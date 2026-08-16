@@ -53,7 +53,7 @@ caller's pool.
 → one-shot-bufferize
 → hip-loop-body-to-out-params
 → hip-use-output-allocator
-→ hip-fix-loop-accumulator-offset
+→ hip-finalize-loop-frames
 → CSE → canonicalize
 → convert-linalg-to-loops
 → hip-optimize-memrefs

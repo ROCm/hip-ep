@@ -40,12 +40,11 @@
 // sync serialises kernel completion vs the host read, so the read sees
 // the cond_out written by the just-finished iter.
 //
-// Aliasing invariant: each v_in_i and v_out_i (and, on the dynamic path,
-// cond_in and cond_out) refer to the same memref slot in the body's call.
-// Safe under the v1 body semantics where each kernel touches each cell at
-// most once per launch. Single-level nesting is enforced at compile time
-// by OnnxLoopOutlinePass (rejects nested onnx.Loop), so the shared
-// per-state iter/cond buffers cannot race here.
+// Every invocation owns a frame with independent iter/condition storage,
+// synchronization event, and two high-water banks per carrier. The callback
+// reads one complete current descriptor set and writes a separate next set;
+// the driver swaps only after success. This makes dynamic extents, nesting,
+// repeated calls, and simultaneous driver invocations independent.
 //
 //===----------------------------------------------------------------------===//
 
@@ -57,99 +56,158 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <limits>
+#include <mutex>
+#include <utility>
+
+struct HipdnnEpLoopFrame {
+  struct CarrierBanks {
+    void *data[2];
+    size_t capacity[2];
+    const void *current_data;
+    int current_bank;
+    int allocated_bank;
+    int published_bank;
+  };
+
+  RuntimeState *state;
+  int32_t num_carriers;
+  CarrierBanks *carriers;
+  void *iter_cpu_buf;
+  void *iter_dev;
+  void *cond_host;
+  void *cond_dev;
+  void *event;
+  int status;
+  HipdnnEpLoopFrame *parent;
+  HipdnnEpLoopFrame *first_child;
+  HipdnnEpLoopFrame *next_sibling;
+  HipdnnEpLoopFrame *quarantine_next;
+};
 
 namespace {
 
-// Lazily allocate the per-state iter / cond buffers + reusable sync event
-// on first loop call, then grow the iter cpu staging array on demand if
-// max_trip_count exceeds its current capacity.
-//
-// iter side (stream-ordered, see runtime_state_internal.h comment):
-//   * loop_iter_cpu_buf : pinned host int64[capacity], values [i] = i,
-//                         filled once at grow time
-//   * loop_iter_dev     : device int64, target of per-iter hipMemcpyAsync
-//
-// cond side stays host-mapped (correct as-is; only writer is host-before-loop
-// or GPU-via-stream, both serialised).
-//
-// Partial-allocation policy: if any later step fails, earlier successful
-// allocations stay live on the RuntimeState so the next call's null-check
-// skips re-allocating them -- they are correctly freed in
-// hipdnn_ep_state_cleanup regardless. This is intentional; do not "clean
-// up" by nullifying earlier slots on a later failure, or repeated transient
-// failures will leak.
-int ensureLoopBuffers(RuntimeState *state, int64_t max_trip_count) {
-  // Grow-on-demand the pinned host iter array. Static contents: cpu_buf[i] = i.
-  if (max_trip_count > 0 &&
-      static_cast<size_t>(max_trip_count) > state->loop_iter_capacity) {
-    size_t old_cap = state->loop_iter_capacity;
-    size_t new_cap = static_cast<size_t>(max_trip_count);
-    void *new_buf = nullptr;
-    if (hipHostMalloc(&new_buf, new_cap * sizeof(int64_t),
+#ifdef HIPDNN_EP_RUNTIME_TESTING
+bool failNextLoopSync = false;
+bool failNextLoopAlloc = false;
+#endif
+
+hipError_t synchronizeLoopStream(hipStream_t stream) {
+#ifdef HIPDNN_EP_RUNTIME_TESTING
+  if (failNextLoopSync) {
+    failNextLoopSync = false;
+    return -1;
+  }
+#endif
+  return hipStreamSynchronize(stream);
+}
+
+std::mutex *getFrameMutex(RuntimeState *state) {
+  return static_cast<std::mutex *>(state ? state->loop_frames_mutex : nullptr);
+}
+
+void destroyFrame(HipdnnEpLoopFrame *frame) {
+  if (!frame)
+    return;
+  if (frame->event)
+    hipEventDestroy(static_cast<hipEvent_t>(frame->event));
+  if (frame->iter_cpu_buf)
+    hipHostFree(frame->iter_cpu_buf);
+  if (frame->iter_dev)
+    hipFree(frame->iter_dev);
+  if (frame->cond_host)
+    hipHostFree(frame->cond_host);
+  if (frame->carriers) {
+    for (int32_t i = 0; i < frame->num_carriers; ++i)
+      for (int bank = 0; bank < 2; ++bank)
+        if (frame->carriers[i].data[bank])
+          hipFree(frame->carriers[i].data[bank]);
+    std::free(frame->carriers);
+  }
+  while (frame->first_child) {
+    HipdnnEpLoopFrame *child = frame->first_child;
+    frame->first_child = child->next_sibling;
+    child->parent = nullptr;
+    destroyFrame(child);
+  }
+  std::free(frame);
+}
+
+HipdnnEpLoopFrame *createFrame(RuntimeState *state, int32_t num_carriers,
+                               int64_t max_trip_count) {
+  auto *frame = static_cast<HipdnnEpLoopFrame *>(
+      std::calloc(1, sizeof(HipdnnEpLoopFrame)));
+  if (!frame)
+    return nullptr;
+  frame->state = state;
+  frame->num_carriers = num_carriers;
+  if (num_carriers > 0) {
+    frame->carriers = static_cast<HipdnnEpLoopFrame::CarrierBanks *>(
+        std::calloc(static_cast<size_t>(num_carriers),
+                    sizeof(HipdnnEpLoopFrame::CarrierBanks)));
+    if (!frame->carriers) {
+      destroyFrame(frame);
+      return nullptr;
+    }
+    for (int32_t i = 0; i < num_carriers; ++i) {
+      frame->carriers[i].current_bank = -1;
+      frame->carriers[i].allocated_bank = -1;
+      frame->carriers[i].published_bank = -2;
+    }
+  }
+  if (max_trip_count > 0) {
+    size_t count = static_cast<size_t>(max_trip_count);
+    if (count > std::numeric_limits<size_t>::max() / sizeof(int64_t) ||
+        hipHostMalloc(&frame->iter_cpu_buf, count * sizeof(int64_t),
                       hipHostMallocDefault) != hipSuccess) {
-      fprintf(stderr,
-              "hipdnn_ep_run_*_loop: hipHostMalloc for iter cpu buf (%zu "
-              "entries) failed\n",
-              new_cap);
-      return -1;
+      destroyFrame(frame);
+      return nullptr;
     }
-    int64_t *new_arr = static_cast<int64_t *>(new_buf);
-    // Copy preserved [0..old_cap) -- values are static (i -> i), so even if we
-    // re-init from scratch the result is identical; copy is just a hair faster
-    // and removes any future surprise if cpu_buf semantics evolve.
-    if (state->loop_iter_cpu_buf && old_cap > 0) {
-      std::memcpy(new_arr, state->loop_iter_cpu_buf, old_cap * sizeof(int64_t));
-    }
-    for (size_t i = old_cap; i < new_cap; ++i) {
-      new_arr[i] = static_cast<int64_t>(i);
-    }
-    if (state->loop_iter_cpu_buf) {
-      // Stream may still hold async memcpy reads from the old buf; drain
-      // before freeing. Grow is a rare per-session event so the sync cost
-      // is negligible.
-      hipStreamSynchronize(static_cast<hipStream_t>(state->stream));
-      hipHostFree(state->loop_iter_cpu_buf);
-    }
-    state->loop_iter_cpu_buf = new_buf;
-    state->loop_iter_capacity = new_cap;
+    auto *iters = static_cast<int64_t *>(frame->iter_cpu_buf);
+    for (int64_t i = 0; i < max_trip_count; ++i)
+      iters[i] = i;
   }
-  if (!state->loop_iter_dev) {
-    if (hipMalloc(&state->loop_iter_dev, sizeof(int64_t)) != hipSuccess) {
-      fprintf(stderr,
-              "hipdnn_ep_run_*_loop: hipMalloc for iter dev buffer failed\n");
-      state->loop_iter_dev = nullptr;
-      return -1;
-    }
+  if (hipMalloc(&frame->iter_dev, sizeof(int64_t)) != hipSuccess ||
+      hipHostMalloc(&frame->cond_host, sizeof(int8_t), hipHostMallocMapped) !=
+          hipSuccess ||
+      hipHostGetDevicePointer(&frame->cond_dev, frame->cond_host, 0) !=
+          hipSuccess) {
+    destroyFrame(frame);
+    return nullptr;
   }
-  if (!state->loop_cond_host) {
-    // Bool stored as 1 byte (matches LLVM bool ABI and memref<i1> layout).
-    if (hipHostMalloc(&state->loop_cond_host, sizeof(int8_t),
-                      hipHostMallocMapped) != hipSuccess) {
-      fprintf(stderr,
-              "hipdnn_ep_run_*_loop: hipHostMalloc for cond buffer failed\n");
-      state->loop_cond_host = nullptr;
-      return -1;
-    }
-    if (hipHostGetDevicePointer(&state->loop_cond_dev, state->loop_cond_host,
-                                0) != hipSuccess) {
-      fprintf(stderr, "hipdnn_ep_run_*_loop: hipHostGetDevicePointer for cond "
-                      "buffer failed\n");
-      hipHostFree(state->loop_cond_host);
-      state->loop_cond_host = nullptr;
-      state->loop_cond_dev = nullptr;
-      return -1;
-    }
+  hipEvent_t event = nullptr;
+  if (hipEventCreateWithFlags(&event, hipEventDisableTiming) != hipSuccess) {
+    destroyFrame(frame);
+    return nullptr;
   }
-  if (!state->loop_event) {
-    hipEvent_t evt = nullptr;
-    if (hipEventCreateWithFlags(&evt, hipEventDisableTiming) != hipSuccess) {
-      fprintf(stderr, "hipdnn_ep_run_*_loop: hipEventCreateWithFlags failed\n");
-      return -1;
-    }
-    state->loop_event = static_cast<void *>(evt);
+  frame->event = static_cast<void *>(event);
+  return frame;
+}
+
+void quarantineFrame(RuntimeState *state, HipdnnEpLoopFrame *frame) {
+  std::mutex *mutex = getFrameMutex(state);
+  if (!mutex) {
+    destroyFrame(frame);
+    return;
   }
-  return 0;
+  std::lock_guard<std::mutex> lock(*mutex);
+  frame->quarantine_next =
+      static_cast<HipdnnEpLoopFrame *>(state->quarantined_loop_frames);
+  state->quarantined_loop_frames = frame;
+}
+
+void unlinkFromParent(HipdnnEpLoopFrame *frame) {
+  if (!frame || !frame->parent)
+    return;
+  HipdnnEpLoopFrame **link = &frame->parent->first_child;
+  while (*link && *link != frame)
+    link = &(*link)->next_sibling;
+  if (*link == frame)
+    *link = frame->next_sibling;
+  frame->parent = nullptr;
+  frame->next_sibling = nullptr;
 }
 
 // Policy: each iter, decide whether to continue. The counted policy never
@@ -161,7 +219,7 @@ int ensureLoopBuffers(RuntimeState *state, int64_t max_trip_count) {
 // including the indirect call to checkCond -- without relying on cross-TU
 // LTO to inline through the runtime DLL boundary.
 struct CountedCondPolicy {
-  static int checkCond(RuntimeState * /*state*/, int8_t * /*cond_host*/,
+  static int checkCond(HipdnnEpLoopFrame * /*frame*/, int8_t * /*cond_host*/,
                        bool * /*out_continue*/) {
     return 0;
   }
@@ -174,10 +232,10 @@ struct DynamicCondPolicy {
   // `LoopImpl::Execute` and MIGraphX `run_loop` are equivalent (and pre-
   // host-mapped MIGraphX also paid hipMemcpyAsync(D2H) + hipStreamSync per
   // iter on top of this).
-  static int checkCond(RuntimeState *state, int8_t *cond_host,
+  static int checkCond(HipdnnEpLoopFrame *frame, int8_t *cond_host,
                        bool *out_continue) {
-    hipEvent_t evt = static_cast<hipEvent_t>(state->loop_event);
-    hipStream_t stream = static_cast<hipStream_t>(state->stream);
+    hipEvent_t evt = static_cast<hipEvent_t>(frame->event);
+    hipStream_t stream = static_cast<hipStream_t>(frame->state->stream);
     if (hipEventRecord(evt, stream) != hipSuccess)
       return -1;
     if (hipEventSynchronize(evt) != hipSuccess)
@@ -194,12 +252,19 @@ struct DynamicCondPolicy {
 template <class CondPolicy>
 int runLoopImpl(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
                 int64_t max_trip_count, bool cond_init,
-                int32_t /*num_loop_carried*/, int32_t /*num_captures*/,
-                void **loop_carried_descs, void **capture_descs) {
-  if (!state || !body_fn)
+                int32_t num_loop_carried, int32_t /*num_captures*/,
+                void **initial_descs, void **scratch_descs_a,
+                void **scratch_descs_b, void **capture_descs,
+                HipdnnEpLoopFrame *parent_frame, void ***final_descs,
+                HipdnnEpLoopFrame **frame_out) {
+  if (!state || !body_fn || !final_descs || !frame_out)
     return -1;
-  if (max_trip_count < 0)
+  if (max_trip_count < 0 || num_loop_carried < 0 ||
+      (num_loop_carried > 0 &&
+       (!initial_descs || !scratch_descs_a || !scratch_descs_b)))
     return -1;
+  *final_descs = initial_descs;
+  *frame_out = nullptr;
   // ONNX Loop: when cond_init is false the body must execute zero times,
   // regardless of M. On the dynamic path this falls out of the per-iter
   // cond check, but on the counted path consultsCond() is false and the
@@ -208,13 +273,20 @@ int runLoopImpl(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
   // cond_init value. Short-circuit here so both paths honor the spec.
   if (!cond_init)
     return 0;
-  if (ensureLoopBuffers(state, max_trip_count) != 0)
-    return -1;
+  if (max_trip_count == 0)
+    return 0;
 
-  void *iter_dev = state->loop_iter_dev;
-  void *cond_dev = state->loop_cond_dev;
-  int64_t *iter_cpu_buf = static_cast<int64_t *>(state->loop_iter_cpu_buf);
-  int8_t *cond_host = static_cast<int8_t *>(state->loop_cond_host);
+  HipdnnEpLoopFrame *frame =
+      createFrame(state, num_loop_carried, max_trip_count);
+  if (!frame) {
+    (void)hipdnn_ep_state_set_error_flag(state);
+    return -1;
+  }
+
+  void *iter_dev = frame->iter_dev;
+  void *cond_dev = frame->cond_dev;
+  int64_t *iter_cpu_buf = static_cast<int64_t *>(frame->iter_cpu_buf);
+  int8_t *cond_host = static_cast<int8_t *>(frame->cond_host);
   hipStream_t stream = static_cast<hipStream_t>(state->stream);
 
   // Initialize cond_in for the body to read. cond_init is guaranteed true
@@ -223,7 +295,10 @@ int runLoopImpl(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
   // (the launch of iter 0 below already drains any prior writer).
   *cond_host = int8_t{1};
 
+  void **current_descs = initial_descs;
+  void **next_descs = scratch_descs_a;
   bool keep_going = true;
+  int rc = 0;
   for (int64_t i = 0; i < max_trip_count; ++i) {
     if constexpr (CondPolicy::consultsCond()) {
       if (!keep_going)
@@ -240,38 +315,237 @@ int runLoopImpl(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
       fprintf(stderr,
               "hipdnn_ep_run_*_loop: hipMemcpyAsync for iter[%lld] failed\n",
               static_cast<long long>(i));
-      return -1;
+      rc = -1;
+      break;
     }
-    int rc =
-        body_fn(state, iter_dev, cond_dev, loop_carried_descs, capture_descs);
+    frame->status = 0;
+    for (int32_t carrier = 0; carrier < num_loop_carried; ++carrier) {
+      frame->carriers[carrier].allocated_bank = -1;
+      frame->carriers[carrier].published_bank = -2;
+    }
+    rc = body_fn(state, frame, iter_dev, cond_dev, current_descs, capture_descs,
+                 next_descs);
     if (rc != 0)
-      return rc;
-    if constexpr (CondPolicy::consultsCond()) {
-      if (CondPolicy::checkCond(state, cond_host, &keep_going) != 0)
-        return -1;
+      break;
+    for (int32_t carrier = 0; carrier < num_loop_carried; ++carrier) {
+      auto &banks = frame->carriers[carrier];
+      if (banks.published_bank == -2) {
+        rc = -1;
+        break;
+      }
     }
+    if (rc != 0)
+      break;
+    if constexpr (CondPolicy::consultsCond()) {
+      if (CondPolicy::checkCond(frame, cond_host, &keep_going) != 0) {
+        rc = -1;
+        break;
+      }
+    }
+    current_descs = next_descs;
+    next_descs =
+        current_descs == scratch_descs_a ? scratch_descs_b : scratch_descs_a;
+    for (int32_t carrier = 0; carrier < num_loop_carried; ++carrier) {
+      auto &banks = frame->carriers[carrier];
+      if (banks.published_bank >= 0)
+        banks.current_bank = banks.published_bank;
+    }
+    *final_descs = current_descs;
   }
+  if (rc != 0) {
+    // The callback contract is transactional: current_descs was swapped only
+    // after complete success, so final_descs still names the prior set.
+    (void)hipdnn_ep_state_set_error_flag(state);
+    *final_descs = initial_descs;
+    if (synchronizeLoopStream(stream) == hipSuccess)
+      destroyFrame(frame);
+    else
+      quarantineFrame(state, frame);
+    return rc;
+  }
+  frame->parent = parent_frame;
+  if (parent_frame) {
+    frame->next_sibling = parent_frame->first_child;
+    parent_frame->first_child = frame;
+  }
+  *frame_out = frame;
   return 0;
 }
 
 } // namespace
 
-extern "C" int
-hipdnn_ep_run_counted_loop(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
-                           int64_t max_trip_count, bool cond_init,
-                           int32_t num_loop_carried, int32_t num_captures,
-                           void **loop_carried_descs, void **capture_descs) {
+#ifdef HIPDNN_EP_RUNTIME_TESTING
+extern "C" void hipdnn_ep_test_fail_next_loop_sync() {
+  failNextLoopSync = true;
+}
+extern "C" void hipdnn_ep_test_fail_next_loop_alloc() {
+  failNextLoopAlloc = true;
+}
+#endif
+
+extern "C" int hipdnn_ep_run_counted_loop(
+    RuntimeState *state, HipdnnEpLoopBodyFn body_fn, int64_t max_trip_count,
+    bool cond_init, int32_t num_loop_carried, int32_t num_captures,
+    void **initial_descs, void **scratch_descs_a, void **scratch_descs_b,
+    void **capture_descs, HipdnnEpLoopFrame *parent_frame, void ***final_descs,
+    HipdnnEpLoopFrame **frame_out) {
   return runLoopImpl<CountedCondPolicy>(
       state, body_fn, max_trip_count, cond_init, num_loop_carried, num_captures,
-      loop_carried_descs, capture_descs);
+      initial_descs, scratch_descs_a, scratch_descs_b, capture_descs,
+      parent_frame, final_descs, frame_out);
 }
 
-extern "C" int
-hipdnn_ep_run_loop(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
-                   int64_t max_trip_count, bool cond_init,
-                   int32_t num_loop_carried, int32_t num_captures,
-                   void **loop_carried_descs, void **capture_descs) {
+extern "C" int hipdnn_ep_run_loop(
+    RuntimeState *state, HipdnnEpLoopBodyFn body_fn, int64_t max_trip_count,
+    bool cond_init, int32_t num_loop_carried, int32_t num_captures,
+    void **initial_descs, void **scratch_descs_a, void **scratch_descs_b,
+    void **capture_descs, HipdnnEpLoopFrame *parent_frame, void ***final_descs,
+    HipdnnEpLoopFrame **frame_out) {
   return runLoopImpl<DynamicCondPolicy>(
       state, body_fn, max_trip_count, cond_init, num_loop_carried, num_captures,
-      loop_carried_descs, capture_descs);
+      initial_descs, scratch_descs_a, scratch_descs_b, capture_descs,
+      parent_frame, final_descs, frame_out);
+}
+
+extern "C" void *hipdnn_ep_loop_frame_alloc(HipdnnEpLoopFrame *frame,
+                                            int32_t carrier_index,
+                                            const int64_t *shape, int64_t rank,
+                                            int64_t elem_size) {
+  if (!frame || carrier_index < 0 || carrier_index >= frame->num_carriers ||
+      rank < 0 || elem_size <= 0 || (rank > 0 && !shape)) {
+    if (frame)
+      frame->status = -1;
+    return nullptr;
+  }
+
+  size_t bytes = static_cast<size_t>(elem_size);
+  for (int64_t i = 0; i < rank; ++i) {
+    if (shape[i] < 0) {
+      frame->status = -1;
+      return nullptr;
+    }
+    size_t dim = static_cast<size_t>(shape[i]);
+    if (dim != 0 && bytes > std::numeric_limits<size_t>::max() / dim) {
+      frame->status = -1;
+      return nullptr;
+    }
+    bytes *= dim;
+  }
+  auto &carrier = frame->carriers[carrier_index];
+  int bank = carrier.current_bank == 0 ? 1 : 0;
+  carrier.allocated_bank = bank;
+  if (bytes == 0)
+    return nullptr;
+  if (bytes > carrier.capacity[bank]) {
+    if (carrier.data[bank]) {
+      if (synchronizeLoopStream(
+              static_cast<hipStream_t>(frame->state->stream)) != hipSuccess ||
+          hipFree(carrier.data[bank]) != hipSuccess) {
+        frame->status = -1;
+        return nullptr;
+      }
+      carrier.data[bank] = nullptr;
+      carrier.capacity[bank] = 0;
+    }
+#ifdef HIPDNN_EP_RUNTIME_TESTING
+    if (failNextLoopAlloc) {
+      failNextLoopAlloc = false;
+      frame->status = -1;
+      return nullptr;
+    }
+#endif
+    if (hipMalloc(&carrier.data[bank], bytes) != hipSuccess) {
+      frame->status = -1;
+      return nullptr;
+    }
+    carrier.capacity[bank] = bytes;
+  }
+  return carrier.data[bank];
+}
+
+extern "C" int hipdnn_ep_loop_frame_status(HipdnnEpLoopFrame *frame) {
+  return frame ? frame->status : -1;
+}
+
+extern "C" int hipdnn_ep_loop_frame_set_current(HipdnnEpLoopFrame *frame,
+                                                int32_t carrier_index,
+                                                const void *current_data) {
+  if (!frame || carrier_index < 0 || carrier_index >= frame->num_carriers)
+    return -1;
+  frame->carriers[carrier_index].current_data = current_data;
+  return 0;
+}
+
+extern "C" int hipdnn_ep_loop_frame_publish(HipdnnEpLoopFrame *frame,
+                                            int32_t carrier_index,
+                                            const void *published_data) {
+  if (!frame || carrier_index < 0 || carrier_index >= frame->num_carriers)
+    return -1;
+  auto &carrier = frame->carriers[carrier_index];
+  int bank = carrier.allocated_bank;
+  if (bank >= 0 && published_data == carrier.data[bank]) {
+    carrier.published_bank = bank;
+    return 0;
+  }
+  if (published_data == carrier.current_data) {
+    carrier.published_bank = -1;
+    return 0;
+  }
+  frame->status = -1;
+  return -1;
+}
+
+extern "C" int hipdnn_ep_loop_frame_destroy(RuntimeState *state,
+                                            HipdnnEpLoopFrame *frame) {
+  if (!frame)
+    return 0;
+  if (!state || frame->state != state)
+    return -1;
+  unlinkFromParent(frame);
+  if (synchronizeLoopStream(static_cast<hipStream_t>(state->stream)) !=
+      hipSuccess) {
+    quarantineFrame(state, frame);
+    (void)hipdnn_ep_state_set_error_flag(state);
+    return -1;
+  }
+  destroyFrame(frame);
+  return 0;
+}
+
+extern "C" int hipdnn_ep_loop_state_init(RuntimeState *state) {
+  if (!state)
+    return -1;
+  state->loop_frames_mutex = new std::mutex();
+  state->quarantined_loop_frames = nullptr;
+  return 0;
+}
+
+extern "C" void hipdnn_ep_loop_cleanup_quarantined_frames(RuntimeState *state) {
+  if (!state)
+    return;
+  std::mutex *mutex = getFrameMutex(state);
+  HipdnnEpLoopFrame *frames = nullptr;
+  if (mutex) {
+    std::lock_guard<std::mutex> lock(*mutex);
+    frames = static_cast<HipdnnEpLoopFrame *>(state->quarantined_loop_frames);
+    state->quarantined_loop_frames = nullptr;
+  } else {
+    frames = static_cast<HipdnnEpLoopFrame *>(state->quarantined_loop_frames);
+    state->quarantined_loop_frames = nullptr;
+  }
+  while (frames) {
+    HipdnnEpLoopFrame *next = frames->quarantine_next;
+    destroyFrame(frames);
+    frames = next;
+  }
+}
+
+extern "C" void hipdnn_ep_loop_state_cleanup(RuntimeState *state) {
+  if (!state)
+    return;
+  if (synchronizeLoopStream(static_cast<hipStream_t>(state->stream)) ==
+      hipSuccess)
+    hipdnn_ep_loop_cleanup_quarantined_frames(state);
+  delete getFrameMutex(state);
+  state->loop_frames_mutex = nullptr;
 }

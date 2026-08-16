@@ -502,6 +502,11 @@ int hipdnn_ep_stream_sync(RuntimeState *state) {
     return HIPDNN_EP_ERR_STREAM_SYNC_FAILED;
   }
 
+  // Retry only frames whose explicit destroy previously failed to synchronize.
+  // Active/successful invocation frames are compiler-token-owned and are never
+  // swept here.
+  hipdnn_ep_loop_cleanup_quarantined_frames(state);
+
   // PERF: compute and log timing breakdown
   if (hipdnn_ep_perf_enabled() && g_perf.initialized) {
     float h2d_ms = 0, compute_ms = 0, d2h_ms = 0;

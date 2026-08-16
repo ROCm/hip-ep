@@ -8,7 +8,7 @@ add_library(HipDialectTransforms STATIC
   AssignOpStateSlots.cpp
   BufferUtils.cpp
   ExternalizeConstants.cpp
-  FixLoopAccumulatorOffset.cpp
+  FinalizeLoopFrames.cpp
   GenerateInterface.cpp
   GenerateOpStateInit.cpp
   HoistAllocSizeArith.cpp
@@ -20,6 +20,7 @@ add_library(HipDialectTransforms STATIC
   OptimizeMemRefs.cpp
   Pipelines.cpp
   PoolAllocs.cpp
+  PrepareLoopBodyFailures.cpp
   PromoteStridedHipOperands.cpp
   RelaxMultiDynExpandShape.cpp
   ResolveExternConstants.cpp

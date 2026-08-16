@@ -107,6 +107,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for PR, formatting, AI-disclosure, and co
 - Compiler/runtime metadata and ABI: [docs/design/compiler-runtime-contract.md](docs/design/compiler-runtime-contract.md)
 - Output allocator: [docs/design/output-allocator-design.md](docs/design/output-allocator-design.md)
 - Shape inference: [docs/design/hip-shape-inference.md](docs/design/hip-shape-inference.md)
+- Loop carrier descriptors: [docs/design/loop-carrier-descriptor-abi.md](docs/design/loop-carrier-descriptor-abi.md)
 - Memory planning: [docs/design/pool-allocs-memory-planning.md](docs/design/pool-allocs-memory-planning.md)
 - Constant handling: [docs/design/constant-handling-design.md](docs/design/constant-handling-design.md)
 - Compilation options and artifact format: [docs/design/compilation-options.md](docs/design/compilation-options.md)

@@ -826,5 +826,10 @@ module {
 
   func.func private @consume_shape(tensor<3xi64>)
   func.func private @direct_loop_body(
-      !hip.context, index, i1, tensor<?x4xf16>) -> tensor<?x4xf16>
+      %ctx: !hip.context, %iter: tensor<i64>, %cond: tensor<i1>,
+      %current: tensor<?x4xf16>, %frame: !hip.loop_frame)
+      -> (i32, tensor<?x4xf16>) {
+    %status = arith.constant 0 : i32
+    return %status, %current : i32, tensor<?x4xf16>
+  }
 }

@@ -916,13 +916,15 @@ func.func @refine_nonzero_data_dependent_dim1(
 // is also already type-consistent.
 //
 // CHECK-LABEL: func.func private @body_already_tight
-// CHECK-SAME:    (%{{.*}}: !hip.context, %{{.*}}: index, %{{.*}}: i1, %[[V:.*]]: tensor<128xf32>)
-// CHECK-SAME:    -> tensor<128xf32>
-// CHECK:         return %[[V]] : tensor<128xf32>
-func.func private @body_already_tight(%ctx: !hip.context, %iter: index,
-                                      %cond_in: i1,
-                                      %v: tensor<128xf32>) -> tensor<128xf32> {
-  return %v : tensor<128xf32>
+// CHECK-SAME:    %[[V:[^ ,]+]]: tensor<128xf32>
+// CHECK-SAME:    -> (i32, tensor<128xf32>)
+// CHECK:         return %{{.*}}, %[[V]] : i32, tensor<128xf32>
+func.func private @body_already_tight(%ctx: !hip.context, %iter: tensor<i64>,
+                                      %cond_in: tensor<i1>,
+                                      %v: tensor<128xf32>,
+                                      %frame: !hip.loop_frame) -> (i32, tensor<128xf32>) {
+  %status = arith.constant 0 : i32
+  return %status, %v : i32, tensor<128xf32>
 }
 
 // CHECK-LABEL: func.func @loop_signatures_no_op
@@ -962,34 +964,41 @@ func.func @loop_signatures_no_op(%ctx: !hip.context,
 // of that rejection.
 //
 // CHECK-LABEL: func.func private @inner_body
-// CHECK-SAME:    (%{{.*}}: !hip.context, %{{.*}}: index, %{{.*}}: i1, %[[V:.*]]: tensor<256xf32>)
-// CHECK-SAME:    -> tensor<256xf32>
-// CHECK:         return %[[V]] : tensor<256xf32>
-func.func private @inner_body(%ctx: !hip.context, %iter: index,
-                              %cond_in: i1,
-                              %v: tensor<?xf32>) -> tensor<?xf32> {
-  return %v : tensor<?xf32>
+// CHECK-SAME:    %[[V:[^ ,]+]]: tensor<256xf32>
+// CHECK-SAME:    -> (i32, tensor<256xf32>)
+// CHECK:         return %{{.*}}, %[[V]] : i32, tensor<256xf32>
+func.func private @inner_body(%ctx: !hip.context, %iter: tensor<i64>,
+                              %cond_in: tensor<i1>,
+                              %v: tensor<256xf32>,
+                              %frame: !hip.loop_frame) -> (i32, tensor<256xf32>) {
+  %status = arith.constant 0 : i32
+  return %status, %v : i32, tensor<256xf32>
 }
 
 // CHECK-LABEL: func.func private @outer_body_with_inner_loop
-// CHECK-SAME:    (%{{.*}}: !hip.context, %{{.*}}: index, %{{.*}}: i1, %[[V:.*]]: tensor<256xf32>)
-// CHECK-SAME:    -> tensor<256xf32>
+// CHECK-SAME:    %[[V:[^ ,]+]]: tensor<256xf32>
+// CHECK-SAME:    -> (i32, tensor<256xf32>)
 // CHECK:         %[[R:.*]] = hip.loop
 // CHECK-SAME:      iter_args(%[[V]] : tensor<256xf32>)
 // CHECK-SAME:      -> (tensor<256xf32>)
 // CHECK-SAME:      body @inner_body
-// CHECK:         return %[[R]] : tensor<256xf32>
+// CHECK:         return %{{.*}}, %[[R]] : i32, tensor<256xf32>
 func.func private @outer_body_with_inner_loop(%ctx: !hip.context,
-                                              %iter: index, %cond_in: i1,
-                                              %v: tensor<?xf32>) -> tensor<?xf32> {
+                                              %iter: tensor<i64>,
+                                              %cond_in: tensor<i1>,
+                                              %v: tensor<256xf32>,
+                                              %frame: !hip.loop_frame)
+    -> (i32, tensor<256xf32>) {
+  %status = arith.constant 0 : i32
   %M_inner = arith.constant 1 : index
   %cond_init_inner = arith.constant true
   %r = hip.loop(%ctx, %M_inner, %cond_init_inner)
-                 iter_args(%v : tensor<?xf32>)
-                 -> (tensor<?xf32>)
+                 iter_args(%v : tensor<256xf32>)
+                 parent(%frame)
+                 -> (tensor<256xf32>)
                  body @inner_body
                  {num_loop_carried = 1 : i32, cond_is_passthrough}
-  return %r : tensor<?xf32>
+  return %status, %r : i32, tensor<256xf32>
 }
 
 // CHECK-LABEL: func.func @nested_loop_signatures

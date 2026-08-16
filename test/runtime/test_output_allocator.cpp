@@ -21,6 +21,9 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+
+int runtime_errors = 0;
 
 namespace {
 
@@ -143,7 +146,35 @@ void test_alloc_null_state() {
   CHECK(g_cap.calls == 0);
 }
 
+void test_safe_output_copy() {
+  RuntimeState st = makeState();
+  float source[6] = {0, 1, 2, 3, 4, 5};
+  float target[4] = {};
+  int64_t sizes[2] = {2, 2};
+  int64_t strides[2] = {3, 1};
+  CHECK(hipdnn_ep_copy_output(&st, target, source, 2, sizes, strides,
+                              sizeof(float)) == 0);
+  CHECK(target[0] == 0 && target[1] == 1);
+  CHECK(target[2] == 3 && target[3] == 4);
+
+  int64_t zeroShape[1] = {0};
+  CHECK(hipdnn_ep_copy_output(&st, nullptr, nullptr, 1, zeroShape, zeroShape,
+                              sizeof(float)) == 0);
+}
+
 } // namespace
+
+extern "C" int hipdnn_ep_state_set_error_flag(RuntimeState *) {
+  ++runtime_errors;
+  return 0;
+}
+
+extern "C" int wrap_hipMemcpyAsync(RuntimeState *, void *dst, const void *src,
+                                   size_t size_bytes) {
+  if (size_bytes != 0)
+    std::memcpy(dst, src, size_bytes);
+  return 0;
+}
 
 int main() {
   test_forwarding();
@@ -151,6 +182,7 @@ int main() {
   test_nullptr_setter_arg();
   test_set_null_state();
   test_alloc_null_state();
+  test_safe_output_copy();
   if (g_failures == 0) {
     std::printf("output_allocator unit test: ALL PASS\n");
     return 0;

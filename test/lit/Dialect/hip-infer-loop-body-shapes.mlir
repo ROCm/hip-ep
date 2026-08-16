@@ -36,17 +36,21 @@ func.func @forward_concat(%ctx: !hip.context, %M: index, %cond: i1,
 }
 
 // CHECK-LABEL: func.func private @body_concat
-// CHECK-SAME:    -> tensor<1x?x1152xf16>
+// CHECK-SAME:    -> (i32, tensor<1x?x1152xf16>)
 // CHECK:         %[[R:.*]] = "onnx.Concat"
 // CHECK-SAME:      -> tensor<1x?x1152xf16>
-// CHECK:         return %[[R]] : tensor<1x?x1152xf16>
+// CHECK:         return %{{.*}}, %{{.*}} : i32, tensor<1x?x1152xf16>
 func.func private @body_concat(%ctx: !hip.context, %iter: tensor<i64>,
                                %cond_in: tensor<ui8>,
                                %acc: tensor<1x?x1152xf16>,
-                               %other: tensor<?x?x?xf16>) -> tensor<*xf16> {
+                               %other: tensor<?x?x?xf16>,
+                               %frame: !hip.loop_frame)
+    -> (i32, tensor<1x?x1152xf16>) {
+  %status = arith.constant 0 : i32
   %r = "onnx.Concat"(%acc, %other) {axis = 1 : si64} :
          (tensor<1x?x1152xf16>, tensor<?x?x?xf16>) -> tensor<*xf16>
-  return %r : tensor<*xf16>
+  %cast = tensor.cast %r : tensor<*xf16> to tensor<1x?x1152xf16>
+  return %status, %cast : i32, tensor<1x?x1152xf16>
 }
 
 // -----------------------------------------------------------------------
@@ -64,15 +68,19 @@ func.func @backstop_no_rule(%ctx: !hip.context, %M: index, %cond: i1,
 }
 
 // CHECK-LABEL: func.func private @body_backstop
-// CHECK-SAME:    -> tensor<4x8xf32>
+// CHECK-SAME:    -> (i32, tensor<4x8xf32>)
 // CHECK:         %[[R:.*]] = "onnx.NoRuleOp"
 // CHECK-SAME:      -> tensor<4x8xf32>
-// CHECK:         return %[[R]] : tensor<4x8xf32>
+// CHECK:         return %{{.*}}, %{{.*}} : i32, tensor<4x8xf32>
 func.func private @body_backstop(%ctx: !hip.context, %iter: tensor<i64>,
                                  %cond_in: tensor<ui8>,
-                                 %acc: tensor<4x8xf32>) -> tensor<*xf32> {
+                                 %acc: tensor<4x8xf32>,
+                                 %frame: !hip.loop_frame)
+    -> (i32, tensor<4x8xf32>) {
+  %status = arith.constant 0 : i32
   %r = "onnx.NoRuleOp"(%acc) : (tensor<4x8xf32>) -> tensor<*xf32>
-  return %r : tensor<*xf32>
+  %cast = tensor.cast %r : tensor<*xf32> to tensor<4x8xf32>
+  return %status, %cast : i32, tensor<4x8xf32>
 }
 
 // -----------------------------------------------------------------------
@@ -91,18 +99,22 @@ func.func @non_passthrough(%ctx: !hip.context, %M: index, %cond: i1,
 }
 
 // CHECK-LABEL: func.func private @body_non_passthrough
-// CHECK-SAME:    -> (tensor<ui8>, tensor<1x?x1152xf16>)
+// CHECK-SAME:    -> (i32, tensor<ui8>, tensor<1x?x1152xf16>)
 // CHECK:         %[[R:.*]] = "onnx.Concat"
 // CHECK-SAME:      -> tensor<1x?x1152xf16>
-// CHECK:         return %{{.*}}, %[[R]] : tensor<ui8>, tensor<1x?x1152xf16>
+// CHECK:         return %{{.*}}, %{{.*}}, %{{.*}} : i32, tensor<ui8>, tensor<1x?x1152xf16>
 func.func private @body_non_passthrough(%ctx: !hip.context, %iter: tensor<i64>,
                                         %cond_in: tensor<ui8>,
                                         %acc: tensor<1x?x1152xf16>,
-                                        %other: tensor<?x?x?xf16>)
-    -> (tensor<ui8>, tensor<*xf16>) {
+                                        %other: tensor<?x?x?xf16>,
+                                        %frame: !hip.loop_frame)
+    -> (i32, tensor<ui8>, tensor<1x?x1152xf16>) {
+  %status = arith.constant 0 : i32
   %r = "onnx.Concat"(%acc, %other) {axis = 1 : si64} :
          (tensor<1x?x1152xf16>, tensor<?x?x?xf16>) -> tensor<*xf16>
-  return %cond_in, %r : tensor<ui8>, tensor<*xf16>
+  %cast = tensor.cast %r : tensor<*xf16> to tensor<1x?x1152xf16>
+  return %status, %cond_in, %cast :
+      i32, tensor<ui8>, tensor<1x?x1152xf16>
 }
 
 // -----------------------------------------------------------------------
@@ -119,10 +131,12 @@ func.func @already_ranked(%ctx: !hip.context, %M: index, %cond: i1,
 }
 
 // CHECK-LABEL: func.func private @body_ranked
-// CHECK-SAME:    -> tensor<4x8xf32>
-// CHECK:         return %{{.*}} : tensor<4x8xf32>
+// CHECK-SAME:    -> (i32, tensor<4x8xf32>)
+// CHECK:         return %{{.*}}, %{{.*}} : i32, tensor<4x8xf32>
 func.func private @body_ranked(%ctx: !hip.context, %iter: tensor<i64>,
                                %cond_in: tensor<ui8>,
-                               %acc: tensor<4x8xf32>) -> tensor<4x8xf32> {
-  return %acc : tensor<4x8xf32>
+                               %acc: tensor<4x8xf32>,
+                               %frame: !hip.loop_frame) -> (i32, tensor<4x8xf32>) {
+  %status = arith.constant 0 : i32
+  return %status, %acc : i32, tensor<4x8xf32>
 }

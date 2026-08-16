@@ -228,6 +228,16 @@ void ConvertHipToLLVMPass::runOnOperation() {
   typeConverter.addConversion([ctx](ContextType type) -> Type {
     return LLVM::LLVMPointerType::get(ctx, 0);
   });
+  // !hip.loop_frame -> !llvm.ptr (opaque per-invocation carrier arena)
+  typeConverter.addConversion([ctx](LoopFrameType type) -> Type {
+    return LLVM::LLVMPointerType::get(ctx, 0);
+  });
+
+  // Nested loop body functions may be converted before the enclosing
+  // hip.loop is visited by the partial-conversion worklist. Snapshot every
+  // trampoline while all source func.func signatures are still available.
+  if (failed(precreateLoopTrampolines(module, typeConverter)))
+    return signalPassFailure();
 
   RewritePatternSet patterns(ctx);
 

@@ -313,13 +313,60 @@ def Hip_AllocOutputOp : Hip_Op<"alloc_output",
   let hasVerifier = 1;
 }
 
+def Hip_LoopAllocOp : Hip_Op<"loop_alloc",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Allocate a loop carrier in its per-invocation next bank";
+  let description = [{
+    Obtains writable storage for one outlined loop-body carrier result from the
+    current `!hip.loop_frame`. The runtime keeps two independent high-water
+    banks per carrier; the body reads the current descriptor and writes this
+    next bank. The bank is published only when the body callback succeeds.
+
+    Unlike `hip.alloc`, this operation intentionally has no Allocate effect:
+    the frame owns the storage, so PoolAllocs and ownership-based deallocation
+    must not absorb or free it.
+  }];
+
+  let arguments = (ins Hip_LoopFrameType:$frame,
+                       Variadic<Index>:$dynamicSizes,
+                       I32Attr:$carrier_index);
+  let results = (outs AnyMemRef:$memref);
+  let assemblyFormat = [{
+    `(` $frame (`,` $dynamicSizes^ )? `)` attr-dict `:` type($memref)
+  }];
+  let hasVerifier = 1;
+}
+
+def Hip_LoopFrameStatusOp : Hip_Op<"loop_frame_status",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Read the current loop frame allocation status";
+  let arguments = (ins Hip_LoopFrameType:$frame);
+  let results = (outs I32:$status);
+  let assemblyFormat = "`(` $frame `)` attr-dict";
+}
+
+def Hip_LoopFrameDestroyOp : Hip_Op<"loop_frame_destroy",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Release one completed loop invocation frame";
+  let arguments = (ins Hip_ContextType:$ctx, Hip_LoopFrameType:$frame);
+  let assemblyFormat = "`(` $ctx `,` $frame `)` attr-dict";
+}
+
+def Hip_CopyOutputOp : Hip_Op<"copy_output",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Checked exact descriptor copy for carriers and outputs";
+  let arguments = (ins Hip_ContextType:$ctx, AnyMemRef:$source,
+                       AnyMemRef:$target);
+  let results = (outs I32:$status);
+  let assemblyFormat = "`(` $ctx `,` $source `,` $target `)` attr-dict `:` type($source) `to` type($target)";
+  let hasVerifier = 1;
+}
+
 // ===== Control flow ==========================================================
 
 def Hip_LoopOp : Hip_Op<"loop",
     [AttrSizedOperandSegments,
      DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-     DeclareOpInterfaceMethods<DestinationStyleOpInterface,
-                               ["getDpsInitsMutable"]>,
      DeclareOpInterfaceMethods<InferTypeOpInterface,
                                ["inferReturnTypes"]>,
      DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
@@ -334,14 +381,16 @@ def Hip_LoopOp : Hip_Op<"loop",
       - `$ctx`: `!hip.context` (always first).
       - `$max_trip_count`: `index` — the trip count `M` (ONNX Loop input 0).
       - `$cond_init`: optional `i1` — initial condition (ONNX Loop input 1).
-      - `$v_init`: variadic, length must equal `$num_loop_carried` — initial
-        values for loop-carried tensors/memrefs; types must match the op's
-        result types.
+      - `$v_init`: variadic, length must equal `$num_loop_carried` — borrowed
+        initial values for loop-carried tensors/memrefs. The runtime never
+        frees these buffers.
       - `$captures`: variadic — outer-graph values used inside the body
         that are not loop-carried (e.g. constant tensors A, B).
 
-    Result types match `$v_init` types and correspond to the loop-carried
-    values after the final iteration.
+    Tensor mode has one joined ranked tensor result per carrier. Memref mode
+    has those carrier descriptors followed by one `!hip.loop_frame` ownership
+    token. Dynamic extents may change between iterations; rank, element type,
+    and non-conflicting static extents may not.
 
     If `$cond_is_passthrough` is set, the outlining pass has verified that
     the body's yielded `cond_out` is SSA-equal to its `cond_in` block
@@ -368,20 +417,23 @@ def Hip_LoopOp : Hip_Op<"loop",
     Optional<I1>:$cond_init,
     Variadic<Hip_TensorOrMemRef>:$v_init,
     Variadic<AnyType>:$captures,
+    Optional<Hip_LoopFrameType>:$parent_frame,
     FlatSymbolRefAttr:$body_func,
     I32Attr:$num_loop_carried,
-    UnitAttr:$cond_is_passthrough
+    UnitAttr:$cond_is_passthrough,
+    UnitAttr:$descriptor_return
   );
 
-  // v_final is non-empty only at the tensor level (DPS convention).
-  // After bufferization + loop-body out-param promotion, the results are
-  // eliminated and v_init carries the writes via its memref descriptors.
-  let results = (outs Variadic<AnyRankedTensor>:$v_final);
+  // Post-bufferization appends one !hip.loop_frame token after the carrier
+  // descriptors. AnyType is intentional; LoopOp::verify enforces the exact
+  // tensor/memref/token mode contracts.
+  let results = (outs Variadic<AnyType>:$v_final);
 
   let assemblyFormat = [{
     `(` $ctx `,` $max_trip_count (`,` $cond_init^)? `)`
     ( `iter_args` `(` $v_init^ `:` type($v_init) `)` )?
     ( `captures` `(` $captures^ `:` type($captures) `)` )?
+    ( `parent` `(` $parent_frame^ `)` )?
     ( `->` `(` type($v_final)^ `)` )?
     `body` $body_func
     attr-dict

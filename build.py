@@ -326,8 +326,7 @@ def build_targets(args, build_dir):
 def run_tests(args, build_dir):
     """Run the GPU-free test suites (no device needed, so they run on the build
     machine in every CI job): the MLIR LIT pass-verification suite plus the
-    compiler-plugin registrar, output-allocator, custom-op status,
-    symbolic-metadata, and MatMul/Gemm ctest unit tests."""
+    compiler-plugin registrar and runtime ctest unit tests."""
     step("Test (check-hip-mlir-lit)")
     run_subprocess(
         [
@@ -354,7 +353,8 @@ def run_tests(args, build_dir):
             "-R",
             "StaticPlugins|OutputAllocator|CustomOpComputeStatus|"
             "ArtifactAbi|TensorBufferLifecycle|SymbolicDims|CacheIdentity|"
-            "MatmulGemmContractUnitTest|ReductionStatusUnitTest",
+            "MatmulGemmContractUnitTest|ReductionStatusUnitTest|"
+            "LoopFrameUnitTest",
             "--output-on-failure",
         ]
     )

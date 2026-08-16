@@ -278,6 +278,9 @@ hipdnn_ep_set_output_allocator(RuntimeState *state,
 void *hipdnn_ep_alloc_output(RuntimeState *state, int64_t out_idx,
                              const int64_t *shape, int64_t rank,
                              int64_t elem_size);
+int hipdnn_ep_copy_output(RuntimeState *state, void *dst, const void *src,
+                          int64_t rank, const int64_t *sizes,
+                          const int64_t *src_strides, int64_t elem_size);
 
 // Initialize runtime state with external constant storage via FileSystem.
 // Used when compiled with hip_compile_with_fs.
@@ -1613,6 +1616,8 @@ int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
 // ONNX Loop Drivers
 //===----------------------------------------------------------------------===//
 //
+typedef struct HipdnnEpLoopFrame HipdnnEpLoopFrame;
+
 // Body callback signature shared by both loop drivers. Emitted as a small
 // trampoline LLVMFuncOp by the HipToLLVM lowering pass; one trampoline per
 // `hip.loop`. The trampoline unpacks the descriptor-pointer arrays and
@@ -1621,6 +1626,7 @@ int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
 //
 // Args:
 //   state              : RuntimeState pointer.
+//   frame              : unique per-invocation carrier allocator/frame.
 //   iter_dev_ptr       : device int64_t holding the current iteration index.
 //                        Driver writes the host iter value into this buffer
 //                        each iter before calling the trampoline.
@@ -1629,18 +1635,31 @@ int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
 //                        reads it as cond_in and writes the next-iter cond
 //                        in place. The driver re-reads it on the slow path
 //                        to decide whether to continue.
-//   loop_carried_descs : array of pointers to memref descriptors for each
-//                        loop-carried slot. The trampoline passes the same
-//                        descriptor for both the v_in and v_out positions
-//                        of the body -- one buffer per slot, body reads-
-//                        and-writes in place (safe under single-pass kernel
-//                        semantics).
+//   current_descs      : read-only current descriptor set.
 //   capture_descs      : array of pointers to memref descriptors for each
 //                        captured value. Treated read-only by the body.
+//   next_descs         : writable descriptor slots. Published atomically by
+//                        the driver only when the callback returns zero.
 // Returns 0 on success, non-zero on body failure.
-typedef int (*HipdnnEpLoopBodyFn)(RuntimeState *state, void *iter_dev_ptr,
-                                  void *cond_dev_ptr, void **loop_carried_descs,
-                                  void **capture_descs);
+typedef int (*HipdnnEpLoopBodyFn)(RuntimeState *state, HipdnnEpLoopFrame *frame,
+                                  void *iter_dev_ptr, void *cond_dev_ptr,
+                                  void **current_descs, void **capture_descs,
+                                  void **next_descs);
+
+// Dedicated next-bank allocation used by hip.loop_alloc. Exact logical extents
+// are checked independently from retained bank capacity. Zero-element shapes
+// return an inert non-owning sentinel and are valid.
+void *hipdnn_ep_loop_frame_alloc(HipdnnEpLoopFrame *frame,
+                                 int32_t carrier_index, const int64_t *shape,
+                                 int64_t rank, int64_t elem_size);
+int hipdnn_ep_loop_frame_status(HipdnnEpLoopFrame *frame);
+int hipdnn_ep_loop_frame_set_current(HipdnnEpLoopFrame *frame,
+                                     int32_t carrier_index,
+                                     const void *current_data);
+int hipdnn_ep_loop_frame_publish(HipdnnEpLoopFrame *frame,
+                                 int32_t carrier_index,
+                                 const void *published_data);
+int hipdnn_ep_loop_frame_destroy(RuntimeState *state, HipdnnEpLoopFrame *frame);
 
 // Fast-path: counted loop. Selected by the HipToLLVM lowering when the
 // outlining pass proves cond_out == cond_in (SSA-equality, i.e. the body's
@@ -1654,7 +1673,11 @@ typedef int (*HipdnnEpLoopBodyFn)(RuntimeState *state, void *iter_dev_ptr,
 int hipdnn_ep_run_counted_loop(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
                                int64_t max_trip_count, bool cond_init,
                                int32_t num_loop_carried, int32_t num_captures,
-                               void **loop_carried_descs, void **capture_descs);
+                               void **initial_descs, void **scratch_descs_a,
+                               void **scratch_descs_b, void **capture_descs,
+                               HipdnnEpLoopFrame *parent_frame,
+                               void ***final_descs,
+                               HipdnnEpLoopFrame **frame_out);
 
 // Slow-path: dynamic-cond loop. Reads cond_out each iter via D2H sync
 // (matches the behavior of ORT CUDA EP `LoopImpl::Execute` and MIGraphX
@@ -1663,7 +1686,16 @@ int hipdnn_ep_run_counted_loop(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
 int hipdnn_ep_run_loop(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
                        int64_t max_trip_count, bool cond_init,
                        int32_t num_loop_carried, int32_t num_captures,
-                       void **loop_carried_descs, void **capture_descs);
+                       void **initial_descs, void **scratch_descs_a,
+                       void **scratch_descs_b, void **capture_descs,
+                       HipdnnEpLoopFrame *parent_frame, void ***final_descs,
+                       HipdnnEpLoopFrame **frame_out);
+
+// Retry cleanup only for frames quarantined by a failed explicit destroy.
+// Successful frames are released through their compiler-visible token.
+void hipdnn_ep_loop_cleanup_quarantined_frames(RuntimeState *state);
+int hipdnn_ep_loop_state_init(RuntimeState *state);
+void hipdnn_ep_loop_state_cleanup(RuntimeState *state);
 
 // ONNX If driver. Dispatches to exactly one of the two branch trampolines
 // based on `cond`. Each trampoline writes branch outputs into the shared

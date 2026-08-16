@@ -33,6 +33,12 @@ FailureOr<int64_t> getStaticByteSize(MemRefType type);
 Value emitAlignUp(OpBuilder &builder, Location loc, Value value,
                   int64_t alignment);
 
+/// Resolve view aliases plus conditional loop result -> v_init edges. This is
+/// the post-bufferization counterpart of LoopOp's MAYBE/Unknown One-Shot alias
+/// relation and is required for transitive zero-trip/pass-through lifetimes.
+SmallVector<Value> resolveAliasesIncludingLoopMayAlias(
+    Value root, const BufferViewFlowAnalysis &aliasAnalysis);
+
 /// Find the highest block-local operation index among all transitive users
 /// of \p allocResult, following view-like aliases via \p aliasAnalysis.
 /// memref.dealloc ops are excluded so that lifetimes reflect data usage,

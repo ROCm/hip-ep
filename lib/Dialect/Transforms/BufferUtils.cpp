@@ -9,6 +9,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "hip/Dialect/Transforms/BufferUtils.h"
+#include "hip/Dialect/IR/HipDialect.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -16,6 +17,31 @@
 #include "llvm/Support/MathExtras.h"
 
 using namespace mlir;
+
+SmallVector<Value> mlir::hip::resolveAliasesIncludingLoopMayAlias(
+    Value root, const BufferViewFlowAnalysis &aliasAnalysis) {
+  auto initial = aliasAnalysis.resolve(root);
+  SmallVector<Value> worklist(initial.begin(), initial.end());
+  DenseSet<Value> seen;
+  for (size_t cursor = 0; cursor < worklist.size(); ++cursor) {
+    Value alias = worklist[cursor];
+    if (!seen.insert(alias).second)
+      continue;
+    for (OpOperand &use : alias.getUses()) {
+      auto loop = dyn_cast<mlir::hip::LoopOp>(use.getOwner());
+      if (!loop)
+        continue;
+      for (auto [index, init] : llvm::enumerate(loop.getVInitMutable())) {
+        if (&init != &use)
+          continue;
+        for (Value resultAlias : aliasAnalysis.resolve(loop.getResult(index)))
+          if (!seen.contains(resultAlias))
+            worklist.push_back(resultAlias);
+      }
+    }
+  }
+  return llvm::to_vector(seen);
+}
 
 int64_t mlir::hip::getElementByteWidth(MemRefType type) {
   return static_cast<int64_t>(
@@ -53,7 +79,8 @@ unsigned mlir::hip::findLastAliasedUseIndex(
   // itself plus any values derived from it via view-like ops (memref.view,
   // memref.subview, memref.cast, etc.).  We must consider users of ALL
   // aliases to get the true last-use index.
-  for (Value alias : aliasAnalysis.resolve(allocResult)) {
+  for (Value alias :
+       resolveAliasesIncludingLoopMayAlias(allocResult, aliasAnalysis)) {
     for (Operation *user : alias.getUsers()) {
       if (isa<memref::DeallocOp>(user))
         continue;
@@ -85,7 +112,8 @@ mlir::hip::findLastAliasedUser(Value allocResult,
   // the alloc has no users at all (e.g., dead code not yet cleaned up).
   Operation *lastUser = allocResult.getDefiningOp();
   // resolve() returns all forward aliases -- see findLastAliasedUseIndex.
-  for (Value alias : aliasAnalysis.resolve(allocResult)) {
+  for (Value alias :
+       resolveAliasesIncludingLoopMayAlias(allocResult, aliasAnalysis)) {
     for (Operation *user : alias.getUsers()) {
       Operation *resolved = user;
       if (resolved->getBlock() != &entryBlock) {
@@ -106,7 +134,7 @@ bool mlir::hip::isAliasInSet(Value root,
   // Check whether root or any of its forward aliases (views, casts, etc.)
   // appears in valueSet.  Used by LowerAllocs to skip hip.free for returned
   // buffers even when a derived view (not the alloc itself) is returned.
-  for (Value alias : aliasAnalysis.resolve(root))
+  for (Value alias : resolveAliasesIncludingLoopMayAlias(root, aliasAnalysis))
     if (valueSet.contains(alias))
       return true;
   return false;

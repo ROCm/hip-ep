@@ -120,9 +120,10 @@ Options use MLIR's pipeline-option syntax:
 | `hip-infer-shapes` | module | Refine `?` dims on HIP DPS result types via `ReifyRankedShapedTypeOpInterface`. |
 | `hip-split-duplicate-dps-inits` | func.func | De-alias DPS init operands that CSE merged onto one `tensor.empty`, so an op that reads back its own outputs (e.g. `hip.gqa` present K/V) does not share a buffer (pre-bufferize). |
 | `hip-resolve-tensor-dims` | func.func | Fold `tensor.dim` of reshape chains into root-dim arithmetic (pre-bufferize). |
-| `hip-loop-body-to-out-params` | module | Promote outlined loop bodies to the out-param ABI. |
-| `hip-use-output-allocator` | func.func | Rewrite returned `memref.alloc` → `hip.alloc_output` (graph outputs become EP/runtime-owned, not pooled or deallocated). |
-| `hip-fix-loop-accumulator-offset` | func.func | Rewrite frozen Concat-accumulator offsets in loop bodies to iter-driven offsets. |
+| `hip-loop-body-to-out-params` | module | Preserve loop carrier descriptor returns, redirect returned carrier allocations to `hip.loop_alloc`, and promote If bodies to out-params. |
+| `hip-use-output-allocator` | func.func | Rewrite returned `memref.alloc` → `hip.alloc_output`; prevalidate compatible contiguous loop-result view chains and issue one exact checked output copy. |
+| `hip-finalize-loop-frames` | func.func | Place explicit frame destruction after final carrier use/output copy, or transfer escaping nested carriers to their parent frame. |
+| `hip-prepare-loop-body-failures` | module | After pooling, insert fail-fast status branches immediately after each `hip.loop_alloc`. |
 | `hip-optimize-memrefs` | func.func | HIP-specific buffer reuse / subview folding. |
 | `hip-promote-strided-operands` | func.func | Materialize identity-layout temporaries for non-identity-layout DPS-input memrefs. |
 | `hip-materialize-host-scalars` | func.func | Redirect tiny host-fed scalar allocs to runtime-owned host-mapped scratch (away from the GPU pool). |
@@ -195,7 +196,7 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   one-shot-bufferize
   hip-loop-body-to-out-params
   func.func(hip-use-output-allocator)  (slot 4.5)
-  func.func(hip-fix-loop-accumulator-offset)
+  func.func(hip-finalize-loop-frames)
   cse ; canonicalize
   func.func(convert-linalg-to-loops)
   func.func(hip-optimize-memrefs)
@@ -219,6 +220,7 @@ HIP → LLVM  (buildHipToLLVMPipeline)
   lower-affine
   assign-op-state-slots
   generate-op-state-init
+  hip-prepare-loop-body-failures
   convert-scf-to-cf
   reconcile-unrealized-casts
   convert-hip-to-llvm

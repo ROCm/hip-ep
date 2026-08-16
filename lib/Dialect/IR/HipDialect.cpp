@@ -103,6 +103,108 @@ void AllocOutputOp::getEffects(
                        SideEffects::DefaultResource::get());
 }
 
+void LoopAllocOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  // Frame-owned storage: deliberately omit Allocate so PoolAllocs and generic
+  // ownership-based deallocation cannot claim the carrier bank. The generic
+  // Write models mutation of the per-invocation frame and keeps the call alive.
+  effects.emplace_back(MemoryEffects::Write::get(),
+                       SideEffects::DefaultResource::get());
+}
+
+void LoopFrameStatusOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  // Reads the same mutable frame resource that hip.loop_alloc writes. This
+  // prevents CSE/hoisting from moving a status observation across allocation.
+  effects.emplace_back(MemoryEffects::Read::get(),
+                       SideEffects::DefaultResource::get());
+}
+
+LogicalResult LoopAllocOp::verify() {
+  auto type = dyn_cast<MemRefType>(getMemref().getType());
+  if (!type || !type.hasRank())
+    return emitOpError("requires a ranked memref result");
+  if (getCarrierIndex() < 0)
+    return emitOpError("carrier_index must be non-negative");
+  if (static_cast<int64_t>(getDynamicSizes().size()) !=
+      type.getNumDynamicDims())
+    return emitOpError("dynamic-size operand count must match the result type");
+  if (!type.getLayout().isIdentity())
+    return emitOpError("requires an identity-layout result memref");
+  auto body = getOperation()->getParentOfType<func::FuncOp>();
+  if (!body || body.empty())
+    return emitOpError("must be nested in an outlined loop body");
+  if (body.getNumArguments() == 0 || getFrame() != body.getArguments().back() ||
+      !isa<LoopFrameType>(body.getArgumentTypes().back()))
+    return emitOpError(
+        "frame must be the outlined body's final !hip.loop_frame argument");
+  ModuleOp module = body->getParentOfType<ModuleOp>();
+  LoopOp owner;
+  if (module)
+    module.walk([&](LoopOp loop) {
+      if (!owner && loop.getBodyFunc() == body.getName())
+        owner = loop;
+    });
+  if (!owner)
+    return emitOpError("cannot resolve owning hip.loop for body ")
+           << body.getName();
+  unsigned carrier = static_cast<unsigned>(getCarrierIndex());
+  if (carrier >= owner.getNumLoopCarried())
+    return emitOpError("carrier_index ")
+           << carrier << " is outside [0, " << owner.getNumLoopCarried() << ")";
+  if (body.getNumArguments() <= 3 + carrier)
+    return emitOpError("owning body is missing current carrier argument #")
+           << carrier;
+  auto currentType = dyn_cast<MemRefType>(body.getArgumentTypes()[3 + carrier]);
+  if (!currentType || currentType != type)
+    return emitOpError("result type ")
+           << type << " must match current carrier #" << carrier << " type "
+           << body.getArgumentTypes()[3 + carrier];
+  return success();
+}
+
+void LoopFrameDestroyOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Write::get(),
+                       SideEffects::DefaultResource::get());
+}
+
+void CopyOutputOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Read::get(),
+                       &getOperation()->getOpOperand(1),
+                       SideEffects::DefaultResource::get());
+  effects.emplace_back(MemoryEffects::Write::get(),
+                       &getOperation()->getOpOperand(2),
+                       SideEffects::DefaultResource::get());
+}
+
+LogicalResult CopyOutputOp::verify() {
+  auto source = dyn_cast<MemRefType>(getSource().getType());
+  auto target = dyn_cast<MemRefType>(getTarget().getType());
+  if (!source || !target || source.getRank() != target.getRank())
+    return emitOpError(
+        "source and target must have the same ranked memref rank");
+  if (source.getElementType() != target.getElementType())
+    return emitOpError("source and target element types must match");
+  if (!target.getLayout().isIdentity())
+    return emitOpError("target must have identity layout");
+  for (int64_t dim = 0; dim < source.getRank(); ++dim) {
+    int64_t lhs = source.getDimSize(dim);
+    int64_t rhs = target.getDimSize(dim);
+    if (!ShapedType::isDynamic(lhs) && !ShapedType::isDynamic(rhs) &&
+        lhs != rhs)
+      return emitOpError(
+                 "source and target static extent mismatch at dimension ")
+             << dim;
+  }
+  return success();
+}
+
 LogicalResult AllocOutputOp::verify() {
   // Operand convention matches hip.alloc: exactly one Index per dynamic dim of
   // the result memref (static dims come from the type, dynamic dims from
@@ -222,31 +324,24 @@ LogicalResult ConstantOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
-// LoopOp: outlined-body counted/conditional loop (DPS)
+// LoopOp: outlined-body counted/conditional loop
 //===----------------------------------------------------------------------===//
-
-MutableOperandRange LoopOp::getDpsInitsMutable() { return getVInitMutable(); }
 
 void LoopOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  // Match the DPS convention used by other Hip ops (see emitDpsMemoryEffects):
-  //   - v_init are DPS inits  -> Write (the body accumulates into them across
-  //     iterations; without Write, post-bufferization DCE drops the entire
-  //     loop because it appears side-effect-free with no live results).
-  //   - captures are data inputs -> Read.
-  //   - ctx / index / i1 operands are skipped (not memref).
-  // Pre-bufferization v_init are tensors (not memref) -- the isa<MemRefType>
-  // filter naturally suppresses effects then, which is correct: the op's
-  // tensor result use prevents DCE in tensor mode.
+  // v_init and captures are read-only from the caller's perspective. Carrier
+  // writes target frame-owned banks, represented by a generic Write effect.
   for (OpOperand &operand : getVInitMutable())
     if (isa<MemRefType>(operand.get().getType()))
-      effects.emplace_back(MemoryEffects::Write::get(), &operand,
+      effects.emplace_back(MemoryEffects::Read::get(), &operand,
                            SideEffects::DefaultResource::get());
   for (OpOperand &operand : getCapturesMutable())
     if (isa<MemRefType>(operand.get().getType()))
       effects.emplace_back(MemoryEffects::Read::get(), &operand,
                            SideEffects::DefaultResource::get());
+  effects.emplace_back(MemoryEffects::Write::get(),
+                       SideEffects::DefaultResource::get());
 }
 
 LogicalResult LoopOp::verify() {
@@ -258,29 +353,38 @@ LogicalResult LoopOp::verify() {
            << numLoopCarried << ") must equal the v_init operand count ("
            << getVInit().size() << ")";
 
-  // Determine mode from v_init type when present; otherwise default to
-  // tensor mode (a num_loop_carried=0 op makes no sense, but allow it).
-  bool tensorMode = true;
-  if (!getVInit().empty())
-    tensorMode = isa<RankedTensorType>(getVInit()[0].getType());
+  bool memrefMode = getDescriptorReturn();
+  unsigned expectedResults = numLoopCarried + (memrefMode ? 1u : 0u);
+  if (getNumResults() != expectedResults)
+    return emitOpError(memrefMode ? "memref mode" : "tensor mode")
+           << " expects " << expectedResults << " results, got "
+           << getNumResults();
+  if (memrefMode && !isa<LoopFrameType>(getResult(numLoopCarried).getType()))
+    return emitOpError("descriptor-return mode final result must be "
+                       "!hip.loop_frame");
 
-  if (tensorMode) {
-    // Tensor mode: results count == num_loop_carried, types match v_init.
-    if (numLoopCarried != getNumResults())
-      return emitOpError("tensor mode: num_loop_carried (")
-             << numLoopCarried << ") must equal the result count ("
-             << getNumResults() << ")";
-    for (uint32_t i = 0; i < numLoopCarried; ++i)
-      if (getVInit()[i].getType() != getResult(i).getType())
-        return emitOpError("result type #")
-               << i << " (" << getResult(i).getType()
-               << ") must match v_init type #" << i << " ("
-               << getVInit()[i].getType() << ")";
-  } else {
-    // Memref mode (post-bufferization): no results, v_init carries writes.
-    if (getNumResults() != 0)
-      return emitOpError("memref mode must have zero results, got ")
-             << getNumResults();
+  for (uint32_t i = 0; i < numLoopCarried; ++i) {
+    Type initType = getVInit()[i].getType();
+    Type resultType = getResult(i).getType();
+    bool tensorPair = !memrefMode && isa<RankedTensorType>(initType) &&
+                      isa<RankedTensorType>(resultType);
+    bool memrefPair =
+        memrefMode && isa<MemRefType>(initType) && isa<MemRefType>(resultType);
+    if (!tensorPair && !memrefPair)
+      return emitOpError("carrier #")
+             << i << " must use matching ranked tensor or memref categories";
+    if (initType != resultType)
+      return emitOpError("result type #")
+             << i << " (" << resultType << ") must match v_init type #" << i
+             << " (" << initType << ")";
+  }
+  if (Value parent = getParentFrame()) {
+    auto function = getOperation()->getParentOfType<func::FuncOp>();
+    if (!function || function.getNumArguments() == 0 ||
+        parent != function.getArguments().back() ||
+        !isa<LoopFrameType>(parent.getType()))
+      return emitOpError(
+          "parent frame must be the enclosing body's final argument");
   }
 
   // body_func symbol resolution is checked in verifySymbolUses() so the
@@ -295,6 +399,89 @@ LogicalResult LoopOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   if (!bodyFunc)
     return emitOpError("body_func '")
            << getBodyFunc() << "' does not reference a func.func";
+
+  uint32_t numLoopCarried = getNumLoopCarried();
+  unsigned numCaptures = getCaptures().size();
+  unsigned expectedArgs = 4 + numLoopCarried + numCaptures;
+  if (bodyFunc.getNumArguments() != expectedArgs)
+    return emitOpError("body_func argument count mismatch: expected ")
+           << expectedArgs
+           << " (context, iter, cond, carriers, captures, frame), got "
+           << bodyFunc.getNumArguments();
+  ArrayRef<Type> args = bodyFunc.getArgumentTypes();
+  if (!isa<ContextType>(args[0]))
+    return emitOpError("body_func argument #0 must be !hip.context");
+  bool descriptorMode = getDescriptorReturn();
+  // A zero-carrier/no-capture loop gives One-Shot no tensor value on which to
+  // invoke the external model. Its body function boundary is nevertheless
+  // converted first; LoopBodyToOutParams materializes the frame token in the
+  // immediately following pass.
+  bool zeroCarrierBoundaryTransition = !descriptorMode && numLoopCarried == 0 &&
+                                       getNumResults() == 0 &&
+                                       isa<MemRefType>(args[1]);
+  bool bodyDescriptorMode = descriptorMode || zeroCarrierBoundaryTransition;
+  auto isModeRankZeroInteger = [bodyDescriptorMode](Type type, unsigned widthA,
+                                                    unsigned widthB = 0) {
+    ShapedType shaped;
+    if (bodyDescriptorMode)
+      shaped = dyn_cast<MemRefType>(type);
+    else
+      shaped = dyn_cast<RankedTensorType>(type);
+    if (!shaped || shaped.getRank() != 0)
+      return false;
+    auto integer = dyn_cast<IntegerType>(shaped.getElementType());
+    return integer && (integer.getWidth() == widthA ||
+                       (widthB != 0 && integer.getWidth() == widthB));
+  };
+  if (!isModeRankZeroInteger(args[1], 64))
+    return emitOpError("body_func argument #1 must be rank-zero i64 ")
+           << (bodyDescriptorMode ? "memref" : "ranked tensor") << " iter";
+  if (!isModeRankZeroInteger(args[2], 1, 8))
+    return emitOpError("body_func argument #2 must be rank-zero i1/i8 ")
+           << (bodyDescriptorMode ? "memref" : "ranked tensor") << " condition";
+  if (!isa<LoopFrameType>(args.back()))
+    return emitOpError("body_func final argument must be !hip.loop_frame");
+  for (unsigned i = 0; i < numLoopCarried; ++i)
+    if (args[3 + i] != getResult(i).getType())
+      return emitOpError("body_func current carrier #")
+             << i << " type " << args[3 + i]
+             << " must match loop carrier result type "
+             << getResult(i).getType();
+  for (unsigned i = 0; i < numCaptures; ++i)
+    if (args[3 + numLoopCarried + i] != getCaptures()[i].getType())
+      return emitOpError("body_func capture #") << i << " type mismatch";
+  for (unsigned i = 0; i < numCaptures; ++i) {
+    Type capture = getCaptures()[i].getType();
+    bool supported = bodyDescriptorMode ? isa<MemRefType>(capture)
+                                        : isa<RankedTensorType>(capture);
+    if (!supported)
+      return emitOpError("capture #")
+             << i << " must be a lowering-supported ranked "
+             << (bodyDescriptorMode ? "memref" : "tensor")
+             << "; context is threaded separately";
+  }
+
+  unsigned condResults = getCondIsPassthrough() ? 0u : 1u;
+  unsigned expectedBodyResults = 1 + condResults + numLoopCarried;
+  if (bodyFunc.getNumResults() != expectedBodyResults)
+    return emitOpError("body_func result count mismatch: expected status")
+           << (condResults ? ", condition" : "") << " and " << numLoopCarried
+           << " carrier descriptors";
+  ArrayRef<Type> results = bodyFunc.getResultTypes();
+  if (!results[0].isInteger(32))
+    return emitOpError("body_func result #0 must be i32 status");
+  if (condResults && results[1] != args[2])
+    return emitOpError(
+        "body_func condition result must match condition argument type");
+  unsigned carrierStart = 1 + condResults;
+  for (unsigned i = 0; i < numLoopCarried; ++i) {
+    Type bodyResult = results[carrierStart + i];
+    Type contract = getResult(i).getType();
+    if (bodyResult != contract)
+      return emitOpError("body_func carrier result #")
+             << i << " type " << bodyResult << " must match loop carrier type "
+             << contract;
+  }
   return success();
 }
 
@@ -303,8 +490,6 @@ LogicalResult LoopOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 // builder (operand types only, no explicit result types) is verifier-clean
 // by construction.
 //
-// Memref-mode v_init produces 0 result types (DPS post-bufferization
-// convention; the verifier rejects mixed mode anyway).
 LogicalResult
 LoopOp::inferReturnTypes(MLIRContext *context, std::optional<Location> location,
                          ValueRange operands, DictionaryAttr attributes,
@@ -313,10 +498,11 @@ LoopOp::inferReturnTypes(MLIRContext *context, std::optional<Location> location,
   LoopOpAdaptor adaptor(operands, attributes, properties, regions);
   auto vInit = adaptor.getVInit();
   inferredReturnTypes.reserve(vInit.size());
-  for (Value v : vInit) {
-    if (isa<RankedTensorType>(v.getType()))
+  for (Value v : vInit)
+    if (isa<RankedTensorType, MemRefType>(v.getType()))
       inferredReturnTypes.push_back(v.getType());
-  }
+  if (adaptor.getDescriptorReturn())
+    inferredReturnTypes.push_back(LoopFrameType::get(context));
   return success();
 }
 
