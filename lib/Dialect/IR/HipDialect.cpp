@@ -626,16 +626,20 @@ void MatmulOp::getEffects(
 LogicalResult MatmulOp::verify() {
   // First the cross-cutting DPS contract (all-tensor-or-all-memref +
   // result-count parity); failures here also rule out bogus operand types,
-  // so the matmul shape check below can rely on detail::getShapeOf().
+  // so the matmul shape check below can rely on getShapeOf().
   if (failed(verifyDpsComputeOp(*this, {getA(), getB(), getOutput()},
                                 /*numInits=*/1)))
     return failure();
 
-  return mlir::hip::verifyHipOpShape(*this, [&] {
-    return mlir::hip::inferMatmulShape(detail::getShapeOf(getA()),
-                                       detail::getShapeOf(getB()),
-                                       [&]() { return this->emitOpError(); });
-  });
+  ArrayRef<int64_t> aShape = detail::getShapeOf(getA());
+  ArrayRef<int64_t> bShape = detail::getShapeOf(getB());
+  if (failed(mlir::hip::verifyHipOpShape(*this, [&] {
+        return mlir::hip::inferMatmulShape(aShape, bShape,
+                                           [&] { return this->emitOpError(); });
+      })))
+    return failure();
+  return mlir::hip::verifyStridedBatchMatmul(
+      aShape, bShape, [&]() { return this->emitOpError(); });
 }
 
 // `MatmulOp::reifyResultShapes` lives in
@@ -1301,6 +1305,39 @@ void MatMulNBitsOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult MatMulNBitsOp::verify() {
+  SmallVector<Value> operands = {getA(), getB(), getScales()};
+  if (Value zeroPoints = getZeroPoints())
+    operands.push_back(zeroPoints);
+  if (Value gIdx = getGIdx())
+    operands.push_back(gIdx);
+  if (Value bias = getBias())
+    operands.push_back(bias);
+  operands.push_back(getOutput());
+  if (failed(verifyDpsComputeOp(*this, operands, /*numInits=*/1)))
+    return failure();
+
+  auto aType = cast<ShapedType>(getA().getType());
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  if (outputType.getElementType() != aType.getElementType())
+    return emitOpError("output element type must match A");
+  if (getK() < 0 || getN() < 0 || getBlockSize() <= 0)
+    return emitOpError(
+        "K and N must be non-negative and block_size must be positive");
+  if (aType.getRank() < 1)
+    return emitOpError("A must have rank at least 1");
+  int64_t contraction = aType.getDimSize(aType.getRank() - 1);
+  if (!ShapedType::isDynamic(contraction) && contraction != getK())
+    return emitOpError("A's trailing extent must equal K");
+
+  FailureOr<SmallVector<int64_t>> expected =
+      inferMatMulNBitsShape(aType.getShape(), getN());
+  if (failed(expected))
+    return emitOpError("could not infer MatMulNBits output shape");
+  return verifyHipOpShape(
+      *this, [&]() -> FailureOr<SmallVector<int64_t>> { return *expected; });
+}
+
 //===----------------------------------------------------------------------===//
 // QMoEOp
 //===----------------------------------------------------------------------===//
@@ -1363,6 +1400,27 @@ void GemmOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult GemmOp::verify() {
+  SmallVector<Value> dataOperands = {getInputA(), getInputB()};
+  if (getInputC())
+    dataOperands.push_back(getInputC());
+  dataOperands.push_back(getOutput());
+  // The cross-cutting DPS contract first (all-tensor-or-all-memref +
+  // result-count parity); it also rules out non-shaped data operands, so the
+  // shape check below can rely on getShapeOf().
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  std::optional<ArrayRef<int64_t>> cShape;
+  if (getInputC())
+    cShape = detail::getShapeOf(getInputC());
+  return mlir::hip::verifyHipOpShape(*this, [&] {
+    return mlir::hip::inferGemmShape(
+        detail::getShapeOf(getInputA()), detail::getShapeOf(getInputB()),
+        cShape, getTransA(), getTransB(), [&] { return this->emitOpError(); });
+  });
 }
 
 //===----------------------------------------------------------------------===//

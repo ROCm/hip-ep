@@ -9,7 +9,17 @@ namespace mlir {
 namespace hip {
 namespace {
 
-/// onnx.MatMul -> hip.hipblaslt.matmul
+/// onnx.MatMul -> hip.matmul
+///
+/// Before:
+///   %r = "onnx.MatMul"(%a, %b)
+///       : (tensor<?x4xf16>, tensor<?x4x?xf16>) -> tensor<?x?x?xf16>
+/// After:
+///   %batch = tensor.dim %b, %c0
+///   %m = tensor.dim %a, %c0
+///   %n = tensor.dim %b, %c2
+///   %init = tensor.empty(%batch, %m, %n) : tensor<?x?x?xf16>
+///   %r = hip.matmul ... outs(%init : tensor<?x?x?xf16>)
 struct MatMulToHip : public mlir::RewritePattern {
   MatMulToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.MatMul", /*benefit=*/1, ctx) {}
@@ -22,42 +32,51 @@ struct MatMulToHip : public mlir::RewritePattern {
 mlir::LogicalResult
 MatMulToHip::matchAndRewrite(mlir::Operation *op,
                              mlir::PatternRewriter &rewriter) const {
+  mlir::Location loc = op->getLoc();
+  mlir::Value a = op->getOperand(0);
+  mlir::Value b = op->getOperand(1);
+
+  auto aType = mlir::dyn_cast<mlir::RankedTensorType>(a.getType());
+  auto bType = mlir::dyn_cast<mlir::RankedTensorType>(b.getType());
+  auto resultType =
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!aType || !bType)
+    return rewriter.notifyMatchFailure(op, "MatMul operands must be ranked");
+  if (!resultType)
+    return rewriter.notifyMatchFailure(op, "MatMul result must be ranked");
+
+  // Complete every fallible static check before reification emits tensor.dim
+  // or broadcast-selection IR.
+  mlir::FailureOr<llvm::SmallVector<int64_t>> inferredShape =
+      mlir::hip::inferMatmulShape(aType.getShape(), bType.getShape(),
+                                  [&]() { return op->emitError(); });
+  if (mlir::failed(inferredShape))
+    return mlir::failure();
+  if (mlir::failed(mlir::hip::verifyStridedBatchMatmul(
+          aType.getShape(), bType.getShape(),
+          [&]() { return op->emitError(); })))
+    return mlir::failure();
+  if (!isResultTypeCompatibleWithInferredShape(resultType, *inferredShape))
+    return rewriter.notifyMatchFailure(
+        op, "MatMul result type is incompatible with inferred shape");
+
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
     return mlir::failure();
   mlir::Value context = *ctxOrFailure;
 
-  mlir::Location loc = op->getLoc();
-  mlir::Value a = op->getOperand(0);
-  mlir::Value b = op->getOperand(1);
-  auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-
-  // MatMul: result[..., M, N] = A[..., M, K] @ B[..., K, N].
-  // Batch and M dims come from A; N comes from B's last dim.
-  llvm::SmallVector<mlir::Value> dynSizes;
-  const int64_t rank = resultType.getRank();
-  const auto bType = mlir::cast<mlir::RankedTensorType>(b.getType());
-  for (int64_t dimIdx : llvm::seq<int64_t>(rank)) {
-    if (!resultType.isDynamicDim(dimIdx))
-      continue;
-    if (dimIdx == rank - 1) {
-      dynSizes.push_back(
-          mlir::tensor::DimOp::create(rewriter, loc, b, bType.getRank() - 1));
-    } else {
-      dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, a, dimIdx));
-    }
-  }
-
-  mlir::Value init =
-      mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
-                                    resultType.getElementType(), dynSizes);
-  // Inferred-type Op::create overload: result type is read from the typed
-  // outs operand by MatmulOp's inference family. This is equivalent to passing
-  // `resultType` explicitly -- outs.getType() == resultType by construction
-  // here -- but keeps `result_type == outs_operand_type` closed by ODS rather
-  // than restated at the callsite.
-  auto hipOp = mlir::hip::MatmulOp::create(rewriter, loc, context, a, b, init);
+  mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> resultShape =
+      mlir::hip::reifyMatmulResultShape(rewriter, loc, a, b,
+                                        [&]() { return op->emitError(); });
+  if (mlir::failed(resultShape))
+    return mlir::failure();
+  mlir::FailureOr<mlir::Value> init = createEmptyTensorFromReifiedShape(
+      rewriter, loc, resultType, *resultShape);
+  if (mlir::failed(init))
+    return rewriter.notifyMatchFailure(
+        op, "MatMul result type is incompatible with inferred shape");
+  // The semantic inference family reads the result type from the DPS init.
+  auto hipOp = mlir::hip::MatmulOp::create(rewriter, loc, context, a, b, *init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
