@@ -8,7 +8,6 @@
 
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/Value.h"
-#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringSet.h"
 
@@ -16,12 +15,14 @@ namespace mlir::hip {
 namespace {
 
 bool isBroadcastOp(Operation *op) {
+  static constexpr llvm::StringLiteral kBroadcastOpNames[] = {
+      "onnx.Add",   "onnx.And",         "onnx.Div",
+      "onnx.Equal", "onnx.Greater",     "onnx.GreaterOrEqual",
+      "onnx.Less",  "onnx.LessOrEqual", "onnx.Mod",
+      "onnx.Mul",   "onnx.Or",          "onnx.Sub",
+      "onnx.Where"};
   llvm::StringRef name = op->getName().getStringRef();
-  return llvm::is_contained({"onnx.Add", "onnx.And", "onnx.Div", "onnx.Equal",
-                             "onnx.Greater", "onnx.GreaterOrEqual", "onnx.Less",
-                             "onnx.LessOrEqual", "onnx.Mod", "onnx.Mul",
-                             "onnx.Or", "onnx.Sub", "onnx.Where"},
-                            name);
+  return llvm::is_contained(kBroadcastOpNames, name);
 }
 
 std::optional<std::string> getValueName(Value value) {

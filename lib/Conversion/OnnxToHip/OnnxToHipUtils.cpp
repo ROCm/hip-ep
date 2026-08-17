@@ -52,11 +52,6 @@ bool extractConstantIntVector(Value value,
   return extractConstantIntTensor(value, out, /*expectedRank=*/1);
 }
 
-bool isResultTypeCompatibleWithPayloadShape(
-    mlir::RankedTensorType resultType, llvm::ArrayRef<int64_t> inferredShape) {
-  return isResultTypeCompatibleWithInferredShape(resultType, inferredShape);
-}
-
 static std::optional<llvm::ArrayRef<int64_t>>
 resolveReductionAxes(Operation *op, Value data, int64_t noopWithEmptyAxes,
                      llvm::SmallVectorImpl<int64_t> &storage) {

@@ -133,12 +133,6 @@ bool extractConstantIntTensor(
 bool extractConstantIntVector(mlir::Value value,
                               llvm::SmallVectorImpl<int64_t> &out);
 
-/// Compatibility check for a pure payload shape. A dynamic imported or
-/// inferred extent is compatible with its counterpart; unequal static extents
-/// are contradictions.
-bool isResultTypeCompatibleWithPayloadShape(
-    mlir::RankedTensorType resultType, llvm::ArrayRef<int64_t> inferredShape);
-
 /// Map an MLIR element type onto the HIPDNN_EP_DATATYPE_* enum that runtime
 /// wrappers take as an `input_data_type` argument. Only the subset needed by
 /// the converters that scan a raw buffer (hip.nonzero, and the Compress
