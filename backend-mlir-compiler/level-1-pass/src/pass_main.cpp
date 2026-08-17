@@ -7,6 +7,7 @@
 
 // Morphizen headers
 #include "hip/timing.h"
+#include "morphizen/cache_identity.hpp"
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
 #include <cstdint>
@@ -108,6 +109,13 @@ static std::string get_mlir_bytecode(PassContext *ctx, Graph &graph) {
   }
 
   return std::string(bytecode->data(), bytecode->size());
+}
+
+static void verify_initializer_snapshot(Graph &graph, const char *phase) {
+  std::string error;
+  if (!verify_graph_initializer_digest(graph, error))
+    throw CacheIntegrityError(std::string("initializer verification failed ") +
+                              phase + ": " + error);
 }
 
 // Step 3: Compile MLIR bytecode to artifact
@@ -276,6 +284,8 @@ struct Level1MlirPass {
 
     TIMING_LOG("[Session] load_config: %.3fs\n", record_elapsed(t_prev));
 
+    verify_initializer_snapshot(graph, "before compiler consumption");
+
     // Step 2: Get MLIR bytecode from graph
     auto mlir_bytecode = get_mlir_bytecode(self.get_context().get(), graph);
     if (mlir_bytecode.empty()) {
@@ -294,6 +304,8 @@ struct Level1MlirPass {
       return;
     }
     CompilationArtifact artifact = *artifactOpt;
+
+    verify_initializer_snapshot(graph, "after compiler consumption");
 
     TIMING_LOG("[Session] MLIR compilation (CompilerDriver): %.3fs\n",
                record_elapsed(t_prev));

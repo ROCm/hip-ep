@@ -11,6 +11,7 @@
 #include <glog/logging.h>
 #include <limits>
 #include <morphizen-utils/morphizen-utils.hpp>
+#include <morphizen/cache_identity.hpp>
 #include <morphizen/graph.hpp>
 #include <morphizen/morphizen-ort-api-ext.hpp>
 #include <morphizen/node_attr.hpp>
@@ -88,15 +89,9 @@ OrtStatus *IRConverterImp::convert_to_model(morphizen::Model &model) const {
     (model, std::string(kOnnxDimParamsMetadataKey),
      encode_symbolic_dim_records(std::move(records)));
     if (config_.hash_initializer_data) {
-      std::sort(initializer_digests_.begin(), initializer_digests_.end());
-      std::string framed = "HIDI1\n";
-      for (const auto &[name, digest] : initializer_digests_) {
-        framed += std::to_string(name.size()) + ":" + name;
-        framed += std::to_string(digest.size()) + ":" + digest;
-      }
       MORPHIZEN_ORT_API(model_set_meta_data)
       (model, std::string(kInitializerDataDigestMetadataKey),
-       get_sha256_of_buffer(framed.data(), framed.size()));
+       compute_graph_initializer_digest(main_graph));
     }
   } catch (const std::exception &error) {
     return ort_api.CreateStatus(ORT_INVALID_ARGUMENT, error.what());
@@ -298,8 +293,6 @@ IRConverterImp::convert_graph_initializers(morphizen::Graph &graph) const {
   std::filesystem::path model_path = api_model_path
                                          ? std::filesystem::path(api_model_path)
                                          : std::filesystem::path();
-  std::filesystem::path model_dir =
-      model_path.has_parent_path() ? model_path.parent_path() : model_path;
 
   // Get initializers from the ORT graph
   auto initializers = graph_.initializers();
@@ -307,7 +300,6 @@ IRConverterImp::convert_graph_initializers(morphizen::Graph &graph) const {
     // Create ValueInfo wrapper for the initializer
     auto value_info =
         Ort::ConstValueInfo(initializer); // Create ONNX ValueInfoProto
-    std::string initializer_name = value_info.GetName();
 
     // Try the file-reference path first: ValueInfo_GetExternalInitializerInfo
     // returns the {file_path, offset, byte_size} triple WITHOUT triggering
@@ -334,14 +326,10 @@ IRConverterImp::convert_graph_initializers(morphizen::Graph &graph) const {
       // directory to get an absolute path the runtime can fopen without
       // needing to know the model location.
       std::filesystem::path abs_path =
-          rel_path.is_absolute() ? rel_path : (model_dir / rel_path);
+          normalize_external_initializer_path(model_path, rel_path);
       std::string abs_path_str = abs_path.u8string();
       int64_t file_offset = ext_info.GetFileOffset();
       size_t byte_size = ext_info.GetByteSize();
-      if (config_.hash_initializer_data)
-        initializer_digests_.emplace_back(
-            initializer_name,
-            get_sha256_of_file_slice(abs_path, file_offset, byte_size));
 
       // Need shape + element type, which require the OrtValue. ORT will
       // construct a stub tensor descriptor without materializing the data
@@ -400,9 +388,6 @@ IRConverterImp::convert_graph_initializers(morphizen::Graph &graph) const {
       auto shape = tensor_info.GetShape();
       const void *tensor_data = tensor_value.GetTensorRawData();
       size_t data_size = tensor_value.GetTensorSizeInBytes();
-      if (config_.hash_initializer_data)
-        initializer_digests_.emplace_back(
-            initializer_name, get_sha256_of_buffer(tensor_data, data_size));
 
       if (data_size > config_.external_data_threshold) {
         // Large tensor: use the no-copy memory-address mechanism. Encode the
