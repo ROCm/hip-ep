@@ -350,7 +350,11 @@ static int gqa_forward_fused(
     const void *k_scale = nullptr, const void *v_scale = nullptr,
     KvCacheFormat kv_format = KvCacheFormat::Fp16,
     const void *head_sink = nullptr, bool use_smooth_softmax = false,
-    int local_window_size = -1) {
+    int local_window_size = -1,
+    // Additive attention mask, applied by flash decode only (sq == 1). Prefill
+    // has no bias support on this path and is gated out by the caller.
+    const void *attention_bias = nullptr, int64_t attn_bias_batch = 1,
+    int64_t attn_bias_num_heads = 1) {
 
   // Any non-fp16 cache reads/writes quantized bytes on the concat/append/decode
   // path; the specific scheme is carried by kv_format (extensible to INT4/FP8).
@@ -513,6 +517,23 @@ static int gqa_forward_fused(
       // Decode structurally clamps kv_lo to the requested local window. This
       // keeps sliding layers on the fused autotuned path rather than treating
       // the window as a decomposed score-mask operation.
+      //
+      // The mask is dense [bias_batch, bias_heads, 1, total_seq], so its kv
+      // stride is the VALID total length, not the present buffer stride --
+      // those differ whenever past and present share a max_length buffer. The
+      // decomposed path strides it by total_seq for the same reason (Step 8b).
+      // total_seq is only host-known here via the B==1 pre-read, which is
+      // exactly the shape the caller admits a masked decode for.
+      int64_t bias_kv_stride = 0;
+      if (attention_bias) {
+        if (seqlens_k_pre == kSeqlensKNotRead || seqlens_k_pre < 0) {
+          fprintf(stderr,
+                  "gqa_forward_fused (decode): attention_bias needs a host-side "
+                  "total_seq, but seqlens_k could not be pre-read\n");
+          return -1;
+        }
+        bias_kv_stride = static_cast<int64_t>(seqlens_k_pre) + 1;
+      }
       int drc = hip_gqa_flash_decode(
           stream, qSrc, present_key, present_value, output, partials,
           static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
@@ -520,7 +541,10 @@ static int gqa_forward_fused(
           static_cast<int>(present_seq), kFlashDecodeMaxSplits, scale,
           seqlens_k_ptr, static_cast<int>(local_window_size), head_sink,
           static_cast<int>(use_smooth_softmax), kv_dtype_abi(kv_format),
-          kv_quantized ? k_scale : nullptr, kv_quantized ? v_scale : nullptr);
+          kv_quantized ? k_scale : nullptr, kv_quantized ? v_scale : nullptr,
+          attention_bias, static_cast<int>(attn_bias_batch),
+          static_cast<int>(attn_bias_num_heads),
+          static_cast<int>(bias_kv_stride));
       if (drc != 0)
         return -1;
       RUNTIME_DEBUG_LOG(
@@ -818,6 +842,22 @@ static bool gqa_fused_decode_disabled() {
   }();
   return disabled;
 }
+
+// Env-var gate to keep a MASKED decode on the decomposed pipeline, i.e. to undo
+// just the additive-bias admission in fused_supported below. Set
+// HIPDNN_EP_GQA_DISABLE_FUSED_DECODE_BIAS=1 to A/B the two implementations of
+// the same masking from one build. That comparison is the only way to check the
+// bias is really applied: a dropped or misindexed mask shows up as a changed
+// answer only where the mask actually removes keys, e.g. Gemma-4's 1024-wide
+// sliding-window layers past 1024 tokens of context.
+static bool gqa_fused_decode_bias_disabled() {
+  static const bool disabled = [] {
+    const char *v = std::getenv("HIPDNN_EP_GQA_DISABLE_FUSED_DECODE_BIAS");
+    return v && std::strcmp(v, "0") != 0;
+  }();
+  return disabled;
+}
+
 
 // Smart-dispatch threshold for the legacy GQA decode (sq == 1). When total_seq
 // exceeds this value, dispatch routes through the decomposed hipBLASLt pipeline
@@ -2410,9 +2450,30 @@ int wrap_group_query_attention(
   // trap on CDNA (wave64, e.g. MI350). Route wave64 to the decomposed hipBLASLt
   // pipeline below (MFMA GEMMs + wave-portable scalar kernels), which is
   // feature-complete and correct on both wave sizes. RDNA is unaffected.
+  // A masked decode CAN take the fused path: flash decode folds the additive
+  // mask into its online softmax. Three conditions make that sound, and all
+  // three are decode-only, which is why prefill stays excluded:
+  //   - sq == 1, so the mask is a single row and the kernel's dense
+  //     [bias_batch, bias_heads, 1, total_seq] view is exact;
+  //   - batch 1, so total_seq (the mask's kv stride) is host-known from the
+  //     seqlens_k pre-read;
+  //   - fp16 KV, since the int8 launcher does not thread the mask.
+  // Flash prefill has no bias support at all, so a masked prefill must keep
+  // going decomposed or the mask would be silently dropped.
+  const bool bias_ok =
+      attention_bias == nullptr ||
+      (is_decode && batch_size == 1 && !kv_quantized &&
+       !gqa_fused_decode_bias_disabled());
+  // no_causal on a masked decode is likewise safe: is_causal=0 exports (Gemma-4)
+  // carry causal, padding AND any sliding window inside the additive mask, and
+  // the built-in causal triangle is a documented no-op at sq == 1 anyway (see
+  // Step 9), so admitting these costs no masking. Unmasked no_causal is
+  // bidirectional attention and still belongs on the decomposed path.
+  const bool causal_ok =
+      no_causal == 0 || (is_decode && attention_bias != nullptr);
   const bool fused_supported =
-      element_size_bytes == 2 && no_causal == 0 && window_ok && sink_ok &&
-      head_dim_ok && decode_geometry_ok && attention_bias == nullptr &&
+      element_size_bytes == 2 && causal_ok && window_ok && sink_ok &&
+      head_dim_ok && decode_geometry_ok && bias_ok &&
       !hipdnn_device_is_wave64();
 
   // The quantized-cache kernels live exclusively on the fused path, which is
@@ -2489,7 +2550,8 @@ int wrap_group_query_attention(
       cos_cache, sin_cache, output, present_key, present_value, batch_size,
       seq_len_q, seq_len_kv, past_buf_seq, num_heads, kv_num_heads, head_dim,
       scale, do_rotary, k_scale, v_scale, kv_format, head_sink,
-      has_smooth_softmax, static_cast<int>(local_window_size));
+      has_smooth_softmax, static_cast<int>(local_window_size), attention_bias,
+      attn_bias_batch, attn_bias_num_heads);
   if (rc != 0)
     fprintf(stderr,
             "wrap_group_query_attention: gqa_forward_fused failed "

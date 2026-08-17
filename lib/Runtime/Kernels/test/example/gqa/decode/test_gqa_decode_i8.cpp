@@ -42,7 +42,9 @@ extern "C" int hip_gqa_flash_decode(
     int B, int H, int G, int d, int skv, int max_seq, int max_splits,
     float scale, const void* seqlens_k, int local_window_size,
     const void* head_sink, int use_smooth_softmax,
-    int kv_dtype, const void* k_scale, const void* v_scale);
+    int kv_dtype, const void* k_scale, const void* v_scale,
+    const void* attn_bias, int attn_bias_batch, int attn_bias_heads,
+    int attn_bias_kv_stride);
 
 static constexpr int MAX_SPLITS = 64;
 
@@ -262,7 +264,8 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
   // Warmup + correctness fetch for the int8 kernel (kv_dtype = INT8).
   HIP_CHECK((hipError_t)hip_gqa_flash_decode(
       nullptr, dQ, dK8, dV8, dO8, dPart, B, H, G, D, c.total, max_seq,
-      MAX_SPLITS, scale, dSeq, 0, nullptr, 0, HIP_KV_DTYPE_INT8, dKsc, dVsc));
+      MAX_SPLITS, scale, dSeq, 0, nullptr, 0, HIP_KV_DTYPE_INT8, dKsc, dVsc,
+      nullptr, 1, 1, 0));
   HIP_CHECK(hipDeviceSynchronize());
   std::vector<float> O_int8((size_t)B * H * D);
   {
@@ -275,7 +278,7 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
   HIP_CHECK((hipError_t)hip_gqa_flash_decode(
       nullptr, dQ, dKh, dVh, dO16, dPart, B, H, G, D, c.total, max_seq,
       MAX_SPLITS, scale, dSeq, 0, nullptr, 0, HIP_KV_DTYPE_FP16, nullptr,
-      nullptr));
+      nullptr, nullptr, 1, 1, 0));
   HIP_CHECK(hipDeviceSynchronize());
 
   auto bench = [&](auto&& launch) -> double {
@@ -298,12 +301,12 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
   double ms_int8 = bench([&]() {
     hip_gqa_flash_decode(nullptr, dQ, dK8, dV8, dO8, dPart, B, H, G, D,
                             c.total, max_seq, MAX_SPLITS, scale, dSeq, 0,
-                            nullptr, 0, HIP_KV_DTYPE_INT8, dKsc, dVsc);
+                            nullptr, 0, HIP_KV_DTYPE_INT8, dKsc, dVsc, nullptr, 1, 1, 0);
   });
   double ms_fp16 = bench([&]() {
     hip_gqa_flash_decode(nullptr, dQ, dKh, dVh, dO16, dPart, B, H, G, D,
                             c.total, max_seq, MAX_SPLITS, scale, dSeq, 0,
-                            nullptr, 0, HIP_KV_DTYPE_FP16, nullptr, nullptr);
+                            nullptr, 0, HIP_KV_DTYPE_FP16, nullptr, nullptr, nullptr, 1, 1, 0);
   });
 
   Result r;
