@@ -4,6 +4,7 @@
  */
 
 #include "OnnxToHipUtils.h"
+#include "hip/Dialect/IR/HipShapeUtilsConvPool.h"
 
 #include "mlir/IR/BuiltinAttributes.h"
 
