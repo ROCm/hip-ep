@@ -71,22 +71,37 @@ namespace {
 ///
 /// After:
 ///   %cur       = tensor.dim %q, %c1        // current KV tokens (== query seq)
-///   %past      = tensor.dim %past_k, %c2   // valid past KV length (0 prefill)
-///   %tot       = arith.addi %past, %cur    // present seq = past + current
+///   %past      = tensor.dim %past_k, %c2   // past buffer EXTENT (see below)
+///   %tot       = tensor.dim %mask, %c3     // valid total KV, else %past + %cur
+///   %cap       = arith.maxsi %past, %tot   // present buffer capacity
 ///   %seqlens_k = tensor.from_elements (%tot - 1)  : tensor<1xi32>
-///   %total_seq = tensor.from_elements %tot        : tensor<i32>
-///   %pk_init   = tensor.empty(%B, %tot)    // present sized to %tot, NOT %past
+///   %total_seq = tensor.from_elements %cap        : tensor<i32>
+///   %pk_init   = tensor.empty(%B, %cap)    // present sized to capacity
 ///   %y, %pk, %pv = hip.gqa(%ctx)
 ///       ins(%q, %k, %v, %past_k, %past_v, %seqlens_k, %total_seq, %mask)
 ///       outs(%y_init, %pk_init, %pv_init)
 ///       {num_heads = 16, kv_num_heads = 8, scale = 1.0, no_causal = true}
 ///
-/// present KV is concat(past, current) along the seq axis, so its seq extent is
-/// past_seq + current_seq.  A fresh prefill arrives with an EMPTY past
-/// (past_seq == 0): sizing present from dim(past_key, 2) alone would collapse
-/// it to a zero-length buffer, the output allocator would then hand the runtime
-/// a null present_key/present_value, and wrap_group_query_attention would
-/// reject the call and leave the attention output zero-filled.
+/// Buffer capacity vs valid length. These coincide only when the caller
+/// allocates a fresh, exactly-sized present every step, and separating them is
+/// what lets this op reach the in-place append path:
+///
+///   - Valid total KV length drives seqlens_k, and comes from the mask's kv
+///     extent when a mask is present. dim(past_key, 2) cannot serve here: under
+///     a shared past/present buffer it is the max_length capacity, so past +
+///     current would overshoot the real length and attend to stale cache.
+///   - Capacity drives the present DPS init, and is max(past extent, total).
+///     Requesting exactly the bound buffer's shape is what makes ORT's
+///     GetOutput return the pre-bound OrtValue instead of allocating a fresh
+///     one, so past_key == present_key and update_kv_cache takes the cheap
+///     append branch rather than re-materialising the whole cache every step.
+///
+/// The max() also preserves the property the previous past + current form was
+/// protecting: a fresh prefill arrives with an EMPTY past (past_seq == 0), and
+/// sizing present from dim(past_key, 2) alone would collapse it to a
+/// zero-length buffer, after which the output allocator hands the runtime a
+/// null present_key/present_value and wrap_group_query_attention rejects the
+/// call, leaving the attention output zero-filled.
 struct OnnxAttentionToHip : public mlir::RewritePattern {
   OnnxAttentionToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Attention", /*benefit=*/1, ctx) {}
@@ -339,8 +354,36 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
       pastKey
           ? mlir::tensor::DimOp::create(rewriter, loc, pastKey, 2).getResult()
           : mlir::arith::ConstantIndexOp::create(rewriter, loc, 0).getResult();
+
+  // Valid total KV length. dim(past_key, 2) is the past buffer's EXTENT, which
+  // equals the valid past length only when the caller grows a fresh present
+  // every step. Under a shared past/present buffer it is the max_length
+  // capacity, so past + current would overshoot. The additive mask carries the
+  // true length: its kv extent is the total past+current KV length (see the
+  // mask-extent contract above), so prefer it whenever a mask is present.
+  mlir::Value maskKvIdx;
+  if (attnMask) {
+    auto maskType = mlir::dyn_cast<mlir::RankedTensorType>(attnMask.getType());
+    if (maskType && maskType.getRank() >= 2)
+      maskKvIdx = mlir::tensor::DimOp::create(rewriter, loc, attnMask,
+                                              maskType.getRank() - 1)
+                      .getResult();
+  }
   mlir::Value totalKvIdx =
-      mlir::arith::AddIOp::create(rewriter, loc, pastSeqIdx, curSeqIdx)
+      maskKvIdx ? maskKvIdx
+                : mlir::arith::AddIOp::create(rewriter, loc, pastSeqIdx,
+                                              curSeqIdx)
+                      .getResult();
+
+  // present buffer capacity, which is NOT the same as the valid length above.
+  // Taking the max keeps both callers correct: with a separately allocated
+  // present it collapses to past + current (the past extent is the valid past
+  // length, which is smaller), while with a shared buffer it yields the
+  // max_length capacity so the requested output shape matches the buffer ORT
+  // already bound -- which is what makes past_key == present_key, and hence the
+  // in-place append path, reachable at all.
+  mlir::Value presentCapIdx =
+      mlir::arith::MaxSIOp::create(rewriter, loc, pastSeqIdx, totalKvIdx)
           .getResult();
 
   // seqlens_k[b] = total_seq - 1 (ORT GQA convention total_seq = seqlens_k + 1;
@@ -440,7 +483,7 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
     totalSeqLen = mlir::arith::ConstantOp::create(rewriter, loc, attr);
   } else {
     mlir::Value totalKvI32 =
-        mlir::arith::IndexCastOp::create(rewriter, loc, i32Ty, totalKvIdx);
+        mlir::arith::IndexCastOp::create(rewriter, loc, i32Ty, presentCapIdx);
     totalSeqLen = mlir::tensor::FromElementsOp::create(
         rewriter, loc, totalSeqLenType, mlir::ValueRange{totalKvI32});
   }
@@ -455,7 +498,7 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
       if (!t.isDynamicDim(dimIdx))
         continue;
       if (dimIdx == 2)
-        dynSizes.push_back(totalKvIdx);
+        dynSizes.push_back(presentCapIdx);
       else if (dimIdx == 0)
         dynSizes.push_back(
             mlir::tensor::DimOp::create(rewriter, loc, query, 0).getResult());

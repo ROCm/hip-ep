@@ -9,9 +9,15 @@
 //   - is_causal=1 WITH an external attn_mask -> no_causal=false AND the mask
 //     threaded as attention_bias (runtime adds the mask, then the built-in
 //     causal triangle applies on top -- both, mirroring the ONNX reference)
-//   - present KV seq extent = past_seq + current_seq (concat semantics),
-//     and seqlens_k = total_seq - 1 (ORT convention total_seq = seqlens_k + 1)
-//   - present_key/value DPS inits sized to the past+current total
+//   - valid total KV length taken from the mask's kv extent when a mask is
+//     present (dim(past_key, 2) is the past buffer EXTENT, which equals the
+//     valid past length only when present is freshly allocated each step), and
+//     seqlens_k = total_seq - 1 (ORT convention total_seq = seqlens_k + 1)
+//   - present_key/value DPS inits sized to CAPACITY = max(past extent, total),
+//     which collapses to past+current for a separately allocated present and
+//     yields the max_length capacity under past_present_share_buffer -- the
+//     latter is what makes past_key == present_key, and hence the in-place
+//     append path, reachable
 //
 // Cases: a static-shape decode (16 query heads, 8 KV heads), a dynamic-shape
 // prefill with an EMPTY past (the case that previously sized present from
@@ -55,9 +61,9 @@ module {
         -> (tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
             tensor<1x8x128x128xf16>)
 
-    // present KV seq = past_seq (127) + current_seq (1); seqlens_k = total - 1.
-    // CHECK: tensor.dim %{{.*}}, %c2
-    // CHECK: arith.addi
+    // Total KV (128) comes from the mask's kv extent; seqlens_k = total - 1.
+    // present is statically 128 here, so the capacity max() folds away.
+    // CHECK: tensor.dim %{{.*}}, %c3
     // CHECK: arith.subi
     // CHECK: tensor.from_elements %{{.*}} : tensor<1xi32>
     // CHECK: tensor.empty() : tensor<1x1x2048xf16>
@@ -108,14 +114,16 @@ module {
         -> (tensor<?x?x4096xf16>, tensor<?x8x?x256xf16>,
             tensor<?x8x?x256xf16>)
 
-    // present seq extent = past + current, materialised as arith.addi and fed
-    // into the present tensor.empty (dynamic seq dim), NOT dim(past_key, 2).
-    // CHECK: %[[CUR:.*]] = tensor.dim %{{.*}}, %c1
+    // Valid total KV comes from the mask kv extent and drives seqlens_k, while
+    // the present tensor.empty is sized to max(past extent, total). The two
+    // differ only under a shared past/present buffer; here past is the valid
+    // past length, so the max() picks the mask total.
     // CHECK: %[[PAST:.*]] = tensor.dim %{{.*}}, %c2
-    // CHECK: %[[TOT:.*]] = arith.addi %[[PAST]], %[[CUR]]
-    // CHECK: arith.subi %[[TOT]], %{{.*}}
+    // CHECK: %[[MASKKV:.*]] = tensor.dim %{{.*}}, %c3
+    // CHECK: %[[CAP:.*]] = arith.maxsi %[[PAST]], %[[MASKKV]]
+    // CHECK: arith.subi %[[MASKKV]], %{{.*}}
     // CHECK: tensor.from_elements %{{.*}} : tensor<1xi32>
-    // CHECK: tensor.empty(%{{.*}}, %[[TOT]]) : tensor<?x8x?x256xf16>
+    // CHECK: tensor.empty(%{{.*}}, %[[CAP]]) : tensor<?x8x?x256xf16>
     // CHECK: hip.gqa(%[[CTX2]])
     // CHECK-SAME: no_causal = true
     // CHECK-NOT: onnx.Attention
@@ -161,13 +169,14 @@ module {
         -> (tensor<?x?x2048xf16>, tensor<?x1x?x256xf16>,
             tensor<?x1x?x256xf16>)
 
-    // present seq extent = past + current; mask threaded as attention_bias (8
-    // hip.gqa ins: q, k, v, past_k, past_v, seqlens_k, total_seq, mask).
-    // CHECK: %[[CURG:.*]] = tensor.dim %{{.*}}, %c1
+    // present sized to max(past extent, mask total); mask threaded as
+    // attention_bias (8 hip.gqa ins: q, k, v, past_k, past_v, seqlens_k,
+    // total_seq, mask).
     // CHECK: %[[PASTG:.*]] = tensor.dim %{{.*}}, %c2
-    // CHECK: %[[TOTG:.*]] = arith.addi %[[PASTG]], %[[CURG]]
+    // CHECK: %[[MASKKVG:.*]] = tensor.dim %{{.*}}, %c3
+    // CHECK: %[[CAPG:.*]] = arith.maxsi %[[PASTG]], %[[MASKKVG]]
     // CHECK: tensor.from_elements %{{.*}} : tensor<1xi32>
-    // CHECK: tensor.empty(%{{.*}}, %[[TOTG]]) : tensor<?x1x?x256xf16>
+    // CHECK: tensor.empty(%{{.*}}, %[[CAPG]]) : tensor<?x1x?x256xf16>
     // CHECK: hip.gqa(%[[CTXG]])
     // Mask is threaded as the final hip.gqa input (attention_bias).
     // CHECK-SAME: ins({{.*}}tensor<?x1x?x?xf16>) outs
