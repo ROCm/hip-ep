@@ -48,7 +48,16 @@ initializer bytes for persistent artifacts, canonical symbolic metadata, and
 the resolved compiler contract. Process-local initializer addresses are
 normalized out of graph identity. Prebuilt artifacts without finalized
 initializer identity are ignored, and restored cache metadata must match the
-already-finalized key.
+already-finalized key. A prebuilt mismatch is a cache miss and triggers fresh
+compilation; an EPContext mismatch is reported to ORT because its source graph
+is unavailable for recompilation.
+
+External initializer paths are resolved against the model directory and
+lexically normalized without resolving symlinks. For persistent artifacts, the
+compiler verifies initializer bytes immediately before and after consuming the
+compiler graph and rejects a mutation. This closes the hash-to-compile window;
+it does not make later changes to a streaming source file safe after
+compilation.
 
 ## DPS shape contract
 

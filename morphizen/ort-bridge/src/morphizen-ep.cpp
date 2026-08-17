@@ -384,6 +384,10 @@ MorphiZenEP::GetCapability(OrtGraphWrapper &graph_viewer,
           },
           &logger_));
 
+  if (status != nullptr) {
+    execution_providers_.reset();
+    return status;
+  }
   if (!execution_providers_) {
     MY_LOG(1) << "Failed to compile ONNX model to MorphiZen EP.";
     return nullptr;

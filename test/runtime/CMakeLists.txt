@@ -124,3 +124,11 @@ target_link_libraries(test-symbolic-dims-mlir PRIVATE
 )
 add_test(NAME SymbolicDimsMLIRUnitTest COMMAND test-symbolic-dims-mlir)
 set_target_properties(test-symbolic-dims-mlir PROPERTIES FOLDER "runtime-tests")
+
+add_executable(test-cache-identity test_cache_identity.cpp)
+target_compile_features(test-cache-identity PRIVATE cxx_std_17)
+target_link_libraries(test-cache-identity PRIVATE
+    morphizen-core-static
+)
+add_test(NAME CacheIdentityUnitTest COMMAND test-cache-identity)
+set_target_properties(test-cache-identity PROPERTIES FOLDER "runtime-tests")
