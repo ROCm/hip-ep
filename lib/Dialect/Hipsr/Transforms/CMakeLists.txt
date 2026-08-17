@@ -4,6 +4,7 @@
 ##
 
 add_library(HipsrDialectTransforms STATIC
+  AddContextArgPass.cpp
   BufferizableOpInterfaceImpl.cpp
   ExternalizeConstants.cpp
   HipsrPoolAllocPass.cpp
