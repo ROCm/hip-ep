@@ -42,10 +42,21 @@ struct Scenario {
   bool runNested = false;
   RuntimeState *state = nullptr;
   std::vector<std::vector<void *>> allocations;
+  void *nestedAllocation = nullptr;
 };
 
 thread_local Scenario *activeScenario = nullptr;
 thread_local int specialIteration = 0;
+
+struct ConcurrentScenario {
+  RuntimeState *state;
+  int64_t extent;
+  std::atomic<int> *ready;
+  std::atomic<bool> *release;
+  void *allocation = nullptr;
+};
+
+thread_local ConcurrentScenario *activeConcurrentScenario = nullptr;
 
 extern "C" void hipdnn_ep_test_fail_next_loop_sync();
 extern "C" void hipdnn_ep_test_fail_next_loop_alloc();
@@ -96,6 +107,8 @@ int body(RuntimeState *state, HipdnnEpLoopFrame *frame, void *, void *cond,
     activeScenario = saved;
     CHECK(rc == 0);
     CHECK(static_cast<Rank1Desc *>(final[0])->sizes[0] == 3);
+    if (!nested.allocations.empty() && !nested.allocations[0].empty())
+      scenario.nestedAllocation = nested.allocations[0][0];
   }
 
   // Dynamic-loop tests stop after the second successful body.
@@ -104,15 +117,56 @@ int body(RuntimeState *state, HipdnnEpLoopFrame *frame, void *, void *cond,
   return 0;
 }
 
+int concurrentBody(RuntimeState *, HipdnnEpLoopFrame *frame, void *, void *,
+                   void **current, void **, void **next) {
+  ConcurrentScenario &scenario = *activeConcurrentScenario;
+  auto *in = static_cast<Rank1Desc *>(current[0]);
+  CHECK(hipdnn_ep_loop_frame_set_current(frame, 0, in->aligned) == 0);
+  scenario.allocation =
+      hipdnn_ep_loop_frame_alloc(frame, 0, &scenario.extent, 1, sizeof(float));
+  auto *out = static_cast<Rank1Desc *>(next[0]);
+  *out = {scenario.allocation, scenario.allocation, 0, {scenario.extent}, {1}};
+  CHECK(hipdnn_ep_loop_frame_publish(frame, 0, scenario.allocation) == 0);
+  ++*scenario.ready;
+  while (!scenario.release->load())
+    std::this_thread::yield();
+  return hipdnn_ep_loop_frame_status(frame);
+}
+
 RuntimeState makeState() {
   RuntimeState state{};
   CHECK(hipdnn_ep_loop_state_init(&state) == 0);
   return state;
 }
 
-void cleanup(RuntimeState &state) {
-  hipdnn_ep_loop_cleanup_quarantined_frames(&state);
-  hipdnn_ep_loop_state_cleanup(&state);
+void cleanup(RuntimeState &state) { hipdnn_ep_loop_state_cleanup(&state); }
+
+HipdnnEpLoopBankStats getStats(RuntimeState &state) {
+  HipdnnEpLoopBankStats stats{};
+  hipdnn_ep_test_get_loop_bank_stats(&state, &stats);
+  return stats;
+}
+
+std::vector<void *> runCarrierFrame(RuntimeState &state,
+                                    const std::vector<int64_t> &extents) {
+  Rank1Desc seed{nullptr, nullptr, 0, {0}, {1}};
+  Rank1Desc scratchA{}, scratchB{};
+  void *initial[] = {&seed};
+  void *nextA[] = {&scratchA};
+  void *nextB[] = {&scratchB};
+  void **final = nullptr;
+  HipdnnEpLoopFrame *frame = nullptr;
+  Scenario scenario{{extents}, 0, -1, false, &state};
+  activeScenario = &scenario;
+  CHECK(hipdnn_ep_run_counted_loop(
+            &state, body, static_cast<int64_t>(extents.size()), true, 1, 0,
+            initial, nextA, nextB, nullptr, nullptr, &final, &frame) == 0);
+  CHECK(frame != nullptr);
+  if (frame)
+    CHECK(hipdnn_ep_loop_frame_destroy(&state, frame) == 0);
+  if (scenario.allocations.empty())
+    return {};
+  return scenario.allocations[0];
 }
 
 void testZeroTripAliasesSeed() {
@@ -134,6 +188,58 @@ void testZeroTripAliasesSeed() {
   CHECK(final[0] == &seed);
   CHECK(frame == nullptr);
   cleanup(state);
+}
+
+void testZeroSizeDoesNotCheckoutBank() {
+  RuntimeState state = makeState();
+  std::vector<void *> allocations = runCarrierFrame(state, {0});
+  CHECK(allocations.size() == 1);
+  if (allocations.size() == 1)
+    CHECK(allocations[0] == nullptr);
+  HipdnnEpLoopBankStats stats = getStats(state);
+  CHECK(stats.hits == 0);
+  CHECK(stats.misses == 0);
+  CHECK(stats.allocations == 0);
+  CHECK(stats.active_bytes == 0);
+  CHECK(stats.cached_bytes == 0);
+  cleanup(state);
+}
+
+void testSequentialGrowingFramesReuseTwoBlocks() {
+  RuntimeState state = makeState();
+  std::vector<void *> first = runCarrierFrame(state, {4, 16, 8, 32});
+  CHECK(first.size() == 4);
+  if (first.size() == 4) {
+    CHECK(first[0] != first[2]);
+    CHECK(first[1] != first[3]);
+    CHECK(first[2] != first[3]);
+  }
+  for (int frame = 1; frame < 27; ++frame) {
+    std::vector<void *> current = runCarrierFrame(state, {4, 16, 8, 32});
+    CHECK(current.size() == 4);
+    if (current.size() == 4 && first.size() == 4) {
+      CHECK(current[0] == first[2]);
+      CHECK(current[1] == first[3]);
+      CHECK(current[2] == first[2]);
+      CHECK(current[3] == first[3]);
+    }
+  }
+  HipdnnEpLoopBankStats stats = getStats(state);
+  CHECK(stats.hits == 52);
+  CHECK(stats.misses == 4);
+  CHECK(stats.allocations == 4);
+  CHECK(stats.frees == 2);
+  CHECK(stats.active_bytes == 0);
+  CHECK(stats.cached_bytes == 160);
+  CHECK(stats.peak_bytes == 160);
+  cleanup(state);
+
+  HipdnnEpLoopBankStats cleaned{};
+  hipdnn_ep_test_get_last_cleaned_loop_bank_stats(&cleaned);
+  CHECK(cleaned.allocations == 4);
+  CHECK(cleaned.frees == 4);
+  CHECK(cleaned.active_bytes == 0);
+  CHECK(cleaned.cached_bytes == 0);
 }
 
 void testGrowShrinkRegrowAndMultipleCarriers() {
@@ -274,6 +380,24 @@ int allocationFailureAfterEvolution(RuntimeState *, HipdnnEpLoopFrame *frame,
   return 0;
 }
 
+thread_local int growthSyncDispatches = 0;
+int growthSyncFailure(RuntimeState *, HipdnnEpLoopFrame *frame, void *, void *,
+                      void **current, void **, void **next) {
+  auto *in = static_cast<Rank1Desc *>(current[0]);
+  CHECK(hipdnn_ep_loop_frame_set_current(frame, 0, in->aligned) == 0);
+  const int64_t extents[] = {2, 3, 9};
+  int64_t extent = extents[growthSyncDispatches];
+  if (growthSyncDispatches == 2)
+    hipdnn_ep_test_fail_next_loop_sync();
+  void *data = hipdnn_ep_loop_frame_alloc(frame, 0, &extent, 1, sizeof(float));
+  if (hipdnn_ep_loop_frame_status(frame) != 0)
+    return hipdnn_ep_loop_frame_status(frame);
+  ++growthSyncDispatches;
+  *static_cast<Rank1Desc *>(next[0]) = {data, data, 0, {extent}, {1}};
+  CHECK(hipdnn_ep_loop_frame_publish(frame, 0, data) == 0);
+  return 0;
+}
+
 void testAllocationOverflow() {
   RuntimeState state = makeState();
   Rank1Desc seed{nullptr, nullptr, 0, {0}, {1}};
@@ -302,27 +426,42 @@ void testNestedAndConcurrentFrames() {
   CHECK(hipdnn_ep_run_counted_loop(&state, body, 1, true, 1, 0, initial, next,
                                    next, nullptr, nullptr, &final,
                                    &frame) == 0);
+  CHECK(!outer.allocations.empty());
+  CHECK(outer.nestedAllocation != nullptr);
+  if (!outer.allocations.empty() && !outer.allocations[0].empty())
+    CHECK(outer.allocations[0][0] != outer.nestedAllocation);
 
-  auto run = [&state](int64_t extent) {
+  std::atomic<int> ready{0};
+  std::atomic<bool> release{false};
+  void *concurrentAllocations[2] = {};
+  auto run = [&state, &ready, &release,
+              &concurrentAllocations](int index, int64_t extent) {
     Rank1Desc localSeed{nullptr, nullptr, 0, {0}, {1}};
     Rank1Desc localScratch{};
     void *localInitial[] = {&localSeed};
     void *localNext[] = {&localScratch};
     void **localFinal = nullptr;
     HipdnnEpLoopFrame *localFrame = nullptr;
-    Scenario scenario{{{extent}}, 0, -1, false, &state};
-    activeScenario = &scenario;
+    ConcurrentScenario scenario{&state, extent, &ready, &release};
+    activeConcurrentScenario = &scenario;
     int rc = hipdnn_ep_run_counted_loop(
-        &state, body, 1, true, 1, 0, localInitial, localNext, localNext,
-        nullptr, nullptr, &localFinal, &localFrame);
+        &state, concurrentBody, 1, true, 1, 0, localInitial, localNext,
+        localNext, nullptr, nullptr, &localFinal, &localFrame);
     CHECK(rc == 0);
     CHECK(static_cast<Rank1Desc *>(localFinal[0])->sizes[0] == extent);
+    concurrentAllocations[index] = scenario.allocation;
     CHECK(hipdnn_ep_loop_frame_destroy(&state, localFrame) == 0);
   };
-  std::thread first(run, 11);
-  std::thread second(run, 13);
+  std::thread first(run, 0, 11);
+  std::thread second(run, 1, 13);
+  while (ready.load() != 2)
+    std::this_thread::yield();
+  release = true;
   first.join();
   second.join();
+  CHECK(concurrentAllocations[0] != nullptr);
+  CHECK(concurrentAllocations[1] != nullptr);
+  CHECK(concurrentAllocations[0] != concurrentAllocations[1]);
   CHECK(hipdnn_ep_loop_frame_destroy(&state, frame) == 0);
   cleanup(state);
 }
@@ -384,8 +523,19 @@ void testEarlyExitAndSyncFailureCleanup() {
   hipdnn_ep_test_fail_next_loop_sync();
   CHECK(hipdnn_ep_loop_frame_destroy(&state, frame) != 0);
   CHECK(recordedErrors.load() > 0);
-  // The failed destroy quarantines only this frame. State cleanup retries a
-  // successful sync and releases it without touching any active invocation.
+  HipdnnEpLoopBankStats quarantined = getStats(state);
+  CHECK(quarantined.active_bytes == 28);
+  CHECK(quarantined.cached_bytes == 0);
+  CHECK(quarantined.quarantined_bytes == 28);
+  // The failed destroy quarantines only this frame. A later successful graph
+  // sync proves its banks safe to recycle without touching active invocations.
+  CHECK(hipStreamSynchronize(static_cast<hipStream_t>(state.stream)) ==
+        hipSuccess);
+  hipdnn_ep_loop_cleanup_quarantined_frames(&state);
+  HipdnnEpLoopBankStats recycled = getStats(state);
+  CHECK(recycled.active_bytes == 0);
+  CHECK(recycled.cached_bytes == 28);
+  CHECK(recycled.quarantined_bytes == 0);
   cleanup(state);
 }
 
@@ -405,7 +555,48 @@ void testInjectedAllocationFailureAfterEvolution() {
   CHECK(allocationDispatches == 1);
   CHECK(final == initial);
   CHECK(frame == nullptr);
+  HipdnnEpLoopBankStats stats = getStats(state);
+  CHECK(stats.misses == 2);
+  CHECK(stats.allocations == 1);
+  CHECK(stats.active_bytes == 0);
+  CHECK(stats.cached_bytes == 8);
   cleanup(state);
+}
+
+void testGrowthSyncFailureQuarantinesBanks() {
+  RuntimeState state = makeState();
+  Rank1Desc seed{nullptr, nullptr, 0, {0}, {1}};
+  Rank1Desc scratchA{}, scratchB{};
+  void *initial[] = {&seed};
+  void *nextA[] = {&scratchA};
+  void *nextB[] = {&scratchB};
+  void **final = nullptr;
+  HipdnnEpLoopFrame *frame = nullptr;
+  growthSyncDispatches = 0;
+  CHECK(hipdnn_ep_run_counted_loop(&state, growthSyncFailure, 3, true, 1, 0,
+                                   initial, nextA, nextB, nullptr, nullptr,
+                                   &final, &frame) != 0);
+  CHECK(growthSyncDispatches == 2);
+  CHECK(final == initial);
+  CHECK(frame == nullptr);
+  HipdnnEpLoopBankStats quarantined = getStats(state);
+  CHECK(quarantined.allocations == 2);
+  CHECK(quarantined.active_bytes == 20);
+  CHECK(quarantined.cached_bytes == 0);
+  CHECK(quarantined.quarantined_bytes == 20);
+
+  CHECK(hipStreamSynchronize(static_cast<hipStream_t>(state.stream)) ==
+        hipSuccess);
+  hipdnn_ep_loop_cleanup_quarantined_frames(&state);
+  HipdnnEpLoopBankStats recycled = getStats(state);
+  CHECK(recycled.active_bytes == 0);
+  CHECK(recycled.cached_bytes == 20);
+  CHECK(recycled.quarantined_bytes == 0);
+  cleanup(state);
+  HipdnnEpLoopBankStats cleaned{};
+  hipdnn_ep_test_get_last_cleaned_loop_bank_stats(&cleaned);
+  CHECK(cleaned.allocations == 2);
+  CHECK(cleaned.frees == 2);
 }
 
 } // namespace
@@ -417,6 +608,8 @@ extern "C" int hipdnn_ep_state_set_error_flag(RuntimeState *) {
 
 int main() {
   testZeroTripAliasesSeed();
+  testZeroSizeDoesNotCheckoutBank();
+  testSequentialGrowingFramesReuseTwoBlocks();
   testGrowShrinkRegrowAndMultipleCarriers();
   testZeroSizePublicationAndBankReuse();
   testFailureIsTransactional();
@@ -425,6 +618,7 @@ int main() {
   testPassThroughThenAllocateAndAtomicFailure();
   testEarlyExitAndSyncFailureCleanup();
   testInjectedAllocationFailureAfterEvolution();
+  testGrowthSyncFailureQuarantinesBanks();
   if (failures == 0) {
     std::printf("loop frame unit test: ALL PASS\n");
     return 0;

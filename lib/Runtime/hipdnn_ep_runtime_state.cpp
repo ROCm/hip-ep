@@ -184,6 +184,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->seqlens_k_cached_valid = false;
   state->seqlens_k_cached_val = 0;
   state->seqlens_k_cached_ptr = nullptr;
+  state->loop_bank_cache = nullptr;
   state->quarantined_loop_frames = nullptr;
   state->loop_frames_mutex = nullptr;
   state->op_states = nullptr;

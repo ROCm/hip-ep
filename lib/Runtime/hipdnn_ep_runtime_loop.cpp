@@ -60,12 +60,18 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <new>
 #include <utility>
+
+struct HipdnnEpLoopBankBlock {
+  void *data;
+  size_t capacity;
+  HipdnnEpLoopBankBlock *next;
+};
 
 struct HipdnnEpLoopFrame {
   struct CarrierBanks {
-    void *data[2];
-    size_t capacity[2];
+    HipdnnEpLoopBankBlock *bank[2];
     const void *current_data;
     int current_bank;
     int allocated_bank;
@@ -87,13 +93,32 @@ struct HipdnnEpLoopFrame {
   HipdnnEpLoopFrame *first_child;
   HipdnnEpLoopFrame *next_sibling;
   HipdnnEpLoopFrame *quarantine_next;
+  size_t quarantined_bytes;
+  const char *quarantine_reason;
 };
 
 namespace {
 
+struct LoopBankCache {
+  HipdnnEpLoopBankBlock *available = nullptr;
+  uint64_t hits = 0;
+  uint64_t misses = 0;
+  uint64_t allocations = 0;
+  uint64_t frees = 0;
+  size_t active_blocks = 0;
+  size_t peak_active_blocks = 0;
+  size_t total_blocks = 0;
+  size_t active_bytes = 0;
+  size_t cached_bytes = 0;
+  size_t peak_bytes = 0;
+  size_t quarantined_bytes = 0;
+  bool trace = false;
+};
+
 #ifdef HIPDNN_EP_RUNTIME_TESTING
 bool failNextLoopSync = false;
 bool failNextLoopAlloc = false;
+HipdnnEpLoopBankStats lastCleanedLoopBankStats{};
 #endif
 
 hipError_t synchronizeLoopStream(hipStream_t stream) {
@@ -110,7 +135,40 @@ std::mutex *getFrameMutex(RuntimeState *state) {
   return static_cast<std::mutex *>(state ? state->loop_frames_mutex : nullptr);
 }
 
-void destroyFrame(HipdnnEpLoopFrame *frame) {
+LoopBankCache *getBankCache(RuntimeState *state) {
+  return static_cast<LoopBankCache *>(state ? state->loop_bank_cache : nullptr);
+}
+
+void traceCacheLocked(const LoopBankCache &cache, const char *event,
+                      const char *reason, size_t bytes) {
+  if (!cache.trace)
+    return;
+  std::fprintf(
+      stderr,
+      "[HIPDNN_EP_LOOP_BANK_TRACE] event=%s reason=%s bytes=%zu hits=%llu "
+      "misses=%llu allocations=%llu frees=%llu active_blocks=%zu "
+      "cached_blocks=%zu active_bytes=%zu cached_bytes=%zu peak_bytes=%zu "
+      "quarantined_bytes=%zu\n",
+      event, reason ? reason : "none", bytes,
+      static_cast<unsigned long long>(cache.hits),
+      static_cast<unsigned long long>(cache.misses),
+      static_cast<unsigned long long>(cache.allocations),
+      static_cast<unsigned long long>(cache.frees), cache.active_blocks,
+      cache.total_blocks - cache.active_blocks, cache.active_bytes,
+      cache.cached_bytes, cache.peak_bytes, cache.quarantined_bytes);
+}
+
+void traceCache(RuntimeState *state, const char *event, const char *reason,
+                size_t bytes) {
+  std::mutex *mutex = getFrameMutex(state);
+  LoopBankCache *cache = getBankCache(state);
+  if (!mutex || !cache)
+    return;
+  std::lock_guard<std::mutex> lock(*mutex);
+  traceCacheLocked(*cache, event, reason, bytes);
+}
+
+void destroyFrameMetadata(HipdnnEpLoopFrame *frame) {
   if (!frame)
     return;
   if (frame->event)
@@ -121,20 +179,151 @@ void destroyFrame(HipdnnEpLoopFrame *frame) {
     hipFree(frame->iter_dev);
   if (frame->cond_host)
     hipHostFree(frame->cond_host);
-  if (frame->carriers) {
-    for (int32_t i = 0; i < frame->num_carriers; ++i)
-      for (int bank = 0; bank < 2; ++bank)
-        if (frame->carriers[i].data[bank])
-          hipFree(frame->carriers[i].data[bank]);
+  if (frame->carriers)
     std::free(frame->carriers);
-  }
   while (frame->first_child) {
     HipdnnEpLoopFrame *child = frame->first_child;
     frame->first_child = child->next_sibling;
     child->parent = nullptr;
-    destroyFrame(child);
+    destroyFrameMetadata(child);
   }
   std::free(frame);
+}
+
+size_t frameBankBytes(const HipdnnEpLoopFrame *frame) {
+  if (!frame)
+    return 0;
+  size_t bytes = 0;
+  for (int32_t i = 0; i < frame->num_carriers; ++i)
+    for (int bank = 0; bank < 2; ++bank)
+      if (frame->carriers[i].bank[bank])
+        bytes += frame->carriers[i].bank[bank]->capacity;
+  for (HipdnnEpLoopFrame *child = frame->first_child; child;
+       child = child->next_sibling)
+    bytes += frameBankBytes(child);
+  return bytes;
+}
+
+void trimCacheLocked(LoopBankCache &cache) {
+  while (cache.total_blocks > cache.peak_active_blocks && cache.available) {
+    HipdnnEpLoopBankBlock **smallestLink = &cache.available;
+    for (HipdnnEpLoopBankBlock **link = &cache.available; *link;
+         link = &(*link)->next)
+      if ((*link)->capacity < (*smallestLink)->capacity)
+        smallestLink = link;
+    HipdnnEpLoopBankBlock *block = *smallestLink;
+    if (hipFree(block->data) != hipSuccess) {
+      traceCacheLocked(cache, "free", "high-water-trim-failure",
+                       block->capacity);
+      return;
+    }
+    *smallestLink = block->next;
+    cache.cached_bytes -= block->capacity;
+    --cache.total_blocks;
+    ++cache.frees;
+    traceCacheLocked(cache, "free", "high-water-trim", block->capacity);
+    std::free(block);
+  }
+}
+
+HipdnnEpLoopBankBlock *checkoutBank(RuntimeState *state, size_t bytes) {
+  std::mutex *mutex = getFrameMutex(state);
+  LoopBankCache *cache = getBankCache(state);
+  if (!mutex || !cache)
+    return nullptr;
+  std::lock_guard<std::mutex> lock(*mutex);
+
+  HipdnnEpLoopBankBlock **bestLink = nullptr;
+  for (HipdnnEpLoopBankBlock **link = &cache->available; *link;
+       link = &(*link)->next) {
+    if ((*link)->capacity < bytes)
+      continue;
+    if (!bestLink || (*link)->capacity < (*bestLink)->capacity)
+      bestLink = link;
+  }
+  if (bestLink) {
+    HipdnnEpLoopBankBlock *block = *bestLink;
+    *bestLink = block->next;
+    block->next = nullptr;
+    ++cache->hits;
+    ++cache->active_blocks;
+    if (cache->active_blocks > cache->peak_active_blocks)
+      cache->peak_active_blocks = cache->active_blocks;
+    cache->cached_bytes -= block->capacity;
+    cache->active_bytes += block->capacity;
+    if (cache->active_bytes > cache->peak_bytes)
+      cache->peak_bytes = cache->active_bytes;
+    traceCacheLocked(*cache, "checkout", "best-fit-hit", block->capacity);
+    return block;
+  }
+
+  ++cache->misses;
+#ifdef HIPDNN_EP_RUNTIME_TESTING
+  if (failNextLoopAlloc) {
+    failNextLoopAlloc = false;
+    traceCacheLocked(*cache, "checkout", "allocation-injected-failure", bytes);
+    return nullptr;
+  }
+#endif
+  void *data = nullptr;
+  if (hipMalloc(&data, bytes) != hipSuccess) {
+    traceCacheLocked(*cache, "checkout", "allocation-failure", bytes);
+    return nullptr;
+  }
+  auto *block = static_cast<HipdnnEpLoopBankBlock *>(
+      std::calloc(1, sizeof(HipdnnEpLoopBankBlock)));
+  if (!block) {
+    ++cache->allocations;
+    if (hipFree(data) == hipSuccess)
+      ++cache->frees;
+    traceCacheLocked(*cache, "checkout", "metadata-allocation-failure", bytes);
+    return nullptr;
+  }
+  block->data = data;
+  block->capacity = bytes;
+  ++cache->allocations;
+  ++cache->active_blocks;
+  ++cache->total_blocks;
+  if (cache->active_blocks > cache->peak_active_blocks)
+    cache->peak_active_blocks = cache->active_blocks;
+  cache->active_bytes += bytes;
+  if (cache->active_bytes > cache->peak_bytes)
+    cache->peak_bytes = cache->active_bytes;
+  traceCacheLocked(*cache, "checkout", "cache-miss", bytes);
+  trimCacheLocked(*cache);
+  return block;
+}
+
+void recycleBank(RuntimeState *state, HipdnnEpLoopBankBlock *block,
+                 const char *reason) {
+  if (!block)
+    return;
+  std::mutex *mutex = getFrameMutex(state);
+  LoopBankCache *cache = getBankCache(state);
+  if (!mutex || !cache)
+    return;
+  std::lock_guard<std::mutex> lock(*mutex);
+  --cache->active_blocks;
+  cache->active_bytes -= block->capacity;
+  cache->cached_bytes += block->capacity;
+  block->next = cache->available;
+  cache->available = block;
+  traceCacheLocked(*cache, "recycle", reason, block->capacity);
+}
+
+void recycleFrameBanks(RuntimeState *state, HipdnnEpLoopFrame *frame,
+                       const char *reason) {
+  if (!frame)
+    return;
+  for (int32_t i = 0; i < frame->num_carriers; ++i) {
+    for (int bank = 0; bank < 2; ++bank) {
+      recycleBank(state, frame->carriers[i].bank[bank], reason);
+      frame->carriers[i].bank[bank] = nullptr;
+    }
+  }
+  for (HipdnnEpLoopFrame *child = frame->first_child; child;
+       child = child->next_sibling)
+    recycleFrameBanks(state, child, reason);
 }
 
 HipdnnEpLoopFrame *createFrame(RuntimeState *state, int32_t num_carriers,
@@ -150,7 +339,7 @@ HipdnnEpLoopFrame *createFrame(RuntimeState *state, int32_t num_carriers,
         std::calloc(static_cast<size_t>(num_carriers),
                     sizeof(HipdnnEpLoopFrame::CarrierBanks)));
     if (!frame->carriers) {
-      destroyFrame(frame);
+      destroyFrameMetadata(frame);
       return nullptr;
     }
     for (int32_t i = 0; i < num_carriers; ++i) {
@@ -164,7 +353,7 @@ HipdnnEpLoopFrame *createFrame(RuntimeState *state, int32_t num_carriers,
     if (count > std::numeric_limits<size_t>::max() / sizeof(int64_t) ||
         hipHostMalloc(&frame->iter_cpu_buf, count * sizeof(int64_t),
                       hipHostMallocDefault) != hipSuccess) {
-      destroyFrame(frame);
+      destroyFrameMetadata(frame);
       return nullptr;
     }
     auto *iters = static_cast<int64_t *>(frame->iter_cpu_buf);
@@ -176,28 +365,32 @@ HipdnnEpLoopFrame *createFrame(RuntimeState *state, int32_t num_carriers,
           hipSuccess ||
       hipHostGetDevicePointer(&frame->cond_dev, frame->cond_host, 0) !=
           hipSuccess) {
-    destroyFrame(frame);
+    destroyFrameMetadata(frame);
     return nullptr;
   }
   hipEvent_t event = nullptr;
   if (hipEventCreateWithFlags(&event, hipEventDisableTiming) != hipSuccess) {
-    destroyFrame(frame);
+    destroyFrameMetadata(frame);
     return nullptr;
   }
   frame->event = static_cast<void *>(event);
   return frame;
 }
 
-void quarantineFrame(RuntimeState *state, HipdnnEpLoopFrame *frame) {
+void quarantineFrame(RuntimeState *state, HipdnnEpLoopFrame *frame,
+                     const char *reason) {
   std::mutex *mutex = getFrameMutex(state);
-  if (!mutex) {
-    destroyFrame(frame);
+  LoopBankCache *cache = getBankCache(state);
+  if (!mutex || !cache)
     return;
-  }
   std::lock_guard<std::mutex> lock(*mutex);
+  frame->quarantined_bytes = frameBankBytes(frame);
+  frame->quarantine_reason = reason;
+  cache->quarantined_bytes += frame->quarantined_bytes;
   frame->quarantine_next =
       static_cast<HipdnnEpLoopFrame *>(state->quarantined_loop_frames);
   state->quarantined_loop_frames = frame;
+  traceCacheLocked(*cache, "quarantine", reason, frame->quarantined_bytes);
 }
 
 void unlinkFromParent(HipdnnEpLoopFrame *frame) {
@@ -361,10 +554,14 @@ int runLoopImpl(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
     // after complete success, so final_descs still names the prior set.
     (void)hipdnn_ep_state_set_error_flag(state);
     *final_descs = initial_descs;
-    if (synchronizeLoopStream(stream) == hipSuccess)
-      destroyFrame(frame);
-    else
-      quarantineFrame(state, frame);
+    if (frame->quarantine_reason) {
+      quarantineFrame(state, frame, frame->quarantine_reason);
+    } else if (synchronizeLoopStream(stream) == hipSuccess) {
+      recycleFrameBanks(state, frame, "failed-frame-drained");
+      destroyFrameMetadata(frame);
+    } else {
+      quarantineFrame(state, frame, "failed-frame-sync");
+    }
     return rc;
   }
   frame->parent = parent_frame;
@@ -384,6 +581,26 @@ extern "C" void hipdnn_ep_test_fail_next_loop_sync() {
 }
 extern "C" void hipdnn_ep_test_fail_next_loop_alloc() {
   failNextLoopAlloc = true;
+}
+extern "C" void
+hipdnn_ep_test_get_loop_bank_stats(RuntimeState *state,
+                                   HipdnnEpLoopBankStats *stats) {
+  if (!stats)
+    return;
+  *stats = {};
+  std::mutex *mutex = getFrameMutex(state);
+  LoopBankCache *cache = getBankCache(state);
+  if (!mutex || !cache)
+    return;
+  std::lock_guard<std::mutex> lock(*mutex);
+  *stats = {cache->hits,       cache->misses,           cache->allocations,
+            cache->frees,      cache->active_bytes,     cache->cached_bytes,
+            cache->peak_bytes, cache->quarantined_bytes};
+}
+extern "C" void
+hipdnn_ep_test_get_last_cleaned_loop_bank_stats(HipdnnEpLoopBankStats *stats) {
+  if (stats)
+    *stats = lastCleanedLoopBankStats;
 }
 #endif
 
@@ -444,32 +661,27 @@ extern "C" void *hipdnn_ep_loop_frame_alloc(HipdnnEpLoopFrame *frame,
     carrier.allocation_valid = true;
     return nullptr;
   }
-  if (bytes > carrier.capacity[bank]) {
-    if (carrier.data[bank]) {
+  HipdnnEpLoopBankBlock *block = carrier.bank[bank];
+  if (!block || bytes > block->capacity) {
+    if (block) {
       if (synchronizeLoopStream(
-              static_cast<hipStream_t>(frame->state->stream)) != hipSuccess ||
-          hipFree(carrier.data[bank]) != hipSuccess) {
+              static_cast<hipStream_t>(frame->state->stream)) != hipSuccess) {
+        frame->quarantine_reason = "growth-sync";
         frame->status = -1;
         return nullptr;
       }
-      carrier.data[bank] = nullptr;
-      carrier.capacity[bank] = 0;
+      recycleBank(frame->state, block, "growth");
+      carrier.bank[bank] = nullptr;
     }
-#ifdef HIPDNN_EP_RUNTIME_TESTING
-    if (failNextLoopAlloc) {
-      failNextLoopAlloc = false;
+    block = checkoutBank(frame->state, bytes);
+    if (!block) {
       frame->status = -1;
       return nullptr;
     }
-#endif
-    if (hipMalloc(&carrier.data[bank], bytes) != hipSuccess) {
-      frame->status = -1;
-      return nullptr;
-    }
-    carrier.capacity[bank] = bytes;
+    carrier.bank[bank] = block;
   }
   carrier.allocation_valid = true;
-  return carrier.data[bank];
+  return block->data;
 }
 
 extern "C" int hipdnn_ep_loop_frame_status(HipdnnEpLoopFrame *frame) {
@@ -496,9 +708,10 @@ extern "C" int hipdnn_ep_loop_frame_publish(HipdnnEpLoopFrame *frame,
     bool validZeroSize = carrier.allocation_valid &&
                          carrier.allocated_bytes == 0 &&
                          published_data == nullptr;
-    bool validAllocated =
-        carrier.allocation_valid && carrier.allocated_bytes > 0 &&
-        published_data != nullptr && published_data == carrier.data[bank];
+    bool validAllocated = carrier.allocation_valid &&
+                          carrier.allocated_bytes > 0 &&
+                          published_data != nullptr && carrier.bank[bank] &&
+                          published_data == carrier.bank[bank]->data;
     if (validZeroSize || validAllocated) {
       carrier.published_bank = bank;
       return 0;
@@ -523,18 +736,29 @@ extern "C" int hipdnn_ep_loop_frame_destroy(RuntimeState *state,
   unlinkFromParent(frame);
   if (synchronizeLoopStream(static_cast<hipStream_t>(state->stream)) !=
       hipSuccess) {
-    quarantineFrame(state, frame);
+    quarantineFrame(state, frame, "destroy-sync");
     (void)hipdnn_ep_state_set_error_flag(state);
     return -1;
   }
-  destroyFrame(frame);
+  recycleFrameBanks(state, frame, "frame-destroy");
+  destroyFrameMetadata(frame);
   return 0;
 }
 
 extern "C" int hipdnn_ep_loop_state_init(RuntimeState *state) {
   if (!state)
     return -1;
-  state->loop_frames_mutex = new std::mutex();
+  auto *mutex = new (std::nothrow) std::mutex();
+  auto *cache = new (std::nothrow) LoopBankCache();
+  if (!mutex || !cache) {
+    delete mutex;
+    delete cache;
+    return -1;
+  }
+  const char *trace = std::getenv("HIPDNN_EP_LOOP_BANK_TRACE");
+  cache->trace = trace && trace[0] != '\0' && std::strcmp(trace, "0") != 0;
+  state->loop_frames_mutex = mutex;
+  state->loop_bank_cache = cache;
   state->quarantined_loop_frames = nullptr;
   return 0;
 }
@@ -554,7 +778,15 @@ extern "C" void hipdnn_ep_loop_cleanup_quarantined_frames(RuntimeState *state) {
   }
   while (frames) {
     HipdnnEpLoopFrame *next = frames->quarantine_next;
-    destroyFrame(frames);
+    LoopBankCache *cache = getBankCache(state);
+    if (mutex && cache) {
+      std::lock_guard<std::mutex> lock(*mutex);
+      cache->quarantined_bytes -= frames->quarantined_bytes;
+      traceCacheLocked(*cache, "quarantine-cleanup", frames->quarantine_reason,
+                       frames->quarantined_bytes);
+    }
+    recycleFrameBanks(state, frames, "quarantine-drained");
+    destroyFrameMetadata(frames);
     frames = next;
   }
 }
@@ -562,9 +794,41 @@ extern "C" void hipdnn_ep_loop_cleanup_quarantined_frames(RuntimeState *state) {
 extern "C" void hipdnn_ep_loop_state_cleanup(RuntimeState *state) {
   if (!state)
     return;
-  if (synchronizeLoopStream(static_cast<hipStream_t>(state->stream)) ==
-      hipSuccess)
+  bool streamDrained =
+      synchronizeLoopStream(static_cast<hipStream_t>(state->stream)) ==
+      hipSuccess;
+  if (streamDrained)
     hipdnn_ep_loop_cleanup_quarantined_frames(state);
-  delete getFrameMutex(state);
+  else
+    traceCache(state, "state-cleanup", "sync-failure", 0);
+
+  std::mutex *mutex = getFrameMutex(state);
+  LoopBankCache *cache = getBankCache(state);
+  if (mutex && cache) {
+    std::lock_guard<std::mutex> lock(*mutex);
+    while (cache->available) {
+      HipdnnEpLoopBankBlock *block = cache->available;
+      cache->available = block->next;
+      cache->cached_bytes -= block->capacity;
+      --cache->total_blocks;
+      if (hipFree(block->data) == hipSuccess) {
+        ++cache->frees;
+        traceCacheLocked(*cache, "free", "state-teardown", block->capacity);
+      } else {
+        traceCacheLocked(*cache, "free", "state-teardown-failure",
+                         block->capacity);
+      }
+      std::free(block);
+    }
+#ifdef HIPDNN_EP_RUNTIME_TESTING
+    lastCleanedLoopBankStats = {cache->hits,         cache->misses,
+                                cache->allocations,  cache->frees,
+                                cache->active_bytes, cache->cached_bytes,
+                                cache->peak_bytes,   cache->quarantined_bytes};
+#endif
+  }
+  delete cache;
+  state->loop_bank_cache = nullptr;
+  delete mutex;
   state->loop_frames_mutex = nullptr;
 }
