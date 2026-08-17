@@ -11,9 +11,9 @@ def Hipsr_MulOp : Hipsr_DpsOp<"mul"> {
 
   let arguments = (ins
     Hipsr_ContextType:$ctx,
-    Hipsr_TensorOrDeviceMemRef:$lhs,
-    Hipsr_TensorOrDeviceMemRef:$rhs,
-    Hipsr_TensorOrDeviceMemRef:$init
+    Hipsr_DeviceTensorOrMemRef:$lhs,
+    Hipsr_DeviceTensorOrMemRef:$rhs,
+    Hipsr_DeviceTensorOrMemRef:$init
   );
 
   let assemblyFormat = [{

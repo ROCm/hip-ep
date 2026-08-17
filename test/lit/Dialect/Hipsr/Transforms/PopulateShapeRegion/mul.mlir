@@ -6,25 +6,25 @@
 // Mul broadcasts its two input shapes into the placeholder result shape.
 // CHECK-LABEL: func.func @mul_normal(
 // CHECK-SAME: %[[CTX:.+]]: !hipsr.context,
-// CHECK-SAME: %[[LHS:.+]]: tensor<?x1024xf16>,
-// CHECK-SAME: %[[RHS:.+]]: tensor<1024xf16>) {
-// CHECK-NEXT: %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[LHS]], %[[RHS]] : tensor<?x1024xf16>, tensor<1024xf16>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x1024xf16> shape_region {
+// CHECK-SAME: %[[LHS:.+]]: tensor<?x1024xf16, #hipsr.mem<device>>,
+// CHECK-SAME: %[[RHS:.+]]: tensor<1024xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT: %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[LHS]], %[[RHS]] : tensor<?x1024xf16, #hipsr.mem<device>>, tensor<1024xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x1024xf16, #hipsr.mem<device>> shape_region {
 // CHECK-NEXT: ^bb0(%[[LHS_SHAPE:.+]]: !shape.shape, %[[RHS_SHAPE:.+]]: !shape.shape):
 // CHECK-NEXT: %[[BROADCAST:.+]] = shape.broadcast %[[LHS_SHAPE]], %[[RHS_SHAPE]] : !shape.shape, !shape.shape -> !shape.shape
 // CHECK-NEXT: hipsr.shape_yield %[[BROADCAST]] : !shape.shape
 // CHECK-NEXT: }
-// CHECK-NEXT: %[[RESULT:.+]] = hipsr.mul(%[[CTX]]) ins(%[[LHS]], %[[RHS]] : tensor<?x1024xf16>, tensor<1024xf16>) outs(%[[INIT]] : tensor<?x1024xf16>) : tensor<?x1024xf16>
+// CHECK-NEXT: %[[RESULT:.+]] = hipsr.mul(%[[CTX]]) ins(%[[LHS]], %[[RHS]] : tensor<?x1024xf16, #hipsr.mem<device>>, tensor<1024xf16, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<?x1024xf16, #hipsr.mem<device>>) : tensor<?x1024xf16, #hipsr.mem<device>>
 // CHECK-NEXT: return
 // CHECK-NEXT: }
 func.func @mul_normal(
-    %ctx: !hipsr.context, %lhs: tensor<?x1024xf16>,
-    %rhs: tensor<1024xf16>) {
+    %ctx: !hipsr.context, %lhs: tensor<?x1024xf16, #hipsr.mem<device>>,
+    %rhs: tensor<1024xf16, #hipsr.mem<device>>) {
   %init = hipsr.placeholder(%ctx)
-      ins(%lhs, %rhs : tensor<?x1024xf16>, tensor<1024xf16>)
+      ins(%lhs, %rhs : tensor<?x1024xf16, #hipsr.mem<device>>, tensor<1024xf16, #hipsr.mem<device>>)
       {placeholder_type = #hipsr.placeholder_type<normal>}
-      : tensor<?x1024xf16>
+      : tensor<?x1024xf16, #hipsr.mem<device>>
   %result = hipsr.mul(%ctx)
-      ins(%lhs, %rhs : tensor<?x1024xf16>, tensor<1024xf16>)
-      outs(%init : tensor<?x1024xf16>) : tensor<?x1024xf16>
+      ins(%lhs, %rhs : tensor<?x1024xf16, #hipsr.mem<device>>, tensor<1024xf16, #hipsr.mem<device>>)
+      outs(%init : tensor<?x1024xf16, #hipsr.mem<device>>) : tensor<?x1024xf16, #hipsr.mem<device>>
   return
 }
