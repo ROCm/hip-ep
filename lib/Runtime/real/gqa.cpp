@@ -740,17 +740,17 @@ static bool gqa_no_expand_prefill_enabled() {
 // are quadratic in sequence length, so at long prompts the ungrouped size stops
 // being allocatable: H=16 at a 16K prompt wants 24.5 GiB in one block. The
 // default keeps every head resident for short sequences -- where the whole
-// buffer is a few hundred MB and grouping would only cost launches -- and starts
-// splitting once the buffer would exceed the budget.
+// buffer is a few hundred MB and grouping would only cost launches -- and
+// starts splitting once the buffer would exceed the budget.
 //
-// The budget is deliberately generous, because splitting is not free: each group
-// is a separate pair of strided-batched GEMMs over a smaller batch, so more
-// groups means more launches with less work each. Measured on gfx1151 with a
-// Gemma-4 16K prompt, 8 groups of 2 heads cost 39.8 s of TTFT against 38.1 s for
-// 2 groups of 8, and forcing groups at 12K -- where the ungrouped buffer still
-// fits -- cost 0.5%. So the default is set just above what a 12K prompt needs
-// ungrouped (14.1 GiB), which leaves everything that already worked ungrouped
-// and splits only where the alternative is not running at all.
+// The budget is deliberately generous, because splitting is not free: each
+// group is a separate pair of strided-batched GEMMs over a smaller batch, so
+// more groups means more launches with less work each. Measured on gfx1151 with
+// a Gemma-4 16K prompt, 8 groups of 2 heads cost 39.8 s of TTFT against 38.1 s
+// for 2 groups of 8, and forcing groups at 12K -- where the ungrouped buffer
+// still fits -- cost 0.5%. So the default is set just above what a 12K prompt
+// needs ungrouped (14.1 GiB), which leaves everything that already worked
+// ungrouped and splits only where the alternative is not running at all.
 static size_t gqa_score_budget_bytes() {
   static const size_t budget = [] {
     constexpr size_t kDefaultMiB = 16384;
@@ -1568,8 +1568,8 @@ static int gqa_forward_hipblaslt(
   //
   // Grouping renumbers the head index that kernels see, so it is restricted to
   // cases where no consumer depends on the absolute head: a per-head additive
-  // bias or a per-head softmax sink both would. no-expand is excluded too, since
-  // its K/V operands are addressed per KV head rather than per Q head.
+  // bias or a per-head softmax sink both would. no-expand is excluded too,
+  // since its K/V operands are addressed per KV head rather than per Q head.
   const bool bias_head_broadcast =
       attention_bias == nullptr ||
       (attn_bias_batch <= 1 && attn_bias_num_heads <= 1);
@@ -1835,106 +1835,105 @@ static int gqa_forward_hipblaslt(
     // heads_per_group == B*H this loop runs once and every pointer below is the
     // buffer base, identical to the ungrouped pipeline.
     for (int64_t head0 = 0; head0 < B * H; head0 += heads_per_group) {
-    // Byte offsets of this group inside the whole-head Q/K/V/O buffers. Q and O
-    // are BNSD [B,H,sq,d]; the expanded K/V are [B*H,total_seq,d].
-    const size_t group_q_off =
-        static_cast<size_t>(head0) * sq * d * elem_sz;
-    const size_t group_kv_off =
-        static_cast<size_t>(head0) * total_seq * d * elem_sz;
+      // Byte offsets of this group inside the whole-head Q/K/V/O buffers. Q and
+      // O are BNSD [B,H,sq,d]; the expanded K/V are [B*H,total_seq,d].
+      const size_t group_q_off = static_cast<size_t>(head0) * sq * d * elem_sz;
+      const size_t group_kv_off =
+          static_cast<size_t>(head0) * total_seq * d * elem_sz;
 
-    // ---- Step 8: Score GEMM (fp16/fp32 in, fp32 out) ----
-    // A = K: no-expand reads present_key directly, expand reads d_Kexp.
-    // B = Q: need_transpose reads d_Qtrans (BNSD), else qSrc (BSHD==BNSD@sq=1).
-    const void *scoreA =
-        use_no_expand ? present_key
-                      : static_cast<const char *>(d_Kexp) + group_kv_off;
-    const void *scoreB =
-        need_transpose ? static_cast<const char *>(d_Qtrans) + group_q_off
-                       : qSrc;
-    float scoreAlpha = scale;
-    float beta = 0.0f;
-    hipblasLtMatmulAlgo_t sAlgo = scoreState->algo;
+      // ---- Step 8: Score GEMM (fp16/fp32 in, fp32 out) ----
+      // A = K: no-expand reads present_key directly, expand reads d_Kexp.
+      // B = Q: need_transpose reads d_Qtrans (BNSD), else qSrc
+      // (BSHD==BNSD@sq=1).
+      const void *scoreA =
+          use_no_expand ? present_key
+                        : static_cast<const char *>(d_Kexp) + group_kv_off;
+      const void *scoreB =
+          need_transpose ? static_cast<const char *>(d_Qtrans) + group_q_off
+                         : qSrc;
+      float scoreAlpha = scale;
+      float beta = 0.0f;
+      hipblasLtMatmulAlgo_t sAlgo = scoreState->algo;
 
-    HIPBLAS_CHECK(hipblasLtMatmul(
-        ltHandle, scoreState->desc, &scoreAlpha, scoreA, scoreState->layA,
-        scoreB, scoreState->layB, &beta, d_S_f32, scoreState->layC, d_S_f32,
-        scoreState->layD, &sAlgo, gemm_ws_ptr, gemm_ws_bytes, stream));
+      HIPBLAS_CHECK(hipblasLtMatmul(
+          ltHandle, scoreState->desc, &scoreAlpha, scoreA, scoreState->layA,
+          scoreB, scoreState->layB, &beta, d_S_f32, scoreState->layC, d_S_f32,
+          scoreState->layD, &sAlgo, gemm_ws_ptr, gemm_ws_bytes, stream));
 
-    // ---- Step 8b: Add external attention bias (onnx.Attention attn_mask) ----
-    int scoreF32BatchStride = static_cast<int>(sq * total_seq);
-    if (attention_bias) {
-      HIP_CHECK(hip_gqa_add_attention_bias_f32(
-          stream, d_S_f32, const_cast<void *>(attention_bias),
-          static_cast<int>(heads_per_group), static_cast<int>(H),
-          static_cast<int>(attn_bias_batch),
-          static_cast<int>(attn_bias_num_heads), static_cast<int>(sq),
-          static_cast<int>(total_seq), scoreF32BatchStride,
-          static_cast<int>(elem_sz)));
-    }
+      // ---- Step 8b: Add external attention bias (onnx.Attention attn_mask)
+      // ----
+      int scoreF32BatchStride = static_cast<int>(sq * total_seq);
+      if (attention_bias) {
+        HIP_CHECK(hip_gqa_add_attention_bias_f32(
+            stream, d_S_f32, const_cast<void *>(attention_bias),
+            static_cast<int>(heads_per_group), static_cast<int>(H),
+            static_cast<int>(attn_bias_batch),
+            static_cast<int>(attn_bias_num_heads), static_cast<int>(sq),
+            static_cast<int>(total_seq), scoreF32BatchStride,
+            static_cast<int>(elem_sz)));
+      }
 
-    // ---- Step 9: Causal Mask (fp32) + Softmax (fp32 -> fp16/fp32) ----
-    // S is treated as [B*H, sq, total_seq] (head stride sq*total_seq) by both
-    // GEMM flavours. softmax dtype follows gemm_fp32.
-    //
-    // The built-in causal triangle is applied whenever !no_causal,
-    // INDEPENDENTLY of attention_bias. This mirrors the ONNX Attention
-    // reference and the ORT GQA op: the additive mask (Step 8b, e.g.
-    // onnx.Attention attn_mask or a GQA/ALiBi bias) is ADDED first, then, if
-    // the op is causal, the upper triangle is masked out. For a mask that
-    // already encodes causal (the common HF export) this is idempotent (-inf
-    // stays -inf); for a padding-only mask + is_causal it supplies the missing
-    // triangle. The bidirectional paths (no_causal, e.g. Whisper
-    // encoder/cross-attn or onnx.Attention is_causal=0) set no_causal=true and
-    // thus skip this, letting the mask carry all masking. Note this Step is a
-    // no-op at sq==1 (single-query decode has no future tokens), gated by (sq >
-    // 1 || local_window_size > 0).
-    int scoreFp16BatchStride = static_cast<int>(sq * total_seq);
-    if ((sq > 1 || local_window_size > 0) && !no_causal) {
-      // The causal / window mask is the same for every head, so a group needs no
-      // head offset -- only the group's head count.
-      HIP_CHECK(hip_gqa_causal_mask_f32(
-          stream, d_S_f32, static_cast<int>(heads_per_group),
-          static_cast<int>(total_seq), static_cast<int>(sq),
-          scoreF32BatchStride, static_cast<int>(past_len),
-          static_cast<int>(local_window_size)));
-    }
-    // fp16 GQA: softmax writes fp16 probabilities for the fp16 Value GEMM.
-    // fp32 GQA (Whisper no_causal): softmax writes fp32 probabilities for the
-    // fp32 Value GEMM. d_S_fp16 is the probabilities buffer either way (sized
-    // by elem_sz above), so the name is fp16-specific but holds fp32 when
-    // gemm_fp32.
-    if (gemm_fp32) {
-      HIP_CHECK(hip_gqa_softmax_f32_to_f32(
-          stream, d_S_f32, d_S_fp16,
-          static_cast<int>(heads_per_group * sq), static_cast<int>(total_seq),
-          static_cast<int>(sq), scoreF32BatchStride, scoreFp16BatchStride,
-          head_sink, static_cast<int>(H),
-          static_cast<int>(use_smooth_softmax)));
-    } else {
-      HIP_CHECK(hip_gqa_softmax_f32_to_f16(
-          stream, d_S_f32, d_S_fp16,
-          static_cast<int>(heads_per_group * sq), static_cast<int>(total_seq),
-          static_cast<int>(sq), scoreF32BatchStride, scoreFp16BatchStride,
-          head_sink, static_cast<int>(H),
-          static_cast<int>(use_smooth_softmax)));
-    }
+      // ---- Step 9: Causal Mask (fp32) + Softmax (fp32 -> fp16/fp32) ----
+      // S is treated as [B*H, sq, total_seq] (head stride sq*total_seq) by both
+      // GEMM flavours. softmax dtype follows gemm_fp32.
+      //
+      // The built-in causal triangle is applied whenever !no_causal,
+      // INDEPENDENTLY of attention_bias. This mirrors the ONNX Attention
+      // reference and the ORT GQA op: the additive mask (Step 8b, e.g.
+      // onnx.Attention attn_mask or a GQA/ALiBi bias) is ADDED first, then, if
+      // the op is causal, the upper triangle is masked out. For a mask that
+      // already encodes causal (the common HF export) this is idempotent (-inf
+      // stays -inf); for a padding-only mask + is_causal it supplies the
+      // missing triangle. The bidirectional paths (no_causal, e.g. Whisper
+      // encoder/cross-attn or onnx.Attention is_causal=0) set no_causal=true
+      // and thus skip this, letting the mask carry all masking. Note this Step
+      // is a no-op at sq==1 (single-query decode has no future tokens), gated
+      // by (sq > 1 || local_window_size > 0).
+      int scoreFp16BatchStride = static_cast<int>(sq * total_seq);
+      if ((sq > 1 || local_window_size > 0) && !no_causal) {
+        // The causal / window mask is the same for every head, so a group needs
+        // no head offset -- only the group's head count.
+        HIP_CHECK(hip_gqa_causal_mask_f32(
+            stream, d_S_f32, static_cast<int>(heads_per_group),
+            static_cast<int>(total_seq), static_cast<int>(sq),
+            scoreF32BatchStride, static_cast<int>(past_len),
+            static_cast<int>(local_window_size)));
+      }
+      // fp16 GQA: softmax writes fp16 probabilities for the fp16 Value GEMM.
+      // fp32 GQA (Whisper no_causal): softmax writes fp32 probabilities for the
+      // fp32 Value GEMM. d_S_fp16 is the probabilities buffer either way (sized
+      // by elem_sz above), so the name is fp16-specific but holds fp32 when
+      // gemm_fp32.
+      if (gemm_fp32) {
+        HIP_CHECK(hip_gqa_softmax_f32_to_f32(
+            stream, d_S_f32, d_S_fp16, static_cast<int>(heads_per_group * sq),
+            static_cast<int>(total_seq), static_cast<int>(sq),
+            scoreF32BatchStride, scoreFp16BatchStride, head_sink,
+            static_cast<int>(H), static_cast<int>(use_smooth_softmax)));
+      } else {
+        HIP_CHECK(hip_gqa_softmax_f32_to_f16(
+            stream, d_S_f32, d_S_fp16, static_cast<int>(heads_per_group * sq),
+            static_cast<int>(total_seq), static_cast<int>(sq),
+            scoreF32BatchStride, scoreFp16BatchStride, head_sink,
+            static_cast<int>(H), static_cast<int>(use_smooth_softmax)));
+      }
 
-    // ---- Step 10: Value GEMM (fp16/fp32 in, fp16/fp32 out) ----
-    // A = V: no-expand reads present_value directly, expand reads d_Vexp.
-    // C = O: need_transpose writes d_O (BNSD, transposed below); at sq==1 the
-    //        GEMM writes straight to output (BSHD==BNSD).
-    const void *valueA =
-        use_no_expand ? present_value
-                      : static_cast<const char *>(d_Vexp) + group_kv_off;
-    void *valueC = need_transpose ? static_cast<char *>(d_O) + group_q_off
-                                  : output;
-    float valAlpha = 1.0f;
-    hipblasLtMatmulAlgo_t vAlgo = valueState->algo;
+      // ---- Step 10: Value GEMM (fp16/fp32 in, fp16/fp32 out) ----
+      // A = V: no-expand reads present_value directly, expand reads d_Vexp.
+      // C = O: need_transpose writes d_O (BNSD, transposed below); at sq==1 the
+      //        GEMM writes straight to output (BSHD==BNSD).
+      const void *valueA =
+          use_no_expand ? present_value
+                        : static_cast<const char *>(d_Vexp) + group_kv_off;
+      void *valueC =
+          need_transpose ? static_cast<char *>(d_O) + group_q_off : output;
+      float valAlpha = 1.0f;
+      hipblasLtMatmulAlgo_t vAlgo = valueState->algo;
 
-    HIPBLAS_CHECK(hipblasLtMatmul(
-        ltHandle, valueState->desc, &valAlpha, valueA, valueState->layA,
-        d_S_fp16, valueState->layB, &beta, valueC, valueState->layC, valueC,
-        valueState->layD, &vAlgo, gemm_ws_ptr, gemm_ws_bytes, stream));
+      HIPBLAS_CHECK(hipblasLtMatmul(
+          ltHandle, valueState->desc, &valAlpha, valueA, valueState->layA,
+          d_S_fp16, valueState->layB, &beta, valueC, valueState->layC, valueC,
+          valueState->layD, &vAlgo, gemm_ws_ptr, gemm_ws_bytes, stream));
     } // head group
 
     // ---- Step 11: O Transpose BNSD [B,H,sq,d] -> BSHD [B,sq,H,d] ----

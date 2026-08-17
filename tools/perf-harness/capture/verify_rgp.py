@@ -25,8 +25,11 @@ from rgp_parser.struct.rdf import RdfFile  # noqa: E402
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("capture", help="path to the .rgp file")
-    ap.add_argument("--require-spm", action="store_true",
-                    help="also fail when the capture carries no SPM counters")
+    ap.add_argument(
+        "--require-spm",
+        action="store_true",
+        help="also fail when the capture carries no SPM counters",
+    )
     args = ap.parse_args()
 
     counts = RdfFile.from_path(args.capture).counts()

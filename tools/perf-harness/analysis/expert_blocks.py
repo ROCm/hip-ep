@@ -22,16 +22,25 @@ Read it with two cautions:
 import argparse
 from collections import defaultdict
 
-from perfcommon import (M_BUCKETS, Capture, add_common_args, bucket_label,
-                        specs_from_args)
+from perfcommon import (
+    M_BUCKETS,
+    Capture,
+    add_common_args,
+    bucket_label,
+    specs_from_args,
+)
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     add_common_args(ap, many=True)
-    ap.add_argument("--shapes", action="store_true",
-                    help="also list the routing distribution block by block")
+    ap.add_argument(
+        "--shapes",
+        action="store_true",
+        help="also list the routing distribution block by block",
+    )
     args = ap.parse_args()
     spec, dev = specs_from_args(args)
 
@@ -42,15 +51,27 @@ def main() -> None:
         floor_us = spec.expert_weight_bytes / dev.bw_bytes_s * 1e6
 
         print(f"\n######## {path}")
-        print(f"window {cap.total_us/1000:.1f} ms, {len(cap.rows)} dispatches, "
-              f"{cap.layers_in_window} layer-groups -> x{k:.2f} for {spec.layers} layers")
-        print(f"reconstructed chunk ({spec.chunk_tokens} tok): {chunk_us/1000:.1f} ms"
-              + (f"  (incl. lm_head {cap.lm_head_us/1000:.1f} ms)" if cap.lm_head_us else ""))
-        print(f"one expert = {spec.expert_weight_bytes/1e6:.1f} MB of weights+scales "
-              f"-> {floor_us:.1f} us at {dev.bw_bytes_s/1e9:.0f} GB/s\n")
+        print(
+            f"window {cap.total_us / 1000:.1f} ms, {len(cap.rows)} dispatches, "
+            f"{cap.layers_in_window} layer-groups -> x{k:.2f} for {spec.layers} layers"
+        )
+        print(
+            f"reconstructed chunk ({spec.chunk_tokens} tok): {chunk_us / 1000:.1f} ms"
+            + (
+                f"  (incl. lm_head {cap.lm_head_us / 1000:.1f} ms)"
+                if cap.lm_head_us
+                else ""
+            )
+        )
+        print(
+            f"one expert = {spec.expert_weight_bytes / 1e6:.1f} MB of weights+scales "
+            f"-> {floor_us:.1f} us at {dev.bw_bytes_s / 1e9:.0f} GB/s\n"
+        )
 
-        print(f"{'M range':>10} {'blocks':>7} {'tokens':>7} {'ms/chunk':>9} {'%chunk':>7} "
-              f"{'us/blk':>8} {'mean M':>7} {'x floor':>8} {'eff GB/s':>9}  path")
+        print(
+            f"{'M range':>10} {'blocks':>7} {'tokens':>7} {'ms/chunk':>9} {'%chunk':>7} "
+            f"{'us/blk':>8} {'mean M':>7} {'x floor':>8} {'eff GB/s':>9}  path"
+        )
         for lo, hi in M_BUCKETS:
             sel = [b for b in cap.blocks if lo <= b.m <= hi]
             if not sel:
@@ -60,18 +81,26 @@ def main() -> None:
             toks = sum(b.m for b in sel)
             paths = defaultdict(int)
             for b in sel:
-                paths["+".join(sorted(x.replace("MatMulNBits", "") for x in b.kernels))] += 1
-            pretty = " ".join(f"{n}x{c}" for n, c in sorted(paths.items(), key=lambda kv: -kv[1]))
-            print(f"{bucket_label(lo, hi):>10} {len(sel):7d} {toks:7d} {us*k/1000:9.2f} "
-                  f"{100*us*k/chunk_us:7.2f} {mean:8.1f} {toks/len(sel):7.1f} "
-                  f"{mean/floor_us:8.2f} {spec.expert_weight_bytes/mean/1e3:9.0f}  {pretty}")
+                paths[
+                    "+".join(sorted(x.replace("MatMulNBits", "") for x in b.kernels))
+                ] += 1
+            pretty = " ".join(
+                f"{n}x{c}" for n, c in sorted(paths.items(), key=lambda kv: -kv[1])
+            )
+            print(
+                f"{bucket_label(lo, hi):>10} {len(sel):7d} {toks:7d} {us * k / 1000:9.2f} "
+                f"{100 * us * k / chunk_us:7.2f} {mean:8.1f} {toks / len(sel):7.1f} "
+                f"{mean / floor_us:8.2f} {spec.expert_weight_bytes / mean / 1e3:9.0f}  {pretty}"
+            )
 
         small = [b for b in cap.blocks if b.m <= 63]
         if small and cap.blocks:
             tok_all = sum(b.m for b in cap.blocks)
-            print(f"\nM<=63: {len(small)}/{len(cap.blocks)} blocks, "
-                  f"{100*sum(b.m for b in small)/tok_all:.1f}% of routed tokens, "
-                  f"{100*sum(b.dur_us for b in small)*k/chunk_us:.1f}% of a chunk")
+            print(
+                f"\nM<=63: {len(small)}/{len(cap.blocks)} blocks, "
+                f"{100 * sum(b.m for b in small) / tok_all:.1f}% of routed tokens, "
+                f"{100 * sum(b.dur_us for b in small) * k / chunk_us:.1f}% of a chunk"
+            )
 
         # Same expert size, two different paths: does skipping the fused dequant
         # actually pay? Only comparable within one bucket.
@@ -79,13 +108,20 @@ def main() -> None:
         fused = [b for b in big if b.dequant_us == 0]
         split = [b for b in big if b.dequant_us > 0]
         if fused and split:
-            print("\n=== fused WMMA vs dequant+Fp16GEMM at the same expert size (M>=256) ===")
-            for label, sel in (("fused WMMA only", fused), ("dequant + Fp16GEMM", split)):
+            print(
+                "\n=== fused WMMA vs dequant+Fp16GEMM at the same expert size (M>=256) ==="
+            )
+            for label, sel in (
+                ("fused WMMA only", fused),
+                ("dequant + Fp16GEMM", split),
+            ):
                 us = sum(b.dur_us for b in sel)
                 tok = sum(b.m for b in sel)
-                print(f"  {label:22} n={len(sel):3d}  meanM={tok/len(sel):6.1f}  "
-                      f"{us/len(sel):8.1f} us/block  {us/tok:6.2f} us/token  "
-                      f"dequant {sum(b.dequant_us for b in sel)/len(sel):6.1f} us/block")
+                print(
+                    f"  {label:22} n={len(sel):3d}  meanM={tok / len(sel):6.1f}  "
+                    f"{us / len(sel):8.1f} us/block  {us / tok:6.2f} us/token  "
+                    f"dequant {sum(b.dequant_us for b in sel) / len(sel):6.1f} us/block"
+                )
 
         if args.shapes:
             print("\n=== routing distribution ===")
