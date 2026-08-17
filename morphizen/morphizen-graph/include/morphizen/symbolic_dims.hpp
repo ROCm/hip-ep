@@ -11,6 +11,31 @@
 
 namespace morphizen {
 
+/// Normative HSDI1 symbolic-dimension metadata contract.
+///
+/// The wire grammar is ASCII framing around opaque byte strings:
+///
+///   file     := "HSDI1\n" record-count "\n" record*
+///   record   := bytes(scope) bytes(value-name) rank ":" bytes(dimension)* "\n"
+///   bytes(x) := byte-count ":" lowercase-hex(x)
+///
+/// Decimal counts contain no leading zero unless the value is zero. A bytes
+/// field has exactly twice `byte-count` hexadecimal characters. Records are
+/// strictly sorted by the bytewise lexicographic `(scope, value-name)` pair;
+/// duplicate pairs, trailing bytes, and non-canonical spellings are invalid.
+///
+/// HSDI1 permits at most 1,000,000 records, 1,024 dimensions per record,
+/// 16 MiB of decoded bytes per scope, value name, or dimension, and 64 MiB in
+/// the complete encoding. Scope and value name are non-empty. An empty
+/// dimension (`0:`) means that axis has no symbolic identity. A missing
+/// metadata property and the canonical zero-record value `HSDI1\n0\n` both
+/// provide no symbolic proofs; cache identity normalizes missing metadata to
+/// that zero-record value.
+///
+/// HSDI1 is immutable. An incompatible grammar, field meaning, ordering, or
+/// bound requires a new encoding magic and new versioned metadata key/module
+/// attribute. A resolver-only semantic change instead updates
+/// kOnnxDimParamsResolverPolicyVersion. Decoders reject unknown magic.
 inline constexpr char kOnnxDimParamsMetadataKey[] =
     "com.amd.morphizen.onnx_dim_params.v1";
 inline constexpr char kOnnxDimParamsModuleAttr[] = "hipdnn.onnx_dim_params_v1";
