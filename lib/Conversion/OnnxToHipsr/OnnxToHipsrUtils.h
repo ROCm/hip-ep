@@ -22,13 +22,11 @@
 namespace mlir {
 namespace hipsr {
 
-// Force change memoryspace to device
-inline ::mlir::RankedTensorType
-deviceTensorType(::mlir::RankedTensorType type) {
-  auto space = ::mlir::hipsr::MemorySpaceAttr::get(type.getContext(),
-                                                   MemorySpace::Device);
-  return ::mlir::RankedTensorType::get(type.getShape(), type.getElementType(),
-                                       space);
+// Force change memoryspace to space
+inline ::mlir::RankedTensorType tensorTypeInSpace(::mlir::RankedTensorType type,
+                                                  MemorySpace space) {
+  return type.cloneWithEncoding(
+      ::mlir::hipsr::MemorySpaceAttr::get(type.getContext(), space));
 }
 
 /// Gets the `!hipsr.context` from function argument 0. The ONNX phase adds it

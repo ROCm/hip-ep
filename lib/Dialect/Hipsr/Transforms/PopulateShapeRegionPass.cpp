@@ -21,6 +21,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
+#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionPopulationUtils.h"
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -49,16 +50,6 @@ LogicalResult populateMatMulShapeRegion(OpBuilder &builder, Block &block,
 #include "hip/Dialect/Hipsr/Transforms/Passes.h.inc"
 
 namespace {
-
-Block &createPlaceholderShapeBlock(OpBuilder &builder,
-                                   PlaceholderOp placeholder) {
-  Region &shapeRegion = placeholder.getShapeRegion();
-  Block &block = *builder.createBlock(&shapeRegion);
-  for (Type type : placeholder.getShapeRegionArgumentTypes()) {
-    block.addArgument(type, placeholder.getLoc());
-  }
-  return block;
-}
 
 LogicalResult populatePlaceholderShapeRegion(OpBuilder &builder,
                                              PlaceholderOp placeholder) {
