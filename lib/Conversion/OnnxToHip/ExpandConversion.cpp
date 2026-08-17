@@ -84,7 +84,7 @@ struct ExpandToHip : public mlir::RewritePattern {
       if (mlir::failed(inferredShape))
         return rewriter.notifyMatchFailure(
             op, "constant Expand shape is not broadcast-compatible");
-      if (!isResultTypeCompatibleWithPayloadShape(resultType, *inferredShape))
+      if (!isResultTypeCompatibleWithInferredShape(resultType, *inferredShape))
         return rewriter.notifyMatchFailure(
             op, "Expand result type contradicts constant shape");
     }
