@@ -24,7 +24,8 @@ struct CastToHipsr : public ::mlir::ConversionPattern {
       : ConversionPattern(typeConverter, "onnx.Cast", /*benefit=*/1, ctx) {}
 
   ::mlir::LogicalResult
-  matchAndRewrite(::mlir::Operation *op, ::mlir::ArrayRef<::mlir::Value> operands,
+  matchAndRewrite(::mlir::Operation *op,
+                  ::mlir::ArrayRef<::mlir::Value> operands,
                   ::mlir::ConversionPatternRewriter &rewriter) const override {
     // Matching is by name on an (unregistered) ONNX op, so guard the shape:
     // onnx.Cast is single-input / single-result.

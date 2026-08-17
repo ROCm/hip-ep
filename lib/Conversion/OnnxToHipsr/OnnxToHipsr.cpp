@@ -84,8 +84,9 @@ struct ConvertOnnxToHipsrPass
     TypeConverter converter;
     converter.addConversion([](Type type) { return type; });
     converter.addConversion([](RankedTensorType type) -> Type {
-      // Leave rank-0 scalars (compile-time host roots lowered to arith.constant)
-      // and tensors that already name a space (e.g. host shapes) untouched.
+      // Leave rank-0 scalars (compile-time host roots lowered to
+      // arith.constant) and tensors that already name a space (e.g. host
+      // shapes) untouched.
       if (type.getRank() == 0 || type.getEncoding()) {
         return type;
       }

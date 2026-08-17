@@ -27,8 +27,8 @@ inline ::mlir::RankedTensorType
 deviceTensorType(::mlir::RankedTensorType type) {
   auto space = ::mlir::hipsr::MemorySpaceAttr::get(type.getContext(),
                                                    MemorySpace::Device);
-  return ::mlir::RankedTensorType::get(type.getShape(),
-                                       type.getElementType(), space);
+  return ::mlir::RankedTensorType::get(type.getShape(), type.getElementType(),
+                                       space);
 }
 
 /// Gets the `!hipsr.context` from function argument 0. The ONNX phase adds it
