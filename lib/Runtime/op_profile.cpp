@@ -3,6 +3,11 @@
  * Licensed under the MIT License.
  */
 
+// The HIP types and entry points below arrive through op_profile.h ->
+// runtime_types.h, which resolves to real/ or mock/ depending on the build.
+// Including <hip/hip_runtime.h> directly here would be redundant for the real
+// runtime and fatal for the mock one, which has no ROCm headers on its include
+// path.
 #include "op_profile.h"
 #include "chrome_trace.h"
 #include <algorithm>
@@ -11,7 +16,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <hip/hip_runtime.h>
 #include <map>
 #include <string>
 #include <vector>
