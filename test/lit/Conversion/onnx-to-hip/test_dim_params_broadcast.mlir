@@ -129,6 +129,88 @@ module attributes {
 
 // -----
 
+// A stale proof can name an original operand that a conversion does not
+// consume. Greater intentionally consumes its first two operands in reverse;
+// the extra operand models an operation-local plan invalidated after planning.
+// Losing that optional proof must retain the exact runtime broadcast and must
+// neither leave the plan behind nor prevent conversion.
+module attributes {
+  hipdnn.onnx_dim_params_v1 = [
+    {scope = "main_graph", value_name = "canonical", dimensions = ["N"]},
+    {scope = "main_graph", value_name = "b", dimensions = ["N"]},
+    {scope = "main_graph", value_name = "c", dimensions = ["N"]},
+    {scope = "main_graph", value_name = "out", dimensions = ["N"]}
+  ]
+} {
+  // CHECK-LABEL: func.func @main_graph
+  // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
+  // CHECK: %[[B:.*]] = hip.cast
+  // CHECK: %[[C:.*]] = hip.cast
+  // CHECK-DAG: %[[CD:.*]] = tensor.dim %[[C]], %[[C0]]
+  // CHECK-DAG: %[[BD:.*]] = tensor.dim %[[B]], %[[C0]]
+  // CHECK: %[[IS_ONE:.*]] = arith.cmpi eq, %[[CD]], %[[C1]] : index
+  // CHECK: %[[DIM:.*]] = arith.select %[[IS_ONE]], %[[BD]], %[[CD]] : index
+  // CHECK: tensor.empty(%[[DIM]])
+  // CHECK: hip.less{{.*}}ins(%[[C]], %[[B]]
+  // CHECK-NOT: hipdnn.broadcast_dim_sources
+  func.func @main_graph(
+      %seed: tensor<?xf16>,
+      %canonical: tensor<?xf32> {onnx.name = "canonical"}) -> tensor<?xi1> {
+    %b = "onnx.Cast"(%seed) {node.outputs = ["b"], to = 1 : i64}
+        : (tensor<?xf16>) -> tensor<?xf32>
+    %c = "onnx.Cast"(%seed) {node.outputs = ["c"], to = 1 : i64}
+        : (tensor<?xf16>) -> tensor<?xf32>
+    %out = "onnx.Greater"(%b, %c, %canonical) {node.outputs = ["out"]}
+        : (tensor<?xf32>, tensor<?xf32>, tensor<?xf32>) -> tensor<?xi1>
+    "onnx.Return"(%out) : (tensor<?xi1>) -> ()
+  }
+}
+
+// -----
+
+// Preserve a valid remapped source on the leading axis while a missing
+// lower-rank canonical operand degrades only the trailing axis. The trailing
+// extent still uses select(lhs == 1, rhs, lhs).
+module attributes {
+  hipdnn.onnx_dim_params_v1 = [
+    {scope = "main_graph", value_name = "canonical", dimensions = ["N"]},
+    {scope = "main_graph", value_name = "b", dimensions = ["M", "N"]},
+    {scope = "main_graph", value_name = "c", dimensions = ["M", "N"]},
+    {scope = "main_graph", value_name = "out", dimensions = ["M", "N"]}
+  ]
+} {
+  // CHECK-LABEL: func.func @main_graph
+  // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
+  // CHECK: %[[B:.*]] = hip.cast
+  // CHECK: %[[C:.*]] = hip.cast
+  // CHECK-NOT: tensor.dim %[[C]], %[[C0]]
+  // CHECK: %[[C1D:.*]] = tensor.dim %[[C]], %[[C1]]
+  // CHECK: %[[B0:.*]] = tensor.dim %[[B]], %[[C0]]
+  // CHECK: %[[B1:.*]] = tensor.dim %[[B]], %[[C1]]
+  // CHECK: %[[IS_ONE:.*]] = arith.cmpi eq, %[[C1D]], %[[C1]] : index
+  // CHECK: %[[D1:.*]] = arith.select %[[IS_ONE]], %[[B1]], %[[C1D]] : index
+  // CHECK: tensor.empty(%[[B0]], %[[D1]])
+  // CHECK: hip.less{{.*}}ins(%[[C]], %[[B]]
+  // CHECK-NOT: hipdnn.broadcast_dim_sources
+  func.func @main_graph(
+      %seed: tensor<?x?xf16>,
+      %canonical: tensor<?xf32> {onnx.name = "canonical"})
+      -> tensor<?x?xi1> {
+    %b = "onnx.Cast"(%seed) {node.outputs = ["b"], to = 1 : i64}
+        : (tensor<?x?xf16>) -> tensor<?x?xf32>
+    %c = "onnx.Cast"(%seed) {node.outputs = ["c"], to = 1 : i64}
+        : (tensor<?x?xf16>) -> tensor<?x?xf32>
+    %out = "onnx.Greater"(%b, %c, %canonical) {node.outputs = ["out"]}
+        : (tensor<?x?xf32>, tensor<?x?xf32>, tensor<?xf32>)
+          -> tensor<?x?xi1>
+    "onnx.Return"(%out) : (tensor<?x?xi1>) -> ()
+  }
+}
+
+// -----
+
 // Where consumes all three original contributors. One graph-input binding for
 // N makes the complete contributor class eligible.
 module attributes {

@@ -84,16 +84,33 @@ createOnnxBroadcastEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
                                mlir::ValueRange operands,
                                mlir::Operation *onnxOp) {
   llvm::SmallVector<int64_t> sources = getBroadcastDimSources(onnxOp);
-  for (int64_t &source : sources) {
-    if (source < 0)
+  if (!sources.empty())
+    sources.resize(resultType.getRank(), -1);
+  for (auto [axis, source] : llvm::enumerate(sources)) {
+    if (source < 0) {
+      sources[axis] = -1;
       continue;
-    if (source >= static_cast<int64_t>(onnxOp->getNumOperands()))
-      return mlir::failure();
+    }
+    if (source >= static_cast<int64_t>(onnxOp->getNumOperands())) {
+      sources[axis] = -1;
+      continue;
+    }
     mlir::Value plannedOperand = onnxOp->getOperand(source);
     auto found = llvm::find(operands, plannedOperand);
-    if (found == operands.end())
-      return mlir::failure();
-    source = static_cast<int64_t>(found - operands.begin());
+    auto plannedType =
+        mlir::dyn_cast<mlir::RankedTensorType>(plannedOperand.getType());
+    int64_t padding =
+        plannedType ? resultType.getRank() - plannedType.getRank() : -1;
+    if (found == operands.end() || padding < 0 ||
+        static_cast<int64_t>(axis) < padding ||
+        !mlir::ShapedType::isDynamic(
+            plannedType.getDimSize(static_cast<int64_t>(axis) - padding))) {
+      // Symbolic sources are optional proofs. A stale operation-local plan
+      // must degrade only this axis to the exact runtime broadcast merge.
+      sources[axis] = -1;
+      continue;
+    }
+    sources[axis] = static_cast<int64_t>(found - operands.begin());
   }
   return mlir::hip::createBroadcastEmptyTensor(builder, loc, resultType,
                                                operands, sources);
