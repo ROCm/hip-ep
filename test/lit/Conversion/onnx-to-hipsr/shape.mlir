@@ -165,8 +165,7 @@ func.func @shape_bounds_past_the_ends(%ctx: !hipsr.context,
 // -----
 
 // A result naming no space, as an ONNX graph writes it, still puts the extents
-// in host memory. Nothing reads them here, since a consumer carrying the type
-// converter would ask for this result in the space that converter picks.
+// in host memory.
 // CHECK-LABEL:   func.func @result_names_no_space(
 // CHECK-SAME:      %[[CTX:.*]]: !hipsr.context,
 // CHECK-SAME:      %[[INPUT:.*]]: tensor<2x3xf16, #hipsr.mem<device>>) {
@@ -191,6 +190,10 @@ func.func @result_names_no_space(%ctx: !hipsr.context,
 
 // -----
 
+// Neither ONNX type names a space, and the expand still reads its shape operand
+// in the host memory this conversion picks: an operation pattern does not carry
+// the pass converter, so an operand keeps the space its producer gave it.
+//
 // The extents feed the shape graph as well as the data graph, and each takes a
 // different value: the barrier placeholder's input names the buffer holding
 // them, which is the compute's destination, while the expand reads what the
@@ -219,9 +222,8 @@ func.func @result_names_no_space(%ctx: !hipsr.context,
 // CHECK-NEXT:      return %[[EXPANDED]] : tensor<?x?xf16, #hipsr.mem<device>>
 func.func @extents_feed_an_expand(%ctx: !hipsr.context,
                                   %input: tensor<?x3xf16>) -> tensor<?x?xf16> {
-  %0 = "onnx.Shape"(%input)
-      : (tensor<?x3xf16>) -> tensor<2xi64, #hipsr.mem<host>>
+  %0 = "onnx.Shape"(%input) : (tensor<?x3xf16>) -> tensor<2xi64>
   %1 = "onnx.Expand"(%input, %0)
-      : (tensor<?x3xf16>, tensor<2xi64, #hipsr.mem<host>>) -> tensor<?x?xf16>
+      : (tensor<?x3xf16>, tensor<2xi64>) -> tensor<?x?xf16>
   return %1 : tensor<?x?xf16>
 }
