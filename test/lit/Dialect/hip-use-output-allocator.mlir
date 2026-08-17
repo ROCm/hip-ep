@@ -245,71 +245,28 @@ func.func @chain_output(%ctx: !hip.context) -> memref<?xf32> {
   return %cast : memref<?xf32>
 }
 
-// --- A longer 3-op view chain (collapse_shape -> expand_shape -> cast), mixing
-//     all three view-op kinds before the return: the root alloc is still
-//     converted exactly once, and the whole chain is left in place. Proves the
-//     alias analysis follows arbitrary-length chains, not just one or two ops. ---
-// CHECK-LABEL: func.func @long_chain_output
-// CHECK-SAME:    (%[[CTX:.*]]: !hip.context)
-// CHECK-NOT:     memref.alloc
-// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]]) {out_idx = 0 : i64} : memref<2x4x8xf32>
-// CHECK:         %[[COL:.*]] = memref.collapse_shape %[[OUT]]
-// CHECK:         %[[EXP:.*]] = memref.expand_shape %[[COL]]
-// CHECK:         %[[CST:.*]] = memref.cast %[[EXP]]
-// CHECK:         return %[[CST]]
-func.func @long_chain_output(%ctx: !hip.context) -> memref<?x8xf32> {
-  %x = memref.alloc() : memref<2x4x8xf32>
-  %col = memref.collapse_shape %x [[0, 1, 2]]
-       : memref<2x4x8xf32> into memref<64xf32>
-  %exp = memref.expand_shape %col [[0, 1]] output_shape [8, 8]
-       : memref<64xf32> into memref<8x8xf32>
-  %cast = memref.cast %exp : memref<8x8xf32> to memref<?x8xf32>
-  return %cast : memref<?x8xf32>
-}
-
-// --- An even longer 5-op view chain exercising every view-op kind the analysis
-//     handles (collapse_shape -> collapse_shape -> expand_shape -> subview ->
-//     cast): the root alloc is still converted exactly once and the full chain
-//     is preserved. Stresses that the backward alias walk terminates correctly
-//     no matter how deep the view chain is. ---
-// CHECK-LABEL: func.func @longer_chain_output
-// CHECK-SAME:    (%[[CTX:.*]]: !hip.context)
-// CHECK-NOT:     memref.alloc
-// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]]) {out_idx = 0 : i64} : memref<2x4x8xf32>
-// CHECK:         %[[C1:.*]] = memref.collapse_shape %[[OUT]]
-// CHECK:         %[[C2:.*]] = memref.collapse_shape %[[C1]]
-// CHECK:         %[[E:.*]] = memref.expand_shape %[[C2]]
-// CHECK:         %[[S:.*]] = memref.subview %[[E]]
-// CHECK:         %[[CST:.*]] = memref.cast %[[S]]
-// CHECK:         return %[[CST]]
-func.func @longer_chain_output(%ctx: !hip.context) -> memref<?x8xf32, strided<[8, 1]>> {
-  %x = memref.alloc() : memref<2x4x8xf32>
-  %c1 = memref.collapse_shape %x [[0, 1], [2]]
-      : memref<2x4x8xf32> into memref<8x8xf32>
-  %c2 = memref.collapse_shape %c1 [[0, 1]]
-      : memref<8x8xf32> into memref<64xf32>
-  %e = memref.expand_shape %c2 [[0, 1]] output_shape [8, 8]
-     : memref<64xf32> into memref<8x8xf32>
-  %s = memref.subview %e[0, 0] [4, 8] [1, 1]
-     : memref<8x8xf32> to memref<4x8xf32, strided<[8, 1]>>
-  %cast = memref.cast %s
-        : memref<4x8xf32, strided<[8, 1]>> to memref<?x8xf32, strided<[8, 1]>>
-  return %cast : memref<?x8xf32, strided<[8, 1]>>
-}
-
-// --- Output returned through memref.subview: the parent alloc becomes
-//     hip.alloc_output; the subview is left in place feeding the return. ---
-// CHECK-LABEL: func.func @subview_output
-// CHECK-SAME:    (%[[CTX:.*]]: !hip.context)
-// CHECK-NOT:     memref.alloc
-// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]]) {out_idx = 0 : i64} : memref<4x8xf32>
-// CHECK:         %[[S:.*]] = memref.subview %[[OUT]]
-// CHECK:         return %[[S]]
-func.func @subview_output(%ctx: !hip.context) -> memref<2x4xf32, strided<[8, 1]>> {
-  %x = memref.alloc() : memref<4x8xf32>
-  %s = memref.subview %x[0, 0] [2, 4] [1, 1]
-     : memref<4x8xf32> to memref<2x4xf32, strided<[8, 1]>>
-  return %s : memref<2x4xf32, strided<[8, 1]>>
+// --- A zero-offset, unit-step, rank-preserving subview returned through an
+//     identity-layout cast is copied into a fresh exact-shape output. The
+//     capacity root remains a normal alloc (and will be pooled); the callback
+//     receives the logical returned extent, and the return uses the fresh base.
+//     This is the bufferized direct-NonZero-output shape. ---
+// CHECK-LABEL: func.func @trimmed_subview_output
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context, %[[N:.*]]: index)
+// CHECK:         %[[ROOT:.*]] = memref.alloc() : memref<2x12xi64>
+// CHECK:         %[[VIEW:.*]] = memref.subview %[[ROOT]][0, 0] [2, %[[N]]] [1, 1]
+// CHECK:         %[[CAST:.*]] = memref.cast %[[VIEW]] : memref<2x?xi64, strided<[12, 1]>> to memref<2x?xi64>
+// CHECK:         %[[DIM:.*]] = memref.dim %[[CAST]], %{{.*}} : memref<2x?xi64>
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]], %[[DIM]]) {out_idx = 0 : i64} : memref<2x?xi64>
+// CHECK:         memref.copy %[[CAST]], %[[OUT]] : memref<2x?xi64> to memref<2x?xi64>
+// CHECK:         return %[[OUT]]
+func.func @trimmed_subview_output(%ctx: !hip.context, %n: index)
+    -> memref<2x?xi64> {
+  %capacity = memref.alloc() : memref<2x12xi64>
+  %trimmed = memref.subview %capacity[0, 0] [2, %n] [1, 1]
+      : memref<2x12xi64> to memref<2x?xi64, strided<[12, 1]>>
+  %logical = memref.cast %trimmed
+      : memref<2x?xi64, strided<[12, 1]>> to memref<2x?xi64>
+  return %logical : memref<2x?xi64>
 }
 
 // --- DETR-class expand: internal rank-2 Gemm buffer, graph output rank 3.

@@ -6,11 +6,16 @@
 //
 // Turns each graph-output `memref.alloc` into a `hip.alloc_output`. A graph
 // output is a buffer that func.return hands back -- either the alloc directly,
-// or the alloc after it goes through view ops like `memref.cast`,
-// `memref.collapse_shape`, `memref.expand_shape`, or `memref.subview` (any
-// number of them, in any order). `hip.alloc_output` gets its buffer from the
-// EP's output allocator, so the EP owns and frees it. Allocs that are NOT
-// returned are left alone and get freed / pooled later like normal temporaries.
+// through any number of `memref.cast` ops, or through one representable
+// `memref.collapse_shape` / `memref.expand_shape` (optionally with casts).
+// A zero-offset, unit-step, rank-preserving subview returned as an
+// identity-layout memref is copied into a fresh exact-shape output immediately
+// before return. Other returned view chains are rejected before mutation: the
+// allocator callback carries shape only and cannot represent a subview's
+// offset/strides.
+// `hip.alloc_output` gets its buffer from the EP's output allocator, so the EP
+// owns and frees it. Allocs that are NOT returned are left alone and get freed
+// / pooled later like normal temporaries.
 //
 // For each matching alloc the rewrite:
 //   - sets `out_idx` to its position in func.return (the graph output index),
@@ -20,15 +25,12 @@
 //   - when the output is returned through a rank-changing view (collapse_shape
 //     or expand_shape), stamps `hipdnn.abi_shape` / `hipdnn.abi_groups` so the
 //     HIP->LLVM lowering issues the output-allocator callback at the RETURNED
-//     (ONNX) rank rather than the internal compute rank (see
-//     stampAbiReshapeAttrs).
+//     (ONNX) rank rather than the internal compute rank.
 //
-// How outputs are found. Rather than listing every view op by hand, the pass
-// asks `BufferViewFlowAnalysis` one question per alloc: does any value derived
-// from the alloc (through any chain of view ops) show up in func.return? That
-// covers every case with no per-op special-casing -- a direct return, a single
-// `memref.cast`, or a reshaped output such as a rank-4 conv result collapsed to
-// rank-2 before the return.
+// How outputs are found. `BufferViewFlowAnalysis` discovers every returned
+// alias of an alloc. A separate backward walk then proves that the exact
+// alloc-to-return chain is representable by the callback ABI. Discovery and
+// validation finish for every output before any IR is changed.
 //
 // Only public (graph-entry) functions are rewritten. Private helpers (e.g.
 // outlined `onnx.Loop` bodies) also take a `!hip.context` arg and return
@@ -63,6 +65,7 @@
 #include "mlir/Dialect/Bufferization/Transforms/BufferViewFlowAnalysis.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -80,8 +83,22 @@ namespace hip {
 
 namespace {
 
-// Stamp `hipdnn.abi_shape` / `hipdnn.abi_groups` when the graph output is
-// returned through a single rank-changing view (collapse_shape or expand_shape,
+struct AbiReshapePlan {
+  bool stampAttrs = false;
+  bool materializeExactCopy = false;
+  SmallVector<int64_t> shape;
+  SmallVector<int64_t> groups;
+};
+
+struct OutputPlan {
+  memref::AllocOp alloc;
+  int64_t outIdx;
+  AbiReshapePlan abiReshape;
+};
+
+// Validate the exact alloc-to-return chain and plan
+// `hipdnn.abi_shape` / `hipdnn.abi_groups` when the graph output is returned
+// through a single rank-changing view (collapse_shape or expand_shape,
 // optionally wrapped in memref.cast) of the EP-owned buffer.
 //
 // Collapse (internal rank > return rank): abi_groups[e] = # internal dims
@@ -90,86 +107,203 @@ namespace {
 // Expand (internal rank < return rank, e.g. DETR logits): abi_groups[i] = #
 // external dims expanded from internal dim i (sum = external rank, len =
 // internal rank).
-static void stampAbiReshapeAttrs(AllocOutputOp allocOutput, Value retVal,
-                                 OpBuilder &builder) {
-  Value root = allocOutput.getResult();
+static LogicalResult planReturnedViewChain(memref::AllocOp alloc, Value retVal,
+                                           int64_t outIdx,
+                                           func::ReturnOp returnOp,
+                                           AbiReshapePlan &plan) {
+  Value root = alloc.getResult();
   auto rootType = dyn_cast<MemRefType>(root.getType());
   if (!rootType)
-    return;
+    return success();
 
   memref::CollapseShapeOp collapse;
   memref::ExpandShapeOp expand;
+  memref::SubViewOp subview;
   Value cur = retVal;
   while (cur != root) {
     Operation *def = cur.getDefiningOp();
-    if (!def)
-      return;
+    if (!def) {
+      returnOp.emitError()
+          << "output #" << outIdx
+          << " has an unsupported returned output-view chain that does not "
+             "trace back to its allocation";
+      return failure();
+    }
     if (auto c = dyn_cast<memref::CollapseShapeOp>(def)) {
-      if (collapse || expand)
-        return;
+      if (collapse || expand || subview) {
+        returnOp.emitError()
+            << "output #" << outIdx
+            << " has an unsupported returned output-view chain mixing "
+               "memref.subview or multiple rank-changing reshape ops";
+        return failure();
+      }
       collapse = c;
       cur = c.getSrc();
       continue;
     }
     if (auto e = dyn_cast<memref::ExpandShapeOp>(def)) {
-      if (collapse || expand)
-        return;
+      if (collapse || expand || subview) {
+        returnOp.emitError()
+            << "output #" << outIdx
+            << " has an unsupported returned output-view chain mixing "
+               "memref.subview or multiple rank-changing reshape ops";
+        return failure();
+      }
       expand = e;
       cur = e.getSrc();
+      continue;
+    }
+    if (auto s = dyn_cast<memref::SubViewOp>(def)) {
+      if (collapse || expand || subview) {
+        returnOp.emitError()
+            << "output #" << outIdx
+            << " has an unsupported returned output-view chain mixing "
+               "memref.subview or multiple rank-changing reshape ops";
+        return failure();
+      }
+      subview = s;
+      cur = s.getSource();
       continue;
     }
     if (auto castOp = dyn_cast<memref::CastOp>(def)) {
       cur = castOp.getSource();
       continue;
     }
-    return;
+    returnOp.emitError()
+        << "output #" << outIdx
+        << " has an unsupported returned output-view chain through '"
+        << def->getName()
+        << "'; the output allocator callback cannot represent view offsets or "
+           "strides";
+    return failure();
   }
+
+  if (subview) {
+    auto extType = dyn_cast<MemRefType>(retVal.getType());
+    Type elemType = extType ? extType.getElementType() : Type();
+    if (!extType || extType.getRank() != rootType.getRank()) {
+      returnOp.emitError()
+          << "output #" << outIdx
+          << " has an unsupported rank-reducing returned memref.subview";
+      return failure();
+    }
+    for (OpFoldResult offset : subview.getMixedOffsets()) {
+      std::optional<int64_t> value = getConstantIntValue(offset);
+      if (!value || *value != 0) {
+        returnOp.emitError()
+            << "output #" << outIdx
+            << " has a returned memref.subview with a nonzero or dynamic "
+               "offset; exact-output copying requires zero offsets";
+        return failure();
+      }
+    }
+    for (OpFoldResult stride : subview.getMixedStrides()) {
+      std::optional<int64_t> value = getConstantIntValue(stride);
+      if (!value || *value != 1) {
+        returnOp.emitError()
+            << "output #" << outIdx
+            << " has a returned memref.subview with a non-unit or dynamic "
+               "stride; exact-output copying requires unit slice strides";
+        return failure();
+      }
+    }
+    if (!extType.getLayout().isIdentity()) {
+      returnOp.emitError()
+          << "output #" << outIdx
+          << " has a returned memref.subview without an identity-layout "
+             "return type; exact-output copying cannot replace the return";
+      return failure();
+    }
+    if (!elemType.isIntOrFloat() || elemType.getIntOrFloatBitWidth() % 8 != 0) {
+      returnOp.emitError()
+          << "output #" << outIdx
+          << " has a returned memref.subview with an element type unsupported "
+             "by exact-output copying";
+      return failure();
+    }
+    plan.materializeExactCopy = true;
+    return success();
+  }
+
   if (!collapse && !expand)
-    return;
+    return success();
 
-  auto extType = cast<MemRefType>(retVal.getType());
+  auto extType = dyn_cast<MemRefType>(retVal.getType());
+  if (!extType) {
+    returnOp.emitError() << "output #" << outIdx
+                         << " has a non-memref returned output-view type";
+    return failure();
+  }
   if (extType.getRank() == rootType.getRank())
-    return;
+    return success();
 
-  if (auto module = allocOutput->getParentOfType<ModuleOp>()) {
+  if (auto module = alloc->getParentOfType<ModuleOp>()) {
     auto outputShapes =
         module->getAttrOfType<ArrayAttr>("hipdnn.output_shapes");
-    int64_t outIdx = allocOutput.getOutIdx();
     if (outputShapes && outIdx >= 0 &&
         outIdx < static_cast<int64_t>(outputShapes.size())) {
       if (auto metaShape = dyn_cast<DenseI64ArrayAttr>(
               outputShapes[static_cast<unsigned>(outIdx)])) {
-        if (static_cast<int64_t>(metaShape.size()) != extType.getRank())
-          return;
+        if (static_cast<int64_t>(metaShape.size()) != extType.getRank()) {
+          returnOp.emitError()
+              << "output #" << outIdx << " has output metadata rank "
+              << metaShape.size() << " but its returned output-view rank is "
+              << extType.getRank();
+          return failure();
+        }
       }
     }
   }
 
-  SmallVector<int64_t> groups;
   if (collapse) {
     int64_t total = 0;
     for (ArrayRef<int64_t> g : collapse.getReassociationIndices()) {
-      groups.push_back(static_cast<int64_t>(g.size()));
+      plan.groups.push_back(static_cast<int64_t>(g.size()));
       total += static_cast<int64_t>(g.size());
     }
     if (total != rootType.getRank() ||
-        static_cast<int64_t>(groups.size()) != extType.getRank())
-      return;
+        static_cast<int64_t>(plan.groups.size()) != extType.getRank()) {
+      returnOp.emitError()
+          << "output #" << outIdx
+          << " has an unsupported memref.collapse_shape reassociation for the "
+             "output allocator callback";
+      return failure();
+    }
   } else {
     int64_t total = 0;
     for (ArrayRef<int64_t> g : expand.getReassociationIndices()) {
-      groups.push_back(static_cast<int64_t>(g.size()));
+      plan.groups.push_back(static_cast<int64_t>(g.size()));
       total += static_cast<int64_t>(g.size());
     }
     if (total != extType.getRank() ||
-        static_cast<int64_t>(groups.size()) != rootType.getRank())
-      return;
+        static_cast<int64_t>(plan.groups.size()) != rootType.getRank()) {
+      returnOp.emitError()
+          << "output #" << outIdx
+          << " has an unsupported memref.expand_shape reassociation for the "
+             "output allocator callback";
+      return failure();
+    }
+
+    int64_t externalDim = 0;
+    for (int64_t groupSize : plan.groups) {
+      int64_t dynamicDims = 0;
+      for (int64_t i = 0; i < groupSize; ++i)
+        dynamicDims +=
+            ShapedType::isDynamic(extType.getDimSize(externalDim + i));
+      if (dynamicDims > 1) {
+        returnOp.emitError()
+            << "output #" << outIdx
+            << " has an unsupported memref.expand_shape group with multiple "
+               "dynamic returned dimensions";
+        return failure();
+      }
+      externalDim += groupSize;
+    }
   }
 
-  allocOutput->setAttr(kAbiShapeAttrName,
-                       builder.getDenseI64ArrayAttr(extType.getShape()));
-  allocOutput->setAttr(kAbiGroupsAttrName,
-                       builder.getDenseI64ArrayAttr(groups));
+  plan.stampAttrs = true;
+  plan.shape.assign(extType.getShape().begin(), extType.getShape().end());
+  return success();
 }
 
 struct UseOutputAllocatorPass
@@ -200,8 +334,9 @@ struct UseOutputAllocatorPass
     // Build the alias analysis once for the whole function.
     BufferViewFlowAnalysis aliasAnalysis(funcOp);
 
-    // Phase 1 -- classify (analysis only, no IR mutation). For each alloc that
-    // is a graph output, record (alloc, out_idx). resolve() gives back the
+    // Phase 1 -- classify and validate (analysis only, no IR mutation). For
+    // each alloc that is a graph output, record (alloc, out_idx). resolve()
+    // gives back the
     // alloc plus every value derived from it through view ops (cast / collapse
     // / expand / subview / ...), so a returned alloc is found even when it was
     // reshaped on the way to the return. getOperandNumber() on a func.return
@@ -211,7 +346,7 @@ struct UseOutputAllocatorPass
     // analysis (which caches Value handles) is never read after the IR it
     // describes has been mutated. Walk order is program order, so out_idx
     // values print in order in phase 2.
-    SmallVector<std::pair<memref::AllocOp, int64_t>> outputs;
+    SmallVector<OutputPlan> outputs;
     funcOp.walk([&](memref::AllocOp allocOp) {
       int64_t outIdx = -1;
       for (Value aliased : aliasAnalysis.resolve(allocOp.getResult()))
@@ -222,7 +357,7 @@ struct UseOutputAllocatorPass
               outIdx = idx;
           }
       if (outIdx >= 0)
-        outputs.emplace_back(allocOp, outIdx);
+        outputs.push_back({allocOp, outIdx, {}});
     });
 
     // The single func.return of this graph-entry function. Used to recover the
@@ -231,9 +366,51 @@ struct UseOutputAllocatorPass
     func::ReturnOp returnOp;
     funcOp.walk([&](func::ReturnOp r) { returnOp = r; });
 
+    // Validate every returned alias before rewriting even the first alloc.
+    // This makes pass failure atomic with respect to this function: unsupported
+    // subviews or mixed reshape chains cannot leave earlier outputs converted.
+    bool invalid = false;
+    for (OutputPlan &output : outputs) {
+      if (!returnOp || output.outIdx < 0 ||
+          output.outIdx >= static_cast<int64_t>(returnOp.getNumOperands())) {
+        funcOp.emitError() << "cannot resolve func.return operand for output #"
+                           << output.outIdx;
+        invalid = true;
+        continue;
+      }
+      if (failed(planReturnedViewChain(
+              output.alloc, returnOp.getOperand(output.outIdx), output.outIdx,
+              returnOp, output.abiReshape)))
+        invalid = true;
+    }
+    if (invalid) {
+      signalPassFailure();
+      return;
+    }
+
     // Phase 2 -- rewrite (IR mutation only; the analysis is no longer queried).
     OpBuilder builder(funcOp.getContext());
-    for (auto [allocOp, outIdx] : outputs) {
+    for (OutputPlan &output : outputs) {
+      memref::AllocOp allocOp = output.alloc;
+      int64_t outIdx = output.outIdx;
+      if (output.abiReshape.materializeExactCopy) {
+        Value returned = returnOp.getOperand(outIdx);
+        auto outputType = cast<MemRefType>(returned.getType());
+        builder.setInsertionPoint(returnOp);
+        SmallVector<Value> dynamicSizes;
+        for (int64_t dim = 0; dim < outputType.getRank(); ++dim)
+          if (outputType.isDynamicDim(dim))
+            dynamicSizes.push_back(memref::DimOp::create(
+                builder, returnOp.getLoc(), returned, dim));
+        auto exactOutput = AllocOutputOp::create(
+            builder, returnOp.getLoc(), outputType, ctx, dynamicSizes,
+            builder.getI64IntegerAttr(outIdx));
+        memref::CopyOp::create(builder, returnOp.getLoc(), returned,
+                               exactOutput.getResult());
+        returnOp->setOperand(outIdx, exactOutput.getResult());
+        continue;
+      }
+
       // The EP owns this buffer now, so drop any dealloc of it. A returned
       // buffer normally has none, but remove one if present -- the EP-owned
       // output must never be freed by the graph.
@@ -248,13 +425,12 @@ struct UseOutputAllocatorPass
       allocOp.getResult().replaceAllUsesWith(allocOutput.getResult());
       allocOp.erase();
 
-      // After RAUW the returned value's view chain is rooted at allocOutput.
-      // Record the ONNX return shape when it is a rank-reduced collapse of the
-      // internal compute buffer, so the lowering issues the output-allocator
-      // callback at the returned (ONNX) rank (see stampAbiReshapeAttrs).
-      if (returnOp && outIdx >= 0 &&
-          outIdx < static_cast<int64_t>(returnOp.getNumOperands()))
-        stampAbiReshapeAttrs(allocOutput, returnOp.getOperand(outIdx), builder);
+      if (output.abiReshape.stampAttrs) {
+        allocOutput->setAttr(kAbiShapeAttrName, builder.getDenseI64ArrayAttr(
+                                                    output.abiReshape.shape));
+        allocOutput->setAttr(kAbiGroupsAttrName, builder.getDenseI64ArrayAttr(
+                                                     output.abiReshape.groups));
+      }
     }
   }
 };

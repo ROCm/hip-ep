@@ -67,7 +67,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | ScatterElements | Custom HIP kernel (reductions: none / add / mul / min / max) |
 | Range | Custom HIP kernel |
 | Size | Custom HIP kernel; folds to a constant for static shapes |
-| NonZero | Custom HIP kernel |
+| NonZero | Custom HIP kernel; direct graph outputs copy the trimmed capacity-buffer subview into an exact output |
 | Gather | Custom HIP kernel |
 | GatherElements | Custom HIP kernel |
 | TopK | Custom HIP kernel |
