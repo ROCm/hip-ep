@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Generate MiniONNX dialect from ONNX schemas - handles all ONNX ops.
+Generate MiniONNX dialect from ONNX schemas.
 """
 
 import argparse
 import sys
 from collections import OrderedDict
-from typing import Text
+from typing import Text, Optional, Tuple, List
 
 try:
     from onnx import defs
@@ -37,18 +37,23 @@ def onnx_attr_type_to_mlir_attr_type(t):
     return type_map.get(onnx_attr_type, "AnyAttr")
 
 
-def parse_type_str(allowed_type):
-    """Convert ONNX type string to MLIR TableGen type."""
-    # Skip unsupported types
-    if "string" in allowed_type.lower():
-        return None
-    if "complex" in allowed_type.lower():
-        return None
-    if "seq(" in allowed_type.lower():  # Skip sequence types
-        return None
-    if "map(" in allowed_type.lower():  # Skip map types
-        return None
-    if "optional(" in allowed_type.lower():  # Skip optional wrapper for now
+def is_supported_type(type_str: str) -> bool:
+    lower = type_str.lower()
+    if "seq(" in lower:
+        return False
+    if "map(" in lower:
+        return False
+    if "optional(" in lower:
+        return False
+    if "string" in lower:
+        return False
+    if "complex" in lower:
+        return False
+    return True
+
+
+def parse_type_str(allowed_type: str) -> Optional[str]:
+    if not is_supported_type(allowed_type):
         return None
 
     onnx_to_mlir = {
@@ -76,16 +81,41 @@ def parse_type_str(allowed_type):
         "float8e5m2fnuz": "F8E5M2FNUZ",
     }
 
+    result = allowed_type
     mapping = sorted(onnx_to_mlir.items(), key=lambda x: len(x[0]), reverse=True)
     for key, value in mapping:
-        allowed_type = allowed_type.replace(key, value)
-    return allowed_type
+        result = result.replace(key, value)
+    return result
+
+
+def can_generate_operation(schema) -> Tuple[bool, str]:
+    for inp in schema.inputs:
+        if inp.type_str and not is_supported_type(inp.type_str):
+            return False, f"unsupported input type: {inp.type_str}"
+        for constraint in schema.type_constraints:
+            if inp.type_str == constraint.type_param_str:
+                if not any(is_supported_type(t) for t in constraint.allowed_type_strs):
+                    return False, "all input types unsupported"
+
+    for out in schema.outputs:
+        if out.type_str and not is_supported_type(out.type_str):
+            return False, f"unsupported output type: {out.type_str}"
+        for constraint in schema.type_constraints:
+            if out.type_str == constraint.type_param_str:
+                if not any(is_supported_type(t) for t in constraint.allowed_type_strs):
+                    return False, "all output types unsupported"
+
+    for attr in schema.attributes.values():
+        if attr.type == OpSchema.AttrType.GRAPH:
+            return False, "has subgraph attributes (If/Loop/Scan)"
+
+    return True, ""
 
 
 def parse_type_constraints(schema):
     type_str_dict = {}
     for constraint in schema.type_constraints:
-        mlir_types = []
+        mlir_types: List[str] = []
         for allowed_type in constraint.allowed_type_strs:
             mlir_type = parse_type_str(allowed_type)
             if mlir_type and mlir_type not in mlir_types:
@@ -147,6 +177,25 @@ def get_attrs(schema):
     if not schema.attributes:
         return OrderedDict()
 
+    def format_default_value(value):
+        if isinstance(value, float):
+            import numpy as np
+            formatted = str(np.round(value, 5))
+            if len(formatted) > 10:
+                formatted = f"({value:e})"
+            return formatted
+        elif isinstance(value, (bytes, bytearray)):
+            return str(value.decode("utf-8"))
+        elif isinstance(value, list):
+            # Format list
+            formatted_list = [format_default_value(v) for v in value]
+            result = str(formatted_list)
+            result = result.replace("[", "{", 1)
+            result = result.replace("]", "}", 1)
+            result = result.replace("'", '\\"')
+            return result
+        return str(value)
+
     name_to_type = OrderedDict()
     for _, attr in sorted(schema.attributes.items()):
         if attr.type == OpSchema.AttrType.GRAPH:
@@ -157,6 +206,9 @@ def get_attrs(schema):
         if attr.required:
             name_to_type[attr.name] = mlir_type
         else:
+            # All non-required attributes use OptionalAttr
+            # NOTE: We lose default value information, but DefaultValuedAttr
+            # triggers BytecodeOpInterface in MLIR 22 which requires properties support
             name_to_type[attr.name] = f"OptionalAttr<{mlir_type}>"
 
     return name_to_type
@@ -196,6 +248,7 @@ def gen_op_def(schema):
         s += indent + "let arguments = (ins);\n"
 
     outs = get_operands_or_results(schema, type_str_dict, is_input=False)
+
     if outs:
         outs_strs = [f"{ty}:${name}" for name, ty in outs.items()]
         s += indent + "let results = (outs\n"
@@ -204,10 +257,9 @@ def gen_op_def(schema):
     else:
         s += indent + "let results = (outs);\n"
 
-    s += indent + "let skipDefaultBuilders = 1;\n"
-    s += indent + "let builders = [\n"
-    s += inc_indent(indent) + 'OpBuilder<(ins "ValueRange":$operands, "ArrayRef<NamedAttribute>":$attributes)>\n'
-    s += indent + "];\n"
+    # Add generic assembly format - this tells TableGen how to serialize/deserialize
+    # the operation and allows it to auto-generate all properties infrastructure
+    s += indent + 'let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";\n'
 
     s += "}\n\n"
     return s
@@ -231,19 +283,51 @@ def main():
         help="Comma-separated list of ONNX operations or 'all'"
     )
     parser.add_argument(
+        "--skip",
+        default="",
+        help="Comma-separated list of operations to skip"
+    )
+    parser.add_argument(
         "--output",
         default="MiniONNXOps.td.inc",
         help="Output file"
     )
 
     args = parser.parse_args()
-    
+
+    skip_set = set(name.strip() for name in args.skip.split(",") if name.strip())
+
     if args.ops.lower() == "all":
-        # Generate all ONNX ops
         schemas = defs.get_all_schemas_with_history()
-        op_names = sorted(set(s.name for s in schemas if s.domain == ""))
+        all_ops = sorted(set(s.name for s in schemas if s.domain == ""))
+
+        op_names: List[str] = []
+        skipped_filter: List[Tuple[str, str]] = []
+        skipped_manual: List[str] = []
+
+        for op_name in all_ops:
+            if op_name in skip_set:
+                skipped_manual.append(op_name)
+                continue
+
+            schema = get_schema(op_name)
+            can_gen, reason = can_generate_operation(schema)
+            if can_gen:
+                op_names.append(op_name)
+            else:
+                skipped_filter.append((op_name, reason))
+
+        print(f"Generating {len(op_names)}/{len(all_ops)} operations")
+        if skipped_manual:
+            print(f"\nManually skipped ({len(skipped_manual)}):")
+            for name in skipped_manual:
+                print(f"  - {name}")
+        if skipped_filter:
+            print(f"\nFiltered out ({len(skipped_filter)}):")
+            for name, reason in skipped_filter:
+                print(f"  - {name}: {reason}")
     else:
-        op_names = [name.strip() for name in args.ops.split(",")]
+        op_names = [name.strip() for name in args.ops.split(",") if name.strip() not in skip_set]
 
     header = """//********************************************************
 //   MiniONNX Operation Definitions
@@ -263,11 +347,10 @@ def main():
                 print(f"WARNING: Operation {op_name} not found", file=sys.stderr)
                 continue
 
-            print(f"Generating {op_name}...")
             op_def = gen_op_def(schema)
             f.write(op_def)
 
-    print(f"\nGenerated {len(op_names)} operations to {args.output}")
+    print(f"\n✅ Generated {len(op_names)} operations to {args.output}")
 
 
 if __name__ == "__main__":
