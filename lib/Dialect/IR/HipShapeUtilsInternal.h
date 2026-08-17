@@ -5,7 +5,7 @@
 #ifndef HIP_DIALECT_IR_HIP_SHAPE_UTILS_INTERNAL_H
 #define HIP_DIALECT_IR_HIP_SHAPE_UTILS_INTERNAL_H
 
-#include "hip/Dialect/IR/HipShapeUtils.h"
+#include "hip/Dialect/IR/HipShapeUtilsCommon.h"
 
 #include <string>
 

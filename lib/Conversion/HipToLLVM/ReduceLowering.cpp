@@ -4,7 +4,7 @@
  */
 
 #include "HipToLLVMUtils.h"
-#include "hip/Dialect/IR/HipShapeUtils.h"
+#include "hip/Dialect/IR/HipShapeUtilsReduction.h"
 
 namespace mlir {
 namespace hip {

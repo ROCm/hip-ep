@@ -5,12 +5,12 @@
 //===- HipShapeUtilsConvPool.cpp - Convolution and pooling shapes ---------===//
 //
 // Category implementation for the public shape helpers declared in
-// `hip/Dialect/IR/HipShapeUtils.h`.
+// `hip/Dialect/IR/HipShapeUtilsConvPool.h`.
 //
 //===----------------------------------------------------------------------===//
 
+#include "hip/Dialect/IR/HipShapeUtilsConvPool.h"
 #include "HipShapeUtilsInternal.h"
-#include "hip/Dialect/IR/HipShapeUtils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
