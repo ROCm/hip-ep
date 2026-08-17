@@ -55,8 +55,8 @@ inline constexpr llvm::StringLiteral kCompileTimeScalarAttr =
 /// compile time: inline dense constants, hip.constant carriers, globals with
 /// initial_value, or extern globals tagged with `hip.compile_time_scalar`.
 inline std::optional<int64_t> getCompileTimeScalarInt(mlir::Value value) {
-  auto scalarFromDense = [](mlir::DenseElementsAttr dense)
-      -> std::optional<int64_t> {
+  auto scalarFromDense =
+      [](mlir::DenseElementsAttr dense) -> std::optional<int64_t> {
     if (!dense || dense.getNumElements() != 1)
       return std::nullopt;
     mlir::Type elemTy = dense.getElementType();
