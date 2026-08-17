@@ -25,14 +25,17 @@ namespace hipsr {
 
 void populateOnnxToHipsrConstantPatterns(::mlir::RewritePatternSet &patterns);
 
-void populateCastConversionPatterns(::mlir::RewritePatternSet &patterns,
+void populateCastConversionPatterns(const ::mlir::TypeConverter &typeConverter,
+                                    ::mlir::RewritePatternSet &patterns,
                                     ::mlir::MLIRContext *ctx);
 
-void populateMatMulConversionPatterns(::mlir::RewritePatternSet &patterns,
-                                      ::mlir::MLIRContext *ctx);
+void populateMatMulConversionPatterns(
+    const ::mlir::TypeConverter &typeConverter,
+    ::mlir::RewritePatternSet &patterns, ::mlir::MLIRContext *ctx);
 
-void populateExpandConversionPatterns(::mlir::RewritePatternSet &patterns,
-                                      ::mlir::MLIRContext *ctx);
+void populateExpandConversionPatterns(
+    const ::mlir::TypeConverter &typeConverter,
+    ::mlir::RewritePatternSet &patterns, ::mlir::MLIRContext *ctx);
 
 void populateReturnConversionPatterns(::mlir::RewritePatternSet &patterns,
                                       ::mlir::MLIRContext *ctx);
