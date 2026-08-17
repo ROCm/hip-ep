@@ -2,41 +2,42 @@
 ## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 ## Licensed under the MIT License.
 ##
-## Interleaved, order-reversed A/B (or A/B/C/...) of DLL variants by TTFT.
-##
-## Why not just run arm A a few times, then arm B a few times:
-##
-##  - Run-to-run spread on a thermally managed APU is comparable to the effects
-##    worth shipping (~0.8% vs ~1-2%), so block-sequential runs let slow drift
-##    land entirely on one arm. Interleaving and pairing by round cancels it.
-##  - Position within a round is itself a bias. Always run at least one block
-##    with -Reverse and check the delta survives; if it flips, you measured the
-##    order, not the change.
-##  - Discard rounds taken while the box is shedding heat from a build or a test
-##    suite. They report a different answer -- in one measured case the opposite
-##    sign -- and they are recognisable by sitting well above the known baseline.
-##
-## Each arm gets its OWN TEMP, and therefore its own autotune cache file: the
-## on-disk WMMA cache holds a single build timestamp and is discarded when it
-## does not match, so a shared TEMP would make every DLL swap a cold-tune run.
-##
-## Arms are defined in a JSON manifest:
-##
-##   { "base":  { "dll": "D:\\builds\\base\\custom_kernels_gfx1151.dll" },
-##     "cand":  { "dll": "D:\\builds\\cand\\custom_kernels_gfx1151.dll" } }
-##
-## The named DLL is copied over the same filename in $env:HIPEP_BIN before each
-## run, so every arm is measured through one identical harness.
-##
-## Use "dlls" instead when an arm spans more than one artifact:
-##
-##   { "base": { "dlls": ["D:\\b\\base\\hipgpu.dll",
-##                        "D:\\b\\base\\custom_kernels_gfx1151.dll"] }, ... }
-##
-## Anything touching lib/Conversion or lib/Runtime/real lands in hipgpu.dll, and
-## the two share the extern "C" kernel ABI, so swapping only one of the pair
-## measures a mix of both arms. Every arm must list the same file names, or the
-## unlisted one silently persists from whichever arm ran last.
+
+# Interleaved, order-reversed A/B (or A/B/C/...) of DLL variants by TTFT.
+#
+# Why not just run arm A a few times, then arm B a few times:
+#
+#  - Run-to-run spread on a thermally managed APU is comparable to the effects
+#    worth shipping (~0.8% vs ~1-2%), so block-sequential runs let slow drift
+#    land entirely on one arm. Interleaving and pairing by round cancels it.
+#  - Position within a round is itself a bias. Always run at least one block
+#    with -Reverse and check the delta survives; if it flips, you measured the
+#    order, not the change.
+#  - Discard rounds taken while the box is shedding heat from a build or a test
+#    suite. They report a different answer -- in one measured case the opposite
+#    sign -- and they are recognisable by sitting well above the known baseline.
+#
+# Each arm gets its OWN TEMP, and therefore its own autotune cache file: the
+# on-disk WMMA cache holds a single build timestamp and is discarded when it
+# does not match, so a shared TEMP would make every DLL swap a cold-tune run.
+#
+# Arms are defined in a JSON manifest:
+#
+#   { "base":  { "dll": "D:\\builds\\base\\custom_kernels_gfx1151.dll" },
+#     "cand":  { "dll": "D:\\builds\\cand\\custom_kernels_gfx1151.dll" } }
+#
+# The named DLL is copied over the same filename in $env:HIPEP_BIN before each
+# run, so every arm is measured through one identical harness.
+#
+# Use "dlls" instead when an arm spans more than one artifact:
+#
+#   { "base": { "dlls": ["D:\\b\\base\\hipgpu.dll",
+#                        "D:\\b\\base\\custom_kernels_gfx1151.dll"] }, ... }
+#
+# Anything touching lib/Conversion or lib/Runtime/real lands in hipgpu.dll, and
+# the two share the extern "C" kernel ABI, so swapping only one of the pair
+# measures a mix of both arms. Every arm must list the same file names, or the
+# unlisted one silently persists from whichever arm ran last.
 
 param(
   [Parameter(Mandatory = $true)][string]$Manifest,

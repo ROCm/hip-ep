@@ -2,36 +2,37 @@
 ## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 ## Licensed under the MIT License.
 ##
-## Build the runtime artifacts and deploy them where the benchmark drivers load
-## them from, so an A/B is one command and cannot silently measure a stale DLL.
-##
-## Why this exists as a script rather than a documented copy step. The perf
-## harness measures whatever is in $HIPEP_BIN, which for the vlm driver is a
-## venv's onnxruntime\capi -- not the cmake install prefix. Nothing connects the
-## two, so a hand-run build followed by a forgotten copy reports the previous
-## DLL's number as the new one. That failure is silent and produces a plausible
-## result, which is the worst kind. Deploying prints each file's hash so a
-## comparison against the previous run's hash proves the binary actually moved.
-##
-## Three artifacts carry the operators the harness profiles:
-##   hipgpu.dll                  lib/Runtime (gqa.cpp, matmul_nbits.cpp)
-##   custom_kernels_<arch>.dll   lib/Runtime/Kernels/hip (gqa_kernel.hip,
-##                               matmul_nbits_kernel.hip)
-##   hip-compiler.dll            lib/Dialect and lib/Conversion -- every MLIR
-##                               pass, fold and canonicalization
-## They are deployed as a set on purpose. hipgpu and custom_kernels share the
-## extern "C" kernel ABI, so a mixed pair is only accidentally correct -- and a
-## mixed pair was in fact deployed on this machine (hipgpu from one build,
-## custom_kernels from an eight-hour-older one), which is unattributable as a
-## baseline.
-##
-## hip-compiler.dll is here because leaving it out is silent in a way the other
-## two are not. A graph-level change lowers to the same runtime entry points, so
-## a stale compiler produces a correct, fast-looking run that simply never
-## applies the rewrite. The causal-conv Transpose fold lives entirely in
-## hip-compiler.dll (lib/Dialect/IR/HipCausalConvCanonicalize.cpp); deploying
-## without it measures the conv kernel change alone and reports the fold as
-## worthless.
+
+# Build the runtime artifacts and deploy them where the benchmark drivers load
+# them from, so an A/B is one command and cannot silently measure a stale DLL.
+#
+# Why this exists as a script rather than a documented copy step. The perf
+# harness measures whatever is in $HIPEP_BIN, which for the vlm driver is a
+# venv's onnxruntime\capi -- not the cmake install prefix. Nothing connects the
+# two, so a hand-run build followed by a forgotten copy reports the previous
+# DLL's number as the new one. That failure is silent and produces a plausible
+# result, which is the worst kind. Deploying prints each file's hash so a
+# comparison against the previous run's hash proves the binary actually moved.
+#
+# Three artifacts carry the operators the harness profiles:
+#   hipgpu.dll                  lib/Runtime (gqa.cpp, matmul_nbits.cpp)
+#   custom_kernels_<arch>.dll   lib/Runtime/Kernels/hip (gqa_kernel.hip,
+#                               matmul_nbits_kernel.hip)
+#   hip-compiler.dll            lib/Dialect and lib/Conversion -- every MLIR
+#                               pass, fold and canonicalization
+# They are deployed as a set on purpose. hipgpu and custom_kernels share the
+# extern "C" kernel ABI, so a mixed pair is only accidentally correct -- and a
+# mixed pair was in fact deployed on this machine (hipgpu from one build,
+# custom_kernels from an eight-hour-older one), which is unattributable as a
+# baseline.
+#
+# hip-compiler.dll is here because leaving it out is silent in a way the other
+# two are not. A graph-level change lowers to the same runtime entry points, so
+# a stale compiler produces a correct, fast-looking run that simply never
+# applies the rewrite. The causal-conv Transpose fold lives entirely in
+# hip-compiler.dll (lib/Dialect/IR/HipCausalConvCanonicalize.cpp); deploying
+# without it measures the conv kernel change alone and reports the fold as
+# worthless.
 
 [CmdletBinding()]
 param(

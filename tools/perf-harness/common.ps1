@@ -2,10 +2,11 @@
 ## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 ## Licensed under the MIT License.
 ##
-## Shared environment resolution for the perf-harness scripts.
-##
-## Everything is an environment variable with a discovery fallback, so the same
-## scripts run on any machine. Dot-source this, then use the $HarnessEnv fields.
+
+# Shared environment resolution for the perf-harness scripts.
+#
+# Everything is an environment variable with a discovery fallback, so the same
+# scripts run on any machine. Dot-source this, then use the $HarnessEnv fields.
 
 Set-StrictMode -Version Latest
 

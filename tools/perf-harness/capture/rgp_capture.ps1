@@ -2,24 +2,25 @@
 ## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 ## Licensed under the MIT License.
 ##
-## Drive one RGP dispatch-mode capture of a model_benchmark run, then decode it
-## with tools/rgp_parser.
-##
-## Positioning a capture on a specific op is the hard part. Two modes:
-##
-##   -Op <name>   Fence mode. The runtime's rgp_capture_fence (op_profile.cpp)
-##                drains the GPU and idles right before that op's Nth instance,
-##                printing [RGP_FENCE_ARMED]. This script watches for the marker
-##                and triggers RGP inside the idle window, so the very next
-##                dispatches are the op you asked for. Deterministic.
-##
-##   -Trigger     Auto-capture mode: RGP's own dispatch:<delay>:<count> trigger.
-##                No runtime support needed, but it positions blind by dispatch
-##                index, which drifts run to run. Use when the build under test
-##                has no fence.
-##
-## Deliberately no HIPDNN_EP_PERF / HIPDNN_EP_DEBUG: CLAUDE.md forbids measuring
-## throughput with either. SQTT already carries the timing.
+
+# Drive one RGP dispatch-mode capture of a model_benchmark run, then decode it
+# with tools/rgp_parser.
+#
+# Positioning a capture on a specific op is the hard part. Two modes:
+#
+#   -Op <name>   Fence mode. The runtime's rgp_capture_fence (op_profile.cpp)
+#                drains the GPU and idles right before that op's Nth instance,
+#                printing [RGP_FENCE_ARMED]. This script watches for the marker
+#                and triggers RGP inside the idle window, so the very next
+#                dispatches are the op you asked for. Deterministic.
+#
+#   -Trigger     Auto-capture mode: RGP's own dispatch:<delay>:<count> trigger.
+#                No runtime support needed, but it positions blind by dispatch
+#                index, which drifts run to run. Use when the build under test
+#                has no fence.
+#
+# Deliberately no HIPDNN_EP_PERF / HIPDNN_EP_DEBUG: CLAUDE.md forbids measuring
+# throughput with either. SQTT already carries the timing.
 
 [CmdletBinding(DefaultParameterSetName = 'Fence')]
 param(

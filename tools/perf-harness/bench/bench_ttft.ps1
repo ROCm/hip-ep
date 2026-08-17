@@ -2,14 +2,15 @@
 ## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 ## Licensed under the MIT License.
 ##
-## One clean TTFT measurement, appended to a CSV.
-##
-## Deliberately no HIPDNN_EP_PERF / HIPDNN_EP_DEBUG: CLAUDE.md forbids measuring
-## throughput with either (PERF alone costs ~4%).
-##
-## Warmup reps are not optional. Autotune caches are per-process and partly
-## on-disk keyed by build timestamp, so iteration 1 of a fresh build always pays
-## tuning cost and is not a measurement of the kernel.
+
+# One clean TTFT measurement, appended to a CSV.
+#
+# Deliberately no HIPDNN_EP_PERF / HIPDNN_EP_DEBUG: CLAUDE.md forbids measuring
+# throughput with either (PERF alone costs ~4%).
+#
+# Warmup reps are not optional. Autotune caches are per-process and partly
+# on-disk keyed by build timestamp, so iteration 1 of a fresh build always pays
+# tuning cost and is not a measurement of the kernel.
 
 param(
   [Parameter(Mandatory = $true)][string]$Tag,
