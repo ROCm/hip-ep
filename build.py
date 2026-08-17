@@ -348,7 +348,7 @@ def run_tests(args, build_dir):
             "-C",
             args.config,
             "-R",
-            "StaticPlugins|OutputAllocator|LdsBarrierArchGate|SymbolicDims",
+            "StaticPlugins|OutputAllocator|LdsBarrierArchGate|SymbolicDims|CacheIdentity",
             "--output-on-failure",
         ]
     )
