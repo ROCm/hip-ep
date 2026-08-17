@@ -16,6 +16,7 @@
 #include "./pass_imp.hpp"
 #include "./version_info.hpp"
 #include "profile_utils.hpp"
+#include "morphizen/cache_identity.hpp"
 #include "morphizen/morphizen.hpp"
 #include "morphizen/symbolic_dims.hpp"
 #include "morphizen/util.hpp"
@@ -24,8 +25,6 @@
 #include <codecvt>
 #include <errno.h>
 #include <functional>
-#include <google/protobuf/io/coded_stream.h>
-#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 #include <google/protobuf/util/json_util.h>
 #include <ios>
 #include <limits>
@@ -146,23 +145,35 @@ bool check_cache_hit(PassContextImp &context) {
   auto prebuild_cache_context_name =
       context.get_provider_option("prebuild_cache_context");
   if (prebuild_cache_context_name) {
-    if (!context.initializer_digest_finalized) {
-      LOG(WARNING) << "ignoring prebuild cache because initializer bytes were "
-                      "not included in the finalized key";
+    bool available = has_mem_binary(prebuild_cache_context_name.value());
+    std::string_view expected_key = context.context_proto.cache_key();
+    CacheLoadAction action = select_cache_load_action(
+        CacheLoadKind::Prebuilt, context.initializer_digest_finalized,
+        available, expected_key, expected_key);
+    if (action == CacheLoadAction::Recompile) {
+      if (!context.initializer_digest_finalized) {
+        LOG(WARNING)
+            << "ignoring prebuilt cache because initializer bytes were "
+               "not included in the finalized key";
+      } else {
+        LOG(WARNING) << "prebuilt cache '"
+                     << prebuild_cache_context_name.value()
+                     << "' is unavailable; compiling a fresh artifact";
+      }
       return false;
     }
-    MY_LOG(1) << "==== prebuild_cache_context hit ====";
-    if (!has_mem_binary(prebuild_cache_context_name.value())) {
-      LOG(ERROR) << " " << prebuild_cache_context_name.value()
-                 << " does not in mem please check morphizen_config.json";
-
-      std::abort();
+    try {
+      auto prebuild_ep_context_in_mem =
+          get_mem_binary(prebuild_cache_context_name.value());
+      context.create_tar_file_for_prebuild_cache(
+          std::move(prebuild_ep_context_in_mem));
+      MY_LOG(1) << "==== prebuild_cache_context candidate ====";
+      return true;
+    } catch (const CacheIntegrityError &error) {
+      LOG(WARNING) << "prebuilt cache rejected: " << error.what();
+      context.maybe_create_tar_file_for_write();
+      return false;
     }
-    auto prebuild_ep_context_in_mem =
-        get_mem_binary(prebuild_cache_context_name.value());
-    context.create_tar_file_for_prebuild_cache(
-        std::move(prebuild_ep_context_in_mem));
-    return true;
   }
   // No file-based cache - always miss for non-prebuild scenarios
   return false;
@@ -192,16 +203,30 @@ static int64_t compute_model_clone_threshold(const ConfigProto &config_proto,
 void compile_onnx_model_2(std::shared_ptr<PassContextImp> context,
                           const Graph &onnx_graph) {
   bool cache_hit = check_cache_hit(*context);
-  if (!cache_hit) {
-    auto &model = morphizen_cxx::GraphConstRef(onnx_graph).model();
-    int64_t threshold = compute_model_clone_threshold(
-        context->get_config_proto(), context.get());
-    auto cloned_model = morphizen::model_clone(model, threshold);
-    auto &cloned_graph = morphizen::model_main_graph(*cloned_model);
-    update_cache(context, cloned_graph);
-  } else {
-    MY_LOG(1) << "==== cache hit ====";
+  if (cache_hit) {
+    try {
+      read_cache(context);
+      MY_LOG(1) << "==== cache hit ====";
+      return;
+    } catch (const CacheIntegrityError &error) {
+      CacheLoadAction action = select_cache_load_action(
+          CacheLoadKind::Prebuilt, context->initializer_digest_finalized,
+          /*cache_available=*/true, context->context_proto.cache_key(),
+          /*loaded_key=*/{});
+      if (action != CacheLoadAction::Recompile)
+        throw;
+      LOG(WARNING) << "prebuilt cache rejected: " << error.what()
+                   << "; compiling a fresh artifact";
+      context->maybe_create_tar_file_for_write();
+    }
   }
+
+  auto &model = morphizen_cxx::GraphConstRef(onnx_graph).model();
+  int64_t threshold =
+      compute_model_clone_threshold(context->get_config_proto(), context.get());
+  auto cloned_model = morphizen::model_clone(model, threshold);
+  auto &cloned_graph = morphizen::model_main_graph(*cloned_model);
+  update_cache(context, cloned_graph);
   auto encryption_key = context->get_provider_option("encryption_key", "");
   read_cache(context);
 }
@@ -314,29 +339,6 @@ static std::string get_signature(const std::string &model_path,
   return md5_in_memory_a;
 }
 
-static void add_framed(SHA256 &sha256, std::string_view value) {
-  uint64_t size = value.size();
-  unsigned char big_endian_size[sizeof(size)];
-  for (size_t i = 0; i < sizeof(size); ++i)
-    big_endian_size[sizeof(size) - i - 1] =
-        static_cast<unsigned char>((size >> (i * 8)) & 0xff);
-  sha256.add(big_endian_size, sizeof(big_endian_size));
-  if (!value.empty())
-    sha256.add(value.data(), value.size());
-}
-
-static std::string
-serialize_deterministically(const google::protobuf::MessageLite &message) {
-  std::string result;
-  google::protobuf::io::StringOutputStream output(&result);
-  google::protobuf::io::CodedOutputStream coded(&output);
-  coded.SetSerializationDeterministic(true);
-  if (!message.SerializeToCodedStream(&coded) || coded.HadError())
-    throw std::runtime_error(
-        "cannot serialize compiler contract for cache identity");
-  return result;
-}
-
 static std::string
 get_complete_graph_digest(const std::filesystem::path &model_path,
                           const Graph &graph, const Model &model) {
@@ -369,63 +371,28 @@ get_complete_graph_digest(const std::filesystem::path &model_path,
   return SHA256()(*serialized);
 }
 
-static std::string finalize_cache_key(const std::string &base_key,
-                                      const std::string &graph_digest,
-                                      const std::string &compiler_contract,
-                                      const Model &model) {
-  std::string symbolic_bytes =
-      std::string(kOnnxDimParamsEncodingVersion) + "\n0\n";
+static CacheKeyInputs get_cache_key_inputs(const std::string &base_key,
+                                           const std::string &graph_digest,
+                                           const std::string &compiler_contract,
+                                           const Model &model,
+                                           std::string &symbolic_bytes,
+                                           std::string &initializer_digest,
+                                           std::string &compiler_graph_digest) {
+  symbolic_bytes = std::string(kOnnxDimParamsEncodingVersion) + "\n0\n";
   auto model_ref = morphizen_cxx::ModelConstRef(model);
   if (model_ref.has_metadata(kOnnxDimParamsMetadataKey))
     symbolic_bytes = model_ref.get_metadata(kOnnxDimParamsMetadataKey);
 
-  std::string error;
-  if (!decode_symbolic_dim_records(symbolic_bytes, error))
-    throw std::runtime_error("invalid symbolic dimension metadata: " + error);
-  std::string initializer_digest;
   if (model_ref.has_metadata(kInitializerDataDigestMetadataKey))
     initializer_digest =
         model_ref.get_metadata(kInitializerDataDigestMetadataKey);
-  if (!initializer_digest.empty() &&
-      (initializer_digest.size() != 64 ||
-       !std::all_of(initializer_digest.begin(), initializer_digest.end(),
-                    [](unsigned char c) {
-                      return std::isdigit(c) || (c >= 'a' && c <= 'f');
-                    })))
-    throw std::runtime_error("invalid initializer data SHA-256 metadata");
-  std::string compiler_graph_digest;
   if (model_ref.has_metadata(kCompilerGraphDigestMetadataKey))
     compiler_graph_digest =
         model_ref.get_metadata(kCompilerGraphDigestMetadataKey);
-  if (!compiler_graph_digest.empty() &&
-      (compiler_graph_digest.size() != 64 ||
-       !std::all_of(compiler_graph_digest.begin(), compiler_graph_digest.end(),
-                    [](unsigned char c) {
-                      return std::isdigit(c) || (c >= 'a' && c <= 'f');
-                    })))
-    throw std::runtime_error("invalid compiler graph SHA-256 metadata");
-
-  SHA256 sha256;
-  add_framed(sha256, "hipdnn.symbolic.extent.cache.v1");
-  add_framed(sha256, graph_digest);
-  add_framed(sha256, base_key);
-  add_framed(sha256, compiler_contract);
-  add_framed(sha256, symbolic_bytes);
-  add_framed(sha256, initializer_digest);
-  add_framed(sha256, compiler_graph_digest);
-  add_framed(sha256, kOnnxDimParamsEncodingVersion);
-  add_framed(sha256, kOnnxDimParamsResolverPolicyVersion);
-  return "hsdi1-" + sha256.getHash();
-}
-
-static bool is_finalized_cache_key(std::string_view key) {
-  constexpr std::string_view prefix = "hsdi1-";
-  return key.size() == prefix.size() + 64 &&
-         key.substr(0, prefix.size()) == prefix &&
-         std::all_of(key.begin() + prefix.size(), key.end(),
-                     [](unsigned char c) {
-                       return std::isdigit(c) || (c >= 'a' && c <= 'f');
-                     });
+  return {
+      base_key,       graph_digest,       compiler_contract,
+      symbolic_bytes, initializer_digest, compiler_graph_digest,
+  };
 }
 
 std::shared_ptr<PassContextImp> initialize_context(
@@ -463,15 +430,15 @@ std::shared_ptr<PassContextImp> initialize_context(
   context->target_auto_discovery(model);
   std::string compiler_contract;
   if (!context->is_ep_context_model) {
-    SHA256 contract;
-    add_framed(contract, serialize_deterministically(context->config_));
+    std::vector<std::string> contract_fields;
+    contract_fields.push_back(serialize_deterministically(context->config_));
     if (context->target_proto_)
-      add_framed(contract,
-                 serialize_deterministically(*context->target_proto_));
-    add_framed(contract,
-               serialize_deterministically(context->context_proto.version()));
+      contract_fields.push_back(
+          serialize_deterministically(*context->target_proto_));
+    contract_fields.push_back(
+        serialize_deterministically(context->context_proto.version()));
     for (const PassProto &pass : context->compute_effective_passes())
-      add_framed(contract, serialize_deterministically(pass));
+      contract_fields.push_back(serialize_deterministically(pass));
     static const std::set<std::string> non_compiler_options = {
         "cache_key",      "cacheKey", "config_file",
         "encryption_key", "target",   "prebuild_cache_context",
@@ -479,10 +446,10 @@ std::shared_ptr<PassContextImp> initialize_context(
     for (const auto &[key, value] : context->get_all_provider_options()) {
       if (non_compiler_options.count(key))
         continue;
-      add_framed(contract, key);
-      add_framed(contract, value);
+      contract_fields.push_back(key);
+      contract_fields.push_back(value);
     }
-    compiler_contract = contract.getHash();
+    compiler_contract = compute_framed_sha256(contract_fields);
   }
 
   if (!context->context_proto.cache_key().empty()) {
@@ -506,9 +473,14 @@ std::shared_ptr<PassContextImp> initialize_context(
     *context->context_proto.mutable_cache_key() = new_cache_key;
   }
   if (!context->is_ep_context_model) {
-    auto finalized =
-        finalize_cache_key(context->context_proto.cache_key(),
-                           complete_graph_digest, compiler_contract, model);
+    std::string symbolic_bytes;
+    std::string initializer_digest;
+    std::string compiler_graph_digest;
+    CacheKeyInputs inputs = get_cache_key_inputs(
+        context->context_proto.cache_key(), complete_graph_digest,
+        compiler_contract, model, symbolic_bytes, initializer_digest,
+        compiler_graph_digest);
+    auto finalized = finalize_cache_key(inputs);
     MY_LOG(1) << "finalized symbolic-aware cache key " << finalized;
     *context->context_proto.mutable_cache_key() = std::move(finalized);
     context->cache_key_finalized = true;
@@ -918,11 +890,9 @@ static std::optional<morphizen_cxx::NodeConstRef> get_main_ep_context_node(
       ret = node;
     }
   }
-  CHECK_EQ(count_main_context, 1)
-      << "There must be exactly one main EPContext node. The EP context "
-         "model "
-         "have "
-      << count_main_context << " main EPContext nodes.";
+  if (count_main_context != 1)
+    throw CacheIntegrityError(
+        "EPContext model must contain exactly one main context node");
   return ret;
 }
 
@@ -933,8 +903,9 @@ store_cache_directory_from_main_node(PassContextImp &context,
   int64_t ep_embed_mode = main_node.get_attr_int("embed_mode", 1);
   // Always use cache_key prefix - validate it exists
   auto loaded_cache_key = main_node.get_attr_string("cache_file_prefix", "");
-  CHECK(!loaded_cache_key.empty())
-      << "EP context node must have non-empty cache_file_prefix attribute";
+  if (!is_finalized_cache_key(loaded_cache_key))
+    throw CacheIntegrityError(
+        "EPContext node has an invalid finalized cache_file_prefix");
   *context.context_proto.mutable_cache_key() = loaded_cache_key;
   context.cache_key_finalized = true;
 #if MORPHIZEN_ORT_API_MAJOR >= 12
@@ -991,8 +962,8 @@ store_cache_directory_from_main_node(PassContextImp &context,
 }
 
 static int64_t get_ep_context_index(const morphizen_cxx::NodeConstRef &node) {
-  CHECK(node.has_attr("index"))
-      << "EPContext Node has no index attr, EPContext node : " << node;
+  if (!node.has_attr("index"))
+    throw CacheIntegrityError("EPContext node has no index attribute");
   return node.get_attr_int("index");
 }
 
@@ -1000,7 +971,10 @@ static std::vector<std::unique_ptr<ExecutionProvider>>
 create_execution_providers_from_ep_context_nodes(
     std::shared_ptr<PassContextImp> context,
     std::vector<morphizen_cxx::NodeConstRef> ep_context_nodes) {
-  CHECK_EQ(ep_context_nodes.size(), context->context_proto.meta_def_size());
+  if (ep_context_nodes.size() !=
+      static_cast<size_t>(context->context_proto.meta_def_size()))
+    throw CacheIntegrityError(
+        "EPContext node count does not match cached metadata");
   auto size = ep_context_nodes.size();
   auto ret = std::vector<std::unique_ptr<ExecutionProvider>>();
   ret.reserve(size);
@@ -1013,8 +987,8 @@ create_execution_providers_from_ep_context_nodes(
   for (auto idx = 0u; idx < size; ++idx) {
     auto node = ep_context_nodes[idx];
     auto index = get_ep_context_index(node);
-    CHECK_EQ(index, idx) << "EPContext Node index mismatch, EPContext node : "
-                         << node;
+    if (index != static_cast<int64_t>(idx))
+      throw CacheIntegrityError("EPContext node index mismatch");
     auto meta_def_index = idx;
     auto &meta_def = *context->context_proto.mutable_meta_def(meta_def_index);
     update_meta_def_from_ep_node(node, meta_def);
@@ -1048,7 +1022,8 @@ restore_execution_providers_from_ep_context_model(
       }
     }
   }
-  CHECK(main_node) << " no main EPContext node";
+  if (!main_node)
+    throw CacheIntegrityError("EPContext model has no main context node");
 
   auto user_cache_key = context->get_provider_option("cache_key");
   if (!user_cache_key.has_value()) {
@@ -1064,19 +1039,15 @@ restore_execution_providers_from_ep_context_model(
   store_cache_directory_from_main_node(*context, main_node.value());
 
   auto ep_context_cache_key = context->context_proto.cache_key();
-  bool user_provided_different_final_cache_key =
-      user_cache_key.has_value() && !user_cache_key->empty() &&
+  if (user_cache_key.has_value() && !user_cache_key->empty() &&
       is_finalized_cache_key(*user_cache_key) &&
-      user_cache_key.value() != ep_context_cache_key;
-
-  if (user_provided_different_final_cache_key) {
-    LOG(ERROR) << "When using EP context model, your cache key '"
-               << user_cache_key.value()
-               << "' is different from the one in the EP context model '"
-               << ep_context_cache_key
-               << "'. This is not allowed. Please remove the cache key from "
-                  "provider options ";
-    abort();
+      select_cache_load_action(CacheLoadKind::EpContext,
+                               /*initializer_digest_finalized=*/true,
+                               /*cache_available=*/true, *user_cache_key,
+                               ep_context_cache_key) ==
+          CacheLoadAction::Reject) {
+    throw CacheIntegrityError(
+        "provider cache key does not match the EPContext cache key");
   }
 
   context->update_pass_context_from_context_json_in_cache();
@@ -1247,7 +1218,11 @@ std::vector<std::unique_ptr<ExecutionProvider>> compile_onnx_model_3_internal(
     }
   }
 #endif
-  catch (const morphizen_encryption::EncryptionError &e) {
+  catch (const CacheIntegrityError &e) {
+    if (set_ort_status)
+      set_ort_status(ORT_FAIL, e.what());
+    return {};
+  } catch (const morphizen_encryption::EncryptionError &e) {
     if (set_ort_status) {
       set_ort_status(1, e.what());
     }
