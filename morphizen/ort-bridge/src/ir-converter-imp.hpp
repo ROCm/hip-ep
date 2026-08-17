@@ -55,6 +55,5 @@ private:
   // deterministic HSDI1 model metadata record for compiler shape reasoning.
   mutable std::unordered_map<std::string, std::vector<std::string>>
       dim_params_map_;
-  mutable std::vector<std::pair<std::string, std::string>> initializer_digests_;
 };
 } // namespace morphizen
