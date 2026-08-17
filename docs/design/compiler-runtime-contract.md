@@ -178,6 +178,11 @@ Pool planning is the canonical example:
 - `site_id` is the deterministic top-level function ordinal and `domain_id` is
   local to that function. The explicit pair prevents caller/outlined-helper
   pool collisions without relying on symbol-name hashes.
+- Each `hip.get_host_scratch` lowers to
+  `hipdnn_ep_get_host_scratch_base(state, site_id, needed_size)`. Distinct
+  function sites own distinct host-mapped allocations; production outlined
+  helpers are non-recursive and execute under the single-inference-per-state
+  contract.
 - None of the `hipdnn.pool_*` or `hipdnn.buffer_*` attributes are fields in the
   FlatBuffers schema or the JSON mirror.
 
@@ -185,8 +190,8 @@ The generated LLVM IR plus `RuntimeState` therefore carry pool behavior. See
 [pool-allocs-memory-planning.md](pool-allocs-memory-planning.md) for the
 attribute, lowering, grow-on-demand runtime contract, and stale-artifact
 invalidation requirement. Because the generated call ABI changed, cached model
-artifacts compiled against the old three-argument pool helper must be deleted
-and rebuilt with the matching runtime bitcode.
+artifacts compiled against the old pool helper or two-argument host-scratch
+helper must be deleted and rebuilt with the matching runtime bitcode.
 
 Input staging is another generated-code-only contract. `generate-interface`
 queries `hipdnn_ep_tensor_buffer_storage_words` and constructs every opaque

@@ -253,7 +253,26 @@ the new runtime.
 
 `hip-materialize-host-scalars` selects static-shape integer/index allocations of at most 16 elements with host reads or writes, including accesses reachable through supported view/alias operations. Accepted descriptor-only and terminal users include memref dimension/deallocation operations, supported views, memref copies, reshape shape operands, and HIP operations.
 
-All selected allocations in a function share one `hip.get_host_scratch` buffer. Their offsets are aligned to 64 bytes, independently of PoolAllocs' default 256-byte alignment.
+All selected allocations in a function share one `hip.get_host_scratch` buffer.
+Their offsets are aligned to 64 bytes, independently of PoolAllocs' default
+256-byte alignment. The op carries the same deterministic top-level function
+ordinal used for pool sites, and lowers to:
+
+```c
+void *hipdnn_ep_get_host_scratch_base(RuntimeState *state,
+                                      int site_id,
+                                      size_t needed_size);
+```
+
+Each site owns distinct host-mapped storage. Caller and outlined-helper local
+offset zero therefore cannot collide, and growing a helper site synchronizes
+the stream before replacing only that site's allocation.
+
+`RuntimeState` supports one inference at a time. Recursive or reentrant entry
+into the same compiled function reuses that function's site and is unsupported;
+current production outlined helpers are non-recursive and execute serially.
+The changed generated-call ABI also requires stale cached model artifacts to be
+deleted and rebuilt.
 
 Functions without `!hip.context` as argument zero are skipped.
 

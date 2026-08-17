@@ -22,6 +22,16 @@ extern "C" hipError_t hipFree(void *ptr) {
   return hipSuccess;
 }
 
+extern "C" hipError_t hipHostMalloc(void **ptr, size_t size, unsigned int) {
+  *ptr = std::malloc(size);
+  return *ptr ? hipSuccess : -1;
+}
+
+extern "C" hipError_t hipHostFree(void *ptr) {
+  std::free(ptr);
+  return hipSuccess;
+}
+
 extern "C" hipError_t hipStreamSynchronize(hipStream_t) {
   ++sync_count;
   return hipSuccess;
@@ -46,6 +56,20 @@ int main() {
     assert(static_cast<unsigned char *>(parent)[i] == 0x5a);
   assert(sync_count == 1);
 
+  void *parent_scratch = hipdnn_ep_get_host_scratch_base(&state, 0, 64);
+  void *child_scratch = hipdnn_ep_get_host_scratch_base(&state, 1, 32);
+  assert(parent_scratch != nullptr);
+  assert(child_scratch != nullptr);
+  assert(parent_scratch != child_scratch);
+
+  std::memset(parent_scratch, 0xa5, 64);
+  void *grown_child_scratch = hipdnn_ep_get_host_scratch_base(&state, 1, 128);
+  assert(grown_child_scratch != nullptr);
+  assert(state.host_scratch_sites[0].base == parent_scratch);
+  for (size_t i = 0; i < 64; ++i)
+    assert(static_cast<unsigned char *>(parent_scratch)[i] == 0xa5);
+  assert(sync_count == 2);
+
   for (int site_id = 0; site_id < state.num_pool_sites; ++site_id) {
     RuntimePoolSite &site = state.pool_sites[site_id];
     for (int domain_id = 0; domain_id < site.num_domains; ++domain_id)
@@ -54,5 +78,8 @@ int main() {
     std::free(site.pool_size);
   }
   std::free(state.pool_sites);
+  for (int site_id = 0; site_id < state.num_host_scratch_sites; ++site_id)
+    std::free(state.host_scratch_sites[site_id].base);
+  std::free(state.host_scratch_sites);
   return 0;
 }
