@@ -348,6 +348,17 @@ public:
     auto dataType = dyn_cast<RankedTensorType>(data.getType());
     if (!dataType)
       return op->emitError("reduction data must be a ranked tensor");
+    auto declaredResultType = dyn_cast<ShapedType>(op->getResult(0).getType());
+    if (declaredResultType &&
+        declaredResultType.getElementType() != dataType.getElementType())
+      return op->emitError(
+          "reduction data and result must have the same element type");
+    llvm::StringRef hipOpName = HipOpTy::getOperationName();
+    if (!isSupportedReductionElementType(hipOpName, dataType.getElementType()))
+      return op->emitError()
+             << "unsupported reduction element type "
+             << dataType.getElementType() << "; supported types: "
+             << getSupportedReductionElementTypes(hipOpName);
     auto normalizedAxes =
         normalizeReductionAxes(dataType.getRank(), *reducedAxes);
     if (failed(normalizedAxes))
