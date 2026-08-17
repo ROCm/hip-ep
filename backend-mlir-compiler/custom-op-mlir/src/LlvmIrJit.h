@@ -36,7 +36,8 @@ public:
   // The bytes are copied internally; `module_name` is a diagnostic tag.
   // Returns nullptr on parse / JIT-init failure (errors logged via glog).
   static std::unique_ptr<LlvmIrJit> create(const std::vector<uint8_t> &bitcode,
-                                           const std::string &module_name);
+                                           const std::string &module_name,
+                                           std::string *error = nullptr);
 
   // Returns nullptr when the symbol is absent (callers use this to probe
   // optional hooks like `hipdnn_ep_runtime_begin_compute`).

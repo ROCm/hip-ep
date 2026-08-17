@@ -15,6 +15,10 @@ message Metadata {
   //   "LLVM_IR" (default / empty) -> LlvmIrJit (in-process ORC JIT)
   //   "NATIVE"                    -> morphizen::Plugin (LoadLibrary/dlopen)
   string artifact_format = 4;
+  // Early EPContext/cache copy of hipdnn::abi::kArtifactAbiToken. The loader
+  // validates this before opening the artifact, then validates the generated
+  // artifact's exported handshake as the final authority.
+  uint64 artifact_abi = 5;
 }
 
 message Input {

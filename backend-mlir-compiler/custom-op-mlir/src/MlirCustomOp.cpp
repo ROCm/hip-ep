@@ -19,12 +19,11 @@
 
 #include "llvm/ADT/ScopeExit.h"
 
-// Protobuf headers
-#include "google/protobuf/util/json_util.h"
 #include "metadata.pb.h"
 
 // Component headers
 #include "InferenceState.h"
+#include "artifact_metadata.h"
 #include "hip/env.h" // shared cross-platform env reader (single Win32 call)
 
 #include <algorithm>
@@ -214,37 +213,34 @@ static std::vector<int> build_output_index_map(
 
 namespace {
 
-// Parse metadata from JSON string in MetaDefProto
-// Logs FATAL and terminates on failure
+// Parse metadata from JSON string in MetaDefProto. Failures throw so the
+// CreateState C-ABI callback can translate them into an OrtStatus.
 mlir_metadata::Metadata parse_metadata_from_metadef(
     const std::shared_ptr<const morphizen::PassContext> &context,
     const std::shared_ptr<morphizen::MetaDefProto> &meta_def) {
 
   auto metadata_json = context->get_meta_def_param(*meta_def);
   mlir_metadata::Metadata metadata;
-  auto status =
-      google::protobuf::util::JsonStringToMessage(metadata_json, &metadata);
-
-  if (!status.ok()) {
-    LOG(FATAL) << "Failed to parse MLIR metadata: " << status.ToString();
-  }
+  std::string error;
+  if (!customop::parseAndValidateArtifactMetadata(metadata_json, metadata,
+                                                  error))
+    throw std::runtime_error(error);
 
   MY_LOG(1) << "Parsed metadata - Artifact filename: "
             << metadata.artifact_filename();
   return metadata;
 }
 
-// Load artifact bytes from EPContext file stream
-// Logs FATAL and terminates on failure
+// Load artifact bytes from EPContext file stream. Failures throw so session
+// creation returns a recoverable ORT-visible status.
 std::vector<uint8_t> load_artifact_from_epcontext(
     const std::shared_ptr<const morphizen::PassContext> &context,
     const std::string &artifact_filename) {
 
   auto artifact_stream = context->open_file_for_read(artifact_filename);
-  if (!artifact_stream) {
-    LOG(FATAL) << "Failed to open artifact from EPContext: "
-               << artifact_filename;
-  }
+  if (!artifact_stream)
+    throw std::runtime_error("failed to open artifact from EPContext: " +
+                             artifact_filename);
 
   std::vector<uint8_t> artifact_bytes;
   artifact_bytes.reserve(1024 * 1024); // Start with 1MB
@@ -266,9 +262,9 @@ std::vector<uint8_t> load_artifact_from_epcontext(
     }
   }
 
-  if (artifact_bytes.empty()) {
-    LOG(FATAL) << "Failed to read artifact bytes from EPContext";
-  }
+  if (artifact_bytes.empty())
+    throw std::runtime_error("failed to read artifact bytes from EPContext: " +
+                             artifact_filename);
 
   MY_LOG(1) << "Loaded artifact: " << total_read << " bytes";
   return artifact_bytes;
@@ -277,14 +273,14 @@ std::vector<uint8_t> load_artifact_from_epcontext(
 // Decide which loader the EP should use for this artifact. The format is
 // recorded in the EPContext metadata by the compiler (artifact_format), which
 // always sets it (see pass_main.cpp); an empty/unknown value means a malformed
-// or pre-PR EPContext and is fatal here rather than mis-loaded.
+// or pre-PR EPContext and is rejected rather than mis-loaded.
 customop::ArtifactKind determine_artifact_kind(const std::string &format_str) {
   customop::ArtifactKind kind;
   if (!customop::artifactKindFromFormat(format_str, kind)) {
-    LOG(FATAL) << "EPContext metadata has empty/unknown artifact_format='"
-               << format_str << "'; expected '"
-               << customop::kArtifactFormatLlvmIr << "' or '"
-               << customop::kArtifactFormatNative << "'.";
+    throw std::runtime_error(
+        "EPContext metadata has empty/unknown artifact_format='" + format_str +
+        "'; expected '" + customop::kArtifactFormatLlvmIr + "' or '" +
+        customop::kArtifactFormatNative + "'");
   }
 
   MY_LOG(1) << "Artifact loader: "

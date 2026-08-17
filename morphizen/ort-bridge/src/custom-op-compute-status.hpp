@@ -52,6 +52,25 @@ OrtStatus *translateComputeExceptions(const OrtApi &api,
   }
 }
 
+// Custom-op construction loads and validates cached artifacts inside ORT's
+// CreateState C callback. Translate loader/ABI exceptions at that boundary so
+// stale EPContexts fail session creation without unwinding through C or
+// aborting the process.
+template <typename CreateState>
+OrtStatus *translateCreateStateExceptions(const OrtApi &api,
+                                          CreateState &&create) noexcept {
+  try {
+    std::forward<CreateState>(create)();
+    return nullptr;
+  } catch (const std::exception &e) {
+    return api.CreateStatus(ORT_RUNTIME_EXCEPTION, e.what());
+  } catch (...) {
+    return api.CreateStatus(
+        ORT_RUNTIME_EXCEPTION,
+        "CustomOp::CreateState failed with unknown exception");
+  }
+}
+
 [[noreturn]] inline void throwComputeFailure(const char *entryPoint, int code) {
   throw std::runtime_error(std::string(entryPoint) +
                            " failed with code: " + std::to_string(code));

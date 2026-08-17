@@ -10,10 +10,10 @@
 // The hip-to-llvm-pipeline lowers this through:
 //   1. convert-hip-to-llvm (func/memref → LLVM, transformMainFunction wraps
 //      the expanded memref signature to the 2-pointer (ctx, inputs) C ABI)
-//   2. generate-interface (creates inference_init/compute/cleanup wrappers)
+//   2. generate-interface (creates ABI query + init/compute/cleanup wrappers)
 //
 // Verifies:
-//   1. Four wrapper functions are generated.
+//   1. Five wrapper functions are generated.
 //   2. inference_init calls hipdnn_ep_state_init_with_fs.
 //   3. inference_compute stages inputs and calls main_graph (outputs
 //      allocated in-graph).
@@ -65,6 +65,11 @@
 // --- inference_get_metadata_json returns metadata pointer ---
 // CHECK-LABEL: llvm.func @inference_get_metadata_json
 // CHECK:   llvm.mlir.addressof @__metadata_json
+
+// --- loader validates this tagged token before binding any other function ---
+// CHECK-LABEL: llvm.func @inference_get_artifact_abi() -> i64
+// CHECK:   llvm.mlir.constant(5208782684133785601 : i64)
+// CHECK:   llvm.return
 
 module attributes {
   hipdnn.input_count = 3 : i64,

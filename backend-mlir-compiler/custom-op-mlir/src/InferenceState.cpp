@@ -23,20 +23,18 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND, "0")
 namespace mlir_compilation::customop {
 
 namespace {
-// Resolve inference_init from the loaded artifact, call it, and return the
-// opaque state. FATALs (like the rest of create()) on a missing symbol or
-// non-zero return.
+// Resolve inference_init from the ABI-validated artifact, call it, and return
+// the opaque state. Throw on failure so CreateState can return an OrtStatus.
 void *runInit(const LoadedArtifact &artifact, morphizen::FileSystem *fs) {
   auto init_fn =
       artifact.get_method<int, void **, void *>(hipdnn::abi::kInferenceInit);
-  if (!init_fn) {
-    LOG(FATAL) << "inference_init not found in artifact.";
-  }
+  if (!init_fn)
+    throw std::runtime_error("inference_init not found in artifact");
   void *state = nullptr;
   int ret = init_fn(&state, static_cast<void *>(fs));
-  if (ret != 0) {
-    LOG(FATAL) << "inference_init() failed with code: " << ret;
-  }
+  if (ret != 0)
+    throw std::runtime_error("inference_init failed with code: " +
+                             std::to_string(ret));
   return state;
 }
 } // namespace
@@ -119,11 +117,12 @@ InferenceState::create(const std::vector<uint8_t> &artifact_bytes,
   auto artifact = LoadedArtifact::createInMemory(artifact_bytes, kind,
                                                  "model_compiled", &load_err);
   if (!artifact) {
-    LOG(FATAL) << "InferenceState::create: failed to load " << kind_name
-               << " artifact: " << load_err
-               << " (per-model artifact malformed, or required external "
-                  "symbols -- kernels / HIP runtime / CRT -- could not be "
-                  "resolved in the EP DLL process).";
+    throw std::runtime_error(
+        std::string("InferenceState::create: failed to load ") + kind_name +
+        " artifact: " + load_err +
+        " (per-model artifact malformed, stale, or required external symbols "
+        "-- kernels / HIP runtime / CRT -- could not be resolved in the EP "
+        "DLL process)");
   }
 
   TIMING_LOG("[Session] LoadedArtifact::createInMemory (parse + JIT-init / "
@@ -177,13 +176,14 @@ int InferenceState::compute(span_t *inputs) const {
 void InferenceState::set_output_allocator(
     const output_allocator_t *allocator) const {
   if (!set_output_allocator_fn_) {
-    // Installing an allocator on a DLL that cannot accept it would leave
-    // hip.alloc_output returning null. Clearing on such a DLL remains a no-op.
+    // Installing an allocator on an artifact that cannot accept it would leave
+    // hip.alloc_output returning null. Throw an actionable exception that the
+    // Compute callback translates to OrtStatus.
+    // Clearing (nullptr) on such an artifact is a no-op.
     if (allocator)
       throw std::runtime_error(
-          "Loaded model artifact does not export "
-          "hipdnn_ep_set_output_allocator; regenerate the EPContext and "
-          "rebuild it with the current runtime");
+          "ABI-validated artifact does not export "
+          "hipdnn_ep_set_output_allocator; regenerate the EPContext");
     return;
   }
   if (state_) {

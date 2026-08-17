@@ -543,9 +543,12 @@ OrtStatus *MorphiZenEP::CompileSubgraph(const morphizen::ExecutionProvider &ep,
            void **compute_state) -> OrtStatus * {
       (void)compute_context;
       auto self = static_cast<MorphiZenEP_ComputeInfo *>(this_ptr);
-      auto *p = self->morphizen_ep->compile().release();
-      *compute_state = p;
-      return nullptr;
+      *compute_state = nullptr;
+      const OrtApi &api = Ort::GetApi();
+      return detail::translateCreateStateExceptions(api, [&] {
+        auto custom_op = self->morphizen_ep->compile();
+        *compute_state = custom_op.release();
+      });
     };
     morphizen_node_compute_info->ReleaseState =
         [](OrtNodeComputeInfo *this_ptr, void *compute_state) -> void {

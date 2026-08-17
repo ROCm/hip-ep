@@ -16,6 +16,7 @@ Licensed under the MIT License.
 - [Overview](#overview)
 - [Schema: Single Source of Truth](#schema-single-source-of-truth)
 - [Embedding Mechanism](#embedding-mechanism)
+- [Generated-Artifact ABI Handshake](#generated-artifact-abi-handshake)
 - [Current Fields](#current-fields)
 - [Generated-Code Runtime Inputs](#generated-code-runtime-inputs)
 - [Consumers](#consumers)
@@ -41,6 +42,7 @@ contract; see [Generated-Code Runtime Inputs](#generated-code-runtime-inputs).
         ▼
   ┌──────────────────────────────────────┐
   │           model.bc (bitcode)         │
+  │  inference_get_artifact_abi()        │  ← public pre-bind handshake
   │  __metadata_blob       (internal)    │  ← baked into bitcode data
   │  __metadata_json       (internal)    │  ← human-readable copy
   │                                      │
@@ -68,6 +70,8 @@ mirror are produced for both artifact formats
 
 The EP selects the loader from `mlir_metadata::Metadata.artifact_format` before
 opening the artifact. See [native-vs-ir-comparison.md](../native-vs-ir-comparison.md).
+That EPContext metadata also carries an early copy of the tagged artifact ABI
+token; the generated artifact export remains the final authority.
 
 ---
 
@@ -140,13 +144,45 @@ Dynamic dimensions are encoded as `-1`.
 }
 ```
 
+## Generated-Artifact ABI Handshake
+
+`include/hip/artifact_abi.h` owns the single
+`hipdnn::abi::kArtifactAbiVersion` constant and the tagged token derived from
+it. `generate-interface` emits:
+
+```c
+uint64_t inference_get_artifact_abi(void);
+```
+
+The loader must validate this stable no-argument query before resolving or
+calling `inference_init`, `inference_compute`, or any generated/runtime wrapper
+entry point. Missing exports, a malformed tag, and unequal versions all fail
+closed. LLVM bitcode is also inspected structurally before its model/runtime
+modules are added to the JIT; native artifacts expose the same exported query.
+
+EPContext metadata stores the same tagged token so stale contexts can be
+rejected before the artifact is opened. This is an early consistency check, not
+a second version authority: both copies are emitted from
+`kArtifactAbiVersion`, and the artifact export is always validated after load.
+Old contexts and artifacts without the handshake are rejected.
+
+Bump `kArtifactAbiVersion` whenever:
+
+- an `inference_*` signature changes;
+- a generated call to a runtime wrapper changes name, signature, or semantics;
+- generated code observes a changed `RuntimeState` or other runtime layout.
+
+Do not bump it for additive inspection metadata or implementation-only changes
+behind unchanged wrapper and layout contracts. Cache-key salting remains useful
+for normal invalidation, but it is not the ABI safety mechanism.
+
 ---
 
 ## Current Fields
 
 | Field | Type | Purpose |
 |-------|------|---------|
-| `version` | `int32` | Schema version |
+| `version` | `int32` | FlatBuffer schema version; not the generated/runtime ABI version |
 | `constants_filename` | `string` | Name of the constants file to open via `fs` |
 | `constants[i].size` | `int64` | Byte size of constant `i` |
 | `constants[i].offset` | `int64` | Byte offset of constant `i` in the constants file |
@@ -189,9 +225,9 @@ Pool planning is the canonical example:
 The generated LLVM IR plus `RuntimeState` therefore carry pool behavior. See
 [pool-allocs-memory-planning.md](pool-allocs-memory-planning.md) for the
 attribute, lowering, grow-on-demand runtime contract, and stale-artifact
-invalidation requirement. Because the generated call ABI changed, cached model
-artifacts compiled against the old pool helper or two-argument host-scratch
-helper must be deleted and rebuilt with the matching runtime bitcode.
+invalidation requirement. A generated-call ABI change requires an artifact ABI
+version bump; the loader then rejects cached artifacts compiled against the old
+pool or host-scratch signatures before inference setup.
 
 Input staging is another generated-code-only contract. `generate-interface`
 queries `hipdnn_ep_tensor_buffer_storage_words` and constructs every opaque

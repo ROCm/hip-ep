@@ -6,6 +6,7 @@
 
 #include "../../common/temp_path.hpp"
 #include "LlvmIrJit.h"
+#include "artifact_abi_validation.h"
 // morphizen.hpp must precede plugin.hpp (morphizen/_sanity_check.hpp enforces
 // this include order).
 #include "morphizen/morphizen.hpp"
@@ -47,6 +48,16 @@ std::vector<uint8_t> readFileBytes(const std::string &path,
                               std::istreambuf_iterator<char>());
 }
 
+bool validateHandshake(const LoadedArtifact &artifact, std::string *error) {
+  ArtifactAbiValidation validation = validateArtifactAbiSymbol(
+      artifact.lookup_raw(hipdnn::abi::kInferenceGetArtifactAbi));
+  if (validation)
+    return true;
+  if (error)
+    *error = artifactAbiErrorMessage(validation, "generated artifact");
+  return false;
+}
+
 } // namespace
 
 LoadedArtifact::LoadedArtifact() = default;
@@ -66,13 +77,15 @@ std::unique_ptr<LoadedArtifact> LoadedArtifact::createInMemory(
   art->kind_ = kind;
 
   if (kind == ArtifactKind::LLVM_IR) {
-    auto jit = LlvmIrJit::create(bytes, module_name);
+    auto jit = LlvmIrJit::create(bytes, module_name, error);
     if (!jit) {
-      if (error)
+      if (error && error->empty())
         *error = "LlvmIrJit::create failed for '" + module_name + "'";
       return nullptr;
     }
     art->backend_ = std::move(jit);
+    if (!validateHandshake(*art, error))
+      return nullptr;
     return art;
   }
 
@@ -102,6 +115,8 @@ std::unique_ptr<LoadedArtifact> LoadedArtifact::createInMemory(
     return nullptr; // destructor removes the temp file
   }
   art->backend_ = std::move(plugin);
+  if (!validateHandshake(*art, error))
+    return nullptr;
   return art;
 }
 
@@ -124,13 +139,15 @@ LoadedArtifact::createFromFile(const std::string &path, std::string *error) {
   const bool native = (art->kind_ == ArtifactKind::NATIVE);
 
   if (!native) {
-    auto jit = LlvmIrJit::create(bytes, path);
+    auto jit = LlvmIrJit::create(bytes, path, error);
     if (!jit) {
-      if (error)
+      if (error && error->empty())
         *error = "LlvmIrJit::create failed for '" + path + "'";
       return nullptr;
     }
     art->backend_ = std::move(jit);
+    if (!validateHandshake(*art, error))
+      return nullptr;
     return art;
   }
 
@@ -144,6 +161,8 @@ LoadedArtifact::createFromFile(const std::string &path, std::string *error) {
     return nullptr;
   }
   art->backend_ = std::move(plugin);
+  if (!validateHandshake(*art, error))
+    return nullptr;
   return art;
 }
 
