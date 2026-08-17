@@ -49,13 +49,13 @@ inline int normalizeGbqAxis(int64_t axis, int64_t rank) {
   return a;
 }
 
-inline bool resolveUnsignedQuantStorage(int64_t bits, bool hasUnsignedAttr,
+inline bool resolveUnsignedQuantStorage(bool hasUnsignedAttr,
                                         Type dataElemType) {
-  if (hasUnsignedAttr)
+  if (isUnsignedMlirElementType(dataElemType))
     return true;
-  if (bits == 8)
-    return true;
-  return isUnsignedMlirElementType(dataElemType);
+  if (auto intTy = dyn_cast<IntegerType>(dataElemType))
+    return intTy.isSignless() && hasUnsignedAttr;
+  return false;
 }
 
 inline bool isAlreadyPackedByteTensor(RankedTensorType dataType,
@@ -194,16 +194,12 @@ bool annotateGbqSemantics(Operation *gbq, OpBuilder &builder) {
     return false;
 
   bool changed = false;
-  const bool unsignedStorage = gbq::resolveUnsignedQuantStorage(
-      bits, gbq->hasAttr("unsigned_quant_storage"), dataType.getElementType());
-  if (unsignedStorage) {
-    if (!gbq->hasAttr("unsigned_quant_storage")) {
-      gbq->setAttr("unsigned_quant_storage",
-                   UnitAttr::get(builder.getContext()));
-      changed = true;
-    }
-  } else if (gbq->hasAttr("unsigned_quant_storage")) {
-    gbq->removeAttr("unsigned_quant_storage");
+  // Preserve importer-provided unsignedness for signless legalized storage.
+  // Explicit MLIR ui8 is also canonicalized to the marker. Never infer
+  // unsignedness from `bits`: bits describes width, not signedness.
+  if (gbq::isUnsignedMlirElementType(dataType.getElementType()) &&
+      !gbq->hasAttr("unsigned_quant_storage")) {
+    gbq->setAttr("unsigned_quant_storage", UnitAttr::get(builder.getContext()));
     changed = true;
   }
 
@@ -348,10 +344,10 @@ struct GatherBlockQuantizedPreparePattern : public RewritePattern {
 //             ++ logical_data[gather_axis+1:]
 // The multiplication is omitted when Gather removes `quantize_axis` itself.
 //
-// Storage semantics (unsigned vs signed) come from ONNX T1 + bits, not from
-// signless MLIR integer types alone. `unsigned_quant_storage` is set when:
-//   - convert-onnx-to-hip prepare annotated the Custom op, or
-//   - the data tensor element type is ui8 at conversion time.
+// Storage semantics come from ONNX T1, not `bits`. Explicit si8/ui8 retain
+// their signedness. For signless i8 produced while legalizing INT4/UINT4,
+// `unsigned_quant_storage` is the authoritative UINT marker; absence means
+// signed storage.
 //
 // quantize_axis is taken from the ONNX attribute when present; otherwise it is
 // inferred from (data, scales, block_size, bits) shape invariants.
@@ -444,6 +440,10 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
   if (!dataElementType || dataElementType.getWidth() != 8)
     return rewriter.notifyMatchFailure(
         op, "GBQ data storage must use an 8-bit integer element type");
+  if (dataElementType.isSigned() && op->hasAttr("unsigned_quant_storage")) {
+    return op->emitError(
+        "GBQ `unsigned_quant_storage` conflicts with explicitly signed data");
+  }
   if (!indicesElementType || (indicesElementType.getWidth() != 32 &&
                               indicesElementType.getWidth() != 64))
     return rewriter.notifyMatchFailure(op, "GBQ indices must be i32 or i64");
@@ -470,7 +470,7 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
         op, "could not resolve `quantize_axis` from GBQ data/scales shapes");
 
   bool unsignedQuantStorage = gbq::resolveUnsignedQuantStorage(
-      bits, op->hasAttr("unsigned_quant_storage"), dataType.getElementType());
+      op->hasAttr("unsigned_quant_storage"), dataType.getElementType());
 
   auto bitsAttr = rewriter.getI64IntegerAttr(bits);
   auto blockSizeAttr = rewriter.getI64IntegerAttr(blockSize);
@@ -479,7 +479,7 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
   auto quantAxisAttr = rewriter.getI64IntegerAttr(*quantAxisOr);
 
   bool bytePackedInt4 = bits == 4;
-  bool uint8Storage = bits == 8 || dataElementType.isUnsignedInteger(8);
+  bool uint8Storage = bits == 8 && unsignedQuantStorage;
   auto resultShape = mlir::hip::reifyGatherBlockQuantizedShape(
       rewriter, loc, data, indices, scales, zeroPoints, bits, blockSize,
       gatherAxisAttr.getInt(), quantAxisAttr.getInt(), bytePackedInt4,

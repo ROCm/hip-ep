@@ -359,6 +359,17 @@ Converter destination construction, op reification, and static verification all
 call this rule. The runtime receives the physical data descriptor and expands
 its quantize-axis extent before launching the logical-element kernel.
 
+`bits` controls packing width only; it never selects signedness. Explicit MLIR
+`si8` and `ui8` remain signed and unsigned respectively. Native ONNX
+INT4/UINT4 storage is legalized to signless `i8`; on that form,
+`unsigned_quant_storage` is authoritative (present for UINT4, absent for INT4).
+The marker is also canonicalized onto explicit `ui8` and is rejected on
+explicit `si8`. Lowering passes the resolved INT8/UINT8 runtime dtype, which
+controls data and zero-point interpretation plus the omitted-zero-point default
+(0 signed, `2^(bits-1)` unsigned). Only unsigned `bits = 8` uses the ONNX uint8
+axis policy: gather axis zero and the last, distinct quantize axis. Packed
+INT4/UINT4 and signed int8 retain the general valid-axis policy.
+
 Forward Conv and Pool share one validated spatial-window primitive:
 `floor((input + pads - effectiveKernel) / stride) + 1`; Pool selects signed
 ceil division when `ceil_mode = 1`. After that ceil calculation, a positive

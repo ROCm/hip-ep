@@ -204,10 +204,15 @@ LogicalResult mlir::hip::detail::validatePermutation(ArrayRef<int64_t> perm,
 }
 
 mlir::hip::detail::GatherBlockQuantizedStorageFlags
-mlir::hip::detail::getGatherBlockQuantizedStorageFlags(int64_t bits,
-                                                       Type dataElementType) {
+mlir::hip::detail::getGatherBlockQuantizedStorageFlags(
+    int64_t bits, Type dataElementType, bool hasUnsignedStorageAttr) {
+  auto intType = dyn_cast<IntegerType>(dataElementType);
+  bool unsignedStorage =
+      intType && (intType.isUnsigned() ||
+                  (intType.isSignless() && hasUnsignedStorageAttr));
   return {/*bytePackedInt4=*/bits == 4,
-          /*uint8Storage=*/bits == 8 || dataElementType.isUnsignedInteger(8)};
+          /*unsignedStorage=*/unsignedStorage,
+          /*uint8Storage=*/bits == 8 && unsignedStorage};
 }
 
 /// NumPy-broadcast result shape of `shapes` (right-aligned) from static extents

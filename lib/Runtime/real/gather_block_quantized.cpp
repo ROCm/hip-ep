@@ -17,15 +17,16 @@
 //   * dtype mapping HIPDNN_EP_DATATYPE_* -> HIP_DTYPE_* and signedness
 //     derivation from the data tensor element type
 //   * default zp computation per the ONNX spec:
-//       - bits == 4 (int4 / uint4) ........ default 0
-//       - bits == 8, uint8 storage ........ default 128 (= 2^(bits-1))
-//       - bits == 8, int8  storage ........ default 0
-//   * spec compliance: for uint8 data, gather_axis must be 0
+//       - signed int4/int8 storage ......... default 0
+//       - unsigned uint4 storage ........... default 8
+//       - unsigned uint8 storage ........... default 128
+//   * spec compliance: uint8 uses gather_axis 0 and the last quantize axis
 //   * size-zero output fast-path (no kernel launch)
 
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
+#include "gather_block_quantized_utils.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
@@ -80,6 +81,21 @@ extern "C" int wrap_gather_block_quantized(
             "[REAL] wrap_gather_block_quantized: null required argument\n");
     return -1;
   }
+  if (bits != 4 && bits != 8) {
+    fprintf(stderr,
+            "[REAL] wrap_gather_block_quantized: bits must be 4 or 8, got "
+            "%lld\n",
+            (long long)bits);
+    return -1;
+  }
+  if (data_dtype != HIPDNN_EP_DATATYPE_INT8 &&
+      data_dtype != HIPDNN_EP_DATATYPE_UINT8) {
+    fprintf(stderr,
+            "[REAL] wrap_gather_block_quantized: data dtype must be i8 or "
+            "ui8, got %s (%lld)\n",
+            hipdnn_ep_datatype_name(data_dtype), (long long)data_dtype);
+    return -1;
+  }
 
   // Normalise potentially-negative axes against `data_rank`. The conversion
   // (lib/Conversion/OnnxToHip/GatherBlockQuantizedConversion.cpp) forwards
@@ -100,15 +116,15 @@ extern "C" int wrap_gather_block_quantized(
     return -1;
   }
 
-  // Spec: for uint8 data the gather_axis must be 0. Catch this here
-  // (cheap) instead of producing silently-wrong output.
-  bool is_signed_data =
-      (data_dtype == HIPDNN_EP_DATATYPE_INT8); // i8 storage -> int4 / int8
-  if (bits == 8 && !is_signed_data && gather_axis_n != 0) {
+  bool is_signed_data = data_dtype == HIPDNN_EP_DATATYPE_INT8;
+  if (!hipdnn_ep::gbq::supportsUint8Axes(
+          static_cast<int>(bits), !is_signed_data, static_cast<int>(data_rank),
+          gather_axis_n, quantize_axis_n)) {
     fprintf(stderr,
             "[REAL] wrap_gather_block_quantized: ONNX spec requires "
-            "gather_axis == 0 for uint8 data, got %d\n",
-            gather_axis_n);
+            "uint8 data to use gather_axis == 0 and the last dimension as "
+            "quantize_axis (got gather_axis=%d, quantize_axis=%d, rank=%lld)\n",
+            gather_axis_n, quantize_axis_n, (long long)data_rank);
     return -1;
   }
 
@@ -125,12 +141,8 @@ extern "C" int wrap_gather_block_quantized(
   // (canonical site: Qwen3.5 vision encoder's pos_embed.weight_Q4 — the
   // model dequantises to roughly +0.65/+0.73 in place of the correct
   // values, which cluster around 0).
-  int default_zp;
-  if (is_signed_data) {
-    default_zp = 0;
-  } else {
-    default_zp = 1 << (static_cast<int>(bits) - 1);
-  }
+  int default_zp = hipdnn_ep::gbq::defaultZeroPoint(
+      static_cast<int>(bits), /*unsignedStorage=*/!is_signed_data);
 
   // Sub-byte storage: when bits == 4 and the data tensor element type is
   // uint8 / int8 (no native int4/uint4 in the EP type system), ONNX stores

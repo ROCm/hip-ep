@@ -438,8 +438,9 @@ LogicalResult GatherBlockQuantizedOp::reifyResultShapes(
     return failure();
 
   detail::GatherBlockQuantizedStorageFlags storageFlags =
-      detail::getGatherBlockQuantizedStorageFlags(getBits(),
-                                                  dataType.getElementType());
+      detail::getGatherBlockQuantizedStorageFlags(
+          getBits(), dataType.getElementType(),
+          (*this)->hasAttr("unsigned_quant_storage"));
   FailureOr<SmallVector<OpFoldResult>> dims =
       mlir::hip::reifyGatherBlockQuantizedShape(
           b, getLoc(), getData(), getIndices(), getScales(), getZeroPoints(),

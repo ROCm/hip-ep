@@ -332,9 +332,9 @@ reifyGatherWithAxis(OpBuilder &b, Location loc, Value data, Value indices,
 ///            ++ logicalData[gatherAxis + 1:]
 ///
 /// If `gatherAxis == quantizeAxis`, the packed axis is removed by Gather and
-/// no output extent is multiplied. `uint8Storage` carries the schema's
-/// gather-axis-zero restriction independently of whether the storage contains
-/// packed 4-bit values.
+/// no output extent is multiplied. `uint8Storage` means unsigned `bits == 8`
+/// logical storage and enforces its gather-axis-zero, last-quantize-axis
+/// policy. It is false for signed int8 and for byte-packed INT4/UINT4.
 ///
 /// Also validates the runtime-supported ranks, attributes, data/scales block
 /// grid, and optional zero-point shape. Dynamic extents are treated as

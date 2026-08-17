@@ -1127,13 +1127,18 @@ def Hip_GatherBlockQuantizedOp :
     `logical_data[quantize_axis] = data.shape[quantize_axis] * 2`; no extent is
     doubled when Gather removes that axis. Output rank is `q + (r - 1)` where
     `q = rank(indices)`. Element type of `output` matches `scales`
-    (T2: f32 / f16 / bf16). For uint8 `data`, `gather_axis` must be 0.
+    (T2: f32 / f16 / bf16). Unsigned 8-bit `data` requires `gather_axis = 0`,
+    `quantize_axis = rank(data) - 1`, and distinct axes.
 
-    Optional unit attribute `unsigned_quant_storage`: set when
-    convert-onnx-to-hip identifies UINT4/UINT8
-    packed byte storage (MLIR cannot represent ui4). Lowering passes
-    HIPDNN_EP_DATATYPE_UINT8 to the runtime instead of the signless-i8 default
-    (INT8 / signed int4). Absent for signed INT4 or explicit ui8/i8 storage.
+    Signedness comes from ONNX T1, never from `bits`. Explicit si8/ui8 MLIR
+    storage remains signed/unsigned. Native INT4/UINT4 is legalized to signless
+    i8 because the HIP boundary uses byte storage; for that signless form, the
+    optional `unsigned_quant_storage` unit attribute is authoritative:
+    present means unsigned and absent means signed. Conversion also
+    canonicalizes explicit ui8 by setting the marker. The marker on explicit
+    si8 is contradictory and rejected. Lowering carries the resolved choice as
+    HIPDNN_EP_DATATYPE_INT8 or HIPDNN_EP_DATATYPE_UINT8, which controls both
+    data/zero-point interpretation and the omitted-zero-point default.
 
     Uses destination-passing style: the `output` buffer is provided as an
     argument. The runtime is responsible for fetching the per-element

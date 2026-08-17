@@ -230,6 +230,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
             ${CMAKE_CURRENT_SOURCE_DIR}/real/runtime_types.h
             ${CMAKE_CURRENT_SOURCE_DIR}/real/cache_utils.h
             ${CMAKE_CURRENT_SOURCE_DIR}/real/zp_unpack_cache.h
+            ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/include/gather_block_quantized_utils.h
             ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/include/hip_custom_kernels.h)
     else()
         list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}/mock")

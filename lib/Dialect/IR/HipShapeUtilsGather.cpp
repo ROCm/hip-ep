@@ -178,6 +178,16 @@ FailureOr<SmallVector<int64_t>> mlir::hip::inferGatherBlockQuantizedShape(
         << "gather_block_quantized gather_axis must be 0 for uint8 storage";
     return failure();
   }
+  if (uint8Storage && normalizedQuantizeAxis != dataRank - 1) {
+    emitError() << "gather_block_quantized quantize_axis must be the last "
+                   "dimension for uint8 storage";
+    return failure();
+  }
+  if (uint8Storage && normalizedGatherAxis == normalizedQuantizeAxis) {
+    emitError() << "gather_block_quantized gather_axis and quantize_axis must "
+                   "differ for uint8 storage";
+    return failure();
+  }
 
   SmallVector<int64_t> logicalDataShape(dataShape);
   int64_t packedDim = dataShape[normalizedQuantizeAxis];

@@ -61,8 +61,15 @@ struct GatherBlockQuantizedOpLowering
     auto scalesType = cast<MemRefType>(op.getScales().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
 
-    int64_t dataDtype = getHipdnnDataType(dataType.getElementType());
-    if (dataType.getElementType().isUnsignedInteger(8) || op.getBits() == 8 ||
+    Type dataElementType = dataType.getElementType();
+    if (dataElementType.isSignedInteger(8) &&
+        op->hasAttr("unsigned_quant_storage")) {
+      op.emitError(
+          "unsigned_quant_storage conflicts with explicitly signed data");
+      return failure();
+    }
+    int64_t dataDtype = getHipdnnDataType(dataElementType);
+    if (dataElementType.isUnsignedInteger(8) ||
         op->hasAttr("unsigned_quant_storage"))
       dataDtype = 7; // HIPDNN_EP_DATATYPE_UINT8
     int64_t indicesDtype = getHipdnnDataType(indicesType.getElementType());

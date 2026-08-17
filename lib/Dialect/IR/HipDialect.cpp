@@ -1789,6 +1789,9 @@ LogicalResult GatherBlockQuantizedOp::verify() {
   auto dataElementType = dyn_cast<IntegerType>(dataType.getElementType());
   if (!dataElementType || dataElementType.getWidth() != 8)
     return emitOpError("data storage must have an 8-bit integer element type");
+  if (dataElementType.isSigned() && (*this)->hasAttr("unsigned_quant_storage"))
+    return emitOpError("unsigned_quant_storage conflicts with explicitly "
+                       "signed data storage");
   auto indicesElementType = dyn_cast<IntegerType>(indicesType.getElementType());
   if (!indicesElementType || (indicesElementType.getWidth() != 32 &&
                               indicesElementType.getWidth() != 64))
@@ -1808,8 +1811,9 @@ LogicalResult GatherBlockQuantizedOp::verify() {
     return emitOpError("tensor result type must match its output buffer type");
 
   detail::GatherBlockQuantizedStorageFlags storageFlags =
-      detail::getGatherBlockQuantizedStorageFlags(getBits(),
-                                                  dataType.getElementType());
+      detail::getGatherBlockQuantizedStorageFlags(
+          getBits(), dataType.getElementType(),
+          (*this)->hasAttr("unsigned_quant_storage"));
   std::optional<ArrayRef<int64_t>> zeroPointsShape;
   if (Value zeroPoints = getZeroPoints())
     zeroPointsShape = detail::getShapeOf(zeroPoints);

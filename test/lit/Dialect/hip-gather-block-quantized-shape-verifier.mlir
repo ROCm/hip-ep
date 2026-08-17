@@ -110,18 +110,103 @@ func.func @bad_bits(
 
 // -----
 
-func.func @bad_gather_axis_for_uint8(
+// Byte-packed UINT4 is not subject to the UINT8-only axis restriction.
+func.func @valid_uint4_nonzero_gather_axis(
     %ctx: !hip.context,
     %data: memref<4x64xui8, 1>,
     %indices: memref<2xi64, 1>,
     %scales: memref<4x4xf16, 1>,
     %output: memref<4x2xf16, 1>) {
-  // expected-error @+1 {{gather_axis must be 0 for uint8 storage}}
   hip.gather_block_quantized(%ctx)
     ins(%data, %indices, %scales :
         memref<4x64xui8, 1>, memref<2xi64, 1>, memref<4x4xf16, 1>)
     outs(%output : memref<4x2xf16, 1>)
     {bits = 4, block_size = 32, gather_axis = 1, quantize_axis = 1}
+  return
+}
+
+// -----
+
+func.func @valid_signed_i8_general_axes(
+    %ctx: !hip.context,
+    %data: memref<64x512xsi8, 1>,
+    %indices: memref<2xi32, 1>,
+    %scales: memref<2x512xf32, 1>,
+    %output: memref<64x2xf32, 1>) {
+  hip.gather_block_quantized(%ctx)
+    ins(%data, %indices, %scales :
+        memref<64x512xsi8, 1>, memref<2xi32, 1>, memref<2x512xf32, 1>)
+    outs(%output : memref<64x2xf32, 1>)
+    {bits = 8, block_size = 32, gather_axis = 1, quantize_axis = 0}
+  return
+}
+
+// -----
+
+func.func @valid_unsigned_signless_i8(
+    %ctx: !hip.context,
+    %data: memref<4x64xi8, 1>,
+    %indices: memref<2xi64, 1>,
+    %scales: memref<4x2xf16, 1>,
+    %output: memref<2x64xf16, 1>) {
+  hip.gather_block_quantized(%ctx)
+    ins(%data, %indices, %scales :
+        memref<4x64xi8, 1>, memref<2xi64, 1>, memref<4x2xf16, 1>)
+    outs(%output : memref<2x64xf16, 1>)
+    {bits = 8, block_size = 32, gather_axis = 0, quantize_axis = 1,
+     unsigned_quant_storage}
+  return
+}
+
+// -----
+
+func.func @bad_gather_axis_for_uint8(
+    %ctx: !hip.context,
+    %data: memref<4x64xui8, 1>,
+    %indices: memref<2xi64, 1>,
+    %scales: memref<4x2xf16, 1>,
+    %output: memref<4x2xf16, 1>) {
+  // expected-error @+1 {{gather_axis must be 0 for uint8 storage}}
+  hip.gather_block_quantized(%ctx)
+    ins(%data, %indices, %scales :
+        memref<4x64xui8, 1>, memref<2xi64, 1>, memref<4x2xf16, 1>)
+    outs(%output : memref<4x2xf16, 1>)
+    {bits = 8, block_size = 32, gather_axis = 1, quantize_axis = 1}
+  return
+}
+
+// -----
+
+func.func @bad_quantize_axis_for_uint8(
+    %ctx: !hip.context,
+    %data: memref<4x64xui8, 1>,
+    %indices: memref<2xi64, 1>,
+    %scales: memref<1x64xf16, 1>,
+    %output: memref<2x64xf16, 1>) {
+  // expected-error @+1 {{quantize_axis must be the last dimension for uint8 storage}}
+  hip.gather_block_quantized(%ctx)
+    ins(%data, %indices, %scales :
+        memref<4x64xui8, 1>, memref<2xi64, 1>, memref<1x64xf16, 1>)
+    outs(%output : memref<2x64xf16, 1>)
+    {bits = 8, block_size = 32, gather_axis = 0, quantize_axis = 0}
+  return
+}
+
+// -----
+
+func.func @conflicting_signed_storage_marker(
+    %ctx: !hip.context,
+    %data: memref<64x512xsi8, 1>,
+    %indices: memref<2xi32, 1>,
+    %scales: memref<2x512xf32, 1>,
+    %output: memref<64x2xf32, 1>) {
+  // expected-error @+1 {{unsigned_quant_storage conflicts with explicitly signed data storage}}
+  hip.gather_block_quantized(%ctx)
+    ins(%data, %indices, %scales :
+        memref<64x512xsi8, 1>, memref<2xi32, 1>, memref<2x512xf32, 1>)
+    outs(%output : memref<64x2xf32, 1>)
+    {bits = 8, block_size = 32, gather_axis = 1, quantize_axis = 0,
+     unsigned_quant_storage}
   return
 }
 
