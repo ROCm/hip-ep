@@ -34,19 +34,19 @@ func.func @foreign_arith_top_level(%lhs: f32, %rhs: f32) -> f32 {
 
 // ONNX operations remain illegal at any nesting depth inside hipsr.compute.
 func.func @nested_onnx(
-    %ctx: !hipsr.context, %input: tensor<2x3xf16, #hipsr.mem<device>>,
-    %init: tensor<6xf16, #hipsr.mem<device>>) -> tensor<6xf16, #hipsr.mem<device>> {
-  %result = hipsr.compute(%ctx) ins(%input : tensor<2x3xf16, #hipsr.mem<device>>)
-                                  outs(%init : tensor<6xf16, #hipsr.mem<device>>) {
-  ^bb0(%body_ctx: !hipsr.context, %body_input: tensor<2x3xf16, #hipsr.mem<device>>,
-       %body_init: tensor<6xf16, #hipsr.mem<device>>):
-    %nested = scf.execute_region -> tensor<6xf16, #hipsr.mem<device>> {
+    %ctx: !hipsr.context, %input: tensor<2x3xf16>,
+    %init: tensor<6xf16>) -> tensor<6xf16> {
+  %result = hipsr.compute(%ctx) ins(%input : tensor<2x3xf16>)
+                                  outs(%init : tensor<6xf16>) {
+  ^bb0(%body_ctx: !hipsr.context, %body_input: tensor<2x3xf16>,
+       %body_init: tensor<6xf16>):
+    %nested = scf.execute_region -> tensor<6xf16> {
       // expected-error @+1 {{failed to legalize operation 'onnx.Unsupported'}}
       %onnx = "onnx.Unsupported"(%body_input)
-          : (tensor<2x3xf16, #hipsr.mem<device>>) -> tensor<6xf16, #hipsr.mem<device>>
-      scf.yield %onnx : tensor<6xf16, #hipsr.mem<device>>
+          : (tensor<2x3xf16>) -> tensor<6xf16>
+      scf.yield %onnx : tensor<6xf16>
     }
-    hipsr.compute_yield %nested : tensor<6xf16, #hipsr.mem<device>>
-  } : tensor<6xf16, #hipsr.mem<device>>
-  return %result : tensor<6xf16, #hipsr.mem<device>>
+    hipsr.compute_yield %nested : tensor<6xf16>
+  } : tensor<6xf16>
+  return %result : tensor<6xf16>
 }
