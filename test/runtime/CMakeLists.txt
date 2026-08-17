@@ -166,3 +166,22 @@ target_compile_definitions(test-matmul-gemm-contract PRIVATE
 )
 add_test(NAME MatmulGemmContractUnitTest COMMAND test-matmul-gemm-contract)
 set_target_properties(test-matmul-gemm-contract PROPERTIES FOLDER "runtime-tests")
+
+# Reduction wrappers return status, and lowering aggregates every status into
+# the shared device error flag read by generated inference.
+add_executable(test-reduction-status
+    test_reduction_status.cpp
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/runtime_error.cpp
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/mock/mock_gpu.cpp
+)
+target_compile_features(test-reduction-status PRIVATE cxx_std_17)
+target_include_directories(test-reduction-status PRIVATE
+    ${CMAKE_SOURCE_DIR}/lib/Runtime
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/mock
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_compile_definitions(test-reduction-status PRIVATE
+    HIPDNN_EP_RT_NO_EXPORT
+)
+add_test(NAME ReductionStatusUnitTest COMMAND test-reduction-status)
+set_target_properties(test-reduction-status PROPERTIES FOLDER "runtime-tests")

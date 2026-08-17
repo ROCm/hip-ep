@@ -51,15 +51,15 @@ module {
   }
 
   // Dynamic input extents with compile-time axes.
-  func.func @reduce_max_dynamic(%data: tensor<?x?x512xf32>) -> tensor<?x?xf32> {
+  func.func @reduce_max_dynamic(%data: tensor<?x?x512xf16>) -> tensor<?x?xf16> {
     %axes = arith.constant dense<[2]> : tensor<1xi64>
-    %output = "onnx.ReduceMax"(%data, %axes) {keepdims = 0 : si64, noop_with_empty_axes = 0 : si64} : (tensor<?x?x512xf32>, tensor<1xi64>) -> tensor<?x?xf32>
-    return %output : tensor<?x?xf32>
+    %output = "onnx.ReduceMax"(%data, %axes) {keepdims = 0 : si64, noop_with_empty_axes = 0 : si64} : (tensor<?x?x512xf16>, tensor<1xi64>) -> tensor<?x?xf16>
+    return %output : tensor<?x?xf16>
   }
 
   // CHECK-LABEL: func.func @reduce_max_dynamic
-  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<?x?x512xf32>) -> tensor<?x?xf32>
-  // CHECK: %[[INIT:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xf32>
-  // CHECK: hip.reduce_max(%[[CTX]]) ins(%[[DATA]], %{{.*}} : tensor<?x?x512xf32>, tensor<1xi64>) outs(%[[INIT]] : tensor<?x?xf32>) {keepdims = 0 : i64, normalized_axes = array<i64: 2>}
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<?x?x512xf16>) -> tensor<?x?xf16>
+  // CHECK: %[[INIT:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xf16>
+  // CHECK: hip.reduce_max(%[[CTX]]) ins(%[[DATA]], %{{.*}} : tensor<?x?x512xf16>, tensor<1xi64>) outs(%[[INIT]] : tensor<?x?xf16>) {keepdims = 0 : i64, normalized_axes = array<i64: 2>}
   // CHECK-NOT: hip.alloc
 }

@@ -234,6 +234,19 @@ public:
     auto dataType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
     if (!dataType)
       return op->emitError("reduction data must be a ranked tensor");
+    auto declaredResultType =
+        mlir::dyn_cast<mlir::ShapedType>(op->getResult(0).getType());
+    if (declaredResultType &&
+        declaredResultType.getElementType() != dataType.getElementType())
+      return op->emitError(
+          "reduction data and result must have the same element type");
+    llvm::StringRef hipOpName = HipOpTy::getOperationName();
+    if (!mlir::hip::isSupportedReductionElementType(hipOpName,
+                                                    dataType.getElementType()))
+      return op->emitError()
+             << "unsupported reduction element type "
+             << dataType.getElementType() << "; supported types: "
+             << mlir::hip::getSupportedReductionElementTypes(hipOpName);
     auto normalizedAxes =
         mlir::hip::normalizeReductionAxes(dataType.getRank(), *reducedAxes);
     if (mlir::failed(normalizedAxes))

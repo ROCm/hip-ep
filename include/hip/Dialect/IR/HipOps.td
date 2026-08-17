@@ -3691,8 +3691,8 @@ def Hip_ReduceProdOp : Hip_DpsOp_Reduction<"reduce_prod"> {
 
     Example:
     ```mlir
-    hip.reduce_prod(%ctx) ins(%data, %axes : memref<3x2x2xf32, 1>, memref<0xi64, 1>)
-                          outs(%output : memref<1x1x1xf32, 1>) {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
+    hip.reduce_prod(%ctx) ins(%data, %axes : memref<3x2x2xi32, 1>, memref<0xi64, 1>)
+                          outs(%output : memref<1x1x1xi32, 1>) {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
     ```
   }];
 

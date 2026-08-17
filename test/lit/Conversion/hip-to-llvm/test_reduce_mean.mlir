@@ -36,7 +36,8 @@ module {
                           {keepdims = 0 : i64, noop_with_empty_axes = 0 : i64,
                            normalized_axes = array<i64: 2>}
 
-    // CHECK: llvm.call @wrap_reduce_mean({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: %[[STATUS:.*]] = llvm.call @wrap_reduce_mean({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK-NEXT: llvm.call @hipdnn_ep_state_record_status({{.*}}, %[[STATUS]]) : (!llvm.ptr, i32) -> i32
 
     return
   }

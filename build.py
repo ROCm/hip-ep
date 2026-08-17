@@ -354,7 +354,7 @@ def run_tests(args, build_dir):
             "-R",
             "StaticPlugins|OutputAllocator|CustomOpComputeStatus|"
             "ArtifactAbi|TensorBufferLifecycle|SymbolicDims|CacheIdentity|"
-            "MatmulGemmContractUnitTest",
+            "MatmulGemmContractUnitTest|ReductionStatusUnitTest",
             "--output-on-failure",
         ]
     )

@@ -43,6 +43,13 @@ struct ReduceOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     ModuleOp module = op->template getParentOfType<ModuleOp>();
     auto dataType = cast<MemRefType>(op.getData().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
+    StringRef operationName = op->getName().getStringRef();
+    if (!isSupportedReductionElementType(operationName,
+                                         dataType.getElementType()))
+      return op.emitOpError()
+             << "lowering does not support element type "
+             << dataType.getElementType() << "; supported types: "
+             << getSupportedReductionElementTypes(operationName);
     // The HIP op verifier compares normalized_axes against the structural
     // constant source before dialect conversion starts. By the time this
     // pattern runs, memref.get_global may already be rewritten to LLVM, so the
@@ -120,6 +127,10 @@ struct ReduceOpLowering : public ConvertOpToLLVMPattern<OpTy> {
         LLVM::lookupOrCreateFn(rewriter, module, funcName, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
+    FailureOr<LLVM::LLVMFuncOp> recordStatusFunc = LLVM::lookupOrCreateFn(
+        rewriter, module, kHipRecordStatus, {ptrType, i32Type}, i32Type);
+    if (failed(recordStatusFunc))
+      return failure();
 
     SmallVector<Value, 11> args = {statePtr,        dataPtr,
                                    axesPtr,         outputPtr,
@@ -128,7 +139,10 @@ struct ReduceOpLowering : public ConvertOpToLLVMPattern<OpTy> {
                                    keepdimsVal,     noopWithEmptyAxesVal,
                                    innerSizeVal};
 
-    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    Value status =
+        LLVM::CallOp::create(rewriter, loc, *funcOp, args).getResult();
+    LLVM::CallOp::create(rewriter, loc, *recordStatusFunc,
+                         ValueRange{statePtr, status});
     rewriter.eraseOp(op);
     return success();
   }

@@ -13,6 +13,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
 
 #include <optional>
 
@@ -237,6 +238,16 @@ FailureOr<SmallVector<int64_t>> normalizeReductionAxes(int64_t dataRank,
 FailureOr<SmallVector<int64_t>>
 resolveConstantReductionAxes(Value axes, int64_t dataRank,
                              int64_t noopWithEmptyAxes);
+
+/// Return whether a reduction leaf's generated runtime implements
+/// `elementType`. `operationName` is the canonical HIP operation name (for
+/// example, "hip.reduce_sum"). This is the single dtype matrix used by
+/// conversion, dialect verification, and lowering.
+bool isSupportedReductionElementType(StringRef operationName, Type elementType);
+
+/// Human-readable supported dtype list paired with
+/// `isSupportedReductionElementType`, for diagnostics.
+StringRef getSupportedReductionElementTypes(StringRef operationName);
 
 /// Generated-verifier target for `Hip_DpsOp_Reduction`. Tensor and memref
 /// forms both require a structurally-proven constant axes source, one

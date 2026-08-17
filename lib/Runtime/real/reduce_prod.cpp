@@ -53,8 +53,11 @@ int wrap_reduce_prod(RuntimeState *state, void *data, void *axes, void *output,
   (void)axes;
   (void)keepdims;
 
-  if (!state || !data || !output) {
-    RUNTIME_DEBUG_LOG("[REAL] wrap_reduce_prod: null argument\n");
+  if (!state || !data || !output || data_num_elements < 0 ||
+      output_num_elements < 0 || axes_num_elements < 0 || inner_size < 0 ||
+      (keepdims != 0 && keepdims != 1) ||
+      (noop_with_empty_axes != 0 && noop_with_empty_axes != 1)) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_reduce_prod: invalid argument\n");
     return -1;
   }
 

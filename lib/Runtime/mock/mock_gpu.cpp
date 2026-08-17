@@ -1081,14 +1081,50 @@ int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
   return 0;
 }
 
+enum class MockReductionKind { Sum, Mean, L2, Max, Min, Prod };
+
+static bool mock_reduction_dtype_supported(MockReductionKind kind,
+                                           int64_t data_type) {
+  if (kind == MockReductionKind::Sum)
+    return data_type == HIPDNN_EP_DATATYPE_HALF ||
+           data_type == HIPDNN_EP_DATATYPE_FLOAT ||
+           data_type == HIPDNN_EP_DATATYPE_INT32 ||
+           data_type == HIPDNN_EP_DATATYPE_INT64;
+  if (kind == MockReductionKind::Mean || kind == MockReductionKind::L2)
+    return data_type == HIPDNN_EP_DATATYPE_HALF ||
+           data_type == HIPDNN_EP_DATATYPE_FLOAT;
+  return data_type == HIPDNN_EP_DATATYPE_HALF ||
+         data_type == HIPDNN_EP_DATATYPE_INT32 ||
+         data_type == HIPDNN_EP_DATATYPE_INT64;
+}
+
+static int mock_validate_reduction(RuntimeState *state, void *data,
+                                   void *output, int64_t data_type,
+                                   int64_t keepdims,
+                                   int64_t noop_with_empty_axes,
+                                   MockReductionKind kind) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in reduction wrapper\n");
+    return -1;
+  }
+  if (!data || !output || (keepdims != 0 && keepdims != 1) ||
+      (noop_with_empty_axes != 0 && noop_with_empty_axes != 1) ||
+      !mock_reduction_dtype_supported(kind, data_type))
+    return -1;
+  return 0;
+}
+
 int wrap_reduce_max(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t data_num_elements, int64_t output_num_elements,
                     int64_t axes_num_elements, int64_t data_type,
-                    int64_t keepdims, int64_t noop_with_empty_axes) {
-  if (!state) {
-    fprintf(stderr, "Invalid state in wrap_reduce_max\n");
+                    int64_t keepdims, int64_t noop_with_empty_axes,
+                    int64_t inner_size) {
+  (void)axes;
+  (void)inner_size;
+  if (mock_validate_reduction(state, data, output, data_type, keepdims,
+                              noop_with_empty_axes,
+                              MockReductionKind::Max) != 0)
     return -1;
-  }
 
   MOCK_PRINT(
       "[MOCK] wrap_reduce_max(data_num_elements=%lld, "
@@ -1105,11 +1141,14 @@ int wrap_reduce_max(RuntimeState *state, void *data, void *axes, void *output,
 int wrap_reduce_min(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t data_num_elements, int64_t output_num_elements,
                     int64_t axes_num_elements, int64_t data_type,
-                    int64_t keepdims, int64_t noop_with_empty_axes) {
-  if (!state) {
-    fprintf(stderr, "Invalid state in wrap_reduce_min\n");
+                    int64_t keepdims, int64_t noop_with_empty_axes,
+                    int64_t inner_size) {
+  (void)axes;
+  (void)inner_size;
+  if (mock_validate_reduction(state, data, output, data_type, keepdims,
+                              noop_with_empty_axes,
+                              MockReductionKind::Min) != 0)
     return -1;
-  }
 
   MOCK_PRINT(
       "[MOCK] wrap_reduce_min(data_num_elements=%lld, "
@@ -1126,11 +1165,14 @@ int wrap_reduce_min(RuntimeState *state, void *data, void *axes, void *output,
 int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t data_num_elements, int64_t output_num_elements,
                     int64_t axes_num_elements, int64_t data_type,
-                    int64_t keepdims, int64_t noop_with_empty_axes) {
-  if (!state) {
-    fprintf(stderr, "Invalid state in wrap_reduce_sum\n");
+                    int64_t keepdims, int64_t noop_with_empty_axes,
+                    int64_t inner_size) {
+  (void)axes;
+  (void)inner_size;
+  if (mock_validate_reduction(state, data, output, data_type, keepdims,
+                              noop_with_empty_axes,
+                              MockReductionKind::Sum) != 0)
     return -1;
-  }
 
   MOCK_PRINT(
       "[MOCK] wrap_reduce_sum(data_num_elements=%lld, "
@@ -1147,11 +1189,14 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
 int wrap_reduce_mean(RuntimeState *state, void *data, void *axes, void *output,
                      int64_t data_num_elements, int64_t output_num_elements,
                      int64_t axes_num_elements, int64_t data_type,
-                     int64_t keepdims, int64_t noop_with_empty_axes) {
-  if (!state) {
-    fprintf(stderr, "Invalid state in wrap_reduce_mean\n");
+                     int64_t keepdims, int64_t noop_with_empty_axes,
+                     int64_t inner_size) {
+  (void)axes;
+  (void)inner_size;
+  if (mock_validate_reduction(state, data, output, data_type, keepdims,
+                              noop_with_empty_axes,
+                              MockReductionKind::Mean) != 0)
     return -1;
-  }
 
   MOCK_PRINT(
       "[MOCK] wrap_reduce_mean(data_num_elements=%lld, "
@@ -1172,10 +1217,9 @@ int wrap_reduce_l2(RuntimeState *state, void *data, void *axes, void *output,
                    int64_t inner_size) {
   (void)axes;
   (void)inner_size;
-  if (!state) {
-    fprintf(stderr, "Invalid state in wrap_reduce_l2\n");
+  if (mock_validate_reduction(state, data, output, data_type, keepdims,
+                              noop_with_empty_axes, MockReductionKind::L2) != 0)
     return -1;
-  }
 
   MOCK_PRINT(
       "[MOCK] wrap_reduce_l2(data_num_elements=%lld, "
@@ -1942,11 +1986,14 @@ int wrap_expand(RuntimeState *state, void *input, void *shape, void *output,
 int wrap_reduce_prod(RuntimeState *state, void *data, void *axes, void *output,
                      int64_t data_num_elements, int64_t output_num_elements,
                      int64_t axes_num_elements, int64_t data_type,
-                     int64_t keepdims, int64_t noop_with_empty_axes) {
-  if (!state) {
-    fprintf(stderr, "Invalid state in wrap_reduce_prod\n");
+                     int64_t keepdims, int64_t noop_with_empty_axes,
+                     int64_t inner_size) {
+  (void)axes;
+  (void)inner_size;
+  if (mock_validate_reduction(state, data, output, data_type, keepdims,
+                              noop_with_empty_axes,
+                              MockReductionKind::Prod) != 0)
     return -1;
-  }
   MOCK_PRINT("[MOCK] wrap_reduce_prod(data_num_elements=%lld, "
              "output_num_elements=%lld, axes_num_elements=%lld, "
              "data_type=%s(%lld), keepdims=%lld, noop_with_empty_axes=%lld)\n",

@@ -124,6 +124,35 @@ mlir::hip::inferReductionShape(ArrayRef<int64_t> dataShape,
   return shape;
 }
 
+bool mlir::hip::isSupportedReductionElementType(StringRef operationName,
+                                                Type elementType) {
+  bool isF16 = elementType.isF16();
+  bool isF32 = elementType.isF32();
+  bool isI32 = elementType.isInteger(32);
+  bool isI64 = elementType.isInteger(64);
+
+  if (operationName == "hip.reduce_sum")
+    return isF16 || isF32 || isI32 || isI64;
+  if (operationName == "hip.reduce_mean" || operationName == "hip.reduce_l2")
+    return isF16 || isF32;
+  if (operationName == "hip.reduce_max" || operationName == "hip.reduce_min" ||
+      operationName == "hip.reduce_prod")
+    return isF16 || isI32 || isI64;
+  return false;
+}
+
+StringRef
+mlir::hip::getSupportedReductionElementTypes(StringRef operationName) {
+  if (operationName == "hip.reduce_sum")
+    return "f16, f32, i32, i64";
+  if (operationName == "hip.reduce_mean" || operationName == "hip.reduce_l2")
+    return "f16, f32";
+  if (operationName == "hip.reduce_max" || operationName == "hip.reduce_min" ||
+      operationName == "hip.reduce_prod")
+    return "f16, i32, i64";
+  return "<none>";
+}
+
 LogicalResult mlir::hip::verifyReductionDpsOp(Operation *op, Value data,
                                               Value axes, int64_t keepdims,
                                               int64_t noopWithEmptyAxes) {
@@ -138,6 +167,17 @@ LogicalResult mlir::hip::verifyReductionDpsOp(Operation *op, Value data,
 
   auto dataType = cast<ShapedType>(data.getType());
   auto axesType = cast<ShapedType>(axes.getType());
+  Type outputType = cast<ShapedType>((*dpsOp.getDpsInits().begin()).getType())
+                        .getElementType();
+  Type elementType = dataType.getElementType();
+  if (outputType != elementType)
+    return op->emitOpError("data and output must have the same element type");
+  StringRef operationName = op->getName().getStringRef();
+  if (!isSupportedReductionElementType(operationName, elementType))
+    return op->emitOpError()
+           << "unsupported reduction element type " << elementType
+           << "; supported types: "
+           << getSupportedReductionElementTypes(operationName);
   if ((axesType.getRank() != 0 && axesType.getRank() != 1) ||
       !axesType.getElementType().isInteger(64))
     return op->emitOpError(
