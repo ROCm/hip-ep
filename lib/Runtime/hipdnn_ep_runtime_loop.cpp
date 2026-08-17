@@ -69,6 +69,8 @@ struct HipdnnEpLoopFrame {
     const void *current_data;
     int current_bank;
     int allocated_bank;
+    size_t allocated_bytes;
+    bool allocation_valid;
     int published_bank;
   };
 
@@ -321,6 +323,8 @@ int runLoopImpl(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
     frame->status = 0;
     for (int32_t carrier = 0; carrier < num_loop_carried; ++carrier) {
       frame->carriers[carrier].allocated_bank = -1;
+      frame->carriers[carrier].allocated_bytes = 0;
+      frame->carriers[carrier].allocation_valid = false;
       frame->carriers[carrier].published_bank = -2;
     }
     rc = body_fn(state, frame, iter_dev, cond_dev, current_descs, capture_descs,
@@ -434,8 +438,12 @@ extern "C" void *hipdnn_ep_loop_frame_alloc(HipdnnEpLoopFrame *frame,
   auto &carrier = frame->carriers[carrier_index];
   int bank = carrier.current_bank == 0 ? 1 : 0;
   carrier.allocated_bank = bank;
-  if (bytes == 0)
+  carrier.allocated_bytes = bytes;
+  carrier.allocation_valid = false;
+  if (bytes == 0) {
+    carrier.allocation_valid = true;
     return nullptr;
+  }
   if (bytes > carrier.capacity[bank]) {
     if (carrier.data[bank]) {
       if (synchronizeLoopStream(
@@ -460,6 +468,7 @@ extern "C" void *hipdnn_ep_loop_frame_alloc(HipdnnEpLoopFrame *frame,
     }
     carrier.capacity[bank] = bytes;
   }
+  carrier.allocation_valid = true;
   return carrier.data[bank];
 }
 
@@ -483,9 +492,19 @@ extern "C" int hipdnn_ep_loop_frame_publish(HipdnnEpLoopFrame *frame,
     return -1;
   auto &carrier = frame->carriers[carrier_index];
   int bank = carrier.allocated_bank;
-  if (bank >= 0 && published_data == carrier.data[bank]) {
-    carrier.published_bank = bank;
-    return 0;
+  if (bank >= 0) {
+    bool validZeroSize = carrier.allocation_valid &&
+                         carrier.allocated_bytes == 0 &&
+                         published_data == nullptr;
+    bool validAllocated =
+        carrier.allocation_valid && carrier.allocated_bytes > 0 &&
+        published_data != nullptr && published_data == carrier.data[bank];
+    if (validZeroSize || validAllocated) {
+      carrier.published_bank = bank;
+      return 0;
+    }
+    frame->status = -1;
+    return -1;
   }
   if (published_data == carrier.current_data) {
     carrier.published_bank = -1;

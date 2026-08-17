@@ -41,6 +41,7 @@ struct Scenario {
   int failIteration = -1;
   bool runNested = false;
   RuntimeState *state = nullptr;
+  std::vector<std::vector<void *>> allocations;
 };
 
 thread_local Scenario *activeScenario = nullptr;
@@ -56,17 +57,23 @@ int body(RuntimeState *state, HipdnnEpLoopFrame *frame, void *, void *cond,
   if (iteration == scenario.failIteration)
     return -7;
 
+  if (scenario.allocations.empty())
+    scenario.allocations.resize(scenario.extents.size());
   for (size_t carrier = 0; carrier < scenario.extents.size(); ++carrier) {
     auto *in = static_cast<Rank1Desc *>(current[carrier]);
     CHECK(hipdnn_ep_loop_frame_set_current(frame, static_cast<int32_t>(carrier),
                                            in->aligned) == 0);
-    if (iteration > 0)
+    if (iteration > 0) {
       CHECK(in->sizes[0] == scenario.extents[carrier][iteration - 1]);
+      CHECK(in->allocated == scenario.allocations[carrier][iteration - 1]);
+      CHECK(in->aligned == scenario.allocations[carrier][iteration - 1]);
+    }
     int64_t extent = scenario.extents[carrier][iteration];
     void *data = hipdnn_ep_loop_frame_alloc(
         frame, static_cast<int32_t>(carrier), &extent, 1, sizeof(float));
     if (hipdnn_ep_loop_frame_status(frame) != 0)
       return hipdnn_ep_loop_frame_status(frame);
+    scenario.allocations[carrier].push_back(data);
     auto *out = static_cast<Rank1Desc *>(next[carrier]);
     *out = {data, data, 0, {extent}, {1}};
     CHECK(hipdnn_ep_loop_frame_publish(frame, static_cast<int32_t>(carrier),
@@ -146,6 +153,49 @@ void testGrowShrinkRegrowAndMultipleCarriers() {
   CHECK(static_cast<Rank1Desc *>(final[0])->sizes[0] == 4);
   CHECK(static_cast<Rank1Desc *>(final[1])->sizes[0] == 2);
   CHECK(static_cast<Rank1Desc *>(final[0])->aligned != nullptr);
+  CHECK(hipdnn_ep_loop_frame_destroy(&state, frame) == 0);
+  cleanup(state);
+}
+
+void testZeroSizePublicationAndBankReuse() {
+  RuntimeState state = makeState();
+  Rank1Desc seed{nullptr, nullptr, 0, {0}, {1}};
+  Rank1Desc scratchA{}, scratchB{};
+  void *initial[] = {&seed};
+  void *nextA[] = {&scratchA};
+  void *nextB[] = {&scratchB};
+  void **final = nullptr;
+  HipdnnEpLoopFrame *frame = nullptr;
+  Scenario scenario{{{2, 5, 0, 4}}, 0, -1, false, &state};
+  int errorsBefore = recordedErrors.load();
+  activeScenario = &scenario;
+  CHECK(hipdnn_ep_run_counted_loop(&state, body, 4, true, 1, 0, initial, nextA,
+                                   nextB, nullptr, nullptr, &final,
+                                   &frame) == 0);
+  CHECK(frame != nullptr);
+  CHECK(hipdnn_ep_loop_frame_status(frame) == 0);
+  CHECK(recordedErrors.load() == errorsBefore);
+  CHECK(scenario.allocations.size() == 1);
+  void *expectedFinal = nullptr;
+  if (scenario.allocations.size() == 1) {
+    const auto &allocations = scenario.allocations[0];
+    CHECK(allocations.size() == 4);
+    if (allocations.size() == 4) {
+      CHECK(allocations[0] != nullptr);
+      CHECK(allocations[1] != nullptr);
+      CHECK(allocations[0] != allocations[1]);
+      CHECK(allocations[2] == nullptr);
+      // Publishing zero bytes advances the logical bank without releasing
+      // either retained allocation, so extent 4 reuses the extent-5 bank.
+      CHECK(allocations[3] == allocations[1]);
+      expectedFinal = allocations[3];
+    }
+  }
+  auto *result = static_cast<Rank1Desc *>(final[0]);
+  CHECK(result->sizes[0] == 4);
+  CHECK(result->allocated != nullptr);
+  CHECK(result->allocated == result->aligned);
+  CHECK(result->allocated == expectedFinal);
   CHECK(hipdnn_ep_loop_frame_destroy(&state, frame) == 0);
   cleanup(state);
 }
@@ -368,6 +418,7 @@ extern "C" int hipdnn_ep_state_set_error_flag(RuntimeState *) {
 int main() {
   testZeroTripAliasesSeed();
   testGrowShrinkRegrowAndMultipleCarriers();
+  testZeroSizePublicationAndBankReuse();
   testFailureIsTransactional();
   testAllocationOverflow();
   testNestedAndConcurrentFrames();

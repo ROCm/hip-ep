@@ -50,8 +50,10 @@ Each invocation owns two high-water device banks per carrier. Current is
 read-only to the body; next is writable and may grow. Exact logical sizes and
 contiguous strides live in the returned memref descriptor and are independent
 of retained bank capacity. Checked multiplication rejects negative extents and
-byte-size overflow. A zero-element descriptor is valid and uses no device
-allocation.
+byte-size overflow. A zero-element descriptor has null data and zero logical
+bytes; publishing it advances the logical bank without allocating, freeing, or
+discarding retained bank capacity. A later nonzero iteration resumes normal
+bank reuse or growth. Null remains an allocation failure for nonzero bytes.
 
 `hip.loop_alloc` deliberately has no Allocate memory effect. Carrier banks are
 therefore excluded from PoolAllocs and ownership-based deallocation. Ordinary

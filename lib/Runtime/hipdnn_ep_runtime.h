@@ -1647,8 +1647,9 @@ typedef int (*HipdnnEpLoopBodyFn)(RuntimeState *state, HipdnnEpLoopFrame *frame,
                                   void **next_descs);
 
 // Dedicated next-bank allocation used by hip.loop_alloc. Exact logical extents
-// are checked independently from retained bank capacity. Zero-element shapes
-// return an inert non-owning sentinel and are valid.
+// are checked independently from retained bank capacity. A zero-element shape
+// returns null with successful frame status and may be published as a valid
+// descriptor; null remains an allocation failure for nonzero logical bytes.
 void *hipdnn_ep_loop_frame_alloc(HipdnnEpLoopFrame *frame,
                                  int32_t carrier_index, const int64_t *shape,
                                  int64_t rank, int64_t elem_size);
