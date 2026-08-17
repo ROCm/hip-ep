@@ -1273,12 +1273,23 @@ gqa_flash_decode_kernel(
     int K_SPLITS) {  // runtime split-K count (was a template param)
   constexpr bool KV_I8 = (FMT == KvDtype::kI8);
   using KVt = std::conditional_t<KV_I8, int8_t, __half>;
-  // Keep the K+V LDS tile at ~16KB/block (4 blocks resident per 64KB-LDS CU)
-  // regardless of D, so DRAM latency stays hidden. At BKV=64,D=128 the tile
-  // would be 32KB -> only 2 resident blocks -> latency-bound (decode stalls
-  // ~1.6x). 2*BKV*D*2 bytes: D=256 -> BKV=16 (16KB), D=128 -> BKV=32 (16KB),
-  // D=64 -> BKV=64 (16KB).
-  constexpr int BKV = (D >= 256) ? 16 : (D == 128) ? 32 : FLASH_DECODE_BKV;
+  // Size the K+V LDS tile for block residency, since this kernel is bandwidth
+  // bound and the split-K grid always supplies more blocks than fit. 2*BKV*D*2
+  // bytes: D=128 -> BKV=32 (16KB), D=64 -> BKV=64 (16KB). At BKV=64,D=128 the
+  // tile would be 32KB -> only 2 resident blocks -> latency-bound (decode
+  // stalls ~1.6x).
+  //
+  // D>=256 uses 8KB (BKV=8) rather than the 16KB the other widths get, which
+  // doubles resident blocks per WGP. Measured on gfx1151 with
+  // test_gqa_decode --iters 500, vs BKV=16, taking the min of 5-7 runs
+  // (the absolute numbers drift a few % with clocks, so only compare within a
+  // run):
+  //   Qwen3.5-9B   H16 G4 d256 skv3860   0.0440 -> 0.0409 ms  (7-9% faster)
+  //   Qwen3.6-35B  H16 G2 d256 skv18646  0.1772 -> 0.1745 ms  (neutral..+3%)
+  // Going further the wrong way in either direction is worse: BKV=32 costs 37%
+  // on the 9B (halved residency), and BKV=4 costs 6% on the 35B (the tile stops
+  // amortizing the per-tile __syncthreads and staging setup).
+  constexpr int BKV = (D >= 256) ? 8 : (D == 128) ? 32 : FLASH_DECODE_BKV;
   constexpr int THREADS = HPG * WAVE_SIZE;  // total threads in block
   constexpr int EPT = D / WAVE_SIZE;  // elements-per-thread along d
 
