@@ -32,9 +32,9 @@ struct ConstantOpLowering : public ::mlir::ConversionPattern {
                                   /*benefit=*/1, ctx) {}
 
   ::mlir::LogicalResult
-  matchAndRewrite(
-      ::mlir::Operation *op, ::mlir::ArrayRef<::mlir::Value> operands,
-      ::mlir::ConversionPatternRewriter &rewriter) const override {
+  matchAndRewrite(::mlir::Operation *op,
+                  ::mlir::ArrayRef<::mlir::Value> operands,
+                  ::mlir::ConversionPatternRewriter &rewriter) const override {
     (void)operands;
     auto tensorType =
         ::llvm::dyn_cast<::mlir::RankedTensorType>(op->getResult(0).getType());
@@ -55,8 +55,7 @@ struct ConstantOpLowering : public ::mlir::ConversionPattern {
       auto resultType = ::llvm::dyn_cast_or_null<::mlir::RankedTensorType>(
           getTypeConverter()->convertType(tensorType));
       if (!resultType) {
-        return rewriter.notifyMatchFailure(op,
-                                           "failed to convert result type");
+        return rewriter.notifyMatchFailure(op, "failed to convert result type");
       }
       rewriter.replaceOpWithNewOp<ConstantOp>(
           op, /*result=*/resultType, /*value=*/valueAttr,
