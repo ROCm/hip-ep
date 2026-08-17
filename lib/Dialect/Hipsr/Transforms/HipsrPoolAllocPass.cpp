@@ -9,8 +9,10 @@
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Bufferization/Transforms/BufferViewFlowAnalysis.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
@@ -106,46 +108,119 @@ llvm::DenseMap<Value, size_t> mapAllocIndices(Block &body) {
   return indices;
 }
 
-llvm::DenseMap<Value, Lifetime> computeLiveness(Block &body) {
+FailureOr<llvm::DenseMap<Value, Lifetime>>
+computeLiveness(PoolDomainOp domain) {
+  Block &body = domain.getBody().front();
+  BufferViewFlowAnalysis aliases(domain);
+
   llvm::DenseMap<Operation *, size_t> opIndices;
   size_t idx = 0;
   for (Operation &op : body) {
     opIndices[&op] = idx++;
   }
 
+  LLVM_DEBUG(DBGS() << "Computing liveness for " << idx << " operations\n");
+
+  auto processUser =
+      [&body, &opIndices](Operation *user, Value alias, memref::AllocOp allocOp,
+                          const FailureOr<std::optional<Lifetime>> &current)
+      -> FailureOr<std::optional<Lifetime>> {
+    if (failed(current)) {
+      return current;
+    }
+    if (isa<memref::DeallocOp, ViewLikeOpInterface>(user)) {
+      return current;
+    }
+    Operation *blockLevelUser = body.findAncestorOpInBlock(*user);
+    if (!blockLevelUser) {
+      allocOp.emitError("allocation escapes IsolatedFromAbove domain - "
+                        "user not in domain block");
+      return failure();
+    }
+    auto it = opIndices.find(blockLevelUser);
+    if (it == opIndices.end()) {
+      allocOp.emitError(
+          "internal error: block-level user not in opIndices map");
+      return failure();
+    }
+    size_t userIdx = it->second;
+
+    bool isDpsWrite =
+        llvm::is_contained(getHipsrDestinationOperands(user), alias);
+
+    if (current->has_value()) {
+      return std::optional<Lifetime>(Lifetime{
+          isDpsWrite ? std::min((*current)->start, userIdx) : (*current)->start,
+          std::max((*current)->end, userIdx)});
+    }
+    if (!isDpsWrite) {
+      allocOp.emitError("buffer used before written - invalid IR "
+                        "(first use is not a DPS destination)");
+      return failure();
+    }
+    return std::optional<Lifetime>(Lifetime{userIdx, userIdx});
+  };
+
+  auto blockLevelIndex =
+      [&body, &opIndices](Operation *user) -> std::optional<size_t> {
+    Operation *blockLevelUser = body.findAncestorOpInBlock(*user);
+    if (!blockLevelUser) {
+      return std::nullopt;
+    }
+    auto it = opIndices.find(blockLevelUser);
+    if (it == opIndices.end()) {
+      return std::nullopt;
+    }
+    return it->second;
+  };
+
+  auto processAllocation =
+      [&aliases, &processUser, &blockLevelIndex](
+          memref::AllocOp allocOp) -> FailureOr<std::optional<Lifetime>> {
+    Value buffer = allocOp.getResult();
+    llvm::SmallVector<std::pair<Value, Operation *>> users;
+    for (Value alias : aliases.resolve(buffer)) {
+      for (Operation *user : alias.getUsers()) {
+        users.emplace_back(alias, user);
+      }
+    }
+    llvm::stable_sort(
+        users, [&blockLevelIndex](const auto &lhs, const auto &rhs) {
+          return blockLevelIndex(lhs.second) < blockLevelIndex(rhs.second);
+        });
+    FailureOr<std::optional<Lifetime>> lifetime =
+        std::optional<Lifetime>(std::nullopt);
+    for (auto [alias, user] : users) {
+      lifetime = processUser(user, alias, allocOp, lifetime);
+    }
+    return lifetime;
+  };
+
   llvm::DenseMap<Value, Lifetime> lifetimes;
+  size_t numAllocations = 0;
   for (Operation &op : body) {
     auto allocOp = dyn_cast<memref::AllocOp>(&op);
     if (!allocOp) {
       continue;
     }
-    Value buffer = allocOp.getResult();
-    std::optional<size_t> start;
-    std::optional<size_t> end;
-    Operation *firstWrite = nullptr;
-    Operation *lastUse = nullptr;
-    for (Operation *user : buffer.getUsers()) {
-      Operation *blockLevelUser = body.findAncestorOpInBlock(*user);
-      assert(blockLevelUser && "alloc escapes its IsolatedFromAbove domain");
-      size_t userIdx = opIndices.lookup(blockLevelUser);
-      if (llvm::is_contained(getHipsrDestinationOperands(user), buffer) &&
-          (!start || userIdx < *start)) {
-        start = userIdx;
-        firstWrite = blockLevelUser;
-      }
-      if (!end || userIdx > *end) {
-        end = userIdx;
-        lastUse = blockLevelUser;
-      }
+    FailureOr<std::optional<Lifetime>> lifetimeOrErr =
+        processAllocation(allocOp);
+    if (failed(lifetimeOrErr)) {
+      return failure();
     }
-    if (start) {
-      lifetimes[buffer] = Lifetime{*start, *end};
-      LLVM_DEBUG(DBGS() << "alloc #" << opIndices.lookup(&op) << " lifetime ["
-                        << *start << "," << *end << "]: first write "
-                        << firstWrite->getName() << ", last use "
-                        << lastUse->getName() << "\n");
+    if (lifetimeOrErr->has_value()) {
+      Lifetime lifetime = **lifetimeOrErr;
+      lifetimes[allocOp.getResult()] = lifetime;
+      ++numAllocations;
+      LLVM_DEBUG(DBGS() << "  " << allocOp.getResult() << ": ["
+                        << lifetime.start << ", " << lifetime.end << "]\n");
+    } else {
+      allocOp.emitWarning("pool-allocs: allocation has no users (dead code?)");
     }
   }
+
+  LLVM_DEBUG(DBGS() << "Found " << numAllocations << " live allocations\n");
+
   return lifetimes;
 }
 
@@ -385,7 +460,13 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
                         << domain.getDomainId() << ")\n");
       ++domainOrdinal;
       Block &body = domain.getBody().front();
-      llvm::DenseMap<Value, Lifetime> lifetimes = computeLiveness(body);
+      FailureOr<llvm::DenseMap<Value, Lifetime>> lifetimesOrErr =
+          computeLiveness(domain);
+      if (failed(lifetimesOrErr)) {
+        signalPassFailure();
+        return;
+      }
+      llvm::DenseMap<Value, Lifetime> lifetimes = std::move(*lifetimesOrErr);
       Operation *insertionPoint = findInsertionPoint(body, lifetimes);
       if (!insertionPoint) {
         domain.emitError(
