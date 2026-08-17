@@ -4,6 +4,8 @@
  */
 
 #include "OnnxToHipUtils.h"
+#include "hip/Dialect/IR/HipShapeUtilsCommon.h"
+#include "hip/Dialect/IR/HipShapeUtilsShapeOps.h"
 
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"

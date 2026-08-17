@@ -19,6 +19,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "OnnxToHipUtils.h"
+#include "hip/Dialect/IR/HipShapeUtilsAttention.h"
 
 namespace mlir {
 namespace hip {

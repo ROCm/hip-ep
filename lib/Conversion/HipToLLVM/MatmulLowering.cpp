@@ -5,7 +5,7 @@
 
 #include "HipToLLVMUtils.h"
 
-#include "hip/Dialect/IR/HipShapeUtils.h"
+#include "hip/Dialect/IR/HipShapeUtilsMatmulGemm.h"
 
 #include "llvm/ADT/STLExtras.h"
 
