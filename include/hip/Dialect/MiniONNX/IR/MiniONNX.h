@@ -7,6 +7,7 @@
 #ifndef HIP_DIALECT_MINIONNX_IR_MINIONNX_H
 #define HIP_DIALECT_MINIONNX_IR_MINIONNX_H
 
+#include "mlir/Bytecode/BytecodeOpInterface.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"

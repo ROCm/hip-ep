@@ -1468,6 +1468,25 @@ def MiniONNX_IdentityOp : MiniONNX_Op<"Identity",
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
 }
 
+def MiniONNX_IfOp : MiniONNX_Op<"If",
+  [Pure]> {
+  let summary = "ONNX If operation";
+  let description = [{
+  If conditional
+  }];
+  let arguments = (ins
+    TensorOf<[I1]>:$cond
+  );
+  let results = (outs
+    Variadic<AnyTypeOf<[TensorOf<[UI8]>, TensorOf<[UI16]>, TensorOf<[UI32]>, TensorOf<[UI64]>, TensorOf<[I8]>, TensorOf<[I16]>, TensorOf<[I32]>, TensorOf<[I64]>, TensorOf<[BF16]>, TensorOf<[F16]>, TensorOf<[F32]>, TensorOf<[F64]>, TensorOf<[I1]>, TensorOf<[F8E4M3FN]>, TensorOf<[F8E4M3FNUZ]>, TensorOf<[F8E5M2]>, TensorOf<[F8E5M2FNUZ]>]>>:$outputs
+  );
+  let regions = (region
+    AnyRegion:$else_branch,
+    AnyRegion:$then_branch
+  );
+  let assemblyFormat = "operands attr-dict-with-keyword $else_branch $then_branch `:` functional-type(operands, results)";
+}
+
 def MiniONNX_ImageDecoderOp : MiniONNX_Op<"ImageDecoder",
   [Pure]> {
   let summary = "ONNX ImageDecoder operation";
@@ -1716,6 +1735,30 @@ def MiniONNX_LogSoftmaxOp : MiniONNX_Op<"LogSoftmax",
     AnyTypeOf<[TensorOf<[F16]>, TensorOf<[F32]>, TensorOf<[F64]>, TensorOf<[BF16]>]>:$output
   );
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def MiniONNX_LoopOp : MiniONNX_Op<"Loop",
+  [Pure]> {
+  let summary = "ONNX Loop operation";
+  let description = [{
+  Generic Looping construct. This loop has multiple termination conditions:
+  
+  1) Trip count. Iteration count specified at runtime. Set by
+     specifying the input M. Optional. Set to empty string to omit.
+     Note that a static trip count (specified at graph construction time) can be
+  }];
+  let arguments = (ins
+    AnyTypeOf<[TensorOf<[I64]>, NoneType]>:$M,
+    AnyTypeOf<[TensorOf<[I1]>, NoneType]>:$cond,
+    Variadic<AnyTypeOf<[TensorOf<[UI8]>, TensorOf<[UI16]>, TensorOf<[UI32]>, TensorOf<[UI64]>, TensorOf<[I8]>, TensorOf<[I16]>, TensorOf<[I32]>, TensorOf<[I64]>, TensorOf<[BF16]>, TensorOf<[F16]>, TensorOf<[F32]>, TensorOf<[F64]>, TensorOf<[I1]>, TensorOf<[F8E4M3FN]>, TensorOf<[F8E4M3FNUZ]>, TensorOf<[F8E5M2]>, TensorOf<[F8E5M2FNUZ]>]>>:$v_initial
+  );
+  let results = (outs
+    Variadic<AnyTypeOf<[TensorOf<[UI8]>, TensorOf<[UI16]>, TensorOf<[UI32]>, TensorOf<[UI64]>, TensorOf<[I8]>, TensorOf<[I16]>, TensorOf<[I32]>, TensorOf<[I64]>, TensorOf<[BF16]>, TensorOf<[F16]>, TensorOf<[F32]>, TensorOf<[F64]>, TensorOf<[I1]>, TensorOf<[F8E4M3FN]>, TensorOf<[F8E4M3FNUZ]>, TensorOf<[F8E5M2]>, TensorOf<[F8E5M2FNUZ]>]>>:$v_final_and_scan_outputs
+  );
+  let regions = (region
+    AnyRegion:$body
+  );
+  let assemblyFormat = "operands attr-dict-with-keyword $body `:` functional-type(operands, results)";
 }
 
 def MiniONNX_LpNormalizationOp : MiniONNX_Op<"LpNormalization",
@@ -2890,6 +2933,33 @@ def MiniONNX_STFTOp : MiniONNX_Op<"STFT",
     AnyTypeOf<[TensorOf<[F32]>, TensorOf<[F16]>, TensorOf<[F64]>, TensorOf<[BF16]>, NoneType]>:$output
   );
   let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";
+}
+
+def MiniONNX_ScanOp : MiniONNX_Op<"Scan",
+  [Pure]> {
+  let summary = "ONNX Scan operation";
+  let description = [{
+  Scan can be used to iterate over one or more scan_input tensors,
+  constructing zero or more scan_output tensors. It combines ideas from general recurrences,
+  functional programming constructs such as scan, fold, map, and zip, and is intended to enable
+  generalizations of RNN-like constructs for sequence-to-sequence processing.
+  Other tensors (referred to as state_variables here) can be used to carry a state
+  }];
+  let arguments = (ins
+    Variadic<AnyTypeOf<[TensorOf<[UI8]>, TensorOf<[UI16]>, TensorOf<[UI32]>, TensorOf<[UI64]>, TensorOf<[I8]>, TensorOf<[I16]>, TensorOf<[I32]>, TensorOf<[I64]>, TensorOf<[BF16]>, TensorOf<[F16]>, TensorOf<[F32]>, TensorOf<[F64]>, TensorOf<[I1]>, TensorOf<[F8E4M3FN]>, TensorOf<[F8E4M3FNUZ]>, TensorOf<[F8E5M2]>, TensorOf<[F8E5M2FNUZ]>]>>:$initial_state_and_scan_inputs,
+    SI64Attr:$num_scan_inputs,
+    OptionalAttr<I64ArrayAttr>:$scan_input_axes,
+    OptionalAttr<I64ArrayAttr>:$scan_input_directions,
+    OptionalAttr<I64ArrayAttr>:$scan_output_axes,
+    OptionalAttr<I64ArrayAttr>:$scan_output_directions
+  );
+  let results = (outs
+    Variadic<AnyTypeOf<[TensorOf<[UI8]>, TensorOf<[UI16]>, TensorOf<[UI32]>, TensorOf<[UI64]>, TensorOf<[I8]>, TensorOf<[I16]>, TensorOf<[I32]>, TensorOf<[I64]>, TensorOf<[BF16]>, TensorOf<[F16]>, TensorOf<[F32]>, TensorOf<[F64]>, TensorOf<[I1]>, TensorOf<[F8E4M3FN]>, TensorOf<[F8E4M3FNUZ]>, TensorOf<[F8E5M2]>, TensorOf<[F8E5M2FNUZ]>]>>:$final_state_and_scan_outputs
+  );
+  let regions = (region
+    AnyRegion:$body
+  );
+  let assemblyFormat = "operands attr-dict-with-keyword $body `:` functional-type(operands, results)";
 }
 
 def MiniONNX_ScatterOp : MiniONNX_Op<"Scatter",

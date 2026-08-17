@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Generate MiniONNX dialect from ONNX schemas.
+Supports operations with subgraph regions (If/Loop/Scan).
 """
 
 import argparse
@@ -89,6 +90,15 @@ def parse_type_str(allowed_type: str) -> Optional[str]:
 
 
 def can_generate_operation(schema) -> Tuple[bool, str]:
+    # Check if operation has GRAPH attributes
+    has_graph_attrs = any(attr.type == OpSchema.AttrType.GRAPH
+                          for attr in schema.attributes.values())
+
+    # For operations with GRAPH attributes, allow only If, Loop, Scan
+    if has_graph_attrs:
+        if schema.name not in ['If', 'Loop', 'Scan']:
+            return False, f"has subgraph attributes (not If/Loop/Scan)"
+
     for inp in schema.inputs:
         if inp.type_str and not is_supported_type(inp.type_str):
             return False, f"unsupported input type: {inp.type_str}"
@@ -104,10 +114,6 @@ def can_generate_operation(schema) -> Tuple[bool, str]:
             if out.type_str == constraint.type_param_str:
                 if not any(is_supported_type(t) for t in constraint.allowed_type_strs):
                     return False, "all output types unsupported"
-
-    for attr in schema.attributes.values():
-        if attr.type == OpSchema.AttrType.GRAPH:
-            return False, "has subgraph attributes (If/Loop/Scan)"
 
     return True, ""
 
@@ -174,30 +180,13 @@ def get_operands_or_results(schema, type_str_dict, is_input):
 
 
 def get_attrs(schema):
+    """Get non-GRAPH attributes"""
     if not schema.attributes:
         return OrderedDict()
 
-    def format_default_value(value):
-        if isinstance(value, float):
-            import numpy as np
-            formatted = str(np.round(value, 5))
-            if len(formatted) > 10:
-                formatted = f"({value:e})"
-            return formatted
-        elif isinstance(value, (bytes, bytearray)):
-            return str(value.decode("utf-8"))
-        elif isinstance(value, list):
-            # Format list
-            formatted_list = [format_default_value(v) for v in value]
-            result = str(formatted_list)
-            result = result.replace("[", "{", 1)
-            result = result.replace("]", "}", 1)
-            result = result.replace("'", '\\"')
-            return result
-        return str(value)
-
     name_to_type = OrderedDict()
     for _, attr in sorted(schema.attributes.items()):
+        # Skip GRAPH attributes - they become regions
         if attr.type == OpSchema.AttrType.GRAPH:
             continue
 
@@ -207,11 +196,19 @@ def get_attrs(schema):
             name_to_type[attr.name] = mlir_type
         else:
             # All non-required attributes use OptionalAttr
-            # NOTE: We lose default value information, but DefaultValuedAttr
-            # triggers BytecodeOpInterface in MLIR 22 which requires properties support
             name_to_type[attr.name] = f"OptionalAttr<{mlir_type}>"
 
     return name_to_type
+
+
+def get_regions(schema):
+    """Get GRAPH attributes as regions"""
+    regions = OrderedDict()
+    for attr_name, attr in sorted(schema.attributes.items()):
+        if attr.type == OpSchema.AttrType.GRAPH:
+            # GRAPH attributes become regions with size 1 (one block)
+            regions[attr_name] = "AnyRegion"
+    return regions
 
 
 def gen_op_def(schema):
@@ -236,6 +233,7 @@ def gen_op_def(schema):
 
     type_str_dict = parse_type_constraints(schema)
 
+    # Get inputs and non-GRAPH attributes
     ins = get_operands_or_results(schema, type_str_dict, is_input=True)
     ins.update(get_attrs(schema))
 
@@ -247,6 +245,7 @@ def gen_op_def(schema):
     else:
         s += indent + "let arguments = (ins);\n"
 
+    # Get outputs
     outs = get_operands_or_results(schema, type_str_dict, is_input=False)
 
     if outs:
@@ -257,9 +256,30 @@ def gen_op_def(schema):
     else:
         s += indent + "let results = (outs);\n"
 
-    # Add generic assembly format - this tells TableGen how to serialize/deserialize
-    # the operation and allows it to auto-generate all properties infrastructure
-    s += indent + 'let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";\n'
+    # Get GRAPH attributes as regions
+    regions = get_regions(schema)
+    if regions:
+        region_strs = [f"{ty}:${name}" for name, ty in regions.items()]
+        s += indent + "let regions = (region\n"
+        s += inc_indent(indent) + (",\n" + inc_indent(indent)).join(region_strs)
+        s += "\n" + indent + ");\n"
+
+    # Add assembly format
+    # This enables TableGen to auto-generate all properties infrastructure
+    if regions:
+        # Operations with regions: include region names in assembly format
+        # For multiple regions, list them explicitly
+        region_names = list(regions.keys())
+        if len(region_names) == 1:
+            # Single region: $region_name
+            s += indent + f'let assemblyFormat = "operands attr-dict-with-keyword ${region_names[0]} `:` functional-type(operands, results)";\n'
+        else:
+            # Multiple regions: list them all
+            region_refs = ' '.join([f'${name}' for name in region_names])
+            s += indent + f'let assemblyFormat = "operands attr-dict-with-keyword {region_refs} `:` functional-type(operands, results)";\n'
+    else:
+        # Standard format for operations without regions
+        s += indent + 'let assemblyFormat = "operands attr-dict `:` functional-type(operands, results)";\n'
 
     s += "}\n\n"
     return s
