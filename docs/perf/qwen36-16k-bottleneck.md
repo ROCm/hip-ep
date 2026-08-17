@@ -642,11 +642,12 @@ the same constant was worth -294 ms when measured before any of this round's
 work landed. The mechanism explains the growth. The window governs how much
 scratch the pass1 -> scan -> pass3 chain streams through between writing a
 Uloc/W tile and reading it back, so its value depends on what else is competing
-for cache in that interval. Step 1 deleted 60 Transpose dispatches, each of
-which had been streaming a full 18,646-token activation through the same cache,
-so the 25 MiB this change keeps resident now survives where it previously did
-not. Stacked wins are usually sub-additive; this pair is the opposite, and only
-because the first change removed the thing that was evicting the second.
+for cache in that interval. Step 1 deleted 60 Transpose dispatches, and the
+capture confirms that at least one per linear-attention block was streaming a
+full 18,646x8192 activation through the same cache, so the 25 MiB this change
+keeps resident now survives where it previously did not. Stacked wins are
+usually sub-additive; this pair is the opposite, and only because the first
+change removed the thing that was evicting the second.
 
 ## Where the three land
 
@@ -664,3 +665,201 @@ The plan expected roughly 3.0 s and 21%. The 2.8 s is within reach of that; the
 percentage falls short only because the denominator moved, since today's box
 runs 17.1 s where the plan was written against 14.5 s. Against that original
 baseline the same relative reduction would read 12.1 s.
+
+# Fourth round: re-profile after the three landings
+
+Clean baseline on the stacked build: **14,537 ms**, sd 1 ms over four reps. Three
+fresh fence windows, `-Buf default`, no SPM, no EP instrumentation, all three
+gated through `inspect_capture.py` as steady state with zero artifact dispatches
+and no tuner sweep:
+
+| window | fence | dispatches | span | round 2 |
+|---|---|---:|---:|---:|
+| one linear-attention block | `causal_conv` skip 40 | 240 | 76.91 ms | 148.40 ms |
+| one MoE block | `qmoe` skip 45 | 1,250 | 48.50 ms | 58.49 ms |
+| vision encoder | `multi_head_attention` skip 40 | 119 | 47.80 ms/layer | 47.80 ms/layer |
+
+Each decoder window is exactly one period: 73 `la_pf_scan` launches and one
+`causal_conv` in the first, one `topk_routing` in the second. Vision is a
+control -- nothing this round touched it, and it reproduced to within 1% on every
+row (`mha_flash_prefill` 20,369 us against 20,344), which is also what
+establishes that the box was in a comparable state for the two decoder windows.
+
+The vision capture had to be retried without `-Counters`. SPM worked for this
+window in round 2 and this time produced no `.rgp` at all, so SPM at 16K is
+unreliable rather than simply unavailable.
+
+## The block model now closes to 2%
+
+| block | count | round 2 | round 3 | delta |
+|---|---:|---:|---:|---:|
+| linear-attention | 30 | 4,452 | 2,307 | -2,145 |
+| MoE | 40 | 2,340 | 1,940 | -400 |
+| full-attention, `gqa` only | 10 | 2,240 | 2,240 | 0 |
+| vision layers | 27 | 1,291 | 1,291 | 0 |
+| **sum** | | **10,322** | **7,778** | **-2,545** |
+
+Against the interleaved A/B series, which moved TTFT 17,129 -> 14,312 for
+**-2,592 ms**, the captures predict -2,545 ms. That is 2% agreement between
+per-kernel GPU time and end-to-end wall time, across three independent changes,
+and it is the strongest validation the harness has produced. It also means the
+uncaptured remainder did not move, which is the assumption the block model needs.
+
+Per change, capture-predicted against realised:
+
+| change | capture predicts | realised | ratio |
+|---|---:|---:|---:|
+| channels-last conv + Transpose fold | -1,635 | -1,772 | 1.08 |
+| chunked bucketing | -348 | -348 | 1.00 |
+| LA window 16 | -551 | -674 | 1.22 |
+
+Realised meets or beats the capture in all three, which is the expected
+direction: RGP pegs clocks, so a saving measured under SQTT understates what the
+same saving is worth on a box running at production clocks.
+
+Note that the conv prediction here is -1,635 ms where the plan's was -2,334 ms
+and only 76% of it was realised. The plan's figure came from `[PERF]` call counts
+(60 Transpose dispatches at 26.7 ms), while the capture sees one such dispatch
+per linear-attention block, i.e. 30. Taking the capture instead, the prediction
+is -1,635 ms and the realised -1,772 ms *exceeds* it. So the "shortfall" recorded
+under step 1 was an artifact of counting, not a real underperformance.
+
+## Per-kernel deltas in one linear-attention block
+
+| kernel | round 2 | round 3 | delta |
+|---|---:|---:|---:|
+| `causal_conv_prefill` -> `_nlc` | 31.54 | 3.75 | -27.79 |
+| `transpose_tiled` (38.2M threads) | 26.70 | absent | -26.70 |
+| `la_pf_pass3_wmma` | 30.66 | 14.36 | -16.30 |
+| `la_pf_pass1_local` | 10.12 | 8.64 | -1.48 |
+| `la_pf_scan` | 15.89 | 15.31 | -0.58 |
+| `T5LayernormFwdContiguous` | 16.34 | 16.30 | -0.04 |
+| `cast_f32_to_f16` | 0.76 | 2.20 | **+1.44** |
+| everything else | 16.49 | 16.35 | -0.14 |
+| **total** | **148.40** | **76.91** | **-71.49** |
+
+The `cast_f32_to_f16` row is the one apparent regression and it is not one. At
+76,374,016 elements the kernel moves 458 MB, so 748 us implies 613 GB/s on a part
+whose roofline is 256 GB/s: round 2's number was **239% of achievable bandwidth**
+and therefore never real. Round 3's 2,180 us is 82% of roofline, which is a
+healthy figure for a streaming cast. The cause of the round-2 reading was not
+identified; it is 43 ms across the model either way, and the end-to-end A/B was
+strongly negative regardless.
+
+`bucket_tokens_kernel` is confirmed gone from the MoE window. Its replacement is
+three kernels totalling 138 us against 8,829 us, and the original's 256-thread
+launch geometry is visible directly in the dispatch record, which is what made
+that row the round-2 table's most clear-cut defect.
+
+## Grouping by family was hiding shapes
+
+The round-2 table ranked by kernel family, which averaged dispatches whose sizes
+differ by 100x. One linear-attention block runs `ew_bcast4d` at both 596,736 and
+76,374,016 threads, and `T5Layernorm` at both 76,374,016 and 152,748,032. A mean
+over those is not a shape, so a floor computed from it is not a floor.
+
+This matters most for the row the plan named as the next target. Round 2 gave
+`T5LayernormFwdContiguous` a floor from an assumed 298,336x128 = 38.2M elements,
+producing 16% utilisation and 505 ms recoverable. The dispatches are actually 2x
+and 4x that size, so the floor is 1.79 and 3.58 ms against measured 4.07 and
+8.15, i.e. **44% of roofline and 274 ms recoverable**, not 16% and 505 ms.
+
+The plan's *mechanism* for it survives: at 256 threads per workgroup the 76.4M
+shape is 298,336 workgroups in 4.07 ms, or 73 M/s, against the 167 M/s that
+reaching 256 GB/s would need. It is dispatch-rate bound as described, by 2.3x
+rather than 6x.
+
+The same correction shrinks `gather_tokens` + `scatter_add`: 55% and 83% of
+roofline for 124 ms recoverable, against the 201 ms round 2 claimed from a
+guessed shape.
+
+## Refreshed ranking
+
+Floors are `max(bytes/BW, FLOP/peak)` at 256 GB/s and 59.4 TFLOP/s, computed per
+*dispatch shape* from the capture's own thread counts.
+
+| kernel | calls | ms/call | total | floor | util | recoverable | confidence |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `gqa_flash_prefill_v8` | 10 | 224.00 | 2,240 | 47.95 | 21% | 1,761 | upper bound |
+| `MatMulNBits` (MoE, all variants) | 40 blk | 32.63 | 1,305 | 15.80 | 48% | 673 | medium |
+| vision `mha_flash_prefill` | 27 | 20.37 | 550 | 4.13 | 20% | 438 | upper bound |
+| vision `gemm` (Tensile) | 27 lyr | 14.81 | 400 | 3.74 | 25% | 299 | high |
+| `T5LayernormFwdContiguous` | 90 | 5.43 | 489 | 2.39 | **44%** | **274** | high |
+| `strided_copy` (16.8M) | 90 | 1.58 | 143 | 0.26 | **17%** | **119** | high |
+| `gather_tokens` | 40 blk | 5.09 | 204 | 2.81 | 55% | 91 | high |
+| `ew_bcast4d` f32 (76.4M) | 30 | 5.18 | 156 | 2.39 | 46% | 84 | high |
+| `causal_conv_prefill_nlc` | 30 | 3.75 | 113 | 2.39 | 64% | 41 | high |
+| `scatter_add` | 40 blk | 5.02 | 201 | 4.19 | 83% | 33 | high |
+| `cast_f16_to_f32` (76.4M) | 30 | 2.47 | 74 | 1.79 | 72% | 20 | high |
+| `ew_bcast4d` f16 (38.2M) | 30 | 1.05 | 31 | 0.60 | 57% | 14 | high |
+| `cast_f32_to_f16` (76.4M) | 30 | 2.18 | 65 | 1.79 | 82% | 12 | high |
+| `swiglu` | 40 blk | 1.10 | 44 | 1.05 | 95% | 2 | high |
+
+Recoverable: **994 ms high confidence**, 673 ms medium, 2,199 ms
+upper-bound-only.
+
+The three linear-attention passes stay measured-only, because a defensible FLOP
+count for the chunked scan still could not be derived:
+
+| kernel | calls | ms/call | total | round 2 |
+|---|---:|---:|---:|---:|
+| `la_pf_scan` | 2,190 | 0.2097 | 459 | 477 |
+| `la_pf_pass3_wmma` | 2,190 | 0.1967 | 431 | 920 |
+| `la_pf_pass1_local` | 2,190 | 0.1184 | 259 | 304 |
+| **total** | | | **1,149** | **1,700** |
+
+`matmul_nbits_add_bias_rowmajor` is listed without a floor: at any traffic model
+consistent with its arguments its measured 2.93 ms/block is faster than the
+implied floor, so `threads` is not its element count and the floor cannot be
+derived from the capture alone.
+
+## What changed about the ranking
+
+The second round's headline was that data movement had overtaken GQA. That has
+reversed. High-confidence recoverable data movement fell from 3,563 ms to 994 ms,
+and `gqa_flash_prefill_v8` is once again the largest single line by a factor of
+1.8 over everything else combined.
+
+Both of the round-2 table's top data-movement rows are gone: `transpose_tiled`
+was 1,602 ms at 2% of roofline and no longer runs at that shape, and
+`causal_conv_prefill` was 946 ms at 8% and is now 113 ms at 64%.
+
+Three observations for whoever picks the next target:
+
+- **`gqa_flash_prefill_v8` is 2,240 ms and its floor is not known.** Its 1,761 ms
+  is an upper bound that omits softmax, and ablation already showed softmax is
+  41.1 ms of the kernel's 203 ms, so the true floor is far above 47.95 ms. Sizing
+  this honestly needs a softmax-inclusive model, not another roofline.
+- **`strided_copy` is the worst-utilised kernel left at 17%**, but it is only
+  119 ms. It is the best ratio of confidence to effort on the board.
+- **The MoE `MatMulNBits` row is now second largest and it is a real GEMM.** 48%
+  of roofline on int4 weights is not obviously improvable, and the round-3 window
+  shows the autotuner picked `WMMA_NoZP` where round 2 picked `Fp16GEMM` for many
+  shapes, so about 1.3 ms/block of the MoE delta is autotune reshuffling rather
+  than the bucketing change.
+
+Stopping here for target selection rather than assuming this ranking implies the
+next move.
+
+## Reproducing round 4
+
+```powershell
+. C:\Users\zyq\hipep-env.ps1
+Remove-Item Env:HIPDNN_EP_TRACE_FILE,Env:HIPDNN_EP_PERF,Env:HIPDNN_EP_DEBUG -EA SilentlyContinue
+
+.\bench\bench_ttft.ps1 -Tag p3-stack-clean -Driver vlm -SeqLen 18646 `
+  -MaxLength 18900 -Reps 4 -Warmup 1 -ExecutionProvider AMDGPU
+
+# one window per fence; drop -Counters, SPM produced no .rgp for vision this time
+foreach ($f in 'causal_conv','qmoe','multi_head_attention') {
+  .\capture\rgp_capture.ps1 -Op $f -Skip 40 -Driver vlm -Reps 3 `
+    -PromptFile C:\Users\zyq\prompt_16k.txt -SeqLen 16384 -MaxLength 18900 `
+    -ExecutionProvider AMDGPU -MaxTokens 1 -Buf default `
+    -ArmTimeoutSec 900 -Dwell 40 -Tag "p3_$f"
+}
+```
+
+`qmoe` needs `-Skip 45`, not 40. The per-shape tables come from `shape_table.py`
+and `moe_plumbing.py`, which sit beside `qwen_floors.py` in the captures
+directory; they group by `(kernel, threads)` from `*_dispatches.csv` rather than
+by family, which is the distinction that produced the corrected floors above.
