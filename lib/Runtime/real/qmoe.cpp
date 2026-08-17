@@ -272,11 +272,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     // Bucket tokens on the device: count per expert (atomicAdd), exclusive
     // prefix sum into d_expert_offsets, scatter (token_id, weight) pairs
     // into d_sorted_token_ids / d_sorted_weights ordered by expert.
-    HIP_CHECK(hip_qmoe_bucket_tokens(stream, d_expert_indices, d_expert_weights,
-                                     d_expert_counts, d_expert_offsets,
-                                     d_sorted_token_ids, d_sorted_weights,
-                                     num_tokens, num_experts, k, elem_size,
-                                     d_bucket_scratch, sz_bucket_scratch));
+    HIP_CHECK(hip_qmoe_bucket_tokens(
+        stream, d_expert_indices, d_expert_weights, d_expert_counts,
+        d_expert_offsets, d_sorted_token_ids, d_sorted_weights, num_tokens,
+        num_experts, k, elem_size, d_bucket_scratch, sz_bucket_scratch));
 
     // Only readback the counts (num_experts * int32, e.g. 32*4 = 128 bytes)
     // to drive the host-side per-expert dispatch loop. Offsets are computed
