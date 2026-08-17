@@ -81,43 +81,25 @@ struct ConvertOnnxToHipsrPass
   void runOnOperation() override {
     ModuleOp module = getOperation();
 
-    TypeConverter converter;
-    converter.addConversion([](Type type) { return type; });
-    converter.addConversion([](RankedTensorType type) -> Type {
-      // Leave rank-0 scalars (compile-time host roots lowered to arith.constant)
-      // and tensors that already name a space (e.g. host shapes) untouched.
-      if (type.getRank() == 0 || type.getEncoding()) {
-        return type;
-      }
-      return deviceTensorType(type);
-    });
-
     ConversionTarget target(getContext());
     target.addIllegalDialect("onnx");
     // The consumer's conversion drops the operand this stands for, so the
     // placeholder has to survive until then.
     target.addLegalOp(OperationName("onnx.NoValue", &getContext()));
     target.addLegalDialect<HipsrDialect>();
-    target.addLegalOp<ModuleOp>();
+    target.addLegalOp<ModuleOp, func::FuncOp, func::ReturnOp>();
     target.addLegalOp<arith::ConstantOp>();
-    target.addDynamicallyLegalOp<func::FuncOp>([&](func::FuncOp op) {
-      return converter.isSignatureLegal(op.getFunctionType());
-    });
-    target.addDynamicallyLegalOp<func::ReturnOp>(
-        [&](func::ReturnOp op) { return converter.isLegal(op); });
     target.markUnknownOpDynamicallyLegal([](Operation *op) {
       return op->getParentOfType<ComputeOp>() != nullptr;
     });
 
     RewritePatternSet patterns(&getContext());
     populateOnnxToHipsrConstantPatterns(patterns);
-    populateCastConversionPatterns(converter, patterns, &getContext());
-    populateMatMulConversionPatterns(converter, patterns, &getContext());
-    populateExpandConversionPatterns(converter, patterns, &getContext());
+    populateCastConversionPatterns(patterns, &getContext());
+    populateMatMulConversionPatterns(patterns, &getContext());
+    populateExpandConversionPatterns(patterns, &getContext());
     populateReturnConversionPatterns(patterns, &getContext());
-    populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns,
-                                                                   converter);
-    populateReturnOpTypeConversionPattern(patterns, converter);
+
 
     if (failed(applyFullConversion(module, target, std::move(patterns)))) {
       signalPassFailure();

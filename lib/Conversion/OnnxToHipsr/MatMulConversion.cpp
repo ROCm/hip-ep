@@ -9,21 +9,18 @@
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "mlir/IR/PatternMatch.h"
-#include "mlir/Transforms/DialectConversion.h"
 
 namespace mlir {
 namespace hipsr {
 namespace {
 
-struct MatMulToHipsr : public ::mlir::ConversionPattern {
-  MatMulToHipsr(const ::mlir::TypeConverter &typeConverter,
-                ::mlir::MLIRContext *ctx)
-      : ConversionPattern(typeConverter, "onnx.MatMul", /*benefit=*/1, ctx) {}
+struct MatMulToHipsr : public ::mlir::RewritePattern {
+  MatMulToHipsr(::mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.MatMul", /*benefit=*/1, ctx) {}
 
   ::mlir::LogicalResult
   matchAndRewrite(::mlir::Operation *op,
-                  ::mlir::ArrayRef<::mlir::Value> operands,
-                  ::mlir::ConversionPatternRewriter &rewriter) const override {
+                  ::mlir::PatternRewriter &rewriter) const override {
     // Matching is by name on an (unregistered) ONNX op, so guard the shape:
     // onnx.MatMul is two-input / single-result.
     if (op->getNumOperands() != 2 || op->getNumResults() != 1) {
@@ -37,13 +34,17 @@ struct MatMulToHipsr : public ::mlir::ConversionPattern {
     }
 
     ::mlir::Location loc = op->getLoc();
-    ::mlir::Value a = operands[0];
-    ::mlir::Value b = operands[1];
-    auto resultType = ::mlir::dyn_cast_or_null<::mlir::RankedTensorType>(
-        getTypeConverter()->convertType(op->getResult(0).getType()));
-    if (!resultType) {
+    ::mlir::Value a = op->getOperand(0);
+    ::mlir::Value b = op->getOperand(1);
+
+    // The hipsr.matmul result buffer lives in device memory, so stamp the
+    // device space onto the result type.
+    auto oldType =
+        ::mlir::dyn_cast<::mlir::RankedTensorType>(op->getResult(0).getType());
+    if (!oldType) {
       return rewriter.notifyMatchFailure(op, "expected ranked tensor result");
     }
+    ::mlir::RankedTensorType resultType = deviceTensorType(oldType);
 
     ::mlir::Value init = PlaceholderOp::create(
                              rewriter, loc, ::mlir::TypeRange{resultType}, *ctx,
@@ -60,10 +61,9 @@ struct MatMulToHipsr : public ::mlir::ConversionPattern {
 
 } // namespace
 
-void populateMatMulConversionPatterns(
-    const ::mlir::TypeConverter &typeConverter,
-    ::mlir::RewritePatternSet &patterns, ::mlir::MLIRContext *ctx) {
-  patterns.add<MatMulToHipsr>(typeConverter, ctx);
+void populateMatMulConversionPatterns(::mlir::RewritePatternSet &patterns,
+                                      ::mlir::MLIRContext *ctx) {
+  patterns.add<MatMulToHipsr>(ctx);
 }
 
 } // namespace hipsr
