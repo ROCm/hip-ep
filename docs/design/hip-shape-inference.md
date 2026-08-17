@@ -39,6 +39,13 @@ therefore records each named tensor's symbolic dimensions in the deterministic
 serialization projects it temporarily onto the module, and loading imports it
 back into model metadata.
 
+The normative wire grammar, canonical ordering, bounds, empty/missing
+semantics, and versioning rule are defined beside the public encoder and
+decoder in
+[`symbolic_dims.hpp`](../../morphizen/morphizen-graph/include/morphizen/symbolic_dims.hpp).
+The encoder emits only that canonical form, and the decoder rejects malformed,
+non-canonical, or unknown-version input.
+
 The transport alone does not change destination construction or HIP shape
 semantics. A later conversion layer may consume the metadata conservatively; a
 missing identity always means no proof.
