@@ -26,8 +26,11 @@ struct MulPlaceholderShapeArgs : PlaceholderShapeRegionArgs {
 
 MutableOperandRange MulOp::getDpsInitsMutable() { return getInitMutable(); }
 
-LogicalResult mlir::hipsr::populateMulShapeRegion(OpBuilder &builder,
-                                                  Block &shapeBlock, MulOp op) {
+namespace mlir {
+namespace hipsr {
+
+LogicalResult populateMulShapeRegion(OpBuilder &builder, Block &shapeBlock,
+                                     MulOp op) {
   OpBuilder::InsertionGuard guard(builder);
   builder.setInsertionPointToStart(&shapeBlock);
 
@@ -38,6 +41,9 @@ LogicalResult mlir::hipsr::populateMulShapeRegion(OpBuilder &builder,
   ShapeYieldOp::create(builder, op.getLoc(), ValueRange{broadcast});
   return success();
 }
+
+} // namespace hipsr
+} // namespace mlir
 
 namespace {
 
