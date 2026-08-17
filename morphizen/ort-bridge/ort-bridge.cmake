@@ -8,6 +8,7 @@ set(_ORT_BRIDGE_SOURCES
   src/api-ptrs.cpp
   src/ort-status-exception.hpp
   src/ort-status-exception.cpp
+  src/custom-op-compute-status.hpp
   src/ort-graph-wrapper.hpp
   src/ort-graph-wrapper.cpp
   src/morphizen-ep-factory.cpp

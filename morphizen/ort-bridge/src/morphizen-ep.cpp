@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "./morphizen-ep.hpp"
+#include "./custom-op-compute-status.hpp"
 #include "./ir-converter.hpp"
 #include "./morphizen-deps.hpp"
 #include "./ort-graph-wrapper.hpp"
@@ -543,9 +544,11 @@ OrtStatus *MorphiZenEP::CompileSubgraph(const morphizen::ExecutionProvider &ep,
            OrtKernelContext *kernel_context) -> OrtStatus * {
       auto self = static_cast<MorphiZenEP_ComputeInfo *>(this_ptr);
       (void)self;
-      static_cast<morphizen::CustomOp *>(compute_state)
-          ->Compute(&Ort::GetApi(), kernel_context);
-      return nullptr;
+      const OrtApi &api = Ort::GetApi();
+      return detail::translateComputeExceptions(api, [&] {
+        static_cast<morphizen::CustomOp *>(compute_state)
+            ->Compute(&api, kernel_context);
+      });
     };
     MY_LOG(2) << "CompileSubgraph: Successfully compiled subgraph";
     return nullptr;

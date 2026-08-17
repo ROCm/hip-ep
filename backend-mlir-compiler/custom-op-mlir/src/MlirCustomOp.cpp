@@ -5,6 +5,7 @@
 #include "MlirCustomOp.h"
 
 // CRITICAL: morphizen.hpp must be included before other morphizen headers
+#include "custom-op-compute-status.hpp"
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
 #include "morphizen/onnxruntime_api.hpp"
@@ -751,7 +752,10 @@ void MlirCustomOp::compute_with_output_allocator(
   inference_state_->set_output_allocator(nullptr);
 
   if (ret != 0) {
-    LOG(ERROR) << "inference_compute (allocator) failed with code: " << ret;
+    // Do not validate, copy, profile, or report successful outputs after a
+    // generated/runtime failure. The stable void CustomOp ABI carries this to
+    // the ORT callback as an exception, where it becomes a non-null OrtStatus.
+    morphizen::detail::throwComputeFailure("inference_compute", ret);
   }
 
   // Output-completeness guard. Every declared output must be produced in-graph
