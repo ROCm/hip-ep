@@ -128,6 +128,7 @@ class Hip_DpsOp_Semantic<string mnemonic,
     Hip_DpsOp_WithInfer<mnemonic, outsAccessor, traits> {
   let hipShapeContract = "semantic";
   let hipHasExplicitShapeContract = 1;
+  let hasVerifier = 1;
 }
 
 /// Multi-result semantic operation with handwritten reification.
@@ -136,14 +137,17 @@ class Hip_DpsOp_SemanticNoInfer<string mnemonic,
     Hip_DpsOp<mnemonic, traits> {
   let hipShapeContract = "semantic";
   let hipHasExplicitShapeContract = 1;
+  let hasVerifier = 1;
 }
 
 /// Semantic operation using the default destination-based reification only.
-class Hip_DpsOp_SemanticAutoReify<string mnemonic,
-                                  list<Trait> traits = []> :
+/// Semantic operation with destination reification and handwritten verifier.
+class Hip_DpsOp_SemanticAutoReifyManualVerify<
+    string mnemonic, list<Trait> traits = []> :
     Hip_DpsOp_AutoReify<mnemonic, traits> {
   let hipShapeContract = "semantic";
   let hipHasExplicitShapeContract = 1;
+  let hasVerifier = 1;
 }
 
 /// Semantic operation whose destination remains authoritative for reification.
@@ -153,6 +157,7 @@ class Hip_DpsOp_SemanticAutoReifyInfer<
     Hip_DpsOp_AutoReifyInfer<mnemonic, outsAccessor, traits> {
   let hipShapeContract = "semantic";
   let hipHasExplicitShapeContract = 1;
+  let hasVerifier = 1;
 }
 
 /// Single-result operations whose output shape equals one named input.
@@ -208,6 +213,16 @@ class Hip_DpsOp_Payload<string mnemonic,
     Hip_DpsOp_WithInfer<mnemonic, outsAccessor, traits> {
   let hipShapeContract = "payload";
   let hipHasExplicitShapeContract = 1;
+}
+
+/// Payload-shaped operation with an op-specific handwritten verifier.
+class Hip_DpsOp_PayloadManualVerify<string mnemonic,
+                                    list<Trait> traits = [],
+                                    string outsAccessor = "Output"> :
+    Hip_DpsOp_WithInfer<mnemonic, outsAccessor, traits> {
+  let hipShapeContract = "payload";
+  let hipHasExplicitShapeContract = 1;
+  let hasVerifier = 1;
 }
 
 class Hip_DpsOp_PayloadNoInfer<string mnemonic,
@@ -1117,7 +1132,7 @@ def Hip_QMoEOp :
 }
 
 def Hip_GatherBlockQuantizedOp :
-    Hip_DpsOp_SemanticAutoReify<"gather_block_quantized"> {
+    Hip_DpsOp_OutsAuthoritative<"gather_block_quantized"> {
   let summary = "Gather + block-wise dequantize "
                 "(com.microsoft GatherBlockQuantized)";
   let description = [{
@@ -3089,7 +3104,7 @@ def Hip_CausalConvWithStateOp :
 // ===== Group Query Attention =================================================
 
 def Hip_GqaOp :
-    Hip_DpsOp_SemanticAutoReify<"gqa",
+    Hip_DpsOp_SemanticAutoReifyManualVerify<"gqa",
                                 [AttrSizedOperandSegments,
                                  OpStateOpInterface]> {
   let summary = "Group Query Attention - Full MS spec implementation";
@@ -3790,8 +3805,8 @@ def Hip_PadOp :
 }
 
 def Hip_TileOp :
-    Hip_DpsOp_Payload<"tile", /*traits=*/[],
-                      /*outsAccessor=*/"Output"> {
+    Hip_DpsOp_PayloadManualVerify<"tile", /*traits=*/[],
+                                  /*outsAccessor=*/"Output"> {
   let summary = "Tile a tensor by repeating along each dimension";
   let description = [{
     Constructs a new tensor by repeating `input` along each dimension by the
@@ -3823,7 +3838,6 @@ def Hip_TileOp :
     attr-dict (`:` type($result_tensors)^)?
   }];
 
-  let hasVerifier = 1;
 }
 
 def Hip_ExpandOp :
@@ -3861,7 +3875,8 @@ def Hip_ExpandOp :
   }];
 }
 
-def Hip_GlobalPoolOp : Hip_DpsOp_AutoReify<"global_pool"> {
+def Hip_GlobalPoolOp :
+    Hip_DpsOp_OutsAuthoritative<"global_pool"> {
   let summary = "Global pooling over spatial dimensions (average / max / lp)";
   let description = [{
     Unified lowering for ONNX GlobalAveragePool / GlobalMaxPool / GlobalLpPool.
@@ -4288,7 +4303,7 @@ def Hip_NonZeroOp :
 }
 
 def Hip_PoolOp :
-    Hip_DpsOp_SemanticAutoReify<"pool"> {
+    Hip_DpsOp_OutsAuthoritative<"pool"> {
   let summary = "Spatial pooling (ONNX MaxPool / AveragePool / LpPool)";
   let description = [{
     Unified window pooling for ONNX MaxPool / AveragePool / LpPool. For an
