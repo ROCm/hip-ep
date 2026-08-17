@@ -25,13 +25,17 @@ namespace {
 // OnnxToHip.cpp.
 constexpr ::llvm::StringLiteral kOrtMemAddrTag = "*/_ORT_MEM_ADDR_/*";
 
-struct ConstantOpLowering : public ::mlir::RewritePattern {
-  explicit ConstantOpLowering(::mlir::MLIRContext *ctx)
-      : ::mlir::RewritePattern("onnx.Constant", /*benefit=*/1, ctx) {}
+struct ConstantOpLowering : public ::mlir::ConversionPattern {
+  ConstantOpLowering(const ::mlir::TypeConverter &typeConverter,
+                     ::mlir::MLIRContext *ctx)
+      : ::mlir::ConversionPattern(typeConverter, "onnx.Constant",
+                                  /*benefit=*/1, ctx) {}
 
   ::mlir::LogicalResult
   matchAndRewrite(::mlir::Operation *op,
-                  ::mlir::PatternRewriter &rewriter) const override {
+                  ::mlir::ArrayRef<::mlir::Value> operands,
+                  ::mlir::ConversionPatternRewriter &rewriter) const override {
+    (void)operands;
     auto tensorType =
         ::llvm::dyn_cast<::mlir::RankedTensorType>(op->getResult(0).getType());
     if (!tensorType) {
@@ -48,8 +52,13 @@ struct ConstantOpLowering : public ::mlir::RewritePattern {
         return ::mlir::success();
       }
 
+      auto resultType = ::llvm::dyn_cast_or_null<::mlir::RankedTensorType>(
+          getTypeConverter()->convertType(tensorType));
+      if (!resultType) {
+        return rewriter.notifyMatchFailure(op, "failed to convert result type");
+      }
       rewriter.replaceOpWithNewOp<ConstantOp>(
-          op, /*result=*/tensorType, /*value=*/valueAttr,
+          op, /*result=*/resultType, /*value=*/valueAttr,
           /*index=*/IntegerAttr(), /*offset=*/IntegerAttr(),
           /*size=*/IntegerAttr());
       return ::mlir::success();
@@ -88,11 +97,16 @@ struct ConstantOpLowering : public ::mlir::RewritePattern {
       data = {buf->getBufferStart() + offset, static_cast<size_t>(size)};
     }
 
+    auto resultType = ::llvm::dyn_cast_or_null<::mlir::RankedTensorType>(
+        getTypeConverter()->convertType(tensorType));
+    if (!resultType) {
+      return rewriter.notifyMatchFailure(op, "failed to convert result type");
+    }
     auto value = DenseResourceElementsAttr::get(
-        tensorType, key, UnmanagedAsmResourceBlob::allocateInferAlign(data));
+        resultType, key, UnmanagedAsmResourceBlob::allocateInferAlign(data));
 
     rewriter.replaceOpWithNewOp<ConstantOp>(
-        op, /*result=*/tensorType, value, /*index=*/IntegerAttr(),
+        op, /*result=*/resultType, value, /*index=*/IntegerAttr(),
         /*offset=*/IntegerAttr(), /*size=*/IntegerAttr());
     return ::mlir::success();
   }
@@ -100,8 +114,10 @@ struct ConstantOpLowering : public ::mlir::RewritePattern {
 
 } // namespace
 
-void populateOnnxToHipsrConstantPatterns(::mlir::RewritePatternSet &patterns) {
-  patterns.add<ConstantOpLowering>(patterns.getContext());
+void populateOnnxToHipsrConstantPatterns(
+    const ::mlir::TypeConverter &typeConverter,
+    ::mlir::RewritePatternSet &patterns) {
+  patterns.add<ConstantOpLowering>(typeConverter, patterns.getContext());
 }
 
 } // namespace hipsr

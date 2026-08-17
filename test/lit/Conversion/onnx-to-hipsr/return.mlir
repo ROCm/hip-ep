@@ -11,8 +11,8 @@
 // result.
 // CHECK-LABEL: func.func @imported_graph(
 // CHECK-SAME:    %{{.*}}: !hipsr.context,
-// CHECK-SAME:    %[[INPUT:.*]]: tensor<?x4096xf16>) -> tensor<?x4096xf16> {
-// CHECK-NEXT:    return %[[INPUT]] : tensor<?x4096xf16>
+// CHECK-SAME:    %[[INPUT:.*]]: tensor<?x4096xf16, #hipsr.mem<device>>) -> tensor<?x4096xf16, #hipsr.mem<device>> {
+// CHECK-NEXT:    return %[[INPUT]] : tensor<?x4096xf16, #hipsr.mem<device>>
 func.func @imported_graph(%ctx: !hipsr.context, %input: tensor<?x4096xf16>)
     -> tensor<?x4096xf16> {
   "onnx.Return"(%input) : (tensor<?x4096xf16>) -> ()
