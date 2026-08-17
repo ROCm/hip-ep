@@ -4382,7 +4382,9 @@ def Hip_ReadbackControlOp : Hip_Op<"readback_control",
     order and converted to signed i64 (i32 values are sign-extended). `valid`
     is false if argument validation, any copy enqueue, or the single stream
     synchronization fails. Values are initialized to zero before the runtime
-    call and are never clamped.
+    call. When `require_non_negative` is true, any negative value makes the
+    complete group invalid, resets every value to zero, and records the shared
+    runtime error flag. Otherwise signed values are preserved without clamping.
 
     This op has device-to-host copy and synchronization side effects and is not
     speculatable.
@@ -4390,7 +4392,8 @@ def Hip_ReadbackControlOp : Hip_Op<"readback_control",
 
   let arguments = (ins
     Hip_ContextType:$ctx,
-    Variadic<Hip_TensorOrMemRef>:$sources
+    Variadic<Hip_TensorOrMemRef>:$sources,
+    DefaultValuedAttr<BoolAttr, "false">:$require_non_negative
   );
   let results = (outs I1:$valid, Variadic<I64>:$values);
 

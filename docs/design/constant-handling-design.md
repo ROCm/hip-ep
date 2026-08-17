@@ -192,6 +192,15 @@ payloads during normal compute conversion; they do not require ONNX stamping
 attributes or constant-preservation prepasses. Conversion does no filesystem
 access, layout, index assignment, or global creation.
 
+ConstantOfShape validates a constant payload against the exact result rank and
+every static result extent, then keeps dynamic extents as compile-time index
+constants. A non-constant, statically-sized rank-1 i32/i64 payload is read with
+one `hip.readback_control`; non-negative validation and readback failure both
+set the shared runtime error and expose only zero extents on failure. Runtime
+payloads with a dynamic vector length or static result constraints are rejected
+before conversion because that grouped contract cannot prove their exact
+destination shape.
+
 `hip-externalize-constants`
 (`lib/Dialect/Transforms/ExternalizeConstants.cpp`) validates each explicit
 `serialization_order`, then assigns every externalized carrier a sequential

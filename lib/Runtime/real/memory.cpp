@@ -303,7 +303,8 @@ int hipdnn_ep_readback_control(RuntimeState *state, int64_t *host_out,
                                const void *const *device_sources,
                                const int64_t *element_counts,
                                const int64_t *element_bytes,
-                               int64_t source_count, int64_t total_count) {
+                               int64_t source_count, int64_t total_count,
+                               int64_t require_non_negative) {
   OP_PROFILE_CPU("readback_control", state);
 
   auto fail = [&]() {
@@ -316,7 +317,8 @@ int hipdnn_ep_readback_control(RuntimeState *state, int64_t *host_out,
       static_cast<uint64_t>(source_count) >
           std::numeric_limits<size_t>::max() / sizeof(size_t) ||
       static_cast<uint64_t>(total_count) >
-          std::numeric_limits<size_t>::max() / sizeof(int64_t)) {
+          std::numeric_limits<size_t>::max() / sizeof(int64_t) ||
+      (require_non_negative != 0 && require_non_negative != 1)) {
     fprintf(stderr, "hipdnn_ep_readback_control: invalid argument\n");
     return fail();
   }
@@ -406,6 +408,17 @@ int hipdnn_ep_readback_control(RuntimeState *state, int64_t *host_out,
         std::memcpy(&value, source + static_cast<size_t>(j) * 8, sizeof(value));
         host_out[outputIndex++] = value;
       }
+    }
+  }
+  if (require_non_negative != 0) {
+    bool invalid = false;
+    for (int64_t i = 0; i < total_count; ++i)
+      invalid |= host_out[i] < 0;
+    if (invalid) {
+      for (int64_t i = 0; i < total_count; ++i)
+        host_out[i] = 0;
+      fprintf(stderr, "hipdnn_ep_readback_control: negative shape extent\n");
+      return fail();
     }
   }
   return 0;

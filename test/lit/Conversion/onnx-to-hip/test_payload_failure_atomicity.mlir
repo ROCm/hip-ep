@@ -96,4 +96,85 @@ module {
   // CHECK-LABEL: func.func @expand_dynamic_result_static_inference
   // CHECK: tensor.empty({{.*}}, {{.*}}, {{.*}}) : tensor<?x?x?xf32>
   // CHECK: hip.expand
+
+  // A runtime payload cannot validate a static result constraint with the
+  // grouped readback contract. Reject it before creating readback, scalar, or
+  // splat operations.
+  func.func @constant_of_shape_runtime_partial(
+      %shape: tensor<2xi64>) -> tensor<3x?xf32> {
+    %result = "onnx.ConstantOfShape"(%shape)
+      : (tensor<2xi64>) -> tensor<3x?xf32>
+    return %result : tensor<3x?xf32>
+  }
+
+  // CHECK-LABEL: func.func @constant_of_shape_runtime_partial
+  // CHECK-NOT: hip.readback
+  // CHECK-NOT: tensor.splat
+  // CHECK-NOT: arith.index_cast
+  // CHECK: "onnx.ConstantOfShape"
+
+  func.func @constant_of_shape_rank_two(
+      %shape: tensor<1x2xi64>) -> tensor<?x?xf32> {
+    %result = "onnx.ConstantOfShape"(%shape)
+      : (tensor<1x2xi64>) -> tensor<?x?xf32>
+    return %result : tensor<?x?xf32>
+  }
+
+  // CHECK-LABEL: func.func @constant_of_shape_rank_two
+  // CHECK-NOT: hip.readback
+  // CHECK-NOT: tensor.splat
+  // CHECK-NOT: arith.index_cast
+  // CHECK: "onnx.ConstantOfShape"
+
+  func.func @constant_of_shape_wrong_type(
+      %shape: tensor<2xi16>) -> tensor<?x?xf32> {
+    %result = "onnx.ConstantOfShape"(%shape)
+      : (tensor<2xi16>) -> tensor<?x?xf32>
+    return %result : tensor<?x?xf32>
+  }
+
+  // CHECK-LABEL: func.func @constant_of_shape_wrong_type
+  // CHECK-NOT: hip.readback
+  // CHECK-NOT: tensor.splat
+  // CHECK-NOT: arith.index_cast
+  // CHECK: "onnx.ConstantOfShape"
+
+  func.func @constant_of_shape_wrong_length() -> tensor<?x?xf32> {
+    %shape = arith.constant dense<[3]> : tensor<1xi64>
+    %result = "onnx.ConstantOfShape"(%shape)
+      : (tensor<1xi64>) -> tensor<?x?xf32>
+    return %result : tensor<?x?xf32>
+  }
+
+  // CHECK-LABEL: func.func @constant_of_shape_wrong_length
+  // CHECK-NOT: hip.readback
+  // CHECK-NOT: tensor.splat
+  // CHECK-NOT: arith.index_cast
+  // CHECK: "onnx.ConstantOfShape"
+
+  func.func @constant_of_shape_negative() -> tensor<?x?xf32> {
+    %shape = arith.constant dense<[3, -1]> : tensor<2xi64>
+    %result = "onnx.ConstantOfShape"(%shape)
+      : (tensor<2xi64>) -> tensor<?x?xf32>
+    return %result : tensor<?x?xf32>
+  }
+
+  // CHECK-LABEL: func.func @constant_of_shape_negative
+  // CHECK-NOT: hip.readback
+  // CHECK-NOT: tensor.splat
+  // CHECK-NOT: arith.index_cast
+  // CHECK: "onnx.ConstantOfShape"
+
+  func.func @constant_of_shape_dynamic_length(
+      %shape: tensor<?xi64>) -> tensor<?x?xf32> {
+    %result = "onnx.ConstantOfShape"(%shape)
+      : (tensor<?xi64>) -> tensor<?x?xf32>
+    return %result : tensor<?x?xf32>
+  }
+
+  // CHECK-LABEL: func.func @constant_of_shape_dynamic_length
+  // CHECK-NOT: hip.readback
+  // CHECK-NOT: tensor.splat
+  // CHECK-NOT: arith.index_cast
+  // CHECK: "onnx.ConstantOfShape"
 }

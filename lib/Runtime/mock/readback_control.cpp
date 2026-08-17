@@ -12,7 +12,8 @@ int hipdnn_ep_readback_control(RuntimeState *state, int64_t *host_out,
                                const void *const *device_sources,
                                const int64_t *element_counts,
                                const int64_t *element_bytes,
-                               int64_t source_count, int64_t total_count) {
+                               int64_t source_count, int64_t total_count,
+                               int64_t require_non_negative) {
   auto setError = [&]() {
     if (state)
       (void)hipdnn_ep_state_set_error_flag(state);
@@ -32,7 +33,8 @@ int hipdnn_ep_readback_control(RuntimeState *state, int64_t *host_out,
   if (!state || !outputRangeValid || !device_sources || !element_counts ||
       !element_bytes || source_count <= 0 ||
       static_cast<uint64_t>(source_count) >
-          std::numeric_limits<size_t>::max() / sizeof(void *)) {
+          std::numeric_limits<size_t>::max() / sizeof(void *) ||
+      (require_non_negative != 0 && require_non_negative != 1)) {
     zeroOutput();
     return setError();
   }
@@ -76,6 +78,15 @@ int hipdnn_ep_readback_control(RuntimeState *state, int64_t *host_out,
                     sizeof(value));
         host_out[outputIndex++] = value;
       }
+    }
+  }
+  if (require_non_negative != 0) {
+    bool invalid = false;
+    for (int64_t i = 0; i < total_count; ++i)
+      invalid |= host_out[i] < 0;
+    if (invalid) {
+      zeroOutput();
+      return setError();
     }
   }
   return 0;

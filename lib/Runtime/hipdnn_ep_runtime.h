@@ -1475,13 +1475,16 @@ void hipdnn_ep_readback_shape_i64(RuntimeState *state, int64_t *host_out,
 // Read a group of statically-sized i32/i64 control buffers with one stream
 // synchronization. Sources are flattened in operand-major order. `host_out`
 // is zero-initialized before any HIP call; i32 values are sign-extended and i64
-// values are preserved without clamping. Returns zero only when all copies and
-// the synchronization succeed, otherwise records the shared error flag.
+// values are preserved without clamping unless `require_non_negative` is set.
+// In that mode, a negative value clears the complete output group and fails.
+// Returns zero only when all copies, validation, and synchronization succeed;
+// otherwise records the shared error flag.
 int hipdnn_ep_readback_control(RuntimeState *state, int64_t *host_out,
                                const void *const *device_sources,
                                const int64_t *element_counts,
                                const int64_t *element_bytes,
-                               int64_t source_count, int64_t total_count);
+                               int64_t source_count, int64_t total_count,
+                               int64_t require_non_negative);
 
 // ONNX Size wrapper (dynamic-shape path only).
 //

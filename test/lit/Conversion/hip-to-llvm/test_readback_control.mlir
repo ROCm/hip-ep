@@ -7,7 +7,7 @@
 // CHECK: %[[HOST:.*]] = llvm.alloca
 // CHECK: llvm.getelementptr
 // CHECK-COUNT-1: llvm.call @hipdnn_ep_readback_control
-// CHECK-SAME: (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
+// CHECK-SAME: (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
 // CHECK: llvm.icmp "eq"
 // CHECK-COUNT-3: llvm.load
 func.func @readback_control(
