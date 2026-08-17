@@ -37,6 +37,30 @@ add_test(NAME OutputAllocatorUnitTest COMMAND test-output-allocator)
 
 set_target_properties(test-output-allocator PROPERTIES FOLDER "runtime-tests")
 
+# Compiles only the pool-site portion of runtime_state.cpp against tiny mock HIP
+# allocation functions. This directly proves that caller/helper local domain
+# zero map to distinct pointers and child growth leaves the parent live.
+add_executable(test-pool-sites
+    test_pool_sites.cpp
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/hipdnn_ep_runtime_state.cpp
+)
+
+target_compile_features(test-pool-sites PRIVATE cxx_std_17)
+
+target_include_directories(test-pool-sites PRIVATE
+    ${CMAKE_SOURCE_DIR}/lib/Runtime
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/mock
+)
+
+target_compile_definitions(test-pool-sites PRIVATE
+    HIPDNN_EP_POOL_UNIT_TEST
+    HIPDNN_EP_RT_NO_EXPORT
+)
+
+add_test(NAME PoolSitesUnitTest COMMAND test-pool-sites)
+
+set_target_properties(test-pool-sites PROPERTIES FOLDER "runtime-tests")
+
 # Exercises the void CustomOp ABI's exception-to-OrtStatus boundary with a
 # generated-compute failure seam. The fake OrtApi needs only CreateStatus, so
 # this test executes without loading HIP or an ORT session.

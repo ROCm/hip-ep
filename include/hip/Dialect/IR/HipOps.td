@@ -257,22 +257,23 @@ def Hip_GetPoolOp : Hip_Op<"get_pool",
     If the current pool is smaller, the runtime grows it (realloc)
     transparently.
 
-    The optional `domain_id` attribute selects which pool to access (default
-    0).  hip-pool-allocs partitions a function's pooled allocs into
-    independent dominance domains and emits one hip.get_pool per domain;
-    domains are independent so growing one does not affect any other.  Old
-    single-pool textual MLIR (without the attribute) parses as
-    `domain_id = 0`, and the printer omits the attribute when it equals the
-    default — single-domain output is bit-identical to pre-multi-domain IR.
+    The optional `site_id` attribute identifies the containing compiled
+    function (default 0), and `domain_id` identifies a dominance domain within
+    that function (default 0). hip-pool-allocs assigns deterministic,
+    module-unique site IDs from top-level function order. The runtime keys pool
+    storage by the collision-free `(site_id, domain_id)` pair, so a caller and
+    an outlined helper may both use local domain zero without sharing storage.
 
     Example:
     ```mlir
-    %pool0 = hip.get_pool(%ctx, %size_a) : memref<?xi8>
-    %pool1 = hip.get_pool(%ctx, %size_b) {domain_id = 1 : i64} : memref<?xi8>
+    %pool0 = hip.get_pool(%ctx, %size_a) {site_id = 4 : i64} : memref<?xi8>
+    %pool1 = hip.get_pool(%ctx, %size_b)
+        {site_id = 4 : i64, domain_id = 1 : i64} : memref<?xi8>
     ```
   }];
 
   let arguments = (ins Hip_ContextType:$ctx, Index:$pool_size,
+                       DefaultValuedAttr<I64Attr, "0">:$site_id,
                        DefaultValuedAttr<I64Attr, "0">:$domain_id);
   let results = (outs AnyMemRef:$pool);
   let assemblyFormat = "`(` $ctx `,` $pool_size `)` attr-dict `:` type($pool)";

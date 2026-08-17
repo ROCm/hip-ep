@@ -87,6 +87,27 @@ namespace hip {
 
 namespace {
 
+/// Return this function's deterministic module-local runtime site ID.
+///
+/// Symbol-table order is stable for a compiled module and function symbols are
+/// unique, so the ordinal is collision-free without relying on string hashes.
+/// Pool domains remain local to the function and are paired with this ID by the
+/// runtime. Reading the parent module is safe when FuncOp passes execute in
+/// parallel because this helper does not mutate module structure.
+static FailureOr<int64_t> getFunctionSiteId(func::FuncOp funcOp) {
+  ModuleOp moduleOp = funcOp->getParentOfType<ModuleOp>();
+  if (!moduleOp)
+    return failure();
+
+  int64_t siteId = 0;
+  for (func::FuncOp candidate : moduleOp.getOps<func::FuncOp>()) {
+    if (candidate == funcOp)
+      return siteId;
+    ++siteId;
+  }
+  return failure();
+}
+
 //===----------------------------------------------------------------------===//
 // AllocInfo - per-alloc metadata collected in Phase 1
 //===----------------------------------------------------------------------===//
@@ -686,6 +707,12 @@ struct PoolAllocsPass : public impl::PoolAllocsPassBase<PoolAllocsPass> {
 
 void PoolAllocsPass::runOnOperation() {
   func::FuncOp funcOp = getOperation();
+  FailureOr<int64_t> functionSiteId = getFunctionSiteId(funcOp);
+  if (failed(functionSiteId)) {
+    funcOp.emitError(
+        "hip-pool-allocs: function must be a top-level module symbol");
+    return signalPassFailure();
+  }
 
   if (alignment <= 0 || (alignment & (alignment - 1)) != 0) {
     funcOp.emitError("hip-pool-allocs: alignment must be a positive power of 2"
@@ -774,6 +801,8 @@ void PoolAllocsPass::runOnOperation() {
     moduleOp->setAttr("hipdnn.buffer_count", zeroBuilder.getI64IntegerAttr(0));
     moduleOp->setAttr("hipdnn.buffer_offsets",
                       zeroBuilder.getArrayAttr(SmallVector<Attribute>{}));
+    moduleOp->setAttr("hipdnn.pool_site_id",
+                      zeroBuilder.getI64IntegerAttr(*functionSiteId));
     return;
   }
 
@@ -1082,12 +1111,12 @@ void PoolAllocsPass::runOnOperation() {
           builder.createOrFold<arith::AddIOp>(loc, poolSize, contribution);
     }
 
-    // Tag the get_pool with this domain's id so the runtime grows the right
-    // backing buffer. domain_id == 0 round-trips as the default attribute and
-    // is elided by the printer, keeping single-domain output bit-identical to
-    // the pre-multi-domain IR.
+    // The module-local function ordinal and function-local domain ID form a
+    // collision-free runtime identity. An outlined helper's domain 0 therefore
+    // cannot reuse or grow its caller's live domain 0 pool.
     Value pool = hip::GetPoolOp::create(
         builder, loc, poolType, ctx, poolSize,
+        builder.getI64IntegerAttr(*functionSiteId),
         builder.getI64IntegerAttr(static_cast<int64_t>(domainId)));
 
     // Per-alloc offsets in this domain's pool. Static offsets are emitted
@@ -1219,6 +1248,8 @@ void PoolAllocsPass::runOnOperation() {
     offsetAttrs.push_back(builder.getI64IntegerAttr(off));
   moduleOp->setAttr("hipdnn.buffer_offsets",
                     ArrayAttr::get(mlirCtx, offsetAttrs));
+  moduleOp->setAttr("hipdnn.pool_site_id",
+                    builder.getI64IntegerAttr(*functionSiteId));
 
   if (domains.size() > 1) {
     moduleOp->setAttr(
