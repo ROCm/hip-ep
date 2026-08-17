@@ -7,6 +7,7 @@ add_library(HipsrDialectIR STATIC
   HipsrDialect.cpp
   HipsrShapeYieldOp.cpp
   HipsrOps.cpp
+  HipsrAllocOutputOp.cpp
   HipsrPoolDomainYieldOp.cpp
   HipsrPoolDomainOp.cpp
   HipsrComputeYieldOp.cpp

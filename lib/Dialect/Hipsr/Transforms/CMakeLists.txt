@@ -10,6 +10,7 @@ add_library(HipsrDialectTransforms STATIC
   MaterializeInitTensorsPass.cpp
   PartitionPoolDomains.cpp
   PopulateShapeRegionPass.cpp
+  HipsrUseOutputAllocator.cpp
 )
 
 add_dependencies(HipsrDialectTransforms
