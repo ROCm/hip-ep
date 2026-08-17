@@ -36,6 +36,8 @@ namespace hipsr {
 
 LogicalResult populateAddShapeRegion(OpBuilder &builder, Block &block,
                                      AddOp op);
+LogicalResult populateMulShapeRegion(OpBuilder &builder, Block &block,
+                                     MulOp op);
 LogicalResult populateCastShapeRegion(OpBuilder &builder, Block &block,
                                       CastOp op);
 LogicalResult populateExpandShapeRegion(OpBuilder &builder, Block &block,
@@ -69,6 +71,8 @@ LogicalResult populatePlaceholderShapeRegion(OpBuilder &builder,
 
   if (auto addOp = dyn_cast<AddOp>(consumer)) {
     return populateAddShapeRegion(builder, block, addOp);
+  } else if (auto mulOp = dyn_cast<MulOp>(consumer)) {
+    return populateMulShapeRegion(builder, block, mulOp);
   } else if (auto castOp = dyn_cast<CastOp>(consumer)) {
     return populateCastShapeRegion(builder, block, castOp);
   } else if (auto expandOp = dyn_cast<ExpandOp>(consumer)) {
