@@ -46,7 +46,7 @@ int hipdnn_ep_readback_control(RuntimeState *state, int64_t *host_out,
   for (int64_t i = 0; i < source_count; ++i) {
     int64_t count = element_counts[i];
     int64_t width = element_bytes[i];
-    if (count < 0 || (width != 4 && width != 8) ||
+    if (count < 0 || (width != 2 && width != 4 && width != 8) ||
         (count > 0 && !device_sources[i]) ||
         count > std::numeric_limits<int64_t>::max() - checkedTotal ||
         static_cast<uint64_t>(count) >
@@ -67,7 +67,12 @@ int hipdnn_ep_readback_control(RuntimeState *state, int64_t *host_out,
     const unsigned char *source =
         static_cast<const unsigned char *>(device_sources[i]);
     for (int64_t j = 0; j < element_counts[i]; ++j) {
-      if (element_bytes[i] == 4) {
+      if (element_bytes[i] == 2) {
+        int16_t value = 0;
+        std::memcpy(&value, source + static_cast<size_t>(j) * sizeof(value),
+                    sizeof(value));
+        host_out[outputIndex++] = static_cast<int64_t>(value);
+      } else if (element_bytes[i] == 4) {
         int32_t value = 0;
         std::memcpy(&value, source + static_cast<size_t>(j) * sizeof(value),
                     sizeof(value));

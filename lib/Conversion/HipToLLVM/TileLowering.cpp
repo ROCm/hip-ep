@@ -9,6 +9,64 @@ namespace mlir {
 namespace hip {
 namespace {
 
+struct CheckedTileExtentOpLowering
+    : public ConvertOpToLLVMPattern<CheckedTileExtentOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(CheckedTileExtentOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+    auto i64Constant = [&](int64_t value) {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+
+    Value one = i64Constant(1);
+    Value zero = i64Constant(0);
+    Value hostExtent =
+        LLVM::AllocaOp::create(rewriter, loc, ptrType, i64Type, one, 8);
+    Value hostElements =
+        LLVM::AllocaOp::create(rewriter, loc, ptrType, i64Type, one, 8);
+    LLVM::StoreOp::create(rewriter, loc, zero, hostExtent);
+    LLVM::StoreOp::create(rewriter, loc, zero, hostElements);
+    Value valid = LLVM::ZExtOp::create(rewriter, loc, i64Type,
+                                       adaptor.getReadbackValid());
+    Value expected = i64Constant(op.getExpectedExtent());
+
+    SmallVector<Type> parameterTypes = {ptrType, ptrType, ptrType, i64Type,
+                                        i64Type, i64Type, i64Type, i64Type};
+    FailureOr<LLVM::LLVMFuncOp> function = LLVM::lookupOrCreateFn(
+        rewriter, module, kHipCheckedTileExtent, parameterTypes, i32Type);
+    if (failed(function))
+      return failure();
+    LLVM::CallOp call = LLVM::CallOp::create(
+        rewriter, loc, *function,
+        ValueRange{adaptor.getCtx(), hostExtent, hostElements, valid,
+                   adaptor.getInputExtent(), adaptor.getRepeat(), expected,
+                   adaptor.getPriorElements()});
+
+    Value loadedExtent =
+        LLVM::LoadOp::create(rewriter, loc, i64Type, hostExtent);
+    Value loadedElements =
+        LLVM::LoadOp::create(rewriter, loc, i64Type, hostElements);
+    Value statusOk = LLVM::ICmpOp::create(
+        rewriter, loc, LLVM::ICmpPredicate::eq, call.getResult(),
+        LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                 rewriter.getI32IntegerAttr(0)));
+    Value safeExtent =
+        LLVM::SelectOp::create(rewriter, loc, statusOk, loadedExtent, zero);
+    Value safeElements =
+        LLVM::SelectOp::create(rewriter, loc, statusOk, loadedElements, zero);
+    rewriter.replaceOp(op, ValueRange{statusOk, safeExtent, safeElements});
+    return success();
+  }
+};
+
 // hip.tile(ctx, input, repeats, output)
 //   -> wrap_tile(state, in_ptr, repeats_ptr, out_ptr,
 //                in_shape_ptr, in_rank, out_shape_ptr, out_rank, data_type)
@@ -91,7 +149,7 @@ struct TileOpLowering : public ConvertOpToLLVMPattern<TileOp> {
 
 void populateTileLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns) {
-  patterns.add<TileOpLowering>(converter);
+  patterns.add<CheckedTileExtentOpLowering, TileOpLowering>(converter);
 }
 
 } // namespace hip

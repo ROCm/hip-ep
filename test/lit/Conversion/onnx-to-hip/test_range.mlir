@@ -28,7 +28,10 @@ module {
     return %r : tensor<?xi32>
   }
   // CHECK-LABEL: func.func @test_range_i32_dynamic
-  // CHECK: tensor.empty
+  // CHECK-COUNT-1: %[[VALID:.*]], %[[READ:.*]]:3 = hip.readback_control
+  // CHECK: %[[LEN:.*]] = hip.checked_range_count
+  // CHECK-SAME: %[[VALID]], %[[READ]]#0, %[[READ]]#1, %[[READ]]#2
+  // CHECK: tensor.empty(%[[LEN]])
   // CHECK: hip.range
 
   func.func @test_range_i16() -> tensor<4xi16> {
@@ -63,6 +66,30 @@ module {
   // CHECK-NOT: hip.readback_scalar
   // CHECK: tensor.empty(%[[COUNT]]) : tensor<?xi64>
   // CHECK: hip.range
+
+  func.func @test_range_int_min_delta() -> tensor<?xi64> {
+    %s = arith.constant dense<0> : tensor<i64>
+    %l = arith.constant dense<-9223372036854775808> : tensor<i64>
+    %d = arith.constant dense<-9223372036854775808> : tensor<i64>
+    %r = "onnx.Range"(%s, %l, %d) : (tensor<i64>, tensor<i64>, tensor<i64>) -> tensor<?xi64>
+    return %r : tensor<?xi64>
+  }
+  // CHECK-LABEL: func.func @test_range_int_min_delta
+  // CHECK: %[[MIN_COUNT:.*]] = arith.constant 1 : index
+  // CHECK-NOT: hip.readback_control
+  // CHECK: tensor.empty(%[[MIN_COUNT]]) : tensor<?xi64>
+
+  func.func @test_range_f32_constant_dynamic_type() -> tensor<?xf32> {
+    %s = arith.constant dense<-1.0> : tensor<f32>
+    %l = arith.constant dense<1.0> : tensor<f32>
+    %d = arith.constant dense<0.5> : tensor<f32>
+    %r = "onnx.Range"(%s, %l, %d) : (tensor<f32>, tensor<f32>, tensor<f32>) -> tensor<?xf32>
+    return %r : tensor<?xf32>
+  }
+  // CHECK-LABEL: func.func @test_range_f32_constant_dynamic_type
+  // CHECK: %[[FLOAT_COUNT:.*]] = arith.constant 4 : index
+  // CHECK-NOT: hip.readback_control
+  // CHECK: tensor.empty(%[[FLOAT_COUNT]]) : tensor<?xf32>
 
   func.func @test_range_f64() -> tensor<4xf64> {
     %s = arith.constant dense<0.0> : tensor<f64>
@@ -100,7 +127,7 @@ module {
 
   // A single-element rank-1 bound (HF exports slice a length out of Shape as
   // tensor<1xi64>) is accepted and collapsed to rank-0 before the readback +
-  // hip.range path. The dynamic limit reads back through a synchronized scalar.
+  // hip.range path. All three controls use one status-bearing grouped readback.
   func.func @test_range_rank1_limit(%limit: tensor<1xi64>) -> tensor<?xi64> {
     %s = arith.constant dense<0> : tensor<i64>
     %d = arith.constant dense<1> : tensor<i64>
@@ -109,6 +136,8 @@ module {
   }
   // CHECK-LABEL: func.func @test_range_rank1_limit
   // CHECK: tensor.collapse_shape %{{.*}} [] : tensor<1xi64> into tensor<i64>
-  // CHECK: hip.readback_scalar
+  // CHECK-NOT: hip.readback_scalar
+  // CHECK-COUNT-1: hip.readback_control
+  // CHECK: hip.checked_range_count
   // CHECK: hip.range
 }

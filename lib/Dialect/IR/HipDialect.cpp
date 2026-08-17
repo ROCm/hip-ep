@@ -2350,7 +2350,7 @@ LogicalResult ReadbackControlOp::verify() {
       getReadbackControlLayout(sourceTypes);
   if (failed(layout))
     return emitOpError(
-        "requires one or more statically-sized rank-0/rank-1 i32/i64 sources");
+        "requires statically-sized rank-0/rank-1 i16/i32/i64/f32/f64 sources");
 
   for (auto [index, source] : llvm::enumerate(getSources())) {
     auto memref = dyn_cast<MemRefType>(source.getType());
@@ -2374,6 +2374,22 @@ LogicalResult ReadbackControlOp::verify() {
                    [](Type type) { return !type.isInteger(64); }))
     return emitOpError("all flattened value results must be i64");
   return success();
+}
+
+void CheckedRangeCountOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Write::get(),
+                       &getOperation()->getOpOperand(0),
+                       SideEffects::DefaultResource::get());
+}
+
+void CheckedTileExtentOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Write::get(),
+                       &getOperation()->getOpOperand(0),
+                       SideEffects::DefaultResource::get());
 }
 
 //===----------------------------------------------------------------------===//

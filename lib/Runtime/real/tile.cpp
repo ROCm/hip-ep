@@ -8,10 +8,8 @@
 //
 // Source: onnxruntime/core/providers/cuda/tensor/tile.cu @ v1.22.2.
 //
-// The GPU `repeats` tensor pointer is unused -- the lowering passes us host
-// input_shape + output_shape directly, which encodes the same information
-// (repeats[d] = output_shape[d] / input_shape[d]). Avoids a per-call D2H
-// round-trip of the repeats input.
+// The allocation-shape path has already read and checked `repeats` against
+// these final descriptors. The kernel consumes the descriptors directly.
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -48,19 +46,27 @@ int wrap_tile(RuntimeState *state, void *input, void *repeats, void *output,
       },
       state);
 
-  (void)repeats;
+  auto fail = [&]() {
+    if (state)
+      (void)hipdnn_ep_state_set_error_flag(state);
+    return -1;
+  };
 
   if (!state || !input || !output || !input_shape || !output_shape) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_tile: null argument\n");
-    return -1;
+    return fail();
   }
   if (input_rank != output_rank) {
     fprintf(stderr, "[REAL] wrap_tile: input_rank(%lld) != output_rank(%lld)\n",
             (long long)input_rank, (long long)output_rank);
-    return -1;
+    return fail();
   }
   if (input_rank == 0) {
     return 0;
+  }
+  if (!repeats) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_tile: null repeats\n");
+    return fail();
   }
 
   int hip_dtype = tile_hipdnn_to_hip_dtype(data_type);
@@ -69,13 +75,14 @@ int wrap_tile(RuntimeState *state, void *input, void *repeats, void *output,
             "[REAL] wrap_tile: unsupported data_type=%s(%lld) "
             "(supported: f16, f32, i32, i64)\n",
             hipdnn_ep_datatype_name(data_type), (long long)data_type);
-    return -1;
+    return fail();
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
   RUNTIME_DEBUG_LOG("[REAL] wrap_tile: rank=%lld, data_type=%s -> hip_tile\n",
                     (long long)input_rank, hipdnn_ep_datatype_name(data_type));
 
-  return hip_tile(stream, input, output, input_shape, output_shape,
-                  static_cast<int>(input_rank), hip_dtype);
+  int status = hip_tile(stream, input, output, input_shape, output_shape,
+                        static_cast<int>(input_rank), hip_dtype);
+  return status == 0 ? 0 : fail();
 }

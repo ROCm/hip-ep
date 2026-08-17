@@ -78,7 +78,11 @@ mlir::hip::getReadbackControlLayout(TypeRange sourceTypes) {
         (shaped.getRank() != 0 && shaped.getRank() != 1))
       return failure();
     Type elementType = shaped.getElementType();
-    if (!elementType.isInteger(32) && !elementType.isInteger(64))
+    bool supportedInteger = elementType.isInteger(16) ||
+                            elementType.isInteger(32) ||
+                            elementType.isInteger(64);
+    bool supportedFloat = elementType.isF32() || elementType.isF64();
+    if (!supportedInteger && !supportedFloat)
       return failure();
 
     int64_t length = 1;

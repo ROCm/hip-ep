@@ -4388,16 +4388,17 @@ def Hip_ReadbackShapeOp : Hip_Op<"readback_shape",
 }
 
 // hip.readback_control : one synchronized host boundary for a group of small
-// integer control tensors. Unlike readback_shape, signed values are preserved.
+// scalar control tensors. Unlike readback_shape, values are not clamped.
 def Hip_ReadbackControlOp : Hip_Op<"readback_control",
     [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
      DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let summary = "Read statically-sized integer control tensors with one sync";
+  let summary = "Read statically-sized scalar control tensors with one sync";
   let description = [{
-    Copies one or more statically-sized rank-0/rank-1 i32/i64 sources from
-    device-visible memory to the host. Results are flattened in operand-major
-    order and converted to signed i64 (i32 values are sign-extended). `valid`
-    is false if argument validation, any copy enqueue, or the single stream
+    Copies one or more statically-sized rank-0/rank-1 i16/i32/i64/f32/f64
+    sources from device-visible memory to the host. Results are flattened in
+    operand-major order. Integers are sign-extended to i64; floating values
+    preserve their raw bit pattern in the low 32/all 64 bits. `valid` is false
+    if argument validation, any copy enqueue, or the single stream
     synchronization fails. Values are initialized to zero before the runtime
     call. When `require_non_negative` is true, any negative value makes the
     complete group invalid, resets every value to zero, and records the shared
@@ -4446,5 +4447,53 @@ def Hip_CheckedExpandExtentOp : Hip_Op<"checked_expand_extent",
   }];
 
   let hasVerifier = 1;
+}
+
+// hip.checked_range_count : validate grouped host Range values and compute an
+// allocation-safe result length. The shared runtime error state is written on
+// invalid input, so this op is intentionally side-effecting.
+def Hip_CheckedRangeCountOp : Hip_Op<"checked_range_count",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Validate Range controls and compute a checked result length";
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    I1:$readback_valid,
+    I64:$start_bits,
+    I64:$limit_bits,
+    I64:$delta_bits,
+    I64Attr:$data_type,
+    I64Attr:$expected_count
+  );
+  let results = (outs Index:$count);
+
+  let assemblyFormat = [{
+    `(` $ctx `,` $readback_valid `,` $start_bits `,` $limit_bits `,`
+        $delta_bits `)` `data_type` `=` $data_type
+        `expected_count` `=` $expected_count attr-dict
+    `->` type($count)
+  }];
+}
+
+// hip.checked_tile_extent : checked input_extent * repeat plus agreement with
+// a static final descriptor extent when one is available.
+def Hip_CheckedTileExtentOp : Hip_Op<"checked_tile_extent",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Compute and validate one Tile output extent";
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    I1:$readback_valid,
+    Index:$input_extent,
+    I64:$repeat,
+    Index:$prior_elements,
+    I64Attr:$expected_extent
+  );
+  let results = (outs I1:$valid, Index:$extent, Index:$elements);
+
+  let assemblyFormat = [{
+    `(` $ctx `,` $readback_valid `,` $input_extent `,` $repeat `,`
+        $prior_elements `)`
+    `expected_extent` `=` $expected_extent attr-dict
+    `->` `(` type($valid) `,` type($extent) `,` type($elements) `)`
+  }];
 }
 #endif // HIP_OPS

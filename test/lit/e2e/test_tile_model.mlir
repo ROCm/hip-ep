@@ -4,7 +4,8 @@
 // CHECK-SAME: hipdnn.input_count = 2
 // CHECK-SAME: hipdnn.output_count = 1
 // CHECK: llvm.func @wrap_tile
-// CHECK: llvm.func @hipdnn_ep_readback_shape_i64
+// CHECK: llvm.func @hipdnn_ep_checked_tile_extent
+// CHECK: llvm.func @hipdnn_ep_readback_control
 // CHECK: llvm.func @inference_init
 // CHECK: llvm.func @inference_compute
 // CHECK: llvm.func @inference_cleanup

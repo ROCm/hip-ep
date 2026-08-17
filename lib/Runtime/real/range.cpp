@@ -10,13 +10,18 @@
 
 int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
                void *output, int64_t output_num_elements, int64_t hip_dtype) {
+  auto fail = [&]() {
+    if (state)
+      (void)hipdnn_ep_state_set_error_flag(state);
+    return -1;
+  };
   if (!state || !start || !limit || !delta || !output) {
     RUNTIME_DEBUG_LOG(
         "[REAL] wrap_range: null argument (state=%p start=%p limit=%p "
         "delta=%p output=%p output_num_elements=%lld hip_dtype=%lld)\n",
         (void *)state, start, limit, delta, output,
         (long long)output_num_elements, (long long)hip_dtype);
-    return -1;
+    return fail();
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
@@ -26,6 +31,7 @@ int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
       (long long)output_num_elements, (long long)hip_dtype);
 
   void *deviceErrorFlag = hipdnn_ep_state_get_error_flag_device_ptr(state);
-  return hip_range(stream, start, limit, delta, output, output_num_elements,
-                   hip_dtype, deviceErrorFlag);
+  int status = hip_range(stream, start, limit, delta, output,
+                         output_num_elements, hip_dtype, deviceErrorFlag);
+  return status == 0 ? 0 : fail();
 }

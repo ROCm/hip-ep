@@ -272,6 +272,39 @@ class TestTile:
 
 
 # ---------------------------------------------------------------------------
+# Range
+# ---------------------------------------------------------------------------
+def _make_runtime_range_model(dtype):
+    tp = np_to_onnx_type(dtype)
+    start = helper.make_tensor_value_info("start", tp, [])
+    limit = helper.make_tensor_value_info("limit", tp, [])
+    delta = helper.make_tensor_value_info("delta", tp, [])
+    output = helper.make_tensor_value_info("output", tp, [None])
+    node = helper.make_node("Range", ["start", "limit", "delta"], ["output"])
+    return make_model_from_nodes([node], [start, limit, delta], [output])
+
+
+class TestRange:
+    @pytest.mark.parametrize(
+        "dtype,start,limit,delta",
+        [
+            (np.int64, 0, 7, 2),
+            (np.int64, 0, np.iinfo(np.int64).min, np.iinfo(np.int64).min),
+            (np.float32, -1.0, 1.0, 0.5),
+        ],
+    )
+    def test_runtime_controls(self, model_runner, dtype, start, limit, delta):
+        model = _make_runtime_range_model(dtype)
+        feeds = [
+            np.asarray(start, dtype=dtype),
+            np.asarray(limit, dtype=dtype),
+            np.asarray(delta, dtype=dtype),
+        ]
+        actual, expected = model_runner.run_sample(model, feeds)
+        compare_outputs(actual, expected, atol=0)
+
+
+# ---------------------------------------------------------------------------
 # Expand
 # ---------------------------------------------------------------------------
 def _make_expand_model(dtype, input_shape: list[int], out_shape: list[int]):

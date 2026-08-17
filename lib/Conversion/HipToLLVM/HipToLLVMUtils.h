@@ -154,6 +154,10 @@ inline constexpr const char *kHipReadbackShapeI64 =
 inline constexpr const char *kHipReadbackControl = "hipdnn_ep_readback_control";
 inline constexpr const char *kHipCheckedExpandExtent =
     "hipdnn_ep_checked_expand_extent";
+inline constexpr const char *kHipCheckedRangeCount =
+    "hipdnn_ep_checked_range_count";
+inline constexpr const char *kHipCheckedTileExtent =
+    "hipdnn_ep_checked_tile_extent";
 
 // LLVM memref descriptor struct field indices.
 // Layout: { allocatedPtr, alignedPtr, offset, sizes[rank], strides[rank] }

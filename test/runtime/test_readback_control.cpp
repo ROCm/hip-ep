@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 
 struct RuntimeState {
@@ -34,35 +35,40 @@ void expect(bool condition, const char *message) {
 
 int main() {
   RuntimeState state;
+  int16_t i16Value = -3;
   int32_t i32Values[] = {-7, 19};
   int64_t i64Value = std::numeric_limits<int64_t>::min();
-  const void *sources[] = {i32Values, &i64Value};
-  int64_t counts[] = {2, 1};
-  int64_t widths[] = {4, 8};
-  int64_t output[] = {91, 92, 93};
+  float f32Value = -1.25f;
+  uint32_t f32Bits = 0;
+  std::memcpy(&f32Bits, &f32Value, sizeof(f32Bits));
+  const void *sources[] = {&i16Value, i32Values, &i64Value, &f32Value};
+  int64_t counts[] = {1, 2, 1, 1};
+  int64_t widths[] = {2, 4, 8, 4};
+  int64_t output[] = {91, 92, 93, 94, 95};
 
   int status =
-      hipdnn_ep_readback_control(&state, output, sources, counts, widths, 2, 3,
+      hipdnn_ep_readback_control(&state, output, sources, counts, widths, 4, 5,
                                  /*require_non_negative=*/0);
   expect(status == 0 && !state.error, "valid descriptors must succeed");
-  expect(output[0] == -7 && output[1] == 19 &&
-             output[2] == std::numeric_limits<int64_t>::min(),
-         "i32 sign extension and signed i64 preservation");
+  expect(output[0] == -3 && output[1] == -7 && output[2] == 19 &&
+             output[3] == std::numeric_limits<int64_t>::min() &&
+             static_cast<uint32_t>(output[4]) == f32Bits,
+         "integer sign extension and floating bit preservation");
 
   // Source 0 is valid and would be copied first by the old implementation.
   // Source 1 is deliberately malformed late in the table. No partial values
   // may survive: failure leaves every declared output slot safely zero.
   state.error = false;
-  output[0] = 81;
-  output[1] = 82;
-  output[2] = 83;
-  int64_t malformedWidths[] = {4, 2};
+  for (int64_t &value : output)
+    value = 81;
+  int64_t malformedWidths[] = {2, 4, 8, 3};
   status = hipdnn_ep_readback_control(&state, output, sources, counts,
-                                      malformedWidths, 2, 3,
+                                      malformedWidths, 4, 5,
                                       /*require_non_negative=*/0);
   expect(status != 0 && state.error,
          "late malformed source must set the shared error flag");
-  expect(output[0] == 0 && output[1] == 0 && output[2] == 0,
+  expect(output[0] == 0 && output[1] == 0 && output[2] == 0 && output[3] == 0 &&
+             output[4] == 0,
          "late malformed source must not expose a partial copy");
 
   int64_t shapeValues[] = {2, 3};

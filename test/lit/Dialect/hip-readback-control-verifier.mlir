@@ -4,7 +4,7 @@
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics %s
 
 func.func @dynamic_length(%ctx: !hip.context, %source: tensor<?xi32>) {
-  // expected-error @+1 {{requires one or more statically-sized rank-0/rank-1 i32/i64 sources}}
+  // expected-error @+1 {{requires statically-sized rank-0/rank-1 i16/i32/i64/f32/f64 sources}}
   %r:2 = hip.readback_control(%ctx, %source : tensor<?xi32>) -> (i1, i64)
   return
 }
@@ -12,16 +12,16 @@ func.func @dynamic_length(%ctx: !hip.context, %source: tensor<?xi32>) {
 // -----
 
 func.func @rank_two(%ctx: !hip.context, %source: tensor<1x1xi64>) {
-  // expected-error @+1 {{requires one or more statically-sized rank-0/rank-1 i32/i64 sources}}
+  // expected-error @+1 {{requires statically-sized rank-0/rank-1 i16/i32/i64/f32/f64 sources}}
   %r:2 = hip.readback_control(%ctx, %source : tensor<1x1xi64>) -> (i1, i64)
   return
 }
 
 // -----
 
-func.func @wrong_element_type(%ctx: !hip.context, %source: tensor<1xf32>) {
-  // expected-error @+1 {{requires one or more statically-sized rank-0/rank-1 i32/i64 sources}}
-  %r:2 = hip.readback_control(%ctx, %source : tensor<1xf32>) -> (i1, i64)
+func.func @wrong_element_type(%ctx: !hip.context, %source: tensor<1xf16>) {
+  // expected-error @+1 {{requires statically-sized rank-0/rank-1 i16/i32/i64/f32/f64 sources}}
+  %r:2 = hip.readback_control(%ctx, %source : tensor<1xf16>) -> (i1, i64)
   return
 }
 

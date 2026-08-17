@@ -27,12 +27,16 @@ module {
   }
 
   // CHECK-LABEL: func.func @tile_dynamic
-  // CHECK: %[[RB:.*]]:2 = hip.readback_shape
+  // CHECK-COUNT-1: %[[VALID:.*]], %[[RB:.*]]:2 = hip.readback_control
   // CHECK: %[[D0:.*]] = tensor.dim %{{.*}}, %{{.*}} : tensor<?x?xf32>
   // CHECK: %[[D1:.*]] = tensor.dim %{{.*}}, %{{.*}} : tensor<?x?xf32>
-  // CHECK: %[[O0:.*]] = arith.muli %[[D0]], %[[RB]]#0 : index
-  // CHECK: %[[O1:.*]] = arith.muli %[[D1]], %[[RB]]#1 : index
-  // CHECK: %[[INIT:.*]] = tensor.empty(%[[O0]], %[[O1]]) : tensor<?x?xf32>
+  // CHECK: %[[V0:.*]], %[[O0:.*]], %[[E0:.*]] = hip.checked_tile_extent
+  // CHECK-SAME: %[[VALID]], %[[D0]], %[[RB]]#0
+  // CHECK: %[[V1:.*]], %[[O1:.*]], %[[E1:.*]] = hip.checked_tile_extent
+  // CHECK-SAME: %[[V0]], %[[D1]], %[[RB]]#1, %[[E0]]
+  // CHECK: %[[S0:.*]] = arith.select %[[V1]], %[[O0]]
+  // CHECK: %[[S1:.*]] = arith.select %[[V1]], %[[O1]]
+  // CHECK: %[[INIT:.*]] = tensor.empty(%[[S0]], %[[S1]]) : tensor<?x?xf32>
   // CHECK: hip.tile({{.*}}) ins({{.*}}, {{.*}} : tensor<?x?xf32>, tensor<2xi64>) outs(%[[INIT]] : tensor<?x?xf32>)
 
   // Runtime repeats may coexist with imported static result extents. Only the
@@ -46,10 +50,15 @@ module {
   }
 
   // CHECK-LABEL: func.func @tile_runtime_repeats_partial_static
-  // CHECK: %[[PRB:.*]]:2 = hip.readback_shape
+  // CHECK: %[[PVALID:.*]], %[[PRB:.*]]:2 = hip.readback_control
   // CHECK: %[[PD0:.*]] = tensor.dim %{{.*}}, %{{.*}} : tensor<?x1152xf32>
-  // CHECK: %[[PO0:.*]] = arith.muli %[[PD0]], %[[PRB]]#0 : index
-  // CHECK: %[[PINIT:.*]] = tensor.empty(%[[PO0]]) : tensor<?x1152xf32>
+  // CHECK: %[[PV0:.*]], %[[PO0:.*]], %[[PE0:.*]] = hip.checked_tile_extent
+  // CHECK-SAME: %[[PVALID]], %[[PD0]], %[[PRB]]#0
+  // CHECK: %[[PV1:.*]], %{{.*}}, %{{.*}} = hip.checked_tile_extent
+  // CHECK-SAME: %[[PV0]]
+  // CHECK-SAME: expected_extent = 1152
+  // CHECK: %[[PSAFE:.*]] = arith.select %[[PV1]], %[[PO0]]
+  // CHECK: %[[PINIT:.*]] = tensor.empty(%[[PSAFE]]) : tensor<?x1152xf32>
   // CHECK: hip.tile
   // CHECK-SAME: outs(%[[PINIT]] : tensor<?x1152xf32>)
 
@@ -63,8 +72,9 @@ module {
 
   // CHECK-LABEL: func.func @tile_dynamic_input_constant_repeats
   // CHECK-NOT: hip.readback_shape
+  // CHECK-NOT: hip.readback_control
   // CHECK: %[[CD0:.*]] = tensor.dim %{{.*}}, %{{.*}} : tensor<?x?xf32>
-  // CHECK: %[[CO0:.*]] = arith.muli %[[CD0]], %{{.*}} : index
+  // CHECK: %{{.*}}, %[[CO0:.*]], %{{.*}} = hip.checked_tile_extent
   // CHECK: hip.tile
   // CHECK-SAME: static_repeats = array<i64: 2, 3>
 

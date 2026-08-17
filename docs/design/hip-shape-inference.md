@@ -190,6 +190,15 @@ failure before kernel dispatch. Dialect reification never reads the payload; it
 uses constant inference when possible and otherwise lifts the authoritative
 DPS destination.
 
+Dynamic Range sizing reads start, limit, and delta through one status-bearing
+grouped host boundary. The checked count rejects zero delta, non-finite floating
+controls, signed-difference/count overflow, and lengths that cannot be
+represented by the generated index ABI. Dynamic Tile sizing similarly consumes
+one grouped repeats readback, checks every extent multiplication, and validates
+any imported static output extent before allocation. Both paths substitute a
+zero extent after failure and set the shared runtime error state; they never use
+partially initialized readback slots.
+
 Shared declarations live in `HipShapeUtils.h`; common implementation lives in
 `HipShapeUtils.cpp`, with focused category translation units introduced by the
 stack layer that first consumes each family. This foundation includes

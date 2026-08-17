@@ -1472,11 +1472,11 @@ void hipdnn_ep_readback_scalar(RuntimeState *state, void *host_dst,
 void hipdnn_ep_readback_shape_i64(RuntimeState *state, int64_t *host_out,
                                   const void *device_vector, int64_t count);
 
-// Read a group of statically-sized i32/i64 control buffers with one stream
+// Read statically-sized i16/i32/i64/f32/f64 control buffers with one stream
 // synchronization. Sources are flattened in operand-major order. `host_out`
-// is zero-initialized before any HIP call; i32 values are sign-extended and i64
-// values are preserved without clamping unless `require_non_negative` is set.
-// In that mode, a negative value clears the complete output group and fails.
+// is zero-initialized before any HIP call. Integers are sign-extended; floats
+// preserve their raw low-32/all-64-bit pattern. When `require_non_negative` is
+// set, a negative integer clears the complete output group and fails.
 // Returns zero only when all copies, validation, and synchronization succeed;
 // otherwise records the shared error flag.
 int hipdnn_ep_readback_control(RuntimeState *state, int64_t *host_out,
@@ -1495,6 +1495,26 @@ int hipdnn_ep_checked_expand_extent(RuntimeState *state, int64_t *host_extent,
                                     int64_t input_extent, int64_t target_extent,
                                     int64_t expected_extent,
                                     int64_t prior_elements);
+
+// Validate grouped Range control values and compute a safe allocation length.
+// Integer values are signed i64 values; floating values carry their raw
+// f32/f64 bit pattern in the low 32/all 64 bits. `host_count` is initialized
+// to zero before validation. Any failure records the shared runtime error.
+int hipdnn_ep_checked_range_count(RuntimeState *state, int64_t *host_count,
+                                  int64_t readback_valid, int64_t start_bits,
+                                  int64_t limit_bits, int64_t delta_bits,
+                                  int64_t data_type, int64_t expected_count);
+
+// Compute one Tile output extent with checked signed arithmetic and optionally
+// require agreement with a static final output descriptor (negative means
+// dynamic). The running element product is checked at each dimension so total
+// allocation size cannot wrap. Outputs are initialized to zero and failures
+// record the shared error.
+int hipdnn_ep_checked_tile_extent(RuntimeState *state, int64_t *host_extent,
+                                  int64_t *host_elements,
+                                  int64_t readback_valid, int64_t input_extent,
+                                  int64_t repeat, int64_t expected_extent,
+                                  int64_t prior_elements);
 
 // ONNX Size wrapper (dynamic-shape path only).
 //

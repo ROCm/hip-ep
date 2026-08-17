@@ -5,9 +5,23 @@
 
 #include "OnnxToHipUtils.h"
 
+#include "llvm/ADT/APInt.h"
+
 namespace mlir {
 namespace hip {
 namespace {
+
+static bool hasRepresentableStaticElementCount(ArrayRef<int64_t> shape) {
+  APInt count(128, 1, /*isSigned=*/true);
+  for (int64_t extent : shape) {
+    if (ShapedType::isDynamic(extent))
+      return true;
+    count *= APInt(128, extent, /*isSigned=*/true);
+    if (!count.isSignedIntN(64) || count.isNegative())
+      return false;
+  }
+  return true;
+}
 
 /// onnx.Tile -> hip.tile
 struct TileToHip : public mlir::RewritePattern {
@@ -55,50 +69,88 @@ struct TileToHip : public mlir::RewritePattern {
       staticRepeatsValues = staticRepeats.asArrayRef();
 
     SmallVector<OpFoldResult> resultShape;
+    SmallVector<int64_t> inferredStaticShape;
     if (staticRepeatsValues) {
       auto inferredShape =
           inferTileShape(inputType.getShape(), *staticRepeatsValues);
-      if (failed(inferredShape))
-        return rewriter.notifyMatchFailure(
-            op, "Tile repeats must match input rank and be non-negative");
+      if (failed(inferredShape)) {
+        op->emitOpError(
+            "constant Tile repeats or extent products are invalid or "
+            "unrepresentable");
+        return failure();
+      }
       if (!isResultTypeCompatibleWithPayloadShape(resultType, *inferredShape))
         return rewriter.notifyMatchFailure(
             op, "Tile result type contradicts constant repeats");
-      if (failed(reifyTileShape(rewriter, loc, input, repeats,
-                                staticRepeatsValues, resultShape)))
+      if (!hasRepresentableStaticElementCount(*inferredShape)) {
+        op->emitOpError(
+            "constant Tile output element count is unrepresentable");
         return failure();
-    } else {
-      // Runtime repeats are needed only for result dimensions that remain
-      // dynamic after ONNX shape inference. Imported static extents stay
-      // authoritative; this is common when a repeats tensor is assembled at
-      // runtime from one dynamic entry and one constant 1.
-      //
-      // When at least one result extent is dynamic, one bulk readback produces
-      // every repeat with a single stream synchronization. Fully static
-      // results need no host readback at all.
-      mlir::hip::ReadbackShapeOp readback;
-      SmallVector<OpFoldResult> inputSizes;
-      if (resultType.getNumDynamicDims() != 0) {
-        SmallVector<Type> dimTypes(inputType.getRank(),
-                                   rewriter.getIndexType());
-        readback = mlir::hip::ReadbackShapeOp::create(
-            rewriter, loc, dimTypes, context, repeats,
-            rewriter.getI64IntegerAttr(inputType.getRank()));
-        inputSizes = tensor::getMixedSizes(rewriter, loc, input);
       }
-      resultShape.reserve(inputType.getRank());
+      inferredStaticShape.assign(inferredShape->begin(), inferredShape->end());
+    } else if (!hasRepresentableStaticElementCount(resultType.getShape())) {
+      op->emitOpError("Tile output element count is unrepresentable");
+      return failure();
+    }
+
+    Value repeatsValid =
+        arith::ConstantIntOp::create(rewriter, loc, rewriter.getI1Type(), 1);
+    SmallVector<Value> repeatValues;
+    if (staticRepeatsValues) {
+      repeatValues.reserve(staticRepeatsValues->size());
+      for (int64_t repeat : *staticRepeatsValues)
+        repeatValues.push_back(arith::ConstantIntOp::create(
+            rewriter, loc, rewriter.getI64Type(), repeat));
+    } else {
+      SmallVector<Type> readbackTypes(1 + inputType.getRank(),
+                                      rewriter.getI64Type());
+      readbackTypes.front() = rewriter.getI1Type();
+      auto readback = mlir::hip::ReadbackControlOp::create(
+          rewriter, loc, readbackTypes, context, ValueRange{repeats});
+      repeatsValid = readback.getValid();
+      llvm::append_range(repeatValues, readback.getValues());
+    }
+
+    SmallVector<OpFoldResult> inputSizes =
+        tensor::getMixedSizes(rewriter, loc, input);
+    Value shapeValid = repeatsValid;
+    Value priorElements = arith::ConstantIndexOp::create(rewriter, loc, 1);
+    SmallVector<Value> checkedExtents;
+    checkedExtents.reserve(inputType.getRank());
+    bool needsRuntimeCheck =
+        !staticRepeatsValues || inputType.getNumDynamicDims() != 0;
+    if (needsRuntimeCheck) {
+      SmallVector<Type> checkedTypes{rewriter.getI1Type(),
+                                     rewriter.getIndexType(),
+                                     rewriter.getIndexType()};
       for (int64_t dim : llvm::seq<int64_t>(inputType.getRank())) {
-        if (!resultType.isDynamicDim(dim)) {
-          resultShape.push_back(
-              rewriter.getIndexAttr(resultType.getDimSize(dim)));
-          continue;
-        }
-        OpFoldResult inputSize = inputSizes[dim];
         Value inputExtent =
-            getValueOrCreateConstantIndexOp(rewriter, loc, inputSize);
-        resultShape.push_back(arith::MulIOp::create(rewriter, loc, inputExtent,
-                                                    readback.getDims()[dim])
-                                  .getResult());
+            getValueOrCreateConstantIndexOp(rewriter, loc, inputSizes[dim]);
+        auto checked = mlir::hip::CheckedTileExtentOp::create(
+            rewriter, loc, checkedTypes, context, shapeValid, inputExtent,
+            repeatValues[dim], priorElements,
+            rewriter.getI64IntegerAttr(resultType.getDimSize(dim)));
+        shapeValid = checked.getValid();
+        checkedExtents.push_back(checked.getExtent());
+        priorElements = checked.getElements();
+      }
+    }
+
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    resultShape.reserve(inputType.getRank());
+    for (int64_t dim : llvm::seq<int64_t>(inputType.getRank())) {
+      if (resultType.isDynamicDim(dim)) {
+        if (!needsRuntimeCheck)
+          resultShape.push_back(
+              rewriter.getIndexAttr(inferredStaticShape[dim]));
+        else
+          resultShape.push_back(
+              arith::SelectOp::create(rewriter, loc, shapeValid,
+                                      checkedExtents[dim], zero)
+                  .getResult());
+      } else {
+        resultShape.push_back(
+            rewriter.getIndexAttr(resultType.getDimSize(dim)));
       }
     }
 
