@@ -2,7 +2,7 @@
 //   MiniONNX Operation Definitions
 //   Auto-generated from ONNX schemas
 //
-//   To regenerate: python3 gen_mini_onnx.py --ops <ops>
+//   To regenerate: python3 gen_mini_onnx.py --ops all
 //********************************************************
 
 def MiniONNX_MatMulOp : MiniONNX_Op<"MatMul",

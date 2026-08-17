@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate MiniONNX dialect from ONNX schemas - FIXED for MLIR compatibility.
+Generate MiniONNX dialect from ONNX schemas - handles all ONNX ops.
 """
 
 import argparse
@@ -44,12 +44,17 @@ def parse_type_str(allowed_type):
         return None
     if "complex" in allowed_type.lower():
         return None
+    if "seq(" in allowed_type.lower():  # Skip sequence types
+        return None
+    if "map(" in allowed_type.lower():  # Skip map types
+        return None
+    if "optional(" in allowed_type.lower():  # Skip optional wrapper for now
+        return None
 
     onnx_to_mlir = {
         "(": "<[",
         ")": "]>",
         "tensor": "TensorOf",
-        "seq": "SeqOf",
         "bool": "I1",
         "uint8": "UI8",
         "uint16": "UI16",
@@ -163,27 +168,22 @@ def gen_op_def(schema):
 
     s = f'def MiniONNX_{op_name}Op : MiniONNX_Op<"{op_name}",\n'
 
-    # Minimal traits - avoid auto-generated interfaces
     traits = ["Pure"]
     s += inc_indent(indent) + f"[{', '.join(traits)}]> {{\n"
 
     indent = inc_indent(indent)
 
-    # Summary
     s += indent + f'let summary = "ONNX {schema.name} operation";\n'
 
-    # Description (truncated)
     s += indent + "let description = [{\n"
     if schema.doc:
-        for line in schema.doc.lstrip().splitlines()[:5]:  # Limit to 5 lines
+        for line in schema.doc.lstrip().splitlines()[:5]:
             escaped = line.replace('"', '\\"').replace("}]", "\\}\\]")
             s += indent + f"{escaped}\n"
     s += indent + "}];\n"
 
-    # Parse type constraints
     type_str_dict = parse_type_constraints(schema)
 
-    # Arguments
     ins = get_operands_or_results(schema, type_str_dict, is_input=True)
     ins.update(get_attrs(schema))
 
@@ -195,7 +195,6 @@ def gen_op_def(schema):
     else:
         s += indent + "let arguments = (ins);\n"
 
-    # Results
     outs = get_operands_or_results(schema, type_str_dict, is_input=False)
     if outs:
         outs_strs = [f"{ty}:${name}" for name, ty in outs.items()]
@@ -205,10 +204,7 @@ def gen_op_def(schema):
     else:
         s += indent + "let results = (outs);\n"
 
-    # CRITICAL: Skip default builders to avoid BytecodeOpInterface errors
     s += indent + "let skipDefaultBuilders = 1;\n"
-    
-    # Add minimal builder
     s += indent + "let builders = [\n"
     s += inc_indent(indent) + 'OpBuilder<(ins "ValueRange":$operands, "ArrayRef<NamedAttribute>":$attributes)>\n'
     s += indent + "];\n"
@@ -232,7 +228,7 @@ def main():
     parser.add_argument(
         "--ops",
         required=True,
-        help="Comma-separated list of ONNX operations"
+        help="Comma-separated list of ONNX operations or 'all'"
     )
     parser.add_argument(
         "--output",
@@ -241,13 +237,19 @@ def main():
     )
 
     args = parser.parse_args()
-    op_names = [name.strip() for name in args.ops.split(",")]
+    
+    if args.ops.lower() == "all":
+        # Generate all ONNX ops
+        schemas = defs.get_all_schemas_with_history()
+        op_names = sorted(set(s.name for s in schemas if s.domain == ""))
+    else:
+        op_names = [name.strip() for name in args.ops.split(",")]
 
     header = """//********************************************************
 //   MiniONNX Operation Definitions
 //   Auto-generated from ONNX schemas
 //
-//   To regenerate: python3 gen_mini_onnx.py --ops <ops>
+//   To regenerate: python3 gen_mini_onnx.py --ops all
 //********************************************************
 
 """
