@@ -21,6 +21,16 @@ func.func @dynamic_output(
 
 // ---
 
+// in onnx:
+// %graph_input
+//     ↓
+// onnx.MatMul
+//     ↓
+// onnx.Add
+//     ↓
+// onnx.Reshape ──→ func.return（%graph_output）
+//     └──────────→ onnx.Cast
+
 func.func @test_return_shape(
     %ctx: !hipsr.context,
     %input: memref<?x512xf16, #hipsr.mem<device>>,
@@ -87,6 +97,13 @@ func.func @test_return_shape(
       hipsr.compute_yield %collapsed : memref<?xf16, #hipsr.mem<device>>
     } : memref<?xf16, #hipsr.mem<device>>
 
+    %cast_init = memref.alloc(%flat_size)
+      : memref<?xf32, #hipsr.mem<device>>
+
+    hipsr.cast(%dctx)
+      ins(%flat : memref<?xf16, #hipsr.mem<device>>)
+      outs(%cast_init : memref<?xf32, #hipsr.mem<device>>)
+
     hipsr.preserve_shape %shape1, %init1
       : memref<?x256xf16, #hipsr.mem<device>>
 
@@ -95,6 +112,9 @@ func.func @test_return_shape(
 
     hipsr.preserve_shape %shape3, %flat
       : memref<?xf16, #hipsr.mem<device>>
+
+    hipsr.preserve_shape %shape3, %cast_init
+      : memref<?xf32, #hipsr.mem<device>>
 
     hipsr.pool_domain_yield %flat
       : memref<?xf16, #hipsr.mem<device>>
