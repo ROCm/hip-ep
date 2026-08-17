@@ -57,7 +57,7 @@ bool isResultTypeCompatibleWithPayloadShape(
   return isResultTypeCompatibleWithInferredShape(resultType, inferredShape);
 }
 
-std::optional<llvm::ArrayRef<int64_t>>
+static std::optional<llvm::ArrayRef<int64_t>>
 resolveReductionAxes(Operation *op, Value data, int64_t noopWithEmptyAxes,
                      llvm::SmallVectorImpl<int64_t> &storage) {
   storage.clear();
@@ -268,7 +268,7 @@ createGqaQkEmpty(mlir::PatternRewriter &rewriter, mlir::Location loc,
                                     resultType.getElementType(), dynamicSizes));
 }
 
-mlir::FailureOr<mlir::RankedTensorType>
+static mlir::FailureOr<mlir::RankedTensorType>
 inferReduceResultType(mlir::Operation *op, mlir::Value data,
                       llvm::ArrayRef<int64_t> reducedAxes, int64_t keepdims) {
   auto ranked = dyn_cast<RankedTensorType>(op->getResult(0).getType());
@@ -285,6 +285,110 @@ inferReduceResultType(mlir::Operation *op, mlir::Value data,
     return ranked;
   }
   return RankedTensorType::get(*outShape, inputType.getElementType());
+}
+
+namespace {
+
+FailureOr<Value> createReductionEmptyTensor(OpBuilder &builder, Location loc,
+                                            RankedTensorType resultType,
+                                            Value data,
+                                            llvm::ArrayRef<int64_t> reducedAxes,
+                                            int64_t keepdims) {
+  FailureOr<llvm::SmallVector<OpFoldResult>> shape =
+      reifyReductionResultShape(builder, loc, data, reducedAxes, keepdims);
+  if (failed(shape))
+    return failure();
+  return createEmptyTensorFromReifiedShape(builder, loc, resultType, *shape);
+}
+
+Value materializeReductionAxes(OpBuilder &builder, Location loc,
+                               llvm::ArrayRef<int64_t> resolvedAxes) {
+  auto axesType = RankedTensorType::get(
+      {static_cast<int64_t>(resolvedAxes.size())}, builder.getI64Type());
+  auto axesAttr = DenseIntElementsAttr::get(axesType, resolvedAxes);
+  return arith::ConstantOp::create(builder, loc, axesType, axesAttr);
+}
+
+/// Shared ONNX reduction conversion skeleton. All supported reductions differ
+/// only by their HIP op type; axes resolution, destination construction, and
+/// attributes stay private to this translation unit.
+template <typename HipOpTy>
+class OnnxReductionToHip final : public RewritePattern {
+public:
+  OnnxReductionToHip(MLIRContext *ctx, llvm::StringRef onnxOpName)
+      : RewritePattern(onnxOpName, /*benefit=*/1, ctx) {}
+
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override {
+    if (op->getNumOperands() < 1 || op->getNumResults() != 1)
+      return rewriter.notifyMatchFailure(
+          op, "reduction expects at least one input and one output");
+
+    auto context = getContextArg(op, rewriter);
+    if (failed(context))
+      return failure();
+
+    Value data = op->getOperand(0);
+    int64_t noopWithEmptyAxes = 0;
+    if (auto attr = op->getAttrOfType<IntegerAttr>("noop_with_empty_axes"))
+      noopWithEmptyAxes = attr.getSInt();
+    int64_t keepdims = 1;
+    if (auto attr = op->getAttrOfType<IntegerAttr>("keepdims"))
+      keepdims = attr.getSInt();
+    if (keepdims != 0 && keepdims != 1)
+      return op->emitError("keepdims must be 0 or 1");
+    if (noopWithEmptyAxes != 0 && noopWithEmptyAxes != 1)
+      return op->emitError("noop_with_empty_axes must be 0 or 1");
+
+    llvm::SmallVector<int64_t> axesStorage;
+    std::optional<llvm::ArrayRef<int64_t>> reducedAxes =
+        resolveReductionAxes(op, data, noopWithEmptyAxes, axesStorage);
+    if (!reducedAxes)
+      return op->emitError("reduction axes must be known at compile time");
+    auto dataType = dyn_cast<RankedTensorType>(data.getType());
+    if (!dataType)
+      return op->emitError("reduction data must be a ranked tensor");
+    auto normalizedAxes =
+        normalizeReductionAxes(dataType.getRank(), *reducedAxes);
+    if (failed(normalizedAxes))
+      return op->emitError(
+          "reduction axes must be unique, in range, and form one contiguous "
+          "span");
+    axesStorage.assign(normalizedAxes->begin(), normalizedAxes->end());
+    llvm::ArrayRef<int64_t> axesView(axesStorage);
+
+    auto resultType = inferReduceResultType(op, data, axesView, keepdims);
+    if (failed(resultType))
+      return op->emitError(
+          "result type is incompatible with the reduction data shape and axes");
+
+    Location loc = op->getLoc();
+    auto init = createReductionEmptyTensor(rewriter, loc, *resultType, data,
+                                           axesView, keepdims);
+    if (failed(init))
+      return rewriter.notifyMatchFailure(
+          op, "result type is incompatible with the reduction shape");
+
+    Value axes = materializeReductionAxes(rewriter, loc, axesView);
+    auto hipOp = HipOpTy::create(rewriter, loc, *context, data, axes, *init,
+                                 rewriter.getI64IntegerAttr(keepdims),
+                                 rewriter.getI64IntegerAttr(noopWithEmptyAxes),
+                                 rewriter.getDenseI64ArrayAttr(axesView));
+    rewriter.replaceOp(op, hipOp->getResult(0));
+    return success();
+  }
+};
+
+} // namespace
+
+void populateReductionConversionPatterns(RewritePatternSet &patterns,
+                                         MLIRContext *ctx) {
+  patterns.add<OnnxReductionToHip<ReduceSumOp>>(ctx, "onnx.ReduceSum");
+  patterns.add<OnnxReductionToHip<ReduceMeanOp>>(ctx, "onnx.ReduceMean");
+  patterns.add<OnnxReductionToHip<ReduceL2Op>>(ctx, "onnx.ReduceL2");
+  patterns.add<OnnxReductionToHip<ReduceMaxOp>>(ctx, "onnx.ReduceMax");
+  patterns.add<OnnxReductionToHip<ReduceMinOp>>(ctx, "onnx.ReduceMin");
+  patterns.add<OnnxReductionToHip<ReduceProdOp>>(ctx, "onnx.ReduceProd");
 }
 
 } // namespace mlir::hip

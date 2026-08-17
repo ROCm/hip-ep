@@ -131,52 +131,12 @@ bool extractConstantIntTensor(
 bool extractConstantIntVector(mlir::Value value,
                               llvm::SmallVectorImpl<int64_t> &out);
 
-/// Resolve the reduced axis list of an ONNX reduction op.
-///
-/// The axes arrive either as an `axes` attribute (opset < 13) or as an operand
-/// (opset 13+) that may still be a compile-time constant. ONNX's empty-axes
-/// semantics are applied here: with `noop_with_empty_axes = 0` an absent or
-/// empty list reduces every axis, and with 1 it reduces nothing.
-///
-/// Returns `std::nullopt` when the axes are only known at runtime. Every such
-/// form is rejected by the shared reduction converter before IR mutation.
-///
-/// \p storage is caller-owned scratch that backs the returned view; it must
-/// outlive the result and must not be modified while the view is in use.
-std::optional<llvm::ArrayRef<int64_t>>
-resolveReductionAxes(mlir::Operation *op, mlir::Value data,
-                     int64_t noopWithEmptyAxes,
-                     llvm::SmallVectorImpl<int64_t> &storage);
 
 /// Compatibility check for a pure payload shape. A dynamic imported or
 /// inferred extent is compatible with its counterpart; unequal static extents
 /// are contradictions.
 bool isResultTypeCompatibleWithPayloadShape(
     mlir::RankedTensorType resultType, llvm::ArrayRef<int64_t> inferredShape);
-
-/// Resolve the ranked result type of an ONNX reduction op (ReduceMax / Sum /
-/// Mean / Prod / ...).
-///
-/// Usually this is just the op's own result type. The ONNX importer can,
-/// however, leave a reduction result UNRANKED (`tensor<*xT>`) when the input
-/// carries dynamic symbolic dims and the axes are not explicit -- e.g. Phi's
-/// `ReduceMax(position_ids)` feeding `GreaterOrEqual`. A bare
-/// `mlir::cast<RankedTensorType>` on an unranked type is unchecked in release
-/// builds and dereferences garbage -> crash. In that case, infer the result
-/// type from the (ranked) input + statically-known reduced axes + keepdims,
-/// per ONNX reduction shape semantics:
-///   keepdims=1: reduced axes become size 1, other dims preserved.
-///   keepdims=0: reduced axes are dropped.
-///
-/// The shape rule itself is shared with destination construction and
-/// `reifyResultShapes` through `mlir::hip::inferReductionShape`.
-///
-/// \p reducedAxes normalized compile-time axis indices.
-/// Returns failure when the exact result type cannot be established before
-/// destination creation.
-mlir::FailureOr<mlir::RankedTensorType>
-inferReduceResultType(mlir::Operation *op, mlir::Value data,
-                      llvm::ArrayRef<int64_t> reducedAxes, int64_t keepdims);
 
 /// Map an MLIR element type onto the HIPDNN_EP_DATATYPE_* enum that runtime
 /// wrappers take as an `input_data_type` argument. Only the subset needed by
@@ -200,78 +160,6 @@ inline int64_t getHipdnnInputDataType(mlir::Type elemType) {
     return HIPDNN_EP_DATATYPE_INT8; // bool/i1, signed/signless i8
   return HIPDNN_EP_DATATYPE_UNSUPPORTED;
 }
-
-/// Shared ONNX reduction conversion skeleton. All six supported reductions
-/// differ only by their HIP op type; axes/default resolution, unranked result
-/// recovery, destination construction, and attributes stay centralized here.
-template <typename HipOpTy>
-class OnnxReductionToHip final : public mlir::RewritePattern {
-public:
-  OnnxReductionToHip(mlir::MLIRContext *ctx, llvm::StringRef onnxOpName)
-      : RewritePattern(onnxOpName, /*benefit=*/1, ctx) {}
-
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override {
-    if (op->getNumOperands() < 1 || op->getNumResults() != 1)
-      return rewriter.notifyMatchFailure(
-          op, "reduction expects at least one input and one output");
-
-    auto context = getContextArg(op, rewriter);
-    if (mlir::failed(context))
-      return mlir::failure();
-
-    mlir::Value data = op->getOperand(0);
-    int64_t noopWithEmptyAxes = 0;
-    if (auto attr =
-            op->getAttrOfType<mlir::IntegerAttr>("noop_with_empty_axes"))
-      noopWithEmptyAxes = attr.getSInt();
-    int64_t keepdims = 1;
-    if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("keepdims"))
-      keepdims = attr.getSInt();
-    if (keepdims != 0 && keepdims != 1)
-      return op->emitError("keepdims must be 0 or 1");
-    if (noopWithEmptyAxes != 0 && noopWithEmptyAxes != 1)
-      return op->emitError("noop_with_empty_axes must be 0 or 1");
-
-    llvm::SmallVector<int64_t> axesStorage;
-    std::optional<llvm::ArrayRef<int64_t>> reducedAxes =
-        resolveReductionAxes(op, data, noopWithEmptyAxes, axesStorage);
-    if (!reducedAxes)
-      return op->emitError("reduction axes must be known at compile time");
-    auto dataType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
-    if (!dataType)
-      return op->emitError("reduction data must be a ranked tensor");
-    auto normalizedAxes =
-        mlir::hip::normalizeReductionAxes(dataType.getRank(), *reducedAxes);
-    if (mlir::failed(normalizedAxes))
-      return op->emitError(
-          "reduction axes must be unique, in range, and form one contiguous "
-          "span");
-    axesStorage.assign(normalizedAxes->begin(), normalizedAxes->end());
-    llvm::ArrayRef<int64_t> axesView(axesStorage);
-
-    auto resultType = inferReduceResultType(op, data, axesView, keepdims);
-    if (mlir::failed(resultType))
-      return op->emitError(
-          "result type is incompatible with the reduction data shape and axes");
-
-    mlir::Location loc = op->getLoc();
-    auto init = createReductionEmptyTensor(rewriter, loc, *resultType, data,
-                                           axesView, keepdims);
-    if (mlir::failed(init))
-      return rewriter.notifyMatchFailure(
-          op, "result type is incompatible with the reduction shape");
-
-    mlir::Value axes = materializeReductionAxes(rewriter, loc, axesView);
-    auto hipOp = HipOpTy::create(rewriter, loc, *context, data, axes, *init,
-                                 rewriter.getI64IntegerAttr(keepdims),
-                                 rewriter.getI64IntegerAttr(noopWithEmptyAxes),
-                                 rewriter.getDenseI64ArrayAttr(axesView));
-    rewriter.replaceOp(op, hipOp->getResult(0));
-    return mlir::success();
-  }
-};
 
 /// Lower a variadic ONNX elementwise op to a left-associated chain of pairwise
 /// broadcasting HIP ops. Every intermediate result type comes from that
@@ -502,7 +390,7 @@ createGqaQkEmpty(mlir::PatternRewriter &rewriter, mlir::Location loc,
                  mlir::RankedTensorType resultType, mlir::Value query,
                  mlir::Value totalSeqExtent, int64_t numHeads);
 
-// Pattern population functions (one per operator file)
+// Pattern population functions.
 void populateMatMulConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 void populateTransposeConversionPatterns(RewritePatternSet &patterns,
@@ -519,12 +407,8 @@ void populateFastGeluConversionPatterns(RewritePatternSet &patterns,
                                         MLIRContext *ctx);
 void populateCastConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
-void populateReduceSumConversionPatterns(RewritePatternSet &patterns,
+void populateReductionConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
-void populateReduceMeanConversionPatterns(RewritePatternSet &patterns,
-                                          MLIRContext *ctx);
-void populateReduceL2ConversionPatterns(RewritePatternSet &patterns,
-                                        MLIRContext *ctx);
 void populateMatMulNBitsConversionPatterns(RewritePatternSet &patterns,
                                            MLIRContext *ctx);
 void populateQMoEConversionPatterns(RewritePatternSet &patterns,
@@ -585,10 +469,6 @@ void populateMinConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateMaxConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
-void populateReduceMaxConversionPatterns(RewritePatternSet &patterns,
-                                         MLIRContext *ctx);
-void populateReduceMinConversionPatterns(RewritePatternSet &patterns,
-                                         MLIRContext *ctx);
 void populateNotConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateCosConversionPatterns(RewritePatternSet &patterns,
@@ -617,8 +497,6 @@ void populateTileConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateExpandConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
-void populateReduceProdConversionPatterns(RewritePatternSet &patterns,
-                                          MLIRContext *ctx);
 void populateLessConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateGreaterConversionPatterns(RewritePatternSet &patterns,

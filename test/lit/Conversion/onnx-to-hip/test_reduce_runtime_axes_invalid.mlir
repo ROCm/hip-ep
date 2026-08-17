@@ -32,4 +32,16 @@ module {
         : (tensor<2x3x4xf32>, tensor<2xi64>) -> tensor<3xf32>
     return %output : tensor<3xf32>
   }
+
+  func.func @constant_carrier_shape_contradiction(
+      %data: tensor<2x3x4xf32>) -> tensor<2x5xf32> {
+    %axes = "onnx.Constant"() {
+      value = dense<[1]> : tensor<1xi64>
+    } : () -> tensor<1xi64>
+    // expected-error @+1 {{result type is incompatible with the reduction data shape and axes}}
+    %output = "onnx.ReduceL2"(%data, %axes)
+        {keepdims = 0 : si64, noop_with_empty_axes = 0 : si64}
+        : (tensor<2x3x4xf32>, tensor<1xi64>) -> tensor<2x5xf32>
+    return %output : tensor<2x5xf32>
+  }
 }
