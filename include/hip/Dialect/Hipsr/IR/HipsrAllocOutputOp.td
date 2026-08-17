@@ -3,7 +3,8 @@
 // Licensed under the MIT License.
 //
 
-def Hipsr_AllocOutputOp : Hipsr_DpsOp<"alloc_output"> {
+def Hipsr_AllocOutputOp : Hipsr_Op<"alloc_output",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Obtain a graph-output buffer from the EP output allocator";
   let description = [{
     Allocates the buffer for graph output `out_idx` via the EP-supplied output
