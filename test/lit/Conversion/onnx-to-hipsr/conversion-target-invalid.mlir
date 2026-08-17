@@ -5,11 +5,11 @@
 
 // Every top-level ONNX operation requires a conversion pattern.
 func.func @unconverted_onnx(
-    %input: tensor<2x3xf16, #hipsr.mem<device>>) -> tensor<2x3xf16, #hipsr.mem<device>> {
+    %input: tensor<2x3xf16>) -> tensor<2x3xf16> {
   // expected-error @+1 {{failed to legalize operation 'onnx.Unsupported'}}
   %result = "onnx.Unsupported"(%input)
-      : (tensor<2x3xf16, #hipsr.mem<device>>) -> tensor<2x3xf16, #hipsr.mem<device>>
-  return %result : tensor<2x3xf16, #hipsr.mem<device>>
+      : (tensor<2x3xf16>) -> tensor<2x3xf16>
+  return %result : tensor<2x3xf16>
 }
 
 // -----

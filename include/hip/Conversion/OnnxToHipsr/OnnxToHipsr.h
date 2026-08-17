@@ -23,7 +23,9 @@ namespace hipsr {
 #define GEN_PASS_DECL_CONVERTONNXTOHIPSRPASS
 #include "hip/Conversion/Passes.h.inc"
 
-void populateOnnxToHipsrConstantPatterns(::mlir::RewritePatternSet &patterns);
+void populateOnnxToHipsrConstantPatterns(
+    const ::mlir::TypeConverter &typeConverter,
+    ::mlir::RewritePatternSet &patterns);
 
 void populateCastConversionPatterns(const ::mlir::TypeConverter &typeConverter,
                                     ::mlir::RewritePatternSet &patterns,

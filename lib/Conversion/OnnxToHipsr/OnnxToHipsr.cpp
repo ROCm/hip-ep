@@ -111,7 +111,7 @@ struct ConvertOnnxToHipsrPass
     });
 
     RewritePatternSet patterns(&getContext());
-    populateOnnxToHipsrConstantPatterns(patterns);
+    populateOnnxToHipsrConstantPatterns(converter, patterns);
     populateCastConversionPatterns(converter, patterns, &getContext());
     populateMatMulConversionPatterns(converter, patterns, &getContext());
     populateExpandConversionPatterns(converter, patterns, &getContext());
