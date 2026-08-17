@@ -62,7 +62,7 @@ struct TileToHip : public mlir::RewritePattern {
       if (failed(inferredShape))
         return rewriter.notifyMatchFailure(
             op, "Tile repeats must match input rank and be non-negative");
-      if (!isResultTypeCompatibleWithPayloadShape(resultType, *inferredShape))
+      if (!isResultTypeCompatibleWithInferredShape(resultType, *inferredShape))
         return rewriter.notifyMatchFailure(
             op, "Tile result type contradicts constant repeats");
       if (failed(reifyTileShape(rewriter, loc, input, repeats,

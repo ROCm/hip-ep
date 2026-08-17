@@ -279,13 +279,12 @@ struct RangeToHip : public RewritePattern {
                       .Default([&](Type) { return Value(); });
       if (!len)
         return failure();
-      init = resultType.isDynamicDim(0)
-                 ? Value(tensor::EmptyOp::create(rewriter, loc,
-                                                 resultType.getShape(), elemTy,
-                                                 ValueRange{len}))
-                 : Value(tensor::EmptyOp::create(rewriter, loc,
-                                                 resultType.getShape(), elemTy,
-                                                 ValueRange{}));
+      SmallVector<OpFoldResult> exactShape = {len};
+      auto exactInit = createEmptyTensorFromReifiedShape(
+          rewriter, loc, resultType, exactShape);
+      if (failed(exactInit))
+        return failure();
+      init = *exactInit;
     }
 
     auto rangeOp = mlir::hip::RangeOp::create(rewriter, loc, ctx, startS,
