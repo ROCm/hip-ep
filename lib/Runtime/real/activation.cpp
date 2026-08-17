@@ -366,18 +366,20 @@ extern "C" int hip_miopen_softmax(void *state, const void *input, void *output,
 
   void *stream = hipdnn_ep_state_get_stream(st);
 
-  // Copy input -> output with the correct element size.  Previously this
-  // hardcoded sizeof(uint16_t)=2, corrupting fp32 inputs (Qwen VLM attention
-  // scores) by copying only half the data.
-  hipError_t err =
-      hipMemcpyAsync(output, input,
-                     static_cast<size_t>(rows) * static_cast<size_t>(cols) *
-                         static_cast<size_t>(elem_size_bytes),
-                     hipMemcpyDeviceToDevice, static_cast<hipStream_t>(stream));
-  if (err != hipSuccess) {
-    fprintf(stderr, "[REAL] hip_miopen_softmax: hipMemcpyAsync failed: %s\n",
-            hipGetErrorString(err));
-    return -1;
+  // The row kernel reads the complete row before overwriting it, so aliased
+  // operands satisfy the wrapper contract without a copy. Distinct operands
+  // retain the copy-before-launch behavior.
+  if (input != output) {
+    hipError_t err = hipMemcpyAsync(
+        output, input,
+        static_cast<size_t>(rows) * static_cast<size_t>(cols) *
+            static_cast<size_t>(elem_size_bytes),
+        hipMemcpyDeviceToDevice, static_cast<hipStream_t>(stream));
+    if (err != hipSuccess) {
+      fprintf(stderr, "[REAL] hip_miopen_softmax: hipMemcpyAsync failed: %s\n",
+              hipGetErrorString(err));
+      return -1;
+    }
   }
 
   RUNTIME_DEBUG_LOG(

@@ -74,6 +74,13 @@ caller's pool.
 
 `hip-use-output-allocator` must run before pooling so returned buffers are rewritten to runtime-owned `hip.alloc_output` operations rather than absorbed into the transient pool. The production pipeline intentionally omits ownership-based buffer deallocation because every transient is pooled and outputs are runtime-owned. See [output-allocator-design.md](output-allocator-design.md).
 
+`hip-optimize-memrefs` may coalesce a `hip.miopen.softmax` destination with its
+input allocation because the standalone row kernel supports aliased operands.
+The rewrite requires identical identity-layout memref types and dynamic sizes,
+unshared compiler-owned allocations, no later input use, and a non-output
+destination. External, returned, strided, shared, and overlapping lifetimes
+remain distinct.
+
 `convert-linalg-to-loops` must run before host-scalar materialization: a rank-zero `linalg.fill` must become `memref.store` before the host-I/O candidate scan.
 
 `hip-materialize-host-scalars` redirects small integer/index buffers with host accesses to host-mapped scratch. It runs after allocation-producing rewrites and before PoolAllocs so host-written memory never becomes a view into device-only pool storage.

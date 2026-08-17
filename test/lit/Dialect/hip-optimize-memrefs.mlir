@@ -93,22 +93,82 @@ func.func @no_reuse_overlapping_lifetimes(
   return %alloc1 : memref<2x64x64xf32>
 }
 
-// Three memref<?x64xf32> buffers all sized by the same SSA value %n.
-// alloc0 becomes dead after softmax reads it, so alloc2 reuses alloc0.
+// The softmax input has no use after the operation and both operands are
+// unshared transient allocations with the same identity-layout type. The
+// destination is erased and the runtime operation receives one buffer.
+// CHECK-LABEL: func.func @softmax_inplace_transient
+// CHECK:         %[[SCORES:.*]] = memref.alloc()
+// CHECK:         hip.matmul{{.*}}outs(%[[SCORES]] :
+// CHECK-NOT:     memref.alloc
+// CHECK:         hip.miopen.softmax{{.*}}ins(%[[SCORES]] :{{.*}}outs(%[[SCORES]] :
+// CHECK:         hip.matmul{{.*}}ins(%[[SCORES]],
+func.func @softmax_inplace_transient(
+    %ctx: !hip.context,
+    %query: memref<2x64x32xf32>,
+    %key: memref<2x32x64xf32>,
+    %value: memref<2x64x32xf32>,
+    %result: memref<2x64x32xf32>) {
+  %scores = memref.alloc() : memref<2x64x64xf32>
+  hip.matmul(%ctx) ins(%query, %key : memref<2x64x32xf32>, memref<2x32x64xf32>) outs(%scores : memref<2x64x64xf32>)
+  %probabilities = memref.alloc() : memref<2x64x64xf32>
+  hip.miopen.softmax(%ctx) ins(%scores : memref<2x64x64xf32>) outs(%probabilities : memref<2x64x64xf32>)
+  hip.matmul(%ctx) ins(%probabilities, %value : memref<2x64x64xf32>, memref<2x64x32xf32>) outs(%result : memref<2x64x32xf32>)
+  return
+}
+
+// A later consumer of the input keeps its allocation live, so the softmax
+// destination remains distinct.
+// CHECK-LABEL: func.func @softmax_input_has_later_consumer
+// CHECK:         %[[INPUT:.*]] = memref.alloc()
+// CHECK:         %[[OUTPUT:.*]] = memref.alloc()
+// CHECK:         hip.miopen.softmax{{.*}}ins(%[[INPUT]] :{{.*}}outs(%[[OUTPUT]] :
+// CHECK:         hip.mul{{.*}}ins(%[[INPUT]],
+func.func @softmax_input_has_later_consumer(
+    %ctx: !hip.context,
+    %source: memref<2x64x64xf32>,
+    %scale: memref<f32>,
+    %input_result: memref<2x64x64xf32>,
+    %output_result: memref<2x64x64xf32>) {
+  %input = memref.alloc() : memref<2x64x64xf32>
+  hip.miopen.softmax(%ctx) ins(%source : memref<2x64x64xf32>) outs(%input : memref<2x64x64xf32>)
+  %output = memref.alloc() : memref<2x64x64xf32>
+  hip.miopen.softmax(%ctx) ins(%input : memref<2x64x64xf32>) outs(%output : memref<2x64x64xf32>)
+  hip.mul(%ctx) ins(%input, %scale : memref<2x64x64xf32>, memref<f32>) outs(%input_result : memref<2x64x64xf32>)
+  hip.mul(%ctx) ins(%output, %scale : memref<2x64x64xf32>, memref<f32>) outs(%output_result : memref<2x64x64xf32>)
+  return
+}
+
+// A returned destination is graph-owned and must remain separate from the
+// transient softmax input.
+// CHECK-LABEL: func.func @softmax_graph_output
+// CHECK:         %[[INPUT:.*]] = memref.alloc()
+// CHECK:         %[[OUTPUT:.*]] = memref.alloc()
+// CHECK:         hip.miopen.softmax{{.*}}ins(%[[INPUT]] :{{.*}}outs(%[[OUTPUT]] :
+// CHECK:         return %[[OUTPUT]]
+func.func @softmax_graph_output(
+    %ctx: !hip.context,
+    %source: memref<2x64x64xf32>) -> memref<2x64x64xf32> {
+  %input = memref.alloc() : memref<2x64x64xf32>
+  hip.miopen.softmax(%ctx) ins(%source : memref<2x64x64xf32>) outs(%input : memref<2x64x64xf32>)
+  %output = memref.alloc() : memref<2x64x64xf32>
+  hip.miopen.softmax(%ctx) ins(%input : memref<2x64x64xf32>) outs(%output : memref<2x64x64xf32>)
+  return %output : memref<2x64x64xf32>
+}
+
+// Three memref<?x64xf32> buffers all sized by the same SSA value %n. The first
+// softmax coalesces alloc1 into alloc0. The returned alloc2 remains distinct.
 //
 // Intervals:
-//   alloc0: [0, 1]   dead before index 2
-//   alloc1: [1, 2]   new slot (alloc0 still live at 1)
-//   alloc2: [2, ret]  reuses alloc0 (same type, same SSA dim %n)
+//   alloc0: [0, 2]   extended through both softmax input uses
+//   alloc2: [2, ret]  cannot overlap alloc0 at the second softmax
 //
 // CHECK-LABEL: func.func @dynamic_same_dim_reuse
 // CHECK:         %[[A:.*]] = memref.alloc(%arg3)
 // CHECK:         hip.matmul
+// CHECK:         hip.miopen.softmax{{.*}}ins(%[[A]] :{{.*}}outs(%[[A]] :
 // CHECK:         %[[B:.*]] = memref.alloc(%arg3)
-// CHECK:         hip.miopen.softmax{{.*}}outs(%[[B]] :
-// CHECK-NOT:     memref.alloc
-// CHECK:         hip.miopen.softmax{{.*}}outs(%[[A]] :
-// CHECK:         return %[[A]]
+// CHECK:         hip.miopen.softmax{{.*}}ins(%[[A]] :{{.*}}outs(%[[B]] :
+// CHECK:         return %[[B]]
 func.func @dynamic_same_dim_reuse(
     %ctx: !hip.context,
     %a: memref<?x64xf32>,
