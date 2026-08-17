@@ -18,7 +18,9 @@
 #include "hip/Conversion/HipConversionUtils.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Dialect/IR/HipDialect.h"
-#include "hip/Dialect/IR/HipShapeUtils.h"
+#include "hip/Dialect/IR/HipShapeUtilsBroadcast.h"
+#include "hip/Dialect/IR/HipShapeUtilsCommon.h"
+#include "hip/Dialect/IR/HipShapeUtilsReduction.h"
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/datatype_abi.h"
 

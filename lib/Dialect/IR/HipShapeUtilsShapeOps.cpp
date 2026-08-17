@@ -9,8 +9,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "hip/Dialect/IR/HipShapeUtilsShapeOps.h"
 #include "HipShapeUtilsInternal.h"
-#include "hip/Dialect/IR/HipShapeUtils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
