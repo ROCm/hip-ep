@@ -12,6 +12,7 @@
 
 #include "HipShapeUtilsInternal.h"
 #include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/IR/HipGqaSupport.h"
 #include "hip/Dialect/IR/HipShapeUtils.h"
 
 #include "llvm/ADT/Sequence.h"
@@ -151,6 +152,21 @@ GqaOp::reifyResultShapes(OpBuilder &b,
                 "by the runtime");
     return failure();
   }
+  auto optionalType = [](Value value) {
+    return value ? value.getType() : Type{};
+  };
+  GqaFeatureTypes featureTypes{
+      getQuery().getType(),         optionalType(getKey()),
+      optionalType(getValue()),     optionalType(getPastKey()),
+      optionalType(getPastValue()), getOutput().getType(),
+      getPresentKey().getType(),    getPresentValue().getType(),
+      optionalType(getKScale()),    optionalType(getVScale()),
+  };
+  if (failed(verifyGqaFeatureSupport(
+          getKQuantType(), getVQuantType(), getKvCacheBitWidth(),
+          getRotaryInterleaved(), getKvNumHeads(), featureTypes,
+          [&]() { return emitOpError(); })))
+    return failure();
   return cast<HipDpsOp>(getOperation())
       .reifyResultShapes(b, reifiedReturnShapes);
 }

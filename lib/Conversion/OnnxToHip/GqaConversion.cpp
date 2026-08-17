@@ -4,6 +4,7 @@
  */
 
 #include "OnnxToHipUtils.h"
+#include "hip/Dialect/IR/HipGqaSupport.h"
 
 namespace mlir {
 namespace hip {
@@ -214,6 +215,24 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
       mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
   auto presentValueType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(2).getType());
+
+  GqaFeatureTypes featureTypes{
+      query.getType(),
+      key ? key.getType() : Type{},
+      value ? value.getType() : Type{},
+      pastKey ? pastKey.getType() : Type{},
+      pastValue ? pastValue.getType() : Type{},
+      outputType,
+      presentKeyType,
+      presentValueType,
+      kScale ? kScale.getType() : Type{},
+      vScale ? vScale.getType() : Type{},
+  };
+  if (failed(verifyGqaFeatureSupport(
+          kQuantTypeAttr.getValue(), vQuantTypeAttr.getValue(),
+          kvCacheBitWidthAttr.getInt(), rotaryInterleavedAttr.getInt(),
+          kvNumHeads, featureTypes, [&]() { return op->emitError(); })))
+    return failure();
 
   // === Create DPS init tensors ===
 

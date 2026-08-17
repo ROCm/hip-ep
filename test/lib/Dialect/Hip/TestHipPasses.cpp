@@ -20,6 +20,29 @@
 
 namespace {
 
+void injectUnsupportedGqaFeature(mlir::hip::GqaOp op, llvm::StringRef kind) {
+  mlir::MLIRContext *context = op.getContext();
+  if (kind == "softcap") {
+    op->setAttr("softcap",
+                mlir::FloatAttr::get(mlir::Float32Type::get(context), 1.0));
+  } else if (kind == "rotary_interleaved") {
+    op->setAttr("rotary_interleaved",
+                mlir::IntegerAttr::get(mlir::IntegerType::get(context, 64), 1));
+  } else if (kind == "per_tensor") {
+    op->setAttr("k_quant_type", mlir::StringAttr::get(context, "PER_TENSOR"));
+    op->setAttr("v_quant_type", mlir::StringAttr::get(context, "PER_TENSOR"));
+  } else if (kind == "int4") {
+    op->setAttr("kv_cache_bit_width",
+                mlir::IntegerAttr::get(mlir::IntegerType::get(context, 64), 4));
+  } else if (kind == "mixed_scheme") {
+    op->setAttr("v_quant_type", mlir::StringAttr::get(context, "NONE"));
+  } else if (kind == "mixed_dtype") {
+    mlir::Value pastValue = op.getPastValue();
+    auto shapedType = mlir::cast<mlir::ShapedType>(pastValue.getType());
+    pastValue.setType(shapedType.clone(mlir::Float16Type::get(context)));
+  }
+}
+
 class TestMalformedReifyOp final
     : public mlir::Op<TestMalformedReifyOp, mlir::OpTrait::ZeroOperands,
                       mlir::OpTrait::VariadicResults,
@@ -282,32 +305,67 @@ struct TestGqaReifyFailureAtomicPass final
 
   void runOnOperation() final {
     mlir::IRRewriter rewriter(&getContext());
-    mlir::WalkResult walkResult =
-        getOperation().walk([&](mlir::hip::GqaOp op) -> mlir::WalkResult {
-          if (!op->hasAttr("test.gqa_reify_failure_atomic"))
-            return mlir::WalkResult::advance();
-          op->setAttr(
-              "softcap",
-              mlir::FloatAttr::get(mlir::Float32Type::get(&getContext()), 1.0));
-          mlir::Block *block = op->getBlock();
-          size_t before = std::distance(block->begin(), block->end());
-          mlir::DictionaryAttr attrsBefore = op->getAttrDictionary();
+    mlir::WalkResult walkResult = getOperation().walk([&](mlir::hip::GqaOp op)
+                                                          -> mlir::WalkResult {
+      if (op->hasAttr("test.gqa_reify_supported")) {
+        rewriter.setInsertionPoint(op);
+        mlir::ReifiedRankedShapedTypeDims reified;
+        if (mlir::failed(op.reifyResultShapes(rewriter, reified)) ||
+            reified.size() != 3) {
+          op.emitOpError("supported GQA reification unexpectedly failed");
+          return mlir::WalkResult::interrupt();
+        }
+        op.emitRemark("supported GQA reification succeeded");
+        return mlir::WalkResult::advance();
+      }
+      if (op->hasAttr("test.gqa_reify_quant_matrix")) {
+        mlir::Block *block = op->getBlock();
+        size_t before = std::distance(block->begin(), block->end());
+        mlir::DictionaryAttr attrsBefore = op->getAttrDictionary();
+        mlir::Type pastValueType = op.getPastValue().getType();
+        for (llvm::StringRef kind : {"rotary_interleaved", "per_tensor", "int4",
+                                     "mixed_scheme", "mixed_dtype"}) {
+          injectUnsupportedGqaFeature(op, kind);
           rewriter.setInsertionPoint(op);
           mlir::ReifiedRankedShapedTypeDims reified;
-          if (mlir::succeeded(op.reifyResultShapes(rewriter, reified))) {
-            op.emitOpError(
-                "unsupported GQA reification unexpectedly succeeded");
-            return mlir::WalkResult::interrupt();
-          }
-          size_t after = std::distance(block->begin(), block->end());
-          if (after != before || op->getAttrDictionary() != attrsBefore ||
+          if (mlir::succeeded(op.reifyResultShapes(rewriter, reified)) ||
+              static_cast<size_t>(
+                  std::distance(block->begin(), block->end())) != before ||
               !reified.empty()) {
-            op.emitOpError("failed GQA reification mutated IR");
+            op.emitOpError() << "unsupported GQA " << kind
+                             << " reification was not mutation-free";
             return mlir::WalkResult::interrupt();
           }
-          op.emitRemark("failed GQA reification left IR unchanged");
-          return mlir::WalkResult::advance();
-        });
+          op.emitRemark() << "failed GQA " << kind
+                          << " reification left IR unchanged";
+          op->setAttrs(attrsBefore);
+          op.getPastValue().setType(pastValueType);
+        }
+        return mlir::WalkResult::advance();
+      }
+      mlir::Attribute marker = op->getAttr("test.gqa_reify_failure_atomic");
+      if (!marker)
+        return mlir::WalkResult::advance();
+      auto kind = mlir::dyn_cast<mlir::StringAttr>(marker);
+      injectUnsupportedGqaFeature(op, kind ? kind.getValue() : "softcap");
+      mlir::Block *block = op->getBlock();
+      size_t before = std::distance(block->begin(), block->end());
+      mlir::DictionaryAttr attrsBefore = op->getAttrDictionary();
+      rewriter.setInsertionPoint(op);
+      mlir::ReifiedRankedShapedTypeDims reified;
+      if (mlir::succeeded(op.reifyResultShapes(rewriter, reified))) {
+        op.emitOpError("unsupported GQA reification unexpectedly succeeded");
+        return mlir::WalkResult::interrupt();
+      }
+      size_t after = std::distance(block->begin(), block->end());
+      if (after != before || op->getAttrDictionary() != attrsBefore ||
+          !reified.empty()) {
+        op.emitOpError("failed GQA reification mutated IR");
+        return mlir::WalkResult::interrupt();
+      }
+      op.emitRemark("failed GQA reification left IR unchanged");
+      return mlir::WalkResult::advance();
+    });
     if (walkResult.wasInterrupted())
       signalPassFailure();
   }
@@ -323,15 +381,16 @@ struct TestMakeGqaSoftcapUnsupportedPass final
     return "test-make-gqa-softcap-unsupported";
   }
   llvm::StringRef getDescription() const final {
-    return "Inject unsupported GQA softcap after input verification";
+    return "Inject unsupported GQA features after input verification";
   }
 
   void runOnOperation() final {
     getOperation().walk([&](mlir::hip::GqaOp op) {
       if (!op->hasAttr("test.gqa_lowering_unsupported"))
         return;
-      op->setAttr("softcap", mlir::FloatAttr::get(
-                                 mlir::Float32Type::get(&getContext()), 1.0));
+      mlir::Attribute marker = op->getAttr("test.gqa_lowering_unsupported");
+      auto kind = mlir::dyn_cast<mlir::StringAttr>(marker);
+      injectUnsupportedGqaFeature(op, kind ? kind.getValue() : "softcap");
     });
   }
 };

@@ -42,6 +42,147 @@ module {
       %total: tensor<i32>)
       -> (tensor<1x1x32xf16>, tensor<1x2x5x8xf16>,
           tensor<1x2x5x8xf16>) {
+    // CHECK: error: PER_TENSOR KV quantization is unsupported
+    %out:3 = "onnx.Custom"(
+        %query, %key, %value, %past_key, %past_value, %seqlens, %total)
+        <{function_name = "GroupQueryAttention"}>
+        {domain_name = "com.microsoft", num_heads = 4 : si64,
+         kv_num_heads = 2 : si64, k_quant_type = "PER_TENSOR",
+         v_quant_type = "PER_TENSOR"}
+        : (tensor<1x1x32xf16>, tensor<1x1x16xf16>,
+           tensor<1x1x16xf16>, tensor<1x2x4x8xf16>,
+           tensor<1x2x4x8xf16>, tensor<1xi32>, tensor<i32>)
+        -> (tensor<1x1x32xf16>, tensor<1x2x5x8xf16>,
+            tensor<1x2x5x8xf16>)
+    return %out#0, %out#1, %out#2
+        : tensor<1x1x32xf16>, tensor<1x2x5x8xf16>,
+          tensor<1x2x5x8xf16>
+  }
+}
+
+// -----
+
+module {
+  func.func @main_graph(
+      %query: tensor<1x1x32xf16>, %key: tensor<1x1x16xf16>,
+      %value: tensor<1x1x16xf16>, %past_key: tensor<1x2x4x8xi8>,
+      %past_value: tensor<1x2x4x8xi8>, %seqlens: tensor<1xi32>,
+      %total: tensor<i32>)
+      -> (tensor<1x1x32xf16>, tensor<1x2x5x8xi8>,
+          tensor<1x2x5x8xi8>) {
+    // CHECK: error: quantized GQA supports only 8-bit KV caches; 4-bit KV caches are unsupported
+    %out:3 = "onnx.Custom"(
+        %query, %key, %value, %past_key, %past_value, %seqlens, %total)
+        <{function_name = "GroupQueryAttention"}>
+        {domain_name = "com.microsoft", num_heads = 4 : si64,
+         kv_num_heads = 2 : si64, k_quant_type = "PER_CHANNEL",
+         v_quant_type = "PER_CHANNEL", kv_cache_bit_width = 4 : si64}
+        : (tensor<1x1x32xf16>, tensor<1x1x16xf16>,
+           tensor<1x1x16xf16>, tensor<1x2x4x8xi8>,
+           tensor<1x2x4x8xi8>, tensor<1xi32>, tensor<i32>)
+        -> (tensor<1x1x32xf16>, tensor<1x2x5x8xi8>,
+            tensor<1x2x5x8xi8>)
+    return %out#0, %out#1, %out#2
+        : tensor<1x1x32xf16>, tensor<1x2x5x8xi8>, tensor<1x2x5x8xi8>
+  }
+}
+
+// -----
+
+module {
+  func.func @main_graph(
+      %query: tensor<1x1x32xf16>, %key: tensor<1x1x16xf16>,
+      %value: tensor<1x1x16xf16>, %past_key: tensor<1x2x4x8xi8>,
+      %past_value: tensor<1x2x4x8xi8>, %seqlens: tensor<1xi32>,
+      %total: tensor<i32>)
+      -> (tensor<1x1x32xf16>, tensor<1x2x5x8xi8>,
+          tensor<1x2x5x8xi8>) {
+    // CHECK: error: K/V quantization schemes must match
+    %out:3 = "onnx.Custom"(
+        %query, %key, %value, %past_key, %past_value, %seqlens, %total)
+        <{function_name = "GroupQueryAttention"}>
+        {domain_name = "com.microsoft", num_heads = 4 : si64,
+         kv_num_heads = 2 : si64, k_quant_type = "PER_CHANNEL",
+         v_quant_type = "NONE"}
+        : (tensor<1x1x32xf16>, tensor<1x1x16xf16>,
+           tensor<1x1x16xf16>, tensor<1x2x4x8xi8>,
+           tensor<1x2x4x8xi8>, tensor<1xi32>, tensor<i32>)
+        -> (tensor<1x1x32xf16>, tensor<1x2x5x8xi8>,
+            tensor<1x2x5x8xi8>)
+    return %out#0, %out#1, %out#2
+        : tensor<1x1x32xf16>, tensor<1x2x5x8xi8>, tensor<1x2x5x8xi8>
+  }
+}
+
+// -----
+
+module {
+  func.func @main_graph(
+      %query: tensor<1x1x32xf16>, %key: tensor<1x1x16xf16>,
+      %value: tensor<1x1x16xf16>, %past_key: tensor<1x2x4x8xi8>,
+      %past_value: tensor<1x2x4x8xf16>, %seqlens: tensor<1xi32>,
+      %total: tensor<i32>, %k_scale: tensor<16xf32>,
+      %v_scale: tensor<16xf32>)
+      -> (tensor<1x1x32xf16>, tensor<1x2x5x8xi8>,
+          tensor<1x2x5x8xf16>) {
+    %none = "onnx.NoValue"() {value} : () -> none
+    // CHECK: error: quantized GQA past_value element type must be signed int8
+    %out:3 = "onnx.Custom"(
+        %query, %key, %value, %past_key, %past_value, %seqlens, %total,
+        %none, %none, %none, %none, %none, %k_scale, %v_scale)
+        <{function_name = "GroupQueryAttention"}>
+        {domain_name = "com.microsoft", num_heads = 4 : si64,
+         kv_num_heads = 2 : si64, k_quant_type = "PER_CHANNEL",
+         v_quant_type = "PER_CHANNEL", kv_cache_bit_width = 8 : si64}
+        : (tensor<1x1x32xf16>, tensor<1x1x16xf16>,
+           tensor<1x1x16xf16>, tensor<1x2x4x8xi8>,
+           tensor<1x2x4x8xf16>, tensor<1xi32>, tensor<i32>,
+           none, none, none, none, none, tensor<16xf32>, tensor<16xf32>)
+        -> (tensor<1x1x32xf16>, tensor<1x2x5x8xi8>,
+            tensor<1x2x5x8xf16>)
+    return %out#0, %out#1, %out#2
+        : tensor<1x1x32xf16>, tensor<1x2x5x8xi8>,
+          tensor<1x2x5x8xf16>
+  }
+}
+
+// -----
+
+module {
+  func.func @main_graph(
+      %query: tensor<1x1x32xf16>, %key: tensor<1x1x16xf16>,
+      %value: tensor<1x1x16xf16>, %past_key: tensor<1x2x4x8xf16>,
+      %past_value: tensor<1x2x4x8xf16>, %seqlens: tensor<1xi32>,
+      %total: tensor<i32>)
+      -> (tensor<1x1x32xf16>, tensor<1x2x5x8xf16>,
+          tensor<1x2x5x8xf16>) {
+    // CHECK: error: rotary_interleaved must be zero
+    %out:3 = "onnx.Custom"(
+        %query, %key, %value, %past_key, %past_value, %seqlens, %total)
+        <{function_name = "GroupQueryAttention"}>
+        {domain_name = "com.microsoft", num_heads = 4 : si64,
+         kv_num_heads = 2 : si64, rotary_interleaved = 1 : si64}
+        : (tensor<1x1x32xf16>, tensor<1x1x16xf16>,
+           tensor<1x1x16xf16>, tensor<1x2x4x8xf16>,
+           tensor<1x2x4x8xf16>, tensor<1xi32>, tensor<i32>)
+        -> (tensor<1x1x32xf16>, tensor<1x2x5x8xf16>,
+            tensor<1x2x5x8xf16>)
+    return %out#0, %out#1, %out#2
+        : tensor<1x1x32xf16>, tensor<1x2x5x8xf16>,
+          tensor<1x2x5x8xf16>
+  }
+}
+
+// -----
+
+module {
+  func.func @main_graph(
+      %query: tensor<1x1x32xf16>, %key: tensor<1x1x16xf16>,
+      %value: tensor<1x1x16xf16>, %past_key: tensor<1x2x4x8xf16>,
+      %past_value: tensor<1x2x4x8xf16>, %seqlens: tensor<1xi32>,
+      %total: tensor<i32>)
+      -> (tensor<1x1x32xf16>, tensor<1x2x5x8xf16>,
+          tensor<1x2x5x8xf16>) {
     // CHECK: error: GroupQueryAttention qk_output is unsupported by the runtime
     %out:3 = "onnx.Custom"(
         %query, %key, %value, %past_key, %past_value, %seqlens, %total)

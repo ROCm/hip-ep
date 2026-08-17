@@ -6,6 +6,7 @@
 add_library(HipDialectIR STATIC
   HipDialect.cpp
   HipDpsOpInterface.cpp
+  HipGqaSupport.cpp
   HipOpStateInterface.cpp
   HipReifyResultShapesImpl.cpp
   HipShapeUtils.cpp

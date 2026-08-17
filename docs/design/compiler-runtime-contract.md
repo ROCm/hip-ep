@@ -278,15 +278,23 @@ ABI extension rather than reusing this call.
 GroupQueryAttention's generated call retains Microsoft schema slots that the
 current runtime does not implement. `wrap_group_query_attention` requires a
 null `position_ids` pointer, a null `output_qk` pointer with `qk_output = 0`,
-and exact-zero f32 `softcap`. ONNX conversion rejects a live position input, a
-materialized fourth QK result, nonzero QK mode, and nonzero softcap before
-destination or readback IR is created. A four-result ONNX form whose fourth
-result has `NoneType` is an omitted optional output and maps to no HIP value.
-`hip.gqa` verification/reification and HIP-to-LLVM lowering repeat the checks
-defensively before shape or LLVM IR mutation. The real and mock wrappers reject
-violations as an ABI backstop; neither may silently ignore nonzero softcap.
-Supporting any of these forms requires an explicit runtime implementation and
-tests, not merely relaxing the compiler checks.
+exact-zero f32 `softcap`, and `rotary_interleaved = 0`. A four-result ONNX form
+whose fourth result has `NoneType` is an omitted optional output and maps to no
+HIP value.
+
+The call carries explicit K/V cache and scale datatype codes. Unquantized mode
+requires `NONE`/`NONE`, no scales, and matching f16 or f32 compute/cache
+datatypes. Quantized mode requires paired `PER_CHANNEL`, bit width 8, f16
+compute, signed-int8 K/V caches, and paired f32 scales. PER_TENSOR, 4-bit,
+mixed schemes or datatypes, and unpaired scales are invalid.
+
+ONNX conversion rejects invalid forms before destination or readback IR is
+created. `hip.gqa` verification/reification and HIP-to-LLVM lowering repeat the
+checks defensively before shape or LLVM IR mutation. The real and mock wrappers
+validate the same ABI contract and set the shared runtime error flag before
+returning failure; this is required because generated code currently discards
+the wrapper's direct status. Supporting any rejected form requires an explicit
+runtime implementation and tests, not merely relaxing the compiler checks.
 
 ---
 

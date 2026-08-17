@@ -7,8 +7,9 @@
 // GQA runtime wrapper (self-contained: optimized fused fast path + legacy
 // decomposed hipBLASLt fallback).
 //
-// The generated IR calls `wrap_group_query_attention` (39-arg ABI, unchanged so
-// the HipToLLVM lowering keeps resolving). Path selection:
+// The generated IR calls `wrap_group_query_attention`; the compiler/runtime ABI
+// includes cache/scale datatype codes so defensive validation does not infer
+// storage from raw pointers. Path selection:
 //
 //   * Common fp16 causal GQA (head_dim in {64,128,256}, templated decode
 //     geometry) -> optimized fused custom kernels:
@@ -1762,65 +1763,8 @@ extern "C" int8_t hipdnn_ep_op_state_construct_gqa(RuntimeState *state,
 }
 
 //===----------------------------------------------------------------------===//
-// KV-cache quantization scheme handling.
-//
-// The quant-type integers below MUST match GqaLowering.cpp's quantTypeToEnum():
-// the lowering converts the hip.gqa string attribute ("NONE"/"PER_TENSOR"/
-// "PER_CHANNEL") into these values before the runtime ABI sees them. Keep the
-// two in sync.
-//===----------------------------------------------------------------------===//
-enum GqaQuantType : int64_t {
-  GQA_QUANT_NONE = 0,
-  GQA_QUANT_PER_TENSOR = 1,
-  GQA_QUANT_PER_CHANNEL = 2,
-};
-
-// Map the ONNX GQA quantization attributes onto a supported KvCacheFormat.
-// Returns false (and logs) for any combination not (yet) implemented, so the
-// caller can reject rather than silently mis-reading the cache bytes.
-static bool classify_kv_cache(int64_t k_quant_type, int64_t v_quant_type,
-                              int64_t kv_cache_bit_width, const void *k_scale,
-                              const void *v_scale, KvCacheFormat *out) {
-  const bool any_quant =
-      (k_quant_type != GQA_QUANT_NONE || v_quant_type != GQA_QUANT_NONE ||
-       k_scale != nullptr || v_scale != nullptr);
-  if (!any_quant) {
-    *out = KvCacheFormat::Fp16;
-    return true;
-  }
-
-  // K and V share one typed cache buffer, so they must use the same scheme.
-  if (k_quant_type != v_quant_type) {
-    fprintf(stderr,
-            "wrap_group_query_attention: mixed KV quantization not supported "
-            "(k_quant_type=%lld v_quant_type=%lld)\n",
-            (long long)k_quant_type, (long long)v_quant_type);
-    return false;
-  }
-
-  // Symmetric per-channel int8: static fp32 scales [G,d], no zero point.
-  if (k_quant_type == GQA_QUANT_PER_CHANNEL && kv_cache_bit_width == 8 &&
-      k_scale != nullptr && v_scale != nullptr) {
-    *out = KvCacheFormat::Int8PerChannel;
-    return true;
-  }
-
-  // Future schemes (int4 per-channel, fp8, per-tensor, ...) would add branches
-  // above. Anything not matched is rejected.
-  fprintf(stderr,
-          "wrap_group_query_attention: unsupported KV quantization "
-          "(k_quant_type=%lld v_quant_type=%lld bit_width=%lld "
-          "k_scale=%d v_scale=%d); only symmetric per-channel int8 "
-          "(quant_type=PER_CHANNEL=2, bit_width=8) is supported\n",
-          (long long)k_quant_type, (long long)v_quant_type,
-          (long long)kv_cache_bit_width, k_scale != nullptr,
-          v_scale != nullptr);
-  return false;
-}
-
-//===----------------------------------------------------------------------===//
 // Public wrapper called by generated IR. ABI MUST stay identical to the
-// HipToLLVM lowering (kWrapGQA = "wrap_group_query_attention", 41 params).
+// HipToLLVM lowering (kWrapGQA = "wrap_group_query_attention", 45 params).
 //===----------------------------------------------------------------------===//
 int wrap_group_query_attention(
     RuntimeState *state, int op_state_slot,
@@ -1841,7 +1785,10 @@ int wrap_group_query_attention(
     // Shape values (6)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
-    int64_t attn_bias_batch, int64_t attn_bias_num_heads) {
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads,
+    // Runtime datatype codes for cache/scale pointers.
+    int64_t k_cache_data_type, int64_t v_cache_data_type,
+    int64_t k_scale_data_type, int64_t v_scale_data_type) {
   OP_PROFILE(
       "gqa",
       [&] {
@@ -1858,16 +1805,21 @@ int wrap_group_query_attention(
     fprintf(stderr, "wrap_group_query_attention: null state\n");
     return -1;
   }
-  if (!query || !output) {
-    fprintf(stderr, "wrap_group_query_attention: null required argument\n");
+  auto fail = [&](const char *message) {
+    if (message)
+      fprintf(stderr, "wrap_group_query_attention: %s\n", message);
+    (void)hipdnn_ep_state_set_error_flag(state);
     return -1;
+  };
+  if (!query || !output) {
+    return fail("null required argument");
   }
   if (kv_num_heads <= 0 || num_heads % kv_num_heads != 0) {
     fprintf(stderr,
             "wrap_group_query_attention: num_heads (%lld) must be divisible "
             "by kv_num_heads (%lld)\n",
             (long long)num_heads, (long long)kv_num_heads);
-    return -1;
+    return fail(nullptr);
   }
 
   //===------------------------------------------------------------------===//
@@ -1877,12 +1829,15 @@ int wrap_group_query_attention(
   // wrong results. present_key/present_value are required by both paths (the
   // legacy decomposed pipeline reads/writes them as the BNSD KV cache).
   //===------------------------------------------------------------------===//
+  GqaKvCacheMode contractCacheMode = GqaKvCacheMode::Unquantized;
   GqaRuntimeContractViolation contractViolation = validateGqaRuntimeContract(
-      position_ids != nullptr, output_qk != nullptr, qk_output, softcap);
+      position_ids != nullptr, output_qk != nullptr, qk_output, softcap,
+      rotary_interleaved, k_quant_type, v_quant_type, kv_cache_bit_width,
+      k_scale != nullptr, v_scale != nullptr, element_size_bytes,
+      k_cache_data_type, v_cache_data_type, k_scale_data_type,
+      v_scale_data_type, &contractCacheMode);
   if (contractViolation != GqaRuntimeContractViolation::None) {
-    fprintf(stderr, "wrap_group_query_attention: %s\n",
-            gqaRuntimeContractMessage(contractViolation));
-    return -1;
+    return fail(gqaRuntimeContractMessage(contractViolation));
   }
   // attention_bias (onnx.Attention external mask) is intentionally NOT rejected
   // here: the legacy decomposed pipeline applies it (Step 8b in
@@ -1892,22 +1847,18 @@ int wrap_group_query_attention(
   // classifier is the single place that decides which quantized caches are
   // supported; unsupported combinations are rejected here rather than silently
   // mis-read downstream.
-  KvCacheFormat kv_format = KvCacheFormat::Fp16;
-  if (!classify_kv_cache(k_quant_type, v_quant_type, kv_cache_bit_width,
-                         k_scale, v_scale, &kv_format))
-    return -1;
+  KvCacheFormat kv_format = contractCacheMode == GqaKvCacheMode::Int8PerChannel
+                                ? KvCacheFormat::Int8PerChannel
+                                : KvCacheFormat::Fp16;
   const bool kv_quantized = (kv_format != KvCacheFormat::Fp16);
   if (!present_key || !present_value) {
-    fprintf(stderr, "wrap_group_query_attention: GQA requires "
-                    "present_key/present_value KV cache\n");
-    return -1;
+    return fail("GQA requires present_key/present_value KV cache");
   }
 
   hipStream_t stream =
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
   if (!stream) {
-    fprintf(stderr, "wrap_group_query_attention: null stream\n");
-    return -1;
+    return fail("null stream");
   }
 
   // ORT uses scale == 0.0 as sentinel for "auto-compute 1/sqrt(head_size)"
@@ -1916,7 +1867,6 @@ int wrap_group_query_attention(
     scale = 1.0f / sqrtf(static_cast<float>(head_dim));
 
   (void)total_seq_len;      // runtime derives total_seq from seqlens_k
-  (void)rotary_interleaved; // interleaved layout handled inside hip_gqa_rope
   (void)kv_cache_bit_width; // validated above for the int8 KV path
 
   //===------------------------------------------------------------------===//
@@ -1973,7 +1923,7 @@ int wrap_group_query_attention(
         "wrap_group_query_attention: quantized KV cache is not supported on "
         "wave64 devices (CDNA, e.g. MI350) -- its kernels are on the WMMA "
         "fused path, which is RDNA-only. Use an fp16 KV cache.\n");
-    return -1;
+    return fail(nullptr);
   }
 
   // A quantized KV cache is implemented ONLY on the fused path (quant decode +
@@ -1988,15 +1938,14 @@ int wrap_group_query_attention(
             "the fused kernels implement it, head_dim 64 or 128); got "
             "fused_supported=%d head_dim=%lld\n",
             static_cast<int>(fused_supported), (long long)head_dim);
-    return -1;
+    return fail(nullptr);
   }
 
   if (!fused_supported) {
     hipblasLtHandle_t ltHandle = static_cast<hipblasLtHandle_t>(
         hipdnn_ep_state_get_hipblas_handle(state));
     if (!ltHandle) {
-      fprintf(stderr, "wrap_group_query_attention: null hipblas handle\n");
-      return -1;
+      return fail("null hipblas handle");
     }
     RUNTIME_DEBUG_LOG(
         "[REAL] wrap_group_query_attention: routing to legacy decomposed "
@@ -2014,11 +1963,13 @@ int wrap_group_query_attention(
         present_key, present_value, batch_size, seq_len_q, seq_len_kv,
         past_buf_seq, num_heads, kv_num_heads, head_dim, scale, do_rotary,
         local_window_size, no_causal != 0, element_size_bytes, op_state_slot);
-    if (lrc != 0)
+    if (lrc != 0) {
       fprintf(stderr,
               "wrap_group_query_attention: legacy decomposed pipeline failed "
               "(rc=%d)\n",
               lrc);
+      (void)hipdnn_ep_state_set_error_flag(state);
+    }
     return lrc;
   }
 
@@ -2036,10 +1987,12 @@ int wrap_group_query_attention(
       seq_len_q, seq_len_kv, past_buf_seq, num_heads, kv_num_heads, head_dim,
       scale, do_rotary, k_scale, v_scale, kv_format, head_sink,
       has_smooth_softmax, static_cast<int>(local_window_size));
-  if (rc != 0)
+  if (rc != 0) {
     fprintf(stderr,
             "wrap_group_query_attention: gqa_forward_fused failed "
             "(rc=%d)\n",
             rc);
+    (void)hipdnn_ep_state_set_error_flag(state);
+  }
   return rc;
 }

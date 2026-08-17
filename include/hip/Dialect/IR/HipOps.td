@@ -3070,13 +3070,18 @@ def Hip_GqaOp :
     - RoPE with cos/sin caches (explicit position_ids is not supported)
     - Attention bias (ALiBi, T5 relative position bias, etc.)
     - Local / sliding-window attention
-    - KV cache quantization (float8/int8/int4, per-tensor/per-channel)
+    - Unquantized f16/f32 KV caches matching the compute element type
+    - Paired symmetric PER_CHANNEL int8 K/V caches with fp16 compute and
+      static fp32 scales containing `kv_num_heads * head_size` elements
     - Smooth softmax (numerical stability optimization)
 
     The runtime contract rejects explicit `position_ids`, a materialized
     `output_qk` or nonzero `qk_output`, and nonzero `softcap`. These forms must
     be rejected by conversion, verification, reification, and lowering rather
-    than reaching a runtime path that ignores them.
+    than reaching a runtime path that ignores them. Interleaved RoPE,
+    PER_TENSOR quantization, 4-bit caches, unpaired or mixed K/V quantization,
+    and cache/scale element types outside the two modes above are likewise
+    rejected.
 
     Cache format: BNSH (batch_size, num_heads, seq_len, head_size)
 
@@ -3153,9 +3158,9 @@ def Hip_GqaOp :
     DefaultValuedAttr<I64Attr, "0">:$qk_output,  // 0=no output, 1=before softmax, 2=after softmax
 
     // Quantization related attributes
-    DefaultValuedAttr<StrAttr, "\"NONE\"">:$k_quant_type,  // "NONE"/"PER_TENSOR"/"PER_CHANNEL"
+    DefaultValuedAttr<StrAttr, "\"NONE\"">:$k_quant_type,  // NONE or paired PER_CHANNEL
     DefaultValuedAttr<StrAttr, "\"NONE\"">:$v_quant_type,
-    DefaultValuedAttr<I64Attr, "8">:$kv_cache_bit_width,  // 8 or 4
+    DefaultValuedAttr<I64Attr, "8">:$kv_cache_bit_width,  // Quantized mode requires 8
 
     // Whisper / bidirectional-attention enabler: when true, the causal mask
     // step in the runtime is skipped. Default false preserves all existing

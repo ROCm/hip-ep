@@ -4,6 +4,7 @@
  */
 
 #include "HipToLLVMUtils.h"
+#include "hip/Dialect/IR/HipGqaSupport.h"
 
 namespace mlir {
 namespace hip {
@@ -32,6 +33,21 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     if (!op.getSoftcap().isZero())
       return op.emitOpError("softcap must be exactly zero; nonzero softcap is "
                             "unsupported by the runtime");
+    auto optionalType = [](Value value) {
+      return value ? value.getType() : Type{};
+    };
+    GqaFeatureTypes featureTypes{
+        op.getQuery().getType(),         optionalType(op.getKey()),
+        optionalType(op.getValue()),     optionalType(op.getPastKey()),
+        optionalType(op.getPastValue()), op.getOutput().getType(),
+        op.getPresentKey().getType(),    op.getPresentValue().getType(),
+        optionalType(op.getKScale()),    optionalType(op.getVScale()),
+    };
+    if (failed(verifyGqaFeatureSupport(
+            op.getKQuantType(), op.getVQuantType(), op.getKvCacheBitWidth(),
+            op.getRotaryInterleaved(), op.getKvNumHeads(), featureTypes,
+            [&]() { return op.emitOpError(); })))
+      return failure();
 
     Type ptrType = getPtrType();
     Type i32Type = rewriter.getI32Type();
@@ -117,6 +133,18 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     };
     Value kQuantType = createI64Const(quantTypeToEnum(op.getKQuantType()));
     Value vQuantType = createI64Const(quantTypeToEnum(op.getVQuantType()));
+    auto getElementDataType = [](Value value) -> int64_t {
+      if (!value)
+        return -1;
+      return getHipdnnDataType(
+          cast<MemRefType>(value.getType()).getElementType());
+    };
+    Value kCacheDataType =
+        createI64Const(getElementDataType(op.getPresentKey()));
+    Value vCacheDataType =
+        createI64Const(getElementDataType(op.getPresentValue()));
+    Value kScaleDataType = createI64Const(getElementDataType(op.getKScale()));
+    Value vScaleDataType = createI64Const(getElementDataType(op.getVScale()));
 
     // no_causal: emit as i32 (matches wrap_group_query_attention signature).
     Value noCausal = LLVM::ConstantOp::create(
@@ -211,7 +239,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     }
 
     // Function signature matches wrap_group_query_attention() in gqa.cpp
-    SmallVector<Type, 41> paramTypes = {
+    SmallVector<Type, 45> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
         // Inputs (14 pointers - some may be nullptr)
@@ -256,7 +284,12 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type, // head_dim
         i64Type, // element_size_bytes
         i64Type, // attn_bias_batch
-        i64Type  // attn_bias_num_heads
+        i64Type, // attn_bias_num_heads
+        // Cache/scale runtime datatype codes.
+        i64Type, // k_cache_data_type
+        i64Type, // v_cache_data_type
+        i64Type, // k_scale_data_type
+        i64Type  // v_scale_data_type
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp =
@@ -264,7 +297,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 41> args = {
+    SmallVector<Value, 45> args = {
         statePtr,
         // Per-instance op-state slot (threaded by --assign-op-state-slots)
         getOpStateSlotValue(op, rewriter, loc),
@@ -280,7 +313,9 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         kvCacheBitWidth, noCausal,
         // Shape info (8 values)
         batchSizeVal, seqLenQVal, seqLenKVVal, pastBufSeqVal, headDimVal,
-        elemSizeVal, attnBiasBatchVal, attnBiasNumHeadsVal};
+        elemSizeVal, attnBiasBatchVal, attnBiasNumHeadsVal,
+        // Cache/scale runtime datatype codes.
+        kCacheDataType, vCacheDataType, kScaleDataType, vScaleDataType};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 

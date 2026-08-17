@@ -18,7 +18,7 @@
 // 1. Basic GQA (Llama-3.1-8B decode step)
 // 2. Packed QKV (key/value optional)
 // 3. Local window attention (Mistral)
-// 4. Supported advanced inputs with omitted position_ids/QK and zero softcap
+// 4. Supported paired PER_CHANNEL int8 KV cache
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
@@ -158,32 +158,30 @@ module {
   }
 
   // ===========================================================================
-  // Test 4: Supported advanced inputs; unsupported schema slots stay omitted.
+  // Test 4: Supported paired PER_CHANNEL int8 KV cache.
   // ===========================================================================
-  func.func @test_full_spec(
+  func.func @test_int8_per_channel(
       %query: tensor<1x128x4096xf16>,
       %key: tensor<1x128x1024xf16>,
       %value: tensor<1x128x1024xf16>,
-      %past_key: tensor<1x8x0x128xf16>,
-      %past_value: tensor<1x8x0x128xf16>,
+      %past_key: tensor<1x8x0x128xi8>,
+      %past_value: tensor<1x8x0x128xi8>,
       %seqlens_k: tensor<1xi32>,
       %total_seq_len: tensor<i32>,
       %cos_cache: tensor<2048x64xf16>,
       %sin_cache: tensor<2048x64xf16>,
-      %attention_bias: tensor<1x32x128x128xf16>,
-      %head_sink: tensor<32xf16>,
       %k_scale: tensor<1x8x1x128xf32>,
       %v_scale: tensor<1x8x1x128xf32>
-  ) -> (tensor<1x128x4096xf16>, tensor<1x8x128x128xf16>, tensor<1x8x128x128xf16>) {
+  ) -> (tensor<1x128x4096xf16>, tensor<1x8x128x128xi8>, tensor<1x8x128x128xi8>) {
 
-    // CHECK-LABEL: func.func @test_full_spec
+    // CHECK-LABEL: func.func @test_int8_per_channel
     // CHECK-SAME: (%[[CTX:.*]]: !hip.context,
 
     %none_position = "onnx.NoValue"() {value} : () -> none
     %out:3 = "onnx.Custom"(%query, %key, %value, %past_key, %past_value,
                            %seqlens_k, %total_seq_len,
                            %cos_cache, %sin_cache, %none_position,
-                           %attention_bias, %head_sink, %k_scale, %v_scale)
+                           %none_position, %none_position, %k_scale, %v_scale)
         <{function_name = "GroupQueryAttention"}>
         {domain_name = "com.microsoft",
          num_heads = 32 : si64,
@@ -192,33 +190,28 @@ module {
          do_rotary = 1 : si64,
          rotary_interleaved = 0 : si64,
          softcap = 0.000000e+00 : f32,
-         local_window_size = 4096 : si64,
-         smooth_softmax = 1 : si64,
          qk_output = 0 : si64,
          k_quant_type = "PER_CHANNEL",
          v_quant_type = "PER_CHANNEL",
          kv_cache_bit_width = 8 : si64}
         : (tensor<1x128x4096xf16>, tensor<1x128x1024xf16>, tensor<1x128x1024xf16>,
-           tensor<1x8x0x128xf16>, tensor<1x8x0x128xf16>,
+           tensor<1x8x0x128xi8>, tensor<1x8x0x128xi8>,
            tensor<1xi32>, tensor<i32>,
-           tensor<2048x64xf16>, tensor<2048x64xf16>, none,
-           tensor<1x32x128x128xf16>, tensor<32xf16>,
+           tensor<2048x64xf16>, tensor<2048x64xf16>, none, none, none,
            tensor<1x8x1x128xf32>, tensor<1x8x1x128xf32>)
-        -> (tensor<1x128x4096xf16>, tensor<1x8x128x128xf16>, tensor<1x8x128x128xf16>)
+        -> (tensor<1x128x4096xf16>, tensor<1x8x128x128xi8>, tensor<1x8x128x128xi8>)
 
-    // Verify all attributes are preserved (in alphabetical order)
+    // Verify the supported quantization contract is preserved.
     // CHECK: hip.gqa(%[[CTX]])
     // CHECK-SAME: ins(
     // CHECK-SAME: do_rotary = 1
     // CHECK-SAME: k_quant_type = "PER_CHANNEL"
     // CHECK-SAME: kv_num_heads = 8
-    // CHECK-SAME: local_window_size = 4096
     // CHECK-SAME: num_heads = 32
     // CHECK-SAME: scale = {{0.088388[0-9]*|8.838834e-02}}
-    // CHECK-SAME: smooth_softmax = 1
     // CHECK-SAME: v_quant_type = "PER_CHANNEL"
 
-    return %out#0, %out#1, %out#2 : tensor<1x128x4096xf16>, tensor<1x8x128x128xf16>, tensor<1x8x128x128xf16>
+    return %out#0, %out#1, %out#2 : tensor<1x128x4096xf16>, tensor<1x8x128x128xi8>, tensor<1x8x128x128xi8>
   }
 
   // Dynamic present-cache sequence capacity is the maximum of the matching

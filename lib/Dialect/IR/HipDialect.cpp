@@ -4,6 +4,7 @@
  */
 
 #include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/IR/HipGqaSupport.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -2377,42 +2378,21 @@ LogicalResult GqaOp::verify() {
   if (getNumHeads() % getKvNumHeads() != 0)
     return emitOpError("num_heads must be divisible by kv_num_heads");
 
-  // Verify quantization parameter consistency
-  auto kQuantType = getKQuantType().str();
-  auto vQuantType = getVQuantType().str();
-
-  // If k_quant_type != "NONE", k_scale must be provided
-  if (kQuantType != "NONE" && !getKScale()) {
-    return emitOpError("k_quant_type is '")
-           << kQuantType << "' but k_scale is not provided";
-  }
-
-  // If v_quant_type != "NONE", v_scale must be provided
-  if (vQuantType != "NONE" && !getVScale()) {
-    return emitOpError("v_quant_type is '")
-           << vQuantType << "' but v_scale is not provided";
-  }
-
-  // Verify quant_type values
-  if (kQuantType != "NONE" && kQuantType != "PER_TENSOR" &&
-      kQuantType != "PER_CHANNEL") {
-    return emitOpError("k_quant_type must be 'NONE', 'PER_TENSOR', or "
-                       "'PER_CHANNEL', got '")
-           << kQuantType << "'";
-  }
-
-  if (vQuantType != "NONE" && vQuantType != "PER_TENSOR" &&
-      vQuantType != "PER_CHANNEL") {
-    return emitOpError("v_quant_type must be 'NONE', 'PER_TENSOR', or "
-                       "'PER_CHANNEL', got '")
-           << vQuantType << "'";
-  }
-
-  // Verify bit width
-  int64_t bitWidth = getKvCacheBitWidth();
-  if (bitWidth != 4 && bitWidth != 8) {
-    return emitOpError("kv_cache_bit_width must be 4 or 8, got ") << bitWidth;
-  }
+  auto optionalType = [](Value value) {
+    return value ? value.getType() : Type{};
+  };
+  GqaFeatureTypes featureTypes{
+      getQuery().getType(),         optionalType(getKey()),
+      optionalType(getValue()),     optionalType(getPastKey()),
+      optionalType(getPastValue()), getOutput().getType(),
+      getPresentKey().getType(),    getPresentValue().getType(),
+      optionalType(getKScale()),    optionalType(getVScale()),
+  };
+  if (failed(verifyGqaFeatureSupport(
+          getKQuantType(), getVQuantType(), getKvCacheBitWidth(),
+          getRotaryInterleaved(), getKvNumHeads(), featureTypes,
+          [&]() { return emitOpError(); })))
+    return failure();
 
   // Verify paired optional inputs: cos_cache/sin_cache must both be present or
   // both absent
