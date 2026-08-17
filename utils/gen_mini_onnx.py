@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate MiniONNX dialect from ONNX schemas - FIXED version.
+Generate MiniONNX dialect from ONNX schemas - FIXED for MLIR compatibility.
 """
 
 import argparse
@@ -41,9 +41,9 @@ def parse_type_str(allowed_type):
     """Convert ONNX type string to MLIR TableGen type."""
     # Skip unsupported types
     if "string" in allowed_type.lower():
-        return None  # Skip string types
+        return None
     if "complex" in allowed_type.lower():
-        return None  # Skip complex types
+        return None
 
     onnx_to_mlir = {
         "(": "<[",
@@ -71,7 +71,6 @@ def parse_type_str(allowed_type):
         "float8e5m2fnuz": "F8E5M2FNUZ",
     }
 
-    # Apply substitutions in decreasing order of key length
     mapping = sorted(onnx_to_mlir.items(), key=lambda x: len(x[0]), reverse=True)
     for key, value in mapping:
         allowed_type = allowed_type.replace(key, value)
@@ -79,7 +78,6 @@ def parse_type_str(allowed_type):
 
 
 def parse_type_constraints(schema):
-    """Parse type constraints from ONNX schema."""
     type_str_dict = {}
     for constraint in schema.type_constraints:
         mlir_types = []
@@ -87,18 +85,16 @@ def parse_type_constraints(schema):
             mlir_type = parse_type_str(allowed_type)
             if mlir_type and mlir_type not in mlir_types:
                 mlir_types.append(mlir_type)
-        if mlir_types:  # Only add if we have valid types
+        if mlir_types:
             type_str_dict[constraint.type_param_str] = mlir_types
     return type_str_dict
 
 
 def get_onnx_mlir_types(schema, type_str_dict, io_value):
-    """Get MLIR types for an input or output."""
     if io_value.type_str:
         if io_value.type_str in type_str_dict:
             return type_str_dict[io_value.type_str]
         else:
-            # Direct type specification
             mlir_type = parse_type_str(io_value.type_str)
             if mlir_type:
                 return [mlir_type]
@@ -106,7 +102,6 @@ def get_onnx_mlir_types(schema, type_str_dict, io_value):
 
 
 def get_operands_or_results(schema, type_str_dict, is_input):
-    """Generate operands or results dictionary."""
     value_list = schema.inputs if is_input else schema.outputs
     if not value_list:
         return OrderedDict()
@@ -123,19 +118,15 @@ def get_operands_or_results(schema, type_str_dict, is_input):
         if not types:
             types = ["AnyTensor"]
 
-        # Handle optional
         if OpSchema.FormalParameterOption.Optional == value.option:
             types.append("NoneType")
 
-        # Handle variadic
         if OpSchema.FormalParameterOption.Variadic == value.option:
             types = [f"Variadic<{any_type_of(types)}>"]
 
-        # Avoid name conflicts between inputs and outputs
         if is_input:
             value_name = value.name
         else:
-            # Check if output name conflicts with input
             value_name = value.name
             for inp in schema.inputs:
                 if inp.name == value.name:
@@ -148,13 +139,11 @@ def get_operands_or_results(schema, type_str_dict, is_input):
 
 
 def get_attrs(schema):
-    """Generate attributes dictionary."""
     if not schema.attributes:
         return OrderedDict()
 
     name_to_type = OrderedDict()
     for _, attr in sorted(schema.attributes.items()):
-        # Skip graph attributes (subgraphs not supported in MiniONNX)
         if attr.type == OpSchema.AttrType.GRAPH:
             continue
 
@@ -162,24 +151,19 @@ def get_attrs(schema):
 
         if attr.required:
             name_to_type[attr.name] = mlir_type
-        elif attr.default_value.name:
-            # Has default value - simplify to just optional for now
-            name_to_type[attr.name] = f"OptionalAttr<{mlir_type}>"
         else:
-            # Optional
             name_to_type[attr.name] = f"OptionalAttr<{mlir_type}>"
 
     return name_to_type
 
 
 def gen_op_def(schema):
-    """Generate TableGen operation definition."""
     indent = inc_indent()
     op_name = schema.name
 
     s = f'def MiniONNX_{op_name}Op : MiniONNX_Op<"{op_name}",\n'
 
-    # Traits
+    # Minimal traits - avoid auto-generated interfaces
     traits = ["Pure"]
     s += inc_indent(indent) + f"[{', '.join(traits)}]> {{\n"
 
@@ -188,10 +172,10 @@ def gen_op_def(schema):
     # Summary
     s += indent + f'let summary = "ONNX {schema.name} operation";\n'
 
-    # Description
+    # Description (truncated)
     s += indent + "let description = [{\n"
     if schema.doc:
-        for line in schema.doc.lstrip().splitlines()[:10]:  # Limit description length
+        for line in schema.doc.lstrip().splitlines()[:5]:  # Limit to 5 lines
             escaped = line.replace('"', '\\"').replace("}]", "\\}\\]")
             s += indent + f"{escaped}\n"
     s += indent + "}];\n"
@@ -199,7 +183,7 @@ def gen_op_def(schema):
     # Parse type constraints
     type_str_dict = parse_type_constraints(schema)
 
-    # Arguments (inputs + attributes)
+    # Arguments
     ins = get_operands_or_results(schema, type_str_dict, is_input=True)
     ins.update(get_attrs(schema))
 
@@ -211,7 +195,7 @@ def gen_op_def(schema):
     else:
         s += indent + "let arguments = (ins);\n"
 
-    # Results (outputs)
+    # Results
     outs = get_operands_or_results(schema, type_str_dict, is_input=False)
     if outs:
         outs_strs = [f"{ty}:${name}" for name, ty in outs.items()]
@@ -221,14 +205,20 @@ def gen_op_def(schema):
     else:
         s += indent + "let results = (outs);\n"
 
+    # CRITICAL: Skip default builders to avoid BytecodeOpInterface errors
+    s += indent + "let skipDefaultBuilders = 1;\n"
+    
+    # Add minimal builder
+    s += indent + "let builders = [\n"
+    s += inc_indent(indent) + 'OpBuilder<(ins "ValueRange":$operands, "ArrayRef<NamedAttribute>":$attributes)>\n'
+    s += indent + "];\n"
+
     s += "}\n\n"
     return s
 
 
 def get_schema(op_name, domain=""):
-    """Get ONNX schema for an operation."""
     schemas = defs.get_all_schemas_with_history()
-    # Find latest version of the operation
     for schema in reversed(schemas):
         if schema.name == op_name and schema.domain == domain:
             return schema
@@ -242,16 +232,15 @@ def main():
     parser.add_argument(
         "--ops",
         required=True,
-        help="Comma-separated list of ONNX operations (e.g., Cast,MatMul,Add)"
+        help="Comma-separated list of ONNX operations"
     )
     parser.add_argument(
         "--output",
         default="MiniONNXOps.td.inc",
-        help="Output file (default: MiniONNXOps.td.inc)"
+        help="Output file"
     )
 
     args = parser.parse_args()
-
     op_names = [name.strip() for name in args.ops.split(",")]
 
     header = """//********************************************************
@@ -269,7 +258,7 @@ def main():
         for op_name in op_names:
             schema = get_schema(op_name)
             if not schema:
-                print(f"WARNING: Operation {op_name} not found in ONNX schemas", file=sys.stderr)
+                print(f"WARNING: Operation {op_name} not found", file=sys.stderr)
                 continue
 
             print(f"Generating {op_name}...")

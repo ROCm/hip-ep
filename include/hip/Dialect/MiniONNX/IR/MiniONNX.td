@@ -29,10 +29,6 @@ def MiniONNX_Dialect : Dialect {
   let cppNamespace = "::mlir::onnx";
   let useDefaultTypePrinterParser = 1;
   let dependentDialects = ["func::FuncDialect"];
-  
-  let extraClassDeclaration = [{
-    void initialize();
-  }];
 }
 
 //===----------------------------------------------------------------------===//

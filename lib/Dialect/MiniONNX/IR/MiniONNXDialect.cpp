@@ -8,6 +8,7 @@
 
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 
 using namespace mlir;
 using namespace mlir::onnx;
@@ -25,3 +26,6 @@ void MiniONNXDialect::initialize() {
 #include "hip/Dialect/MiniONNX/IR/MiniONNXOps.cpp.inc"
   >();
 }
+
+#define GET_OP_CLASSES
+#include "hip/Dialect/MiniONNX/IR/MiniONNXOps.cpp.inc"
