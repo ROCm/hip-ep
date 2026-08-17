@@ -58,13 +58,14 @@ axisZeroStaticOffset(PatternRewriter &rewriter, Value indices) {
 }
 
 /// Swin-style axis=0 Gather with a single scalar (or len-1) index lowers to
-/// tensor.extract_slice when the index is known at compile time, not hip.gather.
+/// tensor.extract_slice when the index is known at compile time, not
+/// hip.gather.
 struct GatherAxis0ExtractSlice : public RewritePattern {
   GatherAxis0ExtractSlice(MLIRContext *ctx)
       : RewritePattern("onnx.Gather", /*benefit=*/2, ctx) {}
 
-  LogicalResult
-  matchAndRewrite(Operation *op, PatternRewriter &rewriter) const override {
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override {
     int64_t axis = op->getAttrOfType<IntegerAttr>("axis").getSInt();
     auto dataTy = cast<RankedTensorType>(op->getOperand(0).getType());
     auto indicesTy = cast<RankedTensorType>(op->getOperand(1).getType());
@@ -111,7 +112,7 @@ struct GatherAxis0ExtractSlice : public RewritePattern {
     }
 
     Value slice = tensor::ExtractSliceOp::create(rewriter, loc, outputTy, data,
-                                                   offsets, sizes, strides);
+                                                 offsets, sizes, strides);
 
     ++NumGatherAxis0ExtractSlice;
     rewriter.replaceOp(op, slice);

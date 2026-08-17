@@ -81,10 +81,10 @@ static void attachCompileTimeScalarAttr(memref::GlobalOp global,
   if (!intTy || !intTy.isSignlessInteger() ||
       (intTy.getWidth() != 32 && intTy.getWidth() != 64))
     return;
-  int64_t value = intTy.getWidth() == 64
-                      ? *reinterpret_cast<const int64_t *>(hostBytes)
-                      : static_cast<int64_t>(
-                            *reinterpret_cast<const int32_t *>(hostBytes));
+  int64_t value =
+      intTy.getWidth() == 64
+          ? *reinterpret_cast<const int64_t *>(hostBytes)
+          : static_cast<int64_t>(*reinterpret_cast<const int32_t *>(hostBytes));
   global->setAttr(
       "hip.compile_time_scalar",
       IntegerAttr::get(IntegerType::get(global.getContext(), 64), value));
