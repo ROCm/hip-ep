@@ -11,8 +11,10 @@ module {
   memref.global "private" @hip_ext_constant_k_idx : memref<i64> {hip.external_data = {index = 1 : i64, offset = 8 : i64, size = 8 : i64}, hip.compile_time_scalar = 1 : i64}
 
   func.func @main_graph(%arg0: !hip.context, %data: tensor<3x4x2xf16>) -> (tensor<4x2xf16>, tensor<4x2xf16>) {
-    %q_idx = bufferization.to_tensor @hip_ext_constant_q_idx restrict : memref<i64> to tensor<i64>
-    %k_idx = bufferization.to_tensor @hip_ext_constant_k_idx restrict : memref<i64> to tensor<i64>
+    %q_buf = memref.get_global @hip_ext_constant_q_idx : memref<i64>
+    %k_buf = memref.get_global @hip_ext_constant_k_idx : memref<i64>
+    %q_idx = bufferization.to_tensor %q_buf restrict : memref<i64> to tensor<i64>
+    %k_idx = bufferization.to_tensor %k_buf restrict : memref<i64> to tensor<i64>
 
     %q = "onnx.Gather"(%data, %q_idx) {axis = 0 : si64} : (tensor<3x4x2xf16>, tensor<i64>) -> tensor<4x2xf16>
     %k = "onnx.Gather"(%data, %k_idx) {axis = 0 : si64} : (tensor<3x4x2xf16>, tensor<i64>) -> tensor<4x2xf16>
