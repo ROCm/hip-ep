@@ -37,6 +37,7 @@ add_library(OnnxToHip STATIC
   CompressConversion.cpp
   OneHotConversion.cpp
   GatherShapeFold.cpp
+  TransposeMatMulFold.cpp
   ReshapeShapeFold.cpp
   PadShapeFold.cpp
   SliceShapeFold.cpp
