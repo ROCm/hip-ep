@@ -1,0 +1,60 @@
+//===- QDQMatMulFusion.pdll -----------------------------------------------===//
+//
+// PDLL pattern to fuse QuantizeLinear -> MatMul -> DequantizeLinear
+// into hip.qmatmul
+//
+// This demonstrates MLIR's Pattern Description Language for declarative
+// pattern matching and rewriting.
+//
+// References:
+// - https://mlir.llvm.org/docs/PDLL/
+// - https://www.jeremykun.com/2024/08/04/mlir-pdll/
+//
+//===----------------------------------------------------------------------===//
+
+// Pattern: Fuse QDQ MatMul sequence into single quantized operation
+Pattern QDQMatMulFusion {
+  // Match section: Define the pattern to match
+  // We're looking for: QuantizeLinear -> MatMul -> DequantizeLinear
+
+  // Match the root operation (DequantizeLinear)
+  let dequant = op<onnx.DequantizeLinear>(matmul_out, out_scale, out_zp);
+
+  // Match the MatMul feeding into DequantizeLinear
+  let matmul = op<onnx.MatMul>(quant_lhs, rhs);
+
+  // Match the QuantizeLinear feeding into MatMul
+  let quant = op<onnx.QuantizeLinear>(lhs, lhs_scale, lhs_zp);
+
+  // Establish the data flow connections
+  quant_lhs = quant.0;     // quantize output feeds matmul input
+  matmul_out = matmul.0;   // matmul output feeds dequantize input
+
+  // Rewrite section: Replace the pattern with fused operation
+  rewrite dequant with {
+    // Create empty output tensor (DPS style)
+    let output_type = type(dequant.0);
+    let empty = op<tensor.empty> -> (output_type);
+
+    // Extract scale attributes
+    // Note: In real implementation, these would be extracted from the
+    // onnx.Constant operations that provide the scale values
+    let lhs_scale_attr = attr<"0.1 : f32">;
+    let rhs_scale_attr = attr<"1.0 : f32">;
+    let out_scale_attr = attr<"0.2 : f32">;
+
+    // Get HIP context (first function argument by convention)
+    // In PDLL, we'd need a helper to get this
+    let ctx_type = type<hip.context>;
+
+    // Create the fused qmatmul operation
+    let fused = op<hip.qmatmul> {
+      lhs_scale = lhs_scale_attr,
+      rhs_scale = rhs_scale_attr,
+      output_scale = out_scale_attr
+    } (ctx, lhs, rhs, empty.0) -> (output_type);
+
+    // Replace the root (DequantizeLinear) with the fused result
+    replace dequant with fused.0;
+  };
+}
