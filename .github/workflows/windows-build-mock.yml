@@ -38,6 +38,7 @@ jobs:
       # ort-install cache key and drives the same patch set.
       ONNXRUNTIME_PR_PATCHES: ""
       SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: ${{ github.ref_name == 'main' && 'READ_WRITE' || 'READ_ONLY' }}
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
     steps:

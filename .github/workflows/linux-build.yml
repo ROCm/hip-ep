@@ -22,6 +22,7 @@ concurrency:
 env:
   # Route sccache through the GitHub Actions cache.
   SCCACHE_GHA_ENABLED: "true"
+  SCCACHE_GHA_RW_MODE: ${{ github.ref_name == 'main' && 'READ_WRITE' || 'READ_ONLY' }}
   # Pins (kept in lockstep with cmake/deps.txt).
   # LLVM/MLIR/LLD are built from source at this upstream release tag; bumping it
   # only invalidates the llvm-install cache.
