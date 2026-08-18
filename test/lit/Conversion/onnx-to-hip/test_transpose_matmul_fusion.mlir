@@ -73,6 +73,8 @@ module {
   }
 
   // CHECK-LABEL: func.func @no_fold_full_reverse
-  // CHECK: onnx.Transpose
-  // CHECK: onnx.MatMul
+  // CHECK: hip.transpose
+  // CHECK: hip.matmul
+  // CHECK-NOT: transB = 1
+  // CHECK-NOT: transA = 1
 }
