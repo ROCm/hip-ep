@@ -18,9 +18,6 @@
 // names. Data keeps the #hipsr.mem<device> the pass gives a tensor naming no
 // space.
 //
-// A graph that reads these extents has to name host on the ONNX result as well,
-// because the consumer's pattern maps that type through the pass converter.
-//
 // Before:
 //   %s = "onnx.Shape"(%x) : (tensor<?x128xf16, #hipsr.mem<device>>)
 //       -> tensor<2xi64>
@@ -149,7 +146,7 @@ struct ShapeToHipsr : public ConversionPattern {
   // Takes the pass converter to match the other patterns; converts no type
   // itself.
   ShapeToHipsr(const TypeConverter &typeConverter, MLIRContext *ctx)
-      : ConversionPattern(typeConverter, "onnx.Shape", /*benefit=*/1, ctx) {}
+      : ConversionPattern("onnx.Shape", /*benefit=*/1, ctx) {}
 
   LogicalResult
   matchAndRewrite(Operation *op, ArrayRef<Value> operands,
