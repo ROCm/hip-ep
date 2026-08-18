@@ -21,7 +21,7 @@ class MessageLite;
 } // namespace google
 
 namespace onnxruntime {
-class Graph;
+struct Graph;
 } // namespace onnxruntime
 
 namespace morphizen {
