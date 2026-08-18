@@ -12,8 +12,8 @@
 // An unused placeholder is erased. The return directly after the signature is
 // what proves it.
 // CHECK-LABEL: func.func @dead_placeholder(
-// CHECK-SAME:    %[[INPUT:.*]]: tensor<2x3xf16>) -> tensor<2x3xf16> {
-// CHECK-NEXT:    return %[[INPUT]] : tensor<2x3xf16>
+// CHECK-SAME:    %[[INPUT:.*]]: tensor<2x3xf16, #hipsr.mem<device>>) -> tensor<2x3xf16, #hipsr.mem<device>> {
+// CHECK-NEXT:    return %[[INPUT]] : tensor<2x3xf16, #hipsr.mem<device>>
 func.func @dead_placeholder(%input: tensor<2x3xf16>) -> tensor<2x3xf16> {
   %none = "onnx.NoValue"() {value} : () -> none
   return %input : tensor<2x3xf16>

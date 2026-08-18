@@ -3,10 +3,10 @@
 // Licensed under the MIT License.
 //
 
-def Hipsr_AddOp : Hipsr_DpsOp<"add"> {
-  let summary = "Elementwise add, destination-passing style";
+def Hipsr_MulOp : Hipsr_DpsOp<"mul"> {
+  let summary = "Elementwise mul, destination-passing style";
   let description = [{
-    Elementwise addition with ONNX/NumPy broadcasting: `init = lhs + rhs`.
+    Elementwise multiplication with ONNX/NumPy broadcasting: `init = lhs * rhs`.
   }];
 
   let arguments = (ins

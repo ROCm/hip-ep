@@ -15,6 +15,7 @@
 // RUN: hip-mlir-opt --hipsr-pipeline %s | FileCheck %s
 
 // CHECK-LABEL: func.func @main_graph(
+// CHECK-SAME:      %[[CTX:.*]]: !hipsr.context,
 // CHECK-SAME:      %[[IDS:.*]]: tensor<?x?xi64> {onnx.name = "input_ids"},
 // CHECK-SAME:      %[[FEATURES:.*]]: tensor<?x4096xf16> {onnx.name = "image_features"})
 // CHECK-SAME:      -> (tensor<?x?x4096xf16> {onnx.name = "inputs_embeds"})

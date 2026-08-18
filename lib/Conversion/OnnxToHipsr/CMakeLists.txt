@@ -9,6 +9,7 @@ add_library(OnnxToHipsr STATIC
   CastConversion.cpp
   MatMulConversion.cpp
   ExpandConversion.cpp
+  ShapeConversion.cpp
   ReturnConversion.cpp
 )
 
@@ -22,6 +23,7 @@ target_link_libraries(OnnxToHipsr PUBLIC
   MLIRPass
   MLIRTransforms
   MLIRFuncDialect
+  MLIRFuncTransforms
   MLIRTensorDialect
   MLIRShapeDialect
   MLIRArithDialect

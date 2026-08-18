@@ -31,6 +31,15 @@ bool memRefInSpace(Type type, MemorySpace space) {
   return spaceAttr && spaceAttr.getValue() == space;
 }
 
+bool tensorInSpace(Type type, MemorySpace space) {
+  auto tensor = dyn_cast<RankedTensorType>(type);
+  if (!tensor) {
+    return false;
+  }
+  auto spaceAttr = dyn_cast_or_null<MemorySpaceAttr>(tensor.getEncoding());
+  return spaceAttr && spaceAttr.getValue() == space;
+}
+
 } // namespace
 
 namespace mlir {
@@ -48,6 +57,13 @@ bool isManagedMemRef(Type type) {
 }
 
 bool isAnySpaceMemRef(Type type) { return hipsrSpace(type) != nullptr; }
+
+bool isHostRankedTensor(Type type) {
+  return tensorInSpace(type, MemorySpace::Host);
+}
+bool isDeviceRankedTensor(Type type) {
+  return tensorInSpace(type, MemorySpace::Device);
+}
 
 } // namespace hipsr
 } // namespace mlir

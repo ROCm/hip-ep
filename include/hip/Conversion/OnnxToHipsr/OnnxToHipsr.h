@@ -8,6 +8,7 @@
 
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Transforms/DialectConversion.h"
 
 #include <memory>
 
@@ -22,16 +23,28 @@ namespace hipsr {
 #define GEN_PASS_DECL_CONVERTONNXTOHIPSRPASS
 #include "hip/Conversion/Passes.h.inc"
 
-void populateOnnxToHipsrConstantPatterns(::mlir::RewritePatternSet &patterns);
+// These patterns keep the converter out of ConversionPattern: a carried
+// converter forces every operand through convertType, which overwrites the
+// memory space its producer chose.
+void populateOnnxToHipsrConstantPatterns(
+    const ::mlir::TypeConverter &typeConverter,
+    ::mlir::RewritePatternSet &patterns);
 
-void populateCastConversionPatterns(::mlir::RewritePatternSet &patterns,
+void populateCastConversionPatterns(const ::mlir::TypeConverter &typeConverter,
+                                    ::mlir::RewritePatternSet &patterns,
                                     ::mlir::MLIRContext *ctx);
 
-void populateMatMulConversionPatterns(::mlir::RewritePatternSet &patterns,
-                                      ::mlir::MLIRContext *ctx);
+void populateMatMulConversionPatterns(
+    const ::mlir::TypeConverter &typeConverter,
+    ::mlir::RewritePatternSet &patterns, ::mlir::MLIRContext *ctx);
 
-void populateExpandConversionPatterns(::mlir::RewritePatternSet &patterns,
-                                      ::mlir::MLIRContext *ctx);
+void populateExpandConversionPatterns(
+    const ::mlir::TypeConverter &typeConverter,
+    ::mlir::RewritePatternSet &patterns, ::mlir::MLIRContext *ctx);
+
+void populateShapeConversionPatterns(const ::mlir::TypeConverter &typeConverter,
+                                     ::mlir::RewritePatternSet &patterns,
+                                     ::mlir::MLIRContext *ctx);
 
 void populateReturnConversionPatterns(::mlir::RewritePatternSet &patterns,
                                       ::mlir::MLIRContext *ctx);

@@ -10,6 +10,7 @@
 
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Transforms/DialectConversion.h"
 
 #include <algorithm>
 
@@ -17,20 +18,22 @@ namespace mlir {
 namespace hipsr {
 namespace {
 
-struct ExpandToHipsr : public ::mlir::RewritePattern {
-  ExpandToHipsr(::mlir::MLIRContext *ctx)
-      : RewritePattern("onnx.Expand", /*benefit=*/1, ctx) {}
+struct ExpandToHipsr : public ::mlir::ConversionPattern {
+  ExpandToHipsr(const ::mlir::TypeConverter &typeConverter,
+                ::mlir::MLIRContext *ctx)
+      : ConversionPattern("onnx.Expand", /*benefit=*/1, ctx) {}
 
   ::mlir::LogicalResult
   matchAndRewrite(::mlir::Operation *op,
-                  ::mlir::PatternRewriter &rewriter) const override {
+                  ::mlir::ArrayRef<::mlir::Value> operands,
+                  ::mlir::ConversionPatternRewriter &rewriter) const override {
     if (op->getNumOperands() != 2 || op->getNumResults() != 1) {
       return rewriter.notifyMatchFailure(
           op, "expected two operands and a single result");
     }
 
-    ::mlir::Value input = op->getOperand(0);
-    ::mlir::Value shape = op->getOperand(1);
+    ::mlir::Value input = operands[0];
+    ::mlir::Value shape = operands[1];
     auto inputType =
         ::mlir::dyn_cast<::mlir::RankedTensorType>(input.getType());
     if (!inputType) {
@@ -54,6 +57,7 @@ struct ExpandToHipsr : public ::mlir::RewritePattern {
     if (!resultType) {
       return rewriter.notifyMatchFailure(op, "expected ranked tensor result");
     }
+    resultType = tensorTypeInSpace(resultType, MemorySpace::Device);
     if (inputType.getElementType() != resultType.getElementType()) {
       return rewriter.notifyMatchFailure(
           op, "expected matching input and result element types");
@@ -86,9 +90,10 @@ struct ExpandToHipsr : public ::mlir::RewritePattern {
 
 } // namespace
 
-void populateExpandConversionPatterns(::mlir::RewritePatternSet &patterns,
-                                      ::mlir::MLIRContext *ctx) {
-  patterns.add<ExpandToHipsr>(ctx);
+void populateExpandConversionPatterns(
+    const ::mlir::TypeConverter &typeConverter,
+    ::mlir::RewritePatternSet &patterns, ::mlir::MLIRContext *ctx) {
+  patterns.add<ExpandToHipsr>(typeConverter, ctx);
 }
 
 } // namespace hipsr

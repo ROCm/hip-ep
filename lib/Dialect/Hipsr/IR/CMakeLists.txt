@@ -17,6 +17,7 @@ add_library(HipsrDialectIR STATIC
   HipsrMatMulOp.cpp
   HipsrExpandOp.cpp
   HipsrAddOp.cpp
+  HipsrMulOp.cpp
   HipsrGetPoolOp.cpp
   HipsrPreserveShapeOp.cpp
   HipsrLLVMLoweringUtils.cpp
