@@ -98,7 +98,7 @@ findAliasedPoolResults(BufferViewFlowAnalysis &aliasAnalysis, Value value) {
       continue;
 
     unsigned resultIndex = result.getResultNumber();
-    bool alreadyFound = llvm::any_of(poolResults, [&](const PoolResult &found) {
+    bool alreadyFound = llvm::any_of(poolResults, [&](PoolResult &found) {
       return found.poolDomain.getOperation() == poolDomain.getOperation() &&
              found.resultIndex == resultIndex;
     });
