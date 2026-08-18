@@ -31,6 +31,44 @@ func.func @dynamic_output(
 // onnx.Reshape ──→ func.return（%graph_output）
 //     └──────────→ onnx.Cast
 
+// CHECK-LABEL: func.func @test_return_shape
+// CHECK-NEXT: %[[OUT:.*]] = hipsr.pool_domain(%[[CTX:.*]], %[[INPUT:.*]], %[[WEIGHT:.*]], %[[BIAS:.*]] : !hipsr.context, memref<?x512xf16, #hipsr.mem<device>>, memref<512x256xf16, #hipsr.mem<device>>, memref<?x256xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT: ^bb0(%[[DCTX:.*]]: !hipsr.context, %[[IN:.*]]: memref<?x512xf16, #hipsr.mem<device>>, %[[W:.*]]: memref<512x256xf16, #hipsr.mem<device>>, %[[B:.*]]: memref<?x256xf16, #hipsr.mem<device>>):
+// CHECK-NEXT: %[[C256:.*]] = arith.constant 256 : index
+// CHECK-NEXT: %[[C0:.*]] = arith.constant 0 : index
+// CHECK-NEXT: %[[M:.*]] = memref.dim %[[IN]], %[[C0]] : memref<?x512xf16, #hipsr.mem<device>>
+// CHECK-NEXT: %[[FLAT_SIZE:.*]] = arith.muli %[[M]], %[[C256]] : index
+// CHECK-NEXT: %[[SHAPE1:.*]] = scf.execute_region -> !shape.shape {
+// CHECK-NEXT: %[[S1:.*]] = shape.from_extents %[[M]], %[[C256]] : index, index
+// CHECK-NEXT: scf.yield %[[S1]] : !shape.shape
+// CHECK-NEXT: }
+// CHECK-NEXT: %[[SHAPE2:.*]] = scf.execute_region -> !shape.shape {
+// CHECK-NEXT: %[[S2:.*]] = shape.from_extents %[[M]], %[[C256]] : index, index
+// CHECK-NEXT: scf.yield %[[S2]] : !shape.shape
+// CHECK-NEXT: }
+// CHECK-NEXT: %[[SHAPE3:.*]] = scf.execute_region -> !shape.shape {
+// CHECK-NEXT: %[[S3:.*]] = shape.from_extents %[[FLAT_SIZE]] : index
+// CHECK-NEXT: scf.yield %[[S3]] : !shape.shape
+// CHECK-NEXT: }
+// CHECK-NEXT: %[[INIT1:.*]] = memref.alloc(%[[M]]) : memref<?x256xf16, #hipsr.mem<device>>
+// CHECK-NEXT: hipsr.matmul(%[[DCTX]]) ins(%[[IN]], %[[W]] : memref<?x512xf16, #hipsr.mem<device>>, memref<512x256xf16, #hipsr.mem<device>>) outs(%[[INIT1]] : memref<?x256xf16, #hipsr.mem<device>>)
+// CHECK-NEXT: %[[INIT2:.*]] = memref.alloc(%[[M]]) : memref<?x256xf16, #hipsr.mem<device>>
+// CHECK-NEXT: hipsr.add(%[[DCTX]]) ins(%[[INIT1]], %[[B]] : memref<?x256xf16, #hipsr.mem<device>>, memref<?x256xf16, #hipsr.mem<device>>) outs(%[[INIT2]] : memref<?x256xf16, #hipsr.mem<device>>)
+// CHECK-NEXT: %[[FLAT:.*]] = hipsr.compute(%[[DCTX]]) ins(%[[INIT2]] : memref<?x256xf16, #hipsr.mem<device>>) outs(%[[INIT2]] : memref<?x256xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT: ^bb0(%{{.*}}: !hipsr.context, %[[BODY_IN:.*]]: memref<?x256xf16, #hipsr.mem<device>>, %{{.*}}: memref<?x256xf16, #hipsr.mem<device>>):
+// CHECK-NEXT: %[[COLLAPSED:.*]] = memref.collapse_shape %[[BODY_IN]] {{\[\[}}0, 1]] : memref<?x256xf16, #hipsr.mem<device>> into memref<?xf16, #hipsr.mem<device>>
+// CHECK-NEXT: hipsr.compute_yield %[[COLLAPSED]] : memref<?xf16, #hipsr.mem<device>>
+// CHECK-NEXT: } : memref<?xf16, #hipsr.mem<device>>
+// CHECK-NEXT: %[[CAST_INIT:.*]] = memref.alloc(%[[FLAT_SIZE]]) : memref<?xf32, #hipsr.mem<device>>
+// CHECK-NEXT: hipsr.cast(%[[DCTX]]) ins(%[[FLAT]] : memref<?xf16, #hipsr.mem<device>>) outs(%[[CAST_INIT]] : memref<?xf32, #hipsr.mem<device>>)
+// CHECK-NEXT: hipsr.preserve_shape %[[SHAPE1]], %[[INIT1]] : memref<?x256xf16, #hipsr.mem<device>>
+// CHECK-NEXT: hipsr.preserve_shape %[[SHAPE2]], %[[INIT2]] : memref<?x256xf16, #hipsr.mem<device>>
+// CHECK-NEXT: hipsr.preserve_shape %[[SHAPE3]], %[[FLAT]] : memref<?xf16, #hipsr.mem<device>>
+// CHECK-NEXT: hipsr.preserve_shape %[[SHAPE3]], %[[CAST_INIT]] : memref<?xf32, #hipsr.mem<device>>
+// CHECK-NEXT: hipsr.pool_domain_yield %[[FLAT]] : memref<?xf16, #hipsr.mem<device>>
+// CHECK-NEXT: } -> memref<?xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
+// CHECK-NEXT: return %[[OUT]] : memref<?xf16, #hipsr.mem<device>>
+// CHECK-NEXT: }
 func.func @test_return_shape(
     %ctx: !hipsr.context,
     %input: memref<?x512xf16, #hipsr.mem<device>>,
