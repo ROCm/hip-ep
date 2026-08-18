@@ -64,8 +64,9 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
     Value blockSize = createI64Const(op.getBlockSize());
     Value elemSizeVal = createI64Const(elemSize);
     Value zpElemSizeVal = createI64Const(op.getZpElemSize());
+    Value loraWeightPackVal = createI64Const(op.getLoraWeightPack());
 
-    SmallVector<Type, 17> paramTypes = {
+    SmallVector<Type, 18> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
         ptrType, // A
@@ -82,7 +83,8 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
         i64Type, // bits
         i64Type, // block_size
         i64Type, // elem_size
-        i64Type  // zp_elem_size
+        i64Type, // zp_elem_size
+        i64Type  // lora_weight_pack
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -91,7 +93,7 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
       return failure();
     }
 
-    SmallVector<Value, 17> args = {statePtr,
+    SmallVector<Value, 18> args = {statePtr,
                                    getOpStateSlotValue(op, rewriter, loc),
                                    APtr,
                                    BPtr,
@@ -107,7 +109,8 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
                                    bits,
                                    blockSize,
                                    elemSizeVal,
-                                   zpElemSizeVal};
+                                   zpElemSizeVal,
+                                   loraWeightPackVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

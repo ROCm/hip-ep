@@ -876,7 +876,8 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
     I64Attr:$bits,
     I64Attr:$block_size,
     I64Attr:$accuracy_level,
-    I64Attr:$zp_elem_size  // zero_points element size: 1=uint8 packed, 2=fp16
+    I64Attr:$zp_elem_size,  // zero_points element size: 1=uint8 packed, 2=fp16
+    DefaultValuedAttr<I64Attr, "0">:$lora_weight_pack  // 1: B is raw int8 [K,N], pack at runtime
   );
 
   let assemblyFormat = [{

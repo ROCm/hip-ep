@@ -376,6 +376,10 @@ void ConvertOnnxToHipPass::runOnOperation() {
     //   * GatherBlockQuantized INT4 legalize (packed-byte weight shapes,
     //     unsigned_quant_storage, quantize_axis inference) on
     //     com.microsoft.GatherBlockQuantized custom ops.
+    //   * LoRA MatMulNBits(bits=8) weight_pack chain (Transpose -> Cast ->
+    //     Add(+128) -> Cast -> Reshape) rewired to raw int8 weight with
+    //     lora_weight_pack; dead pack ops DCE'd. Invoked once before the
+    //     greedy loop (walk + modifyOpInPlace, not a populate* pattern).
     // All patterns are value-based and require literal values to remain on
     // `onnx.Constant` until the first carrier sweep below.
     // ExistingOps strictness is sufficient: the patterns either rewrite to
@@ -395,6 +399,9 @@ void ConvertOnnxToHipPass::runOnOperation() {
     // breaks the first round that mutates nothing (capped at kMaxRounds as a
     // safety net).
     {
+      // Before greedy pre-lowering: match export-specific pack chains while
+      // Transpose/Cast/Reshape ops are still in their original ONNX form.
+      runLoraWeightPackFusion(funcOp);
       struct ChangeFlagListener final : public mlir::RewriterBase::Listener {
         bool changed = false;
         void notifyOperationInserted(mlir::Operation *,

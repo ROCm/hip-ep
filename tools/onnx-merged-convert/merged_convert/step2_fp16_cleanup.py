@@ -13,6 +13,14 @@ from onnx import TensorProto, shape_inference
 
 FP32 = TensorProto.FLOAT
 FP16 = TensorProto.FLOAT16
+_FLOAT_ELEM_TYPES = frozenset(
+    {
+        TensorProto.FLOAT,
+        TensorProto.FLOAT16,
+        TensorProto.DOUBLE,
+        TensorProto.BFLOAT16,
+    }
+)
 _PRE_CAST_CASTFP32_RE = re.compile(
     "(?:^getitem(?:_\\d+)?_pre_cast_castfp32$|GroupQueryAttention_output_\\d+_pre_cast_castfp32$)"
 )
@@ -36,7 +44,78 @@ def _replace_tensor_uses(graph: onnx.GraphProto, old: str, new: str) -> int:
             if name == old:
                 node.input[idx] = new
                 replacements += 1
+    for vi in list(graph.output) + list(graph.value_info):
+        if vi.name == old:
+            vi.name = new
+            replacements += 1
     return replacements
+
+
+def _build_tensor_users(
+    graph: onnx.GraphProto,
+) -> dict[str, list[tuple[onnx.NodeProto, int]]]:
+    users: dict[str, list[tuple[onnx.NodeProto, int]]] = {}
+    for node in graph.node:
+        for idx, name in enumerate(node.input):
+            if name:
+                users.setdefault(name, []).append((node, idx))
+    return users
+
+
+def _infer_activation_elem_types(graph: onnx.GraphProto) -> dict[str, int]:
+    """Best-effort elem_type map for activation tensors."""
+    types: dict[str, int] = {}
+    for init in graph.initializer:
+        types[init.name] = init.data_type
+    for vi in list(graph.input) + list(graph.output) + list(graph.value_info):
+        elem_type = vi.type.tensor_type.elem_type
+        if elem_type:
+            types[vi.name] = elem_type
+
+    changed = True
+    while changed:
+        changed = False
+        for node in graph.node:
+            if node.op_type == "Cast":
+                to_type = _cast_to(node)
+                if to_type is None or not node.output:
+                    continue
+                out = node.output[0]
+                if types.get(out) != to_type:
+                    types[out] = to_type
+                    changed = True
+                continue
+
+            in_types = [
+                types[inp]
+                for inp in node.input
+                if inp and inp in types and types[inp] in _FLOAT_ELEM_TYPES
+            ]
+            if not in_types or not node.output:
+                continue
+            if all(t == FP16 for t in in_types):
+                out_type = FP16
+            elif len(set(in_types)) == 1:
+                out_type = in_types[0]
+            else:
+                continue
+            for out in node.output:
+                if not out or types.get(out) == out_type:
+                    continue
+                types[out] = out_type
+                changed = True
+    return types
+
+
+def _is_fp16_consumer_op(node: onnx.NodeProto) -> bool:
+    """True when a downstream op consumes fp16 activations on this edge."""
+    if node.op_type == "Cast":
+        return _cast_to(node) == FP16
+    return True
+
+
+def _keep_gqa_pre_cast_fp16_cast(src: str, dst: str) -> bool:
+    return src.endswith("_pre_cast") and "GroupQueryAttention_output_" in dst
 
 
 def _remove_nodes(graph: onnx.GraphProto, names: set[str]) -> int:
@@ -198,6 +277,43 @@ def remove_redundant_mnbits_fp16_casts(model: onnx.ModelProto) -> int:
     return folded
 
 
+def remove_redundant_fp16_casts(model: onnx.ModelProto) -> int:
+    """Drop Cast(fp16) when upstream and downstream ops already use fp16."""
+    graph = model.graph
+    total = 0
+    while True:
+        elem_types = _infer_activation_elem_types(graph)
+        users = _build_tensor_users(graph)
+        remove: set[str] = set()
+        removed = 0
+        for cast in graph.node:
+            if cast.op_type != "Cast" or _cast_to(cast) != FP16:
+                continue
+            if not cast.input or not cast.output:
+                continue
+            src = cast.input[0]
+            dst = cast.output[0]
+            if elem_types.get(src) != FP16:
+                continue
+            if _emu_fp32_boundary_tensor(graph, src):
+                continue
+            if _keep_gqa_pre_cast_fp16_cast(src, dst):
+                continue
+            consumers = users.get(dst, [])
+            if not consumers or any(
+                not _is_fp16_consumer_op(node) for node, _idx in consumers
+            ):
+                continue
+            _replace_tensor_uses(graph, dst, src)
+            remove.add(cast.name)
+            removed += 1
+        _remove_nodes(graph, remove)
+        total += removed
+        if removed == 0:
+            break
+    return total
+
+
 def ensure_matmul_nbits_fp16_inputs(model: onnx.ModelProto) -> int:
     """Cast MatMulNBits activations to fp16 so ORT does not mix float/float16 on T1."""
     graph = model.graph
@@ -253,6 +369,7 @@ def optimize_fp16_activations(
         else 0,
         "mnbits_fp16_casts_folded": remove_redundant_mnbits_fp16_casts(model),
         "mnbits_fp16_inputs": ensure_matmul_nbits_fp16_inputs(model),
+        "fp16_casts_removed": remove_redundant_fp16_casts(model),
     }
     if clear_value_info:
         del model.graph.value_info[:]

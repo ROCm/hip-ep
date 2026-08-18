@@ -5470,6 +5470,34 @@ __global__ void unpack_zp_3bit_to_u8_kernel(
 // unpack/convert kernels run at most once per (zero_points pointer) over
 // the lifetime of a RuntimeState — instead of once per matmul_nbits call,
 // which on 8B asym decode is ~225 redundant launches per Compute().
+
+__global__ void pack_lora_weight_mnbits_int8_kernel(const int8_t* __restrict__ src,
+                                                    uint8_t* __restrict__ dst,
+                                                    int K, int N)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = K * N;
+    if (idx >= total)
+        return;
+    int k = idx / N;
+    int n = idx % N;
+    // Transpose [K,N] -> [N,K] and apply signed int8 -> uint8 (+128).
+    dst[n * K + k] = static_cast<uint8_t>(static_cast<int16_t>(src[k * N + n]) + 128);
+}
+
+extern "C" void hip_pack_lora_weight_mnbits_int8(void* stream, const void* raw_i8,
+                                                 void* dst_u8, int K, int N)
+{
+    int total = K * N;
+    constexpr int THR = 256;
+    dim3 grid(static_cast<unsigned>((total + THR - 1) / THR));
+    dim3 block(THR);
+    hipLaunchKernelGGL(pack_lora_weight_mnbits_int8_kernel,
+                       grid, block, 0, static_cast<hipStream_t>(stream),
+                       static_cast<const int8_t*>(raw_i8),
+                       static_cast<uint8_t*>(dst_u8), K, N);
+}
+
 extern "C" void hip_matmul_nbits_unpack_zp_u8(
     void* stream, const void* zp_packed, void* dst_u8, int N, int groups_k)
 {
