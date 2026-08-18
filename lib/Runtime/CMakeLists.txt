@@ -777,10 +777,29 @@ if(NOT BUILD_MOCK_RUNTIME)
         endif()  # DD_CORE_LIB found
     else()
         message(STATUS "DynamicDispatch headers not found. DynamicDispatch will use mock implementation.")
+    endif()  # DD_INCLUDE_DIR found
+
+    # Create native mock library when DD is not available
+    # This provides stub symbols for .def file exports
+    if(NOT TARGET hipdnn-ep-dd)
+        add_library(hipdnn-ep-dd STATIC
+            mock/dynamic_dispatch_mock.cpp
+            op_state.cpp
+        )
+        target_include_directories(hipdnn-ep-dd PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}
+            ${CMAKE_SOURCE_DIR}/include
+        )
+        target_link_libraries(hipdnn-ep-dd PRIVATE hip::host)
+        set_target_properties(hipdnn-ep-dd PROPERTIES
+            POSITION_INDEPENDENT_CODE ON
+            CXX_STANDARD 17
+        )
+        message(STATUS "Created native DD mock library for symbol exports")
     endif()
-else()
+else()  # BUILD_MOCK_RUNTIME
     message(STATUS "Mock runtime mode: DynamicDispatch will use mock implementation.")
-endif()
+endif()  # NOT BUILD_MOCK_RUNTIME
 
 message(STATUS "Runtime library configuration:")
 message(STATUS "  Mode: ${BUILD_MOCK_RUNTIME}")
