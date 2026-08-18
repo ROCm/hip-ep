@@ -169,6 +169,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->la_scratch_size = 0;
   state->zp_unpack_cache = nullptr;
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
+  state->host_error_status = 0;
   state->device_error_flag = nullptr;
   state->hipdnn_handle = nullptr;
   state->hipdnn_graph_registry = nullptr;
@@ -1470,43 +1471,6 @@ int hipdnn_ep_state_ensure_la_scratch(RuntimeState *state, size_t needed_size) {
   }
   state->la_scratch_size = alloc_size;
   return 0;
-}
-
-void *hipdnn_ep_state_get_error_flag_device_ptr(RuntimeState *state) {
-  return state ? static_cast<void *>(state->device_error_flag) : nullptr;
-}
-
-int hipdnn_ep_state_reset_error_flag(RuntimeState *state) {
-  if (!state || !state->device_error_flag || !state->stream) {
-    fprintf(stderr, "hipdnn_ep_state_reset_error_flag: invalid state\n");
-    return -1;
-  }
-  hipError_t err =
-      hipMemsetAsync(state->device_error_flag, 0, sizeof(int), state->stream);
-  return (err == hipSuccess) ? 0 : -1;
-}
-
-int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state) {
-  if (!state || !state->device_error_flag || !state->stream) {
-    fprintf(stderr,
-            "hipdnn_ep_state_read_and_clear_error_flag: invalid state\n");
-    return -1;
-  }
-
-  int host_error = 0;
-  hipError_t err =
-      hipMemcpyAsync(&host_error, state->device_error_flag, sizeof(int),
-                     hipMemcpyDeviceToHost, state->stream);
-  if (err != hipSuccess)
-    return -1;
-  err = hipStreamSynchronize(state->stream);
-  if (err != hipSuccess)
-    return -1;
-  if (host_error != 0)
-    return host_error;
-
-  err = hipMemsetAsync(state->device_error_flag, 0, sizeof(int), state->stream);
-  return (err == hipSuccess) ? 0 : -1;
 }
 
 } // extern "C"

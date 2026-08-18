@@ -189,6 +189,13 @@ count after each success, so shared error cleanup releases exactly that prefix
 through one runtime batch helper. The runtime, not generated LLVM, owns the
 record layout and release loop.
 
+Operation runtime calls use one status contract. After HIP-to-LLVM conversion,
+every status-bearing call records its nonzero `i32` in the shared runtime error
+flag. The generated interface reads and clears that flag after stream
+synchronization and returns it through `inference_compute`. Conversion fails
+closed if any `i32` call result is left unused; scalar data-return calls must
+consume their value explicitly.
+
 ---
 
 ## Consumers

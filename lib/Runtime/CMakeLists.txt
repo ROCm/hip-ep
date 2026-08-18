@@ -275,6 +275,7 @@ endmacro()
 
 # Compile shared implementation files
 compile_to_bitcode(hipdnn_ep_runtime_state.cpp runtime_state.bc)
+compile_to_bitcode(runtime_error.cpp runtime_error.bc)
 compile_to_bitcode(tensor_buffer.cpp runtime_tensor_buffer.bc)
 compile_to_bitcode(hipdnn_ep_runtime_tensor.cpp runtime_tensor.bc)
 compile_to_bitcode(hipdnn_ep_runtime_loop.cpp runtime_loop.bc)
@@ -363,6 +364,7 @@ if(NOT BUILD_MOCK_RUNTIME)
 
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_error.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor_buffer.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_loop.bc
@@ -454,6 +456,7 @@ else()
 
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_error.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor_buffer.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_loop.bc

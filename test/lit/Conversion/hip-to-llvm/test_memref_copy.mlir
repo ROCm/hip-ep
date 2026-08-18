@@ -26,7 +26,8 @@
 // identity-layout dense memrefs -> single `wrap_hipMemcpyAsync` call.
 //
 // CHECK-LABEL: llvm.func @copy_dense_2d
-// CHECK:         llvm.call @wrap_hipMemcpyAsync({{.*}}) :
+// CHECK:         %[[STATUS:.*]] = llvm.call @wrap_hipMemcpyAsync({{.*}}) :
+// CHECK-NEXT:    llvm.call @hipdnn_ep_state_record_status({{.*}}, %[[STATUS]])
 // CHECK-NOT:     llvm.call @memrefCopy
 // CHECK-NOT:     llvm.call @wrap_hipMemcpy2DAsync
 func.func @copy_dense_2d(%ctx: !hip.context,

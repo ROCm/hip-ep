@@ -4,6 +4,7 @@
  */
 
 #include "HipToLLVMUtils.h"
+#include "RuntimeStatus.h"
 
 #include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
 #include "mlir/IR/Dialect.h"
@@ -46,26 +47,26 @@ private:
       auto ptrTy = cast<LLVM::LLVMPointerType>(ptr.getType());
       if (ptrTy.getAddressSpace() == 0)
         return ptr;
-      return builder.create<LLVM::AddrSpaceCastOp>(loc, as0PtrType, ptr);
+      return LLVM::AddrSpaceCastOp::create(builder, loc, as0PtrType, ptr);
     };
 
-    Value allocPtr = builder.create<LLVM::ExtractValueOp>(
-        loc, memrefStruct, ArrayRef<int64_t>{kAllocPtrIdx});
+    Value allocPtr = LLVM::ExtractValueOp::create(
+        builder, loc, memrefStruct, ArrayRef<int64_t>{kAllocPtrIdx});
     args.push_back(castToAs0(allocPtr));
 
-    Value alignedPtr = builder.create<LLVM::ExtractValueOp>(
-        loc, memrefStruct, ArrayRef<int64_t>{kAlignedPtrIdx});
+    Value alignedPtr = LLVM::ExtractValueOp::create(
+        builder, loc, memrefStruct, ArrayRef<int64_t>{kAlignedPtrIdx});
     args.push_back(castToAs0(alignedPtr));
 
-    args.push_back(builder.create<LLVM::ExtractValueOp>(
-        loc, memrefStruct, ArrayRef<int64_t>{kOffsetIdx}));
+    args.push_back(LLVM::ExtractValueOp::create(builder, loc, memrefStruct,
+                                                ArrayRef<int64_t>{kOffsetIdx}));
 
     for (int64_t dim : llvm::seq<int64_t>(0, rank))
-      args.push_back(builder.create<LLVM::ExtractValueOp>(
-          loc, memrefStruct, ArrayRef<int64_t>{kSizesIdx, dim}));
+      args.push_back(LLVM::ExtractValueOp::create(
+          builder, loc, memrefStruct, ArrayRef<int64_t>{kSizesIdx, dim}));
     for (int64_t dim : llvm::seq<int64_t>(0, rank))
-      args.push_back(builder.create<LLVM::ExtractValueOp>(
-          loc, memrefStruct, ArrayRef<int64_t>{kStridesIdx, dim}));
+      args.push_back(LLVM::ExtractValueOp::create(
+          builder, loc, memrefStruct, ArrayRef<int64_t>{kStridesIdx, dim}));
   }
 
   // Split @main_graph into two functions so the runtime's simple (ctx, inputs)
@@ -168,7 +169,7 @@ private:
     // Create the (ctx, inputs) wrapper.
     builder.setInsertionPoint(mainFunc);
     auto newMainFunc =
-        builder.create<LLVM::LLVMFuncOp>(loc, "main_graph", newFuncType);
+        LLVM::LLVMFuncOp::create(builder, loc, "main_graph", newFuncType);
     newMainFunc.setLinkage(LLVM::Linkage::Private);
 
     newMainFunc->setAttr(
@@ -186,15 +187,15 @@ private:
 
     for (int64_t i : llvm::seq<int64_t>(0, inputCount)) {
       int64_t rank = cast<DenseI64ArrayAttr>(inputShapesAttr[i]).size();
-      Value inputIdxVal = builder.create<LLVM::ConstantOp>(
-          loc, i32Type, builder.getI32IntegerAttr(i));
-      Value inputSlotPtr = builder.create<LLVM::GEPOp>(
-          loc, ptrType, ptrType, inputsArg, ValueRange{inputIdxVal});
+      Value inputIdxVal = LLVM::ConstantOp::create(
+          builder, loc, i32Type, builder.getI32IntegerAttr(i));
+      Value inputSlotPtr = LLVM::GEPOp::create(
+          builder, loc, ptrType, ptrType, inputsArg, ValueRange{inputIdxVal});
       Value inputStructPtr =
-          builder.create<LLVM::LoadOp>(loc, ptrType, inputSlotPtr);
+          LLVM::LoadOp::create(builder, loc, ptrType, inputSlotPtr);
       Type memrefStructType = getMemRefStructType(builder, rank, 1);
       Value inputMemref =
-          builder.create<LLVM::LoadOp>(loc, memrefStructType, inputStructPtr);
+          LLVM::LoadOp::create(builder, loc, memrefStructType, inputStructPtr);
       unpackMemRefStructWithAddrCast(builder, loc, inputMemref, rank,
                                      mainInternalArgs);
     }
@@ -204,10 +205,10 @@ private:
     // any returned descriptor is ignored (the output reaches the EP through the
     // callback). A zero-output graph returns void, so there is nothing to
     // ignore.
-    builder.create<LLVM::CallOp>(loc, mainFunc, mainInternalArgs);
-    Value zero = builder.create<LLVM::ConstantOp>(loc, i32Type,
-                                                  builder.getI32IntegerAttr(0));
-    builder.create<LLVM::ReturnOp>(loc, zero);
+    LLVM::CallOp::create(builder, loc, mainFunc, mainInternalArgs);
+    Value zero = LLVM::ConstantOp::create(builder, loc, i32Type,
+                                          builder.getI32IntegerAttr(0));
+    LLVM::ReturnOp::create(builder, loc, zero);
 
     COMPILER_DEBUG_LOG("[HipToLLVM] Transformed @main_graph signature: "
                        << actualParams << " params -> " << newParamTypes.size()
@@ -357,11 +358,20 @@ void ConvertHipToLLVMPass::runOnOperation() {
     });
   }
 
-  if (failed(applyPartialConversion(module, target, std::move(patterns))))
+  if (failed(applyPartialConversion(module, target, std::move(patterns)))) {
     signalPassFailure();
+    return;
+  }
 
-  if (failed(transformMainFunction(module)))
+  if (failed(recordAndVerifyRuntimeStatuses(module))) {
     signalPassFailure();
+    return;
+  }
+
+  if (failed(transformMainFunction(module))) {
+    signalPassFailure();
+    return;
+  }
 }
 
 } // namespace
