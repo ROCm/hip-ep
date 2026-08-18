@@ -38,12 +38,13 @@ func.func @static_reuse_same_type(
 }
 
 // alloc0 (memref<2x64x64xf32>, 32768 bytes) becomes dead after mul reads it
-// into alloc1. alloc2 (memref<64xf32>, 256 bytes) fits inside alloc0's
-// byte-size, so alloc0 is reused via memref.reinterpret_cast.
+// into alloc1. alloc1 remains live through the later load. alloc2
+// (memref<64xf32>, 256 bytes) fits inside alloc0's byte-size, so alloc0 is
+// reused via memref.reinterpret_cast.
 //
 // Intervals:
 //   alloc0: [0, 1]   dead before index 2
-//   alloc1: [1, 2]   new slot (alloc0 still live at 1)
+//   alloc1: [1, 3]   new slot (alloc0 still live at 1)
 //   alloc2: [2, ret]  reuses alloc0 via reinterpret_cast (256 <= 32768)
 //
 // CHECK-LABEL: func.func @bytesize_reuse_reinterpret_cast
@@ -59,13 +60,16 @@ func.func @bytesize_reuse_reinterpret_cast(
     %ctx: !hip.context,
     %a: memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>,
     %b: memref<64x64xf32, strided<[?, ?], offset: ?>>,
-    %s: memref<f32, strided<[], offset: ?>>) -> memref<64xf32> {
+    %s: memref<f32, strided<[], offset: ?>>,
+    %small: memref<64xf32>) -> memref<64xf32> {
+  %c0 = arith.constant 0 : index
   %alloc0 = memref.alloc() {alignment = 64 : i64} : memref<2x64x64xf32>
   hip.matmul(%ctx) ins(%a, %b : memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<2x64x64xf32>)
   %alloc1 = memref.alloc() {alignment = 64 : i64} : memref<2x64x64xf32>
   hip.mul(%ctx) ins(%alloc0, %s : memref<2x64x64xf32>, memref<f32, strided<[], offset: ?>>) outs(%alloc1 : memref<2x64x64xf32>)
   %alloc2 = memref.alloc() : memref<64xf32>
-  hip.miopen.softmax(%ctx) ins(%alloc1 : memref<2x64x64xf32>) outs(%alloc2 : memref<64xf32>)
+  hip.miopen.softmax(%ctx) ins(%small : memref<64xf32>) outs(%alloc2 : memref<64xf32>)
+  %keep_alive = memref.load %alloc1[%c0, %c0, %c0] : memref<2x64x64xf32>
   return %alloc2 : memref<64xf32>
 }
 
