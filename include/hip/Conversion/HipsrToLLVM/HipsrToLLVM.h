@@ -193,6 +193,8 @@ private:
 
 void populateHipsrAddLoweringPatterns(const LLVMTypeConverter &converter,
                                       RewritePatternSet &patterns);
+void populateHipsrMulLoweringPatterns(const LLVMTypeConverter &converter,
+                                      RewritePatternSet &patterns);
 void populateHipsrConstantLoweringPatterns(const LLVMTypeConverter &converter,
                                            RewritePatternSet &patterns);
 void populateHipsrGetPoolLoweringPatterns(const LLVMTypeConverter &converter,

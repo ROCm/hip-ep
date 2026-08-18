@@ -90,7 +90,7 @@ struct ConvertOnnxToHipsrPass
       if (type.getRank() == 0 || type.getEncoding()) {
         return type;
       }
-      return deviceTensorType(type);
+      return tensorTypeInSpace(type, MemorySpace::Device);
     });
 
     ConversionTarget target(getContext());
@@ -106,8 +106,11 @@ struct ConvertOnnxToHipsrPass
     });
     target.addDynamicallyLegalOp<func::ReturnOp>(
         [&](func::ReturnOp op) { return converter.isLegal(op); });
+    // Helper operations are legal in the hipsr region that owns them: a compute
+    // body or a placeholder's shape region.
     target.markUnknownOpDynamicallyLegal([](Operation *op) {
-      return op->getParentOfType<ComputeOp>() != nullptr;
+      return op->getParentOfType<ComputeOp>() != nullptr ||
+             op->getParentOfType<PlaceholderOp>() != nullptr;
     });
 
     RewritePatternSet patterns(&getContext());
@@ -115,6 +118,7 @@ struct ConvertOnnxToHipsrPass
     populateCastConversionPatterns(converter, patterns, &getContext());
     populateMatMulConversionPatterns(converter, patterns, &getContext());
     populateExpandConversionPatterns(converter, patterns, &getContext());
+    populateShapeConversionPatterns(converter, patterns, &getContext());
     populateReturnConversionPatterns(patterns, &getContext());
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns,
                                                                    converter);

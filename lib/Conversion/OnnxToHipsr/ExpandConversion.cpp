@@ -21,7 +21,7 @@ namespace {
 struct ExpandToHipsr : public ::mlir::ConversionPattern {
   ExpandToHipsr(const ::mlir::TypeConverter &typeConverter,
                 ::mlir::MLIRContext *ctx)
-      : ConversionPattern(typeConverter, "onnx.Expand", /*benefit=*/1, ctx) {}
+      : ConversionPattern("onnx.Expand", /*benefit=*/1, ctx) {}
 
   ::mlir::LogicalResult
   matchAndRewrite(::mlir::Operation *op,
@@ -52,11 +52,12 @@ struct ExpandToHipsr : public ::mlir::ConversionPattern {
       return rewriter.notifyMatchFailure(op, "expected static shape length");
     }
 
-    auto resultType = ::mlir::dyn_cast_or_null<::mlir::RankedTensorType>(
-        getTypeConverter()->convertType(op->getResult(0).getType()));
+    auto resultType =
+        ::mlir::dyn_cast<::mlir::RankedTensorType>(op->getResult(0).getType());
     if (!resultType) {
       return rewriter.notifyMatchFailure(op, "expected ranked tensor result");
     }
+    resultType = tensorTypeInSpace(resultType, MemorySpace::Device);
     if (inputType.getElementType() != resultType.getElementType()) {
       return rewriter.notifyMatchFailure(
           op, "expected matching input and result element types");

@@ -50,6 +50,7 @@ jobs:
       # Remove a PR number once its fix is in the pinned ONNXRUNTIME_VERSION.
       ONNXRUNTIME_PR_PATCHES: ""
       SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: ${{ github.ref_name == 'main' && 'READ_WRITE' || 'READ_ONLY' }}
       OGA_VERSION: "0.14.0"
       # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
       # pull/<n>.patch and `git apply` on top of v<OGA_VERSION>. Part of the OGA

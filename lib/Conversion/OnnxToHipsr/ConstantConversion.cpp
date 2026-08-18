@@ -3,6 +3,8 @@
  * Licensed under the MIT License.
  */
 
+#include "OnnxToHipsrUtils.h"
+
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
@@ -28,8 +30,7 @@ constexpr ::llvm::StringLiteral kOrtMemAddrTag = "*/_ORT_MEM_ADDR_/*";
 struct ConstantOpLowering : public ::mlir::ConversionPattern {
   ConstantOpLowering(const ::mlir::TypeConverter &typeConverter,
                      ::mlir::MLIRContext *ctx)
-      : ::mlir::ConversionPattern(typeConverter, "onnx.Constant",
-                                  /*benefit=*/1, ctx) {}
+      : ::mlir::ConversionPattern("onnx.Constant", /*benefit=*/1, ctx) {}
 
   ::mlir::LogicalResult
   matchAndRewrite(::mlir::Operation *op,
@@ -52,11 +53,8 @@ struct ConstantOpLowering : public ::mlir::ConversionPattern {
         return ::mlir::success();
       }
 
-      auto resultType = ::llvm::dyn_cast_or_null<::mlir::RankedTensorType>(
-          getTypeConverter()->convertType(tensorType));
-      if (!resultType) {
-        return rewriter.notifyMatchFailure(op, "failed to convert result type");
-      }
+      ::mlir::RankedTensorType resultType =
+          tensorTypeInSpace(tensorType, MemorySpace::Device);
       rewriter.replaceOpWithNewOp<ConstantOp>(
           op, /*result=*/resultType, /*value=*/valueAttr,
           /*index=*/IntegerAttr(), /*offset=*/IntegerAttr(),
@@ -97,11 +95,8 @@ struct ConstantOpLowering : public ::mlir::ConversionPattern {
       data = {buf->getBufferStart() + offset, static_cast<size_t>(size)};
     }
 
-    auto resultType = ::llvm::dyn_cast_or_null<::mlir::RankedTensorType>(
-        getTypeConverter()->convertType(tensorType));
-    if (!resultType) {
-      return rewriter.notifyMatchFailure(op, "failed to convert result type");
-    }
+    ::mlir::RankedTensorType resultType =
+        tensorTypeInSpace(tensorType, MemorySpace::Device);
     auto value = DenseResourceElementsAttr::get(
         resultType, key, UnmanagedAsmResourceBlob::allocateInferAlign(data));
 

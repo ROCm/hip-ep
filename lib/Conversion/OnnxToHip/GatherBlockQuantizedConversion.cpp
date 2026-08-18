@@ -32,8 +32,13 @@ inline bool isGatherBlockQuantizedOp(Operation *op) {
 }
 
 inline int64_t getGbqIntAttr(Operation *op, StringRef name, int64_t fallback) {
-  if (auto attr = op->getAttrOfType<IntegerAttr>(name))
-    return attr.getSInt();
+  if (auto attr = op->getAttrOfType<IntegerAttr>(name)) {
+    if (attr.getType().isSignedInteger())
+      return attr.getSInt();
+    if (attr.getType().isSignlessInteger())
+      return attr.getInt();
+    return static_cast<int64_t>(attr.getUInt());
+  }
   return fallback;
 }
 
@@ -220,12 +225,6 @@ bool legalizeInt4ConstantIfNeeded(Operation *gbq, PatternRewriter &rewriter) {
   if (bits != 4 || gbq->getNumOperands() < 3)
     return false;
 
-  if (gbq->getNumOperands() >= 4) {
-    Value zeroPoints = gbq->getOperand(3);
-    if (zeroPoints && !isa<NoneType>(zeroPoints.getType()))
-      return false;
-  }
-
   Value data = gbq->getOperand(0);
   Operation *constOp = data.getDefiningOp();
   if (!constOp || constOp->getName().getStringRef() != "onnx.Constant")
@@ -256,6 +255,57 @@ bool legalizeInt4ConstantIfNeeded(Operation *gbq, PatternRewriter &rewriter) {
   return recreateExternalConstant(rewriter, constOp, packedType) != nullptr;
 }
 
+// zero_points shares scales' rank but may carry ONNX UINT4 logical shapes whose
+// external `size` is half the ui8 element count; data/scales invariants do not
+// detect that case.
+bool legalizeInt4ZeroPointsConstantIfNeeded(Operation *gbq,
+                                            PatternRewriter &rewriter) {
+  const int64_t bits = gbq::getGbqIntAttr(gbq, "bits", 0);
+  if (bits != 4 || gbq->getNumOperands() < 4)
+    return false;
+
+  Value zeroPoints = gbq->getOperand(3);
+  if (!zeroPoints || isa<NoneType>(zeroPoints.getType()))
+    return false;
+
+  Operation *constOp = zeroPoints.getDefiningOp();
+  if (!constOp || constOp->getName().getStringRef() != "onnx.Constant")
+    return false;
+  if (constOp->getAttr("value"))
+    return false;
+  auto sizeAttr = constOp->getAttrOfType<IntegerAttr>("size");
+  if (!sizeAttr || sizeAttr.getInt() <= 0)
+    return false;
+
+  auto dataType = dyn_cast<RankedTensorType>(gbq->getOperand(0).getType());
+  auto zpType = dyn_cast<RankedTensorType>(zeroPoints.getType());
+  if (!dataType || !zpType)
+    return false;
+
+  int qa = gbq::normalizeGbqAxis(gbq::getGbqIntAttr(gbq, "quantize_axis", -1),
+                                 dataType.getRank());
+  if (qa < 0 || qa >= zpType.getRank())
+    return false;
+  if (zpType.getShape()[qa] % 2 != 0)
+    return false;
+
+  int64_t numElements = 1;
+  for (int64_t dim : zpType.getShape()) {
+    if (llvm::MulOverflow(numElements, dim, numElements))
+      return false;
+  }
+  if (sizeAttr.getInt() * 2 != numElements)
+    return false;
+
+  auto shape = llvm::to_vector(zpType.getShape());
+  shape[qa] /= 2;
+  auto packedType =
+      RankedTensorType::get(shape, packedI8ElementType(rewriter.getContext()));
+
+  rewriter.setInsertionPoint(constOp);
+  return recreateExternalConstant(rewriter, constOp, packedType) != nullptr;
+}
+
 struct GatherBlockQuantizedPreparePattern : public RewritePattern {
   GatherBlockQuantizedPreparePattern(MLIRContext *ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/2, ctx) {}
@@ -266,6 +316,7 @@ struct GatherBlockQuantizedPreparePattern : public RewritePattern {
       return failure();
     bool changed = annotateGbqSemantics(op, rewriter);
     changed |= legalizeInt4ConstantIfNeeded(op, rewriter);
+    changed |= legalizeInt4ZeroPointsConstantIfNeeded(op, rewriter);
     return changed ? success() : failure();
   }
 };
@@ -369,7 +420,6 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
     return rewriter.notifyMatchFailure(
         op, "missing required `block_size` attribute");
   auto gatherAxisIntAttr = op->getAttrOfType<mlir::IntegerAttr>("gather_axis");
-  auto quantAxisIntAttr = op->getAttrOfType<mlir::IntegerAttr>("quantize_axis");
 
   const int64_t bits = bitsIntAttr.getSInt();
   const int64_t blockSize = blockSizeIntAttr.getSInt();
@@ -384,8 +434,8 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
   auto scalesType = mlir::cast<mlir::RankedTensorType>(scales.getType());
 
   std::optional<int64_t> explicitQuantAxis;
-  if (quantAxisIntAttr)
-    explicitQuantAxis = quantAxisIntAttr.getSInt();
+  if (op->getAttr("quantize_axis"))
+    explicitQuantAxis = gbq::getGbqIntAttr(op, "quantize_axis", 0);
   auto quantAxisOr = gbq::resolveQuantizeAxis(dataType, scalesType, blockSize,
                                               bits, explicitQuantAxis);
   if (mlir::failed(quantAxisOr))

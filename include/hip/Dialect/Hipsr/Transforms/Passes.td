@@ -13,6 +13,21 @@
 
 include "mlir/Pass/PassBase.td"
 
+def AddContextArgPass : Pass<"hipsr-add-context-arg", "mlir::ModuleOp"> {
+  let summary = "Insert !hipsr.context as arg 0 into every func.func";
+  let description = [{
+    Inserts a !hipsr.context argument at position 0 into every func.func in
+    the module. The OnnxToHipsr conversion patterns assume that the context
+    value is always available as the first function argument.
+
+    Skips functions that already have a !hipsr.context as argument 0.
+  }];
+  let dependentDialects = [
+    "::mlir::hipsr::HipsrDialect",
+    "::mlir::func::FuncDialect"
+  ];
+}
+
 def PopulateShapeRegionPass
     : Pass<"hipsr-populate-shape-region", "mlir::func::FuncOp"> {
   let summary = "Fill empty hipsr shape regions";

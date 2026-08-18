@@ -18,7 +18,7 @@ namespace {
 struct MatMulToHipsr : public ::mlir::ConversionPattern {
   MatMulToHipsr(const ::mlir::TypeConverter &typeConverter,
                 ::mlir::MLIRContext *ctx)
-      : ConversionPattern(typeConverter, "onnx.MatMul", /*benefit=*/1, ctx) {}
+      : ConversionPattern("onnx.MatMul", /*benefit=*/1, ctx) {}
 
   ::mlir::LogicalResult
   matchAndRewrite(::mlir::Operation *op,
@@ -39,11 +39,12 @@ struct MatMulToHipsr : public ::mlir::ConversionPattern {
     ::mlir::Location loc = op->getLoc();
     ::mlir::Value a = operands[0];
     ::mlir::Value b = operands[1];
-    auto resultType = ::mlir::dyn_cast_or_null<::mlir::RankedTensorType>(
-        getTypeConverter()->convertType(op->getResult(0).getType()));
+    auto resultType =
+        ::mlir::dyn_cast<::mlir::RankedTensorType>(op->getResult(0).getType());
     if (!resultType) {
       return rewriter.notifyMatchFailure(op, "expected ranked tensor result");
     }
+    resultType = tensorTypeInSpace(resultType, MemorySpace::Device);
 
     ::mlir::Value init = PlaceholderOp::create(
                              rewriter, loc, ::mlir::TypeRange{resultType}, *ctx,
