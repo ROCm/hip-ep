@@ -638,6 +638,21 @@ void ConvTransposeOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// QMatMulOp: ins(lhs, rhs), outs(output)
+// Quantized matrix multiplication with integrated QDQ scales
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QMatMulOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QMatMulOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // HipblasltMatmulOp: ins(A, B), outs(C)
 //===----------------------------------------------------------------------===//
 

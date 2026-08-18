@@ -122,6 +122,81 @@ MatmulOp::reifyResultShapes(OpBuilder &b,
 }
 
 //===----------------------------------------------------------------------===//
+// QMatMulOp
+//
+// Quantized matmul has the same shape semantics as regular matmul: the result
+// shape is computed from LHS and RHS via NumPy batch broadcasting.
+// Only difference is the quantization scales (attributes), which don't affect
+// output shape.
+//
+// Before:
+//   %m = hip.qmatmul ins(%a, %b : tensor<?x4096xf32>, tensor<4096x4096xf32>)
+//                    outs(%out : tensor<?x4096xf32>)
+//                    {lhs_scale = 0.1, rhs_scale = 0.05, output_scale = 0.2}
+//                    -> tensor<?x4096xf32>
+// After (reified result shape):
+//   dim 0 (dynamic M) -> %d0 = tensor.dim %a, %c0
+//   dim 1 (static N)  -> 4096 : index
+//===----------------------------------------------------------------------===//
+
+LogicalResult QMatMulOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  // Same implementation as MatmulOp since shape semantics are identical
+  if (getNumResults() == 0)
+    return failure();
+
+  ArrayRef<int64_t> lhsShape = getShapeOf(getLhs());
+  ArrayRef<int64_t> rhsShape = getShapeOf(getRhs());
+  if (lhsShape.empty() || rhsShape.empty())
+    return failure();
+
+  SmallVector<int64_t> outShape = mlir::hip::inferMatmulShape(
+      lhsShape, rhsShape, [&]() { return this->emitOpError(); });
+  if (outShape.empty())
+    return failure();
+
+  Location loc = getLoc();
+  Value lhs = getLhs();
+  Value rhs = getRhs();
+  size_t outRank = outShape.size();
+  size_t lhsRank = lhsShape.size();
+  size_t rhsRank = rhsShape.size();
+
+  size_t batchRank = outRank - 2;
+  size_t lhsPad = batchRank - (lhsRank >= 2 ? lhsRank - 2 : 0);
+  size_t rhsPad = batchRank - (rhsRank >= 2 ? rhsRank - 2 : 0);
+
+  SmallVector<OpFoldResult> dims;
+  dims.reserve(outRank);
+  for (size_t i : llvm::seq<size_t>(0, outRank)) {
+    // M dim: lhs[-2]
+    if (i + 2 == outRank) {
+      dims.push_back(mlir::hip::reifyDimOrConstant(b, loc, outShape[i], lhs,
+                                                    lhsRank - 2));
+      continue;
+    }
+    // N dim: rhs[-1]
+    if (i + 1 == outRank) {
+      dims.push_back(mlir::hip::reifyDimOrConstant(b, loc, outShape[i], rhs,
+                                                    rhsRank - 1));
+      continue;
+    }
+    // Batch dim: prefer the side that contributes the size
+    int64_t lhsDim = i < lhsPad ? 1 : lhsShape[i - lhsPad];
+    int64_t rhsDim = i < rhsPad ? 1 : rhsShape[i - rhsPad];
+    bool lhsCanonical = i >= lhsPad && lhsDim != 1;
+    bool rhsCanonical = i >= rhsPad && rhsDim != 1;
+    bool pickLhs = lhsCanonical || (!rhsCanonical && i >= lhsPad);
+    Value src = pickLhs ? lhs : rhs;
+    size_t srcDim = pickLhs ? i - lhsPad : i - rhsPad;
+    dims.push_back(
+        mlir::hip::reifyDimOrConstant(b, loc, outShape[i], src, srcDim));
+  }
+  reifiedReturnShapes.assign({std::move(dims)});
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // RopeOp
 //
 // Result shape == input data tensor's shape (rotary embedding rotates

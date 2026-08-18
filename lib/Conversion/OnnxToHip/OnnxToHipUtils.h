@@ -503,6 +503,11 @@ void populatePowDecompositionPatterns(RewritePatternSet &patterns,
 void populateErfGeluFusionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 
+/// Pre-lowering fusion pattern: fuse QuantizeLinear -> MatMul ->
+/// DequantizeLinear into hip.qmatmul (demonstrative pattern showing QDQ fusion).
+/// See QDQMatMulFusion.cpp.
+void populateQDQMatMulFusionPatterns(RewritePatternSet &patterns);
+
 /// Pre-lowering pattern set: decompose vision/projector ops that have no
 /// direct MorphiZen converter into supported primitives — patch-embed
 /// Conv-ND → Reshape/Gemm/Reshape, AveragePool(kernel==stride) →

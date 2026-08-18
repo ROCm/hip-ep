@@ -4424,4 +4424,60 @@ def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
     `(` $ctx `,` $scalar `:` type($scalar) `)` attr-dict `->` type($value)
   }];
 }
+
+// hip.qmatmul : Quantized matrix multiplication with fused QDQ
+// (QuantizeLinear -> MatMul -> DequantizeLinear)
+//
+// This operation fuses a quantize-dequantize-matmul pattern into a single
+// quantized matrix multiplication kernel. It takes float inputs, quantization
+// scales, performs INT8/INT4 matrix multiplication, and dequantizes the result
+// back to float.
+//
+// Semantics: Y = dequantize(quantize(LHS) @ quantize(RHS), output_scale)
+//
+// Example:
+//   hip.qmatmul(%ctx) ins(%lhs, %rhs : memref<4x128xf32, 1>, memref<128x256xf32, 1>)
+//                     outs(%output : memref<4x256xf32, 1>)
+//                     {lhs_scale = 0.1 : f32, rhs_scale = 0.05 : f32, output_scale = 0.2 : f32}
+def Hip_QMatMulOp : Hip_DpsOp<"qmatmul",
+                              /*traits=*/[],
+                              /*outsAccessor=*/"Output",
+                              /*autoReify=*/0,
+                              /*autoInfer=*/1,
+                              /*declareInfer=*/1> {
+  let summary = "Quantized matrix multiplication with integrated QDQ";
+  let description = [{
+    Performs quantized matrix multiplication with integrated quantization and
+    dequantization. This operation fuses the pattern:
+      QuantizeLinear -> MatMul -> DequantizeLinear
+    into a single kernel call.
+
+    The operation:
+    1. Quantizes LHS and RHS using their respective scales
+    2. Performs quantized matrix multiplication (e.g., INT8 x INT8 -> INT32)
+    3. Dequantizes the result using output_scale
+
+    This is a demonstrative operation showing PDLL pattern fusion capabilities.
+    In production, quantization would require more sophisticated handling
+    (zero points, per-channel scales, etc.).
+
+    Uses destination-passing style: output buffer is provided as argument.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$lhs,           // Left operand (float)
+    Hip_TensorOrMemRef:$rhs,           // Right operand (float)
+    Hip_TensorOrMemRef:$output,        // Output buffer (float)
+    F32Attr:$lhs_scale,                // Quantization scale for LHS
+    F32Attr:$rhs_scale,                // Quantization scale for RHS
+    F32Attr:$output_scale              // Dequantization scale for output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
 #endif // HIP_OPS
