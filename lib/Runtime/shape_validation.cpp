@@ -85,10 +85,11 @@ template <typename T> T decode(int64_t bits) {
 }
 
 } // namespace
-int hipdnn_ep_checked_expand_extent(
-    RuntimeState *state, int64_t *host_extent, int64_t *host_elements,
-    int64_t prior_valid, int64_t input_extent, int64_t target_extent,
-    int64_t expected_extent, int64_t prior_elements) {
+int hipdnn_ep_checked_expand_extent(RuntimeState *state, int64_t *host_extent,
+                                    int64_t *host_elements, int64_t prior_valid,
+                                    int64_t input_extent, int64_t target_extent,
+                                    int64_t expected_extent,
+                                    int64_t prior_elements) {
   auto failExpand = [&]() {
     if (host_elements)
       *host_elements = 0;
@@ -102,8 +103,8 @@ int hipdnn_ep_checked_expand_extent(
       prior_elements < 0)
     return failExpand();
 
-  bool compatible = input_extent == target_extent || input_extent == 1 ||
-                    target_extent == 1;
+  bool compatible =
+      input_extent == target_extent || input_extent == 1 || target_extent == 1;
   if (!compatible)
     return failExpand();
   int64_t result = input_extent == 1 ? target_extent : input_extent;

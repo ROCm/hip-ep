@@ -176,21 +176,17 @@ int main() {
          "Expand 0/1 must produce zero");
 
   status = checkExpand(state, 2, 5, -1, 1, expandExtent, expandElements);
-  expect(status != 0 && state.error && expandExtent == 0 &&
-             expandElements == 0,
+  expect(status != 0 && state.error && expandExtent == 0 && expandElements == 0,
          "incompatible Expand extents must fail safely");
 
-  status = checkExpand(state, 2, 1, 2,
-                       std::numeric_limits<int64_t>::max(), expandExtent,
-                       expandElements);
-  expect(status != 0 && state.error && expandExtent == 0 &&
-             expandElements == 0,
+  status = checkExpand(state, 2, 1, 2, std::numeric_limits<int64_t>::max(),
+                       expandExtent, expandElements);
+  expect(status != 0 && state.error && expandExtent == 0 && expandElements == 0,
          "Expand aggregate element-count overflow must fail safely");
 
   status = checkExpand(state, 3, 1, 3, 1, expandExtent, expandElements,
                        /*valid=*/0);
-  expect(status != 0 && state.error && expandExtent == 0 &&
-             expandElements == 0,
+  expect(status != 0 && state.error && expandExtent == 0 && expandElements == 0,
          "Expand readback failure must not consume target slots");
   if (failures != 0)
     return 1;
