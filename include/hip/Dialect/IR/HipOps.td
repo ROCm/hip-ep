@@ -3676,31 +3676,41 @@ def Hip_ExpandOp :
     Broadcasts `input` to the target `shape` following NumPy broadcast rules.
     Implements the standard ONNX Expand operator.
 
-    `shape` is a 1-D int64 tensor describing the target shape (which is
-    broadcast against the input shape, so output rank may exceed `shape`'s
-    length).
+    `shape` is a rank-1 i32/i64 tensor describing the requested shape. The
+    destination is the right-aligned broadcast result, which can differ from
+    the requested shape when an input extent is non-unit and the corresponding
+    request is one (including `0` broadcast with `1`).
+
+    `shape_valid` is the combined grouped-readback, compatibility, descriptor,
+    and element-count check. A false value means destination construction was
+    clamped safely and the runtime must return failure without dispatch.
 
     Uses destination-passing style: output buffer is provided as argument.
 
     Example:
     ```mlir
-    hip.expand(%ctx) ins(%x, %shape : memref<3x1xf32, 1>, memref<3xi64, 1>)
-                     outs(%y : memref<2x3x6xf32, 1>)
+    hip.expand(%ctx) valid(%ok)
+      ins(%x, %shape : memref<3x1xf32, 1>, memref<3xi64, 1>)
+      outs(%y : memref<2x3x6xf32, 1>)
     ```
   }];
 
   let arguments = (ins
     Hip_ContextType:$ctx,
+    I1:$shape_valid,
     Hip_TensorOrMemRef:$input,
     Hip_TensorOrMemRef:$shape,
     Hip_TensorOrMemRef:$output
   );
 
   let assemblyFormat = [{
-    `(` $ctx `)` `ins` `(` $input `,` $shape `:` type($input) `,` type($shape) `)`
+    `(` $ctx `)` `valid` `(` $shape_valid `)`
+    `ins` `(` $input `,` $shape `:` type($input) `,` type($shape) `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  let hasVerifier = 1;
 }
 
 def Hip_GlobalPoolOp : Hip_DpsOp_AutoReify<"global_pool"> {
@@ -4400,6 +4410,32 @@ def Hip_ReadbackControlOp : Hip_Op<"readback_control",
   let assemblyFormat = [{
     `(` $ctx `,` $sources `:` type($sources) `)` attr-dict
     `->` `(` type($valid) (`,` type($values)^)? `)`
+  }];
+
+  let hasVerifier = 1;
+}
+
+// hip.checked_expand_extent : merge one aligned input/requested extent using
+// exact NumPy semantics, validate a static descriptor constraint, and update a
+// checked running element count. Runtime failure writes the shared error state.
+def Hip_CheckedExpandExtentOp : Hip_Op<"checked_expand_extent",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Compute and validate one Expand output extent";
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    I1:$prior_valid,
+    Index:$input_extent,
+    Index:$target_extent,
+    Index:$prior_elements,
+    I64Attr:$expected_extent
+  );
+  let results = (outs I1:$valid, Index:$extent, Index:$elements);
+
+  let assemblyFormat = [{
+    `(` $ctx `,` $prior_valid `,` $input_extent `,` $target_extent `,`
+        $prior_elements `)`
+    `expected_extent` `=` $expected_extent attr-dict
+    `->` `(` type($valid) `,` type($extent) `,` type($elements) `)`
   }];
 
   let hasVerifier = 1;

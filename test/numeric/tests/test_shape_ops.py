@@ -268,6 +268,17 @@ def _make_expand_model(dtype, input_shape: list[int], out_shape: list[int]):
     return make_model_from_nodes([node], [X], [Y], initializers=[shape_init])
 
 
+def _make_runtime_expand_model(dtype, input_rank: int, target_rank: int):
+    tp = np_to_onnx_type(dtype)
+    X = helper.make_tensor_value_info("X", tp, [None] * input_rank)
+    shape = helper.make_tensor_value_info(
+        "target_shape", TensorProto.INT64, [target_rank]
+    )
+    Y = helper.make_tensor_value_info("Y", tp, [None] * max(input_rank, target_rank))
+    node = helper.make_node("Expand", ["X", "target_shape"], ["Y"])
+    return make_model_from_nodes([node], [X, shape], [Y])
+
+
 class TestExpand:
     @pytest.mark.parametrize(
         "dtype,in_shape,out_shape",
@@ -290,6 +301,23 @@ class TestExpand:
         else:
             x = rng.uniform(-2.0, 2.0, in_shape).astype(dtype)
         actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize(
+        "in_shape,target_shape",
+        [
+            ([5], [1]),
+            ([1], [5]),
+            ([5], [5]),
+            ([2, 1], [3]),
+            ([1, 3], [2, 1]),
+        ],
+    )
+    def test_runtime_target_expand(self, model_runner, in_shape, target_shape):
+        model = _make_runtime_expand_model(np.float32, len(in_shape), len(target_shape))
+        x = np.arange(np.prod(in_shape), dtype=np.float32).reshape(in_shape)
+        target = np.asarray(target_shape, dtype=np.int64)
+        actual, expected = model_runner.run_sample(model, [x, target])
         compare_outputs(actual, expected, atol=0)
 
 

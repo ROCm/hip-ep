@@ -172,11 +172,23 @@ Choose the smallest mechanism that matches the operation's semantics:
 | Permutation | `reifyTransposeByPerm` |
 | Gather/GatherND/GatherElements | Gather-specific helpers or thunks |
 | OneHot, Compress, TopK | Dedicated reification thunks |
-| Pad, Tile, Expand, Slice, Range | Fold-or-bail helpers with fallback to DPS-init shape |
+| Pad, Tile, Slice, Range | Fold-or-bail helpers with fallback to DPS-init shape |
+| Expand | Pure constant inference; grouped readback and checked destination construction for runtime targets |
 | MatMul/Gemm/MatMulNBits | Dedicated shape logic based on operand dimensions and attributes |
 | Attention or normalization with multiple destinations | One shape vector per DPS init unless an op supplies a dedicated thunk |
 | Convolution, pooling, or resize with converter-computed destinations | DPS-init shape, with semantic validity handled by conversion or verification |
 | Runtime-dependent count, such as NonZero or Compress | DPS-init shape; unresolved dimensions remain dynamic |
+
+Expand is the payload-aware exception in that row. A constant target validates
+through `inferExpandShape`. A runtime target is copied once with
+`hip.readback_control`; `hip.checked_expand_extent` then right-aligns input and
+target extents, validates `lhs == rhs || lhs == 1 || rhs == 1`, and computes
+`select(lhs == 1, rhs, lhs)`. This preserves `0` broadcast with `1`, checks the
+running element product, and carries one validity bit into `hip.expand`.
+Invalid shapes produce zero-safe dynamic extents and an ORT-visible runtime
+failure before kernel dispatch. Dialect reification never reads the payload; it
+uses constant inference when possible and otherwise lifts the authoritative
+DPS destination.
 
 Shared declarations live in `HipShapeUtils.h`; common implementation lives in
 `HipShapeUtils.cpp`, with focused category translation units introduced by the

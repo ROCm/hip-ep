@@ -218,3 +218,15 @@ target_include_directories(test-readback-control PRIVATE
 )
 add_test(NAME ReadbackControlUnitTest COMMAND test-readback-control)
 set_target_properties(test-readback-control PROPERTIES FOLDER "runtime-tests")
+
+add_executable(test-shape-validation
+    test_shape_validation.cpp
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/shape_validation.cpp
+)
+target_compile_features(test-shape-validation PRIVATE cxx_std_17)
+target_include_directories(test-shape-validation PRIVATE
+    ${CMAKE_SOURCE_DIR}/lib/Runtime
+)
+target_compile_definitions(test-shape-validation PRIVATE HIPDNN_EP_RT_NO_EXPORT)
+add_test(NAME ShapeValidationUnitTest COMMAND test-shape-validation)
+set_target_properties(test-shape-validation PROPERTIES FOLDER "runtime-tests")

@@ -182,6 +182,8 @@ LogicalResult mlir::hip::reifyTileShape(OpBuilder &b, Location loc, Value input,
 FailureOr<SmallVector<int64_t>>
 mlir::hip::inferExpandShape(ArrayRef<int64_t> inputShape,
                             ArrayRef<int64_t> targetShape) {
+  if (llvm::any_of(targetShape, [](int64_t extent) { return extent < 0; }))
+    return failure();
   SmallVector<int64_t> result;
   if (!OpTrait::util::getBroadcastedShape(inputShape, targetShape, result))
     return failure();

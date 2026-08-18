@@ -9,9 +9,68 @@ namespace mlir {
 namespace hip {
 namespace {
 
-// hip.expand(ctx, input, shape, output)
-//   -> wrap_expand(state, in_ptr, shape_ptr, out_ptr,
-//                  in_shape_ptr, in_rank, out_shape_ptr, out_rank, data_type)
+struct CheckedExpandExtentOpLowering
+    : public ConvertOpToLLVMPattern<CheckedExpandExtentOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(CheckedExpandExtentOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+    auto i64Constant = [&](int64_t value) {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+
+    Value one = i64Constant(1);
+    Value zero = i64Constant(0);
+    Value hostExtent =
+        LLVM::AllocaOp::create(rewriter, loc, ptrType, i64Type, one, 8);
+    Value hostElements =
+        LLVM::AllocaOp::create(rewriter, loc, ptrType, i64Type, one, 8);
+    LLVM::StoreOp::create(rewriter, loc, zero, hostExtent);
+    LLVM::StoreOp::create(rewriter, loc, zero, hostElements);
+    Value valid =
+        LLVM::ZExtOp::create(rewriter, loc, i64Type, adaptor.getPriorValid());
+    Value expected = i64Constant(op.getExpectedExtent());
+
+    SmallVector<Type> parameterTypes = {ptrType, ptrType, ptrType, i64Type,
+                                        i64Type, i64Type, i64Type, i64Type};
+    FailureOr<LLVM::LLVMFuncOp> function = LLVM::lookupOrCreateFn(
+        rewriter, module, kHipCheckedExpandExtent, parameterTypes, i32Type);
+    if (failed(function))
+      return failure();
+    LLVM::CallOp call = LLVM::CallOp::create(
+        rewriter, loc, *function,
+        ValueRange{adaptor.getCtx(), hostExtent, hostElements, valid,
+                   adaptor.getInputExtent(), adaptor.getTargetExtent(),
+                   expected, adaptor.getPriorElements()});
+
+    Value loadedExtent =
+        LLVM::LoadOp::create(rewriter, loc, i64Type, hostExtent);
+    Value loadedElements =
+        LLVM::LoadOp::create(rewriter, loc, i64Type, hostElements);
+    Value statusOk = LLVM::ICmpOp::create(
+        rewriter, loc, LLVM::ICmpPredicate::eq, call.getResult(),
+        LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                 rewriter.getI32IntegerAttr(0)));
+    Value safeExtent =
+        LLVM::SelectOp::create(rewriter, loc, statusOk, loadedExtent, zero);
+    Value safeElements =
+        LLVM::SelectOp::create(rewriter, loc, statusOk, loadedElements, zero);
+    rewriter.replaceOp(op, ValueRange{statusOk, safeExtent, safeElements});
+    return success();
+  }
+};
+
+// hip.expand(ctx, shape_valid, input, shape, output)
+//   -> wrap_expand_checked(state, in_ptr, shape_ptr, out_ptr,
+//                  in_shape_ptr, in_rank, out_shape_ptr, out_rank,
+//                  shape_valid, data_type)
 struct ExpandOpLowering : public ConvertOpToLLVMPattern<ExpandOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -64,22 +123,24 @@ struct ExpandOpLowering : public ConvertOpToLLVMPattern<ExpandOp> {
     Value outShape = emitShapeArray(outType, adaptor.getOutput());
     Value inRank = createI64Const(inType.getRank());
     Value outRank = createI64Const(outType.getRank());
+    Value shapeValid =
+        LLVM::ZExtOp::create(rewriter, loc, i64Type, adaptor.getShapeValid());
     Value dataTypeVal = createI64Const(dataType);
 
-    SmallVector<Type, 9> paramTypes = {ptrType, ptrType, ptrType,
-                                       ptrType, // state, in, shape, out
-                                       ptrType, i64Type, // in_shape, in_rank
-                                       ptrType, i64Type, // out_shape, out_rank
-                                       i64Type};         // data_type
+    SmallVector<Type, 10> paramTypes = {ptrType, ptrType, ptrType,
+                                        ptrType, // state, in, shape, out
+                                        ptrType, i64Type, // in_shape, in_rank
+                                        ptrType, i64Type, // out_shape, out_rank
+                                        i64Type, i64Type}; // valid, data_type
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapExpand, paramTypes, i32Type);
+        rewriter, module, kWrapExpandChecked, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 9> args = {statePtr, inPtr,   shapePtr,
-                                  outPtr,   inShape, inRank,
-                                  outShape, outRank, dataTypeVal};
+    SmallVector<Value, 10> args = {statePtr,   inPtr,      shapePtr, outPtr,
+                                   inShape,    inRank,     outShape, outRank,
+                                   shapeValid, dataTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -91,7 +152,7 @@ struct ExpandOpLowering : public ConvertOpToLLVMPattern<ExpandOp> {
 
 void populateExpandLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns) {
-  patterns.add<ExpandOpLowering>(converter);
+  patterns.add<CheckedExpandExtentOpLowering, ExpandOpLowering>(converter);
 }
 
 } // namespace hip

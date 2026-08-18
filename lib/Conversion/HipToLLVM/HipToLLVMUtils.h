@@ -128,6 +128,7 @@ inline constexpr const char *kWrapCumSum = "wrap_cumsum";
 inline constexpr const char *kWrapPad = "wrap_pad";
 inline constexpr const char *kWrapTile = "wrap_tile";
 inline constexpr const char *kWrapExpand = "wrap_expand";
+inline constexpr const char *kWrapExpandChecked = "wrap_expand_checked";
 inline constexpr const char *kWrapReduceProd = "wrap_reduce_prod";
 inline constexpr const char *kWrapPool = "wrap_pool";
 inline constexpr const char *kWrapResize = "wrap_resize";
@@ -151,6 +152,8 @@ inline constexpr const char *kHipReadbackScalar = "hipdnn_ep_readback_scalar";
 inline constexpr const char *kHipReadbackShapeI64 =
     "hipdnn_ep_readback_shape_i64";
 inline constexpr const char *kHipReadbackControl = "hipdnn_ep_readback_control";
+inline constexpr const char *kHipCheckedExpandExtent =
+    "hipdnn_ep_checked_expand_extent";
 
 // LLVM memref descriptor struct field indices.
 // Layout: { allocatedPtr, alignedPtr, offset, sizes[rank], strides[rank] }

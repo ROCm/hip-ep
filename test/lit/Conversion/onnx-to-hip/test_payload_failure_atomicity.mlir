@@ -45,6 +45,21 @@ module {
   // CHECK-NOT: hip.expand
   // CHECK: "onnx.Expand"
 
+  func.func @expand_negative_target(
+      %input: tensor<1xf32>) -> tensor<?xf32> {
+    %shape = arith.constant dense<[-1]> : tensor<1xi64>
+    %result = "onnx.Expand"(%input, %shape)
+      : (tensor<1xf32>, tensor<1xi64>) -> tensor<?xf32>
+    return %result : tensor<?xf32>
+  }
+
+  // CHECK-LABEL: func.func @expand_negative_target
+  // CHECK-NOT: hip.readback
+  // CHECK-NOT: hip.checked_expand_extent
+  // CHECK-NOT: tensor.empty
+  // CHECK-NOT: hip.expand
+  // CHECK: "onnx.Expand"
+
   // Static imported dimensions may refine dynamic payload inference.
   func.func @pad_static_result_refinement(
       %input: tensor<?x4xf32>) -> tensor<5x4xf32> {

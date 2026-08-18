@@ -351,21 +351,18 @@ LogicalResult reifyPadShape(OpBuilder &b, Location loc, Value data, Value pads,
 LogicalResult reifyTileShape(OpBuilder &b, Location loc, Value input,
                              Value repeats, SmallVectorImpl<OpFoldResult> &out);
 
-/// Reify the result shape of an ONNX-style `expand` op:
-///   broadcast `input.shape` against `shape`'s constant values
-///   (right-aligned, leading-1 padded on whichever side is shorter).
-///
-/// Pure static/dynamic broadcast validation used before conversion emits IR.
+/// Pure result-shape inference for ONNX Expand. The input and requested shapes
+/// are right-aligned and merged with NumPy broadcasting. Requested extents
+/// must be non-negative; a dynamic input extent remains represented by
+/// `ShapedType::kDynamic` when static information cannot refine it.
 FailureOr<SmallVector<int64_t>> inferExpandShape(ArrayRef<int64_t> inputShape,
                                                  ArrayRef<int64_t> targetShape);
 
-///
-/// Same fold-or-bail strategy. `shape` is the target-shape operand
-/// (rank-1 i64 tensor); when it is an `arith.constant` with a
-/// `DenseIntElementsAttr`, the helper runs MLIR's
-/// `OpTrait::util::getBroadcastedShape` and lifts the result shape.
-/// Returns `failure()` when the broadcast result has any dynamic dim
-/// (so the caller falls back to outs-lifting).
+/// Reify a constant-target Expand result. This helper is intentionally
+/// payload-free: non-constant targets and results with unresolved extents
+/// return failure so the op interface can lift the exact DPS destination.
+/// ONNX conversion handles dynamic target payloads separately with one grouped
+/// readback and checked per-axis broadcast construction.
 LogicalResult
 reifyExpandShape(OpBuilder &b, Location loc, Value input, Value shape,
                  SmallVectorImpl<OpFoldResult> &out,

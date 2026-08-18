@@ -1247,6 +1247,9 @@ HIP_KERNEL_API int hip_reduce_prod(
  * - Expand: output_shape[d] is the broadcast result; any input dim that is 1
  *           is replicated. in_coord[d] = (in_shape[d] == 1) ? 0
  *                                       : out_coord[d - rank_diff].
+ *           The entry point rejects negative or incompatible aligned extents,
+ *           checked-product overflow, and missing non-scalar descriptors
+ *           before launching.
  *
  * Both kernels are bounded to kTileMaxRank = 8 input/output dimensions
  * (matches ORT's TArray<int64, 8> default).

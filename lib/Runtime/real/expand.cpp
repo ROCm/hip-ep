@@ -5,13 +5,13 @@
 
 // Expand: copy `input` to `output`, broadcasting any size-1 input dim. ONNX
 // Expand uses numpy-style right-aligned broadcasting; the kernel handles
-// the alignment internally so this wrapper just forwards shapes and ptrs.
+// the alignment internally.
 //
 // Source: onnxruntime/core/providers/cuda/tensor/expand.cu @ v1.22.2.
 //
-// The GPU `shape` tensor pointer is not used here -- the lowering already
-// gives us host-side output_shape, which is the broadcast result the shape
-// tensor would have produced. Avoids a per-call D2H of the shape input.
+// HIP conversion calls the checked adapter below. Both entry points pass the
+// destination descriptor to the kernel for an independent safety check. The
+// original GPU `shape` pointer is unused.
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -54,15 +54,16 @@ int wrap_expand(RuntimeState *state, void *input, void *shape, void *output,
 
   (void)shape;
 
-  if (!state || !input || !output || !output_shape) {
-    RUNTIME_DEBUG_LOG("[REAL] wrap_expand: null argument\n");
+  if (!state) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_expand: null state\n");
     return -1;
   }
-  if (output_rank == 0) {
-    return 0;
+  if (input_rank < 0 || output_rank < 0) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_expand: negative rank\n");
+    return -1;
   }
-  if (input_rank > 0 && !input_shape) {
-    RUNTIME_DEBUG_LOG("[REAL] wrap_expand: input_shape null with rank>0\n");
+  if ((input_rank > 0 && !input_shape) || (output_rank > 0 && !output_shape)) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_expand: missing shape descriptor\n");
     return -1;
   }
 
@@ -70,7 +71,7 @@ int wrap_expand(RuntimeState *state, void *input, void *shape, void *output,
   if (hip_dtype < 0) {
     fprintf(stderr,
             "[REAL] wrap_expand: unsupported data_type=%s(%lld) "
-            "(supported: f16, f32, i32, i64)\n",
+            "(supported: f16, f32, i32, i64, u8)\n",
             hipdnn_ep_datatype_name(data_type), (long long)data_type);
     return -1;
   }
@@ -85,4 +86,16 @@ int wrap_expand(RuntimeState *state, void *input, void *shape, void *output,
   return hip_expand(stream, input, output, input_shape,
                     static_cast<int>(input_rank), output_shape,
                     static_cast<int>(output_rank), hip_dtype);
+}
+int wrap_expand_checked(RuntimeState *state, void *input, void *shape,
+                        void *output, const int64_t *input_shape,
+                        int64_t input_rank, const int64_t *output_shape,
+                        int64_t output_rank, int64_t shape_valid,
+                        int64_t data_type) {
+  if (!shape_valid) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_expand_checked: invalid broadcast shape\n");
+    return -1;
+  }
+  return wrap_expand(state, input, shape, output, input_shape, input_rank,
+                     output_shape, output_rank, data_type);
 }

@@ -2038,6 +2038,70 @@ MutableOperandRange ExpandOp::getDpsInitsMutable() {
   return getOutputMutable();
 }
 
+LogicalResult ExpandOp::verify() {
+  if (failed(verifyDpsComputeOp(getOperation(),
+                                {getInput(), getShape(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+
+  auto inputType = cast<ShapedType>(getInput().getType());
+  auto shapeType = cast<ShapedType>(getShape().getType());
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  if (shapeType.getRank() != 1)
+    return emitOpError("shape must be rank 1");
+  if (shapeType.isDynamicDim(0))
+    return emitOpError("shape length must be static");
+  Type shapeElementType = shapeType.getElementType();
+  if (!shapeElementType.isInteger(32) && !shapeElementType.isInteger(64))
+    return emitOpError("shape element type must be i32 or i64");
+
+  Type elementType = inputType.getElementType();
+  if (outputType.getElementType() != elementType)
+    return emitOpError("input and output element types must match");
+  if (!elementType.isF16() && !elementType.isF32() &&
+      !elementType.isInteger(32) && !elementType.isInteger(64) &&
+      !elementType.isUnsignedInteger(8))
+    return emitOpError("unsupported input element type ")
+           << elementType << "; expected f16, f32, i32, i64, or ui8";
+
+  int64_t inputRank = inputType.getRank();
+  int64_t outputRank = outputType.getRank();
+  int64_t targetRank = shapeType.getDimSize(0);
+  if (outputRank != std::max(inputRank, targetRank))
+    return emitOpError("output rank must equal max(input rank, shape length)");
+  if (outputRank > 8)
+    return emitOpError("output rank exceeds the runtime maximum of 8");
+
+  int64_t inputPadding = outputRank - inputRank;
+  for (int64_t axis : llvm::seq<int64_t>(inputPadding, outputRank)) {
+    int64_t inputExtent = inputType.getDimSize(axis - inputPadding);
+    int64_t outputExtent = outputType.getDimSize(axis);
+    if (!ShapedType::isDynamic(inputExtent) &&
+        !ShapedType::isDynamic(outputExtent) && inputExtent != 1 &&
+        inputExtent != outputExtent)
+      return emitOpError("statically incompatible input/output extent at axis ")
+             << axis << ": " << inputExtent << " vs " << outputExtent;
+  }
+
+  SmallVector<int64_t> targetShape;
+  if (!matchConstantIntTensor(getShape(), targetShape, /*expectedRank=*/1))
+    return success();
+  FailureOr<SmallVector<int64_t>> expected =
+      inferExpandShape(inputType.getShape(), targetShape);
+  if (failed(expected))
+    return emitOpError("constant target is negative or broadcast-incompatible");
+  for (int64_t axis : llvm::seq<int64_t>(0, outputRank)) {
+    int64_t expectedExtent = (*expected)[axis];
+    int64_t outputExtent = outputType.getDimSize(axis);
+    if (!ShapedType::isDynamic(expectedExtent) &&
+        !ShapedType::isDynamic(outputExtent) && expectedExtent != outputExtent)
+      return emitOpError("output extent contradicts constant target at axis ")
+             << axis << ": expected " << expectedExtent << ", got "
+             << outputExtent;
+  }
+  return success();
+}
+
 void ExpandOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
@@ -2216,6 +2280,19 @@ void ReadbackControlOp::getEffects(
       effects.emplace_back(MemoryEffects::Read::get(), &source,
                            SideEffects::DefaultResource::get());
   }
+}
+
+void CheckedExpandExtentOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Write::get(),
+                       SideEffects::DefaultResource::get());
+}
+
+LogicalResult CheckedExpandExtentOp::verify() {
+  if (getExpectedExtent() < -1)
+    return emitOpError("expected_extent must be -1 or non-negative");
+  return success();
 }
 
 LogicalResult ReadbackControlOp::inferReturnTypes(

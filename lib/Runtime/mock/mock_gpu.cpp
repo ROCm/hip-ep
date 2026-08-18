@@ -2000,6 +2000,19 @@ int wrap_expand(RuntimeState *state, void *input, void *shape, void *output,
   return 0;
 }
 
+int wrap_expand_checked(RuntimeState *state, void *input, void *shape,
+                        void *output, const int64_t *input_shape,
+                        int64_t input_rank, const int64_t *output_shape,
+                        int64_t output_rank, int64_t shape_valid,
+                        int64_t data_type) {
+  if (!shape_valid) {
+    fprintf(stderr, "Invalid broadcast shape in wrap_expand_checked\n");
+    return -1;
+  }
+  return wrap_expand(state, input, shape, output, input_shape, input_rank,
+                     output_shape, output_rank, data_type);
+}
+
 int wrap_reduce_prod(RuntimeState *state, void *data, void *axes, void *output,
                      int64_t data_num_elements, int64_t output_num_elements,
                      int64_t axes_num_elements, int64_t data_type,
