@@ -4,6 +4,12 @@
  */
 #include "MlirCustomOp.h"
 
+// HIP must precede LLVM headers on MSVC. LLVM's __has_attribute fallback
+// otherwise makes HIP select its GNU vector implementation.
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+#include <hip/hip_runtime_api.h>
+#endif
+
 // CRITICAL: morphizen.hpp must be included before other morphizen headers
 #include "custom-op-compute-status.hpp"
 #include "morphizen/env_config.hpp"
@@ -21,10 +27,6 @@
 #include "InferenceState.h"
 #include "hip/env.h" // shared cross-platform env reader (single Win32 call)
 
-// HIPDNN_EP_PERF instrumentation dependencies
-#ifdef HIPDNN_EP_LINK_HIP_HOST
-#include <hip/hip_runtime_api.h>
-#endif
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
