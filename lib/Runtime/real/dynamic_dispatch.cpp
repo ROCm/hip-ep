@@ -5,17 +5,21 @@
 
 #include "dynamic_dispatch.h"
 #include "../hipdnn_ep_runtime.h"
-#include "../op_state.h"
 #include "../runtime_state_internal.h"
-#include "runtime_types.h"
+#include "../op_state.h"
+#include "../hipdnn_ep_errors.h"
 
+#include <any>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
 
 // DynamicDispatch headers
+// Note: Include paths are configured in CMakeLists.txt to work with both
+// install layout (ryzenai/dynamic_dispatch/...) and source layout
 #include <ops/dmacompiler/combined_gemm/combined_gemm.hpp>
 #include <ops/dmacompiler/iconv/iconv.hpp>
 #include <ops/op_interface.hpp>
@@ -97,20 +101,24 @@ get_xrt_context(RuntimeState *state) {
 // (XRT context binding, transaction binary loading, etc.). We cache them
 // in RuntimeState's op_state slots to avoid recreating them per inference.
 //
-// Each DD operator instance is stored as:
-//   OpState { void *payload = std::unique_ptr<OpInterface>* }
-//
-// The cleanup callback is set to delete the unique_ptr when the session ends.
+// Each DD operator uses the OpStateT<T> CRTP base for lifecycle management.
 //===----------------------------------------------------------------------===//
 
-// Base cleanup function for DynamicDispatch operators
-template <typename T>
-static void dd_op_cleanup(void *payload) {
-  if (payload) {
-    auto *op_ptr = static_cast<std::unique_ptr<T> *>(payload);
-    delete op_ptr;
-  }
-}
+// GEMM operator state
+struct DDGemmState : OpStateT<DDGemmState> {
+  using GemmOp = ryzenai::combined_gemm<uint16_t, uint8_t, uint16_t>;
+  std::unique_ptr<GemmOp> op;
+
+  DDGemmState(std::unique_ptr<GemmOp> &&gemm_op) : op(std::move(gemm_op)) {}
+};
+
+// Conv2D operator state
+struct DDConvState : OpStateT<DDConvState> {
+  using ConvOp = ryzenai::iconv<uint16_t, uint8_t, uint16_t>;
+  std::unique_ptr<ConvOp> op;
+
+  DDConvState(std::unique_ptr<ConvOp> &&conv_op) : op(std::move(conv_op)) {}
+};
 
 //===----------------------------------------------------------------------===//
 // wrap_dd_matmul - GEMM/MatMul via DynamicDispatch
@@ -123,7 +131,7 @@ int wrap_dd_matmul(RuntimeState *state, int32_t op_state_slot,
                    int64_t data_type) {
   if (!state) {
     fprintf(stderr, "wrap_dd_matmul: null RuntimeState\n");
-    return HIPDNN_STATUS_BAD_PARAM;
+    return HIPDNN_EP_ERR_NULL_POINTER;
   }
 
   // Convert data type
@@ -131,7 +139,7 @@ int wrap_dd_matmul(RuntimeState *state, int32_t op_state_slot,
   if (!dtype_str) {
     fprintf(stderr, "wrap_dd_matmul: unsupported data type %lld\n",
             (long long)data_type);
-    return HIPDNN_STATUS_BAD_PARAM;
+    return HIPDNN_EP_ERR_INVALID_DIMENSION;
   }
 
   // Get XRT context
@@ -139,45 +147,30 @@ int wrap_dd_matmul(RuntimeState *state, int32_t op_state_slot,
   if (!xrt_ctx) {
     fprintf(stderr, "wrap_dd_matmul: XRT context not initialized\n");
     fprintf(stderr, "  (XRT context management not yet implemented in RuntimeState)\n");
-    return HIPDNN_STATUS_INTERNAL_ERROR;
+    return -1;
   }
 
-  // Get or create the DD operator instance from op_state slot
-  using GemmOp = ryzenai::combined_gemm<uint16_t, uint8_t, uint16_t>;
-  OpState *op_slot = hipdnn_ep_get_op_state(state, op_state_slot);
+  DDGemmState *gemm_state = DDGemmState::get_op_state(state, op_state_slot);
 
-  std::unique_ptr<GemmOp> *gemm_op_ptr = nullptr;
-
-  if (!op_slot || !op_slot->payload) {
+  if (!gemm_state) {
     // First call: create operator instance
     try {
-      auto gemm_op = std::make_unique<GemmOp>(dtype_str, dtype_str, dtype_str,
-                                               true /* load_xrt */);
-      gemm_op->register_xrt_context(xrt_ctx);
+      // Create DynamicDispatch combined_gemm operator
+      // Constructor: combined_gemm(a_dtype, b_dtype, c_dtype, load_xrt, attr={})
+      std::map<std::string, std::any> attr;
+      auto gemm_op = std::make_unique<DDGemmState::GemmOp>(
+          dtype_str, dtype_str, dtype_str, true, attr);
 
-      // Store in op_state slot
-      gemm_op_ptr = new std::unique_ptr<GemmOp>(std::move(gemm_op));
-
-      if (!op_slot) {
-        op_slot = hipdnn_ep_alloc_op_state(state, op_state_slot);
-        if (!op_slot) {
-          delete gemm_op_ptr;
-          fprintf(stderr, "wrap_dd_matmul: failed to allocate op_state slot\n");
-          return HIPDNN_STATUS_ALLOC_FAILED;
-        }
-      }
-
-      op_slot->payload = gemm_op_ptr;
-      op_slot->cleanup = dd_op_cleanup<GemmOp>;
+      // Create state and store in slot
+      auto state_ptr = DDGemmState::create(std::move(gemm_op));
+      gemm_state = state_ptr.get();
+      hipdnn_ep_op_state_set(state, op_state_slot, state_ptr.release());
 
     } catch (const std::exception &e) {
       fprintf(stderr, "wrap_dd_matmul: failed to create operator: %s\n",
-              e.what());
-      return HIPDNN_STATUS_EXECUTION_FAILED;
+                  e.what());
+      return -1;
     }
-  } else {
-    // Reuse cached operator
-    gemm_op_ptr = static_cast<std::unique_ptr<GemmOp> *>(op_slot->payload);
   }
 
   // Prepare input/output tensors
@@ -216,14 +209,15 @@ int wrap_dd_matmul(RuntimeState *state, int32_t op_state_slot,
 
   // Execute the operator
   try {
-    (*gemm_op_ptr)->execute(inputs, outputs);
+    gemm_state->op->execute(inputs, outputs);
   } catch (const std::exception &e) {
     fprintf(stderr, "wrap_dd_matmul: execution failed: %s\n", e.what());
     fprintf(stderr, "  M=%lld, N=%lld, K=%lld, dtype=%s\n", (long long)M,
             (long long)N, (long long)K, dtype_str);
-    return HIPDNN_STATUS_EXECUTION_FAILED;
+    return -1;
   }
 
+  (void)alpha; (void)beta; (void)transA; (void)transB;  // TODO: Handle these parameters
   return 0;
 }
 
@@ -241,7 +235,7 @@ int wrap_dd_conv2d(RuntimeState *state, int32_t op_state_slot,
                    int64_t dilation_w, int64_t group, int64_t data_type) {
   if (!state) {
     fprintf(stderr, "wrap_dd_conv2d: null RuntimeState\n");
-    return HIPDNN_STATUS_BAD_PARAM;
+    return HIPDNN_EP_ERR_NULL_POINTER;
   }
 
   // Convert data type
@@ -249,7 +243,7 @@ int wrap_dd_conv2d(RuntimeState *state, int32_t op_state_slot,
   if (!dtype_str) {
     fprintf(stderr, "wrap_dd_conv2d: unsupported data type %lld\n",
             (long long)data_type);
-    return HIPDNN_STATUS_BAD_PARAM;
+    return HIPDNN_EP_ERR_INVALID_DIMENSION;
   }
 
   // Get XRT context
@@ -257,96 +251,44 @@ int wrap_dd_conv2d(RuntimeState *state, int32_t op_state_slot,
   if (!xrt_ctx) {
     fprintf(stderr, "wrap_dd_conv2d: XRT context not initialized\n");
     fprintf(stderr, "  (XRT context management not yet implemented in RuntimeState)\n");
-    return HIPDNN_STATUS_INTERNAL_ERROR;
+    return -1;
   }
 
-  // Get or create the DD operator instance
-  using ConvOp = ryzenai::iconv<uint16_t, uint8_t, uint16_t>;
-  OpState *op_slot = hipdnn_ep_get_op_state(state, op_state_slot);
+  DDConvState *conv_state = DDConvState::get_op_state(state, op_state_slot);
 
-  std::unique_ptr<ConvOp> *conv_op_ptr = nullptr;
-
-  if (!op_slot || !op_slot->payload) {
+  if (!conv_state) {
     // First call: create operator instance
     try {
-      auto conv_op = std::make_unique<ConvOp>(dtype_str, dtype_str, dtype_str,
-                                               true /* load_xrt */);
-      conv_op->register_xrt_context(xrt_ctx);
+      // Create DynamicDispatch iconv operator
+      // Constructor: iconv(a_dtype, b_dtype, c_dtype, load_xrt, attr)
+      std::map<std::string, std::any> attr;
+      auto conv_op = std::make_unique<DDConvState::ConvOp>(
+              dtype_str, dtype_str, dtype_str, true, attr);
 
-      // Store in op_state slot
-      conv_op_ptr = new std::unique_ptr<ConvOp>(std::move(conv_op));
-
-      if (!op_slot) {
-        op_slot = hipdnn_ep_alloc_op_state(state, op_state_slot);
-        if (!op_slot) {
-          delete conv_op_ptr;
-          fprintf(stderr, "wrap_dd_conv2d: failed to allocate op_state slot\n");
-          return HIPDNN_STATUS_ALLOC_FAILED;
-        }
-      }
-
-      op_slot->payload = conv_op_ptr;
-      op_slot->cleanup = dd_op_cleanup<ConvOp>;
+      // Create state and store in slot
+      auto state_ptr = DDConvState::create(std::move(conv_op));
+      conv_state = state_ptr.get();
+      hipdnn_ep_op_state_set(state, op_state_slot, state_ptr.release());
 
     } catch (const std::exception &e) {
       fprintf(stderr, "wrap_dd_conv2d: failed to create operator: %s\n",
-              e.what());
-      return HIPDNN_STATUS_EXECUTION_FAILED;
+                  e.what());
+      return -1;
     }
-  } else {
-    // Reuse cached operator
-    conv_op_ptr = static_cast<std::unique_ptr<ConvOp> *>(op_slot->payload);
   }
 
-  // Prepare input/output tensors
-  std::vector<Tensor> inputs;
-  std::vector<Tensor> outputs;
+  // TODO: Implement tensor preparation and execution for Conv2D
+  // This requires understanding the DynamicDispatch iconv tensor format
+  (void)conv_state;
+  (void)input; (void)n; (void)c; (void)h; (void)w;
+  (void)weights; (void)k; (void)bias; (void)output;
+  (void)out_h; (void)out_w; (void)kernel_h; (void)kernel_w;
+  (void)stride_h; (void)stride_w; (void)pad_top; (void)pad_left;
+  (void)pad_bottom; (void)pad_right; (void)dilation_h; (void)dilation_w;
+  (void)group;
 
-  // Input tensor (N x C x H x W)
-  Tensor tensor_in;
-  tensor_in.data = const_cast<void *>(input);
-  tensor_in.shape = {static_cast<size_t>(n), static_cast<size_t>(c),
-                     static_cast<size_t>(h), static_cast<size_t>(w)};
-  tensor_in.dtype = dtype_str;
-  inputs.push_back(tensor_in);
-
-  // Weights tensor (K x C/group x kH x kW)
-  Tensor tensor_w;
-  tensor_w.data = const_cast<void *>(weights);
-  tensor_w.shape = {static_cast<size_t>(k), static_cast<size_t>(c / group),
-                    static_cast<size_t>(kernel_h),
-                    static_cast<size_t>(kernel_w)};
-  tensor_w.dtype = dtype_str;
-  inputs.push_back(tensor_w);
-
-  // Bias tensor (if provided)
-  if (bias) {
-    Tensor tensor_bias;
-    tensor_bias.data = const_cast<void *>(bias);
-    tensor_bias.shape = {static_cast<size_t>(k)};
-    tensor_bias.dtype = dtype_str;
-    inputs.push_back(tensor_bias);
-  }
-
-  // Output tensor (N x K x outH x outW)
-  Tensor tensor_out;
-  tensor_out.data = output;
-  tensor_out.shape = {static_cast<size_t>(n), static_cast<size_t>(k),
-                      static_cast<size_t>(out_h), static_cast<size_t>(out_w)};
-  tensor_out.dtype = dtype_str;
-  outputs.push_back(tensor_out);
-
-  // Execute the operator
-  try {
-    (*conv_op_ptr)->execute(inputs, outputs);
-  } catch (const std::exception &e) {
-    fprintf(stderr, "wrap_dd_conv2d: execution failed: %s\n", e.what());
-    fprintf(stderr, "  N=%lld, C=%lld, H=%lld, W=%lld, K=%lld\n", (long long)n,
-            (long long)c, (long long)h, (long long)w, (long long)k);
-    return HIPDNN_STATUS_EXECUTION_FAILED;
-  }
-
-  return 0;
+  fprintf(stderr, "wrap_dd_conv2d: tensor preparation not yet implemented\n");
+  return -1;
 }
 
 //===----------------------------------------------------------------------===//

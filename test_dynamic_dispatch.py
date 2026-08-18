@@ -19,6 +19,14 @@ os.environ['HIPDNN_EP_DEBUG'] = '1'  # Enable COMPILER_DEBUG_LOG
 os.environ['HIPEP_USE_DYNAMIC_DISPATCH'] = '1'
 # Point to the actual install location (one level up from repo)
 os.environ['HIPEP_EP_BIN'] = str(pathlib.Path(__file__).resolve().parent.parent / "install" / "bin")
+# Add DynamicDispatch and XRT DLL directories to PATH
+dd_bin_dir = "c:/vai-rt-0/vai-rt-build/install/bin"
+xrt_bin_dir = "c:/vai-rt-0/vai-rt-build/install/xrt/bin"
+path_additions = dd_bin_dir + os.pathsep + xrt_bin_dir
+if 'PATH' in os.environ:
+    os.environ['PATH'] = path_additions + os.pathsep + os.environ['PATH']
+else:
+    os.environ['PATH'] = path_additions
 
 # Add test path for conftest
 REPO_ROOT = pathlib.Path(__file__).resolve().parent
@@ -111,9 +119,9 @@ try:
     print(f"Active providers: {providers}")
 
     if EP_REGISTRATION_NAME in providers:
-        print(f"✓ {EP_REGISTRATION_NAME} is active")
+        print(f"[OK] {EP_REGISTRATION_NAME} is active")
     else:
-        print(f"✗ {EP_REGISTRATION_NAME} is NOT active")
+        print(f"[FAIL] {EP_REGISTRATION_NAME} is NOT active")
 
     print()
     print("Look for compilation debug output above.")
@@ -131,7 +139,7 @@ try:
     outputs = session.run(None, {'A': A_data, 'B': B_data})
 
     print(f"Output shape: {outputs[0].shape}")
-    print("✓ Inference completed successfully")
+    print("[OK] Inference completed successfully")
 
 finally:
     # Cleanup

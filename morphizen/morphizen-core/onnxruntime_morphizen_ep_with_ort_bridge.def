@@ -17,3 +17,7 @@ EXPORTS
     ??_7PassProto@morphizen@@6B@
     ?apply@BaseRule@morphizen@@QEAAXPEAUGraph@onnxruntime@@@Z
     ?create_rule@Rule@morphizen@@SA?AV?$unique_ptr@VRule@morphizen@@U?$default_delete@VRule@morphizen@@@std@@@std@@V?$shared_ptr@VPattern@morphizen@@@4@AEBV?$function@$$A6A_NPEAUGraph@onnxruntime@@AEAVBinder@morphizen@@@Z@4@@Z
+    wrap_dd_matmul
+    wrap_dd_conv2d
+    hipdnn_ep_op_state_get
+    hipdnn_ep_op_state_set
