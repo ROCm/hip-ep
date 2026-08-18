@@ -26,10 +26,10 @@ func.func @dynamic_output(
 //     ↓
 // onnx.MatMul
 //     ↓
-// onnx.Add
+// onnx.Add (?x256xf16)
 //     ↓
-// onnx.Reshape ──→ func.return（%graph_output）
-//     └──────────→ onnx.Cast
+// onnx.Reshape(?xf16) ──> func.return（%graph_output）
+//     └──────────> onnx.Cast
 
 // CHECK-LABEL: func.func @test_return_shape
 // CHECK-NEXT: %[[OUT:.*]] = hipsr.pool_domain(%[[CTX:.*]], %[[INPUT:.*]], %[[WEIGHT:.*]], %[[BIAS:.*]] : !hipsr.context, memref<?x512xf16, #hipsr.mem<device>>, memref<512x256xf16, #hipsr.mem<device>>, memref<?x256xf16, #hipsr.mem<device>>) {
