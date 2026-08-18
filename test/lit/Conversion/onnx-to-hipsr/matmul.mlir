@@ -7,7 +7,7 @@
 // ONNX case).
 //===----------------------------------------------------------------------===//
 
-// RUN: hip-mlir-opt %s --split-input-file -allow-unregistered-dialect -convert-onnx-to-hipsr | FileCheck %s
+// RUN: hip-mlir-opt %s --onnx-dialect=modeled --split-input-file -allow-unregistered-dialect -convert-onnx-to-hipsr | FileCheck %s
 
 // 2-D x 2-D (dynamic M).
 // CHECK-LABEL: func.func @matmul_2d(

@@ -6,7 +6,7 @@
 // live in expand-invalid.mlir.
 //===----------------------------------------------------------------------===//
 
-// RUN: hip-mlir-opt %s --split-input-file -allow-unregistered-dialect -convert-onnx-to-hipsr | FileCheck %s
+// RUN: hip-mlir-opt %s --onnx-dialect=modeled --split-input-file -allow-unregistered-dialect -convert-onnx-to-hipsr | FileCheck %s
 
 // The requested extents are read at runtime, so the init is a barrier
 // placeholder over both the input and the shape operand.

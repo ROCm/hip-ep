@@ -7,6 +7,7 @@
 
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
+#include "hip/Dialect/Onnx/IR/OnnxOps.h"
 
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -15,32 +16,25 @@ namespace mlir {
 namespace hipsr {
 namespace {
 
-struct MatMulToHipsr : public ::mlir::ConversionPattern {
+struct MatMulToHipsr
+    : public ::mlir::OpConversionPattern<::mlir::onnx::MatMulOp> {
   MatMulToHipsr(const ::mlir::TypeConverter &typeConverter,
                 ::mlir::MLIRContext *ctx)
-      : ConversionPattern("onnx.MatMul", /*benefit=*/1, ctx) {}
+      : OpConversionPattern(ctx) {}
 
   ::mlir::LogicalResult
-  matchAndRewrite(::mlir::Operation *op,
-                  ::mlir::ArrayRef<::mlir::Value> operands,
+  matchAndRewrite(::mlir::onnx::MatMulOp op, OpAdaptor adaptor,
                   ::mlir::ConversionPatternRewriter &rewriter) const override {
-    // Matching is by name on an (unregistered) ONNX op, so guard the shape:
-    // onnx.MatMul is two-input / single-result.
-    if (op->getNumOperands() != 2 || op->getNumResults() != 1) {
-      return rewriter.notifyMatchFailure(
-          op, "expected two operands and a single result");
-    }
-
     ::mlir::FailureOr<::mlir::Value> ctx = getHipsrContextArg(op, rewriter);
     if (::mlir::failed(ctx)) {
       return ::mlir::failure();
     }
 
-    ::mlir::Location loc = op->getLoc();
-    ::mlir::Value a = operands[0];
-    ::mlir::Value b = operands[1];
+    ::mlir::Location loc = op.getLoc();
+    ::mlir::Value a = adaptor.getA();
+    ::mlir::Value b = adaptor.getB();
     auto resultType =
-        ::mlir::dyn_cast<::mlir::RankedTensorType>(op->getResult(0).getType());
+        ::mlir::dyn_cast<::mlir::RankedTensorType>(op.getY().getType());
     if (!resultType) {
       return rewriter.notifyMatchFailure(op, "expected ranked tensor result");
     }
