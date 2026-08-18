@@ -42,7 +42,8 @@ target_link_libraries(${morphizen_CORE_DYNAMIC_UNIQUE_ID}
 )
 
 # Link DynamicDispatch library and force inclusion of symbols
-if(NOT BUILD_MOCK_RUNTIME)
+# Only link if the target exists (i.e., DynamicDispatch was found)
+if(NOT BUILD_MOCK_RUNTIME AND TARGET hipdnn-ep-dd)
   # Link against hipdnn-ep-dd target (contains all DD sources and dependencies)
   # The DD library variables (DD_CORE_LIB, DD_TRANSACTION_LIB, etc.) are defined
   # in lib/Runtime/CMakeLists.txt and already linked into hipdnn-ep-dd
