@@ -33,11 +33,14 @@ env:
   # ORT is still built from source either way). Part of the ort-install cache
   # key. Remove a PR once its fix lands in the pinned ONNX Runtime release.
   ONNXRUNTIME_PR_PATCHES: ""
-  OGA_VERSION: "0.14.0"
-  # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
-  # pull/<n>.patch and `git apply` on top of v<OGA_VERSION>. Part of the OGA
-  # cache key. Remove a PR once it lands in the pinned OGA release.
-  OGA_PR_PATCHES: "2194"
+  # Fork branch carrying AMDGPU MorphiZen integration (former PR 2194) plus
+  # sliding_window support.
+  OGA_REPO: "cliu1003/onnxruntime-genai"
+  OGA_REF: "sliding_window_support_amdgpu"
+  # Optional space-separated microsoft/onnxruntime-genai PR numbers applied
+  # on top of the fork checkout via pull/<n>.patch + git am. Empty when the
+  # fork branch already carries the needed integration.
+  OGA_PR_PATCHES: ""
   # The GPU arch the artifact targets. CI runners have no GPU, so it is passed
   # explicitly (build.py auto-detects from /sys on a real GPU host).
   HIP_ARCHITECTURES: gfx1151
@@ -290,17 +293,20 @@ jobs:
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/oga-artifacts
-          key: linux-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-am-whl-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
+          key: linux-oga-${{ env.OGA_REPO }}-${{ env.OGA_REF }}-pr${{ env.OGA_PR_PATCHES }}-am-whl-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
 
       # Checkout + build are skipped on an OGA cache hit (step-level gate); the
       # install-copy below always runs so the
       # cached artifacts land in install/ either way.
+      # OGA is built from cliu1003/onnxruntime-genai sliding_window_support_amdgpu
+      # (AMDGPU MorphiZen integration + sliding_window). Optional OGA_PR_PATCHES
+      # apply extra upstream PRs on top of the fork checkout.
       - name: Checkout OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: microsoft/onnxruntime-genai
-          ref: v${{ env.OGA_VERSION }}
+          repository: ${{ env.OGA_REPO }}
+          ref: ${{ env.OGA_REF }}
           submodules: recursive
           path: onnxruntime-genai
           fetch-depth: 1
