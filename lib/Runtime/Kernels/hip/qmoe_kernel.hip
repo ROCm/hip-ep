@@ -234,6 +234,52 @@ __global__ void scatter_add_kernel(
 }
 
 // ---------------------------------------------------------------------------
+// Scatter-add into an fp32 accumulator, applying the routing weight to the
+// WHOLE per-expert result (raw down_proj GEMM output PLUS the down_proj bias):
+//   out_accum[token_ids[i], j] += (float)weights[i]
+//                                 * ((float)expert_out[i, j] + (float)bias[j])
+//
+// `expert_out` is the RAW down_proj GEMM  W_dn . h_e  in FP32 (see
+// hip_matmul_nbits_fp32out) — NO routing weight and NO bias applied. Keeping it
+// fp32 is what fixes the overflow: an individual down_proj channel can exceed
+// the fp16 max (65504) even when the final weighted cross-expert sum is well in
+// range, so narrowing to fp16 before the weight scales it back down would turn
+// it into inf -> NaN. The per-expert bias b_e (`bias[j]`, broadcast over rows)
+// is added and then the SAME per-row routing weight scales the whole sum,
+// yielding the correct   w_e * (W_dn . h_e + b_e). Applying the weight to the
+// bias too (rather than adding a raw bias) avoids the "bias not scaled by the
+// routing weight" defect: summed over the k experts (Sum w_e = 1) a raw bias
+// would inject a systematic  Sum_e (1 - w_e) * b_e  offset (~k-1 average
+// biases) into every token, corrupting logits far beyond fp16 rounding.
+//
+// `bias` null => scatter w_e * (W_dn . h_e); `weights` null => weight 1.
+// Cross-expert accumulation stays in fp32 so partial sums never round or
+// overflow through fp16; the caller casts the accumulator to fp16 once at the
+// end. Safe without atomics when experts run serially (each expert launch
+// touches a token row at most once, and launches are ordered on one stream).
+// ---------------------------------------------------------------------------
+__global__ void scatter_add_fp32_kernel(
+    float* __restrict__ out_accum,
+    const float* __restrict__ expert_out,  // FP32 raw W_dn.h_e (no w, no bias)
+    const int32_t* __restrict__ token_ids,
+    const __half* __restrict__ bias,     // [width] per-channel, or null
+    const __half* __restrict__ weights,  // [count] per-row routing weight
+    int64_t width,
+    int64_t count) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= count * width) return;
+
+  int64_t row = idx / width;
+  int64_t col = idx % width;
+  int64_t dst_row = static_cast<int64_t>(token_ids[row]);
+
+  float w = weights ? static_cast<float>(weights[row]) : 1.0f;
+  float val = expert_out[idx];
+  if (bias) val += static_cast<float>(bias[col]);
+  out_accum[dst_row * width + col] += w * val;
+}
+
+// ---------------------------------------------------------------------------
 // GPU-side expert bucketing (Phase 2 foundation).
 //
 // Replaces the host-side bucket loop in wrap_qmoe that today requires a D2H
@@ -492,6 +538,46 @@ extern "C" int hip_qmoe_scatter_add(
   hipError_t err = hipGetLastError();
   if (err != hipSuccess)
     fprintf(stderr, "[custom_kernels] hip_qmoe_scatter_add failed: %s\n",
+            hipGetErrorString(err));
+  return static_cast<int>(err);
+}
+
+extern "C" int hip_qmoe_scatter_add_fp32(
+    void* stream,
+    void* out_accum,
+    const void* expert_out,
+    const void* token_ids,
+    const void* bias,
+    const void* weights,
+    int64_t width,
+    int64_t count,
+    int64_t element_size_bytes) {
+  if (count <= 0 || width <= 0) return 0;
+
+  hipStream_t s = static_cast<hipStream_t>(stream);
+  int64_t total = count * width;
+  int grid = static_cast<int>((total + kBlock - 1) / kBlock);
+
+  // expert_out is FP32; out_accum is fp32; bias/weights are fp16.
+  // element_size_bytes describes bias/weights (fp16=2).
+  if (element_size_bytes != 2) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_scatter_add_fp32: only fp16 "
+            "bias/weights supported, got element_size %lld\n",
+            (long long)element_size_bytes);
+    return -1;
+  }
+
+  hipLaunchKernelGGL(scatter_add_fp32_kernel, dim3(grid), dim3(kBlock), 0, s,
+                     static_cast<float*>(out_accum),
+                     static_cast<const float*>(expert_out),
+                     static_cast<const int32_t*>(token_ids),
+                     static_cast<const __half*>(bias),
+                     static_cast<const __half*>(weights), width, count);
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess)
+    fprintf(stderr, "[custom_kernels] hip_qmoe_scatter_add_fp32 failed: %s\n",
             hipGetErrorString(err));
   return static_cast<int>(err);
 }

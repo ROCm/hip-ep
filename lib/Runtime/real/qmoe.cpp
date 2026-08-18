@@ -145,6 +145,17 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   size_t sz_a_scale_in = align_up_64(k_blocks_fc1 * sizeof(float));
   size_t sz_a_qb_mid = align_up_64(k * inter_size * sizeof(int8_t));
   size_t sz_a_scale_mid = align_up_64(k * k_blocks_fc2 * sizeof(float));
+  // fp32 output accumulator for the multi-pass path: cross-expert weighted sums
+  // are accumulated in fp32 so a single expert's down_proj (which can exceed
+  // the fp16 max) never overflows an fp16 intermediate. Cast to the fp16 graph
+  // output once after the expert loop. (Unused by the fused decode fast path.)
+  size_t sz_out_accum = align_up_64(num_tokens * hidden_size * sizeof(float));
+  // fp32 down_proj (fc2) output for the multi-pass path. The raw per-expert
+  // down_proj result is stored in fp32 (not the fp16 d_fc2_buf) so a channel
+  // that exceeds the fp16 max never overflows to inf before the routing weight
+  // scales it back into range; the weighted bias + weight are applied in the
+  // fp32 scatter below. Sized [count<=act_slots, hidden] in fp32.
+  size_t sz_fc2_f32 = align_up_64(act_slots * hidden_size * sizeof(float));
 
   size_t off_expert_indices = 0;
   size_t off_expert_weights = off_expert_indices + sz_expert_indices;
@@ -160,7 +171,9 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   size_t off_a_scale_in = off_a_qb_in + sz_a_qb_in;
   size_t off_a_qb_mid = off_a_scale_in + sz_a_scale_in;
   size_t off_a_scale_mid = off_a_qb_mid + sz_a_qb_mid;
-  size_t total_scratch = off_a_scale_mid + sz_a_scale_mid;
+  size_t off_out_accum = off_a_scale_mid + sz_a_scale_mid;
+  size_t off_fc2_f32 = off_out_accum + sz_out_accum;
+  size_t total_scratch = off_fc2_f32 + sz_fc2_f32;
 
   if (hipdnn_ep_state_ensure_qmoe_scratch(state, total_scratch) != 0) {
     fprintf(stderr, "wrap_qmoe: ensure_qmoe_scratch(%zu) failed\n",
@@ -186,6 +199,8 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   void *d_a_scale_in = scratch_base + off_a_scale_in;
   void *d_a_qb_mid = scratch_base + off_a_qb_mid;
   void *d_a_scale_mid = scratch_base + off_a_scale_mid;
+  float *d_out_accum = reinterpret_cast<float *>(scratch_base + off_out_accum);
+  float *d_fc2_f32 = reinterpret_cast<float *>(scratch_base + off_fc2_f32);
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: topk_routing(tokens=%lld, experts=%lld, "
                     "k=%lld, normalize=%lld)\n",
@@ -284,8 +299,11 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       h_offsets[e + 1] = h_offsets[e] + static_cast<int64_t>(h_counts[e]);
     }
 
-    HIP_CHECK(hipMemsetAsync(output, 0, num_tokens * hidden_size * elem_size,
-                             hip_stream));
+    // Zero the fp32 accumulator (not the fp16 graph output): experts scatter
+    // their pre-weighted contributions here in fp32, then a single cast writes
+    // the fp16 graph output after the loop.
+    HIP_CHECK(hipMemsetAsync(
+        d_out_accum, 0, num_tokens * hidden_size * sizeof(float), hip_stream));
 
     int64_t active_experts = 0;
     for (int64_t e = 0; e < num_experts; e++) {
@@ -402,7 +420,12 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                                            e * hidden_size * elem_size
                                      : nullptr;
 
-      // Same pre-unpack as fc1; per-expert distinct pointer.
+      // fp32out picks its path on count exactly like the fp16 dispatch: the
+      // small-M (decode) regime uses the row-major int4 GEMV (UNPACKED uint8
+      // zeros), while count >= 16 with inter_size % 32 == 0 uses fused-dequant
+      // WMMA (fp16 zeros). Prepare BOTH zp forms so fp32out can dispatch either
+      // way; the fp16 conversion is only computed when the WMMA path is
+      // reachable (avoids an unneeded convert kernel on decode).
       const void *fc2_pre_zp_u8 = nullptr;
       const void *fc2_pre_zp_fp16 = nullptr;
       if (fc2_zp_e && expert_weight_bits == 4 && block_size > 0) {
@@ -413,8 +436,8 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
           result = -1;
           goto cleanup;
         }
-        bool wmma_data_format = (inter_size % 32 == 0);
-        if (wmma_data_format && count > 1) {
+        bool fc2_wmma = (inter_size % 32 == 0) && (count >= 16);
+        if (fc2_wmma) {
           fc2_pre_zp_fp16 = hipdnn_ep_real::lookup_or_convert_zp_fp16(
               *zpc, stream, fc2_zp_e, static_cast<int>(hidden_size), ngk);
           if (!fc2_pre_zp_fp16) {
@@ -424,20 +447,40 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
         }
       }
 
-      RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: fc2 matmul_nbits "
-                        "[%lld x %lld] -> [%lld x %lld]\n",
-                        (long long)e, (long long)count, (long long)inter_size,
-                        (long long)count, (long long)hidden_size);
-      HIP_CHECK(hip_matmul_nbits(
-          stream, d_act_buf, fc2_w_e, fc2_s_e, fc2_zp_e, fc2_b_e, d_fc2_buf,
-          count, hidden_size, inter_size, 1, expert_weight_bits, block_size,
-          elem_size, /*zp_elem_size=*/1, fc2_pre_zp_u8, fc2_pre_zp_fp16));
+      // Down_proj GEMM into an FP32 output (no routing weight, no bias). A raw
+      // per-expert down_proj channel can exceed the fp16 max (65504); computing
+      // and storing it in fp32 (hip_matmul_nbits_fp32out) keeps it finite so it
+      // survives until the routing weight scales it back into range. The
+      // routing weight AND the (weighted) bias are both applied afterwards in
+      // the fp32 scatter, reconstructing w_e*(W_dn . h_e + b_e). fp32out picks
+      // WMMA (count>=16, fp16 zeros) vs GEMV (uint8 zeros) internally on count.
+      RUNTIME_DEBUG_LOG(
+          "[REAL] wrap_qmoe: expert %lld: fc2 matmul_nbits_fp32out "
+          "(no weight/bias) [%lld x %lld] -> [%lld x %lld]\n",
+          (long long)e, (long long)count, (long long)inter_size,
+          (long long)count, (long long)hidden_size);
+      HIP_CHECK(hip_matmul_nbits_fp32out(
+          stream, d_act_buf, fc2_w_e, fc2_s_e, fc2_pre_zp_u8, fc2_pre_zp_fp16,
+          /*bias=*/nullptr, d_fc2_f32, count, hidden_size, inter_size,
+          expert_weight_bits, block_size));
 
-      RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: scatter_add\n",
+      // expert_out (d_fc2_f32) is the raw fp32 W_dn . h_e. The scatter applies
+      // the routing weight to the whole (GEMM result + down_proj bias) under
+      // the SAME per-row weight -> w_e*(W_dn . h_e + b_e), accumulating across
+      // experts in fp32 (no fp16 rounding / overflow).
+      RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: scatter_add_fp32 "
+                        "(weighted result+bias)\n",
                         (long long)e);
-      HIP_CHECK(hip_qmoe_scatter_add(stream, output, d_fc2_buf, d_ids_e,
-                                     d_wts_e, hidden_size, count, elem_size));
+      HIP_CHECK(hip_qmoe_scatter_add_fp32(stream, d_out_accum, d_fc2_f32,
+                                          d_ids_e, fc2_b_e, d_wts_e,
+                                          hidden_size, count, elem_size));
     }
+
+    // Cast the fp32 accumulator down to the fp16 graph output once. This is the
+    // only fp16 narrowing of the cross-expert result, matching the ORT CPU
+    // kernel which keeps intermediates in fp32 and narrows only on final write.
+    HIP_CHECK(hip_cast(stream, d_out_accum, output, num_tokens * hidden_size,
+                       HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16));
   }
 
 cleanup:

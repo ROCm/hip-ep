@@ -1675,6 +1675,39 @@ HIP_KERNEL_API int hip_matmul_nbits(
     const void* pre_unpacked_zp_u8,
     const void* pre_unpacked_zp_fp16);
 
+/* bits=4 quantized GEMM with an FP32 output. Reuses the SAME two int4 kernels
+ * the fp16 hip_matmul_nbits dispatch uses (instantiated with OutT=float) and
+ * picks between them on M with FIXED configs — no autotune, none of the fp16
+ * autotune caches touched:
+ *   - M >= 16 and K % 32 == 0 → fused-dequant WMMA (128x128, needs fp16 zeros)
+ *   - otherwise               → row-major int4 GEMV (any M, needs uint8 zeros)
+ * OutT only changes the final store narrowing; the fp16 paths are unchanged.
+ * Sole caller: QMoE down_proj (fc2), where a raw per-expert GEMM channel can
+ * exceed the fp16 max and overflow to inf before the routing weight scales it
+ * back into range. Caller passes bias=null and folds the weighted bias in the
+ * fp32 scatter, so this computes only W . h in fp32.
+ *   A              : fp16 [M, K] row-major
+ *   B              : packed int4 weights [N, k_blocks*(block_size/2)]
+ *   scales         : fp16 [N, k_blocks]
+ *   zero_points_u8   : UNPACKED uint8 [N, k_blocks] for the GEMV path (asym),
+ *                      or null (sym, zp=8)
+ *   zero_points_fp16 : fp16 [N, k_blocks] for the WMMA path (asym), or null
+ *                      (sym / caller knows M<16)
+ *   bias           : fp16 [N], or null (GEMV path only)
+ *   output         : fp32 [M, N] row-major */
+HIP_KERNEL_API int hip_matmul_nbits_fp32out(
+    void* stream,
+    const void* A,
+    const void* B,
+    const void* scales,
+    const void* zero_points_u8,
+    const void* zero_points_fp16,
+    const void* bias,
+    void* output,
+    int64_t M, int64_t N, int64_t K,
+    int64_t bits,
+    int64_t block_size);
+
 /* W4A8 integer-dot-product (dp4a) GEMV for a single decode row (M==1).
  * Dynamically quantizes the fp16 activation row to per-group int8 (into
  * caller-owned scratch) and runs a `v_dot4_i32_iu8` (`__builtin_amdgcn_sudot4`)
@@ -1859,6 +1892,32 @@ HIP_KERNEL_API int hip_qmoe_scatter_add(
     void* output,
     const void* expert_out,
     const void* token_ids,
+    const void* weights,
+    int64_t width,
+    int64_t count,
+    int64_t element_size_bytes);
+
+/* Scatter-add into an fp32 accumulator, applying the routing weight to the
+ * WHOLE per-expert result (GEMM output + down_proj bias):
+ *   out_accum[token_ids[i],:] += (float)weights[i]
+ *                                * ((float)expert_out[i,:] + (float)bias[:])
+ *   out_accum  - GPU [num_tokens, width] fp32
+ *   expert_out - GPU [count, width] FP32 (raw down_proj W_dn.h_e, NO routing
+ *                weight and NO bias applied — see hip_matmul_nbits_fp32out)
+ *   token_ids  - GPU [count] int32
+ *   bias       - GPU [width] fp16 per-channel down_proj bias, or null
+ *   weights    - GPU [count] fp16 per-row routing weight, or null (=> weight 1)
+ * expert_out is fp32 so a raw down_proj channel that exceeds the fp16 max
+ * never overflows before the weight scales it back into range; the bias is
+ * weighted here so the multi-token result equals w_e*(W_dn.h_e + b_e) with no
+ * Sum_e (1-w_e) b_e offset. Cross-expert accumulation stays in fp32; caller
+ * casts to fp16 once. element_size_bytes describes bias/weights (fp16=2). */
+HIP_KERNEL_API int hip_qmoe_scatter_add_fp32(
+    void* stream,
+    void* out_accum,
+    const void* expert_out,
+    const void* token_ids,
+    const void* bias,
     const void* weights,
     int64_t width,
     int64_t count,
