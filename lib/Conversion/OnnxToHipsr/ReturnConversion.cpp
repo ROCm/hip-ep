@@ -10,6 +10,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
+#include "hip/Dialect/Onnx/IR/OnnxOps.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/PatternMatch.h"
@@ -18,14 +19,13 @@ namespace mlir {
 namespace hipsr {
 namespace {
 
-struct ReturnToFunc : public ::mlir::RewritePattern {
-  ReturnToFunc(::mlir::MLIRContext *ctx)
-      : RewritePattern("onnx.Return", /*benefit=*/1, ctx) {}
+struct ReturnToFunc : public ::mlir::OpRewritePattern<::mlir::onnx::ReturnOp> {
+  using OpRewritePattern::OpRewritePattern;
 
   ::mlir::LogicalResult
-  matchAndRewrite(::mlir::Operation *op,
+  matchAndRewrite(::mlir::onnx::ReturnOp op,
                   ::mlir::PatternRewriter &rewriter) const override {
-    rewriter.replaceOpWithNewOp<::mlir::func::ReturnOp>(op, op->getOperands());
+    rewriter.replaceOpWithNewOp<::mlir::func::ReturnOp>(op, op.getOperands());
     return ::mlir::success();
   }
 };

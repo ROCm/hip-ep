@@ -16,10 +16,12 @@ add_library(OnnxToHipsr STATIC
 add_dependencies(OnnxToHipsr
   HipsrConversionPassIncGen
   HipsrDialectIncGen
+  OnnxDialectIncGen
 )
 
 target_link_libraries(OnnxToHipsr PUBLIC
   HipsrDialectIR
+  OnnxDialectIR
   MLIRPass
   MLIRTransforms
   MLIRFuncDialect

@@ -5,7 +5,7 @@
 // onnx.Return becomes func.return. Rejected forms live in return-invalid.mlir.
 //===----------------------------------------------------------------------===//
 
-// RUN: hip-mlir-opt --convert-onnx-to-hipsr --split-input-file %s | FileCheck %s
+// RUN: hip-mlir-opt --onnx-dialect=modeled --convert-onnx-to-hipsr --split-input-file %s | FileCheck %s
 
 // The shape an ONNX importer produces, with the return carrying the graph's
 // result.
