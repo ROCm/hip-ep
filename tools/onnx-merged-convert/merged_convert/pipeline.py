@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import tempfile
 from pathlib import Path
 
@@ -18,6 +17,7 @@ from .bundle import (
     _find_genai_config_source,
 )
 from .int8kv import convert_decoder_int8kv
+from .lora_weight_pack import write_packed_lora_artifacts
 from .pipeline_aliases import (
     CONVERT_PROFILE_LOW_BIT,
     convert_head_quantized,
@@ -116,7 +116,6 @@ def _convert_quantized_linear(
         dynamic,
         static_seq_lens=(1, bundle.prefill_seq_len),
     )
-    _apply_pure_fp16(dec_decode, dec_prefill, dynamic)
 
     print("  [4/5] Merge emb + dynamic decoder + lm_head ...")
     data_name = f"{bundle.merged_stem}.data"
@@ -164,7 +163,6 @@ def _convert_int8_kv(bundle: ModelBundle, work: Path, merged_path: Path) -> None
         dynamic,
         static_seq_lens=(1, bundle.prefill_seq_len),
     )
-    _apply_pure_fp16(dynamic)
 
     print("  [3/5] QDQ removal + fp16 (emb / lm_head) ...")
     patch_emb_quantized(
@@ -270,7 +268,6 @@ def _convert_low_bit(bundle: ModelBundle, work: Path, merged_path: Path) -> None
         dynamic,
         static_seq_lens=(1, bundle.prefill_seq_len),
     )
-    _apply_pure_fp16(dec_decode, dec_prefill, dynamic)
 
     print("  [4/5] Merge emb + dynamic decoder + lm_head (pruned logits) ...")
     data_name = f"{bundle.merged_stem}.data"
@@ -347,9 +344,16 @@ def convert_bundle(bundle: ModelBundle, output_dir: Path) -> Path:
         extras.append(f"lora_dequant.json ({len(lora_dequant_meta)} adapter ports)")
 
     adapter_src = bundle.input_dir / "adapter.safetensors"
-    if adapter_src.is_file():
-        shutil.copy2(adapter_src, output_dir / "adapter.safetensors")
-        extras.append("adapter.safetensors")
+    try:
+        extras.extend(write_packed_lora_artifacts(merged_path, adapter_src, output_dir))
+    except FileNotFoundError as exc:
+        if (
+            bundle.pipeline is PipelineKind.QUANTIZED_LINEAR
+            and not bundle.fold_gemm_weights
+        ):
+            raise RuntimeError(
+                "LoRA MatMulNBits export requires raw adapter.safetensors in input-dir"
+            ) from exc
 
     extra_msg = f" + {', '.join(extras)}" if extras else ""
     print(

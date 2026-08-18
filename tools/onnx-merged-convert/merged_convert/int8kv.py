@@ -24,7 +24,6 @@ from .qdq_ext import (
     convert_matmul_int8_weight_dq,
     fold_weight_dq_q,
     fuse_conv_transpose_to_matmul_nbits_q,
-    infer_decoder_external_data_name_q,
     prune_initializers_q,
     promote_model_to_fp16_q,
     rewrite_gqa_past_seq_len_to_seqlens_k_q,
@@ -256,7 +255,7 @@ def convert_decoder_int8kv(
     assert_qdq_removed(graph, context=dst.name)
     assert_int8_kv_io(model, context=dst.name)
     assert_gqa_int8_quant(model, context=dst.name)
-    ext_name = infer_decoder_external_data_name_q(src, bundle_root)
+    ext_name = f"{dst.stem}.data"
     save_decoder_model_q(
         model, dst, external_data_name=ext_name, keep_inline=inline_at_load
     )
