@@ -4442,7 +4442,7 @@ def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
 def Hip_QMatMulOp : Hip_DpsOp<"qmatmul",
                               /*traits=*/[],
                               /*outsAccessor=*/"Output",
-                              /*autoReify=*/0,
+                              /*autoReify=*/1,
                               /*autoInfer=*/1,
                               /*declareInfer=*/1> {
   let summary = "Quantized matrix multiplication with integrated QDQ";
