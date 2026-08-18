@@ -22,20 +22,50 @@ struct SoftmaxToHip : public mlir::RewritePattern {
 mlir::LogicalResult
 SoftmaxToHip::matchAndRewrite(mlir::Operation *op,
                               mlir::PatternRewriter &rewriter) const {
+  if (op->getNumOperands() != 1 || op->getNumResults() != 1)
+    return rewriter.notifyMatchFailure(op, "expected one input and one result");
+
+  mlir::Value input = op->getOperand(0);
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+  auto resultType =
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!inputType || !resultType)
+    return rewriter.notifyMatchFailure(
+        op, "Softmax input and result must be ranked tensors");
+  int64_t rank = inputType.getRank();
+  if (rank == 0 || resultType.getRank() != rank)
+    return rewriter.notifyMatchFailure(
+        op, "Softmax requires equal positive input and result ranks");
+  if (inputType.getElementType() != resultType.getElementType())
+    return rewriter.notifyMatchFailure(
+        op, "Softmax input and result element types must match");
+  for (int64_t axis : llvm::seq<int64_t>(0, rank)) {
+    int64_t inputExtent = inputType.getDimSize(axis);
+    int64_t resultExtent = resultType.getDimSize(axis);
+    if (!mlir::ShapedType::isDynamic(inputExtent) &&
+        !mlir::ShapedType::isDynamic(resultExtent) &&
+        inputExtent != resultExtent)
+      return rewriter.notifyMatchFailure(
+          op, "Softmax input and result shapes must match");
+  }
+
+  int64_t axis = -1;
+  if (auto axisAttr = op->getAttrOfType<mlir::IntegerAttr>("axis"))
+    axis = axisAttr.getInt();
+  if (axis < 0)
+    axis += rank;
+  if (axis != rank - 1)
+    return rewriter.notifyMatchFailure(
+        op, "only last-dimension Softmax is supported");
+
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
     return mlir::failure();
-  mlir::Value context = *ctxOrFailure;
 
   mlir::Location loc = op->getLoc();
-  mlir::Value input = op->getOperand(0);
-  auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
-  // Result type inferred from `init` via InferTypeOpInterface — DPS contract:
-  // result type == outs operand type.
-  auto hipOp =
-      mlir::hip::MiopenSoftmaxOp::create(rewriter, loc, context, input, init);
+  auto hipOp = mlir::hip::MiopenSoftmaxOp::create(rewriter, loc, *ctxOrFailure,
+                                                  input, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }

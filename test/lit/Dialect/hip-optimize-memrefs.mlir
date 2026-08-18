@@ -263,3 +263,18 @@ func.func @no_reuse_different_element_type(
   hip.miopen.softmax(%ctx) ins(%c : memref<64xf16>) outs(%alloc1 : memref<64xf16>)
   return %alloc1 : memref<64xf16>
 }
+// BF16 uses the same exact-type coalescing path as f16/f32.
+// CHECK-LABEL: func.func @softmax_inplace_bf16
+// CHECK:         %[[BUFFER:.*]] = memref.alloc()
+// CHECK-NOT:     memref.alloc
+// CHECK:         hip.miopen.softmax{{.*}}ins(%[[BUFFER]] :{{.*}}outs(%[[BUFFER]] :
+func.func @softmax_inplace_bf16(
+    %ctx: !hip.context, %source: memref<2x8xbf16>) {
+  %input = memref.alloc() : memref<2x8xbf16>
+  memref.copy %source, %input : memref<2x8xbf16> to memref<2x8xbf16>
+  %output = memref.alloc() : memref<2x8xbf16>
+  hip.miopen.softmax(%ctx)
+      ins(%input : memref<2x8xbf16>)
+      outs(%output : memref<2x8xbf16>)
+  return
+}

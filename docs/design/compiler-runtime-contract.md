@@ -243,6 +243,12 @@ synchronization and returns it through `inference_compute`. Conversion fails
 closed if any `i32` call result is left unused; scalar data-return calls must
 consume their value explicitly.
 
+Standalone Softmax generated calls carry both input and output row/column
+extents plus a semantic `HIPDNN_EP_DATATYPE_*` value. The runtime validates
+dynamic descriptor equality before copying or dispatching f16, bf16, or f32
+storage through the typed custom kernel. This contract supersedes the former
+element-byte-width argument and therefore requires artifact invalidation.
+
 ---
 
 ## Consumers

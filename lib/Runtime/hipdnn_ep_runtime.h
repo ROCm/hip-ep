@@ -1101,6 +1101,12 @@ int wrap_miopenActivationForward(RuntimeState *state, int op_state_slot,
                                  int64_t num_elements, int64_t data_type,
                                  int64_t activation_mode);
 
+// Row-wise last-dimension Softmax using custom HIP kernels. Input/output
+// descriptors must agree at runtime. data_type supports FLOAT, HALF, BFLOAT16.
+int hip_miopen_softmax(RuntimeState *state, const void *input, void *output,
+                       int64_t input_rows, int64_t input_cols,
+                       int64_t output_rows, int64_t output_cols,
+                       int64_t data_type);
 // GELU activation wrapper (uses custom HIP kernel)
 // Applies GELU element-wise with support for exact or approximate mode
 // data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16, DOUBLE)

@@ -13,6 +13,7 @@
 
 #include <cstdio>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -308,89 +309,89 @@ static int hipdnn_ep_to_hip_dtype_elementwise_unary(int64_t data_type) {
   }
 }
 
-// Standalone Softmax runtime entry point — called from
-// `ConvertHipToLLVM`'s `MiopenSoftmaxOpLowering` for `onnx.Softmax` paths
-// outside fused attention (vision encoder self-attention, primarily; text
-// decoders fuse softmax inside hip.gqa and don't reach this path).
-// Dispatches to `hip_softmax_row_2d_inplace` (custom HIP kernel) —
-// row-wise softmax over a contiguous row-major [rows, cols] fp16 buffer
-// with `cols` = the softmax axis size (ONNX Softmax axis = -1 over the
-// last dim of the flattened input).
-//
-// fp16-only today. The buffer element type is taken on faith from the
-// MemRef the lowering hands us; the runtime does not validate the dtype.
-// If a future model needs fp32 softmax, plumb an `elem_size` (or dtype
-// enum) through the lowering and dispatch in the kernel launcher.
-//
-// Symbol name is `hip_miopen_softmax` (not `hip_softmax`) to match the
-// lowering side's `kMiopenSoftmax` constant. The kernel-level dispatch
-// is unrelated to MIOpen.
-//
-// Reusing `hip_gqa_softmax_inplace` (from gqa_kernel.hip) would not work:
-// that kernel is column-wise over a GQA-specific layout AND its launcher
-// only spawns `total_head_queries` blocks, not `total_head_queries * cols`.
-// A standalone softmax wired to that path produces NaN downstream.
-// elem_size_bytes: 2 for fp16/bf16, 4 for fp32.  The lowering passes the
-// element size derived from the MemRef type so the runtime can copy and
-// dispatch with the correct dtype.
-extern "C" int hip_miopen_softmax(void *state, const void *input, void *output,
-                                  int64_t rows, int64_t cols,
-                                  int64_t elem_size_bytes) {
-  RuntimeState *st = static_cast<RuntimeState *>(state);
+// Standalone row-wise Softmax over the final dimension. This symbol retains
+// its historical name, but dispatches custom HIP kernels rather than MIOpen.
+// Storage is f16, bf16, or f32; reductions are always performed in f32.
+extern "C" int hip_miopen_softmax(RuntimeState *state, const void *input,
+                                  void *output, int64_t input_rows,
+                                  int64_t input_cols, int64_t output_rows,
+                                  int64_t output_cols, int64_t data_type) {
   OP_PROFILE(
       "softmax",
       [&] {
         char b[64];
-        snprintf(b, sizeof(b), "%lldx%lld", (long long)rows, (long long)cols);
+        snprintf(b, sizeof(b), "%lldx%lld:%s", (long long)input_rows,
+                 (long long)input_cols, hipdnn_ep_datatype_name(data_type));
         return std::string(b);
       },
-      st);
+      state);
   if (!state || !input || !output) {
     fprintf(stderr, "[REAL] hip_miopen_softmax: null argument\n");
     return -1;
   }
-  if (rows <= 0 || cols <= 0) {
+  if (input_rows <= 0 || input_cols <= 0 || output_rows <= 0 ||
+      output_cols <= 0 || input_rows != output_rows ||
+      input_cols != output_cols ||
+      input_rows > std::numeric_limits<int>::max() ||
+      input_cols > std::numeric_limits<int>::max()) {
     fprintf(stderr,
-            "[REAL] hip_miopen_softmax: invalid dims rows=%lld cols=%lld\n",
-            (long long)rows, (long long)cols);
+            "[REAL] hip_miopen_softmax: incompatible dims "
+            "input=%lldx%lld output=%lldx%lld\n",
+            (long long)input_rows, (long long)input_cols,
+            (long long)output_rows, (long long)output_cols);
     return -1;
   }
-  // Only fp16/bf16 (2 bytes) and fp32 (4 bytes) are supported.  Reject any
-  // other value immediately rather than silently producing wrong outputs.
-  if (elem_size_bytes != 2 && elem_size_bytes != 4) {
+  if (data_type != HIPDNN_EP_DATATYPE_FLOAT &&
+      data_type != HIPDNN_EP_DATATYPE_HALF &&
+      data_type != HIPDNN_EP_DATATYPE_BFLOAT16) {
     fprintf(stderr,
-            "[REAL] hip_miopen_softmax: unsupported elem_size_bytes=%lld\n",
-            (long long)elem_size_bytes);
+            "[REAL] hip_miopen_softmax: unsupported data_type=%s(%lld)\n",
+            hipdnn_ep_datatype_name(data_type), (long long)data_type);
     return -1;
   }
 
-  void *stream = hipdnn_ep_state_get_stream(st);
+  int64_t elementSize = hipdnn_ep_datatype_size(data_type);
+  size_t rows = static_cast<size_t>(input_rows);
+  size_t cols = static_cast<size_t>(input_cols);
+  if (rows > std::numeric_limits<size_t>::max() / cols)
+    return -1;
+  size_t elements = rows * cols;
+  if (static_cast<size_t>(elementSize) >
+      std::numeric_limits<size_t>::max() / elements)
+    return -1;
+  size_t bytes = elements * static_cast<size_t>(elementSize);
+  void *stream = hipdnn_ep_state_get_stream(state);
 
-  // The row kernel reads the complete row before overwriting it, so aliased
-  // operands satisfy the wrapper contract without a copy. Distinct operands
-  // retain the copy-before-launch behavior.
+  // The row kernel reads the complete row before overwriting it. Preserve
+  // #763's in-place fast path and copy only distinct operands.
   if (input != output) {
-    hipError_t err = hipMemcpyAsync(
-        output, input,
-        static_cast<size_t>(rows) * static_cast<size_t>(cols) *
-            static_cast<size_t>(elem_size_bytes),
-        hipMemcpyDeviceToDevice, static_cast<hipStream_t>(stream));
+    hipError_t err =
+        hipMemcpyAsync(output, input, bytes, hipMemcpyDeviceToDevice,
+                       static_cast<hipStream_t>(stream));
     if (err != hipSuccess) {
       fprintf(stderr, "[REAL] hip_miopen_softmax: hipMemcpyAsync failed: %s\n",
               hipGetErrorString(err));
-      return -1;
+      return static_cast<int>(err);
     }
   }
 
   RUNTIME_DEBUG_LOG(
-      "[REAL] hip_miopen_softmax: rows=%lld cols=%lld elem_size=%lld\n",
-      (long long)rows, (long long)cols, (long long)elem_size_bytes);
+      "[REAL] hip_miopen_softmax: rows=%lld cols=%lld data_type=%s(%lld)\n",
+      (long long)input_rows, (long long)input_cols,
+      hipdnn_ep_datatype_name(data_type), (long long)data_type);
 
-  if (elem_size_bytes == 4)
-    return hip_softmax_row_2d_inplace_fp32(
-        stream, output, static_cast<int>(rows), static_cast<int>(cols));
-  return hip_softmax_row_2d_inplace(stream, output, static_cast<int>(rows),
-                                    static_cast<int>(cols));
+  int rows32 = static_cast<int>(input_rows);
+  int cols32 = static_cast<int>(input_cols);
+  switch (data_type) {
+  case HIPDNN_EP_DATATYPE_FLOAT:
+    return hip_softmax_row_2d_inplace_fp32(stream, output, rows32, cols32);
+  case HIPDNN_EP_DATATYPE_HALF:
+    return hip_softmax_row_2d_inplace(stream, output, rows32, cols32);
+  case HIPDNN_EP_DATATYPE_BFLOAT16:
+    return hip_softmax_row_2d_inplace_bf16(stream, output, rows32, cols32);
+  default:
+    return -1;
+  }
 }
 
 int wrap_gelu(RuntimeState *state, void *input, void *output,

@@ -672,18 +672,15 @@ HIP_KERNEL_API int hip_gqa_softmax_inplace(
     int batch_stride, const void* head_sink, int num_heads,
     int use_smooth_softmax);
 
-/* Row-wise softmax over a flattened [rows, cols] row-major fp16 buffer.
- * One block per row, softmaxes the `cols` elements of each row in-place
- * (data is overwritten with normalized probabilities). Matches ONNX
- * Softmax semantics for axis = -1 on the flattened input. Used by the
- * standalone `hip_miopen_softmax` runtime entry point. */
-HIP_KERNEL_API int hip_softmax_row_2d_inplace(void* stream, void* data, int rows, int cols);
-
-/* fp32 variant of the above — for models where Softmax input is fp32.
- * Qwen VLM vision encoder attention scores are fp32; using the fp16 kernel
- * there misinterprets the data and produces completely wrong outputs.
- * Called by hip_miopen_softmax when elem_size_bytes == 4. */
-HIP_KERNEL_API int hip_softmax_row_2d_inplace_fp32(void* stream, void* data, int rows, int cols);
+/* Row-wise last-dimension Softmax over a flattened [rows, cols] buffer.
+ * Storage-specific f16, bf16, and f32 entry points share one implementation
+ * with f32 max/sum accumulation. Data is overwritten in place. */
+HIP_KERNEL_API int hip_softmax_row_2d_inplace(
+    void* stream, void* data, int rows, int cols);
+HIP_KERNEL_API int hip_softmax_row_2d_inplace_bf16(
+    void* stream, void* data, int rows, int cols);
+HIP_KERNEL_API int hip_softmax_row_2d_inplace_fp32(
+    void* stream, void* data, int rows, int cols);
 
 /* Column-wise softmax: fp32 input -> fp16 output.
  * Reads fp32 Score matrix (no fp16 overflow/inf), writes fp16 probabilities.
