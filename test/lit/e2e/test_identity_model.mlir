@@ -3,22 +3,21 @@
 // Test Identity E2E full pipeline.
 // onnx.Identity is a pass-through: the conversion forwards its input SSA
 // value to every user (cheaper than even a full-range memref.subview view),
-// so the op disappears entirely in convert-onnx-to-hip.  No HIP dialect op,
-// no HipToLLVM lowering, and no runtime symbol are emitted.
+// so the op disappears in convert-onnx-to-hip. The output-allocator pass then
+// creates one exact public destination and copies the forwarded input into it.
 //
 // Verifies the complete hipdnn-pipeline:
 // 1. convert-onnx-to-hip: onnx.Identity -> (eliminated, value forwarded)
-// 2. generate-interface: Create inference_init/compute/cleanup/metadata.
-//
-// The downstream buffer-results-to-out-params + memory-pooling passes are
-// responsible for materialising any input->output buffer copy that the
-// runtime needs when an SSA-forwarded input also has to leave the graph
-// as a named output; this conversion does not need to reason about it.
+// 2. hip-use-output-allocator: allocate output slot 0 and materialize the copy.
+// 3. generate-interface: Create inference_init/compute/cleanup/metadata.
 
 // CHECK: module attributes {
 // CHECK-SAME: hipdnn.input_count = 1
 // CHECK-SAME: hipdnn.output_count = 1
 // CHECK-NOT: onnx.Identity
+// CHECK-LABEL: llvm.func private @main_graph_internal
+// CHECK: llvm.call @hipdnn_ep_alloc_output
+// CHECK: llvm.call @wrap_hipMemcpyAsync
 // CHECK: llvm.func @inference_init
 // CHECK: llvm.func @inference_compute
 // CHECK: llvm.func @inference_cleanup

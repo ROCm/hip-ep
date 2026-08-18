@@ -34,9 +34,8 @@ func.func @unsupported_output_views(%ctx: !hip.context)
       : memref<64xf32> into memref<8x8xf32>
   %mixed = memref.cast %expanded : memref<8x8xf32> to memref<?x8xf32>
 
-  // expected-error @+3 {{output #1 has a returned memref.subview without an identity-layout return type; exact-output copying cannot replace the return}}
-  // expected-error @+2 {{output #2 has a returned memref.subview with a nonzero or dynamic offset; exact-output copying requires zero offsets}}
-  // expected-error @+1 {{output #3 has an unsupported returned output-view chain mixing memref.subview or multiple rank-changing reshape ops}}
+  // expected-error @+2 {{output #1 does not have an identity-layout return type; exact-output copying cannot represent its offset or strides}}
+  // expected-error @+1 {{output #2 does not have an identity-layout return type; exact-output copying cannot represent its offset or strides}}
   return %direct, %smaller, %offset, %mixed
       : memref<4xf32>,
         memref<2x4xf32, strided<[8, 1]>>,

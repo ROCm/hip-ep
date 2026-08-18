@@ -7,7 +7,8 @@
 // Verifies that the pass rewrites graph-output memref.alloc ops (values
 // returned by func.return) into hip.alloc_output, reusing the alloc's dynamic
 // sizes and setting out_idx to the return position, while leaving intermediates,
-// passthrough outputs, private helpers, and context-less functions untouched.
+// private helpers, and context-less functions untouched. Pass-through and
+// duplicate public slots receive exact output allocations and copies.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --hip-use-output-allocator %s 2>&1 | FileCheck %s
@@ -59,12 +60,29 @@ func.func @static_output(%ctx: !hip.context) -> memref<4x8xf16> {
   return %out : memref<4x8xf16>
 }
 
-// --- Passthrough output (return a memref block-arg): left unchanged. ---
+// --- Passthrough output: copy the block argument into an exact public slot. ---
 // CHECK-LABEL: func.func @passthrough
-// CHECK-NOT:     hip.alloc_output
-// CHECK:         return %{{.*}} : memref<?xf16>
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context, %[[X:.*]]: memref<?xf16>)
+// CHECK:         %[[DIM:.*]] = memref.dim %[[X]], %{{.*}} : memref<?xf16>
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]], %[[DIM]]) {out_idx = 0 : i64} : memref<?xf16>
+// CHECK:         memref.copy %[[X]], %[[OUT]]
+// CHECK:         return %[[OUT]] : memref<?xf16>
 func.func @passthrough(%ctx: !hip.context, %x: memref<?xf16>) -> memref<?xf16> {
   return %x : memref<?xf16>
+}
+
+// --- A contiguous input view is also copied into an exact public slot. ---
+// CHECK-LABEL: func.func @passthrough_cast
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context, %[[X:.*]]: memref<4x8xf32>)
+// CHECK:         %[[VIEW:.*]] = memref.cast %[[X]] : memref<4x8xf32> to memref<?x8xf32>
+// CHECK:         %[[DIM:.*]] = memref.dim %[[VIEW]], %{{.*}} : memref<?x8xf32>
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]], %[[DIM]]) {out_idx = 0 : i64} : memref<?x8xf32>
+// CHECK:         memref.copy %[[VIEW]], %[[OUT]]
+// CHECK:         return %[[OUT]] : memref<?x8xf32>
+func.func @passthrough_cast(%ctx: !hip.context, %x: memref<4x8xf32>)
+    -> memref<?x8xf32> {
+  %view = memref.cast %x : memref<4x8xf32> to memref<?x8xf32>
+  return %view : memref<?x8xf32>
 }
 
 // --- No !hip.context arg 0: function left alone (alloc stays). ---
@@ -87,15 +105,53 @@ func.func @returned_alloc_with_dealloc(%ctx: !hip.context, %M: index) -> memref<
   return %out : memref<?xf16>
 }
 
-// --- Aliased multi-output (same alloc returned twice): exactly one
-//     hip.alloc_output (dedupe / no double-erase), both results alias it. ---
+// --- Aliased multi-output: the primary slot may own the original allocation,
+//     but the duplicate slot gets its own exact destination and copy. ---
 // CHECK-LABEL: func.func @aliased_output
-// CHECK-COUNT-1: hip.alloc_output
-// CHECK-NOT:     hip.alloc_output
-// CHECK:         return %[[OUT:.*]], %[[OUT]]
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context, %[[M:.*]]: index)
+// CHECK:         %[[PRIMARY:.*]] = hip.alloc_output(%[[CTX]], %[[M]]) {out_idx = 0 : i64} : memref<?xf16>
+// CHECK:         %[[DIM:.*]] = memref.dim %[[PRIMARY]], %{{.*}} : memref<?xf16>
+// CHECK:         %[[DUPLICATE:.*]] = hip.alloc_output(%[[CTX]], %[[DIM]]) {out_idx = 1 : i64} : memref<?xf16>
+// CHECK:         memref.copy %[[PRIMARY]], %[[DUPLICATE]]
+// CHECK:         return %[[PRIMARY]], %[[DUPLICATE]]
 func.func @aliased_output(%ctx: !hip.context, %M: index) -> (memref<?xf16>, memref<?xf16>) {
   %a = memref.alloc(%M) : memref<?xf16>
   return %a, %a : memref<?xf16>, memref<?xf16>
+}
+
+// --- A may-alias join used only internally cannot invalidate an unrelated
+//     direct output plan. ---
+// CHECK-LABEL: func.func @internal_alias_join
+// CHECK-COUNT-2: memref.alloc
+// CHECK:         hip.alloc_output(%{{.*}}) {out_idx = 0 : i64} : memref<4xf32>
+// CHECK:         cf.cond_br
+func.func @internal_alias_join(%ctx: !hip.context, %cond: i1)
+    -> memref<4xf32> {
+  %a = memref.alloc() : memref<4xf32>
+  %b = memref.alloc() : memref<4xf32>
+  %out = memref.alloc() : memref<4xf32>
+  cf.cond_br %cond, ^bb1(%a : memref<4xf32>), ^bb1(%b : memref<4xf32>)
+^bb1(%joined: memref<4xf32>):
+  memref.copy %joined, %out : memref<4xf32> to memref<4xf32>
+  return %out : memref<4xf32>
+}
+
+// --- A returned may-alias join has no single authoritative root, so copy its
+//     selected logical value into one exact public destination. ---
+// CHECK-LABEL: func.func @returned_alias_join
+// CHECK-COUNT-2: memref.alloc
+// CHECK:         cf.cond_br
+// CHECK:         ^bb{{.*}}(%[[JOINED:.*]]: memref<4xf32>):
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%{{.*}}) {out_idx = 0 : i64} : memref<4xf32>
+// CHECK:         memref.copy %[[JOINED]], %[[OUT]]
+// CHECK:         return %[[OUT]]
+func.func @returned_alias_join(%ctx: !hip.context, %cond: i1)
+    -> memref<4xf32> {
+  %a = memref.alloc() : memref<4xf32>
+  %b = memref.alloc() : memref<4xf32>
+  cf.cond_br %cond, ^bb1(%a : memref<4xf32>), ^bb1(%b : memref<4xf32>)
+^bb1(%joined: memref<4xf32>):
+  return %joined : memref<4xf32>
 }
 
 // --- Realistic graph with real hip ops (design doc "Add -> MatMul -> Sigmoid").
