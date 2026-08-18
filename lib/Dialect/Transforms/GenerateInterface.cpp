@@ -445,8 +445,10 @@ private:
         {"hipdnn_ep_state_get_stream", ptr, {ptr}},
         {"hipdnn_ep_pool_init", i32, {ptr, i64, ptr, i64}},
         {"hipdnn_ep_get_buffer_from_pool", ptr, {ptr, i64}},
+        {"hipdnn_ep_tensor_buffer_storage_words", i64, {}},
+        {"hipdnn_ep_tensor_buffer_construct", vd, {ptr}},
         {"hipdnn_ep_tensor_prepare_input", i32, {ptr, ptr, i64, i64, ptr}},
-        {"hipdnn_ep_tensor_free_input", vd, {ptr, ptr}},
+        {"hipdnn_ep_tensor_free_inputs", vd, {ptr, ptr, i64}},
         {"hipdnn_ep_tensor_buffer_get_gpu_ptr", ptr, {ptr}},
         {"hipdnn_ep_tensor_buffer_get_host_ptr", ptr, {ptr}},
         {"hipdnn_ep_tensor_buffer_get_shape_ptr", ptr, {ptr}},
@@ -743,7 +745,7 @@ private:
     }
   }
 
-  /// Generated IR overview (1 input of rank 1; outputs allocated in-graph):
+  /// Generated IR overview (N inputs; outputs allocated in-graph):
   ///   llvm.func @inference_compute(%state: !llvm.ptr, %ins: !llvm.ptr) -> i32
   ///       attributes {llvm.emit_c_interface, sym_visibility = "public"} {
   ///     // 1. Alloca input TensorBuffer structs on the stack
@@ -806,13 +808,19 @@ private:
 
     Value c0_i32 = LLVM::ConstantOp::create(builder, loc, i32Type,
                                             builder.getI32IntegerAttr(0));
+    Value c0_i64 = LLVM::ConstantOp::create(builder, loc, i64Type,
+                                            builder.getI64IntegerAttr(0));
     Value c1_i64 = LLVM::ConstantOp::create(builder, loc, i64Type,
                                             builder.getI64IntegerAttr(1));
 
     auto prepareInputFunc =
         module.lookupSymbol<LLVM::LLVMFuncOp>("hipdnn_ep_tensor_prepare_input");
-    auto freeInputFunc =
-        module.lookupSymbol<LLVM::LLVMFuncOp>("hipdnn_ep_tensor_free_input");
+    auto freeInputsFunc =
+        module.lookupSymbol<LLVM::LLVMFuncOp>("hipdnn_ep_tensor_free_inputs");
+    auto tensorBufferWordsFunc = module.lookupSymbol<LLVM::LLVMFuncOp>(
+        "hipdnn_ep_tensor_buffer_storage_words");
+    auto constructTensorBufferFunc = module.lookupSymbol<LLVM::LLVMFuncOp>(
+        "hipdnn_ep_tensor_buffer_construct");
 
     auto getGpuPtrFunc = module.lookupSymbol<LLVM::LLVMFuncOp>(
         "hipdnn_ep_tensor_buffer_get_gpu_ptr");
@@ -827,24 +835,32 @@ private:
 
     Value errorCodePtr =
         LLVM::AllocaOp::create(builder, loc, ptrType, i32Type, c1_i64, 0);
+    Value preparedCountPtr =
+        LLVM::AllocaOp::create(builder, loc, ptrType, i64Type, c1_i64, 0);
+    LLVM::StoreOp::create(builder, loc, c0_i64, preparedCountPtr);
 
     SmallVector<Value> inputBuffers;
+    Value numInputsVal = LLVM::ConstantOp::create(
+        builder, loc, i64Type, builder.getI64IntegerAttr(numInputs));
+    Value inputBufferArray =
+        LLVM::AllocaOp::create(builder, loc, ptrType, ptrType, numInputsVal, 0);
 
-    // sizeof(TensorBuffer) in the runtime (6 fields, 48 bytes on 64-bit).
-    // TODO: Replace with sizeof(TensorBuffer) or a runtime query once the
-    // runtime is ported into this repo.
-    constexpr int64_t kTensorBufferSizeBytes = 48;
-
-    Type i8Type = builder.getI8Type();
-    Value tensorBufferSize = LLVM::ConstantOp::create(
-        builder, loc, i64Type,
-        builder.getI64IntegerAttr(kTensorBufferSizeBytes));
+    Value tensorBufferWords =
+        LLVM::CallOp::create(builder, loc, tensorBufferWordsFunc, ValueRange{})
+            .getResult();
 
     for (auto i : llvm::seq<size_t>(0, numInputs)) {
       (void)i;
-      Value bufferPtr = LLVM::AllocaOp::create(builder, loc, ptrType, i8Type,
-                                               tensorBufferSize, 0);
+      Value bufferPtr = LLVM::AllocaOp::create(builder, loc, ptrType, i64Type,
+                                               tensorBufferWords, 0);
+      LLVM::CallOp::create(builder, loc, constructTensorBufferFunc,
+                           ValueRange{bufferPtr});
       inputBuffers.push_back(bufferPtr);
+      Value index = LLVM::ConstantOp::create(builder, loc, i64Type,
+                                             builder.getI64IntegerAttr(i));
+      Value slot = LLVM::GEPOp::create(builder, loc, ptrType, ptrType,
+                                       inputBufferArray, ValueRange{index});
+      LLVM::StoreOp::create(builder, loc, bufferPtr, slot);
     }
 
     Block *errorCleanupBlock = funcOp.addBlock();
@@ -864,11 +880,12 @@ private:
           builder, loc, prepareInputFunc,
           ValueRange{state, inputsSpanPtr, indexVal, rankVal, bufferPtr},
           errorCodePtr, errorCleanupBlock, funcOp);
+      Value prepared = LLVM::ConstantOp::create(
+          builder, loc, i64Type, builder.getI64IntegerAttr(i + 1));
+      LLVM::StoreOp::create(builder, loc, prepared, preparedCountPtr);
     }
 
     // Build memref structs for @main call
-    Value numInputsVal = LLVM::ConstantOp::create(
-        builder, loc, i64Type, builder.getI64IntegerAttr(numInputs));
     Value inputMemrefArray =
         LLVM::AllocaOp::create(builder, loc, ptrType, ptrType, numInputsVal, 0);
 
@@ -933,12 +950,8 @@ private:
     emitErrorCheckedCall(builder, loc, readErrorFlagFunc, ValueRange{state},
                          errorCodePtr, errorCleanupBlock, funcOp);
 
-    // Free input tensors
-    for (auto i : llvm::seq<size_t>(0, numInputs)) {
-      Value bufferPtr = inputBuffers[i];
-      LLVM::CallOp::create(builder, loc, freeInputFunc,
-                           ValueRange{state, bufferPtr});
-    }
+    LLVM::CallOp::create(builder, loc, freeInputsFunc,
+                         ValueRange{state, inputBufferArray, numInputsVal});
 
     LLVM::ReturnOp::create(builder, loc, c0_i32);
 
@@ -947,10 +960,10 @@ private:
 
     Value errorCode = LLVM::LoadOp::create(builder, loc, i32Type, errorCodePtr);
 
-    for (auto i : llvm::seq<size_t>(0, inputBuffers.size())) {
-      LLVM::CallOp::create(builder, loc, freeInputFunc,
-                           ValueRange{state, inputBuffers[i]});
-    }
+    Value preparedCount =
+        LLVM::LoadOp::create(builder, loc, i64Type, preparedCountPtr);
+    LLVM::CallOp::create(builder, loc, freeInputsFunc,
+                         ValueRange{state, inputBufferArray, preparedCount});
 
     LLVM::ReturnOp::create(builder, loc, errorCode);
   }

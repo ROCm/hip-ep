@@ -59,3 +59,22 @@ add_test(NAME CustomOpComputeStatusUnitTest
 
 set_target_properties(test-custom-op-compute-status
     PROPERTIES FOLDER "runtime-tests")
+
+# Pins the opaque TensorBuffer storage/initialization ABI used by generated
+# inference cleanup. This source has no HIP dependency.
+add_executable(test-tensor-buffer-lifecycle
+    test_tensor_buffer_lifecycle.cpp
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/tensor_buffer.cpp
+)
+
+target_compile_features(test-tensor-buffer-lifecycle PRIVATE cxx_std_17)
+
+target_include_directories(test-tensor-buffer-lifecycle PRIVATE
+    ${CMAKE_SOURCE_DIR}/lib/Runtime
+)
+
+add_test(NAME TensorBufferLifecycleUnitTest
+    COMMAND test-tensor-buffer-lifecycle)
+
+set_target_properties(test-tensor-buffer-lifecycle
+    PROPERTIES FOLDER "runtime-tests")

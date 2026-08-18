@@ -34,10 +34,28 @@
 // --- inference_compute stages inputs and calls main_graph (2-arg ABI) ---
 // CHECK-LABEL: llvm.func @inference_compute
 // CHECK-SAME:  -> i32
+// CHECK:   %[[ZERO64:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK:   %[[ONE64:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK:   %[[PREPARED_COUNT:.*]] = llvm.alloca %[[ONE64]] x i64
+// CHECK:   llvm.store %[[ZERO64]], %[[PREPARED_COUNT]]
+// CHECK:   %[[BUFFER_WORDS:.*]] = llvm.call @hipdnn_ep_tensor_buffer_storage_words() : () -> i64
+// CHECK:   llvm.alloca %[[BUFFER_WORDS]] x i64
+// CHECK-COUNT-3: llvm.call @hipdnn_ep_tensor_buffer_construct
 // CHECK:   llvm.call @hipdnn_ep_tensor_prepare_input
+// CHECK:   %[[ERROR_COUNT:.*]] = llvm.load %[[PREPARED_COUNT]]
+// CHECK:   llvm.call @hipdnn_ep_tensor_free_inputs({{.*}}, {{.*}}, %[[ERROR_COUNT]])
+// CHECK:   %[[PREPARED1:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK:   llvm.store %[[PREPARED1]], %[[PREPARED_COUNT]]
+// CHECK:   llvm.call @hipdnn_ep_tensor_prepare_input
+// CHECK:   %[[PREPARED2:.*]] = llvm.mlir.constant(2 : i64) : i64
+// CHECK:   llvm.store %[[PREPARED2]], %[[PREPARED_COUNT]]
+// CHECK:   llvm.call @hipdnn_ep_tensor_prepare_input
+// CHECK:   %[[PREPARED3:.*]] = llvm.mlir.constant(3 : i64) : i64
+// CHECK:   llvm.store %[[PREPARED3]], %[[PREPARED_COUNT]]
 // CHECK:   llvm.call @main_graph
 // CHECK:   llvm.call @hipdnn_ep_stream_sync
 // CHECK:   llvm.call @hipdnn_ep_state_read_and_clear_error_flag
+// CHECK:   llvm.call @hipdnn_ep_tensor_free_inputs
 
 // --- inference_cleanup calls state cleanup ---
 // CHECK-LABEL: llvm.func @inference_cleanup
@@ -49,9 +67,9 @@
 // CHECK:   llvm.mlir.addressof @__metadata_json
 
 module attributes {
-  hipdnn.input_count = 1 : i64,
-  hipdnn.input_shapes = [array<i64: 8>],
-  hipdnn.input_element_sizes = array<i64: 4>,
+  hipdnn.input_count = 3 : i64,
+  hipdnn.input_shapes = [array<i64: 8>, array<i64: 8>, array<i64: 8>],
+  hipdnn.input_element_sizes = array<i64: 4, 4, 4>,
   hipdnn.output_count = 1 : i64,
   hipdnn.output_shapes = [array<i64: 8>],
   hipdnn.output_element_sizes = array<i64: 4>,
@@ -60,7 +78,9 @@ module attributes {
   hipdnn.buffer_count = 0 : i64
 } {
   func.func @main_graph(%ctx: !hip.context,
-                        %in: memref<8xf32>) -> memref<8xf32> {
+                        %in0: memref<8xf32>,
+                        %in1: memref<8xf32>,
+                        %in2: memref<8xf32>) -> memref<8xf32> {
     %out = hip.alloc_output(%ctx) {out_idx = 0 : i64} : memref<8xf32>
     return %out : memref<8xf32>
   }

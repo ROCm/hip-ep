@@ -352,7 +352,7 @@ def run_tests(args, build_dir):
             "-C",
             args.config,
             "-R",
-            "StaticPlugins|OutputAllocator|CustomOpComputeStatus",
+            "StaticPlugins|OutputAllocator|CustomOpComputeStatus|TensorBufferLifecycle",
             "--output-on-failure",
         ]
     )
