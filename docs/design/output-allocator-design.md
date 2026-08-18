@@ -257,7 +257,7 @@ MlirCustomOp::Compute(context)
    ├─ build OutputAllocatorCtx octx{ctx, outputs, output_index_map, host_out_scratch, allocated[]}
    ├─ output_allocator_t alloc{ self=&octx, allocate=&output_allocate_cb }
    ├─ inference_state_->set_output_allocator(&alloc)
-   │     └─ hipdnn_ep_set_output_allocator(state, &alloc)   FATAL if the DLL lacks the export
+   │     └─ hipdnn_ep_set_output_allocator(state, &alloc)   throws if the DLL lacks the export
    ├─ inference_state_->compute(&inputs.span)
    │  └─ inference_compute(state, inputs)        2-arg ABI, NO outputs span
    │     ├─ hipdnn_ep_tensor_prepare_input(...) x N   -> input memref descriptors
@@ -278,8 +278,9 @@ MlirCustomOp::Compute(context)
    │     ├─ hipdnn_ep_stream_sync(state)         all GPU writes complete on return
    │     ├─ hipdnn_ep_state_read_and_clear_error_flag(state)
    │     └─ hipdnn_ep_tensor_free_input(state, ...) x N
-   ├─ inference_state_->set_output_allocator(nullptr)   clear before octx leaves scope
-   ├─ output-completeness guard: every allocated[i] true else LOG(FATAL)
+   ├─ scope-exit clears the allocator before octx leaves scope
+   ├─ rethrow any exception captured by the noexcept callback
+   ├─ output-completeness guard: every allocated[i] true else OrtStatus failure
    └─ #ifndef BUILD_MOCK_RUNTIME: pending_d2h -> blocking hipMemcpy(host <- GPU scratch)
 ```
 
@@ -298,7 +299,7 @@ Note the `main_graph` / `main_graph_internal` split (from `convert-hip-to-llvm`)
 
 **Key design points (as built):**
 
-1. **The callback is `noexcept` across the C ABI.** `output_allocate_cb` is invoked from the model.dll's C runtime; a C++ exception unwinding through those frames is UB. The body is wrapped in `try/catch`, and any failure (out-of-range `out_idx`, an ORT throw, a scratch `hipMalloc` failure) ends in `LOG(FATAL)` — it never returns null, because the lowering builds a memref from the returned pointer and a null write would segfault with no diagnostic. This does **not** contradict the DLL-side `hipdnn_ep_alloc_output` forwarder returning null (above): the forwarder returns null only when *no* callback was installed — which never happens in a real session. Once the EP installs `output_allocate_cb`, the callback always returns a valid pointer.
+1. **The callback is `noexcept` across the C ABI.** `output_allocate_cb` is invoked from the model artifact's C runtime, so unwinding a C++ exception through those frames would be undefined behavior. The callback captures its first exception and returns null. The alloc-output lowering tests that pointer before constructing its memref descriptor; null records shared runtime failure and returns from the generated graph, so no downstream operation can consume it. After `inference_compute` runs generated input cleanup, the EP clears the borrowed callback with `llvm::scope_exit` and rethrows the precise exception. MorphiZen's CustomOp boundary converts it to a non-null `OrtStatus`. No output validation, D2H copy, or success reporting occurs on that path.
 
 2. **Allocator returns a GPU device pointer** (Phase 3 contract). GPU outputs (EP `hipHostMalloc` allocator or OGA device memory: `memory_type == TENSOR_MEMORY_GPU`) zero-copy ORT's buffer. Host (CPU) outputs get an EP-owned GPU scratch pointer; the DLL writes there and the EP D2H-copies into ORT's host buffer after compute.
 
@@ -306,6 +307,8 @@ Note the `main_graph` / `main_graph_internal` split (from `convert-hip-to-llvm`)
 
 4. **KV cache share-buffer needs no special case in the callback.** `output_allocate_cb` passes the DLL's in-graph `shape` to `GetOutput` verbatim — every output is acquired the same way. The shape is already right because `hip.alloc_output`'s dynamic dims come from its producer's operands: a `present.*` output is sized from `memref.dim %past_key` (the past input buffer's actual extent), which under OGA `past_present_share_buffer` already **is** the `max_length` capacity buffer. So `GetOutput` returns the pre-bound shared `OrtValue` and the `past == present` pointer identity is preserved. Pinned by `test/lit/e2e/test_gqa_output_allocator_present_dim.mlir`. (`build_metadata_json` emits each output shape verbatim — static extent or `-1`.)
 
-5. **Output-completeness guard.** Every declared output must be created in-graph, so each one should trigger exactly one `hip.alloc_output` → callback. Right after the inference call returns, the EP checks that every output index in the metadata was served; if one was skipped it `LOG(FATAL)`s and names it. This catches the two graph shapes we don't support yet — an output that just passes a graph input straight through, and two outputs that share (alias) one buffer — and turns them into a clear error instead of handing ORT an unfilled buffer. None of the target models have either shape.
+5. **Output-completeness guard.** Every declared output must be created in-graph, so each one should trigger exactly one `hip.alloc_output` → callback. Right after a successful inference call, the EP checks that every output index in the metadata was served. A missing output throws a named runtime error that becomes `OrtStatus`, rather than exposing an uninitialized buffer or terminating the host. #758 owns support or compile-time rejection for pass-through and duplicated output slots.
 
-6. **Per-Compute allocator install/clear.** The `OutputAllocatorCtx` lives on `MlirCustomOp::compute_with_output_allocator`'s stack; the allocator is installed (with `self = &ctx`) before `InferenceState::compute` and cleared (`set_output_allocator(nullptr)`) immediately after, so `self` can never dangle into a later `Compute()`.
+6. **Per-Compute allocator install/clear.** The `OutputAllocatorCtx` lives on `MlirCustomOp::compute_with_output_allocator`'s stack. A scope-exit guard clears the installed allocator on success and on every exception path, so its borrowed `self` pointer cannot dangle into a later `Compute()`.
+
+7. **Scratch growth is failure-atomic.** Host-output scratch allocates and installs the replacement before retiring the old slot. Allocation failure preserves the reusable old buffer. If freeing the old pointer fails, its disposition is uncertain, so the runtime abandons that pointer (and may leak it) rather than risk reuse; the known-valid replacement remains live. Zero-byte outputs retain a valid one-byte device sentinel and skip the zero-byte D2H call. Shape and byte-size arithmetic is validated before ORT or scratch allocation.

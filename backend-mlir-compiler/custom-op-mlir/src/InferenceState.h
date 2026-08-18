@@ -71,9 +71,9 @@ public:
 
   // Install (allocator != nullptr) or clear (nullptr) the output allocator on
   // the loaded artifact's RuntimeState before compute(). Resolved once in the
-  // ctor. Fatal if called with a non-null allocator but the artifact does not
-  // export the setter (a stale artifact would otherwise crash with a null
-  // output buffer).
+  // ctor. Installing on a stale artifact that lacks the setter throws so the
+  // CustomOp boundary can return an OrtStatus; clearing is always a no-op-safe
+  // cleanup operation.
   void set_output_allocator(const output_allocator_t *allocator) const;
 
   // Invokes the optional `hipdnn_ep_runtime_begin_compute` hook to invalidate

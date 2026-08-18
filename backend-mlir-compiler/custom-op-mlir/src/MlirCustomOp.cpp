@@ -11,6 +11,8 @@
 #include "morphizen/onnxruntime_api.hpp"
 #include <glog/logging.h>
 
+#include "llvm/ADT/ScopeExit.h"
+
 // Protobuf headers
 #include "google/protobuf/util/json_util.h"
 #include "metadata.pb.h"
@@ -25,10 +27,14 @@
 #endif
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 // Environment parameters (global scope, before namespace)
@@ -537,58 +543,113 @@ struct PendingD2H {
 // inference_compute; the allocator is cleared on the RuntimeState before it
 // goes out of scope so `self` can never dangle.
 struct OutputAllocatorCtx {
-  Ort::KernelContext *ctx = nullptr;
-  const google::protobuf::RepeatedPtrField<mlir_metadata::Output> *outputs =
-      nullptr;
-  const std::vector<int> *output_index_map = nullptr;
-  // Borrowed from the MlirCustomOp instance (grow-on-demand, reused across
-  // Compute()): one GPU scratch buffer per output index for host outputs.
-  std::vector<HostOutputScratch> *host_out_scratch = nullptr;
+  OutputAllocatorCtx(
+      Ort::KernelContext &ctx,
+      const google::protobuf::RepeatedPtrField<mlir_metadata::Output> &outputs,
+      const std::vector<int> &outputIndexMap,
+      std::vector<HostOutputScratch> &hostOutputScratch)
+      : ctx(ctx), outputs(outputs), output_index_map(outputIndexMap),
+        host_out_scratch(hostOutputScratch), allocated(outputs.size(), false) {
+    if (output_index_map.size() != static_cast<size_t>(outputs.size()))
+      throw std::runtime_error(
+          "output allocator: metadata/output index map size mismatch");
+  }
+
+  Ort::KernelContext &ctx;
+  const google::protobuf::RepeatedPtrField<mlir_metadata::Output> &outputs;
+  const std::vector<int> &output_index_map;
+  // Session-owned grow-on-demand GPU scratch, one slot per host output.
+  std::vector<HostOutputScratch> &host_out_scratch;
   std::vector<PendingD2H> pending_d2h; // filled during compute, consumed after
   // Output-completeness guard: which metadata outputs received an alloc call.
   std::vector<bool> allocated;
+  morphizen::detail::DeferredComputeException callback_error;
 };
 
+static size_t checked_output_byte_size(const std::vector<int64_t> &shape,
+                                       int64_t elem_size, int64_t out_idx) {
+  if (elem_size <= 0)
+    throw std::runtime_error(
+        "output allocator: non-positive element size for output " +
+        std::to_string(out_idx));
+
+  size_t nbytes = static_cast<size_t>(elem_size);
+  for (size_t axis = 0; axis < shape.size(); ++axis) {
+    int64_t dim = shape[axis];
+    if (dim < 0)
+      throw std::runtime_error("output allocator: negative extent at axis " +
+                               std::to_string(axis) + " for output " +
+                               std::to_string(out_idx));
+    size_t extent = static_cast<size_t>(dim);
+    if (extent != 0 && nbytes > std::numeric_limits<size_t>::max() / extent)
+      throw std::overflow_error("output allocator: byte size overflow for "
+                                "output " +
+                                std::to_string(out_idx));
+    nbytes *= extent;
+  }
+  return nbytes;
+}
+
 #ifdef HIPDNN_EP_LINK_HIP_HOST
-// Ensure scratch[idx] holds at least nbytes of device memory. Grows by
-// hipFree + hipMalloc (never shrinks). Safe within a Compute(): each output
-// index is allocated exactly once, so a grow here cannot invalidate a pointer
-// the DLL is still about to write this pass (distinct indices = distinct
-// buffers). LOG(FATAL) on failure -- never returns null.
+// Grow one persistent scratch slot without discarding the usable old allocation
+// until its replacement exists.
 static void *ensure_host_out_slot(std::vector<HostOutputScratch> &scratch,
                                   size_t idx, size_t nbytes) {
   if (idx >= scratch.size())
     scratch.resize(idx + 1);
   HostOutputScratch &slot = scratch[idx];
-  if (slot.capacity < nbytes) {
-    if (slot.ptr)
-      (void)hipFree(slot.ptr);
-    void *p = nullptr;
-    hipError_t e = hipMalloc(&p, nbytes ? nbytes : 1);
-    if (e != hipSuccess || !p)
-      LOG(FATAL) << "hipMalloc(" << nbytes
-                 << ") for output-allocator host scratch failed: "
-                 << hipGetErrorString(e);
-    slot.ptr = p;
-    slot.capacity = nbytes;
+  const size_t requiredBytes = std::max(nbytes, size_t{1});
+  if (slot.ptr && slot.capacity >= requiredBytes)
+    return slot.ptr;
+
+  void *replacement = nullptr;
+  hipError_t error = hipMalloc(&replacement, requiredBytes);
+  llvm::scope_exit releaseReplacement([&] {
+    if (replacement)
+      (void)hipFree(replacement);
+  });
+  if (error != hipSuccess || !replacement)
+    throw std::runtime_error(
+        "output allocator: hipMalloc(" + std::to_string(requiredBytes) +
+        ") for host scratch failed: " + hipGetErrorString(error));
+
+  // Publish the known-valid replacement before retiring the old pointer. If
+  // hipFree reports an error, its disposition is uncertain; retaining it for
+  // reuse would be unsafe, so leave the replacement live and abandon the old
+  // allocation rather than risk a stale-pointer reuse.
+  void *retired = slot.ptr;
+  slot.ptr = replacement;
+  slot.capacity = requiredBytes;
+  replacement = nullptr;
+  if (retired) {
+    error = hipFree(retired);
+    if (error != hipSuccess)
+      throw std::runtime_error(
+          "output allocator: hipFree of replaced host scratch failed: " +
+          std::string(hipGetErrorString(error)));
   }
   return slot.ptr;
 }
 #endif // HIPDNN_EP_LINK_HIP_HOST
 
 // C callback installed on the RuntimeState (output_allocator_t.allocate).
-// noexcept: invoked from C (the model.dll runtime); a C++ exception crossing
-// that boundary is UB. Any failure aborts via LOG(FATAL) with a clear message
-// rather than returning null (a null would be written by the DLL -> segfault
-// with no diagnostic).
+// It cannot unwind through the model's C ABI. Preserve the first exception and
+// rethrow it after inference_compute returns and runs generated cleanup.
 void *output_allocate_cb(void *self, int64_t out_idx, const int64_t *shape,
                          int64_t rank, int64_t elem_size) noexcept {
   auto *octx = static_cast<OutputAllocatorCtx *>(self);
+  if (!octx || octx->callback_error.hasValue())
+    return nullptr;
+
   try {
-    if (out_idx < 0 || out_idx >= static_cast<int64_t>(octx->outputs->size())) {
-      LOG(FATAL) << "output allocator: out_idx " << out_idx << " out of range ("
-                 << octx->outputs->size() << " outputs)";
-    }
+    if (out_idx < 0 || out_idx >= static_cast<int64_t>(octx->outputs.size()))
+      throw std::runtime_error("output allocator: out_idx " +
+                               std::to_string(out_idx) + " out of range (" +
+                               std::to_string(octx->outputs.size()) +
+                               " outputs)");
+    if (rank < 0 || (rank > 0 && !shape))
+      throw std::runtime_error("output allocator: invalid shape for output " +
+                               std::to_string(out_idx));
     // Use the DLL's in-graph shape verbatim -- the EP never reshapes an output
     // here. The shape is computed in-graph by hip.alloc_output from its
     // producer's operands; when a dynamic output dim is sized from a graph
@@ -597,20 +658,44 @@ void *output_allocate_cb(void *self, int64_t out_idx, const int64_t *shape,
     // (IO-bound) buffer rather than allocating a fresh one, so when an input
     // and output are bound to the same buffer that identity is preserved with
     // no EP-side override.
-    std::vector<int64_t> out_shape(shape, shape + rank);
+    std::vector<int64_t> out_shape;
+    if (rank > 0)
+      out_shape.assign(shape, shape + rank);
+    size_t nbytes = checked_output_byte_size(out_shape, elem_size, out_idx);
 
-    int ort_idx = (*octx->output_index_map)[static_cast<int>(out_idx)];
-    auto out_tensor = octx->ctx->GetOutput(ort_idx, out_shape);
+    const size_t outputIndex = static_cast<size_t>(out_idx);
+    int ort_idx = octx->output_index_map[outputIndex];
+    if (ort_idx < 0)
+      throw std::runtime_error("output allocator: negative ORT output index");
+    auto out_tensor = octx->ctx.GetOutput(ort_idx, out_shape);
     int mem_type =
         static_cast<int>(out_tensor.GetTensorMemoryInfo().GetDeviceType());
     void *ort_ptr = out_tensor.GetTensorMutableRawData();
 
-    octx->allocated[static_cast<size_t>(out_idx)] = true;
+    if (!ort_ptr) {
+      if (nbytes != 0)
+        throw std::runtime_error(
+            "output allocator: ORT returned null for non-empty output " +
+            std::to_string(out_idx));
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+      // Some allocators represent an empty OrtValue with null. Generated code
+      // still requires a non-null descriptor even though it performs no writes.
+      void *sentinel =
+          ensure_host_out_slot(octx->host_out_scratch, outputIndex, 0);
+      octx->allocated[outputIndex] = true;
+      return sentinel;
+#else
+      static std::byte emptyOutputSentinel;
+      octx->allocated[outputIndex] = true;
+      return &emptyOutputSentinel;
+#endif
+    }
 
     if (mem_type == TENSOR_MEMORY_GPU) {
       // Zero-copy: ORT buffer is already GPU-accessible (e.g. the EP's
       // host-mapped allocator, or caller-provided device memory). The DLL
       // writes into it directly.
+      octx->allocated[outputIndex] = true;
       return ort_ptr;
     }
 
@@ -618,27 +703,21 @@ void *output_allocate_cb(void *self, int64_t out_idx, const int64_t *shape,
     // D2H-copies into ort_ptr after inference_compute returns (the 2-arg
     // interface already stream-synced).
 #ifdef HIPDNN_EP_LINK_HIP_HOST
-    size_t nelem = 1;
-    for (int64_t d : out_shape)
-      nelem *= static_cast<size_t>(d);
-    size_t nbytes = nelem * static_cast<size_t>(elem_size);
-    void *gpu = ensure_host_out_slot(*octx->host_out_scratch,
-                                     static_cast<size_t>(out_idx), nbytes);
+    void *gpu =
+        ensure_host_out_slot(octx->host_out_scratch, outputIndex, nbytes);
     octx->pending_d2h.push_back({gpu, ort_ptr, nbytes});
+    octx->allocated[outputIndex] = true;
     return gpu;
 #else
     // Mock runtime writes host memory directly; no GPU staging needed.
     (void)elem_size;
+    octx->allocated[outputIndex] = true;
     return ort_ptr;
 #endif
-  } catch (const std::exception &e) {
-    LOG(FATAL) << "output allocator callback failed for out_idx " << out_idx
-               << ": " << e.what();
   } catch (...) {
-    LOG(FATAL) << "output allocator callback failed for out_idx " << out_idx
-               << " (unknown exception)";
+    octx->callback_error.captureCurrent();
+    return nullptr;
   }
-  return nullptr; // unreachable: LOG(FATAL) aborts. Silences -Wreturn-type.
 }
 
 } // anonymous namespace
@@ -723,33 +802,34 @@ void MlirCustomOp::compute_with_output_allocator(
 #endif
 
   Ort::KernelContext ort_ctx(context);
-  OutputAllocatorCtx octx;
-  octx.ctx = &ort_ctx;
-  octx.outputs = &metadata_.outputs();
-  octx.output_index_map = &output_index_map_;
-  octx.host_out_scratch = &host_out_scratch_;
-  octx.allocated.assign(metadata_.outputs().size(), false);
+  OutputAllocatorCtx octx(ort_ctx, metadata_.outputs(), output_index_map_,
+                          host_out_scratch_);
 
   output_allocator_t alloc;
   alloc.self = &octx;
   alloc.allocate = &output_allocate_cb;
-  inference_state_->set_output_allocator(&alloc);
+  int ret = 0;
+  {
+    inference_state_->set_output_allocator(&alloc);
+    llvm::scope_exit clearAllocator(
+        [&] { inference_state_->set_output_allocator(nullptr); });
 
 #ifdef HIPDNN_EP_LINK_HIP_HOST
-  if (perf)
-    timer->record_start();
+    if (perf)
+      timer->record_start();
 #endif
 
-  int ret = inference_state_->compute(&inputs.span);
+    ret = inference_state_->compute(&inputs.span);
 
 #ifdef HIPDNN_EP_LINK_HIP_HOST
-  if (perf)
-    timer->record_stop();
+    if (perf)
+      timer->record_stop();
 #endif
+  }
 
-  // Clear before octx leaves scope so a stale self pointer can never be used by
-  // a later call (e.g. the next Compute() before it reinstalls its own ctx).
-  inference_state_->set_output_allocator(nullptr);
+  // The callback cannot throw through C. Surface its precise failure only
+  // after inference_compute has completed its generated cleanup.
+  octx.callback_error.rethrow();
 
   if (ret != 0) {
     // Do not validate, copy, profile, or report successful outputs after a
@@ -764,25 +844,27 @@ void MlirCustomOp::compute_with_output_allocator(
   // Fail loudly rather than hand ORT an uninitialized buffer (which can
   // silently pass a CPU-vs-CPU comparison).
   for (size_t i = 0; i < octx.allocated.size(); ++i) {
-    if (!octx.allocated[i]) {
-      LOG(FATAL) << "output allocator: output '"
-                 << metadata_.outputs()[static_cast<int>(i)].name() << "' (idx "
-                 << i
-                 << ") was never allocated by the model.dll. Passthrough / "
-                    "aliased outputs are not supported yet.";
-    }
+    if (!octx.allocated[i])
+      throw std::runtime_error(
+          "output allocator: output '" +
+          metadata_.outputs()[static_cast<int>(i)].name() + "' (idx " +
+          std::to_string(i) +
+          ") was never allocated by the model artifact; passthrough and "
+          "aliased outputs are not supported yet");
   }
 
 #ifdef HIPDNN_EP_LINK_HIP_HOST
   // Deferred host-output copies. The 2-arg interface already stream-synced, so
   // the GPU scratch holds final data; a blocking hipMemcpy is safe.
   for (const auto &p : octx.pending_d2h) {
+    if (p.nbytes == 0)
+      continue;
     hipError_t e =
         hipMemcpy(p.host_dst, p.gpu_src, p.nbytes, hipMemcpyDeviceToHost);
-    if (e != hipSuccess) {
-      LOG(FATAL) << "output allocator: D2H copy of " << p.nbytes
-                 << " bytes failed: " << hipGetErrorString(e);
-    }
+    if (e != hipSuccess)
+      throw std::runtime_error("output allocator: D2H copy of " +
+                               std::to_string(p.nbytes) +
+                               " bytes failed: " + hipGetErrorString(e));
   }
 
   if (perf) {

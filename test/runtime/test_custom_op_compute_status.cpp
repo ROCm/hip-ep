@@ -79,12 +79,43 @@ void testUnknownExceptionReturnsStatus() {
   }
 }
 
+void testDeferredCallbackFailureReturnsStatusAfterCleanup() {
+  const OrtApi api = makeApi();
+  morphizen::detail::DeferredComputeException deferred;
+  bool cleanupRan = false;
+
+  try {
+    throw std::runtime_error("output allocator failed");
+  } catch (...) {
+    deferred.captureCurrent();
+  }
+  // The first callback failure is authoritative if later callbacks also fail.
+  try {
+    throw std::runtime_error("secondary failure");
+  } catch (...) {
+    deferred.captureCurrent();
+  }
+
+  OrtStatus *status = morphizen::detail::translateComputeExceptions(api, [&] {
+    cleanupRan = true;
+    deferred.rethrow();
+  });
+  CHECK(cleanupRan);
+  CHECK(status != nullptr);
+  if (status) {
+    CHECK(unwrap(status)->code == ORT_RUNTIME_EXCEPTION);
+    CHECK(unwrap(status)->message == "output allocator failed");
+    release(status);
+  }
+}
+
 } // namespace
 
 int main() {
   testSuccessReturnsNull();
   testGeneratedFailureReturnsStatus();
   testUnknownExceptionReturnsStatus();
+  testDeferredCallbackFailureReturnsStatusAfterCleanup();
 
   if (gFailures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", gFailures);
