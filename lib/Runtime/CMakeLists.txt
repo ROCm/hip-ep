@@ -681,40 +681,37 @@ if(NOT BUILD_MOCK_RUNTIME)
                 message(STATUS "Found XRT headers: ${XRT_INCLUDE_DIR}")
                 message(STATUS "Found Boost headers: ${BOOST_INCLUDE_DIR}")
 
-                # Locate DynamicDispatch source files
-                set(DD_SRC_DIR "${DD_INCLUDE_DIR}/ryzenai/dynamic_dispatch/src")
-                # Workspace directory - try to find it relative to install
-                if(DYNAMICDISPATCH_ROOT)
-                    get_filename_component(DD_BUILD_ROOT "${DYNAMICDISPATCH_ROOT}" DIRECTORY)
-                    set(DD_WORKSPACE_DIR "${DD_BUILD_ROOT}/workspace/dod")
+                # Find DynamicDispatch prebuilt libraries
+                find_library(DD_CORE_LIB
+                    NAMES dyn_dispatch_core
+                    PATHS ${DD_SEARCH_PATHS}
+                    NO_DEFAULT_PATH
+                )
+                find_library(DD_TRANSACTION_LIB
+                    NAMES transaction
+                    PATHS ${DD_SEARCH_PATHS}
+                    NO_DEFAULT_PATH
+                )
+
+                if(NOT DD_CORE_LIB)
+                    message(WARNING "DynamicDispatch core library not found. Link will fail with unresolved externals until dyn_dispatch_core.lib provides template instantiations for combined_gemm<uint16_t,uint8_t,uint16_t> and iconv<uint16_t,uint8_t,uint16_t>")
                 else()
-                    # Fallback: try to deduce from DD_INCLUDE_DIR
-                    get_filename_component(DD_INSTALL_ROOT "${DD_INCLUDE_DIR}" DIRECTORY)
-                    get_filename_component(DD_BUILD_ROOT "${DD_INSTALL_ROOT}" DIRECTORY)
-                    set(DD_WORKSPACE_DIR "${DD_BUILD_ROOT}/workspace/dod")
+                    message(STATUS "Found DD core library: ${DD_CORE_LIB}")
                 endif()
 
-                # Create native library with real DynamicDispatch implementation
+                if(DD_TRANSACTION_LIB)
+                    message(STATUS "Found DD transaction library: ${DD_TRANSACTION_LIB}")
+                endif()
+
+                # Create native library with wrapper code only
+                # Link against prebuilt DynamicDispatch libraries
+                # NOTE: Currently requires template instantiations in dyn_dispatch_core.lib:
+                #   - combined_gemm<uint16_t, uint8_t, uint16_t>
+                #   - iconv<uint16_t, uint8_t, uint16_t>
                 add_library(hipdnn-ep-dd STATIC
                     real/dynamic_dispatch.cpp
                     real/dd_static_init.cpp
                     op_state.cpp
-                    ${DD_SRC_DIR}/ops/dmacompiler/combined_gemm/combined_gemm.cpp
-                    ${DD_SRC_DIR}/ops/dmacompiler/iconv/iconv.cpp
-                    ${DD_WORKSPACE_DIR}/src/ops/ops_common/coeffs.cpp
-                    ${DD_WORKSPACE_DIR}/src/utils/xrt_context.cpp
-                    ${DD_WORKSPACE_DIR}/src/utils/ctrl_pkt_utils.cpp
-                    ${DD_WORKSPACE_DIR}/src/utils/op_utils.cpp
-                    ${DD_WORKSPACE_DIR}/src/txn_helper/txn_helper.cpp
-                    ${DD_WORKSPACE_DIR}/src/txn/txn_utils.cpp
-                    ${DD_WORKSPACE_DIR}/transaction/src/txn_container.cpp
-                )
-
-                # Find transaction headers (not installed, in workspace)
-                find_path(DD_TRANSACTION_INCLUDE_DIR
-                    NAMES txn_container.hpp
-                    PATHS ${DD_WORKSPACE_DIR}/transaction/include
-                    NO_DEFAULT_PATH
                 )
 
                 # Determine if this is an install layout or source layout
@@ -736,18 +733,12 @@ if(NOT BUILD_MOCK_RUNTIME)
                     ${CMAKE_CURRENT_SOURCE_DIR}
                     ${CMAKE_CURRENT_SOURCE_DIR}/real  # For runtime_types.h
                     ${CMAKE_SOURCE_DIR}/include
-                    ${DD_INCLUDE_DIR}  # For top-level headers (aie_codegen.h, etc.)
+                    ${DD_INCLUDE_DIR}  # For top-level headers
                     ${DD_OPS_INCLUDE_DIR}  # For ops/... headers
                     ${DD_SRC_INCLUDE_DIR}  # For src/... headers
-                    ${DD_WORKSPACE_DIR}/src
-                    ${DD_WORKSPACE_DIR}/transaction/include
                     ${XRT_INCLUDE_DIR}
                     ${BOOST_INCLUDE_DIR}
                 )
-
-                if(DD_TRANSACTION_INCLUDE_DIR)
-                    message(STATUS "Found transaction headers: ${DD_TRANSACTION_INCLUDE_DIR}")
-                endif()
 
                 target_link_libraries(hipdnn-ep-dd PRIVATE
                     ${DD_CORE_LIB}

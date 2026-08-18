@@ -55,6 +55,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     target_link_options(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PRIVATE
       "/INCLUDE:wrap_dd_matmul"
       "/INCLUDE:wrap_dd_conv2d"
+      "/DEBUG:FULL"  # Generate full PDB for debugging
     )
   endif()
 

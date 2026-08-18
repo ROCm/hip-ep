@@ -102,6 +102,15 @@ get_xrt_context(RuntimeState *state) {
 // in RuntimeState's op_state slots to avoid recreating them per inference.
 //
 // Each DD operator uses the OpStateT<T> CRTP base for lifecycle management.
+//
+// IMPORTANT: The template instantiations below must be provided by
+// dyn_dispatch_core.lib. Currently required instantiations:
+//   - ryzenai::combined_gemm<uint16_t, uint8_t, uint16_t>
+//   - ryzenai::iconv<uint16_t, uint8_t, uint16_t>
+//
+// These correspond to float16 activations/outputs with uint8 weights.
+// If these are not exported from dyn_dispatch_core.lib, the linker will
+// report unresolved external symbols.
 //===----------------------------------------------------------------------===//
 
 // GEMM operator state
@@ -158,19 +167,28 @@ int wrap_dd_matmul(RuntimeState *state, int32_t op_state_slot,
       // Create DynamicDispatch combined_gemm operator
       // Constructor: combined_gemm(a_dtype, b_dtype, c_dtype, load_xrt, attr={})
       std::map<std::string, std::any> attr;
+fprintf(stderr, "wrap_dd_matmul: Creating DDGemmState::GemmOp \n");
       auto gemm_op = std::make_unique<DDGemmState::GemmOp>(
           dtype_str, dtype_str, dtype_str, true, attr);
 
+fprintf(stderr, "wrap_dd_matmul: Creating DDGemmState::GemmOp state \n");
       // Create state and store in slot
       auto state_ptr = DDGemmState::create(std::move(gemm_op));
+fprintf(stderr, "wrap_dd_matmul: Creating DDGemmState::GemmOp get state \n");
       gemm_state = state_ptr.get();
+fprintf(stderr, "wrap_dd_matmul: Creating DDGemmState::GemmOp set state \n");
       hipdnn_ep_op_state_set(state, op_state_slot, state_ptr.release());
+fprintf(stderr, "wrap_dd_matmul: Creating DDGemmState::GemmOp created \n");
 
     } catch (const std::exception &e) {
       fprintf(stderr, "wrap_dd_matmul: failed to create operator: %s\n",
                   e.what());
       return -1;
     }
+  }
+  else {
+fprintf(stderr, "wrap_dd_matmul: DDGemmState::GemmOp existed: gemm_state= %p size= %u\n", (void*)gemm_state, sizeof(*gemm_state));
+fprintf(stderr, "wrap_dd_matmul: DDGemmState::GemmOp existed:         op= %p size= %u\n", (void*)gemm_state->op.get(), sizeof(*(gemm_state->op.get())));
   }
 
   // Prepare input/output tensors
@@ -209,7 +227,9 @@ int wrap_dd_matmul(RuntimeState *state, int32_t op_state_slot,
 
   // Execute the operator
   try {
+fprintf(stderr, "wrap_dd_matmul: DDGemmState::GemmOp execute \n");
     gemm_state->op->execute(inputs, outputs);
+fprintf(stderr, "wrap_dd_matmul: DDGemmState::GemmOp finished \n");
   } catch (const std::exception &e) {
     fprintf(stderr, "wrap_dd_matmul: execution failed: %s\n", e.what());
     fprintf(stderr, "  M=%lld, N=%lld, K=%lld, dtype=%s\n", (long long)M,
