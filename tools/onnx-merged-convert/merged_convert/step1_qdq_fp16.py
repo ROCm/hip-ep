@@ -14,6 +14,7 @@ from onnx import TensorProto, helper, numpy_helper
 
 from .step2_fp16_cleanup import optimize_fp16_activations
 from .step3_lm_head import rewrite_lm_head_gather_unsqueeze
+from .lora_weight_pack import retarget_weight_quantized_graph_input
 
 FP32__dup4 = TensorProto.FLOAT
 FP64 = TensorProto.DOUBLE
@@ -372,14 +373,15 @@ def convert_matmul_graph_input_int8_dq(
 ) -> int:
     """Fuse graph-input int8 ``weight_quantized -> DQ -> MatMul`` into MatMulNBits.
 
-    Keeps each ``weight_quantized`` port as a graph input (shape ``[K, N]``).
-    Inserts ``Transpose + Reshape`` so MatMulNBits receives ``[N, K/block, block]``.
+    Keep ``weight_quantized`` ports as uint8 ``[N,K]`` graph inputs and
+    wire MatMulNBits directly.
     """
     graph_inputs = {vi.name: vi for vi in graph.input}
     dq_by_out = {d.output[0]: d for d in graph.node if d.op_type == "DequantizeLinear"}
     scale_cache: dict[tuple[str, str, int, int], str] = {}
     insert_before: dict[str, list[onnx.NodeProto]] = {}
     remove_nodes: set[str] = set()
+    retargeted_ports: set[str] = set()
     converted = 0
     for mm in graph.node:
         if mm.op_type != "MatMul" or len(mm.input) < 2:
@@ -401,54 +403,11 @@ def convert_matmul_graph_input_int8_dq(
         k, n = dims
         block_size = _matmul_nbits_block_size(k)
         n_blocks = k // block_size
-        packed_shape_name = f"{mm.name}_mnbits_pack_shape"
-        new_inits[packed_shape_name] = numpy_helper.from_array(
-            np.array([n, n_blocks, block_size], dtype=np.int64), name=packed_shape_name
-        )
-        offset_name = f"{mm.name}_mnbits_signed_offset"
-        new_inits[offset_name] = numpy_helper.from_array(
-            np.array(128, dtype=np.int16), name=offset_name
-        )
-        trans_out = f"{mm.name}_mnbits_w_t"
-        trans_i16 = f"{mm.name}_mnbits_w_t_i16"
-        shifted_i16 = f"{mm.name}_mnbits_w_shifted_i16"
-        trans_u8 = f"{mm.name}_mnbits_w_t_u8"
-        packed_u8 = f"{mm.name}_mnbits_w_uint8"
-        pack_nodes = [
-            helper.make_node(
-                "Transpose",
-                [w_name],
-                [trans_out],
-                name=f"{mm.name}_mnbits_transpose",
-                perm=[1, 0],
-            ),
-            helper.make_node(
-                "Cast",
-                [trans_out],
-                [trans_i16],
-                name=f"{mm.name}_mnbits_cast_i16",
-                to=TensorProto.INT16,
-            ),
-            helper.make_node(
-                "Add",
-                [trans_i16, offset_name],
-                [shifted_i16],
-                name=f"{mm.name}_mnbits_add_offset",
-            ),
-            helper.make_node(
-                "Cast",
-                [shifted_i16],
-                [trans_u8],
-                name=f"{mm.name}_mnbits_cast_u8",
-                to=TensorProto.UINT8,
-            ),
-            helper.make_node(
-                "Reshape",
-                [trans_u8, packed_shape_name],
-                [packed_u8],
-                name=f"{mm.name}_mnbits_pack",
-            ),
-        ]
+
+        if w_name not in retargeted_ports:
+            retarget_weight_quantized_graph_input(graph, w_name, k, n)
+            retargeted_ports.add(w_name)
+
         scale_key = (dq.input[1], dq.input[2], n, n_blocks)
         if scale_key not in scale_cache:
             scale_blocks, zp_blocks = _expand_scale_zp_blocks_signed_int8(
@@ -465,7 +424,7 @@ def convert_matmul_graph_input_int8_dq(
             scale_cache[dq.input[1], dq.input[2], n, n_blocks, "zp"] = z_name
         s_name = scale_cache[scale_key]
         z_name = scale_cache[dq.input[1], dq.input[2], n, n_blocks, "zp"]
-        mnbits_inputs = [mm.input[0], packed_u8, s_name, z_name]
+        mnbits_inputs = [mm.input[0], w_name, s_name, z_name]
         mnbits = helper.make_node(
             "MatMulNBits",
             mnbits_inputs,
@@ -478,7 +437,7 @@ def convert_matmul_graph_input_int8_dq(
             block_size=block_size,
             accuracy_level=MATMUL_NBITS_ACCURACY_LEVEL,
         )
-        insert_before[mm.name] = [*pack_nodes, mnbits]
+        insert_before[mm.name] = [mnbits]
         remove_nodes.update({mm.name, dq.name})
         converted += 1
     if not converted:
@@ -1152,7 +1111,7 @@ def convert_decoder_model(
     stats["gqa_seqlens_rewrite"] = (
         rewrite_gqa_past_seq_len_to_seqlens_k(model) if gqa_seqlens_rewrite else 0
     )
-    ext_name = external_data_name or infer_decoder_external_data_name(src, bundle_root)
+    ext_name = external_data_name or f"{dst.stem}.data"
     save_decoder_model(model, dst, external_data_name=ext_name)
     return stats
 

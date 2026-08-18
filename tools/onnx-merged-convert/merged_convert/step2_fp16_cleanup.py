@@ -384,55 +384,25 @@ def promote_pure_fp16_activations(
     return optimize_fp16_activations(model, clear_value_info=clear_value_info)
 
 
-def _external_data_location__dup2(model: onnx.ModelProto) -> str | None:
-    locations = {
-        entry.value
-        for init in model.graph.initializer
-        for entry in init.external_data
-        if entry.key == "location"
-    }
-    if len(locations) == 1:
-        return locations.pop()
-    return None
-
-
-def _save_model_preserving_external_data(model: onnx.ModelProto, dst: Path) -> None:
+def _save_model_graph_only(model: onnx.ModelProto, dst: Path) -> None:
+    """Write graph protobuf only; keep existing external weight blob references."""
+    if not model.graph.name:
+        model.graph.name = f"{dst.stem}_graph"
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists():
         dst.unlink()
-    ext_name = _external_data_location__dup2(model)
-    if ext_name is None:
-        data_candidates = sorted(
-            dst.parent.glob("*.data"), key=lambda p: p.stat().st_size, reverse=True
-        )
-        if data_candidates:
-            ext_name = data_candidates[0].name
-    if ext_name is not None:
-        data_path = dst.parent / ext_name
-        if not data_path.exists():
-            raise FileNotFoundError(
-                f"External weights not found for {dst.name}: {data_path}"
-            )
-        onnx.save_model(
-            model,
-            str(dst),
-            save_as_external_data=True,
-            all_tensors_to_one_file=True,
-            location=ext_name,
-            size_threshold=1024,
-        )
-        if dst.stat().st_size > 256 * 1024 * 1024:
-            raise RuntimeError(
-                f"{dst.name}: ONNX protobuf is {dst.stat().st_size} bytes after save; expected weights in {ext_name}"
-            )
-        return
     onnx.save(model, str(dst))
+    if dst.stat().st_size > 256 * 1024 * 1024:
+        raise RuntimeError(
+            f"{dst.name}: ONNX protobuf is {dst.stat().st_size} bytes after graph-only save; "
+            "load with load_external_data=False to preserve external initializers"
+        )
 
 
 def patch_model_file(
     src: Path, dst: Path, *, reinfer_shapes: bool = False
 ) -> dict[str, int]:
-    model = onnx.load(str(src), load_external_data=True)
+    model = onnx.load(str(src), load_external_data=False)
     stats = optimize_fp16_activations(model)
     if stats["fp32_casts_remaining"]:
         raise RuntimeError(
@@ -440,5 +410,5 @@ def patch_model_file(
         )
     if reinfer_shapes:
         model = shape_inference.infer_shapes(model)
-    _save_model_preserving_external_data(model, dst)
+    _save_model_graph_only(model, dst)
     return stats

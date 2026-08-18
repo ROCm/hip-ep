@@ -73,7 +73,7 @@ model-bundle/
 | File | Purpose |
 |------|---------|
 | `genai_config.json` | Source for model metadata and search settings. If missing, a default config is generated from the merged graph and bundle metadata (see below). |
-| `adapter.safetensors` | LoRA adapter weights; copied to the output when present. |
+| `adapter.safetensors` | Raw int8 LoRA weights in input-dir; exported as packed uint8 in output. |
 | `tokenizer/` | Not read by the converter; copy manually for inference. |
 | `tokenizer/config.json` or `config.json` | Hugging Face model config; used for `vocab_size`, `context_length`, and decoder architecture fields when the source genai config omits them. |
 | `tokenizer/tokenizer_config.json` or `tokenizer_config.json` | Tokenizer settings; used for pad/EOS token ids when inferring model metadata. |
@@ -103,7 +103,7 @@ Pipeline **type** is inferred from the decoder prefill graph:
 
 | Detected pattern | Behavior |
 |------------------|----------|
-| Quantized linear (MatMulNBits) | Standard QDQ removal and merge. |
+| Quantized linear (MatMulNBits) | Standard QDQ removal and merge; LoRA weights are packed into `adapter.safetensors` with uint8 `weight_quantized` graph inputs. |
 | Many Gemm nodes, few MatMulNBits | Treats weights as folded Gemm (pure-Gemm / adapter path); may emit `lora_dequant.json`. |
 | GroupQueryAttention with 8-bit KV cache | Preserves int8 KV I/O and GQA quant attrs; rewrites activations to pure fp16 (including RoPE cos/sin at GQA inputs 7–8) for hip-ep. |
 | Many 2-bit MatMulNBits nodes | Low-bit decoder path. |
@@ -116,7 +116,7 @@ Pipeline **type** is inferred from the decoder prefill graph:
 | `{decoder_stem}_merged.data` | External weight blob (when weights are externalized). |
 | `genai_config.json` | GenAI runtime configuration (pipeline stages point at the merged file). |
 | `lora_dequant.json` | Present only for folded-Gemm / adapter bundles. |
-| `adapter.safetensors` | Copied from input when present and needed. |
+| `adapter.safetensors` | Packed uint8 LoRA weights (same keys as `weight_quantized` graph inputs). |
 
 The merged `genai_config.json` is adjusted for a single merged graph:
 
