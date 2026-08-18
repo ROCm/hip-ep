@@ -358,8 +358,8 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/pool.cpp runtime_pool.bc)
     compile_to_bitcode(real/resize.cpp runtime_resize.bc)
     compile_to_bitcode(real/global_pool.cpp runtime_global_pool.bc)
-    # DynamicDispatch: Do NOT compile mock into bitcode - native library provides real impl
-    # compile_to_bitcode(mock/dynamic_dispatch_mock.cpp runtime_dynamic_dispatch.bc)
+    # DynamicDispatch: compile mock stubs for when DD library is not available
+    compile_to_bitcode(mock/dynamic_dispatch_mock.cpp runtime_dynamic_dispatch.bc)
 
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
@@ -436,8 +436,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_resize.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_global_pool.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather_block_quantized.bc
-        # DynamicDispatch provided by native library, not bitcode
-        # ${CMAKE_CURRENT_BINARY_DIR}/runtime_dynamic_dispatch.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_dynamic_dispatch.bc
     )
     # Vendor-symbol stubs (see the compile_to_bitcode above) join runtime.bc only
     # when the vendor BLAS/DNN backends are disabled.
