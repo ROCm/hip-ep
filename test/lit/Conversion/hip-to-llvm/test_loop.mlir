@@ -21,6 +21,8 @@
 //   and the fixed 7-arg signature
 //   `(state, frame, iter, cond, current[], captures[], next[]) -> i32`
 // - Trampoline body calls back the (lowered) body func by name
+// - Frame setter/publisher status is consumed and returned before partially
+//   prepared carrier state can reach the body or runtime
 // - Caller allocates a stack `!llvm.array<N x ptr>` for loop-carried
 //   descriptor slots and a separate one for capture descriptor slots
 // - Caller passes `num_lc` and `num_cap` as `i32` constants, max_trip_count
@@ -89,7 +91,19 @@ module {
   // scope AFTER the caller and the converted body func.  Calls back the
   // lowered body func by name and returns i32 0 to the runtime.
   // CHECK-LABEL: llvm.func internal @loop_passthrough_body_trampoline(%{{.*}}: !llvm.ptr, %{{.*}}: !llvm.ptr, %{{.*}}: !llvm.ptr, %{{.*}}: !llvm.ptr, %{{.*}}: !llvm.ptr, %{{.*}}: !llvm.ptr, %{{.*}}: !llvm.ptr) -> i32
+  // CHECK: %[[SET_CURRENT:.*]] = llvm.call @hipdnn_ep_loop_frame_set_current
+  // CHECK: %[[SET_STATUS:.*]] = llvm.select %{{.*}}, %[[SET_CURRENT]], %{{.*}} : i1, i32
+  // CHECK: %[[SET_OK:.*]] = llvm.icmp "eq" %[[SET_STATUS]], %{{.*}} : i32
+  // CHECK: llvm.cond_br %[[SET_OK]]
+  // CHECK: llvm.return %{{.*}} : i32
   // CHECK: llvm.call @loop_passthrough_body(
+  // CHECK: %[[PUBLISH:.*]] = llvm.call @hipdnn_ep_loop_frame_publish
+  // CHECK: %[[PUBLISH_CALL_STATUS:.*]] = llvm.select %{{.*}}, %[[PUBLISH]], %{{.*}} : i1, i32
+  // CHECK: %[[FRAME_PUBLISH_STATUS:.*]] = llvm.call @hipdnn_ep_loop_frame_status
+  // CHECK: %[[PUBLISH_CALLS_OK:.*]] = llvm.icmp "eq" %[[PUBLISH_CALL_STATUS]], %{{.*}} : i32
+  // CHECK: %[[PUBLISH_STATUS:.*]] = llvm.select %[[PUBLISH_CALLS_OK]], %[[FRAME_PUBLISH_STATUS]], %[[PUBLISH_CALL_STATUS]] : i1, i32
+  // CHECK: %[[PUBLISH_OK:.*]] = llvm.icmp "eq" %[[PUBLISH_STATUS]], %{{.*}} : i32
+  // CHECK: llvm.cond_br %[[PUBLISH_OK]]
   // CHECK: llvm.return %{{.*}} : i32
 }
 

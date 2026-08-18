@@ -32,7 +32,10 @@ memref descriptor return convention. They are not promoted to out-parameters.
 The generated trampoline unpacks the current descriptor set, calls the body,
 and validates all returned descriptors in a separate next set. The runtime
 publishes the complete set only when body status, allocation status, condition
-copy, and every carrier publication succeed.
+copy, and every carrier publication succeed. The trampoline preserves the first
+nonzero current-pointer or publication status; a current-pointer failure
+returns before body execution, and a publication failure prevents the runtime
+from swapping the next descriptor set.
 
 Before a body return, any carrier descriptor not equal to the current borrowed
 descriptor and not rooted in that body's own carrier bank is materialized into

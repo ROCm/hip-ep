@@ -198,14 +198,35 @@ createOrGetTrampoline(OpBuilder &b, ModuleOp module, Location loc, LoopOp op,
                              {ptrTy, i32Ty, ptrTy}, i32Ty);
   if (failed(setCurrentFn))
     return {};
+  Value zero = LLVM::ConstantOp::create(b, loc, i32Ty, b.getI32IntegerAttr(0));
+  Value setCurrentStatus = zero;
   for (unsigned i = 0; i < numLC; ++i) {
     Value index = LLVM::ConstantOp::create(
         b, loc, i32Ty, b.getI32IntegerAttr(static_cast<int32_t>(i)));
     Value currentData = LLVM::ExtractValueOp::create(
         b, loc, lcDescs[i], ArrayRef<int64_t>{kAlignedPtrIdx});
-    LLVM::CallOp::create(b, loc, *setCurrentFn,
-                         ValueRange{frameArg, index, currentData});
+    Value status =
+        LLVM::CallOp::create(b, loc, *setCurrentFn,
+                             ValueRange{frameArg, index, currentData})
+            .getResult();
+    Value priorSucceeded = LLVM::ICmpOp::create(b, loc, LLVM::ICmpPredicate::eq,
+                                                setCurrentStatus, zero);
+    setCurrentStatus = LLVM::SelectOp::create(b, loc, priorSucceeded, status,
+                                              setCurrentStatus);
   }
+
+  // A malformed frame must not reach the body with partially installed
+  // current pointers. Preserve the first setter failure and return it through
+  // the trampoline's existing status result.
+  Value setCurrentSucceeded = LLVM::ICmpOp::create(
+      b, loc, LLVM::ICmpPredicate::eq, setCurrentStatus, zero);
+  Block *setCurrentFailureBlock = tramp.addBlock();
+  Block *prepareBodyBlock = tramp.addBlock();
+  LLVM::CondBrOp::create(b, loc, setCurrentSucceeded, prepareBodyBlock,
+                         setCurrentFailureBlock);
+  b.setInsertionPointToStart(setCurrentFailureBlock);
+  LLVM::ReturnOp::create(b, loc, setCurrentStatus);
+  b.setInsertionPointToStart(prepareBodyBlock);
 
   SmallVector<Value> capDescs;
   for (unsigned j = 0; j < numCap; ++j)
@@ -267,7 +288,6 @@ createOrGetTrampoline(OpBuilder &b, ModuleOp module, Location loc, LoopOp op,
     return {};
   Value frameStatus =
       LLVM::CallOp::create(b, loc, *statusFn, ValueRange{frameArg}).getResult();
-  Value zero = LLVM::ConstantOp::create(b, loc, i32Ty, b.getI32IntegerAttr(0));
   Value bodySucceeded =
       LLVM::ICmpOp::create(b, loc, LLVM::ICmpPredicate::eq, bodyStatus, zero);
   Value frameSucceeded =
@@ -287,16 +307,27 @@ createOrGetTrampoline(OpBuilder &b, ModuleOp module, Location loc, LoopOp op,
       b, module, "hipdnn_ep_loop_frame_publish", {ptrTy, i32Ty, ptrTy}, i32Ty);
   if (failed(publishFn))
     return {};
+  Value publishCallStatus = zero;
   for (unsigned i = 0; i < numLC; ++i) {
     Value descriptor = getBodyResult(carrierResultStart + i);
     Value data = LLVM::ExtractValueOp::create(
         b, loc, descriptor, ArrayRef<int64_t>{kAlignedPtrIdx});
     Value index = LLVM::ConstantOp::create(
         b, loc, i32Ty, b.getI32IntegerAttr(static_cast<int32_t>(i)));
-    LLVM::CallOp::create(b, loc, *publishFn, ValueRange{frameArg, index, data});
+    Value status = LLVM::CallOp::create(b, loc, *publishFn,
+                                        ValueRange{frameArg, index, data})
+                       .getResult();
+    Value priorSucceeded = LLVM::ICmpOp::create(b, loc, LLVM::ICmpPredicate::eq,
+                                                publishCallStatus, zero);
+    publishCallStatus = LLVM::SelectOp::create(b, loc, priorSucceeded, status,
+                                               publishCallStatus);
   }
-  Value publishStatus =
+  Value framePublishStatus =
       LLVM::CallOp::create(b, loc, *statusFn, ValueRange{frameArg}).getResult();
+  Value publishCallsSucceeded = LLVM::ICmpOp::create(
+      b, loc, LLVM::ICmpPredicate::eq, publishCallStatus, zero);
+  Value publishStatus = LLVM::SelectOp::create(
+      b, loc, publishCallsSucceeded, framePublishStatus, publishCallStatus);
   Value publishSucceeded = LLVM::ICmpOp::create(b, loc, LLVM::ICmpPredicate::eq,
                                                 publishStatus, zero);
   Block *publishBlock = tramp.addBlock();
