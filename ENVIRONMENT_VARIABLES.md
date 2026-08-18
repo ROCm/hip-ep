@@ -2,6 +2,17 @@
 
 This document lists the environment variables and CMake options that affect the hip-ep build process.
 
+## Quick Reference
+
+| Variable | Type | When | Purpose |
+|----------|------|------|---------|
+| DYNAMICDISPATCH_ROOT | Env/CMake | Build | Path to DynamicDispatch installation |
+| HIPEP_USE_DYNAMIC_DISPATCH | Env | Runtime | Enable DD lowering during compilation |
+| XILINX_XRT | Env | Build | Fallback for XRT location |
+| BOOST_ROOT | Env | Build | Boost library location |
+| BUILD_MOCK_RUNTIME | CMake | Build | Build CPU-only mock runtime |
+| HIP_ARCHITECTURES | CMake | Build | GPU target (auto-detected) |
+
 ## Required Variables
 
 None. The build system works with default settings for standard GPU builds.
@@ -11,6 +22,12 @@ None. The build system works with default settings for standard GPU builds.
 ### DynamicDispatch NPU/IPU Backend (Optional)
 
 These variables enable NPU/IPU acceleration via AMD's DynamicDispatch library. **If not set, the build proceeds normally without DynamicDispatch support.**
+
+**Important distinction:**
+- **Build-time variables** (below) control whether the DynamicDispatch native library is linked into the EP
+- **Runtime variable** (HIPEP_USE_DYNAMIC_DISPATCH) controls whether DynamicDispatch lowering is used during model compilation
+
+#### Build-time Configuration
 
 - **DYNAMICDISPATCH_ROOT** (environment or CMake variable)
   - Path to DynamicDispatch installation or build directory
@@ -30,6 +47,17 @@ These variables enable NPU/IPU acceleration via AMD's DynamicDispatch library. *
   - Boost library installation directory
   - Required by XRT when using DynamicDispatch
   - Default: Not set (searched in DYNAMICDISPATCH_ROOT first)
+
+#### Runtime Configuration
+
+- **HIPEP_USE_DYNAMIC_DISPATCH** (environment variable, runtime only)
+  - Controls whether the compiler uses DynamicDispatch lowering for operations
+  - Values: `1`, `true` (enable) or `0`, `false` (disable)
+  - Environment: `export HIPEP_USE_DYNAMIC_DISPATCH=1` (Linux) or `set HIPEP_USE_DYNAMIC_DISPATCH=1` (Windows)
+  - Can also be set via ONNX Runtime provider option: `use_dynamic_dispatch=true`
+  - Default: Not set (DynamicDispatch lowering disabled)
+  - **Note**: This only affects model compilation, not the EP build itself
+  - If set to `1` but DD library was not linked at build time, the mock implementation will be used (returns "not available" errors)
 
 ### Build Configuration
 
@@ -54,12 +82,16 @@ python build.py
 
 ### GPU build with DynamicDispatch (NPU backend)
 ```bash
-# Using environment variable
+# Build with DD support (build-time)
 export DYNAMICDISPATCH_ROOT=/opt/vai-rt/install
 python build.py
 
-# Or using CMake variable via build.py
-python build.py  # with DYNAMICDISPATCH_ROOT set in environment
+# Enable DD lowering at runtime
+export HIPEP_USE_DYNAMIC_DISPATCH=1
+# Now when you run models through the EP, DD lowering will be used
+
+# Or set via provider option in Python:
+# session_options.add_session_config_entry("ep.amdgpuexecutionprovider.use_dynamic_dispatch", "1")
 ```
 
 ### Mock runtime (no GPU required)
@@ -105,6 +137,40 @@ During CMake configuration, look for these status messages:
 ```
 -- Mock runtime mode: DynamicDispatch will use mock implementation.
 ```
+
+## Using DynamicDispatch at Runtime
+
+After building with DYNAMICDISPATCH_ROOT set, you can enable DynamicDispatch lowering in two ways:
+
+### Via Environment Variable
+```bash
+# Linux/Mac
+export HIPEP_USE_DYNAMIC_DISPATCH=1
+python your_model.py
+
+# Windows
+set HIPEP_USE_DYNAMIC_DISPATCH=1
+python your_model.py
+```
+
+### Via Provider Option (Python)
+```python
+import onnxruntime as ort
+
+session_options = ort.SessionOptions()
+# Enable DynamicDispatch lowering
+session_options.add_session_config_entry(
+    "ep.amdgpuexecutionprovider.use_dynamic_dispatch", "1"
+)
+
+session = ort.InferenceSession(
+    "model.onnx",
+    session_options,
+    providers=["AMDGPUExecutionProvider"]
+)
+```
+
+The provider option takes precedence over the environment variable.
 
 ## Troubleshooting
 
