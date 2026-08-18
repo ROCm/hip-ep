@@ -2290,7 +2290,7 @@ void CheckedExpandExtentOp::getEffects(
 }
 
 LogicalResult CheckedExpandExtentOp::verify() {
-  if (getExpectedExtent() < -1)
+  if (getExpectedExtentAttr().getInt() < -1)
     return emitOpError("expected_extent must be -1 or non-negative");
   return success();
 }

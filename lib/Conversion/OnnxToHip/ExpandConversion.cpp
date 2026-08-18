@@ -131,10 +131,12 @@ struct ExpandToHip : public mlir::RewritePattern {
             rewriter, loc, inputIdx < 0 ? one : inputExtents[inputIdx]);
         mlir::Value targetExtent = mlir::getValueOrCreateConstantIndexOp(
             rewriter, loc, targetIdx < 0 ? one : targetExtents[targetIdx]);
+        int64_t expectedExtent =
+            resultType.isDynamicDim(axis) ? -1 : resultType.getDimSize(axis);
         auto checked = mlir::hip::CheckedExpandExtentOp::create(
             rewriter, loc, checkedTypes, context, shapeValid, inputExtent,
             targetExtent, priorElements,
-            rewriter.getI64IntegerAttr(resultType.getDimSize(axis)));
+            rewriter.getI64IntegerAttr(expectedExtent));
         shapeValid = checked.getValid();
         priorElements = checked.getElements();
         exactShape.push_back(checked.getExtent());

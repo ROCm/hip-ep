@@ -32,7 +32,7 @@ func.func @unsupported_element_type(
     %ctx: !hip.context, %input: tensor<2xbf16>, %shape: tensor<1xi64>) {
   %valid = arith.constant true
   %output = tensor.empty() : tensor<2xbf16>
-  // expected-error @+1 {{unsupported input element type bf16}}
+  // expected-error @+1 {{unsupported input element type 'bf16'}}
   %result = hip.expand(%ctx) valid(%valid)
     ins(%input, %shape : tensor<2xbf16>, tensor<1xi64>)
     outs(%output : tensor<2xbf16>) : tensor<2xbf16>
