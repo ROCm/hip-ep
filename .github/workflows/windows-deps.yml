@@ -30,8 +30,14 @@ env:
   LLVM_TAG: llvmorg-22.1.0
   ONNXRUNTIME_VERSION: "1.27.0"
   ONNXRUNTIME_PR_PATCHES: ""
-  OGA_VERSION: "0.14.0"
-  OGA_PR_PATCHES: "2194"
+  # Fork branch carrying AMDGPU MorphiZen integration (former PR 2194) plus
+  # sliding_window support.
+  OGA_REPO: "cliu1003/onnxruntime-genai"
+  OGA_REF: "sliding_window_support_amdgpu"
+  # Optional space-separated microsoft/onnxruntime-genai PR numbers applied
+  # on top of the fork checkout via pull/<n>.patch + git am. Empty when the
+  # fork branch already carries the needed integration.
+  OGA_PR_PATCHES: ""
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
 jobs:
@@ -394,7 +400,7 @@ jobs:
       - name: Compute cache key
         id: key
         shell: bash
-        run: echo "value=oga-dml-mm2-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
+        run: echo "value=oga-dml-mm3-${{ env.OGA_REPO }}-${{ env.OGA_REF }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
 
       - name: Probe oga-artifacts
         id: cache-oga
@@ -442,12 +448,15 @@ jobs:
         if: steps.cache-oga.outputs.cache-hit != 'true'
         uses: mozilla-actions/sccache-action@v0.0.9
 
+      # OGA is built from cliu1003/onnxruntime-genai sliding_window_support_amdgpu
+      # (AMDGPU MorphiZen integration + sliding_window). Optional OGA_PR_PATCHES
+      # apply extra upstream PRs on top of the fork checkout.
       - name: Checkout OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: microsoft/onnxruntime-genai
-          ref: v${{ env.OGA_VERSION }}
+          repository: ${{ env.OGA_REPO }}
+          ref: ${{ env.OGA_REF }}
           path: source-oga
           submodules: true
           fetch-depth: 1
