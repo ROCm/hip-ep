@@ -12,24 +12,58 @@
 namespace hip {
 namespace pdl {
 
-// Native rewrite callback - marks operation with attribute
-// CRITICAL: Check if already marked to prevent infinite loop!
-inline void markQDQFusionRewrite(mlir::PatternRewriter& rewriter,
-                                  mlir::Operation* rootOp,
-                                  mlir::Attribute nameAttr)
-{
-    // Check if already marked - prevent infinite loop
-    if (rootOp->hasAttr("hip_fusion")) {
-        return; // Already marked, skip
-    }
+// Native constraint: Get context argument from function
+// Low-level signature required by MLIR PDL infrastructure
+inline mlir::LogicalResult getContextArg(mlir::PatternRewriter& rewriter,
+                                          mlir::PDLResultList& results,
+                                          llvm::ArrayRef<mlir::PDLValue> args) {
+    // args[0] should be the operation
+    if (args.size() != 1)
+        return mlir::failure();
     
-    auto strAttr = mlir::dyn_cast<mlir::StringAttr>(nameAttr);
-    if (!strAttr)
-        return;
+    auto *op = args[0].dyn_cast<mlir::Operation*>();
+    if (!op)
+        return mlir::failure();
     
-    rewriter.modifyOpInPlace(rootOp, [&] {
-        rootOp->setAttr("hip_fusion", strAttr);
-    });
+    auto funcOp = op->getParentOfType<mlir::func::FuncOp>();
+    if (!funcOp || funcOp.getNumArguments() == 0)
+        return mlir::failure();
+    
+    // Return the context (first function argument) as a Value
+    results.push_back(funcOp.getArgument(0));
+    return mlir::success();
+}
+
+// Native constraint: Extract float value from onnx.Constant
+// Low-level signature required by MLIR PDL infrastructure
+inline mlir::LogicalResult extractScaleValue(mlir::PatternRewriter& rewriter,
+                                               mlir::PDLResultList& results,
+                                               llvm::ArrayRef<mlir::PDLValue> args) {
+    // args[0] should be the constant value
+    if (args.size() != 1)
+        return mlir::failure();
+    
+    auto constValue = args[0].dyn_cast<mlir::Value>();
+    if (!constValue)
+        return mlir::failure();
+    
+    auto defOp = constValue.getDefiningOp();
+    if (!defOp)
+        return mlir::failure();
+    
+    auto valueAttr = defOp->getAttr("value");
+    if (!valueAttr)
+        return mlir::failure();
+    
+    auto denseAttr = mlir::dyn_cast<mlir::DenseElementsAttr>(valueAttr);
+    if (!denseAttr || !denseAttr.isSplat())
+        return mlir::failure();
+    
+    float scaleValue = denseAttr.getSplatValue<mlir::FloatAttr>().getValueAsDouble();
+    
+    // Return the extracted float as an f32 attribute
+    results.push_back(rewriter.getF32FloatAttr(scaleValue));
+    return mlir::success();
 }
 
 // Apply PDL patterns
@@ -47,7 +81,10 @@ inline bool run(mlir::ModuleOp mlirModule, llvm::StringRef pdlBytecodeFile)
         return false;
 
     mlir::PDLPatternModule pdlPatterns(std::move(pdlModule));
-    pdlPatterns.registerRewriteFunction("markQDQFusion", markQDQFusionRewrite);
+    
+    // Register native constraints with low-level signatures
+    pdlPatterns.registerConstraintFunction("GetContextArg", getContextArg);
+    pdlPatterns.registerConstraintFunction("ExtractScaleValue", extractScaleValue);
 
     mlir::RewritePatternSet patterns(ctx);
     patterns.add(std::move(pdlPatterns));

@@ -441,7 +441,6 @@ void ConvertOnnxToHipPass::runOnOperation() {
         populateErfGeluFusionPatterns(preLoweringPatterns, ctx);
 
         // Phase 2: Process marked operations and perform actual fusion
-        populateQDQMatMulFusionPatterns(preLoweringPatterns);
         populateProjectorOpsRewritePatterns(preLoweringPatterns, ctx);
         populateLpNormalizationConversionPatterns(preLoweringPatterns, ctx);
         populatePowDecompositionPatterns(preLoweringPatterns, ctx);

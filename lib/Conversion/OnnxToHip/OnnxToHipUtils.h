@@ -505,8 +505,6 @@ void populateErfGeluFusionPatterns(RewritePatternSet &patterns,
 
 /// Pre-lowering fusion pattern: fuse QuantizeLinear -> MatMul ->
 /// DequantizeLinear into hip.qmatmul (demonstrative pattern showing QDQ fusion).
-/// See QDQMatMulFusion.cpp.
-void populateQDQMatMulFusionPatterns(RewritePatternSet &patterns);
 
 
 /// Pre-lowering pattern set: decompose vision/projector ops that have no

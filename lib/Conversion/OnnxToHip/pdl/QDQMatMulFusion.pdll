@@ -1,25 +1,31 @@
 //===- QDQMatMulFusion.pdll -----------------------------------------------===//
 //
-// PDLL pattern for QDQ MatMul fusion.
-//
-// This pattern MARKS operations with attributes.
-// The C++ conversion pass reads these attributes and performs the fusion.
-//
+// PDLL pattern for QDQ MatMul fusion - pure PDLL approach.
 //===----------------------------------------------------------------------===//
 
-// Native rewrite: mark root op with fusion attribute
-// Implemented in QDQMatMulFusion.cpp via registerRewriteFunction
-Rewrite markQDQFusion(root: Op, name: Attr);
+// Declare native constraints (implemented in qdq_fusion_pass.hpp)
+Constraint GetContextArg(op: Op) -> Value;
+Constraint ExtractScaleValue(val: Value) -> Attr;
 
-// Pattern: Mark QDQ MatMul sequence for fusion
 Pattern QDQMatMulFusion with benefit(10) {
-  // Match the chain: QuantizeLinear -> MatMul -> DequantizeLinear
-  let quant = op<onnx.QuantizeLinear>(lhs: Value, lhs_scale: Value, lhs_zp: Value);
+  // Match the QDQ chain: QuantizeLinear -> MatMul -> DequantizeLinear
+  let quant = op<onnx.QuantizeLinear>(lhs_input: Value, lhs_scale: Value, lhs_zp: Value);
   let matmul = op<onnx.MatMul>(quant.0, rhs: Value);
-  let dequant = op<onnx.DequantizeLinear>(matmul.0, out_scale: Value, out_zp: Value);
+  let dequant = op<onnx.DequantizeLinear>(matmul.0, output_scale: Value, output_zp: Value) -> (output_type: Type);
   
-  // Mark the root (DequantizeLinear) for fusion
+  // Get context and scale attributes via native constraints
+  let ctx = GetContextArg(dequant);
+  let lhs_scale_attr = ExtractScaleValue(lhs_scale);
+  let output_scale_attr = ExtractScaleValue(output_scale);
+  
+  // Replace with fused operation
   rewrite dequant with {
-    markQDQFusion(dequant, attr<"\"qdq_matmul\"">);
+    let empty = op<tensor.empty> -> (output_type);
+    let qmatmul = op<hip.qmatmul>(ctx, lhs_input, rhs, empty.0) {
+      lhs_scale = lhs_scale_attr,
+      rhs_scale = attr<"1.0 : f32">,
+      output_scale = output_scale_attr
+    } -> (output_type);
+    replace dequant with qmatmul;
   };
 }
