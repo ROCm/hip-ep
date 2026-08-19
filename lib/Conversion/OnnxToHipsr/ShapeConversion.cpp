@@ -53,7 +53,6 @@
 #include "hip/Dialect/Onnx/IR/OnnxOps.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -99,10 +98,7 @@ void populateShapeRegion(OpBuilder &builder, PlaceholderOp placeholder,
 
   Location loc = placeholder.getLoc();
   Value extent = arith::ConstantIndexOp::create(builder, loc, numExtents);
-  Value shape = shape::FromExtentsOp::create(
-      builder, loc, shape::ShapeType::get(builder.getContext()),
-      ValueRange{extent});
-  ShapeYieldOp::create(builder, loc, ValueRange{shape});
+  yieldShapeFromExtents(builder, loc, ValueRange{extent});
 }
 
 // A static axis becomes a constant, so only a dynamic one needs a tensor.dim.
@@ -112,16 +108,9 @@ void populateComputeBody(OpBuilder &builder, ComputeOp computeOp,
                          int64_t end) {
   OpBuilder::InsertionGuard guard(builder);
   Location loc = computeOp.getLoc();
+  Block &body = createComputeBodyBlock(builder, computeOp);
 
-  // The body's arguments are the operands: ctx, then the inputs, then the
-  // outputs.
-  TypeRange argTypes = computeOp->getOperandTypes();
-  SmallVector<Location> argLocs(argTypes.size(), loc);
-  Block *body =
-      builder.createBlock(&computeOp.getBody(), {}, argTypes, argLocs);
-  builder.setInsertionPointToStart(body);
-
-  Value input = body->getArgument(1);
+  Value input = computeBodyInput(body, 0);
   auto extentOf = [&](int64_t axis) -> Value {
     if (!inputType.isDynamicDim(axis)) {
       return arith::ConstantOp::create(
