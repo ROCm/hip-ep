@@ -458,7 +458,8 @@ if(BUILD_EP)
     endif()
   endif()
 
-  add_subdirectory(morphizen)
+  # NOTE: add_subdirectory(morphizen) moved to main CMakeLists.txt to ensure
+  # it's processed after lib/Runtime (which provides hipdnn-ep-dd target)
 endif()  # BUILD_EP
 
 # ===========================================================================
