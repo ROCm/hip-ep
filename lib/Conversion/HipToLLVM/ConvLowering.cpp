@@ -19,12 +19,12 @@ namespace {
 //          pad_bottom, pad_right, dilation_h, dilation_w, group, data_type)
 //
 // Before:
-//   %out = hip.conv(%ctx) ins(%in, %w, %b :
-//                              memref<1x3x896x896xf16, 1>,
-//                              memref<1152x3x14x14xf16, 1>,
-//                              memref<1152xf16, 1>)
-//                          outs(%o : memref<1x1152x64x64xf16, 1>)
-//                          {kernel_shape=[14,14], strides=[14,14], ...}
+//   hip.conv(%ctx) valid(%shape_valid)
+//                  ins(%in, %w, %b : memref<1x3x896x896xf16, 1>,
+//                                        memref<1152x3x14x14xf16, 1>,
+//                                        memref<1152xf16, 1>)
+//                  outs(%o : memref<1x1152x64x64xf16, 1>)
+//                  {kernel_shape=[14,14], strides=[14,14], ...}
 // After:
 //   llvm.call @wrap_miopenConvolutionForward(
 //       %ctx, %op_state_slot, %shape_valid, %in, 1, 3, 896, 896, %w, 1152,
@@ -222,12 +222,11 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
     // Build argument list matching the signature
     auto opStateSlot = getOpStateSlotValue(op, rewriter, loc);
     SmallVector<Value, 26> args = {
-        statePtr,   opStateSlot, shapeValid, inputPtr,   inputN,
-        inputC,     inputH,      inputW,     weightsPtr, weightsK,
-        biasPtr,    outputPtr,   outputH,    outputW,    kernelH,
-        kernelW,    strideH,     strideW,    padTop,     padLeft,
-        padBottom,  padRight,    dilationH,  dilationW,  groupVal,
-        dataType};
+        statePtr, opStateSlot, shapeValid, inputPtr, inputN,    inputC,
+        inputH,   inputW,      weightsPtr, weightsK, biasPtr,   outputPtr,
+        outputH,  outputW,     kernelH,    kernelW,  strideH,   strideW,
+        padTop,   padLeft,     padBottom,  padRight, dilationH, dilationW,
+        groupVal, dataType};
 
     // Call the runtime function
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);

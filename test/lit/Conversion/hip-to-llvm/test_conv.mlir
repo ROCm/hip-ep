@@ -32,7 +32,7 @@ module {
       %output: memref<1x64x112x112xf32, 1>) {
     // After lowering, function becomes llvm.func with expanded parameters
     // CHECK-LABEL: llvm.func @conv_llvm_test
-    // CHECK-SAME: %[[CTX:.*]]: !llvm.ptr
+    // CHECK-SAME: %[[CTX:[^ ,]+]]: !llvm.ptr
 
     // HIP convolution operation
     hip.conv(%ctx) valid(%valid)
@@ -45,8 +45,9 @@ module {
 
     // Should lower to MIOpen convolution forward call
     // The wrapper is declared and called
-    // CHECK: llvm.zext %{{.*}} : i1 to i64
-    // CHECK: llvm.call @wrap_miopenConvolutionForward
+    // CHECK: %[[SHAPE_VALID:.*]] = llvm.zext %{{.*}} : i1 to i64
+    // CHECK: %[[OP_STATE_SLOT:.*]] = llvm.mlir.constant(-1 : i32) : i32
+    // CHECK: llvm.call @wrap_miopenConvolutionForward(%[[CTX]], %[[OP_STATE_SLOT]], %[[SHAPE_VALID]], {{.*}}) : (!llvm.ptr, i32, i64, !llvm.ptr, i64, i64, i64, i64, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }
