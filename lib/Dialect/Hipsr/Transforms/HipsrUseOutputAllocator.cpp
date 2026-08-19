@@ -66,6 +66,7 @@ static Value findVisibleContext(Operation *op) {
   return {};
 }
 
+// return shapes is empty if no preserve_shape op is found.
 static SmallVector<Value> findPreservedShapes(Value data) {
   SmallVector<Value> shapes;
   for (Operation *user : data.getUsers()) {
@@ -154,10 +155,10 @@ static OpFoldResult multiplyIndexValues(OpFoldResult lhs, OpFoldResult rhs,
   std::optional<int64_t> lhsConstant = getConstantIntValue(lhs);
   std::optional<int64_t> rhsConstant = getConstantIntValue(rhs);
   if (lhsConstant && rhsConstant)
-    return builder.getIndexAttr(*lhsConstant * *rhsConstant);
-  if (lhsConstant && *lhsConstant == 1)
+    return builder.getIndexAttr((*lhsConstant) * (*rhsConstant));
+  if (lhsConstant && (*lhsConstant) == 1)
     return rhs;
-  if (rhsConstant && *rhsConstant == 1)
+  if (rhsConstant && (*rhsConstant) == 1)
     return lhs;
 
   Value lhsValue = getValueOrCreateConstantIndexOp(builder, loc, lhs);
@@ -394,6 +395,7 @@ struct HipsrUseOutputAllocatorPass
 
       // Check if the same memref.alloc is mapped to multiple graph output indices.
       // This theoretically could cause errors, but usually won't happen.
+      // eg: input -> Matmul(graph_output) -> Squeeze(graph_output)
       auto [seenIt, inserted] =
           allocToOutputIndex.try_emplace(allocOp.getOperation(), outIdx);
       if (!inserted) {
