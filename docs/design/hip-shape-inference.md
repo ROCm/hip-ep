@@ -123,7 +123,7 @@ This gives two related but distinct jobs:
 | `InferTypeOpInterface` | Builds result types from DPS init operand types |
 | `ReifyRankedShapedTypeOpInterface` | Materializes static dimensions as attributes and dynamic dimensions as SSA values |
 | `InferShapedTypeOpInterface` | Not used as the primary HIP DPS contract |
-| `HipDpsOpInterface` | Dialect marker interface extending `DestinationStyleOpInterface`; owns the shared default reification body |
+| `HipDpsOpInterface` | Dialect marker extending `DestinationStyleOpInterface`; owns shared whole-shape and direct-dimension reification |
 
 `HipDpsOpInterface` is a generated MLIR `OpInterface`, but it is not a replacement for the standard InferType/Reify contracts. It marks HIP DPS compute operations and provides their shared default reification behavior. In tensor mode it walks `DestinationStyleOpInterface::getDpsInits()` and returns each destination's mixed sizes through `tensor::getMixedSizes`, exactly one vector per SSA result. In memref mode there are no SSA results, so it succeeds with an empty list.
 
@@ -270,6 +270,10 @@ Reification returns one `OpFoldResult` for each result dimension:
 Reification is allowed to create IR at the caller's insertion point. Helpers therefore reuse operand dimensions where possible, fold constant operands and attributes, and avoid pretending that a runtime-computed extent is static. For operations whose runtime extent cannot be represented before execution, the honest result remains dynamic.
 
 Reification is per result: `reifyResultShapes` returns one shape vector for every tensor result. The number and rank of those vectors must match the operation's tensor results even when the implementation derives them from DPS init operands.
+
+Dimension-only consumers use the standard `ReifyRankedShapedTypeOpInterface::reifyDimOfResult` hook. HIP DPS operations implement it directly from `DestinationStyleOpInterface::getTiedOpOperand`, whose contract gives every tensor result one destination with the same type and runtime extents. This direct path validates the result/init cardinality, exact types, and dimension index before emitting IR, then materializes only the requested destination extent.
+
+Whole-shape semantic reification remains the authority for inference and refinement. The direct hook is its bounded, destination-based equivalent for a valid DPS operation.
 
 ### Shared converter/reification shape helpers
 
