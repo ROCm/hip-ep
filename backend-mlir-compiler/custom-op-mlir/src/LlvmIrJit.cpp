@@ -427,7 +427,7 @@ bool installSearchGenerators(llvm::orc::LLJIT &jit) {
   // A missing lib is tolerated: a model that never touches it still JITs.
   const std::vector<std::vector<const char *>> rocm_libs = {
 #ifdef _WIN32
-      {"hipblaslt.dll", "libhipblaslt.dll"},
+      {HIPDNN_HIPBLASLT_DLL},
 #else
       {"libhipblaslt.so"},
 #endif
