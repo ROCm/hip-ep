@@ -6,9 +6,6 @@
 add_subdirectory(hip-mlir-opt)
 add_subdirectory(hip-compiler)
 
-# Offline generator for GQA autotune LUT rows. Host-only, no GPU dependency.
-add_subdirectory(gqa-autotune-lut)
-
 # hip-inspect parses the IR with `llvm::parseBitcodeFile` and reads
 # the `@__metadata_json` global directly -- no JIT, no GPU dependency,
 # so it builds whenever BUILD_HIP_TOOLS is on.
