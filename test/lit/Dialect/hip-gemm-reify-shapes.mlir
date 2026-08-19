@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// RUN: hip-mlir-opt --resolve-shaped-type-result-dims %s | FileCheck %s
+// RUN: hip-mlir-opt --test-hip-whole-shape-dim-reify %s | FileCheck %s
 
 // CHECK-LABEL: func.func @gemm_dynamic_default
 // CHECK-SAME: (%{{.*}}: !hip.context, %[[A:[A-Za-z0-9_]+]]: tensor<?x4xf16>, %[[B:[A-Za-z0-9_]+]]: tensor<4x?xf16>
