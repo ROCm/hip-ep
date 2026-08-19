@@ -57,3 +57,21 @@ module {
     "onnx.Return"(%out) : (tensor<?xf32>) -> ()
   }
 }
+
+// -----
+
+module attributes {
+  hipdnn.onnx_dim_params_v1 = [
+    {scope = "main_graph", value_name = "a", dimensions = ["N"]}
+  ]
+} {
+  // NoneType is the only non-ranked exception. A named unranked internal
+  // tensor still fails closed because its metadata rank cannot be validated.
+  // expected-error@+1 {{symbolic dimension metadata names a non-ranked tensor value: a}}
+  func.func @main_graph(
+      %seed: tensor<?xf32> {onnx.name = "seed"}) -> tensor<?xf32> {
+    %a = "onnx.Identity"(%seed) {node.outputs = ["a"]}
+        : (tensor<?xf32>) -> tensor<*xf32>
+    "onnx.Return"(%seed) : (tensor<?xf32>) -> ()
+  }
+}
