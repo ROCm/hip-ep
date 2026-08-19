@@ -3,6 +3,31 @@
 # ** Licensed under the MIT License.
 ##
 
+# ============================================================================
+# PDLL Pattern Compilation
+# ============================================================================
+# Compile PDLL patterns to C++ includes
+set(MLIR_PDLL "${CMAKE_BINARY_DIR}/_deps/llvm-project-build/bin/mlir-pdll")
+
+add_custom_command(
+  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/QDQMatMulFusion.cpp.inc
+  COMMAND ${MLIR_PDLL}
+          ${CMAKE_CURRENT_SOURCE_DIR}/PDLL/QDQMatMulFusion.pdll
+          -x=cpp
+          -o ${CMAKE_CURRENT_BINARY_DIR}/QDQMatMulFusion.cpp.inc
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/PDLL/QDQMatMulFusion.pdll
+  COMMENT "Compiling PDLL pattern: QDQMatMulFusion.pdll"
+  VERBATIM
+)
+
+add_custom_target(QDQMatMulFusionPDLL
+  DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/QDQMatMulFusion.cpp.inc
+)
+
+# ============================================================================
+# OnnxToHip Library
+# ============================================================================
+
 add_library(OnnxToHip STATIC
   OnnxToHip.cpp
   SimplifyOnnx.cpp
@@ -98,11 +123,15 @@ add_library(OnnxToHip STATIC
 )
 
 add_dependencies(OnnxToHip
+  QDQMatMulFusionPDLL
   HipDialectIncGen
   HipTypesIncGen
   HipOpsIncGen
   HipPassesIncGen
 )
+
+# Add build directory to include path for generated PDLL files
+target_include_directories(OnnxToHip PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 target_link_libraries(OnnxToHip PUBLIC
   HipDialectIR
