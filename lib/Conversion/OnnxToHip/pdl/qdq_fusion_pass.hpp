@@ -39,8 +39,6 @@ inline bool run(mlir::ModuleOp mlirModule, llvm::StringRef pdlBytecodeFile)
         return true;
 
     mlir::MLIRContext* ctx = mlirModule.getContext();
-    ctx->loadDialect<mlir::pdl::PDLDialect>();
-    ctx->loadDialect<mlir::pdl_interp::PDLInterpDialect>();
 
     mlir::ParserConfig parseConfig(ctx);
     mlir::OwningOpRef<mlir::ModuleOp> pdlModule =
