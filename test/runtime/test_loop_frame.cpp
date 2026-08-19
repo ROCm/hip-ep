@@ -621,9 +621,10 @@ void testConvPoolInvalidShapeGuards() {
   int errorsBefore = recordedErrors.load();
 
   CHECK(wrap_miopenConvolutionForward(
-            &state, /*shape_valid=*/0, /*input=*/nullptr, 1, 1, 1, 1,
-            /*weights=*/nullptr, 1, /*bias=*/nullptr, /*output=*/nullptr, 0, 0,
-            3, 3, 1, 1, 0, 0, 0, 0, 1, 1, 1, HIPDNN_EP_DATATYPE_FLOAT) == -1);
+            &state, /*op_state_slot=*/-1, /*shape_valid=*/0,
+            /*input=*/nullptr, 1, 1, 1, 1, /*weights=*/nullptr, 1,
+            /*bias=*/nullptr, /*output=*/nullptr, 0, 0, 3, 3, 1, 1, 0, 0, 0, 0,
+            1, 1, 1, HIPDNN_EP_DATATYPE_FLOAT) == -1);
   CHECK(recordedErrors.load() == errorsBefore + 1);
 
   CHECK(wrap_pool(&state, /*input=*/nullptr, /*output=*/nullptr,
