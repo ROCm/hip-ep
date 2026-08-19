@@ -59,7 +59,7 @@ module {
   // ===== Test 2: 8-bit GatherBlockQuantized without zero_points =====
 
   func.func @test_gbq_uint8_no_zp(%indices: tensor<4xi32>) -> tensor<4x64xf32> {
-    %data = "onnx.Constant"() {value = dense<1> : tensor<512x64xi8>} : () -> tensor<512x64xi8>
+    %data = "onnx.Constant"() {value = dense<1> : tensor<512x64xui8>} : () -> tensor<512x64xui8>
     %scales = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<512x2xf32>} : () -> tensor<512x2xf32>
     %out = "onnx.Custom"(%data, %indices, %scales) {
       function_name = "GatherBlockQuantized",
@@ -69,13 +69,13 @@ module {
       gather_axis = 0 : si64,
       quantize_axis = 1 : si64,
       onnx_node_name = "GatherBlockQuantized_1"
-    } : (tensor<512x64xi8>, tensor<4xi32>, tensor<512x2xf32>) -> tensor<4x64xf32>
+    } : (tensor<512x64xui8>, tensor<4xi32>, tensor<512x2xf32>) -> tensor<4x64xf32>
     return %out : tensor<4x64xf32>
   }
 
   // CHECK-LABEL: func.func @test_gbq_uint8_no_zp
   // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<4x64xf32>
-  // CHECK: hip.gather_block_quantized({{.*}}) ins({{.*}}, %{{.*}}, %{{.*}} : tensor<512x64xi8>, tensor<4xi32>, tensor<512x2xf32>)
+  // CHECK: hip.gather_block_quantized({{.*}}) ins({{.*}}, %{{.*}}, %{{.*}} : tensor<512x64xui8>, tensor<4xi32>, tensor<512x2xf32>)
   // CHECK-NOT: zero_points
   // CHECK-SAME: outs(%[[INIT]] : tensor<4x64xf32>)
   // CHECK-SAME: bits = 8
