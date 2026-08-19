@@ -17,7 +17,7 @@ from .bundle import (
     _find_genai_config_source,
 )
 from .int8kv import convert_decoder_int8kv
-from .lora_weight_pack import write_packed_lora_artifacts
+from .lora_weight_pack import write_dequant_lora_artifacts, write_packed_lora_artifacts
 from .pipeline_aliases import (
     CONVERT_PROFILE_LOW_BIT,
     convert_head_quantized,
@@ -338,22 +338,24 @@ def convert_bundle(bundle: ModelBundle, output_dir: Path) -> Path:
     )
 
     extras: list[str] = []
-    if lora_dequant_meta:
-        meta_path = output_dir / "lora_dequant.json"
-        meta_path.write_text(json.dumps(lora_dequant_meta, indent=2), encoding="utf-8")
-        extras.append(f"lora_dequant.json ({len(lora_dequant_meta)} adapter ports)")
-
     adapter_src = bundle.input_dir / "adapter.safetensors"
-    try:
-        extras.extend(write_packed_lora_artifacts(merged_path, adapter_src, output_dir))
-    except FileNotFoundError as exc:
-        if (
-            bundle.pipeline is PipelineKind.QUANTIZED_LINEAR
-            and not bundle.fold_gemm_weights
-        ):
-            raise RuntimeError(
-                "LoRA MatMulNBits export requires raw adapter.safetensors in input-dir"
-            ) from exc
+    if lora_dequant_meta:
+        extras.extend(
+            write_dequant_lora_artifacts(adapter_src, output_dir, lora_dequant_meta)
+        )
+    else:
+        try:
+            extras.extend(
+                write_packed_lora_artifacts(merged_path, adapter_src, output_dir)
+            )
+        except FileNotFoundError as exc:
+            if (
+                bundle.pipeline is PipelineKind.QUANTIZED_LINEAR
+                and not bundle.fold_gemm_weights
+            ):
+                raise RuntimeError(
+                    "LoRA MatMulNBits export requires raw adapter.safetensors in input-dir"
+                ) from exc
 
     extra_msg = f" + {', '.join(extras)}" if extras else ""
     print(

@@ -3,10 +3,13 @@
 # Licensed under the MIT License.
 #
 
-"""LoRA MatMulNBits adapter weight packing at export time.
+"""LoRA adapter export helpers for merged convert.
 
-``weight_quantized`` graph inputs are uint8 ``[N,K]``; adapter weights are
-written to ``adapter.safetensors`` in the same packed layout.
+MatMulNBits graphs: pack int8 ``[K,N]`` weights to uint8 ``[N,K]`` for
+``weight_quantized`` inputs.
+
+Folded Gemm graphs: dequantize int8 adapter weights to fp16 ``weight_fp16``
+inputs at export time.
 """
 
 from __future__ import annotations
@@ -24,6 +27,69 @@ def pack_lora_weight_mnbits_int8(raw: np.ndarray) -> np.ndarray:
     if raw.ndim != 2:
         raise ValueError(f"expected rank-2 [K,N] weight, got shape {raw.shape}")
     return (raw.astype(np.int16) + 128).astype(np.uint8).T
+
+
+def dequant_lora_weight_int8_to_fp16(
+    raw: np.ndarray, *, scale: float, zero_point: int
+) -> np.ndarray:
+    """Dequantize signed int8 LoRA weights to fp16 (matches runtime DQ formula)."""
+    fp32 = (raw.astype(np.float32) - np.float32(zero_point)) * np.float32(scale)
+    return fp32.astype(np.float16)
+
+
+def export_dequant_adapter_safetensors(
+    src: Path,
+    dst: Path,
+    port_meta: dict[str, dict],
+) -> int:
+    """Dequantize int8 adapter tensors to fp16, keyed by graph ``onnx_input`` names."""
+    try:
+        from safetensors.numpy import save_file
+    except ImportError as exc:
+        raise ImportError("safetensors is required; pip install safetensors") from exc
+
+    if not port_meta:
+        return 0
+
+    raw = load_adapter_int8_tensors(src)
+    missing = set(port_meta) - set(raw)
+    if missing:
+        raise KeyError(
+            f"adapter missing {len(missing)} requested ports, e.g. {next(iter(missing))!r}"
+        )
+
+    dequantized: dict[str, np.ndarray] = {}
+    for weight_quantized, meta in port_meta.items():
+        onnx_input = meta["onnx_input"]
+        dequantized[onnx_input] = dequant_lora_weight_int8_to_fp16(
+            raw[weight_quantized],
+            scale=float(meta["scale"]),
+            zero_point=int(meta["zero_point"]),
+        )
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    save_file(dequantized, str(dst))
+    return len(dequantized)
+
+
+def write_dequant_lora_artifacts(
+    adapter_src: Path,
+    output_dir: Path,
+    port_meta: dict[str, dict],
+) -> list[str]:
+    """Export fp16 ``adapter.safetensors`` for folded Gemm LoRA graphs."""
+    if not port_meta:
+        return []
+
+    if not adapter_src.is_file():
+        raise FileNotFoundError(
+            f"merged Gemm LoRA graph has {len(port_meta)} adapter ports but adapter missing: "
+            f"{adapter_src}"
+        )
+
+    packed_out = output_dir / "adapter.safetensors"
+    count = export_dequant_adapter_safetensors(adapter_src, packed_out, port_meta)
+    return [f"adapter.safetensors ({count} fp16 tensors)"]
 
 
 def load_adapter_int8_tensors(adapter_path: Path) -> dict[str, np.ndarray]:
