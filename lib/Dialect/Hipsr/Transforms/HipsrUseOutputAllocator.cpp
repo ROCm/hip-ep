@@ -128,8 +128,8 @@ static SmallVector<Value> materializeDimensions(Value preservedShape,
     Value size;
     if (type.isDynamicDim(dimension)) {
       assert(preservedShape && "dynamic dims require a preserved shape");
-      Value extent = builder.create<shape::GetExtentOp>(
-          loc, preservedShape, dimension);
+      Value extent =
+          builder.create<shape::GetExtentOp>(loc, preservedShape, dimension);
       size = builder.create<shape::SizeToIndexOp>(loc, extent);
     } else {
       size = arith::ConstantIndexOp::create(builder, loc,
@@ -187,8 +187,9 @@ static Value createContiguousView(OpBuilder &builder, Location loc,
           multiplyIndexValues(runningStride, sizes[dimension], loc, builder);
   }
 
-  return memref::ReinterpretCastOp::create(
-      builder, loc, targetType, source, builder.getIndexAttr(0), sizes, strides);
+  return memref::ReinterpretCastOp::create(builder, loc, targetType, source,
+                                           builder.getIndexAttr(0), sizes,
+                                           strides);
 }
 
 struct OutputInfo {
@@ -222,9 +223,8 @@ struct HipsrUseOutputAllocatorPass
     DominanceInfo dominance(funcOp);
 
     SmallVector<func::ReturnOp> returnOps;
-    funcOp.walk([&](func::ReturnOp returnOp) {
-      returnOps.push_back(returnOp);
-    });
+    funcOp.walk(
+        [&](func::ReturnOp returnOp) { returnOps.push_back(returnOp); });
 
     if (returnOps.size() != 1) {
       funcOp.emitError() << "expected exactly one func.return, got "
@@ -234,8 +234,7 @@ struct HipsrUseOutputAllocatorPass
     }
     func::ReturnOp returnOp = returnOps.front();
 
-    if (returnOp.getNumOperands() !=
-        funcOp.getFunctionType().getNumResults()) {
+    if (returnOp.getNumOperands() != funcOp.getFunctionType().getNumResults()) {
       returnOp.emitError()
           << "return operand count does not match function result count";
       signalPassFailure();
@@ -247,8 +246,7 @@ struct HipsrUseOutputAllocatorPass
 
     for (auto [outIdx, returnedValue] :
          llvm::enumerate(returnOp.getOperands())) {
-      auto externalType =
-          dyn_cast<MemRefType>(funcOp.getResultTypes()[outIdx]);
+      auto externalType = dyn_cast<MemRefType>(funcOp.getResultTypes()[outIdx]);
 
       if (!externalType)
         continue;
@@ -258,9 +256,8 @@ struct HipsrUseOutputAllocatorPass
       SmallVector<PoolResult> poolResults =
           findAliasedPoolResults(aliasAnalysis, returnedValue);
       if (poolResults.size() > 1) {
-        returnOp.emitError()
-            << "graph output " << outIdx
-            << " aliases multiple pool_domain results";
+        returnOp.emitError() << "graph output " << outIdx
+                             << " aliases multiple pool_domain results";
         signalPassFailure();
         return;
       }
@@ -299,15 +296,14 @@ struct HipsrUseOutputAllocatorPass
 
       if (aliasedAllocs.size() != 1) {
         returnOp.emitError()
-            << "graph output " << outIdx << " aliases "
-            << aliasedAllocs.size() << " memref.alloc operations";
+            << "graph output " << outIdx << " aliases " << aliasedAllocs.size()
+            << " memref.alloc operations";
         signalPassFailure();
         return;
       }
       memref::AllocOp allocOp = aliasedAllocs.front();
 
-      SmallVector<Value> externalShapes =
-          findPreservedShapes(yieldedValue);
+      SmallVector<Value> externalShapes = findPreservedShapes(yieldedValue);
       SmallVector<Value> internalShapes =
           findPreservedShapes(allocOp.getResult());
       if (externalShapes.size() > 1) {
@@ -357,18 +353,16 @@ struct HipsrUseOutputAllocatorPass
 
       if (internalType.getElementType() != externalType.getElementType() ||
           internalType.getMemorySpace() != externalType.getMemorySpace()) {
-        allocOp.emitError()
-            << "cannot reinterpret graph output " << outIdx
-            << " as the original allocation type";
+        allocOp.emitError() << "cannot reinterpret graph output " << outIdx
+                            << " as the original allocation type";
         signalPassFailure();
         return;
       }
 
       // Check graph output type is supported by alloc_output lowering.
       if (!externalType.getLayout().isIdentity()) {
-        returnOp.emitError()
-            << "graph output " << outIdx
-            << " must have an identity memref layout";
+        returnOp.emitError() << "graph output " << outIdx
+                             << " must have an identity memref layout";
         signalPassFailure();
         return;
       }
@@ -384,7 +378,8 @@ struct HipsrUseOutputAllocatorPass
         return;
       }
 
-      // Check external and internal shapes are defined before the new alloc_output insertion point.
+      // Check external and internal shapes are defined before the new
+      // alloc_output insertion point.
       if ((externalShape && !dominance.dominates(externalShape, allocOp)) ||
           (internalShape && !dominance.dominates(internalShape, allocOp))) {
         allocOp.emitError()
@@ -393,22 +388,20 @@ struct HipsrUseOutputAllocatorPass
         return;
       }
 
-      // Check if the same memref.alloc is mapped to multiple graph output indices.
-      // This theoretically could cause errors, but usually won't happen.
-      // eg: input -> Matmul(graph_output) -> Squeeze(graph_output)
+      // Check if the same memref.alloc is mapped to multiple graph output
+      // indices. This theoretically could cause errors, but usually won't
+      // happen. eg: input -> Matmul(graph_output) -> Squeeze(graph_output)
       auto [seenIt, inserted] =
           allocToOutputIndex.try_emplace(allocOp.getOperation(), outIdx);
       if (!inserted) {
-        allocOp.emitError()
-            << "is shared by graph outputs " << seenIt->second << " and "
-            << outIdx;
+        allocOp.emitError() << "is shared by graph outputs " << seenIt->second
+                            << " and " << outIdx;
         signalPassFailure();
         return;
       }
 
-      outputs.push_back(
-          {static_cast<int64_t>(outIdx), allocOp, context, externalType,
-           externalShape, internalShape});
+      outputs.push_back({static_cast<int64_t>(outIdx), allocOp, context,
+                         externalType, externalShape, internalShape});
     }
 
     // Rewrite only after all structural checks and alias-analysis queries have
@@ -437,8 +430,7 @@ struct HipsrUseOutputAllocatorPass
         replacement = createContiguousView(builder, loc, replacement,
                                            internalType, internalDimensions);
 
-      for (Operation *user :
-           llvm::make_early_inc_range(allocOp->getUsers()))
+      for (Operation *user : llvm::make_early_inc_range(allocOp->getUsers()))
         if (auto dealloc = dyn_cast<memref::DeallocOp>(user))
           dealloc.erase();
 
