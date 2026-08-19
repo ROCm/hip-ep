@@ -123,18 +123,17 @@ static const T5NormCacheEntry *queryOrCreateT5Norm(T5NormTable &table,
   T5_CACHE_CHECK(miopenCreateTensorDescriptor(&e.rstdDesc));
 
   {
-    int x_dims[] = {static_cast<int>(key.num_rows),
+    int x_dims[] = {1, 1, static_cast<int>(key.num_rows),
                     static_cast<int>(key.hidden_dim)};
-    int x_strides[] = {static_cast<int>(key.hidden_dim), 1};
     int w_dims[] = {static_cast<int>(key.hidden_dim)};
     int w_strides[] = {1};
     int rstd_dims[] = {static_cast<int>(key.num_rows)};
     int rstd_strides[] = {1};
 
-    T5_CACHE_CHECK(miopenSetTensorDescriptor(e.xDesc, key.data_type, 2, x_dims,
-                                             x_strides));
-    T5_CACHE_CHECK(miopenSetTensorDescriptor(e.yDesc, key.data_type, 2, x_dims,
-                                             x_strides));
+    T5_CACHE_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        e.xDesc, key.data_type, miopenTensorNCHW, x_dims, 4));
+    T5_CACHE_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        e.yDesc, key.data_type, miopenTensorNCHW, x_dims, 4));
     T5_CACHE_CHECK(miopenSetTensorDescriptor(e.weightDesc, key.data_type, 1,
                                              w_dims, w_strides));
     T5_CACHE_CHECK(miopenSetTensorDescriptor(e.rstdDesc, miopenFloat, 1,
