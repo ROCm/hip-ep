@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// RUN: hip-mlir-opt --resolve-shaped-type-result-dims %s | FileCheck %s --check-prefix=RESOLVE
+// RUN: hip-mlir-opt --test-hip-whole-shape-dim-reify %s | FileCheck %s --check-prefix=RESOLVE
 // RUN: hip-mlir-opt --hip-infer-shapes %s | FileCheck %s --check-prefix=INFER
 // RUN: hip-mlir-opt --verify-each=0 --test-one-hot-reify-failure-atomic %s 2>&1 | FileCheck %s --check-prefix=ATOMIC
 
