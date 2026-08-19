@@ -72,7 +72,7 @@ namespace {
 /// After:
 ///   %cur       = tensor.dim %q, %c1        // current KV tokens (== query seq)
 ///   %past      = tensor.dim %past_k, %c2   // past buffer EXTENT (see below)
-///   %tot       = tensor.dim %mask, %c3     // valid total KV, else %past + %cur
+///   %tot       = tensor.dim %mask, %c3     // valid total KV, else %past+%cur
 ///   %cap       = arith.maxsi %past, %tot   // present buffer capacity
 ///   %seqlens_k = tensor.from_elements (%tot - 1)  : tensor<1xi32>
 ///   %total_seq = tensor.from_elements %cap        : tensor<i32>
@@ -370,10 +370,10 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
                       .getResult();
   }
   mlir::Value totalKvIdx =
-      maskKvIdx ? maskKvIdx
-                : mlir::arith::AddIOp::create(rewriter, loc, pastSeqIdx,
-                                              curSeqIdx)
-                      .getResult();
+      maskKvIdx
+          ? maskKvIdx
+          : mlir::arith::AddIOp::create(rewriter, loc, pastSeqIdx, curSeqIdx)
+                .getResult();
 
   // present buffer capacity, which is NOT the same as the valid length above.
   // Taking the max keeps both callers correct: with a separately allocated
