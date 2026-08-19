@@ -2,11 +2,12 @@
 // Licensed under the MIT License.
 
 // ============================================================================
-// TEST: QDQ MatMul Fusion Pattern (PDLL-based two-phase approach)
+// TEST: QDQ MatMul Fusion Pattern (Pure PDLL approach)
 //
-// Demonstrates PDLL pattern matching:
-//   Phase 1 (PDLL): Match QDQ chain and mark operations with attributes
-//   Phase 2 (C++):  Process marked operations and create fused op
+// Demonstrates pure PDLL fusion with native constraints:
+// - PDLL matches the QDQ chain pattern
+// - PDLL calls native constraints to get context and extract scales
+// - PDLL creates the fused hip.qmatmul operation
 //
 // Pattern fuses:
 //   onnx.QuantizeLinear -> onnx.MatMul -> onnx.DequantizeLinear
@@ -24,7 +25,7 @@ module {
     %output_scale = "onnx.Constant"() {value = dense<0.2> : tensor<f32>} : () -> tensor<f32>
     %output_zp = "onnx.Constant"() {value = dense<0> : tensor<i8>} : () -> tensor<i8>
 
-    // QDQ pattern (should be fused by PDLL + C++ two-phase approach)
+    // QDQ pattern (fused by pure PDLL with native constraints)
     %quantized = "onnx.QuantizeLinear"(%input, %lhs_scale, %lhs_zp)
                  : (tensor<4x128xf32>, tensor<f32>, tensor<i8>) -> tensor<4x128xi8>
 
