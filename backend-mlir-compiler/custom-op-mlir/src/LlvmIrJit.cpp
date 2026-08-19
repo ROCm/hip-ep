@@ -297,6 +297,7 @@ bool installSearchGenerators(llvm::orc::LLJIT &jit) {
   const char *const rocm_libs[] = {
 #ifdef _WIN32
       "MIOpen.dll",
+      "hipblaslt.dll",
       "libhipblaslt.dll",
       "hipdnn_backend.dll",
 #else
