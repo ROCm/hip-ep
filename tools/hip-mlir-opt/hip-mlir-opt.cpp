@@ -35,6 +35,8 @@
 #include "mlir/Dialect/MemRef/Transforms/AllocationOpInterfaceImpl.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/PDL/IR/PDL.h"
+#include "mlir/Dialect/PDLInterp/IR/PDLInterp.h"
 #include "mlir/Dialect/SCF/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -65,6 +67,8 @@ int main(int argc, char **argv) {
   registry.insert<mlir::LLVM::LLVMDialect>();
   registry.insert<mlir::hip::HipDialect>();
   registry.insert<mlir::hipsr::HipsrDialect>();
+  registry.insert<mlir::pdl::PDLDialect>();
+  registry.insert<mlir::pdl_interp::PDLInterpDialect>();
   mlir::hipsr::registerConvertHipsrToLLVMInterface(registry);
   mlir::registerConvertFuncToLLVMInterface(registry);
   mlir::registerConvertMemRefToLLVMInterface(registry);

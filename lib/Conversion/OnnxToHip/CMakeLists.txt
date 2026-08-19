@@ -4,47 +4,24 @@
 ##
 
 # ============================================================================
-# PDLL Pattern Compilation (AMDMIGraphX approach: PDLL -> MLIR bytecode)
+# PDLL Pattern Compilation
 # ============================================================================
-set(ENABLE_PDLL_FUSION ON CACHE BOOL "Enable PDLL fusion patterns (requires mlir-pdll from LLVM build)")
+# Locate mlir-pdll from the LLVM build tree (self-built, not system)
+find_program(MLIR_PDLL_EXE mlir-pdll
+    HINTS
+        "${CMAKE_BINARY_DIR}/_deps/llvm-project-build/bin"
+    NO_DEFAULT_PATH
+)
 
-if(ENABLE_PDLL_FUSION)
-    # Locate mlir-pdll from the LLVM build tree
-    # Search order: same as AMDMIGraphX-Private
-    #   1. CMAKE_BINARY_DIR/_deps/llvm-project-build/bin (our LLVM build)
-    #   2. System PATH as fallback
-    find_program(MLIR_PDLL_EXE mlir-pdll
-        HINTS
-            "${CMAKE_BINARY_DIR}/_deps/llvm-project-build/bin"
-        NO_DEFAULT_PATH
-    )
+if(MLIR_PDLL_EXE)
+    message(STATUS "OnnxToHip: mlir-pdll found: ${MLIR_PDLL_EXE}")
     
-    if(NOT MLIR_PDLL_EXE)
-        message(WARNING "ENABLE_PDLL_FUSION=ON but mlir-pdll not found in LLVM build tree — "
-                        "PDL fusion disabled. Build with: ninja mlir-pdll")
-        set(ENABLE_PDLL_FUSION OFF CACHE BOOL "" FORCE)
-    else()
-        message(STATUS "OnnxToHip: mlir-pdll found: ${MLIR_PDLL_EXE}")
-    endif()
-endif()
-
-if(ENABLE_PDLL_FUSION)
     set(PDL_INPUT "${CMAKE_CURRENT_SOURCE_DIR}/pdl/QDQMatMulFusion.pdll")
-    if(NOT EXISTS "${PDL_INPUT}")
-        message(WARNING "OnnxToHip: QDQMatMulFusion.pdll not found at ${PDL_INPUT} — disabling PDLL")
-        set(ENABLE_PDLL_FUSION OFF CACHE BOOL "" FORCE)
-    else()
-        message(STATUS "OnnxToHip: PDLL fusion pattern: ${PDL_INPUT}")
-    endif()
-endif()
-
-if(ENABLE_PDLL_FUSION)
     set(PDL_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/pdl")
     file(MAKE_DIRECTORY "${PDL_BUILD_DIR}")
-    
     set(PDL_OUTPUT "${PDL_BUILD_DIR}/QDQMatMulFusion.pdl.mlir")
     
-    # Compile PDLL to MLIR bytecode (not C++)
+    # Compile PDLL to MLIR bytecode
     add_custom_command(
         OUTPUT "${PDL_OUTPUT}"
         COMMAND "${MLIR_PDLL_EXE}"
@@ -59,12 +36,11 @@ if(ENABLE_PDLL_FUSION)
     add_custom_target(QDQMatMulFusionPDLL DEPENDS "${PDL_OUTPUT}")
     
     # Pass bytecode path to C++ via compile definition
-    add_compile_definitions(ENABLE_PDLL_FUSION=1)
-    add_compile_definitions(QDQMATMUL_FUSION_PDL_FILE="${PDL_OUTPUT}")
+    # Will be set via target_compile_definitions after library is defined: QDQMATMUL_FUSION_PDL_FILE="${PDL_OUTPUT}")
     
     message(STATUS "OnnxToHip: PDLL fusion enabled — bytecode: ${PDL_OUTPUT}")
 else()
-    message(STATUS "OnnxToHip: PDLL fusion disabled (set ENABLE_PDLL_FUSION=ON to enable)")
+    message(WARNING "OnnxToHip: mlir-pdll not found — PDLL fusion disabled")
 endif()
 
 # ============================================================================
@@ -165,7 +141,7 @@ add_library(OnnxToHip STATIC
   ClipConversion.cpp
 )
 
-if(ENABLE_PDLL_FUSION)
+if(MLIR_PDLL_EXE)
     add_dependencies(OnnxToHip QDQMatMulFusionPDLL)
 endif()
 
@@ -188,4 +164,14 @@ target_link_libraries(OnnxToHip PUBLIC
   MLIRIR
   MLIRSupport
   MLIRTransforms
+  MLIRPDLDialect
+  MLIRPDLInterpDialect
+  MLIRParser
 )
+
+# Set compile definition with bytecode path (must be after library is defined)
+if(MLIR_PDLL_EXE)
+    target_compile_definitions(OnnxToHip PRIVATE
+        "QDQMATMUL_FUSION_PDL_FILE=\"${PDL_OUTPUT}\""
+    )
+endif()

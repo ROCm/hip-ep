@@ -508,6 +508,7 @@ void populateErfGeluFusionPatterns(RewritePatternSet &patterns,
 /// See QDQMatMulFusion.cpp.
 void populateQDQMatMulFusionPatterns(RewritePatternSet &patterns);
 
+
 /// Pre-lowering pattern set: decompose vision/projector ops that have no
 /// direct MorphiZen converter into supported primitives — patch-embed
 /// Conv-ND → Reshape/Gemm/Reshape, AveragePool(kernel==stride) →

@@ -12,6 +12,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "OnnxToHipUtils.h"
+#ifdef QDQMATMUL_FUSION_PDL_FILE
+#include "pdl/qdq_fusion_pass.hpp"
+#endif
+
 
 #include "hip/debug_log.h"
 #include "hip/timing.h"
@@ -349,6 +353,18 @@ void ConvertOnnxToHipPass::runOnOperation() {
     return signalPassFailure();
   logSubpass("metadata");
 
+#ifdef QDQMATMUL_FUSION_PDL_FILE
+  // Phase 1: Apply PDLL patterns to mark QDQ fusion candidates
+  {
+    constexpr const char* pdlFile = QDQMATMUL_FUSION_PDL_FILE;
+    if (!::hip::pdl::run(module, pdlFile)) {
+      module.emitWarning() << "Failed to load/apply QDQ fusion PDL patterns from " << pdlFile;
+    }
+  }
+#endif
+
+
+
   int64_t constantOrder = 0;
   for (auto funcOp :
        llvm::make_early_inc_range(module.getOps<mlir::func::FuncOp>())) {
@@ -423,6 +439,8 @@ void ConvertOnnxToHipPass::runOnOperation() {
         populateSliceShapeFoldPatterns(preLoweringPatterns, ctx);
         populateFastGeluFusionPatterns(preLoweringPatterns, ctx);
         populateErfGeluFusionPatterns(preLoweringPatterns, ctx);
+
+        // Phase 2: Process marked operations and perform actual fusion
         populateQDQMatMulFusionPatterns(preLoweringPatterns);
         populateProjectorOpsRewritePatterns(preLoweringPatterns, ctx);
         populateLpNormalizationConversionPatterns(preLoweringPatterns, ctx);

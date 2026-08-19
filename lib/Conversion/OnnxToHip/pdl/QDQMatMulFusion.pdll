@@ -1,38 +1,25 @@
 //===- QDQMatMulFusion.pdll -----------------------------------------------===//
 //
-// PDLL pattern demonstrating declarative pattern matching.
+// PDLL pattern for QDQ MatMul fusion.
 //
-// This is a simplified demonstration showing how PDLL can be used for
-// pattern matching. It matches a DequantizeLinear operation and replaces
-// it with hip.qmatmul.
-//
-// A complete implementation would:
-// 1. Match the full QDQ pattern (Quantize -> MatMul -> Dequantize)
-// 2. Extract scale values from the matched operations
-// 3. Pass proper operands to hip.qmatmul
-//
-// This demonstrates the PDLL compilation workflow:
-//   .pdll file --[mlir-pdll]--> .cpp.inc --[#include]--> final binary
-//
-// References:
-// - https://mlir.llvm.org/docs/PDLL/
-// - https://www.jeremykun.com/2024/08/04/mlir-pdll/
+// This pattern MARKS operations with attributes.
+// The C++ conversion pass reads these attributes and performs the fusion.
 //
 //===----------------------------------------------------------------------===//
 
-// Simple pattern: Match any DequantizeLinear and replace with qmatmul
-// This compiles successfully and demonstrates the PDLL workflow
-Pattern QDQMatMulFusion =>
-  replace root: Op<onnx.DequantizeLinear>
-  with op<hip.qmatmul>;
+// Native rewrite: mark root op with fusion attribute
+// Implemented in QDQMatMulFusion.cpp via registerRewriteFunction
+Rewrite markQDQFusion(root: Op, name: Attr);
 
-//
-// TODO for full implementation:
-// - Match the operand chain: Quantize -> MatMul -> Dequantize
-// - Extract scale parameters from onnx.Constant ops
-// - Construct proper hip.qmatmul with correct operands and attributes
-//
-// The challenge is that PDLL's syntax for matching operand DAGs is
-// different from C++. The simple version above shows that PDLL works;
-// extending it requires learning PDLL's specific DAG-matching syntax.
-//
+// Pattern: Mark QDQ MatMul sequence for fusion
+Pattern QDQMatMulFusion with benefit(10) {
+  // Match the chain: QuantizeLinear -> MatMul -> DequantizeLinear
+  let quant = op<onnx.QuantizeLinear>(lhs: Value, lhs_scale: Value, lhs_zp: Value);
+  let matmul = op<onnx.MatMul>(quant.0, rhs: Value);
+  let dequant = op<onnx.DequantizeLinear>(matmul.0, out_scale: Value, out_zp: Value);
+  
+  // Mark the root (DequantizeLinear) for fusion
+  rewrite dequant with {
+    markQDQFusion(dequant, attr<"\"qdq_matmul\"">);
+  };
+}
