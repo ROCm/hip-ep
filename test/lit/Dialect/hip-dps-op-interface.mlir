@@ -6,8 +6,10 @@
 
 // What this file tests
 // --------------------
-// `HipDpsOp::reifyResultShapes` -- the SHARED default body carried by the
-// in-dialect `HipDpsOpInterface`. `Hip_DpsOp_AutoReify` emits a per-op
+// `HipDpsOp::reifyResultShapes` and `reifyDimOfResult` -- the shared
+// whole-result and direct-dimension bodies carried by the in-dialect
+// `HipDpsOpInterface`. Every HIP DPS family emits a direct-dimension
+// dispatcher; `Hip_DpsOp_AutoReify` additionally emits a per-op
 // `ReifyRankedShapedTypeOpInterface::reifyResultShapes` dispatcher that
 // forwards to that default. The default walks
 // `getDpsInits()` in tensor mode and lifts each init operand's runtime shape
@@ -194,4 +196,20 @@ func.func @default_reify_second_result_failure(
       : tensor<?x?xf16>, tensor<?x?xf32>, tensor<?x?xf32>
   return %result#0, %result#1, %result#2 :
       tensor<?x?xf16>, tensor<?x?xf32>, tensor<?x?xf32>
+}
+
+// -----
+
+// Invalid result/dimension indices and an exact-type mismatch must all fail
+// before the shared direct-dimension path emits tensor.dim.
+// MEMREF: hip.silu
+// MEMREF-SAME: test.default_reify_dim_failure_atomic_passed
+func.func @default_reify_dim_failure_atomic(
+    %ctx: !hip.context, %input: tensor<?x8xf16>,
+    %output: tensor<?x8xf16>) -> tensor<?x8xf16> {
+  %result = hip.silu(%ctx)
+      ins(%input : tensor<?x8xf16>)
+      outs(%output : tensor<?x8xf16>)
+      {test.default_reify_dim_failure_atomic} -> tensor<?x8xf16>
+  return %result : tensor<?x8xf16>
 }

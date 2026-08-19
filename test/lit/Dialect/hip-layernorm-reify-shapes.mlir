@@ -4,9 +4,13 @@
 // RUN: hip-mlir-opt --resolve-shaped-type-result-dims %s | FileCheck %s
 
 // CHECK-LABEL: func.func @dynamic_stats
-// CHECK-SAME: %[[INPUT:[^,]+]]: tensor<?x3x4xf16>
-// CHECK-DAG: %[[YD:.*]] = tensor.dim %[[INPUT]], %{{.*}}
-// CHECK-DAG: %[[MD:.*]] = tensor.dim %[[INPUT]], %{{.*}}
+// CHECK-SAME: %[[INPUT:[^,]+]]: tensor<?x3x4xf16>,
+// CHECK-SAME: %[[SCALE:[^,]+]]: tensor<3x4xf16>,
+// CHECK-SAME: %[[Y_INIT:[^,]+]]: tensor<?x3x4xf16>,
+// CHECK-SAME: %[[MEAN_INIT:[^,]+]]: tensor<?x1x1xf32>,
+// CHECK-SAME: %[[INV_INIT:[^)]+]]: tensor<?x1x1xf32>)
+// CHECK-DAG: %[[YD:.*]] = tensor.dim %[[Y_INIT]], %{{.*}}
+// CHECK-DAG: %[[MD:.*]] = tensor.dim %[[MEAN_INIT]], %{{.*}}
 // CHECK-DAG: %[[ONE:.*]] = arith.constant 1 : index
 // CHECK: return %[[YD]], %[[MD]], %[[ONE]] : index, index, index
 func.func @dynamic_stats(
