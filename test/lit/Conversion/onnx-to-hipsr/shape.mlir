@@ -12,7 +12,7 @@
 // no space.
 //===----------------------------------------------------------------------===//
 
-// RUN: hip-mlir-opt %s --split-input-file -allow-unregistered-dialect -convert-onnx-to-hipsr | FileCheck %s
+// RUN: hip-mlir-opt %s --onnx-dialect=modeled --split-input-file -allow-unregistered-dialect -convert-onnx-to-hipsr | FileCheck %s
 
 // Only a dynamic axis needs a query; a static one is a constant. The shape
 // region is constant too, since the input's rank fixes the result length.
