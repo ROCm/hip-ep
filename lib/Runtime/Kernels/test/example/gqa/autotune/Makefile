@@ -38,6 +38,7 @@ INCLUDE_DIR := ../../../../include
 ANALYSIS    := ../../../../../../../../RdpCapture/ops_analyze/gqa/data
 
 TARGET   := $(BUILD_DIR)/gqa_autotune_sweep.exe
+PROBE    := $(BUILD_DIR)/maxseq_probe.exe
 SHAPES   ?= $(ANALYSIS)/gqa_representative_shapes.csv
 OUT_CSV  ?= $(ANALYSIS)/gqa_autotune_results.csv
 BEST_CSV ?= $(ANALYSIS)/gqa_autotune_best.csv
@@ -73,6 +74,15 @@ run: $(TARGET)
 	$(TARGET) --shapes $(SHAPES) --csv $(OUT_CSV) --best-csv $(BEST_CSV) \
 	    --target-ms $(TARGET_MS) --rounds $(ROUNDS) $(ONLY_ARG) 2>&1 | tee $(LOG)
 
+# Does the decode winner depend on the KV cache capacity, or only on the work?
+# Answers whether max_seq belongs in the LUT key; see
+# RdpCapture/ops_analyze/gqa/capture_autotune_lut.md.
+$(PROBE): maxseq_probe.cpp | $(BUILD_DIR)
+	$(HIPCC) $(CXXFLAGS) $(OFFLOAD) -I$(INCLUDE_DIR) -I$(KERNEL_HIP_DIR) $< -o $@
+
+maxseq-probe: $(PROBE)
+	$(PROBE) --csv $(BUILD_DIR)/maxseq_probe.csv --rounds 3 --target-ms 30
+
 clean:
 ifeq ($(DETECTED_OS),Windows)
 	@if exist $(BUILD_DIR) rmdir /s /q $(BUILD_DIR)
@@ -80,4 +90,4 @@ else
 	@rm -rf $(BUILD_DIR)
 endif
 
-.PHONY: all run clean
+.PHONY: all run maxseq-probe clean
