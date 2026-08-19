@@ -4433,7 +4433,13 @@ def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
 // scales, performs INT8/INT4 matrix multiplication, and dequantizes the result
 // back to float.
 //
-// Semantics: Y = dequantize(quantize(LHS) @ quantize(RHS), output_scale)
+// Semantics:
+//   LHS_quantized = quantize(LHS, lhs_scale)
+//   RHS_quantized = quantize(RHS, rhs_scale)
+//   Result_quantized = LHS_quantized @ RHS_quantized
+//   Y = dequantize(Result_quantized, output_scale)
+//
+// Note: rhs_scale can be 1.0 to skip RHS quantization (mixed precision).
 //
 // Example:
 //   hip.qmatmul(%ctx) ins(%lhs, %rhs : memref<4x128xf32, 1>, memref<128x256xf32, 1>)
