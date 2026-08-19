@@ -35,6 +35,28 @@ module attributes {
 
 // -----
 
+// ORT can retain tensor shape metadata for omitted optional outputs. The
+// importer represents such result positions as none; they are not live tensor
+// identities and must not prevent conversion.
+module attributes {
+  hipdnn.onnx_dim_params_v1 = [
+    {scope = "main_graph", value_name = "val_0", dimensions = ["N"]}
+  ]
+} {
+  // CHECK-LABEL: func.func @main_graph
+  // CHECK-NOT: val_0
+  func.func @main_graph(
+      %a: tensor<?xf32> {onnx.name = "a"}) -> tensor<?xf32> {
+    %unused = "onnx.NoValue"() {
+      node.outputs = ["val_0"],
+      value
+    } : () -> none
+    "onnx.Return"(%a) : (tensor<?xf32>) -> ()
+  }
+}
+
+// -----
+
 // A successor-block argument is not a function argument. Its local argument
 // number must not inherit onnx.name from the function entry block.
 module attributes {
