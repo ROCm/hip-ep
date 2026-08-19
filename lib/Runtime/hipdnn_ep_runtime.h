@@ -766,30 +766,30 @@ int wrap_miopenConvolutionForward(
     RuntimeState
         *state, // RuntimeState (opaque - extracts handle/stream internally)
     int32_t op_state_slot, // Op state slot
-    int64_t shape_valid, // Dynamic output-shape validity
-    const void *input,   // Input tensor GPU pointer
-    int64_t input_n,     // Input batch size
-    int64_t input_c,     // Input channels
-    int64_t input_h,     // Input height
-    int64_t input_w,     // Input width
-    const void *weights, // Weights tensor GPU pointer
-    int64_t weights_k,   // Output channels (number of filters)
-    const void *bias,    // Bias tensor GPU pointer (nullable)
-    void *output,        // Output tensor GPU pointer (in-place)
-    int64_t output_h,    // Output height
-    int64_t output_w,    // Output width
-    int64_t kernel_h,    // Kernel height
-    int64_t kernel_w,    // Kernel width
-    int64_t stride_h,    // Stride height
-    int64_t stride_w,    // Stride width
-    int64_t pad_top,     // Padding top
-    int64_t pad_left,    // Padding left
-    int64_t pad_bottom,  // Padding bottom
-    int64_t pad_right,   // Padding right
-    int64_t dilation_h,  // Dilation height
-    int64_t dilation_w,  // Dilation width
-    int64_t group,       // Number of groups
-    int64_t data_type);  // HIPDNN_EP_DATATYPE_* for I/O and weights
+    int64_t shape_valid,   // Dynamic output-shape validity
+    const void *input,     // Input tensor GPU pointer
+    int64_t input_n,       // Input batch size
+    int64_t input_c,       // Input channels
+    int64_t input_h,       // Input height
+    int64_t input_w,       // Input width
+    const void *weights,   // Weights tensor GPU pointer
+    int64_t weights_k,     // Output channels (number of filters)
+    const void *bias,      // Bias tensor GPU pointer (nullable)
+    void *output,          // Output tensor GPU pointer (in-place)
+    int64_t output_h,      // Output height
+    int64_t output_w,      // Output width
+    int64_t kernel_h,      // Kernel height
+    int64_t kernel_w,      // Kernel width
+    int64_t stride_h,      // Stride height
+    int64_t stride_w,      // Stride width
+    int64_t pad_top,       // Padding top
+    int64_t pad_left,      // Padding left
+    int64_t pad_bottom,    // Padding bottom
+    int64_t pad_right,     // Padding right
+    int64_t dilation_h,    // Dilation height
+    int64_t dilation_w,    // Dilation width
+    int64_t group,         // Number of groups
+    int64_t data_type);    // HIPDNN_EP_DATATYPE_* for I/O and weights
 
 // MIOpen transposed convolution (deconvolution) wrapper
 // Uses MIOpen's miopenTranspose convolution mode. Follows the opaque

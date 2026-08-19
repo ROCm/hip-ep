@@ -465,12 +465,11 @@ hipblasLtMatmul(hipblasLtHandle_t handle, hipblasLtMatmulDesc_t matmul_desc,
 
 int wrap_miopenConvolutionForward(
     RuntimeState *state, int32_t op_state_slot, int64_t shape_valid,
-    const void *input,
-    int64_t input_n, int64_t input_c, int64_t input_h, int64_t input_w,
-    const void *weights, int64_t weights_k, const void *bias, void *output,
-    int64_t output_h, int64_t output_w, int64_t kernel_h, int64_t kernel_w,
-    int64_t stride_h, int64_t stride_w, int64_t pad_top, int64_t pad_left,
-    int64_t pad_bottom, int64_t pad_right, int64_t dilation_h,
+    const void *input, int64_t input_n, int64_t input_c, int64_t input_h,
+    int64_t input_w, const void *weights, int64_t weights_k, const void *bias,
+    void *output, int64_t output_h, int64_t output_w, int64_t kernel_h,
+    int64_t kernel_w, int64_t stride_h, int64_t stride_w, int64_t pad_top,
+    int64_t pad_left, int64_t pad_bottom, int64_t pad_right, int64_t dilation_h,
     int64_t dilation_w, int64_t group, int64_t data_type) {
   (void)op_state_slot;
   if (!state) {
