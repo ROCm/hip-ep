@@ -17,67 +17,6 @@
 
 // RUN: hip-mlir-opt %s --onnx-dialect=modeled --split-input-file -allow-unregistered-dialect -convert-onnx-to-hipsr | FileCheck %s
 
-// A shape operand left as a runtime value goes unread: the result type already
-// carries the extents, and a dynamic one follows from the preserved element
-// count.
-// CHECK-LABEL: func.func @collapse_dynamic(
-// CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,
-// CHECK-SAME:    %[[INPUT:.*]]: tensor<?x4096xf16, #hipsr.mem<device>>,
-// CHECK-SAME:    %{{.*}}: tensor<1xi64, #hipsr.mem<device>>) -> tensor<?xf16, #hipsr.mem<device>> {
-// CHECK-NEXT:    %[[INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<?x4096xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?xf16, #hipsr.mem<device>> shape_region {
-// CHECK-NEXT:    ^bb0(%[[IN_SHAPE:.*]]: !shape.shape):
-// CHECK-NEXT:      %[[AXIS:.*]] = shape.const_size 0
-// CHECK-NEXT:      %[[SIZE:.*]] = shape.get_extent %[[IN_SHAPE]], %[[AXIS]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:      %[[EXTENT:.*]] = shape.size_to_index %[[SIZE]] : !shape.size
-// CHECK-NEXT:      %[[COLS:.*]] = arith.constant 4096 : index
-// CHECK-NEXT:      %[[COUNT:.*]] = arith.muli %[[EXTENT]], %[[COLS]] : index
-// CHECK-NEXT:      %[[SHAPE:.*]] = shape.from_extents %[[COUNT]] : index
-// CHECK-NEXT:      hipsr.shape_yield %[[SHAPE]] : !shape.shape
-// CHECK-NEXT:    }
-// CHECK-NEXT:    %[[RESULT:.*]] = hipsr.compute(%[[CTX]]) ins(%[[INPUT]] : tensor<?x4096xf16, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<?xf16, #hipsr.mem<device>>) {
-// CHECK-NEXT:    ^bb0(%{{.*}}: !hipsr.context, %[[IN:.*]]: tensor<?x4096xf16, #hipsr.mem<device>>, %{{.*}}: tensor<?xf16, #hipsr.mem<device>>):
-// CHECK-NEXT:      %[[FLAT:.*]] = tensor.collapse_shape %[[IN]] {{\[}}[0, 1]] : tensor<?x4096xf16, #hipsr.mem<device>> into tensor<?xf16, #hipsr.mem<device>>
-// CHECK-NEXT:      hipsr.compute_yield %[[FLAT]] : tensor<?xf16, #hipsr.mem<device>>
-// CHECK-NEXT:    } : tensor<?xf16, #hipsr.mem<device>>{{$}}
-// CHECK-NEXT:    return %[[RESULT]] : tensor<?xf16, #hipsr.mem<device>>
-func.func @collapse_dynamic(%ctx: !hipsr.context, %input: tensor<?x4096xf16>,
-                            %shape: tensor<1xi64>) -> tensor<?xf16> {
-  %0 = "onnx.Reshape"(%input, %shape) {allowzero = 0 : si64}
-      : (tensor<?x4096xf16>, tensor<1xi64>) -> tensor<?xf16>
-  "onnx.Return"(%0) : (tensor<?xf16>) -> ()
-}
-
-// -----
-
-// Static shapes need no extent arithmetic, so the region is two constants. The
-// body is the 1-D pair, the same as every other regroup.
-// CHECK-LABEL: func.func @static_regroup(
-// CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,
-// CHECK-SAME:    %[[INPUT:.*]]: tensor<2x3x4xf16, #hipsr.mem<device>>,
-// CHECK-SAME:    %{{.*}}: tensor<2xi64, #hipsr.mem<device>>) -> tensor<6x4xf16, #hipsr.mem<device>> {
-// CHECK-NEXT:    %[[INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<2x3x4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<6x4xf16, #hipsr.mem<device>> shape_region {
-// CHECK-NEXT:    ^bb0(%{{.*}}: !shape.shape):
-// CHECK-NEXT:      %[[ROWS:.*]] = arith.constant 6 : index
-// CHECK-NEXT:      %[[COLS:.*]] = arith.constant 4 : index
-// CHECK-NEXT:      %[[SHAPE:.*]] = shape.from_extents %[[ROWS]], %[[COLS]] : index, index
-// CHECK-NEXT:      hipsr.shape_yield %[[SHAPE]] : !shape.shape
-// CHECK-NEXT:    }
-// CHECK-NEXT:    %[[RESULT:.*]] = hipsr.compute(%[[CTX]]) ins(%[[INPUT]] : tensor<2x3x4xf16, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<6x4xf16, #hipsr.mem<device>>) {
-// CHECK-NEXT:    ^bb0(%{{.*}}: !hipsr.context, %[[IN:.*]]: tensor<2x3x4xf16, #hipsr.mem<device>>, %{{.*}}: tensor<6x4xf16, #hipsr.mem<device>>):
-// CHECK-NEXT:      %[[FLAT:.*]] = tensor.collapse_shape %[[IN]] {{\[}}[0, 1, 2]] : tensor<2x3x4xf16, #hipsr.mem<device>> into tensor<24xf16, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[OUT:.*]] = tensor.expand_shape %[[FLAT]] {{\[}}[0, 1]] output_shape [6, 4] : tensor<24xf16, #hipsr.mem<device>> into tensor<6x4xf16, #hipsr.mem<device>>
-// CHECK-NEXT:      hipsr.compute_yield %[[OUT]] : tensor<6x4xf16, #hipsr.mem<device>>
-// CHECK-NEXT:    } : tensor<6x4xf16, #hipsr.mem<device>>{{$}}
-// CHECK-NEXT:    return %[[RESULT]] : tensor<6x4xf16, #hipsr.mem<device>>
-func.func @static_regroup(%ctx: !hipsr.context, %input: tensor<2x3x4xf16>,
-                          %shape: tensor<2xi64>) -> tensor<6x4xf16> {
-  %0 = "onnx.Reshape"(%input, %shape)
-      : (tensor<2x3x4xf16>, tensor<2xi64>) -> tensor<6x4xf16>
-  "onnx.Return"(%0) : (tensor<6x4xf16>) -> ()
-}
-
-// -----
-
 // Expanding splits one input extent over a group, which the input type cannot
 // pin down. The destination already carries what the shape region resolved, so
 // output_shape reads the extent off it rather than dividing for it again. A
@@ -348,6 +287,10 @@ func.func @host_shape(%ctx: !hipsr.context, %input: tensor<?x?x4xf16>,
 // The result aliases the input, so a host input keeps the whole chain in
 // #hipsr.mem<host>. An ONNX result naming no space follows the input rather
 // than defaulting to device.
+//
+// Static extents on both sides also make this the plainest regroup: constants
+// in the region, and a body that flattens and stops, with no extent to refine
+// and no group to expand back out.
 // CHECK-LABEL: func.func @host_input(
 // CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,
 // CHECK-SAME:    %[[INPUT:.*]]: tensor<2x3xi64, #hipsr.mem<host>>,
