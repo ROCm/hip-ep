@@ -4,11 +4,15 @@
 // RUN: hip-mlir-opt --resolve-shaped-type-result-dims %s | FileCheck %s
 
 // CHECK-LABEL: func.func @two_outputs
-// CHECK-SAME: %[[INPUT:[^,]+]]: tensor<?x?x64xf16>
-// CHECK: %[[O0:.*]] = tensor.dim %[[INPUT]], %{{.*}}
-// CHECK: %[[O1:.*]] = tensor.dim %[[INPUT]], %{{.*}}
-// CHECK: %[[R0:.*]] = tensor.dim %[[INPUT]], %{{.*}}
-// CHECK: %[[R1:.*]] = tensor.dim %[[INPUT]], %{{.*}}
+// CHECK-SAME: %[[INPUT:[^,]+]]: tensor<?x?x64xf16>,
+// CHECK-SAME: %[[SKIP:[^,]+]]: tensor<?x?x64xf16>,
+// CHECK-SAME: %[[GAMMA:[^,]+]]: tensor<64xf16>,
+// CHECK-SAME: %[[OUTPUT:[^,]+]]: tensor<?x?x64xf16>,
+// CHECK-SAME: %[[RESIDUAL:[^)]+]]: tensor<?x?x64xf16>)
+// CHECK: %[[O0:.*]] = tensor.dim %[[OUTPUT]], %{{.*}}
+// CHECK: %[[O1:.*]] = tensor.dim %[[OUTPUT]], %{{.*}}
+// CHECK: %[[R0:.*]] = tensor.dim %[[RESIDUAL]], %{{.*}}
+// CHECK: %[[R1:.*]] = tensor.dim %[[RESIDUAL]], %{{.*}}
 // CHECK: return %[[O0]], %[[O1]], %[[R0]], %[[R1]]
 func.func @two_outputs(
     %ctx: !hip.context,
@@ -34,8 +38,11 @@ func.func @two_outputs(
 }
 
 // CHECK-LABEL: func.func @one_output
-// CHECK-SAME: %[[INPUT:[^,]+]]: tensor<?x32xf32>
-// CHECK: %[[D0:.*]] = tensor.dim %[[INPUT]], %{{.*}}
+// CHECK-SAME: %[[INPUT:[^,]+]]: tensor<?x32xf32>,
+// CHECK-SAME: %[[SKIP:[^,]+]]: tensor<?x32xf32>,
+// CHECK-SAME: %[[GAMMA:[^,]+]]: tensor<32xf32>,
+// CHECK-SAME: %[[OUTPUT:[^)]+]]: tensor<?x32xf32>)
+// CHECK: %[[D0:.*]] = tensor.dim %[[OUTPUT]], %{{.*}}
 // CHECK: return %[[D0]]
 func.func @one_output(
     %ctx: !hip.context,
