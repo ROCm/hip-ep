@@ -5,10 +5,14 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
+#include "../op_state.h"
+#include "cache_utils.h"
 #include "error_check_macros.h"
 #include "runtime_types.h"
 
 #include <cstdio>
+#include <mutex>
+#include <unordered_map>
 
 // Convenience wrappers for goto cleanup pattern (all functions use 'cleanup'
 // label)
@@ -38,53 +42,7 @@
 //    -
 //    https://docs.nvidia.com/deeplearning/performance/dl-performance-convolutional/
 //
-// 2. NO DESCRIPTOR CACHING
-//    Why don't we cache tensor/convolution descriptors?
-//
-//    - No evidence descriptor creation is expensive (likely just CPU struct
-//    alloc)
-//    - PyTorch/TensorFlow don't cache descriptors - they cache algorithm
-//    selection
-//    - PyTorch achieves 30-40% speedup from algorithm caching alone (not
-//    descriptors)
-//    - For dynamic shapes, descriptors change frequently anyway
-//    - Descriptor overhead is negligible vs algorithm finding
-//
-//    Source:
-//    - https://docs.pytorch.org/docs/stable/notes/cuda.html
-//
-// 3. PERFORMANCE OPTIMIZATION OPPORTUNITIES (TODOs below):
-//    ✅ Cache algorithm finding results (HIGH PRIORITY - documented as
-//    expensive) ✅ Pool workspace memory (eliminate malloc/free from hot path)
-//    ❌ Cache descriptors (NOT recommended - negligible benefit, added
-//    complexity)
-//
 //===----------------------------------------------------------------------===//
-
-// TODO: Cache miopenFindConvolutionForwardAlgorithm() results
-//
-// RATIONALE: Algorithm finding is expensive (benchmarks multiple algorithms on
-// GPU). MIOpen documentation explicitly states: "miopenFindConvolution*() is
-// expensive in terms of run time and required workspace, so it's highly
-// recommended to reserve the required algorithm and workspace to reuse them
-// later."
-//
-// PyTorch achieves 30-40% speedup by caching algorithm selection via
-// torch.backends.cudnn.benchmark = True.
-//
-// IMPLEMENTATION: Store in RuntimeState as AlgorithmCache keyed by:
-//   (input_shape, weights_shape, output_shape, pad_h, pad_w, stride_h,
-//   stride_w,
-//    dilation_h, dilation_w)
-//
-// For dynamic shapes: Cache hit rate depends on shape variation. If shapes
-// change frequently, cache effectiveness is reduced (PyTorch docs warn about
-// this).
-//
-// Sources:
-// -
-// https://rocm.docs.amd.com/projects/MIOpen/en/latest/how-to/find-and-immediate.html
-// - https://docs.pytorch.org/docs/stable/notes/cuda.html
 
 // TODO: Pool workspace memory instead of malloc/free every call
 //
@@ -119,6 +77,256 @@ static miopenDataType_t conv_to_miopen_type(int64_t data_type, bool &ok) {
   }
 }
 
+struct ConvTableKey {
+  int64_t input_n;
+  int64_t input_c;
+  int64_t input_h;
+  int64_t input_w;
+  int64_t weights_k;
+  int64_t output_h;
+  int64_t output_w;
+  int64_t kernel_h;
+  int64_t kernel_w;
+  int64_t stride_h;
+  int64_t stride_w;
+  int64_t pad_top;
+  int64_t pad_left;
+  int64_t pad_bottom;
+  int64_t pad_right;
+  int64_t dilation_h;
+  int64_t dilation_w;
+  int64_t group;
+  miopenDataType_t data_type;
+  miopenConvolutionMode_t conv_mode;
+  int64_t output_padding_h;
+  int64_t output_padding_w;
+
+  bool operator==(const ConvTableKey &other) const {
+    return (input_n == other.input_n) && (input_c == other.input_c) &&
+           (input_h == other.input_h) && (input_w == other.input_w) &&
+           (weights_k == other.weights_k) && (output_h == other.output_h) &&
+           (output_w == other.output_w) && (kernel_h == other.kernel_h) &&
+           (kernel_w == other.kernel_w) && (stride_h == other.stride_h) &&
+           (stride_w == other.stride_w) && (pad_top == other.pad_top) &&
+           (pad_left == other.pad_left) && (pad_bottom == other.pad_bottom) &&
+           (pad_right == other.pad_right) && (dilation_h == other.dilation_h) &&
+           (dilation_w == other.dilation_w) && (group == other.group) &&
+           (data_type == other.data_type) && (conv_mode == other.conv_mode) &&
+           (output_padding_h == other.output_padding_h) &&
+           (output_padding_w == other.output_padding_w);
+  }
+};
+
+struct ConvTableEntry {
+  miopenTensorDescriptor_t input_desc = nullptr;
+  miopenTensorDescriptor_t weights_desc = nullptr;
+  miopenTensorDescriptor_t output_desc = nullptr;
+  miopenConvolutionDescriptor_t conv_desc = nullptr;
+  miopenProblem_t problem = nullptr;
+  miopenSolution_t solution = nullptr;
+  void *workspace = nullptr;
+  size_t workspaceSize = 0;
+
+  ConvTableEntry() = default;
+
+  // Disable copy
+  ConvTableEntry(const ConvTableEntry &other) = delete;
+  ConvTableEntry &operator=(const ConvTableEntry &other) = delete;
+
+  // Enable move
+  ConvTableEntry(ConvTableEntry &&other)
+      : input_desc(other.input_desc), weights_desc(other.weights_desc),
+        output_desc(other.output_desc), conv_desc(other.conv_desc),
+        problem(other.problem), solution(other.solution),
+        workspace(other.workspace), workspaceSize(other.workspaceSize) {
+    other.input_desc = nullptr;
+    other.weights_desc = nullptr;
+    other.output_desc = nullptr;
+    other.conv_desc = nullptr;
+    other.problem = nullptr;
+    other.solution = nullptr;
+    other.workspace = nullptr;
+    other.workspaceSize = 0;
+  }
+  ConvTableEntry &operator=(ConvTableEntry &&other) = delete;
+
+  ~ConvTableEntry() {
+    if (input_desc)
+      miopenDestroyTensorDescriptor(input_desc);
+    if (weights_desc)
+      miopenDestroyTensorDescriptor(weights_desc);
+    if (output_desc)
+      miopenDestroyTensorDescriptor(output_desc);
+    if (conv_desc)
+      miopenDestroyConvolutionDescriptor(conv_desc);
+    if (problem)
+      miopenDestroyProblem(problem);
+    if (solution)
+      miopenDestroySolution(solution);
+    if (workspace)
+      hipFree(workspace);
+  }
+};
+
+struct ConvKeyHash {
+  size_t operator()(const ConvTableKey &key) const {
+    size_t h = 0;
+    hash_combine_val(h, key.input_n);
+    hash_combine_val(h, key.input_c);
+    hash_combine_val(h, key.input_h);
+    hash_combine_val(h, key.input_w);
+    hash_combine_val(h, key.weights_k);
+    hash_combine_val(h, key.output_h);
+    hash_combine_val(h, key.output_w);
+    hash_combine_val(h, key.kernel_h);
+    hash_combine_val(h, key.kernel_w);
+    hash_combine_val(h, key.stride_h);
+    hash_combine_val(h, key.stride_w);
+    hash_combine_val(h, key.pad_top);
+    hash_combine_val(h, key.pad_left);
+    hash_combine_val(h, key.pad_bottom);
+    hash_combine_val(h, key.pad_right);
+    hash_combine_val(h, key.dilation_h);
+    hash_combine_val(h, key.dilation_w);
+    hash_combine_val(h, key.group);
+    hash_combine_val(h, key.data_type);
+    hash_combine_val(h, key.conv_mode);
+    hash_combine_val(h, key.output_padding_h);
+    hash_combine_val(h, key.output_padding_w);
+    return h;
+  }
+};
+
+struct ConvTable {
+  std::mutex mutex;
+  std::unordered_map<ConvTableKey, ConvTableEntry, ConvKeyHash> map;
+};
+
+struct ConvState : public OpStateT<ConvState> {
+  std::shared_ptr<ConvTable> table;
+  ConvState() {
+    int dev = 0;
+    hipGetDevice(&dev);
+    table = WeakStore<int, ConvTable>::get_or_create(
+        dev, [] { return std::make_shared<ConvTable>(); });
+  }
+};
+
+extern "C" int8_t hipdnn_ep_op_state_construct_conv(RuntimeState *state,
+                                                    int32_t slot) {
+  hipdnn_ep_op_state_set(state, slot, ConvState::create().release());
+  return 0;
+}
+
+static const ConvTableEntry *
+queryOrCreateConv(ConvTable &table, const ConvTableKey &key,
+                  miopenHandle_t miopen_handle, const void *input,
+                  const void *weights, void *output) {
+  std::lock_guard<std::mutex> guard(table.mutex);
+  auto it = table.map.find(key);
+  if (it != table.map.end())
+    return &it->second;
+
+  int result = 0;
+
+  ConvTableEntry entry;
+  miopenFindOptions_t options;
+  size_t foundSolutions;
+
+  MIOPEN_CHECK(miopenCreateTensorDescriptor(&entry.input_desc));
+  MIOPEN_CHECK(miopenCreateTensorDescriptor(&entry.weights_desc));
+  MIOPEN_CHECK(miopenCreateTensorDescriptor(&entry.output_desc));
+
+  // Set tensor descriptors with explicit NCHW layout. The dtype is taken
+  {
+    int in_dims[] = {
+        static_cast<int>(key.input_n),
+        static_cast<int>(key.input_c),
+        static_cast<int>(key.input_h),
+        static_cast<int>(key.input_w),
+    };
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        entry.input_desc, key.data_type, miopenTensorNCHW, in_dims, 4));
+
+    int w_dims[] = {
+        static_cast<int>(key.conv_mode == miopenConvolution ? key.weights_k
+                                                            : key.input_c),
+        static_cast<int>(
+            (key.conv_mode == miopenConvolution ? key.input_c : key.weights_k) /
+            key.group),
+        static_cast<int>(key.kernel_h),
+        static_cast<int>(key.kernel_w),
+    };
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        entry.weights_desc, key.data_type, miopenTensorNCHW, w_dims, 4));
+
+    int out_dims[] = {
+        static_cast<int>(key.input_n),
+        static_cast<int>(key.weights_k),
+        static_cast<int>(key.output_h),
+        static_cast<int>(key.output_w),
+    };
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        entry.output_desc, key.data_type, miopenTensorNCHW, out_dims, 4));
+  }
+
+  // Create convolution descriptor
+  MIOPEN_CHECK(miopenCreateConvolutionDescriptor(&entry.conv_desc));
+  MIOPEN_CHECK(miopenInitConvolutionDescriptor(
+      entry.conv_desc, key.conv_mode, key.pad_top, key.pad_left, key.stride_h,
+      key.stride_w, key.dilation_h, key.dilation_w));
+  if (key.group > 1) {
+    MIOPEN_CHECK(miopenSetConvolutionGroupCount(entry.conv_desc, key.group));
+  }
+  if (key.output_padding_h > 0 || key.output_padding_w > 0) {
+    MIOPEN_CHECK(miopenSetTransposeConvOutputPadding(
+        entry.conv_desc, static_cast<int>(key.output_padding_h),
+        static_cast<int>(key.output_padding_w)));
+  }
+
+  // Find API
+  MIOPEN_CHECK(miopenCreateConvProblem(&entry.problem, entry.conv_desc,
+                                       miopenProblemDirectionForward));
+  MIOPEN_CHECK(miopenSetProblemTensorDescriptor(
+      entry.problem, miopenTensorConvolutionX, entry.input_desc));
+  MIOPEN_CHECK(miopenSetProblemTensorDescriptor(
+      entry.problem, miopenTensorConvolutionW, entry.weights_desc));
+  MIOPEN_CHECK(miopenSetProblemTensorDescriptor(
+      entry.problem, miopenTensorConvolutionY, entry.output_desc));
+
+  MIOPEN_CHECK(miopenCreateFindOptions(&options));
+  MIOPEN_CHECK(miopenSetFindOptionTuning(options, 1));
+  MIOPEN_CHECK(miopenSetFindOptionAttachBinaries(options, 1));
+
+  MIOPEN_CHECK(miopenSetFindOptionPreallocatedTensor(
+      options, miopenTensorConvolutionX, const_cast<void *>(input)));
+  MIOPEN_CHECK(miopenSetFindOptionPreallocatedTensor(
+      options, miopenTensorConvolutionW, const_cast<void *>(weights)));
+  MIOPEN_CHECK(miopenSetFindOptionPreallocatedTensor(
+      options, miopenTensorConvolutionY, output));
+
+  MIOPEN_CHECK(miopenFindSolutions(miopen_handle, entry.problem, options,
+                                   &entry.solution, &foundSolutions, 1));
+  if (foundSolutions == 0 || entry.solution == nullptr) {
+    return nullptr;
+  }
+
+  MIOPEN_CHECK(
+      miopenGetSolutionWorkspaceSize(entry.solution, &entry.workspaceSize));
+  if (entry.workspaceSize > 0)
+    HIP_CHECK(hipMalloc(&entry.workspace, entry.workspaceSize));
+
+  MIOPEN_CHECK(miopenDestroyFindOptions(options));
+
+  {
+    auto [ins, _] = table.map.emplace(key, std::move(entry));
+    return &ins->second;
+  }
+
+cleanup:
+  return nullptr;
+}
+
 // MIOpen convolution forward implementation
 // Follows opaque RuntimeState pattern - extracts handle/stream from state.
 //
@@ -135,12 +343,13 @@ static miopenDataType_t conv_to_miopen_type(int64_t data_type, bool &ok) {
 // for every row, producing NaN/Inf at fp16-max in the output and cascading
 // NaN through the rest of the network.
 int wrap_miopenConvolutionForward(
-    RuntimeState *state, const void *input, int64_t input_n, int64_t input_c,
-    int64_t input_h, int64_t input_w, const void *weights, int64_t weights_k,
-    const void *bias, void *output, int64_t output_h, int64_t output_w,
-    int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
-    int64_t pad_top, int64_t pad_left, int64_t pad_bottom, int64_t pad_right,
-    int64_t dilation_h, int64_t dilation_w, int64_t group, int64_t data_type) {
+    RuntimeState *state, int32_t op_state_slot, const void *input,
+    int64_t input_n, int64_t input_c, int64_t input_h, int64_t input_w,
+    const void *weights, int64_t weights_k, const void *bias, void *output,
+    int64_t output_h, int64_t output_w, int64_t kernel_h, int64_t kernel_w,
+    int64_t stride_h, int64_t stride_w, int64_t pad_top, int64_t pad_left,
+    int64_t pad_bottom, int64_t pad_right, int64_t dilation_h,
+    int64_t dilation_w, int64_t group, int64_t data_type) {
   OP_PROFILE(
       "conv",
       [&] {
@@ -181,119 +390,44 @@ int wrap_miopenConvolutionForward(
   // (Maintains abstraction barrier - no direct field access)
   miopenHandle_t miopen_handle =
       static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
-  hipStream_t hip_stream =
-      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
 
-  // Initialize all resource pointers to nullptr for safe cleanup
-  miopenTensorDescriptor_t input_desc = nullptr;
-  miopenTensorDescriptor_t weights_desc = nullptr;
-  miopenTensorDescriptor_t output_desc = nullptr;
+  ConvState *os = ConvState::get_op_state(state, op_state_slot);
+  if (!os || !os->table) {
+    fprintf(stderr,
+            "wrap_miopenConvolutionForward: missing op-state for slot %d\n",
+            op_state_slot);
+    return -1;
+  }
+
+  ConvTableKey key{
+      input_n,   input_c,           input_h,   input_w,    weights_k,  output_h,
+      output_w,  kernel_h,          kernel_w,  stride_h,   stride_w,   pad_top,
+      pad_left,  pad_bottom,        pad_right, dilation_h, dilation_w, group,
+      miopen_dt, miopenConvolution, 0,         0,
+  };
   miopenTensorDescriptor_t bias_desc = nullptr;
-  miopenConvolutionDescriptor_t conv_desc = nullptr;
-  // Workspace is owned by RuntimeState->conv_scratch (grow-on-demand pool);
-  // do NOT hipFree it here.
-  void *workspace = nullptr;
   int result = 0;
-  miopenConvAlgoPerf_t perf_results[1];
-  int returned_algo_count = 0;
-  miopenConvFwdAlgorithm_t algo;
-  size_t workspace_size = 0;
-  float alpha = 1.0f;
-  float beta = 0.0f;
 
-  // Create tensor descriptors
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&input_desc));
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&weights_desc));
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&output_desc));
-
-  // Set tensor descriptors with explicit NCHW layout. The dtype is taken
-  // from the caller (data_type) — the previous hardcoded `miopenFloat`
-  // produced silent fp16-stride-as-fp32 corruption on fp16 models.
-  // miopenSet4dTensorDescriptor leaves layout as UNKNOWN which triggers
-  // warnings in MIOpen 7.12+.
-  {
-    int in_dims[] = {(int)input_n, (int)input_c, (int)input_h, (int)input_w};
-    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        input_desc, miopen_dt, miopenTensorNCHW, in_dims, 4));
-
-    // For grouped/depthwise convolution the weight tensor's input-channel dim
-    // is input_c / group (e.g. depthwise conv: weights [C,1,kh,kw], group=C).
-    // Using input_c here would describe the wrong filter shape to MIOpen and
-    // produce silently incorrect results. group=1 reduces to input_c. The
-    // `group ? group : 1` guard only defends against a malformed group==0
-    // (ONNX requires group>=1) so we never divide by zero.
-    int w_dims[] = {(int)weights_k, (int)(input_c / (group ? group : 1)),
-                    (int)kernel_h, (int)kernel_w};
-    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        weights_desc, miopen_dt, miopenTensorNCHW, w_dims, 4));
-
-    int out_dims[] = {(int)input_n, (int)weights_k, (int)output_h,
-                      (int)output_w};
-    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        output_desc, miopen_dt, miopenTensorNCHW, out_dims, 4));
+  const ConvTableEntry *entry =
+      queryOrCreateConv(*os->table, key, miopen_handle, input, weights, output);
+  if (!entry || !entry->solution) {
+    fprintf(stderr,
+            "wrap_miopenConvolutionForward: missing solution for problem\n");
+    return -1;
   }
 
-  // Create convolution descriptor
-  // Note: MIOpen padding is per-side, but if pad_top==pad_bottom and
-  // pad_left==pad_right, we use the symmetric version
-  MIOPEN_CHECK(miopenCreateConvolutionDescriptor(&conv_desc));
-  MIOPEN_CHECK(miopenInitConvolutionDescriptor(
-      conv_desc, miopenConvolution, pad_top, pad_left, stride_h, stride_w,
-      dilation_h, dilation_w));
-
-  // Set group count for grouped convolutions (e.g., depthwise convolution)
-  // group=1 for standard convolution, group=C for depthwise convolution
-  if (group > 1) {
-    MIOPEN_CHECK(miopenSetConvolutionGroupCount(conv_desc, group));
-  }
-
-  // Workspace: query the worst-case size MIOpen needs for this conv config,
-  // then grow the per-RuntimeState conv_scratch pool to fit. The same buffer
-  // serves both the Find API and the forward call. This replaces the old
-  // per-call hipMalloc(10MB)/hipFree pattern -- the pool is reused across all
-  // conv calls in the session (encoder front-end runs it once per prefill).
-  MIOPEN_CHECK(miopenConvolutionForwardGetWorkSpaceSize(
-      miopen_handle, weights_desc, input_desc, conv_desc, output_desc,
-      &workspace_size));
-
-  if (workspace_size > 0) {
-    if (hipdnn_ep_state_ensure_conv_scratch(state, workspace_size) != 0) {
-      fprintf(stderr,
-              "wrap_miopenConvolutionForward: failed to grow conv_scratch to "
-              "%zu bytes\n",
-              workspace_size);
-      result = -1;
-      goto cleanup;
-    }
-    workspace = hipdnn_ep_state_get_conv_scratch(state);
-  }
-
-  // Find best algorithm
-  // MIOpen 3.x API: returns array of performance results instead of single
-  // algorithm
-  MIOPEN_CHECK(miopenFindConvolutionForwardAlgorithm(
-      miopen_handle, input_desc, input, weights_desc, weights, conv_desc,
-      output_desc, output,
-      1,                    // requestAlgoCount - ask for 1 algorithm
-      &returned_algo_count, // returnedAlgoCount - how many actually returned
-      perf_results,         // perfResults - array to receive results
-      workspace,            // workspace for algorithm testing
-      workspace_size,       // workspaceSize
-      false));
-  if (returned_algo_count < 1) {
-    fprintf(stderr, "wrap_miopenConvolutionForward: MIOpen Find returned no "
-                    "algorithms\n");
-    result = -1;
-    goto cleanup;
-  }
-
-  // Extract algorithm from performance results
-  algo = perf_results[0].fwd_algo;
-
-  // Perform convolution
-  MIOPEN_CHECK(miopenConvolutionForward(
-      miopen_handle, &alpha, input_desc, input, weights_desc, weights,
-      conv_desc, algo, &beta, output_desc, output, workspace, workspace_size));
+  const miopenTensorArgument_t tensorArgs[3] = {
+      {miopenTensorConvolutionX,
+       const_cast<miopenTensorDescriptor_t *>(&entry->input_desc),
+       const_cast<void *>(input)},
+      {miopenTensorConvolutionW,
+       const_cast<miopenTensorDescriptor_t *>(&entry->weights_desc),
+       const_cast<void *>(weights)},
+      {miopenTensorConvolutionY,
+       const_cast<miopenTensorDescriptor_t *>(&entry->output_desc), output},
+  };
+  MIOPEN_CHECK(miopenRunSolution(miopen_handle, entry->solution, 3, tensorArgs,
+                                 entry->workspace, entry->workspaceSize));
 
   // Add per-channel bias via miopenOpTensor (TensorOpAdd):
   //   C = alpha1*A + alpha2*B + beta*C  with A=C=output, B=bias, beta=0
@@ -310,26 +444,14 @@ int wrap_miopenConvolutionForward(
     MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
         bias_desc, miopen_dt, miopenTensorNCHW, b_dims, 4));
     MIOPEN_CHECK(miopenOpTensor(miopen_handle, miopenTensorOpAdd, &alpha_bias,
-                                output_desc, output, &alpha_bias, bias_desc,
-                                bias, &beta_zero, output_desc, output));
+                                entry->output_desc, output, &alpha_bias,
+                                bias_desc, bias, &beta_zero, entry->output_desc,
+                                output));
   }
 
 cleanup:
-  // Workspace is owned by RuntimeState->conv_scratch; do NOT hipFree here.
   if (bias_desc) {
     miopenDestroyTensorDescriptor(bias_desc);
-  }
-  if (input_desc) {
-    miopenDestroyTensorDescriptor(input_desc);
-  }
-  if (weights_desc) {
-    miopenDestroyTensorDescriptor(weights_desc);
-  }
-  if (output_desc) {
-    miopenDestroyTensorDescriptor(output_desc);
-  }
-  if (conv_desc) {
-    miopenDestroyConvolutionDescriptor(conv_desc);
   }
 
   return result;
@@ -352,13 +474,14 @@ cleanup:
 // by the caller (output_h/output_w from compile-time shape inference); the
 // output padding only affects which computed cells MIOpen fills.
 int wrap_miopenConvolutionTranspose(
-    RuntimeState *state, const void *input, int64_t input_n, int64_t input_c,
-    int64_t input_h, int64_t input_w, const void *weights, const void *bias,
-    void *output, int64_t output_c, int64_t output_h, int64_t output_w,
-    int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
-    int64_t pad_top, int64_t pad_left, int64_t pad_bottom, int64_t pad_right,
-    int64_t dilation_h, int64_t dilation_w, int64_t output_padding_h,
-    int64_t output_padding_w, int64_t group, int64_t data_type) {
+    RuntimeState *state, int32_t op_state_slot, const void *input,
+    int64_t input_n, int64_t input_c, int64_t input_h, int64_t input_w,
+    const void *weights, const void *bias, void *output, int64_t output_c,
+    int64_t output_h, int64_t output_w, int64_t kernel_h, int64_t kernel_w,
+    int64_t stride_h, int64_t stride_w, int64_t pad_top, int64_t pad_left,
+    int64_t pad_bottom, int64_t pad_right, int64_t dilation_h,
+    int64_t dilation_w, int64_t output_padding_h, int64_t output_padding_w,
+    int64_t group, int64_t data_type) {
   OP_PROFILE(
       "conv_transpose",
       [&] {
@@ -377,106 +500,57 @@ int wrap_miopenConvolutionTranspose(
     return -1;
   }
 
-  miopenDataType_t miopen_dt;
-  switch (data_type) {
-  case HIPDNN_EP_DATATYPE_FLOAT:
-    miopen_dt = miopenFloat;
-    break;
-  case HIPDNN_EP_DATATYPE_HALF:
-    miopen_dt = miopenHalf;
-    break;
-  case HIPDNN_EP_DATATYPE_BFLOAT16:
-    miopen_dt = miopenBFloat16;
-    break;
-  default:
-    fprintf(stderr,
-            "wrap_miopenConvolutionTranspose: unsupported data_type=%lld\n",
-            (long long)data_type);
+  bool dt_ok;
+  miopenDataType_t miopen_dt = conv_to_miopen_type(data_type, dt_ok);
+  if (!dt_ok) {
+    fprintf(
+        stderr,
+        "[REAL] wrap_miopenConvolutionTranspose: unsupported data_type %lld\n",
+        (long long)data_type);
     return -1;
   }
 
   miopenHandle_t miopen_handle =
       static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
 
-  // All releasable resources declared at function scope for goto cleanup.
-  miopenTensorDescriptor_t input_desc = nullptr;
-  miopenTensorDescriptor_t weights_desc = nullptr;
-  miopenTensorDescriptor_t output_desc = nullptr;
+  ConvState *os = ConvState::get_op_state(state, op_state_slot);
+  if (!os || !os->table) {
+    fprintf(stderr,
+            "wrap_miopenConvolutionTranspose: missing op-state for slot %d\n",
+            op_state_slot);
+    return -1;
+  }
+
+  ConvTableKey key{
+      input_n,          input_c,          input_h,  input_w,    output_c,
+      output_h,         output_w,         kernel_h, kernel_w,   stride_h,
+      stride_w,         pad_top,          pad_left, pad_bottom, pad_right,
+      dilation_h,       dilation_w,       group,    miopen_dt,  miopenTranspose,
+      output_padding_h, output_padding_w,
+  };
   miopenTensorDescriptor_t bias_desc = nullptr;
-  miopenConvolutionDescriptor_t conv_desc = nullptr;
-  void *find_workspace = nullptr;
-  void *workspace = nullptr;
   int result = 0;
-  miopenConvAlgoPerf_t perf_results[1];
-  int returned_algo_count = 0;
-  miopenConvFwdAlgorithm_t algo;
-  size_t workspace_size = 0;
-  const size_t find_workspace_size = 10 * 1024 * 1024; // 10MB
-  float alpha = 1.0f;
-  float beta = 0.0f;
 
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&input_desc));
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&weights_desc));
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&output_desc));
-
-  {
-    int in_dims[] = {(int)input_n, (int)input_c, (int)input_h, (int)input_w};
-    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        input_desc, miopen_dt, miopenTensorNCHW, in_dims, 4));
-
-    // Transpose-mode weights: [C_in, M/group, kH, kW] (ONNX ConvTranspose W).
-    int w_dims[] = {(int)input_c, (int)(output_c / group), (int)kernel_h,
-                    (int)kernel_w};
-    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        weights_desc, miopen_dt, miopenTensorNCHW, w_dims, 4));
-
-    int out_dims[] = {(int)input_n, (int)output_c, (int)output_h,
-                      (int)output_w};
-    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        output_desc, miopen_dt, miopenTensorNCHW, out_dims, 4));
+  const ConvTableEntry *entry =
+      queryOrCreateConv(*os->table, key, miopen_handle, input, weights, output);
+  if (!entry || !entry->solution) {
+    fprintf(stderr,
+            "wrap_miopenConvolutionTranspose: missing solution for problem\n");
+    return -1;
   }
 
-  MIOPEN_CHECK(miopenCreateConvolutionDescriptor(&conv_desc));
-  MIOPEN_CHECK(miopenInitConvolutionDescriptor(
-      conv_desc, miopenTranspose, pad_top, pad_left, stride_h, stride_w,
-      dilation_h, dilation_w));
-
-  // Output padding is optional in MIOpen; only set it when non-zero so the
-  // common case takes the default (zero adjustment) path.
-  if (output_padding_h > 0 || output_padding_w > 0) {
-    MIOPEN_CHECK(miopenSetTransposeConvOutputPadding(
-        conv_desc, (int)output_padding_h, (int)output_padding_w));
-  }
-
-  if (group > 1) {
-    MIOPEN_CHECK(miopenSetConvolutionGroupCount(conv_desc, group));
-  }
-
-  HIP_CHECK(hipMalloc(&find_workspace, find_workspace_size));
-
-  MIOPEN_CHECK(miopenFindConvolutionForwardAlgorithm(
-      miopen_handle, input_desc, input, weights_desc, weights, conv_desc,
-      output_desc, output, 1, &returned_algo_count, perf_results,
-      find_workspace, find_workspace_size, false));
-
-  algo = perf_results[0].fwd_algo;
-
-  MIOPEN_CHECK(miopenConvolutionForwardGetWorkSpaceSize(
-      miopen_handle, weights_desc, input_desc, conv_desc, output_desc,
-      &workspace_size));
-
-  workspace = find_workspace;
-  if (workspace_size > find_workspace_size) {
-    hipError_t err = hipFree(find_workspace);
-    if (err != hipSuccess)
-      fprintf(stderr, "Warning: hipFree failed for find_workspace: %d\n", err);
-    find_workspace = nullptr;
-    HIP_CHECK(hipMalloc(&workspace, workspace_size));
-  }
-
-  MIOPEN_CHECK(miopenConvolutionForward(
-      miopen_handle, &alpha, input_desc, input, weights_desc, weights,
-      conv_desc, algo, &beta, output_desc, output, workspace, workspace_size));
+  const miopenTensorArgument_t tensorArgs[3] = {
+      {miopenTensorConvolutionX,
+       const_cast<miopenTensorDescriptor_t *>(&entry->input_desc),
+       const_cast<void *>(input)},
+      {miopenTensorConvolutionW,
+       const_cast<miopenTensorDescriptor_t *>(&entry->weights_desc),
+       const_cast<void *>(weights)},
+      {miopenTensorConvolutionY,
+       const_cast<miopenTensorDescriptor_t *>(&entry->output_desc), output},
+  };
+  MIOPEN_CHECK(miopenRunSolution(miopen_handle, entry->solution, 3, tensorArgs,
+                                 entry->workspace, entry->workspaceSize));
 
   // Bias is [M]; broadcast-add over the [N, M, H', W'] output. Use
   // miopenOpTensor (the same op the forward conv uses) rather than
@@ -485,6 +559,8 @@ int wrap_miopenConvolutionTranspose(
   // beta=0, alpha1=alpha2=1 computes C = A + B in-place (A == C), adding the
   // [1,M,1,1] bias broadcast over [N,M,H',W'] without re-touching the conv.
   if (bias) {
+    float alpha = 1.0f;
+    float beta = 0.0f;
     int b_dims[] = {1, (int)output_c, 1, 1};
     MIOPEN_CHECK(miopenCreateTensorDescriptor(&bias_desc));
     MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
@@ -494,31 +570,13 @@ int wrap_miopenConvolutionTranspose(
     // output = output + bias (in place); A==C is required by MIOpen.
     const float alpha1 = 1.0f, alpha2 = 1.0f, beta_zero = 0.0f;
     MIOPEN_CHECK(miopenOpTensor(miopen_handle, miopenTensorOpAdd, &alpha1,
-                                output_desc, output, &alpha2, bias_desc, bias,
-                                &beta_zero, output_desc, output));
+                                entry->output_desc, output, &alpha2, bias_desc,
+                                bias, &beta_zero, entry->output_desc, output));
   }
 
 cleanup:
-  if (workspace) {
-    hipError_t err = hipFree(workspace);
-    if (err != hipSuccess)
-      fprintf(stderr, "Warning: hipFree failed for workspace: %d\n", err);
-  }
-  if (find_workspace && find_workspace != workspace) {
-    hipError_t err = hipFree(find_workspace);
-    if (err != hipSuccess)
-      fprintf(stderr, "Warning: hipFree failed for find_workspace: %d\n", err);
-  }
-  if (input_desc)
-    miopenDestroyTensorDescriptor(input_desc);
-  if (weights_desc)
-    miopenDestroyTensorDescriptor(weights_desc);
-  if (output_desc)
-    miopenDestroyTensorDescriptor(output_desc);
   if (bias_desc)
     miopenDestroyTensorDescriptor(bias_desc);
-  if (conv_desc)
-    miopenDestroyConvolutionDescriptor(conv_desc);
 
   return result;
 }
