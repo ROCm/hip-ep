@@ -13,13 +13,13 @@ Pattern QDQMatMulFusion with benefit(10) {
   let matmul = op<onnx.MatMul>(quant.0, rhs: Value);
   let dequant = op<onnx.DequantizeLinear>(matmul.0, output_scale: Value, output_zp: Value) -> (output_type: Type);
   
-  // Get context and scale attributes via native constraints
-  let ctx = GetContextArg(dequant);
-  let lhs_scale_attr = ExtractScaleValue(lhs_scale);
-  let output_scale_attr = ExtractScaleValue(output_scale);
-  
   // Replace with fused operation
   rewrite dequant with {
+    // Get context and scale attributes via native constraints
+    let ctx = GetContextArg(dequant);
+    let lhs_scale_attr = ExtractScaleValue(lhs_scale);
+    let output_scale_attr = ExtractScaleValue(output_scale);
+    
     let empty = op<tensor.empty> -> (output_type);
     let qmatmul = op<hip.qmatmul>(ctx, lhs_input, rhs, empty.0) {
       lhs_scale = lhs_scale_attr,
