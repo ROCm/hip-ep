@@ -9,18 +9,23 @@ add_library(OnnxToHipsr STATIC
   CastConversion.cpp
   MatMulConversion.cpp
   ExpandConversion.cpp
+  ShapeConversion.cpp
+  ReturnConversion.cpp
 )
 
 add_dependencies(OnnxToHipsr
   HipsrConversionPassIncGen
   HipsrDialectIncGen
+  OnnxDialectIncGen
 )
 
 target_link_libraries(OnnxToHipsr PUBLIC
   HipsrDialectIR
+  OnnxDialectIR
   MLIRPass
   MLIRTransforms
   MLIRFuncDialect
+  MLIRFuncTransforms
   MLIRTensorDialect
   MLIRShapeDialect
   MLIRArithDialect

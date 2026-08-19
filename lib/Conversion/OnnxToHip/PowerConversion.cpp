@@ -31,12 +31,11 @@ static constexpr int64_t kMaxPowUnroll = 16;
 /// immaterial for the integer/half-integer exponents we decompose
 /// (2, 3, 0.5, -1, ...).
 ///
-/// Why this peek runs PRE-lowering: with externalization enabled, every
-/// `onnx.Constant` — including 1-element scalars — is replaced by
-/// `bufferization.to_tensor(memref.get_global)` whose value lives in the
-/// constants file, NOT in IR. A post-lowering matcher cannot recover the
-/// scalar value from that form. Running before `lowerOnnxConstants` keeps the
-/// `onnx.Constant` (and any wrapping Cast) in IR, so the value is readable.
+/// Why this peek runs PRE-lowering: the matcher follows generic
+/// `onnx.Constant` and `onnx.Cast`/`CastLike` chains. `lowerOnnxConstants`
+/// creates an inspectable `hip.constant`, but changes the producer dialect;
+/// compute conversion then lowers the wrapping casts. The standalone
+/// externalizer runs only after this decomposition opportunity.
 static std::optional<double> getScalarConstantValue(mlir::Value v) {
   // Peek through value-preserving casts back to the underlying constant. At
   // pre-lowering time `onnx.Cast`/`onnx.CastLike` have not yet been converted
@@ -186,10 +185,10 @@ struct NegToHip : public mlir::RewritePattern {
 /// scalar exponent Y. Runs as a PRE-lowering rewrite (before
 /// `lowerOnnxConstants` and `convertComputeOps`) so the exponent is still
 /// readable as `onnx.Constant` (or an `onnx.Cast`/`onnx.CastLike` chain to
-/// one). With externalization enabled in production every `onnx.Constant`
-/// — including 1-element scalars — gets replaced by
-/// `bufferization.to_tensor(memref.get_global)` whose value is buried in the
-/// constants file; matching post-lowering would silently miss every Pow.
+/// one). Running here is required because the rewrite is expressed over
+/// generic ONNX op names; carrier creation changes the producer dialect even
+/// though inline carrier values remain inspectable. Standalone externalization
+/// occurs after compute conversion.
 ///
 /// In practice the exponent is always a constant scalar (variance
 /// `Pow(x, 2)` in RMS/LayerNorm and SAM's LayerNorm2d, `Pow(x, 3)` in the
@@ -209,7 +208,7 @@ struct NegToHip : public mlir::RewritePattern {
 /// express losslessly) is left unmatched, so a genuinely unsupported Pow
 /// surfaces downstream (bufferization error) instead of being silently wrong.
 ///
-/// Before (production, externalized constant + Cast wrap):
+/// Before (production generic ONNX constant + Cast wrap):
 ///   %c   = "onnx.Constant"() {value = dense<2.0> : tensor<f32>}
 ///        : () -> tensor<f32>
 ///   %ec  = "onnx.Cast"(%c) {to = 10 : si64}

@@ -196,6 +196,17 @@ pass registry (the same lookup a `--pass=name` flag uses) and adds it to the
 active pass manager. A name that does not resolve produces a one-line
 warning rather than a silent miss.
 
+`AfterConvertOnnxToHip` is also the supported plugin-producer boundary for
+constant weights. A plugin may emit the production `hip.constant` carrier
+there with exactly one source: a dense `value`, complete file
+`location`/`offset`/`size`, or complete `memory_address`/`size`.
+`hip-infer-shapes` consumes any compile-time payload required for shape
+refinement before `hip-externalize-constants` validates and serializes all
+carriers together. Plugins normally leave `serialization_order` unset, so they
+follow explicitly ordered producer carriers in stable module walk order. Later
+slots must not emit carriers; the pipeline diagnoses any `hip.constant` that
+survives to `BeforeBufferization`.
+
 ## How the host dispatches plugins
 
 Selected plugins are linked statically into the host; the CMake-generated

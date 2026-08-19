@@ -89,7 +89,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Cache ort-install
         id: cache-ort
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/ort-install
           # `ortpr-<list>` embeds ONNXRUNTIME_PR_PATCHES verbatim so editing
@@ -98,28 +98,11 @@ jobs:
 
       - name: Cache llvm-install
         id: cache-llvm
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
           key: dep-llvm-${{ env.LLVM_TAG }}
 
-      # protobuf / flatbuffers / gtest are NOT pre-built or cached here anymore:
-      # cmake/deps.cmake resolves them (find_package first, from-source
-      # FetchContent fallback) during the project build. With no prefix install
-      # they take the from-source path (sccache-accelerated). gtest is only
-      # pulled when unit tests are enabled (morphizen_ENABLE_UNIT_TEST=OFF here).
-
-      # -----------------------------------------------------------------------
-      # TheRock HIP SDK is NOT downloaded explicitly here: with no -DTHEROCK_DIST
-      # passed to Configure, cmake/deps.cmake auto-downloads + extracts it into
-      # the build tree (<build>/_therock) during configure. This exercises the
-      # default auto-download path in CI. (gpu-test downloads TheRock itself.)
-      # -----------------------------------------------------------------------
-
-      # -----------------------------------------------------------------------
-      # llvm-lit.py (from prebuilt) requires the lit pip package at runtime.
-      # Pin Python to avoid mismatch with find_package(Python3) in CMake.
-      # -----------------------------------------------------------------------
       - name: Setup Python 3.14
         uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
         with:
@@ -299,7 +282,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Cache amdgpu-ep build
         id: cache-amdgpu
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/build-amdgpu
           # amdgpu-ep/hip-backend link against the patched ort-install, so the
@@ -372,7 +355,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Cache OGA artifacts
         id: cache-oga
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/oga-artifacts
           # OGA is built against the patched ort-install, so the key folds in
@@ -568,10 +551,18 @@ jobs:
           # without touching this workflow each time.
           cp "${{ runner.workspace }}/install/lib/"*.lib staging/lib/ 2>/dev/null || true
 
-          # amdhip64_7.dll – HIP runtime required at inference time. TheRock was
-          # auto-downloaded by cmake/deps.cmake into the build tree's _therock.
           THEROCK_DIR="../build/$(basename "$PWD")/_therock"
-          cp "$THEROCK_DIR/bin/amdhip64_7.dll" staging/bin/
+          for dll in amdhip64_7.dll MIOpen.dll amd_comgr0702.dll rocblas.dll \
+                     libhipblaslt.dll hiprtc0702.dll hiprtc-builtins0702.dll \
+                     hipdnn_backend.dll; do
+            cp "$THEROCK_DIR/bin/$dll" staging/bin/
+          done
+          for data in hipblaslt rocblas; do
+            cp -r "$THEROCK_DIR/bin/$data" staging/bin/
+          done
+          for lib in amdhip64.lib MIOpen.lib libhipblaslt.dll.a; do
+            cp "$THEROCK_DIR/lib/$lib" staging/lib/
+          done
 
           # MorphiZen EP config
           cp etc/morphizen_config.json staging/
@@ -639,14 +630,10 @@ jobs:
           path: staging/
           retention-days: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) && 14 || 3 }}
 
-      # -----------------------------------------------------------------------
-      # Python wheel package: the three project wheels + run_onnx.py + OGA
-      # benchmark scripts. ROCm wheels are NOT bundled — they are installed
-      # from repo.amd.com at runtime (CI smoke) or downloaded by the local
-      # package_release.ps1 script when building the offline distribution.
-      # -----------------------------------------------------------------------
       - name: Stage Python wheel package
         shell: bash
+        env:
+          VLM_BENCHMARK_REF: f02a82c8312224ef3e2f673c4c6569d487d47e64
         run: |
           mkdir -p wheelpkg/wheels
           ORT_WHEEL=$(find "${{ runner.workspace }}/ort-install/wheels" \
@@ -663,6 +650,8 @@ jobs:
           cp "$ORT_WHEEL" "$OGA_WHEEL" "$EP_WHEEL" wheelpkg/wheels/
           cp python/examples/run_onnx.py wheelpkg/
           cp "${{ runner.workspace }}/oga-artifacts/benchmark-python/"*.py wheelpkg/
+          curl -fsSL --retry 3 -o wheelpkg/vlm_benchmark.py \
+            "https://raw.githubusercontent.com/amd/RyzenAI-SW/$VLM_BENCHMARK_REF/LLM-examples/VLM/vlm_benchmark.py"
           echo "=== Python wheel package layout ==="
           find wheelpkg/ -maxdepth 2 -mindepth 1 | sort
 
@@ -693,7 +682,6 @@ jobs:
       pull-requests: write
 
     env:
-      THEROCK_VERSION: therock-dist-windows-gfx1151-7.11.0
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
     steps:
@@ -709,7 +697,6 @@ jobs:
           if exist oga-smoke-venv rd /s /q oga-smoke-venv
           if exist oga-smoke-results rd /s /q oga-smoke-results
           if exist wheelpkg rd /s /q wheelpkg
-          if exist therock-dist rd /s /q therock-dist
 
       - name: Download GPU test package
         uses: actions/download-artifact@v4
@@ -723,37 +710,10 @@ jobs:
           name: hip-python-package
           path: wheelpkg
 
-      # TheRock DLLs are required at runtime on the GPU machine.
-      # Download is fast enough that caching is not needed on the self-hosted runner.
-      - name: Download & extract TheRock
-        shell: pwsh
-        run: |
-          $dist = "$PWD\therock-dist"
-          New-Item -ItemType Directory -Force -Path $dist | Out-Null
-          curl.exe -fsSL `
-            "https://repo.amd.com/rocm/tarball/${{ env.THEROCK_VERSION }}.tar.gz" `
-            -o therock.tar.gz
-          tar -xzf therock.tar.gz -C $dist --strip-components=1
-          Remove-Item therock.tar.gz
-
-      # Run perf test against seq128 models via MorphiZen EP (models pre-placed
-      # at C:\actions-runner\_work\model\). Default bitcode (LLVM_IR) path only
-      # needs PATH -> ROCm runtime DLLs (therock-dist/bin) + co-located
-      # custom_kernels; the in-memory JIT reads neither THEROCK_DIST nor LIB
-      # (those are NATIVE-only, set in the native smoke steps below).
-      # Output is tee'd to results/ for QPS extraction. Non-zero exit code
-      # sets FAILED but continues so all models are tested.
-      #
-      # GPU-test asset dirs (model/, amdgpu-oga-models/, l2-test-models/) resolve
-      # under ${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}: set the repo/org
-      # Actions variable GPU_TEST_ASSET_ROOT to a stable path (and stage the dirs
-      # there) so persistent assets need not live under the repo-name-derived
-      # _work/<repo>/, which strands them on a repo rename. Unset => runner.workspace
-      # (unchanged from today).
       - name: Run onnxruntime_perf_test (GPU)
         shell: cmd
         run: |
-          set PATH=%CD%\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
+          set PATH=%CD%\gpu-test-package\bin;%PATH%
           set MODEL_DIR=${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\model
           if not exist "%MODEL_DIR%" (
             echo [ERROR] MODEL_DIR not found: %MODEL_DIR%
@@ -795,9 +755,9 @@ jobs:
         if: always()
         shell: cmd
         run: |
-          set THEROCK_DIST=%CD%\therock-dist
-          set PATH=%CD%\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
-          set LIB=%CD%\gpu-test-package\lib;%CD%\therock-dist\lib
+          set THEROCK_DIST=%CD%\gpu-test-package
+          set PATH=%CD%\gpu-test-package\bin;%PATH%
+          set LIB=%CD%\gpu-test-package\lib
           set MODEL_DIR=${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\model
           if not exist "%MODEL_DIR%" (
             echo [SKIP] MODEL_DIR not found: %MODEL_DIR%
@@ -841,9 +801,9 @@ jobs:
         if: always()
         shell: cmd
         run: |
-          set THEROCK_DIST=%CD%\therock-dist
-          set PATH=%CD%\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
-          set LIB=%CD%\gpu-test-package\lib;%CD%\therock-dist\lib
+          set THEROCK_DIST=%CD%\gpu-test-package
+          set PATH=%CD%\gpu-test-package\bin;%PATH%
+          set LIB=%CD%\gpu-test-package\lib
           set MODEL_DIR=${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\model
           if not exist "%MODEL_DIR%" (
             echo [SKIP] MODEL_DIR not found: %MODEL_DIR%
@@ -884,7 +844,7 @@ jobs:
           $ErrorActionPreference = 'Continue'
           $PSNativeCommandUseErrorActionPreference = $false
           $pkgBin = Join-Path $PWD "gpu-test-package\bin"
-          $env:PATH = "$PWD\therock-dist\bin;$pkgBin;$env:PATH"
+          $env:PATH = "$pkgBin;$env:PATH"
 
           $modelDir = "${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\model"
           if (-not (Test-Path $modelDir)) {
@@ -960,7 +920,7 @@ jobs:
           $ErrorActionPreference = 'Continue'
           $PSNativeCommandUseErrorActionPreference = $false
           $pkgBin = Join-Path $PWD "gpu-test-package\bin"
-          $env:PATH = "$PWD\therock-dist\bin;$pkgBin;$env:PATH"
+          $env:PATH = "$pkgBin;$env:PATH"
 
           # amdgpu-oga-models holds AMDGPU-profile genai_config copies; it was
           # generated once on the GPU runner and persists across runs, so just
@@ -1105,7 +1065,7 @@ jobs:
         shell: cmd
         run: |
           setlocal enabledelayedexpansion
-          set PATH=%CD%\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
+          set PATH=%CD%\gpu-test-package\bin;%PATH%
           rem The EP DLL is now hipgpu.dll; hip-onnx-runner's legacy default name
           rem is onnxruntime_morphizen_ep.dll, so point it at the new DLL.
           set MORPHIZEN_EP_LIB=%CD%\gpu-test-package\bin\hipgpu.dll

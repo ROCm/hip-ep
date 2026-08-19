@@ -14,12 +14,12 @@ def Hipsr_ComputeYieldOp : Hipsr_Op<"compute_yield",
     [Pure, ReturnLike, Terminator, HasParent<"ComputeOp">]> {
   let summary = "Yield the computed values out of a hipsr.compute region";
   let description = [{
-    Returns values from a compute body to the parent op.
+    Terminates a `hipsr.compute` body and gives that op its results.
 
-    Operands are ranked tensors and give `hipsr.compute` its result
-    types; because that op is not destination-passing style, those types need
-    not match its `outs` types. A bufferized compute has no results and yields
-    nothing.
+    Operands are tensors before bufferization and memrefs after, in any
+    `#hipsr.mem` space, and their types need not match the parent's `outs`
+    types. A bufferized compute has no results, so its yield carries no
+    operands.
 
     Example:
     ```mlir
@@ -27,7 +27,7 @@ def Hipsr_ComputeYieldOp : Hipsr_Op<"compute_yield",
     ```
   }];
 
-  let arguments = (ins Variadic<AnyRankedTensor>:$operands);
+  let arguments = (ins Variadic<Hipsr_TensorOrAnySpaceMemRef>:$operands);
 
   let assemblyFormat = "($operands^ `:` type($operands))? attr-dict";
 

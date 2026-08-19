@@ -704,30 +704,23 @@ HIP_KERNEL_API int hip_gqa_softmax_f32_to_f32(
     int input_batch_stride, int output_batch_stride,
     const void* head_sink, int num_heads, int use_smooth_softmax);
 
-/* Legacy fast-path decode kernels (folded into gqa_kernel.hip with legacy_*
- * device kernels). The production fused decode path uses hip_gqa_flash_decode_v2
- * above; these two entries back gqa.cpp::gqa_forward_hipblaslt -- the decomposed
- * hipBLASLt fallback -- for the cases the fused path does not cover. They MUST be
- * exported (HIP_KERNEL_API) so the EP resolves them out of custom_kernels_<arch>
- * at JIT link / native import (same as every other launcher here).
+/* Legacy fast-path decode kernel (folded into gqa_kernel.hip with a legacy_*
+ * device kernel). The production decode path uses hip_gqa_flash_decode above
+ * for EVERY fp16 causal GQA/MHA decode (window + sink folded in, split count
+ * autotuned). This one entry backs gqa.cpp::gqa_forward_hipblaslt -- the
+ * decomposed hipBLASLt fallback -- only for the odd geometries v2 does not
+ * template. It MUST be exported (HIP_KERNEL_API) so the EP resolves it out of
+ * custom_kernels_<arch> at JIT link / native import (same as every other
+ * launcher here).
  *
  * hip_gqa_fused_decode: one-block-per-(batch,head_q) decode, d in {64,128,256},
- * arbitrary HpG -- the general small-/odd-geometry decode used when flash is not
- * eligible. */
+ * arbitrary HpG -- the general small-/odd-geometry decode used when the fused v2
+ * path does not template the geometry. No sliding window / head sink (those
+ * route to the decomposed pipeline). */
 HIP_KERNEL_API int hip_gqa_fused_decode(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int H, int G, int d, int skv, int max_seq,
     float scale, const void* seqlens_k);
-
-/* hip_gqa_flash_decode: FA-2 split-K (scalar|WMMA), HPG in {4,8}, with
- * sliding-window + head-sink / smooth-softmax -- the fast windowed/sink decode
- * the fallback uses. partials_workspace: float scratch B*H*K_SPLITS*(d+2). */
-HIP_KERNEL_API int hip_gqa_flash_decode(
-    void* stream, const void* Q, const void* Kcache, const void* Vcache,
-    void* O, void* partials_workspace,
-    int B, int H, int G, int d, int max_seq, int K_SPLITS,
-    float scale, const void* seqlens_k, int local_window_size,
-    const void* head_sink, int use_smooth_softmax);
 
 /* Optimized fused GQA prefill (sq > 1, d in {64,128}, fp16, causal, GQA) --
  * Flash-Attention-2 with WMMA tile GEMMs and intra-wave online softmax. These
@@ -776,7 +769,7 @@ HIP_KERNEL_API int hip_gqa_flash_prefill_v2(
  * or a window with d != 64), so the caller falls back to the decomposed path
  * instead of silently dropping either. A request with neither is forwarded to
  * v2 and keeps v2's head-dim coverage. */
-HIP_KERNEL_API int hip_gqa_flash_prefill_v3(
+HIP_KERNEL_API int hip_gqa_flash_prefill(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale, int local_window_size, const void* head_sink,
@@ -786,7 +779,7 @@ HIP_KERNEL_API int hip_gqa_flash_prefill_v3(
  * prefill kernel. The runtime (real/gqa.cpp) dequantizes the int8 KV cache to an
  * fp16 scratch ONCE (hip_gqa_dequant_kv_i8_to_fp16) and reuses the tuned fp16
  * hip_gqa_flash_prefill_v2 above -- ~parity with fp16. Only the bandwidth-bound
- * decode reads int8 directly (hip_gqa_flash_decode_v2 with kv_dtype=INT8). */
+ * decode reads int8 directly (hip_gqa_flash_decode with kv_dtype=INT8). */
 
 /* hip_mha_flash_prefill: fused non-causal FA-2 WMMA prefill for the MS
  * MultiHeadAttention contrib op (self-attention, N_q == N_kv). Replaces the
@@ -849,7 +842,7 @@ HIP_KERNEL_API int hip_mha_flash_prefill(
  *     (kv_head, head_dim) channel, no zero point; dequant x_fp16 = x_i8 *
  *     scale[g*d + c]). The int8 read is 1 byte/elem, halving the DRAM traffic on
  *     the bandwidth-bound decode. Both scales are required for INT8. */
-HIP_KERNEL_API int hip_gqa_flash_decode_v2(
+HIP_KERNEL_API int hip_gqa_flash_decode(
     void* stream,
     const void* Q, const void* Kcache, const void* Vcache,
     void* O,

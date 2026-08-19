@@ -6,15 +6,14 @@
 //
 // Sibling pre-lowering fold to PadShapeFold. Captures the compile-time value
 // of `onnx.Slice`'s starts/ends/axes/steps operands onto the op as attributes
-// BEFORE `lowerOnnxConstants` externalizes the constants -- so SliceDecompose
-// (which runs in `convertComputeOps`, after externalization) can rewrite to
-// `tensor.extract_slice` without reading the operand.
+// while their producers are still generic ONNX constants. The first carrier
+// sweep then creates inspectable `hip.constant` ops, SliceDecompose runs during
+// compute conversion, and only afterward does the standalone externalizer run.
 //
 // SwinV2 window/partition slices use small 1-element i64 constants for every
-// param; production builds externalize even those into `memref.global` entries
-// with null `initial_value` (bytes live in constants.bin / ORT mem). Without
-// this stamp SliceDecompose fails `extractIntVector` and every slice falls
-// through to the stub `hip.slice` runtime op.
+// parameter. Stamping them before their producer changes dialect gives
+// SliceDecompose stable ONNX provenance and avoids falling through to the stub
+// `hip.slice` runtime op.
 //
 //   Before:
 //     %s = onnx.Constant {value = dense<0> : tensor<1xi64>}
@@ -44,7 +43,7 @@
 
 STATISTIC(NumSliceConstStamps,
           "Number of onnx.Slice ops whose constant params were stamped as "
-          "attributes before externalization");
+          "attributes before carrier lowering");
 
 namespace mlir {
 namespace hip {
@@ -61,8 +60,7 @@ static mlir::Value normaliseOptional(mlir::Value v) {
 }
 
 /// Inline 1-D integer constant (`arith.constant` or `onnx.Constant`), or
-/// std::nullopt. Runs before externalization so `bufferization.to_tensor` is
-/// intentionally not handled here.
+/// std::nullopt. This ONNX-rooted pre-rewrite runs before carrier lowering.
 static std::optional<llvm::SmallVector<int64_t>>
 getInlineIntVector(mlir::Value v) {
   if (!v)

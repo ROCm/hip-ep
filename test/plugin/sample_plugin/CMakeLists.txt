@@ -98,6 +98,7 @@ target_include_directories(hip_ep_sample_plugin PRIVATE
   ${LLVM_INCLUDE_DIRS}
 )
 target_link_libraries(hip_ep_sample_plugin PUBLIC
+  HipDialectIR
   MLIRPass
   MLIRIR
   MLIRSupport

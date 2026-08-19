@@ -5,10 +5,13 @@
 
 #include "hip/Dialect/Hipsr/Pipelines/Pipelines.h"
 
+#include "hip/Dialect/Hipsr/Transforms/Passes.h"
+
 #include "mlir/Pass/PassRegistry.h"
 
-void mlir::hipsr::buildHipsrPipeline(OpPassManager & /*pm*/,
+void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
                                      const HipsrPipelineOptions & /*options*/) {
+  pm.addPass(createAddContextArgPass());
 }
 
 void mlir::hipsr::registerHipsrPipelines() {

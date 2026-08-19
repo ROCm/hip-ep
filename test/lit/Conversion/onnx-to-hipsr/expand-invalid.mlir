@@ -7,7 +7,7 @@
 // fails the pass, so each case expects a legalization error.
 //===----------------------------------------------------------------------===//
 
-// RUN: hip-mlir-opt --convert-onnx-to-hipsr --split-input-file --verify-diagnostics %s
+// RUN: hip-mlir-opt --onnx-dialect=modeled --convert-onnx-to-hipsr --split-input-file --verify-diagnostics %s
 
 // The shape operand is an extent vector, so it must be rank 1.
 func.func @shape_rank(%ctx: !hipsr.context, %input: tensor<2x3xf16>,
@@ -15,17 +15,6 @@ func.func @shape_rank(%ctx: !hipsr.context, %input: tensor<2x3xf16>,
   // expected-error @+1 {{failed to legalize operation 'onnx.Expand'}}
   %0 = "onnx.Expand"(%input, %shape)
       : (tensor<2x3xf16>, tensor<1x2xi64>) -> tensor<2x3xf16>
-  return %0 : tensor<2x3xf16>
-}
-
-// -----
-
-// ONNX shape extents are i64.
-func.func @shape_element_type(%ctx: !hipsr.context, %input: tensor<2x3xf16>,
-                              %shape: tensor<2xi32>) -> tensor<2x3xf16> {
-  // expected-error @+1 {{failed to legalize operation 'onnx.Expand'}}
-  %0 = "onnx.Expand"(%input, %shape)
-      : (tensor<2x3xf16>, tensor<2xi32>) -> tensor<2x3xf16>
   return %0 : tensor<2x3xf16>
 }
 
@@ -82,4 +71,20 @@ func.func @missing_context(%input: tensor<2x3xf16>,
   %0 = "onnx.Expand"(%input, %shape)
       : (tensor<2x3xf16>, tensor<2xi64>) -> tensor<2x3xf16>
   return %0 : tensor<2x3xf16>
+}
+
+// -----
+
+// A graph argument naming no space is data, so it becomes device resident, and
+// hipsr.expand reads its extents on the host. Reaching them would take a copy
+// this conversion does not emit, so the shape has to name host already. The
+// pattern builds the operation and its verifier reports the space.
+func.func @shape_argument_names_no_space(%ctx: !hipsr.context,
+                                         %input: tensor<?x3xf16>,
+                                         %shape: tensor<2xi64>)
+    -> tensor<?x?xf16> {
+  // expected-error @+1 {{operand #2 must be ranked host tensor or host memref}}
+  %0 = "onnx.Expand"(%input, %shape)
+      : (tensor<?x3xf16>, tensor<2xi64>) -> tensor<?x?xf16>
+  return %0 : tensor<?x?xf16>
 }

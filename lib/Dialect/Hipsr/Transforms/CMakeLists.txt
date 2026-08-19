@@ -4,6 +4,7 @@
 ##
 
 add_library(HipsrDialectTransforms STATIC
+  AddContextArgPass.cpp
   BufferizableOpInterfaceImpl.cpp
   ExternalizeConstants.cpp
   HipsrPoolAllocPass.cpp
@@ -21,6 +22,7 @@ target_link_libraries(HipsrDialectTransforms PUBLIC
   HipsrDialectIR
   HipConstantsIO  # writeConstantsBinToFileSystem / ConstantEntry
   MLIRBufferizationDialect  # BufferizableOpInterface models
+  MLIRBufferizationTransforms  # BufferViewFlowAnalysis
   MLIRPass
   MLIRTransformUtils
   MLIRFuncDialect

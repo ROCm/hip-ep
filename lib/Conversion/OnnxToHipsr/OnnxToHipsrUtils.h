@@ -16,10 +16,18 @@
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/PatternMatch.h"
 
 namespace mlir {
 namespace hipsr {
+
+// Force change memoryspace to space
+inline ::mlir::RankedTensorType tensorTypeInSpace(::mlir::RankedTensorType type,
+                                                  MemorySpace space) {
+  return type.cloneWithEncoding(
+      ::mlir::hipsr::MemorySpaceAttr::get(type.getContext(), space));
+}
 
 /// Gets the `!hipsr.context` from function argument 0. The ONNX phase adds it
 /// as the enclosing function's first argument, so every hipsr op can thread it

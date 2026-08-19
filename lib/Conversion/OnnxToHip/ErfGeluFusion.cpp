@@ -40,8 +40,9 @@
 // (Cast / CastLike / Sqrt-of-const), so the `Sqrt(2.0)` and `CastLike` wrappers
 // fold transparently into the scalar comparison.
 //
-// Rooted on `onnx.Erf`; run BEFORE `lowerOnnxConstants` so literal values are
-// still inline in `onnx.Constant` value attributes.
+// Rooted on `onnx.Erf`; run BEFORE `lowerOnnxConstants` so this ONNX matcher
+// sees generic `onnx.Constant` producers and their values. The later carrier
+// remains inspectable, but no longer has the generic ONNX producer name.
 //
 //===----------------------------------------------------------------------===//
 

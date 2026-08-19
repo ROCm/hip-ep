@@ -742,29 +742,30 @@ int wrap_strided_copy(RuntimeState *state, void *dst_ptr, const void *src_ptr,
 int wrap_miopenConvolutionForward(
     RuntimeState
         *state, // RuntimeState (opaque - extracts handle/stream internally)
-    const void *input,   // Input tensor GPU pointer
-    int64_t input_n,     // Input batch size
-    int64_t input_c,     // Input channels
-    int64_t input_h,     // Input height
-    int64_t input_w,     // Input width
-    const void *weights, // Weights tensor GPU pointer
-    int64_t weights_k,   // Output channels (number of filters)
-    const void *bias,    // Bias tensor GPU pointer (nullable)
-    void *output,        // Output tensor GPU pointer (in-place)
-    int64_t output_h,    // Output height
-    int64_t output_w,    // Output width
-    int64_t kernel_h,    // Kernel height
-    int64_t kernel_w,    // Kernel width
-    int64_t stride_h,    // Stride height
-    int64_t stride_w,    // Stride width
-    int64_t pad_top,     // Padding top
-    int64_t pad_left,    // Padding left
-    int64_t pad_bottom,  // Padding bottom
-    int64_t pad_right,   // Padding right
-    int64_t dilation_h,  // Dilation height
-    int64_t dilation_w,  // Dilation width
-    int64_t group,       // Number of groups
-    int64_t data_type);  // HIPDNN_EP_DATATYPE_* for I/O and weights
+    int32_t op_state_slot, // Op state slot
+    const void *input,     // Input tensor GPU pointer
+    int64_t input_n,       // Input batch size
+    int64_t input_c,       // Input channels
+    int64_t input_h,       // Input height
+    int64_t input_w,       // Input width
+    const void *weights,   // Weights tensor GPU pointer
+    int64_t weights_k,     // Output channels (number of filters)
+    const void *bias,      // Bias tensor GPU pointer (nullable)
+    void *output,          // Output tensor GPU pointer (in-place)
+    int64_t output_h,      // Output height
+    int64_t output_w,      // Output width
+    int64_t kernel_h,      // Kernel height
+    int64_t kernel_w,      // Kernel width
+    int64_t stride_h,      // Stride height
+    int64_t stride_w,      // Stride width
+    int64_t pad_top,       // Padding top
+    int64_t pad_left,      // Padding left
+    int64_t pad_bottom,    // Padding bottom
+    int64_t pad_right,     // Padding right
+    int64_t dilation_h,    // Dilation height
+    int64_t dilation_w,    // Dilation width
+    int64_t group,         // Number of groups
+    int64_t data_type);    // HIPDNN_EP_DATATYPE_* for I/O and weights
 
 // MIOpen transposed convolution (deconvolution) wrapper
 // Uses MIOpen's miopenTranspose convolution mode. Follows the opaque
@@ -772,28 +773,29 @@ int wrap_miopenConvolutionForward(
 // Weight layout is ONNX ConvTranspose's [C, M/group, kH, kW] (input channels
 // first); M/group is derived from output_c and group inside the wrapper.
 int wrap_miopenConvolutionTranspose(
-    RuntimeState *state, // RuntimeState (opaque)
-    const void *input,   // Input tensor GPU pointer [N, C, H, W]
-    int64_t input_n,     // Input batch size
-    int64_t input_c,     // Input channels (C)
-    int64_t input_h,     // Input height
-    int64_t input_w,     // Input width
-    const void *weights, // Weights GPU pointer [C, M/group, kH, kW]
-    const void *bias,    // Bias GPU pointer (nullable) [M]
-    void *output,        // Output tensor GPU pointer (in-place) [N, M, H', W']
-    int64_t output_c,    // Output channels (M)
-    int64_t output_h,    // Output height
-    int64_t output_w,    // Output width
-    int64_t kernel_h,    // Kernel height
-    int64_t kernel_w,    // Kernel width
-    int64_t stride_h,    // Stride height
-    int64_t stride_w,    // Stride width
-    int64_t pad_top,     // Padding top
-    int64_t pad_left,    // Padding left
-    int64_t pad_bottom,  // Padding bottom
-    int64_t pad_right,   // Padding right
-    int64_t dilation_h,  // Dilation height
-    int64_t dilation_w,  // Dilation width
+    RuntimeState *state,   // RuntimeState (opaque)
+    int32_t op_state_slot, // Op state slot
+    const void *input,     // Input tensor GPU pointer [N, C, H, W]
+    int64_t input_n,       // Input batch size
+    int64_t input_c,       // Input channels (C)
+    int64_t input_h,       // Input height
+    int64_t input_w,       // Input width
+    const void *weights,   // Weights GPU pointer [C, M/group, kH, kW]
+    const void *bias,      // Bias GPU pointer (nullable) [M]
+    void *output,       // Output tensor GPU pointer (in-place) [N, M, H', W']
+    int64_t output_c,   // Output channels (M)
+    int64_t output_h,   // Output height
+    int64_t output_w,   // Output width
+    int64_t kernel_h,   // Kernel height
+    int64_t kernel_w,   // Kernel width
+    int64_t stride_h,   // Stride height
+    int64_t stride_w,   // Stride width
+    int64_t pad_top,    // Padding top
+    int64_t pad_left,   // Padding left
+    int64_t pad_bottom, // Padding bottom
+    int64_t pad_right,  // Padding right
+    int64_t dilation_h, // Dilation height
+    int64_t dilation_w, // Dilation width
     int64_t output_padding_h, // Output padding height (ONNX "adjs")
     int64_t output_padding_w, // Output padding width
     int64_t group,            // Number of groups
