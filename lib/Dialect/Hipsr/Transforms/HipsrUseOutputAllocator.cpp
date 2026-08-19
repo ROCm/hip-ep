@@ -30,6 +30,15 @@ namespace hipsr {
 
 namespace {
 
+// Find a visible !hipsr.context for `op`, starting from its block and moving
+// outward. At each nesting level, try in this order:
+//   1. Block arguments of the current block (first !hipsr.context wins).
+//   2. Block arguments of the region entry block, but only when the current
+//      block is not the entry block.
+//   3. Move to the parent operation and repeat steps 1-2.
+// Stop with no result if the parent has IsIsolatedFromAbove (for example
+// hipsr.pool_domain): ctx must be passed in through the region, not taken
+// from outside.
 static Value findVisibleContext(Operation *op) {
   Operation *anchor = op;
   while (Block *block = anchor->getBlock()) {
@@ -108,22 +117,19 @@ findAliasedPoolResults(BufferViewFlowAnalysis &aliasAnalysis, Value value) {
   return poolResults;
 }
 
-static SmallVector<Value>
-materializeDimensions(Value preservedShape, MemRefType type,
-                      ValueRange fallbackDynamicSizes, Location loc,
-                      OpBuilder &builder) {
+static SmallVector<Value> materializeDimensions(Value preservedShape,
+                                                MemRefType type, Location loc,
+                                                OpBuilder &builder) {
   SmallVector<Value> dimensions;
   dimensions.reserve(type.getRank());
 
-  unsigned dynamicIndex = 0;
   for (int64_t dimension : llvm::seq<int64_t>(0, type.getRank())) {
     Value size;
-    if (type.isDynamicDim(dimension) && preservedShape) {
+    if (type.isDynamicDim(dimension)) {
+      assert(preservedShape && "dynamic dims require a preserved shape");
       Value extent = builder.create<shape::GetExtentOp>(
           loc, preservedShape, dimension);
       size = builder.create<shape::SizeToIndexOp>(loc, extent);
-    } else if (type.isDynamicDim(dimension)) {
-      size = fallbackDynamicSizes[dynamicIndex++];
     } else {
       size = arith::ConstantIndexOp::create(builder, loc,
                                             type.getDimSize(dimension));
@@ -322,27 +328,19 @@ struct HipsrUseOutputAllocatorPass
       Value internalShape =
           internalShapes.empty() ? Value{} : internalShapes.front();
 
-      if (!externalShape && externalType.getNumDynamicDims() != 0 &&
-          externalType.getShape() != allocOp.getType().getShape()) {
+      MemRefType internalType = allocOp.getType();
+
+      if (externalType.getNumDynamicDims() != 0 && !externalShape) {
         returnOp.emitError()
             << "graph output " << outIdx
-            << " has no preserved external shape and its shape does not match "
-               "the allocation";
+            << " has dynamic dims but no preserved external shape";
         signalPassFailure();
         return;
       }
 
-      if (poolDomain && externalType.getNumDynamicDims() != 0 &&
-          !externalShape) {
-        returnOp.emitError()
-            << "graph output " << outIdx
-            << " has no preserved external shape";
-        signalPassFailure();
-        return;
-      }
-
-      if (poolDomain && !internalShape) {
-        allocOp.emitError("has no preserved internal shape");
+      if (internalType.getNumDynamicDims() != 0 && !internalShape) {
+        allocOp.emitError()
+            << "has dynamic dims but no preserved internal shape";
         signalPassFailure();
         return;
       }
@@ -355,8 +353,6 @@ struct HipsrUseOutputAllocatorPass
         signalPassFailure();
         return;
       }
-
-      MemRefType internalType = allocOp.getType();
 
       if (internalType.getElementType() != externalType.getElementType() ||
           internalType.getMemorySpace() != externalType.getMemorySpace()) {
@@ -423,11 +419,9 @@ struct HipsrUseOutputAllocatorPass
       builder.setInsertionPoint(allocOp);
 
       SmallVector<Value> externalDimensions = materializeDimensions(
-          output.externalShape, output.externalType,
-          allocOp.getDynamicSizes(), loc, builder);
+          output.externalShape, output.externalType, loc, builder);
       SmallVector<Value> internalDimensions = materializeDimensions(
-          output.internalShape, internalType, allocOp.getDynamicSizes(), loc,
-          builder);
+          output.internalShape, internalType, loc, builder);
 
       SmallVector<Value> externalDynamicSizes =
           getDynamicDimensions(externalDimensions, output.externalType);
