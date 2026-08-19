@@ -22,5 +22,5 @@ func.func @cast_chain(
     %ctx: !hipsr.context, %input: tensor<?x8xf32>) -> tensor<?x8xf32> {
   %0 = "onnx.Cast"(%input) {to = f16} : (tensor<?x8xf32>) -> tensor<?x8xf16>
   %1 = "onnx.Cast"(%0) {to = f32} : (tensor<?x8xf16>) -> tensor<?x8xf32>
-  return %1 : tensor<?x8xf32>
+  "onnx.Return"(%1) : (tensor<?x8xf32>) -> ()
 }
