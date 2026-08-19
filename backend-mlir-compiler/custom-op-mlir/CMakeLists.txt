@@ -75,13 +75,17 @@ if(TARGET RuntimeBitcode)
 endif()
 
 # Define MORPHIZEN_CUSTOM_OP for conditional compilation
-target_compile_definitions(${LIB_NAME} PRIVATE "MORPHIZEN_CUSTOM_OP=1")
+target_compile_definitions(${LIB_NAME} PRIVATE MORPHIZEN_CUSTOM_OP=1)
+
+find_package(hipblaslt CONFIG REQUIRED)
+target_compile_definitions(${LIB_NAME} PRIVATE
+    HIPDNN_HIPBLASLT=\"$<TARGET_FILE_BASE_NAME:roc::hipblaslt>\")
 
 if(HIPDNN_EP_LINK_HIP_HOST)
-  target_compile_definitions(${LIB_NAME} PRIVATE "HIPDNN_EP_LINK_HIP_HOST=1")
+  target_compile_definitions(${LIB_NAME} PRIVATE HIPDNN_EP_LINK_HIP_HOST=1)
 endif()
 if(HIPDNN_EP_LOAD_KERNEL_DLLS)
-  target_compile_definitions(${LIB_NAME} PRIVATE "HIPDNN_EP_LOAD_KERNEL_DLLS=1")
+  target_compile_definitions(${LIB_NAME} PRIVATE HIPDNN_EP_LOAD_KERNEL_DLLS=1)
 endif()
 
 # Link dependencies
