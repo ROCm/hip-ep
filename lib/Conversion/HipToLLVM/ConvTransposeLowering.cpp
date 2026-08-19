@@ -117,6 +117,7 @@ struct ConvTransposeOpLowering
 
     SmallVector<Type, 27> paramTypes = {
         ptrType, // state
+        i32Type, // op_state_slot
         ptrType, // input
         i64Type, // input_n
         i64Type, // input_c
@@ -149,12 +150,14 @@ struct ConvTransposeOpLowering
     if (failed(funcOp))
       return failure();
 
+    auto opStateSlot = getOpStateSlotValue(op, rewriter, loc);
     SmallVector<Value, 27> args = {
-        statePtr,   inputPtr,   inputN,    inputC,    inputH,  inputW,
-        weightsPtr, biasPtr,    outputPtr, outputC,   outputH, outputW,
-        kernelH,    kernelW,    strideH,   strideW,   padTop,  padLeft,
-        padBottom,  padRight,   dilationH, dilationW, outPadH, outPadW,
-        groupVal,   dataTypeVal};
+        statePtr, opStateSlot, inputPtr,    inputN,    inputC,    inputH,
+        inputW,   weightsPtr,  biasPtr,     outputPtr, outputC,   outputH,
+        outputW,  kernelH,     kernelW,     strideH,   strideW,   padTop,
+        padLeft,  padBottom,   padRight,    dilationH, dilationW, outPadH,
+        outPadW,  groupVal,    dataTypeVal,
+    };
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 

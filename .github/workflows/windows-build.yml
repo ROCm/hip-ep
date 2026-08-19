@@ -50,6 +50,7 @@ jobs:
       # Remove a PR number once its fix is in the pinned ONNXRUNTIME_VERSION.
       ONNXRUNTIME_PR_PATCHES: ""
       SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: ${{ github.ref_name == 'main' && 'READ_WRITE' || 'READ_ONLY' }}
       OGA_VERSION: "0.14.0"
       # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
       # pull/<n>.patch and `git apply` on top of v<OGA_VERSION>. Part of the OGA
@@ -86,7 +87,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Cache ort-install
         id: cache-ort
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/ort-install
           # `ortpr-<list>` embeds ONNXRUNTIME_PR_PATCHES verbatim so editing
@@ -95,7 +96,7 @@ jobs:
 
       - name: Cache llvm-install
         id: cache-llvm
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
           key: dep-llvm-${{ env.LLVM_TAG }}
@@ -279,7 +280,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Cache amdgpu-ep build
         id: cache-amdgpu
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/build-amdgpu
           # amdgpu-ep/hip-backend link against the patched ort-install, so the
@@ -352,7 +353,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Cache OGA artifacts
         id: cache-oga
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/oga-artifacts
           # OGA is built against the patched ort-install, so the key folds in

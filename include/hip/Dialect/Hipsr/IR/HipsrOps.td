@@ -47,8 +47,10 @@ include "hip/Dialect/Hipsr/IR/HipsrMatMulOp.td"
 include "hip/Dialect/Hipsr/IR/HipsrExpandOp.td"
 include "hip/Dialect/Hipsr/IR/HipsrCastOp.td"
 include "hip/Dialect/Hipsr/IR/HipsrAddOp.td"
+include "hip/Dialect/Hipsr/IR/HipsrMulOp.td"
 include "hip/Dialect/Hipsr/IR/HipsrConstantOp.td"
 include "hip/Dialect/Hipsr/IR/HipsrGetPoolOp.td"
 include "hip/Dialect/Hipsr/IR/HipsrPreserveShapeOp.td"
+include "hip/Dialect/Hipsr/IR/HipsrAllocOutputOp.td"
 
 #endif // HIPSR_OPS
