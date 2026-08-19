@@ -122,6 +122,12 @@ OnnxDimParams::annotateBroadcastDimSources(func::FuncOp funcOp) const {
     auto found = byValueName.find(*name);
     if (found == byValueName.end())
       return success();
+    // ORT may retain tensor ValueInfo for an omitted optional output even
+    // though the importer represents that result position as NoneType. Such a
+    // value is an absence marker, not a live tensor, and cannot contribute a
+    // symbolic broadcast proof.
+    if (isa<NoneType>(value.getType()))
+      return success();
     auto tensorType = dyn_cast<RankedTensorType>(value.getType());
     if (!tensorType)
       return funcOp.emitError("symbolic dimension metadata names a non-ranked "
