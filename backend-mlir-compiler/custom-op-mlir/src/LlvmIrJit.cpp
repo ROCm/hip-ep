@@ -313,7 +313,7 @@ bool installSearchGenerators(llvm::orc::LLJIT &jit) {
   const std::vector<std::vector<const char *>> rocm_libs = {
 #ifdef _WIN32
       {"MIOpen.dll"},
-      {"hipblaslt.dll", "libhipblaslt.dll"},
+      {HIPDNN_HIPBLASLT_DLL},
 #else
       {"libMIOpen.so"},
       {"libhipblaslt.so"},
