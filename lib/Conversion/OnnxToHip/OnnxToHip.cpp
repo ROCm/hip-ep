@@ -354,7 +354,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
   logSubpass("metadata");
 
 #ifdef QDQMATMUL_FUSION_PDL_FILE
-  // Phase 1: Apply PDLL patterns to mark QDQ fusion candidates
+  // Apply PDLL-based QDQ MatMul fusion patterns
   {
     constexpr const char* pdlFile = QDQMATMUL_FUSION_PDL_FILE;
     if (!::hip::pdl::run(module, pdlFile)) {
@@ -440,7 +440,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
         populateFastGeluFusionPatterns(preLoweringPatterns, ctx);
         populateErfGeluFusionPatterns(preLoweringPatterns, ctx);
 
-        // Phase 2: Process marked operations and perform actual fusion
+        // Apply pattern-based transformations
         populateProjectorOpsRewritePatterns(preLoweringPatterns, ctx);
         populateLpNormalizationConversionPatterns(preLoweringPatterns, ctx);
         populatePowDecompositionPatterns(preLoweringPatterns, ctx);
