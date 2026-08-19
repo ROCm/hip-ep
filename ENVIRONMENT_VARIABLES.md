@@ -32,11 +32,11 @@ These variables enable NPU/IPU acceleration via AMD's DynamicDispatch library. *
 - **DYNAMICDISPATCH_ROOT** (environment or CMake variable)
   - Path to DynamicDispatch installation or build directory
   - Examples:
-    - Install layout: `c:/vai-rt-0/vai-rt-build/install`
-    - Workspace build: `c:/vai-rt-0/vai-rt-build/workspace/dod/build/RelWithDebInfo`
+    - Install layout: `/path/to/vai-rt-build/install`
+    - Workspace build: `/path/to/vai-rt-build/workspace/dod/build/Release`
   - CMake: `-DDYNAMICDISPATCH_ROOT=<path>`
   - Environment: `export DYNAMICDISPATCH_ROOT=<path>` (Linux) or `set DYNAMICDISPATCH_ROOT=<path>` (Windows)
-  - Default: Not set (DynamicDispatch disabled)
+  - Default: Not set (DynamicDispatch disabled, uses mock implementation)
 
 - **XILINX_XRT** (environment variable)
   - Fallback location for XRT (Xilinx Runtime) headers and libraries

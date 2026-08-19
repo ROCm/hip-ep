@@ -19,14 +19,22 @@ os.environ['HIPDNN_EP_DEBUG'] = '1'  # Enable COMPILER_DEBUG_LOG
 os.environ['HIPEP_USE_DYNAMIC_DISPATCH'] = '1'
 # Point to the actual install location (one level up from repo)
 os.environ['HIPEP_EP_BIN'] = str(pathlib.Path(__file__).resolve().parent.parent / "install" / "bin")
-# Add DynamicDispatch and XRT DLL directories to PATH
-dd_bin_dir = "c:/vai-rt-0/vai-rt-build/install/bin"
-xrt_bin_dir = "c:/vai-rt-0/vai-rt-build/install/xrt/bin"
-path_additions = dd_bin_dir + os.pathsep + xrt_bin_dir
-if 'PATH' in os.environ:
-    os.environ['PATH'] = path_additions + os.pathsep + os.environ['PATH']
+
+# Add DynamicDispatch and XRT DLL directories to PATH (if DYNAMICDISPATCH_ROOT is set)
+dd_root = os.environ.get('DYNAMICDISPATCH_ROOT')
+if dd_root:
+    dd_bin_dir = os.path.join(dd_root, "bin")
+    xrt_bin_dir = os.path.join(dd_root, "xrt", "bin")
+    path_additions = dd_bin_dir + os.pathsep + xrt_bin_dir
+    if 'PATH' in os.environ:
+        os.environ['PATH'] = path_additions + os.pathsep + os.environ['PATH']
+    else:
+        os.environ['PATH'] = path_additions
+    print(f"Added DynamicDispatch paths to PATH:")
+    print(f"  DD bin: {dd_bin_dir}")
+    print(f"  XRT bin: {xrt_bin_dir}")
 else:
-    os.environ['PATH'] = path_additions
+    print("DYNAMICDISPATCH_ROOT not set - skipping DD/XRT DLL path additions")
 
 # Add test path for conftest
 REPO_ROOT = pathlib.Path(__file__).resolve().parent

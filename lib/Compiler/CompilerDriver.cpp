@@ -599,8 +599,6 @@ void CompilerDriver::discoverInTreeLibraries(
     std::string dd_root = hip_get_env("DYNAMICDISPATCH_ROOT");
     if (dd_root.empty())
       dd_root = hip_get_env("VAI_RT_ROOT");
-    if (dd_root.empty())
-      dd_root = "c:/Vai-rt-0/Vai-rt-build/Install"; // Default Windows location
 
     if (!dd_root.empty()) {
       std::string dd_lib_dir = dd_root + "/Lib";

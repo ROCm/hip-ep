@@ -35,7 +35,6 @@ find_path(DynamicDispatch_INCLUDE_DIR
   NAMES ops/op_interface.hpp
   PATHS
     ${_DD_ROOT}
-    "c:/Vai-rt-0/Vai-rt-build/Install"
   PATH_SUFFIXES
     Include/Ryzenai/Dynamic_dispatch
     include/Ryzenai/Dynamic_dispatch
@@ -48,7 +47,6 @@ find_library(DynamicDispatch_LIBRARY
   NAMES dyn_dispatch_core dynamic_dispatch dd_helper
   PATHS
     ${_DD_ROOT}
-    "c:/Vai-rt-0/Vai-rt-build/Install"
   PATH_SUFFIXES
     Lib
     lib
