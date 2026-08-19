@@ -495,21 +495,14 @@ static int gqa_forward_fused(
         int effective_skv = static_cast<int>(skv);
         if (seqlens_k_pre != kSeqlensKNotRead && seqlens_k_pre >= 0)
           effective_skv = seqlens_k_pre + 1;
-        const bool exact_length_known =
-            seqlens_k_ptr == nullptr ||
-            (B == 1 && seqlens_k_pre != kSeqlensKNotRead &&
-             seqlens_k_pre >= 0);
-        const hipdnn_ep::GqaDecodeRequest request{
-            kv_dtype,
-            static_cast<int>(B),
-            static_cast<int>(H),
-            static_cast<int>(G),
-            static_cast<int>(d),
-            effective_skv,
-            exact_length_known,
-            static_cast<int>(present_seq),
-            kFlashDecodeMaxSplits,
-            static_cast<int>(local_window_size)};
+        const hipdnn_ep::GqaDecodeRequest request{kv_dtype,
+                                                  static_cast<int>(B),
+                                                  static_cast<int>(H),
+                                                  static_cast<int>(G),
+                                                  static_cast<int>(d),
+                                                  effective_skv,
+                                                  kFlashDecodeMaxSplits,
+                                                  static_cast<int>(local_window_size)};
         const hipdnn_ep::GqaDecodeResult selected =
             hipdnn_ep::gqa_autotune_resolve_decode(state->gqa_autotune_policy,
                                                    request);
@@ -725,7 +718,6 @@ static int gqa_forward_fused(
                                                static_cast<int>(d),
                                                static_cast<int>(sq),
                                                static_cast<int>(total_seq),
-                                               attn_max_seq,
                                                local_window_size};
     hipdnn_ep::GqaPrefillResult selected =
         hipdnn_ep::gqa_autotune_resolve_prefill(state->gqa_autotune_policy,
