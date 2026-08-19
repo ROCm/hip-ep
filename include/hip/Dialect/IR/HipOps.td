@@ -24,7 +24,7 @@ class Hip_Op<string mnemonic, list<Trait> traits = []> :
 // Provides:
 //   - MemoryEffectsOpInterface
 //   - DestinationStyleOpInterface (`getDpsInitsMutable` is op-defined)
-//   - HipDpsOpInterface (carries the shared default `reifyResultShapes`)
+//   - HipDpsOpInterface (carries shared whole-shape and direct-dim reification)
 //   - ReifyRankedShapedTypeOpInterface (decl; body auto-emitted below)
 //   - Variadic<AnyRankedTensor>:$result_tensors (empty in memref mode)
 //
@@ -39,9 +39,17 @@ class Hip_DpsOp<string mnemonic, list<Trait> traits = []> :
                                   ["getDpsInitsMutable"]>,
         HipDpsOpInterface,
         DeclareOpInterfaceMethods<ReifyRankedShapedTypeOpInterface,
-                                  ["reifyResultShapes"]>
+                                  ["reifyResultShapes", "reifyDimOfResult"]>
       ],
       traits)> {
+  code reifyDimClassDefinition = [{
+    ::llvm::FailureOr<::mlir::OpFoldResult> $cppClass::reifyDimOfResult(
+        ::mlir::OpBuilder &b, int resultIndex, int dim) {
+      return ::llvm::cast<::mlir::hip::HipDpsOp>(getOperation())
+          .reifyDimOfResult(b, resultIndex, dim);
+    }
+  }];
+  let extraClassDefinition = reifyDimClassDefinition;
   let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
 }
 
@@ -71,7 +79,7 @@ class Hip_DpsOp_WithInfer<string mnemonic,
         return ::mlir::success();
       }
     }]);
-  let extraClassDefinition = inferClassDefinition;
+  let extraClassDefinition = reifyDimClassDefinition # inferClassDefinition;
 }
 
 // Uses the shared HipDpsOpInterface implementation to lift the runtime shape
@@ -86,7 +94,7 @@ class Hip_DpsOp_AutoReify<string mnemonic, list<Trait> traits = []> :
           .reifyResultShapes(b, reified);
     }
   }];
-  let extraClassDefinition = reifyClassDefinition;
+  let extraClassDefinition = reifyDimClassDefinition # reifyClassDefinition;
 }
 
 // Combines the two common generated methods without exposing independent
@@ -103,7 +111,8 @@ class Hip_DpsOp_AutoReifyInfer<string mnemonic,
           .reifyResultShapes(b, reified);
     }
   }];
-  let extraClassDefinition = reifyClassDefinition # inferClassDefinition;
+  let extraClassDefinition =
+      reifyDimClassDefinition # reifyClassDefinition # inferClassDefinition;
 }
 
 /// Shape behavior supplied by a dedicated semantic implementation.
@@ -143,7 +152,8 @@ class Hip_DpsOp_SameShapeBase<string mnemonic, string sourceAccessor,
           [{(), getOperation(), reified);
     }
   }]);
-  code sameShapeClassDefinition = reifyClassDefinition # inferClassDefinition;
+  code sameShapeClassDefinition =
+      reifyDimClassDefinition # reifyClassDefinition # inferClassDefinition;
   let extraClassDefinition = sameShapeClassDefinition;
 }
 
@@ -198,7 +208,8 @@ class Hip_DpsOp_Reduction<string mnemonic, list<Trait> traits = []> :
     }
   }];
   let extraClassDefinition =
-      reifyClassDefinition # inferClassDefinition # verifyClassDefinition;
+      reifyDimClassDefinition # reifyClassDefinition # inferClassDefinition #
+      verifyClassDefinition;
   let hasVerifier = 1;
 }
 
@@ -243,7 +254,8 @@ class Hip_DpsOp_Broadcast<string mnemonic, list<string> operandGetters,
     }
   }]);
   let extraClassDefinition =
-      reifyClassDefinition # inferClassDefinition # verifyClassDefinition;
+      reifyDimClassDefinition # reifyClassDefinition # inferClassDefinition #
+      verifyClassDefinition;
   let hasVerifier = 1;
 }
 
