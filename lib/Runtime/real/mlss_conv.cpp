@@ -243,36 +243,90 @@ uint64_t hashCStr(const char *s) {
   return h;
 }
 
-void detectMlssAsic(char *out, size_t out_size) {
+void detectRuntimeGfx(char *out, size_t out_size) {
   out[0] = '\0';
   if (out_size < 1)
     return;
   hipDeviceProp_t props{};
   if (hipGetDeviceProperties(&props, 0) != hipSuccess) {
-    std::strncpy(out, MLSS_GFXAUTOFIND, out_size - 1);
+    std::strncpy(out, "gfx1100", out_size - 1);
     out[out_size - 1] = '\0';
     return;
   }
   const char *arch = props.gcnArchName;
   const char *colon = std::strchr(arch, ':');
   size_t len = colon ? static_cast<size_t>(colon - arch) : std::strlen(arch);
-  if (len < 3 || std::strncmp(arch, "gfx", 3) != 0) {
-    std::strncpy(out, MLSS_GFXAUTOFIND, out_size - 1);
+  if (len == 0 || len >= out_size) {
+    std::strncpy(out, "gfx1100", out_size - 1);
     out[out_size - 1] = '\0';
     return;
   }
-  char suffix[16];
-  size_t suffix_len = len - 3;
-  if (suffix_len >= sizeof(suffix))
-    suffix_len = sizeof(suffix) - 1;
-  for (size_t i = 0; i < suffix_len; ++i) {
-    char c = arch[3 + i];
-    if (c >= 'a' && c <= 'z')
-      c = static_cast<char>(c - 'a' + 'A');
-    suffix[i] = c;
+  std::memcpy(out, arch, len);
+  out[len] = '\0';
+}
+
+// Winograd Base non-reloc archives ship as gfx1100 ELFs. Query MLSS with
+// gfx1100 even on gfx1151 hardware, then patch ELF metadata before
+// hipModuleLoadData.
+constexpr const char *kMlssQueryAsic = MLSS_GFX1100;
+constexpr const char *kArchiveGfx = "gfx1100";
+constexpr const char *kMainKernelName = "main";
+constexpr size_t kElf64EflagsOffset = 0x30U;
+constexpr uint8_t kEfAmdgpuMachMask = 0xFFU;
+constexpr uint8_t kMachGfx1100 = 0x041U;
+
+struct GfxMachEntry {
+  const char *gfx_name;
+  uint8_t mach_code;
+};
+
+constexpr GfxMachEntry kGfxMachTable[] = {
+    {"gfx1100", 0x041U}, {"gfx1101", 0x046U}, {"gfx1102", 0x047U},
+    {"gfx1150", 0x043U}, {"gfx1151", 0x04AU}, {"gfx1152", 0x055U},
+    {"gfx1153", 0x058U},
+};
+
+bool machCodeForGfx(const char *runtime_gfx, uint8_t &out) {
+  for (const GfxMachEntry &entry : kGfxMachTable) {
+    if (runtime_gfx && std::strcmp(runtime_gfx, entry.gfx_name) == 0) {
+      out = entry.mach_code;
+      return true;
+    }
   }
-  suffix[suffix_len] = '\0';
-  std::snprintf(out, out_size, "MLSS_GFX%s", suffix);
+  return false;
+}
+
+bool patchGfxMetadata(std::vector<uint8_t> &image, const char *from_gfx,
+                      uint8_t mach_from, const char *to_gfx, uint8_t mach_to) {
+  const size_t from_len = std::strlen(from_gfx);
+  const size_t to_len = std::strlen(to_gfx);
+  if (from_len != to_len || image.empty())
+    return false;
+
+  if (image.size() > kElf64EflagsOffset &&
+      (image[kElf64EflagsOffset] & kEfAmdgpuMachMask) == mach_from) {
+    image[kElf64EflagsOffset] = static_cast<uint8_t>(
+        (image[kElf64EflagsOffset] & ~kEfAmdgpuMachMask) | mach_to);
+  }
+
+  for (size_t i = 0; i + from_len <= image.size(); ++i) {
+    if (std::memcmp(image.data() + i, from_gfx, from_len) == 0)
+      std::memcpy(image.data() + i, to_gfx, to_len);
+  }
+  return true;
+}
+
+bool prepareModuleImage(const MLSSbinary &bin, const char *runtime_gfx,
+                        std::vector<uint8_t> &out) {
+  const auto *raw = static_cast<const uint8_t *>(bin.m_binaries);
+  out.assign(raw, raw + bin.m_binarySize);
+  if (!runtime_gfx || std::strcmp(runtime_gfx, kArchiveGfx) == 0)
+    return true;
+
+  uint8_t mach_to = 0;
+  if (!machCodeForGfx(runtime_gfx, mach_to))
+    return false;
+  return patchGfxMetadata(out, kArchiveGfx, kMachGfx1100, runtime_gfx, mach_to);
 }
 
 struct ConvConfigKey {
@@ -283,13 +337,13 @@ struct ConvConfigKey {
                             int64_t ow, int64_t sh, int64_t sw, int64_t pt,
                             int64_t pl, int64_t pb, int64_t pr, int64_t dh,
                             int64_t dw, int64_t group, int64_t has_bias,
-                            int64_t dtype, const char *asic) {
+                            int64_t dtype, const char *runtime_gfx) {
     ConvConfigKey key{};
     int64_t vals[] = {n,  c,  h,  w,  k,  kh, kw, oh,    ow,       sh,
                       sw, pt, pl, pb, pr, dh, dw, group, has_bias, dtype};
     for (size_t i = 0; i < sizeof(vals) / sizeof(vals[0]); ++i)
       key.h[i] = static_cast<uint64_t>(vals[i]);
-    key.h[15] = hashCStr(asic);
+    key.h[15] = hashCStr(runtime_gfx);
     return key;
   }
 
@@ -320,15 +374,17 @@ ModuleCacheEntry g_module_entry{};
 bool g_module_valid = false;
 
 const MLSSbinary *pickNonRelocBinary(const MLSSbinary *bins, MLSSsize count) {
-  const MLSSbinary *best = nullptr;
+  // MIGraphX consumer pattern: only the linked "main" non-reloc ELF is
+  // loadable via hipModuleLoadData. Other non-reloc blobs (e.g.
+  // "_amdgpu_cs_main") are not valid module images for this path.
   for (MLSSsize i = 0; i < count; ++i) {
     const MLSSbinary *b = bins + i;
     if (b->m_isRelocatable)
       continue;
-    if (!best || b->m_argList.m_size > best->m_argList.m_size)
-      best = b;
+    if (b->m_pKernelName && std::strcmp(b->m_pKernelName, kMainKernelName) == 0)
+      return b;
   }
-  return best;
+  return nullptr;
 }
 
 const ArgValue *findNamedArg(const NamedArg *args, size_t count,
@@ -340,9 +396,9 @@ const ArgValue *findNamedArg(const NamedArg *args, size_t count,
   return nullptr;
 }
 
-bool buildLaunchArgs(const MLSSbinary &bin, MlssApi &api, const NamedArg *named,
-                     size_t named_count, std::vector<ArgValue> &storage,
-                     std::vector<void *> &launch_args) {
+bool buildOrderedArgs(const MLSSbinary &bin, MlssApi &api,
+                      const NamedArg *named, size_t named_count,
+                      std::vector<ArgValue> &storage) {
   MLSSvoid *raw = nullptr;
   MLSSsize count = 0;
   MLSSenum type = 0;
@@ -366,7 +422,6 @@ bool buildLaunchArgs(const MLSSbinary &bin, MlssApi &api, const NamedArg *named,
   }
 
   storage.clear();
-  launch_args.clear();
   storage.reserve(order.size());
 
   for (size_t idx : order) {
@@ -376,22 +431,63 @@ bool buildLaunchArgs(const MLSSbinary &bin, MlssApi &api, const NamedArg *named,
       return false;
     storage.push_back(*val);
   }
-  launch_args.reserve(storage.size());
-  for (ArgValue &arg : storage)
-    launch_args.push_back(arg.data());
   return true;
 }
 
-bool ensureModule(const MLSSbinary &bin, ModuleCacheEntry &entry) {
+bool serializeKernelArgs(const std::vector<ArgValue> &args,
+                         std::vector<uint8_t> &out) {
+  if (args.empty()) {
+    out.clear();
+    return true;
+  }
+
+  size_t total_size = args[0].size;
+  for (size_t idx = 1; idx < args.size(); ++idx) {
+    const size_t alignment = args[idx].size;
+    const size_t padding = (alignment - (total_size % alignment)) % alignment;
+    total_size += padding + args[idx].size;
+  }
+
+  out.resize(total_size);
+  size_t offset = args[0].size;
+  std::memcpy(out.data(), args[0].bytes, args[0].size);
+
+  for (size_t idx = 1; idx < args.size(); ++idx) {
+    const size_t alignment = args[idx].size;
+    const size_t padding = (alignment - (offset % alignment)) % alignment;
+    const size_t write_offset = offset + padding;
+    std::memcpy(out.data() + write_offset, args[idx].bytes, args[idx].size);
+    offset = write_offset + args[idx].size;
+  }
+  return true;
+}
+
+bool ensureModule(const MLSSbinary &bin, const char *runtime_gfx,
+                  ModuleCacheEntry &entry) {
   if (entry.module)
     return true;
-  if (!bin.m_binaries || bin.m_binarySize == 0 || !bin.m_pKernelName)
+  if (!bin.m_binaries || bin.m_binarySize == 0)
     return false;
 
-  entry.image.assign(static_cast<const uint8_t *>(bin.m_binaries),
-                     static_cast<const uint8_t *>(bin.m_binaries) +
-                         bin.m_binarySize);
-  std::strncpy(entry.kernel_name, bin.m_pKernelName,
+  if (!prepareModuleImage(bin, runtime_gfx, entry.image)) {
+    RUNTIME_DEBUG_LOG(
+        "[REAL] try_mlss_conv_forward: prepareModuleImage(%s -> %s) failed\n",
+        kArchiveGfx, runtime_gfx ? runtime_gfx : "?");
+    return false;
+  }
+  if (entry.image.size() >= 4) {
+    RUNTIME_DEBUG_LOG("[REAL] try_mlss_conv_forward: module image size=%zu "
+                      "magic=%02x%02x%02x%02x "
+                      "eflags@0x30=0x%02x kernel=%s runtime=%s\n",
+                      entry.image.size(), entry.image[0], entry.image[1],
+                      entry.image[2], entry.image[3],
+                      entry.image.size() > kElf64EflagsOffset
+                          ? entry.image[kElf64EflagsOffset]
+                          : 0,
+                      bin.m_pKernelName ? bin.m_pKernelName : "?",
+                      runtime_gfx ? runtime_gfx : "?");
+  }
+  std::strncpy(entry.kernel_name, kMainKernelName,
                sizeof(entry.kernel_name) - 1);
   entry.kernel_name[sizeof(entry.kernel_name) - 1] = '\0';
   entry.grid = bin.m_grid;
@@ -418,9 +514,9 @@ MLSSstatus setBool(MlssApi &api, MLSScontext *ctx, MLSSenum attr, MLSSbool v) {
   return api.setParameterByEnum(ctx, op_name, attr, &v);
 }
 
-bool configureMlssContext(MlssApi &api, MLSScontext *ctx, char *asic,
-                          uint32_t n, uint32_t c, uint32_t h, uint32_t w,
-                          uint32_t k, uint32_t r, uint32_t s, uint32_t out_h,
+bool configureMlssContext(MlssApi &api, MLSScontext *ctx, uint32_t n,
+                          uint32_t c, uint32_t h, uint32_t w, uint32_t k,
+                          uint32_t r, uint32_t s, uint32_t out_h,
                           uint32_t out_w, uint32_t pad_top, uint32_t pad_left,
                           uint32_t pad_bottom, uint32_t pad_right,
                           uint32_t stride_y, uint32_t stride_x,
@@ -441,11 +537,14 @@ bool configureMlssContext(MlssApi &api, MLSScontext *ctx, char *asic,
   const MLSSenum dtype = MLSS_FLOAT16;
   const MLSSenum precision = MLSS_PRECISION_FLOAT16_ADD_FLOAT32;
   const MLSSenum activation = MLSS_ACTIVATION_IDENTITY;
-  const MLSSbool cross_corr = static_cast<MLSSbool>(true);
+  // Match MIGraphX / convmxn_hip_module_validate sample: archived Winograd Base
+  // bins were built with crossCorrelation=false (convolution, not
+  // cross-correlation).
+  const MLSSbool cross_corr = static_cast<MLSSbool>(false);
   const MLSSbool backward = static_cast<MLSSbool>(false);
 
-  if (api.createContext(ctx, asic, const_cast<MLSSstring>(MLSS_CONV)) !=
-      MLSS_SUCCESS)
+  if (api.createContext(ctx, const_cast<MLSSstring>(kMlssQueryAsic),
+                        const_cast<MLSSstring>(MLSS_CONV)) != MLSS_SUCCESS)
     return false;
 
 #define SETU32(attr, val)                                                      \
@@ -556,8 +655,8 @@ int try_mlss_conv_forward(
   }
 
   MlssApi &api = mlssApi();
-  char asic[32];
-  detectMlssAsic(asic, sizeof(asic));
+  char runtime_gfx[32];
+  detectRuntimeGfx(runtime_gfx, sizeof(runtime_gfx));
   const bool has_bias = bias != nullptr;
   const uint32_t n = static_cast<uint32_t>(input_n);
   const uint32_t c = static_cast<uint32_t>(input_c);
@@ -572,7 +671,7 @@ int try_mlss_conv_forward(
 
   MLSScontext ctx = 0;
   if (!configureMlssContext(
-          api, &ctx, asic, n, c, h, w, k, r, s, out_h, out_w,
+          api, &ctx, n, c, h, w, k, r, s, out_h, out_w,
           static_cast<uint32_t>(pad_top), static_cast<uint32_t>(pad_left),
           static_cast<uint32_t>(pad_bottom), static_cast<uint32_t>(pad_right),
           static_cast<uint32_t>(stride_h), static_cast<uint32_t>(stride_w),
@@ -596,14 +695,23 @@ int try_mlss_conv_forward(
   }
 
   const MLSSbinary *bin = pickNonRelocBinary(bins, bin_count);
-  if (!bin)
+  if (!bin) {
+    for (MLSSsize i = 0; i < bin_count; ++i) {
+      RUNTIME_DEBUG_LOG("[REAL] try_mlss_conv_forward: bin[%zu] kernel=%s "
+                        "reloc=%d size=%zu\n",
+                        static_cast<size_t>(i),
+                        bins[i].m_pKernelName ? bins[i].m_pKernelName : "?",
+                        bins[i].m_isRelocatable ? 1 : 0,
+                        static_cast<size_t>(bins[i].m_binarySize));
+    }
     return fail("no non-relocatable MLSS binary");
+  }
 
   const ConvConfigKey key = ConvConfigKey::make(
       input_n, input_c, input_h, input_w, weights_k, kernel_h, kernel_w,
       output_h, output_w, stride_h, stride_w, pad_top, pad_left, pad_bottom,
       pad_right, dilation_h, dilation_w, group, has_bias ? 1 : 0, data_type,
-      asic);
+      runtime_gfx);
 
   ModuleCacheEntry module_entry;
   {
@@ -612,7 +720,7 @@ int try_mlss_conv_forward(
       module_entry = g_module_entry;
     else {
       module_entry = ModuleCacheEntry{};
-      if (!ensureModule(*bin, module_entry))
+      if (!ensureModule(*bin, runtime_gfx, module_entry))
         return fail("hipModuleLoadData failed");
       g_module_key = key;
       g_module_entry = module_entry;
@@ -713,24 +821,30 @@ int try_mlss_conv_forward(
   };
 
   std::vector<ArgValue> arg_storage;
-  std::vector<void *> launch_args;
-  if (!buildLaunchArgs(*bin, api, named_args,
-                       sizeof(named_args) / sizeof(named_args[0]), arg_storage,
-                       launch_args)) {
+  std::vector<uint8_t> kern_args;
+  if (!buildOrderedArgs(*bin, api, named_args,
+                        sizeof(named_args) / sizeof(named_args[0]),
+                        arg_storage) ||
+      !serializeKernelArgs(arg_storage, kern_args)) {
     (void)hipFree(sync_dev);
     (void)hipFree(acc_dev);
-    return fail("buildLaunchArgs failed");
+    return fail("buildOrderedArgs/serializeKernelArgs failed");
   }
 
   dim3 grid(module_entry.grid.m_x, module_entry.grid.m_y,
             module_entry.grid.m_z);
   dim3 block(256, 1, 1);
 
+  size_t kern_arg_size = kern_args.size();
+  void *extra[] = {HIP_LAUNCH_PARAM_BUFFER_POINTER, kern_args.data(),
+                   HIP_LAUNCH_PARAM_BUFFER_SIZE, &kern_arg_size,
+                   HIP_LAUNCH_PARAM_END};
+
   (void)hipGetLastError();
   hipError_t launch_err = hipModuleLaunchKernel(
       func, grid.x, grid.y, grid.z, block.x, block.y, block.z,
       static_cast<unsigned int>(bin->m_sharedMemInBytes),
-      static_cast<hipStream_t>(stream), launch_args.data(), nullptr);
+      static_cast<hipStream_t>(stream), nullptr, extra);
 
   if (launch_err != hipSuccess) {
     fprintf(stderr, "[REAL] try_mlss_conv_forward: hipModuleLaunchKernel: %s\n",
@@ -756,8 +870,9 @@ int try_mlss_conv_forward(
 
   (void)hipFree(sync_dev);
   (void)hipFree(acc_dev);
-  RUNTIME_DEBUG_LOG("[REAL] try_mlss_conv_forward: completed via MLSS (%s)\n",
-                    asic);
+  RUNTIME_DEBUG_LOG("[REAL] try_mlss_conv_forward: completed via MLSS "
+                    "(query=%s runtime=%s)\n",
+                    kMlssQueryAsic, runtime_gfx);
   return 0;
 }
 
