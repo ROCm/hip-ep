@@ -190,6 +190,13 @@ if(BUILD_HIP_TOOLS)
   # DLL target (hip-compiler.dll)
   add_subdirectory(dll)
 
+  # Test-only pass registrations are linked into hip-mlir-opt when the LIT
+  # suite is enabled (the default developer configuration). Production
+  # packaging must configure BUILD_HIP_UNIT_TESTS=OFF to omit these probes.
+  if(BUILD_HIP_UNIT_TESTS)
+    add_subdirectory(test/lib/Dialect/Hip)
+  endif()
+
   # Executable targets
   add_subdirectory(tools)
 
