@@ -60,6 +60,7 @@ thread_local ConcurrentScenario *activeConcurrentScenario = nullptr;
 
 extern "C" void hipdnn_ep_test_fail_next_loop_sync();
 extern "C" void hipdnn_ep_test_fail_next_loop_alloc();
+extern "C" void hipdnn_ep_test_fail_loop_state_allocation(int allocation);
 
 int body(RuntimeState *state, HipdnnEpLoopFrame *frame, void *, void *cond,
          void **current, void **, void **next) {
@@ -145,6 +146,22 @@ HipdnnEpLoopBankStats getStats(RuntimeState &state) {
   HipdnnEpLoopBankStats stats{};
   hipdnn_ep_test_get_loop_bank_stats(&state, &stats);
   return stats;
+}
+
+void testStateInitAllocationFailureIsAtomic() {
+  for (int allocation = 0; allocation < 2; ++allocation) {
+    RuntimeState state{};
+    hipdnn_ep_test_fail_loop_state_allocation(allocation);
+    CHECK(hipdnn_ep_loop_state_init(&state) != 0);
+    CHECK(state.loop_frames_mutex == nullptr);
+    CHECK(state.loop_bank_cache == nullptr);
+    CHECK(state.quarantined_loop_frames == nullptr);
+  }
+
+  RuntimeState state = makeState();
+  CHECK(state.loop_frames_mutex != nullptr);
+  CHECK(state.loop_bank_cache != nullptr);
+  cleanup(state);
 }
 
 std::vector<void *> runCarrierFrame(RuntimeState &state,
@@ -607,6 +624,7 @@ extern "C" int hipdnn_ep_state_set_error_flag(RuntimeState *) {
 }
 
 int main() {
+  testStateInitAllocationFailureIsAtomic();
   testZeroTripAliasesSeed();
   testZeroSizeDoesNotCheckoutBank();
   testSequentialGrowingFramesReuseTwoBlocks();

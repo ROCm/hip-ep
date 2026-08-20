@@ -54,6 +54,7 @@
 #include "runtime_state_internal.h"
 #include "runtime_types.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -61,6 +62,7 @@
 #include <limits>
 #include <mutex>
 #include <new>
+#include <type_traits>
 #include <utility>
 
 struct HipdnnEpLoopBankBlock {
@@ -118,8 +120,33 @@ struct LoopBankCache {
 #ifdef HIPDNN_EP_RUNTIME_TESTING
 bool failNextLoopSync = false;
 bool failNextLoopAlloc = false;
+int failNextLoopStateAllocation = -1;
 HipdnnEpLoopBankStats lastCleanedLoopBankStats{};
 #endif
+
+// Runtime bitcode cannot use std::nothrow allocation on Windows, while this C
+// entry point must report allocation failure as status. Use malloc-backed,
+// statically nonthrowing construction so partial initialization can roll back.
+template <typename T> T *createLoopStateObject(int allocationIndex) noexcept {
+  static_assert(std::is_nothrow_default_constructible_v<T>);
+  static_assert(std::is_nothrow_destructible_v<T>);
+  static_assert(alignof(T) <= alignof(std::max_align_t));
+#ifdef HIPDNN_EP_RUNTIME_TESTING
+  if (failNextLoopStateAllocation == allocationIndex) {
+    failNextLoopStateAllocation = -1;
+    return nullptr;
+  }
+#endif
+  void *storage = std::malloc(sizeof(T));
+  return storage ? ::new (storage) T() : nullptr;
+}
+
+template <typename T> void destroyLoopStateObject(T *object) noexcept {
+  if (!object)
+    return;
+  object->~T();
+  std::free(object);
+}
 
 hipError_t synchronizeLoopStream(hipStream_t stream) {
 #ifdef HIPDNN_EP_RUNTIME_TESTING
@@ -582,6 +609,9 @@ extern "C" void hipdnn_ep_test_fail_next_loop_sync() {
 extern "C" void hipdnn_ep_test_fail_next_loop_alloc() {
   failNextLoopAlloc = true;
 }
+extern "C" void hipdnn_ep_test_fail_loop_state_allocation(int allocation) {
+  failNextLoopStateAllocation = allocation;
+}
 extern "C" void
 hipdnn_ep_test_get_loop_bank_stats(RuntimeState *state,
                                    HipdnnEpLoopBankStats *stats) {
@@ -748,11 +778,12 @@ extern "C" int hipdnn_ep_loop_frame_destroy(RuntimeState *state,
 extern "C" int hipdnn_ep_loop_state_init(RuntimeState *state) {
   if (!state)
     return -1;
-  auto *mutex = new (std::nothrow) std::mutex();
-  auto *cache = new (std::nothrow) LoopBankCache();
-  if (!mutex || !cache) {
-    delete mutex;
-    delete cache;
+  auto *mutex = createLoopStateObject<std::mutex>(0);
+  if (!mutex)
+    return -1;
+  auto *cache = createLoopStateObject<LoopBankCache>(1);
+  if (!cache) {
+    destroyLoopStateObject(mutex);
     return -1;
   }
   const char *trace = std::getenv("HIPDNN_EP_LOOP_BANK_TRACE");
@@ -827,8 +858,8 @@ extern "C" void hipdnn_ep_loop_state_cleanup(RuntimeState *state) {
                                 cache->peak_bytes,   cache->quarantined_bytes};
 #endif
   }
-  delete cache;
+  destroyLoopStateObject(cache);
   state->loop_bank_cache = nullptr;
-  delete mutex;
+  destroyLoopStateObject(mutex);
   state->loop_frames_mutex = nullptr;
 }
