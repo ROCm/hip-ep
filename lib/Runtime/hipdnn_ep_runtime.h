@@ -441,6 +441,18 @@ int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state);
 // call this immediately after status-returning wrappers so generated inference
 // cannot silently continue with an unwritten output. Returns `status`.
 int hipdnn_ep_state_record_status(RuntimeState *state, int status);
+
+// Shared host-side guard for dynamic shape arithmetic. Returns 0 when valid.
+// On invalid input, records the recoverable runtime error flag and returns -1;
+// callers must skip all kernel/library dispatch.
+static inline int hipdnn_ep_validate_dynamic_shape(RuntimeState *state,
+                                                   int64_t shape_valid) {
+  if (shape_valid)
+    return 0;
+  if (state)
+    (void)hipdnn_ep_state_set_error_flag(state);
+  return -1;
+}
 // Mark the start of a new Compute() call. Invalidates per-forward-pass
 // runtime caches -- today: the GQA seqlens_k cache (see
 // runtime_state_internal.h for the canonical list).
@@ -748,11 +760,13 @@ int wrap_strided_copy(RuntimeState *state, void *dst_ptr, const void *src_ptr,
 // `data_type` is a HIPDNN_EP_DATATYPE_* enum value applied uniformly to the
 // input / weights / output tensor descriptors — MIOpen requires all three to
 // share the same element type. The host-side lowering derives this from the
-// hip.conv result memref's element type.
+// hip.conv result memref's element type. `shape_valid=0` records a recoverable
+// error and returns before descriptor creation or MIOpen dispatch.
 int wrap_miopenConvolutionForward(
     RuntimeState
         *state, // RuntimeState (opaque - extracts handle/stream internally)
     int32_t op_state_slot, // Op state slot
+    int64_t shape_valid,   // Dynamic output-shape validity
     const void *input,     // Input tensor GPU pointer
     int64_t input_n,       // Input batch size
     int64_t input_c,       // Input channels

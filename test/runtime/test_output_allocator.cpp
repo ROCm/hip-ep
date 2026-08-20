@@ -4,7 +4,8 @@
  */
 
 //===----------------------------------------------------------------------===//
-// GPU-free unit test for the output allocator runtime contract.
+// GPU-free unit test for output allocation and dynamic-shape failure
+// containment.
 //
 // Compiles lib/Runtime/output_allocator.cpp natively against the MOCK runtime
 // types (no HIP), constructs a RuntimeState on the stack, and exercises the two
@@ -189,6 +190,22 @@ void test_zero_byte_output_remains_valid() {
   CHECK(runtime_errors == 0);
 }
 
+void test_dynamic_shape_guard_records_error_and_blocks_dispatch() {
+  RuntimeState st = makeState();
+  runtime_errors = 0;
+
+  CHECK(hipdnn_ep_validate_dynamic_shape(&st, /*shape_valid=*/1) == 0);
+  CHECK(runtime_errors == 0);
+
+  // Wrappers return immediately on this non-zero status, before any
+  // kernel/library dispatch. The shared error is observed by the generated
+  // interface at the end of inference.
+  CHECK(hipdnn_ep_validate_dynamic_shape(&st, /*shape_valid=*/0) == -1);
+  CHECK(runtime_errors == 1);
+  CHECK(hipdnn_ep_validate_dynamic_shape(nullptr, /*shape_valid=*/0) == -1);
+  CHECK(runtime_errors == 1);
+}
+
 void test_safe_output_copy() {
   RuntimeState st = makeState();
   float source[6] = {0, 1, 2, 3, 4, 5};
@@ -227,6 +244,7 @@ int main() {
   test_alloc_null_state();
   test_invalid_logical_shapes_record_error();
   test_zero_byte_output_remains_valid();
+  test_dynamic_shape_guard_records_error_and_blocks_dispatch();
   test_safe_output_copy();
   if (g_failures == 0) {
     std::printf("output_allocator unit test: ALL PASS\n");

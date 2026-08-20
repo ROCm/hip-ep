@@ -343,13 +343,23 @@ cleanup:
 // for every row, producing NaN/Inf at fp16-max in the output and cascading
 // NaN through the rest of the network.
 int wrap_miopenConvolutionForward(
-    RuntimeState *state, int32_t op_state_slot, const void *input,
-    int64_t input_n, int64_t input_c, int64_t input_h, int64_t input_w,
-    const void *weights, int64_t weights_k, const void *bias, void *output,
-    int64_t output_h, int64_t output_w, int64_t kernel_h, int64_t kernel_w,
-    int64_t stride_h, int64_t stride_w, int64_t pad_top, int64_t pad_left,
-    int64_t pad_bottom, int64_t pad_right, int64_t dilation_h,
+    RuntimeState *state, int32_t op_state_slot, int64_t shape_valid,
+    const void *input, int64_t input_n, int64_t input_c, int64_t input_h,
+    int64_t input_w, const void *weights, int64_t weights_k, const void *bias,
+    void *output, int64_t output_h, int64_t output_w, int64_t kernel_h,
+    int64_t kernel_w, int64_t stride_h, int64_t stride_w, int64_t pad_top,
+    int64_t pad_left, int64_t pad_bottom, int64_t pad_right, int64_t dilation_h,
     int64_t dilation_w, int64_t group, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_miopenConvolutionForward\n");
+    return -1;
+  }
+  if (hipdnn_ep_validate_dynamic_shape(state, shape_valid) != 0) {
+    fprintf(stderr,
+            "[REAL] wrap_miopenConvolutionForward: invalid dynamic output "
+            "shape\n");
+    return -1;
+  }
   OP_PROFILE(
       "conv",
       [&] {
@@ -364,7 +374,7 @@ int wrap_miopenConvolutionForward(
         return std::string(b);
       },
       state);
-  if (!state || !input || !weights || !output) {
+  if (!input || !weights || !output) {
     fprintf(stderr, "Invalid arguments to wrap_miopenConvolutionForward\n");
     return -1;
   }

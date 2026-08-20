@@ -11,27 +11,25 @@ namespace {
 
 // ===== Convolution ops ================================
 
-// hip.conv(%ctx, %input, %weights, %bias, %output)
-//   -> wrap_miopenConvolutionForward(ctx, input, input_n, input_c, input_h,
-//                                     input_w, weights, weights_k, bias,
-//                                     output, output_h, output_w, kernel_h,
-//                                     kernel_w, stride_h, stride_w, pad_top,
-//                                     pad_left, pad_bottom, pad_right,
-//                                     dilation_h, dilation_w, group, data_type)
+// hip.conv(%ctx, %shape_valid, %input, %weights, %bias, %output)
+//   -> wrap_miopenConvolutionForward(
+//          ctx, op_state_slot, shape_valid, input, input_n, input_c, input_h,
+//          input_w, weights, weights_k, bias, output, output_h, output_w,
+//          kernel_h, kernel_w, stride_h, stride_w, pad_top, pad_left,
+//          pad_bottom, pad_right, dilation_h, dilation_w, group, data_type)
 //
 // Before:
-//   %out = hip.conv(%ctx) ins(%in, %w, %b :
-//                              memref<1x3x896x896xf16, 1>,
-//                              memref<1152x3x14x14xf16, 1>,
-//                              memref<1152xf16, 1>)
-//                          outs(%o : memref<1x1152x64x64xf16, 1>)
-//                          {kernel_shape=[14,14], strides=[14,14], ...}
+//   hip.conv(%ctx) valid(%shape_valid)
+//                  ins(%in, %w, %b : memref<1x3x896x896xf16, 1>,
+//                                        memref<1152x3x14x14xf16, 1>,
+//                                        memref<1152xf16, 1>)
+//                  outs(%o : memref<1x1152x64x64xf16, 1>)
+//                  {kernel_shape=[14,14], strides=[14,14], ...}
 // After:
-//   llvm.call @wrap_miopenConvolutionForward(%ctx, %in, 1, 3, 896, 896,
-//                                              %w, 1152, %b, %o, 64, 64,
-//                                              14, 14, 14, 14, 0, 0, 0, 0,
-//                                              1, 1, 1,
-//                                              /*data_type=*/1 /* f16 */)
+//   llvm.call @wrap_miopenConvolutionForward(
+//       %ctx, %op_state_slot, %shape_valid, %in, 1, 3, 896, 896, %w, 1152,
+//       %b, %o, 64, 64, 14, 14, 14, 14, 0, 0, 0, 0, 1, 1, 1,
+//       /*data_type=*/1 /* f16 */)
 //
 // The `data_type` value is derived from the OUTPUT memref's element type and
 // applied uniformly to all three MIOpen tensor descriptors. MIOpen requires
@@ -58,6 +56,8 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
     // int wrap_miopenConvolutionForward(
     //     RuntimeState* state,    // Opaque pointer - extracts handle/stream
     //                             // internally
+    //     int32_t op_state_slot,  // Per-operation descriptor/cache state
+    //     int64_t shape_valid,    // Dynamic output-shape validity
     //     void* input,            // Input tensor data pointer
     //     int64_t input_n,        // Input batch size
     //     int64_t input_c,        // Input channels
@@ -93,6 +93,8 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
 
     // Extract memref pointers (aligned pointers from descriptors)
     Value statePtr = adaptor.getCtx(); // RuntimeState* (opaque)
+    Value shapeValid =
+        LLVM::ZExtOp::create(rewriter, loc, i64Type, adaptor.getShapeValid());
     Value inputPtr =
         extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
     Value weightsPtr =
@@ -182,9 +184,10 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
     Value dataType = createI64Const(dataTypeEnum);
 
     // Build function signature
-    SmallVector<Type, 25> paramTypes = {
+    SmallVector<Type, 26> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
+        i64Type, // shape_valid
         ptrType, // input
         i64Type, // input_n
         i64Type, // input_c
@@ -218,13 +221,12 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
 
     // Build argument list matching the signature
     auto opStateSlot = getOpStateSlotValue(op, rewriter, loc);
-    SmallVector<Value, 25> args = {
-        statePtr,  opStateSlot, inputPtr,   inputN,   inputC,
-        inputH,    inputW,      weightsPtr, weightsK, biasPtr,
-        outputPtr, outputH,     outputW,    kernelH,  kernelW,
-        strideH,   strideW,     padTop,     padLeft,  padBottom,
-        padRight,  dilationH,   dilationW,  groupVal, dataType,
-    };
+    SmallVector<Value, 26> args = {
+        statePtr, opStateSlot, shapeValid, inputPtr, inputN,    inputC,
+        inputH,   inputW,      weightsPtr, weightsK, biasPtr,   outputPtr,
+        outputH,  outputW,     kernelH,    kernelW,  strideH,   strideW,
+        padTop,   padLeft,     padBottom,  padRight, dilationH, dilationW,
+        groupVal, dataType};
 
     // Call the runtime function
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);

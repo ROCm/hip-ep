@@ -189,6 +189,49 @@ reifyGemmResultShape(OpBuilder &b, Location loc, Value A, Value B,
                      Value optionalC, int64_t transA, int64_t transB,
                      function_ref<InFlightDiagnostic()> emitError);
 
+/// Compute the ONNX forward-convolution result shape for rank-3 NCL or rank-4
+/// NCHW operands. The result is `{input[0], weights[0], spatial...}` and each
+/// spatial extent follows the signed-floor window formula.
+///
+/// An empty `kernelShape` means the ONNX attribute was omitted. In that case
+/// the kernel is derived from the static spatial dimensions of `weightShape`;
+/// dynamic weight spatial dimensions require an explicit kernel.
+FailureOr<SmallVector<int64_t>>
+inferConvShape(ArrayRef<int64_t> inputShape, ArrayRef<int64_t> weightShape,
+               ArrayRef<int64_t> kernelShape, ArrayRef<int64_t> strides,
+               ArrayRef<int64_t> pads, ArrayRef<int64_t> dilations,
+               int64_t group, function_ref<InFlightDiagnostic()> emitError);
+
+/// Mixed-shape form of `inferConvShape`. Validates through the static helper
+/// before materializing any dimension arithmetic. Dynamic spatial extents are
+/// safely narrowed from signed i128; `runtimeValid`, when requested, receives
+/// the combined range check consumed by `hip.conv`.
+FailureOr<SmallVector<OpFoldResult>>
+reifyConvResultShape(OpBuilder &b, Location loc, Value input, Value weights,
+                     ArrayRef<int64_t> kernelShape, ArrayRef<int64_t> strides,
+                     ArrayRef<int64_t> pads, ArrayRef<int64_t> dilations,
+                     int64_t group,
+                     function_ref<InFlightDiagnostic()> emitError,
+                     Value *runtimeValid = nullptr);
+
+/// Compute the supported rank-4 NCHW ONNX ConvTranspose result shape.
+FailureOr<SmallVector<int64_t>> inferConvTransposeShape(
+    ArrayRef<int64_t> inputShape, ArrayRef<int64_t> weightShape,
+    ArrayRef<int64_t> kernelShape, ArrayRef<int64_t> strides,
+    ArrayRef<int64_t> pads, ArrayRef<int64_t> dilations,
+    ArrayRef<int64_t> outputPadding, int64_t group,
+    function_ref<InFlightDiagnostic()> emitError);
+
+/// Mixed-shape form of `inferConvTransposeShape`. Validates through the static
+/// helper before materializing any dimension arithmetic.
+FailureOr<SmallVector<OpFoldResult>>
+reifyConvTransposeResultShape(OpBuilder &b, Location loc, Value input,
+                              Value weights, ArrayRef<int64_t> kernelShape,
+                              ArrayRef<int64_t> strides, ArrayRef<int64_t> pads,
+                              ArrayRef<int64_t> dilations,
+                              ArrayRef<int64_t> outputPadding, int64_t group,
+                              function_ref<InFlightDiagnostic()> emitError);
+
 /// Reify the result shape of a transpose op as `output[i] = input[perm[i]]`.
 /// `perm` must be a permutation of `[0, rank-1)` and have the same length
 /// as `input`'s rank.
