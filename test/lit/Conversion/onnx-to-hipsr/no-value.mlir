@@ -7,7 +7,7 @@
 // placeholders left dead afterwards.
 //===----------------------------------------------------------------------===//
 
-// RUN: hip-mlir-opt --convert-onnx-to-hipsr --split-input-file %s | FileCheck %s
+// RUN: hip-mlir-opt --onnx-dialect=modeled --convert-onnx-to-hipsr --split-input-file %s | FileCheck %s
 
 // An unused placeholder is erased. The return directly after the signature is
 // what proves it.

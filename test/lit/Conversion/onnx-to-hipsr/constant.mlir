@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// RUN: rm -rf %t && mkdir -p %t && cd %t && echo 0123456789abcdef > w.bin && hip-mlir-opt --convert-onnx-to-hipsr --split-input-file --mlir-elide-resource-strings-if-larger=0 %s | FileCheck %s
+// RUN: rm -rf %t && mkdir -p %t && cd %t && echo 0123456789abcdef > w.bin && hip-mlir-opt --onnx-dialect=modeled --convert-onnx-to-hipsr --split-input-file --mlir-elide-resource-strings-if-larger=0 %s | FileCheck %s
 
 // CHECK-LABEL: func.func @scalar_const
 func.func @scalar_const() -> tensor<f32> {

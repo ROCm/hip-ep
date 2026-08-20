@@ -10,27 +10,27 @@
 // The generated IR calls `wrap_group_query_attention` (39-arg ABI, unchanged so
 // the HipToLLVM lowering keeps resolving). Path selection:
 //
-//   * Common fp16 causal GQA (head_dim in {64,128}, templated decode geometry)
-//     -> optimized fused custom kernels:
+//   * Common fp16 causal GQA (head_dim in {64,128,256}, templated decode
+//     geometry) -> optimized fused custom kernels:
 //       prefill (sq > 1): [split] -> [rope] -> kv-cache update ->
-//                         hip_gqa_flash_prefill_v3
+//                         hip_gqa_flash_prefill
 //       decode  (sq == 1): [split] -> [rope] -> kv-cache update ->
-//                         hip_gqa_flash_decode_v2
-//     Attention sinks / smooth softmax are applied here too: by flash decode
-//     for any supported geometry, and by flash prefill at head_dim == 64 (the
-//     v5 kernel). Prefill at head_dim 128/256 with a sink still goes
-//     decomposed. Sliding windows are applied by flash prefill at
-//     head_dim == 64; windowed decode still goes decomposed.
+//                         hip_gqa_flash_decode
+//     Decode additionally covers the sliding window and the head sink /
+//     smooth softmax: hip_gqa_flash_decode clamps kv_lo to
+//     max(0, total_seq - window) in the split kernel and folds the sink into
+//     the reduce denominator, and it autotunes (impl, split-count) per shape --
+//     keying sliding layers on the window rather than the full context. Prefill
+//     applies sinks and sliding windows through hip_gqa_flash_prefill for
+//     head_dim == 64; unsupported prefill geometries route to decomposed.
 //
 //   * Everything else the fused kernels do not implement (fp32, no_causal /
-//     bidirectional, a window on decode or on 128/256-wide prefill, a sink on
-//     128/256-wide prefill, additive attention bias, other head_dim,
-//     untemplated decode geometry) -> the feature-complete legacy decomposed
-//     hipBLASLt pipeline gqa_forward_hipblaslt below. This is a verbatim port
-//     of the proven gqa_back.cpp strategy (the read-only backup stays out of
-//     the build); its fast decode kernels (hip_gqa_fused_decode /
-//     hip_gqa_flash_decode) are folded into gqa_kernel.hip so the windowed
-//     decode case keeps the legacy kernel's performance.
+//     bidirectional, additive attention bias, other head_dim, untemplated
+//     decode geometry) -> the feature-complete legacy decomposed hipBLASLt
+//     pipeline gqa_forward_hipblaslt below. This is a verbatim port of the
+//     proven gqa_back.cpp strategy (the read-only backup stays out of the
+//     build); it keeps hip_gqa_fused_decode for decode geometries the v2
+//     kernels do not template.
 //
 //   * The additive attention bias (onnx.Attention attn_mask) IS supported, but
 //     only by the decomposed path (Step 8b adds it; a causal op then masks the
@@ -73,11 +73,11 @@
 #define HIPBLAS_CHECK(cmd) HIPBLAS_CHECK_GOTO(cmd, cleanup)
 
 //===----------------------------------------------------------------------===//
-// Legacy fast-path decode kernels (folded into gqa_kernel.hip as legacy_*
-// device kernels) back the decomposed hipBLASLt fallback below. Their entries
-// hip_gqa_fused_decode / hip_gqa_flash_decode are declared (and HIP_KERNEL_API
-// exported) in hip_custom_kernels.h, so the EP resolves them out of
-// custom_kernels_<arch> at JIT link / native import.
+// Legacy fast-path decode kernel (folded into gqa_kernel.hip as a legacy_*
+// device kernel) backs the decomposed hipBLASLt fallback below. Its entry
+// hip_gqa_fused_decode is declared (and HIP_KERNEL_API exported) in
+// hip_custom_kernels.h, so the EP resolves it out of custom_kernels_<arch> at
+// JIT link / native import.
 //===----------------------------------------------------------------------===//
 
 //===----------------------------------------------------------------------===//
@@ -386,7 +386,7 @@ static int gqa_forward_fused(
     if (past_len < 0)
       past_len = 0;
 
-    // Decode has a SINGLE path: hip_gqa_flash_decode_v2. It selects WMMA (D64/
+    // Decode has a SINGLE path: hip_gqa_flash_decode. It selects WMMA (D64/
     // HpG>=8) vs scalar internally and serves GQA and MHA (HpG==1) alike, by
     // GEOMETRY only -- never by KV depth. There is no legacy fused fallback;
     // geometries the kernel cannot template are rejected here.
@@ -471,28 +471,26 @@ static int gqa_forward_fused(
       // int8 halves the DRAM traffic). One entry serves every format --
       // kv_dtype selects the code path inside the kernel; scales feed dequant.
       //
-      // local_window_size is pinned to 0 rather than forwarded from the
-      // parameter: window_ok in wrap_group_query_attention sends every windowed
-      // decode to the decomposed pipeline, so the parameter is always <= 0 here
-      // and forwarding it would only look like the windowed decode path is
-      // supported. This kernel does clamp kv_lo, so enabling it is roughly this
-      // one argument -- but nothing in the harness verifies it yet, so it stays
-      // an explicit 0 until something does.
-      int drc = hip_gqa_flash_decode_v2(
+      // Decode structurally clamps kv_lo to the requested local window. This
+      // keeps sliding layers on the fused autotuned path rather than treating
+      // the window as a decomposed score-mask operation.
+      int drc = hip_gqa_flash_decode(
           stream, qSrc, present_key, present_value, output, partials,
           static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
           static_cast<int>(d), static_cast<int>(skv),
           static_cast<int>(present_seq), kFlashDecodeMaxSplits, scale,
-          seqlens_k_ptr, /*local_window_size=*/0, head_sink,
-          use_smooth_softmax ? 1 : 0, kv_dtype_abi(kv_format),
+          seqlens_k_ptr, static_cast<int>(local_window_size), head_sink,
+          static_cast<int>(use_smooth_softmax), kv_dtype_abi(kv_format),
           kv_quantized ? k_scale : nullptr, kv_quantized ? v_scale : nullptr);
       if (drc != 0)
         return -1;
       RUNTIME_DEBUG_LOG(
           "[REAL] flash GQA decode (%s): B=%lld skv=%lld H=%lld G=%lld "
-          "d=%lld max_splits=%d\n",
+          "d=%lld max_splits=%d window=%lld sink=%d smooth=%d\n",
           kv_quantized ? "quant" : "fp16", (long long)B, (long long)skv,
-          (long long)H, (long long)G, (long long)d, kFlashDecodeMaxSplits);
+          (long long)H, (long long)G, (long long)d, kFlashDecodeMaxSplits,
+          (long long)local_window_size, static_cast<int>(head_sink != nullptr),
+          static_cast<int>(use_smooth_softmax));
     }
     return 0;
   }
@@ -662,7 +660,7 @@ static int gqa_forward_fused(
   // kernel TU (gqa_kernel.hip). v3 carries the sink and the window; it returns
   // -1 rather than dropping either when the kernel for this d cannot apply it,
   // and the caller then falls back to the decomposed path.
-  int fp_rc = hip_gqa_flash_prefill_v3(
+  int fp_rc = hip_gqa_flash_prefill(
       stream, qSrc, kAttn, vAttn, output, static_cast<int>(B),
       static_cast<int>(H), static_cast<int>(G), static_cast<int>(sq),
       static_cast<int>(total_seq), static_cast<int>(d), attn_max_seq,
@@ -749,26 +747,6 @@ static bool gqa_fused_decode_disabled() {
   return disabled;
 }
 
-// Env-var gate for the FA-2 split-K flash_decode path (legacy decode kernel).
-// HIPDNN_EP_GQA_FLASH_DECODE=0 disables it (falls back to
-// hip_gqa_fused_decode). flash_decode wins at high KV depth where the existing
-// one-block-per-head kernel is bandwidth-bound; below the threshold
-// (gqa_flash_decode_min_skv) its 2-kernel overhead may not pay back, so we keep
-// the existing fused_decode for short sequences.
-static bool gqa_flash_decode_enabled() {
-  static const bool env_enabled = [] {
-    const char *v = std::getenv("HIPDNN_EP_GQA_FLASH_DECODE");
-    return !v || std::strcmp(v, "0") != 0;
-  }();
-  // The legacy flash_decode host launcher sizes the block as HPG * WAVE_SIZE
-  // with WAVE_SIZE fixed to the wave32 host constant, while the device kernel's
-  // __launch_bounds__ and per-lane element mapping (EPT = D / WAVE_SIZE)
-  // resolve to the wave64 device constant on CDNA (MI350). The two disagree on
-  // wave64, so disable flash_decode there and let the dispatch fall back to the
-  // wave-agnostic fused_decode kernel -- correct on both wave sizes.
-  return env_enabled && !hipdnn_device_is_wave64();
-}
-
 // Smart-dispatch threshold for the legacy GQA decode (sq == 1). When total_seq
 // exceeds this value, dispatch routes through the decomposed hipBLASLt pipeline
 // instead of the fused custom kernel hip_gqa_fused_decode. The fused kernel
@@ -794,46 +772,6 @@ static int gqa_fused_decode_max_t() {
     return static_cast<int>(parsed);
   }();
   return max_t;
-}
-
-// Depth threshold for legacy flash_decode eligibility. flash_decode wins at
-// high KV depth; below this (default skv >= 256) the existing one-block-per-
-// head fused_decode amortizes its single-kernel cost better than flash_decode's
-// (split + reduce) launches. Set HIPDNN_EP_GQA_FLASH_DECODE_MIN_SKV=N to
-// override.
-static int gqa_flash_decode_min_skv() {
-  static const int threshold = [] {
-    const char *v = std::getenv("HIPDNN_EP_GQA_FLASH_DECODE_MIN_SKV");
-    if (!v || !*v)
-      return 256;
-    int n = std::atoi(v);
-    return n > 0 ? n : 256;
-  }();
-  return threshold;
-}
-
-// FA-2 split-K geometry (must match the legacy hip_gqa_flash_decode launcher).
-static constexpr int kFlashDecodeKSplits = 8;
-
-// Geometry gate for the legacy flash_decode kernel. The launcher has template
-// instantiations for:
-//   - HPG=4, d in {64, 128}  (Llama-3.x family)
-//   - HPG=8, d == 64         (gpt-oss-20b)
-// Any other (HPG, d) combination must fall back to fused_decode / decomposed.
-// Distinct from flash_decode_geometry_ok above, which gates the optimized _v2
-// decode kernel (HpG in {1,2,3,4,5,8,16}, d in {64,128,256}).
-static inline bool legacy_flash_decode_geometry_ok(int64_t H, int64_t G,
-                                                   int64_t d) {
-  if (G <= 0)
-    return false;
-  int64_t hpg = H / G;
-  if (hpg * G != H)
-    return false;
-  if (hpg == 4 && (d == 64 || d == 128))
-    return true;
-  if (hpg == 8 && d == 64)
-    return true;
-  return false;
 }
 
 //===----------------------------------------------------------------------===//
@@ -1114,51 +1052,34 @@ static int gqa_forward_hipblaslt(
   // serializes over the time dimension (cross-wave reduction tree on the
   // critical path of every iteration). For total_seq above
   // gqa_fused_decode_max_t() the GEMM-based decomposed path wins (~12x at
-  // total_seq=2048 on Strix Halo). The newer flash_decode kernel
-  // (hip_gqa_flash_decode) fixes that scaling via FA-2 split-K, so when it is
-  // eligible we keep the fused branch active even at long total_seq --
-  // flash_decode is exactly what the smart-dispatch threshold was working
-  // around. When we can't read total_seq (B>1, no seqlens_k, or D2H failure)
-  // default to permitting fused -- preserves bit-for-bit behaviour on workloads
-  // that pass the predicate today.
-  bool flash_decode_eligible = gqa_flash_decode_enabled() &&
-                               legacy_flash_decode_geometry_ok(H, G, d) &&
-                               skv >= gqa_flash_decode_min_skv();
+  // total_seq=2048 on Strix Halo), so route long sequences there. When we can't
+  // read total_seq (B>1, no seqlens_k, or D2H failure) default to permitting
+  // fused -- preserves behaviour on workloads that pass the predicate today.
   bool size_ok_for_fused =
       (total_seq_pre < 0) ||
-      (total_seq_pre <= static_cast<int64_t>(gqa_fused_decode_max_t())) ||
-      flash_decode_eligible;
+      (total_seq_pre <= static_cast<int64_t>(gqa_fused_decode_max_t()));
 
-  // ONNX uses local_window_size=-1 for "no sliding window"; <= 0 means
-  // disabled. The original hip_gqa_fused_decode kernel does NOT support sliding
-  // window, but hip_gqa_flash_decode does (it clamps kv_lo to
-  // max(0, eff_skv - window) when local_window_size > 0). So we admit the fused
-  // branch with sliding window only when flash_decode is eligible -- the
-  // (use_flash_decode) check inside the branch then routes us correctly. This
-  // is what unlocks the gpt-oss-20b sliding-attention layers (12 of 24) at long
-  // context: they were previously rejected here and fell through to the
-  // decomposed path, which reads the full skv KV cache instead of just the
-  // 128-element window.
-  bool sliding_ok_for_fused = (local_window_size <= 0) || flash_decode_eligible;
-  // head_sink / smooth_softmax: legacy hip_gqa_fused_decode does not support
-  // these, but hip_gqa_flash_decode now folds the sink term into the reduce
-  // kernel's denominator. Admit them only when flash_decode is the eligible
-  // dispatch -- the (use_flash_decode) check inside the branch then routes
-  // correctly. This is what unlocks gpt-oss-20b decode (all 24 GQA layers pass
-  // head_sink, which previously forced fall-through to the decomposed hipBLASLt
-  // path that scales linearly with skv).
-  bool sink_ok_for_fused =
-      (!head_sink && !use_smooth_softmax) || flash_decode_eligible;
+  // hip_gqa_fused_decode implements neither the sliding window nor the head
+  // sink / smooth softmax, so a windowed or sink decode cannot use it -- gate
+  // it out here and let the decomposed pipeline below own those cases.
+  //
+  // NOTE: fp16 causal decode is the domain of hip_gqa_flash_decode, which
+  // wrap_group_query_attention keeps on the fused path (it implements window +
+  // sink and autotunes its split count). This function only sees the decodes v2
+  // rejects for other reasons (fp32, no_causal, attention_bias, or a geometry
+  // v2 does not template); the fused_decode branch below serves just the last
+  // of those, and only when there is no window / sink.
+  bool sliding_ok_for_fused = (local_window_size <= 0);
+  bool sink_ok_for_fused = (!head_sink && !use_smooth_softmax);
   // Packed-QKV inputs (gpt-oss-20b style: query is the [B,sq,(H+2G)*d]
   // qkv_proj output, key and value are null) are supported by the fused branch
   // by routing through hip_gqa_split_qkv into workspace before rope and
-  // KV-append. Only flash_decode is exercised by these models in practice
-  // (HPG=8, d=64), but split is correct for the legacy fused_decode branch too.
+  // KV-append.
   bool fused_packed_qkv = (!key && !value);
   bool kv_inputs_ok = (key && value) || fused_packed_qkv;
-  // The fused (hip_gqa_fused_decode) and flash (hip_gqa_flash_decode) decode
-  // kernels are __half-only (their Q/K/V/O pointers are `const __half*`). They
-  // are correct for the fp16 causal decode of Llama / gpt-oss (elem_size==2).
+  // hip_gqa_fused_decode is __half-only (its Q/K/V/O pointers are
+  // `const __half*`). It is correct for the fp16 causal decode of Llama /
+  // gpt-oss (elem_size==2).
   // The fp32 GQA path (Whisper decoder self-attn, elem_size==4) must NOT reach
   // them: feeding fp32 buffers to a __half kernel reinterprets the bytes and
   // produces garbage. The decomposed hipBLASLt pipeline below IS fp32-capable,
@@ -1166,8 +1087,8 @@ static int gqa_forward_hipblaslt(
   // no_causal exemption (prefill sq>1 fp32 already used decomposed).
   bool fused_fp16 = (element_size_bytes == 2);
   // no_causal (Whisper encoder / cross-attn) always takes the decomposed
-  // hipBLASLt path. The fused/flash decode kernels are decode-only (sq==1) and
-  // read seqlens_k with the +1 PAST-token convention, plus assume the KV cache
+  // hipBLASLt path. hip_gqa_fused_decode is decode-only (sq==1) and reads
+  // seqlens_k with the +1 PAST-token convention, plus assumes the KV cache
   // is appended in BSHD->BNSD layout from `sq` new tokens. Neither holds for
   // bidirectional no-past attention where `key` is the full Skv-length KV
   // (cross-attn ships it as rank-4 BNSD with Skv != sq). Routing no_causal to
@@ -1179,7 +1100,7 @@ static int gqa_forward_hipblaslt(
        size_ok_for_fused);
 
   //===--------------------------------------------------------------------===//
-  // Fused / flash GQA decode path (sq == 1, d in {64,128,256}, KV cache on).
+  // Fused GQA decode fallback (sq == 1, d in {64,128,256}, KV cache on).
   //
   // Collapses Steps 3 and 6-11 of the decomposed pipeline into a single kernel
   // that reads Q in BSHD and KV from the BNSD cache, producing O in BSHD.
@@ -1251,36 +1172,19 @@ static int gqa_forward_hipblaslt(
     if (past_len < 0)
       past_len = 0;
 
-    // Flash-decode path is taken when:
-    //   - depth threshold met (default skv >= 256)
-    //   - geometry matches a kernel template instantiation
-    //     (HPG=4 with d in {64,128}, or HPG=8 with d=64 for gpt-oss-20b)
-    //   - not disabled via env var
-    // Below threshold the existing one-block-per-head fused_decode is faster
-    // because its single-kernel cost amortizes better than flash_decode's
-    // (split + reduce) launches and per-call workspace setup.
-    const bool use_flash_decode = gqa_flash_decode_enabled() &&
-                                  legacy_flash_decode_geometry_ok(H, G, d) &&
-                                  skv >= gqa_flash_decode_min_skv();
-
-    // Sum split + rope-temp + flash-partials in a single ensure_workspace call.
-    // ensure_workspace does NOT preserve data on grow (free + malloc), so one
-    // combined request avoids clobbering earlier writes; the offsets below
-    // match the call order so each step's input region stays live while
-    // consumed. Region order: split (Q/K/V), then rope-temp (Q/K), then
-    // flash-partials -- each present only when its feature is active.
+    // Sum split + rope-temp in a single ensure_workspace call. ensure_workspace
+    // does NOT preserve data on grow (free + malloc), so one combined request
+    // avoids clobbering earlier writes; the offsets below match the call order
+    // so each step's input region stays live while consumed. Region order:
+    // split (Q/K/V), then rope-temp (Q/K) -- each present only when its feature
+    // is active. hip_gqa_fused_decode needs no scratch of its own.
     const size_t Q_full_bytes = static_cast<size_t>(B) * sq * H * d * elem_sz;
     const size_t K_full_bytes = static_cast<size_t>(B) * sq * G * d * elem_sz;
     const size_t split_bytes =
         fused_packed_qkv ? (Q_full_bytes + K_full_bytes + K_full_bytes) : 0;
     const size_t rope_temp_bytes =
         need_rope ? (Q_full_bytes + K_full_bytes) : 0;
-    const size_t flash_partials_bytes =
-        use_flash_decode ? static_cast<size_t>(B) * H * kFlashDecodeKSplits *
-                               (d + 2) * sizeof(float)
-                         : 0;
-    const size_t total_ws_bytes =
-        split_bytes + rope_temp_bytes + flash_partials_bytes;
+    const size_t total_ws_bytes = split_bytes + rope_temp_bytes;
 
     if (total_ws_bytes > 0) {
       if (hipdnn_ep_state_ensure_workspace(state, total_ws_bytes) != 0)
@@ -1289,7 +1193,6 @@ static int gqa_forward_hipblaslt(
 
     const size_t off_split = 0;
     const size_t off_rope = off_split + split_bytes;
-    const size_t off_partials = off_rope + rope_temp_bytes;
 
     // ---- Step 0: Split packed QKV (if needed) ----
     if (fused_packed_qkv) {
@@ -1341,57 +1244,36 @@ static int gqa_forward_hipblaslt(
             seqlens_k_ptr, static_cast<int>(elem_sz)) != 0)
       return -1;
 
-    if (use_flash_decode) {
-      char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
-      void *partials = ws + off_partials;
-      if (hip_gqa_flash_decode(
-              stream, qSrc, present_key, present_value, output, partials,
-              static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
-              static_cast<int>(d), static_cast<int>(present_seq),
-              kFlashDecodeKSplits, scale, seqlens_k_ptr,
-              static_cast<int>(local_window_size), head_sink,
-              static_cast<int>(use_smooth_softmax)) != 0)
-        return -1;
-      RUNTIME_DEBUG_LOG(
-          "[REAL] flash GQA decode (legacy): B=%lld sq=%lld skv=%lld H=%lld "
-          "G=%lld d=%lld K_SPLITS=%d window=%lld sink=%d smooth=%d\n",
-          (long long)B, (long long)sq, (long long)skv, (long long)H,
-          (long long)G, (long long)d, kFlashDecodeKSplits,
-          (long long)local_window_size, static_cast<int>(head_sink != nullptr),
-          static_cast<int>(use_smooth_softmax));
-    } else {
-      // The original hip_gqa_fused_decode kernel does not implement sliding
-      // window or head_sink/smooth_softmax. The predicate above only admits
-      // those features when flash_decode is eligible, so this branch should
-      // never see them -- assert defensively rather than silently producing
-      // wrong results.
-      if (local_window_size > 0) {
-        fprintf(stderr,
-                "gqa_forward_hipblaslt: BUG -- fused_decode (non-flash) cannot "
-                "handle local_window_size=%lld\n",
-                (long long)local_window_size);
-        return -1;
-      }
-      if (head_sink != nullptr || use_smooth_softmax) {
-        fprintf(stderr,
-                "gqa_forward_hipblaslt: BUG -- fused_decode (non-flash) cannot "
-                "handle head_sink=%p smooth=%d\n",
-                head_sink, static_cast<int>(use_smooth_softmax));
-        return -1;
-      }
-      // skv is passed as a fallback; kernel reads seqlens_k[b]+1 when
-      // available.
-      if (hip_gqa_fused_decode(
-              stream, qSrc, present_key, present_value, output,
-              static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
-              static_cast<int>(d), static_cast<int>(skv),
-              static_cast<int>(present_seq), scale, seqlens_k_ptr) != 0)
-        return -1;
-      RUNTIME_DEBUG_LOG("[REAL] fused GQA decode (legacy): B=%lld sq=%lld "
-                        "skv=%lld H=%lld G=%lld d=%lld\n",
-                        (long long)B, (long long)sq, (long long)skv,
-                        (long long)H, (long long)G, (long long)d);
+    // hip_gqa_flash_decode owns every geometry it templates; this fallback
+    // only runs for the odd geometries it does not, and fused_predicate already
+    // gated out window / sink (sliding_ok_for_fused / sink_ok_for_fused above).
+    // Keep the defensive asserts so a future predicate change cannot silently
+    // feed an unsupported feature to the __half-only kernel.
+    if (local_window_size > 0) {
+      fprintf(stderr,
+              "gqa_forward_hipblaslt: BUG -- hip_gqa_fused_decode cannot "
+              "handle local_window_size=%lld\n",
+              (long long)local_window_size);
+      return -1;
     }
+    if (head_sink != nullptr || use_smooth_softmax) {
+      fprintf(stderr,
+              "gqa_forward_hipblaslt: BUG -- hip_gqa_fused_decode cannot "
+              "handle head_sink=%p smooth=%d\n",
+              head_sink, static_cast<int>(use_smooth_softmax));
+      return -1;
+    }
+    // skv is passed as a fallback; kernel reads seqlens_k[b]+1 when available.
+    if (hip_gqa_fused_decode(
+            stream, qSrc, present_key, present_value, output,
+            static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
+            static_cast<int>(d), static_cast<int>(skv),
+            static_cast<int>(present_seq), scale, seqlens_k_ptr) != 0)
+      return -1;
+    RUNTIME_DEBUG_LOG("[REAL] fused GQA decode (legacy fallback): B=%lld "
+                      "sq=%lld skv=%lld H=%lld G=%lld d=%lld\n",
+                      (long long)B, (long long)sq, (long long)skv, (long long)H,
+                      (long long)G, (long long)d);
     return 0;
   }
 
@@ -2039,17 +1921,11 @@ int wrap_group_query_attention(
   (void)kv_cache_bit_width; // validated above for the int8 KV path
 
   //===------------------------------------------------------------------===//
-  // Path selection. The optimized fused/flash kernels are fp16 causal GQA
-  // with head_dim in {64,128} and a templated decode geometry (HpG in
-  // {1,2,3,4,8,16}), and now also cover attention sinks (decode always,
-  // prefill at head_dim == 64) and sliding windows (prefill at head_dim == 64).
-  // Anything they do not implement -- fp32, no_causal / bidirectional, a window
-  // on decode or on 128/256-wide prefill, a sink on 128/256-wide prefill, other
-  // head_dim, or an untemplated decode geometry -- is handled by the legacy
-  // decomposed hipBLASLt pipeline (gqa_forward_hipblaslt above), which is the
-  // verbatim-ported gqa_back.cpp strategy: feature-complete, and keeps the
-  // legacy fast decode kernel for the windowed decode case so that path is not
-  // slower than the original.
+  // Path selection. The optimized fused/flash kernels are fp16 causal GQA with
+  // head_dim in {64,128,256} and a templated decode geometry (HpG in
+  // {1,2,3,4,5,8,16}). Decode supports sink/window for every templated
+  // geometry; prefill v3 supports them at head_dim == 64. Everything else uses
+  // the feature-complete decomposed hipBLASLt fallback.
   //===------------------------------------------------------------------===//
   const bool is_decode = (seq_len_q == 1);
   const bool decode_geometry_ok =
@@ -2069,19 +1945,13 @@ int wrap_group_query_attention(
   // explicitly 1, matching ORT (gqa_attention_base.h:
   // use_smooth_softmax_ || head_sink != nullptr).
   const bool has_smooth_softmax = (head_sink != nullptr || smooth_softmax == 1);
-  // Sinks on the fused path: the flash decode kernel applies them for any
-  // supported geometry, and flash prefill applies them at head_dim == 64 (the
-  // v5 kernel). Prefill at head_dim 128/256 has no sink support yet, so those
-  // shapes must keep routing to the decomposed pipeline -- admitting them here
-  // would make hip_gqa_flash_prefill_v3 return -1 and fail the op outright
-  // instead of falling back.
+  // Sink/window are first-class decode features. Prefill v3 implements both at
+  // D64; D128/D256 prefill must fall back rather than silently drop them.
   const bool sink_ok = !has_smooth_softmax || is_decode || head_dim == 64;
-  // Sliding window on the fused path: implemented by flash prefill at
-  // head_dim == 64 (the v5 kernel). Decode is deliberately left on the
-  // decomposed pipeline even though its kernel clamps kv_lo, because that path
-  // is unverified here; prefill is what the window costs us on gpt-oss.
-  const bool window_ok =
-      local_window_size <= 0 || (!is_decode && head_dim == 64);
+  // Decode handles the window itself (kv_lo clamp), so it is allowed for any
+  // supported geometry; prefill only implements it at D64. This subsumes the
+  // narrower prefill-only form, so nothing prefill accepted before is widened.
+  const bool window_ok = is_decode || local_window_size <= 0 || head_dim == 64;
   // The whole fused path (gqa_forward_fused, including the sink and windowed
   // prefill kernels above) is built on the RDNA-only WMMA intrinsics, which
   // trap on CDNA (wave64, e.g. MI350). Route wave64 to the decomposed hipBLASLt

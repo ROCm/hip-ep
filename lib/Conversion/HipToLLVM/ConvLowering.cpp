@@ -184,6 +184,7 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
     // Build function signature
     SmallVector<Type, 25> paramTypes = {
         ptrType, // state
+        i32Type, // op_state_slot
         ptrType, // input
         i64Type, // input_n
         i64Type, // input_c
@@ -216,11 +217,14 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
       return failure();
 
     // Build argument list matching the signature
+    auto opStateSlot = getOpStateSlotValue(op, rewriter, loc);
     SmallVector<Value, 25> args = {
-        statePtr,   inputPtr, inputN,    inputC,    inputH,   inputW,
-        weightsPtr, weightsK, biasPtr,   outputPtr, outputH,  outputW,
-        kernelH,    kernelW,  strideH,   strideW,   padTop,   padLeft,
-        padBottom,  padRight, dilationH, dilationW, groupVal, dataType};
+        statePtr,  opStateSlot, inputPtr,   inputN,   inputC,
+        inputH,    inputW,      weightsPtr, weightsK, biasPtr,
+        outputPtr, outputH,     outputW,    kernelH,  kernelW,
+        strideH,   strideW,     padTop,     padLeft,  padBottom,
+        padRight,  dilationH,   dilationW,  groupVal, dataType,
+    };
 
     // Call the runtime function
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
