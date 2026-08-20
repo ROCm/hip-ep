@@ -4,6 +4,29 @@
 // RUN: hip-mlir-opt --test-hip-whole-shape-dim-reify %s | FileCheck %s
 
 
+// input/output accessor family. The dynamic extent must come from the named
+// input, while the source's static trailing extent reifies as a constant.
+// CHECK-LABEL: func.func @input_output
+// CHECK-SAME: %[[INPUT:[A-Za-z0-9_]+]]: tensor<?x8xf32>
+// CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+// CHECK-DAG: %[[C8:.*]] = arith.constant 8 : index
+// CHECK: %[[D0:.*]] = tensor.dim %[[INPUT]], %[[C0]]
+// CHECK: return %[[D0]], %[[C8]]
+func.func @input_output(%ctx: !hip.context, %input: tensor<?x8xf32>,
+                        %output: tensor<?x?xf32>) -> (index, index) {
+  %result = hip.miopen.softmax(%ctx)
+    ins(%input : tensor<?x8xf32>)
+    outs(%output : tensor<?x?xf32>) -> tensor<?x?xf32>
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %d0 = tensor.dim %result, %c0 : tensor<?x?xf32>
+  %d1 = tensor.dim %result, %c1 : tensor<?x?xf32>
+  return %d0, %d1 : index, index
+}
+
+// -----
+
+
 // x/y accessor family with an additional shaped input. CumSum's scalar axis
 // must not become the shape source.
 // CHECK-LABEL: func.func @x_y_with_axis

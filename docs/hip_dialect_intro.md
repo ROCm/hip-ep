@@ -16,10 +16,10 @@ arguments.
 All compute ops support **dual-mode operation**:
 - **Memref mode** (default for hand-written tests): operands are `memref<...>`, no results, writes in-place.
 - **Tensor mode** (used by `--convert-onnx-to-hip` and bufferization): operands are `tensor<...>`, returns results. Standard `--one-shot-bufferize` can then lower tensor mode to memref mode automatically.
-Shape-core DPS operations use explicit same-shape, broadcast, reduction,
-semantic, payload, or outs-authoritative contracts. Runtime-tail operations
-retain their existing behavior until their owning layer adopts the same
-policy, keeping verifier, reifier, and destination authority changes atomic.
+Every compute DPS operation declares an explicit same-shape, broadcast,
+reduction, semantic, payload, or outs-authoritative contract. A classification
+does not by itself change the runtime ABI; behavioral changes remain in the
+lowest layer that owns the corresponding verifier, reifier, or destination.
 
 
 ---
