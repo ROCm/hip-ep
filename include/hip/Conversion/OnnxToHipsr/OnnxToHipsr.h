@@ -42,6 +42,10 @@ void populateExpandConversionPatterns(
     const ::mlir::TypeConverter &typeConverter,
     ::mlir::RewritePatternSet &patterns, ::mlir::MLIRContext *ctx);
 
+void populateMinConversionPatterns(const ::mlir::TypeConverter &typeConverter,
+                                   ::mlir::RewritePatternSet &patterns,
+                                   ::mlir::MLIRContext *ctx);
+
 void populateShapeConversionPatterns(const ::mlir::TypeConverter &typeConverter,
                                      ::mlir::RewritePatternSet &patterns,
                                      ::mlir::MLIRContext *ctx);

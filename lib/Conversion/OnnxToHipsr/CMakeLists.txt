@@ -9,6 +9,7 @@ add_library(OnnxToHipsr STATIC
   CastConversion.cpp
   MatMulConversion.cpp
   ExpandConversion.cpp
+  MinConversion.cpp
   ShapeConversion.cpp
   ReturnConversion.cpp
 )
