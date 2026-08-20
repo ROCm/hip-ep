@@ -276,38 +276,13 @@ def _apply_seq_len_bindings(
     return changed
 
 
-def _external_data_location(model: onnx.ModelProto) -> str | None:
-    locations = {
-        entry.value
-        for init in model.graph.initializer
-        for entry in init.external_data
-        if entry.key == "location"
-    }
-    if len(locations) == 1:
-        return locations.pop()
-    return None
-
-
 def _save_unfixed_model(model: onnx.ModelProto, out_path: Path) -> None:
+    """Write graph-only ONNX; reuse the source model's external weight blob."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if out_path.exists():
         out_path.unlink()
-    ext_name = _external_data_location(model)
-    if ext_name is not None:
-        data_path = out_path.parent / ext_name
-        if not data_path.exists():
-            raise FileNotFoundError(
-                f"External weights not found for {out_path.name}: {data_path}"
-            )
-        onnx.save_model(
-            model,
-            str(out_path),
-            save_as_external_data=True,
-            all_tensors_to_one_file=True,
-            location=ext_name,
-            size_threshold=65536,
-        )
-        return
+    if not model.graph.name:
+        model.graph.name = f"{out_path.stem}_graph"
     onnx.save(model, str(out_path))
 
 
