@@ -99,8 +99,8 @@ std::vector<uint8_t> makeLut() {
   decode(Tier::HeadGroup, 8, Par::Any, Seq::S128, Cfg::Wmma, 4);
   // PR #675 routes sliding-window decode to the fused kernel. A window is part
   // of the key: full attention at 128 keys cannot borrow this row.
-  decode(Tier::HeadGroup, 8, Par::Any, Seq::S128, Cfg::WmmaBkv16, 4,
-         Dim::D64, Bat::Any, Win::W128);
+  decode(Tier::HeadGroup, 8, Par::Any, Seq::S128, Cfg::WmmaBkv16, 4, Dim::D64,
+         Bat::Any, Win::W128);
   // Bucket labels are four to the octave, so S768 answers (640, 768] and S896
   // answers (768, 896] -- a request at 800 is not in the same row as one at
   // 700.
@@ -120,8 +120,8 @@ std::vector<uint8_t> makeLut() {
   // The same parallelism at a named batch beats the one that pools batches: 512
   // work items as 64 sequences of 8 heads is not the same launch as one
   // sequence of 512, and only this row can say so.
-  decode(Tier::Geometry, 8, Par::P512, Seq::S128, Cfg::WmmaBkv32, 4,
-         Dim::D64, Bat::B64);
+  decode(Tier::Geometry, 8, Par::P512, Seq::S128, Cfg::WmmaBkv32, 4, Dim::D64,
+         Bat::B64);
   // No geometry in the key, so no WMMA: the loader refuses a Length row that
   // names it, because this row answers the pairs WMMA is not templated for.
   decode(Tier::Length, 0, Par::Any, Seq::S1536, Cfg::Scalar, 10);
@@ -192,9 +192,9 @@ std::vector<uint8_t> makeLut() {
           builder.GetBufferPointer() + builder.GetSize()};
 }
 
-// A table with exactly one answer in it, so two of them differ only in what they
-// say about the same geometry. Used to pin that the process-wide memo keys on the
-// table as well as the question.
+// A table with exactly one answer in it, so two of them differ only in what
+// they say about the same geometry. Used to pin that the process-wide memo keys
+// on the table as well as the question.
 std::vector<uint8_t> makeOneRowLut(uint8_t splits) {
   std::vector<Row> rows;
   rows.push_back(Row(Phase::Decode, Tier::HeadGroup, Dtype::Any, Dim::D64, 8,
@@ -541,9 +541,10 @@ int main(int argc, char **argv) {
   // second stored under the same question.
   REQUIRE(hipdnn_ep::gqa_autotune_resolve_decode(four, shared).config.splits ==
           4);
-  // A fresh session over the same table -- the case the memo is process-wide for,
-  // where it answers from what an earlier session resolved. Whether the entry was
-  // reused is not observable from here; that it is still the right answer is.
+  // A fresh session over the same table -- the case the memo is process-wide
+  // for, where it answers from what an earlier session resolved. Whether the
+  // entry was reused is not observable from here; that it is still the right
+  // answer is.
   MemoryFileSystem reload_fs(makeOneRowLut(4));
   void *reloaded = hipdnn_ep::gqa_autotune_create(&reload_fs);
   REQUIRE(

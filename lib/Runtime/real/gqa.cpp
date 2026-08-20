@@ -472,9 +472,9 @@ static int gqa_forward_fused(
       // int8 halves the DRAM traffic). One entry serves every format --
       // kv_dtype selects the code path inside the kernel; scales feed dequant.
       //
-      // Decode structurally clamps kv_lo to the requested local window. Keep the
-      // window in the LUT key: it changes the range the split-K kernels scan and
-      // therefore the split count that wins.
+      // Decode structurally clamps kv_lo to the requested local window. Keep
+      // the window in the LUT key: it changes the range the split-K kernels
+      // scan and therefore the split count that wins.
       const int kv_dtype = kv_dtype_abi(kv_format);
       int drc;
       if (hipdnn_ep::gqa_autotune_mode(state->gqa_autotune_policy) ==
@@ -495,26 +495,26 @@ static int gqa_forward_fused(
         int effective_skv = static_cast<int>(skv);
         if (seqlens_k_pre != kSeqlensKNotRead && seqlens_k_pre >= 0)
           effective_skv = seqlens_k_pre + 1;
-        const hipdnn_ep::GqaDecodeRequest request{kv_dtype,
-                                                  static_cast<int>(B),
-                                                  static_cast<int>(H),
-                                                  static_cast<int>(G),
-                                                  static_cast<int>(d),
-                                                  effective_skv,
-                                                  kFlashDecodeMaxSplits,
-                                                  static_cast<int>(local_window_size)};
+        const hipdnn_ep::GqaDecodeRequest request{
+            kv_dtype,
+            static_cast<int>(B),
+            static_cast<int>(H),
+            static_cast<int>(G),
+            static_cast<int>(d),
+            effective_skv,
+            kFlashDecodeMaxSplits,
+            static_cast<int>(local_window_size)};
         const hipdnn_ep::GqaDecodeResult selected =
             hipdnn_ep::gqa_autotune_resolve_decode(state->gqa_autotune_policy,
                                                    request);
         drc = hip_gqa_flash_decode_configured(
             stream, qSrc, present_key, present_value, output, partials,
             static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
-            static_cast<int>(d), effective_skv,
-            static_cast<int>(present_seq), kFlashDecodeMaxSplits, scale,
-            seqlens_k_ptr, static_cast<int>(local_window_size), head_sink,
+            static_cast<int>(d), effective_skv, static_cast<int>(present_seq),
+            kFlashDecodeMaxSplits, scale, seqlens_k_ptr,
+            static_cast<int>(local_window_size), head_sink,
             use_smooth_softmax ? 1 : 0, kv_dtype,
-            kv_quantized ? k_scale : nullptr,
-            kv_quantized ? v_scale : nullptr,
+            kv_quantized ? k_scale : nullptr, kv_quantized ? v_scale : nullptr,
             selected.config.use_wmma ? 1 : 0, selected.config.splits,
             selected.config.bkv);
         RUNTIME_DEBUG_LOG(
