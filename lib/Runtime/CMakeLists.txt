@@ -663,6 +663,15 @@ if(NOT BUILD_MOCK_RUNTIME)
                 PATH_SUFFIXES boost-1_84 ""
                 NO_DEFAULT_PATH
             )
+
+            # Find Boost headers (required by XRT)
+            find_path(BOOST_INCLUDE_DIR
+                NAMES boost/any.hpp
+                PATHS $ENV{BOOST_ROOT}
+                PATH_SUFFIXES boost-1_84 ""
+                NO_DEFAULT_PATH
+            )
+
             # Also check standard BOOST_ROOT location
             if(NOT BOOST_INCLUDE_DIR AND DEFINED ENV{BOOST_ROOT})
                 find_path(BOOST_INCLUDE_DIR
@@ -713,19 +722,63 @@ if(NOT BUILD_MOCK_RUNTIME)
                     op_state.cpp
                 )
 
-                # Determine if this is an install layout or source layout
-                # Install layout: DD_INCLUDE_DIR/ryzenai/dynamic_dispatch/ops/...
-                # Source layout: DD_INCLUDE_DIR/ops/...
+                # Determine DD installation layout
+                # There are three known layouts:
+                #
+                # 1. vai-rt install layout (complete):
+                #    DD_INCLUDE_DIR/ryzenai/dynamic_dispatch/ops/...
+                #    DD_INCLUDE_DIR/ryzenai/dynamic_dispatch/src/ops/... (has coeffs.hpp)
+                #
+                # 2. DD repo build layout (incomplete):
+                #    DD_INCLUDE_DIR/ryzenai/dynamic_dispatch/ops/...
+                #    DD_INCLUDE_DIR/ryzenai/dynamic_dispatch/src/ops/... (MISSING!)
+                #    Need to find src/ elsewhere (e.g., ../../src in DD repo)
+                #
+                # 3. DD source layout (old):
+                #    DD_INCLUDE_DIR/ops/...
+                #    DD_INCLUDE_DIR/src/...
+                #
+                # Issue: combined_gemm.hpp (in ops/) includes coeffs.hpp (in src/ops/).
+                # We must provide both paths or the compile will fail.
+
                 if(EXISTS "${DD_INCLUDE_DIR}/ryzenai/dynamic_dispatch/ops")
-                    # Install layout - add the ryzenai/dynamic_dispatch subdirectory
+                    # Modern layout (install or repo build)
                     set(DD_OPS_INCLUDE_DIR "${DD_INCLUDE_DIR}/ryzenai/dynamic_dispatch")
-                    set(DD_SRC_INCLUDE_DIR "${DD_INCLUDE_DIR}/ryzenai/dynamic_dispatch/src")
-                    message(STATUS "Using DynamicDispatch install layout")
+
+                    # Check if this is vai-rt install (has src/ops) or DD repo build (missing src/ops)
+                    if(EXISTS "${DD_INCLUDE_DIR}/ryzenai/dynamic_dispatch/src/ops")
+                        # vai-rt install layout - complete include structure
+                        set(DD_SRC_INCLUDE_DIR "${DD_INCLUDE_DIR}/ryzenai/dynamic_dispatch/src")
+                        message(STATUS "Using DynamicDispatch vai-rt install layout (complete)")
+                    else()
+                        # DD repo build layout - src/ops not copied to build/include
+                        # Try to find the source tree relative to the build include dir
+                        # Typical DD repo structure: build/relwithdebinfo/include/... and src/...
+                        get_filename_component(DD_BUILD_DIR "${DD_INCLUDE_DIR}/ryzenai/dynamic_dispatch" DIRECTORY)
+                        get_filename_component(DD_BUILD_DIR "${DD_BUILD_DIR}" DIRECTORY)  # Up one more
+                        get_filename_component(DD_BUILD_DIR "${DD_BUILD_DIR}" DIRECTORY)  # Up one more
+                        get_filename_component(DD_BUILD_DIR "${DD_BUILD_DIR}" DIRECTORY)  # Up one more
+                        get_filename_component(DD_REPO_ROOT "${DD_BUILD_DIR}" DIRECTORY)  # Up to repo root
+
+                        if(EXISTS "${DD_REPO_ROOT}/src/ops")
+                            set(DD_SRC_INCLUDE_DIR "${DD_REPO_ROOT}/src")
+                            message(STATUS "Using DynamicDispatch repo build layout")
+                            message(STATUS "  Found src tree at: ${DD_SRC_INCLUDE_DIR}")
+                        else()
+                            message(WARNING "DynamicDispatch layout issue: Found ops/ but not src/ops/")
+                            message(WARNING "  Expected either:")
+                            message(WARNING "    ${DD_INCLUDE_DIR}/ryzenai/dynamic_dispatch/src/ops/ (vai-rt install)")
+                            message(WARNING "    ${DD_REPO_ROOT}/src/ops/ (DD repo)")
+                            message(WARNING "  Build may fail with 'coeffs.hpp: No such file or directory'")
+                            message(WARNING "  Workaround: Set DYNAMICDISPATCH_ROOT to vai-rt install directory")
+                            set(DD_SRC_INCLUDE_DIR "${DD_INCLUDE_DIR}/ryzenai/dynamic_dispatch/src")
+                        endif()
+                    endif()
                 else()
-                    # Source layout - use DD_INCLUDE_DIR directly
+                    # Legacy source layout - use DD_INCLUDE_DIR directly
                     set(DD_OPS_INCLUDE_DIR "${DD_INCLUDE_DIR}")
                     set(DD_SRC_INCLUDE_DIR "${DD_INCLUDE_DIR}/src")
-                    message(STATUS "Using DynamicDispatch source layout")
+                    message(STATUS "Using DynamicDispatch legacy source layout")
                 endif()
 
                 target_include_directories(hipdnn-ep-dd PRIVATE
