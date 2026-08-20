@@ -13,71 +13,51 @@
 // - MatMulConversion.cpp
 // - ExpandConversion.cpp
 //
-// Each pattern follows the same structure:
-// 1. Match ONNX operation
-// 2. Get HipSR context (via native constraint)
-// 3. Create placeholder with inputs
-// 4. Create HipSR operation with same result type
-// 5. Replace ONNX op with HipSR op
+// Each pattern uses native rewrites (implemented in C++) because PDLL doesn't
+// easily support enum attributes required by hipsr.placeholder.
 //
 //===----------------------------------------------------------------------===//
 
 //===----------------------------------------------------------------------===//
-// Native Constraints
+// Native Constraints and Rewrites
 //===----------------------------------------------------------------------===//
 
 /// Get the !hipsr.context value for the current function.
-/// This constraint is implemented in C++ (OnnxToHipsr.cpp) and extracts
-/// the context from the parent function's block arguments.
 Constraint GetHipsrContext(op: Op) -> Value;
 
+/// Rewrite ONNX Cast to HipSR Cast (implemented in C++)
+Rewrite RewriteCast(root: Op) -> Op;
+
+/// Rewrite ONNX MatMul to HipSR MatMul (implemented in C++)
+Rewrite RewriteMatMul(root: Op) -> Op;
+
+/// Rewrite ONNX Expand to HipSR Expand (implemented in C++)
+Rewrite RewriteExpand(root: Op) -> Op;
+
 //===----------------------------------------------------------------------===//
-// ONNX Cast → HipSR Cast
+// Patterns
 //===----------------------------------------------------------------------===//
 
 Pattern CastToHipsr {
-  let root = op<onnx.Cast>(input: Value) -> (resultType: Type);
-  let ctx: Value = GetHipsrContext(root);
-
+  let root = op<onnx.Cast>;
   rewrite root with {
-    let placeholder = op<hipsr.placeholder>(ctx, input)
-                        {placeholder_type = #hipsr<placeholder_type Normal>}
-                        -> (resultType);
-    let castOp = op<hipsr.cast>(ctx, input, placeholder.0) -> (resultType);
-    replace root with castOp;
+    let newOp = RewriteCast(root);
+    replace root with newOp;
   }
 }
-
-//===----------------------------------------------------------------------===//
-// ONNX MatMul → HipSR MatMul
-//===----------------------------------------------------------------------===//
 
 Pattern MatMulToHipsr {
-  let root = op<onnx.MatMul>(lhs: Value, rhs: Value) -> (resultType: Type);
-  let ctx: Value = GetHipsrContext(root);
-
+  let root = op<onnx.MatMul>;
   rewrite root with {
-    let placeholder = op<hipsr.placeholder>(ctx, lhs, rhs)
-                        {placeholder_type = #hipsr<placeholder_type Normal>}
-                        -> (resultType);
-    let matmulOp = op<hipsr.matmul>(ctx, lhs, rhs, placeholder.0) -> (resultType);
-    replace root with matmulOp;
+    let newOp = RewriteMatMul(root);
+    replace root with newOp;
   }
 }
 
-//===----------------------------------------------------------------------===//
-// ONNX Expand → HipSR Expand
-//===----------------------------------------------------------------------===//
-
 Pattern ExpandToHipsr {
-  let root = op<onnx.Expand>(data: Value, shape: Value) -> (resultType: Type);
-  let ctx: Value = GetHipsrContext(root);
-
+  let root = op<onnx.Expand>;
   rewrite root with {
-    let placeholder = op<hipsr.placeholder>(ctx, data, shape)
-                        {placeholder_type = #hipsr<placeholder_type Normal>}
-                        -> (resultType);
-    let expandOp = op<hipsr.expand>(ctx, data, shape, placeholder.0) -> (resultType);
-    replace root with expandOp;
+    let newOp = RewriteExpand(root);
+    replace root with newOp;
   }
 }
