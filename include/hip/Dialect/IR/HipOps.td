@@ -639,6 +639,8 @@ def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[OpStateOpInterface], /*outsAccess
     - pads: Array of padding values [top, left, bottom, right]
     - dilations: Array of dilation values [H, W]
     - group: Number of groups for grouped convolution
+    - activation: Optional fused post-conv activation. 0 = none (default),
+      1 = ReLU6 (Clip to [0, 6] via MIOpen FusionPlan CLIPPEDRELU).
 
     Example:
     ```mlir
@@ -662,7 +664,8 @@ def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[OpStateOpInterface], /*outsAccess
     I64ArrayAttr:$strides,
     I64ArrayAttr:$pads,
     I64ArrayAttr:$dilations,
-    I64Attr:$group
+    I64Attr:$group,
+    DefaultValuedAttr<I64Attr, "0">:$activation
   );
 
   let assemblyFormat = [{

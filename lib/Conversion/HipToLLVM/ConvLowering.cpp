@@ -180,9 +180,10 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
       return op.emitError("hip.conv: unsupported output element type ")
              << outputType.getElementType();
     Value dataType = createI64Const(dataTypeEnum);
+    Value activationVal = createI64Const(op.getActivation());
 
     // Build function signature
-    SmallVector<Type, 25> paramTypes = {
+    SmallVector<Type, 26> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
         ptrType, // input
@@ -207,7 +208,8 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
         i64Type, // dilation_h
         i64Type, // dilation_w
         i64Type, // group
-        i64Type  // data_type
+        i64Type, // data_type
+        i64Type  // activation
     };
 
     // Lookup or create the runtime function
@@ -218,12 +220,12 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
 
     // Build argument list matching the signature
     auto opStateSlot = getOpStateSlotValue(op, rewriter, loc);
-    SmallVector<Value, 25> args = {
-        statePtr,  opStateSlot, inputPtr,   inputN,   inputC,
-        inputH,    inputW,      weightsPtr, weightsK, biasPtr,
-        outputPtr, outputH,     outputW,    kernelH,  kernelW,
-        strideH,   strideW,     padTop,     padLeft,  padBottom,
-        padRight,  dilationH,   dilationW,  groupVal, dataType,
+    SmallVector<Value, 26> args = {
+        statePtr, opStateSlot,   inputPtr, inputN,    inputC,    inputH,
+        inputW,   weightsPtr,    weightsK, biasPtr,   outputPtr, outputH,
+        outputW,  kernelH,       kernelW,  strideH,   strideW,   padTop,
+        padLeft,  padBottom,     padRight, dilationH, dilationW, groupVal,
+        dataType, activationVal,
     };
 
     // Call the runtime function

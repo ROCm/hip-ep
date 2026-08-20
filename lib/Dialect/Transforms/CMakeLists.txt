@@ -9,6 +9,7 @@ add_library(HipDialectTransforms STATIC
   BufferUtils.cpp
   ExternalizeConstants.cpp
   FixLoopAccumulatorOffset.cpp
+  FuseConvRelu6.cpp
   GenerateInterface.cpp
   GenerateOpStateInit.cpp
   HoistAllocSizeArith.cpp

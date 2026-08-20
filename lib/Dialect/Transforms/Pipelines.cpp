@@ -127,6 +127,7 @@ buildOnnxToHipPipelineTail(OpPassManager &pm,
   //     implement the interface. See `docs/design/hip-shape-inference.md`
   //     for the design and `test/lit/Dialect/hip-infer-shapes.mlir` for
   //     the reference cases.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createFuseConvRelu6Pass());
   pm.addPass(mlir::hip::createInferShapesPass());
 
   // Apply constant storage policy only after HIP shape inference has consumed

@@ -11,8 +11,11 @@
 #include "runtime_types.h"
 
 #include <cstdio>
+#include <cstring>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 // Convenience wrappers for goto cleanup pattern (all functions use 'cleanup'
 // label)
@@ -202,13 +205,104 @@ struct ConvTable {
   std::unordered_map<ConvTableKey, ConvTableEntry, ConvKeyHash> map;
 };
 
+struct ConvFusionTableEntry {
+  miopenFusionPlanDescriptor_t fuse_plan = nullptr;
+  miopenFusionOpDescriptor_t conv_op = nullptr;
+  miopenFusionOpDescriptor_t bias_op = nullptr;
+  miopenFusionOpDescriptor_t activ_op = nullptr;
+  bool has_bias = false;
+  miopenTensorDescriptor_t input_desc = nullptr;
+  miopenTensorDescriptor_t weights_desc = nullptr;
+  miopenTensorDescriptor_t output_desc = nullptr;
+  miopenTensorDescriptor_t bias_desc = nullptr;
+  miopenConvolutionDescriptor_t conv_desc = nullptr;
+  miopenConvFwdAlgorithm_t conv_algo = miopenConvolutionFwdAlgoDirect;
+  void *fusion_workspace = nullptr;
+  size_t fusion_workspace_size = 0;
+
+  ConvFusionTableEntry() = default;
+  ConvFusionTableEntry(const ConvFusionTableEntry &) = delete;
+  ConvFusionTableEntry &operator=(const ConvFusionTableEntry &) = delete;
+
+  ConvFusionTableEntry(ConvFusionTableEntry &&other)
+      : fuse_plan(other.fuse_plan), conv_op(other.conv_op),
+        bias_op(other.bias_op), activ_op(other.activ_op),
+        has_bias(other.has_bias), input_desc(other.input_desc),
+        weights_desc(other.weights_desc), output_desc(other.output_desc),
+        bias_desc(other.bias_desc), conv_desc(other.conv_desc),
+        conv_algo(other.conv_algo), fusion_workspace(other.fusion_workspace),
+        fusion_workspace_size(other.fusion_workspace_size) {
+    other.fuse_plan = nullptr;
+    other.conv_op = nullptr;
+    other.bias_op = nullptr;
+    other.activ_op = nullptr;
+    other.input_desc = nullptr;
+    other.weights_desc = nullptr;
+    other.output_desc = nullptr;
+    other.bias_desc = nullptr;
+    other.conv_desc = nullptr;
+    other.fusion_workspace = nullptr;
+    other.fusion_workspace_size = 0;
+  }
+
+  ~ConvFusionTableEntry() {
+    if (fuse_plan)
+      miopenDestroyFusionPlan(fuse_plan);
+    if (input_desc)
+      miopenDestroyTensorDescriptor(input_desc);
+    if (weights_desc)
+      miopenDestroyTensorDescriptor(weights_desc);
+    if (output_desc)
+      miopenDestroyTensorDescriptor(output_desc);
+    if (bias_desc)
+      miopenDestroyTensorDescriptor(bias_desc);
+    if (conv_desc)
+      miopenDestroyConvolutionDescriptor(conv_desc);
+    if (fusion_workspace)
+      hipFree(fusion_workspace);
+  }
+};
+
+struct ConvFusionTable {
+  std::mutex mutex;
+  std::unordered_map<ConvTableKey, ConvFusionTableEntry, ConvKeyHash> map;
+  // Keys whose FusionPlan compile/execute failed; skip on later inferences.
+  std::unordered_set<ConvTableKey, ConvKeyHash> disabled_keys;
+};
+
+struct ClippedRelu6ActivCache {
+  miopenActivationDescriptor_t desc = nullptr;
+
+  ClippedRelu6ActivCache() {
+    if (miopenCreateActivationDescriptor(&desc) != miopenStatusSuccess)
+      desc = nullptr;
+    else if (miopenSetActivationDescriptor(desc, miopenActivationCLIPPEDRELU,
+                                           6.0, 0.0,
+                                           0.0) != miopenStatusSuccess) {
+      miopenDestroyActivationDescriptor(desc);
+      desc = nullptr;
+    }
+  }
+
+  ~ClippedRelu6ActivCache() {
+    if (desc)
+      miopenDestroyActivationDescriptor(desc);
+  }
+};
+
 struct ConvState : public OpStateT<ConvState> {
   std::shared_ptr<ConvTable> table;
+  std::shared_ptr<ConvFusionTable> fusion_table;
+  std::shared_ptr<ClippedRelu6ActivCache> relu6_activ;
   ConvState() {
     int dev = 0;
     hipGetDevice(&dev);
     table = WeakStore<int, ConvTable>::get_or_create(
         dev, [] { return std::make_shared<ConvTable>(); });
+    fusion_table = WeakStore<int, ConvFusionTable>::get_or_create(
+        dev, [] { return std::make_shared<ConvFusionTable>(); });
+    relu6_activ = WeakStore<int, ClippedRelu6ActivCache>::get_or_create(
+        0, [] { return std::make_shared<ClippedRelu6ActivCache>(); });
   }
 };
 
@@ -216,6 +310,191 @@ extern "C" int8_t hipdnn_ep_op_state_construct_conv(RuntimeState *state,
                                                     int32_t slot) {
   hipdnn_ep_op_state_set(state, slot, ConvState::create().release());
   return 0;
+}
+
+//===----------------------------------------------------------------------===//
+// MIOpen FusionPlan cache (Conv + Bias + ClippedReLU for ReLU6)
+//===----------------------------------------------------------------------===//
+
+static int applyClippedRelu6Fallback(ConvState *os, miopenHandle_t handle,
+                                     miopenTensorDescriptor_t desc,
+                                     void *data) {
+  if (!os || !os->relu6_activ || !os->relu6_activ->desc)
+    return -1;
+  const float alpha = 1.f, beta = 0.f;
+  if (miopenActivationForward(handle, os->relu6_activ->desc, &alpha, desc, data,
+                              &beta, desc, data) != miopenStatusSuccess)
+    return -1;
+  return 0;
+}
+
+static void disableConvFusion(ConvFusionTable &table, const ConvTableKey &key) {
+  table.disabled_keys.insert(key);
+}
+
+// MIOpen Conv+Bias+Act FusionPlan is unreliable on gfx115x (Strix Halo).
+// Default: skip FusionPlan there and use Find API conv + ClippedReLU instead.
+// Override: HIPDNN_EP_CONV_FUSION=1 force enable, =0 force disable.
+static bool convFusionPlanEnabled() {
+  char buf[8];
+  unsigned long n =
+      hipdnn_ep::read_env("HIPDNN_EP_CONV_FUSION", buf, sizeof(buf));
+  if (n > 0) {
+    if (buf[0] == '0')
+      return false;
+    if (buf[0] >= '1')
+      return true;
+  }
+
+  static int cached = -1; // 0 = disabled, 1 = enabled
+  if (cached >= 0)
+    return cached != 0;
+
+  hipDeviceProp_t prop{};
+  int dev = 0;
+  hipGetDevice(&dev);
+  if (hipGetDeviceProperties(&prop, dev) != hipSuccess ||
+      prop.gcnArchName[0] == '\0') {
+    cached = 1;
+    return true;
+  }
+  cached = (strncmp(prop.gcnArchName, "gfx115", 6) == 0) ? 0 : 1;
+  return cached != 0;
+}
+
+static void logConvFusionPlanSkipOnce() {
+  static bool logged = false;
+  if (logged)
+    return;
+  logged = true;
+  RUNTIME_DEBUG_LOG(
+      "[CONV] FusionPlan skipped (gfx115x or HIPDNN_EP_CONV_FUSION=0), "
+      "using Find+activ for ReLU6\n");
+}
+
+static const ConvFusionTableEntry *
+queryOrCreateConvFusion(ConvFusionTable &table, const ConvTableKey &key,
+                        miopenHandle_t miopen_handle, bool has_bias,
+                        int64_t weights_k) {
+  std::lock_guard<std::mutex> guard(table.mutex);
+  auto it = table.map.find(key);
+  if (it != table.map.end())
+    return &it->second;
+
+  int result = 0;
+  ConvFusionTableEntry entry;
+
+  MIOPEN_CHECK(miopenCreateTensorDescriptor(&entry.input_desc));
+  MIOPEN_CHECK(miopenCreateTensorDescriptor(&entry.weights_desc));
+  MIOPEN_CHECK(miopenCreateTensorDescriptor(&entry.output_desc));
+
+  {
+    int in_dims[] = {
+        static_cast<int>(key.input_n), static_cast<int>(key.input_c),
+        static_cast<int>(key.input_h), static_cast<int>(key.input_w)};
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        entry.input_desc, key.data_type, miopenTensorNCHW, in_dims, 4));
+
+    int w_dims[] = {
+        static_cast<int>(key.weights_k),
+        static_cast<int>(key.input_c / key.group),
+        static_cast<int>(key.kernel_h),
+        static_cast<int>(key.kernel_w),
+    };
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        entry.weights_desc, key.data_type, miopenTensorNCHW, w_dims, 4));
+
+    int out_dims[] = {
+        static_cast<int>(key.input_n), static_cast<int>(key.weights_k),
+        static_cast<int>(key.output_h), static_cast<int>(key.output_w)};
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        entry.output_desc, key.data_type, miopenTensorNCHW, out_dims, 4));
+  }
+
+  if (has_bias) {
+    MIOPEN_CHECK(miopenCreateTensorDescriptor(&entry.bias_desc));
+    int b_dims[] = {1, static_cast<int>(weights_k), 1, 1};
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        entry.bias_desc, key.data_type, miopenTensorNCHW, b_dims, 4));
+    entry.has_bias = true;
+  }
+
+  MIOPEN_CHECK(miopenCreateConvolutionDescriptor(&entry.conv_desc));
+  MIOPEN_CHECK(miopenInitConvolutionDescriptor(
+      entry.conv_desc, miopenConvolution, key.pad_top, key.pad_left,
+      key.stride_h, key.stride_w, key.dilation_h, key.dilation_w));
+  if (key.group > 1)
+    MIOPEN_CHECK(miopenSetConvolutionGroupCount(entry.conv_desc, key.group));
+
+  MIOPEN_CHECK(miopenCreateFusionPlan(&entry.fuse_plan, miopenVerticalFusion,
+                                      entry.input_desc));
+  MIOPEN_CHECK(miopenCreateOpConvForward(entry.fuse_plan, &entry.conv_op,
+                                         entry.conv_desc, entry.weights_desc));
+  if (has_bias) {
+    MIOPEN_CHECK(miopenCreateOpBiasForward(entry.fuse_plan, &entry.bias_op,
+                                           entry.bias_desc));
+  }
+  MIOPEN_CHECK(miopenCreateOpActivationForward(entry.fuse_plan, &entry.activ_op,
+                                               miopenActivationCLIPPEDRELU));
+
+  {
+    int returned = 0;
+    miopenConvFwdAlgorithm_t algos[8] = {};
+    if (miopenFusionPlanConvolutionGetAlgo(entry.fuse_plan, 8, &returned,
+                                           algos) == miopenStatusSuccess &&
+        returned > 0) {
+      entry.conv_algo = algos[0];
+    }
+  }
+
+  if (miopenCompileFusionPlan(miopen_handle, entry.fuse_plan) !=
+      miopenStatusSuccess) {
+    goto cleanup;
+  }
+
+  MIOPEN_CHECK(miopenFusionPlanGetWorkSpaceSize(miopen_handle, entry.fuse_plan,
+                                                &entry.fusion_workspace_size,
+                                                entry.conv_algo));
+  if (entry.fusion_workspace_size > 0)
+    HIP_CHECK(hipMalloc(&entry.fusion_workspace, entry.fusion_workspace_size));
+
+  {
+    auto [ins, _] = table.map.emplace(key, std::move(entry));
+    return &ins->second;
+  }
+
+cleanup:
+  return nullptr;
+}
+
+static int runConvFusionPlan(const ConvFusionTableEntry *entry,
+                             miopenHandle_t miopen_handle, const void *input,
+                             const void *weights, const void *bias,
+                             void *output) {
+  miopenOperatorArgs_t args = nullptr;
+  const float alpha = 1.f, beta = 0.f;
+  int result = 0;
+
+  MIOPEN_CHECK(miopenCreateOperatorArgs(&args));
+  MIOPEN_CHECK(
+      miopenSetOpArgsConvForward(args, entry->conv_op, &alpha, &beta, weights));
+  if (entry->has_bias && bias) {
+    MIOPEN_CHECK(
+        miopenSetOpArgsBiasForward(args, entry->bias_op, &alpha, &beta, bias));
+  }
+  MIOPEN_CHECK(miopenSetOpArgsActivForward(args, entry->activ_op, &alpha, &beta,
+                                           6.0, 0.0, 0.0));
+  MIOPEN_CHECK(miopenExecuteFusionPlan_v2(
+      miopen_handle, entry->fuse_plan, entry->input_desc, input,
+      entry->output_desc, output, args, entry->fusion_workspace,
+      entry->fusion_workspace_size));
+  MIOPEN_CHECK(miopenDestroyOperatorArgs(args));
+  return 0;
+
+cleanup:
+  if (args)
+    miopenDestroyOperatorArgs(args);
+  return result;
 }
 
 static const ConvTableEntry *
@@ -349,7 +628,7 @@ int wrap_miopenConvolutionForward(
     int64_t output_h, int64_t output_w, int64_t kernel_h, int64_t kernel_w,
     int64_t stride_h, int64_t stride_w, int64_t pad_top, int64_t pad_left,
     int64_t pad_bottom, int64_t pad_right, int64_t dilation_h,
-    int64_t dilation_w, int64_t group, int64_t data_type) {
+    int64_t dilation_w, int64_t group, int64_t data_type, int64_t activation) {
   OP_PROFILE(
       "conv",
       [&] {
@@ -380,14 +659,13 @@ int wrap_miopenConvolutionForward(
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_miopenConvolutionForward N=%lld Cin=%lld H=%lld W=%lld "
-      "Cout=%lld kHxkW=%lldx%lld s=%lldx%lld bias=%s dtype=%lld\n",
+      "Cout=%lld kHxkW=%lldx%lld s=%lldx%lld bias=%s dtype=%lld "
+      "activation=%lld\n",
       (long long)input_n, (long long)input_c, (long long)input_h,
       (long long)input_w, (long long)weights_k, (long long)kernel_h,
       (long long)kernel_w, (long long)stride_h, (long long)stride_w,
-      bias ? "yes" : "null", (long long)data_type);
+      bias ? "yes" : "null", (long long)data_type, (long long)activation);
 
-  // Extract handle and stream from opaque RuntimeState via accessor functions
-  // (Maintains abstraction barrier - no direct field access)
   miopenHandle_t miopen_handle =
       static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
 
@@ -405,6 +683,42 @@ int wrap_miopenConvolutionForward(
       pad_left,  pad_bottom,        pad_right, dilation_h, dilation_w, group,
       miopen_dt, miopenConvolution, 0,         0,
   };
+
+  if (activation == HIPDNN_EP_CONV_ACTIVATION_RELU6) {
+    if (!convFusionPlanEnabled()) {
+      logConvFusionPlanSkipOnce();
+    } else if (os->fusion_table) {
+      bool fusion_disabled = false;
+      {
+        std::lock_guard<std::mutex> guard(os->fusion_table->mutex);
+        fusion_disabled = os->fusion_table->disabled_keys.count(key) != 0;
+      }
+      if (!fusion_disabled) {
+        const ConvFusionTableEntry *fusion_entry = queryOrCreateConvFusion(
+            *os->fusion_table, key, miopen_handle, bias != nullptr, weights_k);
+        if (fusion_entry && fusion_entry->fuse_plan) {
+          int fusion_rc = runConvFusionPlan(fusion_entry, miopen_handle, input,
+                                            weights, bias, output);
+          if (fusion_rc == 0) {
+            RUNTIME_DEBUG_LOG("[CONV] FusionPlan ReLU6 ok N=%lld Cout=%lld\n",
+                              (long long)input_n, (long long)weights_k);
+            return 0;
+          }
+          RUNTIME_DEBUG_LOG("[CONV] FusionPlan ReLU6 failed (rc=%d), falling "
+                            "back to Find+activ\n",
+                            fusion_rc);
+          std::lock_guard<std::mutex> guard(os->fusion_table->mutex);
+          disableConvFusion(*os->fusion_table, key);
+        } else {
+          RUNTIME_DEBUG_LOG(
+              "[CONV] FusionPlan compile unsupported, fallback\n");
+          std::lock_guard<std::mutex> guard(os->fusion_table->mutex);
+          disableConvFusion(*os->fusion_table, key);
+        }
+      }
+    }
+  }
+
   miopenTensorDescriptor_t bias_desc = nullptr;
   int result = 0;
 
@@ -429,14 +743,6 @@ int wrap_miopenConvolutionForward(
   MIOPEN_CHECK(miopenRunSolution(miopen_handle, entry->solution, 3, tensorArgs,
                                  entry->workspace, entry->workspaceSize));
 
-  // Add per-channel bias via miopenOpTensor (TensorOpAdd):
-  //   C = alpha1*A + alpha2*B + beta*C  with A=C=output, B=bias, beta=0
-  //   -> output = output + bias  (broadcast from [1, weights_k, 1, 1])
-  //
-  // We do NOT use miopenConvolutionForwardBias: the MIOpen header states its
-  // alpha/beta are "only supported for alpha = 1 and beta = 0", so it cannot
-  // fuse y = conv + bias (it would compute y = bias). miopenOpTensor with
-  // alpha1=alpha2=1, beta=0 computes y = conv + bias as ONNX Conv requires.
   if (bias) {
     const float alpha_bias = 1.0f, beta_zero = 0.0f;
     MIOPEN_CHECK(miopenCreateTensorDescriptor(&bias_desc));
@@ -447,6 +753,14 @@ int wrap_miopenConvolutionForward(
                                 entry->output_desc, output, &alpha_bias,
                                 bias_desc, bias, &beta_zero, entry->output_desc,
                                 output));
+  }
+
+  if (activation == HIPDNN_EP_CONV_ACTIVATION_RELU6) {
+    if (applyClippedRelu6Fallback(os, miopen_handle, entry->output_desc,
+                                  output) != 0) {
+      result = -1;
+      goto cleanup;
+    }
   }
 
 cleanup:
