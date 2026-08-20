@@ -260,6 +260,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
                 -o ${CMAKE_CURRENT_BINARY_DIR}/${OUTPUT_BC}
         DEPENDS ${SOURCE_FILE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/hipdnn_ep_runtime.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/gqa_contract.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/runtime_state_internal.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/tensor_buffer_internal.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/matmul_gemm_contract.h

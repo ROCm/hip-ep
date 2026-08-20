@@ -4,6 +4,7 @@
  */
 
 #include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/IR/HipGqaSupport.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -2075,7 +2076,7 @@ LogicalResult GemmOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
-// GqaOp: Full MS spec implementation
+// GqaOp: Runtime-supported Microsoft GroupQueryAttention subset
 //        ins(query, [key, value, past_key, past_value], seqlens_k,
 //        total_seq_len,
 //            [cos_cache, sin_cache, position_ids, attention_bias, head_sink,
@@ -2330,6 +2331,17 @@ LogicalResult LinearAttentionOp::verify() {
 }
 
 LogicalResult GqaOp::verify() {
+  if (getPositionIds())
+    return emitOpError("position_ids is unsupported by the runtime");
+  if (getOutputQk())
+    return emitOpError("output_qk is unsupported by the runtime");
+  if (getQkOutput() != 0)
+    return emitOpError("qk_output must be zero; QK output is unsupported by "
+                       "the runtime");
+  if (!getSoftcap().isZero())
+    return emitOpError("softcap must be exactly zero; nonzero softcap is "
+                       "unsupported by the runtime");
+
   SmallVector<Value> operands = {getQuery()};
   auto appendIfPresent = [&](Value value) {
     if (value)
@@ -2366,52 +2378,21 @@ LogicalResult GqaOp::verify() {
   if (getNumHeads() % getKvNumHeads() != 0)
     return emitOpError("num_heads must be divisible by kv_num_heads");
 
-  // Verify quantization parameter consistency
-  auto kQuantType = getKQuantType().str();
-  auto vQuantType = getVQuantType().str();
-
-  // If k_quant_type != "NONE", k_scale must be provided
-  if (kQuantType != "NONE" && !getKScale()) {
-    return emitOpError("k_quant_type is '")
-           << kQuantType << "' but k_scale is not provided";
-  }
-
-  // If v_quant_type != "NONE", v_scale must be provided
-  if (vQuantType != "NONE" && !getVScale()) {
-    return emitOpError("v_quant_type is '")
-           << vQuantType << "' but v_scale is not provided";
-  }
-
-  // Verify quant_type values
-  if (kQuantType != "NONE" && kQuantType != "PER_TENSOR" &&
-      kQuantType != "PER_CHANNEL") {
-    return emitOpError("k_quant_type must be 'NONE', 'PER_TENSOR', or "
-                       "'PER_CHANNEL', got '")
-           << kQuantType << "'";
-  }
-
-  if (vQuantType != "NONE" && vQuantType != "PER_TENSOR" &&
-      vQuantType != "PER_CHANNEL") {
-    return emitOpError("v_quant_type must be 'NONE', 'PER_TENSOR', or "
-                       "'PER_CHANNEL', got '")
-           << vQuantType << "'";
-  }
-
-  // Verify bit width
-  int64_t bitWidth = getKvCacheBitWidth();
-  if (bitWidth != 4 && bitWidth != 8) {
-    return emitOpError("kv_cache_bit_width must be 4 or 8, got ") << bitWidth;
-  }
-
-  // Verify qk_output mode
-  int64_t qkOutput = getQkOutput();
-  if (qkOutput < 0 || qkOutput > 2) {
-    return emitOpError("qk_output must be 0, 1, or 2, got ") << qkOutput;
-  }
-
-  if ((qkOutput != 0) != static_cast<bool>(getOutputQk()))
-    return emitOpError(
-        "output_qk must be present exactly when qk_output is nonzero");
+  auto optionalType = [](Value value) {
+    return value ? value.getType() : Type{};
+  };
+  GqaFeatureTypes featureTypes{
+      getQuery().getType(),         optionalType(getKey()),
+      optionalType(getValue()),     optionalType(getPastKey()),
+      optionalType(getPastValue()), getOutput().getType(),
+      getPresentKey().getType(),    getPresentValue().getType(),
+      optionalType(getKScale()),    optionalType(getVScale()),
+  };
+  if (failed(verifyGqaFeatureSupport(
+          getKQuantType(), getVQuantType(), getKvCacheBitWidth(),
+          getRotaryInterleaved(), getKvNumHeads(), featureTypes,
+          [&]() { return emitOpError(); })))
+    return failure();
 
   // Verify paired optional inputs: cos_cache/sin_cache must both be present or
   // both absent
@@ -2587,19 +2568,6 @@ LogicalResult GqaOp::verify() {
         presentCapacity < pastCapacity)
       return emitOpError(
           "present cache capacity cannot be smaller than past capacity");
-  }
-
-  if (Value outputQk = getOutputQk()) {
-    auto outputQkType = cast<ShapedType>(outputQk.getType());
-    if (outputQkType.getRank() != 4)
-      return emitOpError("output_qk must be rank-4");
-    if (failed(checkDim(outputQkType, 0, queryType, 0,
-                        "output_qk batch must match query batch")) ||
-        failed(checkStaticValue(outputQkType, 1, getNumHeads(),
-                                "output_qk head count must equal num_heads")) ||
-        failed(checkDim(outputQkType, 2, queryType, 1,
-                        "output_qk query sequence must match query")))
-      return failure();
   }
 
   return success();

@@ -24,11 +24,127 @@ func.func @valid_separate(
         tensor<i32>)
     outs(%out, %present_key, %present_value :
         tensor<1x2x32xf16>, tensor<1x2x5x8xf16>, tensor<1x2x5x8xf16>)
-    {num_heads = 4 : i64, kv_num_heads = 2 : i64}
+    {num_heads = 4 : i64, kv_num_heads = 2 : i64,
+     qk_output = 0 : i64, softcap = 0.000000e+00 : f32}
     : tensor<1x2x32xf16>, tensor<1x2x5x8xf16>,
       tensor<1x2x5x8xf16>
   return %result#0, %result#1, %result#2 :
       tensor<1x2x32xf16>, tensor<1x2x5x8xf16>, tensor<1x2x5x8xf16>
+}
+
+// -----
+
+func.func @unsupported_position_ids(
+    %ctx: !hip.context,
+    %query: memref<1x2x32xf16, 1>,
+    %key: memref<1x3x16xf16, 1>,
+    %value: memref<1x3x16xf16, 1>,
+    %past_key: memref<1x2x4x8xf16, 1>,
+    %past_value: memref<1x2x4x8xf16, 1>,
+    %seqlens: memref<1xi32, 1>,
+    %total: memref<i32, 1>,
+    %position_ids: memref<1x2xi64, 1>,
+    %out: memref<1x2x32xf16, 1>,
+    %present_key: memref<1x2x5x8xf16, 1>,
+    %present_value: memref<1x2x5x8xf16, 1>) {
+  // expected-error @+1 {{position_ids is unsupported by the runtime}}
+  "hip.gqa"(
+      %ctx, %query, %key, %value, %past_key, %past_value, %seqlens, %total,
+      %position_ids, %out, %present_key, %present_value)
+      <{num_heads = 4 : i64, kv_num_heads = 2 : i64,
+        operandSegmentSizes =
+          array<i32: 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 0>}>
+      : (!hip.context, memref<1x2x32xf16, 1>, memref<1x3x16xf16, 1>,
+         memref<1x3x16xf16, 1>, memref<1x2x4x8xf16, 1>,
+         memref<1x2x4x8xf16, 1>, memref<1xi32, 1>, memref<i32, 1>,
+         memref<1x2xi64, 1>, memref<1x2x32xf16, 1>,
+         memref<1x2x5x8xf16, 1>, memref<1x2x5x8xf16, 1>) -> ()
+  return
+}
+
+// -----
+
+func.func @unsupported_materialized_qk(
+    %ctx: !hip.context,
+    %query: memref<1x2x32xf16, 1>,
+    %key: memref<1x3x16xf16, 1>,
+    %value: memref<1x3x16xf16, 1>,
+    %past_key: memref<1x2x4x8xf16, 1>,
+    %past_value: memref<1x2x4x8xf16, 1>,
+    %seqlens: memref<1xi32, 1>,
+    %total: memref<i32, 1>,
+    %out: memref<1x2x32xf16, 1>,
+    %present_key: memref<1x2x5x8xf16, 1>,
+    %present_value: memref<1x2x5x8xf16, 1>,
+    %output_qk: memref<1x4x2x5xf16, 1>) {
+  // expected-error @+1 {{output_qk is unsupported by the runtime}}
+  "hip.gqa"(
+      %ctx, %query, %key, %value, %past_key, %past_value, %seqlens, %total,
+      %out, %present_key, %present_value, %output_qk)
+      <{num_heads = 4 : i64, kv_num_heads = 2 : i64,
+        operandSegmentSizes =
+          array<i32: 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1>}>
+      : (!hip.context, memref<1x2x32xf16, 1>, memref<1x3x16xf16, 1>,
+         memref<1x3x16xf16, 1>, memref<1x2x4x8xf16, 1>,
+         memref<1x2x4x8xf16, 1>, memref<1xi32, 1>, memref<i32, 1>,
+         memref<1x2x32xf16, 1>, memref<1x2x5x8xf16, 1>,
+         memref<1x2x5x8xf16, 1>, memref<1x4x2x5xf16, 1>) -> ()
+  return
+}
+
+// -----
+
+func.func @unsupported_requested_qk(
+    %ctx: !hip.context,
+    %query: memref<1x2x32xf16, 1>,
+    %key: memref<1x3x16xf16, 1>,
+    %value: memref<1x3x16xf16, 1>,
+    %past_key: memref<1x2x4x8xf16, 1>,
+    %past_value: memref<1x2x4x8xf16, 1>,
+    %seqlens: memref<1xi32, 1>,
+    %total: memref<i32, 1>,
+    %out: memref<1x2x32xf16, 1>,
+    %present_key: memref<1x2x5x8xf16, 1>,
+    %present_value: memref<1x2x5x8xf16, 1>) {
+  // expected-error @+1 {{qk_output must be zero; QK output is unsupported}}
+  hip.gqa(%ctx)
+    ins(%query, %key, %value, %past_key, %past_value, %seqlens, %total :
+        memref<1x2x32xf16, 1>, memref<1x3x16xf16, 1>,
+        memref<1x3x16xf16, 1>, memref<1x2x4x8xf16, 1>,
+        memref<1x2x4x8xf16, 1>, memref<1xi32, 1>, memref<i32, 1>)
+    outs(%out, %present_key, %present_value :
+        memref<1x2x32xf16, 1>, memref<1x2x5x8xf16, 1>,
+        memref<1x2x5x8xf16, 1>)
+    {num_heads = 4 : i64, kv_num_heads = 2 : i64, qk_output = 1 : i64}
+  return
+}
+
+// -----
+
+func.func @unsupported_softcap(
+    %ctx: !hip.context,
+    %query: memref<1x2x32xf16, 1>,
+    %key: memref<1x3x16xf16, 1>,
+    %value: memref<1x3x16xf16, 1>,
+    %past_key: memref<1x2x4x8xf16, 1>,
+    %past_value: memref<1x2x4x8xf16, 1>,
+    %seqlens: memref<1xi32, 1>,
+    %total: memref<i32, 1>,
+    %out: memref<1x2x32xf16, 1>,
+    %present_key: memref<1x2x5x8xf16, 1>,
+    %present_value: memref<1x2x5x8xf16, 1>) {
+  // expected-error @+1 {{softcap must be exactly zero; nonzero softcap is unsupported}}
+  hip.gqa(%ctx)
+    ins(%query, %key, %value, %past_key, %past_value, %seqlens, %total :
+        memref<1x2x32xf16, 1>, memref<1x3x16xf16, 1>,
+        memref<1x3x16xf16, 1>, memref<1x2x4x8xf16, 1>,
+        memref<1x2x4x8xf16, 1>, memref<1xi32, 1>, memref<i32, 1>)
+    outs(%out, %present_key, %present_value :
+        memref<1x2x32xf16, 1>, memref<1x2x5x8xf16, 1>,
+        memref<1x2x5x8xf16, 1>)
+    {num_heads = 4 : i64, kv_num_heads = 2 : i64,
+     softcap = 3.000000e+01 : f32}
+  return
 }
 
 // -----
@@ -53,7 +169,8 @@ func.func @valid_memref(
     outs(%out, %present_key, %present_value :
         memref<1x2x32xf16, 1>, memref<1x2x5x8xf16, 1>,
         memref<1x2x5x8xf16, 1>)
-    {num_heads = 4 : i64, kv_num_heads = 2 : i64}
+    {num_heads = 4 : i64, kv_num_heads = 2 : i64,
+     softcap = -0.000000e+00 : f32}
   return
 }
 
@@ -198,4 +315,164 @@ func.func @unpaired_past_key_value(
           tensor<1x2x5x8xf16>)
   return %result#0, %result#1, %result#2 :
       tensor<1x2x32xf16>, tensor<1x2x5x8xf16>, tensor<1x2x5x8xf16>
+}
+
+// -----
+
+func.func @valid_int8_per_channel(
+    %ctx: !hip.context, %query: memref<1x1x32xf16, 1>,
+    %key: memref<1x1x16xf16, 1>, %value: memref<1x1x16xf16, 1>,
+    %past_key: memref<1x2x4x8xi8, 1>,
+    %past_value: memref<1x2x4x8xi8, 1>,
+    %seqlens: memref<1xi32, 1>, %total: memref<i32, 1>,
+    %k_scale: memref<16xf32, 1>, %v_scale: memref<16xf32, 1>,
+    %out: memref<1x1x32xf16, 1>, %present_key: memref<1x2x5x8xi8, 1>,
+    %present_value: memref<1x2x5x8xi8, 1>) {
+  "hip.gqa"(
+      %ctx, %query, %key, %value, %past_key, %past_value, %seqlens, %total,
+      %k_scale, %v_scale, %out, %present_key, %present_value)
+      <{num_heads = 4 : i64, kv_num_heads = 2 : i64,
+        k_quant_type = "PER_CHANNEL", v_quant_type = "PER_CHANNEL",
+        kv_cache_bit_width = 8 : i64,
+        operandSegmentSizes =
+          array<i32: 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0>}>
+      : (!hip.context, memref<1x1x32xf16, 1>, memref<1x1x16xf16, 1>,
+         memref<1x1x16xf16, 1>, memref<1x2x4x8xi8, 1>,
+         memref<1x2x4x8xi8, 1>, memref<1xi32, 1>, memref<i32, 1>,
+         memref<16xf32, 1>, memref<16xf32, 1>, memref<1x1x32xf16, 1>,
+         memref<1x2x5x8xi8, 1>, memref<1x2x5x8xi8, 1>) -> ()
+  return
+}
+
+// -----
+
+func.func @unsupported_per_tensor(
+    %ctx: !hip.context, %query: memref<1x1x32xf16, 1>,
+    %key: memref<1x1x16xf16, 1>, %value: memref<1x1x16xf16, 1>,
+    %past_key: memref<1x2x4x8xi8, 1>,
+    %past_value: memref<1x2x4x8xi8, 1>,
+    %seqlens: memref<1xi32, 1>, %total: memref<i32, 1>,
+    %k_scale: memref<16xf32, 1>, %v_scale: memref<16xf32, 1>,
+    %out: memref<1x1x32xf16, 1>, %present_key: memref<1x2x5x8xi8, 1>,
+    %present_value: memref<1x2x5x8xi8, 1>) {
+  // expected-error @+1 {{PER_TENSOR KV quantization is unsupported}}
+  "hip.gqa"(
+      %ctx, %query, %key, %value, %past_key, %past_value, %seqlens, %total,
+      %k_scale, %v_scale, %out, %present_key, %present_value)
+      <{num_heads = 4 : i64, kv_num_heads = 2 : i64,
+        k_quant_type = "PER_TENSOR", v_quant_type = "PER_TENSOR",
+        operandSegmentSizes =
+          array<i32: 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0>}>
+      : (!hip.context, memref<1x1x32xf16, 1>, memref<1x1x16xf16, 1>,
+         memref<1x1x16xf16, 1>, memref<1x2x4x8xi8, 1>,
+         memref<1x2x4x8xi8, 1>, memref<1xi32, 1>, memref<i32, 1>,
+         memref<16xf32, 1>, memref<16xf32, 1>, memref<1x1x32xf16, 1>,
+         memref<1x2x5x8xi8, 1>, memref<1x2x5x8xi8, 1>) -> ()
+  return
+}
+
+// -----
+
+func.func @unsupported_int4(
+    %ctx: !hip.context, %query: memref<1x1x32xf16, 1>,
+    %key: memref<1x1x16xf16, 1>, %value: memref<1x1x16xf16, 1>,
+    %past_key: memref<1x2x4x8xi8, 1>,
+    %past_value: memref<1x2x4x8xi8, 1>,
+    %seqlens: memref<1xi32, 1>, %total: memref<i32, 1>,
+    %k_scale: memref<16xf32, 1>, %v_scale: memref<16xf32, 1>,
+    %out: memref<1x1x32xf16, 1>, %present_key: memref<1x2x5x8xi8, 1>,
+    %present_value: memref<1x2x5x8xi8, 1>) {
+  // expected-error @+1 {{4-bit KV caches are unsupported}}
+  "hip.gqa"(
+      %ctx, %query, %key, %value, %past_key, %past_value, %seqlens, %total,
+      %k_scale, %v_scale, %out, %present_key, %present_value)
+      <{num_heads = 4 : i64, kv_num_heads = 2 : i64,
+        k_quant_type = "PER_CHANNEL", v_quant_type = "PER_CHANNEL",
+        kv_cache_bit_width = 4 : i64,
+        operandSegmentSizes =
+          array<i32: 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0>}>
+      : (!hip.context, memref<1x1x32xf16, 1>, memref<1x1x16xf16, 1>,
+         memref<1x1x16xf16, 1>, memref<1x2x4x8xi8, 1>,
+         memref<1x2x4x8xi8, 1>, memref<1xi32, 1>, memref<i32, 1>,
+         memref<16xf32, 1>, memref<16xf32, 1>, memref<1x1x32xf16, 1>,
+         memref<1x2x5x8xi8, 1>, memref<1x2x5x8xi8, 1>) -> ()
+  return
+}
+
+// -----
+
+func.func @unsupported_mixed_scheme(
+    %ctx: !hip.context, %query: memref<1x1x32xf16, 1>,
+    %key: memref<1x1x16xf16, 1>, %value: memref<1x1x16xf16, 1>,
+    %past_key: memref<1x2x4x8xi8, 1>,
+    %past_value: memref<1x2x4x8xi8, 1>,
+    %seqlens: memref<1xi32, 1>, %total: memref<i32, 1>,
+    %k_scale: memref<16xf32, 1>, %v_scale: memref<16xf32, 1>,
+    %out: memref<1x1x32xf16, 1>, %present_key: memref<1x2x5x8xi8, 1>,
+    %present_value: memref<1x2x5x8xi8, 1>) {
+  // expected-error @+1 {{K/V quantization schemes must match}}
+  "hip.gqa"(
+      %ctx, %query, %key, %value, %past_key, %past_value, %seqlens, %total,
+      %k_scale, %v_scale, %out, %present_key, %present_value)
+      <{num_heads = 4 : i64, kv_num_heads = 2 : i64,
+        k_quant_type = "PER_CHANNEL", v_quant_type = "NONE",
+        operandSegmentSizes =
+          array<i32: 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0>}>
+      : (!hip.context, memref<1x1x32xf16, 1>, memref<1x1x16xf16, 1>,
+         memref<1x1x16xf16, 1>, memref<1x2x4x8xi8, 1>,
+         memref<1x2x4x8xi8, 1>, memref<1xi32, 1>, memref<i32, 1>,
+         memref<16xf32, 1>, memref<16xf32, 1>, memref<1x1x32xf16, 1>,
+         memref<1x2x5x8xi8, 1>, memref<1x2x5x8xi8, 1>) -> ()
+  return
+}
+
+// -----
+
+func.func @unsupported_mixed_cache_dtype(
+    %ctx: !hip.context, %query: memref<1x1x32xf16, 1>,
+    %key: memref<1x1x16xf16, 1>, %value: memref<1x1x16xf16, 1>,
+    %past_key: memref<1x2x4x8xi8, 1>,
+    %past_value: memref<1x2x4x8xf16, 1>,
+    %seqlens: memref<1xi32, 1>, %total: memref<i32, 1>,
+    %k_scale: memref<16xf32, 1>, %v_scale: memref<16xf32, 1>,
+    %out: memref<1x1x32xf16, 1>, %present_key: memref<1x2x5x8xi8, 1>,
+    %present_value: memref<1x2x5x8xf16, 1>) {
+  // expected-error @+1 {{quantized GQA past_value element type must be signed int8}}
+  "hip.gqa"(
+      %ctx, %query, %key, %value, %past_key, %past_value, %seqlens, %total,
+      %k_scale, %v_scale, %out, %present_key, %present_value)
+      <{num_heads = 4 : i64, kv_num_heads = 2 : i64,
+        k_quant_type = "PER_CHANNEL", v_quant_type = "PER_CHANNEL",
+        operandSegmentSizes =
+          array<i32: 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0>}>
+      : (!hip.context, memref<1x1x32xf16, 1>, memref<1x1x16xf16, 1>,
+         memref<1x1x16xf16, 1>, memref<1x2x4x8xi8, 1>,
+         memref<1x2x4x8xf16, 1>, memref<1xi32, 1>, memref<i32, 1>,
+         memref<16xf32, 1>, memref<16xf32, 1>, memref<1x1x32xf16, 1>,
+         memref<1x2x5x8xi8, 1>, memref<1x2x5x8xf16, 1>) -> ()
+  return
+}
+
+// -----
+
+func.func @unsupported_rotary_interleaved(
+    %ctx: !hip.context, %query: memref<1x1x32xf16, 1>,
+    %key: memref<1x1x16xf16, 1>, %value: memref<1x1x16xf16, 1>,
+    %past_key: memref<1x2x4x8xf16, 1>,
+    %past_value: memref<1x2x4x8xf16, 1>,
+    %seqlens: memref<1xi32, 1>, %total: memref<i32, 1>,
+    %out: memref<1x1x32xf16, 1>, %present_key: memref<1x2x5x8xf16, 1>,
+    %present_value: memref<1x2x5x8xf16, 1>) {
+  // expected-error @+1 {{rotary_interleaved must be zero}}
+  hip.gqa(%ctx)
+    ins(%query, %key, %value, %past_key, %past_value, %seqlens, %total :
+        memref<1x1x32xf16, 1>, memref<1x1x16xf16, 1>,
+        memref<1x1x16xf16, 1>, memref<1x2x4x8xf16, 1>,
+        memref<1x2x4x8xf16, 1>, memref<1xi32, 1>, memref<i32, 1>)
+    outs(%out, %present_key, %present_value :
+        memref<1x1x32xf16, 1>, memref<1x2x5x8xf16, 1>,
+        memref<1x2x5x8xf16, 1>)
+    {num_heads = 4 : i64, kv_num_heads = 2 : i64,
+     rotary_interleaved = 1 : i64}
+  return
 }

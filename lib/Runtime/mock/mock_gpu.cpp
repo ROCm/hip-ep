@@ -2,6 +2,7 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
+#include "gqa_contract.h"
 #include "hip/Support/SliceUtils.h"
 #include "hipdnn_ep_runtime.h"
 #include "matmul_gemm_contract.h"
@@ -730,24 +731,38 @@ int wrap_group_query_attention(
     // Shape values (6)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
-    int64_t attn_bias_batch, int64_t attn_bias_num_heads) {
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads,
+    // Runtime datatype codes for cache/scale pointers.
+    int64_t k_cache_data_type, int64_t v_cache_data_type,
+    int64_t k_scale_data_type, int64_t v_scale_data_type) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_group_query_attention\n");
     return -1;
   }
+  auto fail = [&]() {
+    (void)hipdnn_ep_state_set_error_flag(state);
+    return -1;
+  };
+  GqaKvCacheMode cacheMode = GqaKvCacheMode::Unquantized;
+  GqaRuntimeContractViolation contractViolation = validateGqaRuntimeContract(
+      position_ids != nullptr, output_qk != nullptr, qk_output, softcap,
+      rotary_interleaved, k_quant_type, v_quant_type, kv_cache_bit_width,
+      k_scale != nullptr, v_scale != nullptr, element_size_bytes,
+      k_cache_data_type, v_cache_data_type, k_scale_data_type,
+      v_scale_data_type, &cacheMode);
+  if (contractViolation != GqaRuntimeContractViolation::None) {
+    fprintf(stderr, "wrap_group_query_attention: %s\n",
+            gqaRuntimeContractMessage(contractViolation));
+    return fail();
+  }
   (void)op_state_slot;
 
-  (void)position_ids;
   (void)head_sink;
   (void)k_scale;
   (void)v_scale;
-  (void)output_qk;
   (void)local_window_size;
   (void)smooth_softmax;
-  (void)qk_output;
-  (void)k_quant_type;
-  (void)v_quant_type;
-  (void)kv_cache_bit_width;
+  (void)cacheMode;
   (void)no_causal;
   (void)past_buf_seq;
   (void)present_key;

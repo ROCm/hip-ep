@@ -183,7 +183,7 @@ Choose the smallest mechanism that matches the operation's semantics:
 | LayerNormalization | Y equals input; Mean/InvStdDev use keepdims reduction shape over `[axis, rank)` |
 | LinearAttention | Shared output/state formula used by converter, reification, and verifier |
 | SkipSimplifiedLayerNormalization | Output and optional residual sum equal input; training stats rejected |
-| GroupQueryAttention | Semantic query/head mapping plus `max(past capacity, total_seq_len)` or logical length alone without past |
+| GroupQueryAttention | Semantic query/head mapping plus `max(past capacity, total_seq_len)` or logical length alone without past; unsupported position/QK/softcap forms rejected before shape IR |
 | MultiHeadAttention | Default rank-3 fp16 Q/K/V result equals query; optional/cache forms route to GQA or are rejected |
 | Forward Conv (rank-3 converter/rank-4 HIP op) | Shared signed-floor spatial-window formula used by converter, reification, and verifier |
 | Window Pool (spatial rank 1..3) | Shared signed floor/ceil spatial-window formula; optional indices reuse the values shape |
@@ -445,10 +445,38 @@ larger than the past allocation. Conversion therefore sizes each dynamic
 present-cache sequence dimension as the nonnegative index maximum of its
 matching past dim 2 and `total_seq_len`. Without past operands, the dynamic
 present extent is `total_seq_len` directly. Conversion performs exactly one
-synchronized logical-length readback per op when any dynamic present or QK
-extent needs it, reusing that value for separate past-key/past-value maxima.
-Optional QK always uses the logical extent rather than cache capacity.
-Reification keeps the DPS-init fallback for these payload-dependent extents.
+synchronized logical-length readback per op when a dynamic present extent needs
+it, reusing that value for separate past-key/past-value maxima. Reification
+keeps the DPS-init fallback for these payload-dependent extents.
+
+The implemented GQA runtime subset does not accept an explicit `position_ids`
+input, a materialized `output_qk`, nonzero `qk_output`, or nonzero f32
+`softcap`. It also rejects nonzero `rotary_interleaved`: the implemented RoPE
+kernel is the half-rotated layout only. Omitted/`none` position IDs, three
+primary/cache outputs,
+an optional fourth output whose type is `NoneType`, `qk_output = 0`, and
+omitted, positive-zero, or negative-zero softcap are supported. ONNX conversion
+validates these conditions before destination construction or payload readback.
+The `hip.gqa` verifier and reifier enforce the same contract, and the reifier
+checks it before delegating to the DPS-init fallback so failure does not leave
+dimension IR behind.
+
+The KV-cache element-type matrix has two modes:
+
+- Unquantized: `k_quant_type = v_quant_type = NONE`, no scale operands, and
+  query/key/value/output/past/present all use one matching f16 or f32 element
+  type. `kv_cache_bit_width` does not select storage in this mode.
+- Quantized: both quantization attributes are `PER_CHANNEL`,
+  `kv_cache_bit_width = 8`, query/key/value/output are f16, past/present K/V
+  are signed int8, and both scales are static f32 tensors containing exactly
+  `kv_num_heads * head_size` elements. The runtime implements symmetric
+  quantization with no zero point.
+
+PER_TENSOR, 4-bit, mixed K/V schemes, mixed cache or scale dtypes, and
+unpaired scales are rejected. Quantized execution additionally requires the
+runtime fused path (RDNA, causal fp16, supported decode geometry, head size 64
+or 128, and no incompatible bias/window/sink combination); dynamic conditions
+that cannot be proved by the compiler are checked by the wrapper.
 
 The default `hip.multi_head_attention` rule matches its implemented runtime
 path, not the full Microsoft schema: Q/K/V are separate rank-3 fp16 tensors,
