@@ -108,6 +108,20 @@ static bool gqa_cache_seqlens_enabled() {
   return enabled;
 }
 
+// Shares HIPDNN_EP_ALLOC_TRACE with the runtime-state allocator tracing so one
+// switch produces both the per-allocator sizes and the per-call breakdown of
+// what the decomposed attention path asked the workspace for. The workspace
+// trace alone gives a total; only this breakdown says which term grew, and the
+// quadratic score terms are indistinguishable from the linear ones once
+// summed.
+static bool gqa_alloc_trace_enabled() {
+  static const bool enabled = [] {
+    const char *v = std::getenv("HIPDNN_EP_ALLOC_TRACE");
+    return v && std::strcmp(v, "0") != 0;
+  }();
+  return enabled;
+}
+
 // Sentinel returned by read_seqlens_k_for_dispatch when the pre-dispatch read
 // is not applicable (multi-batch or missing seqlens_k_ptr) or failed (D2H copy
 // / stream sync error). Outside the valid range of real seqlens_k values (-1 is
@@ -1521,6 +1535,18 @@ static int gqa_forward_hipblaslt(
     size_t gemm_ws =
         std::max(scoreState->workspace_size, valueState->workspace_size);
     size_t total_needed = temp_end + gemm_ws;
+    if (gqa_alloc_trace_enabled()) {
+      fprintf(stderr,
+              "GQA_WS layer=%d H=%zu G=%zu d=%zu sq=%zu total_seq=%zu "
+              "qtrans=%zu kexp=%zu vexp=%zu sf32=%zu sf16=%zu o=%zu "
+              "gemm_ws=%zu temp_end=%zu total=%zu\n",
+              op_state_slot, static_cast<size_t>(H), static_cast<size_t>(G),
+              static_cast<size_t>(d), static_cast<size_t>(sq),
+              static_cast<size_t>(total_seq), Qtrans_bytes, Kexp_bytes,
+              Vexp_bytes, S_f32_bytes, S_fp16_bytes, O_bytes, gemm_ws, temp_end,
+              total_needed);
+      fflush(stderr);
+    }
     HIP_CHECK(hipdnn_ep_state_ensure_workspace(state, total_needed));
   }
 

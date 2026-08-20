@@ -32,6 +32,82 @@ static int per_entry_load_constants(RuntimeState *state,
                                     morphizen::FileSystem *fs,
                                     const char *constants_filename);
 
+//===----------------------------------------------------------------------===//
+// Allocation tracing (diagnostic, HIPDNN_EP_ALLOC_TRACE=1)
+//===----------------------------------------------------------------------===//
+//
+// Every grow-on-demand buffer in this file reports both the size its caller
+// asked for and the size actually requested from the driver. The two differ
+// wherever a growth-amortisation rule applies, so an inflated request is
+// attributable to the policy rather than to a genuine rise in demand -- which
+// is not otherwise distinguishable from the failure message alone.
+//
+// Off unless the env var is set; when off this costs one relaxed load of a
+// function-local static per allocation, and allocations here are rare by
+// construction (every one of these buffers never shrinks).
+static bool alloc_trace_enabled() {
+  static const bool enabled = [] {
+    const char *v = std::getenv("HIPDNN_EP_ALLOC_TRACE");
+    return v && std::strcmp(v, "0") != 0;
+  }();
+  return enabled;
+}
+
+// Per-site high-water marks, so each trace line also carries the sum across
+// every site. None of these buffers shrink, so that sum is the actual standing
+// residency at the moment of the allocation -- which is what a failing
+// allocation has to fit alongside, and is not recoverable from the individual
+// failure messages.
+namespace {
+struct AllocTraceHwm {
+  static constexpr int kMaxSites = 24;
+  char names[kMaxSites][32] = {};
+  size_t peaks[kMaxSites] = {};
+  int count = 0;
+
+  // Returns this site's peak after folding in `alloc`, and the sum over all
+  // sites seen so far. Sites are few and the trace path is cold, so a linear
+  // scan is cheaper than the machinery to avoid it.
+  void update(const char *site, size_t alloc, size_t *site_peak,
+              size_t *total) {
+    int idx = -1;
+    for (int i = 0; i < count; ++i) {
+      if (std::strcmp(names[i], site) == 0) {
+        idx = i;
+        break;
+      }
+    }
+    if (idx < 0 && count < kMaxSites) {
+      idx = count++;
+      snprintf(names[idx], sizeof(names[idx]), "%s", site);
+    }
+    if (idx >= 0 && alloc > peaks[idx])
+      peaks[idx] = alloc;
+    *site_peak = idx >= 0 ? peaks[idx] : alloc;
+    *total = 0;
+    for (int i = 0; i < count; ++i)
+      *total += peaks[i];
+  }
+};
+} // namespace
+
+// `old` is 0 for a cold allocation, which is how the reader tells a first-touch
+// from a grow without needing the event field to be parsed positionally.
+static void alloc_trace(const char *site, size_t needed, size_t alloc,
+                        size_t old_size) {
+  if (!alloc_trace_enabled())
+    return;
+  static AllocTraceHwm hwm;
+  size_t site_peak = 0, total_peak = 0;
+  hwm.update(site, alloc, &site_peak, &total_peak);
+  fprintf(stderr,
+          "ALLOC_TRACE site=%s event=%s needed=%zu alloc=%zu old=%zu hwm=%zu "
+          "hwm_all=%zu\n",
+          site, old_size ? "grow" : "cold", needed, alloc, old_size, site_peak,
+          total_peak);
+  fflush(stderr);
+}
+
 int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
                                  const void *metadata_blob, size_t blob_size) {
   auto t0 = timing_now();
@@ -316,6 +392,7 @@ static int hipmalloc_and_fixup(RuntimeState *state,
                                const mlir::hip::HipModelMetaInfo *meta,
                                size_t total_size) {
   auto t_prev = timing_now();
+  alloc_trace("gpu_constants_blob", total_size, total_size, 0);
   if (hipMalloc(&state->gpu_constants_blob, total_size) != hipSuccess) {
     fprintf(stderr, "hipMalloc failed for constants blob (%zu bytes)\n",
             total_size);
@@ -999,6 +1076,7 @@ int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
   // time. Multi-domain functions leave domains 1..N empty here; those are grown
   // on first hip.get_pool call (lazy init).
   if (pool_size > 0) {
+    alloc_trace("pool[0]", pool_size, pool_size, 0);
     if (hipMalloc(&state->pool_base[0], pool_size) != hipSuccess) {
       fprintf(stderr, "Failed to allocate memory pool of size %zu bytes\n",
               pool_size);
@@ -1088,6 +1166,11 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state, int domain_id,
   // its pool. Pools never shrink, and other domains are untouched —
   // growing domain N is independent of domain M.
   if (needed_size > state->pool_size[domain_id]) {
+    if (alloc_trace_enabled()) {
+      char site[32];
+      snprintf(site, sizeof(site), "pool[%d]", domain_id);
+      alloc_trace(site, needed_size, needed_size, state->pool_size[domain_id]);
+    }
     // Sync the stream before freeing: the previous inference may have
     // dispatched async kernels that still hold pointers into THIS domain's
     // pool. hipFree on an in-flight buffer is undefined behavior. Other
@@ -1136,6 +1219,8 @@ void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size) {
   // same pointer can be stored into from host code and then read by
   // subsequent GPU kernels.
   if (needed_size > state->host_scratch_size) {
+    alloc_trace("host_scratch", needed_size, needed_size,
+                state->host_scratch_size);
     if (state->host_scratch_base) {
       if (state->stream)
         HIP_CLEANUP(hipStreamSynchronize(state->stream));
@@ -1198,6 +1283,7 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
     if (grown > alloc_size)
       alloc_size = grown;
   }
+  alloc_trace("workspace", needed_size, alloc_size, state->workspace_size);
 
   // Grow: free old, allocate new.
   // Sync the stream first to ensure no in-flight kernel is still using the
@@ -1262,6 +1348,8 @@ int hipdnn_ep_state_ensure_qmoe_scratch(RuntimeState *state,
     if (grown > alloc_size)
       alloc_size = grown;
   }
+  alloc_trace("qmoe_scratch", needed_size, alloc_size,
+              state->qmoe_scratch_size);
 
   if (state->qmoe_scratch) {
     if (state->stream) {
@@ -1307,6 +1395,8 @@ int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
     if (grown > alloc_size)
       alloc_size = grown;
   }
+  alloc_trace("qmoe_host_scratch", needed_size, alloc_size,
+              state->qmoe_host_scratch_size);
 
   if (state->qmoe_host_scratch) {
     // Sync first: any in-flight hipMemcpyAsync(D2H) targeting this pinned
@@ -1355,6 +1445,8 @@ int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
     if (grown > alloc_size)
       alloc_size = grown;
   }
+  alloc_trace("conv_scratch", needed_size, alloc_size,
+              state->conv_scratch_size);
 
   if (state->conv_scratch) {
     // Drain any in-flight conv that may still be reading the old workspace
@@ -1400,6 +1492,8 @@ int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
     if (grown > alloc_size)
       alloc_size = grown;
   }
+  alloc_trace("matmul_dp4a_scratch", needed_size, alloc_size,
+              state->matmul_dp4a_scratch_size);
 
   if (state->matmul_dp4a_scratch) {
     // Drain any in-flight dp4a gemv that may still be reading the old buffer
@@ -1449,6 +1543,7 @@ int hipdnn_ep_state_ensure_la_scratch(RuntimeState *state, size_t needed_size) {
     if (grown > alloc_size)
       alloc_size = grown;
   }
+  alloc_trace("la_scratch", needed_size, alloc_size, state->la_scratch_size);
 
   if (state->la_scratch) {
     // Drain any in-flight prefill still reading the old buffer before freeing.
