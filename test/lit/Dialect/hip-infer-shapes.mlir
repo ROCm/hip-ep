@@ -702,11 +702,7 @@ func.func @refine_expand_tier1_constant_shape(%ctx: !hip.context,
 
 // -----
 
-// `hip.slice` Tier-1 promotion. With static `data` and constant
-// `starts` / `ends` (axes default to [0..rank), steps default to
-// all-ones), the helper computes
-// `output[axis] = ceil_div(end - start, step)`. Slicing `tensor<10x4xf32>`
-// with starts=[1, 0], ends=[6, 4] yields output [5, 4].
+// `hip.slice` uses its exact extent operands as the refinement authority.
 // CHECK-LABEL: func.func @refine_slice_tier1_constant_indices
 // CHECK:         %[[E:.*]] = tensor.empty() : tensor<5x4xf32>
 // CHECK:         %[[Y:.*]] = hip.slice
@@ -716,11 +712,19 @@ func.func @refine_slice_tier1_constant_indices(%ctx: !hip.context,
                                                  %data: tensor<10x4xf32>,
                                                  %d0: index, %d1: index)
     -> tensor<?x?xf32> {
-  %starts = arith.constant dense<[1, 0]> : tensor<2xi64>
-  %ends = arith.constant dense<[6, 4]> : tensor<2xi64>
-  %e = tensor.empty(%d0, %d1) : tensor<?x?xf32>
+  %valid = arith.constant true
+  %s0 = arith.constant 1 : i64
+  %s1 = arith.constant 0 : i64
+  %p = arith.constant 1 : i64
+  %x0 = arith.constant 5 : index
+  %x1 = arith.constant 4 : index
+  %e = tensor.empty(%x0, %x1) : tensor<?x?xf32>
   %y = hip.slice(%ctx)
-    ins(%data, %starts, %ends : tensor<10x4xf32>, tensor<2xi64>, tensor<2xi64>)
+    ins(%data : tensor<10x4xf32>)
+    valid(%valid)
+    starts(%s0, %s1 : i64, i64)
+    steps(%p, %p : i64, i64)
+    extents(%x0, %x1 : index, index)
     outs(%e : tensor<?x?xf32>)
     : tensor<?x?xf32>
   return %y : tensor<?x?xf32>
@@ -728,13 +732,7 @@ func.func @refine_slice_tier1_constant_indices(%ctx: !hip.context,
 
 // -----
 
-// `hip.slice` non-foldable case: `starts` is a function arg, not a
-// constant. The Tier-1 helper bails and the per-op thunk falls back
-// to `HipDpsOp::reifyResultShapes`'s outs-lift default. Static dims
-// of the outs (`tensor<10x?xf32>`) still tighten dim 0; the dynamic
-// dim 1 stays dynamic. This guards "no IR bloat on non-foldable slice"
-// (the dim-arith chain would have been
-// `arith.divsi(arith.subi(end, start), step)` per axis -- never emitted).
+// A mixed static/dynamic exact extent refines only the constant dimension.
 // CHECK-LABEL: func.func @refine_slice_non_foldable_falls_back_to_outs
 // CHECK-NOT:     arith.subi
 // CHECK-NOT:     arith.divsi
@@ -745,13 +743,19 @@ func.func @refine_slice_tier1_constant_indices(%ctx: !hip.context,
 func.func @refine_slice_non_foldable_falls_back_to_outs(
     %ctx: !hip.context,
     %data: tensor<10x4xf32>,
-    %starts: tensor<2xi64>,
-    %ends: tensor<2xi64>,
     %d0: index)
     -> tensor<?x?xf32> {
+  %valid = arith.constant true
+  %s = arith.constant 0 : i64
+  %p = arith.constant 1 : i64
+  %x0 = arith.constant 10 : index
   %e = tensor.empty(%d0) : tensor<10x?xf32>
   %y = hip.slice(%ctx)
-    ins(%data, %starts, %ends : tensor<10x4xf32>, tensor<2xi64>, tensor<2xi64>)
+    ins(%data : tensor<10x4xf32>)
+    valid(%valid)
+    starts(%s, %s : i64, i64)
+    steps(%p, %p : i64, i64)
+    extents(%x0, %d0 : index, index)
     outs(%e : tensor<10x?xf32>)
     : tensor<10x?xf32>
   %c = tensor.cast %y : tensor<10x?xf32> to tensor<?x?xf32>

@@ -9,19 +9,12 @@ namespace mlir {
 namespace hip {
 namespace {
 
-// hip.slice(ctx, data, starts, ends, [axes], [steps], output)
-//   -> wrap_slice(state, data_ptr, starts_ptr, ends_ptr,
-//                 axes_ptr (or null), steps_ptr (or null), out_ptr,
-//                 data_shape_ptr, data_rank,
-//                 output_shape_ptr, output_rank,
-//                 starts_num_elements, axes_num_elements,
-//                 steps_num_elements, data_type)
+// hip.slice(ctx, data, valid, starts[R], steps[R], extents[R], output)
+//   -> wrap_slice(state, data, output, data_shape, output_shape,
+//                 starts, steps, extents, rank, dtype, valid)
 //
-// Today the runtime function is a no-op stub that only logs its parameters
-// (see lib/Runtime/real/slice.cpp). This lowering exists to keep the IR
-// pipeline (bufferize -> hip-to-llvm -> generate-interface) functional even
-// when a Slice cannot be folded to tensor.extract_slice by the OnnxToHip
-// decompose pattern.
+// Every control array is host SSA materialized by conversion. The runtime does
+// no D2H and no ONNX normalization.
 struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -35,92 +28,84 @@ struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
     Type i64Type = rewriter.getI64Type();
 
     auto dataType = cast<MemRefType>(op.getData().getType());
-    auto startsType = cast<MemRefType>(op.getStarts().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
+    int64_t rank = dataType.getRank();
+    if (outputType.getRank() != rank ||
+        static_cast<int64_t>(op.getStarts().size()) != rank ||
+        static_cast<int64_t>(op.getSteps().size()) != rank ||
+        static_cast<int64_t>(op.getExtents().size()) != rank)
+      return rewriter.notifyMatchFailure(op, "invalid exact-rank contract");
 
     int64_t hipDtype = getHipdnnDataType(dataType.getElementType());
     if (hipDtype < 0)
       return rewriter.notifyMatchFailure(op, "unsupported data element type");
 
-    Value statePtr = adaptor.getCtx();
-    Value dataPtr =
-        extractContiguousMemRefPtr(adaptor.getData(), rewriter, loc);
-    Value startsPtr =
-        extractContiguousMemRefPtr(adaptor.getStarts(), rewriter, loc);
-    Value endsPtr =
-        extractContiguousMemRefPtr(adaptor.getEnds(), rewriter, loc);
-    Value axesPtr = extractOptionalMemRefPtr(adaptor.getAxes(), rewriter, loc);
-    Value stepsPtr =
-        extractOptionalMemRefPtr(adaptor.getSteps(), rewriter, loc);
-    Value outPtr =
-        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
-
-    auto createI64Const = [&](int64_t v) {
+    auto i64Constant = [&](int64_t value) {
       return LLVM::ConstantOp::create(rewriter, loc, i64Type,
-                                      rewriter.getI64IntegerAttr(v));
+                                      rewriter.getI64IntegerAttr(value));
     };
-    Value one = createI64Const(1);
-    auto emitShapeArray = [&](MemRefType type, Value descriptor) -> Value {
-      int rank = type.getRank();
-      int arrLen = std::max(rank, 1);
-      auto arrType = LLVM::LLVMArrayType::get(i64Type, arrLen);
-      Value arr =
-          LLVM::AllocaOp::create(rewriter, loc, ptrType, arrType, one, 8);
-      for (int i = 0; i < rank; ++i) {
-        Value dim = getMemRefDimSize(type, i, descriptor, rewriter, loc);
-        Value idx = LLVM::ConstantOp::create(rewriter, loc, i32Type,
-                                             rewriter.getI32IntegerAttr(i));
-        Value elemPtr =
-            LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type, arr, idx);
-        LLVM::StoreOp::create(rewriter, loc, dim, elemPtr);
+    Value one = i64Constant(1);
+    Value arrayCount = i64Constant(std::max<int64_t>(rank, 1));
+
+    auto allocateI64Array = [&]() {
+      return LLVM::AllocaOp::create(rewriter, loc, ptrType, i64Type, arrayCount,
+                                    /*alignment=*/8)
+          .getResult();
+    };
+    auto storeArrayElement = [&](Value array, int64_t index, Value value) {
+      Value indexValue = i64Constant(index);
+      Value slot = LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type, array,
+                                       indexValue);
+      LLVM::StoreOp::create(rewriter, loc, value, slot);
+    };
+    auto emitShapeArray = [&](MemRefType type, Value descriptor) {
+      Value array = allocateI64Array();
+      for (int64_t dim : llvm::seq<int64_t>(rank)) {
+        storeArrayElement(
+            array, dim, getMemRefDimSize(type, dim, descriptor, rewriter, loc));
       }
-      return arr;
+      return array;
     };
 
     Value dataShape = emitShapeArray(dataType, adaptor.getData());
-    Value outShape = emitShapeArray(outputType, adaptor.getOutput());
-
-    Value startsNum =
-        computeNumElements(startsType, adaptor.getStarts(), rewriter, loc);
-    Value axesNum;
-    if (op.getAxes()) {
-      auto axesT = cast<MemRefType>(op.getAxes().getType());
-      axesNum = computeNumElements(axesT, adaptor.getAxes(), rewriter, loc);
-    } else {
-      axesNum = createI64Const(0);
-    }
-    Value stepsNum;
-    if (op.getSteps()) {
-      auto stepsT = cast<MemRefType>(op.getSteps().getType());
-      stepsNum = computeNumElements(stepsT, adaptor.getSteps(), rewriter, loc);
-    } else {
-      stepsNum = createI64Const(0);
+    Value outputShape = emitShapeArray(outputType, adaptor.getOutput());
+    Value starts = allocateI64Array();
+    Value steps = allocateI64Array();
+    Value extents = allocateI64Array();
+    for (int64_t dim : llvm::seq<int64_t>(rank)) {
+      storeArrayElement(starts, dim, adaptor.getStarts()[dim]);
+      storeArrayElement(steps, dim, adaptor.getSteps()[dim]);
+      storeArrayElement(extents, dim, adaptor.getExtents()[dim]);
     }
 
-    Value dataRank = createI64Const(dataType.getRank());
-    Value outRank = createI64Const(outputType.getRank());
-    Value dataTypeVal = createI64Const(hipDtype);
+    Value dataPtr = extractMemRefDataPtr(adaptor.getData(), dataType,
+                                         typeConverter, rewriter, loc);
+    Value outputPtr = extractMemRefDataPtr(adaptor.getOutput(), outputType,
+                                           typeConverter, rewriter, loc);
+    if (!dataPtr || !outputPtr)
+      return rewriter.notifyMatchFailure(op, "failed to compute data pointers");
 
-    SmallVector<Type, 16> paramTypes = {
-        ptrType, ptrType, ptrType, ptrType, // state, data, starts, ends
-        ptrType, ptrType, ptrType,          // axes, steps, output
-        ptrType, i64Type,                   // data_shape, data_rank
-        ptrType, i64Type,                   // out_shape,  out_rank
-        i64Type, i64Type, i64Type,          // starts_num, axes_num,
-                                            // steps_num
-        i64Type};                           // data_type
-
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapSlice, paramTypes, i32Type);
-    if (failed(funcOp))
+    SmallVector<Type> parameterTypes = {ptrType,
+                                        ptrType,
+                                        ptrType,
+                                        ptrType,
+                                        ptrType,
+                                        ptrType,
+                                        ptrType,
+                                        ptrType,
+                                        i64Type,
+                                        i64Type,
+                                        rewriter.getI1Type()};
+    FailureOr<LLVM::LLVMFuncOp> function = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapSlice, parameterTypes, i32Type);
+    if (failed(function))
       return failure();
 
-    SmallVector<Value, 16> args = {statePtr, dataPtr,  startsPtr,  endsPtr,
-                                   axesPtr,  stepsPtr, outPtr,     dataShape,
-                                   dataRank, outShape, outRank,    startsNum,
-                                   axesNum,  stepsNum, dataTypeVal};
-
-    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    LLVM::CallOp::create(
+        rewriter, loc, *function,
+        ValueRange{adaptor.getCtx(), dataPtr, outputPtr, dataShape, outputShape,
+                   starts, steps, extents, i64Constant(rank),
+                   i64Constant(hipDtype), adaptor.getParamsValid()});
     rewriter.eraseOp(op);
     return success();
   }

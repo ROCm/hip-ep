@@ -172,8 +172,11 @@ Choose the smallest mechanism that matches the operation's semantics:
 | Permutation | `reifyTransposeByPerm` |
 | Gather/GatherND/GatherElements | Gather-specific helpers or thunks |
 | OneHot, Compress, TopK | Dedicated reification thunks |
-| Pad, Tile, Slice, Range | Fold-or-bail helpers with fallback to DPS-init shape |
+| Pad | Exact affine input-dimension arithmetic for constant/stamped pads; runtime pads use converter readback and reify from outs |
+| Slice | Shared static/SSA normalization; runtime i32/i64 controls use one grouped readback and exact extents |
 | Expand | Pure constant inference; grouped readback and checked destination construction for runtime targets |
+| Range | Constant controls fold exactly; runtime controls use one grouped readback and a checked result count |
+| Tile | Constant repeats use exact mixed shape arithmetic; runtime repeats use one bulk synchronized readback and reify from that exact init |
 | MatMul/Gemm/MatMulNBits | Dedicated shape logic based on operand dimensions and attributes |
 | Attention or normalization with multiple destinations | One shape vector per DPS init unless an op supplies a dedicated thunk |
 | Convolution, pooling, or resize with converter-computed destinations | DPS-init shape, with semantic validity handled by conversion or verification |
@@ -479,6 +482,72 @@ Static refinements propagate into bufferization sizing and downstream pool plann
 
 A data-dependent extent that reaches a graph output must additionally be a real SSA value *before* the allocation, because `hip.alloc_output` takes the extent as an operand and ORT rejects an output request whose shape differs from the one it computed for the run. The converter therefore materializes the count with a device scan plus a synchronized `hip.readback_dim` and sizes the DPS init with it; reification then reports that init extent. `onnx.Compress` follows this pattern (scanning its `condition` with `hip.nonzero`), so a padded-input encoder that drops its pad slices reports the kept-slice count rather than the padded capacity. Reporting the upper bound instead is not merely conservative — it is the wrong output shape.
 
+Pad reads compile-time pads and optional axes directly from dense
+`hip.constant` carriers during compute conversion, then attaches durable
+`static_pads` / `static_axes` metadata before standalone externalization.
+`inferPadShape` validates the parameter lengths and axes without emitting IR;
+both conversion and reification then use `reifyPadShape` for the exact affine rule
+`output[d] = input[d] + begin[d] + end[d]`. Dynamic input dimensions therefore
+produce `tensor.dim` plus a constant offset. Genuinely runtime pads retain the
+converter's synchronized payload readback, while dialect reification performs
+no payload read and lifts the already-exact destination.
+
+Slice has one semantic rule with pure static inference and standard-arithmetic
+SSA materialization. Constants are consumed directly. Every genuinely runtime
+rank-0/rank-1 i32/i64 control source participates in one
+`hip.readback_control`; the op queues all operand-major copies and performs one
+stream synchronization, sign-extends i32, preserves signed i64 without
+clamping, and returns `i1 valid` plus flattened i64 values. Its source grouping
+comes from static operand types, and its lowering respects memref descriptor
+offsets. `hip.readback_shape` remains unchanged for existing shape-only users.
+
+The Slice materializer normalizes negative or runtime axes, rejects
+duplicates/out-of-range axes and zero steps through `params_valid`, and handles
+omitted axes/steps, negative bounds/steps, zero dimensions, and `INT64_MIN`
+without signed overflow. Invalid runtime controls select zero extents/starts
+and unit steps. Positive all-constant slices may still become
+`tensor.extract_slice`; every native `hip.slice` carries exactly data,
+`params_valid`, rank normalized i64 starts/steps, rank exact extents, and the
+exact DPS destination. There are no raw parameter tensors, static-parameter
+attributes, capacity/logical-tail split, or duplicate readbacks.
+
+`wrap_slice` consumes only normalized host controls and exact shapes. It
+performs defensive count, byte, pointer, destination-shape, and first/last
+address validation; empty outputs accept null allocator storage and launch no
+kernel. Arbitrary-rank strides/starts/steps are staged into runtime-managed
+device scratch on the execution stream, so reuse is ordered after the previous
+Slice launch. The kernel loops over runtime rank and has no rank-8 metadata
+limit or capacity-tail branch.
+
+The `wrap_slice` signature and generated `hip.slice` contract replace the old
+raw-parameter ABI. Cached LLVM bitcode/native model artifacts produced against
+the prior ABI must be invalidated.
+
+Exact Slice descriptors also participate in the loop descriptor-return ABI.
+An exact `[1, 0, D]` Slice remains a zero-element borrowed `v_init` descriptor;
+it is not widened to carrier capacity. Each body iteration returns its exact
+shape-changing descriptor, and `hip-loop-body-to-out-params` redirects the
+carrier allocation to `hip.loop_alloc` in the invocation frame. Nested or
+otherwise foreign body results are copied into the parent frame's exact bank
+before publication. If the final descriptor is a graph output,
+`hip-use-output-allocator` allocates and copies the exact shape before
+`hip-finalize-loop-frames` destroys the frame. See
+[loop-carrier-descriptor-abi.md](loop-carrier-descriptor-abi.md).
+
+Tile's refinement is complete. Dense carrier repeats share
+`inferTileShape`/`reifyTileShape`, including exact multiplication of dynamic
+input dimensions. Runtime repeats are read once in bulk by the converter to
+build the exact destination; reification lifts that destination and never
+duplicates the payload readback.
+
+Slice, Pad, Tile, and Expand converters follow a pure-before-materialize
+contract. Structural validation, static inference, and imported-result
+compatibility complete before any `tensor.dim`, arithmetic, readback, or
+`tensor.empty` is emitted. An imported dynamic dimension may remain dynamic or
+be refined by a proven static extent. An imported static dimension requires an
+equal static inferred extent; unknown inference never inherits an importer
+constraint. A failed pattern therefore leaves the IR unchanged.
+
 ## Pre-conversion loop-body rank inference
 
 `--hip-infer-loop-body-shapes` is a narrow pre-conversion backstop. It runs after loop outlining and before ONNX-to-HIP conversion to establish rank for unranked loop-carried values that would otherwise block conversion; it is not the general HIP shape-inference mechanism.
@@ -524,10 +593,13 @@ Primary regression coverage:
 | `test/lit/Dialect/hip-matmul-shape-verifier.mlir` | Static MatMul shape validation |
 | `test/lit/Conversion/onnx-to-hip/test_reduce_sum.mlir` | Reduction destinations, including the non-positional `keepdims = 0` dimension mapping |
 | `test/lit/Conversion/onnx-to-hip/test_reduce_runtime_axes_invalid.mlir` | Conversion-time rejection of all runtime axes and non-contiguous constant axes |
+| `test/lit/Conversion/onnx-to-hip/test_payload_failure_atomicity.mlir` | Failed payload rewrites leave no destination/readback arithmetic |
 | `test/lit/Dialect/hip-loop-verifier.mlir` | Loop-carried type contract |
 | `test/lit/Dialect/hip-resolve-tensor-dims.mlir` | Production pre-bufferization dim folding |
 
 Complex operations may use dedicated files; common shape categories should extend the consolidated infer-shapes coverage.
+`test/runtime/test_slice_utils.cpp` covers null-storage empty outputs and
+positive/negative extreme-step extent arithmetic without a GPU.
 
 ## Current limitations
 

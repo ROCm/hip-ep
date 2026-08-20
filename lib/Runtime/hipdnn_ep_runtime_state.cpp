@@ -158,6 +158,9 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->num_buffers = 0;
   state->workspace = nullptr;
   state->workspace_size = 0;
+  state->slice_metadata_scratch = nullptr;
+  state->slice_metadata_scratch_size = 0;
+  state->slice_metadata_mutex = nullptr;
   state->num_host_scratch_sites = 0;
   state->host_scratch_sites = nullptr;
   // Start with no output allocator (null context + callback). The EP installs
@@ -283,6 +286,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
     free(state);
     return 12;
   }
+
+  state->slice_metadata_mutex = new std::mutex();
 
   *out_state = state;
   return 0;
@@ -718,6 +723,14 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   if (state->workspace) {
     HIP_CLEANUP(hipFree(state->workspace));
   }
+
+  // Slice's dedicated scratch can only be in flight on state->stream, which
+  // was drained above. No host call may race state cleanup.
+  if (state->slice_metadata_scratch) {
+    HIP_CLEANUP(hipFree(state->slice_metadata_scratch));
+  }
+  delete state->slice_metadata_mutex;
+  state->slice_metadata_mutex = nullptr;
 
   // Free qmoe device scratch + pinned host mirror (if allocated)
   if (state->qmoe_scratch) {

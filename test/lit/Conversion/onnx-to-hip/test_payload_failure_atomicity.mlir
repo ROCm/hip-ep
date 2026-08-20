@@ -11,6 +11,47 @@ module {
     return %input : tensor<1xf32>
   }
 
+  func.func @slice_static_contradiction(
+      %input: tensor<6xf32>) -> tensor<4xf32> {
+    %starts = "onnx.Constant"() {
+      value = dense<[5]> : tensor<1xi64>
+    } : () -> tensor<1xi64>
+    %ends = "onnx.Constant"() {
+      value = dense<[0]> : tensor<1xi64>
+    } : () -> tensor<1xi64>
+    %axes = "onnx.Constant"() {
+      value = dense<[0]> : tensor<1xi64>
+    } : () -> tensor<1xi64>
+    %steps = "onnx.Constant"() {
+      value = dense<[-2]> : tensor<1xi64>
+    } : () -> tensor<1xi64>
+    %result = "onnx.Slice"(%input, %starts, %ends, %axes, %steps)
+      : (tensor<6xf32>, tensor<1xi64>, tensor<1xi64>,
+         tensor<1xi64>, tensor<1xi64>) -> tensor<4xf32>
+    return %result : tensor<4xf32>
+  }
+
+  // CHECK-LABEL: func.func @slice_static_contradiction
+  // CHECK-NOT: tensor.dim
+  // CHECK-NOT: tensor.empty
+  // CHECK-NOT: hip.slice
+  // CHECK: "onnx.Slice"
+
+  func.func @slice_dynamic_control_length(
+      %input: tensor<6xf32>, %starts: tensor<?xi32>) -> tensor<?xf32> {
+    %ends = arith.constant dense<[5]> : tensor<1xi64>
+    %result = "onnx.Slice"(%input, %starts, %ends)
+      : (tensor<6xf32>, tensor<?xi32>, tensor<1xi64>) -> tensor<?xf32>
+    return %result : tensor<?xf32>
+  }
+
+  // CHECK-LABEL: func.func @slice_dynamic_control_length
+  // CHECK-NOT: hip.readback_control
+  // CHECK-NOT: tensor.dim
+  // CHECK-NOT: tensor.empty
+  // CHECK-NOT: hip.slice
+  // CHECK: "onnx.Slice"
+
   func.func @pad_static_contradiction(
       %input: tensor<3x4xf32>) -> tensor<5x7xf32> {
     %pads = "onnx.Constant"() {
@@ -77,6 +118,22 @@ module {
   // CHECK: "onnx.Expand"
 
   // Static imported dimensions may refine dynamic payload inference.
+  func.func @slice_static_result_refinement(
+      %input: tensor<?xf32>) -> tensor<3xf32> {
+    %starts = arith.constant dense<[5]> : tensor<1xi64>
+    %ends = arith.constant dense<[0]> : tensor<1xi64>
+    %axes = arith.constant dense<[0]> : tensor<1xi64>
+    %steps = arith.constant dense<[-2]> : tensor<1xi64>
+    %result = "onnx.Slice"(%input, %starts, %ends, %axes, %steps)
+      : (tensor<?xf32>, tensor<1xi64>, tensor<1xi64>,
+         tensor<1xi64>, tensor<1xi64>) -> tensor<3xf32>
+    return %result : tensor<3xf32>
+  }
+
+  // CHECK-LABEL: func.func @slice_static_result_refinement
+  // CHECK: tensor.empty() : tensor<3xf32>
+  // CHECK: hip.slice
+
   func.func @pad_static_result_refinement(
       %input: tensor<?x4xf32>) -> tensor<5x4xf32> {
     %pads = arith.constant dense<[1, 0, 1, 0]> : tensor<4xi64>
@@ -115,6 +172,22 @@ module {
   // CHECK: hip.expand
 
   // Dynamic imported dimensions may be refined by proven static inference.
+  func.func @slice_dynamic_result_static_inference(
+      %input: tensor<6xf32>) -> tensor<?xf32> {
+    %starts = arith.constant dense<[5]> : tensor<1xi64>
+    %ends = arith.constant dense<[0]> : tensor<1xi64>
+    %axes = arith.constant dense<[0]> : tensor<1xi64>
+    %steps = arith.constant dense<[-2]> : tensor<1xi64>
+    %result = "onnx.Slice"(%input, %starts, %ends, %axes, %steps)
+      : (tensor<6xf32>, tensor<1xi64>, tensor<1xi64>,
+         tensor<1xi64>, tensor<1xi64>) -> tensor<?xf32>
+    return %result : tensor<?xf32>
+  }
+
+  // CHECK-LABEL: func.func @slice_dynamic_result_static_inference
+  // CHECK: tensor.empty({{.*}}) : tensor<?xf32>
+  // CHECK: hip.slice
+
   func.func @pad_dynamic_result_static_inference(
       %input: tensor<3x4xf32>) -> tensor<?x?xf32> {
     %pads = arith.constant dense<[1, 1, 1, 1]> : tensor<4xi64>

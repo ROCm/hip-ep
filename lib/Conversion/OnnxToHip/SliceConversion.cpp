@@ -78,9 +78,9 @@ static SmallVector<Value> materializeValues(PatternRewriter &rewriter,
   return values;
 }
 
-struct SliceDecompose : public RewritePattern {
-  SliceDecompose(MLIRContext *context)
-      : RewritePattern("onnx.Slice", /*benefit=*/2, context) {}
+struct SliceToHip : public RewritePattern {
+  SliceToHip(MLIRContext *context)
+      : RewritePattern("onnx.Slice", /*benefit=*/1, context) {}
 
   LogicalResult matchAndRewrite(Operation *op,
                                 PatternRewriter &rewriter) const override {
@@ -200,8 +200,6 @@ struct SliceDecompose : public RewritePattern {
     bool decompose =
         allConstant && llvm::all_of(resolvedStaticSteps,
                                     [](int64_t step) { return step > 0; });
-    if (!decompose)
-      return failure();
     std::optional<hipdnn_ep::slice::NormalizedParameters> staticParameters;
     if (allConstant &&
         llvm::none_of(dataType.getShape(), ShapedType::isDynamic)) {
@@ -328,70 +326,31 @@ struct SliceDecompose : public RewritePattern {
       return success();
     }
 
-    return failure();
-  }
-};
+    SmallVector<Value> dynamicSizes;
+    for (int64_t axis : llvm::seq<int64_t>(rank))
+      if (resultType.isDynamicDim(axis))
+        dynamicSizes.push_back(extentIndices[axis]);
+    Value init =
+        tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                resultType.getElementType(), dynamicSizes);
 
-struct SliceToHip : public mlir::RewritePattern {
-  SliceToHip(mlir::MLIRContext *ctx)
-      : RewritePattern("onnx.Slice", /*benefit=*/1, ctx) {}
+    SmallVector<Value> operands = {context, data, parameters.valid};
+    llvm::append_range(operands, parameters.starts);
+    llvm::append_range(operands, parameters.steps);
+    llvm::append_range(operands, extentIndices);
+    operands.push_back(init);
 
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override {
-    if (op->getNumOperands() < 3 || op->getNumOperands() > 5 ||
-        op->getNumResults() != 1)
-      return rewriter.notifyMatchFailure(op, "expected 3-5 inputs, 1 output");
-
-    auto ctxOrFailure = getContextArg(op, rewriter);
-    if (mlir::failed(ctxOrFailure))
-      return mlir::failure();
-    mlir::Value context = *ctxOrFailure;
-
-    mlir::Location loc = op->getLoc();
-    mlir::Value data = op->getOperand(0);
-    mlir::Value starts = op->getOperand(1);
-    mlir::Value ends = op->getOperand(2);
-    mlir::Value axes = op->getNumOperands() >= 4
-                           ? normalizeOptional(op->getOperand(3))
-                           : mlir::Value();
-    mlir::Value steps = op->getNumOperands() == 5
-                            ? normalizeOptional(op->getOperand(4))
-                            : mlir::Value();
-
-    auto resultType =
-        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    if (!resultType)
-      return rewriter.notifyMatchFailure(op, "result must be ranked tensor");
-
-    auto dataType = mlir::cast<mlir::RankedTensorType>(data.getType());
-
-    // For each dynamic output dim, source an upper bound from the data
-    // dim at the same position. This is sound because ONNX Slice can
-    // never widen any axis -- output dim i is at most data dim i. The
-    // runtime stub honours `output_shape[i]` as the actual extent so the
-    // over-allocation is benign.
-    llvm::SmallVector<mlir::Value> dynSizes;
-    for (int64_t i = 0; i < resultType.getRank(); ++i) {
-      if (!resultType.isDynamicDim(i))
-        continue;
-      if (i >= dataType.getRank())
-        return rewriter.notifyMatchFailure(
-            op, "result rank exceeds data rank — invalid Slice");
-      if (dataType.isDynamicDim(i))
-        dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, data, i));
-      else
-        dynSizes.push_back(mlir::arith::ConstantIndexOp::create(
-            rewriter, loc, dataType.getDimSize(i)));
-    }
-    mlir::Value init =
-        mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
-                                      resultType.getElementType(), dynSizes);
-
-    auto hipOp = mlir::hip::SliceOp::create(rewriter, loc, context, data,
-                                            starts, ends, axes, steps, init);
-    rewriter.replaceOp(op, hipOp->getResult(0));
-    return mlir::success();
+    OperationState state(loc, SliceOp::getOperationName());
+    state.addOperands(operands);
+    state.addTypes(resultType);
+    state.addAttribute(
+        "operand_segment_sizes",
+        rewriter.getDenseI32ArrayAttr({1, 1, 1, static_cast<int32_t>(rank),
+                                       static_cast<int32_t>(rank),
+                                       static_cast<int32_t>(rank), 1}));
+    Operation *slice = rewriter.create(state);
+    rewriter.replaceOp(op, slice->getResult(0));
+    return success();
   }
 };
 
@@ -399,7 +358,7 @@ struct SliceToHip : public mlir::RewritePattern {
 
 void populateSliceConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *context) {
-  patterns.add<SliceDecompose, SliceToHip>(context);
+  patterns.add<SliceToHip>(context);
 }
 
 } // namespace hip

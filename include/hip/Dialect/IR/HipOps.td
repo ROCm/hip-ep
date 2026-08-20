@@ -3833,36 +3833,32 @@ def Hip_LessOp : Hip_DpsOp_Broadcast<"less", /*operandGetters=*/["Lhs", "Rhs"]> 
   }];
 }
 
-def Hip_SliceOp : Hip_DpsOp_WithInfer<"slice", "Output", [AttrSizedOperandSegments]> {
+def Hip_SliceOp :
+    Hip_DpsOp_Payload<"slice",
+                      /*traits=*/[AttrSizedOperandSegments],
+                      /*outsAccessor=*/"Output"> {
   let summary = "Slice a tensor along multiple axes (ONNX Slice fallback)";
   let description = [{
-    Native fallback for ONNX Slice when the OnnxToHip pass cannot decompose
-    the op to `tensor.extract_slice` (e.g. non-constant slice parameters or
-    negative `steps`). Implements the standard ONNX Slice operator semantics:
+    Native fallback for ONNX Slice after conversion has resolved the complete
+    semantic contract on the host. `starts`, `steps`, and `extents` each have
+    exactly one scalar entry per data dimension. Starts and steps are normalized
+    signed i64 values; extents are exact host index values used to allocate the
+    DPS destination. `params_valid` is false for invalid runtime axes, duplicate
+    axes, or zero steps; in that case conversion supplies zero extents, zero
+    starts, and unit steps.
 
-      output[k] = data[ start[k0]:end[k0]:step[k0],
-                         start[k1]:end[k1]:step[k1], ... ]
-
-    `starts` / `ends` are 1-D integer tensors (int32 or int64), one entry per
-    axis listed in `axes`. `axes` defaults to `[0, ..., r-1]` when absent and
-    `steps` defaults to all-ones. Per-axis negative indices and negative
-    steps follow ONNX clamping rules.
-
-    The common case (compile-time constant indices, positive unit stride) is
-    handled by an upstream decompose pattern that lowers `onnx.Slice` to
-    `tensor.extract_slice` — that path produces a zero-cost view without any
-    runtime call. This op exists only to give the fallback path a stable
-    DPS-shaped representation to bufferize and lower from.
-
-    Uses destination-passing style: output buffer is provided as argument.
+    The runtime performs no parameter readback or ONNX normalization. It only
+    validates the exact shape/address contract, stages arbitrary-rank kernel
+    metadata, and launches the copy kernel. Compile-time positive-step slices
+    may still decompose to `tensor.extract_slice`.
 
     Example:
     ```mlir
-    hip.slice(%ctx) ins(%data, %starts, %ends : memref<3x4xf32, 1>,
-                                                  memref<2xi64, 1>,
-                                                  memref<2xi64, 1>)
-                    axes(%axes : memref<2xi64, 1>)
-                    steps(%steps : memref<2xi64, 1>)
+    hip.slice(%ctx) ins(%data : memref<3x4xf32, 1>)
+                    valid(%valid)
+                    starts(%s0, %s1 : i64, i64)
+                    steps(%p0, %p1 : i64, i64)
+                    extents(%e0, %e1 : index, index)
                     outs(%out : memref<3x2xf32, 1>)
     ```
   }];
@@ -3870,21 +3866,23 @@ def Hip_SliceOp : Hip_DpsOp_WithInfer<"slice", "Output", [AttrSizedOperandSegmen
   let arguments = (ins
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$data,
-    Hip_TensorOrMemRef:$starts,
-    Hip_TensorOrMemRef:$ends,
-    Optional<Hip_TensorOrMemRef>:$axes,
-    Optional<Hip_TensorOrMemRef>:$steps,
+    I1:$params_valid,
+    Variadic<I64>:$starts,
+    Variadic<I64>:$steps,
+    Variadic<Index>:$extents,
     Hip_TensorOrMemRef:$output
   );
 
   let assemblyFormat = [{
-    `(` $ctx `)` `ins` `(` $data `,` $starts `,` $ends `:`
-        type($data) `,` type($starts) `,` type($ends) `)`
-    (`axes` `(` $axes^ `:` type($axes) `)`)?
-    (`steps` `(` $steps^ `:` type($steps) `)`)?
+    `(` $ctx `)` `ins` `(` $data `:` type($data) `)`
+    `valid` `(` $params_valid `)`
+    `starts` `(` $starts `:` type($starts) `)`
+    `steps` `(` $steps `:` type($steps) `)`
+    `extents` `(` $extents `:` type($extents) `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+  let hasVerifier = 1;
 }
 
 def Hip_GatherNDOp : Hip_DpsOp_WithInfer<"gather_nd"> {

@@ -27,6 +27,8 @@
 // is acyclic.
 #include "op_state.h"
 
+#include <mutex>
+
 struct RuntimePoolSite {
   int num_domains;
   void **pool_base;
@@ -72,6 +74,15 @@ struct RuntimeState {
   // Lazily grown via hipdnn_ep_state_ensure_workspace(); never shrinks.
   void *workspace;
   size_t workspace_size;
+
+  // Dedicated device metadata scratch for Slice. It is intentionally separate
+  // from the general operator workspace so concurrent Slice host calls only
+  // serialize each other, not unrelated operators. The mutex is heap-created
+  // because RuntimeState itself is malloc-allocated and therefore does not run
+  // C++ member constructors.
+  void *slice_metadata_scratch;
+  size_t slice_metadata_scratch_size;
+  std::mutex *slice_metadata_mutex;
 
   // Per-function-site host-mapped scratch buffers for tiny host-fed scalars
   // routed away from the GPU pool by hip-materialize-host-scalars.

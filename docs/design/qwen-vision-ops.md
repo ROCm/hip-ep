@@ -26,8 +26,8 @@ The kernels implemented in this round are:
 | Constant     | ConstantOfShape (compile-time fold; no kernel)            | —                                    |
 
 All kernels target FP16 / FP32 / INT32 / INT64 data types (a strict subset
-of ORT's CUDA EP support). Indices for GatherND, ScatterND, and Slice are
-INT64 only.
+of ORT's CUDA EP support). GatherND and ScatterND indices are INT64 only;
+Slice control tensors may be INT32 or INT64.
 
 Reference implementations were ported from
 `onnxruntime/core/providers/cuda/...` at tag **v1.22.2**. We deliberately
@@ -241,24 +241,16 @@ the existing Add/Mul/Sub family in `elementwise_kernel.hip`. If a graph
 arrives with implicit broadcasting it will fail at the lowering stage,
 not at runtime.
 
-### 3.7 Slice and ScatterND — host-side indices
+### 3.7 Slice and ScatterND — runtime controls
 
-`Slice` and `ScatterND` both move tensor data based on small INT64
-index/control tensors:
-
-| Op        | Index-shaped inputs                                | Where they live       | What we do                                |
-|-----------|----------------------------------------------------|-----------------------|-------------------------------------------|
-| Slice     | `starts`, `ends`, optional `axes`, optional `steps` | GPU tensors (graph inputs in the non-folded case) | D2H + `hipStreamSynchronize` once per call, then resolve per ONNX clamping rules host-side and pass the per-axis `(start, step)` arrays into the kernel as host int64 vectors |
-| ScatterND | `indices`                                           | GPU tensor             | **Stay on the device** — the kernel reads them inline. No D2H at all. |
-
-Slice has to D2H because per-axis (start, step) needs ONNX clamping
-(`step > 0`: `start ∈ [0, dim]`, `end ∈ [0, dim]`; `step < 0`:
-`start ∈ [0, dim-1]`, `end ∈ [-1, dim-1]`) plus the optional `axes`
-list to know which axis each entry applies to. Doing this on the GPU
-would require either a launcher prepass or an oversized device kernel
-with the same per-axis state-machine — neither is worth it for a 4×
-int64 D2H. The matching pattern in `lib/Runtime/real/pad.cpp` and
-`lib/Runtime/real/cumsum.cpp` does the same thing (one stall per call).
+`Slice` and `ScatterND` both move tensor data based on small index/control
+tensors, but their boundaries differ. Genuinely runtime Slice
+`starts`/`ends`/optional `axes`/optional `steps` may be i32 or i64 and share one
+generic `hip.readback_control`. Conversion then performs ONNX normalization in
+ordinary arith SSA, creates the exact destination, and passes only normalized
+per-rank starts/steps/extents to `wrap_slice`. The wrapper performs no D2H or
+normalization. ScatterND keeps its indices on the device and each kernel thread
+reads them inline.
 
 ScatterND keeps indices on the device because there is no clamping
 state machine to run host-side — each thread does its own
@@ -272,8 +264,8 @@ when all four index tensors are graph-constant AND every step is
 positive. It lowers to `tensor.extract_slice` (which becomes a
 `memref.subview` after bufferization and is zero-cost at runtime). Any
 graph that doesn't meet both conditions falls through to `wrap_slice`
-and the runtime path described above. Test `test_slice_negative_step`
-in `test/python/tests/test_shape_ops.py` covers both legs.
+with exact normalized controls. Tests in `test/numeric/tests/test_shape_ops.py`
+cover positive, negative, empty, runtime-control, and repeated-invocation paths.
 
 ### 3.8 ConstantOfShape and the pre-fold ordering
 
@@ -439,13 +431,12 @@ doesn't re-discover them:
   (1 = FLOAT, 10 = FLOAT16), **not** the HIPDNN_EP enum. The lowering
   passes `op.getStashType()` unchanged. Default is FLOAT.
 
-- **`Slice` non-constant indices / negative steps**: the graph-constant
-  + positive-stride case folds to `tensor.extract_slice` in
-  `lib/Conversion/OnnxToHip/SliceConversion.cpp` and never reaches the
-  runtime. The `hip_slice` kernel only services slices whose
-  `starts`/`ends`/`axes`/`steps` are graph inputs (D2H + sync once per
-  call) **or** that have at least one negative step. Indices are
-  INT64 only — INT32 indices would need a stride-aware ABI bump.
+- **`Slice` non-constant indices / negative steps**: graph-constant cases that
+  standard tensor IR can represent fold to `tensor.extract_slice`. Remaining
+  INT32/INT64 control tensors cross through one grouped
+  `hip.readback_control` synchronization, are normalized into host SSA, and
+  determine the exact output allocation. The runtime Slice kernel consumes
+  those normalized starts/steps and performs no parameter D2H readback.
 
 - **`Slice` end-sentinel for "all the way down" with `step < 0`**: per
   ONNX-13+ spec, any `end < 0` is normalised via `end += dim` **before**

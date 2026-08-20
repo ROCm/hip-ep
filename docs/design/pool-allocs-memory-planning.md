@@ -70,7 +70,14 @@ caller's pool.
 
 ### Correctness and ABI preparation
 
-`hip-promote-strided-operands` materializes identity-layout temporaries for non-identity-layout DPS-input memrefs. Selecting by interface covers HIP and plugin runtime consumers without coupling the pass to a dialect or operation-name prefix. The pass must run before pooling so its temporaries become pool views.
+`hip-promote-strided-operands` materializes identity-layout temporaries for
+non-identity-layout DPS-input memrefs. Selecting by interface covers HIP and
+plugin runtime consumers without coupling the pass to a dialect or
+operation-name prefix. It also repairs post-bufferization `hip.loop` captures
+whose outlined body argument expects identity layout; repeated identical
+read-only captures share one temporary that is released after the invocation.
+Loop-carried seeds are excluded because zero-trip results may alias them. The
+pass must run before pooling so its temporaries become pool views.
 
 `hip-use-output-allocator` must run before pooling so returned buffers are rewritten to runtime-owned `hip.alloc_output` operations rather than absorbed into the transient pool. The production pipeline intentionally omits ownership-based buffer deallocation because every transient is pooled and outputs are runtime-owned. See [output-allocator-design.md](output-allocator-design.md).
 
