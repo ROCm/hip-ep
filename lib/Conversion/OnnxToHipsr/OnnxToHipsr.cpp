@@ -63,9 +63,12 @@ static LogicalResult populateOnnxToHipsrPDLLPatterns(RewritePatternSet &patterns
 
         Location loc = op->getLoc();
         Value input = op->getOperand(0);
-        auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
-        if (!resultType)
+        auto unconvertedType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+        if (!unconvertedType)
           return nullptr;
+
+        // Apply type conversion: add device memory encoding
+        auto resultType = tensorTypeInSpace(unconvertedType, MemorySpace::Device);
 
         Value init = rewriter.create<PlaceholderOp>(
             loc, TypeRange{resultType}, *ctx, ValueRange{input},
@@ -86,9 +89,12 @@ static LogicalResult populateOnnxToHipsrPDLLPatterns(RewritePatternSet &patterns
         Location loc = op->getLoc();
         Value lhs = op->getOperand(0);
         Value rhs = op->getOperand(1);
-        auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
-        if (!resultType)
+        auto unconvertedType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+        if (!unconvertedType)
           return nullptr;
+
+        // Apply type conversion: add device memory encoding
+        auto resultType = tensorTypeInSpace(unconvertedType, MemorySpace::Device);
 
         Value init = PlaceholderOp::create(
             rewriter, loc, TypeRange{resultType}, *ctx, ValueRange{lhs, rhs},
@@ -109,9 +115,12 @@ static LogicalResult populateOnnxToHipsrPDLLPatterns(RewritePatternSet &patterns
         Location loc = op->getLoc();
         Value data = op->getOperand(0);
         Value shape = op->getOperand(1);
-        auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
-        if (!resultType)
+        auto unconvertedType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+        if (!unconvertedType)
           return nullptr;
+
+        // Apply type conversion: add device memory encoding
+        auto resultType = tensorTypeInSpace(unconvertedType, MemorySpace::Device);
 
         Value init = PlaceholderOp::create(
             rewriter, loc, TypeRange{resultType}, *ctx, ValueRange{data, shape},
