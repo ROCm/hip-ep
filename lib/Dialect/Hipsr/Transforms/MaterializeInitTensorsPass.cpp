@@ -272,7 +272,6 @@ void replaceAndCleanup(
   }
 }
 
-
 struct PreserveShapeTarget {
   Value shape;
   Value data;
