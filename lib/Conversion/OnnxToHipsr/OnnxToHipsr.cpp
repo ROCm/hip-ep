@@ -41,6 +41,98 @@ namespace hipsr {
 
 namespace {
 
+// Populate PDLL-based conversion patterns with native rewrites.
+// Returns true if PDLL patterns were loaded successfully.
+static bool populateOnnxToHipsrPDLLPatterns(RewritePatternSet &patterns) {
+  // Register native constraint for PDLL patterns
+  patterns.getPDLPatterns().registerConstraintFunction(
+      "GetHipsrContext",
+      [](PatternRewriter &rewriter, Operation *op) -> FailureOr<Value> {
+        return getHipsrContextArg(op, rewriter);
+      });
+
+  // Register native rewrites for PDLL patterns
+  patterns.getPDLPatterns().registerRewriteFunction(
+      "RewriteCast",
+      [](PatternRewriter &rewriter, Operation *op) -> Operation * {
+        if (op->getNumOperands() != 1 || op->getNumResults() != 1)
+          return nullptr;
+        FailureOr<Value> ctx = getHipsrContextArg(op, rewriter);
+        if (failed(ctx))
+          return nullptr;
+
+        Location loc = op->getLoc();
+        Value input = op->getOperand(0);
+        auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+        if (!resultType)
+          return nullptr;
+
+        Value init = rewriter.create<PlaceholderOp>(
+            loc, TypeRange{resultType}, *ctx, ValueRange{input},
+            PlaceholderType::Normal).getResult(0);
+
+        return rewriter.create<CastOp>(loc, TypeRange{resultType}, *ctx, input, init);
+      });
+
+  patterns.getPDLPatterns().registerRewriteFunction(
+      "RewriteMatMul",
+      [](PatternRewriter &rewriter, Operation *op) -> Operation * {
+        if (op->getNumOperands() != 2 || op->getNumResults() != 1)
+          return nullptr;
+        FailureOr<Value> ctx = getHipsrContextArg(op, rewriter);
+        if (failed(ctx))
+          return nullptr;
+
+        Location loc = op->getLoc();
+        Value lhs = op->getOperand(0);
+        Value rhs = op->getOperand(1);
+        auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+        if (!resultType)
+          return nullptr;
+
+        Value init = PlaceholderOp::create(
+            rewriter, loc, TypeRange{resultType}, *ctx, ValueRange{lhs, rhs},
+            PlaceholderType::Normal).getResult(0);
+
+        return MatMulOp::create(rewriter, loc, TypeRange{resultType}, *ctx, lhs, rhs, init);
+      });
+
+  patterns.getPDLPatterns().registerRewriteFunction(
+      "RewriteExpand",
+      [](PatternRewriter &rewriter, Operation *op) -> Operation * {
+        if (op->getNumOperands() != 2 || op->getNumResults() != 1)
+          return nullptr;
+        FailureOr<Value> ctx = getHipsrContextArg(op, rewriter);
+        if (failed(ctx))
+          return nullptr;
+
+        Location loc = op->getLoc();
+        Value data = op->getOperand(0);
+        Value shape = op->getOperand(1);
+        auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+        if (!resultType)
+          return nullptr;
+
+        Value init = PlaceholderOp::create(
+            rewriter, loc, TypeRange{resultType}, *ctx, ValueRange{data, shape},
+            PlaceholderType::Barrier).getResult(0);
+
+        return ExpandOp::create(rewriter, loc, TypeRange{resultType}, *ctx, data, shape, init,
+                                ::mlir::DenseI64ArrayAttr{});
+      });
+
+  // Try to load PDLL patterns from compiled bytecode
+  const char *pdlPath = "lib/Conversion/OnnxToHipsr/OnnxToHipsr.pdl.mlir";
+  OwningOpRef<ModuleOp> pdlModule =
+      parseSourceFile<ModuleOp>(pdlPath, patterns.getContext());
+
+  if (pdlModule) {
+    patterns.add(PDLPatternModule(std::move(pdlModule)));
+    return true;
+  }
+  return false;
+}
+
 // Returns the shape-graph value for a placeholder input. A data result becomes
 // the outs operand its producer writes into, which has the same shape.
 Value resolveShapeGraphInput(Value input) {
@@ -120,93 +212,8 @@ struct ConvertOnnxToHipsrPass
 
     RewritePatternSet patterns(&getContext());
 
-    // Register native constraint for PDLL patterns
-    patterns.getPDLPatterns().registerConstraintFunction(
-        "GetHipsrContext",
-        [](PatternRewriter &rewriter, Operation *op) -> FailureOr<Value> {
-          return getHipsrContextArg(op, rewriter);
-        });
-
-    // Register native rewrites for PDLL patterns
-    // These handle the actual op creation since PDLL can't easily create enum attributes
-    patterns.getPDLPatterns().registerRewriteFunction(
-        "RewriteCast",
-        [](PatternRewriter &rewriter, Operation *op) -> Operation * {
-          if (op->getNumOperands() != 1 || op->getNumResults() != 1)
-            return nullptr;
-          FailureOr<Value> ctx = getHipsrContextArg(op, rewriter);
-          if (failed(ctx))
-            return nullptr;
-
-          Location loc = op->getLoc();
-          Value input = op->getOperand(0);
-          auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
-          if (!resultType)
-            return nullptr;
-
-          Value init = rewriter.create<PlaceholderOp>(
-              loc, TypeRange{resultType}, *ctx, ValueRange{input},
-              PlaceholderType::Normal).getResult(0);
-
-          return rewriter.create<CastOp>(loc, TypeRange{resultType}, *ctx, input, init);
-        });
-
-    patterns.getPDLPatterns().registerRewriteFunction(
-        "RewriteMatMul",
-        [](PatternRewriter &rewriter, Operation *op) -> Operation * {
-          if (op->getNumOperands() != 2 || op->getNumResults() != 1)
-            return nullptr;
-          FailureOr<Value> ctx = getHipsrContextArg(op, rewriter);
-          if (failed(ctx))
-            return nullptr;
-
-          Location loc = op->getLoc();
-          Value lhs = op->getOperand(0);
-          Value rhs = op->getOperand(1);
-          auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
-          if (!resultType)
-            return nullptr;
-
-          Value init = PlaceholderOp::create(
-              rewriter, loc, TypeRange{resultType}, *ctx, ValueRange{lhs, rhs},
-              PlaceholderType::Normal).getResult(0);
-
-          return MatMulOp::create(rewriter, loc, TypeRange{resultType}, *ctx, lhs, rhs, init);
-        });
-
-    patterns.getPDLPatterns().registerRewriteFunction(
-        "RewriteExpand",
-        [](PatternRewriter &rewriter, Operation *op) -> Operation * {
-          if (op->getNumOperands() != 2 || op->getNumResults() != 1)
-            return nullptr;
-          FailureOr<Value> ctx = getHipsrContextArg(op, rewriter);
-          if (failed(ctx))
-            return nullptr;
-
-          Location loc = op->getLoc();
-          Value data = op->getOperand(0);
-          Value shape = op->getOperand(1);
-          auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
-          if (!resultType)
-            return nullptr;
-
-          Value init = PlaceholderOp::create(
-              rewriter, loc, TypeRange{resultType}, *ctx, ValueRange{data, shape},
-              PlaceholderType::Barrier).getResult(0);
-
-          return ExpandOp::create(rewriter, loc, TypeRange{resultType}, *ctx, data, shape, init,
-                                  ::mlir::DenseI64ArrayAttr{});
-        });
-
-    // Try to load PDLL patterns from compiled bytecode
-    // Path is relative to build directory
-    const char *pdlPath = "lib/Conversion/OnnxToHipsr/OnnxToHipsr.pdl.mlir";
-    OwningOpRef<ModuleOp> pdlModule = parseSourceFile<ModuleOp>(pdlPath, &getContext());
-
-    if (pdlModule) {
-      patterns.add(PDLPatternModule(std::move(pdlModule)));
-    } else {
-      // Fallback to C++ patterns if PDLL not compiled or failed to load
+    // Try PDLL patterns first, fallback to C++ if unavailable
+    if (!populateOnnxToHipsrPDLLPatterns(patterns)) {
       populateCastConversionPatterns(converter, patterns, &getContext());
       populateMatMulConversionPatterns(converter, patterns, &getContext());
       populateExpandConversionPatterns(converter, patterns, &getContext());
