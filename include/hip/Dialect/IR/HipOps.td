@@ -1116,7 +1116,8 @@ def Hip_QMoEOp :
   }];
 }
 
-def Hip_GatherBlockQuantizedOp : Hip_DpsOp_AutoReify<"gather_block_quantized"> {
+def Hip_GatherBlockQuantizedOp :
+    Hip_DpsOp_SemanticAutoReify<"gather_block_quantized"> {
   let summary = "Gather + block-wise dequantize "
                 "(com.microsoft GatherBlockQuantized)";
   let description = [{
@@ -1685,7 +1686,9 @@ def Hip_MaxOp : Hip_DpsOp_Broadcast<"max",
   }];
 }
 
-def Hip_MiopenSoftmaxOp : Hip_DpsOp_AutoReifyInfer<"miopen.softmax"> {
+def Hip_MiopenSoftmaxOp :
+    Hip_DpsOp_SameShapeManualVerify<
+        "miopen.softmax", /*sourceAccessor=*/"Input"> {
   let summary = "Softmax via miopenSoftmaxForward_V2 (row-wise, last dim)";
   let arguments = (ins
     Hip_ContextType:$ctx,
@@ -3970,7 +3973,9 @@ def Hip_LessOp : Hip_DpsOp_Broadcast<"less", /*operandGetters=*/["Lhs", "Rhs"]> 
   }];
 }
 
-def Hip_SliceOp : Hip_DpsOp_WithInfer<"slice", "Output", [AttrSizedOperandSegments]> {
+def Hip_SliceOp :
+    Hip_DpsOp_Payload<"slice", /*traits=*/[AttrSizedOperandSegments],
+                      /*outsAccessor=*/"Output"> {
   let summary = "Slice a tensor along multiple axes (ONNX Slice fallback)";
   let description = [{
     Native fallback for ONNX Slice when the OnnxToHip pass cannot decompose
@@ -4281,7 +4286,8 @@ def Hip_NonZeroOp :
   }];
 }
 
-def Hip_PoolOp : Hip_DpsOp_AutoReify<"pool"> {
+def Hip_PoolOp :
+    Hip_DpsOp_SemanticAutoReify<"pool"> {
   let summary = "Spatial pooling (ONNX MaxPool / AveragePool / LpPool)";
   let description = [{
     Unified window pooling for ONNX MaxPool / AveragePool / LpPool. For an
