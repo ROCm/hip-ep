@@ -20,8 +20,10 @@
 // Parallel sum reduction for i64. Each block reduces one output element
 // using shared memory.
 //
-// `inner` is the product of the input dims AFTER the reduced axis (1 for a
-// trailing/contiguous reduce). For the output element at linear index
+// `inner` is the product of the input dims AFTER the final axis in the
+// compiler-validated contiguous reduction span (1 for a trailing span). The
+// whole span is flattened into `reduce_size`. For the output element at linear
+// index
 // `out_idx`, decompose it into outer/inner indices:
 //   oo = out_idx / inner   (outer: index of the block of `inner` outputs)
 //   ii = out_idx % inner   (inner: offset within that block)

@@ -4,6 +4,7 @@
  */
 
 #include "HipToLLVMUtils.h"
+#include "hip/Dialect/IR/HipShapeUtils.h"
 
 namespace mlir {
 namespace hip {
@@ -16,12 +17,13 @@ namespace {
 // Handles: hip.reduce_sum, hip.reduce_mean, hip.reduce_max, hip.reduce_min,
 // hip.reduce_prod.
 //
-// All three runtime functions share the exact same calling convention:
+// All six runtime functions share the exact same calling convention:
 //   int wrap_reduce_*(RuntimeState* state, void* data, void* axes,
 //                     void* output, int64_t data_num_elements,
 //                     int64_t output_num_elements,
 //                     int64_t axes_num_elements, int64_t data_type,
-//                     int64_t keepdims, int64_t noop_with_empty_axes)
+//                     int64_t keepdims, int64_t noop_with_empty_axes,
+//                     int64_t inner_size)
 //
 // Supports both static and dynamic shapes (computes num_elements at runtime).
 template <typename OpTy>
@@ -39,6 +41,27 @@ struct ReduceOpLowering : public ConvertOpToLLVMPattern<OpTy> {
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->template getParentOfType<ModuleOp>();
+    auto dataType = cast<MemRefType>(op.getData().getType());
+    auto outputType = cast<MemRefType>(op.getOutput().getType());
+    StringRef operationName = op->getName().getStringRef();
+    if (!isSupportedReductionElementType(operationName,
+                                         dataType.getElementType()))
+      return op.emitOpError()
+             << "lowering does not support element type "
+             << dataType.getElementType() << "; supported types: "
+             << getSupportedReductionElementTypes(operationName);
+    // The HIP op verifier compares normalized_axes against the structural
+    // constant source before dialect conversion starts. By the time this
+    // pattern runs, memref.get_global may already be rewritten to LLVM, so the
+    // durable normalized attribute is the semantic input here.
+    FailureOr<SmallVector<int64_t>> normalizedAxes =
+        normalizeReductionAxes(dataType.getRank(), op.getNormalizedAxes());
+    if (failed(normalizedAxes) ||
+        !llvm::equal(op.getNormalizedAxes(), *normalizedAxes))
+      return op.emitOpError(
+          "lowering requires normalized_axes to be a normalized contiguous "
+          "span");
+
     Type ptrType = this->getPtrType();
     Type i32Type = rewriter.getI32Type();
     Type i64Type = rewriter.getI64Type();
@@ -56,10 +79,6 @@ struct ReduceOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     Value outputPtr =
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
-    auto dataType = cast<MemRefType>(op.getData().getType());
-    auto axesType = cast<MemRefType>(op.getAxes().getType());
-    auto outputType = cast<MemRefType>(op.getOutput().getType());
-
     int64_t dataTypeEnum = getHipdnnDataType(dataType.getElementType());
     if (dataTypeEnum < 0) {
       std::string msg = "unsupported element type for hip.";
@@ -71,72 +90,34 @@ struct ReduceOpLowering : public ConvertOpToLLVMPattern<OpTy> {
         computeNumElements(dataType, adaptor.getData(), rewriter, loc);
     Value outputNumElements =
         computeNumElements(outputType, adaptor.getOutput(), rewriter, loc);
-    Value axesNumElements =
-        computeNumElements(axesType, adaptor.getAxes(), rewriter, loc);
+    Value axesNumElements = createI64Const(normalizedAxes->size());
 
     Value dataTypeVal = createI64Const(dataTypeEnum);
     Value keepdimsVal = createI64Const(op.getKeepdims());
     Value noopWithEmptyAxesVal = createI64Const(op.getNoopWithEmptyAxes());
 
-    // inner_size = product of input dims AFTER the reduced axis, derived purely
-    // from the static input/output shapes (no need for the axes values): align
-    // input & output shapes from the trailing end and multiply the dims that
-    // match; the first mismatch is the reduced axis. The runtime kernel uses
-    // this stride so a NON-trailing-axis reduce (e.g. NCHW channel-axis
-    // LayerNorm2d, axes=[1]) reads the correct strided elements instead of
-    // contiguous trailing ones.
-    //
-    // Before / After (channel-axis ReduceSum over NCHW, the LayerNorm2d case;
-    // only the trailing i64 operand of the call changes -- it carries the new
-    // inner_size):
-    //
-    //   %data : memref<1x512x64x64xf16>   %out : memref<1x1x64x64xf16>
-    //   // align from the right: [1,512,64,64] vs [1,1,64,64] -> first mismatch
-    //   // at axis 1, so inner_size = 64*64 = 4096, reduce_size = 512.
-    //
-    //   Before (this lowering, contiguous-only): emitted inner=1 implicitly
-    //     llvm.call @wrap_reduce_sum(state, data, axes, out,
-    //         dataNum, outNum, axesNum, dtype, keepdims, noop)        // 10
-    //         args
-    //     // kernel did out[o] = sum_r data[o*512 + r]  -- WRONG (reads 512
-    //     // contiguous elems instead of 512 elems spaced 4096 apart)
-    //
-    //   After:
-    //     %inner = llvm.mlir.constant(4096 : i64)
-    //     llvm.call @wrap_reduce_sum(state, data, axes, out,
-    //         dataNum, outNum, axesNum, dtype, keepdims, noop, %inner) // 11
-    //         args
-    //     // kernel does out[oo*4096+ii] = sum_r data[oo*512*4096 + r*4096 +
-    //     ii]
-    //
-    // Assumption: the reduced axis is the FIRST position where input and output
-    // shapes diverge when aligned from the trailing end. This holds for the
-    // standard ONNX reduce ops we lower (single reduced axis, keepdims or not).
-    // `axes` is a runtime memref here so we cannot cross-check the inferred
-    // axis against it at compile time; the inner<=0 / outNum%inner!=0 fallback
-    // below (and the dynamic-shape guard) keep us on the original contiguous
-    // path when the inference does not apply.
-    //
-    // Falls back to 1 (contiguous fast path, original behavior) for any dynamic
-    // dim or if the trailing-match product does not divide the output size.
-    int64_t innerSize = 1;
-    if (dataType.hasStaticShape() && outputType.hasStaticShape()) {
-      llvm::ArrayRef<int64_t> inShape = dataType.getShape();
-      llvm::ArrayRef<int64_t> outShape = outputType.getShape();
-      int64_t i = static_cast<int64_t>(inShape.size()) - 1;
-      int64_t o = static_cast<int64_t>(outShape.size()) - 1;
-      while (i >= 0 && o >= 0 && inShape[i] == outShape[o]) {
-        innerSize *= inShape[i];
-        --i;
-        --o;
+    // The runtime kernel treats a contiguous reduced axis span as one flattened
+    // reduction dimension. `inner_size` is therefore the product of input
+    // dimensions strictly after the span's final axis. Derive it from the
+    // validated axes source, never by comparing input/output extents: equal
+    // extents can make axis 0 and axis 1 shape-indistinguishable.
+    int64_t staticInnerSize = 1;
+    SmallVector<int64_t> dynamicInnerDims;
+    if (!normalizedAxes->empty()) {
+      int64_t lastReducedAxis = normalizedAxes->back();
+      for (int64_t dimIdx :
+           llvm::seq<int64_t>(lastReducedAxis + 1, dataType.getRank())) {
+        if (dataType.isDynamicDim(dimIdx))
+          dynamicInnerDims.push_back(dimIdx);
+        else
+          staticInnerSize *= dataType.getDimSize(dimIdx);
       }
-      int64_t outNum = 1;
-      for (int64_t d : outShape)
-        outNum *= d;
-      if (innerSize <= 0 || (outNum % innerSize) != 0)
-        innerSize = 1;
     }
-    Value innerSizeVal = createI64Const(innerSize);
+    Value innerSizeVal = createI64Const(staticInnerSize);
+    for (int64_t dimIdx : dynamicInnerDims)
+      innerSizeVal = LLVM::MulOp::create(
+          rewriter, loc, innerSizeVal,
+          getMemRefDimSize(dataType, dimIdx, adaptor.getData(), rewriter, loc));
 
     SmallVector<Type, 11> paramTypes = {ptrType, ptrType, ptrType, ptrType,
                                         i64Type, i64Type, i64Type, i64Type,
@@ -146,6 +127,10 @@ struct ReduceOpLowering : public ConvertOpToLLVMPattern<OpTy> {
         LLVM::lookupOrCreateFn(rewriter, module, funcName, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
+    FailureOr<LLVM::LLVMFuncOp> recordStatusFunc = LLVM::lookupOrCreateFn(
+        rewriter, module, kHipRecordStatus, {ptrType, i32Type}, i32Type);
+    if (failed(recordStatusFunc))
+      return failure();
 
     SmallVector<Value, 11> args = {statePtr,        dataPtr,
                                    axesPtr,         outputPtr,
@@ -154,7 +139,10 @@ struct ReduceOpLowering : public ConvertOpToLLVMPattern<OpTy> {
                                    keepdimsVal,     noopWithEmptyAxesVal,
                                    innerSizeVal};
 
-    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    Value status =
+        LLVM::CallOp::create(rewriter, loc, *funcOp, args).getResult();
+    LLVM::CallOp::create(rewriter, loc, *recordStatusFunc,
+                         ValueRange{statePtr, status});
     rewriter.eraseOp(op);
     return success();
   }

@@ -434,6 +434,10 @@ int hipdnn_ep_state_reset_error_flag(RuntimeState *state);
 int hipdnn_ep_state_set_error_flag(RuntimeState *state);
 int hipdnn_ep_state_record_status(RuntimeState *state, int status);
 int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state);
+// Aggregate a wrapper's status into the shared runtime error flag. Lowerings
+// call this immediately after status-returning wrappers so generated inference
+// cannot silently continue with an unwritten output. Returns `status`.
+int hipdnn_ep_state_record_status(RuntimeState *state, int status);
 // Mark the start of a new Compute() call. Invalidates per-forward-pass
 // runtime caches -- today: the GQA seqlens_k cache (see
 // runtime_state_internal.h for the canonical list).
@@ -1025,11 +1029,11 @@ int wrap_transpose(RuntimeState *state, const void *input, void *output,
 
 // ReduceSum operation wrapper
 // data_type: HIPDNN_EP_DATATYPE_* enum value identifying the element type.
-// Supported types: HIPDNN_EP_DATATYPE_HALF, HIPDNN_EP_DATATYPE_INT32,
-//                  HIPDNN_EP_DATATYPE_INT64.
-// `inner_size` = product of input dims AFTER the reduced axis (1 for a
-// trailing/contiguous reduce); enables strided reduction over a non-trailing
-// axis (e.g. NCHW channel-axis LayerNorm2d).
+// Supported types: HIPDNN_EP_DATATYPE_HALF, HIPDNN_EP_DATATYPE_FLOAT,
+//                  HIPDNN_EP_DATATYPE_INT32, HIPDNN_EP_DATATYPE_INT64.
+// The compiler accepts one compile-time constant contiguous axis span.
+// `inner_size` = product of input dims AFTER the span's final axis (1 for a
+// trailing span); enables strided reduction over non-trailing spans.
 int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t data_num_elements, int64_t output_num_elements,
                     int64_t axes_num_elements, int64_t data_type,
@@ -1038,12 +1042,10 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
 
 // ReduceMean operation wrapper
 // data_type: HIPDNN_EP_DATATYPE_* enum value identifying the element type.
-// Supported types: HIPDNN_EP_DATATYPE_HALF (ONNX ReduceMean is float-domain).
-// The division by the reduced-element count happens in-kernel, so a dynamic
-// reduce axis is tolerated.
-// `inner_size` = product of input dims AFTER the reduced axis (1 for a
-// trailing/contiguous reduce); enables strided reduction over a non-trailing
-// axis (e.g. NCHW channel-axis LayerNorm2d).
+// Supported types: HIPDNN_EP_DATATYPE_HALF, HIPDNN_EP_DATATYPE_FLOAT.
+// The division by the reduced-element count happens in-kernel, so extents in
+// the compiler-resolved contiguous reduction span may be dynamic.
+// `inner_size` = product of input dims AFTER the span's final axis.
 int wrap_reduce_mean(RuntimeState *state, void *data, void *axes, void *output,
                      int64_t data_num_elements, int64_t output_num_elements,
                      int64_t axes_num_elements, int64_t data_type,
@@ -1053,26 +1055,31 @@ int wrap_reduce_mean(RuntimeState *state, void *data, void *axes, void *output,
 // ReduceL2 operation wrapper
 // data_type: HIPDNN_EP_DATATYPE_* enum value identifying the element type.
 // Supported types: HIPDNN_EP_DATATYPE_HALF, HIPDNN_EP_DATATYPE_FLOAT.
-// Computes sqrt(sum(x^2)) in-kernel, so a dynamic reduce axis is tolerated.
-// `inner_size` = product of input dims AFTER the reduced axis (1 for a
-// trailing/contiguous reduce); enables strided reduction over a non-trailing
-// axis.
+// Computes sqrt(sum(x^2)) in-kernel. Extents in the compiler-resolved
+// contiguous reduction span may be dynamic.
+// `inner_size` = product of input dims AFTER the span's final axis.
 int wrap_reduce_l2(RuntimeState *state, void *data, void *axes, void *output,
                    int64_t data_num_elements, int64_t output_num_elements,
                    int64_t axes_num_elements, int64_t data_type,
                    int64_t keepdims, int64_t noop_with_empty_axes,
                    int64_t inner_size);
 
-// ReduceMax operation wrapper
+// ReduceMax operation wrapper. Axes follow the same compile-time contiguous
+// span contract as ReduceSum.
 // data_type: HIPDNN_EP_DATATYPE_* enum value identifying the element type.
+// Supported types: HIPDNN_EP_DATATYPE_HALF, HIPDNN_EP_DATATYPE_INT32,
+//                  HIPDNN_EP_DATATYPE_INT64.
 int wrap_reduce_max(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t data_num_elements, int64_t output_num_elements,
                     int64_t axes_num_elements, int64_t data_type,
                     int64_t keepdims, int64_t noop_with_empty_axes,
                     int64_t inner_size);
 
-// ReduceMin operation wrapper
+// ReduceMin operation wrapper. Axes follow the same compile-time contiguous
+// span contract as ReduceSum.
 // data_type: HIPDNN_EP_DATATYPE_* enum value identifying the element type.
+// Supported types: HIPDNN_EP_DATATYPE_HALF, HIPDNN_EP_DATATYPE_INT32,
+//                  HIPDNN_EP_DATATYPE_INT64.
 int wrap_reduce_min(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t data_num_elements, int64_t output_num_elements,
                     int64_t axes_num_elements, int64_t data_type,
@@ -1523,8 +1530,10 @@ int wrap_expand(RuntimeState *state, void *input, void *shape, void *output,
                 const int64_t *output_shape, int64_t output_rank,
                 int64_t data_type);
 
-// ReduceProd operation wrapper. Same calling convention as wrap_reduce_sum
-// / wrap_reduce_max.
+// ReduceProd operation wrapper. Same calling convention and compile-time
+// contiguous span contract as wrap_reduce_sum / wrap_reduce_max.
+// Supported types: HIPDNN_EP_DATATYPE_HALF, HIPDNN_EP_DATATYPE_INT32,
+//                  HIPDNN_EP_DATATYPE_INT64.
 int wrap_reduce_prod(RuntimeState *state, void *data, void *axes, void *output,
                      int64_t data_num_elements, int64_t output_num_elements,
                      int64_t axes_num_elements, int64_t data_type,

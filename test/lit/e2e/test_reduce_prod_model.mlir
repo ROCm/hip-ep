@@ -10,9 +10,9 @@
 // CHECK: llvm.func @inference_get_metadata_json
 // CHECK-NOT: onnx.ReduceProd
 module {
-  func.func @main_graph(%arg0: tensor<3x2x2xf32> {onnx.name = "data"}) -> (tensor<1x1x1xf32> {onnx.name = "output"}) {
-    %0 = "onnx.ReduceProd"(%arg0) {keepdims = 1 : si64, onnx_node_name = "reduce_prod_node"} : (tensor<3x2x2xf32>) -> tensor<1x1x1xf32>
-    "onnx.Return"(%0) : (tensor<1x1x1xf32>) -> ()
+  func.func @main_graph(%arg0: tensor<3x2x2xi32> {onnx.name = "data"}) -> (tensor<1x1x1xi32> {onnx.name = "output"}) {
+    %0 = "onnx.ReduceProd"(%arg0) {keepdims = 1 : si64, onnx_node_name = "reduce_prod_node"} : (tensor<3x2x2xi32>) -> tensor<1x1x1xi32>
+    "onnx.Return"(%0) : (tensor<1x1x1xi32>) -> ()
   }
   "onnx.EntryPoint"() {func = @main_graph} : () -> ()
 }

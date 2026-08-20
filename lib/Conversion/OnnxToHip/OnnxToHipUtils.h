@@ -129,6 +129,23 @@ bool extractConstantIntTensor(
 bool extractConstantIntVector(mlir::Value value,
                               llvm::SmallVectorImpl<int64_t> &out);
 
+/// Resolve the reduced axis list of an ONNX reduction op.
+///
+/// The axes arrive either as an `axes` attribute (opset < 13) or as an operand
+/// (opset 13+) that may still be a compile-time constant. ONNX's empty-axes
+/// semantics are applied here: with `noop_with_empty_axes = 0` an absent or
+/// empty list reduces every axis, and with 1 it reduces nothing.
+///
+/// Returns `std::nullopt` when the axes are only known at runtime. Every such
+/// form is rejected by the shared reduction converter before IR mutation.
+///
+/// \p storage is caller-owned scratch that backs the returned view; it must
+/// outlive the result and must not be modified while the view is in use.
+std::optional<llvm::ArrayRef<int64_t>>
+resolveReductionAxes(mlir::Operation *op, mlir::Value data,
+                     int64_t noopWithEmptyAxes,
+                     llvm::SmallVectorImpl<int64_t> &storage);
+
 /// Resolve the ranked result type of an ONNX reduction op (ReduceMax / Sum /
 /// Mean / Prod / ...).
 ///
@@ -143,93 +160,15 @@ bool extractConstantIntVector(mlir::Value value,
 ///   keepdims=1: reduced axes become size 1, other dims preserved.
 ///   keepdims=0: reduced axes are dropped.
 ///
-/// \p reducedAxes          reduced axis indices (may be negative; normalized
-///                         here). For the all-axes default the caller passes
-///                         every axis; for a noop (empty axes) it passes none.
-/// \p axesStaticallyKnown  false when axes are only known at runtime, in which
-///                         case an unranked result cannot be inferred.
-/// Returns failure only when the result is unranked AND cannot be inferred
-/// (unranked/absent input type, or runtime-only axes).
-inline mlir::FailureOr<mlir::RankedTensorType>
+/// The shape rule itself is shared with destination construction and
+/// `reifyResultShapes` through `mlir::hip::inferReductionShape`.
+///
+/// \p reducedAxes normalized compile-time axis indices.
+/// Returns failure when the exact result type cannot be established before
+/// destination creation.
+mlir::FailureOr<mlir::RankedTensorType>
 inferReduceResultType(mlir::Operation *op, mlir::Value data,
-                      llvm::ArrayRef<int64_t> reducedAxes,
-                      bool axesStaticallyKnown, int64_t keepdims) {
-  if (auto ranked =
-          mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType()))
-    return ranked;
-  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
-  if (!inputType || !axesStaticallyKnown)
-    return mlir::failure();
-  int64_t rank = inputType.getRank();
-  llvm::SmallVector<bool> reduced(rank, false);
-  for (int64_t a : reducedAxes)
-    reduced[a < 0 ? a + rank : a] = true;
-  llvm::SmallVector<int64_t> outShape;
-  for (int64_t i = 0; i < rank; ++i) {
-    if (reduced[i]) {
-      if (keepdims)
-        outShape.push_back(1);
-    } else {
-      outShape.push_back(inputType.getDimSize(i));
-    }
-  }
-  return mlir::RankedTensorType::get(outShape, inputType.getElementType());
-}
-
-/// Build a reduction destination while preserving the pre-contract behavior:
-/// known axes map dynamic result dimensions back to their input dimensions,
-/// while runtime axes retain the historical positional fallback.
-inline mlir::FailureOr<mlir::Value> createOnnxReductionEmptyTensor(
-    mlir::PatternRewriter &rewriter, mlir::Location loc,
-    mlir::RankedTensorType resultType, mlir::Value data,
-    llvm::ArrayRef<int64_t> reducedAxes, bool axesStaticallyKnown,
-    int64_t keepdims) {
-  auto dataType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
-  if (!dataType)
-    return mlir::failure();
-
-  int64_t dataRank = dataType.getRank();
-  llvm::SmallSet<int64_t, 8> reduced;
-  for (int64_t axis : reducedAxes)
-    reduced.insert(axis < 0 ? axis + dataRank : axis);
-
-  llvm::SmallVector<int64_t> outputToInput(resultType.getRank(), -1);
-  if (axesStaticallyKnown) {
-    if (keepdims) {
-      for (int64_t dim : llvm::seq<int64_t>(resultType.getRank()))
-        outputToInput[dim] = reduced.contains(dim) ? -1 : dim;
-    } else {
-      int64_t outputDim = 0;
-      for (int64_t inputDim : llvm::seq<int64_t>(dataRank)) {
-        if (reduced.contains(inputDim))
-          continue;
-        if (outputDim < resultType.getRank())
-          outputToInput[outputDim] = inputDim;
-        ++outputDim;
-      }
-    }
-  } else {
-    for (int64_t dim : llvm::seq<int64_t>(resultType.getRank()))
-      outputToInput[dim] = dim < dataRank ? dim : -1;
-  }
-
-  llvm::SmallVector<mlir::Value> dynamicSizes;
-  for (int64_t dim : llvm::seq<int64_t>(resultType.getRank())) {
-    if (!resultType.isDynamicDim(dim))
-      continue;
-    int64_t inputDim = outputToInput[dim];
-    if (inputDim < 0) {
-      dynamicSizes.push_back(
-          mlir::arith::ConstantIndexOp::create(rewriter, loc, 1));
-    } else {
-      dynamicSizes.push_back(
-          mlir::tensor::DimOp::create(rewriter, loc, data, inputDim));
-    }
-  }
-  return mlir::Value(
-      mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
-                                    resultType.getElementType(), dynamicSizes));
-}
+                      llvm::ArrayRef<int64_t> reducedAxes, int64_t keepdims);
 
 /// Map an MLIR element type onto the HIPDNN_EP_DATATYPE_* enum that runtime
 /// wrappers take as an `input_data_type` argument. Only the subset needed by
@@ -254,10 +193,9 @@ inline int64_t getHipdnnInputDataType(mlir::Type elemType) {
   return -1;
 }
 
-/// Shared conversion skeleton for the supported ONNX reductions. This
-/// centralizes attribute/default handling, optional axes materialization,
-/// unranked-result recovery, and destination construction without changing the
-/// dialect or runtime reduction contract.
+/// Shared ONNX reduction conversion skeleton. All six supported reductions
+/// differ only by their HIP op type; axes/default resolution, unranked result
+/// recovery, destination construction, and attributes stay centralized here.
 template <typename HipOpTy>
 class OnnxReductionToHip final : public mlir::RewritePattern {
 public:
@@ -267,6 +205,10 @@ public:
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
                   mlir::PatternRewriter &rewriter) const override {
+    if (op->getNumOperands() < 1 || op->getNumResults() != 1)
+      return rewriter.notifyMatchFailure(
+          op, "reduction expects at least one input and one output");
+
     auto context = getContextArg(op, rewriter);
     if (mlir::failed(context))
       return mlir::failure();
@@ -279,59 +221,58 @@ public:
     int64_t keepdims = 1;
     if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("keepdims"))
       keepdims = attr.getSInt();
+    if (keepdims != 0 && keepdims != 1)
+      return op->emitError("keepdims must be 0 or 1");
+    if (noopWithEmptyAxes != 0 && noopWithEmptyAxes != 1)
+      return op->emitError("noop_with_empty_axes must be 0 or 1");
 
-    llvm::SmallVector<int64_t> reducedAxes;
-    bool axesStaticallyKnown = false;
-    mlir::Value axesOperand;
-    bool hasAxesOperand =
-        op->getNumOperands() > 1 &&
-        !mlir::isa<mlir::NoneType>(op->getOperand(1).getType());
-    if (hasAxesOperand) {
-      axesOperand = op->getOperand(1);
-      axesStaticallyKnown = extractConstantIntTensor(axesOperand, reducedAxes,
-                                                     /*expectedRank=*/1);
-    } else {
-      axesStaticallyKnown = true;
-      if (auto axesAttr = op->getAttrOfType<mlir::ArrayAttr>("axes")) {
-        for (mlir::Attribute entry : axesAttr)
-          reducedAxes.push_back(
-              mlir::cast<mlir::IntegerAttr>(entry).getValue().getSExtValue());
-      } else if (noopWithEmptyAxes == 0) {
-        auto dataType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
-        if (!dataType)
-          return rewriter.notifyMatchFailure(
-              op, "cannot resolve default reduction axes for unranked data");
-        llvm::append_range(
-            reducedAxes,
-            llvm::seq<int64_t>(0, static_cast<int64_t>(dataType.getRank())));
-      }
-    }
+    llvm::SmallVector<int64_t> axesStorage;
+    std::optional<llvm::ArrayRef<int64_t>> reducedAxes =
+        resolveReductionAxes(op, data, noopWithEmptyAxes, axesStorage);
+    if (!reducedAxes)
+      return op->emitError("reduction axes must be known at compile time");
+    auto dataType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+    if (!dataType)
+      return op->emitError("reduction data must be a ranked tensor");
+    auto declaredResultType =
+        mlir::dyn_cast<mlir::ShapedType>(op->getResult(0).getType());
+    if (declaredResultType &&
+        declaredResultType.getElementType() != dataType.getElementType())
+      return op->emitError(
+          "reduction data and result must have the same element type");
+    llvm::StringRef hipOpName = HipOpTy::getOperationName();
+    if (!mlir::hip::isSupportedReductionElementType(hipOpName,
+                                                    dataType.getElementType()))
+      return op->emitError()
+             << "unsupported reduction element type "
+             << dataType.getElementType() << "; supported types: "
+             << mlir::hip::getSupportedReductionElementTypes(hipOpName);
+    auto normalizedAxes =
+        mlir::hip::normalizeReductionAxes(dataType.getRank(), *reducedAxes);
+    if (mlir::failed(normalizedAxes))
+      return op->emitError(
+          "reduction axes must be unique, in range, and form one contiguous "
+          "span");
+    axesStorage.assign(normalizedAxes->begin(), normalizedAxes->end());
+    llvm::ArrayRef<int64_t> axesView(axesStorage);
 
-    auto resultType = inferReduceResultType(op, data, reducedAxes,
-                                            axesStaticallyKnown, keepdims);
+    auto resultType = inferReduceResultType(op, data, axesView, keepdims);
     if (mlir::failed(resultType))
-      return rewriter.notifyMatchFailure(
-          op, "cannot infer unranked reduction result without static axes");
+      return op->emitError(
+          "result type is incompatible with the reduction data shape and axes");
 
     mlir::Location loc = op->getLoc();
-    auto init = createOnnxReductionEmptyTensor(rewriter, loc, *resultType, data,
-                                               reducedAxes, axesStaticallyKnown,
-                                               keepdims);
+    auto init = createReductionEmptyTensor(rewriter, loc, *resultType, data,
+                                           axesView, keepdims);
     if (mlir::failed(init))
       return rewriter.notifyMatchFailure(
-          op, "reduction data must be a ranked tensor");
+          op, "result type is incompatible with the reduction shape");
 
-    if (!hasAxesOperand) {
-      auto axesType = mlir::RankedTensorType::get(
-          {static_cast<int64_t>(reducedAxes.size())}, rewriter.getI64Type());
-      auto axesAttr = mlir::DenseIntElementsAttr::get(axesType, reducedAxes);
-      axesOperand =
-          mlir::arith::ConstantOp::create(rewriter, loc, axesType, axesAttr);
-    }
-
-    auto hipOp = HipOpTy::create(rewriter, loc, *context, data, axesOperand,
-                                 *init, rewriter.getI64IntegerAttr(keepdims),
-                                 rewriter.getI64IntegerAttr(noopWithEmptyAxes));
+    mlir::Value axes = materializeReductionAxes(rewriter, loc, axesView);
+    auto hipOp = HipOpTy::create(rewriter, loc, *context, data, axes, *init,
+                                 rewriter.getI64IntegerAttr(keepdims),
+                                 rewriter.getI64IntegerAttr(noopWithEmptyAxes),
+                                 rewriter.getDenseI64ArrayAttr(axesView));
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }

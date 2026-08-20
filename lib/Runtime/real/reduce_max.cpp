@@ -5,13 +5,10 @@
 
 // ReduceMax: y = max(x) over the reduce axes.
 //
-// Port note: the HipToLLVM lowering for hip.reduce_* passes only
-// `data_num_elements`, `output_num_elements` and the `axes` buffer pointer.
-// The actual reduce axes are NOT inspected here -- the kernel assumes the
-// upstream lowering has arranged for the reduce dims to occupy the trailing
-// portion of `data` so that
-//      reduce_size = data_num_elements / output_num_elements
-// is correct. This mirrors how wrap_reduce_sum / hip_reduce_sum already work.
+// The compiler validates one constant contiguous axis span. The kernel flattens
+// that span using reduce_size = data_num_elements / output_num_elements and
+// receives inner_size = product of dimensions after the span, so non-trailing
+// spans remain representable without reading the axes payload at runtime.
 //
 // Source: onnxruntime/core/providers/cuda/reduction/reduction_ops.cc /
 //         reduction_functions.cu @ v1.22.2 (CudaT type-min initializer +
@@ -58,8 +55,11 @@ int wrap_reduce_max(RuntimeState *state, void *data, void *axes, void *output,
   (void)axes;
   (void)keepdims;
 
-  if (!state || !data || !output) {
-    RUNTIME_DEBUG_LOG("[REAL] wrap_reduce_max: null argument\n");
+  if (!state || !data || !output || data_num_elements < 0 ||
+      output_num_elements < 0 || axes_num_elements < 0 || inner_size < 0 ||
+      (keepdims != 0 && keepdims != 1) ||
+      (noop_with_empty_axes != 0 && noop_with_empty_axes != 1)) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_reduce_max: invalid argument\n");
     return -1;
   }
 
