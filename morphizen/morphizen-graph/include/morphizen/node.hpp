@@ -42,6 +42,10 @@ std::vector<NodeInput> node_get_inputs(const Node &node);
 const NodeArg &node_get_output_node_arg(const Node &node);
 std::vector<const NodeArg *> node_get_output_node_args(const Node &node);
 const std::string &node_get_first_output_name(const Node &node);
+// Like node_get_first_output_name, but skips empty/non-existent output slots
+// (some quantized/hybrid models carry a placeholder NodeArg in an output slot).
+// Returns the first EXISTING output's name; CHECK-fails if the node has none.
+const std::string &node_get_first_existing_output_name(const Node &node);
 
 MORPHIZEN_DLL_SPEC const std::string &node_get_output_name(const Node &node);
 MORPHIZEN_DLL_SPEC bool node_is_op(const Node &node, const std::string &op_type,

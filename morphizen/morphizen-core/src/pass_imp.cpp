@@ -411,7 +411,7 @@ MetaDefProto &Pass::fuse(Graph &graph, const std::string &name,
   auto graph_ref = morphizen_cxx::GraphConstRef(graph);
   for (auto n : nodes) {
     auto node_ref = graph_ref.node(n);
-    meta_def->add_nodes(node_get_first_output_name(*node_ref.ptr()));
+    meta_def->add_nodes(node_get_first_existing_output_name(*node_ref.ptr()));
   }
   meta_def->set_device(device);
   morphizen::graph_fuse(graph, name, op_type, nodes, inputs, outputs,
