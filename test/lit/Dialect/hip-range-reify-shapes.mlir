@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// RUN: hip-mlir-opt --resolve-shaped-type-result-dims %s | FileCheck %s
+// RUN: hip-mlir-opt --test-hip-whole-shape-dim-reify %s | FileCheck %s
 
 // An endpoint difference larger than INT64_MAX cannot become an index
 // attribute. Reification fails cleanly and lifts the destination dimension.

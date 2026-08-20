@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// RUN: hip-mlir-opt --resolve-shaped-type-result-dims %s | FileCheck %s
+// RUN: hip-mlir-opt --test-hip-whole-shape-dim-reify %s | FileCheck %s
 
 // Compress's selected count is payload-dependent. Reification must preserve
 // the logical extent chosen by the destination instead of reporting the

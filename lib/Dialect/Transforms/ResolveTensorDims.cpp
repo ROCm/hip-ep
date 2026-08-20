@@ -88,10 +88,10 @@ void ResolveTensorDimsPass::runOnOperation() {
   // Upstream reify-driven dim folds.  `populateResolveRankedShapedType...`
   // contributes
   // `DimOfReifyRankedShapedTypeOpInterface<{memref,tensor}::DimOp>`, which
-  // dispatches through the op's `reifyResultShapes`
-  // (`ReifyRankedShapedTypeOpInterface`).  The companion populator covers ops
-  // on `InferShapedTypeOpInterface` (`tensor.dim` of HIP DPS results, via
-  // `reifyReturnTypeShapes`).
+  // dispatches through `ReifyRankedShapedTypeOpInterface::reifyDimOfResult`.
+  // HIP DPS ops implement that direct hook from the tied destination, so one
+  // query does not materialize every dimension of every result. The companion
+  // populator covers ops on `InferShapedTypeOpInterface`.
   memref::populateResolveRankedShapedTypeResultDimsPatterns(patterns);
   memref::populateResolveShapedTypeResultDimsPatterns(patterns);
 
