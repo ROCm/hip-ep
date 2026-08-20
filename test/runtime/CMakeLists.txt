@@ -205,3 +205,16 @@ target_compile_definitions(test-loop-frame PRIVATE
 target_link_libraries(test-loop-frame PRIVATE Threads::Threads)
 add_test(NAME LoopFrameUnitTest COMMAND test-loop-frame)
 set_target_properties(test-loop-frame PROPERTIES FOLDER "runtime-tests")
+
+# Mock grouped-control readback semantics, including failure atomicity when a
+# later source descriptor is malformed.
+add_executable(test-readback-control
+    test_readback_control.cpp
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/mock/readback_control.cpp
+)
+target_compile_features(test-readback-control PRIVATE cxx_std_17)
+target_include_directories(test-readback-control PRIVATE
+    ${CMAKE_SOURCE_DIR}/lib/Runtime
+)
+add_test(NAME ReadbackControlUnitTest COMMAND test-readback-control)
+set_target_properties(test-readback-control PROPERTIES FOLDER "runtime-tests")

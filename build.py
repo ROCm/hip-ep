@@ -354,7 +354,7 @@ def run_tests(args, build_dir):
             "StaticPlugins|OutputAllocator|CustomOpComputeStatus|"
             "ArtifactAbi|TensorBufferLifecycle|SymbolicDims|CacheIdentity|"
             "MatmulGemmContractUnitTest|ReductionStatusUnitTest|"
-            "LoopFrameUnitTest",
+            "LoopFrameUnitTest|ReadbackControlUnitTest",
             "--output-on-failure",
         ]
     )

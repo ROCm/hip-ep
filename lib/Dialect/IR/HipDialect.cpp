@@ -2179,6 +2179,95 @@ void ReadbackScalarOp::getEffects(
                          SideEffects::DefaultResource::get());
 }
 
+void ReadbackShapeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  // Operand order is (ctx, vector); attach the Read to the vector operand.
+  if (isa<MemRefType>(getVector().getType()))
+    effects.emplace_back(MemoryEffects::Read::get(),
+                         &getOperation()->getOpOperand(1),
+                         SideEffects::DefaultResource::get());
+}
+
+LogicalResult ReadbackShapeOp::verify() {
+  auto vectorType = dyn_cast<ShapedType>(getVector().getType());
+  if (!vectorType || !vectorType.hasRank() || vectorType.getRank() != 1)
+    return emitOpError("vector must be rank 1");
+  if (!vectorType.getElementType().isInteger(64))
+    return emitOpError("vector element type must be i64");
+  int64_t count = getCount();
+  if (count < 0)
+    return emitOpError("count must be non-negative");
+  if (vectorType.isDynamicDim(0) || vectorType.getDimSize(0) != count)
+    return emitOpError("vector length must be static and equal count");
+  if (static_cast<int64_t>(getNumResults()) != count)
+    return emitOpError("result count must equal count");
+  if (llvm::any_of(getResultTypes(),
+                   [](Type type) { return !isa<IndexType>(type); }))
+    return emitOpError("all results must be index type");
+  return success();
+}
+
+void ReadbackControlOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  for (OpOperand &source : getSourcesMutable()) {
+    if (isa<MemRefType>(source.get().getType()))
+      effects.emplace_back(MemoryEffects::Read::get(), &source,
+                           SideEffects::DefaultResource::get());
+  }
+}
+
+LogicalResult ReadbackControlOp::inferReturnTypes(
+    MLIRContext *context, std::optional<Location> location, ValueRange operands,
+    DictionaryAttr attributes, OpaqueProperties properties, RegionRange regions,
+    SmallVectorImpl<Type> &inferredReturnTypes) {
+  ReadbackControlOpAdaptor adaptor(operands, attributes, properties, regions);
+  SmallVector<Type> sourceTypes;
+  llvm::transform(adaptor.getSources(), std::back_inserter(sourceTypes),
+                  [](Value value) { return value.getType(); });
+  FailureOr<ReadbackControlLayout> layout =
+      getReadbackControlLayout(sourceTypes);
+  if (failed(layout))
+    return failure();
+
+  inferredReturnTypes.push_back(IntegerType::get(context, 1));
+  inferredReturnTypes.append(layout->totalCount, IntegerType::get(context, 64));
+  return success();
+}
+
+LogicalResult ReadbackControlOp::verify() {
+  SmallVector<Type> sourceTypes(getSources().getTypes());
+  FailureOr<ReadbackControlLayout> layout =
+      getReadbackControlLayout(sourceTypes);
+  if (failed(layout))
+    return emitOpError(
+        "requires one or more statically-sized rank-0/rank-1 i32/i64 sources");
+
+  for (auto [index, source] : llvm::enumerate(getSources())) {
+    auto memref = dyn_cast<MemRefType>(source.getType());
+    if (!memref || memref.getRank() == 0)
+      continue;
+    SmallVector<int64_t> strides;
+    int64_t offset = 0;
+    if (failed(memref.getStridesAndOffset(strides, offset)) ||
+        strides.size() != 1 || strides.front() != 1)
+      return emitOpError("memref source #")
+             << index << " must be contiguous (unit rank-1 stride)";
+  }
+
+  if (!getValid().getType().isInteger(1))
+    return emitOpError("valid result must be i1");
+  if (static_cast<int64_t>(getValues().size()) != layout->totalCount)
+    return emitOpError("expected ")
+           << layout->totalCount << " i64 value results, got "
+           << getValues().size();
+  if (llvm::any_of(getValues().getTypes(),
+                   [](Type type) { return !type.isInteger(64); }))
+    return emitOpError("all flattened value results must be i64");
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // SizeOp: ins(x), outs(y)
 //===----------------------------------------------------------------------===//
