@@ -46,6 +46,62 @@ namespace hip {
 // Helpers
 //===----------------------------------------------------------------------===//
 
+/// Attribute on extern `memref.global` ops recording a single-element integer
+/// constant's value at compile time (data may live only in constants.bin/GPU).
+inline constexpr llvm::StringLiteral kCompileTimeScalarAttr =
+    "hip.compile_time_scalar";
+
+/// Return the integer value of a 0-D (or 1-element) index tensor when known at
+/// compile time: inline dense constants, hip.constant carriers, globals with
+/// initial_value, or extern globals tagged with `hip.compile_time_scalar`.
+inline std::optional<int64_t> getCompileTimeScalarInt(mlir::Value value) {
+  auto scalarFromDense =
+      [](mlir::DenseElementsAttr dense) -> std::optional<int64_t> {
+    if (!dense || dense.getNumElements() != 1)
+      return std::nullopt;
+    mlir::Type elemTy = dense.getElementType();
+    if (!elemTy.isInteger(32) && !elemTy.isInteger(64))
+      return std::nullopt;
+    return (*dense.getValues<mlir::APInt>().begin()).getSExtValue();
+  };
+
+  if (mlir::DenseElementsAttr dense = getConstantDense(value))
+    if (auto v = scalarFromDense(dense))
+      return v;
+
+  if (auto constant = value.getDefiningOp<mlir::hip::ConstantOp>())
+    if (auto valueAttr = mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
+            constant.getValueAttr()))
+      if (auto v = scalarFromDense(valueAttr))
+        return v;
+
+  mlir::Operation *defOp = value.getDefiningOp();
+  if (!defOp)
+    return std::nullopt;
+
+  if (auto toTensor = mlir::dyn_cast<mlir::bufferization::ToTensorOp>(defOp)) {
+    auto bufDef =
+        toTensor.getBuffer().getDefiningOp<mlir::memref::GetGlobalOp>();
+    if (!bufDef)
+      return std::nullopt;
+    auto module = bufDef->getParentOfType<mlir::ModuleOp>();
+    if (!module)
+      return std::nullopt;
+    auto global =
+        module.lookupSymbol<mlir::memref::GlobalOp>(bufDef.getNameAttr());
+    if (!global)
+      return std::nullopt;
+    if (auto initial = mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
+            global.getInitialValueAttr()))
+      if (auto v = scalarFromDense(initial))
+        return v;
+    if (auto scalarAttr =
+            global->getAttrOfType<mlir::IntegerAttr>(kCompileTimeScalarAttr))
+      return scalarAttr.getInt();
+  }
+  return std::nullopt;
+}
+
 /// Create a tensor.empty for a DPS init operand.  Dynamic dimension sizes
 /// are extracted from \p source using tensor.dim at each dynamic index.
 /// Suitable for ops where the output shape aligns positionally with one input
