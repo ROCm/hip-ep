@@ -130,6 +130,25 @@ bool extractConstantIntTensor(
 bool extractConstantIntVector(mlir::Value value,
                               llvm::SmallVectorImpl<int64_t> &out);
 
+/// Conversion-side RotaryEmbedding attributes after applying ONNX defaults and
+/// the shared shape-based inference rules used by the standard and contrib
+/// spellings of the op.
+struct RotaryEmbeddingConfig {
+  int64_t interleaved;
+  int64_t numHeads;
+  int64_t rotaryDim;
+};
+
+/// Resolve RotaryEmbedding's optional attributes from `input` and `cosCache`.
+///
+/// This deliberately remains conversion-side: the two ONNX spellings share
+/// attribute defaults and layout inference, while hip.rope's result shape is
+/// simply its input shape. Failures are reported through the pattern rewriter.
+mlir::FailureOr<RotaryEmbeddingConfig>
+resolveRotaryEmbeddingConfig(mlir::PatternRewriter &rewriter,
+                             mlir::Operation *op, mlir::Value input,
+                             mlir::Value cosCache);
+
 /// Resolve the reduced axis list of an ONNX reduction op.
 ///
 /// The axes arrive either as an `axes` attribute (opset < 13) or as an operand

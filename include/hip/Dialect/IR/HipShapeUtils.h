@@ -288,6 +288,22 @@ reifyResizeShape(OpBuilder &b, Location loc, Value input,
                  ArrayRef<int64_t> outputTemplate,
                  function_ref<InFlightDiagnostic()> emitError);
 
+/// Compute the only output shape implemented by the default
+/// `hip.multi_head_attention` runtime: separate rank-3 fp16 Q/K/V with equal
+/// batch and hidden extents, and equal K/V sequence extents. The result is
+/// exactly `[query.B, query.S, query.hidden]`.
+FailureOr<SmallVector<int64_t>> inferMultiHeadAttentionOutputShape(
+    ArrayRef<int64_t> queryShape, ArrayRef<int64_t> keyShape,
+    ArrayRef<int64_t> valueShape, int64_t numHeads,
+    function_ref<InFlightDiagnostic()> emitError);
+
+/// Mixed-shape form of `inferMultiHeadAttentionOutputShape`. Validation
+/// completes before dimensions are materialized; all result extents come from
+/// `query`.
+FailureOr<SmallVector<OpFoldResult>> reifyMultiHeadAttentionOutputShape(
+    OpBuilder &b, Location loc, Value query, Value key, Value value,
+    int64_t numHeads, function_ref<InFlightDiagnostic()> emitError);
+
 /// Pure transpose shape rule: `output[i] = input[perm[i]]`.
 FailureOr<SmallVector<int64_t>>
 inferTransposeShape(ArrayRef<int64_t> inputShape, ArrayRef<int64_t> perm);
@@ -449,6 +465,25 @@ reifyLayerNormOutputShapes(OpBuilder &b, Location loc, Value input,
 /// Runtime-supported LayerNormalization stats element type for ONNX
 /// `stash_type` (TensorProto enum): 0/1 -> f32, 10 -> f16.
 FailureOr<Type> inferLayerNormStatsType(MLIRContext *ctx, int64_t stashType);
+
+/// LinearAttention result shapes:
+///   output        = [B, T, max(Hq, Hkv) * Dv]
+///   present_state = [B, Hkv, Dk, Dv]
+/// where Dk = query[-1] / Hq and Dv = value[-1] / Hkv.
+///
+/// Also validates the statically knowable head-count and key-sharing
+/// constraints from the op contract.
+FailureOr<SmallVector<SmallVector<int64_t>>> inferLinearAttentionOutputShapes(
+    ArrayRef<int64_t> queryShape, ArrayRef<int64_t> keyShape,
+    ArrayRef<int64_t> valueShape, int64_t qNumHeads, int64_t kvNumHeads,
+    function_ref<InFlightDiagnostic()> emitError);
+
+/// Mixed-shape form of `inferLinearAttentionOutputShapes`.
+FailureOr<ReifiedRankedShapedTypeDims>
+reifyLinearAttentionOutputShapes(OpBuilder &b, Location loc, Value query,
+                                 Value key, Value value, int64_t qNumHeads,
+                                 int64_t kvNumHeads,
+                                 function_ref<InFlightDiagnostic()> emitError);
 
 /// CausalConvWithState output shapes for the runtime-supported 1D layout:
 ///   output        = input = [B, C, L]

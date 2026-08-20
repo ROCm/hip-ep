@@ -181,7 +181,9 @@ Choose the smallest mechanism that matches the operation's semantics:
 | Tile | Constant repeats use exact mixed shape arithmetic; runtime repeats use one bulk synchronized readback and reify from that exact init |
 | MatMul/Gemm/MatMulNBits | Dedicated shape logic based on operand dimensions and attributes |
 | LayerNormalization | Y equals input; Mean/InvStdDev use keepdims reduction shape over `[axis, rank)` |
+| LinearAttention | Shared output/state formula used by converter, reification, and verifier |
 | SkipSimplifiedLayerNormalization | Output and optional residual sum equal input; training stats rejected |
+| MultiHeadAttention | Default rank-3 fp16 Q/K/V result equals query; optional/cache forms route to GQA or are rejected |
 | Forward Conv (rank-3 converter/rank-4 HIP op) | Shared signed-floor spatial-window formula used by converter, reification, and verifier |
 | Window Pool (spatial rank 1..3) | Shared signed floor/ceil spatial-window formula; optional indices reuse the values shape |
 | Rank-4 NCHW ConvTranspose | Shared ONNX formula used by converter, reification, and verifier |
@@ -375,6 +377,13 @@ controls data and zero-point interpretation plus the omitted-zero-point default
 axis policy: gather axis zero and the last, distinct quantize axis. Packed
 INT4/UINT4 and signed int8 retain the general valid-axis policy.
 
+LinearAttention uses one two-result rule in `HipShapeUtils`:
+`Dk = query[-1] / Hq`, `Dv = value[-1] / Hkv`, output shape
+`[B, T, max(Hq, Hkv) * Dv]`, and recurrent-state shape
+`[B, Hkv, Dk, Dv]`. Conversion, `reifyResultShapes`, and the op verifier all
+call that rule. In particular, a missing `past_state` does not make key's
+positional dimensions authoritative for the state destination.
+
 Forward Conv and Pool share one validated spatial-window primitive:
 `floor((input + pads - effectiveKernel) / stride) + 1`; Pool selects signed
 ceil division when `ceil_mode = 1`. After that ceil calculation, a positive
@@ -427,6 +436,18 @@ training outputs and are not implemented by `hip.skip_rms_norm`. Conversion
 accepts every inference output arity (one to four schema slots with omitted
 stats) but rejects a real stats tensor rather than treating the last present
 tensor as the residual output.
+
+The default `hip.multi_head_attention` rule matches its implemented runtime
+path, not the full Microsoft schema: Q/K/V are separate rank-3 fp16 tensors,
+Q/K/V batch and hidden extents agree, K/V sequence extents agree, hidden is
+positive and divisible by `num_heads`, `unidirectional` is 0 or 1,
+`mask_filter_value` remains its -10000 default, and the sole output is exactly
+`[query.B, query.S, query.hidden]`. The runtime honors an explicit `scale`
+(with zero retaining the automatic `1/sqrt(head_size)` sentinel). Biases,
+masks, packed layouts, past/cache inputs, cache indirection, and present/QK
+outputs are rejected before the HIP op is created. The existing decoder
+self-attention and rank-4 cross-attention routes to `hip.gqa` run first and
+retain their separate contracts.
 
 Reductions resolve to one internal out-to-in dimension map, consumed by both
 `inferReductionShape` (static extents) and `reifyReductionResultShape` (mixed
