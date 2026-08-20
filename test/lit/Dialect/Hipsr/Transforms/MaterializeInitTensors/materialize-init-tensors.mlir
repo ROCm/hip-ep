@@ -6,7 +6,7 @@
 //
 // This file grows with the pass instead of gaining a sibling per phase: each
 // case keeps its input IR and only its CHECK lines are extended as later phases
-// land. The transformation is end to end as of phase 4, and runs as:
+// land. The transformation is end to end as of phase 5, and runs as:
 //
 //   phase 1, grouping -- every hipsr.placeholder in a domain moves to the front
 //   of the domain block, keeping the relative order SSA form already gives it;
@@ -17,11 +17,14 @@
 //   extents read out of the computed shape, all of them grouped after the last
 //   scf.execute_region;
 //   phase 4, cleanup -- every placeholder result use is rewired to its
-//   tensor.empty and the placeholders are erased.
+//   tensor.empty and the placeholders are erased;
+//   phase 5, shape preservation -- one hipsr.preserve_shape per placeholder
+//   result, tying its computed shape to the DPS result it was initializing,
+//   grouped after every data op.
 //
-// So each domain ends up in the virtual 3-region form: shape computations, then
-// allocations, then the data ops in their original order, with no
-// hipsr.placeholder left behind.
+// So each domain ends up in the virtual 4-region form: shape computations,
+// then allocations, then the data ops, then the preserve_shape links, all in
+// their original relative order, with no hipsr.placeholder left behind.
 //
 // Every case spells out its whole function with CHECK-NEXT, so the CHECK block
 // reads as the expected output rather than as a set of spot checks. That also
@@ -40,7 +43,8 @@
 // scf.yield because it is bound to hipsr.placeholder by HasParent. Only dim 0
 // of the result is dynamic, so the allocation reads a single extent back out of
 // the shape and 512 stays in the tensor.empty type. The matmul ends up taking
-// that tensor.empty as its outs operand, with the placeholder gone.
+// that tensor.empty as its outs operand, with the placeholder gone, and a
+// trailing preserve_shape ties the computed shape to the matmul result.
 // CHECK-LABEL: func.func @matmul_domain(
 // CHECK-SAME:      %[[CTX:.+]]: !hipsr.context, %[[A:.+]]: tensor<?x256xf16, #hipsr.mem<device>>, %[[B:.+]]: tensor<256x512xf16, #hipsr.mem<device>>) -> tensor<?x512xf16, #hipsr.mem<device>> {
 // CHECK-NEXT:    %[[DOMAIN:.+]] = hipsr.pool_domain(%[[CTX]], %[[A]], %[[B]] : !hipsr.context, tensor<?x256xf16, #hipsr.mem<device>>, tensor<256x512xf16, #hipsr.mem<device>>) {
@@ -60,6 +64,7 @@
 // CHECK-NEXT:      %[[DIM0:.+]] = shape.size_to_index %[[DIM0_EXTENT]] : !shape.size
 // CHECK-NEXT:      %[[INIT:.+]] = tensor.empty(%[[DIM0]]) : tensor<?x512xf16, #hipsr.mem<device>>
 // CHECK-NEXT:      %[[MATMUL:.+]] = hipsr.matmul(%[[DCTX]]) ins(%[[DA]], %[[DB]] : tensor<?x256xf16, #hipsr.mem<device>>, tensor<256x512xf16, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<?x512xf16, #hipsr.mem<device>>) : tensor<?x512xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      hipsr.preserve_shape %[[MATMUL_SHAPE]], %[[MATMUL]] : tensor<?x512xf16, #hipsr.mem<device>>
 // CHECK-NEXT:      hipsr.pool_domain_yield %[[MATMUL]] : tensor<?x512xf16, #hipsr.mem<device>>
 // CHECK-NEXT:    } -> tensor<?x512xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
 // CHECK-NEXT:    return %[[DOMAIN]] : tensor<?x512xf16, #hipsr.mem<device>>
@@ -96,9 +101,9 @@ func.func @matmul_domain(%ctx: !hipsr.context, %a: tensor<?x256xf16, #hipsr.mem<
 
 // The same domain shape as @matmul_domain but with a fully static result. The
 // shape computation is still built -- the pass does not try to prove it dead,
-// it is left for canonicalization -- yet nothing is read back out of it,
-// because the tensor.empty type already carries both extents. %[[SHAPE]] having
-// no reader below is the point of the case.
+// it is left for canonicalization -- and the tensor.empty type already carries
+// both extents, so %[[SHAPE]]'s only reader is the trailing preserve_shape:
+// the link is emitted unconditionally, even for a fully static result.
 // CHECK-LABEL: func.func @static_shape(
 // CHECK-SAME:      %[[CTX:.+]]: !hipsr.context, %[[A:.+]]: tensor<128x256xf16, #hipsr.mem<device>>, %[[B:.+]]: tensor<256x512xf16, #hipsr.mem<device>>) -> tensor<128x512xf16, #hipsr.mem<device>> {
 // CHECK-NEXT:    %[[DOMAIN:.+]] = hipsr.pool_domain(%[[CTX]], %[[A]], %[[B]] : !hipsr.context, tensor<128x256xf16, #hipsr.mem<device>>, tensor<256x512xf16, #hipsr.mem<device>>) {
@@ -115,6 +120,7 @@ func.func @matmul_domain(%ctx: !hipsr.context, %a: tensor<?x256xf16, #hipsr.mem<
 // CHECK-NEXT:      }
 // CHECK-NEXT:      %[[INIT:.+]] = tensor.empty() : tensor<128x512xf16, #hipsr.mem<device>>
 // CHECK-NEXT:      %[[MATMUL:.+]] = hipsr.matmul(%[[DCTX]]) ins(%[[DA]], %[[DB]] : tensor<128x256xf16, #hipsr.mem<device>>, tensor<256x512xf16, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<128x512xf16, #hipsr.mem<device>>) : tensor<128x512xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      hipsr.preserve_shape %[[SHAPE]], %[[MATMUL]] : tensor<128x512xf16, #hipsr.mem<device>>
 // CHECK-NEXT:      hipsr.pool_domain_yield %[[MATMUL]] : tensor<128x512xf16, #hipsr.mem<device>>
 // CHECK-NEXT:    } -> tensor<128x512xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
 // CHECK-NEXT:    return %[[DOMAIN]] : tensor<128x512xf16, #hipsr.mem<device>>
@@ -172,6 +178,7 @@ func.func @static_shape(%ctx: !hipsr.context, %a: tensor<128x256xf16, #hipsr.mem
 // CHECK-NEXT:      %[[D1:.+]] = shape.size_to_index %[[D1_EXTENT]] : !shape.size
 // CHECK-NEXT:      %[[INIT:.+]] = tensor.empty(%[[D0]], %[[D1]]) : tensor<?x?x64xf16, #hipsr.mem<device>>
 // CHECK-NEXT:      %[[ADD:.+]] = hipsr.add(%[[DCTX]]) ins(%[[DA]], %[[DB]] : tensor<?x?x64xf16, #hipsr.mem<device>>, tensor<?x?x64xf16, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<?x?x64xf16, #hipsr.mem<device>>) : tensor<?x?x64xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      hipsr.preserve_shape %[[SHAPE]], %[[ADD]] : tensor<?x?x64xf16, #hipsr.mem<device>>
 // CHECK-NEXT:      hipsr.pool_domain_yield %[[ADD]] : tensor<?x?x64xf16, #hipsr.mem<device>>
 // CHECK-NEXT:    } -> tensor<?x?x64xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
 // CHECK-NEXT:    return %[[DOMAIN]] : tensor<?x?x64xf16, #hipsr.mem<device>>
@@ -208,7 +215,8 @@ func.func @multi_dynamic(%ctx: !hipsr.context, %a: tensor<?x?x64xf16, #hipsr.mem
 // argument becomes %[[MATMUL_SHAPE]] and only its second one gets a
 // shape.shape_of. Both allocations are grouped after the second
 // execute_region, so the domain reads as two shape computations, two
-// allocations, then the two data ops.
+// allocations, then the two data ops, then the two preserve_shape links in
+// placeholder order.
 // CHECK-LABEL: func.func @interleaved(
 // CHECK-SAME:      %[[CTX:.+]]: !hipsr.context, %[[A:.+]]: tensor<?x256xf16, #hipsr.mem<device>>, %[[B:.+]]: tensor<256x512xf16, #hipsr.mem<device>>, %[[C:.+]]: tensor<?x512xf16, #hipsr.mem<device>>) -> tensor<?x512xf16, #hipsr.mem<device>> {
 // CHECK-NEXT:    %[[DOMAIN:.+]] = hipsr.pool_domain(%[[CTX]], %[[A]], %[[B]], %[[C]] : !hipsr.context, tensor<?x256xf16, #hipsr.mem<device>>, tensor<256x512xf16, #hipsr.mem<device>>, tensor<?x512xf16, #hipsr.mem<device>>) {
@@ -238,6 +246,8 @@ func.func @multi_dynamic(%ctx: !hipsr.context, %a: tensor<?x?x64xf16, #hipsr.mem
 // CHECK-NEXT:      %[[ADD_INIT:.+]] = tensor.empty(%[[ADD_D0]]) : tensor<?x512xf16, #hipsr.mem<device>>
 // CHECK-NEXT:      %[[MATMUL:.+]] = hipsr.matmul(%[[DCTX]]) ins(%[[DA]], %[[DB]] : tensor<?x256xf16, #hipsr.mem<device>>, tensor<256x512xf16, #hipsr.mem<device>>) outs(%[[MATMUL_INIT]] : tensor<?x512xf16, #hipsr.mem<device>>) : tensor<?x512xf16, #hipsr.mem<device>>
 // CHECK-NEXT:      %[[ADD:.+]] = hipsr.add(%[[DCTX]]) ins(%[[MATMUL]], %[[DC]] : tensor<?x512xf16, #hipsr.mem<device>>, tensor<?x512xf16, #hipsr.mem<device>>) outs(%[[ADD_INIT]] : tensor<?x512xf16, #hipsr.mem<device>>) : tensor<?x512xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      hipsr.preserve_shape %[[MATMUL_SHAPE]], %[[MATMUL]] : tensor<?x512xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      hipsr.preserve_shape %[[ADD_SHAPE]], %[[ADD]] : tensor<?x512xf16, #hipsr.mem<device>>
 // CHECK-NEXT:      hipsr.pool_domain_yield %[[ADD]] : tensor<?x512xf16, #hipsr.mem<device>>
 // CHECK-NEXT:    } -> tensor<?x512xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
 // CHECK-NEXT:    return %[[DOMAIN]] : tensor<?x512xf16, #hipsr.mem<device>>
@@ -320,6 +330,8 @@ func.func @interleaved(%ctx: !hipsr.context, %a: tensor<?x256xf16, #hipsr.mem<de
 // CHECK-NEXT:      %[[ADD_INIT:.+]] = tensor.empty(%[[ADD_D0]]) : tensor<?x512xf16, #hipsr.mem<device>>
 // CHECK-NEXT:      %[[MATMUL:.+]] = hipsr.matmul(%[[DCTX]]) ins(%[[DA]], %[[DB]] : tensor<?x256xf16, #hipsr.mem<device>>, tensor<256x512xf16, #hipsr.mem<device>>) outs(%[[MATMUL_INIT]] : tensor<?x512xf16, #hipsr.mem<device>>) : tensor<?x512xf16, #hipsr.mem<device>>
 // CHECK-NEXT:      %[[ADD:.+]] = hipsr.add(%[[DCTX]]) ins(%[[MATMUL]], %[[DC]] : tensor<?x512xf16, #hipsr.mem<device>>, tensor<?x512xf16, #hipsr.mem<device>>) outs(%[[ADD_INIT]] : tensor<?x512xf16, #hipsr.mem<device>>) : tensor<?x512xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      hipsr.preserve_shape %[[MATMUL_SHAPE]], %[[MATMUL]] : tensor<?x512xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      hipsr.preserve_shape %[[ADD_SHAPE]], %[[ADD]] : tensor<?x512xf16, #hipsr.mem<device>>
 // CHECK-NEXT:      hipsr.pool_domain_yield %[[ADD]] : tensor<?x512xf16, #hipsr.mem<device>>
 // CHECK-NEXT:    } -> tensor<?x512xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
 // CHECK-NEXT:    return %[[DOMAIN]] : tensor<?x512xf16, #hipsr.mem<device>>
