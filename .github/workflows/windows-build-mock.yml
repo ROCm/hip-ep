@@ -270,13 +270,16 @@ jobs:
           ctest --test-dir "$BUILD" -C Release -R StaticPlugins --output-on-failure
 
       - name: Flush sccache
+        if: always()
+        continue-on-error: true
         shell: bash
         run: |
           sccache --show-stats
           sccache --stop-server || true
 
       - name: Save sccache directory
-        if: github.ref_name == 'main'
+        if: always() && github.ref_name == 'main'
+        continue-on-error: true
         uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/sccache-dir
