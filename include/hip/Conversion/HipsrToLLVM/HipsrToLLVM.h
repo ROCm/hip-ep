@@ -31,6 +31,7 @@ namespace hipsr {
 
 namespace detail {
 
+struct I1Tag {};
 struct I32Tag {};
 struct I64Tag {};
 struct HostPtrTag {};
@@ -38,6 +39,12 @@ struct DevicePtrTag {};
 struct SlotIndexTag {};
 
 template <typename Tag> struct TypeMaterializer;
+
+template <> struct TypeMaterializer<I1Tag> {
+  static Type get(MLIRContext *, OpBuilder &builder) {
+    return builder.getI1Type();
+  }
+};
 
 template <> struct TypeMaterializer<I32Tag> {
   static Type get(MLIRContext *, OpBuilder &builder) {
@@ -76,6 +83,7 @@ Type materializeType(MLIRContext *ctx, OpBuilder &builder) {
 
 } // namespace detail
 
+using i1 = detail::I1Tag;
 using i32 = detail::I32Tag;
 using i64 = detail::I64Tag;
 using hostPtr = detail::HostPtrTag;
@@ -89,6 +97,12 @@ struct SlotIndex {
 namespace detail {
 
 template <typename Tag, typename ArgType> struct ArgConverter;
+
+template <> struct ArgConverter<I1Tag, Value> {
+  static Value convert(ConversionPatternRewriter &, Location, Value value) {
+    return value;
+  }
+};
 
 template <> struct ArgConverter<DevicePtrTag, Value> {
   static Value convert(ConversionPatternRewriter &rewriter, Location loc,

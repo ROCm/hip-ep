@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../matmul_gemm_contract.h"
 #include "../op_profile.h"
 #include "../op_state.h"
 #include "cache_utils.h"
@@ -45,22 +46,13 @@ static bool autotune_enabled() {
 
 struct MatmulCacheKey {
   int64_t M, N, K, batch_count, elem_size;
-  // hipBLASLt's STRIDED_BATCH_OFFSET on layA, in elements. Two distinct
-  // values reach this site at the same (M,N,K,batch,elem_size):
-  //   * 0   — B is a broadcast weight (rank-2 [K,N], or rank-N
-  //           [1,...,1,K,N] whose leading-dim product is 1).
-  //   * K*N — B is per-batch (leading-dim product > 1; the buffer holds
-  //           multiple [K,N] matrices laid out contiguously).
-  // Part of the cache key because the layout descriptor is parameterised
-  // by the stride: mixing the two would silently route one path through
-  // the other's stride and read past the end of a broadcast weight buffer.
-  // Keyed on the actual int stride (not a 0/1 bool) so any future site
-  // that legitimately uses a stride other than {0, K*N} also gets its
-  // own cache entry rather than aliasing one of these two.
-  int64_t b_batch_stride;
+  // hipBLASLt STRIDED_BATCH_OFFSET values for the user's A and B buffers.
+  // They are part of the key because both matrix layouts depend on them.
+  int64_t a_batch_stride, b_batch_stride;
   bool operator==(const MatmulCacheKey &o) const {
     return M == o.M && N == o.N && K == o.K && batch_count == o.batch_count &&
-           elem_size == o.elem_size && b_batch_stride == o.b_batch_stride;
+           elem_size == o.elem_size && a_batch_stride == o.a_batch_stride &&
+           b_batch_stride == o.b_batch_stride;
   }
 };
 
@@ -72,15 +64,17 @@ struct MatmulCacheKeyHash {
     hash_combine_val(h, k.K);
     hash_combine_val(h, k.batch_count);
     hash_combine_val(h, k.elem_size);
+    hash_combine_val(h, k.a_batch_stride);
     hash_combine_val(h, k.b_batch_stride);
     return h;
   }
 };
 
 /// Cached hipBLASLt descriptors + multi-algorithm auto-tune state for a
-/// single (M, N, K, batch, elem_size) shape. Descriptors are created in
-/// queryOrCreateMatmul() and owned by the MatmulAlgoTable, which frees them
-/// when the last session sharing it is destroyed.
+/// single (M, N, K, batch, elem_size, A stride, B stride) configuration.
+/// Descriptors are created in queryOrCreateMatmul() and owned by the
+/// MatmulAlgoTable, which frees them when the last session sharing it is
+/// destroyed.
 struct MatmulCacheEntry {
   hipblasLtMatmulDesc_t desc;
   hipblasLtMatrixLayout_t layA, layB, layC;
@@ -198,19 +192,10 @@ static MatmulCacheEntry *queryOrCreateMatmul(MatmulAlgoTable &table,
 
   if (key.batch_count > 1) {
     int64_t bc = key.batch_count;
-    // layA → user's B. The stride is whatever the compiler computed —
-    // 0 for broadcast B (rank-2 [K,N] or rank-N [1,...,1,K,N]), K*N for
-    // per-batch B (rank-N with leading-dim product > 1). Setting sA = K*N
-    // for a broadcast weight reads K*N elements PAST the end of the
-    // buffer on batch 1+ and feeds garbage into the GEMM — typical symptom
-    // on vision models is image-0 correct, image-1+ NaN (the OOB read
-    // often lands in a fp16-NaN pattern from adjacent pool slots /
-    // constants). Mis-setting sA = 0 for a per-batch B does the opposite:
-    // every batch reads matrix 0 instead of its own.
-    // layB → user's A and layC → output are always per-batch (the BATCH
-    // partition comes from A's leading dim by construction).
+    // Row-major -> column-major swaps operands: layA describes user's B and
+    // layB describes user's A.
     int64_t sA = key.b_batch_stride;
-    int64_t sB = M * K, sC = M * N;
+    int64_t sB = key.a_batch_stride, sC = M * N;
     MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutSetAttribute(
         entry.layA, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &bc, sizeof(bc)));
     MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutSetAttribute(
@@ -433,9 +418,49 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
 //===----------------------------------------------------------------------===//
 
 int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
-                         const void *B, void *output, int64_t M, int64_t N,
-                         int64_t K, int64_t batch_count, int64_t elem_size,
-                         int64_t b_batch_stride) {
+                         const void *B, void *output, bool batch_axes_valid,
+                         int64_t M, int64_t N, int64_t K_a, int64_t K_b,
+                         int64_t batch_count, int64_t elem_size,
+                         int64_t a_batch_count, int64_t b_batch_count,
+                         int64_t a_batch_stride, int64_t b_batch_stride) {
+  using namespace hipdnn_ep::blas_contract;
+
+  ValidationResult validation = validateMatmul(
+      batch_axes_valid, M, N, K_a, K_b, batch_count, elem_size, a_batch_count,
+      b_batch_count, a_batch_stride, b_batch_stride, A != nullptr, B != nullptr,
+      output != nullptr);
+  const OutputSize &outputSize = validation.outputSize;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_hipblasLtMatmul\n");
+    return -1;
+  }
+
+  auto fail = [&](const char *message) {
+    if (message)
+      fprintf(stderr, "%s\n", message);
+    (void)hipdnn_ep_state_set_error_flag(state);
+    if (validation.outputSizeKnown && outputSize.bytes != 0 && output) {
+      hipStream_t failureStream =
+          static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+      if (failureStream) {
+        hipError_t zeroStatus =
+            hipMemsetAsync(output, 0, outputSize.bytes, failureStream);
+        if (zeroStatus != hipSuccess)
+          fprintf(stderr,
+                  "wrap_hipblasLtMatmul: failed to zero invalid output "
+                  "(%d): %s\n",
+                  (int)zeroStatus, hipGetErrorString(zeroStatus));
+      }
+    }
+    return -1;
+  };
+
+  if (validation.status == ValidationStatus::EmptyOutput)
+    return 0;
+  if (validation.status == ValidationStatus::Failure)
+    return fail(validation.errorMessage);
+
+  int64_t K = K_a; // Cache and descriptors consume K only after equality.
   OP_PROFILE(
       "matmul",
       [&] {
@@ -445,10 +470,6 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
         return std::string(b);
       },
       state);
-  if (!state || !A || !B || !output) {
-    fprintf(stderr, "Invalid arguments to wrap_hipblasLtMatmul\n");
-    return -1;
-  }
 
   hipblasLtHandle_t handle =
       static_cast<hipblasLtHandle_t>(hipdnn_ep_state_get_hipblas_handle(state));
@@ -456,40 +477,34 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
 
   if (!handle || !stream) {
-    fprintf(stderr, "wrap_hipblasLtMatmul: null handle or stream\n");
-    return -1;
-  }
-
-  if (elem_size != 2 && elem_size != 4) {
-    fprintf(stderr, "wrap_hipblasLtMatmul: unsupported elem_size %lld\n",
-            (long long)elem_size);
-    return -1;
+    return fail("wrap_hipblasLtMatmul: null handle or stream");
   }
 
   const char *type_name = (elem_size == 2) ? "f16" : "f32";
   RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: M=%lld, N=%lld, K=%lld, "
-                    "batch=%lld, b_batch_stride=%lld, elem_size=%lld (%s), "
-                    "total_bytes=%lld\n",
+                    "batch=%lld, a_batches=%lld, b_batches=%lld, "
+                    "a_batch_stride=%lld, b_batch_stride=%lld, "
+                    "elem_size=%lld (%s), total_bytes=%lld\n",
                     (long long)M, (long long)N, (long long)K,
-                    (long long)batch_count, (long long)b_batch_stride,
-                    (long long)elem_size, type_name,
+                    (long long)batch_count, (long long)a_batch_count,
+                    (long long)b_batch_count, (long long)a_batch_stride,
+                    (long long)b_batch_stride, (long long)elem_size, type_name,
                     (long long)(batch_count * M * N * elem_size));
 
   MatmulState *ms = MatmulState::get_op_state(state, op_state_slot);
   if (!ms || !ms->table) {
-    fprintf(stderr, "wrap_hipblasLtMatmul: missing op-state for slot %d\n",
-            op_state_slot);
-    return -1;
+    return fail("wrap_hipblasLtMatmul: missing op-state");
   }
 
-  MatmulCacheKey key{M, N, K, batch_count, elem_size, b_batch_stride};
+  MatmulCacheKey key{
+      M, N, K, batch_count, elem_size, a_batch_stride, b_batch_stride};
   MatmulCacheEntry *cached = queryOrCreateMatmul(*ms->table, handle, key);
   if (!cached) {
     fprintf(stderr,
             "wrap_hipblasLtMatmul: failed to create/find cached "
             "descriptors for M=%lld N=%lld K=%lld batch=%lld\n",
             (long long)M, (long long)N, (long long)K, (long long)batch_count);
-    return -1;
+    return fail(nullptr);
   }
 
   // Ensure workspace is large enough for auto-tune candidates (if pending)
@@ -498,7 +513,7 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
       cached->tuned ? cached->workspace_size : cached->max_candidate_workspace;
   if (needed_ws > 0) {
     if (hipdnn_ep_state_ensure_workspace(state, needed_ws) != 0)
-      return -1;
+      return fail("wrap_hipblasLtMatmul: workspace allocation failed");
   }
 
   void *ws_ptr = hipdnn_ep_state_get_workspace(state);
@@ -540,7 +555,7 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
 
   if (st != HIPBLAS_STATUS_SUCCESS) {
     fprintf(stderr, "wrap_hipblasLtMatmul: hipblasLtMatmul failed (%d)\n", st);
-    return -1;
+    return fail(nullptr);
   }
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: completed successfully\n");

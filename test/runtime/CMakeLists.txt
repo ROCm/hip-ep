@@ -147,3 +147,22 @@ target_link_libraries(test-cache-identity PRIVATE
 )
 add_test(NAME CacheIdentityUnitTest COMMAND test-cache-identity)
 set_target_properties(test-cache-identity PROPERTIES FOLDER "runtime-tests")
+
+# Shared MatMul/Gemm runtime preflight and mock ABI behavior. Dispatch counters
+# prove invalid contractions return before the simulated BLAS boundary.
+add_executable(test-matmul-gemm-contract
+    test_matmul_gemm_contract.cpp
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/mock/mock_gpu.cpp
+)
+target_compile_features(test-matmul-gemm-contract PRIVATE cxx_std_17)
+target_include_directories(test-matmul-gemm-contract PRIVATE
+    ${CMAKE_SOURCE_DIR}/lib/Runtime
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/mock
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_compile_definitions(test-matmul-gemm-contract PRIVATE
+    HIPDNN_EP_RT_NO_EXPORT
+    HIPDNN_EP_RUNTIME_TESTING
+)
+add_test(NAME MatmulGemmContractUnitTest COMMAND test-matmul-gemm-contract)
+set_target_properties(test-matmul-gemm-contract PROPERTIES FOLDER "runtime-tests")

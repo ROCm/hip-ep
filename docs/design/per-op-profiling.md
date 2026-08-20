@@ -15,10 +15,14 @@ Per-operator GPU profiling measures GPU and CPU time for each runtime wrapper fu
 Each operator wrapper contains one macro call:
 
 ```cpp
-int wrap_hipblasLtMatmul(RuntimeState *state, ..., int64_t M, int64_t N, int64_t K, ...) {
+int wrap_hipblasLtMatmul(RuntimeState *state, ..., int64_t M, int64_t N,
+                         int64_t K_a, int64_t K_b, ...) {
+  // The wrapper has already established K_a == K_b.
+  int64_t K_equal = K_a;
   OP_PROFILE("matmul", [&] {
     char b[64];
-    snprintf(b, sizeof(b), "%lldx%lldx%lld", (long long)M, (long long)N, (long long)K);
+    snprintf(b, sizeof(b), "%lldx%lldx%lld", (long long)M, (long long)N,
+             (long long)K_equal);
     return std::string(b);
   }, state);
   // ... operator implementation ...

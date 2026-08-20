@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../matmul_gemm_contract.h"
 #include "../op_profile.h"
 #include "../op_state.h"
 #include "error_check_macros.h"
@@ -485,8 +486,43 @@ static GemmCacheEntry selectGemmAlgo(
 
 int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
               const void *B, const void *C, void *output, int64_t M, int64_t N,
-              int64_t K, float alpha, float beta, int64_t transA,
+              int64_t K_a, int64_t K_b, float alpha, float beta, int64_t transA,
               int64_t transB, int64_t typeCode, int64_t cDim0, int64_t cDim1) {
+  using namespace hipdnn_ep::blas_contract;
+
+  ValidationResult validation =
+      validateGemm(M, N, K_a, K_b, transA, transB, typeCode, C != nullptr,
+                   cDim0, cDim1, A != nullptr, B != nullptr, output != nullptr);
+  const OutputSize &outputSize = validation.outputSize;
+  if (!state) {
+    fprintf(stderr, "wrap_gemm: invalid state\n");
+    return -1;
+  }
+
+  auto fail = [&](const char *message) {
+    if (message)
+      fprintf(stderr, "%s\n", message);
+    (void)hipdnn_ep_state_set_error_flag(state);
+    if (validation.outputSizeKnown && outputSize.bytes != 0 && output) {
+      hipStream_t failureStream =
+          static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+      if (failureStream) {
+        hipError_t zeroStatus =
+            hipMemsetAsync(output, 0, outputSize.bytes, failureStream);
+        if (zeroStatus != hipSuccess)
+          fprintf(stderr, "wrap_gemm: failed to zero invalid output (%d): %s\n",
+                  (int)zeroStatus, hipGetErrorString(zeroStatus));
+      }
+    }
+    return -1;
+  };
+
+  if (validation.status == ValidationStatus::EmptyOutput)
+    return 0;
+  if (validation.status == ValidationStatus::Failure)
+    return fail(validation.errorMessage);
+
+  int64_t K = K_a; // Cache and descriptors consume K only after equality.
   OP_PROFILE(
       "gemm",
       [&] {
@@ -496,10 +532,6 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
         return std::string(b);
       },
       state);
-  if (!state || !A || !B || !output) {
-    fprintf(stderr, "wrap_gemm: invalid arguments\n");
-    return -1;
-  }
 
   hipblasLtHandle_t handle =
       static_cast<hipblasLtHandle_t>(hipdnn_ep_state_get_hipblas_handle(state));
@@ -507,14 +539,12 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
 
   if (!handle || !stream) {
-    fprintf(stderr, "wrap_gemm: null handle or stream\n");
-    return -1;
+    return fail("wrap_gemm: null handle or stream");
   }
 
   GemmState *gs = GemmState::get_op_state(state, op_state_slot);
   if (!gs || !gs->table) {
-    fprintf(stderr, "wrap_gemm: missing op-state for slot %d\n", op_state_slot);
-    return -1;
+    return fail("wrap_gemm: missing op-state");
   }
   GemmAlgoTable &table = *gs->table;
 
@@ -522,9 +552,7 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
   hipblasComputeType_t computeType;
   hipDataType scaleType;
   if (!resolveGemmTypes(typeCode, dataType, computeType, scaleType)) {
-    fprintf(stderr, "wrap_gemm: unsupported typeCode %lld\n",
-            (long long)typeCode);
-    return -1;
+    return fail("wrap_gemm: unsupported typeCode");
   }
 
   // Fused-bias epilogue eligibility: a per-output-feature [N] / [1,N] bias
@@ -560,7 +588,7 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
     int bc_result = broadcastBiasToOutput(state, C, output, M, N, cDim0, cDim1,
                                           beta, typeCode);
     if (bc_result != 0)
-      return bc_result;
+      return fail("wrap_gemm: bias broadcast failed");
   }
 
   // Select effective beta and C pointer for hipblasLtMatmul.
@@ -737,5 +765,7 @@ cleanup:
   if (matmul_desc)
     hipblasLtMatmulDescDestroy(matmul_desc);
 
+  if (result != 0)
+    return fail(nullptr);
   return result;
 }

@@ -30,6 +30,8 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
     };
 
     auto AType = cast<MemRefType>(op.getInputA().getType());
+    auto BType = cast<MemRefType>(op.getInputB().getType());
+
     Type elemType = AType.getElementType();
     int64_t typeCode;
     if (elemType.isF16())
@@ -69,18 +71,19 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
 
     // A.shape = transA ? [K, M] : [M, K]
     // B.shape = transB ? [N, K] : [K, N]
-    Value M, K, N;
+    Value M, Ka, Kb, N;
     if (adaptor.getTransA()) {
-      K = getMemRefDimSize(AType, 0, adaptor.getInputA(), rewriter, loc);
+      Ka = getMemRefDimSize(AType, 0, adaptor.getInputA(), rewriter, loc);
       M = getMemRefDimSize(AType, 1, adaptor.getInputA(), rewriter, loc);
     } else {
       M = getMemRefDimSize(AType, 0, adaptor.getInputA(), rewriter, loc);
-      K = getMemRefDimSize(AType, 1, adaptor.getInputA(), rewriter, loc);
+      Ka = getMemRefDimSize(AType, 1, adaptor.getInputA(), rewriter, loc);
     }
-    auto BType = cast<MemRefType>(op.getInputB().getType());
     if (adaptor.getTransB()) {
       N = getMemRefDimSize(BType, 0, adaptor.getInputB(), rewriter, loc);
+      Kb = getMemRefDimSize(BType, 1, adaptor.getInputB(), rewriter, loc);
     } else {
+      Kb = getMemRefDimSize(BType, 0, adaptor.getInputB(), rewriter, loc);
       N = getMemRefDimSize(BType, 1, adaptor.getInputB(), rewriter, loc);
     }
 
@@ -105,7 +108,7 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
       cDim1 = createI64Const(0);
     }
 
-    SmallVector<Type, 16> paramTypes = {
+    SmallVector<Type, 17> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
         ptrType, // A
@@ -114,7 +117,8 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
         ptrType, // output
         i64Type, // M
         i64Type, // N
-        i64Type, // K
+        i64Type, // K_a
+        i64Type, // K_b
         f32Type, // alpha
         f32Type, // beta
         i64Type, // transA
@@ -129,15 +133,16 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
       return failure();
     }
 
-    SmallVector<Value, 16> args = {
+    SmallVector<Value, 17> args = {
         statePtr,    getOpStateSlotValue(op, rewriter, loc),
         input_A_ptr, input_B_ptr,
         input_C_ptr, output_ptr,
         M,           N,
-        K,           alpha,
-        beta,        transA,
-        transB,      typeCodeVal,
-        cDim0,       cDim1};
+        Ka,          Kb,
+        alpha,       beta,
+        transA,      transB,
+        typeCodeVal, cDim0,
+        cDim1};
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
     return success();
