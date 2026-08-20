@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// RUN: hip-mlir-opt %s --split-input-file -allow-unregistered-dialect -convert-onnx-to-hipsr | FileCheck %s
+// RUN: hip-mlir-opt %s --onnx-dialect=modeled --split-input-file -allow-unregistered-dialect -convert-onnx-to-hipsr | FileCheck %s
 
 // CHECK-LABEL: func.func @min_two_inputs
 // CHECK-SAME:  (%[[CTX:[^:]*]]: !hipsr.context, %[[A:[^:]*]]: tensor<4x1024xf16, #hipsr.mem<device>>, %[[B:[^:]*]]: tensor<4x1024xf16, #hipsr.mem<device>>) -> tensor<4x1024xf16, #hipsr.mem<device>> {
