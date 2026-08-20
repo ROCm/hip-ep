@@ -4,6 +4,30 @@
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics %s
 
 
+func.func @valid_dynamic(%ctx: !hip.context,
+                         %input: memref<?x4xf32, 1>,
+                         %output: memref<?x4xf32, 1>) {
+  hip.miopen.softmax(%ctx)
+    ins(%input : memref<?x4xf32, 1>)
+    outs(%output : memref<?x4xf32, 1>)
+  return
+}
+
+// -----
+
+func.func @miopen_softmax_wrong_output(
+    %ctx: !hip.context, %input: memref<2x3xf32, 1>,
+    %output: memref<2x4xf32, 1>) {
+  // expected-error @+1 {{dim 1 of result mismatch: expected 3}}
+  hip.miopen.softmax(%ctx)
+    ins(%input : memref<2x3xf32, 1>)
+    outs(%output : memref<2x4xf32, 1>)
+  return
+}
+
+// -----
+
+
 // data/output family with a second shaped input: bias cannot define the result.
 func.func @bias_gelu_wrong_output(
     %ctx: !hip.context, %data: memref<2x8xf32, 1>,
