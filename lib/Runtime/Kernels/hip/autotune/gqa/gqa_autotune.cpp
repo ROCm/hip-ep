@@ -7,6 +7,14 @@
 // nothing about which config to run is decided here: this file turns a request
 // into keys, probes them in order, and checks that what came back can run.
 //
+// That walk runs once per distinct question, not once per dispatch: a resolved
+// answer is remembered against the request's own classes, and a served model
+// asks only a few dozen distinct questions however long it runs. The memo is
+// process-wide and keyed on the table as well as the question, so repeated model
+// loads reuse it and two models with different tables do not share answers. The
+// walk is a pure function of the key, so this is a cost decision and not a
+// policy one -- see g_resolved and internTable.
+//
 // The keys are what changed in schema 5. A key used to carry the request's
 // exact head counts and batch, which meant a model whose (num_heads,
 // kv_num_heads) pair was never measured could only be answered by the
@@ -41,6 +49,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -77,18 +86,39 @@ struct Answer {
   GqaPrefillConfig prefill{};
 };
 
-// Compute units on this part, read once. The fallback split count is a function
-// of it, which is what lets that fallback follow the hardware instead of being
-// a number somebody picked on one GPU.
+// A row the tier walk settled on, plus the tier it came from.
+struct Resolved {
+  Answer answer;
+  GqaTuneSource source = GqaTuneSource::Heuristic;
+};
+
+// Compute units on this part. The fallback split count is a function of it,
+// which is what lets that fallback follow the hardware instead of being a number
+// somebody picked on one GPU.
+//
+// Cached per device for the process, not per policy: hipGetDeviceProperties
+// fills a large struct and is one of the slower queries in the API, while the
+// answer is a fixed property of the part. A host that loads models repeatedly
+// used to pay it once per session. Keyed on the device because a process may run
+// on more than one, and a failure is not cached -- it is not a property of the
+// device.
 static int currentComputeUnits() {
 #if defined(HIPDNN_EP_GQA_AUTOTUNE_GPU_FREE)
   return 0;
 #else
   int device = 0;
-  hipDeviceProp_t prop{};
-  if (hipGetDevice(&device) != hipSuccess ||
-      hipGetDeviceProperties(&prop, device) != hipSuccess)
+  if (hipGetDevice(&device) != hipSuccess)
     return 0;
+  static std::mutex mutex;
+  static std::unordered_map<int, int> by_device;
+  const std::lock_guard<std::mutex> lock(mutex);
+  const auto it = by_device.find(device);
+  if (it != by_device.end())
+    return it->second;
+  hipDeviceProp_t prop{};
+  if (hipGetDeviceProperties(&prop, device) != hipSuccess)
+    return 0;
+  by_device.emplace(device, prop.multiProcessorCount);
   return prop.multiProcessorCount;
 #endif
 }
@@ -99,6 +129,9 @@ struct GqaAutotunePolicy {
   // probe order is a loop over four keys rather than a walk over four
   // containers.
   std::unordered_map<uint64_t, Answer> rows;
+  // Which table these rows came from, for the process-wide memo's key. 0 means
+  // no table loaded, and therefore nothing to memoise.
+  uint32_t table_id = 0;
   std::atomic<uint64_t> invalid_entries{0};
   // Read once at creation; 0 means the query failed and the fallback assumes a
   // part this size.
@@ -458,6 +491,68 @@ static GqaPrefillConfig prefillHeuristic(const GqaPrefillRequest &request) {
   return {0, 32, 0, 0, 0};
 }
 
+// ---- table identity --------------------------------------------------------
+
+// A small id per distinct table, so the process-wide memo below can name the
+// table it answered from in a few bits of its key.
+//
+// The id has to exist because the memo outlives a session and a table does not:
+// the file is read from the model package's own FileSystem, so two models in one
+// process can carry different tables and legitimately disagree about the same
+// geometry. Interning by content, not by `model_key`, because the stamp is a
+// campaign name that two different builds can share -- and because content is
+// what makes a reload of the same package reuse everything the last load
+// resolved, which is the whole point of the memo being process-wide.
+//
+// Two tables are the same table when their bytes are equal, decided by comparing
+// them and not by trusting a digest: a hash collision here would hand one
+// model's config to another, and "unlikely" is not a property a dispatch
+// decision should rest on. So a copy of each distinct table is kept -- tens of
+// kilobytes each, and a process realistically holds one or two -- and the hash
+// is only a fast reject that turns the search into one comparison.
+//
+// kMaxTableIds bounds both that memory and the id space the key has room for.
+// Past it a session resolves without the memo, which is slower and still
+// correct; reaching it would mean 4096 genuinely different GQA tables in one
+// process.
+constexpr uint32_t kMaxTableIds = 4096;
+static std::vector<std::vector<uint8_t>> g_tables;         // id - 1 -> bytes
+static std::unordered_multimap<uint64_t, uint32_t> g_table_ids; // hash -> id
+static std::mutex g_tables_mutex;
+
+// FNV-1a, eight bytes at a time, over a table of tens of kilobytes. The length
+// seeds it so that a table which is a prefix of another is still distinct.
+static uint64_t tableHash(const uint8_t *data, size_t size) {
+  uint64_t h = 0xcbf29ce484222325ull ^ static_cast<uint64_t>(size);
+  size_t i = 0;
+  for (; i + sizeof(uint64_t) <= size; i += sizeof(uint64_t)) {
+    uint64_t word = 0;
+    std::memcpy(&word, data + i, sizeof(word)); // data has no alignment promise
+    h = (h ^ word) * 0x100000001b3ull;
+  }
+  for (; i < size; ++i)
+    h = (h ^ static_cast<uint64_t>(data[i])) * 0x100000001b3ull;
+  return h;
+}
+
+// 0 means "do not memoise": no table, or an id space that ran out.
+static uint32_t internTable(const uint8_t *data, size_t size) {
+  const uint64_t hash = tableHash(data, size);
+  const std::lock_guard<std::mutex> lock(g_tables_mutex);
+  const auto range = g_table_ids.equal_range(hash);
+  for (auto it = range.first; it != range.second; ++it) {
+    const std::vector<uint8_t> &known = g_tables[it->second - 1];
+    if (known.size() == size && std::memcmp(known.data(), data, size) == 0)
+      return it->second;
+  }
+  if (g_tables.size() >= kMaxTableIds)
+    return 0;
+  g_tables.emplace_back(data, data + size);
+  const uint32_t id = static_cast<uint32_t>(g_tables.size());
+  g_table_ids.emplace(hash, id);
+  return id;
+}
+
 // ---- loading ---------------------------------------------------------------
 
 // A row has to mean exactly what its tier says it means. Wildcarding a field
@@ -596,6 +691,11 @@ static bool loadLutBuffer(GqaAutotunePolicy &policy, const uint8_t *data,
   if (!lut->rows())
     return true;
 
+  // Sized up front. The shipped table is 2828 rows, and growing into that from
+  // nothing rehashes about a dozen times, each pass rehashing every row inserted
+  // so far -- all of it on the session-creation path.
+  policy.rows.reserve(lut->rows()->size());
+
   size_t loaded = 0;
   for (const fbs::GqaTuneRow *row : *lut->rows()) {
     Answer answer;
@@ -612,6 +712,10 @@ static bool loadLutBuffer(GqaAutotunePolicy &policy, const uint8_t *data,
     policy.rows.insert_or_assign(key, answer);
     ++loaded;
   }
+  // Only once rows exist: the memo key uses 0 to mean "nothing to memoise", and
+  // a table that contributed no usable row answers nothing to remember.
+  if (loaded > 0)
+    policy.table_id = internTable(data, size);
   // model_key says which measurement campaign produced these rows. It is the only
   // way to tell two tables apart once one is packed, so it is logged rather than
   // carried unread.
@@ -793,15 +897,168 @@ static const Answer *find(const GqaAutotunePolicy &policy,
   return nullptr;
 }
 
+// ---- resolved-answer memo --------------------------------------------------
+
+// What the tier walk decided, keyed on the question rather than on a row.
+//
+// A served model asks the same few questions once per layer per token, and
+// answering one costs up to kMaxProbes misses, so the walk runs once per
+// distinct question and every later dispatch is a single lookup. The walk is a
+// pure function of the key, so this changes cost and nothing else.
+//
+// Process-wide, not per policy, and for the same reason the tuner caches in
+// gqa_kernel.hip are: a host loads and unloads models repeatedly in one process,
+// and a memo that died with the session would start cold for most of the
+// dispatches it exists to serve. The table id in the key is what makes that safe
+// across models -- see internTable.
+//
+// Bounded by construction: every field of the key is a bucket or a class, so the
+// whole process can only ask a few dozen distinct questions per table.
+static std::unordered_map<uint64_t, Resolved> g_resolved;
+// GQA may be dispatched from more than one thread. One uncontended lock is still
+// far cheaper than the walk it replaces.
+static std::mutex g_resolved_mutex;
+
+// The question a request asks, as one word: the table it is asked of, plus the
+// request's own classes with nothing wildcarded. `Geometry` is not a tier here,
+// it just marks the key as naming a request rather than a row -- the memo is its
+// own map, so it cannot collide with a row key.
+//
+// Layout above packKey's 39 bits: max_splits (7 bits) at 39, table id (13 bits,
+// so kMaxTableIds fits) at 46.
+//
+// max_splits rides along because validDecodeConfig reads it and a row key does
+// not carry it. Without it a caller asking for a lower cap could be handed the
+// answer resolved for a higher one.
+static uint64_t decodeMemoKey(const GqaAutotunePolicy &policy,
+                              const GqaDecodeRequest &request) {
+  const uint64_t classes =
+      packKey(fbs::GqaTunePhase::Decode, fbs::GqaTuneTier::Geometry,
+              kvDtypeClass(request.kv_dtype), headDimClass(request.head_dim),
+              headsPerGroup(request.num_heads, request.kv_num_heads),
+              parClass(request.batch, request.num_heads),
+              batchClass(request.batch), fbs::GqaSeqBucket::Any,
+              seqBucket(decodeEffectiveLen(request)),
+              windowClass(request.local_window));
+  const uint64_t cap =
+      static_cast<uint64_t>(std::max(0, std::min(request.max_splits, 127)));
+  return classes | (cap << 39) |
+         (static_cast<uint64_t>(policy.table_id) << 46);
+}
+
+static uint64_t prefillMemoKey(const GqaAutotunePolicy &policy,
+                               const GqaPrefillRequest &request) {
+  // Mirrors the probe the walk would build, window included: v5 is the only
+  // variant the fused path ever hands a window.
+  const bool v5 = request.variant == GqaPrefillVariant::V5;
+  const uint64_t classes =
+      packKey(phaseOf(request.variant), fbs::GqaTuneTier::Geometry,
+              fbs::GqaTuneKvDtype::Fp16, headDimClass(request.head_dim),
+              headsPerGroup(request.num_heads, request.kv_num_heads),
+              parClass(request.batch, request.num_heads),
+              batchClass(request.batch), seqBucket(std::max(request.seq_q, 1)),
+              seqBucket(std::max(request.seq_kv, 1)),
+              v5 ? windowClass(request.local_window)
+                 : fbs::GqaWindowClass::NoWindow);
+  return classes | (static_cast<uint64_t>(policy.table_id) << 46);
+}
+
+static bool memoFind(uint64_t key, Resolved *out) {
+  const std::lock_guard<std::mutex> lock(g_resolved_mutex);
+  const auto it = g_resolved.find(key);
+  if (it == g_resolved.end())
+    return false;
+  *out = it->second;
+  return true;
+}
+
+static void memoStore(uint64_t key, const Answer &answer,
+                      GqaTuneSource source) {
+  const std::lock_guard<std::mutex> lock(g_resolved_mutex);
+  g_resolved.emplace(key, Resolved{answer, source});
+}
+
+// ---- mode ------------------------------------------------------------------
+
+// Where a session takes its configs from. `Lookup` resolves them from the
+// offline table through the tiers above. `Online` bypasses the table entirely
+// and benchmarks candidates on the GPU into the per-shape caches in
+// gqa_kernel.hip -- the behaviour that predates the table, kept so the two can
+// be compared. Both paths are compiled in either way; this only picks which one
+// a session takes.
+//
+// The choice is made in two places because the two levers reach different
+// situations. A build sets the default with
+// -DHIPDNN_EP_GQA_AUTOTUNE_ONLINE_DEFAULT=1, which is the only lever inside a
+// test harness that does not let you set environment variables: the whole run
+// takes the online path with no script change. HIPDNN_GQA_AUTOTUNE_MODE
+// overrides that per process, which is the lever a developer has on a build they
+// did not make.
+#if defined(HIPDNN_EP_GQA_AUTOTUNE_ONLINE_DEFAULT) &&                          \
+    HIPDNN_EP_GQA_AUTOTUNE_ONLINE_DEFAULT
+constexpr GqaAutotuneMode kDefaultMode = GqaAutotuneMode::Online;
+#else
+constexpr GqaAutotuneMode kDefaultMode = GqaAutotuneMode::Lookup;
+#endif
+
+static const char *modeName(GqaAutotuneMode mode) {
+  return mode == GqaAutotuneMode::Online ? "online (GPU benchmark, table "
+                                           "bypassed)"
+                                         : "lookup (offline table)";
+}
+
+struct ModeChoice {
+  GqaAutotuneMode mode = kDefaultMode;
+  bool from_env = false;
+};
+
+// Matched case-insensitively and with whitespace stripped, and an unrecognised
+// value says so instead of quietly leaving the session on the default. The point
+// of the switch is to compare the two paths, so silently running the other one is
+// the failure worth a message.
+static ModeChoice chooseMode() {
+  const std::string raw = hipdnn_ep::env_string("HIPDNN_GQA_AUTOTUNE_MODE");
+  std::string mode;
+  mode.reserve(raw.size());
+  for (const char c : raw) {
+    if (c == ' ' || c == '\t' || c == '\r' || c == '\n')
+      continue;
+    mode.push_back(c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c);
+  }
+  if (mode.empty())
+    return {kDefaultMode, false};
+  if (mode == "lookup")
+    return {GqaAutotuneMode::Lookup, true};
+  if (mode == "online")
+    return {GqaAutotuneMode::Online, true};
+  fprintf(stderr,
+          "GQA autotune: unrecognised HIPDNN_GQA_AUTOTUNE_MODE=\"%s\" "
+          "(expected \"lookup\" or \"online\"); using the build default, %s\n",
+          raw.c_str(), modeName(kDefaultMode));
+  return {kDefaultMode, false};
+}
+
 } // namespace
 
 void *gqa_autotune_create(morphizen::FileSystem *fs) {
   auto policy = std::make_unique<GqaAutotunePolicy>();
   policy->compute_units = currentComputeUnits();
-  const std::string &mode = hipdnn_ep::env_string("HIPDNN_GQA_AUTOTUNE_MODE");
-  if (mode == "online")
-    policy->mode = GqaAutotuneMode::Online;
+  const ModeChoice choice = chooseMode();
+  policy->mode = choice.mode;
+  // Loaded whatever the mode says. An online session never reads these rows, so
+  // skipping the load looks free -- but it only ever saves work in the mode that
+  // then spends 12-96 GPU launches per decode shape, and it would make the
+  // `inspect` tool in test_gqa_autotune.cpp report that a shipped table does not
+  // load whenever the mode happens to be set in the environment. Loading is one
+  // file read; that is the cheaper of the two mistakes.
   loadLutFromFileSystem(*policy, fs);
+  // Says where the mode came from, not just what it is: on a build whose default
+  // was flipped there is no environment variable to inspect, so the log is the
+  // only way to tell a deliberate default from an override that did not take.
+  RUNTIME_DEBUG_LOG(
+      "[Runtime DEBUG] GQA autotune mode: %s (from %s)\n",
+      modeName(policy->mode),
+      choice.from_env ? "HIPDNN_GQA_AUTOTUNE_MODE" : "the build default");
   return policy.release();
 }
 
@@ -819,6 +1076,23 @@ GqaDecodeResult gqa_autotune_resolve_decode(void *opaque_policy,
                                             const GqaDecodeRequest &request) {
   auto *policy = static_cast<GqaAutotunePolicy *>(opaque_policy);
   if (policy) {
+    // A row holds the split count the top of its bucket wants; the clamp is
+    // what makes the same row right lower down. It stays outside the memo so
+    // the remembered answer is the row, not one length's reading of it.
+    const uint64_t memo_key = decodeMemoKey(*policy, request);
+    Resolved memo;
+    if (policy->table_id != 0 && memoFind(memo_key, &memo)) {
+      const GqaDecodeConfig config =
+          clampDecodeConfig(request, GqaDecodeConfig{memo.answer.use_wmma,
+                                                     memo.answer.splits,
+                                                     memo.answer.bkv});
+      // Re-checked rather than assumed: max_splits is in the key, but a length
+      // low in the bucket can clamp to a split count a length at the top of it
+      // cannot. On the rare mismatch, fall through and walk the tiers.
+      if (validDecodeConfig(request, config))
+        return {config, memo.source};
+    }
+
     // The parallelism walk is the long one: every class from the request's down
     // to P1, then the three tiers below and the head_dim-agnostic last resort.
     Probe probes[kMaxProbes];
@@ -833,15 +1107,18 @@ GqaDecodeResult gqa_autotune_resolve_decode(void *opaque_policy,
                                   kvDtypeClass(request.kv_dtype), probes[i]);
       if (!answer)
         continue;
-      // A row holds the split count the top of its bucket wants; the clamp is
-      // what makes the same row right lower down.
       const GqaDecodeConfig config = clampDecodeConfig(
           request,
           GqaDecodeConfig{answer->use_wmma, answer->splits, answer->bkv});
       if (!validDecodeConfig(request, config)) {
+        // Counted once per question now, not once per dispatch: a rejected row
+        // is a property of the table, and repeating the count per token said
+        // nothing extra.
         policy->invalid_entries.fetch_add(1, std::memory_order_relaxed);
         continue;
       }
+      if (policy->table_id != 0)
+        memoStore(memo_key, *answer, probes[i].source);
       return {config, probes[i].source};
     }
   }
@@ -862,6 +1139,12 @@ gqa_autotune_resolve_prefill(void *opaque_policy,
     // local_window is v5's alone: window_ok in real/gqa.cpp admits a window to
     // the fused path at head_dim 64 only, so v7 and v8 never see one.
     const bool v5 = request.variant == GqaPrefillVariant::V5;
+    // Nothing here is clamped per request, so a hit is the whole answer.
+    const uint64_t memo_key = prefillMemoKey(*policy, request);
+    Resolved memo;
+    if (policy->table_id != 0 && memoFind(memo_key, &memo))
+      return {memo.answer.prefill, memo.source};
+
     // The parallelism walk is the long one: every class from the request's down
     // to P1, then the three tiers below and the head_dim-agnostic last resort.
     Probe probes[kMaxProbes];
@@ -878,6 +1161,8 @@ gqa_autotune_resolve_prefill(void *opaque_policy,
                                   fbs::GqaTuneKvDtype::Fp16, probes[i]);
       if (!answer)
         continue;
+      if (policy->table_id != 0)
+        memoStore(memo_key, *answer, probes[i].source);
       return {answer->prefill, probes[i].source};
     }
   }

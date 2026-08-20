@@ -187,6 +187,13 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
         list(APPEND COMPILE_FLAGS "-DHIPDNN_EP_DISABLE_VENDOR_BLAS")
     endif()
 
+    # Moves the GQA autotune default (autotune/gqa/gqa_autotune.cpp) from the
+    # offline LUT to online GPU benchmarking. Both paths stay compiled in either
+    # way; this is the lever for harnesses that cannot set HIPDNN_GQA_AUTOTUNE_MODE.
+    if(HIPDNN_EP_GQA_AUTOTUNE_ONLINE_DEFAULT)
+        list(APPEND COMPILE_FLAGS "-DHIPDNN_EP_GQA_AUTOTUNE_ONLINE_DEFAULT=1")
+    endif()
+
     # Always add root directory for public headers
     list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}")
 

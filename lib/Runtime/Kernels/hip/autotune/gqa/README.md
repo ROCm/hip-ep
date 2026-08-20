@@ -31,6 +31,25 @@ the dispatch path — no timing, no scoring, no floating point, one hash of one
 nobody reviewed, so deriving one is an offline job (see below) and its output ships
 as more rows.
 
+The probe order above is walked **once per distinct question**. A resolved answer is
+memoised against the request's own classes, so the second and every later dispatch
+of a shape is a single lookup instead of up to `kMaxProbes` misses — which is what a
+served model does, once per layer per token. Three properties of that memo are
+load-bearing:
+
+- **It holds the row, not the config.** The decode split clamp below is per request,
+  so two lengths sharing a bucket still get their own split count.
+- **It is process-wide**, like the online tuner's caches in `gqa_kernel.hip`, because
+  a host loads and unloads models repeatedly in one process and a per-session memo
+  would be cold for most of the dispatches it exists to serve.
+- **Its key names the table**, interned by content in `internTable()`. The answer
+  comes out of a file that ships inside the model package, so two models can carry
+  different tables and legitimately disagree about the same geometry; a reload of the
+  same package interns to the same id and reuses everything the last load resolved.
+
+Its size is bounded by construction, since every field of the key is a bucket or a
+class.
+
 `Heuristic` is not a tier so much as a failure mode: no file, an arch or schema
 mismatch, or a table shipped without `Fallback` rows. **A table that loads answers
 every shape**, so `Heuristic` in a log means the table did not load, not that a
@@ -168,7 +187,7 @@ bumping `schema_version`. And the JSON stays readable: a row diffs as
 |---|---|---|
 | `gqa_autotune.fbs` | LUT **schema** — the format, not the data. Lives here, not in `schemas/`, so it sits next to its only reader. | `schemas/CMakeLists.txt` (flatc) |
 | `gqa_autotune.h` | Policy API: requests, configs, `GqaTuneSource`. | — |
-| `gqa_autotune.cpp` | Key encoding, the four probes, the split clamp, the loader. | `lib/Runtime/CMakeLists.txt` (bitcode) |
+| `gqa_autotune.cpp` | Key encoding, the four probes, the resolved-answer memo, the split clamp, the loader. | `lib/Runtime/CMakeLists.txt` (bitcode) |
 | `lut/*.json` | The tables, per arch. Reviewable source of truth. | `build_lut.py` |
 | `lut/*.fb` | What the runtime loads, produced from the JSON by `flatc`. | `flatc` |
 
@@ -297,9 +316,9 @@ version they measured, so `measurement_store.py stats --any-kernel-ver` can show
 a kernel change did to the numbers it changed.
 
 `test/runtime/test_gqa_autotune.cpp` covers the probe order, the quarter-octave
-labels, the split clamp, the parallelism tier, the config names and every rule
-`rowConsistent()` enforces. It is GPU-free and compiles the same
-`gqa_autotune.cpp` that goes into `runtime.bc`.
+labels, the split clamp, what the memo is allowed to remember, the parallelism tier,
+the config names and every rule `rowConsistent()` enforces. It is GPU-free and
+compiles the same `gqa_autotune.cpp` that goes into `runtime.bc`.
 
 ## Packaging
 
@@ -307,8 +326,34 @@ labels, the split clamp, the parallelism tier, the config names and every rule
 gqa_autotune_lut=/path/to/lib/Runtime/Kernels/hip/autotune/gqa/lut/gfx1151.fb
 ```
 
-`HIPDNN_GQA_LUT_FILE` overrides the logical filename at runtime, and
-`HIPDNN_GQA_AUTOTUNE_MODE=online` bypasses the table entirely and benchmarks on the
-GPU as before. Deciding online is not free: the production tuner issues 12-96
-launches for a decode shape and 526-1518 for a prefill one, up to 1769 s on the
-worst single shape. A table lookup is zero launches.
+`HIPDNN_GQA_LUT_FILE` overrides the logical filename at runtime.
+
+Which of the two config sources a session uses is chosen in two places, because
+the two levers reach different situations. **Both paths are compiled into every
+build either way** — this only decides which one a session takes.
+
+| Lever | Scope | Use it when |
+|---|---|---|
+| `-DHIPDNN_EP_GQA_AUTOTUNE_ONLINE_DEFAULT=ON` (CMake) | the build's default | the harness gives you no way to set an environment variable: build a package with the default flipped and the whole run takes the online path |
+| `HIPDNN_GQA_AUTOTUNE_MODE=lookup\|online` | one process, overrides the build default | you are running a build you did not configure |
+
+The environment variable is read once per session, in `gqa_autotune_create()`, so
+set it before the session is created; changing it later does not move a session
+that already exists. It is matched case-insensitively with whitespace stripped,
+and an unrecognised value prints a message and falls back to the build default
+rather than silently running the path you did not ask for.
+
+`HIPDNN_EP_DEBUG=1` logs both the mode and where it came from — on a build whose
+default was flipped there is no variable to inspect, so this is the only way to
+tell a deliberate default from an override that did not take:
+
+```text
+[Runtime DEBUG] GQA autotune mode: online (GPU benchmark, table bypassed) (from the build default)
+```
+
+That line is printed once per session, which also makes it the cheapest way to
+find out whether a harness reuses one session or builds a new one per run.
+
+Deciding online is not free: the production tuner issues 12-96 launches for a
+decode shape and 526-1518 for a prefill one, up to 1769 s on the worst single
+shape. A table lookup is zero launches.

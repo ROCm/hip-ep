@@ -109,6 +109,10 @@ std::vector<uint8_t> makeLut() {
   // Deliberately more splits than a short request can use, to pin the clamp:
   // S80 answers (64, 80], and at 70 keys only ceil(70/16) = 5 splits have work.
   decode(Tier::HeadGroup, 8, Par::Any, Seq::S80, Cfg::Scalar, 48);
+  // A bucket wide enough that two lengths inside it clamp differently: S160
+  // answers (128, 160], where ceil(len/16) is 9 at the bottom and 10 at the
+  // top. Used to pin what the resolved-answer memo is allowed to remember.
+  decode(Tier::HeadGroup, 8, Par::Any, Seq::S160, Cfg::Scalar, 10);
   // A batch*num_heads bucket beats the pooled row for the same lengths. This is
   // the only tier that can express "this head count wants something else", and
   // it is also how batch enters the key at all.
@@ -183,6 +187,23 @@ std::vector<uint8_t> makeLut() {
   auto lut = mlir::hip::CreateGqaAutotuneLutDirect(
       builder, /*schema_version=*/5, /*gpu_arch=*/"", /*rocm_version=*/0,
       hipdnn_ep::kGqaKernelAbi, "unit-test", &rows);
+  mlir::hip::FinishGqaAutotuneLutBuffer(builder, lut);
+  return {builder.GetBufferPointer(),
+          builder.GetBufferPointer() + builder.GetSize()};
+}
+
+// A table with exactly one answer in it, so two of them differ only in what they
+// say about the same geometry. Used to pin that the process-wide memo keys on the
+// table as well as the question.
+std::vector<uint8_t> makeOneRowLut(uint8_t splits) {
+  std::vector<Row> rows;
+  rows.push_back(Row(Phase::Decode, Tier::HeadGroup, Dtype::Any, Dim::D64, 8,
+                     Par::Any, Bat::Any, Seq::Any, Seq::S128, Win::NoWindow,
+                     Cfg::Scalar, splits));
+  flatbuffers::FlatBufferBuilder builder;
+  auto lut = mlir::hip::CreateGqaAutotuneLutDirect(
+      builder, /*schema_version=*/5, /*gpu_arch=*/"", /*rocm_version=*/0,
+      hipdnn_ep::kGqaKernelAbi, "unit-test-one-row", &rows);
   mlir::hip::FinishGqaAutotuneLutBuffer(builder, lut);
   return {builder.GetBufferPointer(),
           builder.GetBufferPointer() + builder.GetSize()};
@@ -333,6 +354,25 @@ int main(int argc, char **argv) {
   REQUIRE(result.source == hipdnn_ep::GqaTuneSource::HeadGroup);
   REQUIRE(result.config.splits == 5);
 
+  // Resolving is memoised per question so that a served model walks the tiers
+  // once instead of once per layer per token. What the memo may hold is the
+  // row, not one request's reading of it: 129 and 160 keys share a bucket and
+  // therefore a row, but not a clamp, so each has to get its own split count
+  // whichever of them asked first.
+  auto low_in_bucket = decodeRequest(64, 8, 64, 129);
+  auto high_in_bucket = decodeRequest(64, 8, 64, 160);
+  result = hipdnn_ep::gqa_autotune_resolve_decode(policy, low_in_bucket);
+  REQUIRE(result.source == hipdnn_ep::GqaTuneSource::HeadGroup);
+  REQUIRE(result.config.splits == 9);
+  result = hipdnn_ep::gqa_autotune_resolve_decode(policy, high_in_bucket);
+  REQUIRE(result.source == hipdnn_ep::GqaTuneSource::HeadGroup);
+  REQUIRE(result.config.splits == 10);
+  // Asking again is the path every token after the first takes, and it is the
+  // one that reads the memo rather than writing it.
+  result = hipdnn_ep::gqa_autotune_resolve_decode(policy, low_in_bucket);
+  REQUIRE(result.source == hipdnn_ep::GqaTuneSource::HeadGroup);
+  REQUIRE(result.config.splits == 9);
+
   // Nothing keyed on heads-per-group covers (1280, 1536], so the length-keyed
   // row answers -- a tier below the geometry ones but still measured, and above
   // the last resort. The WMMA row at that tier was refused on load, so this is
@@ -481,6 +521,37 @@ int main(int argc, char **argv) {
       hipdnn_ep::GqaPrefillVariant::V7, 1, 32, 8, 128, 512, 2048, 0};
   REQUIRE(hipdnn_ep::gqa_autotune_resolve_prefill(policy, v7).source ==
           hipdnn_ep::GqaTuneSource::Heuristic);
+
+  // The memo outlives a session, so two models loaded into one process must not
+  // be answered from each other's table. These two differ only in the split
+  // count they hold for one geometry, which is exactly the collision a memo
+  // keyed on the question alone would produce -- and it would produce it
+  // silently, since both requests hash to the same question.
+  MemoryFileSystem four_fs(makeOneRowLut(4));
+  MemoryFileSystem eight_fs(makeOneRowLut(8));
+  void *four = hipdnn_ep::gqa_autotune_create(&four_fs);
+  void *eight = hipdnn_ep::gqa_autotune_create(&eight_fs);
+  REQUIRE(four != nullptr && eight != nullptr);
+  const auto shared = decodeRequest(64, 8, 64, 128);
+  REQUIRE(hipdnn_ep::gqa_autotune_resolve_decode(four, shared).config.splits ==
+          4);
+  REQUIRE(hipdnn_ep::gqa_autotune_resolve_decode(eight, shared).config.splits ==
+          8);
+  // Asking the first one again has to give its own answer back, not the one the
+  // second stored under the same question.
+  REQUIRE(hipdnn_ep::gqa_autotune_resolve_decode(four, shared).config.splits ==
+          4);
+  // A fresh session over the same table -- the case the memo is process-wide for,
+  // where it answers from what an earlier session resolved. Whether the entry was
+  // reused is not observable from here; that it is still the right answer is.
+  MemoryFileSystem reload_fs(makeOneRowLut(4));
+  void *reloaded = hipdnn_ep::gqa_autotune_create(&reload_fs);
+  REQUIRE(
+      hipdnn_ep::gqa_autotune_resolve_decode(reloaded, shared).config.splits ==
+      4);
+  hipdnn_ep::gqa_autotune_destroy(reloaded);
+  hipdnn_ep::gqa_autotune_destroy(eight);
+  hipdnn_ep::gqa_autotune_destroy(four);
 
   hipdnn_ep::gqa_autotune_destroy(policy);
   return 0;
