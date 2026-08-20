@@ -127,7 +127,6 @@ buildOnnxToHipPipelineTail(OpPassManager &pm,
   //     implement the interface. See `docs/design/hip-shape-inference.md`
   //     for the design and `test/lit/Dialect/hip-infer-shapes.mlir` for
   //     the reference cases.
-  pm.addNestedPass<func::FuncOp>(mlir::hip::createFuseConvRelu6Pass());
   pm.addPass(mlir::hip::createInferShapesPass());
 
   // Apply constant storage policy only after HIP shape inference has consumed
@@ -146,6 +145,10 @@ buildOnnxToHipPipelineTail(OpPassManager &pm,
     pm.addPass(mlir::hip::createExternalizeConstantsPass(
         std::move(externalizeOptions)));
   }
+
+  // Fold conv+ReLU6 after constant externalization: greedy rewrite can DCE
+  // unused hip.constant carriers if this runs earlier (StaticPlugins test).
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createFuseConvRelu6Pass());
 
   // 1b'. Canonicalize + CSE immediately after shape inference and constant
   //      externalization. The dynamic-shape op conversions (e.g. pool /
