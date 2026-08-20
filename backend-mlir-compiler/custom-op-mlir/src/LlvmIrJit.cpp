@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "LlvmIrJit.h"
+#include "artifact_abi_validation.h"
 
 // HIP host API must precede the LLVM ORC headers: an ORC header pulls in
 // <intrin.h> on MSVC, which otherwise breaks HIP's vector-type headers.
@@ -18,6 +19,7 @@
 #include <llvm/ExecutionEngine/Orc/ExecutionUtils.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
+#include <llvm/IR/Instructions.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/Error.h>
@@ -421,6 +423,54 @@ bool installSearchGenerators(llvm::orc::LLJIT &jit) {
   return true;
 }
 
+// Validate the generated query structurally before adding the model or runtime
+// modules to the JITDylib. This keeps stale LLVM bitcode from materializing any
+// call site whose runtime-wrapper signature may have changed.
+bool validateBitcodeArtifactAbi(const llvm::Module &module,
+                                std::string &error) {
+  const llvm::Function *query =
+      module.getFunction(hipdnn::abi::kInferenceGetArtifactAbi);
+  if (!query) {
+    error = artifactAbiErrorMessage({ArtifactAbiError::Missing, 0},
+                                    "LLVM bitcode artifact");
+    return false;
+  }
+  if (query->isDeclaration() || query->arg_size() != 0 ||
+      !query->getReturnType()->isIntegerTy(64)) {
+    error = artifactAbiErrorMessage({ArtifactAbiError::Malformed, 0},
+                                    "LLVM bitcode artifact");
+    return false;
+  }
+
+  const llvm::ConstantInt *token = nullptr;
+  for (const llvm::BasicBlock &block : *query) {
+    const auto *ret = llvm::dyn_cast<llvm::ReturnInst>(block.getTerminator());
+    if (!ret)
+      continue;
+    const auto *candidate =
+        llvm::dyn_cast_or_null<llvm::ConstantInt>(ret->getReturnValue());
+    if (!candidate || token) {
+      error = artifactAbiErrorMessage({ArtifactAbiError::Malformed, 0},
+                                      "LLVM bitcode artifact");
+      return false;
+    }
+    token = candidate;
+  }
+  if (!token || token->getBitWidth() != 64) {
+    error = artifactAbiErrorMessage({ArtifactAbiError::Malformed, 0},
+                                    "LLVM bitcode artifact");
+    return false;
+  }
+
+  ArtifactAbiValidation validation =
+      validateArtifactAbiToken(token->getZExtValue());
+  if (!validation) {
+    error = artifactAbiErrorMessage(validation, "LLVM bitcode artifact");
+    return false;
+  }
+  return true;
+}
+
 } // namespace
 
 // PImpl keeps the LLVM ORC headers out of LlvmIrJit.h.
@@ -456,7 +506,7 @@ LlvmIrJit::~LlvmIrJit() {
 
 std::unique_ptr<LlvmIrJit>
 LlvmIrJit::create(const std::vector<uint8_t> &bitcode,
-                  const std::string &module_name) {
+                  const std::string &module_name, std::string *error) {
   ensureLLVMNativeTargetInitialized();
 
   // LLJIT auto-selects the object linking layer by triple
@@ -525,6 +575,13 @@ LlvmIrJit::create(const std::vector<uint8_t> &bitcode,
       module_name);
   if (!module)
     return nullptr;
+  std::string abi_error;
+  if (!validateBitcodeArtifactAbi(*module, abi_error)) {
+    LOG(ERROR) << "LlvmIrJit::create: " << abi_error;
+    if (error)
+      *error = abi_error;
+    return nullptr;
+  }
 
   auto runtime_module = parseAndStamp(
       llvm::StringRef(reinterpret_cast<const char *>(runtime_bc_data),

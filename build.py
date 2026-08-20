@@ -353,7 +353,7 @@ def run_tests(args, build_dir):
             args.config,
             "-R",
             "StaticPlugins|OutputAllocator|CustomOpComputeStatus|"
-            "TensorBufferLifecycle|SymbolicDims|CacheIdentity",
+            "ArtifactAbi|TensorBufferLifecycle|SymbolicDims|CacheIdentity",
             "--output-on-failure",
         ]
     )

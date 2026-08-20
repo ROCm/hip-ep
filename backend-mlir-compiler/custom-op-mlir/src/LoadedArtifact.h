@@ -29,9 +29,10 @@ class LlvmIrJit;
 // identically regardless of format. Shared by the EP (in-memory EPContext
 // model) and the standalone tools (artifact on disk), so the two never drift.
 //
-// The factories never LOG(FATAL): they return nullptr and (optionally) a
-// reason string, leaving error policy to the caller -- the EP escalates to
-// FATAL, the tools return an exit code.
+// Both factories validate inference_get_artifact_abi before returning. Callers
+// therefore cannot bind changed inference/runtime signatures on a stale
+// artifact. The factories never LOG(FATAL): they return nullptr and
+// (optionally) a reason string, leaving error policy to the caller.
 class LoadedArtifact {
 public:
   ~LoadedArtifact();

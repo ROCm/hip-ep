@@ -6,6 +6,7 @@
 #include "MlirCompiler.h"
 
 // Morphizen headers
+#include "hip/artifact_abi.h"
 #include "hip/timing.h"
 #include "morphizen/cache_identity.hpp"
 #include "morphizen/env_config.hpp"
@@ -169,6 +170,10 @@ static std::string build_metadata_json(const CompilationArtifact &artifact,
   // artifact and cannot drive the load decision).
   metadata.set_artifact_format(
       artifact.format == ArtifactFormat::NATIVE ? "NATIVE" : "LLVM_IR");
+  // This EPContext copy permits rejection before opening/loading the artifact.
+  // LoadedArtifact independently validates the generated symbol, whose value
+  // is emitted from the same single contract constant.
+  metadata.set_artifact_abi(hipdnn::abi::kArtifactAbiToken);
 
   GraphRef graphRef(graph);
 

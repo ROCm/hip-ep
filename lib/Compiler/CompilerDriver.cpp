@@ -179,6 +179,7 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
     logPhase("compileToObject");
 
     // Symbols exported from the generated DLL:
+    //   inference_get_artifact_abi             — pre-bind ABI handshake
     //   inference_init/compute/cleanup       — runtime entry points
     //   inference_get_metadata_json          — model metadata query
     //   test_hip_from_dll                    — diagnostic hook for hip-test
@@ -199,6 +200,7 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
     //                                          an artifact_abi.h constant (same
     //                                          as test_hip_from_dll below).
     std::vector<std::string> export_symbols = {
+        hipdnn::abi::kInferenceGetArtifactAbi,
         hipdnn::abi::kInferenceInit,
         hipdnn::abi::kInferenceCompute,
         hipdnn::abi::kInferenceCleanup,
@@ -431,6 +433,15 @@ bool CompilerDriver::runMLIRPasses(
                     "an '") +
         hipdnn::abi::kInferenceCompute +
         "' entry point (did it omit generate-interface?)";
+    return false;
+  }
+  if (overridePipeline &&
+      !module.lookupSymbol(hipdnn::abi::kInferenceGetArtifactAbi)) {
+    error_message =
+        std::string("HIPDNN_EP_PIPELINE: the custom pipeline did not produce "
+                    "an '") +
+        hipdnn::abi::kInferenceGetArtifactAbi +
+        "' ABI handshake (did it omit generate-interface?)";
     return false;
   }
 

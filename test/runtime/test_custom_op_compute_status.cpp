@@ -109,6 +109,38 @@ void testDeferredCallbackFailureReturnsStatusAfterCleanup() {
   }
 }
 
+void testCreateStateFailureReturnsStatus() {
+  const OrtApi api = makeApi();
+  void *state = reinterpret_cast<void *>(1);
+  OrtStatus *status =
+      morphizen::detail::translateCreateStateExceptions(api, [&] {
+        state = nullptr;
+        throw std::runtime_error(
+            "generated artifact ABI handshake version mismatch");
+      });
+  CHECK(state == nullptr);
+  CHECK(status != nullptr);
+  if (status) {
+    CHECK(unwrap(status)->code == ORT_RUNTIME_EXCEPTION);
+    CHECK(unwrap(status)->message ==
+          "generated artifact ABI handshake version mismatch");
+    release(status);
+  }
+}
+
+void testCreateStateUnknownExceptionReturnsStatus() {
+  const OrtApi api = makeApi();
+  OrtStatus *status =
+      morphizen::detail::translateCreateStateExceptions(api, [] { throw 42; });
+  CHECK(status != nullptr);
+  if (status) {
+    CHECK(unwrap(status)->code == ORT_RUNTIME_EXCEPTION);
+    CHECK(unwrap(status)->message ==
+          "CustomOp::CreateState failed with unknown exception");
+    release(status);
+  }
+}
+
 } // namespace
 
 int main() {
@@ -116,6 +148,8 @@ int main() {
   testGeneratedFailureReturnsStatus();
   testUnknownExceptionReturnsStatus();
   testDeferredCallbackFailureReturnsStatusAfterCleanup();
+  testCreateStateFailureReturnsStatus();
+  testCreateStateUnknownExceptionReturnsStatus();
 
   if (gFailures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", gFailures);

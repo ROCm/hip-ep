@@ -6,8 +6,9 @@
 //===----------------------------------------------------------------------===//
 // Generate Interface Pass - Create C-compatible interface functions
 //===----------------------------------------------------------------------===//
-// This pass generates four C-ABI compatible functions that wrap the internal
+// This pass generates five C-ABI compatible functions that wrap the internal
 // @main_graph function:
+// - inference_get_artifact_abi: Return the generated/runtime ABI token
 // - inference_init: Allocate context, create handles, upload constants
 // - inference_compute: 2-arg (state, inputs) ABI -- stage inputs, call
 //   @main_graph (graph outputs are allocated in-graph via hip.alloc_output)
@@ -265,6 +266,31 @@ void generateInferenceGetMetadataJson(ModuleOp module) {
   LLVM::ReturnOp::create(builder, loc, addr);
 }
 
+/// Generate inference_get_artifact_abi().
+///
+/// The stable no-argument query is the only artifact function a loader may call
+/// before validating the tagged return value. All other generated/runtime
+/// signatures are guarded by this handshake.
+void generateInferenceGetArtifactAbi(ModuleOp module) {
+  OpBuilder builder(module.getContext());
+  Location loc = module.getLoc();
+  builder.setInsertionPointToEnd(module.getBody());
+
+  Type i64Type = builder.getI64Type();
+  auto funcType = LLVM::LLVMFunctionType::get(i64Type, {});
+  auto funcOp = LLVM::LLVMFuncOp::create(
+      builder, loc, hipdnn::abi::kInferenceGetArtifactAbi, funcType);
+  funcOp->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
+  funcOp->setAttr("sym_visibility", builder.getStringAttr("public"));
+
+  Block *entry = funcOp.addEntryBlock(builder);
+  builder.setInsertionPointToStart(entry);
+  Value token = LLVM::ConstantOp::create(
+      builder, loc, i64Type,
+      builder.getI64IntegerAttr(hipdnn::abi::kArtifactAbiToken));
+  LLVM::ReturnOp::create(builder, loc, token);
+}
+
 /// Build an LLVM memref descriptor struct {ptr, ptr, offset, sizes, strides}
 /// from a TensorBuffer's GPU pointer and shape pointer.
 static Value buildMemrefDescriptor(OpBuilder &builder, Location loc,
@@ -347,11 +373,11 @@ static void emitErrorCheckedCall(OpBuilder &builder, Location loc,
   builder.setInsertionPointToStart(continueBlock);
 }
 
-// Generates the four C-ABI interface functions (inference_init,
-// inference_compute, inference_cleanup, inference_get_metadata_json) for a
-// lowered module. inference_compute has the (state, inputs) -> i32 signature;
-// graph outputs are allocated in-graph via hip.alloc_output, not passed as
-// out-params.
+// Generates the five C-ABI interface functions (inference_get_artifact_abi,
+// inference_init, inference_compute, inference_cleanup,
+// inference_get_metadata_json) for a lowered module. inference_compute has the
+// (state, inputs) -> i32 signature; graph outputs are allocated in-graph via
+// hip.alloc_output, not passed as out-params.
 class GenerateInterfacePass
     : public PassWrapper<GenerateInterfacePass, OperationPass<ModuleOp>> {
 public:
@@ -367,7 +393,8 @@ public:
   StringRef getArgument() const final { return "generate-interface"; }
   StringRef getDescription() const final {
     return "Generate C interface wrapper functions (inference_init, "
-           "inference_compute, inference_cleanup, inference_get_metadata_json)";
+           "inference_compute, inference_cleanup, inference_get_metadata_json, "
+           "inference_get_artifact_abi)";
   }
 
   void getDependentDialects(DialectRegistry &registry) const override {
@@ -407,8 +434,9 @@ public:
     std::string json = buildMetadataJson(module, constantsFile);
     generateMetadataGlobal(module, json);
     generateInferenceGetMetadataJson(module);
+    generateInferenceGetArtifactAbi(module);
 
-    COMPILER_DEBUG_LOG("[GenerateInterface] Generated 4 interface functions\n");
+    COMPILER_DEBUG_LOG("[GenerateInterface] Generated 5 interface functions\n");
   }
 
 private:
@@ -482,7 +510,9 @@ private:
     Type i32Type = IntegerType::get(ctx, 32);
     Type i64Type = IntegerType::get(ctx, 64);
 
-    if (module.lookupSymbol<LLVM::LLVMFuncOp>(hipdnn::abi::kInferenceInit) ||
+    if (module.lookupSymbol<LLVM::LLVMFuncOp>(
+            hipdnn::abi::kInferenceGetArtifactAbi) ||
+        module.lookupSymbol<LLVM::LLVMFuncOp>(hipdnn::abi::kInferenceInit) ||
         module.lookupSymbol<LLVM::LLVMFuncOp>(hipdnn::abi::kInferenceCompute) ||
         module.lookupSymbol<LLVM::LLVMFuncOp>(hipdnn::abi::kInferenceCleanup) ||
         module.lookupSymbol<LLVM::LLVMFuncOp>(

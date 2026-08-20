@@ -5,6 +5,8 @@
 #ifndef HIP_ARTIFACT_ABI_H
 #define HIP_ARTIFACT_ABI_H
 
+#include <cstdint>
+
 // Single source of truth for the per-model artifact's C-ABI symbol names and
 // the embedded-metadata global names. These names form the contract between
 // the producer (GenerateInterface emits the functions / globals; CompilerDriver
@@ -16,7 +18,35 @@
 
 namespace hipdnn::abi {
 
+// Generated-artifact/runtime ABI version.
+//
+// Bump this whenever generated code changes an inference_* signature, a
+// generated call to a runtime wrapper changes name/signature/semantics, or a
+// RuntimeState/layout contract observable by generated code changes. Additive
+// metadata-only changes and implementation changes behind an unchanged wrapper
+// contract do not require a bump.
+//
+// The tagged token lets a loader distinguish a stale, well-formed version from
+// arbitrary/malformed values without dereferencing artifact-owned data.
+inline constexpr uint32_t kArtifactAbiVersion = 1;
+inline constexpr uint32_t kArtifactAbiMagic = 0x48495041; // "HIPA"
+inline constexpr uint64_t artifactAbiToken(uint32_t version) {
+  return (static_cast<uint64_t>(kArtifactAbiMagic) << 32) | version;
+}
+inline constexpr uint64_t kArtifactAbiToken =
+    artifactAbiToken(kArtifactAbiVersion);
+inline constexpr uint32_t artifactAbiMagic(uint64_t token) {
+  return static_cast<uint32_t>(token >> 32);
+}
+inline constexpr uint32_t artifactAbiVersion(uint64_t token) {
+  return static_cast<uint32_t>(token);
+}
+
 // C-ABI entry points emitted by GenerateInterface and resolved by consumers.
+// The ABI query has the stable signature `uint64_t(void)` and must be validated
+// before resolving or calling any other artifact/runtime entry point.
+inline constexpr const char *kInferenceGetArtifactAbi =
+    "inference_get_artifact_abi";
 inline constexpr const char *kInferenceInit = "inference_init";
 inline constexpr const char *kInferenceCompute = "inference_compute";
 inline constexpr const char *kInferenceCleanup = "inference_cleanup";

@@ -51,7 +51,8 @@ public:
   // EPContext tar. `artifact_bytes` is the raw `.bc` (Bitcode) or native
   // `.dll`/`.so` (Native) blob; `kind` selects the loader. `fs` is the
   // morphizen FileSystem that resolves model constants and is forwarded
-  // to `inference_init`. Logs FATAL and terminates on failure.
+  // to `inference_init`. Throws on load/ABI/init failure; the ORT CreateState
+  // callback translates the exception into a recoverable OrtStatus.
   static std::unique_ptr<InferenceState>
   create(const std::vector<uint8_t> &artifact_bytes, morphizen::FileSystem *fs,
          ArtifactKind kind = ArtifactKind::LLVM_IR);
@@ -71,9 +72,9 @@ public:
 
   // Install (allocator != nullptr) or clear (nullptr) the output allocator on
   // the loaded artifact's RuntimeState before compute(). Resolved once in the
-  // ctor. Installing on a stale artifact that lacks the setter throws so the
-  // CustomOp boundary can return an OrtStatus; clearing is always a no-op-safe
-  // cleanup operation.
+  // ctor. Throws if called with a non-null allocator but the artifact does not
+  // export the setter; the Compute callback translates the exception to
+  // OrtStatus. Clearing is always a no-op-safe cleanup operation.
   void set_output_allocator(const output_allocator_t *allocator) const;
 
   // Invokes the optional `hipdnn_ep_runtime_begin_compute` hook to invalidate

@@ -103,6 +103,21 @@ add_test(NAME TensorBufferLifecycleUnitTest
 set_target_properties(test-tensor-buffer-lifecycle
     PROPERTIES FOLDER "runtime-tests")
 
+# Validates current/stale/missing/malformed artifact ABI tokens, strict
+# EPContext metadata parsing, and both LLVM_IR/NATIVE loader-selection seams.
+# The test calls only pure metadata/symbol-validation helpers and needs no GPU.
+add_executable(test-artifact-abi test_artifact_abi.cpp)
+target_compile_features(test-artifact-abi PRIVATE cxx_std_17)
+target_include_directories(test-artifact-abi PRIVATE
+    ${CMAKE_SOURCE_DIR}/backend-mlir-compiler/custom-op-mlir/src
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_link_libraries(test-artifact-abi PRIVATE
+    mlir_compilation_proto
+)
+add_test(NAME ArtifactAbiUnitTest COMMAND test-artifact-abi)
+set_target_properties(test-artifact-abi PROPERTIES FOLDER "runtime-tests")
+
 add_executable(test-symbolic-dims test_symbolic_dims.cpp)
 target_compile_features(test-symbolic-dims PRIVATE cxx_std_17)
 target_link_libraries(test-symbolic-dims PRIVATE morphizen-graph)
