@@ -21,6 +21,7 @@ FP64 = TensorProto.DOUBLE
 FP16__dup4 = TensorProto.FLOAT16
 INT4 = TensorProto.INT4
 DECODER_EXTERNAL_DATA = "BUNDLE.data"
+DECODER_WORK_EXTERNAL_DATA = "model.data"
 HEAD_QWEIGHT_DATA = "BUNDLE_head_qweight.data"
 HEAD_SCALE_DATA = "BUNDLE_head_scale.data"
 DEFAULT_BATCH = 1
@@ -961,11 +962,75 @@ def rewrite_gqa_past_seq_len_to_seqlens_k(model: onnx.ModelProto) -> int:
     return len(gqa_nodes)
 
 
+def _external_data_kv(init: onnx.TensorProto, key: str) -> str | None:
+    for kv in init.external_data:
+        if kv.key == key:
+            return kv.value
+    return None
+
+
+def _promote_initializer_to_shared_external_data(
+    init: onnx.TensorProto,
+    ref_init: onnx.TensorProto,
+    *,
+    location: str,
+) -> None:
+    if ref_init.data_location != TensorProto.EXTERNAL:
+        raise RuntimeError(
+            f"Reference initializer {ref_init.name!r} is not external; "
+            f"cannot reuse {location}"
+        )
+    offset_raw = _external_data_kv(ref_init, "offset")
+    length_raw = _external_data_kv(ref_init, "length")
+    if offset_raw is None or length_raw is None:
+        raise RuntimeError(
+            f"Reference initializer {ref_init.name!r} is missing external offset/length"
+        )
+    name = init.name
+    data_type = init.data_type
+    dims = list(init.dims)
+    init.Clear()
+    init.name = name
+    init.data_type = data_type
+    init.dims.extend(dims)
+    init.data_location = TensorProto.EXTERNAL
+    for kv in ref_init.external_data:
+        entry = init.external_data.add()
+        entry.key = kv.key
+        entry.value = location if kv.key == "location" else kv.value
+
+
+def _save_decoder_graph_reusing_external_data(
+    model: onnx.ModelProto,
+    dst: Path,
+    *,
+    external_data_ref: Path,
+    external_data_name: str,
+) -> None:
+    from .step2_fp16_cleanup import _save_model_graph_only
+
+    ref_model = onnx.load(str(external_data_ref), load_external_data=False)
+    ref_inits = {init.name: init for init in ref_model.graph.initializer}
+    for init in model.graph.initializer:
+        ref_init = ref_inits.get(init.name)
+        if ref_init is None:
+            raise RuntimeError(
+                f"Initializer {init.name!r} missing from reference {external_data_ref.name}"
+            )
+        if ref_init.data_location == TensorProto.EXTERNAL:
+            _promote_initializer_to_shared_external_data(
+                init, ref_init, location=external_data_name
+            )
+    _save_model_graph_only(model, dst)
+
+
 def save_decoder_model(
     model: onnx.ModelProto,
     dst: Path,
     *,
     external_data_name: str = DECODER_EXTERNAL_DATA,
+    reuse_external_data: bool = False,
+    external_data_ref: Path | None = None,
 ) -> None:
     if not model.graph.name:
         model.graph.name = f"{dst.stem}_graph"
@@ -973,6 +1038,22 @@ def save_decoder_model(
     data_path = dst.parent / external_data_name
     if dst.exists():
         dst.unlink()
+    if reuse_external_data:
+        if external_data_ref is None:
+            raise ValueError(
+                "external_data_ref is required when reuse_external_data=True"
+            )
+        if not data_path.is_file():
+            raise RuntimeError(
+                f"Expected shared external weights at {data_path} before reusing them"
+            )
+        _save_decoder_graph_reusing_external_data(
+            model,
+            dst,
+            external_data_ref=external_data_ref,
+            external_data_name=external_data_name,
+        )
+        return
     if data_path.exists():
         data_path.unlink()
     onnx.save_model(
@@ -1057,6 +1138,8 @@ def convert_decoder_model(
     shape_fix: ShapeFixConfig,
     bundle_root: Path,
     external_data_name: str | None = None,
+    reuse_external_data: bool = False,
+    external_data_ref: Path | None = None,
     lpnorm_fp32: bool = False,
     gqa_seqlens_rewrite: bool = True,
     pure_gemm: bool = False,
@@ -1111,8 +1194,14 @@ def convert_decoder_model(
     stats["gqa_seqlens_rewrite"] = (
         rewrite_gqa_past_seq_len_to_seqlens_k(model) if gqa_seqlens_rewrite else 0
     )
-    ext_name = external_data_name or f"{dst.stem}.data"
-    save_decoder_model(model, dst, external_data_name=ext_name)
+    ext_name = external_data_name or DECODER_WORK_EXTERNAL_DATA
+    save_decoder_model(
+        model,
+        dst,
+        external_data_name=ext_name,
+        reuse_external_data=reuse_external_data,
+        external_data_ref=external_data_ref,
+    )
     return stats
 
 

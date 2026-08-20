@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from .pipeline_aliases import (
 )
 from .qdq_ext import CONVERT_PROFILE_LITE
 from .step1_qdq_fp16 import (
+    DECODER_WORK_EXTERNAL_DATA,
     ShapeFixConfig,
     convert_decoder_model,
     convert_lm_head_model,
@@ -38,6 +40,7 @@ from .step2_fp16_cleanup import patch_model_file
 from .step4_unfix_seq_len import unfix_seq_len
 
 DEFAULT_MAX_SEQ_LEN = 16384
+INTERMEDIATES_DIR_NAME = "work"
 
 
 def _apply_pure_fp16(*paths: Path) -> None:
@@ -77,6 +80,7 @@ def _convert_quantized_linear(
         dec_prefill,
         shape_fix=shape_prefill,
         bundle_root=bundle.input_dir,
+        external_data_name=DECODER_WORK_EXTERNAL_DATA,
         gqa_seqlens_rewrite=False,
         pure_gemm=bundle.fold_gemm_weights,
         lora_dequant_meta=lora_dequant_meta if bundle.fold_gemm_weights else None,
@@ -86,6 +90,9 @@ def _convert_quantized_linear(
         dec_decode,
         shape_fix=shape_decode,
         bundle_root=bundle.input_dir,
+        external_data_name=DECODER_WORK_EXTERNAL_DATA,
+        reuse_external_data=True,
+        external_data_ref=dec_prefill,
         gqa_seqlens_rewrite=False,
         pure_gemm=bundle.fold_gemm_weights,
         lora_dequant_meta=lora_dequant_meta if bundle.fold_gemm_weights else None,
@@ -146,12 +153,16 @@ def _convert_int8_kv(bundle: ModelBundle, work: Path, merged_path: Path) -> None
         bundle.dec_prefill,
         dec_prefill,
         bundle_root=bundle.input_dir,
+        external_data_name=DECODER_WORK_EXTERNAL_DATA,
         gqa_seqlens_rewrite=False,
     )
     convert_decoder_int8kv(
         bundle.dec_decode,
         dec_decode,
         bundle_root=bundle.input_dir,
+        external_data_name=DECODER_WORK_EXTERNAL_DATA,
+        reuse_external_data=True,
+        external_data_ref=dec_prefill,
         gqa_seqlens_rewrite=False,
     )
 
@@ -224,6 +235,7 @@ def _convert_low_bit(bundle: ModelBundle, work: Path, merged_path: Path) -> None
         bundle_root=bundle.input_dir,
         head_data_dir=work,
         rewrite_head_data=False,
+        external_data_name=DECODER_WORK_EXTERNAL_DATA,
         profile=profile,
     )
     process_one_onnx(
@@ -234,6 +246,9 @@ def _convert_low_bit(bundle: ModelBundle, work: Path, merged_path: Path) -> None
         bundle_root=bundle.input_dir,
         head_data_dir=work,
         rewrite_head_data=False,
+        external_data_name=DECODER_WORK_EXTERNAL_DATA,
+        reuse_external_data=True,
+        external_data_ref=dec_prefill,
         profile=profile,
     )
 
@@ -283,7 +298,33 @@ def _convert_low_bit(bundle: ModelBundle, work: Path, merged_path: Path) -> None
     _apply_pure_fp16(merged_path)
 
 
-def convert_bundle(bundle: ModelBundle, output_dir: Path) -> Path:
+def _reset_work_dir(work_dir: Path) -> Path:
+    if work_dir.exists():
+        shutil.rmtree(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    return work_dir
+
+
+def _run_pipeline(
+    bundle: ModelBundle, work: Path, merged_path: Path
+) -> dict[str, dict] | None:
+    if bundle.pipeline is PipelineKind.QUANTIZED_LINEAR:
+        return _convert_quantized_linear(bundle, work, merged_path)
+    if bundle.pipeline is PipelineKind.INT8_KV:
+        _convert_int8_kv(bundle, work, merged_path)
+        return None
+    if bundle.pipeline is PipelineKind.LOW_BIT:
+        _convert_low_bit(bundle, work, merged_path)
+        return None
+    raise ValueError(f"Unsupported pipeline: {bundle.pipeline}")
+
+
+def convert_bundle(
+    bundle: ModelBundle,
+    output_dir: Path,
+    *,
+    keep_intermediates: bool = False,
+) -> Path:
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -303,18 +344,15 @@ def convert_bundle(bundle: ModelBundle, output_dir: Path) -> Path:
     )
 
     lora_dequant_meta: dict[str, dict] | None = None
-    with tempfile.TemporaryDirectory(
-        prefix=f"merged_convert_{bundle.decoder_stem}_"
-    ) as tmp:
-        work = Path(tmp)
-        if bundle.pipeline is PipelineKind.QUANTIZED_LINEAR:
-            lora_dequant_meta = _convert_quantized_linear(bundle, work, merged_path)
-        elif bundle.pipeline is PipelineKind.INT8_KV:
-            _convert_int8_kv(bundle, work, merged_path)
-        elif bundle.pipeline is PipelineKind.LOW_BIT:
-            _convert_low_bit(bundle, work, merged_path)
-        else:
-            raise ValueError(f"Unsupported pipeline: {bundle.pipeline}")
+    if keep_intermediates:
+        work = _reset_work_dir(output_dir / INTERMEDIATES_DIR_NAME)
+        lora_dequant_meta = _run_pipeline(bundle, work, merged_path)
+        print(f"  Kept intermediate artifacts in {work}")
+    else:
+        with tempfile.TemporaryDirectory(
+            prefix=f"merged_convert_{bundle.decoder_stem}_"
+        ) as tmp:
+            lora_dequant_meta = _run_pipeline(bundle, Path(tmp), merged_path)
 
     if not merged_path.exists():
         raise RuntimeError(
