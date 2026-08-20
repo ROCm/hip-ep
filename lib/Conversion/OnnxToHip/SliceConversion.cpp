@@ -35,8 +35,21 @@ namespace {
 //     steps. Produces a native `hip.slice` DPS op whose runtime function is
 //     a stub today (throws); models that hit this path are unsupported until
 //     the runtime is implemented, but the conversion / bufferization pipeline
-//     can still verify and link the IR. Dynamic output dims are sourced from
-//     `tensor.dim` on `data` (an upper bound — Slice cannot widen any axis).
+//     can still verify and link the IR. Dynamic output dims are computed from
+//     the slice bounds when those are host-resolvable, and otherwise fall back
+//     to `tensor.dim` on `data` (an upper bound — Slice cannot widen any axis).
+//
+// That fallback is only an upper bound, and an upper bound is not a safe
+// stand-in for the extent: the extent this pattern puts on the `tensor.empty`
+// init IS the output shape as far as everything downstream is concerned, since
+// `tensor.dim` of a DPS result resolves through to the init. A Slice that keeps
+// one row of a 12k-row tensor therefore hands every consumer a 12k-row shape.
+// Gemma-4 26B-A4B decode does exactly this — `Slice(CumSum(attention_mask),
+// Shape(attn)[1] - Shape(ids)[1], Shape(attn)[1])` takes the single current
+// query position — and the inflated extent turned the causal mask from
+// [1, 1, S] into [1, S, S], 60% of a decode step. Hence resolveHostIndex:
+// `ends - starts` is host arithmetic over `onnx.Shape` entries, so the true
+// extent is computable without any device readback.
 
 /// Return the dense-elements attribute backing \p value if it can be
 /// determined at compile time. Recognizes arith constants, inspectable
@@ -118,6 +131,141 @@ static mlir::Value normaliseOptional(mlir::Value v) {
   if (defOp && defOp->getName().getStringRef() == "onnx.NoValue")
     return mlir::Value();
   return v;
+}
+
+/// Producer-chain depth walked by `resolveHostIndex`. Shape arithmetic in
+/// exported graphs is a handful of ops deep; the bound only stops a
+/// pathological walk.
+static constexpr int kHostIndexMaxDepth = 8;
+
+/// Resolve element \p idx of an integer shape tensor \p v to a host `index`
+/// SSA value, materializing `arith` ops as needed. Returns a null Value when
+/// the element is not host-computable.
+///
+/// Both the pre- and post-conversion spelling of ONNX shape arithmetic are
+/// accepted, because the greedy driver gives no ordering guarantee between this
+/// pattern and the ones rewriting the producers: `onnx.Shape` may still be
+/// present, or may already be
+/// `tensor.from_elements(arith.index_cast(tensor.dim))`, and `onnx.Sub` may
+/// already be `hip.sub`.
+static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
+                                    mlir::Value v, int64_t idx, int depth) {
+  if (!v || depth > kHostIndexMaxDepth)
+    return {};
+  auto vType = mlir::dyn_cast<mlir::RankedTensorType>(v.getType());
+  if (!vType || !vType.getElementType().isSignlessInteger())
+    return {};
+
+  if (mlir::DenseElementsAttr dense = getCompileTimeConstantTensor(v)) {
+    if (idx >= dense.getNumElements())
+      return {};
+    return mlir::arith::ConstantIndexOp::create(
+        b, loc,
+        (*(dense.getValues<mlir::APInt>().begin() + idx)).getSExtValue());
+  }
+
+  mlir::Operation *def = v.getDefiningOp();
+  if (!def)
+    return {};
+
+  if (auto fromElems = mlir::dyn_cast<mlir::tensor::FromElementsOp>(def)) {
+    if (idx >= static_cast<int64_t>(fromElems.getElements().size()))
+      return {};
+    mlir::Value elem = fromElems.getElements()[idx];
+    // ShapeToTensorDims index_casts every tensor.dim to i64 to pack it; take
+    // the index back rather than casting a second time.
+    if (auto cast = elem.getDefiningOp<mlir::arith::IndexCastOp>())
+      if (cast.getIn().getType().isIndex())
+        return cast.getIn();
+    return mlir::arith::IndexCastOp::create(b, loc, b.getIndexType(), elem);
+  }
+
+  if (auto cast = mlir::dyn_cast<mlir::tensor::CastOp>(def))
+    return resolveHostIndex(b, loc, cast.getSource(), idx, depth + 1);
+
+  llvm::StringRef opName = def->getName().getStringRef();
+
+  // Unconverted onnx.Shape: element idx is dim (start + idx) of the operand.
+  // start/end normalization matches ShapeToTensorDims.
+  if (opName == "onnx.Shape") {
+    mlir::Value input = def->getOperand(0);
+    auto inType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+    if (!inType)
+      return {};
+    int64_t rank = inType.getRank();
+    int64_t start = 0;
+    if (auto startAttr = def->getAttrOfType<mlir::IntegerAttr>("start"))
+      start = startAttr.getSInt();
+    if (start < 0)
+      start += rank;
+    start = std::max(start, int64_t(0));
+    int64_t dimIdx = start + idx;
+    if (dimIdx < 0 || dimIdx >= rank)
+      return {};
+    if (!inType.isDynamicDim(dimIdx))
+      return mlir::arith::ConstantIndexOp::create(b, loc,
+                                                  inType.getDimSize(dimIdx));
+    return mlir::tensor::DimOp::create(b, loc, input, dimIdx);
+  }
+
+  // Binary shape arithmetic. hip elementwise ops are DPS, so their operands are
+  // (ctx, lhs, rhs, out); the ONNX forms are plain (lhs, rhs).
+  unsigned lhsPos = 0;
+  bool isHip =
+      mlir::isa<mlir::hip::SubOp, mlir::hip::AddOp, mlir::hip::MulOp>(def);
+  if (isHip)
+    lhsPos = 1;
+  else if (opName != "onnx.Sub" && opName != "onnx.Add" && opName != "onnx.Mul")
+    return {};
+
+  mlir::Value lhs = def->getOperand(lhsPos);
+  mlir::Value rhs = def->getOperand(lhsPos + 1);
+  // A rank-0 or single-element operand is broadcast against the other.
+  auto elemIdx = [&](mlir::Value operand) -> int64_t {
+    auto t = mlir::dyn_cast<mlir::RankedTensorType>(operand.getType());
+    return (t && t.hasStaticShape() && t.getNumElements() == 1) ? 0 : idx;
+  };
+  mlir::Value l = resolveHostIndex(b, loc, lhs, elemIdx(lhs), depth + 1);
+  mlir::Value r = resolveHostIndex(b, loc, rhs, elemIdx(rhs), depth + 1);
+  if (!l || !r)
+    return {};
+
+  bool isSub = isHip ? mlir::isa<mlir::hip::SubOp>(def) : opName == "onnx.Sub";
+  bool isAdd = isHip ? mlir::isa<mlir::hip::AddOp>(def) : opName == "onnx.Add";
+  if (isSub)
+    return mlir::arith::SubIOp::create(b, loc, l, r);
+  if (isAdd)
+    return mlir::arith::AddIOp::create(b, loc, l, r);
+  return mlir::arith::MulIOp::create(b, loc, l, r);
+}
+
+/// Emit the number of elements ONNX Slice produces on one axis, given runtime
+/// `start`/`end` bounds and a positive compile-time \p step. Mirrors the
+/// compile-time arithmetic in SliceDecompose; `arith` ops are needed here only
+/// because the bounds are not known until run time.
+static mlir::Value buildSliceExtent(mlir::OpBuilder &b, mlir::Location loc,
+                                    mlir::Value dim, mlir::Value start,
+                                    mlir::Value end, int64_t step) {
+  mlir::Value zero = mlir::arith::ConstantIndexOp::create(b, loc, 0);
+  // A negative bound counts from the end, and the sign is not known until run
+  // time, so both forms are computed and selected between. INT64_MAX ("to the
+  // end") stays positive and is caught by the clamp instead.
+  auto normalize = [&](mlir::Value v) -> mlir::Value {
+    mlir::Value shifted = mlir::arith::AddIOp::create(b, loc, v, dim);
+    mlir::Value isNeg = mlir::arith::CmpIOp::create(
+        b, loc, mlir::arith::CmpIPredicate::slt, v, zero);
+    mlir::Value picked =
+        mlir::arith::SelectOp::create(b, loc, isNeg, shifted, v);
+    picked = mlir::arith::MaxSIOp::create(b, loc, picked, zero);
+    return mlir::arith::MinSIOp::create(b, loc, picked, dim);
+  };
+  mlir::Value len =
+      mlir::arith::SubIOp::create(b, loc, normalize(end), normalize(start));
+  len = mlir::arith::MaxSIOp::create(b, loc, len, zero);
+  if (step == 1)
+    return len;
+  return mlir::arith::CeilDivSIOp::create(
+      b, loc, len, mlir::arith::ConstantIndexOp::create(b, loc, step));
 }
 
 struct SliceDecompose : public mlir::RewritePattern {
@@ -323,11 +471,28 @@ struct SliceToHip : public mlir::RewritePattern {
 
     auto dataType = mlir::cast<mlir::RankedTensorType>(data.getType());
 
-    // For each dynamic output dim, source an upper bound from the data
-    // dim at the same position. This is sound because ONNX Slice can
-    // never widen any axis -- output dim i is at most data dim i. The
-    // runtime stub honours `output_shape[i]` as the actual extent so the
-    // over-allocation is benign.
+    // Which axes are sliced, and with what step. Both must be known to compute
+    // an extent; a non-constant axes/steps operand leaves every dim on the
+    // conservative upper bound below.
+    llvm::SmallVector<int64_t> axesVec, stepsVec;
+    bool haveAxes = true;
+    if (axes)
+      haveAxes = mlir::succeeded(
+          extractSliceParamVector(op, "hipdnn.slice_axes", axes, axesVec));
+    if (haveAxes && axesVec.empty())
+      for (int64_t i : llvm::seq<int64_t>(dataType.getRank()))
+        axesVec.push_back(i);
+    if (steps && haveAxes)
+      haveAxes = mlir::succeeded(
+          extractSliceParamVector(op, "hipdnn.slice_steps", steps, stepsVec));
+    if (haveAxes && stepsVec.empty())
+      stepsVec.assign(axesVec.size(), 1);
+    if (stepsVec.size() != axesVec.size())
+      haveAxes = false;
+
+    // Compute each dynamic output dim from the slice bounds where possible;
+    // see the file header for why the data dim is not an acceptable substitute.
+    // Ops materialized by a resolution that then fails are pure and get DCE'd.
     llvm::SmallVector<mlir::Value> dynSizes;
     for (int64_t i = 0; i < resultType.getRank(); ++i) {
       if (!resultType.isDynamicDim(i))
@@ -335,11 +500,29 @@ struct SliceToHip : public mlir::RewritePattern {
       if (i >= dataType.getRank())
         return rewriter.notifyMatchFailure(
             op, "result rank exceeds data rank — invalid Slice");
-      if (dataType.isDynamicDim(i))
-        dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, data, i));
-      else
-        dynSizes.push_back(mlir::arith::ConstantIndexOp::create(
-            rewriter, loc, dataType.getDimSize(i)));
+
+      mlir::Value dim =
+          dataType.isDynamicDim(i)
+              ? mlir::tensor::DimOp::create(rewriter, loc, data, i).getResult()
+              : mlir::arith::ConstantIndexOp::create(rewriter, loc,
+                                                     dataType.getDimSize(i))
+                    .getResult();
+
+      mlir::Value extent;
+      if (haveAxes) {
+        for (size_t k = 0; k < axesVec.size(); ++k) {
+          int64_t axis =
+              axesVec[k] < 0 ? axesVec[k] + dataType.getRank() : axesVec[k];
+          if (axis != i || stepsVec[k] <= 0)
+            continue;
+          mlir::Value s = resolveHostIndex(rewriter, loc, starts, k, 0);
+          mlir::Value e = resolveHostIndex(rewriter, loc, ends, k, 0);
+          if (s && e)
+            extent = buildSliceExtent(rewriter, loc, dim, s, e, stepsVec[k]);
+          break;
+        }
+      }
+      dynSizes.push_back(extent ? extent : dim);
     }
     mlir::Value init =
         mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
