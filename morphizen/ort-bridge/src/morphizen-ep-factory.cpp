@@ -67,6 +67,8 @@ MorphiZenEpFactory::MorphiZenEpFactory(const char *ep_name, ApiPtrs apis,
   CreateDataTransfer = CreateDataTransferImpl;
   IsStreamAware = IsStreamAwareImpl;
   CreateSyncStreamForDevice = CreateSyncStreamForDeviceImpl;
+  GetNumCustomOpDomains = GetNumCustomOpDomainsImpl;
+  GetCustomOpDomains = GetCustomOpDomainsImpl;
 
   morphizen::add_cleanup_function("protobuf shutdown", []() {
 #ifdef _WIN32
@@ -346,6 +348,39 @@ OrtStatus *ORT_API_CALL MorphiZenEpFactory::CreateSyncStreamForDeviceImpl(
   return factory->ort_api.CreateStatus(
       ORT_INVALID_ARGUMENT, "CreateSyncStreamForDevice should not be called as "
                             "IsStreamAware returned false.");
+}
+
+// ORT calls GetNumCustomOpDomainsImpl then GetCustomOpDomainsImpl back to
+// back and requires both to agree on the same set; cache once so repeated
+// calls (e.g. across sessions) all see the same result, and so the
+// underlying plugin scan in CollectCustomOpDomains() only runs once.
+static const std::vector<OrtCustomOpDomain *> &GetCachedCustomOpDomains() {
+  static const std::vector<OrtCustomOpDomain *> cached = [] {
+    std::vector<OrtCustomOpDomain *> ret;
+    // CollectCustomOpDomains is declared in the global namespace (extern "C"
+    // block in onnxruntime_morphizen_ep.hpp, like its neighbors
+    // initialize_onnxruntime_morphizen_ep() etc.), found here via normal
+    // enclosing-namespace lookup from inside `namespace morphizen`.
+    CollectCustomOpDomains(ret);
+    return ret;
+  }();
+  return cached;
+}
+
+OrtStatus *ORT_API_CALL MorphiZenEpFactory::GetNumCustomOpDomainsImpl(
+    OrtEpFactory * /*this_ptr*/, size_t *num_domains) noexcept {
+  *num_domains = GetCachedCustomOpDomains().size();
+  return nullptr;
+}
+
+OrtStatus *ORT_API_CALL MorphiZenEpFactory::GetCustomOpDomainsImpl(
+    OrtEpFactory * /*this_ptr*/, OrtCustomOpDomain **domains,
+    size_t num_domains) noexcept {
+  const auto &cached = GetCachedCustomOpDomains();
+  for (size_t i = 0; i < num_domains && i < cached.size(); ++i) {
+    domains[i] = cached[i];
+  }
+  return nullptr;
 }
 
 } // namespace morphizen
