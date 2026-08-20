@@ -43,9 +43,6 @@ add_library(OnnxToHipsr STATIC
 
 if(MLIR_PDLL_EXE)
     add_dependencies(OnnxToHipsr OnnxToHipsrPDLL)
-    target_compile_definitions(OnnxToHipsr PRIVATE
-        "ONNX_TO_HIPSR_PDL_FILE=\"${PDL_OUTPUT}\""
-    )
 endif()
 
 add_dependencies(OnnxToHipsr

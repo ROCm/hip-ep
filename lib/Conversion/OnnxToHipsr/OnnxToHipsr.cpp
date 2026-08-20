@@ -198,15 +198,14 @@ struct ConvertOnnxToHipsrPass
                                   ::mlir::DenseI64ArrayAttr{});
         });
 
-    // Load PDLL patterns from compiled bytecode (if available)
-#ifdef ONNX_TO_HIPSR_PDL_FILE
-    OwningOpRef<ModuleOp> pdlModule =
-        parseSourceFile<ModuleOp>(ONNX_TO_HIPSR_PDL_FILE, &getContext());
+    // Try to load PDLL patterns from compiled bytecode
+    // Path is relative to build directory
+    const char *pdlPath = "lib/Conversion/OnnxToHipsr/OnnxToHipsr.pdl.mlir";
+    OwningOpRef<ModuleOp> pdlModule = parseSourceFile<ModuleOp>(pdlPath, &getContext());
+
     if (pdlModule) {
       patterns.add(PDLPatternModule(std::move(pdlModule)));
-    } else
-#endif
-    {
+    } else {
       // Fallback to C++ patterns if PDLL not compiled or failed to load
       populateCastConversionPatterns(converter, patterns, &getContext());
       populateMatMulConversionPatterns(converter, patterns, &getContext());
