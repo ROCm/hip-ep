@@ -3,7 +3,7 @@
 # Licensed under the MIT License.
 #
 
-"""Tests for the unary math ops Abs, Ceil, Log.
+"""Tests for the unary math ops Abs, Ceil, Log, Erf.
 
 All three route through the shared unary elementwise HIP kernel family
 (lib/Runtime/real/{abs,ceil,log}.cpp). Per those dtype tables:
@@ -111,3 +111,26 @@ class TestLog:
         x = rng.uniform(0.1, 10.0, shape).astype(np.float16)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-3, rtol=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# Erf : y = erf(x)
+# ---------------------------------------------------------------------------
+class TestErf:
+    @pytest.mark.parametrize("dtype", [np.float16, np.float32])
+    def test_erf(self, model_runner, dtype):
+        shape = [4, 8]
+        model = _make_unary_model("Erf", dtype, shape)
+        rng = np.random.default_rng(907)
+        x = rng.uniform(-3.0, 3.0, shape).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x])
+        atol = 2e-3 if dtype == np.float16 else 1e-5
+        compare_outputs(actual, expected, atol=atol, rtol=1e-3)
+
+    def test_erf_bev_shape(self, model_runner):
+        shape = [1, 128, 200, 200]
+        model = _make_unary_model("Erf", np.float32, shape)
+        rng = np.random.default_rng(908)
+        x = rng.uniform(-2.0, 2.0, shape).astype(np.float32)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)

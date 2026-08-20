@@ -2454,6 +2454,40 @@ def Hip_CosOp : Hip_DpsOp<"cos", /*traits=*/[],
   }];
 }
 
+def Hip_ErfOp : Hip_DpsOp<"erf", /*traits=*/[],
+                          /*outsAccessor=*/"Y",
+                          /*autoReify=*/1,
+                          /*autoInfer=*/1,
+                          /*declareInfer=*/1> {
+  let summary = "Element-wise error function: y = erf(x)";
+  let description = [{
+    Computes the Gauss error function of each element.
+    Implements the standard ONNX Erf operator.
+
+    Formula: Y = erf(X)
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.erf(%ctx) ins(%x : memref<1x128x200x200xf32, 1>)
+                  outs(%y : memref<1x128x200x200xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_SinOp : Hip_DpsOp<"sin", /*traits=*/[],
                           /*outsAccessor=*/"Y",
                           /*autoReify=*/1,
