@@ -67,6 +67,43 @@ LogicalResult ConvTransposeOp::reifyResultShapes(
 }
 
 //===----------------------------------------------------------------------===//
+// GlobalPoolOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult GlobalPoolOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() != 1)
+    return failure();
+  FailureOr<SmallVector<OpFoldResult>> shape =
+      mlir::hip::reifyGlobalPoolResultShape(
+          b, getLoc(), getInput(), [&]() { return this->emitOpError(); });
+  if (failed(shape))
+    return failure();
+  reifiedReturnShapes.assign({std::move(*shape)});
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// PoolOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult
+PoolOp::reifyResultShapes(OpBuilder &b,
+                          ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() < 1 || getNumResults() > 2)
+    return failure();
+  FailureOr<SmallVector<OpFoldResult>> shape = mlir::hip::reifyPoolResultShape(
+      b, getLoc(), getInput(), detail::getI64Array(getKernelShape()),
+      detail::getI64Array(getStrides()), detail::getI64Array(getPads()),
+      detail::getI64Array(getDilations()), getCeilMode(),
+      [&]() { return this->emitOpError(); });
+  if (failed(shape))
+    return failure();
+  reifiedReturnShapes.assign(getNumResults(), *shape);
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // MatmulOp
 //
 // Reify delegates to the shared MatMul helper used by converter destination

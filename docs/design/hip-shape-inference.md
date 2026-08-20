@@ -180,7 +180,9 @@ Choose the smallest mechanism that matches the operation's semantics:
 | MatMul/Gemm/MatMulNBits | Dedicated shape logic based on operand dimensions and attributes |
 | Attention or normalization with multiple destinations | One shape vector per DPS init unless an op supplies a dedicated thunk |
 | Forward Conv (rank-3 converter/rank-4 HIP op) | Shared signed-floor spatial-window formula used by converter, reification, and verifier |
+| Window Pool (spatial rank 1..3) | Shared signed floor/ceil spatial-window formula; optional indices reuse the values shape |
 | Rank-4 NCHW ConvTranspose | Shared ONNX formula used by converter, reification, and verifier |
+| GlobalPool | N/C from input and unit spatial extents, shared by converter, reification, and verifier |
 | Resize | DPS-init shape, with semantic validity handled by conversion |
 | Runtime-dependent count, such as NonZero or Compress | DPS-init shape; unresolved dimensions remain dynamic |
 
@@ -331,30 +333,39 @@ produces 0, not 1. Variadic Max/Min share one
 `lowerVariadicBroadcastChain` helper that derives every pairwise intermediate
 type from this shared broadcast shape.
 
-Forward Conv uses a validated signed-floor spatial-window formula:
-`floor((input + pads - effectiveKernel) / stride) + 1`. Signed floor and
-intermediate arithmetic are required because the numerator can be negative
-even when the final extent is the valid value zero. Dilation contributes through
+Forward Conv and Pool share one validated spatial-window primitive:
+`floor((input + pads - effectiveKernel) / stride) + 1`; Pool selects signed
+ceil division when `ceil_mode = 1`. After that ceil calculation, a positive
+extent is decremented when its final window start, `(output - 1) * stride`, is
+at or beyond `input + pad_begin`; ONNX excludes windows that start entirely in
+the trailing padding. The positive-extent guard preserves zero rather than
+producing `-1`. Signed floor/ceil and intermediate arithmetic are required
+because the numerator can be negative even when the final extent is the valid
+value zero. Dilation contributes through
 `effectiveKernel = (kernel - 1) * dilation + 1`.
 
-Conv conversion applies the shared rule to the original rank-3 NCL shape before
-its NC1L expansion; `hip.conv` itself uses the rank-4 form. An omitted ONNX Conv
-`kernel_shape` is derived from static weight spatial dimensions. ConvTranspose
-likewise uses one rule for destination construction, reification, and static
+Conv always uses floor mode, so the trailing-window correction applies only to
+Pool ceil mode. Conv conversion applies the shared rule to the original rank-3
+NCL shape before its NC1L expansion; `hip.conv` itself uses the rank-4 form. An
+omitted ONNX Conv `kernel_shape` is derived from static weight spatial
+dimensions. Pool values and optional MaxPool indices are allocated and reified
+from the same corrected mixed shape vector. ConvTranspose and GlobalPool
+likewise use one rule for destination construction, reification, and static
 verification.
 
 Dynamic spatial-window arithmetic uses signed i128 from the input-dimension
 cast through effective-kernel multiplication, padded input, signed numerator,
-floor division, and raw output. This width covers every combination of
-nonnegative i64/index extents and i64 attributes without intermediate
-wraparound and stays equivalent to the static APInt rule. Before narrowing,
-each final extent must be in `[0, INT64_MAX]`; invalid extents select zero, so
-destination allocation is always safe. Forward Conv combines its per-axis
-checks into a `shape_valid` operand. The runtime records the shared recoverable
-error flag and skips MIOpen dispatch when that operand is false; the zero extent
-is failure containment, not successful shape recovery. Cached model artifacts
-compiled against the prior `wrap_miopenConvolutionForward` ABI must be
-invalidated.
+floor/ceil division, raw output, and the ceil-mode final-window predicate.
+This width covers every combination of nonnegative i64/index extents and i64
+attributes without intermediate wraparound and stays equivalent to the static
+APInt rule. Before narrowing, each final extent must be in
+`[0, INT64_MAX]`; invalid extents select zero, so destination allocation is
+always safe. Forward Conv and Pool each combine their per-axis checks into a
+`shape_valid` operand. The runtime records the shared recoverable error flag
+and skips MIOpen/kernel dispatch when that operand is false; the zero extent is
+failure containment, not successful shape recovery. Cached model artifacts
+compiled against the prior `wrap_miopenConvolutionForward` or `wrap_pool` ABI
+must be invalidated.
 
 Reductions resolve to one internal out-to-in dimension map, consumed by both
 `inferReductionShape` (static extents) and `reifyReductionResultShape` (mixed

@@ -112,6 +112,11 @@ class Hip_DpsOp_Semantic<string mnemonic,
                          string outsAccessor = "Output"> :
     Hip_DpsOp_WithInfer<mnemonic, outsAccessor, traits>;
 
+/// Multi-result semantic operation with handwritten reify and inferred types.
+class Hip_DpsOp_SemanticNoInfer<string mnemonic,
+                                list<Trait> traits = []> :
+    Hip_DpsOp<mnemonic, traits>;
+
 /// Shape behavior controlled by compile-time or runtime tensor payloads.
 class Hip_DpsOp_Payload<string mnemonic,
                         list<Trait> traits = [],
@@ -3731,7 +3736,8 @@ def Hip_ExpandOp :
   let hasVerifier = 1;
 }
 
-def Hip_GlobalPoolOp : Hip_DpsOp_AutoReify<"global_pool"> {
+def Hip_GlobalPoolOp :
+    Hip_DpsOp_SemanticNoInfer<"global_pool"> {
   let summary = "Global pooling over spatial dimensions (average / max / lp)";
   let description = [{
     Unified lowering for ONNX GlobalAveragePool / GlobalMaxPool / GlobalLpPool.
@@ -3775,6 +3781,8 @@ def Hip_GlobalPoolOp : Hip_DpsOp_AutoReify<"global_pool"> {
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  let hasVerifier = 1;
 }
 
 def Hip_ReduceProdOp : Hip_DpsOp_Reduction<"reduce_prod"> {
@@ -4144,7 +4152,8 @@ def Hip_NonZeroOp : Hip_DpsOp_AutoReify<"nonzero"> {
   }];
 }
 
-def Hip_PoolOp : Hip_DpsOp_AutoReify<"pool"> {
+def Hip_PoolOp :
+    Hip_DpsOp_SemanticNoInfer<"pool"> {
   let summary = "Spatial pooling (ONNX MaxPool / AveragePool / LpPool)";
   let description = [{
     Unified window pooling for ONNX MaxPool / AveragePool / LpPool. For an
@@ -4186,7 +4195,10 @@ def Hip_PoolOp : Hip_DpsOp_AutoReify<"pool"> {
     - p:            LP norm exponent (default 2). LP only.
 
     Uses destination-passing style: the output buffer (and optional indices
-    buffer) are provided as Variadic `outputs`.
+    buffer) are provided as Variadic `outputs`. `shape_valid` is the combined
+    runtime range check for dynamic spatial extents. A false value means the
+    destination has been safely clamped to zero and the runtime records a
+    recoverable inference error without launching the kernel.
 
     Example (2D MaxPool, with indices):
     ```mlir
@@ -4202,6 +4214,7 @@ def Hip_PoolOp : Hip_DpsOp_AutoReify<"pool"> {
 
   let arguments = (ins
     Hip_ContextType:$ctx,
+    I1:$shape_valid,
     Hip_TensorOrMemRef:$input,
     Variadic<Hip_TensorOrMemRef>:$outputs,
     I64Attr:$pool_mode,
@@ -4216,10 +4229,12 @@ def Hip_PoolOp : Hip_DpsOp_AutoReify<"pool"> {
   );
 
   let assemblyFormat = [{
-    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `(` $ctx `)` `valid` `(` $shape_valid `)` `ins` `(` $input `:` type($input) `)`
     `outs` `(` $outputs `:` type($outputs) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  let hasVerifier = 1;
 }
 
 def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize"> {

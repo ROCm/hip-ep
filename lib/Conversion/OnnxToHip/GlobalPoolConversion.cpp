@@ -82,14 +82,20 @@ static mlir::LogicalResult buildHipGlobalPool(mlir::Operation *op,
 
   mlir::Location loc = op->getLoc();
 
-  // The output's leading two dims (N, C) mirror the input; the trailing
-  // (rank-2) spatial dims are always 1 in the output (verified statically
-  // when present). `createEmptyTensor` resolves dynamic N / C from `input`
-  // — the static "1" dims need no runtime size.
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+  mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> resultShape =
+      reifyGlobalPoolResultShape(rewriter, loc, input,
+                                 [&]() { return op->emitError(); });
+  if (mlir::failed(resultShape))
+    return rewriter.notifyMatchFailure(op,
+                                       "cannot derive GlobalPool result shape");
+  mlir::FailureOr<mlir::Value> init = createEmptyTensorFromReifiedShape(
+      rewriter, loc, resultType, *resultShape);
+  if (mlir::failed(init))
+    return rewriter.notifyMatchFailure(
+        op, "GlobalPool result type disagrees with inferred shape");
 
   auto hipOp = mlir::hip::GlobalPoolOp::create(rewriter, loc, resultType,
-                                               context, input, init,
+                                               context, input, *init,
                                                /*mode=*/mode, /*p=*/p);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();

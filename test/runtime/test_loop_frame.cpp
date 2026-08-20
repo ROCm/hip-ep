@@ -616,6 +616,25 @@ void testGrowthSyncFailureQuarantinesBanks() {
   CHECK(cleaned.frees == 2);
 }
 
+void testConvPoolInvalidShapeGuards() {
+  RuntimeState state = makeState();
+  int errorsBefore = recordedErrors.load();
+
+  CHECK(wrap_miopenConvolutionForward(
+            &state, /*op_state_slot=*/-1, /*shape_valid=*/0,
+            /*input=*/nullptr, 1, 1, 1, 1, /*weights=*/nullptr, 1,
+            /*bias=*/nullptr, /*output=*/nullptr, 0, 0, 3, 3, 1, 1, 0, 0, 0, 0,
+            1, 1, 1, HIPDNN_EP_DATATYPE_FLOAT) == -1);
+  CHECK(recordedErrors.load() == errorsBefore + 1);
+
+  CHECK(wrap_pool(&state, /*input=*/nullptr, /*output=*/nullptr,
+                  /*indices=*/nullptr, /*shape_valid=*/0,
+                  HIPDNN_EP_DATATYPE_FLOAT, HIPDNN_EP_POOL_MAX,
+                  /*spatial_rank=*/1, 1, 1, 1, 1, 1, 0, 1, 1, 3, 1, 1, 1, 1, 1,
+                  0, 0, 0, 1, 1, 1, 0, 1, 0, 0, 2) == -1);
+  CHECK(recordedErrors.load() == errorsBefore + 2);
+}
+
 } // namespace
 
 extern "C" int hipdnn_ep_state_set_error_flag(RuntimeState *) {
@@ -637,6 +656,7 @@ int main() {
   testEarlyExitAndSyncFailureCleanup();
   testInjectedAllocationFailureAfterEvolution();
   testGrowthSyncFailureQuarantinesBanks();
+  testConvPoolInvalidShapeGuards();
   if (failures == 0) {
     std::printf("loop frame unit test: ALL PASS\n");
     return 0;
