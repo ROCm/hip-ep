@@ -162,3 +162,5 @@ test/python/data/whisper/librispeech/
 
 .idea/
 .depend/
+CMakeUserPresets.json
+build.*/
