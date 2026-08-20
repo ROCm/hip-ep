@@ -5,6 +5,7 @@
 
 #include "hip_custom_kernels.h"
 #include "debug_log.h"
+#include "gather_block_quantized_utils.h"
 
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
@@ -88,22 +89,12 @@ __device__ inline int read_quant(const uint8_t *__restrict__ buf,
                                  int64_t lin_elem, int bits, bool is_signed) {
   if (bits == 4) {
     int64_t byte_idx = lin_elem >> 1;
-    int nibble_sel = static_cast<int>(lin_elem & 1);
     uint8_t byte = buf[byte_idx];
-    uint8_t nibble = nibble_sel ? (byte >> 4) : (byte & 0xF);
-    if (is_signed) {
-      // Sign-extend 4-bit -> int8 -> int. Shifting an int8_t by 4 left
-      // then arithmetic-right by 4 propagates the sign bit (bit 3 of
-      // the nibble) into bits 4-7.
-      return static_cast<int>(static_cast<int8_t>(nibble << 4)) >> 4;
-    }
-    return static_cast<int>(nibble);
+    return hipdnn_ep::gbq::decodeStorageByte(
+        byte, bits, is_signed, static_cast<int>(lin_elem));
   }
-  // bits == 8
-  if (is_signed) {
-    return static_cast<int>(static_cast<int8_t>(buf[lin_elem]));
-  }
-  return static_cast<int>(buf[lin_elem]);
+  return hipdnn_ep::gbq::decodeStorageByte(buf[lin_elem], bits, is_signed,
+                                          /*logicalIndex=*/0);
 }
 
 // ---- main kernel ---------------------------------------------------------

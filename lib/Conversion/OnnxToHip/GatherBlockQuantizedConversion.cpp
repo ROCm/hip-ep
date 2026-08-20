@@ -49,13 +49,13 @@ inline int normalizeGbqAxis(int64_t axis, int64_t rank) {
   return a;
 }
 
-inline bool resolveUnsignedQuantStorage(int64_t bits, bool hasUnsignedAttr,
+inline bool resolveUnsignedQuantStorage(bool hasUnsignedAttr,
                                         Type dataElemType) {
-  if (hasUnsignedAttr)
+  if (isUnsignedMlirElementType(dataElemType))
     return true;
-  if (bits == 8)
-    return true;
-  return isUnsignedMlirElementType(dataElemType);
+  if (auto intTy = dyn_cast<IntegerType>(dataElemType))
+    return intTy.isSignless() && hasUnsignedAttr;
+  return false;
 }
 
 inline bool isAlreadyPackedByteTensor(RankedTensorType dataType,
@@ -143,9 +143,6 @@ resolveQuantizeAxis(RankedTensorType dataType, RankedTensorType scalesType,
       axis += rank;
     if (axis < 0 || axis >= rank)
       return failure();
-    if (!quantizeAxisMatches(dataType.getShape(), scalesType.getShape(),
-                             static_cast<int>(axis), blockSize, bits))
-      return failure();
     return axis;
   }
   return inferQuantizeAxis(dataType, scalesType, blockSize, bits);
@@ -197,16 +194,12 @@ bool annotateGbqSemantics(Operation *gbq, OpBuilder &builder) {
     return false;
 
   bool changed = false;
-  const bool unsignedStorage = gbq::resolveUnsignedQuantStorage(
-      bits, gbq->hasAttr("unsigned_quant_storage"), dataType.getElementType());
-  if (unsignedStorage) {
-    if (!gbq->hasAttr("unsigned_quant_storage")) {
-      gbq->setAttr("unsigned_quant_storage",
-                   UnitAttr::get(builder.getContext()));
-      changed = true;
-    }
-  } else if (gbq->hasAttr("unsigned_quant_storage")) {
-    gbq->removeAttr("unsigned_quant_storage");
+  // Preserve importer-provided unsignedness for signless legalized storage.
+  // Explicit MLIR ui8 is also canonicalized to the marker. Never infer
+  // unsignedness from `bits`: bits describes width, not signedness.
+  if (gbq::isUnsignedMlirElementType(dataType.getElementType()) &&
+      !gbq->hasAttr("unsigned_quant_storage")) {
+    gbq->setAttr("unsigned_quant_storage", UnitAttr::get(builder.getContext()));
     changed = true;
   }
 
@@ -332,30 +325,29 @@ struct GatherBlockQuantizedPreparePattern : public RewritePattern {
 //        bits = 4 : si64, block_size = 16 : si64,
 //        gather_axis = 0 : si64, quantize_axis = 1 : si64}
 //       : (tensor<2048x96xui8>, tensor<8xi64>,
-//          tensor<2048x12xf16>, tensor<2048x12xui8>) -> tensor<8x96xf16>
+//          tensor<2048x12xf16>, tensor<2048x12xui8>) -> tensor<8x192xf16>
 //
 // After:
-//   %init = tensor.empty() : tensor<8x96xf16>
+//   %init = tensor.empty() : tensor<8x192xf16>
 //   %out = hip.gather_block_quantized(%ctx)
 //       ins(%data, %indices, %scales :
 //           tensor<2048x96xui8>, tensor<8xi64>, tensor<2048x12xf16>)
 //       zero_points(%zp : tensor<2048x12xui8>)
-//       outs(%init : tensor<8x96xf16>)
+//       outs(%init : tensor<8x192xf16>)
 //       {bits = 4, block_size = 16, gather_axis = 0, quantize_axis = 1}
-//       : tensor<8x96xf16>
+//       : tensor<8x192xf16>
 //
-// Output shape derivation (mirrors plain Gather):
-//   out.shape = data.shape[0:gather_axis]
+// Output shape derivation applies Gather to the logical dequantized shape:
+//   logical_data[quantize_axis] = 2 * data[quantize_axis]  // packed int4
+//   out.shape = logical_data[0:gather_axis]
 //             ++ indices.shape
-//             ++ data.shape[gather_axis+1:]
-// The dequant block axis lives entirely inside `data`, so the output has
-// no extra "blocks" dim — the runtime fans out per-element on the gathered
-// rows during the dequantize step.
+//             ++ logical_data[gather_axis+1:]
+// The multiplication is omitted when Gather removes `quantize_axis` itself.
 //
-// Storage semantics (unsigned vs signed) come from ONNX T1 + bits, not from
-// signless MLIR integer types alone. `unsigned_quant_storage` is set when:
-//   - convert-onnx-to-hip prepare annotated the Custom op, or
-//   - the data tensor element type is ui8 at conversion time.
+// Storage semantics come from ONNX T1, not `bits`. Explicit si8/ui8 retain
+// their signedness. For signless i8 produced while legalizing INT4/UINT4,
+// `unsigned_quant_storage` is the authoritative UINT marker; absence means
+// signed storage.
 //
 // quantize_axis is taken from the ONNX attribute when present; otherwise it is
 // inferred from (data, scales, block_size, bits) shape invariants.
@@ -407,11 +399,9 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
       zeroPoints = v;
   }
 
-  // Attribute extraction. Spec defaults:
-  //   bits           — required, 4 or 8
-  //   block_size     — required, power of 2 >= 16
-  //   gather_axis    — optional, default 0
-  //   quantize_axis  — optional, default 0
+  // Attribute extraction. The import path materializes the required bits and
+  // block_size values. gather_axis defaults to 0; when quantize_axis is absent,
+  // the prepare/conversion path resolves it from the data/scales block grid.
   auto bitsIntAttr = op->getAttrOfType<mlir::IntegerAttr>("bits");
   if (!bitsIntAttr)
     return rewriter.notifyMatchFailure(op, "missing required `bits` attribute");
@@ -425,13 +415,50 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
   const int64_t blockSize = blockSizeIntAttr.getSInt();
   if (bits != 4 && bits != 8)
     return rewriter.notifyMatchFailure(op, "GBQ `bits` must be 4 or 8");
-  if (blockSize <= 0)
-    return rewriter.notifyMatchFailure(op, "invalid `block_size`");
+  if (blockSize < 16 || (blockSize & (blockSize - 1)) != 0)
+    return rewriter.notifyMatchFailure(
+        op, "GBQ `block_size` must be a power of two and at least 16");
 
   auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  auto dataType = mlir::cast<mlir::RankedTensorType>(data.getType());
-  auto scalesType = mlir::cast<mlir::RankedTensorType>(scales.getType());
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  auto dataType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+  auto indicesType = mlir::dyn_cast<mlir::RankedTensorType>(indices.getType());
+  auto scalesType = mlir::dyn_cast<mlir::RankedTensorType>(scales.getType());
+  auto zeroPointsType =
+      zeroPoints ? mlir::dyn_cast<mlir::RankedTensorType>(zeroPoints.getType())
+                 : mlir::RankedTensorType();
+  if (!resultType || !dataType || !indicesType || !scalesType ||
+      (zeroPoints && !zeroPointsType))
+    return rewriter.notifyMatchFailure(
+        op,
+        "GBQ data, indices, scales, zero_points, and output must be ranked");
+
+  auto dataElementType =
+      mlir::dyn_cast<mlir::IntegerType>(dataType.getElementType());
+  auto indicesElementType =
+      mlir::dyn_cast<mlir::IntegerType>(indicesType.getElementType());
+  if (!dataElementType || dataElementType.getWidth() != 8)
+    return rewriter.notifyMatchFailure(
+        op, "GBQ data storage must use an 8-bit integer element type");
+  if (dataElementType.isSigned() && op->hasAttr("unsigned_quant_storage")) {
+    return op->emitError(
+        "GBQ `unsigned_quant_storage` conflicts with explicitly signed data");
+  }
+  if (!indicesElementType || (indicesElementType.getWidth() != 32 &&
+                              indicesElementType.getWidth() != 64))
+    return rewriter.notifyMatchFailure(op, "GBQ indices must be i32 or i64");
+  mlir::Type scalesElementType = scalesType.getElementType();
+  if (!scalesElementType.isF16() && !scalesElementType.isF32() &&
+      !scalesElementType.isBF16())
+    return rewriter.notifyMatchFailure(op,
+                                       "GBQ scales must use f16, f32, or bf16");
+  if (resultType.getElementType() != scalesElementType)
+    return rewriter.notifyMatchFailure(
+        op, "GBQ output element type must match scales");
+  if (zeroPointsType &&
+      zeroPointsType.getElementType() != dataType.getElementType())
+    return rewriter.notifyMatchFailure(
+        op, "GBQ zero_points element type must match data");
 
   std::optional<int64_t> explicitQuantAxis;
   if (op->getAttr("quantize_axis"))
@@ -443,7 +470,7 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
         op, "could not resolve `quantize_axis` from GBQ data/scales shapes");
 
   bool unsignedQuantStorage = gbq::resolveUnsignedQuantStorage(
-      bits, op->hasAttr("unsigned_quant_storage"), dataType.getElementType());
+      op->hasAttr("unsigned_quant_storage"), dataType.getElementType());
 
   auto bitsAttr = rewriter.getI64IntegerAttr(bits);
   auto blockSizeAttr = rewriter.getI64IntegerAttr(blockSize);
@@ -451,41 +478,23 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
       gatherAxisIntAttr ? gatherAxisIntAttr.getSInt() : 0);
   auto quantAxisAttr = rewriter.getI64IntegerAttr(*quantAxisOr);
 
-  // Output shape: [data[0:gather_axis], indices.shape, data[gather_axis+1:]].
-  // Mirror GatherConversion's dim-mapping: walk output dims, source each
-  // dynamic dim from either data or indices according to its position.
-  int64_t gatherAxis = gatherAxisAttr.getInt();
-  int64_t normalizedGatherAxis =
-      gatherAxis < 0 ? gatherAxis + dataType.getRank() : gatherAxis;
-
-  auto indicesType = mlir::cast<mlir::RankedTensorType>(indices.getType());
-  llvm::SmallVector<mlir::Value> dynSizes;
-  int64_t outDimIdx = 0;
-  for (auto i : llvm::seq<int64_t>(0, normalizedGatherAxis)) {
-    if (outDimIdx < resultType.getRank() && resultType.isDynamicDim(outDimIdx))
-      dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, data, i));
-    outDimIdx++;
-  }
-  for (auto i : llvm::seq<int64_t>(0, indicesType.getRank())) {
-    if (outDimIdx < resultType.getRank() && resultType.isDynamicDim(outDimIdx))
-      dynSizes.push_back(
-          mlir::tensor::DimOp::create(rewriter, loc, indices, i));
-    outDimIdx++;
-  }
-  for (auto i :
-       llvm::seq<int64_t>(normalizedGatherAxis + 1, dataType.getRank())) {
-    if (outDimIdx < resultType.getRank() && resultType.isDynamicDim(outDimIdx))
-      dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, data, i));
-    outDimIdx++;
-  }
-
-  mlir::Value init =
-      mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
-                                    resultType.getElementType(), dynSizes);
+  bool bytePackedInt4 = bits == 4;
+  bool uint8Storage = bits == 8 && unsignedQuantStorage;
+  auto resultShape = mlir::hip::reifyGatherBlockQuantizedShape(
+      rewriter, loc, data, indices, scales, zeroPoints, bits, blockSize,
+      gatherAxisAttr.getInt(), quantAxisAttr.getInt(), bytePackedInt4,
+      uint8Storage, [&]() { return op->emitError(); });
+  if (mlir::failed(resultShape))
+    return mlir::failure();
+  auto init = createEmptyTensorFromReifiedShape(rewriter, loc, resultType,
+                                                *resultShape);
+  if (mlir::failed(init))
+    return rewriter.notifyMatchFailure(
+        op, "GBQ result type is incompatible with its logical gathered shape");
 
   auto hipOp = mlir::hip::GatherBlockQuantizedOp::create(
       rewriter, loc, mlir::TypeRange{resultType}, context, data, indices,
-      scales, zeroPoints, init, bitsAttr, blockSizeAttr, gatherAxisAttr,
+      scales, zeroPoints, *init, bitsAttr, blockSizeAttr, gatherAxisAttr,
       quantAxisAttr);
   if (unsignedQuantStorage)
     hipOp->setAttr("unsigned_quant_storage", rewriter.getUnitAttr());

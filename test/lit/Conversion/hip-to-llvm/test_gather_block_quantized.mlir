@@ -26,12 +26,12 @@ module {
                                       %indices: memref<8xi64, 1>,
                                       %scales: memref<2048x12xf16, 1>,
                                       %zp: memref<2048x12xui8, 1>,
-                                      %output: memref<8x96xf16, 1>) {
+                                      %output: memref<8x192xf16, 1>) {
     hip.gather_block_quantized(%ctx)
         ins(%data, %indices, %scales :
             memref<2048x96xui8, 1>, memref<8xi64, 1>, memref<2048x12xf16, 1>)
         zero_points(%zp : memref<2048x12xui8, 1>)
-        outs(%output : memref<8x96xf16, 1>)
+        outs(%output : memref<8x192xf16, 1>)
         {bits = 4 : i64, block_size = 16 : i64,
          gather_axis = 0 : i64, quantize_axis = 1 : i64}
     return
@@ -59,11 +59,11 @@ module {
                                        %data: memref<2048x96xui8, 1>,
                                        %indices: memref<?xi64, 1>,
                                        %scales: memref<2048x12xf16, 1>,
-                                       %output: memref<?x96xf16, 1>) {
+                                       %output: memref<?x192xf16, 1>) {
     hip.gather_block_quantized(%ctx)
         ins(%data, %indices, %scales :
             memref<2048x96xui8, 1>, memref<?xi64, 1>, memref<2048x12xf16, 1>)
-        outs(%output : memref<?x96xf16, 1>)
+        outs(%output : memref<?x192xf16, 1>)
         {bits = 4 : i64, block_size = 16 : i64,
          gather_axis = 0 : i64, quantize_axis = 1 : i64}
     return
@@ -77,12 +77,46 @@ module {
                                               %data: memref<2048x96xi8, 1>,
                                               %indices: memref<8xi64, 1>,
                                               %scales: memref<2048x12xf16, 1>,
-                                              %output: memref<8x96xf16, 1>) {
+                                              %output: memref<8x192xf16, 1>) {
     hip.gather_block_quantized(%ctx)
         ins(%data, %indices, %scales :
             memref<2048x96xi8, 1>, memref<8xi64, 1>, memref<2048x12xf16, 1>)
-        outs(%output : memref<8x96xf16, 1>)
+        outs(%output : memref<8x192xf16, 1>)
         {bits = 4 : i64, block_size = 16 : i64,
+         gather_axis = 0 : i64, quantize_axis = 1 : i64,
+         unsigned_quant_storage}
+    return
+  }
+
+  // ===== Test 5: bits=8 does not override explicit signed i8 =====
+
+  func.func @test_gbq_signed_i8_no_zp(%ctx: !hip.context,
+                                      %data: memref<64x512xsi8, 1>,
+                                      %indices: memref<2xi32, 1>,
+                                      %scales: memref<2x512xf32, 1>,
+                                      %output: memref<64x2xf32, 1>) {
+    hip.gather_block_quantized(%ctx)
+        ins(%data, %indices, %scales :
+            memref<64x512xsi8, 1>, memref<2xi32, 1>, memref<2x512xf32, 1>)
+        outs(%output : memref<64x2xf32, 1>)
+        {bits = 8 : i64, block_size = 32 : i64,
+         gather_axis = 1 : i64, quantize_axis = 0 : i64}
+    return
+  }
+
+  // ===== Test 6: bits=8 signless i8 with explicit unsigned marker =====
+
+  func.func @test_gbq_unsigned_signless_i8_no_zp(
+      %ctx: !hip.context,
+      %data: memref<4x64xi8, 1>,
+      %indices: memref<2xi64, 1>,
+      %scales: memref<4x2xf16, 1>,
+      %output: memref<2x64xf16, 1>) {
+    hip.gather_block_quantized(%ctx)
+        ins(%data, %indices, %scales :
+            memref<4x64xi8, 1>, memref<2xi64, 1>, memref<4x2xf16, 1>)
+        outs(%output : memref<2x64xf16, 1>)
+        {bits = 8 : i64, block_size = 32 : i64,
          gather_axis = 0 : i64, quantize_axis = 1 : i64,
          unsigned_quant_storage}
     return
@@ -95,6 +129,7 @@ module {
 
 // CHECK-LABEL: llvm.func @test_gbq_static_no_zp
 // CHECK: llvm.mlir.zero
+// CHECK-DAG: llvm.mlir.constant(7 : i64) : i64
 // CHECK: llvm.call @wrap_gather_block_quantized({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
 // CHECK-LABEL: llvm.func @test_gbq_dynamic_indices
@@ -108,4 +143,14 @@ module {
 // data_dtype must be HIPDNN_EP_DATATYPE_UINT8 (7), not signless-i8 default (5).
 // CHECK-DAG: llvm.mlir.constant(7 : i64) : i64
 // CHECK-NOT: llvm.mlir.constant(5 : i64) : i64
+// CHECK: llvm.call @wrap_gather_block_quantized
+
+// CHECK-LABEL: llvm.func @test_gbq_signed_i8_no_zp
+// CHECK: llvm.mlir.zero
+// CHECK-DAG: llvm.mlir.constant(5 : i64) : i64
+// CHECK: llvm.call @wrap_gather_block_quantized
+
+// CHECK-LABEL: llvm.func @test_gbq_unsigned_signless_i8_no_zp
+// CHECK: llvm.mlir.zero
+// CHECK-DAG: llvm.mlir.constant(7 : i64) : i64
 // CHECK: llvm.call @wrap_gather_block_quantized

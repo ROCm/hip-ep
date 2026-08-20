@@ -203,6 +203,18 @@ LogicalResult mlir::hip::detail::validatePermutation(ArrayRef<int64_t> perm,
                  PermutationErrorKind::None);
 }
 
+mlir::hip::detail::GatherBlockQuantizedStorageFlags
+mlir::hip::detail::getGatherBlockQuantizedStorageFlags(
+    int64_t bits, Type dataElementType, bool hasUnsignedStorageAttr) {
+  auto intType = dyn_cast<IntegerType>(dataElementType);
+  bool unsignedStorage =
+      intType && (intType.isUnsigned() ||
+                  (intType.isSignless() && hasUnsignedStorageAttr));
+  return {/*bytePackedInt4=*/bits == 4,
+          /*unsignedStorage=*/unsignedStorage,
+          /*uint8Storage=*/bits == 8 && unsignedStorage};
+}
+
 /// NumPy-broadcast result shape of `shapes` (right-aligned) from static extents
 /// only. Folds `OpTrait::util::getBroadcastedShape` pairwise so static
 /// broadcast validation is identical to the matmul batch path.

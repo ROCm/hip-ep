@@ -321,6 +321,40 @@ FailureOr<SmallVector<OpFoldResult>>
 reifyGatherWithAxis(OpBuilder &b, Location loc, Value data, Value indices,
                     int64_t axis);
 
+/// Compute com.microsoft GatherBlockQuantized's dequantized output shape.
+///
+/// The logical data shape equals the storage shape except that
+/// `quantizeAxis` is multiplied by two for byte-packed 4-bit storage. Gather
+/// then replaces `gatherAxis` in that logical shape with `indicesShape`:
+///
+///   logicalData[quantizeAxis] = dataShape[quantizeAxis] * 2  (packed int4)
+///   output = logicalData[:gatherAxis] ++ indicesShape
+///            ++ logicalData[gatherAxis + 1:]
+///
+/// If `gatherAxis == quantizeAxis`, the packed axis is removed by Gather and
+/// no output extent is multiplied. `uint8Storage` means unsigned `bits == 8`
+/// logical storage and enforces its gather-axis-zero, last-quantize-axis
+/// policy. It is false for signed int8 and for byte-packed INT4/UINT4.
+///
+/// Also validates the runtime-supported ranks, attributes, data/scales block
+/// grid, and optional zero-point shape. Dynamic extents are treated as
+/// statically unknown.
+FailureOr<SmallVector<int64_t>> inferGatherBlockQuantizedShape(
+    ArrayRef<int64_t> dataShape, ArrayRef<int64_t> indicesShape,
+    ArrayRef<int64_t> scalesShape,
+    std::optional<ArrayRef<int64_t>> zeroPointsShape, int64_t bits,
+    int64_t blockSize, int64_t gatherAxis, int64_t quantizeAxis,
+    bool bytePackedInt4, bool uint8Storage,
+    function_ref<InFlightDiagnostic()> emitError);
+
+/// Mixed-shape form of `inferGatherBlockQuantizedShape`. Validation completes
+/// before any `tensor.dim` or arithmetic operation is emitted.
+FailureOr<SmallVector<OpFoldResult>> reifyGatherBlockQuantizedShape(
+    OpBuilder &b, Location loc, Value data, Value indices, Value scales,
+    Value zeroPoints, int64_t bits, int64_t blockSize, int64_t gatherAxis,
+    int64_t quantizeAxis, bool bytePackedInt4, bool uint8Storage,
+    function_ref<InFlightDiagnostic()> emitError);
+
 /// Pure GatherND shape rule. A dynamic trailing tuple width returns failure
 /// because the output rank is not statically knowable; callers that support an
 /// outs-authoritative fallback must distinguish that case before diagnosing.

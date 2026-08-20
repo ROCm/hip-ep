@@ -239,3 +239,17 @@ target_include_directories(test-shape-validation PRIVATE
 target_compile_definitions(test-shape-validation PRIVATE HIPDNN_EP_RT_NO_EXPORT)
 add_test(NAME ShapeValidationUnitTest COMMAND test-shape-validation)
 set_target_properties(test-shape-validation PROPERTIES FOLDER "runtime-tests")
+
+# Shared host/device GBQ byte decoding, omitted-zero-point defaults, and UINT8
+# axis policy. The same constexpr helpers are called by the HIP kernel/runtime.
+add_executable(test-gather-block-quantized-utils
+    test_gather_block_quantized_utils.cpp
+)
+target_compile_features(test-gather-block-quantized-utils PRIVATE cxx_std_17)
+target_include_directories(test-gather-block-quantized-utils PRIVATE
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/include
+)
+add_test(NAME GatherBlockQuantizedUtilsUnitTest
+    COMMAND test-gather-block-quantized-utils)
+set_target_properties(test-gather-block-quantized-utils
+    PROPERTIES FOLDER "runtime-tests")

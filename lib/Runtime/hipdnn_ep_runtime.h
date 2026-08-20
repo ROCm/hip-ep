@@ -35,9 +35,9 @@ extern "C" {
 #define HIPDNN_EP_DATATYPE_BFLOAT16 2 // bf16, 2 bytes
 #define HIPDNN_EP_DATATYPE_INT32 3    // i32, 4 bytes
 #define HIPDNN_EP_DATATYPE_INT64 4    // i64, 8 bytes
-#define HIPDNN_EP_DATATYPE_INT8 5     // i8, 1 byte
+#define HIPDNN_EP_DATATYPE_INT8 5     // signed i8, 1 byte
 #define HIPDNN_EP_DATATYPE_DOUBLE 6   // f64, 8 bytes
-#define HIPDNN_EP_DATATYPE_UINT8 7    // ui8, 1 byte
+#define HIPDNN_EP_DATATYPE_UINT8 7    // unsigned ui8, 1 byte
 #define HIPDNN_EP_DATATYPE_INT16 8    // i16, 2 byte
 
 //===----------------------------------------------------------------------===//
@@ -1277,9 +1277,8 @@ int wrap_matmul_nbits(
 //
 // Shapes are passed as int64_t* arrays + ranks because both `data` and
 // `indices` rank are arbitrary per ONNX spec. zero_points is nullable —
-// when null, default is 0 for int4/uint4, 2^(bits-1) for uint8.
-//
-// Currently a stub — see lib/Runtime/real/gather_block_quantized.cpp.
+// when null, default is 0 for signed storage and 2^(bits-1) for unsigned
+// storage. data_dtype is the sole runtime signedness authority.
 int wrap_gather_block_quantized(
     RuntimeState *state,
     const void *data,        // packed quantized [r-rank]
@@ -1293,7 +1292,7 @@ int wrap_gather_block_quantized(
     int64_t bits,       // 4 or 8
     int64_t block_size, // power of 2, >= 16
     int64_t gather_axis, int64_t quantize_axis,
-    int64_t data_dtype,    // HIPDNN_EP_DATATYPE_* (uint8 packed)
+    int64_t data_dtype,    // INT8 or UINT8; controls q/zp interpretation
     int64_t indices_dtype, // INT32 / INT64
     int64_t scales_dtype); // FLOAT / HALF / BFLOAT16
 

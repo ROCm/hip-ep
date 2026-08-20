@@ -26,6 +26,17 @@ LogicalResult validatePermutation(ArrayRef<int64_t> perm, int64_t rank,
                                   function_ref<InFlightDiagnostic()> emitError);
 LogicalResult validatePermutation(ArrayRef<int64_t> perm, int64_t rank);
 
+struct GatherBlockQuantizedStorageFlags {
+  bool bytePackedInt4;
+  bool unsignedStorage;
+  bool uint8Storage;
+};
+
+/// Derive the logical-storage flags shared by GBQ verification and reification.
+GatherBlockQuantizedStorageFlags
+getGatherBlockQuantizedStorageFlags(int64_t bits, Type dataElementType,
+                                    bool hasUnsignedStorageAttr);
+
 /// Pretty-print a static shape for implementation diagnostics.
 std::string formatShape(ArrayRef<int64_t> shape);
 

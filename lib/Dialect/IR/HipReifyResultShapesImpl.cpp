@@ -429,6 +429,30 @@ GatherOp::reifyResultShapes(OpBuilder &b,
   return success();
 }
 
+LogicalResult GatherBlockQuantizedOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() == 0)
+    return failure();
+  auto dataType = dyn_cast<RankedTensorType>(getData().getType());
+  if (!dataType)
+    return failure();
+
+  detail::GatherBlockQuantizedStorageFlags storageFlags =
+      detail::getGatherBlockQuantizedStorageFlags(
+          getBits(), dataType.getElementType(),
+          (*this)->hasAttr("unsigned_quant_storage"));
+  FailureOr<SmallVector<OpFoldResult>> dims =
+      mlir::hip::reifyGatherBlockQuantizedShape(
+          b, getLoc(), getData(), getIndices(), getScales(), getZeroPoints(),
+          getBits(), getBlockSize(), getGatherAxis(), getQuantizeAxis(),
+          storageFlags.bytePackedInt4, storageFlags.uint8Storage,
+          [&]() { return this->emitOpError(); });
+  if (failed(dims))
+    return failure();
+  reifiedReturnShapes.assign({std::move(*dims)});
+  return success();
+}
+
 LogicalResult
 OneHotOp::reifyResultShapes(OpBuilder &b,
                             ReifiedRankedShapedTypeDims &reified) {

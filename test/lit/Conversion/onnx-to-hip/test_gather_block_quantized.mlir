@@ -11,9 +11,9 @@
 //     domain_name=com.microsoft)
 //   - Optional zero_points operand handling (present + absent)
 //   - Attribute propagation (bits, block_size, gather_axis, quantize_axis,
-//     unsigned_quant_storage for INT4/UINT4 prepare path)
-//   - Output shape derivation (data[:gather_axis] ++ indices ++
-//     data[gather_axis+1:])
+//     unsigned_quant_storage as the signless-storage authority)
+//   - Output shape derivation over logical dequantized data, including the
+//     doubled quantize-axis extent for packed int4 storage
 //   - Dynamic-shape `tensor.dim` + `tensor.empty` plumbing for the gathered
 //     dimension
 // ============================================================================
@@ -26,10 +26,10 @@ module {
   // 192 4-bit elements). scales/zp are [vocab=2048, blocks=12] with
   // block_size=16. quantize_axis=1 (last). gather_axis=0 (rows).
 
-  func.func @main_graph(%indices: tensor<8xi64>) -> tensor<8x96xf16> {
-    %data = "onnx.Constant"() {value = dense<1> : tensor<2048x96xi8>} : () -> tensor<2048x96xi8>
+  func.func @main_graph(%indices: tensor<8xi64>) -> tensor<8x192xf16> {
+    %data = "onnx.Constant"() {value = dense<1> : tensor<2048x96xui8>} : () -> tensor<2048x96xui8>
     %scales = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<2048x12xf16>} : () -> tensor<2048x12xf16>
-    %zp = "onnx.Constant"() {value = dense<8> : tensor<2048x12xi8>} : () -> tensor<2048x12xi8>
+    %zp = "onnx.Constant"() {value = dense<8> : tensor<2048x12xui8>} : () -> tensor<2048x12xui8>
     %out = "onnx.Custom"(%data, %indices, %scales, %zp) {
       function_name = "GatherBlockQuantized",
       domain_name = "com.microsoft",
@@ -39,16 +39,16 @@ module {
       quantize_axis = 1 : si64,
       unsigned_quant_storage,
       onnx_node_name = "GatherBlockQuantized_0"
-    } : (tensor<2048x96xi8>, tensor<8xi64>, tensor<2048x12xf16>, tensor<2048x12xi8>) -> tensor<8x96xf16>
-    return %out : tensor<8x96xf16>
+    } : (tensor<2048x96xui8>, tensor<8xi64>, tensor<2048x12xf16>, tensor<2048x12xui8>) -> tensor<8x192xf16>
+    return %out : tensor<8x192xf16>
   }
 
   // CHECK-LABEL: func.func @main_graph
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IDX:.*]]: tensor<8xi64>)
-  // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<8x96xf16>
-  // CHECK: hip.gather_block_quantized(%[[CTX]]) ins({{.*}}, %[[IDX]], {{.*}} : tensor<2048x96xi8>, tensor<8xi64>, tensor<2048x12xf16>)
-  // CHECK-SAME: zero_points(%{{.*}} : tensor<2048x12xi8>)
-  // CHECK-SAME: outs(%[[INIT]] : tensor<8x96xf16>)
+  // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<8x192xf16>
+  // CHECK: hip.gather_block_quantized(%[[CTX]]) ins({{.*}}, %[[IDX]], {{.*}} : tensor<2048x96xui8>, tensor<8xi64>, tensor<2048x12xf16>)
+  // CHECK-SAME: zero_points(%{{.*}} : tensor<2048x12xui8>)
+  // CHECK-SAME: outs(%[[INIT]] : tensor<8x192xf16>)
   // CHECK-SAME: bits = 4
   // CHECK-SAME: block_size = 16
   // CHECK-SAME: gather_axis = 0
@@ -59,7 +59,7 @@ module {
   // ===== Test 2: 8-bit GatherBlockQuantized without zero_points =====
 
   func.func @test_gbq_uint8_no_zp(%indices: tensor<4xi32>) -> tensor<4x64xf32> {
-    %data = "onnx.Constant"() {value = dense<1> : tensor<512x64xi8>} : () -> tensor<512x64xi8>
+    %data = "onnx.Constant"() {value = dense<1> : tensor<512x64xui8>} : () -> tensor<512x64xui8>
     %scales = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<512x2xf32>} : () -> tensor<512x2xf32>
     %out = "onnx.Custom"(%data, %indices, %scales) {
       function_name = "GatherBlockQuantized",
@@ -69,13 +69,13 @@ module {
       gather_axis = 0 : si64,
       quantize_axis = 1 : si64,
       onnx_node_name = "GatherBlockQuantized_1"
-    } : (tensor<512x64xi8>, tensor<4xi32>, tensor<512x2xf32>) -> tensor<4x64xf32>
+    } : (tensor<512x64xui8>, tensor<4xi32>, tensor<512x2xf32>) -> tensor<4x64xf32>
     return %out : tensor<4x64xf32>
   }
 
   // CHECK-LABEL: func.func @test_gbq_uint8_no_zp
   // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<4x64xf32>
-  // CHECK: hip.gather_block_quantized({{.*}}) ins({{.*}}, %{{.*}}, %{{.*}} : tensor<512x64xi8>, tensor<4xi32>, tensor<512x2xf32>)
+  // CHECK: hip.gather_block_quantized({{.*}}) ins({{.*}}, %{{.*}}, %{{.*}} : tensor<512x64xui8>, tensor<4xi32>, tensor<512x2xf32>)
   // CHECK-NOT: zero_points
   // CHECK-SAME: outs(%[[INIT]] : tensor<4x64xf32>)
   // CHECK-SAME: bits = 8
@@ -84,11 +84,11 @@ module {
   // CHECK-NOT: onnx.Custom
 
   // ===== Test 3: Dynamic indices length =====
-  // The first output dim follows %indices's dynamic dim 0; the trailing 96
-  // comes straight from data[1] (static).
+  // The first output dim follows %indices's dynamic dim 0; packed data[1]=96
+  // becomes the logical dequantized extent 192.
 
-  func.func @test_gbq_dynamic_indices(%indices: tensor<?xi64>) -> tensor<?x96xf16> {
-    %data = "onnx.Constant"() {value = dense<1> : tensor<2048x96xi8>} : () -> tensor<2048x96xi8>
+  func.func @test_gbq_dynamic_indices(%indices: tensor<?xi64>) -> tensor<?x192xf16> {
+    %data = "onnx.Constant"() {value = dense<1> : tensor<2048x96xui8>} : () -> tensor<2048x96xui8>
     %scales = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<2048x12xf16>} : () -> tensor<2048x12xf16>
     %out = "onnx.Custom"(%data, %indices, %scales) {
       function_name = "GatherBlockQuantized",
@@ -98,23 +98,23 @@ module {
       gather_axis = 0 : si64,
       quantize_axis = 1 : si64,
       onnx_node_name = "GatherBlockQuantized_2"
-    } : (tensor<2048x96xi8>, tensor<?xi64>, tensor<2048x12xf16>) -> tensor<?x96xf16>
-    return %out : tensor<?x96xf16>
+    } : (tensor<2048x96xui8>, tensor<?xi64>, tensor<2048x12xf16>) -> tensor<?x192xf16>
+    return %out : tensor<?x192xf16>
   }
 
   // CHECK-LABEL: func.func @test_gbq_dynamic_indices
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IDX:.*]]: tensor<?xi64>)
   // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
   // CHECK: %[[DIM0:.*]] = tensor.dim %[[IDX]], %[[C0]] : tensor<?xi64>
-  // CHECK: %[[INIT:.*]] = tensor.empty(%[[DIM0]]) : tensor<?x96xf16>
-  // CHECK: hip.gather_block_quantized(%[[CTX]]) ins({{.*}}, %[[IDX]], {{.*}} : tensor<2048x96xi8>, tensor<?xi64>, tensor<2048x12xf16>) outs(%[[INIT]] : tensor<?x96xf16>)
+  // CHECK: %[[INIT:.*]] = tensor.empty(%[[DIM0]]) : tensor<?x192xf16>
+  // CHECK: hip.gather_block_quantized(%[[CTX]]) ins({{.*}}, %[[IDX]], {{.*}} : tensor<2048x96xui8>, tensor<?xi64>, tensor<2048x12xf16>) outs(%[[INIT]] : tensor<?x192xf16>)
   // CHECK-NOT: onnx.Custom
 
   // ===== Test 4: prepare-annotated UINT4 (signless i8 + unsigned flag) =====
   // Packed byte shape with logical quantize_axis already halved; unsigned
   // storage is carried on the Custom op, not via ui8 element type.
 
-  func.func @test_gbq_unsigned_quant_storage(%indices: tensor<8xi64>) -> tensor<8x96xf16> {
+  func.func @test_gbq_unsigned_quant_storage(%indices: tensor<8xi64>) -> tensor<8x192xf16> {
     %data = "onnx.Constant"() {value = dense<1> : tensor<2048x96xi8>} : () -> tensor<2048x96xi8>
     %scales = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<2048x12xf16>} : () -> tensor<2048x12xf16>
     %out = "onnx.Custom"(%data, %indices, %scales) {
@@ -126,21 +126,21 @@ module {
       quantize_axis = 1 : si64,
       unsigned_quant_storage,
       onnx_node_name = "GatherBlockQuantized_3"
-    } : (tensor<2048x96xi8>, tensor<8xi64>, tensor<2048x12xf16>) -> tensor<8x96xf16>
-    return %out : tensor<8x96xf16>
+    } : (tensor<2048x96xi8>, tensor<8xi64>, tensor<2048x12xf16>) -> tensor<8x192xf16>
+    return %out : tensor<8x192xf16>
   }
 
   // CHECK-LABEL: func.func @test_gbq_unsigned_quant_storage
-  // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<8x96xf16>
-  // CHECK: hip.gather_block_quantized({{.*}}) ins({{.*}}, {{.*}}, {{.*}} : tensor<2048x96xi8>, tensor<8xi64>, tensor<2048x12xf16>) outs(%[[INIT]] : tensor<8x96xf16>)
+  // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<8x192xf16>
+  // CHECK: hip.gather_block_quantized({{.*}}) ins({{.*}}, {{.*}}, {{.*}} : tensor<2048x96xi8>, tensor<8xi64>, tensor<2048x12xf16>) outs(%[[INIT]] : tensor<8x192xf16>)
   // CHECK-SAME: unsigned_quant_storage
   // CHECK-NOT: onnx.Custom
 
   // ===== Test 5: UINT8 bits=4, quantize_axis inferred from shapes =====
   // ONNX often omits quantize_axis; shape invariants identify axis 1.
 
-  func.func @test_gbq_infer_quantize_axis(%indices: tensor<8xi64>) -> tensor<8x128xf16> {
-    %data = "onnx.Constant"() {value = dense<1> : tensor<512x128xi8>} : () -> tensor<512x128xi8>
+  func.func @test_gbq_infer_quantize_axis(%indices: tensor<8xi64>) -> tensor<8x256xf16> {
+    %data = "onnx.Constant"() {value = dense<1> : tensor<512x128xui8>} : () -> tensor<512x128xui8>
     %scales = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<512x8xf16>} : () -> tensor<512x8xf16>
     %out = "onnx.Custom"(%data, %indices, %scales) {
       function_name = "GatherBlockQuantized",
@@ -150,12 +150,12 @@ module {
       gather_axis = 0 : si64,
       unsigned_quant_storage,
       onnx_node_name = "GatherBlockQuantized_4"
-    } : (tensor<512x128xi8>, tensor<8xi64>, tensor<512x8xf16>) -> tensor<8x128xf16>
-    return %out : tensor<8x128xf16>
+    } : (tensor<512x128xui8>, tensor<8xi64>, tensor<512x8xf16>) -> tensor<8x256xf16>
+    return %out : tensor<8x256xf16>
   }
 
   // CHECK-LABEL: func.func @test_gbq_infer_quantize_axis
-  // CHECK: hip.gather_block_quantized({{.*}}) ins({{.*}}, {{.*}}, {{.*}} : tensor<512x128xi8>, tensor<8xi64>, tensor<512x8xf16>)
+  // CHECK: hip.gather_block_quantized({{.*}}) ins({{.*}}, {{.*}}, {{.*}} : tensor<512x128xui8>, tensor<8xi64>, tensor<512x8xf16>)
   // CHECK-SAME: quantize_axis = 1
   // CHECK-SAME: unsigned_quant_storage
   // CHECK-NOT: onnx.Custom
@@ -206,5 +206,79 @@ module {
   // CHECK: hip.gather_block_quantized
   // CHECK-SAME: tensor<128x256xi8>
   // CHECK-SAME: zero_points(%{{.*}} : tensor<128x8xi8>)
+  // CHECK-NOT: onnx.Custom
+
+  // ===== Test 7: Dynamic packed quantize-axis extent =====
+
+  func.func @test_gbq_dynamic_packed_axis(
+      %data: tensor<512x?xui8>, %indices: tensor<4xi64>,
+      %scales: tensor<512x?xf16>) -> tensor<4x?xf16> {
+    %out = "onnx.Custom"(%data, %indices, %scales) {
+      function_name = "GatherBlockQuantized",
+      domain_name = "com.microsoft",
+      bits = 4 : si64,
+      block_size = 32 : si64,
+      gather_axis = 0 : si64,
+      quantize_axis = 1 : si64
+    } : (tensor<512x?xui8>, tensor<4xi64>, tensor<512x?xf16>) -> tensor<4x?xf16>
+    return %out : tensor<4x?xf16>
+  }
+
+  // CHECK-LABEL: func.func @test_gbq_dynamic_packed_axis
+  // CHECK-SAME: %[[DATA:[A-Za-z0-9_]+]]: tensor<512x?xui8>
+  // CHECK: %[[PACKED:.*]] = tensor.dim %[[DATA]], %{{.*}} : tensor<512x?xui8>
+  // CHECK: %[[LOGICAL:.*]] = arith.muli %[[PACKED]], %{{.*}} : index
+  // CHECK: %[[INIT:.*]] = tensor.empty(%[[LOGICAL]]) : tensor<4x?xf16>
+  // CHECK: hip.gather_block_quantized
+  // CHECK-SAME: outs(%[[INIT]] : tensor<4x?xf16>)
+
+  // ===== Test 7: signed i8 remains signed when bits == 8 =====
+  // Signed 8-bit is a HIP compatibility form outside the current ONNX T1
+  // schema. It must not acquire unsigned_quant_storage merely from bits.
+
+  func.func @test_gbq_signed_i8_no_zp(%indices: tensor<4xi32>) -> tensor<64x4xf32> {
+    %data = "onnx.Constant"() {value = dense<-1> : tensor<64x512xsi8>} : () -> tensor<64x512xsi8>
+    %scales = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<2x512xf32>} : () -> tensor<2x512xf32>
+    %out = "onnx.Custom"(%data, %indices, %scales) {
+      function_name = "GatherBlockQuantized",
+      domain_name = "com.microsoft",
+      bits = 8 : si64,
+      block_size = 32 : si64,
+      gather_axis = 1 : si64,
+      quantize_axis = 0 : si64
+    } : (tensor<64x512xsi8>, tensor<4xi32>, tensor<2x512xf32>) -> tensor<64x4xf32>
+    return %out : tensor<64x4xf32>
+  }
+
+  // CHECK-LABEL: func.func @test_gbq_signed_i8_no_zp
+  // CHECK: hip.gather_block_quantized
+  // CHECK-SAME: tensor<64x512xsi8>
+  // CHECK-SAME: bits = 8
+  // CHECK-SAME: gather_axis = 1
+  // CHECK-NOT: unsigned_quant_storage
+  // CHECK-NOT: onnx.Custom
+
+  // ===== Test 8: explicit unsigned signless i8 when bits == 8 =====
+
+  func.func @test_gbq_unsigned_signless_i8_no_zp(%indices: tensor<4xi32>) -> tensor<4x64xf32> {
+    %data = "onnx.Constant"() {value = dense<255> : tensor<512x64xi8>} : () -> tensor<512x64xi8>
+    %scales = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<512x2xf32>} : () -> tensor<512x2xf32>
+    %out = "onnx.Custom"(%data, %indices, %scales) {
+      function_name = "GatherBlockQuantized",
+      domain_name = "com.microsoft",
+      bits = 8 : si64,
+      block_size = 32 : si64,
+      gather_axis = 0 : si64,
+      quantize_axis = 1 : si64,
+      unsigned_quant_storage
+    } : (tensor<512x64xi8>, tensor<4xi32>, tensor<512x2xf32>) -> tensor<4x64xf32>
+    return %out : tensor<4x64xf32>
+  }
+
+  // CHECK-LABEL: func.func @test_gbq_unsigned_signless_i8_no_zp
+  // CHECK: hip.gather_block_quantized
+  // CHECK-SAME: tensor<512x64xi8>
+  // CHECK-SAME: bits = 8
+  // CHECK-SAME: unsigned_quant_storage
   // CHECK-NOT: onnx.Custom
 }
