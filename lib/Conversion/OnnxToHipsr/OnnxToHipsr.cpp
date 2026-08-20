@@ -29,6 +29,12 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/SmallVectorExtras.h"
 
+#ifdef ONNX_TO_HIPSR_PDL_FILE
+#include "mlir/Dialect/PDL/IR/PDL.h"
+#include "mlir/Dialect/PDLInterp/IR/PDLInterp.h"
+#include "mlir/Parser/Parser.h"
+#endif
+
 namespace mlir {
 namespace hipsr {
 
@@ -115,10 +121,37 @@ struct ConvertOnnxToHipsrPass
     });
 
     RewritePatternSet patterns(&getContext());
-    populateOnnxToHipsrConstantPatterns(converter, patterns);
+
+#ifdef ONNX_TO_HIPSR_PDL_FILE
+    // Register native constraint for PDLL patterns
+    patterns.getPDLPatterns().registerConstraintFunction(
+        "GetHipsrContext",
+        [](PatternRewriter &rewriter, Operation *op) -> FailureOr<Value> {
+          return getHipsrContextArg(op, rewriter);
+        });
+
+    // Load PDLL patterns from compiled bytecode
+    OwningOpRef<ModuleOp> pdlModule =
+        parseSourceFile<ModuleOp>(ONNX_TO_HIPSR_PDL_FILE, &getContext());
+
+    if (pdlModule) {
+      patterns.add(PDLPatternModule(std::move(pdlModule)));
+    } else {
+      llvm::errs() << "Warning: Failed to load PDLL patterns from "
+                   << ONNX_TO_HIPSR_PDL_FILE << "\n";
+      // Fall back to C++ patterns
+      populateCastConversionPatterns(converter, patterns, &getContext());
+      populateMatMulConversionPatterns(converter, patterns, &getContext());
+      populateExpandConversionPatterns(converter, patterns, &getContext());
+    }
+#else
+    // Use C++ patterns when PDLL not available
     populateCastConversionPatterns(converter, patterns, &getContext());
     populateMatMulConversionPatterns(converter, patterns, &getContext());
     populateExpandConversionPatterns(converter, patterns, &getContext());
+#endif
+
+    populateOnnxToHipsrConstantPatterns(converter, patterns);
     populateShapeConversionPatterns(converter, patterns, &getContext());
     populateReturnConversionPatterns(patterns, &getContext());
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns,
