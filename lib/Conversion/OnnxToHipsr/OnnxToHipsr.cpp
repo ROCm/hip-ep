@@ -42,8 +42,8 @@ namespace hipsr {
 namespace {
 
 // Populate PDLL-based conversion patterns with native rewrites.
-// Returns true if PDLL patterns were loaded successfully.
-static bool populateOnnxToHipsrPDLLPatterns(RewritePatternSet &patterns) {
+// Returns failure if PDLL patterns could not be loaded.
+static LogicalResult populateOnnxToHipsrPDLLPatterns(RewritePatternSet &patterns) {
   // Register native constraint for PDLL patterns
   patterns.getPDLPatterns().registerConstraintFunction(
       "GetHipsrContext",
@@ -121,16 +121,18 @@ static bool populateOnnxToHipsrPDLLPatterns(RewritePatternSet &patterns) {
                                 ::mlir::DenseI64ArrayAttr{});
       });
 
-  // Try to load PDLL patterns from compiled bytecode
+  // Load PDLL patterns from compiled bytecode
   const char *pdlPath = "lib/Conversion/OnnxToHipsr/OnnxToHipsr.pdl.mlir";
   OwningOpRef<ModuleOp> pdlModule =
       parseSourceFile<ModuleOp>(pdlPath, patterns.getContext());
 
-  if (pdlModule) {
-    patterns.add(PDLPatternModule(std::move(pdlModule)));
-    return true;
+  if (!pdlModule) {
+    llvm::errs() << "Error: Failed to load PDLL patterns from " << pdlPath << "\n";
+    return failure();
   }
-  return false;
+
+  patterns.add(PDLPatternModule(std::move(pdlModule)));
+  return success();
 }
 
 // Returns the shape-graph value for a placeholder input. A data result becomes
@@ -212,11 +214,10 @@ struct ConvertOnnxToHipsrPass
 
     RewritePatternSet patterns(&getContext());
 
-    // Try PDLL patterns first, fallback to C++ if unavailable
-    if (!populateOnnxToHipsrPDLLPatterns(patterns)) {
-      populateCastConversionPatterns(converter, patterns, &getContext());
-      populateMatMulConversionPatterns(converter, patterns, &getContext());
-      populateExpandConversionPatterns(converter, patterns, &getContext());
+    // Load PDLL patterns (required - no fallback)
+    if (failed(populateOnnxToHipsrPDLLPatterns(patterns))) {
+      signalPassFailure();
+      return;
     }
 
     populateOnnxToHipsrConstantPatterns(converter, patterns);
