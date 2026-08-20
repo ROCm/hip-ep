@@ -99,6 +99,14 @@ struct MorphiZenEpFactory : OrtEpFactory, ApiPtrs {
       const OrtKeyValuePairs * /*stream_options*/,
       OrtSyncStreamImpl **stream) noexcept;
 
+  // ORT calls GetNumCustomOpDomainsImpl once to size its array, then
+  // GetCustomOpDomainsImpl to fill it; both must observe the same result.
+  static OrtStatus *ORT_API_CALL GetNumCustomOpDomainsImpl(
+      OrtEpFactory *this_ptr, size_t *num_domains) noexcept;
+  static OrtStatus *ORT_API_CALL
+  GetCustomOpDomainsImpl(OrtEpFactory *this_ptr, OrtCustomOpDomain **domains,
+                         size_t num_domains) noexcept;
+
   const OrtLogger &default_logger_; // default logger for the EP factory
   const std::string ep_name_;       // EP name
   const std::string vendor_{"AMD"}; // EP vendor name

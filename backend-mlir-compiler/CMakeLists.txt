@@ -15,6 +15,9 @@ add_subdirectory(level-1-pass)
 # Custom Op MLIR (MorphiZen runtime - always build)
 add_subdirectory(custom-op-mlir)
 
+# ORT custom-op registration module
+add_subdirectory(custom-op-schema)
+
 # E2E Tests (requires ONNX Runtime and GTest)
 if(morphizen_ENABLE_UNIT_TEST)
   add_subdirectory(test)

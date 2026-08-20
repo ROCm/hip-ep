@@ -56,6 +56,21 @@ MORPHIZEN_DLL_SPEC
 void deinitialize_onnxruntime_morphizen_ep();
 
 /**
+ * @brief Collects every OrtCustomOpDomain contributed by
+ * "morphizen_register_ops" plugin symbols (see morphizen/op_def.hpp's
+ * OpRegister), independent of the ABI surface calling it.
+ *
+ * Does a fresh plugin scan on every call -- a caller that needs this to run
+ * at most once per process must cache its own call (see
+ * morphizen/ort-bridge/src/morphizen-ep-factory.cpp's
+ * GetCachedCustomOpDomains()).
+ *
+ * @param ret_domain Domains are appended to this vector.
+ */
+MORPHIZEN_DLL_SPEC
+void CollectCustomOpDomains(std::vector<OrtCustomOpDomain *> &ret_domain);
+
+/**
  * @brief Called when InferenceSession::Run() started.
  * Enable user to set proformance mode for every session run.
  * Related to ORT #19521
