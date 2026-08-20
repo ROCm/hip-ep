@@ -46,6 +46,27 @@ func.func @max_dynamic_dynamic(%ctx: !hip.context, %a: tensor<?xf32>,
   return %d : index
 }
 
+// Each asymmetric axis comes directly from the operand that spans it.
+// REIFY-LABEL: func.func @asymmetric_axes
+// REIFY-SAME: (%{{.*}}: !hip.context, %[[A:[A-Za-z0-9_]+]]: tensor<?x1xf32>, %[[B:[A-Za-z0-9_]+]]: tensor<1x?xf32>
+// REIFY-DAG: %[[C0:.*]] = arith.constant 0 : index
+// REIFY-DAG: %[[C1:.*]] = arith.constant 1 : index
+// REIFY: %[[M:.*]] = tensor.dim %[[A]], %[[C0]]
+// REIFY: %[[N:.*]] = tensor.dim %[[B]], %[[C1]]
+// REIFY: return %[[M]], %[[N]]
+func.func @asymmetric_axes(%ctx: !hip.context, %a: tensor<?x1xf32>,
+                           %b: tensor<1x?xf32>,
+                           %out: tensor<?x?xf32>) -> (index, index) {
+  %r = hip.max(%ctx)
+    ins(%a, %b : tensor<?x1xf32>, tensor<1x?xf32>)
+    outs(%out : tensor<?x?xf32>) : tensor<?x?xf32>
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %d0 = tensor.dim %r, %c0 : tensor<?x?xf32>
+  %d1 = tensor.dim %r, %c1 : tensor<?x?xf32>
+  return %d0, %d1 : index, index
+}
+
 // Broadcasting zero with one yields zero; max(0, 1) would be incorrect.
 // REIFY-LABEL: func.func @zero_one
 // REIFY-DAG: %[[C0:.*]] = arith.constant 0 : index
@@ -60,7 +81,8 @@ func.func @zero_one(%ctx: !hip.context, %a: tensor<0xf32>,
   return %d : index
 }
 
-// Rank-zero broadcast is a successful empty reified shape.
+// Rank-zero broadcast is a successful empty reified shape. hip-infer-shapes
+// must not fail merely because the result has no dimensions.
 // INFER-LABEL: func.func @rank_zero
 // INFER: %[[R:.*]] = hip.where
 // INFER: return %[[R]] : tensor<f32>
