@@ -197,16 +197,34 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
 
   // === Create DPS init tensors ===
 
+  mlir::FailureOr<GqaSequenceExtents> sequenceExtents =
+      resolveGqaSequenceExtents(rewriter, loc, op, totalSeqLen, pastKey,
+                                pastValue, presentKeyType, presentValueType,
+                                outputQkType);
+  if (mlir::failed(sequenceExtents))
+    return rewriter.notifyMatchFailure(
+        op, "cannot derive the GQA sequence extents");
+
   mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, query);
-  mlir::Value presentKeyInit = createEmptyTensor(
-      rewriter, loc, presentKeyType, pastKey ? pastKey : (key ? key : query));
-  mlir::Value presentValueInit =
-      createEmptyTensor(rewriter, loc, presentValueType,
-                        pastValue ? pastValue : (value ? value : query));
+  mlir::FailureOr<mlir::Value> presentKeyInit =
+      createGqaPresentEmpty(rewriter, loc, presentKeyType, query, key,
+                            sequenceExtents->presentKey, numHeads, kvNumHeads);
+  mlir::FailureOr<mlir::Value> presentValueInit = createGqaPresentEmpty(
+      rewriter, loc, presentValueType, query, value,
+      sequenceExtents->presentValue, numHeads, kvNumHeads);
+  if (mlir::failed(presentKeyInit) || mlir::failed(presentValueInit))
+    return rewriter.notifyMatchFailure(
+        op, "cannot derive the GQA present-cache destination shape");
 
   mlir::Value outputQkInit = nullptr;
-  if (outputQkType)
-    outputQkInit = createEmptyTensor(rewriter, loc, outputQkType, query);
+  if (outputQkType) {
+    mlir::FailureOr<mlir::Value> init = createGqaQkEmpty(
+        rewriter, loc, outputQkType, query, sequenceExtents->logical, numHeads);
+    if (mlir::failed(init))
+      return rewriter.notifyMatchFailure(
+          op, "cannot derive the GQA QK destination shape");
+    outputQkInit = *init;
+  }
 
   // === Create hip.gqa operation ===
 
@@ -247,8 +265,8 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
   if (vScale)
     operands.push_back(vScale);
   operands.push_back(outputInit);
-  operands.push_back(presentKeyInit);
-  operands.push_back(presentValueInit);
+  operands.push_back(*presentKeyInit);
+  operands.push_back(*presentValueInit);
   if (outputQkInit)
     operands.push_back(outputQkInit);
 
