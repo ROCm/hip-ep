@@ -351,6 +351,7 @@ collectPreserveShapeTargets(ArrayRef<PlaceholderOp> placeholders,
       if (failed(data)) {
         return failure();
       }
+      // defer set shape in this stage, emitPreserveShapes will set it.
       targets.push_back({/*shape=*/nullptr, *data});
     }
   }

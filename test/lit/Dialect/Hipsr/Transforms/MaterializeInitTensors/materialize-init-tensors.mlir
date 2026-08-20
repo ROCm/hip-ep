@@ -19,8 +19,8 @@
 //   phase 4, cleanup -- every placeholder result use is rewired to its
 //   tensor.empty and the placeholders are erased;
 //   phase 5, shape preservation -- one hipsr.preserve_shape per placeholder
-//   result, tying its computed shape to the DPS result it was initializing,
-//   grouped after every data op.
+//   result, tying a shape to the result its consumer ties to that
+//   placeholder, grouped after every data op.
 //
 // So each domain ends up in the virtual 4-region form: shape computations,
 // then allocations, then the data ops, then the preserve_shape links, all in
@@ -376,6 +376,59 @@ func.func @already_grouped(%ctx: !hipsr.context, %a: tensor<?x256xf16, #hipsr.me
     hipsr.pool_domain_yield %add : tensor<?x512xf16, #hipsr.mem<device>>
   } -> tensor<?x512xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
   return %0 : tensor<?x512xf16, #hipsr.mem<device>>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @compute_consumer(
+// CHECK-SAME:      %[[CTX:.+]]: !hipsr.context, %[[A:.+]]: tensor<?x256xf16, #hipsr.mem<device>>) -> tensor<?xf16, #hipsr.mem<device>> {
+// CHECK-NEXT:    %[[DOMAIN:.+]] = hipsr.pool_domain(%[[CTX]], %[[A]] : !hipsr.context, tensor<?x256xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT:    ^bb0(%[[DCTX:.+]]: !hipsr.context, %[[DA:.+]]: tensor<?x256xf16, #hipsr.mem<device>>):
+// CHECK-NEXT:      %[[SHAPE:.+]] = scf.execute_region -> !shape.shape {
+// CHECK-NEXT:        %[[A_SHAPE:.+]] = shape.shape_of %[[DA]] : tensor<?x256xf16, #hipsr.mem<device>> -> !shape.shape
+// CHECK-NEXT:        scf.yield %[[A_SHAPE]] : !shape.shape
+// CHECK-NEXT:      }
+// CHECK-NEXT:      %[[D0_INDEX:.+]] = shape.const_size 0
+// CHECK-NEXT:      %[[D0_EXTENT:.+]] = shape.get_extent %[[SHAPE]], %[[D0_INDEX]] : !shape.shape, !shape.size -> !shape.size
+// CHECK-NEXT:      %[[D0:.+]] = shape.size_to_index %[[D0_EXTENT]] : !shape.size
+// CHECK-NEXT:      %[[INIT:.+]] = tensor.empty(%[[D0]]) : tensor<?x256xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      %[[OUT:.+]] = hipsr.compute(%[[DCTX]]) ins(%[[DA]] : tensor<?x256xf16, #hipsr.mem<device>>)
+// CHECK-SAME:      outs(%[[INIT]] : tensor<?x256xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT:      ^bb0(%[[BCTX:.+]]: !hipsr.context, %[[IN:.+]]: tensor<?x256xf16, #hipsr.mem<device>>,
+// CHECK-SAME:           %[[DEST:.+]]: tensor<?x256xf16, #hipsr.mem<device>>):
+// CHECK-NEXT:        %[[COLLAPSED:.+]] = tensor.collapse_shape %[[IN]] {{\[\[}}0, 1]]
+// CHECK-SAME:            : tensor<?x256xf16, #hipsr.mem<device>> into tensor<?xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.compute_yield %[[COLLAPSED]] : tensor<?xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      } : tensor<?xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      %[[RESULT_SHAPE:.+]] = shape.shape_of %[[OUT]] : tensor<?xf16, #hipsr.mem<device>> -> !shape.shape
+// CHECK-NEXT:      hipsr.preserve_shape %[[RESULT_SHAPE]], %[[OUT]] : tensor<?xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      hipsr.pool_domain_yield %[[OUT]] : tensor<?xf16, #hipsr.mem<device>>
+// CHECK-NEXT:    } -> tensor<?xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
+// CHECK-NEXT:    return %[[DOMAIN]] : tensor<?xf16, #hipsr.mem<device>>
+// CHECK-NEXT:  }
+func.func @compute_consumer(%ctx: !hipsr.context, %a: tensor<?x256xf16, #hipsr.mem<device>>)
+    -> tensor<?xf16, #hipsr.mem<device>> {
+  %0 = hipsr.pool_domain(%ctx, %a : !hipsr.context, tensor<?x256xf16, #hipsr.mem<device>>) {
+  ^bb0(%domain_ctx: !hipsr.context, %domain_a: tensor<?x256xf16, #hipsr.mem<device>>):
+    %init = hipsr.placeholder(%domain_ctx)
+        ins(%domain_a : tensor<?x256xf16, #hipsr.mem<device>>)
+        {placeholder_type = #hipsr.placeholder_type<normal>}
+        : tensor<?x256xf16, #hipsr.mem<device>> shape_region {
+    ^bb0(%a_shape: !shape.shape):
+      hipsr.shape_yield %a_shape : !shape.shape
+    }
+    %out = hipsr.compute(%domain_ctx)
+        ins(%domain_a : tensor<?x256xf16, #hipsr.mem<device>>)
+        outs(%init : tensor<?x256xf16, #hipsr.mem<device>>) {
+    ^bb0(%body_ctx: !hipsr.context, %in: tensor<?x256xf16, #hipsr.mem<device>>,
+         %dest: tensor<?x256xf16, #hipsr.mem<device>>):
+      %collapsed = tensor.collapse_shape %in [[0, 1]]
+          : tensor<?x256xf16, #hipsr.mem<device>> into tensor<?xf16, #hipsr.mem<device>>
+      hipsr.compute_yield %collapsed : tensor<?xf16, #hipsr.mem<device>>
+    } : tensor<?xf16, #hipsr.mem<device>>
+    hipsr.pool_domain_yield %out : tensor<?xf16, #hipsr.mem<device>>
+  } -> tensor<?xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
+  return %0 : tensor<?xf16, #hipsr.mem<device>>
 }
 
 // -----
