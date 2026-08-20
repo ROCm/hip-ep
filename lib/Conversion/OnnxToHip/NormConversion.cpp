@@ -16,6 +16,7 @@
 //   - onnx.Custom(SkipSimplifiedLayerNormalization)     -> hip.skip_rms_norm
 //   - onnx.Custom(SkipLayerNormalization)               -> add + layer_norm
 //   - onnx.LayerNormalization (standard, opset 17+)     -> hip.layer_norm
+//   - onnx.InstanceNormalization                        -> hip.instance_norm
 //===----------------------------------------------------------------------===//
 
 #include "OnnxToHipUtils.h"
@@ -632,14 +633,79 @@ LayerNormToHip::matchAndRewrite(mlir::Operation *op,
   return mlir::success();
 }
 
+//===----------------------------------------------------------------------===//
+// onnx.InstanceNormalization -> hip.instance_norm
+//===----------------------------------------------------------------------===//
+
+/// ONNX InstanceNormalization (schema 6+ / 22):
+///   inputs:  input (N,C,D1,...,Dn), scale (C), B (C)
+///   attrs:   epsilon (default 1e-5)
+///   output:  same shape as input
+///
+///   y = scale * (x - mean) / sqrt(variance + epsilon) + B
+///   mean/var are per (N, C) over the spatial axes D1..Dn.
+struct InstanceNormToHip : public mlir::RewritePattern {
+  InstanceNormToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.InstanceNormalization", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+InstanceNormToHip::matchAndRewrite(mlir::Operation *op,
+                                   mlir::PatternRewriter &rewriter) const {
+  if (op->getNumOperands() != 3 || op->getNumResults() != 1)
+    return rewriter.notifyMatchFailure(
+        op, "InstanceNormalization expects 3 operands (X, scale, B) and 1 "
+            "result");
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+  mlir::Value input = op->getOperand(0);
+  mlir::Value scale = op->getOperand(1);
+  mlir::Value bias = op->getOperand(2);
+
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+  if (!inputType || inputType.getRank() < 3)
+    return rewriter.notifyMatchFailure(
+        op, "InstanceNormalization requires ranked input of rank >= 3");
+
+  auto scaleType = mlir::dyn_cast<mlir::RankedTensorType>(scale.getType());
+  auto biasType = mlir::dyn_cast<mlir::RankedTensorType>(bias.getType());
+  if (!scaleType || scaleType.getRank() != 1 || !biasType ||
+      biasType.getRank() != 1)
+    return rewriter.notifyMatchFailure(
+        op, "InstanceNormalization scale and B must be 1-D of length C");
+
+  llvm::APFloat epsValue(1.0e-05f);
+  if (auto a = op->getAttrOfType<mlir::FloatAttr>("epsilon"))
+    epsValue = a.getValue();
+
+  auto outputType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
+
+  auto hipOp = mlir::hip::InstanceNormOp::create(
+      rewriter, loc, context, input, scale, bias, outputInit,
+      rewriter.getF32FloatAttr(epsValue.convertToFloat()));
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
 } // namespace
 
 void populateNormConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx) {
   patterns
       .add<SimplifiedLayerNormToHip, RMSNormalizationToHip,
-           SkipSimplifiedLayerNormToHip, SkipLayerNormToHip, LayerNormToHip>(
-          ctx);
+           SkipSimplifiedLayerNormToHip, SkipLayerNormToHip, LayerNormToHip,
+           InstanceNormToHip>(ctx);
 }
 
 } // namespace hip
