@@ -54,7 +54,7 @@ func.func @static_two_allocs(
 // Pool size depends on alignment and overlap analysis.
 //
 // CHECK-LABEL: func.func @static_three_allocs_overlap
-// CHECK:         %[[POOL:.*]] = hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK:         %[[POOL:.*]] = hip.get_pool({{.*}}){{.*}} : memref<?xi8>
 // CHECK-COUNT-3: memref.view %[[POOL]]
 // CHECK:         return
 func.func @static_three_allocs_overlap(
@@ -76,7 +76,7 @@ func.func @static_three_allocs_overlap(
 // Both go into the same i8 pool (type-agnostic via memref.view).
 //
 // CHECK-LABEL: func.func @mixed_element_types
-// CHECK:         %[[POOL:.*]] = hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK:         %[[POOL:.*]] = hip.get_pool({{.*}}){{.*}} : memref<?xi8>
 // CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<8x8xf32>
 // CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<8x8xf16>
 // CHECK:         return
@@ -97,7 +97,7 @@ func.func @mixed_element_types(
 // through to an out-param) =====
 //
 // CHECK-LABEL: func.func @single_alloc_pooled
-// CHECK:         %[[POOL:.*]] = hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK:         %[[POOL:.*]] = hip.get_pool({{.*}}){{.*}} : memref<?xi8>
 // CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<8x8xf32>
 // CHECK:         return
 func.func @single_alloc_pooled(
@@ -128,7 +128,7 @@ func.func @no_allocs_noop(
 // Both memref<?x8xf32> allocs use %n. Pool comes from hip.get_pool.
 //
 // CHECK-LABEL: func.func @dynamic_two_allocs_same_size
-// CHECK:         %[[POOL:.*]] = hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK:         %[[POOL:.*]] = hip.get_pool({{.*}}){{.*}} : memref<?xi8>
 // CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<?x8xf32>
 // CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<?x8xf32>
 // CHECK:         return
@@ -150,7 +150,7 @@ func.func @dynamic_two_allocs_same_size(
 // Pool comes from hip.get_pool.
 //
 // CHECK-LABEL: func.func @mixed_static_dynamic
-// CHECK:         %[[POOL:.*]] = hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK:         %[[POOL:.*]] = hip.get_pool({{.*}}){{.*}} : memref<?xi8>
 // CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<8x8xf32>
 // CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<?x8xf32>
 // CHECK:         return
@@ -175,7 +175,7 @@ func.func @mixed_static_dynamic(
 // CHECK-LABEL: func.func @alignment_256
 // CHECK-SAME:    (%[[CTX:.*]]: !hip.context,
 // CHECK:         %[[SIZE:.*]] = arith.constant 512 : index
-// CHECK:         %[[POOL:.*]] = hip.get_pool(%[[CTX]], %[[SIZE]]) : memref<?xi8>
+// CHECK:         %[[POOL:.*]] = hip.get_pool(%[[CTX]], %[[SIZE]]){{.*}} : memref<?xi8>
 // CHECK-DAG:     arith.constant 0 : index
 // CHECK-DAG:     arith.constant 256 : index
 // CHECK:         memref.view %[[POOL]]
@@ -185,7 +185,7 @@ func.func @mixed_static_dynamic(
 // With --alignment=64, each 4-byte alloc rounds to 64 bytes -> pool = 128xi8.
 // ALIGN64-LABEL: func.func @alignment_256
 // ALIGN64:         arith.constant 128 : index
-// ALIGN64:         hip.get_pool({{.*}}) : memref<?xi8>
+// ALIGN64:         hip.get_pool({{.*}}){{.*}} : memref<?xi8>
 func.func @alignment_256(
     %ctx: !hip.context,
     %in: memref<1xf32>) -> memref<1xf32> {
@@ -210,7 +210,7 @@ func.func @alignment_256(
 // CHECK:         %[[ADJUSTED:.*]] = arith.addi %[[WIDTH]], %[[C255]] : index
 // CHECK:         %[[QUOTIENT:.*]] = arith.divui %[[ADJUSTED]], %[[C256]] : index
 // CHECK:         %[[ALIGNED:.*]] = arith.muli %[[QUOTIENT]], %[[C256]] : index
-// CHECK:         %[[POOL:.*]] = hip.get_pool(%{{.*}}, %[[ALIGNED]]) : memref<?xi8>
+// CHECK:         %[[POOL:.*]] = hip.get_pool(%{{.*}}, %[[ALIGNED]]){{.*}} : memref<?xi8>
 // CHECK:         memref.view %[[POOL]][%[[OFF:[a-zA-Z0-9_]+]]]
 // CHECK-SAME:      : memref<?xi8> to memref<?x8xf32>
 // CHECK:         memref.view %[[POOL]][%[[OFF]]]
@@ -237,7 +237,7 @@ func.func @dynamic_disjoint_share(
 // CHECK-LABEL: func.func @metadata_attributes
 // CHECK-NOT:     hipdnn.pool_size
 // CHECK-NOT:     hipdnn.buffer_offsets
-// CHECK:         hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK:         hip.get_pool({{.*}}){{.*}} : memref<?xi8>
 func.func @metadata_attributes(
     %ctx: !hip.context,
     %a: memref<8x8xf32, strided<[?, ?], offset: ?>>,
@@ -256,7 +256,7 @@ func.func @metadata_attributes(
 // No pool dealloc is inserted — the pool is owned by the runtime.
 //
 // CHECK-LABEL: func.func @preexisting_deallocs
-// CHECK:         %[[POOL:.*]] = hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK:         %[[POOL:.*]] = hip.get_pool({{.*}}){{.*}} : memref<?xi8>
 // CHECK:         memref.view %[[POOL]]
 // CHECK:         memref.view %[[POOL]]
 // CHECK-NOT:     memref.dealloc
@@ -278,7 +278,7 @@ func.func @preexisting_deallocs(
 //
 // CHECK-LABEL: func.func @dynamic_metadata
 // CHECK-NOT:     hipdnn.buffer_offsets
-// CHECK:         hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK:         hip.get_pool({{.*}}){{.*}} : memref<?xi8>
 func.func @dynamic_metadata(
     %ctx: !hip.context,
     %a: memref<?x8xf32>,
@@ -319,7 +319,7 @@ func.func @dynamic_metadata(
 // CHECK-LABEL: func.func @dim_of_collapse
 // CHECK:         memref.collapse_shape
 // CHECK:         memref.dim
-// CHECK:         hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK:         hip.get_pool({{.*}}){{.*}} : memref<?xi8>
 // CHECK-COUNT-2: memref.view %{{.*}} : memref<?xi8> to memref<?x8xf32>
 // CHECK:         return
 func.func @dim_of_collapse(
@@ -345,7 +345,7 @@ func.func @dim_of_collapse(
 // CHECK-LABEL: func.func @dim_of_cast
 // CHECK:         memref.cast
 // CHECK:         memref.dim
-// CHECK:         hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK:         hip.get_pool({{.*}}){{.*}} : memref<?xi8>
 // CHECK:         memref.view %{{.*}} : memref<?xi8> to memref<?x16xf32>
 // CHECK:         return
 func.func @dim_of_cast(
@@ -371,7 +371,7 @@ func.func @dim_of_cast(
 // CHECK-LABEL: func.func @dim_of_view
 // CHECK:         memref.view
 // CHECK:         memref.dim
-// CHECK:         hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK:         hip.get_pool({{.*}}){{.*}} : memref<?xi8>
 // CHECK:         return
 func.func @dim_of_view(
     %ctx: !hip.context,
@@ -398,7 +398,7 @@ func.func @dim_of_view(
 // CHECK-LABEL: func.func @dim_of_subview
 // CHECK:         memref.subview
 // CHECK:         memref.dim
-// CHECK:         hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK:         hip.get_pool({{.*}}){{.*}} : memref<?xi8>
 // CHECK:         return
 func.func @dim_of_subview(
     %ctx: !hip.context,
@@ -428,7 +428,7 @@ func.func @dim_of_subview(
 // CHECK-LABEL: func.func @dim_of_reshape
 // CHECK:         memref.reshape
 // CHECK:         memref.dim
-// CHECK:         hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK:         hip.get_pool({{.*}}){{.*}} : memref<?xi8>
 // CHECK:         return
 func.func @dim_of_reshape(
     %ctx: !hip.context,
@@ -463,7 +463,7 @@ func.func @dim_of_reshape(
 // CHECK-LABEL: func.func @dim_from_host_scratch
 // CHECK:         memref.store
 // CHECK:         memref.load
-// CHECK:         hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK:         hip.get_pool({{.*}}){{.*}} : memref<?xi8>
 // CHECK:         return
 func.func @dim_from_host_scratch(
     %ctx: !hip.context,
@@ -498,12 +498,11 @@ func.func @dim_from_host_scratch(
 // CHECK-LABEL: func.func @multi_domain_two_pools
 // CHECK-SAME:    (%[[CTX:.*]]: !hip.context,
 // CHECK:         memref.dim %{{.*}}, %{{.*}}
-// CHECK:         %[[POOL0:.*]] = hip.get_pool(%[[CTX]], %{{.*}}) : memref<?xi8>
-// CHECK-NOT:     domain_id
+// CHECK:         %[[POOL0:.*]] = hip.get_pool(%[[CTX]], %{{.*}}) {site_id = 18 : i64} : memref<?xi8>
 // CHECK:         %[[V0:.*]] = memref.view %[[POOL0]]{{.*}} to memref<?x16xf32>
 // CHECK:         hip.miopen.softmax{{.*}}outs(%[[V0]] :
 // CHECK:         memref.load
-// CHECK:         %[[POOL1:.*]] = hip.get_pool(%[[CTX]], %{{.*}}) {domain_id = 1 : i64} : memref<?xi8>
+// CHECK:         %[[POOL1:.*]] = hip.get_pool(%[[CTX]], %{{.*}}) {domain_id = 1 : i64, site_id = 18 : i64} : memref<?xi8>
 // CHECK:         %[[V1:.*]] = memref.view %[[POOL1]]{{.*}} to memref<?x16xf32>
 // CHECK:         hip.miopen.softmax{{.*}}outs(%[[V1]] :
 // CHECK:         return %[[V1]]
@@ -527,12 +526,11 @@ func.func @multi_domain_two_pools(
 // BELOW the previous alloc, so each alloc opens a new domain.
 //
 // CHECK-LABEL: func.func @multi_domain_three_pools
-// CHECK:         hip.get_pool({{.*}}) : memref<?xi8>
-// CHECK-NOT:     domain_id
+// CHECK:         hip.get_pool({{.*}}) {site_id = 19 : i64} : memref<?xi8>
 // CHECK:         memref.load
-// CHECK:         hip.get_pool({{.*}}) {domain_id = 1 : i64} : memref<?xi8>
+// CHECK:         hip.get_pool({{.*}}) {domain_id = 1 : i64, site_id = 19 : i64} : memref<?xi8>
 // CHECK:         memref.load
-// CHECK:         hip.get_pool({{.*}}) {domain_id = 2 : i64} : memref<?xi8>
+// CHECK:         hip.get_pool({{.*}}) {domain_id = 2 : i64, site_id = 19 : i64} : memref<?xi8>
 // CHECK:         return
 func.func @multi_domain_three_pools(
     %ctx: !hip.context,

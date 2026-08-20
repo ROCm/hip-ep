@@ -27,6 +27,12 @@
 // is acyclic.
 #include "op_state.h"
 
+struct RuntimePoolSite {
+  int num_domains;
+  void **pool_base;
+  size_t *pool_size;
+};
+
 // Internal runtime state structure
 // This struct is opaque to generated code (passed as void*)
 struct RuntimeState {
@@ -42,31 +48,20 @@ struct RuntimeState {
   void **gpu_constants;
   size_t num_constants;
 
-  // Memory pooling support — multi-domain.
+  // Memory pooling support — module sites containing function-local domains.
   //
-  // hip-pool-allocs partitions a function's pooled allocs into independent
-  // dominance domains; each domain owns one contiguous GPU pool that grows on
-  // demand. Domain 0 carries the legacy single-pool semantics (eagerly sized
-  // by hipdnn_ep_pool_init using static offsets) so single-domain models are
-  // bit-identical to the pre-multi-domain runtime. Domains 1..N start empty
-  // and grow lazily on the first hipdnn_ep_get_pool_base(state, domain_id, ...)
-  // call.
+  // hip-pool-allocs assigns each top-level function a deterministic module
+  // ordinal (site_id), then partitions that function's allocs into local
+  // dominance domains. Runtime identity is the pair (site_id, domain_id), so
+  // caller and outlined-helper domain zero never share a backing allocation.
   //
-  // The per-domain pool arrays are themselves grown on demand: there is no
-  // compile-time cap on the domain count. pool_base/pool_size are heap arrays
-  // of num_pool_domains entries, reallocated (zero-filling new slots) the first
-  // time a higher domain_id is observed — by hipdnn_ep_get_pool_base for the
-  // lazy domains and by hipdnn_ep_pool_init for domain 0. Every domain_id is
-  // first seen on the cold first inference, so num_pool_domains stabilises
-  // after that and no further array realloc happens at steady state — mirroring
-  // the grow-on-demand contract of the individual pools. realloc-move is safe
-  // because nothing caches &pool_base[i] across calls; pool_base[domain_id] is
-  // re-derived from state on every access.
-  int num_pool_domains;   // Number of slots currently allocated in the arrays
-  void **pool_base;       // [num_pool_domains] per-domain GPU pool base ptrs
-  size_t *pool_size;      // [num_pool_domains] per-domain pool size in bytes
-  size_t *buffer_offsets; // Offsets for static buffers in domain 0
-  size_t num_buffers;     // Static buffer count in domain 0
+  // Both dimensions grow lazily without a compile-time cap and stabilize after
+  // the first inference. No generated code caches addresses of table entries.
+  int num_pool_sites;
+  RuntimePoolSite *pool_sites;
+  int legacy_pool_site_id; // Site initialized by hipdnn_ep_pool_init
+  size_t *buffer_offsets;  // Offsets for static buffers in domain 0
+  size_t num_buffers;      // Static buffer count in domain 0
 
   // Shared workspace for operator temp buffers (MatMul GEMM ws, GQA pipeline).
   // Lazily grown via hipdnn_ep_state_ensure_workspace(); never shrinks.

@@ -19,7 +19,7 @@
 // CHECK-LABEL: func.func @main_graph
 // CHECK-SAME:    (%[[CTX:.*]]: !hip.context,
 // CHECK:         %[[SIZE:.*]] = arith.constant 8192 : index
-// CHECK:         %[[POOL:.*]] = hip.get_pool(%[[CTX]], %[[SIZE]]) : memref<?xi8>
+// CHECK:         %[[POOL:.*]] = hip.get_pool(%[[CTX]], %[[SIZE]]){{.*}} : memref<?xi8>
 // CHECK-DAG:     %[[OFF0:.*]] = arith.constant 0 : index
 // CHECK-DAG:     %[[OFF1:.*]] = arith.constant 4096 : index
 // CHECK:         memref.view %[[POOL]][%[[OFF0]]][] : memref<?xi8> to memref<1x16x8x8xf32>

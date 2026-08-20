@@ -443,7 +443,7 @@ private:
         {"wrap_hipMemcpyD2H", i32, {ptr, ptr, i64, ptr}},
         {"wrap_hipStreamSynchronize", i32, {ptr}},
         {"hipdnn_ep_state_get_stream", ptr, {ptr}},
-        {"hipdnn_ep_pool_init", i32, {ptr, i64, ptr, i64}},
+        {"hipdnn_ep_pool_init", i32, {ptr, i32, i64, ptr, i64}},
         {"hipdnn_ep_get_buffer_from_pool", ptr, {ptr, i64}},
         {"hipdnn_ep_tensor_buffer_storage_words", i64, {}},
         {"hipdnn_ep_tensor_buffer_construct", vd, {ptr}},
@@ -609,6 +609,8 @@ private:
         module->getAttrOfType<ArrayAttr>("hipdnn.buffer_offsets");
     auto bufferCountAttr =
         module->getAttrOfType<IntegerAttr>("hipdnn.buffer_count");
+    auto poolSiteIdAttr =
+        module->getAttrOfType<IntegerAttr>("hipdnn.pool_site_id");
 
     // Buffer offsets and count are optional — if absent, pool is managed at
     // runtime via hip.get_pool / hipdnn_ep_get_pool_base (no static offsets).
@@ -646,6 +648,7 @@ private:
       if (hasPoolInit) {
         size_t poolSize = poolSizeAttr.getInt();
         size_t numBuffers = bufferCountAttr.getInt();
+        int32_t poolSiteId = poolSiteIdAttr ? poolSiteIdAttr.getInt() : 0;
         auto offsetsAttrArray = bufferOffsetsAttr.getValue();
         Value numBuffersVal = LLVM::ConstantOp::create(
             builder, loc, i64Type, builder.getI64IntegerAttr(numBuffers));
@@ -666,9 +669,12 @@ private:
             module.lookupSymbol<LLVM::LLVMFuncOp>("hipdnn_ep_pool_init");
         Value poolSizeVal = LLVM::ConstantOp::create(
             builder, loc, i64Type, builder.getI64IntegerAttr(poolSize));
+        Value poolSiteIdVal = LLVM::ConstantOp::create(
+            builder, loc, i32Type, builder.getI32IntegerAttr(poolSiteId));
         auto poolInitCall = LLVM::CallOp::create(
             builder, loc, poolInitFunc,
-            ValueRange{statePtr, poolSizeVal, offsetsArrayPtr, numBuffersVal});
+            ValueRange{statePtr, poolSiteIdVal, poolSizeVal, offsetsArrayPtr,
+                       numBuffersVal});
         Value poolFailed =
             LLVM::ICmpOp::create(builder, loc, LLVM::ICmpPredicate::ne,
                                  poolInitCall.getResult(), zero_i32);
@@ -692,6 +698,7 @@ private:
     if (hasPoolAttrs && poolSizeAttr.getInt() > 0) {
       size_t poolSize = poolSizeAttr.getInt();
       size_t numBuffers = bufferCountAttr.getInt();
+      int32_t poolSiteId = poolSiteIdAttr ? poolSiteIdAttr.getInt() : 0;
       auto offsetsAttrArray = bufferOffsetsAttr.getValue();
 
       Value zero_i32 = LLVM::ConstantOp::create(builder, loc, i32Type,
@@ -735,9 +742,12 @@ private:
           module.lookupSymbol<LLVM::LLVMFuncOp>("hipdnn_ep_pool_init");
       Value poolSizeVal = LLVM::ConstantOp::create(
           builder, loc, i64Type, builder.getI64IntegerAttr(poolSize));
-      auto poolInitCall = LLVM::CallOp::create(
-          builder, loc, poolInitFunc,
-          ValueRange{statePtr, poolSizeVal, offsetsArrayPtr, numBuffersVal});
+      Value poolSiteIdVal = LLVM::ConstantOp::create(
+          builder, loc, i32Type, builder.getI32IntegerAttr(poolSiteId));
+      auto poolInitCall =
+          LLVM::CallOp::create(builder, loc, poolInitFunc,
+                               ValueRange{statePtr, poolSiteIdVal, poolSizeVal,
+                                          offsetsArrayPtr, numBuffersVal});
 
       LLVM::ReturnOp::create(builder, loc, poolInitCall.getResult());
     } else {
