@@ -89,14 +89,18 @@ std::vector<uint8_t> makeLut() {
   std::vector<Row> rows;
   const auto decode = [&](Tier tier, uint8_t hpg, Par par, Seq skv, Cfg config,
                           uint8_t splits, Dim dim = Dim::D64,
-                          Bat batch = Bat::Any) {
+                          Bat batch = Bat::Any, Win window = Win::NoWindow) {
     rows.push_back(Row(Phase::Decode, tier, Dtype::Any, dim, hpg, par, batch,
-                       Seq::Any, skv, Win::NoWindow, config, splits));
+                       Seq::Any, skv, window, config, splits));
   };
 
   // heads-per-group 8 at head_dim 64, which is what gpt-oss runs: WMMA is
   // templated for this pair, so a row keyed on it may name it.
   decode(Tier::HeadGroup, 8, Par::Any, Seq::S128, Cfg::Wmma, 4);
+  // PR #675 routes sliding-window decode to the fused kernel. A window is part
+  // of the key: full attention at 128 keys cannot borrow this row.
+  decode(Tier::HeadGroup, 8, Par::Any, Seq::S128, Cfg::WmmaBkv16, 4,
+         Dim::D64, Bat::Any, Win::W128);
   // Bucket labels are four to the octave, so S768 answers (640, 768] and S896
   // answers (768, 896] -- a request at 800 is not in the same row as one at
   // 700.
@@ -112,8 +116,8 @@ std::vector<uint8_t> makeLut() {
   // The same parallelism at a named batch beats the one that pools batches: 512
   // work items as 64 sequences of 8 heads is not the same launch as one
   // sequence of 512, and only this row can say so.
-  decode(Tier::Geometry, 8, Par::P512, Seq::S128, Cfg::Wmma, 4, Dim::D64,
-         Bat::B64);
+  decode(Tier::Geometry, 8, Par::P512, Seq::S128, Cfg::WmmaBkv32, 4,
+         Dim::D64, Bat::B64);
   // No geometry in the key, so no WMMA: the loader refuses a Length row that
   // names it, because this row answers the pairs WMMA is not templated for.
   decode(Tier::Length, 0, Par::Any, Seq::S1536, Cfg::Scalar, 10);
@@ -270,6 +274,15 @@ int main(int argc, char **argv) {
   REQUIRE(result.source == hipdnn_ep::GqaTuneSource::HeadGroup);
   REQUIRE(result.config.use_wmma && result.config.splits == 4);
 
+  // The same geometry at a deep context scans 128 keys under a sliding window.
+  // Its W128 row, rather than the full-attention S16384 row, is selected.
+  auto windowed = decodeRequest(64, 8, 64, 16384);
+  windowed.local_window = 128;
+  result = hipdnn_ep::gqa_autotune_resolve_decode(policy, windowed);
+  REQUIRE(result.source == hipdnn_ep::GqaTuneSource::HeadGroup);
+  REQUIRE(result.config.use_wmma && result.config.splits == 4 &&
+          result.config.bkv == 16);
+
   // The same model at batch 8 is 512 work items, which the Geometry row names.
   // Nothing else about the request changed. Its 16 splits then clamp to the 8
   // that have work at 128 keys, so this pins the clamp at this tier too.
@@ -284,7 +297,8 @@ int main(int argc, char **argv) {
   auto many_seqs = decodeRequest(8, 1, 64, 128, /*batch=*/64);
   result = hipdnn_ep::gqa_autotune_resolve_decode(policy, many_seqs);
   REQUIRE(result.source == hipdnn_ep::GqaTuneSource::Geometry);
-  REQUIRE(result.config.use_wmma && result.config.splits == 4);
+  REQUIRE(result.config.use_wmma && result.config.splits == 4 &&
+          result.config.bkv == 32);
 
   // The headline of keying on heads-per-group: 32:4:64 was never measured, and
   // it gets the row measured on 64:8:64 because both are 8 queries per KV head.

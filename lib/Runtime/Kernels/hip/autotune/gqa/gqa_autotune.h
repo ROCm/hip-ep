@@ -14,7 +14,10 @@ class FileSystem;
 namespace hipdnn_ep {
 
 inline constexpr const char kGqaAutotuneFilename[] = "gqa_autotune.fb";
-inline constexpr const char kGqaKernelAbi[] = "gqa-v1";
+// PR #675 added BKV=32 as a separately tunable d64 WMMA decode candidate. A
+// gqa-v1 row can only name "WMMA", which now means the incomplete BKV=16
+// subset, so reject it instead of silently losing the new candidate.
+inline constexpr const char kGqaKernelAbi[] = "gqa-v2";
 
 // Where a config came from, in the order the policy tries them. Each name is a
 // tier of the offline table, and the tier is part of a row's key.
@@ -77,6 +80,9 @@ struct GqaDecodeRequest {
 struct GqaDecodeConfig {
   bool use_wmma;
   int splits;
+  // d64 WMMA has BKV=16 and BKV=32 implementations. Scalar ignores this; d128
+  // WMMA is fixed at BKV=32 in the kernel and uses the legacy Wmma row name.
+  int bkv;
 };
 
 struct GqaDecodeResult {

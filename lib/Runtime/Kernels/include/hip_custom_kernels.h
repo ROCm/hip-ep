@@ -867,11 +867,11 @@ HIP_KERNEL_API int hip_gqa_flash_decode(
     const void* k_scale,
     const void* v_scale);
 
-/* Lookup-only variant of hip_gqa_flash_decode_v2. The caller supplies a
+/* Lookup-only variant of hip_gqa_flash_decode. The caller supplies a
  * validated offline-LUT or heuristic configuration, so this entry never runs
  * the in-kernel autotuner. Environment force overrides remain available for
  * development diagnostics. */
-HIP_KERNEL_API int hip_gqa_flash_decode_v2_configured(
+HIP_KERNEL_API int hip_gqa_flash_decode_configured(
     void* stream,
     const void* Q, const void* Kcache, const void* Vcache,
     void* O,
@@ -886,7 +886,8 @@ HIP_KERNEL_API int hip_gqa_flash_decode_v2_configured(
     const void* k_scale,
     const void* v_scale,
     int use_wmma,
-    int splits);
+    int splits,
+    int bkv);
 
 /* =========================================================================
  * Cast (Element Type Conversion)

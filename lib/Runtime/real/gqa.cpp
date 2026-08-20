@@ -506,7 +506,7 @@ static int gqa_forward_fused(
         const hipdnn_ep::GqaDecodeResult selected =
             hipdnn_ep::gqa_autotune_resolve_decode(state->gqa_autotune_policy,
                                                    request);
-        drc = hip_gqa_flash_decode_v2_configured(
+        drc = hip_gqa_flash_decode_configured(
             stream, qSrc, present_key, present_value, output, partials,
             static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
             static_cast<int>(d), effective_skv,
@@ -515,13 +515,14 @@ static int gqa_forward_fused(
             use_smooth_softmax ? 1 : 0, kv_dtype,
             kv_quantized ? k_scale : nullptr,
             kv_quantized ? v_scale : nullptr,
-            selected.config.use_wmma ? 1 : 0, selected.config.splits);
+            selected.config.use_wmma ? 1 : 0, selected.config.splits,
+            selected.config.bkv);
         RUNTIME_DEBUG_LOG(
-            "[REAL] GQA decode config source=%s impl=%s splits=%d "
+            "[REAL] GQA decode config source=%s impl=%s splits=%d bkv=%d "
             "effective_skv=%d\n",
             hipdnn_ep::gqa_tune_source_name(selected.source),
             selected.config.use_wmma ? "wmma" : "scalar",
-            selected.config.splits, effective_skv);
+            selected.config.splits, selected.config.bkv, effective_skv);
       }
       if (drc != 0)
         return -1;

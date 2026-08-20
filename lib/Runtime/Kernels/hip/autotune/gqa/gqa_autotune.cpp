@@ -73,6 +73,7 @@ constexpr size_t kMaxLutBytes = 64u * 1024u * 1024u;
 struct Answer {
   bool use_wmma = false;
   int splits = 0;
+  int bkv = 16;
   GqaPrefillConfig prefill{};
 };
 
@@ -333,6 +334,12 @@ static bool wmmaSupported(int head_dim, unsigned heads_per_group) {
   return heads_per_group == 8 && head_dim == 64;
 }
 
+static bool decodeWmmaConfig(fbs::GqaTuneConfig config) {
+  using C = fbs::GqaTuneConfig;
+  return config == C::Wmma || config == C::WmmaBkv16 ||
+         config == C::WmmaBkv32;
+}
+
 static int decodeEffectiveLen(const GqaDecodeRequest &request) {
   int effective_len = std::max(request.effective_skv, 1);
   if (request.local_window > 0)
@@ -370,9 +377,13 @@ static bool validDecodeConfig(const GqaDecodeRequest &request,
       config.splits > 64)
     return false;
   if (!config.use_wmma)
-    return true;
-  return wmmaSupported(request.head_dim,
-                       headsPerGroup(request.num_heads, request.kv_num_heads));
+    return config.bkv == 16;
+  if (!wmmaSupported(request.head_dim,
+                     headsPerGroup(request.num_heads, request.kv_num_heads)))
+    return false;
+  // d128's kernel fixes the tile at 32 and ignores this placeholder; d64's
+  // value is a real LUT choice. Both paths accept only compiled tile heights.
+  return config.bkv == 16 || config.bkv == 32;
 }
 
 // Blocks the part can have in flight at once, per compute unit. Fitted over
@@ -431,7 +442,8 @@ static GqaDecodeConfig decodeHeuristic(const GqaDecodeRequest &request,
   // path runs when nothing is known, so it stays on the kernel that always
   // exists.
   return {/*use_wmma=*/false,
-          /*splits=*/std::max(1, std::min(cap, occupancySplits(request, cus)))};
+          /*splits=*/std::max(1, std::min(cap, occupancySplits(request, cus))),
+          /*bkv=*/16};
 }
 
 static GqaPrefillConfig prefillHeuristic(const GqaPrefillRequest &request) {
@@ -472,7 +484,7 @@ static bool rowConsistent(const fbs::GqaTuneRow &row) {
     // the pairs nobody measured.
     return !has_hpg && !has_par && !has_batch && has_skv && has_window &&
            has_sq == !decode && row.head_dim() != fbs::GqaTuneHeadDim::Any &&
-           (!decode || row.config() != fbs::GqaTuneConfig::Wmma);
+           (!decode || !decodeWmmaConfig(row.config()));
   case fbs::GqaTuneTier::HeadGroup:
     return has_hpg && !has_par && !has_batch && has_skv && has_window &&
            has_sq == !decode && row.head_dim() != fbs::GqaTuneHeadDim::Any;
@@ -488,13 +500,17 @@ static bool rowConsistent(const fbs::GqaTuneRow &row) {
 
 static bool rowAnswer(const fbs::GqaTuneRow &row, Answer *out) {
   if (row.phase() == fbs::GqaTunePhase::Decode) {
-    if (row.config() != fbs::GqaTuneConfig::Scalar &&
-        row.config() != fbs::GqaTuneConfig::Wmma)
+    using C = fbs::GqaTuneConfig;
+    if (row.config() != C::Scalar && !decodeWmmaConfig(row.config()))
       return false;
     if (row.splits() < 1 || row.splits() > 64)
       return false;
-    out->use_wmma = row.config() == fbs::GqaTuneConfig::Wmma;
+    out->use_wmma = decodeWmmaConfig(row.config());
     out->splits = row.splits();
+    // Wmma predates the tunable d64 tile height and remains the name of d128's
+    // fixed-BKV=32 implementation. It maps to 16 here because the kernel ignores
+    // the knob at d128; the explicit names carry d64's real choice.
+    out->bkv = row.config() == C::WmmaBkv32 ? 32 : 16;
     return true;
   }
   if (row.splits() != 0)
@@ -820,7 +836,8 @@ GqaDecodeResult gqa_autotune_resolve_decode(void *opaque_policy,
       // A row holds the split count the top of its bucket wants; the clamp is
       // what makes the same row right lower down.
       const GqaDecodeConfig config = clampDecodeConfig(
-          request, GqaDecodeConfig{answer->use_wmma, answer->splits});
+          request,
+          GqaDecodeConfig{answer->use_wmma, answer->splits, answer->bkv});
       if (!validDecodeConfig(request, config)) {
         policy->invalid_entries.fetch_add(1, std::memory_order_relaxed);
         continue;

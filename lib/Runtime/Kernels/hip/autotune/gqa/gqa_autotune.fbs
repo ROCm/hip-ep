@@ -177,7 +177,13 @@ enum GqaTuneConfig : ubyte {
   None = 0,
   // decode
   Scalar = 1,
+  // d128 WMMA is fixed at BKV=32 in the kernel. Keep its established name;
+  // gqa-v2 rows use the explicit BKV names below only for d64.
   Wmma = 2,
+  // PR #675 makes the d64 WMMA KV tile height a performance choice. It stays
+  // in this enum rather than adding a row field, preserving the 12-byte struct.
+  WmmaBkv16 = 3,
+  WmmaBkv32 = 4,
   // prefill v5: m_tiles, bkv
   MT1_BKV32 = 16,
   MT1_BKV64 = 17,

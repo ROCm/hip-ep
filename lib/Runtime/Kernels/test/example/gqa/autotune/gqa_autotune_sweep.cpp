@@ -2,7 +2,7 @@
 // GQA autotune sweep: enumerate EVERY autotune candidate for a list of real
 // model shapes and report the winner per shape.
 //
-// The production launchers (hip_gqa_flash_prefill_v2 / hip_gqa_flash_decode_v2)
+// The production launchers (hip_gqa_flash_prefill_v2 / hip_gqa_flash_decode)
 // tune once per shape and then hide the choice inside a process-local cache, so
 // there is no way from the public ABI to see the full candidate ranking or to
 // control the timing budget. This TU therefore #includes the kernel source and
@@ -489,7 +489,7 @@ struct KernelVersion {
   const char *version;
 };
 constexpr KernelVersion kKernelVersions[] = {
-    {"flash_decode", "decode-1"},
+    {"flash_decode", "decode-2"},
     {"prefill_v5", "v5-1"},
     {"prefill_v7", "v7-1"},
     {"prefill_v8", "v8-1"},
@@ -523,7 +523,7 @@ std::vector<Result> sweepDecode(const Shape &s, bool verify, double target_ms,
   const int cap = split_cap;
   const float scale = 1.0f / std::sqrt((float)d);
   const int window = s.window > 0 ? s.window : -1;
-  // Mirrors hip_gqa_flash_decode_v2: a sliding layer tunes over the window, not
+  // Mirrors hip_gqa_flash_decode: a sliding layer tunes over the window, not
   // the full context, so its candidate clamp uses the window length.
   const int tune_len = (window > 0 && skv > window) ? window : skv;
 
@@ -621,47 +621,68 @@ std::vector<Result> sweepDecode(const Shape &s, bool verify, double target_ms,
     const bool use_wmma = (impl == 1);
     if (use_wmma && !wmma_ok)
       continue;
-    int last = -1;
-    for (int sp_base : kAllSplits) {
-      const int sp = std::min(sp_base, std::min(cap, max_useful));
-      if (sp == last)
-        continue; // clamping collapsed this rung
-      last = sp;
-      const FlashDecodeCfg cfg{use_wmma, sp};
-      int turn = 0;
-      auto launch = [&]() {
-        // Next cache in the rotation, so consecutive launches read different
-        // memory the way consecutive layers do.
-        const int i = turn++ % copies;
-        launchFlashDecodeConfig(cfg, nullptr, dQ, dK[i], dV[i], dO, dPart, B, H,
-                                G, d, hpg, max_seq, scale, dSeq, window, sink,
-                                smooth);
-      };
-      // Each dispatch on its own, and each one reading the next cache in the
-      // rotation. `rounds` is spent on samples instead: the median of 40-800
-      // isolated dispatches rather than the median of a handful of averages.
-      const double ms = timeIsolated(launch, target_ms * rounds, 40, 800);
-      double err = -1.0;
-      if (verify) {
-        launch();
-        SWEEP_CHECK(hipDeviceSynchronize());
-        std::vector<float> cur = fetchHalf(dO, qn);
-        if (ref.empty())
-          ref = cur;
+    // PR #675 makes BKV=16 versus BKV=32 a d64 WMMA choice. d128 has one
+    // BKV=32 instantiation, so its established `wmma_SPLITS*` spelling stays
+    // a single candidate.
+    const int bkv_values[2] = {16, 32};
+    const int bkv_count = use_wmma && d == 64 ? 2 : 1;
+    for (int bi = 0; bi < bkv_count; ++bi) {
+      const int bkv = bkv_values[bi];
+      int last = -1;
+      for (int sp_base : kAllSplits) {
+        const int sp = std::min(sp_base, std::min(cap, max_useful));
+        if (sp == last)
+          continue; // clamping collapsed this rung
+        last = sp;
+        // The online tuner never considers the tall tile when the per-split
+        // range cannot amortize its register and ragged-tail cost. Do not let
+        // an offline row name a candidate production would not consider.
+        if (use_wmma && d == 64 &&
+            !flashDecodeTallTileUseful(bkv, tune_len, sp))
+          continue;
+        const FlashDecodeCfg cfg{use_wmma, sp, bkv};
+        int turn = 0;
+        auto launch = [&]() {
+          // Next cache in the rotation, so consecutive launches read different
+          // memory the way consecutive layers do.
+          const int i = turn++ % copies;
+          launchFlashDecodeConfig<KvDtype::kF16>(
+              cfg, nullptr, dQ, dK[i], dV[i], nullptr, nullptr, dO, dPart, B,
+              H, G, d, hpg, max_seq, scale, dSeq, window, sink, smooth);
+        };
+        // Each dispatch on its own, and each one reading the next cache in the
+        // rotation. `rounds` is spent on samples instead: the median of 40-800
+        // isolated dispatches rather than the median of a handful of averages.
+        const double ms = timeIsolated(launch, target_ms * rounds, 40, 800);
+        double err = -1.0;
+        if (verify) {
+          launch();
+          SWEEP_CHECK(hipDeviceSynchronize());
+          std::vector<float> cur = fetchHalf(dO, qn);
+          if (ref.empty())
+            ref = cur;
+          else
+            err = relL2(cur, ref);
+        }
+        char name[64];
+        if (use_wmma && d == 64)
+          snprintf(name, sizeof(name), "wmma_BKV%d_SPLITS%d", bkv, sp);
         else
-          err = relL2(cur, ref);
+          snprintf(name, sizeof(name), "%s_SPLITS%d",
+                   use_wmma ? "wmma" : "scalar", sp);
+        Result r;
+        r.cfg = name;
+        r.ms = ms;
+        r.prod_candidate =
+            is_prod(sp) &&
+            (!use_wmma || d != 64 ||
+             flashDecodeTallTileUseful(bkv, tune_len, sp));
+        r.rel_l2 = err;
+        r.impl_wmma = use_wmma ? 1 : 0;
+        r.splits = sp;
+        r.bkv = use_wmma ? bkv : -1;
+        out.push_back(r);
       }
-      char name[64];
-      snprintf(name, sizeof(name), "%s_SPLITS%d", use_wmma ? "wmma" : "scalar",
-               sp);
-      Result r;
-      r.cfg = name;
-      r.ms = ms;
-      r.prod_candidate = is_prod(sp);
-      r.rel_l2 = err;
-      r.impl_wmma = use_wmma ? 1 : 0;
-      r.splits = sp;
-      out.push_back(r);
     }
   }
 
@@ -670,19 +691,29 @@ std::vector<Result> sweepDecode(const Shape &s, bool verify, double target_ms,
     const auto t0 = std::chrono::steady_clock::now();
     // The production tuner sees one cache, because that is what it gets in
     // production too: it tunes on the layer it was called for.
-    const FlashDecodeCfg cfg = tuneFlashDecode(
-        nullptr, dQ, dK[0], dV[0], dO, dPart, B, H, G, d, hpg, tune_len,
-        max_seq, kFlashDecodeMaxSplits, scale, dSeq, window, sink, smooth);
+    const FlashDecodeCfg cfg = tuneFlashDecodeConfig(
+        nullptr, d, hpg, tune_len, kFlashDecodeMaxSplits, "sweep_online",
+        [&](const FlashDecodeCfg &candidate) {
+          launchFlashDecodeConfig<KvDtype::kF16>(
+              candidate, nullptr, dQ, dK[0], dV[0], nullptr, nullptr, dO,
+              dPart, B, H, G, d, hpg, max_seq, scale, dSeq, window, sink,
+              smooth);
+        });
     SWEEP_CHECK(hipDeviceSynchronize());
     online->decide_ms = std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - t0)
                             .count();
     char buf[64];
-    snprintf(buf, sizeof(buf), "%s_SPLITS%d", cfg.use_wmma ? "wmma" : "scalar",
-             cfg.splits);
+    if (cfg.use_wmma && d == 64)
+      snprintf(buf, sizeof(buf), "wmma_BKV%d_SPLITS%d", cfg.bkv, cfg.splits);
+    else
+      snprintf(buf, sizeof(buf), "%s_SPLITS%d",
+               cfg.use_wmma ? "wmma" : "scalar", cfg.splits);
     online->cfg = buf;
-    // WARMUP=2 + ITERS=10 per candidate, over the production candidate set.
-    online->launches = n_prod * (wmma_ok ? 2 : 1) * 12;
+    // PR #675's production tuner adapts the iteration count to the candidate's
+    // duration, so unlike the former fixed 2+10 loop it has no stable launch
+    // count worth reporting.
+    online->launches = 0;
     online->measured = true;
   }
 

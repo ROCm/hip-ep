@@ -138,9 +138,11 @@ row would have to hold the value its shortest length tolerates and would give up
 ### A config is a name, not a bag of knobs
 
 `GqaTuneConfig` names one point of the launch space — `Scalar`, `Wmma`,
-`MT2_BKV32`, `NW4_BKV32_MT1`, `ND4_MT1_BKV32` — spelled the way the dispatchers and
-the offline sweep spell it. The previous schema carried seven independent ints and
-the loader had to check, per phase, which combinations were real. `nd = 4` with
+`WmmaBkv16`, `WmmaBkv32`, `MT2_BKV32`, `NW4_BKV32_MT1`, `ND4_MT1_BKV32` — spelled
+the way the dispatchers and the offline sweep spell it. PR #675 made BKV=16 versus
+BKV=32 a real d64-WMMA decode choice; it belongs in the config name, not as an
+unconstrained row field. The previous schema carried seven independent ints and the
+loader had to check, per phase, which combinations were real. `nd = 4` with
 `bkv = 64` has no name, so no table can ask for it.
 
 Decode carries its split count separately, in `splits`, because the split ladder is
