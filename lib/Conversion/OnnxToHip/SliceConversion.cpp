@@ -4,288 +4,331 @@
  */
 
 #include "OnnxToHipUtils.h"
+#include "hip/Support/SliceUtils.h"
 
-#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinTypes.h"
 
-#include "llvm/ADT/APInt.h"
+#include "llvm/ADT/STLExtras.h"
+
+#include <limits>
+#include <optional>
 
 namespace mlir {
 namespace hip {
 namespace {
 
-//===----------------------------------------------------------------------===//
-// Slice lowering
-//===----------------------------------------------------------------------===//
-//
-// Two patterns are registered (in benefit order):
-//
-//   * SliceDecompose (benefit=2) — when starts/ends/axes/steps are all
-//     compile-time constants AND every effective step is positive, the op
-//     is rewritten to a `tensor.extract_slice`, which bufferizes to a
-//     zero-copy `memref.subview`. This is the by-far most common case in
-//     transformer models (slicing a fixed prefix off a static-shape KV / mask
-//     tensor) and avoids any runtime call. Dynamic input/output dims are
-//     supported as long as either the dim is NOT touched by `axes` (in
-//     which case we forward the data dim via `tensor.dim`), or the input
-//     dim is static so the per-axis ONNX clamping rules can be evaluated
-//     at compile time.
-//
-//   * SliceToHip (benefit=1) — fallback for non-constant indices or negative
-//     steps. Produces a native `hip.slice` DPS op whose runtime function is
-//     a stub today (throws); models that hit this path are unsupported until
-//     the runtime is implemented, but the conversion / bufferization pipeline
-//     can still verify and link the IR. Dynamic output dims are sourced from
-//     `tensor.dim` on `data` (an upper bound — Slice cannot widen any axis).
+static Value normalizeOptional(Value value) {
+  if (!value)
+    return value;
+  Operation *definingOp = value.getDefiningOp();
+  if (definingOp && definingOp->getName().getStringRef() == "onnx.NoValue")
+    return Value();
+  return value;
+}
 
-/// Return the dense-elements attribute backing \p value if it can be
-/// determined at compile time. Recognizes arith constants, inspectable
-/// hip.constant value carriers produced before `convertComputeOps`, and a
-/// legacy initialized-global bridge.
-static mlir::DenseElementsAttr getCompileTimeConstantTensor(mlir::Value value) {
-  mlir::Operation *defOp = value.getDefiningOp();
-  if (!defOp)
-    return nullptr;
-  if (auto cst = mlir::dyn_cast<mlir::arith::ConstantOp>(defOp))
-    return mlir::dyn_cast<mlir::DenseElementsAttr>(cst.getValue());
-  if (auto attr = defOp->getAttr("value"))
-    if (auto dense = mlir::dyn_cast<mlir::DenseElementsAttr>(attr))
-      return dense;
-  if (auto toTensor = mlir::dyn_cast<mlir::bufferization::ToTensorOp>(defOp)) {
-    auto bufDef =
-        toTensor.getBuffer().getDefiningOp<mlir::memref::GetGlobalOp>();
-    if (!bufDef)
-      return nullptr;
-    auto module = bufDef->getParentOfType<mlir::ModuleOp>();
-    if (!module)
-      return nullptr;
-    auto global =
-        module.lookupSymbol<mlir::memref::GlobalOp>(bufDef.getNameAttr());
-    if (!global)
-      return nullptr;
-    return mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
-        global.getInitialValueAttr());
+struct SliceInput {
+  Value value;
+  int64_t length = 0;
+  std::optional<SmallVector<int64_t>> constant;
+  int64_t readbackOffset = -1;
+};
+
+static FailureOr<SliceInput> inspectSliceInput(Value value) {
+  auto type = dyn_cast<RankedTensorType>(value.getType());
+  if (!type || type.getRank() != 1 ||
+      (!type.getElementType().isInteger(32) &&
+       !type.getElementType().isInteger(64)) ||
+      type.isDynamicDim(0))
+    return failure();
+
+  SliceInput input;
+  input.value = value;
+  input.length = type.getDimSize(0);
+  SmallVector<int64_t> values;
+  if (extractConstantIntVector(value, values)) {
+    if (static_cast<int64_t>(values.size()) != input.length)
+      return failure();
+    input.constant = std::move(values);
   }
-  return nullptr;
+  return input;
 }
 
-/// Populate \p out from a dense 1-D integer tensor attribute.
-static mlir::LogicalResult
-denseIntVectorToSmallVector(mlir::DenseElementsAttr dense,
-                            llvm::SmallVectorImpl<int64_t> &out) {
-  if (!dense)
-    return mlir::failure();
-  auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(dense.getType());
-  if (!tensorType || tensorType.getRank() != 1)
-    return mlir::failure();
-  auto elemTy = tensorType.getElementType();
-  if (!elemTy.isInteger(64) && !elemTy.isInteger(32))
-    return mlir::failure();
-  out.clear();
-  for (mlir::APInt entry : dense.getValues<mlir::APInt>())
-    out.push_back(entry.getSExtValue());
-  return mlir::success();
+static LogicalResult validateResultShape(RankedTensorType resultType,
+                                         ArrayRef<int64_t> expected) {
+  return success(isResultTypeCompatibleWithPayloadShape(resultType, expected));
 }
 
-/// Extract a 1-D integer tensor constant into a SmallVector<int64_t>.
-/// Returns failure if the tensor is missing, not 1-D, or not int32/int64.
-static mlir::LogicalResult
-extractIntVector(mlir::Value v, llvm::SmallVectorImpl<int64_t> &out) {
-  if (!v)
-    return mlir::failure();
-  return denseIntVectorToSmallVector(getCompileTimeConstantTensor(v), out);
-}
-
-/// Prefer compile-time slice params stamped by SliceShapeFold while producers
-/// were generic ONNX constants; fall back to inspecting inline carriers.
-static mlir::LogicalResult
-extractSliceParamVector(mlir::Operation *op, llvm::StringRef attrName,
-                        mlir::Value operand,
-                        llvm::SmallVectorImpl<int64_t> &out) {
-  if (auto attr = op->getAttrOfType<mlir::DenseI64ArrayAttr>(attrName)) {
-    out.assign(attr.asArrayRef().begin(), attr.asArrayRef().end());
-    return mlir::success();
+static SmallVector<Value> materializeValues(PatternRewriter &rewriter,
+                                            Location loc, SliceInput &input,
+                                            ReadbackControlOp readback) {
+  SmallVector<Value> values;
+  values.reserve(input.length);
+  if (input.constant) {
+    for (int64_t value : *input.constant) {
+      values.push_back(
+          arith::ConstantOp::create(rewriter, loc, rewriter.getI64Type(),
+                                    rewriter.getI64IntegerAttr(value)));
+    }
+    return values;
   }
-  return extractIntVector(operand, out);
+  for (int64_t i : llvm::seq<int64_t>(input.length))
+    values.push_back(readback.getValues()[input.readbackOffset + i]);
+  return values;
 }
 
-/// Normalise an ONNX Slice operand reference (`v`): if it is an `onnx.NoValue`
-/// placeholder (used for absent optional inputs), returns null Value.
-static mlir::Value normaliseOptional(mlir::Value v) {
-  if (!v)
-    return v;
-  auto defOp = v.getDefiningOp();
-  if (defOp && defOp->getName().getStringRef() == "onnx.NoValue")
-    return mlir::Value();
-  return v;
-}
+struct SliceDecompose : public RewritePattern {
+  SliceDecompose(MLIRContext *context)
+      : RewritePattern("onnx.Slice", /*benefit=*/2, context) {}
 
-struct SliceDecompose : public mlir::RewritePattern {
-  SliceDecompose(mlir::MLIRContext *ctx)
-      : RewritePattern("onnx.Slice", /*benefit=*/2, ctx) {}
-
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override {
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override {
+    // Complete structural and conservative result validation before creating
+    // the first constant, readback, dim query, or destination.
     if (op->getNumOperands() < 3 || op->getNumOperands() > 5 ||
         op->getNumResults() != 1)
       return rewriter.notifyMatchFailure(op, "expected 3-5 inputs, 1 output");
 
-    mlir::Value data = op->getOperand(0);
-    auto dataType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
-    auto outType =
-        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    if (!dataType || !outType)
-      return rewriter.notifyMatchFailure(op, "expected ranked tensor types");
+    Value data = op->getOperand(0);
+    auto dataType = dyn_cast<RankedTensorType>(data.getType());
+    auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+    if (!dataType || !resultType ||
+        dataType.getRank() != resultType.getRank() ||
+        dataType.getElementType() != resultType.getElementType())
+      return rewriter.notifyMatchFailure(
+          op, "data/result must be ranked tensors with matching rank and type");
+
+    FailureOr<SliceInput> starts = inspectSliceInput(op->getOperand(1));
+    FailureOr<SliceInput> ends = inspectSliceInput(op->getOperand(2));
+    if (failed(starts) || failed(ends))
+      return rewriter.notifyMatchFailure(
+          op, "starts and ends must be statically-sized rank-1 i32/i64");
+    if (starts->length != ends->length)
+      return rewriter.notifyMatchFailure(
+          op, "starts and ends must have equal static lengths");
+    int64_t count = starts->length;
+
+    std::optional<SliceInput> axes;
+    if (op->getNumOperands() >= 4) {
+      Value value = normalizeOptional(op->getOperand(3));
+      if (value) {
+        FailureOr<SliceInput> inspected = inspectSliceInput(value);
+        if (failed(inspected) || inspected->length != count)
+          return rewriter.notifyMatchFailure(
+              op, "axes must be statically-sized rank-1 i32/i64 with the "
+                  "same length as starts");
+        axes = std::move(*inspected);
+      }
+    }
+    std::optional<SliceInput> steps;
+    if (op->getNumOperands() == 5) {
+      Value value = normalizeOptional(op->getOperand(4));
+      if (value) {
+        FailureOr<SliceInput> inspected = inspectSliceInput(value);
+        if (failed(inspected) || inspected->length != count)
+          return rewriter.notifyMatchFailure(
+              op, "steps must be statically-sized rank-1 i32/i64 with the "
+                  "same length as starts");
+        steps = std::move(*inspected);
+      }
+    }
 
     int64_t rank = dataType.getRank();
-
-    llvm::SmallVector<int64_t> startsVec, endsVec;
-    if (mlir::failed(extractSliceParamVector(op, "hipdnn.slice_starts",
-                                             op->getOperand(1), startsVec)) ||
-        mlir::failed(extractSliceParamVector(op, "hipdnn.slice_ends",
-                                             op->getOperand(2), endsVec)))
+    if (rank > std::numeric_limits<int32_t>::max())
       return rewriter.notifyMatchFailure(
-          op, "starts/ends are not compile-time constants");
+          op, "Slice rank exceeds operand-segment representation");
+    bool allConstant = starts->constant && ends->constant &&
+                       (!axes || axes->constant) && (!steps || steps->constant);
+    if (steps && steps->constant &&
+        llvm::is_contained(*steps->constant, int64_t{0}))
+      return rewriter.notifyMatchFailure(op, "Slice steps must be non-zero");
 
-    llvm::SmallVector<int64_t> axesVec;
-    if (op->getNumOperands() >= 4) {
-      mlir::Value axes = normaliseOptional(op->getOperand(3));
+    SmallVector<int64_t> knownAxes;
+    bool axesKnown = !axes || axes->constant.has_value();
+    if (axesKnown) {
+      SmallVector<int64_t> rawAxes;
       if (axes) {
-        if (mlir::failed(extractSliceParamVector(op, "hipdnn.slice_axes", axes,
-                                                 axesVec)))
-          return rewriter.notifyMatchFailure(
-              op, "axes is not a compile-time constant");
-      } else if (auto attr = op->getAttrOfType<mlir::DenseI64ArrayAttr>(
-                     "hipdnn.slice_axes")) {
-        axesVec.assign(attr.asArrayRef().begin(), attr.asArrayRef().end());
-      }
-    }
-    if (axesVec.empty())
-      for (int64_t i : llvm::seq<int64_t>(rank))
-        axesVec.push_back(i);
-
-    llvm::SmallVector<int64_t> stepsVec;
-    if (op->getNumOperands() == 5) {
-      mlir::Value steps = normaliseOptional(op->getOperand(4));
-      if (steps) {
-        if (mlir::failed(extractSliceParamVector(op, "hipdnn.slice_steps",
-                                                 steps, stepsVec)))
-          return rewriter.notifyMatchFailure(
-              op, "steps is not a compile-time constant");
-      } else if (auto attr = op->getAttrOfType<mlir::DenseI64ArrayAttr>(
-                     "hipdnn.slice_steps")) {
-        stepsVec.assign(attr.asArrayRef().begin(), attr.asArrayRef().end());
-      }
-    }
-    if (stepsVec.empty())
-      stepsVec.assign(axesVec.size(), 1);
-
-    if (axesVec.size() != startsVec.size() ||
-        axesVec.size() != endsVec.size() || axesVec.size() != stepsVec.size())
-      return rewriter.notifyMatchFailure(op, "starts/ends/axes/steps mismatch");
-
-    // tensor.extract_slice only supports positive strides; negative-step
-    // slices need a separate reverse pass and fall through to the native op.
-    for (int64_t s : stepsVec)
-      if (s <= 0)
-        return rewriter.notifyMatchFailure(
-            op, "negative or zero step is not supported by extract_slice");
-
-    mlir::Location loc = op->getLoc();
-
-    // Build the set of axes touched by slice and validate the input is
-    // static on each of those axes (we need the static dim size to apply
-    // the ONNX clamping rules at compile time).
-    llvm::SmallSet<int64_t, 8> seenAxes;
-    for (size_t k = 0; k < axesVec.size(); ++k) {
-      int64_t axis = axesVec[k];
-      if (axis < 0)
-        axis += rank;
-      if (axis < 0 || axis >= rank)
-        return rewriter.notifyMatchFailure(op, "axis out of range");
-      if (!seenAxes.insert(axis).second)
-        return rewriter.notifyMatchFailure(op, "duplicate axis");
-      // ONNX clamps start/end against `dim`. If dim is dynamic we cannot
-      // resolve the slice size at compile time -- fall through to the
-      // hip.slice runtime op.
-      if (dataType.isDynamicDim(axis))
-        return rewriter.notifyMatchFailure(
-            op, "slice axis has dynamic input dim; "
-                "cannot apply ONNX clamping at compile time");
-    }
-
-    // Default: full range, unit stride on every dim. Untouched dynamic
-    // dims forward through as `tensor.dim` so the extract_slice's size
-    // operands are well-defined; untouched static dims become attrs.
-    llvm::SmallVector<mlir::OpFoldResult> offsets, sizes, strides;
-    offsets.assign(rank, rewriter.getIndexAttr(0));
-    sizes.reserve(rank);
-    strides.assign(rank, rewriter.getIndexAttr(1));
-    for (int64_t i : llvm::seq<int64_t>(rank)) {
-      if (dataType.isDynamicDim(i)) {
-        mlir::Value dimVal =
-            mlir::tensor::DimOp::create(rewriter, loc, data, i);
-        sizes.push_back(dimVal);
+        rawAxes.assign(axes->constant->begin(), axes->constant->end());
       } else {
-        sizes.push_back(rewriter.getIndexAttr(dataType.getDimSize(i)));
+        rawAxes = llvm::to_vector(llvm::seq<int64_t>(0, count));
+      }
+      std::vector<int64_t> normalized;
+      if (!hipdnn_ep::slice::normalizeAxes(rank, rawAxes.data(), count,
+                                           normalized))
+        return rewriter.notifyMatchFailure(
+            op, "Slice axes must be unique and within the data rank");
+      knownAxes.assign(normalized.begin(), normalized.end());
+    }
+
+    SmallVector<int64_t> conservativeShape(dataType.getShape());
+    SmallVector<int64_t> exactStaticShape;
+    if (allConstant) {
+      std::optional<ArrayRef<int64_t>> staticAxes;
+      if (axes)
+        staticAxes = *axes->constant;
+      std::optional<ArrayRef<int64_t>> staticSteps;
+      if (steps)
+        staticSteps = *steps->constant;
+      FailureOr<SmallVector<int64_t>> inferred =
+          inferSliceShape(dataType.getShape(), *starts->constant,
+                          *ends->constant, staticAxes, staticSteps);
+      if (failed(inferred))
+        return rewriter.notifyMatchFailure(
+            op, "constant Slice parameters are invalid");
+      exactStaticShape = std::move(*inferred);
+      conservativeShape = exactStaticShape;
+    } else if (axesKnown) {
+      for (int64_t axis : knownAxes)
+        conservativeShape[axis] =
+            dataType.getDimSize(axis) == 0 ? 0 : ShapedType::kDynamic;
+    } else {
+      for (int64_t axis : llvm::seq<int64_t>(rank))
+        conservativeShape[axis] =
+            dataType.getDimSize(axis) == 0 ? 0 : ShapedType::kDynamic;
+    }
+    if (failed(validateResultShape(resultType, conservativeShape)))
+      return rewriter.notifyMatchFailure(
+          op, "Slice result type contradicts the validated semantic shape");
+
+    // The HIP fallback needs a context. Positive all-static slices remain a
+    // zero-copy extract_slice and therefore do not require one.
+    SmallVector<int64_t> resolvedStaticSteps(count, 1);
+    if (steps && steps->constant)
+      resolvedStaticSteps.assign(steps->constant->begin(),
+                                 steps->constant->end());
+    bool decompose =
+        allConstant && llvm::all_of(resolvedStaticSteps,
+                                    [](int64_t step) { return step > 0; });
+    if (!decompose)
+      return failure();
+    std::optional<hipdnn_ep::slice::NormalizedParameters> staticParameters;
+    if (allConstant &&
+        llvm::none_of(dataType.getShape(), ShapedType::isDynamic)) {
+      hipdnn_ep::slice::NormalizedParameters normalized;
+      const int64_t *staticAxes = axes ? axes->constant->data() : nullptr;
+      const int64_t *staticSteps = steps ? steps->constant->data() : nullptr;
+      if (!hipdnn_ep::slice::normalizeParameters(
+              dataType.getShape().data(), rank, starts->constant->data(),
+              ends->constant->data(), staticAxes, staticSteps, count,
+              normalized))
+        return rewriter.notifyMatchFailure(
+            op, "constant Slice parameters are invalid");
+      staticParameters = std::move(normalized);
+    }
+
+    Location loc = op->getLoc();
+    Value context;
+    if (!decompose) {
+      FailureOr<Value> contextOr = getContextArg(op, rewriter);
+      if (failed(contextOr))
+        return failure();
+      context = *contextOr;
+    }
+
+    SmallVector<Value> runtimeSources;
+    SmallVector<SliceInput *> orderedInputs = {&*starts, &*ends};
+    if (axes)
+      orderedInputs.push_back(&*axes);
+    if (steps)
+      orderedInputs.push_back(&*steps);
+    for (SliceInput *input : orderedInputs) {
+      if (!input->constant) {
+        input->readbackOffset = 0;
+        runtimeSources.push_back(input->value);
       }
     }
 
-    // Apply per-axis (start, end, step), implementing the ONNX spec's
-    // negative-index and clamping rules.
-    for (size_t k = 0; k < axesVec.size(); ++k) {
-      int64_t axis = axesVec[k];
-      if (axis < 0)
-        axis += rank;
-
-      int64_t dim = dataType.getDimSize(axis);
-      int64_t start = startsVec[k];
-      int64_t end = endsVec[k];
-      int64_t step = stepsVec[k];
-
-      if (start < 0)
-        start += dim;
-      if (end < 0)
-        end += dim;
-      // Positive-step clamp per spec: start in [0, dim], end in [0, dim].
-      start = std::clamp<int64_t>(start, 0, dim);
-      end = std::clamp<int64_t>(end, 0, dim);
-      if (end < start)
-        end = start; // empty slice
-
-      int64_t size = (end - start + step - 1) / step;
-      if (size < 0)
-        size = 0;
-
-      offsets[axis] = rewriter.getIndexAttr(start);
-      sizes[axis] = rewriter.getIndexAttr(size);
-      strides[axis] = rewriter.getIndexAttr(step);
+    ReadbackControlOp readback;
+    Value readbackValid;
+    if (!runtimeSources.empty()) {
+      SmallVector<Type> runtimeTypes;
+      llvm::transform(runtimeSources, std::back_inserter(runtimeTypes),
+                      [](Value value) { return value.getType(); });
+      FailureOr<ReadbackControlLayout> layout =
+          getReadbackControlLayout(runtimeTypes);
+      assert(succeeded(layout) && "validated Slice sources must group");
+      unsigned runtimeIndex = 0;
+      for (SliceInput *input : orderedInputs) {
+        if (input->constant)
+          continue;
+        input->readbackOffset = layout->resultOffsets[runtimeIndex++];
+      }
+      SmallVector<Type> resultTypes = {rewriter.getI1Type()};
+      resultTypes.append(layout->totalCount, rewriter.getI64Type());
+      readback = ReadbackControlOp::create(rewriter, loc, resultTypes, context,
+                                           runtimeSources);
+      readbackValid = readback.getValid();
+    } else {
+      readbackValid = arith::ConstantOp::create(
+          rewriter, loc, rewriter.getI1Type(), rewriter.getBoolAttr(true));
     }
 
-    // Sanity check (only meaningful for static output dims): computed
-    // sizes must match the IR-inferred output type. If they diverge we
-    // have an unsupported corner case and should fall through to the
-    // native op rather than silently produce wrong shapes. Dynamic output
-    // dims are intentionally skipped -- the IR cannot tell us what value
-    // to compare against.
-    for (int64_t i : llvm::seq<int64_t>(rank)) {
-      if (outType.isDynamicDim(i))
-        continue;
-      auto attr = llvm::dyn_cast_if_present<mlir::Attribute>(sizes[i]);
-      auto intAttr = mlir::dyn_cast_or_null<mlir::IntegerAttr>(attr);
-      if (!intAttr || intAttr.getInt() != outType.getDimSize(i))
-        return rewriter.notifyMatchFailure(
-            op, "computed slice size does not match inferred output");
+    SmallVector<Value> startValues =
+        materializeValues(rewriter, loc, *starts, readback);
+    SmallVector<Value> endValues =
+        materializeValues(rewriter, loc, *ends, readback);
+    SmallVector<Value> axisValues;
+    std::optional<ArrayRef<Value>> axisValuesRef;
+    if (axes) {
+      axisValues = materializeValues(rewriter, loc, *axes, readback);
+      axisValuesRef = axisValues;
+    }
+    SmallVector<Value> stepValues;
+    std::optional<ArrayRef<Value>> stepValuesRef;
+    if (steps) {
+      stepValues = materializeValues(rewriter, loc, *steps, readback);
+      stepValuesRef = stepValues;
     }
 
-    mlir::OperationState state(
-        loc, mlir::tensor::ExtractSliceOp::getOperationName());
-    mlir::tensor::ExtractSliceOp::build(rewriter, state, outType, data, offsets,
-                                        sizes, strides);
-    mlir::Operation *sliceOp = rewriter.create(state);
-    rewriter.replaceOp(op, sliceOp->getResult(0));
-    return mlir::success();
+    MaterializedSliceParameters parameters;
+    if (failed(materializeSliceParameters(
+            rewriter, loc, data, startValues, endValues, axisValuesRef,
+            stepValuesRef, readbackValid, parameters)))
+      return failure();
+
+    SmallVector<Value> extentIndices;
+    extentIndices.reserve(rank);
+    for (Value extent : parameters.extents) {
+      extentIndices.push_back(arith::IndexCastOp::create(
+          rewriter, loc, rewriter.getIndexType(), extent));
+    }
+
+    if (decompose) {
+      SmallVector<OpFoldResult> offsets, sizes, strides;
+      offsets.reserve(rank);
+      sizes.reserve(rank);
+      strides.reserve(rank);
+      for (int64_t axis : llvm::seq<int64_t>(rank)) {
+        if (staticParameters) {
+          offsets.push_back(
+              rewriter.getIndexAttr(staticParameters->starts[axis]));
+          sizes.push_back(
+              rewriter.getIndexAttr(staticParameters->extents[axis]));
+          strides.push_back(
+              rewriter.getIndexAttr(staticParameters->steps[axis]));
+          continue;
+        }
+        offsets.push_back(OpFoldResult(
+            arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(),
+                                       parameters.starts[axis])
+                .getResult()));
+        if (resultType.isDynamicDim(axis))
+          sizes.push_back(extentIndices[axis]);
+        else
+          sizes.push_back(rewriter.getIndexAttr(resultType.getDimSize(axis)));
+        strides.push_back(OpFoldResult(
+            arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(),
+                                       parameters.steps[axis])
+                .getResult()));
+      }
+      Value slice = tensor::ExtractSliceOp::create(
+          rewriter, loc, resultType, data, offsets, sizes, strides);
+      rewriter.replaceOp(op, slice);
+      return success();
+    }
+
+    return failure();
   }
 };
 
@@ -310,10 +353,10 @@ struct SliceToHip : public mlir::RewritePattern {
     mlir::Value starts = op->getOperand(1);
     mlir::Value ends = op->getOperand(2);
     mlir::Value axes = op->getNumOperands() >= 4
-                           ? normaliseOptional(op->getOperand(3))
+                           ? normalizeOptional(op->getOperand(3))
                            : mlir::Value();
     mlir::Value steps = op->getNumOperands() == 5
-                            ? normaliseOptional(op->getOperand(4))
+                            ? normalizeOptional(op->getOperand(4))
                             : mlir::Value();
 
     auto resultType =
@@ -355,8 +398,8 @@ struct SliceToHip : public mlir::RewritePattern {
 } // namespace
 
 void populateSliceConversionPatterns(RewritePatternSet &patterns,
-                                     MLIRContext *ctx) {
-  patterns.add<SliceDecompose, SliceToHip>(ctx);
+                                     MLIRContext *context) {
+  patterns.add<SliceDecompose, SliceToHip>(context);
 }
 
 } // namespace hip

@@ -206,6 +206,15 @@ target_link_libraries(test-loop-frame PRIVATE Threads::Threads)
 add_test(NAME LoopFrameUnitTest COMMAND test-loop-frame)
 set_target_properties(test-loop-frame PROPERTIES FOLDER "runtime-tests")
 
+# Header-only Slice preflight/extent arithmetic shared by compiler and runtime.
+# This keeps empty-output pointer handling and extreme-step ceil division
+# GPU-free and directly testable.
+add_executable(test-slice-utils test_slice_utils.cpp)
+target_compile_features(test-slice-utils PRIVATE cxx_std_17)
+target_include_directories(test-slice-utils PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME SliceUtilsUnitTest COMMAND test-slice-utils)
+set_target_properties(test-slice-utils PROPERTIES FOLDER "runtime-tests")
+
 # Mock grouped-control readback semantics, including failure atomicity when a
 # later source descriptor is malformed.
 add_executable(test-readback-control

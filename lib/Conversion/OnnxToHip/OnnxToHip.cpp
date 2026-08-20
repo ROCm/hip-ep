@@ -445,7 +445,6 @@ void ConvertOnnxToHipPass::runOnOperation() {
         mlir::RewritePatternSet preLoweringPatterns(ctx);
         populateGatherShapeFoldPatterns(preLoweringPatterns, ctx);
         populateGatherBlockQuantizedPreparePatterns(preLoweringPatterns, ctx);
-        populateSliceShapeFoldPatterns(preLoweringPatterns, ctx);
         populateConstantOfShapePreLoweringPatterns(preLoweringPatterns, ctx);
         populateFastGeluFusionPatterns(preLoweringPatterns, ctx);
         populateErfGeluFusionPatterns(preLoweringPatterns, ctx);

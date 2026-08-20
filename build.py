@@ -355,7 +355,7 @@ def run_tests(args, build_dir):
             "ArtifactAbi|TensorBufferLifecycle|SymbolicDims|CacheIdentity|"
             "MatmulGemmContractUnitTest|ReductionStatusUnitTest|"
             "LoopFrameUnitTest|ReadbackControlUnitTest|"
-            "ShapeValidationUnitTest",
+            "ShapeValidationUnitTest|SliceUtilsUnitTest",
             "--output-on-failure",
         ]
     )

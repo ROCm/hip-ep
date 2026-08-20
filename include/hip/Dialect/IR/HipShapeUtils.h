@@ -373,22 +373,58 @@ reifyExpandShape(OpBuilder &b, Location loc, Value input, Value shape,
                  SmallVectorImpl<OpFoldResult> &out,
                  std::optional<ArrayRef<int64_t>> staticShape = std::nullopt);
 
-/// Reify the result shape of an ONNX-style `slice` op. `output[axis]`
+/// Compute the result shape of an ONNX-style `slice` op. `output[axis]`
 /// for each `axis` in `axes` is `ceil_div(end - start, step)` (negative
 /// indices and steps clamp per ONNX rules); for axes not in `axes`,
 /// `output[d] = data.shape[d]`.
 ///
-/// Pure fold-or-bail (no fallback for partial constants). The dim-arith
-/// chain `arith.divsi(arith.subi(end, start), step)` per axis would
-/// clutter the IR persistently when any of starts / ends / axes / steps
-/// is non-constant; returning `failure()` early lets the per-op reify
-/// thunk fall back to the `HipDpsOp` outs-lift default for a single
-/// `tensor.dim` per dim instead.
+/// Sliced dynamic input extents remain dynamic in the pure result; the mixed
+/// helper below materializes their exact clamp arithmetic as SSA.
+FailureOr<SmallVector<int64_t>>
+inferSliceShape(ArrayRef<int64_t> dataShape, ArrayRef<int64_t> starts,
+                ArrayRef<int64_t> ends, std::optional<ArrayRef<int64_t>> axes,
+                std::optional<ArrayRef<int64_t>> steps);
+
+/// Exact host-side Slice controls materialized from signed i64 SSA parameters.
+/// Every array has one entry per data dimension. Invalid runtime controls
+/// produce `valid=false`, zero extents/starts, and unit steps.
+struct MaterializedSliceParameters {
+  Value valid;
+  SmallVector<Value> starts;
+  SmallVector<Value> steps;
+  SmallVector<Value> extents;
+};
+
+/// Materialize the ONNX Slice normalization rule using standard arith SSA.
+/// Structural/type/length validation completes before the first operation is
+/// emitted. `readbackValid` is the status from the single grouped runtime
+/// readback, or a constant true supplied by an all-static caller.
+LogicalResult materializeSliceParameters(OpBuilder &b, Location loc, Value data,
+                                         ArrayRef<Value> starts,
+                                         ArrayRef<Value> ends,
+                                         std::optional<ArrayRef<Value>> axes,
+                                         std::optional<ArrayRef<Value>> steps,
+                                         Value readbackValid,
+                                         MaterializedSliceParameters &out);
+///
+/// The value-based mixed form folds all four parameter tensors and delegates to
+/// the compile-time-value overload. Payload-dynamic parameters return failure;
+/// conversion handles them through one grouped `hip.readback_control` and the
+/// SSA materializer above.
 ///
 /// `axes` and `steps` may be null (ONNX defaults: `[0, rank)` and
 /// all-ones respectively).
 LogicalResult reifySliceShape(OpBuilder &b, Location loc, Value data,
                               Value starts, Value ends, Value axes, Value steps,
+                              SmallVectorImpl<OpFoldResult> &out);
+
+/// Reify an exact Slice shape from compile-time parameters. Validation
+/// completes before any IR is emitted; sliced dynamic input dimensions become
+/// ONNX clamp and ceil-div index SSA. Negative indices and steps are preserved.
+LogicalResult reifySliceShape(OpBuilder &b, Location loc, Value data,
+                              ArrayRef<int64_t> starts, ArrayRef<int64_t> ends,
+                              std::optional<ArrayRef<int64_t>> axes,
+                              std::optional<ArrayRef<int64_t>> steps,
                               SmallVectorImpl<OpFoldResult> &out);
 
 /// Reify the result shape of an ONNX-style `range` op:

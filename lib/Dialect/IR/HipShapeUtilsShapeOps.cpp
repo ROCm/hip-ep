@@ -11,6 +11,7 @@
 
 #include "HipShapeUtilsInternal.h"
 #include "hip/Dialect/IR/HipShapeUtils.h"
+#include "hip/Support/SliceUtils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
@@ -243,6 +244,344 @@ mlir::hip::reifyExpandShape(OpBuilder &b, Location loc, Value input,
   return success();
 }
 
+namespace {
+
+struct SliceShapeInference {
+  SmallVector<int64_t> result;
+  SmallVector<int64_t> axes;
+  SmallVector<int64_t> steps;
+};
+
+FailureOr<SliceShapeInference>
+inferSliceShapeAndParams(ArrayRef<int64_t> dataShape, ArrayRef<int64_t> starts,
+                         ArrayRef<int64_t> ends,
+                         std::optional<ArrayRef<int64_t>> axes,
+                         std::optional<ArrayRef<int64_t>> steps) {
+  int64_t dataRank = dataShape.size();
+  if (starts.size() != ends.size())
+    return failure();
+  SmallVector<int64_t> resolvedAxes =
+      axes ? SmallVector<int64_t>(axes->begin(), axes->end())
+           : llvm::to_vector(
+                 llvm::seq<int64_t>(0, static_cast<int64_t>(starts.size())));
+  SmallVector<int64_t> resolvedSteps =
+      steps ? SmallVector<int64_t>(steps->begin(), steps->end())
+            : SmallVector<int64_t>(resolvedAxes.size(), 1);
+  if (starts.size() != resolvedAxes.size() ||
+      ends.size() != resolvedAxes.size() ||
+      resolvedSteps.size() != resolvedAxes.size())
+    return failure();
+
+  std::vector<int64_t> normalizedAxes;
+  if (!hipdnn_ep::slice::normalizeAxes(
+          dataRank, resolvedAxes.data(),
+          static_cast<int64_t>(resolvedAxes.size()), normalizedAxes))
+    return failure();
+  resolvedAxes.assign(normalizedAxes.begin(), normalizedAxes.end());
+
+  SmallVector<int64_t> result(dataShape.begin(), dataShape.end());
+  for (size_t i : llvm::seq<size_t>(0, resolvedAxes.size())) {
+    int64_t axis = resolvedAxes[i];
+    if (resolvedSteps[i] == 0)
+      return failure();
+    int64_t dim = dataShape[axis];
+    if (ShapedType::isDynamic(dim)) {
+      result[axis] = ShapedType::kDynamic;
+      continue;
+    }
+    int64_t normalizedStart = 0;
+    int64_t output = 0;
+    if (!hipdnn_ep::slice::normalizeAxis(
+            dim, starts[i], ends[i], resolvedSteps[i], normalizedStart, output))
+      return failure();
+    result[axis] = output;
+  }
+  return SliceShapeInference{std::move(result), std::move(resolvedAxes),
+                             std::move(resolvedSteps)};
+}
+
+} // namespace
+
+FailureOr<SmallVector<int64_t>>
+mlir::hip::inferSliceShape(ArrayRef<int64_t> dataShape,
+                           ArrayRef<int64_t> starts, ArrayRef<int64_t> ends,
+                           std::optional<ArrayRef<int64_t>> axes,
+                           std::optional<ArrayRef<int64_t>> steps) {
+  FailureOr<SliceShapeInference> inferred =
+      inferSliceShapeAndParams(dataShape, starts, ends, axes, steps);
+  if (failed(inferred))
+    return failure();
+  return std::move(inferred->result);
+}
+
+LogicalResult mlir::hip::materializeSliceParameters(
+    OpBuilder &b, Location loc, Value data, ArrayRef<Value> starts,
+    ArrayRef<Value> ends, std::optional<ArrayRef<Value>> axes,
+    std::optional<ArrayRef<Value>> steps, Value readbackValid,
+    MaterializedSliceParameters &out) {
+  out = {};
+  auto dataType = dyn_cast<RankedTensorType>(data.getType());
+  if (!dataType || starts.size() != ends.size() ||
+      (axes && axes->size() != starts.size()) ||
+      (steps && steps->size() != starts.size()) || !readbackValid ||
+      !readbackValid.getType().isInteger(1))
+    return failure();
+  auto allI64 = [](ArrayRef<Value> values) {
+    return llvm::all_of(
+        values, [](Value value) { return value.getType().isInteger(64); });
+  };
+  if (!allI64(starts) || !allI64(ends) || (axes && !allI64(*axes)) ||
+      (steps && !allI64(*steps)))
+    return failure();
+
+  auto constant = [&](int64_t value) -> Value {
+    return arith::ConstantOp::create(b, loc, b.getI64Type(),
+                                     b.getI64IntegerAttr(value));
+  };
+  auto boolConstant = [&](bool value) -> Value {
+    return arith::ConstantOp::create(b, loc, b.getI1Type(),
+                                     b.getBoolAttr(value));
+  };
+  auto cmp = [&](arith::CmpIPredicate predicate, Value lhs,
+                 Value rhs) -> Value {
+    return arith::CmpIOp::create(b, loc, predicate, lhs, rhs);
+  };
+  auto andI1 = [&](Value lhs, Value rhs) -> Value {
+    return arith::AndIOp::create(b, loc, lhs, rhs);
+  };
+  auto select = [&](Value condition, Value trueValue,
+                    Value falseValue) -> Value {
+    return arith::SelectOp::create(b, loc, condition, trueValue, falseValue);
+  };
+  auto clamp = [&](Value value, Value low, Value high) -> Value {
+    Value atLeastLow = arith::MaxSIOp::create(b, loc, value, low);
+    return arith::MinSIOp::create(b, loc, atLeastLow, high);
+  };
+
+  int64_t rank = dataType.getRank();
+  size_t count = starts.size();
+  Value zero = constant(0);
+  Value one = constant(1);
+  Value minusOne = constant(-1);
+  Value rankValue = constant(rank);
+  Value paramsValid = readbackValid;
+
+  SmallVector<Value> resolvedAxes;
+  resolvedAxes.reserve(count);
+  if (axes) {
+    resolvedAxes.append(axes->begin(), axes->end());
+  } else {
+    for (size_t i : llvm::seq<size_t>(count))
+      resolvedAxes.push_back(constant(static_cast<int64_t>(i)));
+  }
+  SmallVector<Value> resolvedSteps;
+  resolvedSteps.reserve(count);
+  if (steps)
+    resolvedSteps.append(steps->begin(), steps->end());
+  else
+    resolvedSteps.assign(count, one);
+
+  if (rank == 0) {
+    if (count != 0)
+      paramsValid = andI1(paramsValid, boolConstant(false));
+    out.valid = paramsValid;
+    return success();
+  }
+
+  SmallVector<Value> normalizedAxes;
+  SmallVector<Value> axesInRange;
+  normalizedAxes.reserve(count);
+  axesInRange.reserve(count);
+  for (size_t i : llvm::seq<size_t>(count)) {
+    Value axis = resolvedAxes[i];
+    Value axisNegative = cmp(arith::CmpIPredicate::slt, axis, zero);
+    Value normalized = select(
+        axisNegative, arith::AddIOp::create(b, loc, axis, rankValue), axis);
+    Value atLeastZero = cmp(arith::CmpIPredicate::sge, normalized, zero);
+    Value belowRank = cmp(arith::CmpIPredicate::slt, normalized, rankValue);
+    Value inRange = andI1(atLeastZero, belowRank);
+    paramsValid = andI1(paramsValid, inRange);
+    for (size_t previous : llvm::seq<size_t>(i)) {
+      Value distinct =
+          cmp(arith::CmpIPredicate::ne, normalized, normalizedAxes[previous]);
+      paramsValid = andI1(paramsValid, distinct);
+    }
+    Value nonzeroStep = cmp(arith::CmpIPredicate::ne, resolvedSteps[i], zero);
+    paramsValid = andI1(paramsValid, nonzeroStep);
+    normalizedAxes.push_back(normalized);
+    axesInRange.push_back(inRange);
+  }
+
+  SmallVector<OpFoldResult> mixedInputSizes =
+      tensor::getMixedSizes(b, loc, data);
+  SmallVector<Value> inputExtents;
+  inputExtents.reserve(rank);
+  for (OpFoldResult extent : mixedInputSizes) {
+    Value indexExtent = getValueOrCreateConstantIndexOp(b, loc, extent);
+    inputExtents.push_back(
+        arith::IndexCastOp::create(b, loc, b.getI64Type(), indexExtent));
+  }
+
+  SmallVector<Value> candidateStarts;
+  SmallVector<Value> candidateExtents;
+  candidateStarts.reserve(count);
+  candidateExtents.reserve(count);
+  for (size_t i : llvm::seq<size_t>(count)) {
+    Value safeAxis = select(axesInRange[i], normalizedAxes[i], zero);
+    Value safeAxisIndex =
+        arith::IndexCastOp::create(b, loc, b.getIndexType(), safeAxis);
+    Value dimIndex = tensor::DimOp::create(b, loc, data, safeAxisIndex);
+    Value dim = arith::IndexCastOp::create(b, loc, b.getI64Type(), dimIndex);
+    Value dimIsZero = cmp(arith::CmpIPredicate::eq, dim, zero);
+    Value upper = arith::SubIOp::create(b, loc, dim, one);
+    Value stepPositive = cmp(arith::CmpIPredicate::sgt, resolvedSteps[i], zero);
+    Value stepNegative = cmp(arith::CmpIPredicate::slt, resolvedSteps[i], zero);
+
+    auto normalizeIndex = [&](Value raw, Value low, Value high) -> Value {
+      Value negative = cmp(arith::CmpIPredicate::slt, raw, zero);
+      Value adjusted =
+          select(negative, arith::AddIOp::create(b, loc, raw, dim), raw);
+      return clamp(adjusted, low, high);
+    };
+    Value positiveStart = normalizeIndex(starts[i], zero, dim);
+    Value positiveEnd = normalizeIndex(ends[i], zero, dim);
+    Value negativeStart = normalizeIndex(starts[i], zero, upper);
+    Value negativeEnd = normalizeIndex(ends[i], minusOne, upper);
+    Value normalizedStart = select(stepPositive, positiveStart, negativeStart);
+
+    Value positiveDistance =
+        arith::SubIOp::create(b, loc, positiveEnd, positiveStart);
+    positiveDistance = arith::MaxSIOp::create(b, loc, positiveDistance, zero);
+    Value positiveDivisor = select(stepPositive, resolvedSteps[i], one);
+    Value positiveExtent =
+        arith::CeilDivSIOp::create(b, loc, positiveDistance, positiveDivisor);
+
+    Value negativeDistance =
+        arith::SubIOp::create(b, loc, negativeStart, negativeEnd);
+    negativeDistance = arith::MaxSIOp::create(b, loc, negativeDistance, zero);
+    Value stepIsMin = cmp(arith::CmpIPredicate::eq, resolvedSteps[i],
+                          constant(std::numeric_limits<int64_t>::min()));
+    Value safeNegativeStep = select(stepIsMin, minusOne, resolvedSteps[i]);
+    Value stepMagnitude = arith::SubIOp::create(b, loc, zero, safeNegativeStep);
+    Value negativeDivisor = select(stepNegative, stepMagnitude, one);
+    Value regularNegativeExtent =
+        arith::CeilDivSIOp::create(b, loc, negativeDistance, negativeDivisor);
+    Value hasNegativeElements =
+        cmp(arith::CmpIPredicate::sgt, negativeDistance, zero);
+    Value minStepExtent = select(hasNegativeElements, one, zero);
+    Value negativeExtent =
+        select(stepIsMin, minStepExtent, regularNegativeExtent);
+    Value extent = select(stepPositive, positiveExtent, negativeExtent);
+
+    candidateStarts.push_back(select(dimIsZero, zero, normalizedStart));
+    candidateExtents.push_back(select(dimIsZero, zero, extent));
+  }
+
+  SmallVector<Value> startsPerAxis(rank, zero);
+  SmallVector<Value> stepsPerAxis(rank, one);
+  SmallVector<Value> extentsPerAxis(inputExtents.begin(), inputExtents.end());
+  for (int64_t axis : llvm::seq<int64_t>(rank)) {
+    Value axisValue = constant(axis);
+    for (size_t i : llvm::seq<size_t>(count)) {
+      Value matches =
+          cmp(arith::CmpIPredicate::eq, normalizedAxes[i], axisValue);
+      startsPerAxis[axis] =
+          select(matches, candidateStarts[i], startsPerAxis[axis]);
+      stepsPerAxis[axis] =
+          select(matches, resolvedSteps[i], stepsPerAxis[axis]);
+      extentsPerAxis[axis] =
+          select(matches, candidateExtents[i], extentsPerAxis[axis]);
+    }
+  }
+
+  out.valid = paramsValid;
+  out.starts.reserve(rank);
+  out.steps.reserve(rank);
+  out.extents.reserve(rank);
+  for (int64_t axis : llvm::seq<int64_t>(rank)) {
+    out.starts.push_back(select(paramsValid, startsPerAxis[axis], zero));
+    out.steps.push_back(select(paramsValid, stepsPerAxis[axis], one));
+    out.extents.push_back(select(paramsValid, extentsPerAxis[axis], zero));
+  }
+  return success();
+}
+
+LogicalResult mlir::hip::reifySliceShape(OpBuilder &b, Location loc, Value data,
+                                         ArrayRef<int64_t> starts,
+                                         ArrayRef<int64_t> ends,
+                                         std::optional<ArrayRef<int64_t>> axes,
+                                         std::optional<ArrayRef<int64_t>> steps,
+                                         SmallVectorImpl<OpFoldResult> &out) {
+  out.clear();
+  auto dataType = dyn_cast<RankedTensorType>(data.getType());
+  if (!dataType)
+    return failure();
+
+  // Validate every parameter before materializing the first tensor.dim or
+  // arithmetic operation.
+  FailureOr<SliceShapeInference> inferred =
+      inferSliceShapeAndParams(dataType.getShape(), starts, ends, axes, steps);
+  if (failed(inferred))
+    return failure();
+
+  SmallVector<OpFoldResult> inputSizes = tensor::getMixedSizes(b, loc, data);
+  out.assign(inputSizes.begin(), inputSizes.end());
+
+  auto constant = [&](int64_t value) -> Value {
+    return arith::ConstantIndexOp::create(b, loc, value);
+  };
+  auto clamp = [&](Value value, Value low, Value high) -> Value {
+    Value atLeastLow = arith::MaxSIOp::create(b, loc, value, low);
+    return arith::MinSIOp::create(b, loc, atLeastLow, high);
+  };
+
+  for (size_t i : llvm::seq<size_t>(0, inferred->axes.size())) {
+    int64_t axis = inferred->axes[i];
+    int64_t staticExtent = inferred->result[axis];
+    if (!ShapedType::isDynamic(staticExtent)) {
+      out[axis] = b.getIndexAttr(staticExtent);
+      continue;
+    }
+
+    Value dim = getValueOrCreateConstantIndexOp(b, loc, inputSizes[axis]);
+    Value zero = constant(0);
+    Value one = constant(1);
+    int64_t step = inferred->steps[i];
+
+    auto normalize = [&](int64_t index, Value low, Value high) -> Value {
+      Value value = constant(index);
+      if (index < 0)
+        value = arith::AddIOp::create(b, loc, dim, value);
+      return clamp(value, low, high);
+    };
+
+    Value extent;
+    if (step > 0) {
+      Value start = normalize(starts[i], zero, dim);
+      Value end = normalize(ends[i], zero, dim);
+      Value distance = arith::SubIOp::create(b, loc, end, start);
+      distance = arith::MaxSIOp::create(b, loc, distance, zero);
+      extent = arith::CeilDivSIOp::create(b, loc, distance, constant(step));
+    } else {
+      Value minusOne = constant(-1);
+      Value upper = arith::SubIOp::create(b, loc, dim, one);
+      Value start = normalize(starts[i], zero, upper);
+      Value end = normalize(ends[i], minusOne, upper);
+      Value distance = arith::SubIOp::create(b, loc, start, end);
+      distance = arith::MaxSIOp::create(b, loc, distance, zero);
+      if (step == std::numeric_limits<int64_t>::min()) {
+        Value hasElements = arith::CmpIOp::create(
+            b, loc, arith::CmpIPredicate::sgt, distance, zero);
+        extent = arith::SelectOp::create(b, loc, hasElements, one, zero);
+      } else {
+        extent = arith::CeilDivSIOp::create(b, loc, distance, constant(-step));
+      }
+    }
+    out[axis] = extent;
+  }
+  return success();
+}
+
 LogicalResult mlir::hip::reifySliceShape(OpBuilder &b, Location loc, Value data,
                                          Value starts, Value ends, Value axes,
                                          Value steps,
@@ -251,67 +590,25 @@ LogicalResult mlir::hip::reifySliceShape(OpBuilder &b, Location loc, Value data,
   auto dataType = dyn_cast<RankedTensorType>(data.getType());
   if (!dataType)
     return failure();
-  ArrayRef<int64_t> dataShape = dataType.getShape();
-  int64_t dataRank = dataType.getRank();
 
   SmallVector<int64_t> startsList, endsList, axesList, stepsList;
-  if (!matchConstantIntTensor(starts, startsList) ||
-      !matchConstantIntTensor(ends, endsList))
+  if (!matchConstantIntTensor(starts, startsList, /*expectedRank=*/1) ||
+      !matchConstantIntTensor(ends, endsList, /*expectedRank=*/1))
     return failure();
+  std::optional<ArrayRef<int64_t>> resolvedAxes;
   if (axes) {
-    if (!matchConstantIntTensor(axes, axesList))
+    if (!matchConstantIntTensor(axes, axesList, /*expectedRank=*/1))
       return failure();
-  } else {
-    llvm::append_range(axesList, llvm::seq<int64_t>(0, dataRank));
+    resolvedAxes = axesList;
   }
+  std::optional<ArrayRef<int64_t>> resolvedSteps;
   if (steps) {
-    if (!matchConstantIntTensor(steps, stepsList))
+    if (!matchConstantIntTensor(steps, stepsList, /*expectedRank=*/1))
       return failure();
-  } else {
-    stepsList.assign(axesList.size(), 1);
+    resolvedSteps = stepsList;
   }
-  if (startsList.size() != axesList.size() ||
-      endsList.size() != axesList.size() || stepsList.size() != axesList.size())
-    return failure();
-
-  SmallVector<int64_t> outShape(dataShape.begin(), dataShape.end());
-  for (size_t i : llvm::seq<size_t>(0, axesList.size())) {
-    int64_t axis = axesList[i];
-    if (axis < 0)
-      axis += dataRank;
-    if (axis < 0 || axis >= dataRank)
-      return failure();
-    int64_t dim = dataShape[axis];
-    if (ShapedType::isDynamic(dim))
-      return failure();
-    int64_t step = stepsList[i];
-    if (step == 0)
-      return failure();
-    int64_t start = startsList[i];
-    int64_t end = endsList[i];
-    if (start < 0)
-      start += dim;
-    if (end < 0)
-      end += dim;
-    if (step > 0) {
-      start = std::clamp<int64_t>(start, 0, dim);
-      end = std::clamp<int64_t>(end, 0, dim);
-      outShape[axis] = end > start ? (end - start + step - 1) / step : 0;
-    } else {
-      start = std::clamp<int64_t>(start, 0, dim - 1);
-      end = std::clamp<int64_t>(end, -1, dim - 1);
-      int64_t span = start - end;
-      int64_t magnitude = -step;
-      outShape[axis] = start > end ? (span + magnitude - 1) / magnitude : 0;
-    }
-  }
-
-  for (int64_t extent : outShape)
-    if (ShapedType::isDynamic(extent))
-      return failure();
-  for (int64_t extent : outShape)
-    out.push_back(b.getIndexAttr(extent));
-  return success();
+  return reifySliceShape(b, loc, data, startsList, endsList, resolvedAxes,
+                         resolvedSteps, out);
 }
 
 LogicalResult

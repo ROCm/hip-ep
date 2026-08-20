@@ -119,16 +119,14 @@ module {
     // CHECK-NOT: hip.slice
     // CHECK-DAG: %[[A1:.*]] = arith.constant 1 : index
     // CHECK-DAG: %[[DIM:.*]] = tensor.dim %{{.*}}, %[[A1]] : tensor<4x?xf32>
-    // The first dim's slice is [start=1, size=2, step=1]; the second
-    // dim is untouched and uses the runtime dim value.
-    // CHECK: tensor.extract_slice %{{.*}}[1, 0] [2, %[[DIM]]] [1, 1]
+    // Shared normalization materializes exact offsets and strides before
+    // constructing the view; the untouched dimension keeps its runtime size.
+    // CHECK: tensor.extract_slice %{{.*}}[{{.*}}] [{{.*}}] [{{.*}}] : tensor<4x?xf32> to tensor<2x?xf32>
     return %r : tensor<2x?xf32>
   }
 
-  // Test 7: SliceDecompose bails when a sliced axis has a dynamic
-  // input dim (ONNX clamping rules need the static dim size); falls
-  // through to hip.slice. The data dim is forwarded as an upper-bound
-  // tensor.dim for the dynamic output dim.
+  // Test 7: shared normalization emits clamp SSA for a dynamic sliced axis,
+  // allowing the positive-step case to remain an exact extract_slice.
   func.func @test_slice_native_dyn_axis(%input: tensor<?xf32>) -> tensor<?xf32> {
     // CHECK-LABEL: func.func @test_slice_native_dyn_axis
     %starts = arith.constant dense<[1]> : tensor<1xi64>
@@ -139,11 +137,10 @@ module {
         : (tensor<?xf32>, tensor<1xi64>, tensor<1xi64>,
            tensor<1xi64>, tensor<1xi64>) -> tensor<?xf32>
 
-    // CHECK-NOT: tensor.extract_slice
     // CHECK-DAG: %[[A0:.*]] = arith.constant 0 : index
     // CHECK-DAG: %[[DIM:.*]] = tensor.dim %{{.*}}, %[[A0]] : tensor<?xf32>
-    // CHECK: tensor.empty(%[[DIM]]) : tensor<?xf32>
-    // CHECK: hip.slice({{.*}}) ins({{.*}}, {{.*}}, {{.*}} : tensor<?xf32>, tensor<1xi64>, tensor<1xi64>)
+    // CHECK-NOT: hip.slice
+    // CHECK: tensor.extract_slice %{{.*}}[{{.*}}] [{{.*}}] [{{.*}}] : tensor<?xf32> to tensor<?xf32>
     return %r : tensor<?xf32>
   }
 }
