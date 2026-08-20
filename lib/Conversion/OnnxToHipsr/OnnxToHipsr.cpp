@@ -195,7 +195,7 @@ struct ConvertOnnxToHipsrPass
 
           Value init = PlaceholderOp::create(
               rewriter, loc, TypeRange{resultType}, *ctx, ValueRange{data, shape},
-              PlaceholderType::Normal).getResult(0);
+              PlaceholderType::Barrier).getResult(0);
 
           return ExpandOp::create(rewriter, loc, TypeRange{resultType}, *ctx, data, shape, init,
                                   ::mlir::DenseI64ArrayAttr{});
@@ -207,14 +207,9 @@ struct ConvertOnnxToHipsrPass
 
     if (pdlModule) {
       patterns.add(PDLPatternModule(std::move(pdlModule)));
-    } else {
-      llvm::errs() << "Warning: Failed to load PDLL patterns from "
-                   << ONNX_TO_HIPSR_PDL_FILE << "\n";
-      // Fall back to C++ patterns
-      populateCastConversionPatterns(converter, patterns, &getContext());
-      populateMatMulConversionPatterns(converter, patterns, &getContext());
-      populateExpandConversionPatterns(converter, patterns, &getContext());
     }
+    // Note: PDLL native rewrites replace the old C++ patterns
+    // (CastConversion.cpp, MatMulConversion.cpp, ExpandConversion.cpp)
 #else
     // Use C++ patterns when PDLL not available
     populateCastConversionPatterns(converter, patterns, &getContext());
