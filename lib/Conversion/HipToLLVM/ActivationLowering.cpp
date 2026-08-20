@@ -5,6 +5,8 @@
 
 #include "HipToLLVMUtils.h"
 
+#include <utility>
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -348,12 +350,12 @@ struct SiluOpLowering : public ConvertOpToLLVMPattern<SiluOp> {
 };
 
 // hip.miopen.softmax(%handle) ins(%input) outs(%output)
-//   -> hip_miopen_softmax(handle, input, output, rows, cols, elem_size_bytes)
-// Rank-generic: softmax over last dim. For 3D [B,S,D], rows = B*S, cols = D.
-// elem_size_bytes is derived from the MemRef element type (2=fp16, 4=fp32)
-// and passed to the runtime so it can copy + dispatch with the right dtype.
-// Previously this was not passed, causing fp32 Softmax inputs (e.g. Qwen VLM
-// attention scores) to be misread as fp16, producing completely wrong outputs.
+//   -> hip_miopen_softmax(state, input, output,
+//                         input_rows, input_cols, output_rows, output_cols,
+//                         data_type)
+// Rank-generic row-wise Softmax over the last dimension. Runtime input/output
+// extents remain explicit so dynamic descriptor disagreement fails before copy
+// or kernel dispatch. The semantic dtype distinguishes f16, bf16, and f32.
 struct MiopenSoftmaxOpLowering
     : public ConvertOpToLLVMPattern<MiopenSoftmaxOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -367,48 +369,47 @@ struct MiopenSoftmaxOpLowering
     Type i32Type = rewriter.getI32Type();
     Type indexType = getIndexType();
 
-    SmallVector<Type> paramTypes = {ptrType,   ptrType,   ptrType,
-                                    indexType, indexType, indexType};
+    SmallVector<Type> paramTypes = {ptrType,   ptrType,   ptrType,   indexType,
+                                    indexType, indexType, indexType, indexType};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kMiopenSoftmax, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    auto inputMemrefType = cast<MemRefType>(op.getInput().getType());
-    int rank = inputMemrefType.getRank();
-    MemRefDescriptor inputDesc(adaptor.getInput());
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    auto outputType = cast<MemRefType>(op.getOutput().getType());
+    auto flattenRowsCols = [&](MemRefType type,
+                               Value descriptor) -> std::pair<Value, Value> {
+      MemRefDescriptor desc(descriptor);
+      Value rows = LLVM::ConstantOp::create(
+          rewriter, loc, indexType, rewriter.getIntegerAttr(indexType, 1));
+      for (int64_t axis : llvm::seq<int64_t>(0, type.getRank() - 1))
+        rows = LLVM::MulOp::create(rewriter, loc, rows,
+                                   desc.size(rewriter, loc, axis));
+      return {rows, desc.size(rewriter, loc, type.getRank() - 1)};
+    };
+    auto [inputRows, inputCols] =
+        flattenRowsCols(inputType, adaptor.getInput());
+    auto [outputRows, outputCols] =
+        flattenRowsCols(outputType, adaptor.getOutput());
 
-    // cols = last dim; rows = product of all other dims
-    Value cols = inputDesc.size(rewriter, loc, rank - 1);
-    Value rows = inputDesc.size(rewriter, loc, 0);
-    for (int i = 1; i < rank - 1; i++)
-      rows = LLVM::MulOp::create(rewriter, loc, rows,
-                                 inputDesc.size(rewriter, loc, i));
-
-    // Determine element size in bytes from the MemRef element type.
-    // Only fp16/bf16 (2 bytes) and fp32 (4 bytes) are supported by the
-    // runtime kernels.  Unsupported types are rejected here at compile time
-    // rather than silently producing wrong outputs at runtime.
-    Type elemType = inputMemrefType.getElementType();
-    int64_t elemSizeBytes;
-    if (elemType.isF16() || elemType.isBF16())
-      elemSizeBytes = 2;
-    else if (elemType.isF32())
-      elemSizeBytes = 4;
-    else
-      return op.emitOpError("hip_miopen_softmax: unsupported element type; "
-                            "only fp16/bf16/fp32 are supported");
-    Value elemSize = LLVM::ConstantOp::create(
-        rewriter, loc, indexType,
-        rewriter.getIntegerAttr(indexType, elemSizeBytes));
+    Type elementType = inputType.getElementType();
+    if (!elementType.isF16() && !elementType.isBF16() && !elementType.isF32())
+      return op.emitOpError(
+          "hip_miopen_softmax supports only f16, bf16, and f32");
+    int64_t dataType = getHipdnnDataType(elementType);
+    Value dataTypeValue = LLVM::ConstantOp::create(
+        rewriter, loc, indexType, rewriter.getIntegerAttr(indexType, dataType));
 
     SmallVector<Value> args = {
         adaptor.getCtx(),
         extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc),
-        rows,
-        cols,
-        elemSize};
+        inputRows,
+        inputCols,
+        outputRows,
+        outputCols,
+        dataTypeValue};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

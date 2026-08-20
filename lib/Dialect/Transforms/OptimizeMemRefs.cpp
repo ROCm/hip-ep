@@ -41,6 +41,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/BufferUtils.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
@@ -48,6 +49,7 @@
 #include "mlir/Dialect/Arith/Transforms/BufferViewFlowOpInterfaceImpl.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Statistic.h"
@@ -57,6 +59,8 @@
 
 STATISTIC(NumAllocsReused, "Number of allocations reused via slot assignment");
 STATISTIC(NumSlotsCreated, "Number of unique memory slots created");
+STATISTIC(NumSoftmaxBuffersCoalesced,
+          "Number of softmax destinations coalesced with dead inputs");
 
 namespace mlir {
 namespace hip {
@@ -127,6 +131,91 @@ static bool canReuse(const Slot &slot, MemRefType neededType,
   return false;
 }
 
+/// Return true when \p value has no view-like aliases. Coalescing is restricted
+/// to unshared allocation results so replacing one destination cannot retarget
+/// an independently-used view.
+static bool hasNoViewAliases(Value value) {
+  return llvm::none_of(value.getUsers(), [value](Operation *user) {
+    auto view = dyn_cast<ViewLikeOpInterface>(user);
+    return view && view.getViewSource() == value;
+  });
+}
+
+/// Return true when every non-lifetime use of \p value is at or before
+/// \p boundary. The function is single-block, so operation order proves the
+/// input's storage is dead immediately after the boundary operation.
+static bool hasNoUseAfter(Value value, Operation *boundary, Block &block) {
+  for (Operation *user : value.getUsers()) {
+    if (isa<memref::DeallocOp>(user))
+      continue;
+    if (user == boundary)
+      continue;
+    if (user->getBlock() != &block || boundary->isBeforeInBlock(user))
+      return false;
+  }
+  return true;
+}
+
+/// Return true when \p value is not observed before \p boundary. Uses after the
+/// boundary are the result lifetime that will be transferred to the input.
+static bool hasNoUseBefore(Value value, Operation *boundary, Block &block) {
+  for (Operation *user : value.getUsers()) {
+    if (isa<memref::DeallocOp>(user) || user == boundary)
+      continue;
+    if (user->getBlock() != &block || user->isBeforeInBlock(boundary))
+      return false;
+  }
+  return true;
+}
+
+/// Coalesce a softmax destination with its input when both are unshared,
+/// compiler-owned allocations with identical storage requirements. The
+/// runtime wrapper accepts aliased operands and executes the kernel in place.
+static bool tryCoalesceSoftmax(MiopenSoftmaxOp softmax, Block &block) {
+  Value input = softmax.getInput();
+  Value output = softmax.getOutput();
+  if (input == output)
+    return false;
+
+  auto inputType = dyn_cast<MemRefType>(input.getType());
+  auto outputType = dyn_cast<MemRefType>(output.getType());
+  if (!inputType || inputType != outputType ||
+      !inputType.getLayout().isIdentity() ||
+      !outputType.getLayout().isIdentity())
+    return false;
+
+  auto inputAlloc = input.getDefiningOp<memref::AllocOp>();
+  auto outputAlloc = output.getDefiningOp<memref::AllocOp>();
+  if (!inputAlloc || !outputAlloc || inputAlloc->getBlock() != &block ||
+      outputAlloc->getBlock() != &block ||
+      !inputAlloc->isBeforeInBlock(softmax) ||
+      !outputAlloc->isBeforeInBlock(softmax))
+    return false;
+
+  if (!llvm::equal(inputAlloc.getDynamicSizes(),
+                   outputAlloc.getDynamicSizes()) ||
+      !hasNoViewAliases(input) || !hasNoViewAliases(output) ||
+      !hasNoUseAfter(input, softmax, block) ||
+      !hasNoUseBefore(output, softmax, block))
+    return false;
+
+  if (llvm::any_of(output.getUsers(),
+                   [](Operation *user) { return isa<func::ReturnOp>(user); }))
+    return false;
+
+  SmallVector<memref::DeallocOp> inputDeallocs;
+  for (Operation *user : input.getUsers())
+    if (auto dealloc = dyn_cast<memref::DeallocOp>(user))
+      inputDeallocs.push_back(dealloc);
+  for (memref::DeallocOp dealloc : inputDeallocs)
+    dealloc.erase();
+
+  output.replaceAllUsesWith(input);
+  outputAlloc.erase();
+  ++NumSoftmaxBuffersCoalesced;
+  return true;
+}
+
 //===----------------------------------------------------------------------===//
 // Pass
 //===----------------------------------------------------------------------===//
@@ -158,6 +247,13 @@ void OptimizeMemRefsPass::runOnOperation() {
   }
 
   Block &block = funcOp.getBody().front();
+
+  // The custom softmax kernel is in-place. Coalesce its transient output with
+  // a dead input before general interval assignment extends the input lifetime
+  // through downstream users of the aliased result.
+  for (Operation &op : llvm::make_early_inc_range(block))
+    if (auto softmax = dyn_cast<MiopenSoftmaxOp>(op))
+      (void)tryCoalesceSoftmax(softmax, block);
 
   BufferViewFlowAnalysis aliasAnalysis(funcOp);
 

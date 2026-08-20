@@ -819,7 +819,33 @@ void MiopenSoftmaxOp::getEffects(
 }
 
 LogicalResult MiopenSoftmaxOp::verify() {
-  return verifyDpsComputeOp(*this, {getInput(), getOutput()}, /*numInits=*/1);
+  if (failed(
+          verifyDpsComputeOp(*this, {getInput(), getOutput()}, /*numInits=*/1)))
+    return failure();
+
+  auto inputType = cast<ShapedType>(getInput().getType());
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  if (inputType.getRank() == 0)
+    return emitOpError("requires positive-rank input and output");
+  if (inputType.getRank() != outputType.getRank())
+    return emitOpError("input and output ranks must match");
+
+  Type elementType = inputType.getElementType();
+  if (outputType.getElementType() != elementType)
+    return emitOpError("input and output element types must match");
+  if (!elementType.isF16() && !elementType.isBF16() && !elementType.isF32())
+    return emitOpError("unsupported element type ")
+           << elementType << "; expected f16, bf16, or f32";
+
+  for (int64_t axis : llvm::seq<int64_t>(0, inputType.getRank())) {
+    int64_t inputExtent = inputType.getDimSize(axis);
+    int64_t outputExtent = outputType.getDimSize(axis);
+    if (!ShapedType::isDynamic(inputExtent) &&
+        !ShapedType::isDynamic(outputExtent) && inputExtent != outputExtent)
+      return emitOpError("input and output dimensions must match at axis ")
+             << axis << ": " << inputExtent << " vs " << outputExtent;
+  }
+  return success();
 }
 
 ParseResult MiopenSoftmaxOp::parse(OpAsmParser &parser,

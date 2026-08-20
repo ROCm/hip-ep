@@ -68,7 +68,7 @@
 
 // --- loader validates this tagged token before binding any other function ---
 // CHECK-LABEL: llvm.func @inference_get_artifact_abi() -> i64
-// CHECK:   llvm.mlir.constant(5208782684133785601 : i64)
+// CHECK:   llvm.mlir.constant(5208782684133785602 : i64)
 // CHECK:   llvm.return
 
 module attributes {

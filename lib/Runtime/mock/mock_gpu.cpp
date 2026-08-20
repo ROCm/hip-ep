@@ -1267,17 +1267,23 @@ int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
 // Mock impl of the runtime symbol referenced by the hip.miopen.softmax
 // lowering. Signature must match lib/Runtime/real/miopen.cpp.
 extern "C" int hip_miopen_softmax(RuntimeState *state, const void *input,
-                                  void *output, int64_t rows, int64_t cols,
-                                  int64_t data_type) {
-  if (!state) {
-    fprintf(stderr, "Invalid state in hip_miopen_softmax\n");
+                                  void *output, int64_t input_rows,
+                                  int64_t input_cols, int64_t output_rows,
+                                  int64_t output_cols, int64_t data_type) {
+  if (!state || !input || !output) {
+    fprintf(stderr, "Invalid argument in hip_miopen_softmax\n");
     return -1;
   }
-  (void)input;
-  (void)output;
+  if (input_rows <= 0 || input_cols <= 0 || input_rows != output_rows ||
+      input_cols != output_cols)
+    return -1;
+  if (data_type != HIPDNN_EP_DATATYPE_FLOAT &&
+      data_type != HIPDNN_EP_DATATYPE_HALF &&
+      data_type != HIPDNN_EP_DATATYPE_BFLOAT16)
+    return -1;
   MOCK_PRINT("[MOCK] hip_miopen_softmax(rows=%lld, cols=%lld, "
              "data_type=%s(%lld))\n",
-             (long long)rows, (long long)cols,
+             (long long)input_rows, (long long)input_cols,
              hipdnn_ep_datatype_name(data_type), (long long)data_type);
   return 0;
 }

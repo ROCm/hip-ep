@@ -1518,7 +1518,7 @@ def Hip_MaxOp : Hip_DpsOp_Broadcast<"max",
 }
 
 def Hip_MiopenSoftmaxOp : Hip_DpsOp_AutoReifyInfer<"miopen.softmax"> {
-  let summary = "Softmax via miopenSoftmaxForward_V2 (row-wise, last dim)";
+  let summary = "Typed custom-HIP Softmax (row-wise, last dimension)";
   let arguments = (ins
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$input,

@@ -93,11 +93,11 @@ existing `--convert-hip-to-llvm` pipeline.
 | `Sigmoid` | `hip.miopen.sigmoid` | `miopenActivationLOGISTIC` |
 | `Relu` | `hip.miopen.relu` | `miopenActivationRELU` |
 
-### MIOpen: Softmax (`miopenSoftmaxForward`)
+### Custom HIP: row-wise Softmax
 
-| ONNX | HIP | MIOpen API |
+| ONNX | HIP | Runtime implementation |
 |---|---|---|
-| `Softmax` | `hip.miopen.softmax` | `miopenSoftmaxForward` |
+| `Softmax` | `hip.miopen.softmax` | Typed f16/bf16/f32 row kernel with f32 reduction |
 
 ### MIOpen: Element-wise Tensor Ops (`miopenOpTensor`)
 

@@ -91,13 +91,14 @@ elements of A via MIOpen's tensor broadcasting support.
 
 ### Softmax
 
-| Op | DPS Syntax | MIOpen API | Status |
+| Op | DPS Syntax | Runtime implementation | Status |
 |---|---|---|---|
-| `hip.miopen.softmax` | `(%ctx) ins(%input : ...) outs(%output : ...)` | `miopenSoftmaxForward_V2` | Full impl |
+| `hip.miopen.softmax` | `(%ctx) ins(%input : ...) outs(%output : ...)` | Typed custom HIP row kernel | Full impl |
 
 Row-wise softmax over the last dimension. Rank-generic: for 3D `[B,S,S]`, the
-lowering flattens `rows = B*S, cols = S`. The runtime uses a 4D descriptor
-`[rows, cols, 1, 1]` with `MIOPEN_SOFTMAX_MODE_CHANNEL` to normalize over cols.
+lowering flattens `rows = B*S, cols = S`. The runtime validates input/output
+descriptor equality, supports f16/bf16/f32 storage, and accumulates max and sum
+in f32.
 
 ---
 
