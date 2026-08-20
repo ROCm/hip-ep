@@ -164,18 +164,52 @@ static FailureOr<Value> unboxCondInit(OpBuilder &builder, Location loc,
 }
 
 static FailureOr<RankedTensorType>
-validateCarrierEquality(Operation *loopOp, unsigned carrierIndex,
-                        ArrayRef<Type> participantTypes) {
+computeCarrierJoin(Operation *loopOp, unsigned carrierIndex,
+                   ArrayRef<Type> participantTypes) {
   auto initType = dyn_cast<RankedTensorType>(participantTypes.front());
   if (!initType)
     return loopOp->emitOpError("loop carrier #")
            << carrierIndex << " requires a ranked v_init type";
 
-  // Normalize under-refined source boundaries to v_init. The outlined function
-  // and hip.loop verifier then enforce exact current/result equality; actual
-  // shape evolution is deferred to the conservative-join layer.
-  (void)participantTypes;
-  return initType;
+  int64_t rank = initType.getRank();
+  Type elementType = initType.getElementType();
+  SmallVector<int64_t> shape(rank, ShapedType::kDynamic);
+  for (int64_t dim = 0; dim < rank; ++dim) {
+    std::optional<int64_t> agreedStatic;
+    bool allStatic = true;
+    for (Type type : participantTypes) {
+      auto tensor = dyn_cast<TensorType>(type);
+      if (!tensor)
+        return loopOp->emitOpError("loop carrier #")
+               << carrierIndex << " participant is not a tensor: " << type;
+      if (tensor.getElementType() != elementType)
+        return loopOp->emitOpError("loop carrier #")
+               << carrierIndex << " has contradictory element types "
+               << elementType << " and " << tensor.getElementType();
+      auto ranked = dyn_cast<RankedTensorType>(tensor);
+      if (!ranked) {
+        allStatic = false;
+        continue;
+      }
+      if (ranked.getRank() != rank)
+        return loopOp->emitOpError("loop carrier #")
+               << carrierIndex << " has contradictory ranks " << rank << " and "
+               << ranked.getRank();
+      int64_t extent = ranked.getDimSize(dim);
+      if (ShapedType::isDynamic(extent)) {
+        allStatic = false;
+        continue;
+      }
+      if (agreedStatic && *agreedStatic != extent)
+        return loopOp->emitOpError("loop carrier #")
+               << carrierIndex << " has contradictory static extents "
+               << *agreedStatic << " and " << extent << " at dimension " << dim;
+      agreedStatic = extent;
+    }
+    if (allStatic && agreedStatic)
+      shape[dim] = *agreedStatic;
+  }
+  return RankedTensorType::get(shape, elementType, initType.getEncoding());
 }
 
 //===----------------------------------------------------------------------===//
@@ -261,9 +295,9 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
     return loopOp->emitOpError("onnx.Loop body arg count mismatch: expected ")
            << (2 + numLoopCarried) << ", got " << bodyBlock.getNumArguments();
 
-  // The descriptor-frame ABI lands before shape-changing carrier joins. Keep
-  // this layer independently safe by requiring one exact carrier type at every
-  // source boundary.
+  // Compute the conservative carrier contract before mutating any IR. Static
+  // extents survive only when v_init, the source Loop result, the body current
+  // argument, and the body yield all agree on the same static value.
   SmallVector<RankedTensorType> carrierTypes;
   carrierTypes.reserve(numLoopCarried);
   for (unsigned i = 0; i < numLoopCarried; ++i) {
@@ -272,7 +306,7 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
                            bodyBlock.getArgument(2 + i).getType(),
                            yieldOp->getOperand(1 + i).getType()};
     FailureOr<RankedTensorType> joined =
-        validateCarrierEquality(loopOp, i, participants);
+        computeCarrierJoin(loopOp, i, participants);
     if (failed(joined))
       return failure();
     carrierTypes.push_back(*joined);
@@ -448,7 +482,13 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
   for (Operation &op : bodyBlock) {
     if (&op == yieldOp)
       continue;
-    bodyBuilder.clone(op, mapping);
+    Operation *cloned = bodyBuilder.clone(op, mapping);
+    if (auto nested = dyn_cast<LoopOp>(cloned)) {
+      if (nested.getParentFrame())
+        return loopOp->emitOpError(
+            "nested hip.loop already carries a parent frame before outlining");
+      nested.getParentFrameMutable().assign(entry->getArguments().back());
+    }
   }
 
   // In passthrough mode the yield's cond_out came from a chain of
@@ -572,25 +612,26 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
 }
 
 LogicalResult OnnxLoopOutlinePass::outlineAll(ModuleOp module) {
-  // Nested frame threading lands with shape-changing carriers. Reject nesting
-  // transactionally in this ABI-only layer so a child can never escape without
-  // an explicit parent lifetime.
+  // Collect in post-order so nested loops are outlined before their parents.
+  // Each runtime invocation now owns a distinct frame, iter slot, condition
+  // slot, event, and carrier banks, so nesting no longer aliases per-state
+  // scratch.
   unsigned counter = 0;
-  SmallVector<Operation *> loops;
-  module.walk([&](Operation *op) {
-    if (op->getName().getStringRef() == "onnx.Loop")
-      loops.push_back(op);
-  });
-  for (Operation *loopOp : loops) {
-    for (Operation *parent = loopOp->getParentOp(); parent;
-         parent = parent->getParentOp()) {
-      if (parent->getName().getStringRef() != "onnx.Loop")
-        continue;
-      return loopOp->emitOpError(
-          "nested onnx.Loop requires shape-carrier frame threading");
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    SmallVector<Operation *> loops;
+    module.walk<WalkOrder::PostOrder>([&](Operation *op) {
+      if (op->getName().getStringRef() == "onnx.Loop")
+        loops.push_back(op);
+    });
+    if (loops.empty())
+      break;
+    for (Operation *loopOp : loops) {
+      if (failed(outlineLoop(loopOp, counter)))
+        return failure();
+      changed = true;
     }
-    if (failed(outlineLoop(loopOp, counter)))
-      return failure();
   }
   return success();
 }

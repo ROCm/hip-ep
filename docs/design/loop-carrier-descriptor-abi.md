@@ -6,11 +6,12 @@ Licensed under the MIT License.
 
 ## Contract
 
-This ABI layer requires `v_init`, the source Loop result, the body current
-argument, and the body yield to have exactly equal ranked tensor types.
-Shape-changing and nested carriers are rejected before outlining; a following
-shape-contract layer adds conservative joins and parent-frame threading without
-changing the descriptor-return runtime ABI.
+Each carrier contract is the compatible join of `v_init`, the source Loop
+result, the body current argument, and the body yield. Rank and element type
+must agree. Conflicting static extents are rejected; a dimension remains static
+only when every participant is ranked and agrees on the same static value.
+Otherwise it is dynamic. The seed is cast to this joined type and later shape
+inference never narrows the contract from the seed.
 
 Bufferization preserves one ranked memref result per carrier and appends a
 compiler-visible `!hip.loop_frame` ownership token. A zero-trip loop returns
@@ -39,8 +40,9 @@ from swapping the next descriptor set.
 
 Before a body return, any carrier descriptor not equal to the current borrowed
 descriptor and not rooted in that body's own carrier bank is materialized into
-an exact `hip.loop_alloc` plus checked copy. A trampoline therefore observes
-only pass-through or its own bank.
+an exact `hip.loop_alloc` plus checked copy. This includes nested-loop results
+owned by child frames and arbitrary captured/body-produced descriptors, so a
+parent trampoline only ever observes pass-through or its own bank.
 
 `!hip.loop_frame` is an opaque per-invocation handle. `hip.loop_alloc` uses it
 to obtain a carrier's writable next bank from
@@ -63,14 +65,15 @@ therefore excluded from PoolAllocs and ownership-based deallocation. Ordinary
 body `memref.alloc` operations remain poolable.
 
 `hip-finalize-loop-frames` inserts `hip.loop_frame_destroy` after the last
-carrier descriptor use and after any graph-output copy. Normal invocations
-therefore retain no per-run frame. If synchronization fails during destruction,
-only that frame is quarantined for a later successful synchronization or state
-cleanup.
+carrier descriptor use and after any graph-output copy. An escaping nested
+carrier transfers its child frame to the enclosing parent frame; explicit child
+destruction unlinks it. Normal invocations therefore retain no per-run frame.
+If synchronization fails during destruction, only that frame is quarantined
+for a later successful synchronization or state cleanup.
 
-Lifetime analysis follows conditional zero-trip/pass-through aliases through
-later loop `v_init` edges and view chains. Therefore `b = loop(a)` keeps `a`'s
-frame alive through every possible consumer of `b`.
+Lifetime analysis follows conditional zero-trip/pass-through aliases
+transitively through later loop `v_init` edges and view chains. Therefore
+`b = loop(a)` keeps `a`'s frame alive through every possible consumer of `b`.
 
 ## Graph outputs and errors
 
@@ -86,10 +89,9 @@ status plus safe current descriptors before any later body kernel or copy.
 Driver failure exposes only borrowed initial descriptors and a null frame
 token. Every failure sets the existing generated-graph runtime error flag.
 
-## Concurrency
+## Concurrency and nesting
 
 Iteration storage, condition storage, events, descriptor sets, and carrier
-banks are frame-local. Simultaneous driver invocations on one runtime state
-therefore do not share loop slots. Only the failed-destruction quarantine list
-is shared and mutex-protected. Nested loops are rejected until parent-frame
-threading lands in the shape-carrier layer.
+banks are frame-local. Nested loops and simultaneous driver invocations on one
+runtime state therefore do not share loop slots. Only the failed-destruction
+quarantine list is shared and mutex-protected.
