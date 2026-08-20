@@ -692,7 +692,8 @@ func.func @refine_expand_tier1_constant_shape(%ctx: !hip.context,
     -> tensor<?x?x?xf32> {
   %shape = arith.constant dense<[2, 3, 6]> : tensor<3xi64>
   %e = tensor.empty(%d0, %d1, %d2) : tensor<?x?x?xf32>
-  %y = hip.expand(%ctx)
+  %valid = arith.constant true
+  %y = hip.expand(%ctx) valid(%valid)
     ins(%input, %shape : tensor<3x1xf32>, tensor<3xi64>)
     outs(%e : tensor<?x?x?xf32>)
     : tensor<?x?x?xf32>

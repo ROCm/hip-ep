@@ -42,7 +42,8 @@ int main() {
   int64_t output[] = {91, 92, 93};
 
   int status =
-      hipdnn_ep_readback_control(&state, output, sources, counts, widths, 2, 3);
+      hipdnn_ep_readback_control(&state, output, sources, counts, widths, 2, 3,
+                                 /*require_non_negative=*/0);
   expect(status == 0 && !state.error, "valid descriptors must succeed");
   expect(output[0] == -7 && output[1] == 19 &&
              output[2] == std::numeric_limits<int64_t>::min(),
@@ -57,11 +58,38 @@ int main() {
   output[2] = 83;
   int64_t malformedWidths[] = {4, 2};
   status = hipdnn_ep_readback_control(&state, output, sources, counts,
-                                      malformedWidths, 2, 3);
+                                      malformedWidths, 2, 3,
+                                      /*require_non_negative=*/0);
   expect(status != 0 && state.error,
          "late malformed source must set the shared error flag");
   expect(output[0] == 0 && output[1] == 0 && output[2] == 0,
          "late malformed source must not expose a partial copy");
+
+  int64_t shapeValues[] = {2, 3};
+  const void *shapeSources[] = {shapeValues};
+  int64_t shapeCounts[] = {2};
+  int64_t shapeWidths[] = {8};
+  int64_t shapeOutput[] = {71, 72};
+  state.error = false;
+  status = hipdnn_ep_readback_control(&state, shapeOutput, shapeSources,
+                                      shapeCounts, shapeWidths, 1, 2,
+                                      /*require_non_negative=*/1);
+  expect(status == 0 && !state.error,
+         "non-negative shape validation must accept valid extents");
+  expect(shapeOutput[0] == 2 && shapeOutput[1] == 3,
+         "valid shape extents must be preserved");
+
+  shapeValues[1] = -3;
+  shapeOutput[0] = 61;
+  shapeOutput[1] = 62;
+  state.error = false;
+  status = hipdnn_ep_readback_control(&state, shapeOutput, shapeSources,
+                                      shapeCounts, shapeWidths, 1, 2,
+                                      /*require_non_negative=*/1);
+  expect(status != 0 && state.error,
+         "negative shape extent must set the shared error flag");
+  expect(shapeOutput[0] == 0 && shapeOutput[1] == 0,
+         "negative shape extent must clear the complete output group");
 
   if (failures != 0)
     return 1;

@@ -271,6 +271,9 @@ StringRef getSupportedReductionElementTypes(StringRef operationName);
 LogicalResult verifyReductionDpsOp(Operation *op, Value data, Value axes,
                                    int64_t keepdims, int64_t noopWithEmptyAxes);
 
+/// ONNX Size always produces one rank-zero i64 result.
+FailureOr<SmallVector<int64_t>> inferSizeShape();
+
 /// ONNX reduction result shape over `axes` as mixed extents, emitting
 /// `tensor.dim` only for dimensions that are dynamic in `data`. Same mapping
 /// as `inferReductionShape`; see it for the `keepdims` semantics. `data` must
@@ -312,26 +315,30 @@ LogicalResult reifyBroadcastShapeFor(OpBuilder &b, Location loc,
                                      ValueRange operands, Operation *op,
                                      ReifiedRankedShapedTypeDims &reified);
 
-/// Reify the result shape of an ONNX-style `pad` op:
+/// Compute the result shape of an ONNX-style `pad` op:
 ///   `output[d] = data.shape[d] + pre_pad[d] + post_pad[d]`
 /// where `pre_pad[d]` / `post_pad[d]` come from `pads[axes.find(d)]` /
 /// `pads[axes.find(d) + N]` (default `axes = [0, rank)`, `N = num_axes`).
 ///
-/// Fold-or-bail strategy: tries to introspect `pads` and (if non-null)
-/// `axes` as constant int vectors, then per-dim computes static output
-/// extents from `data.shape`. Returns `success()` and writes the per-dim
-/// `OpFoldResult`s into `out` ONLY when EVERY output dim is statically
-/// known; returns `failure()` otherwise (the per-op reify thunk falls
-/// back to `HipDpsOp::reifyResultShapes`'s outs-lift default so reify
-/// still succeeds end-to-end). This avoids emitting per-dim
-/// `arith.addi(tensor.dim, const)` chains that don't fold and would
-/// clutter the IR; the typical Tier-1 case is `pads` from an ONNX
-/// attribute (constant) + a fully-static `data.shape`, which folds
-/// entirely to `IndexAttr` results.
+/// The pure form validates axes, lengths, duplicate axes, and statically
+/// computable extents. Dynamic data dimensions remain dynamic.
+FailureOr<SmallVector<int64_t>>
+inferPadShape(ArrayRef<int64_t> dataShape, ArrayRef<int64_t> pads,
+              std::optional<ArrayRef<int64_t>> axes);
+///
+/// The mixed form first resolves compile-time pads/axes from the optional
+/// stamped attributes or constant operands and validates through
+/// `inferPadShape`. Only then does it emit exact affine index SSA for dynamic
+/// input dimensions. Payload-dynamic pads/axes return failure so the caller
+/// can preserve its synchronized-readback (converter) or outs-lift (reify)
+/// policy; dialect reification never reads tensor payload.
 ///
 /// `axes` may be null (ONNX "pad all axes" default).
 LogicalResult reifyPadShape(OpBuilder &b, Location loc, Value data, Value pads,
-                            Value axes, SmallVectorImpl<OpFoldResult> &out);
+                            Value axes,
+                            std::optional<ArrayRef<int64_t>> staticPads,
+                            std::optional<ArrayRef<int64_t>> staticAxes,
+                            SmallVectorImpl<OpFoldResult> &out);
 
 /// Reify the result shape of an ONNX-style `tile` op:
 ///   `output[d] = input.shape[d] * repeats[d]`
@@ -344,18 +351,22 @@ LogicalResult reifyPadShape(OpBuilder &b, Location loc, Value data, Value pads,
 LogicalResult reifyTileShape(OpBuilder &b, Location loc, Value input,
                              Value repeats, SmallVectorImpl<OpFoldResult> &out);
 
-/// Reify the result shape of an ONNX-style `expand` op:
-///   broadcast `input.shape` against `shape`'s constant values
-///   (right-aligned, leading-1 padded on whichever side is shorter).
-///
-/// Same fold-or-bail strategy. `shape` is the target-shape operand
-/// (rank-1 i64 tensor); when it is an `arith.constant` with a
-/// `DenseIntElementsAttr`, the helper runs MLIR's
-/// `OpTrait::util::getBroadcastedShape` and lifts the result shape.
-/// Returns `failure()` when the broadcast result has any dynamic dim
-/// (so the caller falls back to outs-lifting).
-LogicalResult reifyExpandShape(OpBuilder &b, Location loc, Value input,
-                               Value shape, SmallVectorImpl<OpFoldResult> &out);
+/// Pure result-shape inference for ONNX Expand. The input and requested shapes
+/// are right-aligned and merged with NumPy broadcasting. Requested extents
+/// must be non-negative; a dynamic input extent remains represented by
+/// `ShapedType::kDynamic` when static information cannot refine it.
+FailureOr<SmallVector<int64_t>> inferExpandShape(ArrayRef<int64_t> inputShape,
+                                                 ArrayRef<int64_t> targetShape);
+
+/// Reify a constant-target Expand result. This helper is intentionally
+/// payload-free: non-constant targets and results with unresolved extents
+/// return failure so the op interface can lift the exact DPS destination.
+/// ONNX conversion handles dynamic target payloads separately with one grouped
+/// readback and checked per-axis broadcast construction.
+LogicalResult
+reifyExpandShape(OpBuilder &b, Location loc, Value input, Value shape,
+                 SmallVectorImpl<OpFoldResult> &out,
+                 std::optional<ArrayRef<int64_t>> staticShape = std::nullopt);
 
 /// Reify the result shape of an ONNX-style `slice` op. `output[axis]`
 /// for each `axis` in `axes` is `ceil_div(end - start, step)` (negative

@@ -97,7 +97,7 @@ struct ReadbackControlOpLowering
     }
 
     SmallVector<Type> parameterTypes = {ptrType, ptrType, ptrType, ptrType,
-                                        ptrType, i64Type, i64Type};
+                                        ptrType, i64Type, i64Type, i64Type};
     FailureOr<LLVM::LLVMFuncOp> function = LLVM::lookupOrCreateFn(
         rewriter, module, kHipReadbackControl, parameterTypes, i32Type);
     if (failed(function))
@@ -105,7 +105,8 @@ struct ReadbackControlOpLowering
     LLVM::CallOp call = LLVM::CallOp::create(
         rewriter, loc, *function,
         ValueRange{adaptor.getCtx(), hostValues, sourcePointers, sourceLengths,
-                   elementBytes, sourceCount, totalCount});
+                   elementBytes, sourceCount, totalCount,
+                   i64Constant(op.getRequireNonNegative() ? 1 : 0)});
 
     Value status = call.getResult();
     Value valid = LLVM::ICmpOp::create(rewriter, loc, LLVM::ICmpPredicate::eq,

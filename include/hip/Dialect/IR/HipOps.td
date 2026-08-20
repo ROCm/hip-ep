@@ -112,6 +112,12 @@ class Hip_DpsOp_Semantic<string mnemonic,
                          string outsAccessor = "Output"> :
     Hip_DpsOp_WithInfer<mnemonic, outsAccessor, traits>;
 
+/// Shape behavior controlled by compile-time or runtime tensor payloads.
+class Hip_DpsOp_Payload<string mnemonic,
+                        list<Trait> traits = [],
+                        string outsAccessor = "Output"> :
+    Hip_DpsOp_WithInfer<mnemonic, outsAccessor, traits>;
+
 // Parameterized sub-base for ONNX-style reduction ops (reduce_sum,
 // reduce_max, reduce_prod). Auto-emits a `reifyResultShapes` body
 // that calls `mlir::hip::reifyReductionShape`. The axes operand must
@@ -1709,7 +1715,9 @@ def Hip_OneHotOp : Hip_DpsOp_WithInfer<"one_hot"> {
   }];
 }
 
-def Hip_CompressOp : Hip_DpsOp_WithInfer<"compress"> {
+def Hip_CompressOp :
+    Hip_DpsOp_Payload<"compress", /*traits=*/[],
+                      /*outsAccessor=*/"Output"> {
   let summary = "Select slices or elements where a 1-D condition is true";
   let description = [{
     Implements ONNX Compress: along `axis`, keep only slices whose
@@ -3572,7 +3580,10 @@ def Hip_CumSumOp : Hip_DpsOp_AutoReifyInfer<"cumsum", "Y"> {
   }];
 }
 
-def Hip_PadOp : Hip_DpsOp_WithInfer<"pad", "Output", [AttrSizedOperandSegments]> {
+def Hip_PadOp :
+    Hip_DpsOp_Payload<"pad",
+                      /*traits=*/[AttrSizedOperandSegments],
+                      /*outsAccessor=*/"Output"> {
   let summary = "Pad a tensor with constant / reflect / edge / wrap";
   let description = [{
     Pads input tensor along the axes selected by `axes` (or all axes if
@@ -3584,6 +3595,11 @@ def Hip_PadOp : Hip_DpsOp_WithInfer<"pad", "Output", [AttrSizedOperandSegments]>
     an optional scalar used in `constant` mode (default 0). `axes` is an
     optional 1-D int64 tensor selecting which axes the pads apply to;
     when omitted (rank-0 / size-0), all axes are padded.
+
+    Optional `static_pads` / `static_axes` preserve shape metadata read directly
+    from dense constant carriers during compute conversion. They remain
+    available after standalone constant externalization for destination sizing
+    and shape reification; the runtime still receives the original operands.
 
     The `mode` attribute is one of `"constant"`, `"reflect"`, `"edge"`,
     `"wrap"`.
@@ -3606,7 +3622,9 @@ def Hip_PadOp : Hip_DpsOp_WithInfer<"pad", "Output", [AttrSizedOperandSegments]>
     Optional<Hip_TensorOrMemRef>:$constant_value,
     Optional<Hip_TensorOrMemRef>:$axes,
     Hip_TensorOrMemRef:$output,
-    DefaultValuedAttr<StrAttr, "\"constant\"">:$mode
+    DefaultValuedAttr<StrAttr, "\"constant\"">:$mode,
+    OptionalAttr<DenseI64ArrayAttr>:$static_pads,
+    OptionalAttr<DenseI64ArrayAttr>:$static_axes
   );
 
   let assemblyFormat = [{
@@ -3650,37 +3668,49 @@ def Hip_TileOp : Hip_DpsOp_WithInfer<"tile"> {
   }];
 }
 
-def Hip_ExpandOp : Hip_DpsOp_WithInfer<"expand"> {
+def Hip_ExpandOp :
+    Hip_DpsOp_Payload<"expand", /*traits=*/[],
+                      /*outsAccessor=*/"Output"> {
   let summary = "Broadcast a tensor to a target shape";
   let description = [{
     Broadcasts `input` to the target `shape` following NumPy broadcast rules.
     Implements the standard ONNX Expand operator.
 
-    `shape` is a 1-D int64 tensor describing the target shape (which is
-    broadcast against the input shape, so output rank may exceed `shape`'s
-    length).
+    `shape` is a rank-1 i32/i64 tensor describing the requested shape. The
+    destination is the right-aligned broadcast result, which can differ from
+    the requested shape when an input extent is non-unit and the corresponding
+    request is one (including `0` broadcast with `1`).
+
+    `shape_valid` is the combined grouped-readback, compatibility, descriptor,
+    and element-count check. A false value means destination construction was
+    clamped safely and the runtime must return failure without dispatch.
 
     Uses destination-passing style: output buffer is provided as argument.
 
     Example:
     ```mlir
-    hip.expand(%ctx) ins(%x, %shape : memref<3x1xf32, 1>, memref<3xi64, 1>)
-                     outs(%y : memref<2x3x6xf32, 1>)
+    hip.expand(%ctx) valid(%ok)
+      ins(%x, %shape : memref<3x1xf32, 1>, memref<3xi64, 1>)
+      outs(%y : memref<2x3x6xf32, 1>)
     ```
   }];
 
   let arguments = (ins
     Hip_ContextType:$ctx,
+    I1:$shape_valid,
     Hip_TensorOrMemRef:$input,
     Hip_TensorOrMemRef:$shape,
     Hip_TensorOrMemRef:$output
   );
 
   let assemblyFormat = [{
-    `(` $ctx `)` `ins` `(` $input `,` $shape `:` type($input) `,` type($shape) `)`
+    `(` $ctx `)` `valid` `(` $shape_valid `)`
+    `ins` `(` $input `,` $shape `:` type($input) `,` type($shape) `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  let hasVerifier = 1;
 }
 
 def Hip_GlobalPoolOp : Hip_DpsOp_AutoReify<"global_pool"> {
@@ -4362,7 +4392,9 @@ def Hip_ReadbackControlOp : Hip_Op<"readback_control",
     order and converted to signed i64 (i32 values are sign-extended). `valid`
     is false if argument validation, any copy enqueue, or the single stream
     synchronization fails. Values are initialized to zero before the runtime
-    call and are never clamped.
+    call. When `require_non_negative` is true, any negative value makes the
+    complete group invalid, resets every value to zero, and records the shared
+    runtime error flag. Otherwise signed values are preserved without clamping.
 
     This op has device-to-host copy and synchronization side effects and is not
     speculatable.
@@ -4370,13 +4402,40 @@ def Hip_ReadbackControlOp : Hip_Op<"readback_control",
 
   let arguments = (ins
     Hip_ContextType:$ctx,
-    Variadic<Hip_TensorOrMemRef>:$sources
+    Variadic<Hip_TensorOrMemRef>:$sources,
+    DefaultValuedAttr<BoolAttr, "false">:$require_non_negative
   );
   let results = (outs I1:$valid, Variadic<I64>:$values);
 
   let assemblyFormat = [{
     `(` $ctx `,` $sources `:` type($sources) `)` attr-dict
     `->` `(` type($valid) (`,` type($values)^)? `)`
+  }];
+
+  let hasVerifier = 1;
+}
+
+// hip.checked_expand_extent : merge one aligned input/requested extent using
+// exact NumPy semantics, validate a static descriptor constraint, and update a
+// checked running element count. Runtime failure writes the shared error state.
+def Hip_CheckedExpandExtentOp : Hip_Op<"checked_expand_extent",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Compute and validate one Expand output extent";
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    I1:$prior_valid,
+    Index:$input_extent,
+    Index:$target_extent,
+    Index:$prior_elements,
+    I64Attr:$expected_extent
+  );
+  let results = (outs I1:$valid, Index:$extent, Index:$elements);
+
+  let assemblyFormat = [{
+    `(` $ctx `,` $prior_valid `,` $input_extent `,` $target_extent `,`
+        $prior_elements `)`
+    `expected_extent` `=` $expected_extent attr-dict
+    `->` `(` type($valid) `,` type($extent) `,` type($elements) `)`
   }];
 
   let hasVerifier = 1;

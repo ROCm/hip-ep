@@ -1475,13 +1475,26 @@ void hipdnn_ep_readback_shape_i64(RuntimeState *state, int64_t *host_out,
 // Read a group of statically-sized i32/i64 control buffers with one stream
 // synchronization. Sources are flattened in operand-major order. `host_out`
 // is zero-initialized before any HIP call; i32 values are sign-extended and i64
-// values are preserved without clamping. Returns zero only when all copies and
-// the synchronization succeed, otherwise records the shared error flag.
+// values are preserved without clamping unless `require_non_negative` is set.
+// In that mode, a negative value clears the complete output group and fails.
+// Returns zero only when all copies, validation, and synchronization succeed;
+// otherwise records the shared error flag.
 int hipdnn_ep_readback_control(RuntimeState *state, int64_t *host_out,
                                const void *const *device_sources,
                                const int64_t *element_counts,
                                const int64_t *element_bytes,
-                               int64_t source_count, int64_t total_count);
+                               int64_t source_count, int64_t total_count,
+                               int64_t require_non_negative);
+
+// Merge one aligned input/requested Expand extent with exact NumPy
+// broadcasting, require agreement with a static descriptor extent when known,
+// and update a checked running element count. Outputs are zero on failure and
+// the shared recoverable runtime error is recorded.
+int hipdnn_ep_checked_expand_extent(RuntimeState *state, int64_t *host_extent,
+                                    int64_t *host_elements, int64_t prior_valid,
+                                    int64_t input_extent, int64_t target_extent,
+                                    int64_t expected_extent,
+                                    int64_t prior_elements);
 
 // ONNX Size wrapper (dynamic-shape path only).
 //
@@ -1544,11 +1557,20 @@ int wrap_tile(RuntimeState *state, void *input, void *repeats, void *output,
               const int64_t *output_shape, int64_t output_rank,
               int64_t data_type);
 
-// Expand operation wrapper (NumPy-style broadcasting to a target shape).
+// Expand operation wrapper for an already validated destination shape.
 int wrap_expand(RuntimeState *state, void *input, void *shape, void *output,
                 const int64_t *input_shape, int64_t input_rank,
                 const int64_t *output_shape, int64_t output_rank,
                 int64_t data_type);
+
+// HIP conversion entry point. `shape_valid` is the checked merge of the input
+// and requested shapes; false returns failure before dispatch. Kept separate
+// so existing non-HIP callers retain the stable wrap_expand ABI.
+int wrap_expand_checked(RuntimeState *state, void *input, void *shape,
+                        void *output, const int64_t *input_shape,
+                        int64_t input_rank, const int64_t *output_shape,
+                        int64_t output_rank, int64_t shape_valid,
+                        int64_t data_type);
 
 // ReduceProd operation wrapper. Same calling convention and compile-time
 // contiguous span contract as wrap_reduce_sum / wrap_reduce_max.

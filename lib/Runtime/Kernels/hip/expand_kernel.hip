@@ -11,9 +11,9 @@
  * Same one-thread-per-output-element + dim-walk structure as tile_kernel.hip;
  * differs only in how the in_coord is computed (broadcast vs modulo).
  *
- * The GPU `shape` input tensor is NOT read here -- the HipToLLVM Expand
- * lowering gives us host-side output_shape, which already includes whatever
- * the shape tensor would have provided.
+ * The original GPU target-shape tensor is not read here. Conversion provides
+ * the checked destination descriptor; this entry point revalidates that every
+ * output extent is safe for the right-aligned input before launching.
  */
 
 #include "hip_custom_kernels.h"
@@ -23,6 +23,7 @@
 #include <hip/hip_runtime.h>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 
 static constexpr int kExpandMaxRank = 8;
 
@@ -71,8 +72,10 @@ extern "C" int hip_expand(void *stream, const void *input, void *output,
                           const int64_t *input_shape_host, int input_rank,
                           const int64_t *output_shape_host, int output_rank,
                           int hip_dtype) {
-  if (output_rank <= 0)
-    return 0;
+  if (input_rank < 0 || output_rank < 0) {
+    fprintf(stderr, "[custom_kernels] hip_expand: negative rank\n");
+    return -1;
+  }
   if (output_rank > kExpandMaxRank) {
     fprintf(stderr,
             "[custom_kernels] hip_expand: output_rank=%d exceeds "
@@ -86,6 +89,12 @@ extern "C" int hip_expand(void *stream, const void *input, void *output,
             input_rank, output_rank);
     return -1;
   }
+  if ((input_rank > 0 && !input_shape_host) ||
+      (output_rank > 0 && !output_shape_host)) {
+    fprintf(stderr,
+            "[custom_kernels] hip_expand: missing shape descriptor\n");
+    return -1;
+  }
 
   // Right-align input shape against output shape (leading dims become 1).
   ExpandShape aligned_in_shape{};
@@ -96,9 +105,28 @@ extern "C" int hip_expand(void *stream, const void *input, void *output,
   int64_t num_output_elements = 1;
   for (int d = 0; d < output_rank; ++d) {
     int64_t in_dim = (d < rank_diff) ? 1 : input_shape_host[d - rank_diff];
+    int64_t out_dim = output_shape_host[d];
+    if (in_dim < 0 || out_dim < 0) {
+      fprintf(stderr,
+              "[custom_kernels] hip_expand: negative extent (%lld, %lld)\n",
+              (long long)in_dim, (long long)out_dim);
+      return -1;
+    }
+    if (in_dim != 1 && in_dim != out_dim) {
+      fprintf(stderr,
+              "[custom_kernels] hip_expand: incompatible extents %lld and "
+              "%lld\n",
+              (long long)in_dim, (long long)out_dim);
+      return -1;
+    }
+    if (out_dim != 0 &&
+        num_output_elements > std::numeric_limits<int64_t>::max() / out_dim) {
+      fprintf(stderr, "[custom_kernels] hip_expand: element-count overflow\n");
+      return -1;
+    }
     aligned_in_shape.dims[d] = in_dim;
-    output_shape.dims[d] = output_shape_host[d];
-    num_output_elements *= output_shape_host[d];
+    output_shape.dims[d] = out_dim;
+    num_output_elements *= out_dim;
   }
 
   // Strides over the ORIGINAL (non-padded) input layout. A padded dim is
@@ -109,17 +137,31 @@ extern "C" int hip_expand(void *stream, const void *input, void *output,
       aligned_in_strides.dims[d] = 0; // padded dim
     } else {
       aligned_in_strides.dims[d] = stride;
-      stride *= input_shape_host[d - rank_diff];
+      int64_t in_dim = input_shape_host[d - rank_diff];
+      if (in_dim != 0 &&
+          stride > std::numeric_limits<int64_t>::max() / in_dim) {
+        fprintf(stderr, "[custom_kernels] hip_expand: stride overflow\n");
+        return -1;
+      }
+      stride *= in_dim;
     }
   }
 
   if (num_output_elements == 0)
     return 0;
+  if (!input || !output) {
+    fprintf(stderr, "[custom_kernels] hip_expand: null data pointer\n");
+    return -1;
+  }
 
-  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
   constexpr int kBlockSize = 256;
-  int grid_size = static_cast<int>(
-      (num_output_elements + kBlockSize - 1) / kBlockSize);
+  int64_t gridSize = (num_output_elements - 1) / kBlockSize + 1;
+  if (gridSize > std::numeric_limits<int>::max()) {
+    fprintf(stderr, "[custom_kernels] hip_expand: grid size overflow\n");
+    return -1;
+  }
+  int grid_size = static_cast<int>(gridSize);
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
 
   CUSTOM_KERNELS_DEBUG_LOG(
       "[custom_kernels] hip_expand: dtype=%d, in_rank=%d, out_rank=%d, "
@@ -127,6 +169,8 @@ extern "C" int hip_expand(void *stream, const void *input, void *output,
       hip_dtype, input_rank, output_rank, (long long)num_output_elements,
       grid_size, kBlockSize);
 
+
+  (void)hipGetLastError();
   switch (hip_dtype) {
   case HIP_DTYPE_FLOAT16:
     hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_expand_kernel<__half>),

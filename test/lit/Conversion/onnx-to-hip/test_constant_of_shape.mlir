@@ -9,9 +9,9 @@
 //   2. ConstantOfShapeFold: shape input is a compile-time constant AND result
 //      type is fully static -> single splat arith.constant; no runtime work.
 //   3. ConstantOfShapeDynamic (fallback): shape input is non-constant OR
-//      result has at least one dynamic dim -> tensor.splat whose dynamic
-//      dim sizes are read out of the shape tensor at runtime via
-//      tensor.extract + arith.index_cast.
+//      result has at least one dynamic dim -> tensor.splat. Compile-time
+//      payloads remain constants; device payloads use one status-bearing,
+//      non-negative grouped readback.
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
 
@@ -20,10 +20,14 @@ module {
     return %arg0 : tensor<4xf32>
   }
 
-  // Test 1: default value (fp32 zero) with shape from arith.constant.
+  // Test 1: default value with shape from an imported ONNX constant. The first
+  // carrier sweep makes the dense payload visible to ordinary compute
+  // conversion; no ConstantOfShape-specific pre-carrier invocation is needed.
   func.func @test_constant_of_shape_default() -> tensor<2x3xf32> {
     // CHECK-LABEL: func.func @test_constant_of_shape_default
-    %shape = arith.constant dense<[2, 3]> : tensor<2xi64>
+    %shape = "onnx.Constant"() {
+      value = dense<[2, 3]> : tensor<2xi64>
+    } : () -> tensor<2xi64>
     %r = "onnx.ConstantOfShape"(%shape) : (tensor<2xi64>) -> tensor<2x3xf32>
 
     // CHECK-NOT: onnx.ConstantOfShape
@@ -67,42 +71,44 @@ module {
 
   // Test 4: dynamic result shape with a non-constant shape input -- the
   // fold path bails (no compile-time shape attr AND result is dynamic)
-  // and the dynamic pattern emits tensor.splat with per-dim
-  // tensor.extract + index_cast for each dynamic result dim.
+  // and the dynamic pattern emits one grouped synchronized readback. The
+  // status guards every extent before its checked i64-to-index conversion.
   func.func @test_constant_of_shape_dynamic(%shape: tensor<2xi64>) -> tensor<?x?xf32> {
     // CHECK-LABEL: func.func @test_constant_of_shape_dynamic
     // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[SHAPE:.*]]: tensor<2xi64>)
     %r = "onnx.ConstantOfShape"(%shape) : (tensor<2xi64>) -> tensor<?x?xf32>
 
     // CHECK-NOT: onnx.ConstantOfShape
+    // CHECK-DAG: %[[Z64:.*]] = arith.constant 0 : i64
     // CHECK-DAG: %[[ZERO:.*]] = arith.constant 0.000000e+00 : f32
-    // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
-    // CHECK-DAG: %[[E0:.*]] = tensor.extract %[[SHAPE]][%[[C0]]] : tensor<2xi64>
-    // CHECK-DAG: %[[D0:.*]] = arith.index_cast %[[E0]] : i64 to index
-    // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
-    // CHECK-DAG: %[[E1:.*]] = tensor.extract %[[SHAPE]][%[[C1]]] : tensor<2xi64>
-    // CHECK-DAG: %[[D1:.*]] = arith.index_cast %[[E1]] : i64 to index
-    // CHECK: tensor.splat %[[ZERO]]{{\[}}%{{.*}}, %{{.*}}{{\]}} : tensor<?x?xf32>
+    // CHECK-NOT: tensor.extract
+    // CHECK-COUNT-1: %[[VALID:.*]], %[[VALUES:.*]]:2 = hip.readback_control(%[[CTX]], %[[SHAPE]] : tensor<2xi64>) {require_non_negative = true} -> (i1, i64, i64)
+    // CHECK: %[[S0:.*]] = arith.select %[[VALID]], %[[VALUES]]#0, %[[Z64]] : i64
+    // CHECK: %[[D0:.*]] = arith.index_cast %[[S0]] : i64 to index
+    // CHECK: %[[S1:.*]] = arith.select %[[VALID]], %[[VALUES]]#1, %[[Z64]] : i64
+    // CHECK: %[[D1:.*]] = arith.index_cast %[[S1]] : i64 to index
+    // CHECK: tensor.splat %[[ZERO]]{{\[}}%[[D0]], %[[D1]]{{\]}} : tensor<?x?xf32>
+    // CHECK-NOT: tensor.extract
 
     return %r : tensor<?x?xf32>
   }
 
-  // Test 5: partially dynamic result with custom int value attribute --
-  // the static dim is encoded in the result type and only the dynamic
-  // dim gets a tensor.extract.
-  func.func @test_constant_of_shape_partial_dynamic(%shape: tensor<2xi64>) -> tensor<3x?xi64> {
+  // Test 5: a constant payload with a partially dynamic result stays entirely
+  // on the compile-time path. The static result dim is cross-checked and the
+  // dynamic dim is materialized directly as an index constant.
+  func.func @test_constant_of_shape_partial_dynamic() -> tensor<3x?xi64> {
     // CHECK-LABEL: func.func @test_constant_of_shape_partial_dynamic
-    // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[SHAPE:.*]]: tensor<2xi64>)
+    %shape = arith.constant dense<[3, 5]> : tensor<2xi64>
     %r = "onnx.ConstantOfShape"(%shape) {
       value = dense<42> : tensor<1xi64>
     } : (tensor<2xi64>) -> tensor<3x?xi64>
 
     // CHECK-NOT: onnx.ConstantOfShape
+    // CHECK-NOT: hip.readback
+    // CHECK-NOT: tensor.extract
     // CHECK-DAG: %[[VAL:.*]] = arith.constant 42 : i64
-    // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
-    // CHECK-DAG: %[[E1:.*]] = tensor.extract %[[SHAPE]][%[[C1]]] : tensor<2xi64>
-    // CHECK-DAG: %[[D1:.*]] = arith.index_cast %[[E1]] : i64 to index
-    // CHECK: tensor.splat %[[VAL]]{{\[}}%{{.*}}{{\]}} : tensor<3x?xi64>
+    // CHECK-DAG: %[[D1:.*]] = arith.constant 5 : index
+    // CHECK: tensor.splat %[[VAL]]{{\[}}%[[D1]]{{\]}} : tensor<3x?xi64>
 
     return %r : tensor<3x?xi64>
   }
@@ -130,5 +136,23 @@ module {
     // CHECK: linalg.fill ins(%[[V]] : i64) outs(%[[E]] : tensor<i64>) -> tensor<i64>
 
     return %o : tensor<?x?xi64>
+  }
+
+  // Test 7: i32 device payloads are sign-extended by the same grouped
+  // readback contract and then converted from its i64 results to index.
+  func.func @test_constant_of_shape_dynamic_i32(
+      %shape: tensor<1xi32>) -> tensor<?xf32> {
+    // CHECK-LABEL: func.func @test_constant_of_shape_dynamic_i32
+    // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[SHAPE:.*]]: tensor<1xi32>)
+    %r = "onnx.ConstantOfShape"(%shape)
+      : (tensor<1xi32>) -> tensor<?xf32>
+
+    // CHECK-NOT: tensor.extract
+    // CHECK-COUNT-1: %[[VALID:.*]], %[[VALUE:.*]] = hip.readback_control(%[[CTX]], %[[SHAPE]] : tensor<1xi32>) {require_non_negative = true} -> (i1, i64)
+    // CHECK: arith.select %[[VALID]], %[[VALUE]], %{{.*}} : i64
+    // CHECK: arith.index_cast %{{.*}} : i64 to index
+    // CHECK: tensor.splat
+
+    return %r : tensor<?xf32>
   }
 }

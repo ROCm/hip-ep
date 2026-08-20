@@ -249,6 +249,11 @@ dynamic descriptor equality before copying or dispatching f16, bf16, or f32
 storage through the typed custom kernel. This contract supersedes the former
 element-byte-width argument and therefore requires artifact invalidation.
 
+Payload-dependent Expand lowering passes a checked `shape_valid` argument to
+`wrap_expand_checked`. The wrapper returns failure before dispatch when grouped
+readback, broadcast compatibility, descriptor agreement, or element-count
+validation fails. This argument is part of the versioned artifact ABI.
+
 HIP MatMul and Gemm carry two contraction extents in generated calls. MatMul
 calls `wrap_hipblasLtMatmul` with `A[-1]`, `B[-2]`, and one i1 proving
 all right-aligned runtime batch axes and output extents agree with ONNX

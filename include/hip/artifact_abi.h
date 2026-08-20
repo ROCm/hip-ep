@@ -28,7 +28,7 @@ namespace hipdnn::abi {
 //
 // The tagged token lets a loader distinguish a stale, well-formed version from
 // arbitrary/malformed values without dereferencing artifact-owned data.
-inline constexpr uint32_t kArtifactAbiVersion = 2;
+inline constexpr uint32_t kArtifactAbiVersion = 3;
 inline constexpr uint32_t kArtifactAbiMagic = 0x48495041; // "HIPA"
 inline constexpr uint64_t artifactAbiToken(uint32_t version) {
   return (static_cast<uint64_t>(kArtifactAbiMagic) << 32) | version;

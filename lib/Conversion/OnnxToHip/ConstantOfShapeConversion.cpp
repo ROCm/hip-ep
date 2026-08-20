@@ -42,38 +42,35 @@ namespace {
 //      common case for transformer-style "allocate a zero KV/mask tensor"
 //      patterns once shape inference + constant folding have run.
 //
-//   3. ConstantOfShapeDynamic (benefit=1): fallback for non-constant shape
-//      input OR a result type with at least one dynamic dim. Each dynamic
-//      dim is materialised from the shape input via `tensor.extract` +
-//      `arith.index_cast`, the fill value is built as a scalar
-//      `arith.constant`, and the output tensor is produced via
-//      `tensor.splat` (which broadcasts a scalar to a ranked tensor with
-//      arbitrary static + dynamic dims). No HIP dialect op or runtime
-//      function is needed -- `tensor.splat` bufferizes naturally and lowers
-//      through the standard MLIR pipeline.
+//   3. ConstantOfShapeDynamic (benefit=1): fallback for a dynamic result.
+//      Constant payloads still materialise compile-time index values. A
+//      statically-sized device payload is copied through one status-bearing
+//      `hip.readback_control`; the runtime validates every extent as
+//      non-negative before the values are converted to the generated ABI's
+//      64-bit index type. The output tensor is produced via `tensor.splat`.
 
-/// Return the dense-elements attribute backing \p value if it can be
-/// determined at compile time (the same forms recognised by ReshapeConversion
-/// for "axes" inputs).  Returns null otherwise.
-static mlir::DenseElementsAttr getCompileTimeConstantTensor(mlir::Value value) {
+/// Extract ConstantOfShape's rank-1 integer shape. Ordinary imported constants
+/// arrive here as dense `hip.constant` carriers and use the shared extractor.
+/// `onnx.Shape` is the one dedicated extension because its payload is implicit
+/// in its source type.
+static bool extractConstantOfShapeVector(mlir::Value value,
+                                         llvm::SmallVectorImpl<int64_t> &out) {
+  if (extractConstantIntVector(value, out))
+    return true;
   mlir::Operation *defOp = value.getDefiningOp();
   if (!defOp)
-    return nullptr;
-
-  if (auto cst = mlir::dyn_cast<mlir::arith::ConstantOp>(defOp))
-    return mlir::dyn_cast<mlir::DenseElementsAttr>(cst.getValue());
-
+    return false;
   // `onnx.Shape(static-tensor)` is itself a compile-time constant -- the
   // transformer-emitted `Shape -> ConstantOfShape` pattern (zero-initialised
   // KV / mask buffers) relies on this fold to collapse to a single splat
   // constant when the source tensor has fully static shape.
   if (defOp->getName().getStringRef() == "onnx.Shape") {
     if (defOp->getNumOperands() != 1)
-      return nullptr;
+      return false;
     auto srcType =
         mlir::dyn_cast<mlir::RankedTensorType>(defOp->getOperand(0).getType());
     if (!srcType || !srcType.hasStaticShape())
-      return nullptr;
+      return false;
     // ONNX Shape supports start/end attributes for slicing the shape vector.
     int64_t rank = srcType.getRank();
     int64_t start = 0;
@@ -90,45 +87,37 @@ static mlir::DenseElementsAttr getCompileTimeConstantTensor(mlir::Value value) {
     end = std::max<int64_t>(0, std::min<int64_t>(rank, end));
     if (end < start)
       end = start;
-    llvm::SmallVector<int64_t> dims;
-    dims.reserve(end - start);
+    out.clear();
+    out.reserve(end - start);
     for (int64_t i = start; i < end; ++i)
-      dims.push_back(srcType.getDimSize(i));
-    auto i64 = mlir::IntegerType::get(value.getContext(), 64);
-    auto outTy = mlir::RankedTensorType::get({end - start}, i64);
-    llvm::SmallVector<mlir::APInt> apDims;
-    apDims.reserve(dims.size());
-    for (int64_t d : dims)
-      apDims.emplace_back(64, d);
-    return mlir::DenseElementsAttr::get(outTy, apDims);
+      out.push_back(srcType.getDimSize(i));
+    return true;
   }
+  return false;
+}
 
-  // onnx.Constant carrying a dense `value` attribute (pre-lowerOnnxConstants).
-  if (auto attr = defOp->getAttr("value"))
-    if (auto dense = mlir::dyn_cast<mlir::DenseElementsAttr>(attr))
-      return dense;
+static mlir::LogicalResult
+validateScalarFillValue(mlir::Operation *op, mlir::PatternRewriter &rewriter,
+                        mlir::Type elemType) {
+  if (!mlir::isa<mlir::FloatType, mlir::IntegerType>(elemType))
+    return rewriter.notifyMatchFailure(op, "unsupported result element type");
 
-  // Externalised path: bufferization.to_tensor of a memref.get_global whose
-  // global has a dense initial_value. This preserves compatibility with the
-  // legacy initialized-global bridge; production carrier externalization runs
-  // only after this fold.
-  if (auto toTensor = mlir::dyn_cast<mlir::bufferization::ToTensorOp>(defOp)) {
-    auto bufDef =
-        toTensor.getBuffer().getDefiningOp<mlir::memref::GetGlobalOp>();
-    if (!bufDef)
-      return nullptr;
-    auto module = bufDef->getParentOfType<mlir::ModuleOp>();
-    if (!module)
-      return nullptr;
-    auto global =
-        module.lookupSymbol<mlir::memref::GlobalOp>(bufDef.getNameAttr());
-    if (!global)
-      return nullptr;
-    return mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
-        global.getInitialValueAttr());
-  }
-
-  return nullptr;
+  auto valueAttr = op->getAttrOfType<mlir::ElementsAttr>("value");
+  if (!valueAttr)
+    return mlir::success();
+  auto valueDense = mlir::dyn_cast<mlir::DenseElementsAttr>(valueAttr);
+  if (!valueDense)
+    return rewriter.notifyMatchFailure(
+        op, "non-dense value attribute is not supported");
+  auto valueTensorType =
+      mlir::dyn_cast<mlir::RankedTensorType>(valueDense.getType());
+  if (!valueTensorType || valueTensorType.getElementType() != elemType)
+    return rewriter.notifyMatchFailure(
+        op, "value attribute element type does not match result");
+  if (valueDense.getNumElements() != 1)
+    return rewriter.notifyMatchFailure(
+        op, "value attribute must contain exactly one element");
+  return mlir::success();
 }
 
 /// Build the scalar fill value for ConstantOfShape, respecting the optional
@@ -139,17 +128,11 @@ static mlir::LogicalResult buildScalarFillValue(mlir::Operation *op,
                                                 mlir::Location loc,
                                                 mlir::Type elemType,
                                                 mlir::Value &scalarOut) {
+  if (mlir::failed(validateScalarFillValue(op, rewriter, elemType)))
+    return mlir::failure();
+
   if (auto valueAttr = op->getAttrOfType<mlir::ElementsAttr>("value")) {
     auto valueDense = mlir::dyn_cast<mlir::DenseElementsAttr>(valueAttr);
-    if (!valueDense)
-      return rewriter.notifyMatchFailure(
-          op, "non-dense value attribute is not supported");
-    auto valueTensorType =
-        mlir::dyn_cast<mlir::RankedTensorType>(valueDense.getType());
-    if (!valueTensorType || valueTensorType.getElementType() != elemType)
-      return rewriter.notifyMatchFailure(
-          op, "value attribute element type does not match result");
-
     if (auto floatTy = mlir::dyn_cast<mlir::FloatType>(elemType)) {
       mlir::APFloat scalar = *valueDense.getValues<mlir::APFloat>().begin();
       scalarOut =
@@ -260,48 +243,46 @@ struct ConstantOfShapeAsScalar : public mlir::RewritePattern {
 };
 
 struct ConstantOfShapeFold : public mlir::RewritePattern {
-  ConstantOfShapeFold(mlir::MLIRContext *ctx)
-      : RewritePattern("onnx.ConstantOfShape", /*benefit=*/2, ctx) {}
+  ConstantOfShapeFold(mlir::MLIRContext *ctx,
+                      bool staticShapeSourceOnly = false)
+      : RewritePattern("onnx.ConstantOfShape", /*benefit=*/2, ctx),
+        staticShapeSourceOnly(staticShapeSourceOnly) {}
 
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
                   mlir::PatternRewriter &rewriter) const override {
     if (op->getNumOperands() != 1 || op->getNumResults() != 1)
       return rewriter.notifyMatchFailure(op, "expected 1 input and 1 output");
+    if (staticShapeSourceOnly) {
+      mlir::Operation *source = op->getOperand(0).getDefiningOp();
+      if (!source || source->getName().getStringRef() != "onnx.Shape")
+        return rewriter.notifyMatchFailure(
+            op, "pre-carrier fold is reserved for onnx.Shape");
+    }
 
-    mlir::Value shapeInput = op->getOperand(0);
-    mlir::DenseElementsAttr shapeAttr =
-        getCompileTimeConstantTensor(shapeInput);
-    if (!shapeAttr)
+    llvm::SmallVector<int64_t> outShape;
+    if (!extractConstantOfShapeVector(op->getOperand(0), outShape))
       return rewriter.notifyMatchFailure(
           op, "shape input is not a compile-time constant; "
               "falling back to ConstantOfShapeDynamic");
-
-    auto shapeTensorType =
-        mlir::dyn_cast<mlir::RankedTensorType>(shapeAttr.getType());
-    if (!shapeTensorType || shapeTensorType.getRank() != 1)
-      return rewriter.notifyMatchFailure(op,
-                                         "shape input must be a rank-1 tensor");
-    if (!shapeTensorType.getElementType().isInteger(64) &&
-        !shapeTensorType.getElementType().isInteger(32))
-      return rewriter.notifyMatchFailure(
-          op, "shape input must have int32 or int64 element type");
-
-    llvm::SmallVector<int64_t> outShape;
-    outShape.reserve(shapeTensorType.getDimSize(0));
-    for (mlir::APInt v : shapeAttr.getValues<mlir::APInt>()) {
-      int64_t d = v.getSExtValue();
+    for (int64_t d : outShape)
       if (d < 0)
         return rewriter.notifyMatchFailure(
             op, "negative dimension in ConstantOfShape input");
-      outShape.push_back(d);
-    }
 
     auto resultType =
         mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
     if (!resultType)
       return rewriter.notifyMatchFailure(op, "result must be ranked tensor");
     mlir::Type elemType = resultType.getElementType();
+    if (outShape.size() != static_cast<size_t>(resultType.getRank()))
+      return rewriter.notifyMatchFailure(
+          op, "shape input length must equal the result rank");
+    if (!isResultTypeCompatibleWithPayloadShape(resultType, outShape))
+      return rewriter.notifyMatchFailure(
+          op, "result type contradicts ConstantOfShape payload");
+    if (mlir::failed(validateScalarFillValue(op, rewriter, elemType)))
+      return mlir::failure();
 
     // The fold path replaces the op with a `arith.constant` whose type
     // is `tensor<outShape x elemType>`. If the original result type has
@@ -355,12 +336,14 @@ struct ConstantOfShapeFold : public mlir::RewritePattern {
     rewriter.replaceOp(op, cst);
     return mlir::success();
   }
+
+private:
+  bool staticShapeSourceOnly;
 };
 
-/// Dynamic-shape fallback: produce a `tensor.splat` whose dynamic dim sizes
-/// are read out of the shape input at runtime via `tensor.extract`.
-/// Handles either (a) a non-constant shape input or (b) a result type with
-/// at least one dynamic dim.
+/// Dynamic-shape fallback. Constant payloads remain compile-time values.
+/// Device payloads use one grouped synchronized readback, with non-negative
+/// validation performed by the runtime helper before any extent is exposed.
 struct ConstantOfShapeDynamic : public mlir::RewritePattern {
   ConstantOfShapeDynamic(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.ConstantOfShape", /*benefit=*/1, ctx) {}
@@ -388,28 +371,82 @@ struct ConstantOfShapeDynamic : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(op, "result must be ranked tensor");
     mlir::Type elemType = resultType.getElementType();
 
-    mlir::Location loc = op->getLoc();
+    if (shapeTensorType.isDynamicDim(0) ||
+        shapeTensorType.getDimSize(0) != resultType.getRank())
+      return rewriter.notifyMatchFailure(
+          op, "shape input length must be static and equal the result rank");
 
-    // For each dynamic result dim, read the corresponding entry from the
-    // shape tensor and cast to `index`. The shape tensor's length must
-    // equal the result rank; we trust shape inference and only emit an
-    // extract per dynamic dim (static dims are encoded directly in the
-    // result type).
-    llvm::SmallVector<mlir::Value> dynSizes;
-    for (int64_t i = 0; i < resultType.getRank(); ++i) {
-      if (!resultType.isDynamicDim(i))
-        continue;
-      mlir::Value idx = mlir::arith::ConstantIndexOp::create(rewriter, loc, i);
-      mlir::Value extracted = mlir::tensor::ExtractOp::create(
-          rewriter, loc, shapeInput, mlir::ValueRange{idx});
-      mlir::Value asIndex = mlir::arith::IndexCastOp::create(
-          rewriter, loc, rewriter.getIndexType(), extracted);
-      dynSizes.push_back(asIndex);
+    llvm::SmallVector<int64_t> constantShape;
+    bool hasConstantShape =
+        extractConstantOfShapeVector(shapeInput, constantShape);
+    if (hasConstantShape) {
+      if (constantShape.size() != static_cast<size_t>(resultType.getRank()))
+        return rewriter.notifyMatchFailure(
+            op, "shape input length must equal the result rank");
+      if (llvm::any_of(constantShape, [](int64_t dim) { return dim < 0; }))
+        return rewriter.notifyMatchFailure(
+            op, "negative dimension in ConstantOfShape input");
+      if (!isResultTypeCompatibleWithPayloadShape(resultType, constantShape))
+        return rewriter.notifyMatchFailure(
+            op, "result type contradicts ConstantOfShape payload");
+    } else if (resultType.getRank() != 0 &&
+               llvm::any_of(resultType.getShape(), [](int64_t dim) {
+                 return !mlir::ShapedType::isDynamic(dim);
+               })) {
+      return rewriter.notifyMatchFailure(
+          op, "runtime ConstantOfShape payload requires a fully dynamic result "
+              "type");
     }
 
+    if (mlir::failed(validateScalarFillValue(op, rewriter, elemType)))
+      return mlir::failure();
+
+    mlir::Value context;
+    if (!hasConstantShape) {
+      auto contextOrFailure = getContextArg(op, rewriter);
+      if (mlir::failed(contextOrFailure))
+        return mlir::failure();
+      context = *contextOrFailure;
+    }
+
+    mlir::Location loc = op->getLoc();
     mlir::Value scalar;
     if (mlir::failed(buildScalarFillValue(op, rewriter, loc, elemType, scalar)))
       return mlir::failure();
+
+    llvm::SmallVector<mlir::Value> dynSizes;
+    if (hasConstantShape) {
+      for (int64_t i : llvm::seq<int64_t>(resultType.getRank())) {
+        if (resultType.isDynamicDim(i))
+          dynSizes.push_back(mlir::arith::ConstantIndexOp::create(
+              rewriter, loc, constantShape[i]));
+      }
+    } else {
+      mlir::OperationState readbackState(
+          loc, mlir::hip::ReadbackControlOp::getOperationName());
+      readbackState.addOperands(context);
+      readbackState.addOperands(shapeInput);
+      readbackState.addTypes(rewriter.getI1Type());
+      readbackState.addTypes(llvm::SmallVector<mlir::Type>(
+          resultType.getRank(), rewriter.getI64Type()));
+      readbackState.addAttribute("require_non_negative",
+                                 rewriter.getBoolAttr(true));
+      auto readback = mlir::cast<mlir::hip::ReadbackControlOp>(
+          rewriter.create(readbackState));
+
+      mlir::Value zero = mlir::arith::ConstantIntOp::create(
+          rewriter, loc, rewriter.getI64Type(), 0);
+      for (mlir::Value extent : readback.getValues()) {
+        // A failed readback has already recorded the shared runtime error.
+        // Guard its zero-initialized values explicitly so status remains part
+        // of destination construction instead of becoming dead metadata.
+        mlir::Value safeExtent = mlir::arith::SelectOp::create(
+            rewriter, loc, readback.getValid(), extent, zero);
+        mlir::Value asIndex = mlir::arith::IndexCastOp::create(
+            rewriter, loc, rewriter.getIndexType(), safeExtent);
+        dynSizes.push_back(asIndex);
+      }
+    }
 
     // tensor.splat broadcasts a scalar to a ranked (possibly dynamic) shape;
     // dynamic dims must be supplied positionally in the same order they
@@ -427,6 +464,12 @@ void populateConstantOfShapeConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx) {
   patterns.add<ConstantOfShapeAsScalar, ConstantOfShapeFold,
                ConstantOfShapeDynamic>(ctx);
+}
+
+void populateConstantOfShapePreLoweringPatterns(RewritePatternSet &patterns,
+                                                MLIRContext *ctx) {
+  patterns.add<ConstantOfShapeAsScalar>(ctx);
+  patterns.add<ConstantOfShapeFold>(ctx, /*staticShapeSourceOnly=*/true);
 }
 
 } // namespace hip
