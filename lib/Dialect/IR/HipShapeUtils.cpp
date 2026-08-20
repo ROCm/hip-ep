@@ -111,6 +111,33 @@ mlir::hip::getReadbackControlLayout(TypeRange sourceTypes) {
 
 namespace {
 
+enum class PermutationErrorKind {
+  None,
+  RankMismatch,
+  OutOfRange,
+  Duplicate,
+};
+
+struct PermutationError {
+  PermutationErrorKind kind = PermutationErrorKind::None;
+  int64_t value = 0;
+};
+
+PermutationError checkPermutation(ArrayRef<int64_t> perm, int64_t rank) {
+  if (static_cast<int64_t>(perm.size()) != rank)
+    return {PermutationErrorKind::RankMismatch, 0};
+
+  llvm::SmallBitVector seen(rank);
+  for (int64_t value : perm) {
+    if (value < 0 || value >= rank)
+      return {PermutationErrorKind::OutOfRange, value};
+    if (seen.test(value))
+      return {PermutationErrorKind::Duplicate, value};
+    seen.set(value);
+  }
+  return {};
+}
+
 FailureOr<OpFoldResult>
 broadcastDim(OpBuilder &b, Location loc, OpFoldResult lhs, OpFoldResult rhs,
              function_ref<InFlightDiagnostic()> emitError) {
@@ -147,6 +174,34 @@ broadcastDim(OpBuilder &b, Location loc, OpFoldResult lhs, OpFoldResult rhs,
 }
 
 } // namespace
+
+LogicalResult mlir::hip::detail::validatePermutation(
+    ArrayRef<int64_t> perm, int64_t rank,
+    function_ref<InFlightDiagnostic()> emitError) {
+  PermutationError error = checkPermutation(perm, rank);
+  switch (error.kind) {
+  case PermutationErrorKind::None:
+    return success();
+  case PermutationErrorKind::RankMismatch:
+    emitError() << "perm length (" << perm.size() << ") must match input rank ("
+                << rank << ")";
+    return failure();
+  case PermutationErrorKind::OutOfRange:
+    emitError() << "perm value " << error.value << " is out of range";
+    return failure();
+  case PermutationErrorKind::Duplicate:
+    emitError() << "perm must be a permutation (duplicate value " << error.value
+                << ")";
+    return failure();
+  }
+  llvm_unreachable("unknown permutation validation result");
+}
+
+LogicalResult mlir::hip::detail::validatePermutation(ArrayRef<int64_t> perm,
+                                                     int64_t rank) {
+  return success(checkPermutation(perm, rank).kind ==
+                 PermutationErrorKind::None);
+}
 
 /// NumPy-broadcast result shape of `shapes` (right-aligned) from static extents
 /// only. Folds `OpTrait::util::getBroadcastedShape` pairwise so static
@@ -417,6 +472,34 @@ mlir::hip::reifyElementwiseSameShapeFor(OpBuilder &b, Location loc,
         "same-shape reification requires a ranked tensor source");
   reified.assign({std::move(*dims)});
   return success();
+}
+
+LogicalResult mlir::hip::verifySameShapeDpsOp(Operation *op, Value source,
+                                              unsigned initIndex) {
+  auto dpsOp = dyn_cast<DestinationStyleOpInterface>(op);
+  if (!dpsOp)
+    return op->emitOpError(
+        "same-shape verification requires DestinationStyleOpInterface");
+
+  SmallVector<Value> dataOperands;
+  for (OpOperand *operand : dpsOp.getDpsInputOperands()) {
+    Value value = operand->get();
+    if (isa<RankedTensorType, MemRefType>(value.getType()))
+      dataOperands.push_back(value);
+  }
+  SmallVector<Value> inits = dpsOp.getDpsInits();
+  llvm::append_range(dataOperands, inits);
+  if (failed(verifyDpsComputeOp(op, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  auto sourceType = dyn_cast<ShapedType>(source.getType());
+  if (!sourceType || !sourceType.hasRank())
+    return op->emitOpError(
+        "same-shape source operand must be a ranked shaped type");
+  SmallVector<int64_t> expected(sourceType.getShape());
+  return verifyHipOpShape(
+      op, [&]() -> FailureOr<SmallVector<int64_t>> { return expected; },
+      initIndex);
 }
 
 FailureOr<SmallVector<OpFoldResult>> mlir::hip::reifyBroadcastResultShape(

@@ -36,47 +36,23 @@ struct GatherToHip : public mlir::RewritePattern {
     // Get result type
     auto resultType =
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    auto dataType = mlir::cast<mlir::RankedTensorType>(data.getType());
-    auto indicesType = mlir::cast<mlir::RankedTensorType>(indices.getType());
 
-    // Normalize negative axis for dimension calculations only
-    int64_t normalizedAxis = axis < 0 ? axis + dataType.getRank() : axis;
-
-    // Create output tensor with dynamic shape support
-    // Output shape: [data[0:axis], indices.shape, data[axis+1:]]
-    llvm::SmallVector<mlir::Value> dynSizes;
-    int64_t outDimIdx = 0;
-
-    // Copy dimensions before axis from data
-    for (auto i : llvm::seq<int64_t>(0, normalizedAxis)) {
-      if (outDimIdx < resultType.getRank() &&
-          resultType.isDynamicDim(outDimIdx))
-        dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, data, i));
-      outDimIdx++;
-    }
-    // Copy all dimensions from indices
-    for (auto i : llvm::seq<int64_t>(0, indicesType.getRank())) {
-      if (outDimIdx < resultType.getRank() &&
-          resultType.isDynamicDim(outDimIdx))
-        dynSizes.push_back(
-            mlir::tensor::DimOp::create(rewriter, loc, indices, i));
-      outDimIdx++;
-    }
-    // Copy dimensions after axis from data
-    for (auto i : llvm::seq<int64_t>(normalizedAxis + 1, dataType.getRank())) {
-      if (outDimIdx < resultType.getRank() &&
-          resultType.isDynamicDim(outDimIdx))
-        dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, data, i));
-      outDimIdx++;
-    }
-
-    mlir::Value init =
-        mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
-                                      resultType.getElementType(), dynSizes);
+    // Output shape is `data[:axis] ++ indices.shape ++ data[axis+1:]`. Use the
+    // same helper that backs `GatherOp::reifyResultShapes` so the destination
+    // and the shape consumers observe cannot disagree.
+    mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> resultShape =
+        mlir::hip::reifyGatherWithAxis(rewriter, loc, data, indices, axis);
+    if (mlir::failed(resultShape))
+      return rewriter.notifyMatchFailure(op, "Gather axis is not reifiable");
+    mlir::FailureOr<mlir::Value> init = createEmptyTensorFromReifiedShape(
+        rewriter, loc, resultType, *resultShape);
+    if (mlir::failed(init))
+      return rewriter.notifyMatchFailure(
+          op, "Gather result type is incompatible with the gathered shape");
 
     // Create hip.gather operation
     auto gatherOp = mlir::hip::GatherOp::create(rewriter, loc, context, data,
-                                                indices, init, axisAttr);
+                                                indices, *init, axisAttr);
 
     rewriter.replaceOp(op, gatherOp->getResult(0));
     return mlir::success();

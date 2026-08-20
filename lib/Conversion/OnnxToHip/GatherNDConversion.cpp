@@ -35,66 +35,51 @@ struct GatherNDToHip : public mlir::RewritePattern {
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
                   mlir::PatternRewriter &rewriter) const override {
+    mlir::Value data = op->getOperand(0);
+    mlir::Value indices = op->getOperand(1);
+    auto indicesType =
+        mlir::dyn_cast<mlir::RankedTensorType>(indices.getType());
+    if (!indicesType || !indicesType.getElementType().isInteger(64)) {
+      op->emitError("GatherND indices element type must be i64");
+      return mlir::failure();
+    }
+
     auto ctxOrFailure = getContextArg(op, rewriter);
     if (mlir::failed(ctxOrFailure))
       return mlir::failure();
     mlir::Value context = *ctxOrFailure;
 
     mlir::Location loc = op->getLoc();
-    mlir::Value data = op->getOperand(0);
-    mlir::Value indices = op->getOperand(1);
 
     auto resultType =
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    auto dataType = mlir::cast<mlir::RankedTensorType>(data.getType());
-    auto indicesType = mlir::cast<mlir::RankedTensorType>(indices.getType());
 
     int64_t batchDims = 0;
     if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("batch_dims"))
       batchDims = attr.getValue().getSExtValue();
 
-    int64_t q = indicesType.getRank();
-    int64_t r = dataType.getRank();
-    int64_t outRank = resultType.getRank();
-
-    // The last dim of `indices` (call it `k`) controls how many leading data
-    // dims each index tuple consumes. It must be statically known so we can
-    // compute the data-tail mapping; dynamic-k GatherND is not expressible
-    // with a single `tensor.empty` dynsize list.
-    int64_t k = indicesType.getDimSize(q - 1);
-    if (k == mlir::ShapedType::kDynamic)
+    // The trailing index-tuple width must be statically known: it determines
+    // the output rank, so a dynamic one leaves nothing to build a destination
+    // from. The shared helper bails on the same condition.
+    if (indicesType.isDynamicDim(indicesType.getRank() - 1))
       return rewriter.notifyMatchFailure(
           op, "GatherND requires static indices.shape[-1]");
 
-    llvm::SmallVector<mlir::Value> dynSizes;
-    for (int64_t i = 0; i < outRank; ++i) {
-      if (!resultType.isDynamicDim(i))
-        continue;
-
-      mlir::Value dim;
-      if (i < batchDims) {
-        // Batch dim -- ONNX requires data and indices to agree; prefer data
-        // because we already have it bound for the tail case below.
-        dim = mlir::tensor::DimOp::create(rewriter, loc, data, i);
-      } else if (i < q - 1) {
-        // Indices-outer dim: result[i] == indices[i] for batch_dims <= i < q-1.
-        dim = mlir::tensor::DimOp::create(rewriter, loc, indices, i);
-      } else {
-        // Data-tail dim: result[i] == data[i - (q-1) + batch_dims + k].
-        int64_t dataIdx = i - (q - 1) + batchDims + k;
-        if (dataIdx < 0 || dataIdx >= r)
-          return rewriter.notifyMatchFailure(
-              op, "cannot resolve dynamic result dim from data tail");
-        dim = mlir::tensor::DimOp::create(rewriter, loc, data, dataIdx);
-      }
-      dynSizes.push_back(dim);
-    }
-    mlir::Value init =
-        mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
-                                      resultType.getElementType(), dynSizes);
+    // Same helper that backs `GatherNDOp::reifyResultShapes`, so the
+    // destination and the shape consumers observe cannot disagree.
+    mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> resultShape =
+        mlir::hip::reifyGatherND(rewriter, loc, data, indices, batchDims);
+    if (mlir::failed(resultShape))
+      return rewriter.notifyMatchFailure(
+          op, "GatherND batch_dims/indices layout is not reifiable");
+    mlir::FailureOr<mlir::Value> init = createEmptyTensorFromReifiedShape(
+        rewriter, loc, resultType, *resultShape);
+    if (mlir::failed(init))
+      return rewriter.notifyMatchFailure(
+          op, "GatherND result type is incompatible with the gathered shape");
 
     auto hipOp = mlir::hip::GatherNDOp::create(
-        rewriter, loc, context, data, indices, init,
+        rewriter, loc, context, data, indices, *init,
         rewriter.getI64IntegerAttr(batchDims));
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
