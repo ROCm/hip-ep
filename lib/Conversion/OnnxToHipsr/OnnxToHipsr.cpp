@@ -197,7 +197,8 @@ struct ConvertOnnxToHipsrPass
               rewriter, loc, TypeRange{resultType}, *ctx, ValueRange{data, shape},
               PlaceholderType::Normal).getResult(0);
 
-          return ExpandOp::create(rewriter, loc, TypeRange{resultType}, *ctx, data, shape, init);
+          return ExpandOp::create(rewriter, loc, TypeRange{resultType}, *ctx, data, shape, init,
+                                  ::mlir::DenseI64ArrayAttr{});
         });
 
     // Load PDLL patterns from compiled bytecode
