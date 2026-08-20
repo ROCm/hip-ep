@@ -91,8 +91,7 @@ struct ReadbackControlOpLowering
 
       Value widthSlot = LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type,
                                             elementBytes, index);
-      int64_t bytes =
-          cast<IntegerType>(memrefType.getElementType()).getWidth() / 8;
+      int64_t bytes = memrefType.getElementType().getIntOrFloatBitWidth() / 8;
       LLVM::StoreOp::create(rewriter, loc, i64Constant(bytes), widthSlot);
     }
 

@@ -28,6 +28,22 @@ module {
   // CHECK-NOT: hip.pad
   // CHECK: "onnx.Pad"
 
+  func.func @tile_static_contradiction(
+      %input: tensor<2x3xf32>) -> tensor<4x8xf32> {
+    %repeats = "onnx.Constant"() {
+      value = dense<[2, 3]> : tensor<2xi64>
+    } : () -> tensor<2xi64>
+    %result = "onnx.Tile"(%input, %repeats)
+      : (tensor<2x3xf32>, tensor<2xi64>) -> tensor<4x8xf32>
+    return %result : tensor<4x8xf32>
+  }
+
+  // CHECK-LABEL: func.func @tile_static_contradiction
+  // CHECK-NOT: tensor.dim
+  // CHECK-NOT: tensor.empty
+  // CHECK-NOT: hip.tile
+  // CHECK: "onnx.Tile"
+
   func.func @expand_static_contradiction(
       %input: tensor<1x3x1xf32>) -> tensor<2x3x5xf32> {
     %shape = "onnx.Constant"() {
@@ -74,6 +90,18 @@ module {
   // CHECK: tensor.empty() : tensor<5x4xf32>
   // CHECK: hip.pad
 
+  func.func @tile_static_result_refinement(
+      %input: tensor<?x3xf32>) -> tensor<4x9xf32> {
+    %repeats = arith.constant dense<[2, 3]> : tensor<2xi64>
+    %result = "onnx.Tile"(%input, %repeats)
+      : (tensor<?x3xf32>, tensor<2xi64>) -> tensor<4x9xf32>
+    return %result : tensor<4x9xf32>
+  }
+
+  // CHECK-LABEL: func.func @tile_static_result_refinement
+  // CHECK: tensor.empty() : tensor<4x9xf32>
+  // CHECK: hip.tile
+
   func.func @expand_static_result_refinement(
       %input: tensor<?x1xf32>) -> tensor<3x4xf32> {
     %shape = arith.constant dense<[1, 4]> : tensor<2xi64>
@@ -99,6 +127,18 @@ module {
   // CHECK-LABEL: func.func @pad_dynamic_result_static_inference
   // CHECK: tensor.empty({{.*}}, {{.*}}) : tensor<?x?xf32>
   // CHECK: hip.pad
+
+  func.func @tile_dynamic_result_static_inference(
+      %input: tensor<2x3xf32>) -> tensor<?x?xf32> {
+    %repeats = arith.constant dense<[2, 3]> : tensor<2xi64>
+    %result = "onnx.Tile"(%input, %repeats)
+      : (tensor<2x3xf32>, tensor<2xi64>) -> tensor<?x?xf32>
+    return %result : tensor<?x?xf32>
+  }
+
+  // CHECK-LABEL: func.func @tile_dynamic_result_static_inference
+  // CHECK: tensor.empty({{.*}}, {{.*}}) : tensor<?x?xf32>
+  // CHECK: hip.tile
 
   func.func @expand_dynamic_result_static_inference(
       %input: tensor<1x3x1xf32>) -> tensor<?x?x?xf32> {

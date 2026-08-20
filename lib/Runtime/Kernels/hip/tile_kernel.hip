@@ -24,6 +24,7 @@
 #include <hip/hip_runtime.h>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 
 static constexpr int kTileMaxRank = 8;
 
@@ -85,6 +86,16 @@ extern "C" int hip_tile(void *stream, const void *input, void *output,
   TileShape input_strides{};
   int64_t num_output_elements = 1;
   for (int d = 0; d < rank; ++d) {
+    if (input_shape_host[d] < 0 || output_shape_host[d] < 0 ||
+        (output_shape_host[d] != 0 &&
+         num_output_elements >
+             std::numeric_limits<int64_t>::max() / output_shape_host[d])) {
+      fprintf(stderr,
+              "[custom_kernels] hip_tile: invalid or overflowing shape at "
+              "dimension %d\n",
+              d);
+      return -1;
+    }
     input_shape.dims[d] = input_shape_host[d];
     output_shape.dims[d] = output_shape_host[d];
     num_output_elements *= output_shape_host[d];
@@ -92,6 +103,14 @@ extern "C" int hip_tile(void *stream, const void *input, void *output,
 
   int64_t stride = 1;
   for (int d = rank - 1; d >= 0; --d) {
+    if (input_shape_host[d] != 0 &&
+        stride > std::numeric_limits<int64_t>::max() / input_shape_host[d]) {
+      fprintf(stderr,
+              "[custom_kernels] hip_tile: input stride overflow at dimension "
+              "%d\n",
+              d);
+      return -1;
+    }
     input_strides.dims[d] = stride;
     stride *= input_shape_host[d];
   }
@@ -101,13 +120,21 @@ extern "C" int hip_tile(void *stream, const void *input, void *output,
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
   constexpr int kBlockSize = 256;
-  int grid_size = static_cast<int>(
-      (num_output_elements + kBlockSize - 1) / kBlockSize);
+  uint64_t gridSize = (static_cast<uint64_t>(num_output_elements) +
+                       kBlockSize - 1) /
+                      kBlockSize;
+  if (gridSize > std::numeric_limits<uint32_t>::max()) {
+    fprintf(stderr, "[custom_kernels] hip_tile: grid dimension overflow\n");
+    return -1;
+  }
+  uint32_t grid_size = static_cast<uint32_t>(gridSize);
 
   CUSTOM_KERNELS_DEBUG_LOG(
       "[custom_kernels] hip_tile: dtype=%d, rank=%d, num_out=%lld, "
       "grid=%d, block=%d\n",
       hip_dtype, rank, (long long)num_output_elements, grid_size, kBlockSize);
+
+  (void)hipGetLastError();
 
   switch (hip_dtype) {
   case HIP_DTYPE_FLOAT16:

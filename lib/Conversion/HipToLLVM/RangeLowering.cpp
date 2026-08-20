@@ -9,6 +9,56 @@ namespace mlir {
 namespace hip {
 namespace {
 
+struct CheckedRangeCountOpLowering
+    : public ConvertOpToLLVMPattern<CheckedRangeCountOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(CheckedRangeCountOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+    auto i64Constant = [&](int64_t value) {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+
+    Value one = i64Constant(1);
+    Value zero = i64Constant(0);
+    Value hostCount =
+        LLVM::AllocaOp::create(rewriter, loc, ptrType, i64Type, one, 8);
+    LLVM::StoreOp::create(rewriter, loc, zero, hostCount);
+    Value valid = LLVM::ZExtOp::create(rewriter, loc, i64Type,
+                                       adaptor.getReadbackValid());
+    Value dataType = i64Constant(op.getDataType());
+    Value expectedCount = i64Constant(op.getExpectedCount());
+
+    SmallVector<Type> parameterTypes = {ptrType, ptrType, i64Type, i64Type,
+                                        i64Type, i64Type, i64Type, i64Type};
+    FailureOr<LLVM::LLVMFuncOp> function = LLVM::lookupOrCreateFn(
+        rewriter, module, kHipCheckedRangeCount, parameterTypes, i32Type);
+    if (failed(function))
+      return failure();
+    LLVM::CallOp call = LLVM::CallOp::create(
+        rewriter, loc, *function,
+        ValueRange{adaptor.getCtx(), hostCount, valid, adaptor.getStartBits(),
+                   adaptor.getLimitBits(), adaptor.getDeltaBits(), dataType,
+                   expectedCount});
+
+    Value loaded = LLVM::LoadOp::create(rewriter, loc, i64Type, hostCount);
+    Value statusOk = LLVM::ICmpOp::create(
+        rewriter, loc, LLVM::ICmpPredicate::eq, call.getResult(),
+        LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                 rewriter.getI32IntegerAttr(0)));
+    Value safe = LLVM::SelectOp::create(rewriter, loc, statusOk, loaded, zero);
+    rewriter.replaceOp(op, safe);
+    return success();
+  }
+};
+
 // Maps MLIR element type to hip_dtype_t for hip_range() in range_kernel.hip.
 // ONNX Range only defines int32/int64/float/double; the kernel implements those
 // plus int16. F16/BF16 are not ONNX Range types and are not implemented in
@@ -86,7 +136,7 @@ struct RangeOpLowering : public ConvertOpToLLVMPattern<RangeOp> {
 
 void populateRangeLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns) {
-  patterns.add<RangeOpLowering>(converter);
+  patterns.add<CheckedRangeCountOpLowering, RangeOpLowering>(converter);
 }
 
 } // namespace hip

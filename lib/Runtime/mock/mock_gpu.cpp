@@ -1071,8 +1071,11 @@ int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
 
 int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
                void *output, int64_t output_num_elements, int64_t hip_dtype) {
-  if (!state) {
-    fprintf(stderr, "Invalid state in wrap_range\n");
+  if (!state || !start || !limit || !delta || !output ||
+      output_num_elements < 0) {
+    fprintf(stderr, "Invalid argument in wrap_range\n");
+    if (state)
+      (void)hipdnn_ep_state_set_error_flag(state);
     return -1;
   }
 
@@ -1974,8 +1977,12 @@ int wrap_tile(RuntimeState *state, void *input, void *repeats, void *output,
               const int64_t *input_shape, int64_t input_rank,
               const int64_t *output_shape, int64_t output_rank,
               int64_t data_type) {
-  if (!state) {
-    fprintf(stderr, "Invalid state in wrap_tile\n");
+  if (!state || !input || !output || !input_shape || !output_shape ||
+      input_rank != output_rank || input_rank < 0 ||
+      (input_rank > 0 && !repeats)) {
+    fprintf(stderr, "Invalid argument in wrap_tile\n");
+    if (state)
+      (void)hipdnn_ep_state_set_error_flag(state);
     return -1;
   }
   MOCK_PRINT("[MOCK] wrap_tile(input_rank=%lld, output_rank=%lld, "

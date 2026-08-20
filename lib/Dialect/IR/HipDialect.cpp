@@ -2030,6 +2030,37 @@ void TileOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult TileOp::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getInput(), getRepeats(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+  auto inputType = dyn_cast<ShapedType>(getInput().getType());
+  auto repeatsType = dyn_cast<ShapedType>(getRepeats().getType());
+  auto outputType = dyn_cast<ShapedType>(getOutput().getType());
+  if (!inputType || !inputType.hasRank() || !repeatsType ||
+      !repeatsType.hasRank() || !outputType || !outputType.hasRank())
+    return emitOpError("input, repeats, and output must be ranked");
+  if (repeatsType.getRank() != 1 ||
+      !repeatsType.getElementType().isInteger(64) ||
+      repeatsType.isDynamicDim(0) ||
+      repeatsType.getDimSize(0) != inputType.getRank())
+    return emitOpError(
+        "repeats must be static-length rank-1 i64 matching input rank");
+  if (outputType.getRank() != inputType.getRank())
+    return emitOpError("output rank must match input rank");
+
+  std::optional<ArrayRef<int64_t>> staticRepeats = getStaticRepeats();
+  if (!staticRepeats)
+    return success();
+  FailureOr<SmallVector<int64_t>> expected =
+      mlir::hip::inferTileShape(inputType.getShape(), *staticRepeats);
+  if (failed(expected))
+    return emitOpError(
+        "static_repeats must match input rank and be non-negative");
+  return mlir::hip::verifyHipOpShape(
+      *this, [&]() -> FailureOr<SmallVector<int64_t>> { return *expected; });
+}
+
 //===----------------------------------------------------------------------===//
 // ExpandOp: ins(input, shape), outs(output)
 //===----------------------------------------------------------------------===//
@@ -2319,7 +2350,7 @@ LogicalResult ReadbackControlOp::verify() {
       getReadbackControlLayout(sourceTypes);
   if (failed(layout))
     return emitOpError(
-        "requires one or more statically-sized rank-0/rank-1 i32/i64 sources");
+        "requires statically-sized rank-0/rank-1 i16/i32/i64/f32/f64 sources");
 
   for (auto [index, source] : llvm::enumerate(getSources())) {
     auto memref = dyn_cast<MemRefType>(source.getType());
@@ -2343,6 +2374,22 @@ LogicalResult ReadbackControlOp::verify() {
                    [](Type type) { return !type.isInteger(64); }))
     return emitOpError("all flattened value results must be i64");
   return success();
+}
+
+void CheckedRangeCountOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Write::get(),
+                       &getOperation()->getOpOperand(0),
+                       SideEffects::DefaultResource::get());
+}
+
+void CheckedTileExtentOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Write::get(),
+                       &getOperation()->getOpOperand(0),
+                       SideEffects::DefaultResource::get());
 }
 
 //===----------------------------------------------------------------------===//

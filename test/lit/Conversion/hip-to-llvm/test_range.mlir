@@ -4,6 +4,15 @@
 // RUN: hip-mlir-opt --convert-hip-to-llvm %s | FileCheck %s
 
 module {
+  func.func @checked_range_count(
+      %ctx: !hip.context, %valid: i1, %start: i64, %limit: i64,
+      %delta: i64) -> index {
+    %count = hip.checked_range_count(
+      %ctx, %valid, %start, %limit, %delta)
+      data_type = 4 expected_count = -1 -> index
+    return %count : index
+  }
+
   func.func @range_dynamic_i32(
       %ctx: !hip.context,
       %start: memref<i32, 1>,
@@ -59,6 +68,12 @@ module {
     return
   }
 }
+
+// CHECK-LABEL: llvm.func @checked_range_count
+// CHECK: llvm.store
+// CHECK: %[[STATUS:.*]] = llvm.call @hipdnn_ep_checked_range_count
+// CHECK: llvm.icmp "eq" %[[STATUS]]
+// CHECK: llvm.select
 
 // CHECK-LABEL: llvm.func @range_dynamic_i32
 // CHECK: llvm.call @wrap_range({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32

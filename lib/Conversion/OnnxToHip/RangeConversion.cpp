@@ -12,129 +12,91 @@
 
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/APInt.h"
-#include "llvm/ADT/TypeSwitch.h"
+#include <cmath>
+#include <limits>
 
 namespace mlir {
 namespace hip {
 namespace {
 
-/// Empty-result condition for integer Range:
-/// - delta > 0 and limit <= start
-/// - delta < 0 and limit >= start
-static Value buildIntRangeEmptyCheck(PatternRewriter &rewriter, Location loc,
-                                     Value start, Value limit, Value delta,
-                                     Value zero) {
-  Value cmpPos = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sgt,
-                                       delta, zero);
-  Value cmpNeg = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::slt,
-                                       delta, zero);
-  Value cmpLimLe = arith::CmpIOp::create(
-      rewriter, loc, arith::CmpIPredicate::sle, limit, start);
-  Value cmpLimGe = arith::CmpIOp::create(
-      rewriter, loc, arith::CmpIPredicate::sge, limit, start);
-  Value emptyPos = arith::AndIOp::create(rewriter, loc, cmpPos, cmpLimLe);
-  Value emptyNeg = arith::AndIOp::create(rewriter, loc, cmpNeg, cmpLimGe);
-  return arith::OrIOp::create(rewriter, loc, emptyPos, emptyNeg);
+static int64_t getRangeRuntimeDataType(Type type) {
+  if (type.isF32())
+    return 0; // HIPDNN_EP_DATATYPE_FLOAT
+  if (type.isInteger(32))
+    return 3; // HIPDNN_EP_DATATYPE_INT32
+  if (type.isInteger(64))
+    return 4; // HIPDNN_EP_DATATYPE_INT64
+  if (type.isF64())
+    return 6; // HIPDNN_EP_DATATYPE_DOUBLE
+  if (type.isInteger(16))
+    return 8; // HIPDNN_EP_DATATYPE_INT16
+  return -1;
 }
 
-/// Empty-result condition for float Range:
-/// - delta > 0 and limit <= start
-/// - delta < 0 and limit >= start
-static Value buildFloatRangeEmptyCheck(PatternRewriter &rewriter, Location loc,
-                                       Value start, Value limit, Value delta,
-                                       Value zero) {
-  Value cmpPos = arith::CmpFOp::create(rewriter, loc, arith::CmpFPredicate::OGT,
-                                       delta, zero);
-  Value cmpNeg = arith::CmpFOp::create(rewriter, loc, arith::CmpFPredicate::OLT,
-                                       delta, zero);
-  Value cmpLimLe = arith::CmpFOp::create(
-      rewriter, loc, arith::CmpFPredicate::OLE, limit, start);
-  Value cmpLimGe = arith::CmpFOp::create(
-      rewriter, loc, arith::CmpFPredicate::OGE, limit, start);
-  Value emptyPos = arith::AndIOp::create(rewriter, loc, cmpPos, cmpLimLe);
-  Value emptyNeg = arith::AndIOp::create(rewriter, loc, cmpNeg, cmpLimGe);
-  return arith::OrIOp::create(rewriter, loc, emptyPos, emptyNeg);
+template <typename T>
+static FailureOr<int64_t> computeConstantFloatCount(T start, T limit, T delta) {
+  if (!std::isfinite(start) || !std::isfinite(limit) || !std::isfinite(delta) ||
+      delta == T{0})
+    return failure();
+  if ((delta > T{0} && limit <= start) || (delta < T{0} && limit >= start))
+    return 0;
+  T quotient = (limit - start) / delta;
+  if (!std::isfinite(quotient) || quotient < T{0})
+    return failure();
+  long double count = std::ceil(static_cast<long double>(quotient));
+  if (!std::isfinite(count) || count < 0 ||
+      count > static_cast<long double>(std::numeric_limits<int64_t>::max()))
+    return failure();
+  return static_cast<int64_t>(count);
 }
 
-/// Dynamic length (index) for integer numpy.arange(start, limit, delta).
-static Value buildIntRangeCount(PatternRewriter &rewriter, Location loc,
-                                Value start, Value limit, Value delta,
-                                IntegerType elemTy) {
-  Value zero = arith::ConstantIntOp::create(rewriter, loc, elemTy, 0);
-  Value cmpZ = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq,
-                                     delta, zero);
-  Value empty =
-      buildIntRangeEmptyCheck(rewriter, loc, start, limit, delta, zero);
-  Value cmpPos = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sgt,
-                                       delta, zero);
-  // Guard compile-time length expression from divide-by-zero and empty ranges.
-  // Non-empty `hip_range` launches validate delta in `range_kernel`. Constant
-  // delta==0 is rejected in `verifyConstantDeltaNonZero`.
-  Value clampToZeroLen = arith::OrIOp::create(rewriter, loc, cmpZ, empty);
+static FailureOr<std::optional<int64_t>>
+tryComputeConstantRangeCount(Value start, Value limit, Value delta,
+                             Type elemTy) {
+  DenseElementsAttr startDense = getConstantDense(start);
+  DenseElementsAttr limitDense = getConstantDense(limit);
+  DenseElementsAttr deltaDense = getConstantDense(delta);
+  if (!startDense || !limitDense || !deltaDense)
+    return std::optional<int64_t>();
+  if (startDense.getNumElements() != 1 || limitDense.getNumElements() != 1 ||
+      deltaDense.getNumElements() != 1)
+    return failure();
 
-  Value diffPos = arith::SubIOp::create(rewriter, loc, limit, start);
-  Value diffNeg = arith::SubIOp::create(rewriter, loc, start, limit);
-  Value negDelta = arith::SubIOp::create(rewriter, loc, zero, delta);
-  Value nPos = arith::CeilDivSIOp::create(rewriter, loc, diffPos, delta);
-  Value nNeg = arith::CeilDivSIOp::create(rewriter, loc, diffNeg, negDelta);
-  Value nInt = arith::SelectOp::create(rewriter, loc, cmpPos, nPos, nNeg);
-  Value nIntSel =
-      arith::SelectOp::create(rewriter, loc, clampToZeroLen, zero, nInt);
-  return arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(),
-                                    nIntSel);
-}
+  if (isa<IntegerType>(elemTy)) {
+    APInt s = *startDense.getValues<APInt>().begin();
+    APInt l = *limitDense.getValues<APInt>().begin();
+    APInt d = *deltaDense.getValues<APInt>().begin();
+    unsigned width = std::max<unsigned>(128, elemTy.getIntOrFloatBitWidth());
+    s = s.sext(width);
+    l = l.sext(width);
+    d = d.sext(width);
+    if (d.isZero())
+      return failure();
+    APInt count(width, 0, /*isSigned=*/true);
+    if ((d.isStrictlyPositive() && l.sgt(s)) || (d.isNegative() && l.slt(s))) {
+      APInt difference = d.isStrictlyPositive() ? l - s : s - l;
+      APInt step = d.isStrictlyPositive() ? d : -d;
+      APInt quotient = difference.sdiv(step);
+      APInt remainder = difference.srem(step);
+      count = quotient + APInt(width, !remainder.isZero());
+    }
+    if (!count.isSignedIntN(64) || count.isNegative())
+      return failure();
+    return std::optional<int64_t>(count.getSExtValue());
+  }
 
-/// Ceil(\p q) for \p q >= 0 using arith only (avoids math.ceil / MathDialect).
-static Value buildArithCeilNonNegFloat(PatternRewriter &rewriter, Location loc,
-                                       Value q, FloatType elemTy) {
-  IntegerType i64 = rewriter.getI64Type();
-  Value floorI = arith::FPToSIOp::create(rewriter, loc, i64, q);
-  Value floorF = arith::SIToFPOp::create(rewriter, loc, elemTy, floorI);
-  Value frac = arith::SubFOp::create(rewriter, loc, q, floorF);
-  Value c0f = arith::ConstantFloatOp::create(
-      rewriter, loc, elemTy, APFloat::getZero(elemTy.getFloatSemantics()));
-  Value needBump = arith::CmpFOp::create(rewriter, loc,
-                                         arith::CmpFPredicate::OGT, frac, c0f);
-  Value oneI = arith::ConstantIntOp::create(rewriter, loc, i64, 1);
-  Value zeroI = arith::ConstantIntOp::create(rewriter, loc, i64, 0);
-  Value bumpI = arith::SelectOp::create(rewriter, loc, needBump, oneI, zeroI);
-  return arith::AddIOp::create(rewriter, loc, floorI, bumpI);
-}
-
-/// Dynamic length for float ranges using ceil((limit-start)/delta) or
-/// ceil((start-limit)/(-delta)).
-static Value buildFloatRangeCount(PatternRewriter &rewriter, Location loc,
-                                  Value start, Value limit, Value delta,
-                                  FloatType elemTy) {
-  Value zero = arith::ConstantFloatOp::create(
-      rewriter, loc, elemTy, APFloat::getZero(elemTy.getFloatSemantics()));
-  Value cmpZ = arith::CmpFOp::create(rewriter, loc, arith::CmpFPredicate::OEQ,
-                                     delta, zero);
-  Value cmpPos = arith::CmpFOp::create(rewriter, loc, arith::CmpFPredicate::OGT,
-                                       delta, zero);
-  Value empty =
-      buildFloatRangeEmptyCheck(rewriter, loc, start, limit, delta, zero);
-  // Guard compile-time length expression from divide-by-zero and empty ranges.
-  // Non-empty `hip_range` launches validate delta in `range_kernel`. Constant
-  // delta==0 is rejected in `verifyConstantDeltaNonZero`.
-  Value clampToZeroLen = arith::OrIOp::create(rewriter, loc, cmpZ, empty);
-
-  Value diffPos = arith::SubFOp::create(rewriter, loc, limit, start);
-  Value diffNeg = arith::SubFOp::create(rewriter, loc, start, limit);
-  Value negDelta = arith::SubFOp::create(rewriter, loc, zero, delta);
-  Value quotPos = arith::DivFOp::create(rewriter, loc, diffPos, delta);
-  Value quotNeg = arith::DivFOp::create(rewriter, loc, diffNeg, negDelta);
-  IntegerType i64 = rewriter.getI64Type();
-  Value ceilPosI = buildArithCeilNonNegFloat(rewriter, loc, quotPos, elemTy);
-  Value ceilNegI = buildArithCeilNonNegFloat(rewriter, loc, quotNeg, elemTy);
-  Value nInt =
-      arith::SelectOp::create(rewriter, loc, cmpPos, ceilPosI, ceilNegI);
-  Value zeroI = arith::ConstantIntOp::create(rewriter, loc, i64, 0);
-  Value nIntSel =
-      arith::SelectOp::create(rewriter, loc, clampToZeroLen, zeroI, nInt);
-  Value nNonNeg = arith::MaxSIOp::create(rewriter, loc, nIntSel, zeroI);
-  return arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(),
-                                    nNonNeg);
+  APFloat s = *startDense.getValues<APFloat>().begin();
+  APFloat l = *limitDense.getValues<APFloat>().begin();
+  APFloat d = *deltaDense.getValues<APFloat>().begin();
+  FailureOr<int64_t> count =
+      elemTy.isF32()
+          ? computeConstantFloatCount(s.convertToFloat(), l.convertToFloat(),
+                                      d.convertToFloat())
+          : computeConstantFloatCount(s.convertToDouble(), l.convertToDouble(),
+                                      d.convertToDouble());
+  if (failed(count))
+    return failure();
+  return std::optional<int64_t>(*count);
 }
 
 /// Fail conversion when delta is a compile-time constant equal to zero (ORT
@@ -202,7 +164,8 @@ struct RangeToHip : public RewritePattern {
       return rewriter.notifyMatchFailure(op, "expected 1-D ranked result");
 
     Type elemTy = resultType.getElementType();
-    if (!elemTy.isIntOrFloat())
+    int64_t runtimeDataType = getRangeRuntimeDataType(elemTy);
+    if (runtimeDataType < 0)
       return rewriter.notifyMatchFailure(op, "unsupported element type");
 
     // ONNX Range bounds are scalars. Accept a rank-0 tensor, or a rank-1
@@ -238,34 +201,49 @@ struct RangeToHip : public RewritePattern {
     Value limitS = collapseRangeBoundToScalar(rewriter, loc, op->getOperand(1));
     Value deltaS = collapseRangeBoundToScalar(rewriter, loc, op->getOperand(2));
 
-    // Read start/limit/delta to host SSA values for the trip-count arithmetic.
-    // Constants fold; GPU-computed operands go through a synchronized
-    // hip.readback_scalar (see ReadbackScalar.h for why a plain tensor.extract
-    // is a correctness bug on true-device-memory targets).
-    Value startE = readbackScalarToHost(rewriter, loc, ctx, startS);
-    Value limitE = readbackScalarToHost(rewriter, loc, ctx, limitS);
-    Value deltaE = readbackScalarToHost(rewriter, loc, ctx, deltaS);
-
-    Value len = llvm::TypeSwitch<Type, Value>(elemTy)
-                    .Case<IntegerType>([&](IntegerType ity) {
-                      return buildIntRangeCount(rewriter, loc, startE, limitE,
-                                                deltaE, ity);
-                    })
-                    .Case<FloatType>([&](FloatType fty) {
-                      return buildFloatRangeCount(rewriter, loc, startE, limitE,
-                                                  deltaE, fty);
-                    })
-                    .Default([&](Type) { return Value(); });
-    if (!len)
-      return failure();
-
     Value init;
-    if (resultType.isDynamicDim(0)) {
-      init = tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
-                                     elemTy, ValueRange{len});
-    } else {
-      init = tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
-                                     elemTy, ValueRange{});
+    FailureOr<std::optional<int64_t>> constantCount =
+        tryComputeConstantRangeCount(op->getOperand(0), op->getOperand(1),
+                                     op->getOperand(2), elemTy);
+    if (failed(constantCount)) {
+      op->emitOpError(
+          "constant Range controls produce an invalid or unrepresentable "
+          "result length");
+      return failure();
+    }
+    if (*constantCount) {
+      SmallVector<OpFoldResult> reifiedShape{
+          rewriter.getIndexAttr(**constantCount)};
+      auto constantInit = createEmptyTensorFromReifiedShape(
+          rewriter, loc, resultType, reifiedShape);
+      if (failed(constantInit))
+        return rewriter.notifyMatchFailure(
+            op, "Range result type contradicts constant trip count");
+      init = *constantInit;
+    }
+
+    if (!init) {
+      // One status-bearing grouped readback synchronizes all three controls.
+      // The checked count op consumes `valid` before interpreting the slots,
+      // initializes failure to length zero, and records the shared error state.
+      SmallVector<Type> readbackTypes{
+          rewriter.getI1Type(), rewriter.getI64Type(), rewriter.getI64Type(),
+          rewriter.getI64Type()};
+      auto readback = mlir::hip::ReadbackControlOp::create(
+          rewriter, loc, readbackTypes, ctx,
+          ValueRange{startS, limitS, deltaS});
+      Value len = mlir::hip::CheckedRangeCountOp::create(
+          rewriter, loc, rewriter.getIndexType(), ctx, readback.getValid(),
+          readback.getValues()[0], readback.getValues()[1],
+          readback.getValues()[2], rewriter.getI64IntegerAttr(runtimeDataType),
+          rewriter.getI64IntegerAttr(resultType.getDimSize(0)));
+      init = resultType.isDynamicDim(0)
+                 ? Value(tensor::EmptyOp::create(rewriter, loc,
+                                                 resultType.getShape(), elemTy,
+                                                 ValueRange{len}))
+                 : Value(tensor::EmptyOp::create(rewriter, loc,
+                                                 resultType.getShape(), elemTy,
+                                                 ValueRange{}));
     }
 
     auto rangeOp = mlir::hip::RangeOp::create(rewriter, loc, ctx, startS,

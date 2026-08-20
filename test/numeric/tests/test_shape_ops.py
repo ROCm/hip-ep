@@ -233,6 +233,15 @@ def _make_tile_model(dtype, input_shape: list[int], repeats: list[int]):
     return make_model_from_nodes([node], [X], [Y], initializers=[repeats_init])
 
 
+def _make_tile_runtime_repeats_model(dtype, rank: int):
+    tp = np_to_onnx_type(dtype)
+    X = helper.make_tensor_value_info("X", tp, [None] * rank)
+    repeats = helper.make_tensor_value_info("repeats", TensorProto.INT64, [rank])
+    Y = helper.make_tensor_value_info("Y", tp, [None] * rank)
+    node = helper.make_node("Tile", ["X", "repeats"], ["Y"])
+    return make_model_from_nodes([node], [X, repeats], [Y])
+
+
 class TestTile:
     @pytest.mark.parametrize(
         "dtype,shape,repeats",
@@ -251,6 +260,47 @@ class TestTile:
         else:
             x = rng.uniform(-2.0, 2.0, shape).astype(dtype)
         actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize("repeats", [[2, 3], [0, 1]])
+    def test_tile_runtime_repeats(self, model_runner, repeats):
+        model = _make_tile_runtime_repeats_model(np.float32, rank=2)
+        x = np.arange(6, dtype=np.float32).reshape(2, 3)
+        repeats_array = np.array(repeats, dtype=np.int64)
+        actual, expected = model_runner.run_sample(model, [x, repeats_array])
+        compare_outputs(actual, expected, atol=0)
+
+
+# ---------------------------------------------------------------------------
+# Range
+# ---------------------------------------------------------------------------
+def _make_runtime_range_model(dtype):
+    tp = np_to_onnx_type(dtype)
+    start = helper.make_tensor_value_info("start", tp, [])
+    limit = helper.make_tensor_value_info("limit", tp, [])
+    delta = helper.make_tensor_value_info("delta", tp, [])
+    output = helper.make_tensor_value_info("output", tp, [None])
+    node = helper.make_node("Range", ["start", "limit", "delta"], ["output"])
+    return make_model_from_nodes([node], [start, limit, delta], [output])
+
+
+class TestRange:
+    @pytest.mark.parametrize(
+        "dtype,start,limit,delta",
+        [
+            (np.int64, 0, 7, 2),
+            (np.int64, 0, np.iinfo(np.int64).min, np.iinfo(np.int64).min),
+            (np.float32, -1.0, 1.0, 0.5),
+        ],
+    )
+    def test_runtime_controls(self, model_runner, dtype, start, limit, delta):
+        model = _make_runtime_range_model(dtype)
+        feeds = [
+            np.asarray(start, dtype=dtype),
+            np.asarray(limit, dtype=dtype),
+            np.asarray(delta, dtype=dtype),
+        ]
+        actual, expected = model_runner.run_sample(model, feeds)
         compare_outputs(actual, expected, atol=0)
 
 

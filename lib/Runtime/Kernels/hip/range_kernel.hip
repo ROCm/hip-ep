@@ -104,6 +104,7 @@ extern "C" int hip_range(void *stream, const void *start, const void *limit,
       (long long)output_num_elements, (long long)hip_dtype, grid_size,
       kBlockSize);
 
+  (void)hipGetLastError();
   switch (hip_dtype) {
   case HIP_DTYPE_INT16:
     hipLaunchKernelGGL(range_kernel<int16_t>, dim3(grid_size), dim3(kBlockSize),

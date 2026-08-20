@@ -14,6 +14,21 @@
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
 
 module {
+  func.func @checked_tile_extent(
+      %ctx: !hip.context, %valid: i1, %input: index,
+      %repeat: i64, %prior: index) -> index {
+    %nextValid, %extent, %elements = hip.checked_tile_extent(
+      %ctx, %valid, %input, %repeat, %prior)
+      expected_extent = -1 -> (i1, index, index)
+    return %extent : index
+  }
+
+  // CHECK-LABEL: llvm.func @checked_tile_extent
+  // CHECK-COUNT-2: llvm.store
+  // CHECK: %[[STATUS:.*]] = llvm.call @hipdnn_ep_checked_tile_extent
+  // CHECK: llvm.icmp "eq" %[[STATUS]]
+  // CHECK: llvm.select
+
   func.func @tile_static_f32(
       %ctx: !hip.context,
       %x: memref<2x3xf32, 1>,
