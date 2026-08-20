@@ -37,9 +37,9 @@ add_test(NAME OutputAllocatorUnitTest COMMAND test-output-allocator)
 
 set_target_properties(test-output-allocator PROPERTIES FOLDER "runtime-tests")
 
-# Compiles only the pool-site portion of runtime_state.cpp against tiny mock HIP
-# allocation functions. This directly proves that caller/helper local domain
-# zero map to distinct pointers and child growth leaves the parent live.
+# Compiles only the pool/host-scratch site portion of runtime_state.cpp against
+# tiny mock HIP allocation functions. This directly proves caller/helper local
+# zero identities map to distinct pointers and child growth leaves parents live.
 add_executable(test-pool-sites
     test_pool_sites.cpp
     ${CMAKE_SOURCE_DIR}/lib/Runtime/hipdnn_ep_runtime_state.cpp

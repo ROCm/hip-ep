@@ -158,8 +158,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->num_buffers = 0;
   state->workspace = nullptr;
   state->workspace_size = 0;
-  state->host_scratch_base = nullptr;
-  state->host_scratch_size = 0;
+  state->num_host_scratch_sites = 0;
+  state->host_scratch_sites = nullptr;
   // Start with no output allocator (null context + callback). The EP installs
   // one via hipdnn_ep_set_output_allocator before the first inference_compute,
   // and hipdnn_ep_alloc_output then forwards each graph-output request to it.
@@ -773,10 +773,16 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipFree(state->device_error_flag));
   }
 
-  // Free host-mapped scratch buffer (if allocated)
-  if (state->host_scratch_base) {
-    HIP_CLEANUP(hipHostFree(state->host_scratch_base));
+  // Free each function site's host-mapped scratch buffer and the site table.
+  if (state->host_scratch_sites) {
+    for (int site_id = 0; site_id < state->num_host_scratch_sites; ++site_id) {
+      if (state->host_scratch_sites[site_id].base)
+        HIP_CLEANUP(hipHostFree(state->host_scratch_sites[site_id].base));
+    }
+    free(state->host_scratch_sites);
+    state->host_scratch_sites = nullptr;
   }
+  state->num_host_scratch_sites = 0;
 
   // Free every module-site/function-domain pool and then both table levels.
   if (state->pool_sites) {
@@ -1150,51 +1156,71 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state, int site_id, int domain_id,
   return site.pool_base[domain_id];
 }
 
-#ifdef HIPDNN_EP_POOL_UNIT_TEST
-} // extern "C"
-#else
-void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size) {
+void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, int site_id,
+                                      size_t needed_size) {
   if (!state) {
     fprintf(stderr,
             "Invalid state parameter to hipdnn_ep_get_host_scratch_base\n");
     return nullptr;
   }
-  // Mirrors hipdnn_ep_get_pool_base growth semantics for the host-mapped
-  // scratch buffer that backs hip.get_host_scratch. One allocation per
-  // function for all tiny host-fed scalars routed away from the GPU pool by
-  // hip-materialize-host-scalars; grown only when shape changes increase the
-  // total demand; never shrinks. hipHostMalloc(hipHostMallocMapped) memory is
-  // host-writable AND GPU-readable via the device pointer mapping, so the
-  // same pointer can be stored into from host code and then read by
-  // subsequent GPU kernels.
-  if (needed_size > state->host_scratch_size) {
-    if (state->host_scratch_base) {
+  if (site_id < 0) {
+    fprintf(stderr, "hipdnn_ep_get_host_scratch_base: negative site_id %d\n",
+            site_id);
+    return nullptr;
+  }
+  if (site_id >= state->num_host_scratch_sites) {
+    int needed_count = site_id + 1;
+    auto *new_sites = static_cast<RuntimeHostScratchSite *>(
+        realloc(state->host_scratch_sites,
+                sizeof(RuntimeHostScratchSite) * needed_count));
+    if (!new_sites) {
+      fprintf(stderr, "Failed to grow host scratch site array to %d sites\n",
+              needed_count);
+      return nullptr;
+    }
+    state->host_scratch_sites = new_sites;
+    for (int i = state->num_host_scratch_sites; i < needed_count; ++i) {
+      state->host_scratch_sites[i].base = nullptr;
+      state->host_scratch_sites[i].size = 0;
+    }
+    state->num_host_scratch_sites = needed_count;
+  }
+
+  RuntimeHostScratchSite &site = state->host_scratch_sites[site_id];
+  if (needed_size == 0)
+    needed_size = 1;
+  if (needed_size > site.size) {
+    if (site.base) {
       if (state->stream)
         HIP_CLEANUP(hipStreamSynchronize(state->stream));
       fprintf(stderr,
-              "hipdnn_ep_get_host_scratch_base: growing host scratch "
+              "hipdnn_ep_get_host_scratch_base: growing host scratch[%d] "
               "%zu -> %zu bytes (rare; first time this large)\n",
-              state->host_scratch_size, needed_size);
+              site_id, site.size, needed_size);
       fflush(stderr);
-      HIP_CLEANUP(hipHostFree(state->host_scratch_base));
+      HIP_CLEANUP(hipHostFree(site.base));
     }
     void *new_base = nullptr;
     if (hipHostMalloc(&new_base, needed_size, hipHostMallocMapped) !=
         hipSuccess) {
       fprintf(stderr,
-              "hipdnn_ep_get_host_scratch_base: hipHostMalloc failed "
+              "hipdnn_ep_get_host_scratch_base: hipHostMalloc failed for "
+              "site[%d] "
               "(%zu -> %zu bytes)\n",
-              state->host_scratch_size, needed_size);
-      state->host_scratch_base = nullptr;
-      state->host_scratch_size = 0;
+              site_id, site.size, needed_size);
+      site.base = nullptr;
+      site.size = 0;
       return nullptr;
     }
-    state->host_scratch_base = new_base;
-    state->host_scratch_size = needed_size;
+    site.base = new_base;
+    site.size = needed_size;
   }
-  return state->host_scratch_base;
+  return site.base;
 }
 
+#ifdef HIPDNN_EP_POOL_UNIT_TEST
+} // extern "C"
+#else
 //===----------------------------------------------------------------------===//
 // Shared Workspace Support
 //===----------------------------------------------------------------------===//

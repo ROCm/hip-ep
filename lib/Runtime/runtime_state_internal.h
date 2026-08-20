@@ -33,6 +33,11 @@ struct RuntimePoolSite {
   size_t *pool_size;
 };
 
+struct RuntimeHostScratchSite {
+  void *base;
+  size_t size;
+};
+
 // Internal runtime state structure
 // This struct is opaque to generated code (passed as void*)
 struct RuntimeState {
@@ -68,16 +73,15 @@ struct RuntimeState {
   void *workspace;
   size_t workspace_size;
 
-  // Host-mapped scratch buffer for tiny host-fed scalars routed away from the
-  // GPU pool by hip-materialize-host-scalars.
+  // Per-function-site host-mapped scratch buffers for tiny host-fed scalars
+  // routed away from the GPU pool by hip-materialize-host-scalars.
   // hipHostMalloc(hipHostMallocMapped): host-writable AND GPU-readable.
   // Grow-on-demand via hipdnn_ep_get_host_scratch_base(); never shrinks.
-  // hipHostFree'd in cleanup. Why: on some targets the regular GPU pool is
-  // real device memory; host stores into it SEGV. Other targets silently
-  // worked because hipMalloc returned UMA-mapped host memory there, masking
-  // the bug.
-  void *host_scratch_base;
-  size_t host_scratch_size;
+  // Distinct compiled functions have disjoint storage, so a helper cannot
+  // invalidate its caller's live offset-zero scalar while growing. The table
+  // is hipHostFree'd in cleanup.
+  int num_host_scratch_sites;
+  RuntimeHostScratchSite *host_scratch_sites;
 
   // Output allocator installed by the EP before inference_compute via
   // hipdnn_ep_set_output_allocator. hipdnn_ep_alloc_output forwards to

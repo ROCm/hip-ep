@@ -8,7 +8,7 @@
 // host-fed scalar staging buffers -- small static-shape, integer-or-index
 // memrefs that have at least one host I/O user (memref.store / load) --
 // away from the GPU pool.  Each candidate is replaced by a `memref.view`
-// over a single per-function `hip.get_host_scratch(%ctx, %total)` buffer
+// over a single per-function-site `hip.get_host_scratch(%ctx, %total)` buffer
 // (host-mapped via `hipHostMalloc(hipHostMallocMapped)`, GPU-readable at
 // the same VA on UMA targets, runtime-owned, grow-on-demand).
 //
@@ -34,7 +34,8 @@
 // After (alloc replaced by a view into the per-function host scratch buffer):
 //
 //   %total   = arith.constant 8 : index              // 1 elem * 8 bytes (i64)
-//   %scratch = hip.get_host_scratch(%ctx, %total) : memref<?xi8>
+//   %scratch = hip.get_host_scratch(%ctx, %total)
+//                  {site_id = <module function ordinal>} : memref<?xi8>
 //   %c0      = arith.constant 0 : index
 //   %view    = memref.view %scratch[%c0][] : memref<?xi8> to memref<i64>
 //   %c0_i64  = arith.constant 0 : i64
@@ -99,10 +100,12 @@
 //     Utility functions and pre-context-arg passes don't have access to
 //     the runtime scratch handle; the pass is a best-effort mitigation,
 //     not a correctness requirement on every function.
-//   - Cross-function scratch coalescing: each function gets its own
-//     `hip.get_host_scratch` allocation.  The runtime pool is
-//     grow-on-demand and amortizes over the model's lifetime;
-//     cross-function pooling would need a different mechanism.
+//   - Cross-function scratch coalescing: each function gets a deterministic
+//     site ID and distinct runtime storage. This is required while outlined
+//     helpers execute with caller scratch still live.
+//   - Recursive/reentrant execution of the SAME compiled function: a site is
+//     reused by design. Production outlined helpers are non-recursive and
+//     RuntimeState permits one inference at a time.
 //   - Pipeline placement after `hip-pool-allocs`: this pass MUST run
 //     before `hip-pool-allocs`, otherwise candidates have already been
 //     rewritten as views into the GPU pool and the host-mapping rewrite
@@ -134,6 +137,23 @@ namespace hip {
 #include "hip/Dialect/Transforms/Passes.h.inc"
 
 namespace {
+
+/// Return this function's deterministic ordinal among top-level module
+/// functions. Symbol-table order is stable and function symbols are unique, so
+/// the ordinal is collision-free without hashing names.
+static FailureOr<int64_t> getFunctionSiteId(func::FuncOp funcOp) {
+  ModuleOp moduleOp = funcOp->getParentOfType<ModuleOp>();
+  if (!moduleOp)
+    return failure();
+
+  int64_t siteId = 0;
+  for (func::FuncOp candidate : moduleOp.getOps<func::FuncOp>()) {
+    if (candidate == funcOp)
+      return siteId;
+    ++siteId;
+  }
+  return failure();
+}
 
 // Round \p x up to a multiple of \p align (align must be a power of two).
 static int64_t roundUp(int64_t x, int64_t align) {
@@ -223,6 +243,13 @@ void MaterializeHostScalarsPass::runOnOperation() {
   func::FuncOp funcOp = getOperation();
   if (funcOp.empty())
     return;
+  FailureOr<int64_t> functionSiteId = getFunctionSiteId(funcOp);
+  if (failed(functionSiteId)) {
+    funcOp.emitError(
+        "hip-materialize-host-scalars: function must be a top-level module "
+        "symbol");
+    return signalPassFailure();
+  }
 
   // Need !hip.context as arg 0 to call hip.get_host_scratch. If absent (e.g.
   // utility funcs or pre-context-arg passes), silently skip — we're a
@@ -275,7 +302,8 @@ void MaterializeHostScalarsPass::runOnOperation() {
   auto scratchType =
       MemRefType::get({ShapedType::kDynamic}, builder.getIntegerType(8));
   Value scratch =
-      GetHostScratchOp::create(builder, loc, scratchType, ctx, totalSize);
+      GetHostScratchOp::create(builder, loc, scratchType, ctx, totalSize,
+                               builder.getI64IntegerAttr(*functionSiteId));
 
   // Replace each candidate with a memref.view over the scratch buffer.
   // Deallocs of the candidate are erased — the scratch buffer is owned by
