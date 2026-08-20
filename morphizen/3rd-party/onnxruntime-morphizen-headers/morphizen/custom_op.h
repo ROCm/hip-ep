@@ -47,6 +47,9 @@ public:
   MORPHIZEN_DLL_SPEC virtual ~CustomOp();
 
 public:
+  // The void return is part of the stable plugin ABI. Implementations signal
+  // execution failure by throwing; the MorphiZen ORT callback catches every
+  // exception and returns a non-null OrtStatus to ORT.
   virtual void Compute(const OrtApi *api, OrtKernelContext *context) const = 0;
 };
 

@@ -427,11 +427,12 @@ int hipdnn_ep_state_ensure_la_scratch(RuntimeState *state, size_t needed_size);
 // walks the array via each object's deletor.
 bool hipdnn_ep_op_states_alloc(RuntimeState *state, int64_t n);
 
-// Device-side runtime error flag (set by kernels, observed by wrappers).
-// Intended for operators that detect runtime-invalid inputs on GPU (e.g. Range
-// delta==0) and need to propagate an error code back through main_graph.
+// Shared runtime error flag. Generated code records every nonzero operation
+// status here; kernels may also write the device pointer directly.
 void *hipdnn_ep_state_get_error_flag_device_ptr(RuntimeState *state);
 int hipdnn_ep_state_reset_error_flag(RuntimeState *state);
+int hipdnn_ep_state_set_error_flag(RuntimeState *state);
+int hipdnn_ep_state_record_status(RuntimeState *state, int status);
 int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state);
 // Mark the start of a new Compute() call. Invalidates per-forward-pass
 // runtime caches -- today: the GQA seqlens_k cache (see
@@ -573,20 +574,9 @@ typedef struct {
   size_t count;   // Number of tensors
 } span_t;
 
-// Represents a prepared tensor with GPU buffer and metadata
-// Used internally by tensor preparation helpers
-typedef struct {
-  void *gpu_ptr;      // GPU memory (allocated, from pool, or aliased)
-  void *host_ptr;     // Host memory (from tensor_t.data)
-  int64_t *shape_ptr; // Shape array (from tensor_t.shape) for memref building
-  size_t rank;        // Tensor rank (for validation)
-  size_t size_bytes;  // Buffer size
-  bool is_pooled;     // Internal: true if from pool, false if allocated
-  // Internal: true if gpu_ptr aliases caller's GPU-accessible memory
-  // (tensor_t.memory_type == TENSOR_MEMORY_GPU). When set, free_input skips
-  // pool_release/hipFree because the memory is owned by the caller, not by us.
-  bool is_aliased;
-} TensorBuffer;
+// Opaque prepared-input record. Generated code obtains its storage size and
+// starts its lifetime through the helpers below; only the runtime owns layout.
+typedef struct TensorBuffer TensorBuffer;
 
 //===----------------------------------------------------------------------===//
 // Constant Access (used by generated inference code)
@@ -610,6 +600,12 @@ void *hipdnn_ep_constant_get(RuntimeState *state, int64_t index);
 // Element size: Read from tensor_t.element_size, set by the EP caller.
 //===----------------------------------------------------------------------===//
 
+// Return the number of i64 words required for one TensorBuffer and construct
+// an empty record in that storage. Generated code constructs every record
+// before the first fallible prepare call, making common error cleanup safe.
+int64_t hipdnn_ep_tensor_buffer_storage_words(void);
+void hipdnn_ep_tensor_buffer_construct(void *storage);
+
 // Prepare input tensor: parse, validate, get/allocate GPU buffer, H2D transfer
 //
 // Parameters:
@@ -628,6 +624,12 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
 //   state: Runtime state
 //   buffer: TensorBuffer from prepare_input
 void hipdnn_ep_tensor_free_input(RuntimeState *state, TensorBuffer *buffer);
+
+// Release the successfully prepared prefix of an array of TensorBuffer
+// pointers. Generated error cleanup passes the count committed after each
+// successful prepare call.
+void hipdnn_ep_tensor_free_inputs(RuntimeState *state, TensorBuffer **buffers,
+                                  size_t count);
 
 // Synchronize the GPU stream and print PERF/profile timing (if enabled).
 // Called by generated code after compute, before free_input.

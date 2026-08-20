@@ -36,3 +36,45 @@ target_compile_definitions(test-output-allocator PRIVATE HIPDNN_EP_RT_NO_EXPORT)
 add_test(NAME OutputAllocatorUnitTest COMMAND test-output-allocator)
 
 set_target_properties(test-output-allocator PROPERTIES FOLDER "runtime-tests")
+
+# Exercises the void CustomOp ABI's exception-to-OrtStatus boundary with a
+# generated-compute failure seam. The fake OrtApi needs only CreateStatus, so
+# this test executes without loading HIP or an ORT session.
+add_executable(test-custom-op-compute-status
+    test_custom_op_compute_status.cpp
+)
+
+target_compile_features(test-custom-op-compute-status PRIVATE cxx_std_17)
+
+target_include_directories(test-custom-op-compute-status PRIVATE
+    ${CMAKE_SOURCE_DIR}/morphizen/ort-bridge/src
+)
+
+target_link_libraries(test-custom-op-compute-status PRIVATE
+    onnxruntime::onnxruntime
+)
+
+add_test(NAME CustomOpComputeStatusUnitTest
+    COMMAND test-custom-op-compute-status)
+
+set_target_properties(test-custom-op-compute-status
+    PROPERTIES FOLDER "runtime-tests")
+
+# Pins the opaque TensorBuffer storage/initialization ABI used by generated
+# inference cleanup. This source has no HIP dependency.
+add_executable(test-tensor-buffer-lifecycle
+    test_tensor_buffer_lifecycle.cpp
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/tensor_buffer.cpp
+)
+
+target_compile_features(test-tensor-buffer-lifecycle PRIVATE cxx_std_17)
+
+target_include_directories(test-tensor-buffer-lifecycle PRIVATE
+    ${CMAKE_SOURCE_DIR}/lib/Runtime
+)
+
+add_test(NAME TensorBufferLifecycleUnitTest
+    COMMAND test-tensor-buffer-lifecycle)
+
+set_target_properties(test-tensor-buffer-lifecycle
+    PROPERTIES FOLDER "runtime-tests")

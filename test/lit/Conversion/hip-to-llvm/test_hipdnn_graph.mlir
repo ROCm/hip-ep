@@ -52,7 +52,8 @@ module {
     // CHECK:       llvm.store
     // CHECK:       llvm.store
 
-    // CHECK:       llvm.call @hipdnn_graph_execute({{.*}}) : (!llvm.ptr, i32, i32, !llvm.ptr, !llvm.ptr) -> i32
+    // CHECK:       %[[STATUS:.*]] = llvm.call @hipdnn_graph_execute({{.*}}) : (!llvm.ptr, i32, i32, !llvm.ptr, !llvm.ptr) -> i32
+    // CHECK-NEXT:  llvm.call @hipdnn_ep_state_record_status({{.*}}, %[[STATUS]])
 
     return
   }

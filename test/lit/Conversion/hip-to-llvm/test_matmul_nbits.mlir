@@ -36,9 +36,10 @@ module {
   }
 
   // CHECK-LABEL: llvm.func @test_matmul_nbits_basic
-  // CHECK: llvm.call @wrap_matmul_nbits({{.*}}) :
+  // CHECK: %[[STATUS:.*]] = llvm.call @wrap_matmul_nbits({{.*}}) :
   // CHECK-SAME: (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
   // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+  // CHECK-NEXT: llvm.call @hipdnn_ep_state_record_status({{.*}}, %[[STATUS]])
   // Verify 17 parameters:
   // - 1 i32: op_state_slot (2nd arg; per-instance MatmulNbitsState; threaded by
   //          --assign-op-state-slots, replaces shared RuntimeState::zp_unpack_cache)

@@ -90,7 +90,8 @@ module {
 }
 
 // CHECK-LABEL: llvm.func @test_gbq_static_with_zp
-// CHECK: llvm.call @wrap_gather_block_quantized({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK: %[[STATUS:.*]] = llvm.call @wrap_gather_block_quantized({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK-NEXT: llvm.call @hipdnn_ep_state_record_status({{.*}}, %[[STATUS]])
 
 // CHECK-LABEL: llvm.func @test_gbq_static_no_zp
 // CHECK: llvm.mlir.zero

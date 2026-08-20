@@ -5,6 +5,7 @@
 
 add_library(HipToLLVM STATIC
   HipToLLVM.cpp
+  RuntimeStatus.cpp
   MemoryLowering.cpp
   ConvLowering.cpp
   ConvTransposeLowering.cpp

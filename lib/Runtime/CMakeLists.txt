@@ -260,6 +260,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
         DEPENDS ${SOURCE_FILE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/hipdnn_ep_runtime.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/runtime_state_internal.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/tensor_buffer_internal.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/op_state.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/op_profile.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/chrome_trace.h
@@ -274,6 +275,8 @@ endmacro()
 
 # Compile shared implementation files
 compile_to_bitcode(hipdnn_ep_runtime_state.cpp runtime_state.bc)
+compile_to_bitcode(runtime_error.cpp runtime_error.bc)
+compile_to_bitcode(tensor_buffer.cpp runtime_tensor_buffer.bc)
 compile_to_bitcode(hipdnn_ep_runtime_tensor.cpp runtime_tensor.bc)
 compile_to_bitcode(hipdnn_ep_runtime_loop.cpp runtime_loop.bc)
 compile_to_bitcode(hipdnn_ep_runtime_if.cpp runtime_if.bc)
@@ -361,6 +364,8 @@ if(NOT BUILD_MOCK_RUNTIME)
 
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_error.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor_buffer.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_loop.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_if.bc
@@ -451,6 +456,8 @@ else()
 
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_error.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor_buffer.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_loop.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_if.bc
