@@ -589,13 +589,18 @@ def UseOutputAllocatorPass
     func.return.  Output buffers then come from the EP output allocator (the EP
     owns and frees them) instead of being deallocated or pooled.
 
-    An alloc counts as a graph output when func.return hands it back -- either
-    directly, or after it passes through view ops (memref.cast,
-    memref.collapse_shape, memref.expand_shape, memref.subview, any number of
-    them).  The pass uses BufferViewFlowAnalysis to check this: an alloc is an
-    output if any value made from it via those view ops is returned.  This
-    handles reshaped / cast / subview'd outputs without special-casing each op.
-    The view ops between the alloc and the return are left in place.
+    BufferViewFlowAnalysis discovers allocs returned through view aliases.  The
+    pass then validates the exact alloc-to-return chain before changing any IR.
+    Direct returns, any number of memref.cast ops, and one representable
+    memref.collapse_shape or memref.expand_shape (optionally with casts) are
+    accepted. A rank-preserving memref.subview with constant-zero offsets,
+    unit slice strides, a byte-addressable element type, and an identity-layout
+    return type is materialized as a fresh exact-shape hip.alloc_output plus
+    memref.copy immediately before return. Other chains, including nonzero
+    subview offsets and multiple rank-changing reshapes, fail with a
+    deterministic diagnostic because the callback ABI carries shape but cannot
+    represent a view offset or strides. Accepted reshape/cast ops between the
+    alloc and the return are left in place.
 
     Only public (graph-entry) functions are rewritten.  Private helpers (e.g.
     outlined onnx.Loop bodies) also take a !hip.context arg and return allocs,

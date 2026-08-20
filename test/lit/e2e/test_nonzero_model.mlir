@@ -3,16 +3,14 @@
 // Test NonZero E2E full pipeline
 // This IR represents an ONNX NonZero operation imported via onnx-mlir
 //
-// Verifies the complete hipdnn-pipeline:
-// 1. convert-onnx-to-hip: onnx.NonZero -> hip.nonzero
-// 2. canonicalize: Simplify redundant operations
-// 3. memory-pooling: Pool output buffer into single allocation
-// 4. convert-hip-to-llvm: HIP ops -> LLVM runtime calls
-// 5. generate-interface: Create inference_init/compute/cleanup/metadata
-
+// NonZero computes into a worst-case capacity buffer and returns a
+// data-dependent smaller subview. The output allocator pass materializes a
+// fresh exact-shape output and copies the logical subview before return.
+//
 // CHECK: module attributes {
 // CHECK-SAME: hipdnn.input_count = 1
 // CHECK-SAME: hipdnn.output_count = 1
+// CHECK: llvm.func @memrefCopy
 // CHECK: llvm.func @wrap_nonzero
 // CHECK: llvm.func @inference_init
 // CHECK: llvm.func @inference_compute
