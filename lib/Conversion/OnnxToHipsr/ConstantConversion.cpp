@@ -7,11 +7,13 @@
 
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
+#include "hip/Dialect/Onnx/IR/OnnxOps.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/Transforms/DialectConversion.h"
 
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/Twine.h"
@@ -27,24 +29,24 @@ namespace {
 // OnnxToHip.cpp.
 constexpr ::llvm::StringLiteral kOrtMemAddrTag = "*/_ORT_MEM_ADDR_/*";
 
-struct ConstantOpLowering : public ::mlir::ConversionPattern {
+struct ConstantOpLowering
+    : public ::mlir::OpConversionPattern<::mlir::onnx::ConstantOp> {
   ConstantOpLowering(const ::mlir::TypeConverter &typeConverter,
                      ::mlir::MLIRContext *ctx)
-      : ::mlir::ConversionPattern("onnx.Constant", /*benefit=*/1, ctx) {}
+      : OpConversionPattern(ctx) {}
 
   ::mlir::LogicalResult
-  matchAndRewrite(::mlir::Operation *op,
-                  ::mlir::ArrayRef<::mlir::Value> operands,
+  matchAndRewrite(::mlir::onnx::ConstantOp op, OpAdaptor adaptor,
                   ::mlir::ConversionPatternRewriter &rewriter) const override {
-    (void)operands;
     auto tensorType =
-        ::llvm::dyn_cast<::mlir::RankedTensorType>(op->getResult(0).getType());
+        ::llvm::dyn_cast<::mlir::RankedTensorType>(op.getOutput().getType());
     if (!tensorType) {
       return rewriter.notifyMatchFailure(op, "non-ranked result type");
     }
 
     // Inline dense value.
-    if (auto valueAttr = op->getAttrOfType<::mlir::ElementsAttr>("value")) {
+    if (auto valueAttr = ::llvm::dyn_cast_or_null<::mlir::ElementsAttr>(
+            adaptor.getValueAttr())) {
       // Rank-0 scalar stays a compile-time arith.constant (keeps the tensor<>
       // result type; the elements attr is TypedAttr-compatible).
       if (tensorType.getRank() == 0) {
@@ -63,13 +65,13 @@ struct ConstantOpLowering : public ::mlir::ConversionPattern {
     }
 
     // External data: location + offset + size.
-    auto locAttr = op->getAttrOfType<::mlir::StringAttr>("location");
+    ::mlir::StringAttr locAttr = adaptor.getLocationAttr();
     if (!locAttr) {
       return rewriter.notifyMatchFailure(
           op, "onnx.Constant has neither value nor location");
     }
-    auto offsetAttr = op->getAttrOfType<::mlir::IntegerAttr>("offset");
-    auto sizeAttr = op->getAttrOfType<::mlir::IntegerAttr>("size");
+    ::mlir::IntegerAttr offsetAttr = adaptor.getOffsetAttr();
+    ::mlir::IntegerAttr sizeAttr = adaptor.getSizeAttr();
     if (!offsetAttr || !sizeAttr) {
       return rewriter.notifyMatchFailure(
           op, "onnx.Constant with location missing offset/size");
