@@ -83,17 +83,18 @@ module {
   // CHECK: return %[[RESULT]] : tensor<16xf32>
   //
   // Outlined body func sits at module scope.  Signature:
-  //   (!hip.context, iter, cond_in, v_in, capture) -> v_out
+  //   (!hip.context, iter, cond_in, v_in, capture, !hip.loop_frame)
+  //       -> (i32 status, v_out)
   // Cond return slot is stripped under passthrough.
   // CHECK-LABEL: func.func private @main_graph_loop_body_n0
   // CHECK-SAME: (%{{.*}}: !hip.context,
   // CHECK-SAME:  %{{.*}}: tensor<i64>,
   // CHECK-SAME:  %{{.*}}: tensor<i1>,
-  // CHECK-SAME:  %[[V_IN:.*]]: tensor<16xf32>,
-  // CHECK-SAME:  %[[CAP:.*]]: tensor<16xf32>) -> tensor<16xf32>
+  // CHECK-SAME: tensor<16xf32>, %{{.*}}: tensor<16xf32>,
+  // CHECK-SAME: !hip.loop_frame) -> (i32, tensor<16xf32>)
   //
-  // CHECK: %[[ADD:.*]] = "onnx.Add"(%[[V_IN]], %[[CAP]])
-  // CHECK: return %[[ADD]] : tensor<16xf32>
+  // CHECK: %[[ADD:.*]] = "onnx.Add"
+  // CHECK: return %{{.*}}, %[[ADD]] : i32, tensor<16xf32>
 }
 
 // -----
@@ -169,10 +170,10 @@ module {
   // body block), but the return tuple is (cond_out, v_out) per the ONNX
   // Yield order that the outliner mirrors.
   // CHECK-LABEL: func.func private @main_graph_dynamic_cond_loop_body_n0
-  // CHECK-SAME: -> (tensor<i1>, tensor<16xf32>)
+  // CHECK-SAME: -> (i32, tensor<i1>, tensor<16xf32>)
   // CHECK: %[[ADD:.*]] = "onnx.Add"
   // CHECK: %[[NOT:.*]] = "onnx.Not"
-  // CHECK: return %[[NOT]], %[[ADD]] : tensor<i1>, tensor<16xf32>
+  // CHECK: return %{{.*}}, %[[NOT]], %[[ADD]] : i32, tensor<i1>, tensor<16xf32>
 }
 
 // -----
@@ -216,11 +217,11 @@ module {
   // is preserved as tensor<i1> (block-arg type copied verbatim).
   // CHECK-LABEL: func.func private @main_graph_no_cond_loop_body_n0
   // CHECK-SAME: %{{.*}}: tensor<i1>,
-  // CHECK-SAME: %[[V_IN:.*]]: tensor<16xf32>,
-  // CHECK-SAME: %[[CAP:.*]]: tensor<16xf32>) -> tensor<16xf32>
+  // CHECK-SAME: tensor<16xf32>, %{{.*}}: tensor<16xf32>,
+  // CHECK-SAME: !hip.loop_frame) -> (i32, tensor<16xf32>)
   //
-  // CHECK: %[[ADD:.*]] = "onnx.Add"(%[[V_IN]], %[[CAP]])
-  // CHECK: return %[[ADD]] : tensor<16xf32>
+  // CHECK: %[[ADD:.*]] = "onnx.Add"
+  // CHECK: return %{{.*}}, %[[ADD]] : i32, tensor<16xf32>
 }
 
 // -----
@@ -254,25 +255,20 @@ module {
   }
 
   // CHECK-LABEL: func.func @main_graph_v_init_refined
-  // hip.loop.result_type derived from v_init (tensor<16xf32>), not from
-  // the under-refined onnx.Loop body output (tensor<?xf32>).
+  // The ABI-only layer normalizes under-refined body boundaries to v_init.
   // CHECK: %[[R:.*]] = hip.loop
   // CHECK-SAME: iter_args(%{{.*}} : tensor<16xf32>)
   // CHECK-SAME: -> (tensor<16xf32>)
   // CHECK-SAME: body @main_graph_v_init_refined_loop_body_n0
   // CHECK: return %[[R]] : tensor<16xf32>
   //
-  // Body func arg slot 3 (v_carry) has the REFINED v_init type
-  // (tensor<16xf32>), not the under-refined body block v_in arg type
-  // (tensor<?xf32>). The body func's declared return type matches the
-  // cloned onnx.Identity result type as written in the source IR
-  // (tensor<?xf32>); refinement to tensor<16xf32> happens later via
-  // `--hip-infer-shapes` and is not part of LoopOutline's contract.
+  // Body current/result slots use the same exact descriptor contract.
   // CHECK-LABEL: func.func private @main_graph_v_init_refined_loop_body_n0
   // CHECK-SAME: (%{{.*}}: !hip.context,
   // CHECK-SAME:  %{{.*}}: tensor<i64>,
   // CHECK-SAME:  %{{.*}}: tensor<i1>,
-  // CHECK-SAME:  %[[V_IN:.*]]: tensor<16xf32>) -> tensor<?xf32>
+  // CHECK-SAME:  %[[V_IN:.*]]: tensor<16xf32>,
+  // CHECK-SAME:  %{{.*}}: !hip.loop_frame) -> (i32, tensor<16xf32>)
 }
 
 // -----
@@ -341,10 +337,11 @@ module {
   // CHECK-SAME: (%{{.*}}: !hip.context,
   // CHECK-SAME:  %{{.*}}: tensor<i64>,
   // CHECK-SAME:  %{{.*}}: tensor<ui8>,
-  // CHECK-SAME:  %{{.*}}: tensor<?x?x?xf16>,
-  // CHECK-SAME:  %{{.*}}: tensor<?x?x?xf16>) -> tensor<*xf16>
+  // CHECK-SAME: tensor<?x?x?xf16>, %{{.*}}: tensor<?x?x?xf16>,
+  // CHECK-SAME: !hip.loop_frame) -> (i32, tensor<?x?x?xf16>)
   //
   // CHECK: %[[CONCAT:.*]] = "onnx.Concat"
   // CHECK-SAME: -> tensor<*xf16>
-  // CHECK: return %[[CONCAT]] : tensor<*xf16>
+  // CHECK: tensor.cast %[[CONCAT]] : tensor<*xf16> to tensor<?x?x?xf16>
+  // CHECK: return %{{.*}}, %{{.*}} : i32, tensor<?x?x?xf16>
 }

@@ -185,3 +185,23 @@ target_compile_definitions(test-reduction-status PRIVATE
 )
 add_test(NAME ReductionStatusUnitTest COMMAND test-reduction-status)
 set_target_properties(test-reduction-status PROPERTIES FOLDER "runtime-tests")
+
+find_package(Threads REQUIRED)
+
+add_executable(test-loop-frame
+    test_loop_frame.cpp
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/hipdnn_ep_runtime_loop.cpp
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/mock/mock_gpu.cpp
+)
+target_compile_features(test-loop-frame PRIVATE cxx_std_17)
+target_include_directories(test-loop-frame PRIVATE
+    ${CMAKE_SOURCE_DIR}/lib/Runtime
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/mock
+)
+target_compile_definitions(test-loop-frame PRIVATE
+    HIPDNN_EP_RT_NO_EXPORT
+    HIPDNN_EP_RUNTIME_TESTING
+)
+target_link_libraries(test-loop-frame PRIVATE Threads::Threads)
+add_test(NAME LoopFrameUnitTest COMMAND test-loop-frame)
+set_target_properties(test-loop-frame PROPERTIES FOLDER "runtime-tests")

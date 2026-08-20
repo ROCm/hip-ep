@@ -552,27 +552,14 @@ def ResolveMemRefDimsPass
 
 def LoopBodyToOutParamsPass
     : Pass<"hip-loop-body-to-out-params", "mlir::ModuleOp"> {
-  let summary = "Promote outlined hip.loop body returns to out-param ABI";
+  let summary = "Prepare descriptor-return loop bodies and If out-params";
   let description = [{
-    Runs AFTER `one-shot-bufferize` and BEFORE the pool/lowering passes that
-    consume the out-param ABI.
-
-    `onnx-loop-outline` emits each `hip.loop` body as a private
-    `func.func` named `*_loop_body_*`. After bufferization those helpers
-    still return loop-carried memrefs, while `convert-hip-to-llvm`
-    LoopLowering expects the out-param ABI (`v_in` + `v_out` per
-    loop-carried value, with `{bufferize.result}` on each out-param).
-
-    This is the loop-body out-param ABI, which is INTERNAL to the DLL and
-    unrelated to the graph-entry output allocator ABI. `@main_graph`
-    outputs are handled by `hip-use-output-allocator` (`hip.alloc_output`
-    + EP callback); this pass only promotes the private `*_loop_body_*`
-    helpers by calling MLIR's `promoteBufferResultsToOutParams` with
-    `modifyPublicFunctions = false` and a filter on `*_loop_body_*` only.
-
-    Example (one loop-carried memref):
-      Before:  private @body(..., %v_in) -> memref<16xf32> { return %out }
-      After:   private @body(..., %v_in, %v_out {bufferize.result}) { return }
+    Runs after one-shot-bufferize. Loop carrier memrefs remain descriptor
+    results with i32 status result #0; returned allocations become
+    frame-owned hip.loop_alloc. A yielded descriptor owned by a nested frame,
+    capture, or other producer is copied into the current body's exact
+    frame/carrier bank before publication. Zero-carrier loops receive a real
+    frame token. If branch helpers retain the established generic out-param ABI.
   }];
   let dependentDialects = [
     "mlir::func::FuncDialect",
@@ -601,6 +588,10 @@ def UseOutputAllocatorPass
     deterministic diagnostic because the callback ABI carries shape but cannot
     represent a view offset or strides. Accepted reshape/cast ops between the
     alloc and the return are left in place.
+
+    Loop-backed graph outputs are followed through compatible view chains,
+    prevalidated as contiguous/identity-compatible, copied with checked status
+    into an exact identity-layout hip.alloc_output, and never adopted directly.
 
     Only public (graph-entry) functions are rewritten.  Private helpers (e.g.
     outlined onnx.Loop bodies) also take a !hip.context arg and return allocs,
@@ -737,29 +728,24 @@ def InferLoopBodyShapesPass
   ];
 }
 
-def FixLoopAccumulatorOffsetPass
-    : Pass<"hip-fix-loop-accumulator-offset", "mlir::func::FuncOp"> {
-  let summary = "Rewrite frozen Concat-accumulator offsets in outlined "
-                "hip.loop body functions to iter-driven offsets";
-  let description = [{
-    Out-param promotion + the LoopLowering trampoline alias each loop-carried
-    `v_in` arg and its `{bufferize.result}` `v_out` out-param onto one
-    immutable memref descriptor, so `memref.dim %v_in, %cN` is frozen at the
-    v_init dim every iteration. A growing-Concat accumulator then appends each
-    chunk at that frozen offset and only the last chunk survives.
+def FinalizeLoopFramesPass
+    : Pass<"hip-finalize-loop-frames", "mlir::func::FuncOp"> {
+  let summary = "Place explicit loop frame destruction after final descriptor use";
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::func::FuncDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
 
-    This pass rewrites each chunk-append `memref.subview` OFFSET from the frozen
-    `memref.dim` to the real per-iter chunk start: `seqlens_k[iter]` (read via a
-    synchronized `hip.readback_scalar` of the body's first
-    `hip.gather -> memref<1xi32>`), or `iter * chunk_size` when there is no
-    seqlens gather. Only OFFSETs are touched. Runs after out-param promotion
-    and before the pool/hoist passes. See FixLoopAccumulatorOffset.cpp for the
-    matcher and a Before/After snippet.
-  }];
+def PrepareLoopBodyFailuresPass
+    : Pass<"hip-prepare-loop-body-failures", "mlir::ModuleOp"> {
+  let summary = "Insert fail-fast control flow after loop carrier allocation";
   let dependentDialects = [
     "mlir::hip::HipDialect",
     "mlir::arith::ArithDialect",
-    "mlir::memref::MemRefDialect"
+    "mlir::cf::ControlFlowDialect",
+    "mlir::func::FuncDialect"
   ];
 }
 

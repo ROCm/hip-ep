@@ -226,11 +226,9 @@ buildOnnxToHipPipelineTail(OpPassManager &pm,
     bufferizeOpts.copyBeforeWrite = true;
   pm.addPass(bufferization::createOneShotBufferizePass(bufferizeOpts));
 
-  // 3. Promote outlined `*_loop_body_*` helpers to the out-param ABI
-  //    LoopLowering expects. @main_graph keeps its returned memrefs here and
-  //    defers output handling to slot 4.5 (hip-use-output-allocator). This pass
-  //    is scoped to the private loop bodies (modifyPublicFunctions = false) and
-  //    must run before the pool/lowering passes that consume the out-param ABI.
+  // 3. Establish outlined control-flow body ABIs. If branches retain generic
+  //    out-params. Loop bodies retain carrier descriptor results and redirect
+  //    their returned allocations to frame-owned hip.loop_alloc banks.
   pm.addPass(mlir::hip::createLoopBodyToOutParamsPass());
 
   // 4. Ownership-based buffer deallocation is intentionally NOT run. One-Shot
@@ -254,17 +252,11 @@ buildOnnxToHipPipelineTail(OpPassManager &pm,
   //      `memref.alloc` (`hip.alloc_output` carries a Write but no Allocate
   //      effect).
   pm.addNestedPass<func::FuncOp>(mlir::hip::createUseOutputAllocatorPass());
-
-  // 4.6. Rewrite frozen Concat-accumulator offsets in outlined hip.loop bodies
-  //      to iter-driven offsets (the loop trampoline aliases v_in/v_out onto
-  //      one descriptor, freezing `memref.dim %v_in` so a growing accumulator
-  //      keeps only its last chunk). Placement is load-bearing: AFTER
-  //      out-param promotion (slot 3, which is what creates the in-place-writer
-  //      alias) and BEFORE the pool/hoist passes (so the synthesized readback +
-  //      index_cast flow through them). No-op on non-loop-body funcs. See
-  //      FixLoopAccumulatorOffset.cpp.
-  pm.addNestedPass<func::FuncOp>(
-      mlir::hip::createFixLoopAccumulatorOffsetPass());
+  // Loop carrier banks are explicitly owned by the frame token appended by
+  // bufferization. Place destruction after all descriptor consumers and the
+  // exact graph-output copy, or transfer escaping nested results to the parent
+  // frame.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createFinalizeLoopFramesPass());
 
   // 5. Clean up after bufferization
   pm.addPass(createCSEPass());
@@ -482,6 +474,11 @@ void mlir::hip::buildHipToLLVMPipeline(
   // no-ops on modules with no stateful ops.
   pm.addPass(createAssignOpStateSlotsPass());
   pm.addPass(createGenerateOpStateInitPass());
+
+  // Pool planning requires single-block body functions. Only after pooling is
+  // complete, split each outlined body after hip.loop_alloc so allocation
+  // failure returns status + safe current descriptors before any kernel/copy.
+  pm.addPass(mlir::hip::createPrepareLoopBodyFailuresPass());
 
   // Lower `scf.for` / `scf.if` introduced by convert-linalg-to-loops (5a) to
   // unstructured control flow, then reconcile any leftover unrealized casts.

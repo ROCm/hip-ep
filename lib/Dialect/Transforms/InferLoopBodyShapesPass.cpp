@@ -60,6 +60,7 @@
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Operation.h"
@@ -242,7 +243,8 @@ static void inferLoopBodyShapes(func::FuncOp body, hip::LoopOp loopOp) {
   Operation::operand_range vInit = loopOp.getVInit();
   static constexpr unsigned kArgVCarryStart = 3;
 
-  // 1. Seed loop-carried block args from the loop op's v_init types.
+  // 1. Seed loop-carried block args from the exact v_init types. This ABI-only
+  //    layer rejects shape-changing carriers before outlining.
   for (auto [i, v] : llvm::enumerate(vInit)) {
     unsigned argSlot = kArgVCarryStart + i;
     if (argSlot < entry.getNumArguments())
@@ -256,16 +258,25 @@ static void inferLoopBodyShapes(func::FuncOp body, hip::LoopOp loopOp) {
   //    its v_init type per the ONNX Loop spec (covers ops with no forward
   //    rule).
   Operation *terminator = entry.getTerminator();
-  unsigned resultVCarryStart = loopOp.getCondIsPassthrough() ? 0u : 1u;
+  unsigned resultVCarryStart = loopOp.getCondIsPassthrough() ? 1u : 2u;
   for (auto [i, v] : llvm::enumerate(vInit)) {
     unsigned slot = resultVCarryStart + i;
     if (slot >= terminator->getNumOperands())
       break;
     Value carried = terminator->getOperand(slot);
+    if (auto cast = carried.getDefiningOp<tensor::CastOp>()) {
+      Value source = cast.getSource();
+      if (isa<UnrankedTensorType>(source.getType())) {
+        Type contract = v.getType();
+        source.setType(contract);
+        ++NumLoopContractRanked;
+      }
+    }
     if (isa<UnrankedTensorType>(carried.getType())) {
+      Type contract = v.getType();
       LLVM_DEBUG(DBGS() << "backstop return slot " << slot << ": "
-                        << carried.getType() << " -> " << v.getType() << "\n");
-      carried.setType(v.getType());
+                        << carried.getType() << " -> " << contract << "\n");
+      carried.setType(contract);
       ++NumLoopContractRanked;
     }
   }
@@ -284,7 +295,7 @@ static void inferLoopBodyShapes(func::FuncOp body, hip::LoopOp loopOp) {
 struct InferLoopBodyShapesPass
     : public impl::InferLoopBodyShapesPassBase<InferLoopBodyShapesPass> {
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<HipDialect, func::FuncDialect>();
+    registry.insert<HipDialect, func::FuncDialect, tensor::TensorDialect>();
   }
 
   void runOnOperation() override {

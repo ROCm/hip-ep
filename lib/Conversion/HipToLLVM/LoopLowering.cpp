@@ -11,16 +11,16 @@
 // memref-descriptor signature.
 //
 // Trampoline ABI:
-//   Receives  : (state*, iter_dev*, cond_dev*, lc_descs*, cap_descs*)
+//   Receives  : (state*, frame*, iter_dev*, cond_dev*, current_descs*,
+//                cap_descs*, next_descs*)
 //   Builds    : rank-0 memref descriptors for iter and cond from the raw
 //               device pointers; loads each loop-carried / capture
 //               descriptor struct from its slot in the *_descs array.
-//   Calls body: (state, iter, cond_in, v_in..., captures...,
-//                [cond_out if !cond_is_passthrough], v_out...).
-// Aliasing invariant: each v_in_i shares its buffer with v_out_i, and
-// cond_in shares with cond_out when not passthrough. Safe under v1
-// single-pass-per-kernel body semantics; the runtime driver enforces
-// non-nesting so the shared per-state iter/cond buffers cannot race.
+//   Calls body: (state, iter, cond_in, v_current..., captures..., frame)
+//               -> (i32 status, [cond_out,] v_next...).
+//   Publishes : returned carrier descriptors into next_descs only after all
+//               frame allocations succeed. Runtime swaps descriptor sets only
+//               when the callback returns success.
 //
 //===----------------------------------------------------------------------===//
 
@@ -94,19 +94,14 @@ static int64_t memrefRankFromStructType(Type structTy) {
 /// Build (or reuse) the trampoline LLVMFuncOp for this loop.
 ///
 /// Inserts `<body>_trampoline` at module scope.  Its body:
-///   * Receives (state, iter_dev, cond_dev, lc_descs, cap_descs).
+///   * Receives (state, frame, iter_dev, cond_dev, current, captures, next).
 ///   * Builds rank-0 memref descriptors for iter and cond from the raw ptrs.
 ///   * Loads the loop-carried and captured memref descriptors from the
 ///     pointer arrays (each entry is a pointer to a descriptor struct
 ///     allocated by the calling main_graph function).
-///   * Calls the outlined body with the body's positional signature
-///     (state, iter, cond_in, v_in..., captures..., cond_out, v_out...).
-///   * Returns 0.
-///
-/// Aliasing invariant: cond_in and cond_out share the same buffer, and
-/// each v_in_i shares its buffer with the corresponding v_out_i.  This
-/// matches the runtime driver's per-iter buffer management and the body's
-/// single-pass-per-kernel safety (see file header).
+///   * Calls the outlined body using MLIR's standard descriptor-result ABI.
+///   * Copies dynamic cond_out into the frame-local condition slot and writes
+///     all next carrier descriptors transactionally.
 ///
 /// Precondition: the body has not yet been converted to LLVMFuncOp.  The
 /// LoopOpLowering caller enforces this by failing if `module.lookupSymbol
@@ -128,9 +123,10 @@ createOrGetTrampoline(OpBuilder &b, ModuleOp module, Location loc, LoopOp op,
   Type ptrTy = LLVM::LLVMPointerType::get(ctx, 0);
   Type i32Ty = b.getI32Type();
 
-  // Fixed trampoline signature: (state, iter, cond, lc[], cap[]) -> i32.
-  auto trampType =
-      LLVM::LLVMFunctionType::get(i32Ty, {ptrTy, ptrTy, ptrTy, ptrTy, ptrTy});
+  // Fixed trampoline signature:
+  //   (state, frame, iter, cond, current_lc[], cap[], next_lc[]) -> i32.
+  auto trampType = LLVM::LLVMFunctionType::get(
+      i32Ty, {ptrTy, ptrTy, ptrTy, ptrTy, ptrTy, ptrTy, ptrTy});
 
   OpBuilder::InsertionGuard guard(b);
   b.setInsertionPointToEnd(module.getBody());
@@ -141,10 +137,12 @@ createOrGetTrampoline(OpBuilder &b, ModuleOp module, Location loc, LoopOp op,
   b.setInsertionPointToStart(entry);
 
   Value stateArg = entry->getArgument(0);
-  Value iterPtr = entry->getArgument(1);
-  Value condPtr = entry->getArgument(2);
-  Value lcArr = entry->getArgument(3);
-  Value capArr = entry->getArgument(4);
+  Value frameArg = entry->getArgument(1);
+  Value iterPtr = entry->getArgument(2);
+  Value condPtr = entry->getArgument(3);
+  Value lcArr = entry->getArgument(4);
+  Value capArr = entry->getArgument(5);
+  Value nextArr = entry->getArgument(6);
 
   // Convert each body func.func arg type through the LLVMTypeConverter to
   // get the per-arg LLVM struct (one struct per memref).  This is the
@@ -162,40 +160,22 @@ createOrGetTrampoline(OpBuilder &b, ModuleOp module, Location loc, LoopOp op,
     bodyArgTypes.append(converted.begin(), converted.end());
   }
 
-  // Layout (matches outlining pass output):
+  // Argument layout (the frame is appended so established carrier indexes do
+  // not move):
   //   arg 0           : !hip.context           (lowered to !llvm.ptr)
   //   arg 1           : memref<i64>            (iter)
   //   arg 2           : memref<i1>             (cond_in)
   //   arg 3..3+numLC  : loop-carried memrefs   (v_in_i)
   //   ..+numCap       : captures               (cap_j)
-  //   [if !cond_is_passthrough]
-  //     ..            : memref<i1>             (cond_out, bufferize.result)
-  //   ..              : loop-carried memrefs   (v_out_i, bufferize.result)
+  //   final arg        : !hip.loop_frame
   bool condIsPassthrough = op.getCondIsPassthrough();
-  unsigned expectedArgCount =
-      3 + 2 * numLC + numCap + (condIsPassthrough ? 0 : 1);
+  unsigned expectedArgCount = 4 + numLC + numCap;
   if (bodyArgTypes.size() != expectedArgCount) {
     tramp.emitError("body arg count mismatch: expected ")
-        << expectedArgCount << " (3 + 2*" << numLC << " + " << numCap << " + "
-        << (condIsPassthrough ? 0 : 1) << "), got " << bodyArgTypes.size();
+        << expectedArgCount << " (4 + " << numLC << " + " << numCap << "), got "
+        << bodyArgTypes.size();
     return {};
   }
-  // After populateFuncToLLVMConversionPatterns, each memref arg in
-  // bodyArgTypes is presented as a single struct type (the per-rank
-  // descriptor type).  At the call site we must emit one ARG PER FIELD
-  // because the func-to-llvm lowering rewrites the body's signature to
-  // the expanded form (allocPtr, alignedPtr, offset, sizes..., strides...)
-  // -- the call has to match.
-  //
-  // Locate body arg positions:
-  //   arg 0           : !hip.context           (lowered to !llvm.ptr)
-  //   arg 1           : memref<i64>            (iter)
-  //   arg 2           : memref<i1>             (cond_in)
-  //   arg 3..3+numLC  : loop-carried memrefs   (v_in_i)
-  //   ..+numCap       : captures               (cap_j)
-  //   [if !cond_is_passthrough]
-  //     ..            : memref<i1>             (cond_out, bufferize.result)
-  //   ..              : loop-carried memrefs   (v_out_i, bufferize.result)
 
   // Load each loop-carried / capture descriptor struct from its slot.
   // (We DON'T need iter/cond -- those are passed as raw ptrs from the
@@ -213,15 +193,48 @@ createOrGetTrampoline(OpBuilder &b, ModuleOp module, Location loc, LoopOp op,
   for (unsigned i = 0; i < numLC; ++i)
     lcDescs.push_back(loadDesc(lcArr, i, bodyArgTypes[3 + i]));
 
+  FailureOr<LLVM::LLVMFuncOp> setCurrentFn =
+      LLVM::lookupOrCreateFn(b, module, "hipdnn_ep_loop_frame_set_current",
+                             {ptrTy, i32Ty, ptrTy}, i32Ty);
+  if (failed(setCurrentFn))
+    return {};
+  Value zero = LLVM::ConstantOp::create(b, loc, i32Ty, b.getI32IntegerAttr(0));
+  Value setCurrentStatus = zero;
+  for (unsigned i = 0; i < numLC; ++i) {
+    Value index = LLVM::ConstantOp::create(
+        b, loc, i32Ty, b.getI32IntegerAttr(static_cast<int32_t>(i)));
+    Value currentData = LLVM::ExtractValueOp::create(
+        b, loc, lcDescs[i], ArrayRef<int64_t>{kAlignedPtrIdx});
+    Value status =
+        LLVM::CallOp::create(b, loc, *setCurrentFn,
+                             ValueRange{frameArg, index, currentData})
+            .getResult();
+    Value priorSucceeded = LLVM::ICmpOp::create(b, loc, LLVM::ICmpPredicate::eq,
+                                                setCurrentStatus, zero);
+    setCurrentStatus = LLVM::SelectOp::create(b, loc, priorSucceeded, status,
+                                              setCurrentStatus);
+  }
+
+  // A malformed frame must not reach the body with partially installed
+  // current pointers. Preserve the first setter failure and return it through
+  // the trampoline's existing status result.
+  Value setCurrentSucceeded = LLVM::ICmpOp::create(
+      b, loc, LLVM::ICmpPredicate::eq, setCurrentStatus, zero);
+  Block *setCurrentFailureBlock = tramp.addBlock();
+  Block *prepareBodyBlock = tramp.addBlock();
+  LLVM::CondBrOp::create(b, loc, setCurrentSucceeded, prepareBodyBlock,
+                         setCurrentFailureBlock);
+  b.setInsertionPointToStart(setCurrentFailureBlock);
+  LLVM::ReturnOp::create(b, loc, setCurrentStatus);
+  b.setInsertionPointToStart(prepareBodyBlock);
+
   SmallVector<Value> capDescs;
   for (unsigned j = 0; j < numCap; ++j)
     capDescs.push_back(loadDesc(capArr, j, bodyArgTypes[3 + numLC + j]));
 
   // Assemble call args for the body, EXPANDED form.
-  // Order must match the outlining-pass output post-BufferResultsToOutParams:
-  //   state, iter, cond_in, v_in_0..numLC-1, cap_0..numCap-1,
-  //   [cond_out (only when !cond_is_passthrough)],
-  //   v_out_0..numLC-1
+  // Order matches the outlined body: state, iter, cond, current carriers,
+  // captures, frame.
   SmallVector<Value> bodyCallArgs;
   bodyCallArgs.push_back(stateArg);
   emitRank0DescriptorFields(b, loc, iterPtr, bodyCallArgs);
@@ -232,24 +245,130 @@ createOrGetTrampoline(OpBuilder &b, ModuleOp module, Location loc, LoopOp op,
   for (Value d : capDescs)
     expandMemRefStruct(b, loc, d, memrefRankFromStructType(d.getType()),
                        bodyCallArgs);
-  if (!condIsPassthrough) {
-    // cond_out aliased with cond_in (same buffer, single-pass kernel safety).
-    emitRank0DescriptorFields(b, loc, condPtr, bodyCallArgs);
+  bodyCallArgs.push_back(frameArg);
+
+  // Func-to-LLVM returns one memref descriptor directly, or a literal struct
+  // containing one descriptor per source-level result.
+  SmallVector<Type> bodyResultTypes;
+  for (Type t : bodyFuncFn.getResultTypes()) {
+    SmallVector<Type, 1> converted;
+    if (failed(typeConverter.convertType(t, converted)) ||
+        converted.size() != 1) {
+      tramp.emitError("could not convert body result type ") << t;
+      return {};
+    }
+    bodyResultTypes.push_back(converted.front());
   }
-  // v_out_i == v_in_i (same buffer, single-pass kernel safety).
-  for (Value d : lcDescs)
-    expandMemRefStruct(b, loc, d, memrefRankFromStructType(d.getType()),
-                       bodyCallArgs);
+  unsigned carrierResultStart = condIsPassthrough ? 1u : 2u;
+  if (bodyResultTypes.size() != carrierResultStart + numLC) {
+    tramp.emitError("body result count mismatch for descriptor-return ABI");
+    return {};
+  }
+  Type packedResultType =
+      bodyResultTypes.size() == 1
+          ? bodyResultTypes.front()
+          : LLVM::LLVMStructType::getLiteral(ctx, bodyResultTypes);
+  Value packed =
+      LLVM::CallOp::create(b, loc, TypeRange{packedResultType},
+                           FlatSymbolRefAttr::get(ctx, bodyName), bodyCallArgs)
+          .getResult();
+  auto getBodyResult = [&](unsigned index) -> Value {
+    if (bodyResultTypes.size() == 1)
+      return packed;
+    return LLVM::ExtractValueOp::create(b, loc, packed,
+                                        ArrayRef<int64_t>{index});
+  };
 
-  // Call the body by symbol name.  The verifier checks this matches once
-  // the body has been converted to LLVMFuncOp (which it will be by the
-  // end of the same partial-conversion pass, via
-  // populateFuncToLLVMConversionPatterns).
-  LLVM::CallOp::create(b, loc, /*results=*/TypeRange{},
-                       FlatSymbolRefAttr::get(ctx, bodyName), bodyCallArgs);
+  // Body status is result #0. Allocation failure is also recorded on the
+  // frame by hip.loop_alloc. Neither path may publish a descriptor.
+  Value bodyStatus = getBodyResult(0);
+  FailureOr<LLVM::LLVMFuncOp> statusFn = LLVM::lookupOrCreateFn(
+      b, module, "hipdnn_ep_loop_frame_status", {ptrTy}, i32Ty);
+  if (failed(statusFn))
+    return {};
+  Value frameStatus =
+      LLVM::CallOp::create(b, loc, *statusFn, ValueRange{frameArg}).getResult();
+  Value bodySucceeded =
+      LLVM::ICmpOp::create(b, loc, LLVM::ICmpPredicate::eq, bodyStatus, zero);
+  Value frameSucceeded =
+      LLVM::ICmpOp::create(b, loc, LLVM::ICmpPredicate::eq, frameStatus, zero);
+  Value succeeded = LLVM::AndOp::create(b, loc, bodySucceeded, frameSucceeded);
+  Value failureStatus =
+      LLVM::SelectOp::create(b, loc, bodySucceeded, frameStatus, bodyStatus);
+  Block *validatePublishBlock = tramp.addBlock();
+  Block *failureBlock = tramp.addBlock();
+  LLVM::CondBrOp::create(b, loc, succeeded, validatePublishBlock, failureBlock);
 
-  Value zero = LLVM::ConstantOp::create(b, loc, i32Ty, b.getI32IntegerAttr(0));
-  LLVM::ReturnOp::create(b, loc, ValueRange{zero});
+  b.setInsertionPointToStart(failureBlock);
+  LLVM::ReturnOp::create(b, loc, failureStatus);
+
+  b.setInsertionPointToStart(validatePublishBlock);
+  FailureOr<LLVM::LLVMFuncOp> publishFn = LLVM::lookupOrCreateFn(
+      b, module, "hipdnn_ep_loop_frame_publish", {ptrTy, i32Ty, ptrTy}, i32Ty);
+  if (failed(publishFn))
+    return {};
+  Value publishCallStatus = zero;
+  for (unsigned i = 0; i < numLC; ++i) {
+    Value descriptor = getBodyResult(carrierResultStart + i);
+    Value data = LLVM::ExtractValueOp::create(
+        b, loc, descriptor, ArrayRef<int64_t>{kAlignedPtrIdx});
+    Value index = LLVM::ConstantOp::create(
+        b, loc, i32Ty, b.getI32IntegerAttr(static_cast<int32_t>(i)));
+    Value status = LLVM::CallOp::create(b, loc, *publishFn,
+                                        ValueRange{frameArg, index, data})
+                       .getResult();
+    Value priorSucceeded = LLVM::ICmpOp::create(b, loc, LLVM::ICmpPredicate::eq,
+                                                publishCallStatus, zero);
+    publishCallStatus = LLVM::SelectOp::create(b, loc, priorSucceeded, status,
+                                               publishCallStatus);
+  }
+  Value framePublishStatus =
+      LLVM::CallOp::create(b, loc, *statusFn, ValueRange{frameArg}).getResult();
+  Value publishCallsSucceeded = LLVM::ICmpOp::create(
+      b, loc, LLVM::ICmpPredicate::eq, publishCallStatus, zero);
+  Value publishStatus = LLVM::SelectOp::create(
+      b, loc, publishCallsSucceeded, framePublishStatus, publishCallStatus);
+  Value publishSucceeded = LLVM::ICmpOp::create(b, loc, LLVM::ICmpPredicate::eq,
+                                                publishStatus, zero);
+  Block *publishBlock = tramp.addBlock();
+  Block *publishFailureBlock = tramp.addBlock();
+  LLVM::CondBrOp::create(b, loc, publishSucceeded, publishBlock,
+                         publishFailureBlock);
+  b.setInsertionPointToStart(publishFailureBlock);
+  LLVM::ReturnOp::create(b, loc, publishStatus);
+
+  b.setInsertionPointToStart(publishBlock);
+  Value callbackStatus = zero;
+  if (!condIsPassthrough) {
+    Value condDesc = getBodyResult(1);
+    Value condSrc = LLVM::ExtractValueOp::create(
+        b, loc, condDesc, ArrayRef<int64_t>{kAlignedPtrIdx});
+    Value oneByte = LLVM::ConstantOp::create(b, loc, b.getI64Type(),
+                                             b.getI64IntegerAttr(1));
+    FailureOr<LLVM::LLVMFuncOp> copyFn =
+        LLVM::lookupOrCreateFn(b, module, kWrapHipMemcpyAsync,
+                               {ptrTy, ptrTy, ptrTy, b.getI64Type()}, i32Ty);
+    if (failed(copyFn))
+      return {};
+    callbackStatus =
+        LLVM::CallOp::create(b, loc, *copyFn,
+                             ValueRange{stateArg, condPtr, condSrc, oneByte})
+            .getResult();
+  }
+
+  // Write the complete next descriptor set. Runtime swaps current/next only
+  // when callbackStatus is zero, so a failed body cannot partially publish.
+  for (unsigned i = 0; i < numLC; ++i) {
+    Value index = LLVM::ConstantOp::create(b, loc, b.getI64Type(),
+                                           b.getI64IntegerAttr(i));
+    Value slotPtr =
+        LLVM::GEPOp::create(b, loc, ptrTy, ptrTy, nextArr, ValueRange{index});
+    Value descPtr = LLVM::LoadOp::create(b, loc, ptrTy, slotPtr);
+    LLVM::StoreOp::create(b, loc, getBodyResult(carrierResultStart + i),
+                          descPtr);
+  }
+
+  LLVM::ReturnOp::create(b, loc, callbackStatus);
 
   return tramp;
 }
@@ -283,7 +402,10 @@ struct LoopOpLowering : public ConvertOpToLLVMPattern<LoopOp> {
     // driver visits the LoopOp before recursing into its body func.
     StringRef bodyName = op.getBodyFunc();
     auto bodyFuncFn = module.lookupSymbol<func::FuncOp>(bodyName);
-    if (!bodyFuncFn) {
+    std::string trampolineName = (bodyName + "_trampoline").str();
+    auto precreatedTrampoline =
+        module.lookupSymbol<LLVM::LLVMFuncOp>(trampolineName);
+    if (!bodyFuncFn && !precreatedTrampoline) {
       if (module.lookupSymbol<LLVM::LLVMFuncOp>(bodyName))
         return op.emitOpError("body func '")
                << bodyName
@@ -299,9 +421,13 @@ struct LoopOpLowering : public ConvertOpToLLVMPattern<LoopOp> {
     // Generate (or fetch) the trampoline.  Inserted at module scope.
     LLVM::LLVMFuncOp tramp;
     {
-      OpBuilder modBuilder(module.getBody(), module.getBody()->end());
-      tramp = createOrGetTrampoline(modBuilder, module, loc, op, bodyFuncFn,
-                                    *getTypeConverter(), numLC, numCap);
+      if (precreatedTrampoline) {
+        tramp = precreatedTrampoline;
+      } else {
+        OpBuilder modBuilder(module.getBody(), module.getBody()->end());
+        tramp = createOrGetTrampoline(modBuilder, module, loc, op, bodyFuncFn,
+                                      *getTypeConverter(), numLC, numCap);
+      }
       if (!tramp)
         return failure();
     }
@@ -310,29 +436,40 @@ struct LoopOpLowering : public ConvertOpToLLVMPattern<LoopOp> {
     Value trampPtr =
         LLVM::AddressOfOp::create(rewriter, loc, ptrTy, tramp.getSymNameAttr());
 
-    // Build a stack array of descriptor pointers for loop-carried operands.
-    //   ptr[numLC]: each entry is alloca'd to hold the corresponding
-    //   memref descriptor struct, with the descriptor's value stored
-    //   into it.
+    // Build two stack arrays of descriptor pointers. The initial array owns
+    // copies of v_init descriptors; the scratch array provides one descriptor
+    // slot per carrier for the callback's atomic next set. Runtime swaps these
+    // arrays after successful iterations and returns the final array pointer.
     Value oneI64 = LLVM::ConstantOp::create(rewriter, loc, i64Ty,
                                             rewriter.getI64IntegerAttr(1));
-    Value lcArrayPtr;
-    {
+    auto buildLCArray = [&](bool initialize) -> Value {
       Type arrTy = LLVM::LLVMArrayType::get(ptrTy, numLC == 0 ? 1 : numLC);
-      lcArrayPtr = LLVM::AllocaOp::create(rewriter, loc, ptrTy, arrTy, oneI64,
-                                          /*alignment=*/8);
+      Value array = LLVM::AllocaOp::create(rewriter, loc, ptrTy, arrTy, oneI64,
+                                           /*alignment=*/8);
       for (unsigned i = 0; i < numLC; ++i) {
         Value desc = adaptor.getVInit()[i];
         Value descSlot = LLVM::AllocaOp::create(
             rewriter, loc, ptrTy, desc.getType(), oneI64, /*alignment=*/8);
-        LLVM::StoreOp::create(rewriter, loc, desc, descSlot);
+        if (initialize)
+          LLVM::StoreOp::create(rewriter, loc, desc, descSlot);
         Value idxVal = LLVM::ConstantOp::create(rewriter, loc, i64Ty,
                                                 rewriter.getI64IntegerAttr(i));
-        Value slotPtr = LLVM::GEPOp::create(rewriter, loc, ptrTy, ptrTy,
-                                            lcArrayPtr, ValueRange{idxVal});
+        Value slotPtr = LLVM::GEPOp::create(rewriter, loc, ptrTy, ptrTy, array,
+                                            ValueRange{idxVal});
         LLVM::StoreOp::create(rewriter, loc, descSlot, slotPtr);
       }
-    }
+      return array;
+    };
+    Value lcArrayPtr = buildLCArray(/*initialize=*/true);
+    Value scratchArrayPtrA = buildLCArray(/*initialize=*/false);
+    Value scratchArrayPtrB = buildLCArray(/*initialize=*/false);
+    Value finalArrayOut = LLVM::AllocaOp::create(rewriter, loc, ptrTy, ptrTy,
+                                                 oneI64, /*alignment=*/8);
+    LLVM::StoreOp::create(rewriter, loc, lcArrayPtr, finalArrayOut);
+    Value frameOut = LLVM::AllocaOp::create(rewriter, loc, ptrTy, ptrTy, oneI64,
+                                            /*alignment=*/8);
+    Value nullPtr = LLVM::ZeroOp::create(rewriter, loc, ptrTy);
+    LLVM::StoreOp::create(rewriter, loc, nullPtr, frameOut);
 
     // Same for captures.  If numCap is 0, allocate a tiny placeholder so
     // the runtime sees a non-null pointer (and num_cap=0).
@@ -382,29 +519,78 @@ struct LoopOpLowering : public ConvertOpToLLVMPattern<LoopOp> {
         op.getCondIsPassthrough() ? kRunCountedLoop : kRunLoop;
 
     // Runtime signature:
-    //   i32 (*)(state*, body_fn*, i64 M, i1 cond_init,
-    //           i32 num_lc, i32 num_cap, ptr* lc_descs, ptr* cap_descs)
-    SmallVector<Type, 8> paramTypes = {ptrTy, ptrTy, i64Ty, i1Ty,
-                                       i32Ty, i32Ty, ptrTy, ptrTy};
+    //   i32 (*)(state*, body_fn*, i64 M, i1 cond_init, i32 num_lc,
+    //           i32 num_cap, ptr* initial, ptr* scratch, ptr* captures,
+    //           ptr** final_array)
+    SmallVector<Type, 13> paramTypes = {ptrTy, ptrTy, i64Ty, i1Ty,  i32Ty,
+                                        i32Ty, ptrTy, ptrTy, ptrTy, ptrTy,
+                                        ptrTy, ptrTy, ptrTy};
     FailureOr<LLVM::LLVMFuncOp> runLoopFn = LLVM::lookupOrCreateFn(
         rewriter, module, runtimeSymbol, paramTypes, i32Ty);
     if (failed(runLoopFn))
       return failure();
 
-    SmallVector<Value, 8> args = {adaptor.getCtx(), trampPtr,   maxTripCountI64,
-                                  condInit,         numLCConst, numCapConst,
-                                  lcArrayPtr,       capArrayPtr};
-    LLVM::CallOp::create(rewriter, loc, *runLoopFn, args);
+    Value parentFrame =
+        adaptor.getParentFrame() ? adaptor.getParentFrame() : nullPtr;
+    SmallVector<Value, 13> args = {
+        adaptor.getCtx(), trampPtr,    maxTripCountI64, condInit,
+        numLCConst,       numCapConst, lcArrayPtr,      scratchArrayPtrA,
+        scratchArrayPtrB, capArrayPtr, parentFrame,     finalArrayOut,
+        frameOut};
+    Value runStatus =
+        LLVM::CallOp::create(rewriter, loc, *runLoopFn, args).getResult();
+    Value zeroStatus = LLVM::ConstantOp::create(rewriter, loc, i32Ty,
+                                                rewriter.getI32IntegerAttr(0));
+    Value runSucceeded = LLVM::ICmpOp::create(
+        rewriter, loc, LLVM::ICmpPredicate::eq, runStatus, zeroStatus);
 
-    // hip.loop has no LLVM-level results post-bufferization (loop-carried
-    // results were converted to out-params).  Replace any remaining uses
-    // (should be zero) and erase.
-    rewriter.eraseOp(op);
+    Value returnedArray =
+        LLVM::LoadOp::create(rewriter, loc, ptrTy, finalArrayOut);
+    Value finalArray = LLVM::SelectOp::create(rewriter, loc, runSucceeded,
+                                              returnedArray, lcArrayPtr);
+    SmallVector<Value> finalDescriptors;
+    finalDescriptors.reserve(numLC);
+    for (unsigned i = 0; i < numLC; ++i) {
+      Value index = LLVM::ConstantOp::create(rewriter, loc, i64Ty,
+                                             rewriter.getI64IntegerAttr(i));
+      Value slot = LLVM::GEPOp::create(rewriter, loc, ptrTy, ptrTy, finalArray,
+                                       ValueRange{index});
+      Value descPtr = LLVM::LoadOp::create(rewriter, loc, ptrTy, slot);
+      finalDescriptors.push_back(LLVM::LoadOp::create(
+          rewriter, loc, adaptor.getVInit()[i].getType(), descPtr));
+    }
+    Value returnedFrame = LLVM::LoadOp::create(rewriter, loc, ptrTy, frameOut);
+    Value safeFrame = LLVM::SelectOp::create(rewriter, loc, runSucceeded,
+                                             returnedFrame, nullPtr);
+    finalDescriptors.push_back(safeFrame);
+    rewriter.replaceOp(op, finalDescriptors);
     return success();
   }
 };
 
 } // namespace
+
+LogicalResult precreateLoopTrampolines(ModuleOp module,
+                                       const LLVMTypeConverter &converter) {
+  LogicalResult result = success();
+  module.walk([&](LoopOp loop) {
+    if (failed(result))
+      return;
+    auto body = module.lookupSymbol<func::FuncOp>(loop.getBodyFuncAttr());
+    if (!body) {
+      loop.emitOpError("body func must exist before trampoline precreation");
+      result = failure();
+      return;
+    }
+    OpBuilder builder(module.getBody(), module.getBody()->end());
+    LLVM::LLVMFuncOp trampoline = createOrGetTrampoline(
+        builder, module, loop.getLoc(), loop, body, converter,
+        loop.getNumLoopCarried(), loop.getCaptures().size());
+    if (!trampoline)
+      result = failure();
+  });
+  return result;
+}
 
 void populateLoopLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns) {

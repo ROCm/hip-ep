@@ -21,4 +21,14 @@ def Hip_ContextType : Hip_Type<"Context", "context"> {
   }];
 }
 
+def Hip_LoopFrameType : Hip_Type<"LoopFrame", "loop_frame"> {
+  let summary = "Per-invocation storage for shape-changing loop carriers";
+  let description = [{
+    Opaque handle owned by the loop runtime for one invocation of one
+    `hip.loop`. The handle gives an outlined body access to the dedicated
+    double-buffered carrier allocator without using a process-global or
+    RuntimeState-global carrier slot. Lowered to !llvm.ptr.
+  }];
+}
+
 #endif // HIP_TYPES

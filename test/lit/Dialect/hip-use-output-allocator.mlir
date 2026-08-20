@@ -336,3 +336,65 @@ func.func @expand_logits_class(%ctx: !hip.context, %n: index) -> memref<1x?x92xf
        : memref<?x92xf16> into memref<1x?x92xf16>
   return %ret : memref<1x?x92xf16>
 }
+
+// --- Descriptor-return loop graph output: allocate exact EP output after the
+//     loop and perform one final copy; never adopt the carrier bank. ---
+// CHECK-LABEL: func.func @loop_graph_output
+// CHECK: %[[LOOP:[^: ]+]]:2 = hip.loop
+// CHECK: %[[OUT:.*]] = hip.alloc_output(%{{.*}}) {out_idx = 0 : i64} : memref<16xf32>
+// CHECK: hip.copy_output(%{{.*}}, %[[LOOP]]#0, %[[OUT]])
+// CHECK: return %[[OUT]]
+func.func @loop_graph_output(%ctx: !hip.context, %seed: memref<16xf32>)
+    -> memref<16xf32> {
+  %zero = arith.constant 0 : index
+  %true = arith.constant true
+  %result, %loop_frame = hip.loop(%ctx, %zero, %true)
+      iter_args(%seed : memref<16xf32>)
+      -> (memref<16xf32>, !hip.loop_frame)
+      body @loop_graph_output_body
+      {cond_is_passthrough, descriptor_return, num_loop_carried = 1 : i32}
+  return %result : memref<16xf32>
+}
+
+func.func private @loop_graph_output_body(
+    %ctx: !hip.context, %iter: memref<i64>, %cond: memref<i1>,
+    %current: memref<16xf32>, %frame: !hip.loop_frame) -> (i32, memref<16xf32>) {
+  %status = arith.constant 0 : i32
+  return %status, %current : i32, memref<16xf32>
+}
+
+// --- Loop output through a view chain: copy the exact returned descriptor,
+//     not the loop root/capacity descriptor. ---
+// CHECK-LABEL: func.func @loop_view_graph_output
+// CHECK: %[[LOOP:[^: ]+]]:2 = hip.loop
+// CHECK: %[[VIEW:.*]] = memref.subview %[[LOOP]]#0
+// CHECK: %[[CAST:.*]] = memref.cast %[[VIEW]]
+// CHECK: %[[OUT:.*]] = hip.alloc_output
+// CHECK: hip.copy_output(%{{.*}}, %[[CAST]], %[[OUT]])
+// CHECK: %[[OUTCAST:.*]] = memref.cast %[[OUT]]
+// CHECK: return %[[OUTCAST]]
+func.func @loop_view_graph_output(%ctx: !hip.context,
+                                  %seed: memref<8x4xf32>)
+    -> memref<?x4xf32, strided<[4, 1], offset: ?>> {
+  %zero = arith.constant 0 : index
+  %true = arith.constant true
+  %result, %loop_frame = hip.loop(%ctx, %zero, %true)
+      iter_args(%seed : memref<8x4xf32>)
+      -> (memref<8x4xf32>, !hip.loop_frame)
+      body @loop_view_graph_output_body
+      {cond_is_passthrough, descriptor_return, num_loop_carried = 1 : i32}
+  %view = memref.subview %result[2, 0] [3, 4] [1, 1]
+      : memref<8x4xf32> to memref<3x4xf32, strided<[4, 1], offset: 8>>
+  %cast = memref.cast %view
+      : memref<3x4xf32, strided<[4, 1], offset: 8>>
+        to memref<?x4xf32, strided<[4, 1], offset: ?>>
+  return %cast : memref<?x4xf32, strided<[4, 1], offset: ?>>
+}
+
+func.func private @loop_view_graph_output_body(
+    %ctx: !hip.context, %iter: memref<i64>, %cond: memref<i1>,
+    %current: memref<8x4xf32>, %frame: !hip.loop_frame)
+    -> (i32, memref<8x4xf32>) {
+  %status = arith.constant 0 : i32
+  return %status, %current : i32, memref<8x4xf32>
+}

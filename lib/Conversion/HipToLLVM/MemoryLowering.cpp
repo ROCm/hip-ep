@@ -531,6 +531,190 @@ struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
   }
 };
 
+// --- LoopAllocOp: frame-owned double-buffered carrier storage.
+struct LoopAllocOpLowering : public ConvertOpToLLVMPattern<LoopAllocOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(LoopAllocOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    MemRefType memRefType = cast<MemRefType>(op.getMemref().getType());
+    if (!isConvertibleAndHasIdentityMaps(memRefType))
+      return rewriter.notifyMatchFailure(op, "requires identity-layout memref");
+
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+    Type i32Type = rewriter.getI32Type();
+    Type elemType = memRefType.getElementType();
+    if (!elemType.isIntOrFloat())
+      return rewriter.notifyMatchFailure(op, "unsupported element type");
+    int64_t elemBytes = (elemType.getIntOrFloatBitWidth() + 7) / 8;
+    if (elemBytes <= 0)
+      return rewriter.notifyMatchFailure(op, "unsupported element bit width");
+
+    SmallVector<Value, 4> sizes;
+    SmallVector<Value, 4> strides;
+    Value sizeBytes;
+    getMemRefDescriptorSizes(loc, memRefType, adaptor.getDynamicSizes(),
+                             rewriter, sizes, strides, sizeBytes, true);
+
+    int64_t rank = memRefType.getRank();
+    Value one = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                         rewriter.getI64IntegerAttr(1));
+    Type shapeArrayType =
+        LLVM::LLVMArrayType::get(i64Type, rank == 0 ? 1 : rank);
+    Value shapePtr = LLVM::AllocaOp::create(
+        rewriter, loc, ptrType, shapeArrayType, one, /*alignment=*/8);
+    for (int64_t i = 0; i < rank; ++i) {
+      Value index = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                             rewriter.getI64IntegerAttr(i));
+      Value slot = LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type,
+                                       shapePtr, ValueRange{index});
+      LLVM::StoreOp::create(rewriter, loc, sizes[i], slot);
+    }
+
+    FailureOr<LLVM::LLVMFuncOp> allocFn = LLVM::lookupOrCreateFn(
+        rewriter, module, kHipLoopFrameAlloc,
+        {ptrType, i32Type, ptrType, i64Type, i64Type}, ptrType);
+    if (failed(allocFn))
+      return failure();
+    Value carrier = LLVM::ConstantOp::create(
+        rewriter, loc, i32Type,
+        rewriter.getI32IntegerAttr(op.getCarrierIndex()));
+    Value rankValue = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(rank));
+    Value elemBytesValue = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(elemBytes));
+    Value rawPtr =
+        LLVM::CallOp::create(rewriter, loc, *allocFn,
+                             ValueRange{adaptor.getFrame(), carrier, shapePtr,
+                                        rankValue, elemBytesValue})
+            .getResult();
+
+    FailureOr<unsigned> addrSpace =
+        getTypeConverter()->getMemRefAddressSpace(memRefType);
+    if (failed(addrSpace))
+      return failure();
+    Value dataPtr = rawPtr;
+    if (cast<LLVM::LLVMPointerType>(rawPtr.getType()).getAddressSpace() !=
+        *addrSpace)
+      dataPtr = LLVM::AddrSpaceCastOp::create(
+          rewriter, loc,
+          LLVM::LLVMPointerType::get(rewriter.getContext(), *addrSpace),
+          rawPtr);
+
+    MemRefDescriptor desc = createMemRefDescriptor(
+        loc, memRefType, dataPtr, dataPtr, sizes, strides, rewriter);
+    rewriter.replaceOp(op, {desc});
+    return success();
+  }
+};
+
+struct LoopFrameStatusOpLowering
+    : public ConvertOpToLLVMPattern<LoopFrameStatusOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+  LogicalResult
+  matchAndRewrite(LoopFrameStatusOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+    FailureOr<LLVM::LLVMFuncOp> fn = LLVM::lookupOrCreateFn(
+        rewriter, module, kHipLoopFrameStatus, {ptrType}, i32Type);
+    if (failed(fn))
+      return failure();
+    rewriter.replaceOp(op, LLVM::CallOp::create(rewriter, op.getLoc(), *fn,
+                                                ValueRange{adaptor.getFrame()})
+                               .getResult());
+    return success();
+  }
+};
+
+struct LoopFrameDestroyOpLowering
+    : public ConvertOpToLLVMPattern<LoopFrameDestroyOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+  LogicalResult
+  matchAndRewrite(LoopFrameDestroyOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+    FailureOr<LLVM::LLVMFuncOp> fn = LLVM::lookupOrCreateFn(
+        rewriter, module, kHipLoopFrameDestroy, {ptrType, ptrType}, i32Type);
+    if (failed(fn))
+      return failure();
+    LLVM::CallOp::create(rewriter, op.getLoc(), *fn,
+                         ValueRange{adaptor.getCtx(), adaptor.getFrame()});
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+struct CopyOutputOpLowering : public ConvertOpToLLVMPattern<CopyOutputOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+  LogicalResult
+  matchAndRewrite(CopyOutputOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    auto sourceType = cast<MemRefType>(op.getSource().getType());
+    auto targetType = cast<MemRefType>(op.getTarget().getType());
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+    Type i32Type = rewriter.getI32Type();
+    int64_t rank = sourceType.getRank();
+    int64_t elemBytes = (sourceType.getElementTypeBitWidth() + 7) / 8;
+
+    Value sourcePtr = extractMemRefDataPtr(adaptor.getSource(), sourceType,
+                                           getTypeConverter(), rewriter, loc);
+    Value targetPtr = extractMemRefDataPtr(adaptor.getTarget(), targetType,
+                                           getTypeConverter(), rewriter, loc);
+    if (!sourcePtr || !targetPtr)
+      return failure();
+
+    Value one = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                         rewriter.getI64IntegerAttr(1));
+    Type arrayType = LLVM::LLVMArrayType::get(i64Type, rank == 0 ? 1 : rank);
+    Value sizes = LLVM::AllocaOp::create(rewriter, loc, ptrType, arrayType, one,
+                                         /*alignment=*/8);
+    Value strides = LLVM::AllocaOp::create(rewriter, loc, ptrType, arrayType,
+                                           one, /*alignment=*/8);
+    MemRefDescriptor source(adaptor.getSource());
+    for (int64_t dim = 0; dim < rank; ++dim) {
+      Value index = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                             rewriter.getI64IntegerAttr(dim));
+      Value sizeSlot = LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type,
+                                           sizes, ValueRange{index});
+      Value strideSlot = LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type,
+                                             strides, ValueRange{index});
+      LLVM::StoreOp::create(rewriter, loc, source.size(rewriter, loc, dim),
+                            sizeSlot);
+      LLVM::StoreOp::create(rewriter, loc, source.stride(rewriter, loc, dim),
+                            strideSlot);
+    }
+
+    FailureOr<LLVM::LLVMFuncOp> fn = LLVM::lookupOrCreateFn(
+        rewriter, module, kHipCopyOutput,
+        {ptrType, ptrType, ptrType, i64Type, ptrType, ptrType, i64Type},
+        i32Type);
+    if (failed(fn))
+      return failure();
+    Value rankValue = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(rank));
+    Value elemValue = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(elemBytes));
+    Value status =
+        LLVM::CallOp::create(rewriter, loc, *fn,
+                             ValueRange{adaptor.getCtx(), targetPtr, sourcePtr,
+                                        rankValue, sizes, strides, elemValue})
+            .getResult();
+    rewriter.replaceOp(op, status);
+    return success();
+  }
+};
+
 //===----------------------------------------------------------------------===//
 // GetConstantOp Lowering
 //===----------------------------------------------------------------------===//
@@ -973,10 +1157,12 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
 
 void populateMemoryLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns) {
-  patterns.add<AllocOpLowering, FreeOpLowering, GetPoolOpLowering,
-               GetHostScratchOpLowering, AllocOutputOpLowering,
-               GetConstantOpLowering, MemRefAllocOpLowering,
-               MemRefDeallocOpLowering>(converter);
+  patterns
+      .add<AllocOpLowering, FreeOpLowering, GetPoolOpLowering,
+           GetHostScratchOpLowering, AllocOutputOpLowering, LoopAllocOpLowering,
+           LoopFrameStatusOpLowering, LoopFrameDestroyOpLowering,
+           CopyOutputOpLowering, GetConstantOpLowering, MemRefAllocOpLowering,
+           MemRefDeallocOpLowering>(converter);
   patterns.add<MemRefCopyOpLowering>(converter);
 }
 

@@ -14,7 +14,8 @@
 //   2. Unbox the ONNX-style 0-D-tensor `M` and `cond_init` operands to the
 //      MLIR-style `index` and `i1` scalars that hip.loop expects.
 //   3. Build a new func.func with signature
-//        (!hip.context, iter_t, cond_in_t, v_in..., captures...)
+//        (!hip.context, iter_t, cond_in_t, v_in..., captures...,
+//         !hip.loop_frame)
 //          -> (cond_out_t, v_out...)
 //      and move the body region into it.
 //   4. Replace the body's `onnx.Yield` terminator with `func.return`.
@@ -162,6 +163,21 @@ static FailureOr<Value> unboxCondInit(OpBuilder &builder, Location loc,
       .getResult();
 }
 
+static FailureOr<RankedTensorType>
+validateCarrierEquality(Operation *loopOp, unsigned carrierIndex,
+                        ArrayRef<Type> participantTypes) {
+  auto initType = dyn_cast<RankedTensorType>(participantTypes.front());
+  if (!initType)
+    return loopOp->emitOpError("loop carrier #")
+           << carrierIndex << " requires a ranked v_init type";
+
+  // Normalize under-refined source boundaries to v_init. The outlined function
+  // and hip.loop verifier then enforce exact current/result equality; actual
+  // shape evolution is deferred to the conservative-join layer.
+  (void)participantTypes;
+  return initType;
+}
+
 //===----------------------------------------------------------------------===//
 // OnnxLoopOutlinePass
 //===----------------------------------------------------------------------===//
@@ -185,6 +201,7 @@ struct OnnxLoopOutlinePass
   }
 
   void runOnOperation() override;
+  LogicalResult outlineAll(ModuleOp module);
 
   /// Outline a single onnx.Loop. Returns failure on unsupported variant.
   LogicalResult outlineLoop(Operation *loopOp, unsigned &counter);
@@ -222,6 +239,10 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
   ValueRange vInitTensors = loopOp->getOperands().drop_front(2);
   unsigned numLoopCarried = vInitTensors.size();
 
+  if (loopOp->getNumResults() != numLoopCarried)
+    return loopOp->emitOpError("loop-carried result count mismatch: expected ")
+           << numLoopCarried << ", got " << loopOp->getNumResults();
+
   // ONNX Yield is the body terminator: (cond_out, v_out_1, ..., v_out_N,
   // scan_outputs...).
   Operation *yieldOp = bodyBlock.getTerminator();
@@ -239,6 +260,23 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
   if (bodyBlock.getNumArguments() != 2 + numLoopCarried)
     return loopOp->emitOpError("onnx.Loop body arg count mismatch: expected ")
            << (2 + numLoopCarried) << ", got " << bodyBlock.getNumArguments();
+
+  // The descriptor-frame ABI lands before shape-changing carrier joins. Keep
+  // this layer independently safe by requiring one exact carrier type at every
+  // source boundary.
+  SmallVector<RankedTensorType> carrierTypes;
+  carrierTypes.reserve(numLoopCarried);
+  for (unsigned i = 0; i < numLoopCarried; ++i) {
+    Type participants[] = {vInitTensors[i].getType(),
+                           loopOp->getResult(i).getType(),
+                           bodyBlock.getArgument(2 + i).getType(),
+                           yieldOp->getOperand(1 + i).getType()};
+    FailureOr<RankedTensorType> joined =
+        validateCarrierEquality(loopOp, i, participants);
+    if (failed(joined))
+      return failure();
+    carrierTypes.push_back(*joined);
+  }
 
   // Detect cond passthrough BEFORE we touch the body. The check is SSA-
   // equality between the yield's cond_out operand and the body's cond_in
@@ -266,10 +304,25 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
   LLVM_DEBUG(llvm::dbgs() << "[onnx-loop-outline] cond_is_passthrough = "
                           << condIsPassthrough << "\n");
 
+  auto parentFn = loopOp->getParentOfType<func::FuncOp>();
+  if (!parentFn || parentFn.getNumArguments() == 0 ||
+      !isa<ContextType>(parentFn.getArgument(0).getType()))
+    return loopOp->emitOpError(
+        "onnx.Loop is not inside a func.func with !hip.context as arg 0; "
+        "ensure --hip-add-context-arg ran first");
+  Value parentCtx = parentFn.getArgument(0);
+
   // Capture free variables defined above the body region.
   llvm::SetVector<Value> capturedSet;
   getUsedValuesDefinedAbove(bodyRegion, capturedSet);
-  SmallVector<Value> captureVals(capturedSet.begin(), capturedSet.end());
+  SmallVector<Value> captureVals;
+  SmallVector<Value> capturedContexts;
+  for (Value captured : capturedSet) {
+    if (isa<ContextType>(captured.getType()))
+      capturedContexts.push_back(captured);
+    else
+      captureVals.push_back(captured);
+  }
 
   // Outlined function signature:
   //   arg0           : !hip.context (threaded by us; AddHipContextArg
@@ -305,10 +358,10 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
   argTypes.push_back(ctxType);
   argTypes.push_back(bodyBlock.getArgument(0).getType()); // iter_t
   argTypes.push_back(bodyBlock.getArgument(1).getType()); // cond_in_t
-  for (Value v : vInitTensors)
-    argTypes.push_back(v.getType());
+  llvm::append_range(argTypes, carrierTypes);
   for (Value c : captureVals)
     argTypes.push_back(c.getType());
+  argTypes.push_back(LoopFrameType::get(ctx));
 
   // Skip the cond return value if the body trivially passes cond_in
   // through. The runtime trampoline aliases cond_in and cond_out on the
@@ -343,10 +396,11 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
   //     each body op's `reifyResultShapes` catches up with the
   //     tighter entry-block arg types.
   SmallVector<Type> resultTypes;
-  resultTypes.reserve(yieldOp->getNumOperands());
-  unsigned yieldStartIdx = condIsPassthrough ? 1 : 0;
-  for (unsigned i = yieldStartIdx; i < yieldOp->getNumOperands(); ++i)
-    resultTypes.push_back(yieldOp->getOperand(i).getType());
+  resultTypes.reserve(1 + yieldOp->getNumOperands());
+  resultTypes.push_back(IntegerType::get(ctx, 32));
+  if (!condIsPassthrough)
+    resultTypes.push_back(yieldOp->getOperand(0).getType());
+  llvm::append_range(resultTypes, carrierTypes);
 
   auto fnType = FunctionType::get(ctx, argTypes, resultTypes);
 
@@ -355,7 +409,6 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
   // collision, retry with the same prefix (don't drop it) and bump the
   // suffix until lookupSymbol returns null. `counter` ends one past the
   // suffix actually used so consecutive outlineLoop calls don't collide.
-  auto parentFn = loopOp->getParentOfType<func::FuncOp>();
   auto buildName = [&](unsigned n) -> std::string {
     if (parentFn)
       return (parentFn.getName() + "_loop_body_n" + Twine(n)).str();
@@ -378,6 +431,8 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
   // Map body block args -> entry block args [1..1+bodyArgs).
   // Map captures -> entry block args [1+bodyArgs..end).
   IRMapping mapping;
+  for (Value capturedCtx : capturedContexts)
+    mapping.map(capturedCtx, entry->getArgument(0));
   unsigned argIdx = 1; // skip ctx
   for (BlockArgument a : bodyBlock.getArguments())
     mapping.map(a, entry->getArgument(argIdx++));
@@ -429,23 +484,24 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
   // cloned body ops is refined post-conversion by
   // `--hip-infer-shapes`.
   SmallVector<Value> returnVals;
-  returnVals.reserve(yieldOp->getNumOperands());
-  for (unsigned i = yieldStartIdx; i < yieldOp->getNumOperands(); ++i)
-    returnVals.push_back(mapping.lookupOrDefault(yieldOp->getOperand(i)));
+  returnVals.reserve(resultTypes.size());
+  returnVals.push_back(arith::ConstantIntOp::create(
+      bodyBuilder, loc, bodyBuilder.getI32Type(), 0));
+  if (!condIsPassthrough)
+    returnVals.push_back(mapping.lookupOrDefault(yieldOp->getOperand(0)));
+  for (unsigned i = 0; i < numLoopCarried; ++i) {
+    Value returned = mapping.lookupOrDefault(yieldOp->getOperand(1 + i));
+    if (returned.getType() != carrierTypes[i])
+      returned =
+          tensor::CastOp::create(bodyBuilder, loc, carrierTypes[i], returned);
+    returnVals.push_back(returned);
+  }
   func::ReturnOp::create(bodyBuilder, loc, returnVals);
 
   // Now build the hip.loop op at the original onnx.Loop location.
   OpBuilder outerBuilder(loopOp);
 
-  // Look up the !hip.context value: must be arg 0 of the parent function
-  // (AddHipContextArg has already run by pipeline ordering).  `parentFn`
-  // was captured earlier for the symbol-name builder.
-  if (!parentFn || parentFn.getNumArguments() == 0 ||
-      !isa<ContextType>(parentFn.getArgument(0).getType()))
-    return loopOp->emitOpError(
-        "onnx.Loop is not inside a func.func with !hip.context as arg 0; "
-        "ensure --hip-add-context-arg ran first");
-  Value ctxVal = parentFn.getArgument(0);
+  Value ctxVal = parentCtx;
 
   // Unbox M (tensor<i64>) -> index, and cond_init (tensor<i1>) -> i1.
   FailureOr<Value> mIdx = unboxTripCount(outerBuilder, loc, ctxVal, mTensor);
@@ -469,6 +525,15 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
     condI1Val = *condI1;
   }
 
+  SmallVector<Value> joinedVInit;
+  joinedVInit.reserve(numLoopCarried);
+  for (unsigned i = 0; i < numLoopCarried; ++i) {
+    Value init = vInitTensors[i];
+    if (init.getType() != carrierTypes[i])
+      init = tensor::CastOp::create(outerBuilder, loc, carrierTypes[i], init);
+    joinedVInit.push_back(init);
+  }
+
   // Build the hip.loop op via the `InferTypeOpInterface`-aware
   // `LoopOp::create` overload (no explicit `v_final` argument).
   // `LoopOp::inferReturnTypes` sources result types from the v_init
@@ -483,83 +548,63 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
       /*ctx=*/ctxVal,
       /*max_trip_count=*/*mIdx,
       /*cond_init=*/condI1Val,
-      /*v_init=*/vInitTensors,
+      /*v_init=*/joinedVInit,
       /*captures=*/ValueRange(captureVals),
+      /*parent_frame=*/Value(),
       /*body_func=*/FlatSymbolRefAttr::get(ctx, fnName),
       /*num_loop_carried=*/outerBuilder.getI32IntegerAttr(numLoopCarried),
       /*cond_is_passthrough=*/
-      condIsPassthrough ? outerBuilder.getUnitAttr() : nullptr);
+      condIsPassthrough ? outerBuilder.getUnitAttr() : nullptr,
+      /*descriptor_return=*/nullptr);
 
-  // Splice the hip.loop's results into the old op's use sites and erase.
-  loopOp->replaceAllUsesWith(hipLoopOp.getResults());
+  // Preserve the source ONNX result boundary with compatible tensor casts.
+  // Internally the loop always carries the conservative joined descriptor.
+  for (unsigned i = 0; i < numLoopCarried; ++i) {
+    Value replacement = hipLoopOp.getResult(i);
+    Type oldType = loopOp->getResult(i).getType();
+    if (replacement.getType() != oldType)
+      replacement =
+          tensor::CastOp::create(outerBuilder, loc, oldType, replacement);
+    loopOp->getResult(i).replaceAllUsesWith(replacement);
+  }
   loopOp->erase();
+  return success();
+}
+
+LogicalResult OnnxLoopOutlinePass::outlineAll(ModuleOp module) {
+  // Nested frame threading lands with shape-changing carriers. Reject nesting
+  // transactionally in this ABI-only layer so a child can never escape without
+  // an explicit parent lifetime.
+  unsigned counter = 0;
+  SmallVector<Operation *> loops;
+  module.walk([&](Operation *op) {
+    if (op->getName().getStringRef() == "onnx.Loop")
+      loops.push_back(op);
+  });
+  for (Operation *loopOp : loops) {
+    for (Operation *parent = loopOp->getParentOp(); parent;
+         parent = parent->getParentOp()) {
+      if (parent->getName().getStringRef() != "onnx.Loop")
+        continue;
+      return loopOp->emitOpError(
+          "nested onnx.Loop requires shape-carrier frame threading");
+    }
+    if (failed(outlineLoop(loopOp, counter)))
+      return failure();
+  }
   return success();
 }
 
 void OnnxLoopOutlinePass::runOnOperation() {
   ModuleOp module = getOperation();
 
-  // Pre-scan: reject nested onnx.Loop before any outlining happens. The
-  // HIP runtime drivers share a single iter/cond buffer pair per
-  // RuntimeState (see runtime_state_internal.h), so an inner hip.loop
-  // would race with the outer's not-yet-consumed iter on the next outer
-  // iteration. Has to run here, not inside outlineLoop, because the
-  // post-order walk below visits the inner onnx.Loop first -- by the
-  // time the outer is outlined, the inner has already become a hip.loop
-  // and a per-outlineLoop "scan my body for onnx.Loop" check would miss
-  // it.
-  WalkResult nestedFound = module.walk([&](Operation *outerLoop) {
-    if (outerLoop->getName().getStringRef() != "onnx.Loop")
-      return WalkResult::advance();
-    if (outerLoop->getNumRegions() != 1)
-      return WalkResult::advance();
-    // Region::walk visits ops *inside* the region only, never the region's
-    // owner -- safe to check for "onnx.Loop" without excluding outerLoop.
-    Operation *innerLoop = nullptr;
-    outerLoop->getRegion(0).walk([&](Operation *inner) {
-      if (inner->getName().getStringRef() == "onnx.Loop") {
-        innerLoop = inner;
-        return WalkResult::interrupt();
-      }
-      return WalkResult::advance();
-    });
-    if (innerLoop) {
-      InFlightDiagnostic diag = outerLoop->emitOpError(
-          "nested onnx.Loop is not supported by the MorphiZen EP "
-          "(the loop runtime shares a single iter/cond buffer pair per "
-          "RuntimeState across all hip.loop instances)");
-      diag.attachNote(innerLoop->getLoc()) << "inner onnx.Loop is here";
-      return WalkResult::interrupt();
-    }
-    return WalkResult::advance();
-  });
-  if (nestedFound.wasInterrupted())
-    return signalPassFailure();
-
-  // Collect all onnx.Loop ops first; mutating during the walk would
-  // invalidate iterators (we erase the loop op and insert a new func.func
-  // at module scope). With the nested-loop pre-scan above, every onnx.Loop
-  // is a sibling at top level, so this loop terminates after one outlining
-  // pass plus one trailing empty walk. The while/changed structure is
-  // retained from the original pre-rejection algorithm; cheap to keep and
-  // a no-op for the supported single-level case.
-  unsigned counter = 0;
-  bool changed = true;
-  while (changed) {
-    changed = false;
-    SmallVector<Operation *> loops;
-    module.walk([&](Operation *op) {
-      if (op->getName().getStringRef() == "onnx.Loop")
-        loops.push_back(op);
-    });
-    if (loops.empty())
-      break;
-    for (Operation *loopOp : loops) {
-      if (failed(outlineLoop(loopOp, counter)))
-        return signalPassFailure();
-      changed = true;
-    }
-  }
+  // Transactional validation/planning: run the complete nested post-order
+  // transformation on a clone first. Any malformed child or parent leaves the
+  // real module untouched, so no orphan body symbols or partially outlined
+  // nested graph can survive a diagnostic.
+  OwningOpRef<ModuleOp> planned = cast<ModuleOp>(module->clone());
+  if (failed(outlineAll(*planned)) || failed(outlineAll(module)))
+    signalPassFailure();
 }
 
 } // namespace

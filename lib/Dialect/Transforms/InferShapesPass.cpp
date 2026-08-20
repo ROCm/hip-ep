@@ -17,17 +17,9 @@
 //   Phase 1: per-func reify walk. Each `func.func` (main_graph + every
 //            outlined `hip.loop` body func) has its reify-impl ops
 //            collected in post-order and refined via `refineFuncBody`.
-//   Phase 2: hip.loop signature catch-up. When Phase 1 narrowed an
-//            upstream producer feeding a `hip.loop`'s `$v_init` operand,
-//            the v_init operand type updates in place (DPS-init uses
-//            skip cast emission), but the loop's own result types and
-//            its body func's signature go stale. `refineLoopSignatures`
-//            walks every `hip.loop`, syncs (a) body func arg types at
-//            the v_carry slots, (b) body func return types at the same
-//            slots (so `func.return` operand types match), (c) the
-//            loop op's own result types. If body args changed, the
-//            body func is re-walked once so body op result types
-//            catch up with the now-tighter entry block arg types.
+//   Phase 2: hip.loop signature catch-up. This ABI-only layer requires exact
+//            carrier equality, so the v_init operand types synchronize the loop
+//            results and body current/result slots.
 //
 // See `docs/design/hip-shape-inference.md` for rationale, layout, and the
 // recipe for wiring a new op.
@@ -355,15 +347,12 @@ static LogicalResult refineFuncBody(func::FuncOp funcOp, IRRewriter &rewriter) {
 ///   [3..3+N) v_carry    (loop-carried values; types must match v_init)
 ///   [3+N..]  captures   (outer-graph values referenced inside the body)
 ///
-/// The body func's declared return types follow the yield sliced by
-/// `cond_is_passthrough`: when set, the yield's operand 0 (cond_out) is
-/// elided and v_carry returns occupy slots [0..N); when unset they
-/// occupy [1..1+N) and the cond_out type sits at slot 0.
+/// Body result #0 is i32 status. Carrier results occupy [1..1+N) for
+/// passthrough condition and [2..2+N) otherwise, after cond_out.
 ///
 /// Both arg slots and the corresponding return slots are kept in sync
 /// with v_init types — keeping just one side would leave `func.return`
-/// type-incompatible with the FunctionType result list and fail
-/// verification.
+/// type-incompatible with the FunctionType result list and fail verification.
 ///
 /// Returns true iff any signature type was rewritten (arg or result).
 static bool syncBodyFuncSignatureFromVInit(func::FuncOp bodyFunc,
@@ -371,7 +360,7 @@ static bool syncBodyFuncSignatureFromVInit(func::FuncOp bodyFunc,
   static constexpr unsigned kArgVCarryStart = 3;
   Operation::operand_range vInit = loopOp.getVInit();
   size_t N = vInit.size();
-  unsigned resultVCarryStart = loopOp.getCondIsPassthrough() ? 0u : 1u;
+  unsigned resultVCarryStart = loopOp.getCondIsPassthrough() ? 1u : 2u;
 
   Block &entry = bodyFunc.getBody().front();
   FunctionType oldType = bodyFunc.getFunctionType();
@@ -403,24 +392,16 @@ static bool syncBodyFuncSignatureFromVInit(func::FuncOp bodyFunc,
   return changed;
 }
 
-/// Sync `loopOp`'s result types from its `$v_init` operand types and
-/// emit a `tensor.cast` on every non-DPS-init use of any result whose
-/// type changed (so consumer signatures are preserved exactly as
-/// `refineOneResult` does for ordinary DPS-op result narrowing).
-///
-/// hip.loop's verifier requires `result_type[i] == v_init[i].type`
-/// (HipOps.td); when Phase 1 has narrowed a v_init producer's result
-/// type and the narrowing propagated into the v_init operand (DPS-init
-/// uses skip cast emission), the loop op's own result types are stale
-/// until this sync runs.
+/// Sync `loopOp`'s result types from its `$v_init` operand types and emit a
+/// `tensor.cast` on every non-DPS-init use of any result whose type changed.
 static bool syncLoopResultsAndInsertCasts(IRRewriter &rewriter,
                                           hip::LoopOp loopOp) {
   Operation::operand_range vInit = loopOp.getVInit();
   bool changed = false;
   for (auto [i, v] : llvm::enumerate(vInit)) {
-    if (i >= loopOp->getNumResults())
+    if (i >= loopOp.getNumLoopCarried())
       break;
-    Value result = loopOp->getResult(i);
+    Value result = loopOp.getResult(i);
     Type newType = v.getType();
     if (result.getType() == newType)
       continue;
@@ -436,14 +417,12 @@ static bool syncLoopResultsAndInsertCasts(IRRewriter &rewriter,
 }
 
 /// Phase 2 worker: walk every `hip.loop` in `module` until fixed point,
-/// syncing its result types and its outlined body func's signature
-/// from `$v_init`, and re-walking the body func once per change so
-/// body op result types catch up with the now-tighter entry block args.
+/// syncing its result types and outlined body func signature from `$v_init`,
+/// then re-walking the body func once per change.
 ///
 /// `module.walk` is depth-agnostic, so the helper is safe on hand-written
-/// test cases nesting one `hip.loop` inside another's body func (the
-/// production outline pass forbids nested `onnx.Loop` upstream, so this
-/// is purely a robustness contract).
+/// test cases nesting one `hip.loop` inside another. Production outlining
+/// rejects nesting in this layer.
 ///
 /// Why iterate. Body op refinement is monotone (`?` dims only narrow),
 /// but the order in which sibling `hip.loop` ops show up in
@@ -460,7 +439,7 @@ static bool syncLoopResultsAndInsertCasts(IRRewriter &rewriter,
 ///   %r = hip.loop(...) iter_args(%0 : tensor<128xf32>) -> tensor<?xf32>
 ///        body @loop_body
 ///   func.func @loop_body(%ctx, %iter, %cond, %carry: tensor<?xf32>, ...)
-///                       -> (i1, tensor<?xf32>) { ... }
+///                       -> (i32, tensor<?xf32>) { ... }
 ///
 /// After:
 ///   %0 = hip.matmul ... -> tensor<128xf32>
@@ -469,7 +448,7 @@ static bool syncLoopResultsAndInsertCasts(IRRewriter &rewriter,
 ///   // tensor.cast from tensor<128xf32> back to tensor<?xf32> on every
 ///   // non-DPS-init use of %r so consumer signatures are preserved.
 ///   func.func @loop_body(%ctx, %iter, %cond, %carry: tensor<128xf32>, ...)
-///                       -> (i1, tensor<128xf32>) { ... }
+///                       -> (i32, tensor<128xf32>) { ... }
 static LogicalResult refineLoopSignatures(ModuleOp module,
                                           IRRewriter &rewriter) {
   // Hard cap. Each iteration narrows a finite type lattice across a
@@ -525,10 +504,7 @@ void InferShapesPass::runOnOperation() {
   IRRewriter rewriter(&getContext());
 
   // Phase 1: per-func reify walk. Refines all hip-dialect Hip_DpsOp
-  // result types in-place; cast insertion preserves consumer
-  // signatures except on DPS-init uses (which propagate refinement
-  // directly — `hip.loop`'s `$v_init` operands are DPS-init by
-  // `LoopOp::getDpsInitsMutable`, see HipDialect.cpp).
+  // result types in-place; cast insertion preserves consumer signatures.
   WalkResult walkResult = module.walk([&](func::FuncOp funcOp) -> WalkResult {
     return succeeded(refineFuncBody(funcOp, rewriter))
                ? WalkResult::advance()
@@ -537,11 +513,8 @@ void InferShapesPass::runOnOperation() {
   if (walkResult.wasInterrupted())
     return signalPassFailure();
 
-  // Phase 2: hip.loop signature catch-up. Sync each loop's result
-  // types and its body func's signature from the (potentially
-  // Phase-1-refined) v_init operand types, then re-walk the body func
-  // so body op result types catch up with the tighter entry-block
-  // arg types.
+  // Phase 2: synchronize each loop and body from the v_init carrier contract,
+  // then re-walk changed bodies.
   if (failed(refineLoopSignatures(module, rewriter)))
     signalPassFailure();
 }

@@ -184,12 +184,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->seqlens_k_cached_valid = false;
   state->seqlens_k_cached_val = 0;
   state->seqlens_k_cached_ptr = nullptr;
-  state->loop_iter_cpu_buf = nullptr;
-  state->loop_iter_capacity = 0;
-  state->loop_iter_dev = nullptr;
-  state->loop_cond_host = nullptr;
-  state->loop_cond_dev = nullptr;
-  state->loop_event = nullptr;
+  state->quarantined_loop_frames = nullptr;
+  state->loop_frames_mutex = nullptr;
   state->op_states = nullptr;
   state->num_op_states = 0;
 
@@ -276,6 +272,15 @@ static int initialize_state_handles(RuntimeState **out_state) {
       HIP_CLEANUP(hipStreamDestroy(state->stream));
     free(state);
     return 11;
+  }
+
+  if (hipdnn_ep_loop_state_init(state) != 0) {
+    HIP_CLEANUP(hipFree(state->device_error_flag));
+    hipblasLtDestroy(state->hipblas_handle);
+    miopenDestroy(state->miopen_handle);
+    HIP_CLEANUP(hipStreamDestroy(state->stream));
+    free(state);
+    return 12;
   }
 
   *out_state = state;
@@ -752,22 +757,7 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     state->num_op_states = 0;
   }
 
-  // Free ONNX Loop driver host-mapped buffers + reusable sync event (if
-  // allocated). The stream sync at the top of cleanup has already drained
-  // any in-flight kernel that may have been holding loop_*_dev pointers,
-  // so hipHostFree is safe here.
-  if (state->loop_event) {
-    HIP_CLEANUP(hipEventDestroy(static_cast<hipEvent_t>(state->loop_event)));
-  }
-  if (state->loop_iter_cpu_buf) {
-    HIP_CLEANUP(hipHostFree(state->loop_iter_cpu_buf));
-  }
-  if (state->loop_iter_dev) {
-    HIP_CLEANUP(hipFree(state->loop_iter_dev));
-  }
-  if (state->loop_cond_host) {
-    HIP_CLEANUP(hipHostFree(state->loop_cond_host));
-  }
+  hipdnn_ep_loop_state_cleanup(state);
 
   if (state->device_error_flag) {
     HIP_CLEANUP(hipFree(state->device_error_flag));

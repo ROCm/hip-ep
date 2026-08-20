@@ -64,6 +64,7 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/Transforms/BufferViewFlowAnalysis.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -87,6 +88,33 @@ namespace hip {
 #include "hip/Dialect/Transforms/Passes.h.inc"
 
 namespace {
+
+static bool isSupportedContiguousLoopOutput(MemRefType type) {
+  if (type.getLayout().isIdentity())
+    return true;
+  SmallVector<int64_t> strides;
+  int64_t offset = 0;
+  if (failed(type.getStridesAndOffset(strides, offset)))
+    return false;
+  if (!ShapedType::isDynamic(offset) && offset != 0)
+    return false;
+  int64_t expected = 1;
+  for (int64_t dim = type.getRank() - 1; dim >= 0; --dim) {
+    int64_t stride = strides[dim];
+    if (ShapedType::isDynamic(expected)) {
+      if (!ShapedType::isDynamic(stride))
+        return false;
+    } else if (stride != expected) {
+      return false;
+    }
+    int64_t extent = type.getDimSize(dim);
+    if (ShapedType::isDynamic(extent))
+      expected = ShapedType::kDynamic;
+    else if (!ShapedType::isDynamic(expected))
+      expected *= extent;
+  }
+  return true;
+}
 
 struct AbiReshapePlan {
   bool stampAttrs = false;
@@ -277,7 +305,8 @@ struct UseOutputAllocatorPass
     // The pass creates hip.alloc_output (HipDialect). BufferViewFlowAnalysis
     // follows the memref view ops (cast, collapse_shape, expand_shape, subview)
     // through their ViewLikeOpInterface, which MemRefDialect provides.
-    registry.insert<hip::HipDialect, memref::MemRefDialect>();
+    registry
+        .insert<hip::HipDialect, arith::ArithDialect, memref::MemRefDialect>();
   }
 
   void runOnOperation() override {
@@ -313,6 +342,14 @@ struct UseOutputAllocatorPass
     // slot without querying the analysis after mutation.
     BufferViewFlowAnalysis aliasAnalysis(funcOp);
     llvm::DenseMap<Value, SmallVector<memref::AllocOp, 2>> aliasRoots;
+
+    struct LoopOutput {
+      LoopOp loop;
+      unsigned carrier;
+      unsigned output;
+      Value returned;
+    };
+    SmallVector<LoopOutput> loopOutputs;
     funcOp.walk([&](memref::AllocOp allocOp) {
       for (Value aliased : aliasAnalysis.resolve(allocOp.getResult())) {
         SmallVectorImpl<memref::AllocOp> &roots = aliasRoots[aliased];
@@ -321,12 +358,41 @@ struct UseOutputAllocatorPass
       }
     });
 
-    // Validate every public slot before rewriting even the first alloc.
-    // Failure is atomic with respect to this function.
+    for (LoopOp loop : funcOp.getOps<LoopOp>()) {
+      for (unsigned carrier = 0; carrier < loop.getNumLoopCarried();
+           ++carrier) {
+        for (Value alias : aliasAnalysis.resolve(loop.getResult(carrier))) {
+          for (OpOperand &use : alias.getUses()) {
+            if (use.getOwner() != returnOp)
+              continue;
+            unsigned output = use.getOperandNumber();
+            auto duplicate =
+                llvm::find_if(loopOutputs, [&](const LoopOutput &item) {
+                  return item.output == output;
+                });
+            if (duplicate != loopOutputs.end()) {
+              returnOp.emitOpError("graph output #")
+                  << output
+                  << " ambiguously aliases multiple loop carrier results";
+              return signalPassFailure();
+            }
+            loopOutputs.push_back(
+                {loop, carrier, output, returnOp.getOperand(output)});
+          }
+        }
+      }
+    }
+
+    // Validate every public slot before rewriting even the first allocation or
+    // loop return. Failure is atomic with respect to this function.
     SmallVector<OutputPlan> outputs;
     llvm::SmallPtrSet<Operation *, 8> claimedAllocs;
     bool invalid = false;
     for (auto [outIdx, returned] : llvm::enumerate(returnOp.getOperands())) {
+      if (llvm::any_of(loopOutputs, [&](const LoopOutput &item) {
+            return item.output == outIdx;
+          }))
+        continue;
       OutputPlan output{returned, {}, static_cast<int64_t>(outIdx), {}};
       auto roots = aliasRoots.find(returned);
       if (roots == aliasRoots.end() || roots->second.size() != 1 ||
@@ -350,6 +416,21 @@ struct UseOutputAllocatorPass
     if (invalid) {
       signalPassFailure();
       return;
+    }
+
+    // Validate every loop-backed output before mutating any allocation or
+    // return. Only exact contiguous descriptors can be copied into a fresh
+    // identity-layout output without inventing offset/layout ownership.
+    for (const LoopOutput &item : loopOutputs) {
+      auto type = dyn_cast<MemRefType>(item.returned.getType());
+      if (!type || !type.getElementType().isIntOrFloat() ||
+          !isSupportedContiguousLoopOutput(type)) {
+        returnOp.emitOpError("loop-backed graph output #")
+            << item.output
+            << " must be a contiguous identity-compatible ranked memref; got "
+            << item.returned.getType();
+        return signalPassFailure();
+      }
     }
 
     // Phase 2a -- materialize pass-through, duplicate, and copied-view slots.
@@ -399,6 +480,44 @@ struct UseOutputAllocatorPass
         allocOutput->setAttr(kAbiGroupsAttrName, builder.getDenseI64ArrayAttr(
                                                      output.abiReshape.groups));
       }
+    }
+
+    // A descriptor-return loop result is frame-owned rather than rooted at a
+    // memref.alloc, so the allocation scan above intentionally does not claim
+    // it. If it is a graph output, allocate the EP-owned exact-shape output
+    // after the loop and perform one final D2D copy. The frame bank remains an
+    // internal temporary and is released after the graph stream sync.
+    for (const LoopOutput &item : loopOutputs) {
+      auto sourceType = dyn_cast<MemRefType>(item.returned.getType());
+      if (!sourceType || !sourceType.getElementType().isIntOrFloat()) {
+        returnOp.emitOpError("loop-backed graph output #")
+            << item.output << " has unsupported or lossy view ownership type "
+            << item.returned.getType();
+        return signalPassFailure();
+      }
+      auto outputType =
+          MemRefType::get(sourceType.getShape(), sourceType.getElementType(),
+                          AffineMap(), sourceType.getMemorySpace());
+      builder.setInsertionPoint(returnOp);
+      SmallVector<Value> dynamicSizes;
+      for (int64_t dim = 0; dim < sourceType.getRank(); ++dim) {
+        if (!sourceType.isDynamicDim(dim))
+          continue;
+        Value dimIndex =
+            arith::ConstantIndexOp::create(builder, returnOp.getLoc(), dim);
+        dynamicSizes.push_back(memref::DimOp::create(builder, returnOp.getLoc(),
+                                                     item.returned, dimIndex));
+      }
+      auto output = AllocOutputOp::create(
+          builder, returnOp.getLoc(), outputType, ctx, dynamicSizes,
+          builder.getI64IntegerAttr(item.output));
+      CopyOutputOp::create(builder, returnOp.getLoc(), ctx, item.returned,
+                           output.getResult());
+      Value replacement = output.getResult();
+      if (outputType != sourceType)
+        replacement = memref::CastOp::create(builder, returnOp.getLoc(),
+                                             sourceType, replacement);
+      returnOp->setOperand(item.output, replacement);
     }
   }
 };

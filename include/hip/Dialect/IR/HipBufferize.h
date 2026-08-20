@@ -11,6 +11,8 @@
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/OperationSupport.h"
 
+#include "llvm/ADT/STLExtras.h"
+
 namespace mlir {
 namespace hip {
 
@@ -98,6 +100,75 @@ struct HipReadbackBufferizableModel
                      readback.getCtx(), *scalarBuf);
     bufferization::replaceOpWithBufferizedValues(rewriter, op,
                                                  newOp.getResult());
+    return success();
+  }
+};
+
+struct HipLoopBufferizableModel
+    : public bufferization::BufferizableOpInterface::ExternalModel<
+          HipLoopBufferizableModel, LoopOp> {
+  bool bufferizesToMemoryRead(Operation *, OpOperand &operand,
+                              const bufferization::AnalysisState &) const {
+    return isa<TensorType>(operand.get().getType());
+  }
+  bool bufferizesToMemoryWrite(Operation *, OpOperand &,
+                               const bufferization::AnalysisState &) const {
+    return false;
+  }
+  bufferization::AliasingValueList
+  getAliasingValues(Operation *op, OpOperand &operand,
+                    const bufferization::AnalysisState &) const {
+    auto loop = cast<LoopOp>(op);
+    for (auto [index, init] : llvm::enumerate(loop.getVInitMutable())) {
+      if (&init != &operand)
+        continue;
+      // Zero-trip returns this exact borrowed descriptor. The relation is only
+      // MAYBE because a successful body iteration publishes frame-owned
+      // storage instead. Unknown prevents One-Shot from forcing an in-place
+      // tie while keeping seed allocations live through all loop-result uses.
+      return {{loop.getResult(index), bufferization::BufferRelation::Unknown,
+               /*isDefinite=*/false}};
+    }
+    return {};
+  }
+  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
+                          const bufferization::BufferizationOptions &options,
+                          bufferization::BufferizationState &state) const {
+    SmallVector<Value> newOperands;
+    newOperands.reserve(op->getNumOperands());
+    for (OpOperand &operand : op->getOpOperands()) {
+      if (!isa<TensorType>(operand.get().getType())) {
+        newOperands.push_back(operand.get());
+        continue;
+      }
+      FailureOr<Value> buffer =
+          getBuffer(rewriter, operand.get(), options, state);
+      if (failed(buffer))
+        return failure();
+      newOperands.push_back(*buffer);
+    }
+
+    SmallVector<Type> resultTypes;
+    resultTypes.reserve(op->getNumResults());
+    for (OpResult result : op->getResults()) {
+      auto tensorType = dyn_cast<RankedTensorType>(result.getType());
+      if (!tensorType)
+        return op->emitOpError(
+            "loop bufferization requires ranked tensor results");
+      resultTypes.push_back(
+          MemRefType::get(tensorType.getShape(), tensorType.getElementType()));
+    }
+    resultTypes.push_back(LoopFrameType::get(op->getContext()));
+
+    OperationState newState(op->getLoc(), op->getName().getStringRef());
+    newState.addOperands(newOperands);
+    newState.addTypes(resultTypes);
+    newState.addAttributes(op->getAttrs());
+    newState.addAttribute("descriptor_return", rewriter.getUnitAttr());
+    newState.propertiesAttr = op->getPropertiesAsAttribute();
+    Operation *newOp = rewriter.create(newState);
+    bufferization::replaceOpWithBufferizedValues(
+        rewriter, op, newOp->getResults().take_front(op->getNumResults()));
     return success();
   }
 };
@@ -196,7 +267,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
         HipDstBufferizableModel<MultiHeadAttentionOp>>(*ctx);
     NonZeroOp::attachInterface<HipDstBufferizableModel<NonZeroOp>>(*ctx);
     SizeOp::attachInterface<HipDstBufferizableModel<SizeOp>>(*ctx);
-    LoopOp::attachInterface<HipDstBufferizableModel<LoopOp>>(*ctx);
+    LoopOp::attachInterface<HipLoopBufferizableModel>(*ctx);
     // hip.if is a DPS control-flow op (getDpsInitsMutable, results alias
     // o_init) just like hip.loop. Without this model one-shot-bufferize aborts
     // with "op was not bufferized: hip.if" for any graph containing onnx.If,
