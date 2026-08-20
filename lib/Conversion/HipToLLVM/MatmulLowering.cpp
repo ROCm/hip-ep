@@ -5,6 +5,8 @@
 
 #include "HipToLLVMUtils.h"
 
+#include "hip/Dialect/IR/HipShapeUtils.h"
+
 #include "llvm/ADT/STLExtras.h"
 
 namespace mlir {
@@ -46,7 +48,14 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     int64_t ARank = AType.getRank();
     int64_t BRank = BType.getRank();
     int64_t outputRank = outputType.getRank();
+    if (failed(inferMatmulShape(AType.getShape(), BType.getShape(),
+                                [&]() { return op.emitOpError(); })))
+      return failure();
+    if (failed(verifyStridedBatchMatmul(AType.getShape(), BType.getShape(),
+                                        [&]() { return op.emitOpError(); })))
+      return failure();
 
+    // No IR is emitted before all static representability checks pass.
     Value statePtr = adaptor.getCtx();
     Value APtr = extractContiguousMemRefPtr(adaptor.getA(), rewriter, loc);
     Value BPtr = extractContiguousMemRefPtr(adaptor.getB(), rewriter, loc);

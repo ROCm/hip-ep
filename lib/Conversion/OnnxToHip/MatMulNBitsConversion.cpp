@@ -109,13 +109,25 @@ MatMulNBitsToHip::matchAndRewrite(mlir::Operation *op,
   auto zpElemSizeAttr = rewriter.getI64IntegerAttr(zpElemSize);
 
   auto rt = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value init = createEmptyTensor(rewriter, loc, rt, A);
+  // Same helper that backs `MatMulNBitsOp::reifyResultShapes`. A positional
+  // copy from A would size the last dimension from A's contraction extent (K)
+  // instead of the output width (N) whenever the imported type leaves it
+  // dynamic.
+  mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> resultShape =
+      mlir::hip::reifyMatMulNBitsResultShape(rewriter, loc, A, NAttr.getInt());
+  if (mlir::failed(resultShape))
+    return rewriter.notifyMatchFailure(op, "MatMulNBits A must be ranked");
+  mlir::FailureOr<mlir::Value> init =
+      createEmptyTensorFromReifiedShape(rewriter, loc, rt, *resultShape);
+  if (mlir::failed(init))
+    return rewriter.notifyMatchFailure(
+        op, "MatMulNBits result type is incompatible with the inferred shape");
 
   // Result type inferred from `init` via InferTypeOpInterface — DPS contract:
   // result type == outs operand type.
   auto hipOp = mlir::hip::MatMulNBitsOp::create(
-      rewriter, loc, context, A, B, scales, zeroPoints, gIdx, bias, init, KAttr,
-      NAttr, bitsAttr, blockSizeAttr, accuracyLevelAttr, zpElemSizeAttr);
+      rewriter, loc, context, A, B, scales, zeroPoints, gIdx, bias, *init,
+      KAttr, NAttr, bitsAttr, blockSizeAttr, accuracyLevelAttr, zpElemSizeAttr);
   rewriter.replaceOp(op, hipOp->getResults());
   return mlir::success();
 }

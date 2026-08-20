@@ -73,10 +73,10 @@ func.func @refine_single_matmul(%ctx: !hip.context,
 // CHECK:         %[[E1:.*]] = tensor.empty() : tensor<2x8xf16>
 // CHECK:         %[[Y1:.*]] = hip.matmul
 // CHECK-SAME:      outs(%[[E1]] : tensor<2x8xf16>) : tensor<2x8xf16>
-// CHECK:         %[[CAST:.*]] = tensor.cast %[[Y1]] : tensor<2x8xf16> to tensor<?x?xf16>
+// CHECK:         %[[CAST:.*]] = tensor.cast %[[Y1]] : tensor<2x8xf16> to tensor<?x8xf16>
 // CHECK:         %[[E2:.*]] = tensor.empty() : tensor<2x16xf16>
 // CHECK:         %[[Y2:.*]] = hip.matmul
-// CHECK-SAME:      ins(%[[CAST]], %{{.*}} : tensor<?x?xf16>, tensor<8x16xf16>)
+// CHECK-SAME:      ins(%[[CAST]], %{{.*}} : tensor<?x8xf16>, tensor<8x16xf16>)
 // CHECK-SAME:      outs(%[[E2]] : tensor<2x16xf16>) : tensor<2x16xf16>
 func.func @refine_chained_matmul(%ctx: !hip.context,
                                  %a: tensor<2x4xf16>,
@@ -85,13 +85,13 @@ func.func @refine_chained_matmul(%ctx: !hip.context,
                                  %d1: index, %d2: index,
                                  %d3: index, %d4: index)
     -> tensor<?x?xf16> {
-  %e1 = tensor.empty(%d1, %d2) : tensor<?x?xf16>
+  %e1 = tensor.empty(%d1) : tensor<?x8xf16>
   %y1 = hip.matmul(%ctx)
     ins(%a, %b : tensor<2x4xf16>, tensor<4x8xf16>)
-    outs(%e1 : tensor<?x?xf16>) : tensor<?x?xf16>
+    outs(%e1 : tensor<?x8xf16>) : tensor<?x8xf16>
   %e2 = tensor.empty(%d3, %d4) : tensor<?x?xf16>
   %y2 = hip.matmul(%ctx)
-    ins(%y1, %c : tensor<?x?xf16>, tensor<8x16xf16>)
+    ins(%y1, %c : tensor<?x8xf16>, tensor<8x16xf16>)
     outs(%e2 : tensor<?x?xf16>) : tensor<?x?xf16>
   return %y2 : tensor<?x?xf16>
 }
@@ -307,15 +307,16 @@ func.func @refine_matmul_nbits_from_attr(%ctx: !hip.context,
 // CHECK-SAME:                  outs(%[[E]] : tensor<128x256xf32>) : tensor<128x256xf32>
 // CHECK:         tensor.cast %[[Y]] : tensor<128x256xf32> to tensor<?x?xf32>
 func.func @refine_gemm_2d_from_inputs(%ctx: !hip.context,
-                                      %a: tensor<128x?xf32>,
-                                      %b: tensor<?x256xf32>,
+                                      %a: tensor<128x64xf32>,
+                                      %b: tensor<64x256xf32>,
                                       %dM: index, %dN: index)
     -> tensor<?x?xf32> {
   %e = tensor.empty(%dM, %dN) : tensor<?x?xf32>
   %y = hip.gemm(%ctx)
-    ins(%a, %b : tensor<128x?xf32>, tensor<?x256xf32>)
+    ins(%a, %b : tensor<128x64xf32>, tensor<64x256xf32>)
     outs(%e : tensor<?x?xf32>)
-    {alpha = 1.0 : f32, beta = 1.0 : f32, transA = 0 : i64, transB = 0 : i64}
+    {alpha = 1.0 : f32, beta = 1.0 : f32,
+     transA = 0 : i64, transB = 0 : i64}
     : tensor<?x?xf32>
   return %y : tensor<?x?xf32>
 }

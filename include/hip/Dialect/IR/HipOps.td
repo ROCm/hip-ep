@@ -106,6 +106,12 @@ class Hip_DpsOp_AutoReifyInfer<string mnemonic,
   let extraClassDefinition = reifyClassDefinition # inferClassDefinition;
 }
 
+/// Shape behavior supplied by a dedicated semantic implementation.
+class Hip_DpsOp_Semantic<string mnemonic,
+                         list<Trait> traits = [],
+                         string outsAccessor = "Output"> :
+    Hip_DpsOp_WithInfer<mnemonic, outsAccessor, traits>;
+
 // Parameterized sub-base for ONNX-style reduction ops (reduce_sum,
 // reduce_max, reduce_prod). Auto-emits a `reifyResultShapes` body
 // that calls `mlir::hip::reifyReductionShape` — which tries
@@ -709,10 +715,12 @@ def Hip_ConvTransposeOp : Hip_DpsOp_AutoReify<
 
 // ===== hipBLASLt ops =========================================================
 
-// Matmul selects a manual-reify/generated-infer family: reification recovers
-// M/K/N from operand shapes in `HipReifyResultShapesImpl.cpp`, while the
-// generated `inferReturnTypes` body reads the typed outs operand.
-def Hip_MatmulOp : Hip_DpsOp_WithInfer<"matmul", "Output", [OpStateOpInterface]> {
+// Semantic MatMul-family ops recover result dimensions from their inputs rather
+// than echoing the outs shape, so reification is hand-written in
+// `HipReifyResultShapesImpl.cpp`. Their family base still emits the common
+// single-result `inferReturnTypes` body from the typed outs operand.
+def Hip_MatmulOp :
+    Hip_DpsOp_Semantic<"matmul", /*traits=*/[OpStateOpInterface]> {
   let summary = "Matrix multiplication (supports batched N-D x N-D)";
   let description = [{
     Performs matrix multiplication: output = A @ B
@@ -726,9 +734,10 @@ def Hip_MatmulOp : Hip_DpsOp_WithInfer<"matmul", "Output", [OpStateOpInterface]>
       B:      [..., K, N]
       output: [broadcast(A.batch, B.batch), M, N]
 
-    `?` (kDynamic) is permitted on any dim and behaves as a wildcard for
-    verification; `reifyResultShapes` lifts dynamic dims into `tensor.dim`
-    / `memref.dim` of the corresponding operand. See
+    `?` (kDynamic) is supported for M, N, and structurally representable batch
+    dimensions; dynamic contraction K is unsupported. `reifyResultShapes`
+    lifts supported dynamic dims into `tensor.dim` / `memref.dim` of the
+    corresponding operand. See
     [docs/design/hip-shape-inference.md](docs/design/hip-shape-inference.md)
     for the dim-source contract and the consuming pipeline.
 
@@ -784,8 +793,10 @@ def Hip_MatmulOp : Hip_DpsOp_WithInfer<"matmul", "Output", [OpStateOpInterface]>
 // Quantized Operations
 //===----------------------------------------------------------------------===//
 
-def Hip_MatMulNBitsOp : Hip_DpsOp_WithInfer<"matmul_nbits", "Output", [AttrSizedOperandSegments,
-                                              OpStateOpInterface]> {
+def Hip_MatMulNBitsOp :
+    Hip_DpsOp_Semantic<"matmul_nbits",
+                       /*traits=*/[AttrSizedOperandSegments,
+                                   OpStateOpInterface]> {
   let summary = "Quantized N-bit matrix multiplication (com.microsoft MatMulNBits)";
   let description = [{
     Performs matrix multiplication with N-bit quantized weights.
@@ -858,6 +869,7 @@ def Hip_MatMulNBitsOp : Hip_DpsOp_WithInfer<"matmul_nbits", "Output", [AttrSized
           "hipdnn_ep_op_state_construct_matmul_nbits", {});
     }
   }];
+  let hasVerifier = 1;
 }
 
 def Hip_QMoEOp : Hip_DpsOp_WithInfer<"qmoe", "Output", [AttrSizedOperandSegments]> {
@@ -3384,7 +3396,9 @@ def Hip_LinearAttentionOp : Hip_DpsOp_AutoReify<"linear_attention", [AttrSizedOp
   }];
 }
 
-def Hip_GemmOp : Hip_DpsOp_WithInfer<"gemm", "Output", [OpStateOpInterface]> {
+def Hip_GemmOp :
+    Hip_DpsOp_Semantic<"gemm", /*traits=*/[OpStateOpInterface],
+                       /*outsAccessor=*/"Output"> {
   let summary = "General matrix multiplication (ONNX Gemm)";
   let description = [{
     Computes Y = alpha * A' * B' + beta * C, where:
@@ -3439,6 +3453,11 @@ def Hip_GemmOp : Hip_DpsOp_WithInfer<"gemm", "Output", [OpStateOpInterface]> {
           {});
     }
   }];
+
+  // Verifies the DPS contract plus the shared `inferGemmShape` rule, so the
+  // `outs` shape, the converter destination, and `reifyResultShapes` are all
+  // held to one ONNX Gemm shape function.
+  let hasVerifier = 1;
 }
 
 def Hip_CumSumOp : Hip_DpsOp_AutoReifyInfer<"cumsum", "Y"> {
