@@ -9,6 +9,7 @@ add_library(HipDialectIR STATIC
   HipOpStateInterface.cpp
   HipReifyResultShapesImpl.cpp
   HipShapeUtils.cpp
+  HipShapeUtilsAttention.cpp
   HipShapeUtilsConvPool.cpp
   HipShapeUtilsGather.cpp
   HipShapeUtilsMatmulGemm.cpp

@@ -183,6 +183,7 @@ Choose the smallest mechanism that matches the operation's semantics:
 | Window Pool (spatial rank 1..3) | Shared signed floor/ceil spatial-window formula; optional indices reuse the values shape |
 | Rank-4 NCHW ConvTranspose | Shared ONNX formula used by converter, reification, and verifier |
 | GlobalPool | N/C from input and unit spatial extents, shared by converter, reification, and verifier |
+| CausalConvWithState | Runtime-supported 1D output/state formulas from input and depthwise kernel |
 | Resize | DPS-init shape, with semantic validity handled by conversion |
 | Runtime-dependent count, such as NonZero or Compress | DPS-init shape; unresolved dimensions remain dynamic |
 
@@ -366,6 +367,15 @@ and skips MIOpen/kernel dispatch when that operand is false; the zero extent is
 failure containment, not successful shape recovery. Cached model artifacts
 compiled against the prior `wrap_miopenConvolutionForward` or `wrap_pool` ABI
 must be invalidated.
+
+CausalConvWithState uses the backend's implemented 1D contract. For input
+`[B,C,L]` and depthwise weight `[C,1,K]`, output is `[B,C,L]` and
+`present_state` is `[B,C,K-1]`. Optional `past_state` must have that same state
+shape, but it is a validator rather than an extent source: when it is absent or
+more dynamic than the weight, the state length still comes from `weight.K-1`.
+The mixed helper emits subtraction only after its pure helper has validated
+rank, depthwise layout, channel agreement, optional bias/state, and the current
+runtime restriction `ndim=1`.
 
 Reductions resolve to one internal out-to-in dimension map, consumed by both
 `inferReductionShape` (static extents) and `reifyReductionResultShape` (mixed

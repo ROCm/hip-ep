@@ -71,21 +71,71 @@ mlir::LogicalResult CausalConvWithStateToHip::matchAndRewrite(
           ? rewriter.getI64IntegerAttr(ndimAttrOnnx.getValue().getSExtValue())
           : rewriter.getI64IntegerAttr(1);
 
-  // Outputs: output (same shape as input), present_state
+  // Outputs: output (same shape as input), present_state [B,C,K-1].
   size_t numResults = op->getNumResults();
   if (numResults != 2)
     return rewriter.notifyMatchFailure(
         op, "CausalConvWithState expects exactly 2 results");
 
   auto outputType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
   auto presentStateType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(1).getType());
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+  auto weightType = mlir::dyn_cast<mlir::RankedTensorType>(weight.getType());
+  auto biasType = bias ? mlir::dyn_cast<mlir::RankedTensorType>(bias.getType())
+                       : mlir::RankedTensorType{};
+  auto pastStateType =
+      pastState ? mlir::dyn_cast<mlir::RankedTensorType>(pastState.getType())
+                : mlir::RankedTensorType{};
+  if (!outputType || !presentStateType || !inputType || !weightType ||
+      (bias && !biasType) || (pastState && !pastStateType))
+    return rewriter.notifyMatchFailure(
+        op, "CausalConvWithState requires ranked tensor operands and results");
 
-  // Create DPS init tensors
-  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
-  mlir::Value presentStateInit = createEmptyTensor(
-      rewriter, loc, presentStateType, pastState ? pastState : input);
+  std::optional<llvm::ArrayRef<int64_t>> biasShape;
+  if (biasType)
+    biasShape = biasType.getShape();
+  std::optional<llvm::ArrayRef<int64_t>> pastStateShape;
+  if (pastStateType)
+    pastStateShape = pastStateType.getShape();
+  auto staticShapes = mlir::hip::inferCausalConvWithStateOutputShapes(
+      inputType.getShape(), weightType.getShape(), biasShape, pastStateShape,
+      ndimAttr.getInt(), [&]() { return op->emitError(); });
+  if (mlir::failed(staticShapes))
+    return mlir::failure();
+
+  auto importedTypeAgrees = [](mlir::RankedTensorType imported,
+                               llvm::ArrayRef<int64_t> expected) {
+    if (imported.getRank() != static_cast<int64_t>(expected.size()))
+      return false;
+    for (int64_t dim : llvm::seq<int64_t>(0, imported.getRank()))
+      if (!imported.isDynamicDim(dim) &&
+          !mlir::ShapedType::isDynamic(expected[dim]) &&
+          imported.getDimSize(dim) != expected[dim])
+        return false;
+    return true;
+  };
+  if (!importedTypeAgrees(outputType, (*staticShapes)[0]) ||
+      !importedTypeAgrees(presentStateType, (*staticShapes)[1]))
+    return rewriter.notifyMatchFailure(
+        op, "CausalConvWithState imported result types disagree with "
+            "[input, (B,C,K-1)]");
+
+  // The same mixed helper backs op reification. It validates every shape
+  // precondition before emitting dynamic dimension arithmetic.
+  auto resultShapes = mlir::hip::reifyCausalConvWithStateOutputShapes(
+      rewriter, loc, input, weight, bias, pastState, ndimAttr.getInt(),
+      [&]() { return op->emitError(); });
+  if (mlir::failed(resultShapes))
+    return mlir::failure();
+  auto outputInit = createEmptyTensorFromReifiedShape(rewriter, loc, outputType,
+                                                      (*resultShapes)[0]);
+  auto presentStateInit = createEmptyTensorFromReifiedShape(
+      rewriter, loc, presentStateType, (*resultShapes)[1]);
+  if (mlir::failed(outputInit) || mlir::failed(presentStateInit))
+    return rewriter.notifyMatchFailure(
+        op, "CausalConvWithState result types are not reifiable");
 
   // Build operands
   mlir::SmallVector<mlir::Value> operands;
@@ -96,8 +146,8 @@ mlir::LogicalResult CausalConvWithStateToHip::matchAndRewrite(
     operands.push_back(bias);
   if (pastState)
     operands.push_back(pastState);
-  operands.push_back(outputInit);
-  operands.push_back(presentStateInit);
+  operands.push_back(*outputInit);
+  operands.push_back(*presentStateInit);
 
   // Build attributes
   mlir::SmallVector<mlir::NamedAttribute> attrs;
