@@ -7,6 +7,7 @@
 
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
+#include "hip/Dialect/Onnx/IR/OnnxOps.h"
 
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -15,27 +16,26 @@ namespace mlir {
 namespace hipsr {
 namespace {
 
-struct MinToHipsr : public ::mlir::ConversionPattern {
+struct MinToHipsr : public ::mlir::OpConversionPattern<::mlir::onnx::MinOp> {
   MinToHipsr(const ::mlir::TypeConverter &typeConverter,
              ::mlir::MLIRContext *ctx)
-      : ConversionPattern("onnx.Min", /*benefit=*/1, ctx) {}
+      : OpConversionPattern(ctx) {}
 
   ::mlir::LogicalResult
-  matchAndRewrite(::mlir::Operation *op,
-                  ::mlir::ArrayRef<::mlir::Value> operands,
+  matchAndRewrite(::mlir::onnx::MinOp op, OpAdaptor adaptor,
                   ::mlir::ConversionPatternRewriter &rewriter) const override {
-    if (operands.empty() || op->getNumResults() != 1) {
-      return rewriter.notifyMatchFailure(
-          op, "expected at least one operand and a single result");
+    ::mlir::ValueRange inputs = adaptor.getData_0();
+    if (inputs.empty()) {
+      return rewriter.notifyMatchFailure(op, "expected at least one input");
     }
 
-    if (operands.size() == 1) {
-      rewriter.replaceOp(op, operands[0]);
+    if (inputs.size() == 1) {
+      rewriter.replaceOp(op, inputs[0]);
       return ::mlir::success();
     }
 
     auto resultType =
-        ::mlir::dyn_cast<::mlir::RankedTensorType>(op->getResult(0).getType());
+        ::mlir::dyn_cast<::mlir::RankedTensorType>(op.getMin().getType());
     if (!resultType) {
       return rewriter.notifyMatchFailure(op, "expected ranked tensor result");
     }
@@ -46,18 +46,17 @@ struct MinToHipsr : public ::mlir::ConversionPattern {
       return ::mlir::failure();
     }
 
-    ::mlir::Location loc = op->getLoc();
-    ::mlir::Value accumulate = operands[0];
-    for (size_t i = 1; i < operands.size(); ++i) {
-      ::mlir::Value rhs = operands[i];
+    ::mlir::Location loc = op.getLoc();
+    ::mlir::Value accumulate = inputs[0];
+    for (size_t i = 1; i < inputs.size(); ++i) {
+      ::mlir::Value rhs = inputs[i];
       auto accumulateType =
           ::mlir::dyn_cast<::mlir::RankedTensorType>(accumulate.getType());
       if (!accumulateType) {
-        return rewriter.notifyMatchFailure(op,
-                                           "expected ranked tensor operands");
+        return rewriter.notifyMatchFailure(op, "expected ranked tensor inputs");
       }
       ::mlir::RankedTensorType stepType =
-          (i + 1 == operands.size()) ? resultType : accumulateType;
+          (i + 1 == inputs.size()) ? resultType : accumulateType;
 
       ::mlir::Value init =
           PlaceholderOp::create(rewriter, loc, ::mlir::TypeRange{stepType},
