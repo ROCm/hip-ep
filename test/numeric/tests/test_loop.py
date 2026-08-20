@@ -46,6 +46,51 @@ def _append_from_empty_model(trip_count: int, width: int):
     )
 
 
+def _append_from_exact_slice_seed_model(trip_count: int, width: int):
+    body_iter = helper.make_tensor_value_info("iter", TensorProto.INT64, [])
+    body_cond = helper.make_tensor_value_info("cond_in", TensorProto.BOOL, [])
+    body_acc = helper.make_tensor_value_info(
+        "acc_in", TensorProto.FLOAT, [1, None, width]
+    )
+    body_cond_out = helper.make_tensor_value_info("cond_out", TensorProto.BOOL, [])
+    body_acc_out = helper.make_tensor_value_info(
+        "acc_out", TensorProto.FLOAT, [1, None, width]
+    )
+    body = helper.make_graph(
+        [
+            helper.make_node("Concat", ["acc_in", "row"], ["acc_out"], axis=1),
+            helper.make_node("Identity", ["cond_in"], ["cond_out"]),
+        ],
+        "slice_seed_append_body",
+        [body_iter, body_cond, body_acc],
+        [body_cond_out, body_acc_out],
+    )
+
+    row_info = helper.make_tensor_value_info("row", TensorProto.FLOAT, [1, 1, width])
+    output_info = helper.make_tensor_value_info(
+        "Y", TensorProto.FLOAT, [1, None, width]
+    )
+    initializers = [
+        helper.make_tensor("starts", TensorProto.INT64, [1], [0]),
+        helper.make_tensor("ends", TensorProto.INT64, [1], [0]),
+        helper.make_tensor("axes", TensorProto.INT64, [1], [1]),
+        helper.make_tensor("steps", TensorProto.INT64, [1], [1]),
+        helper.make_tensor("M", TensorProto.INT64, [], [trip_count]),
+        helper.make_tensor("cond", TensorProto.BOOL, [], [True]),
+    ]
+    slice_node = helper.make_node(
+        "Slice", ["row", "starts", "ends", "axes", "steps"], ["seed"]
+    )
+    loop = helper.make_node("Loop", ["M", "cond", "seed"], ["Y"], body=body)
+    return make_model_from_nodes(
+        [slice_node, loop],
+        [row_info],
+        [output_info],
+        initializers=initializers,
+        opset=17,
+    )
+
+
 @pytest.mark.parametrize("trip_count", [0, 1, 4])
 def test_loop_append_from_exact_empty_seed(model_runner, trip_count):
     model = _append_from_empty_model(trip_count=trip_count, width=3)
@@ -57,3 +102,17 @@ def test_loop_append_from_exact_empty_seed(model_runner, trip_count):
         name=f"loop_append_from_empty_seed_{trip_count}",
     )
     compare_outputs(actual, expected, atol=0.0, rtol=0.0)
+
+
+@pytest.mark.parametrize("trip_count", [0, 1, 4])
+def test_loop_append_from_exact_slice_seed(model_runner, trip_count):
+    model = _append_from_exact_slice_seed_model(trip_count=trip_count, width=3)
+    row = np.arange(3, dtype=np.float32).reshape(1, 1, 3)
+    actual, expected = model_runner.run_sample(
+        model,
+        [row],
+        reference="cpu",
+        name=f"loop_append_from_exact_slice_seed_{trip_count}",
+    )
+    compare_outputs(actual, expected, atol=0.0, rtol=0.0)
+    assert actual[0].shape == (1, trip_count, 3)

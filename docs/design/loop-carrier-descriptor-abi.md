@@ -19,6 +19,11 @@ the borrowed `v_init` descriptor unchanged and a null frame token. A loop that
 executes its body returns the final successfully published descriptor and its
 owning frame; `v_init` is never mutated, freed, or adopted.
 
+This includes exact zero-element Slice seeds. A `[1, 0, D]` seed stays exact
+and may carry null storage; it is never replaced by an input-shaped capacity.
+When the body grows that carrier, its result allocation is redirected to
+`hip.loop_alloc`, and the returned descriptor carries the new exact extent.
+
 ## Outlined body ABI
 
 An outlined body has the source-level signature:
