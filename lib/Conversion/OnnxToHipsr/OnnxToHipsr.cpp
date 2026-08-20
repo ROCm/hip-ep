@@ -15,6 +15,7 @@
 
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
+#include "hip/Dialect/Onnx/IR/OnnxOps.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -55,14 +56,14 @@ Value resolveShapeGraphInput(Value input) {
 // dead once the conversion of its consumer drops that operand. Sweeping it up
 // therefore belongs after the conversion.
 void eraseDeadNoValue(ModuleOp module) {
-  SmallVector<Operation *> dead;
-  module.walk([&](Operation *op) {
-    if (op->getName().getStringRef() == "onnx.NoValue" && op->use_empty()) {
+  SmallVector<onnx::NoValueOp> dead;
+  module.walk([&](onnx::NoValueOp op) {
+    if (op->use_empty()) {
       dead.push_back(op);
     }
   });
-  for (Operation *op : dead) {
-    op->erase();
+  for (onnx::NoValueOp op : dead) {
+    op.erase();
   }
 }
 
@@ -90,14 +91,14 @@ struct ConvertOnnxToHipsrPass
       if (type.getRank() == 0 || type.getEncoding()) {
         return type;
       }
-      return deviceTensorType(type);
+      return tensorTypeInSpace(type, MemorySpace::Device);
     });
 
     ConversionTarget target(getContext());
-    target.addIllegalDialect("onnx");
+    target.addIllegalDialect<onnx::OnnxDialect>();
     // The consumer's conversion drops the operand this stands for, so the
     // placeholder has to survive until then.
-    target.addLegalOp(OperationName("onnx.NoValue", &getContext()));
+    target.addLegalOp<onnx::NoValueOp>();
     target.addLegalDialect<HipsrDialect>();
     target.addLegalOp<ModuleOp>();
     target.addLegalOp<arith::ConstantOp>();
@@ -106,8 +107,11 @@ struct ConvertOnnxToHipsrPass
     });
     target.addDynamicallyLegalOp<func::ReturnOp>(
         [&](func::ReturnOp op) { return converter.isLegal(op); });
+    // Helper operations are legal in the hipsr region that owns them: a compute
+    // body or a placeholder's shape region.
     target.markUnknownOpDynamicallyLegal([](Operation *op) {
-      return op->getParentOfType<ComputeOp>() != nullptr;
+      return op->getParentOfType<ComputeOp>() != nullptr ||
+             op->getParentOfType<PlaceholderOp>() != nullptr;
     });
 
     RewritePatternSet patterns(&getContext());
@@ -115,6 +119,7 @@ struct ConvertOnnxToHipsrPass
     populateCastConversionPatterns(converter, patterns, &getContext());
     populateMatMulConversionPatterns(converter, patterns, &getContext());
     populateExpandConversionPatterns(converter, patterns, &getContext());
+    populateShapeConversionPatterns(converter, patterns, &getContext());
     populateReturnConversionPatterns(patterns, &getContext());
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns,
                                                                    converter);

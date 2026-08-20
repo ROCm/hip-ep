@@ -37,7 +37,7 @@ extern "C" int hip_gqa_flash_prefill_v2(
 
 // Wide entry: same as v2 plus attention sinks / smooth softmax and a sliding
 // window.
-extern "C" int hip_gqa_flash_prefill_v3(
+extern "C" int hip_gqa_flash_prefill(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale, int local_window_size, const void* head_sink,
@@ -208,7 +208,7 @@ static bool run_case(const Case& c, int iters) {
                        : (c.sink_mode == kSinkBoth)    ? "both"
                                                        : "-";
   auto launch = [&]() {
-    return hip_gqa_flash_prefill_v3(nullptr, dQ, dK, dV, dO, B, H, G, sq, skv, D,
+    return hip_gqa_flash_prefill(nullptr, dQ, dK, dV, dO, B, H, G, sq, skv, D,
                                     max_seq, past_len, scale, window_arg,
                                     sink_arg, H, smooth_arg);
   };

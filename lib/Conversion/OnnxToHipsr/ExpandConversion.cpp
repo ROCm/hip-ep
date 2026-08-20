@@ -7,6 +7,7 @@
 
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
+#include "hip/Dialect/Onnx/IR/OnnxOps.h"
 
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/PatternMatch.h"
@@ -18,22 +19,17 @@ namespace mlir {
 namespace hipsr {
 namespace {
 
-struct ExpandToHipsr : public ::mlir::ConversionPattern {
+struct ExpandToHipsr
+    : public ::mlir::OpConversionPattern<::mlir::onnx::ExpandOp> {
   ExpandToHipsr(const ::mlir::TypeConverter &typeConverter,
                 ::mlir::MLIRContext *ctx)
-      : ConversionPattern(typeConverter, "onnx.Expand", /*benefit=*/1, ctx) {}
+      : OpConversionPattern(ctx) {}
 
   ::mlir::LogicalResult
-  matchAndRewrite(::mlir::Operation *op,
-                  ::mlir::ArrayRef<::mlir::Value> operands,
+  matchAndRewrite(::mlir::onnx::ExpandOp op, OpAdaptor adaptor,
                   ::mlir::ConversionPatternRewriter &rewriter) const override {
-    if (op->getNumOperands() != 2 || op->getNumResults() != 1) {
-      return rewriter.notifyMatchFailure(
-          op, "expected two operands and a single result");
-    }
-
-    ::mlir::Value input = operands[0];
-    ::mlir::Value shape = operands[1];
+    ::mlir::Value input = adaptor.getInput();
+    ::mlir::Value shape = adaptor.getShape();
     auto inputType =
         ::mlir::dyn_cast<::mlir::RankedTensorType>(input.getType());
     if (!inputType) {
@@ -52,11 +48,12 @@ struct ExpandToHipsr : public ::mlir::ConversionPattern {
       return rewriter.notifyMatchFailure(op, "expected static shape length");
     }
 
-    auto resultType = ::mlir::dyn_cast_or_null<::mlir::RankedTensorType>(
-        getTypeConverter()->convertType(op->getResult(0).getType()));
+    auto resultType =
+        ::mlir::dyn_cast<::mlir::RankedTensorType>(op.getOutput().getType());
     if (!resultType) {
       return rewriter.notifyMatchFailure(op, "expected ranked tensor result");
     }
+    resultType = tensorTypeInSpace(resultType, MemorySpace::Device);
     if (inputType.getElementType() != resultType.getElementType()) {
       return rewriter.notifyMatchFailure(
           op, "expected matching input and result element types");
@@ -73,7 +70,7 @@ struct ExpandToHipsr : public ::mlir::ConversionPattern {
       return ::mlir::failure();
     }
 
-    ::mlir::Location loc = op->getLoc();
+    ::mlir::Location loc = op.getLoc();
     ::mlir::Value init =
         PlaceholderOp::create(rewriter, loc, ::mlir::TypeRange{resultType},
                               *ctx, ::mlir::ValueRange{input, shape},
