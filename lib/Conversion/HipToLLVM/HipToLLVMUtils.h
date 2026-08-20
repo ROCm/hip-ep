@@ -121,6 +121,7 @@ inline constexpr const char *kWrapExpand = "wrap_expand";
 inline constexpr const char *kWrapReduceProd = "wrap_reduce_prod";
 inline constexpr const char *kWrapPool = "wrap_pool";
 inline constexpr const char *kWrapResize = "wrap_resize";
+inline constexpr const char *kWrapGridSample = "wrap_grid_sample";
 inline constexpr const char *kWrapGlobalPool = "wrap_global_pool";
 inline constexpr const char *kWrapLess = "wrap_less";
 inline constexpr const char *kWrapGatherND = "wrap_gather_nd";
@@ -498,6 +499,8 @@ void populatePoolLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateResizeLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns);
+void populateGridSampleLoweringPatterns(const LLVMTypeConverter &converter,
+                                        RewritePatternSet &patterns);
 void populateGlobalPoolLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns);
 

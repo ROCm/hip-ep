@@ -1178,6 +1178,26 @@ int wrap_resize(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_grid_sample(RuntimeState *state, void *input, void *grid, void *output,
+                     int64_t data_type, int64_t n, int64_t c, int64_t in_h,
+                     int64_t in_w, int64_t out_h, int64_t out_w, int64_t mode,
+                     int64_t padding_mode, int64_t align_corners) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_grid_sample\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_grid_sample(dtype=%s(%lld), N=%lld, C=%lld, "
+             "in=%lldx%lld, out=%lldx%lld, mode=%lld, pad=%lld, align=%lld)\n",
+             hipdnn_ep_datatype_name(data_type), (long long)data_type,
+             (long long)n, (long long)c, (long long)in_h, (long long)in_w,
+             (long long)out_h, (long long)out_w, (long long)mode,
+             (long long)padding_mode, (long long)align_corners);
+  (void)input;
+  (void)grid;
+  (void)output;
+  return 0;
+}
+
 int wrap_global_pool(RuntimeState *state, void *input, void *output,
                      int64_t outer, int64_t reduce_size, int64_t data_type,
                      int64_t mode, int64_t p) {
