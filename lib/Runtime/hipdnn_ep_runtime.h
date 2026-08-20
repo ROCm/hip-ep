@@ -1692,11 +1692,32 @@ int hipdnn_ep_run_loop(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
                        HipdnnEpLoopFrame *parent_frame, void ***final_descs,
                        HipdnnEpLoopFrame **frame_out);
 
-// Retry cleanup only for frames quarantined by a failed explicit destroy.
-// Successful frames are released through their compiler-visible token.
+// Recycle frames quarantined by a failed explicit destroy after the caller has
+// successfully synchronized the RuntimeState stream. Successful frames are
+// released through their compiler-visible token.
 void hipdnn_ep_loop_cleanup_quarantined_frames(RuntimeState *state);
 int hipdnn_ep_loop_state_init(RuntimeState *state);
 void hipdnn_ep_loop_state_cleanup(RuntimeState *state);
+
+#ifdef HIPDNN_EP_RUNTIME_TESTING
+typedef struct HipdnnEpLoopBankStats {
+  uint64_t hits;
+  uint64_t misses;
+  uint64_t allocations;
+  uint64_t frees;
+  size_t active_bytes;
+  size_t cached_bytes;
+  size_t peak_bytes;
+  size_t quarantined_bytes;
+} HipdnnEpLoopBankStats;
+
+void hipdnn_ep_test_fail_next_loop_sync(void);
+void hipdnn_ep_test_fail_next_loop_alloc(void);
+void hipdnn_ep_test_get_loop_bank_stats(RuntimeState *state,
+                                        HipdnnEpLoopBankStats *stats);
+void hipdnn_ep_test_get_last_cleaned_loop_bank_stats(
+    HipdnnEpLoopBankStats *stats);
+#endif
 
 // ONNX If driver. Dispatches to exactly one of the two branch trampolines
 // based on `cond`. Each trampoline writes branch outputs into the shared

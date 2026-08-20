@@ -51,14 +51,29 @@ element_size)`.
 
 ## Ownership and allocation
 
-Each invocation owns two high-water device banks per carrier. Current is
-read-only to the body; next is writable and may grow. Exact logical sizes and
-contiguous strides live in the returned memref descriptor and are independent
-of retained bank capacity. Checked multiplication rejects negative extents and
-byte-size overflow. A zero-element descriptor has null data and zero logical
-bytes; publishing it advances the logical bank without allocating, freeing, or
-discarding retained bank capacity. A later nonzero iteration resumes normal
-bank reuse or growth. Null remains an allocation failure for nonzero bytes.
+Each invocation checks out two independent device-bank blocks per carrier as
+needed. Checkout is exclusive until frame destruction, so current remains
+read-only, next remains writable, nested/concurrent frames cannot share a
+pointer, and a checked-out block never relocates. The generic two-bank
+ping-pong contract is unchanged. Exact logical sizes and contiguous strides
+live in the returned memref descriptor and are independent of block capacity.
+Checked multiplication rejects negative extents and byte-size overflow. A
+zero-element descriptor has null data and zero logical bytes; publishing it
+advances the logical bank without checking out, freeing, or discarding a
+retained block. A later nonzero iteration resumes normal bank reuse or growth.
+Null remains an allocation failure for nonzero bytes.
+
+The RuntimeState owns a mutex-protected best-fit cache of independent blocks.
+Checkout takes the smallest cached capacity at least as large as the request.
+A miss allocates one block. Frame destruction and bank growth return blocks to
+the cache only after successful stream synchronization; a synchronization
+failure quarantines the owning frame and its blocks until a later successful
+graph sync. Uncertain in-flight memory is never offered to another frame.
+The cache keeps the largest useful blocks up to the observed concurrent block
+high-water; undersized blocks displaced by synchronized growth are released,
+while retained blocks live across inferences and are freed exactly once during
+normal RuntimeState teardown. This cache is separate from relocatable compiler
+pools and deliberately is not one contiguous arena.
 
 `hip.loop_alloc` deliberately has no Allocate memory effect. Carrier banks are
 therefore excluded from PoolAllocs and ownership-based deallocation. Ordinary
@@ -68,8 +83,9 @@ body `memref.alloc` operations remain poolable.
 carrier descriptor use and after any graph-output copy. An escaping nested
 carrier transfers its child frame to the enclosing parent frame; explicit child
 destruction unlinks it. Normal invocations therefore retain no per-run frame.
-If synchronization fails during destruction, only that frame is quarantined
-for a later successful synchronization or state cleanup.
+Their drained bank blocks remain in the RuntimeState cache. If synchronization
+fails during destruction or growth, only that frame is quarantined for a later
+successful synchronization or state cleanup.
 
 Lifetime analysis follows conditional zero-trip/pass-through aliases
 transitively through later loop `v_init` edges and view chains. Therefore
@@ -91,7 +107,24 @@ token. Every failure sets the existing generated-graph runtime error flag.
 
 ## Concurrency and nesting
 
-Iteration storage, condition storage, events, descriptor sets, and carrier
-banks are frame-local. Nested loops and simultaneous driver invocations on one
-runtime state therefore do not share loop slots. Only the failed-destruction
-quarantine list is shared and mutex-protected.
+Iteration storage, condition storage, events, descriptor sets, and checked-out
+carrier banks are frame-local. Nested loops and simultaneous driver
+invocations on one runtime state therefore do not share loop slots or bank
+pointers. The
+available-block cache and failed-synchronization quarantine list are shared and
+mutex-protected.
+
+## Diagnostics and retention estimate
+
+`HIPDNN_EP_LOOP_BANK_TRACE=1` enables low-overhead cache event lines with
+best-fit hits/misses, successful allocation/free counts, active/cached/peak
+bytes, quarantine bytes, and synchronization/quarantine reason. The variable
+is read once when loop state is initialized; no cache diagnostics are emitted
+by default.
+
+For 27 sequential equivalent Loop frames whose two final bank capacities are
+`A` and `B`, the cache retains `A + B` bytes and avoids up to 52 repeated
+allocations after the first frame. Relative to allocating/finally freeing two
+blocks per frame, the estimated cumulative allocation traffic recovered is
+`26 * (A + B)` bytes. This is an allocation-volume estimate, not a Windows VRAM
+measurement; peak/process VRAM must be reported only after CI reruns it.

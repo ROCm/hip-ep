@@ -504,6 +504,45 @@ set(RUNTIME_BC_PATH ${CMAKE_CURRENT_BINARY_DIR}/runtime.bc PARENT_SCOPE)
 
 add_custom_target(RuntimeBitcode DEPENDS HipRuntime)
 
+# Keep runtime.bc within the symbol surface that LlvmIrJit can resolve in the
+# EP process. In particular, std::nothrow allocation introduces MSVC CRT
+# symbols that are unavailable to Windows JIT artifacts.
+if(TARGET llvm-nm)
+    set(RUNTIME_LLVM_NM "$<TARGET_FILE:llvm-nm>")
+    set(RUNTIME_LLVM_NM_DEPENDS llvm-nm)
+else()
+    find_program(RUNTIME_LLVM_NM NAMES llvm-nm
+        PATHS
+            ${LLVM_BINARY_DIR}/bin
+            ${LLVM_TOOLS_BINARY_DIR}
+    )
+    if(NOT RUNTIME_LLVM_NM)
+        message(FATAL_ERROR
+            "llvm-nm not found (required for runtime bitcode ABI audit)")
+    endif()
+    set(RUNTIME_LLVM_NM_DEPENDS "")
+endif()
+
+set(RUNTIME_BITCODE_ABI_STAMP
+    ${CMAKE_CURRENT_BINARY_DIR}/runtime_bitcode_jit_abi.stamp)
+add_custom_command(
+    OUTPUT ${RUNTIME_BITCODE_ABI_STAMP}
+    COMMAND ${CMAKE_COMMAND}
+            -DLLVM_NM_EXECUTABLE=${RUNTIME_LLVM_NM}
+            -DRUNTIME_BITCODE=${CMAKE_CURRENT_BINARY_DIR}/runtime.bc
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/check_runtime_bitcode_symbols.cmake
+    COMMAND ${CMAKE_COMMAND} -E touch ${RUNTIME_BITCODE_ABI_STAMP}
+    DEPENDS
+            ${CMAKE_CURRENT_BINARY_DIR}/runtime.bc
+            ${CMAKE_CURRENT_SOURCE_DIR}/check_runtime_bitcode_symbols.cmake
+            ${RUNTIME_LLVM_NM_DEPENDS}
+    COMMENT "Auditing runtime bitcode JIT symbol compatibility"
+    VERBATIM
+)
+add_custom_target(RuntimeBitcodeJitAbiCheck ALL
+    DEPENDS ${RUNTIME_BITCODE_ABI_STAMP})
+add_dependencies(RuntimeBitcodeJitAbiCheck RuntimeBitcode)
+
 # ============================================================================
 # STEP 6: Native current-stream accessor (NOT bitcode)
 # ============================================================================

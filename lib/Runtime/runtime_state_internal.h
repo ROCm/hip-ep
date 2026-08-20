@@ -231,10 +231,12 @@ struct RuntimeState {
   int32_t seqlens_k_cached_val;
   const void *seqlens_k_cached_ptr;
 
-  // Frames whose explicit destroy encountered a stream-sync failure are
-  // quarantined here. A later successful graph sync or state cleanup retries
-  // them; active/successful frames are never swept globally. The list and mutex
-  // are opaque to keep C++ runtime types out of this C-layout header.
+  // Independent loop-carrier bank blocks are checked out exclusively from a
+  // synchronized best-fit cache and retained to the RuntimeState high-water.
+  // Frames whose explicit destroy encountered a stream-sync failure remain
+  // quarantined until a later successful graph sync proves their blocks safe
+  // to recycle. These C++ implementation types stay opaque here.
+  void *loop_bank_cache;
   void *quarantined_loop_frames;
   void *loop_frames_mutex;
 
