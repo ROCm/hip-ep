@@ -36,6 +36,7 @@ does not claim that every handwritten reifier is free of destination fallback.
 | HIP control op | Classification | Destination/result policy |
 |---|---|---|
 | `if` | `control_flow_dps` | Each tensor result is tied to the matching `o_init`; memref mode writes branch results through those destinations |
+| `loop` | `control_flow_dps` | Tensor loop-carried results are tied positionally to `v_init`; outlined-body signatures preserve those carrier slots |
 
 | HIP op | Contract | Shape rule / payload policy | Status |
 |---|---|---|---|
@@ -111,7 +112,7 @@ does not claim that every handwritten reifier is free of destination fallback.
 | `sqrt` | `same_shape` | Result shape equals `input` | shared named-source base |
 | `sub` | `broadcast` | NumPy right-aligned broadcast over declared inputs | shared |
 | `tanh` | `same_shape` | Result shape equals `input` | shared named-source base |
-| `tile` | `payload` | Each extent is inputDim multiplied by a constant or synchronized runtime repeat | audited payload policy |
+| `tile` | `payload` | Each extent is inputDim multiplied by a constant or synchronized per-entry runtime repeat | audited payload policy |
 | `top_k` | `payload` | Selected axis extent comes from K payload | audited payload policy |
 | `transpose` | `semantic` | output[i] = input[perm[i]] | shared infer/reify/verifier |
 | `where` | `broadcast` | NumPy right-aligned broadcast over declared inputs | shared |
