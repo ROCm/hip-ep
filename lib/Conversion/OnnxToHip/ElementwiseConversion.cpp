@@ -59,10 +59,8 @@ AddToHip::matchAndRewrite(mlir::Operation *op,
     return rewriter.notifyMatchFailure(
         op, "Add: no ranked operand spans dynamic result dim");
 
-  auto hipOp =
-      mlir::hip::AddOp::create(rewriter, loc, context, a, b, *initOrFailure);
-  rewriter.replaceOp(op, hipOp->getResult(0));
-  return mlir::success();
+  return replaceWithBroadcastBinaryHipOp<mlir::hip::AddOp>(
+      rewriter, op, "Add", context, a, b, *initOrFailure, resultType);
 }
 
 mlir::LogicalResult
@@ -85,10 +83,8 @@ MulToHip::matchAndRewrite(mlir::Operation *op,
     return rewriter.notifyMatchFailure(
         op, "Mul: no ranked operand spans dynamic result dim");
 
-  auto hipOp =
-      mlir::hip::MulOp::create(rewriter, loc, context, a, b, *initOrFailure);
-  rewriter.replaceOp(op, hipOp->getResult(0));
-  return mlir::success();
+  return replaceWithBroadcastBinaryHipOp<mlir::hip::MulOp>(
+      rewriter, op, "Mul", context, a, b, *initOrFailure, resultType);
 }
 
 mlir::LogicalResult
@@ -109,10 +105,8 @@ SubToHip::matchAndRewrite(mlir::Operation *op,
   if (mlir::failed(initOrFailure))
     return rewriter.notifyMatchFailure(
         op, "Sub: no ranked operand spans dynamic result dim");
-  auto hipOp = mlir::hip::SubOp::create(rewriter, loc, context, lhs, rhs,
-                                        *initOrFailure);
-  rewriter.replaceOp(op, hipOp->getResult(0));
-  return mlir::success();
+  return replaceWithBroadcastBinaryHipOp<mlir::hip::SubOp>(
+      rewriter, op, "Sub", context, lhs, rhs, *initOrFailure, resultType);
 }
 
 } // namespace

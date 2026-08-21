@@ -55,10 +55,8 @@ struct GreaterDecompose : public mlir::RewritePattern {
           op, "Greater: cannot infer dynamic result dimensions from "
               "operands (both inputs must be ranked tensors)");
 
-    auto hipOp =
-        mlir::hip::LessOp::create(rewriter, loc, context, b, a, *initOrFailure);
-    rewriter.replaceOp(op, hipOp->getResult(0));
-    return mlir::success();
+    return replaceWithBroadcastBinaryHipOp<mlir::hip::LessOp>(
+        rewriter, op, "Greater", context, b, a, *initOrFailure, resultType);
   }
 };
 

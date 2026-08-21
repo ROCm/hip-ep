@@ -34,10 +34,8 @@ struct DivToHip : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "Div: no ranked operand spans dynamic result dim");
 
-    auto hipOp =
-        mlir::hip::DivOp::create(rewriter, loc, context, a, b, *initOrFailure);
-    rewriter.replaceOp(op, hipOp->getResult(0));
-    return mlir::success();
+    return replaceWithBroadcastBinaryHipOp<mlir::hip::DivOp>(
+        rewriter, op, "Div", context, a, b, *initOrFailure, resultType);
   }
 };
 
