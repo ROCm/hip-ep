@@ -34,4 +34,23 @@ module {
 
   // CHECK-LABEL: func.func @scatter_elements_add
   // CHECK: hip.scatter_elements(%{{.*}}) ins({{.*}} : tensor<3x2xf32>, tensor<3x2xi64>, tensor<3x2xf32>) outs({{.*}} : tensor<3x2xf32>) {reduction = "add"} : tensor<3x2xf32>
+
+  func.func @scatter_elements_dynamic(
+      %data: tensor<?x4xf32>,
+      %indices: tensor<2x3xi64>,
+      %updates: tensor<2x3xf32>) -> tensor<?x4xf32> {
+    %result = "onnx.ScatterElements"(%data, %indices, %updates)
+        {axis = 1 : si64}
+        : (tensor<?x4xf32>, tensor<2x3xi64>, tensor<2x3xf32>)
+          -> tensor<?x4xf32>
+    return %result : tensor<?x4xf32>
+  }
+
+  // CHECK-LABEL: func.func @scatter_elements_dynamic
+  // CHECK-SAME: (%{{[^,]*}}, %[[DATA:[A-Za-z0-9_]+]]: tensor<?x4xf32>
+  // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+  // CHECK: %[[D0:.*]] = tensor.dim %[[DATA]], %[[C0]]
+  // CHECK: %[[EMPTY:.*]] = tensor.empty(%[[D0]]) : tensor<?x4xf32>
+  // CHECK: hip.scatter_elements(%{{[^)]*}})
+  // CHECK-SAME: outs(%[[EMPTY]] : tensor<?x4xf32>)
 }

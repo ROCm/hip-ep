@@ -104,16 +104,14 @@ static FailureOr<Value> unboxTripCount(OpBuilder &builder, Location loc,
 ///                      don't need to know which morphizen variant they
 ///                      got.
 ///
-/// Same constant-folding rationale as `unboxTripCount`: when the cond is
-/// produced by an `onnx.Constant` we fold the byte directly into an
-/// `arith.constant i1` so the hip.loop op's `cond_init` operand doesn't
-/// sit on a `tensor.extract` that would later bufferize to a host load
-/// from device-resident memory. For non-constant cond (rare; future
-/// extension), we extract and reduce to i1 via `cmpi ne 0`, bridging
-/// `ui8`/`si8` -> signless `i8` with an `unrealized_conversion_cast`
-/// since `arith.cmpi` requires signless operands.
+/// Same constant-folding rationale as `unboxTripCount`: constants fold directly
+/// to `arith.constant i1`. A runtime condition may be GPU-produced, so it must
+/// cross a synchronized `hip.readback_scalar` boundary before host-side
+/// conversion to i1. For `ui8`/`si8`, bridge the read-back value to signless
+/// i8 before comparing against zero because `arith.cmpi` requires signless
+/// operands.
 static FailureOr<Value> unboxCondInit(OpBuilder &builder, Location loc,
-                                      Value condTensor) {
+                                      Value ctx, Value condTensor) {
   auto t = dyn_cast<RankedTensorType>(condTensor.getType());
   if (!t || t.getRank() != 0)
     return failure();
@@ -124,27 +122,18 @@ static FailureOr<Value> unboxCondInit(OpBuilder &builder, Location loc,
   if (width != 1 && width != 8)
     return failure();
 
-  // Constant-fold path. Read the raw bit pattern via APInt (signedness-
-  // agnostic) and convert to bool by comparison to zero.
-  if (Operation *defOp = condTensor.getDefiningOp()) {
-    if (defOp->getName().getStringRef() == "onnx.Constant") {
-      if (auto attr = defOp->getAttrOfType<DenseElementsAttr>("value")) {
-        auto at = dyn_cast<RankedTensorType>(attr.getType());
-        if (at && at.getRank() == 0 && at.getElementType() == intTy) {
-          bool truthy = (*attr.getValues<APInt>().begin()).getZExtValue() != 0;
-          Value i1Val = arith::ConstantIntOp::create(
-              builder, loc, builder.getI1Type(), truthy ? 1 : 0);
-          return i1Val;
-        }
-      }
-    }
+  // Validation above is intentionally complete before this helper can emit a
+  // constant, readback, cast, or comparison.
+  if (DenseElementsAttr dense = getConstantDense(condTensor)) {
+    bool truthy = (*dense.getValues<APInt>().begin()).getZExtValue() != 0;
+    return arith::ConstantIntOp::create(builder, loc, builder.getI1Type(),
+                                        truthy ? 1 : 0)
+        .getResult();
   }
 
-  // Non-constant fallback.
-  Value extracted =
-      tensor::ExtractOp::create(builder, loc, condTensor, ValueRange{});
+  Value hostValue = readbackScalarToHost(builder, loc, ctx, condTensor);
   if (width == 1)
-    return extracted; // already an i1 scalar
+    return hostValue;
 
   // width == 8: reduce to i1 by comparing to zero. arith.cmpi requires
   // signless operands; bridge ui8/si8 -> signless i8 with an
@@ -152,13 +141,13 @@ static FailureOr<Value> unboxCondInit(OpBuilder &builder, Location loc,
   // by downstream type conversion since the bit patterns are identical).
   Type signlessI8 = builder.getIntegerType(8);
   if (!intTy.isSignless()) {
-    extracted = UnrealizedConversionCastOp::create(
-                    builder, loc, TypeRange{signlessI8}, ValueRange{extracted})
+    hostValue = UnrealizedConversionCastOp::create(
+                    builder, loc, TypeRange{signlessI8}, ValueRange{hostValue})
                     .getResult(0);
   }
   Value zero = arith::ConstantIntOp::create(builder, loc, signlessI8, 0);
   return arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::ne,
-                               extracted, zero)
+                               hostValue, zero)
       .getResult();
 }
 
@@ -460,7 +449,8 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
     condI1Val = arith::ConstantIntOp::create(outerBuilder, loc,
                                              outerBuilder.getI1Type(), 1);
   } else {
-    FailureOr<Value> condI1 = unboxCondInit(outerBuilder, loc, condInitTensor);
+    FailureOr<Value> condI1 =
+        unboxCondInit(outerBuilder, loc, ctxVal, condInitTensor);
     if (failed(condI1))
       return loopOp->emitOpError("could not unbox cond_init to i1 (expected "
                                  "0-D tensor<i1>, tensor<i8>, or tensor<ui8>, "
