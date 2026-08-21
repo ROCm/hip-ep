@@ -324,13 +324,9 @@ cast through effective-kernel multiplication, padded input, signed numerator,
 floor division, and raw output. This width covers every combination of
 nonnegative i64/index extents and i64 attributes without intermediate
 wraparound and stays equivalent to the static APInt rule. Before narrowing,
-each final extent must be in `[0, INT64_MAX]`; invalid extents select zero, so
-destination allocation is always safe. Forward Conv combines its per-axis
-checks into a `shape_valid` operand. The runtime records the shared recoverable
-error flag and skips MIOpen dispatch when that operand is false; the zero extent
-is failure containment, not successful shape recovery. Cached model artifacts
-compiled against the prior `wrap_miopenConvolutionForward` ABI must be
-invalidated.
+each final extent must be in `[0, INT64_MAX]`; invalid extents select zero so
+destination allocation remains bounded. Runtime rejection of those invalid
+dynamic combinations belongs to the later runtime-hardening layer.
 
 Reductions resolve to one internal out-to-in dimension map, consumed by both
 `inferReductionShape` (static extents) and `reifyReductionResultShape` (mixed
