@@ -470,7 +470,6 @@ GatherOp::reifyResultShapes(OpBuilder &b,
   return success();
 }
 
-
 LogicalResult
 OneHotOp::reifyResultShapes(OpBuilder &b,
                             ReifiedRankedShapedTypeDims &reified) {
