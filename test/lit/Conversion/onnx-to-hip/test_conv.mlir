@@ -47,7 +47,7 @@ module {
   // CHECK-LABEL: func.func @conv_basic
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<1x3x224x224xf32>, %[[W:.*]]: tensor<64x3x7x7xf32>, %[[B:.*]]: tensor<64xf32>) -> tensor<1x64x112x112xf32>
   // CHECK: tensor.empty() : tensor<1x64x112x112xf32>
-  // CHECK: hip.conv(%[[CTX]]) valid(%{{.*}}) ins(%[[IN]], %[[W]], %[[B]] : tensor<1x3x224x224xf32>, tensor<64x3x7x7xf32>, tensor<64xf32>) outs({{.*}} : tensor<1x64x112x112xf32>) {dilations = [1, 1], group = 1 : i64, kernel_shape = [7, 7], pads = [3, 3, 3, 3], strides = [2, 2]}
+  // CHECK: hip.conv(%[[CTX]]) ins(%[[IN]], %[[W]], %[[B]] : tensor<1x3x224x224xf32>, tensor<64x3x7x7xf32>, tensor<64xf32>) outs({{.*}} : tensor<1x64x112x112xf32>) {dilations = [1, 1], group = 1 : i64, kernel_shape = [7, 7], pads = [3, 3, 3, 3], strides = [2, 2]}
   // CHECK-NOT: hip.alloc
 
   // --------------------------------------------------------------------------
@@ -67,7 +67,7 @@ module {
   // CHECK-LABEL: func.func @conv_grouped
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<1x64x56x56xf32>, %[[W:.*]]: tensor<128x32x3x3xf32>, %[[B:.*]]: tensor<128xf32>) -> tensor<1x128x56x56xf32>
   // CHECK: tensor.empty() : tensor<1x128x56x56xf32>
-  // CHECK: hip.conv(%[[CTX]]) valid(%{{.*}}) ins(%[[IN]], %[[W]], %[[B]] : tensor<1x64x56x56xf32>, tensor<128x32x3x3xf32>, tensor<128xf32>) outs({{.*}} : tensor<1x128x56x56xf32>) {dilations = [1, 1], group = 2 : i64, kernel_shape = [3, 3], pads = [1, 1, 1, 1], strides = [1, 1]}
+  // CHECK: hip.conv(%[[CTX]]) ins(%[[IN]], %[[W]], %[[B]] : tensor<1x64x56x56xf32>, tensor<128x32x3x3xf32>, tensor<128xf32>) outs({{.*}} : tensor<1x128x56x56xf32>) {dilations = [1, 1], group = 2 : i64, kernel_shape = [3, 3], pads = [1, 1, 1, 1], strides = [1, 1]}
   // CHECK-NOT: hip.alloc
 
   // --------------------------------------------------------------------------
@@ -106,7 +106,7 @@ module {
   // CHECK-LABEL: func.func @conv_stride2
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<1x64x56x56xf32>, %[[W:.*]]: tensor<128x64x3x3xf32>, %[[B:.*]]: tensor<128xf32>) -> tensor<1x128x28x28xf32>
   // CHECK: tensor.empty() : tensor<1x128x28x28xf32>
-  // CHECK: hip.conv(%[[CTX]]) valid(%{{.*}}) ins(%[[IN]], %[[W]], %[[B]] : tensor<1x64x56x56xf32>, tensor<128x64x3x3xf32>, tensor<128xf32>) outs({{.*}} : tensor<1x128x28x28xf32>) {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3], pads = [1, 1, 1, 1], strides = [2, 2]}
+  // CHECK: hip.conv(%[[CTX]]) ins(%[[IN]], %[[W]], %[[B]] : tensor<1x64x56x56xf32>, tensor<128x64x3x3xf32>, tensor<128xf32>) outs({{.*}} : tensor<1x128x28x28xf32>) {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3], pads = [1, 1, 1, 1], strides = [2, 2]}
   // CHECK-NOT: hip.alloc
 
   // --------------------------------------------------------------------------
@@ -151,7 +151,7 @@ module {
   // conv result (would be a use-before-def).
   // CHECK: arith.floordivsi
   // CHECK: tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x128x?x64xf16>
-  // CHECK: hip.conv({{.*}}) valid(%{{.*}}) ins({{.*}}) outs({{.*}} : tensor<?x128x?x64xf16>) {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3], pads = [1, 1, 1, 1], strides = [2, 2]}
+  // CHECK: hip.conv({{.*}}) ins({{.*}}) outs({{.*}} : tensor<?x128x?x64xf16>) {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3], pads = [1, 1, 1, 1], strides = [2, 2]}
   // CHECK-NOT: hip.alloc
 
   // --------------------------------------------------------------------------
@@ -194,14 +194,12 @@ module {
   // CHECK: %[[HSAFE:.*]] = arith.select %[[HVALID]], %{{.*}}, %{{.*}} : i128
   // CHECK: %[[WVALID:.*]] = arith.andi %{{.*}}, %{{.*}}
   // CHECK: %[[WSAFE:.*]] = arith.select %[[WVALID]], %{{.*}}, %{{.*}} : i128
-  // CHECK: %[[VALID:.*]] = arith.andi %[[HVALID]], %[[WVALID]]
   // CHECK: tensor.empty(%{{.*}}, %{{.*}}) : tensor<1x1x?x?xf32>
   // CHECK: hip.conv
-  // CHECK-SAME: valid(%[[VALID]])
 
   // --------------------------------------------------------------------------
-  // 9. Maximal kernel/dilation/stride/pads stay in i128 and still feed the
-  //    checked Conv validity operand instead of wrapping index arithmetic.
+  // 9. Maximal kernel/dilation/stride/pads stay in i128 before narrowing,
+  //    instead of wrapping index arithmetic.
   // --------------------------------------------------------------------------
   func.func @conv_dynamic_extreme_attributes(
       %input: tensor<1x1x?x1xf32>,
@@ -228,5 +226,4 @@ module {
   // CHECK: arith.cmpi sle, %{{.*}}, %{{.*}} : i128
   // CHECK: arith.trunci %{{.*}} : i128 to i64
   // CHECK: hip.conv
-  // CHECK-SAME: valid(%{{.*}})
 }
