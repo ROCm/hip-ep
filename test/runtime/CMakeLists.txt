@@ -36,3 +36,33 @@ target_compile_definitions(test-output-allocator PRIVATE HIPDNN_EP_RT_NO_EXPORT)
 add_test(NAME OutputAllocatorUnitTest COMMAND test-output-allocator)
 
 set_target_properties(test-output-allocator PROPERTIES FOLDER "runtime-tests")
+
+add_executable(test-symbolic-dims test_symbolic_dims.cpp)
+target_compile_features(test-symbolic-dims PRIVATE cxx_std_17)
+target_link_libraries(test-symbolic-dims PRIVATE morphizen-graph)
+add_test(NAME SymbolicDimsUnitTest COMMAND test-symbolic-dims)
+set_target_properties(test-symbolic-dims PROPERTIES FOLDER "runtime-tests")
+
+add_executable(test-symbolic-dims-mlir test_symbolic_dims_mlir.cpp)
+target_compile_features(test-symbolic-dims-mlir PRIVATE cxx_std_17)
+target_include_directories(test-symbolic-dims-mlir PRIVATE
+    ${CMAKE_SOURCE_DIR}/morphizen/mlir-imp/src
+)
+target_include_directories(test-symbolic-dims-mlir SYSTEM PRIVATE
+    ${LLVM_INCLUDE_DIRS}
+    ${MLIR_INCLUDE_DIRS}
+)
+target_link_libraries(test-symbolic-dims-mlir PRIVATE
+    mlir-imp
+    morphizen-graph
+)
+add_test(NAME SymbolicDimsMLIRUnitTest COMMAND test-symbolic-dims-mlir)
+set_target_properties(test-symbolic-dims-mlir PROPERTIES FOLDER "runtime-tests")
+
+add_executable(test-cache-identity test_cache_identity.cpp)
+target_compile_features(test-cache-identity PRIVATE cxx_std_17)
+target_link_libraries(test-cache-identity PRIVATE
+    morphizen-core-static
+)
+add_test(NAME CacheIdentityUnitTest COMMAND test-cache-identity)
+set_target_properties(test-cache-identity PROPERTIES FOLDER "runtime-tests")
