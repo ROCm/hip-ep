@@ -733,6 +733,25 @@ static bool gqa_no_expand_prefill_enabled() {
   return enabled;
 }
 
+// Byte budget for the pair of score matrices the decomposed prefill holds. Once
+// the pair would exceed this, the prefill is tiled over query rows instead (see
+// the chunking comment in gqa_forward_hipblaslt).
+//
+// Deliberately far above any shape that already runs well: at 1 GiB nothing
+// tiles below roughly 3.5K tokens on a 16-head model, so short and medium
+// sequences keep their existing kernel launch counts and descriptor cache
+// entries exactly, and only the lengths whose score matrices are already tens
+// of gigabytes change behaviour. A fixed budget rather than a fraction of free
+// memory keeps the chunk count -- and so the set of GEMM descriptors a session
+// compiles -- reproducible across runs.
+static constexpr size_t kScoreBudgetBytes = size_t{1024} * 1024 * 1024;
+
+// Query rows per chunk are rounded down to a multiple of this so the Score and
+// Value GEMMs see a tile-friendly n. Only applied when it does not cost an
+// extra chunk, since a ragged n on one chunk is cheaper than a whole extra
+// pass.
+static constexpr int64_t kScoreChunkAlign = 128;
+
 // Env-var gate to force decode through the decomposed hipBLASLt pipeline
 // instead of the fused custom kernel hip_gqa_fused_decode. Default off
 // (fused path is preferred). Set HIPDNN_EP_GQA_DISABLE_FUSED_DECODE=1 to
@@ -1399,9 +1418,94 @@ static int gqa_forward_hipblaslt(
                        (sq == 1 || gqa_no_expand_prefill_enabled());
   bool need_transpose = (sq > 1);
 
+  //===--------------------------------------------------------------------===//
+  // Query-row chunking of the score matrix
+  //
+  // This path materialises the whole [B*H, sq, total_seq] score matrix twice --
+  // once in fp32 for the bias add, the causal mask and the softmax reduction,
+  // and once in the GEMM input dtype as the probabilities the Value GEMM
+  // consumes. Both are quadratic in sequence length, and together they dominate
+  // every other allocation the runtime makes: at 16K on a 16-head model they
+  // are 96 bytes per S^2, or 23.6 GiB, which is 97.9% of the workspace.
+  //
+  // The softmax here reduces along total_seq, so each query row is independent
+  // of every other. A block of rows can therefore be scored, biased, masked,
+  // softmaxed and multiplied by V to completion before the next block starts,
+  // and the result is identical -- this is a tiling of the same arithmetic, not
+  // an approximation, and it needs no running maximum or rescaling because
+  // every row sees its full key range within one chunk.
+  //
+  // Only the two score buffers shrink. Q, K, V and O are linear in sq and stay
+  // whole, so Q is read and O is written through a per-chunk offset while their
+  // batch strides continue to describe the full sq.
+  //
+  // Chunking is skipped entirely unless the score pair exceeds the budget, in
+  // which case sq_chunk == sq, the loop below runs once, the GEMM keys keep
+  // their dense default strides and the behaviour is exactly what it was.
+  //
+  // The no-expand flavour is excluded: its Q and O operands are laid out
+  // [B, G, HPG, sq, d] with n = HPG*sq, so a range of query rows is not a
+  // contiguous range of n and the same offset trick does not apply. That path
+  // is off by default for prefill.
+  //===--------------------------------------------------------------------===//
+  int64_t sq_chunk = sq;
+  if (sq > 1 && !use_no_expand) {
+    const size_t score_row_bytes =
+        static_cast<size_t>(B) * H * total_seq * (sizeof(float) + elem_sz);
+    if (score_row_bytes > 0 &&
+        static_cast<size_t>(sq) * score_row_bytes > kScoreBudgetBytes) {
+      int64_t rows = static_cast<int64_t>(kScoreBudgetBytes / score_row_bytes);
+      // A single row can already exceed the budget on a long enough context.
+      // Correctness wins: one row per chunk is the floor.
+      if (rows < 1)
+        rows = 1;
+      // Round down to a tile-friendly multiple only when that does not add a
+      // chunk. Comparing the two chunk counts is what enforces this: rounding
+      // 600 down to 512 at sq == 1200 would turn two passes into three, so it
+      // is skipped and the ragged n is kept instead.
+      const int64_t aligned = rows - rows % kScoreChunkAlign;
+      if (aligned > 0 &&
+          (sq + aligned - 1) / aligned == (sq + rows - 1) / rows)
+        rows = aligned;
+      if (rows > sq)
+        rows = sq;
+      sq_chunk = rows;
+    }
+  }
+  const bool chunked = (sq_chunk < sq);
+  const int64_t sq_tail = chunked ? (sq % sq_chunk) : 0;
+
   // GEMM descriptor keys. The no-expand flavour uses explicit per-operand
   // strides (non-zero stride fields); the expand flavour leaves them zero so
   // queryOrCreateGemmState falls back to the dense packed-batch defaults.
+  //
+  // When chunking, the expand flavour must state Q's and O's strides
+  // explicitly: n is the chunk length but those two operands still advance by
+  // the full sq between heads. The score matrices are freshly packed per chunk,
+  // so their strides stay at the dense default.
+  auto makeKeys = [&](int64_t n_rows, GqaGemmKey *score, GqaGemmKey *value) {
+    *score = {total_seq,
+              n_rows,
+              d,
+              B * H,
+              true,
+              /*outputFp32=*/true,
+              gemm_fp32,
+              /*strideA=*/0,
+              /*strideB=*/chunked ? sq * d : 0,
+              /*strideC=*/0};
+    *value = {d,
+              n_rows,
+              total_seq,
+              B * H,
+              false,
+              /*outputFp32=*/gemm_fp32,
+              gemm_fp32,
+              /*strideA=*/0,
+              /*strideB=*/0,
+              /*strideC=*/chunked ? sq * d : 0};
+  };
+
   GqaGemmKey scoreKey, valueKey;
   if (use_no_expand) {
     // Score: C[total_seq, HPG*sq] = K^T[d,total_seq] * Q[d, HPG*sq] per (b, g)
@@ -1432,21 +1536,7 @@ static int gqa_forward_hipblaslt(
                 /*strideB=*/HPG * sq * total_seq,
                 /*strideC=*/HPG * sq * d};
   } else {
-    scoreKey = {total_seq,           sq,        d, B * H, true,
-                /*outputFp32=*/true, gemm_fp32,
-                /*strideA=*/0,
-                /*strideB=*/0,
-                /*strideC=*/0};
-    valueKey = {d,
-                sq,
-                total_seq,
-                B * H,
-                false,
-                /*outputFp32=*/gemm_fp32,
-                gemm_fp32,
-                /*strideA=*/0,
-                /*strideB=*/0,
-                /*strideC=*/0};
+    makeKeys(sq_chunk, &scoreKey, &valueKey);
   }
 
   const GqaGemmCacheEntry *scoreState =
@@ -1457,6 +1547,24 @@ static int gqa_forward_hipblaslt(
       queryOrCreateGemmState(state, ltHandle, valueKey, op_state_slot);
   if (!valueState)
     return -1;
+
+  // A ragged final chunk is a different n and so a different descriptor. Both
+  // shapes are resolved before sizing the workspace because the GEMM workspace
+  // region has to cover whichever algorithm asks for more.
+  const GqaGemmCacheEntry *scoreTailState = nullptr;
+  const GqaGemmCacheEntry *valueTailState = nullptr;
+  if (sq_tail > 0) {
+    GqaGemmKey scoreTailKey, valueTailKey;
+    makeKeys(sq_tail, &scoreTailKey, &valueTailKey);
+    scoreTailState =
+        queryOrCreateGemmState(state, ltHandle, scoreTailKey, op_state_slot);
+    if (!scoreTailState)
+      return -1;
+    valueTailState =
+        queryOrCreateGemmState(state, ltHandle, valueTailKey, op_state_slot);
+    if (!valueTailState)
+      return -1;
+  }
 
   // ---- Workspace layout ----
   // All temp buffers are packed contiguously into the shared workspace,
@@ -1470,15 +1578,18 @@ static int gqa_forward_hipblaslt(
   //
   // Qtrans / O are only allocated when need_transpose is true.
   // Kexp / Vexp are only allocated when use_no_expand is false.
-  // S_f32 and S_fp16 are always allocated (softmax is on every path).
+  // S_f32 and S_fp16 are always allocated (softmax is on every path), and are
+  // sized to one query chunk rather than the whole query range -- sq_chunk ==
+  // sq whenever chunking is inactive, so this is the full matrix in that case.
   size_t Qtrans_bytes =
       need_transpose ? static_cast<size_t>(B) * H * sq * d * elem_sz : 0;
   size_t Kexp_bytes =
       use_no_expand ? 0 : static_cast<size_t>(B) * H * total_seq * d * elem_sz;
   size_t Vexp_bytes = Kexp_bytes;
   size_t S_f32_bytes =
-      static_cast<size_t>(B) * H * sq * total_seq * sizeof(float);
-  size_t S_fp16_bytes = static_cast<size_t>(B) * H * sq * total_seq * elem_sz;
+      static_cast<size_t>(B) * H * sq_chunk * total_seq * sizeof(float);
+  size_t S_fp16_bytes =
+      static_cast<size_t>(B) * H * sq_chunk * total_seq * elem_sz;
   size_t O_bytes =
       need_transpose ? static_cast<size_t>(B) * H * sq * d * elem_sz : 0;
 
@@ -1520,6 +1631,10 @@ static int gqa_forward_hipblaslt(
   {
     size_t gemm_ws =
         std::max(scoreState->workspace_size, valueState->workspace_size);
+    if (scoreTailState)
+      gemm_ws = std::max(gemm_ws, scoreTailState->workspace_size);
+    if (valueTailState)
+      gemm_ws = std::max(gemm_ws, valueTailState->workspace_size);
     size_t total_needed = temp_end + gemm_ws;
     HIP_CHECK(hipdnn_ep_state_ensure_workspace(state, total_needed));
   }
@@ -1631,87 +1746,114 @@ static int gqa_forward_hipblaslt(
                             expandCopy, static_cast<int>(elem_sz)));
     }
 
-    // ---- Step 8: Score GEMM (fp16/fp32 in, fp32 out) ----
-    // A = K: no-expand reads present_key directly, expand reads d_Kexp.
-    // B = Q: need_transpose reads d_Qtrans (BNSD), else qSrc (BSHD==BNSD@sq=1).
+    // ---- Steps 8-10, per query chunk ----
+    // One iteration when chunking is inactive, in which case q0 is 0, c is sq
+    // and every pointer and stride below reduces to what it was.
     const void *scoreA = use_no_expand ? present_key : d_Kexp;
-    const void *scoreB = need_transpose ? d_Qtrans : qSrc;
+    const void *scoreBBase = need_transpose ? d_Qtrans : qSrc;
+    const void *valueA = use_no_expand ? present_value : d_Vexp;
+    void *valueCBase = need_transpose ? d_O : output;
     float scoreAlpha = scale;
     float beta = 0.0f;
-    hipblasLtMatmulAlgo_t sAlgo = scoreState->algo;
-
-    HIPBLAS_CHECK(hipblasLtMatmul(
-        ltHandle, scoreState->desc, &scoreAlpha, scoreA, scoreState->layA,
-        scoreB, scoreState->layB, &beta, d_S_f32, scoreState->layC, d_S_f32,
-        scoreState->layD, &sAlgo, gemm_ws_ptr, gemm_ws_bytes, stream));
-
-    // ---- Step 8b: Add external attention bias (onnx.Attention attn_mask) ----
-    int scoreF32BatchStride = static_cast<int>(sq * total_seq);
-    if (attention_bias) {
-      HIP_CHECK(hip_gqa_add_attention_bias_f32(
-          stream, d_S_f32, const_cast<void *>(attention_bias),
-          static_cast<int>(B * H), static_cast<int>(H),
-          static_cast<int>(attn_bias_batch),
-          static_cast<int>(attn_bias_num_heads), static_cast<int>(sq),
-          static_cast<int>(total_seq), scoreF32BatchStride,
-          static_cast<int>(elem_sz)));
-    }
-
-    // ---- Step 9: Causal Mask (fp32) + Softmax (fp32 -> fp16/fp32) ----
-    // S is treated as [B*H, sq, total_seq] (head stride sq*total_seq) by both
-    // GEMM flavours. softmax dtype follows gemm_fp32.
-    //
-    // The built-in causal triangle is applied whenever !no_causal,
-    // INDEPENDENTLY of attention_bias. This mirrors the ONNX Attention
-    // reference and the ORT GQA op: the additive mask (Step 8b, e.g.
-    // onnx.Attention attn_mask or a GQA/ALiBi bias) is ADDED first, then, if
-    // the op is causal, the upper triangle is masked out. For a mask that
-    // already encodes causal (the common HF export) this is idempotent (-inf
-    // stays -inf); for a padding-only mask + is_causal it supplies the missing
-    // triangle. The bidirectional paths (no_causal, e.g. Whisper
-    // encoder/cross-attn or onnx.Attention is_causal=0) set no_causal=true and
-    // thus skip this, letting the mask carry all masking. Note this Step is a
-    // no-op at sq==1 (single-query decode has no future tokens), gated by (sq >
-    // 1 || local_window_size > 0).
-    int scoreFp16BatchStride = static_cast<int>(sq * total_seq);
-    if ((sq > 1 || local_window_size > 0) && !no_causal) {
-      HIP_CHECK(hip_gqa_causal_mask_f32(
-          stream, d_S_f32, static_cast<int>(B * H), static_cast<int>(total_seq),
-          static_cast<int>(sq), scoreF32BatchStride, static_cast<int>(past_len),
-          static_cast<int>(local_window_size)));
-    }
-    // fp16 GQA: softmax writes fp16 probabilities for the fp16 Value GEMM.
-    // fp32 GQA (Whisper no_causal): softmax writes fp32 probabilities for the
-    // fp32 Value GEMM. d_S_fp16 is the probabilities buffer either way (sized
-    // by elem_sz above), so the name is fp16-specific but holds fp32 when
-    // gemm_fp32.
-    if (gemm_fp32) {
-      HIP_CHECK(hip_gqa_softmax_f32_to_f32(
-          stream, d_S_f32, d_S_fp16, static_cast<int>(B * H * sq),
-          static_cast<int>(total_seq), static_cast<int>(sq),
-          scoreF32BatchStride, scoreFp16BatchStride, head_sink,
-          static_cast<int>(H), static_cast<int>(use_smooth_softmax)));
-    } else {
-      HIP_CHECK(hip_gqa_softmax_f32_to_f16(
-          stream, d_S_f32, d_S_fp16, static_cast<int>(B * H * sq),
-          static_cast<int>(total_seq), static_cast<int>(sq),
-          scoreF32BatchStride, scoreFp16BatchStride, head_sink,
-          static_cast<int>(H), static_cast<int>(use_smooth_softmax)));
-    }
-
-    // ---- Step 10: Value GEMM (fp16/fp32 in, fp16/fp32 out) ----
-    // A = V: no-expand reads present_value directly, expand reads d_Vexp.
-    // C = O: need_transpose writes d_O (BNSD, transposed below); at sq==1 the
-    //        GEMM writes straight to output (BSHD==BNSD).
-    const void *valueA = use_no_expand ? present_value : d_Vexp;
-    void *valueC = need_transpose ? d_O : output;
     float valAlpha = 1.0f;
-    hipblasLtMatmulAlgo_t vAlgo = valueState->algo;
 
-    HIPBLAS_CHECK(hipblasLtMatmul(
-        ltHandle, valueState->desc, &valAlpha, valueA, valueState->layA,
-        d_S_fp16, valueState->layB, &beta, valueC, valueState->layC, valueC,
-        valueState->layD, &vAlgo, gemm_ws_ptr, gemm_ws_bytes, stream));
+    for (int64_t q0 = 0; q0 < sq; q0 += sq_chunk) {
+      const int64_t c = std::min<int64_t>(sq_chunk, sq - q0);
+      const bool is_tail = (c != sq_chunk);
+      const GqaGemmCacheEntry *sSt = is_tail ? scoreTailState : scoreState;
+      const GqaGemmCacheEntry *vSt = is_tail ? valueTailState : valueState;
+
+      // Q and O keep their full-sq batch strides (stated in the GEMM key), so
+      // selecting a chunk is a plain offset into the query axis of each.
+      const void *scoreB = static_cast<const char *>(scoreBBase) +
+                           static_cast<size_t>(q0) * d * elem_sz;
+      void *valueC = static_cast<char *>(valueCBase) +
+                     static_cast<size_t>(q0) * d * elem_sz;
+      // The score buffers are re-packed per chunk, so their per-head stride is
+      // the chunk's own row count.
+      const int scoreBatchStride = static_cast<int>(c * total_seq);
+
+      // ---- Step 8: Score GEMM (fp16/fp32 in, fp32 out) ----
+      // A = K: no-expand reads present_key directly, expand reads d_Kexp.
+      // B = Q: need_transpose reads d_Qtrans (BNSD), else qSrc
+      // (BSHD==BNSD@sq=1).
+      hipblasLtMatmulAlgo_t sAlgo = sSt->algo;
+      HIPBLAS_CHECK(hipblasLtMatmul(
+          ltHandle, sSt->desc, &scoreAlpha, scoreA, sSt->layA, scoreB,
+          sSt->layB, &beta, d_S_f32, sSt->layC, d_S_f32, sSt->layD, &sAlgo,
+          gemm_ws_ptr, gemm_ws_bytes, stream));
+
+      // ---- Step 8b: Add external attention bias (onnx.Attention attn_mask) --
+      // The bias is indexed over the full query range, so the chunk's row
+      // offset is passed through rather than folded into the pointer: with
+      // bias_batch or bias_heads > 1 the plane stride still spans all sq rows.
+      if (attention_bias) {
+        HIP_CHECK(hip_gqa_add_attention_bias_f32(
+            stream, d_S_f32, const_cast<void *>(attention_bias),
+            static_cast<int>(B * H), static_cast<int>(H),
+            static_cast<int>(attn_bias_batch),
+            static_cast<int>(attn_bias_num_heads), static_cast<int>(c),
+            static_cast<int>(total_seq), scoreBatchStride,
+            static_cast<int>(elem_sz), static_cast<int>(sq),
+            static_cast<int>(q0)));
+      }
+
+      // ---- Step 9: Causal Mask (fp32) + Softmax (fp32 -> fp16/fp32) ----
+      // S is treated as [B*H, c, total_seq] (head stride c*total_seq) by both
+      // GEMM flavours. softmax dtype follows gemm_fp32.
+      //
+      // The built-in causal triangle is applied whenever !no_causal,
+      // INDEPENDENTLY of attention_bias. This mirrors the ONNX Attention
+      // reference and the ORT GQA op: the additive mask (Step 8b, e.g.
+      // onnx.Attention attn_mask or a GQA/ALiBi bias) is ADDED first, then, if
+      // the op is causal, the upper triangle is masked out. For a mask that
+      // already encodes causal (the common HF export) this is idempotent (-inf
+      // stays -inf); for a padding-only mask + is_causal it supplies the
+      // missing triangle. The bidirectional paths (no_causal, e.g. Whisper
+      // encoder/cross-attn or onnx.Attention is_causal=0) set no_causal=true
+      // and thus skip this, letting the mask carry all masking. Note this Step
+      // is a no-op at sq==1 (single-query decode has no future tokens), gated
+      // by (sq > 1 || local_window_size > 0).
+      //
+      // The mask kernel derives each row's absolute query position as
+      // past_len + row, so advancing past_len by the chunk's start puts the
+      // triangle and the sliding window in the right place for the chunk.
+      if ((sq > 1 || local_window_size > 0) && !no_causal) {
+        HIP_CHECK(hip_gqa_causal_mask_f32(
+            stream, d_S_f32, static_cast<int>(B * H),
+            static_cast<int>(total_seq), static_cast<int>(c), scoreBatchStride,
+            static_cast<int>(past_len + q0),
+            static_cast<int>(local_window_size)));
+      }
+      // fp16 GQA: softmax writes fp16 probabilities for the fp16 Value GEMM.
+      // fp32 GQA (Whisper no_causal): softmax writes fp32 probabilities for the
+      // fp32 Value GEMM. d_S_fp16 is the probabilities buffer either way (sized
+      // by elem_sz above), so the name is fp16-specific but holds fp32 when
+      // gemm_fp32.
+      if (gemm_fp32) {
+        HIP_CHECK(hip_gqa_softmax_f32_to_f32(
+            stream, d_S_f32, d_S_fp16, static_cast<int>(B * H * c),
+            static_cast<int>(total_seq), static_cast<int>(c), scoreBatchStride,
+            scoreBatchStride, head_sink, static_cast<int>(H),
+            static_cast<int>(use_smooth_softmax)));
+      } else {
+        HIP_CHECK(hip_gqa_softmax_f32_to_f16(
+            stream, d_S_f32, d_S_fp16, static_cast<int>(B * H * c),
+            static_cast<int>(total_seq), static_cast<int>(c), scoreBatchStride,
+            scoreBatchStride, head_sink, static_cast<int>(H),
+            static_cast<int>(use_smooth_softmax)));
+      }
+
+      // ---- Step 10: Value GEMM (fp16/fp32 in, fp16/fp32 out) ----
+      // A = V: no-expand reads present_value directly, expand reads d_Vexp.
+      // C = O: need_transpose writes d_O (BNSD, transposed below); at sq==1 the
+      //        GEMM writes straight to output (BSHD==BNSD).
+      hipblasLtMatmulAlgo_t vAlgo = vSt->algo;
+      HIPBLAS_CHECK(hipblasLtMatmul(
+          ltHandle, vSt->desc, &valAlpha, valueA, vSt->layA, d_S_fp16,
+          vSt->layB, &beta, valueC, vSt->layC, valueC, vSt->layD, &vAlgo,
+          gemm_ws_ptr, gemm_ws_bytes, stream));
+    }
 
     // ---- Step 11: O Transpose BNSD [B,H,sq,d] -> BSHD [B,sq,H,d] ----
     // Skipped at sq == 1: the Value GEMM already wrote into output.
@@ -1723,11 +1865,11 @@ static int gqa_forward_hipblaslt(
     }
 
     RUNTIME_DEBUG_LOG(
-        "[REAL] GQA hipBLASLt: B=%lld sq=%lld total_seq=%lld H=%lld G=%lld "
-        "d=%lld no_expand=%d transpose=%d\n",
-        (long long)B, (long long)sq, (long long)total_seq, (long long)H,
-        (long long)G, (long long)d, static_cast<int>(use_no_expand),
-        static_cast<int>(need_transpose));
+        "[REAL] GQA hipBLASLt: B=%lld sq=%lld sq_chunk=%lld total_seq=%lld "
+        "H=%lld G=%lld d=%lld no_expand=%d transpose=%d\n",
+        (long long)B, (long long)sq, (long long)sq_chunk, (long long)total_seq,
+        (long long)H, (long long)G, (long long)d,
+        static_cast<int>(use_no_expand), static_cast<int>(need_transpose));
   }
 
 cleanup:
