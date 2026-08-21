@@ -188,8 +188,10 @@ struct GetPoolOpLowering : public ConvertOpToLLVMPattern<GetPoolOp> {
   }
 };
 
-// --- GetHostScratchOp: hip.get_host_scratch(%ctx, %scratch_size) :memref<?xi8>
-//     -> llvm.call @hipdnn_ep_get_host_scratch_base(state, size) + descriptor.
+// --- GetHostScratchOp:
+//     hip.get_host_scratch(%ctx, %scratch_size) {site_id = S} : memref<?xi8>
+//       -> llvm.call @hipdnn_ep_get_host_scratch_base(state, S, size)
+//          + descriptor.
 // The runtime returns hipHostMalloc(hipHostMallocMapped) memory, which is
 // accessible from both host and device. The result memref uses the default
 // address space (AS 0) — so host stores from materialized scalars work, and
@@ -205,19 +207,24 @@ struct GetHostScratchOpLowering
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
     Type i64Type = rewriter.getI64Type();
     MemRefType memRefType = cast<MemRefType>(op.getScratch().getType());
 
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kHipGetHostScratch, {ptrType, i64Type}, ptrType);
+    FailureOr<LLVM::LLVMFuncOp> funcOp =
+        LLVM::lookupOrCreateFn(rewriter, module, kHipGetHostScratch,
+                               {ptrType, i32Type, i64Type}, ptrType);
     if (failed(funcOp))
       return failure();
 
     Value scratchSize = adaptor.getScratchSize();
-    Value rawPtr =
-        LLVM::CallOp::create(rewriter, loc, *funcOp,
-                             ValueRange{adaptor.getCtx(), scratchSize})
-            .getResult();
+    Value siteIdVal = LLVM::ConstantOp::create(
+        rewriter, loc, i32Type,
+        rewriter.getI32IntegerAttr(static_cast<int32_t>(op.getSiteId())));
+    Value rawPtr = LLVM::CallOp::create(
+                       rewriter, loc, *funcOp,
+                       ValueRange{adaptor.getCtx(), siteIdVal, scratchSize})
+                       .getResult();
 
     FailureOr<unsigned> addrSpace =
         getTypeConverter()->getMemRefAddressSpace(memRefType);

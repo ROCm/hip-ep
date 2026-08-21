@@ -356,15 +356,19 @@ void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index);
 void *hipdnn_ep_get_pool_base(RuntimeState *state, int site_id, int domain_id,
                               size_t needed_size);
 
-// Get the host-mapped scratch buffer base, growing it if needed. Called from
-// hip.get_host_scratch (emitted by hip-materialize-host-scalars) once per
-// inference for tiny host-fed scalar memrefs that would otherwise land in the
-// GPU pool. Memory is hipHostMalloc(hipHostMallocMapped) - host-writable AND
-// GPU-readable via the device pointer mapping. Grow semantics mirror
-// hipdnn_ep_get_pool_base: stream-synced hipHostFree + hipHostMalloc; never
-// shrinks.
+// Get one compiled function site's host-mapped scratch base, growing it if
+// needed. `site_id` is the deterministic module-local function ordinal emitted
+// by hip-materialize-host-scalars. Distinct sites own distinct allocations, so
+// caller/helper offset zero cannot collide and helper growth cannot invalidate
+// the caller. Memory is hipHostMalloc(hipHostMallocMapped), host-writable and
+// GPU-readable. Growth remains stream-synchronized and never shrinks.
+//
+// RuntimeState is not thread-safe, and recursive/reentrant entry into the same
+// compiled function reuses that function's site. Production outlined helpers
+// are non-recursive and execute serially; same-site recursion is unsupported.
 // Returns: host-mapped base pointer (NULL on allocation failure)
-void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size);
+void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, int site_id,
+                                      size_t needed_size);
 
 // Shared workspace management (lazily grown, reused across MatMul/GQA/Conv)
 void *hipdnn_ep_state_get_workspace(RuntimeState *state);

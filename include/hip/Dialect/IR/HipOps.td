@@ -288,15 +288,20 @@ def Hip_GetHostScratchOp : Hip_Op<"get_host_scratch",
     GPU-readable. Used by hip-materialize-host-scalars to redirect tiny
     host-fed memref.alloc ops away from the GPU pool (which on some targets
     is real device memory and SEGVs on host stores). Grow-on-demand semantics
-    mirror hip.get_pool.
+    mirror hip.get_pool. The optional `site_id` is the deterministic
+    module-local ordinal of the containing function. Distinct sites have
+    distinct backing allocations, so an outlined helper cannot overwrite or
+    grow its caller's live scratch.
 
     Example:
     ```mlir
-    %scratch = hip.get_host_scratch(%ctx, %size) : memref<?xi8>
+    %scratch = hip.get_host_scratch(%ctx, %size)
+        {site_id = 4 : i64} : memref<?xi8>
     ```
   }];
 
-  let arguments = (ins Hip_ContextType:$ctx, Index:$scratch_size);
+  let arguments = (ins Hip_ContextType:$ctx, Index:$scratch_size,
+                       DefaultValuedAttr<I64Attr, "0">:$site_id);
   let results = (outs AnyMemRef:$scratch);
   let assemblyFormat = "`(` $ctx `,` $scratch_size `)` attr-dict `:` type($scratch)";
 }
