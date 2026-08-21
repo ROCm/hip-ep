@@ -73,19 +73,12 @@ struct TileToHip : public mlir::RewritePattern {
       // authoritative; this is common when a repeats tensor is assembled at
       // runtime from one dynamic entry and one constant 1.
       //
-      // When at least one result extent is dynamic, one bulk readback produces
-      // every repeat with a single stream synchronization. Fully static
-      // results need no host readback at all.
-      mlir::hip::ReadbackShapeOp readback;
+      // Read only repeats that contribute to dynamic result dimensions. Each
+      // device-produced entry crosses the existing synchronized scalar
+      // boundary; fully static result dimensions need no host readback.
       SmallVector<OpFoldResult> inputSizes;
-      if (resultType.getNumDynamicDims() != 0) {
-        SmallVector<Type> dimTypes(inputType.getRank(),
-                                   rewriter.getIndexType());
-        readback = mlir::hip::ReadbackShapeOp::create(
-            rewriter, loc, dimTypes, context, repeats,
-            rewriter.getI64IntegerAttr(inputType.getRank()));
+      if (resultType.getNumDynamicDims() != 0)
         inputSizes = tensor::getMixedSizes(rewriter, loc, input);
-      }
       resultShape.reserve(inputType.getRank());
       for (int64_t dim : llvm::seq<int64_t>(inputType.getRank())) {
         if (!resultType.isDynamicDim(dim)) {
@@ -96,9 +89,13 @@ struct TileToHip : public mlir::RewritePattern {
         OpFoldResult inputSize = inputSizes[dim];
         Value inputExtent =
             getValueOrCreateConstantIndexOp(rewriter, loc, inputSize);
-        resultShape.push_back(arith::MulIOp::create(rewriter, loc, inputExtent,
-                                                    readback.getDims()[dim])
-                                  .getResult());
+        Value repeat =
+            readbackShapeEntryToHost(rewriter, loc, context, repeats, dim);
+        Value repeatIndex = arith::IndexCastOp::create(
+            rewriter, loc, rewriter.getIndexType(), repeat);
+        resultShape.push_back(
+            arith::MulIOp::create(rewriter, loc, inputExtent, repeatIndex)
+                .getResult());
       }
     }
 
