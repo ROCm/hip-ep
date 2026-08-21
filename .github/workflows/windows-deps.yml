@@ -1,0 +1,328 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+name: Windows Deps
+
+# Prebuilds the two heavy from-source dependencies into cached install prefixes
+# and returns their cache keys. Callers restore those prefixes with
+# fail-on-cache-miss, so a green run here is what guarantees the caches exist.
+on:
+  workflow_call:
+    outputs:
+      llvm_cache_key:
+        description: Cache key holding the LLVM/MLIR/LLD install prefix.
+        value: ${{ jobs.llvm.outputs.cache_key }}
+      ort_cache_key:
+        description: Cache key holding the ONNX Runtime install prefix.
+        value: ${{ jobs.ort.outputs.cache_key }}
+      onnxruntime_version:
+        description: ONNX Runtime version the ort-install prefix was built from.
+        value: ${{ jobs.ort.outputs.version }}
+      onnxruntime_pr_patches:
+        description: ONNX Runtime PR patch list applied to that prefix.
+        value: ${{ jobs.ort.outputs.pr_patches }}
+
+permissions:
+  contents: read
+
+env:
+  # LLVM/MLIR/LLD are built from source at this upstream release tag.
+  # Bumping it only invalidates the llvm-install cache. NOTE: this is NOT
+  # the morphizen FetchContent fallback pin (cmake/deps.txt) -- the project
+  # resolves LLVM via find_package against this build, so that fallback is
+  # unused.
+  LLVM_TAG: llvmorg-22.1.0
+  ONNXRUNTIME_VERSION: "1.27.0"
+  # Space-separated list of microsoft/onnxruntime PR numbers to fetch
+  # from github.com/microsoft/onnxruntime/pull/<n>.patch and `git apply`
+  # on top of the pinned ONNXRUNTIME_VERSION tag during the source-build
+  # step. The PR list is also part of the ort-install cache key, so
+  # editing this list auto-invalidates the cached ORT install prefix.
+  # Remove a PR number once its fix is in the pinned ONNXRUNTIME_VERSION.
+  ONNXRUNTIME_PR_PATCHES: ""
+  # ilammy/msvc-dev-cmd and mozilla-actions/sccache-action have no
+  # Node.js 24 releases yet; allow Node.js 20 until they are updated.
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # A cold LLVM build is multi-hour (clang dominates), so this job queues
+  # instead of cancelling: killing it mid-flight leaves the cache unpopulated
+  # and the next run pays the full price again.
+  # ---------------------------------------------------------------------------
+  llvm:
+    runs-on: windows-2022
+    concurrency:
+      group: deps-llvm-${{ github.ref }}
+      cancel-in-progress: false
+
+    outputs:
+      cache_key: ${{ steps.key.outputs.value }}
+
+    steps:
+      - name: Compute cache key
+        id: key
+        shell: bash
+        run: echo "value=dep-llvm-${{ env.LLVM_TAG }}" >> "$GITHUB_OUTPUT"
+
+      # lookup-only: on a hit every step below is skipped, so downloading the
+      # multi-GB prefix here would be pure waste -- the caller restores it.
+      - name: Probe llvm-install
+        id: cache-llvm
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/llvm-install
+          key: ${{ steps.key.outputs.value }}
+          lookup-only: true
+
+      # LLVM's CMake needs a Python 3 interpreter; pin it to the CI-wide one
+      # rather than whatever the image happens to ship.
+      - name: Setup Python 3.14
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Setup MSVC environment
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+
+      - name: Prepare sccache local cache
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          echo "SCCACHE_DIR=${{ runner.workspace }}/sccache-dir" >> $GITHUB_ENV
+          echo "SCCACHE_KEY_DATE=$(date -u +'%Y%m%d')" >> $GITHUB_ENV
+
+      # Own sccache namespace: this job's objects have nothing in common with
+      # the real/mock builds, and sharing a key would just evict both sides.
+      - name: Restore sccache directory
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/sccache-dir
+          key: sccache-windows-deps-llvm-${{ env.SCCACHE_KEY_DATE }}
+          restore-keys: |
+            sccache-windows-deps-llvm-
+
+      - name: Setup sccache
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      # -----------------------------------------------------------------------
+      # Build LLVM/MLIR/LLD/Clang from source into llvm-install.
+      # Projects clang;mlir;lld, X86 backend only. The EP find_package()s
+      # LLVM/MLIR/LLD and lib/Target/LLVM links X86 codegen + lldCOFF/lldCommon
+      # for the in-process COFF DLL linker; clang is shipped so lib/Runtime's
+      # runtime-bitcode step uses a version-matched clang from the prefix (and
+      # so this build stays identical to cmake/deps.cmake's from-source
+      # fallback). /MT matches the toolchain; RTTI on, zlib/zstd off.
+      # LLVM_INSTALL_UTILS=ON ships FileCheck (+ not/count) for the LIT suite.
+      # Cold build is multi-hour (clang dominates); sccache + the shared
+      # llvm-install cache amortize it.
+      # -----------------------------------------------------------------------
+      - name: Build LLVM/MLIR/LLD from source
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          SRC="${{ runner.workspace }}/llvm-project"
+          git init "$SRC"
+          git -C "$SRC" remote add origin https://github.com/llvm/llvm-project.git
+          git -C "$SRC" fetch --depth 1 origin "${{ env.LLVM_TAG }}"
+          git -C "$SRC" checkout FETCH_HEAD
+          cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
+            -DLLVM_TARGETS_TO_BUILD=X86 \
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
+            -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/llvm-install" \
+            -DLLVM_ENABLE_RTTI=ON \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_BUILD_TOOLS=ON \
+            -DLLVM_INSTALL_UTILS=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+          cmake --build "${{ runner.workspace }}/build-llvm" --target install
+
+      # continue-on-error: two runs can miss and save the same key
+      # concurrently; the loser's "already exists" failure is harmless because
+      # the winner's entry is what callers restore.
+      - name: Save llvm-install
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/llvm-install
+          key: ${{ steps.key.outputs.value }}
+
+      - name: Save sccache directory
+        if: always() && steps.cache-llvm.outputs.cache-hit != 'true' && github.ref_name == 'main'
+        continue-on-error: true
+        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/sccache-dir
+          key: sccache-windows-deps-llvm-${{ env.SCCACHE_KEY_DATE }}
+
+  # ---------------------------------------------------------------------------
+  # ONNX Runtime -> ort-install. No sccache: ORT does not support it, so the
+  # build.bat call below passes no compiler launcher.
+  # ---------------------------------------------------------------------------
+  ort:
+    runs-on: windows-2022
+    concurrency:
+      group: deps-ort-${{ github.ref }}
+      cancel-in-progress: false
+
+    outputs:
+      cache_key: ${{ steps.key.outputs.value }}
+      version: ${{ steps.key.outputs.version }}
+      pr_patches: ${{ steps.key.outputs.pr_patches }}
+
+    steps:
+      # version/pr_patches ride along so callers can compose the amdgpu-ep and
+      # OGA cache keys, which fold in the ORT pins they were built against.
+      - name: Compute cache key
+        id: key
+        shell: bash
+        run: |
+          echo "value=dep-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
+          echo "version=${{ env.ONNXRUNTIME_VERSION }}" >> "$GITHUB_OUTPUT"
+          echo "pr_patches=${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
+
+      - name: Probe ort-install
+        id: cache-ort
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/ort-install
+          key: ${{ steps.key.outputs.value }}
+          lookup-only: true
+
+      # build.bat --build_wheel builds against this interpreter, so the cached
+      # wheel is cp314 and matches what the downstream jobs install.
+      - name: Setup Python 3.14
+        if: steps.cache-ort.outputs.cache-hit != 'true'
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Setup MSVC environment
+        if: steps.cache-ort.outputs.cache-hit != 'true'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+
+      # -----------------------------------------------------------------------
+      # Build ONNX Runtime from source and install into ort-install.
+      # Produces both the ORT shared library (build-time dep for onnx-hipdnn-ep)
+      # and onnxruntime_perf_test.exe (GPU test tool).
+      # Requires MSVC env; placed after Setup MSVC (same pattern as GTest).
+      # Clone and build are skipped when the ORT build cache hits.
+      # -----------------------------------------------------------------------
+      - name: Checkout ONNX Runtime v${{ env.ONNXRUNTIME_VERSION }}
+        if: steps.cache-ort.outputs.cache-hit != 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: Microsoft/onnxruntime
+          ref: v${{ env.ONNXRUNTIME_VERSION }}
+          path: source-onnxruntime
+          submodules: true
+          fetch-depth: 1
+          show-progress: false
+
+      # Fetch and apply microsoft/onnxruntime PR patches listed in
+      # ONNXRUNTIME_PR_PATCHES (env). Each PR's `.patch` endpoint returns the
+      # git format-patch mailbox for the PR's current head, which we apply on
+      # top of the pinned ONNXRUNTIME_VERSION tag. The cache key on
+      # `ort-install` includes the PR list, so adding/removing a PR
+      # number forces a rebuild. The source-onnxruntime tree itself is not
+      # cached, so a fresh checkout always lands here clean and patches
+      # apply directly. No idempotency needed.
+      - name: Apply ONNX Runtime PR patches
+        if: steps.cache-ort.outputs.cache-hit != 'true'
+        shell: pwsh
+        working-directory: ${{ github.workspace }}\source-onnxruntime
+        env:
+          ORT_PRS: ${{ env.ONNXRUNTIME_PR_PATCHES }}
+        run: |
+          $prs = $env:ORT_PRS.Trim()
+          if (-not $prs) {
+            Write-Host "ONNXRUNTIME_PR_PATCHES is empty; nothing to apply"
+            exit 0
+          }
+          foreach ($pr in $prs -split '\s+') {
+            if (-not $pr) { continue }
+            $url = "https://github.com/microsoft/onnxruntime/pull/$pr.patch"
+            $tmp = Join-Path $env:RUNNER_TEMP "ort-pr-$pr.patch"
+            Write-Host "Fetching $url"
+            Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+            Write-Host "Applying PR #$pr"
+            git apply --whitespace=nowarn $tmp
+            if ($LASTEXITCODE -ne 0) {
+              throw "PR #$pr failed to apply (exit $LASTEXITCODE)"
+            }
+          }
+
+      - name: Build ONNX Runtime
+        if: steps.cache-ort.outputs.cache-hit != 'true'
+        shell: cmd
+        run: |
+          cd /d "${{ github.workspace }}\source-onnxruntime"
+          call build.bat ^
+            --config Release ^
+            --build_shared_lib ^
+            --parallel ^
+            --compile_no_warning_as_error ^
+            --skip_submodule_sync ^
+            --build_dir "${{ runner.workspace }}\build-onnxruntime" ^
+            --skip_tests ^
+            --disable_memleak_checker ^
+            --use_dml ^
+            --cmake_generator Ninja ^
+            --build_wheel
+
+      - name: Install ORT into ort-install
+        if: steps.cache-ort.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          cmake --install "${{ runner.workspace }}/build-onnxruntime/Release" \
+            --prefix "${{ runner.workspace }}/ort-install"
+          # perf_test is not a cmake install target; copy manually so it lands
+          # in ort-install (cached) rather than the ephemeral build directory.
+          PERF_TEST=$(find "${{ runner.workspace }}/build-onnxruntime" \
+            -name "onnxruntime_perf_test.exe" -type f | head -1)
+          if [ -z "$PERF_TEST" ]; then
+            echo "ERROR: onnxruntime_perf_test.exe not found in build tree"
+            exit 1
+          fi
+          cp "$PERF_TEST" "${{ runner.workspace }}/ort-install/bin/"
+          # DirectML.dll is not installed by cmake --install; copy manually.
+          DML_DLL=$(find "${{ runner.workspace }}/build-onnxruntime" \
+            -path "*/x64-win/DirectML.dll" -type f | head -1)
+          if [ -z "$DML_DLL" ]; then
+            echo "ERROR: DirectML.dll not found in build tree"
+            exit 1
+          fi
+          cp "$DML_DLL" "${{ runner.workspace }}/ort-install/bin/"
+          # Cache the cp314 ORT Python wheel inside ort-install so it
+          # rides the same cache key as the rest of the ORT artifacts.
+          # Output path: build-onnxruntime/Release/dist/onnxruntime_directml-1.27.0-cp314-cp314-win_amd64.whl
+          ORT_WHEEL=$(find "${{ runner.workspace }}/build-onnxruntime" \
+            -name "onnxruntime_directml-*.whl" -type f | head -1)
+          if [ -z "$ORT_WHEEL" ]; then
+            echo "ERROR: onnxruntime_directml wheel not found in build tree"
+            exit 1
+          fi
+          mkdir -p "${{ runner.workspace }}/ort-install/wheels"
+          cp "$ORT_WHEEL" "${{ runner.workspace }}/ort-install/wheels/"
+          echo "Cached ORT wheel: $(basename "$ORT_WHEEL")"
+
+      - name: Save ort-install
+        if: steps.cache-ort.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/ort-install
+          key: ${{ steps.key.outputs.value }}
