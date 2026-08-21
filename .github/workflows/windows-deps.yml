@@ -16,41 +16,25 @@ on:
       ort_cache_key:
         description: Cache key holding the ONNX Runtime install prefix.
         value: ${{ jobs.ort.outputs.cache_key }}
-      onnxruntime_version:
-        description: ONNX Runtime version the ort-install prefix was built from.
-        value: ${{ jobs.ort.outputs.version }}
-      onnxruntime_pr_patches:
-        description: ONNX Runtime PR patch list applied to that prefix.
-        value: ${{ jobs.ort.outputs.pr_patches }}
+      amdgpu_cache_key:
+        description: Cache key holding amdgpu-ep.dll + hip-backend.dll.
+        value: ${{ jobs.amdgpu.outputs.cache_key }}
+      oga_cache_key:
+        description: Cache key holding the OGA artifact set.
+        value: ${{ jobs.oga.outputs.cache_key }}
 
 permissions:
   contents: read
 
 env:
-  # LLVM/MLIR/LLD are built from source at this upstream release tag.
-  # Bumping it only invalidates the llvm-install cache. NOTE: this is NOT
-  # the morphizen FetchContent fallback pin (cmake/deps.txt) -- the project
-  # resolves LLVM via find_package against this build, so that fallback is
-  # unused.
   LLVM_TAG: llvmorg-22.1.0
   ONNXRUNTIME_VERSION: "1.27.0"
-  # Space-separated list of microsoft/onnxruntime PR numbers to fetch
-  # from github.com/microsoft/onnxruntime/pull/<n>.patch and `git apply`
-  # on top of the pinned ONNXRUNTIME_VERSION tag during the source-build
-  # step. The PR list is also part of the ort-install cache key, so
-  # editing this list auto-invalidates the cached ORT install prefix.
-  # Remove a PR number once its fix is in the pinned ONNXRUNTIME_VERSION.
   ONNXRUNTIME_PR_PATCHES: ""
-  # ilammy/msvc-dev-cmd and mozilla-actions/sccache-action have no
-  # Node.js 24 releases yet; allow Node.js 20 until they are updated.
+  OGA_VERSION: "0.14.0"
+  OGA_PR_PATCHES: "2194"
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # A cold LLVM build is multi-hour (clang dominates), so this job queues
-  # instead of cancelling: killing it mid-flight leaves the cache unpopulated
-  # and the next run pays the full price again.
-  # ---------------------------------------------------------------------------
   llvm:
     runs-on: windows-2022
     concurrency:
@@ -66,8 +50,6 @@ jobs:
         shell: bash
         run: echo "value=dep-llvm-${{ env.LLVM_TAG }}" >> "$GITHUB_OUTPUT"
 
-      # lookup-only: on a hit every step below is skipped, so downloading the
-      # multi-GB prefix here would be pure waste -- the caller restores it.
       - name: Probe llvm-install
         id: cache-llvm
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
@@ -76,8 +58,6 @@ jobs:
           key: ${{ steps.key.outputs.value }}
           lookup-only: true
 
-      # LLVM's CMake needs a Python 3 interpreter; pin it to the CI-wide one
-      # rather than whatever the image happens to ship.
       - name: Setup Python 3.14
         if: steps.cache-llvm.outputs.cache-hit != 'true'
         uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
@@ -95,8 +75,6 @@ jobs:
           echo "SCCACHE_DIR=${{ runner.workspace }}/sccache-dir" >> $GITHUB_ENV
           echo "SCCACHE_KEY_DATE=$(date -u +'%Y%m%d')" >> $GITHUB_ENV
 
-      # Own sccache namespace: this job's objects have nothing in common with
-      # the real/mock builds, and sharing a key would just evict both sides.
       - name: Restore sccache directory
         if: steps.cache-llvm.outputs.cache-hit != 'true'
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
@@ -110,18 +88,6 @@ jobs:
         if: steps.cache-llvm.outputs.cache-hit != 'true'
         uses: mozilla-actions/sccache-action@v0.0.9
 
-      # -----------------------------------------------------------------------
-      # Build LLVM/MLIR/LLD/Clang from source into llvm-install.
-      # Projects clang;mlir;lld, X86 backend only. The EP find_package()s
-      # LLVM/MLIR/LLD and lib/Target/LLVM links X86 codegen + lldCOFF/lldCommon
-      # for the in-process COFF DLL linker; clang is shipped so lib/Runtime's
-      # runtime-bitcode step uses a version-matched clang from the prefix (and
-      # so this build stays identical to cmake/deps.cmake's from-source
-      # fallback). /MT matches the toolchain; RTTI on, zlib/zstd off.
-      # LLVM_INSTALL_UTILS=ON ships FileCheck (+ not/count) for the LIT suite.
-      # Cold build is multi-hour (clang dominates); sccache + the shared
-      # llvm-install cache amortize it.
-      # -----------------------------------------------------------------------
       - name: Build LLVM/MLIR/LLD from source
         if: steps.cache-llvm.outputs.cache-hit != 'true'
         shell: bash
@@ -149,9 +115,6 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
           cmake --build "${{ runner.workspace }}/build-llvm" --target install
 
-      # continue-on-error: two runs can miss and save the same key
-      # concurrently; the loser's "already exists" failure is harmless because
-      # the winner's entry is what callers restore.
       - name: Save llvm-install
         if: steps.cache-llvm.outputs.cache-hit != 'true'
         continue-on-error: true
@@ -168,10 +131,6 @@ jobs:
           path: ${{ runner.workspace }}/sccache-dir
           key: sccache-windows-deps-llvm-${{ env.SCCACHE_KEY_DATE }}
 
-  # ---------------------------------------------------------------------------
-  # ONNX Runtime -> ort-install. No sccache: ORT does not support it, so the
-  # build.bat call below passes no compiler launcher.
-  # ---------------------------------------------------------------------------
   ort:
     runs-on: windows-2022
     concurrency:
@@ -180,19 +139,12 @@ jobs:
 
     outputs:
       cache_key: ${{ steps.key.outputs.value }}
-      version: ${{ steps.key.outputs.version }}
-      pr_patches: ${{ steps.key.outputs.pr_patches }}
 
     steps:
-      # version/pr_patches ride along so callers can compose the amdgpu-ep and
-      # OGA cache keys, which fold in the ORT pins they were built against.
       - name: Compute cache key
         id: key
         shell: bash
-        run: |
-          echo "value=dep-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
-          echo "version=${{ env.ONNXRUNTIME_VERSION }}" >> "$GITHUB_OUTPUT"
-          echo "pr_patches=${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
+        run: echo "value=dep-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
 
       - name: Probe ort-install
         id: cache-ort
@@ -202,8 +154,6 @@ jobs:
           key: ${{ steps.key.outputs.value }}
           lookup-only: true
 
-      # build.bat --build_wheel builds against this interpreter, so the cached
-      # wheel is cp314 and matches what the downstream jobs install.
       - name: Setup Python 3.14
         if: steps.cache-ort.outputs.cache-hit != 'true'
         uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
@@ -214,13 +164,6 @@ jobs:
         if: steps.cache-ort.outputs.cache-hit != 'true'
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
-      # -----------------------------------------------------------------------
-      # Build ONNX Runtime from source and install into ort-install.
-      # Produces both the ORT shared library (build-time dep for onnx-hipdnn-ep)
-      # and onnxruntime_perf_test.exe (GPU test tool).
-      # Requires MSVC env; placed after Setup MSVC (same pattern as GTest).
-      # Clone and build are skipped when the ORT build cache hits.
-      # -----------------------------------------------------------------------
       - name: Checkout ONNX Runtime v${{ env.ONNXRUNTIME_VERSION }}
         if: steps.cache-ort.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -232,14 +175,6 @@ jobs:
           fetch-depth: 1
           show-progress: false
 
-      # Fetch and apply microsoft/onnxruntime PR patches listed in
-      # ONNXRUNTIME_PR_PATCHES (env). Each PR's `.patch` endpoint returns the
-      # git format-patch mailbox for the PR's current head, which we apply on
-      # top of the pinned ONNXRUNTIME_VERSION tag. The cache key on
-      # `ort-install` includes the PR list, so adding/removing a PR
-      # number forces a rebuild. The source-onnxruntime tree itself is not
-      # cached, so a fresh checkout always lands here clean and patches
-      # apply directly. No idempotency needed.
       - name: Apply ONNX Runtime PR patches
         if: steps.cache-ort.outputs.cache-hit != 'true'
         shell: pwsh
@@ -326,3 +261,315 @@ jobs:
         with:
           path: ${{ runner.workspace }}/ort-install
           key: ${{ steps.key.outputs.value }}
+
+  amdgpu:
+    needs: ort
+    runs-on: windows-2022
+    concurrency:
+      group: deps-amdgpu-${{ github.ref }}
+      cancel-in-progress: false
+
+    outputs:
+      cache_key: ${{ steps.key.outputs.value }}
+
+    steps:
+      - name: Compute cache key
+        id: key
+        shell: bash
+        run: echo "value=windows-amdgpu-a1318ed-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
+
+      - name: Probe amdgpu-artifacts
+        id: cache-amdgpu
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/amdgpu-artifacts
+          key: ${{ steps.key.outputs.value }}
+          lookup-only: true
+
+      - name: Restore ort-install
+        if: steps.cache-amdgpu.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/ort-install
+          key: ${{ needs.ort.outputs.cache_key }}
+          fail-on-cache-miss: true
+
+      - name: Setup Python 3.14
+        if: steps.cache-amdgpu.outputs.cache-hit != 'true'
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Setup MSVC environment
+        if: steps.cache-amdgpu.outputs.cache-hit != 'true'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+
+      - name: Prepare sccache local cache
+        if: steps.cache-amdgpu.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          echo "SCCACHE_DIR=${{ runner.workspace }}/sccache-dir" >> $GITHUB_ENV
+          echo "SCCACHE_KEY_DATE=$(date -u +'%Y%m%d')" >> $GITHUB_ENV
+
+      - name: Restore sccache directory
+        if: steps.cache-amdgpu.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/sccache-dir
+          key: sccache-windows-deps-amdgpu-${{ env.SCCACHE_KEY_DATE }}
+          restore-keys: |
+            sccache-windows-deps-amdgpu-
+
+      - name: Setup sccache
+        if: steps.cache-amdgpu.outputs.cache-hit != 'true'
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Checkout amdgpu-ep
+        if: steps.cache-amdgpu.outputs.cache-hit != 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: zz002/onnxruntime-ep-amdgpu
+          ref: a1318edb3c5b87d539bd797eff3addaa7ba2ddda
+          path: source-amdgpu
+          fetch-depth: 1
+          show-progress: false
+
+      - name: Build amdgpu-ep
+        if: steps.cache-amdgpu.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          # onnxruntime-ep-amdgpu requires CMake >= 4.2; the runner's system
+          # cmake is 3.31, so use a pip-provided cmake for this build.
+          python -m pip install -q "cmake>=4.2"
+          CMAKE="$(python -c "import cmake, os; print(os.path.join(cmake.CMAKE_BIN_DIR, 'cmake.exe'))")"
+          echo "Using $("$CMAKE" --version | head -1)"
+          "$CMAKE" -G Ninja -S source-amdgpu -B "${{ runner.workspace }}/build-amdgpu" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DUSE_AMDGPU=ON \
+            -DCMAKE_PREFIX_PATH="${{ runner.workspace }}/ort-install" \
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+          "$CMAKE" --build "${{ runner.workspace }}/build-amdgpu" --target amdgpu-ep hip-ep
+
+          ARTIFACTS="${{ runner.workspace }}/amdgpu-artifacts"
+          mkdir -p "$ARTIFACTS"
+          for dll in amdgpu-ep.dll hip-backend.dll; do
+            SRC=$(find "${{ runner.workspace }}/build-amdgpu" -name "$dll" -type f | head -1)
+            if [ -z "$SRC" ]; then
+              echo "ERROR: $dll not found in build tree"
+              exit 1
+            fi
+            cp "$SRC" "$ARTIFACTS/"
+            echo "Cached $dll"
+          done
+
+      - name: Save amdgpu-artifacts
+        if: steps.cache-amdgpu.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/amdgpu-artifacts
+          key: ${{ steps.key.outputs.value }}
+
+      - name: Save sccache directory
+        if: always() && steps.cache-amdgpu.outputs.cache-hit != 'true' && github.ref_name == 'main'
+        continue-on-error: true
+        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/sccache-dir
+          key: sccache-windows-deps-amdgpu-${{ env.SCCACHE_KEY_DATE }}
+
+  oga:
+    needs: ort
+    runs-on: windows-2022
+    concurrency:
+      group: deps-oga-${{ github.ref }}
+      cancel-in-progress: false
+
+    outputs:
+      cache_key: ${{ steps.key.outputs.value }}
+
+    steps:
+      - name: Compute cache key
+        id: key
+        shell: bash
+        run: echo "value=oga-dml-mm2-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
+
+      - name: Probe oga-artifacts
+        id: cache-oga
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/oga-artifacts
+          key: ${{ steps.key.outputs.value }}
+          lookup-only: true
+
+      - name: Restore ort-install
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/ort-install
+          key: ${{ needs.ort.outputs.cache_key }}
+          fail-on-cache-miss: true
+
+      - name: Setup Python 3.14
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Setup MSVC environment
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+
+      - name: Prepare sccache local cache
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          echo "SCCACHE_DIR=${{ runner.workspace }}/sccache-dir" >> $GITHUB_ENV
+          echo "SCCACHE_KEY_DATE=$(date -u +'%Y%m%d')" >> $GITHUB_ENV
+
+      - name: Restore sccache directory
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/sccache-dir
+          key: sccache-windows-deps-oga-${{ env.SCCACHE_KEY_DATE }}
+          restore-keys: |
+            sccache-windows-deps-oga-
+
+      - name: Setup sccache
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Checkout OGA
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: microsoft/onnxruntime-genai
+          ref: v${{ env.OGA_VERSION }}
+          path: source-oga
+          submodules: true
+          fetch-depth: 1
+          show-progress: false
+
+      - name: Apply OGA PR patches
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        shell: pwsh
+        working-directory: ${{ github.workspace }}\source-oga
+        env:
+          OGA_PRS: ${{ env.OGA_PR_PATCHES }}
+        run: |
+          $prs = $env:OGA_PRS.Trim()
+          if (-not $prs) {
+            Write-Host "OGA_PR_PATCHES is empty; nothing to apply"
+            exit 0
+          }
+          # pull/<n>.patch is a format-patch series; apply with `git am` so that
+          # intra-series file renames (morphizen_ep -> amdgpu) replay against the
+          # correct intermediate tree. `git apply` flattens the series and chokes
+          # on the rename whose pre-image only exists after an earlier commit.
+          git config user.email "ci@rocm.amd.com"
+          git config user.name "ROCm CI"
+          foreach ($pr in $prs -split '\s+') {
+            if (-not $pr) { continue }
+            $url = "https://github.com/microsoft/onnxruntime-genai/pull/$pr.patch"
+            $tmp = Join-Path $env:RUNNER_TEMP "oga-pr-$pr.patch"
+            Write-Host "Fetching $url"
+            Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+            Write-Host "Applying PR #$pr"
+            git am --3way --whitespace=nowarn $tmp
+            if ($LASTEXITCODE -ne 0) {
+              git am --abort
+              throw "PR #$pr failed to apply (exit $LASTEXITCODE)"
+            }
+          }
+
+      - name: Prepare ORT_HOME for OGA
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          ORT_HOME="${{ runner.workspace }}/oga-ort-home"
+          mkdir -p "$ORT_HOME/include" "$ORT_HOME/lib"
+          PREBUILT="${{ runner.workspace }}/ort-install"
+          cp -r "$PREBUILT/include/onnxruntime/"* "$ORT_HOME/include/"
+          cp "$PREBUILT/lib/"onnxruntime*.lib "$ORT_HOME/lib/"
+          cp "$PREBUILT/bin/onnxruntime.dll" "$ORT_HOME/lib/"
+          cp "$PREBUILT/bin/onnxruntime_providers_shared.dll" "$ORT_HOME/lib/"
+          echo "ORT_HOME=$ORT_HOME" >> "$GITHUB_ENV"
+
+      - name: Build OGA
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          python "${{ github.workspace }}/source-oga/build.py" \
+            --config Release \
+            --cmake_generator Ninja \
+            --use_dml \
+            --ort_home "$ORT_HOME" \
+            --skip_tests --skip_examples \
+            --parallel \
+            --build_dir "${{ runner.workspace }}/build-oga" \
+            --cmake_extra_defines \
+              CMAKE_C_COMPILER_LAUNCHER=sccache \
+              CMAKE_CXX_COMPILER_LAUNCHER=sccache
+
+          mkdir -p "${{ runner.workspace }}/oga-artifacts"
+          OGA_OUT="${{ runner.workspace }}/build-oga/Release"
+          cp "$OGA_OUT/benchmark/c/model_benchmark.exe" "${{ runner.workspace }}/oga-artifacts/"
+          cp "$OGA_OUT/onnxruntime-genai.dll" "${{ runner.workspace }}/oga-artifacts/"
+          # Cache the cp314 OGA Python wheel alongside the other OGA artifacts.
+          # Output path: build-oga/Release/wheel/onnxruntime_genai_directml-0.13.0.dev0-cp314-cp314-win_amd64.whl
+          OGA_WHEEL=$(find "${{ runner.workspace }}/build-oga" \
+            -name "onnxruntime_genai_directml-*.whl" -type f | head -1)
+          if [ -z "$OGA_WHEEL" ]; then
+            echo "ERROR: onnxruntime_genai_directml wheel not found in build tree"
+            exit 1
+          fi
+          cp "$OGA_WHEEL" "${{ runner.workspace }}/oga-artifacts/"
+          echo "Cached OGA wheel: $(basename "$OGA_WHEEL")"
+
+          # Cache the Python e2e benchmark scripts (benchmark_e2e.py + its metrics
+          # helper) so the gpu-test wheel smoke can run them without an OGA source
+          # checkout (which only happens on a cache miss).
+          mkdir -p "${{ runner.workspace }}/oga-artifacts/benchmark-python"
+          cp "${{ github.workspace }}/source-oga/benchmark/python/benchmark_e2e.py" \
+             "${{ github.workspace }}/source-oga/benchmark/python/metrics.py" \
+             "${{ runner.workspace }}/oga-artifacts/benchmark-python/"
+
+          # build.py --skip_examples leaves examples/c unbuilt. Build only
+          # model_mm (the multimodal example used by VL model CI) as a standalone
+          # cmake project against the just-built OGA lib + ORT_HOME. build.py's
+          # build_examples ignores CXXFLAGS, so set -DCMAKE_CXX_FLAGS=-FS here to
+          # force synchronous compiler-PDB writes (parallel model_mm.cpp /
+          # common.cpp otherwise clash on vc140.pdb -> C1041).
+          cmake -S "${{ github.workspace }}/source-oga/examples/c" \
+            -B "${{ runner.workspace }}/build-oga-examples" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DMODEL_MM=ON -DCMAKE_CXX_FLAGS=-FS \
+            -DORT_INCLUDE_DIR="$ORT_HOME/include" \
+            -DORT_LIB_DIR="$ORT_HOME/lib" \
+            -DOGA_INCLUDE_DIR="${{ github.workspace }}/source-oga/src" \
+            -DOGA_LIB_DIR="$OGA_OUT"
+          cmake --build "${{ runner.workspace }}/build-oga-examples" --target model_mm
+          cp "${{ runner.workspace }}/build-oga-examples/model_mm.exe" \
+            "${{ runner.workspace }}/oga-artifacts/"
+
+          # benchmark_multimodal.py drives model_mm for the VL benchmark.
+          cp "${{ github.workspace }}/source-oga/benchmark/python/benchmark_multimodal.py" \
+            "${{ runner.workspace }}/oga-artifacts/"
+
+      - name: Save oga-artifacts
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/oga-artifacts
+          key: ${{ steps.key.outputs.value }}
+
+      - name: Save sccache directory
+        if: always() && steps.cache-oga.outputs.cache-hit != 'true' && github.ref_name == 'main'
+        continue-on-error: true
+        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/sccache-dir
+          key: sccache-windows-deps-oga-${{ env.SCCACHE_KEY_DATE }}

@@ -25,8 +25,6 @@ jobs:
     # (actions/runner-images#14017), which the pinned LLVM/ORT deps were
     # not validated against.
     runs-on: windows-2022
-    # Must be job-level: workflow-level concurrency has no effect in a
-    # reusable workflow.
     concurrency:
       group: build-windows-mock-${{ github.ref }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -35,8 +33,6 @@ jobs:
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
     steps:
-      # MorphiZen is vendored in-tree as a git subtree under morphizen,
-      # so no deploy key or submodule initialization is needed.
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -44,9 +40,6 @@ jobs:
           fetch-depth: 0
           show-progress: false
 
-      # LLVM and ORT are prebuilt by the deps workflow. fail-on-cache-miss
-      # makes the contract explicit: a green deps run means these entries
-      # exist, so a miss is a wiring bug, not a cue to rebuild.
       - name: Restore llvm-install
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
@@ -94,20 +87,7 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
-      # -----------------------------------------------------------------------
-      # protobuf, flatbuffers and gtest are resolved by cmake/deps.cmake during
-      # Configure/Build (from-source FetchContent fallback), not pre-built here.
-      # -----------------------------------------------------------------------
-
-      # -----------------------------------------------------------------------
-      # Build (mock) via the cross-platform build.py. --mock sets
-      # BUILD_MOCK_RUNTIME=ON (no ROCm/TheRock); ORT + LLVM come from the cached
-      # prefixes and cmake/deps.cmake source-builds the rest. build.py runs the
-      # GPU-free test suites (LIT + the plugin-registrar and output-allocator
-      # unit tests) after install. No compiler plugin is selected here, so the
-      # LIT pipeline stays plugin-free (see the isolated step below for why).
-      # -----------------------------------------------------------------------
-      - name: Build onnx-hipdnn-ep (mock)
+      - name: Build hip-ep (mock)
         shell: bash
         run: |
           python build.py \
