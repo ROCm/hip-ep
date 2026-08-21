@@ -274,7 +274,6 @@ struct TestHipDpsDefaultReifyPass final
   }
 };
 
-
 struct TestOneHotReifyFailureAtomicPass final
     : public mlir::PassWrapper<TestOneHotReifyFailureAtomicPass,
                                mlir::OperationPass<mlir::ModuleOp>> {
@@ -341,7 +340,6 @@ struct TestOneHotReifyFailureAtomicPass final
       signalPassFailure();
   }
 };
-
 
 } // namespace
 
