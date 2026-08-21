@@ -74,7 +74,7 @@ module {
   // Test 2: Packed QKV - Key and Value are optional (QKV fused in query)
   // ===========================================================================
   func.func @test_packed_qkv(
-      %query: tensor<1x128x12288xf16>,
+      %query: tensor<1x128x6144xf16>,
       %past_key: tensor<1x8x0x128xf16>,
       %past_value: tensor<1x8x0x128xf16>,
       %seqlens_k: tensor<1xi32>,
@@ -100,7 +100,7 @@ module {
          softcap = 0.000000e+00 : f32,
          do_rotary = 0 : si64,
          rotary_interleaved = 0 : si64}
-        : (tensor<1x128x12288xf16>, none, none,
+        : (tensor<1x128x6144xf16>, none, none,
            tensor<1x8x0x128xf16>, tensor<1x8x0x128xf16>,
            tensor<1xi32>, tensor<i32>, none, none)
         -> (tensor<1x128x4096xf16>, tensor<1x8x128x128xf16>, tensor<1x8x128x128xf16>)
@@ -162,8 +162,8 @@ module {
   // ===========================================================================
   func.func @test_full_spec(
       %query: tensor<1x128x4096xf16>,
-      %key: tensor<1x128x4096xf16>,
-      %value: tensor<1x128x4096xf16>,
+      %key: tensor<1x128x1024xf16>,
+      %value: tensor<1x128x1024xf16>,
       %past_key: tensor<1x8x0x128xf16>,
       %past_value: tensor<1x8x0x128xf16>,
       %seqlens_k: tensor<1xi32>,
@@ -199,7 +199,7 @@ module {
          k_quant_type = "PER_CHANNEL",
          v_quant_type = "PER_CHANNEL",
          kv_cache_bit_width = 8 : si64}
-        : (tensor<1x128x4096xf16>, tensor<1x128x4096xf16>, tensor<1x128x4096xf16>,
+        : (tensor<1x128x4096xf16>, tensor<1x128x1024xf16>, tensor<1x128x1024xf16>,
            tensor<1x8x0x128xf16>, tensor<1x8x0x128xf16>,
            tensor<1xi32>, tensor<i32>,
            tensor<2048x64xf16>, tensor<2048x64xf16>, tensor<1x128xi64>,
@@ -222,5 +222,52 @@ module {
     // CHECK-SAME: v_quant_type = "PER_CHANNEL"
 
     return %out#0, %out#1, %out#2, %out#3 : tensor<1x128x4096xf16>, tensor<1x8x128x128xf16>, tensor<1x8x128x128xf16>, tensor<1x32x128x128xf16>
+  }
+
+  // Dynamic present-cache sequence capacity is the maximum of the matching
+  // past buffer and the total_seq_len logical prefix.
+  func.func @test_dynamic_cache_capacity(
+      %query: tensor<?x?x4096xf16>,
+      %key: tensor<?x?x1024xf16>,
+      %value: tensor<?x?x1024xf16>,
+      %past_key: tensor<?x8x?x128xf16>,
+      %past_value: tensor<?x8x?x128xf16>,
+      %seqlens_k: tensor<?xi32>,
+      %total_seq_len: tensor<i32>)
+      -> (tensor<?x?x4096xf16>, tensor<?x8x?x128xf16>, tensor<?x8x?x128xf16>) {
+    %none1 = "onnx.NoValue"() {value} : () -> none
+    %none2 = "onnx.NoValue"() {value} : () -> none
+
+    %out:3 = "onnx.Custom"(%query, %key, %value, %past_key, %past_value,
+                            %seqlens_k, %total_seq_len, %none1, %none2)
+        <{function_name = "GroupQueryAttention"}>
+        {domain_name = "com.microsoft",
+         num_heads = 32 : si64,
+         kv_num_heads = 8 : si64}
+        : (tensor<?x?x4096xf16>, tensor<?x?x1024xf16>,
+           tensor<?x?x1024xf16>, tensor<?x8x?x128xf16>,
+           tensor<?x8x?x128xf16>, tensor<?xi32>, tensor<i32>, none, none)
+        -> (tensor<?x?x4096xf16>, tensor<?x8x?x128xf16>,
+            tensor<?x8x?x128xf16>)
+
+    // CHECK-LABEL: func.func @test_dynamic_cache_capacity
+    // CHECK-SAME: %[[CTX:.*]]: !hip.context
+    // CHECK-SAME: %[[PK:[^,]+]]: tensor<?x8x?x128xf16>
+    // CHECK-SAME: %[[PV:[^,]+]]: tensor<?x8x?x128xf16>
+    // CHECK-SAME: %[[TOTAL:[^,)]+]]: tensor<i32>
+    // CHECK: %[[TOTAL_I32:.*]] = hip.readback_scalar(%[[CTX]], %[[TOTAL]] : tensor<i32>) -> i32
+    // CHECK: %[[TOTAL_IDX:.*]] = arith.index_cast %[[TOTAL_I32]] : i32 to index
+    // CHECK: %[[PKS:.*]] = tensor.dim %[[PK]]
+    // CHECK: %[[PK_CAP:.*]] = arith.maxui %[[PKS]], %[[TOTAL_IDX]] : index
+    // CHECK: %[[PVS:.*]] = tensor.dim %[[PV]]
+    // CHECK: %[[PV_CAP:.*]] = arith.maxui %[[PVS]], %[[TOTAL_IDX]] : index
+    // CHECK-NOT: hip.readback_scalar
+    // CHECK: tensor.empty(%{{.*}}, %[[PK_CAP]]) : tensor<?x8x?x128xf16>
+    // CHECK: tensor.empty(%{{.*}}, %[[PV_CAP]]) : tensor<?x8x?x128xf16>
+    // CHECK: hip.gqa
+
+    return %out#0, %out#1, %out#2
+        : tensor<?x?x4096xf16>, tensor<?x8x?x128xf16>,
+          tensor<?x8x?x128xf16>
   }
 }
