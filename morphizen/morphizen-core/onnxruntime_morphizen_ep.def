@@ -13,3 +13,7 @@ EXPORTS
     get_compiled_model_compatibility_info
     validate_compiled_model_compatibility_info
     ??_7PassProto@morphizen@@6B@
+    wrap_dd_matmul
+    wrap_dd_conv2d
+    hipdnn_ep_op_state_get
+    hipdnn_ep_op_state_set

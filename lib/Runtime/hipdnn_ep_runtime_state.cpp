@@ -139,6 +139,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->stream = nullptr;
   state->miopen_handle = nullptr;
   state->hipblas_handle = nullptr;
+  state->xrt_context = nullptr;
   state->gpu_constants_blob = nullptr;
   state->gpu_constants = nullptr;
   state->num_constants = 0;
@@ -820,6 +821,20 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   if (state->op_profile) {
     op_profile_destroy(static_cast<OpProfileState *>(state->op_profile));
     state->op_profile = nullptr;
+  }
+
+  // Destroy XRT context (DynamicDispatch NPU/IPU backend)
+  // NOTE: XRT context cleanup is intentionally NOT performed in the bitcode
+  // runtime because it requires C++ destructor calls for xrt_context (a
+  // shared_ptr). The bitcode compilation cannot include XRT headers, so we
+  // accept a small memory leak on session teardown for DynamicDispatch-enabled
+  // models. In practice, sessions are long-lived and the leak is minimal.
+  // TODO: Add weak symbol or function pointer mechanism to allow optional
+  // cleanup when XRT library is available.
+  if (state->xrt_context) {
+    // XRT context cleanup would go here if we could link it
+    // For now, we accept the leak (shared_ptr will not be destroyed)
+    state->xrt_context = nullptr;
   }
 
   // Destroy hipBLASLt handle

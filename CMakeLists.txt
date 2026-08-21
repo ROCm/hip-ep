@@ -179,7 +179,13 @@ if(BUILD_HIP_TOOLS)
   add_subdirectory(include/hip)
 
   # lib/Runtime produces runtime.bc consumed by backend-mlir-compiler.
+  # Also creates hipdnn-ep-dd target (real or mock) for EP DLL linking.
   add_subdirectory(lib)
+
+  # morphizen (EP DLL) - must come AFTER lib/Runtime so hipdnn-ep-dd target exists
+  if(BUILD_EP)
+    add_subdirectory(morphizen)
+  endif()
 
   # Must come AFTER lib/Runtime (RuntimeBitcode dep) and BEFORE tools/
   # (tools/hip-test links morphizen-custom-op-mlir).

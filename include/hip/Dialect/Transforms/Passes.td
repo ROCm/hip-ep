@@ -146,7 +146,18 @@ def ConvertHipToLLVMPass : Pass<"convert-hip-to-llvm", "mlir::ModuleOp"> {
     Lowers HIP dialect operations to LLVM dialect by converting each HIP op
     into calls to the HIP runtime C API (hipCreateHandle, hipblasltMatmul,
     etc.). MemRef operands are unpacked into bare pointers for the C calls.
+
+    Backend Selection:
+      --use-dynamic-dispatch: Route GEMM and Conv operations to DynamicDispatch
+                              (NPU/IPU via XRT) instead of GPU backends
+                              (MIOpen/hipBLASLt). Other operations continue to
+                              use GPU backends.
   }];
+  let options = [
+    Option<"useDynamicDispatch", "use-dynamic-dispatch", "bool",
+           /*default=*/"false",
+           "Use DynamicDispatch (NPU/IPU) backend for GEMM and Conv instead of GPU">
+  ];
   let dependentDialects = [
     "mlir::LLVM::LLVMDialect",
     "mlir::memref::MemRefDialect"
