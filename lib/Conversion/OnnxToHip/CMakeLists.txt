@@ -16,9 +16,6 @@ add_library(OnnxToHip STATIC
   BiasGeluConversion.cpp
   FastGeluConversion.cpp
   CastConversion.cpp
-  ReduceSumConversion.cpp
-  ReduceMeanConversion.cpp
-  ReduceL2Conversion.cpp
   MatMulNBitsConversion.cpp
   QMoEConversion.cpp
   GatherBlockQuantizedConversion.cpp
@@ -55,8 +52,6 @@ add_library(OnnxToHip STATIC
   LpNormalizationConversion.cpp
   EqualConversion.cpp
   DivConversion.cpp
-  ReduceMaxConversion.cpp
-  ReduceMinConversion.cpp
   MinConversion.cpp
   MaxConversion.cpp
   NotConversion.cpp
@@ -69,7 +64,6 @@ add_library(OnnxToHip STATIC
   PadConversion.cpp
   TileConversion.cpp
   ExpandConversion.cpp
-  ReduceProdConversion.cpp
   LessConversion.cpp
   GreaterConversion.cpp
   GreaterOrEqualConversion.cpp

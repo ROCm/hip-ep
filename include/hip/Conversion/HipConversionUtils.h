@@ -57,17 +57,6 @@ createBroadcastEmptyTensor(OpBuilder &builder, Location loc,
                            RankedTensorType resultType, ValueRange operands,
                            ArrayRef<int64_t> canonicalOperandForResultDim = {});
 
-/// Build a reduction destination from normalized compile-time axes.
-FailureOr<Value> createReductionEmptyTensor(OpBuilder &builder, Location loc,
-                                            RankedTensorType resultType,
-                                            Value data,
-                                            llvm::ArrayRef<int64_t> reducedAxes,
-                                            int64_t keepdims);
-
-/// Materialize normalized reduction axes as a rank-1 i64 tensor constant.
-Value materializeReductionAxes(OpBuilder &builder, Location loc,
-                               llvm::ArrayRef<int64_t> resolvedAxes);
-
 /// Return !hip.context from function argument 0.
 FailureOr<Value> getContextArg(Operation *op, PatternRewriter &rewriter);
 
