@@ -27,11 +27,14 @@ module {
   }
 
   // CHECK-LABEL: func.func @tile_dynamic
-  // CHECK: %[[RB:.*]]:2 = hip.readback_shape
-  // CHECK: %[[D0:.*]] = tensor.dim %{{.*}}, %{{.*}} : tensor<?x?xf32>
-  // CHECK: %[[D1:.*]] = tensor.dim %{{.*}}, %{{.*}} : tensor<?x?xf32>
-  // CHECK: %[[O0:.*]] = arith.muli %[[D0]], %[[RB]]#0 : index
-  // CHECK: %[[O1:.*]] = arith.muli %[[D1]], %[[RB]]#1 : index
+  // CHECK-DAG: %[[D0:.*]] = tensor.dim %{{.*}}, %{{.*}} : tensor<?x?xf32>
+  // CHECK-DAG: %[[D1:.*]] = tensor.dim %{{.*}}, %{{.*}} : tensor<?x?xf32>
+  // CHECK: %[[RB0:.*]] = hip.readback_scalar
+  // CHECK: %[[R0:.*]] = arith.index_cast %[[RB0]] : i64 to index
+  // CHECK: %[[O0:.*]] = arith.muli %[[D0]], %[[R0]] : index
+  // CHECK: %[[RB1:.*]] = hip.readback_scalar
+  // CHECK: %[[R1:.*]] = arith.index_cast %[[RB1]] : i64 to index
+  // CHECK: %[[O1:.*]] = arith.muli %[[D1]], %[[R1]] : index
   // CHECK: %[[INIT:.*]] = tensor.empty(%[[O0]], %[[O1]]) : tensor<?x?xf32>
   // CHECK: hip.tile({{.*}}) ins({{.*}}, {{.*}} : tensor<?x?xf32>, tensor<2xi64>) outs(%[[INIT]] : tensor<?x?xf32>)
 
@@ -46,9 +49,10 @@ module {
   }
 
   // CHECK-LABEL: func.func @tile_runtime_repeats_partial_static
-  // CHECK: %[[PRB:.*]]:2 = hip.readback_shape
   // CHECK: %[[PD0:.*]] = tensor.dim %{{.*}}, %{{.*}} : tensor<?x1152xf32>
-  // CHECK: %[[PO0:.*]] = arith.muli %[[PD0]], %[[PRB]]#0 : index
+  // CHECK: %[[PRB:.*]] = hip.readback_scalar
+  // CHECK: %[[PRI:.*]] = arith.index_cast %[[PRB]] : i64 to index
+  // CHECK: %[[PO0:.*]] = arith.muli %[[PD0]], %[[PRI]] : index
   // CHECK: %[[PINIT:.*]] = tensor.empty(%[[PO0]]) : tensor<?x1152xf32>
   // CHECK: hip.tile
   // CHECK-SAME: outs(%[[PINIT]] : tensor<?x1152xf32>)
@@ -62,7 +66,7 @@ module {
   }
 
   // CHECK-LABEL: func.func @tile_dynamic_input_constant_repeats
-  // CHECK-NOT: hip.readback_shape
+  // CHECK-NOT: hip.readback_scalar
   // CHECK: %[[CD0:.*]] = tensor.dim %{{.*}}, %{{.*}} : tensor<?x?xf32>
   // CHECK: %[[CO0:.*]] = arith.muli %[[CD0]], %{{.*}} : index
   // CHECK: hip.tile
@@ -82,7 +86,7 @@ module {
   }
 
   // CHECK-LABEL: func.func @tile_carrier_repeats
-  // CHECK-NOT: hip.readback_shape
+  // CHECK-NOT: hip.readback_scalar
   // CHECK-NOT: hipdnn.tile_repeats
   // CHECK: hip.tile
   // CHECK-SAME: static_repeats = array<i64: 4, 5>
