@@ -2553,21 +2553,25 @@ __global__ void dequant_u4_to_fp16(
  * Section 2b: WMMA kernel (supports both fused dequant and fp16 B)
  * ======================================================================= */
 
-typedef _Float16 half16 __attribute__((ext_vector_type(16)));
+// half16 holds one WMMA A/B fragment; its vector width matches
+// HIPDNN_WMMA_FRAG_ELEMS (16 on gfx11, 8 on the gfx12-style encoding
+// gfx1170/gfx12xx use -- see hip_arch_compat.h). The name is kept for
+// continuity even though the width is arch-dependent.
+typedef _Float16 half16 __attribute__((ext_vector_type(HIPDNN_WMMA_FRAG_ELEMS)));
 typedef float    float8 __attribute__((ext_vector_type(8)));
 
-// The WMMA builtin below is RDNA3-family (wave32) only. Where __has_builtin
-// reports it absent, trap instead so this file still compiles and a WMMA
-// launch on an unsupported arch aborts loudly rather than returning garbage.
-#if !defined(__has_builtin) ||                                                  \
-    !__has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_f16_w32)
+// Where neither WMMA builtin is available (non-RDNA3/3.5/4 arch), trap
+// instead so this file still compiles and a WMMA launch on an unsupported
+// arch aborts loudly rather than returning garbage.
+#if !HIPDNN_HAS_WMMA
 static __device__ __forceinline__ float8
-hipdnn_wmma_f32_16x16x16_f16_w32_unavailable(half16, half16, float8 c) {
+hipdnn_wmma_f32_16x16x16_f16_unavailable(half16, half16, float8 c) {
   __builtin_trap();
   return c;
 }
-#define __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c)                     \
-  hipdnn_wmma_f32_16x16x16_f16_w32_unavailable((a), (b), (c))
+#undef HIPDNN_WMMA_F32_16X16X16_F16
+#define HIPDNN_WMMA_F32_16X16X16_F16(a, b, c)                                  \
+  hipdnn_wmma_f32_16x16x16_f16_unavailable((a), (b), (c))
 #endif
 
 #define WMMA_TILE 16
@@ -2801,15 +2805,16 @@ void GemmFp16U4Impl(
         for(int ks = 0; ks < K_STEPS; ks++)
         {
             half16 b_frag[WT_N];
+            const int k_off = hipdnn_wmma_k_off(sub);
 #pragma unroll
             for(int wn = 0; wn < WT_N; wn++)
             {
                 int noff              = (wcol * WT_N + wn) * WMMA_TILE;
                 uint32_t* dst         = reinterpret_cast<uint32_t*>(&b_frag[wn]);
                 const uint32_t* src   = reinterpret_cast<const uint32_t*>(
-                    &smB[buf][noff + lane][ks * WMMA_TILE]);
+                    &smB[buf][noff + lane][ks * WMMA_TILE + k_off]);
 #pragma unroll
-                for(int i = 0; i < 8; i++)
+                for(int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 2; i++)
                     dst[i] = src[i];
             }
 #pragma unroll
@@ -2819,14 +2824,14 @@ void GemmFp16U4Impl(
                 half16 a_frag;
                 uint32_t* dst         = reinterpret_cast<uint32_t*>(&a_frag);
                 const uint32_t* src   = reinterpret_cast<const uint32_t*>(
-                    &smA[buf][moff + lane][ks * WMMA_TILE]);
+                    &smA[buf][moff + lane][ks * WMMA_TILE + k_off]);
 #pragma unroll
-                for(int i = 0; i < 8; i++)
+                for(int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 2; i++)
                     dst[i] = src[i];
 
 #pragma unroll
                 for(int wn = 0; wn < WT_N; wn++)
-                    acc[wm][wn] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                    acc[wm][wn] = HIPDNN_WMMA_F32_16X16X16_F16(
                         a_frag, b_frag[wn], acc[wm][wn]);
             }
         }
@@ -2859,7 +2864,7 @@ void GemmFp16U4Impl(
 #pragma unroll
             for(int e = 0; e < 8; e++)
             {
-                int r = e * 2 + sub;
+                int r = hipdnn_wmma_acc_row(sub, e);
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
                         C[(mbase + r) * ldc + nbase + lane] =
@@ -3703,14 +3708,15 @@ void GemmFp16I8Impl(
 #pragma unroll
         for (int ks = 0; ks < K_STEPS; ks++) {
             half16 b_frag[WT_N];
+            const int k_off = hipdnn_wmma_k_off(sub);
 #pragma unroll
             for (int wn = 0; wn < WT_N; wn++) {
                 int noff              = (wcol * WT_N + wn) * WMMA_TILE;
                 uint32_t* dst         = reinterpret_cast<uint32_t*>(&b_frag[wn]);
                 const uint32_t* src   = reinterpret_cast<const uint32_t*>(
-                    &smB[buf][noff + lane][ks * WMMA_TILE]);
+                    &smB[buf][noff + lane][ks * WMMA_TILE + k_off]);
 #pragma unroll
-                for (int i = 0; i < 8; i++)
+                for (int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 2; i++)
                     dst[i] = src[i];
             }
 #pragma unroll
@@ -3719,14 +3725,14 @@ void GemmFp16I8Impl(
                 half16 a_frag;
                 uint32_t* dst         = reinterpret_cast<uint32_t*>(&a_frag);
                 const uint32_t* src   = reinterpret_cast<const uint32_t*>(
-                    &smA[buf][moff + lane][ks * WMMA_TILE]);
+                    &smA[buf][moff + lane][ks * WMMA_TILE + k_off]);
 #pragma unroll
-                for (int i = 0; i < 8; i++)
+                for (int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 2; i++)
                     dst[i] = src[i];
 
 #pragma unroll
                 for (int wn = 0; wn < WT_N; wn++)
-                    acc[wm][wn] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                    acc[wm][wn] = HIPDNN_WMMA_F32_16X16X16_F16(
                         a_frag, b_frag[wn], acc[wm][wn]);
             }
         }
@@ -3755,7 +3761,7 @@ void GemmFp16I8Impl(
             int nbase = col0 + (wcol * WT_N + wn) * WMMA_TILE;
 #pragma unroll
             for (int e = 0; e < 8; e++) {
-                int r = e * 2 + sub;
+                int r = hipdnn_wmma_acc_row(sub, e);
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
                         C[(mbase + r) * ldc + nbase + lane] =
@@ -4229,14 +4235,15 @@ void GemmFp16U3Impl(
 #pragma unroll
         for (int ks = 0; ks < K_STEPS; ks++) {
             half16 b_frag[WT_N];
+            const int k_off = hipdnn_wmma_k_off(sub);
 #pragma unroll
             for (int wn = 0; wn < WT_N; wn++) {
                 int noff              = (wcol * WT_N + wn) * WMMA_TILE;
                 uint32_t* dst         = reinterpret_cast<uint32_t*>(&b_frag[wn]);
                 const uint32_t* src   = reinterpret_cast<const uint32_t*>(
-                    &smB[buf][noff + lane][ks * WMMA_TILE]);
+                    &smB[buf][noff + lane][ks * WMMA_TILE + k_off]);
 #pragma unroll
-                for (int i = 0; i < 8; i++)
+                for (int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 2; i++)
                     dst[i] = src[i];
             }
 #pragma unroll
@@ -4245,14 +4252,14 @@ void GemmFp16U3Impl(
                 half16 a_frag;
                 uint32_t* dst         = reinterpret_cast<uint32_t*>(&a_frag);
                 const uint32_t* src   = reinterpret_cast<const uint32_t*>(
-                    &smA[buf][moff + lane][ks * WMMA_TILE]);
+                    &smA[buf][moff + lane][ks * WMMA_TILE + k_off]);
 #pragma unroll
-                for (int i = 0; i < 8; i++)
+                for (int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 2; i++)
                     dst[i] = src[i];
 
 #pragma unroll
                 for (int wn = 0; wn < WT_N; wn++)
-                    acc[wm][wn] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                    acc[wm][wn] = HIPDNN_WMMA_F32_16X16X16_F16(
                         a_frag, b_frag[wn], acc[wm][wn]);
             }
         }
@@ -4281,7 +4288,7 @@ void GemmFp16U3Impl(
             int nbase = col0 + (wcol * WT_N + wn) * WMMA_TILE;
 #pragma unroll
             for (int e = 0; e < 8; e++) {
-                int r = e * 2 + sub;
+                int r = hipdnn_wmma_acc_row(sub, e);
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
                         C[(mbase + r) * ldc + nbase + lane] =
@@ -4901,14 +4908,15 @@ void GemmFp16U2Impl(
 #pragma unroll
         for (int ks = 0; ks < K_STEPS; ks++) {
             half16 b_frag[WT_N];
+            const int k_off = hipdnn_wmma_k_off(sub);
 #pragma unroll
             for (int wn = 0; wn < WT_N; wn++) {
                 int noff              = (wcol * WT_N + wn) * WMMA_TILE;
                 uint32_t* dst         = reinterpret_cast<uint32_t*>(&b_frag[wn]);
                 const uint32_t* src   = reinterpret_cast<const uint32_t*>(
-                    &smB[buf][noff + lane][ks * WMMA_TILE]);
+                    &smB[buf][noff + lane][ks * WMMA_TILE + k_off]);
 #pragma unroll
-                for (int i = 0; i < 8; i++)
+                for (int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 2; i++)
                     dst[i] = src[i];
             }
 #pragma unroll
@@ -4917,14 +4925,14 @@ void GemmFp16U2Impl(
                 half16 a_frag;
                 uint32_t* dst         = reinterpret_cast<uint32_t*>(&a_frag);
                 const uint32_t* src   = reinterpret_cast<const uint32_t*>(
-                    &smA[buf][moff + lane][ks * WMMA_TILE]);
+                    &smA[buf][moff + lane][ks * WMMA_TILE + k_off]);
 #pragma unroll
-                for (int i = 0; i < 8; i++)
+                for (int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 2; i++)
                     dst[i] = src[i];
 
 #pragma unroll
                 for (int wn = 0; wn < WT_N; wn++)
-                    acc[wm][wn] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                    acc[wm][wn] = HIPDNN_WMMA_F32_16X16X16_F16(
                         a_frag, b_frag[wn], acc[wm][wn]);
             }
         }
@@ -4953,7 +4961,7 @@ void GemmFp16U2Impl(
             int nbase = col0 + (wcol * WT_N + wn) * WMMA_TILE;
 #pragma unroll
             for (int e = 0; e < 8; e++) {
-                int r = e * 2 + sub;
+                int r = hipdnn_wmma_acc_row(sub, e);
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
                         C[(mbase + r) * ldc + nbase + lane] =
