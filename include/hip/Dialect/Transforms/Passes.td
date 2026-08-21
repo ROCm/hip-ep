@@ -610,6 +610,19 @@ def UseOutputAllocatorPass
   ];
 }
 
+def FuseConvRelu6Pass : Pass<"hip-fuse-conv-relu6", "mlir::func::FuncOp"> {
+  let summary = "Fuse hip.conv + hip.max(0) + hip.min(6) into conv with ReLU6";
+  let description = [{
+    Matches MobileNet-style ReLU6 (Clip 0..6) when it is the sole consumer of
+    a convolution and sets `activation = 1` on the conv so the runtime can use
+    MIOpen FusionPlan (Conv+Bias+ClippedReLU).
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::func::FuncDialect"
+  ];
+}
+
 def InferShapesPass : Pass<"hip-infer-shapes", "mlir::ModuleOp"> {
   let summary = "Refine dynamic dims in HIP DPS op result types via "
                 "`ReifyRankedShapedTypeOpInterface`";

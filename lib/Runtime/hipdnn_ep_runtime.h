@@ -137,6 +137,10 @@ static inline const char *hipdnn_ep_datatype_name(int64_t data_type) {
 #define HIPDNN_EP_ACTIVATION_TANH 2
 #define HIPDNN_EP_ACTIVATION_SOFTPLUS 3
 
+// Fused post-conv activation modes for wrap_miopenConvolutionForward.
+#define HIPDNN_EP_CONV_ACTIVATION_NONE 0
+#define HIPDNN_EP_CONV_ACTIVATION_RELU6 1
+
 static inline const char *hipdnn_ep_activation_name(int64_t activation_mode) {
   switch (activation_mode) {
   case HIPDNN_EP_ACTIVATION_SIGMOID:
@@ -765,7 +769,8 @@ int wrap_miopenConvolutionForward(
     int64_t dilation_h,    // Dilation height
     int64_t dilation_w,    // Dilation width
     int64_t group,         // Number of groups
-    int64_t data_type);    // HIPDNN_EP_DATATYPE_* for I/O and weights
+    int64_t data_type,     // HIPDNN_EP_DATATYPE_* for I/O and weights
+    int64_t activation);   // HIPDNN_EP_CONV_ACTIVATION_* (0=none, 1=ReLU6)
 
 // MIOpen transposed convolution (deconvolution) wrapper
 // Uses MIOpen's miopenTranspose convolution mode. Follows the opaque
