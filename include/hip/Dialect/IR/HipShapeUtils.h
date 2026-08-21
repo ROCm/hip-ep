@@ -349,6 +349,9 @@ resolveConstantReductionAxes(Value axes, int64_t dataRank,
 LogicalResult verifyReductionDpsOp(Operation *op, Value data, Value axes,
                                    int64_t keepdims, int64_t noopWithEmptyAxes);
 
+/// ONNX Size always produces one rank-zero i64 result.
+FailureOr<SmallVector<int64_t>> inferSizeShape();
+
 /// ONNX reduction result shape over `axes` as mixed extents, emitting
 /// `tensor.dim` only for dimensions that are dynamic in `data`. Same mapping
 /// as `inferReductionShape`; see it for the `keepdims` semantics. `data` must
