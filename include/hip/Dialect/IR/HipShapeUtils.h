@@ -489,12 +489,17 @@ LogicalResult reifyPadShape(OpBuilder &b, Location loc, Value data, Value pads,
 ///   `output[d] = input.shape[d] * repeats[d]`
 /// where `repeats` is a rank-1 i64 tensor of length `input.rank`.
 ///
-/// Same fold-or-bail strategy as `reifyPadShape`: tries to introspect
-/// `repeats` as a constant int vector, computes static output extents
-/// from `input.shape`, and returns `success()` only when EVERY dim is
-/// statically known.
+/// The pure static form validates rank/length/non-negative repeats.
+FailureOr<SmallVector<int64_t>> inferTileShape(ArrayRef<int64_t> inputShape,
+                                               ArrayRef<int64_t> repeats);
+
+/// Mixed form for constant repeats. Dynamic input dims produce exact index SSA;
+/// payload-dynamic repeats return failure so the caller can use bulk readback
+/// (converter) or outs-lift (reify).
 LogicalResult reifyTileShape(OpBuilder &b, Location loc, Value input,
-                             Value repeats, SmallVectorImpl<OpFoldResult> &out);
+                             Value repeats,
+                             std::optional<ArrayRef<int64_t>> staticRepeats,
+                             SmallVectorImpl<OpFoldResult> &out);
 
 /// Reify the result shape of an ONNX-style `expand` op:
 ///   broadcast `input.shape` against `shape`'s constant values
@@ -544,9 +549,10 @@ LogicalResult reifySliceShape(OpBuilder &b, Location loc, Value data,
 /// `IndexAttr` vector. Else `failure()` -- the dim-arith chain to
 /// compute the count at runtime is rarely useful for refinement and
 /// would persist in IR.
-LogicalResult reifyRangeShape(OpBuilder &b, Location loc, Value start,
-                              Value limit, Value delta,
-                              SmallVectorImpl<OpFoldResult> &out);
+LogicalResult
+reifyRangeShape(OpBuilder &b, Location loc, Value start, Value limit,
+                Value delta, SmallVectorImpl<OpFoldResult> &out,
+                std::optional<ArrayRef<int64_t>> staticValues = std::nullopt);
 
 } // namespace hip
 } // namespace mlir
