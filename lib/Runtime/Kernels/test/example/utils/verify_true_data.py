@@ -3,8 +3,13 @@
 Verify true-data folder: reload inputs, compute C = A @ dequant(B)^T in NumPy,
 compare against the provided reference output and GPU output.
 
+NOTE: specific to the bits=4 (uint4) "true_data" dump format produced by the
+hip-ep runtime debug path. Reads layout from shape.json (fields: M, K, N,
+block_size, ifm_disc, wts_disc, scales_disc, zeros_disc, output_disc).
+Not compatible with the synthetic data from utils/gen_data.py.
+
 Usage:
-    python verify_true_data.py true_data/layer_0/o_proj
+    python utils/verify_true_data.py true_data/layer_0/o_proj
 """
 
 import numpy as np

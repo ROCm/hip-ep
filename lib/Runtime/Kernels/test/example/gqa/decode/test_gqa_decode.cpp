@@ -105,7 +105,7 @@ struct Row {
 static std::vector<Row> g_rows;
 static bool g_do_fused = false;  // --fused: also time the oldest one-block/head decode
 static bool g_md = false;        // --md: suppress per-case text, emit Markdown table
-static bool g_prod_only = false; // --prod-only: time only the autotuned config
+static bool g_prod_only = true;  // time only the autotuned config (use --all-configs to also run fixed configs)
 static std::string g_only;       // --only: run just the models matching this
 
 // ---- CPU fp32 reference ---------------------------------------------------
@@ -449,6 +449,7 @@ int main(int argc, char** argv) {
     else if (a == "--md") { g_md = true; all = true; }
     else if (a == "--fused") g_do_fused = true;
     else if (a == "--prod-only") g_prod_only = true;
+    else if (a == "--all-configs") g_prod_only = false;
     else if (a == "--only" && i + 1 < argc) { g_only = argv[++i]; all = true; }
     else if (a == "--iters") next(iters);
     else if (a == "--seed") { int s; next(s); seed = (unsigned)s; }
