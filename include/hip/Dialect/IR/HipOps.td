@@ -1972,7 +1972,8 @@ def Hip_RangeOp :
   }];
 }
 
-def Hip_SiluOp : Hip_DpsOp_AutoReifyInfer<"silu"> {
+def Hip_SiluOp :
+    Hip_DpsOp_SameShapeManualVerify<"silu", /*sourceAccessor=*/"Input"> {
   let summary = "SiLU activation: output = input * sigmoid(input)";
   let arguments = (ins
     Hip_ContextType:$ctx,
