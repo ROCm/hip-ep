@@ -15,6 +15,7 @@
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/SymbolTable.h"
 
+#include "HipShapeUtilsInternal.h"
 #include "hip/Dialect/IR/HipShapeUtils.h"
 
 #include <limits>
@@ -402,40 +403,6 @@ IfOp::inferReturnTypes(MLIRContext *context, std::optional<Location> location,
 // Helpers for DPS compute ops (custom parse/print, verify, interfaces)
 //===----------------------------------------------------------------------===//
 
-static bool isTensorMode(Value v) { return isa<RankedTensorType>(v.getType()); }
-
-/// Verify that all data operands (skipping ctx and Index args) are
-/// uniformly tensor or memref, and that results match the mode.
-static LogicalResult verifyDpsComputeOp(Operation *op,
-                                        ArrayRef<Value> dataOperands,
-                                        unsigned numInits) {
-  if (dataOperands.empty())
-    return op->emitOpError("expected at least one data operand");
-
-  bool tensorMode = isTensorMode(dataOperands.front());
-  for (Value v : dataOperands) {
-    if (isTensorMode(v) != tensorMode)
-      return op->emitOpError(
-          "all data operands must be the same kind (all tensor or all memref)");
-  }
-
-  unsigned numResults = op->getNumResults();
-  if (tensorMode) {
-    if (numResults != numInits)
-      return op->emitOpError("tensor mode requires ")
-             << numInits << " result(s), got " << numResults;
-    for (unsigned i = 0; i < numResults; ++i) {
-      if (!isa<RankedTensorType>(op->getResult(i).getType()))
-        return op->emitOpError("result #") << i << " must be a ranked tensor";
-    }
-  } else {
-    if (numResults != 0)
-      return op->emitOpError("memref mode must have zero results, got ")
-             << numResults;
-  }
-  return success();
-}
-
 /// Emit memory effects for a DPS compute op: memref inputs read, memref inits
 /// write. Non-memref operands (e.g. !hip.context, index scalars) are skipped.
 static void emitDpsMemoryEffects(
@@ -656,37 +623,19 @@ void MatmulOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
-/// Read the shape of `v` if it is a `RankedTensorType` or `MemRefType`;
-/// returns an empty ArrayRef otherwise (caller must guard against this with
-/// `verifyDpsComputeOp`, which already rejects non-shaped data operands).
-static ArrayRef<int64_t> getShapeOf(Value v) {
-  if (auto t = dyn_cast<RankedTensorType>(v.getType()))
-    return t.getShape();
-  if (auto m = dyn_cast<MemRefType>(v.getType()))
-    return m.getShape();
-  return {};
-}
-
 LogicalResult MatmulOp::verify() {
   // First the cross-cutting DPS contract (all-tensor-or-all-memref +
   // result-count parity); failures here also rule out bogus operand types,
-  // so the matmul shape check below can rely on getShapeOf().
+  // so the matmul shape check below can rely on detail::getShapeOf().
   if (failed(verifyDpsComputeOp(*this, {getA(), getB(), getOutput()},
                                 /*numInits=*/1)))
     return failure();
 
-  // Static shape check via the shared matmul helper. The lambda is
-  // invoked once; it returns `{outputShape}` on success or `{}` on shape
-  // mismatch (in which case it has already issued a diagnostic on `*this`).
-  return mlir::hip::verifyHipOpShape(
-      *this, [&]() -> SmallVector<SmallVector<int64_t>> {
-        SmallVector<int64_t> outShape =
-            mlir::hip::inferMatmulShape(getShapeOf(getA()), getShapeOf(getB()),
-                                        [&]() { return this->emitOpError(); });
-        if (outShape.empty())
-          return {};
-        return {std::move(outShape)};
-      });
+  return mlir::hip::verifyHipOpShape(*this, [&] {
+    return mlir::hip::inferMatmulShape(detail::getShapeOf(getA()),
+                                       detail::getShapeOf(getB()),
+                                       [&]() { return this->emitOpError(); });
+  });
 }
 
 // `MatmulOp::reifyResultShapes` lives in

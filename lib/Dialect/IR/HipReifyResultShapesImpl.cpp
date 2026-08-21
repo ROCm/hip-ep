@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "HipShapeUtilsInternal.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/IR/HipShapeUtils.h"
 
@@ -22,24 +23,6 @@
 
 using namespace mlir;
 using namespace mlir::hip;
-
-namespace {
-
-/// Read the shape of `v` if shaped, else return empty. Callers below treat
-/// empty as a graceful bail-out (return failure() and let the caller of
-/// reifyResultShapes fall back to using the existing result type's shape).
-/// `HipDialect.cpp` carries a near-twin used in `verify()`; keeping the
-/// two distinct lets verify reject non-shaped values while reify bails
-/// silently if the contract ever loosens.
-ArrayRef<int64_t> getShapeOf(Value v) {
-  if (auto t = dyn_cast<RankedTensorType>(v.getType()))
-    return t.getShape();
-  if (auto m = dyn_cast<MemRefType>(v.getType()))
-    return m.getShape();
-  return {};
-}
-
-} // namespace
 
 //===----------------------------------------------------------------------===//
 // MatmulOp
@@ -66,17 +49,18 @@ MatmulOp::reifyResultShapes(OpBuilder &b,
   if (getNumResults() == 0)
     return failure();
 
-  ArrayRef<int64_t> aShape = getShapeOf(getA());
-  ArrayRef<int64_t> bShape = getShapeOf(getB());
+  ArrayRef<int64_t> aShape = detail::getShapeOf(getA());
+  ArrayRef<int64_t> bShape = detail::getShapeOf(getB());
   if (aShape.empty() || bShape.empty())
     return failure();
 
   // Re-run the matmul-shape helper. verify() has already passed by reify
   // time, but bail on empty() in case a pre-verify call sneaks in.
-  SmallVector<int64_t> outShape = mlir::hip::inferMatmulShape(
+  FailureOr<SmallVector<int64_t>> inferredShape = mlir::hip::inferMatmulShape(
       aShape, bShape, [&]() { return this->emitOpError(); });
-  if (outShape.empty())
+  if (failed(inferredShape))
     return failure();
+  ArrayRef<int64_t> outShape = *inferredShape;
 
   Location loc = getLoc();
   Value A = getA();
@@ -140,13 +124,8 @@ MatmulOp::reifyResultShapes(OpBuilder &b,
 LogicalResult
 RopeOp::reifyResultShapes(OpBuilder &b,
                           ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
-  if (getNumResults() == 0)
-    return failure();
-  if (!isa<RankedTensorType>(getInput().getType()))
-    return failure();
-  reifiedReturnShapes.assign(
-      {mlir::hip::reifyElementwiseSameShape(b, getLoc(), getInput())});
-  return success();
+  return mlir::hip::reifyElementwiseSameShapeFor(
+      b, getLoc(), getInput(), getOperation(), reifiedReturnShapes);
 }
 
 //===----------------------------------------------------------------------===//
@@ -169,13 +148,8 @@ RopeOp::reifyResultShapes(OpBuilder &b,
 LogicalResult
 RmsNormOp::reifyResultShapes(OpBuilder &b,
                              ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
-  if (getNumResults() == 0)
-    return failure();
-  if (!isa<RankedTensorType>(getInput().getType()))
-    return failure();
-  reifiedReturnShapes.assign(
-      {mlir::hip::reifyElementwiseSameShape(b, getLoc(), getInput())});
-  return success();
+  return mlir::hip::reifyElementwiseSameShapeFor(
+      b, getLoc(), getInput(), getOperation(), reifiedReturnShapes);
 }
 
 //===----------------------------------------------------------------------===//
@@ -201,13 +175,8 @@ RmsNormOp::reifyResultShapes(OpBuilder &b,
 LogicalResult
 QMoEOp::reifyResultShapes(OpBuilder &b,
                           ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
-  if (getNumResults() == 0)
-    return failure();
-  if (!isa<RankedTensorType>(getInput().getType()))
-    return failure();
-  reifiedReturnShapes.assign(
-      {mlir::hip::reifyElementwiseSameShape(b, getLoc(), getInput())});
-  return success();
+  return mlir::hip::reifyElementwiseSameShapeFor(
+      b, getLoc(), getInput(), getOperation(), reifiedReturnShapes);
 }
 
 //===----------------------------------------------------------------------===//
@@ -236,7 +205,7 @@ LogicalResult MatMulNBitsOp::reifyResultShapes(
     OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
   if (getNumResults() == 0)
     return failure();
-  ArrayRef<int64_t> aShape = getShapeOf(getA());
+  ArrayRef<int64_t> aShape = detail::getShapeOf(getA());
   if (aShape.empty())
     return failure();
 
@@ -276,8 +245,8 @@ GemmOp::reifyResultShapes(OpBuilder &b,
                           ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
   if (getNumResults() == 0)
     return failure();
-  ArrayRef<int64_t> aShape = getShapeOf(getInputA());
-  ArrayRef<int64_t> bShape = getShapeOf(getInputB());
+  ArrayRef<int64_t> aShape = detail::getShapeOf(getInputA());
+  ArrayRef<int64_t> bShape = detail::getShapeOf(getInputB());
   if (aShape.size() != 2 || bShape.size() != 2)
     return failure();
 
@@ -392,11 +361,11 @@ LogicalResult TransposeOp::reifyResultShapes(
     perm.push_back(ia.getInt());
   }
 
-  SmallVector<OpFoldResult> dims =
+  FailureOr<SmallVector<OpFoldResult>> dims =
       mlir::hip::reifyTransposeByPerm(b, getLoc(), getInput(), perm);
-  if (dims.empty())
+  if (failed(dims))
     return failure();
-  reifiedReturnShapes.assign({std::move(dims)});
+  reifiedReturnShapes.assign({std::move(*dims)});
   return success();
 }
 
@@ -409,11 +378,11 @@ GatherOp::reifyResultShapes(OpBuilder &b,
       !isa<RankedTensorType>(getIndices().getType()))
     return failure();
 
-  SmallVector<OpFoldResult> dims = mlir::hip::reifyGatherWithAxis(
+  FailureOr<SmallVector<OpFoldResult>> dims = mlir::hip::reifyGatherWithAxis(
       b, getLoc(), getData(), getIndices(), getAxis());
-  if (dims.empty())
+  if (failed(dims))
     return failure();
-  reifiedReturnShapes.assign({std::move(dims)});
+  reifiedReturnShapes.assign({std::move(*dims)});
   return success();
 }
 
@@ -562,11 +531,11 @@ LogicalResult GatherNDOp::reifyResultShapes(
       !isa<RankedTensorType>(getIndices().getType()))
     return failure();
 
-  SmallVector<OpFoldResult> dims = mlir::hip::reifyGatherND(
+  FailureOr<SmallVector<OpFoldResult>> dims = mlir::hip::reifyGatherND(
       b, getLoc(), getData(), getIndices(), getBatchDims());
-  if (dims.empty())
+  if (failed(dims))
     return failure();
-  reifiedReturnShapes.assign({std::move(dims)});
+  reifiedReturnShapes.assign({std::move(*dims)});
   return success();
 }
 
