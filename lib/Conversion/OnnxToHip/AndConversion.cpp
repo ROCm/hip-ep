@@ -12,9 +12,8 @@ namespace {
 /// onnx.And -> hip.and
 ///
 /// Element-wise logical AND of two boolean tensors with NumPy-style
-/// broadcasting. Dynamic output dims are resolved via
-/// `createBroadcastEmptyTensor` so each axis picks the non-broadcasting operand
-/// (e.g. `[?x1] & [1x?] -> [?x?]`).
+/// broadcasting. Dynamic output dimensions use the shared exact broadcast
+/// selection, including when both aligned operand dimensions are dynamic.
 struct AndToHip : public mlir::RewritePattern {
   AndToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.And", /*benefit=*/1, ctx) {}
@@ -47,7 +46,7 @@ struct AndToHip : public mlir::RewritePattern {
         createOnnxBroadcastEmptyTensor(rewriter, loc, resultType, {a, b}, op);
     if (mlir::failed(initOrFailure))
       return rewriter.notifyMatchFailure(
-          op, "And: no ranked operand spans dynamic result dim");
+          op, "And: result type is incompatible with the broadcast shape");
 
     auto hipOp =
         mlir::hip::AndOp::create(rewriter, loc, context, a, b, *initOrFailure);
