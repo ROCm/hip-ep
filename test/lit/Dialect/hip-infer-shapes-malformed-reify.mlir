@@ -41,9 +41,9 @@ func.func @negative_extent() {
 // -----
 
 // CHECK-LABEL: func.func @mixed_non_shaped_results
-// CHECK: "hip.test_malformed_reify"() {kind = "mixed_results"} : () -> (tensor<2x4xf32>, i32, !hip.loop_frame)
+// CHECK: "hip.test_malformed_reify"() {kind = "mixed_results"} : () -> (tensor<2x4xf32>, i32, index)
 func.func @mixed_non_shaped_results() {
   %tensor, %status, %frame = "hip.test_malformed_reify"()
-      {kind = "mixed_results"} : () -> (tensor<?x?xf32>, i32, !hip.loop_frame)
+      {kind = "mixed_results"} : () -> (tensor<?x?xf32>, i32, index)
   return
 }
