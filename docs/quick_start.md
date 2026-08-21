@@ -262,7 +262,7 @@ git am --3way --whitespace=nowarn /tmp/oga-2194.patch
 
 > **Note**: the upstream tag + PR list are pinned in CI via `OGA_VERSION` and
 > `OGA_PR_PATCHES` in
-> [`.github/workflows/windows-build.yml`](../.github/workflows/windows-build.yml);
+> [`.github/workflows/windows-build-real.yml`](../.github/workflows/windows-build-real.yml);
 > match those for byte-for-byte reproducibility.
 
 #### 3c. Build OGA
@@ -353,7 +353,7 @@ rocm-sdk init   # populates site-packages/_rocm_sdk_devel/lib
 location. Run a model whose `genai_config.json` selects the EP via
 `provider_options`; OGA discovers the colocated EP automatically. This is what
 the CI wheel smoke does (`Run OGA wheel smoke (Python)` in
-`.github/workflows/windows-build.yml`):
+`.github/workflows/windows-gpu-test.yml`):
 
 ```bash
 # site-packages root + the colocated capi dir
@@ -374,7 +374,7 @@ python onnxruntime-genai/benchmark/python/benchmark_e2e.py \
 (v0.14.0 + PR2194, DeviceType AMDGPU) this is the AMD GPU umbrella
 (`provider_options [{ "AMDGPU": {"profile": "hip"} }]`), which loads
 `amdgpu-ep.dll` and needs the umbrella DLLs colocated (see
-`.github/workflows/windows-build.yml`); the default wheel ships only the hipgpu
+`.github/workflows/windows-build-real.yml`); the default wheel ships only the hipgpu
 chain. For plain ORT (direct hipgpu, no OGA), register the colocated plugin via
 `ort.register_execution_provider_library("hipgpu", "$CAPI/hipgpu.dll")`.
 
@@ -491,7 +491,7 @@ auto-discovered next to `onnxruntime-genai.dll` -- do NOT pass `--ep_library`
 (upstream `model_benchmark` rejects it). With the upstream OGA (v0.14.0 +
 PR2194) the EP is the AMD GPU umbrella (`provider_options [{ "AMDGPU":
 {"profile": "hip"} }]`), so `amdgpu-ep.dll` must sit next to the OGA DLLs (see
-`.github/workflows/windows-build.yml`).
+`.github/workflows/windows-build-real.yml`).
 
 ```bash
 # Auto-generated prompt (512 tokens)

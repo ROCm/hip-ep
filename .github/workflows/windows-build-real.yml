@@ -1,0 +1,304 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+name: Windows Build (Real)
+
+on:
+  workflow_call:
+    inputs:
+      llvm_cache_key:
+        description: Cache key of the prebuilt LLVM/MLIR/LLD install prefix.
+        required: true
+        type: string
+      ort_cache_key:
+        description: Cache key of the prebuilt ONNX Runtime install prefix.
+        required: true
+        type: string
+      amdgpu_cache_key:
+        description: Cache key of the prebuilt amdgpu-ep.dll + hip-backend.dll.
+        required: true
+        type: string
+      oga_cache_key:
+        description: Cache key of the prebuilt OGA artifact set.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # windows-latest now serves the VS 2026 (VS 18) image, under which the
+    # pinned onnxruntime-genai / onnxruntime_extensions fails to build
+    # (gsl/util C2220 warning-as-error). Pin to the VS 2022 image per
+    # actions/runner-images#14017.
+    runs-on: windows-2022
+    concurrency:
+      group: build-windows-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+    env:
+      # ilammy/msvc-dev-cmd and mozilla-actions/sccache-action have no
+      # Node.js 24 releases yet; allow Node.js 20 until they are updated.
+      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
+      # gfx1151 first: TheRock tarball selection, NATIVE default import lib, and
+      # wheel rocm index hint all take the first list entry (see cmake/deps.cmake).
+      HIP_ARCHITECTURES: "gfx1151;gfx1152;gfx1150"
+
+    steps:
+      # MorphiZen is vendored in-tree as a git subtree under morphizen,
+      # so no deploy key or submodule initialization is needed.
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: false
+          fetch-depth: 1
+          show-progress: false
+
+      # LLVM and ORT are prebuilt by the deps workflow. fail-on-cache-miss
+      # makes the contract explicit: a green deps run means these entries
+      # exist, so a miss is a wiring bug, not a cue to rebuild.
+      - name: Restore llvm-install
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/llvm-install
+          key: ${{ inputs.llvm_cache_key }}
+          fail-on-cache-miss: true
+
+      - name: Restore ort-install
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/ort-install
+          key: ${{ inputs.ort_cache_key }}
+          fail-on-cache-miss: true
+
+      - name: Restore amdgpu-artifacts
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/amdgpu-artifacts
+          key: ${{ inputs.amdgpu_cache_key }}
+          fail-on-cache-miss: true
+
+      - name: Restore oga-artifacts
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/oga-artifacts
+          key: ${{ inputs.oga_cache_key }}
+          fail-on-cache-miss: true
+
+      - name: Setup Python 3.14
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Install pip dependencies
+        run: pip install lit requests
+
+      # Put cl.exe and ninja.exe (bundled with VS) into PATH
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+
+      - name: Prepare sccache local cache
+        shell: bash
+        run: |
+          echo "SCCACHE_DIR=${{ runner.workspace }}/sccache-dir" >> $GITHUB_ENV
+          echo "SCCACHE_KEY_DATE=$(date -u +'%Y%m%d')" >> $GITHUB_ENV
+
+      - name: Restore sccache directory
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/sccache-dir
+          key: sccache-windows-real-${{ env.SCCACHE_KEY_DATE }}
+          restore-keys: |
+            sccache-windows-real-
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Build hip-ep
+        shell: bash
+        run: |
+          AMDGPU_ARTIFACTS="${{ runner.workspace }}/amdgpu-artifacts"
+          AMDGPU_EP="$AMDGPU_ARTIFACTS/amdgpu-ep.dll"
+          HIP_BACKEND="$AMDGPU_ARTIFACTS/hip-backend.dll"
+          python build.py \
+            --config Release \
+            --cmake_generator Ninja \
+            --hip_arch "${{ env.HIP_ARCHITECTURES }}" \
+            --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
+            --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON \
+            --cmake_extra_defines "HIP_WHEEL_EXTRA_DLLS=$AMDGPU_EP;$HIP_BACKEND"
+
+      # -----------------------------------------------------------------------
+      # Stage GPU test package:
+      #   staging/bin/    – executables + DLLs needed at runtime on the GPU box
+      #   staging/models/ – ONNX test model
+      #   staging/morphizen_config.json
+      # -----------------------------------------------------------------------
+      - name: Stage GPU test package
+        shell: bash
+        run: |
+          mkdir -p staging/bin staging/lib
+
+          # onnxruntime_perf_test.exe + onnxruntime.dll – from ort-install
+          PREBUILT="${{ runner.workspace }}/ort-install"
+          PERF_TEST=$(find "$PREBUILT" -name "onnxruntime_perf_test.exe" -type f | head -1)
+          if [ -z "$PERF_TEST" ]; then
+            echo "ERROR: onnxruntime_perf_test.exe not found in $PREBUILT"
+            exit 1
+          fi
+          cp "$PERF_TEST" staging/bin/
+
+          # ORT DLLs + DirectML.dll – from the install prefix
+          cp "$PREBUILT/bin/onnxruntime.dll" staging/bin/
+          cp "$PREBUILT/bin/onnxruntime_providers_shared.dll" staging/bin/
+          cp "$PREBUILT/bin/DirectML.dll" staging/bin/
+
+          # MorphiZen EP DLL + per-arch custom_kernels_gfx<arch>.dll + other
+          # install DLLs/EXEs (kernel DLL must sit next to the EP DLL so
+          # LlvmIrJit's GetModuleFileName-anchored Load finds it).
+          cp "${{ runner.workspace }}/install/bin/"*.dll staging/bin/ 2>/dev/null || true
+          cp "${{ runner.workspace }}/install/bin/"*.exe staging/bin/ 2>/dev/null || true
+
+          cp "${{ runner.workspace }}/amdgpu-artifacts/amdgpu-ep.dll" staging/bin/
+          cp "${{ runner.workspace }}/amdgpu-artifacts/hip-backend.dll" staging/bin/
+
+          # Smoke: every per-arch kernel DLL must be present in staging/bin/
+          # (LlvmIrJit dlopens custom_kernels_<gcnArchName>.dll at runtime).
+          # Failure here means the install rule in lib/Runtime/Kernels/CMakeLists.txt
+          # regressed or HIP_ARCHITECTURES was trimmed.
+          IFS=';' read -ra HIP_ARCHS <<< "${{ env.HIP_ARCHITECTURES }}"
+          for arch in "${HIP_ARCHS[@]}"; do
+            KERNEL_DLL="staging/bin/custom_kernels_${arch}.dll"
+            if [ ! -f "$KERNEL_DLL" ]; then
+              echo "ERROR: $KERNEL_DLL missing from install (HIP_ARCHITECTURES=${{ env.HIP_ARCHITECTURES }})"
+              ls -1 "${{ runner.workspace }}/install/bin/" || true
+              exit 1
+            fi
+            echo "OK: $(basename "$KERNEL_DLL") present"
+          done
+
+          # Import libraries that get bundled into the MorphiZen JIT-linker
+          # path. Kept as a glob so the set evolves with the install rules
+          # without touching this workflow each time.
+          cp "${{ runner.workspace }}/install/lib/"*.lib staging/lib/ 2>/dev/null || true
+
+          THEROCK_DIR="../build/$(basename "$PWD")/_therock"
+          for dll in amdhip64_7.dll MIOpen.dll amd_comgr0702.dll rocblas.dll \
+                     libhipblaslt.dll hiprtc0702.dll hiprtc-builtins0702.dll \
+                     hipdnn_backend.dll; do
+            cp "$THEROCK_DIR/bin/$dll" staging/bin/
+          done
+          for data in hipblaslt rocblas; do
+            cp -r "$THEROCK_DIR/bin/$data" staging/bin/
+          done
+          for lib in amdhip64.lib MIOpen.lib libhipblaslt.dll.a; do
+            cp "$THEROCK_DIR/lib/$lib" staging/lib/
+          done
+
+          # MorphiZen EP config
+          cp etc/morphizen_config.json staging/
+
+          # ---------------------------------------------------------------
+          # Package MSVC/WinSDK release CRT import libraries for lld-link.
+          # The MorphiZen JIT compiler links against the release CRT (/MD),
+          # so the GPU test machine does not need VS Build Tools installed.
+          # ilammy/msvc-dev-cmd (already run above) sets VCToolsInstallDir,
+          # WindowsSdkDir, and WindowsSDKVersion in the environment.
+          # ---------------------------------------------------------------
+          MSVC_LIB="$(cygpath -u "$VCToolsInstallDir")/lib/x64"
+          UCRT_LIB="$(cygpath -u "$WindowsSdkDir")/Lib/${WindowsSDKVersion}/ucrt/x64"
+          UM_LIB="$(cygpath -u "$WindowsSdkDir")/Lib/${WindowsSDKVersion}/um/x64"
+          echo "MSVC lib: $MSVC_LIB"
+          echo "UCRT lib: $UCRT_LIB"
+          echo "UM lib:   $UM_LIB"
+          for lib in msvcrt.lib ucrt.lib vcruntime.lib oldnames.lib \
+                     libcpmt.lib libcmt.lib kernel32.lib user32.lib; do
+            src=$(find "$MSVC_LIB" "$UCRT_LIB" "$UM_LIB" \
+                    -maxdepth 1 -iname "$lib" 2>/dev/null | head -1)
+            if [ -n "$src" ]; then
+              cp "$src" staging/lib/
+              echo "  Packaged: $lib <- $src"
+            else
+              echo "  WARNING: $lib not found"
+            fi
+          done
+
+          # ---------------------------------------------------------------
+          # OGA artifacts: model_benchmark.exe + onnxruntime-genai.dll, plus
+          # model_mm.exe + benchmark_multimodal.py for the VL model tests.
+          # ---------------------------------------------------------------
+          cp "${{ runner.workspace }}/oga-artifacts/model_benchmark.exe" staging/bin/
+          cp "${{ runner.workspace }}/oga-artifacts/onnxruntime-genai.dll" staging/bin/
+          cp "${{ runner.workspace }}/oga-artifacts/model_mm.exe" staging/bin/
+          cp "${{ runner.workspace }}/oga-artifacts/benchmark_multimodal.py" staging/bin/
+
+          # ---------------------------------------------------------------
+          # Python wheels (ORT + OGA cp314) bundled into the artifact under
+          # staging/wheels/. Both are cached inside ort-install / oga-artifacts,
+          # so cache hits restore them without rebuilding ORT / OGA.
+          # ---------------------------------------------------------------
+          mkdir -p staging/wheels
+          ORT_WHEEL=$(find "${{ runner.workspace }}/ort-install/wheels" \
+            -name "onnxruntime_directml-*.whl" -type f | head -1)
+          OGA_WHEEL=$(find "${{ runner.workspace }}/oga-artifacts" \
+            -name "onnxruntime_genai_directml-*.whl" -type f | head -1)
+          if [ -z "$ORT_WHEEL" ] || [ -z "$OGA_WHEEL" ]; then
+            echo "ERROR: cp314 wheel(s) missing from cache"
+            echo "  ORT: $ORT_WHEEL"
+            echo "  OGA: $OGA_WHEEL"
+            exit 1
+          fi
+          cp "$ORT_WHEEL" staging/wheels/
+          cp "$OGA_WHEEL" staging/wheels/
+
+          echo "=== Staged package contents ==="
+          find staging/ -type f | sort
+
+      - name: Upload GPU test package
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-test-package
+          path: staging/
+          retention-days: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) && 14 || 3 }}
+
+      - name: Stage Python wheel package
+        shell: bash
+        env:
+          VLM_BENCHMARK_REF: f02a82c8312224ef3e2f673c4c6569d487d47e64
+        run: |
+          mkdir -p wheelpkg/wheels
+          ORT_WHEEL=$(find "${{ runner.workspace }}/ort-install/wheels" \
+            -name "onnxruntime_directml-*.whl" -type f | head -1)
+          OGA_WHEEL=$(find "${{ runner.workspace }}/oga-artifacts" \
+            -name "onnxruntime_genai_directml-*.whl" -type f | head -1)
+          EP_WHEEL=$(find "../build/$(basename "$PWD")/python/dist" \
+            -name "onnxruntime_ep_hip-*.whl" -type f | head -1)
+          if [ -z "$ORT_WHEEL" ] || [ -z "$OGA_WHEEL" ] || [ -z "$EP_WHEEL" ]; then
+            echo "ERROR: wheel(s) missing"
+            echo "  ORT=$ORT_WHEEL OGA=$OGA_WHEEL EP=$EP_WHEEL"
+            exit 1
+          fi
+          cp "$ORT_WHEEL" "$OGA_WHEEL" "$EP_WHEEL" wheelpkg/wheels/
+          cp python/examples/run_onnx.py wheelpkg/
+          cp "${{ runner.workspace }}/oga-artifacts/benchmark-python/"*.py wheelpkg/
+          curl -fsSL --retry 3 -o wheelpkg/vlm_benchmark.py \
+            "https://raw.githubusercontent.com/amd/RyzenAI-SW/$VLM_BENCHMARK_REF/LLM-examples/VLM/vlm_benchmark.py"
+          echo "=== Python wheel package layout ==="
+          find wheelpkg/ -maxdepth 2 -mindepth 1 | sort
+
+      - name: Upload Python wheel package
+        uses: actions/upload-artifact@v4
+        with:
+          name: hip-python-package
+          path: wheelpkg/
+          retention-days: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) && 14 || 3 }}
+
+      - name: Save sccache directory
+        if: always() && github.ref_name == 'main'
+        continue-on-error: true
+        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/sccache-dir
+          key: sccache-windows-real-${{ env.SCCACHE_KEY_DATE }}
