@@ -46,8 +46,9 @@ void populateShapeConversionPatterns(const ::mlir::TypeConverter &typeConverter,
                                      ::mlir::RewritePatternSet &patterns,
                                      ::mlir::MLIRContext *ctx);
 
-void populateReturnConversionPatterns(::mlir::RewritePatternSet &patterns,
-                                      ::mlir::MLIRContext *ctx);
+void populateReturnConversionPatterns(
+    const ::mlir::TypeConverter &typeConverter,
+    ::mlir::RewritePatternSet &patterns, ::mlir::MLIRContext *ctx);
 
 } // namespace hipsr
 } // namespace mlir

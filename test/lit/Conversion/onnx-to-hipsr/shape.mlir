@@ -190,25 +190,18 @@ func.func @result_names_no_space(%ctx: !hipsr.context,
 
 // -----
 
-// Neither ONNX type names a space, and the expand still reads its shape operand
-// in the host memory this conversion picks: an operation pattern does not carry
-// the pass converter, so an operand keeps the space its producer gave it.
-//
-// The extents feed the shape graph as well as the data graph, and each takes a
-// different value: the barrier placeholder's input names the buffer holding
-// them, which is the compute's destination, while the expand reads what the
-// compute wrote. Reading host extents says nothing about where the expand keeps
-// its own data, which stays in the #hipsr.mem<device> its input and init
-// require.
-// CHECK-LABEL:   func.func @extents_feed_an_expand(
+// Returning the extents carries the host space to the function boundary, so a
+// graph declaring a bare tensor comes back with the space this conversion
+// picked.
+// CHECK-LABEL:   func.func @extents_leave_the_function(
 // CHECK-SAME:      %[[CTX:.*]]: !hipsr.context,
-// CHECK-SAME:      %[[INPUT:.*]]: tensor<?x3xf16, #hipsr.mem<device>>) -> tensor<?x?xf16, #hipsr.mem<device>> {
-// CHECK-NEXT:      %[[EXTENTS_INIT:.*]] = hipsr.placeholder(%[[CTX]]) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<2xi64, #hipsr.mem<host>> shape_region {
+// CHECK-SAME:      %[[INPUT:.*]]: tensor<?x3xf16, #hipsr.mem<device>>) -> tensor<2xi64, #hipsr.mem<host>> {
+// CHECK-NEXT:      %[[INIT:.*]] = hipsr.placeholder(%[[CTX]]) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<2xi64, #hipsr.mem<host>> shape_region {
 // CHECK-NEXT:        %[[LEN:.*]] = arith.constant 2 : index
 // CHECK-NEXT:        %[[SHAPE:.*]] = shape.from_extents %[[LEN]] : index
 // CHECK-NEXT:        hipsr.shape_yield %[[SHAPE]] : !shape.shape
 // CHECK-NEXT:      }
-// CHECK-NEXT:      %[[RESULT:.*]] = hipsr.compute(%[[CTX]]) ins(%[[INPUT]] : tensor<?x3xf16, #hipsr.mem<device>>) outs(%[[EXTENTS_INIT]] : tensor<2xi64, #hipsr.mem<host>>) {
+// CHECK-NEXT:      %[[RESULT:.*]] = hipsr.compute(%[[CTX]]) ins(%[[INPUT]] : tensor<?x3xf16, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<2xi64, #hipsr.mem<host>>) {
 // CHECK-NEXT:      ^bb0(%{{.*}}: !hipsr.context, %[[IN:.*]]: tensor<?x3xf16, #hipsr.mem<device>>, %{{.*}}: tensor<2xi64, #hipsr.mem<host>>):
 // CHECK-NEXT:        %[[C0:.*]] = arith.constant 0 : index
 // CHECK-NEXT:        %[[DIM0:.*]] = tensor.dim %[[IN]], %[[C0]] : tensor<?x3xf16, #hipsr.mem<device>>
@@ -217,13 +210,10 @@ func.func @result_names_no_space(%ctx: !hipsr.context,
 // CHECK-NEXT:        %[[EXTENTS:.*]] = tensor.from_elements %[[EXT0]], %[[EXT1]] : tensor<2xi64, #hipsr.mem<host>>
 // CHECK-NEXT:        hipsr.compute_yield %[[EXTENTS]] : tensor<2xi64, #hipsr.mem<host>>
 // CHECK-NEXT:      } : tensor<2xi64, #hipsr.mem<host>>{{$}}
-// CHECK-NEXT:      %[[INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]], %[[EXTENTS_INIT]] : tensor<?x3xf16, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<?x?xf16, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[EXPANDED:.*]] = hipsr.expand(%[[CTX]]) ins(%[[INPUT]], %[[RESULT]] : tensor<?x3xf16, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>) outs(%[[INIT]] : tensor<?x?xf16, #hipsr.mem<device>>) : tensor<?x?xf16, #hipsr.mem<device>>
-// CHECK-NEXT:      return %[[EXPANDED]] : tensor<?x?xf16, #hipsr.mem<device>>
-func.func @extents_feed_an_expand(%ctx: !hipsr.context,
-                                  %input: tensor<?x3xf16>) -> tensor<?x?xf16> {
+// CHECK-NEXT:      return %[[RESULT]] : tensor<2xi64, #hipsr.mem<host>>
+func.func @extents_leave_the_function(%ctx: !hipsr.context,
+                                      %input: tensor<?x3xf16>)
+    -> tensor<2xi64> {
   %0 = "onnx.Shape"(%input) : (tensor<?x3xf16>) -> tensor<2xi64>
-  %1 = "onnx.Expand"(%input, %0)
-      : (tensor<?x3xf16>, tensor<2xi64>) -> tensor<?x?xf16>
-  return %1 : tensor<?x?xf16>
+  "onnx.Return"(%0) : (tensor<2xi64>) -> ()
 }
