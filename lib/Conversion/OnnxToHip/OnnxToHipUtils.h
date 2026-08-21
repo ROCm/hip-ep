@@ -131,7 +131,6 @@ bool extractConstantIntTensor(
 bool extractConstantIntVector(mlir::Value value,
                               llvm::SmallVectorImpl<int64_t> &out);
 
-
 /// Compatibility check for a pure payload shape. A dynamic imported or
 /// inferred extent is compatible with its counterpart; unequal static extents
 /// are contradictions.
