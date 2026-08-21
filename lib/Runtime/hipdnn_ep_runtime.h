@@ -1207,6 +1207,13 @@ int wrap_layer_normalization(RuntimeState *state, void *input, void *scale,
                              int64_t element_size_bytes, int64_t axis,
                              float epsilon, int64_t stash_type);
 
+// InstanceNormalization: y = scale * (x - mean) / sqrt(var + epsilon) + B
+// with mean/var over spatial axes of each (N, C) slice. Input is (N,C,D1..Dn).
+int wrap_instance_normalization(RuntimeState *state, void *input, void *scale,
+                                void *bias, void *output, int64_t n, int64_t c,
+                                int64_t spatial, int64_t data_type,
+                                float epsilon);
+
 // SkipSimplifiedLayerNormalization operation wrapper (Full MS spec)
 // Computes: input_skip_bias_sum = input + skip [+ bias]
 //           output = RMSNorm(input_skip_bias_sum) * gamma

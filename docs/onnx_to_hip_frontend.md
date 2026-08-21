@@ -64,6 +64,7 @@ existing `--convert-hip-to-llvm` pipeline.
 | ONNX / ORT Contrib | HIP | MIOpen C API |
 |---|---|---|
 | `LayerNormalization` | `hip.miopen.layer_norm` | `miopenLayerNormForward` |
+| `InstanceNormalization` | `hip.instance_norm` | custom HIP kernel |
 | `SimplifiedLayerNormalization` | `hip.miopen.t5_layer_norm` | `miopenT5LayerNormForward` |
 | `SkipLayerNormalization` | `hip.miopen.skip_layer_norm` | `miopenAddLayerNormForward` |
 | `SkipSimplifiedLayerNormalization` | `hip.miopen.skip_rms_norm` | `miopenAddLayerNormForward` (T5 mode) |
