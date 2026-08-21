@@ -10,10 +10,10 @@
 // That walk runs once per distinct question, not once per dispatch: a resolved
 // answer is remembered against the request's own classes, and a served model
 // asks only a few dozen distinct questions however long it runs. The memo is
-// process-wide and keyed on the table as well as the question, so repeated model
-// loads reuse it and two models with different tables do not share answers. The
-// walk is a pure function of the key, so this is a cost decision and not a
-// policy one -- see g_resolved and internTable.
+// process-wide and keyed on the table as well as the question, so repeated
+// model loads reuse it and two models with different tables do not share
+// answers. The walk is a pure function of the key, so this is a cost decision
+// and not a policy one -- see g_resolved and internTable.
 //
 // The keys are what changed in schema 5. A key used to carry the request's
 // exact head counts and batch, which meant a model whose (num_heads,
@@ -53,6 +53,15 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#if !defined(HIPDNN_EP_GQA_AUTOTUNE_GPU_FREE)
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#elif defined(__linux__)
+#include <dlfcn.h>
+#endif
+#endif
 
 namespace hipdnn_ep {
 namespace {
@@ -93,15 +102,15 @@ struct Resolved {
 };
 
 // Compute units on this part. The fallback split count is a function of it,
-// which is what lets that fallback follow the hardware instead of being a number
-// somebody picked on one GPU.
+// which is what lets that fallback follow the hardware instead of being a
+// number somebody picked on one GPU.
 //
 // Cached per device for the process, not per policy: hipGetDeviceProperties
 // fills a large struct and is one of the slower queries in the API, while the
 // answer is a fixed property of the part. A host that loads models repeatedly
-// used to pay it once per session. Keyed on the device because a process may run
-// on more than one, and a failure is not cached -- it is not a property of the
-// device.
+// used to pay it once per session. Keyed on the device because a process may
+// run on more than one, and a failure is not cached -- it is not a property of
+// the device.
 static int currentComputeUnits() {
 #if defined(HIPDNN_EP_GQA_AUTOTUNE_GPU_FREE)
   return 0;
@@ -369,8 +378,7 @@ static bool wmmaSupported(int head_dim, unsigned heads_per_group) {
 
 static bool decodeWmmaConfig(fbs::GqaTuneConfig config) {
   using C = fbs::GqaTuneConfig;
-  return config == C::Wmma || config == C::WmmaBkv16 ||
-         config == C::WmmaBkv32;
+  return config == C::Wmma || config == C::WmmaBkv16 || config == C::WmmaBkv32;
 }
 
 static int decodeEffectiveLen(const GqaDecodeRequest &request) {
@@ -497,16 +505,16 @@ static GqaPrefillConfig prefillHeuristic(const GqaPrefillRequest &request) {
 // table it answered from in a few bits of its key.
 //
 // The id has to exist because the memo outlives a session and a table does not:
-// the file is read from the model package's own FileSystem, so two models in one
-// process can carry different tables and legitimately disagree about the same
-// geometry. Interning by content, not by `model_key`, because the stamp is a
-// campaign name that two different builds can share -- and because content is
+// the file is read from the model package's own FileSystem, so two models in
+// one process can carry different tables and legitimately disagree about the
+// same geometry. Interning by content, not by `model_key`, because the stamp is
+// a campaign name that two different builds can share -- and because content is
 // what makes a reload of the same package reuse everything the last load
 // resolved, which is the whole point of the memo being process-wide.
 //
-// Two tables are the same table when their bytes are equal, decided by comparing
-// them and not by trusting a digest: a hash collision here would hand one
-// model's config to another, and "unlikely" is not a property a dispatch
+// Two tables are the same table when their bytes are equal, decided by
+// comparing them and not by trusting a digest: a hash collision here would hand
+// one model's config to another, and "unlikely" is not a property a dispatch
 // decision should rest on. So a copy of each distinct table is kept -- tens of
 // kilobytes each, and a process realistically holds one or two -- and the hash
 // is only a fast reject that turns the search into one comparison.
@@ -516,7 +524,7 @@ static GqaPrefillConfig prefillHeuristic(const GqaPrefillRequest &request) {
 // correct; reaching it would mean 4096 genuinely different GQA tables in one
 // process.
 constexpr uint32_t kMaxTableIds = 4096;
-static std::vector<std::vector<uint8_t>> g_tables;         // id - 1 -> bytes
+static std::vector<std::vector<uint8_t>> g_tables; // id - 1 -> bytes
 static std::unordered_multimap<uint64_t, uint32_t> g_table_ids; // hash -> id
 static std::mutex g_tables_mutex;
 
@@ -603,8 +611,8 @@ static bool rowAnswer(const fbs::GqaTuneRow &row, Answer *out) {
     out->use_wmma = decodeWmmaConfig(row.config());
     out->splits = row.splits();
     // Wmma predates the tunable d64 tile height and remains the name of d128's
-    // fixed-BKV=32 implementation. It maps to 16 here because the kernel ignores
-    // the knob at d128; the explicit names carry d64's real choice.
+    // fixed-BKV=32 implementation. It maps to 16 here because the kernel
+    // ignores the knob at d128; the explicit names carry d64's real choice.
     out->bkv = row.config() == C::WmmaBkv32 ? 32 : 16;
     return true;
   }
@@ -692,8 +700,8 @@ static bool loadLutBuffer(GqaAutotunePolicy &policy, const uint8_t *data,
     return true;
 
   // Sized up front. The shipped table is 2828 rows, and growing into that from
-  // nothing rehashes about a dozen times, each pass rehashing every row inserted
-  // so far -- all of it on the session-creation path.
+  // nothing rehashes about a dozen times, each pass rehashing every row
+  // inserted so far -- all of it on the session-creation path.
   policy.rows.reserve(lut->rows()->size());
 
   size_t loaded = 0;
@@ -716,9 +724,9 @@ static bool loadLutBuffer(GqaAutotunePolicy &policy, const uint8_t *data,
   // a table that contributed no usable row answers nothing to remember.
   if (loaded > 0)
     policy.table_id = internTable(data, size);
-  // model_key says which measurement campaign produced these rows. It is the only
-  // way to tell two tables apart once one is packed, so it is logged rather than
-  // carried unread.
+  // model_key says which measurement campaign produced these rows. It is the
+  // only way to tell two tables apart once one is packed, so it is logged
+  // rather than carried unread.
   RUNTIME_DEBUG_LOG(
       "[Runtime DEBUG] loaded GQA LUT: %zu rows (%zu invalid), built from %s\n",
       loaded,
@@ -727,6 +735,66 @@ static bool loadLutBuffer(GqaAutotunePolicy &policy, const uint8_t *data,
       lut->model_key() ? lut->model_key()->c_str() : "(no model_key)");
   return true;
 }
+
+#if !defined(HIPDNN_EP_GQA_AUTOTUNE_GPU_FREE) &&                               \
+    (defined(_WIN32) || defined(__linux__))
+// Fallback loader: find gqa_autotune.fb in the same directory as this module
+// (the EP DLL / .so).  Used when HIPDNN_GQA_LUT_FILE is not set and the
+// model's EPContext filesystem does not contain the file.  The CMake install
+// rule places gqa_autotune.fb next to custom_kernels_gfx*.dll / .so.
+static bool loadLutFromDllDir(GqaAutotunePolicy &policy) {
+  std::string path;
+#if defined(_WIN32)
+  HMODULE hm = nullptr;
+  if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                              GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                          reinterpret_cast<LPCSTR>(&loadLutFromDllDir), &hm))
+    return false;
+  char buf[MAX_PATH];
+  DWORD len = GetModuleFileNameA(hm, buf, MAX_PATH);
+  if (len == 0 || len >= MAX_PATH)
+    return false;
+  path.assign(buf, len);
+#elif defined(__linux__)
+  Dl_info info{};
+  if (!dladdr(reinterpret_cast<void *>(&loadLutFromDllDir), &info) ||
+      !info.dli_fname)
+    return false;
+  path = info.dli_fname;
+#endif
+  // Trim to directory (keep trailing separator).
+  // Avoid std::string::find_last_of: it calls __std_find_last_of_trivial_pos_1
+  // which is not available to the LLVM JIT linker in the bitcode environment.
+  size_t sep = path.size();
+  while (sep > 0 && path[sep - 1] != '/' && path[sep - 1] != '\\')
+    --sep;
+  if (sep == 0)
+    return false;
+  path = path.substr(0, sep) + kGqaAutotuneFilename;
+  // Read the file with standard C I/O.
+  FILE *f = fopen(path.c_str(), "rb"); // NOLINT
+  if (!f)
+    return false;
+  if (fseek(f, 0, SEEK_END) != 0) {
+    fclose(f);
+    return false;
+  }
+  const long sz = ftell(f);
+  rewind(f);
+  if (sz <= 0 || static_cast<size_t>(sz) > kMaxLutBytes) {
+    fclose(f);
+    return false;
+  }
+  std::vector<uint8_t> bytes(static_cast<size_t>(sz));
+  const bool ok = fread(bytes.data(), 1, bytes.size(), f) == bytes.size();
+  fclose(f);
+  if (!ok)
+    return false;
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] GQA LUT loaded from DLL dir: %s\n",
+                    path.c_str());
+  return loadLutBuffer(policy, bytes.data(), bytes.size());
+}
+#endif // !GPU_FREE && (WIN32 || linux)
 
 static void loadLutFromFileSystem(GqaAutotunePolicy &policy,
                                   morphizen::FileSystem *fs) {
@@ -741,6 +809,14 @@ static void loadLutFromFileSystem(GqaAutotunePolicy &policy,
   auto reader = fs->create_reader_template(filename);
   if (!reader) {
     RUNTIME_DEBUG_LOG("[Runtime DEBUG] no GQA LUT found at %s\n", filename);
+#if defined(_WIN32) && !defined(HIPDNN_EP_GQA_AUTOTUNE_GPU_FREE)
+    // HIPDNN_GQA_LUT_FILE was not set and the model's EPContext does not carry
+    // the file.  Try the directory where this module (EP DLL) lives -- the
+    // CMake install rule places gqa_autotune.fb there alongside the kernel
+    // DLLs.
+    if (configured_filename.empty())
+      (void)loadLutFromDllDir(policy);
+#endif
     return;
   }
   const size_t size = reader->size();
@@ -907,22 +983,22 @@ static const Answer *find(const GqaAutotunePolicy &policy,
 // pure function of the key, so this changes cost and nothing else.
 //
 // Process-wide, not per policy, and for the same reason the tuner caches in
-// gqa_kernel.hip are: a host loads and unloads models repeatedly in one process,
-// and a memo that died with the session would start cold for most of the
-// dispatches it exists to serve. The table id in the key is what makes that safe
-// across models -- see internTable.
+// gqa_kernel.hip are: a host loads and unloads models repeatedly in one
+// process, and a memo that died with the session would start cold for most of
+// the dispatches it exists to serve. The table id in the key is what makes that
+// safe across models -- see internTable.
 //
-// Bounded by construction: every field of the key is a bucket or a class, so the
-// whole process can only ask a few dozen distinct questions per table.
+// Bounded by construction: every field of the key is a bucket or a class, so
+// the whole process can only ask a few dozen distinct questions per table.
 static std::unordered_map<uint64_t, Resolved> g_resolved;
-// GQA may be dispatched from more than one thread. One uncontended lock is still
-// far cheaper than the walk it replaces.
+// GQA may be dispatched from more than one thread. One uncontended lock is
+// still far cheaper than the walk it replaces.
 static std::mutex g_resolved_mutex;
 
 // The question a request asks, as one word: the table it is asked of, plus the
 // request's own classes with nothing wildcarded. `Geometry` is not a tier here,
-// it just marks the key as naming a request rather than a row -- the memo is its
-// own map, so it cannot collide with a row key.
+// it just marks the key as naming a request rather than a row -- the memo is
+// its own map, so it cannot collide with a row key.
 //
 // Layout above packKey's 39 bits: max_splits (7 bits) at 39, table id (13 bits,
 // so kMaxTableIds fits) at 46.
@@ -932,18 +1008,16 @@ static std::mutex g_resolved_mutex;
 // answer resolved for a higher one.
 static uint64_t decodeMemoKey(const GqaAutotunePolicy &policy,
                               const GqaDecodeRequest &request) {
-  const uint64_t classes =
-      packKey(fbs::GqaTunePhase::Decode, fbs::GqaTuneTier::Geometry,
-              kvDtypeClass(request.kv_dtype), headDimClass(request.head_dim),
-              headsPerGroup(request.num_heads, request.kv_num_heads),
-              parClass(request.batch, request.num_heads),
-              batchClass(request.batch), fbs::GqaSeqBucket::Any,
-              seqBucket(decodeEffectiveLen(request)),
-              windowClass(request.local_window));
+  const uint64_t classes = packKey(
+      fbs::GqaTunePhase::Decode, fbs::GqaTuneTier::Geometry,
+      kvDtypeClass(request.kv_dtype), headDimClass(request.head_dim),
+      headsPerGroup(request.num_heads, request.kv_num_heads),
+      parClass(request.batch, request.num_heads), batchClass(request.batch),
+      fbs::GqaSeqBucket::Any, seqBucket(decodeEffectiveLen(request)),
+      windowClass(request.local_window));
   const uint64_t cap =
       static_cast<uint64_t>(std::max(0, std::min(request.max_splits, 127)));
-  return classes | (cap << 39) |
-         (static_cast<uint64_t>(policy.table_id) << 46);
+  return classes | (cap << 39) | (static_cast<uint64_t>(policy.table_id) << 46);
 }
 
 static uint64_t prefillMemoKey(const GqaAutotunePolicy &policy,
@@ -951,15 +1025,14 @@ static uint64_t prefillMemoKey(const GqaAutotunePolicy &policy,
   // Mirrors the probe the walk would build, window included: v5 is the only
   // variant the fused path ever hands a window.
   const bool v5 = request.variant == GqaPrefillVariant::V5;
-  const uint64_t classes =
-      packKey(phaseOf(request.variant), fbs::GqaTuneTier::Geometry,
-              fbs::GqaTuneKvDtype::Fp16, headDimClass(request.head_dim),
-              headsPerGroup(request.num_heads, request.kv_num_heads),
-              parClass(request.batch, request.num_heads),
-              batchClass(request.batch), seqBucket(std::max(request.seq_q, 1)),
-              seqBucket(std::max(request.seq_kv, 1)),
-              v5 ? windowClass(request.local_window)
-                 : fbs::GqaWindowClass::NoWindow);
+  const uint64_t classes = packKey(
+      phaseOf(request.variant), fbs::GqaTuneTier::Geometry,
+      fbs::GqaTuneKvDtype::Fp16, headDimClass(request.head_dim),
+      headsPerGroup(request.num_heads, request.kv_num_heads),
+      parClass(request.batch, request.num_heads), batchClass(request.batch),
+      seqBucket(std::max(request.seq_q, 1)),
+      seqBucket(std::max(request.seq_kv, 1)),
+      v5 ? windowClass(request.local_window) : fbs::GqaWindowClass::NoWindow);
   return classes | (static_cast<uint64_t>(policy.table_id) << 46);
 }
 
@@ -992,8 +1065,8 @@ static void memoStore(uint64_t key, const Answer &answer,
 // -DHIPDNN_EP_GQA_AUTOTUNE_ONLINE_DEFAULT=1, which is the only lever inside a
 // test harness that does not let you set environment variables: the whole run
 // takes the online path with no script change. HIPDNN_GQA_AUTOTUNE_MODE
-// overrides that per process, which is the lever a developer has on a build they
-// did not make.
+// overrides that per process, which is the lever a developer has on a build
+// they did not make.
 #if defined(HIPDNN_EP_GQA_AUTOTUNE_ONLINE_DEFAULT) &&                          \
     HIPDNN_EP_GQA_AUTOTUNE_ONLINE_DEFAULT
 constexpr GqaAutotuneMode kDefaultMode = GqaAutotuneMode::Online;
@@ -1013,9 +1086,9 @@ struct ModeChoice {
 };
 
 // Matched case-insensitively and with whitespace stripped, and an unrecognised
-// value says so instead of quietly leaving the session on the default. The point
-// of the switch is to compare the two paths, so silently running the other one is
-// the failure worth a message.
+// value says so instead of quietly leaving the session on the default. The
+// point of the switch is to compare the two paths, so silently running the
+// other one is the failure worth a message.
 static ModeChoice chooseMode() {
   const std::string raw = hipdnn_ep::env_string("HIPDNN_GQA_AUTOTUNE_MODE");
   std::string mode;
@@ -1046,19 +1119,20 @@ void *gqa_autotune_create(morphizen::FileSystem *fs) {
   const ModeChoice choice = chooseMode();
   policy->mode = choice.mode;
   // Loaded whatever the mode says. An online session never reads these rows, so
-  // skipping the load looks free -- but it only ever saves work in the mode that
-  // then spends 12-96 GPU launches per decode shape, and it would make the
-  // `inspect` tool in test_gqa_autotune.cpp report that a shipped table does not
-  // load whenever the mode happens to be set in the environment. Loading is one
-  // file read; that is the cheaper of the two mistakes.
+  // skipping the load looks free -- but it only ever saves work in the mode
+  // that then spends 12-96 GPU launches per decode shape, and it would make the
+  // `inspect` tool in test_gqa_autotune.cpp report that a shipped table does
+  // not load whenever the mode happens to be set in the environment. Loading is
+  // one file read; that is the cheaper of the two mistakes.
   loadLutFromFileSystem(*policy, fs);
-  // Says where the mode came from, not just what it is: on a build whose default
-  // was flipped there is no environment variable to inspect, so the log is the
-  // only way to tell a deliberate default from an override that did not take.
-  RUNTIME_DEBUG_LOG(
-      "[Runtime DEBUG] GQA autotune mode: %s (from %s)\n",
-      modeName(policy->mode),
-      choice.from_env ? "HIPDNN_GQA_AUTOTUNE_MODE" : "the build default");
+  // Says where the mode came from, not just what it is: on a build whose
+  // default was flipped there is no environment variable to inspect, so the log
+  // is the only way to tell a deliberate default from an override that did not
+  // take.
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] GQA autotune mode: %s (from %s)\n",
+                    modeName(policy->mode),
+                    choice.from_env ? "HIPDNN_GQA_AUTOTUNE_MODE"
+                                    : "the build default");
   return policy.release();
 }
 
@@ -1082,10 +1156,9 @@ GqaDecodeResult gqa_autotune_resolve_decode(void *opaque_policy,
     const uint64_t memo_key = decodeMemoKey(*policy, request);
     Resolved memo;
     if (policy->table_id != 0 && memoFind(memo_key, &memo)) {
-      const GqaDecodeConfig config =
-          clampDecodeConfig(request, GqaDecodeConfig{memo.answer.use_wmma,
-                                                     memo.answer.splits,
-                                                     memo.answer.bkv});
+      const GqaDecodeConfig config = clampDecodeConfig(
+          request, GqaDecodeConfig{memo.answer.use_wmma, memo.answer.splits,
+                                   memo.answer.bkv});
       // Re-checked rather than assumed: max_splits is in the key, but a length
       // low in the bucket can clamp to a split count a length at the top of it
       // cannot. On the rare mismatch, fall through and walk the tiers.
