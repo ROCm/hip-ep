@@ -200,6 +200,21 @@ Frontend-neutral destination construction lives in
 lookup. `OnnxToHipUtils` retains only ONNX import semantics and wrappers, so a
 future frontend can target HIP without depending on the ONNX conversion layer.
 
+
+The same-shape inventory guard requires every `same_shape` op to use a
+generated named-source family. Converter destinations materialize this contract
+with `createSameShapeEmptyTensor`, so dynamic extents and static compatibility
+come from the same source as reification and verification.
+
+Every HIP compute DPS op has one reviewed category in
+[hip-shape-contract-inventory.md](hip-shape-contract-inventory.md). TableGen's
+`hipShapeContract` field is source-level inventory metadata, not emitted IR.
+The audit resolves `DestinationStyleOpInterface` and the exact behavior-family
+superclass from `llvm-tblgen --dump-json`; it rejects unclassified compute DPS,
+incorrectly labeled non-DPS infrastructure, and missing family-required
+verifier wiring. Focused negative LIT fixtures validate handwritten verifier
+and reifier behavior.
+
 Pure descriptor transformations such as Reshape, Squeeze, and Unsqueeze
 generally lower to standard tensor operations rather than HIP DPS compute
 operations. Their result-extent inference and dim folding use MLIR's standard
