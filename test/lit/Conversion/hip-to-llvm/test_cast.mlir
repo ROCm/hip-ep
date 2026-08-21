@@ -30,7 +30,8 @@ module {
     hip.cast(%ctx) ins(%input : memref<256x512xf32, 1>)
                    outs(%output : memref<256x512xf16, 1>) {to = 10 : i64}
 
-    // CHECK: llvm.call @wrap_cast({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+    // CHECK: %[[STATUS:.*]] = llvm.call @wrap_cast({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+    // CHECK-NEXT: llvm.call @hipdnn_ep_state_record_status({{.*}}, %[[STATUS]])
 
     return
   }

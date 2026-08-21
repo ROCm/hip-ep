@@ -13,6 +13,8 @@
 //   dims come from the op's operands.
 // - The call signature is (state, out_idx, shape_ptr, rank, elem_size) -> ptr,
 //   with out_idx / rank / elem_size emitted as i64 constants.
+// - A null callback result records failure and returns before the descriptor is
+//   consumed.
 // - The returned generic (AS 0) pointer is addrspacecast to the memref's
 //   address space (AS 1) only when they differ; for a default-AS (AS 0) result
 //   no cast is emitted.
@@ -188,6 +190,14 @@ module {
     // CHECK-LABEL: llvm.func @alloc_then_sigmoid
     // CHECK:       %[[OUTIDX:.*]] = llvm.mlir.constant(29 : i64) : i64
     // CHECK:       %[[OUTRAW:.*]] = llvm.call @hipdnn_ep_alloc_output(%{{.*}}, %[[OUTIDX]], %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, i64, !llvm.ptr, i64, i64) -> !llvm.ptr
+    // CHECK:       %[[NULL:.*]] = llvm.mlir.zero : !llvm.ptr
+    // CHECK:       %[[HAS_OUTPUT:.*]] = llvm.icmp "ne" %[[OUTRAW]], %[[NULL]] : !llvm.ptr
+    // CHECK:       llvm.cond_br %[[HAS_OUTPUT]], ^[[SUCCESS:bb[0-9]+]], ^[[FAILURE:bb[0-9]+]]
+    // CHECK:       ^[[FAILURE]]:
+    // CHECK:       %[[FAILURE_STATUS:.*]] = llvm.mlir.constant(-1 : i32) : i32
+    // CHECK:       llvm.call @hipdnn_ep_state_record_status(%{{.*}}, %[[FAILURE_STATUS]])
+    // CHECK:       llvm.return
+    // CHECK:       ^[[SUCCESS]]:
     // CHECK:       %[[OUTCAST:.*]] = llvm.addrspacecast %[[OUTRAW]] : !llvm.ptr to !llvm.ptr<1>
     // CHECK:       llvm.insertvalue %[[OUTCAST]], %{{.*}}[1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
     // CHECK:       llvm.call @wrap_miopenActivationForward(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32

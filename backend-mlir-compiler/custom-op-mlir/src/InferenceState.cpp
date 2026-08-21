@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <glog/logging.h>
+#include <stdexcept>
 #include <utility>
 
 // Environment parameters (global scope, before namespace)
@@ -177,14 +178,12 @@ void InferenceState::set_output_allocator(
     const output_allocator_t *allocator) const {
   if (!set_output_allocator_fn_) {
     // Installing an allocator on a DLL that cannot accept it would leave
-    // hip.alloc_output returning null -> guaranteed crash. Fail loudly with an
-    // actionable message instead. Clearing (nullptr) on such a DLL is a no-op.
-    if (allocator) {
-      LOG(FATAL) << "Loaded model.dll does not export "
-                    "hipdnn_ep_set_output_allocator. The DLL is stale; delete "
-                    "%TEMP%/morphizen_mlir_* (or regenerate the EPContext) and "
-                    "rebuild so the linked runtime exports the setter.";
-    }
+    // hip.alloc_output returning null. Clearing on such a DLL remains a no-op.
+    if (allocator)
+      throw std::runtime_error(
+          "Loaded model artifact does not export "
+          "hipdnn_ep_set_output_allocator; regenerate the EPContext and "
+          "rebuild it with the current runtime");
     return;
   }
   if (state_) {

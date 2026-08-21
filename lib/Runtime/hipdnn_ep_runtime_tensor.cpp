@@ -7,6 +7,7 @@
 #include "hipdnn_ep_runtime.h"
 #include "op_profile.h"
 #include "runtime_state_internal.h"
+#include "tensor_buffer_internal.h"
 
 #include <cassert>
 #include <cstdio>
@@ -198,45 +199,17 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
                                    TensorBuffer *out_buffer) {
   check_gcnarch("BEFORE prepare_input");
 
-  // VERIFICATION: Struct sizes
-  RUNTIME_DEBUG_LOG("[Runtime DEBUG] === Struct Size Verification ===\n");
-  RUNTIME_DEBUG_LOG("[Runtime DEBUG] sizeof(TensorBuffer) = %zu\n",
-                    sizeof(TensorBuffer));
-  RUNTIME_DEBUG_LOG("[Runtime DEBUG] offsetof(TensorBuffer, gpu_ptr) = %zu\n",
-                    offsetof(TensorBuffer, gpu_ptr));
-  RUNTIME_DEBUG_LOG("[Runtime DEBUG] offsetof(TensorBuffer, host_ptr) = %zu\n",
-                    offsetof(TensorBuffer, host_ptr));
-  RUNTIME_DEBUG_LOG("[Runtime DEBUG] offsetof(TensorBuffer, shape_ptr) = %zu\n",
-                    offsetof(TensorBuffer, shape_ptr));
-  RUNTIME_DEBUG_LOG("[Runtime DEBUG] offsetof(TensorBuffer, rank) = %zu\n",
-                    offsetof(TensorBuffer, rank));
-  RUNTIME_DEBUG_LOG(
-      "[Runtime DEBUG] offsetof(TensorBuffer, size_bytes) = %zu\n",
-      offsetof(TensorBuffer, size_bytes));
-  RUNTIME_DEBUG_LOG("[Runtime DEBUG] offsetof(TensorBuffer, is_pooled) = %zu\n",
-                    offsetof(TensorBuffer, is_pooled));
-
-  // VERIFICATION: tensor_t struct
-  RUNTIME_DEBUG_LOG("[Runtime DEBUG] sizeof(tensor_t) = %zu\n",
-                    sizeof(tensor_t));
-  RUNTIME_DEBUG_LOG("[Runtime DEBUG] offsetof(tensor_t, data) = %zu\n",
-                    offsetof(tensor_t, data));
-  RUNTIME_DEBUG_LOG("[Runtime DEBUG] offsetof(tensor_t, shape) = %zu\n",
-                    offsetof(tensor_t, shape));
-  RUNTIME_DEBUG_LOG("[Runtime DEBUG] offsetof(tensor_t, rank) = %zu\n",
-                    offsetof(tensor_t, rank));
-
-  // Validate arguments
+  if (!out_buffer) {
+    fprintf(stderr, "hipdnn_ep_tensor_prepare_input: null out_buffer\n");
+    return HIPDNN_EP_ERR_NULL_POINTER;
+  }
+  *out_buffer = {};
   if (!state) {
     fprintf(stderr, "hipdnn_ep_tensor_prepare_input: null state\n");
     return HIPDNN_EP_ERR_NULL_POINTER;
   }
   if (!inputs) {
     fprintf(stderr, "hipdnn_ep_tensor_prepare_input: null inputs\n");
-    return HIPDNN_EP_ERR_NULL_POINTER;
-  }
-  if (!out_buffer) {
-    fprintf(stderr, "hipdnn_ep_tensor_prepare_input: null out_buffer\n");
     return HIPDNN_EP_ERR_NULL_POINTER;
   }
 
@@ -257,37 +230,6 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
 
   // Extract tensor from span
   tensor_t *tensor = &inputs->data[index];
-
-  // DUMP: Raw memory of tensor_t struct
-  RUNTIME_DEBUG_LOG(
-      "[Runtime DEBUG] tensor_t struct memory dump (address=%p):\n",
-      (void *)tensor);
-  auto *bytes = reinterpret_cast<unsigned char *>(tensor);
-  for (size_t i = 0; i < sizeof(tensor_t); i++) {
-    RUNTIME_DEBUG_LOG("  [%02zu] = 0x%02x\n", i, bytes[i]);
-  }
-
-  // DUMP: Field values
-  RUNTIME_DEBUG_LOG("[Runtime DEBUG] tensor->data = %p\n", tensor->data);
-  RUNTIME_DEBUG_LOG("[Runtime DEBUG] tensor->shape = %p\n",
-                    (void *)tensor->shape);
-  RUNTIME_DEBUG_LOG("[Runtime DEBUG] tensor->rank = %zu\n", tensor->rank);
-
-  // Validate field access doesn't corrupt memory (re-read test)
-  void *data_before = tensor->data;
-  int64_t *shape_before = tensor->shape;
-  size_t rank_before = tensor->rank;
-
-  // Re-read and compare
-  if (tensor->data != data_before || tensor->shape != shape_before ||
-      tensor->rank != rank_before) {
-    fprintf(stderr, "[Runtime ERROR] Struct fields changed on re-read!\n");
-    fprintf(stderr, "  data: %p -> %p\n", data_before, tensor->data);
-    fprintf(stderr, "  shape: %p -> %p\n", (void *)shape_before,
-            (void *)tensor->shape);
-    fprintf(stderr, "  rank: %zu -> %zu\n", rank_before, tensor->rank);
-    return HIPDNN_EP_ERR_NULL_POINTER; // Use generic error code
-  }
 
   // Shape must be present (or rank==0 for scalars).
   if (!tensor->shape && tensor->rank != 0) {
@@ -335,7 +277,6 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
     out_buffer->shape_ptr = tensor->shape;
     out_buffer->rank = tensor->rank;
     out_buffer->size_bytes = 0;
-    out_buffer->is_pooled = false;
     out_buffer->is_aliased = false;
     return HIPDNN_EP_SUCCESS;
   }
@@ -461,7 +402,6 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   out_buffer->shape_ptr = tensor->shape;
   out_buffer->rank = tensor->rank;
   out_buffer->size_bytes = size_bytes;
-  out_buffer->is_pooled = false;
   out_buffer->is_aliased = alias_caller_buffer;
 
   check_gcnarch("AFTER prepare_input");
@@ -601,21 +541,16 @@ void hipdnn_ep_tensor_free_input(RuntimeState *state, TensorBuffer *buffer) {
     return;
   }
 
-  // Empty input (size_bytes == 0, e.g. KV cache with past_sequence_length==0
-  // on prefill): no pool allocation was made; nothing to release.
+  // A zero-sized or merely constructed record owns no pool allocation.
   if (buffer->size_bytes == 0) {
-    buffer->gpu_ptr = nullptr;
+    *buffer = {};
     return;
   }
 
-  // Return buffer to pool only if we own it. Aliased buffers are owned by
-  // the caller (e.g. OGA's KV cache OrtValue under path A); freeing them
-  // would corrupt the caller's allocation.
-  if (!buffer->is_aliased) {
+  // Aliased device inputs remain owned by the caller.
+  if (!buffer->is_aliased)
     pool_release(buffer->gpu_ptr, buffer->size_bytes);
-  }
-  buffer->gpu_ptr = nullptr;
-  buffer->is_aliased = false;
+  *buffer = {};
 }
 
 //===----------------------------------------------------------------------===//

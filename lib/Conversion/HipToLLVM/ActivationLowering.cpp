@@ -363,14 +363,14 @@ struct MiopenSoftmaxOpLowering
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
-    Type voidType = getVoidType();
     Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
     Type indexType = getIndexType();
 
     SmallVector<Type> paramTypes = {ptrType,   ptrType,   ptrType,
                                     indexType, indexType, indexType};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kMiopenSoftmax, paramTypes, voidType);
+        rewriter, module, kMiopenSoftmax, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 

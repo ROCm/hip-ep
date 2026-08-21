@@ -276,9 +276,29 @@ struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     MemRefType memRefType = cast<MemRefType>(op.getMemref().getType());
+    auto parentFunc = op->getParentOfType<func::FuncOp>();
+    auto parentLLVMFunc = op->getParentOfType<LLVM::LLVMFuncOp>();
 
     if (!isConvertibleAndHasIdentityMaps(memRefType))
       return rewriter.notifyMatchFailure(op, "incompatible memref type");
+    if (!parentFunc && !parentLLVMFunc)
+      return rewriter.notifyMatchFailure(op, "expected a function parent");
+
+    // A null callback result returns from the graph before any consumer can
+    // dereference it. Precompute the converted failure-return type before
+    // emitting IR so a conversion failure cannot leave a partially split CFG.
+    Type failureReturnType;
+    if (parentFunc && parentFunc.getNumResults() != 0) {
+      failureReturnType =
+          getTypeConverter()->packFunctionResults(parentFunc.getResultTypes());
+      if (!failureReturnType)
+        return rewriter.notifyMatchFailure(
+            op, "could not convert function results");
+    } else if (parentLLVMFunc) {
+      Type resultType = parentLLVMFunc.getFunctionType().getReturnType();
+      if (!isa<LLVM::LLVMVoidType>(resultType))
+        failureReturnType = resultType;
+    }
 
     Type ptrType = getPtrType();
     Type i64Type = rewriter.getI64Type();
@@ -404,7 +424,6 @@ struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
       callbackRank = rank;
     }
 
-    auto parentFunc = op->getParentOfType<func::FuncOp>();
     if (failed(verifyCallbackRankAgainstMetadata(
             module, parentFunc, op.getOutIdx(), callbackRank, loc)))
       return failure();
@@ -439,12 +458,48 @@ struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
         {ptrType, i64Type, ptrType, i64Type, i64Type}, ptrType);
     if (failed(funcOp))
       return failure();
+    FailureOr<LLVM::LLVMFuncOp> recorder = LLVM::lookupOrCreateFn(
+        rewriter, module, kHipRecordStatus, {ptrType, i32Type}, i32Type);
+    if (failed(recorder))
+      return failure();
 
     Value rawPtr =
         LLVM::CallOp::create(rewriter, loc, *funcOp,
                              ValueRange{adaptor.getCtx(), outIdxVal,
                                         shapeAlloca, rankVal, elemSizeVal})
             .getResult();
+
+    // The callback is a noexcept C boundary and reports failure with null.
+    // Split before replacing the op so every downstream use remains in the
+    // success block. The failure block records status and returns a poison
+    // value only to satisfy the internal function ABI; its wrapper discards
+    // graph return descriptors and the generated interface observes status.
+    Value nullPtr = LLVM::ZeroOp::create(rewriter, loc, ptrType);
+    Value hasOutput = LLVM::ICmpOp::create(
+        rewriter, loc, LLVM::ICmpPredicate::ne, rawPtr, nullPtr);
+    Block *allocationBlock = op->getBlock();
+    Block *continuationBlock =
+        rewriter.splitBlock(allocationBlock, Block::iterator(op));
+    Block *failureBlock = rewriter.createBlock(
+        continuationBlock->getParent(), Region::iterator(continuationBlock));
+
+    rewriter.setInsertionPointToEnd(allocationBlock);
+    LLVM::CondBrOp::create(rewriter, loc, hasOutput, continuationBlock,
+                           failureBlock);
+
+    rewriter.setInsertionPointToEnd(failureBlock);
+    Value failureStatus = LLVM::ConstantOp::create(
+        rewriter, loc, i32Type, rewriter.getI32IntegerAttr(-1));
+    LLVM::CallOp::create(rewriter, loc, *recorder,
+                         ValueRange{adaptor.getCtx(), failureStatus});
+    if (failureReturnType) {
+      Value poison = LLVM::PoisonOp::create(rewriter, loc, failureReturnType);
+      LLVM::ReturnOp::create(rewriter, loc, poison);
+    } else {
+      LLVM::ReturnOp::create(rewriter, loc, ValueRange{});
+    }
+
+    rewriter.setInsertionPoint(op);
 
     // The runtime returns a generic (AS 0) pointer; cast to the memref's
     // address space if it differs (mirrors GetConstant / AllocOp).

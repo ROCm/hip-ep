@@ -196,6 +196,10 @@ struct RuntimeState {
   // Allocated in state_init, freed in state_cleanup.
   void *op_profile;
 
+  // First host-observed operation error in the current Compute() call. This
+  // preserves wrapper failures even if queuing the mirrored device flag fails.
+  int host_error_status;
+
   // Device-side error flag used by kernels to report runtime-invalid inputs.
   // 0 = no error, non-zero = error code (currently -1).
   int *device_error_flag;
