@@ -21,6 +21,8 @@
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 
 #include "llvm/ADT/STLExtras.h"
 
@@ -191,6 +193,14 @@ struct ComputeOpBufferization
     if (OpOperand *destination = getDestinationOf(computeOp, resultIndex))
       aliases.addAlias({destination, BufferRelation::Equivalent});
     return aliases;
+  }
+
+  bool bufferizesToAllocation(Operation *op, Value value,
+                              const AnalysisState &) const {
+    // hipsr.compute reuses buffers from its operands; it never allocates.
+    // This allows the analysis to unify equivalence classes between the result
+    // and the aliased input, enabling tensor.empty elimination.
+    return false;
   }
 
   FailureOr<BufferLikeType>
