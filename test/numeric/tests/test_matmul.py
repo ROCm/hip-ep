@@ -40,6 +40,17 @@ def _make_matmul_model(input_shape: list[int], weight_shape: list[int]):
     return make_model_from_nodes([node], [X], [Y], initializers=[w_init])
 
 
+def _make_dynamic_k_matmul_model(
+    a_metadata_shape, b_metadata_shape, output_metadata_shape
+):
+    """Build an input-input MatMul whose ONNX metadata keeps K dynamic."""
+    A = helper.make_tensor_value_info("A", TensorProto.FLOAT16, a_metadata_shape)
+    B = helper.make_tensor_value_info("B", TensorProto.FLOAT16, b_metadata_shape)
+    Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT16, output_metadata_shape)
+    node = helper.make_node("MatMul", ["A", "B"], ["Y"])
+    return make_model_from_nodes([node], [A, B], [Y])
+
+
 class TestMatMul:
     @pytest.mark.parametrize(
         "input_shape,weight_shape",
@@ -60,6 +71,53 @@ class TestMatMul:
             [x],
             reference="cpu",
         )
+        compare_outputs(actual, expected, atol=1e-4)
+
+    @pytest.mark.parametrize(
+        "a_metadata_shape,b_metadata_shape",
+        [
+            ([1, 4, "K"], ["K", 8]),
+            ([1, 4, "K_a"], [16, 8]),
+            ([1, 4, 16], ["K_b", 8]),
+        ],
+    )
+    def test_matmul_dynamic_k_matching(
+        self, model_runner, a_metadata_shape, b_metadata_shape
+    ):
+        """Dynamic and one-sided-dynamic K metadata with matching runtime K."""
+        model = _make_dynamic_k_matmul_model(
+            a_metadata_shape, b_metadata_shape, [1, 4, 8]
+        )
+        rng = np.random.default_rng(43)
+        a = rng.uniform(-1, 1, [1, 4, 16]).astype(np.float16)
+        b = rng.uniform(-1, 1, [16, 8]).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [a, b], reference="cpu")
+        compare_outputs(actual, expected, atol=1e-4)
+
+    def test_matmul_gemma_dynamic_batches(self, model_runner):
+        """Gemma-shaped [?, ?, M, K] operands with matching runtime batches."""
+        model = _make_dynamic_k_matmul_model(
+            ["B0", "B1", 4, "K"],
+            ["B0", "B1", "K", 8],
+            ["B0", "B1", 4, 8],
+        )
+        rng = np.random.default_rng(44)
+        a = rng.uniform(-1, 1, [2, 3, 4, 16]).astype(np.float16)
+        b = rng.uniform(-1, 1, [2, 3, 16, 8]).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [a, b], reference="cpu")
+        compare_outputs(actual, expected, atol=1e-4)
+
+    def test_matmul_gemma_dynamic_batch_unit_broadcast(self, model_runner):
+        """Dynamic [1,1] batch broadcasts over a runtime [2,3] batch."""
+        model = _make_dynamic_k_matmul_model(
+            ["A0", "A1", 4, "K"],
+            ["B0", "B1", "K", 8],
+            ["O0", "O1", 4, 8],
+        )
+        rng = np.random.default_rng(45)
+        a = rng.uniform(-1, 1, [1, 1, 4, 16]).astype(np.float16)
+        b = rng.uniform(-1, 1, [2, 3, 16, 8]).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [a, b], reference="cpu")
         compare_outputs(actual, expected, atol=1e-4)
 
     @pytest.mark.parametrize("seq_len", SEQ_LENS)
