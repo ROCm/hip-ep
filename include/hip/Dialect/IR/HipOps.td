@@ -151,7 +151,8 @@ class Hip_DpsOp_SameShapeBase<string mnemonic, string sourceAccessor,
           [{(), getOperation(), reified);
     }
   }]);
-  code sameShapeClassDefinition = reifyClassDefinition # inferClassDefinition;
+  code sameShapeClassDefinition =
+      reifyDimClassDefinition # reifyClassDefinition # inferClassDefinition;
   let extraClassDefinition = sameShapeClassDefinition;
 }
 
