@@ -392,16 +392,16 @@ func.func @already_grouped(%ctx: !hipsr.context, %a: tensor<?x256xf16, #hipsr.me
 // CHECK-NEXT:      %[[D0_EXTENT:.+]] = shape.get_extent %[[SHAPE]], %[[D0_INDEX]] : !shape.shape, !shape.size -> !shape.size
 // CHECK-NEXT:      %[[D0:.+]] = shape.size_to_index %[[D0_EXTENT]] : !shape.size
 // CHECK-NEXT:      %[[INIT:.+]] = tensor.empty(%[[D0]]) : tensor<?x256xf16, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[OUT:.+]] = hipsr.compute(%[[DCTX]]) ins(%[[DA]] : tensor<?x256xf16, #hipsr.mem<device>>)
-// CHECK-SAME:      outs(%[[INIT]] : tensor<?x256xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT:      %[[CAST:.+]] = hipsr.cast(%[[DCTX]]) ins(%[[DA]] : tensor<?x256xf16, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<?x256xf16, #hipsr.mem<device>>) : tensor<?x256xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      %[[OUT:.+]] = hipsr.compute(%[[DCTX]]) ins(%[[CAST]] : tensor<?x256xf16, #hipsr.mem<device>>)
+// CHECK-SAME:      outs(%[[CAST]] : tensor<?x256xf16, #hipsr.mem<device>>) {
 // CHECK-NEXT:      ^bb0(%[[BCTX:.+]]: !hipsr.context, %[[IN:.+]]: tensor<?x256xf16, #hipsr.mem<device>>,
 // CHECK-SAME:           %[[DEST:.+]]: tensor<?x256xf16, #hipsr.mem<device>>):
 // CHECK-NEXT:        %[[COLLAPSED:.+]] = tensor.collapse_shape %[[IN]] {{\[\[}}0, 1]]
 // CHECK-SAME:            : tensor<?x256xf16, #hipsr.mem<device>> into tensor<?xf16, #hipsr.mem<device>>
 // CHECK-NEXT:        hipsr.compute_yield %[[COLLAPSED]] : tensor<?xf16, #hipsr.mem<device>>
 // CHECK-NEXT:      } : tensor<?xf16, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[RESULT_SHAPE:.+]] = shape.shape_of %[[OUT]] : tensor<?xf16, #hipsr.mem<device>> -> !shape.shape
-// CHECK-NEXT:      hipsr.preserve_shape %[[RESULT_SHAPE]], %[[OUT]] : tensor<?xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      hipsr.preserve_shape %[[SHAPE]], %[[CAST]] : tensor<?x256xf16, #hipsr.mem<device>>
 // CHECK-NEXT:      hipsr.pool_domain_yield %[[OUT]] : tensor<?xf16, #hipsr.mem<device>>
 // CHECK-NEXT:    } -> tensor<?xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
 // CHECK-NEXT:    return %[[DOMAIN]] : tensor<?xf16, #hipsr.mem<device>>
@@ -417,9 +417,12 @@ func.func @compute_consumer(%ctx: !hipsr.context, %a: tensor<?x256xf16, #hipsr.m
     ^bb0(%a_shape: !shape.shape):
       hipsr.shape_yield %a_shape : !shape.shape
     }
-    %out = hipsr.compute(%domain_ctx)
+    %cast = hipsr.cast(%domain_ctx)
         ins(%domain_a : tensor<?x256xf16, #hipsr.mem<device>>)
-        outs(%init : tensor<?x256xf16, #hipsr.mem<device>>) {
+        outs(%init : tensor<?x256xf16, #hipsr.mem<device>>) : tensor<?x256xf16, #hipsr.mem<device>>
+    %out = hipsr.compute(%domain_ctx)
+        ins(%cast : tensor<?x256xf16, #hipsr.mem<device>>)
+        outs(%cast : tensor<?x256xf16, #hipsr.mem<device>>) {
     ^bb0(%body_ctx: !hipsr.context, %in: tensor<?x256xf16, #hipsr.mem<device>>,
          %dest: tensor<?x256xf16, #hipsr.mem<device>>):
       %collapsed = tensor.collapse_shape %in [[0, 1]]
