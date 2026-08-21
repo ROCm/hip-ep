@@ -67,6 +67,24 @@ LogicalResult ConvTransposeOp::reifyResultShapes(
 }
 
 //===----------------------------------------------------------------------===//
+// MultiHeadAttentionOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult MultiHeadAttentionOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() != 1 || !getKey() || !getValue())
+    return failure();
+  FailureOr<SmallVector<OpFoldResult>> shape =
+      mlir::hip::reifyMultiHeadAttentionOutputShape(
+          b, getLoc(), getQuery(), getKey(), getValue(), getNumHeads(),
+          [&]() { return this->emitOpError(); });
+  if (failed(shape))
+    return failure();
+  reifiedReturnShapes.assign({std::move(*shape)});
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // CausalConvWithStateOp
 //===----------------------------------------------------------------------===//
 
@@ -146,6 +164,24 @@ LogicalResult LayerNormOp::reifyResultShapes(
   FailureOr<ReifiedRankedShapedTypeDims> shapes =
       mlir::hip::reifyLayerNormOutputShapes(b, getLoc(), getInput(), getAxis(),
                                             getNumResults());
+  if (failed(shapes))
+    return failure();
+  reifiedReturnShapes = std::move(*shapes);
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// LinearAttentionOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult LinearAttentionOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() != 2)
+    return failure();
+  FailureOr<ReifiedRankedShapedTypeDims> shapes =
+      mlir::hip::reifyLinearAttentionOutputShapes(
+          b, getLoc(), getQuery(), getKey(), getValue(), getQNumHeads(),
+          getKvNumHeads(), [&]() { return this->emitOpError(); });
   if (failed(shapes))
     return failure();
   reifiedReturnShapes = std::move(*shapes);

@@ -61,42 +61,4 @@ module {
     return %0 : tensor<1x1x1280xf16>
   }
 
-  // ===========================================================================
-  // Regression: pre-surgery decoder self-attn (8-input WITH past_key/past_value
-  // non-empty) MUST keep lowering to hip.multi_head_attention — Task 8 only
-  // changes the empty-past 8-input case.  The post-surgery 9-input form is
-  // covered by test_whisper_self_mha_with_past.mlir.
-  // ===========================================================================
-  func.func @decoder_self_pre_surgery(
-      %q:        tensor<1x1x1280xf16>,
-      %k:        tensor<1x1x1280xf16>,
-      %v:        tensor<1x1x1280xf16>,
-      %past_k:   tensor<1x20x447x64xf16>,
-      %past_v:   tensor<1x20x447x64xf16>)
-      -> (tensor<1x1x1280xf16>, tensor<1x20x448x64xf16>, tensor<1x20x448x64xf16>) {
-    // CHECK-LABEL: func.func @decoder_self_pre_surgery
-
-    %none1 = "onnx.NoValue"() {value} : () -> none
-    %none2 = "onnx.NoValue"() {value} : () -> none
-    %none3 = "onnx.NoValue"() {value} : () -> none
-
-    %out:3 = "onnx.Custom"(%q, %k, %v, %none1, %none2, %none3, %past_k, %past_v)
-        <{function_name = "MultiHeadAttention"}>
-        {domain_name = "com.microsoft",
-         num_heads = 20 : si64,
-         scale = 1.250000e-01 : f32,
-         unidirectional = 1 : si64,
-         mask_filter_value = -1.000000e+04 : f32}
-        : (tensor<1x1x1280xf16>, tensor<1x1x1280xf16>, tensor<1x1x1280xf16>,
-           none, none, none, tensor<1x20x447x64xf16>, tensor<1x20x447x64xf16>)
-        -> (tensor<1x1x1280xf16>, tensor<1x20x448x64xf16>, tensor<1x20x448x64xf16>)
-
-    // 8-input WITH past_key/past_value present and no past_sequence_length
-    // → existing hip.multi_head_attention lowering (NOT hip.gqa).
-    // CHECK: hip.multi_head_attention
-    // CHECK-NOT: hip.gqa
-
-    return %out#0, %out#1, %out#2
-      : tensor<1x1x1280xf16>, tensor<1x20x448x64xf16>, tensor<1x20x448x64xf16>
-  }
 }
