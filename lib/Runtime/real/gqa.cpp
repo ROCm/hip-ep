@@ -225,12 +225,21 @@ static inline int kv_dtype_abi(KvCacheFormat f) {
 // plain copy. Only the causal concat/append tail honours it (the no_causal
 // Whisper branches are fp16/fp32-only), so the format decision lives here
 // rather than in a separate helper or at each call site.
+//
+// copy_lo bounds the separate-buffer concat from below: past positions
+// [0, copy_lo) are not copied into present and are left whatever the allocator
+// held. It exists for the one caller that can prove it will not read them back
+// -- a sliding-window layer at decode passes the same lower bound it scores
+// from -- and must be 0 for everyone else. It is required rather than defaulted
+// so that a new call site has to say which it is. The append branches ignore
+// it: they only ever write the new tokens, and an in-place cache has no prefix
+// to copy in the first place.
 static int update_kv_cache(hipStream_t stream, const void *past_key,
                            const void *past_value, const void *new_key,
                            const void *new_value, void *present_key,
                            void *present_value, int B, int past_len, int sq,
                            int G, int d, int past_buf_seq, int present_seq,
-                           const void *seqlens_k_ptr, int elem_sz,
+                           const void *seqlens_k_ptr, int elem_sz, int copy_lo,
                            bool no_causal = false, int skv = -1,
                            KvCacheFormat kv_format = KvCacheFormat::Fp16,
                            const void *k_scale = nullptr,
@@ -285,11 +294,11 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
     // Separate-buffer concat: needs host-side past_len for stride computation.
     if (hip_gqa_kv_cache_concat(stream, past_key, new_key, present_key, B,
                                 past_len, sq, G, d, past_buf_seq, present_seq,
-                                elem_sz, kv_dtype, k_sc) != 0)
+                                elem_sz, kv_dtype, k_sc, copy_lo) != 0)
       return -1;
     if (hip_gqa_kv_cache_concat(stream, past_value, new_value, present_value, B,
                                 past_len, sq, G, d, past_buf_seq, present_seq,
-                                elem_sz, kv_dtype, v_sc) != 0)
+                                elem_sz, kv_dtype, v_sc, copy_lo) != 0)
       return -1;
   } else {
     // In-place append: kernel can read past_len from device via seqlens_k_ptr.
@@ -455,13 +464,22 @@ static int gqa_forward_fused(
     // Append the new token to the KV cache. Quantized cache:
     // quantize-and-append with the static per-channel scale; fp16 cache: plain
     // append. update_kv_cache dispatches on kv_format internally.
+    //
+    // copy_lo stays 0 here even though this path knows its window. Narrowing
+    // the concat needs a separate growing present buffer, and this path never
+    // gets one: seq_len_kv reaches the runtime as the present_key memref's
+    // sequence dim, which for a GroupQueryAttention export with a growing cache
+    // arrives one short of the declared present, and the seqlens_k check above
+    // then rejects the call before it can reach the concat. When the cache is
+    // instead in-place there is no prefix to copy and update_kv_cache appends.
+    // So a bound here would be unreachable, and therefore untestable, code.
     if (update_kv_cache(
             stream, past_key, past_value, kSrc, vSrc, present_key,
             present_value, static_cast<int>(B), static_cast<int>(past_len),
             static_cast<int>(sq), static_cast<int>(G), static_cast<int>(d),
             static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
-            seqlens_k_ptr, static_cast<int>(elem_sz), /*no_causal=*/false,
-            /*skv=*/-1, kv_format, k_scale, v_scale) != 0)
+            seqlens_k_ptr, static_cast<int>(elem_sz), /*copy_lo=*/0,
+            /*no_causal=*/false, /*skv=*/-1, kv_format, k_scale, v_scale) != 0)
       return -1;
 
     {
@@ -619,8 +637,8 @@ static int gqa_forward_fused(
             present_value, static_cast<int>(B), static_cast<int>(past_len),
             static_cast<int>(sq), static_cast<int>(G), static_cast<int>(d),
             static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
-            seqlens_k_ptr, static_cast<int>(elem_sz), /*no_causal=*/false,
-            /*skv=*/-1, kv_format, k_scale, v_scale) != 0)
+            seqlens_k_ptr, static_cast<int>(elem_sz), /*copy_lo=*/0,
+            /*no_causal=*/false, /*skv=*/-1, kv_format, k_scale, v_scale) != 0)
       return -1;
   }
 
@@ -1273,7 +1291,7 @@ static int gqa_forward_hipblaslt(
             present_value, static_cast<int>(B), static_cast<int>(past_len),
             static_cast<int>(sq), static_cast<int>(G), static_cast<int>(d),
             static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
-            seqlens_k_ptr, static_cast<int>(elem_sz)) != 0)
+            seqlens_k_ptr, static_cast<int>(elem_sz), /*copy_lo=*/0) != 0)
       return -1;
 
     // hip_gqa_flash_decode owns every geometry it templates; this fallback
@@ -1814,14 +1832,30 @@ static int gqa_forward_hipblaslt(
       // seqlens_k to the append kernel (it would apply the +1 convention).
       // ONNX Attention with is_causal=0 + external mask keeps the standard
       // decode KV path (bidirectional_no_past=false).
+      //
+      // copy_lo is kv_lo, deliberately the identical value and not a separately
+      // derived one: the bytes this skips writing are then exactly the bytes
+      // the Score and Value GEMMs below skip reading, so the narrowing cannot
+      // be half-applied. That equality is the whole safety argument, and it is
+      // why this needs no gate of its own -- kv_lo is already 0 for prefill,
+      // for the expand flavour and whenever no window applies.
+      //
+      // It holds across steps as well as within one: this step writes
+      // [kv_lo, total_seq) and the next step reads from kv_lo + 1 (the window
+      // slides by exactly the one token it appends), so every step's read range
+      // is a subset of the previous step's written range.
+      //
+      // Only the separate-buffer concat can skip anything. When the cache is
+      // in-place (past_key == present_key) the prefix is already there and
+      // update_kv_cache appends, ignoring this.
       HIP_CHECK(update_kv_cache(
           stream, past_key, past_value, kSrc, vSrc, present_key, present_value,
           static_cast<int>(B), static_cast<int>(past_len), static_cast<int>(sq),
           static_cast<int>(G), static_cast<int>(d),
           static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
           (use_no_expand && !bidirectional_no_past) ? seqlens_k_ptr : nullptr,
-          static_cast<int>(elem_sz), bidirectional_no_past,
-          static_cast<int>(skv)));
+          static_cast<int>(elem_sz), static_cast<int>(kv_lo),
+          bidirectional_no_past, static_cast<int>(skv)));
     }
 
     // ---- Steps 6-7: KV Expand [B*G,present_seq,d] -> [B*H,total_seq,d] ----
@@ -1980,14 +2014,24 @@ static int gqa_forward_hipblaslt(
           static_cast<int>(elem_sz)));
     }
 
+    // kv_inplace and the three sequence lengths are here because they decide
+    // whether any of this narrowing does anything: the copy can only be skipped
+    // on the separate-buffer branch, which is exactly kv_inplace=0, and that in
+    // turn is visible only as present_seq differing from past_buf_seq. A model
+    // exporting its cache in place takes the append branch and the copy_lo
+    // below is inert, which is otherwise indistinguishable from the narrowing
+    // failing to engage.
     RUNTIME_DEBUG_LOG(
         "[REAL] GQA hipBLASLt: B=%lld sq=%lld sq_chunk=%lld total_seq=%lld "
         "kv_lo=%lld kv_span=%lld H=%lld G=%lld d=%lld no_expand=%d "
-        "transpose=%d\n",
+        "transpose=%d kv_inplace=%d past_len=%lld past_buf_seq=%lld "
+        "present_seq=%lld\n",
         (long long)B, (long long)sq, (long long)sq_chunk, (long long)total_seq,
         (long long)kv_lo, (long long)kv_span, (long long)H, (long long)G,
         (long long)d, static_cast<int>(use_no_expand),
-        static_cast<int>(need_transpose));
+        static_cast<int>(need_transpose),
+        static_cast<int>(past_key != nullptr && past_key == present_key),
+        (long long)past_len, (long long)past_buf_seq, (long long)present_seq);
   }
 
 cleanup:

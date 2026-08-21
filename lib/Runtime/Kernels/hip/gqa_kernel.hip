@@ -427,6 +427,11 @@ __global__ void kv_cache_append_vec_kernel(
 // Performs both the strided past copy and the BSHD->BNSD new-token transpose
 // in a single kernel launch, avoiding host-side loop overhead.
 // Thread: one per (b, s_present, g, d_i) element. blockIdx.y = batch.
+//
+// s_lo is the first present position written; [0, s_lo) is left untouched, for
+// a caller that will not read it back (a sliding-window layer at decode). The
+// grid is sized to (total_seq - s_lo) so the skipped positions cost no threads,
+// which is the entire point -- the indices below stay absolute in s.
 // -------------------------------------------------------------------------
 
 template <typename T>
@@ -435,17 +440,17 @@ __global__ void kv_cache_concat_kernel(
     const T* __restrict__ current,
     T* __restrict__ present,
     int past_len, int sq, int G, int d,
-    int past_seq, int present_seq) {
+    int past_seq, int present_seq, int s_lo) {
   const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   int total_seq = past_len + sq;
-  int total_per_batch = total_seq * G * d;
+  int total_per_batch = (total_seq - s_lo) * G * d;
   if (idx >= total_per_batch) return;
 
   int di = idx % d;
   int remaining = idx / d;
   int g = remaining % G;
-  int s = remaining / G;
+  int s = s_lo + remaining / G;
 
   int dst_idx = ((batch_idx * G + g) * present_seq + s) * d + di;
 
@@ -468,18 +473,18 @@ __global__ void kv_cache_concat_vec_kernel(
     const T* __restrict__ current,
     T* __restrict__ present,
     int past_len, int sq, int G, int d,
-    int past_seq, int present_seq) {
+    int past_seq, int present_seq, int s_lo) {
   const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   const int dv = d / VEC;
   int total_seq = past_len + sq;
-  int total_per_batch = total_seq * G * dv;
+  int total_per_batch = (total_seq - s_lo) * G * dv;
   if (idx >= total_per_batch) return;
 
   int dvi = idx % dv;
   int remaining = idx / dv;
   int g = remaining % G;
-  int s = remaining / G;
+  int s = s_lo + remaining / G;
 
   int dst_idx = ((batch_idx * G + g) * present_seq + s) * d + dvi * VEC;
 
@@ -538,15 +543,16 @@ __global__ void kv_cache_concat_quant_i8_kernel(
     const _Float16* __restrict__ current, // BSHD fp16 [B, sq, G, d]
     int8_t* __restrict__ present,         // BNSD int8 [B, G, present_seq, d]
     const float* __restrict__ scale,      // [G, d]
-    int past_len, int sq, int G, int d, int past_seq, int present_seq) {
+    int past_len, int sq, int G, int d, int past_seq, int present_seq,
+    int s_lo) {
   const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   int total_seq = past_len + sq;
-  if (idx >= total_seq * G * d) return;
+  if (idx >= (total_seq - s_lo) * G * d) return;
   int di = idx % d;
   int r = idx / d;
   int g = r % G;
-  int s = r / G;
+  int s = s_lo + r / G;
   int dst_idx = ((batch_idx * G + g) * present_seq + s) * d + di;
   if (s < past_len) {
     present[dst_idx] = past[((batch_idx * G + g) * past_seq + s) * d + di];
@@ -852,25 +858,27 @@ template <typename T>
 static void launch_kv_cache_concat(
     hipStream_t stream, const void* past, const void* current, void* present,
     int batch_size, int past_len, int sq, int G, int d,
-    int past_seq, int present_seq) {
+    int past_seq, int present_seq, int s_lo) {
   int total_seq = past_len + sq;
   constexpr int VEC = 16 / sizeof(T);
   if ((d % VEC) == 0 && kv_is_16b_aligned(past) && kv_is_16b_aligned(current) &&
       kv_is_16b_aligned(present)) {
-    int total = total_seq * G * (d / VEC);
+    int total = (total_seq - s_lo) * G * (d / VEC);
     int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
     kv_cache_concat_vec_kernel<T, VEC><<<dim3(blocks, batch_size), GQA_THREADS,
                                          0, stream>>>(
         static_cast<const T*>(past), static_cast<const T*>(current),
-        static_cast<T*>(present), past_len, sq, G, d, past_seq, present_seq);
+        static_cast<T*>(present), past_len, sq, G, d, past_seq, present_seq,
+        s_lo);
     return;
   }
-  int total = total_seq * G * d;
+  int total = (total_seq - s_lo) * G * d;
   int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
   kv_cache_concat_kernel<T><<<dim3(blocks, batch_size), GQA_THREADS, 0,
                               stream>>>(
       static_cast<const T*>(past), static_cast<const T*>(current),
-      static_cast<T*>(present), past_len, sq, G, d, past_seq, present_seq);
+      static_cast<T*>(present), past_len, sq, G, d, past_seq, present_seq,
+      s_lo);
 }
 
 template <typename T>
@@ -958,19 +966,27 @@ extern "C" int hip_gqa_kv_cache_append(
 
 // Step 4-5: KV cache concat (separate-buffer). `kv_dtype` selects the format, as
 // in hip_gqa_kv_cache_append (FP16 -> plain copy, INT8 -> INT8 quant).
+//
+// s_lo skips the past prefix below it. It is clamped to [0, past_len] here, once
+// for all three kernels: past_len is the hard ceiling because [past_len,
+// total_seq) is the new tokens, which are the one thing this call must never
+// drop. A caller asking for more than that is asking for silent data loss, so
+// the boundary refuses rather than obeys.
 extern "C" int hip_gqa_kv_cache_concat(
     void* stream_ptr, const void* past, const void* current, void* present,
     int batch_size, int past_len, int sq, int G, int d,
     int past_seq, int present_seq, int element_size_bytes,
-    int kv_dtype, const void* scale) {
+    int kv_dtype, const void* scale, int s_lo) {
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  if (s_lo < 0) s_lo = 0;
+  if (s_lo > past_len) s_lo = past_len;
   if (kv_dtype == HIP_KV_DTYPE_INT8) {
     if (scale == nullptr) {
       fprintf(stderr, "hip_gqa_kv_cache_concat: INT8 requires scale\n");
       return -1;
     }
     int total_seq = past_len + sq;
-    int total = total_seq * G * d;
+    int total = (total_seq - s_lo) * G * d;
     int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
     (void)hipGetLastError();
     kv_cache_concat_quant_i8_kernel<<<dim3(blocks, batch_size), GQA_THREADS, 0,
@@ -978,7 +994,7 @@ extern "C" int hip_gqa_kv_cache_concat(
         static_cast<const int8_t*>(past),
         static_cast<const _Float16*>(current), static_cast<int8_t*>(present),
         static_cast<const float*>(scale), past_len, sq, G, d, past_seq,
-        present_seq);
+        present_seq, s_lo);
     GQA_RETURN_LAUNCH_STATUS();
   }
   if (kv_dtype != HIP_KV_DTYPE_FP16) {
@@ -988,7 +1004,7 @@ extern "C" int hip_gqa_kv_cache_concat(
   }
   GQA_DISPATCH_BY_ELEM_SIZE(element_size_bytes, launch_kv_cache_concat, stream,
                             past, current, present, batch_size, past_len, sq, G,
-                            d, past_seq, present_seq);
+                            d, past_seq, present_seq, s_lo);
   GQA_RETURN_LAUNCH_STATUS();
 }
 
