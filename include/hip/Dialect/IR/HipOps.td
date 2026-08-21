@@ -605,10 +605,7 @@ def Hip_ConvOp :
     Performs 2D convolution using MIOpen (miopenConvolutionForward).
 
     Uses destination-passing style: output buffer is provided as argument,
-    operation writes result in-place. `shape_valid` is the combined runtime
-    range check for dynamic spatial extents; false means the destination was
-    safely clamped to zero and runtime dispatch must be skipped with a
-    recoverable inference error.
+    and the operation writes the result in-place.
 
     Attributes:
     - kernel_shape: Array of kernel dimensions [H, W]
@@ -619,7 +616,7 @@ def Hip_ConvOp :
 
     Example:
     ```mlir
-    hip.conv(%ctx) valid(%shape_valid) ins(%input, %weights, %bias :
+    hip.conv(%ctx) ins(%input, %weights, %bias :
                        memref<1x3x224x224xf32, 1>,
                        memref<64x3x3x3xf32, 1>,
                        memref<64xf32, 1>)
@@ -631,7 +628,6 @@ def Hip_ConvOp :
 
   let arguments = (ins
     Hip_ContextType:$ctx,
-    I1:$shape_valid,
     Hip_TensorOrMemRef:$input,
     Hip_TensorOrMemRef:$weights,
     Optional<Hip_TensorOrMemRef>:$bias,
@@ -644,8 +640,7 @@ def Hip_ConvOp :
   );
 
   let assemblyFormat = [{
-    `(` $ctx `)` `valid` `(` $shape_valid `)` `ins`
-    `(` $input `,` $weights (`,` $bias^)? `:`
+    `(` $ctx `)` `ins` `(` $input `,` $weights (`,` $bias^)? `:`
     type($input) `,` type($weights) (`,` type($bias)^)? `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^ )?

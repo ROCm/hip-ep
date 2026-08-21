@@ -24,7 +24,7 @@ func.func @reify_dynamic_spatial(
     %input: tensor<?x4x?x?xf32>,
     %weights: tensor<8x2x3x5xf32>,
     %init: tensor<?x8x?x?xf32>) -> (index, index, index) {
-  %result = hip.conv(%ctx) valid(%valid)
+  %result = hip.conv(%ctx)
     ins(%input, %weights : tensor<?x4x?x?xf32>, tensor<8x2x3x5xf32>)
     outs(%init : tensor<?x8x?x?xf32>)
     {kernel_shape = [3, 5], strides = [2, 3],

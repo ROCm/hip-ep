@@ -133,11 +133,10 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   // Derive the original-rank destination before rank-3 Conv is promoted to
   // NC1L. This is the same helper used by hip.conv reification and its static
   // verifier, so converter allocation and shape consumers cannot drift.
-  mlir::Value shapeValid;
   mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> resultShape =
-      mlir::hip::reifyConvResultShape(
-          rewriter, loc, input, weights, kernelShape, strides, pads, dilations,
-          group, [&]() { return op->emitError(); }, &shapeValid);
+      mlir::hip::reifyConvResultShape(rewriter, loc, input, weights,
+                                      kernelShape, strides, pads, dilations,
+                                      group, [&]() { return op->emitError(); });
   if (mlir::failed(resultShape))
     return mlir::failure();
 
@@ -252,10 +251,8 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
                                                init, reassoc1d, outShape);
   }
 
-  // Build operands vector: context, shape-valid guard, input, weights, [bias],
-  // init.
-  llvm::SmallVector<mlir::Value> operands = {context, shapeValid, input,
-                                             weights};
+  // Build operands vector: context, input, weights, [bias], init.
+  llvm::SmallVector<mlir::Value> operands = {context, input, weights};
   if (bias)
     operands.push_back(bias);
   operands.push_back(init);
