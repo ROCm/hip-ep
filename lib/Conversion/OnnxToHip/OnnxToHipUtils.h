@@ -366,6 +366,8 @@ void populateNotConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateCosConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
+void populateErfConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
 void populateSinConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateCeilConversionPatterns(RewritePatternSet &patterns,

@@ -1742,6 +1742,18 @@ void CosOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// ErfOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ErfOp::getDpsInitsMutable() { return getYMutable(); }
+
+void ErfOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // SinOp: ins(x), outs(y)
 //===----------------------------------------------------------------------===//
 

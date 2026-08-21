@@ -42,6 +42,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Or | Custom HIP kernel |
 | Abs | Custom HIP kernel |
 | Cos | Custom HIP kernel |
+| Erf | Custom HIP kernel |
 | Sin | Custom HIP kernel |
 | Div | Custom HIP kernel |
 | Mod | Custom HIP kernel |

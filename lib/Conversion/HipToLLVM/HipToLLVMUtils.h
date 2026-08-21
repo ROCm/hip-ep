@@ -109,6 +109,7 @@ inline constexpr const char *kWrapAbs = "wrap_abs";
 inline constexpr const char *kWrapNeg = "wrap_neg";
 inline constexpr const char *kWrapNot = "wrap_not";
 inline constexpr const char *kWrapCos = "wrap_cos";
+inline constexpr const char *kWrapErf = "wrap_erf";
 inline constexpr const char *kWrapSin = "wrap_sin";
 inline constexpr const char *kWrapCeil = "wrap_ceil";
 inline constexpr const char *kWrapExp = "wrap_exp";
