@@ -17,8 +17,8 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | MatMul | hipBLASLt |
 | Gemm | hipBLASLt |
 | Transpose | Custom HIP kernel |
-| Mul | Custom HIP broadcast kernel through rank 4; static rank 5–6 when broadcast-safe packing to rank ≤ 4 is possible |
-| Add | Custom HIP broadcast kernel through rank 4; MIOpen fallback through rank 4; static rank 5–6 when broadcast-safe packing to rank ≤ 4 is possible |
+| Mul | MIOpen |
+| Add | MIOpen |
 | Softmax | Custom HIP kernel |
 | Sigmoid | MIOpen |
 | Tanh | MIOpen |
@@ -31,7 +31,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Exp | Custom HIP kernel |
 | Log | Custom HIP kernel |
 | Pow | Decomposed to Mul / Sqrt / Reciprocal for supported constant scalar exponents |
-| Sub | Custom HIP kernel through rank 4; static rank 5–6 when broadcast-safe packing to rank ≤ 4 is possible |
+| Sub | Custom HIP kernel |
 | Cast | Custom HIP kernel |
 | CastLike | Simplified to Cast |
 | Ceil | Custom HIP kernel |
@@ -43,12 +43,12 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Abs | Custom HIP kernel |
 | Cos | Custom HIP kernel |
 | Sin | Custom HIP kernel |
-| Div | Custom HIP kernel through rank 4; static rank 5–6 when broadcast-safe packing to rank ≤ 4 is possible |
+| Div | Custom HIP kernel |
 | Mod | Custom HIP kernel |
 | Sign | Custom HIP kernel |
 | Where | Custom HIP kernel |
-| Less | Custom HIP kernel through rank 4; static rank 5–6 when broadcast-safe packing to rank ≤ 4 is possible |
-| Greater | Decomposed to `Less(B, A)`; static rank 5–6 when broadcast-safe packing to rank ≤ 4 is possible |
+| Less | Custom HIP kernel |
+| Greater | Decomposed to `Less(B, A)` |
 | GreaterOrEqual | Decomposed to `Not(Less(A, B))` |
 | LessOrEqual | Decomposed to `Not(Less(B, A))` |
 | Min | MIOpen |
@@ -100,14 +100,6 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | GlobalAveragePool | Custom HIP kernel |
 | GlobalMaxPool | Custom HIP kernel |
 | GlobalLpPool | Custom HIP kernel |
-
-For rank-5/6 Add, Sub, Mul, Div, Less, and Greater, the frontend packs static
-shapes by right-aligning the operands and collapsing contiguous axes only when
-each operand is either fully broadcast across the group or matches the complete
-output group. If packing cannot preserve per-axis ONNX broadcasting in four or
-fewer groups—or the shape is dynamic—the frontend preserves the rank-5/6 HIP
-operation for a backend with native high-rank support. The current HIP-to-LLVM
-backend rejects such unpacked operations.
 
 ## Control flow
 
