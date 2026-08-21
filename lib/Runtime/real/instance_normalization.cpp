@@ -30,9 +30,10 @@ static int hipdnn_ep_to_hip_dtype_instance_norm(int64_t data_type) {
   }
 }
 
-HIPDNN_EP_RT_EXPORT int wrap_instance_normalization(
-    RuntimeState *state, void *input, void *scale, void *bias, void *output,
-    int64_t n, int64_t c, int64_t spatial, int64_t data_type, float epsilon) {
+HIPDNN_EP_RT_EXPORT int
+wrap_instance_normalization(RuntimeState *state, void *input, void *scale,
+                            void *bias, void *output, int64_t n, int64_t c,
+                            int64_t spatial, int64_t data_type, float epsilon) {
   OP_PROFILE(
       "instancenorm",
       [&] {
@@ -44,7 +45,8 @@ HIPDNN_EP_RT_EXPORT int wrap_instance_normalization(
       state);
 
   if (!state || !input || !scale || !bias || !output) {
-    RUNTIME_DEBUG_LOG("[REAL] wrap_instance_normalization: null required arg\n");
+    RUNTIME_DEBUG_LOG(
+        "[REAL] wrap_instance_normalization: null required arg\n");
     return -1;
   }
   if (n <= 0 || c <= 0 || spatial <= 0) {

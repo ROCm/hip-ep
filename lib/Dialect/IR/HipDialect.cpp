@@ -803,8 +803,7 @@ LogicalResult InstanceNormOp::verify() {
     return emitOpError("expected 1-D scale of length C, got rank ")
            << *scaleRank;
   if (biasRank && *biasRank != 1)
-    return emitOpError("expected 1-D bias of length C, got rank ")
-           << *biasRank;
+    return emitOpError("expected 1-D bias of length C, got rank ") << *biasRank;
   return success();
 }
 

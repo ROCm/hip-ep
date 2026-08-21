@@ -702,10 +702,9 @@ InstanceNormToHip::matchAndRewrite(mlir::Operation *op,
 
 void populateNormConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx) {
-  patterns
-      .add<SimplifiedLayerNormToHip, RMSNormalizationToHip,
-           SkipSimplifiedLayerNormToHip, SkipLayerNormToHip, LayerNormToHip,
-           InstanceNormToHip>(ctx);
+  patterns.add<SimplifiedLayerNormToHip, RMSNormalizationToHip,
+               SkipSimplifiedLayerNormToHip, SkipLayerNormToHip, LayerNormToHip,
+               InstanceNormToHip>(ctx);
 }
 
 } // namespace hip

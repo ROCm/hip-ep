@@ -333,10 +333,8 @@ struct InstanceNormOpLowering : public ConvertOpToLLVMPattern<InstanceNormOp> {
       return rewriter.notifyMatchFailure(
           op, "hip.instance_norm requires input rank >= 3");
 
-    Value n =
-        getMemRefDimSize(inputType, 0, adaptor.getInput(), rewriter, loc);
-    Value c =
-        getMemRefDimSize(inputType, 1, adaptor.getInput(), rewriter, loc);
+    Value n = getMemRefDimSize(inputType, 0, adaptor.getInput(), rewriter, loc);
+    Value c = getMemRefDimSize(inputType, 1, adaptor.getInput(), rewriter, loc);
     Value spatial = LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                              rewriter.getI64IntegerAttr(1));
     for (int64_t dimIdx = 2, rank = inputType.getRank(); dimIdx < rank;
@@ -370,8 +368,8 @@ struct InstanceNormOpLowering : public ConvertOpToLLVMPattern<InstanceNormOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {statePtr,  inputPtr,     scalePtr,    biasPtr,
-                               outputPtr, n,            c,           spatial,
+    SmallVector<Value> args = {statePtr,    inputPtr,  scalePtr, biasPtr,
+                               outputPtr,   n,         c,        spatial,
                                dataTypeVal, epsilonVal};
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
