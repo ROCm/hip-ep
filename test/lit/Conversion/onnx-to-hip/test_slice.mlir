@@ -175,10 +175,12 @@ module {
         : (tensor<?x?xi64>, tensor<1xi64>, tensor<1xi64>,
            tensor<1xi64>) -> tensor<?x?xi64>
 
-    // `starts` resolves through the already-lowered shape arithmetic
-    // (hip.sub of two from_elements) to an index-domain subi of the two dims,
-    // and the extent is the clamped end minus the clamped start. Dim 0, which
-    // axes does not touch, still forwards the data dim.
+    // SliceToHip fires before the operands are rewritten, so `starts` resolves
+    // through the ONNX spelling (onnx.Sub of two onnx.Shape) and the walker
+    // emits the tensor.dim / arith.subi below itself. That is also the order
+    // Gemma-4 takes in the real pipeline, so this is the production path; test
+    // 10 covers the post-conversion spelling, which the same walk accepts
+    // because the greedy driver does not guarantee either order.
     // CHECK: %[[D0:.*]] = tensor.dim %arg1, %{{.*}} : tensor<?x?xi64>
     // CHECK: %[[D1:.*]] = tensor.dim %arg1, %{{.*}} : tensor<?x?xi64>
     // CHECK: arith.subi %{{.*}}, %{{.*}} : index
@@ -208,5 +210,51 @@ module {
     // CHECK: tensor.empty(%[[DIM]]) : tensor<?xi64>
     // CHECK: hip.slice
     return %r : tensor<?xi64>
+  }
+
+  // Test 10: the same idiom already rewritten into the post-conversion
+  // spelling, which is the other order the greedy driver may produce and which
+  // test 8 therefore does not reach. Feeding it pre-lowered pins that branch of
+  // the walk: `from_elements(index_cast(tensor.dim))` for the shapes and
+  // hip.sub for the arithmetic, with the index_cast unwrapped rather than cast
+  // a second time. Without a test here, an ordering change elsewhere would
+  // silently drop back to the data-dim upper bound and nothing would fail.
+  func.func @test_slice_native_lowered_shape_sub_extent(
+      %ctx: !hip.context, %data: tensor<?x?xi64>, %ids: tensor<?x?xi64>,
+      %attn: tensor<?x?xi64>) -> tensor<?x?xi64> {
+    // CHECK-LABEL: func.func @test_slice_native_lowered_shape_sub_extent
+    %c1 = arith.constant 1 : index
+    %axes = arith.constant dense<[1]> : tensor<1xi64>
+
+    %ids_dim = tensor.dim %ids, %c1 : tensor<?x?xi64>
+    %ids_i64 = arith.index_cast %ids_dim : index to i64
+    %ids_len = tensor.from_elements %ids_i64 : tensor<1xi64>
+
+    %attn_dim = tensor.dim %attn, %c1 : tensor<?x?xi64>
+    %attn_i64 = arith.index_cast %attn_dim : index to i64
+    %attn_len = tensor.from_elements %attn_i64 : tensor<1xi64>
+
+    %sub_init = tensor.empty() : tensor<1xi64>
+    %starts = hip.sub(%ctx) ins(%attn_len, %ids_len : tensor<1xi64>,
+        tensor<1xi64>) outs(%sub_init : tensor<1xi64>) : tensor<1xi64>
+
+    %r = "onnx.Slice"(%data, %starts, %attn_len, %axes)
+        : (tensor<?x?xi64>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>) -> tensor<?x?xi64>
+
+    // The bounds resolve to the two dims the from_elements were packed from,
+    // with the index_cast unwrapped, so `starts` is an index-domain subi of
+    // them; the extent is then the clamped end minus the clamped start, not the
+    // data dim.
+    // CHECK: %[[D0:.*]] = tensor.dim %arg1, %{{.*}} : tensor<?x?xi64>
+    // CHECK: %[[D1:.*]] = tensor.dim %arg1, %{{.*}} : tensor<?x?xi64>
+    // CHECK: arith.subi %{{.*}}, %{{.*}} : index
+    // CHECK: %[[LO:.*]] = arith.minsi %{{.*}}, %[[D1]] : index
+    // CHECK: %[[HI:.*]] = arith.minsi %{{.*}}, %[[D1]] : index
+    // CHECK: %[[LEN:.*]] = arith.subi %[[HI]], %[[LO]] : index
+    // CHECK: %[[EXT:.*]] = arith.maxsi %[[LEN]], %{{.*}} : index
+    // CHECK: tensor.empty(%[[D0]], %[[EXT]]) : tensor<?x?xi64>
+    // CHECK: hip.slice
+    return %r : tensor<?x?xi64>
   }
 }

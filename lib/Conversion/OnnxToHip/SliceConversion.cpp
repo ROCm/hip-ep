@@ -32,10 +32,12 @@ namespace {
 //     at compile time.
 //
 //   * SliceToHip (benefit=1) — fallback for non-constant indices or negative
-//     steps. Produces a native `hip.slice` DPS op whose runtime function is
-//     a stub today (throws); models that hit this path are unsupported until
-//     the runtime is implemented, but the conversion / bufferization pipeline
-//     can still verify and link the IR. Dynamic output dims are computed from
+//     steps. Produces a native `hip.slice` DPS op, executed by `wrap_slice` in
+//     Runtime/real/slice.cpp since #284 (this comment claimed a throwing stub
+//     long after that landed). Worth knowing when reading the extent logic
+//     below: that runtime D2Hs starts/ends/axes/steps and synchronizes the
+//     stream on every call, so this op already costs a host sync per
+//     execution. Dynamic output dims are computed from
 //     the slice bounds when those are host-resolvable, and otherwise fall back
 //     to `tensor.dim` on `data` (an upper bound — Slice cannot widen any axis).
 //
@@ -147,13 +149,24 @@ static constexpr int kHostIndexMaxDepth = 8;
 /// pattern and the ones rewriting the producers: `onnx.Shape` may still be
 /// present, or may already be
 /// `tensor.from_elements(arith.index_cast(tensor.dim))`, and `onnx.Sub` may
-/// already be `hip.sub`.
+/// already be `hip.sub`. On Gemma-4 26B-A4B it is in practice the ONNX
+/// spelling that arrives here, this pattern running first; the post-conversion
+/// spelling is covered by test 10 in test_slice.mlir rather than by a model,
+/// since nothing pins the order and losing either branch silently costs the
+/// extent.
 static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
                                     mlir::Value v, int64_t idx, int depth) {
-  if (!v || depth > kHostIndexMaxDepth)
+  if (!v || idx < 0 || depth > kHostIndexMaxDepth)
     return {};
   auto vType = mlir::dyn_cast<mlir::RankedTensorType>(v.getType());
   if (!vType || !vType.getElementType().isSignlessInteger())
+    return {};
+  // Bound the request against the value's own extent once, here, rather than in
+  // each producer branch: an out-of-range element must fail rather than resolve
+  // to something plausible. Without this an `onnx.Shape` narrowed by its `end`
+  // attribute would hand back dim(start + idx) for an element it does not have,
+  // which is the same class of silently-wrong extent this file exists to fix.
+  if (vType.hasStaticShape() && idx >= vType.getNumElements())
     return {};
 
   if (mlir::DenseElementsAttr dense = getCompileTimeConstantTensor(v)) {
@@ -186,7 +199,8 @@ static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
   llvm::StringRef opName = def->getName().getStringRef();
 
   // Unconverted onnx.Shape: element idx is dim (start + idx) of the operand.
-  // start/end normalization matches ShapeToTensorDims.
+  // `start` is normalized as ShapeToTensorDims normalizes it; `end` only bounds
+  // how many elements exist, which the caller-side extent check above covers.
   if (opName == "onnx.Shape") {
     mlir::Value input = def->getOperand(0);
     auto inType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
@@ -248,8 +262,11 @@ static mlir::Value buildSliceExtent(mlir::OpBuilder &b, mlir::Location loc,
                                     mlir::Value end, int64_t step) {
   mlir::Value zero = mlir::arith::ConstantIndexOp::create(b, loc, 0);
   // A negative bound counts from the end, and the sign is not known until run
-  // time, so both forms are computed and selected between. INT64_MAX ("to the
-  // end") stays positive and is caught by the clamp instead.
+  // time, so both forms are computed and selected between. Neither sentinel
+  // exporters use needs special handling: INT64_MAX ("to the end") stays
+  // positive, so `v + dim` overflows but is never selected, and the clamp
+  // returns `dim`; INT64_MIN ("from the beginning") cannot overflow, since
+  // adding a non-negative `dim` only moves it toward zero.
   auto normalize = [&](mlir::Value v) -> mlir::Value {
     mlir::Value shifted = mlir::arith::AddIOp::create(b, loc, v, dim);
     mlir::Value isNeg = mlir::arith::CmpIOp::create(
@@ -493,6 +510,20 @@ struct SliceToHip : public mlir::RewritePattern {
     // Compute each dynamic output dim from the slice bounds where possible;
     // see the file header for why the data dim is not an acceptable substitute.
     // Ops materialized by a resolution that then fails are pure and get DCE'd.
+    //
+    // Where the bounds do not resolve, the fallback keeps the upper bound and
+    // therefore keeps the over-sized shape. It could be exact instead:
+    // CompressConversion solves the same shrinking-extent problem by reading
+    // the true count back from the device with `hip.ReadbackDimOp`. That is not
+    // done here, but not because a readback is unaffordable on this op --
+    // `wrap_slice` already D2Hs its own bounds and syncs the stream every call,
+    // so the sync is paid regardless. It is that a readback would add a second
+    // sync point, in the shape computation ahead of the slice, to serve a case
+    // no model in scope reaches: on Gemma-4 every sliced axis resolves from its
+    // bounds, and host arithmetic is strictly better than a readback wherever
+    // it is available. If a model does land here, revisit it -- the cost is
+    // lower than it looks. Hence the debug line below: the fallback is a known
+    // performance cliff, and it should be findable without an RGP capture.
     llvm::SmallVector<mlir::Value> dynSizes;
     for (int64_t i = 0; i < resultType.getRank(); ++i) {
       if (!resultType.isDynamicDim(i))
@@ -509,12 +540,20 @@ struct SliceToHip : public mlir::RewritePattern {
                     .getResult();
 
       mlir::Value extent;
+      // An axis `axes` does not name is not sliced at all, so the data dim is
+      // its exact extent rather than a fallback. Only an axis this op really
+      // slices can land on the upper bound, so only that is worth reporting --
+      // and if `axes` itself was unreadable, any axis might be sliced.
+      bool axisIsSliced = !haveAxes;
       if (haveAxes) {
         for (size_t k = 0; k < axesVec.size(); ++k) {
           int64_t axis =
               axesVec[k] < 0 ? axesVec[k] + dataType.getRank() : axesVec[k];
-          if (axis != i || stepsVec[k] <= 0)
+          if (axis != i)
             continue;
+          axisIsSliced = true;
+          if (stepsVec[k] <= 0)
+            break;
           mlir::Value s = resolveHostIndex(rewriter, loc, starts, k, 0);
           mlir::Value e = resolveHostIndex(rewriter, loc, ends, k, 0);
           if (s && e)
@@ -522,6 +561,13 @@ struct SliceToHip : public mlir::RewritePattern {
           break;
         }
       }
+      if (!extent && axisIsSliced)
+        LLVM_DEBUG(llvm::dbgs()
+                   << "[" DEBUG_TYPE "] slice extent for dim " << i
+                   << " falls back to the data dim: no host-resolvable bounds "
+                      "(or a non-positive step), so consumers see an upper "
+                      "bound rather than the slice length -- "
+                   << *op << "\n");
       dynSizes.push_back(extent ? extent : dim);
     }
     mlir::Value init =
