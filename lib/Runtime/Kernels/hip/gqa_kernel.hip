@@ -341,6 +341,23 @@ __global__ void transpose_mid_dims_kernel(
 // Ref: onnxruntime/contrib_ops/cpu/bert/gqa_attention_base.h (ConcatStateChunkGQA)
 // -------------------------------------------------------------------------
 
+// Widest copy unit for the KV data-movement kernels. Both append and concat are
+// pure relocation, so the element type only matters for indexing -- the payload
+// can move as opaque 16 B chunks. One fp16 per lane leaves the copy issue-rate
+// limited well short of the memory roofline (measured ~99 GB/s of 256 GB/s at
+// 12K context); eight per lane is what closes that gap.
+struct __align__(16) KvVec16 {
+  uint32_t x, y, z, w;
+};
+
+// The vectorised path indexes in KvVec16 units, which is only valid when the
+// head dim divides evenly and every buffer is 16 B aligned. Element offsets are
+// then automatically aligned too: each is (multiple of d) + (multiple of VEC),
+// and d % VEC == 0. Callers fall back to the scalar kernel when this fails.
+static inline bool kv_is_16b_aligned(const void* p) {
+  return (reinterpret_cast<uintptr_t>(p) & 15u) == 0;
+}
+
 template <typename T>
 __global__ void kv_cache_append_kernel(
     const T* __restrict__ src,
@@ -363,6 +380,35 @@ __global__ void kv_cache_append_kernel(
   int src_idx = ((batch_idx * sq + s) * G + g) * d + di;
   int dst_idx = ((batch_idx * G + g) * present_seq + (eff_past_len + s)) * d + di;
   cache[dst_idx] = src[src_idx];
+}
+
+// 16 B-per-lane form of kv_cache_append_kernel. VEC elements of T are moved as
+// one KvVec16, so the thread count drops by VEC and each lane issues a single
+// dwordx4. Indexing is identical, just in vector units along d.
+template <typename T, int VEC>
+__global__ void kv_cache_append_vec_kernel(
+    const T* __restrict__ src,
+    T* __restrict__ cache,
+    int sq, int G, int d, int present_seq, int past_len,
+    const int* __restrict__ seqlens_k) {
+  const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
+  int eff_past_len = seqlens_k ? (seqlens_k[batch_idx] + 1 - sq) : past_len;
+  if (eff_past_len < 0 || eff_past_len + sq > present_seq) return;
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const int dv = d / VEC;
+  int total_per_batch = sq * G * dv;
+  if (idx >= total_per_batch) return;
+
+  int dvi = idx % dv;
+  int remaining = idx / dv;
+  int g = remaining % G;
+  int s = remaining / G;
+
+  int src_idx = ((batch_idx * sq + s) * G + g) * d + dvi * VEC;
+  int dst_idx =
+      ((batch_idx * G + g) * present_seq + (eff_past_len + s)) * d + dvi * VEC;
+  *reinterpret_cast<KvVec16*>(cache + dst_idx) =
+      *reinterpret_cast<const KvVec16*>(src + src_idx);
 }
 
 // -------------------------------------------------------------------------
@@ -410,6 +456,42 @@ __global__ void kv_cache_concat_kernel(
     int cs = s - past_len;
     int src_idx = ((batch_idx * sq + cs) * G + g) * d + di;
     present[dst_idx] = current[src_idx];
+  }
+}
+
+// 16 B-per-lane form of kv_cache_concat_kernel. A VEC-wide chunk never straddles
+// the past/new boundary (the split is along s, the chunk runs along d), so the
+// source branch stays uniform per lane exactly as in the scalar kernel.
+template <typename T, int VEC>
+__global__ void kv_cache_concat_vec_kernel(
+    const T* __restrict__ past,
+    const T* __restrict__ current,
+    T* __restrict__ present,
+    int past_len, int sq, int G, int d,
+    int past_seq, int present_seq) {
+  const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const int dv = d / VEC;
+  int total_seq = past_len + sq;
+  int total_per_batch = total_seq * G * dv;
+  if (idx >= total_per_batch) return;
+
+  int dvi = idx % dv;
+  int remaining = idx / dv;
+  int g = remaining % G;
+  int s = remaining / G;
+
+  int dst_idx = ((batch_idx * G + g) * present_seq + s) * d + dvi * VEC;
+
+  if (s < past_len) {
+    int src_idx = ((batch_idx * G + g) * past_seq + s) * d + dvi * VEC;
+    *reinterpret_cast<KvVec16*>(present + dst_idx) =
+        *reinterpret_cast<const KvVec16*>(past + src_idx);
+  } else {
+    int cs = s - past_len;
+    int src_idx = ((batch_idx * sq + cs) * G + g) * d + dvi * VEC;
+    *reinterpret_cast<KvVec16*>(present + dst_idx) =
+        *reinterpret_cast<const KvVec16*>(current + src_idx);
   }
 }
 
@@ -748,6 +830,16 @@ static void launch_kv_cache_append(
     hipStream_t stream, const void* src, void* cache,
     int batch_size, int sq, int G, int d, int present_seq, int past_len,
     const void* seqlens_k) {
+  constexpr int VEC = 16 / sizeof(T);
+  if ((d % VEC) == 0 && kv_is_16b_aligned(src) && kv_is_16b_aligned(cache)) {
+    int total = sq * G * (d / VEC);
+    int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
+    kv_cache_append_vec_kernel<T, VEC><<<dim3(blocks, batch_size), GQA_THREADS,
+                                         0, stream>>>(
+        static_cast<const T*>(src), static_cast<T*>(cache),
+        sq, G, d, present_seq, past_len, static_cast<const int*>(seqlens_k));
+    return;
+  }
   int total = sq * G * d;
   int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
   kv_cache_append_kernel<T><<<dim3(blocks, batch_size), GQA_THREADS, 0,
@@ -762,6 +854,17 @@ static void launch_kv_cache_concat(
     int batch_size, int past_len, int sq, int G, int d,
     int past_seq, int present_seq) {
   int total_seq = past_len + sq;
+  constexpr int VEC = 16 / sizeof(T);
+  if ((d % VEC) == 0 && kv_is_16b_aligned(past) && kv_is_16b_aligned(current) &&
+      kv_is_16b_aligned(present)) {
+    int total = total_seq * G * (d / VEC);
+    int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
+    kv_cache_concat_vec_kernel<T, VEC><<<dim3(blocks, batch_size), GQA_THREADS,
+                                         0, stream>>>(
+        static_cast<const T*>(past), static_cast<const T*>(current),
+        static_cast<T*>(present), past_len, sq, G, d, past_seq, present_seq);
+    return;
+  }
   int total = total_seq * G * d;
   int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
   kv_cache_concat_kernel<T><<<dim3(blocks, batch_size), GQA_THREADS, 0,
