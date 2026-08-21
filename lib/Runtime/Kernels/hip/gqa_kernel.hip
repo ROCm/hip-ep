@@ -341,6 +341,23 @@ __global__ void transpose_mid_dims_kernel(
 // Ref: onnxruntime/contrib_ops/cpu/bert/gqa_attention_base.h (ConcatStateChunkGQA)
 // -------------------------------------------------------------------------
 
+// Widest copy unit for the KV data-movement kernels. Both append and concat are
+// pure relocation, so the element type only matters for indexing -- the payload
+// can move as opaque 16 B chunks. One fp16 per lane leaves the copy issue-rate
+// limited well short of the memory roofline (measured ~99 GB/s of 256 GB/s at
+// 12K context); eight per lane is what closes that gap.
+struct __align__(16) KvVec16 {
+  uint32_t x, y, z, w;
+};
+
+// The vectorised path indexes in KvVec16 units, which is only valid when the
+// head dim divides evenly and every buffer is 16 B aligned. Element offsets are
+// then automatically aligned too: each is (multiple of d) + (multiple of VEC),
+// and d % VEC == 0. Callers fall back to the scalar kernel when this fails.
+static inline bool kv_is_16b_aligned(const void* p) {
+  return (reinterpret_cast<uintptr_t>(p) & 15u) == 0;
+}
+
 template <typename T>
 __global__ void kv_cache_append_kernel(
     const T* __restrict__ src,
@@ -363,6 +380,35 @@ __global__ void kv_cache_append_kernel(
   int src_idx = ((batch_idx * sq + s) * G + g) * d + di;
   int dst_idx = ((batch_idx * G + g) * present_seq + (eff_past_len + s)) * d + di;
   cache[dst_idx] = src[src_idx];
+}
+
+// 16 B-per-lane form of kv_cache_append_kernel. VEC elements of T are moved as
+// one KvVec16, so the thread count drops by VEC and each lane issues a single
+// dwordx4. Indexing is identical, just in vector units along d.
+template <typename T, int VEC>
+__global__ void kv_cache_append_vec_kernel(
+    const T* __restrict__ src,
+    T* __restrict__ cache,
+    int sq, int G, int d, int present_seq, int past_len,
+    const int* __restrict__ seqlens_k) {
+  const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
+  int eff_past_len = seqlens_k ? (seqlens_k[batch_idx] + 1 - sq) : past_len;
+  if (eff_past_len < 0 || eff_past_len + sq > present_seq) return;
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const int dv = d / VEC;
+  int total_per_batch = sq * G * dv;
+  if (idx >= total_per_batch) return;
+
+  int dvi = idx % dv;
+  int remaining = idx / dv;
+  int g = remaining % G;
+  int s = remaining / G;
+
+  int src_idx = ((batch_idx * sq + s) * G + g) * d + dvi * VEC;
+  int dst_idx =
+      ((batch_idx * G + g) * present_seq + (eff_past_len + s)) * d + dvi * VEC;
+  *reinterpret_cast<KvVec16*>(cache + dst_idx) =
+      *reinterpret_cast<const KvVec16*>(src + src_idx);
 }
 
 // -------------------------------------------------------------------------
@@ -410,6 +456,42 @@ __global__ void kv_cache_concat_kernel(
     int cs = s - past_len;
     int src_idx = ((batch_idx * sq + cs) * G + g) * d + di;
     present[dst_idx] = current[src_idx];
+  }
+}
+
+// 16 B-per-lane form of kv_cache_concat_kernel. A VEC-wide chunk never straddles
+// the past/new boundary (the split is along s, the chunk runs along d), so the
+// source branch stays uniform per lane exactly as in the scalar kernel.
+template <typename T, int VEC>
+__global__ void kv_cache_concat_vec_kernel(
+    const T* __restrict__ past,
+    const T* __restrict__ current,
+    T* __restrict__ present,
+    int past_len, int sq, int G, int d,
+    int past_seq, int present_seq) {
+  const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const int dv = d / VEC;
+  int total_seq = past_len + sq;
+  int total_per_batch = total_seq * G * dv;
+  if (idx >= total_per_batch) return;
+
+  int dvi = idx % dv;
+  int remaining = idx / dv;
+  int g = remaining % G;
+  int s = remaining / G;
+
+  int dst_idx = ((batch_idx * G + g) * present_seq + s) * d + dvi * VEC;
+
+  if (s < past_len) {
+    int src_idx = ((batch_idx * G + g) * past_seq + s) * d + dvi * VEC;
+    *reinterpret_cast<KvVec16*>(present + dst_idx) =
+        *reinterpret_cast<const KvVec16*>(past + src_idx);
+  } else {
+    int cs = s - past_len;
+    int src_idx = ((batch_idx * sq + cs) * G + g) * d + dvi * VEC;
+    *reinterpret_cast<KvVec16*>(present + dst_idx) =
+        *reinterpret_cast<const KvVec16*>(current + src_idx);
   }
 }
 
@@ -748,6 +830,16 @@ static void launch_kv_cache_append(
     hipStream_t stream, const void* src, void* cache,
     int batch_size, int sq, int G, int d, int present_seq, int past_len,
     const void* seqlens_k) {
+  constexpr int VEC = 16 / sizeof(T);
+  if ((d % VEC) == 0 && kv_is_16b_aligned(src) && kv_is_16b_aligned(cache)) {
+    int total = sq * G * (d / VEC);
+    int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
+    kv_cache_append_vec_kernel<T, VEC><<<dim3(blocks, batch_size), GQA_THREADS,
+                                         0, stream>>>(
+        static_cast<const T*>(src), static_cast<T*>(cache),
+        sq, G, d, present_seq, past_len, static_cast<const int*>(seqlens_k));
+    return;
+  }
   int total = sq * G * d;
   int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
   kv_cache_append_kernel<T><<<dim3(blocks, batch_size), GQA_THREADS, 0,
@@ -762,6 +854,17 @@ static void launch_kv_cache_concat(
     int batch_size, int past_len, int sq, int G, int d,
     int past_seq, int present_seq) {
   int total_seq = past_len + sq;
+  constexpr int VEC = 16 / sizeof(T);
+  if ((d % VEC) == 0 && kv_is_16b_aligned(past) && kv_is_16b_aligned(current) &&
+      kv_is_16b_aligned(present)) {
+    int total = total_seq * G * (d / VEC);
+    int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
+    kv_cache_concat_vec_kernel<T, VEC><<<dim3(blocks, batch_size), GQA_THREADS,
+                                         0, stream>>>(
+        static_cast<const T*>(past), static_cast<const T*>(current),
+        static_cast<T*>(present), past_len, sq, G, d, past_seq, present_seq);
+    return;
+  }
   int total = total_seq * G * d;
   int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
   kv_cache_concat_kernel<T><<<dim3(blocks, batch_size), GQA_THREADS, 0,
@@ -1283,12 +1386,23 @@ gqa_flash_decode_kernel(
     int K_SPLITS) {  // runtime split-K count (was a template param)
   constexpr bool KV_I8 = (FMT == KvDtype::kI8);
   using KVt = std::conditional_t<KV_I8, int8_t, __half>;
-  // Keep the K+V LDS tile at ~16KB/block (4 blocks resident per 64KB-LDS CU)
-  // regardless of D, so DRAM latency stays hidden. At BKV=64,D=128 the tile
-  // would be 32KB -> only 2 resident blocks -> latency-bound (decode stalls
-  // ~1.6x). 2*BKV*D*2 bytes: D=256 -> BKV=16 (16KB), D=128 -> BKV=32 (16KB),
-  // D=64 -> BKV=64 (16KB).
-  constexpr int BKV = (D >= 256) ? 16 : (D == 128) ? 32 : FLASH_DECODE_BKV;
+  // Size the K+V LDS tile for block residency, since this kernel is bandwidth
+  // bound and the split-K grid always supplies more blocks than fit. 2*BKV*D*2
+  // bytes: D=128 -> BKV=32 (16KB), D=64 -> BKV=64 (16KB). At BKV=64,D=128 the
+  // tile would be 32KB -> only 2 resident blocks -> latency-bound (decode
+  // stalls ~1.6x).
+  //
+  // D>=256 uses 8KB (BKV=8) rather than the 16KB the other widths get, which
+  // doubles resident blocks per WGP. Measured on gfx1151 with
+  // test_gqa_decode --iters 500, vs BKV=16, taking the min of 5-7 runs
+  // (the absolute numbers drift a few % with clocks, so only compare within a
+  // run):
+  //   Qwen3.5-9B   H16 G4 d256 skv3860   0.0440 -> 0.0409 ms  (7-9% faster)
+  //   Qwen3.6-35B  H16 G2 d256 skv18646  0.1772 -> 0.1745 ms  (neutral..+3%)
+  // Going further the wrong way in either direction is worse: BKV=32 costs 37%
+  // on the 9B (halved residency), and BKV=4 costs 6% on the 35B (the tile stops
+  // amortizing the per-tile __syncthreads and staging setup).
+  constexpr int BKV = (D >= 256) ? 8 : (D == 128) ? 32 : FLASH_DECODE_BKV;
   constexpr int THREADS = HPG * WAVE_SIZE;  // total threads in block
   constexpr int EPT = D / WAVE_SIZE;  // elements-per-thread along d
 
@@ -3415,6 +3529,11 @@ gqa_flash_prefill_v8_kernel(
     constexpr int S_TILES_J = BKV / kWmmaTile;
     constexpr int D_TILES   = D / kWmmaTile;
     constexpr int DPG       = D_TILES / ND;    // D-tiles owned per wave
+    // A WMMA accumulator holds 8 rows per lane (row = e*2 + pair), and the
+    // softmax over those rows is row-independent, so it splits ND ways instead of
+    // being repeated ND times or dumped on one wave while the rest wait.
+    constexpr int EPW       = 8 / ND;          // accumulator rows per wave
+    static_assert(EPW * ND == 8, "ND must divide 8 for the softmax row split");
     constexpr int P_STR     = BKV + 2;
     constexpr int KV_STR    = D + 2;
     constexpr int SP_STR    = BKV;             // partial-score LDS row stride
@@ -3440,6 +3559,11 @@ gqa_flash_prefill_v8_kernel(
         smem_v8 + (size_t)BKV * KV_STR * sizeof(_Float16));
     _Float16* P_lds  = reinterpret_cast<_Float16*>(
         Sp_lds + (size_t)ND * ROWS * SP_STR);
+    // Per-row softmax correction, published by the one wave that owns the
+    // softmax and read by all of them; reused after the KV loop to hand out the
+    // final l. ROWS floats, so 64 B at MT=1.
+    float*    Cr_lds  = reinterpret_cast<float*>(
+        P_lds + (size_t)ROWS * P_STR);
 
     const size_t kv_base =
         (static_cast<size_t>(batch) * G + head_kv) * max_seq * D;
@@ -3458,13 +3582,20 @@ gqa_flash_prefill_v8_kernel(
                 ? HALF16_LOAD(&Q[q_row_base + (dt_base + tk) * 16]) : half16_t{};
     }
 
-    half8_t O_h[MT][DPG] = {};
-    float   m_reg[MT][8];
-    float   l_reg[MT][8];
+    // Accumulate O in fp32 registers. The WMMA accumulator is already fp32, so
+    // the previous half8_t store meant unpacking to float, accumulating, and
+    // repacking on every KV tile -- 2 conversions per element per tile, plus the
+    // same round-trip again in the rescale, for no register saving that mattered
+    // at the winning config. Holding fp32 also drops the per-tile rounding of a
+    // running sum.
+    float8_t O_acc[MT][DPG] = {};
+    // Running (m, l) only for the rows this wave owns in the softmax split.
+    float   m_reg[MT][EPW];
+    float   l_reg[MT][EPW];
     #pragma unroll
     for (int mt = 0; mt < MT; ++mt)
         #pragma unroll
-        for (int e = 0; e < 8; ++e) { m_reg[mt][e] = -INFINITY; l_reg[mt][e] = 0.0f; }
+        for (int ei = 0; ei < EPW; ++ei) { m_reg[mt][ei] = -INFINITY; l_reg[mt][ei] = 0.0f; }
 
     const int kv_max    = (skv - 1 < past_len + q_start + ROWS - 1)
                               ? (skv - 1) : (past_len + q_start + ROWS - 1);
@@ -3522,88 +3653,116 @@ gqa_flash_prefill_v8_kernel(
                     Sp_lds[((size_t)group * ROWS + mt * 16 + rl) * SP_STR + col] =
                         S_reg[mt][sj][e];
                 }
-        __syncthreads();   // b_a: partials + V staging visible
-        #pragma unroll
-        for (int mt = 0; mt < MT; ++mt)
-            #pragma unroll
-            for (int sj = 0; sj < S_TILES_J; ++sj)
-                #pragma unroll
-                for (int e = 0; e < 8; ++e) {
-                    const int rl  = e * 2 + pair;
-                    const int col = sj * 16 + wmma_lane;
-                    float acc = 0.0f;
-                    #pragma unroll
-                    for (int g = 0; g < ND; ++g)
-                        acc += Sp_lds[((size_t)g * ROWS + mt * 16 + rl) * SP_STR + col];
-                    S_reg[mt][sj][e] = acc * scale * kLog2e;
-                }
+        // abl bit 32 drops all three per-tile barriers. The result is wrong, but
+        // it prices the barriers before any restructuring is done to remove them:
+        // this kernel runs 3 barriers per KV tile and ~583 tiles per block at
+        // BKV=16, so "reduce the barrier count" is only worth doing if that shows
+        // up as time.
+        if (!(abl & 32)) __syncthreads();   // b_a: partials + V staging visible
 
-        // ---- online softmax on full S (identical across waves) ----
-        // Only group 0 stores P (all waves would write identical values);
-        // b_b then publishes it to every wave for the value GEMM.
+        // ---- softmax, rows split ND ways across the waves ----
+        // Every wave used to sum the ND partials and run a bit-identical softmax,
+        // with only group 0's P store skipped for the others. Ablating this block
+        // (ablate bit 1, which also drops the cross-wave partial sum below, so the
+        // figure covers that read-back too) cost 136 ms of 348 ms at
+        // sq=18646, the largest single item in the kernel, so repeating it ND times
+        // was the main waste -- and it is why raising ND used to make this kernel
+        // slower rather than faster despite the extra occupancy.
+        //
+        // Handing the whole softmax to group 0 instead only moves the problem: the
+        // other waves then idle at b_b while group 0's copy sits on the critical
+        // path. The rows are independent, so wave g takes accumulator rows
+        // [g*EPW, (g+1)*EPW) and the critical path shrinks with ND instead of
+        // growing. Each wave publishes the per-row correction and, after the loop,
+        // its share of l; both are read back by every wave, since a wave writes
+        // all 16 rows of the D tiles it owns.
+        //
+        // corr and l are uniform across wmma_lane (both come out of a 16-lane
+        // shuffle reduction), so the 16 lanes sharing a row write the same value
+        // to Cr_lds -- a same-value race, not a data race.
         if (!(abl & 1)) {
             #pragma unroll
             for (int mt = 0; mt < MT; ++mt) {
-                float corr_e[8];
                 #pragma unroll
-                for (int e = 0; e < 8; ++e) {
+                for (int ei = 0; ei < EPW; ++ei) {
+                    const int e     = group * EPW + ei;
                     const int rl    = e * 2 + pair;
                     const int q_pos = q_start + mt * 16 + rl;
+
+                    // Sum the ND partial scores for this row only.
+                    float s_row[S_TILES_J];
+                    #pragma unroll
+                    for (int sj = 0; sj < S_TILES_J; ++sj) {
+                        const int col = sj * 16 + wmma_lane;
+                        float acc = 0.0f;
+                        #pragma unroll
+                        for (int g = 0; g < ND; ++g)
+                            acc += Sp_lds[((size_t)g * ROWS + mt * 16 + rl) * SP_STR + col];
+                        s_row[sj] = acc * scale * kLog2e;
+                    }
+
                     float rmax = -INFINITY;
                     #pragma unroll
                     for (int sj = 0; sj < S_TILES_J; ++sj) {
                         const int kv_pos = kv0 + sj * 16 + wmma_lane;
                         if (kv_pos >= skv || kv_pos > past_len + q_pos)
-                            S_reg[mt][sj][e] = -INFINITY;
-                        rmax = fmaxf(rmax, S_reg[mt][sj][e]);
+                            s_row[sj] = -INFINITY;
+                        rmax = fmaxf(rmax, s_row[sj]);
                     }
                     rmax = fmaxf(rmax, __shfl_xor(rmax, 1));
                     rmax = fmaxf(rmax, __shfl_xor(rmax, 2));
                     rmax = fmaxf(rmax, __shfl_xor(rmax, 4));
                     rmax = fmaxf(rmax, __shfl_xor(rmax, 8));
 
-                    const float m_old = m_reg[mt][e];
+                    const float m_old = m_reg[mt][ei];
                     const float m_new = fmaxf(m_old, rmax);
                     const float corr  = exp2f(m_old - m_new);
-                    corr_e[e]         = corr;
 
                     float rsum = 0.0f;
                     #pragma unroll
                     for (int sj = 0; sj < S_TILES_J; ++sj) {
-                        const float p = exp2f(S_reg[mt][sj][e] - m_new);
+                        const float p = exp2f(s_row[sj] - m_new);
                         rsum += p;
-                        if (group == 0)
-                            P_lds[(mt * 16 + rl) * P_STR + sj * 16 + wmma_lane] =
-                                static_cast<_Float16>(p);
+                        P_lds[(mt * 16 + rl) * P_STR + sj * 16 + wmma_lane] =
+                            static_cast<_Float16>(p);
                     }
                     rsum += __shfl_xor(rsum, 1);
                     rsum += __shfl_xor(rsum, 2);
                     rsum += __shfl_xor(rsum, 4);
                     rsum += __shfl_xor(rsum, 8);
 
-                    m_reg[mt][e] = m_new;
-                    l_reg[mt][e] = corr * l_reg[mt][e] + rsum;
+                    m_reg[mt][ei] = m_new;
+                    l_reg[mt][ei] = corr * l_reg[mt][ei] + rsum;
+                    Cr_lds[mt * 16 + rl] = corr;
                 }
-                // rescale this wave's owned O tiles by the correction
+            }
+        }
+        if (!(abl & 32)) __syncthreads();   // b_b: P_lds + Cr_lds visible
+
+        // ---- every wave rescales its own O tiles by the published correction ----
+        // Skipping this when corr == 1.0 (i.e. no row's running max grew, which is
+        // most tiles past the first few) was tried and measured 0.3%, inside run
+        // noise: these fp32 multiplies hide behind the tile's memory traffic, so
+        // the ballot and the branch bought nothing and are not here.
+        if (!(abl & 1)) {
+            #pragma unroll
+            for (int mt = 0; mt < MT; ++mt) {
+                float corr_e[8];
+                #pragma unroll
+                for (int e = 0; e < 8; ++e)
+                    corr_e[e] = Cr_lds[mt * 16 + e * 2 + pair];
                 #pragma unroll
                 for (int tj = 0; tj < DPG; ++tj)
                     #pragma unroll
                     for (int e = 0; e < 8; ++e)
-                        O_h[mt][tj][e] =
-                            static_cast<_Float16>((float)O_h[mt][tj][e] * corr_e[e]);
+                        O_acc[mt][tj][e] *= corr_e[e];
             }
         }
-        __syncthreads();   // b_b: P_lds visible for the value GEMM
 
         // ---- value GEMM: this wave's owned D tiles only ----
         if (!(abl & 2))
         for (int tj = 0; tj < DPG; ++tj) {
             const int d_tile = dt_base + tj;
-            float8_t Of[MT];
-            #pragma unroll
-            for (int mt = 0; mt < MT; ++mt)
-                #pragma unroll
-                for (int e = 0; e < 8; ++e) Of[mt][e] = (float)O_h[mt][tj][e];
             #pragma unroll
             for (int tk = 0; tk < S_TILES_J; ++tk) {
                 half16_t v_frag;
@@ -3614,18 +3773,30 @@ gqa_flash_prefill_v8_kernel(
                 for (int mt = 0; mt < MT; ++mt) {
                     half16_t p_frag = HALF16_LOAD(
                         &P_lds[(mt * 16 + wmma_lane) * P_STR + tk * 16]);
-                    Of[mt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
-                        p_frag, v_frag, Of[mt]);
+                    O_acc[mt][tj] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                        p_frag, v_frag, O_acc[mt][tj]);
                 }
             }
-            #pragma unroll
-            for (int mt = 0; mt < MT; ++mt)
-                #pragma unroll
-                for (int e = 0; e < 8; ++e)
-                    O_h[mt][tj][e] = static_cast<_Float16>(Of[mt][e]);
         }
-        __syncthreads();   // b_c: WAR -- V_lds/Sp_lds/P_lds reused next tile
+        if (!(abl & 32)) __syncthreads();   // b_c: WAR on V_lds/Sp_lds/P_lds
     }
+
+    // ---- pool the per-wave l so every wave can normalise all 16 rows ----
+    // The softmax split gives each wave l for only EPW of the 8 accumulator rows,
+    // but a wave writes all 16 rows of the D tiles it owns. b_c above already
+    // separated this from the last tile's reads of Cr_lds, so one barrier does.
+    #pragma unroll
+    for (int mt = 0; mt < MT; ++mt)
+        #pragma unroll
+        for (int ei = 0; ei < EPW; ++ei)
+            Cr_lds[mt * 16 + (group * EPW + ei) * 2 + pair] = l_reg[mt][ei];
+    __syncthreads();
+    float l_fin[MT][8];
+    #pragma unroll
+    for (int mt = 0; mt < MT; ++mt)
+        #pragma unroll
+        for (int e = 0; e < 8; ++e)
+            l_fin[mt][e] = Cr_lds[mt * 16 + e * 2 + pair];
 
     // ---- Epilogue: this wave writes its owned D tiles ----
     #pragma unroll
@@ -3638,8 +3809,8 @@ gqa_flash_prefill_v8_kernel(
                 const int rl    = e * 2 + pair;
                 const int q_pos = q_start + mt * 16 + rl;
                 if (q_pos < sq && c < D) {
-                    const float l_val   = fmaxf(l_reg[mt][e], 1e-6f);
-                    const float out_val = (float)O_h[mt][tj][e] / l_val;
+                    const float l_val   = fmaxf(l_fin[mt][e], 1e-6f);
+                    const float out_val = O_acc[mt][tj][e] / l_val;
                     O[(static_cast<size_t>(batch * sq + q_pos) * Hq + head_q) * D + c] =
                         static_cast<_Float16>(out_val);
                 }
@@ -3655,7 +3826,8 @@ static inline size_t prefillV8SmemBytes(int nd, int mt, int bkv, int d) {
     const size_t v_lds  = (size_t)bkv * (d + 2) * sizeof(_Float16);
     const size_t sp_lds = (size_t)nd * rows * bkv * sizeof(float);
     const size_t p_lds  = (size_t)rows * (bkv + 2) * sizeof(_Float16);
-    return v_lds + sp_lds + p_lds;
+    const size_t cr_lds = (size_t)rows * sizeof(float);
+    return v_lds + sp_lds + p_lds + cr_lds;
 }
 static constexpr size_t kPrefillV8MaxSmem = 65536;
 static int g_v8_ablate = 0;
@@ -3684,16 +3856,49 @@ static inline void dispatchPrefillV8(
     else if (nd == 2 && mt == 2 && bkv == 64) LAUNCH_V8(2, 2, 64);
     else if (nd == 4 && mt == 1 && bkv == 32) LAUNCH_V8(4, 1, 32);
     else if (nd == 4 && mt == 2 && bkv == 32) LAUNCH_V8(4, 2, 32);
+    else if (nd == 2 && mt == 1 && bkv == 16) LAUNCH_V8(2, 1, 16);
+    else if (nd == 4 && mt == 1 && bkv == 16) LAUNCH_V8(4, 1, 16);
+    else if (nd == 8 && mt == 1 && bkv == 16) LAUNCH_V8(8, 1, 16);
+    else if (nd == 8 && mt == 1 && bkv == 32) LAUNCH_V8(8, 1, 32);
+    else if (nd == 2 && mt == 2 && bkv == 16) LAUNCH_V8(2, 2, 16);
+    else if (nd == 4 && mt == 2 && bkv == 16) LAUNCH_V8(4, 2, 16);
+    else if (nd == 1 && mt == 1 && bkv == 16) LAUNCH_V8(1, 1, 16);
+    else if (nd == 1 && mt == 2 && bkv == 16) LAUNCH_V8(1, 2, 16);
     else                                      LAUNCH_V8(2, 1, 32);
     #undef LAUNCH_V8
 }
 
 struct PrefillV8Cfg { int nd; int mt; int bkv; };
+
+// The configs the tuner sweeps, kept to those that do not spill and can plausibly
+// win. Each candidate costs ~40 s of first-call sweep at sq=18646, and -O3 register
+// allocation (read with -Rpass-analysis=kernel-resource-usage) disqualifies most
+// of the original list outright:
+//
+//   cfg      vgpr  spill   occ    ms @ sq=18646
+//   2,1,16    239      0  37.5%   204   <- long-prompt winner
+//   4,1,16    135      0  62.5%   219
+//   4,1,32    175      0  50.0%   249
+//   8,1,16     82      0 100.0%   276
+//   2,1,32    256     92  31.2%    -    (spills)
+//   2,2,32    256      -  31.2%    -    (spills)
+//   2,1,64    256      -  31.2%    -    (spills; V_lds alone is 33 KB)
+//   2,2,64    256      -  31.2%    -    (spills)
+//   1,1,16    256      -  31.2%   410   (spills)
+//   2,2,16    256      -  31.2%   423   (spills)
+//   1,2,16    256      -  31.2%   638   (spills)
+//
+// Occupancy does not order this table: 8,1,16 is fully occupant and still 35%
+// slower than 2,1,16 at 37.5%, because raising ND adds cross-wave
+// score-reduction traffic that costs more than the extra residency buys. That is
+// the opposite of what the kernel's "lift occupancy" design note assumes, so do
+// not re-add candidates on an occupancy argument alone. Anything that spills is
+// hopeless regardless, which removes BKV=64 and all of MT=2.
 static inline int prefillV8Candidates(int d, PrefillV8Cfg* out) {
-    static const PrefillV8Cfg kAll[] = {
-        {2, 1, 32}, {2, 2, 32}, {2, 1, 64}, {2, 2, 64}, {4, 1, 32}, {4, 2, 32}};
+    static const PrefillV8Cfg kTuned[] = {
+        {2, 1, 16}, {4, 1, 16}, {4, 1, 32}, {8, 1, 16}};
     int n = 0;
-    for (const PrefillV8Cfg& c : kAll)
+    for (const PrefillV8Cfg& c : kTuned)
         if (prefillV8SmemBytes(c.nd, c.mt, c.bkv, d) <= kPrefillV8MaxSmem)
             out[n++] = c;
     return n;
@@ -3709,7 +3914,7 @@ static int tunePrefillV8Cfg(
     _Float16* O, int B, int Hq, int G, int sq, int skv, int max_seq,
     int past_len, float scale)
 {
-    PrefillV8Cfg cands[8];
+    PrefillV8Cfg cands[16];
     const int nc = prefillV8Candidates(d, cands);
     constexpr int kWarmup = 30, kRounds = 4, kIters = 30;
 
@@ -3724,7 +3929,7 @@ static int tunePrefillV8Cfg(
     hipEvent_t ev0, ev1;
     (void)hipEventCreate(&ev0);
     (void)hipEventCreate(&ev1);
-    float best_ms[8];
+    float best_ms[16];
     for (int i = 0; i < nc; ++i) best_ms[i] = 1.0e30f;
     for (int r = 0; r < kRounds; ++r) {
         for (int idx = 0; idx < nc; ++idx) {

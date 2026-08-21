@@ -37,8 +37,6 @@ jobs:
       # Must match windows-build.yml verbatim: it is part of the shared
       # ort-install cache key and drives the same patch set.
       ONNXRUNTIME_PR_PATCHES: ""
-      SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_RW_MODE: ${{ github.ref_name == 'main' && 'READ_WRITE' || 'READ_ONLY' }}
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
     steps:
@@ -58,14 +56,14 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Cache ort-install
         id: cache-ort
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/ort-install
           key: dep-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}
 
       - name: Cache llvm-install
         id: cache-llvm
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
           key: dep-llvm-${{ env.LLVM_TAG }}
@@ -88,6 +86,20 @@ jobs:
 
       - name: Setup MSVC environment
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+
+      - name: Prepare sccache local cache
+        shell: bash
+        run: |
+          echo "SCCACHE_DIR=${{ runner.workspace }}/sccache-dir" >> $GITHUB_ENV
+          echo "SCCACHE_KEY_DATE=$(date -u +'%Y%m%d')" >> $GITHUB_ENV
+
+      - name: Restore sccache directory
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/sccache-dir
+          key: sccache-windows-mock-${{ env.SCCACHE_KEY_DATE }}
+          restore-keys: |
+            sccache-windows-mock-
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -256,3 +268,11 @@ jobs:
           cmake -B "$BUILD" -DHIPDNN_EP_COMPILER_PLUGINS=sample
           cmake --build "$BUILD" --config Release --target test_static_plugins
           ctest --test-dir "$BUILD" -C Release -R StaticPlugins --output-on-failure
+
+      - name: Save sccache directory
+        if: always() && github.ref_name == 'main'
+        continue-on-error: true
+        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/sccache-dir
+          key: sccache-windows-mock-${{ env.SCCACHE_KEY_DATE }}
