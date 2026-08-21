@@ -39,9 +39,17 @@ class Hip_DpsOp<string mnemonic, list<Trait> traits = []> :
                                   ["getDpsInitsMutable"]>,
         HipDpsOpInterface,
         DeclareOpInterfaceMethods<ReifyRankedShapedTypeOpInterface,
-                                  ["reifyResultShapes"]>
+                                  ["reifyResultShapes", "reifyDimOfResult"]>
       ],
       traits)> {
+  code reifyDimClassDefinition = [{
+    ::llvm::FailureOr<::mlir::OpFoldResult> $cppClass::reifyDimOfResult(
+        ::mlir::OpBuilder &b, int resultIndex, int dim) {
+      return ::llvm::cast<::mlir::hip::HipDpsOp>(getOperation())
+          .reifyDimOfResult(b, resultIndex, dim);
+    }
+  }];
+  let extraClassDefinition = reifyDimClassDefinition;
   let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
 }
 
@@ -71,7 +79,7 @@ class Hip_DpsOp_WithInfer<string mnemonic,
         return ::mlir::success();
       }
     }]);
-  let extraClassDefinition = inferClassDefinition;
+  let extraClassDefinition = reifyDimClassDefinition # inferClassDefinition;
 }
 
 // Uses the shared HipDpsOpInterface implementation to lift the runtime shape
@@ -86,7 +94,7 @@ class Hip_DpsOp_AutoReify<string mnemonic, list<Trait> traits = []> :
           .reifyResultShapes(b, reified);
     }
   }];
-  let extraClassDefinition = reifyClassDefinition;
+  let extraClassDefinition = reifyDimClassDefinition # reifyClassDefinition;
 }
 
 // Combines the two common generated methods without exposing independent
@@ -103,7 +111,8 @@ class Hip_DpsOp_AutoReifyInfer<string mnemonic,
           .reifyResultShapes(b, reified);
     }
   }];
-  let extraClassDefinition = reifyClassDefinition # inferClassDefinition;
+  let extraClassDefinition =
+      reifyDimClassDefinition # reifyClassDefinition # inferClassDefinition;
 }
 
 /// Shape behavior supplied by a dedicated semantic implementation.
@@ -147,7 +156,8 @@ class Hip_DpsOp_Reduction<string mnemonic, list<Trait> traits = []> :
     }
   }];
   let extraClassDefinition =
-      reifyClassDefinition # inferClassDefinition # verifyClassDefinition;
+      reifyDimClassDefinition # reifyClassDefinition # inferClassDefinition #
+      verifyClassDefinition;
   let hasVerifier = 1;
 }
 
@@ -192,7 +202,8 @@ class Hip_DpsOp_Broadcast<string mnemonic, list<string> operandGetters,
     }
   }]);
   let extraClassDefinition =
-      reifyClassDefinition # inferClassDefinition # verifyClassDefinition;
+      reifyDimClassDefinition # reifyClassDefinition # inferClassDefinition #
+      verifyClassDefinition;
   let hasVerifier = 1;
 }
 
@@ -1117,7 +1128,9 @@ def Hip_RmsNormOp : Hip_DpsOp_WithInfer<"rms_norm", "Output", [OpStateOpInterfac
   let hasVerifier = 1;
 }
 
-def Hip_LayerNormOp : Hip_DpsOp_AutoReify<"layer_norm", [AttrSizedOperandSegments]> {
+def Hip_LayerNormOp :
+    Hip_DpsOp_SemanticNoInfer<"layer_norm",
+                              /*traits=*/[AttrSizedOperandSegments]> {
   let summary = "Standard layer normalization (ONNX LayerNormalization opset 17)";
   let description = [{
     Full ONNX LayerNormalization (opset 17+) with mean subtraction and an
@@ -1208,7 +1221,10 @@ def Hip_LayerNormOp : Hip_DpsOp_AutoReify<"layer_norm", [AttrSizedOperandSegment
   let hasVerifier = 1;
 }
 
-def Hip_SkipRmsNormOp : Hip_DpsOp_AutoReify<"skip_rms_norm", [AttrSizedOperandSegments, OpStateOpInterface]> {
+def Hip_SkipRmsNormOp :
+    Hip_DpsOp_SemanticNoInfer<"skip_rms_norm",
+                              [AttrSizedOperandSegments,
+                               OpStateOpInterface]> {
   let summary = "Fused skip + RMS normalization (com.microsoft.SkipSimplifiedLayerNormalization)";
   let description = [{
     Full alignment with Microsoft ONNX Runtime SkipSimplifiedLayerNormalization

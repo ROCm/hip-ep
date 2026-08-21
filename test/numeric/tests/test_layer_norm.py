@@ -272,6 +272,50 @@ def _make_layer_norm_model(
     return make_model_from_nodes([node], [X], [Y], initializers=initializers)
 
 
+def _make_layer_norm_stats_model(
+    input_shape: list[int],
+    axis: int,
+    *,
+    include_mean: bool,
+    include_inv_std: bool,
+):
+    normalized_axis = axis if axis >= 0 else axis + len(input_shape)
+    scale_shape = input_shape[normalized_axis:]
+    stats_shape = input_shape[:normalized_axis] + [1] * (
+        len(input_shape) - normalized_axis
+    )
+    X = helper.make_tensor_value_info("X", TensorProto.FLOAT16, input_shape)
+    Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT16, input_shape)
+    output_names = ["Y"]
+    outputs = [Y]
+    if include_mean:
+        output_names.append("Mean")
+        outputs.append(
+            helper.make_tensor_value_info("Mean", TensorProto.FLOAT, stats_shape)
+        )
+    else:
+        output_names.append("")
+    if include_inv_std:
+        output_names.append("InvStdDev")
+        outputs.append(
+            helper.make_tensor_value_info("InvStdDev", TensorProto.FLOAT, stats_shape)
+        )
+
+    rng = np.random.default_rng(117)
+    scale_init = numpy_helper.from_array(
+        rng.uniform(0.5, 1.5, scale_shape).astype(np.float16), name="scale"
+    )
+    node = helper.make_node(
+        "LayerNormalization",
+        ["X", "scale"],
+        output_names,
+        axis=axis,
+        epsilon=1e-5,
+        stash_type=1,
+    )
+    return make_model_from_nodes([node], [X], outputs, initializers=[scale_init])
+
+
 class TestLayerNormalization:
     """Full LN: (x - mean) * rsqrt(var + eps) * scale [+ bias]."""
 
@@ -323,6 +367,28 @@ class TestLayerNormalization:
         x = rng.uniform(-2, 2, input_shape).astype(np.float32)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)
+
+    @pytest.mark.parametrize(
+        "input_shape,axis,include_mean,include_inv_std",
+        [
+            ([2, 3, 4], -1, True, True),
+            ([2, 3, 4], 1, True, True),
+            ([2, 4], -1, False, True),
+        ],
+    )
+    def test_layer_norm_stats_outputs(
+        self, model_runner, input_shape, axis, include_mean, include_inv_std
+    ):
+        model = _make_layer_norm_stats_model(
+            input_shape,
+            axis,
+            include_mean=include_mean,
+            include_inv_std=include_inv_std,
+        )
+        rng = np.random.default_rng(118)
+        x = rng.uniform(-2, 2, input_shape).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=2e-3, rtol=1e-3)
 
     @pytest.mark.parametrize("num_patches", [256, 1024])
     def test_layer_norm_qwen35b_vision_shape(self, model_runner, num_patches):

@@ -118,6 +118,41 @@ MatmulOp::reifyResultShapes(OpBuilder &b,
 }
 
 //===----------------------------------------------------------------------===//
+// SkipRmsNormOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult SkipRmsNormOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() < 1 || getNumResults() > 2)
+    return failure();
+  FailureOr<ReifiedRankedShapedTypeDims> shapes =
+      mlir::hip::reifySkipRmsNormOutputShapes(
+          b, getLoc(), getInput(), getSkip(), getGamma(), getBias(),
+          getNumResults(), [&]() { return this->emitOpError(); });
+  if (failed(shapes))
+    return failure();
+  reifiedReturnShapes = std::move(*shapes);
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// LayerNormOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult LayerNormOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() == 0)
+    return failure();
+  FailureOr<ReifiedRankedShapedTypeDims> shapes =
+      mlir::hip::reifyLayerNormOutputShapes(b, getLoc(), getInput(), getAxis(),
+                                            getNumResults());
+  if (failed(shapes))
+    return failure();
+  reifiedReturnShapes = std::move(*shapes);
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // RopeOp
 //
 // Result shape == input data tensor's shape (rotary embedding rotates
