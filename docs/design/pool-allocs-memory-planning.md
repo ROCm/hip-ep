@@ -24,13 +24,22 @@ When all dynamic sizes can be computed before the earliest pooled allocation, th
 ## Ownership model
 
 - Pool memory belongs to `RuntimeState`, not to an inference call.
-- `hip.get_pool(%ctx, %size) {domain_id = N}` obtains the backing buffer for a domain.
+- `hip.get_pool(%ctx, %size) {site_id = S, domain_id = N}` obtains the backing
+  buffer for a function-local domain.
 - Pool buffers grow on demand and are freed during session cleanup.
 - Pooled `memref.alloc` operations become `memref.view` operations; matching per-allocation deallocations are removed.
 - Graph outputs are not pooled. `hip-use-output-allocator` rewrites them to `hip.alloc_output`.
 - Tiny host-written shape buffers are not pooled. `hip-materialize-host-scalars` redirects them to session-owned host-mapped scratch.
 
-The default domain ID is zero and is omitted from textual IR. Additional domains print an explicit `domain_id`.
+`site_id` is the function's ordinal in top-level module symbol order. This
+deterministic module-level assignment is collision-free and independent of
+symbol spelling; no string hash is used. `domain_id` remains local to the
+function, preserving existing per-domain packing.
+
+The runtime keys storage by `(site_id, domain_id)`. A caller's local domain zero
+and an outlined helper's local domain zero therefore have distinct backing
+allocations while both are live; growing the helper cannot invalidate the
+caller's pool.
 
 ## Pipeline relationship
 
@@ -206,22 +215,35 @@ PoolAllocs writes MLIR module attributes:
 | `hipdnn.domain_count` | Number of domains; emitted only for multi-domain functions |
 | `hipdnn.pool_sizes` | Per-domain static prefixes |
 | `hipdnn.buffer_domains` | Domain ID for each pooled allocation |
+| `hipdnn.pool_site_id` | Function site owning legacy eager domain-zero metadata |
 
 The pool attributes are MLIR code-generation inputs, not fields in `schemas/model_metadata.fbs`. `generate-interface` emits `hipdnn_ep_pool_init` only when all three legacy attributes are present and `hipdnn.pool_size > 0`. Dynamic contributions are handled by the size operands on `hip.get_pool` during `inference_compute`.
 
-Pool behavior is therefore carried by generated LLVM IR plus `RuntimeState`, not by the FlatBuffers metadata blob. The optional multi-domain attributes are diagnostic/code-generation metadata; runtime domain selection comes from each lowered `hip.get_pool` call's `domain_id`.
+Pool behavior is therefore carried by generated LLVM IR plus `RuntimeState`,
+not by the FlatBuffers metadata blob. Runtime selection comes from each lowered
+`hip.get_pool` call's `(site_id, domain_id)` pair.
 
 Each `hip.get_pool` lowers to:
 
 ```c
 void *hipdnn_ep_get_pool_base(RuntimeState *state,
+                              int site_id,
                               int domain_id,
                               size_t needed_size);
 ```
 
-The runtime maintains grow-on-demand arrays of pool bases and capacities. Domain 0 is initialized eagerly when it has a static prefix; higher domains allocate lazily on first use. A zero-byte request is promoted to one byte before calling HIP.
+The runtime maintains a grow-on-demand function-site table whose entries own
+grow-on-demand arrays of domain bases and capacities. A zero-byte request is
+promoted to one byte before calling HIP.
 
-When a domain grows, the runtime synchronizes the session stream, frees that domain's old buffer, allocates the new capacity, and leaves other domains untouched. Pools never shrink.
+When one site/domain grows, the runtime synchronizes the session stream, frees
+that pool's old buffer, allocates the new capacity, and leaves every other pool
+untouched. Pools never shrink.
+
+This generated-call ABI is internal but not backwards compatible. Delete and
+rebuild stale cached model bitcode/native artifacts after upgrading; artifacts
+compiled against the former three-argument pool helper cannot be mixed with
+the new runtime.
 
 `hipdnn_ep_get_buffer_from_pool(state, index)` remains the legacy domain-zero accessor for compile-time offsets. Multi-domain dynamic paths use `hipdnn_ep_get_pool_base`.
 

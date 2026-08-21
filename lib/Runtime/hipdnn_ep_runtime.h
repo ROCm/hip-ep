@@ -339,26 +339,21 @@ void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index);
 // if needed. Called from PoolAllocs-generated code, once per emitted
 // hip.get_pool, at the start of each inference.
 //
-// `domain_id` selects which pool to access: hip-pool-allocs partitions the
-// function's pooled allocs into independent dominance domains and emits one
-// hip.get_pool per domain (id starts at 0). Domain 0 inherits the legacy
-// single-pool semantics — its pool was eagerly sized by hipdnn_ep_pool_init
-// using the static buffer offsets, so single-domain models are bit-identical
-// to the pre-multi-domain runtime. Domains 1..N start with size 0 and grow
-// lazily on their first call here.
+// `site_id` is the deterministic module-local ordinal of the compiled function.
+// `domain_id` selects a dominance domain within that function. The runtime keys
+// storage by the pair, so a caller and outlined helper may both use local
+// domain zero while their buffers are simultaneously live.
 //
 // When `needed_size` exceeds the selected domain's current allocation, that
 // pool is grown via stream-sync + hipFree + hipMalloc. Pools never shrink and
 // are independent across domains: growing domain N does not touch domain M.
 //
-// There is no compile-time cap on `domain_id`: the per-domain arrays are
-// themselves grown on demand the first time a higher id is seen (a cold-path
-// event on the first inference). A negative `domain_id` returns NULL with a
-// stderr diagnostic (it would indicate a compiler bug — ids start at 0).
+// There is no compile-time cap on either ID: both table levels grow on demand.
+// Negative IDs return NULL with a diagnostic.
 //
 // Returns: GPU base pointer for the selected domain (NULL on bad domain_id
 //          or allocation failure).
-void *hipdnn_ep_get_pool_base(RuntimeState *state, int domain_id,
+void *hipdnn_ep_get_pool_base(RuntimeState *state, int site_id, int domain_id,
                               size_t needed_size);
 
 // Get the host-mapped scratch buffer base, growing it if needed. Called from
@@ -498,11 +493,12 @@ void hipdnn_ep_runtime_add_cpu_profile(RuntimeState *state, const char *name,
 // Called by generated inference_init after creating RuntimeState
 // Parameters:
 //   state: Runtime state to initialize pool in
+//   site_id: Module-local function site owning domain zero
 //   pool_size: Total size of memory pool in bytes
 //   buffer_offsets: Array of offsets for each buffer
 //   num_buffers: Number of buffers
 // Returns: 0=success, non-zero=error
-int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
+int hipdnn_ep_pool_init(RuntimeState *state, int site_id, size_t pool_size,
                         const size_t *buffer_offsets, size_t num_buffers);
 
 //===----------------------------------------------------------------------===//

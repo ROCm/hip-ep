@@ -264,7 +264,8 @@ MlirCustomOp::Compute(context)
    │     ├─ hipdnn_ep_state_reset_error_flag(state)
    │     ├─ main_graph(state, inputs)            thin wrapper: unpacks input descriptors,
    │     │  └─ main_graph_internal(...)          calls body, DISCARDS its returned descriptor
-   │     │     ├─ hipdnn_ep_get_pool_base(state, domain_id, size)   grow-on-demand GPU pool
+   │     │     ├─ hipdnn_ep_get_pool_base(state, site_id, domain_id, size)
+   │     │     │                                                    grow-on-demand GPU pool
    │     │     ├─ <compute ops> (e.g. wrap_hipblasLtMatmul, wrap_miopen*) -> pool slots
    │     │     ├─ hipdnn_ep_alloc_output(state, out_idx, shape, rank, elem)   <-- OUTPUT ALLOC
    │     │     │  └─ output_allocator.cpp: forwards to alloc.allocate(self, ...)

@@ -7,7 +7,7 @@
 // larger than the default pool alignment so a packed-bit size cannot hide.
 // CHECK-LABEL: func.func @static_i1
 // CHECK: %[[BYTES:.*]] = arith.constant 300 : index
-// CHECK: %[[POOL:.*]] = hip.get_pool(%{{.*}}, %[[BYTES]]) : memref<?xi8>
+// CHECK: %[[POOL:.*]] = hip.get_pool(%{{.*}}, %[[BYTES]]){{.*}} : memref<?xi8>
 // CHECK: memref.view %[[POOL]]{{.*}} to memref<300xi1>
 func.func @static_i1(
     %ctx: !hip.context, %input: memref<300xi1>) -> memref<300xi1> {
@@ -23,7 +23,7 @@ func.func @static_i1(
 // CHECK-SAME: %[[N:[a-zA-Z0-9_]+]]: index
 // CHECK: %[[COEFF:.*]] = arith.constant 4 : index
 // CHECK: %[[BYTES:.*]] = arith.muli %[[N]], %[[COEFF]] : index
-// CHECK: hip.get_pool(%{{.*}}, %[[BYTES]]) : memref<?xi8>
+// CHECK: hip.get_pool(%{{.*}}, %[[BYTES]]){{.*}} : memref<?xi8>
 func.func @dynamic_i1_static_suffix(
     %ctx: !hip.context, %input: memref<?x4xi1>,
     %n: index) -> memref<?x4xi1> {
@@ -39,7 +39,7 @@ func.func @dynamic_i1_static_suffix(
 // CHECK-SAME: %[[N:[a-zA-Z0-9_]+]]: index
 // CHECK: %[[COEFF:.*]] = arith.constant 16 : index
 // CHECK: %[[BYTES:.*]] = arith.muli %[[N]], %[[COEFF]] : index
-// CHECK: hip.get_pool(%{{.*}}, %[[BYTES]]) : memref<?xi8>
+// CHECK: hip.get_pool(%{{.*}}, %[[BYTES]]){{.*}} : memref<?xi8>
 func.func @dynamic_f32_static_suffix(
     %ctx: !hip.context, %input: memref<?x4xf32>,
     %n: index) -> memref<?x4xf32> {
