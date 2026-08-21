@@ -256,8 +256,8 @@ collapseStaticTensor(mlir::OpBuilder &builder, mlir::Location loc,
 /// Pack a static rank-5/6 binary broadcast into at most four dimensions.
 ///
 /// Returns failure when the ranks/shapes cannot be proven safe to pack. The
-/// caller must then reject conversion; there is intentionally no high-rank
-/// runtime fallback.
+/// caller may preserve the original high-rank HIP operation so a backend with
+/// native high-rank support can lower it.
 inline mlir::FailureOr<PackedBroadcast4D>
 packStaticBroadcastTo4D(mlir::OpBuilder &builder, mlir::Location loc,
                         mlir::Value lhs, mlir::Value rhs, mlir::Value init,
@@ -366,36 +366,33 @@ restorePackedBroadcastResult(mlir::OpBuilder &builder, mlir::Location loc,
       .getResult();
 }
 
-/// Replace \p op with \p HipOpTy built from an already-computed DPS \p init.
+/// Replace \p op with binary elementwise \p HipOpTy using DPS \p init.
 ///
 /// The HIP binary elementwise lowerings only carry a rank-4 broadcast
 /// descriptor, so a static rank-5/6 result is routed through collapsed views
-/// and expanded back afterwards. \p onnxName only names the operation in the
-/// rejection diagnostic. Every ONNX binary broadcast conversion must go
-/// through here so that a new operation cannot silently miss the packing and
-/// fail HIP-to-LLVM legalization instead.
+/// and expanded back afterwards when that preserves ONNX broadcasting.
+///
+/// If packing is not possible, preserve the original rank in the HIP dialect.
+/// The current backend will reject unsupported ranks, while a future backend
+/// with native rank-5/6 support can lower the operation without a frontend
+/// change.
 template <typename HipOpTy>
-inline mlir::LogicalResult replaceWithBroadcastBinaryHipOp(
-    mlir::PatternRewriter &rewriter, mlir::Operation *op,
-    llvm::StringRef onnxName, mlir::Value context, mlir::Value lhs,
-    mlir::Value rhs, mlir::Value init, mlir::RankedTensorType resultType) {
+inline mlir::LogicalResult replaceWithBinaryElementwiseHipOp(
+    mlir::PatternRewriter &rewriter, mlir::Operation *op, mlir::Value context,
+    mlir::Value lhs, mlir::Value rhs, mlir::Value init,
+    mlir::RankedTensorType resultType) {
   mlir::Location loc = op->getLoc();
 
   if (resultType.getRank() > 4) {
     auto packing =
         packStaticBroadcastTo4D(rewriter, loc, lhs, rhs, init, resultType);
-    if (mlir::failed(packing)) {
-      op->emitError() << onnxName
-                      << " rank-5/6 shape cannot be packed to rank <= 4 "
-                         "without changing broadcast semantics; all dimensions "
-                         "must be static";
-      return mlir::failure();
+    if (mlir::succeeded(packing)) {
+      auto hipOp = HipOpTy::create(rewriter, loc, context, packing->lhs,
+                                   packing->rhs, packing->init);
+      rewriter.replaceOp(op, restorePackedBroadcastResult(
+                                 rewriter, loc, hipOp->getResult(0), *packing));
+      return mlir::success();
     }
-    auto hipOp = HipOpTy::create(rewriter, loc, context, packing->lhs,
-                                 packing->rhs, packing->init);
-    rewriter.replaceOp(op, restorePackedBroadcastResult(
-                               rewriter, loc, hipOp->getResult(0), *packing));
-    return mlir::success();
   }
 
   auto hipOp = HipOpTy::create(rewriter, loc, context, lhs, rhs, init);

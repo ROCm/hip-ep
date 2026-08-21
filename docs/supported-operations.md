@@ -101,12 +101,13 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | GlobalMaxPool | Custom HIP kernel |
 | GlobalLpPool | Custom HIP kernel |
 
-For rank-5/6 Add, Sub, Mul, Div, Less, and Greater, every dimension must be
-static. The frontend right-aligns the operands and collapses contiguous axes
-only when each operand is either fully broadcast across the group or matches
-the complete output group. Shapes that cannot preserve per-axis ONNX
-broadcasting in four or fewer groups are rejected during ONNX-to-HIP
-conversion.
+For rank-5/6 Add, Sub, Mul, Div, Less, and Greater, the frontend packs static
+shapes by right-aligning the operands and collapsing contiguous axes only when
+each operand is either fully broadcast across the group or matches the complete
+output group. If packing cannot preserve per-axis ONNX broadcasting in four or
+fewer groups—or the shape is dynamic—the frontend preserves the rank-5/6 HIP
+operation for a backend with native high-rank support. The current HIP-to-LLVM
+backend rejects such unpacked operations.
 
 ## Control flow
 

@@ -34,8 +34,8 @@ struct LessToHip : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "Less: no ranked operand spans dynamic result dim");
 
-    return replaceWithBroadcastBinaryHipOp<mlir::hip::LessOp>(
-        rewriter, op, "Less", context, a, b, *initOrFailure, resultType);
+    return replaceWithBinaryElementwiseHipOp<mlir::hip::LessOp>(
+        rewriter, op, context, a, b, *initOrFailure, resultType);
   }
 };
 
