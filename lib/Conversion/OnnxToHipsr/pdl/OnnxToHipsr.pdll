@@ -1,0 +1,63 @@
+//===- OnnxToHipsr.pdll - ONNX to HipSR conversion patterns ---------------===//
+//
+// Part of the ROCm Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+//
+// PDLL patterns for converting ONNX operations to HipSR dialect.
+//
+// This file replaces the C++ RewritePattern implementations in:
+// - CastConversion.cpp
+// - MatMulConversion.cpp
+// - ExpandConversion.cpp
+//
+// Each pattern uses native rewrites (implemented in C++) because PDLL doesn't
+// easily support enum attributes required by hipsr.placeholder.
+//
+//===----------------------------------------------------------------------===//
+
+//===----------------------------------------------------------------------===//
+// Native Constraints and Rewrites
+//===----------------------------------------------------------------------===//
+
+/// Get the !hipsr.context value for the current function.
+Constraint GetHipsrContext(op: Op) -> Value;
+
+/// Rewrite ONNX Cast to HipSR Cast (implemented in C++)
+Rewrite RewriteCast(root: Op) -> Op;
+
+/// Rewrite ONNX MatMul to HipSR MatMul (implemented in C++)
+Rewrite RewriteMatMul(root: Op) -> Op;
+
+/// Rewrite ONNX Expand to HipSR Expand (implemented in C++)
+Rewrite RewriteExpand(root: Op) -> Op;
+
+//===----------------------------------------------------------------------===//
+// Patterns
+//===----------------------------------------------------------------------===//
+
+Pattern CastToHipsr {
+  let root = op<onnx.Cast>;
+  rewrite root with {
+    let newOp = RewriteCast(root);
+    replace root with newOp;
+  };
+}
+
+Pattern MatMulToHipsr {
+  let root = op<onnx.MatMul>;
+  rewrite root with {
+    let newOp = RewriteMatMul(root);
+    replace root with newOp;
+  };
+}
+
+Pattern ExpandToHipsr {
+  let root = op<onnx.Expand>;
+  rewrite root with {
+    let newOp = RewriteExpand(root);
+    replace root with newOp;
+  };
+}
