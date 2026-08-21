@@ -35,8 +35,8 @@ SoftmaxToHip::matchAndRewrite(mlir::Operation *op,
   if (mlir::failed(init))
     return rewriter.notifyMatchFailure(
         op, "Softmax result type must match the input shape");
-  auto hipOp = mlir::hip::MiopenSoftmaxOp::create(rewriter, loc, context, input,
-                                                  *init);
+  auto hipOp =
+      mlir::hip::MiopenSoftmaxOp::create(rewriter, loc, context, input, *init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
