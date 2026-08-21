@@ -45,6 +45,14 @@ ArrayRef<int64_t> getShapeOf(Value value) {
   return {};
 }
 
+SmallVector<int64_t> getI64Array(ArrayAttr attr) {
+  SmallVector<int64_t> values;
+  values.reserve(attr.size());
+  for (Attribute value : attr)
+    values.push_back(cast<IntegerAttr>(value).getInt());
+  return values;
+}
+
 /// Pretty-print a shape vector with `?` for kDynamic. Used in diagnostics.
 std::string formatShape(ArrayRef<int64_t> shape) {
   std::string out;

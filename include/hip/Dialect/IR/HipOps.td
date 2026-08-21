@@ -598,14 +598,14 @@ def Hip_HipblasltGraphOp : Hip_Op<"hipblaslt.graph", [SingleBlock, NoTerminator]
 
 // ===== MIOpen DNN Operations =================================================
 
-def Hip_ConvOp : Hip_DpsOp_AutoReifyInfer<
-    "conv", /*outsAccessor=*/"Output", /*traits=*/[OpStateOpInterface]> {
+def Hip_ConvOp :
+    Hip_DpsOp_Semantic<"conv", /*traits=*/[OpStateOpInterface]> {
   let summary = "2D convolution operation using MIOpen (in-place)";
   let description = [{
     Performs 2D convolution using MIOpen (miopenConvolutionForward).
 
     Uses destination-passing style: output buffer is provided as argument,
-    operation writes result in-place.
+    and the operation writes the result in-place.
 
     Attributes:
     - kernel_shape: Array of kernel dimensions [H, W]
@@ -655,10 +655,14 @@ def Hip_ConvOp : Hip_DpsOp_AutoReifyInfer<
           {});
     }
   }];
+
+  let hasVerifier = 1;
 }
 
-def Hip_ConvTransposeOp : Hip_DpsOp_AutoReify<
-    "conv_transpose", /*traits=*/[OpStateOpInterface]> {
+def Hip_ConvTransposeOp :
+    Hip_DpsOp_Semantic<"conv_transpose",
+                       /*traits=*/[OpStateOpInterface],
+                       /*outsAccessor=*/"Output"> {
   let summary = "2D transposed convolution / deconvolution using MIOpen "
                 "(in-place)";
   let description = [{
@@ -727,6 +731,8 @@ def Hip_ConvTransposeOp : Hip_DpsOp_AutoReify<
           {});
     }
   }];
+
+  let hasVerifier = 1;
 }
 
 // ===== hipBLASLt ops =========================================================
