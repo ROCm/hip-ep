@@ -2197,6 +2197,30 @@ HIP_KERNEL_API int hip_causal_conv_prefill(
     int64_t activation,
     int64_t element_size_bytes);
 
+// Channels-last prefill: same contract as hip_causal_conv_prefill except that
+// input and output are [B, L, C]. The state keeps its [B, C, K-1] layout.
+//
+// The ONNX export wraps this convolution in a Transpose pair only because ONNX
+// Conv wants channels first; on Qwen3.6-35B-A3B those two transposes move 65 MB
+// apiece and together cost more than the convolution between them. A caller that
+// can fold the transposes away calls this instead, and pays neither. Results are
+// bit-identical to the channels-first kernel on the same data -- same fp32
+// accumulation of the same K taps in the same order.
+HIP_KERNEL_API int hip_causal_conv_prefill_nlc(
+    void* stream,
+    const void* input,
+    const void* weight,
+    const void* bias,
+    const void* past_state,
+    void* output,
+    void* present_state,
+    int64_t batch_size,
+    int64_t channels,
+    int64_t seq_len,
+    int64_t kernel_size,
+    int64_t activation,
+    int64_t element_size_bytes);
+
 /* =========================================================================
  * WMMA GEMM (Small-M Matrix Multiply via Wave Matrix Multiply-Accumulate)
  * =========================================================================
