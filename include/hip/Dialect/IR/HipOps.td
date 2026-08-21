@@ -1855,8 +1855,8 @@ def Hip_GatherOp :
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
-}
   let hasVerifier = 1;
+}
 
 def Hip_OneHotOp : Hip_DpsOp_WithInfer<"one_hot"> {
   let summary = "Expand indices into a one-hot tensor along an axis";
@@ -4227,8 +4227,8 @@ def Hip_GatherNDOp :
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
-}
   let hasVerifier = 1;
+}
 
 def Hip_ScatterNDOp : Hip_DpsOp_AutoReifyInfer<"scatter_nd"> {
   let summary = "ScatterND: scatter updates into a data tensor using N-D index tuples";
@@ -4391,8 +4391,8 @@ def Hip_SizeOp :
     `outs` `(` $y `:` type($y) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
-}
   let hasVerifier = 1;
+}
 
 def Hip_NonZeroOp : Hip_DpsOp_AutoReify<"nonzero"> {
   let summary = "Indices of non-zero elements (ONNX NonZero)";
