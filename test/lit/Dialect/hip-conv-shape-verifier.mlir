@@ -10,7 +10,7 @@ func.func @valid_zero_extent(
     %weights: memref<4x2x2x2xf32, 1>,
     %output: memref<1x4x0x0xf32, 1>) {
   hip.conv(%ctx)
-    valid(%valid)
+
     ins(%input, %weights : memref<1x2x1x1xf32, 1>,
                            memref<4x2x2x2xf32, 1>)
     outs(%output : memref<1x4x0x0xf32, 1>)
@@ -29,7 +29,7 @@ func.func @wrong_spatial(
     %output: memref<1x4x8x6xf32, 1>) {
   // expected-error @+1 {{dim 3 of result mismatch: expected 4}}
   hip.conv(%ctx)
-    valid(%valid)
+
     ins(%input, %weights : memref<1x2x8x8xf32, 1>,
                            memref<4x2x3x3xf32, 1>)
     outs(%output : memref<1x4x8x6xf32, 1>)
@@ -48,7 +48,7 @@ func.func @wrong_group_channels(
     %output: memref<1x8x8x8xf32, 1>) {
   // expected-error @+1 {{input channels 6 do not match weights channels-per-group 2 times group 2}}
   hip.conv(%ctx)
-    valid(%valid)
+
     ins(%input, %weights : memref<1x6x8x8xf32, 1>,
                            memref<8x2x3x3xf32, 1>)
     outs(%output : memref<1x8x8x8xf32, 1>)
@@ -67,7 +67,7 @@ func.func @wrong_kernel_shape(
     %output: memref<1x4x8x8xf32, 1>) {
   // expected-error @+1 {{kernel_shape dimension 5 does not match weights spatial dimension 3 at axis 0}}
   hip.conv(%ctx)
-    valid(%valid)
+
     ins(%input, %weights : memref<1x2x8x8xf32, 1>,
                            memref<4x2x3x3xf32, 1>)
     outs(%output : memref<1x4x8x8xf32, 1>)
@@ -85,7 +85,7 @@ func.func @wide_window_product(
     %weights: memref<1x1x9223372036854775807xf32, 1>,
     %output: memref<1x1x?xf32, 1>) {
   hip.conv(%ctx)
-    valid(%valid)
+
     ins(%input, %weights : memref<1x1x?xf32, 1>,
                            memref<1x1x9223372036854775807xf32, 1>)
     outs(%output : memref<1x1x?xf32, 1>)
@@ -103,7 +103,7 @@ func.func @window_offset_i64_boundary(
     %weights: memref<1x1x9223372036854775807xf32, 1>,
     %output: memref<1x1x?xf32, 1>) {
   hip.conv(%ctx)
-    valid(%valid)
+
     ins(%input, %weights : memref<1x1x?xf32, 1>,
                            memref<1x1x9223372036854775807xf32, 1>)
     outs(%output : memref<1x1x?xf32, 1>)
@@ -122,7 +122,7 @@ func.func @static_invalid_padded_kernel(
     %weights: memref<1x1x5x5xf32, 1>,
     %output: memref<1x1x?x?xf32, 1>) {
   // expected-error @+1 {{conv inferred a negative output extent -1 at spatial axis 0}}
-  hip.conv(%ctx) valid(%valid)
+  hip.conv(%ctx)
     ins(%input, %weights : memref<1x1x1x1xf32, 1>,
                            memref<1x1x5x5xf32, 1>)
     outs(%output : memref<1x1x?x?xf32, 1>)
