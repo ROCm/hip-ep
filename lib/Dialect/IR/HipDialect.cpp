@@ -1213,9 +1213,8 @@ LogicalResult GridSampleOp::verify() {
            << mode;
   int64_t padding = getPaddingMode();
   if (padding < 0 || padding > 2)
-    return emitOpError(
-               "padding_mode must be 0 (zeros), 1 (border), or 2 "
-               "(reflection), got ")
+    return emitOpError("padding_mode must be 0 (zeros), 1 (border), or 2 "
+                       "(reflection), got ")
            << padding;
   int64_t align = getAlignCorners();
   if (align != 0 && align != 1)

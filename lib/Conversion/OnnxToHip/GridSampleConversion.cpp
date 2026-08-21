@@ -25,8 +25,9 @@ namespace {
 //
 // Before:
 //   %y = "onnx.GridSample"(%x, %grid)
-//          {mode = "bilinear", padding_mode = "zeros", align_corners = 0 : si64}
-//          : (tensor<1x3x8x8xf32>, tensor<1x4x4x2xf32>) -> tensor<1x3x4x4xf32>
+//          {mode = "bilinear", padding_mode = "zeros", align_corners = 0 :
+//          si64} : (tensor<1x3x8x8xf32>, tensor<1x4x4x2xf32>) ->
+//          tensor<1x3x4x4xf32>
 //
 // After:
 //   %init = tensor.empty() : tensor<1x3x4x4xf32>

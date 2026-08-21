@@ -35,11 +35,11 @@ static int hipdnn_ep_to_hip_dtype_grid_sample(int64_t data_type) {
   }
 }
 
-HIPDNN_EP_RT_EXPORT int wrap_grid_sample(
-    RuntimeState *state, void *input, void *grid, void *output,
-    int64_t data_type, int64_t n, int64_t c, int64_t in_h, int64_t in_w,
-    int64_t out_h, int64_t out_w, int64_t mode, int64_t padding_mode,
-    int64_t align_corners) {
+HIPDNN_EP_RT_EXPORT int
+wrap_grid_sample(RuntimeState *state, void *input, void *grid, void *output,
+                 int64_t data_type, int64_t n, int64_t c, int64_t in_h,
+                 int64_t in_w, int64_t out_h, int64_t out_w, int64_t mode,
+                 int64_t padding_mode, int64_t align_corners) {
   OP_PROFILE(
       "gridsample",
       [&] {

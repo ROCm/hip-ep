@@ -1158,7 +1158,8 @@ int wrap_resize(RuntimeState *state, void *input, void *output,
 
 // GridSample (4-D NCHW). grid is (N, H_out, W_out, 2) with last dim (x, y).
 // mode: 0=nearest, 1=bilinear; padding_mode: 0=zeros, 1=border, 2=reflection;
-// align_corners: 0 or 1. data_type: HIPDNN_EP_DATATYPE_* (FLOAT/HALF/BFLOAT16/DOUBLE).
+// align_corners: 0 or 1. data_type: HIPDNN_EP_DATATYPE_*
+// (FLOAT/HALF/BFLOAT16/DOUBLE).
 int wrap_grid_sample(RuntimeState *state, void *input, void *grid, void *output,
                      int64_t data_type, int64_t n, int64_t c, int64_t in_h,
                      int64_t in_w, int64_t out_h, int64_t out_w, int64_t mode,

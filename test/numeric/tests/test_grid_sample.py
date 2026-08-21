@@ -57,9 +57,7 @@ class TestGridSample:
             ("bilinear", "zeros", 1),
         ],
     )
-    def test_grid_sample_f32(
-        self, model_runner, mode, padding_mode, align_corners
-    ):
+    def test_grid_sample_f32(self, model_runner, mode, padding_mode, align_corners):
         input_shape = [1, 3, 8, 8]
         grid_shape = [1, 4, 4, 2]
         model = _make_grid_sample_model(
