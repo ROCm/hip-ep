@@ -23,7 +23,8 @@ std::string formatShape(ArrayRef<int64_t> shape);
 FailureOr<SmallVector<OpFoldResult>>
 reifyBroadcastShape(OpBuilder &b, Location loc,
                     ArrayRef<SmallVector<OpFoldResult>> inputShapes,
-                    function_ref<InFlightDiagnostic()> emitError);
+                    function_ref<InFlightDiagnostic()> emitError,
+                    ArrayRef<int64_t> canonicalOperandForResultDim = {});
 
 } // namespace mlir::hip::detail
 

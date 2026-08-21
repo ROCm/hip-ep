@@ -122,7 +122,8 @@ reifyElementwiseSameShapeFor(OpBuilder &b, Location loc, Value source,
 /// emitted.
 FailureOr<SmallVector<OpFoldResult>>
 reifyBroadcastResultShape(OpBuilder &b, Location loc, ValueRange operands,
-                          function_ref<InFlightDiagnostic()> emitError);
+                          function_ref<InFlightDiagnostic()> emitError,
+                          ArrayRef<int64_t> canonicalOperandForResultDim = {});
 
 /// Reify the result shape of a transpose op as `output[i] = input[perm[i]]`.
 /// `perm` must be a permutation of `[0, rank-1)` and have the same length

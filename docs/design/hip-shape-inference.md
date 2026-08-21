@@ -82,6 +82,25 @@ before introducing another feature-specific symbolic analysis. Frontend payload
 provenance, such as reconstructing a shape tensor's values, is a separate
 problem from proving affine equality between dimensions.
 
+ONNX also carries authoritative dimension-variable identity (`dim_param`).
+MorphiZen preserves that frontend fact as compile-time-only module metadata.
+Immediately before ONNX compute conversion, a bounded operation-local plan may
+reuse one operand extent when every dynamic non-unit broadcast contributor has
+the same eligible non-empty identity. Missing, different, malformed, unnamed,
+multi-bound, nested-subgraph, and post-rewrite values retain the exact runtime
+broadcast expression. Pre-existing operation-local plan attributes are rejected
+rather than trusted. The metadata and generated plan are consumed during ONNX
+conversion and do not survive into HIP IR; `ReifyRankedShapedTypeOpInterface`
+and `--hip-infer-shapes` remain frontend-neutral and callback-free.
+
+MorphiZen's finalized cache key includes the immutable source model (or
+canonical in-memory compiler graph), persistent-artifact initializer bytes,
+canonical symbolic metadata, resolved compiler contract, encoding version, and
+resolver-policy version in domain-separated SHA-256 fields. Process-local
+initializer addresses are normalized out of graph identity. A prebuilt artifact
+without finalized initializer identity is ignored, and a restored cache context
+must contain the same finalized key; cache metadata cannot replace it.
+
 Phase 1 of `--hip-infer-shapes` is intentionally local rather than a global
 fixpoint: each operation is refined once in producer-before-consumer order, and
 cast barriers preserve existing consumer signatures instead of propagating
