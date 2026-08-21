@@ -85,18 +85,18 @@ resolveGqaSequenceExtents(mlir::PatternRewriter &rewriter, mlir::Location loc,
                           mlir::RankedTensorType presentValueType,
                           mlir::RankedTensorType outputQkType) {
   if (static_cast<bool>(pastKey) != static_cast<bool>(pastValue)) {
-    rewriter.notifyMatchFailure(
+    (void)rewriter.notifyMatchFailure(
         op, "past_key and past_value must both be present or both be absent");
     return mlir::failure();
   }
   if (!presentKeyType || !presentValueType || presentKeyType.getRank() != 4 ||
       presentValueType.getRank() != 4) {
-    rewriter.notifyMatchFailure(
+    (void)rewriter.notifyMatchFailure(
         op, "present_key and present_value must be rank-4 BNSH tensors");
     return mlir::failure();
   }
   if (outputQkType && outputQkType.getRank() != 4) {
-    rewriter.notifyMatchFailure(op, "output_qk must be a rank-4 tensor");
+    (void)rewriter.notifyMatchFailure(op, "output_qk must be a rank-4 tensor");
     return mlir::failure();
   }
 
@@ -107,7 +107,7 @@ resolveGqaSequenceExtents(mlir::PatternRewriter &rewriter, mlir::Location loc,
         mlir::dyn_cast<mlir::RankedTensorType>(pastValue.getType());
     if (!pastKeyType || !pastValueType || pastKeyType.getRank() != 4 ||
         pastValueType.getRank() != 4) {
-      rewriter.notifyMatchFailure(
+      (void)rewriter.notifyMatchFailure(
           op, "past_key and past_value must be rank-4 BNSH tensors");
       return mlir::failure();
     }
@@ -127,7 +127,7 @@ resolveGqaSequenceExtents(mlir::PatternRewriter &rewriter, mlir::Location loc,
   if (!totalSeqLenType || totalSeqLenType.getRank() != 0 ||
       !mlir::isa<mlir::IntegerType, mlir::IndexType>(
           totalSeqLenType.getElementType())) {
-    rewriter.notifyMatchFailure(
+    (void)rewriter.notifyMatchFailure(
         op, "total_sequence_length must be a scalar integer tensor");
     return mlir::failure();
   }
