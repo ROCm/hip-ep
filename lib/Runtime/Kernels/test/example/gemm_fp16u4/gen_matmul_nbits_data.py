@@ -66,7 +66,16 @@ def main():
     B_uint4 = np.random.randint(0, 16, (N, K), dtype=np.uint8)
     B_even = B_uint4[:, 0::2]
     B_odd  = B_uint4[:, 1::2]
-    B_packed = (B_even | (B_odd << 4)).astype(np.uint8)
+    B_packed_real = (B_even | (B_odd << 4)).astype(np.uint8)
+
+    # ONNX MatMulNBits pads each row's blob to num_groups_k * (group_size/2)
+    # bytes -- the last group is padded to a full group_size even when K is not
+    # a multiple of group_size. hip_matmul_nbits' row stride assumes this
+    # padded layout (see matmul_nbits_kernel.hip row-stride comments), so an
+    # unpadded K/2-byte row misaligns every row n>0 whenever K % group_size != 0.
+    row_bytes = num_groups_k * (group_size // 2)
+    B_packed = np.zeros((N, row_bytes), dtype=np.uint8)
+    B_packed[:, :B_packed_real.shape[1]] = B_packed_real
 
     scales = np.random.uniform(0.01, 0.05, (N, num_groups_k)).astype(np.float16)
 
