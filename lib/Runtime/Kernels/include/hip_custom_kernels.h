@@ -1877,6 +1877,14 @@ HIP_KERNEL_API int hip_qmoe_scatter_add(
  *   sorted_token_ids - GPU [num_tokens * k]   int32 (output, grouped by eid)
  *   sorted_weights   - GPU [num_tokens * k]   fp16  (output, aligned w/ ids)
  *
+ *   scratch          - GPU scratch for the chunked path, or null
+ *   scratch_bytes    - bytes at scratch; size it with the helper below
+ *
+ * With scratch the bucketing runs as a chunked stable counting sort spread over
+ * the machine; without it (or for a single chunk's worth of pairs, i.e. decode)
+ * it runs as one workgroup. Both produce byte-identical output, token-major
+ * within each expert, which the downstream weighted scatter_add relies on.
+ *
  * Constraints: fp16 only; num_experts <= 1024.
  */
 HIP_KERNEL_API int hip_qmoe_bucket_tokens(
@@ -1890,7 +1898,15 @@ HIP_KERNEL_API int hip_qmoe_bucket_tokens(
     int64_t num_tokens,
     int64_t num_experts,
     int64_t k,
-    int64_t element_size_bytes);
+    int64_t element_size_bytes,
+    void* scratch,
+    size_t scratch_bytes);
+
+/* Scratch bytes hip_qmoe_bucket_tokens needs to take its chunked path for this
+ * shape. Returns 0 when the shape would use the single-workgroup path anyway.
+ */
+HIP_KERNEL_API size_t hip_qmoe_bucket_scratch_bytes(
+    int64_t num_tokens, int64_t num_experts, int64_t k);
 
 /* -------------------------------------------------------------------------
  * Fully fused MoE decode (num_tokens == 1).
