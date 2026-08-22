@@ -583,12 +583,19 @@ HIP_KERNEL_API int hip_gqa_kv_cache_append(
  * element_size_bytes: 2 = fp16, 4 = fp32 (used only by the FP16 copy path).
  * kv_dtype / scale select the storage format exactly as in
  * hip_gqa_kv_cache_append (HIP_KV_DTYPE_FP16 -> plain copy; HIP_KV_DTYPE_INT8 ->
- * INT8 quant of the new fp16 tokens, past then read as INT8, scale = [G,d]). */
+ * INT8 quant of the new fp16 tokens, past then read as INT8, scale = [G,d]).
+ * s_lo: first present position to write. Positions [0, s_lo) are LEFT UNWRITTEN
+ * -- not zeroed, not copied -- so present is only valid from s_lo onwards, and
+ * the caller must not read below it. Pass 0 for a full concat. The grid shrinks
+ * with s_lo, which is the point: a sliding-window layer at decode passes the
+ * same lower bound it reads from, so the bytes it skips writing are exactly the
+ * bytes it will not read. Clamped internally to [0, past_len] so the new tokens
+ * at [past_len, past_len+sq) are always written. */
 HIP_KERNEL_API int hip_gqa_kv_cache_concat(
     void* stream, const void* past, const void* current, void* present,
     int batch_size, int past_len, int sq, int G, int d,
     int past_seq, int present_seq, int element_size_bytes,
-    int kv_dtype, const void* scale);
+    int kv_dtype, const void* scale, int s_lo);
 
 /* INT8 KV cache (symmetric per-channel, kv_cache_bit_width=8) dequant.
  * dequant_kv_i8_to_fp16: rebuilds an fp16 BNSD view [B,G,dst_seq,d] of the first
@@ -651,19 +658,24 @@ HIP_KERNEL_API int hip_gqa_causal_mask_f32(
     int batch_stride, int past_len, int local_window_size);
 
 /* Add an attention bias onto the fp32 score matrix before softmax.
- * scores layout: [total_heads, sq, total_seq] row-major with batch_stride
- * = sq * total_seq per head.
- * bias layout: [bias_batch, bias_heads, bias_sq, total_seq], row-major.
+ * scores layout: [total_heads, sq, score_cols] row-major with batch_stride
+ * = sq * score_cols per head.
+ * bias layout: [bias_batch, bias_heads, bias_sq, bias_total_seq], row-major.
  * bias_batch / bias_heads may be 1 for ONNX-style broadcast.
- * sq is the number of query rows in `scores`, which is a chunk of the full
- * query range when the caller tiles the prefill; bias_sq is the bias tensor's
- * full query extent and bias_row_offset locates the chunk within it. Pass
- * bias_sq = sq (or 0) and bias_row_offset = 0 for the untiled case. */
+ * `scores` may be a sub-block of the full logical score matrix on either axis,
+ * so both axes carry a bias extent and an offset:
+ *   sq / bias_sq / bias_row_offset -- sq is the number of query rows present,
+ *     a chunk of the full range when the caller tiles the prefill.
+ *   score_cols / bias_total_seq / bias_col_offset -- score_cols is the number
+ *     of key columns present, just the sliding window when the caller narrowed
+ *     the decode key range.
+ * Pass bias_sq = sq (or 0) and bias_row_offset = 0, and bias_total_seq =
+ * score_cols (or 0) and bias_col_offset = 0, for the untiled/unnarrowed case. */
 HIP_KERNEL_API int hip_gqa_add_attention_bias_f32(
     void* stream, void* scores, const void* bias,
     int total_heads, int num_heads, int bias_batch, int bias_heads,
-    int sq, int total_seq, int score_batch_stride, int bias_element_size_bytes,
-    int bias_sq, int bias_row_offset);
+    int sq, int score_cols, int score_batch_stride, int bias_element_size_bytes,
+    int bias_sq, int bias_row_offset, int bias_total_seq, int bias_col_offset);
 
 /* Column-wise softmax in-place. One threadblock per (head, query).
  * Smooth softmax is activated when head_sink is non-null OR use_smooth_softmax
