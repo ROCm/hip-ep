@@ -127,8 +127,9 @@ module {
 
   // Test 7: SliceDecompose bails when a sliced axis has a dynamic
   // input dim (ONNX clamping rules need the static dim size); falls
-  // through to hip.slice. The data dim is forwarded as an upper-bound
-  // tensor.dim for the dynamic output dim.
+  // through to hip.slice. The output extent is still the slice length --
+  // clamp(end) - clamp(start) -- not the data dim, which is only an upper
+  // bound and would be handed to every consumer as the shape.
   func.func @test_slice_native_dyn_axis(%input: tensor<?xf32>) -> tensor<?xf32> {
     // CHECK-LABEL: func.func @test_slice_native_dyn_axis
     %starts = arith.constant dense<[1]> : tensor<1xi64>
@@ -140,10 +141,120 @@ module {
            tensor<1xi64>, tensor<1xi64>) -> tensor<?xf32>
 
     // CHECK-NOT: tensor.extract_slice
-    // CHECK-DAG: %[[A0:.*]] = arith.constant 0 : index
-    // CHECK-DAG: %[[DIM:.*]] = tensor.dim %{{.*}}, %[[A0]] : tensor<?xf32>
-    // CHECK: tensor.empty(%[[DIM]]) : tensor<?xf32>
+    // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
+    // CHECK-DAG: %[[C3:.*]] = arith.constant 3 : index
+    // CHECK-DAG: %[[DIM:.*]] = tensor.dim %{{.*}} : tensor<?xf32>
+    // CHECK: %[[LO:.*]] = arith.minsi %{{.*}}, %[[DIM]] : index
+    // CHECK: %[[HI:.*]] = arith.minsi %{{.*}}, %[[DIM]] : index
+    // CHECK: %[[LEN:.*]] = arith.subi %[[HI]], %[[LO]] : index
+    // CHECK: %[[EXT:.*]] = arith.maxsi %[[LEN]], %{{.*}} : index
+    // CHECK: tensor.empty(%[[EXT]]) : tensor<?xf32>
     // CHECK: hip.slice({{.*}}) ins({{.*}}, {{.*}}, {{.*}} : tensor<?xf32>, tensor<1xi64>, tensor<1xi64>)
     return %r : tensor<?xf32>
+  }
+
+  // Test 8: the decode-mask idiom from Gemma-4 26B-A4B. `starts` is
+  // Shape(attn)[1] - Shape(ids)[1] and `ends` is Shape(attn)[1], so the slice
+  // keeps the current query positions only -- one row during decode. Both
+  // bounds are host arithmetic over onnx.Shape, so the extent is computable
+  // with no device readback, and the resulting empty must NOT be sized by the
+  // data dim: that is what inflated the causal mask to [1, S, S] and cost 60%
+  // of a decode step.
+  func.func @test_slice_native_shape_sub_extent(
+      %data: tensor<?x?xi64>, %ids: tensor<?x?xi64>, %attn: tensor<?x?xi64>)
+      -> tensor<?x?xi64> {
+    // CHECK-LABEL: func.func @test_slice_native_shape_sub_extent
+    %axes = arith.constant dense<[1]> : tensor<1xi64>
+    %ids_len  = "onnx.Shape"(%ids)  {start = 1 : si64, end = 2 : si64}
+        : (tensor<?x?xi64>) -> tensor<1xi64>
+    %attn_len = "onnx.Shape"(%attn) {start = 1 : si64, end = 2 : si64}
+        : (tensor<?x?xi64>) -> tensor<1xi64>
+    %starts = "onnx.Sub"(%attn_len, %ids_len)
+        : (tensor<1xi64>, tensor<1xi64>) -> tensor<1xi64>
+    %r = "onnx.Slice"(%data, %starts, %attn_len, %axes)
+        : (tensor<?x?xi64>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>) -> tensor<?x?xi64>
+
+    // SliceToHip fires before the operands are rewritten, so `starts` resolves
+    // through the ONNX spelling (onnx.Sub of two onnx.Shape) and the walker
+    // emits the tensor.dim / arith.subi below itself. That is also the order
+    // Gemma-4 takes in the real pipeline, so this is the production path; test
+    // 10 covers the post-conversion spelling, which the same walk accepts
+    // because the greedy driver does not guarantee either order.
+    // CHECK: %[[D0:.*]] = tensor.dim %arg1, %{{.*}} : tensor<?x?xi64>
+    // CHECK: %[[D1:.*]] = tensor.dim %arg1, %{{.*}} : tensor<?x?xi64>
+    // CHECK: arith.subi %{{.*}}, %{{.*}} : index
+    // CHECK: %[[LO:.*]] = arith.minsi %{{.*}}, %[[D1]] : index
+    // CHECK: %[[HI:.*]] = arith.minsi %{{.*}}, %[[D1]] : index
+    // CHECK: %[[LEN:.*]] = arith.subi %[[HI]], %[[LO]] : index
+    // CHECK: %[[EXT:.*]] = arith.maxsi %[[LEN]], %{{.*}} : index
+    // CHECK: tensor.empty(%[[D0]], %[[EXT]]) : tensor<?x?xi64>
+    // CHECK: hip.slice
+    return %r : tensor<?x?xi64>
+  }
+
+  // Test 9: an opaque `starts` (a graph input, not shape arithmetic) is not
+  // host-resolvable, so the extent falls back to the data dim upper bound
+  // rather than emitting an extent that cannot be justified.
+  func.func @test_slice_native_opaque_starts(
+      %data: tensor<?xi64>, %starts: tensor<1xi64>, %ends: tensor<1xi64>)
+      -> tensor<?xi64> {
+    // CHECK-LABEL: func.func @test_slice_native_opaque_starts
+    %axes = arith.constant dense<[0]> : tensor<1xi64>
+    %r = "onnx.Slice"(%data, %starts, %ends, %axes)
+        : (tensor<?xi64>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>) -> tensor<?xi64>
+
+    // CHECK-NOT: arith.minsi
+    // CHECK: %[[DIM:.*]] = tensor.dim %arg1, %{{.*}} : tensor<?xi64>
+    // CHECK: tensor.empty(%[[DIM]]) : tensor<?xi64>
+    // CHECK: hip.slice
+    return %r : tensor<?xi64>
+  }
+
+  // Test 10: the same idiom already rewritten into the post-conversion
+  // spelling, which is the other order the greedy driver may produce and which
+  // test 8 therefore does not reach. Feeding it pre-lowered pins that branch of
+  // the walk: `from_elements(index_cast(tensor.dim))` for the shapes and
+  // hip.sub for the arithmetic, with the index_cast unwrapped rather than cast
+  // a second time. Without a test here, an ordering change elsewhere would
+  // silently drop back to the data-dim upper bound and nothing would fail.
+  func.func @test_slice_native_lowered_shape_sub_extent(
+      %ctx: !hip.context, %data: tensor<?x?xi64>, %ids: tensor<?x?xi64>,
+      %attn: tensor<?x?xi64>) -> tensor<?x?xi64> {
+    // CHECK-LABEL: func.func @test_slice_native_lowered_shape_sub_extent
+    %c1 = arith.constant 1 : index
+    %axes = arith.constant dense<[1]> : tensor<1xi64>
+
+    %ids_dim = tensor.dim %ids, %c1 : tensor<?x?xi64>
+    %ids_i64 = arith.index_cast %ids_dim : index to i64
+    %ids_len = tensor.from_elements %ids_i64 : tensor<1xi64>
+
+    %attn_dim = tensor.dim %attn, %c1 : tensor<?x?xi64>
+    %attn_i64 = arith.index_cast %attn_dim : index to i64
+    %attn_len = tensor.from_elements %attn_i64 : tensor<1xi64>
+
+    %sub_init = tensor.empty() : tensor<1xi64>
+    %starts = hip.sub(%ctx) ins(%attn_len, %ids_len : tensor<1xi64>,
+        tensor<1xi64>) outs(%sub_init : tensor<1xi64>) : tensor<1xi64>
+
+    %r = "onnx.Slice"(%data, %starts, %attn_len, %axes)
+        : (tensor<?x?xi64>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>) -> tensor<?x?xi64>
+
+    // The bounds resolve to the two dims the from_elements were packed from,
+    // with the index_cast unwrapped, so `starts` is an index-domain subi of
+    // them; the extent is then the clamped end minus the clamped start, not the
+    // data dim.
+    // CHECK: %[[D0:.*]] = tensor.dim %arg1, %{{.*}} : tensor<?x?xi64>
+    // CHECK: %[[D1:.*]] = tensor.dim %arg1, %{{.*}} : tensor<?x?xi64>
+    // CHECK: arith.subi %{{.*}}, %{{.*}} : index
+    // CHECK: %[[LO:.*]] = arith.minsi %{{.*}}, %[[D1]] : index
+    // CHECK: %[[HI:.*]] = arith.minsi %{{.*}}, %[[D1]] : index
+    // CHECK: %[[LEN:.*]] = arith.subi %[[HI]], %[[LO]] : index
+    // CHECK: %[[EXT:.*]] = arith.maxsi %[[LEN]], %{{.*}} : index
+    // CHECK: tensor.empty(%[[D0]], %[[EXT]]) : tensor<?x?xi64>
+    // CHECK: hip.slice
+    return %r : tensor<?x?xi64>
   }
 }
