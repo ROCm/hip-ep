@@ -2531,8 +2531,12 @@ __global__ void dequant_u4_to_fp16(
     _Float16 scale = scales[n * num_groups_k + grp];
     _Float16 zp    = zeros ? zeros[n * num_groups_k + grp] : (_Float16)8;
 
+    // Row stride is num_groups_k * (group_size/2) bytes (ONNX MatMulNBits
+    // padding: the last group is padded to a full group_size even when
+    // K % group_size != 0), not a plain K/2 -- see GemmFp16U4Impl's
+    // b_byte_base comment. The intra-row offset (k8/2) is unaffected.
     uint32_t four = *reinterpret_cast<const uint32_t*>(
-        &B_packed[n * (K / 2) + k8 / 2]);
+        &B_packed[n * (num_groups_k * (group_size / 2)) + k8 / 2]);
 
     _Float16 bv[8];
     bv[0] = (static_cast<_Float16>(static_cast<int>((four      ) & 0xF)) - zp) * scale;
@@ -2650,9 +2654,16 @@ void GemmFp16U4Impl(
     const bool b_valid    = BOUNDS_CHECK ? (b_n_g_raw < N) : true;
     const int b_n_g       = (BOUNDS_CHECK && !b_valid) ? 0 : b_n_g_raw;
 
-    // Fused dequant state (compile-time eliminated when FUSED_DQ=false)
+    // Fused dequant state (compile-time eliminated when FUSED_DQ=false).
+    // B_packed rows are padded to num_groups_k * (group_size/2) bytes (ONNX
+    // MatMulNBits blob layout -- the last group is padded to a full
+    // group_size even when K % group_size != 0), NOT a plain K/2 bytes/row;
+    // see the row-stride comment on matmul_nbits_gemv_kernel's b_base_arr.
+    // Within a row the nibbles are still packed compactly from k=0 (only the
+    // tail beyond K is padding), so the intra-row byte offset (b_k8 >> 1)
+    // below is unaffected -- only the per-row stride changes.
     [[maybe_unused]] const int b_byte_base =
-        FUSED_DQ ? (b_n_g * (K >> 1) + (b_k8 >> 1)) : 0;
+        FUSED_DQ ? (b_n_g * (num_groups_k * (group_size >> 1)) + (b_k8 >> 1)) : 0;
     [[maybe_unused]] const int b_gid_base =
         FUSED_DQ ? (b_n_g * num_groups_k) : 0;
     // cached_k_grp is the quant-group index currently loaded into cached_s/
