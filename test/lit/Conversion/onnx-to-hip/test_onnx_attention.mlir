@@ -13,12 +13,17 @@
 //     and seqlens_k = total_seq - 1 (ORT convention total_seq = seqlens_k + 1)
 //   - present_key/value DPS inits sized to the past+current total
 //
+//   - a sliding window baked into the additive mask recovered from the mask's
+//     producing subgraph and stamped as local_window_size, since
+//     onnx.Attention has no attribute to carry one
+//
 // Cases: a static-shape decode (16 query heads, 8 KV heads), a dynamic-shape
 // prefill with an EMPTY past (the case that previously sized present from
 // dim(past_key, 2) alone -> zero-length present buffer -> null present_key ->
 // zeroed attention output), the Gemma-4-E2B decoder self-attn (is_causal=1 +
 // fp16 mask + past KV + 3 outputs -- previously rejected), a single-output
-// causal case, a bidirectional no-mask case, and a rank-4 BNSH case.
+// causal case, a bidirectional no-mask case, a rank-4 BNSH case, and three
+// window-recovery cases (windowed layer, global layer, unrecognized OR leg).
 // ============================================================================
 
 // The pass runs `--convert-onnx-to-hip`, whose module-metadata step requires
@@ -291,5 +296,277 @@ module {
     // CHECK-NOT: onnx.Attention
 
     return %y : tensor<1x16x8x64xf16>
+  }
+}
+
+// -----
+
+// ===== Sliding window recovered from the mask subgraph (windowed layer) =====
+//
+// `onnx.Attention` has no local_window_size attribute, so a windowed model can
+// only express its window in the additive mask. AttentionWindowFold reads it
+// back out and stamps it, which is what lets the runtime narrow its key range
+// instead of scoring everything.
+//
+// This is Gemma-4's local-layer mask, reproduced node for node: the keep
+// condition ANDs the padding mask with an OR of the windowed-causal leg and the
+// same-image-block bidirectional leg. The window leg is
+// `And(qpos >= kpos, qpos - kpos < 1024)`, and the compare and the subtraction
+// reference the SAME two values in the same order -- that identity is what
+// makes `qpos` the query index and `qpos - kpos < 1024` the window, so W
+// transfers to local_window_size unchanged.
+module {
+  func.func @main_graph(
+      %query: tensor<?x?x4096xf16>,
+      %key: tensor<?x?x2048xf16>,
+      %value: tensor<?x?x2048xf16>,
+      %qidx: tensor<?x?xi64>,
+      %kidx: tensor<?x?xi64>,
+      %blk: tensor<?x?xi64>,
+      %pad: tensor<?x?xi64>,
+      %past_key: tensor<?x8x?x256xf16>,
+      %past_value: tensor<?x8x?x256xf16>)
+      -> (tensor<?x?x4096xf16>, tensor<?x8x?x256xf16>,
+          tensor<?x8x?x256xf16>) {
+
+    // CHECK-LABEL: func.func @main_graph
+    // CHECK-SAME: (%[[CTXW:.*]]: !hip.context,
+
+    %c1 = "onnx.Constant"() {value = dense<1> : tensor<1xi64>}
+        : () -> tensor<1xi64>
+    %c2 = "onnx.Constant"() {value = dense<2> : tensor<1xi64>}
+        : () -> tensor<1xi64>
+    %w = "onnx.Constant"() {value = dense<1024> : tensor<i64>}
+        : () -> tensor<i64>
+    %zi = "onnx.Constant"() {value = dense<0> : tensor<i64>} : () -> tensor<i64>
+    %keepv = "onnx.Constant"() {value = dense<0.000000e+00> : tensor<f32>}
+        : () -> tensor<f32>
+    %dropv = "onnx.Constant"() {value = dense<-6.550400e+04> : tensor<f32>}
+        : () -> tensor<f32>
+
+    // Broadcast the two index vectors into [B, q, k]: the query index goes on
+    // the lower axis (unsqueezed at 2), the key index on the higher (at 1).
+    %qpos = "onnx.Unsqueeze"(%qidx, %c2)
+        : (tensor<?x?xi64>, tensor<1xi64>) -> tensor<?x?x1xi64>
+    %kpos = "onnx.Unsqueeze"(%kidx, %c1)
+        : (tensor<?x?xi64>, tensor<1xi64>) -> tensor<?x1x?xi64>
+
+    %causal = "onnx.GreaterOrEqual"(%qpos, %kpos)
+        : (tensor<?x?x1xi64>, tensor<?x1x?xi64>) -> tensor<?x?x?xi1>
+    %dist = "onnx.Sub"(%qpos, %kpos)
+        : (tensor<?x?x1xi64>, tensor<?x1x?xi64>) -> tensor<?x?x?xi64>
+    %inwin = "onnx.Less"(%dist, %w)
+        : (tensor<?x?x?xi64>, tensor<i64>) -> tensor<?x?x?xi1>
+    %wleg = "onnx.And"(%causal, %inwin)
+        : (tensor<?x?x?xi1>, tensor<?x?x?xi1>) -> tensor<?x?x?xi1>
+
+    // Same-image-block bidirectional leg: identically false for a text-only
+    // prompt, and bounded by the image block length otherwise.
+    %qblk = "onnx.Unsqueeze"(%blk, %c2)
+        : (tensor<?x?xi64>, tensor<1xi64>) -> tensor<?x?x1xi64>
+    %kblk = "onnx.Unsqueeze"(%blk, %c1)
+        : (tensor<?x?xi64>, tensor<1xi64>) -> tensor<?x1x?xi64>
+    %sameblk = "onnx.Equal"(%qblk, %kblk)
+        : (tensor<?x?x1xi64>, tensor<?x1x?xi64>) -> tensor<?x?x?xi1>
+    %isimg = "onnx.GreaterOrEqual"(%qblk, %zi)
+        : (tensor<?x?x1xi64>, tensor<i64>) -> tensor<?x?x1xi1>
+    %segleg = "onnx.And"(%sameblk, %isimg)
+        : (tensor<?x?x?xi1>, tensor<?x?x1xi1>) -> tensor<?x?x?xi1>
+
+    %or = "onnx.Or"(%wleg, %segleg)
+        : (tensor<?x?x?xi1>, tensor<?x?x?xi1>) -> tensor<?x?x?xi1>
+    %padu = "onnx.Unsqueeze"(%pad, %c1)
+        : (tensor<?x?xi64>, tensor<1xi64>) -> tensor<?x1x?xi64>
+    %padb = "onnx.Cast"(%padu) {to = 9 : si64}
+        : (tensor<?x1x?xi64>) -> tensor<?x1x?xi1>
+    %keep = "onnx.And"(%padb, %or)
+        : (tensor<?x1x?xi1>, tensor<?x?x?xi1>) -> tensor<?x?x?xi1>
+    %bias32 = "onnx.Where"(%keep, %keepv, %dropv)
+        : (tensor<?x?x?xi1>, tensor<f32>, tensor<f32>) -> tensor<?x?x?xf32>
+    %bias16 = "onnx.Cast"(%bias32) {to = 10 : si64}
+        : (tensor<?x?x?xf32>) -> tensor<?x?x?xf16>
+    %bias = "onnx.Unsqueeze"(%bias16, %c1)
+        : (tensor<?x?x?xf16>, tensor<1xi64>) -> tensor<?x1x?x?xf16>
+
+    %out:3 = "onnx.Attention"(%query, %key, %value, %bias, %past_key,
+                              %past_value)
+        {q_num_heads = 16 : si64,
+         kv_num_heads = 8 : si64,
+         is_causal = 0 : si64,
+         scale = 6.250000e-02 : f32,
+         softcap = 0.000000e+00 : f32}
+        : (tensor<?x?x4096xf16>, tensor<?x?x2048xf16>, tensor<?x?x2048xf16>,
+           tensor<?x1x?x?xf16>, tensor<?x8x?x256xf16>, tensor<?x8x?x256xf16>)
+        -> (tensor<?x?x4096xf16>, tensor<?x8x?x256xf16>,
+            tensor<?x8x?x256xf16>)
+
+    // CHECK: hip.gqa(%[[CTXW]])
+    // Attributes print alphabetically, so the recovered window lands between
+    // kv_num_heads and no_causal.
+    // CHECK-SAME: {kv_num_heads = 8 : i64, local_window_size = 1024 : i64, no_causal = true, num_heads = 16 : i64
+    // CHECK-NOT: onnx.Attention
+
+    return %out#0, %out#1, %out#2
+        : tensor<?x?x4096xf16>, tensor<?x8x?x256xf16>, tensor<?x8x?x256xf16>
+  }
+}
+
+// -----
+
+// ===== Global layer: the same mask WITHOUT the window leg =====
+//
+// Gemma-4's 5 full-attention layers differ from its 25 windowed ones by exactly
+// one node: the OR's causal leg is the bare compare rather than
+// `And(causal, within-window)`. A bare causal term bounds nothing from below, so
+// no window is recovered and the op keeps hip.gqa's -1 default. This is the
+// case that must NOT be stamped -- forcing a window here would change results
+// rather than just make them cheaper.
+module {
+  func.func @main_graph(
+      %query: tensor<?x?x8192xf16>,
+      %key: tensor<?x?x1024xf16>,
+      %value: tensor<?x?x1024xf16>,
+      %qidx: tensor<?x?xi64>,
+      %kidx: tensor<?x?xi64>,
+      %pad: tensor<?x?xi64>,
+      %past_key: tensor<?x2x?x512xf16>,
+      %past_value: tensor<?x2x?x512xf16>)
+      -> (tensor<?x?x8192xf16>, tensor<?x2x?x512xf16>,
+          tensor<?x2x?x512xf16>) {
+
+    // CHECK-LABEL: func.func @main_graph
+    // CHECK-SAME: (%[[CTXG2:.*]]: !hip.context,
+
+    %c1 = "onnx.Constant"() {value = dense<1> : tensor<1xi64>}
+        : () -> tensor<1xi64>
+    %c2 = "onnx.Constant"() {value = dense<2> : tensor<1xi64>}
+        : () -> tensor<1xi64>
+    %keepv = "onnx.Constant"() {value = dense<0.000000e+00> : tensor<f32>}
+        : () -> tensor<f32>
+    %dropv = "onnx.Constant"() {value = dense<-6.550400e+04> : tensor<f32>}
+        : () -> tensor<f32>
+
+    %qpos = "onnx.Unsqueeze"(%qidx, %c2)
+        : (tensor<?x?xi64>, tensor<1xi64>) -> tensor<?x?x1xi64>
+    %kpos = "onnx.Unsqueeze"(%kidx, %c1)
+        : (tensor<?x?xi64>, tensor<1xi64>) -> tensor<?x1x?xi64>
+    %causal = "onnx.GreaterOrEqual"(%qpos, %kpos)
+        : (tensor<?x?x1xi64>, tensor<?x1x?xi64>) -> tensor<?x?x?xi1>
+
+    %padu = "onnx.Unsqueeze"(%pad, %c1)
+        : (tensor<?x?xi64>, tensor<1xi64>) -> tensor<?x1x?xi64>
+    %padb = "onnx.Cast"(%padu) {to = 9 : si64}
+        : (tensor<?x1x?xi64>) -> tensor<?x1x?xi1>
+    %keep = "onnx.And"(%padb, %causal)
+        : (tensor<?x1x?xi1>, tensor<?x?x?xi1>) -> tensor<?x?x?xi1>
+    %bias32 = "onnx.Where"(%keep, %keepv, %dropv)
+        : (tensor<?x?x?xi1>, tensor<f32>, tensor<f32>) -> tensor<?x?x?xf32>
+    %bias16 = "onnx.Cast"(%bias32) {to = 10 : si64}
+        : (tensor<?x?x?xf32>) -> tensor<?x?x?xf16>
+    %bias = "onnx.Unsqueeze"(%bias16, %c1)
+        : (tensor<?x?x?xf16>, tensor<1xi64>) -> tensor<?x1x?x?xf16>
+
+    %out:3 = "onnx.Attention"(%query, %key, %value, %bias, %past_key,
+                              %past_value)
+        {q_num_heads = 16 : si64,
+         kv_num_heads = 2 : si64,
+         is_causal = 0 : si64,
+         scale = 4.419420e-02 : f32,
+         softcap = 0.000000e+00 : f32}
+        : (tensor<?x?x8192xf16>, tensor<?x?x1024xf16>, tensor<?x?x1024xf16>,
+           tensor<?x1x?x?xf16>, tensor<?x2x?x512xf16>, tensor<?x2x?x512xf16>)
+        -> (tensor<?x?x8192xf16>, tensor<?x2x?x512xf16>,
+            tensor<?x2x?x512xf16>)
+
+    // No local_window_size: the dict goes straight from kv_num_heads to
+    // no_causal, so the attribute is absent and the -1 default stands.
+    // CHECK: hip.gqa(%[[CTXG2]])
+    // CHECK-SAME: {kv_num_heads = 2 : i64, no_causal = true, num_heads = 16 : i64
+    // CHECK-NOT: onnx.Attention
+
+    return %out#0, %out#1, %out#2
+        : tensor<?x?x8192xf16>, tensor<?x2x?x512xf16>, tensor<?x2x?x512xf16>
+  }
+}
+
+// -----
+
+// ===== An unrecognized OR leg must abandon the window =====
+//
+// A disjunct ADDS keeps, so one that cannot be bounded leaves the whole
+// condition unbounded no matter how tight the window leg is: the model may be
+// keeping a key the narrowing would drop. Here the second leg is a bare
+// equality on the position indices, which is neither a window nor the
+// recognized same-segment shape, so nothing is stamped even though the window
+// leg itself is a perfect match. Recognizing only what it understands is the
+// whole safety property of this rewrite.
+module {
+  func.func @main_graph(
+      %query: tensor<?x?x4096xf16>,
+      %key: tensor<?x?x2048xf16>,
+      %value: tensor<?x?x2048xf16>,
+      %qidx: tensor<?x?xi64>,
+      %kidx: tensor<?x?xi64>,
+      %past_key: tensor<?x8x?x256xf16>,
+      %past_value: tensor<?x8x?x256xf16>)
+      -> (tensor<?x?x4096xf16>, tensor<?x8x?x256xf16>,
+          tensor<?x8x?x256xf16>) {
+
+    // CHECK-LABEL: func.func @main_graph
+    // CHECK-SAME: (%[[CTXU:.*]]: !hip.context,
+
+    %c1 = "onnx.Constant"() {value = dense<1> : tensor<1xi64>}
+        : () -> tensor<1xi64>
+    %c2 = "onnx.Constant"() {value = dense<2> : tensor<1xi64>}
+        : () -> tensor<1xi64>
+    %w = "onnx.Constant"() {value = dense<1024> : tensor<i64>}
+        : () -> tensor<i64>
+    %keepv = "onnx.Constant"() {value = dense<0.000000e+00> : tensor<f32>}
+        : () -> tensor<f32>
+    %dropv = "onnx.Constant"() {value = dense<-6.550400e+04> : tensor<f32>}
+        : () -> tensor<f32>
+
+    %qpos = "onnx.Unsqueeze"(%qidx, %c2)
+        : (tensor<?x?xi64>, tensor<1xi64>) -> tensor<?x?x1xi64>
+    %kpos = "onnx.Unsqueeze"(%kidx, %c1)
+        : (tensor<?x?xi64>, tensor<1xi64>) -> tensor<?x1x?xi64>
+    %causal = "onnx.GreaterOrEqual"(%qpos, %kpos)
+        : (tensor<?x?x1xi64>, tensor<?x1x?xi64>) -> tensor<?x?x?xi1>
+    %dist = "onnx.Sub"(%qpos, %kpos)
+        : (tensor<?x?x1xi64>, tensor<?x1x?xi64>) -> tensor<?x?x?xi64>
+    %inwin = "onnx.Less"(%dist, %w)
+        : (tensor<?x?x?xi64>, tensor<i64>) -> tensor<?x?x?xi1>
+    %wleg = "onnx.And"(%causal, %inwin)
+        : (tensor<?x?x?xi1>, tensor<?x?x?xi1>) -> tensor<?x?x?xi1>
+
+    %other = "onnx.Equal"(%qpos, %kpos)
+        : (tensor<?x?x1xi64>, tensor<?x1x?xi64>) -> tensor<?x?x?xi1>
+    %keep = "onnx.Or"(%wleg, %other)
+        : (tensor<?x?x?xi1>, tensor<?x?x?xi1>) -> tensor<?x?x?xi1>
+    %bias32 = "onnx.Where"(%keep, %keepv, %dropv)
+        : (tensor<?x?x?xi1>, tensor<f32>, tensor<f32>) -> tensor<?x?x?xf32>
+    %bias16 = "onnx.Cast"(%bias32) {to = 10 : si64}
+        : (tensor<?x?x?xf32>) -> tensor<?x?x?xf16>
+    %bias = "onnx.Unsqueeze"(%bias16, %c1)
+        : (tensor<?x?x?xf16>, tensor<1xi64>) -> tensor<?x1x?x?xf16>
+
+    %out:3 = "onnx.Attention"(%query, %key, %value, %bias, %past_key,
+                              %past_value)
+        {q_num_heads = 16 : si64,
+         kv_num_heads = 8 : si64,
+         is_causal = 0 : si64,
+         scale = 6.250000e-02 : f32,
+         softcap = 0.000000e+00 : f32}
+        : (tensor<?x?x4096xf16>, tensor<?x?x2048xf16>, tensor<?x?x2048xf16>,
+           tensor<?x1x?x?xf16>, tensor<?x8x?x256xf16>, tensor<?x8x?x256xf16>)
+        -> (tensor<?x?x4096xf16>, tensor<?x8x?x256xf16>,
+            tensor<?x8x?x256xf16>)
+
+    // CHECK: hip.gqa(%[[CTXU]])
+    // CHECK-SAME: {kv_num_heads = 8 : i64, no_causal = true, num_heads = 16 : i64
+    // CHECK-NOT: onnx.Attention
+
+    return %out#0, %out#1, %out#2
+        : tensor<?x?x4096xf16>, tensor<?x8x?x256xf16>, tensor<?x8x?x256xf16>
   }
 }

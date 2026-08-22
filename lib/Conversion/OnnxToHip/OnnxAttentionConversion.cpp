@@ -535,6 +535,19 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
       rewriter.getNamedAttr("softcap", rewriter.getF32FloatAttr(softcap)));
   attrs.push_back(
       rewriter.getNamedAttr("no_causal", rewriter.getBoolAttr(noCausal)));
+  // `onnx.Attention` has no window attribute, so a windowed model expresses its
+  // window only in the additive mask. AttentionWindowFold recovers it from the
+  // mask subgraph during pre-lowering and stamps it here; absent the stamp the
+  // op keeps hip.gqa's -1 default and the runtime scores the full key range, as
+  // it did before. Only a positive window is forwarded, so a recovered 0 or a
+  // hand-written 0 cannot be mistaken for "windowed".
+  if (auto stampedWindow =
+          op->getAttrOfType<mlir::IntegerAttr>("hipdnn.local_window_size")) {
+    int64_t window = stampedWindow.getValue().getSExtValue();
+    if (window > 0)
+      attrs.push_back(rewriter.getNamedAttr(
+          "local_window_size", rewriter.getI64IntegerAttr(window)));
+  }
 
   mlir::OperationState gqaState(loc, "hip.gqa");
   gqaState.addOperands(operands);
