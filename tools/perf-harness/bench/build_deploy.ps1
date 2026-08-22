@@ -13,15 +13,20 @@
 ## result, which is the worst kind. Deploying prints each file's hash so a
 ## comparison against the previous run's hash proves the binary actually moved.
 ##
-## Only two artifacts matter for the operators the harness profiles:
-##   hipgpu.dll                  lib/Runtime (gqa.cpp, matmul_nbits.cpp) and
-##                               lib/Conversion
+## Three artifacts carry the code the harness profiles:
+##   hipgpu.dll                  lib/Runtime (gqa.cpp, matmul_nbits.cpp)
 ##   custom_kernels_<arch>.dll   lib/Runtime/Kernels/hip (gqa_kernel.hip,
 ##                               matmul_nbits_kernel.hip)
-## They are deployed as a pair on purpose. They share the extern "C" kernel ABI,
-## so a mixed pair is only accidentally correct -- and a mixed pair was in fact
-## deployed on this machine (hipgpu from one build, custom_kernels from an
-## eight-hour-older one), which is unattributable as a baseline.
+##   hip-compiler.dll            lib/Conversion, lib/Dialect -- everything that
+##                               decides what the runtime is asked to execute
+## They are deployed as a set on purpose. hipgpu and custom_kernels share the
+## extern "C" kernel ABI, so a mixed pair is only accidentally correct -- and a
+## mixed pair was in fact deployed on this machine (hipgpu from one build,
+## custom_kernels from an eight-hour-older one), which is unattributable as a
+## baseline. hip-compiler is here because omitting it produced the opposite and
+## more insidious failure: a conversion-only change measured as an exact no-op,
+## the stale compiler having emitted the old graph for a correctly rebuilt
+## runtime. Anything that lowers a graph belongs in this list.
 
 [CmdletBinding()]
 param(
@@ -112,7 +117,7 @@ $arch = (Select-String -Path (Join-Path $BuildDir 'CMakeCache.txt') `
 $arch = ($arch -split ';')[0].Trim()
 if (-not $arch) { throw "Could not read HIP_ARCHITECTURES from the cmake cache." }
 
-$artifacts = @('hipgpu.dll', "custom_kernels_$arch.dll")
+$artifacts = @('hipgpu.dll', "custom_kernels_$arch.dll", 'hip-compiler.dll')
 
 if (-not $SkipBuild) {
   Write-Host ">>> build [$Config] $BuildDir"
@@ -124,7 +129,7 @@ if (-not $SkipBuild) {
     # versioned unique id and only its OUTPUT_NAME is hipgpu, so ask cmake for
     # the file and let ninja resolve the producing target.
     $cmd += @('--target')
-    $cmd += @("bin/hipgpu.dll", "bin/custom_kernels_$arch.dll")
+    foreach ($a in $artifacts) { $cmd += "bin/$a" }
   }
   $sw = [Diagnostics.Stopwatch]::StartNew()
   & cmake @cmd
