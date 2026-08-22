@@ -81,7 +81,15 @@ def main():
 
     zeros = None
     if not args.no_zeros:
-        zeros = np.random.uniform(7.0, 9.0, (N, num_groups_k)).astype(np.float16)
+        # ONNX MatMulNBits zero_points are packed at `bits` bits (4 bits here),
+        # so they are always small integers (0..15), never fractional -- the
+        # FP16 buffer this test passes to hip_matmul_nbits (zp_elem_size==2)
+        # is a pre-converted cast of those integers, not an independently
+        # continuous value. Matches the integer convention already used by
+        # ../gemm_fp16u3/gen_matmul_nbits_u3_data.py and
+        # ../gemm_fp16u2/gen_matmul_nbits_u2_data.py's zero_points.
+        zeros = np.random.randint(7, 10, (N, num_groups_k)).astype(np.uint8) \
+                    .astype(np.float16)
 
     # A stored row-major (C order)
     file_A = os.path.join(out_dir, "matmul_nbits_A.bin")

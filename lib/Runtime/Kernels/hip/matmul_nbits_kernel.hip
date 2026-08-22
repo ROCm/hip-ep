@@ -6017,9 +6017,16 @@ extern "C" int hip_matmul_nbits(
   }
 
   // Packed nibble ZPs [N, ceil(k_blocks/2)] must be unpacked before use:
-  //   - FP16 for WMMA and col-major GEMV paths (only when M > 1)
+  //   - FP16 for WMMA and col-major GEMV paths
   //   - Individual uint8 for row-major GEMV and naive fallback paths
-  // When zp_elem_size == 2 (FP16) or ZPs are NULL, no conversion needed.
+  // When zp_elem_size == 2, zero_points is already FP16 [N, num_groups_k]
+  // (not nibble-packed) and is used as zp_for_fp16_paths directly, with no
+  // conversion. zp_for_u8_paths is deliberately left unset in that case: the
+  // dispatch below never reads it when zp_elem_size==2, because M==1 is
+  // routed to the FP16-capable col-major GEMV kernel instead of the
+  // uint8-only row-major one (see fp16_zp_ready below) -- reinterpreting the
+  // FP16 buffer as raw uint8 bytes there previously produced garbage
+  // zero-points.
   // The runtime wrapper (lib/Runtime/real/matmul_nbits.cpp) caches the
   // unpacked buffers per zero_points pointer and passes them via
   // pre_unpacked_zp_{u8,fp16} so we skip the kernel launches here.
@@ -6039,6 +6046,15 @@ extern "C" int hip_matmul_nbits(
     if (pre_unpacked_zp_fp16)
       zp_for_fp16_paths = pre_unpacked_zp_fp16;
   }
+  // True once zp_for_fp16_paths is a genuinely-ready FP16 buffer (or there
+  // are no zero points at all): zp_elem_size==2 supplies it directly above;
+  // zp_elem_size==1 only pre-builds pre_unpacked_zp_fp16 for M>1 (see the
+  // wrapper), so M==1 with zp_elem_size==1 is deliberately excluded here and
+  // keeps using the row-major kernel's pre_unpacked_zp_u8 below instead of
+  // paying for an extra fp16 conversion on the M==1 decode hot path.
+  const bool fp16_zp_ready =
+      !zero_points || zp_elem_size == 2 ||
+      (zp_elem_size == 1 && pre_unpacked_zp_fp16 != nullptr);
 
   /* -------------------------------------------------------------------
    * WMMA data format: batch==1 && K%32==0
@@ -6135,16 +6151,19 @@ extern "C" int hip_matmul_nbits(
   }
 
   /* -------------------------------------------------------------------
-   * GEMV path with col-major data — small M (>1), WMMA data format
+   * GEMV path with col-major data — small M, WMMA data format
    *
-   * When batch==1, K%32==0, but 1 < M < kWmmaMinM: internally transpose
-   * A row->col and output col->row so the caller sees row-major I/O.
-   * GEMV kernel runs with COL_MAJOR=true for K-parallel reduction.
-   *
-   * M=1 skips this path entirely — row/col layouts are identical for a
-   * single row, and the row-major GEMV avoids the ZP conversion kernel.
+   * When batch==1, K%32==0, M < kWmmaMinM: internally transpose A row->col
+   * and output col->row so the caller sees row-major I/O (skipped for M==1,
+   * where row-major and col-major are the identical single row/column).
+   * GEMV kernel runs with COL_MAJOR=true, reading zero_points as FP16
+   * directly -- the only kernel variant that can, so M==1 must also take
+   * this path whenever an FP16 zp buffer is actually available
+   * (fp16_zp_ready above); M==1 with zp_elem_size==1 and no pre-built
+   * pre_unpacked_zp_fp16 instead falls through to the row-major path below,
+   * which already has the uint8 zp it needs at no extra cost.
    * ------------------------------------------------------------------- */
-  if (wmma_data_format && M > 1 && M < kWmmaMinM) {
+  if (wmma_data_format && M < kWmmaMinM && (M > 1 || fp16_zp_ready)) {
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_matmul_nbits: GEMV col-major path M=%lld "
         "N=%lld K=%lld bs=%lld zp=%s bias=%s\n",
