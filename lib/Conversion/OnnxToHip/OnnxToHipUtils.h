@@ -471,6 +471,17 @@ void populatePadShapeFoldPatterns(RewritePatternSet &patterns,
 void populateSliceShapeFoldPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 
+/// Pre-lowering pattern set: recover a sliding window from `onnx.Attention`'s
+/// additive mask subgraph and stamp it as `hipdnn.local_window_size`, which
+/// OnnxAttentionConversion then puts on `hip.gqa`. `onnx.Attention` has no
+/// window attribute, so a windowed model expresses the window only in the mask
+/// data and the runtime would otherwise score its whole key range. Must run
+/// BEFORE `convertComputeOps`, which rewrites the mask's producers into
+/// `hip.*` in an order this matcher cannot rely on. See
+/// AttentionWindowFold.cpp.
+void populateAttentionWindowFoldPatterns(RewritePatternSet &patterns,
+                                         MLIRContext *ctx);
+
 /// Pre-lowering pattern set: collapse ORT's inlined `FastGelu` primitive
 /// chain (Pow / Mul / Sum / Tanh) back into a single
 /// `onnx.Gelu(approximate="tanh")`. ORT inlines the Gelu function body
