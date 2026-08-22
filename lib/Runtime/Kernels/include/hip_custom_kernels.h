@@ -775,6 +775,16 @@ HIP_KERNEL_API int hip_gqa_flash_prefill(
     int past_len, float scale, int local_window_size, const void* head_sink,
     int num_heads, int smooth_softmax);
 
+/* Lookup-only v3 variant. The final five fields are explicit launch
+ * parameters for v5/v7/v8 respectively; unused fields are zero. This entry
+ * validates the selected tuple and never invokes an online autotuner. */
+HIP_KERNEL_API int hip_gqa_flash_prefill_v3_configured(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
+    int past_len, float scale, int local_window_size, const void* head_sink,
+    int num_heads, int smooth_softmax,
+    int m_tiles, int bkv, int nw, int mt, int nd);
+
 /* NB: prefill is compute-bound, so there is deliberately NO separate int8
  * prefill kernel. The runtime (real/gqa.cpp) dequantizes the int8 KV cache to an
  * fp16 scratch ONCE (hip_gqa_dequant_kv_i8_to_fp16) and reuses the tuned fp16
@@ -856,6 +866,28 @@ HIP_KERNEL_API int hip_gqa_flash_decode(
     int kv_dtype,
     const void* k_scale,
     const void* v_scale);
+
+/* Lookup-only variant of hip_gqa_flash_decode. The caller supplies a
+ * validated offline-LUT or heuristic configuration, so this entry never runs
+ * the in-kernel autotuner. Environment force overrides remain available for
+ * development diagnostics. */
+HIP_KERNEL_API int hip_gqa_flash_decode_configured(
+    void* stream,
+    const void* Q, const void* Kcache, const void* Vcache,
+    void* O,
+    void* partials_workspace,
+    int B, int H, int G, int d, int skv, int max_seq, int max_splits,
+    float scale,
+    const void* seqlens_k,
+    int local_window_size,
+    const void* head_sink,
+    int use_smooth_softmax,
+    int kv_dtype,
+    const void* k_scale,
+    const void* v_scale,
+    int use_wmma,
+    int splits,
+    int bkv);
 
 /* =========================================================================
  * Cast (Element Type Conversion)

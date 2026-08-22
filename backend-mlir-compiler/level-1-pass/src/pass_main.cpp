@@ -15,6 +15,7 @@
 #include <fstream>
 #include <glog/logging.h>
 #include <limits>
+#include <string>
 #include <vector>
 
 // Protobuf
@@ -137,6 +138,43 @@ static bool write_artifact_to_epcontext(PassContext *ctx,
 
   stream.reset(); // Close file
   MY_LOG(1) << "Wrote " << written << " bytes to EPContext";
+  return true;
+}
+
+// Import an offline-generated GQA LUT into the same EPContext namespace as the
+// model artifact and constants. The provider option is an input filesystem
+// path; the runtime-facing logical filename is intentionally fixed.
+static bool import_gqa_lut_to_epcontext(PassContext *ctx) {
+  const std::string input_path =
+      ctx->get_provider_option("gqa_autotune_lut", "");
+  if (input_path.empty())
+    return true;
+
+  std::ifstream input(input_path, std::ios::binary | std::ios::ate);
+  if (!input) {
+    LOG(WARNING) << "Failed to open GQA autotune LUT: " << input_path;
+    return false;
+  }
+  const std::streamsize size = input.tellg();
+  if (size <= 0 || size > 64 * 1024 * 1024) {
+    LOG(WARNING) << "Invalid GQA autotune LUT size: " << size;
+    return false;
+  }
+  input.seekg(0, std::ios::beg);
+  std::vector<char> bytes(static_cast<size_t>(size));
+  if (!input.read(bytes.data(), size)) {
+    LOG(WARNING) << "Failed to read GQA autotune LUT: " << input_path;
+    return false;
+  }
+
+  constexpr const char *kLogicalFilename = "gqa_autotune.fb";
+  auto output = ctx->open_file_for_write(kLogicalFilename);
+  if (!output || output->fwrite(bytes.data(), bytes.size()) != bytes.size()) {
+    LOG(WARNING) << "Failed to write " << kLogicalFilename << " to EPContext";
+    return false;
+  }
+  MY_LOG(1) << "Imported GQA autotune LUT (" << bytes.size() << " bytes) from "
+            << input_path;
   return true;
 }
 
@@ -300,6 +338,9 @@ struct Level1MlirPass {
 
     // Step 4: Write artifact to EPContext
     if (!write_artifact_to_epcontext(self.get_context().get(), artifact)) {
+      return;
+    }
+    if (!import_gqa_lut_to_epcontext(self.get_context().get())) {
       return;
     }
 

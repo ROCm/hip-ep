@@ -109,6 +109,17 @@ endforeach()
 # Export include directory for Runtime bitcode compilation
 set(HIP_CUSTOM_KERNELS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include" PARENT_SCOPE)
 
+# GQA offline-autotune LUT table: install alongside the kernel DLLs so the
+# runtime can find it even when the model's EPContext was not compiled with the
+# gqa_autotune_lut provider option.  The runtime searches for gqa_autotune.fb
+# co-located with the EP DLL as a fallback (see loadLutFromFileSystem in
+# gqa_autotune.cpp).
+install(FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/hip/autotune/gqa/lut/gfx1151.fb"
+    DESTINATION bin
+    RENAME gqa_autotune.fb
+)
+
 # Header is intentionally NOT installed: the EP-side build always uses the
 # in-tree header (lib/Runtime/Kernels/include/hip_custom_kernels.h) so
 # the host-side declarations stay in lockstep with the kernel TUs that
