@@ -20,9 +20,12 @@
 namespace mlir {
 namespace hip {
 
-/// Byte size for a fully-static memref type; returns 0 when any dim is dynamic.
-/// Uses llvm::divideCeil to correctly handle sub-byte element types (e.g. i1).
-int64_t getStaticByteSize(MemRefType type);
+/// Physical bytes used by one HIP memref element.
+int64_t getElementByteWidth(MemRefType type);
+
+/// Byte size for a fully-static memref type. Fails for dynamic shapes or when
+/// the physical byte size does not fit in int64_t.
+FailureOr<int64_t> getStaticByteSize(MemRefType type);
 
 /// Emit arith ops for: llvm::alignTo(value, alignment).
 /// Produces: ((value + alignment - 1) / alignment) * alignment.
