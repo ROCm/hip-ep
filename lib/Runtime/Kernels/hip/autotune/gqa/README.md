@@ -213,35 +213,48 @@ writing another matcher.
 ```
 lut/gfx1151.json    # source of truth, reviewed in PRs
 lut/gfx1151.fb      # what the runtime loads
+scripts/update_lut.py  # full pipeline: measure → build → compile
 ```
 
-Regenerate the binary after the JSON changes:
+## Updating the LUT
+
+The complete pipeline lives in `scripts/update_lut.py`. Build the sweep
+executable first, then run:
 
 ```bash
-cd lut && flatc --binary --strict-json -o /tmp ../gqa_autotune.fbs gfx1151.json
-cp /tmp/gfx1151.bin gfx1151.fb
+LUT=lib/Runtime/Kernels/hip/autotune/gqa
+SCRIPTS=$LUT/scripts
+
+# Full pipeline: measure all geometries, rebuild JSON, compile to .fb
+python $SCRIPTS/update_lut.py all \
+    --sweep <build-dir>/lib/Runtime/Kernels/test/example/gqa/autotune/gqa_autotune_sweep.exe \
+    --flatc flatc
+
+# Or step by step:
+python $SCRIPTS/update_lut.py measure --sweep <path-to-sweep-exe>
+python $SCRIPTS/update_lut.py build
+python $SCRIPTS/update_lut.py compile --flatc flatc
 ```
 
-Rows are generated from measurement, not by hand. The pipeline — shape grid, both
-timing harnesses, row selection and the quality report — is documented in
-`RdpCapture/ops_analyze/gqa/capture_autotune_lut.md`, which also records what the
-current table costs and which shapes it is weakest on. Two questions have their own
-tools:
+Measurement CSVs are written to `scripts/data/`. The JSON is written to
+`lut/gfx1151.json` and compiled to `lut/gfx1151.fb`.
 
-- `tools/check_model_coverage.py` replays these probes for a catalog of shipped LLM
-  geometries and prints the tier each one lands on. That, not the row count, is the
-  answer to "is my model covered?".
-- `tools/score_table.py` scores a shipped table against measurements it was not built
-  from — held-out geometries, or a CI run. That is the answer to "what does a model
-  nobody measured get?", and for this table it is 93.5% of optimum by total time on
-  decode and 98.4% on prefill.
-- `tools/validate_lut_json.py` checks what `flatc` does not: duplicate keys, rows
-  the loader will refuse, and a phase with no `Fallback` row.
-- `tools/check_fallback.py` is the gate for after a kernel change: it holds out a
-  geometry, rebuilds through the real selection path, scores what the held-out shapes
-  get, and refits `kBlocksPerCu` against the current readings. See below.
+**With RdpCapture** (full pipeline — measurement store, outlier repair,
+prune-tolerance tuning, quality scoring):
 
-`lut/README.md` states what the current gfx1151 table covers.
+```bash
+python $SCRIPTS/update_lut.py all \
+    --rdpcapture /path/to/RdpCapture \
+    --sweep <path-to-sweep-exe> \
+    --flatc flatc \
+    --prune-tolerance 1.02
+```
+
+Adding a new model geometry: add its `(H, G, d)` to the `GEOMETRIES` list in
+`scripts/update_lut.py` and re-run the pipeline. If the `(H, G)` pair should get
+exact matching (not just HpG fuzzy), add it to `HEAD_COUNT_CLASS` in the same
+file **and** add the enum entry to `GqaHeadCountClass` in `gqa_autotune.fbs`
+(bump `schema_version` and `kGqaLutSchemaVersion`).
 
 ## Keeping it current
 
@@ -250,33 +263,25 @@ kernels that stop existing the moment one is edited, and the expensive mistake i
 rebuilding it — it is rebuilding it from readings the old kernel produced, which
 fails silently and ships a table that is confidently wrong.
 
-Four steps. The first three update the exact half of the policy, the fourth checks
-the half that answers shapes nobody measured.
+Four steps:
 
 ```bash
-# 1. Stamp what you changed, in the same commit as the change.
-#    kKernelVersions in gqa_autotune_sweep.cpp -- bump the entry for the kernel you
-#    touched (not for a rename; only for something that can move which config wins).
-#    This is what stops the measurement store reusing that kernel's old readings,
-#    and it is per kernel: bumping v7 leaves the decode grid valid.
+# 1. Stamp the kernel change (same commit as the change).
+#    Bump the entry for the kernel you touched in
+#    gqa_autotune_sweep.cpp :: kKernelVersions.
+#    This invalidates old readings for that kernel only.
 
+# 2. Measure (only re-measures what changed).
+python scripts/update_lut.py measure \
+    --sweep <build-dir>/gqa_autotune_sweep.exe
+
+# 3. Rebuild JSON + compile FB.
+python scripts/update_lut.py build
+python scripts/update_lut.py compile --flatc flatc
+
+# 4. Gate the fuzzy-match half (no GPU needed, exits non-zero on regression).
+#    Requires RdpCapture:
 cd RdpCapture/ops_analyze/gqa
-
-# 2. Measure. The store is asked what is missing first, so this costs what you
-#    changed, not what the table contains. Everything from empty is 172 min
-#    unattended; one kernel is typically 15-40 min.
-powershell -File tools/run_hipevent_sweeps.ps1
-
-# 3. Rebuild, check, pack. All four tiers come out of this one pass.
-LUT=../../../hip-ep/lib/Runtime/Kernels/hip/autotune/gqa
-python tools/build_lut.py --store --prune-tolerance 1.02 \
-    --selection data/gqa_lut_selection.csv --json $LUT/lut/gfx1151.json
-python tools/validate_lut_json.py --fbs $LUT/gqa_autotune.fbs \
-    --json $LUT/lut/gfx1151.json
-(cd $LUT/lut && flatc --binary --strict-json -o /tmp ../gqa_autotune.fbs gfx1151.json \
-    && cp /tmp/gfx1151.bin gfx1151.fb)
-
-# 4. Gate the fallback half. Seconds, no GPU. Exits non-zero on a regression.
 python tools/check_fallback.py
 ```
 
