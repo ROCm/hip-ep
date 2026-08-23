@@ -240,13 +240,18 @@ static inline int kv_dtype_abi(KvCacheFormat f) {
 // and appends, so nothing here runs. It stays because that configuration is a
 // property of the model directory, not of this repo, and a caller that ships
 // without it still gets a separate buffer and still wants a narrowed copy.
+//
+// ring says the present buffer is a right-sized sliding-window cache holding
+// only the newest present_seq positions, so the append wraps and drops anything
+// older. It is meaningless on the concat branch -- a separate present is always
+// allocated to the full length -- and so is required to be 0 there.
 static int update_kv_cache(hipStream_t stream, const void *past_key,
                            const void *past_value, const void *new_key,
                            const void *new_value, void *present_key,
                            void *present_value, int B, int past_len, int sq,
                            int G, int d, int past_buf_seq, int present_seq,
                            const void *seqlens_k_ptr, int elem_sz, int copy_lo,
-                           bool no_causal = false, int skv = -1,
+                           int ring, bool no_causal = false, int skv = -1,
                            KvCacheFormat kv_format = KvCacheFormat::Fp16,
                            const void *k_scale = nullptr,
                            const void *v_scale = nullptr) {
@@ -280,12 +285,14 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
     if (hip_gqa_kv_cache_append(stream, new_key, present_key, B, sq, G, d,
                                 present_seq, /*past_len=*/0,
                                 /*seqlens_k_ptr=*/nullptr, elem_sz,
-                                HIP_KV_DTYPE_FP16, /*scale=*/nullptr) != 0)
+                                HIP_KV_DTYPE_FP16, /*scale=*/nullptr,
+                                /*ring=*/0) != 0)
       return -1;
     if (hip_gqa_kv_cache_append(stream, new_value, present_value, B, sq, G, d,
                                 present_seq, /*past_len=*/0,
                                 /*seqlens_k_ptr=*/nullptr, elem_sz,
-                                HIP_KV_DTYPE_FP16, /*scale=*/nullptr) != 0)
+                                HIP_KV_DTYPE_FP16, /*scale=*/nullptr,
+                                /*ring=*/0) != 0)
       return -1;
     return 0;
   }
@@ -298,6 +305,13 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
   const void *v_sc = quantized ? v_scale : nullptr;
   if (past_key && past_len > 0 && past_key != present_key) {
     // Separate-buffer concat: needs host-side past_len for stride computation.
+    if (ring) {
+      fprintf(stderr,
+              "update_kv_cache: ring append requested with separate past and "
+              "present buffers (past_buf_seq=%d present_seq=%d)\n",
+              past_buf_seq, present_seq);
+      return -1;
+    }
     if (hip_gqa_kv_cache_concat(stream, past_key, new_key, present_key, B,
                                 past_len, sq, G, d, past_buf_seq, present_seq,
                                 elem_sz, kv_dtype, k_sc, copy_lo) != 0)
@@ -310,11 +324,11 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
     // In-place append: kernel can read past_len from device via seqlens_k_ptr.
     if (hip_gqa_kv_cache_append(stream, new_key, present_key, B, sq, G, d,
                                 present_seq, past_len, seqlens_k_ptr, elem_sz,
-                                kv_dtype, k_sc) != 0)
+                                kv_dtype, k_sc, ring) != 0)
       return -1;
     if (hip_gqa_kv_cache_append(stream, new_value, present_value, B, sq, G, d,
                                 present_seq, past_len, seqlens_k_ptr, elem_sz,
-                                kv_dtype, v_sc) != 0)
+                                kv_dtype, v_sc, ring) != 0)
       return -1;
   }
   return 0;
@@ -485,7 +499,8 @@ static int gqa_forward_fused(
             static_cast<int>(sq), static_cast<int>(G), static_cast<int>(d),
             static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
             seqlens_k_ptr, static_cast<int>(elem_sz), /*copy_lo=*/0,
-            /*no_causal=*/false, /*skv=*/-1, kv_format, k_scale, v_scale) != 0)
+            /*ring=*/0, /*no_causal=*/false, /*skv=*/-1, kv_format, k_scale,
+            v_scale) != 0)
       return -1;
 
     {
@@ -644,7 +659,8 @@ static int gqa_forward_fused(
             static_cast<int>(sq), static_cast<int>(G), static_cast<int>(d),
             static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
             seqlens_k_ptr, static_cast<int>(elem_sz), /*copy_lo=*/0,
-            /*no_causal=*/false, /*skv=*/-1, kv_format, k_scale, v_scale) != 0)
+            /*ring=*/0, /*no_causal=*/false, /*skv=*/-1, kv_format, k_scale,
+            v_scale) != 0)
       return -1;
   }
 
@@ -1297,7 +1313,8 @@ static int gqa_forward_hipblaslt(
             present_value, static_cast<int>(B), static_cast<int>(past_len),
             static_cast<int>(sq), static_cast<int>(G), static_cast<int>(d),
             static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
-            seqlens_k_ptr, static_cast<int>(elem_sz), /*copy_lo=*/0) != 0)
+            seqlens_k_ptr, static_cast<int>(elem_sz), /*copy_lo=*/0,
+            /*ring=*/0) != 0)
       return -1;
 
     // hip_gqa_flash_decode owns every geometry it templates; this fallback
@@ -1419,8 +1436,15 @@ static int gqa_forward_hipblaslt(
     } else {
       total_seq = static_cast<int64_t>(seqlens_k_val) + 1;
       past_len = total_seq - sq;
-      if (total_seq < 1 || past_len < 0 || total_seq > present_seq ||
-          past_len > past_buf_seq) {
+      // A cache right-sized to a sliding window is legitimately shorter than
+      // the context, so present_seq stops being an upper bound on total_seq for
+      // those layers. It still bounds a layer without a window, where a short
+      // buffer means the graph and the runtime disagree about the cache. The
+      // ring block further down re-checks the capacity against the window
+      // before letting anything wrap.
+      const bool short_ok = (local_window_size > 0 && present_seq >= local_window_size);
+      if (total_seq < 1 || past_len < 0 ||
+          ((total_seq > present_seq || past_len > past_buf_seq) && !short_ok)) {
         fprintf(stderr,
                 "gqa_forward_hipblaslt: invalid seqlens_k[0]+1=%lld "
                 "(sq=%lld, past_len=%lld, present_seq=%lld, "
@@ -1533,13 +1557,65 @@ static int gqa_forward_hipblaslt(
   // no_causal except the recovery above (GqaConversion sets no_causal=false
   // explicitly, and the Whisper bidirectional builders set no window).
 
+  //===--------------------------------------------------------------------===//
+  // Right-sized sliding-window cache (ring)
+  //
+  // OGA can allocate a sliding-window layer's cache to the window rather than
+  // max_length, which on Gemma-4 is 25 of 30 layers and 3.0 GB. The buffer then
+  // holds only the newest present_seq positions and the append wraps, so
+  // present_seq < total_seq stops being a malformed call and becomes the steady
+  // state once the context passes the window.
+  //
+  // Capacity is required to equal the window exactly, and that is a correctness
+  // condition rather than a convenience. A ring of exactly `window` cells holds
+  // precisely the positions the current query may attend to, so the causal and
+  // window masks have nothing to reject and can be skipped -- which matters
+  // because the mask kernel derives a column's position from its index and a
+  // ring presents them rotated. Give it one cell more and the oldest slot is
+  // outside the window with no way to say so.
+  //===--------------------------------------------------------------------===//
+  const bool ring_cache = (present_key != nullptr && present_seq < total_seq);
+  if (ring_cache) {
+    if (local_window_size <= 0 || present_seq != local_window_size) {
+      fprintf(stderr,
+              "gqa_forward_hipblaslt: present KV buffer (%lld) is shorter than "
+              "the context (%lld), which is only supported for a sliding-window "
+              "layer whose cache is right-sized to exactly the window, but "
+              "local_window_size=%lld\n",
+              (long long)present_seq, (long long)total_seq,
+              (long long)local_window_size);
+      return -1;
+    }
+    if (past_key != present_key) {
+      fprintf(stderr,
+              "gqa_forward_hipblaslt: a right-sized sliding-window cache needs "
+              "past and present aliased (past_present_share_buffer), but they "
+              "differ\n");
+      return -1;
+    }
+  }
+
+  // The two halves of ring mode, which want opposite things. A prefill scores
+  // against the whole context, so it reads a full-length linear copy and only
+  // the cache write wraps. A decode reads the ring itself, whose keys arrive
+  // rotated.
+  const bool ring_prefill = ring_cache && sq > 1;
+  const bool ring_read = ring_cache && sq == 1;
+
   // Number of key positions actually scored, and the first one. kv_span ==
   // total_seq and kv_lo == 0 whenever narrowing is inactive, which keeps every
   // downstream expression below identical to what it was.
   int64_t kv_span = total_seq;
   int64_t kv_lo = 0;
-  if (sq == 1 && use_no_expand && local_window_size > 0 &&
-      local_window_size < total_seq) {
+  if (ring_cache && sq == 1) {
+    // The whole ring is in-window by construction, so #795's narrowing
+    // collapses: read every slot from 0 and let the ring rotation, not an
+    // offset, place them. kv_lo must stay 0 -- a ring has no contiguous "first
+    // scored position" to point at.
+    kv_span = present_seq;
+    kv_lo = 0;
+  } else if (sq == 1 && use_no_expand && local_window_size > 0 &&
+             local_window_size < total_seq) {
     kv_span = local_window_size;
     kv_lo = total_seq - kv_span;
   }
@@ -1627,6 +1703,11 @@ static int gqa_forward_hipblaslt(
               /*strideC=*/chunked ? sq * d : 0};
   };
 
+  // strideA is the buffer page the K/V operand steps over per (b, g). It is the
+  // present cache's own capacity, except on a ring prefill, which reads the
+  // full-length workspace copy instead.
+  const int64_t kv_page_seq = ring_prefill ? total_seq : present_seq;
+
   GqaGemmKey scoreKey, valueKey;
   if (use_no_expand) {
     // Score: C[kv_span, HPG*sq] = K^T[d,kv_span] * Q[d, HPG*sq] per (b, g)
@@ -1643,7 +1724,7 @@ static int gqa_forward_hipblaslt(
                 /*transA=*/true,
                 /*outputFp32=*/true,
                 /*inputFp32=*/gemm_fp32,
-                /*strideA=*/present_seq * d,
+                /*strideA=*/kv_page_seq * d,
                 /*strideB=*/HPG * sq * d,
                 /*strideC=*/HPG * sq * kv_span};
     // Value: C[d, HPG*sq] = V[d, kv_span] * S[kv_span, HPG*sq] per (b, g)
@@ -1656,7 +1737,7 @@ static int gqa_forward_hipblaslt(
                 /*transA=*/false,
                 /*outputFp32=*/gemm_fp32,
                 /*inputFp32=*/gemm_fp32,
-                /*strideA=*/present_seq * d,
+                /*strideA=*/kv_page_seq * d,
                 /*strideB=*/HPG * sq * kv_span,
                 /*strideC=*/HPG * sq * d};
   } else {
@@ -1752,6 +1833,23 @@ static int gqa_forward_hipblaslt(
     off_Ksplit = off_Qsplit + Q_bytes;
     off_Vsplit = off_Ksplit + K_bytes;
     temp_end = off_Vsplit + K_bytes;
+  }
+
+  // Full-length BNSD K/V for a ring prefill. A prefill scores every query
+  // against every earlier key, so it needs all total_seq keys laid out
+  // contiguously -- but the ring only has `window` cells, and the incoming
+  // kSrc/vSrc are BSHD, which is not the layout the expand step and the
+  // no-expand GEMM strides read. So the prefill gets a transient BNSD copy of
+  // the full range here, and the persistent cache separately receives just the
+  // tail the next decode will read. This is workspace, sized once and reused by
+  // every layer, not 25 more caches: it is the same order as Kexp/Vexp
+  // alongside it, and it disappears when prefill does.
+  size_t off_Kfull = 0, off_Vfull = 0;
+  if (ring_prefill) {
+    size_t KV_bytes = static_cast<size_t>(B) * G * total_seq * d * elem_sz;
+    off_Kfull = temp_end;
+    off_Vfull = off_Kfull + KV_bytes;
+    temp_end = off_Vfull + KV_bytes;
   }
 
   int result = 0;
@@ -1868,16 +1966,36 @@ static int gqa_forward_hipblaslt(
           static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
           (use_no_expand && !bidirectional_no_past) ? seqlens_k_ptr : nullptr,
           static_cast<int>(elem_sz), static_cast<int>(kv_lo),
-          bidirectional_no_past, static_cast<int>(skv)));
+          ring_cache ? 1 : 0, bidirectional_no_past, static_cast<int>(skv)));
+
+      // Ring prefill: the append above stored the tail the next decode reads.
+      // The attention below still needs the whole range, so lay it out BNSD in
+      // workspace. past_len is 0 for a prefill, so this is a plain linear
+      // append into a buffer that is exactly total_seq long.
+      if (ring_prefill) {
+        HIP_CHECK(update_kv_cache(
+            stream, /*past_key=*/nullptr, /*past_value=*/nullptr, kSrc, vSrc,
+            ws + off_Kfull, ws + off_Vfull, static_cast<int>(B),
+            /*past_len=*/0, static_cast<int>(sq), static_cast<int>(G),
+            static_cast<int>(d), /*past_buf_seq=*/0,
+            static_cast<int>(total_seq), /*seqlens_k_ptr=*/nullptr,
+            static_cast<int>(elem_sz), /*copy_lo=*/0, /*ring=*/0,
+            /*no_causal=*/false, /*skv=*/-1));
+      }
     }
 
     // ---- Steps 6-7: KV Expand [B*G,present_seq,d] -> [B*H,total_seq,d] ----
     // Skipped in no-expand mode: the Score/Value GEMMs read K/V directly from
     // the BNSD cache via per-operand batch strides instead.
     if (!use_no_expand) {
-      const void *kCache = present_key ? present_key : key;
-      const void *vCache = present_value ? present_value : value;
-      int kvSrcStride = static_cast<int>(present_seq * d);
+      // A ring prefill expands out of the full-length workspace copy, whose
+      // batch stride is total_seq rather than the ring's capacity.
+      const void *kCache = ring_prefill ? (ws + off_Kfull)
+                                        : (present_key ? present_key : key);
+      const void *vCache = ring_prefill ? (ws + off_Vfull)
+                                        : (present_value ? present_value : value);
+      int kvSrcStride =
+          static_cast<int>((ring_prefill ? total_seq : present_seq) * d);
       int kvDstStride = static_cast<int>(total_seq * d);
       int expandCopy = static_cast<int>(total_seq * d);
 
@@ -1899,14 +2017,20 @@ static int gqa_forward_hipblaslt(
     // BNSD with d fastest, so this selects a contiguous span and leaves the
     // per-(b,g) batch stride at present_seq*d. kv_lo is 0 unless the sliding
     // window narrowed the range.
+    // A ring prefill reads the full-length workspace copy instead of the cache,
+    // for the same reason the expand step above does: the ring holds only the
+    // window, and a prefill scores against everything before it.
     const size_t kv_byte_off = static_cast<size_t>(kv_lo) * d * elem_sz;
-    const void *scoreA =
-        (use_no_expand ? static_cast<const char *>(present_key) + kv_byte_off
-                       : static_cast<const char *>(d_Kexp));
+    const char *noExpandK = ring_prefill ? (ws + off_Kfull)
+                                         : static_cast<const char *>(present_key);
+    const char *noExpandV = ring_prefill
+                                ? (ws + off_Vfull)
+                                : static_cast<const char *>(present_value);
+    const void *scoreA = (use_no_expand ? noExpandK + kv_byte_off
+                                        : static_cast<const char *>(d_Kexp));
     const void *scoreBBase = need_transpose ? d_Qtrans : qSrc;
-    const void *valueA =
-        (use_no_expand ? static_cast<const char *>(present_value) + kv_byte_off
-                       : static_cast<const char *>(d_Vexp));
+    const void *valueA = (use_no_expand ? noExpandV + kv_byte_off
+                                        : static_cast<const char *>(d_Vexp));
     void *valueCBase = need_transpose ? d_O : output;
     float scoreAlpha = scale;
     float beta = 0.0f;
@@ -1952,7 +2076,9 @@ static int gqa_forward_hipblaslt(
             static_cast<int>(kv_span), scoreBatchStride,
             static_cast<int>(elem_sz), static_cast<int>(sq),
             static_cast<int>(q0), static_cast<int>(total_seq),
-            static_cast<int>(kv_lo)));
+            static_cast<int>(kv_lo),
+            static_cast<int>(ring_read ? total_seq - present_seq : 0),
+            static_cast<int>(ring_read ? present_seq : 0)));
       }
 
       // ---- Step 9: Causal Mask (fp32) + Softmax (fp32 -> fp16/fp32) ----
@@ -1981,7 +2107,13 @@ static int gqa_forward_hipblaslt(
       // exactly equivalent to shifting the column index up by it. No kernel
       // change needed. (At sq == 1 the narrowed range is precisely the window,
       // so the kernel then writes nothing -- correct, just redundant.)
-      if ((sq > 1 || local_window_size > 0) && !no_causal) {
+      // A ring read is exempt, and has to be: the kernel derives a column's
+      // absolute position from its index, which a rotated ring breaks. It is
+      // also unnecessary, and for the same reason the capacity is pinned to the
+      // window -- a ring of exactly `window` cells holds exactly the positions
+      // the single query may attend to, so both the triangle and the window
+      // admit every column and the kernel would write nothing.
+      if ((sq > 1 || local_window_size > 0) && !no_causal && !ring_read) {
         HIP_CHECK(hip_gqa_causal_mask_f32(
             stream, d_S_f32, static_cast<int>(B * H), static_cast<int>(kv_span),
             static_cast<int>(c), scoreBatchStride,
