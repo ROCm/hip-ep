@@ -133,7 +133,8 @@ std::vector<uint8_t> makeLut() {
   const auto add_fallback = [&](Phase phase, Dim dim, Cfg config,
                                 uint8_t splits) {
     rows.push_back(Row(phase, Tier::Fallback, Dtype::Any, dim, 0, Head::Any,
-                       Par::Any, Bat::Any, Seq::Any, Seq::Any, Win::Any, config, splits));
+                       Par::Any, Bat::Any, Seq::Any, Seq::Any, Win::Any, config,
+                       splits));
   };
   add_fallback(Phase::Decode, Dim::D64, Cfg::Scalar, 12);
   add_fallback(Phase::PrefillV5, Dim::D64, Cfg::MT1_BKV32, 0);
@@ -171,7 +172,8 @@ std::vector<uint8_t> makeLut() {
   // window is not always NoWindow.
   const auto v5 = [&](Tier tier, Seq sq, Seq skv, Win window, Cfg config) {
     rows.push_back(Row(Phase::PrefillV5, tier, Dtype::Any, Dim::D64, 0,
-                       Head::Any, Par::Any, Bat::Any, sq, skv, window, config, 0));
+                       Head::Any, Par::Any, Bat::Any, sq, skv, window, config,
+                       0));
   };
   v5(Tier::Length, Seq::S256, Seq::S512, Win::NoWindow, Cfg::MT2_BKV64);
   v5(Tier::Length, Seq::S256, Seq::S3072, Win::NoWindow, Cfg::MT1_BKV32);
