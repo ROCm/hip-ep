@@ -234,6 +234,12 @@ static inline int kv_dtype_abi(KvCacheFormat f) {
 // so that a new call site has to say which it is. The append branches ignore
 // it: they only ever write the new tokens, and an in-place cache has no prefix
 // to copy in the first place.
+//
+// Which means the narrowing is now the fallback rather than the common path:
+// a model configured with past_present_share_buffer aliases present onto past
+// and appends, so nothing here runs. It stays because that configuration is a
+// property of the model directory, not of this repo, and a caller that ships
+// without it still gets a separate buffer and still wants a narrowed copy.
 static int update_kv_cache(hipStream_t stream, const void *past_key,
                            const void *past_value, const void *new_key,
                            const void *new_value, void *present_key,
