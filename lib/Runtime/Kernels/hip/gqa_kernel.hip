@@ -3980,7 +3980,10 @@ struct PrefillV8Cfg { int nd; int mt; int bkv; };
 // hopeless regardless, which removes BKV=64 and all of MT=2.
 static inline int prefillV8Candidates(int d, PrefillV8Cfg* out) {
     static const PrefillV8Cfg kTuned[] = {
-        {2, 1, 16}, {4, 1, 16}, {4, 1, 32}, {8, 1, 16}};
+        {2, 1, 16}, {4, 1, 16}, {4, 1, 32}, {8, 1, 16},
+        // dispatchPrefillV8's default launch and what the offline LUT selects
+        // for D256; keep it here so the configured entry accepts that row.
+        {2, 1, 32}};
     int n = 0;
     for (const PrefillV8Cfg& c : kTuned)
         if (prefillV8SmemBytes(c.nd, c.mt, c.bkv, d) <= kPrefillV8MaxSmem)
