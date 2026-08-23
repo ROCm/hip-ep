@@ -2182,6 +2182,15 @@ static inline void launchFlashDecodeConfig(
     const __half* hSink, int use_smooth_softmax) {
   const int splits = cfg.splits;
   const bool use_wmma = cfg.use_wmma && flash_decode_wmma_supported(d, hpg);
+  // Diagnostic: print the config actually launched (works in both lookup and
+  // online/autotune modes) so a run can be diffed against the other mode.
+  static const bool s_log_cfg = getenv("HIPDNN_EP_GQA_LOG_CONFIG") != nullptr;
+  if (s_log_cfg)
+    fprintf(stderr,
+            "[gqa-cfg] decode B=%d H=%d G=%d d=%d hpg=%d maxseq=%d -> "
+            "impl=%s splits=%d bkv=%d\n",
+            B, H, G, d, hpg, max_seq, use_wmma ? "wmma" : "scalar", splits,
+            cfg.bkv);
   if (use_wmma) {
     // BKV: D=64 has both 16 and 32 instantiated and cfg.bkv picks between them;
     // D=128 has only 32. Grid (G, splits, B), one wave per block.
@@ -3105,6 +3114,12 @@ static inline void dispatchPrefillV5(
     const _Float16* head_sink, int num_heads, int smooth_softmax,
     int local_window_size)
 {
+    static const bool s_log_cfg = getenv("HIPDNN_EP_GQA_LOG_CONFIG") != nullptr;
+    if (s_log_cfg)
+        fprintf(stderr,
+                "[gqa-cfg] prefill v5 B=%d H=%d G=%d d=%d sq=%d skv=%d -> "
+                "m_tiles=%d bkv=%d\n",
+                B, Hq, G, d, sq, skv, m_tiles, bkv);
     const int rows = m_tiles * 16;
     const int num_q_tiles = (sq + rows - 1) / rows;
     dim3 grid(num_q_tiles * B, Hq);
@@ -3474,6 +3489,12 @@ static inline void dispatchPrefillV7(
     _Float16* O, int B, int Hq, int G, int sq, int skv, int max_seq,
     int past_len, float scale)
 {
+    static const bool s_log_cfg = getenv("HIPDNN_EP_GQA_LOG_CONFIG") != nullptr;
+    if (s_log_cfg)
+        fprintf(stderr,
+                "[gqa-cfg] prefill v7 B=%d H=%d G=%d d=%d sq=%d skv=%d -> "
+                "nw=%d bkv=%d mt=%d\n",
+                B, Hq, G, d, sq, skv, nw, bkv, mt);
     const int rows = nw * mt * 16;
     const int num_q_tiles = (sq + rows - 1) / rows;
     dim3 grid(num_q_tiles * B, Hq);
@@ -3922,6 +3943,12 @@ static inline void dispatchPrefillV8(
     _Float16* O, int B, int Hq, int G, int sq, int skv, int max_seq,
     int past_len, float scale)
 {
+    static const bool s_log_cfg = getenv("HIPDNN_EP_GQA_LOG_CONFIG") != nullptr;
+    if (s_log_cfg)
+        fprintf(stderr,
+                "[gqa-cfg] prefill v8 B=%d H=%d G=%d d=%d sq=%d skv=%d -> "
+                "nd=%d mt=%d bkv=%d\n",
+                B, Hq, G, d, sq, skv, nd, mt, bkv);
     const int rows = mt * 16;
     const int num_q_tiles = (sq + rows - 1) / rows;
     dim3 grid(num_q_tiles * B, Hq);
