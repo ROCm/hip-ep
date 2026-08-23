@@ -1064,11 +1064,16 @@ extern "C" int hip_gqa_causal_mask_f32(
   GQA_RETURN_LAUNCH_STATUS();
 }
 
+// `sq` counts the query rows present in `scores`, which is a chunk of the full
+// query range when the caller is tiling the prefill. `bias_sq` is the full query
+// extent of the bias tensor and `bias_row_offset` locates the chunk inside it --
+// the two cannot be folded together because the bias plane stride is set by the
+// full extent while the score plane stride is set by the chunk.
 template <typename TBias>
 __global__ void add_attention_bias_kernel(
     float* __restrict__ scores, const TBias* __restrict__ bias,
     int total_heads, int num_heads, int bias_batch, int bias_heads, int sq,
-    int total_seq, int score_batch_stride) {
+    int total_seq, int score_batch_stride, int bias_sq, int bias_row_offset) {
   int head = blockIdx.y;
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int n = sq * total_seq;
@@ -1080,9 +1085,10 @@ __global__ void add_attention_bias_kernel(
   int h = head % num_heads;
   int bias_b = (bias_batch == 1) ? 0 : b;
   int bias_h = (bias_heads == 1) ? 0 : h;
-  size_t bias_idx = static_cast<size_t>(bias_b) * bias_heads * sq * total_seq +
-                    static_cast<size_t>(bias_h) * sq * total_seq +
-                    static_cast<size_t>(row) * total_seq + col;
+  size_t bias_plane = static_cast<size_t>(bias_sq) * total_seq;
+  size_t bias_idx = static_cast<size_t>(bias_b) * bias_heads * bias_plane +
+                    static_cast<size_t>(bias_h) * bias_plane +
+                    static_cast<size_t>(bias_row_offset + row) * total_seq + col;
   scores[static_cast<size_t>(head) * score_batch_stride + tid] +=
       static_cast<float>(bias[bias_idx]);
 }
@@ -1090,10 +1096,13 @@ __global__ void add_attention_bias_kernel(
 extern "C" int hip_gqa_add_attention_bias_f32(
     void* stream_ptr, void* scores, const void* bias, int total_heads,
     int num_heads, int bias_batch, int bias_heads, int sq, int total_seq,
-    int score_batch_stride, int bias_element_size_bytes) {
+    int score_batch_stride, int bias_element_size_bytes, int bias_sq,
+    int bias_row_offset) {
   if (!scores || !bias)
     return -1;
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  if (bias_sq <= 0)
+    bias_sq = sq;
   int n = sq * total_seq;
   int blocksX = (n + GQA_THREADS - 1) / GQA_THREADS;
   (void)hipGetLastError();
@@ -1102,13 +1111,13 @@ extern "C" int hip_gqa_add_attention_bias_f32(
         <<<dim3(blocksX, total_heads), GQA_THREADS, 0, stream>>>(
             static_cast<float*>(scores), static_cast<const __half*>(bias),
             total_heads, num_heads, bias_batch, bias_heads, sq, total_seq,
-            score_batch_stride);
+            score_batch_stride, bias_sq, bias_row_offset);
   } else if (bias_element_size_bytes == 4) {
     add_attention_bias_kernel<float>
         <<<dim3(blocksX, total_heads), GQA_THREADS, 0, stream>>>(
             static_cast<float*>(scores), static_cast<const float*>(bias),
             total_heads, num_heads, bias_batch, bias_heads, sq, total_seq,
-            score_batch_stride);
+            score_batch_stride, bias_sq, bias_row_offset);
   } else {
     fprintf(stderr,
             "hip_gqa_add_attention_bias_f32: unsupported bias elem size %d\n",
