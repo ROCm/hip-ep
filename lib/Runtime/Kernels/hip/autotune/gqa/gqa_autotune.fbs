@@ -33,13 +33,17 @@ enum GqaHeadCountClass : ubyte {
   // hpg=4: Llama-3.1-8B, Mistral-7B; Qwen3.5-9B
   H32_G8  = 2,
   H16_G4  = 3,
+  // hpg=4: phi-4
+  H40_G10 = 4,
   // hpg=5: Qwen2.5-14B, Qwen2.5-Coder-14B
-  H40_G8  = 4,
+  H40_G8  = 5,
   // hpg=6: Qwen3.6-27B, Qwen3.8-27B (corrected from earlier data: G=4, not G=6 or G=3)
-  H24_G4  = 5,
+  H24_G4  = 6,
   // hpg=8: DeepSeek-R1-Distill-Llama-70B; Qwen3.5/3.6-35B-A3B
-  H64_G8  = 6,
-  H16_G2  = 7
+  H64_G8  = 7,
+  H16_G2  = 8,
+  // hpg=1: gpt-oss-20b (MHA)
+  H32_G32 = 9
 }
 
 // How much of the key a row leaves wildcarded. Every tier is a row, so what to
@@ -268,7 +272,7 @@ struct GqaTuneRow {
 }
 
 table GqaAutotuneLut {
-  schema_version: uint32 = 6;
+  schema_version: uint32 = 7;
   gpu_arch: string;
   rocm_version: int32;
   kernel_abi: string;

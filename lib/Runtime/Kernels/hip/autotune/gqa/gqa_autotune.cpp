@@ -87,7 +87,7 @@ namespace fbs = mlir::hip;
 // 6: 13-byte rows (added head_count field); new ExactHeadGroup tier keyed on
 //    exact (num_heads, kv_num_heads) pairs for finest-grain matching; existing
 //    Geometry and HeadGroup tiers serve as fuzzy fallback for new models.
-constexpr uint32_t kGqaLutSchemaVersion = 6;
+constexpr uint32_t kGqaLutSchemaVersion = 7;
 constexpr size_t kMaxLutBytes = 64u * 1024u * 1024u;
 
 // What a row resolves to once the config name has been expanded.
@@ -295,6 +295,8 @@ static fbs::GqaHeadCountClass headCountClass(int num_heads, int kv_num_heads) {
     return fbs::GqaHeadCountClass::H32_G8;
   if (num_heads == 16 && kv_num_heads == 4)
     return fbs::GqaHeadCountClass::H16_G4;
+  if (num_heads == 40 && kv_num_heads == 10)
+    return fbs::GqaHeadCountClass::H40_G10;
   if (num_heads == 40 && kv_num_heads == 8)
     return fbs::GqaHeadCountClass::H40_G8;
   if (num_heads == 24 && kv_num_heads == 4)
@@ -303,6 +305,8 @@ static fbs::GqaHeadCountClass headCountClass(int num_heads, int kv_num_heads) {
     return fbs::GqaHeadCountClass::H64_G8;
   if (num_heads == 16 && kv_num_heads == 2)
     return fbs::GqaHeadCountClass::H16_G2;
+  if (num_heads == 32 && kv_num_heads == 32)
+    return fbs::GqaHeadCountClass::H32_G32;
   return fbs::GqaHeadCountClass::Any;
 }
 
