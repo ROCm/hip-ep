@@ -5,6 +5,8 @@
 
 #include "OnnxToHipUtils.h"
 
+#include "hip/env.h"
+
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 
@@ -74,6 +76,8 @@ namespace {
 ///   %past      = tensor.dim %past_k, %c2   // past buffer EXTENT (see below)
 ///   %tot       = tensor.dim %mask, %c3     // valid total KV, else %past + %cur
 ///   %cap       = arith.maxsi %past, %tot   // present buffer capacity
+///                                          // (just %past under
+///                                          //  HIPDNN_EP_KV_SHARE_BUFFER)
 ///   %seqlens_k = tensor.from_elements (%tot - 1)  : tensor<1xi32>
 ///   %total_seq = tensor.from_elements %cap        : tensor<i32>
 ///   %pk_init   = tensor.empty(%B, %cap)    // present sized to capacity
@@ -376,15 +380,34 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
                       .getResult();
 
   // present buffer capacity, which is NOT the same as the valid length above.
-  // Taking the max keeps both callers correct: with a separately allocated
-  // present it collapses to past + current (the past extent is the valid past
-  // length, which is smaller), while with a shared buffer it yields the
-  // max_length capacity so the requested output shape matches the buffer ORT
-  // already bound -- which is what makes past_key == present_key, and hence the
-  // in-place append path, reachable at all.
+  //
+  // The two deployments want different things, and only one of them can be
+  // inferred from the operands. A separately allocated present has to hold
+  // past + current, and there dim(past_key, 2) is the valid past length, so it
+  // is strictly smaller than the total. A shared present IS the past buffer, so
+  // its capacity is dim(past_key, 2) exactly -- never the total.
+  //
+  // max() computes the right answer for both only as long as a shared buffer is
+  // allocated to max_length, where the past extent dominates the total anyway.
+  // It stops working the moment a buffer is deliberately allocated shorter than
+  // the context, which is what right-sizing a sliding-window layer's cache to
+  // its window does: max(1024, 2240) asks ORT for a 2240-long present and ORT
+  // refuses, because the buffer it bound is 1024.
+  //
+  // The relation between the extents cannot tell those apart -- a right-sized
+  // shared buffer and a growing separate one both have past < total -- so the
+  // deployment has to say. HIPDNN_EP_KV_SHARE_BUFFER must agree with
+  // past_present_share_buffer in genai_config.json; they are two views of one
+  // fact and disagreeing gets a shape rejection at the first Run.
+  // With no past operand there is nothing to share, so the flag does not apply
+  // and a zero-length present would be nonsense.
+  const bool kvShareBuffer =
+      pastKey && hipdnn_ep::env_enabled("HIPDNN_EP_KV_SHARE_BUFFER");
   mlir::Value presentCapIdx =
-      mlir::arith::MaxSIOp::create(rewriter, loc, pastSeqIdx, totalKvIdx)
-          .getResult();
+      kvShareBuffer
+          ? pastSeqIdx
+          : mlir::arith::MaxSIOp::create(rewriter, loc, pastSeqIdx, totalKvIdx)
+                .getResult();
 
   // seqlens_k[b] = total_seq - 1 (ORT GQA convention total_seq = seqlens_k + 1;
   // the runtime derives past_len = total_seq - sq). Ignored by the runtime on
