@@ -1428,6 +1428,13 @@ static int gqa_forward_hipblaslt(
   if (past_len < 0)
     past_len = 0;
 
+  RUNTIME_DEBUG_LOG(
+      "[REAL] decomposed GQA lengths: sq=%lld total_seq=%lld past_len=%lld "
+      "present_seq=%lld past_buf_seq=%lld aliased=%d\n",
+      (long long)sq, (long long)total_seq, (long long)past_len,
+      (long long)present_seq, (long long)past_buf_seq,
+      static_cast<int>(past_key == present_key));
+
   bool packed_qkv = (key == nullptr && value == nullptr);
 
   //===--------------------------------------------------------------------===//
