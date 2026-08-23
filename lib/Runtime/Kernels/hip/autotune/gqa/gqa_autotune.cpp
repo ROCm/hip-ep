@@ -746,6 +746,7 @@ static bool loadLutBuffer(GqaAutotunePolicy &policy, const uint8_t *data,
     }
     const uint64_t key = packKey(
         row->phase(), row->tier(), row->kv_dtype(), row->head_dim(), row->hpg(),
+        row->head_count(),
         row->par(), row->batch(), row->seq_q(), row->seq_kv(), row->window());
     // insert_or_assign, so a duplicate key is the last row rather than the
     // first. validate_lut_json.py rejects duplicates offline, because either
