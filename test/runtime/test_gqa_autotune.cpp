@@ -83,6 +83,7 @@ using Win = mlir::hip::GqaWindowClass;
 using Par = mlir::hip::GqaParClass;
 using Bat = mlir::hip::GqaBatchClass;
 using Cfg = mlir::hip::GqaTuneConfig;
+using Head = mlir::hip::GqaHeadCountClass;
 using Row = mlir::hip::GqaTuneRow;
 
 std::vector<uint8_t> makeLut() {
@@ -90,8 +91,8 @@ std::vector<uint8_t> makeLut() {
   const auto decode = [&](Tier tier, uint8_t hpg, Par par, Seq skv, Cfg config,
                           uint8_t splits, Dim dim = Dim::D64,
                           Bat batch = Bat::Any, Win window = Win::NoWindow) {
-    rows.push_back(Row(Phase::Decode, tier, Dtype::Any, dim, hpg, par, batch,
-                       Seq::Any, skv, window, config, splits));
+    rows.push_back(Row(Phase::Decode, tier, Dtype::Any, dim, hpg, Head::Any,
+                       par, batch, Seq::Any, skv, window, config, splits));
   };
 
   // heads-per-group 8 at head_dim 64, which is what gpt-oss runs: WMMA is
@@ -131,8 +132,8 @@ std::vector<uint8_t> makeLut() {
   // and an unwindowed request, which `Any` means and `NoWindow` does not.
   const auto add_fallback = [&](Phase phase, Dim dim, Cfg config,
                                 uint8_t splits) {
-    rows.push_back(Row(phase, Tier::Fallback, Dtype::Any, dim, 0, Par::Any,
-                       Bat::Any, Seq::Any, Seq::Any, Win::Any, config, splits));
+    rows.push_back(Row(phase, Tier::Fallback, Dtype::Any, dim, 0, Head::Any,
+                       Par::Any, Bat::Any, Seq::Any, Seq::Any, Win::Any, config, splits));
   };
   add_fallback(Phase::Decode, Dim::D64, Cfg::Scalar, 12);
   add_fallback(Phase::PrefillV5, Dim::D64, Cfg::MT1_BKV32, 0);
@@ -144,33 +145,33 @@ std::vector<uint8_t> makeLut() {
   //
   //  - a Length row naming WMMA: unhonourable without heads-per-group.
   rows.push_back(Row(Phase::Decode, Tier::Length, Dtype::Any, Dim::D64, 0,
-                     Par::Any, Bat::Any, Seq::Any, Seq::S2048, Win::NoWindow,
-                     Cfg::Wmma, 8));
+                     Head::Any, Par::Any, Bat::Any, Seq::Any, Seq::S2048,
+                     Win::NoWindow, Cfg::Wmma, 8));
   //  - a HeadGroup row that also sets par: it would answer one head count while
   //    looking like it answers all of them.
   rows.push_back(Row(Phase::Decode, Tier::HeadGroup, Dtype::Any, Dim::D64, 8,
-                     Par::P256, Bat::Any, Seq::S2048, Seq::S2048, Win::NoWindow,
-                     Cfg::Scalar, 8));
+                     Head::Any, Par::P256, Bat::Any, Seq::S2048, Seq::S2048,
+                     Win::NoWindow, Cfg::Scalar, 8));
   //  - a Fallback row that keys on a length: it would answer far less than the
   //    last resort is expected to.
   rows.push_back(Row(Phase::Decode, Tier::Fallback, Dtype::Any, Dim::D128, 0,
-                     Par::Any, Bat::Any, Seq::Any, Seq::S4096, Win::Any,
-                     Cfg::Scalar, 8));
+                     Head::Any, Par::Any, Bat::Any, Seq::Any, Seq::S4096,
+                     Win::Any, Cfg::Scalar, 8));
   //  - a v7 phase naming a v8 config: the knobs would go to the wrong
   //  dispatcher.
   rows.push_back(Row(Phase::PrefillV7, Tier::Fallback, Dtype::Any, Dim::D128, 0,
-                     Par::Any, Bat::Any, Seq::Any, Seq::Any, Win::Any,
-                     Cfg::ND2_MT1_BKV32, 0));
+                     Head::Any, Par::Any, Bat::Any, Seq::Any, Seq::Any,
+                     Win::Any, Cfg::ND2_MT1_BKV32, 0));
   //  - a decode row with a split count outside 1..64.
   rows.push_back(Row(Phase::Decode, Tier::HeadGroup, Dtype::Any, Dim::D256, 4,
-                     Par::Any, Bat::Any, Seq::Any, Seq::S2048, Win::NoWindow,
-                     Cfg::Scalar, 200));
+                     Head::Any, Par::Any, Bat::Any, Seq::Any, Seq::S2048,
+                     Win::NoWindow, Cfg::Scalar, 200));
 
   // Prefill v5 is the one variant with a window in its key, and the one whose
   // window is not always NoWindow.
   const auto v5 = [&](Tier tier, Seq sq, Seq skv, Win window, Cfg config) {
     rows.push_back(Row(Phase::PrefillV5, tier, Dtype::Any, Dim::D64, 0,
-                       Par::Any, Bat::Any, sq, skv, window, config, 0));
+                       Head::Any, Par::Any, Bat::Any, sq, skv, window, config, 0));
   };
   v5(Tier::Length, Seq::S256, Seq::S512, Win::NoWindow, Cfg::MT2_BKV64);
   v5(Tier::Length, Seq::S256, Seq::S3072, Win::NoWindow, Cfg::MT1_BKV32);
@@ -180,12 +181,12 @@ std::vector<uint8_t> makeLut() {
   // Nothing measured is dtype-specific yet; this pins the probe order so that
   // measuring one later does not need a schema change.
   rows.push_back(Row(Phase::Decode, Tier::HeadGroup, Dtype::Int8, Dim::D64, 8,
-                     Par::Any, Bat::Any, Seq::Any, Seq::S128, Win::NoWindow,
-                     Cfg::Scalar, 2));
+                     Head::Any, Par::Any, Bat::Any, Seq::Any, Seq::S128,
+                     Win::NoWindow, Cfg::Scalar, 2));
 
   flatbuffers::FlatBufferBuilder builder;
   auto lut = mlir::hip::CreateGqaAutotuneLutDirect(
-      builder, /*schema_version=*/5, /*gpu_arch=*/"", /*rocm_version=*/0,
+      builder, /*schema_version=*/6, /*gpu_arch=*/"", /*rocm_version=*/0,
       hipdnn_ep::kGqaKernelAbi, "unit-test", &rows);
   mlir::hip::FinishGqaAutotuneLutBuffer(builder, lut);
   return {builder.GetBufferPointer(),
@@ -198,11 +199,11 @@ std::vector<uint8_t> makeLut() {
 std::vector<uint8_t> makeOneRowLut(uint8_t splits) {
   std::vector<Row> rows;
   rows.push_back(Row(Phase::Decode, Tier::HeadGroup, Dtype::Any, Dim::D64, 8,
-                     Par::Any, Bat::Any, Seq::Any, Seq::S128, Win::NoWindow,
-                     Cfg::Scalar, splits));
+                     Head::Any, Par::Any, Bat::Any, Seq::Any, Seq::S128,
+                     Win::NoWindow, Cfg::Scalar, splits));
   flatbuffers::FlatBufferBuilder builder;
   auto lut = mlir::hip::CreateGqaAutotuneLutDirect(
-      builder, /*schema_version=*/5, /*gpu_arch=*/"", /*rocm_version=*/0,
+      builder, /*schema_version=*/6, /*gpu_arch=*/"", /*rocm_version=*/0,
       hipdnn_ep::kGqaKernelAbi, "unit-test-one-row", &rows);
   mlir::hip::FinishGqaAutotuneLutBuffer(builder, lut);
   return {builder.GetBufferPointer(),
