@@ -25,6 +25,23 @@ enum GqaTunePhase : ubyte {
   PrefillV8 = 3
 }
 
+// Exact (num_heads, kv_num_heads) pairs measured in practice. Used by ExactHeadGroup tier.
+enum GqaHeadCountClass : ubyte {
+  Any     = 0,
+  // hpg=2: gemma3-4b
+  H8_G4   = 1,
+  // hpg=4: Llama-3.1-8B, Mistral-7B; Qwen3.5-9B
+  H32_G8  = 2,
+  H16_G4  = 3,
+  // hpg=5: Qwen2.5-14B, Qwen2.5-Coder-14B
+  H40_G8  = 4,
+  // hpg=6: Qwen3.6-27B, Qwen3.8-27B (corrected from earlier data: G=4, not G=6 or G=3)
+  H24_G4  = 5,
+  // hpg=8: DeepSeek-R1-Distill-Llama-70B; Qwen3.5/3.6-35B-A3B
+  H64_G8  = 6,
+  H16_G2  = 7
+}
+
 // How much of the key a row leaves wildcarded. Every tier is a row, so what to
 // run is never decided in code -- and which tier answers is decided by which row
 // exists, not by a branch.
@@ -33,34 +50,38 @@ enum GqaTunePhase : ubyte {
 // measurement support. Measured on the 460-shape decode grid, with each tier used
 // alone (tools/analyze_key_space.py):
 //
-//   tier        rows  median  p90    max    <=5% of optimum
-//   Geometry    190   1.000   1.007  1.130  99%
-//   HeadGroup   133   1.000   1.015  1.130  98%
-//   Length       57   1.000   1.063  1.246  84%
-//   Fallback      3   1.003   1.213  1.515  69%
+//   tier             rows  median  p90    max    <=5% of optimum
+//   Geometry         190   1.000   1.007  1.130  99%
+//   ExactHeadGroup    ?    TBD     TBD    TBD    TBD (new tier: exact H+G match)
+//   HeadGroup        133   1.000   1.015  1.130  98% (fuzzy fallback for new H/G combos)
+//   Length            57   1.000   1.063  1.246  84%
+//   Fallback           3   1.003   1.213  1.515  69%
 //
-// HeadGroup is the tier that carries production traffic. It costs one percentage
-// point against a key that also names the exact head counts, and unlike that key
-// it is *complete*: gqa.cpp admits heads-per-group in {1,2,3,4,5,8,16} and
-// head_dim in {64,128,256} on the fused decode path, 21 pairs in all, so every
-// model that can reach this table has a row keyed on its own pair. A key on head
-// counts can only ever cover the counts somebody measured.
+// Probe order (finest to coarsest): Geometry (par-walk) → ExactHeadGroup → HeadGroup (HpG-only) → Length → Fallback.
+// Geometry is the tier that carries production traffic when a batch-specific measurement exists.
+// ExactHeadGroup is the new finest tier for exact (H, G) pairs, answering models whose head counts
+// match exactly. HeadGroup remains as fuzzy fallback for new models with known HpG but unseen (H,G).
 enum GqaTuneTier : ubyte {
   // hpg, par and the length labels are all set. For a geometry whose absolute
   // head count or batch changes the answer, which measurement has so far found
   // only on decode at head_dim 256.
   Geometry = 0,
+  // Exact (num_heads, kv_num_heads) pair + length labels set, par and batch are Any.
+  // Finest-grain matching: answers models whose head counts match exactly, e.g. H=32,G=8.
+  // Falls through to HeadGroup if no row exists for the requested (H, G) pair.
+  ExactHeadGroup = 1,
   // hpg and the length labels are set, par is Any: one row per
   // (head_dim, heads-per-group, length bucket), pooled over head counts.
-  HeadGroup = 1,
+  // Fuzzy fallback for new models with known HpG ratio but unmeasured (H, G) pair.
+  HeadGroup = 2,
   // Only the length labels are set. Answers a geometry whose heads-per-group has
   // no row, and most prefill shapes: the prefill kernels are templated on head_dim
   // alone, so their rows depend on the geometry only where the query-to-KV ratio
   // changes how much of the cache a tile re-reads. Prefill v8 is the extreme case
   // -- one config wins all 599 shapes measured, over seven geometries.
-  Length = 2,
+  Length = 3,
   // phase, kv_dtype and head_dim only. The last resort, ranked on its worst case.
-  Fallback = 3
+  Fallback = 4
 }
 
 enum GqaTuneKvDtype : ubyte {
@@ -211,7 +232,7 @@ enum GqaTuneConfig : ubyte {
   ND4_MT2_BKV32 = 53
 }
 
-// 12 bytes, alignment 1. Fields a tier does not use hold their `Any` value, and
+// 13 bytes, alignment 1. Fields a tier does not use hold their `Any` value, and
 // the loader rejects a row whose wildcards disagree with its tier.
 //
 //   phase      which kernel and, for prefill, which variant
@@ -219,6 +240,7 @@ enum GqaTuneConfig : ubyte {
 //   kv_dtype   Fp16 or Int8 KV cache
 //   head_dim   64, 128 or 256
 //   hpg        heads per group, 1..16, or 0 for Any
+//   head_count exact (num_heads, kv_num_heads) pair; Any for all tiers except ExactHeadGroup
 //   par        batch * num_heads, bucketed
 //   batch      the batch size, bucketed; Any unless the row is batch-specific
 //   seq_q      prefill chunk length, bucketed. Any on decode.
@@ -235,6 +257,7 @@ struct GqaTuneRow {
   kv_dtype: GqaTuneKvDtype;
   head_dim: GqaTuneHeadDim;
   hpg: ubyte;
+  head_count: GqaHeadCountClass;
   par: GqaParClass;
   batch: GqaBatchClass;
   seq_q: GqaSeqBucket;
@@ -245,7 +268,7 @@ struct GqaTuneRow {
 }
 
 table GqaAutotuneLut {
-  schema_version: uint32 = 5;
+  schema_version: uint32 = 6;
   gpu_arch: string;
   rocm_version: int32;
   kernel_abi: string;

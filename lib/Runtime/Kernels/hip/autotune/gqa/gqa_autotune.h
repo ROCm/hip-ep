@@ -21,21 +21,23 @@ inline constexpr const char kGqaKernelAbi[] = "gqa-v2";
 
 // Where a config came from, in the order the policy tries them. Each name is a
 // tier of the offline table, and the tier is part of a row's key.
-//   Geometry   heads-per-group, a bucket of batch*num_heads, and bucketed
-//   lengths. HeadGroup  heads-per-group and bucketed lengths, pooled over head
-//   counts. The
-//              tier that carries production traffic: the (head_dim,
-//              heads-per-group) pairs the fused path admits are a closed set of
-//              21, so a complete table answers every geometry here.
-//   Length     bucketed lengths only, pooled over geometries. What answers a
-//              heads-per-group with no row of its own, and most prefill shapes,
-//              since the prefill kernels are templated on head_dim alone.
-//   Fallback   phase, kv_dtype and head_dim only, ranked on its worst case.
-//   Heuristic  a config compiled into gqa_autotune.cpp, reached only when there
-//   is
-//              no usable table at all: no file, an arch/schema mismatch, or a
-//              table with no Fallback rows. A LUT that loads answers every
-//              shape.
+//   Geometry          heads-per-group, a bucket of batch*num_heads, and bucketed
+//                     lengths.
+//   ExactHeadGroup    exact (num_heads, kv_num_heads) pair and bucketed lengths.
+//                     Finest-grain matching for known H/G pairs (e.g. Llama H=32,G=8).
+//   HeadGroup         heads-per-group and bucketed lengths, pooled over head
+//                     counts. Fuzzy fallback for new models with known hpg.
+//                     The tier that carries production traffic when no ExactHeadGroup
+//                     row exists: the (head_dim, heads-per-group) pairs the fused path
+//                     admits are a closed set of 21, so a complete table answers
+//                     every geometry here.
+//   Length            bucketed lengths only, pooled over geometries. What answers a
+//                     heads-per-group with no row of its own, and most prefill shapes,
+//                     since the prefill kernels are templated on head_dim alone.
+//   Fallback          phase, kv_dtype and head_dim only, ranked on its worst case.
+//   Heuristic         a config compiled into gqa_autotune.cpp, reached only when there
+//                     is no usable table at all: no file, an arch/schema mismatch, or a
+//                     table with no Fallback rows. A LUT that loads answers every shape.
 //
 // Every LUT tier is data, measured offline and reviewed as rows. Widening what
 // the table answers means adding rows, not adding another matcher here -- a
@@ -45,11 +47,12 @@ inline constexpr const char kGqaKernelAbi[] = "gqa-v2";
 // was missed.
 //
 // The tiers are not equally good, and the gap is worth logging for. Over the
-// decode grid, with each tier used alone: HeadGroup lands 98% of shapes within
-// 5% of optimum with a worst case of 1.13x, Length 84% and 1.25x, Fallback 69%
-// and 1.52x.
+// decode grid, with each tier used alone: ExactHeadGroup (TBD), Geometry ~99.5%,
+// HeadGroup lands 98% of shapes within 5% of optimum with a worst case of 1.13x,
+// Length 84% and 1.25x, Fallback 69% and 1.52x.
 enum class GqaTuneSource : uint8_t {
   Geometry,
+  ExactHeadGroup,
   HeadGroup,
   Length,
   Fallback,
