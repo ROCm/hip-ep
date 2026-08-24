@@ -170,6 +170,10 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->qmoe_scratch_size = 0;
   state->qmoe_host_scratch = nullptr;
   state->qmoe_host_scratch_size = 0;
+  state->qmoe_amd_scratch = nullptr;
+  state->qmoe_amd_scratch_size = 0;
+  state->qmoe_amd_host_scratch = nullptr;
+  state->qmoe_amd_host_scratch_size = 0;
   state->conv_scratch = nullptr;
   state->conv_scratch_size = 0;
   state->matmul_dp4a_scratch = nullptr;
@@ -704,6 +708,14 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   }
   if (state->qmoe_host_scratch) {
     HIP_CLEANUP(hipHostFree(state->qmoe_host_scratch));
+  }
+
+  // Free com.amd qmoe device scratch + pinned host mirror (if allocated)
+  if (state->qmoe_amd_scratch) {
+    HIP_CLEANUP(hipFree(state->qmoe_amd_scratch));
+  }
+  if (state->qmoe_amd_host_scratch) {
+    HIP_CLEANUP(hipHostFree(state->qmoe_amd_host_scratch));
   }
 
   // Free the convolution workspace pool (if allocated). The stream
@@ -1312,6 +1324,95 @@ int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
     return -1;
   }
   state->qmoe_host_scratch_size = alloc_size;
+  return 0;
+}
+
+//===----------------------------------------------------------------------===//
+// com.amd QMoE (Nemotron-H LatentMoE) scratch -- independent from qmoe_scratch
+// above (see runtime_state_internal.h for the rationale). Same grow-on-
+// demand, never-shrink policy and same sync-before-free-on-grow discipline.
+//===----------------------------------------------------------------------===//
+
+void *hipdnn_ep_state_get_qmoe_amd_scratch(RuntimeState *state) {
+  return state ? state->qmoe_amd_scratch : nullptr;
+}
+
+int hipdnn_ep_state_ensure_qmoe_amd_scratch(RuntimeState *state,
+                                            size_t needed_size) {
+  if (!state)
+    return -1;
+  if (needed_size == 0)
+    return 0;
+  if (state->qmoe_amd_scratch_size >= needed_size)
+    return 0;
+
+  size_t alloc_size = needed_size;
+  if (state->qmoe_amd_scratch_size > 0) {
+    size_t grown =
+        state->qmoe_amd_scratch_size + state->qmoe_amd_scratch_size / 2;
+    if (grown > alloc_size)
+      alloc_size = grown;
+  }
+
+  if (state->qmoe_amd_scratch) {
+    if (state->stream) {
+      HIP_CLEANUP(hipStreamSynchronize(state->stream));
+    }
+    HIP_CLEANUP(hipFree(state->qmoe_amd_scratch));
+    state->qmoe_amd_scratch = nullptr;
+    state->qmoe_amd_scratch_size = 0;
+  }
+
+  if (hipMalloc(&state->qmoe_amd_scratch, alloc_size) != hipSuccess) {
+    fprintf(stderr,
+            "hipdnn_ep_state_ensure_qmoe_amd_scratch: hipMalloc failed for "
+            "%zu bytes\n",
+            alloc_size);
+    return -1;
+  }
+  state->qmoe_amd_scratch_size = alloc_size;
+  return 0;
+}
+
+void *hipdnn_ep_state_get_qmoe_amd_host_scratch(RuntimeState *state) {
+  return state ? state->qmoe_amd_host_scratch : nullptr;
+}
+
+int hipdnn_ep_state_ensure_qmoe_amd_host_scratch(RuntimeState *state,
+                                                 size_t needed_size) {
+  if (!state)
+    return -1;
+  if (needed_size == 0)
+    return 0;
+  if (state->qmoe_amd_host_scratch_size >= needed_size)
+    return 0;
+
+  size_t alloc_size = needed_size;
+  if (state->qmoe_amd_host_scratch_size > 0) {
+    size_t grown = state->qmoe_amd_host_scratch_size +
+                   state->qmoe_amd_host_scratch_size / 2;
+    if (grown > alloc_size)
+      alloc_size = grown;
+  }
+
+  if (state->qmoe_amd_host_scratch) {
+    if (state->stream) {
+      HIP_CLEANUP(hipStreamSynchronize(state->stream));
+    }
+    HIP_CLEANUP(hipHostFree(state->qmoe_amd_host_scratch));
+    state->qmoe_amd_host_scratch = nullptr;
+    state->qmoe_amd_host_scratch_size = 0;
+  }
+
+  if (hipHostMalloc(&state->qmoe_amd_host_scratch, alloc_size,
+                    hipHostMallocDefault) != hipSuccess) {
+    fprintf(stderr,
+            "hipdnn_ep_state_ensure_qmoe_amd_host_scratch: hipHostMalloc "
+            "failed for %zu bytes\n",
+            alloc_size);
+    return -1;
+  }
+  state->qmoe_amd_host_scratch_size = alloc_size;
   return 0;
 }
 

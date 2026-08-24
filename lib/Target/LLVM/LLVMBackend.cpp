@@ -15,10 +15,14 @@
 #include <llvm/IR/DataLayout.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Module.h>
+#include <llvm/IR/PassTimingInfo.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Linker/Linker.h>
 #include <llvm/MC/TargetRegistry.h>
+#include <llvm/Pass.h>
 #include <llvm/Passes/PassBuilder.h>
+#include <llvm/Support/CodeGen.h>
+#include <llvm/Support/CommandLine.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/TargetSelect.h>
@@ -30,6 +34,7 @@
 
 #include "hip/debug_log.h"
 
+#include <cstdlib>
 #include <system_error>
 
 namespace hipdnn {
@@ -190,8 +195,39 @@ llvm::TargetMachine *LLVMBackend::createTargetMachine() {
   llvm::Reloc::Model RM =
       llvm::Reloc::PIC_; // Position-independent code for DLL
 
-  llvm::TargetMachine *TM =
-      target->createTargetMachine(target_triple, cpu, features, options, RM);
+  // Backend (SelectionDAG ISel + register allocation + scheduling) opt level.
+  // This is distinct from the middle-end opt level applied in
+  // CompilerDriver::optimizeLLVMIR: it selects FastISel + the fast register
+  // allocator at CodeGenOptLevel::None versus full DAG ISel + the Greedy
+  // register allocator at Default. On a single huge function (e.g. a fully
+  // decomposed MoE main_graph_internal) the Default backend passes are the
+  // dominant compile-time cost, so HIPDNN_EP_CODEGEN_OPT_LEVEL lets us trade
+  // generated-code quality for far faster codegen.
+  llvm::CodeGenOptLevel cgOpt = llvm::CodeGenOptLevel::Default;
+  if (const char *env = std::getenv("HIPDNN_EP_CODEGEN_OPT_LEVEL")) {
+    switch (std::atoi(env)) {
+    case 0:
+      cgOpt = llvm::CodeGenOptLevel::None;
+      break;
+    case 1:
+      cgOpt = llvm::CodeGenOptLevel::Less;
+      break;
+    case 2:
+      cgOpt = llvm::CodeGenOptLevel::Default;
+      break;
+    case 3:
+      cgOpt = llvm::CodeGenOptLevel::Aggressive;
+      break;
+    default:
+      break;
+    }
+    llvm::errs() << "[LLVMBackend] HIPDNN_EP_CODEGEN_OPT_LEVEL=" << env
+                 << " -> backend CodeGenOptLevel=" << static_cast<int>(cgOpt)
+                 << "\n";
+  }
+
+  llvm::TargetMachine *TM = target->createTargetMachine(
+      target_triple, cpu, features, options, RM, /*CM=*/std::nullopt, cgOpt);
 
   if (!TM) {
     llvm::errs() << "Failed to create target machine\n";
@@ -226,6 +262,25 @@ bool LLVMBackend::compileToObjectFile(llvm::Module *module,
     return false;
   }
 
+  // Optional backend-pass diagnosis. HIPDNN_EP_CODEGEN_TIME_PASSES enables the
+  // legacy PassManager's per-pass tracing and timing so we can pinpoint which
+  // codegen pass (e.g. SelectionDAG ISel or the Greedy register allocator)
+  // dominates on a huge single function. debug-pass=Executions prints
+  // "Executing Pass '<name>' on Function '<fn>'" to errs() (unbuffered) before
+  // each pass runs, so the last line before a stall names the culprit; this
+  // printing is not gated on asserts and works in release builds.
+  const bool time_passes =
+      std::getenv("HIPDNN_EP_CODEGEN_TIME_PASSES") != nullptr;
+  if (time_passes) {
+    llvm::TimePassesIsEnabled = true;
+    auto &opts = llvm::cl::getRegisteredOptions();
+    if (auto it = opts.find("debug-pass"); it != opts.end()) {
+      it->second->addOccurrence(0, "debug-pass", "Executions");
+      llvm::errs() << "[LLVMBackend] enabled debug-pass=Executions + "
+                      "time-passes for compileToObjectFile\n";
+    }
+  }
+
   // Create legacy pass manager for code generation
   llvm::legacy::PassManager pass;
 
@@ -239,6 +294,9 @@ bool LLVMBackend::compileToObjectFile(llvm::Module *module,
   // Run code generation passes
   pass.run(*module);
   out.flush();
+
+  if (time_passes)
+    llvm::reportAndResetTimings(&llvm::errs());
 
   COMPILER_DEBUG_LOG("Compiled object file to: " << outputPath << "\n");
   return true;

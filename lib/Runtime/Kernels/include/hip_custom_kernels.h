@@ -2153,6 +2153,59 @@ HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a(
     int64_t element_size_bytes);
 
 /* =========================================================================
+ * com.amd QMoE Sub-Kernels (Nemotron-H LatentMoE)
+ * =========================================================================
+ *
+ * The two kernels genuinely new to this op: sigmoid + correction-bias
+ * routing (raw prob for weighting, biased score for top-k selection), and
+ * the relu2 activation. Everything else in the com.amd QMoE runtime path
+ * (lib/Runtime/real/qmoe_amd.cpp) reuses hip_matmul_nbits, the
+ * hip_qmoe_gather_tokens / hip_qmoe_bucket_tokens / hip_qmoe_scatter_add
+ * kernels declared above unmodified.
+ */
+
+/* com.amd QMoE routing (fp16 only):
+ *   logits = hidden_states @ router_weight   (dense, NOT quantized)
+ *   probs  = sigmoid(logits)
+ *   sel    = top_k(probs + correction_bias, k)   -- selection only
+ *   w      = probs[sel]                           -- raw prob for weighting
+ *   w      = (normalize) ? w / (sum(w) + eps) : w; w *= routed_scaling_factor
+ *
+ *   hidden_states   - GPU [num_tokens, hidden_size]
+ *   router_weight   - GPU [hidden_size, num_experts] (dense, unquantized)
+ *   correction_bias - GPU [num_experts] (nullable iff use_correction_bias==0)
+ *   expert_indices  - GPU [num_tokens, k] int32 (output)
+ *   expert_weights  - GPU [num_tokens, k] (output, same type as hidden_states)
+ */
+HIP_KERNEL_API int hip_qmoe_amd_route(
+    void* stream,
+    const void* hidden_states,
+    const void* router_weight,
+    const void* correction_bias,
+    void* expert_indices,
+    void* expert_weights,
+    int64_t num_tokens,
+    int64_t hidden_size,
+    int64_t num_experts,
+    int64_t k,
+    int64_t normalize,
+    int64_t use_correction_bias,
+    float routed_scaling_factor,
+    int64_t element_size_bytes);
+
+/* relu2 activation (fp16 only): output[i] = relu(input[i])^2, elementwise
+ * over n*width elements. Used by com.amd QMoE for both the per-expert and
+ * shared-expert branches.
+ */
+HIP_KERNEL_API int hip_qmoe_amd_relu2(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t n,
+    int64_t width,
+    int64_t element_size_bytes);
+
+/* =========================================================================
  * Linear Attention Decode (Single-Token Recurrence, Prefill-Friendly)
  * =========================================================================
  *

@@ -1311,6 +1311,66 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   return 0;
 }
 
+// com.amd::QMoE (Nemotron-H LatentMoE) mock stub. Independent pipeline from
+// wrap_qmoe above -- see lib/Runtime/real/qmoe_amd.cpp for the real
+// implementation. Just logs and zero-fills the output.
+int wrap_qmoe_amd(RuntimeState *state, const void *hidden_states,
+                  const void *fc1_experts_weights,
+                  const void *fc1_experts_scales,
+                  const void *fc2_experts_weights,
+                  const void *fc2_experts_scales,
+                  const void *fc1_latent_weights, const void *fc1_latent_scales,
+                  const void *fc2_latent_weights, const void *fc2_latent_scales,
+                  const void *shared_fc1_weights, const void *shared_fc1_scales,
+                  const void *shared_fc2_weights, const void *shared_fc2_scales,
+                  const void *router_weight, const void *correction_bias,
+                  void *output, int64_t num_tokens, int64_t hidden_size,
+                  int64_t latent_size, int64_t moe_intermediate_size,
+                  int64_t shared_intermediate_size, int64_t num_experts,
+                  int64_t k, int64_t expert_weight_bits, int64_t block_size,
+                  int64_t normalize_routing_weights,
+                  int64_t use_correction_bias, float routed_scaling_factor,
+                  int64_t elem_size) {
+  if (!state || !hidden_states || !fc1_experts_weights || !fc1_experts_scales ||
+      !fc2_experts_weights || !fc2_experts_scales || !fc1_latent_weights ||
+      !fc1_latent_scales || !fc2_latent_weights || !fc2_latent_scales ||
+      !shared_fc1_weights || !shared_fc1_scales || !shared_fc2_weights ||
+      !shared_fc2_scales || !router_weight || !output) {
+    fprintf(stderr, "Invalid state or null tensor in wrap_qmoe_amd\n");
+    return -1;
+  }
+  if (use_correction_bias != 0 && !correction_bias) {
+    fprintf(stderr,
+            "wrap_qmoe_amd: use_correction_bias=1 but correction_bias is "
+            "null\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_qmoe_amd(\n");
+  MOCK_PRINT("[MOCK]   num_tokens=%lld, hidden_size=%lld, latent_size=%lld,\n",
+             (long long)num_tokens, (long long)hidden_size,
+             (long long)latent_size);
+  MOCK_PRINT("[MOCK]   moe_intermediate_size=%lld, "
+             "shared_intermediate_size=%lld, num_experts=%lld,\n",
+             (long long)moe_intermediate_size,
+             (long long)shared_intermediate_size, (long long)num_experts);
+  MOCK_PRINT("[MOCK]   k=%lld, expert_weight_bits=%lld, block_size=%lld,\n",
+             (long long)k, (long long)expert_weight_bits,
+             (long long)block_size);
+  MOCK_PRINT("[MOCK]   normalize_routing_weights=%lld, "
+             "use_correction_bias=%lld, routed_scaling_factor=%f, "
+             "elem_size=%lld)\n",
+             (long long)normalize_routing_weights,
+             (long long)use_correction_bias, (double)routed_scaling_factor,
+             (long long)elem_size);
+
+  hipStream_t stream =
+      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  HIP_CHECK(
+      hipMemsetAsync(output, 0, num_tokens * hidden_size * elem_size, stream));
+  return 0;
+}
+
 int wrap_hipMalloc(void **ptr, int64_t size) {
   HIP_CHECK(hipMalloc(ptr, size));
   return 0;

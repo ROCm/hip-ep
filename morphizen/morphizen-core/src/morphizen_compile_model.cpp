@@ -36,6 +36,15 @@
 #include <onnxruntime_session_options_config_keys.h>
 #include "morphizen-foundation/mem_binary.hpp"
 #include "morphizen/config_reader.hpp"
+#if defined(_WIN32)
+#include <Windows.h>
+#include <DbgHelp.h>
+#pragma comment(lib, "Dbghelp.lib")
+#elif defined(__linux__)
+#include <cxxabi.h>
+#include <execinfo.h>
+#include <dlfcn.h>
+#endif
 // clang-format on
 
 DEF_ENV_PARAM_2(XLNX_ONNX_EP_REPORT_FILE, "", std::string)
@@ -964,9 +973,74 @@ compile_onnx_model_internal(
   return ret;
 }
 
+// Captures the current call stack for diagnostics when a fatal (glog CHECK)
+// failure is converted into a catchable GlogFatalException (see
+// compile_fatal_func below). Frames are reported as
+// "<module>+0x<offset> (<best-effort symbol>+0x<disp>) [0x<abs addr>]" so that
+// even when no debug symbols are loaded for the compiler/runtime DLLs, the
+// module-relative offset can still be cross-referenced against a matching
+// build (e.g. via objdump/dumpbin) to locate the faulting call site.
 static std::vector<std::string> GetStackTrace() {
-  // Stack trace functionality disabled
-  return std::vector<std::string>();
+  std::vector<std::string> frames;
+#if defined(_WIN32)
+  constexpr int kMaxFrames = 64;
+  void *raw_frames[kMaxFrames];
+  const HANDLE process = GetCurrentProcess();
+  static bool sym_initialized = false;
+  if (!sym_initialized) {
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
+    SymInitialize(process, nullptr, TRUE);
+    sym_initialized = true;
+  }
+  const WORD num_frames =
+      CaptureStackBackTrace(1, kMaxFrames, raw_frames, nullptr);
+  for (WORD i = 0; i < num_frames; ++i) {
+    const DWORD64 address = reinterpret_cast<DWORD64>(raw_frames[i]);
+    HMODULE hmod = nullptr;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCSTR>(address), &hmod);
+    char module_path[MAX_PATH] = {0};
+    DWORD64 module_base = 0;
+    if (hmod != nullptr) {
+      GetModuleFileNameA(hmod, module_path, MAX_PATH);
+      module_base = reinterpret_cast<DWORD64>(hmod);
+    }
+    std::string module_name = module_path[0] ? module_path : "??";
+    const auto slash = module_name.find_last_of("\\/");
+    if (slash != std::string::npos) {
+      module_name = module_name.substr(slash + 1);
+    }
+
+    char sym_buf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME * sizeof(char)];
+    PSYMBOL_INFO symbol = reinterpret_cast<PSYMBOL_INFO>(sym_buf);
+    symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+    symbol->MaxNameLen = MAX_SYM_NAME;
+    DWORD64 displacement = 0;
+    std::string sym_name = "??";
+    if (SymFromAddr(process, address, &displacement, symbol)) {
+      sym_name = symbol->Name;
+    }
+
+    std::ostringstream frame;
+    frame << "#" << i << " " << module_name << "+0x" << std::hex
+          << (module_base ? (address - module_base) : 0) << " (" << sym_name
+          << "+0x" << displacement << ") [0x" << address << std::dec << "]";
+    frames.push_back(frame.str());
+  }
+#elif defined(__linux__)
+  constexpr int kMaxFrames = 64;
+  void *raw_frames[kMaxFrames];
+  const int num_frames = backtrace(raw_frames, kMaxFrames);
+  char **symbols = backtrace_symbols(raw_frames, num_frames);
+  for (int i = 1; i < num_frames; ++i) {
+    std::ostringstream frame;
+    frame << "#" << (i - 1) << " " << (symbols != nullptr ? symbols[i] : "??");
+    frames.push_back(frame.str());
+  }
+  free(symbols);
+#endif
+  return frames;
 }
 
 struct GlogFatalException : public std::exception {
