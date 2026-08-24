@@ -5,8 +5,6 @@
 
 #include "OnnxToHipUtils.h"
 
-#include "hip/env.h"
-
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 
@@ -77,7 +75,7 @@ namespace {
 ///   %tot       = tensor.dim %mask, %c3     // valid total KV, else %past +
 ///   %cur %cap       = arith.maxsi %past, %tot   // present buffer capacity
 ///                                          // (just %past under
-///                                          //  HIPDNN_EP_KV_SHARE_BUFFER)
+///                                          //  kv-share-buffer)
 ///   %seqlens_k = tensor.from_elements (%tot - 1)  : tensor<1xi32>
 ///   %total_seq = tensor.from_elements %cap        : tensor<i32>
 ///   %pk_init   = tensor.empty(%B, %cap)    // present sized to capacity
@@ -107,12 +105,17 @@ namespace {
 /// null present_key/present_value and wrap_group_query_attention rejects the
 /// call, leaving the attention output zero-filled.
 struct OnnxAttentionToHip : public mlir::RewritePattern {
-  OnnxAttentionToHip(mlir::MLIRContext *ctx)
-      : RewritePattern("onnx.Attention", /*benefit=*/1, ctx) {}
+  OnnxAttentionToHip(mlir::MLIRContext *ctx, bool kvShareBuffer)
+      : RewritePattern("onnx.Attention", /*benefit=*/1, ctx),
+        kvShareBuffer(kvShareBuffer) {}
 
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
                   mlir::PatternRewriter &rewriter) const override;
+
+  /// present and past name one allocation. See the capacity comment in
+  /// matchAndRewrite for why the graph cannot supply this on its own.
+  bool kvShareBuffer;
 };
 
 mlir::LogicalResult
@@ -332,13 +335,13 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
     return transOp->getResult(0);
   };
 
-  // Whether present and past are one allocation. Read here, ahead of any IR
-  // construction, because the check below has to reject before the pattern
-  // starts building: a pattern that creates ops and then returns failure leaves
-  // the greedy driver holding orphaned IR. See the capacity comment further
-  // down for what the flag means and why the graph alone cannot supply it.
-  const bool kvShareBuffer =
-      pastKey && hipdnn_ep::env_enabled("HIPDNN_EP_KV_SHARE_BUFFER");
+  // With no past operand there is nothing to share, so the option does not
+  // apply and a zero-length present would be nonsense. Resolved here, ahead of
+  // any IR construction, because the check below has to reject before the
+  // pattern starts building: a pattern that creates ops and then returns
+  // failure leaves the greedy driver holding orphaned IR. See the capacity
+  // comment further down for what it means and why the graph cannot supply it.
+  const bool sharedPresent = kvShareBuffer && pastKey;
 
   // A static present seq dim short-circuits the capacity computation entirely:
   // total_seq_len becomes a constant read off the result type and
@@ -352,7 +355,7 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
   // whose signature still declares the old extent. A graph that pins present to
   // a length its shared past buffer does not have is inconsistent at the
   // source, so report it rather than quietly emitting the wrong capacity.
-  if (kvShareBuffer && numResults >= 2) {
+  if (sharedPresent && numResults >= 2) {
     auto presentTy =
         mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(1).getType());
     auto pastTy = mlir::dyn_cast<mlir::RankedTensorType>(pastKey.getType());
@@ -361,9 +364,9 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
           (pastTy && pastTy.getRank() == 4) ? pastTy.getDimSize(2) : kDyn;
       if (pastExtent != presentTy.getDimSize(2))
         return rewriter.notifyMatchFailure(
-            op, "HIPDNN_EP_KV_SHARE_BUFFER: present pins a seq extent the "
-                "shared past buffer does not have; they are one allocation, so "
-                "the extents must match");
+            op, "kv-share-buffer: present pins a seq extent the shared past "
+                "buffer does not have; they are one allocation, so the extents "
+                "must match");
     }
   }
 
@@ -431,13 +434,14 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
   //
   // The relation between the extents cannot tell those apart -- a right-sized
   // shared buffer and a growing separate one both have past < total -- so the
-  // deployment has to say. HIPDNN_EP_KV_SHARE_BUFFER must agree with
+  // deployment has to say. That is the kv-share-buffer pass option, set from
+  // the `kv_share_buffer` provider option, which must agree with
   // past_present_share_buffer in genai_config.json; they are two views of one
-  // fact and disagreeing gets a shape rejection at the first Run.
-  // With no past operand there is nothing to share, so the flag does not apply
-  // and a zero-length present would be nonsense.
+  // fact and disagreeing gets a shape rejection at the first Run. Keeping both
+  // in provider_options puts them in the same file, where a reader can see
+  // them together.
   mlir::Value presentCapIdx =
-      kvShareBuffer
+      sharedPresent
           ? pastSeqIdx
           : mlir::arith::MaxSIOp::create(rewriter, loc, pastSeqIdx, totalKvIdx)
                 .getResult();
@@ -676,8 +680,9 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
 } // namespace
 
 void populateOnnxAttentionConversionPatterns(RewritePatternSet &patterns,
-                                             MLIRContext *ctx) {
-  patterns.add<OnnxAttentionToHip>(ctx);
+                                             MLIRContext *ctx,
+                                             bool kvShareBuffer) {
+  patterns.add<OnnxAttentionToHip>(ctx, kvShareBuffer);
 }
 
 } // namespace hip

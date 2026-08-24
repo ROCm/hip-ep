@@ -64,6 +64,13 @@ struct OnnxToHipPipelineOptions
       llvm::cl::desc("Skip writing constant data to constants.bin (metadata "
                      "only). Used for ORT EP live-compile path."),
       llvm::cl::init(false)};
+  Option<bool> kvShareBuffer{
+      *this, "kv-share-buffer",
+      llvm::cl::desc("present_key/value name the same allocation as "
+                     "past_key/value, so present capacity is the past extent "
+                     "rather than past+current. Must agree with "
+                     "past_present_share_buffer in genai_config.json."),
+      llvm::cl::init(false)};
 };
 
 /// Pipeline options for the HIP-to-LLVM lowering pipeline.

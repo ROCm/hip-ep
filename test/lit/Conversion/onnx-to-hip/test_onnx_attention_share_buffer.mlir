@@ -3,8 +3,11 @@
 
 // ============================================================================
 // TEST PURPOSE:
-// Cover the present-capacity rule under HIPDNN_EP_KV_SHARE_BUFFER, which says
-// present IS the past allocation rather than a freshly grown past+current.
+// Cover the present-capacity rule under the convert-onnx-to-hip pass option
+// `kv-share-buffer`, which says present IS the past allocation rather than a
+// freshly grown past+current. In a session the option is set from the
+// `kv_share_buffer` provider option, which has to agree with
+// past_present_share_buffer in the model's genai_config.json.
 //
 // The default rule is capacity = max(past extent, valid total). That is right
 // for a separately allocated present, and right for a shared one too as long
@@ -13,7 +16,7 @@
 // than the context -- right-sizing a sliding-window layer's cache to its
 // window -- where max(1024, 2240) asks ORT for a present the bound buffer
 // cannot satisfy. Nothing in the operand shapes distinguishes the two
-// deployments (both have past < total), so the flag supplies the fact.
+// deployments (both have past < total), so the option supplies the fact.
 //
 // Two shapes of present reach this code and they take different paths:
 //
@@ -22,7 +25,7 @@
 //     takes; its present is tensor<?x8x?x256xf16>.
 //
 //   static present seq dim -> capacity is a constant read straight off the
-//     result type and the computation is skipped entirely, so the flag has
+//     result type and the computation is skipped entirely, so the option has
 //     nothing to act on. That silent bypass is what section 2 pins: under the
 //     flag a present pinned to an extent the shared past does not have is a
 //     contradiction in the graph, so the converter declines instead of
@@ -35,9 +38,9 @@
 
 // RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip \
 // RUN:   --split-input-file | FileCheck %s --check-prefix=DEFAULT
-// RUN: env HIPDNN_EP_KV_SHARE_BUFFER=1 hip-mlir-opt %s --hip-add-context-arg \
-// RUN:   --convert-onnx-to-hip --split-input-file | FileCheck %s \
-// RUN:   --check-prefix=SHARE
+// RUN: hip-mlir-opt %s --hip-add-context-arg \
+// RUN:   --convert-onnx-to-hip=kv-share-buffer=true --split-input-file \
+// RUN:   | FileCheck %s --check-prefix=SHARE
 
 // Section 1 -- dynamic present, the real decoder's shape.
 //

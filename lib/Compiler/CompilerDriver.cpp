@@ -308,6 +308,7 @@ bool CompilerDriver::runMLIRPasses(
     onnxToHipOpts.externalizeMinNumElements =
         mlir::hip::kDefaultExternalizeMinNumElements;
     onnxToHipOpts.skipConstantData = options.skip_constant_data;
+    onnxToHipOpts.kvShareBuffer = options.kv_share_buffer;
 
     if (hipdnnHandle_) {
       compiledGraphs_ =

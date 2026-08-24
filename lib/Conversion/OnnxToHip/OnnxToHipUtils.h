@@ -322,8 +322,13 @@ void populateMultiHeadAttentionConversionPatterns(RewritePatternSet &patterns,
                                                   MLIRContext *ctx);
 void populateAttentionConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
+/// \p kvShareBuffer: present_key/value name the same allocation as
+/// past_key/value, so the present capacity is the past extent rather than
+/// past+current. Sourced from the convert-onnx-to-hip pass option of the same
+/// name; see OnnxAttentionConversion.cpp for why the graph cannot infer it.
 void populateOnnxAttentionConversionPatterns(RewritePatternSet &patterns,
-                                             MLIRContext *ctx);
+                                             MLIRContext *ctx,
+                                             bool kvShareBuffer);
 void populateGatherConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 void populateCompressConversionPatterns(RewritePatternSet &patterns,

@@ -132,7 +132,8 @@ static void lowerOnnxReturns(mlir::func::FuncOp funcOp) {
 //===----------------------------------------------------------------------===//
 
 static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
-                                             mlir::MLIRContext *ctx) {
+                                             mlir::MLIRContext *ctx,
+                                             bool kvShareBuffer) {
   mlir::RewritePatternSet patterns(ctx);
   populateMatMulConversionPatterns(patterns, ctx);
   populateTransposeConversionPatterns(patterns, ctx);
@@ -160,7 +161,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateGqaConversionPatterns(patterns, ctx);
   populateMultiHeadAttentionConversionPatterns(patterns, ctx);
   populateAttentionConversionPatterns(patterns, ctx);
-  populateOnnxAttentionConversionPatterns(patterns, ctx);
+  populateOnnxAttentionConversionPatterns(patterns, ctx, kvShareBuffer);
   populateMatMulNBitsConversionPatterns(patterns, ctx);
   populateQMoEConversionPatterns(patterns, ctx);
   populateGatherBlockQuantizedConversionPatterns(patterns, ctx);
@@ -465,7 +466,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
     if (mlir::failed(lowerOnnxConstants(funcOp, constantOrder)))
       return signalPassFailure();
     lowerOnnxReturns(funcOp);
-    if (mlir::failed(convertComputeOps(funcOp, ctx)))
+    if (mlir::failed(convertComputeOps(funcOp, ctx, kvShareBuffer)))
       return signalPassFailure();
     // Phase 2: lower any `onnx.Constant` ops SYNTHESIZED during
     // convertComputeOps. Some ONNX->HIP patterns introduce a fresh literal as
