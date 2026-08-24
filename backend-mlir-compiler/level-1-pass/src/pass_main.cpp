@@ -12,11 +12,24 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <glog/logging.h>
 #include <limits>
 #include <string>
 #include <vector>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 
 // Protobuf
 #include "google/protobuf/util/json_util.h"
@@ -141,40 +154,97 @@ static bool write_artifact_to_epcontext(PassContext *ctx,
   return true;
 }
 
-// Import an offline-generated GQA LUT into the same EPContext namespace as the
-// model artifact and constants. The provider option is an input filesystem
-// path; the runtime-facing logical filename is intentionally fixed.
-static bool import_gqa_lut_to_epcontext(PassContext *ctx) {
-  const std::string input_path =
-      ctx->get_provider_option("gqa_autotune_lut", "");
-  if (input_path.empty())
-    return true;
+// Directory of the module this code is compiled into (the EP DLL/so). This runs
+// at model-compile time in a native process, so -- unlike the JIT runtime -- it
+// has a real on-disk module to anchor on. Used to find the bundled default LUT.
+static std::string this_module_dir() {
+  std::filesystem::path p;
+#if defined(_WIN32)
+  HMODULE hm = nullptr;
+  if (::GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCSTR>(&this_module_dir), &hm)) {
+    char buf[MAX_PATH];
+    const DWORD n = ::GetModuleFileNameA(hm, buf, sizeof(buf));
+    if (n > 0 && n < sizeof(buf))
+      p = std::filesystem::path(std::string(buf, n)).parent_path();
+  }
+#else
+  Dl_info info{};
+  if (::dladdr(reinterpret_cast<void *>(&this_module_dir), &info) &&
+      info.dli_fname)
+    p = std::filesystem::path(info.dli_fname).parent_path();
+#endif
+  return p.string();
+}
 
+// Read one LUT file and write it into the model's EPContext under a logical
+// name the runtime looks up. Returns false only on a real read/write failure.
+static bool embed_lut_file(PassContext *ctx, const std::string &input_path,
+                           const std::string &logical_name) {
   std::ifstream input(input_path, std::ios::binary | std::ios::ate);
   if (!input) {
-    LOG(WARNING) << "Failed to open GQA autotune LUT: " << input_path;
+    LOG(WARNING) << "GQA LUT: failed to open " << input_path;
     return false;
   }
   const std::streamsize size = input.tellg();
   if (size <= 0 || size > 64 * 1024 * 1024) {
-    LOG(WARNING) << "Invalid GQA autotune LUT size: " << size;
+    LOG(WARNING) << "GQA LUT: invalid size " << size << " for " << input_path;
     return false;
   }
   input.seekg(0, std::ios::beg);
   std::vector<char> bytes(static_cast<size_t>(size));
   if (!input.read(bytes.data(), size)) {
-    LOG(WARNING) << "Failed to read GQA autotune LUT: " << input_path;
+    LOG(WARNING) << "GQA LUT: failed to read " << input_path;
     return false;
   }
-
-  constexpr const char *kLogicalFilename = "gqa_autotune.fb";
-  auto output = ctx->open_file_for_write(kLogicalFilename);
+  auto output = ctx->open_file_for_write(logical_name);
   if (!output || output->fwrite(bytes.data(), bytes.size()) != bytes.size()) {
-    LOG(WARNING) << "Failed to write " << kLogicalFilename << " to EPContext";
+    LOG(WARNING) << "GQA LUT: failed to write " << logical_name
+                 << " to EPContext";
     return false;
   }
-  MY_LOG(1) << "Imported GQA autotune LUT (" << bytes.size() << " bytes) from "
-            << input_path;
+  MY_LOG(1) << "GQA LUT: embedded " << bytes.size() << " bytes as "
+            << logical_name << " (from " << input_path << ")";
+  return true;
+}
+
+// Import an offline-generated GQA LUT into the model's EPContext so the runtime
+// can read it even though the JIT'd runtime cannot locate a file on disk.
+//   - Explicit `gqa_autotune_lut=<path>` option: embed that file under the
+//     legacy fixed name; the runtime tries it as a fallback.
+//   - No option (the common case): auto-embed every gqa_autotune_<arch>.fb
+//     bundled next to this module (installed alongside custom_kernels_<arch>).
+//     The runtime picks the one matching its GPU arch by name, so a portable
+//     bitcode model stays correct across archs. A missing default LUT is not a
+//     compile failure -- the runtime degrades to the compiled heuristic.
+static bool import_gqa_lut_to_epcontext(PassContext *ctx) {
+  const std::string input_path =
+      ctx->get_provider_option("gqa_autotune_lut", "");
+  if (!input_path.empty())
+    return embed_lut_file(ctx, input_path, "gqa_autotune.fb");
+
+  const std::string dir = this_module_dir();
+  if (dir.empty()) {
+    LOG(WARNING) << "GQA LUT: cannot resolve module directory; compiled model "
+                    "will run the GQA heuristic";
+    return true;
+  }
+  std::error_code ec;
+  bool any = false;
+  for (const auto &entry : std::filesystem::directory_iterator(dir, ec)) {
+    if (ec)
+      break;
+    const std::string name = entry.path().filename().string();
+    if (name.rfind("gqa_autotune_", 0) == 0 &&
+        entry.path().extension() == ".fb") {
+      if (embed_lut_file(ctx, entry.path().string(), name))
+        any = true;
+    }
+  }
+  if (!any)
+    LOG(WARNING) << "GQA LUT: no bundled gqa_autotune_*.fb found next to " << dir
+                 << "; compiled model will run the GQA heuristic";
   return true;
 }
 

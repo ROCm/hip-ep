@@ -850,53 +850,62 @@ static void loadLutFromFileSystem(GqaAutotunePolicy &policy,
                                   morphizen::FileSystem *fs) {
   if (!fs)
     return;
+  // Names to try, in order. HIPDNN_GQA_LUT_FILE overrides everything. Otherwise
+  // prefer the arch-specific table the compiler embeds (gqa_autotune_<arch>.fb),
+  // then the legacy fixed name that an explicit compile-time option writes.
   const std::string &configured_filename =
       hipdnn_ep::env_string("HIPDNN_GQA_LUT_FILE");
-  const char *filename = configured_filename.empty()
-                             ? kGqaAutotuneFilename
-                             : configured_filename.c_str();
+  std::vector<std::string> candidates;
+  if (!configured_filename.empty()) {
+    candidates.push_back(configured_filename);
+  } else {
+    const std::string arch = currentGpuArch();
+    if (!arch.empty())
+      candidates.push_back("gqa_autotune_" + arch + ".fb");
+    candidates.emplace_back(kGqaAutotuneFilename);
+  }
 
-  auto reader = fs->create_reader_template(filename);
-  if (gqaLutLogOn())
-    fprintf(stderr, "[gqa-lut] model FileSystem lookup '%s' => %s\n", filename,
-            reader ? "found" : "not found (will try DLL dir)");
-  if (!reader) {
-    RUNTIME_DEBUG_LOG("[Runtime DEBUG] no GQA LUT found at %s\n", filename);
+  for (const std::string &name : candidates) {
+    auto reader = fs->create_reader_template(name.c_str());
+    if (gqaLutLogOn())
+      fprintf(stderr, "[gqa-lut] model FileSystem lookup '%s' => %s\n",
+              name.c_str(), reader ? "found" : "not found");
+    if (!reader)
+      continue;
+    const size_t size = reader->size();
+    if (size == 0 || size > kMaxLutBytes) {
+      fprintf(stderr, "GQA LUT ignored: invalid file size %zu\n", size);
+      return;
+    }
+    if (void *mapped = reader->mmap()) {
+      (void)loadLutBuffer(policy, static_cast<const uint8_t *>(mapped), size);
+      return;
+    }
+    std::vector<uint8_t> bytes(size);
+    reader->rewind();
+    size_t offset = 0;
+    while (offset < size) {
+      const size_t n = reader->fread(bytes.data() + offset, size - offset);
+      if (n == 0)
+        break;
+      offset += n;
+    }
+    if (offset != size) {
+      fprintf(stderr, "GQA LUT ignored: short read (%zu of %zu bytes)\n", offset,
+              size);
+      return;
+    }
+    (void)loadLutBuffer(policy, bytes.data(), bytes.size());
+    return;
+  }
+
+  // Not in the model's EPContext under any candidate name. Fall back to a file
+  // next to the module (works for a native EP DLL; a no-op under JIT bitcode).
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] no GQA LUT in FileSystem\n");
 #if defined(_WIN32) && !defined(HIPDNN_EP_GQA_AUTOTUNE_GPU_FREE)
-    // HIPDNN_GQA_LUT_FILE was not set and the model's EPContext does not carry
-    // the file.  Try the directory where this module (EP DLL) lives -- the
-    // CMake install rule places gqa_autotune.fb there alongside the kernel
-    // DLLs.
-    if (configured_filename.empty())
-      (void)loadLutFromDllDir(policy);
+  if (configured_filename.empty())
+    (void)loadLutFromDllDir(policy);
 #endif
-    return;
-  }
-  const size_t size = reader->size();
-  if (size == 0 || size > kMaxLutBytes) {
-    fprintf(stderr, "GQA LUT ignored: invalid file size %zu\n", size);
-    return;
-  }
-  if (void *mapped = reader->mmap()) {
-    (void)loadLutBuffer(policy, static_cast<const uint8_t *>(mapped), size);
-    return;
-  }
-
-  std::vector<uint8_t> bytes(size);
-  reader->rewind();
-  size_t offset = 0;
-  while (offset < size) {
-    const size_t n = reader->fread(bytes.data() + offset, size - offset);
-    if (n == 0)
-      break;
-    offset += n;
-  }
-  if (offset != size) {
-    fprintf(stderr, "GQA LUT ignored: short read (%zu of %zu bytes)\n", offset,
-            size);
-    return;
-  }
-  (void)loadLutBuffer(policy, bytes.data(), bytes.size());
 }
 
 // ---- probing ---------------------------------------------------------------
@@ -1216,6 +1225,15 @@ void *gqa_autotune_create(morphizen::FileSystem *fs) {
                 policy->invalid_entries.load(std::memory_order_relaxed)),
             policy->table_id ? "TABLE (LUT active)"
                              : "HEURISTIC (no usable table loaded)");
+  // Never silently degrade: lookup mode with no table means every shape falls
+  // to the compiled heuristic, which is what a missing/undelivered LUT looks
+  // like. Warn once per session (not gated on the debug env) so it is visible.
+  if (policy->mode == GqaAutotuneMode::Lookup && policy->table_id == 0)
+    fprintf(stderr,
+            "GQA autotune: lookup mode requested but no LUT loaded -- using the "
+            "compiled heuristic (GQA perf will be suboptimal). Ensure "
+            "gqa_autotune_<arch>.fb is embedded in the model's EPContext or set "
+            "HIPDNN_GQA_LUT_FILE.\n");
   // Says where the mode came from, not just what it is: on a build whose
   // default was flipped there is no environment variable to inspect, so the log
   // is the only way to tell a deliberate default from an override that did not
