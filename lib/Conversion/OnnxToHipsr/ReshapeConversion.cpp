@@ -90,6 +90,7 @@ inferResultType(onnx::ReshapeOp op, RankedTensorType inputType, Value shape,
     return rewriter.notifyMatchFailure(
         op, "expected a target shape that folds to a constant");
   }
+  // ONNX writes the dimension to infer as -1, which is kDynamic here.
   SmallVector<int64_t> dims = llvm::map_to_vector(
       folded.getValues<APInt>(), [](const APInt &entry) -> int64_t {
         int64_t value = entry.getSExtValue();
@@ -179,9 +180,9 @@ SmallVector<ReassociationIndices> flatReassociation(int64_t rank) {
   return {llvm::to_vector<2>(llvm::seq<int64_t>(0, rank))};
 }
 
-// Every regroup goes through the 1-D form. A single op would fit some of them,
-// but `ComposeExpandOfCollapseOp` already finds those. `dest` is the
-// placeholder, so it carries the result type and the sizes an expand needs.
+// Every regroup goes through the 1-D form. A single op would fit some, but
+// `ComposeExpandOfCollapseOp` already finds those. `dest` is the placeholder,
+// so its type is the result type.
 Value createReshape(OpBuilder &builder, Location loc, Value input, Value dest) {
   auto inputType = cast<RankedTensorType>(input.getType());
   auto resultType = cast<RankedTensorType>(dest.getType());
@@ -201,10 +202,12 @@ Value createReshape(OpBuilder &builder, Location loc, Value input, Value dest) {
     flat = tensor::CastOp::create(builder, loc, resultFlatType, flat);
     flatType = resultFlatType;
   }
+  // A 1-D result is already the flat form.
   if (flatType == resultType) {
     return flat;
   }
 
+  // The flat source cannot state a dynamic dimension; the destination can.
   return tensor::ExpandShapeOp::create(
              builder, loc, resultType, flat,
              flatReassociation(resultType.getRank()),
