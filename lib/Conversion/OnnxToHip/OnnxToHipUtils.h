@@ -25,6 +25,7 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
@@ -166,18 +167,6 @@ createBroadcastEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
   return mlir::Value(
       mlir::tensor::EmptyOp::create(builder, loc, resultType.getShape(),
                                     resultType.getElementType(), dynSizes));
-}
-
-/// Replace \p op with binary elementwise \p HipOpTy using DPS \p init.
-template <typename HipOpTy>
-inline mlir::LogicalResult replaceWithBinaryElementwiseHipOp(
-    mlir::PatternRewriter &rewriter, mlir::Operation *op, mlir::Value context,
-    mlir::Value lhs, mlir::Value rhs, mlir::Value init,
-    mlir::RankedTensorType resultType) {
-  (void)resultType;
-  auto hipOp = HipOpTy::create(rewriter, op->getLoc(), context, lhs, rhs, init);
-  rewriter.replaceOp(op, hipOp->getResult(0));
-  return mlir::success();
 }
 
 /// Get !hip.context from function argument 0. Returns failure if the
