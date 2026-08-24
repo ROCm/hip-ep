@@ -377,6 +377,45 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/resize.cpp runtime_resize.bc)
     compile_to_bitcode(real/global_pool.cpp runtime_global_pool.bc)
 
+    # GQA offline-autotune LUT, embedded into runtime.bc so the JIT'd runtime
+    # always has it: it ships with the project build (inside runtime.bc), not
+    # with each model and not as a loose file the JIT loader cannot locate on
+    # disk. compatibleLut still gates it by GPU arch at load time, so a model
+    # that runs on a different arch simply falls through to the heuristic.
+    set(GQA_LUT_FB
+        ${CMAKE_CURRENT_SOURCE_DIR}/Kernels/hip/autotune/gqa/lut/gfx1151.fb)
+    set(GQA_LUT_PIC "")
+    if(NOT WIN32)
+        set(GQA_LUT_PIC "-fPIC")
+    endif()
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/gqa_lut_data.cpp
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/cmake/xxd.py
+                --var kGqaLutData_gfx1151
+                --output ${CMAKE_CURRENT_BINARY_DIR}/gqa_lut_data.cpp.tmp
+                ${GQA_LUT_FB}
+        # xxd.py emits a `static` array with a trailing padding byte; rewrite it
+        # to an extern "C" symbol and record the true byte count separately.
+        COMMAND ${Python3_EXECUTABLE} -c
+                "import os; data = open('${CMAKE_CURRENT_BINARY_DIR}/gqa_lut_data.cpp.tmp').read(); data = data.replace('static const unsigned char', 'extern \"C\" const unsigned char'); n = os.path.getsize('${GQA_LUT_FB}'); data = '#include <cstddef>\\n' + data + f'\\nextern \"C\" const size_t kGqaLutData_gfx1151_size = {n};\\n'; open('${CMAKE_CURRENT_BINARY_DIR}/gqa_lut_data.cpp', 'w').write(data)"
+        COMMAND ${CMAKE_COMMAND} -E remove
+                ${CMAKE_CURRENT_BINARY_DIR}/gqa_lut_data.cpp.tmp
+        DEPENDS ${GQA_LUT_FB} ${CMAKE_SOURCE_DIR}/cmake/xxd.py
+        COMMENT "Embedding GQA LUT (gfx1151.fb) into runtime.bc"
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/runtime_gqa_lut_data.bc
+        COMMAND ${CLANG_EXECUTABLE}
+                -c -emit-llvm -std=c++17 ${GQA_LUT_PIC}
+                ${CMAKE_CURRENT_BINARY_DIR}/gqa_lut_data.cpp
+                -o ${CMAKE_CURRENT_BINARY_DIR}/runtime_gqa_lut_data.bc
+        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/gqa_lut_data.cpp
+        COMMENT "Compiling embedded GQA LUT to bitcode"
+        VERBATIM
+    )
+
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
@@ -460,6 +499,9 @@ if(NOT BUILD_MOCK_RUNTIME)
         list(APPEND RUNTIME_BC_MODULES
             ${CMAKE_CURRENT_BINARY_DIR}/runtime_vendor_blas_stub.bc)
     endif()
+    # Embedded GQA LUT bytes (defined by gqa_lut_data.cpp above).
+    list(APPEND RUNTIME_BC_MODULES
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_gqa_lut_data.bc)
 else()
     # Mock runtime for testing without GPU
     compile_to_bitcode(mock/mock_gpu.cpp runtime_mock.bc)

@@ -908,6 +908,32 @@ static void loadLutFromFileSystem(GqaAutotunePolicy &policy,
 #endif
 }
 
+// The offline LUT bytes compiled into runtime.bc (lib/Runtime/CMakeLists.txt
+// embeds gfx1151.fb via xxd). Present only in the real runtime; the GPU-free
+// test build supplies its own table through the inspect path and never
+// references these symbols.
+#if !defined(HIPDNN_EP_GQA_AUTOTUNE_GPU_FREE)
+extern "C" const unsigned char kGqaLutData_gfx1151[];
+extern "C" const size_t kGqaLutData_gfx1151_size;
+#endif
+
+// Last-resort source: the table baked into runtime.bc. Always present in a
+// JIT'd model with no file on disk and nothing in the model's EPContext -- it
+// travels with the project build. compatibleLut (inside loadLutBuffer) still
+// gates it by GPU arch, so a mismatched arch degrades to the heuristic.
+static void loadLutFromEmbedded(GqaAutotunePolicy &policy) {
+#if !defined(HIPDNN_EP_GQA_AUTOTUNE_GPU_FREE)
+  if (kGqaLutData_gfx1151_size == 0)
+    return;
+  if (gqaLutLogOn())
+    fprintf(stderr, "[gqa-lut] trying embedded table (%zu bytes)\n",
+            kGqaLutData_gfx1151_size);
+  (void)loadLutBuffer(policy, kGqaLutData_gfx1151, kGqaLutData_gfx1151_size);
+#else
+  (void)policy;
+#endif
+}
+
 // ---- probing ---------------------------------------------------------------
 
 // Probes per resolve: the parallelism classes from the request's down to P1,
@@ -1217,6 +1243,9 @@ void *gqa_autotune_create(morphizen::FileSystem *fs) {
   // not load whenever the mode happens to be set in the environment. Loading is
   // one file read; that is the cheaper of the two mistakes.
   loadLutFromFileSystem(*policy, fs);
+  // Nothing on disk or in the model? Use the copy baked into runtime.bc.
+  if (policy->table_id == 0)
+    loadLutFromEmbedded(*policy);
   if (gqaLutLogOn())
     fprintf(stderr,
             "[gqa-lut] SUMMARY mode=%s table_id=%u rows=%zu invalid=%zu => %s\n",
