@@ -287,7 +287,8 @@ HIP_KERNEL_API int hip_elementwise_mod(
  *
  *   op: 0 = add, 1 = mul, 2 = min, 3 = max
  *
- * Supported hip_dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16.
+ * Supported hip_dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_BFLOAT16.
  * Returns: 0 on success, -1 on unsupported dtype / launch error, -2 when the
  * output volume exceeds the 32-bit index range (caller should fall back).
  */
@@ -301,6 +302,39 @@ HIP_KERNEL_API int hip_elementwise_binary_bcast(
     const int64_t* out_shape4,
     int op,
     int hip_dtype);
+
+/* MIOpen miopenOpTensor MIN de-library path (Op4dTensorLite / Generic port).
+ *
+ * Implements C = min(alpha0 * A, alpha1 * B) + beta * C over 4-D NCHW tensors.
+ * A must match C shape (caller normalizes via swap/expand in
+ * wrap_miopenOpTensor); B may broadcast. Keeps the MIOpen naming to mark the
+ * technical lineage while avoiding the MIOpen library call.
+ *
+ * Supported hip_dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_BFLOAT16.
+ * Returns: 0 on success, -1 on unsupported dtype / launch error.
+ */
+HIP_KERNEL_API int hip_miopen_op_tensor_min(
+    void* stream,
+    const void* a,
+    const void* b,
+    void* c,
+    int64_t a_n,
+    int64_t a_c,
+    int64_t a_h,
+    int64_t a_w,
+    int64_t b_n,
+    int64_t b_c,
+    int64_t b_h,
+    int64_t b_w,
+    int64_t c_n,
+    int64_t c_c,
+    int64_t c_h,
+    int64_t c_w,
+    int hip_dtype,
+    float alpha0,
+    float alpha1,
+    float beta);
 
 /*
  * Element-wise Equal with optional scalar broadcast.
