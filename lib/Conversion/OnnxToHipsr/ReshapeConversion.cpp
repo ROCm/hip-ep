@@ -14,28 +14,32 @@
 // target shape states the dimensions, the input gives the element type and
 // memory space. The shape region reads no memory.
 //
-// Before, with %shape the constant [-1]:
+// Before, with %shape the constant [-1, 4]:
 //   %r = "onnx.Reshape"(%x, %shape)
-//       : (tensor<?x4096xf16, #hipsr.mem<device>>, tensor<1xi64>)
-//       -> tensor<?xf16, #hipsr.mem<device>>
+//       : (tensor<2x3x4xf16, #hipsr.mem<device>>, tensor<2xi64>)
+//       -> tensor<?x?xf16, #hipsr.mem<device>>
 //
-// After, with region types left out and only the -1 stated, so a divisor of 1:
+// After, with region types left out. The input states its element count, so the
+// -1 resolves to 6 while the type is inferred:
 //   %init = hipsr.placeholder(%ctx) ins(%x)
 //       {placeholder_type = #hipsr.placeholder_type<normal>}
-//       : tensor<?xf16, #hipsr.mem<device>> shape_region {
+//       : tensor<6x4xf16, #hipsr.mem<device>> shape_region {
 //   ^bb0(%x_shape):
-//     %count = shape.num_elements %x_shape
-//     %n = shape.size_to_index %count
-//     %c1 = arith.constant 1 : index
-//     %d = arith.divui %n, %c1
-//     %s = shape.from_extents %d
+//     %c6 = arith.constant 6 : index
+//     %c4 = arith.constant 4 : index
+//     %s = shape.from_extents %c6, %c4
 //     hipsr.shape_yield %s
 //   }
 //   %r = hipsr.compute(%ctx) ins(%x) outs(%init) {
 //   ^bb0(%body_ctx, %in, %dest):
-//     %flat = tensor.collapse_shape %in [[0, 1]]
-//     hipsr.compute_yield %flat
-//   } : tensor<?xf16, #hipsr.mem<device>>
+//     %flat = tensor.collapse_shape %in [[0, 1, 2]]
+//     %out = tensor.expand_shape %flat [[0, 1]] output_shape [6, 4]
+//     hipsr.compute_yield %out
+//   } : tensor<6x4xf16, #hipsr.mem<device>>
+//
+// A dynamic input leaves the -1 to runtime: the region divides
+// shape.num_elements by the dimensions the operand states, and the expand reads
+// that dimension back off %dest.
 //
 //===----------------------------------------------------------------------===//
 
