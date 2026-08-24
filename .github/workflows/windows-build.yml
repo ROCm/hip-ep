@@ -10,13 +10,14 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
   push:
-    branches: [main, "release/**"]
+    branches: [main, "release/**", "ci/gpuep-test-package*"]
 
 permissions:
   contents: read
 
 jobs:
   build-windows:
+    if: ${{ !startsWith(github.ref, 'refs/heads/ci/gpuep-test-package') && !startsWith(github.head_ref, 'ci/gpuep-test-package') }}
     # windows-latest now serves the VS 2026 (VS 18) image, under which the
     # pinned onnxruntime-genai / onnxruntime_extensions fails to build
     # (gsl/util C2220 warning-as-error). Pin to the VS 2022 image per
@@ -681,10 +682,47 @@ jobs:
           key: sccache-windows-real-${{ env.SCCACHE_KEY_DATE }}
 
   # ---------------------------------------------------------------------------
+  # gpuep release branch: skip the multi-hour build and publish the LFS-vendored
+  # gpu-test-package zip (see .github/gpuep-packages/MANIFEST.md).
+  # ---------------------------------------------------------------------------
+  publish-gpuep-test-package:
+    if: ${{ startsWith(github.ref, 'refs/heads/ci/gpuep-test-package') || startsWith(github.head_ref, 'ci/gpuep-test-package') }}
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          lfs: true
+          submodules: false
+          fetch-depth: 1
+          show-progress: false
+
+      - name: Smudge LFS files
+        run: git lfs checkout
+
+      - name: Extract vendored gpu-test-package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = ".github/gpuep-packages/gpuep-rel-2610.2-gpu-test-package.zip"
+          if (-not (Test-Path $zip)) { throw "LFS zip missing: $zip" }
+          Expand-Archive -Path $zip -DestinationPath staging -Force
+          $count = (Get-ChildItem staging -Recurse -File).Count
+          Write-Host "staged $count files"
+
+      - name: Upload GPU test package
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-test-package
+          path: staging/
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
   # GPU test job: runs on the self-hosted machine with a real AMD GPU.
   # Downloads the package built above and runs onnxruntime_perf_test.
   # ---------------------------------------------------------------------------
   gpu-test:
+    if: ${{ !startsWith(github.ref, 'refs/heads/ci/gpuep-test-package') && !startsWith(github.head_ref, 'ci/gpuep-test-package') }}
     needs: build-windows
     runs-on: StrixHalo
     # Never cancel an in-progress GPU run: queue newer runs of the same ref
