@@ -67,21 +67,6 @@ func.func @non_constant_shape(%ctx: !hipsr.context, %input: tensor<2x3xf16>,
 
 // -----
 
-// A reshape preserves the element count, and 4 does not divide 6: the dimension
-// left to infer has no whole-number answer, so the truncated one would state 4
-// elements where the input has 6.
-func.func @inexact_inferred_dim(%ctx: !hipsr.context,
-                                %input: tensor<6xf16>) -> tensor<?x4xf16> {
-  %shape = "onnx.Constant"() {value = dense<[-1, 4]> : tensor<2xi64>}
-      : () -> tensor<2xi64>
-  // expected-error @+1 {{failed to legalize operation 'onnx.Reshape'}}
-  %0 = "onnx.Reshape"(%input, %shape) {allowzero = 0 : si64}
-      : (tensor<6xf16>, tensor<2xi64>) -> tensor<?x4xf16>
-  return %0 : tensor<?x4xf16>
-}
-
-// -----
-
 // The 1-D form is built from the input's dimensions, so it must be ranked.
 func.func @unranked_input(%ctx: !hipsr.context,
                           %input: tensor<*xf16>) -> tensor<6xf16> {

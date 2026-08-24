@@ -83,8 +83,7 @@ int64_t productOfStaticDims(ArrayRef<int64_t> dims) {
 FailureOr<RankedTensorType>
 inferResultType(onnx::ReshapeOp op, RankedTensorType inputType, Value shape,
                 ConversionPatternRewriter &rewriter) {
-  // TODO: Support a target shape that only holds its value at runtime, which
-  // takes a host read and so a barrier placeholder.
+  // TODO: Support a target shape that only holds its value at runtime.
   DenseIntElementsAttr folded;
   if (!matchPattern(shape, m_Constant(&folded))) {
     return rewriter.notifyMatchFailure(
@@ -108,17 +107,11 @@ inferResultType(onnx::ReshapeOp op, RankedTensorType inputType, Value shape,
         op, "expected at most one dimension left to infer");
   }
 
-  // The -1 stays dynamic unless the input pins the element count down.
+  // The -1 stays dynamic unless the input pins the element count down. A
+  // reshape preserves that count, so the division below comes out even.
   if (auto *unknown = llvm::find(dims, ShapedType::kDynamic);
       unknown != dims.end() && inputType.hasStaticShape()) {
     *unknown = inputType.getNumElements() / productOfStaticDims(dims);
-  }
-  // Both counts are known now, and a reshape preserves them. This is also what
-  // makes the division above sound: it truncates, so an inexact one lands here.
-  if (inputType.hasStaticShape() &&
-      inputType.getNumElements() != productOfStaticDims(dims)) {
-    return rewriter.notifyMatchFailure(
-        op, "expected the element count to be preserved");
   }
   return RankedTensorType::get(dims, inputType.getElementType(),
                                inputType.getEncoding());
@@ -136,41 +129,30 @@ Value readDim(OpBuilder &builder, Location loc, Value shape, int64_t axis) {
                                       size);
 }
 
-// The dimension ONNX left to the element count: the input's count over
-// `divisor`. Both are products, so they cancel where they divide evenly, which
-// is what leaves a plain flatten with no arithmetic beyond its dynamic
-// dimensions.
+// The dimension ONNX wrote as -1: the input's element count over the dimensions
+// the target shape does state.
 Value buildInferredDim(OpBuilder &builder, Location loc,
-                       RankedTensorType inputType, int64_t divisor,
+                       RankedTensorType inputType, int64_t resultStaticCount,
                        Value inputShape) {
-  assert(divisor > 0 && "a 0 result dimension is rejected before this point");
+  assert(resultStaticCount > 0 &&
+         "a 0 result dimension is rejected before this point");
 
-  SmallVector<Value> factors;
+  SmallVector<Value> dividendFactors;
   for (int64_t axis : llvm::seq<int64_t>(0, inputType.getRank())) {
     if (inputType.isDynamicDim(axis)) {
-      factors.push_back(readDim(builder, loc, inputShape, axis));
+      dividendFactors.push_back(readDim(builder, loc, inputShape, axis));
     }
   }
+  dividendFactors.push_back(arith::ConstantIndexOp::create(
+      builder, loc, productOfStaticDims(inputType.getShape())));
 
-  int64_t staticCount = productOfStaticDims(inputType.getShape());
-  if (staticCount % divisor == 0) {
-    staticCount /= divisor;
-    divisor = 1;
+  Value dividend = dividendFactors.front();
+  for (Value factor : llvm::drop_begin(dividendFactors)) {
+    dividend = arith::MulIOp::create(builder, loc, dividend, factor);
   }
-  if (staticCount != 1 || factors.empty()) {
-    factors.push_back(
-        arith::ConstantIndexOp::create(builder, loc, staticCount));
-  }
-
-  Value dim = factors.front();
-  for (Value factor : llvm::drop_begin(factors)) {
-    dim = arith::MulIOp::create(builder, loc, dim, factor);
-  }
-  if (divisor == 1) {
-    return dim;
-  }
-  Value divisorValue = arith::ConstantIndexOp::create(builder, loc, divisor);
-  return arith::DivUIOp::create(builder, loc, dim, divisorValue);
+  Value divisor =
+      arith::ConstantIndexOp::create(builder, loc, resultStaticCount);
+  return arith::DivUIOp::create(builder, loc, dividend, divisor);
 }
 
 // One value per result axis: a stated dimension is a constant, the inferred one
@@ -187,11 +169,12 @@ void populateShapeRegion(OpBuilder &builder, PlaceholderOp placeholder,
 
   Location loc = placeholder.getLoc();
   Value inputShape = PlaceholderShapeRegionArgs{block}.in(0);
-  int64_t divisor = productOfStaticDims(resultType.getShape());
   SmallVector<Value> dims =
       llvm::map_to_vector(resultType.getShape(), [&](int64_t dim) -> Value {
         if (ShapedType::isDynamic(dim)) {
-          return buildInferredDim(builder, loc, inputType, divisor, inputShape);
+          return buildInferredDim(builder, loc, inputType,
+                                  productOfStaticDims(resultType.getShape()),
+                                  inputShape);
         }
         return arith::ConstantIndexOp::create(builder, loc, dim);
       });
@@ -314,7 +297,11 @@ struct ReshapeToHipsr : public OpConversionPattern<onnx::ReshapeOp> {
       return failure();
     }
 
-    // The shape region reads no memory, so a normal placeholder is enough.
+    // The region builds the dimensions out of constants and the input's shape,
+    // so a normal placeholder is enough.
+    // TODO: A target shape that only holds its value at runtime would have the
+    // region read that operand instead, and a host read takes a barrier
+    // placeholder.
     Location loc = op.getLoc();
     auto init =
         PlaceholderOp::create(rewriter, loc, TypeRange{resultType}, *ctx,

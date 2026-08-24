@@ -15,8 +15,8 @@
 
 // The reshape an embedding graph flattens its image features with: a constant
 // [-1] against a batch that stays symbolic. Nothing else is stated, so the
-// inferred dimension is the whole element count with no divisor, and the body
-// stops at the collapse that already reaches the 1-D result.
+// inferred dimension is the whole element count over a divisor of 1, and the
+// body stops at the collapse that already reaches the 1-D result.
 // CHECK-LABEL: func.func @flatten_dynamic(
 // CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,
 // CHECK-SAME:    %[[INPUT:.*]]: tensor<?x4096xf16, #hipsr.mem<device>>) -> tensor<?xf16, #hipsr.mem<device>> {
@@ -28,7 +28,9 @@
 // CHECK-NEXT:      %[[ROWS:.*]] = shape.size_to_index %[[SIZE]] : !shape.size
 // CHECK-NEXT:      %[[COLS:.*]] = arith.constant 4096 : index
 // CHECK-NEXT:      %[[COUNT:.*]] = arith.muli %[[ROWS]], %[[COLS]] : index
-// CHECK-NEXT:      %[[SHAPE:.*]] = shape.from_extents %[[COUNT]] : index
+// CHECK-NEXT:      %[[DIVISOR:.*]] = arith.constant 1 : index
+// CHECK-NEXT:      %[[DIM:.*]] = arith.divui %[[COUNT]], %[[DIVISOR]] : index
+// CHECK-NEXT:      %[[SHAPE:.*]] = shape.from_extents %[[DIM]] : index
 // CHECK-NEXT:      hipsr.shape_yield %[[SHAPE]] : !shape.shape
 // CHECK-NEXT:    }
 // CHECK-NEXT:    %[[RESULT:.*]] = hipsr.compute(%[[CTX]]) ins(%[[INPUT]] : tensor<?x4096xf16, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<?xf16, #hipsr.mem<device>>) {
@@ -60,7 +62,9 @@ func.func @flatten_dynamic(%ctx: !hipsr.context,
 // CHECK-NEXT:    ^bb0(%[[IN_SHAPE:.*]]: !shape.shape):
 // CHECK-NEXT:      %[[AXIS:.*]] = shape.const_size 0
 // CHECK-NEXT:      %[[SIZE:.*]] = shape.get_extent %[[IN_SHAPE]], %[[AXIS]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:      %[[COUNT:.*]] = shape.size_to_index %[[SIZE]] : !shape.size
+// CHECK-NEXT:      %[[DIM0:.*]] = shape.size_to_index %[[SIZE]] : !shape.size
+// CHECK-NEXT:      %[[ONE:.*]] = arith.constant 1 : index
+// CHECK-NEXT:      %[[COUNT:.*]] = arith.muli %[[DIM0]], %[[ONE]] : index
 // CHECK-NEXT:      %[[DIVISOR:.*]] = arith.constant 4096 : index
 // CHECK-NEXT:      %[[ROWS:.*]] = arith.divui %[[COUNT]], %[[DIVISOR]] : index
 // CHECK-NEXT:      %[[COLS:.*]] = arith.constant 4096 : index
@@ -146,10 +150,11 @@ func.func @refines_to_input(%ctx: !hipsr.context,
 // one, and the inferred type is what the compute carries, so it reaches the
 // signature instead of being widened back to the one ONNX declared.
 //
-// The stated 32 and the input's 8x4 cancel, so the inferred dimension is the
-// batch read straight off the input's shape with nothing left to multiply. An
-// expansion cannot take its dimensions from the flat form, so it reads them off
-// the destination the shape region resolved.
+// The input's 8x4 and the stated 32 are the same number, so the multiply and
+// the divide undo each other and leave the batch. Neither folds away, since
+// arith cannot assume the product stays in range. An expansion cannot take its
+// dimensions from the flat form, so it reads them off the destination the shape
+// region resolved.
 // CHECK-LABEL: func.func @collapse_and_expand(
 // CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,
 // CHECK-SAME:    %[[INPUT:.*]]: tensor<?x8x4xf16, #hipsr.mem<device>>) -> tensor<?x32xf16, #hipsr.mem<device>> {
@@ -158,7 +163,11 @@ func.func @refines_to_input(%ctx: !hipsr.context,
 // CHECK-NEXT:    ^bb0(%[[IN_SHAPE:.*]]: !shape.shape):
 // CHECK-NEXT:      %[[AXIS:.*]] = shape.const_size 0
 // CHECK-NEXT:      %[[SIZE:.*]] = shape.get_extent %[[IN_SHAPE]], %[[AXIS]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:      %[[ROWS:.*]] = shape.size_to_index %[[SIZE]] : !shape.size
+// CHECK-NEXT:      %[[BATCH:.*]] = shape.size_to_index %[[SIZE]] : !shape.size
+// CHECK-NEXT:      %[[GROUP:.*]] = arith.constant 32 : index
+// CHECK-NEXT:      %[[COUNT:.*]] = arith.muli %[[BATCH]], %[[GROUP]] : index
+// CHECK-NEXT:      %[[DIVISOR:.*]] = arith.constant 32 : index
+// CHECK-NEXT:      %[[ROWS:.*]] = arith.divui %[[COUNT]], %[[DIVISOR]] : index
 // CHECK-NEXT:      %[[COLS:.*]] = arith.constant 32 : index
 // CHECK-NEXT:      %[[SHAPE:.*]] = shape.from_extents %[[ROWS]], %[[COLS]] : index, index
 // CHECK-NEXT:      hipsr.shape_yield %[[SHAPE]] : !shape.shape
