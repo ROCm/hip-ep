@@ -180,36 +180,47 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
       return op.emitError("hip.conv: unsupported output element type ")
              << outputType.getElementType();
     Value dataType = createI64Const(dataTypeEnum);
-    Value activationVal = createI64Const(op.getActivation());
+    Value fusedActivationVal = createI64Const(op.getFusedActivation() ? 1 : 0);
+
+    auto createF32Const = [&](float value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, rewriter.getF32Type(),
+                                      rewriter.getF32FloatAttr(value));
+    };
+    Value clipLoVal = createF32Const(op.getActivationClipLo().convertToFloat());
+    Value clipHiVal = createF32Const(op.getActivationClipHi().convertToFloat());
+    Value alphaVal = createF32Const(op.getActivationAlpha().convertToFloat());
 
     // Build function signature
-    SmallVector<Type, 26> paramTypes = {
-        ptrType, // state
-        i32Type, // op_state_slot
-        ptrType, // input
-        i64Type, // input_n
-        i64Type, // input_c
-        i64Type, // input_h
-        i64Type, // input_w
-        ptrType, // weights
-        i64Type, // weights_k
-        ptrType, // bias
-        ptrType, // output
-        i64Type, // output_h
-        i64Type, // output_w
-        i64Type, // kernel_h
-        i64Type, // kernel_w
-        i64Type, // stride_h
-        i64Type, // stride_w
-        i64Type, // pad_top
-        i64Type, // pad_left
-        i64Type, // pad_bottom
-        i64Type, // pad_right
-        i64Type, // dilation_h
-        i64Type, // dilation_w
-        i64Type, // group
-        i64Type, // data_type
-        i64Type  // activation
+    SmallVector<Type, 29> paramTypes = {
+        ptrType,               // state
+        i32Type,               // op_state_slot
+        ptrType,               // input
+        i64Type,               // input_n
+        i64Type,               // input_c
+        i64Type,               // input_h
+        i64Type,               // input_w
+        ptrType,               // weights
+        i64Type,               // weights_k
+        ptrType,               // bias
+        ptrType,               // output
+        i64Type,               // output_h
+        i64Type,               // output_w
+        i64Type,               // kernel_h
+        i64Type,               // kernel_w
+        i64Type,               // stride_h
+        i64Type,               // stride_w
+        i64Type,               // pad_top
+        i64Type,               // pad_left
+        i64Type,               // pad_bottom
+        i64Type,               // pad_right
+        i64Type,               // dilation_h
+        i64Type,               // dilation_w
+        i64Type,               // group
+        i64Type,               // data_type
+        i64Type,               // fused_activation
+        rewriter.getF32Type(), // activation_clip_lo
+        rewriter.getF32Type(), // activation_clip_hi
+        rewriter.getF32Type()  // activation_alpha
     };
 
     // Lookup or create the runtime function
@@ -220,12 +231,22 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
 
     // Build argument list matching the signature
     auto opStateSlot = getOpStateSlotValue(op, rewriter, loc);
-    SmallVector<Value, 26> args = {
-        statePtr, opStateSlot,   inputPtr, inputN,    inputC,    inputH,
-        inputW,   weightsPtr,    weightsK, biasPtr,   outputPtr, outputH,
-        outputW,  kernelH,       kernelW,  strideH,   strideW,   padTop,
-        padLeft,  padBottom,     padRight, dilationH, dilationW, groupVal,
-        dataType, activationVal,
+    SmallVector<Value, 29> args = {
+        statePtr,  opStateSlot,
+        inputPtr,  inputN,
+        inputC,    inputH,
+        inputW,    weightsPtr,
+        weightsK,  biasPtr,
+        outputPtr, outputH,
+        outputW,   kernelH,
+        kernelW,   strideH,
+        strideW,   padTop,
+        padLeft,   padBottom,
+        padRight,  dilationH,
+        dilationW, groupVal,
+        dataType,  fusedActivationVal,
+        clipLoVal, clipHiVal,
+        alphaVal,
     };
 
     // Call the runtime function

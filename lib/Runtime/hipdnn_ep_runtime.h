@@ -137,9 +137,23 @@ static inline const char *hipdnn_ep_datatype_name(int64_t data_type) {
 #define HIPDNN_EP_ACTIVATION_TANH 2
 #define HIPDNN_EP_ACTIVATION_SOFTPLUS 3
 
-// Fused post-conv activation modes for wrap_miopenConvolutionForward.
-#define HIPDNN_EP_CONV_ACTIVATION_NONE 0
-#define HIPDNN_EP_CONV_ACTIVATION_RELU6 1
+// Fused post-conv activation parameters for wrap_miopenConvolutionForward.
+// When fused_activation is 0, clip/alpha params are ignored.
+// activation_clip_hi == 0 means no upper clip (plain ReLU when clip_lo == 0).
+#define HIPDNN_EP_CONV_CLIP_HI_NONE 0.0f
+
+static inline const char *
+hipdnn_ep_conv_fused_activation_name(int64_t fused_activation,
+                                     float activation_clip_lo,
+                                     float activation_clip_hi) {
+  if (!fused_activation)
+    return "none";
+  if (activation_clip_hi > 0.0f)
+    return "clipped_relu";
+  if (activation_clip_lo == 0.0f)
+    return "relu";
+  return "clip";
+}
 
 static inline const char *hipdnn_ep_activation_name(int64_t activation_mode) {
   switch (activation_mode) {
@@ -746,31 +760,34 @@ int wrap_strided_copy(RuntimeState *state, void *dst_ptr, const void *src_ptr,
 int wrap_miopenConvolutionForward(
     RuntimeState
         *state, // RuntimeState (opaque - extracts handle/stream internally)
-    int32_t op_state_slot, // Op state slot
-    const void *input,     // Input tensor GPU pointer
-    int64_t input_n,       // Input batch size
-    int64_t input_c,       // Input channels
-    int64_t input_h,       // Input height
-    int64_t input_w,       // Input width
-    const void *weights,   // Weights tensor GPU pointer
-    int64_t weights_k,     // Output channels (number of filters)
-    const void *bias,      // Bias tensor GPU pointer (nullable)
-    void *output,          // Output tensor GPU pointer (in-place)
-    int64_t output_h,      // Output height
-    int64_t output_w,      // Output width
-    int64_t kernel_h,      // Kernel height
-    int64_t kernel_w,      // Kernel width
-    int64_t stride_h,      // Stride height
-    int64_t stride_w,      // Stride width
-    int64_t pad_top,       // Padding top
-    int64_t pad_left,      // Padding left
-    int64_t pad_bottom,    // Padding bottom
-    int64_t pad_right,     // Padding right
-    int64_t dilation_h,    // Dilation height
-    int64_t dilation_w,    // Dilation width
-    int64_t group,         // Number of groups
-    int64_t data_type,     // HIPDNN_EP_DATATYPE_* for I/O and weights
-    int64_t activation);   // HIPDNN_EP_CONV_ACTIVATION_* (0=none, 1=ReLU6)
+    int32_t op_state_slot,    // Op state slot
+    const void *input,        // Input tensor GPU pointer
+    int64_t input_n,          // Input batch size
+    int64_t input_c,          // Input channels
+    int64_t input_h,          // Input height
+    int64_t input_w,          // Input width
+    const void *weights,      // Weights tensor GPU pointer
+    int64_t weights_k,        // Output channels (number of filters)
+    const void *bias,         // Bias tensor GPU pointer (nullable)
+    void *output,             // Output tensor GPU pointer (in-place)
+    int64_t output_h,         // Output height
+    int64_t output_w,         // Output width
+    int64_t kernel_h,         // Kernel height
+    int64_t kernel_w,         // Kernel width
+    int64_t stride_h,         // Stride height
+    int64_t stride_w,         // Stride width
+    int64_t pad_top,          // Padding top
+    int64_t pad_left,         // Padding left
+    int64_t pad_bottom,       // Padding bottom
+    int64_t pad_right,        // Padding right
+    int64_t dilation_h,       // Dilation height
+    int64_t dilation_w,       // Dilation width
+    int64_t group,            // Number of groups
+    int64_t data_type,        // HIPDNN_EP_DATATYPE_* for I/O and weights
+    int64_t fused_activation, // 0 = none, 1 = apply fused activation
+    float activation_clip_lo, // lower clip (typically 0)
+    float activation_clip_hi, // upper clip; 0 = no upper clip
+    float activation_alpha);  // reserved for leaky/slope activations
 
 // MIOpen transposed convolution (deconvolution) wrapper
 // Uses MIOpen's miopenTranspose convolution mode. Follows the opaque

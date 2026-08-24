@@ -611,11 +611,15 @@ def UseOutputAllocatorPass
 }
 
 def FuseConvRelu6Pass : Pass<"hip-fuse-conv-relu6", "mlir::func::FuncOp"> {
-  let summary = "Fuse hip.conv + hip.max(0) + hip.min(6) into conv with ReLU6";
+  let summary = "Fuse hip.conv + ReLU/ReLU6 elementwise chains into conv";
   let description = [{
-    Matches MobileNet-style ReLU6 (Clip 0..6) when it is the sole consumer of
-    a convolution and sets `activation = 1` on the conv so the runtime can use
-    MIOpen FusionPlan (Conv+Bias+ClippedReLU).
+    Folds post-conv activation elementwise chains into `hip.conv`:
+      - ReLU6: hip.conv + hip.max(0) + hip.min(6)
+          -> fused_activation, activation_clip_lo=0, activation_clip_hi=6
+      - ReLU:  hip.conv + hip.max(0)
+          -> fused_activation, activation_clip_lo=0, activation_clip_hi=0
+    The runtime applies MIOpen ReLU / ClippedReLU after conv+bias (FusionPlan
+    when supported).
   }];
   let dependentDialects = [
     "mlir::hip::HipDialect",

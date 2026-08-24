@@ -205,11 +205,34 @@ struct ConvTable {
   std::unordered_map<ConvTableKey, ConvTableEntry, ConvKeyHash> map;
 };
 
+struct ConvFusionKey {
+  ConvTableKey conv;
+  float clip_lo;
+  float clip_hi;
+
+  bool operator==(const ConvFusionKey &other) const {
+    return conv == other.conv && clip_lo == other.clip_lo &&
+           clip_hi == other.clip_hi;
+  }
+};
+
+struct ConvFusionKeyHash {
+  size_t operator()(const ConvFusionKey &key) const {
+    ConvKeyHash conv_hash;
+    size_t h = conv_hash(key.conv);
+    hash_combine_val(h, key.clip_lo);
+    hash_combine_val(h, key.clip_hi);
+    return h;
+  }
+};
+
 struct ConvFusionTableEntry {
   miopenFusionPlanDescriptor_t fuse_plan = nullptr;
   miopenFusionOpDescriptor_t conv_op = nullptr;
   miopenFusionOpDescriptor_t bias_op = nullptr;
   miopenFusionOpDescriptor_t activ_op = nullptr;
+  float clip_lo = 0.f;
+  float clip_hi = 0.f;
   bool has_bias = false;
   miopenTensorDescriptor_t input_desc = nullptr;
   miopenTensorDescriptor_t weights_desc = nullptr;
@@ -227,6 +250,7 @@ struct ConvFusionTableEntry {
   ConvFusionTableEntry(ConvFusionTableEntry &&other)
       : fuse_plan(other.fuse_plan), conv_op(other.conv_op),
         bias_op(other.bias_op), activ_op(other.activ_op),
+        clip_lo(other.clip_lo), clip_hi(other.clip_hi),
         has_bias(other.has_bias), input_desc(other.input_desc),
         weights_desc(other.weights_desc), output_desc(other.output_desc),
         bias_desc(other.bias_desc), conv_desc(other.conv_desc),
@@ -265,35 +289,70 @@ struct ConvFusionTableEntry {
 
 struct ConvFusionTable {
   std::mutex mutex;
-  std::unordered_map<ConvTableKey, ConvFusionTableEntry, ConvKeyHash> map;
-  // Keys whose FusionPlan compile/execute failed; skip on later inferences.
-  std::unordered_set<ConvTableKey, ConvKeyHash> disabled_keys;
+  std::unordered_map<ConvFusionKey, ConvFusionTableEntry, ConvFusionKeyHash>
+      map;
+  std::unordered_set<ConvFusionKey, ConvFusionKeyHash> disabled_keys;
 };
 
-struct ClippedRelu6ActivCache {
+struct ReluActivCache {
   miopenActivationDescriptor_t desc = nullptr;
 
-  ClippedRelu6ActivCache() {
+  ReluActivCache() {
     if (miopenCreateActivationDescriptor(&desc) != miopenStatusSuccess)
       desc = nullptr;
-    else if (miopenSetActivationDescriptor(desc, miopenActivationCLIPPEDRELU,
-                                           6.0, 0.0,
+    else if (miopenSetActivationDescriptor(desc, miopenActivationRELU, 0.0, 0.0,
                                            0.0) != miopenStatusSuccess) {
       miopenDestroyActivationDescriptor(desc);
       desc = nullptr;
     }
   }
 
-  ~ClippedRelu6ActivCache() {
+  ~ReluActivCache() {
     if (desc)
       miopenDestroyActivationDescriptor(desc);
+  }
+};
+
+struct ClippedReluActivCache {
+  std::mutex mutex;
+  std::unordered_map<uint32_t, miopenActivationDescriptor_t> desc_by_ceiling;
+
+  miopenActivationDescriptor_t get(float ceiling) {
+    uint32_t key = 0;
+    static_assert(sizeof(float) == sizeof(uint32_t));
+    std::memcpy(&key, &ceiling, sizeof(float));
+
+    std::lock_guard<std::mutex> guard(mutex);
+    auto it = desc_by_ceiling.find(key);
+    if (it != desc_by_ceiling.end())
+      return it->second;
+
+    miopenActivationDescriptor_t desc = nullptr;
+    if (miopenCreateActivationDescriptor(&desc) != miopenStatusSuccess)
+      return nullptr;
+    if (miopenSetActivationDescriptor(desc, miopenActivationCLIPPEDRELU,
+                                      ceiling, 0.0,
+                                      0.0) != miopenStatusSuccess) {
+      miopenDestroyActivationDescriptor(desc);
+      return nullptr;
+    }
+    desc_by_ceiling[key] = desc;
+    return desc;
+  }
+
+  ~ClippedReluActivCache() {
+    for (auto &kv : desc_by_ceiling) {
+      if (kv.second)
+        miopenDestroyActivationDescriptor(kv.second);
+    }
   }
 };
 
 struct ConvState : public OpStateT<ConvState> {
   std::shared_ptr<ConvTable> table;
   std::shared_ptr<ConvFusionTable> fusion_table;
-  std::shared_ptr<ClippedRelu6ActivCache> relu6_activ;
+  std::shared_ptr<ReluActivCache> relu_activ;
+  std::shared_ptr<ClippedReluActivCache> clipped_relu_activ;
   ConvState() {
     int dev = 0;
     hipGetDevice(&dev);
@@ -301,8 +360,10 @@ struct ConvState : public OpStateT<ConvState> {
         dev, [] { return std::make_shared<ConvTable>(); });
     fusion_table = WeakStore<int, ConvFusionTable>::get_or_create(
         dev, [] { return std::make_shared<ConvFusionTable>(); });
-    relu6_activ = WeakStore<int, ClippedRelu6ActivCache>::get_or_create(
-        0, [] { return std::make_shared<ClippedRelu6ActivCache>(); });
+    relu_activ = WeakStore<int, ReluActivCache>::get_or_create(
+        0, [] { return std::make_shared<ReluActivCache>(); });
+    clipped_relu_activ = WeakStore<int, ClippedReluActivCache>::get_or_create(
+        0, [] { return std::make_shared<ClippedReluActivCache>(); });
   }
 };
 
@@ -313,22 +374,37 @@ extern "C" int8_t hipdnn_ep_op_state_construct_conv(RuntimeState *state,
 }
 
 //===----------------------------------------------------------------------===//
-// MIOpen FusionPlan cache (Conv + Bias + ClippedReLU for ReLU6)
+// MIOpen FusionPlan cache (Conv + Bias + parametric ReLU / ClippedReLU)
 //===----------------------------------------------------------------------===//
 
-static int applyClippedRelu6Fallback(ConvState *os, miopenHandle_t handle,
-                                     miopenTensorDescriptor_t desc,
-                                     void *data) {
-  if (!os || !os->relu6_activ || !os->relu6_activ->desc)
-    return -1;
+static bool convHasUpperClip(float clip_hi) { return clip_hi > 0.f; }
+
+static int applyFusedActivationFallback(ConvState *os, miopenHandle_t handle,
+                                        miopenTensorDescriptor_t desc,
+                                        void *data, float clip_lo,
+                                        float clip_hi) {
+  (void)clip_lo;
   const float alpha = 1.f, beta = 0.f;
-  if (miopenActivationForward(handle, os->relu6_activ->desc, &alpha, desc, data,
-                              &beta, desc, data) != miopenStatusSuccess)
+  miopenActivationDescriptor_t act_desc = nullptr;
+  if (convHasUpperClip(clip_hi)) {
+    if (!os || !os->clipped_relu_activ)
+      return -1;
+    act_desc = os->clipped_relu_activ->get(clip_hi);
+  } else {
+    if (!os || !os->relu_activ || !os->relu_activ->desc)
+      return -1;
+    act_desc = os->relu_activ->desc;
+  }
+  if (!act_desc)
+    return -1;
+  if (miopenActivationForward(handle, act_desc, &alpha, desc, data, &beta, desc,
+                              data) != miopenStatusSuccess)
     return -1;
   return 0;
 }
 
-static void disableConvFusion(ConvFusionTable &table, const ConvTableKey &key) {
+static void disableConvFusion(ConvFusionTable &table,
+                              const ConvFusionKey &key) {
   table.disabled_keys.insert(key);
 }
 
@@ -369,11 +445,11 @@ static void logConvFusionPlanSkipOnce() {
   logged = true;
   RUNTIME_DEBUG_LOG(
       "[CONV] FusionPlan skipped (gfx115x or HIPDNN_EP_CONV_FUSION=0), "
-      "using Find+activ for ReLU6\n");
+      "using Find+activ fallback\n");
 }
 
 static const ConvFusionTableEntry *
-queryOrCreateConvFusion(ConvFusionTable &table, const ConvTableKey &key,
+queryOrCreateConvFusion(ConvFusionTable &table, const ConvFusionKey &key,
                         miopenHandle_t miopen_handle, bool has_bias,
                         int64_t weights_k) {
   std::lock_guard<std::mutex> guard(table.mutex);
@@ -383,6 +459,9 @@ queryOrCreateConvFusion(ConvFusionTable &table, const ConvTableKey &key,
 
   int result = 0;
   ConvFusionTableEntry entry;
+  entry.clip_lo = key.clip_lo;
+  entry.clip_hi = key.clip_hi;
+  const ConvTableKey &conv = key.conv;
 
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&entry.input_desc));
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&entry.weights_desc));
@@ -390,41 +469,41 @@ queryOrCreateConvFusion(ConvFusionTable &table, const ConvTableKey &key,
 
   {
     int in_dims[] = {
-        static_cast<int>(key.input_n), static_cast<int>(key.input_c),
-        static_cast<int>(key.input_h), static_cast<int>(key.input_w)};
+        static_cast<int>(conv.input_n), static_cast<int>(conv.input_c),
+        static_cast<int>(conv.input_h), static_cast<int>(conv.input_w)};
     MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        entry.input_desc, key.data_type, miopenTensorNCHW, in_dims, 4));
+        entry.input_desc, conv.data_type, miopenTensorNCHW, in_dims, 4));
 
     int w_dims[] = {
-        static_cast<int>(key.weights_k),
-        static_cast<int>(key.input_c / key.group),
-        static_cast<int>(key.kernel_h),
-        static_cast<int>(key.kernel_w),
+        static_cast<int>(conv.weights_k),
+        static_cast<int>(conv.input_c / conv.group),
+        static_cast<int>(conv.kernel_h),
+        static_cast<int>(conv.kernel_w),
     };
     MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        entry.weights_desc, key.data_type, miopenTensorNCHW, w_dims, 4));
+        entry.weights_desc, conv.data_type, miopenTensorNCHW, w_dims, 4));
 
     int out_dims[] = {
-        static_cast<int>(key.input_n), static_cast<int>(key.weights_k),
-        static_cast<int>(key.output_h), static_cast<int>(key.output_w)};
+        static_cast<int>(conv.input_n), static_cast<int>(conv.weights_k),
+        static_cast<int>(conv.output_h), static_cast<int>(conv.output_w)};
     MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        entry.output_desc, key.data_type, miopenTensorNCHW, out_dims, 4));
+        entry.output_desc, conv.data_type, miopenTensorNCHW, out_dims, 4));
   }
 
   if (has_bias) {
     MIOPEN_CHECK(miopenCreateTensorDescriptor(&entry.bias_desc));
     int b_dims[] = {1, static_cast<int>(weights_k), 1, 1};
     MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        entry.bias_desc, key.data_type, miopenTensorNCHW, b_dims, 4));
+        entry.bias_desc, conv.data_type, miopenTensorNCHW, b_dims, 4));
     entry.has_bias = true;
   }
 
   MIOPEN_CHECK(miopenCreateConvolutionDescriptor(&entry.conv_desc));
   MIOPEN_CHECK(miopenInitConvolutionDescriptor(
-      entry.conv_desc, miopenConvolution, key.pad_top, key.pad_left,
-      key.stride_h, key.stride_w, key.dilation_h, key.dilation_w));
-  if (key.group > 1)
-    MIOPEN_CHECK(miopenSetConvolutionGroupCount(entry.conv_desc, key.group));
+      entry.conv_desc, miopenConvolution, conv.pad_top, conv.pad_left,
+      conv.stride_h, conv.stride_w, conv.dilation_h, conv.dilation_w));
+  if (conv.group > 1)
+    MIOPEN_CHECK(miopenSetConvolutionGroupCount(entry.conv_desc, conv.group));
 
   MIOPEN_CHECK(miopenCreateFusionPlan(&entry.fuse_plan, miopenVerticalFusion,
                                       entry.input_desc));
@@ -434,8 +513,11 @@ queryOrCreateConvFusion(ConvFusionTable &table, const ConvTableKey &key,
     MIOPEN_CHECK(miopenCreateOpBiasForward(entry.fuse_plan, &entry.bias_op,
                                            entry.bias_desc));
   }
+  const miopenActivationMode_t activ_mode = convHasUpperClip(key.clip_hi)
+                                                ? miopenActivationCLIPPEDRELU
+                                                : miopenActivationRELU;
   MIOPEN_CHECK(miopenCreateOpActivationForward(entry.fuse_plan, &entry.activ_op,
-                                               miopenActivationCLIPPEDRELU));
+                                               activ_mode));
 
   {
     int returned = 0;
@@ -482,8 +564,9 @@ static int runConvFusionPlan(const ConvFusionTableEntry *entry,
     MIOPEN_CHECK(
         miopenSetOpArgsBiasForward(args, entry->bias_op, &alpha, &beta, bias));
   }
-  MIOPEN_CHECK(miopenSetOpArgsActivForward(args, entry->activ_op, &alpha, &beta,
-                                           6.0, 0.0, 0.0));
+  MIOPEN_CHECK(miopenSetOpArgsActivForward(
+      args, entry->activ_op, &alpha, &beta,
+      convHasUpperClip(entry->clip_hi) ? entry->clip_hi : 0.0, 0.0, 0.0));
   MIOPEN_CHECK(miopenExecuteFusionPlan_v2(
       miopen_handle, entry->fuse_plan, entry->input_desc, input,
       entry->output_desc, output, args, entry->fusion_workspace,
@@ -628,7 +711,10 @@ int wrap_miopenConvolutionForward(
     int64_t output_h, int64_t output_w, int64_t kernel_h, int64_t kernel_w,
     int64_t stride_h, int64_t stride_w, int64_t pad_top, int64_t pad_left,
     int64_t pad_bottom, int64_t pad_right, int64_t dilation_h,
-    int64_t dilation_w, int64_t group, int64_t data_type, int64_t activation) {
+    int64_t dilation_w, int64_t group, int64_t data_type,
+    int64_t fused_activation, float activation_clip_lo,
+    float activation_clip_hi, float activation_alpha) {
+  (void)activation_alpha;
   OP_PROFILE(
       "conv",
       [&] {
@@ -660,11 +746,12 @@ int wrap_miopenConvolutionForward(
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_miopenConvolutionForward N=%lld Cin=%lld H=%lld W=%lld "
       "Cout=%lld kHxkW=%lldx%lld s=%lldx%lld bias=%s dtype=%lld "
-      "activation=%lld\n",
+      "fused=%lld clip=[%.3f,%.3f]\n",
       (long long)input_n, (long long)input_c, (long long)input_h,
       (long long)input_w, (long long)weights_k, (long long)kernel_h,
       (long long)kernel_w, (long long)stride_h, (long long)stride_w,
-      bias ? "yes" : "null", (long long)data_type, (long long)activation);
+      bias ? "yes" : "null", (long long)data_type, (long long)fused_activation,
+      activation_clip_lo, activation_clip_hi);
 
   miopenHandle_t miopen_handle =
       static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
@@ -684,36 +771,42 @@ int wrap_miopenConvolutionForward(
       miopen_dt, miopenConvolution, 0,         0,
   };
 
-  if (activation == HIPDNN_EP_CONV_ACTIVATION_RELU6) {
+  if (fused_activation) {
+    ConvFusionKey fusion_key{key, activation_clip_lo, activation_clip_hi};
     if (!convFusionPlanEnabled()) {
       logConvFusionPlanSkipOnce();
     } else if (os->fusion_table) {
       bool fusion_disabled = false;
       {
         std::lock_guard<std::mutex> guard(os->fusion_table->mutex);
-        fusion_disabled = os->fusion_table->disabled_keys.count(key) != 0;
+        fusion_disabled =
+            os->fusion_table->disabled_keys.count(fusion_key) != 0;
       }
       if (!fusion_disabled) {
-        const ConvFusionTableEntry *fusion_entry = queryOrCreateConvFusion(
-            *os->fusion_table, key, miopen_handle, bias != nullptr, weights_k);
+        const ConvFusionTableEntry *fusion_entry =
+            queryOrCreateConvFusion(*os->fusion_table, fusion_key,
+                                    miopen_handle, bias != nullptr, weights_k);
         if (fusion_entry && fusion_entry->fuse_plan) {
           int fusion_rc = runConvFusionPlan(fusion_entry, miopen_handle, input,
                                             weights, bias, output);
           if (fusion_rc == 0) {
-            RUNTIME_DEBUG_LOG("[CONV] FusionPlan ReLU6 ok N=%lld Cout=%lld\n",
-                              (long long)input_n, (long long)weights_k);
+            RUNTIME_DEBUG_LOG(
+                "[CONV] FusionPlan %s ok N=%lld Cout=%lld\n",
+                hipdnn_ep_conv_fused_activation_name(
+                    fused_activation, activation_clip_lo, activation_clip_hi),
+                (long long)input_n, (long long)weights_k);
             return 0;
           }
-          RUNTIME_DEBUG_LOG("[CONV] FusionPlan ReLU6 failed (rc=%d), falling "
-                            "back to Find+activ\n",
-                            fusion_rc);
+          RUNTIME_DEBUG_LOG(
+              "[CONV] FusionPlan failed (rc=%d), falling back to Find+activ\n",
+              fusion_rc);
           std::lock_guard<std::mutex> guard(os->fusion_table->mutex);
-          disableConvFusion(*os->fusion_table, key);
+          disableConvFusion(*os->fusion_table, fusion_key);
         } else {
           RUNTIME_DEBUG_LOG(
               "[CONV] FusionPlan compile unsupported, fallback\n");
           std::lock_guard<std::mutex> guard(os->fusion_table->mutex);
-          disableConvFusion(*os->fusion_table, key);
+          disableConvFusion(*os->fusion_table, fusion_key);
         }
       }
     }
@@ -755,9 +848,10 @@ int wrap_miopenConvolutionForward(
                                 output));
   }
 
-  if (activation == HIPDNN_EP_CONV_ACTIVATION_RELU6) {
-    if (applyClippedRelu6Fallback(os, miopen_handle, entry->output_desc,
-                                  output) != 0) {
+  if (fused_activation) {
+    if (applyFusedActivationFallback(os, miopen_handle, entry->output_desc,
+                                     output, activation_clip_lo,
+                                     activation_clip_hi) != 0) {
       result = -1;
       goto cleanup;
     }
