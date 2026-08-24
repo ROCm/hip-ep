@@ -462,6 +462,9 @@ queryOrCreateConvFusion(ConvFusionTable &table, const ConvFusionKey &key,
   entry.clip_lo = key.clip_lo;
   entry.clip_hi = key.clip_hi;
   const ConvTableKey &conv = key.conv;
+  const miopenActivationMode_t activ_mode = convHasUpperClip(key.clip_hi)
+                                                ? miopenActivationCLIPPEDRELU
+                                                : miopenActivationRELU;
 
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&entry.input_desc));
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&entry.weights_desc));
@@ -513,9 +516,6 @@ queryOrCreateConvFusion(ConvFusionTable &table, const ConvFusionKey &key,
     MIOPEN_CHECK(miopenCreateOpBiasForward(entry.fuse_plan, &entry.bias_op,
                                            entry.bias_desc));
   }
-  const miopenActivationMode_t activ_mode = convHasUpperClip(key.clip_hi)
-                                                ? miopenActivationCLIPPEDRELU
-                                                : miopenActivationRELU;
   MIOPEN_CHECK(miopenCreateOpActivationForward(entry.fuse_plan, &entry.activ_op,
                                                activ_mode));
 
