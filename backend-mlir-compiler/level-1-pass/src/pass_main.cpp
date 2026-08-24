@@ -6,6 +6,7 @@
 #include "MlirCompiler.h"
 
 // Morphizen headers
+#include "hip/env.h"
 #include "hip/timing.h"
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
@@ -71,6 +72,18 @@ static CompilationConfig load_config(PassContext *ctx) {
         ctx->get_provider_option("optimization_level", "2");
     config.optLevel = std::stoi(opt_level_str);
 
+    // Whether present_key/value alias past_key/value. Seeded from the legacy
+    // env var so existing shells keep working, then overridden by the provider
+    // option when the session sets one. The option is the source of truth
+    // because it has to agree with past_present_share_buffer, and provider
+    // options are where that flag already lives; an env var can only disagree
+    // with it from somewhere the reader cannot see. The optional overload is
+    // deliberate -- the defaulted one cannot tell "unset" from "0" and would
+    // silently clear the env seed.
+    config.kvShareBuffer = hipdnn_ep::env_enabled("HIPDNN_EP_KV_SHARE_BUFFER");
+    if (auto kv_share = ctx->get_provider_option("kv_share_buffer"))
+      config.kvShareBuffer = !kv_share->empty() && (*kv_share)[0] >= '1';
+
   } catch (const std::exception &ex) {
     MY_LOG(1) << "Failed to parse provider options: " << ex.what()
               << ", using defaults";
@@ -82,7 +95,8 @@ static CompilationConfig load_config(PassContext *ctx) {
             << "; skipConstantData="
             << (config.skipConstantData ? "true" : "false")
             << (epctxExport ? " (EPContext export -> constants file)"
-                            : " (streaming default)");
+                            : " (streaming default)")
+            << "; kvShareBuffer=" << (config.kvShareBuffer ? "true" : "false");
 
   return config;
 }

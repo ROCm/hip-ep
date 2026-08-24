@@ -358,16 +358,38 @@ static inline bool kv_is_16b_aligned(const void* p) {
   return (reinterpret_cast<uintptr_t>(p) & 15u) == 0;
 }
 
+// Destination sequence slot for absolute KV position `pos`, given that the
+// append covers positions [.., total) into a buffer of `capacity` cells.
+// Returns -1 for a position this append must not write.
+//
+// Linear (ring == 0): the slot IS the position, which is what a cache allocated
+// to max_length wants.
+//
+// Ring (ring != 0): the buffer holds only the most recent `capacity` positions,
+// so position pos lives at pos % capacity and anything older than
+// total - capacity is dropped. Dropping is load-bearing rather than an
+// optimisation: a sliding-window prefill hands this kernel far more positions
+// than the ring has cells, and writing them all would leave several source rows
+// racing for one slot with the last wave to retire deciding the winner. Writing
+// exactly the newest `capacity` positions touches each slot once.
+__device__ __forceinline__ int kv_ring_slot(int pos, int total, int capacity,
+                                            int ring) {
+  if (!ring) return pos;
+  if (pos < total - capacity) return -1;
+  return pos % capacity;
+}
+
 template <typename T>
 __global__ void kv_cache_append_kernel(
     const T* __restrict__ src,
     T* __restrict__ cache,
     int sq, int G, int d, int present_seq, int past_len,
-    const int* __restrict__ seqlens_k) {
+    const int* __restrict__ seqlens_k, int ring) {
   const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
   int eff_past_len = seqlens_k ? (seqlens_k[batch_idx] + 1 - sq) : past_len;
   // Skip malformed batches rather than write past this slice.
-  if (eff_past_len < 0 || eff_past_len + sq > present_seq) return;
+  if (eff_past_len < 0) return;
+  if (!ring && eff_past_len + sq > present_seq) return;
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   int total_per_batch = sq * G * d;
   if (idx >= total_per_batch) return;
@@ -377,8 +399,11 @@ __global__ void kv_cache_append_kernel(
   int g = remaining % G;
   int s = remaining / G;
 
+  int dst_s = kv_ring_slot(eff_past_len + s, eff_past_len + sq, present_seq, ring);
+  if (dst_s < 0) return;
+
   int src_idx = ((batch_idx * sq + s) * G + g) * d + di;
-  int dst_idx = ((batch_idx * G + g) * present_seq + (eff_past_len + s)) * d + di;
+  int dst_idx = ((batch_idx * G + g) * present_seq + dst_s) * d + di;
   cache[dst_idx] = src[src_idx];
 }
 
@@ -390,10 +415,11 @@ __global__ void kv_cache_append_vec_kernel(
     const T* __restrict__ src,
     T* __restrict__ cache,
     int sq, int G, int d, int present_seq, int past_len,
-    const int* __restrict__ seqlens_k) {
+    const int* __restrict__ seqlens_k, int ring) {
   const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
   int eff_past_len = seqlens_k ? (seqlens_k[batch_idx] + 1 - sq) : past_len;
-  if (eff_past_len < 0 || eff_past_len + sq > present_seq) return;
+  if (eff_past_len < 0) return;
+  if (!ring && eff_past_len + sq > present_seq) return;
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   const int dv = d / VEC;
   int total_per_batch = sq * G * dv;
@@ -404,9 +430,11 @@ __global__ void kv_cache_append_vec_kernel(
   int g = remaining % G;
   int s = remaining / G;
 
+  int dst_s = kv_ring_slot(eff_past_len + s, eff_past_len + sq, present_seq, ring);
+  if (dst_s < 0) return;
+
   int src_idx = ((batch_idx * sq + s) * G + g) * d + dvi * VEC;
-  int dst_idx =
-      ((batch_idx * G + g) * present_seq + (eff_past_len + s)) * d + dvi * VEC;
+  int dst_idx = ((batch_idx * G + g) * present_seq + dst_s) * d + dvi * VEC;
   *reinterpret_cast<KvVec16*>(cache + dst_idx) =
       *reinterpret_cast<const KvVec16*>(src + src_idx);
 }
@@ -517,10 +545,11 @@ __global__ void kv_cache_append_quant_i8_kernel(
     int8_t* __restrict__ cache,           // BNSD [B, G, present_seq, d]
     const float* __restrict__ scale,      // [G, d]
     int sq, int G, int d, int present_seq, int past_len,
-    const int* __restrict__ seqlens_k) {
+    const int* __restrict__ seqlens_k, int ring) {
   const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
   int eff_past_len = seqlens_k ? (seqlens_k[batch_idx] + 1 - sq) : past_len;
-  if (eff_past_len < 0 || eff_past_len + sq > present_seq) return;
+  if (eff_past_len < 0) return;
+  if (!ring && eff_past_len + sq > present_seq) return;
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   int total_per_batch = sq * G * d;
   if (idx >= total_per_batch) return;
@@ -528,8 +557,10 @@ __global__ void kv_cache_append_quant_i8_kernel(
   int remaining = idx / d;
   int g = remaining % G;
   int s = remaining / G;
+  int dst_s = kv_ring_slot(eff_past_len + s, eff_past_len + sq, present_seq, ring);
+  if (dst_s < 0) return;
   int src_idx = ((batch_idx * sq + s) * G + g) * d + di;
-  int dst_idx = ((batch_idx * G + g) * present_seq + (eff_past_len + s)) * d + di;
+  int dst_idx = ((batch_idx * G + g) * present_seq + dst_s) * d + di;
   float inv = 1.0f / scale[g * d + di];
   float q = rintf((float)src[src_idx] * inv);
   q = fminf(fmaxf(q, -128.0f), 127.0f);
@@ -835,7 +866,7 @@ template <typename T>
 static void launch_kv_cache_append(
     hipStream_t stream, const void* src, void* cache,
     int batch_size, int sq, int G, int d, int present_seq, int past_len,
-    const void* seqlens_k) {
+    const void* seqlens_k, int ring) {
   constexpr int VEC = 16 / sizeof(T);
   if ((d % VEC) == 0 && kv_is_16b_aligned(src) && kv_is_16b_aligned(cache)) {
     int total = sq * G * (d / VEC);
@@ -843,7 +874,8 @@ static void launch_kv_cache_append(
     kv_cache_append_vec_kernel<T, VEC><<<dim3(blocks, batch_size), GQA_THREADS,
                                          0, stream>>>(
         static_cast<const T*>(src), static_cast<T*>(cache),
-        sq, G, d, present_seq, past_len, static_cast<const int*>(seqlens_k));
+        sq, G, d, present_seq, past_len, static_cast<const int*>(seqlens_k),
+        ring);
     return;
   }
   int total = sq * G * d;
@@ -851,7 +883,7 @@ static void launch_kv_cache_append(
   kv_cache_append_kernel<T><<<dim3(blocks, batch_size), GQA_THREADS, 0,
                               stream>>>(
       static_cast<const T*>(src), static_cast<T*>(cache),
-      sq, G, d, present_seq, past_len, static_cast<const int*>(seqlens_k));
+      sq, G, d, present_seq, past_len, static_cast<const int*>(seqlens_k), ring);
 }
 
 template <typename T>
@@ -936,7 +968,7 @@ extern "C" int hip_gqa_kv_cache_append(
     void* stream_ptr, const void* src, void* cache,
     int batch_size, int sq, int G, int d, int present_seq, int past_len,
     const void* seqlens_k, int element_size_bytes,
-    int kv_dtype, const void* scale) {
+    int kv_dtype, const void* scale, int ring) {
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
   if (kv_dtype == HIP_KV_DTYPE_INT8) {
     if (scale == nullptr) {
@@ -950,7 +982,7 @@ extern "C" int hip_gqa_kv_cache_append(
                                       stream>>>(
         static_cast<const _Float16*>(src), static_cast<int8_t*>(cache),
         static_cast<const float*>(scale), sq, G, d, present_seq, past_len,
-        static_cast<const int*>(seqlens_k));
+        static_cast<const int*>(seqlens_k), ring);
     GQA_RETURN_LAUNCH_STATUS();
   }
   if (kv_dtype != HIP_KV_DTYPE_FP16) {
@@ -960,7 +992,7 @@ extern "C" int hip_gqa_kv_cache_append(
   }
   GQA_DISPATCH_BY_ELEM_SIZE(element_size_bytes, launch_kv_cache_append, stream,
                             src, cache, batch_size, sq, G, d, present_seq,
-                            past_len, seqlens_k);
+                            past_len, seqlens_k, ring);
   GQA_RETURN_LAUNCH_STATUS();
 }
 
@@ -1103,7 +1135,7 @@ __global__ void add_attention_bias_kernel(
     float* __restrict__ scores, const TBias* __restrict__ bias,
     int total_heads, int num_heads, int bias_batch, int bias_heads, int sq,
     int score_cols, int score_batch_stride, int bias_sq, int bias_row_offset,
-    int bias_total_seq, int bias_col_offset) {
+    int bias_total_seq, int bias_col_offset, int ring_base, int ring_cap) {
   int head = blockIdx.y;
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int n = sq * score_cols;
@@ -1116,10 +1148,20 @@ __global__ void add_attention_bias_kernel(
   int bias_b = (bias_batch == 1) ? 0 : b;
   int bias_h = (bias_heads == 1) ? 0 : h;
   size_t bias_plane = static_cast<size_t>(bias_sq) * bias_total_seq;
+  // A ring cache presents its keys rotated: slot `col` holds the position
+  // congruent to col mod capacity that falls in [ring_base, ring_base+cap).
+  // The bias is indexed by absolute position, so undo the rotation here rather
+  // than assuming the window part of the bias makes it a no-op.
+  int bias_col = bias_col_offset + col;
+  if (ring_cap > 0) {
+    int off = (col - ring_base) % ring_cap;
+    if (off < 0) off += ring_cap;
+    bias_col = ring_base + off;
+  }
   size_t bias_idx = static_cast<size_t>(bias_b) * bias_heads * bias_plane +
                     static_cast<size_t>(bias_h) * bias_plane +
                     static_cast<size_t>(bias_row_offset + row) * bias_total_seq +
-                    (bias_col_offset + col);
+                    bias_col;
   scores[static_cast<size_t>(head) * score_batch_stride + tid] +=
       static_cast<float>(bias[bias_idx]);
 }
@@ -1128,7 +1170,8 @@ extern "C" int hip_gqa_add_attention_bias_f32(
     void* stream_ptr, void* scores, const void* bias, int total_heads,
     int num_heads, int bias_batch, int bias_heads, int sq, int score_cols,
     int score_batch_stride, int bias_element_size_bytes, int bias_sq,
-    int bias_row_offset, int bias_total_seq, int bias_col_offset) {
+    int bias_row_offset, int bias_total_seq, int bias_col_offset, int ring_base,
+    int ring_cap) {
   if (!scores || !bias)
     return -1;
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
@@ -1145,14 +1188,14 @@ extern "C" int hip_gqa_add_attention_bias_f32(
             static_cast<float*>(scores), static_cast<const __half*>(bias),
             total_heads, num_heads, bias_batch, bias_heads, sq, score_cols,
             score_batch_stride, bias_sq, bias_row_offset, bias_total_seq,
-            bias_col_offset);
+            bias_col_offset, ring_base, ring_cap);
   } else if (bias_element_size_bytes == 4) {
     add_attention_bias_kernel<float>
         <<<dim3(blocksX, total_heads), GQA_THREADS, 0, stream>>>(
             static_cast<float*>(scores), static_cast<const float*>(bias),
             total_heads, num_heads, bias_batch, bias_heads, sq, score_cols,
             score_batch_stride, bias_sq, bias_row_offset, bias_total_seq,
-            bias_col_offset);
+            bias_col_offset, ring_base, ring_cap);
   } else {
     fprintf(stderr,
             "hip_gqa_add_attention_bias_f32: unsupported bias elem size %d\n",

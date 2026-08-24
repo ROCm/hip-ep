@@ -14,6 +14,11 @@ table CompilationOptions {
   verbose: bool = false;
   constants_file: string = "constants.bin";
   skip_constant_data: bool = false;
+  // present_key/value name the same allocation as past_key/value, so the
+  // present buffer's capacity is the past extent rather than past+current.
+  // Set from the `kv_share_buffer` provider option; must agree with
+  // past_present_share_buffer in the model's genai_config.json.
+  kv_share_buffer: bool = false;
 }
 
 root_type CompilationOptions;

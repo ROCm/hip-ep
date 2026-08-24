@@ -85,6 +85,15 @@ def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
     Requires hip-add-context-arg to have run first so that !hip.context is
     available as function argument 0.
   }];
+  let options = [
+    Option<"kvShareBuffer", "kv-share-buffer", "bool", /*default=*/"false",
+           "present_key/value name the same allocation as past_key/value "
+           "rather than a freshly grown past+current, so the present buffer's "
+           "capacity is the past extent alone. Must agree with "
+           "past_present_share_buffer in the model's genai_config.json: the "
+           "operand shapes cannot tell a right-sized shared buffer from a "
+           "growing separate one, since both have past < total.">
+  ];
   let dependentDialects = [
     "mlir::hip::HipDialect",
     "mlir::arith::ArithDialect",

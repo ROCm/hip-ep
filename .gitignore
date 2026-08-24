@@ -159,3 +159,6 @@ _local/
 # Whisper test audio (auto-downloaded at test setup, cached locally; README kept)
 test/python/data/whisper/*.wav
 test/python/data/whisper/librispeech/
+
+# Standalone kernel example test binaries (built by hand via hipcc)
+lib/Runtime/Kernels/test/example/**/*.exe

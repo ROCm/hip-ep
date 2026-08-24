@@ -400,7 +400,11 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   addPluginPassesForSlot(pm,
                          ::hip::compiler::PipelineSlot::AfterOnnxLoopOutline);
 
-  pm.addPass(createConvertOnnxToHipPass());
+  {
+    ConvertOnnxToHipPassOptions convertOptions;
+    convertOptions.kvShareBuffer = options.kvShareBuffer;
+    pm.addPass(createConvertOnnxToHipPass(std::move(convertOptions)));
+  }
 
   // Plugin slot: AfterConvertOnnxToHip. The most common slot for
   // vendor lowerings of `onnx.Custom` ops or vendor-specific hip.*
@@ -433,7 +437,11 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
     pm.addPass(createCompileHipDNNGraphsPass(handle, std::move(output_graphs)));
   }
 
-  pm.addPass(createConvertOnnxToHipPass());
+  {
+    ConvertOnnxToHipPassOptions convertOptions;
+    convertOptions.kvShareBuffer = options.kvShareBuffer;
+    pm.addPass(createConvertOnnxToHipPass(std::move(convertOptions)));
+  }
 
   addPluginPassesForSlot(pm,
                          ::hip::compiler::PipelineSlot::AfterConvertOnnxToHip);

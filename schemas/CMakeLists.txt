@@ -43,6 +43,12 @@ add_custom_target(HipSchemas ALL DEPENDS ${GENERATED_HEADERS})
 # flatbuffers::Parser for JSON<->binary conversion without a separate schema file.
 foreach(schema ${FBS_SCHEMAS})
     get_filename_component(schema_name ${schema} NAME_WE)
+    # file(READ) happens at CONFIGURE time, unlike the flatc custom command
+    # above which reruns on build. Without this the embedded schema silently
+    # keeps whatever the last configure saw, so a new field parses fine in C++
+    # and then fails at runtime with "unknown field" from the JSON parser --
+    # the two halves of the same .fbs disagreeing.
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${schema})
     file(READ ${schema} schema_content)
     file(CONFIGURE
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${schema_name}_schema.h

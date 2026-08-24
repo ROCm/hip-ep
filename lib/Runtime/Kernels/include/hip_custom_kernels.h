@@ -566,12 +566,19 @@ typedef enum {
  *                        scale is ignored (pass NULL).
  *   HIP_KV_DTYPE_INT8 -> symmetric per-channel INT8 quant (fp16 src, int8
  *                        cache); scale is the static fp32 per-channel table
- *                        [G,d] (no zero point), q = clamp(round(x/scale),-128,127). */
+ *                        [G,d] (no zero point), q = clamp(round(x/scale),-128,127).
+ * ring: 0 = linear, position p goes to slot p and the append refuses to run at
+ *       all if past_len+sq exceeds present_seq.
+ *       1 = ring, for a sliding-window layer whose cache is right-sized to the
+ *       window instead of max_length. Position p goes to slot p % present_seq,
+ *       and only the newest present_seq positions are written -- a prefill hands
+ *       this far more positions than the ring has cells, and writing them all
+ *       would race several source rows onto one slot. */
 HIP_KERNEL_API int hip_gqa_kv_cache_append(
     void* stream, const void* src, void* cache,
     int batch_size, int sq, int G, int d, int present_seq, int past_len,
     const void* seqlens_k, int element_size_bytes,
-    int kv_dtype, const void* scale);
+    int kv_dtype, const void* scale, int ring);
 
 /* KV cache concat: concatenate past data and new tokens into a fresh present
  * buffer.  Fills present [B,G,present_seq,d] by copying past data from
@@ -670,12 +677,17 @@ HIP_KERNEL_API int hip_gqa_causal_mask_f32(
  *     of key columns present, just the sliding window when the caller narrowed
  *     the decode key range.
  * Pass bias_sq = sq (or 0) and bias_row_offset = 0, and bias_total_seq =
- * score_cols (or 0) and bias_col_offset = 0, for the untiled/unnarrowed case. */
+ * score_cols (or 0) and bias_col_offset = 0, for the untiled/unnarrowed case.
+ * ring_base / ring_cap describe a right-sized sliding-window cache, whose keys
+ * arrive rotated: slot col holds the absolute position congruent to col modulo
+ * ring_cap that lies in [ring_base, ring_base+ring_cap). Pass ring_cap = 0 for
+ * a linear cache, where the column index is bias_col_offset + col. */
 HIP_KERNEL_API int hip_gqa_add_attention_bias_f32(
     void* stream, void* scores, const void* bias,
     int total_heads, int num_heads, int bias_batch, int bias_heads,
     int sq, int score_cols, int score_batch_stride, int bias_element_size_bytes,
-    int bias_sq, int bias_row_offset, int bias_total_seq, int bias_col_offset);
+    int bias_sq, int bias_row_offset, int bias_total_seq, int bias_col_offset,
+    int ring_base, int ring_cap);
 
 /* Column-wise softmax in-place. One threadblock per (head, query).
  * Smooth softmax is activated when head_sink is non-null OR use_smooth_softmax

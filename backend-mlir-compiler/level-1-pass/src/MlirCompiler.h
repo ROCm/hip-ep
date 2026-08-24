@@ -40,6 +40,12 @@ struct CompilationConfig {
   ArtifactFormat artifactFormat;
   int optLevel;
   bool skipConstantData = true;
+  // present_key/value name the same allocation as past_key/value. The graph
+  // cannot infer this -- a right-sized shared buffer and a growing separate
+  // one both have past < total -- so it comes from the `kv_share_buffer`
+  // provider option, which must agree with past_present_share_buffer in the
+  // model's genai_config.json.
+  bool kvShareBuffer = false;
 };
 
 // Compiled artifact (bytes + metadata)

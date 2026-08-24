@@ -72,8 +72,10 @@ namespace {
 /// After:
 ///   %cur       = tensor.dim %q, %c1        // current KV tokens (== query seq)
 ///   %past      = tensor.dim %past_k, %c2   // past buffer EXTENT (see below)
-///   %tot       = tensor.dim %mask, %c3     // valid total KV, else %past + %cur
-///   %cap       = arith.maxsi %past, %tot   // present buffer capacity
+///   %tot       = tensor.dim %mask, %c3     // valid total KV, else %past +
+///   %cur %cap       = arith.maxsi %past, %tot   // present buffer capacity
+///                                          // (just %past under
+///                                          //  kv-share-buffer)
 ///   %seqlens_k = tensor.from_elements (%tot - 1)  : tensor<1xi32>
 ///   %total_seq = tensor.from_elements %cap        : tensor<i32>
 ///   %pk_init   = tensor.empty(%B, %cap)    // present sized to capacity
@@ -103,12 +105,17 @@ namespace {
 /// null present_key/present_value and wrap_group_query_attention rejects the
 /// call, leaving the attention output zero-filled.
 struct OnnxAttentionToHip : public mlir::RewritePattern {
-  OnnxAttentionToHip(mlir::MLIRContext *ctx)
-      : RewritePattern("onnx.Attention", /*benefit=*/1, ctx) {}
+  OnnxAttentionToHip(mlir::MLIRContext *ctx, bool kvShareBuffer)
+      : RewritePattern("onnx.Attention", /*benefit=*/1, ctx),
+        kvShareBuffer(kvShareBuffer) {}
 
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
                   mlir::PatternRewriter &rewriter) const override;
+
+  /// present and past name one allocation. See the capacity comment in
+  /// matchAndRewrite for why the graph cannot supply this on its own.
+  bool kvShareBuffer;
 };
 
 mlir::LogicalResult
@@ -328,6 +335,41 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
     return transOp->getResult(0);
   };
 
+  // With no past operand there is nothing to share, so the option does not
+  // apply and a zero-length present would be nonsense. Resolved here, ahead of
+  // any IR construction, because the check below has to reject before the
+  // pattern starts building: a pattern that creates ops and then returns
+  // failure leaves the greedy driver holding orphaned IR. See the capacity
+  // comment further down for what it means and why the graph cannot supply it.
+  const bool sharedPresent = kvShareBuffer && pastKey;
+
+  // A static present seq dim short-circuits the capacity computation entirely:
+  // total_seq_len becomes a constant read off the result type and
+  // buildPresentInit skips the dim, so presentCapIdx -- and with it the
+  // shared-buffer rule -- is never consulted. Harmless when the graph and the
+  // buffer agree, silently wrong when they do not, which is precisely the case
+  // the flag exists for.
+  //
+  // Rewriting the type is not an option: replaceOp hands the result straight to
+  // the original op's users, and in a real graph present is a function result
+  // whose signature still declares the old extent. A graph that pins present to
+  // a length its shared past buffer does not have is inconsistent at the
+  // source, so report it rather than quietly emitting the wrong capacity.
+  if (sharedPresent && numResults >= 2) {
+    auto presentTy =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(1).getType());
+    auto pastTy = mlir::dyn_cast<mlir::RankedTensorType>(pastKey.getType());
+    if (presentTy && presentTy.getRank() == 4 && !presentTy.isDynamicDim(2)) {
+      const int64_t pastExtent =
+          (pastTy && pastTy.getRank() == 4) ? pastTy.getDimSize(2) : kDyn;
+      if (pastExtent != presentTy.getDimSize(2))
+        return rewriter.notifyMatchFailure(
+            op, "kv-share-buffer: present pins a seq extent the shared past "
+                "buffer does not have; they are one allocation, so the extents "
+                "must match");
+    }
+  }
+
   // Flatten rank-4 Q/K/V to the rank-3 BSHD layout the runtime consumes.
   mlir::Value q3 = query, k3 = key, v3 = value;
   if (rank4) {
@@ -370,21 +412,39 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
                       .getResult();
   }
   mlir::Value totalKvIdx =
-      maskKvIdx ? maskKvIdx
-                : mlir::arith::AddIOp::create(rewriter, loc, pastSeqIdx,
-                                              curSeqIdx)
-                      .getResult();
+      maskKvIdx
+          ? maskKvIdx
+          : mlir::arith::AddIOp::create(rewriter, loc, pastSeqIdx, curSeqIdx)
+                .getResult();
 
   // present buffer capacity, which is NOT the same as the valid length above.
-  // Taking the max keeps both callers correct: with a separately allocated
-  // present it collapses to past + current (the past extent is the valid past
-  // length, which is smaller), while with a shared buffer it yields the
-  // max_length capacity so the requested output shape matches the buffer ORT
-  // already bound -- which is what makes past_key == present_key, and hence the
-  // in-place append path, reachable at all.
+  //
+  // The two deployments want different things, and only one of them can be
+  // inferred from the operands. A separately allocated present has to hold
+  // past + current, and there dim(past_key, 2) is the valid past length, so it
+  // is strictly smaller than the total. A shared present IS the past buffer, so
+  // its capacity is dim(past_key, 2) exactly -- never the total.
+  //
+  // max() computes the right answer for both only as long as a shared buffer is
+  // allocated to max_length, where the past extent dominates the total anyway.
+  // It stops working the moment a buffer is deliberately allocated shorter than
+  // the context, which is what right-sizing a sliding-window layer's cache to
+  // its window does: max(1024, 2240) asks ORT for a 2240-long present and ORT
+  // refuses, because the buffer it bound is 1024.
+  //
+  // The relation between the extents cannot tell those apart -- a right-sized
+  // shared buffer and a growing separate one both have past < total -- so the
+  // deployment has to say. That is the kv-share-buffer pass option, set from
+  // the `kv_share_buffer` provider option, which must agree with
+  // past_present_share_buffer in genai_config.json; they are two views of one
+  // fact and disagreeing gets a shape rejection at the first Run. Keeping both
+  // in provider_options puts them in the same file, where a reader can see
+  // them together.
   mlir::Value presentCapIdx =
-      mlir::arith::MaxSIOp::create(rewriter, loc, pastSeqIdx, totalKvIdx)
-          .getResult();
+      sharedPresent
+          ? pastSeqIdx
+          : mlir::arith::MaxSIOp::create(rewriter, loc, pastSeqIdx, totalKvIdx)
+                .getResult();
 
   // seqlens_k[b] = total_seq - 1 (ORT GQA convention total_seq = seqlens_k + 1;
   // the runtime derives past_len = total_seq - sq). Ignored by the runtime on
@@ -620,8 +680,9 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
 } // namespace
 
 void populateOnnxAttentionConversionPatterns(RewritePatternSet &patterns,
-                                             MLIRContext *ctx) {
-  patterns.add<OnnxAttentionToHip>(ctx);
+                                             MLIRContext *ctx,
+                                             bool kvShareBuffer) {
+  patterns.add<OnnxAttentionToHip>(ctx, kvShareBuffer);
 }
 
 } // namespace hip
