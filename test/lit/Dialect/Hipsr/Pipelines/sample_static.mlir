@@ -2,29 +2,11 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// The hipsr pipeline over a small ONNX graph, every extent static.
-// sample_dynamic.mlir is the same graph with a dynamic leading extent.
-//
-// The CHECK block is the pipeline's output as it stands today, and grows with
-// each pass added to buildHipsrPipeline.
-//
-// Editing notes. Keep the graph a chain, so that the shape and data graphs stay
-// distinguishable: each init takes the previous placeholder, each operation the
-// previous result. Keep the expand, which is what makes a barrier placeholder
-// appear, and keep feeding its extents from onnx.Shape -- hipsr.expand requires
-// them in the host space, and a graph input would arrive in the device space.
-// Spell out constant elements, because hipsr.constant rejects a splat with more
-// than one element.
+// A sample for testing --hipsr-pipeline, with every extent static.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt %s --onnx-dialect=modeled --hipsr-pipeline | FileCheck %s
 
-// Regions whose contents come from an operation's own recipe are matched at
-// their boundaries -- block signature, terminator, closing brace -- because
-// each recipe is pinned under
-// test/lit/Dialect/Hipsr/Transforms/PopulateShapeRegion/ and
-// test/lit/Conversion/onnx-to-hipsr/. The two trivial regions, the cast's
-// identity and the shape's constant, are matched whole.
 // CHECK-LABEL: func.func @main_graph(
 // CHECK-SAME:      %[[CTX:.+]]: !hipsr.context,
 // CHECK-SAME:      %[[A:.+]]: tensor<2x3xf16, #hipsr.mem<device>> {onnx.name = "a"},
@@ -45,9 +27,6 @@
 // CHECK-NEXT:    }
 // CHECK-NEXT:    %[[CAST:.+]] = hipsr.cast(%[[CTX]]) ins(%[[MM1]] : tensor<2x1xf16, #hipsr.mem<device>>) outs(%[[CAST_INIT]] : tensor<2x1xf32, #hipsr.mem<device>>) : tensor<2x1xf32, #hipsr.mem<device>>
 
-// onnx.Shape has no shape-graph inputs of its own: the result length is fixed by
-// the operand's rank, so the init takes no ins and its region is a constant. The
-// extents land in the host space, which is what hipsr.expand needs.
 // CHECK-NEXT:    %[[SHAPE_INIT:.+]] = hipsr.placeholder(%[[CTX]]) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<2xi64, #hipsr.mem<host>> shape_region {
 // CHECK-NEXT:      %[[RANK:.+]] = arith.constant 2 : index
 // CHECK-NEXT:      %[[SHAPE_SHAPE:.+]] = shape.from_extents %[[RANK]] : index

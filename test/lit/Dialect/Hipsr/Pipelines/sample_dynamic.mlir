@@ -2,18 +2,11 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// sample_static.mlir with the leading extent left symbolic. Where the static
-// file lets every buffer size fold to a constant, here the shape graph is the
-// only thing that knows how large each buffer is, so anything that freezes an
-// extent shows up in this file and nowhere else.
-//
-// See sample_static.mlir for the editing notes; they apply here too.
+// A sample for testing --hipsr-pipeline, with a dynamic leading extent.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt %s --onnx-dialect=modeled --hipsr-pipeline | FileCheck %s
 
-// Matched at the same granularity as sample_static.mlir: boundaries for the
-// recipe-driven regions, whole for the two trivial ones.
 // CHECK-LABEL: func.func @main_graph(
 // CHECK-SAME:      %[[CTX:.+]]: !hipsr.context,
 // CHECK-SAME:      %[[A:.+]]: tensor<?x3xf16, #hipsr.mem<device>> {onnx.name = "a"},
@@ -34,9 +27,6 @@
 // CHECK-NEXT:    }
 // CHECK-NEXT:    %[[CAST:.+]] = hipsr.cast(%[[CTX]]) ins(%[[MM1]] : tensor<?x1xf16, #hipsr.mem<device>>) outs(%[[CAST_INIT]] : tensor<?x1xf32, #hipsr.mem<device>>) : tensor<?x1xf32, #hipsr.mem<device>>
 
-// The shape init's region stays a constant even here: it sizes the extent
-// vector, which the operand's rank fixes. The dynamic extent shows up one level
-// down, inside the compute body, as a tensor.dim on the operand.
 // CHECK-NEXT:    %[[SHAPE_INIT:.+]] = hipsr.placeholder(%[[CTX]]) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<2xi64, #hipsr.mem<host>> shape_region {
 // CHECK-NEXT:      %[[RANK:.+]] = arith.constant 2 : index
 // CHECK-NEXT:      %[[SHAPE_SHAPE:.+]] = shape.from_extents %[[RANK]] : index
