@@ -17,8 +17,8 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | MatMul | hipBLASLt |
 | Gemm | hipBLASLt |
 | Transpose | Custom HIP kernel |
-| Mul | MIOpen |
-| Add | MIOpen |
+| Mul | Custom HIP broadcast kernel through rank 4; static rank > 4 when broadcast-safe packing to rank ≤ 4 is possible |
+| Add | Custom HIP broadcast kernel through rank 4; MIOpen fallback through rank 4; static rank > 4 when broadcast-safe packing to rank ≤ 4 is possible |
 | Softmax | Custom HIP kernel |
 | Sigmoid | MIOpen |
 | Tanh | MIOpen |
@@ -31,7 +31,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Exp | Custom HIP kernel |
 | Log | Custom HIP kernel |
 | Pow | Decomposed to Mul / Sqrt / Reciprocal for supported constant scalar exponents |
-| Sub | Custom HIP kernel |
+| Sub | Custom HIP kernel through rank 4; static rank > 4 when broadcast-safe packing to rank ≤ 4 is possible |
 | Cast | Custom HIP kernel |
 | CastLike | Simplified to Cast |
 | Ceil | Custom HIP kernel |
@@ -43,12 +43,12 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Abs | Custom HIP kernel |
 | Cos | Custom HIP kernel |
 | Sin | Custom HIP kernel |
-| Div | Custom HIP kernel |
+| Div | Custom HIP kernel through rank 4; static rank > 4 when broadcast-safe packing to rank ≤ 4 is possible |
 | Mod | Custom HIP kernel |
 | Sign | Custom HIP kernel |
 | Where | Custom HIP kernel |
-| Less | Custom HIP kernel |
-| Greater | Decomposed to `Less(B, A)` |
+| Less | Custom HIP kernel through rank 4; static rank > 4 when broadcast-safe packing to rank ≤ 4 is possible |
+| Greater | Decomposed to `Less(B, A)`; static rank > 4 when broadcast-safe packing to rank ≤ 4 is possible |
 | GreaterOrEqual | Decomposed to `Not(Less(A, B))` |
 | LessOrEqual | Decomposed to `Not(Less(B, A))` |
 | Min | MIOpen |
@@ -100,6 +100,12 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | GlobalAveragePool | Custom HIP kernel |
 | GlobalMaxPool | Custom HIP kernel |
 | GlobalLpPool | Custom HIP kernel |
+
+For high-rank Add, Sub, Mul, Div, Less, and Greater, convert-onnx-to-hip first
+packs static ONNX shapes to rank ≤ 4 when grouping is broadcast-safe (the same
+pre-lowering pattern-set wiring as the Gather/Reshape shape folds), then maps
+the packed operation to hip.*. Shapes that cannot be packed are mapped at their
+original rank; HIP-to-LLVM currently rejects rank > 4.
 
 ## Control flow
 

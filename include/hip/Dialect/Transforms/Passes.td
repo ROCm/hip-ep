@@ -79,8 +79,11 @@ def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
       1. Constants: onnx.Constant -> hip.constant. The two existing constant
          sweeps remain around compute-op conversion, but neither applies
          storage policy or performs file I/O.
-      2. Op mapping: onnx.{MatMul,Transpose,Mul,Softmax} -> hip.* (tensor DPS)
-      3. Cleanup: erase onnx.EntryPoint
+      2. Pre-lowering: pack static high-rank ONNX binary elementwise ops to
+         rank <= 4 when grouping is broadcast-safe (same mechanism as the
+         Gather/Reshape shape-fold pattern sets).
+      3. Op mapping: onnx.{MatMul,Transpose,Mul,Softmax} -> hip.* (tensor DPS)
+      4. Cleanup: erase onnx.EntryPoint
 
     Requires hip-add-context-arg to have run first so that !hip.context is
     available as function argument 0.

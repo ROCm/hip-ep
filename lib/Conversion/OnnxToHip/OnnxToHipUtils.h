@@ -25,7 +25,6 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
-#include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
@@ -36,8 +35,6 @@
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
-
-#include <limits>
 
 #define DEBUG_TYPE "convert-onnx-to-hip"
 
@@ -171,231 +168,14 @@ createBroadcastEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
                                     resultType.getElementType(), dynSizes));
 }
 
-/// A zero-copy rank packing for a static binary broadcast operation.
-///
-/// All values are first right-aligned to the result rank. Contiguous axis
-/// groups are collapsible only when each operand is either fully broadcast
-/// (group product 1) or fully present (group product equals the result group
-/// product). This prevents collapsing a mix of broadcast and non-broadcast
-/// axes, which would change ONNX multidirectional broadcast semantics.
-struct PackedBroadcast4D {
-  mlir::Value lhs;
-  mlir::Value rhs;
-  mlir::Value init;
-  mlir::RankedTensorType originalResultType;
-  llvm::SmallVector<mlir::ReassociationIndices> reassociation;
-};
-
-namespace detail {
-
-inline bool multiplyShapeDim(int64_t &product, int64_t dim) {
-  if (dim < 0)
-    return false;
-  if (dim != 0 && product > std::numeric_limits<int64_t>::max() / dim)
-    return false;
-  product *= dim;
-  return true;
-}
-
-inline mlir::FailureOr<mlir::Value>
-rightAlignStaticTensor(mlir::OpBuilder &builder, mlir::Location loc,
-                       mlir::Value value, int64_t targetRank) {
-  auto type = mlir::dyn_cast<mlir::RankedTensorType>(value.getType());
-  if (!type || !type.hasStaticShape() || type.getRank() == 0 ||
-      type.getRank() > targetRank)
-    return mlir::failure();
-  if (type.getRank() == targetRank)
-    return value;
-
-  int64_t leadingOnes = targetRank - type.getRank();
-  llvm::SmallVector<int64_t> alignedShape(leadingOnes, 1);
-  llvm::append_range(alignedShape, type.getShape());
-  auto alignedType = mlir::RankedTensorType::get(
-      alignedShape, type.getElementType(), type.getEncoding());
-
-  llvm::SmallVector<mlir::ReassociationIndices> reassociation;
-  reassociation.reserve(type.getRank());
-  int64_t resultDim = 0;
-  mlir::ReassociationIndices firstGroup;
-  for (int64_t i = 0; i <= leadingOnes; ++i)
-    firstGroup.push_back(resultDim++);
-  reassociation.push_back(std::move(firstGroup));
-  for (int64_t i = 1; i < type.getRank(); ++i)
-    reassociation.push_back({resultDim++});
-
-  llvm::SmallVector<mlir::OpFoldResult> outputShape;
-  outputShape.reserve(targetRank);
-  for (int64_t dim : alignedShape)
-    outputShape.push_back(builder.getIndexAttr(dim));
-  return mlir::Value(mlir::tensor::ExpandShapeOp::create(
-      builder, loc, alignedType, value, reassociation, outputShape));
-}
-
-inline mlir::FailureOr<mlir::Value>
-collapseStaticTensor(mlir::OpBuilder &builder, mlir::Location loc,
-                     mlir::Value value,
-                     llvm::ArrayRef<mlir::ReassociationIndices> reassociation) {
-  auto type = mlir::cast<mlir::RankedTensorType>(value.getType());
-  llvm::SmallVector<int64_t> packedShape;
-  packedShape.reserve(reassociation.size());
-  for (const mlir::ReassociationIndices &group : reassociation) {
-    int64_t product = 1;
-    for (int64_t dim : group)
-      if (!multiplyShapeDim(product, type.getDimSize(dim)))
-        return mlir::failure();
-    packedShape.push_back(product);
-  }
-  auto packedType = mlir::RankedTensorType::get(
-      packedShape, type.getElementType(), type.getEncoding());
-  return mlir::Value(mlir::tensor::CollapseShapeOp::create(
-      builder, loc, packedType, value, reassociation));
-}
-
-} // namespace detail
-
-/// Pack a static rank-5/6 binary broadcast into at most four dimensions.
-///
-/// Returns failure when the ranks/shapes cannot be proven safe to pack. The
-/// caller may preserve the original high-rank HIP operation so a backend with
-/// native high-rank support can lower it.
-inline mlir::FailureOr<PackedBroadcast4D>
-packStaticBroadcastTo4D(mlir::OpBuilder &builder, mlir::Location loc,
-                        mlir::Value lhs, mlir::Value rhs, mlir::Value init,
-                        mlir::RankedTensorType resultType) {
-  int64_t rank = resultType.getRank();
-  if (rank < 5 || rank > 6 || !resultType.hasStaticShape())
-    return mlir::failure();
-
-  auto lhsType = mlir::dyn_cast<mlir::RankedTensorType>(lhs.getType());
-  auto rhsType = mlir::dyn_cast<mlir::RankedTensorType>(rhs.getType());
-  if (!lhsType || !rhsType || !lhsType.hasStaticShape() ||
-      !rhsType.hasStaticShape() || lhsType.getRank() > rank ||
-      rhsType.getRank() > rank)
-    return mlir::failure();
-
-  llvm::SmallVector<int64_t> lhsShape(rank, 1);
-  llvm::SmallVector<int64_t> rhsShape(rank, 1);
-  llvm::copy(lhsType.getShape(), lhsShape.begin() + (rank - lhsType.getRank()));
-  llvm::copy(rhsType.getShape(), rhsShape.begin() + (rank - rhsType.getRank()));
-  llvm::ArrayRef<int64_t> outShape = resultType.getShape();
-
-  for (int64_t dim : llvm::seq<int64_t>(rank)) {
-    if ((lhsShape[dim] != 1 && lhsShape[dim] != outShape[dim]) ||
-        (rhsShape[dim] != 1 && rhsShape[dim] != outShape[dim]) ||
-        (outShape[dim] != lhsShape[dim] && outShape[dim] != rhsShape[dim]))
-      return mlir::failure();
-  }
-
-  llvm::SmallVector<mlir::ReassociationIndices> chosen;
-  // A rank-6 shape has only 32 contiguous partitions. Prefer four groups to
-  // avoid unnecessarily large packed extents while satisfying the 4-D ABI.
-  const uint64_t partitionCount = uint64_t{1} << (rank - 1);
-  for (int64_t wantedGroups = 4; wantedGroups >= 1 && chosen.empty();
-       --wantedGroups) {
-    for (uint64_t cuts = 0; cuts < partitionCount; ++cuts) {
-      int64_t groups = 1;
-      for (int64_t axis = 0; axis < rank - 1; ++axis)
-        groups += (cuts >> axis) & 1;
-      if (groups != wantedGroups)
-        continue;
-
-      llvm::SmallVector<mlir::ReassociationIndices> candidate;
-      candidate.push_back({});
-      for (int64_t axis = 0; axis < rank; ++axis) {
-        candidate.back().push_back(axis);
-        if (axis < rank - 1 && ((cuts >> axis) & 1))
-          candidate.push_back({});
-      }
-
-      bool valid = true;
-      for (const mlir::ReassociationIndices &group : candidate) {
-        int64_t lhsProduct = 1;
-        int64_t rhsProduct = 1;
-        int64_t outProduct = 1;
-        for (int64_t axis : group)
-          valid = valid &&
-                  detail::multiplyShapeDim(lhsProduct, lhsShape[axis]) &&
-                  detail::multiplyShapeDim(rhsProduct, rhsShape[axis]) &&
-                  detail::multiplyShapeDim(outProduct, outShape[axis]);
-        valid = valid && (lhsProduct == 1 || lhsProduct == outProduct) &&
-                (rhsProduct == 1 || rhsProduct == outProduct);
-        if (!valid)
-          break;
-      }
-      if (valid) {
-        chosen = std::move(candidate);
-        break;
-      }
-    }
-  }
-  if (chosen.empty())
-    return mlir::failure();
-
-  auto packOperand = [&](mlir::Value operand) -> mlir::FailureOr<mlir::Value> {
-    auto operandType = mlir::cast<mlir::RankedTensorType>(operand.getType());
-    // A scalar already broadcasts through the rank-<=4 lowering. Tensor
-    // expand_shape cannot express rank-0 to rank-N, so keep it as-is.
-    if (operandType.getRank() == 0)
-      return operand;
-    auto aligned = detail::rightAlignStaticTensor(builder, loc, operand, rank);
-    if (mlir::failed(aligned))
-      return mlir::failure();
-    return detail::collapseStaticTensor(builder, loc, *aligned, chosen);
-  };
-  auto packedLhs = packOperand(lhs);
-  auto packedRhs = packOperand(rhs);
-  auto packedInit = detail::collapseStaticTensor(builder, loc, init, chosen);
-  if (mlir::failed(packedLhs) || mlir::failed(packedRhs) ||
-      mlir::failed(packedInit))
-    return mlir::failure();
-
-  return PackedBroadcast4D{*packedLhs, *packedRhs, *packedInit, resultType,
-                           std::move(chosen)};
-}
-
-inline mlir::Value
-restorePackedBroadcastResult(mlir::OpBuilder &builder, mlir::Location loc,
-                             mlir::Value packedResult,
-                             const PackedBroadcast4D &packing) {
-  llvm::SmallVector<mlir::OpFoldResult> outputShape;
-  for (int64_t dim : packing.originalResultType.getShape())
-    outputShape.push_back(builder.getIndexAttr(dim));
-  return mlir::tensor::ExpandShapeOp::create(
-             builder, loc, packing.originalResultType, packedResult,
-             packing.reassociation, outputShape)
-      .getResult();
-}
-
 /// Replace \p op with binary elementwise \p HipOpTy using DPS \p init.
-///
-/// The HIP binary elementwise lowerings only carry a rank-4 broadcast
-/// descriptor, so a static rank-5/6 result is routed through collapsed views
-/// and expanded back afterwards when that preserves ONNX broadcasting.
-///
-/// If packing is not possible, preserve the original rank in the HIP dialect.
-/// The current backend will reject unsupported ranks, while a future backend
-/// with native rank-5/6 support can lower the operation without a frontend
-/// change.
 template <typename HipOpTy>
 inline mlir::LogicalResult replaceWithBinaryElementwiseHipOp(
     mlir::PatternRewriter &rewriter, mlir::Operation *op, mlir::Value context,
     mlir::Value lhs, mlir::Value rhs, mlir::Value init,
     mlir::RankedTensorType resultType) {
-  mlir::Location loc = op->getLoc();
-
-  if (resultType.getRank() > 4) {
-    auto packing =
-        packStaticBroadcastTo4D(rewriter, loc, lhs, rhs, init, resultType);
-    if (mlir::succeeded(packing)) {
-      auto hipOp = HipOpTy::create(rewriter, loc, context, packing->lhs,
-                                   packing->rhs, packing->init);
-      rewriter.replaceOp(op, restorePackedBroadcastResult(
-                                 rewriter, loc, hipOp->getResult(0), *packing));
-      return mlir::success();
-    }
-  }
-
-  auto hipOp = HipOpTy::create(rewriter, loc, context, lhs, rhs, init);
+  (void)resultType;
+  auto hipOp = HipOpTy::create(rewriter, op->getLoc(), context, lhs, rhs, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
@@ -701,6 +481,13 @@ void populatePadShapeFoldPatterns(RewritePatternSet &patterns,
 /// constants are still directly matchable. See SliceShapeFold.cpp.
 void populateSliceShapeFoldPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+
+/// Pre-lowering pattern set: rewrite static high-rank onnx.Add/Sub/Mul/Div/
+/// Less/Greater to collapse_shape -> rank-<=4 ONNX op -> expand_shape when
+/// contiguous grouping preserves multidirectional broadcast semantics.
+/// Unsafe or dynamic shapes stay at their original rank for compute conversion.
+void populatePackBroadcastTo4DPatterns(RewritePatternSet &patterns,
+                                       MLIRContext *ctx);
 
 /// Pre-lowering pattern set: collapse ORT's inlined `FastGelu` primitive
 /// chain (Pow / Mul / Sum / Tanh) back into a single

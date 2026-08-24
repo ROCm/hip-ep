@@ -40,6 +40,7 @@ add_library(OnnxToHip STATIC
   ReshapeShapeFold.cpp
   PadShapeFold.cpp
   SliceShapeFold.cpp
+  PackBroadcastTo4D.cpp
   ShapeConversion.cpp
   ReshapeConversion.cpp
   CausalConvWithStateConversion.cpp

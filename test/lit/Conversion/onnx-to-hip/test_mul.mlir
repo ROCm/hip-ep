@@ -46,10 +46,9 @@ module {
       %rhs: tensor<6x1x200x8x200xf32>)
       -> tensor<6x128x200x8x200xf32> {
     // CHECK-LABEL: func.func @mul_5d_simplebev
-    // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<6x128x200x8x200xf32>
     // CHECK: %[[PACKED_LHS:.*]] = tensor.collapse_shape %{{.*}} {{\[\[}}0], [1], [2], [3, 4]] : tensor<6x128x200x8x200xf32> into tensor<6x128x200x1600xf32>
     // CHECK: %[[PACKED_RHS:.*]] = tensor.collapse_shape %{{.*}} {{\[\[}}0], [1], [2], [3, 4]] : tensor<6x1x200x8x200xf32> into tensor<6x1x200x1600xf32>
-    // CHECK: %[[PACKED_INIT:.*]] = tensor.collapse_shape %[[INIT]] {{\[\[}}0], [1], [2], [3, 4]] : tensor<6x128x200x8x200xf32> into tensor<6x128x200x1600xf32>
+    // CHECK: %[[PACKED_INIT:.*]] = tensor.empty() : tensor<6x128x200x1600xf32>
     // CHECK: %[[PACKED_RESULT:.*]] = hip.mul({{.*}}) ins(%[[PACKED_LHS]], %[[PACKED_RHS]] : tensor<6x128x200x1600xf32>, tensor<6x1x200x1600xf32>) outs(%[[PACKED_INIT]] : tensor<6x128x200x1600xf32>)
     // CHECK: %[[RESULT:.*]] = tensor.expand_shape %[[PACKED_RESULT]] {{\[\[}}0], [1], [2], [3, 4]] output_shape [6, 128, 200, 8, 200] : tensor<6x128x200x1600xf32> into tensor<6x128x200x8x200xf32>
     %result = "onnx.Mul"(%lhs, %rhs) :

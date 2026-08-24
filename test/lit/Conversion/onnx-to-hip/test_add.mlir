@@ -48,8 +48,8 @@ module {
     return %output : tensor<1x128x32xf16>
   }
 
-  // Test 3: rank-5 Add against a scalar. hip.add only has a 4-D lowering, so
-  // the trailing axes are collapsed and the result expanded back.
+  // Test 3: rank-5 Add against a scalar. Pre-lowering packs trailing axes so
+  // compute conversion creates a rank-4 hip.add, then expands its result.
   func.func @test_add_5d_scalar(%input: tensor<1x128x200x8x200xf32>, %bias: tensor<f32>) -> tensor<1x128x200x8x200xf32> {
     // CHECK-LABEL: func.func @test_add_5d_scalar
     // CHECK: tensor.collapse_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4]] : tensor<1x128x200x8x200xf32> into tensor<1x128x200x1600xf32>
