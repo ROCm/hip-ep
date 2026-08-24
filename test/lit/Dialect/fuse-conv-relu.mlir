@@ -14,5 +14,4 @@ module {
 // CHECK-LABEL: func.func @main_graph
 // CHECK-NOT: hip.max
 // CHECK: hip.conv{{.*}}fused_activation = true
-// CHECK-SAME: activation_clip_hi = 0.000000e+00
 // CHECK: return

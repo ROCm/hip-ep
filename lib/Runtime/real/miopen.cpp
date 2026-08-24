@@ -408,11 +408,12 @@ static void disableConvFusion(ConvFusionTable &table,
   table.disabled_keys.insert(key);
 }
 
-// MIOpen Conv+Bias+Act FusionPlan is unreliable (workspace null on some solvers,
-// slower than Find API + activation on ResNet-class models). Default off: the
-// compiler still fuses conv+ReLU/ReLU6 into hip.conv, but runtime executes via
-// miopenRunSolution + applyFusedActivationFallback (~3 ms on ResNet50).
-// Opt in with HIPDNN_EP_CONV_FUSION=1 when validating FusionPlan kernels.
+// MIOpen Conv+Bias+Act FusionPlan is unreliable (workspace null on some
+// solvers, slower than Find API + activation on ResNet-class models). Default
+// off: the compiler still fuses conv+ReLU/ReLU6 into hip.conv, but runtime
+// executes via miopenRunSolution + applyFusedActivationFallback (~3 ms on
+// ResNet50). Opt in with HIPDNN_EP_CONV_FUSION=1 when validating FusionPlan
+// kernels.
 static bool convFusionPlanEnabled() {
   char buf[8];
   unsigned long n =
