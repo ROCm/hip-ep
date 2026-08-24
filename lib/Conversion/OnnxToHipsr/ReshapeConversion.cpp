@@ -5,38 +5,43 @@
 //===- ReshapeConversion.cpp - Convert onnx.Reshape to hipsr.compute -----===//
 //
 // onnx.Reshape regroups dimensions in row-major order without moving data, so
-// the hipsr.compute body is a tensor.collapse_shape and a tensor.expand_shape
-// through the 1-D form. Both bufferize to memrefs that alias their source, so
-// nothing runs on the device, and canonicalization composes the pair back into
-// one op where one can express the regroup.
+// the hipsr.compute body collapses the input to its 1-D form and expands the
+// result out of it, skipping either step when it is a no-op. Both ops bufferize
+// to memrefs that alias their source, so nothing runs on the device, and
+// canonicalization composes the pair back into one op where one can express the
+// regroup.
 //
 // The result type is inferred from the operands, not taken from the type ONNX
-// declared, which is often the weaker of the two: the target shape states the
-// dimensions, and the input states the element type and memory space the result
-// aliases. The shape region then works off the input's shape and reads no
-// memory.
+// declared, which often says less. The target shape states the dimensions, and
+// the input states the element type and memory space the result aliases. The
+// shape region then works off the input's shape and reads no memory.
 //
-// Before, with %shape the constant [-1]:
+// Before, with %shape the constant [-1, 32]:
 //   %r = "onnx.Reshape"(%x, %shape)
-//       : (tensor<?x4096xf16, #hipsr.mem<device>>, tensor<1xi64>)
-//       -> tensor<?xf16, #hipsr.mem<device>>
+//       : (tensor<?x8x4xf16, #hipsr.mem<device>>, tensor<2xi64>)
+//       -> tensor<?x?xf16, #hipsr.mem<device>>
 //
-// After, with the region types left out:
+// After, with the types inside the regions left out:
 //   %init = hipsr.placeholder(%ctx) ins(%x)
 //       {placeholder_type = #hipsr.placeholder_type<normal>}
-//       : tensor<?xf16, #hipsr.mem<device>> shape_region {
+//       : tensor<?x32xf16, #hipsr.mem<device>> shape_region {
 //   ^bb0(%x_shape):
-//     %d0 = shape.get_extent %x_shape, 0
-//     %c = arith.constant 4096 : index
-//     %n = arith.muli %d0, %c
-//     %s = shape.from_extents %n
+//     %count = shape.num_elements %x_shape
+//     %n = shape.size_to_index %count
+//     %c32 = arith.constant 32 : index
+//     %rows = arith.divui %n, %c32
+//     %cols = arith.constant 32 : index
+//     %s = shape.from_extents %rows, %cols
 //     hipsr.shape_yield %s
 //   }
 //   %r = hipsr.compute(%ctx) ins(%x) outs(%init) {
 //   ^bb0(%body_ctx, %in, %dest):
-//     %flat = tensor.collapse_shape %in [[0, 1]]
-//     hipsr.compute_yield %flat
-//   } : tensor<?xf16, #hipsr.mem<device>>
+//     %flat = tensor.collapse_shape %in [[0, 1, 2]]
+//     %c0 = arith.constant 0 : index
+//     %dim = tensor.dim %dest, %c0
+//     %out = tensor.expand_shape %flat [[0, 1]] output_shape [%dim, 32]
+//     hipsr.compute_yield %out
+//   } : tensor<?x32xf16, #hipsr.mem<device>>
 //
 //===----------------------------------------------------------------------===//
 
@@ -70,8 +75,7 @@ namespace {
 // Inferring the result type
 //===----------------------------------------------------------------------===//
 
-// The product of the dimensions a shape states, leaving out any it left
-// dynamic.
+// The product of the static dimensions, with the dynamic ones left out.
 int64_t productOfStaticDims(ArrayRef<int64_t> dims) {
   return llvm::product_of(llvm::make_filter_range(
       dims, [](int64_t dim) { return ShapedType::isStatic(dim); }));
@@ -101,7 +105,8 @@ inferResultType(onnx::ReshapeOp op, RankedTensorType inputType, Value shape,
   if (llvm::is_contained(dims, 0)) {
     return rewriter.notifyMatchFailure(op, "expected no 0 in the target shape");
   }
-  // One equation recovers one unknown; the rest would take a host read.
+  // The element count fills in one -1. ONNX allows no more than one, and a
+  // second would have no answer.
   if (llvm::count(dims, ShapedType::kDynamic) > 1) {
     return rewriter.notifyMatchFailure(
         op, "expected at most one dimension left to infer");
@@ -123,8 +128,8 @@ inferResultType(onnx::ReshapeOp op, RankedTensorType inputType, Value shape,
 
 // The dimension ONNX wrote as -1: the input's element count over the dimensions
 // the target shape does state. `shape.num_elements` is the product of every
-// extent the shape holds, so the rank stays out of it. `!shape.size` carries an
-// error state arith cannot express, so the count converts to index to divide.
+// extent, so the input's rank never comes into it. A `!shape.size` can hold an
+// error value that arith has no way to carry, so the count converts to index.
 Value buildInferredDim(OpBuilder &builder, Location loc, Value inputShape,
                        int64_t resultStaticCount) {
   assert(resultStaticCount > 0 &&
@@ -177,7 +182,8 @@ RankedTensorType flatTensorType(RankedTensorType type) {
                                type.getEncoding());
 }
 
-// Every axis in one group: the grouping that reaches the 1-D form.
+// Every axis in one group, which is the grouping a collapse or an expand takes
+// to reach the 1-D form.
 SmallVector<ReassociationIndices> flatReassociation(int64_t rank) {
   return {llvm::to_vector<2>(llvm::seq<int64_t>(0, rank))};
 }
@@ -185,10 +191,11 @@ SmallVector<ReassociationIndices> flatReassociation(int64_t rank) {
 // Every regroup goes through the 1-D form: one group collapses every input
 // axis, one expands the result out of it. A single collapse or expand would fit
 // some regroups, but `ComposeExpandOfCollapseOp` already finds those. `dest` is
-// the placeholder, so an expansion reads the dimensions it resolved.
-Value createReshape(OpBuilder &builder, Location loc, Value input,
-                    RankedTensorType inputType, RankedTensorType resultType,
-                    Value dest) {
+// the placeholder, so it carries the result type and an expansion reads the
+// dimensions it resolved.
+Value createReshape(OpBuilder &builder, Location loc, Value input, Value dest) {
+  auto inputType = cast<RankedTensorType>(input.getType());
+  auto resultType = cast<RankedTensorType>(dest.getType());
   assert(inputType != resultType &&
          "an identity reshape is dropped before it is given a body");
 
@@ -217,10 +224,9 @@ Value createReshape(OpBuilder &builder, Location loc, Value input,
 }
 
 // The compute and the destination both carry the inferred type, so the body
-// never widens back to the type ONNX declared.
-void populateComputeBody(OpBuilder &builder, ComputeOp computeOp,
-                         RankedTensorType inputType,
-                         RankedTensorType resultType) {
+// takes its types from its own arguments and never widens back to the one ONNX
+// declared.
+void populateComputeBody(OpBuilder &builder, ComputeOp computeOp) {
   OpBuilder::InsertionGuard guard(builder);
   Location loc = computeOp.getLoc();
 
@@ -231,8 +237,8 @@ void populateComputeBody(OpBuilder &builder, ComputeOp computeOp,
       builder.createBlock(&computeOp.getBody(), {}, argTypes, argLocs);
   builder.setInsertionPointToStart(body);
 
-  Value reshaped = createReshape(builder, loc, body->getArgument(1), inputType,
-                                 resultType, body->getArguments().back());
+  Value reshaped = createReshape(builder, loc, body->getArgument(1),
+                                 body->getArguments().back());
   ComputeYieldOp::create(builder, loc, ValueRange{reshaped});
 }
 
@@ -267,8 +273,8 @@ struct ReshapeToHipsr : public OpConversionPattern<onnx::ReshapeOp> {
     }
     RankedTensorType resultType = *inferred;
 
-    // An identity reshape needs no destination. Inferring first also catches
-    // the ones only the target shape operand reveals to be identities.
+    // An identity reshape needs no destination. Inferring the type first also
+    // catches the identities the declared type hides.
     if (inputType == resultType) {
       rewriter.replaceOp(op, input);
       return success();
@@ -292,7 +298,7 @@ struct ReshapeToHipsr : public OpConversionPattern<onnx::ReshapeOp> {
     auto computeOp =
         ComputeOp::create(rewriter, loc, TypeRange{resultType}, *ctx,
                           ValueRange{input}, ValueRange{init.getResult(0)});
-    populateComputeBody(rewriter, computeOp, inputType, resultType);
+    populateComputeBody(rewriter, computeOp);
     rewriter.replaceOp(op, computeOp.getResult(0));
     return success();
   }

@@ -2,9 +2,9 @@
 // Licensed under the MIT License.
 
 //===----------------------------------------------------------------------===//
-// onnx.Reshape becomes a hipsr.compute holding a tensor.collapse_shape and a
-// tensor.expand_shape, with the placeholder's shape region filled in as the
-// body is built. Rejected forms are in reshape-invalid.mlir.
+// onnx.Reshape becomes a hipsr.compute holding a tensor.collapse_shape, a
+// tensor.expand_shape, or both, with a placeholder whose shape region resolves
+// the destination. Rejected forms are in reshape-invalid.mlir.
 //
 // The result type is inferred from the operands: a target shape operand that
 // folds to a constant states the dimensions, and the input states the element
@@ -13,10 +13,10 @@
 
 // RUN: hip-mlir-opt %s --onnx-dialect=modeled --split-input-file -allow-unregistered-dialect -convert-onnx-to-hipsr | FileCheck %s
 
-// The reshape an embedding graph flattens its image features with: a constant
-// [-1] against a batch that stays symbolic. Nothing else is stated, so the
-// inferred dimension is the whole element count over a divisor of 1, and the
-// body stops at the collapse that already reaches the 1-D result.
+// How an embedding graph flattens its image features: a constant [-1] against
+// a batch that stays dynamic. Nothing else is stated, so the inferred dimension
+// is the whole element count over a divisor of 1, and the body stops at the
+// collapse that already reaches the 1-D result.
 // CHECK-LABEL: func.func @flatten_dynamic(
 // CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,
 // CHECK-SAME:    %[[INPUT:.*]]: tensor<?x4096xf16, #hipsr.mem<device>>) -> tensor<?xf16, #hipsr.mem<device>> {
@@ -47,10 +47,10 @@ func.func @flatten_dynamic(%ctx: !hipsr.context,
 
 // -----
 
-// Expanding splits one input dimension over a group, which the input type
-// cannot pin down. The destination already carries what the shape region
-// resolved, so output_shape reads it off there rather than dividing again. A
-// rank-1 input is already flat, so no collapse comes first.
+// Expanding splits the flat form over several dimensions, and the input type
+// does not say what they are. The destination already carries what the shape
+// region resolved, so output_shape reads them off there rather than dividing
+// again. A rank-1 input is already flat, so no collapse comes first.
 // CHECK-LABEL: func.func @expand_dynamic(
 // CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,
 // CHECK-SAME:    %[[INPUT:.*]]: tensor<?xf16, #hipsr.mem<device>>) -> tensor<?x4096xf16, #hipsr.mem<device>> {
@@ -85,10 +85,10 @@ func.func @expand_dynamic(%ctx: !hipsr.context,
 // -----
 
 // The input leaves the element count dynamic while the target shape names every
-// dimension. Neither reshape op carries that refinement across a group: a
+// dimension. Neither reshape op can make that flat dimension static: a
 // collapsed dimension stays dynamic with its group, and an expansion needs a
-// static source to reach a static result. A cast between the two bridges them.
-// The destination is static, so the expansion states its dimensions outright.
+// static source to give a static result. A cast in between does it. The
+// destination is static, so the expansion states its dimensions outright.
 // CHECK-LABEL: func.func @cast_and_expand(
 // CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,
 // CHECK-SAME:    %[[INPUT:.*]]: tensor<?x4xi64, #hipsr.mem<device>>) -> tensor<6x4xi64, #hipsr.mem<device>> {
@@ -119,10 +119,9 @@ func.func @cast_and_expand(%ctx: !hipsr.context,
 
 // -----
 
-// The identity check runs on the inferred type, so it catches the reshapes only
-// the target shape reveals to be identities: [-1, 32] against a rank-2 input
-// names the dimensions back to the input's own. The reshape is replaced by its
-// input, leaving no destination.
+// The identity check runs on the inferred type, so the declared type cannot
+// hide one: [-1, 32] against a rank-2 input names the input's own dimensions
+// back. The reshape is replaced by its input, and no destination is built.
 // CHECK-LABEL: func.func @refines_to_input(
 // CHECK-SAME:    %{{.*}}: !hipsr.context,
 // CHECK-SAME:    %[[INPUT:.*]]: tensor<?x32xf16, #hipsr.mem<device>>) -> tensor<?x32xf16, #hipsr.mem<device>> {
@@ -181,12 +180,12 @@ func.func @collapse_and_expand(%ctx: !hipsr.context,
 
 // -----
 
-// The same target shape against an input that states its element count. The -1
-// is resolved while the type is inferred, so nothing about the destination is
-// left to runtime: the shape region is constants alone, the expansion states
-// its dimensions rather than reading them back, and the count never reaches
-// the arithmetic. Neither dimension comes from the type ONNX declared -- the
-// operand states the 4 and the input's count gives the 6.
+// The same [-1, N] form as above, but against an input that states its element
+// count. The -1 is resolved while the type is inferred, so nothing about the
+// destination is left to runtime: the shape region is constants alone, and the
+// expansion states its dimensions rather than reading them back. Neither
+// dimension comes from the type ONNX declared -- the operand states the 4 and
+// the input's count gives the 6.
 // CHECK-LABEL: func.func @static_infers_dim(
 // CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,
 // CHECK-SAME:    %[[INPUT:.*]]: tensor<2x3x4xf16, #hipsr.mem<device>>) -> tensor<6x4xf16, #hipsr.mem<device>> {

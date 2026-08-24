@@ -12,9 +12,9 @@
 
 // RUN: hip-mlir-opt --onnx-dialect=modeled --convert-onnx-to-hipsr --split-input-file --verify-diagnostics %s
 
-// Two -1 entries are one equation with two unknowns, and the element count
-// recovers one. @collapse_and_expand in reshape.mlir is the same reshape with
-// the second dimension named.
+// The element count fills in one -1, so a second has no answer.
+// @collapse_and_expand in reshape.mlir is the same reshape with the second
+// dimension named.
 func.func @two_inferred_dims(%ctx: !hipsr.context,
                              %input: tensor<?x8x4xf16>) -> tensor<?x?xf16> {
   %shape = "onnx.Constant"() {value = dense<-1> : tensor<2xi64>}
