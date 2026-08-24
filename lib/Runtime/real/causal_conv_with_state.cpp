@@ -202,14 +202,12 @@ template <typename T> static inline T silu(T x) {
   return x / (static_cast<T>(1) + std::exp(-x));
 }
 
-int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
-                                const void *input, const void *weight,
-                                const void *bias, const void *past_state,
-                                void *output, void *present_state,
-                                int64_t batch_size, int64_t channels,
-                                int64_t seq_len, int64_t kernel_size,
-                                int64_t ndim, int64_t activation,
-                                int64_t element_size_bytes) {
+int wrap_causal_conv_with_state(
+    RuntimeState *state, int op_state_slot, const void *input,
+    const void *weight, const void *bias, const void *past_state, void *output,
+    void *present_state, int64_t batch_size, int64_t channels, int64_t seq_len,
+    int64_t kernel_size, int64_t ndim, int64_t activation,
+    int64_t element_size_bytes, int64_t channels_last) {
   // ---- Cheap, configuration-level validation FIRST. None of these touch the
   // device, so do them before any allocation or descriptor work to avoid
   // ad-hoc cleanup paths (and to keep the OP_PROFILE scope tight around the
@@ -257,19 +255,20 @@ int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
       "causal_conv",
       [&] {
         char b[64];
-        snprintf(b, sizeof(b), "%lldx%lldx%lld,k=%lld", (long long)batch_size,
+        snprintf(b, sizeof(b), "%lldx%lldx%lld,k=%lld%s", (long long)batch_size,
                  (long long)channels, (long long)seq_len,
-                 (long long)kernel_size);
+                 (long long)kernel_size, channels_last ? ",nlc" : "");
         return std::string(b);
       },
       state);
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_causal_conv_with_state: batch=%lld, "
                     "channels=%lld, seq_len=%lld, kernel=%lld, ndim=%lld, "
-                    "activation=%lld, elem_size=%lld\n",
+                    "activation=%lld, elem_size=%lld, channels_last=%lld\n",
                     (long long)batch_size, (long long)channels,
                     (long long)seq_len, (long long)kernel_size, (long long)ndim,
-                    (long long)activation, (long long)element_size_bytes);
+                    (long long)activation, (long long)element_size_bytes,
+                    (long long)channels_last);
 
   // ---- Fast path: single-step decode (seq_len==1, k<=8) -------------------
   // The MIOpen path requires building a "virtual" buffer of shape
@@ -289,6 +288,11 @@ int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
   // activation in {0=none, 1=SiLU}, fp16/fp32). Anything outside falls
   // through to the MIOpen path below, which handles prefill and any odd
   // hybrid shapes correctly.
+  //
+  // channels_last needs no separate kernel here: at seq_len==1 the flat index
+  // of element (b, c) is b*channels + c under both layouts, since the permuted
+  // axis has extent 1. The decode kernel is therefore layout-agnostic by
+  // construction rather than by accident.
   if (seq_len == 1 && kernel_size >= 1 && kernel_size <= 8 &&
       (activation == 0 || activation == 1) &&
       (element_size_bytes == 2 || element_size_bytes == 4)) {
@@ -313,23 +317,53 @@ int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
   // largest text-prefill op -- with one launch. Same supported envelope as
   // the decode fast path (k in [1,8], activation none/SiLU, fp16/fp32);
   // anything else falls through to MIOpen below.
+  //
+  // channels_last takes the _nlc kernel, which reads and writes (B, L, C)
+  // directly instead of paying the Transpose pair the channels-first kernel
+  // needs to be spliced into a channels-last graph.
   if (seq_len > 1 && kernel_size >= 1 && kernel_size <= 8 &&
       (activation == 0 || activation == 1) &&
       (element_size_bytes == 2 || element_size_bytes == 4)) {
-    int rc =
-        hip_causal_conv_prefill(stream, input, weight, bias, past_state, output,
-                                present_state, batch_size, channels, seq_len,
-                                kernel_size, activation, element_size_bytes);
+    int rc = channels_last
+                 ? hip_causal_conv_prefill_nlc(
+                       stream, input, weight, bias, past_state, output,
+                       present_state, batch_size, channels, seq_len,
+                       kernel_size, activation, element_size_bytes)
+                 : hip_causal_conv_prefill(
+                       stream, input, weight, bias, past_state, output,
+                       present_state, batch_size, channels, seq_len,
+                       kernel_size, activation, element_size_bytes);
     if (rc != 0) {
       fprintf(stderr,
-              "wrap_causal_conv_with_state: hip_causal_conv_prefill failed "
+              "wrap_causal_conv_with_state: hip_causal_conv_prefill%s failed "
               "(%d)\n",
-              rc);
+              channels_last ? "_nlc" : "", rc);
       return -1;
     }
     RUNTIME_DEBUG_LOG(
-        "[REAL] wrap_causal_conv_with_state: completed via fast prefill\n");
+        "[REAL] wrap_causal_conv_with_state: completed via fast prefill%s\n",
+        channels_last ? " (nlc)" : "");
     return 0;
+  }
+
+  // Everything below is MIOpen, and MIOpen is channels-first: the 4D tensor
+  // descriptors are (B, C, 1, virtual_len) and the pitched copies that build
+  // the virtual buffer assume each (b, c) plane is contiguous along the
+  // sequence axis. Reinterpreting a (B, L, C) buffer through them produces
+  // plausible-looking garbage rather than an error, so refuse instead. Reaching
+  // here with channels_last means the shape escaped the fast-path envelope
+  // above (k > 8, an activation other than none/SiLU, or an element size that
+  // is neither 2 nor 4 bytes); the fold that sets the attribute should not have
+  // fired on such a shape.
+  if (channels_last) {
+    fprintf(stderr,
+            "wrap_causal_conv_with_state: channels_last is only supported on "
+            "the custom-kernel fast paths, but this shape needs the "
+            "channels-first MIOpen path (k=%lld, activation=%lld, "
+            "elem_size=%lld)\n",
+            (long long)kernel_size, (long long)activation,
+            (long long)element_size_bytes);
+    return -1;
   }
 
   const int64_t state_len = kernel_size - 1; // k-1
