@@ -113,6 +113,21 @@ OpOperand *getDestinationOf(ComputeOp computeOp, unsigned resultIndex) {
   return &computeOp->getOpOperand(outputs.getBeginOperandIndex() + resultIndex);
 }
 
+BlockArgument traceViewToBlockArg(Value value, Block *body) {
+  while (value) {
+    if (auto blockArg = dyn_cast<BlockArgument>(value))
+      return blockArg.getOwner() == body ? blockArg : BlockArgument();
+    Operation *def = value.getDefiningOp();
+    if (!def || !isa<tensor::CollapseShapeOp, tensor::ExpandShapeOp,
+                     tensor::CastOp, memref::CollapseShapeOp,
+                     memref::ExpandShapeOp, memref::CastOp,
+                     bufferization::ToTensorOp, bufferization::ToBufferOp>(def))
+      return {};
+    value = def->getOperand(0);
+  }
+  return {};
+}
+
 // Returns true if the buffer underlying `value` or any of its aliases is
 // written.
 bool isValueWritten(Value value, const AnalysisState &state) {
@@ -195,8 +210,7 @@ struct ComputeOpBufferization
     return aliases;
   }
 
-  bool bufferizesToAllocation(Operation *op, Value value,
-                              const AnalysisState &) const {
+  bool bufferizesToAllocation(Operation *op, Value value) const {
     // hipsr.compute reuses buffers from its operands; it never allocates.
     // This allows the analysis to unify equivalence classes between the result
     // and the aliased input, enabling tensor.empty elimination.
@@ -242,9 +256,25 @@ struct ComputeOpBufferization
       }
     }
 
+    // When a result is only a view of an input, the destination names the same
+    // buffer as that input, so reuse the input buffer instead of allocating a
+    // separate destination init. The now-unused init tensor.empty is erased
+    // during its own bufferization, so the domain allocates one buffer fewer.
+    //
+    // Before: %r = compute ins(%in) outs(%init) { yield collapse(%in_arg) }
+    // After:  %r = compute ins(%in) outs(%in)   { yield collapse(%in_arg) }
+
+    unsigned numInputs = computeOp.getInputs().size();
     SmallVector<Value> bufferizedOutputs;
-    for (Value output : computeOp.getOutputs()) {
+    for (auto [outputIndex, output] : llvm::enumerate(computeOp.getOutputs())) {
       if (isa<TensorType>(output.getType())) {
+        Value yielded = getYieldOp(computeOp)->getOperand(outputIndex);
+        BlockArgument backing = traceViewToBlockArg(yielded, oldBody);
+        if (backing && backing.getArgNumber() >= 1 &&
+            backing.getArgNumber() <= numInputs) {
+          bufferizedOutputs.push_back(bufferizedInputs[backing.getArgNumber() - 1]);
+          continue;
+        }
         FailureOr<Value> buffer = getBuffer(rewriter, output, options, state);
         if (failed(buffer))
           return failure();
