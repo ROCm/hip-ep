@@ -2,19 +2,16 @@
 // Licensed under the MIT License.
 
 //===----------------------------------------------------------------------===//
-// onnx.Reshape forms the conversion rejects.
-//
-// Each case folds its target shape, so the rejection under test is the only
-// thing standing in the way. Forms the conversion has yet to implement are not
-// here: those are marked with TODOs at the checks that turn them away, and a
-// case built on one would have to go when the feature lands.
+// onnx.Reshape forms the conversion rejects for good. Each case folds its
+// target shape, so the rejection under test is the only thing in the way.
+// Forms that are merely unimplemented are not here: those are marked with TODOs
+// at the checks that turn them away, and a case built on one would have to go
+// when the feature lands.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --onnx-dialect=modeled --convert-onnx-to-hipsr --split-input-file --verify-diagnostics %s
 
 // The element count fills in one -1, so a second has no answer.
-// @collapse_and_expand in reshape.mlir is the same reshape with the second
-// dimension named.
 func.func @two_inferred_dims(%ctx: !hipsr.context,
                              %input: tensor<?x8x4xf16>) -> tensor<?x?xf16> {
   %shape = "onnx.Constant"() {value = dense<-1> : tensor<2xi64>}

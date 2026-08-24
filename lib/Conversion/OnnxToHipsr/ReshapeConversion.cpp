@@ -5,43 +5,37 @@
 //===- ReshapeConversion.cpp - Convert onnx.Reshape to hipsr.compute -----===//
 //
 // onnx.Reshape regroups dimensions in row-major order without moving data, so
-// the hipsr.compute body collapses the input to its 1-D form and expands the
-// result out of it, skipping either step when it is a no-op. Both ops bufferize
-// to memrefs that alias their source, so nothing runs on the device, and
-// canonicalization composes the pair back into one op where one can express the
-// regroup.
+// the body collapses the input to its 1-D form and expands the result out of
+// it, skipping either step when it is a no-op. Both bufferize to memrefs that
+// alias their source, so nothing runs on the device, and canonicalization
+// composes the pair back where one op can express the regroup.
 //
-// The result type is inferred from the operands, not taken from the type ONNX
-// declared, which often says less. The target shape states the dimensions, and
-// the input states the element type and memory space the result aliases. The
-// shape region then works off the input's shape and reads no memory.
+// The result type comes from the operands, not the type ONNX declared: the
+// target shape states the dimensions, the input gives the element type and
+// memory space. The shape region reads no memory.
 //
-// Before, with %shape the constant [-1, 32]:
+// Before, with %shape the constant [-1]:
 //   %r = "onnx.Reshape"(%x, %shape)
-//       : (tensor<?x8x4xf16, #hipsr.mem<device>>, tensor<2xi64>)
-//       -> tensor<?x?xf16, #hipsr.mem<device>>
+//       : (tensor<?x4096xf16, #hipsr.mem<device>>, tensor<1xi64>)
+//       -> tensor<?xf16, #hipsr.mem<device>>
 //
-// After, with the types inside the regions left out:
+// After, with region types left out and only the -1 stated, so a divisor of 1:
 //   %init = hipsr.placeholder(%ctx) ins(%x)
 //       {placeholder_type = #hipsr.placeholder_type<normal>}
-//       : tensor<?x32xf16, #hipsr.mem<device>> shape_region {
+//       : tensor<?xf16, #hipsr.mem<device>> shape_region {
 //   ^bb0(%x_shape):
 //     %count = shape.num_elements %x_shape
 //     %n = shape.size_to_index %count
-//     %c32 = arith.constant 32 : index
-//     %rows = arith.divui %n, %c32
-//     %cols = arith.constant 32 : index
-//     %s = shape.from_extents %rows, %cols
+//     %c1 = arith.constant 1 : index
+//     %d = arith.divui %n, %c1
+//     %s = shape.from_extents %d
 //     hipsr.shape_yield %s
 //   }
 //   %r = hipsr.compute(%ctx) ins(%x) outs(%init) {
 //   ^bb0(%body_ctx, %in, %dest):
-//     %flat = tensor.collapse_shape %in [[0, 1, 2]]
-//     %c0 = arith.constant 0 : index
-//     %dim = tensor.dim %dest, %c0
-//     %out = tensor.expand_shape %flat [[0, 1]] output_shape [%dim, 32]
-//     hipsr.compute_yield %out
-//   } : tensor<?x32xf16, #hipsr.mem<device>>
+//     %flat = tensor.collapse_shape %in [[0, 1]]
+//     hipsr.compute_yield %flat
+//   } : tensor<?xf16, #hipsr.mem<device>>
 //
 //===----------------------------------------------------------------------===//
 
@@ -81,9 +75,8 @@ int64_t productOfStaticDims(ArrayRef<int64_t> dims) {
       dims, [](int64_t dim) { return ShapedType::isStatic(dim); }));
 }
 
-// The result type, read off the operands: the target shape states the
-// dimensions, the one written as -1 comes from the preserved element count, and
-// the input gives the element type and memory space the result aliases.
+// The result type: the target shape states the dimensions, the -1 comes from
+// the element count, and the input gives the element type and memory space.
 FailureOr<RankedTensorType>
 inferResultType(onnx::ReshapeOp op, RankedTensorType inputType, Value shape,
                 ConversionPatternRewriter &rewriter) {
@@ -99,21 +92,18 @@ inferResultType(onnx::ReshapeOp op, RankedTensorType inputType, Value shape,
         return value < 0 ? ShapedType::kDynamic : value;
       });
 
-  // The -1 is resolved below from the element count, but a 0 is not: with
-  // allowzero clear it copies the input's dimension at that axis instead.
+  // A 0 copies the input's dimension at that axis when allowzero is clear.
   // TODO: Resolve a 0 too.
   if (llvm::is_contained(dims, 0)) {
     return rewriter.notifyMatchFailure(op, "expected no 0 in the target shape");
   }
-  // The element count fills in one -1. ONNX allows no more than one, and a
-  // second would have no answer.
+  // The element count fills in one -1; a second would have no answer.
   if (llvm::count(dims, ShapedType::kDynamic) > 1) {
     return rewriter.notifyMatchFailure(
         op, "expected at most one dimension left to infer");
   }
 
-  // The -1 stays dynamic unless the input pins the element count down. A
-  // reshape preserves that count, so the division below comes out even.
+  // A reshape preserves the element count, so this division comes out even.
   if (auto *unknown = llvm::find(dims, ShapedType::kDynamic);
       unknown != dims.end() && inputType.hasStaticShape()) {
     *unknown = inputType.getNumElements() / productOfStaticDims(dims);
@@ -126,10 +116,9 @@ inferResultType(onnx::ReshapeOp op, RankedTensorType inputType, Value shape,
 // The destination
 //===----------------------------------------------------------------------===//
 
-// The dimension ONNX wrote as -1: the input's element count over the dimensions
-// the target shape does state. `shape.num_elements` is the product of every
-// extent, so the input's rank never comes into it. A `!shape.size` can hold an
-// error value that arith has no way to carry, so the count converts to index.
+// The dimension ONNX wrote as -1: the input's element count over what the
+// target shape does state. `shape.num_elements` keeps the rank out of it, and
+// the `!shape.size` it returns converts to index because it can hold an error.
 Value buildInferredDim(OpBuilder &builder, Location loc, Value inputShape,
                        int64_t resultStaticCount) {
   assert(resultStaticCount > 0 &&
@@ -173,8 +162,7 @@ void populateShapeRegion(OpBuilder &builder, PlaceholderOp placeholder,
 // The compute body
 //===----------------------------------------------------------------------===//
 
-// The 1-D form `type` flattens to, dynamic when the element count is not a
-// compile-time constant.
+// The 1-D form `type` flattens to, dynamic unless the element count is known.
 RankedTensorType flatTensorType(RankedTensorType type) {
   int64_t count =
       type.hasStaticShape() ? type.getNumElements() : ShapedType::kDynamic;
@@ -182,17 +170,14 @@ RankedTensorType flatTensorType(RankedTensorType type) {
                                type.getEncoding());
 }
 
-// Every axis in one group, which is the grouping a collapse or an expand takes
-// to reach the 1-D form.
+// One group holding every axis, which is what reaches the 1-D form.
 SmallVector<ReassociationIndices> flatReassociation(int64_t rank) {
   return {llvm::to_vector<2>(llvm::seq<int64_t>(0, rank))};
 }
 
-// Every regroup goes through the 1-D form: one group collapses every input
-// axis, one expands the result out of it. A single collapse or expand would fit
-// some regroups, but `ComposeExpandOfCollapseOp` already finds those. `dest` is
-// the placeholder, so it carries the result type and an expansion reads the
-// dimensions it resolved.
+// Every regroup goes through the 1-D form. A single op would fit some of them,
+// but `ComposeExpandOfCollapseOp` already finds those. `dest` is the
+// placeholder, so it carries the result type and the sizes an expand needs.
 Value createReshape(OpBuilder &builder, Location loc, Value input, Value dest) {
   auto inputType = cast<RankedTensorType>(input.getType());
   auto resultType = cast<RankedTensorType>(dest.getType());
@@ -223,9 +208,8 @@ Value createReshape(OpBuilder &builder, Location loc, Value input, Value dest) {
       .getResult();
 }
 
-// The compute and the destination both carry the inferred type, so the body
-// takes its types from its own arguments and never widens back to the one ONNX
-// declared.
+// The compute and the destination carry the inferred type, so the body takes
+// its types from its own arguments and never widens back to the declared one.
 void populateComputeBody(OpBuilder &builder, ComputeOp computeOp) {
   OpBuilder::InsertionGuard guard(builder);
   Location loc = computeOp.getLoc();
@@ -248,8 +232,7 @@ void populateComputeBody(OpBuilder &builder, ComputeOp computeOp) {
 
 struct ReshapeToHipsr : public OpConversionPattern<onnx::ReshapeOp> {
   // The converter goes unused: the result type depends on the target shape
-  // operand, which a type conversion never sees. Taken so the pass adds every
-  // pattern the same way.
+  // operand, which a type conversion never sees. Taken for a uniform setup.
   ReshapeToHipsr(const TypeConverter &, MLIRContext *ctx)
       : OpConversionPattern(ctx) {}
 
@@ -284,11 +267,9 @@ struct ReshapeToHipsr : public OpConversionPattern<onnx::ReshapeOp> {
       return failure();
     }
 
-    // The region builds the dimensions out of constants and the input's shape,
-    // so a normal placeholder is enough.
-    // TODO: A target shape that only holds its value at runtime would have the
-    // region read that operand instead, and a host read takes a barrier
-    // placeholder.
+    // The region needs only constants and the input's shape, so a normal
+    // placeholder is enough.
+    // TODO: A runtime-only target shape would need a host read, so a barrier.
     Location loc = op.getLoc();
     auto init =
         PlaceholderOp::create(rewriter, loc, TypeRange{resultType}, *ctx,
