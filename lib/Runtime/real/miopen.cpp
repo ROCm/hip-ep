@@ -408,34 +408,18 @@ static void disableConvFusion(ConvFusionTable &table,
   table.disabled_keys.insert(key);
 }
 
-// MIOpen Conv+Bias+Act FusionPlan is unreliable on gfx115x (Strix Halo).
-// Default: skip FusionPlan there and use Find API conv + ClippedReLU instead.
-// Override: HIPDNN_EP_CONV_FUSION=1 force enable, =0 force disable.
+// MIOpen Conv+Bias+Act FusionPlan is unreliable (workspace null on some solvers,
+// slower than Find API + activation on ResNet-class models). Default off: the
+// compiler still fuses conv+ReLU/ReLU6 into hip.conv, but runtime executes via
+// miopenRunSolution + applyFusedActivationFallback (~3 ms on ResNet50).
+// Opt in with HIPDNN_EP_CONV_FUSION=1 when validating FusionPlan kernels.
 static bool convFusionPlanEnabled() {
   char buf[8];
   unsigned long n =
       hipdnn_ep::read_env("HIPDNN_EP_CONV_FUSION", buf, sizeof(buf));
-  if (n > 0) {
-    if (buf[0] == '0')
-      return false;
-    if (buf[0] >= '1')
-      return true;
-  }
-
-  static int cached = -1; // 0 = disabled, 1 = enabled
-  if (cached >= 0)
-    return cached != 0;
-
-  hipDeviceProp_t prop{};
-  int dev = 0;
-  hipGetDevice(&dev);
-  if (hipGetDeviceProperties(&prop, dev) != hipSuccess ||
-      prop.gcnArchName[0] == '\0') {
-    cached = 1;
-    return true;
-  }
-  cached = (strncmp(prop.gcnArchName, "gfx115", 6) == 0) ? 0 : 1;
-  return cached != 0;
+  if (n > 0)
+    return buf[0] >= '1';
+  return false;
 }
 
 static void logConvFusionPlanSkipOnce() {
@@ -444,8 +428,7 @@ static void logConvFusionPlanSkipOnce() {
     return;
   logged = true;
   RUNTIME_DEBUG_LOG(
-      "[CONV] FusionPlan skipped (gfx115x or HIPDNN_EP_CONV_FUSION=0), "
-      "using Find+activ fallback\n");
+      "[CONV] FusionPlan disabled (default), using Find+activ fallback\n");
 }
 
 static const ConvFusionTableEntry *
