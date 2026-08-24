@@ -569,6 +569,7 @@ jobs:
             cp $THEROCK_DIR/bin/$pat staging/bin/
           done
           cp -r "$THEROCK_DIR/bin/hipblaslt" staging/bin/
+          cp -r "$THEROCK_DIR/bin/rocblas" staging/bin/
           for pat in 'amdhip64*.lib' MIOpen.lib hipblaslt.lib; do
             cp $THEROCK_DIR/lib/$pat staging/lib/
           done
