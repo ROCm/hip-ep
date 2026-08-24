@@ -8,6 +8,7 @@
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Pass/PassRegistry.h"
 
 void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
@@ -16,6 +17,7 @@ void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
   // conversion pattern reads the runtime context out of function argument 0.
   pm.addPass(createAddContextArgPass());
   pm.addPass(createConvertOnnxToHipsrPass());
+  pm.addNestedPass<func::FuncOp>(createPopulateShapeRegionPass());
 }
 
 void mlir::hipsr::registerHipsrPipelines() {

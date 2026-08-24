@@ -17,16 +17,22 @@
 
 // RUN: hip-mlir-opt %s --onnx-dialect=modeled --hipsr-pipeline | FileCheck %s
 
-// The placeholder's shape region is still empty here, and the CHECK-NEXT chain
-// is what says so: a populated region prints as extra lines, which would leave
-// the matmul off the line the chain expects it on.
+// The shape region's body is matched only at its boundaries -- the block
+// signature on the way in, the hipsr.shape_yield terminator and the brace that
+// closes the region on the way out. What the region computes belongs to the
+// operation's shape recipe, and MatMul's is already pinned line by line in
+// test/lit/Dialect/Hipsr/Transforms/PopulateShapeRegion/matmul.mlir. Restating
+// it here would make one recipe change break two tests for the same reason.
 // CHECK-LABEL: func.func @main_graph(
 // CHECK-SAME:      %[[CTX:.+]]: !hipsr.context,
 // CHECK-SAME:      %[[A:.+]]: tensor<2x3xf16, #hipsr.mem<device>> {onnx.name = "a"})
 // CHECK-SAME:      -> (tensor<2x4xf16, #hipsr.mem<device>> {onnx.name = "y"})
 // CHECK-SAME:      attributes {onnx.graph.name = "main_graph"} {
 // CHECK-NEXT:    %[[B:.+]] = hipsr.constant {value = dense<{{.*}}> : tensor<3x4xf16>} : tensor<3x4xf16, #hipsr.mem<device>>
-// CHECK-NEXT:    %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<2x3xf16, #hipsr.mem<device>>, tensor<3x4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<2x4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:    %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<2x3xf16, #hipsr.mem<device>>, tensor<3x4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<2x4xf16, #hipsr.mem<device>> shape_region {
+// CHECK-NEXT:    ^bb0(%{{.+}}: !shape.shape, %{{.+}}: !shape.shape):
+// CHECK:           hipsr.shape_yield %{{.+}} : !shape.shape
+// CHECK-NEXT:    }
 // CHECK-NEXT:    %[[Y:.+]] = hipsr.matmul(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<2x3xf16, #hipsr.mem<device>>, tensor<3x4xf16, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<2x4xf16, #hipsr.mem<device>>) : tensor<2x4xf16, #hipsr.mem<device>>
 // CHECK-NEXT:    return %[[Y]] : tensor<2x4xf16, #hipsr.mem<device>>
 // CHECK-NEXT:  }
