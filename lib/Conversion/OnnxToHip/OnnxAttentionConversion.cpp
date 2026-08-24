@@ -74,8 +74,8 @@ namespace {
 /// After:
 ///   %cur       = tensor.dim %q, %c1        // current KV tokens (== query seq)
 ///   %past      = tensor.dim %past_k, %c2   // past buffer EXTENT (see below)
-///   %tot       = tensor.dim %mask, %c3     // valid total KV, else %past + %cur
-///   %cap       = arith.maxsi %past, %tot   // present buffer capacity
+///   %tot       = tensor.dim %mask, %c3     // valid total KV, else %past +
+///   %cur %cap       = arith.maxsi %past, %tot   // present buffer capacity
 ///                                          // (just %past under
 ///                                          //  HIPDNN_EP_KV_SHARE_BUFFER)
 ///   %seqlens_k = tensor.from_elements (%tot - 1)  : tensor<1xi32>
@@ -332,6 +332,41 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
     return transOp->getResult(0);
   };
 
+  // Whether present and past are one allocation. Read here, ahead of any IR
+  // construction, because the check below has to reject before the pattern
+  // starts building: a pattern that creates ops and then returns failure leaves
+  // the greedy driver holding orphaned IR. See the capacity comment further
+  // down for what the flag means and why the graph alone cannot supply it.
+  const bool kvShareBuffer =
+      pastKey && hipdnn_ep::env_enabled("HIPDNN_EP_KV_SHARE_BUFFER");
+
+  // A static present seq dim short-circuits the capacity computation entirely:
+  // total_seq_len becomes a constant read off the result type and
+  // buildPresentInit skips the dim, so presentCapIdx -- and with it the
+  // shared-buffer rule -- is never consulted. Harmless when the graph and the
+  // buffer agree, silently wrong when they do not, which is precisely the case
+  // the flag exists for.
+  //
+  // Rewriting the type is not an option: replaceOp hands the result straight to
+  // the original op's users, and in a real graph present is a function result
+  // whose signature still declares the old extent. A graph that pins present to
+  // a length its shared past buffer does not have is inconsistent at the
+  // source, so report it rather than quietly emitting the wrong capacity.
+  if (kvShareBuffer && numResults >= 2) {
+    auto presentTy =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(1).getType());
+    auto pastTy = mlir::dyn_cast<mlir::RankedTensorType>(pastKey.getType());
+    if (presentTy && presentTy.getRank() == 4 && !presentTy.isDynamicDim(2)) {
+      const int64_t pastExtent =
+          (pastTy && pastTy.getRank() == 4) ? pastTy.getDimSize(2) : kDyn;
+      if (pastExtent != presentTy.getDimSize(2))
+        return rewriter.notifyMatchFailure(
+            op, "HIPDNN_EP_KV_SHARE_BUFFER: present pins a seq extent the "
+                "shared past buffer does not have; they are one allocation, so "
+                "the extents must match");
+    }
+  }
+
   // Flatten rank-4 Q/K/V to the rank-3 BSHD layout the runtime consumes.
   mlir::Value q3 = query, k3 = key, v3 = value;
   if (rank4) {
@@ -374,10 +409,10 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
                       .getResult();
   }
   mlir::Value totalKvIdx =
-      maskKvIdx ? maskKvIdx
-                : mlir::arith::AddIOp::create(rewriter, loc, pastSeqIdx,
-                                              curSeqIdx)
-                      .getResult();
+      maskKvIdx
+          ? maskKvIdx
+          : mlir::arith::AddIOp::create(rewriter, loc, pastSeqIdx, curSeqIdx)
+                .getResult();
 
   // present buffer capacity, which is NOT the same as the valid length above.
   //
@@ -401,8 +436,6 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
   // fact and disagreeing gets a shape rejection at the first Run.
   // With no past operand there is nothing to share, so the flag does not apply
   // and a zero-length present would be nonsense.
-  const bool kvShareBuffer =
-      pastKey && hipdnn_ep::env_enabled("HIPDNN_EP_KV_SHARE_BUFFER");
   mlir::Value presentCapIdx =
       kvShareBuffer
           ? pastSeqIdx
