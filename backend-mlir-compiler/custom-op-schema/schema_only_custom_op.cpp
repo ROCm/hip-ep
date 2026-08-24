@@ -21,11 +21,16 @@ namespace {
 struct SchemaOnlyOpSpec {
   const char *domain;
   const char *name;
+  // Concrete output element type ORT's shape inference needs whenever the
+  // graph doesn't already carry an explicit type for the op's output (see
+  // schema_only_custom_op.hpp). UNDEFINED is only safe for ops whose output
+  // is always already typed in every graph that uses them.
+  ONNXTensorElementDataType output_type;
 };
 
 constexpr SchemaOnlyOpSpec kSchemaOnlyOps[] = {
-    {"com.amd", "QMoE"},
-    // {"domain", "OpName"},  // add new schema-only ops here
+    {"com.amd", "QMoE", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16},
+    // {"domain", "OpName", output_type},  // add new schema-only ops here
 };
 
 int RegisterSchemaOnlyOps(void *state, add_op_t add_op) {
@@ -33,8 +38,8 @@ int RegisterSchemaOnlyOps(void *state, add_op_t add_op) {
     Register(void *s, add_op_t a) : OpRegister(s, a) {}
     int register_ops() override {
       for (const auto &spec : kSchemaOnlyOps) {
-        AddOp(spec.domain,
-              std::make_unique<hipep::SchemaOnlyCustomOp>(spec.name));
+        AddOp(spec.domain, std::make_unique<hipep::SchemaOnlyCustomOp>(
+                               spec.name, spec.output_type));
       }
       return 0;
     }
