@@ -1442,7 +1442,8 @@ static int gqa_forward_hipblaslt(
       // buffer means the graph and the runtime disagree about the cache. The
       // ring block further down re-checks the capacity against the window
       // before letting anything wrap.
-      const bool short_ok = (local_window_size > 0 && present_seq >= local_window_size);
+      const bool short_ok =
+          (local_window_size > 0 && present_seq >= local_window_size);
       if (total_seq < 1 || past_len < 0 ||
           ((total_seq > present_seq || past_len > past_buf_seq) && !short_ok)) {
         fprintf(stderr,
@@ -1577,13 +1578,14 @@ static int gqa_forward_hipblaslt(
   const bool ring_cache = (present_key != nullptr && present_seq < total_seq);
   if (ring_cache) {
     if (local_window_size <= 0 || present_seq != local_window_size) {
-      fprintf(stderr,
-              "gqa_forward_hipblaslt: present KV buffer (%lld) is shorter than "
-              "the context (%lld), which is only supported for a sliding-window "
-              "layer whose cache is right-sized to exactly the window, but "
-              "local_window_size=%lld\n",
-              (long long)present_seq, (long long)total_seq,
-              (long long)local_window_size);
+      fprintf(
+          stderr,
+          "gqa_forward_hipblaslt: present KV buffer (%lld) is shorter than "
+          "the context (%lld), which is only supported for a sliding-window "
+          "layer whose cache is right-sized to exactly the window, but "
+          "local_window_size=%lld\n",
+          (long long)present_seq, (long long)total_seq,
+          (long long)local_window_size);
       return -1;
     }
     if (past_key != present_key) {
@@ -1990,10 +1992,11 @@ static int gqa_forward_hipblaslt(
     if (!use_no_expand) {
       // A ring prefill expands out of the full-length workspace copy, whose
       // batch stride is total_seq rather than the ring's capacity.
-      const void *kCache = ring_prefill ? (ws + off_Kfull)
-                                        : (present_key ? present_key : key);
-      const void *vCache = ring_prefill ? (ws + off_Vfull)
-                                        : (present_value ? present_value : value);
+      const void *kCache =
+          ring_prefill ? (ws + off_Kfull) : (present_key ? present_key : key);
+      const void *vCache = ring_prefill
+                               ? (ws + off_Vfull)
+                               : (present_value ? present_value : value);
       int kvSrcStride =
           static_cast<int>((ring_prefill ? total_seq : present_seq) * d);
       int kvDstStride = static_cast<int>(total_seq * d);
@@ -2021,8 +2024,9 @@ static int gqa_forward_hipblaslt(
     // for the same reason the expand step above does: the ring holds only the
     // window, and a prefill scores against everything before it.
     const size_t kv_byte_off = static_cast<size_t>(kv_lo) * d * elem_sz;
-    const char *noExpandK = ring_prefill ? (ws + off_Kfull)
-                                         : static_cast<const char *>(present_key);
+    const char *noExpandK = ring_prefill
+                                ? (ws + off_Kfull)
+                                : static_cast<const char *>(present_key);
     const char *noExpandV = ring_prefill
                                 ? (ws + off_Vfull)
                                 : static_cast<const char *>(present_value);
