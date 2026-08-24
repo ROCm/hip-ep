@@ -7,15 +7,15 @@
 // body is built. Rejected forms are in reshape-invalid.mlir.
 //
 // The result type is inferred from the operands: a target shape operand that
-// folds to a constant states the extents, and the input states the element type
-// and memory space. The shape region never reads memory.
+// folds to a constant states the dimensions, and the input states the element
+// type and memory space. The shape region never reads memory.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt %s --onnx-dialect=modeled --split-input-file -allow-unregistered-dialect -convert-onnx-to-hipsr | FileCheck %s
 
 // The reshape an embedding graph flattens its image features with: a constant
 // [-1] against a batch that stays symbolic. Nothing else is stated, so the
-// inferred extent is the whole element count with no divisor, and the body
+// inferred dimension is the whole element count with no divisor, and the body
 // stops at the collapse that already reaches the 1-D result.
 // CHECK-LABEL: func.func @flatten_dynamic(
 // CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,
@@ -48,9 +48,9 @@ func.func @flatten_dynamic(%ctx: !hipsr.context,
 
 // -----
 
-// Expanding splits one input extent over a group, which the input type cannot
-// pin down. The destination already carries what the shape region resolved, so
-// output_shape reads the extent off it rather than dividing for it again. A
+// Expanding splits one input dimension over a group, which the input type
+// cannot pin down. The destination already carries what the shape region
+// resolved, so output_shape reads it off there rather than dividing again. A
 // rank-1 input is already flat, so no collapse comes first.
 // CHECK-LABEL: func.func @expand_dynamic(
 // CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,
@@ -58,12 +58,12 @@ func.func @flatten_dynamic(%ctx: !hipsr.context,
 // CHECK-NEXT:    %{{.*}} = hipsr.constant {value = dense<[-1, 4096]> : tensor<2xi64>} : tensor<2xi64, #hipsr.mem<device>>
 // CHECK-NEXT:    %[[INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<?xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x4096xf16, #hipsr.mem<device>> shape_region {
 // CHECK-NEXT:    ^bb0(%[[IN_SHAPE:.*]]: !shape.shape):
-// CHECK-NEXT:      %[[COLS:.*]] = arith.constant 4096 : index
 // CHECK-NEXT:      %[[AXIS:.*]] = shape.const_size 0
 // CHECK-NEXT:      %[[SIZE:.*]] = shape.get_extent %[[IN_SHAPE]], %[[AXIS]] : !shape.shape, !shape.size -> !shape.size
 // CHECK-NEXT:      %[[COUNT:.*]] = shape.size_to_index %[[SIZE]] : !shape.size
 // CHECK-NEXT:      %[[DIVISOR:.*]] = arith.constant 4096 : index
 // CHECK-NEXT:      %[[ROWS:.*]] = arith.divui %[[COUNT]], %[[DIVISOR]] : index
+// CHECK-NEXT:      %[[COLS:.*]] = arith.constant 4096 : index
 // CHECK-NEXT:      %[[SHAPE:.*]] = shape.from_extents %[[ROWS]], %[[COLS]] : index, index
 // CHECK-NEXT:      hipsr.shape_yield %[[SHAPE]] : !shape.shape
 // CHECK-NEXT:    }
@@ -86,40 +86,44 @@ func.func @expand_dynamic(%ctx: !hipsr.context,
 
 // -----
 
-// The input leaves the element count dynamic while the target shape pins it
-// down. Neither reshape op takes that mismatch across a group, so a cast
-// refines the flat form first. The result is already 1-D, so no expansion
-// follows.
-// CHECK-LABEL: func.func @collapse_and_cast(
+// The input leaves the element count dynamic while the target shape names every
+// dimension. Neither reshape op carries that refinement across a group: a
+// collapsed dimension stays dynamic with its group, and an expansion needs a
+// static source to reach a static result. A cast between the two bridges them.
+// The destination is static, so the expansion states its dimensions outright.
+// CHECK-LABEL: func.func @cast_and_expand(
 // CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,
-// CHECK-SAME:    %[[INPUT:.*]]: tensor<?x4xi64, #hipsr.mem<device>>) -> tensor<24xi64, #hipsr.mem<device>> {
-// CHECK-NEXT:    %{{.*}} = hipsr.constant {value = dense<24> : tensor<1xi64>} : tensor<1xi64, #hipsr.mem<device>>
-// CHECK-NEXT:    %[[INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<?x4xi64, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<24xi64, #hipsr.mem<device>> shape_region {
+// CHECK-SAME:    %[[INPUT:.*]]: tensor<?x4xi64, #hipsr.mem<device>>) -> tensor<6x4xi64, #hipsr.mem<device>> {
+// CHECK-NEXT:    %{{.*}} = hipsr.constant {value = dense<[6, 4]> : tensor<2xi64>} : tensor<2xi64, #hipsr.mem<device>>
+// CHECK-NEXT:    %[[INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<?x4xi64, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<6x4xi64, #hipsr.mem<device>> shape_region {
 // CHECK-NEXT:    ^bb0(%{{.*}}: !shape.shape):
-// CHECK-NEXT:      %[[COUNT:.*]] = arith.constant 24 : index
-// CHECK-NEXT:      %[[SHAPE:.*]] = shape.from_extents %[[COUNT]] : index
+// CHECK-NEXT:      %[[ROWS:.*]] = arith.constant 6 : index
+// CHECK-NEXT:      %[[COLS:.*]] = arith.constant 4 : index
+// CHECK-NEXT:      %[[SHAPE:.*]] = shape.from_extents %[[ROWS]], %[[COLS]] : index, index
 // CHECK-NEXT:      hipsr.shape_yield %[[SHAPE]] : !shape.shape
 // CHECK-NEXT:    }
-// CHECK-NEXT:    %[[RESULT:.*]] = hipsr.compute(%[[CTX]]) ins(%[[INPUT]] : tensor<?x4xi64, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<24xi64, #hipsr.mem<device>>) {
-// CHECK-NEXT:    ^bb0(%{{.*}}: !hipsr.context, %[[IN:.*]]: tensor<?x4xi64, #hipsr.mem<device>>, %{{.*}}: tensor<24xi64, #hipsr.mem<device>>):
+// CHECK-NEXT:    %[[RESULT:.*]] = hipsr.compute(%[[CTX]]) ins(%[[INPUT]] : tensor<?x4xi64, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<6x4xi64, #hipsr.mem<device>>) {
+// CHECK-NEXT:    ^bb0(%{{.*}}: !hipsr.context, %[[IN:.*]]: tensor<?x4xi64, #hipsr.mem<device>>, %{{.*}}: tensor<6x4xi64, #hipsr.mem<device>>):
 // CHECK-NEXT:      %[[FLAT:.*]] = tensor.collapse_shape %[[IN]] {{\[}}[0, 1]] : tensor<?x4xi64, #hipsr.mem<device>> into tensor<?xi64, #hipsr.mem<device>>
 // CHECK-NEXT:      %[[REFINED:.*]] = tensor.cast %[[FLAT]] : tensor<?xi64, #hipsr.mem<device>> to tensor<24xi64, #hipsr.mem<device>>
-// CHECK-NEXT:      hipsr.compute_yield %[[REFINED]] : tensor<24xi64, #hipsr.mem<device>>
-// CHECK-NEXT:    } : tensor<24xi64, #hipsr.mem<device>>{{$}}
-// CHECK-NEXT:    return %[[RESULT]] : tensor<24xi64, #hipsr.mem<device>>
-func.func @collapse_and_cast(%ctx: !hipsr.context,
-                             %input: tensor<?x4xi64>) -> tensor<24xi64> {
-  %shape = "onnx.Constant"() {value = dense<24> : tensor<1xi64>}
-      : () -> tensor<1xi64>
+// CHECK-NEXT:      %[[OUT:.*]] = tensor.expand_shape %[[REFINED]] {{\[}}[0, 1]] output_shape {{\[}}6, 4] : tensor<24xi64, #hipsr.mem<device>> into tensor<6x4xi64, #hipsr.mem<device>>
+// CHECK-NEXT:      hipsr.compute_yield %[[OUT]] : tensor<6x4xi64, #hipsr.mem<device>>
+// CHECK-NEXT:    } : tensor<6x4xi64, #hipsr.mem<device>>{{$}}
+// CHECK-NEXT:    return %[[RESULT]] : tensor<6x4xi64, #hipsr.mem<device>>
+func.func @cast_and_expand(%ctx: !hipsr.context,
+                           %input: tensor<?x4xi64>) -> tensor<6x4xi64> {
+  %shape = "onnx.Constant"() {value = dense<[6, 4]> : tensor<2xi64>}
+      : () -> tensor<2xi64>
   %0 = "onnx.Reshape"(%input, %shape) {allowzero = 0 : si64}
-      : (tensor<?x4xi64>, tensor<1xi64>) -> tensor<24xi64>
-  "onnx.Return"(%0) : (tensor<24xi64>) -> ()
+      : (tensor<?x4xi64>, tensor<2xi64>) -> tensor<6x4xi64>
+  "onnx.Return"(%0) : (tensor<6x4xi64>) -> ()
 }
+
 // -----
 
 // The identity check runs on the inferred type, so it catches the reshapes only
 // the target shape reveals to be identities: [-1, 32] against a rank-2 input
-// names the extents back to the input's own. The reshape is replaced by its
+// names the dimensions back to the input's own. The reshape is replaced by its
 // input, leaving no destination.
 // CHECK-LABEL: func.func @refines_to_input(
 // CHECK-SAME:    %{{.*}}: !hipsr.context,
@@ -138,13 +142,13 @@ func.func @refines_to_input(%ctx: !hipsr.context,
 // -----
 
 // Shape inference does not always fold a constant shape operand into the result
-// type, which leaves both extents dynamic here. The operand names the second
+// type, which leaves both dimensions dynamic here. The operand names the second
 // one, and the inferred type is what the compute carries, so it reaches the
 // signature instead of being widened back to the one ONNX declared.
 //
-// The stated 32 and the input's 8x4 cancel, so the inferred extent is the batch
-// read straight off the input's shape with nothing left to multiply. An
-// expansion cannot take its extents from the flat form, so it reads them off
+// The stated 32 and the input's 8x4 cancel, so the inferred dimension is the
+// batch read straight off the input's shape with nothing left to multiply. An
+// expansion cannot take its dimensions from the flat form, so it reads them off
 // the destination the shape region resolved.
 // CHECK-LABEL: func.func @collapse_and_expand(
 // CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,
@@ -152,10 +156,10 @@ func.func @refines_to_input(%ctx: !hipsr.context,
 // CHECK-NEXT:    %{{.*}} = hipsr.constant {value = dense<[-1, 32]> : tensor<2xi64>} : tensor<2xi64, #hipsr.mem<device>>
 // CHECK-NEXT:    %[[INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<?x8x4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x32xf16, #hipsr.mem<device>> shape_region {
 // CHECK-NEXT:    ^bb0(%[[IN_SHAPE:.*]]: !shape.shape):
-// CHECK-NEXT:      %[[COLS:.*]] = arith.constant 32 : index
 // CHECK-NEXT:      %[[AXIS:.*]] = shape.const_size 0
 // CHECK-NEXT:      %[[SIZE:.*]] = shape.get_extent %[[IN_SHAPE]], %[[AXIS]] : !shape.shape, !shape.size -> !shape.size
 // CHECK-NEXT:      %[[ROWS:.*]] = shape.size_to_index %[[SIZE]] : !shape.size
+// CHECK-NEXT:      %[[COLS:.*]] = arith.constant 32 : index
 // CHECK-NEXT:      %[[SHAPE:.*]] = shape.from_extents %[[ROWS]], %[[COLS]] : index, index
 // CHECK-NEXT:      hipsr.shape_yield %[[SHAPE]] : !shape.shape
 // CHECK-NEXT:    }

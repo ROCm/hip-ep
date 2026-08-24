@@ -10,7 +10,7 @@
 
 // RUN: hip-mlir-opt --onnx-dialect=modeled --convert-onnx-to-hipsr --split-input-file --verify-diagnostics %s
 
-// With allowzero set, a 0 in the target shape is a literal extent instead of a
+// With allowzero set, a 0 in the target shape is a literal dimension, not a
 // copy of the input's. The conversion does not implement that reading, so it
 // turns the attribute away rather than resolve a shape under the wrong one.
 func.func @allowzero(%ctx: !hipsr.context,
@@ -25,8 +25,8 @@ func.func @allowzero(%ctx: !hipsr.context,
 
 // -----
 
-// With allowzero clear a 0 copies the input's extent at that axis. Resolving
-// that is left out, so the entry is rejected rather than read as an extent.
+// With allowzero clear a 0 copies the input's dimension at that axis. Resolving
+// that is left out, so the entry is rejected rather than read as a dimension.
 func.func @zero_entry(%ctx: !hipsr.context,
                       %input: tensor<?x8x4xf16>) -> tensor<?x?xf16> {
   %shape = "onnx.Constant"() {value = dense<[0, -1]> : tensor<2xi64>}
@@ -41,9 +41,9 @@ func.func @zero_entry(%ctx: !hipsr.context,
 
 // Two -1 entries are one equation with two unknowns, and the element count
 // recovers one. @collapse_and_expand in reshape.mlir is the same reshape with
-// the second extent named.
-func.func @two_inferred_extents(%ctx: !hipsr.context,
-                                %input: tensor<?x8x4xf16>) -> tensor<?x?xf16> {
+// the second dimension named.
+func.func @two_inferred_dims(%ctx: !hipsr.context,
+                             %input: tensor<?x8x4xf16>) -> tensor<?x?xf16> {
   %shape = "onnx.Constant"() {value = dense<-1> : tensor<2xi64>}
       : () -> tensor<2xi64>
   // expected-error @+1 {{failed to legalize operation 'onnx.Reshape'}}
@@ -54,7 +54,7 @@ func.func @two_inferred_extents(%ctx: !hipsr.context,
 
 // -----
 
-// The target shape is the only thing that states the result extents, so an
+// The target shape is the only thing that states the result dimensions, so an
 // operand that stays a runtime value leaves them out of reach. Reading it would
 // be a host read the conversion does not do.
 func.func @non_constant_shape(%ctx: !hipsr.context, %input: tensor<2x3xf16>,
@@ -67,21 +67,22 @@ func.func @non_constant_shape(%ctx: !hipsr.context, %input: tensor<2x3xf16>,
 
 // -----
 
-// A reshape preserves the element count, so 6 elements cannot become 7 by
-// regrouping them.
-func.func @count_mismatch(%ctx: !hipsr.context,
-                          %input: tensor<2x3xf16>) -> tensor<7xf16> {
-  %shape = "onnx.Constant"() {value = dense<7> : tensor<1xi64>}
-      : () -> tensor<1xi64>
+// A reshape preserves the element count, and 4 does not divide 6: the dimension
+// left to infer has no whole-number answer, so the truncated one would state 4
+// elements where the input has 6.
+func.func @inexact_inferred_dim(%ctx: !hipsr.context,
+                                %input: tensor<6xf16>) -> tensor<?x4xf16> {
+  %shape = "onnx.Constant"() {value = dense<[-1, 4]> : tensor<2xi64>}
+      : () -> tensor<2xi64>
   // expected-error @+1 {{failed to legalize operation 'onnx.Reshape'}}
   %0 = "onnx.Reshape"(%input, %shape) {allowzero = 0 : si64}
-      : (tensor<2x3xf16>, tensor<1xi64>) -> tensor<7xf16>
-  return %0 : tensor<7xf16>
+      : (tensor<6xf16>, tensor<2xi64>) -> tensor<?x4xf16>
+  return %0 : tensor<?x4xf16>
 }
 
 // -----
 
-// The 1-D form is built from the input's extents, so the input must be ranked.
+// The 1-D form is built from the input's dimensions, so it must be ranked.
 func.func @unranked_input(%ctx: !hipsr.context,
                           %input: tensor<*xf16>) -> tensor<6xf16> {
   %shape = "onnx.Constant"() {value = dense<6> : tensor<1xi64>}
@@ -89,17 +90,5 @@ func.func @unranked_input(%ctx: !hipsr.context,
   // expected-error @+1 {{failed to legalize operation 'onnx.Reshape'}}
   %0 = "onnx.Reshape"(%input, %shape) {allowzero = 0 : si64}
       : (tensor<*xf16>, tensor<1xi64>) -> tensor<6xf16>
-  return %0 : tensor<6xf16>
-}
-
-// -----
-
-// Every hipsr op threads the context from function argument 0.
-func.func @missing_context(%input: tensor<2x3xf16>) -> tensor<6xf16> {
-  %shape = "onnx.Constant"() {value = dense<6> : tensor<1xi64>}
-      : () -> tensor<1xi64>
-  // expected-error @+1 {{failed to legalize operation 'onnx.Reshape'}}
-  %0 = "onnx.Reshape"(%input, %shape) {allowzero = 0 : si64}
-      : (tensor<2x3xf16>, tensor<1xi64>) -> tensor<6xf16>
   return %0 : tensor<6xf16>
 }

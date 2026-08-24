@@ -4,31 +4,24 @@
  */
 //===- ReshapeConversion.cpp - Convert onnx.Reshape to hipsr.compute -----===//
 //
-// onnx.Reshape regroups extents in row-major order without moving data. The
-// conversion emits a tensor.collapse_shape and a tensor.expand_shape through
-// the 1-D form, inside a hipsr.compute. Both bufferize to memrefs that alias
-// their source, so nothing runs on the device, and canonicalization composes
-// the pair into one op when a single op can express the regroup.
+// onnx.Reshape regroups dimensions in row-major order without moving data, so
+// the hipsr.compute body is a tensor.collapse_shape and a tensor.expand_shape
+// through the 1-D form. Both bufferize to memrefs that alias their source, so
+// nothing runs on the device, and canonicalization composes the pair back into
+// one op where one can express the regroup.
 //
-// The result type is inferred from the operands rather than taken from the one
-// ONNX declared, which is often the weaker of the two: the target shape states
-// every extent, bar the one written as -1 and left to the preserved element
-// count, and the input states the element type and memory space it aliases. So
-// the shape region works from the input's shape alone and reads nothing out of
+// The result type is inferred from the operands, not taken from the type ONNX
+// declared, which is often the weaker of the two: the target shape states the
+// dimensions, and the input states the element type and memory space the result
+// aliases. The shape region then works off the input's shape and reads no
 // memory.
-//
-// Three forms are rejected. A target shape that does not fold, because nothing
-// else states the extents. A second inferred extent, because one equation
-// recovers one unknown and the rest would take a host read of the operand. And
-// a 0, which with allowzero clear copies the input's extent at that axis;
-// resolving that is a separate step from the arithmetic here.
 //
 // Before, with %shape the constant [-1]:
 //   %r = "onnx.Reshape"(%x, %shape)
 //       : (tensor<?x4096xf16, #hipsr.mem<device>>, tensor<1xi64>)
 //       -> tensor<?xf16, #hipsr.mem<device>>
 //
-// After, with the types inside the regions left out:
+// After, with the region types left out:
 //   %init = hipsr.placeholder(%ctx) ins(%x)
 //       {placeholder_type = #hipsr.placeholder_type<normal>}
 //       : tensor<?xf16, #hipsr.mem<device>> shape_region {
@@ -77,50 +70,57 @@ namespace {
 // Inferring the result type
 //===----------------------------------------------------------------------===//
 
-// The product of a shape's static extents. Over the target extents it is the
-// divisor the inferred hole divides the element count by; over the input's
-// shape it is the part of that count already known.
-int64_t staticExtentProduct(ArrayRef<int64_t> extents) {
+// The product of the dimensions a shape states, leaving out any it left
+// dynamic.
+int64_t productOfStaticDims(ArrayRef<int64_t> dims) {
   return llvm::product_of(llvm::make_filter_range(
-      extents, [](int64_t extent) { return ShapedType::isStatic(extent); }));
+      dims, [](int64_t dim) { return ShapedType::isStatic(dim); }));
 }
 
-// What the reshape produces, read off its own operands rather than the type
-// ONNX declared: the target shape states every extent, and the one it writes as
-// -1 comes from the element count a reshape preserves. The result aliases the
-// input, so it keeps the input's element type and memory space.
+// The result type, read off the operands: the target shape states the
+// dimensions, the one written as -1 comes from the preserved element count, and
+// the input gives the element type and memory space the result aliases.
 FailureOr<RankedTensorType>
 inferResultType(onnx::ReshapeOp op, RankedTensorType inputType, Value shape,
                 ConversionPatternRewriter &rewriter) {
+  // TODO: Support a target shape that only holds its value at runtime, which
+  // takes a host read and so a barrier placeholder.
   DenseIntElementsAttr folded;
   if (!matchPattern(shape, m_Constant(&folded))) {
     return rewriter.notifyMatchFailure(
         op, "expected a target shape that folds to a constant");
   }
-  SmallVector<int64_t> extents = llvm::map_to_vector(
+  SmallVector<int64_t> dims = llvm::map_to_vector(
       folded.getValues<APInt>(), [](const APInt &entry) -> int64_t {
         int64_t value = entry.getSExtValue();
         return value < 0 ? ShapedType::kDynamic : value;
       });
 
-  // With allowzero clear a 0 copies the input's extent at that axis, which is a
-  // separate step, and it would leave the inferred extent nothing to divide by.
-  if (llvm::is_contained(extents, 0)) {
+  // The -1 is resolved below from the element count, but a 0 is not: with
+  // allowzero clear it copies the input's dimension at that axis instead.
+  // TODO: Resolve a 0 too.
+  if (llvm::is_contained(dims, 0)) {
     return rewriter.notifyMatchFailure(op, "expected no 0 in the target shape");
   }
-  // One equation recovers one unknown, and the rest would take a host read of
-  // the operand.
-  if (llvm::count(extents, ShapedType::kDynamic) > 1) {
+  // One equation recovers one unknown; the rest would take a host read.
+  if (llvm::count(dims, ShapedType::kDynamic) > 1) {
     return rewriter.notifyMatchFailure(
-        op, "expected at most one extent left to infer");
+        op, "expected at most one dimension left to infer");
   }
 
-  // The hole stays dynamic unless the input pins the element count down.
-  if (auto *hole = llvm::find(extents, ShapedType::kDynamic);
-      hole != extents.end() && inputType.hasStaticShape()) {
-    *hole = inputType.getNumElements() / staticExtentProduct(extents);
+  // The -1 stays dynamic unless the input pins the element count down.
+  if (auto *unknown = llvm::find(dims, ShapedType::kDynamic);
+      unknown != dims.end() && inputType.hasStaticShape()) {
+    *unknown = inputType.getNumElements() / productOfStaticDims(dims);
   }
-  return RankedTensorType::get(extents, inputType.getElementType(),
+  // Both counts are known now, and a reshape preserves them. This is also what
+  // makes the division above sound: it truncates, so an inexact one lands here.
+  if (inputType.hasStaticShape() &&
+      inputType.getNumElements() != productOfStaticDims(dims)) {
+    return rewriter.notifyMatchFailure(
+        op, "expected the element count to be preserved");
+  }
+  return RankedTensorType::get(dims, inputType.getElementType(),
                                inputType.getEncoding());
 }
 
@@ -128,32 +128,31 @@ inferResultType(onnx::ReshapeOp op, RankedTensorType inputType, Value shape,
 // The destination
 //===----------------------------------------------------------------------===//
 
-// `!shape.size` carries an error state that arith has no room for, so an
-// extent read off a `!shape.shape` has to be converted to index.
-Value buildShapeExtent(OpBuilder &builder, Location loc, Value shape,
-                       int64_t axis) {
+// `!shape.size` carries an error state arith cannot express, so a dimension
+// read off a `!shape.shape` converts to index first.
+Value readDim(OpBuilder &builder, Location loc, Value shape, int64_t axis) {
   Value size = shape::GetExtentOp::create(builder, loc, shape, axis);
   return shape::SizeToIndexOp::create(builder, loc, builder.getIndexType(),
                                       size);
 }
 
-// The extent ONNX left to the element count: the input's count over `divisor`.
-// Both sides are products, so the input's static extents and the divisor cancel
-// where they divide evenly, which is what leaves a plain flatten with no
-// division at all. What is left is one multiply per dynamic input extent.
-Value buildInferredExtent(OpBuilder &builder, Location loc,
-                          RankedTensorType inputType, int64_t divisor,
-                          Value inputShape) {
-  assert(divisor > 0 && "a 0 result extent is rejected before this point");
+// The dimension ONNX left to the element count: the input's count over
+// `divisor`. Both are products, so they cancel where they divide evenly, which
+// is what leaves a plain flatten with no arithmetic beyond its dynamic
+// dimensions.
+Value buildInferredDim(OpBuilder &builder, Location loc,
+                       RankedTensorType inputType, int64_t divisor,
+                       Value inputShape) {
+  assert(divisor > 0 && "a 0 result dimension is rejected before this point");
 
   SmallVector<Value> factors;
   for (int64_t axis : llvm::seq<int64_t>(0, inputType.getRank())) {
     if (inputType.isDynamicDim(axis)) {
-      factors.push_back(buildShapeExtent(builder, loc, inputShape, axis));
+      factors.push_back(readDim(builder, loc, inputShape, axis));
     }
   }
 
-  int64_t staticCount = staticExtentProduct(inputType.getShape());
+  int64_t staticCount = productOfStaticDims(inputType.getShape());
   if (staticCount % divisor == 0) {
     staticCount /= divisor;
     divisor = 1;
@@ -163,51 +162,41 @@ Value buildInferredExtent(OpBuilder &builder, Location loc,
         arith::ConstantIndexOp::create(builder, loc, staticCount));
   }
 
-  Value extent = factors.front();
+  Value dim = factors.front();
   for (Value factor : llvm::drop_begin(factors)) {
-    extent = arith::MulIOp::create(builder, loc, extent, factor);
+    dim = arith::MulIOp::create(builder, loc, dim, factor);
   }
   if (divisor == 1) {
-    return extent;
+    return dim;
   }
   Value divisorValue = arith::ConstantIndexOp::create(builder, loc, divisor);
-  return arith::DivUIOp::create(builder, loc, extent, divisorValue);
+  return arith::DivUIOp::create(builder, loc, dim, divisorValue);
 }
 
-// One value per result axis. At most one extent is left to infer, so the stated
-// ones become constants and that single hole is filled from the input's shape.
-SmallVector<Value> buildResultExtents(OpBuilder &builder, Location loc,
-                                      RankedTensorType inputType,
-                                      RankedTensorType resultType,
-                                      Value inputShape) {
-  SmallVector<Value> values =
-      llvm::map_to_vector(resultType.getShape(), [&](int64_t extent) -> Value {
-        if (ShapedType::isDynamic(extent)) {
-          return nullptr;
-        }
-        return arith::ConstantIndexOp::create(builder, loc, extent);
-      });
-  if (auto *inferred = llvm::find(values, Value()); inferred != values.end()) {
-    *inferred = buildInferredExtent(builder, loc, inputType,
-                                    staticExtentProduct(resultType.getShape()),
-                                    inputShape);
-  }
-  return values;
-}
-
+// One value per result axis: a stated dimension is a constant, the inferred one
+// is computed off the input's shape.
 void populateShapeRegion(OpBuilder &builder, PlaceholderOp placeholder,
                          RankedTensorType inputType,
                          RankedTensorType resultType) {
+  assert(llvm::count_if(resultType.getShape(), ShapedType::isDynamic) <= 1 &&
+         "a second inferred dimension is rejected before this point");
+
   OpBuilder::InsertionGuard guard(builder);
   Block &block = createPlaceholderShapeBlock(builder, placeholder);
   builder.setInsertionPointToStart(&block);
 
   Location loc = placeholder.getLoc();
-  SmallVector<Value> values =
-      buildResultExtents(builder, loc, inputType, resultType,
-                         PlaceholderShapeRegionArgs{block}.in(0));
+  Value inputShape = PlaceholderShapeRegionArgs{block}.in(0);
+  int64_t divisor = productOfStaticDims(resultType.getShape());
+  SmallVector<Value> dims =
+      llvm::map_to_vector(resultType.getShape(), [&](int64_t dim) -> Value {
+        if (ShapedType::isDynamic(dim)) {
+          return buildInferredDim(builder, loc, inputType, divisor, inputShape);
+        }
+        return arith::ConstantIndexOp::create(builder, loc, dim);
+      });
   Value shape = shape::FromExtentsOp::create(
-      builder, loc, shape::ShapeType::get(builder.getContext()), values);
+      builder, loc, shape::ShapeType::get(builder.getContext()), dims);
   ShapeYieldOp::create(builder, loc, ValueRange{shape});
 }
 
@@ -217,10 +206,11 @@ void populateShapeRegion(OpBuilder &builder, PlaceholderOp placeholder,
 
 // The 1-D form `type` flattens to, dynamic when the element count is not a
 // compile-time constant.
-RankedTensorType flatTensorType(RankedTensorType type, Attribute space) {
+RankedTensorType flatTensorType(RankedTensorType type) {
   int64_t count =
       type.hasStaticShape() ? type.getNumElements() : ShapedType::kDynamic;
-  return RankedTensorType::get({count}, type.getElementType(), space);
+  return RankedTensorType::get({count}, type.getElementType(),
+                               type.getEncoding());
 }
 
 // Every axis in one group: the grouping that reaches the 1-D form.
@@ -229,29 +219,25 @@ SmallVector<ReassociationIndices> flatReassociation(int64_t rank) {
 }
 
 // Every regroup goes through the 1-D form: one group collapses every input
-// axis, one expands the result out of it. A single collapse or expand would
-// fit some regroups, but `ComposeExpandOfCollapseOp` already finds those.
-//
-// `dest` is the placeholder, so an expansion reads the extents it resolved.
+// axis, one expands the result out of it. A single collapse or expand would fit
+// some regroups, but `ComposeExpandOfCollapseOp` already finds those. `dest` is
+// the placeholder, so an expansion reads the dimensions it resolved.
 Value createReshape(OpBuilder &builder, Location loc, Value input,
                     RankedTensorType inputType, RankedTensorType resultType,
                     Value dest) {
   assert(inputType != resultType &&
          "an identity reshape is dropped before it is given a body");
 
-  // The result took the input's space, so both sides agree on it.
-  Attribute space = resultType.getEncoding();
-  RankedTensorType flatType = flatTensorType(inputType, space);
+  RankedTensorType flatType = flatTensorType(inputType);
   Value flat = input;
   if (inputType.getRank() > 1) {
     flat = tensor::CollapseShapeOp::create(
         builder, loc, flatType, input, flatReassociation(inputType.getRank()));
   }
 
-  // A collapsed extent has to agree with its group on being dynamic, so the
-  // collapse cannot pin down an element count only the result side knows.
-  if (RankedTensorType resultFlatType = flatTensorType(resultType, space);
+  if (RankedTensorType resultFlatType = flatTensorType(resultType);
       flatType != resultFlatType) {
+    // Collapse and expand cannot make a dynamic dimension static; a cast can.
     flat = tensor::CastOp::create(builder, loc, resultFlatType, flat);
     flatType = resultFlatType;
   }
@@ -274,8 +260,7 @@ void populateComputeBody(OpBuilder &builder, ComputeOp computeOp,
   OpBuilder::InsertionGuard guard(builder);
   Location loc = computeOp.getLoc();
 
-  // The body's arguments are the operands: ctx, then the inputs, then the
-  // outputs.
+  // The body's arguments are the operands: ctx, the inputs, then the outputs.
   TypeRange argTypes = computeOp->getOperandTypes();
   SmallVector<Location> argLocs(argTypes.size(), loc);
   Block *body =
@@ -293,15 +278,16 @@ void populateComputeBody(OpBuilder &builder, ComputeOp computeOp,
 
 struct ReshapeToHipsr : public OpConversionPattern<onnx::ReshapeOp> {
   // The converter goes unused: the result type depends on the target shape
-  // operand, which a type conversion never sees. Taken so that the pass adds
-  // every pattern the same way.
+  // operand, which a type conversion never sees. Taken so the pass adds every
+  // pattern the same way.
   ReshapeToHipsr(const TypeConverter &, MLIRContext *ctx)
       : OpConversionPattern(ctx) {}
 
   LogicalResult
   matchAndRewrite(onnx::ReshapeOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    // allowzero flips what a 0 entry means, giving a different result shape.
+    // allowzero makes a 0 a literal dimension instead of a copy of the input's.
+    // TODO: Support it once a 0 entry is resolved.
     if (op.getAllowzero() != 0) {
       return rewriter.notifyMatchFailure(op, "expected allowzero = 0");
     }
@@ -310,23 +296,18 @@ struct ReshapeToHipsr : public OpConversionPattern<onnx::ReshapeOp> {
     if (!inputType) {
       return rewriter.notifyMatchFailure(op, "expected a ranked tensor input");
     }
-    FailureOr<RankedTensorType> resultType =
+    FailureOr<RankedTensorType> inferred =
         inferResultType(op, inputType, adaptor.getShape(), rewriter);
-    if (failed(resultType)) {
+    if (failed(inferred)) {
       return failure();
     }
+    RankedTensorType resultType = *inferred;
 
     // An identity reshape needs no destination. Inferring first also catches
     // the ones only the target shape operand reveals to be identities.
-    if (inputType == *resultType) {
+    if (inputType == resultType) {
       rewriter.replaceOp(op, input);
       return success();
-    }
-    // A static input leaves no extent to infer, so both counts are known.
-    if (inputType.hasStaticShape() &&
-        inputType.getNumElements() != resultType->getNumElements()) {
-      return rewriter.notifyMatchFailure(
-          op, "expected the element count to be preserved");
     }
     FailureOr<Value> ctx = getHipsrContextArg(op, rewriter);
     if (failed(ctx)) {
@@ -336,14 +317,14 @@ struct ReshapeToHipsr : public OpConversionPattern<onnx::ReshapeOp> {
     // The shape region reads no memory, so a normal placeholder is enough.
     Location loc = op.getLoc();
     auto init =
-        PlaceholderOp::create(rewriter, loc, TypeRange{*resultType}, *ctx,
+        PlaceholderOp::create(rewriter, loc, TypeRange{resultType}, *ctx,
                               ValueRange{input}, PlaceholderType::Normal);
-    populateShapeRegion(rewriter, init, inputType, *resultType);
+    populateShapeRegion(rewriter, init, inputType, resultType);
 
     auto computeOp =
-        ComputeOp::create(rewriter, loc, TypeRange{*resultType}, *ctx,
+        ComputeOp::create(rewriter, loc, TypeRange{resultType}, *ctx,
                           ValueRange{input}, ValueRange{init.getResult(0)});
-    populateComputeBody(rewriter, computeOp, inputType, *resultType);
+    populateComputeBody(rewriter, computeOp, inputType, resultType);
     rewriter.replaceOp(op, computeOp.getResult(0));
     return success();
   }
