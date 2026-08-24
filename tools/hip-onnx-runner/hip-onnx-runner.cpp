@@ -1053,6 +1053,15 @@ int main(int argc, char *argv[]) {
     }
     session_opts.AppendExecutionProvider_V2(env, devices, ep_opts);
     session_opts.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
+    // Match the OGA/genai_config.json production setting: without this, ORT's
+    // ahead-of-time local-function inlining (models that define ops like
+    // CausalConvWithState/LinearAttention as ONNX local functions) triggers an
+    // extra hip-ep compile attempt on the not-yet-Level1-optimized, inlined
+    // graph before the normal partitioning pass ever runs. hip-ep's conversion
+    // patterns match those ops as opaque function-call nodes, not their
+    // inlined primitive decomposition, so that extra pre-optimization compile
+    // attempt sees a graph shape the converter never expects.
+    session_opts.AddConfigEntry("session.disable_aot_function_inlining", "1");
   }
 
   // Free-dimension values for symbolic input dims. Each entry is "name:value".

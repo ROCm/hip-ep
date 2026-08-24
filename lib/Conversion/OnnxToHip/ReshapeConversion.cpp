@@ -510,6 +510,26 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
         // zero-copy for the data path; only the shape side gets the extra
         // arith chain.
         //
+        // ONNX `Reshape` also permits a shape entry of literal `0`, meaning
+        // "keep the input's dim at this position unchanged" -- NOT a size-0
+        // dim -- unless the node's `allowzero` attribute is set (opset >=14),
+        // in which case `0` is a literal size like any other entry. This is
+        // easy to miss because `0` and `-1` conventionally sit on a reshape's
+        // static feature dim (where the result type already pins the extent
+        // and this code never queries the shape operand for it at all) --
+        // but that is only an export convention, not an ONNX guarantee.
+        // Nemotron's mamba blocks reshape [bs*ss, H] -> [bs, ss, H] via
+        // `Reshape(_, [0, 0, H])`, putting BOTH non-literal markers on the
+        // dynamic batch/seq dims instead, where they previously WERE read
+        // (and taken as literal 0) -- collapsing every mamba layer's
+        // batch/seq to 0 sized reads that resolved to garbage extents one op
+        // later. See docs/nemotron-mamba-shape-collapse.md.
+        //
+        // Resolve `0` (like `-1`) here, before tensor.reshape, replacing it
+        // with the corresponding input dim BEFORE computing the `-1`
+        // inference product below -- otherwise a shape with both `0` and
+        // `-1` would divide by the wrong product.
+        //
         // Before:
         //   %r = onnx.Reshape %x, %shape :
         //          (tensor<?x1152xf16>, tensor<6xi64>) ->
@@ -518,17 +538,27 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
         // After:
         //   %total  = product of tensor.dim(%x, i) for i in 0..inputRank
         //   %d[0..outRank-1] = tensor.extract %shape[i]
-        //   %pp     = product of max(%d[i], 1) for i in 0..outRank
-        //   %inf    = %total / %pp
-        //   %d'[i]  = select(%d[i] == -1, %inf, %d[i])
-        //   %newsh  = tensor.from_elements %d'[0..outRank-1] : tensor<NxI64>
-        //   %r      = tensor.reshape %x(%newsh)
+        //   %d[i]   = select(%d[i] == 0, tensor.dim(%x, i), %d[i])   // if i <
+        //   inputRank && !allowzero %pp     = product of max(%d[i], 1) for i in
+        //   0..outRank %inf    = %total / %pp %d'[i]  = select(%d[i] == -1,
+        //   %inf, %d[i]) %newsh  = tensor.from_elements %d'[0..outRank-1] :
+        //   tensor<NxI64> %r      = tensor.reshape %x(%newsh)
         mlir::Type elemTy = shapeTy.getElementType();
         unsigned bits = elemTy.getIntOrFloatBitWidth();
+        // `allowzero` is emitted as SI64Attr (signed), not a signless/index
+        // integer, so IntegerAttr::getInt() asserts. Read via getValue()
+        // (APInt) + getSExtValue(), matching every other SI64Attr read in
+        // this codebase (e.g. GqaConversion.cpp, TransposeConversion.cpp).
+        bool allowzero = false;
+        if (auto allowzeroAttr =
+                op->getAttrOfType<mlir::IntegerAttr>("allowzero"))
+          allowzero = allowzeroAttr.getValue().getSExtValue() != 0;
         mlir::Value cMinusOne = mlir::arith::ConstantOp::create(
             rewriter, loc,
             rewriter.getIntegerAttr(elemTy, mlir::APInt(bits, /*val=*/-1,
                                                         /*isSigned=*/true)));
+        mlir::Value cZero = mlir::arith::ConstantOp::create(
+            rewriter, loc, rewriter.getIntegerAttr(elemTy, 0));
         mlir::Value cOne = mlir::arith::ConstantOp::create(
             rewriter, loc, rewriter.getIntegerAttr(elemTy, 1));
 
@@ -554,6 +584,22 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
           // garbage dim that collapses the reshape. See ReadbackScalar.h.
           mlir::Value v = readbackShapeEntryToHostOrExtract(rewriter, loc, op,
                                                             shapeOperand, i);
+          // Resolve ONNX's `0` ("keep the input's dim here") BEFORE it feeds
+          // the `-1`-inference product below, so a shape with both `0` and
+          // `-1` infers against the real extent instead of dividing as if
+          // this position were size 1. Only applies to positions that have a
+          // corresponding input dim (i < inputRank); allowzero=1 makes `0` a
+          // literal size like any other entry.
+          if (!allowzero && i < inputRank) {
+            mlir::Value isZero = mlir::arith::CmpIOp::create(
+                rewriter, loc, mlir::arith::CmpIPredicate::eq, v, cZero);
+            mlir::Value inputDimIdx =
+                mlir::tensor::DimOp::create(rewriter, loc, data, i);
+            mlir::Value inputDimElemTy = mlir::arith::IndexCastOp::create(
+                rewriter, loc, elemTy, inputDimIdx);
+            v = mlir::arith::SelectOp::create(rewriter, loc, isZero,
+                                              inputDimElemTy, v);
+          }
           dims.push_back(v);
           mlir::Value isPositive = mlir::arith::CmpIOp::create(
               rewriter, loc, mlir::arith::CmpIPredicate::sgt, v, cOne);
