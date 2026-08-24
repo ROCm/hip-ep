@@ -520,14 +520,12 @@ int wrap_miopenConvolutionTranspose(
   return 0;
 }
 
-int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
-                                const void *input, const void *weight,
-                                const void *bias, const void *past_state,
-                                void *output, void *present_state,
-                                int64_t batch_size, int64_t channels,
-                                int64_t seq_len, int64_t kernel_size,
-                                int64_t ndim, int64_t activation,
-                                int64_t element_size_bytes) {
+int wrap_causal_conv_with_state(
+    RuntimeState *state, int op_state_slot, const void *input,
+    const void *weight, const void *bias, const void *past_state, void *output,
+    void *present_state, int64_t batch_size, int64_t channels, int64_t seq_len,
+    int64_t kernel_size, int64_t ndim, int64_t activation,
+    int64_t element_size_bytes, int64_t channels_last) {
   (void)op_state_slot;
   if (!state || !input || !weight || !output || !present_state) {
     fprintf(stderr,
@@ -547,6 +545,8 @@ int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
   MOCK_PRINT("[MOCK]   ndim=%lld, activation=%s(%lld), elem_size=%lld,\n",
              (long long)ndim, act_name, (long long)activation,
              (long long)element_size_bytes);
+  MOCK_PRINT("[MOCK]   layout=%s,\n",
+             channels_last ? "channels_last(B,L,C)" : "channels_first(B,C,L)");
   MOCK_PRINT("[MOCK]   bias=%s, past_state=%s)\n", bias ? "yes" : "null",
              past_state ? "yes" : "null");
 

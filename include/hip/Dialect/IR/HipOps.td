@@ -2972,10 +2972,19 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
     the last spatial dimension) and depthwise (each channel is convolved
     independently with its own kernel).
 
-    Input layout is channels-first: (batch_size, channels, ...).
-    Weight layout: (channels, 1, k_1, ...) for depthwise convolution.
-    The carry state stores the last (k-1) positions along the causal axis
-    for incremental decode.
+    Input layout is channels-first, (batch_size, channels, ...), unless
+    `channels_last` is set, in which case 1D input is (batch_size, seq_len,
+    channels). Weight layout: (channels, 1, k_1, ...) for depthwise
+    convolution. The carry state stores the last (k-1) positions along the
+    causal axis for incremental decode, and is (batch, channels, k-1) in both
+    layouts -- only input and output are permuted, so a layout change never
+    invalidates a carried state.
+
+    `channels_last` exists because the surrounding graph is channels-last: a
+    channels-first convolution has to be bracketed by a Transpose pair, and at
+    the Qwen3.6 footprint that pair costs more than the convolution it serves.
+    The canonicalizer sets the attribute while absorbing both Transposes.
+    Only ndim=1 is supported channels-last.
 
     Example (1D):
     ```mlir
@@ -3006,7 +3015,8 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
 
     // Attributes
     DefaultValuedAttr<StrAttr, "\"none\"">:$activation,  // "none", "silu", "swish"
-    DefaultValuedAttr<I64Attr, "1">:$ndim                // 1, 2, or 3
+    DefaultValuedAttr<I64Attr, "1">:$ndim,               // 1, 2, or 3
+    DefaultValuedAttr<BoolAttr, "false">:$channels_last  // input/output (B, L, C)
   );
 
   let assemblyFormat = [{
@@ -3026,6 +3036,10 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
     `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  // Absorbs a surrounding [0,2,1] Transpose pair into `channels_last`.
+  // See lib/Dialect/IR/HipCausalConvCanonicalize.cpp.
+  let hasCanonicalizer = 1;
 
   // OpStateOpInterface: construct this instance's per-session MIOpen
   // descriptor/algo cache (CausalConvState). No compile-time params — the

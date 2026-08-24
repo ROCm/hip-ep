@@ -1309,25 +1309,31 @@ int wrap_qmoe(
 // Used by Gated DeltaNet (Qwen3.5) and Mamba models.
 // Performs causal depthwise convolution with carry state for incremental
 // decode. The convolution is causal (looks only at current and past positions)
-// and depthwise (each channel convolved independently). Input layout:
-// channels-first (batch, channels, seq_len). Weight layout: (channels, 1,
-// kernel_size) for 1D depthwise.
+// and depthwise (each channel convolved independently). Input layout is
+// channels-first (batch, channels, seq_len) unless channels_last is set, which
+// makes input and output (batch, seq_len, channels). Weight layout: (channels,
+// 1, kernel_size) for 1D depthwise.
 //   bias:       nullable - per-channel bias (channels)
 //   past_state: nullable - carry state from previous step (batch, channels,
 //   k-1) activation: 0=none, 1=silu/swish
 int wrap_causal_conv_with_state(
     RuntimeState *state,
     int op_state_slot,  // per-instance op-state slot (descriptor cache home)
-    const void *input,  // (batch, channels, seq_len)
+    const void *input,  // (batch, channels, seq_len), or (batch, seq_len,
+                        // channels) when channels_last
     const void *weight, // (channels, 1, kernel_size)
     const void *bias,   // nullable, (channels)
     const void *past_state, // nullable, (batch, channels, kernel_size - 1)
-    void *output,           // (batch, channels, seq_len)
+    void *output,           // same layout as input
     void *present_state,    // (batch, channels, kernel_size - 1)
     int64_t batch_size, int64_t channels, int64_t seq_len, int64_t kernel_size,
     int64_t ndim,
     int64_t activation, // 0=none, 1=silu/swish
-    int64_t element_size_bytes);
+    int64_t element_size_bytes,
+    // 0=channels-first, 1=channels-last. Permutes input and output only: the
+    // carry state is (batch, channels, k-1) either way. ndim=1 only, and only
+    // on the custom-kernel fast paths -- the MIOpen fallback is channels-first.
+    int64_t channels_last);
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt
