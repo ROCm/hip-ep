@@ -174,9 +174,8 @@ intialize_op_defs_old(std::vector<OrtCustomOpDomain *> &contrib_domains,
 // Collects every OrtCustomOpDomain contributed by "morphizen_register_ops"
 // plugin symbols (see morphizen/op_def.hpp's OpRegister) into ret_domain.
 // Does a fresh plugin scan on every call -- callers that need this to run
-// at most once per process must cache their own call (see
-// morphizen-ep-factory.cpp's GetCachedCustomOpDomains()).
-MORPHIZEN_DLL_SPEC
+// at most once must cache their own call (see MorphiZenEpFactory's
+// custom_op_domains_ member in morphizen-ep-factory.cpp).
 void CollectCustomOpDomains(std::vector<OrtCustomOpDomain *> &ret_domain) {
   typedef void (*register_ops_t)(void *, add_op_t);
   auto &op_holder = get_global_op_holder();

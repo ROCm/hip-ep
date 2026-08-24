@@ -4,6 +4,7 @@
  */
 #pragma once
 #include "./api-ptrs.hpp"
+#include <vector>
 
 #if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
     MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
@@ -119,6 +120,9 @@ struct MorphiZenEpFactory : OrtEpFactory, ApiPtrs {
       ep_metadata_; // EP metadata
   std::unique_ptr<OrtKeyValuePairs, void (*)(OrtKeyValuePairs *)>
       ep_options_; // EP metadata
+
+  // Custom op domains from this EP factory.
+  std::vector<OrtCustomOpDomain *> custom_op_domains_;
 
 #if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
     MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR

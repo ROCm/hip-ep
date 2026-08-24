@@ -7,9 +7,10 @@
 
 This is the minimal end-to-end check for the schema-only custom-op
 registration module (backend-mlir-compiler/custom-op-schema/): a graph
-containing one com.amd::QMoE node, with the 15 inputs and dtypes from the
-registered schema (see
-backend-mlir-compiler/custom-op-schema/ops/qmoe_schema.cpp), must resolve and
+containing one com.amd::QMoE node, with the 15 inputs from AMD's
+CUSTOM_OP_SCHEMA.md (see
+backend-mlir-compiler/custom-op-schema/schema_only_custom_op.cpp for the
+registered (domain, name) entry), must resolve and
 build a session against hipgpu.dll -- proving ORT recognizes the op and
 can construct a kernel for it (the schema-only stub kernel) -- without
 requiring the HIP dialect op / conversion / lowering / real kernel (that
@@ -44,14 +45,16 @@ from onnx import TensorProto, helper
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
-# hip-ep's own EP dll (schema-only QMoE registration is linked directly
-# into it, see backend-mlir-compiler/custom-op-schema/CMakeLists.txt).
-# Overridable so this also works against a differently located install prefix.
+# hip-ep's own EP dll. Default matches build.py's own default
+# --install_dir (<repo>/../install). Overridable for a differently
+# located install prefix.
 EP_DLL = Path(
-    os.environ.get("HIPEP_QMOE_TEST_DLL", r"C:\workspace\local\bin\hipgpu.dll")
+    os.environ.get(
+        "HIPEP_QMOE_TEST_DLL", str(REPO_ROOT.parent / "install" / "bin" / "hipgpu.dll")
+    )
 )
 
-# index -> (name, dtype). Must match backend-mlir-compiler/custom-op-schema/ops/qmoe_schema.cpp.
+# index -> (name, dtype), matching AMD's CUSTOM_OP_SCHEMA.md for com.amd::QMoE.
 _QMOE_INPUTS = [
     ("hidden_states", TensorProto.FLOAT16),
     ("fc1_expert_weights", TensorProto.UINT8),
@@ -174,11 +177,12 @@ def model_path(tmp_path_factory):
 def test_qmoe_amd_schema_resolves(model_path):
     """A single com.amd::QMoE node must resolve and build a session.
 
-    This proves the schema-only registration (register_custom_op.hpp,
-    SchemaOnlyCustomOpBase, qmoe_schema.cpp, and the morphizen-core /
-    ort-bridge wiring that surfaces it via GetCustomOpDomains) makes ORT
-    recognize com.amd::QMoE end to end, ahead of the dialect op /
-    conversion / lowering / real kernel work (out of scope here).
+    This proves the schema-only registration (hipep::SchemaOnlyCustomOp and
+    the kSchemaOnlyOps table, both in schema_only_custom_op.{hpp,cpp}, and
+    the morphizen-core / ort-bridge wiring that surfaces it via
+    GetCustomOpDomains) makes ORT recognize com.amd::QMoE end to end, ahead
+    of the dialect op / conversion / lowering / real kernel work (out of
+    scope here).
     """
     proc = _run_worker(model_path)
     combined = proc.stdout + "\n" + proc.stderr

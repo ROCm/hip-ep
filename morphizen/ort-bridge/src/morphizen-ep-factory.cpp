@@ -70,6 +70,10 @@ MorphiZenEpFactory::MorphiZenEpFactory(const char *ep_name, ApiPtrs apis,
   GetNumCustomOpDomains = GetNumCustomOpDomainsImpl;
   GetCustomOpDomains = GetCustomOpDomainsImpl;
 
+  // Populate custom_op_domains_ once here so its lifetime is tied to this
+  // factory instance instead of the process.
+  CollectCustomOpDomains(custom_op_domains_);
+
   morphizen::add_cleanup_function("protobuf shutdown", []() {
 #ifdef _WIN32
     google::protobuf::ShutdownProtobufLibrary();
@@ -351,34 +355,24 @@ OrtStatus *ORT_API_CALL MorphiZenEpFactory::CreateSyncStreamForDeviceImpl(
 }
 
 // ORT calls GetNumCustomOpDomainsImpl then GetCustomOpDomainsImpl back to
-// back and requires both to agree on the same set; cache once so repeated
-// calls (e.g. across sessions) all see the same result, and so the
-// underlying plugin scan in CollectCustomOpDomains() only runs once.
-static const std::vector<OrtCustomOpDomain *> &GetCachedCustomOpDomains() {
-  static const std::vector<OrtCustomOpDomain *> cached = [] {
-    std::vector<OrtCustomOpDomain *> ret;
-    // CollectCustomOpDomains is declared in the global namespace (extern "C"
-    // block in onnxruntime_morphizen_ep.hpp, like its neighbors
-    // initialize_onnxruntime_morphizen_ep() etc.), found here via normal
-    // enclosing-namespace lookup from inside `namespace morphizen`.
-    CollectCustomOpDomains(ret);
-    return ret;
-  }();
-  return cached;
-}
-
+// back and requires both to agree on the same set; custom_op_domains_ is
+// populated once in the constructor (see MorphiZenEpFactory::
+// MorphiZenEpFactory above), so both accessors simply read the same
+// factory-owned vector.
 OrtStatus *ORT_API_CALL MorphiZenEpFactory::GetNumCustomOpDomainsImpl(
-    OrtEpFactory * /*this_ptr*/, size_t *num_domains) noexcept {
-  *num_domains = GetCachedCustomOpDomains().size();
+    OrtEpFactory *this_ptr, size_t *num_domains) noexcept {
+  *num_domains =
+      static_cast<MorphiZenEpFactory *>(this_ptr)->custom_op_domains_.size();
   return nullptr;
 }
 
 OrtStatus *ORT_API_CALL MorphiZenEpFactory::GetCustomOpDomainsImpl(
-    OrtEpFactory * /*this_ptr*/, OrtCustomOpDomain **domains,
+    OrtEpFactory *this_ptr, OrtCustomOpDomain **domains,
     size_t num_domains) noexcept {
-  const auto &cached = GetCachedCustomOpDomains();
-  for (size_t i = 0; i < num_domains && i < cached.size(); ++i) {
-    domains[i] = cached[i];
+  const auto &domains_vec =
+      static_cast<MorphiZenEpFactory *>(this_ptr)->custom_op_domains_;
+  for (size_t i = 0; i < num_domains && i < domains_vec.size(); ++i) {
+    domains[i] = domains_vec[i];
   }
   return nullptr;
 }

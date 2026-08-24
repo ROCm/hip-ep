@@ -61,13 +61,12 @@ void deinitialize_onnxruntime_morphizen_ep();
  * OpRegister), independent of the ABI surface calling it.
  *
  * Does a fresh plugin scan on every call -- a caller that needs this to run
- * at most once per process must cache its own call (see
- * morphizen/ort-bridge/src/morphizen-ep-factory.cpp's
- * GetCachedCustomOpDomains()).
+ * at most once must cache its own call (see MorphiZenEpFactory's
+ * custom_op_domains_ member in
+ * morphizen/ort-bridge/src/morphizen-ep-factory.cpp).
  *
  * @param ret_domain Domains are appended to this vector.
  */
-MORPHIZEN_DLL_SPEC
 void CollectCustomOpDomains(std::vector<OrtCustomOpDomain *> &ret_domain);
 
 /**

@@ -3,15 +3,14 @@
 # ** Licensed under the MIT License.
 ##
 
-# Generic ORT custom-op schema registration module. Adding a new op only
-# requires a new ops/*_schema.cpp file added below -- no other file in this
-# CMakeLists.txt or elsewhere needs to change.
-set(LIB_NAME morphizen-custom-op-schema)
+# Generic ORT custom-op schema registration module. Every schema-only op
+# (one that only needs to let ORT load/Resolve a graph containing it, with
+# no real kernel or shape inference) is a one-line entry in the
+# kSchemaOnlyOps table in schema_only_custom_op.cpp
+set(LIB_NAME hipep-custom-op-schema)
 add_library(${LIB_NAME} STATIC
-  register_custom_op.hpp
-  schema_only_custom_op_base.hpp
-  ops/qmoe_schema.cpp
-  # ops/xxx_schema.cpp        # future ops only add a line here
+  schema_only_custom_op.hpp
+  schema_only_custom_op.cpp
 )
 target_compile_features(${LIB_NAME} PRIVATE cxx_std_17)
 target_link_libraries(${LIB_NAME} PRIVATE
@@ -20,8 +19,7 @@ target_link_libraries(${LIB_NAME} PRIVATE
 )
 
 # Must be WHOLE_ARCHIVE-linked into the EP target: otherwise the
-# StaticPluginRegister static object each HIPEP_REGISTER_CUSTOM_OP
-# (register_custom_op.hpp) expands to in every ops/*_schema.cpp is
+# StaticPluginRegister static object in schema_only_custom_op.cpp is
 # referenced by nothing, so the linker drops the whole translation unit and
 # registration silently becomes a no-op.
 if(DEFINED morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET AND
