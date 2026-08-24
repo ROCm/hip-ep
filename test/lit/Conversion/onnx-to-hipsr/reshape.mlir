@@ -189,3 +189,38 @@ func.func @collapse_and_expand(%ctx: !hipsr.context,
       : (tensor<?x8x4xf16>, tensor<2xi64>) -> tensor<?x?xf16>
   "onnx.Return"(%0) : (tensor<?x?xf16>) -> ()
 }
+
+// -----
+
+// The same target shape against an input that states its element count. The -1
+// is resolved while the type is inferred, so nothing about the destination is
+// left to runtime: the shape region is constants alone, the expansion states
+// its dimensions rather than reading them back, and the count never reaches
+// the arithmetic. Neither dimension comes from the type ONNX declared -- the
+// operand states the 4 and the input's count gives the 6.
+// CHECK-LABEL: func.func @static_infers_dim(
+// CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,
+// CHECK-SAME:    %[[INPUT:.*]]: tensor<2x3x4xf16, #hipsr.mem<device>>) -> tensor<6x4xf16, #hipsr.mem<device>> {
+// CHECK-NEXT:    %{{.*}} = hipsr.constant {value = dense<[-1, 4]> : tensor<2xi64>} : tensor<2xi64, #hipsr.mem<device>>
+// CHECK-NEXT:    %[[INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<2x3x4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<6x4xf16, #hipsr.mem<device>> shape_region {
+// CHECK-NEXT:    ^bb0(%{{.*}}: !shape.shape):
+// CHECK-NEXT:      %[[ROWS:.*]] = arith.constant 6 : index
+// CHECK-NEXT:      %[[COLS:.*]] = arith.constant 4 : index
+// CHECK-NEXT:      %[[SHAPE:.*]] = shape.from_extents %[[ROWS]], %[[COLS]] : index, index
+// CHECK-NEXT:      hipsr.shape_yield %[[SHAPE]] : !shape.shape
+// CHECK-NEXT:    }
+// CHECK-NEXT:    %[[RESULT:.*]] = hipsr.compute(%[[CTX]]) ins(%[[INPUT]] : tensor<2x3x4xf16, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<6x4xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT:    ^bb0(%{{.*}}: !hipsr.context, %[[IN:.*]]: tensor<2x3x4xf16, #hipsr.mem<device>>, %{{.*}}: tensor<6x4xf16, #hipsr.mem<device>>):
+// CHECK-NEXT:      %[[FLAT:.*]] = tensor.collapse_shape %[[IN]] {{\[}}[0, 1, 2]] : tensor<2x3x4xf16, #hipsr.mem<device>> into tensor<24xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      %[[OUT:.*]] = tensor.expand_shape %[[FLAT]] {{\[}}[0, 1]] output_shape {{\[}}6, 4] : tensor<24xf16, #hipsr.mem<device>> into tensor<6x4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      hipsr.compute_yield %[[OUT]] : tensor<6x4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:    } : tensor<6x4xf16, #hipsr.mem<device>>{{$}}
+// CHECK-NEXT:    return %[[RESULT]] : tensor<6x4xf16, #hipsr.mem<device>>
+func.func @static_infers_dim(%ctx: !hipsr.context,
+                             %input: tensor<2x3x4xf16>) -> tensor<?x?xf16> {
+  %shape = "onnx.Constant"() {value = dense<[-1, 4]> : tensor<2xi64>}
+      : () -> tensor<2xi64>
+  %0 = "onnx.Reshape"(%input, %shape) {allowzero = 0 : si64}
+      : (tensor<2x3x4xf16>, tensor<2xi64>) -> tensor<?x?xf16>
+  "onnx.Return"(%0) : (tensor<?x?xf16>) -> ()
+}
