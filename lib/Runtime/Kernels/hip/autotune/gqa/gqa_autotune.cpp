@@ -713,10 +713,14 @@ static bool compatibleLut(const fbs::GqaAutotuneLut *lut) {
     int actual = 0;
     if (hipRuntimeGetVersion(&actual) != hipSuccess ||
         actual != lut->rocm_version()) {
+      // A ROCm minor/patch bump shifts kernel timings but rarely reorders which
+      // config wins, so a table tuned on a nearby ROCm still beats the compiled
+      // heuristic by a wide margin. Warn (so the drift is visible and someone
+      // can re-tune) but keep using the table rather than rejecting it.
       fprintf(stderr,
-              "GQA LUT ignored: ROCm runtime version is %d, LUT requires %d\n",
+              "GQA LUT: ROCm runtime is %d but table was tuned on %d -- using "
+              "it anyway; re-tune on this ROCm for optimal configs\n",
               actual, lut->rocm_version());
-      return false;
     }
 #endif
   }
