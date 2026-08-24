@@ -1098,11 +1098,10 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state, int domain_id,
     if (state->pool_base[domain_id]) {
       if (state->stream)
         HIP_CLEANUP(hipStreamSynchronize(state->stream));
-      fprintf(stderr,
-              "hipdnn_ep_get_pool_base: growing pool[%d] %zu -> %zu bytes "
-              "(rare; first time this large input shape was seen)\n",
-              domain_id, state->pool_size[domain_id], needed_size);
-      fflush(stderr);
+      RUNTIME_DEBUG_LOG(
+          "hipdnn_ep_get_pool_base: growing pool[%d] %zu -> %zu bytes "
+          "(rare; first time this large input shape was seen)\n",
+          domain_id, state->pool_size[domain_id], needed_size);
       HIP_CLEANUP(hipFree(state->pool_base[domain_id]));
     }
     void *new_base = nullptr;

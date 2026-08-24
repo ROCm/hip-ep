@@ -31,6 +31,7 @@
 // pluginLibraryPaths). Provided by LibHipCompiler, which every host linking
 // this lib also links (see this dir's CMakeLists).
 #include "hip/Compiler/PluginRegistry.h"
+#include "hip/env.h" // shared cross-platform env reader (single Win32 call)
 
 #include <glog/logging.h>
 
@@ -327,9 +328,11 @@ bool installSearchGenerators(llvm::orc::LLJIT &jit) {
         tried += ", ";
       tried += lib;
     }
-    LOG(WARNING) << "LlvmIrJit: Load(" << tried
-                 << ") failed: " << last_load_error
-                 << "; models needing it will fail at lookup.";
+    if (hipdnn_ep::env_enabled("HIPDNN_EP_DEBUG")) {
+      LOG(WARNING) << "LlvmIrJit: Load(" << tried
+                   << ") failed: " << last_load_error
+                   << "; models needing it will fail at lookup.";
+    }
   }
 
 #ifdef _WIN32
@@ -338,9 +341,11 @@ bool installSearchGenerators(llvm::orc::LLJIT &jit) {
   const char *const kHipdnnBackend = "libhipdnn_backend.so";
 #endif
   if (!loadFirst({kHipdnnBackend})) {
-    LOG(INFO) << "LlvmIrJit: Load(" << kHipdnnBackend
-              << ") failed: " << last_load_error
-              << "; hipDNN graph models will fail at lookup.";
+    if (hipdnn_ep::env_enabled("HIPDNN_EP_DEBUG")) {
+      LOG(INFO) << "LlvmIrJit: Load(" << kHipdnnBackend
+                << ") failed: " << last_load_error
+                << "; hipDNN graph models will fail at lookup.";
+    }
   }
 
 #ifdef HIPDNN_EP_LOAD_KERNEL_DLLS
