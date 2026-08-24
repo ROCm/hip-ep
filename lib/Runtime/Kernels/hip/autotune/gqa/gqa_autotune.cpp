@@ -88,7 +88,6 @@ namespace fbs = mlir::hip;
 //    exact (num_heads, kv_num_heads) pairs for finest-grain matching; existing
 //    Geometry and HeadGroup tiers serve as fuzzy fallback for new models.
 constexpr uint32_t kGqaLutSchemaVersion = 7;
-constexpr size_t kMaxLutBytes = 64u * 1024u * 1024u;
 
 // What a row resolves to once the config name has been expanded.
 struct Answer {
@@ -787,131 +786,6 @@ static bool loadLutBuffer(GqaAutotunePolicy &policy, const uint8_t *data,
   return true;
 }
 
-#if !defined(HIPDNN_EP_GQA_AUTOTUNE_GPU_FREE) &&                               \
-    (defined(_WIN32) || defined(__linux__))
-// Fallback loader: find gqa_autotune.fb in the same directory as this module
-// (the EP DLL / .so).  Used when HIPDNN_GQA_LUT_FILE is not set and the
-// model's EPContext filesystem does not contain the file.  The CMake install
-// rule places gqa_autotune.fb next to custom_kernels_gfx*.dll / .so.
-static bool loadLutFromDllDir(GqaAutotunePolicy &policy) {
-  std::string path;
-#if defined(_WIN32)
-  HMODULE hm = nullptr;
-  if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                              GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                          reinterpret_cast<LPCSTR>(&loadLutFromDllDir), &hm))
-    return false;
-  char buf[MAX_PATH];
-  DWORD len = GetModuleFileNameA(hm, buf, MAX_PATH);
-  if (len == 0 || len >= MAX_PATH)
-    return false;
-  path.assign(buf, len);
-#elif defined(__linux__)
-  Dl_info info{};
-  if (!dladdr(reinterpret_cast<void *>(&loadLutFromDllDir), &info) ||
-      !info.dli_fname)
-    return false;
-  path = info.dli_fname;
-#endif
-  // Trim to directory (keep trailing separator).
-  // Avoid std::string::find_last_of: it calls __std_find_last_of_trivial_pos_1
-  // which is not available to the LLVM JIT linker in the bitcode environment.
-  size_t sep = path.size();
-  while (sep > 0 && path[sep - 1] != '/' && path[sep - 1] != '\\')
-    --sep;
-  if (sep == 0)
-    return false;
-  path = path.substr(0, sep) + kGqaAutotuneFilename;
-  // Read the file with standard C I/O.
-  FILE *f = fopen(path.c_str(), "rb"); // NOLINT
-  if (gqaLutLogOn())
-    fprintf(stderr, "[gqa-lut] DLL-dir candidate '%s' => %s\n", path.c_str(),
-            f ? "opened" : "NOT FOUND");
-  if (!f)
-    return false;
-  if (fseek(f, 0, SEEK_END) != 0) {
-    fclose(f);
-    return false;
-  }
-  const long sz = ftell(f);
-  rewind(f);
-  if (sz <= 0 || static_cast<size_t>(sz) > kMaxLutBytes) {
-    fclose(f);
-    return false;
-  }
-  std::vector<uint8_t> bytes(static_cast<size_t>(sz));
-  const bool ok = fread(bytes.data(), 1, bytes.size(), f) == bytes.size();
-  fclose(f);
-  if (!ok)
-    return false;
-  RUNTIME_DEBUG_LOG("[Runtime DEBUG] GQA LUT loaded from DLL dir: %s\n",
-                    path.c_str());
-  return loadLutBuffer(policy, bytes.data(), bytes.size());
-}
-#endif // !GPU_FREE && (WIN32 || linux)
-
-static void loadLutFromFileSystem(GqaAutotunePolicy &policy,
-                                  morphizen::FileSystem *fs) {
-  if (!fs)
-    return;
-  // Names to try, in order. HIPDNN_GQA_LUT_FILE overrides everything. Otherwise
-  // prefer the arch-specific table the compiler embeds (gqa_autotune_<arch>.fb),
-  // then the legacy fixed name that an explicit compile-time option writes.
-  const std::string &configured_filename =
-      hipdnn_ep::env_string("HIPDNN_GQA_LUT_FILE");
-  std::vector<std::string> candidates;
-  if (!configured_filename.empty()) {
-    candidates.push_back(configured_filename);
-  } else {
-    const std::string arch = currentGpuArch();
-    if (!arch.empty())
-      candidates.push_back("gqa_autotune_" + arch + ".fb");
-    candidates.emplace_back(kGqaAutotuneFilename);
-  }
-
-  for (const std::string &name : candidates) {
-    auto reader = fs->create_reader_template(name.c_str());
-    if (gqaLutLogOn())
-      fprintf(stderr, "[gqa-lut] model FileSystem lookup '%s' => %s\n",
-              name.c_str(), reader ? "found" : "not found");
-    if (!reader)
-      continue;
-    const size_t size = reader->size();
-    if (size == 0 || size > kMaxLutBytes) {
-      fprintf(stderr, "GQA LUT ignored: invalid file size %zu\n", size);
-      return;
-    }
-    if (void *mapped = reader->mmap()) {
-      (void)loadLutBuffer(policy, static_cast<const uint8_t *>(mapped), size);
-      return;
-    }
-    std::vector<uint8_t> bytes(size);
-    reader->rewind();
-    size_t offset = 0;
-    while (offset < size) {
-      const size_t n = reader->fread(bytes.data() + offset, size - offset);
-      if (n == 0)
-        break;
-      offset += n;
-    }
-    if (offset != size) {
-      fprintf(stderr, "GQA LUT ignored: short read (%zu of %zu bytes)\n", offset,
-              size);
-      return;
-    }
-    (void)loadLutBuffer(policy, bytes.data(), bytes.size());
-    return;
-  }
-
-  // Not in the model's EPContext under any candidate name. Fall back to a file
-  // next to the module (works for a native EP DLL; a no-op under JIT bitcode).
-  RUNTIME_DEBUG_LOG("[Runtime DEBUG] no GQA LUT in FileSystem\n");
-#if defined(_WIN32) && !defined(HIPDNN_EP_GQA_AUTOTUNE_GPU_FREE)
-  if (configured_filename.empty())
-    (void)loadLutFromDllDir(policy);
-#endif
-}
-
 // The offline LUT bytes compiled into runtime.bc (lib/Runtime/CMakeLists.txt
 // embeds gfx1151.fb via xxd). Present only in the real runtime; the GPU-free
 // test build supplies its own table through the inspect path and never
@@ -1240,16 +1114,13 @@ void *gqa_autotune_create(morphizen::FileSystem *fs) {
   policy->compute_units = currentComputeUnits();
   const ModeChoice choice = chooseMode();
   policy->mode = choice.mode;
-  // Loaded whatever the mode says. An online session never reads these rows, so
-  // skipping the load looks free -- but it only ever saves work in the mode
-  // that then spends 12-96 GPU launches per decode shape, and it would make the
-  // `inspect` tool in test_gqa_autotune.cpp report that a shipped table does
-  // not load whenever the mode happens to be set in the environment. Loading is
-  // one file read; that is the cheaper of the two mistakes.
-  loadLutFromFileSystem(*policy, fs);
-  // Nothing on disk or in the model? Use the copy baked into runtime.bc.
-  if (policy->table_id == 0)
-    loadLutFromEmbedded(*policy);
+  // The table is compiled into runtime.bc (see lib/Runtime/CMakeLists.txt) and
+  // travels with the build, so it is available to a JIT'd model with no file on
+  // disk and nothing embedded per-model. The EP FileSystem is unused now that
+  // delivery is the embedded copy. Loaded in either mode so `inspect` and the
+  // SUMMARY log below report a shipped table honestly.
+  (void)fs;
+  loadLutFromEmbedded(*policy);
   if (gqaLutLogOn())
     fprintf(stderr,
             "[gqa-lut] SUMMARY mode=%s table_id=%u rows=%zu invalid=%zu => %s\n",
@@ -1264,9 +1135,9 @@ void *gqa_autotune_create(morphizen::FileSystem *fs) {
   if (policy->mode == GqaAutotuneMode::Lookup && policy->table_id == 0)
     fprintf(stderr,
             "GQA autotune: lookup mode requested but no LUT loaded -- using the "
-            "compiled heuristic (GQA perf will be suboptimal). Ensure "
-            "gqa_autotune_<arch>.fb is embedded in the model's EPContext or set "
-            "HIPDNN_GQA_LUT_FILE.\n");
+            "compiled heuristic (GQA perf will be suboptimal). The embedded "
+            "table was rejected; see the 'GQA LUT ...' message above (e.g. GPU "
+            "arch or schema mismatch).\n");
   // Says where the mode came from, not just what it is: on a build whose
   // default was flipped there is no environment variable to inspect, so the log
   // is the only way to tell a deliberate default from an override that did not
