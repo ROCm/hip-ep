@@ -11,10 +11,12 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Pass/PassRegistry.h"
 
+// --hipsr-pipeline is equivalent to running these in order:
+//   --hipsr-add-context-arg
+//   --convert-onnx-to-hipsr
+//   --hipsr-populate-shape-region
 void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
                                      const HipsrPipelineOptions & /*options*/) {
-  // The context argument has to exist before the conversion runs: every
-  // conversion pattern reads the runtime context out of function argument 0.
   pm.addPass(createAddContextArgPass());
   pm.addPass(createConvertOnnxToHipsrPass());
   pm.addNestedPass<func::FuncOp>(createPopulateShapeRegionPass());

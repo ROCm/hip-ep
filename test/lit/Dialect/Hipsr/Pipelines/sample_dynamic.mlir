@@ -1,0 +1,84 @@
+// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
+// sample_static.mlir with the leading extent left symbolic. Where the static
+// file lets every buffer size fold to a constant, here the shape graph is the
+// only thing that knows how large each buffer is, so anything that freezes an
+// extent shows up in this file and nowhere else.
+//
+// See sample_static.mlir for the editing notes; they apply here too.
+//===----------------------------------------------------------------------===//
+
+// RUN: hip-mlir-opt %s --onnx-dialect=modeled --hipsr-pipeline | FileCheck %s
+
+// Matched at the same granularity as sample_static.mlir: boundaries for the
+// recipe-driven regions, whole for the two trivial ones.
+// CHECK-LABEL: func.func @main_graph(
+// CHECK-SAME:      %[[CTX:.+]]: !hipsr.context,
+// CHECK-SAME:      %[[A:.+]]: tensor<?x3xf16, #hipsr.mem<device>> {onnx.name = "a"},
+// CHECK-SAME:      %[[B:.+]]: tensor<?x4xf32, #hipsr.mem<device>> {onnx.name = "b"})
+// CHECK-SAME:      -> (tensor<?x2xf32, #hipsr.mem<device>> {onnx.name = "y"})
+// CHECK-SAME:      attributes {onnx.graph.name = "main_graph"} {
+
+// CHECK-NEXT:    %[[W1:.+]] = hipsr.constant {value = dense<{{.*}}> : tensor<3x1xf16>} : tensor<3x1xf16, #hipsr.mem<device>>
+// CHECK-NEXT:    %[[MM1_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[A]], %[[W1]] : tensor<?x3xf16, #hipsr.mem<device>>, tensor<3x1xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x1xf16, #hipsr.mem<device>> shape_region {
+// CHECK-NEXT:    ^bb0(%{{.+}}: !shape.shape, %{{.+}}: !shape.shape):
+// CHECK:           hipsr.shape_yield %{{.+}} : !shape.shape
+// CHECK-NEXT:    }
+// CHECK-NEXT:    %[[MM1:.+]] = hipsr.matmul(%[[CTX]]) ins(%[[A]], %[[W1]] : tensor<?x3xf16, #hipsr.mem<device>>, tensor<3x1xf16, #hipsr.mem<device>>) outs(%[[MM1_INIT]] : tensor<?x1xf16, #hipsr.mem<device>>) : tensor<?x1xf16, #hipsr.mem<device>>
+
+// CHECK-NEXT:    %[[CAST_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[MM1_INIT]] : tensor<?x1xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x1xf32, #hipsr.mem<device>> shape_region {
+// CHECK-NEXT:    ^bb0(%[[MM1_SHAPE:.+]]: !shape.shape):
+// CHECK-NEXT:      hipsr.shape_yield %[[MM1_SHAPE]] : !shape.shape
+// CHECK-NEXT:    }
+// CHECK-NEXT:    %[[CAST:.+]] = hipsr.cast(%[[CTX]]) ins(%[[MM1]] : tensor<?x1xf16, #hipsr.mem<device>>) outs(%[[CAST_INIT]] : tensor<?x1xf32, #hipsr.mem<device>>) : tensor<?x1xf32, #hipsr.mem<device>>
+
+// The shape init's region stays a constant even here: it sizes the extent
+// vector, which the operand's rank fixes. The dynamic extent shows up one level
+// down, inside the compute body, as a tensor.dim on the operand.
+// CHECK-NEXT:    %[[SHAPE_INIT:.+]] = hipsr.placeholder(%[[CTX]]) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<2xi64, #hipsr.mem<host>> shape_region {
+// CHECK-NEXT:      %[[RANK:.+]] = arith.constant 2 : index
+// CHECK-NEXT:      %[[SHAPE_SHAPE:.+]] = shape.from_extents %[[RANK]] : index
+// CHECK-NEXT:      hipsr.shape_yield %[[SHAPE_SHAPE]] : !shape.shape
+// CHECK-NEXT:    }
+// CHECK-NEXT:    %[[SHAPE:.+]] = hipsr.compute(%[[CTX]]) ins(%[[B]] : tensor<?x4xf32, #hipsr.mem<device>>) outs(%[[SHAPE_INIT]] : tensor<2xi64, #hipsr.mem<host>>) {
+// CHECK-NEXT:    ^bb0(%{{.+}}: !hipsr.context, %[[BODY_B:.+]]: tensor<?x4xf32, #hipsr.mem<device>>, %{{.+}}: tensor<2xi64, #hipsr.mem<host>>):
+// CHECK:           tensor.dim %[[BODY_B]], %{{.+}} : tensor<?x4xf32, #hipsr.mem<device>>
+// CHECK:           hipsr.compute_yield %{{.+}} : tensor<2xi64, #hipsr.mem<host>>
+// CHECK-NEXT:    } : tensor<2xi64, #hipsr.mem<host>>
+
+// CHECK-NEXT:    %[[EXPAND_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[CAST_INIT]], %[[SHAPE_INIT]] : tensor<?x1xf32, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<?x4xf32, #hipsr.mem<device>> shape_region {
+// CHECK-NEXT:    ^bb0(%{{.+}}: !hipsr.context, %{{.+}}: tensor<?x1xf32, #hipsr.mem<device>>, %{{.+}}: tensor<2xi64, #hipsr.mem<host>>):
+// CHECK:           hipsr.shape_yield %{{.+}} : !shape.shape
+// CHECK-NEXT:    }
+// CHECK-NEXT:    %[[EXPAND:.+]] = hipsr.expand(%[[CTX]]) ins(%[[CAST]], %[[SHAPE]] : tensor<?x1xf32, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>) outs(%[[EXPAND_INIT]] : tensor<?x4xf32, #hipsr.mem<device>>) : tensor<?x4xf32, #hipsr.mem<device>>
+
+// CHECK-NEXT:    %[[W2:.+]] = hipsr.constant {value = dense<{{.*}}> : tensor<4x2xf32>} : tensor<4x2xf32, #hipsr.mem<device>>
+// CHECK-NEXT:    %[[MM2_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[EXPAND_INIT]], %[[W2]] : tensor<?x4xf32, #hipsr.mem<device>>, tensor<4x2xf32, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x2xf32, #hipsr.mem<device>> shape_region {
+// CHECK-NEXT:    ^bb0(%{{.+}}: !shape.shape, %{{.+}}: !shape.shape):
+// CHECK:           hipsr.shape_yield %{{.+}} : !shape.shape
+// CHECK-NEXT:    }
+// CHECK-NEXT:    %[[Y:.+]] = hipsr.matmul(%[[CTX]]) ins(%[[EXPAND]], %[[W2]] : tensor<?x4xf32, #hipsr.mem<device>>, tensor<4x2xf32, #hipsr.mem<device>>) outs(%[[MM2_INIT]] : tensor<?x2xf32, #hipsr.mem<device>>) : tensor<?x2xf32, #hipsr.mem<device>>
+
+// CHECK-NEXT:    return %[[Y]] : tensor<?x2xf32, #hipsr.mem<device>>
+// CHECK-NEXT:  }
+func.func @main_graph(%a: tensor<?x3xf16> {onnx.name = "a"},
+                      %b: tensor<?x4xf32> {onnx.name = "b"})
+    -> (tensor<?x2xf32> {onnx.name = "y"})
+    attributes {onnx.graph.name = "main_graph"} {
+  %w1 = "onnx.Constant"() {value = dense<[[1.0], [2.0], [3.0]]> : tensor<3x1xf16>}
+      : () -> tensor<3x1xf16>
+  %mm1 = "onnx.MatMul"(%a, %w1) : (tensor<?x3xf16>, tensor<3x1xf16>)
+      -> tensor<?x1xf16>
+  %cast = "onnx.Cast"(%mm1) {to = f32} : (tensor<?x1xf16>) -> tensor<?x1xf32>
+  %shape = "onnx.Shape"(%b) : (tensor<?x4xf32>) -> tensor<2xi64>
+  %expand = "onnx.Expand"(%cast, %shape)
+      : (tensor<?x1xf32>, tensor<2xi64>) -> tensor<?x4xf32>
+  %w2 = "onnx.Constant"() {value = dense<[[1.0, 2.0], [3.0, 4.0],
+                                          [5.0, 6.0], [7.0, 8.0]]> : tensor<4x2xf32>}
+      : () -> tensor<4x2xf32>
+  %y = "onnx.MatMul"(%expand, %w2) : (tensor<?x4xf32>, tensor<4x2xf32>)
+      -> tensor<?x2xf32>
+  "onnx.Return"(%y) : (tensor<?x2xf32>) -> ()
+}
