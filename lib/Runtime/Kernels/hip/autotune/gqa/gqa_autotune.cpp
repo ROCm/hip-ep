@@ -723,6 +723,15 @@ static bool compatibleLut(const fbs::GqaAutotuneLut *lut) {
   return true;
 }
 
+// Diagnostic gate shared with the per-shape config log in gqa_kernel.hip:
+// setting HIPDNN_EP_GQA_LOG_CONFIG turns on both, so one run shows whether the
+// table loaded AND what config each shape resolved to.
+static bool gqaLutLogOn() {
+  static const bool on =
+      !hipdnn_ep::env_string("HIPDNN_EP_GQA_LOG_CONFIG").empty();
+  return on;
+}
+
 static bool loadLutBuffer(GqaAutotunePolicy &policy, const uint8_t *data,
                           size_t size) {
   flatbuffers::Verifier verifier(data, size);
@@ -811,6 +820,9 @@ static bool loadLutFromDllDir(GqaAutotunePolicy &policy) {
   path = path.substr(0, sep) + kGqaAutotuneFilename;
   // Read the file with standard C I/O.
   FILE *f = fopen(path.c_str(), "rb"); // NOLINT
+  if (gqaLutLogOn())
+    fprintf(stderr, "[gqa-lut] DLL-dir candidate '%s' => %s\n", path.c_str(),
+            f ? "opened" : "NOT FOUND");
   if (!f)
     return false;
   if (fseek(f, 0, SEEK_END) != 0) {
@@ -845,6 +857,9 @@ static void loadLutFromFileSystem(GqaAutotunePolicy &policy,
                              : configured_filename.c_str();
 
   auto reader = fs->create_reader_template(filename);
+  if (gqaLutLogOn())
+    fprintf(stderr, "[gqa-lut] model FileSystem lookup '%s' => %s\n", filename,
+            reader ? "found" : "not found (will try DLL dir)");
   if (!reader) {
     RUNTIME_DEBUG_LOG("[Runtime DEBUG] no GQA LUT found at %s\n", filename);
 #if defined(_WIN32) && !defined(HIPDNN_EP_GQA_AUTOTUNE_GPU_FREE)
@@ -1193,6 +1208,14 @@ void *gqa_autotune_create(morphizen::FileSystem *fs) {
   // not load whenever the mode happens to be set in the environment. Loading is
   // one file read; that is the cheaper of the two mistakes.
   loadLutFromFileSystem(*policy, fs);
+  if (gqaLutLogOn())
+    fprintf(stderr,
+            "[gqa-lut] SUMMARY mode=%s table_id=%u rows=%zu invalid=%zu => %s\n",
+            modeName(policy->mode), policy->table_id, policy->rows.size(),
+            static_cast<size_t>(
+                policy->invalid_entries.load(std::memory_order_relaxed)),
+            policy->table_id ? "TABLE (LUT active)"
+                             : "HEURISTIC (no usable table loaded)");
   // Says where the mode came from, not just what it is: on a build whose
   // default was flipped there is no environment variable to inspect, so the log
   // is the only way to tell a deliberate default from an override that did not
