@@ -23,13 +23,10 @@
 // CHECK-NEXT:    %{{.*}} = hipsr.constant {value = dense<-1> : tensor<1xi64>} : tensor<1xi64, #hipsr.mem<device>>
 // CHECK-NEXT:    %[[INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<?x4096xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?xf16, #hipsr.mem<device>> shape_region {
 // CHECK-NEXT:    ^bb0(%[[IN_SHAPE:.*]]: !shape.shape):
-// CHECK-NEXT:      %[[AXIS:.*]] = shape.const_size 0
-// CHECK-NEXT:      %[[SIZE:.*]] = shape.get_extent %[[IN_SHAPE]], %[[AXIS]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:      %[[ROWS:.*]] = shape.size_to_index %[[SIZE]] : !shape.size
-// CHECK-NEXT:      %[[COLS:.*]] = arith.constant 4096 : index
-// CHECK-NEXT:      %[[COUNT:.*]] = arith.muli %[[ROWS]], %[[COLS]] : index
+// CHECK-NEXT:      %[[COUNT:.*]] = shape.num_elements %[[IN_SHAPE]] : !shape.shape -> !shape.size
+// CHECK-NEXT:      %[[DIVIDEND:.*]] = shape.size_to_index %[[COUNT]] : !shape.size
 // CHECK-NEXT:      %[[DIVISOR:.*]] = arith.constant 1 : index
-// CHECK-NEXT:      %[[DIM:.*]] = arith.divui %[[COUNT]], %[[DIVISOR]] : index
+// CHECK-NEXT:      %[[DIM:.*]] = arith.divui %[[DIVIDEND]], %[[DIVISOR]] : index
 // CHECK-NEXT:      %[[SHAPE:.*]] = shape.from_extents %[[DIM]] : index
 // CHECK-NEXT:      hipsr.shape_yield %[[SHAPE]] : !shape.shape
 // CHECK-NEXT:    }
@@ -60,13 +57,10 @@ func.func @flatten_dynamic(%ctx: !hipsr.context,
 // CHECK-NEXT:    %{{.*}} = hipsr.constant {value = dense<[-1, 4096]> : tensor<2xi64>} : tensor<2xi64, #hipsr.mem<device>>
 // CHECK-NEXT:    %[[INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<?xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x4096xf16, #hipsr.mem<device>> shape_region {
 // CHECK-NEXT:    ^bb0(%[[IN_SHAPE:.*]]: !shape.shape):
-// CHECK-NEXT:      %[[AXIS:.*]] = shape.const_size 0
-// CHECK-NEXT:      %[[SIZE:.*]] = shape.get_extent %[[IN_SHAPE]], %[[AXIS]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:      %[[DIM0:.*]] = shape.size_to_index %[[SIZE]] : !shape.size
-// CHECK-NEXT:      %[[ONE:.*]] = arith.constant 1 : index
-// CHECK-NEXT:      %[[COUNT:.*]] = arith.muli %[[DIM0]], %[[ONE]] : index
+// CHECK-NEXT:      %[[COUNT:.*]] = shape.num_elements %[[IN_SHAPE]] : !shape.shape -> !shape.size
+// CHECK-NEXT:      %[[DIVIDEND:.*]] = shape.size_to_index %[[COUNT]] : !shape.size
 // CHECK-NEXT:      %[[DIVISOR:.*]] = arith.constant 4096 : index
-// CHECK-NEXT:      %[[ROWS:.*]] = arith.divui %[[COUNT]], %[[DIVISOR]] : index
+// CHECK-NEXT:      %[[ROWS:.*]] = arith.divui %[[DIVIDEND]], %[[DIVISOR]] : index
 // CHECK-NEXT:      %[[COLS:.*]] = arith.constant 4096 : index
 // CHECK-NEXT:      %[[SHAPE:.*]] = shape.from_extents %[[ROWS]], %[[COLS]] : index, index
 // CHECK-NEXT:      hipsr.shape_yield %[[SHAPE]] : !shape.shape
@@ -150,24 +144,19 @@ func.func @refines_to_input(%ctx: !hipsr.context,
 // one, and the inferred type is what the compute carries, so it reaches the
 // signature instead of being widened back to the one ONNX declared.
 //
-// The input's 8x4 and the stated 32 are the same number, so the multiply and
-// the divide undo each other and leave the batch. Neither folds away, since
-// arith cannot assume the product stays in range. An expansion cannot take its
-// dimensions from the flat form, so it reads them off the destination the shape
-// region resolved.
+// Regrouping 8x4 into 32 takes both a collapse and an expand. An expansion
+// cannot take its dimensions from the flat form, so it reads them off the
+// destination the shape region resolved.
 // CHECK-LABEL: func.func @collapse_and_expand(
 // CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,
 // CHECK-SAME:    %[[INPUT:.*]]: tensor<?x8x4xf16, #hipsr.mem<device>>) -> tensor<?x32xf16, #hipsr.mem<device>> {
 // CHECK-NEXT:    %{{.*}} = hipsr.constant {value = dense<[-1, 32]> : tensor<2xi64>} : tensor<2xi64, #hipsr.mem<device>>
 // CHECK-NEXT:    %[[INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<?x8x4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x32xf16, #hipsr.mem<device>> shape_region {
 // CHECK-NEXT:    ^bb0(%[[IN_SHAPE:.*]]: !shape.shape):
-// CHECK-NEXT:      %[[AXIS:.*]] = shape.const_size 0
-// CHECK-NEXT:      %[[SIZE:.*]] = shape.get_extent %[[IN_SHAPE]], %[[AXIS]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:      %[[BATCH:.*]] = shape.size_to_index %[[SIZE]] : !shape.size
-// CHECK-NEXT:      %[[GROUP:.*]] = arith.constant 32 : index
-// CHECK-NEXT:      %[[COUNT:.*]] = arith.muli %[[BATCH]], %[[GROUP]] : index
+// CHECK-NEXT:      %[[COUNT:.*]] = shape.num_elements %[[IN_SHAPE]] : !shape.shape -> !shape.size
+// CHECK-NEXT:      %[[DIVIDEND:.*]] = shape.size_to_index %[[COUNT]] : !shape.size
 // CHECK-NEXT:      %[[DIVISOR:.*]] = arith.constant 32 : index
-// CHECK-NEXT:      %[[ROWS:.*]] = arith.divui %[[COUNT]], %[[DIVISOR]] : index
+// CHECK-NEXT:      %[[ROWS:.*]] = arith.divui %[[DIVIDEND]], %[[DIVISOR]] : index
 // CHECK-NEXT:      %[[COLS:.*]] = arith.constant 32 : index
 // CHECK-NEXT:      %[[SHAPE:.*]] = shape.from_extents %[[ROWS]], %[[COLS]] : index, index
 // CHECK-NEXT:      hipsr.shape_yield %[[SHAPE]] : !shape.shape

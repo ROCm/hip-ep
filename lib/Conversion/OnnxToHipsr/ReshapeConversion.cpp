@@ -121,35 +121,18 @@ inferResultType(onnx::ReshapeOp op, RankedTensorType inputType, Value shape,
 // The destination
 //===----------------------------------------------------------------------===//
 
-// `!shape.size` carries an error state arith cannot express, so a dimension
-// read off a `!shape.shape` converts to index first.
-Value readDim(OpBuilder &builder, Location loc, Value shape, int64_t axis) {
-  Value size = shape::GetExtentOp::create(builder, loc, shape, axis);
-  return shape::SizeToIndexOp::create(builder, loc, builder.getIndexType(),
-                                      size);
-}
-
 // The dimension ONNX wrote as -1: the input's element count over the dimensions
-// the target shape does state.
-Value buildInferredDim(OpBuilder &builder, Location loc,
-                       RankedTensorType inputType, int64_t resultStaticCount,
-                       Value inputShape) {
+// the target shape does state. `shape.num_elements` is the product of every
+// extent the shape holds, so the rank stays out of it. `!shape.size` carries an
+// error state arith cannot express, so the count converts to index to divide.
+Value buildInferredDim(OpBuilder &builder, Location loc, Value inputShape,
+                       int64_t resultStaticCount) {
   assert(resultStaticCount > 0 &&
          "a 0 result dimension is rejected before this point");
 
-  SmallVector<Value> dividendFactors;
-  for (int64_t axis : llvm::seq<int64_t>(0, inputType.getRank())) {
-    if (inputType.isDynamicDim(axis)) {
-      dividendFactors.push_back(readDim(builder, loc, inputShape, axis));
-    }
-  }
-  dividendFactors.push_back(arith::ConstantIndexOp::create(
-      builder, loc, productOfStaticDims(inputType.getShape())));
-
-  Value dividend = dividendFactors.front();
-  for (Value factor : llvm::drop_begin(dividendFactors)) {
-    dividend = arith::MulIOp::create(builder, loc, dividend, factor);
-  }
+  Value count = shape::NumElementsOp::create(builder, loc, inputShape);
+  Value dividend =
+      shape::SizeToIndexOp::create(builder, loc, builder.getIndexType(), count);
   Value divisor =
       arith::ConstantIndexOp::create(builder, loc, resultStaticCount);
   return arith::DivUIOp::create(builder, loc, dividend, divisor);
@@ -158,9 +141,8 @@ Value buildInferredDim(OpBuilder &builder, Location loc,
 // One value per result axis: a stated dimension is a constant, the inferred one
 // is computed off the input's shape.
 void populateShapeRegion(OpBuilder &builder, PlaceholderOp placeholder,
-                         RankedTensorType inputType,
-                         RankedTensorType resultType) {
-  assert(llvm::count_if(resultType.getShape(), ShapedType::isDynamic) <= 1 &&
+                         ArrayRef<int64_t> resultShape) {
+  assert(llvm::count_if(resultShape, ShapedType::isDynamic) <= 1 &&
          "a second inferred dimension is rejected before this point");
 
   OpBuilder::InsertionGuard guard(builder);
@@ -170,11 +152,10 @@ void populateShapeRegion(OpBuilder &builder, PlaceholderOp placeholder,
   Location loc = placeholder.getLoc();
   Value inputShape = PlaceholderShapeRegionArgs{block}.in(0);
   SmallVector<Value> dims =
-      llvm::map_to_vector(resultType.getShape(), [&](int64_t dim) -> Value {
+      llvm::map_to_vector(resultShape, [&](int64_t dim) -> Value {
         if (ShapedType::isDynamic(dim)) {
-          return buildInferredDim(builder, loc, inputType,
-                                  productOfStaticDims(resultType.getShape()),
-                                  inputShape);
+          return buildInferredDim(builder, loc, inputShape,
+                                  productOfStaticDims(resultShape));
         }
         return arith::ConstantIndexOp::create(builder, loc, dim);
       });
@@ -306,7 +287,7 @@ struct ReshapeToHipsr : public OpConversionPattern<onnx::ReshapeOp> {
     auto init =
         PlaceholderOp::create(rewriter, loc, TypeRange{resultType}, *ctx,
                               ValueRange{input}, PlaceholderType::Normal);
-    populateShapeRegion(rewriter, init, inputType, resultType);
+    populateShapeRegion(rewriter, init, resultType.getShape());
 
     auto computeOp =
         ComputeOp::create(rewriter, loc, TypeRange{resultType}, *ctx,
