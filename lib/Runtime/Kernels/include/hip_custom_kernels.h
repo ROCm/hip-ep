@@ -1197,6 +1197,34 @@ HIP_KERNEL_API int hip_resize(
     int nearest_mode);
 
 /* =========================================================================
+ * GridSample (ONNX 4-D NCHW)
+ * =========================================================================
+ *
+ * Samples input (N, C, H_in, W_in) at normalized (x, y) locations from
+ * grid (N, H_out, W_out, 2). Output is (N, C, H_out, W_out).
+ *
+ *  mode:           0 = nearest, 1 = bilinear
+ *  padding_mode:   0 = zeros, 1 = border, 2 = reflection
+ *  align_corners:  0 or 1
+ *
+ * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64.
+ * Returns: 0 on success, non-zero on failure.
+ */
+HIP_KERNEL_API int hip_grid_sample(
+    void* stream,
+    const void* input,
+    const void* grid,
+    void* output,
+    int64_t n, int64_t c,
+    int64_t in_h, int64_t in_w,
+    int64_t out_h, int64_t out_w,
+    int mode,
+    int padding_mode,
+    int align_corners,
+    int hip_dtype);
+
+/* =========================================================================
  * Global pool (avg / max / lp)
  * =========================================================================
  *
