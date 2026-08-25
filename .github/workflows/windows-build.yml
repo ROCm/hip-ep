@@ -49,11 +49,14 @@ jobs:
       # editing this list auto-invalidates the cached ORT install prefix.
       # Remove a PR number once its fix is in the pinned ONNXRUNTIME_VERSION.
       ONNXRUNTIME_PR_PATCHES: ""
-      OGA_VERSION: "0.14.0"
-      # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
-      # pull/<n>.patch and `git apply` on top of v<OGA_VERSION>. Part of the OGA
-      # cache key. Remove a PR once it lands in the pinned OGA release.
-      OGA_PR_PATCHES: "2194"
+      # Fork branch carrying AMDGPU MorphiZen integration (former PR 2194) plus
+      # sliding_window support.
+      OGA_REPO: "amd-genmingz/onnxruntime-genai"
+      OGA_REF: "test_0_3"
+      # Optional space-separated microsoft/onnxruntime-genai PR numbers applied
+      # on top of the fork checkout via pull/<n>.patch + git am. Empty when the
+      # fork branch already carries the needed integration.
+      OGA_PR_PATCHES: ""
       # ilammy/msvc-dev-cmd and mozilla-actions/sccache-action have no
       # Node.js 24 releases yet; allow Node.js 20 until they are updated.
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
@@ -368,22 +371,20 @@ jobs:
         with:
           path: ${{ runner.workspace }}/oga-artifacts
           # OGA is built against the patched ort-install, so the key folds in
-          # both OGA's own PR list and ONNXRUNTIME_PR_PATCHES; editing either
-          # forces a rebuild. The mm<N> token bumps when the OGA artifact set
-          # changes shape, or when a PR's branch content changes under the same
-          # number (mm2: PR 2194 now carries the AMDGPU OGA integration).
-          key: oga-dml-mm2-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
+          # the fork ref, optional OGA_PR_PATCHES, and ONNXRUNTIME_PR_PATCHES.
+          # The mm<N> token bumps when the OGA artifact set changes shape.
+          key: oga-dml-mm3-${{ env.OGA_REPO }}-${{ env.OGA_REF }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
 
-      # OGA is built from upstream microsoft/onnxruntime-genai + PR patches
-      # (OGA_PR_PATCHES). PR 2194 (the dynamic-shape-morphizen branch) now also
-      # carries the AMDGPU umbrella integration, so the patched upstream build
-      # is the AMDGPU-targeted OGA -- no fork checkout needed.
+      # OGA is built from the OGA_REPO / OGA_REF fork branch, which carries the
+      # AMDGPU MorphiZen integration (what PR 2194 used to supply) plus
+      # sliding_window support. Optional OGA_PR_PATCHES apply extra upstream PRs
+      # on top of the fork checkout.
       - name: Checkout OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: microsoft/onnxruntime-genai
-          ref: v${{ env.OGA_VERSION }}
+          repository: ${{ env.OGA_REPO }}
+          ref: ${{ env.OGA_REF }}
           path: source-oga
           submodules: true
           fetch-depth: 1
