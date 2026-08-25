@@ -19,7 +19,6 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/Func/Transforms/FuncConversions.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -120,10 +119,10 @@ struct ConvertOnnxToHipsrPass
     populateMatMulConversionPatterns(converter, patterns, &getContext());
     populateExpandConversionPatterns(converter, patterns, &getContext());
     populateShapeConversionPatterns(converter, patterns, &getContext());
-    populateReturnConversionPatterns(patterns, &getContext());
+    populateReshapeConversionPatterns(converter, patterns, &getContext());
+    populateReturnConversionPatterns(converter, patterns, &getContext());
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns,
                                                                    converter);
-    populateReturnOpTypeConversionPattern(patterns, converter);
 
     if (failed(applyFullConversion(module, target, std::move(patterns)))) {
       signalPassFailure();

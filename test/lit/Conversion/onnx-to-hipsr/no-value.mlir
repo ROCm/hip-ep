@@ -16,5 +16,5 @@
 // CHECK-NEXT:    return %[[INPUT]] : tensor<2x3xf16, #hipsr.mem<device>>
 func.func @dead_placeholder(%input: tensor<2x3xf16>) -> tensor<2x3xf16> {
   %none = "onnx.NoValue"() {value} : () -> none
-  return %input : tensor<2x3xf16>
+  "onnx.Return"(%input) : (tensor<2x3xf16>) -> ()
 }

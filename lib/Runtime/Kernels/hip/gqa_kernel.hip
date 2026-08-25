@@ -1064,11 +1064,16 @@ extern "C" int hip_gqa_causal_mask_f32(
   GQA_RETURN_LAUNCH_STATUS();
 }
 
+// `sq` counts the query rows present in `scores`, which is a chunk of the full
+// query range when the caller is tiling the prefill. `bias_sq` is the full query
+// extent of the bias tensor and `bias_row_offset` locates the chunk inside it --
+// the two cannot be folded together because the bias plane stride is set by the
+// full extent while the score plane stride is set by the chunk.
 template <typename TBias>
 __global__ void add_attention_bias_kernel(
     float* __restrict__ scores, const TBias* __restrict__ bias,
     int total_heads, int num_heads, int bias_batch, int bias_heads, int sq,
-    int total_seq, int score_batch_stride) {
+    int total_seq, int score_batch_stride, int bias_sq, int bias_row_offset) {
   int head = blockIdx.y;
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int n = sq * total_seq;
@@ -1080,9 +1085,10 @@ __global__ void add_attention_bias_kernel(
   int h = head % num_heads;
   int bias_b = (bias_batch == 1) ? 0 : b;
   int bias_h = (bias_heads == 1) ? 0 : h;
-  size_t bias_idx = static_cast<size_t>(bias_b) * bias_heads * sq * total_seq +
-                    static_cast<size_t>(bias_h) * sq * total_seq +
-                    static_cast<size_t>(row) * total_seq + col;
+  size_t bias_plane = static_cast<size_t>(bias_sq) * total_seq;
+  size_t bias_idx = static_cast<size_t>(bias_b) * bias_heads * bias_plane +
+                    static_cast<size_t>(bias_h) * bias_plane +
+                    static_cast<size_t>(bias_row_offset + row) * total_seq + col;
   scores[static_cast<size_t>(head) * score_batch_stride + tid] +=
       static_cast<float>(bias[bias_idx]);
 }
@@ -1090,10 +1096,13 @@ __global__ void add_attention_bias_kernel(
 extern "C" int hip_gqa_add_attention_bias_f32(
     void* stream_ptr, void* scores, const void* bias, int total_heads,
     int num_heads, int bias_batch, int bias_heads, int sq, int total_seq,
-    int score_batch_stride, int bias_element_size_bytes) {
+    int score_batch_stride, int bias_element_size_bytes, int bias_sq,
+    int bias_row_offset) {
   if (!scores || !bias)
     return -1;
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  if (bias_sq <= 0)
+    bias_sq = sq;
   int n = sq * total_seq;
   int blocksX = (n + GQA_THREADS - 1) / GQA_THREADS;
   (void)hipGetLastError();
@@ -1102,13 +1111,13 @@ extern "C" int hip_gqa_add_attention_bias_f32(
         <<<dim3(blocksX, total_heads), GQA_THREADS, 0, stream>>>(
             static_cast<float*>(scores), static_cast<const __half*>(bias),
             total_heads, num_heads, bias_batch, bias_heads, sq, total_seq,
-            score_batch_stride);
+            score_batch_stride, bias_sq, bias_row_offset);
   } else if (bias_element_size_bytes == 4) {
     add_attention_bias_kernel<float>
         <<<dim3(blocksX, total_heads), GQA_THREADS, 0, stream>>>(
             static_cast<float*>(scores), static_cast<const float*>(bias),
             total_heads, num_heads, bias_batch, bias_heads, sq, total_seq,
-            score_batch_stride);
+            score_batch_stride, bias_sq, bias_row_offset);
   } else {
     fprintf(stderr,
             "hip_gqa_add_attention_bias_f32: unsupported bias elem size %d\n",
@@ -2173,6 +2182,15 @@ static inline void launchFlashDecodeConfig(
     const __half* hSink, int use_smooth_softmax) {
   const int splits = cfg.splits;
   const bool use_wmma = cfg.use_wmma && flash_decode_wmma_supported(d, hpg);
+  // Diagnostic: print the config actually launched (works in both lookup and
+  // online/autotune modes) so a run can be diffed against the other mode.
+  static const bool s_log_cfg = getenv("HIPDNN_EP_GQA_LOG_CONFIG") != nullptr;
+  if (s_log_cfg)
+    fprintf(stderr,
+            "[gqa-cfg] decode B=%d H=%d G=%d d=%d hpg=%d maxseq=%d -> "
+            "impl=%s splits=%d bkv=%d\n",
+            B, H, G, d, hpg, max_seq, use_wmma ? "wmma" : "scalar", splits,
+            cfg.bkv);
   if (use_wmma) {
     // BKV: D=64 has both 16 and 32 instantiated and cfg.bkv picks between them;
     // D=128 has only 32. Grid (G, splits, B), one wave per block.
@@ -2527,7 +2545,7 @@ static std::mutex g_flash_decode_i8_mutex;
 // decode). Both formats share this autotune/env skeleton and emit identical
 // [B,H,splits,d+2] partials, so only the tune/launch tail differs. Adding INT4/
 // FP8 = one enumerator (hip_kv_dtype_t) + a kernel specialization + a branch.
-extern "C" int hip_gqa_flash_decode(
+static int runGqaFlashDecode(
     void* stream_ptr,
     const void* Q, const void* Kcache, const void* Vcache,
     void* O,
@@ -2540,7 +2558,11 @@ extern "C" int hip_gqa_flash_decode(
     int use_smooth_softmax,
     int kv_dtype,
     const void* k_scale,
-    const void* v_scale) {
+    const void* v_scale,
+    int configured_use_wmma,
+    int configured_splits,
+    int configured_bkv,
+    bool allow_autotune) {
   // HPG = heads-per-group (Q heads sharing one KV head). The kernels are
   // instantiated for HPG=4 (Llama-3.x family at d=64 and d=128), HPG=5
   // (Qwen2.5-14B's 40:8 at d=128) and HPG=8 (gpt-oss-20b at d=64). HPG=8 with
@@ -2599,7 +2621,7 @@ extern "C" int hip_gqa_flash_decode(
                            ? local_window_size
                            : eff_skv;
 
-  // --- Config selection: env override > autotune cache > one-shot tune ---
+  // --- Config selection: explicit LUT config > env override > online tune ---
   // Heuristic default favours WMMA at d==64, but only where it is templated;
   // every other geometry (incl. MHA) starts from the scalar kernel. The split
   // count is sized from the device rather than fixed, and keys off tune_len so
@@ -2609,7 +2631,29 @@ extern "C" int hip_gqa_flash_decode(
       default_wmma,
       flashDecodeDefaultSplits(default_wmma, B, H, G, tune_len, cap)};
 
-  bool forced = false;
+  bool forced = !allow_autotune;
+  if (!allow_autotune) {
+    if (configured_use_wmma < 0 || configured_splits < 1 ||
+        configured_bkv < 1) {
+      fprintf(stderr,
+              "hip_gqa_flash_decode_configured: missing explicit config\n");
+      return -1;
+    }
+    if (configured_splits > cap || (configured_bkv != 16 &&
+                                    configured_bkv != 32) ||
+        (configured_use_wmma == 0 && configured_bkv != 16) ||
+        (configured_use_wmma != 0 &&
+         !flash_decode_wmma_supported(d, hpg))) {
+      fprintf(stderr,
+              "hip_gqa_flash_decode_configured: invalid config "
+              "(wmma=%d splits=%d bkv=%d cap=%d H=%d G=%d d=%d)\n",
+              configured_use_wmma, configured_splits, configured_bkv, cap, H,
+              G, d);
+      return -1;
+    }
+    cfg = FlashDecodeCfg{configured_use_wmma != 0, configured_splits,
+                         configured_bkv};
+  }
   if (const char* e = getenv("HIPDNN_GQA_DECODE_SCALAR")) { if (atoi(e) != 0) { cfg.use_wmma = false; forced = true; } }
   if (const char* e = getenv("HIPDNN_GQA_DECODE_WMMA"))   { if (atoi(e) != 0) { cfg.use_wmma = true;  forced = true; } }
   if (const char* e = getenv("HIPDNN_GQA_DECODE_SPLITS")) {
@@ -2685,6 +2729,55 @@ extern "C" int hip_gqa_flash_decode(
       max_seq, scale, iSeq, local_window_size, hSink, use_smooth_softmax);
 
   return hipGetLastError();
+}
+
+// Keep the established public entry as the online-tuning path. The lookup-only
+// sibling below takes an explicit config from gqa_autotune.cpp.
+extern "C" int hip_gqa_flash_decode(
+    void* stream_ptr,
+    const void* Q, const void* Kcache, const void* Vcache,
+    void* O,
+    void* partials_workspace,
+    int B, int H, int G, int d, int skv, int max_seq, int max_splits,
+    float scale,
+    const void* seqlens_k,
+    int local_window_size,
+    const void* head_sink,
+    int use_smooth_softmax,
+    int kv_dtype,
+    const void* k_scale,
+    const void* v_scale) {
+  return runGqaFlashDecode(
+      stream_ptr, Q, Kcache, Vcache, O, partials_workspace, B, H, G, d, skv,
+      max_seq, max_splits, scale, seqlens_k, local_window_size, head_sink,
+      use_smooth_softmax, kv_dtype, k_scale, v_scale,
+      /*configured_use_wmma=*/-1, /*configured_splits=*/0,
+      /*configured_bkv=*/-1,
+      /*allow_autotune=*/true);
+}
+
+extern "C" int hip_gqa_flash_decode_configured(
+    void* stream_ptr,
+    const void* Q, const void* Kcache, const void* Vcache,
+    void* O,
+    void* partials_workspace,
+    int B, int H, int G, int d, int skv, int max_seq, int max_splits,
+    float scale,
+    const void* seqlens_k,
+    int local_window_size,
+    const void* head_sink,
+    int use_smooth_softmax,
+    int kv_dtype,
+    const void* k_scale,
+    const void* v_scale,
+    int use_wmma,
+    int splits,
+    int bkv) {
+  return runGqaFlashDecode(
+      stream_ptr, Q, Kcache, Vcache, O, partials_workspace, B, H, G, d, skv,
+      max_seq, max_splits, scale, seqlens_k, local_window_size, head_sink,
+      use_smooth_softmax, kv_dtype, k_scale, v_scale, use_wmma, splits, bkv,
+      /*allow_autotune=*/false);
 }
 
 //===----------------------------------------------------------------------===//
@@ -3021,6 +3114,12 @@ static inline void dispatchPrefillV5(
     const _Float16* head_sink, int num_heads, int smooth_softmax,
     int local_window_size)
 {
+    static const bool s_log_cfg = getenv("HIPDNN_EP_GQA_LOG_CONFIG") != nullptr;
+    if (s_log_cfg)
+        fprintf(stderr,
+                "[gqa-cfg] prefill v5 B=%d H=%d G=%d d=%d sq=%d skv=%d -> "
+                "m_tiles=%d bkv=%d\n",
+                B, Hq, G, d, sq, skv, m_tiles, bkv);
     const int rows = m_tiles * 16;
     const int num_q_tiles = (sq + rows - 1) / rows;
     dim3 grid(num_q_tiles * B, Hq);
@@ -3390,6 +3489,12 @@ static inline void dispatchPrefillV7(
     _Float16* O, int B, int Hq, int G, int sq, int skv, int max_seq,
     int past_len, float scale)
 {
+    static const bool s_log_cfg = getenv("HIPDNN_EP_GQA_LOG_CONFIG") != nullptr;
+    if (s_log_cfg)
+        fprintf(stderr,
+                "[gqa-cfg] prefill v7 B=%d H=%d G=%d d=%d sq=%d skv=%d -> "
+                "nw=%d bkv=%d mt=%d\n",
+                B, Hq, G, d, sq, skv, nw, bkv, mt);
     const int rows = nw * mt * 16;
     const int num_q_tiles = (sq + rows - 1) / rows;
     dim3 grid(num_q_tiles * B, Hq);
@@ -3838,6 +3943,12 @@ static inline void dispatchPrefillV8(
     _Float16* O, int B, int Hq, int G, int sq, int skv, int max_seq,
     int past_len, float scale)
 {
+    static const bool s_log_cfg = getenv("HIPDNN_EP_GQA_LOG_CONFIG") != nullptr;
+    if (s_log_cfg)
+        fprintf(stderr,
+                "[gqa-cfg] prefill v8 B=%d H=%d G=%d d=%d sq=%d skv=%d -> "
+                "nd=%d mt=%d bkv=%d\n",
+                B, Hq, G, d, sq, skv, nd, mt, bkv);
     const int rows = mt * 16;
     const int num_q_tiles = (sq + rows - 1) / rows;
     dim3 grid(num_q_tiles * B, Hq);
@@ -3896,7 +4007,10 @@ struct PrefillV8Cfg { int nd; int mt; int bkv; };
 // hopeless regardless, which removes BKV=64 and all of MT=2.
 static inline int prefillV8Candidates(int d, PrefillV8Cfg* out) {
     static const PrefillV8Cfg kTuned[] = {
-        {2, 1, 16}, {4, 1, 16}, {4, 1, 32}, {8, 1, 16}};
+        {2, 1, 16}, {4, 1, 16}, {4, 1, 32}, {8, 1, 16},
+        // dispatchPrefillV8's default launch and what the offline LUT selects
+        // for D256; keep it here so the configured entry accepts that row.
+        {2, 1, 32}};
     int n = 0;
     for (const PrefillV8Cfg& c : kTuned)
         if (prefillV8SmemBytes(c.nd, c.mt, c.bkv, d) <= kPrefillV8MaxSmem)
@@ -4189,6 +4303,70 @@ extern "C" int hip_gqa_flash_prefill_v2(
         return hip_gqa_flash_prefill_v7_v2(stream_ptr, Q, Kcache, Vcache, O,
                                         B, Hq, G, sq, skv, d, max_seq, past_len,
                                         scale);
+    }
+    return -1;
+}
+
+// Lookup-only prefill entry. Unlike v2/v3, every launch parameter comes from a
+// runtime-validated offline LUT or deterministic heuristic, so this path never
+// enters tunePrefillV5Cfg/tunePrefillV7Cfg/tunePrefillV8Cfg.
+extern "C" int hip_gqa_flash_prefill_v3_configured(
+    void* stream_ptr,
+    const void* Q, const void* Kcache, const void* Vcache, void* O,
+    int B, int Hq, int G, int sq, int skv, int d, int max_seq, int past_len,
+    float scale, int local_window_size, const void* head_sink,
+    int num_heads, int smooth_softmax,
+    int m_tiles, int bkv, int nw, int mt, int nd)
+{
+    const bool wants_sink = head_sink != nullptr || smooth_softmax != 0;
+    const bool wants_window = local_window_size > 0;
+    if ((wants_sink || wants_window) && d != 64) return -1;
+
+    hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+    const _Float16* Q_ptr = static_cast<const _Float16*>(Q);
+    const _Float16* K_ptr = static_cast<const _Float16*>(Kcache);
+    const _Float16* V_ptr = static_cast<const _Float16*>(Vcache);
+    _Float16* O_ptr = static_cast<_Float16*>(O);
+
+    if (d == 64) {
+        PrefillV5Cfg candidates[8];
+        const int count = prefillV5Candidates(d, candidates);
+        bool valid = false;
+        for (int i = 0; i < count; ++i)
+            if (candidates[i].m_tiles == m_tiles && candidates[i].bkv == bkv)
+                valid = true;
+        if (!valid) return -1;
+        dispatchPrefillV5(m_tiles, bkv, d, stream, Q_ptr, K_ptr, V_ptr, O_ptr,
+                          B, Hq, G, sq, skv, max_seq, past_len, scale,
+                          static_cast<const _Float16*>(head_sink), num_heads,
+                          smooth_softmax, local_window_size);
+        return 0;
+    }
+    if (d == 128) {
+        PrefillV7Cfg candidates[12];
+        const int count = prefillV7Candidates(d, candidates);
+        bool valid = false;
+        for (int i = 0; i < count; ++i)
+            if (candidates[i].nw == nw && candidates[i].bkv == bkv &&
+                candidates[i].mt == mt)
+                valid = true;
+        if (!valid) return -1;
+        dispatchPrefillV7(nw, bkv, mt, d, stream, Q_ptr, K_ptr, V_ptr, O_ptr,
+                          B, Hq, G, sq, skv, max_seq, past_len, scale);
+        return 0;
+    }
+    if (d == 256) {
+        PrefillV8Cfg candidates[8];
+        const int count = prefillV8Candidates(d, candidates);
+        bool valid = false;
+        for (int i = 0; i < count; ++i)
+            if (candidates[i].nd == nd && candidates[i].bkv == bkv &&
+                candidates[i].mt == mt)
+                valid = true;
+        if (!valid) return -1;
+        dispatchPrefillV8(nd, mt, bkv, d, stream, Q_ptr, K_ptr, V_ptr, O_ptr,
+                          B, Hq, G, sq, skv, max_seq, past_len, scale);
+        return 0;
     }
     return -1;
 }
