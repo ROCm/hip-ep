@@ -121,7 +121,7 @@ This copies all required DLLs from the install directory to the test binary dire
 [Test] Creating session with MorphiZen EP (MLIR backend)...
 [MOCK] hipGetDeviceCount
 [MOCK] hipStreamCreate() -> <address>
-[MOCK] wrap_miopenConvolutionForward(...)
+[MOCK] wrap_conv(...)
 [Test] Session created successfully with MorphiZen EP!
 [  PASSED  ] MlirE2ETest.TwoLayerConvSession
 [==========] 1 test from 1 test suite ran.

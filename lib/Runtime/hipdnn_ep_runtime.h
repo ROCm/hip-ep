@@ -354,12 +354,12 @@ void *hipdnn_ep_state_get_qmoe_host_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
                                              size_t needed_size);
 
-// Per-session MIOpen convolution workspace pool (used by
-// wrap_miopenConvolutionForward for both 2D and the H=1 1D conv path). Lazily
-// grown via hipdnn_ep_state_ensure_conv_scratch (same policy as qmoe_scratch
-// above: never shrinks, freed in hipdnn_ep_state_cleanup). Single buffer
-// reused across all conv calls in the session -- safe because the stream is
-// serialised. See runtime_state_internal.h for design rationale.
+// Per-session convolution workspace pool. No wrapper allocates from it today
+// -- MIOpen's Find API owns its own per-problem workspace, and forward Conv
+// runs on hip_conv, which needs none. Lazily grown via
+// hipdnn_ep_state_ensure_conv_scratch (same policy as qmoe_scratch above:
+// never shrinks, freed in hipdnn_ep_state_cleanup). See
+// runtime_state_internal.h.
 void *hipdnn_ep_state_get_conv_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
                                         size_t needed_size);
@@ -692,46 +692,38 @@ int wrap_strided_copy(RuntimeState *state, void *dst_ptr, const void *src_ptr,
                       int64_t src_pitch_elems, int64_t dst_pitch_elems,
                       int64_t row_elems);
 
+// Forward convolution via the custom HIP kernel (hip_conv). Arbitrary stride,
+// dilation, group and asymmetric padding over 1D / 2D / 3D spatial ranks, with
+// the per-channel bias fused into the accumulator instead of costing a second
+// pass over the output.
+//
+// `spatial_rank` selects how many of the per-axis slots (in_*, out_*, k*, s*,
+// p*, dil*) are read; unused slots must be 1 (extent/kernel/stride/dilation) or
+// 0 (pad). Only pad_begin is passed: pad positions are never read, so the
+// trailing pad affects nothing beyond the output extent, which out_* already
+// carries.
+//
+// `op_state_slot` is accepted for ABI stability and ignored -- unlike the
+// MIOpen path this replaced, the kernel needs no cached solution or workspace.
+//
+// data_type: HIPDNN_EP_DATATYPE_* (FLOAT, HALF, BFLOAT16), applied uniformly to
+// input / weights / bias / output.
+int wrap_conv(RuntimeState *state, int32_t op_state_slot, const void *input,
+              const void *weights, const void *bias, void *output,
+              int64_t data_type, int64_t spatial_rank, int64_t N, int64_t Cin,
+              int64_t Cout, int64_t in0, int64_t in1, int64_t in2, int64_t out0,
+              int64_t out1, int64_t out2, int64_t k0, int64_t k1, int64_t k2,
+              int64_t s0, int64_t s1, int64_t s2, int64_t p0, int64_t p1,
+              int64_t p2, int64_t dil0, int64_t dil1, int64_t dil2,
+              int64_t group);
+
 //===----------------------------------------------------------------------===//
 // Library Operations (MIOpen, hipBLAS)
 //===----------------------------------------------------------------------===//
 
-// MIOpen convolution forward operation
-// Full wrapper with descriptor creation, algorithm finding, workspace
-// management. Follows opaque RuntimeState pattern - extracts handle/stream
-// internally. Parameters match generated LLVM IR from HipToLLVM pass.
-//
-// `data_type` is a HIPDNN_EP_DATATYPE_* enum value applied uniformly to the
-// input / weights / output tensor descriptors — MIOpen requires all three to
-// share the same element type. The host-side lowering derives this from the
-// hip.conv result memref's element type.
-int wrap_miopenConvolutionForward(
-    RuntimeState
-        *state, // RuntimeState (opaque - extracts handle/stream internally)
-    int32_t op_state_slot, // Op state slot
-    const void *input,     // Input tensor GPU pointer
-    int64_t input_n,       // Input batch size
-    int64_t input_c,       // Input channels
-    int64_t input_h,       // Input height
-    int64_t input_w,       // Input width
-    const void *weights,   // Weights tensor GPU pointer
-    int64_t weights_k,     // Output channels (number of filters)
-    const void *bias,      // Bias tensor GPU pointer (nullable)
-    void *output,          // Output tensor GPU pointer (in-place)
-    int64_t output_h,      // Output height
-    int64_t output_w,      // Output width
-    int64_t kernel_h,      // Kernel height
-    int64_t kernel_w,      // Kernel width
-    int64_t stride_h,      // Stride height
-    int64_t stride_w,      // Stride width
-    int64_t pad_top,       // Padding top
-    int64_t pad_left,      // Padding left
-    int64_t pad_bottom,    // Padding bottom
-    int64_t pad_right,     // Padding right
-    int64_t dilation_h,    // Dilation height
-    int64_t dilation_w,    // Dilation width
-    int64_t group,         // Number of groups
-    int64_t data_type);    // HIPDNN_EP_DATATYPE_* for I/O and weights
+// Forward convolution is not here. It runs on the in-tree hip_conv kernel via
+// wrap_conv above; nothing on the forward Conv path calls MIOpen. Only the
+// transpose direction remains on MIOpen, no supported model using it.
 
 // MIOpen transposed convolution (deconvolution) wrapper
 // Uses MIOpen's miopenTranspose convolution mode. Follows the opaque

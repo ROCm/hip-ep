@@ -2351,6 +2351,50 @@ HIP_KERNEL_API int hip_causal_conv_prefill_nlc(
     int64_t element_size_bytes);
 
 /* =========================================================================
+ * Conv — general forward convolution (1D / 2D / 3D spatial)
+ * =========================================================================
+ *
+ * Forward ONNX Conv over an `(N, C_in, D_1[, D_2[, D_3]])` input against a
+ * `(C_out, C_in/group, k_1[, k_2[, k_3]])` filter, writing
+ * `(N, C_out, O_1[, O_2[, O_3]])` in the same row-major layout. Arbitrary
+ * stride, dilation, group and asymmetric padding; per-channel `bias` is
+ * optional (pass NULL) and is fused into the accumulator rather than costing a
+ * second pass over the output.
+ *
+ * Only `pads_begin` is in the ABI. Pad positions are never read -- they fall
+ * outside the input bounds and contribute zero -- so the trailing pad affects
+ * nothing but how many output positions exist, which the caller already passes
+ * as `out_d*`. That makes asymmetric padding fall out for free.
+ *
+ * `spatial_rank` selects how many of the per-axis arrays are read; for
+ * spatial_rank < 3 the trailing slots in `in_d`, `out_d`, `k`, `s` and `dil`
+ * must be 1 and those in `p` must be 0 (the lowering does this).
+ *
+ * Accumulation is in float for every dtype, so a fp16 convolution with a
+ * contraction extent in the thousands does not lose the reduction to rounding.
+ *
+ * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_BFLOAT16. All of input / weights / bias / output share the dtype.
+ * Returns: 0 on success, non-zero on failure.
+ */
+HIP_KERNEL_API int hip_conv(
+    void* stream,
+    const void* input,
+    const void* weights,
+    const void* bias,         /* nullable */
+    void* output,
+    int hip_dtype,
+    int spatial_rank,
+    int64_t N, int64_t Cin, int64_t Cout,
+    int64_t in_d0, int64_t in_d1, int64_t in_d2,
+    int64_t out_d0, int64_t out_d1, int64_t out_d2,
+    int64_t k0, int64_t k1, int64_t k2,
+    int64_t s0, int64_t s1, int64_t s2,
+    int64_t p0, int64_t p1, int64_t p2,
+    int64_t dil0, int64_t dil1, int64_t dil2,
+    int64_t group);
+
+/* =========================================================================
  * WMMA GEMM (Small-M Matrix Multiply via Wave Matrix Multiply-Accumulate)
  * =========================================================================
  *

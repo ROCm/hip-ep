@@ -117,19 +117,14 @@ struct RuntimeState {
   void *qmoe_host_scratch; // pinned host mirror for D2H of expert idx/weights
   size_t qmoe_host_scratch_size;
 
-  // Per-session scratch buffer for the MIOpen convolution workspace
-  // (wrap_miopenConvolutionForward, both 2D and the H=1 1D conv path).
-  //
-  // The MIOpen forward-convolution Find API selects an algorithm whose
-  // workspace requirement is shape-dependent (winograd/gemm/etc). Whisper's
-  // encoder front-end runs the same two Conv shapes every inference
-  // (Cin=128/Cout=1280 K=3 s=1, Cin=1280/Cout=1280 K=3 s=2), so a per-call
-  // hipMalloc/hipFree of the workspace would be wasted work after the
-  // first call. Same grow-on-demand policy as qmoe_scratch above: lazily
-  // allocated on first use, never shrinks, freed in
-  // hipdnn_ep_state_cleanup. Single-buffer reuse is safe because the HIP
-  // stream is serialised -- the next conv launches only after the previous
-  // miopenConvolutionForward + bias add have consumed the workspace.
+  // Per-session convolution workspace. Currently allocated by nobody: the
+  // MIOpen Find API migration moved the workspace into the per-problem
+  // solution cache in real/miopen.cpp, and forward Conv has since left MIOpen
+  // entirely for the in-tree hip_conv kernel, which needs no workspace at all.
+  // Kept only because the accessors are part of the runtime's exported
+  // surface. Same grow-on-demand policy as qmoe_scratch above if it is ever
+  // wired up again: lazily allocated on first use, never shrinks, freed in
+  // hipdnn_ep_state_cleanup.
   void *conv_scratch;
   size_t conv_scratch_size;
 

@@ -20,42 +20,21 @@
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
 
 //===----------------------------------------------------------------------===//
-// MIOpen Convolution Forward Wrapper
+// MIOpen Convolution Wrapper — ConvTranspose only
 //===----------------------------------------------------------------------===//
 //
-// DESIGN DECISIONS:
+// Forward Conv does not live here. It goes through the in-tree `hip_conv`
+// kernel via `wrap_conv` (lib/Runtime/real/conv.cpp), so nothing on the
+// forward path calls MIOpen. ConvTranspose stays on MIOpen: no supported
+// model uses it, so it is not worth a hand-written kernel.
 //
-// 1. GENERIC WRAPPER (Not Specialized)
-//    Why use one wrapper for all convolution configurations instead of
-//    specialized wrappers per kernel size (1x1, 3x3, 7x7)?
-//
-//    - MIOpen handles specialization internally via algorithm selection
-//    - miopenFindConvolutionForwardAlgorithm() automatically selects optimal
-//      kernel (Winograd for 3×3, GEMM for 1×1, FFT for certain configs)
-//    - Industry standard: PyTorch, TensorFlow use generic wrappers
-//    - No performance benefit from wrapper-level specialization
-//    - Avoids complexity explosion (would need 50+ specialized wrappers)
-//
-//    Sources:
-//    -
-//    https://rocm.docs.amd.com/projects/MIOpen/en/develop/doxygen/html/group__convolutions.html
-//    -
-//    https://docs.nvidia.com/deeplearning/performance/dl-performance-convolutional/
+// The descriptor/solution cache below (`ConvTable`, `queryOrCreateConv`) is
+// therefore reached only from `wrap_miopenConvolutionTranspose`. It is still
+// keyed on the full forward-conv problem — including `conv_mode` and the
+// transpose-only output padding — because in transpose mode MIOpen describes
+// the deconvolution as the equivalent forward conv whose output is our input.
 //
 //===----------------------------------------------------------------------===//
-
-// TODO: Pool workspace memory instead of malloc/free every call
-//
-// RATIONALE: GPU memory allocation (hipMalloc) is expensive - involves kernel
-// launch, synchronization, and memory manager overhead. Current code allocates
-// and frees workspace on every inference call (lines 95, 107).
-//
-// IMPLEMENTATION: Add WorkspacePool to RuntimeState that:
-//   - Pre-allocates workspace of maximum required size
-//   - Reuses across multiple calls
-//   - Grows dynamically if larger workspace needed
-//
-// BENEFIT: Eliminates malloc/free from hot path.
 
 // Map HIPDNN_EP_DATATYPE_* to miopenDataType_t for the conv tensor
 // descriptors. Mirrors hipdnn_ep_to_miopen_type in elementwise.cpp /
@@ -325,136 +304,6 @@ queryOrCreateConv(ConvTable &table, const ConvTableKey &key,
 
 cleanup:
   return nullptr;
-}
-
-// MIOpen convolution forward implementation
-// Follows opaque RuntimeState pattern - extracts handle/stream from state.
-//
-// `data_type` is a HIPDNN_EP_DATATYPE_* enum value applied uniformly to the
-// input, weights, and output tensor descriptors. All three buffers MUST share
-// the same element type — MIOpen's miopenConvolutionForward does not support
-// mixed-precision descriptors. This matches the host-side ConvConversion
-// invariant that all three operands use `resultType.getElementType()`.
-//
-// Historical note: prior to the data_type parameter the descriptors were
-// hardcoded to miopenFloat (fp32), which silently passed wrong strides to
-// MIOpen when the actual buffers were fp16 (e.g. SigLIP / ViT patch
-// embedding). MIOpen then read out-of-bounds bytes as the second-half stride
-// for every row, producing NaN/Inf at fp16-max in the output and cascading
-// NaN through the rest of the network.
-int wrap_miopenConvolutionForward(
-    RuntimeState *state, int32_t op_state_slot, const void *input,
-    int64_t input_n, int64_t input_c, int64_t input_h, int64_t input_w,
-    const void *weights, int64_t weights_k, const void *bias, void *output,
-    int64_t output_h, int64_t output_w, int64_t kernel_h, int64_t kernel_w,
-    int64_t stride_h, int64_t stride_w, int64_t pad_top, int64_t pad_left,
-    int64_t pad_bottom, int64_t pad_right, int64_t dilation_h,
-    int64_t dilation_w, int64_t group, int64_t data_type) {
-  OP_PROFILE(
-      "conv",
-      [&] {
-        char b[80];
-        const char *dt = (data_type == HIPDNN_EP_DATATYPE_HALF)       ? "f16"
-                         : (data_type == HIPDNN_EP_DATATYPE_BFLOAT16) ? "bf16"
-                                                                      : "f32";
-        snprintf(b, sizeof(b), "%lldx%lldx%lldx%lld,k=%lldx%lldx%lld,%s",
-                 (long long)input_n, (long long)input_c, (long long)input_h,
-                 (long long)input_w, (long long)weights_k, (long long)kernel_h,
-                 (long long)kernel_w, dt);
-        return std::string(b);
-      },
-      state);
-  if (!state || !input || !weights || !output) {
-    fprintf(stderr, "Invalid arguments to wrap_miopenConvolutionForward\n");
-    return -1;
-  }
-  bool dt_ok;
-  miopenDataType_t miopen_dt = conv_to_miopen_type(data_type, dt_ok);
-  if (!dt_ok) {
-    fprintf(
-        stderr,
-        "[REAL] wrap_miopenConvolutionForward: unsupported data_type %lld\n",
-        (long long)data_type);
-    return -1;
-  }
-
-  RUNTIME_DEBUG_LOG(
-      "[REAL] wrap_miopenConvolutionForward N=%lld Cin=%lld H=%lld W=%lld "
-      "Cout=%lld kHxkW=%lldx%lld s=%lldx%lld bias=%s dtype=%lld\n",
-      (long long)input_n, (long long)input_c, (long long)input_h,
-      (long long)input_w, (long long)weights_k, (long long)kernel_h,
-      (long long)kernel_w, (long long)stride_h, (long long)stride_w,
-      bias ? "yes" : "null", (long long)data_type);
-
-  // Extract handle and stream from opaque RuntimeState via accessor functions
-  // (Maintains abstraction barrier - no direct field access)
-  miopenHandle_t miopen_handle =
-      static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
-
-  ConvState *os = ConvState::get_op_state(state, op_state_slot);
-  if (!os || !os->table) {
-    fprintf(stderr,
-            "wrap_miopenConvolutionForward: missing op-state for slot %d\n",
-            op_state_slot);
-    return -1;
-  }
-
-  ConvTableKey key{
-      input_n,   input_c,           input_h,   input_w,    weights_k,  output_h,
-      output_w,  kernel_h,          kernel_w,  stride_h,   stride_w,   pad_top,
-      pad_left,  pad_bottom,        pad_right, dilation_h, dilation_w, group,
-      miopen_dt, miopenConvolution, 0,         0,
-  };
-  miopenTensorDescriptor_t bias_desc = nullptr;
-  int result = 0;
-
-  const ConvTableEntry *entry =
-      queryOrCreateConv(*os->table, key, miopen_handle, input, weights, output);
-  if (!entry || !entry->solution) {
-    fprintf(stderr,
-            "wrap_miopenConvolutionForward: missing solution for problem\n");
-    return -1;
-  }
-
-  const miopenTensorArgument_t tensorArgs[3] = {
-      {miopenTensorConvolutionX,
-       const_cast<miopenTensorDescriptor_t *>(&entry->input_desc),
-       const_cast<void *>(input)},
-      {miopenTensorConvolutionW,
-       const_cast<miopenTensorDescriptor_t *>(&entry->weights_desc),
-       const_cast<void *>(weights)},
-      {miopenTensorConvolutionY,
-       const_cast<miopenTensorDescriptor_t *>(&entry->output_desc), output},
-  };
-  MIOPEN_CHECK(miopenRunSolution(miopen_handle, entry->solution, 3, tensorArgs,
-                                 entry->workspace, entry->workspaceSize));
-
-  // Add per-channel bias via miopenOpTensor (TensorOpAdd):
-  //   C = alpha1*A + alpha2*B + beta*C  with A=C=output, B=bias, beta=0
-  //   -> output = output + bias  (broadcast from [1, weights_k, 1, 1])
-  //
-  // We do NOT use miopenConvolutionForwardBias: the MIOpen header states its
-  // alpha/beta are "only supported for alpha = 1 and beta = 0", so it cannot
-  // fuse y = conv + bias (it would compute y = bias). miopenOpTensor with
-  // alpha1=alpha2=1, beta=0 computes y = conv + bias as ONNX Conv requires.
-  if (bias) {
-    const float alpha_bias = 1.0f, beta_zero = 0.0f;
-    MIOPEN_CHECK(miopenCreateTensorDescriptor(&bias_desc));
-    int b_dims[] = {1, (int)weights_k, 1, 1};
-    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        bias_desc, miopen_dt, miopenTensorNCHW, b_dims, 4));
-    MIOPEN_CHECK(miopenOpTensor(miopen_handle, miopenTensorOpAdd, &alpha_bias,
-                                entry->output_desc, output, &alpha_bias,
-                                bias_desc, bias, &beta_zero, entry->output_desc,
-                                output));
-  }
-
-cleanup:
-  if (bias_desc) {
-    miopenDestroyTensorDescriptor(bias_desc);
-  }
-
-  return result;
 }
 
 //===----------------------------------------------------------------------===//

@@ -68,6 +68,7 @@ set(_kernel_sources
     hip/one_hot_kernel.hip
     hip/reduce_sum_kernel.hip
     hip/pool_kernel.hip
+    hip/conv_kernel.hip
     hip/resize_kernel.hip
     hip/grid_sample_kernel.hip
     hip/global_pool_kernel.hip
