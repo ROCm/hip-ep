@@ -77,9 +77,9 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | LayerNormalization | Custom HIP kernel |
 | InstanceNormalization | Custom HIP kernel |
 | SkipLayerNormalization (`com.microsoft`) | Decomposed to Add + LayerNormalization |
-| RMSNormalization | MIOpen |
-| SimplifiedLayerNormalization | MIOpen |
-| SkipSimplifiedLayerNormalization (`com.microsoft`) | MIOpen |
+| RMSNormalization | Custom HIP kernel |
+| SimplifiedLayerNormalization | Custom HIP kernel |
+| SkipSimplifiedLayerNormalization (`com.microsoft`) | Custom HIP kernel, add and norm fused |
 | LpNormalization | Decomposed to Mul / ReduceSum / Sqrt / Div |
 | RotaryEmbedding (`com.microsoft`) | Custom HIP kernel |
 | RotaryEmbedding (`ai.onnx`) | Custom HIP kernel |

@@ -192,8 +192,8 @@
         "rmsnorm",
         "batchnormalization"
       ],
-      "preferred_path": "MIOpen",
-      "wrapper_extension_target": "wrap_miopenT5LayerNormForward",
+      "preferred_path": "Custom Hip Kernel",
+      "wrapper_extension_target": "wrap_rms_norm",
       "fallback_path": "Custom Hip Kernel"
     }
   ],

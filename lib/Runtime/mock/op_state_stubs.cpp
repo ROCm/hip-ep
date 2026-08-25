@@ -87,25 +87,6 @@ extern "C" int8_t hipdnn_ep_op_state_construct_optensor(RuntimeState *state,
   return 0;
 }
 
-// SimplifiedLayerNorm (rms_norm): real runtime holds a shared_ptr to a
-// device-wide MIOpen descriptor table (T5NormState in
-// real/simplified_layer_norm.cpp); the mock owns no device/MIOpen resources.
-extern "C" int8_t hipdnn_ep_op_state_construct_t5norm(RuntimeState *state,
-                                                      int32_t slot) {
-  hipdnn_ep_op_state_set(state, slot, MockOpState::create().release());
-  return 0;
-}
-
-// SkipSimplifiedLayerNorm (skip_rms_norm): real runtime holds a shared_ptr to a
-// device-wide MIOpen descriptor table (SkipT5NormState in
-// real/skip_simplified_layer_norm.cpp); the mock owns no device/MIOpen
-// resources.
-extern "C" int8_t hipdnn_ep_op_state_construct_skip_t5norm(RuntimeState *state,
-                                                           int32_t slot) {
-  hipdnn_ep_op_state_set(state, slot, MockOpState::create().release());
-  return 0;
-}
-
 // Gemm: real runtime holds a shared_ptr to a device-wide hipBLASLt algo table
 // (GemmState in real/gemm.cpp); the mock owns no device/hipBLASLt resources.
 extern "C" int8_t hipdnn_ep_op_state_construct_gemm(RuntimeState *state,

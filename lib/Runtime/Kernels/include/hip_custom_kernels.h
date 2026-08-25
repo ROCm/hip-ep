@@ -1630,6 +1630,62 @@ HIP_KERNEL_API int hip_instance_norm(
     int hip_dtype);
 
 /* =========================================================================
+ * RMS Normalization (ONNX RMSNormalization / SimplifiedLayerNormalization)
+ * =========================================================================
+ *
+ *   y = x * rsqrt(mean(x^2) + epsilon) * scale
+ *
+ * Per-row reduction with FP32 accumulators, regardless of I/O dtype. Unlike
+ * LayerNormalization there is no mean subtraction and no bias term.
+ *
+ * `outer` / `norm_size`: input viewed as [outer, norm_size], where norm_size
+ *                        equals the scale element count.
+ * `hip_dtype`          : I/O type for input/scale/output -- FLOAT16 or FLOAT32.
+ *
+ * FLOAT16 automatically uses a packed __half2 body when norm_size is even and
+ * all three pointers are 4-byte aligned; otherwise it falls back to scalar.
+ */
+HIP_KERNEL_API int hip_rms_norm(
+    void* stream,
+    const void* input,
+    const void* scale,
+    void* output,
+    int64_t outer,
+    int64_t norm_size,
+    float epsilon,
+    int hip_dtype);
+
+/* =========================================================================
+ * Skip RMS Normalization (com.microsoft SkipSimplifiedLayerNormalization)
+ * =========================================================================
+ *
+ *   sum = input + skip [+ bias]
+ *   y   = sum * rsqrt(mean(sum^2) + epsilon) * gamma
+ *
+ * Fuses what would otherwise be two elementwise adds plus a norm into a
+ * single pass. `sum` is recomputed in the second pass rather than staged in
+ * scratch, so this kernel needs no workspace.
+ *
+ * `bias`                : optional, broadcast over rows -- indexed within the
+ *                         row as bias[i], length norm_size.
+ * `input_skip_bias_sum` : optional second output; when non-null it receives
+ *                         `sum`. Skipped entirely when null.
+ * `hip_dtype`           : FLOAT16 or FLOAT32.
+ */
+HIP_KERNEL_API int hip_skip_rms_norm(
+    void* stream,
+    const void* input,
+    const void* skip,
+    const void* gamma,
+    const void* bias,              // optional
+    void* output,
+    void* input_skip_bias_sum,     // optional
+    int64_t outer,
+    int64_t norm_size,
+    float epsilon,
+    int hip_dtype);
+
+/* =========================================================================
  * Range (1-D sequence generation)
  * =========================================================================
  *
