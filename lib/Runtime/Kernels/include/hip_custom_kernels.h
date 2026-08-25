@@ -653,12 +653,17 @@ HIP_KERNEL_API int hip_gqa_causal_mask_f32(
 /* Add an attention bias onto the fp32 score matrix before softmax.
  * scores layout: [total_heads, sq, total_seq] row-major with batch_stride
  * = sq * total_seq per head.
- * bias layout: [bias_batch, bias_heads, sq, total_seq], row-major.
- * bias_batch / bias_heads may be 1 for ONNX-style broadcast. */
+ * bias layout: [bias_batch, bias_heads, bias_sq, total_seq], row-major.
+ * bias_batch / bias_heads may be 1 for ONNX-style broadcast.
+ * sq is the number of query rows in `scores`, which is a chunk of the full
+ * query range when the caller tiles the prefill; bias_sq is the bias tensor's
+ * full query extent and bias_row_offset locates the chunk within it. Pass
+ * bias_sq = sq (or 0) and bias_row_offset = 0 for the untiled case. */
 HIP_KERNEL_API int hip_gqa_add_attention_bias_f32(
     void* stream, void* scores, const void* bias,
     int total_heads, int num_heads, int bias_batch, int bias_heads,
-    int sq, int total_seq, int score_batch_stride, int bias_element_size_bytes);
+    int sq, int total_seq, int score_batch_stride, int bias_element_size_bytes,
+    int bias_sq, int bias_row_offset);
 
 /* Column-wise softmax in-place. One threadblock per (head, query).
  * Smooth softmax is activated when head_sink is non-null OR use_smooth_softmax
@@ -2183,6 +2188,30 @@ HIP_KERNEL_API int hip_causal_conv_step_decode(
 // plus a seq_len argument. Supports kernel_size in [1,8], activation 0/1,
 // element_size 2/4; caller falls back to MIOpen for anything else.
 HIP_KERNEL_API int hip_causal_conv_prefill(
+    void* stream,
+    const void* input,
+    const void* weight,
+    const void* bias,
+    const void* past_state,
+    void* output,
+    void* present_state,
+    int64_t batch_size,
+    int64_t channels,
+    int64_t seq_len,
+    int64_t kernel_size,
+    int64_t activation,
+    int64_t element_size_bytes);
+
+// Channels-last prefill: same contract as hip_causal_conv_prefill except that
+// input and output are [B, L, C]. The state keeps its [B, C, K-1] layout.
+//
+// The ONNX export wraps this convolution in a Transpose pair only because ONNX
+// Conv wants channels first; on Qwen3.6-35B-A3B those two transposes move 65 MB
+// apiece and together cost more than the convolution between them. A caller that
+// can fold the transposes away calls this instead, and pays neither. Results are
+// bit-identical to the channels-first kernel on the same data -- same fp32
+// accumulation of the same K taps in the same order.
+HIP_KERNEL_API int hip_causal_conv_prefill_nlc(
     void* stream,
     const void* input,
     const void* weight,
