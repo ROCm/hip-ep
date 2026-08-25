@@ -63,23 +63,20 @@ existing `--convert-hip-to-llvm` pipeline.
 
 | ONNX / ORT Contrib | HIP | Backend |
 |---|---|---|
-| `LayerNormalization` | `hip.layer_norm` | `layer_norm_kernel.hip` |
+| `LayerNormalization` | `hip.miopen.layer_norm` | `miopenLayerNormForward` |
 | `InstanceNormalization` | `hip.instance_norm` | custom HIP kernel |
 | `RMSNormalization` | `hip.rms_norm` | `rms_norm_kernel.hip` |
 | `SimplifiedLayerNormalization` | `hip.rms_norm` | `rms_norm_kernel.hip` |
 | `GridSample` | `hip.grid_sample` | custom HIP kernel |
-| `SkipLayerNormalization` | `hip.add` + `hip.layer_norm` | `layer_norm_kernel.hip` |
+| `SkipLayerNormalization` | `hip.miopen.skip_layer_norm` | `miopenAddLayerNormForward` |
 | `SkipSimplifiedLayerNormalization` | `hip.skip_rms_norm` | `skip_rms_norm_kernel.hip` |
 | LpNorm+Mul pattern (fused) | `hip.rms_norm` | `rms_norm_kernel.hip` |
 
 `SkipSimplifiedLayerNormalization` fuses Add + RMSNorm into one kernel:
 `residual = x + skip [+ bias]; output = RMSNorm(residual) * weight`.
 
-All four norm kernels are block-per-row with FP32 accumulation, and take a
+Both RMS-norm kernels are block-per-row with FP32 accumulation, and take a
 packed `__half2` path for fp16 rows of even width.
-
-Note that `SkipLayerNormalization` is the mean-subtracting variant and is
-decomposed rather than fused; only the Simplified (RMS) variant has a fused op.
 
 ### Attention
 
