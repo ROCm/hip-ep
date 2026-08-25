@@ -403,6 +403,74 @@ extern "C" int hip_elementwise_ceil(void *stream, const void *input,
   return static_cast<int>(err);
 }
 
+// ONNX Round: nearest integer, ties to even (nearbyintf / rintf).
+__global__ void elementwise_round_f16_kernel(const __half *__restrict__ input,
+                                             __half *__restrict__ output,
+                                             int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    float x = __half2float(input[idx]);
+    output[idx] = __float2half(nearbyintf(x));
+  }
+}
+
+__global__ void elementwise_round_f32_kernel(const float *__restrict__ input,
+                                             float *__restrict__ output,
+                                             int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = nearbyintf(input[idx]);
+  }
+}
+
+extern "C" int hip_elementwise_round(void *stream, const void *input,
+                                     void *output, int64_t num_elements,
+                                     int hip_dtype) {
+  if (num_elements <= 0)
+    return 0;
+
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  constexpr int kBlockSize = 256;
+  int grid_size =
+      static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
+
+  switch (hip_dtype) {
+  case HIP_DTYPE_FLOAT16:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_round: f16, num=%lld\n",
+        (long long)num_elements);
+    hipLaunchKernelGGL(elementwise_round_f16_kernel, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const __half *>(input),
+                       static_cast<__half *>(output), num_elements);
+    break;
+  case HIP_DTYPE_FLOAT32:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_round: f32, num=%lld\n",
+        (long long)num_elements);
+    hipLaunchKernelGGL(elementwise_round_f32_kernel, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const float *>(input),
+                       static_cast<float *>(output), num_elements);
+    break;
+  default:
+    fprintf(stderr,
+            "[custom_kernels] hip_elementwise_round: unsupported dtype=%d\n",
+            hip_dtype);
+    return -1;
+  }
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr,
+            "[custom_kernels] hip_elementwise_round launch failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
+}
+
 __global__ void elementwise_exp_f16_kernel(const __half *__restrict__ input,
                                            __half *__restrict__ output,
                                            int64_t num_elements) {

@@ -181,6 +181,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateErfConversionPatterns(patterns, ctx);
   populateSinConversionPatterns(patterns, ctx);
   populateCeilConversionPatterns(patterns, ctx);
+  populateRoundConversionPatterns(patterns, ctx);
   populateExpConversionPatterns(patterns, ctx);
   populateLogConversionPatterns(patterns, ctx);
   populateCumSumConversionPatterns(patterns, ctx);

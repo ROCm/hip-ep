@@ -1875,6 +1875,18 @@ void CeilOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// RoundOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange RoundOp::getDpsInitsMutable() { return getYMutable(); }
+
+void RoundOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // ExpOp: ins(x), outs(y)
 //===----------------------------------------------------------------------===//
 

@@ -1788,6 +1788,18 @@ int wrap_ceil(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_round(RuntimeState *state, void *input, void *output,
+               int64_t num_elements, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_round\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_round(num_elements=%lld, data_type=%s(%lld))\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  return 0;
+}
+
 int wrap_exp(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type) {
   if (!state) {

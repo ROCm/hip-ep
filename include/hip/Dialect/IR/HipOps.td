@@ -2578,6 +2578,42 @@ def Hip_CeilOp : Hip_DpsOp<"ceil", /*traits=*/[],
   }];
 }
 
+def Hip_RoundOp : Hip_DpsOp<"round", /*traits=*/[],
+                            /*outsAccessor=*/"Y",
+                            /*autoReify=*/1,
+                            /*autoInfer=*/1,
+                            /*declareInfer=*/1> {
+  let summary = "Element-wise round-ties-to-even: y = round(x)";
+  let description = [{
+    Rounds each element to the nearest integer; halfway cases go to the
+    nearest even integer (ONNX Round).
+
+    Formula: Y = round_ties_to_even(X)
+
+    Lowered via the unified unary elementwise path (wrap_round).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.round(%ctx) ins(%x : memref<3x4xf32, 1>)
+                    outs(%y : memref<3x4xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_ExpOp : Hip_DpsOp<"exp"> {
   let summary = "Element-wise natural exponential: y = exp(x)";
   let description = [{
