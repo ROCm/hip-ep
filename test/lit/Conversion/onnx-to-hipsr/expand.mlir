@@ -25,7 +25,7 @@ func.func @expand(%ctx: !hipsr.context, %input: tensor<?x3xf16>,
                   %shape: tensor<2xi64, #hipsr.mem<host>>) -> tensor<?x?xf16> {
   %0 = "onnx.Expand"(%input, %shape)
       : (tensor<?x3xf16>, tensor<2xi64, #hipsr.mem<host>>) -> tensor<?x?xf16>
-  return %0 : tensor<?x?xf16>
+  "onnx.Return"(%0) : (tensor<?x?xf16>) -> ()
 }
 
 // -----
@@ -45,5 +45,5 @@ func.func @expand_broadcast_rank(%ctx: !hipsr.context,
     -> tensor<?x?x?x?xf16> {
   %0 = "onnx.Expand"(%input, %shape)
       : (tensor<2x3xf16>, tensor<4xi64, #hipsr.mem<host>>) -> tensor<?x?x?x?xf16>
-  return %0 : tensor<?x?x?x?xf16>
+  "onnx.Return"(%0) : (tensor<?x?x?x?xf16>) -> ()
 }

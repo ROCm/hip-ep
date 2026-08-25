@@ -225,5 +225,5 @@ func.func @extents_feed_an_expand(%ctx: !hipsr.context,
   %0 = "onnx.Shape"(%input) : (tensor<?x3xf16>) -> tensor<2xi64>
   %1 = "onnx.Expand"(%input, %0)
       : (tensor<?x3xf16>, tensor<2xi64>) -> tensor<?x?xf16>
-  return %1 : tensor<?x?xf16>
+  "onnx.Return"(%1) : (tensor<?x?xf16>) -> ()
 }

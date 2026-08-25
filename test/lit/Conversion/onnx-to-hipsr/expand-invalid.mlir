@@ -86,5 +86,5 @@ func.func @shape_argument_names_no_space(%ctx: !hipsr.context,
   // expected-error @+1 {{operand #2 must be ranked host tensor or host memref}}
   %0 = "onnx.Expand"(%input, %shape)
       : (tensor<?x3xf16>, tensor<2xi64>) -> tensor<?x?xf16>
-  return %0 : tensor<?x?xf16>
+  "onnx.Return"(%0) : (tensor<?x?xf16>) -> ()
 }
