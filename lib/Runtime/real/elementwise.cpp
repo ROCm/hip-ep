@@ -6,8 +6,6 @@
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
 #include "../op_state.h"
-#include "cache_utils.h"
-#include "error_check_macros.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
@@ -15,8 +13,6 @@
 #include <cstdio>
 #include <functional>
 #include <memory>
-#include <mutex>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -48,193 +44,18 @@ static int hipdnn_to_hip_dtype(int64_t hipdnn_type) {
   }
 }
 
-// Explicit mapping from backend-independent HIPDNN_EP_DATATYPE_* enum to
-// MIOpen-specific miopenDataType_t. No static_cast -- our enum values are
-// independent of any library.
-static miopenDataType_t hipdnn_ep_to_miopen_type(int64_t data_type, bool &ok) {
-  ok = true;
-  switch (data_type) {
-  case HIPDNN_EP_DATATYPE_FLOAT:
-    return miopenFloat;
-  case HIPDNN_EP_DATATYPE_HALF:
-    return miopenHalf;
-  case HIPDNN_EP_DATATYPE_BFLOAT16:
-    return miopenBFloat16;
-  default:
-    fprintf(stderr, "[REAL] unsupported data_type %lld for MIOpen\n",
-            (long long)data_type);
-    ok = false;
-    return miopenFloat;
-  }
-}
 
-// Explicit mapping from backend-independent HIPDNN_EP_TENSOR_OP_* enum to
-// MIOpen-specific miopenTensorOp_t.
-static miopenTensorOp_t hipdnn_ep_to_miopen_op(int64_t tensor_op, bool &ok) {
-  ok = true;
-  switch (tensor_op) {
-  case HIPDNN_EP_TENSOR_OP_MUL:
-    return miopenTensorOpMul;
-  case HIPDNN_EP_TENSOR_OP_ADD:
-    return miopenTensorOpAdd;
-  case HIPDNN_EP_TENSOR_OP_MIN:
-    return miopenTensorOpMin;
-  case HIPDNN_EP_TENSOR_OP_MAX:
-    return miopenTensorOpMax;
-  default:
-    fprintf(stderr, "[REAL] unsupported tensor_op %lld for MIOpen\n",
-            (long long)tensor_op);
-    ok = false;
-    return miopenTensorOpMul;
-  }
-}
-
-//===----------------------------------------------------------------------===//
-// MIOpen OpTensor descriptor cache
-//===----------------------------------------------------------------------===//
-//
-// Three MIOpen tensor descriptors (lhs, rhs, output) are created once per
-// unique (lhs_shape, rhs_shape, out_shape, data_type) combination and reused
-// for the process lifetime.  Avoids repeated miopenCreate/Set/Destroy on
-// every element-wise inference call.
-
-struct OpTensorCacheKey {
-  int64_t lhs_n, lhs_c, lhs_h, lhs_w; // lhs 4D shape
-  int64_t rhs_n, rhs_c, rhs_h, rhs_w; // rhs 4D shape
-  int64_t out_n, out_c, out_h, out_w; // output 4D shape
-  int64_t data_type;                  // HIPDNN_EP_DATATYPE_* enum value
-  bool operator==(const OpTensorCacheKey &o) const {
-    return lhs_n == o.lhs_n && lhs_c == o.lhs_c && lhs_h == o.lhs_h &&
-           lhs_w == o.lhs_w && rhs_n == o.rhs_n && rhs_c == o.rhs_c &&
-           rhs_h == o.rhs_h && rhs_w == o.rhs_w && out_n == o.out_n &&
-           out_c == o.out_c && out_h == o.out_h && out_w == o.out_w &&
-           data_type == o.data_type;
-  }
-};
-
-struct OpTensorCacheKeyHash {
-  size_t operator()(const OpTensorCacheKey &k) const {
-    size_t h = 0;
-    hash_combine_val(h, k.lhs_n);
-    hash_combine_val(h, k.lhs_c);
-    hash_combine_val(h, k.lhs_h);
-    hash_combine_val(h, k.lhs_w);
-    hash_combine_val(h, k.rhs_n);
-    hash_combine_val(h, k.rhs_c);
-    hash_combine_val(h, k.rhs_h);
-    hash_combine_val(h, k.rhs_w);
-    hash_combine_val(h, k.out_n);
-    hash_combine_val(h, k.out_c);
-    hash_combine_val(h, k.out_h);
-    hash_combine_val(h, k.out_w);
-    hash_combine_val(h, k.data_type);
-    return h;
-  }
-};
-
-/// Cached MIOpen tensor descriptors for a single OpTensor shape. Owned by the
-/// OpTensorTable, which destroys them when the last session sharing it is torn
-/// down (previously these leaked for the process lifetime).
-struct OpTensorCacheEntry {
-  miopenTensorDescriptor_t aDesc, bDesc, cDesc; // lhs, rhs, output
-};
-
-// One descriptor table shared across every session in the process and freed
-// when the last session holding it is destroyed. MIOpen tensor descriptors are
-// pure shape/dtype metadata (no device binding), so a single table is correct
-// for all sessions; the mutex guards find/insert because sessions run
-// Compute() on independent threads.
-struct OpTensorTable {
-  std::mutex mu;
-  std::unordered_map<OpTensorCacheKey, OpTensorCacheEntry, OpTensorCacheKeyHash>
-      map;
-  ~OpTensorTable() {
-    for (auto &kv : map) {
-      OpTensorCacheEntry &e = kv.second;
-      if (e.cDesc)
-        miopenDestroyTensorDescriptor(e.cDesc);
-      if (e.bDesc)
-        miopenDestroyTensorDescriptor(e.bDesc);
-      if (e.aDesc)
-        miopenDestroyTensorDescriptor(e.aDesc);
-    }
-  }
-};
-
-// Per-instance op state for hip.miopen.add: the slot holds a shared_ptr to the
-// one shared descriptor table, reached through a global WeakStore keyed by
-// device (see op_state.h). The store is weak_ptr-backed, so the table lives
-// only while some session's OpTensorState holds a shared_ptr to it.
-struct OpTensorState : OpStateT<OpTensorState> {
-  std::shared_ptr<OpTensorTable> table;
-  OpTensorState() {
-    int dev = 0;
-    hipGetDevice(&dev);
-    table = WeakStore<int, OpTensorTable>::get_or_create(
-        dev, [] { return std::make_shared<OpTensorTable>(); });
-  }
-};
+// Per-instance op state for hip.add/mul/min/max. The state itself is empty --
+// these ops no longer need any shared per-device data -- but the slot must
+// still be constructed because the compiler unconditionally emits a
+// generateOpStateInit call for any op implementing OpStateOpInterface (see
+// Hip_AddOp/MulOp/MinOp/MaxOp in HipOps.td).
+struct OpTensorState : OpStateT<OpTensorState> {};
 
 extern "C" int8_t hipdnn_ep_op_state_construct_optensor(RuntimeState *state,
                                                         int32_t slot) {
   hipdnn_ep_op_state_set(state, slot, OpTensorState::create().release());
   return 0;
-}
-
-/// Look up or create cached MIOpen tensor descriptors for an OpTensor shape.
-/// Returns nullptr on any MIOpen API failure (partially created descriptors
-/// are cleaned up before returning).
-static const OpTensorCacheEntry *
-queryOrCreateOpTensor(OpTensorTable &table, const OpTensorCacheKey &key) {
-  // The table is shared across sessions, so guard find/insert. Entries are
-  // never erased, so the returned pointer stays valid after the lock drops.
-  std::lock_guard<std::mutex> guard(table.mu);
-  auto it = table.map.find(key);
-  if (it != table.map.end())
-    return &it->second;
-
-  bool type_ok;
-  miopenDataType_t dt = hipdnn_ep_to_miopen_type(key.data_type, type_ok);
-  if (!type_ok)
-    return nullptr;
-  OpTensorCacheEntry e{};
-  int result = 0;
-
-  MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&e.aDesc), cache_fail);
-  MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&e.bDesc), cache_fail);
-  MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&e.cDesc), cache_fail);
-
-  {
-    int a_dims[] = {static_cast<int>(key.lhs_n), static_cast<int>(key.lhs_c),
-                    static_cast<int>(key.lhs_h), static_cast<int>(key.lhs_w)};
-    MIOPEN_CHECK_GOTO(miopenSetNdTensorDescriptorWithLayout(
-                          e.aDesc, dt, miopenTensorNCHW, a_dims, 4),
-                      cache_fail);
-    int b_dims[] = {static_cast<int>(key.rhs_n), static_cast<int>(key.rhs_c),
-                    static_cast<int>(key.rhs_h), static_cast<int>(key.rhs_w)};
-    MIOPEN_CHECK_GOTO(miopenSetNdTensorDescriptorWithLayout(
-                          e.bDesc, dt, miopenTensorNCHW, b_dims, 4),
-                      cache_fail);
-    int c_dims[] = {static_cast<int>(key.out_n), static_cast<int>(key.out_c),
-                    static_cast<int>(key.out_h), static_cast<int>(key.out_w)};
-    MIOPEN_CHECK_GOTO(miopenSetNdTensorDescriptorWithLayout(
-                          e.cDesc, dt, miopenTensorNCHW, c_dims, 4),
-                      cache_fail);
-  }
-  goto cache_done;
-
-cache_fail:
-  if (e.cDesc)
-    miopenDestroyTensorDescriptor(e.cDesc);
-  if (e.bDesc)
-    miopenDestroyTensorDescriptor(e.bDesc);
-  if (e.aDesc)
-    miopenDestroyTensorDescriptor(e.aDesc);
-  return nullptr;
-
-cache_done:
-  auto [ins, _] = table.map.emplace(key, e);
-  return &ins->second;
 }
 
 //===----------------------------------------------------------------------===//
