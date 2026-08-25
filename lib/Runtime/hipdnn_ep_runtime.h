@@ -1479,6 +1479,8 @@ void hipdnn_ep_readback_scalar(RuntimeState *state, void *host_dst,
 int wrap_size(RuntimeState *state, void *output, int64_t num_elements);
 int wrap_cos(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
+int wrap_erf(RuntimeState *state, void *input, void *output,
+             int64_t num_elements, int64_t data_type);
 int wrap_sin(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 int wrap_ceil(RuntimeState *state, void *input, void *output,

@@ -175,6 +175,13 @@ HIP_KERNEL_API int hip_elementwise_cos(
     int64_t num_elements,
     int hip_dtype);
 
+HIP_KERNEL_API int hip_elementwise_erf(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
 HIP_KERNEL_API int hip_elementwise_sin(
     void* stream,
     const void* input,
