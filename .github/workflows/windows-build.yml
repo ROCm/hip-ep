@@ -704,11 +704,15 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $zip = ".github/gpuep-packages/gpuep-rel-2610.2-gpu-test-package.zip"
-          if (-not (Test-Path $zip)) { throw "LFS zip missing: $zip" }
-          Expand-Archive -Path $zip -DestinationPath staging -Force
+          $gpuZip = ".github/gpuep-packages/gpuep-rel-2610.2-gpu-test-package.zip"
+          $hipZip = ".github/gpuep-packages/gpuep-rel-2610.2-hip-python-package.zip"
+          if (-not (Test-Path $gpuZip)) { throw "LFS zip missing: $gpuZip" }
+          if (-not (Test-Path $hipZip)) { throw "LFS zip missing: $hipZip" }
+          Expand-Archive -Path $gpuZip -DestinationPath staging -Force
+          Expand-Archive -Path $hipZip -DestinationPath wheelpkg -Force
           $count = (Get-ChildItem staging -Recurse -File).Count
-          Write-Host "staged $count files"
+          Write-Host "staged gpu-test-package: $count files"
+          Write-Host "staged hip-python-package:" (Get-ChildItem wheelpkg -Recurse -File).Count "files"
 
       - name: Upload GPU test package
         uses: actions/upload-artifact@v4
@@ -717,13 +721,20 @@ jobs:
           path: staging/
           retention-days: 14
 
+      - name: Upload Python wheel package
+        uses: actions/upload-artifact@v4
+        with:
+          name: hip-python-package
+          path: wheelpkg/
+          retention-days: 14
+
   # ---------------------------------------------------------------------------
   # GPU test job: runs on the self-hosted machine with a real AMD GPU.
   # Downloads the package built above and runs onnxruntime_perf_test.
   # ---------------------------------------------------------------------------
   gpu-test:
-    if: ${{ !startsWith(github.ref, 'refs/heads/ci/gpuep-test-package') && !startsWith(github.head_ref, 'ci/gpuep-test-package') }}
-    needs: build-windows
+    needs: [build-windows, publish-gpuep-test-package]
+    if: ${{ !cancelled() && (needs.build-windows.result == 'success' || needs.publish-gpuep-test-package.result == 'success') }}
     runs-on: StrixHalo
     # Never cancel an in-progress GPU run: queue newer runs of the same ref
     # behind it instead of killing the long-running perf / OGA / L2 suites.
