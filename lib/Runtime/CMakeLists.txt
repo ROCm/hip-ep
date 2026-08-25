@@ -633,6 +633,31 @@ if(NOT BUILD_MOCK_RUNTIME)
                 PATHS ${DD_SEARCH_PATHS}
                 NO_DEFAULT_PATH
             )
+            find_library(DD_PM_PACKAGE_LIB
+                NAMES pm_package
+                PATHS ${DD_SEARCH_PATHS}
+                NO_DEFAULT_PATH
+            )
+            find_library(DD_XCLBIN_LIB
+                NAMES xclbin
+                PATHS ${DD_SEARCH_PATHS}
+                NO_DEFAULT_PATH
+            )
+            find_library(DD_HASHLIB_LIB
+                NAMES hashlib
+                PATHS ${DD_SEARCH_PATHS}
+                NO_DEFAULT_PATH
+            )
+            find_library(DD_SPDLOG_LIB
+                NAMES spdlog
+                PATHS ${DD_SEARCH_PATHS}
+                NO_DEFAULT_PATH
+            )
+            find_library(DD_AIEBU_STATIC_LIB
+                NAMES aiebu_static
+                PATHS ${DD_SEARCH_PATHS}
+                NO_DEFAULT_PATH
+            )
             find_library(DD_AIE_CODEGEN_LIB
                 NAMES aie_codegen
                 PATHS ${DD_SEARCH_PATHS}
@@ -777,8 +802,12 @@ if(NOT BUILD_MOCK_RUNTIME)
                 else()
                     # Legacy source layout - use DD_INCLUDE_DIR directly
                     set(DD_OPS_INCLUDE_DIR "${DD_INCLUDE_DIR}")
-                    set(DD_SRC_INCLUDE_DIR "${DD_INCLUDE_DIR}/src")
-                    message(STATUS "Using DynamicDispatch legacy source layout")
+                    get_filename_component(DD_SRC_INCLUDE_DIR "${DD_OPS_INCLUDE_DIR}" DIRECTORY)  # Up to repo root
+                    get_filename_component(DD_SRC_INCLUDE_DIR "${DD_OPS_INCLUDE_DIR}" DIRECTORY)  # Up to repo root
+                    get_filename_component(DD_SRC_INCLUDE_DIR "${DD_OPS_INCLUDE_DIR}" DIRECTORY)  # Up to repo root
+                    get_filename_component(DD_SRC_INCLUDE_DIR "${DD_OPS_INCLUDE_DIR}" DIRECTORY)  # Up to repo root
+                    set(DD_SRC_INCLUDE_DIR "${DD_SRC_INCLUDE_DIR}/src")
+                    message(STATUS "Using DynamicDispatch legacy source layout: ${DD_INCLUDE_DIR} ${DD_OPS_INCLUDE_DIR} ${DD_SRC_INCLUDE_DIR}")
                 endif()
 
                 target_include_directories(hipdnn-ep-dd PRIVATE
@@ -797,22 +826,83 @@ if(NOT BUILD_MOCK_RUNTIME)
                     hip::host
                 )
 
-                # Link additional DD libraries if found
-                if(DD_TRANSACTION_LIB)
-                    target_link_libraries(hipdnn-ep-dd PRIVATE ${DD_TRANSACTION_LIB})
-                    message(STATUS "Linking transaction library: ${DD_TRANSACTION_LIB}")
+                # Determine if dyn_dispatch_core.lib is a static library or DLL import library.
+                # Static library: requires linking all transitive dependencies.
+                # DLL import lib: dependencies already in the .dll, don't link them again.
+                #
+                # Detection strategy:
+                # 1. Check for dyn_dispatch_core.dll in bin/ directory (same parent as lib/)
+                # 2. If .dll exists, this is an import lib -> skip transitive dependencies
+                # 3. If .dll missing, this is a static lib -> link all dependencies
+                set(DD_IS_STATIC_LIB FALSE)
+                get_filename_component(DD_LIB_DIR "${DD_CORE_LIB}" DIRECTORY)
+                get_filename_component(DD_INSTALL_DIR "${DD_LIB_DIR}" DIRECTORY)
+
+                if(WIN32)
+                    # Check for dyn_dispatch_core.dll in bin/ directory
+                    if(EXISTS "${DD_INSTALL_DIR}/bin/dyn_dispatch_core.dll")
+                        message(STATUS "Detected dyn_dispatch_core.dll -> using DLL import library")
+                        message(STATUS "  Transitive dependencies already linked into DLL")
+                        set(DD_IS_STATIC_LIB FALSE)
+                    else()
+                        message(STATUS "No dyn_dispatch_core.dll found -> using static library")
+                        message(STATUS "  Will link transitive dependencies explicitly")
+                        set(DD_IS_STATIC_LIB TRUE)
+                    endif()
+                else()
+                    # Linux: check for .so file
+                    if(EXISTS "${DD_LIB_DIR}/libdyn_dispatch_core.so")
+                        message(STATUS "Detected libdyn_dispatch_core.so -> using shared library")
+                        set(DD_IS_STATIC_LIB FALSE)
+                    else()
+                        message(STATUS "No libdyn_dispatch_core.so found -> using static library")
+                        set(DD_IS_STATIC_LIB TRUE)
+                    endif()
                 endif()
-                if(DD_AIE_CODEGEN_LIB)
-                    target_link_libraries(hipdnn-ep-dd PRIVATE ${DD_AIE_CODEGEN_LIB})
-                    message(STATUS "Linking aie_codegen library: ${DD_AIE_CODEGEN_LIB}")
-                endif()
-                if(XRT_COREUTIL_LIB)
-                    target_link_libraries(hipdnn-ep-dd PRIVATE ${XRT_COREUTIL_LIB})
-                    message(STATUS "Linking XRT coreutil library: ${XRT_COREUTIL_LIB}")
-                endif()
-                if(ZLIB_LIB)
-                    target_link_libraries(hipdnn-ep-dd PRIVATE ${ZLIB_LIB})
-                    message(STATUS "Linking zlib library: ${ZLIB_LIB}")
+
+                # Link additional DD libraries ONLY if dyn_dispatch_core is a static library.
+                # When it's a DLL/shared library, these dependencies are already inside it.
+                if(DD_IS_STATIC_LIB)
+                    message(STATUS "Linking transitive dependencies for static dyn_dispatch_core:")
+
+                    if(DD_TRANSACTION_LIB)
+                        target_link_libraries(hipdnn-ep-dd PRIVATE ${DD_TRANSACTION_LIB})
+                        message(STATUS "  - transaction:  ${DD_TRANSACTION_LIB}")
+                    endif()
+                    if(DD_PM_PACKAGE_LIB)
+                        target_link_libraries(hipdnn-ep-dd PRIVATE ${DD_PM_PACKAGE_LIB})
+                        message(STATUS "  - pm_package:   ${DD_PM_PACKAGE_LIB}")
+                    endif()
+                    if(DD_XCLBIN_LIB)
+                        target_link_libraries(hipdnn-ep-dd PRIVATE ${DD_XCLBIN_LIB})
+                        message(STATUS "  - xclbin:       ${DD_XCLBIN_LIB}")
+                    endif()
+                    if(DD_HASHLIB_LIB)
+                        target_link_libraries(hipdnn-ep-dd PRIVATE ${DD_HASHLIB_LIB})
+                        message(STATUS "  - hashlib:      ${DD_HASHLIB_LIB}")
+                    endif()
+                    if(DD_SPDLOG_LIB)
+                        target_link_libraries(hipdnn-ep-dd PRIVATE ${DD_SPDLOG_LIB})
+                        message(STATUS "  - spdlog:       ${DD_SPDLOG_LIB}")
+                    endif()
+                    if(DD_AIEBU_STATIC_LIB)
+                        target_link_libraries(hipdnn-ep-dd PRIVATE ${DD_AIEBU_STATIC_LIB})
+                        message(STATUS "  - aiebu_static: ${DD_AIEBU_STATIC_LIB}")
+                    endif()
+                    if(DD_AIE_CODEGEN_LIB)
+                        target_link_libraries(hipdnn-ep-dd PRIVATE ${DD_AIE_CODEGEN_LIB})
+                        message(STATUS "  - aie_codegen:  ${DD_AIE_CODEGEN_LIB}")
+                    endif()
+                    if(XRT_COREUTIL_LIB)
+                        target_link_libraries(hipdnn-ep-dd PRIVATE ${XRT_COREUTIL_LIB})
+                        message(STATUS "  - xrt_coreutil: ${XRT_COREUTIL_LIB}")
+                    endif()
+                    if(ZLIB_LIB)
+                        target_link_libraries(hipdnn-ep-dd PRIVATE ${ZLIB_LIB})
+                        message(STATUS "  - zlib:         ${ZLIB_LIB}")
+                    endif()
+                else()
+                    message(STATUS "Skipping transitive dependencies (already in dyn_dispatch_core DLL)")
                 endif()
 
                 set_target_properties(hipdnn-ep-dd PROPERTIES

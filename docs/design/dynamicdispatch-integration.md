@@ -121,6 +121,22 @@ The native library is required because:
 - JIT cannot link external C++ libraries at runtime
 - Native symbols take precedence over bitcode stubs via JIT's `ProcessSymbolSearchGenerator`
 
+### Static vs. Shared Library Linking
+
+DynamicDispatch may be built as either a **static library** (`.lib`/`.a`) or a **shared library** (`.dll`/`.so`):
+
+**Shared library (DLL) build**:
+- hip-ep links against `dyn_dispatch_core.lib` (import library)
+- Transitive dependencies (transaction, xrt_coreutil, zlib, etc.) are already linked into `dyn_dispatch_core.dll`
+- hip-ep does **not** link those dependencies again
+
+**Static library build**:
+- hip-ep links against `dyn_dispatch_core.lib` (static library)
+- Transitive dependencies are **not** included; they must be linked explicitly
+- hip-ep links transaction, xrt_coreutil, zlib, etc. to resolve symbols
+
+The CMake build automatically detects which type by checking for the presence of `dyn_dispatch_core.dll` (Windows) or `libdyn_dispatch_core.so` (Linux). If found, only the core library is linked. If missing, all transitive dependencies are linked.
+
 ## Known Issues and Workarounds
 
 ### 1. Missing Static Member Definitions
@@ -187,7 +203,108 @@ template class ryzenai::dynamic_dispatch::combined_gemm<uint16_t, uint8_t, uint1
 template class ryzenai::dynamic_dispatch::iconv<uint16_t, uint8_t, uint16_t>;
 ```
 
-### 3. MSVC Runtime Library Mismatch (Windows Only)
+### 3. MSVC Compiler Version Mismatch (Windows Only)
+
+**Problem**: DynamicDispatch libraries compiled with one version of MSVC contain STL symbols that are incompatible with a different MSVC version used to build hip-ep.
+
+**Symptoms**:
+```
+dyn_dispatch_core.lib(utils.obj) : error LNK2019: unresolved external symbol 
+__std_find_first_of_trivial_pos_1 referenced in function "unsigned __int64 __cdecl 
+std::_Find_first_of_pos_vectorized<char,char>(...)"
+```
+
+Other common STL symbol mismatches:
+- `__std_find_trivial_*`
+- `__std_compare_*`
+- `_Atomic_*`
+- `__std_terminate`
+
+**Explanation**:
+
+The MSVC Standard Template Library (STL) is an implementation detail that changes between compiler versions:
+- **VS 2019 (MSVC 14.2x)**: STL version 14.2x
+- **VS 2022 (MSVC 14.3x)**: STL version 14.3x with different internal symbols
+
+When DD is built with VS 2022 and hip-ep is built with VS 2019 (or vice versa), the STL symbols don't match, causing link errors. This happens even if both use the same `/MT` or `/MD` setting.
+
+**Binary compatibility matrix**:
+
+| hip-ep MSVC | DD MSVC | Compatible? |
+|-------------|---------|-------------|
+| VS 2019 14.29 | VS 2019 14.29 | ✓ Yes |
+| VS 2022 17.x | VS 2022 17.x | ✓ Yes (same minor version) |
+| VS 2019 | VS 2022 | ❌ No - STL ABI mismatch |
+| VS 2022 17.4 | VS 2022 17.8 | ⚠️ Maybe - depends on STL changes |
+
+**Solution 1: Use matching MSVC versions** (Recommended)
+
+Build both hip-ep and DD with the **exact same MSVC version**:
+
+```bash
+# Check hip-ep's MSVC version
+cl.exe /?
+# Example output: Microsoft (R) C/C++ Optimizing Compiler Version 19.29.30148 for x64
+
+# Build DD with the same compiler
+# Set up VS 2019 environment
+call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Professional\VC\Auxiliary\Build\vcvars64.bat"
+cd %DD_REPO%
+cmake -G "Visual Studio 16 2019" ..
+cmake --build . --config Release
+```
+
+**Solution 2: Request DD build for your MSVC version**
+
+Contact DD maintainers and request a build that matches your Visual Studio version.
+
+**Solution 3: Upgrade/downgrade hip-ep's MSVC**
+
+If you have multiple VS versions installed, use the same one that built DD:
+
+```bash
+# Use VS 2022 if DD was built with VS 2022
+call "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
+cd %HIP_EP_REPO%
+python build.py --clean
+python build.py
+```
+
+**Verification**:
+
+Check MSVC version used to build a library:
+
+```bash
+# Check what compiler built a .lib file
+dumpbin /DIRECTIVES dyn_dispatch_core.lib | findstr /C:"MSVC"
+# Look for: /DEFAULTLIB:"MSVCRT" and compiler version metadata
+
+# Check hip-ep's compiler
+cl.exe /?
+# Microsoft (R) C/C++ Optimizing Compiler Version XX.XX.XXXXX
+```
+
+**Why this happens**:
+
+Unlike the C ABI (which is stable), the C++ STL is **not ABI-stable** across MSVC versions. Microsoft reserves the right to change STL internals between releases. When DD's static library contains compiled STL code (like `std::string`, `std::vector` algorithms), those compiled bytes reference internal STL symbols that must match your compiler's version.
+
+**Workaround: Use DD shared library (DLL)**
+
+If available, use a DLL build of DD instead of static. The DLL was linked with its own MSVC runtime, so hip-ep doesn't need to resolve DD's STL symbols:
+
+```bash
+# Point to a DLL build instead of static
+set DYNAMICDISPATCH_ROOT=C:\vai-rt\install-dll
+python build.py
+```
+
+The DLL should have been built with `/MD` and will load `msvcrt.dll` at runtime (see next section).
+
+**References**:
+- MSVC binary compatibility: https://learn.microsoft.com/en-us/cpp/porting/binary-compat-2015-2017
+- STL breaking changes: https://github.com/microsoft/STL/wiki/Changelog
+
+### 4. MSVC Runtime Library Mismatch (Windows Only)
 
 **Problem**: DynamicDispatch libraries may be built with `/MD` (dynamic CRT), but hip-ep uses `/MT` (static CRT), causing link errors.
 
@@ -298,7 +415,7 @@ The CMake configuration (as of recent changes) checks:
 
 **See**: `lib/Runtime/CMakeLists.txt` lines 668-683
 
-### 5. Install Layout vs. Source Layout
+### 6. Install Layout vs. Source Layout
 
 **Problem**: DD may be built from source or installed as a package, with different header paths. Additionally, some DD headers reference files outside the standard include structure.
 
@@ -402,14 +519,41 @@ Then the build will succeed but DD operations will use mock stubs (CPU fallback)
 
 ### At Link Time
 
-The hipdnn-ep-dd library should link against:
-- `dyn_dispatch_core.lib` (required)
-- `transaction.lib` (optional)
-- `aie_codegen.lib` (optional)
-- `xrt_coreutil.lib` (optional)
-- `zlib.lib` (optional)
+Check CMake output to see if DD is static or shared:
 
-Missing optional libraries are non-fatal; missing `dyn_dispatch_core` will cause unresolved externals.
+```
+-- Detected dyn_dispatch_core.dll -> using DLL import library
+-- Transitive dependencies already linked into DLL
+-- Skipping transitive dependencies (already in dyn_dispatch_core DLL)
+```
+
+OR
+
+```
+-- No dyn_dispatch_core.dll found -> using static library
+-- Will link transitive dependencies explicitly
+-- Linking transitive dependencies for static dyn_dispatch_core:
+--   - transaction:  C:/path/to/transaction.lib
+--   - xrt_coreutil: C:/path/to/xrt_coreutil.lib
+--   - zlib:         C:/path/to/zlib.lib
+```
+
+**Static library build** links:
+- `dyn_dispatch_core.lib` (required)
+- `transaction.lib` (if found)
+- `pm_package.lib` (if found)
+- `xclbin.lib` (if found)
+- `hashlib.lib` (if found)
+- `spdlog.lib` (if found)
+- `aiebu_static.lib` (if found)
+- `aie_codegen.lib` (if found)
+- `xrt_coreutil.lib` (if found)
+- `zlib.lib` (if found)
+
+**Shared library (DLL) build** links:
+- `dyn_dispatch_core.lib` (import library only)
+
+Missing transitive dependencies in a static build will cause unresolved externals.
 
 ### At Runtime
 
@@ -437,6 +581,38 @@ With `HIPEP_USE_DYNAMIC_DISPATCH=1`, DD operations should dispatch to NPU. Check
 1. Check `$DYNAMICDISPATCH_ROOT/xrt/include/xrt/xrt_bo.h`
 2. Or set `XILINX_XRT` environment variable
 3. Or install XRT to `/opt/xilinx/xrt` (Linux default)
+
+### "LNK2019: unresolved external symbol __std_*" (Windows)
+
+This is an MSVC compiler version mismatch (see "MSVC Compiler Version Mismatch" above).
+
+1. **Identify the issue**: STL symbol mismatches mean different MSVC versions
+   ```
+   error LNK2019: unresolved external symbol __std_find_first_of_trivial_pos_1
+   error LNK2019: unresolved external symbol __std_compare_*
+   ```
+
+2. **Check your MSVC version**:
+   ```bash
+   cl.exe /?
+   # Example: Version 19.29.30148 = VS 2019
+   # Example: Version 19.39.33523 = VS 2022
+   ```
+
+3. **Best solution**: Rebuild DD with matching MSVC version
+   - VS 2019 → Use MSVC 14.29.x
+   - VS 2022 → Use MSVC 14.3x (same minor version if possible)
+
+4. **Quick workaround**: Use DD DLL instead of static library (if available)
+   - DLL was linked with its own runtime, avoids STL symbol resolution
+
+5. **Last resort**: Switch hip-ep to match DD's compiler version
+   ```bash
+   # If DD was built with VS 2022
+   call "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
+   python build.py --clean
+   python build.py
+   ```
 
 ### "LNK2038: mismatch detected for 'RuntimeLibrary'" (Windows)
 
@@ -494,6 +670,35 @@ This indicates a layout detection issue (see "Install Layout vs. Source Layout" 
 
 ### Unresolved Externals at Link Time
 
+**Missing transitive dependencies** (static library only):
+
+If you see unresolved symbols from XRT, zlib, or other DD dependencies:
+
+1. Check if CMake detected the correct library type:
+   ```
+   # Look for this in CMake output:
+   -- No dyn_dispatch_core.dll found -> using static library
+   ```
+
+2. Verify the DLL doesn't exist (if it does, this is a false negative):
+   ```bash
+   # Windows
+   dir %DYNAMICDISPATCH_ROOT%\bin\dyn_dispatch_core.dll
+
+   # Linux
+   ls $DYNAMICDISPATCH_ROOT/lib/libdyn_dispatch_core.so
+   ```
+
+3. If it's truly a static build, check which dependencies were found:
+   ```
+   # CMake output should show:
+   -- Linking transitive dependencies for static dyn_dispatch_core:
+   --   - transaction:  <path>
+   --   - xrt_coreutil: <path>
+   ```
+
+4. If a required library is missing, add it to `DYNAMICDISPATCH_ROOT` search paths or install it.
+
 **Static members**:
 1. See "Missing Static Member Definitions" section above
 2. Enable workarounds in `dd_static_init.cpp`
@@ -505,6 +710,30 @@ This indicates a layout detection issue (see "Install Layout vs. Source Layout" 
 **Vendor symbols** (MIOpen/hipBLASLt):
 1. These should **not** be needed by DD integration
 2. If you see MIOpen/hipBLASLt errors, check that `hipdnn-ep-dd` doesn't accidentally pull in GPU runtime headers
+
+**Wrong library type detected**:
+
+If CMake incorrectly detects the library type (rare):
+
+1. Check the actual layout:
+   ```bash
+   # Static build should have NO .dll/.so:
+   ls $DYNAMICDISPATCH_ROOT/bin/        # Should be empty or missing
+   ls $DYNAMICDISPATCH_ROOT/lib/*.lib   # Only .lib files
+
+   # Shared build should have .dll/.so:
+   ls $DYNAMICDISPATCH_ROOT/bin/*.dll   # dyn_dispatch_core.dll present
+   ls $DYNAMICDISPATCH_ROOT/lib/*.lib   # Import lib
+   ```
+
+2. Override detection by modifying `lib/Runtime/CMakeLists.txt`:
+   ```cmake
+   # Force static library linking:
+   set(DD_IS_STATIC_LIB TRUE)
+
+   # Force shared library linking:
+   set(DD_IS_STATIC_LIB FALSE)
+   ```
 
 ## Testing DD Integration
 
