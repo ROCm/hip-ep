@@ -3,14 +3,15 @@
 # Licensed under the MIT License.
 #
 
-"""Tests for the unary math ops Abs, Ceil, Log, Erf.
+"""Tests for the unary math ops Abs, Ceil, Floor, Log, Erf.
 
-All three route through the shared unary elementwise HIP kernel family
-(lib/Runtime/real/{abs,ceil,log}.cpp). Per those dtype tables:
+These route through the shared unary elementwise HIP kernel family
+(lib/Runtime/real/{abs,ceil,floor,log}.cpp). Per those dtype tables:
 
-    Abs  : f16, f32, i32, i64   (bit-exact; abs is value-preserving)
-    Ceil : f16, f32             (bit-exact; result is integral)
-    Log  : f16, f32             (positive inputs only; fp16 ~1e-3, fp32 ~1e-6)
+    Abs   : f16, f32, i32, i64   (bit-exact; abs is value-preserving)
+    Ceil  : f16, f32             (bit-exact; result is integral)
+    Floor : f16, f32             (bit-exact; result is integral)
+    Log   : f16, f32             (positive inputs only; fp16 ~1e-3, fp32 ~1e-6)
 
 Each op is checked at a small smoke shape plus a llama-style [1, S, 4096]
 shape for S in {1, 128}.
@@ -84,6 +85,29 @@ class TestCeil:
         shape = [1, seq_len, HIDDEN]
         model = _make_unary_model("Ceil", np.float16, shape)
         rng = np.random.default_rng(904)
+        x = rng.uniform(-5.0, 5.0, shape).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+
+# ---------------------------------------------------------------------------
+# Floor : y = floor(x)
+# ---------------------------------------------------------------------------
+class TestFloor:
+    @pytest.mark.parametrize("dtype", [np.float16, np.float32])
+    def test_floor(self, model_runner, dtype):
+        shape = [4, 8]
+        model = _make_unary_model("Floor", dtype, shape)
+        rng = np.random.default_rng(913)
+        x = rng.uniform(-5.0, 5.0, shape).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize("seq_len", SEQ_LENS)
+    def test_floor_llama_shape(self, model_runner, seq_len):
+        shape = [1, seq_len, HIDDEN]
+        model = _make_unary_model("Floor", np.float16, shape)
+        rng = np.random.default_rng(914)
         x = rng.uniform(-5.0, 5.0, shape).astype(np.float16)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)

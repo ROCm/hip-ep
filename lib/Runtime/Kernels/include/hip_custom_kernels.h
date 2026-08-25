@@ -193,6 +193,10 @@ HIP_KERNEL_API int hip_elementwise_ceil(
     void *stream, const void *input, void *output, int64_t num_elements,
     int hip_dtype);
 
+HIP_KERNEL_API int hip_elementwise_floor(
+    void *stream, const void *input, void *output, int64_t num_elements,
+    int hip_dtype);
+
 HIP_KERNEL_API int hip_elementwise_exp(
     void* stream,
     const void* input,

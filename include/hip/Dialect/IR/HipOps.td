@@ -2558,6 +2558,42 @@ def Hip_CeilOp : Hip_DpsOp<"ceil", /*traits=*/[],
   }];
 }
 
+def Hip_FloorOp : Hip_DpsOp<"floor", /*traits=*/[],
+                            /*outsAccessor=*/"Y",
+                            /*autoReify=*/1,
+                            /*autoInfer=*/1,
+                            /*declareInfer=*/1> {
+  let summary = "Element-wise floor: y = floor(x)";
+  let description = [{
+    Rounds each element downward to the nearest integer.
+    Implements the standard ONNX Floor operator.
+
+    Formula: Y = floor(X)
+
+    Lowered via the unified unary elementwise path (wrap_floor).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.floor(%ctx) ins(%x : memref<3x4xf32, 1>)
+                    outs(%y : memref<3x4xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_ExpOp : Hip_DpsOp<"exp"> {
   let summary = "Element-wise natural exponential: y = exp(x)";
   let description = [{

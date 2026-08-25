@@ -402,6 +402,73 @@ extern "C" int hip_elementwise_ceil(void *stream, const void *input,
   return static_cast<int>(err);
 }
 
+__global__ void elementwise_floor_f16_kernel(const __half *__restrict__ input,
+                                             __half *__restrict__ output,
+                                             int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    float x = __half2float(input[idx]);
+    output[idx] = __float2half(floorf(x));
+  }
+}
+
+__global__ void elementwise_floor_f32_kernel(const float *__restrict__ input,
+                                             float *__restrict__ output,
+                                             int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = floorf(input[idx]);
+  }
+}
+
+extern "C" int hip_elementwise_floor(void *stream, const void *input,
+                                     void *output, int64_t num_elements,
+                                     int hip_dtype) {
+  if (num_elements <= 0)
+    return 0;
+
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  constexpr int kBlockSize = 256;
+  int grid_size =
+      static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
+
+  switch (hip_dtype) {
+  case HIP_DTYPE_FLOAT16:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_floor: f16, num=%lld\n",
+        (long long)num_elements);
+    hipLaunchKernelGGL(elementwise_floor_f16_kernel, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const __half *>(input),
+                       static_cast<__half *>(output), num_elements);
+    break;
+  case HIP_DTYPE_FLOAT32:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_floor: f32, num=%lld\n",
+        (long long)num_elements);
+    hipLaunchKernelGGL(elementwise_floor_f32_kernel, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const float *>(input),
+                       static_cast<float *>(output), num_elements);
+    break;
+  default:
+    fprintf(stderr,
+            "[custom_kernels] hip_elementwise_floor: unsupported dtype=%d\n",
+            hip_dtype);
+    return -1;
+  }
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr,
+            "[custom_kernels] hip_elementwise_floor launch failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
+}
+
 __global__ void elementwise_exp_f16_kernel(const __half *__restrict__ input,
                                            __half *__restrict__ output,
                                            int64_t num_elements) {

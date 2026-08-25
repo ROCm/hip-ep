@@ -1830,6 +1830,18 @@ void CeilOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// FloorOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange FloorOp::getDpsInitsMutable() { return getYMutable(); }
+
+void FloorOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // ExpOp: ins(x), outs(y)
 //===----------------------------------------------------------------------===//
 

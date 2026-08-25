@@ -372,6 +372,8 @@ void populateSinConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateCeilConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateFloorConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
 void populateExpConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateLogConversionPatterns(RewritePatternSet &patterns,
