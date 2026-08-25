@@ -360,6 +360,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/ceil.cpp runtime_ceil.bc)
     compile_to_bitcode(real/round.cpp runtime_round.bc)
     compile_to_bitcode(real/atan.cpp runtime_atan.bc)
+    compile_to_bitcode(real/floor.cpp runtime_floor.bc)
     compile_to_bitcode(real/exp.cpp runtime_exp.bc)
     compile_to_bitcode(real/sigmoid.cpp runtime_sigmoid.bc)
     compile_to_bitcode(real/tanh.cpp runtime_tanh.bc)
@@ -483,6 +484,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_ceil.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_round.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_atan.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_floor.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_exp.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_sigmoid.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tanh.bc

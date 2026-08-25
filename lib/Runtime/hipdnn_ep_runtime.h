@@ -1460,6 +1460,8 @@ int wrap_round(RuntimeState *state, void *input, void *output,
                int64_t num_elements, int64_t data_type);
 int wrap_atan(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t data_type);
+int wrap_floor(RuntimeState *state, void *input, void *output,
+               int64_t num_elements, int64_t data_type);
 int wrap_exp(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 int wrap_sigmoid(RuntimeState *state, void *input, void *output,

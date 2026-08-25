@@ -112,6 +112,7 @@ inline constexpr const char *kWrapSin = "wrap_sin";
 inline constexpr const char *kWrapCeil = "wrap_ceil";
 inline constexpr const char *kWrapRound = "wrap_round";
 inline constexpr const char *kWrapAtan = "wrap_atan";
+inline constexpr const char *kWrapFloor = "wrap_floor";
 inline constexpr const char *kWrapExp = "wrap_exp";
 inline constexpr const char *kWrapSigmoid = "wrap_sigmoid";
 inline constexpr const char *kWrapTanh = "wrap_tanh";
