@@ -50,6 +50,7 @@ set(_kernel_sources
     hip/elementwise_where_kernel.hip
     hip/elementwise_unary_kernel.hip
     hip/elementwise_binary_kernel.hip  # Mul/Add/Min/Max/Div/Mod/Equal/Less
+    hip/miopen_optensor_kernel.hip     # miopenOpTensor MIN de-library path
     hip/tile_kernel.hip
     hip/expand_kernel.hip
     hip/gather_nd_kernel.hip

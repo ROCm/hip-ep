@@ -24,6 +24,7 @@
 #include "debug_log.h"
 
 #include <cmath>
+#include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 #include <cstdint>
@@ -874,11 +875,18 @@ __device__ __forceinline__ float ew_load(const float *p, uint32_t i) {
 __device__ __forceinline__ float ew_load(const __half *p, uint32_t i) {
   return __half2float(p[i]);
 }
+__device__ __forceinline__ float ew_load(const __hip_bfloat16 *p, uint32_t i) {
+  return __bfloat162float(p[i]);
+}
 __device__ __forceinline__ void ew_store(float *p, uint32_t i, float v) {
   p[i] = v;
 }
 __device__ __forceinline__ void ew_store(__half *p, uint32_t i, float v) {
   p[i] = __float2half(v);
+}
+__device__ __forceinline__ void ew_store(__hip_bfloat16 *p, uint32_t i,
+                                         float v) {
+  p[i] = __float2bfloat16(v);
 }
 
 // op: 0=add, 1=mul, 2=min, 3=max
@@ -971,6 +979,13 @@ extern "C" int hip_elementwise_binary_bcast(void *stream, const void *lhs,
                        static_cast<const float *>(lhs),
                        static_cast<const float *>(rhs),
                        static_cast<float *>(output), n, op, meta);
+    break;
+  case HIP_DTYPE_BFLOAT16:
+    hipLaunchKernelGGL(ew_bcast4d_kernel<__hip_bfloat16>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const __hip_bfloat16 *>(lhs),
+                       static_cast<const __hip_bfloat16 *>(rhs),
+                       static_cast<__hip_bfloat16 *>(output), n, op, meta);
     break;
   default:
     fprintf(stderr,

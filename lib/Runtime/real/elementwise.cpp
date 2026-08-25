@@ -505,15 +505,18 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
     return rc;
   }
 
-  // Float/half Add/Mul/Min/Max fast path: a single broadcasting HIP kernel.
-  // MIOpen's miopenOpTensor is pathologically slow on gfx1151 for the
+  // Float/half/bfloat16 Add/Mul/Min/Max fast path: a single broadcasting HIP
+  // kernel. MIOpen's miopenOpTensor is pathologically slow on gfx1151 for the
   // vision-encoder elementwise shapes (~390 ms for a 6.3M-element fp16 op
   // measured on SAM2.1's Hiera encoder); the custom kernel does the same work
   // in well under a millisecond with fully coalesced output writes and native
-  // per-axis broadcasting (no Expand materialisation). bf16 and any future op
-  // not in {ADD,MUL,MIN,MAX} fall through to the MIOpen path below.
+  // per-axis broadcasting (no Expand materialisation). Min falls back to the
+  // ported MIOpen OpTensor kernels below when the output volume exceeds the
+  // 32-bit bcast index range. Any future op not in {ADD,MUL,MIN,MAX} still
+  // uses the MIOpen path below.
   if ((data_type == HIPDNN_EP_DATATYPE_HALF ||
-       data_type == HIPDNN_EP_DATATYPE_FLOAT) &&
+       data_type == HIPDNN_EP_DATATYPE_FLOAT ||
+       data_type == HIPDNN_EP_DATATYPE_BFLOAT16) &&
       (tensor_op == HIPDNN_EP_TENSOR_OP_ADD ||
        tensor_op == HIPDNN_EP_TENSOR_OP_MUL ||
        tensor_op == HIPDNN_EP_TENSOR_OP_MIN ||
@@ -530,8 +533,8 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
     int rc = hip_elementwise_binary_bcast(stream, lhs, rhs, output, lhs_shape4,
                                           rhs_shape4, out_shape4, bcast_op,
                                           hip_dtype);
-    // rc == -2: output volume exceeds the kernel's 32-bit index range; fall
-    // back to the MIOpen path below. Any other rc is terminal.
+    // rc == -2: output volume exceeds the bcast kernel's 32-bit index range;
+    // Min uses the ported MIOpen OpTensor path below, other ops use MIOpen.
     if (rc != -2)
       return rc;
   }
@@ -636,6 +639,29 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
       rhs_h = orig_lhs_h;
       rhs_w = orig_lhs_w;
     }
+  }
+
+  // Min de-MIOpen path: ported Op4dTensorLite / Op4dTensorGeneric kernels.
+  // wrap_miopenOpTensor keeps the MIOpen name to mark the technical lineage.
+  if (tensor_op == HIPDNN_EP_TENSOR_OP_MIN) {
+    void *stream = hipdnn_ep_state_get_stream(state);
+    int hip_dtype = hipdnn_to_hip_dtype(data_type);
+    if (hip_dtype < 0) {
+      fprintf(stderr,
+              "wrap_miopenOpTensor: MIN custom path unsupported dtype %lld\n",
+              (long long)data_type);
+      return -1;
+    }
+    RUNTIME_DEBUG_LOG(
+        "[REAL] wrap_miopenOpTensor: hip_miopen_op_tensor_min "
+        "A=[%lld,%lld,%lld,%lld] B=[%lld,%lld,%lld,%lld] "
+        "C=[%lld,%lld,%lld,%lld]\n",
+        (long long)lhs_n, (long long)lhs_c, (long long)lhs_h, (long long)lhs_w,
+        (long long)rhs_n, (long long)rhs_c, (long long)rhs_h, (long long)rhs_w,
+        (long long)out_n, (long long)out_c, (long long)out_h, (long long)out_w);
+    return hip_miopen_op_tensor_min(
+        stream, lhs, rhs, output, lhs_n, lhs_c, lhs_h, lhs_w, rhs_n, rhs_c,
+        rhs_h, rhs_w, out_n, out_c, out_h, out_w, hip_dtype, 1.0f, 1.0f, 0.0f);
   }
 
   OpTensorState *os = OpTensorState::get_op_state(state, op_state_slot);
