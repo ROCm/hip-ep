@@ -273,3 +273,13 @@ class TestAnd:
         b = rng.integers(0, 2, shape).astype(np.bool_)
         actual, expected = model_runner.run_sample(model, [a, b])
         compare_outputs(actual, expected, atol=0)
+
+    def test_and_5d(self, model_runner):
+        """Rank-5 And packed through the 4-D path (BEVFormer reference mask)."""
+        shape = [2, 1, 3, 4, 1]
+        model = _make_binary_model("And", np.bool_, np.bool_, shape)
+        rng = np.random.default_rng(210)
+        a = rng.integers(0, 2, shape).astype(np.bool_)
+        b = rng.integers(0, 2, shape).astype(np.bool_)
+        actual, expected = model_runner.run_sample(model, [a, b])
+        compare_outputs(actual, expected, atol=0)
