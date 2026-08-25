@@ -134,7 +134,8 @@ queryOrCreateSkipT5Norm(SkipT5NormTable &table, const SkipT5NormCacheKey &key) {
   }
 
   {
-    // T5LayerNorm: 2D [num_rows, hidden_dim]
+    int norm_dims[] = {1, 1, static_cast<int>(key.num_rows),
+                       static_cast<int>(key.hidden_dim)};
     int x_dims[] = {static_cast<int>(key.num_rows),
                     static_cast<int>(key.hidden_dim)};
     int x_strides[] = {static_cast<int>(key.hidden_dim), 1};
@@ -145,10 +146,10 @@ queryOrCreateSkipT5Norm(SkipT5NormTable &table, const SkipT5NormCacheKey &key) {
     int bias_dims[] = {1, static_cast<int>(key.hidden_dim)};
     int bias_strides[] = {static_cast<int>(key.hidden_dim), 1};
 
-    SKIP_CACHE_CHECK(miopenSetTensorDescriptor(e.xDesc, key.data_type, 2,
-                                               x_dims, x_strides));
-    SKIP_CACHE_CHECK(miopenSetTensorDescriptor(e.yDesc, key.data_type, 2,
-                                               x_dims, x_strides));
+    SKIP_CACHE_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        e.xDesc, key.data_type, miopenTensorNCHW, norm_dims, 4));
+    SKIP_CACHE_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        e.yDesc, key.data_type, miopenTensorNCHW, norm_dims, 4));
     SKIP_CACHE_CHECK(miopenSetTensorDescriptor(e.weightDesc, key.data_type, 1,
                                                w_dims, w_strides));
     SKIP_CACHE_CHECK(miopenSetTensorDescriptor(e.rstdDesc, miopenFloat, 1,
