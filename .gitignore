@@ -87,8 +87,20 @@ Thumbs.db
 .cursor/skills/**/__pycache__/
 .cursor/skills/**/*.pyc
 
-# Claude Code workspace (worktrees, local settings, sdd ledger ΓÇö never committed)
-.claude/
+# Claude Code workspace: ignore local state (worktrees, local settings, sdd ledger),
+# then re-include the shared agent roster, hooks, and hook wiring — a guard that lives
+# on one developer's machine cannot prevent a mistake on anyone else's. Same shape as
+# the .cursor block above, and for the same reason: never bare .claude/, because git
+# cannot un-ignore children of a fully ignored directory.
+.claude/*
+!.claude/
+!.claude/agents/
+!.claude/agents/**
+!.claude/hooks/
+!.claude/hooks/**
+!.claude/settings.json
+.claude/hooks/**/__pycache__/
+.claude/hooks/**/*.pyc
 
 # Agentic spec/plan scratch docs (superpowers) ΓÇö working artifacts, not shipped
 docs/superpowers/
@@ -159,3 +171,5 @@ _local/
 # Whisper test audio (auto-downloaded at test setup, cached locally; README kept)
 test/python/data/whisper/*.wav
 test/python/data/whisper/librispeech/
+# Orchestrator run state and agent logs: per-machine, never committed.
+.claude/state/

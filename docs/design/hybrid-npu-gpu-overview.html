@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+
+Source for hybrid-npu-gpu-overview.pdf. Regenerate with:
+  chrome --headless --disable-gpu --no-pdf-header-footer \
+         --print-to-pdf=docs/design/hybrid-npu-gpu-overview.pdf \
+         docs/design/hybrid-npu-gpu-overview.html
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hybrid NPU + GPU Execution — Overview</title>
+<style>
+  @page { size: A4; margin: 14mm 15mm; }
+
+  :root {
+    --npu:    #b45309;
+    --npu-bg: #fffbeb;
+    --gpu:    #1d4ed8;
+    --gpu-bg: #eff6ff;
+    --ok:     #047857;
+    --ok-bg:  #ecfdf5;
+    --ink:    #14181f;
+    --body:   #333b47;
+    --mute:   #6b7480;
+    --line:   #dde2e8;
+    --rule:   #b91c1c;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    font-family: "Segoe UI", -apple-system, system-ui, sans-serif;
+    color: var(--body);
+    font-size: 9.7pt;
+    line-height: 1.5;
+    margin: 0;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  h1 { font-size: 19pt; color: var(--ink); margin: 0; letter-spacing: -.4pt; font-weight: 650; }
+  h2 {
+    font-size: 11.5pt; color: var(--ink); font-weight: 650;
+    margin: 16pt 0 6pt; padding-bottom: 3pt;
+    border-bottom: 1.5px solid var(--line);
+    page-break-after: avoid;
+  }
+  h3 { font-size: 9.9pt; color: var(--ink); font-weight: 650; margin: 10pt 0 3pt; page-break-after: avoid; }
+  p  { margin: 0 0 6pt; }
+  b, strong { color: var(--ink); font-weight: 650; }
+
+  .sub { color: var(--mute); font-size: 10pt; margin: 5pt 0 0; }
+  header { border-bottom: 2.5px solid var(--ink); padding-bottom: 8pt; margin-bottom: 4pt; }
+  .meta { color: var(--mute); font-size: 8pt; margin-top: 6pt; }
+
+  code {
+    font-family: "Cascadia Mono", Consolas, monospace;
+    font-size: 8.5pt; background: #f2f4f7;
+    padding: .5pt 3pt; border-radius: 3px; color: #1f2937;
+  }
+
+  table { width: 100%; border-collapse: collapse; margin: 4pt 0 8pt; font-size: 9pt; }
+  th {
+    text-align: left; font-weight: 650; color: var(--ink);
+    border-bottom: 1.2px solid var(--ink); padding: 4pt 7pt 4pt 0; font-size: 8.4pt;
+    text-transform: uppercase; letter-spacing: .35pt;
+  }
+  td { padding: 4pt 7pt 4pt 0; border-bottom: 1px solid #eef1f4; vertical-align: top; }
+  tr { page-break-inside: avoid; }
+
+  .callout {
+    border-left: 3px solid var(--rule);
+    background: #fef4f4; padding: 7pt 10pt; margin: 8pt 0;
+    page-break-inside: avoid; border-radius: 0 4px 4px 0;
+  }
+  .callout .t { color: #991b1b; font-weight: 650; display: block; margin-bottom: 1pt; }
+
+  figure { margin: 6pt 0 9pt; page-break-inside: avoid; text-align: center; }
+  figure svg { max-width: 100%; height: auto; }
+  figcaption { font-size: 8.1pt; color: var(--mute); margin-top: 3pt; text-align: left; }
+
+  .cols { display: flex; gap: 13pt; page-break-inside: avoid; }
+  .cols > div { flex: 1; }
+
+  .card {
+    border: 1px solid var(--line); border-radius: 5px;
+    padding: 8pt 10pt; page-break-inside: avoid;
+  }
+  .card.npu { border-left: 3px solid var(--npu); background: var(--npu-bg); }
+  .card.gpu { border-left: 3px solid var(--gpu); background: var(--gpu-bg); }
+  .card h3 { margin-top: 0; }
+
+  ul { margin: 0 0 6pt; padding-left: 14pt; }
+  li { margin-bottom: 2.5pt; }
+
+  .tag-npu { color: var(--npu); font-weight: 650; }
+  .tag-gpu { color: var(--gpu); font-weight: 650; }
+  .keep { page-break-inside: avoid; }
+
+  footer {
+    margin-top: 13pt; padding-top: 6pt;
+    border-top: 1px solid var(--line);
+    font-size: 7.8pt; color: var(--mute);
+  }
+  svg text { font-family: "Segoe UI", system-ui, sans-serif; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Hybrid NPU&nbsp;+&nbsp;GPU Execution</h1>
+  <p class="sub">Running LLM prompt processing on the NPU and token generation on the GPU,
+     inside a single ONNX Runtime session.</p>
+  <p class="meta">hip-ep &middot; MorphiZen HIP Execution Provider &middot; design overview</p>
+</header>
+
+<h2>The idea</h2>
+
+<p>Generating text has two phases with <b>opposite</b> hardware appetites. Today both run on the GPU.
+This project sends each phase to the processor that suits it, without leaving the ORT session.</p>
+
+<table>
+  <tr>
+    <th style="width:15%">Phase</th>
+    <th style="width:29%">What it does</th>
+    <th style="width:24%">Bottleneck</th>
+    <th style="width:32%">Best hardware</th>
+  </tr>
+  <tr>
+    <td><b>Prefill</b><br><span style="color:var(--mute);font-size:8.2pt">TTFT</span></td>
+    <td>Reads the whole prompt at once</td>
+    <td><b>Compute</b> — large dense matrix work</td>
+    <td class="tag-npu">NPU — dense systolic arrays</td>
+  </tr>
+  <tr>
+    <td><b>Decode</b><br><span style="color:var(--mute);font-size:8.2pt">TPS</span></td>
+    <td>Emits one token at a time, in a loop</td>
+    <td><b>Memory bandwidth</b> — re-reads weights per token</td>
+    <td class="tag-gpu">GPU — high bandwidth</td>
+  </tr>
+</table>
+
+<p>The prompt is processed once; a token is generated hundreds of times. Speeding up the first
+improves responsiveness, and the second sets sustained speed — so the split targets both at once.</p>
+
+<figure>
+<svg viewBox="0 0 700 178" width="700" role="img" aria-label="Runtime flow from prompt through NPU prefill and GPU decode to output tokens">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6b7480"/>
+    </marker>
+    <marker id="arg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#047857"/>
+    </marker>
+  </defs>
+
+  <rect x="2" y="42" width="74" height="36" rx="5" fill="#f1f3f6" stroke="#c9d0d8"/>
+  <text x="39" y="58" font-size="10" font-weight="600" fill="#14181f" text-anchor="middle">Prompt</text>
+  <text x="39" y="70" font-size="8" fill="#6b7480" text-anchor="middle">N tokens</text>
+  <line x1="78" y1="60" x2="104" y2="60" stroke="#6b7480" stroke-width="1.4" marker-end="url(#ar)"/>
+
+  <rect x="106" y="26" width="176" height="68" rx="6" fill="#fffbeb" stroke="#b45309" stroke-width="1.6"/>
+  <text x="194" y="44" font-size="10.5" font-weight="700" fill="#b45309" text-anchor="middle">NPU &mdash; Prefill</text>
+  <text x="194" y="59" font-size="8.4" fill="#6b5320" text-anchor="middle">All N tokens in one pass</text>
+  <text x="194" y="72" font-size="8.4" fill="#6b5320" text-anchor="middle">Runs once per request</text>
+  <text x="194" y="86" font-size="8" fill="#8a6a2a" text-anchor="middle" font-style="italic">executes an NPU plan</text>
+
+  <line x1="284" y1="60" x2="310" y2="60" stroke="#6b7480" stroke-width="1.4" marker-end="url(#ar)"/>
+  <rect x="312" y="30" width="112" height="60" rx="6" fill="#ecfdf5" stroke="#047857" stroke-width="1.6"/>
+  <text x="368" y="48" font-size="9.6" font-weight="700" fill="#047857" text-anchor="middle">KV cache</text>
+  <text x="368" y="61" font-size="8" fill="#065f46" text-anchor="middle">one shared buffer</text>
+  <text x="368" y="76" font-size="8.2" font-weight="700" fill="#047857" text-anchor="middle">NOT COPIED</text>
+
+  <line x1="426" y1="60" x2="452" y2="60" stroke="#6b7480" stroke-width="1.4" marker-end="url(#ar)"/>
+  <rect x="454" y="26" width="164" height="68" rx="6" fill="#eff6ff" stroke="#1d4ed8" stroke-width="1.6"/>
+  <text x="536" y="44" font-size="10.5" font-weight="700" fill="#1d4ed8" text-anchor="middle">GPU &mdash; Decode</text>
+  <text x="536" y="59" font-size="8.4" fill="#1e3a8a" text-anchor="middle">1 token per pass</text>
+  <text x="536" y="72" font-size="8.4" fill="#1e3a8a" text-anchor="middle">Loops until stop</text>
+  <text x="536" y="86" font-size="8" fill="#3b5bb5" text-anchor="middle" font-style="italic">unchanged code path</text>
+
+  <line x1="620" y1="60" x2="646" y2="60" stroke="#6b7480" stroke-width="1.4" marker-end="url(#ar)"/>
+  <rect x="648" y="42" width="50" height="36" rx="5" fill="#f1f3f6" stroke="#c9d0d8"/>
+  <text x="673" y="58" font-size="9" font-weight="600" fill="#14181f" text-anchor="middle">Text</text>
+  <text x="673" y="70" font-size="7.6" fill="#6b7480" text-anchor="middle">out</text>
+
+  <path d="M536,96 L536,112 L458,112" fill="none" stroke="#1d4ed8" stroke-width="1.3"
+        stroke-dasharray="3,2.5" marker-end="url(#ar)"/>
+  <text x="500" y="124" font-size="7.8" fill="#1d4ed8" text-anchor="middle">next token</text>
+
+  <path d="M420,92 C420,118 400,130 368,130" fill="none" stroke="#047857" stroke-width="1.3"/>
+  <path d="M368,130 L400,130 C440,130 466,118 470,96" fill="none" stroke="#047857"
+        stroke-width="1.3" marker-end="url(#arg)"/>
+  <text x="368" y="145" font-size="7.8" fill="#047857" text-anchor="middle">GPU reads and appends in place &mdash; same memory the NPU wrote</text>
+
+  <text x="350" y="168" font-size="8" fill="#6b7480" text-anchor="middle">
+    One ORT session &middot; one execution provider &middot; one memory manager
+  </text>
+</svg>
+<figcaption><b>Runtime flow.</b> The handoff between processors is the KV cache. Because both sides
+address the same buffer, the switch costs nothing — no tensor is copied, staged or repacked.</figcaption>
+</figure>
+
+<div class="callout">
+  <span class="t">Zero copy is a requirement, not an optimization.</span>
+  The KV cache is the largest tensor in the system. If it had to be copied whenever execution changed
+  processor, the copy would cost more than the NPU saves and the idea collapses. So it is enforced
+  rather than hoped for: counters assert zero copies, and a buffer is accepted only because of
+  <i>which allocator produced it</i> — never because reading it happens to work.
+</div>
+
+<h2>Where tensors live</h2>
+
+<p>Zero copy is really a <b>memory</b> question, so this is the part worth understanding. There is one
+memory <i>manager</i>, but not one pool — because whether the NPU can reach a buffer is a physical
+property of how it was allocated, not a policy choice.</p>
+
+<figure>
+<svg viewBox="0 0 700 224" width="700" role="img" aria-label="Two memory families: host-mapped and NPU-visible, versus device-only">
+  <defs>
+    <marker id="ar4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#047857"/>
+    </marker>
+  </defs>
+
+  <!-- host-mapped family -->
+  <rect x="2" y="4" width="530" height="104" rx="6" fill="#ecfdf5" stroke="#047857" stroke-width="1.6"/>
+  <text x="16" y="24" font-size="9.8" font-weight="700" fill="#047857">Host-mapped
+    <tspan font-family="Consolas,monospace" font-size="8.4" font-weight="400">hipHostMalloc</tspan>
+    &mdash; NPU and GPU can both address it</text>
+
+  <rect x="16" y="32" width="164" height="64" rx="4" fill="#fff" stroke="#8fcfb5"/>
+  <text x="98" y="48" font-size="8.8" font-weight="700" fill="#14181f" text-anchor="middle">EP allocator</text>
+  <text x="98" y="61" font-size="7.8" fill="#333b47" text-anchor="middle">graph inputs / outputs</text>
+  <text x="98" y="73" font-size="7.8" font-weight="700" fill="#047857" text-anchor="middle">the KV cache</text>
+  <text x="98" y="88" font-size="7.4" fill="#6b7480" text-anchor="middle" font-style="italic">already exists today</text>
+
+  <rect x="188" y="32" width="164" height="64" rx="4" fill="#fff" stroke="#8fcfb5"/>
+  <text x="270" y="48" font-size="8.8" font-weight="700" fill="#b45309" text-anchor="middle">NPU pool &mdash; new</text>
+  <text x="270" y="61" font-size="7.8" fill="#333b47" text-anchor="middle">plan intermediates,</text>
+  <text x="270" y="73" font-size="7.8" fill="#333b47" text-anchor="middle">island boundary tensors</text>
+  <text x="270" y="88" font-size="7.4" fill="#6b7480" text-anchor="middle" font-style="italic">scratch only, grows on demand</text>
+
+  <rect x="360" y="32" width="160" height="64" rx="4" fill="#fff" stroke="#8fcfb5"/>
+  <text x="440" y="48" font-size="8.8" font-weight="700" fill="#14181f" text-anchor="middle">Host scratch</text>
+  <text x="440" y="61" font-size="7.8" fill="#333b47" text-anchor="middle">tiny shape scalars</text>
+  <text x="440" y="88" font-size="7.4" fill="#6b7480" text-anchor="middle" font-style="italic">already exists today</text>
+
+  <!-- device-only family -->
+  <rect x="2" y="120" width="530" height="76" rx="6" fill="#eff6ff" stroke="#1d4ed8" stroke-width="1.6"/>
+  <text x="16" y="140" font-size="9.8" font-weight="700" fill="#1d4ed8">Device memory
+    <tspan font-family="Consolas,monospace" font-size="8.4" font-weight="400">hipMalloc</tspan>
+    &mdash; GPU only, invisible to the NPU</text>
+
+  <rect x="16" y="148" width="248" height="38" rx="4" fill="#fff" stroke="#9cbdf0"/>
+  <text x="140" y="164" font-size="8.8" font-weight="700" fill="#14181f" text-anchor="middle">Session GPU pool</text>
+  <text x="140" y="177" font-size="7.8" fill="#333b47" text-anchor="middle">all GPU graph activations</text>
+
+  <rect x="272" y="148" width="248" height="38" rx="4" fill="#fff" stroke="#9cbdf0"/>
+  <text x="396" y="164" font-size="8.8" font-weight="700" fill="#14181f" text-anchor="middle">Constants blob</text>
+  <text x="396" y="177" font-size="7.8" fill="#333b47" text-anchor="middle">GPU weights</text>
+
+  <!-- the point -->
+  <path d="M186,64 L186,64" fill="none"/>
+  <rect x="546" y="4" width="152" height="104" rx="6" fill="#fff" stroke="#047857" stroke-width="1.5"/>
+  <text x="622" y="24" font-size="9" font-weight="700" fill="#047857" text-anchor="middle">Why nothing</text>
+  <text x="622" y="36" font-size="9" font-weight="700" fill="#047857" text-anchor="middle">is copied</text>
+  <text x="622" y="54" font-size="7.8" fill="#333b47" text-anchor="middle">Everything that crosses</text>
+  <text x="622" y="65" font-size="7.8" fill="#333b47" text-anchor="middle">between NPU and GPU</text>
+  <text x="622" y="76" font-size="7.8" fill="#333b47" text-anchor="middle">is already allocated in</text>
+  <text x="622" y="87" font-size="7.8" font-weight="700" fill="#047857" text-anchor="middle">the green family.</text>
+  <text x="622" y="99" font-size="7.8" fill="#333b47" text-anchor="middle">Nothing has to move.</text>
+
+  <rect x="546" y="120" width="152" height="76" rx="6" fill="#fff" stroke="#9cbdf0" stroke-width="1.5"/>
+  <text x="622" y="139" font-size="9" font-weight="700" fill="#1d4ed8" text-anchor="middle">Left as-is</text>
+  <text x="622" y="156" font-size="7.8" fill="#333b47" text-anchor="middle">Device memory is faster</text>
+  <text x="622" y="167" font-size="7.8" fill="#333b47" text-anchor="middle">for GPU-only work, and</text>
+  <text x="622" y="178" font-size="7.8" fill="#333b47" text-anchor="middle">the NPU never needs to</text>
+  <text x="622" y="189" font-size="7.8" fill="#333b47" text-anchor="middle">see these tensors.</text>
+
+  <text x="350" y="214" font-size="8.2" fill="#6b7480" text-anchor="middle">
+    Only these three green sources may be handed to the NPU. Anything else is a
+    <tspan font-weight="700" fill="#991b1b">hard error</tspan>, never a silent copy.
+  </text>
+</svg>
+<figcaption><b>The memory model.</b> Five classes, split by whether the pages are host-accessible —
+that is the only property that decides whether the NPU can address them.</figcaption>
+</figure>
+
+<div class="cols">
+  <div class="card">
+    <h3>Why not one pool for both?</h3>
+    <p style="margin:0">The GPU pool is device memory <i>by design</i>, and the graph memory planner
+    packs every transient into it. Making it NPU-visible would mean moving all GPU activations to
+    slower host-mapped memory and reworking the planner — for one execution target. The NPU pool is
+    small and additive instead.</p>
+  </div>
+  <div class="card">
+    <h3>So what is the "NPU pool" for?</h3>
+    <p style="margin:0">Only the plan's own scratch: intermediates and island boundary tensors. It is
+    <b>not</b> where the KV cache lives — that already comes from the EP allocator, which is already
+    host-mapped. The new pool mirrors the host-scratch pool that exists today.</p>
+  </div>
+</div>
+
+<h2>How a model gets there</h2>
+
+<p>Nothing about the model changes. The same ONNX file compiles to <b>one artifact containing two
+things</b>: a plan the NPU follows, and GPU code as before.</p>
+
+<figure>
+<svg viewBox="0 0 700 208" width="700" role="img" aria-label="Compilation flow from ONNX model to a single artifact">
+  <defs>
+    <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6b7480"/>
+    </marker>
+  </defs>
+
+  <rect x="2" y="66" width="92" height="46" rx="5" fill="#f1f3f6" stroke="#c9d0d8"/>
+  <text x="48" y="84" font-size="9.6" font-weight="650" fill="#14181f" text-anchor="middle">ONNX model</text>
+  <text x="48" y="97" font-size="7.8" fill="#6b7480" text-anchor="middle">stock, unmodified</text>
+  <line x1="96" y1="89" x2="122" y2="89" stroke="#6b7480" stroke-width="1.4" marker-end="url(#ar2)"/>
+
+  <rect x="124" y="60" width="106" height="58" rx="5" fill="#fff" stroke="#c9d0d8"/>
+  <text x="177" y="80" font-size="9.4" font-weight="650" fill="#14181f" text-anchor="middle">MLIR</text>
+  <text x="177" y="93" font-size="7.8" fill="#6b7480" text-anchor="middle">HIP dialect</text>
+  <text x="177" y="106" font-size="7.8" fill="#6b7480" text-anchor="middle">existing pipeline</text>
+  <line x1="232" y1="89" x2="258" y2="89" stroke="#6b7480" stroke-width="1.4" marker-end="url(#ar2)"/>
+
+  <rect x="260" y="52" width="118" height="74" rx="5" fill="#fff" stroke="#14181f" stroke-width="1.5"/>
+  <text x="319" y="72" font-size="9.2" font-weight="700" fill="#14181f" text-anchor="middle">Can the NPU</text>
+  <text x="319" y="85" font-size="9.2" font-weight="700" fill="#14181f" text-anchor="middle">do this op?</text>
+  <text x="319" y="102" font-size="7.6" fill="#6b7480" text-anchor="middle">admissibility check,</text>
+  <text x="319" y="113" font-size="7.6" fill="#6b7480" text-anchor="middle">per operation</text>
+
+  <path d="M380,72 L424,72 L424,44" fill="none" stroke="#b45309" stroke-width="1.5" marker-end="url(#ar2)"/>
+  <text x="402" y="66" font-size="8" font-weight="650" fill="#b45309">yes</text>
+  <rect x="352" y="8" width="150" height="34" rx="5" fill="#fffbeb" stroke="#b45309" stroke-width="1.5"/>
+  <text x="427" y="23" font-size="9" font-weight="700" fill="#b45309" text-anchor="middle">NPU plan entry</text>
+  <text x="427" y="35" font-size="7.6" fill="#6b5320" text-anchor="middle">op + pointer bindings</text>
+
+  <path d="M380,108 L424,108 L424,140" fill="none" stroke="#1d4ed8" stroke-width="1.5" marker-end="url(#ar2)"/>
+  <text x="402" y="126" font-size="8" font-weight="650" fill="#1d4ed8">no</text>
+  <rect x="352" y="142" width="150" height="34" rx="5" fill="#eff6ff" stroke="#1d4ed8" stroke-width="1.5"/>
+  <text x="427" y="157" font-size="9" font-weight="700" fill="#1d4ed8" text-anchor="middle">GPU island</text>
+  <text x="427" y="169" font-size="7.6" fill="#1e3a8a" text-anchor="middle">runs on GPU mid-plan</text>
+
+  <path d="M504,25 L556,25 L556,80" fill="none" stroke="#6b7480" stroke-width="1.3" marker-end="url(#ar2)"/>
+  <path d="M504,159 L556,159 L556,100" fill="none" stroke="#6b7480" stroke-width="1.3" marker-end="url(#ar2)"/>
+  <rect x="580" y="60" width="116" height="60" rx="5" fill="#f8fafc" stroke="#14181f" stroke-width="1.5"/>
+  <text x="638" y="79" font-size="9.4" font-weight="700" fill="#14181f" text-anchor="middle">One artifact</text>
+  <text x="638" y="93" font-size="7.8" fill="#6b7480" text-anchor="middle">plan + GPU code,</text>
+  <text x="638" y="104" font-size="7.8" fill="#6b7480" text-anchor="middle">cached per model</text>
+
+  <text x="350" y="197" font-size="8.2" fill="#6b7480" text-anchor="middle">
+    An operation the NPU cannot do correctly is <tspan font-weight="700" fill="#991b1b">rejected, never
+    silently approximated</tspan> &mdash; it falls back to the GPU instead.
+  </text>
+</svg>
+<figcaption><b>Compilation flow.</b> The plan is <b>data, not code</b> — an ordered list of operations
+with pointer bindings. That keeps it inspectable, cacheable and testable without hardware.</figcaption>
+</figure>
+
+<div class="cols">
+  <div class="card npu">
+    <h3>Why "reject, never approximate"</h3>
+    <p style="margin:0">Our operations carry optional features the NPU library lacks. Quietly ignoring
+    one computes a <b>different function</b> and still returns plausible-looking numbers. Declining is
+    strictly safer, so an unrecognized attribute means fall back to the GPU.</p>
+  </div>
+  <div class="card gpu">
+    <h3>Why some ops stay on the GPU</h3>
+    <p style="margin:0">The NPU has no kernel for a few operations, notably the embedding lookup, and
+    none for appending to the KV cache. Those run as <b>islands</b> inside the plan. Expected, and
+    they scale with model depth rather than op count.</p>
+  </div>
+</div>
+
+<h2>What is being built</h2>
+
+<table>
+  <tr><th style="width:23%">Piece</th><th style="width:44%">Purpose</th><th style="width:33%">Why it exists</th></tr>
+  <tr>
+    <td><b>Shim library</b></td>
+    <td>Thin C interface between the EP and the NPU driver stack</td>
+    <td>Isolates conflicting dependencies; lets a <b>mock</b> stand in with no hardware</td>
+  </tr>
+  <tr>
+    <td><b>NPU pool</b></td>
+    <td>Host-mapped scratch for plan intermediates</td>
+    <td>Keeps plan buffers NPU-visible without touching the GPU pool</td>
+  </tr>
+  <tr>
+    <td><b>Buffer registry</b></td>
+    <td>Records which allocator produced each pointer</td>
+    <td>Makes a violation a <b>hard error</b> instead of undefined behaviour</td>
+  </tr>
+  <tr>
+    <td><b>Copy counters</b></td>
+    <td>Count every boundary copy at run time</td>
+    <td>Makes zero copy <b>testable</b>; a copy yields correct numbers, so numerics can't detect it</td>
+  </tr>
+  <tr>
+    <td><b>Plan emitter</b></td>
+    <td>Turns claimed MLIR into a plan, or declines with a reason</td>
+    <td>Compiler side, verifiable without an NPU</td>
+  </tr>
+  <tr>
+    <td><b>Plan interpreter</b></td>
+    <td>Walks the plan and dispatches each entry</td>
+    <td>Runtime side; restartable, so falling back mid-plan is always safe</td>
+  </tr>
+</table>
+
+<div class="keep">
+<h2>Roadmap</h2>
+
+<p>39 tasks in nine phases, ordered so each phase makes the next one testable.</p>
+
+<table>
+  <tr><th style="width:8%">Phase</th><th style="width:30%">Name</th><th style="width:62%">Goal</th></tr>
+  <tr><td><b>0</b></td><td>Spikes</td><td>Prove the risky assumptions before building on them</td></tr>
+  <tr><td><b>1</b></td><td>Shim and C ABI</td><td>The boundary to the NPU stack, plus the mock behind it</td></tr>
+  <tr><td><b>2</b></td><td>NPU memory class</td><td>Pool, registry and copy counters — zero-copy enforcement</td></tr>
+  <tr><td><b>3</b></td><td>Plan emission</td><td>Compiler emits a plan, or declines with a reason</td></tr>
+  <tr><td><b>4</b></td><td>Dispatch and interpretation</td><td>Choose prefill vs decode; execute the plan</td></tr>
+  <tr><td><b>5</b></td><td>Operator coverage</td><td>Map the operators; attention is the large one</td></tr>
+  <tr><td><b>6</b></td><td>GPU islands</td><td>Let unmapped operations run mid-plan on the GPU</td></tr>
+  <tr><td><b>7</b></td><td>Weight streaming</td><td>Get weights into NPU-visible memory once, at load</td></tr>
+  <tr><td><b>8</b></td><td>End to end</td><td>Full generation, both models, copy counters at zero</td></tr>
+</table>
+</div>
+
+<footer>
+  Overview only. Full detail in <code>docs/design/hybrid-npu-gpu-design.md</code> (architecture and
+  decisions) and <code>docs/design/hybrid-npu-gpu-tasks.md</code> (task breakdown).
+</footer>
+
+</body>
+</html>

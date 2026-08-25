@@ -25,7 +25,7 @@ This design adds a second execution target. **Prefill runs on the XDNA NPU; deco
 GPU**, inside one ORT session, one execution provider, and one memory manager. The NPU capability is
 drawn from hybrid-llm's DynamicDispatch integration as reference, not as a dependency.
 
-Target is a Strix-class APU (`gfx1150` iGPU + XDNA NPU). First model is Llama-3.2-1B, then
+Target is a Strix-class APU (`gfx1151` iGPU + XDNA NPU). First model is Llama-3.2-1B, then
 Llama-3.1-8B. **Accuracy is the acceptance criterion** — no phase is gated on a throughput number.
 
 **Zero copy is a requirement, not an optimization.** No tensor is copied when execution crosses
@@ -387,6 +387,24 @@ session setup, because instantiation is expensive and shape-dependent setup is b
 **Dispatch.** `MlirCustomOp::Compute` chooses per call, on the predicate above. The first thing that
 can be built and tested is therefore "the NPU is never chosen," which must be byte-identical to today.
 
+**Dispatch needs a host-visible sequence length.** Choosing a bucket and filling the attention param
+buffer both require knowing the sequence length on the host, but `total_seq_len` and `seqlens_k` are
+device tensors, and this repository forbids a bare host read of device memory. The GPU path already
+solves this: `read_seqlens_k_for_dispatch` performs a synchronized readback cached per `Compute`. The
+NPU predicate reuses that value rather than adding a second read. Note the KV-append step needs no such
+read at all — it derives `past_len` from `seqlens_k` on the device.
+
+**NPU dispatch is serialized.** ORT may call `Compute` concurrently, but per-operator DD state and the
+`xrt::run` objects built at session setup are reused across calls and are not reentrant. One NPU plan
+executes at a time, under a lock held for the plan rather than per entry. Concurrent callers either wait
+or take the GPU path; they must never share an `xrt::run`.
+
+**The plan must be restartable.** Fallback is only free if a partially executed plan leaves nothing
+behind that a retry would double-apply. Overwriting a graph output twice is harmless, but applying the
+KV append twice is not. So the write offset must be derived from `seqlens_k`, which the plan does not
+mutate — never from a running counter incremented as entries execute. Any future entry that mutates
+persistent state has to preserve this property or the fallback guarantee is void.
+
 **Why not the alternatives.** Branching inside the runtime operator wrappers would drag XRT and DD
 into the JIT-linked model artifact — a self-contained bitcode module with a static CRT, the worst
 possible place for a foreign toolchain. Porting the per-node custom-op model would require porting the
@@ -402,7 +420,7 @@ not an API contract.
 | HIP dialect op | DynamicDispatch target | Notes |
 |---|---|---|
 | `hip.matmul_nbits` | `mladfmatmulbias<uint16_t, int8_t, uint16_t, uint16_t>`, tagged `"bfloat16" / "int4" / "bfloat16"` | Dominant by count and time. Weight layout differs from the GPU path |
-| `hip.gqa` | `transformer::flash_mha`, or `bmm` + `maskedsoftmax` + `bmm` decomposed | Layout and mask conventions are the risk. Decomposing materializes the score matrix in DDR — avoid |
+| `hip.gqa` | **decomposes — see [below](#hipgqa-is-a-decomposition-not-a-call)** | Not a single call. `hip.gqa` performs RoPE, the KV-cache append *and* attention; DD's attention operators do only the attention math |
 | MLP block (fused) | `transformer::ssmlp` | `general_activation + rmsnorm0 + matmul_gateup + matmul + rmsnorm1`. Requires **concatenated gate/up weights** |
 | `hip.rope` | `mladfmharope` / `transformer::RoPE` | Cos/sin cache needs a DD-specific packed layout |
 | `hip.rms_norm` | `mladfrmsnorm` | |
@@ -415,26 +433,102 @@ not an API contract.
 Two operator gaps in the wider model set have no counterpart and are out of scope for Llama: logit
 softcapping and interleaved rotary embedding. Recorded deliberately — other model families need them.
 
+### `hip.gqa` is a decomposition, not a call
+
+The one place our dialect is *more* fused than DD. `hip.gqa` implements the full
+`com.microsoft.GroupQueryAttention` spec — RoPE, the KV-cache append, and attention, in one operation
+producing `output`, `present_key` and `present_value`. DD's `chunk_flash_mha` computes attention and
+nothing else: it declares no in-place support, and K/V are read-only inputs for the current call.
+
+One `hip.gqa` therefore becomes five plan entries:
+
+| # | Step | Target | Notes |
+|---|---|---|---|
+| 1 | RoPE on Q | `mladfmharope` | Cos/sin cache needs DD's packed layout |
+| 2 | RoPE on K | `mladfmharope` | |
+| 3 | **KV-cache append** | **GPU step** — `hip_gqa_kv_cache_append` | No DD operator exists for this. See below |
+| 4 | K‖V staging pack | interpreter-issued device copy | Required because DD binds the buffer wholesale; see [the known exceptions](#the-known-exceptions) |
+| 5 | Attention | `transformer::chunk_flash_mha` | Chosen over `flash_mha`: the only variant able to express a sequence shorter than its bucket, and it packs only K‖V rather than Q‖K‖V. Decomposing further into `bmm` + `maskedsoftmax` + `bmm` would materialize the score matrix in DDR — avoid |
+
+**The KV append is a GPU step, deliberately.** DynamicDispatch has no cache-append operator, so this
+work has to be assigned somewhere, and we already own a correct implementation. Reusing it costs one
+kernel launch per layer and buys three things: it already **transposes BSHD to the cache's BNSD**, it
+already handles the shared-buffer in-place case, and it derives `past_len` **from `seqlens_k` on the
+device**, so it needs no host readback and cannot disagree with the GPU path about the write offset.
+Its `kv_dtype` argument also carries the INT8-cache path for free.
+
+The alternative — writing an NPU-side append so prefill never touches the GPU — was rejected for v1: it
+reimplements tested code against an operator set that does not offer it, for no correctness gain.
+
+Consequence to accept: prefill is not *purely* NPU. It is NPU compute with an O(layers) GPU step, which
+is why the island rule below is stated in terms of structure rather than count.
+
+## Operator admissibility
+
+Matching an operation by name is not sufficient. Our dialect operations carry optional features their
+DD counterparts do not implement, and emitting a plan entry that silently ignores one computes a
+different function — strictly worse than declining, because the numbers look plausible.
+
+Plan emission therefore applies an **admissibility check per operation**, and a rejection is a normal
+outcome rather than an error. `hip.gqa` is the clearest case: `chunk_flash_mha` supports sliding window
+and nothing else, so any instance carrying `attention_bias`, `head_sink` (smooth softmax),
+`k_scale`/`v_scale` (KV-cache quantization), `output_qk`, or an unsupported rotary variant is
+inadmissible.
+
+Three rules:
+
+- **Reject on anything unrecognized, never ignore it.** An attribute the emitter does not understand is
+  a rejection, not a default. This is what makes the check safe as DD and the dialect both evolve.
+- **Record the reason in the plan or the log.** "No NPU plan" with no explanation is the silent-failure
+  mode this design exists to avoid; under strict mode a rejection names the operation and the feature.
+- **Rejection granularity is the graph, not the operation, unless the operation can be an island.** An
+  inadmissible operation with a GPU implementation becomes an island; one without means no plan.
+
 ## GPU islands
 
-"The whole prefill graph runs on the NPU" is an approximation. hybrid-llm registers NPU kernels for
-fourteen operators and has none for `Gather`, `Cast`, `Sub`, or `ReduceSum`. For Llama the practical
-consequence is the **embedding lookup**, plus whatever small type or shape operators survive
-conversion.
+"The whole prefill graph runs on the NPU" is an approximation, and the KV append above makes that
+explicit. hybrid-llm registers NPU kernels for fourteen operators and has none for `Gather`, `Cast`,
+`Sub`, or `ReduceSum`. For Llama the practical consequences are the **embedding lookup**, the
+**per-layer KV append**, and whatever small type or shape operators survive conversion.
 
-Unmapped operators run on the GPU as **islands** inside the prefill plan. Three rules keep this from
+Unmapped operations run on the GPU as **islands** inside the prefill plan. Three rules keep this from
 degenerating into the per-node shared-memory problem:
 
 - Islands are **enumerated at compile time**, not discovered at run time. The plan records which
-  entries are islands and how many. An unexpected count means conversion changed.
+  entries are islands. An unexpected *kind* of island means conversion changed.
 - Island boundary tensors come from the **NPU pool**, so they satisfy the registered-memory rule by
   construction.
-- The expected count is small. **If it is not small, the design assumption is wrong and the phase
-  should stop rather than proceed** — an island between every pair of operators is the per-node
-  architecture in disguise, with none of its benefits.
+- **The test is structure, not count.** Islands that are architectural and scale with depth — one KV
+  append per layer, one embedding lookup per graph, so `O(layers)` — are expected and fine. Islands
+  that scale with the operation count, appearing between arbitrary pairs of operations, mean
+  whole-graph offload has degenerated into per-node dispatch with none of its benefits. **That** is the
+  stop condition, and it is about the pattern rather than the number: 33 structured islands on a 16-layer
+  model is healthy; 33 unstructured ones is not.
 
 An alternative worth evaluating during bring-up: shrink the claimed subgraph so the embedding lookup
 sits outside it and ORT runs it on CPU. That trades an island for a graph-claim change.
+
+### Which processor runs an island
+
+"Island" has meant "GPU" above, but on a UMA part that is a choice rather than a constraint: island
+boundary tensors live in the NPU pool, which is host-mapped and therefore directly CPU-addressable, so
+a host-executed island copies nothing either. The right target differs by island kind.
+
+**Small type and shape operations are CPU candidates.** `Cast`, `Sub` and `ReduceSum` on small tensors
+carry no arithmetic for a kernel launch to amortize, and `hip-materialize-host-scalars` already
+establishes host handling of small shape work. The embedding lookup is better served by the graph-claim
+change above than by an island of either kind.
+
+**The KV append stays on the GPU**, and not for throughput. Prefill writes the cache through the same
+kernel decode uses, so the two cannot disagree about layout or write offset; a host implementation
+would duplicate the BSHD→BNSD transform and the `past_len` derivation, then need them kept in agreement
+by review. It would also require `seqlens_k` on the host — available, since bucket selection already
+reads it once per `Compute`, but a coupling the device-side derivation does not have.
+
+A CPU island is **not** the [prohibited host-side conversion](#zero-copy-and-the-dtype-boundary): an
+island performs work the graph requires, in place, whereas that pass adds a whole traversal per
+operator boundary. The two are close enough to be confused, so a proposal should say which it is, and
+should account for the cache traffic a large host write leaves behind for the next device read.
 
 ## Shape contract
 
@@ -456,6 +550,29 @@ v1; chunked prefill later fixes it by making one bucket the chunk size and itera
 does not include the runtime version, which is why stale artifacts must be deleted manually. The NPU
 plan key must additionally cover the bucket set, the DD configuration, and the NPU binary identity, or
 a configuration change silently reuses an incompatible plan.
+
+Two constraints discovered by the T0.4 comparison shape this more than expected.
+
+**The bucket ladder is discovered, not chosen.** Supported shapes come from transaction binaries loaded
+at run time from an external library; `get_supported_shapes()` must be called against the opened device
+to enumerate them, and they cannot be read from source. This inverts the dependency the paragraph above
+assumes: the plan cache key includes the bucket set, but the bucket set is not knowable until a device
+is open. So plan emission must either take the ladder as an input resolved at session setup, or emit for
+a ladder declared in configuration and validate it against the device before first use. The second is
+preferable — it keeps compilation independent of the host.
+
+**`chunk_flash_mha` requires `S_q == S_k`.** Fine for v1, which prefills a fresh prompt in one shot, so
+query and key lengths are equal. It does *not* hold for multi-turn re-prefill or chunked prefill, where
+the query is one chunk while the key spans the whole context so far. Both cases are served by the
+operator's param buffer — `query_start_pos_id`, `num_query_data`, `kv_start_pos_id`, `num_kv_data`,
+`is_first_key_chunk`, `is_last_key_chunk` — rather than by the tensor extents, so the mechanism exists;
+v1 simply does not exercise it. Any plan emitted with `S_q != S_k` before that path is built must be
+rejected, not padded into shape.
+
+**Partial-chunk K/V tails must be zeroed** before the call. hybrid-llm does this explicitly and its
+comments state that stale tail data breaks the online softmax. This is a correctness requirement, not a
+hygiene preference, and it is the one place the design deliberately writes into a buffer region it
+otherwise treats as undefined.
 
 ## Data type policy
 
@@ -595,13 +712,14 @@ or the constants blob.
 > A buffer may be handed to the NPU **only because of which allocator produced it**, never because an
 > access to it happens to work.
 
-The development target hides this design's most likely bug. On `gfx1150`, `hipMalloc` returns
-UMA-mapped memory that happens to be host-accessible; on `gfx1151` it returns true device memory. This
-repository has already been bitten by that asymmetry — it is why the host-scalar materialization pass
-exists.
+Whether this design's most likely bug is visible at all depends on the part it runs on. On `gfx1150`,
+`hipMalloc` returns UMA-mapped memory that happens to be host-accessible; on `gfx1151` it returns true
+device memory. This repository has already been bitten by that asymmetry — it is why the host-scalar
+materialization pass exists.
 
-So if the plan is handed a GPU-pool buffer, **it will work on the development target and fail on the
-next one.** No amount of accuracy testing on `gfx1150` surfaces it.
+So if the plan is handed a GPU-pool buffer, **whether that is caught is a property of the target, not
+of the test.** The `gfx1151` host is the favourable case because it faults instead of silently
+tolerating the violation; no amount of accuracy testing on a `gfx1150` part would surface it.
 
 NPU visibility is therefore asserted on **where the buffer came from**, not on whether an access
 faults:
@@ -673,9 +791,18 @@ The rule is therefore stricter than "the graph stays fp16":
 If fusion proves unavailable for the operators that matter, the extra traversal becomes the dominant
 argument for moving bf16 to the graph boundary after all, on measured evidence.
 
-### The known exception
+### The known exceptions
 
-`mladfmatmulbias::format_output()` depads the kernel's padded-N stride back to the real N, row by row
+**Attention input packing.** DD's attention operators require their inputs contiguous in one buffer
+and bind it wholesale — `flash_mha::create_run` passes `input.at(0).bo` while ignoring
+`NPUBufferSpan`'s `offset` and `size` fields. So the current chunk's K and V must be staged into a
+packed buffer rather than read in place out of the persistent KV cache. This is bounded to the
+**current chunk**, not the cache: order of 1 MB per layer for Llama-1B at a 512-token chunk, once per
+prefill. It is categorically smaller than the full-cache repack this design forbids, and it is counted
+separately. Whether allocating each layer's K and V adjacently would satisfy the packing requirement
+by construction is an open question recorded in T0.4.
+
+**Logit depadding.** `mladfmatmulbias::format_output()` depads the kernel's padded-N stride back to the real N, row by row
 — DD's own comment cites a vocab of 120818 padded to 120832. That is a restride copy of the
 **logits**, the largest output tensor, and it is not optional: it falls out of the kernel padding N.
 
@@ -693,6 +820,12 @@ The [registered-memory rule](#the-registered-memory-rule) is the primary mechani
 runtime maintains **boundary-copy counters** — one per category (input staging, output staging, KV
 repack, dtype conversion) — always compiled in, cheap, and asserted zero by the tests. A test that
 merely compares numbers cannot detect a copy; a test that asserts the counter is zero can.
+
+**Know the limit of that instrument.** The counters see copies this repository performs. They cannot
+see one performed *below* them — inside XRT's buffer synchronization, for instance. A counter reading
+zero therefore proves that hip-ep introduced no copy, not that no bytes moved. Closing that remaining
+gap is a Phase 0 measurement rather than an assertion; see
+[the open question on `sync()`](#open-questions).
 
 ---
 
@@ -743,8 +876,11 @@ use and resolved through the registry.
 session setup   caller allocates KV via the EP allocator
                 registry insert + XRT registration      → one buffer, three viewers
 
-prefill (NPU)   flash_mha writes K/V into [0, prompt_len)      ── same buffer
-                seqlens_k set to prompt_len - 1  (the +1 convention)
+prefill (NPU)   RoPE (NPU) → KV append (GPU step) writes K/V     ── same buffer
+                  into [0, prompt_len), transposing BSHD→BNSD
+                → K‖V staged for the current chunk
+                → chunk_flash_mha reads the staged K/V
+                seqlens_k carries prompt_len - 1  (the +1 convention)
 
 decode  (GPU)   hip.gqa reads [0, past_len), appends at past_len ── same buffer
                 past_len grows by 1 per step
@@ -752,25 +888,29 @@ decode  (GPU)   hip.gqa reads [0, past_len), appends at past_len ── same buf
 transition      nothing happens. no copy, no conversion, no repack.
 ```
 
-### Three things that must agree, and are not known to
+Note what the append step buys beyond correctness: because prefill writes the cache through the *same
+kernel* decode uses, the two phases cannot disagree about layout, write offset, or the `seqlens_k`
+convention. The agreement is structural rather than maintained by review.
 
-- **Tensor layout.** hip-ep's attention runtime uses a specific head/sequence ordering; DD's operators
-  have their own. A mismatch means a transpose no phase budgets for.
-- **The valid-length convention.** A mismatch of one produces attention that is subtly wrong rather
-  than obviously broken.
-- **The undefined tail.** Any NPU-side assumption that it is zero reads garbage.
+### Three things that had to agree — resolved by T0.4
 
-Designated an explicit Phase 0 investigation, because it is answerable by reading two sets of headers
-and one runtime file.
+All three were open when this design was written and all three are now settled by source comparison.
+Recorded because the answers are load-bearing, not merely reassuring.
 
-**A repack is not an acceptable resolution** — it is a boundary copy of the largest tensor in the
-system. If layouts disagree, the **NPU side must conform**: a different DD variant, a different
-binding, or arranging the NPU attention to write what decode already expects. Only if no NPU-side
-arrangement works does the question escalate, and the next candidate is changing what the GPU side
-expects, not inserting a copy.
+| | Question | Answer |
+|---|---|---|
+| Tensor layout | Do the two attention implementations use the same head/sequence ordering? | **Yes — BNSD on both sides**, and hybrid-llm's persistent cache too. DD calls it BMK (`heads, seq, head_dim`) but the memory order is identical |
+| Valid-length convention | Is the meaning of `seqlens_k` the same? | **Yes, exactly.** Both derive `total_seq = seqlens_k + 1`, arrived at independently |
+| Undefined tail | Does either assume the region past the valid length is zero? | **Neither does.** Both rely on masking and bounds, not on physical cleanliness |
 
-The valid-length convention and the tail are cheaper to reconcile, being conventions rather than
-layouts: satisfied by what the NPU path writes into `seqlens_k` and by not depending on the tail.
+**No repack is required, and the phase transition really is "nothing happens."** A repack would have
+been a boundary copy of the largest tensor in the system and was never an acceptable resolution; the
+question is now moot. Since the KV append reuses the GPU path's own kernel, the layout agreement is
+enforced by construction rather than by convention.
+
+What T0.4 did surface, in place of the layout risk, is that DD's attention operators bind their input
+buffer wholesale and require K‖V contiguous, so the *current chunk* must be staged. That is bounded and
+counted separately — see [the known exceptions](#the-known-exceptions).
 
 ### A padding trap
 
@@ -792,7 +932,13 @@ memory, load ahead onto the device, free after the last prefill operator. The po
 in the abstract; it is that NPU and GPU weight residency **never peak together**, because prefill and
 decode do not overlap.
 
-Two details decide whether this is straightforward:
+**Cos/sin caches are formatted the same way.** `mladfmharope` wants its rotary tables in a DD-specific
+packed layout, and in our path those tables arrive as ordinary graph initializers. They belong in the
+same formatting-and-caching pipeline as the quantized weights even though they are not weights — the
+distinction that matters is "constant input needing a DD-specific layout," not what the tensor means.
+Easy to overlook precisely because the section title says weights.
+
+Three details decide whether this is straightforward:
 
 **Formatting must be cached across sessions.** Transposing and repacking an 8B model's weights per
 session would dominate setup. The result is a pure function of the source weights and the DD
@@ -832,6 +978,73 @@ output-allocator callback, for the same reason.
 Note that XRT is fetched from an internal artifact server by hybrid-llm's build. That build must
 therefore be run, with credentials, before this one — making "the hybrid-llm install tree is present
 and current" a prerequisite of the NPU build rather than an assumption of it.
+
+## Build and test topology
+
+This work is developed and **built on a machine with no NPU**, and the resulting binaries are copied to
+a Strix Halo host to run. That differs from [the repository's remote workflow](../remote-dev-workflow.md),
+which keeps one clone on the remote and builds there. The divergence is workable because most of this
+project is compiler-side and verifiable against a mock, but it introduces three hazards that the
+build-on-target model does not have.
+
+### The GPU architecture must be overridden, every time
+
+`build.py` detects the architecture of the **local** GPU. On a build host that is not Strix, detection
+returns the wrong target, and per this repository's standing rule a mismatched architecture **builds
+successfully and fails only when a kernel launches** — an access violation inside `hipLaunchKernel`, far
+from its cause. Every build intended for the remote must therefore pass `--hip_arch gfx1151` explicitly
+and must not rely on detection.
+
+This is not a background concern for the NPU path specifically, for two reasons. The KV-cache append is a
+**HIP kernel**, so the attention decomposition puts an architecture-sensitive kernel on the critical path
+of NPU prefill. And the memory argument underlying the registered-memory rule is itself
+architecture-specific: `gfx1151` is the architecture that exposes the aliasing bug `gfx1150` masks, so
+building for the wrong target can silently remove the very failure mode the tests exist to provoke.
+
+### What crosses the wire
+
+Because the copy is manual, the set has to be written down; an incomplete copy is the most likely way this
+loop produces a confusing failure. The shim is its own artifact, built with DD's toolchain settings rather
+than the EP's, so it is easy to rebuild one side and ship the other.
+
+| Item | Copied | Note |
+|---|---|---|
+| EP provider library | Yes | |
+| **Shim DLL** | Yes | Separate toolchain (`/MD`, protobuf 3.21.5); rebuilt and shipped independently of the EP |
+| Runtime bitcode and custom-kernel library | Yes | Architecture-sensitive — see above |
+| Test binaries and test data | Yes | |
+| DD runtime, XRT, `xclbin` | **No** | Resident on the remote as a prerequisite |
+| Cached model artifacts and NPU plans | **No — invalidate instead** | Copying a stale cache is worse than having none |
+
+### Version skew is now a first-class failure mode
+
+The shim's ABI version check was introduced to catch genuine interface drift. Under manual copying it
+acquires a second and more frequent job: catching a **partially updated install**, where a new EP loads an
+old shim or vice versa. It must therefore fail loudly and name both versions, not merely refuse to load.
+
+The same reasoning extends the plan cache key. This repository's existing artifact key is deliberately
+narrow and does not include the runtime version, which is why stale artifacts already have to be deleted
+by hand. A plan cache is worse, because a plan encodes operator selections and buffer bindings that a
+rebuilt shim may no longer honour. The key must cover the **shim ABI version** and **NPU binary identity**
+alongside the bucket set, so a stale remote cache is rejected rather than replayed.
+
+### What the local machine can and cannot prove
+
+The remote workflow doc already warns that test passes on a non-`gfx1151` box are not authoritative,
+because they do not exercise the runtime path that fails in production. Manual copying makes each remote
+verification expensive, which pushes in the opposite direction — toward proving as much as possible
+locally. Both pressures are satisfied by being explicit about which claims each side can support:
+
+| Locally, no NPU, fast loop | Only on the remote |
+|---|---|
+| Plan emission and admissibility rejections (LIT) | Registration and zero-copy behaviour |
+| Registry and copy-counter unit tests | Any NPU numeric result |
+| Interpreter driven against the mock shim | The phase transition and end-to-end runs |
+| Structural claims: entry ordering, bindings, decline paths | Every performance claim |
+
+The dividing line is that local tests may prove **structure** — that the right entries are emitted in the
+right order with the right bindings, and that the wrong graph is declined — while **correctness and
+performance are remote-only**. Passing locally is never evidence a phase is complete.
 
 ## Configuration surface
 
@@ -968,6 +1181,19 @@ Three harness rules are non-negotiable, the first two from hard-won experience h
 **sets the strict flag**; tests **assert on dispatch, not infer it**; tests **assert the copy counters
 are zero**.
 
+**The mock shim is the primary development vehicle, not a stopgap.** Under
+[this project's build topology](#build-and-test-topology) every hardware test is a manual round trip, so
+the loop only stays workable if the mock carries most of the iteration. That sets a requirement on the
+mock beyond "it links": it must record the call sequence it received, so a test can assert the interpreter
+issued the *right* operations in the right order with the right bindings, against the right buffers. A mock
+that merely returns success turns the local loop into a compilation check.
+
+Two consequences worth designing for rather than discovering. Remote verification should be **batched** —
+accumulate local confidence, then take one trip covering several tasks, because per-trip cost is fixed and
+high. And each phase's gate must state plainly **which side satisfies it**: a gate whose evidence is
+remote-only cannot be closed by a green local run, and the copy-counter and numeric gates are exactly
+those.
+
 ## Risks and stop conditions
 
 Three findings would invalidate the approach rather than complicate it.
@@ -993,7 +1219,14 @@ source of bindable pointers *and* asserting counters — either alone is insuffi
 **The dtype conversion is the most likely way zero copy is lost**, because the reference implementation
 does it host-side and a faithful port silently introduces a full copy per operator boundary.
 
-**KV layout disagreement.** A repack is forbidden; the NPU side must conform.
+**Attention input staging.** *Retired risk, replaced by a smaller one.* KV layout disagreement was the
+headline risk here; T0.4 resolved it — layouts agree and no repack is needed. What remains is that DD's
+attention operators bind their buffer wholesale, so the current chunk's K‖V must be staged. Bounded to
+the chunk rather than the cache, and counted.
+
+**The attention decomposition is where the operator count hides.** One `hip.gqa` becomes five entries
+including a GPU step, so attention is a materially larger task than the op-mapping table's single row
+suggested. Sequencing it last is correct; budgeting it as one operator is not.
 
 **Weight formatting cost.** Mitigated by caching, but the cache key must be right or it silently
 serves stale layouts.
@@ -1004,20 +1237,61 @@ Mitigated by poisoned-padding cases.
 **The prerequisite build chain.** XRT arrives from an internal artifact server via hybrid-llm's build,
 which must run with credentials before this repository's NPU build can configure. Check on day one.
 
+**Architecture mismatch from building off-target.** The build host is not Strix, detection picks the local
+GPU, and the failure surfaces as an access violation at kernel launch rather than at build time. Mitigated
+only by passing `--hip_arch gfx1151` on every build — and the consequence is not merely a crash: building
+for `gfx1150` would mask the aliasing bug the registered-memory rule exists to catch, so a green run on the
+wrong target is actively misleading. See [the build topology](#build-and-test-topology).
+
+**Partial manual copy.** The EP, the shim, and the kernel library are separate artifacts on separate
+toolchains, shipped by hand. A half-updated remote install can present as a plausible numeric or dispatch
+bug. Mitigated by a loud ABI-version check naming both sides, by invalidating rather than copying plan
+caches, and by treating the documented copy set as a checklist.
+
 ## Open questions
 
 - Which memory-ownership candidate works, and is `RyzenMM` preferable to a first-party registry if
   more than one does? (Gating.)
-- Do the two attention implementations agree on KV layout, the valid-length convention, and the
-  undefined tail? If layouts disagree, can the NPU side be arranged to write what decode expects,
-  given that a repack is forbidden?
 - Can the fp16/bf16 conversion be fused into the DD operators, or does it need a separate device-side
   pass? Determines whether Decision 4 holds or must be revisited on measured evidence.
-- Does `flash_mha` require **packed QKV**? If so we inherit QKV weight concatenation even in the
-  unfused v1, since attention is one DD call regardless of how many MatMulNBits feed it. Stock OGA
-  Llama has separate q/k/v projections.
-- How many GPU islands does a converted Llama prefill graph actually contain, and is shrinking the
-  claimed subgraph to exclude the embedding lookup cleaner than islanding it?
+- Can each layer's K and V be allocated **adjacently as one buffer**, so `chunk_flash_mha`'s K‖V
+  packing requirement is satisfied by construction and the staging copy disappears? This is the one
+  idea that would make attention genuinely copy-free. It depends on whether a sub-range can be bound
+  at an offset, which the eager path does not currently do.
+- Can fusion RT's `sub_bo` path bind at an offset? If so, the wholesale-BO restriction lifts and pool
+  offsets become directly bindable — which also decides whether the NPU pool can reuse PoolAllocs'
+  256-byte-aligned offsets or needs its own packing.
+- **Do per-layer islands cost more power than the arrangement saves?** The premise is that each
+  accelerator idles during the phase it is worse at, but Decision 2 concedes the GPU is idle during
+  prefill *except for islands*, and the KV append makes that one wake per layer. A GPU re-entered
+  `O(layers)` times never reaches a deep idle state, so part of the claimed power benefit is spent by
+  the island structure itself. The CPU is awake regardless — it runs the interpreter — so
+  host-executed islands would add no wake-ups. Whether any of this is measurable is unknown; it
+  belongs with perf and power characterization. This is the one argument that would move the KV append
+  off the GPU despite the structural agreement that currently keeps it there, so it should be measured
+  before that trade is considered rather than after.
+- **Does `xrt::bo::sync()` move bytes on an imported buffer?** The registered-memory rule secures
+  *addressability*; it says nothing about **cache maintenance**. XRT's normal lifecycle syncs a buffer
+  to and from the device around each run, and on a discrete part those syncs are DMA transfers. On a
+  UMA part with an imported host allocation they should be cache operations or no-ops — but if the
+  implementation copies, then **zero copy is silently false**: the values all still compare equal, and
+  the copy is invisible to the boundary-copy counters because it happens inside XRT, below the level
+  the EP instruments. This is the one failure mode in this design that would survive every test written
+  for it. `bind_bo`'s cost being measured does not cover it, since that is a one-time registration cost
+  while `sync` recurs per inference. T0.1's spike now times both and reports implied throughput; a
+  figure near DRAM bandwidth is the signature of a copy. If it copies, the finding bears on Decision 3
+  — which ownership candidate is viable — rather than on performance.
+- What is the actual supported-shape ladder? Not answerable from source; requires calling
+  `get_supported_shapes()` against an opened device.
+- ~~Is the target `gfx1150` or `gfx1151`?~~ **Resolved: `gfx1151`, and this is the favourable answer.**
+  Per [the remote workflow](../remote-dev-workflow.md), the authoritative build-and-test host is a
+  Strix Halo part, and `gfx1151` is precisely the architecture that *exposes* the UMA aliasing bug which
+  `gfx1150` masks by returning host-accessible memory from `hipMalloc`. The registered-memory rule exists
+  to catch that class of bug, so the test host can actually fail on a violation rather than silently
+  tolerating it. A registration spike that passes on `gfx1150` would prove much less.
+- How many GPU islands does a converted Llama prefill graph actually contain beyond the structural
+  ones, and is shrinking the claimed subgraph to exclude the embedding lookup cleaner than islanding
+  it?
 - Does OGA bind its KV cache and activations through the EP allocator in every case?
 - What bucket ladder should the NPU path expose, and does a single bucket plus chunked prefill dominate
   a multi-bucket scheme once chunking exists?

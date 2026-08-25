@@ -36,8 +36,9 @@ repos:
         # -x excludes paths from license-header insertion. morphizen/* (the
         # vendored subtree) keeps its own upstream copyright headers, and
         # lib/Runtime/Kernels/* (the hand-written GPU kernels) keeps its existing
-        # headers untouched.
-        args: [-t,./LICENSES/license.txt,-x,morphizen/*,lib/Runtime/Kernels/*,-s,./LICENSES/settings.json,-f]
+        # headers untouched. .claude/agents/* must start with YAML frontmatter for
+        # the agent loader to parse them, so a header comment cannot be prepended.
+        args: [-t,./LICENSES/license.txt,-x,morphizen/*,lib/Runtime/Kernels/*,.claude/agents/*,-s,./LICENSES/settings.json,-f]
         language: python
         additional_dependencies: [licenseheaders==0.8.8]
         types: [file]

@@ -43,18 +43,22 @@ Nothing in `D:\develop\git\gitenterprise\hybrid-llm` may be modified. It is read
 
 ## Prerequisites
 
-Verify all four on day one. A failure here blocks Phase 0 entirely and is worth discovering before any planning effort is spent.
+Verify on day one. A failure here blocks Phase 0 entirely and is worth discovering before any planning effort is spent.
 
-| # | Check | How |
-|---|---|---|
-| P1 | Target host has an XDNA NPU and a supported iGPU in the same machine | Device manager shows a Ryzen AI / XDNA accelerator; `amdgpu-arch` reports `gfx1150` |
-| P2 | The hybrid LLM build has been run with credentials, so XRT is present | `hybrid-llm/install/xrt_package/xrt/share/cmake/XRT/xrt-config.cmake` exists |
-| P3 | Prebuilt DynamicDispatch is present | `hybrid-llm/install/lib/dyn_dispatch_core.lib` and `hybrid-llm/install/bin/dyn_dispatch_core.dll` exist |
-| P4 | NPU binaries are present | `hybrid-llm/DynamicDispatch/xclbin/` is populated, and the variant matching the target silicon is identified |
+**Two machines, and the checks divide between them.** Development and building happen on a host with **no NPU**; binaries are copied by hand to a Strix Halo host to run. Read every check below against the machine named in its scope — verifying the build host and assuming the test host follows is the specific mistake this table now guards against. See [the build topology](hybrid-npu-gpu-design.md#build-and-test-topology).
+
+| # | Scope | Check | How |
+|---|---|---|---|
+| P1 | **Test host** | An XDNA NPU and a supported iGPU in the same machine | Device manager shows a Ryzen AI / XDNA accelerator; `amdgpu-arch` reports `gfx1151` on Strix Halo |
+| P2 | **Build host** | The hybrid LLM build has been run with credentials, so XRT headers and import libraries are present to compile and link against | `hybrid-llm/install/xrt_package/xrt/share/cmake/XRT/xrt-config.cmake` exists |
+| P3 | **Build host** | Prebuilt DynamicDispatch import library is present | `hybrid-llm/install/lib/dyn_dispatch_core.lib` exists |
+| P4 | **Test host** | DD runtime and NPU binaries are present and resident | `dyn_dispatch_core.dll`, the XRT runtime DLLs, and the `xclbin/` variant matching the target silicon |
+
+Note that P2 and P3 are **build-host** checks satisfied by headers and an import library — neither requires a device, which is what makes off-target building possible at all. P1 and P4 are **test-host** checks, and nothing in Phase 0's verification half can close without them.
 
 XRT is fetched from an internal artifact server by `hybrid-llm/build.py` (see its `ensure_xrt`). If the download fails with an authentication error, that must be resolved before anything else; there is no offline path.
 
-This repository builds with `python build.py` and is unaffected by any of the above until Phase 1.
+This repository builds with `python build.py` and is unaffected by any of the above until Phase 1 — with one exception that applies from the first build onward. **`build.py` detects the local GPU's architecture, which is wrong for this topology.** Every build destined for the remote must pass `--hip_arch gfx1151` explicitly; a mismatch builds cleanly and fails at kernel launch, and building for `gfx1150` would additionally mask the aliasing bug the registered-memory rule exists to catch.
 
 ---
 
@@ -71,7 +75,9 @@ These are repository rules, not suggestions. Violating them will fail review.
 - **Never introduce a boundary copy.** Zero copy is a requirement. If a tensor is not in registered memory, decline the NPU for that call — do not copy it into registered memory, do not stage it, do not repack it. A copy produces correct output and is therefore invisible to every test except the counter assertion, which is exactly why the rule has to be followed rather than discovered.
 - **Revert completely on failure.** If an approach does not work, remove it entirely rather than leaving experimental code in the tree. If a multi-layer fix fails once, revert and reassess.
 - **Run the linter.** `lintrunner -a` before finishing.
-- **Delete stale artifacts after runtime changes.** `del %TEMP%\morphizen_mlir_*` — the artifact cache is keyed on the ONNX hash, not the runtime version.
+- **Delete stale artifacts after runtime changes.** `del %TEMP%\morphizen_mlir_*` — the artifact cache is keyed on the ONNX hash, not the runtime version. **On the test host as well as the build host**, and before every hardware run: under manual copying a stale remote cache is the likeliest source of a result that contradicts the code you think you are testing.
+- **Build for the target, not the build host.** `--hip_arch gfx1151` on every build intended for the remote. Never rely on architecture detection.
+- **Ship the whole set or none of it.** The EP, the shim, and the kernel library are separate artifacts; a partial copy presents as a plausible bug. Rebuild and copy them together, and never close a gate on a local run when its evidence is hardware-only.
 
 ---
 
@@ -151,9 +157,16 @@ Recover the exact call sequence for the quantized matmul operator: class and tem
 
 Write a standalone program that runs one quantized matmul on the NPU against known inputs and compares to a CPU reference. **Retain this program** — it is the reference for every subsequent operator and the fastest way to isolate a numeric problem away from the EP.
 
-While in the headers, answer two structural questions that change v1's weight-formatting scope and are cheap to settle now rather than during Phase 5:
+While in the headers, settle the structural questions that change v1's weight-formatting scope and are cheap to answer now rather than during Phase 5.
 
-- **Does `transformer::flash_mha` require packed QKV?** If it does, QKV weight concatenation is inherited even in the unfused v1 — attention is one DD call regardless of how many `MatMulNBits` feed it, and stock OGA Llama exports separate q/k/v projections.
+**Answered by T0.4 — packed QKV.** `flash_mha` does require Q‖K‖V packed contiguously, but v1 targets
+`chunk_flash_mha`, which packs only K‖V. Either way the packing is of *activations*, not weights, and it
+is satisfied by a staging copy at run time rather than by concatenating the projection weights. So v1
+does **not** inherit QKV weight concatenation, and stock OGA Llama's separate q/k/v projections are fine
+as exported. Only `ssmlp`'s gate/up concatenation is a genuine weight-layout obligation.
+
+Still to confirm against the headers:
+
 - **Confirm `transformer::ssmlp`'s concatenated gate/up requirement** and the layout `cal_shuffled_gateup_size()` implies, since T5.6 depends on it. Also confirm `need_format_input()` / `need_format_output()` are both false there, which is what keeps the fused MLP path free of staging copies.
 
 **Gate:** the standalone program matches a CPU reference within tolerance, the exact weight layout expected by the operator is written down, and both structural questions above are answered in writing.
@@ -168,6 +181,46 @@ This requires no hardware and no build. It is pure comparison, and it determines
 **A repack is not an available answer.** The KV cache is the largest tensor in the system and copying it at the phase transition violates the zero-copy requirement. If the layouts disagree, the recommendation must be an NPU-side arrangement that writes what decode already expects — a different DD operator variant, different binding, or different attention decomposition.
 
 **Gate:** a written comparison with an explicit recommendation — layouts match, or here is the NPU-side arrangement that makes them match. If no NPU-side arrangement exists, escalate rather than proposing a copy.
+
+#### T0.4 finding (2026-08-18) — **GATE PASSED, with one new constraint**
+
+Completed by source comparison only; no hardware used. Sources: this repository's `lib/Runtime/real/gqa.cpp`; DynamicDispatch `flash_mha`, `chunk_flash_mha`, `qflashmha` headers, implementations, and unit tests; hybrid-llm `npu/gqo.cpp`.
+
+**All three questions the task asked resolve in our favour.**
+
+| Question | Verdict | Evidence |
+|---|---|---|
+| Tensor layout | **Agree — BNSD everywhere** | Ours: `past_key // BNSD [B, G, past_buf_seq, d]` (`lib/Runtime/real/gqa.cpp:316`). DD: `[N_heads, S, H]`, which DD calls BMK (`flash_mha.cpp:265-272`, `flash_mha.hpp:42-47`); size arithmetic `N_kv_ * S_k_ * H_` confirms head-major then seq then head_dim (`flash_mha.cpp:73-76`). hybrid-llm's persistent cache is `[B, N_kv, S, H]` and it reads it for attention with **no full repack** (`gqo.cpp:6203-6207`, `3611-3617`) |
+| Valid-length convention | **Agree exactly** | Ours: `total_seq = seqlens_k_val + 1` (`gqa.cpp:368`). hybrid-llm: `total_seq_len = seq_len_k[0] + 1` (`gqo.cpp:5865-5866`). Same `+1` convention, independently |
+| Undefined tail | **Agree — neither zeroes it, neither assumes zero** | Ours does not zero on alloc or release. hybrid-llm's `append_*` writes only new slots and never memsets the trailing cache (`gqo.cpp:7395-7424`, `7498-7518`); correctness rests on masks and chunk bounds, not physical cleanliness |
+
+**The forbidden outcome does not arise. No full-cache repack is needed** — the phase transition really is "nothing happens." The single largest risk in the design is retired.
+
+**New constraint discovered, not anticipated by the design: DD attention requires packed inputs and cannot bind a sub-range.**
+
+- `flash_mha` requires **Q, K and V contiguous in one buffer object**. All three logical inputs map to `xrt_arg_idx = 0` at increasing byte offsets (`flash_mha.cpp:425-429`), and `create_run` passes `input.at(0).bo` **wholesale, ignoring `NPUBufferSpan.offset` and `.size`** (`flash_mha.cpp:152-154`). `qflashmha` is the same (`qflashmha.cpp:336-339`).
+- `chunk_flash_mha` is looser: Q gets its own buffer and only **K‖V** are packed, plus a param buffer and scratch (`chunk_flash_mha.cpp:385-391`).
+- `NPUBufferSpan` does carry `{bo, offset, size}` (`op_interface_types.hpp:32-36`), and fusion RT can build sub-buffers via `parent.sub_bo(offset, size)` — but the eager attention path does not use either.
+- hybrid-llm pays for this with an explicit `memcpy` that concatenates Q, K, V into one buffer (`gqo.cpp:1456-1467`).
+
+Consequence: the current chunk's Q/K/V must be staged into a packed buffer, so attention cannot read K/V directly out of the persistent cache. This is bounded — it is the **current chunk**, not the cache: roughly 1 MB per layer for Llama-1B at a 512-token chunk, once per prefill, versus the hundreds of megabytes a full-cache repack would have cost. It is a different and far smaller problem than the one the gate was written to catch.
+
+**Second finding: `flash_mha` has no way to express "sequence shorter than the bucket."** There is no mask tensor and no runtime length parameter; it assumes the full static `S_q × S_k` extent with implicit causal masking, with only `window_size` as a modifier (`flash_mha.cpp:228`, `flash_mha.hpp:47`). `chunk_flash_mha` instead takes an 8×int32 param buffer carrying `query_start_pos_id, num_query_data, kv_start_pos_id, num_kv_data, local_window_size, is_first_key_chunk, is_last_key_chunk, granularity` (`chunk_flash_mha.cpp:262-264`, semantics documented at `test_chunk_flash_mha.cpp:564-567`). Padding therefore has an explicit, kernel-honoured representation only on the chunked operator.
+
+**Recommendation: target `transformer::chunk_flash_mha`, not `flash_mha`.**
+
+1. It is the only variant that can express a partial chunk, which our bucketing requires.
+2. It packs only K‖V, not Q‖K‖V, halving the staging.
+3. It is what hybrid-llm uses for chunked prefill, so it is the better-exercised path.
+4. It makes chunked prefill (T9.2) an extension of the v1 design rather than a rewrite.
+
+Costs to accept: it requires `S_q == S_k` (`chunk_flash_mha.cpp:307-308`) and pads `S_k` to a multiple of 128 (`chunk_flash_mha.cpp:64-67`). Partial-chunk K/V tails **must be zeroed** before the call — hybrid-llm does this explicitly and its comments state that stale tail data breaks the online softmax (`gqo.cpp:4667-4669`, `4736-4756`). That tail-zeroing is a hard requirement we inherit, not an optimization.
+
+**Open items handed to later tasks:**
+
+- Whether allocating each layer's K and V adjacently as one buffer would satisfy the K‖V packing requirement by construction, eliminating the staging copy. This is the one idea that could make attention genuinely copy-free; it needs the sub-range binding question answered first.
+- Whether fusion RT's `sub_bo` path can bind at an offset, which would remove the wholesale-BO restriction. Both are hardware/experiment questions for T0.1 and T0.3, not source questions.
+- The complete supported-shape ladder cannot be read from source — transaction binaries are loaded at runtime from an external library. `get_supported_shapes()` must be called on hardware to enumerate buckets. This blocks fixing the bucket ladder and belongs in T0.3's program.
 
 ---
 
@@ -280,9 +333,23 @@ Serialize the plan alongside the GPU artifact. The cache key must cover the ONNX
 
 **Files:** `lib/Compiler/CompilerDriver.cpp`
 
-### T3.4 — Decline paths
+### T3.4 — Decline paths and operator admissibility
 
 Every reason a plan cannot be emitted — unmapped operator, unsupported bucket, unsupported dtype — produces a diagnostic naming the cause, declines cleanly, and aborts instead when strict mode is set.
+
+Includes the **per-operator admissibility check** from the design. Matching an operation by name is not
+enough: our dialect operations carry optional features their DD counterparts do not implement, and
+emitting an entry that ignores one computes a different function while looking plausible. The rule is
+**reject on anything unrecognized, never ignore it** — an attribute the emitter does not understand is a
+rejection, not a default.
+
+Build this as a predicate per operator alongside the mapping, not as a late filter, so a mapping added in
+Phase 5 cannot be merged without one. `hip.gqa` is the test case: it must reject `attention_bias`,
+`head_sink`, `k_scale`/`v_scale`, `output_qk`, unsupported rotary variants, and `S_q != S_k`.
+
+**Verification:** a LIT test per rejection reason asserting no plan is emitted and the GPU artifact
+survives intact. A silent wrong-numbers path is the specific failure this task exists to prevent, so the
+negative tests matter more here than the positive ones.
 
 ---
 
@@ -331,10 +398,28 @@ Attention is last because it carries the conventions and because everything else
 | T5.2 | Normalization (`rms_norm`, `skip_rms_norm`) | Skip variant may need an added elementwise operator | B |
 | T5.3 | Elementwise multiply and add | | B |
 | T5.4 | Activation (SiLU, GELU) | Confirm which form survives conversion for the target model | A |
-| T5.5 **[GATE]** | Attention | Apply T0.4's recommendation. Prefer adapting the NPU side over touching the GPU path | — |
+| T5.5 **[GATE]** | Attention — **decomposes into five entries** | The largest task in the phase, not one operator. Needs T6.1 first; see below | — |
 | T5.6 | MLP fusion into `transformer::ssmlp` | v1 scope per Decision 12. Depends on T5.2–T5.4 as its numerics reference, not on T5.5 | — |
 
-**T5.6 is in v1, not deferred.** The MLP is the one block where hip-ep's dialect is coarser than DD's fused operator: attention is already one op mapping to one DD call, but the MLP arrives as `rms_norm → matmul_nbits ×2 → silu → mul → matmul_nbits`. The task is an MLIR pattern-match pass (`lib/Dialect/Transforms/FuseMlpForNpu.cpp`) collapsing that chain into a single plan entry, plus gate/up weight concatenation during formatting — which `matmul_gateup` makes mandatory rather than optional, so it cannot be added later without redoing the weight cache. Build the unfused path first and keep it as the numerics reference; the fused entry must match it before it replaces it.
+**T5.5 is a decomposition and it inverts the phase order.** `hip.gqa` implements RoPE, the KV-cache
+append *and* attention, while `chunk_flash_mha` computes only attention. One operation therefore becomes
+five plan entries — RoPE on Q, RoPE on K, the KV-cache append, K‖V staging, then attention — per the
+design's [decomposition section](hybrid-npu-gpu-design.md#hipgqa-is-a-decomposition-not-a-call).
+
+Two consequences for sequencing:
+
+- **The KV append is a GPU step** reusing `hip_gqa_kv_cache_append`, which means T5.5 depends on the
+  GPU-step mechanism in **T6.1**, not the other way round. Promote T6.1 ahead of T5.5 rather than
+  discovering the dependency mid-task.
+- T5.1 (rotary) stops being independent of attention and becomes a **prerequisite** of it.
+
+Budget T5.5 accordingly: it carries the staging copy, the mandatory K/V tail zeroing, the `S_q == S_k`
+restriction, and the admissibility rejections for `attention_bias`, `head_sink`, KV quantization and
+`output_qk`.
+
+**T5.6 is in v1, not deferred.** The MLP is the other block where hip-ep's dialect and DD's disagree on
+granularity — but in the opposite direction from attention. Attention is *more* fused in our dialect and
+must be split; the MLP is *less* fused, arriving as `rms_norm → matmul_nbits ×2 → silu → mul → matmul_nbits`, and must be collapsed. The task is an MLIR pattern-match pass (`lib/Dialect/Transforms/FuseMlpForNpu.cpp`) collapsing that chain into a single plan entry, plus gate/up weight concatenation during formatting — which `matmul_gateup` makes mandatory rather than optional, so it cannot be added later without redoing the weight cache. Build the unfused path first and keep it as the numerics reference; the fused entry must match it before it replaces it.
 
 Every task in this phase carries two additional obligations beyond its own correctness.
 
@@ -346,11 +431,19 @@ Every task in this phase carries two additional obligations beyond its own corre
 
 ## Phase 6 — GPU islands
 
-Depends on Phase 5.
+**T6.1 must be promoted ahead of T5.5**, because the KV-cache append inside the attention decomposition
+is itself a GPU step and cannot be built without the island mechanism. The rest of the phase depends on
+Phase 5 as originally written.
 
 ### T6.1 — Island representation
 
 A plan entry that runs a HIP operator through the existing GPU path, with boundary tensors allocated from the NPU pool.
+
+This is the mechanism the KV-cache append rides on, so it is a Phase 5 prerequisite rather than a Phase 6
+task proper. Build it generic enough to carry both cases: a *structural* GPU step the emitter always
+inserts (the append, one per layer), and a *fallback* island for an operation with no NPU mapping (the
+embedding lookup). Same representation, different reason for existing — the plan should record which,
+because the island-count health check in the design distinguishes them.
 
 ### T6.2 **[GATE]** — Island enumeration and assertion
 
