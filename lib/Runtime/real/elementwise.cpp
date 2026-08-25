@@ -249,6 +249,8 @@ cache_done:
 // broadcasting.  When a dimension is 1 in one operand but >1 in the other,
 // MIOpen broadcasts automatically (e.g. bias addition).
 // The compiler (HipToLLVM) left-pads shapes with 1 for rank < 4.
+// Currently supported data_types: float16, float32, int32, int64, int16
+// Currently supported tensor_ops: MUL, ADD, MIN, MAX
 //===----------------------------------------------------------------------===//
 
 int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
@@ -380,28 +382,6 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
                     (long long)out_n, (long long)out_c, (long long)out_h,
                     (long long)out_w, type_name, (long long)data_type);
 
-  miopenHandle_t handle =
-      static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
-  if (!handle) {
-    fprintf(stderr, "wrap_miopenOpTensor: null MIOpen handle\n");
-    return -1;
-  }
-
-  bool op_ok;
-  miopenTensorOp_t miopen_op = hipdnn_ep_to_miopen_op(tensor_op, op_ok);
-  if (!op_ok) {
-    fprintf(stderr, "wrap_miopenOpTensor: unsupported tensor_op %lld\n",
-            (long long)tensor_op);
-    return -1;
-  }
-
-  // Integer dtypes (i32/i64/i16) aren't supported by miopenOpTensor. Vision
-  // encoders run small i64 shape arithmetic via these ops (e.g. multiplying
-  // two i64 scalars to compute a downstream Reshape dim); attention chains
-  // run i32/i64 Min/Max for the seqlens_k = Min(total_seq_len, max_seq_len)
-  // clamp. Route those to a custom HIP kernel that handles same-shape
-  // mul/add/min/max. Broadcasting is materialised below by hip_expand into
-  // a per-state workspace before the flat kernel runs.
   if (data_type == HIPDNN_EP_DATATYPE_INT64 ||
       data_type == HIPDNN_EP_DATATYPE_INT32 ||
       data_type == HIPDNN_EP_DATATYPE_INT16) {
@@ -506,12 +486,11 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
   }
 
   // Float/half Add/Mul/Min/Max fast path: a single broadcasting HIP kernel.
-  // MIOpen's miopenOpTensor is pathologically slow on gfx1151 for the
-  // vision-encoder elementwise shapes (~390 ms for a 6.3M-element fp16 op
-  // measured on SAM2.1's Hiera encoder); the custom kernel does the same work
-  // in well under a millisecond with fully coalesced output writes and native
-  // per-axis broadcasting (no Expand materialisation). bf16 and any future op
-  // not in {ADD,MUL,MIN,MAX} fall through to the MIOpen path below.
+  // The custom kernel does this work in well under a millisecond with fully
+  // coalesced output writes and native per-axis broadcasting (no Expand
+  // materialisation). bf16, any op not in {ADD,MUL,MIN,MAX}, or an output
+  // volume exceeding the kernel's 32-bit index range fall through to the
+  // unsupported-combination error below -- there is no MIOpen fallback.
   if ((data_type == HIPDNN_EP_DATATYPE_HALF ||
        data_type == HIPDNN_EP_DATATYPE_FLOAT) &&
       (tensor_op == HIPDNN_EP_TENSOR_OP_ADD ||
@@ -530,145 +509,16 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
     int rc = hip_elementwise_binary_bcast(stream, lhs, rhs, output, lhs_shape4,
                                           rhs_shape4, out_shape4, bcast_op,
                                           hip_dtype);
-    // rc == -2: output volume exceeds the kernel's 32-bit index range; fall
-    // back to the MIOpen path below. Any other rc is terminal.
+    // rc == -2: output volume exceeds the kernel's 32-bit index range; no
+    // MIOpen fallback exists, so this falls through to the unsupported-
+    // combination error below. Any other rc is terminal.
     if (rc != -2)
       return rc;
   }
 
-  // MIOpen's miopenOpTensor requires A.shape == C.shape; only B may broadcast
-  // (dim==1) into A. Caller-provided lhs/rhs ordering is dictated by the
-  // original ONNX graph and is not normalized by the lowering pass, so when
-  // the broadcast-source operand happens to be in lhs position MIOpen rejects
-  // with "A and C Tensors do not match". All ops routed here are commutative
-  // (MUL/ADD/MIN/MAX -- see hipdnn_ep_to_miopen_op), so we can safely swap
-  // lhs<->rhs to put the output-shaped tensor on the A side.
-  const bool lhs_eq_out =
-      (lhs_n == out_n && lhs_c == out_c && lhs_h == out_h && lhs_w == out_w);
-  const bool rhs_eq_out =
-      (rhs_n == out_n && rhs_c == out_c && rhs_h == out_h && rhs_w == out_w);
-  if (!lhs_eq_out && rhs_eq_out) {
-    RUNTIME_DEBUG_LOG(
-        "[REAL] wrap_miopenOpTensor: swapping lhs<->rhs to satisfy MIOpen "
-        "A==C constraint (was lhs=[%lld,%lld,%lld,%lld] rhs=[%lld,%lld,%lld,"
-        "%lld])\n",
-        (long long)lhs_n, (long long)lhs_c, (long long)lhs_h, (long long)lhs_w,
-        (long long)rhs_n, (long long)rhs_c, (long long)rhs_h, (long long)rhs_w);
-    std::swap(lhs, rhs);
-    std::swap(lhs_n, rhs_n);
-    std::swap(lhs_c, rhs_c);
-    std::swap(lhs_h, rhs_h);
-    std::swap(lhs_w, rhs_w);
-  }
-
-  // True 2-D broadcast: neither lhs nor rhs equals out. The canonical case
-  // is `lhs=[1,1,H,1] * rhs=[1,1,1,W] -> out=[1,1,H,W]` from vision-encoder
-  // mrope tables and similar position-encoding patterns. MIOpen accepts only
-  // single-side broadcast (B may broadcast into A; A must equal C). Expand
-  // the smaller-volume side into the runtime workspace, then call MIOpen
-  // with the expanded side as A. Workspace is single-use within this call
-  // (the next stream op runs after the MIOpen call returns, but the kernel
-  // is queued on the same stream and reads the workspace before any later
-  // user grows it).
-  if (!lhs_eq_out && !rhs_eq_out) {
-    const int64_t lhs_vol = lhs_n * lhs_c * lhs_h * lhs_w;
-    const int64_t rhs_vol = rhs_n * rhs_c * rhs_h * rhs_w;
-    const bool expand_lhs = (lhs_vol <= rhs_vol);
-    const int64_t elem_bytes = hipdnn_ep_datatype_size(data_type);
-    const int64_t out_vol = out_n * out_c * out_h * out_w;
-    const size_t needed = static_cast<size_t>(out_vol * elem_bytes);
-    if (hipdnn_ep_state_ensure_workspace(state, needed) != 0) {
-      fprintf(stderr,
-              "wrap_miopenOpTensor: failed to ensure workspace %zu bytes for "
-              "broadcast expand\n",
-              needed);
-      return -1;
-    }
-    void *ws = hipdnn_ep_state_get_workspace(state);
-    void *stream = hipdnn_ep_state_get_stream(state);
-
-    const int64_t in_shape[4] = {
-        expand_lhs ? lhs_n : rhs_n, expand_lhs ? lhs_c : rhs_c,
-        expand_lhs ? lhs_h : rhs_h, expand_lhs ? lhs_w : rhs_w};
-    const int64_t out_shape[4] = {out_n, out_c, out_h, out_w};
-    int hip_dtype = hipdnn_to_hip_dtype(data_type);
-    if (hip_dtype < 0) {
-      fprintf(stderr,
-              "wrap_miopenOpTensor: unsupported data_type %lld for expand\n",
-              (long long)data_type);
-      return -1;
-    }
-    RUNTIME_DEBUG_LOG(
-        "[REAL] wrap_miopenOpTensor: 2-D broadcast detected, expanding %s "
-        "side [%lld,%lld,%lld,%lld] to [%lld,%lld,%lld,%lld] into workspace\n",
-        expand_lhs ? "lhs" : "rhs", (long long)in_shape[0],
-        (long long)in_shape[1], (long long)in_shape[2], (long long)in_shape[3],
-        (long long)out_n, (long long)out_c, (long long)out_h, (long long)out_w);
-    int rc = hip_expand(stream, expand_lhs ? lhs : rhs, ws, in_shape, 4,
-                        out_shape, 4, hip_dtype);
-    if (rc != 0) {
-      fprintf(stderr, "wrap_miopenOpTensor: hip_expand failed (%d)\n", rc);
-      return -1;
-    }
-
-    if (expand_lhs) {
-      lhs = ws;
-      lhs_n = out_n;
-      lhs_c = out_c;
-      lhs_h = out_h;
-      lhs_w = out_w;
-    } else {
-      // After expanding rhs to out shape, swap so the expanded side lands on
-      // A (lhs); the original lhs becomes the broadcasting B side, which
-      // MIOpen handles natively for its 1-axes.
-      void *expanded = ws;
-      void *orig_lhs = lhs;
-      const int64_t orig_lhs_n = lhs_n, orig_lhs_c = lhs_c, orig_lhs_h = lhs_h,
-                    orig_lhs_w = lhs_w;
-      lhs = expanded;
-      lhs_n = out_n;
-      lhs_c = out_c;
-      lhs_h = out_h;
-      lhs_w = out_w;
-      rhs = orig_lhs;
-      rhs_n = orig_lhs_n;
-      rhs_c = orig_lhs_c;
-      rhs_h = orig_lhs_h;
-      rhs_w = orig_lhs_w;
-    }
-  }
-
-  OpTensorState *os = OpTensorState::get_op_state(state, op_state_slot);
-  if (!os || !os->table) {
-    fprintf(stderr, "wrap_miopenOpTensor: missing op-state for slot %d\n",
-            op_state_slot);
-    return -1;
-  }
-
-  OpTensorCacheKey key{lhs_n, lhs_c, lhs_h, lhs_w, rhs_n, rhs_c,    rhs_h,
-                       rhs_w, out_n, out_c, out_h, out_w, data_type};
-  const OpTensorCacheEntry *c = queryOrCreateOpTensor(*os->table, key);
-  if (!c) {
-    fprintf(stderr, "wrap_miopenOpTensor: descriptor cache creation failed\n");
-    return -1;
-  }
-
-  float alpha1 = 1.0f, alpha2 = 1.0f, beta = 0.0f;
-
-  RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: calling miopenOpTensor"
-                    "(op=%s, alpha1=%.1f, alpha2=%.1f, beta=%.1f)\n",
-                    op_name, alpha1, alpha2, beta);
-
-  miopenStatus_t st =
-      miopenOpTensor(handle, miopen_op, &alpha1, c->aDesc, lhs, &alpha2,
-                     c->bDesc, rhs, &beta, c->cDesc, output);
-  if (st != miopenStatusSuccess) {
-    fprintf(stderr, "wrap_miopenOpTensor: miopenOpTensor failed (%d)\n", st);
-    return -1;
-  }
-
-  RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: completed successfully\n");
-  return 0;
+  fprintf(stderr, "wrap_miopenOpTensor: not support datatype: %s, op: %s\n",
+          type_name, op_name);
+  return -1;
 }
 
 //===----------------------------------------------------------------------===//
