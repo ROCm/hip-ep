@@ -21,10 +21,10 @@
 #include <vector>
 
 // Map HIPDNN_EP_DATATYPE_* -> hip_dtype_t for custom kernels (e.g. hip_expand
-// used as the broadcast-materialise fallback when MIOpen rejects double-side
-// broadcast).  The two enum systems use different orderings.  Local copy of
-// the helper in cast.cpp -- runtime files are bitcode TUs and cannot share
-// statics without extra plumbing.
+// used to materialise broadcasting before the flat integer kernel, which
+// cannot broadcast on its own).  The two enum systems use different
+// orderings.  Local copy of the helper in cast.cpp -- runtime files are
+// bitcode TUs and cannot share statics without extra plumbing.
 static int hipdnn_to_hip_dtype(int64_t hipdnn_type) {
   switch (hipdnn_type) {
   case HIPDNN_EP_DATATYPE_FLOAT:
@@ -238,16 +238,18 @@ cache_done:
 }
 
 //===----------------------------------------------------------------------===//
-// Generic Element-wise Tensor Operation via MIOpen
+// Generic Element-wise Tensor Operation
 //===----------------------------------------------------------------------===//
 //
-// Uses miopenOpTensor to compute:
-//   output = alpha1 * op(lhs, alpha2 * rhs) + beta * output
-// With alpha1=1, alpha2=1, beta=0 this gives: output = op(lhs, rhs)
+// Dispatches to custom HIP kernels: hip_elementwise_{mul,add,min,max} for
+// int16/int32/int64, and the native broadcasting kernel
+// hip_elementwise_binary_bcast for float16/float32.  Any other data_type /
+// tensor_op combination is unsupported and returns an error.
 //
-// Each operand's shape is passed as 4D (N, C, H, W) to allow MIOpen-native
-// broadcasting.  When a dimension is 1 in one operand but >1 in the other,
-// MIOpen broadcasts automatically (e.g. bias addition).
+// Each operand's shape is passed as 4D (N, C, H, W). For the integer path,
+// non-matching operands are materialised to the output shape via hip_expand
+// before the flat kernel runs; the float path broadcasts natively (dimension
+// 1 in one operand vs >1 in the other) without materialisation.
 // The compiler (HipToLLVM) left-pads shapes with 1 for rank < 4.
 // Currently supported data_types: float16, float32, int32, int64, int16
 // Currently supported tensor_ops: MUL, ADD, MIN, MAX
@@ -289,8 +291,8 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
   // operand is meant as an additive/multiplicative identity (no
   // contribution). Some exporters' shape inference then sizes the
   // output OUT to MAX(LHS_dim, RHS_dim), which gives a non-empty OUT
-  // even when one operand is empty. The MIOpen tensor-op API rejects
-  // 0-dim descriptors, so we must handle this here.
+  // even when one operand is empty. 0-dim descriptors are not well-defined
+  // for the custom elementwise kernels either, so we must handle this here.
   //
   // Treatment: if one operand is empty and the other has the same
   // shape as OUT, copy the non-empty operand into OUT. If both
@@ -490,7 +492,7 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
   // coalesced output writes and native per-axis broadcasting (no Expand
   // materialisation). bf16, any op not in {ADD,MUL,MIN,MAX}, or an output
   // volume exceeding the kernel's 32-bit index range fall through to the
-  // unsupported-combination error below -- there is no MIOpen fallback.
+  // unsupported-combination error below -- there is no fallback.
   if ((data_type == HIPDNN_EP_DATATYPE_HALF ||
        data_type == HIPDNN_EP_DATATYPE_FLOAT) &&
       (tensor_op == HIPDNN_EP_TENSOR_OP_ADD ||
@@ -510,8 +512,8 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
                                           rhs_shape4, out_shape4, bcast_op,
                                           hip_dtype);
     // rc == -2: output volume exceeds the kernel's 32-bit index range; no
-    // MIOpen fallback exists, so this falls through to the unsupported-
-    // combination error below. Any other rc is terminal.
+    // fallback exists, so this falls through to the unsupported-combination
+    // error below. Any other rc is terminal.
     if (rc != -2)
       return rc;
   }
@@ -521,12 +523,6 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
   return -1;
 }
 
-//===----------------------------------------------------------------------===//
-// Element-wise Subtraction via Custom HIP Kernel
-//===----------------------------------------------------------------------===//
-//
-// MIOpen has no subtract op; dispatches to hip_elementwise_sub after optional
-// hip_expand broadcast materialisation (4D shapes, rank <= 4).
 
 static int sub_hipdnn_to_hip_dtype(int64_t hipdnn_type) {
   switch (hipdnn_type) {
