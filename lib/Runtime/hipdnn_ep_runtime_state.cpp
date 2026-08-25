@@ -9,6 +9,10 @@
 #include "op_profile.h"
 #include "runtime_state_internal.h"
 
+#if defined(HIPDNN_EP_REAL_RUNTIME)
+#include "gqa_autotune.h"
+#endif
+
 #include "model_metadata_generated.h"
 #include "morphizen-foundation/file_io.hpp"
 
@@ -45,6 +49,14 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
     return rc;
   }
 
+  auto *fileSystem = static_cast<morphizen::FileSystem *>(fs);
+#if defined(HIPDNN_EP_REAL_RUNTIME)
+  // LUT loading is independent of constants metadata. Keep it before the
+  // metadata early returns so constant-free models still get lookup-only GQA.
+  (*out_state)->gqa_autotune_policy =
+      hipdnn_ep::gqa_autotune_create(fileSystem);
+#endif
+
   if (!metadata_blob || blob_size == 0) {
     TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs (no "
                "constants)\n",
@@ -77,8 +89,6 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
     *out_state = nullptr;
     return rc;
   }
-
-  auto *fileSystem = static_cast<morphizen::FileSystem *>(fs);
 
   // 3. Dispatch by metadata semantics: if any constant carries a per-entry
   //    source descriptor (Splat / FileRef), do per-tensor upload driven by
@@ -169,6 +179,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->la_scratch_size = 0;
   state->zp_unpack_cache = nullptr;
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
+  state->gqa_autotune_policy = nullptr;
   state->device_error_flag = nullptr;
   state->hipdnn_handle = nullptr;
   state->hipdnn_graph_registry = nullptr;
@@ -693,6 +704,11 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
 
   // Best-effort cleanup - continue even if operations fail
   // Cleanup in reverse order of initialization (LIFO)
+
+#if defined(HIPDNN_EP_REAL_RUNTIME)
+  hipdnn_ep::gqa_autotune_destroy(state->gqa_autotune_policy);
+  state->gqa_autotune_policy = nullptr;
+#endif
 
   // Synchronize stream to ensure all GPU operations complete
   if (state->stream) {
