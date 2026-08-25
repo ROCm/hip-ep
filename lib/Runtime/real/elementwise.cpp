@@ -44,7 +44,6 @@ static int hipdnn_to_hip_dtype(int64_t hipdnn_type) {
   }
 }
 
-
 // Per-instance op state for hip.add/mul/min/max. The state itself is empty --
 // these ops no longer need any shared per-device data -- but the slot must
 // still be constructed because the compiler unconditionally emits a
@@ -77,11 +76,11 @@ extern "C" int8_t hipdnn_ep_op_state_construct_optensor(RuntimeState *state,
 //===----------------------------------------------------------------------===//
 
 int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
-                        void *rhs, void *output, int64_t lhs_n, int64_t lhs_c,
-                        int64_t lhs_h, int64_t lhs_w, int64_t rhs_n,
-                        int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
-                        int64_t out_n, int64_t out_c, int64_t out_h,
-                        int64_t out_w, int64_t data_type, int64_t tensor_op) {
+                     void *rhs, void *output, int64_t lhs_n, int64_t lhs_c,
+                     int64_t lhs_h, int64_t lhs_w, int64_t rhs_n, int64_t rhs_c,
+                     int64_t rhs_h, int64_t rhs_w, int64_t out_n, int64_t out_c,
+                     int64_t out_h, int64_t out_w, int64_t data_type,
+                     int64_t tensor_op) {
   OP_PROFILE(
       "elementwise",
       [&] {
@@ -343,7 +342,6 @@ int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
           type_name, op_name);
   return -1;
 }
-
 
 static int sub_hipdnn_to_hip_dtype(int64_t hipdnn_type) {
   switch (hipdnn_type) {
