@@ -119,6 +119,7 @@ struct ConvertOnnxToHipsrPass
     populateMatMulConversionPatterns(converter, patterns, &getContext());
     populateExpandConversionPatterns(converter, patterns, &getContext());
     populateShapeConversionPatterns(converter, patterns, &getContext());
+    populateReshapeConversionPatterns(converter, patterns, &getContext());
     populateReturnConversionPatterns(converter, patterns, &getContext());
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns,
                                                                    converter);
