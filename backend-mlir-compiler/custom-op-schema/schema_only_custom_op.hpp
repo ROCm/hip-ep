@@ -31,26 +31,24 @@ private:
   const OrtKernelInfo *info_;
 };
 
-// A schema-only custom op only needs to let ORT load/Resolve a graph
-// containing it -- there is no real kernel and no shape inference, so
-// there is nothing to distinguish one op from another beyond its name,
-// domain, and output element type. UNDEFINED+VARIADIC inputs tell ORT to
-// skip input type/count validation, which is why a single concrete class
-// parameterized by name and output type (rather than one CRTP subclass per
-// op) is enough to cover every op in this bucket.
-//
-// The output element type can't default to UNDEFINED the same way: ORT's
-// ONNX type/shape inference (Graph::UpdateShapeInference) requires a single
-// concrete formal output type whenever the graph doesn't already carry an
-// explicit type for that intermediate tensor (the common case) -- with
-// UNDEFINED the formal type list expands to every tensor element type, none
-// of which is picked, and Model::Load fails with "type inference failed"
-// on the first real graph where the op's output isn't already typed.
+using SchemaOnlyShapeInferFn =
+    OrtStatusPtr(ORT_API_CALL *)(const OrtCustomOp *, OrtShapeInferContext *);
+
+// One Ort::CustomOpBase subclass covers every schema-only op; kSchemaOnlyOps
+// passes a per-op SchemaOnlyShapeInferFn (see schema_only_custom_op.cpp).
+// We inherit CustomOpBase for CreateKernel/GetName/type hooks but do not use
+// its static InferOutputShape path -- that is one callback per class, while we
+// need one callback per registered op instance.
 class SchemaOnlyCustomOp
     : public Ort::CustomOpBase<SchemaOnlyCustomOp, SchemaOnlyStubKernel> {
 public:
-  SchemaOnlyCustomOp(std::string name, ONNXTensorElementDataType output_type)
-      : name_(std::move(name)), output_type_(output_type) {}
+  SchemaOnlyCustomOp(std::string name, SchemaOnlyShapeInferFn shape_infer_fn)
+      : name_(std::move(name)) {
+    // CustomOpBase ctor clears InferOutputShapeFn when no static
+    // InferOutputShape exists. Assign on this OrtCustomOp instance only; ORT
+    // calls it for nodes matching this op's domain/name, not other custom ops.
+    OrtCustomOp::InferOutputShapeFn = shape_infer_fn;
+  }
 
   void *CreateKernel(const OrtApi &, const OrtKernelInfo *info) const {
     return new SchemaOnlyStubKernel(info);
@@ -68,18 +66,17 @@ public:
   bool GetVariadicInputHomogeneity() const { return false; }
 
   size_t GetOutputTypeCount() const { return 1; }
-  ONNXTensorElementDataType GetOutputType(size_t) const { return output_type_; }
+  ONNXTensorElementDataType GetOutputType(size_t) const {
+    return ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+  }
   OrtCustomOpInputOutputCharacteristic GetOutputCharacteristic(size_t) const {
-    return output_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED
-               ? OrtCustomOpInputOutputCharacteristic::INPUT_OUTPUT_VARIADIC
-               : OrtCustomOpInputOutputCharacteristic::INPUT_OUTPUT_REQUIRED;
+    return OrtCustomOpInputOutputCharacteristic::INPUT_OUTPUT_VARIADIC;
   }
   int GetVariadicOutputMinArity() const { return 0; }
   bool GetVariadicOutputHomogeneity() const { return false; }
 
 private:
   std::string name_;
-  ONNXTensorElementDataType output_type_;
 };
 
 } // namespace hipep
