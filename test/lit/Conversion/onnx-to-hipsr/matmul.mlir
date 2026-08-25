@@ -22,7 +22,7 @@ func.func @matmul_2d(%ctx: !hipsr.context, %a: tensor<?x4096xf16>,
                      %b: tensor<4096x1024xf16>) -> tensor<?x1024xf16> {
   %0 = "onnx.MatMul"(%a, %b) : (tensor<?x4096xf16>, tensor<4096x1024xf16>)
       -> tensor<?x1024xf16>
-  return %0 : tensor<?x1024xf16>
+  "onnx.Return"(%0) : (tensor<?x1024xf16>) -> ()
 }
 
 // -----
@@ -40,5 +40,5 @@ func.func @matmul_1d_rhs(%ctx: !hipsr.context, %a: tensor<?x4096xf16>,
                          %b: tensor<4096xf16>) -> tensor<?xf16> {
   %0 = "onnx.MatMul"(%a, %b) : (tensor<?x4096xf16>, tensor<4096xf16>)
       -> tensor<?xf16>
-  return %0 : tensor<?xf16>
+  "onnx.Return"(%0) : (tensor<?xf16>) -> ()
 }
