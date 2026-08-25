@@ -2433,6 +2433,40 @@ def Hip_CosOp : Hip_DpsOp<"cos", /*traits=*/[],
   }];
 }
 
+def Hip_ErfOp : Hip_DpsOp<"erf", /*traits=*/[],
+                          /*outsAccessor=*/"Y",
+                          /*autoReify=*/1,
+                          /*autoInfer=*/1,
+                          /*declareInfer=*/1> {
+  let summary = "Element-wise error function: y = erf(x)";
+  let description = [{
+    Computes the Gauss error function of each element.
+    Implements the standard ONNX Erf operator.
+
+    Formula: Y = erf(X)
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.erf(%ctx) ins(%x : memref<1x128x200x200xf32, 1>)
+                  outs(%y : memref<1x128x200x200xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_SinOp : Hip_DpsOp<"sin", /*traits=*/[],
                           /*outsAccessor=*/"Y",
                           /*autoReify=*/1,
@@ -4345,6 +4379,54 @@ def Hip_ResizeOp : Hip_DpsOp<"resize"> {
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+}
+
+def Hip_GridSampleOp : Hip_DpsOp<"grid_sample", /*traits=*/[],
+                                 /*outsAccessor=*/"Output",
+                                 /*autoReify=*/1,
+                                 /*autoInfer=*/1,
+                                 /*declareInfer=*/1> {
+  let summary = "ONNX GridSample (4D NCHW bilinear / nearest)";
+  let description = [{
+    Samples a 4-D input `X` of shape (N, C, H_in, W_in) at normalized
+    locations from `grid` of shape (N, H_out, W_out, 2).  The last grid
+    axis is (x, y) in [-1, 1].  Output Y has shape (N, C, H_out, W_out).
+
+    Attribute encoding (decoded at ONNX->HIP conversion):
+      * mode: 0 = nearest, 1 = bilinear (ONNX "bilinear" / "linear")
+      * padding_mode: 0 = zeros, 1 = border, 2 = reflection
+      * align_corners: 0 or 1 (ONNX default 0)
+
+    Cubic / bicubic interpolation and 5-D (volumetric) sampling are
+    rejected at conversion.
+
+    Example:
+    ```mlir
+    hip.grid_sample(%ctx)
+        ins(%x, %grid : memref<1x3x8x8xf32, 1>, memref<1x4x4x2xf32, 1>)
+        outs(%y : memref<1x3x4x4xf32, 1>)
+        {mode = 1, padding_mode = 0, align_corners = 0}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$grid,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$mode,
+    I64Attr:$padding_mode,
+    I64Attr:$align_corners
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $grid `:` type($input) `,` type($grid)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
 }
 
 // hip.readback_dim : materialize a kernel-computed runtime extent as a host

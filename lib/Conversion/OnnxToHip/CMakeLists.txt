@@ -59,6 +59,7 @@ add_library(OnnxToHip STATIC
   MaxConversion.cpp
   NotConversion.cpp
   CosConversion.cpp
+  ErfConversion.cpp
   SinConversion.cpp
   CeilConversion.cpp
   ExpConversion.cpp
@@ -87,6 +88,7 @@ add_library(OnnxToHip STATIC
   ConcatConversion.cpp
   PoolConversion.cpp
   ResizeConversion.cpp
+  GridSampleConversion.cpp
   GlobalPoolConversion.cpp
   FlattenConversion.cpp
   LoopOutline.cpp

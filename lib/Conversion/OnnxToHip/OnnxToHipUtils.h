@@ -366,6 +366,8 @@ void populateNotConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateCosConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
+void populateErfConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
 void populateSinConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateCeilConversionPatterns(RewritePatternSet &patterns,
@@ -428,6 +430,8 @@ void populatePoolConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateResizeConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+void populateGridSampleConversionPatterns(RewritePatternSet &patterns,
+                                          MLIRContext *ctx);
 void populateGlobalPoolConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
 void populateFlattenConversionPatterns(RewritePatternSet &patterns,

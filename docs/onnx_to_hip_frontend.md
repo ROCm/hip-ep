@@ -65,6 +65,7 @@ existing `--convert-hip-to-llvm` pipeline.
 |---|---|---|
 | `LayerNormalization` | `hip.miopen.layer_norm` | `miopenLayerNormForward` |
 | `SimplifiedLayerNormalization` | `hip.miopen.t5_layer_norm` | `miopenT5LayerNormForward` |
+| `GridSample` | `hip.grid_sample` | custom HIP kernel |
 | `SkipLayerNormalization` | `hip.miopen.skip_layer_norm` | `miopenAddLayerNormForward` |
 | `SkipSimplifiedLayerNormalization` | `hip.miopen.skip_rms_norm` | `miopenAddLayerNormForward` (T5 mode) |
 | LpNorm+Mul pattern (fused) | `hip.miopen.rms_norm` | `miopenT5LayerNormForward` |

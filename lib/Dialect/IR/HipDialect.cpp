@@ -1171,6 +1171,58 @@ void ResizeOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// GridSampleOp: ins(input, grid), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GridSampleOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void GridSampleOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult GridSampleOp::verify() {
+  SmallVector<Value> dataOperands{getInput(), getGrid(), getOutput()};
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  auto rankedShape = [](Type t) -> std::optional<int64_t> {
+    if (auto tensor = dyn_cast<RankedTensorType>(t))
+      return tensor.getRank();
+    if (auto memref = dyn_cast<MemRefType>(t))
+      return memref.getRank();
+    return std::nullopt;
+  };
+
+  auto inputRank = rankedShape(getInput().getType());
+  auto gridRank = rankedShape(getGrid().getType());
+  auto outputRank = rankedShape(getOutput().getType());
+  if (!inputRank || *inputRank != 4)
+    return emitOpError("expected 4-D input (N, C, H, W)");
+  if (!gridRank || *gridRank != 4)
+    return emitOpError("expected 4-D grid (N, H_out, W_out, 2)");
+  if (!outputRank || *outputRank != 4)
+    return emitOpError("expected 4-D output (N, C, H_out, W_out)");
+
+  int64_t mode = getMode();
+  if (mode != 0 && mode != 1)
+    return emitOpError("mode must be 0 (nearest) or 1 (bilinear), got ")
+           << mode;
+  int64_t padding = getPaddingMode();
+  if (padding < 0 || padding > 2)
+    return emitOpError("padding_mode must be 0 (zeros), 1 (border), or 2 "
+                       "(reflection), got ")
+           << padding;
+  int64_t align = getAlignCorners();
+  if (align != 0 && align != 1)
+    return emitOpError("align_corners must be 0 or 1, got ") << align;
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // GlobalPoolOp: ins(input), outs(output)
 //===----------------------------------------------------------------------===//
 
@@ -1736,6 +1788,18 @@ void AndOp::getEffects(
 MutableOperandRange CosOp::getDpsInitsMutable() { return getYMutable(); }
 
 void CosOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ErfOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ErfOp::getDpsInitsMutable() { return getYMutable(); }
+
+void ErfOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
