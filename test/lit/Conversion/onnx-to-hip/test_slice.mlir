@@ -148,7 +148,11 @@ module {
     // CHECK: %[[HI:.*]] = arith.minsi %{{.*}}, %[[DIM]] : index
     // CHECK: %[[LEN:.*]] = arith.subi %[[HI]], %[[LO]] : index
     // CHECK: %[[EXT:.*]] = arith.maxsi %[[LEN]], %{{.*}} : index
-    // CHECK: tensor.empty(%[[EXT]]) : tensor<?xf32>
+    // A length of zero would allocate nothing, so the capacity falls back to
+    // the data dim; here the bounds are 1 and 3, so the select never fires.
+    // CHECK: %[[EMPTY:.*]] = arith.cmpi eq, %[[EXT]], %{{.*}} : index
+    // CHECK: %[[CAP:.*]] = arith.select %[[EMPTY]], %[[DIM]], %[[EXT]] : index
+    // CHECK: tensor.empty(%[[CAP]]) : tensor<?xf32>
     // CHECK: hip.slice({{.*}}) ins({{.*}}, {{.*}}, {{.*}} : tensor<?xf32>, tensor<1xi64>, tensor<1xi64>)
     return %r : tensor<?xf32>
   }
@@ -188,7 +192,12 @@ module {
     // CHECK: %[[HI:.*]] = arith.minsi %{{.*}}, %[[D1]] : index
     // CHECK: %[[LEN:.*]] = arith.subi %[[HI]], %[[LO]] : index
     // CHECK: %[[EXT:.*]] = arith.maxsi %[[LEN]], %{{.*}} : index
-    // CHECK: tensor.empty(%[[D0]], %[[EXT]]) : tensor<?x?xi64>
+    // Gemma-4's length is 1 at decode and S at prefill, never 0, so the
+    // capacity select is dead weight here -- it exists for the seed slices in
+    // test 11.
+    // CHECK: %[[EMPTY:.*]] = arith.cmpi eq, %[[EXT]], %{{.*}} : index
+    // CHECK: %[[CAP:.*]] = arith.select %[[EMPTY]], %[[D1]], %[[EXT]] : index
+    // CHECK: tensor.empty(%[[D0]], %[[CAP]]) : tensor<?x?xi64>
     // CHECK: hip.slice
     return %r : tensor<?x?xi64>
   }
@@ -253,8 +262,36 @@ module {
     // CHECK: %[[HI:.*]] = arith.minsi %{{.*}}, %[[D1]] : index
     // CHECK: %[[LEN:.*]] = arith.subi %[[HI]], %[[LO]] : index
     // CHECK: %[[EXT:.*]] = arith.maxsi %[[LEN]], %{{.*}} : index
-    // CHECK: tensor.empty(%[[D0]], %[[EXT]]) : tensor<?x?xi64>
+    // CHECK: %[[EMPTY:.*]] = arith.cmpi eq, %[[EXT]], %{{.*}} : index
+    // CHECK: %[[CAP:.*]] = arith.select %[[EMPTY]], %[[D1]], %[[EXT]] : index
+    // CHECK: tensor.empty(%[[D0]], %[[CAP]]) : tensor<?x?xi64>
     // CHECK: hip.slice
     return %r : tensor<?x?xi64>
+  }
+
+  // Test 11: the `Slice(x, k, k, axis)` empty-tensor idiom, which Qwen3.6-VL's
+  // windowed attention uses to seed a Concat accumulator that a hip.loop then
+  // appends into. Its exact extent is 0, but the init IS the allocation, and
+  // FixLoopAccumulatorOffset.cpp rewrites the loop's append offsets on the
+  // stated assumption that this seed carries full capacity. Sizing it at 0 --
+  // which is what #782 did before this guard -- gives the append copy a zero
+  // destination pitch and the model dies at runtime. Both bounds being the
+  // same SSA value is recognised without resolving either, so the data dim is
+  // used directly and no extent arithmetic is emitted at all.
+  func.func @test_slice_native_empty_accumulator_seed(
+      %data: tensor<?x?xf16>, %k: tensor<1xi64>) -> tensor<?x?xf16> {
+    // CHECK-LABEL: func.func @test_slice_native_empty_accumulator_seed
+    %axes = arith.constant dense<[1]> : tensor<1xi64>
+    %r = "onnx.Slice"(%data, %k, %k, %axes)
+        : (tensor<?x?xf16>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>) -> tensor<?x?xf16>
+
+    // CHECK-NOT: arith.minsi
+    // CHECK-NOT: arith.select
+    // CHECK: %[[D0:.*]] = tensor.dim %arg1, %{{.*}} : tensor<?x?xf16>
+    // CHECK: %[[D1:.*]] = tensor.dim %arg1, %{{.*}} : tensor<?x?xf16>
+    // CHECK: tensor.empty(%[[D0]], %[[D1]]) : tensor<?x?xf16>
+    // CHECK: hip.slice
+    return %r : tensor<?x?xf16>
   }
 }

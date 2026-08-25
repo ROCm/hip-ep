@@ -52,6 +52,18 @@ namespace {
 // [1, 1, S] into [1, S, S], 60% of a decode step. Hence resolveHostIndex:
 // `ends - starts` is host arithmetic over `onnx.Shape` entries, so the true
 // extent is computable without any device readback.
+//
+// The one extent that must NOT shrink is zero. The extent here is also the
+// allocation, and one consumer depends on that allocation being the upper
+// bound: FixLoopAccumulatorOffset.cpp rewrites a growing-Concat accumulator in
+// an outlined `hip.loop` body and, as its header states, "assumes ... v_init is
+// pre-sized to full capacity (the canonical `Slice(x, k, k, axis) -> Loop`
+// pattern)". `Slice(x, k, k, axis)` is the ONNX empty-tensor idiom used to seed
+// such an accumulator; its exact extent is 0, and a zero-capacity init leaves
+// the loop appending chunks into nothing -- on Qwen3.6-VL's windowed attention
+// that surfaced as `memrefCopy(rank-2 strided) failed: invalid pitch argument`,
+// because the append subview's destination pitch was 0. So an extent that
+// evaluates to zero falls back to the data dim; see buildAllocCapacity.
 
 /// Return the dense-elements attribute backing \p value if it can be
 /// determined at compile time. Recognizes arith constants, inspectable
@@ -283,6 +295,22 @@ static mlir::Value buildSliceExtent(mlir::OpBuilder &b, mlir::Location loc,
     return len;
   return mlir::arith::CeilDivSIOp::create(
       b, loc, len, mlir::arith::ConstantIndexOp::create(b, loc, step));
+}
+
+/// Capacity to put on the `tensor.empty` init for a slice length \p len: the
+/// length itself, or \p dim when the length is zero. A zero-length init is a
+/// zero-byte buffer, and the `Slice(x, k, k, axis) -> Loop` accumulator seed
+/// (see the file header) needs full capacity to append into. The compare is
+/// against a run-time value because a bound pair can be equal only at run time;
+/// bounds that are never equal are unaffected, so Gemma-4 -- whose length is
+/// `Shape(attn)[1] - Shape(ids)[1]`, 1 at decode and S at prefill -- still gets
+/// its exact extent.
+static mlir::Value buildAllocCapacity(mlir::OpBuilder &b, mlir::Location loc,
+                                      mlir::Value dim, mlir::Value len) {
+  mlir::Value zero = mlir::arith::ConstantIndexOp::create(b, loc, 0);
+  mlir::Value isEmpty = mlir::arith::CmpIOp::create(
+      b, loc, mlir::arith::CmpIPredicate::eq, len, zero);
+  return mlir::arith::SelectOp::create(b, loc, isEmpty, dim, len);
 }
 
 struct SliceDecompose : public mlir::RewritePattern {
@@ -545,6 +573,7 @@ struct SliceToHip : public mlir::RewritePattern {
       // slices can land on the upper bound, so only that is worth reporting --
       // and if `axes` itself was unreadable, any axis might be sliced.
       bool axisIsSliced = !haveAxes;
+      bool emptyAccumulatorSeed = false;
       if (haveAxes) {
         for (size_t k = 0; k < axesVec.size(); ++k) {
           int64_t axis =
@@ -554,14 +583,24 @@ struct SliceToHip : public mlir::RewritePattern {
           axisIsSliced = true;
           if (stepsVec[k] <= 0)
             break;
+          // One `Value` for both bounds is `Slice(x, k, k, axis)` spelled the
+          // way exporters emit it, so the length is zero without resolving
+          // anything. Take the data dim directly rather than emitting the
+          // arithmetic and the select that would fold back to it.
+          if (starts == ends) {
+            emptyAccumulatorSeed = true;
+            break;
+          }
           mlir::Value s = resolveHostIndex(rewriter, loc, starts, k, 0);
           mlir::Value e = resolveHostIndex(rewriter, loc, ends, k, 0);
           if (s && e)
-            extent = buildSliceExtent(rewriter, loc, dim, s, e, stepsVec[k]);
+            extent = buildAllocCapacity(
+                rewriter, loc, dim,
+                buildSliceExtent(rewriter, loc, dim, s, e, stepsVec[k]));
           break;
         }
       }
-      if (!extent && axisIsSliced)
+      if (!extent && axisIsSliced && !emptyAccumulatorSeed)
         LLVM_DEBUG(llvm::dbgs()
                    << "[" DEBUG_TYPE "] slice extent for dim " << i
                    << " falls back to the data dim: no host-resolvable bounds "
