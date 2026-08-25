@@ -358,6 +358,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/erf.cpp runtime_erf.bc)
     compile_to_bitcode(real/sin.cpp runtime_sin.bc)
     compile_to_bitcode(real/ceil.cpp runtime_ceil.bc)
+    compile_to_bitcode(real/atan.cpp runtime_atan.bc)
     compile_to_bitcode(real/exp.cpp runtime_exp.bc)
     compile_to_bitcode(real/log.cpp runtime_log.bc)
     compile_to_bitcode(real/cumsum.cpp runtime_cumsum.bc)
@@ -475,6 +476,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_erf.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_sin.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_ceil.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_atan.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_exp.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_log.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_cumsum.bc
