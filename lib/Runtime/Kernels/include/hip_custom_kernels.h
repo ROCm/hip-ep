@@ -482,6 +482,25 @@ HIP_KERNEL_API int hip_leaky_relu(
     double alpha);
 
 /* =========================================================================
+ * Softplus activation
+ * =========================================================================
+ *
+ * Element-wise softplus: y = log(1 + exp(x)).
+ *
+ * Matches MIOpen miopenActivationSOFTRELU on packed 1D tensors
+ * (ActivationFunction_BNLL in MIOpenNeuron.cl / activation_functions.h).
+ *
+ * Supported hip_dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16.
+ * Returns: 0 on success, non-zero on launch/validation error.
+ */
+HIP_KERNEL_API int hip_softplus(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+/* =========================================================================
  * Rotary Position Embedding (RoPE)
  * =========================================================================
  *

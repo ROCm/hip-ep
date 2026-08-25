@@ -40,8 +40,6 @@ static miopenActivationMode_t hipdnn_ep_to_miopen_activation(int64_t mode,
   switch (mode) {
   case HIPDNN_EP_ACTIVATION_RELU:
     return miopenActivationRELU;
-  case HIPDNN_EP_ACTIVATION_SOFTPLUS:
-    return miopenActivationSOFTRELU;
   default:
     fprintf(stderr, "[REAL] unsupported activation_mode %lld for MIOpen\n",
             (long long)mode);
@@ -105,11 +103,8 @@ struct ActivationTable {
   }
 };
 
-// Per-instance op state shared by hip.sigmoid / hip.tanh / hip.softplus: each
-// slot holds a shared_ptr to the one shared descriptor table. The table is
-// reached through a global WeakStore keyed by device (see op_state.h): it is
-// weak_ptr-backed, so it lives only while some session's ActivationState holds
-// a shared_ptr to it.
+// Per-instance op state shared by hip.sigmoid / hip.tanh: each slot holds a
+// shared_ptr to the one shared descriptor table.
 struct ActivationState : OpStateT<ActivationState> {
   std::shared_ptr<ActivationTable> table;
   ActivationState() {
@@ -159,9 +154,8 @@ queryOrCreateActivation(ActivationTable &table, const ActivationCacheKey &key) {
   }
   MIOPEN_CHECK_GOTO(miopenCreateActivationDescriptor(&e.actDesc), cache_fail);
   {
-    // SOFTRELU (and RELU) ignore alpha/beta. ONNX Tanh no longer uses this
-    // path; if a future mode needs non-zero coefficients, key them on
-    // ActivationCacheKey as well.
+    // RELU ignores alpha/beta. If a future mode needs non-zero coefficients,
+    // key them on ActivationCacheKey as well.
     MIOPEN_CHECK_GOTO(
         miopenSetActivationDescriptor(e.actDesc, act, 0.0, 0.0, 0.0),
         cache_fail);
@@ -189,7 +183,7 @@ cache_done:
 }
 
 //===----------------------------------------------------------------------===//
-// Generic MIOpen Activation Forward
+// MIOpen Activation Forward (sigmoid, tanh)
 //===----------------------------------------------------------------------===//
 //
 // Applies activation_mode element-wise using miopenActivationForward.
@@ -419,6 +413,57 @@ int wrap_gelu(RuntimeState *state, void *input, void *output,
   }
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_gelu: completed successfully\n");
+  return 0;
+}
+
+//===----------------------------------------------------------------------===//
+// Softplus Activation (Custom HIP Kernel)
+//===----------------------------------------------------------------------===//
+//
+// Applies softplus element-wise via hip_softplus. Formula matches MIOpen's
+// miopenActivationSOFTRELU device path (ActivationFunction_BNLL on packed 1D
+// tensors): y = x + log(1 + exp(-x)) when x > 0, else log(1 + exp(x)).
+// Supports f32 and f16 only.
+//===----------------------------------------------------------------------===//
+
+int wrap_softplus(RuntimeState *state, void *input, void *output,
+                  int64_t num_elements, int64_t data_type) {
+  OP_PROFILE(
+      "softplus",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "n=%lld", (long long)num_elements);
+        return std::string(b);
+      },
+      state);
+  if (!state || !input || !output) {
+    fprintf(stderr, "[REAL] wrap_softplus: null argument\n");
+    return -1;
+  }
+
+  int hip_dtype = hipdnn_ep_to_hip_dtype_elementwise_unary(data_type);
+  if (hip_dtype != HIP_DTYPE_FLOAT32 && hip_dtype != HIP_DTYPE_FLOAT16) {
+    fprintf(stderr,
+            "[REAL] wrap_softplus: unsupported data_type %s(%lld); only f32 "
+            "and f16 are supported\n",
+            hipdnn_ep_datatype_name(data_type), (long long)data_type);
+    return -1;
+  }
+
+  void *stream = hipdnn_ep_state_get_stream(state);
+  RUNTIME_DEBUG_LOG(
+      "[REAL] wrap_softplus: num_elements=%lld, data_type=%s(%lld)\n",
+      (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+      (long long)data_type);
+
+  int result = hip_softplus(stream, input, output, num_elements, hip_dtype);
+  if (result != 0) {
+    fprintf(stderr, "[REAL] wrap_softplus: kernel launch failed (%d)\n",
+            result);
+    return -1;
+  }
+
+  RUNTIME_DEBUG_LOG("[REAL] wrap_softplus: completed successfully\n");
   return 0;
 }
 

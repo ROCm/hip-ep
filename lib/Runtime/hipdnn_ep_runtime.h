@@ -135,7 +135,6 @@ static inline const char *hipdnn_ep_datatype_name(int64_t data_type) {
 #define HIPDNN_EP_ACTIVATION_SIGMOID 0
 #define HIPDNN_EP_ACTIVATION_RELU 1
 #define HIPDNN_EP_ACTIVATION_TANH 2
-#define HIPDNN_EP_ACTIVATION_SOFTPLUS 3
 
 static inline const char *hipdnn_ep_activation_name(int64_t activation_mode) {
   switch (activation_mode) {
@@ -145,8 +144,6 @@ static inline const char *hipdnn_ep_activation_name(int64_t activation_mode) {
     return "relu";
   case HIPDNN_EP_ACTIVATION_TANH:
     return "tanh";
-  case HIPDNN_EP_ACTIVATION_SOFTPLUS:
-    return "softplus";
   default:
     return "unknown";
   }
@@ -925,10 +922,10 @@ int wrap_multi_head_attention(
 //   data_type: HIPDNN_EP_DATATYPE_* constant identifying the element type
 int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
                      void *rhs, void *output, int64_t lhs_n, int64_t lhs_c,
-                     int64_t lhs_h, int64_t lhs_w, int64_t rhs_n,
-                     int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
-                     int64_t out_n, int64_t out_c, int64_t out_h,
-                     int64_t out_w, int64_t data_type, int64_t tensor_op);
+                     int64_t lhs_h, int64_t lhs_w, int64_t rhs_n, int64_t rhs_c,
+                     int64_t rhs_h, int64_t rhs_w, int64_t out_n, int64_t out_c,
+                     int64_t out_h, int64_t out_w, int64_t data_type,
+                     int64_t tensor_op);
 
 // Element-wise subtraction with 4D ONNX broadcast (rank <= 4).
 // Computes output = lhs - rhs; materialises broadcast via hip_expand when
@@ -1093,8 +1090,8 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t src_data_type,
               int64_t dst_data_type);
 
-// Generic MIOpen activation wrapper
-// Applies activation_mode (HIPDNN_EP_ACTIVATION_*) element-wise
+// MIOpen activation wrapper (sigmoid, tanh).
+// Applies activation_mode (HIPDNN_EP_ACTIVATION_SIGMOID or _TANH) element-wise.
 // data_type: HIPDNN_EP_DATATYPE_* constant identifying the element type
 int wrap_miopenActivationForward(RuntimeState *state, int op_state_slot,
                                  void *input, void *output,
@@ -1107,6 +1104,11 @@ int wrap_miopenActivationForward(RuntimeState *state, int op_state_slot,
 // approximate: 0 = exact (erf), 1 = tanh approximation
 int wrap_gelu(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t data_type, int64_t approximate);
+
+// Softplus activation wrapper (uses custom HIP kernel).
+// data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF only)
+int wrap_softplus(RuntimeState *state, void *input, void *output,
+                  int64_t num_elements, int64_t data_type);
 
 // Fused com.microsoft.BiasGelu: Gelu_erf(data + broadcast(bias)).
 // data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16, DOUBLE)

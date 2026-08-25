@@ -2031,23 +2031,13 @@ def Hip_TanhOp : Hip_DpsOp<"tanh", /*traits=*/[],
   }];
 }
 
-def Hip_SoftplusOp : Hip_DpsOp<"softplus", /*traits=*/[OpStateOpInterface],
+def Hip_SoftplusOp : Hip_DpsOp<"softplus", /*traits=*/[],
                                /*outsAccessor=*/"Y",
                                /*autoReify=*/1,
                                /*autoInfer=*/1,
                                /*declareInfer=*/1> {
   let summary = "Softplus activation: y = ln(exp(x) + 1)";
 
-  // OpStateOpInterface: shared ActivationState (see hip.sigmoid).
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot,
-          "hipdnn_ep_op_state_construct_activation", {});
-    }
-  }];
   let description = [{
     Applies the softplus activation function element-wise.
     Implements the standard ONNX Softplus operator.

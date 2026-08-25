@@ -78,7 +78,7 @@ hipdnn_ep_op_state_construct_multi_head_attention(RuntimeState *state,
   return 0;
 }
 
-// Activation (sigmoid/tanh/softplus): real runtime holds a shared_ptr to a
+// Activation (sigmoid/tanh): real runtime holds a shared_ptr to a
 // device-wide MIOpen descriptor table (ActivationState in real/activation.cpp);
 // the mock owns no device/MIOpen resources.
 extern "C" int8_t hipdnn_ep_op_state_construct_activation(RuntimeState *state,

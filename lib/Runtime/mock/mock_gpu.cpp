@@ -784,10 +784,10 @@ int wrap_linear_attention(RuntimeState *state, const void *query,
 
 int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
                      void *rhs, void *output, int64_t lhs_n, int64_t lhs_c,
-                     int64_t lhs_h, int64_t lhs_w, int64_t rhs_n,
-                     int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
-                     int64_t out_n, int64_t out_c, int64_t out_h,
-                     int64_t out_w, int64_t data_type, int64_t tensor_op) {
+                     int64_t lhs_h, int64_t lhs_w, int64_t rhs_n, int64_t rhs_c,
+                     int64_t rhs_h, int64_t rhs_w, int64_t out_n, int64_t out_c,
+                     int64_t out_h, int64_t out_w, int64_t data_type,
+                     int64_t tensor_op) {
   (void)op_state_slot;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_elementwise\n");
@@ -1265,6 +1265,27 @@ int wrap_fast_gelu(RuntimeState *state, void *input, void *bias, void *output,
              (long long)num_elements, (long long)bias_len,
              hipdnn_ep_datatype_name(data_type), (long long)data_type,
              bias ? "yes" : "null");
+
+  return 0;
+}
+
+int wrap_softplus(RuntimeState *state, void *input, void *output,
+                  int64_t num_elements, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_softplus\n");
+    return -1;
+  }
+
+  if (data_type != HIPDNN_EP_DATATYPE_FLOAT &&
+      data_type != HIPDNN_EP_DATATYPE_HALF) {
+    fprintf(stderr, "[MOCK] wrap_softplus: unsupported data_type %s(%lld)\n",
+            hipdnn_ep_datatype_name(data_type), (long long)data_type);
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_softplus(num_elements=%lld, data_type=%s(%lld))\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
 
   return 0;
 }

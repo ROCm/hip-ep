@@ -19,7 +19,7 @@ namespace {
 //   float32, float16, bfloat16
 //
 // Template parameters:
-//   OpType: The HIP op type (e.g., SigmoidOp, SoftplusOp)
+//   OpType: The HIP op type (e.g., SigmoidOp, TanhOp)
 //   activationMode: The HIPDNN_EP_ACTIVATION_* constant
 //
 // Requirements:
@@ -107,17 +107,75 @@ lowerMiopenActivation(OpType op, typename OpType::Adaptor adaptor,
 //===----------------------------------------------------------------------===//
 
 // hip.softplus(ctx, x, y)
-//   -> wrap_miopenActivationForward(state, x, y, num_elements,
-//                                    data_type, activation_mode=SOFTPLUS)
-// Supports both static and dynamic shapes (computes num_elements at runtime).
+//   -> wrap_softplus(state, input, output, num_elements, data_type)
+// Uses custom HIP kernel (hip_softplus).
+// Supports static and dynamic shapes (computes num_elements at runtime).
+// Supports data types: f32, f16 only.
 struct SoftplusOpLowering : public ConvertOpToLLVMPattern<SoftplusOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
   matchAndRewrite(SoftplusOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    return lowerMiopenActivation<SoftplusOp, kActivationSoftplus>(op, adaptor,
-                                                                  rewriter);
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+
+    auto createI64Const = [&](int64_t value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+
+    Value statePtr = adaptor.getCtx();
+    Value inputPtr = extractContiguousMemRefPtr(adaptor.getX(), rewriter, loc);
+    Value outputPtr = extractContiguousMemRefPtr(adaptor.getY(), rewriter, loc);
+
+    auto outputType = cast<MemRefType>(op.getY().getType());
+
+    Value numElements = createI64Const(1);
+    MemRefDescriptor outputDesc(adaptor.getY());
+
+    for (auto dimIdx : llvm::seq<int64_t>(outputType.getRank())) {
+      Value dimSize;
+      if (outputType.isDynamicDim(dimIdx)) {
+        dimSize = outputDesc.size(rewriter, loc, dimIdx);
+      } else {
+        dimSize = createI64Const(outputType.getDimSize(dimIdx));
+      }
+      numElements = LLVM::MulOp::create(rewriter, loc, numElements, dimSize);
+    }
+
+    Type elemType = outputType.getElementType();
+    int64_t dataType = getHipdnnDataType(elemType);
+
+    if (dataType != 0 && dataType != 1) {
+      std::string errorMsg;
+      llvm::raw_string_ostream os(errorMsg);
+      os << "unsupported element type '" << elemType
+         << "' for softplus. Only f32 and f16 are supported";
+      return rewriter.notifyMatchFailure(op, os.str());
+    }
+
+    Value dataTypeVal = createI64Const(dataType);
+
+    // int wrap_softplus(RuntimeState* state, void* input, void* output,
+    //                   int64_t num_elements, int64_t data_type)
+    SmallVector<Type, 5> paramTypes = {ptrType, ptrType, ptrType, i64Type,
+                                       i64Type};
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapSoftplus, paramTypes, i32Type);
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value, 5> args = {statePtr, inputPtr, outputPtr, numElements,
+                                  dataTypeVal};
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
   }
 };
 
