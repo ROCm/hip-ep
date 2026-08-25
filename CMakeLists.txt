@@ -89,7 +89,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
 # always compiled in and HIPDNN_GQA_AUTOTUNE_MODE overrides per process -- this
 # only moves the default, for harnesses that cannot set an environment variable.
 option(HIPDNN_EP_GQA_AUTOTUNE_ONLINE_DEFAULT
-       "Default GQA sessions to online GPU autotuning instead of the offline LUT" OFF)
+       "Default GQA sessions to online GPU autotuning instead of the offline LUT" ON)
 
 option(HIPDNN_EP_LINK_HIP_HOST
        "Link hip::host into the EP DLL (enables HIP host APIs in EP code)" ON)
