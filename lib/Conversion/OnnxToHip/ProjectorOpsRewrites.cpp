@@ -617,8 +617,8 @@ struct PatchEmbedConvToGemm : public mlir::RewritePattern {
     if (Cin == mlir::ShapedType::kDynamic)
       return rewriter.notifyMatchFailure(op, "conv.cin_dynamic");
 
-    int64_t K = Cin;             // contraction extent: C * prod(kernel)
-    int64_t outSpatialProd = 1;  // number of patches per batch element
+    int64_t K = Cin;            // contraction extent: C * prod(kernel)
+    int64_t outSpatialProd = 1; // number of patches per batch element
     llvm::SmallVector<int64_t> outSpatial, kernelSpatial;
     for (int64_t i : llvm::seq<int64_t>(0, nSpatial)) {
       int64_t xs = xType.getDimSize(2 + i);
@@ -631,7 +631,8 @@ struct PatchEmbedConvToGemm : public mlir::RewritePattern {
       if (strides[i] != ws)
         return rewriter.notifyMatchFailure(op, "conv.stride_ne_kernel");
       if (ws < 1 || xs < ws || xs % ws != 0)
-        return rewriter.notifyMatchFailure(op, "conv.input_not_tiled_by_kernel");
+        return rewriter.notifyMatchFailure(op,
+                                           "conv.input_not_tiled_by_kernel");
       if (ys != xs / ws)
         return rewriter.notifyMatchFailure(op, "conv.out_spatial_mismatch");
       kernelSpatial.push_back(ws);
@@ -685,9 +686,8 @@ struct PatchEmbedConvToGemm : public mlir::RewritePattern {
     int64_t N = xType.getDimSize(0);
     // Rows of the GEMM: one per (batch, patch). -1 in the reshape target keeps
     // a dynamic batch dynamic; the static form is N * prod(O).
-    int64_t P = (N == mlir::ShapedType::kDynamic)
-                    ? mlir::ShapedType::kDynamic
-                    : N * outSpatialProd;
+    int64_t P = (N == mlir::ShapedType::kDynamic) ? mlir::ShapedType::kDynamic
+                                                  : N * outSpatialProd;
 
     mlir::Value xFlat;
     if (outSpatialProd == 1) {
@@ -735,8 +735,7 @@ struct PatchEmbedConvToGemm : public mlir::RewritePattern {
     // channel-major then kernel-major, which is exactly the row order the
     // gathered input above produces.
     mlir::Value wFlat = emitReshape(
-        w, {M, K},
-        mlir::RankedTensorType::get({M, K}, wType.getElementType()));
+        w, {M, K}, mlir::RankedTensorType::get({M, K}, wType.getElementType()));
 
     // Build Gemm. Bias is required by the GemmConversion (which calls
     // ConvertOnnxGemm with 3 operands). When absent, synthesize a zero
@@ -802,8 +801,7 @@ struct PatchEmbedConvToGemm : public mlir::RewritePattern {
       nlcShape.push_back(M);
       nlcTarget.push_back(M);
       mlir::Value nlc = emitReshape(
-          gemmOut, nlcTarget,
-          mlir::RankedTensorType::get(nlcShape, elemType));
+          gemmOut, nlcTarget, mlir::RankedTensorType::get(nlcShape, elemType));
 
       llvm::SmallVector<int64_t> outPerm = {0, nSpatial + 1};
       for (int64_t i : llvm::seq<int64_t>(0, nSpatial))

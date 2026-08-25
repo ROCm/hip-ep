@@ -168,8 +168,8 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
     // in[3], out[3], k[3], s[3], pad_begin[3], dil[3], group
     paramTypes.append(19, i64Type);
 
-    FailureOr<LLVM::LLVMFuncOp> funcOp =
-        LLVM::lookupOrCreateFn(rewriter, module, kWrapConv, paramTypes, i32Type);
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapConv, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 

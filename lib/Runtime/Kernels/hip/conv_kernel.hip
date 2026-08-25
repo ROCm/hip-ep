@@ -787,6 +787,17 @@ bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
     launchWmma<128, 256, 4, 4>(stream, x, w, bias, y, pr);
     return true;
   }
+  // A taller row tile, for the shapes with many output channels. What this buys
+  // is not arithmetic but traffic: the im2col matrix is re-read once per tile
+  // row, and it is never materialised, so each re-read is a fresh gather out of
+  // the input. Halving the number of tile rows halves the dominant cost of the
+  // kernel -- on whisper_l1 the gather is 51% of the runtime, moving 236 MB for
+  // 21 MB of unique data at close to what the memory system can deliver, so
+  // there is nothing to win by making it faster, only by doing less of it.
+  if (tileFits(pr, 256, 128, units)) {
+    launchWmma<256, 128, 4, 2>(stream, x, w, bias, y, pr);
+    return true;
+  }
   if (tileFits(pr, 128, 128, units)) {
     launchWmma<128, 128, 4, 2>(stream, x, w, bias, y, pr);
     return true;

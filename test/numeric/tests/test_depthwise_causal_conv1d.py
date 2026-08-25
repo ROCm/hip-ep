@@ -36,7 +36,9 @@ _DTYPES = {
 }
 
 
-def _conv1d_nodes(channels, length, k, pads, stride=1, dtype=TensorProto.FLOAT16, seed=5):
+def _conv1d_nodes(
+    channels, length, k, pads, stride=1, dtype=TensorProto.FLOAT16, seed=5
+):
     """A single rank-3 depthwise Conv with weight+bias initializers."""
     np_dtype = _DTYPES[dtype]
     lout = (length + pads[0] + pads[1] - k) // stride + 1

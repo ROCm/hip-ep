@@ -304,10 +304,10 @@ class TestConvGrouped:
         [
             (16, 16, 16),  # depthwise
             (16, 32, 16),  # depthwise with a channel multiplier
-            (64, 64, 2),   # wide groups: each group still fills a 32-row tile
+            (64, 64, 2),  # wide groups: each group still fills a 32-row tile
             (128, 128, 2),
             (128, 256, 4),
-            (12, 18, 3),   # group divides neither channel count evenly by 2
+            (12, 18, 3),  # group divides neither channel count evenly by 2
         ],
     )
     def test_grouped_2d(self, model_runner, in_c, out_c, group):

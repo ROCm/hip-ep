@@ -113,10 +113,9 @@ int wrap_conv(RuntimeState *state, int32_t op_state_slot, const void *input,
       (long long)spatial_rank, (long long)N, (long long)Cin, (long long)Cout,
       (long long)group, (long long)in0, (long long)in1, (long long)in2,
       (long long)out0, (long long)out1, (long long)out2, (long long)k0,
-      (long long)k1, (long long)k2, (long long)s0, (long long)s1,
-      (long long)s2, (long long)p0, (long long)p1, (long long)p2,
-      (long long)dil0, (long long)dil1, (long long)dil2,
-      bias ? "yes" : "null");
+      (long long)k1, (long long)k2, (long long)s0, (long long)s1, (long long)s2,
+      (long long)p0, (long long)p1, (long long)p2, (long long)dil0,
+      (long long)dil1, (long long)dil2, bias ? "yes" : "null");
 
   int rc = hip_conv(stream, input, weights, bias, output, hip_dtype,
                     static_cast<int>(spatial_rank), N, Cin, Cout, in0, in1, in2,

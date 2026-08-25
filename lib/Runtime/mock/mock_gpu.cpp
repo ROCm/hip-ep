@@ -456,18 +456,18 @@ int wrap_conv(RuntimeState *state, int32_t op_state_slot, const void *input,
   }
   (void)op_state_slot;
 
-  MOCK_PRINT("[MOCK] wrap_conv(dtype=%s(%lld), rank=%lld, N=%lld, Cin=%lld, "
-             "Cout=%lld, group=%lld, in=[%lld,%lld,%lld], out=[%lld,%lld,%lld], "
-             "k=[%lld,%lld,%lld], s=[%lld,%lld,%lld], pbegin=[%lld,%lld,%lld], "
-             "dil=[%lld,%lld,%lld], bias=%s)\n",
-             hipdnn_ep_datatype_name(data_type), (long long)data_type,
-             (long long)spatial_rank, (long long)N, (long long)Cin,
-             (long long)Cout, (long long)group, (long long)in0, (long long)in1,
-             (long long)in2, (long long)out0, (long long)out1, (long long)out2,
-             (long long)k0, (long long)k1, (long long)k2, (long long)s0,
-             (long long)s1, (long long)s2, (long long)p0, (long long)p1,
-             (long long)p2, (long long)dil0, (long long)dil1, (long long)dil2,
-             bias ? "yes" : "null");
+  MOCK_PRINT(
+      "[MOCK] wrap_conv(dtype=%s(%lld), rank=%lld, N=%lld, Cin=%lld, "
+      "Cout=%lld, group=%lld, in=[%lld,%lld,%lld], out=[%lld,%lld,%lld], "
+      "k=[%lld,%lld,%lld], s=[%lld,%lld,%lld], pbegin=[%lld,%lld,%lld], "
+      "dil=[%lld,%lld,%lld], bias=%s)\n",
+      hipdnn_ep_datatype_name(data_type), (long long)data_type,
+      (long long)spatial_rank, (long long)N, (long long)Cin, (long long)Cout,
+      (long long)group, (long long)in0, (long long)in1, (long long)in2,
+      (long long)out0, (long long)out1, (long long)out2, (long long)k0,
+      (long long)k1, (long long)k2, (long long)s0, (long long)s1, (long long)s2,
+      (long long)p0, (long long)p1, (long long)p2, (long long)dil0,
+      (long long)dil1, (long long)dil2, bias ? "yes" : "null");
 
   // Zero the output so a mock run leaves the buffer defined. Use the real
   // element size so fp16 buffers are not overrun.

@@ -217,10 +217,10 @@ mlir::LogicalResult DepthwiseCausalConvToHip::matchAndRewrite(
   const int64_t channels = weightType.getDimSize(0);
   const int64_t kernel = weightType.getDimSize(2);
   if (channels == mlir::ShapedType::kDynamic ||
-      kernel == mlir::ShapedType::kDynamic ||
-      weightType.getDimSize(1) != 1)
+      kernel == mlir::ShapedType::kDynamic || weightType.getDimSize(1) != 1)
     return rewriter.notifyMatchFailure(op, "causal_conv.weight_not_depthwise");
-  if (inputType.getDimSize(1) != channels || resultType.getDimSize(1) != channels)
+  if (inputType.getDimSize(1) != channels ||
+      resultType.getDimSize(1) != channels)
     return rewriter.notifyMatchFailure(op, "causal_conv.channel_mismatch");
 
   // k == 1 is excluded on purpose: the carry state is [B, C, k-1], so k == 1
@@ -233,7 +233,8 @@ mlir::LogicalResult DepthwiseCausalConvToHip::matchAndRewrite(
   if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("group"))
     group = attr.getValue().getSExtValue();
   if (group != channels)
-    return rewriter.notifyMatchFailure(op, "causal_conv.not_grouped_by_channel");
+    return rewriter.notifyMatchFailure(op,
+                                       "causal_conv.not_grouped_by_channel");
 
   llvm::SmallVector<int64_t> kernelShape, strides, pads, dilations;
   if (!readIntArrayAttr(op, "kernel_shape", kernelShape) ||

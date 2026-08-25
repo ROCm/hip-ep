@@ -96,9 +96,9 @@ def _patch_conv_model(
     # the tolerance for reasons that have nothing to do with the rewrite.
     fan_in = (in_channels // group) * int(np.prod(kernel))
     scale = 1.0 / np.sqrt(fan_in)
-    w = (rng.standard_normal((out_channels, in_channels // group, *kernel)) * scale).astype(
-        np_dtype
-    )
+    w = (
+        rng.standard_normal((out_channels, in_channels // group, *kernel)) * scale
+    ).astype(np_dtype)
 
     inputs = ["x", "w"]
     initializers = [numpy_helper.from_array(w, name="w")]
@@ -155,7 +155,9 @@ class TestPatchEmbedSinglePatch:
 
     def test_rank4_single_patch(self, model_runner):
         """Rank-4 with kernel == input spatial, the degenerate 1x1 output grid."""
-        model = _patch_conv_model(in_spatial=[14, 14], kernel=[14, 14], out_channels=192)
+        model = _patch_conv_model(
+            in_spatial=[14, 14], kernel=[14, 14], out_channels=192
+        )
         x = _sample((1, 3, 14, 14), 0x9E6)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=5e-3, rtol=1e-2, cos_threshold=0.9999)
@@ -201,9 +203,7 @@ class TestPatchEmbedMultiPatch:
         kernels and a square grid, swapping the two spatial axes in the
         permutation is invisible.
         """
-        model = _patch_conv_model(
-            in_spatial=[12, 20], kernel=[4, 5], out_channels=48
-        )
+        model = _patch_conv_model(in_spatial=[12, 20], kernel=[4, 5], out_channels=48)
         x = _sample((1, 3, 12, 20), 0x2A5)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=5e-3, rtol=1e-2, cos_threshold=0.9999)
