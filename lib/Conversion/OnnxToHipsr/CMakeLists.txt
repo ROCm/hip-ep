@@ -12,6 +12,7 @@ add_library(OnnxToHipsr STATIC
   ShapeConversion.cpp
   ReshapeConversion.cpp
   UnsqueezeConversion.cpp
+  EqualConversion.cpp
   ReturnConversion.cpp
 )
 
