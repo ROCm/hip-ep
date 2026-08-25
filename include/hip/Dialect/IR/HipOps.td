@@ -1474,9 +1474,9 @@ def Hip_MulOp : Hip_DpsOp_Broadcast<"mul", /*operandGetters=*/["Lhs", "Rhs"],
                                     /*traits=*/[OpStateOpInterface]> {
   let summary = "Elementwise multiplication";
 
-  // OpStateOpInterface: hip.mul/add/min/max all lower to wrap_miopenOpTensor,
-  // which owns the shared MIOpen OpTensor descriptor table (OpTensorState);
-  // each instance's slot holds a shared_ptr to the device-wide table.
+  // OpStateOpInterface: hip.mul/add/min/max all lower to wrap_elementwise.
+  // The op-state slot itself is unused (OpTensorState is an empty struct);
+  // it exists only because every OpStateOpInterface op must construct one.
   let extraClassDeclaration = [{
     ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
                                       ::mlir::Location loc,
@@ -1569,8 +1569,8 @@ def Hip_MinOp : Hip_DpsOp_Broadcast<"min", /*operandGetters=*/["Lhs", "Rhs"],
   let description = [{
     Performs elementwise minimum: output = min(lhs, rhs)
 
-    Supports multidirectional (NumPy-style) broadcasting via MIOpen's
-    miopenOpTensor with miopenTensorOpMin.
+    Supports multidirectional (NumPy-style) broadcasting via the runtime's
+    wrap_elementwise dispatch.
 
     Uses destination-passing style: output buffer is provided as argument.
 
@@ -1612,8 +1612,8 @@ def Hip_MaxOp : Hip_DpsOp<"max", /*traits=*/[OpStateOpInterface]> {
   let description = [{
     Performs elementwise maximum: output = max(lhs, rhs)
 
-    Supports multidirectional (NumPy-style) broadcasting via MIOpen's
-    miopenOpTensor with miopenTensorOpMax.
+    Supports multidirectional (NumPy-style) broadcasting via the runtime's
+    wrap_elementwise dispatch.
 
     Uses destination-passing style: output buffer is provided as argument.
 

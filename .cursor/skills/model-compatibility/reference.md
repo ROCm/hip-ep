@@ -106,7 +106,7 @@ Machine-readable form: [scripts/unsupported_reco_rules.json](scripts/unsupported
 | 1 | Matrix multiplication (`matmul`, `gemm`, batched dense linear) | `hipBLASLt` — extend `wrap_hipblasLtMatmul` | `Custom Hip Kernel` |
 | 2 | Convolution (`conv`, depthwise / pointwise variants) | `MIOpen` — extend convolution wrapper | `Custom Hip Kernel` |
 | 3 | Activation (`relu`, `sigmoid`, `tanh`, `softplus`, similar unary) | `MIOpen` activation wrapper extension | `Custom Hip Kernel` |
-| 4 | Elementwise arith / cmp / logical | `MIOpen` op-tensor path when representable by `wrap_miopenOpTensor` | `Custom Hip Kernel` |
+| 4 | Elementwise arith / cmp / logical | `MIOpen` op-tensor path when representable by `wrap_elementwise` | `Custom Hip Kernel` |
 | 5 | Reduction (`reduce_*`, cumulative reductions) | extend existing reduction runtime path (`wrap_reduce_sum` family) | `Custom Hip Kernel` |
 | 6 | Indexing / data movement (`gather / scatter / slice / split / tile / pad / concat / expand`) | reuse / extend existing custom data-movement kernels | `Custom Hip Kernel` |
 | 7 | Control flow / stateful (`loop / if / scan`) | graph-level lowering / runtime orchestration | `Custom Hip Kernel` (unless compile-time eliminable) |
@@ -114,7 +114,7 @@ Machine-readable form: [scripts/unsupported_reco_rules.json](scripts/unsupported
 
 ### Known runtime capabilities (capability inventory examples)
 
-- `wrap_miopenOpTensor` — elementwise add / mul / min / max
+- `wrap_elementwise` — elementwise add / mul / min / max
 - `wrap_miopenActivationForward` — activation-family elementwise ops
 - `miopenActivationPOWER` — can express `Reciprocal` / `Sqrt` by parameterization
 - `wrap_miopenConvolutionForward` — convolution family

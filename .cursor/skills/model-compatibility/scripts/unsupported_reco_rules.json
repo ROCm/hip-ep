@@ -74,7 +74,7 @@
     {
       "op_name": "Div",
       "recommended_path": "MIOpen",
-      "wrapper_extension_target": "compose POWER reciprocal + wrap_miopenOpTensor(mul)",
+      "wrapper_extension_target": "compose POWER reciprocal + wrap_elementwise(mul)",
       "rationale": "No direct OpTensor div, but composable via reciprocal then multiplication."
     }
   ],
@@ -135,7 +135,7 @@
         "div"
       ],
       "preferred_path": "MIOpen",
-      "wrapper_extension_target": "wrap_miopenOpTensor (or composed path for div)",
+      "wrapper_extension_target": "wrap_elementwise (or composed path for div)",
       "fallback_path": "Custom Hip Kernel"
     },
     {

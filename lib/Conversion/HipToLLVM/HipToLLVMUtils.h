@@ -80,8 +80,8 @@ inline constexpr const char *kWrapLeakyRelu =
     "wrap_leaky_relu"; // hip.leaky_relu
 inline constexpr const char *kWrapElementwiseSub = "wrap_elementwise_sub";
 inline constexpr const char *kWrapRotaryEmbedding = "wrap_rotary_embedding";
-inline constexpr const char *kWrapMiopenOpTensor =
-    "wrap_miopenOpTensor"; // hip.mul, hip.add (with 4D shape for broadcasting)
+inline constexpr const char *kWrapElementwise =
+    "wrap_elementwise"; // hip.mul/add/min/max (with 4D shape for broadcasting)
 inline constexpr const char *kWrapCast = "wrap_cast";
 inline constexpr const char *kWrapPower = "wrap_power";
 inline constexpr const char *kWrapRange = "wrap_range";

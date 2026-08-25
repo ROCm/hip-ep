@@ -915,18 +915,20 @@ int wrap_multi_head_attention(
     int64_t query_hidden, int64_t v_hidden, int64_t head_size,
     int64_t query_rank, int64_t element_size_bytes);
 
-// Generic MIOpen tensor operation wrapper with per-operand 4D shapes.
-// Computes output = op(lhs, rhs) element-wise via miopenOpTensor.
-// Each operand is described by 4D shape (N, C, H, W) to enable MIOpen-native
-// broadcasting: dims of 1 are broadcast against the corresponding larger dim.
+// Generic element-wise tensor operation wrapper with per-operand 4D shapes.
+// Computes output = op(lhs, rhs) element-wise via the custom HIP kernels
+// (flat int kernels + hip_expand for int16/int32/int64, the native
+// broadcasting kernel for float16/float32; see elementwise.cpp).
+// Each operand is described by 4D shape (N, C, H, W): dims of 1 are
+// broadcast against the corresponding larger dim.
 //   tensor_op: HIPDNN_EP_TENSOR_OP_* constant (mul, add, min, max)
 //   data_type: HIPDNN_EP_DATATYPE_* constant identifying the element type
-int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
-                        void *rhs, void *output, int64_t lhs_n, int64_t lhs_c,
-                        int64_t lhs_h, int64_t lhs_w, int64_t rhs_n,
-                        int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
-                        int64_t out_n, int64_t out_c, int64_t out_h,
-                        int64_t out_w, int64_t data_type, int64_t tensor_op);
+int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
+                     void *rhs, void *output, int64_t lhs_n, int64_t lhs_c,
+                     int64_t lhs_h, int64_t lhs_w, int64_t rhs_n,
+                     int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
+                     int64_t out_n, int64_t out_c, int64_t out_h,
+                     int64_t out_w, int64_t data_type, int64_t tensor_op);
 
 // Element-wise subtraction with 4D ONNX broadcast (rank <= 4).
 // Computes output = lhs - rhs; materialises broadcast via hip_expand when

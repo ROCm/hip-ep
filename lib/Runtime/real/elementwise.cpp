@@ -76,7 +76,7 @@ extern "C" int8_t hipdnn_ep_op_state_construct_optensor(RuntimeState *state,
 // Currently supported tensor_ops: MUL, ADD, MIN, MAX
 //===----------------------------------------------------------------------===//
 
-int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
+int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
                         void *rhs, void *output, int64_t lhs_n, int64_t lhs_c,
                         int64_t lhs_h, int64_t lhs_w, int64_t rhs_n,
                         int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
@@ -93,7 +93,7 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
       state);
   if (!state || !lhs || !rhs || !output) {
     fprintf(stderr,
-            "wrap_miopenOpTensor: null argument (state=%p lhs=%p rhs=%p "
+            "wrap_elementwise: null argument (state=%p lhs=%p rhs=%p "
             "output=%p op=%lld dtype=%lld)\n",
             (void *)state, lhs, rhs, output, (long long)tensor_op,
             (long long)data_type);
@@ -194,7 +194,7 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
       return -1;
     return 0;
   }
-  RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: op=%s, "
+  RUNTIME_DEBUG_LOG("[REAL] wrap_elementwise: op=%s, "
                     "lhs=[%lld,%lld,%lld,%lld], "
                     "rhs=[%lld,%lld,%lld,%lld], "
                     "out=[%lld,%lld,%lld,%lld], "
@@ -213,7 +213,7 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
         tensor_op != HIPDNN_EP_TENSOR_OP_MIN &&
         tensor_op != HIPDNN_EP_TENSOR_OP_MAX) {
       fprintf(stderr,
-              "wrap_miopenOpTensor: integer fallback only supports "
+              "wrap_elementwise: integer fallback only supports "
               "MUL/ADD/MIN/MAX (got tensor_op=%lld, data_type=%lld)\n",
               (long long)tensor_op, (long long)data_type);
       return -1;
@@ -222,7 +222,7 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
     int hip_dtype = hipdnn_to_hip_dtype(data_type);
     if (hip_dtype < 0) {
       fprintf(stderr,
-              "wrap_miopenOpTensor: integer fallback unsupported dtype %lld\n",
+              "wrap_elementwise: integer fallback unsupported dtype %lld\n",
               (long long)data_type);
       return -1;
     }
@@ -250,7 +250,7 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
                                          (!rhs_eq_out_ints ? 1 : 0));
       if (hipdnn_ep_state_ensure_workspace(state, needed) != 0) {
         fprintf(stderr,
-                "wrap_miopenOpTensor: integer fallback workspace ensure failed "
+                "wrap_elementwise: integer fallback workspace ensure failed "
                 "(%zu bytes)\n",
                 needed);
         return -1;
@@ -265,7 +265,7 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
                             hip_dtype);
         if (rc != 0) {
           fprintf(stderr,
-                  "wrap_miopenOpTensor: integer fallback hip_expand(lhs) "
+                  "wrap_elementwise: integer fallback hip_expand(lhs) "
                   "failed (%d)\n",
                   rc);
           return -1;
@@ -278,7 +278,7 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
                             hip_dtype);
         if (rc != 0) {
           fprintf(stderr,
-                  "wrap_miopenOpTensor: integer fallback hip_expand(rhs) "
+                  "wrap_elementwise: integer fallback hip_expand(rhs) "
                   "failed (%d)\n",
                   rc);
           return -1;
@@ -339,7 +339,7 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
       return rc;
   }
 
-  fprintf(stderr, "wrap_miopenOpTensor: not support datatype: %s, op: %s\n",
+  fprintf(stderr, "wrap_elementwise: not support datatype: %s, op: %s\n",
           type_name, op_name);
   return -1;
 }

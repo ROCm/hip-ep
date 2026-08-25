@@ -782,19 +782,19 @@ int wrap_linear_attention(RuntimeState *state, const void *query,
   return 0;
 }
 
-int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
-                        void *rhs, void *output, int64_t lhs_n, int64_t lhs_c,
-                        int64_t lhs_h, int64_t lhs_w, int64_t rhs_n,
-                        int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
-                        int64_t out_n, int64_t out_c, int64_t out_h,
-                        int64_t out_w, int64_t data_type, int64_t tensor_op) {
+int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
+                     void *rhs, void *output, int64_t lhs_n, int64_t lhs_c,
+                     int64_t lhs_h, int64_t lhs_w, int64_t rhs_n,
+                     int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
+                     int64_t out_n, int64_t out_c, int64_t out_h,
+                     int64_t out_w, int64_t data_type, int64_t tensor_op) {
   (void)op_state_slot;
   if (!state) {
-    fprintf(stderr, "Invalid state in wrap_miopenOpTensor\n");
+    fprintf(stderr, "Invalid state in wrap_elementwise\n");
     return -1;
   }
 
-  MOCK_PRINT("[MOCK] wrap_miopenOpTensor(op=%s, "
+  MOCK_PRINT("[MOCK] wrap_elementwise(op=%s, "
              "lhs=[%lld,%lld,%lld,%lld], "
              "rhs=[%lld,%lld,%lld,%lld], "
              "out=[%lld,%lld,%lld,%lld], "
