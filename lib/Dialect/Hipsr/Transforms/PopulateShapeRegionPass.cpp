@@ -39,6 +39,8 @@ LogicalResult populateAddShapeRegion(OpBuilder &builder, Block &block,
                                      AddOp op);
 LogicalResult populateMulShapeRegion(OpBuilder &builder, Block &block,
                                      MulOp op);
+LogicalResult populateEqualShapeRegion(OpBuilder &builder, Block &block,
+                                       EqualOp op);
 LogicalResult populateCastShapeRegion(OpBuilder &builder, Block &block,
                                       CastOp op);
 LogicalResult populateExpandShapeRegion(OpBuilder &builder, Block &block,
@@ -64,6 +66,8 @@ LogicalResult populatePlaceholderShapeRegion(OpBuilder &builder,
     return populateAddShapeRegion(builder, block, addOp);
   } else if (auto mulOp = dyn_cast<MulOp>(consumer)) {
     return populateMulShapeRegion(builder, block, mulOp);
+  } else if (auto equalOp = dyn_cast<EqualOp>(consumer)) {
+    return populateEqualShapeRegion(builder, block, equalOp);
   } else if (auto castOp = dyn_cast<CastOp>(consumer)) {
     return populateCastShapeRegion(builder, block, castOp);
   } else if (auto expandOp = dyn_cast<ExpandOp>(consumer)) {

@@ -655,5 +655,6 @@ void mlir::hipsr::registerBufferizableOpInterfaceExternalModels(
     PoolDomainYieldOp::attachInterface<PoolDomainYieldOpBufferization>(*ctx);
     CastOp::attachInterface<DpsBufferizableModel<CastOp>>(*ctx);
     MulOp::attachInterface<DpsBufferizableModel<MulOp>>(*ctx);
+    EqualOp::attachInterface<DpsBufferizableModel<EqualOp>>(*ctx);
   });
 }
