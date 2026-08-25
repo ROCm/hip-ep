@@ -14,107 +14,122 @@
 // CHECK-SAME:      -> (tensor<?x2xf32, #hipsr.mem<device>> {onnx.name = "y"})
 // CHECK-SAME:      attributes {onnx.graph.name = "main_graph"} {
 
-// CHECK-NEXT:    %[[W1:.+]] = hipsr.constant {value = dense<{{.*}}> : tensor<3x1xf16>} : tensor<3x1xf16, #hipsr.mem<device>>
-// CHECK-NEXT:    %[[MM1_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[A]], %[[W1]] : tensor<?x3xf16, #hipsr.mem<device>>, tensor<3x1xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x1xf16, #hipsr.mem<device>> shape_region {
-// CHECK-NEXT:    ^bb0(%[[A_SHAPE:.+]]: !shape.shape, %[[W1_SHAPE:.+]]: !shape.shape):
-// CHECK-NEXT:      %[[A_K_IDX:.+]] = shape.const_size 1
-// CHECK-NEXT:      %[[A_K:.+]] = shape.get_extent %[[A_SHAPE]], %[[A_K_IDX]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:      %[[A_K_SHAPE:.+]] = shape.from_extents %[[A_K]] : !shape.size
-// CHECK-NEXT:      %[[W1_K_IDX:.+]] = shape.const_size 0
-// CHECK-NEXT:      %[[W1_K:.+]] = shape.get_extent %[[W1_SHAPE]], %[[W1_K_IDX]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:      %[[W1_K_SHAPE:.+]] = shape.from_extents %[[W1_K]] : !shape.size
-// CHECK-NEXT:      %[[K_WITNESS:.+]] = shape.cstr_eq %[[A_K_SHAPE]], %[[W1_K_SHAPE]] : !shape.shape, !shape.shape
-// CHECK-NEXT:      %[[A_SPLIT_IDX:.+]] = shape.const_size 0
-// CHECK-NEXT:      %[[A_BATCH:.+]], %[[A_TAIL:.+]] = "shape.split_at"(%[[A_SHAPE]], %[[A_SPLIT_IDX]]) : (!shape.shape, !shape.size) -> (!shape.shape, !shape.shape)
-// CHECK-NEXT:      %[[W1_SPLIT_IDX:.+]] = shape.const_size 0
-// CHECK-NEXT:      %[[W1_BATCH:.+]], %[[W1_TAIL:.+]] = "shape.split_at"(%[[W1_SHAPE]], %[[W1_SPLIT_IDX]]) : (!shape.shape, !shape.size) -> (!shape.shape, !shape.shape)
-// CHECK-NEXT:      %[[BATCH_WITNESS:.+]] = shape.cstr_broadcastable %[[A_BATCH]], %[[W1_BATCH]] : !shape.shape, !shape.shape
-// CHECK-NEXT:      %[[WITNESS:.+]] = shape.assuming_all %[[K_WITNESS]], %[[BATCH_WITNESS]]
-// CHECK-NEXT:      %[[MM1_SHAPE_VAL:.+]] = shape.assuming %[[WITNESS]] -> (!shape.shape) {
-// CHECK-NEXT:        %[[BATCH:.+]] = shape.broadcast %[[A_BATCH]], %[[W1_BATCH]] : !shape.shape, !shape.shape -> !shape.shape
-// CHECK-NEXT:        %[[M_IDX:.+]] = shape.const_size 0
-// CHECK-NEXT:        %[[M:.+]] = shape.get_extent %[[A_SHAPE]], %[[M_IDX]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:        %[[N_IDX:.+]] = shape.const_size 1
-// CHECK-NEXT:        %[[N:.+]] = shape.get_extent %[[W1_SHAPE]], %[[N_IDX]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:        %[[MATRIX:.+]] = shape.from_extents %[[M]], %[[N]] : !shape.size, !shape.size
-// CHECK-NEXT:        %[[RESULT:.+]] = shape.concat %[[BATCH]], %[[MATRIX]] : !shape.shape, !shape.shape -> !shape.shape
-// CHECK-NEXT:        shape.assuming_yield %[[RESULT]] : !shape.shape
+// The domains split exactly where they do in sample_static.mlir: the barrier
+// placeholder's position does not depend on whether the extents are known.
+// CHECK-NEXT:    %[[D0:.+]]:5 = hipsr.pool_domain(%[[CTX]], %[[A]], %[[B]] : !hipsr.context, tensor<?x3xf16, #hipsr.mem<device>>, tensor<?x4xf32, #hipsr.mem<device>>) {
+// CHECK-NEXT:    ^bb0(%[[D0_CTX:.+]]: !hipsr.context, %[[D0_A:.+]]: tensor<?x3xf16, #hipsr.mem<device>>, %[[D0_B:.+]]: tensor<?x4xf32, #hipsr.mem<device>>):
+
+// CHECK-NEXT:      %[[W1:.+]] = hipsr.constant {value = dense<{{.*}}> : tensor<3x1xf16>} : tensor<3x1xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      %[[MM1_INIT:.+]] = hipsr.placeholder(%[[D0_CTX]]) ins(%[[D0_A]], %[[W1]] : tensor<?x3xf16, #hipsr.mem<device>>, tensor<3x1xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x1xf16, #hipsr.mem<device>> shape_region {
+// CHECK-NEXT:      ^bb0(%[[A_SHAPE:.+]]: !shape.shape, %[[W1_SHAPE:.+]]: !shape.shape):
+// CHECK-NEXT:        %[[A_K_IDX:.+]] = shape.const_size 1
+// CHECK-NEXT:        %[[A_K:.+]] = shape.get_extent %[[A_SHAPE]], %[[A_K_IDX]] : !shape.shape, !shape.size -> !shape.size
+// CHECK-NEXT:        %[[A_K_SHAPE:.+]] = shape.from_extents %[[A_K]] : !shape.size
+// CHECK-NEXT:        %[[W1_K_IDX:.+]] = shape.const_size 0
+// CHECK-NEXT:        %[[W1_K:.+]] = shape.get_extent %[[W1_SHAPE]], %[[W1_K_IDX]] : !shape.shape, !shape.size -> !shape.size
+// CHECK-NEXT:        %[[W1_K_SHAPE:.+]] = shape.from_extents %[[W1_K]] : !shape.size
+// CHECK-NEXT:        %[[K_WITNESS:.+]] = shape.cstr_eq %[[A_K_SHAPE]], %[[W1_K_SHAPE]] : !shape.shape, !shape.shape
+// CHECK-NEXT:        %[[A_SPLIT_IDX:.+]] = shape.const_size 0
+// CHECK-NEXT:        %[[A_BATCH:.+]], %[[A_TAIL:.+]] = "shape.split_at"(%[[A_SHAPE]], %[[A_SPLIT_IDX]]) : (!shape.shape, !shape.size) -> (!shape.shape, !shape.shape)
+// CHECK-NEXT:        %[[W1_SPLIT_IDX:.+]] = shape.const_size 0
+// CHECK-NEXT:        %[[W1_BATCH:.+]], %[[W1_TAIL:.+]] = "shape.split_at"(%[[W1_SHAPE]], %[[W1_SPLIT_IDX]]) : (!shape.shape, !shape.size) -> (!shape.shape, !shape.shape)
+// CHECK-NEXT:        %[[BATCH_WITNESS:.+]] = shape.cstr_broadcastable %[[A_BATCH]], %[[W1_BATCH]] : !shape.shape, !shape.shape
+// CHECK-NEXT:        %[[WITNESS:.+]] = shape.assuming_all %[[K_WITNESS]], %[[BATCH_WITNESS]]
+// CHECK-NEXT:        %[[MM1_SHAPE_VAL:.+]] = shape.assuming %[[WITNESS]] -> (!shape.shape) {
+// CHECK-NEXT:          %[[BATCH:.+]] = shape.broadcast %[[A_BATCH]], %[[W1_BATCH]] : !shape.shape, !shape.shape -> !shape.shape
+// CHECK-NEXT:          %[[M_IDX:.+]] = shape.const_size 0
+// CHECK-NEXT:          %[[M:.+]] = shape.get_extent %[[A_SHAPE]], %[[M_IDX]] : !shape.shape, !shape.size -> !shape.size
+// CHECK-NEXT:          %[[N_IDX:.+]] = shape.const_size 1
+// CHECK-NEXT:          %[[N:.+]] = shape.get_extent %[[W1_SHAPE]], %[[N_IDX]] : !shape.shape, !shape.size -> !shape.size
+// CHECK-NEXT:          %[[MATRIX:.+]] = shape.from_extents %[[M]], %[[N]] : !shape.size, !shape.size
+// CHECK-NEXT:          %[[RESULT:.+]] = shape.concat %[[BATCH]], %[[MATRIX]] : !shape.shape, !shape.shape -> !shape.shape
+// CHECK-NEXT:          shape.assuming_yield %[[RESULT]] : !shape.shape
+// CHECK-NEXT:        }
+// CHECK-NEXT:        hipsr.shape_yield %[[MM1_SHAPE_VAL]] : !shape.shape
 // CHECK-NEXT:      }
-// CHECK-NEXT:      hipsr.shape_yield %[[MM1_SHAPE_VAL]] : !shape.shape
-// CHECK-NEXT:    }
-// CHECK-NEXT:    %[[MM1:.+]] = hipsr.matmul(%[[CTX]]) ins(%[[A]], %[[W1]] : tensor<?x3xf16, #hipsr.mem<device>>, tensor<3x1xf16, #hipsr.mem<device>>) outs(%[[MM1_INIT]] : tensor<?x1xf16, #hipsr.mem<device>>) : tensor<?x1xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      %[[MM1:.+]] = hipsr.matmul(%[[D0_CTX]]) ins(%[[D0_A]], %[[W1]] : tensor<?x3xf16, #hipsr.mem<device>>, tensor<3x1xf16, #hipsr.mem<device>>) outs(%[[MM1_INIT]] : tensor<?x1xf16, #hipsr.mem<device>>) : tensor<?x1xf16, #hipsr.mem<device>>
 
-// CHECK-NEXT:    %[[CAST_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[MM1_INIT]] : tensor<?x1xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x1xf32, #hipsr.mem<device>> shape_region {
-// CHECK-NEXT:    ^bb0(%[[MM1_SHAPE:.+]]: !shape.shape):
-// CHECK-NEXT:      hipsr.shape_yield %[[MM1_SHAPE]] : !shape.shape
-// CHECK-NEXT:    }
-// CHECK-NEXT:    %[[CAST:.+]] = hipsr.cast(%[[CTX]]) ins(%[[MM1]] : tensor<?x1xf16, #hipsr.mem<device>>) outs(%[[CAST_INIT]] : tensor<?x1xf32, #hipsr.mem<device>>) : tensor<?x1xf32, #hipsr.mem<device>>
-
-// CHECK-NEXT:    %[[SHAPE_INIT:.+]] = hipsr.placeholder(%[[CTX]]) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<2xi64, #hipsr.mem<host>> shape_region {
-// CHECK-NEXT:      %[[RANK:.+]] = arith.constant 2 : index
-// CHECK-NEXT:      %[[RANK_SHAPE:.+]] = shape.from_extents %[[RANK]] : index
-// CHECK-NEXT:      hipsr.shape_yield %[[RANK_SHAPE]] : !shape.shape
-// CHECK-NEXT:    }
-// CHECK-NEXT:    %[[SHAPE:.+]] = hipsr.compute(%[[CTX]]) ins(%[[B]] : tensor<?x4xf32, #hipsr.mem<device>>) outs(%[[SHAPE_INIT]] : tensor<2xi64, #hipsr.mem<host>>) {
-// CHECK-NEXT:    ^bb0(%{{.+}}: !hipsr.context, %[[BODY_B:.+]]: tensor<?x4xf32, #hipsr.mem<device>>, %{{.+}}: tensor<2xi64, #hipsr.mem<host>>):
-// CHECK-NEXT:      %[[DIM_IDX:.+]] = arith.constant 0 : index
-// CHECK-NEXT:      %[[DIM:.+]] = tensor.dim %[[BODY_B]], %[[DIM_IDX]] : tensor<?x4xf32, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[D0:.+]] = arith.index_cast %[[DIM]] : index to i64
-// CHECK-NEXT:      %[[D1:.+]] = arith.constant 4 : i64
-// CHECK-NEXT:      %[[EXTENTS:.+]] = tensor.from_elements %[[D0]], %[[D1]] : tensor<2xi64, #hipsr.mem<host>>
-// CHECK-NEXT:      hipsr.compute_yield %[[EXTENTS]] : tensor<2xi64, #hipsr.mem<host>>
-// CHECK-NEXT:    } : tensor<2xi64, #hipsr.mem<host>>
-
-// CHECK-NEXT:    %[[EXPAND_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[CAST_INIT]], %[[SHAPE_INIT]] : tensor<?x1xf32, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<?x4xf32, #hipsr.mem<device>> shape_region {
-// CHECK-NEXT:    ^bb0(%{{.+}}: !hipsr.context, %[[IN:.+]]: tensor<?x1xf32, #hipsr.mem<device>>, %[[EXT:.+]]: tensor<2xi64, #hipsr.mem<host>>):
-// CHECK-NEXT:      %[[IN_SHAPE:.+]] = shape.shape_of %[[IN]] : tensor<?x1xf32, #hipsr.mem<device>> -> tensor<2xindex>
-// CHECK-NEXT:      %[[I0:.+]] = arith.constant 0 : index
-// CHECK-NEXT:      %[[E0:.+]] = tensor.extract %[[EXT]][%[[I0]]] : tensor<2xi64, #hipsr.mem<host>>
-// CHECK-NEXT:      %[[X0:.+]] = arith.index_cast %[[E0]] : i64 to index
-// CHECK-NEXT:      %[[I1:.+]] = arith.constant 1 : index
-// CHECK-NEXT:      %[[E1:.+]] = tensor.extract %[[EXT]][%[[I1]]] : tensor<2xi64, #hipsr.mem<host>>
-// CHECK-NEXT:      %[[X1:.+]] = arith.index_cast %[[E1]] : i64 to index
-// CHECK-NEXT:      %[[REQ:.+]] = shape.from_extents %[[X0]], %[[X1]] : index, index
-// CHECK-NEXT:      %[[EXPAND_WITNESS:.+]] = shape.cstr_broadcastable %[[IN_SHAPE]], %[[REQ]] : tensor<2xindex>, !shape.shape
-// CHECK-NEXT:      %[[EXPAND_SHAPE:.+]] = shape.assuming %[[EXPAND_WITNESS]] -> (!shape.shape) {
-// CHECK-NEXT:        %[[BROADCAST:.+]] = shape.broadcast %[[IN_SHAPE]], %[[REQ]] : tensor<2xindex>, !shape.shape -> !shape.shape
-// CHECK-NEXT:        shape.assuming_yield %[[BROADCAST]] : !shape.shape
+// CHECK-NEXT:      %[[CAST_INIT:.+]] = hipsr.placeholder(%[[D0_CTX]]) ins(%[[MM1_INIT]] : tensor<?x1xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x1xf32, #hipsr.mem<device>> shape_region {
+// CHECK-NEXT:      ^bb0(%[[MM1_SHAPE:.+]]: !shape.shape):
+// CHECK-NEXT:        hipsr.shape_yield %[[MM1_SHAPE]] : !shape.shape
 // CHECK-NEXT:      }
-// CHECK-NEXT:      hipsr.shape_yield %[[EXPAND_SHAPE]] : !shape.shape
-// CHECK-NEXT:    }
-// CHECK-NEXT:    %[[EXPAND:.+]] = hipsr.expand(%[[CTX]]) ins(%[[CAST]], %[[SHAPE]] : tensor<?x1xf32, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>) outs(%[[EXPAND_INIT]] : tensor<?x4xf32, #hipsr.mem<device>>) : tensor<?x4xf32, #hipsr.mem<device>>
+// CHECK-NEXT:      %[[CAST:.+]] = hipsr.cast(%[[D0_CTX]]) ins(%[[MM1]] : tensor<?x1xf16, #hipsr.mem<device>>) outs(%[[CAST_INIT]] : tensor<?x1xf32, #hipsr.mem<device>>) : tensor<?x1xf32, #hipsr.mem<device>>
 
-// CHECK-NEXT:    %[[W2:.+]] = hipsr.constant {value = dense<{{.*}}> : tensor<4x2xf32>} : tensor<4x2xf32, #hipsr.mem<device>>
-// CHECK-NEXT:    %[[MM2_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[EXPAND_INIT]], %[[W2]] : tensor<?x4xf32, #hipsr.mem<device>>, tensor<4x2xf32, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x2xf32, #hipsr.mem<device>> shape_region {
-// CHECK-NEXT:    ^bb0(%[[E_SHAPE:.+]]: !shape.shape, %[[W2_SHAPE:.+]]: !shape.shape):
-// CHECK-NEXT:      %[[E_K_IDX:.+]] = shape.const_size 1
-// CHECK-NEXT:      %[[E_K:.+]] = shape.get_extent %[[E_SHAPE]], %[[E_K_IDX]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:      %[[E_K_SHAPE:.+]] = shape.from_extents %[[E_K]] : !shape.size
-// CHECK-NEXT:      %[[W2_K_IDX:.+]] = shape.const_size 0
-// CHECK-NEXT:      %[[W2_K:.+]] = shape.get_extent %[[W2_SHAPE]], %[[W2_K_IDX]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:      %[[W2_K_SHAPE:.+]] = shape.from_extents %[[W2_K]] : !shape.size
-// CHECK-NEXT:      %[[K2_WITNESS:.+]] = shape.cstr_eq %[[E_K_SHAPE]], %[[W2_K_SHAPE]] : !shape.shape, !shape.shape
-// CHECK-NEXT:      %[[E_SPLIT_IDX:.+]] = shape.const_size 0
-// CHECK-NEXT:      %[[E_BATCH:.+]], %[[E_TAIL:.+]] = "shape.split_at"(%[[E_SHAPE]], %[[E_SPLIT_IDX]]) : (!shape.shape, !shape.size) -> (!shape.shape, !shape.shape)
-// CHECK-NEXT:      %[[W2_SPLIT_IDX:.+]] = shape.const_size 0
-// CHECK-NEXT:      %[[W2_BATCH:.+]], %[[W2_TAIL:.+]] = "shape.split_at"(%[[W2_SHAPE]], %[[W2_SPLIT_IDX]]) : (!shape.shape, !shape.size) -> (!shape.shape, !shape.shape)
-// CHECK-NEXT:      %[[BATCH2_WITNESS:.+]] = shape.cstr_broadcastable %[[E_BATCH]], %[[W2_BATCH]] : !shape.shape, !shape.shape
-// CHECK-NEXT:      %[[WITNESS2:.+]] = shape.assuming_all %[[K2_WITNESS]], %[[BATCH2_WITNESS]]
-// CHECK-NEXT:      %[[MM2_SHAPE_VAL:.+]] = shape.assuming %[[WITNESS2]] -> (!shape.shape) {
-// CHECK-NEXT:        %[[BATCH2:.+]] = shape.broadcast %[[E_BATCH]], %[[W2_BATCH]] : !shape.shape, !shape.shape -> !shape.shape
-// CHECK-NEXT:        %[[M2_IDX:.+]] = shape.const_size 0
-// CHECK-NEXT:        %[[M2:.+]] = shape.get_extent %[[E_SHAPE]], %[[M2_IDX]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:        %[[N2_IDX:.+]] = shape.const_size 1
-// CHECK-NEXT:        %[[N2:.+]] = shape.get_extent %[[W2_SHAPE]], %[[N2_IDX]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:        %[[MATRIX2:.+]] = shape.from_extents %[[M2]], %[[N2]] : !shape.size, !shape.size
-// CHECK-NEXT:        %[[RESULT2:.+]] = shape.concat %[[BATCH2]], %[[MATRIX2]] : !shape.shape, !shape.shape -> !shape.shape
-// CHECK-NEXT:        shape.assuming_yield %[[RESULT2]] : !shape.shape
+// The extent vector's length is still a constant -- the operand's rank fixes it.
+// The dynamic extent appears one level down, as a tensor.dim in the body.
+// CHECK-NEXT:      %[[SHAPE_INIT:.+]] = hipsr.placeholder(%[[D0_CTX]]) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<2xi64, #hipsr.mem<host>> shape_region {
+// CHECK-NEXT:        %[[RANK:.+]] = arith.constant 2 : index
+// CHECK-NEXT:        %[[RANK_SHAPE:.+]] = shape.from_extents %[[RANK]] : index
+// CHECK-NEXT:        hipsr.shape_yield %[[RANK_SHAPE]] : !shape.shape
 // CHECK-NEXT:      }
-// CHECK-NEXT:      hipsr.shape_yield %[[MM2_SHAPE_VAL]] : !shape.shape
-// CHECK-NEXT:    }
-// CHECK-NEXT:    %[[Y:.+]] = hipsr.matmul(%[[CTX]]) ins(%[[EXPAND]], %[[W2]] : tensor<?x4xf32, #hipsr.mem<device>>, tensor<4x2xf32, #hipsr.mem<device>>) outs(%[[MM2_INIT]] : tensor<?x2xf32, #hipsr.mem<device>>) : tensor<?x2xf32, #hipsr.mem<device>>
+// CHECK-NEXT:      %[[SHAPE:.+]] = hipsr.compute(%[[D0_CTX]]) ins(%[[D0_B]] : tensor<?x4xf32, #hipsr.mem<device>>) outs(%[[SHAPE_INIT]] : tensor<2xi64, #hipsr.mem<host>>) {
+// CHECK-NEXT:      ^bb0(%{{.+}}: !hipsr.context, %[[BODY_B:.+]]: tensor<?x4xf32, #hipsr.mem<device>>, %{{.+}}: tensor<2xi64, #hipsr.mem<host>>):
+// CHECK-NEXT:        %[[DIM_IDX:.+]] = arith.constant 0 : index
+// CHECK-NEXT:        %[[DIM:.+]] = tensor.dim %[[BODY_B]], %[[DIM_IDX]] : tensor<?x4xf32, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[D0_EXT:.+]] = arith.index_cast %[[DIM]] : index to i64
+// CHECK-NEXT:        %[[D1_EXT:.+]] = arith.constant 4 : i64
+// CHECK-NEXT:        %[[EXTENTS:.+]] = tensor.from_elements %[[D0_EXT]], %[[D1_EXT]] : tensor<2xi64, #hipsr.mem<host>>
+// CHECK-NEXT:        hipsr.compute_yield %[[EXTENTS]] : tensor<2xi64, #hipsr.mem<host>>
+// CHECK-NEXT:      } : tensor<2xi64, #hipsr.mem<host>>
 
-// CHECK-NEXT:    return %[[Y]] : tensor<?x2xf32, #hipsr.mem<device>>
+// CHECK-NEXT:      %[[W2:.+]] = hipsr.constant {value = dense<{{.*}}> : tensor<4x2xf32>} : tensor<4x2xf32, #hipsr.mem<device>>
+// CHECK-NEXT:      hipsr.pool_domain_yield %[[CAST_INIT]], %[[CAST]], %[[SHAPE_INIT]], %[[SHAPE]], %[[W2]] : tensor<?x1xf32, #hipsr.mem<device>>, tensor<?x1xf32, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>, tensor<2xi64, #hipsr.mem<host>>, tensor<4x2xf32, #hipsr.mem<device>>
+// CHECK-NEXT:    } -> tensor<?x1xf32, #hipsr.mem<device>>, tensor<?x1xf32, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>, tensor<2xi64, #hipsr.mem<host>>, tensor<4x2xf32, #hipsr.mem<device>> {domain_id = 0 : i64}
+
+// CHECK-NEXT:    %[[D1:.+]] = hipsr.pool_domain(%[[CTX]], %[[D0]]#0, %[[D0]]#2, %[[D0]]#1, %[[D0]]#3, %[[D0]]#4 : !hipsr.context, tensor<?x1xf32, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>, tensor<?x1xf32, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>, tensor<4x2xf32, #hipsr.mem<device>>) {
+// CHECK-NEXT:    ^bb0(%[[D1_CTX:.+]]: !hipsr.context, %[[D1_CAST_INIT:.+]]: tensor<?x1xf32, #hipsr.mem<device>>, %[[D1_SHAPE_INIT:.+]]: tensor<2xi64, #hipsr.mem<host>>, %[[D1_CAST:.+]]: tensor<?x1xf32, #hipsr.mem<device>>, %[[D1_SHAPE:.+]]: tensor<2xi64, #hipsr.mem<host>>, %[[D1_W2:.+]]: tensor<4x2xf32, #hipsr.mem<device>>):
+
+// CHECK-NEXT:      %[[EXPAND_INIT:.+]] = hipsr.placeholder(%[[D1_CTX]]) ins(%[[D1_CAST_INIT]], %[[D1_SHAPE_INIT]] : tensor<?x1xf32, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<?x4xf32, #hipsr.mem<device>> shape_region {
+// CHECK-NEXT:      ^bb0(%{{.+}}: !hipsr.context, %[[IN:.+]]: tensor<?x1xf32, #hipsr.mem<device>>, %[[EXT:.+]]: tensor<2xi64, #hipsr.mem<host>>):
+// CHECK-NEXT:        %[[IN_SHAPE:.+]] = shape.shape_of %[[IN]] : tensor<?x1xf32, #hipsr.mem<device>> -> tensor<2xindex>
+// CHECK-NEXT:        %[[I0:.+]] = arith.constant 0 : index
+// CHECK-NEXT:        %[[E0:.+]] = tensor.extract %[[EXT]][%[[I0]]] : tensor<2xi64, #hipsr.mem<host>>
+// CHECK-NEXT:        %[[X0:.+]] = arith.index_cast %[[E0]] : i64 to index
+// CHECK-NEXT:        %[[I1:.+]] = arith.constant 1 : index
+// CHECK-NEXT:        %[[E1:.+]] = tensor.extract %[[EXT]][%[[I1]]] : tensor<2xi64, #hipsr.mem<host>>
+// CHECK-NEXT:        %[[X1:.+]] = arith.index_cast %[[E1]] : i64 to index
+// CHECK-NEXT:        %[[REQ:.+]] = shape.from_extents %[[X0]], %[[X1]] : index, index
+// CHECK-NEXT:        %[[EXPAND_WITNESS:.+]] = shape.cstr_broadcastable %[[IN_SHAPE]], %[[REQ]] : tensor<2xindex>, !shape.shape
+// CHECK-NEXT:        %[[EXPAND_SHAPE:.+]] = shape.assuming %[[EXPAND_WITNESS]] -> (!shape.shape) {
+// CHECK-NEXT:          %[[BROADCAST:.+]] = shape.broadcast %[[IN_SHAPE]], %[[REQ]] : tensor<2xindex>, !shape.shape -> !shape.shape
+// CHECK-NEXT:          shape.assuming_yield %[[BROADCAST]] : !shape.shape
+// CHECK-NEXT:        }
+// CHECK-NEXT:        hipsr.shape_yield %[[EXPAND_SHAPE]] : !shape.shape
+// CHECK-NEXT:      }
+// CHECK-NEXT:      %[[EXPAND:.+]] = hipsr.expand(%[[D1_CTX]]) ins(%[[D1_CAST]], %[[D1_SHAPE]] : tensor<?x1xf32, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>) outs(%[[EXPAND_INIT]] : tensor<?x4xf32, #hipsr.mem<device>>) : tensor<?x4xf32, #hipsr.mem<device>>
+
+// CHECK-NEXT:      %[[MM2_INIT:.+]] = hipsr.placeholder(%[[D1_CTX]]) ins(%[[EXPAND_INIT]], %[[D1_W2]] : tensor<?x4xf32, #hipsr.mem<device>>, tensor<4x2xf32, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x2xf32, #hipsr.mem<device>> shape_region {
+// CHECK-NEXT:      ^bb0(%[[E_SHAPE:.+]]: !shape.shape, %[[W2_SHAPE:.+]]: !shape.shape):
+// CHECK-NEXT:        %[[E_K_IDX:.+]] = shape.const_size 1
+// CHECK-NEXT:        %[[E_K:.+]] = shape.get_extent %[[E_SHAPE]], %[[E_K_IDX]] : !shape.shape, !shape.size -> !shape.size
+// CHECK-NEXT:        %[[E_K_SHAPE:.+]] = shape.from_extents %[[E_K]] : !shape.size
+// CHECK-NEXT:        %[[W2_K_IDX:.+]] = shape.const_size 0
+// CHECK-NEXT:        %[[W2_K:.+]] = shape.get_extent %[[W2_SHAPE]], %[[W2_K_IDX]] : !shape.shape, !shape.size -> !shape.size
+// CHECK-NEXT:        %[[W2_K_SHAPE:.+]] = shape.from_extents %[[W2_K]] : !shape.size
+// CHECK-NEXT:        %[[K2_WITNESS:.+]] = shape.cstr_eq %[[E_K_SHAPE]], %[[W2_K_SHAPE]] : !shape.shape, !shape.shape
+// CHECK-NEXT:        %[[E_SPLIT_IDX:.+]] = shape.const_size 0
+// CHECK-NEXT:        %[[E_BATCH:.+]], %[[E_TAIL:.+]] = "shape.split_at"(%[[E_SHAPE]], %[[E_SPLIT_IDX]]) : (!shape.shape, !shape.size) -> (!shape.shape, !shape.shape)
+// CHECK-NEXT:        %[[W2_SPLIT_IDX:.+]] = shape.const_size 0
+// CHECK-NEXT:        %[[W2_BATCH:.+]], %[[W2_TAIL:.+]] = "shape.split_at"(%[[W2_SHAPE]], %[[W2_SPLIT_IDX]]) : (!shape.shape, !shape.size) -> (!shape.shape, !shape.shape)
+// CHECK-NEXT:        %[[BATCH2_WITNESS:.+]] = shape.cstr_broadcastable %[[E_BATCH]], %[[W2_BATCH]] : !shape.shape, !shape.shape
+// CHECK-NEXT:        %[[WITNESS2:.+]] = shape.assuming_all %[[K2_WITNESS]], %[[BATCH2_WITNESS]]
+// CHECK-NEXT:        %[[MM2_SHAPE_VAL:.+]] = shape.assuming %[[WITNESS2]] -> (!shape.shape) {
+// CHECK-NEXT:          %[[BATCH2:.+]] = shape.broadcast %[[E_BATCH]], %[[W2_BATCH]] : !shape.shape, !shape.shape -> !shape.shape
+// CHECK-NEXT:          %[[M2_IDX:.+]] = shape.const_size 0
+// CHECK-NEXT:          %[[M2:.+]] = shape.get_extent %[[E_SHAPE]], %[[M2_IDX]] : !shape.shape, !shape.size -> !shape.size
+// CHECK-NEXT:          %[[N2_IDX:.+]] = shape.const_size 1
+// CHECK-NEXT:          %[[N2:.+]] = shape.get_extent %[[W2_SHAPE]], %[[N2_IDX]] : !shape.shape, !shape.size -> !shape.size
+// CHECK-NEXT:          %[[MATRIX2:.+]] = shape.from_extents %[[M2]], %[[N2]] : !shape.size, !shape.size
+// CHECK-NEXT:          %[[RESULT2:.+]] = shape.concat %[[BATCH2]], %[[MATRIX2]] : !shape.shape, !shape.shape -> !shape.shape
+// CHECK-NEXT:          shape.assuming_yield %[[RESULT2]] : !shape.shape
+// CHECK-NEXT:        }
+// CHECK-NEXT:        hipsr.shape_yield %[[MM2_SHAPE_VAL]] : !shape.shape
+// CHECK-NEXT:      }
+// CHECK-NEXT:      %[[MM2:.+]] = hipsr.matmul(%[[D1_CTX]]) ins(%[[EXPAND]], %[[D1_W2]] : tensor<?x4xf32, #hipsr.mem<device>>, tensor<4x2xf32, #hipsr.mem<device>>) outs(%[[MM2_INIT]] : tensor<?x2xf32, #hipsr.mem<device>>) : tensor<?x2xf32, #hipsr.mem<device>>
+// CHECK-NEXT:      hipsr.pool_domain_yield %[[MM2]] : tensor<?x2xf32, #hipsr.mem<device>>
+// CHECK-NEXT:    } -> tensor<?x2xf32, #hipsr.mem<device>> {domain_id = 1 : i64}
+
+// CHECK-NEXT:    return %[[D1]] : tensor<?x2xf32, #hipsr.mem<device>>
 // CHECK-NEXT:  }
 func.func @main_graph(%a: tensor<?x3xf16> {onnx.name = "a"},
                       %b: tensor<?x4xf32> {onnx.name = "b"})

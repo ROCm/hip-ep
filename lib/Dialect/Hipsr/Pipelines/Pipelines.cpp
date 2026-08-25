@@ -15,11 +15,13 @@
 //   --hipsr-add-context-arg
 //   --convert-onnx-to-hipsr
 //   --hipsr-populate-shape-region
+//   --hipsr-partition-pool-domains
 void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
                                      const HipsrPipelineOptions & /*options*/) {
   pm.addPass(createAddContextArgPass());
   pm.addPass(createConvertOnnxToHipsrPass());
   pm.addNestedPass<func::FuncOp>(createPopulateShapeRegionPass());
+  pm.addNestedPass<func::FuncOp>(createPartitionPoolDomainsPass());
 }
 
 void mlir::hipsr::registerHipsrPipelines() {
