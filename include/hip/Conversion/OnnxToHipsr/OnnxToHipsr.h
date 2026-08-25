@@ -50,6 +50,10 @@ void populateReshapeConversionPatterns(
     const ::mlir::TypeConverter &typeConverter,
     ::mlir::RewritePatternSet &patterns, ::mlir::MLIRContext *ctx);
 
+void populateUnsqueezeConversionPatterns(
+    const ::mlir::TypeConverter &typeConverter,
+    ::mlir::RewritePatternSet &patterns, ::mlir::MLIRContext *ctx);
+
 void populateReturnConversionPatterns(
     const ::mlir::TypeConverter &typeConverter,
     ::mlir::RewritePatternSet &patterns, ::mlir::MLIRContext *ctx);
