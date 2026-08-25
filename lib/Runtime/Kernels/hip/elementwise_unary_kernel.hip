@@ -2,7 +2,8 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  *
- * Unary elementwise HIP kernels (Neg / Sign / Cos / Sin / Not, and friends).
+ * Unary elementwise HIP kernels (Neg / Sign / Cos / Sin / Not / Sigmoid /
+ * Tanh, and friends).
  *
  * Ported from ONNX Runtime v1.22.2:
  *   onnxruntime/core/providers/cuda/math/unary_elementwise_ops_impl.cu
@@ -20,6 +21,7 @@
 #include "debug_log.h"
 
 #include <cmath>
+#include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 #include <cstdint>
@@ -418,6 +420,186 @@ extern "C" int hip_elementwise_exp(void *stream, const void *input,
   if (err != hipSuccess) {
     fprintf(stderr,
             "[custom_kernels] hip_elementwise_exp launch failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
+}
+
+__global__ void
+elementwise_sigmoid_f16_kernel(const __half *__restrict__ input,
+                               __half *__restrict__ output,
+                               int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    float x = __half2float(input[idx]);
+    output[idx] = __float2half(1.0f / (1.0f + expf(-x)));
+  }
+}
+
+__global__ void
+elementwise_sigmoid_bf16_kernel(const __hip_bfloat16 *__restrict__ input,
+                                __hip_bfloat16 *__restrict__ output,
+                                int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    float x = __bfloat162float(input[idx]);
+    output[idx] = __float2bfloat16(1.0f / (1.0f + expf(-x)));
+  }
+}
+
+__global__ void
+elementwise_sigmoid_f32_kernel(const float *__restrict__ input,
+                               float *__restrict__ output,
+                               int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements)
+    output[idx] = 1.0f / (1.0f + expf(-input[idx]));
+}
+
+extern "C" int hip_elementwise_sigmoid(void *stream, const void *input,
+                                       void *output, int64_t num_elements,
+                                       int hip_dtype) {
+  if (num_elements <= 0)
+    return 0;
+
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  constexpr int kBlockSize = 256;
+  int grid_size =
+      static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
+
+  (void)hipGetLastError();
+
+  switch (hip_dtype) {
+  case HIP_DTYPE_FLOAT16:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_sigmoid: f16, num=%lld\n",
+        (long long)num_elements);
+    hipLaunchKernelGGL(elementwise_sigmoid_f16_kernel, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const __half *>(input),
+                       static_cast<__half *>(output), num_elements);
+    break;
+  case HIP_DTYPE_BFLOAT16:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_sigmoid: bf16, num=%lld\n",
+        (long long)num_elements);
+    hipLaunchKernelGGL(elementwise_sigmoid_bf16_kernel, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const __hip_bfloat16 *>(input),
+                       static_cast<__hip_bfloat16 *>(output), num_elements);
+    break;
+  case HIP_DTYPE_FLOAT32:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_sigmoid: f32, num=%lld\n",
+        (long long)num_elements);
+    hipLaunchKernelGGL(elementwise_sigmoid_f32_kernel, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const float *>(input),
+                       static_cast<float *>(output), num_elements);
+    break;
+  default:
+    fprintf(stderr,
+            "[custom_kernels] hip_elementwise_sigmoid: unsupported dtype=%d\n",
+            hip_dtype);
+    return -1;
+  }
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr,
+            "[custom_kernels] hip_elementwise_sigmoid launch failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
+}
+
+__global__ void elementwise_tanh_f16_kernel(const __half *__restrict__ input,
+                                            __half *__restrict__ output,
+                                            int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    float x = __half2float(input[idx]);
+    output[idx] = __float2half(tanhf(x));
+  }
+}
+
+__global__ void
+elementwise_tanh_bf16_kernel(const __hip_bfloat16 *__restrict__ input,
+                             __hip_bfloat16 *__restrict__ output,
+                             int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    float x = __bfloat162float(input[idx]);
+    output[idx] = __float2bfloat16(tanhf(x));
+  }
+}
+
+__global__ void elementwise_tanh_f32_kernel(const float *__restrict__ input,
+                                            float *__restrict__ output,
+                                            int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements)
+    output[idx] = tanhf(input[idx]);
+}
+
+extern "C" int hip_elementwise_tanh(void *stream, const void *input,
+                                    void *output, int64_t num_elements,
+                                    int hip_dtype) {
+  if (num_elements <= 0)
+    return 0;
+
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  constexpr int kBlockSize = 256;
+  int grid_size =
+      static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
+
+  (void)hipGetLastError();
+
+  switch (hip_dtype) {
+  case HIP_DTYPE_FLOAT16:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_tanh: f16, num=%lld\n",
+        (long long)num_elements);
+    hipLaunchKernelGGL(elementwise_tanh_f16_kernel, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const __half *>(input),
+                       static_cast<__half *>(output), num_elements);
+    break;
+  case HIP_DTYPE_BFLOAT16:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_tanh: bf16, num=%lld\n",
+        (long long)num_elements);
+    hipLaunchKernelGGL(elementwise_tanh_bf16_kernel, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const __hip_bfloat16 *>(input),
+                       static_cast<__hip_bfloat16 *>(output), num_elements);
+    break;
+  case HIP_DTYPE_FLOAT32:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_tanh: f32, num=%lld\n",
+        (long long)num_elements);
+    hipLaunchKernelGGL(elementwise_tanh_f32_kernel, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const float *>(input),
+                       static_cast<float *>(output), num_elements);
+    break;
+  default:
+    fprintf(stderr,
+            "[custom_kernels] hip_elementwise_tanh: unsupported dtype=%d\n",
+            hip_dtype);
+    return -1;
+  }
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr,
+            "[custom_kernels] hip_elementwise_tanh launch failed: %s\n",
             hipGetErrorString(err));
   }
   return static_cast<int>(err);
