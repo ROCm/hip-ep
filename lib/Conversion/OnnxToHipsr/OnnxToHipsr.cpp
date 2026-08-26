@@ -123,6 +123,7 @@ struct ConvertOnnxToHipsrPass
     populateUnsqueezeConversionPatterns(converter, patterns, &getContext());
     populateEqualConversionPatterns(converter, patterns, &getContext());
     populateTransposeConversionPatterns(converter, patterns, &getContext());
+    populateGatherConversionPatterns(converter, patterns, &getContext());
     populateReturnConversionPatterns(converter, patterns, &getContext());
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns,
                                                                    converter);
