@@ -9,10 +9,7 @@
 #include "hip/flatbuffers_json.h"
 
 #include "morphizen-foundation/file_io.hpp"
-
-#ifdef HIP_COMPILER_STATIC
 #include "morphizen-utils/morphizen_plugin.hpp"
-#endif
 
 #include "compilation_options_schema.h"
 
@@ -137,7 +134,6 @@ COMPILER_API const char *hip_get_version(void) { return COMPILER_VERSION; }
 
 } // extern "C"
 
-#ifdef HIP_COMPILER_STATIC
 namespace {
 
 static ::morphizen::StaticPluginRegister
@@ -149,4 +145,3 @@ static ::morphizen::StaticPluginRegister
                            reinterpret_cast<void *>(&hip_get_version));
 
 } // namespace
-#endif

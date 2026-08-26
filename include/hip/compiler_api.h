@@ -8,20 +8,9 @@
 
 #include "compiler_types.h"
 
-/* Export macro for DLL visibility. HIP_COMPILER_STATIC is for the build that
- * links the compiler into the EP instead of a standalone DLL: the definitions
- * must not be dllexport there, or they would widen the EP's export surface. */
-#ifdef _WIN32
-#ifdef HIP_COMPILER_STATIC
+/* C API linked into the EP; leave symbols unexported so they do not widen the
+ * EP's dynamic export surface. */
 #define COMPILER_API
-#elif defined(HIP_COMPILER_EXPORTS)
-#define COMPILER_API __declspec(dllexport)
-#else
-#define COMPILER_API __declspec(dllimport)
-#endif
-#else
-#define COMPILER_API __attribute__((visibility("default")))
-#endif
 
 #ifdef __cplusplus
 extern "C" {
