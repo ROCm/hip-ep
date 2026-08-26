@@ -3,10 +3,15 @@
 # ** Licensed under the MIT License.
 ##
 
+# The standalone C API DLL is for a tools-only tree. A BUILD_EP tree links the
+# compiler into the EP instead (see lib/CInterface), so building it here too
+# would only add a second, never-loaded copy of LLVM/MLIR.
+if(NOT BUILD_EP)
+
 message(STATUS "Building hip-compiler.dll")
 
 # Create the DLL target
-add_library(hip-compiler-dll STATIC
+add_library(hip-compiler-dll SHARED
     dll_main.cpp
     hip-compiler.def
 )
@@ -49,16 +54,6 @@ if(NOT WIN32)
         "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/hip-compiler.exports")
 endif()
 
-if(DEFINED morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET AND
-   TARGET ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET})
-    target_link_libraries(${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET}
-        PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,hip-compiler-dll>")
-else()
-    message(WARNING
-        "morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET not defined or not a target "
-        "- hip-compiler will not be linked into the EP")
-endif()
-
 # Install DLL and import library
 install(TARGETS hip-compiler-dll
     RUNTIME DESTINATION bin
@@ -66,10 +61,12 @@ install(TARGETS hip-compiler-dll
     LIBRARY DESTINATION lib
 )
 
-# Install C API headers
+message(STATUS "hip-compiler.dll configuration complete")
+
+endif()  # NOT BUILD_EP
+
+# Install C API headers regardless of which flavour was built.
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/include/hip
     DESTINATION include
     FILES_MATCHING PATTERN "*.h"
 )
-
-message(STATUS "hip-compiler.dll configuration complete")
