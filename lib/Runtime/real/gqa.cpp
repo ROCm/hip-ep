@@ -533,6 +533,20 @@ static int gqa_forward_fused(
           return -1;
         }
         bias_kv_stride = static_cast<int64_t>(seqlens_k_pre) + 1;
+        // The caller's predicate excludes a ring cache structurally (it cannot
+        // read total_seq that early). Re-check it here, where total_seq IS
+        // known, because the two disagreeing is silent: the kernel would index
+        // the mask by ring slot instead of absolute position and return a
+        // plausible-looking wrong answer rather than an error.
+        if (bias_kv_stride > present_seq) {
+          fprintf(stderr,
+                  "gqa_forward_fused (decode): attention_bias with a ring cache "
+                  "(total_seq=%lld > present_seq=%lld) indexes the mask by ring "
+                  "slot, not position; this call should have been routed to the "
+                  "decomposed pipeline\n",
+                  (long long)bias_kv_stride, (long long)present_seq);
+          return -1;
+        }
       }
       int drc = hip_gqa_flash_decode(
           stream, qSrc, present_key, present_value, output, partials,
@@ -2460,9 +2474,30 @@ int wrap_group_query_attention(
   //   - fp16 KV, since the int8 launcher does not thread the mask.
   // Flash prefill has no bias support at all, so a masked prefill must keep
   // going decomposed or the mask would be silently dropped.
+  //
+  // A ring cache is the fourth condition, and it is not a limitation of the
+  // mask so much as of indexing. flash decode reads the present buffer slot by
+  // slot and indexes the mask by that slot, which is only the key's absolute
+  // position while the buffer is linear. A cache right-sized to a sliding
+  // window holds position p at p % capacity, so once the context passes the
+  // window the slots arrive rotated and every mask entry lands on the wrong
+  // key. The decomposed path already knows this -- it passes a ring base and
+  // capacity into hip_gqa_add_attention_bias_f32 and skips its causal/window
+  // kernel entirely under ring_read, for exactly this reason -- and the fused
+  // path has no equivalent yet.
+  //
+  // The test is structural rather than a comparison against total_seq, which is
+  // not host-known this early: the ring block in gqa_forward_hipblaslt admits a
+  // short buffer ONLY when it is right-sized to the window exactly, so a buffer
+  // longer than the window can never rotate. That makes this conservative by
+  // one phase -- a right-sized layer is excluded even before the context
+  // exceeds its window, where slot and position still agree -- which costs a
+  // few early tokens on the decomposed path and needs no device read.
+  const bool ring_cache_possible =
+      local_window_size > 0 && seq_len_kv <= local_window_size;
   const bool bias_ok =
       attention_bias == nullptr ||
-      (is_decode && batch_size == 1 && !kv_quantized &&
+      (is_decode && batch_size == 1 && !kv_quantized && !ring_cache_possible &&
        !gqa_fused_decode_bias_disabled());
   // no_causal on a masked decode is likewise safe: is_causal=0 exports (Gemma-4)
   // carry causal, padding AND any sliding window inside the additive mask, and
