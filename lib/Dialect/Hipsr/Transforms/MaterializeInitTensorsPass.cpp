@@ -304,54 +304,47 @@ FailureOr<Value> getPositionalTiedResult(PlaceholderOp placeholder,
   return consumer->getResult(index);
 }
 
-// Resolves, for one placeholder result, the data value its computed shape
-// should describe and, for destination-style consumers, the shape to tie it
-// to. The tie is always to the consumer's result rather than the
-// tensor.empty init: in tensor form those are two different values, and
-// tying the link to the init would describe the value the buffer held before
-// the write, which forces a copy under bufferization.
-//
-// A destination-style consumer's type constraint guarantees
-// type(outs) == type(result), so the placeholder's own computed shape already
-// describes the result and is reused as is. hipsr.compute carries no such
-// guarantee, so its shape is left null here for emitPreserveShapes to derive
-// straight from the result instead.
-//
-// This lookup must happen before replaceAndCleanup erases the placeholders:
-// it walks the placeholder result's own uses to find the destination operand
-// that names its consumer.
-FailureOr<SmallVector<PreserveShapeTarget>>
-collectPreserveShapeTargets(ArrayRef<PlaceholderOp> placeholders,
-                            const DenseMap<PlaceholderOp, scf::ExecuteRegionOp>
-                                &placeholderToExecuteRegion) {
+// Collects each placeholder result's shape and the data value that
+// preserve_shape should associate with it.
+// For non-DPS consumers, the true result shape is not materialized here;
+// nullptr defers shape creation while pre-cleanup lookup avoids traversing
+// a long use chain later.
+FailureOr<SmallVector<PreserveShapeTarget>> collectPreserveShapeTargets(
+    ArrayRef<PlaceholderOp> placeholders,
+    const DenseMap<PlaceholderOp, scf::ExecuteRegionOp>
+        &placeholderToExecuteRegion,
+    const DenseMap<Value, Value> &placeholderResultToInitTensor) {
   SmallVector<PreserveShapeTarget> targets;
   for (PlaceholderOp placeholder : placeholders) {
     scf::ExecuteRegionOp executeRegion =
         placeholderToExecuteRegion.lookup(placeholder);
-    for (OpResult result : placeholder.getResults()) {
-      OpOperand *destinationUse = findDestinationUse(result);
+    for (auto [resultIndex, placeholderResult] :
+         llvm::enumerate(placeholder.getResults())) {
+      OpOperand *destinationUse =
+          findDestinationUse(cast<OpResult>(placeholderResult));
       if (!destinationUse) {
-        placeholder.emitOpError(
-            "result has no destination use to preserve a shape for");
-        return failure();
+        return placeholder.emitOpError(
+            "result has no destination use for preserve_shape collection");
       }
+      Operation *consumer = destinationUse->getOwner();
 
-      if (auto dpsConsumer = dyn_cast<DestinationStyleOpInterface>(
-              destinationUse->getOwner())) {
-        Value shape = executeRegion.getResult(result.getResultNumber());
-        Value data = dpsConsumer.getTiedOpResult(destinationUse);
-        targets.push_back({shape, data});
-        continue;
+      Value shapeValue = executeRegion.getResult(resultIndex);
+      Value data;
+      if (isa<DestinationStyleOpInterface>(consumer)) {
+        data = placeholderResultToInitTensor.lookup(placeholderResult);
+        if (!data) {
+          return placeholder.emitOpError(
+              "missing tensor.empty init for preserve_shape");
+        }
+      } else {
+        FailureOr<Value> tiedResult =
+            getPositionalTiedResult(placeholder, destinationUse);
+        if (failed(tiedResult))
+          return failure();
+        data = *tiedResult;
+        shapeValue = nullptr;
       }
-
-      // hipsr.compute
-      FailureOr<Value> data =
-          getPositionalTiedResult(placeholder, destinationUse);
-      if (failed(data)) {
-        return failure();
-      }
-      // defer set shape in this stage, emitPreserveShapes will set it.
-      targets.push_back({/*shape=*/nullptr, *data});
+      targets.push_back({shapeValue, data});
     }
   }
   return targets;
@@ -402,7 +395,8 @@ LogicalResult materializePoolDomain(PoolDomainOp poolDomain) {
       createInitTensors(*placeholders, *placeholderToExecuteRegion, builder);
 
   FailureOr<SmallVector<PreserveShapeTarget>> preserveShapeTargets =
-      collectPreserveShapeTargets(*placeholders, *placeholderToExecuteRegion);
+      collectPreserveShapeTargets(*placeholders, *placeholderToExecuteRegion,
+                                  placeholderResultToInitTensor);
   if (failed(preserveShapeTargets)) {
     return failure();
   }
