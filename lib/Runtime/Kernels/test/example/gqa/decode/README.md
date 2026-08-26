@@ -46,8 +46,34 @@ ALL PASS (0 failing case(s))
 |---|---|
 | `test_gqa_decode.cpp` | fp16 correctness and latency over the full geometry matrix |
 | `test_gqa_decode_i8.cpp` | The same for an INT8 KV cache, plus the fp16/INT8 ratio |
+| `test_gqa_decode_bias.cpp` | Correctness with an additive attention mask, on linear and ring caches |
 
-Both cover correctness and latency; flags select how much of each you get.
+The first two cover correctness and latency; flags select how much of each you
+get. `test_gqa_decode_bias` is correctness only and takes no flags.
+
+### `test_gqa_decode_bias` (additive mask)
+
+The mask is the one input the kernel indexes by absolute KV *position* rather
+than by buffer slot, so it is the only place a right-sized sliding-window cache
+("ring") is visible: the slots arrive rotated and every entry lands on the wrong
+key. That failure is silent — the attention still sums over the right set of
+keys, so the output is plausible rather than NaN — which is why half the cases
+here run on a ring, and why they use a random mask. A window mask cannot detect
+a rotation, because a ring of exactly `window` cells holds only in-window
+positions and all of its live entries are zero.
+
+```bash
+hipcc --offload-arch=gfx1151 -O3 -std=c++17 -Wno-deprecated-declarations \
+  test_gqa_decode_bias.cpp ../../../../hip/gqa_kernel.hip \
+  -I../../../../include -o test_gqa_decode_bias.exe
+./test_gqa_decode_bias.exe
+```
+
+Each line reports the geometry, whether the cache is linear or a ring (with the
+rotation), and `relL2` against an fp32 CPU reference. Healthy fp16 values are
+around `2e-04`; a case passes under `5e-03`. Removing the de-rotation from the
+kernel puts every ring case at `~1e+00` and leaves every linear case passing,
+which is the check that the ring cases are load-bearing rather than decorative.
 
 ### `test_gqa_decode` (fp16)
 

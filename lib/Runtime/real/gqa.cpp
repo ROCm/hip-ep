@@ -511,6 +511,39 @@ static int gqa_forward_fused(
     // quantize-and-append with the static per-channel scale; fp16 cache: plain
     // append. update_kv_cache dispatches on kv_format internally.
     //
+    // Right-sized sliding-window cache, same contract the decomposed path
+    // states in full at its ring block: OGA may allocate a windowed layer's
+    // buffer to the window rather than to max_length, and capacity is then
+    // required to equal the window exactly, so the buffer holds precisely the
+    // positions this query may attend to. total_seq is host-known here only via
+    // the B==1 pre-read, which is the shape the caller admits.
+    const int64_t decode_total_seq =
+        (seqlens_k_pre != kSeqlensKNotRead && seqlens_k_pre >= 0)
+            ? static_cast<int64_t>(seqlens_k_pre) + 1
+            : past_len + sq;
+    const bool ring_cache = present_seq < decode_total_seq;
+    if (ring_cache) {
+      if (local_window_size <= 0 || present_seq != local_window_size) {
+        fprintf(stderr,
+                "gqa_forward_fused (decode): present KV buffer (%lld) is "
+                "shorter than the context (%lld), which is only supported for "
+                "a sliding-window layer whose cache is right-sized to exactly "
+                "the window, but local_window_size=%lld\n",
+                (long long)present_seq, (long long)decode_total_seq,
+                (long long)local_window_size);
+        return -1;
+      }
+      if (past_key != present_key) {
+        fprintf(stderr,
+                "gqa_forward_fused (decode): a right-sized sliding-window "
+                "cache needs past and present aliased "
+                "(past_present_share_buffer), but they differ\n");
+        return -1;
+      }
+    }
+    const int64_t ring_base = ring_cache ? decode_total_seq - present_seq : 0;
+    const int64_t ring_cap = ring_cache ? present_seq : 0;
+
     // copy_lo stays 0 here even though this path knows its window. Narrowing
     // the concat needs a separate growing present buffer, and this path never
     // gets one: seq_len_kv reaches the runtime as the present_key memref's
@@ -525,8 +558,8 @@ static int gqa_forward_fused(
             static_cast<int>(sq), static_cast<int>(G), static_cast<int>(d),
             static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
             seqlens_k_ptr, static_cast<int>(elem_sz), /*copy_lo=*/0,
-            /*ring=*/0, /*no_causal=*/false, /*skv=*/-1, kv_format, k_scale,
-            v_scale) != 0)
+            /*ring=*/ring_cache ? 1 : 0, /*no_causal=*/false, /*skv=*/-1,
+            kv_format, k_scale, v_scale) != 0)
       return -1;
 
     {
@@ -554,21 +587,7 @@ static int gqa_forward_fused(
                   "total_seq, but seqlens_k could not be pre-read\n");
           return -1;
         }
-        bias_kv_stride = static_cast<int64_t>(seqlens_k_pre) + 1;
-        // The caller's predicate excludes a ring cache structurally (it cannot
-        // read total_seq that early). Re-check it here, where total_seq IS
-        // known, because the two disagreeing is silent: the kernel would index
-        // the mask by ring slot instead of absolute position and return a
-        // plausible-looking wrong answer rather than an error.
-        if (bias_kv_stride > present_seq) {
-          fprintf(stderr,
-                  "gqa_forward_fused (decode): attention_bias with a ring cache "
-                  "(total_seq=%lld > present_seq=%lld) indexes the mask by ring "
-                  "slot, not position; this call should have been routed to the "
-                  "decomposed pipeline\n",
-                  (long long)bias_kv_stride, (long long)present_seq);
-          return -1;
-        }
+        bias_kv_stride = decode_total_seq;
       }
       int drc = hip_gqa_flash_decode(
           stream, qSrc, present_key, present_value, output, partials,
@@ -580,16 +599,19 @@ static int gqa_forward_fused(
           kv_quantized ? k_scale : nullptr, kv_quantized ? v_scale : nullptr,
           attention_bias, static_cast<int>(attn_bias_batch),
           static_cast<int>(attn_bias_num_heads),
-          static_cast<int>(bias_kv_stride));
+          static_cast<int>(bias_kv_stride), static_cast<int>(ring_base),
+          static_cast<int>(ring_cap));
       if (drc != 0)
         return -1;
       RUNTIME_DEBUG_LOG(
           "[REAL] flash GQA decode (%s): B=%lld skv=%lld H=%lld G=%lld "
-          "d=%lld max_splits=%d window=%lld sink=%d smooth=%d\n",
+          "d=%lld max_splits=%d window=%lld sink=%d smooth=%d ring_base=%lld "
+          "ring_cap=%lld\n",
           kv_quantized ? "quant" : "fp16", (long long)B, (long long)skv,
           (long long)H, (long long)G, (long long)d, kFlashDecodeMaxSplits,
           (long long)local_window_size, static_cast<int>(head_sink != nullptr),
-          static_cast<int>(use_smooth_softmax));
+          static_cast<int>(use_smooth_softmax), (long long)ring_base,
+          (long long)ring_cap);
     }
     return 0;
   }
@@ -2498,29 +2520,18 @@ int wrap_group_query_attention(
   // Flash prefill has no bias support at all, so a masked prefill must keep
   // going decomposed or the mask would be silently dropped.
   //
-  // A ring cache is the fourth condition, and it is not a limitation of the
-  // mask so much as of indexing. flash decode reads the present buffer slot by
-  // slot and indexes the mask by that slot, which is only the key's absolute
-  // position while the buffer is linear. A cache right-sized to a sliding
-  // window holds position p at p % capacity, so once the context passes the
-  // window the slots arrive rotated and every mask entry lands on the wrong
-  // key. The decomposed path already knows this -- it passes a ring base and
-  // capacity into hip_gqa_add_attention_bias_f32 and skips its causal/window
-  // kernel entirely under ring_read, for exactly this reason -- and the fused
-  // path has no equivalent yet.
-  //
-  // The test is structural rather than a comparison against total_seq, which is
-  // not host-known this early: the ring block in gqa_forward_hipblaslt admits a
-  // short buffer ONLY when it is right-sized to the window exactly, so a buffer
-  // longer than the window can never rotate. That makes this conservative by
-  // one phase -- a right-sized layer is excluded even before the context
-  // exceeds its window, where slot and position still agree -- which costs a
-  // few early tokens on the decomposed path and needs no device read.
-  const bool ring_cache_possible =
-      local_window_size > 0 && seq_len_kv <= local_window_size;
+  // A ring cache used to be a fourth condition and no longer is. A cache
+  // right-sized to its sliding window holds position p at p % capacity, so the
+  // slots arrive rotated and a mask indexed by slot lands on the wrong key
+  // every time. flash decode now takes a ring base and capacity and undoes the
+  // rotation where it reads the mask, the same correction
+  // hip_gqa_add_attention_bias_f32 has always applied on the decomposed path.
+  // The condition it replaces was structural (window > 0 && seq_len_kv <=
+  // window) because total_seq is not host-known this early; the kernel does not
+  // need that guess, since gqa_forward_fused reads total_seq before it decides.
   const bool bias_ok =
       attention_bias == nullptr ||
-      (is_decode && batch_size == 1 && !kv_quantized && !ring_cache_possible &&
+      (is_decode && batch_size == 1 && !kv_quantized &&
        !gqa_fused_decode_bias_disabled());
   // no_causal on a masked decode is likewise safe: is_causal=0 exports (Gemma-4)
   // carry causal, padding AND any sliding window inside the additive mask, and

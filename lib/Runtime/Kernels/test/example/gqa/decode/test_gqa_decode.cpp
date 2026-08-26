@@ -60,7 +60,11 @@ extern "C" int hip_gqa_flash_decode(
     // passes NULL. Declared to match the entry point exactly -- extern "C" is
     // unmangled, so a short declaration here would link and then read garbage.
     const void* attn_bias,
-    int attn_bias_batch, int attn_bias_heads, int attn_bias_kv_stride);
+    int attn_bias_batch, int attn_bias_heads, int attn_bias_kv_stride,
+    // Ring cache; linear here (0). Only the mask reads a position rather than
+    // a slot, so an unmasked decode cannot tell a ring from a linear cache --
+    // test_gqa_decode_bias owns that coverage.
+    int ring_base, int ring_cap);
 
 // Legacy one-block-per-head fused decode (the ORIGINAL baseline that the
 // OPTIMIZATION.md 10-20x figure was measured against). No window/sink/split-K.
@@ -234,7 +238,7 @@ static double run_kernel(DecodeMode mode, const Case& c, float scale,
   HIP_CHECK((hipError_t)hip_gqa_flash_decode(
       nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, c.total, max_seq, MAX_SPLITS,
       scale, dSeq, c.window, sinkp, c.smooth, HIP_KV_DTYPE_FP16, nullptr,
-      nullptr, nullptr, 1, 1, 0));
+      nullptr, nullptr, 1, 1, 0, 0, 0));
   HIP_CHECK(hipDeviceSynchronize());
   host_O.resize((size_t)B * H * D);
   {
@@ -252,7 +256,7 @@ static double run_kernel(DecodeMode mode, const Case& c, float scale,
     hip_gqa_flash_decode(nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, c.total,
                             max_seq, MAX_SPLITS, scale, dSeq, c.window, sinkp,
                             c.smooth, HIP_KV_DTYPE_FP16, nullptr, nullptr,
-                            nullptr, 1, 1, 0);
+                            nullptr, 1, 1, 0, 0, 0);
   }
   HIP_CHECK(hipEventRecord(b));
   HIP_CHECK(hipEventSynchronize(b));
