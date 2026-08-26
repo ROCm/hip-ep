@@ -22,7 +22,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Softmax | Custom HIP kernel |
 | Sigmoid | Custom HIP kernel |
 | Tanh | Custom HIP kernel |
-| Softplus | MIOpen |
+| Softplus | Custom HIP kernel (f32/f16) |
 | Gelu | Custom HIP kernel |
 | BiasGelu (`com.microsoft`) | Custom HIP kernel |
 | FastGelu (`com.microsoft`) | Custom HIP kernel |

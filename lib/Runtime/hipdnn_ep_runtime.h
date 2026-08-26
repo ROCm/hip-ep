@@ -119,40 +119,6 @@ static inline const char *hipdnn_ep_datatype_name(int64_t data_type) {
 }
 
 //===----------------------------------------------------------------------===//
-// Backend-Independent Activation Mode Identifiers
-//===----------------------------------------------------------------------===//
-//
-// Same pattern as HIPDNN_EP_DATATYPE_* above. Each backend provides an explicit
-// mapping function (e.g. hipdnn_ep_to_miopen_activation in
-// real/activation.cpp).
-//
-// To add a new activation:
-//   1. Add #define here
-//   2. Update hipdnn_ep_activation_name()
-//   3. Update each backend mapping function
-//===----------------------------------------------------------------------===//
-
-#define HIPDNN_EP_ACTIVATION_SIGMOID 0
-#define HIPDNN_EP_ACTIVATION_RELU 1
-#define HIPDNN_EP_ACTIVATION_TANH 2
-#define HIPDNN_EP_ACTIVATION_SOFTPLUS 3
-
-static inline const char *hipdnn_ep_activation_name(int64_t activation_mode) {
-  switch (activation_mode) {
-  case HIPDNN_EP_ACTIVATION_SIGMOID:
-    return "sigmoid";
-  case HIPDNN_EP_ACTIVATION_RELU:
-    return "relu";
-  case HIPDNN_EP_ACTIVATION_TANH:
-    return "tanh";
-  case HIPDNN_EP_ACTIVATION_SOFTPLUS:
-    return "softplus";
-  default:
-    return "unknown";
-  }
-}
-
-//===----------------------------------------------------------------------===//
 // Global pool reduction modes (must match kGlobalPool* in HipToLLVMUtils.h).
 //===----------------------------------------------------------------------===//
 
@@ -915,18 +881,20 @@ int wrap_multi_head_attention(
     int64_t query_hidden, int64_t v_hidden, int64_t head_size,
     int64_t query_rank, int64_t element_size_bytes);
 
-// Generic MIOpen tensor operation wrapper with per-operand 4D shapes.
-// Computes output = op(lhs, rhs) element-wise via miopenOpTensor.
-// Each operand is described by 4D shape (N, C, H, W) to enable MIOpen-native
-// broadcasting: dims of 1 are broadcast against the corresponding larger dim.
+// Generic element-wise tensor operation wrapper with per-operand 4D shapes.
+// Computes output = op(lhs, rhs) element-wise via the custom HIP kernels
+// (flat int kernels + hip_expand for int16/int32/int64, the native
+// broadcasting kernel for float16/float32; see elementwise.cpp).
+// Each operand is described by 4D shape (N, C, H, W): dims of 1 are
+// broadcast against the corresponding larger dim.
 //   tensor_op: HIPDNN_EP_TENSOR_OP_* constant (mul, add, min, max)
 //   data_type: HIPDNN_EP_DATATYPE_* constant identifying the element type
-int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
-                        void *rhs, void *output, int64_t lhs_n, int64_t lhs_c,
-                        int64_t lhs_h, int64_t lhs_w, int64_t rhs_n,
-                        int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
-                        int64_t out_n, int64_t out_c, int64_t out_h,
-                        int64_t out_w, int64_t data_type, int64_t tensor_op);
+int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
+                     void *rhs, void *output, int64_t lhs_n, int64_t lhs_c,
+                     int64_t lhs_h, int64_t lhs_w, int64_t rhs_n, int64_t rhs_c,
+                     int64_t rhs_h, int64_t rhs_w, int64_t out_n, int64_t out_c,
+                     int64_t out_h, int64_t out_w, int64_t data_type,
+                     int64_t tensor_op);
 
 // Element-wise subtraction with 4D ONNX broadcast (rank <= 4).
 // Computes output = lhs - rhs; materialises broadcast via hip_expand when
@@ -1091,20 +1059,17 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t src_data_type,
               int64_t dst_data_type);
 
-// Generic MIOpen activation wrapper
-// Applies activation_mode (HIPDNN_EP_ACTIVATION_*) element-wise
-// data_type: HIPDNN_EP_DATATYPE_* constant identifying the element type
-int wrap_miopenActivationForward(RuntimeState *state, int op_state_slot,
-                                 void *input, void *output,
-                                 int64_t num_elements, int64_t data_type,
-                                 int64_t activation_mode);
-
 // GELU activation wrapper (uses custom HIP kernel)
 // Applies GELU element-wise with support for exact or approximate mode
 // data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16, DOUBLE)
 // approximate: 0 = exact (erf), 1 = tanh approximation
 int wrap_gelu(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t data_type, int64_t approximate);
+
+// Softplus activation wrapper (uses custom HIP kernel).
+// data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF only)
+int wrap_softplus(RuntimeState *state, void *input, void *output,
+                  int64_t num_elements, int64_t data_type);
 
 // Fused com.microsoft.BiasGelu: Gelu_erf(data + broadcast(bias)).
 // data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16, DOUBLE)

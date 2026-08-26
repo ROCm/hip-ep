@@ -533,8 +533,6 @@ int wrap_causal_conv_with_state(
   }
 
   // CausalConvWithState fused activation enum: 0=none, 1=silu/swish.
-  // This is independent of hipdnn_ep_activation_name() which maps generic
-  // miopen activations (sigmoid/relu/tanh).
   const char *act_name = (activation == 1) ? "silu" : "none";
 
   MOCK_PRINT("[MOCK] wrap_causal_conv_with_state(\n");
@@ -782,19 +780,19 @@ int wrap_linear_attention(RuntimeState *state, const void *query,
   return 0;
 }
 
-int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
-                        void *rhs, void *output, int64_t lhs_n, int64_t lhs_c,
-                        int64_t lhs_h, int64_t lhs_w, int64_t rhs_n,
-                        int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
-                        int64_t out_n, int64_t out_c, int64_t out_h,
-                        int64_t out_w, int64_t data_type, int64_t tensor_op) {
+int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
+                     void *rhs, void *output, int64_t lhs_n, int64_t lhs_c,
+                     int64_t lhs_h, int64_t lhs_w, int64_t rhs_n, int64_t rhs_c,
+                     int64_t rhs_h, int64_t rhs_w, int64_t out_n, int64_t out_c,
+                     int64_t out_h, int64_t out_w, int64_t data_type,
+                     int64_t tensor_op) {
   (void)op_state_slot;
   if (!state) {
-    fprintf(stderr, "Invalid state in wrap_miopenOpTensor\n");
+    fprintf(stderr, "Invalid state in wrap_elementwise\n");
     return -1;
   }
 
-  MOCK_PRINT("[MOCK] wrap_miopenOpTensor(op=%s, "
+  MOCK_PRINT("[MOCK] wrap_elementwise(op=%s, "
              "lhs=[%lld,%lld,%lld,%lld], "
              "rhs=[%lld,%lld,%lld,%lld], "
              "out=[%lld,%lld,%lld,%lld], "
@@ -1218,26 +1216,6 @@ int wrap_global_pool(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
-int wrap_miopenActivationForward(RuntimeState *state, int op_state_slot,
-                                 void *input, void *output,
-                                 int64_t num_elements, int64_t data_type,
-                                 int64_t activation_mode) {
-  (void)op_state_slot;
-  if (!state) {
-    fprintf(stderr, "Invalid state in wrap_miopenActivationForward\n");
-    return -1;
-  }
-
-  MOCK_PRINT("[MOCK] wrap_miopenActivationForward(activation=%s, "
-             "num_elements=%lld, data_type=%s(%lld), element_size=%lld)\n",
-             hipdnn_ep_activation_name(activation_mode),
-             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
-             (long long)data_type,
-             (long long)hipdnn_ep_datatype_size(data_type));
-
-  return 0;
-}
-
 int wrap_bias_gelu(RuntimeState *state, void *data, void *bias, void *output,
                    int64_t num_elements, int64_t bias_len, int64_t data_type) {
   if (!state) {
@@ -1265,6 +1243,27 @@ int wrap_fast_gelu(RuntimeState *state, void *input, void *bias, void *output,
              (long long)num_elements, (long long)bias_len,
              hipdnn_ep_datatype_name(data_type), (long long)data_type,
              bias ? "yes" : "null");
+
+  return 0;
+}
+
+int wrap_softplus(RuntimeState *state, void *input, void *output,
+                  int64_t num_elements, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_softplus\n");
+    return -1;
+  }
+
+  if (data_type != HIPDNN_EP_DATATYPE_FLOAT &&
+      data_type != HIPDNN_EP_DATATYPE_HALF) {
+    fprintf(stderr, "[MOCK] wrap_softplus: unsupported data_type %s(%lld)\n",
+            hipdnn_ep_datatype_name(data_type), (long long)data_type);
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_softplus(num_elements=%lld, data_type=%s(%lld))\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
 
   return 0;
 }

@@ -234,9 +234,10 @@ HIP_KERNEL_API int hip_elementwise_not(
  * Same-shape binary elementwise ops. All eight share one translation unit:
  * lib/Runtime/Kernels/hip/elementwise_binary_kernel.hip.
  *
- * Mul / Add / Min / Max are reached from wrap_miopenOpTensor when MIOpen's
- * miopenOpTensor rejects the element type (notably INT32/INT64). Float
- * dtypes still use MIOpen for performance and autotuning.
+ * Mul / Add / Min / Max are reached from wrap_elementwise: the
+ * int16/int32/int64 path lands in this file's flat kernels (after
+ * hip_expand materialises any broadcast), while the float16/float32 path
+ * uses the native broadcasting kernel below instead.
  *
  * Div / Mod / Equal / Less were added for the Qwen3.5 vision path. Equal and
  * Less write bool (1 byte); their hip_dtype refers to the input element type.
@@ -479,6 +480,25 @@ HIP_KERNEL_API int hip_leaky_relu(
     int64_t num_elements,
     int hip_dtype,
     double alpha);
+
+/* =========================================================================
+ * Softplus activation
+ * =========================================================================
+ *
+ * Element-wise softplus: y = log(1 + exp(x)).
+ *
+ * Matches MIOpen miopenActivationSOFTRELU on packed 1D tensors
+ * (ActivationFunction_BNLL in MIOpenNeuron.cl / activation_functions.h).
+ *
+ * Supported hip_dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16.
+ * Returns: 0 on success, non-zero on launch/validation error.
+ */
+HIP_KERNEL_API int hip_softplus(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
 
 /* =========================================================================
  * Rotary Position Embedding (RoPE)

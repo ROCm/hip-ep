@@ -172,6 +172,8 @@ class TestSoftplus:
         [
             (np.float32, [1, 10]),
             (np.float32, [4, 256]),
+            (np.float16, [1, 10]),
+            (np.float16, [4, 256]),
         ],
     )
     def test_softplus(self, model_runner, dtype, shape):
@@ -181,7 +183,8 @@ class TestSoftplus:
         x = rng.uniform(-5, 5, shape).astype(dtype)
 
         actual, expected = model_runner.run_sample(model, [x])
-        compare_outputs(actual, expected, atol=1e-4)
+        atol = 1e-3 if dtype == np.float16 else 1e-4
+        compare_outputs(actual, expected, atol=atol)
 
     @pytest.mark.parametrize("seq_len", CHUNK_OPT_SEQ_LENS)
     def test_softplus_chunk_opt_gate_shape(self, model_runner, seq_len):
