@@ -65,8 +65,8 @@ bool op_profile_is_active(OpProfileState *ps);
 //
 // The drain is also what makes an asynchronous GPU fault attributable: HIP
 // reports a memory violation on whichever launch happens to be in flight, so
-// without a sync the blame lands on an arbitrary later kernel. Fencing on `conv`
-// and walking RGP_FENCE_SKIP bisects the faulting instance directly.
+// without a sync the blame lands on an arbitrary later kernel. Fencing on
+// `conv` and walking RGP_FENCE_SKIP bisects the faulting instance directly.
 void rgp_capture_fence(const char *opname);
 
 // Absolute microseconds on the shared steady_clock axis. A plain time
