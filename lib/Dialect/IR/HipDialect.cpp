@@ -680,9 +680,9 @@ LogicalResult MatmulOp::verify() {
   // mismatch (in which case it has already issued a diagnostic on `*this`).
   return mlir::hip::verifyHipOpShape(
       *this, [&]() -> SmallVector<SmallVector<int64_t>> {
-        SmallVector<int64_t> outShape =
-            mlir::hip::inferMatmulShape(getShapeOf(getA()), getShapeOf(getB()),
-                                        [&]() { return this->emitOpError(); });
+        SmallVector<int64_t> outShape = mlir::hip::inferMatmulShape(
+            getShapeOf(getA()), getShapeOf(getB()),
+            [&]() { return this->emitOpError(); }, getTransA(), getTransB());
         if (outShape.empty())
           return {};
         return {std::move(outShape)};

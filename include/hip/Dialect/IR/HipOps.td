@@ -791,8 +791,11 @@ def Hip_MatmulOp : Hip_DpsOp<"matmul", /*traits=*/[OpStateOpInterface],
     [docs/design/hip-shape-inference.md](docs/design/hip-shape-inference.md)
     for the dim-source contract and the consuming pipeline.
 
-    Unlike hip.gemm, this has no alpha/beta/transA/transB/bias — it maps
-    directly to onnx.MatMul semantics.
+    Optional `transA` / `transB` (0/1) apply a last-dimension swap on the
+    corresponding operand before multiply — the compile-time fusion of
+    `Transpose(perm=[..,r,r-2])` into MatMul for attention Q @ K^T. When
+    unset they default to 0 (standard onnx.MatMul layout: A [...,M,K],
+    B [...,K,N]).
 
     Example (2D):
     ```mlir
@@ -813,7 +816,9 @@ def Hip_MatmulOp : Hip_DpsOp<"matmul", /*traits=*/[OpStateOpInterface],
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$A,
     Hip_TensorOrMemRef:$B,
-    Hip_TensorOrMemRef:$output
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "0">:$transA,
+    DefaultValuedAttr<I64Attr, "0">:$transB
   );
 
   let assemblyFormat = [{

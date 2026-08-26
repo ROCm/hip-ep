@@ -437,6 +437,13 @@ void populateGlobalPoolConversionPatterns(RewritePatternSet &patterns,
 void populateFlattenConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
 
+/// Pre-lowering pattern set: fold `Transpose(perm=[..,r,r-2])` into a
+/// consuming `onnx.MatMul` as `hipdnn.transA` / `hipdnn.transB` so the
+/// runtime can apply the swap inside hipBLASLt. Sibling of GatherShapeFold;
+/// must run while ONNX ops are still present. See TransposeMatMulFold.cpp.
+void populateTransposeMatMulFoldPatterns(RewritePatternSet &patterns,
+                                         MLIRContext *ctx);
+
 /// Pre-lowering pattern set: collapse the Gather(Shape(x), const_idx)
 /// idiom into tensor.from_elements over a tensor.dim of x. Must run
 /// BEFORE lowerOnnxConstants so this ONNX-rooted matcher still sees the
