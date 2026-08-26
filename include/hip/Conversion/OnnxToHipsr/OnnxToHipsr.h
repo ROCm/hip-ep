@@ -58,6 +58,10 @@ void populateEqualConversionPatterns(const ::mlir::TypeConverter &typeConverter,
                                      ::mlir::RewritePatternSet &patterns,
                                      ::mlir::MLIRContext *ctx);
 
+void populateTransposeConversionPatterns(
+    const ::mlir::TypeConverter &typeConverter,
+    ::mlir::RewritePatternSet &patterns, ::mlir::MLIRContext *ctx);
+
 void populateReturnConversionPatterns(
     const ::mlir::TypeConverter &typeConverter,
     ::mlir::RewritePatternSet &patterns, ::mlir::MLIRContext *ctx);

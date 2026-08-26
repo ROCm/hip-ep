@@ -13,6 +13,7 @@ add_library(OnnxToHipsr STATIC
   ReshapeConversion.cpp
   UnsqueezeConversion.cpp
   EqualConversion.cpp
+  TransposeConversion.cpp
   ReturnConversion.cpp
 )
 

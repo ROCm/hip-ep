@@ -656,5 +656,6 @@ void mlir::hipsr::registerBufferizableOpInterfaceExternalModels(
     CastOp::attachInterface<DpsBufferizableModel<CastOp>>(*ctx);
     MulOp::attachInterface<DpsBufferizableModel<MulOp>>(*ctx);
     EqualOp::attachInterface<DpsBufferizableModel<EqualOp>>(*ctx);
+    TransposeOp::attachInterface<DpsBufferizableModel<TransposeOp>>(*ctx);
   });
 }
