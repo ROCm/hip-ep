@@ -193,9 +193,11 @@ if(BUILD_HIP_TOOLS)
   if(BUILD_EP)
     add_subdirectory(backend-mlir-compiler)
   endif()
-
-  # DLL target (hip-compiler.dll)
-  add_subdirectory(dll)
+  # Since hip-compiler.dll has been merged into hipgpu.dll, 
+  # hip-compiler.dll is no longer required when BUILD_EP=OFF.
+  if(NOT BUILD_EP)
+    add_subdirectory(dll)
+  endif()
 
   # Executable targets
   add_subdirectory(tools)
@@ -254,9 +256,10 @@ if(BUILD_HIP_TOOLS)
   endforeach()
 endif()
 
-# Python wheel packaging (opt-in; defines the 'wheel' target). Added last so
-# both the EP target (morphizen_CORE_DYNAMIC_UNIQUE_ID, from deps.cmake) and the
-# JIT compiler plugin target (hip-compiler-dll, from BUILD_HIP_TOOLS) exist.
+# Python wheel packaging (opt-in; defines the 'wheel' target). Added last so the
+# EP target (morphizen_CORE_DYNAMIC_UNIQUE_ID, from deps.cmake) exists. That one
+# target is all the wheel needs: BUILD_EP links the JIT compiler into it, so
+# there is no separate compiler library to stage.
 if(BUILD_EP AND BUILD_PYTHON_WHEEL)
   add_subdirectory(python)
 endif()

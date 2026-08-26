@@ -329,8 +329,9 @@ pip install \
 ```
 > **Note**: the ORT whl may be under `../build/onnxruntime/Release/Release/dist/`.
 > Replace `gfx1151` with your GPU arch. Install the EP wheel AFTER onnxruntime:
-> it ships its own native files (EP plugin `hipgpu.dll`, hip-compiler, custom
-> kernels) straight into `onnxruntime/capi/` next to `onnxruntime.dll`. The ROCm
+> it ships its own native files (EP plugin `hipgpu.dll`, which carries the
+> JIT compiler, plus the custom kernels) straight into `onnxruntime/capi/`
+> next to `onnxruntime.dll`. The ROCm
 > runtime DLLs (amdhip64/MIOpen/hipBLASLt) come from the `rocm[devel]` wheel
 > (expanded next). The wheel does NOT bundle the AMD GPU umbrella
 > (`amdgpu-ep.dll` + `hip-backend.dll`); driving OGA through the umbrella needs
