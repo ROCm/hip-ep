@@ -119,37 +119,6 @@ static inline const char *hipdnn_ep_datatype_name(int64_t data_type) {
 }
 
 //===----------------------------------------------------------------------===//
-// Backend-Independent Activation Mode Identifiers
-//===----------------------------------------------------------------------===//
-//
-// Same pattern as HIPDNN_EP_DATATYPE_* above. Each backend provides an explicit
-// mapping function (e.g. hipdnn_ep_to_miopen_activation in
-// real/activation.cpp).
-//
-// To add a new activation:
-//   1. Add #define here
-//   2. Update hipdnn_ep_activation_name()
-//   3. Update each backend mapping function
-//===----------------------------------------------------------------------===//
-
-#define HIPDNN_EP_ACTIVATION_SIGMOID 0
-#define HIPDNN_EP_ACTIVATION_RELU 1
-#define HIPDNN_EP_ACTIVATION_TANH 2
-
-static inline const char *hipdnn_ep_activation_name(int64_t activation_mode) {
-  switch (activation_mode) {
-  case HIPDNN_EP_ACTIVATION_SIGMOID:
-    return "sigmoid";
-  case HIPDNN_EP_ACTIVATION_RELU:
-    return "relu";
-  case HIPDNN_EP_ACTIVATION_TANH:
-    return "tanh";
-  default:
-    return "unknown";
-  }
-}
-
-//===----------------------------------------------------------------------===//
 // Global pool reduction modes (must match kGlobalPool* in HipToLLVMUtils.h).
 //===----------------------------------------------------------------------===//
 
@@ -1089,14 +1058,6 @@ int wrap_reduce_min(RuntimeState *state, void *data, void *axes, void *output,
 int wrap_cast(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t src_data_type,
               int64_t dst_data_type);
-
-// MIOpen activation wrapper (sigmoid, tanh).
-// Applies activation_mode (HIPDNN_EP_ACTIVATION_SIGMOID or _TANH) element-wise.
-// data_type: HIPDNN_EP_DATATYPE_* constant identifying the element type
-int wrap_miopenActivationForward(RuntimeState *state, int op_state_slot,
-                                 void *input, void *output,
-                                 int64_t num_elements, int64_t data_type,
-                                 int64_t activation_mode);
 
 // GELU activation wrapper (uses custom HIP kernel)
 // Applies GELU element-wise with support for exact or approximate mode

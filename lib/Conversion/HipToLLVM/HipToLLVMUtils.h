@@ -71,8 +71,6 @@ inline constexpr const char *kWrapScatterElements = "wrap_scatter_elements";
 inline constexpr const char *kWrapCompress = "wrap_compress";
 inline constexpr const char *kWrapOneHot = "wrap_one_hot";
 inline constexpr const char *kHipSilu = "hip_silu";
-inline constexpr const char *kWrapMiopenActivationForward =
-    "wrap_miopenActivationForward";                            // hip.sigmoid
 inline constexpr const char *kWrapGelu = "wrap_gelu";          // hip.gelu
 inline constexpr const char *kWrapBiasGelu = "wrap_bias_gelu"; // hip.bias_gelu
 inline constexpr const char *kWrapFastGelu = "wrap_fast_gelu"; // hip.fast_gelu
@@ -153,10 +151,6 @@ inline constexpr int64_t kAlignedPtrIdx = 1;
 inline constexpr int64_t kOffsetIdx = 2;
 inline constexpr int64_t kSizesIdx = 3;
 inline constexpr int64_t kStridesIdx = 4;
-
-// Activation mode constants.
-// Values must match HIPDNN_EP_ACTIVATION_* in lib/Runtime/hipdnn_ep_runtime.h.
-inline constexpr int64_t kActivationRelu = 1;
 
 // Window-pool reduction mode constants (hip.pool / wrap_pool).
 // Values must match HIPDNN_EP_POOL_* in lib/Runtime/hipdnn_ep_runtime.h

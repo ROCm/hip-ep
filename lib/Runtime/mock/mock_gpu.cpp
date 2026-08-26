@@ -533,8 +533,6 @@ int wrap_causal_conv_with_state(
   }
 
   // CausalConvWithState fused activation enum: 0=none, 1=silu/swish.
-  // This is independent of hipdnn_ep_activation_name() which maps generic
-  // miopen activations (sigmoid/relu/tanh).
   const char *act_name = (activation == 1) ? "silu" : "none";
 
   MOCK_PRINT("[MOCK] wrap_causal_conv_with_state(\n");
@@ -1214,26 +1212,6 @@ int wrap_global_pool(RuntimeState *state, void *input, void *output,
              hipdnn_ep_datatype_name(data_type), (long long)data_type,
              (long long)hipdnn_ep_datatype_size(data_type),
              input ? "yes" : "null", output ? "yes" : "null");
-
-  return 0;
-}
-
-int wrap_miopenActivationForward(RuntimeState *state, int op_state_slot,
-                                 void *input, void *output,
-                                 int64_t num_elements, int64_t data_type,
-                                 int64_t activation_mode) {
-  (void)op_state_slot;
-  if (!state) {
-    fprintf(stderr, "Invalid state in wrap_miopenActivationForward\n");
-    return -1;
-  }
-
-  MOCK_PRINT("[MOCK] wrap_miopenActivationForward(activation=%s, "
-             "num_elements=%lld, data_type=%s(%lld), element_size=%lld)\n",
-             hipdnn_ep_activation_name(activation_mode),
-             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
-             (long long)data_type,
-             (long long)hipdnn_ep_datatype_size(data_type));
 
   return 0;
 }

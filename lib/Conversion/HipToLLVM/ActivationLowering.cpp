@@ -10,99 +10,6 @@ namespace hip {
 namespace {
 
 //===----------------------------------------------------------------------===//
-// Shared MIOpen Activation Lowering Helper
-//===----------------------------------------------------------------------===//
-// Generic lowering for single-input/single-output MIOpen activation functions
-// that call wrap_miopenActivationForward with an activation_mode parameter.
-//
-// Supports data type:
-//   float32, float16, bfloat16
-//
-// Template parameters:
-//   OpType: The HIP op type (e.g., SigmoidOp, TanhOp)
-//   activationMode: The HIPDNN_EP_ACTIVATION_* constant
-//
-// Requirements:
-//   - OpType must have: getCtx(), getX(), getY() accessors
-//   - OpType must be a DPS op with single input (x) and single output (y)
-template <typename OpType, int64_t activationMode>
-static LogicalResult
-lowerMiopenActivation(OpType op, typename OpType::Adaptor adaptor,
-                      ConversionPatternRewriter &rewriter) {
-  Location loc = op.getLoc();
-  ModuleOp module = op->template getParentOfType<ModuleOp>();
-  Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
-  Type i32Type = rewriter.getI32Type();
-  Type i64Type = rewriter.getI64Type();
-
-  // Helper to create i64 constants
-  auto createI64Const = [&](int64_t value) -> Value {
-    return LLVM::ConstantOp::create(rewriter, loc, i64Type,
-                                    rewriter.getI64IntegerAttr(value));
-  };
-
-  // Extract pointers
-  Value statePtr = adaptor.getCtx();
-  Value inputPtr = extractContiguousMemRefPtr(adaptor.getX(), rewriter, loc);
-  Value outputPtr = extractContiguousMemRefPtr(adaptor.getY(), rewriter, loc);
-
-  auto outputType = cast<MemRefType>(op.getY().getType());
-
-  // Compute num_elements (supports dynamic shapes)
-  Value numElements = createI64Const(1);
-  MemRefDescriptor outputDesc(adaptor.getY());
-
-  for (auto dimIdx : llvm::seq<int64_t>(outputType.getRank())) {
-    Value dimSize;
-    if (outputType.isDynamicDim(dimIdx)) {
-      dimSize = outputDesc.size(rewriter, loc, dimIdx);
-    } else {
-      dimSize = createI64Const(outputType.getDimSize(dimIdx));
-    }
-    numElements = LLVM::MulOp::create(rewriter, loc, numElements, dimSize);
-  }
-
-  // Get data type enum (f32=0, f16=1, bf16=2)
-  // MIOpen activations only support floating-point types
-  Type elemType = outputType.getElementType();
-  int64_t dataType = getHipdnnDataType(elemType);
-
-  // Validate: only f32, f16, bf16 are supported (no integer types)
-  if (dataType < 0 || dataType > 2) {
-    std::string errorMsg;
-    llvm::raw_string_ostream os(errorMsg);
-    os << "unsupported element type '" << elemType
-       << "' for MIOpen activation (mode=" << activationMode
-       << "). Only f32, f16, and bf16 are supported";
-    return rewriter.notifyMatchFailure(op, os.str());
-  }
-
-  Value dataTypeVal = createI64Const(dataType);
-  Value activationModeVal = createI64Const(activationMode);
-
-  // int wrap_miopenActivationForward(RuntimeState* state, int op_state_slot,
-  //     void* input, void* output, int64_t num_elements, int64_t data_type,
-  //     int64_t activation_mode)
-  SmallVector<Type, 7> paramTypes = {ptrType, i32Type, ptrType, ptrType,
-                                     i64Type, i64Type, i64Type};
-
-  FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-      rewriter, module, kWrapMiopenActivationForward, paramTypes, i32Type);
-  if (failed(funcOp))
-    return failure();
-
-  SmallVector<Value, 7> args = {
-      statePtr,         getOpStateSlotValue(op, rewriter, loc),
-      inputPtr,         outputPtr,
-      numElements,      dataTypeVal,
-      activationModeVal};
-
-  LLVM::CallOp::create(rewriter, loc, *funcOp, args);
-  rewriter.eraseOp(op);
-  return success();
-}
-
-//===----------------------------------------------------------------------===//
 // Individual Activation Lowering Patterns
 //===----------------------------------------------------------------------===//
 
@@ -110,7 +17,6 @@ lowerMiopenActivation(OpType op, typename OpType::Adaptor adaptor,
 //   -> wrap_softplus(state, input, output, num_elements, data_type)
 // Uses custom HIP kernel (hip_softplus).
 // Supports static and dynamic shapes (computes num_elements at runtime).
-// Supports data types: f32, f16 only.
 struct SoftplusOpLowering : public ConvertOpToLLVMPattern<SoftplusOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -149,15 +55,6 @@ struct SoftplusOpLowering : public ConvertOpToLLVMPattern<SoftplusOp> {
 
     Type elemType = outputType.getElementType();
     int64_t dataType = getHipdnnDataType(elemType);
-
-    if (dataType != 0 && dataType != 1) {
-      std::string errorMsg;
-      llvm::raw_string_ostream os(errorMsg);
-      os << "unsupported element type '" << elemType
-         << "' for softplus. Only f32 and f16 are supported";
-      return rewriter.notifyMatchFailure(op, os.str());
-    }
-
     Value dataTypeVal = createI64Const(dataType);
 
     // int wrap_softplus(RuntimeState* state, void* input, void* output,
