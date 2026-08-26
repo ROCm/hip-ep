@@ -17,5 +17,5 @@ flatbuffers;https://github.com/google/flatbuffers.git;v25.12.19
 ## Crash-backtrace helper (always FetchContent; no find_package path).
 cpptrace;https://github.com/jeremy-rifkin/cpptrace.git;v0.8.3
 ##
-therock_windows;https://github.com/ROCm/hip-ep/releases/download/v0.3.0;therock-dist-windows-gfx115X-all-7.11.0
+therock_windows;https://rocm.genesis.amd.com/tarball;therock-dist-windows-gfx117X-all-10.1.0a20260807
 therock_linux;https://repo.amd.com/rocm/tarball;7.11.0
