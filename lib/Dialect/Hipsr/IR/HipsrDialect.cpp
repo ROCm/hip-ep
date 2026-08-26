@@ -78,6 +78,7 @@ void populateHipsrToLLVMPatterns(const LLVMTypeConverter &typeConverter,
   populateHipsrMulLoweringPatterns(typeConverter, patterns);
   populateHipsrEqualLoweringPatterns(typeConverter, patterns);
   populateHipsrTransposeLoweringPatterns(typeConverter, patterns);
+  populateHipsrGatherLoweringPatterns(typeConverter, patterns);
   populateHipsrGetPoolLoweringPatterns(typeConverter, patterns);
   populateHipsrCastLoweringPatterns(typeConverter, patterns);
   populateHipsrMatMulLoweringPatterns(typeConverter, patterns);

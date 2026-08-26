@@ -21,6 +21,7 @@ add_library(HipsrDialectIR STATIC
   HipsrMulOp.cpp
   HipsrEqualOp.cpp
   HipsrTransposeOp.cpp
+  HipsrGatherOp.cpp
   HipsrGetPoolOp.cpp
   HipsrPreserveShapeOp.cpp
   HipsrLLVMLoweringUtils.cpp
