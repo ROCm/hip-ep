@@ -682,6 +682,15 @@ static std::string currentGpuArch() {
 #endif
 }
 
+// Diagnostic gate shared with the per-shape config log in gqa_kernel.hip:
+// setting HIPDNN_EP_GQA_LOG_CONFIG turns on both, so one run shows whether the
+// table loaded AND what config each shape resolved to.
+static bool gqaLutLogOn() {
+  static const bool on =
+      !hipdnn_ep::env_string("HIPDNN_EP_GQA_LOG_CONFIG").empty();
+  return on;
+}
+
 static bool compatibleLut(const fbs::GqaAutotuneLut *lut) {
   if (lut->schema_version() != kGqaLutSchemaVersion) {
     if (gqaLutLogOn())
@@ -725,15 +734,6 @@ static bool compatibleLut(const fbs::GqaAutotuneLut *lut) {
 #endif
   }
   return true;
-}
-
-// Diagnostic gate shared with the per-shape config log in gqa_kernel.hip:
-// setting HIPDNN_EP_GQA_LOG_CONFIG turns on both, so one run shows whether the
-// table loaded AND what config each shape resolved to.
-static bool gqaLutLogOn() {
-  static const bool on =
-      !hipdnn_ep::env_string("HIPDNN_EP_GQA_LOG_CONFIG").empty();
-  return on;
 }
 
 static bool loadLutBuffer(GqaAutotunePolicy &policy, const uint8_t *data,
