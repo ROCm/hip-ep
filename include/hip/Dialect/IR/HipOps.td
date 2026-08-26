@@ -1919,28 +1919,16 @@ def Hip_SiluOp : Hip_DpsOp<"silu", /*traits=*/[],
   let hasVerifier = 1;
 }
 
-def Hip_SigmoidOp : Hip_DpsOp<"sigmoid", /*traits=*/[OpStateOpInterface],
+def Hip_SigmoidOp : Hip_DpsOp<"sigmoid", /*traits=*/[],
                               /*outsAccessor=*/"Y",
                               /*autoReify=*/1,
                               /*autoInfer=*/1,
                               /*declareInfer=*/1> {
   let summary = "Sigmoid activation";
-
-  // OpStateOpInterface: construct this instance's per-session ActivationState,
-  // which holds a shared_ptr to the device-wide MIOpen descriptor table shared
-  // across sessions via WeakStore. All three MIOpen activations (sigmoid, tanh,
-  // softplus) share the same construct + table.
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot,
-          "hipdnn_ep_op_state_construct_activation", {});
-    }
-  }];
   let description = [{
     Applies sigmoid activation: y = 1 / (1 + exp(-x))
+
+    Lowered via the unified unary elementwise path (wrap_sigmoid).
 
     Uses destination-passing style: output buffer is provided as argument.
 
@@ -1964,25 +1952,16 @@ def Hip_SigmoidOp : Hip_DpsOp<"sigmoid", /*traits=*/[OpStateOpInterface],
   }];
 }
 
-def Hip_TanhOp : Hip_DpsOp<"tanh", /*traits=*/[OpStateOpInterface],
+def Hip_TanhOp : Hip_DpsOp<"tanh", /*traits=*/[],
                            /*outsAccessor=*/"Y",
                            /*autoReify=*/1,
                            /*autoInfer=*/1,
                            /*declareInfer=*/1> {
   let summary = "Tanh activation";
-
-  // OpStateOpInterface: shared ActivationState (see hip.sigmoid).
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot,
-          "hipdnn_ep_op_state_construct_activation", {});
-    }
-  }];
   let description = [{
     Applies hyperbolic-tangent activation: y = tanh(x)
+
+    Lowered via the unified unary elementwise path (wrap_tanh).
 
     Uses destination-passing style: output buffer is provided as argument.
 

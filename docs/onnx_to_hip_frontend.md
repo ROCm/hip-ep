@@ -91,7 +91,6 @@ existing `--convert-hip-to-llvm` pipeline.
 
 | ONNX | HIP | MIOpen mode |
 |---|---|---|
-| `Sigmoid` | `hip.miopen.sigmoid` | `miopenActivationLOGISTIC` |
 | `Relu` | `hip.miopen.relu` | `miopenActivationRELU` |
 
 ### MIOpen: Softmax (`miopenSoftmaxForward`)

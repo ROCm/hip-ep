@@ -20,8 +20,8 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Mul | MIOpen |
 | Add | MIOpen |
 | Softmax | Custom HIP kernel |
-| Sigmoid | MIOpen |
-| Tanh | MIOpen |
+| Sigmoid | Custom HIP kernel |
+| Tanh | Custom HIP kernel |
 | Softplus | MIOpen |
 | Gelu | Custom HIP kernel |
 | BiasGelu (`com.microsoft`) | Custom HIP kernel |

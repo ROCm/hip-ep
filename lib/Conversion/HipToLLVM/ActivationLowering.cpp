@@ -106,34 +106,6 @@ lowerMiopenActivation(OpType op, typename OpType::Adaptor adaptor,
 // Individual Activation Lowering Patterns
 //===----------------------------------------------------------------------===//
 
-// hip.sigmoid(ctx, x, y)
-//   -> wrap_miopenActivationForward(state, x, y, num_elements,
-//                                    data_type, activation_mode=SIGMOID)
-struct SigmoidOpLowering : public ConvertOpToLLVMPattern<SigmoidOp> {
-  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
-
-  LogicalResult
-  matchAndRewrite(SigmoidOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    return lowerMiopenActivation<SigmoidOp, kActivationSigmoid>(op, adaptor,
-                                                                rewriter);
-  }
-};
-
-// hip.tanh(ctx, x, y)
-//   -> wrap_miopenActivationForward(state, x, y, num_elements,
-//                                    data_type, activation_mode=TANH)
-struct TanhOpLowering : public ConvertOpToLLVMPattern<TanhOp> {
-  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
-
-  LogicalResult
-  matchAndRewrite(TanhOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    return lowerMiopenActivation<TanhOp, kActivationTanh>(op, adaptor,
-                                                          rewriter);
-  }
-};
-
 // hip.softplus(ctx, x, y)
 //   -> wrap_miopenActivationForward(state, x, y, num_elements,
 //                                    data_type, activation_mode=SOFTPLUS)
@@ -420,9 +392,8 @@ struct MiopenSoftmaxOpLowering
 
 void populateActivationLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns) {
-  patterns.add<SigmoidOpLowering, TanhOpLowering, SoftplusOpLowering,
-               GeluOpLowering, LeakyReluOpLowering, SiluOpLowering,
-               MiopenSoftmaxOpLowering>(converter);
+  patterns.add<SoftplusOpLowering, GeluOpLowering, LeakyReluOpLowering,
+               SiluOpLowering, MiopenSoftmaxOpLowering>(converter);
 }
 
 } // namespace hip

@@ -1487,6 +1487,10 @@ int wrap_ceil(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t data_type);
 int wrap_exp(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
+int wrap_sigmoid(RuntimeState *state, void *input, void *output,
+                 int64_t num_elements, int64_t data_type);
+int wrap_tanh(RuntimeState *state, void *input, void *output,
+              int64_t num_elements, int64_t data_type);
 
 int wrap_log(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);

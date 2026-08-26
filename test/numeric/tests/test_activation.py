@@ -3,7 +3,7 @@
 # Licensed under the MIT License.
 #
 
-"""Tests for activation / unary operations: Sigmoid, Sqrt, Reciprocal,
+"""Tests for activation / unary operations: Sigmoid, Tanh, Sqrt, Reciprocal,
 Softplus."""
 
 import numpy as np
@@ -58,6 +58,24 @@ class TestSigmoid:
 
         rng = np.random.default_rng(42)
         x = rng.uniform(-5, 5, shape).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-3)
+
+
+class TestTanh:
+    @pytest.mark.parametrize(
+        "dtype,shape",
+        [
+            (np.float16, [1, 10]),
+            (np.float16, [4, 256]),
+        ],
+    )
+    def test_tanh(self, model_runner, dtype, shape):
+        model = _make_unary_model("Tanh", dtype, shape)
+
+        rng = np.random.default_rng(42)
+        x = rng.uniform(-5, 5, shape).astype(dtype)
 
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-3)

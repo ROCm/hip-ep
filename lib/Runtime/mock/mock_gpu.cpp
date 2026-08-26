@@ -1798,6 +1798,30 @@ int wrap_exp(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_sigmoid(RuntimeState *state, void *input, void *output,
+                 int64_t num_elements, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_sigmoid\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_sigmoid(num_elements=%lld, data_type=%s(%lld))\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  return 0;
+}
+
+int wrap_tanh(RuntimeState *state, void *input, void *output,
+              int64_t num_elements, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_tanh\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_tanh(num_elements=%lld, data_type=%s(%lld))\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  return 0;
+}
+
 int wrap_log(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type) {
   if (!state) {
