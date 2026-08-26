@@ -6,7 +6,7 @@
 message(STATUS "Building hip-compiler.dll")
 
 # Create the DLL target
-add_library(hip-compiler-dll SHARED
+add_library(hip-compiler-dll STATIC
     dll_main.cpp
     hip-compiler.def
 )
@@ -47,6 +47,16 @@ hipdnn_ep_apply_binary_compliance(hip-compiler-dll
 if(NOT WIN32)
     target_link_options(hip-compiler-dll PRIVATE
         "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/hip-compiler.exports")
+endif()
+
+if(DEFINED morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET AND
+   TARGET ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET})
+    target_link_libraries(${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET}
+        PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,hip-compiler-dll>")
+else()
+    message(WARNING
+        "morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET not defined or not a target "
+        "- hip-compiler will not be linked into the EP")
 endif()
 
 # Install DLL and import library

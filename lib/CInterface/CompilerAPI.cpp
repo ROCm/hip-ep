@@ -9,6 +9,7 @@
 #include "hip/flatbuffers_json.h"
 
 #include "morphizen-foundation/file_io.hpp"
+#include "morphizen-utils/morphizen_plugin.hpp"
 
 #include "compilation_options_schema.h"
 
@@ -16,7 +17,6 @@
 
 #include <cstring>
 #include <string>
-
 #ifdef HIPDNN_GRAPH_RUNTIME_AVAILABLE
 #include "../HipDNNGraphRuntime/hipdnn_graph_runtime.h"
 #endif
@@ -132,3 +132,13 @@ COMPILER_API CompilerErrorCode hip_compile_with_fs(
 COMPILER_API const char *hip_get_version(void) { return COMPILER_VERSION; }
 
 } // extern "C"
+
+namespace{
+static ::morphizen::StaticPluginRegister
+    __register_hip_compile("hip-compiler", "hip_compile_with_fs",
+                           reinterpret_cast<void *>(&hip_compile_with_fs));
+
+static ::morphizen::StaticPluginRegister
+    __register_hip_version("hip-compiler", "hip_get_version",
+                           reinterpret_cast<void *>(&hip_get_version));
+}
