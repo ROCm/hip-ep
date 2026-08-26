@@ -442,7 +442,6 @@ jobs:
           }
           stage_pass \
             "$INSTALL"/lib/libhipgpu.so \
-            "$INSTALL"/lib/libhip-compiler.so \
             "$INSTALL"/bin/hip-compiler \
             "$INSTALL"/bin/hip-onnx-runner \
             "$INSTALL"/bin/hip-test \
