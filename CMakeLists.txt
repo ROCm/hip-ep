@@ -193,7 +193,7 @@ if(BUILD_HIP_TOOLS)
   if(BUILD_EP)
     add_subdirectory(backend-mlir-compiler)
   endif()
-  # Since hip-compiler.dll has been merged into hipgpu.dll, 
+  # Since hip-compiler.dll has been merged into hipgpu.dll,
   # hip-compiler.dll is no longer required when BUILD_EP=OFF.
   if(NOT BUILD_EP)
     add_subdirectory(dll)

@@ -1044,7 +1044,7 @@ jobs:
           # The morphizen wheel now bundles the whole AMD GPU umbrella chain
           # (amdgpu-ep.dll + hip-backend.dll + hipgpu.dll + custom_kernels) into
           # onnxruntime/capi/, next to onnxruntime.dll where OGA discovers the
-          # EP. No DLL injection needed — exercise the wheel path end-to-end. 
+          # EP. No DLL injection needed — exercise the wheel path end-to-end.
           $pkg = "$PWD\wheelpkg"
           $venv = "$PWD\oga-smoke-venv"
           if (Test-Path $venv) { Remove-Item $venv -Recurse -Force }

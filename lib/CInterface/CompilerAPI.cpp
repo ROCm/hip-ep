@@ -142,11 +142,11 @@ namespace {
 
 static ::morphizen::StaticPluginRegister
     __register_hip_compile("hip-compiler", "hip_compile_with_fs",
-                         reinterpret_cast<void *>(&hip_compile_with_fs));
+                           reinterpret_cast<void *>(&hip_compile_with_fs));
 
 static ::morphizen::StaticPluginRegister
     __register_hip_version("hip-compiler", "hip_get_version",
-                         reinterpret_cast<void *>(&hip_get_version));
+                           reinterpret_cast<void *>(&hip_get_version));
 
 } // namespace
 #endif
