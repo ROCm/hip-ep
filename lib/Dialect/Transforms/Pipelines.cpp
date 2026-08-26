@@ -146,6 +146,10 @@ buildOnnxToHipPipelineTail(OpPassManager &pm,
         std::move(externalizeOptions)));
   }
 
+  // Fold conv+ReLU6 after constant externalization: greedy rewrite can DCE
+  // unused hip.constant carriers if this runs earlier (StaticPlugins test).
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createFuseConvRelu6Pass());
+
   // 1b'. Canonicalize + CSE immediately after shape inference and constant
   //      externalization. The dynamic-shape op conversions (e.g. pool /
   //      reduce) size each dynamic result dim by emitting `tensor.dim` of a

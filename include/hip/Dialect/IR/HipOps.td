@@ -639,6 +639,13 @@ def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[OpStateOpInterface], /*outsAccess
     - pads: Array of padding values [top, left, bottom, right]
     - dilations: Array of dilation values [H, W]
     - group: Number of groups for grouped convolution
+    - fused_activation: When true, apply a fused post-conv activation via MIOpen
+      after conv (+ bias). When false (default), no activation is applied.
+    - activation_clip_lo: Lower clip bound (default 0.0). Used when
+      fused_activation is true.
+    - activation_clip_hi: Upper clip bound (default 0.0). 0.0 means no upper
+      clip (plain ReLU when clip_lo is 0). ReLU6 uses clip_hi = 6.0.
+    - activation_alpha: Reserved for future leaky/slope activations (default 0.0).
 
     Example:
     ```mlir
@@ -662,7 +669,11 @@ def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[OpStateOpInterface], /*outsAccess
     I64ArrayAttr:$strides,
     I64ArrayAttr:$pads,
     I64ArrayAttr:$dilations,
-    I64Attr:$group
+    I64Attr:$group,
+    DefaultValuedAttr<BoolAttr, "false">:$fused_activation,
+    DefaultValuedAttr<F32Attr, "0.0">:$activation_clip_lo,
+    DefaultValuedAttr<F32Attr, "0.0">:$activation_clip_hi,
+    DefaultValuedAttr<F32Attr, "0.0">:$activation_alpha
   );
 
   let assemblyFormat = [{

@@ -449,7 +449,10 @@ int wrap_miopenConvolutionForward(
     int64_t output_h, int64_t output_w, int64_t kernel_h, int64_t kernel_w,
     int64_t stride_h, int64_t stride_w, int64_t pad_top, int64_t pad_left,
     int64_t pad_bottom, int64_t pad_right, int64_t dilation_h,
-    int64_t dilation_w, int64_t group, int64_t data_type) {
+    int64_t dilation_w, int64_t group, int64_t data_type,
+    int64_t fused_activation, float activation_clip_lo,
+    float activation_clip_hi, float activation_alpha) {
+  (void)activation_alpha;
   if (!state || !input || !weights || !output) {
     fprintf(stderr, "Invalid arguments to wrap_miopenConvolutionForward\n");
     return -1;
@@ -464,10 +467,13 @@ int wrap_miopenConvolutionForward(
   MOCK_PRINT("[MOCK]   output=[%lld,%lld,%lld,%lld],\n", (long long)input_n,
              (long long)weights_k, (long long)output_h, (long long)output_w);
   MOCK_PRINT("[MOCK]   stride=[%lld,%lld], pad=[%lld,%lld,%lld,%lld], "
-             "dilation=[%lld,%lld], group=%lld)\n",
+             "dilation=[%lld,%lld], group=%lld, dtype=%lld, "
+             "fused=%lld clip=[%.3f,%.3f] alpha=%.3f)\n",
              (long long)stride_h, (long long)stride_w, (long long)pad_top,
              (long long)pad_left, (long long)pad_bottom, (long long)pad_right,
-             (long long)dilation_h, (long long)dilation_w, (long long)group);
+             (long long)dilation_h, (long long)dilation_w, (long long)group,
+             (long long)data_type, (long long)fused_activation,
+             activation_clip_lo, activation_clip_hi, activation_alpha);
 
   // Mock: Fill output with dummy data (zeros in this case)
   // In a real implementation, this would call MIOpen. Use the actual element
