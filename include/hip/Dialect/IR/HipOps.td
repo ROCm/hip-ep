@@ -1248,6 +1248,52 @@ def Hip_LayerNormOp : Hip_DpsOp<"layer_norm",
   let hasVerifier = 1;
 }
 
+def Hip_InstanceNormOp : Hip_DpsOp<"instance_norm", /*traits=*/[],
+                                   /*outsAccessor=*/"Output",
+                                   /*autoReify=*/1,
+                                   /*autoInfer=*/1,
+                                   /*declareInfer=*/1> {
+  let summary = "ONNX InstanceNormalization (per-instance per-channel mean/var)";
+  let description = [{
+    Carries out instance normalization as described in
+    https://arxiv.org/abs/1607.08022 / ONNX InstanceNormalization:
+
+      y = scale * (x - mean) / sqrt(variance + epsilon) + B
+
+    Mean and variance are computed over the spatial axes of each (N, C)
+    slice. Input rank is at least 3: (N, C, D1, ..., Dn). Scale and B are
+    1-D tensors of length C.
+
+    Example:
+    ```mlir
+    hip.instance_norm(%ctx)
+        ins(%input, %scale, %bias :
+            memref<2x3x8x8xf32, 1>, memref<3xf32, 1>, memref<3xf32, 1>)
+        outs(%output : memref<2x3x8x8xf32, 1>)
+        {epsilon = 1.000000e-05 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$scale,
+    Hip_TensorOrMemRef:$bias,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<F32Attr, "1.000000e-05">:$epsilon
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $scale `,` $bias `:`
+        type($input) `,` type($scale) `,` type($bias)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
 def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
     [AttrSizedOperandSegments, OpStateOpInterface]> {
   let summary = "Fused skip + RMS normalization (com.microsoft.SkipSimplifiedLayerNormalization)";

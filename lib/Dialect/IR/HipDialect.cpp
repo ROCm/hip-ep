@@ -763,6 +763,51 @@ LogicalResult LayerNormOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// InstanceNormOp: ins(input, scale, bias), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange InstanceNormOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void InstanceNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult InstanceNormOp::verify() {
+  SmallVector<Value> dataOperands{getInput(), getScale(), getBias(),
+                                  getOutput()};
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  auto rankedShape = [](Type t) -> std::optional<int64_t> {
+    if (auto tensor = dyn_cast<RankedTensorType>(t))
+      return tensor.getRank();
+    if (auto memref = dyn_cast<MemRefType>(t))
+      return memref.getRank();
+    return std::nullopt;
+  };
+
+  auto inputRank = rankedShape(getInput().getType());
+  if (!inputRank)
+    return emitOpError("expected ranked input of rank >= 3 (N, C, D1, ...)");
+  if (*inputRank < 3)
+    return emitOpError("expected input rank >= 3 (N, C, D1, ...), got ")
+           << *inputRank;
+
+  auto scaleRank = rankedShape(getScale().getType());
+  auto biasRank = rankedShape(getBias().getType());
+  if (scaleRank && *scaleRank != 1)
+    return emitOpError("expected 1-D scale of length C, got rank ")
+           << *scaleRank;
+  if (biasRank && *biasRank != 1)
+    return emitOpError("expected 1-D bias of length C, got rank ") << *biasRank;
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // RopeOp: ins(input, [position_ids], cos_cache, sin_cache), outs(output)
 //===----------------------------------------------------------------------===//
 

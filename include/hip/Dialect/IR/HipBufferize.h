@@ -168,6 +168,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     LinearAttentionOp::attachInterface<
         HipDstBufferizableModel<LinearAttentionOp>>(*ctx);
     LayerNormOp::attachInterface<HipDstBufferizableModel<LayerNormOp>>(*ctx);
+    InstanceNormOp::attachInterface<HipDstBufferizableModel<InstanceNormOp>>(
+        *ctx);
     MinOp::attachInterface<HipDstBufferizableModel<MinOp>>(*ctx);
     MaxOp::attachInterface<HipDstBufferizableModel<MaxOp>>(*ctx);
     AbsOp::attachInterface<HipDstBufferizableModel<AbsOp>>(*ctx);
