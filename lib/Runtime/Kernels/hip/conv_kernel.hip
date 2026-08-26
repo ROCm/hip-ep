@@ -175,6 +175,18 @@ struct ConvParams {
   // Reciprocals of the five divisors the index decode needs.
   FastDiv rKvol, rK1k2, rK2, rOut1out2, rOut2;
 
+  // The innermost spatial axis: the one whose coordinate advances by a single
+  // element of `lin` per output position, which is what lets a run of adjacent
+  // columns of the im2col matrix be read as one contiguous vector. It is axis
+  // spatial_rank-1, and it has unit stride in `lin` because the caller fills the
+  // unused trailing axes with extent 1. `innerVec` is set only when a run is
+  // actually contiguous, i.e. when that axis has stride 1.
+  int32_t innerAxis;  // 0, 1 or 2
+  int32_t innerIni;   // input extent of that axis, for the bounds test
+  int64_t innerOut;   // output extent of that axis: where a run breaks
+  FastDiv rInnerOut;
+  int32_t innerVec;   // nonzero when the vectorised stage is usable
+
   // Tile-grid geometry for the block swizzle below. Depends on the tile shape,
   // so it is filled in per launch rather than with the rest of the descriptor.
   int32_t nBlkM, nBlkN;
@@ -240,12 +252,24 @@ struct KSlice {
 // The contraction half, for one contraction index. A `kidx` past the end of the
 // contraction is a zero-padded column, which is expressed as a tap that the
 // bounds test is guaranteed to reject.
+//
+// The staging loops walk a whole BK-deep slice whether or not the contraction
+// has that many taps left, so this sentinel is on the live path for every
+// K % BK != 0 shape and it has to reject for *every* output position, not just
+// the interior ones. gatherSplit tests `org.x0 + c0` against in0i, and
+// decodeOrigin gives org.x0 = o0*s0 - p0 with o0 >= 0, so org.x0 >= -p0. A bare
+// `c0 = in0i` therefore lands back inside the input on the leading padded rows
+// (x0 = in0i - p0 < in0i), and the gather reads org.lin elements *before* the
+// tensor -- an out-of-bounds read that faults on ESRGAN, whose head conv is the
+// one shape in the model with K = 27. Adding pad_begin restores the invariant
+// org.x0 + c0 >= -p0 + in0i + p0 = in0i for all positions. Negative pads (a
+// crop) only push org.x0 further positive, so clamping at zero is safe there.
 __device__ __forceinline__ KSlice makeKSlice(const ConvParams &pr,
                                              int64_t kidx) {
   KSlice s;
   if (kidx >= pr.K) {
     s.off = 0;
-    s.c0 = pr.in0i; // always out of bounds
+    s.c0 = pr.in0i + static_cast<int32_t>(pr.p0 > 0 ? pr.p0 : 0);
     s.c1 = 0;
     s.c2 = 0;
     return s;
@@ -281,6 +305,39 @@ __device__ __forceinline__ float gatherSplit(const T *__restrict__ xChan,
   const int32_t x2 = org.x2 + ks.c2;
   if (x2 < 0 || x2 >= pr.in2i) return 0.0f;
   return to_float<T>(xChan[org.lin + ks.off]);
+}
+
+// The same bounds test as gatherSplit, but with the innermost axis held back.
+//
+// A run of adjacent columns shares its outer coordinates and walks the inner one
+// by one element per column, so splitting the test this way lets the vectorised
+// stage below do the outer two axes once for the whole run and the inner axis
+// with a compare per element -- no per-column origin, no per-column address.
+// The switch is on a launch-uniform field, so it costs a scalar branch.
+__device__ __forceinline__ void boundsRun(const ConvParams &pr,
+                                          const PosOrigin &org,
+                                          const KSlice &ks, bool &outerOk,
+                                          int32_t &xi) {
+  const int32_t x0 = org.x0 + ks.c0;
+  const int32_t x1 = org.x1 + ks.c1;
+  const int32_t x2 = org.x2 + ks.c2;
+  const bool ok0 = x0 >= 0 && x0 < pr.in0i;
+  const bool ok1 = x1 >= 0 && x1 < pr.in1i;
+  const bool ok2 = x2 >= 0 && x2 < pr.in2i;
+  switch (pr.innerAxis) {
+  case 0:
+    outerOk = ok1 && ok2;
+    xi = x0;
+    break;
+  case 1:
+    outerOk = ok0 && ok2;
+    xi = x1;
+    break;
+  default:
+    outerOk = ok0 && ok1;
+    xi = x2;
+    break;
+  }
 }
 
 // One im2col element B[(ic, kv), o], decoding the contraction index on the
@@ -510,6 +567,34 @@ typedef _Float16 half16 __attribute__((ext_vector_type(16)));
 typedef _Float16 half8 __attribute__((ext_vector_type(8)));
 typedef float float8 __attribute__((ext_vector_type(8)));
 
+// The im2col gather lands on arbitrary element offsets, so a run of eight is
+// only 2-byte aligned. Saying so lets the backend pick a wide load it can
+// actually use instead of assuming 16 and being wrong.
+typedef _Float16 half8u
+    __attribute__((ext_vector_type(8), aligned(alignof(_Float16))));
+
+// Eight consecutive input elements from `base`, or zeros where that would leave
+// the region `p` addresses. The caller's per-element mask decides what is
+// actually used, so this only has to avoid the illegal read: the wide path is
+// taken whenever the whole run is inside the region, which is everywhere except
+// the handful of blocks straddling its first or last elements.
+//
+// `span` is the whole group's channels, not one plane. The offset handed in
+// carries the input-channel term from KSlice::off, so it walks past the first
+// plane as the contraction advances.
+__device__ __forceinline__ half8 loadRun8(const _Float16 *__restrict__ p,
+                                          int64_t base, int64_t span) {
+  if (base >= 0 && base + 8 <= span)
+    return *reinterpret_cast<const half8u *>(p + base);
+  half8 v;
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    const int64_t idx = base + i;
+    v[i] = (idx >= 0 && idx < span) ? p[idx] : static_cast<_Float16>(0.0f);
+  }
+  return v;
+}
+
 // RDNA3-family wave32 builtin. Where it is absent, trap: this file still has
 // to compile for other architectures, and a silent wrong answer is worse than
 // an abort that names the reason.
@@ -541,7 +626,10 @@ constexpr int kWmma = 16; // 16x16x16 tile, so BK is fixed at 16
 // sixteen 2-byte ones. The padding is what keeps that from serialising: it
 // makes the row stride an odd multiple of 16 bytes, so the 32 lanes of a
 // fragment load land on 32 distinct banks.
-template <int BM, int BN, int WM, int WN>
+// VEC selects the vectorised im2col stage. It is a template parameter rather
+// than a branch so that only one of the two sets of hoisted per-thread origins
+// is materialised into registers.
+template <int BM, int BN, int WM, int WN, bool VEC>
 __global__ __launch_bounds__((BM / (WM * kWmma)) * (BN / (WN * kWmma)) * 32)
 void conv_wmma_kernel(const __half *__restrict__ x,
                       const __half *__restrict__ w,
@@ -555,9 +643,38 @@ void conv_wmma_kernel(const __half *__restrict__ x,
   static_assert((BN * kWmma) % kThreads == 0, "B stage tiling");
   static_assert(kThreads % BN == 0, "B column tiling");
 
+  // Vectorised stage geometry: eight columns per item, one item per lane, so a
+  // wave covers 8*32 = 256 columns of one contraction slice per instruction.
+  constexpr int kVecB = 8;
+  constexpr int kColGroups = BN / kVecB;
+  constexpr int kVecItems = kColGroups * kWmma;
+  static_assert(!VEC || BN % kVecB == 0, "B vector tiling");
+  static_assert(!VEC || kVecItems % kThreads == 0, "B vector items");
+  // Kept well-formed for the tiles that decline the vectorised stage, where
+  // these are dead but still have to compile.
+  constexpr int kItemsB = kVecItems >= kThreads ? kVecItems / kThreads : 1;
+  constexpr int kStepKK = kThreads >= kColGroups ? kThreads / kColGroups : 1;
+
+  // Bs carries an extra 8 halves every 8 columns, and the row base below is
+  // what applies it. Without the skew the vectorised stage -- where one lane
+  // writes eight consecutive columns -- puts all 32 lanes of a wave on a single
+  // LDS bank: eight rows of 48 bytes is 384, exactly three 128-byte bank
+  // cycles, so the per-lane stride lands on bank 0 every time. That conflict is
+  // worth more than the wide loads win, and measured as such (esrgan 64->32 at
+  // 250x250: 1.14 ms with it, 0.56 ms without).
+  //
+  // Skewing to 400 bytes spreads a wave over eight banks -- the same 4-way
+  // conflict the one-column-per-lane stage already lives with, and the best
+  // available while rows stay 16-byte aligned, which the fragment loads need.
+  // 8 halves is 16 bytes, so alignment survives.
+  constexpr int kBsSkew = 8;
+  static_assert(BN % 8 == 0, "Bs skew granularity");
   __shared__ _Float16 As[BM][kLdsK];
-  __shared__ _Float16 Bs[BN][kLdsK];
+  __shared__ __align__(16) _Float16 Bs[BN * kLdsK + (BN / 8) * kBsSkew];
   __shared__ KSlice ks[2][kWmma]; // see conv_tiled_kernel
+
+  // Start of a column's contraction slice in Bs, in halves.
+  const auto bsRow = [](int c) { return c * kLdsK + (c >> 3) * kBsSkew; };
 
   const int tid = threadIdx.x;
   const int wave = tid / 32;
@@ -588,9 +705,39 @@ void conv_wmma_kernel(const __half *__restrict__ x,
   const int kkB = tid / BN;
   const int64_t oPos = n0 + colB;
   const bool colValid = oPos < pr.Nout;
-  const PosOrigin org = colValid ? decodeOrigin(pr, oPos) : PosOrigin{0, 0, 0};
+  const PosOrigin org =
+      (!VEC && colValid) ? decodeOrigin(pr, oPos) : PosOrigin{0, 0, 0};
   const __half *xChan =
       x + (nbatch * pr.Cin + g * pr.CinPerGroup) * pr.inPlane;
+
+  // Vectorised stage, hoisted. A group of eight columns is contiguous in the
+  // input until it reaches the end of an output row, so it is at most two runs,
+  // and both are found once here rather than per contraction slice. Holding two
+  // origins and a split point costs a few registers and removes the per-column
+  // address arithmetic from the inner loop entirely.
+  const int cgB = tid % kColGroups;
+  const int kkVec = tid / kColGroups;
+  const int64_t oVec = n0 + static_cast<int64_t>(cgB) * kVecB;
+  int nValid = 0, splitB = kVecB;
+  PosOrigin orgA{0, 0, 0}, orgB{0, 0, 0};
+  if (VEC) {
+    const int64_t rem = pr.Nout - oVec;
+    nValid = rem <= 0 ? 0 : (rem < kVecB ? static_cast<int>(rem) : kVecB);
+    if (nValid > 0) {
+      const uint32_t ov = static_cast<uint32_t>(oVec);
+      const uint32_t row = fastDiv(ov, pr.rInnerOut);
+      const int inRow =
+          static_cast<int>(ov - row * static_cast<uint32_t>(pr.innerOut));
+      const int toEnd = static_cast<int>(pr.innerOut) - inRow;
+      splitB = toEnd < kVecB ? toEnd : kVecB;
+      orgA = decodeOrigin(pr, oVec);
+      if (splitB < nValid) orgB = decodeOrigin(pr, oVec + splitB);
+    }
+  }
+  const _Float16 *xChanF = reinterpret_cast<const _Float16 *>(xChan);
+  // xChan is the base of this group's channels, so a gather may legally reach
+  // anywhere in them -- KSlice::off carries the input-channel term.
+  const int64_t xSpan = pr.CinPerGroup * pr.inPlane;
 
   float8 acc[WM][WN];
 #pragma unroll
@@ -611,13 +758,50 @@ void conv_wmma_kernel(const __half *__restrict__ x,
           (rowValidA && i < kRem) ? static_cast<_Float16>(w[wBase + i])
                                   : static_cast<_Float16>(0.0f);
 
+    if (VEC) {
 #pragma unroll
-    for (int l = 0; l < kLoadsB; ++l) {
-      const int kk = kkB + l * kStepB;
-      Bs[colB][kk] =
-          colValid ? static_cast<_Float16>(
-                         gatherSplit<__half>(xChan, pr, org, ks[cur][kk]))
-                   : static_cast<_Float16>(0.0f);
+      for (int l = 0; l < kItemsB; ++l) {
+        const int kk = kkVec + l * kStepKK;
+        const KSlice s = ks[cur][kk];
+        // The two runs share the slice, so both bounds tests reduce to an outer
+        // predicate plus the innermost coordinate of the run's first column.
+        bool outerA, outerB;
+        int32_t xiA, xiB;
+        boundsRun(pr, orgA, s, outerA, xiA);
+        boundsRun(pr, orgB, s, outerB, xiB);
+        // Predicated, not unconditional: a run only spills into a second one at
+        // the end of an output row, so across a wave a single lane needs run 2
+        // and the rest need nothing. Inactive lanes issue no memory request, so
+        // guarding this is the difference between fetching the tile once and
+        // fetching it twice -- and the stage is bandwidth-bound, so fetching it
+        // twice costs exactly what it sounds like.
+        const half8 zero8 = static_cast<half8>(0.0f);
+        const half8 v1 = nValid > 0 ? loadRun8(xChanF, orgA.lin + s.off, xSpan)
+                                    : zero8;
+        // Run 2 is shifted so that column i still sits at base + i.
+        const half8 v2 =
+            splitB < nValid
+                ? loadRun8(xChanF, orgB.lin + s.off - splitB, xSpan)
+                : zero8;
+#pragma unroll
+        for (int i = 0; i < kVecB; ++i) {
+          const bool useA = i < splitB;
+          const int32_t xi = useA ? xiA + i : xiB + (i - splitB);
+          const bool ok = i < nValid && (useA ? outerA : outerB) && xi >= 0 &&
+                          xi < pr.innerIni;
+          Bs[bsRow(cgB * kVecB + i) + kk] =
+              ok ? (useA ? v1[i] : v2[i]) : static_cast<_Float16>(0.0f);
+        }
+      }
+    } else {
+#pragma unroll
+      for (int l = 0; l < kLoadsB; ++l) {
+        const int kk = kkB + l * kStepB;
+        Bs[bsRow(colB) + kk] =
+            colValid ? static_cast<_Float16>(
+                           gatherSplit<__half>(xChan, pr, org, ks[cur][kk]))
+                     : static_cast<_Float16>(0.0f);
+      }
     }
     __syncthreads();
 
@@ -632,7 +816,7 @@ void conv_wmma_kernel(const __half *__restrict__ x,
     }
 #pragma unroll
     for (int j = 0; j < WN; ++j) {
-      const _Float16 *p = &Bs[waveN * WN * kWmma + j * kWmma + lane16][0];
+      const _Float16 *p = &Bs[bsRow(waveN * WN * kWmma + j * kWmma + lane16)];
       *reinterpret_cast<half8 *>(&bFrag[j]) =
           *reinterpret_cast<const half8 *>(p);
       *(reinterpret_cast<half8 *>(&bFrag[j]) + 1) =
@@ -700,6 +884,133 @@ __global__ void conv_direct_kernel(const T *__restrict__ x,
 }
 
 // ---------------------------------------------------------------------------
+// Depthwise kernel — one input channel per output channel
+// ---------------------------------------------------------------------------
+//
+// group == C, so every group contracts over a single input channel and the
+// implicit GEMM degenerates to M = 1: one filter row, kvol taps long. The tiled
+// ladder cannot take it -- its narrowest row block is 32 -- so before this
+// existed the depthwise shapes fell all the way through to conv_direct, and
+// that is a bad fit for a reason that has nothing to do with tiling.
+//
+// conv_direct holds one output element per thread and decodes the contraction
+// index on the spot, because in the general case every thread has a different
+// output position and there is nothing to share a decode with. Depthwise breaks
+// that assumption: the contraction *is* the kernel window, so all kvol slices
+// are the same for every thread in the block, and decoding them per thread per
+// tap means three reciprocal divisions and two 64-bit multiplies for each of
+// the 49 taps of a 7x7 -- an index decode bill three times the size of the
+// loads it is addressing. convnext is 36 such convs (7x7, stride 1, pad 3, at
+// 96/192/384/768 channels and batch 32), which comes to ~885M decoded gathers
+// per inference.
+//
+// So the block stages the whole contraction once: kvol KSlices and kvol filter
+// taps into LDS, after which the inner loop is an LDS read, a bounds test, a
+// gather and an FMA. Parallelism comes from (batch, channel), which is 3072 to
+// 24576 blocks on convnext before the spatial split, so nothing is lost by
+// giving each block a single channel.
+//
+// Threads are strided across output positions rather than given contiguous
+// runs, so that for a fixed tap the lanes of a wave read consecutive input
+// addresses and coalesce.
+
+// Cap on the staged contraction. 7x7 is 49 and 11x11 is 121; anything larger
+// keeps the old path rather than growing LDS for a shape no model asks for.
+constexpr int kMaxDepthwiseK = 128;
+
+template <typename T, int kThreads, int TN>
+__global__ __launch_bounds__(kThreads) void
+conv_depthwise_kernel(const T *__restrict__ x, const T *__restrict__ w,
+                      const T *__restrict__ bias, T *__restrict__ y,
+                      ConvParams pr) {
+  __shared__ KSlice ks[kMaxDepthwiseK];
+  __shared__ float wf[kMaxDepthwiseK];
+
+  const int tid = threadIdx.x;
+  const int kvol = static_cast<int>(pr.kvol);
+
+  // z indexes (batch, channel). group == Cout == Cin here, so the group index
+  // is the channel index on both sides.
+  const int64_t z = blockIdx.z;
+  const int64_t nbatch = z / pr.group;
+  const int64_t oc = z - nbatch * pr.group;
+
+  for (int t = tid; t < kvol; t += kThreads) {
+    ks[t] = makeKSlice(pr, t);
+    wf[t] = to_float<T>(w[oc * pr.K + t]);
+  }
+  __syncthreads();
+
+  const T *xChan = x + (nbatch * pr.Cin + oc) * pr.inPlane;
+  T *yChan = y + (nbatch * pr.Cout + oc) * pr.Nout;
+  const float bv = bias ? to_float<T>(bias[oc]) : 0.0f;
+
+  const int64_t oBase =
+      static_cast<int64_t>(blockIdx.x) * (kThreads * TN) + tid;
+
+  PosOrigin org[TN];
+  float acc[TN];
+  bool live[TN];
+#pragma unroll
+  for (int j = 0; j < TN; ++j) {
+    const int64_t o = oBase + static_cast<int64_t>(j) * kThreads;
+    live[j] = o < pr.Nout;
+    org[j] = live[j] ? decodeOrigin(pr, o) : PosOrigin{0, 0, 0, 0};
+    acc[j] = bv;
+  }
+
+  for (int k = 0; k < kvol; ++k) {
+    const KSlice s = ks[k];
+    const float wv = wf[k];
+#pragma unroll
+    for (int j = 0; j < TN; ++j)
+      if (live[j]) acc[j] += wv * gatherSplit<T>(xChan, pr, org[j], s);
+  }
+
+#pragma unroll
+  for (int j = 0; j < TN; ++j) {
+    const int64_t o = oBase + static_cast<int64_t>(j) * kThreads;
+    if (live[j]) yChan[o] = from_float<T>(acc[j]);
+  }
+}
+
+template <typename T, int kThreads, int TN>
+static void launchDepthwise(hipStream_t stream, const void *x, const void *w,
+                            const void *bias, void *y, const ConvParams &pr) {
+  const int64_t perBlock = kThreads * TN;
+  dim3 grid(static_cast<unsigned>((pr.Nout + perBlock - 1) / perBlock), 1u,
+            static_cast<unsigned>(pr.N * pr.group));
+  hipLaunchKernelGGL((conv_depthwise_kernel<T, kThreads, TN>), grid,
+                     dim3(kThreads), 0, stream, static_cast<const T *>(x),
+                     static_cast<const T *>(w), static_cast<const T *>(bias),
+                     static_cast<T *>(y), pr);
+}
+
+// True depthwise: one input channel and one output channel per group. The
+// channel-multiplier case (MPerGroup > 1) still has a real contraction per
+// output row and is left to the ladder.
+static bool isDepthwise(const ConvParams &pr) {
+  return pr.CinPerGroup == 1 && pr.MPerGroup == 1 &&
+         pr.kvol <= kMaxDepthwiseK && pr.group > 1;
+}
+
+template <typename T>
+static void launchDepthwiseForShape(hipStream_t stream, const void *x,
+                                    const void *w, const void *bias, void *y,
+                                    const ConvParams &pr) {
+  // Pick the block so that a block covers roughly one channel's output plane:
+  // the grid is already (batch x channels) deep, so a block that overshoots the
+  // plane only costs idle lanes. convnext's four sizes are 3136, 784, 196 and
+  // 49 positions.
+  if (pr.Nout <= 64)
+    launchDepthwise<T, 64, 1>(stream, x, w, bias, y, pr);
+  else if (pr.Nout <= 512)
+    launchDepthwise<T, 256, 1>(stream, x, w, bias, y, pr);
+  else
+    launchDepthwise<T, 256, 4>(stream, x, w, bias, y, pr);
+}
+
+// ---------------------------------------------------------------------------
 // Launch
 // ---------------------------------------------------------------------------
 
@@ -721,10 +1032,22 @@ static int deviceUnitCount() {
 
 constexpr int kBK = 16;
 
+// Which kernel a shape landed on. Only the pick, so that a model run under
+// HIPDNN_EP_DEBUG can be tallied by kernel without re-deriving the ladder.
+static inline void logPick(const char *what, const ConvParams &pr) {
+  CUSTOM_KERNELS_DEBUG_LOG(
+      "[custom_kernels] hip_conv pick=%s Cin/g=%lld M/g=%lld out=[%lld,%lld] "
+      "k=[%lld,%lld] s=[%lld,%lld]\n",
+      what, (long long)pr.CinPerGroup, (long long)pr.MPerGroup,
+      (long long)pr.out0, (long long)pr.out1, (long long)pr.k0,
+      (long long)pr.k1, (long long)pr.s0, (long long)pr.s1);
+}
+
 template <typename T, int BM, int BN, int TM, int TN>
 static void launchTile(hipStream_t stream, const void *x, const void *w,
                        const void *bias, void *y, const ConvParams &base) {
   const ConvParams pr = withTileGrid(base, BM, BN);
+  logPick("tiled", pr);
   dim3 grid(swizzledGridX(pr), 1u,
             static_cast<unsigned>(pr.N * pr.group));
   hipLaunchKernelGGL((conv_tiled_kernel<T, BM, BN, kBK, TM, TN>), grid,
@@ -738,10 +1061,26 @@ static void launchWmma(hipStream_t stream, const void *x, const void *w,
                        const void *bias, void *y, const ConvParams &base) {
   constexpr int threads = (BM / (WM * kWmma)) * (BN / (WN * kWmma)) * 32;
   const ConvParams pr = withTileGrid(base, BM, BN);
+  logPick("wmma", pr);
   dim3 grid(swizzledGridX(pr), 1u,
             static_cast<unsigned>(pr.N * pr.group));
-  hipLaunchKernelGGL((conv_wmma_kernel<BM, BN, WM, WN>), grid, dim3(threads), 0,
-                     stream, static_cast<const __half *>(x),
+  // The vectorised stage needs a whole wave's worth of column groups, so it is
+  // only instantiated for the tiles wide enough to supply them.
+  constexpr bool kVecEligible =
+      (BN % 8 == 0) && (((BN / 8) * kWmma) % threads == 0);
+  if constexpr (kVecEligible) {
+    if (pr.innerVec) {
+      hipLaunchKernelGGL((conv_wmma_kernel<BM, BN, WM, WN, true>), grid,
+                         dim3(threads), 0, stream,
+                         static_cast<const __half *>(x),
+                         static_cast<const __half *>(w),
+                         static_cast<const __half *>(bias),
+                         static_cast<__half *>(y), pr);
+      return;
+    }
+  }
+  hipLaunchKernelGGL((conv_wmma_kernel<BM, BN, WM, WN, false>), grid,
+                     dim3(threads), 0, stream, static_cast<const __half *>(x),
                      static_cast<const __half *>(w),
                      static_cast<const __half *>(bias),
                      static_cast<__half *>(y), pr);
@@ -750,12 +1089,16 @@ static void launchWmma(hipStream_t stream, const void *x, const void *w,
 // Whether a tile shape is worth using: its row block has to be fully live (a
 // block computes its whole tile whether or not the rows exist) and the grid it
 // produces has to cover the device.
-static bool tileFits(const ConvParams &pr, int64_t bm, int64_t bn,
-                     int64_t units) {
-  if (pr.MPerGroup < bm) return false;
+static bool tileCovers(const ConvParams &pr, int64_t bm, int64_t bn,
+                       int64_t units) {
   const int64_t blocks = ((pr.MPerGroup + bm - 1) / bm) *
                          ((pr.Nout + bn - 1) / bn) * pr.N * pr.group;
   return blocks >= units;
+}
+
+static bool tileFits(const ConvParams &pr, int64_t bm, int64_t bn,
+                     int64_t units) {
+  return pr.MPerGroup >= bm && tileCovers(pr, bm, bn, units);
 }
 
 // fp16 gets first refusal on the matrix cores; everything else, and every fp16
@@ -771,6 +1114,13 @@ template <>
 bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
                                     const void *w, const void *bias, void *y,
                                     const ConvParams &pr, int64_t units) {
+  // The window-staging kernel gets first refusal on the multi-tap 2-D shapes.
+  // Every tile below re-reads the input once per kernel tap, and on those
+  // shapes that amplification -- not arithmetic, not occupancy -- is what the
+  // runtime is made of, so a tile that removes it wins by more than any tile
+  // that does not can make up. Widest row block first: the window is staged
+  // once per tile row, so fewer rows is less of the cost this kernel exists to
+  // avoid.
   // The 4x4 wave tile issues 16 WMMAs off 8 fragment loads where 4x2 issues 8
   // off 6, so it asks much less of LDS per unit of matrix-core work -- but it
   // doubles the accumulator register count, which costs occupancy, and it
@@ -802,11 +1152,46 @@ bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
     launchWmma<128, 128, 4, 2>(stream, x, w, bias, y, pr);
     return true;
   }
+  // 64 rows, for the shapes with too few output channels for a 128-row tile but
+  // enough to waste half of a 32-row one. Two things make this worth its own
+  // rung rather than letting 32x256 take it.
+  //
+  // The im2col matrix is re-gathered once per tile row and is never
+  // materialised, so tile rows are the multiplier on the dominant cost of this
+  // kernel. At 64 output channels, 32x256 needs two rows and this needs one --
+  // half the gather.
+  //
+  // It also issues more matrix-core work per LDS fragment load: a 2x4 wave tile
+  // is 8 WMMAs off 6 fragments where 2x2 is 4 off 4. That ratio is what the
+  // narrow tiles are short of, and it cannot be had at BM=32, where the B-stage
+  // mapping (one column per thread) pins the block at 256 threads and so pins
+  // WM*WN at 4.
+  //
+  // esrgan is the shape that wants it: 69 of its convs are 192->64 at 250x250,
+  // its most expensive by a wide margin, and they sit exactly on this rung.
+  if (tileFits(pr, 64, 256, units)) {
+    launchWmma<64, 256, 2, 4>(stream, x, w, bias, y, pr);
+    return true;
+  }
   // Narrow row block for the grouped and low-channel-count shapes -- the audio
   // encoder's second conv has 32 output channels and would throw away three
   // quarters of a 128-row tile.
   if (tileFits(pr, 32, 256, units)) {
     launchWmma<32, 256, 2, 2>(stream, x, w, bias, y, pr);
+    return true;
+  }
+  // Fewer output channels than any tile above has rows. The alternative is
+  // conv_direct -- one thread per output element, decoding the contraction
+  // index on every tap -- and a 16-row tile beats it even when most of those
+  // rows are padding, because wasted matrix-core work is nearly free and the
+  // decode is not. This is the only rung that does not require its rows to be
+  // live; the staging zeroes the missing ones and the store skips them.
+  //
+  // esrgan is what makes it worth having: its output conv is 64->3 at
+  // 1000x1000, and on the direct path that single node costs more than any
+  // other conv in the model.
+  if (tileCovers(pr, 16, 256, units)) {
+    launchWmma<16, 256, 1, 2>(stream, x, w, bias, y, pr);
     return true;
   }
   return false;
@@ -820,17 +1205,61 @@ static int launch(hipStream_t stream, const void *x, const void *w,
 
   const int64_t units = deviceUnitCount();
 
-  if (!launchWmmaIfProfitable<T>(stream, x, w, bias, y, pr, units)) {
+  // Depthwise first: M == 1 per group clears no tile in the ladder, and the
+  // contraction is shared by the whole block, which neither tiled kernel can
+  // exploit and conv_direct pays for on every tap.
+  if (isDepthwise(pr)) {
+    logPick("depthwise", pr);
+    launchDepthwiseForShape<T>(stream, x, w, bias, y, pr);
+    hipError_t derr = hipGetLastError();
+    if (derr != hipSuccess) {
+      fprintf(stderr, "[custom_kernels] hip_conv depthwise launch failed: %s\n",
+              hipGetErrorString(derr));
+    }
+    return static_cast<int>(derr);
+  }
+
+  // Two passes over the ladder. The first asks a tile shape to cover the
+  // device; the second takes the widest tile whose rows are live and accepts
+  // whatever grid that gives.
+  //
+  // The second pass exists because coverage is the wrong thing to insist on
+  // when the problem is small. A shape with few output channels over a small
+  // feature map produces few blocks under every tile, so a single-pass ladder
+  // rejects all of them and lands on conv_direct -- and conv_direct is not a
+  // small-problem kernel, it is a no-reuse one: a thread per output element,
+  // re-decoding the contraction index and re-reading the input on every tap.
+  // The ssd detection heads are the case that shows the difference. A 1024
+  // -channel 10x10 feature map into 126 channels gathers 227 MB on the direct
+  // path against roughly 12 MB tiled, and measures 2.95 ms against MIOpen's
+  // 0.24. Half an idle device running a kernel with reuse beats a full one
+  // running a kernel without it.
+  for (int pass = 0; pass < 2; ++pass) {
+    const int64_t need = pass == 0 ? units : 1;
+    if (launchWmmaIfProfitable<T>(stream, x, w, bias, y, pr, need)) {
+      hipError_t err = hipGetLastError();
+      if (err != hipSuccess)
+        fprintf(stderr, "[custom_kernels] hip_conv launch failed: %s\n",
+                hipGetErrorString(err));
+      return static_cast<int>(err);
+    }
     // Widest scalar tile that fits, then narrower ones. A wider tile does more
     // FMAs per LDS read -- 8x8 does 64 per 16, where 4x4 does 16 per 8 -- so
     // the widest one that fits the problem is the fastest.
-    if (tileFits(pr, 128, 128, units)) {
+    if (tileFits(pr, 128, 128, need)) {
       launchTile<T, 128, 128, 8, 8>(stream, x, w, bias, y, pr);
-    } else if (tileFits(pr, 64, 64, units)) {
+      break;
+    }
+    if (tileFits(pr, 64, 64, need)) {
       launchTile<T, 64, 64, 4, 4>(stream, x, w, bias, y, pr);
-    } else if (pr.MPerGroup >= 24 && tileFits(pr, 32, 128, units)) {
+      break;
+    }
+    if (pr.MPerGroup >= 24 && tileFits(pr, 32, 128, need)) {
       launchTile<T, 32, 128, 2, 8>(stream, x, w, bias, y, pr);
-    } else {
+      break;
+    }
+    if (pass == 1) {
+      logPick("direct", pr);
       const int block = 256;
       const int64_t grid = (totalOut + block - 1) / block;
       hipLaunchKernelGGL(conv_direct_kernel<T>,
@@ -905,6 +1334,23 @@ extern "C" int hip_conv(void *stream, const void *input, const void *weights,
   pr.rK2 = makeFastDiv(k2);
   pr.rOut1out2 = makeFastDiv(pr.out1out2);
   pr.rOut2 = makeFastDiv(out_d2);
+
+  // The innermost spatial axis is the last one the caller actually used; the
+  // trailing axes it filled with extent 1 contribute nothing to `lin`, so that
+  // axis is the one with unit stride in it. Advancing the output position by one
+  // then advances the input offset by exactly its stride, which is what makes a
+  // run of adjacent columns a contiguous read.
+  const int inner = spatial_rank - 1;
+  const int64_t innerIn = inner == 2 ? in_d2 : (inner == 1 ? in_d1 : in_d0);
+  const int64_t innerOut = inner == 2 ? out_d2 : (inner == 1 ? out_d1 : out_d0);
+  const int64_t innerS = inner == 2 ? s2 : (inner == 1 ? s1 : s0);
+  pr.innerAxis = inner;
+  pr.innerIni = static_cast<int32_t>(innerIn);
+  pr.innerOut = innerOut;
+  pr.rInnerOut = makeFastDiv(innerOut > 0 ? innerOut : 1);
+  // Runs are only contiguous at unit stride, and only worth forming when a row
+  // is at least one run long. Everything else keeps the scalar stage.
+  pr.innerVec = (innerS == 1 && innerOut >= 8 && pr.Nout > 0) ? 1 : 0;
 
   CUSTOM_KERNELS_DEBUG_LOG(
       "[custom_kernels] hip_conv: dtype=%d spatial_rank=%d N=%lld Cin=%lld "

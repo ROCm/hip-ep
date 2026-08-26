@@ -244,6 +244,111 @@ class TestConvPathSelection:
         _check(model_runner, model, _sample((1, k_in, 40), 0xD00 + k_in))
 
 
+class TestConvKTailWithPadding:
+    """A contraction that does not fill the reduction slice, on a padded conv.
+
+    The two conditions are only dangerous together, which is why sweeping them
+    separately (test_contraction_extent_sweep pads nothing, TestConvPadding
+    contracts over a multiple of the slice) missed the bug they found in
+    combination: the staging loops walk a whole BK-deep slice regardless of how
+    many taps are left, so a K % BK != 0 shape stages sentinel taps, and the
+    sentinel has to be rejected by the bounds test for *every* output position.
+    It was built as `c0 = in0i`, which lands back inside the input on the leading
+    padded rows -- where the origin coordinate is negative -- and the gather then
+    read before the tensor. esrgan's head conv (3 -> 64, 3x3, pad 1, K = 27) is
+    the shape in the supported set that hits it, and it faulted the GPU.
+
+    These cases do not, on their own, detect that bug, and it is worth being
+    precise about why. A wrong answer is not its failure mode: the filter tail
+    stages as zero, so whatever the bad read returns is multiplied away. The
+    only observable is the illegal read, and a read just below a tensor faults
+    only when it leaves the mapped allocation -- which depends on where the
+    arena put that tensor. In a single-conv session it lands in mapped memory
+    and everything looks fine; sweeping the underrun out to 64 KB here does not
+    change that. The detector for the fault is the model: esrgan in the Procyon
+    sweep, whose mid-graph arena is packed tightly enough that a 502-byte
+    underrun is off the end of the buffer.
+
+    What these cases *do* pin is the invariant that makes the tail harmless in
+    the first place -- that a contraction which does not fill the slice still
+    produces the reference answer on every dispatch path, padded or not. That is
+    the property a future change to the staging loops would break, and it is
+    checkable here.
+    """
+
+    @pytest.mark.parametrize("in_c", [1, 3, 5, 7])
+    def test_esrgan_head_family(self, model_runner, in_c):
+        """3x3 pad-1 over a small channel count: K = 9 * in_c, none a multiple
+        of 16 for these values, and pad 1 makes the first output row's origin
+        negative on both axes."""
+        model = _conv_model(
+            in_spatial=[64, 64],
+            in_channels=in_c,
+            out_channels=64,
+            kernel=[3, 3],
+            pads=[1, 1, 1, 1],
+        )
+        _check(model_runner, model, _sample((1, in_c, 64, 64), 0xE00 + in_c))
+
+    def test_esrgan_head_full_size(self, model_runner):
+        """The real esrgan head conv, at its real 250x250 size so it takes the
+        same WMMA tile as in the model."""
+        model = _conv_model(
+            in_spatial=[250, 250],
+            in_channels=3,
+            out_channels=64,
+            kernel=[3, 3],
+            pads=[1, 1, 1, 1],
+        )
+        _check(model_runner, model, _sample((1, 3, 250, 250), 0xE10))
+
+    @pytest.mark.parametrize("pad", [1, 2, 4])
+    def test_deep_underrun(self, model_runner, pad):
+        """A wide inner axis turns a small pad into a large negative offset: the
+        origin of the first output position is -(pad*in1 + pad) elements, so at
+        in1 = 4096 this reads tens of kilobytes below the tensor if the sentinel
+        does not reject."""
+        model = _conv_model(
+            in_spatial=[8, 4096],
+            in_channels=3,
+            out_channels=32,
+            kernel=[3, 3],
+            pads=[pad, pad, pad, pad],
+        )
+        _check(model_runner, model, _sample((1, 3, 8, 4096), 0xE20 + pad))
+
+    def test_k_tail_fp32_scalar_path(self, model_runner):
+        """fp32 never reaches the WMMA tiles, so this pins the same sentinel on
+        the scalar tiled kernel, which stages through the identical KSlice."""
+        model = _conv_model(
+            in_spatial=[96, 96],
+            in_channels=3,
+            out_channels=128,
+            kernel=[3, 3],
+            pads=[1, 1, 1, 1],
+            dtype=TensorProto.FLOAT,
+        )
+        _check(
+            model_runner,
+            model,
+            _sample((1, 3, 96, 96), 0xE30, dtype=np.float32),
+            dtype=np.float32,
+        )
+
+    def test_k_tail_grouped(self, model_runner):
+        """Grouped convs contract over Cin/group, so the tail is per group and
+        the sentinel is reached once per group rather than once per conv."""
+        model = _conv_model(
+            in_spatial=[48, 48],
+            in_channels=12,
+            out_channels=96,
+            kernel=[3, 3],
+            pads=[1, 1, 1, 1],
+            group=4,  # Cin/group = 3 -> K = 27
+        )
+        _check(model_runner, model, _sample((1, 12, 48, 48), 0xE40))
+
+
 class TestConvPadding:
     """Only pads_begin is in the ABI; the trailing pad is carried by the output
     extent. These cases are what makes that claim testable."""
