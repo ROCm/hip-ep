@@ -11,10 +11,20 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <hip/hip_runtime.h>
 #include <map>
 #include <string>
 #include <vector>
+
+// This TU is shared with the mock runtime, which builds without a HIP
+// toolchain, so the header cannot be a hard dependency. The only thing the
+// fence needs from it is the drain, and a build with no GPU has nothing to
+// drain.
+#if __has_include(<hip/hip_runtime.h>)
+#include <hip/hip_runtime.h>
+static void fence_drain_gpu() { (void)hipDeviceSynchronize(); }
+#else
+static void fence_drain_gpu() {}
+#endif
 
 // One-shot RGP capture fence -- see op_profile.h for the rationale. Pure host
 // code (no kernel launch): drains the GPU and sleeps so RGP arms on the next
@@ -47,13 +57,13 @@ void rgp_capture_fence(const char *opname) {
   bool expected = false;
   if (!fired.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
     return;
-  // Drain all outstanding GPU work, THEN announce the idle window and hold. The
-  // marker is emitted BEFORE the wait so the capture orchestrator has the full
-  // window to detect it and trigger RGP; the GPU stays quiescent for the whole
-  // wait, so RGP arms cleanly and this op's kernels are the first dispatches
-  // after the gap. Busy-wait on the steady clock (no threading headers, no GPU
-  // work).
-  (void)hipDeviceSynchronize();
+  // Drain all outstanding GPU work, THEN announce the idle window and hold.
+  // The marker is emitted BEFORE the wait so the capture orchestrator has the
+  // full window to detect it and trigger RGP; the GPU stays quiescent for the
+  // whole wait, so RGP arms cleanly and this op's kernels are the first
+  // dispatches after the gap. Busy-wait on the steady clock (no threading
+  // headers, no GPU work).
+  fence_drain_gpu();
   fprintf(stderr, "[RGP_FENCE_ARMED] op=%s instance=%d idling sleep_ms=%d\n",
           opname, idx, sleep_ms);
   fflush(stderr);
