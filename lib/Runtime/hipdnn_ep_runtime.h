@@ -692,6 +692,18 @@ int wrap_strided_copy(RuntimeState *state, void *dst_ptr, const void *src_ptr,
                       int64_t src_pitch_elems, int64_t dst_pitch_elems,
                       int64_t row_elems);
 
+/// Copies device memory to host memory on the state's stream. Backs
+/// hipsr.copy_d2h.
+///
+/// Does not wait for the copy to finish, so the host can read `dst_ptr` only
+/// after the stream is synchronized.
+///
+/// Return codes:
+///   0 = success
+///   -1 = invalid argument, or the copy could not be started
+int wrap_copy_d2h(RuntimeState *state, void *dst_ptr, const void *src_ptr,
+                  int64_t size_bytes);
+
 // Forward convolution via the custom HIP kernel (hip_conv). Arbitrary stride,
 // dilation, group and asymmetric padding over 1D / 2D / 3D spatial ranks, with
 // the per-channel bias fused into the accumulator instead of costing a second

@@ -15,6 +15,7 @@ add_library(HipsrDialectIR STATIC
   HipsrConstantOp.cpp
   HipsrPlaceholderOp.cpp
   HipsrCastOp.cpp
+  HipsrCopyD2HOp.cpp
   HipsrMatMulOp.cpp
   HipsrExpandOp.cpp
   HipsrAddOp.cpp

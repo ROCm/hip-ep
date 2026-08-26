@@ -217,6 +217,8 @@ void populateHipsrGetPoolLoweringPatterns(const LLVMTypeConverter &converter,
                                           RewritePatternSet &patterns);
 void populateHipsrCastLoweringPatterns(const LLVMTypeConverter &converter,
                                        RewritePatternSet &patterns);
+void populateHipsrCopyD2HLoweringPatterns(const LLVMTypeConverter &converter,
+                                          RewritePatternSet &patterns);
 void populateHipsrMatMulLoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns);
 void populateHipsrExpandLoweringPatterns(const LLVMTypeConverter &converter,
