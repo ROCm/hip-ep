@@ -51,7 +51,7 @@ Both cover correctness and latency; flags select how much of each you get.
 
 ### `test_gqa_decode` (fp16)
 
-Sweeps MHA and GQA at HpG 1/2/3/4/5/8/16, head_dim 64/128/256 and
+Sweeps MHA and GQA at HpG 1/2/3/4/5/8/16, head_dim 64/128/256/512 and
 `len` 512..32768, including sliding-window, head-sink and smooth-softmax
 variants. Each case is checked against an fp32 CPU reference and against the
 other kernel implementation (WMMA versus scalar), then timed.

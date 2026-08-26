@@ -1425,12 +1425,20 @@ hipdnn_wmma_f32_16x16x16_f16_w32_unavailable(half16, half16, float8 c) {
 //   - HPG=8  (gpt-oss-20b at d=64; 64 q heads / 8 kv heads)
 //
 // Constraints (asserted at launcher):
-//   - D must be 64, 128 or 256 (EPT = D/32 in 1..8; D=256 -> BKV=16 to keep
-//     the LDS tile ~16KB). The scalar kernel is otherwise D-generic.
+//   - D must be 64, 128, 256 or 512 (EPT = D/32 in 1..16; BKV is chosen per D
+//     to hold the LDS tile at its budget). The scalar kernel is otherwise
+//     D-generic.
 //   - RDNA wave32 (uses __shfl_xor across 32 lanes).
 //===----------------------------------------------------------------------===//
 
 static constexpr int FLASH_DECODE_BKV     = 64;
+
+// D=512's KV tile height, overridable at compile time only so the choice below
+// can be re-measured without editing this file. See the BKV comment in the
+// kernel for why 4 rather than 8.
+#ifndef FLASH_DECODE_BKV_D512
+#define FLASH_DECODE_BKV_D512 4
+#endif
 
 // Partial layout per (b, h_q, k_split): {m: float, l: float, O[D]: float}
 __device__ __forceinline__ size_t flash_decode_partial_offset(
@@ -1494,12 +1502,31 @@ gqa_flash_decode_kernel(
   // Going further the wrong way in either direction is worse: BKV=32 costs 37%
   // on the 9B (halved residency), and BKV=4 costs 6% on the 35B (the tile stops
   // amortizing the per-tile __syncthreads and staging setup).
-  constexpr int BKV = (D >= 256) ? 8 : (D == 128) ? 32 : FLASH_DECODE_BKV;
+  //
+  // D=512 (Gemma-4's global-attention layers) keeps that same 8KB budget rather
+  // than the row count, so BKV halves to 4. Inheriting BKV=8 would put the tile
+  // at 16KB and halve resident blocks, which is the mistake the D>=256 rule was
+  // introduced to avoid in the first place. Measured on gfx1151 at Gemma-4's
+  // global geometry (H16 G2 hpg8 D512), --iters 400, min of 3 runs:
+  //             BKV=2     BKV=4     BKV=8     BKV=16
+  //   skv 2241  0.0270    0.0258    0.0274    0.0296 ms
+  //   skv 16241 0.3087    0.2963    0.3012    0.3126 ms
+  // 4 wins at both ends, and the shape of the curve is the budget argument:
+  // 8 and 16 lose residency, 2 stops amortizing the per-tile __syncthreads.
+  constexpr int BKV = (D >= 512)  ? FLASH_DECODE_BKV_D512
+                    : (D == 256)  ? 8
+                    : (D == 128)  ? 32
+                                  : FLASH_DECODE_BKV;
   constexpr int THREADS = HPG * WAVE_SIZE;  // total threads in block
   constexpr int EPT = D / WAVE_SIZE;  // elements-per-thread along d
 
   static_assert(D % WAVE_SIZE == 0, "D must be a multiple of WAVE_SIZE");
-  static_assert(EPT >= 1 && EPT <= 8, "EPT must be 1..8");
+  // The bound is a register-pressure budget, not a correctness one: Q_f and
+  // O_acc are both EPT floats per lane, so EPT=16 (D=512) holds 32 VGPRs of
+  // accumulator before the unrolled inner loop's temporaries. That still fits
+  // the occupancy this bandwidth-bound kernel needs on RDNA; EPT=32 (D=1024)
+  // would not, and no shipped geometry asks for it.
+  static_assert(EPT >= 1 && EPT <= 16, "EPT must be 1..16");
 
   const int batch     = __builtin_amdgcn_readfirstlane(blockIdx.x / G);
   const int head_kv   = __builtin_amdgcn_readfirstlane(blockIdx.x % G);
@@ -2335,7 +2362,8 @@ static inline void launchFlashDecodeConfig(
               bias_kv_stride)
     #define LAUNCH_SCALAR(HPG_)                                                \
       do {                                                                     \
-        if (d == 256)      LAUNCH_SCALAR_D(256, HPG_);                         \
+        if (d == 512)      LAUNCH_SCALAR_D(512, HPG_);                         \
+        else if (d == 256) LAUNCH_SCALAR_D(256, HPG_);                         \
         else if (d == 128) LAUNCH_SCALAR_D(128, HPG_);                         \
         else               LAUNCH_SCALAR_D(64, HPG_);                          \
       } while (0)
@@ -2356,7 +2384,10 @@ static inline void launchFlashDecodeConfig(
   // Reduce: one block per query head, block dim D. seqlens_k / sliding-window /
   // head_sink / smooth_softmax are all folded in here (not the partials).
   dim3 grid_reduce(B * H);
-  if (d == 256)
+  if (d == 512)
+    gqa_flash_decode_reduce_kernel<512><<<grid_reduce, 512, 0, stream>>>(
+        hP, hO, H, hSink, H, use_smooth_softmax, splits);
+  else if (d == 256)
     gqa_flash_decode_reduce_kernel<256><<<grid_reduce, 256, 0, stream>>>(
         hP, hO, H, hSink, H, use_smooth_softmax, splits);
   else if (d == 128)
@@ -2695,9 +2726,9 @@ extern "C" int hip_gqa_flash_decode(
             hpg, H, G);
     return -1;
   }
-  if (d != 64 && d != 128 && d != 256) {
+  if (d != 64 && d != 128 && d != 256 && d != 512) {
     fprintf(stderr,
-            "hip_gqa_flash_decode: unsupported d=%d (must be 64/128/256)\n",
+            "hip_gqa_flash_decode: unsupported d=%d (must be 64/128/256/512)\n",
             d);
     return -1;
   }

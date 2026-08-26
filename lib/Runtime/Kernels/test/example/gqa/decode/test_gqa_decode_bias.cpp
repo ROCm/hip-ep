@@ -171,6 +171,18 @@ int main() {
       {"gemma4-local 12k wininf", 1, 16, 8, 256, 16384, 12279, MASK_WINDOW_INF, 1024, 0},
       {"gemma4-local 12k window", 1, 16, 8, 256, 16384, 12279, MASK_WINDOW, 1024, 0},
       {"gemma4-local per-head  ", 1, 16, 8, 256, 16384, 2051, MASK_RANDOM, 0, 1},
+      // Gemma-4's other 5 layers: global attention at twice the head width.
+      // These carry the mask too -- the model exports is_causal=0 and folds
+      // causal and padding into the bias on every layer, not just the sliding
+      // ones -- so d=512 has to be correct WITH a bias, not merely reachable.
+      {"gemma4-global zero     ", 1, 16, 8, 512, 16384, 2051, MASK_ZERO, 0, 0},
+      {"gemma4-global random   ", 1, 16, 8, 512, 16384, 2051, MASK_RANDOM, 0, 0},
+      {"gemma4-global 12k rand ", 1, 16, 8, 512, 16384, 12279, MASK_RANDOM, 0, 0},
+      {"gemma4-global per-head ", 1, 16, 8, 512, 16384, 2051, MASK_RANDOM, 0, 1},
+      // The window/bias agreement check at d=512: the same window expressed
+      // twice must agree, which is what pins the bias indexing to absolute kv
+      // position rather than split-relative at the widest EPT.
+      {"gemma4-global window-inf", 1, 16, 8, 512, 16384, 2051, MASK_WINDOW_INF, 1024, 0},
       {"llama-3.1-8b random    ", 1, 32, 8, 128, 16384, 4096, MASK_RANDOM, 0, 0},
       {"llama-3.1-8b window-inf", 1, 32, 8, 128, 16384, 4096, MASK_WINDOW_INF, 512, 0},
       {"d64 hpg8 window-inf    ", 1, 64, 8, 64, 16384, 8192, MASK_WINDOW_INF, 256, 0},

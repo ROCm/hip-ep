@@ -480,7 +480,7 @@ int main(int argc, char** argv) {
   int fails = 0;
   if (all || !have_single) {
     // B=1 single-stream decode. Coverage: real models + a geometry sweep over
-    // MHA (HpG==1) and GQA (HpG in {2,4,5,8,16}) x head_dim in {64,128,256}.
+    // MHA (HpG==1) and GQA (HpG in {2,4,5,8,16}) x head_dim in {64,128,256,512}.
     const int lens[] = {512, 2048, 8192, 32768};
     auto maybe = [&](const Case& c) {
       if (!g_only.empty() &&
@@ -516,6 +516,16 @@ int main(int argc, char** argv) {
       maybe({"GQA hpg8 D128",       1, 64,  8, 128, L, L,   0, 0, 0});
       maybe({"GQA hpg16 D64",       1, 32,  2,  64, L, L,   0, 0, 0});
       maybe({"GQA hpg4 D256",       1, 32,  8, 256, L, L,   0, 0, 0});
+      // ---- D512: Gemma-4's 5 global-attention layers ----
+      // Twice the head width of its 25 sliding layers, which is why they are
+      // the only ones the geometry gate used to reject. EPT=16 here, the widest
+      // the scalar kernel templates, so this is also the register-pressure
+      // boundary case. The sliding sibling is covered so both halves of the
+      // same model run through this kernel.
+      maybe({"gemma-4-26b global",  1, 16,  8, 512, L, L,   0, 0, 0});
+      maybe({"gemma-4-26b sliding", 1, 16,  8, 256, L, L, 1024, 0, 0});
+      maybe({"MHA hpg1 D512",       1,  8,  8, 512, L, L,   0, 0, 0});
+      maybe({"GQA hpg4 D512",       1, 32,  8, 512, L, L,   0, 0, 0});
       if (!g_md) printf("\n");
     }
   } else {

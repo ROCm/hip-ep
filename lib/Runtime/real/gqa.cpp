@@ -166,16 +166,38 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
 // FA-2 split-K decode workspace capacity, in splits (matches gqa_kernel.hip).
 static constexpr int kFlashDecodeMaxSplits = 64;
 
+// Env-var gate to keep a d=512 decode on the decomposed pipeline, i.e. to undo
+// just the head_dim admission in flash_decode_geometry_ok below. Set
+// HIPDNN_EP_GQA_DISABLE_FUSED_DECODE_D512=1 to A/B the fused and decomposed
+// implementations of Gemma-4's 5 global layers from ONE build. That matters
+// more here than usual: adding the d=512 instantiations changes the kernels
+// DLL's code-object layout, which moves even untouched kernels by around a
+// microsecond, so a two-build A/B would not isolate the routing change.
+//
+// The gate lives inside flash_decode_geometry_ok rather than at the two call
+// sites so both agree. Gating only the wrap_ predicate would let the fused
+// entry still be reached and then fail its own geometry check with an fprintf.
+static bool gqa_fused_decode_d512_disabled() {
+  static const bool disabled = [] {
+    const char *v = std::getenv("HIPDNN_EP_GQA_DISABLE_FUSED_DECODE_D512");
+    return v && std::strcmp(v, "0") != 0;
+  }();
+  return disabled;
+}
+
 // Geometry gate for the flash_decode kernel template instantiations. The scalar
 // decode kernel is templated for HpG in {1,2,3,4,5,8,16} (so it covers MHA and
-// the common GQA ratios, incl. Qwen2.5-14B's 40:8=5) at d in {64,128,256}
-// (d=256 covers Qwen3-family 16:4 heads); WMMA is layered on top inside the
-// kernel where it helps (d<=128 only). Anything outside this set has no decode
-// kernel.
+// the common GQA ratios, incl. Qwen2.5-14B's 40:8=5) at d in {64,128,256,512}
+// (d=256 covers Qwen3-family 16:4 heads; d=512 is Gemma-4's global-attention
+// layers, which are twice as wide as its 25 sliding ones); WMMA is layered on
+// top inside the kernel where it helps (d<=128 only). Anything outside this set
+// has no decode kernel.
 static inline bool flash_decode_geometry_ok(int64_t H, int64_t G, int64_t d) {
   if (G <= 0)
     return false;
-  if (d != 64 && d != 128 && d != 256)
+  if (d != 64 && d != 128 && d != 256 && d != 512)
+    return false;
+  if (d == 512 && gqa_fused_decode_d512_disabled())
     return false;
   int64_t hpg = H / G;
   if (hpg * G != H)
@@ -426,7 +448,7 @@ static int gqa_forward_fused(
     if (!flash_decode_geometry_ok(H, G, d)) {
       fprintf(stderr,
               "gqa_forward_fused (decode): unsupported geometry H=%lld G=%lld "
-              "d=%lld (HpG must be 1/2/3/4/5/8/16 and d 64/128/256)\n",
+              "d=%lld (HpG must be 1/2/3/4/5/8/16 and d 64/128/256/512)\n",
               (long long)H, (long long)G, (long long)d);
       return -1;
     }
@@ -2429,18 +2451,19 @@ int wrap_group_query_attention(
 
   //===------------------------------------------------------------------===//
   // Path selection. The optimized fused/flash kernels are fp16 causal GQA with
-  // head_dim in {64,128,256} and a templated decode geometry (HpG in
-  // {1,2,3,4,5,8,16}). Decode supports sink/window for every templated
-  // geometry; prefill v3 supports them at head_dim == 64. Everything else uses
-  // the feature-complete decomposed hipBLASLt fallback.
+  // a templated head_dim and decode geometry (HpG in {1,2,3,4,5,8,16}). Decode
+  // supports sink/window for every templated geometry; prefill v3 supports them
+  // at head_dim == 64. Everything else uses the feature-complete decomposed
+  // hipBLASLt fallback.
   //===------------------------------------------------------------------===//
   const bool is_decode = (seq_len_q == 1);
   const bool decode_geometry_ok =
       !is_decode || flash_decode_geometry_ok(num_heads, kv_num_heads, head_dim);
-  // head_dim gate: the fused WMMA prefill (v7) and the scalar flash-decode
-  // kernels both cover d in {64,128,256} now (d=256 for Qwen3-family 16:4). For
-  // decode, flash_decode_geometry_ok already validates d; for prefill we clamp
-  // to the templated set here.
+  // head_dim gate: the scalar flash-decode kernel covers d in {64,128,256,512},
+  // the fused WMMA prefill (v7) only {64,128,256}. For decode,
+  // flash_decode_geometry_ok already validates d; for prefill we clamp to the
+  // narrower prefill set here, which is why d=512 fuses at decode and stays
+  // decomposed at prefill.
   const bool head_dim_ok =
       is_decode ? true : (head_dim == 64 || head_dim == 128 || head_dim == 256);
   // attention_bias (onnx.Attention external mask) is only applied by the legacy
