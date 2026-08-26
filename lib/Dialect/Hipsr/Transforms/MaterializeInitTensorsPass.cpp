@@ -4,35 +4,25 @@
  */
 //===- MaterializeInitTensorsPass.cpp - Materialize placeholder inits -----===//
 //
-// Rewrites each pool domain into the virtual 4-region form: every
-// hipsr.placeholder shape region becomes an scf.execute_region yielding
-// !shape.shape, every placeholder result becomes a tensor.empty built from
-// that shape, the data ops keep their order, and a trailing
-// hipsr.preserve_shape ties each computed shape back to the data value it
-// describes.
+// Materializes placeholder inits inside each hipsr.pool_domain:
+//
+// 1. Group placeholders at the start of each pool domain.
+// 2. Move each shape region into an scf.execute_region.
+// 3. Build one tensor.empty from every computed result shape.
+// 4. Pair shapes with DPS inits or non-DPS results.
+// 5. Replace placeholder uses with tensor.empty values, then erase
+// placeholders.
+// 6. Emit preserve_shape links at the end of the domain.
 //
 // Before:
-//   %init = hipsr.placeholder(%ctx) ins(%a, %b) : tensor<?x512xf16>
-//       shape_region { ^bb0(%a_shape: !shape.shape, %b_shape: !shape.shape):
-//         hipsr.shape_yield %result_shape : !shape.shape }
-//   %0 = hipsr.matmul(%ctx) ins(%a, %b) outs(%init) : tensor<?x512xf16>
+//   %init = hipsr.placeholder(%ctx) : tensor<?xf16> shape_region { ... }
+//   %out = hipsr.matmul(%ctx) outs(%init) : tensor<?xf16>
+//
 // After:
 //   %shape = scf.execute_region -> !shape.shape { ... }
-//   %init = tensor.empty(%d0) : tensor<?x512xf16>
-//   %0 = hipsr.matmul(%ctx) ins(%a, %b) outs(%init) : tensor<?x512xf16>
-//   hipsr.preserve_shape %shape, %0 : tensor<?x512xf16>
-//
-// The shape is tied to the consumer's result rather than its tensor.empty
-// init: in tensor form those are two different values, and tying the link to
-// the init would describe the value the buffer held before the write. A
-// destination-style consumer's result shares its init's computed shape (its
-// type constraint guarantees type(outs) == type(result)), so that shape is
-// reused as is; hipsr.compute carries no such guarantee, so its link instead
-// reads the shape straight off the result with shape.shape_of.
-//
-// The phases run per domain: collect and group the placeholders, build the
-// shape regions, build the init tensors, collect the shape/data pairs, replace
-// and erase the placeholders, then emit the preserve_shape links.
+//   %init = tensor.empty(%d0) : tensor<?xf16>
+//   %out = hipsr.matmul(%ctx) outs(%init) : tensor<?xf16>
+//   hipsr.preserve_shape %shape, %init : tensor<?xf16>
 //
 //===----------------------------------------------------------------------===//
 
