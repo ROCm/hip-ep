@@ -31,6 +31,15 @@ def Hipsr_TensorOrManagedMemRef : AnyTypeOf<[AnyRankedTensor, Hipsr_ManagedMemRe
 def Hipsr_TensorOrMemRef : AnyTypeOf<[AnyRankedTensor, AnyMemRef], "ranked tensor or memref">;
 def Hipsr_TensorOrAnySpaceMemRef : AnyTypeOf<[AnyRankedTensor, Hipsr_AnySpaceMemRef], "ranked tensor or hipsr memref">;
 
+// A vector of i64 indices read on the host: a shape region works the output
+// shape out from its entries, so they have to be host resident.
+def Hipsr_HostIndexVector : Type<
+    And<[Hipsr_HostTensorOrMemRef.predicate,
+         CPred<"::llvm::cast<::mlir::ShapedType>($_self).getRank() == 1">,
+         CPred<"::llvm::cast<::mlir::ShapedType>($_self).getElementType()"
+               ".isInteger(64)">]>,
+    "rank-1 i64 host tensor or memref">;
+
 // Base class for hipsr types.
 class Hipsr_Type<string name, string typeMnemonic> : TypeDef<Hipsr_Dialect, name> {
   let mnemonic = typeMnemonic;
