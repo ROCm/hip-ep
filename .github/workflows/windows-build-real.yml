@@ -44,7 +44,7 @@ jobs:
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
       # gfx1151 first: TheRock tarball selection, NATIVE default import lib, and
       # wheel rocm index hint all take the first list entry (see cmake/deps.cmake).
-      HIP_ARCHITECTURES: "gfx1151;gfx1152;gfx1150"
+      HIP_ARCHITECTURES: "gfx11-generic"
 
     steps:
       # MorphiZen is vendored in-tree as a git subtree under morphizen,
