@@ -475,6 +475,13 @@ void populatePadShapeFoldPatterns(RewritePatternSet &patterns,
 void populateSliceShapeFoldPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 
+/// Pre-lowering pattern set: rewrite static high-rank onnx.Add/Sub/Mul/Div/
+/// Less/Greater to collapse_shape -> rank-<=4 ONNX op -> expand_shape when
+/// contiguous grouping preserves multidirectional broadcast semantics.
+/// Unsafe or dynamic shapes stay at their original rank for compute conversion.
+void populatePackBroadcastTo4DPatterns(RewritePatternSet &patterns,
+                                       MLIRContext *ctx);
+
 /// Pre-lowering pattern set: collapse ORT's inlined `FastGelu` primitive
 /// chain (Pow / Mul / Sum / Tanh) back into a single
 /// `onnx.Gelu(approximate="tanh")`. ORT inlines the Gelu function body
