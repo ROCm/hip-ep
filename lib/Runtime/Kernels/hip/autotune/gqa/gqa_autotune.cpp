@@ -682,50 +682,6 @@ static std::string currentGpuArch() {
 #endif
 }
 
-static bool compatibleLut(const fbs::GqaAutotuneLut *lut) {
-  if (lut->schema_version() != kGqaLutSchemaVersion) {
-    fprintf(
-        stderr,
-        "GQA LUT ignored: schema version %u is not supported (expected %u)\n",
-        lut->schema_version(), kGqaLutSchemaVersion);
-    return false;
-  }
-  if (!lut->kernel_abi() || lut->kernel_abi()->str() != kGqaKernelAbi) {
-    fprintf(stderr, "GQA LUT ignored: kernel ABI mismatch\n");
-    return false;
-  }
-  if (lut->gpu_arch() && !lut->gpu_arch()->str().empty()) {
-    const std::string actual = currentGpuArch();
-    if (actual.empty() || actual != lut->gpu_arch()->str()) {
-      fprintf(stderr, "GQA LUT ignored: GPU arch is %s, LUT requires %s\n",
-              actual.empty() ? "<unknown>" : actual.c_str(),
-              lut->gpu_arch()->c_str());
-      return false;
-    }
-  }
-  if (lut->rocm_version() != 0) {
-#if defined(HIPDNN_EP_GQA_AUTOTUNE_GPU_FREE)
-    fprintf(stderr,
-            "GQA LUT ignored: GPU-free validation requires rocm_version=0\n");
-    return false;
-#else
-    int actual = 0;
-    if (hipRuntimeGetVersion(&actual) != hipSuccess ||
-        actual != lut->rocm_version()) {
-      // A ROCm minor/patch bump shifts kernel timings but rarely reorders which
-      // config wins, so a table tuned on a nearby ROCm still beats the compiled
-      // heuristic by a wide margin. Warn (so the drift is visible and someone
-      // can re-tune) but keep using the table rather than rejecting it.
-      fprintf(stderr,
-              "GQA LUT: ROCm runtime is %d but table was tuned on %d -- using "
-              "it anyway; re-tune on this ROCm for optimal configs\n",
-              actual, lut->rocm_version());
-    }
-#endif
-  }
-  return true;
-}
-
 // Diagnostic gate shared with the per-shape config log in gqa_kernel.hip:
 // setting HIPDNN_EP_GQA_LOG_CONFIG turns on both, so one run shows whether the
 // table loaded AND what config each shape resolved to.
@@ -735,11 +691,57 @@ static bool gqaLutLogOn() {
   return on;
 }
 
+static bool compatibleLut(const fbs::GqaAutotuneLut *lut) {
+  if (lut->schema_version() != kGqaLutSchemaVersion) {
+    if (gqaLutLogOn())
+      fprintf(
+          stderr,
+          "GQA LUT ignored: schema version %u is not supported (expected %u)\n",
+          lut->schema_version(), kGqaLutSchemaVersion);
+    return false;
+  }
+  if (!lut->kernel_abi() || lut->kernel_abi()->str() != kGqaKernelAbi) {
+    if (gqaLutLogOn())
+      fprintf(stderr, "GQA LUT ignored: kernel ABI mismatch\n");
+    return false;
+  }
+  if (lut->gpu_arch() && !lut->gpu_arch()->str().empty()) {
+    const std::string actual = currentGpuArch();
+    if (actual.empty() || actual != lut->gpu_arch()->str()) {
+      if (gqaLutLogOn())
+        fprintf(stderr, "GQA LUT ignored: GPU arch is %s, LUT requires %s\n",
+                actual.empty() ? "<unknown>" : actual.c_str(),
+                lut->gpu_arch()->c_str());
+      return false;
+    }
+  }
+  if (lut->rocm_version() != 0) {
+#if defined(HIPDNN_EP_GQA_AUTOTUNE_GPU_FREE)
+    if (gqaLutLogOn())
+      fprintf(stderr,
+              "GQA LUT ignored: GPU-free validation requires rocm_version=0\n");
+    return false;
+#else
+    int actual = 0;
+    if (hipRuntimeGetVersion(&actual) != hipSuccess ||
+        actual != lut->rocm_version()) {
+      if (gqaLutLogOn())
+        fprintf(stderr,
+                "GQA LUT: ROCm runtime is %d but table was tuned on %d -- "
+                "using it anyway; re-tune on this ROCm for optimal configs\n",
+                actual, lut->rocm_version());
+    }
+#endif
+  }
+  return true;
+}
+
 static bool loadLutBuffer(GqaAutotunePolicy &policy, const uint8_t *data,
                           size_t size) {
   flatbuffers::Verifier verifier(data, size);
   if (!fbs::VerifyGqaAutotuneLutBuffer(verifier)) {
-    fprintf(stderr, "GQA LUT ignored: invalid FlatBuffer\n");
+    if (gqaLutLogOn())
+      fprintf(stderr, "GQA LUT ignored: invalid FlatBuffer\n");
     return false;
   }
   const auto *lut = fbs::GetGqaAutotuneLut(data);
@@ -1100,10 +1102,12 @@ static ModeChoice chooseMode() {
     return {GqaAutotuneMode::Lookup, true};
   if (mode == "online")
     return {GqaAutotuneMode::Online, true};
-  fprintf(stderr,
-          "GQA autotune: unrecognised HIPDNN_GQA_AUTOTUNE_MODE=\"%s\" "
-          "(expected \"lookup\" or \"online\"); using the build default, %s\n",
-          raw.c_str(), modeName(kDefaultMode));
+  if (gqaLutLogOn())
+    fprintf(stderr,
+            "GQA autotune: unrecognised HIPDNN_GQA_AUTOTUNE_MODE=\"%s\" "
+            "(expected \"lookup\" or \"online\"); using the build default, "
+            "%s\n",
+            raw.c_str(), modeName(kDefaultMode));
   return {kDefaultMode, false};
 }
 
@@ -1129,15 +1133,14 @@ void *gqa_autotune_create(morphizen::FileSystem *fs) {
                 policy->invalid_entries.load(std::memory_order_relaxed)),
             policy->table_id ? "TABLE (LUT active)"
                              : "HEURISTIC (no usable table loaded)");
-  // Never silently degrade: lookup mode with no table means every shape falls
-  // to the compiled heuristic, which is what a missing/undelivered LUT looks
-  // like. Warn once per session (not gated on the debug env) so it is visible.
+  // LUT load failure in lookup mode: the embedded table was rejected (arch /
+  // schema mismatch, corrupt data). Warn unconditionally so the degradation is
+  // always visible regardless of the log env var.
   if (policy->mode == GqaAutotuneMode::Lookup && policy->table_id == 0)
     fprintf(stderr,
-            "GQA autotune: lookup mode requested but no LUT loaded -- using the "
-            "compiled heuristic (GQA perf will be suboptimal). The embedded "
-            "table was rejected; see the 'GQA LUT ...' message above (e.g. GPU "
-            "arch or schema mismatch).\n");
+            "GQA autotune: LUT load failed -- falling back to compiled "
+            "heuristic (GQA perf will be suboptimal). Set "
+            "HIPDNN_EP_GQA_LOG_CONFIG=1 for details.\n");
   // Says where the mode came from, not just what it is: on a build whose
   // default was flipped there is no environment variable to inspect, so the log
   // is the only way to tell a deliberate default from an override that did not
@@ -1209,9 +1212,16 @@ GqaDecodeResult gqa_autotune_resolve_decode(void *opaque_policy,
       return {config, probes[i].source};
     }
   }
-  // Only reachable with no usable table at all -- no file, an arch or schema
-  // mismatch, or a table shipped without Fallback rows. Keeping it means a
-  // rejected LUT degrades instead of failing the op.
+  // Reachable when the table has no Fallback rows covering this shape. Warn
+  // once so the gap is visible; subsequent misses are silent.
+  if (policy && policy->table_id != 0) {
+    static std::atomic<bool> warned{false};
+    if (!warned.exchange(true, std::memory_order_relaxed))
+      fprintf(stderr,
+              "GQA autotune: LUT has no match for a decode shape (all tiers "
+              "missed) -- falling back to heuristic for this shape. Set "
+              "HIPDNN_EP_GQA_LOG_CONFIG=1 for details.\n");
+  }
   return {decodeHeuristic(request, policy && policy->compute_units > 0
                                        ? policy->compute_units
                                        : kAssumedCus),
@@ -1254,7 +1264,16 @@ gqa_autotune_resolve_prefill(void *opaque_policy,
       return {answer->prefill, probes[i].source};
     }
   }
-  // See the note in resolve_decode: reachable only without a usable table.
+  // Same as resolve_decode: reachable when the table has no Fallback rows for
+  // this shape. Warn once.
+  if (policy && policy->table_id != 0) {
+    static std::atomic<bool> warned{false};
+    if (!warned.exchange(true, std::memory_order_relaxed))
+      fprintf(stderr,
+              "GQA autotune: LUT has no match for a prefill shape (all tiers "
+              "missed) -- falling back to heuristic for this shape. Set "
+              "HIPDNN_EP_GQA_LOG_CONFIG=1 for details.\n");
+  }
   return {prefillHeuristic(request), GqaTuneSource::Heuristic};
 }
 

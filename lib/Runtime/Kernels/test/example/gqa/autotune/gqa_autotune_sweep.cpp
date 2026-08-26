@@ -294,7 +294,8 @@ struct OnlineResult {
 // ---- prefill sweep ----------------------------------------------------------
 
 std::vector<Result> sweepPrefill(const Shape &s, bool verify, double target_ms,
-                                 int rounds, OnlineResult *online = nullptr) {
+                                 int rounds, OnlineResult *online = nullptr,
+                                 bool print_realtime = true) {
   const int B = s.B, H = s.H, G = s.G, d = s.d, sq = s.sq, skv = s.skv;
   const int max_seq = s.max_seq;
   const int past_len = skv - sq;
@@ -347,7 +348,7 @@ std::vector<Result> sweepPrefill(const Shape &s, bool verify, double target_ms,
 
   std::vector<Result> out;
   auto measure = [&](Result r, auto &&launch) {
-    r.ms = timeConfig(launch, target_ms, 3, 200, rounds);
+    r.ms = timeConfig(launch, target_ms, 3, 2000, rounds);
     r.prod_candidate = true;
     r.rel_l2 = -1.0;
     if (do_verify) {
@@ -360,6 +361,14 @@ std::vector<Result> sweepPrefill(const Shape &s, bool verify, double target_ms,
         r.rel_l2 = relL2(cur, ref);
     }
     out.push_back(r);
+    if (print_realtime) {
+      // Real-time print: show each candidate as soon as it is measured.
+      double best_so_far = out[0].ms;
+      for (const auto &x : out) best_so_far = std::min(best_so_far, x.ms);
+      fprintf(stderr, "   %-18s %9.5f ms%s\n", r.cfg.c_str(), r.ms,
+              r.ms <= best_so_far + 1e-9 ? "  <-- best so far" : "");
+      fflush(stderr);
+    }
   };
 
   if (d == 64) {
@@ -512,7 +521,8 @@ constexpr size_t kKvCopiesMax = 48;
 
 std::vector<Result> sweepDecode(const Shape &s, bool verify, double target_ms,
                                 int rounds, int split_cap,
-                                OnlineResult *online = nullptr) {
+                                OnlineResult *online = nullptr,
+                                bool print_realtime = true) {
   const int B = s.B, H = s.H, G = s.G, d = s.d, skv = s.skv;
   const int hpg = H / G;
   const int max_seq = s.max_seq;
@@ -682,6 +692,14 @@ std::vector<Result> sweepDecode(const Shape &s, bool verify, double target_ms,
         r.splits = sp;
         r.bkv = use_wmma ? bkv : -1;
         out.push_back(r);
+        if (print_realtime) {
+          // Real-time print.
+          double best_so_far = out[0].ms;
+          for (const auto &x : out) best_so_far = std::min(best_so_far, x.ms);
+          fprintf(stderr, "   %-18s %9.5f ms%s\n", r.cfg.c_str(), r.ms,
+                  r.ms <= best_so_far + 1e-9 ? "  <-- best so far" : "");
+          fflush(stderr);
+        }
       }
     }
   }
@@ -841,7 +859,7 @@ int main(int argc, char **argv) {
   std::string csv_path;
   std::string best_path;
   bool verify = true;
-  double target_ms = 40.0;
+  double target_ms = 1000.0;
   int rounds = 3;
   int decode_split_cap = kFlashDecodeMaxSplits;
   double warmup_s = 4.0;
@@ -975,10 +993,12 @@ int main(int argc, char **argv) {
       const auto t_warm = std::chrono::steady_clock::now();
       do {
         if (seed->phase == "prefill")
-          (void)sweepPrefill(*seed, /*verify=*/false, /*target_ms=*/5.0, 1);
+          (void)sweepPrefill(*seed, /*verify=*/false, /*target_ms=*/5.0, 1,
+                             /*online=*/nullptr, /*print_realtime=*/false);
         else
           (void)sweepDecode(*seed, /*verify=*/false, /*target_ms=*/5.0, 1,
-                            decode_split_cap);
+                            decode_split_cap, /*online=*/nullptr,
+                            /*print_realtime=*/false);
       } while (std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                              t_warm)
                    .count() < warmup_s);
