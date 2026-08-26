@@ -258,8 +258,8 @@ bool DLLLinker::linkDLL_Linux(const std::string &objectFile,
   // glibc 2.34 libpthread merge. Subprocess because lldMain SIGSEGVs on its
   // post-output cleanup when the shared library carrying this code is
   // dlopen'd into the EP host process (libhipgpu.so). Windows linkDLL_Windows
-  // stays in-process — lld-link doesn't have this cleanup bug. clang++ (not bare
-  // clang) auto-links libstdc++ for the generated object's
+  // stays in-process — lld-link doesn't have this cleanup bug. clang++ (not
+  // bare clang) auto-links libstdc++ for the generated object's
   // __cxa_begin_catch / __cxa_rethrow.
   std::string clangPath;
 #ifdef HIPDNN_CLANG_PATH
