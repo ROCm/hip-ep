@@ -1,7 +1,7 @@
 // ============================================================
 // custom_kernels GQA flash *decode* with an additive attention mask.
 //
-// Covers the path branch 2 opens up: hip_gqa_flash_decode_v2 with a dense
+// Covers the path branch 2 opens up: hip_gqa_flash_decode with a dense
 // [bias_batch, bias_heads, 1, total_seq] fp16 bias folded into the online
 // softmax. Verified against a CPU fp32 reference over the mask shapes the
 // Gemma-4 26B graph actually emits:
@@ -30,7 +30,7 @@
 
 enum { HIP_KV_DTYPE_FP16 = 0, HIP_KV_DTYPE_INT8 = 1 };
 
-extern "C" int hip_gqa_flash_decode_v2(
+extern "C" int hip_gqa_flash_decode(
     void* stream,
     const void* Q, const void* Kcache, const void* Vcache,
     void* O,
@@ -245,7 +245,7 @@ int main() {
                         hipMemcpyHostToDevice));
 
     // window is carried entirely by the mask, so the kernel runs unwindowed.
-    HIP_CHECK((hipError_t)hip_gqa_flash_decode_v2(
+    HIP_CHECK((hipError_t)hip_gqa_flash_decode(
         nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, c.total, max_seq,
         MAX_SPLITS, scale, dSeq, 0, nullptr, 0, HIP_KV_DTYPE_FP16, nullptr,
         nullptr, dBias, /*bias_batch=*/B, bias_heads, /*bias_kv_stride=*/c.total));

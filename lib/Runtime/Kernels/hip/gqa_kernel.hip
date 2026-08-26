@@ -2718,7 +2718,7 @@ extern "C" int hip_gqa_flash_decode(
   // decomposed pipeline, which applies the bias for every cache format.
   if (kv_i8 && attn_bias != nullptr) {
     fprintf(stderr,
-            "hip_gqa_flash_decode_v2: attention_bias is not supported with an "
+            "hip_gqa_flash_decode: attention_bias is not supported with an "
             "INT8 KV cache\n");
     return -1;
   }
