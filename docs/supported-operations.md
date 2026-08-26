@@ -20,8 +20,8 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Mul | MIOpen |
 | Add | MIOpen |
 | Softmax | Custom HIP kernel |
-| Sigmoid | MIOpen |
-| Tanh | MIOpen |
+| Sigmoid | Custom HIP kernel |
+| Tanh | Custom HIP kernel |
 | Softplus | MIOpen |
 | Gelu | Custom HIP kernel |
 | BiasGelu (`com.microsoft`) | Custom HIP kernel |
@@ -42,6 +42,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Or | Custom HIP kernel |
 | Abs | Custom HIP kernel |
 | Cos | Custom HIP kernel |
+| Erf | Custom HIP kernel |
 | Sin | Custom HIP kernel |
 | Div | Custom HIP kernel |
 | Mod | Custom HIP kernel |
@@ -74,6 +75,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Compress | Custom HIP kernel; a dynamic selected extent is scanned and read back before allocation |
 | OneHot | Custom HIP kernel |
 | LayerNormalization | Custom HIP kernel |
+| InstanceNormalization | Custom HIP kernel |
 | SkipLayerNormalization (`com.microsoft`) | Decomposed to Add + LayerNormalization |
 | RMSNormalization | MIOpen |
 | SimplifiedLayerNormalization | MIOpen |
@@ -97,6 +99,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | AveragePool | Custom HIP kernel |
 | LpPool | Custom HIP kernel |
 | Resize | Custom HIP kernel |
+| GridSample | Custom HIP kernel |
 | GlobalAveragePool | Custom HIP kernel |
 | GlobalMaxPool | Custom HIP kernel |
 | GlobalLpPool | Custom HIP kernel |

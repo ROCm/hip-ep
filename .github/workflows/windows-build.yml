@@ -564,16 +564,14 @@ jobs:
           cp "${{ runner.workspace }}/install/lib/"*.lib staging/lib/ 2>/dev/null || true
 
           THEROCK_DIR="../build/$(basename "$PWD")/_therock"
-          for dll in amdhip64_7.dll MIOpen.dll amd_comgr0702.dll rocblas.dll \
-                     libhipblaslt.dll hiprtc0702.dll hiprtc-builtins0702.dll \
-                     hipdnn_backend.dll; do
-            cp "$THEROCK_DIR/bin/$dll" staging/bin/
+          for pat in amdhip64_7.dll MIOpen.dll 'amd_comgr*.dll' rocblas.dll \
+                     hipblaslt.dll libhipblaslt.dll 'hiprtc*.dll'; do
+            cp $THEROCK_DIR/bin/$pat staging/bin/ 2>/dev/null || true
           done
-          for data in hipblaslt rocblas; do
-            cp -r "$THEROCK_DIR/bin/$data" staging/bin/
-          done
-          for lib in amdhip64.lib MIOpen.lib libhipblaslt.dll.a; do
-            cp "$THEROCK_DIR/lib/$lib" staging/lib/
+          cp -r "$THEROCK_DIR/bin/hipblaslt" staging/bin/ 2>/dev/null || true
+          cp -r "$THEROCK_DIR/bin/rocblas" staging/bin/ 2>/dev/null || true
+          for pat in 'amdhip64*.lib' MIOpen.lib hipblaslt.lib libhipblaslt.dll.a; do
+            cp $THEROCK_DIR/lib/$pat staging/lib/ 2>/dev/null || true
           done
 
           # MorphiZen EP config

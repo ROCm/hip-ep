@@ -58,6 +58,8 @@ inline constexpr const char *kWrapSkipSimplifiedLayerNorm =
     "wrap_skip_simplified_layer_norm";
 inline constexpr const char *kWrapLayerNormalization =
     "wrap_layer_normalization";
+inline constexpr const char *kWrapInstanceNormalization =
+    "wrap_instance_normalization";
 inline constexpr const char *kMiopenAdd = "hip_miopen_add";
 inline constexpr const char *kMiopenMul = "hip_miopen_mul";
 inline constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";
@@ -109,9 +111,12 @@ inline constexpr const char *kWrapAbs = "wrap_abs";
 inline constexpr const char *kWrapNeg = "wrap_neg";
 inline constexpr const char *kWrapNot = "wrap_not";
 inline constexpr const char *kWrapCos = "wrap_cos";
+inline constexpr const char *kWrapErf = "wrap_erf";
 inline constexpr const char *kWrapSin = "wrap_sin";
 inline constexpr const char *kWrapCeil = "wrap_ceil";
 inline constexpr const char *kWrapExp = "wrap_exp";
+inline constexpr const char *kWrapSigmoid = "wrap_sigmoid";
+inline constexpr const char *kWrapTanh = "wrap_tanh";
 inline constexpr const char *kWrapLog = "wrap_log";
 inline constexpr const char *kWrapDiv = "wrap_div";
 inline constexpr const char *kWrapCumSum = "wrap_cumsum";
@@ -121,6 +126,7 @@ inline constexpr const char *kWrapExpand = "wrap_expand";
 inline constexpr const char *kWrapReduceProd = "wrap_reduce_prod";
 inline constexpr const char *kWrapPool = "wrap_pool";
 inline constexpr const char *kWrapResize = "wrap_resize";
+inline constexpr const char *kWrapGridSample = "wrap_grid_sample";
 inline constexpr const char *kWrapGlobalPool = "wrap_global_pool";
 inline constexpr const char *kWrapLess = "wrap_less";
 inline constexpr const char *kWrapGatherND = "wrap_gather_nd";
@@ -149,9 +155,7 @@ inline constexpr int64_t kStridesIdx = 4;
 
 // Activation mode constants.
 // Values must match HIPDNN_EP_ACTIVATION_* in lib/Runtime/hipdnn_ep_runtime.h.
-inline constexpr int64_t kActivationSigmoid = 0;
 inline constexpr int64_t kActivationRelu = 1;
-inline constexpr int64_t kActivationTanh = 2;
 inline constexpr int64_t kActivationSoftplus = 3;
 
 // Window-pool reduction mode constants (hip.pool / wrap_pool).
@@ -498,6 +502,8 @@ void populatePoolLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateResizeLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns);
+void populateGridSampleLoweringPatterns(const LLVMTypeConverter &converter,
+                                        RewritePatternSet &patterns);
 void populateGlobalPoolLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns);
 

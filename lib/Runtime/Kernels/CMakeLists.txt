@@ -56,6 +56,7 @@ set(_kernel_sources
     hip/cumsum_kernel.hip
     hip/pad_kernel.hip
     hip/layer_norm_kernel.hip
+    hip/instance_norm_kernel.hip
     hip/cast_kernel.hip
     hip/range_kernel.hip
     hip/gather_kernel.hip
@@ -67,6 +68,7 @@ set(_kernel_sources
     hip/reduce_sum_kernel.hip
     hip/pool_kernel.hip
     hip/resize_kernel.hip
+    hip/grid_sample_kernel.hip
     hip/global_pool_kernel.hip
     hip/matmul_nbits_kernel.hip
     hip/qmoe_kernel.hip
@@ -108,6 +110,11 @@ endforeach()
 
 # Export include directory for Runtime bitcode compilation
 set(HIP_CUSTOM_KERNELS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include" PARENT_SCOPE)
+
+# The GQA offline-autotune LUT is compiled into runtime.bc (see
+# lib/Runtime/CMakeLists.txt, which xxd's lut/gfx1151.fb into the bitcode), so
+# it travels with the build and is JIT-loaded with every model. No loose file
+# is installed and no per-model/per-compile step is needed.
 
 # Header is intentionally NOT installed: the EP-side build always uses the
 # in-tree header (lib/Runtime/Kernels/include/hip_custom_kernels.h) so

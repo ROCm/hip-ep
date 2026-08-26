@@ -64,7 +64,9 @@ existing `--convert-hip-to-llvm` pipeline.
 | ONNX / ORT Contrib | HIP | MIOpen C API |
 |---|---|---|
 | `LayerNormalization` | `hip.miopen.layer_norm` | `miopenLayerNormForward` |
+| `InstanceNormalization` | `hip.instance_norm` | custom HIP kernel |
 | `SimplifiedLayerNormalization` | `hip.miopen.t5_layer_norm` | `miopenT5LayerNormForward` |
+| `GridSample` | `hip.grid_sample` | custom HIP kernel |
 | `SkipLayerNormalization` | `hip.miopen.skip_layer_norm` | `miopenAddLayerNormForward` |
 | `SkipSimplifiedLayerNormalization` | `hip.miopen.skip_rms_norm` | `miopenAddLayerNormForward` (T5 mode) |
 | LpNorm+Mul pattern (fused) | `hip.miopen.rms_norm` | `miopenT5LayerNormForward` |
@@ -90,7 +92,6 @@ existing `--convert-hip-to-llvm` pipeline.
 
 | ONNX | HIP | MIOpen mode |
 |---|---|---|
-| `Sigmoid` | `hip.miopen.sigmoid` | `miopenActivationLOGISTIC` |
 | `Relu` | `hip.miopen.relu` | `miopenActivationRELU` |
 
 ### MIOpen: Softmax (`miopenSoftmaxForward`)

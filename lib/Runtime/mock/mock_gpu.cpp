@@ -1178,6 +1178,26 @@ int wrap_resize(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_grid_sample(RuntimeState *state, void *input, void *grid, void *output,
+                     int64_t data_type, int64_t n, int64_t c, int64_t in_h,
+                     int64_t in_w, int64_t out_h, int64_t out_w, int64_t mode,
+                     int64_t padding_mode, int64_t align_corners) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_grid_sample\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_grid_sample(dtype=%s(%lld), N=%lld, C=%lld, "
+             "in=%lldx%lld, out=%lldx%lld, mode=%lld, pad=%lld, align=%lld)\n",
+             hipdnn_ep_datatype_name(data_type), (long long)data_type,
+             (long long)n, (long long)c, (long long)in_h, (long long)in_w,
+             (long long)out_h, (long long)out_w, (long long)mode,
+             (long long)padding_mode, (long long)align_corners);
+  (void)input;
+  (void)grid;
+  (void)output;
+  return 0;
+}
+
 int wrap_global_pool(RuntimeState *state, void *input, void *output,
                      int64_t outer, int64_t reduce_size, int64_t data_type,
                      int64_t mode, int64_t p) {
@@ -1728,6 +1748,20 @@ int wrap_cos(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_erf(RuntimeState *state, void *input, void *output,
+             int64_t num_elements, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_erf\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_erf(num_elements=%lld, data_type=%s(%lld))\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  (void)input;
+  (void)output;
+  return 0;
+}
+
 int wrap_sin(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type) {
   if (!state) {
@@ -1759,6 +1793,30 @@ int wrap_exp(RuntimeState *state, void *input, void *output,
     return -1;
   }
   MOCK_PRINT("[MOCK] wrap_exp(num_elements=%lld, data_type=%s(%lld))\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  return 0;
+}
+
+int wrap_sigmoid(RuntimeState *state, void *input, void *output,
+                 int64_t num_elements, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_sigmoid\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_sigmoid(num_elements=%lld, data_type=%s(%lld))\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  return 0;
+}
+
+int wrap_tanh(RuntimeState *state, void *input, void *output,
+              int64_t num_elements, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_tanh\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_tanh(num_elements=%lld, data_type=%s(%lld))\n",
              (long long)num_elements, hipdnn_ep_datatype_name(data_type),
              (long long)data_type);
   return 0;
@@ -2003,6 +2061,26 @@ int wrap_layer_normalization(RuntimeState *state, void *input, void *scale,
              (long long)stash_type, bias ? "yes" : "null",
              mean ? "yes" : "null", inv_std ? "yes" : "null");
 
+  return 0;
+}
+
+int wrap_instance_normalization(RuntimeState *state, void *input, void *scale,
+                                void *bias, void *output, int64_t n, int64_t c,
+                                int64_t spatial, int64_t data_type,
+                                float epsilon) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_instance_normalization\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_instance_normalization(n=%lld, c=%lld, spatial=%lld, "
+             "data_type=%lld, epsilon=%f)\n",
+             (long long)n, (long long)c, (long long)spatial,
+             (long long)data_type, epsilon);
+  (void)input;
+  (void)scale;
+  (void)bias;
+  (void)output;
   return 0;
 }
 

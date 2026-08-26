@@ -38,12 +38,8 @@ static miopenActivationMode_t hipdnn_ep_to_miopen_activation(int64_t mode,
                                                              bool &ok) {
   ok = true;
   switch (mode) {
-  case HIPDNN_EP_ACTIVATION_SIGMOID:
-    return miopenActivationLOGISTIC;
   case HIPDNN_EP_ACTIVATION_RELU:
     return miopenActivationRELU;
-  case HIPDNN_EP_ACTIVATION_TANH:
-    return miopenActivationTANH;
   case HIPDNN_EP_ACTIVATION_SOFTPLUS:
     return miopenActivationSOFTRELU;
   default:
@@ -163,23 +159,11 @@ queryOrCreateActivation(ActivationTable &table, const ActivationCacheKey &key) {
   }
   MIOPEN_CHECK_GOTO(miopenCreateActivationDescriptor(&e.actDesc), cache_fail);
   {
-    // MIOpen's TANH mode computes y = alpha * tanh(beta * x); plain ONNX Tanh
-    // needs alpha = beta = 1. (LOGISTIC/SOFTRELU ignore alpha/beta, so the
-    // 0,0,0 default is only correct for those modes -- with the default,
-    // TANH would degenerate to 0 * tanh(0) = 0.)
-    //
-    // alpha/beta are a pure function of `act` here, and the descriptor cache is
-    // keyed by activation_mode (see ActivationCacheKey), so a TANH descriptor
-    // can never be reused for a different mode (no alpha/beta aliasing). If a
-    // future activation needs alpha/beta that vary independently of the mode,
-    // add those params to ActivationCacheKey as well.
-    double alpha = 0.0, beta = 0.0;
-    if (act == miopenActivationTANH) {
-      alpha = 1.0;
-      beta = 1.0;
-    }
+    // SOFTRELU (and RELU) ignore alpha/beta. ONNX Tanh no longer uses this
+    // path; if a future mode needs non-zero coefficients, key them on
+    // ActivationCacheKey as well.
     MIOPEN_CHECK_GOTO(
-        miopenSetActivationDescriptor(e.actDesc, act, alpha, beta, 0.0),
+        miopenSetActivationDescriptor(e.actDesc, act, 0.0, 0.0, 0.0),
         cache_fail);
   }
   goto cache_done;

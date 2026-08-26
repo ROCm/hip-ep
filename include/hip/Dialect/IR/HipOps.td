@@ -1248,6 +1248,52 @@ def Hip_LayerNormOp : Hip_DpsOp<"layer_norm",
   let hasVerifier = 1;
 }
 
+def Hip_InstanceNormOp : Hip_DpsOp<"instance_norm", /*traits=*/[],
+                                   /*outsAccessor=*/"Output",
+                                   /*autoReify=*/1,
+                                   /*autoInfer=*/1,
+                                   /*declareInfer=*/1> {
+  let summary = "ONNX InstanceNormalization (per-instance per-channel mean/var)";
+  let description = [{
+    Carries out instance normalization as described in
+    https://arxiv.org/abs/1607.08022 / ONNX InstanceNormalization:
+
+      y = scale * (x - mean) / sqrt(variance + epsilon) + B
+
+    Mean and variance are computed over the spatial axes of each (N, C)
+    slice. Input rank is at least 3: (N, C, D1, ..., Dn). Scale and B are
+    1-D tensors of length C.
+
+    Example:
+    ```mlir
+    hip.instance_norm(%ctx)
+        ins(%input, %scale, %bias :
+            memref<2x3x8x8xf32, 1>, memref<3xf32, 1>, memref<3xf32, 1>)
+        outs(%output : memref<2x3x8x8xf32, 1>)
+        {epsilon = 1.000000e-05 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$scale,
+    Hip_TensorOrMemRef:$bias,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<F32Attr, "1.000000e-05">:$epsilon
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $scale `,` $bias `:`
+        type($input) `,` type($scale) `,` type($bias)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
 def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
     [AttrSizedOperandSegments, OpStateOpInterface]> {
   let summary = "Fused skip + RMS normalization (com.microsoft.SkipSimplifiedLayerNormalization)";
@@ -1919,28 +1965,16 @@ def Hip_SiluOp : Hip_DpsOp<"silu", /*traits=*/[],
   let hasVerifier = 1;
 }
 
-def Hip_SigmoidOp : Hip_DpsOp<"sigmoid", /*traits=*/[OpStateOpInterface],
+def Hip_SigmoidOp : Hip_DpsOp<"sigmoid", /*traits=*/[],
                               /*outsAccessor=*/"Y",
                               /*autoReify=*/1,
                               /*autoInfer=*/1,
                               /*declareInfer=*/1> {
   let summary = "Sigmoid activation";
-
-  // OpStateOpInterface: construct this instance's per-session ActivationState,
-  // which holds a shared_ptr to the device-wide MIOpen descriptor table shared
-  // across sessions via WeakStore. All three MIOpen activations (sigmoid, tanh,
-  // softplus) share the same construct + table.
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot,
-          "hipdnn_ep_op_state_construct_activation", {});
-    }
-  }];
   let description = [{
     Applies sigmoid activation: y = 1 / (1 + exp(-x))
+
+    Lowered via the unified unary elementwise path (wrap_sigmoid).
 
     Uses destination-passing style: output buffer is provided as argument.
 
@@ -1964,25 +1998,16 @@ def Hip_SigmoidOp : Hip_DpsOp<"sigmoid", /*traits=*/[OpStateOpInterface],
   }];
 }
 
-def Hip_TanhOp : Hip_DpsOp<"tanh", /*traits=*/[OpStateOpInterface],
+def Hip_TanhOp : Hip_DpsOp<"tanh", /*traits=*/[],
                            /*outsAccessor=*/"Y",
                            /*autoReify=*/1,
                            /*autoInfer=*/1,
                            /*declareInfer=*/1> {
   let summary = "Tanh activation";
-
-  // OpStateOpInterface: shared ActivationState (see hip.sigmoid).
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot,
-          "hipdnn_ep_op_state_construct_activation", {});
-    }
-  }];
   let description = [{
     Applies hyperbolic-tangent activation: y = tanh(x)
+
+    Lowered via the unified unary elementwise path (wrap_tanh).
 
     Uses destination-passing style: output buffer is provided as argument.
 
@@ -2438,6 +2463,40 @@ def Hip_CosOp : Hip_DpsOp<"cos", /*traits=*/[],
     ```mlir
     hip.cos(%ctx) ins(%x : memref<1x128x512xf32, 1>)
                   outs(%y : memref<1x128x512xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_ErfOp : Hip_DpsOp<"erf", /*traits=*/[],
+                          /*outsAccessor=*/"Y",
+                          /*autoReify=*/1,
+                          /*autoInfer=*/1,
+                          /*declareInfer=*/1> {
+  let summary = "Element-wise error function: y = erf(x)";
+  let description = [{
+    Computes the Gauss error function of each element.
+    Implements the standard ONNX Erf operator.
+
+    Formula: Y = erf(X)
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.erf(%ctx) ins(%x : memref<1x128x200x200xf32, 1>)
+                  outs(%y : memref<1x128x200x200xf32, 1>)
     ```
   }];
 
@@ -4366,6 +4425,54 @@ def Hip_ResizeOp : Hip_DpsOp<"resize"> {
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+}
+
+def Hip_GridSampleOp : Hip_DpsOp<"grid_sample", /*traits=*/[],
+                                 /*outsAccessor=*/"Output",
+                                 /*autoReify=*/1,
+                                 /*autoInfer=*/1,
+                                 /*declareInfer=*/1> {
+  let summary = "ONNX GridSample (4D NCHW bilinear / nearest)";
+  let description = [{
+    Samples a 4-D input `X` of shape (N, C, H_in, W_in) at normalized
+    locations from `grid` of shape (N, H_out, W_out, 2).  The last grid
+    axis is (x, y) in [-1, 1].  Output Y has shape (N, C, H_out, W_out).
+
+    Attribute encoding (decoded at ONNX->HIP conversion):
+      * mode: 0 = nearest, 1 = bilinear (ONNX "bilinear" / "linear")
+      * padding_mode: 0 = zeros, 1 = border, 2 = reflection
+      * align_corners: 0 or 1 (ONNX default 0)
+
+    Cubic / bicubic interpolation and 5-D (volumetric) sampling are
+    rejected at conversion.
+
+    Example:
+    ```mlir
+    hip.grid_sample(%ctx)
+        ins(%x, %grid : memref<1x3x8x8xf32, 1>, memref<1x4x4x2xf32, 1>)
+        outs(%y : memref<1x3x4x4xf32, 1>)
+        {mode = 1, padding_mode = 0, align_corners = 0}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$grid,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$mode,
+    I64Attr:$padding_mode,
+    I64Attr:$align_corners
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $grid `:` type($input) `,` type($grid)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
 }
 
 // hip.readback_dim : materialize a kernel-computed runtime extent as a host

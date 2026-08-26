@@ -139,6 +139,33 @@ class TestElementwiseMul:
         actual, expected = model_runner.run_sample(model, [lhs, rhs])
         compare_outputs(actual, expected, atol=1e-4)
 
+    def test_mul_5d_broadcast(self, model_runner):
+        """Rank-5 broadcast matching SimpleBEV feature-volume masking."""
+        lhs_shape = [2, 3, 4, 2, 5]
+        rhs_shape = [2, 1, 4, 2, 5]
+        model = _make_broadcast_binary_model(
+            "Mul", np.float32, lhs_shape, rhs_shape, lhs_shape
+        )
+
+        rng = np.random.default_rng(78)
+        lhs = rng.uniform(-2, 2, lhs_shape).astype(np.float32)
+        rhs = rng.uniform(-2, 2, rhs_shape).astype(np.float32)
+
+        actual, expected = model_runner.run_sample(model, [lhs, rhs])
+        compare_outputs(actual, expected, atol=1e-6)
+
+    def test_mul_6d_same_shape(self, model_runner):
+        """Rank-6 same-shape multiplication packed through the 4-D path."""
+        shape = [1, 2, 3, 2, 3, 4]
+        model = _make_binary_model("Mul", np.float16, shape)
+
+        rng = np.random.default_rng(79)
+        lhs = rng.uniform(-2, 2, shape).astype(np.float16)
+        rhs = rng.uniform(-2, 2, shape).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [lhs, rhs])
+        compare_outputs(actual, expected, atol=1e-3)
+
 
 class TestElementwiseAdd:
     """Add op coverage matching the per-projection bias adds in
