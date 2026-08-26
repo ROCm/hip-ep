@@ -527,6 +527,9 @@ struct BroadcastDivToMulReciprocal : public mlir::RewritePattern {
 // Restricted to:
 //   - input rank >= 4, matching weight and result ranks
 //   - stride == kernel on every spatial axis (the non-overlap requirement)
+//   - a patch of more than one element, unless there is exactly one patch. A
+//     1x1 kernel tiles the input trivially but gains nothing from the rewrite
+//     and pays for both transposes; see the check for the measurement.
 //   - every input spatial extent an exact multiple of its kernel extent, so the
 //     patch grid is expressible as a reshape (a ragged trailing partial patch
 //     would need a Slice first)
@@ -643,6 +646,31 @@ struct PatchEmbedConvToGemm : public mlir::RewritePattern {
     int64_t M = wType.getDimSize(0); // out_channels
     if (M == mlir::ShapedType::kDynamic)
       return rewriter.notifyMatchFailure(op, "conv.m_dynamic");
+
+    // A 1x1 kernel satisfies `stride == kernel` trivially, but it is not a
+    // patch embed and this rewrite makes it slower, so decline it.
+    //
+    // With every kernel extent 1 the patch is a single pixel: the split reshape
+    // is an identity, and the two transposes the gather path emits degenerate
+    // into a plain NCHW <-> NHWC round trip around a contraction that was
+    // already a GEMM over C. Nothing is gained and two full passes over the
+    // input and the output are added. The cost shows up as soon as a model has
+    // 1x1 convs in bulk: detr's ResNet-50 backbone has 33, and converting them
+    // took transposes from 94 calls to 161 and cost 36% of the model's runtime.
+    //
+    // The rewrite only pays when the patch is big enough that the GEMM dominates
+    // the permutations it needs -- gemma3-4b contracts over 14x14x3 = 588 per
+    // output element, Qwen's rank-5 embed over 2x16x16x3 = 1536. Requiring more
+    // than one element in the patch is the weakest condition that separates
+    // those from a 1x1, and it leaves the 1x1 case to the ordinary conv path,
+    // which handles it as a K = C contraction with no data movement at all.
+    //
+    // The `outSpatialProd == 1` shapes are exempt: there the two permutations
+    // are identities on the linear layout and are never emitted, so the rewrite
+    // is a pure win regardless of patch size.
+    if (outSpatialProd != 1 &&
+        llvm::all_of(kernelSpatial, [](int64_t k) { return k == 1; }))
+      return rewriter.notifyMatchFailure(op, "conv.unit_kernel");
 
     // The gather path splits every spatial axis in two, so the intermediate is
     // rank 2 + 2*nSpatial. hip.transpose caps out at rank 8; declining here

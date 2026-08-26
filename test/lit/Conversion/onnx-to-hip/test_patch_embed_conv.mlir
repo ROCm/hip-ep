@@ -278,4 +278,79 @@ module {
 
   // CHECK-LABEL: func.func @guard_auto_pad
   // CHECK:         hip.conv
+
+  // --------------------------------------------------------------------------
+  // GUARD: 1x1 kernel, stride 1. It satisfies `stride == kernel` and tiles the
+  // input, but the patch is a single pixel: the gather path's two transposes
+  // would be a plain NCHW <-> NHWC round trip around a contraction that is
+  // already a GEMM over C, so the rewrite is pure added traffic. detr's
+  // ResNet-50 backbone has 33 of these and converting them cost 36% of the
+  // model's runtime. They belong on hip.conv, which contracts over K = C with
+  // no data movement.
+  // --------------------------------------------------------------------------
+  func.func @guard_unit_kernel(%x: tensor<1x256x200x272xf16>,
+                               %w: tensor<64x256x1x1xf16>,
+                               %b: tensor<64xf16>)
+      -> tensor<1x64x200x272xf16> {
+    %y = "onnx.Conv"(%x, %w, %b) {
+      kernel_shape = [1, 1],
+      strides = [1, 1],
+      pads = [0, 0, 0, 0],
+      group = 1 : i64
+    } : (tensor<1x256x200x272xf16>, tensor<64x256x1x1xf16>, tensor<64xf16>)
+      -> tensor<1x64x200x272xf16>
+    return %y : tensor<1x64x200x272xf16>
+  }
+
+  // CHECK-LABEL: func.func @guard_unit_kernel
+  // CHECK-NOT:     hip.transpose
+  // CHECK:         hip.conv
+
+  // --------------------------------------------------------------------------
+  // The unit-kernel guard is scoped to the gather path. A 1x1 kernel over a 1x1
+  // input still has exactly one patch, so both permutations are identities that
+  // are never emitted and the rewrite is a free reshape into a GEMM. Keep it.
+  // --------------------------------------------------------------------------
+  func.func @unit_kernel_single_patch(%x: tensor<1x1152x1x1xf16>,
+                                      %w: tensor<512x1152x1x1xf16>,
+                                      %b: tensor<512xf16>)
+      -> tensor<1x512x1x1xf16> {
+    %y = "onnx.Conv"(%x, %w, %b) {
+      kernel_shape = [1, 1],
+      strides = [1, 1],
+      pads = [0, 0, 0, 0],
+      group = 1 : i64
+    } : (tensor<1x1152x1x1xf16>, tensor<512x1152x1x1xf16>, tensor<512xf16>)
+      -> tensor<1x512x1x1xf16>
+    return %y : tensor<1x512x1x1xf16>
+  }
+
+  // CHECK-LABEL: func.func @unit_kernel_single_patch
+  // CHECK-NOT:     hip.conv
+  // CHECK:         hip.gemm
+  // CHECK-NOT:     hip.conv
+
+  // --------------------------------------------------------------------------
+  // The guard must not catch a real patch embed with a small patch: convnext's
+  // downsample stages are 2x2 stride 2, which is four elements per patch and
+  // still a genuine partition of the input.
+  // --------------------------------------------------------------------------
+  func.func @convnext_downsample(%x: tensor<1x192x56x56xf16>,
+                                 %w: tensor<384x192x2x2xf16>,
+                                 %b: tensor<384xf16>)
+      -> tensor<1x384x28x28xf16> {
+    %y = "onnx.Conv"(%x, %w, %b) {
+      kernel_shape = [2, 2],
+      strides = [2, 2],
+      pads = [0, 0, 0, 0],
+      group = 1 : i64
+    } : (tensor<1x192x56x56xf16>, tensor<384x192x2x2xf16>, tensor<384xf16>)
+      -> tensor<1x384x28x28xf16>
+    return %y : tensor<1x384x28x28xf16>
+  }
+
+  // CHECK-LABEL: func.func @convnext_downsample
+  // CHECK-NOT:     hip.conv
+  // CHECK:         hip.gemm
+  // CHECK-NOT:     hip.conv
 }
