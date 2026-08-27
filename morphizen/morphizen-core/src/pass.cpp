@@ -86,12 +86,19 @@ node_arg_names_to_nodes(const Graph &graph,
       bool node_arg_is_node_output =
           (!node_arg_is_graph_input(graph, onnx_node_arg_name)) &&
           (!node_arg_is_initializer(graph, onnx_node_arg_name));
+      // A producerless node_arg that is a graph input or a constant initializer
+      // is legal, not a fusion error: ORT constant folding can leave a constant
+      // initializer as a graph output (e.g. Model-PSI-QDQ-v3_0's
+      // output_exposed_scale/zero_point, an Identity of a constant that gets
+      // folded away). Only a genuine node-output with no producer signals a
+      // node fused into another subgraph -- record it so the caller gives up
+      // this fuse gracefully instead of aborting the whole compile.
       if (node_arg_is_node_output) {
         ss << onnx_node_arg_name << ",";
-      }
-      if (!allow_node_not_found) {
-        LOG(FATAL) << "cannot find producer. onnx_node_arg_name="
-                   << onnx_node_arg_name;
+        if (!allow_node_not_found) {
+          LOG(FATAL) << "cannot find producer. onnx_node_arg_name="
+                     << onnx_node_arg_name;
+        }
       }
     } else {
       auto found = std::find(ret.begin(), ret.end(), deq) != ret.end();
