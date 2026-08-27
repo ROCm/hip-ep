@@ -294,12 +294,9 @@ TEST_F(GraphTest, TryFuse) {
   LOG(INFO) << " fused_node=" << meta_def->DebugString();
 }
 
-// A graph output that is a bare constant initializer (no producer node) must
-// not abort or crash try_fuse, and must be excluded from the fused meta_def
-// outputs. This reproduces the shape of Model-PSI-QDQ-v3_0's
-// output_exposed_scale / output_exposed_zero_point, where an Identity(constant)
-// is const-folded into an initializer-backed graph output. Regression test for
-// the fusion handling of producerless graph outputs.
+// A constant initializer surfaced directly as a graph output (no producer) must
+// not abort try_fuse and must be excluded from the fused outputs. Mirrors the
+// shape of a const-folded Identity(constant) graph output.
 TEST_F(GraphTest, TryFuseConstantGraphOutput) {
   auto path = CMAKE_CURRENT_BINARY_PATH /
               std::filesystem::path("const_output_test.onnx");
@@ -332,8 +329,7 @@ TEST_F(GraphTest, TryFuseConstantGraphOutput) {
   // The fuse must succeed (no FATAL on the producerless constant output).
   ASSERT_TRUE(meta_def != nullptr) << error.comments;
 
-  // The constant output must be excluded from the fused outputs -- only the
-  // real compute output is claimed. ORT serves the initializer output directly.
+  // Only the real compute output is claimed; ORT serves the constant directly.
   std::vector<std::string> fused_outputs{meta_def->outputs().begin(),
                                          meta_def->outputs().end()};
   EXPECT_NE(

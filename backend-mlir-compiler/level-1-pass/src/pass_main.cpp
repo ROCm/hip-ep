@@ -182,12 +182,9 @@ static std::string build_metadata_json(const CompilationArtifact &artifact,
   }
 
   for (const auto &output : graphRef.outputs()) {
-    // Skip producerless (constant initializer) graph outputs, mirroring
-    // fuse_graph(): they are not produced by the fused region, so the artifact
-    // metadata output list must exclude them to stay consistent with the
-    // meta_def output list. Otherwise build_output_index_map() (MlirCustomOp)
-    // fails to match this artifact output back to a meta_def output. ORT serves
-    // such initializer-backed outputs directly.
+    // Skip producerless (constant) outputs, mirroring fuse_graph(): excluding
+    // them here keeps the artifact metadata outputs consistent with the
+    // meta_def outputs (see build_output_index_map).
     if (!output.find_producer().has_value()) {
       continue;
     }
@@ -236,18 +233,11 @@ static bool fuse_graph(IPass &self, Graph &graph, const std::string &metadata,
   }
   MY_LOG(1) << "Graph inputs: " << input_names.size();
 
-  // Extract graph output names.
-  //
-  // Skip graph outputs that have no producer node -- i.e. a constant
-  // initializer surfaced directly as a graph output. ORT constant folding can
-  // collapse an `Identity(constant)` into a bare initializer that is still a
-  // declared graph output (e.g. Model-PSI-QDQ-v3_0's output_exposed_scale /
-  // output_exposed_zero_point). Such an output is not produced by any node in
-  // the fused region, so claiming it would build a fused function whose return
-  // references a value that does not exist inside the region. ONNX Runtime
-  // serves an initializer-backed graph output directly, so leaving it unclaimed
-  // is correct and keeps the fused node's outputs consistent across the
-  // meta_def, the compiled artifact, and the custom-op output map.
+  // Skip graph outputs with no producer node -- a constant initializer surfaced
+  // directly as a graph output (e.g. an Identity(constant) that ORT constant
+  // folding collapses to a bare initializer). It has no value inside the fused
+  // region, so claiming it would build an invalid fused-function return; ORT
+  // serves such initializer-backed outputs directly.
   std::vector<std::string> output_names;
   for (const auto &output : graphRef.outputs()) {
     if (!output.find_producer().has_value()) {
