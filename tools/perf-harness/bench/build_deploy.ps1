@@ -13,20 +13,26 @@
 ## result, which is the worst kind. Deploying prints each file's hash so a
 ## comparison against the previous run's hash proves the binary actually moved.
 ##
-## Three artifacts carry the code the harness profiles:
-##   hipgpu.dll                  lib/Runtime (gqa.cpp, matmul_nbits.cpp)
+## Two artifacts carry the code the harness profiles:
+##   hipgpu.dll                  lib/Runtime, plus lib/Conversion and lib/Dialect
+##                               -- everything that decides what the runtime is
+##                               asked to execute. The compiler became a static
+##                               plugin linked into this DLL (#838) and the
+##                               standalone hip-compiler.dll build was removed
+##                               (#840), so a graph-lowering change now ships
+##                               here and nowhere else.
 ##   custom_kernels_<arch>.dll   lib/Runtime/Kernels/hip (gqa_kernel.hip,
-##                               matmul_nbits_kernel.hip)
-##   hip-compiler.dll            lib/Conversion, lib/Dialect -- everything that
-##                               decides what the runtime is asked to execute
-## They are deployed as a set on purpose. hipgpu and custom_kernels share the
+##                               matmul_nbits_kernel.hip, conv_kernel.hip)
+## They are deployed as a set on purpose: hipgpu and custom_kernels share the
 ## extern "C" kernel ABI, so a mixed pair is only accidentally correct -- and a
 ## mixed pair was in fact deployed on this machine (hipgpu from one build,
 ## custom_kernels from an eight-hour-older one), which is unattributable as a
-## baseline. hip-compiler is here because omitting it produced the opposite and
-## more insidious failure: a conversion-only change measured as an exact no-op,
-## the stale compiler having emitted the old graph for a correctly rebuilt
-## runtime. Anything that lowers a graph belongs in this list.
+## baseline.
+##
+## A hip-compiler.dll left over in the deploy directory from before #840 is not
+## loaded, but it is worth deleting rather than reasoning about: the failure it
+## would cause -- a conversion-only change measuring as an exact no-op because a
+## stale compiler emitted the old graph -- is silent and plausible.
 
 [CmdletBinding()]
 param(
@@ -117,7 +123,7 @@ $arch = (Select-String -Path (Join-Path $BuildDir 'CMakeCache.txt') `
 $arch = ($arch -split ';')[0].Trim()
 if (-not $arch) { throw "Could not read HIP_ARCHITECTURES from the cmake cache." }
 
-$artifacts = @('hipgpu.dll', "custom_kernels_$arch.dll", 'hip-compiler.dll')
+$artifacts = @('hipgpu.dll', "custom_kernels_$arch.dll")
 
 if (-not $SkipBuild) {
   Write-Host ">>> build [$Config] $BuildDir"

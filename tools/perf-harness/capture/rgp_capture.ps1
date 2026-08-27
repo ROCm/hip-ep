@@ -2,8 +2,8 @@
 ## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 ## Licensed under the MIT License.
 ##
-## Drive one RGP dispatch-mode capture of a model_benchmark run, then decode it
-## with tools/rgp_parser.
+## Drive one RGP dispatch-mode capture of a model run, then decode it with
+## tools/rgp_parser. See -Driver for the three ways a model can be driven.
 ##
 ## Positioning a capture on a specific op is the hard part. Two modes:
 ##
@@ -37,10 +37,15 @@ param(
   [int]$SeqLen = 16384,                          # with -PromptFile unset, drives --use_random_tokens
   [string]$PromptFile,
   # The fence lives in hipgpu.dll, not in the benchmark, so it fires the same way
-  # under a Python driver. 'vlm' is required for multimodal models, whose vision
-  # encoder model_benchmark.exe never touches.
-  [ValidateSet('model_benchmark', 'vlm')]
+  # under any driver. 'vlm' is required for multimodal models, whose vision
+  # encoder model_benchmark.exe never touches. 'onnx' drives a plain .onnx graph
+  # through onnxruntime_perf_test, which is how the vision zoo runs -- those
+  # models have no genai_config.json and never enter the OGA path at all.
+  [ValidateSet('model_benchmark', 'vlm', 'onnx')]
   [string]$Driver = 'model_benchmark',
+  # onnx only: seconds of steady-state inference. It has to outlast fence arming
+  # plus the trace dump, not just the measurement.
+  [int]$OnnxSeconds = 120,
   [int]$MaxTokens = 2,                           # vlm only
   [int]$MaxLength,                               # vlm only
   # vlm only. 'follow_config' leaves the model's own genai_config provider list
@@ -83,10 +88,14 @@ $benchErr = Join-Path $OutDir "bench_$Tag.err"
 $panelLog = Join-Path $OutDir "panel_$Tag.log"
 
 $isVlm = ($Driver -eq 'vlm')
+$isOnnx = ($Driver -eq 'onnx')
 if ($isVlm) {
   foreach ($n in 'VlmBench', 'Image', 'PromptFile') {
     if (-not $HarnessEnv.$n) { throw "Driver 'vlm' needs `$env:HIPEP_$($n.ToUpper()); see common.ps1." }
   }
+}
+if ($isOnnx -and -not (Test-Path $HarnessEnv.Model -PathType Leaf)) {
+  throw "Driver 'onnx' needs `$env:HIPEP_MODEL to be a .onnx file, got '$($HarnessEnv.Model)'."
 }
 
 Stop-HarnessProcesses -IncludePython:$isVlm
@@ -101,7 +110,7 @@ $panelArgs = @(
   '--rgp-render-op-count', "$OpCount")
 if ($Counters) { $panelArgs += '--rgp-counter-collection' }
 if ($PSCmdlet.ParameterSetName -eq 'Trigger') { $panelArgs += @('--rgp-auto-capture', $Trigger) }
-$targetProcess = if ($isVlm) { 'python' } else { 'model_benchmark' }
+$targetProcess = if ($isVlm) { 'python' } elseif ($isOnnx) { 'onnxruntime_perf_test' } else { 'model_benchmark' }
 $panelArgs += @('-p', $targetProcess, '--verbose')
 
 $pi = New-Object System.Diagnostics.ProcessStartInfo
@@ -136,6 +145,18 @@ if ($isVlm) {
              '--max_length', "$MaxLength", '-e', $ExecutionProvider,
              '-n', "$Reps", '-w', '0')
   $wd    = Split-Path -Parent $HarnessEnv.VlmBench
+} elseif ($isOnnx) {
+  # -I generates inputs: these model directories ship raw .bin tensors rather
+  # than the test_data_set_0 layout perf_test reads, and shapes -- which is what
+  # a convolution capture depends on -- are unaffected either way.
+  $exe   = Join-Path $HarnessEnv.Bin 'onnxruntime_perf_test.exe'
+  $margs = @('--plugin_ep_libs', 'hipgpu|hipgpu.dll',
+             '--plugin_eps', 'hipgpu',
+             '--plugin_ep_options', 'config_file|..\morphizen_config.json',
+             '-C', 'session.disable_cpu_ep_fallback|1',
+             '-t', "$OnnxSeconds", '-c', '1', '-s', '-I',
+             $HarnessEnv.Model)
+  $wd    = $HarnessEnv.Bin
 } else {
   $exe   = Join-Path $HarnessEnv.Bin 'model_benchmark.exe'
   $margs = @('-i', $HarnessEnv.Model, '-g', "$Gen", '-r', "$Reps", '-w', '0', '-b', '1', '-ml', '0', '-v')

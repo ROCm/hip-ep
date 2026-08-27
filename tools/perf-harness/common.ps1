@@ -58,8 +58,11 @@ $script:HarnessEnv = [PSCustomObject]@{
   # driver there is no model_benchmark.exe, so point this at the venv's
   # onnxruntime\capi, which is where the EP DLLs actually live.
   Bin      = Resolve-HarnessPath -EnvName 'HIPEP_BIN' -Candidates @() -Required -What 'the test package bin directory (model_benchmark.exe + EP DLLs)'
-  # ONNX model directory (genai_config.json lives here).
-  Model    = Resolve-HarnessPath -EnvName 'HIPEP_MODEL' -Candidates @() -Required -What 'the model directory'
+  # For the model_benchmark and vlm drivers this is the model *directory*, the
+  # one holding genai_config.json. For the onnx driver it is a single .onnx
+  # *file*, because onnxruntime_perf_test takes a model path rather than an OGA
+  # export; Resolve-HarnessPath accepts either.
+  Model    = Resolve-HarnessPath -EnvName 'HIPEP_MODEL' -Candidates @() -Required -What 'the model directory or .onnx file'
   Python   = $py
   RgpCli   = $rgpCli
   Parser   = Join-Path $RepoRoot 'tools\rgp_parser'
@@ -101,7 +104,7 @@ function Stop-HarnessProcesses {
   # -IncludePython only when the vlm driver is in use: killing every python on
   # the box would be unacceptable collateral otherwise.
   param([switch]$IncludePython)
-  $names = @('model_benchmark', 'RadeonDeveloper*')
+  $names = @('model_benchmark', 'onnxruntime_perf_test', 'RadeonDeveloper*')
   if ($IncludePython) { $names += 'python' }
   Get-Process $names -EA SilentlyContinue |
     Stop-Process -Force -EA SilentlyContinue
