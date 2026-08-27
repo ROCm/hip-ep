@@ -4,11 +4,11 @@
 // ============================================================================
 // TEST PURPOSE:
 // Verify --generate-op-state-init emits per-instance op-state construction for
-// the MIOpen OpTensor elementwise ops (hip.add / hip.mul / hip.min / hip.max),
-// which all lower to wrap_miopenOpTensor and share one OpTensorState (a
-// shared_ptr to the device-wide MIOpen descriptor table, shared across sessions
-// via WeakStore). The constructor takes no compile-time args. Here two
-// instances (one add, one mul) each get their own slot, both built by
+// the elementwise ops (hip.add / hip.mul / hip.min / hip.max), which all
+// lower to wrap_elementwise and share one (empty) OpTensorState type -- the
+// slot exists only because every OpStateOpInterface op must construct one.
+// The constructor takes no compile-time args. Here two instances (one add,
+// one mul) each get their own slot, both built by
 // hipdnn_ep_op_state_construct_optensor. See
 // docs/design/op-state-slots-design.md.
 // ============================================================================

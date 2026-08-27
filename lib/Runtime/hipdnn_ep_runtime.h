@@ -119,40 +119,6 @@ static inline const char *hipdnn_ep_datatype_name(int64_t data_type) {
 }
 
 //===----------------------------------------------------------------------===//
-// Backend-Independent Activation Mode Identifiers
-//===----------------------------------------------------------------------===//
-//
-// Same pattern as HIPDNN_EP_DATATYPE_* above. Each backend provides an explicit
-// mapping function (e.g. hipdnn_ep_to_miopen_activation in
-// real/activation.cpp).
-//
-// To add a new activation:
-//   1. Add #define here
-//   2. Update hipdnn_ep_activation_name()
-//   3. Update each backend mapping function
-//===----------------------------------------------------------------------===//
-
-#define HIPDNN_EP_ACTIVATION_SIGMOID 0
-#define HIPDNN_EP_ACTIVATION_RELU 1
-#define HIPDNN_EP_ACTIVATION_TANH 2
-#define HIPDNN_EP_ACTIVATION_SOFTPLUS 3
-
-static inline const char *hipdnn_ep_activation_name(int64_t activation_mode) {
-  switch (activation_mode) {
-  case HIPDNN_EP_ACTIVATION_SIGMOID:
-    return "sigmoid";
-  case HIPDNN_EP_ACTIVATION_RELU:
-    return "relu";
-  case HIPDNN_EP_ACTIVATION_TANH:
-    return "tanh";
-  case HIPDNN_EP_ACTIVATION_SOFTPLUS:
-    return "softplus";
-  default:
-    return "unknown";
-  }
-}
-
-//===----------------------------------------------------------------------===//
 // Global pool reduction modes (must match kGlobalPool* in HipToLLVMUtils.h).
 //===----------------------------------------------------------------------===//
 
@@ -388,12 +354,12 @@ void *hipdnn_ep_state_get_qmoe_host_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
                                              size_t needed_size);
 
-// Per-session MIOpen convolution workspace pool (used by
-// wrap_miopenConvolutionForward for both 2D and the H=1 1D conv path). Lazily
-// grown via hipdnn_ep_state_ensure_conv_scratch (same policy as qmoe_scratch
-// above: never shrinks, freed in hipdnn_ep_state_cleanup). Single buffer
-// reused across all conv calls in the session -- safe because the stream is
-// serialised. See runtime_state_internal.h for design rationale.
+// Per-session convolution workspace pool. No wrapper allocates from it today
+// -- MIOpen's Find API owns its own per-problem workspace, and forward Conv
+// runs on hip_conv, which needs none. Lazily grown via
+// hipdnn_ep_state_ensure_conv_scratch (same policy as qmoe_scratch above:
+// never shrinks, freed in hipdnn_ep_state_cleanup). See
+// runtime_state_internal.h.
 void *hipdnn_ep_state_get_conv_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
                                         size_t needed_size);
@@ -651,9 +617,9 @@ void *hipdnn_ep_state_get_op_profile(RuntimeState *state);
 
 // NOTE: the CausalConvWithState descriptor/algo cache (CausalConvCache)
 // formerly lived in RuntimeState::causal_conv_cache with a
-// hipdnn_ep_causal_conv_cache_destroy teardown shim here. It is now
-// per-instance: each causal_conv_with_state instance owns one in its
-// CausalConvState op-state slot, so concurrent sessions no longer share it.
+// hipdnn_ep_causal_conv_cache_destroy teardown shim here, then moved to a
+// per-instance CausalConvState op-state slot. It is now gone outright: the op
+// runs entirely on custom kernels and has no MIOpen descriptors to cache.
 // See docs/design/op-state-slots-design.md.
 
 // Asym zero_points unpack cache lifecycle (qmoe-owned RuntimeState cache;
@@ -726,53 +692,37 @@ int wrap_strided_copy(RuntimeState *state, void *dst_ptr, const void *src_ptr,
                       int64_t src_pitch_elems, int64_t dst_pitch_elems,
                       int64_t row_elems);
 
-//===----------------------------------------------------------------------===//
-// Library Operations (MIOpen, hipBLAS)
-//===----------------------------------------------------------------------===//
-
-// MIOpen convolution forward operation
-// Full wrapper with descriptor creation, algorithm finding, workspace
-// management. Follows opaque RuntimeState pattern - extracts handle/stream
-// internally. Parameters match generated LLVM IR from HipToLLVM pass.
+// Forward convolution via the custom HIP kernel (hip_conv). Arbitrary stride,
+// dilation, group and asymmetric padding over 1D / 2D / 3D spatial ranks, with
+// the per-channel bias fused into the accumulator instead of costing a second
+// pass over the output.
 //
-// `data_type` is a HIPDNN_EP_DATATYPE_* enum value applied uniformly to the
-// input / weights / output tensor descriptors — MIOpen requires all three to
-// share the same element type. The host-side lowering derives this from the
-// hip.conv result memref's element type.
-int wrap_miopenConvolutionForward(
-    RuntimeState
-        *state, // RuntimeState (opaque - extracts handle/stream internally)
-    int32_t op_state_slot, // Op state slot
-    const void *input,     // Input tensor GPU pointer
-    int64_t input_n,       // Input batch size
-    int64_t input_c,       // Input channels
-    int64_t input_h,       // Input height
-    int64_t input_w,       // Input width
-    const void *weights,   // Weights tensor GPU pointer
-    int64_t weights_k,     // Output channels (number of filters)
-    const void *bias,      // Bias tensor GPU pointer (nullable)
-    void *output,          // Output tensor GPU pointer (in-place)
-    int64_t output_h,      // Output height
-    int64_t output_w,      // Output width
-    int64_t kernel_h,      // Kernel height
-    int64_t kernel_w,      // Kernel width
-    int64_t stride_h,      // Stride height
-    int64_t stride_w,      // Stride width
-    int64_t pad_top,       // Padding top
-    int64_t pad_left,      // Padding left
-    int64_t pad_bottom,    // Padding bottom
-    int64_t pad_right,     // Padding right
-    int64_t dilation_h,    // Dilation height
-    int64_t dilation_w,    // Dilation width
-    int64_t group,         // Number of groups
-    int64_t data_type);    // HIPDNN_EP_DATATYPE_* for I/O and weights
+// `spatial_rank` selects how many of the per-axis slots (in_*, out_*, k*, s*,
+// p*, dil*) are read; unused slots must be 1 (extent/kernel/stride/dilation) or
+// 0 (pad). Only pad_begin is passed: pad positions are never read, so the
+// trailing pad affects nothing beyond the output extent, which out_* already
+// carries.
+//
+// `op_state_slot` is accepted for ABI stability and ignored -- unlike the
+// MIOpen path this replaced, the kernel needs no cached solution or workspace.
+//
+// data_type: HIPDNN_EP_DATATYPE_* (FLOAT, HALF, BFLOAT16), applied uniformly to
+// input / weights / bias / output.
+int wrap_conv(RuntimeState *state, int32_t op_state_slot, const void *input,
+              const void *weights, const void *bias, void *output,
+              int64_t data_type, int64_t spatial_rank, int64_t N, int64_t Cin,
+              int64_t Cout, int64_t in0, int64_t in1, int64_t in2, int64_t out0,
+              int64_t out1, int64_t out2, int64_t k0, int64_t k1, int64_t k2,
+              int64_t s0, int64_t s1, int64_t s2, int64_t p0, int64_t p1,
+              int64_t p2, int64_t dil0, int64_t dil1, int64_t dil2,
+              int64_t group);
 
-// MIOpen transposed convolution (deconvolution) wrapper
-// Uses MIOpen's miopenTranspose convolution mode. Follows the opaque
-// RuntimeState pattern - extracts handle/stream internally.
+// Transposed convolution (deconvolution) wrapper. Runs on the in-tree
+// hip_conv_transpose kernel, so neither convolution direction calls MIOpen.
+// Follows the opaque RuntimeState pattern - extracts the stream internally.
 // Weight layout is ONNX ConvTranspose's [C, M/group, kH, kW] (input channels
 // first); M/group is derived from output_c and group inside the wrapper.
-int wrap_miopenConvolutionTranspose(
+int wrap_conv_transpose(
     RuntimeState *state,   // RuntimeState (opaque)
     int32_t op_state_slot, // Op state slot
     const void *input,     // Input tensor GPU pointer [N, C, H, W]
@@ -800,6 +750,10 @@ int wrap_miopenConvolutionTranspose(
     int64_t output_padding_w, // Output padding width
     int64_t group,            // Number of groups
     int64_t data_type);       // HIPDNN_EP_DATATYPE_* element type
+
+//===----------------------------------------------------------------------===//
+// Library Operations (hipBLAS)
+//===----------------------------------------------------------------------===//
 
 // hipBLASLt GEMM operation wrapper
 // Called by generated IR for matrix multiplication operations
@@ -833,16 +787,18 @@ int wrap_hipblasLtGemm(void *handle, // hipBLASLt handle
 // at compile time when B's leading dims are static, else at runtime.
 int wrap_hipblasLtMatmul(
     RuntimeState *state,
-    int op_state_slot,       // per-instance op-state slot (shared algo table)
-    const void *A,           // Matrix A GPU pointer
-    const void *B,           // Matrix B GPU pointer
-    void *output,            // Output GPU pointer
-    int64_t M,               // Rows of A (per batch)
-    int64_t N,               // Columns of B
-    int64_t K,               // Columns of A / Rows of B
-    int64_t batch_count,     // Number of batches
-    int64_t elem_size,       // Element size in bytes (2=f16, 4=f32)
-    int64_t b_batch_stride); // 0 = broadcast (any rank); K*N = per-batch
+    int op_state_slot,      // per-instance op-state slot (shared algo table)
+    const void *A,          // Matrix A GPU pointer
+    const void *B,          // Matrix B GPU pointer
+    void *output,           // Output GPU pointer
+    int64_t M,              // Rows of A (per batch)
+    int64_t N,              // Columns of B
+    int64_t K,              // Columns of A / Rows of B
+    int64_t batch_count,    // Number of batches
+    int64_t elem_size,      // Element size in bytes (2=f16, 4=f32)
+    int64_t b_batch_stride, // 0 = broadcast (any rank); K*N = per-batch
+    int64_t transA,         // 1 = swap A's last two dims before multiply
+    int64_t transB);        // 1 = swap B's last two dims before multiply
 
 // GroupQueryAttention operation wrapper (Full MS spec)
 // Called by generated IR for onnx.Custom(GroupQueryAttention) lowering
@@ -915,18 +871,20 @@ int wrap_multi_head_attention(
     int64_t query_hidden, int64_t v_hidden, int64_t head_size,
     int64_t query_rank, int64_t element_size_bytes);
 
-// Generic MIOpen tensor operation wrapper with per-operand 4D shapes.
-// Computes output = op(lhs, rhs) element-wise via miopenOpTensor.
-// Each operand is described by 4D shape (N, C, H, W) to enable MIOpen-native
-// broadcasting: dims of 1 are broadcast against the corresponding larger dim.
+// Generic element-wise tensor operation wrapper with per-operand 4D shapes.
+// Computes output = op(lhs, rhs) element-wise via the custom HIP kernels
+// (flat int kernels + hip_expand for int16/int32/int64, the native
+// broadcasting kernel for float16/float32; see elementwise.cpp).
+// Each operand is described by 4D shape (N, C, H, W): dims of 1 are
+// broadcast against the corresponding larger dim.
 //   tensor_op: HIPDNN_EP_TENSOR_OP_* constant (mul, add, min, max)
 //   data_type: HIPDNN_EP_DATATYPE_* constant identifying the element type
-int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
-                        void *rhs, void *output, int64_t lhs_n, int64_t lhs_c,
-                        int64_t lhs_h, int64_t lhs_w, int64_t rhs_n,
-                        int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
-                        int64_t out_n, int64_t out_c, int64_t out_h,
-                        int64_t out_w, int64_t data_type, int64_t tensor_op);
+int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
+                     void *rhs, void *output, int64_t lhs_n, int64_t lhs_c,
+                     int64_t lhs_h, int64_t lhs_w, int64_t rhs_n, int64_t rhs_c,
+                     int64_t rhs_h, int64_t rhs_w, int64_t out_n, int64_t out_c,
+                     int64_t out_h, int64_t out_w, int64_t data_type,
+                     int64_t tensor_op);
 
 // Element-wise subtraction with 4D ONNX broadcast (rank <= 4).
 // Computes output = lhs - rhs; materialises broadcast via hip_expand when
@@ -1091,20 +1049,17 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t src_data_type,
               int64_t dst_data_type);
 
-// Generic MIOpen activation wrapper
-// Applies activation_mode (HIPDNN_EP_ACTIVATION_*) element-wise
-// data_type: HIPDNN_EP_DATATYPE_* constant identifying the element type
-int wrap_miopenActivationForward(RuntimeState *state, int op_state_slot,
-                                 void *input, void *output,
-                                 int64_t num_elements, int64_t data_type,
-                                 int64_t activation_mode);
-
 // GELU activation wrapper (uses custom HIP kernel)
 // Applies GELU element-wise with support for exact or approximate mode
 // data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16, DOUBLE)
 // approximate: 0 = exact (erf), 1 = tanh approximation
 int wrap_gelu(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t data_type, int64_t approximate);
+
+// Softplus activation wrapper (uses custom HIP kernel).
+// data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF only)
+int wrap_softplus(RuntimeState *state, void *input, void *output,
+                  int64_t num_elements, int64_t data_type);
 
 // Fused com.microsoft.BiasGelu: Gelu_erf(data + broadcast(bias)).
 // data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16, DOUBLE)
@@ -1156,6 +1111,15 @@ int wrap_resize(RuntimeState *state, void *input, void *output,
                 int64_t out1, int64_t out2, int64_t mode,
                 int64_t coord_transform, int64_t nearest_mode);
 
+// GridSample (4-D NCHW). grid is (N, H_out, W_out, 2) with last dim (x, y).
+// mode: 0=nearest, 1=bilinear; padding_mode: 0=zeros, 1=border, 2=reflection;
+// align_corners: 0 or 1. data_type: HIPDNN_EP_DATATYPE_*
+// (FLOAT/HALF/BFLOAT16/DOUBLE).
+int wrap_grid_sample(RuntimeState *state, void *input, void *grid, void *output,
+                     int64_t data_type, int64_t n, int64_t c, int64_t in_h,
+                     int64_t in_w, int64_t out_h, int64_t out_w, int64_t mode,
+                     int64_t padding_mode, int64_t align_corners);
+
 // Global pool wrapper (uses custom HIP kernel).
 // Treats the data as a flat [outer, reduce_size] matrix and writes one
 // reduced value per row into output. Covers ONNX GlobalAveragePool /
@@ -1190,13 +1154,11 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           int64_t rotary_dim, int64_t cos_cache_num_elements,
                           int64_t element_size_bytes, int64_t is_bnsh);
 
-// SimplifiedLayerNormalization operation wrapper
-int wrap_miopenT5LayerNormForward(RuntimeState *state, int op_state_slot,
-                                  void *input, void *scale, void *output,
-                                  int64_t input_num_elements,
-                                  int64_t scale_num_elements,
-                                  int64_t element_size_bytes, int64_t axis,
-                                  float epsilon, int64_t stash_type);
+// SimplifiedLayerNormalization / RMSNormalization operation wrapper
+int wrap_rms_norm(RuntimeState *state, void *input, void *scale, void *output,
+                  int64_t input_num_elements, int64_t scale_num_elements,
+                  int64_t element_size_bytes, int64_t axis, float epsilon,
+                  int64_t stash_type);
 
 // LayerNormalization operation wrapper (standard ONNX opset 17+)
 // bias, mean, inv_std may be nullptr when optional inputs/outputs are absent
@@ -1207,14 +1169,20 @@ int wrap_layer_normalization(RuntimeState *state, void *input, void *scale,
                              int64_t element_size_bytes, int64_t axis,
                              float epsilon, int64_t stash_type);
 
+// InstanceNormalization: y = scale * (x - mean) / sqrt(var + epsilon) + B
+// with mean/var over spatial axes of each (N, C) slice. Input is (N,C,D1..Dn).
+int wrap_instance_normalization(RuntimeState *state, void *input, void *scale,
+                                void *bias, void *output, int64_t n, int64_t c,
+                                int64_t spatial, int64_t data_type,
+                                float epsilon);
+
 // SkipSimplifiedLayerNormalization operation wrapper (Full MS spec)
 // Computes: input_skip_bias_sum = input + skip [+ bias]
 //           output = RMSNorm(input_skip_bias_sum) * gamma
 // bias and input_skip_bias_sum may be nullptr (optional per MS spec)
-int wrap_skip_simplified_layer_norm(RuntimeState *state, int op_state_slot,
-                                    void *input, void *skip, void *gamma,
-                                    void *bias, void *output,
-                                    void *input_skip_bias_sum,
+int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
+                                    void *skip, void *gamma, void *bias,
+                                    void *output, void *input_skip_bias_sum,
                                     int64_t input_num_elements,
                                     int64_t gamma_num_elements,
                                     int64_t element_size_bytes, float epsilon);
@@ -1304,25 +1272,31 @@ int wrap_qmoe(
 // Used by Gated DeltaNet (Qwen3.5) and Mamba models.
 // Performs causal depthwise convolution with carry state for incremental
 // decode. The convolution is causal (looks only at current and past positions)
-// and depthwise (each channel convolved independently). Input layout:
-// channels-first (batch, channels, seq_len). Weight layout: (channels, 1,
-// kernel_size) for 1D depthwise.
+// and depthwise (each channel convolved independently). Input layout is
+// channels-first (batch, channels, seq_len) unless channels_last is set, which
+// makes input and output (batch, seq_len, channels). Weight layout: (channels,
+// 1, kernel_size) for 1D depthwise.
 //   bias:       nullable - per-channel bias (channels)
 //   past_state: nullable - carry state from previous step (batch, channels,
 //   k-1) activation: 0=none, 1=silu/swish
 int wrap_causal_conv_with_state(
     RuntimeState *state,
     int op_state_slot,  // per-instance op-state slot (descriptor cache home)
-    const void *input,  // (batch, channels, seq_len)
+    const void *input,  // (batch, channels, seq_len), or (batch, seq_len,
+                        // channels) when channels_last
     const void *weight, // (channels, 1, kernel_size)
     const void *bias,   // nullable, (channels)
     const void *past_state, // nullable, (batch, channels, kernel_size - 1)
-    void *output,           // (batch, channels, seq_len)
+    void *output,           // same layout as input
     void *present_state,    // (batch, channels, kernel_size - 1)
     int64_t batch_size, int64_t channels, int64_t seq_len, int64_t kernel_size,
     int64_t ndim,
     int64_t activation, // 0=none, 1=silu/swish
-    int64_t element_size_bytes);
+    int64_t element_size_bytes,
+    // 0=channels-first, 1=channels-last. Permutes input and output only: the
+    // carry state is (batch, channels, k-1) either way. ndim=1 only, and only
+    // on the custom-kernel fast paths -- the MIOpen fallback is channels-first.
+    int64_t channels_last);
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt
@@ -1464,12 +1438,20 @@ void hipdnn_ep_readback_scalar(RuntimeState *state, void *host_dst,
 int wrap_size(RuntimeState *state, void *output, int64_t num_elements);
 int wrap_cos(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
+int wrap_erf(RuntimeState *state, void *input, void *output,
+             int64_t num_elements, int64_t data_type);
 int wrap_sin(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 int wrap_ceil(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t data_type);
+int wrap_round(RuntimeState *state, void *input, void *output,
+               int64_t num_elements, int64_t data_type);
 int wrap_exp(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
+int wrap_sigmoid(RuntimeState *state, void *input, void *output,
+                 int64_t num_elements, int64_t data_type);
+int wrap_tanh(RuntimeState *state, void *input, void *output,
+              int64_t num_elements, int64_t data_type);
 
 int wrap_log(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);

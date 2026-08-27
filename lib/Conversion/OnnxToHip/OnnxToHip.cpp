@@ -178,8 +178,10 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateMaxConversionPatterns(patterns, ctx);
   populateNotConversionPatterns(patterns, ctx);
   populateCosConversionPatterns(patterns, ctx);
+  populateErfConversionPatterns(patterns, ctx);
   populateSinConversionPatterns(patterns, ctx);
   populateCeilConversionPatterns(patterns, ctx);
+  populateRoundConversionPatterns(patterns, ctx);
   populateExpConversionPatterns(patterns, ctx);
   populateLogConversionPatterns(patterns, ctx);
   populateCumSumConversionPatterns(patterns, ctx);
@@ -209,6 +211,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateClipConversionPatterns(patterns, ctx);
   populatePoolConversionPatterns(patterns, ctx);
   populateResizeConversionPatterns(patterns, ctx);
+  populateGridSampleConversionPatterns(patterns, ctx);
   populateGlobalPoolConversionPatterns(patterns, ctx);
   populateFlattenConversionPatterns(patterns, ctx);
 
@@ -417,10 +420,12 @@ void ConvertOnnxToHipPass::runOnOperation() {
       for (int round = 0; round < kMaxRounds; ++round) {
         mlir::RewritePatternSet preLoweringPatterns(ctx);
         populateGatherShapeFoldPatterns(preLoweringPatterns, ctx);
+        populateTransposeMatMulFoldPatterns(preLoweringPatterns, ctx);
         populateGatherBlockQuantizedPreparePatterns(preLoweringPatterns, ctx);
         populateReshapeShapeFoldPatterns(preLoweringPatterns, ctx);
         populatePadShapeFoldPatterns(preLoweringPatterns, ctx);
         populateSliceShapeFoldPatterns(preLoweringPatterns, ctx);
+        populatePackBroadcastTo4DPatterns(preLoweringPatterns, ctx);
         populateFastGeluFusionPatterns(preLoweringPatterns, ctx);
         populateErfGeluFusionPatterns(preLoweringPatterns, ctx);
         populateProjectorOpsRewritePatterns(preLoweringPatterns, ctx);

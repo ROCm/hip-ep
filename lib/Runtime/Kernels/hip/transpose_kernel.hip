@@ -25,6 +25,64 @@ struct TransposeMeta {
     int64_t perm[kTransposeMaxRank];
 };
 
+// Division by a runtime constant, without dividing. The generic kernel below
+// decomposes a flat index with one division per rank, per element; with native
+// 64-bit division that is the dominant cost of the whole transpose. Every
+// divisor is an output extent, fixed for the launch, so each becomes a
+// multiply-high and a shift. Valid for numerators below 2^31, which the caller
+// checks before selecting this path.
+struct TDiv {
+    uint32_t mul; // 0 => a pure shift (divisor is a power of two)
+    uint32_t shr;
+};
+
+__device__ __forceinline__ uint32_t tFastDiv(uint32_t n, TDiv d) {
+    return d.mul ? (__umulhi(n, d.mul) >> d.shr) : (n >> d.shr);
+}
+
+static TDiv makeTDiv(int64_t denom) {
+    const uint32_t d = static_cast<uint32_t>(denom < 1 ? 1 : denom);
+    TDiv r{0u, 0u};
+    uint32_t l = 0;
+    while ((1u << l) < d) ++l;
+    if ((1u << l) == d) {
+        r.shr = l;
+        return r;
+    }
+    const uint32_t p = 31 + l;
+    r.mul = static_cast<uint32_t>(((1ull << p) + d - 1) / d);
+    r.shr = p - 32;
+    return r;
+}
+
+struct TransposeMetaFD {
+    int rank;
+    int64_t input_strides[kTransposeMaxRank];
+    uint32_t output_shape[kTransposeMaxRank];
+    TDiv r_output_shape[kTransposeMaxRank];
+    int32_t perm[kTransposeMaxRank];
+};
+
+// Generic gather, with the index decode done in 32-bit reciprocal arithmetic.
+template <typename T>
+__global__ void transpose_kernel_fd(const T* __restrict__ input,
+                                    T* __restrict__ output,
+                                    uint32_t num_elements,
+                                    TransposeMetaFD meta) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_elements) return;
+
+    int64_t in_idx = 0;
+    uint32_t remaining = tid;
+    for (int i = meta.rank - 1; i >= 0; --i) {
+        const uint32_t q = tFastDiv(remaining, meta.r_output_shape[i]);
+        const uint32_t c = remaining - q * meta.output_shape[i];
+        remaining = q;
+        in_idx += static_cast<int64_t>(c) * meta.input_strides[meta.perm[i]];
+    }
+    output[tid] = input[in_idx];
+}
+
 template <typename T>
 __global__ void transpose_kernel(const T* __restrict__ input,
                                  T* __restrict__ output,
@@ -185,26 +243,167 @@ extern "C" int hip_transpose(void* stream,
         return -1;
     }
 
-    TransposeMeta meta{};
-    meta.rank = static_cast<int>(rank);
-    // Row-major strides: input_strides[r-1] = 1; input_strides[i] = stride[i+1] * shape[i+1].
-    meta.input_strides[rank - 1] = 1;
-    for (int i = static_cast<int>(rank) - 2; i >= 0; --i) {
-        meta.input_strides[i] = meta.input_strides[i + 1] * input_shape[i + 1];
-    }
     for (int i = 0; i < rank; ++i) {
-        int64_t p = perm[i];
-        if (p < 0 || p >= rank) {
+        if (perm[i] < 0 || perm[i] >= rank) {
             fprintf(stderr,
                     "[custom_kernels] hip_transpose: perm[%d]=%lld out of range\n",
-                    i, (long long)p);
+                    i, (long long)perm[i]);
             return -1;
         }
-        meta.perm[i] = p;
-        meta.output_shape[i] = input_shape[p];
     }
 
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+
+    // -----------------------------------------------------------------------
+    // Canonicalise the permutation before choosing a kernel.
+    //
+    // The shape a transpose arrives in is an artefact of how the graph was
+    // written, not of the data movement it asks for. Two rewrites reduce it to
+    // the movement's actual rank without changing a single element's
+    // destination:
+    //
+    //   * An axis of extent 1 contributes nothing to any address, so it drops.
+    //   * Two input axes that are adjacent *and* stay adjacent and in order in
+    //     the output are never separated, so the elements they span are one
+    //     contiguous run: they merge into a single axis.
+    //
+    // This matters because it is what exposes the fast path. The patch-embed
+    // output permute arrives as rank 4, [1,64,64,1152] by [0,3,1,2], and the
+    // generic gather runs it at a small fraction of memory bandwidth -- its
+    // innermost output axis is not the innermost input axis, so every read is a
+    // separate transaction. Canonicalised it is [4096,1152] by [1,0]: a plain
+    // 2-D transpose, which the tiled kernel above already does at bandwidth
+    // through LDS. Same for an identity permute wrapped in reshapes, which
+    // collapses to rank 1 and is just a copy.
+    // -----------------------------------------------------------------------
+    int64_t cShape[kTransposeMaxRank];
+    int cPerm[kTransposeMaxRank];
+    int cRank = 0;
+    {
+        // Drop extent-1 axes, renumbering the surviving ones.
+        int remap[kTransposeMaxRank];
+        for (int a = 0; a < rank; ++a) {
+            remap[a] = (input_shape[a] > 1) ? cRank : -1;
+            if (input_shape[a] > 1) cShape[cRank++] = input_shape[a];
+        }
+        int n = 0;
+        for (int i = 0; i < rank; ++i)
+            if (remap[perm[i]] >= 0) cPerm[n++] = remap[perm[i]];
+        // n == cRank: both count the axes with extent > 1.
+
+        // Merge runs that stay adjacent and ascending in the output.
+        for (bool changed = true; changed;) {
+            changed = false;
+            for (int i = 0; i + 1 < cRank; ++i) {
+                const int a = cPerm[i];
+                if (cPerm[i + 1] != a + 1) continue;
+                cShape[a] *= cShape[a + 1];
+                for (int j = a + 1; j + 1 < cRank; ++j) cShape[j] = cShape[j + 1];
+                for (int j = i + 1; j + 1 < cRank; ++j) cPerm[j] = cPerm[j + 1];
+                --cRank;
+                for (int j = 0; j < cRank; ++j)
+                    if (cPerm[j] > a) --cPerm[j];
+                changed = true;
+                break;
+            }
+        }
+    }
+
+    // Rank 0 or 1 can only be the identity: the data is already in place.
+    if (cRank <= 1) {
+        hipError_t err = hipMemcpyAsync(
+            output, input,
+            static_cast<size_t>(num_elements) * element_size_bytes,
+            hipMemcpyDeviceToDevice, hip_stream);
+        if (err != hipSuccess) {
+            fprintf(stderr, "[custom_kernels] hip_transpose copy failed: %s\n",
+                    hipGetErrorString(err));
+            return static_cast<int>(err);
+        }
+        return 0;
+    }
+
+    // A batched swap of the two innermost axes is what the tiled kernel does.
+    const bool two_d = (cRank == 2 && cPerm[0] == 1 && cPerm[1] == 0);
+    const bool batched_two_d =
+        (cRank == 3 && cPerm[0] == 0 && cPerm[1] == 2 && cPerm[2] == 1);
+    if (two_d || batched_two_d) {
+        const int64_t batch = two_d ? 1 : cShape[0];
+        const int64_t rows = two_d ? cShape[0] : cShape[1];
+        const int64_t cols = two_d ? cShape[1] : cShape[2];
+        const int rc = hip_transpose_2d_tiled(stream, input, output, batch, rows,
+                                              cols, element_size_bytes);
+        if (rc == 0) return 0;
+        if (rc < 0) return rc;
+        // rc == 1: declined (batch over the gridDim.z cap, or an element width
+        // it does not handle). Fall through to the generic gather.
+    }
+
+    TransposeMeta meta{};
+    meta.rank = cRank;
+    // Row-major strides: input_strides[r-1] = 1; input_strides[i] = stride[i+1] * shape[i+1].
+    meta.input_strides[cRank - 1] = 1;
+    for (int i = cRank - 2; i >= 0; --i) {
+        meta.input_strides[i] = meta.input_strides[i + 1] * cShape[i + 1];
+    }
+    for (int i = 0; i < cRank; ++i) {
+        meta.perm[i] = cPerm[i];
+        meta.output_shape[i] = cShape[cPerm[i]];
+    }
+
+    // 32-bit reciprocal decode where the flat index allows it, which is every
+    // tensor that is not enormous.
+    if (num_elements < (1LL << 31)) {
+        TransposeMetaFD fd{};
+        fd.rank = cRank;
+        for (int i = 0; i < cRank; ++i) {
+            fd.input_strides[i] = meta.input_strides[i];
+            fd.perm[i] = cPerm[i];
+            fd.output_shape[i] = static_cast<uint32_t>(meta.output_shape[i]);
+            fd.r_output_shape[i] = makeTDiv(meta.output_shape[i]);
+        }
+        const uint32_t n = static_cast<uint32_t>(num_elements);
+        constexpr int kBlock = 256;
+        const unsigned g = static_cast<unsigned>((num_elements + kBlock - 1) / kBlock);
+        switch (element_size_bytes) {
+            case 1:
+                hipLaunchKernelGGL(transpose_kernel_fd<uint8_t>, dim3(g),
+                                   dim3(kBlock), 0, hip_stream,
+                                   static_cast<const uint8_t*>(input),
+                                   static_cast<uint8_t*>(output), n, fd);
+                break;
+            case 2:
+                hipLaunchKernelGGL(transpose_kernel_fd<uint16_t>, dim3(g),
+                                   dim3(kBlock), 0, hip_stream,
+                                   static_cast<const uint16_t*>(input),
+                                   static_cast<uint16_t*>(output), n, fd);
+                break;
+            case 4:
+                hipLaunchKernelGGL(transpose_kernel_fd<uint32_t>, dim3(g),
+                                   dim3(kBlock), 0, hip_stream,
+                                   static_cast<const uint32_t*>(input),
+                                   static_cast<uint32_t*>(output), n, fd);
+                break;
+            case 8:
+                hipLaunchKernelGGL(transpose_kernel_fd<uint64_t>, dim3(g),
+                                   dim3(kBlock), 0, hip_stream,
+                                   static_cast<const uint64_t*>(input),
+                                   static_cast<uint64_t*>(output), n, fd);
+                break;
+            default:
+                fprintf(stderr,
+                        "[custom_kernels] hip_transpose: unsupported "
+                        "element_size_bytes=%d\n",
+                        element_size_bytes);
+                return -1;
+        }
+        hipError_t err = hipGetLastError();
+        if (err != hipSuccess) {
+            fprintf(stderr, "[custom_kernels] hip_transpose launch failed: %s\n",
+                    hipGetErrorString(err));
+        }
+        return static_cast<int>(err);
+    }
     constexpr int kBlockSize = 256;
     int64_t grid_size_i64 = (num_elements + kBlockSize - 1) / kBlockSize;
     if (grid_size_i64 <= 0) return 0;

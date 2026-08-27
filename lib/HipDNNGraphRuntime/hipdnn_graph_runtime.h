@@ -8,7 +8,8 @@
 // Public C API exported from hipdnn_graph_runtime.dll.
 //
 // Three consumers:
-//   1. hip-compiler.dll (handle creation + singleton registry population)
+//   1. The hip-compiler plugin (handle creation + singleton registry
+//      population)
 //   2. The ORT EP (registry management + attach)
 //   3. JITted per-model bitcode (hipdnn_graph_execute, resolved by
 //      LlvmIrJit's process search generator against this DLL)
@@ -56,7 +57,7 @@ HIPDNN_GRAPH_RUNTIME_API void
 hipdnn_graph_registry_store(void *registry, int32_t graph_id, void *graph);
 
 /// Set the process-level default graph registry. Used by the same-process
-/// singleton pattern: hip-compiler.dll populates this during compilation,
+/// singleton pattern: hip-compiler populates this during compilation,
 /// the JITted per-model code reads it during inference via the
 /// hipdnn_graph_execute fallback.
 HIPDNN_GRAPH_RUNTIME_API void hipdnn_graph_set_default_registry(void *registry);

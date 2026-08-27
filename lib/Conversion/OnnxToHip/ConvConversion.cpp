@@ -176,15 +176,12 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   }
 
   if (is1D) {
-    // The shared 2D MIOpen path treats NCL as NC[H=1]L. The H=1 reshape hard-
-    // codes dilations to [1,1] below, so it cannot preserve a non-unit spatial
-    // dilation — bail on dilation != 1. `group` IS preserved verbatim on the
-    // 2D hip.conv (a depthwise [C,1,K] filter reshapes to [C,1,1,K] with
-    // group=C), so grouped/depthwise 1D convs are supported.
-    if (!dilations.empty() && dilations[0] != 1)
-      return rewriter.notifyMatchFailure(
-          op, "1D Conv with dilation != 1 is not supported");
-
+    // The shared 2D path treats NCL as NC[H=1]L. Every 1D attribute maps onto
+    // the W axis of that view, including the dilation — the unit H axis takes
+    // the identity (k=1, stride 1, dilation 1, pad 0), so nothing about the 1D
+    // problem is lost. `group` is preserved verbatim too (a depthwise [C,1,K]
+    // filter reshapes to [C,1,1,K] with group=C), so grouped and depthwise 1D
+    // convolutions ride the same path.
     auto weightsType = mlir::cast<mlir::RankedTensorType>(weights.getType());
 
     // Expand a rank-3 NCL operand to rank-4 NC1L (unit H before the spatial
@@ -232,13 +229,13 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
     //   kernel_shape [K]      -> [1, K]
     //   strides      [s]      -> [1, s]
     //   pads         [b, e]   -> [0, b, 0, e]  (H top/bottom = 0)
-    //   dilations    [d] / {} -> [1, 1]
+    //   dilations    [d] / {} -> [1, d]
     kernelShape.insert(kernelShape.begin(), 1);
     strides.insert(strides.begin(), 1);
     int64_t padBegin = pads.empty() ? 0 : pads[0];
     int64_t padEnd = pads.size() > 1 ? pads[1] : padBegin;
     pads = {0, padBegin, 0, padEnd};
-    dilations = {1, 1};
+    dilations = {1, dilations.empty() ? 1 : dilations[0]};
   }
 
   // Create the output (destination) tensor at the ORIGINAL result rank, then —

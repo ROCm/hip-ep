@@ -10,6 +10,13 @@ add_library(OnnxToHipsr STATIC
   MatMulConversion.cpp
   ExpandConversion.cpp
   ShapeConversion.cpp
+  ReshapeConversion.cpp
+  UnsqueezeConversion.cpp
+  EqualConversion.cpp
+  TransposeConversion.cpp
+  GatherConversion.cpp
+  SliceConversion.cpp
+  ScatterNDConversion.cpp
   ReturnConversion.cpp
 )
 
