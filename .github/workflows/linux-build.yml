@@ -10,7 +10,7 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
   push:
-    branches: [main, "release/**"]
+    branches: [main, "**/*release*"]
 
 permissions:
   contents: read
@@ -578,7 +578,7 @@ jobs:
         with:
           name: linux-gpu-test-package
           path: staging/
-          retention-days: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) && 14 || 3 }}
+          retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 14 || 3 }}
 
       - name: Save sccache directory
         if: always() && github.ref_name == 'main'
