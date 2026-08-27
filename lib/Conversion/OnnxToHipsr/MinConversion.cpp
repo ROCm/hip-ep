@@ -50,20 +50,17 @@ struct MinToHipsr : public ::mlir::OpConversionPattern<::mlir::onnx::MinOp> {
     ::mlir::Value accumulate = inputs[0];
     for (size_t i = 1; i < inputs.size(); ++i) {
       ::mlir::Value rhs = inputs[i];
-      auto accumulateType =
-          ::mlir::dyn_cast<::mlir::RankedTensorType>(accumulate.getType());
-      if (!accumulateType) {
+      if (!::mlir::isa<::mlir::RankedTensorType>(accumulate.getType()) ||
+          !::mlir::isa<::mlir::RankedTensorType>(rhs.getType())) {
         return rewriter.notifyMatchFailure(op, "expected ranked tensor inputs");
       }
-      ::mlir::RankedTensorType stepType =
-          (i + 1 == inputs.size()) ? resultType : accumulateType;
 
       ::mlir::Value init =
-          PlaceholderOp::create(rewriter, loc, ::mlir::TypeRange{stepType},
+          PlaceholderOp::create(rewriter, loc, ::mlir::TypeRange{resultType},
                                 *ctx, ::mlir::ValueRange{accumulate, rhs},
                                 PlaceholderType::Normal)
               .getResult(0);
-      accumulate = MinOp::create(rewriter, loc, ::mlir::TypeRange{stepType},
+      accumulate = MinOp::create(rewriter, loc, ::mlir::TypeRange{resultType},
                                  *ctx, accumulate, rhs, init)
                        .getResult(0);
     }
