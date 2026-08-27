@@ -9,11 +9,13 @@
 #include "hip/flatbuffers_json.h"
 
 #include "morphizen-foundation/file_io.hpp"
+#include "morphizen-utils/cleanup.hpp"
 #include "morphizen-utils/morphizen_plugin.hpp"
 
 #include "compilation_options_schema.h"
 
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/ManagedStatic.h"
 
 #include <cstring>
 #include <string>
@@ -143,5 +145,12 @@ static ::morphizen::StaticPluginRegister
 static ::morphizen::StaticPluginRegister
     __register_hip_version("hip-compiler", "hip_get_version",
                            reinterpret_cast<void *>(&hip_get_version));
+
+// Registered here rather than next to DllMain because this is the only
+// translation unit that sees both LLVM and the cleanup registry.
+static const bool __register_llvm_shutdown = []() {
+  ::morphizen::add_cleanup_function("llvm shutdown", &llvm::llvm_shutdown);
+  return true;
+}();
 
 } // namespace
