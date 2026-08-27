@@ -6,7 +6,7 @@
 """Tests for the unary math ops Abs, Ceil, Round, Atan, Log, Erf.
 
 These route through the shared unary elementwise HIP kernel family
-(lib/Runtime/real/{abs,ceil,round,atan,log}.cpp). Per those dtype tables:
+(lib/Runtime/real/{abs,ceil,round,atan,log,erf}.cpp). Per those dtype tables:
 
     Abs   : f16, f32, i32, i64   (bit-exact; abs is value-preserving)
     Ceil  : f16, f32             (bit-exact; result is integral)

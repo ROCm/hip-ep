@@ -503,6 +503,8 @@ extern "C" int hip_elementwise_atan(void *stream, const void *input,
   int grid_size =
       static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
 
+  (void)hipGetLastError();
+
   switch (hip_dtype) {
   case HIP_DTYPE_FLOAT16:
     CUSTOM_KERNELS_DEBUG_LOG(
