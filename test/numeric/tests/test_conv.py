@@ -3,19 +3,25 @@
 # Licensed under the MIT License.
 #
 
-"""Tests for the Conv operation, focused on grouped / depthwise convolution.
+"""Tests for the Conv and ConvTranspose operations.
 
-The MIOpen weight descriptor must use the per-group input-channel count
-(input_c / group), not input_c. For group == 1 the two are equal, but for
-grouped (1 < group < C) and depthwise (group == C) convolutions, using input_c
-describes the wrong filter shape and produces silently incorrect results. These
-tests exercise all three regimes against the ORT CPU reference.
+`TestConv` covers grouped / depthwise convolution. The weight descriptor must
+use the per-group input-channel count (input_c / group), not input_c. For
+group == 1 the two are equal, but for grouped (1 < group < C) and depthwise
+(group == C) convolutions, using input_c describes the wrong filter shape and
+produces silently incorrect results.
+
+`TestConvShapeSweep` drives the shape sweep in conv_cases.py, which is where
+the cases and the reasoning behind them live. They sit in their own module
+because the same sweep also runs outside pytest, against hip-onnx-runner, on
+machines whose ORT build cannot load the EP as a plugin.
 """
 
 import numpy as np
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
+from conv_cases import CONV_CASES, CONV_TRANSPOSE_CASES, build
 from framework.comparator import compare_outputs
 from framework.onnx_utils import make_model_from_nodes
 
@@ -88,3 +94,39 @@ class TestConv:
 
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-2, rtol=1e-2, cos_threshold=0.999)
+
+
+def _check(model_runner, case):
+    model, x = build(case)
+    actual, expected = model_runner.run_sample(model, [x])
+
+    # Assert finiteness before correlating. A NaN makes the cosine NaN too, so
+    # comparing first reports "cosine below threshold" for what is really an
+    # arithmetic fault, and the count is the diagnostic that separates a kernel
+    # writing garbage from one that is merely imprecise.
+    for i, a in enumerate(actual):
+        bad = int(np.count_nonzero(~np.isfinite(a)))
+        if not bad:
+            continue
+        finite = a[np.isfinite(a)]
+        lo = float(finite.min()) if finite.size else float("nan")
+        hi = float(finite.max()) if finite.size else float("nan")
+        raise AssertionError(
+            f"output {i} has {bad} non-finite values of {a.size} "
+            f"({100.0 * bad / a.size:.2f}%); finite range [{lo:.4g}, {hi:.4g}]"
+        )
+
+    tol = 2e-2 if case.get("dtype", "float16") == "float16" else 1e-4
+    compare_outputs(actual, expected, atol=tol, rtol=tol, cos_threshold=0.999)
+
+
+class TestConvShapeSweep:
+    @pytest.mark.parametrize("case", CONV_CASES, ids=[c["id"] for c in CONV_CASES])
+    def test_conv_shape(self, model_runner, case):
+        _check(model_runner, case)
+
+    @pytest.mark.parametrize(
+        "case", CONV_TRANSPOSE_CASES, ids=[c["id"] for c in CONV_TRANSPOSE_CASES]
+    )
+    def test_conv_transpose_shape(self, model_runner, case):
+        _check(model_runner, case)
