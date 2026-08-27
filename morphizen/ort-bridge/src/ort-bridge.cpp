@@ -46,8 +46,6 @@ OrtStatus *CreateEpFactories(const char *registration_name,
 }
 OrtStatus *ReleaseEpFactory(OrtEpFactory *factory) {
   MY_LOG(1) << " ReleaseEpFactory: this=" << (void *)factory;
-  // OrtEpFactory has no virtual destructor; deleting through it would skip
-  // ~MorphiZenEpFactory.
   delete static_cast<morphizen::MorphiZenEpFactory *>(factory);
   return nullptr;
 }

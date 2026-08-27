@@ -312,6 +312,7 @@ BOOL WINAPI DllMain(HINSTANCE /*hinstDLL*/, // handle to DLL module
     if (lpvReserved != nullptr) {
       break; // do not do cleanup if process termination scenario
     }
+    // Perform any necessary cleanup.
     break;
   }
   return TRUE; // Successful DLL_PROCESS_ATTACH.
