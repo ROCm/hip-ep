@@ -84,18 +84,21 @@ int wrap_qmoe_amd(
     return -1;
   }
 
+  // The compiler forwards whatever mode the graph asked for, so rejecting an
+  // unimplemented one here is what keeps it from being computed as
+  // relu2/sigmoid. UNKNOWN means the mode string itself was unrecognized.
   if (activation_type != HIPDNN_EP_QMOE_AMD_ACTIVATION_RELU2) {
     fprintf(stderr,
             "wrap_qmoe_amd: unsupported activation_type=%lld (only relu2 is "
-            "implemented)\n",
-            (long long)activation_type);
+            "implemented; %d means the graph named an unrecognized mode)\n",
+            (long long)activation_type, HIPDNN_EP_QMOE_AMD_ACTIVATION_UNKNOWN);
     return -1;
   }
   if (routing_type != HIPDNN_EP_QMOE_AMD_ROUTING_SIGMOID) {
     fprintf(stderr,
             "wrap_qmoe_amd: unsupported routing_type=%lld (only sigmoid is "
-            "implemented)\n",
-            (long long)routing_type);
+            "implemented; %d means the graph named an unrecognized mode)\n",
+            (long long)routing_type, HIPDNN_EP_QMOE_AMD_ROUTING_UNKNOWN);
     return -1;
   }
 

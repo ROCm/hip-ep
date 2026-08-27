@@ -1292,7 +1292,8 @@ int wrap_qmoe(
 // include/hip/Dialect/IR/HipOps.td carries the full op semantics.
 //
 // activation_type / routing_type use the HIPDNN_EP_QMOE_AMD_* identifiers
-// below. Only relu2 and sigmoid are implemented; any other value is rejected
+// below. Only relu2 and sigmoid are implemented; every other value, including
+// UNKNOWN for a mode name the compiler did not recognize, is rejected here
 // rather than silently computed as relu2/sigmoid.
 //
 // All 15 inputs are required (no optional operands, unlike wrap_qmoe).
@@ -1303,7 +1304,14 @@ int wrap_qmoe(
 // These are deliberately separate from the HIPDNN_EP_ACTIVATION_* set above,
 // which enumerates MIOpen activation modes: relu2 has no MIOpen equivalent,
 // and wrap_qmoe's activation_type is yet another unrelated numbering.
+//
+// UNKNOWN is what the compiler emits for a mode string it does not recognize.
+// Deciding what is implemented belongs here, not in the compiler, so the
+// lowering translates every mode faithfully and this wrapper is the single
+// authority that accepts or rejects one.
+#define HIPDNN_EP_QMOE_AMD_ACTIVATION_UNKNOWN (-1)
 #define HIPDNN_EP_QMOE_AMD_ACTIVATION_RELU2 0
+#define HIPDNN_EP_QMOE_AMD_ROUTING_UNKNOWN (-1)
 #define HIPDNN_EP_QMOE_AMD_ROUTING_SIGMOID 0
 
 int wrap_qmoe_amd(

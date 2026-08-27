@@ -101,26 +101,19 @@ QMoEAmdToHip::matchAndRewrite(mlir::Operation *op,
   auto routedScalingFactorAttr =
       scalingFloatAttr ? scalingFloatAttr : rewriter.getF32FloatAttr(1.0f);
 
-  // Only relu2 / sigmoid are implemented end to end. Decline the match on any
-  // other value so the node stays on CPU, rather than offloading it and
-  // computing relu2/sigmoid regardless of what the model asked for.
+  // Carry both mode strings through verbatim. Which modes are actually
+  // implemented is a runtime/kernel property, so wrap_qmoe_amd is the layer
+  // that accepts or rejects one; the conversion must not drop the attribute,
+  // or an unsupported mode would silently be computed as relu2/sigmoid.
   auto activationTypeStrAttr =
       op->getAttrOfType<mlir::StringAttr>("activation_type");
   auto activationTypeAttr = activationTypeStrAttr
                                 ? activationTypeStrAttr
                                 : rewriter.getStringAttr("relu2");
-  if (activationTypeAttr.getValue() != "relu2") {
-    return rewriter.notifyMatchFailure(
-        op, "QMoE (com.amd): only activation_type 'relu2' is supported");
-  }
 
   auto routingTypeStrAttr = op->getAttrOfType<mlir::StringAttr>("routing_type");
   auto routingTypeAttr = routingTypeStrAttr ? routingTypeStrAttr
                                             : rewriter.getStringAttr("sigmoid");
-  if (routingTypeAttr.getValue() != "sigmoid") {
-    return rewriter.notifyMatchFailure(
-        op, "QMoE (com.amd): only routing_type 'sigmoid' is supported");
-  }
 
   // The custom-op schema deliberately implements no InferOutputShape, so
   // ORT's Resolve() always leaves QMoE's result type UNRANKED:

@@ -3,19 +3,20 @@
 
 // ============================================================================
 // TEST PURPOSE:
-// Verify com.amd::QMoE nodes asking for a mode the runtime does not implement
-// are NOT offloaded. Only activation_type="relu2" and routing_type="sigmoid"
-// are implemented end to end; any other value must leave the onnx.Custom op in
-// place so ORT keeps the node on CPU, rather than producing hip.qmoe_amd and
-// silently computing relu2/sigmoid regardless of what the model asked for.
+// Verify the com.amd::QMoE conversion stays agnostic about which activation /
+// routing modes a kernel implements: it offloads the node either way and
+// carries both mode strings through verbatim.
 //
-// The conversion runs as a greedy rewrite, so a declined match leaves the op
-// untouched without failing the pass.
+// Deciding what is implemented belongs to wrap_qmoe_amd, which rejects an
+// unimplemented mode. That only works if the conversion preserves the
+// attribute -- dropping it would make the runtime see relu2/sigmoid and
+// silently compute the wrong function for a graph that asked for something
+// else. These two cases are the regression guard for that.
 // ============================================================================
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip --split-input-file %s | FileCheck %s
 
-// Unsupported activation_type: everything else matches the supported case.
+// A mode the runtime does not implement must still reach hip.qmoe_amd unchanged.
 module {
   func.func @main_graph(
       %hidden_states: tensor<1x4x16xf16>) -> tensor<1x4x16xf16> {
@@ -43,7 +44,7 @@ module {
       normalize_routing_weights = 1 : si64, use_correction_bias = 1 : si64,
       routed_scaling_factor = 5.000000e+00 : f32,
       activation_type = "swiglu", routing_type = "sigmoid",
-      onnx_node_name = "QMoE_amd_bad_activation"
+      onnx_node_name = "QMoE_amd_other_activation"
     } : (tensor<1x4x16xf16>,
          tensor<4x8x1x4xui8>, tensor<4x8x1xf16>,
          tensor<4x8x1x4xui8>, tensor<4x8x1xf16>,
@@ -56,13 +57,13 @@ module {
   }
 }
 
-// CHECK: onnx.Custom
+// CHECK: hip.qmoe_amd
 // CHECK-SAME: activation_type = "swiglu"
-// CHECK-NOT: hip.qmoe_amd
+// CHECK-NOT: onnx.Custom
 
 // -----
 
-// Unsupported routing_type, supported activation_type.
+// Same for an unimplemented routing_type.
 module {
   func.func @main_graph(
       %hidden_states: tensor<1x4x16xf16>) -> tensor<1x4x16xf16> {
@@ -90,7 +91,7 @@ module {
       normalize_routing_weights = 1 : si64, use_correction_bias = 1 : si64,
       routed_scaling_factor = 5.000000e+00 : f32,
       activation_type = "relu2", routing_type = "softmax",
-      onnx_node_name = "QMoE_amd_bad_routing"
+      onnx_node_name = "QMoE_amd_other_routing"
     } : (tensor<1x4x16xf16>,
          tensor<4x8x1x4xui8>, tensor<4x8x1xf16>,
          tensor<4x8x1x4xui8>, tensor<4x8x1xf16>,
@@ -103,6 +104,6 @@ module {
   }
 }
 
-// CHECK: onnx.Custom
+// CHECK: hip.qmoe_amd
 // CHECK-SAME: routing_type = "softmax"
-// CHECK-NOT: hip.qmoe_amd
+// CHECK-NOT: onnx.Custom
