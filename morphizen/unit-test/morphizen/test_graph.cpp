@@ -3,11 +3,13 @@
  * Licensed under the MIT License.
  */
 
+#include "morphizen/morphizen-ort-api-ext.hpp"
 #include "morphizen/morphizen.hpp"
 #include "test_environment.hpp"
 #ifdef MORPHIZEN_ENABLE_BOOST
 #include <boost/process.hpp>
 #endif
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <glog/logging.h>
@@ -290,6 +292,59 @@ TEST_F(GraphTest, TryFuse) {
       graph, "a_name", {"111"}, {"138"}, {}, "CUSTOM");
   ASSERT_TRUE(meta_def != nullptr) << error.comments;
   LOG(INFO) << " fused_node=" << meta_def->DebugString();
+}
+
+// A graph output that is a bare constant initializer (no producer node) must
+// not abort or crash try_fuse, and must be excluded from the fused meta_def
+// outputs. This reproduces the shape of Model-PSI-QDQ-v3_0's
+// output_exposed_scale / output_exposed_zero_point, where an Identity(constant)
+// is const-folded into an initializer-backed graph output. Regression test for
+// the fusion handling of producerless graph outputs.
+TEST_F(GraphTest, TryFuseConstantGraphOutput) {
+  auto path = CMAKE_CURRENT_BINARY_PATH /
+              std::filesystem::path("const_output_test.onnx");
+  std::vector<std::pair<std::string, int64_t>> opset = {{"", 17}};
+  auto model = morphizen_cxx::Model::create(path, opset);
+  auto graph = model->main_graph();
+
+  // input -> Relu -> compute_out (a real node output)
+  std::vector<std::optional<morphizen_cxx::NodeArgConstRef>> input = {
+      graph.new_node_arg("input", {1, 8},
+                         ONNX_NAMESPACE::TensorProto_DataType_FLOAT)};
+  std::vector<std::optional<morphizen_cxx::NodeArgConstRef>> compute_out = {
+      graph.new_node_arg("compute_out", {1, 8},
+                         ONNX_NAMESPACE::TensorProto_DataType_FLOAT)};
+  graph.add_node("relu_0", "", "Relu", "", {input[0]}, {compute_out[0]},
+                 morphizen::NodeAttributesBuilder().build());
+
+  // A constant initializer surfaced directly as a graph output -- no producer.
+  auto const_out = graph.new_constant_initializer_u8(204, "const_out");
+
+  graph.set_inputs({input[0].value()});
+  graph.set_outputs({compute_out[0].value(), const_out});
+  graph.resolve();
+
+  // Both outputs are requested, exactly as the EP passes graph.outputs().
+  auto [meta_def, error] =
+      morphizen_cxx::graph_try_fuse(graph, "const_out_fuse", {"input"},
+                                    {"compute_out", "const_out"}, {}, "CUSTOM");
+
+  // The fuse must succeed (no FATAL on the producerless constant output).
+  ASSERT_TRUE(meta_def != nullptr) << error.comments;
+
+  // The constant output must be excluded from the fused outputs -- only the
+  // real compute output is claimed. ORT serves the initializer output directly.
+  std::vector<std::string> fused_outputs{meta_def->outputs().begin(),
+                                         meta_def->outputs().end()};
+  EXPECT_NE(
+      std::find(fused_outputs.begin(), fused_outputs.end(), "compute_out"),
+      fused_outputs.end())
+      << "real compute output should be a fused output";
+  EXPECT_EQ(std::find(fused_outputs.begin(), fused_outputs.end(), "const_out"),
+            fused_outputs.end())
+      << "producerless constant output must not be a fused output";
+
+  std::filesystem::remove(path);
 }
 
 TEST_F(GraphTest, NewConstantInitializer) {
