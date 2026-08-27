@@ -2,7 +2,7 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  *
- * com.amd QMoE (Nemotron-H LatentMoE) sub-kernels — pure kernel launches, no
+ * com.amd QMoE (LatentMoE) sub-kernels — pure kernel launches, no
  * memory or stream management. The orchestration logic (scratch sizing,
  * bucketing, per-expert dispatch loop) lives in the runtime wrapper
  * (lib/Runtime/real/qmoe_amd.cpp). This file only adds the two kernels that
@@ -22,8 +22,8 @@
 static constexpr int kBlock = 256;
 static constexpr int kAmdRoutingBlock = 256;
 // com.amd QMoE routing epsilon added to the weight-sum denominator before
-// normalization, matching the sigmoid-gate MoE convention (e.g. DeepSeek-V3
-// style routers): w = probs[sel] / (sum(probs[sel]) + eps).
+// normalization, matching the sigmoid-gate MoE convention:
+//   w = probs[sel] / (sum(probs[sel]) + eps).
 static constexpr float kRoutingEps = 1e-20f;
 
 __host__ __device__ static inline size_t align_up_4(size_t s) { return (s + 3) & ~size_t(3); }
@@ -230,6 +230,12 @@ extern "C" int hip_qmoe_amd_route(
     return -1;
   }
 
+  // Clear any stale error so the check below attributes a launch failure to
+  // THIS kernel. hipGetLastError() reports the last error from any prior HIP
+  // call on the thread, and the caller aborts the whole op on a non-zero
+  // return -- without this clear, an error left sticky by an earlier op's
+  // unchecked launch fails QMoE with a bogus diagnostic.
+  (void)hipGetLastError();
   hipLaunchKernelGGL(
       qmoe_amd_route_kernel, dim3(static_cast<unsigned>(num_tokens)),
       dim3(kAmdRoutingBlock), shmem, s,
@@ -268,6 +274,7 @@ extern "C" int hip_qmoe_amd_relu2(
   int64_t total = n * width;
   int grid = static_cast<int>((total + kBlock - 1) / kBlock);
 
+  (void)hipGetLastError(); // clear stale error for correct attribution
   hipLaunchKernelGGL(qmoe_amd_relu2_kernel, dim3(grid), dim3(kBlock), 0, s,
                      static_cast<const __half*>(input),
                      static_cast<__half*>(output), total);

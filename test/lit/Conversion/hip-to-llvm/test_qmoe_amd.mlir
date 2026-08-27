@@ -16,7 +16,8 @@
 // - Dimension extraction (num_tokens, hidden_size, latent_size,
 //   moe_intermediate_size, shared_intermediate_size, num_experts)
 // - Attribute-to-constant lowering (k, expert_weight_bits, block_size,
-//   normalize_routing_weights, use_correction_bias, routed_scaling_factor)
+//   normalize_routing_weights, use_correction_bias, routed_scaling_factor,
+//   activation_type, routing_type)
 // ============================================================================
 
 // RUN: hip-mlir-opt --convert-hip-to-llvm %s | FileCheck %s
@@ -68,16 +69,22 @@ module {
   // CHECK: llvm.call @wrap_qmoe_amd({{.*}}) :
   // CHECK-SAME: (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
   // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
-  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, i64) -> i32
-  // Verify 30 parameters:
+  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, i64, i64, i64) -> i32
+  // Verify 32 parameters:
   // - 17 pointers: state, hidden_states, fc1_experts_weights,
   //   fc1_experts_scales, fc2_experts_weights, fc2_experts_scales,
   //   fc1_latent_weights, fc1_latent_scales, fc2_latent_weights,
   //   fc2_latent_scales, shared_fc1_weights, shared_fc1_scales,
   //   shared_fc2_weights, shared_fc2_scales, router_weight, correction_bias,
   //   output
-  // - 12 i64 + 1 f32: num_tokens, hidden_size, latent_size,
+  // - 14 i64 + 1 f32: num_tokens, hidden_size, latent_size,
   //   moe_intermediate_size, shared_intermediate_size, num_experts, k,
   //   expert_weight_bits, block_size, normalize_routing_weights,
-  //   use_correction_bias, routed_scaling_factor, elem_size
+  //   use_correction_bias, routed_scaling_factor, activation_type,
+  //   routing_type, elem_size
+  //
+  // activation_type / routing_type are the trailing i64 pair before elem_size
+  // (0 = relu2 / 0 = sigmoid). Unsupported modes are rejected earlier, in the
+  // ONNX-to-HIP conversion, so they never reach this lowering -- see
+  // test/lit/Conversion/onnx-to-hip/test_qmoe_amd.mlir.
 }

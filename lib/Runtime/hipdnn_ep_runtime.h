@@ -348,8 +348,8 @@ void *hipdnn_ep_state_get_qmoe_host_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
                                              size_t needed_size);
 
-// Per-session scratch for wrap_qmoe_amd (com.amd QMoE / Nemotron-H
-// LatentMoE) transient buffers. Independent from the qmoe_scratch pair
+// Per-session scratch for wrap_qmoe_amd (com.amd QMoE / LatentMoE)
+// transient buffers. Independent from the qmoe_scratch pair
 // above -- see runtime_state_internal.h for why the two ops do not share a
 // buffer. Same grow-on-demand, never-shrink policy.
 void *hipdnn_ep_state_get_qmoe_amd_scratch(RuntimeState *state);
@@ -1282,19 +1282,30 @@ int wrap_qmoe(
     float activation_alpha, float activation_beta, float swiglu_limit,
     int64_t normalize_routing_weights, int64_t elem_size);
 
-// com.amd QMoE operation wrapper (Nemotron-H LatentMoE).
+// com.amd QMoE operation wrapper (LatentMoE).
 //
 // Independent pipeline from wrap_qmoe above (com.microsoft QMoE): sigmoid +
 // correction-bias routing (vs softmax), relu2 activation (vs SwiGLU), and a
 // mandatory latent projection + shared-expert branch. Shares only the
 // generic int4 GEMM / gather / bucket / scatter sub-kernels, not any code
-// path in lib/Runtime/real/qmoe.cpp. See docs/design and
-// lib/Dialect/IR/HipOps.td (Hip_QMoEAmdOp) for the full op semantics.
+// path in lib/Runtime/real/qmoe.cpp. Hip_QMoEAmdOp in
+// include/hip/Dialect/IR/HipOps.td carries the full op semantics.
+//
+// activation_type / routing_type use the HIPDNN_EP_QMOE_AMD_* identifiers
+// below. Only relu2 and sigmoid are implemented; any other value is rejected
+// rather than silently computed as relu2/sigmoid.
 //
 // All 15 inputs are required (no optional operands, unlike wrap_qmoe).
 // Weight packing matches MatMulNBits convention: uint8 packed int4,
 // dequantized = (quantized - 8) * scale, always symmetric (no zero_points
 // input for this op).
+//
+// These are deliberately separate from the HIPDNN_EP_ACTIVATION_* set above,
+// which enumerates MIOpen activation modes: relu2 has no MIOpen equivalent,
+// and wrap_qmoe's activation_type is yet another unrelated numbering.
+#define HIPDNN_EP_QMOE_AMD_ACTIVATION_RELU2 0
+#define HIPDNN_EP_QMOE_AMD_ROUTING_SIGMOID 0
+
 int wrap_qmoe_amd(
     RuntimeState *state,
     const void *hidden_states,       // [num_tokens, hidden_size]
@@ -1318,6 +1329,8 @@ int wrap_qmoe_amd(
     int64_t num_experts, int64_t k, int64_t expert_weight_bits,
     int64_t block_size, int64_t normalize_routing_weights,
     int64_t use_correction_bias, float routed_scaling_factor,
+    int64_t activation_type, // HIPDNN_EP_QMOE_AMD_ACTIVATION_*
+    int64_t routing_type,    // HIPDNN_EP_QMOE_AMD_ROUTING_*
     int64_t elem_size);
 
 // CausalConvWithState operation wrapper (stateful causal depthwise convolution)

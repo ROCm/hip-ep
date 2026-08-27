@@ -116,8 +116,8 @@ struct RuntimeState {
   void *qmoe_host_scratch; // pinned host mirror for D2H of expert idx/weights
   size_t qmoe_host_scratch_size;
 
-  // Per-session scratch for wrap_qmoe_amd (com.amd QMoE / Nemotron-H
-  // LatentMoE) transient buffers. Deliberately a SEPARATE field from
+  // Per-session scratch for wrap_qmoe_amd (com.amd QMoE / LatentMoE)
+  // transient buffers. Deliberately a SEPARATE field from
   // qmoe_scratch above -- the two ops are independent pipelines (see
   // lib/Runtime/real/qmoe_amd.cpp) and must not share a buffer, so growing
   // one never invalidates offsets computed for the other. Same grow-on-

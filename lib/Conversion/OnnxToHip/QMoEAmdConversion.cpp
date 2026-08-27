@@ -10,7 +10,7 @@ namespace hip {
 namespace {
 
 //===----------------------------------------------------------------------===//
-// ONNX QMoE -> HIP QMoEAmd (com.amd custom op, Nemotron-H LatentMoE)
+// ONNX QMoE -> HIP QMoEAmd (com.amd custom op, LatentMoE)
 //===----------------------------------------------------------------------===//
 
 struct QMoEAmdToHip : public mlir::RewritePattern {
@@ -36,9 +36,8 @@ QMoEAmdToHip::matchAndRewrite(mlir::Operation *op,
 
   mlir::Location loc = op->getLoc();
 
-  // Fixed 15-input schema (see backend-mlir-compiler/custom-op-schema/ops/
-  // qmoe_schema.cpp) -- unlike com.microsoft::QMoE, every input is required,
-  // so there is no optional-operand handling here.
+  // Fixed 15-input schema -- unlike com.microsoft::QMoE, every input is
+  // required, so there is no optional-operand handling here.
   if (op->getNumOperands() != 15) {
     return rewriter.notifyMatchFailure(
         op, "expected exactly 15 inputs for com.amd QMoE");
@@ -69,9 +68,8 @@ QMoEAmdToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value routerWeight = op->getOperand(13);
   mlir::Value correctionBias = op->getOperand(14);
 
-  // Attribute defaults mirror the fixed values documented for this model's
-  // export (see CUSTOM_OP_SCHEMA.md shipped alongside the AMD Nemotron-3
-  // QMoE artifact); nodes are still free to override any of them.
+  // Attribute defaults mirror the fixed values documented for this op's
+  // custom-op schema; nodes are still free to override any of them.
   auto kIntAttr = op->getAttrOfType<mlir::IntegerAttr>("k");
   auto kAttr = rewriter.getI64IntegerAttr(kIntAttr ? kIntAttr.getSInt() : 22);
 
@@ -103,25 +101,34 @@ QMoEAmdToHip::matchAndRewrite(mlir::Operation *op,
   auto routedScalingFactorAttr =
       scalingFloatAttr ? scalingFloatAttr : rewriter.getF32FloatAttr(1.0f);
 
+  // Only relu2 / sigmoid are implemented end to end. Decline the match on any
+  // other value so the node stays on CPU, rather than offloading it and
+  // computing relu2/sigmoid regardless of what the model asked for.
   auto activationTypeStrAttr =
       op->getAttrOfType<mlir::StringAttr>("activation_type");
   auto activationTypeAttr = activationTypeStrAttr
                                 ? activationTypeStrAttr
                                 : rewriter.getStringAttr("relu2");
+  if (activationTypeAttr.getValue() != "relu2") {
+    return rewriter.notifyMatchFailure(
+        op, "QMoE (com.amd): only activation_type 'relu2' is supported");
+  }
 
   auto routingTypeStrAttr = op->getAttrOfType<mlir::StringAttr>("routing_type");
   auto routingTypeAttr = routingTypeStrAttr ? routingTypeStrAttr
                                             : rewriter.getStringAttr("sigmoid");
+  if (routingTypeAttr.getValue() != "sigmoid") {
+    return rewriter.notifyMatchFailure(
+        op, "QMoE (com.amd): only routing_type 'sigmoid' is supported");
+  }
 
-  // The custom-op schema (backend-mlir-compiler/custom-op-schema/ops/
-  // qmoe_schema.cpp) deliberately implements no InferOutputShape, so ORT's
-  // Resolve() always leaves QMoE's result type UNRANKED (see that file's
-  // comment for why: Ort::ShapeInferContext::SetOutputShape cannot encode
-  // hidden_states' dynamic batch/sequence dim without hitting an upstream
-  // ORT validation bug). An unchecked `mlir::cast<RankedTensorType>` here
-  // would read a garbage rank from the unranked type and crash (see
-  // docs/design or bisect notes for the createEmptyTensor AV). Instead,
-  // derive the output type from hiddenStates' own (reliably ranked,
+  // The custom-op schema deliberately implements no InferOutputShape, so
+  // ORT's Resolve() always leaves QMoE's result type UNRANKED:
+  // Ort::ShapeInferContext::SetOutputShape cannot encode hidden_states'
+  // dynamic batch/sequence dim without hitting an upstream ORT validation
+  // bug. An unchecked `mlir::cast<RankedTensorType>` here would read a
+  // garbage rank from the unranked type and crash in createEmptyTensor.
+  // Instead, derive the output type from hiddenStates' own (reliably ranked,
   // imported from its already-resolved producer type) type, per the op's
   // documented output-shape == hidden_states contract.
   mlir::RankedTensorType rt;

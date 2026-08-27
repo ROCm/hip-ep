@@ -14,7 +14,7 @@
 
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
 
-// com.amd QMoE (Nemotron-H LatentMoE) real runtime implementation.
+// com.amd QMoE (LatentMoE) real runtime implementation.
 //
 // Fully independent from lib/Runtime/real/qmoe.cpp (com.microsoft QMoE):
 // different routing (sigmoid + correction-bias vs softmax), different
@@ -29,7 +29,7 @@
 // call below passes null zero_points/bias and skips the ZpUnpackCache
 // machinery that com.microsoft::QMoE needs.
 //
-// Pipeline (see docs / Hip_QMoEAmdOp in lib/Dialect/IR/HipOps.td for the
+// Pipeline (Hip_QMoEAmdOp in include/hip/Dialect/IR/HipOps.td carries the
 // full math):
 //   1. hip_qmoe_amd_route            : sigmoid+correction-bias routing
 //   2. fc1_latent_proj (matmul_nbits): hidden_states -> h        [latent]
@@ -40,23 +40,21 @@
 //   5. fc2_latent_proj (matmul_nbits): acc -> y                 [hidden]
 //   6. shared expert: hidden_states -> fc1 -> relu2 -> fc2 -> s  [hidden]
 //   7. output = y + s (hip_elementwise_add)
-int wrap_qmoe_amd(RuntimeState *state, const void *hidden_states,
-                  const void *fc1_experts_weights,
-                  const void *fc1_experts_scales,
-                  const void *fc2_experts_weights,
-                  const void *fc2_experts_scales,
-                  const void *fc1_latent_weights, const void *fc1_latent_scales,
-                  const void *fc2_latent_weights, const void *fc2_latent_scales,
-                  const void *shared_fc1_weights, const void *shared_fc1_scales,
-                  const void *shared_fc2_weights, const void *shared_fc2_scales,
-                  const void *router_weight, const void *correction_bias,
-                  void *output, int64_t num_tokens, int64_t hidden_size,
-                  int64_t latent_size, int64_t moe_intermediate_size,
-                  int64_t shared_intermediate_size, int64_t num_experts,
-                  int64_t k, int64_t expert_weight_bits, int64_t block_size,
-                  int64_t normalize_routing_weights,
-                  int64_t use_correction_bias, float routed_scaling_factor,
-                  int64_t elem_size) {
+int wrap_qmoe_amd(
+    RuntimeState *state, const void *hidden_states,
+    const void *fc1_experts_weights, const void *fc1_experts_scales,
+    const void *fc2_experts_weights, const void *fc2_experts_scales,
+    const void *fc1_latent_weights, const void *fc1_latent_scales,
+    const void *fc2_latent_weights, const void *fc2_latent_scales,
+    const void *shared_fc1_weights, const void *shared_fc1_scales,
+    const void *shared_fc2_weights, const void *shared_fc2_scales,
+    const void *router_weight, const void *correction_bias, void *output,
+    int64_t num_tokens, int64_t hidden_size, int64_t latent_size,
+    int64_t moe_intermediate_size, int64_t shared_intermediate_size,
+    int64_t num_experts, int64_t k, int64_t expert_weight_bits,
+    int64_t block_size, int64_t normalize_routing_weights,
+    int64_t use_correction_bias, float routed_scaling_factor,
+    int64_t activation_type, int64_t routing_type, int64_t elem_size) {
   OP_PROFILE(
       "qmoe_amd",
       [&] {
@@ -83,6 +81,21 @@ int wrap_qmoe_amd(RuntimeState *state, const void *hidden_states,
     fprintf(stderr,
             "wrap_qmoe_amd: use_correction_bias=1 but correction_bias is "
             "null\n");
+    return -1;
+  }
+
+  if (activation_type != HIPDNN_EP_QMOE_AMD_ACTIVATION_RELU2) {
+    fprintf(stderr,
+            "wrap_qmoe_amd: unsupported activation_type=%lld (only relu2 is "
+            "implemented)\n",
+            (long long)activation_type);
+    return -1;
+  }
+  if (routing_type != HIPDNN_EP_QMOE_AMD_ROUTING_SIGMOID) {
+    fprintf(stderr,
+            "wrap_qmoe_amd: unsupported routing_type=%lld (only sigmoid is "
+            "implemented)\n",
+            (long long)routing_type);
     return -1;
   }
 

@@ -1034,7 +1034,7 @@ def Hip_QMoEAmdOp : Hip_DpsOp<"qmoe_amd",
                               /*autoReify=*/0,
                               /*autoInfer=*/1,
                               /*declareInfer=*/1> {
-  let summary = "Latent Mixture-of-Experts (com.amd QMoE, Nemotron-H)";
+    let summary = "Latent Mixture-of-Experts (com.amd QMoE)";
   let description = [{
     Implements the com.amd QMoE operator: a latent-space Mixture-of-Experts
     block with sigmoid + correction-bias routing, a shared expert, and

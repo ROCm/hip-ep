@@ -153,6 +153,13 @@ inline constexpr int64_t kOffsetIdx = 2;
 inline constexpr int64_t kSizesIdx = 3;
 inline constexpr int64_t kStridesIdx = 4;
 
+// com.amd QMoE (hip.qmoe_amd / wrap_qmoe_amd) activation and routing modes.
+// Values must match HIPDNN_EP_QMOE_AMD_* in lib/Runtime/hipdnn_ep_runtime.h.
+// Deliberately its own numbering: the MIOpen activation set this dialect maps
+// elsewhere has no relu2 equivalent.
+inline constexpr int64_t kQMoEAmdActivationRelu2 = 0;
+inline constexpr int64_t kQMoEAmdRoutingSigmoid = 0;
+
 // Window-pool reduction mode constants (hip.pool / wrap_pool).
 // Values must match HIPDNN_EP_POOL_* in lib/Runtime/hipdnn_ep_runtime.h
 // and the `pool_mode` constants used in OnnxToHip/PoolConversion.cpp.

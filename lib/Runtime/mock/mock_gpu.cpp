@@ -1311,26 +1311,24 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   return 0;
 }
 
-// com.amd::QMoE (Nemotron-H LatentMoE) mock stub. Independent pipeline from
-// wrap_qmoe above -- see lib/Runtime/real/qmoe_amd.cpp for the real
-// implementation. Just logs and zero-fills the output.
-int wrap_qmoe_amd(RuntimeState *state, const void *hidden_states,
-                  const void *fc1_experts_weights,
-                  const void *fc1_experts_scales,
-                  const void *fc2_experts_weights,
-                  const void *fc2_experts_scales,
-                  const void *fc1_latent_weights, const void *fc1_latent_scales,
-                  const void *fc2_latent_weights, const void *fc2_latent_scales,
-                  const void *shared_fc1_weights, const void *shared_fc1_scales,
-                  const void *shared_fc2_weights, const void *shared_fc2_scales,
-                  const void *router_weight, const void *correction_bias,
-                  void *output, int64_t num_tokens, int64_t hidden_size,
-                  int64_t latent_size, int64_t moe_intermediate_size,
-                  int64_t shared_intermediate_size, int64_t num_experts,
-                  int64_t k, int64_t expert_weight_bits, int64_t block_size,
-                  int64_t normalize_routing_weights,
-                  int64_t use_correction_bias, float routed_scaling_factor,
-                  int64_t elem_size) {
+// com.amd::QMoE (LatentMoE) mock stub. Independent pipeline from wrap_qmoe
+// above -- see lib/Runtime/real/qmoe_amd.cpp for the real implementation.
+// Just logs and zero-fills the output.
+int wrap_qmoe_amd(
+    RuntimeState *state, const void *hidden_states,
+    const void *fc1_experts_weights, const void *fc1_experts_scales,
+    const void *fc2_experts_weights, const void *fc2_experts_scales,
+    const void *fc1_latent_weights, const void *fc1_latent_scales,
+    const void *fc2_latent_weights, const void *fc2_latent_scales,
+    const void *shared_fc1_weights, const void *shared_fc1_scales,
+    const void *shared_fc2_weights, const void *shared_fc2_scales,
+    const void *router_weight, const void *correction_bias, void *output,
+    int64_t num_tokens, int64_t hidden_size, int64_t latent_size,
+    int64_t moe_intermediate_size, int64_t shared_intermediate_size,
+    int64_t num_experts, int64_t k, int64_t expert_weight_bits,
+    int64_t block_size, int64_t normalize_routing_weights,
+    int64_t use_correction_bias, float routed_scaling_factor,
+    int64_t activation_type, int64_t routing_type, int64_t elem_size) {
   if (!state || !hidden_states || !fc1_experts_weights || !fc1_experts_scales ||
       !fc2_experts_weights || !fc2_experts_scales || !fc1_latent_weights ||
       !fc1_latent_scales || !fc2_latent_weights || !fc2_latent_scales ||
@@ -1343,6 +1341,16 @@ int wrap_qmoe_amd(RuntimeState *state, const void *hidden_states,
     fprintf(stderr,
             "wrap_qmoe_amd: use_correction_bias=1 but correction_bias is "
             "null\n");
+    return -1;
+  }
+  // Mirror the real implementation's mode rejection so a mock run cannot pass
+  // a configuration the GPU path refuses.
+  if (activation_type != HIPDNN_EP_QMOE_AMD_ACTIVATION_RELU2 ||
+      routing_type != HIPDNN_EP_QMOE_AMD_ROUTING_SIGMOID) {
+    fprintf(stderr,
+            "wrap_qmoe_amd: unsupported activation_type=%lld / "
+            "routing_type=%lld (only relu2 / sigmoid are implemented)\n",
+            (long long)activation_type, (long long)routing_type);
     return -1;
   }
 

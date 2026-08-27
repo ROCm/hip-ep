@@ -109,6 +109,19 @@ struct QMoEAmdOpLowering : public ConvertOpToLLVMPattern<QMoEAmdOp> {
     Value sharedInterSizeVal = getMemRefDimSize(
         sharedFc1WeightsType, 0, adaptor.getSharedFc1Weights(), rewriter, loc);
 
+    // ONNX-to-HIP already declines unsupported modes, so reaching here with
+    // one means the op was built by something other than that conversion.
+    // Refuse rather than defaulting to relu2/sigmoid, which would compute the
+    // wrong function for a graph that asked for something else.
+    StringRef activationType = op.getActivationType();
+    if (activationType != "relu2")
+      return rewriter.notifyMatchFailure(
+          op, "com.amd QMoE: only activation_type 'relu2' is implemented");
+    StringRef routingType = op.getRoutingType();
+    if (routingType != "sigmoid")
+      return rewriter.notifyMatchFailure(
+          op, "com.amd QMoE: only routing_type 'sigmoid' is implemented");
+
     Value kVal = createI64Const(op.getK());
     Value expertWeightBitsVal = createI64Const(op.getExpertWeightBits());
     Value blockSizeVal = createI64Const(op.getBlockSize());
@@ -116,9 +129,11 @@ struct QMoEAmdOpLowering : public ConvertOpToLLVMPattern<QMoEAmdOp> {
     Value useCorrectionBiasVal = createI64Const(op.getUseCorrectionBias());
     Value routedScalingFactorVal =
         createF32Const(op.getRoutedScalingFactor().convertToFloat());
+    Value activationTypeVal = createI64Const(kQMoEAmdActivationRelu2);
+    Value routingTypeVal = createI64Const(kQMoEAmdRoutingSigmoid);
     Value elemSizeVal = createI64Const(elemSize);
 
-    SmallVector<Type, 30> paramTypes = {
+    SmallVector<Type, 32> paramTypes = {
         ptrType, // state
         ptrType, // hidden_states
         ptrType, // fc1_experts_weights
@@ -148,6 +163,8 @@ struct QMoEAmdOpLowering : public ConvertOpToLLVMPattern<QMoEAmdOp> {
         i64Type, // normalize_routing_weights
         i64Type, // use_correction_bias
         f32Type, // routed_scaling_factor
+        i64Type, // activation_type
+        i64Type, // routing_type
         i64Type  // elem_size
     };
 
@@ -157,7 +174,7 @@ struct QMoEAmdOpLowering : public ConvertOpToLLVMPattern<QMoEAmdOp> {
       return failure();
     }
 
-    SmallVector<Value, 30> args = {statePtr,
+    SmallVector<Value, 32> args = {statePtr,
                                    hiddenStatesPtr,
                                    fc1ExpertsWeightsPtr,
                                    fc1ExpertsScalesPtr,
@@ -186,6 +203,8 @@ struct QMoEAmdOpLowering : public ConvertOpToLLVMPattern<QMoEAmdOp> {
                                    normalizeVal,
                                    useCorrectionBiasVal,
                                    routedScalingFactorVal,
+                                   activationTypeVal,
+                                   routingTypeVal,
                                    elemSizeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);

@@ -1328,7 +1328,7 @@ int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
 }
 
 //===----------------------------------------------------------------------===//
-// com.amd QMoE (Nemotron-H LatentMoE) scratch -- independent from qmoe_scratch
+// com.amd QMoE (LatentMoE) scratch -- independent from qmoe_scratch
 // above (see runtime_state_internal.h for the rationale). Same grow-on-
 // demand, never-shrink policy and same sync-before-free-on-grow discipline.
 //===----------------------------------------------------------------------===//

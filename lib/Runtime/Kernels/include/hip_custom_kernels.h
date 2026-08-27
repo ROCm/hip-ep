@@ -2153,7 +2153,7 @@ HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a(
     int64_t element_size_bytes);
 
 /* =========================================================================
- * com.amd QMoE Sub-Kernels (Nemotron-H LatentMoE)
+ * com.amd QMoE Sub-Kernels (LatentMoE)
  * =========================================================================
  *
  * The two kernels genuinely new to this op: sigmoid + correction-bias

@@ -1,6 +1,6 @@
 // RUN: hip-mlir-opt %s --hipdnn-pipeline | FileCheck %s
 
-// Test com.amd::QMoE (Nemotron-H LatentMoE) E2E full pipeline.
+// Test com.amd::QMoE (LatentMoE) E2E full pipeline.
 // Verifies the complete hipdnn-pipeline, distinct from the com.microsoft::QMoE
 // path exercised by test_qmoe_model.mlir:
 // 1. convert-onnx-to-hip: ONNX Custom(function_name=QMoE, domain=com.amd) ->
@@ -8,12 +8,9 @@
 // 2. convert-hip-to-llvm: hip.qmoe_amd -> wrap_qmoe_amd runtime call
 // 3. generate-interface: Create inference_init/compute/cleanup/metadata
 //
-// Dims mirror test/numeric/tests/test_qmoe_amd.py (hidden=32, latent=16,
-// moe_intermediate=16, shared_intermediate=32, num_experts=4, k=2,
-// block_size=32 -- matches the real Nemotron-H checkpoint, see that file's
-// module docstring for why block_size=16 is deliberately avoided) so the
-// same shapes are exercised for real GPU execution
-// (E2E_Execute_test_qmoe_amd_model) as for the CPU-reference numeric check.
+// Dims: hidden=32, latent=16, moe_intermediate=16, shared_intermediate=32,
+// num_experts=4, k=2, block_size=32. block_size=16 is deliberately avoided
+// because it does not match the quant block layout these shapes exercise.
 
 // CHECK: module attributes {
 // CHECK-SAME: hipdnn.input_count = 1
