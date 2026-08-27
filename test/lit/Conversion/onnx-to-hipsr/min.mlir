@@ -13,7 +13,7 @@ func.func @min_two_inputs(%ctx: !hipsr.context, %a: tensor<4x1024xf16>,
                           %b: tensor<4x1024xf16>) -> tensor<4x1024xf16> {
   %0 = "onnx.Min"(%a, %b) : (tensor<4x1024xf16>, tensor<4x1024xf16>)
       -> tensor<4x1024xf16>
-  return %0 : tensor<4x1024xf16>
+  "onnx.Return"(%0) : (tensor<4x1024xf16>) -> ()
 }
 
 // -----
@@ -22,7 +22,7 @@ func.func @min_two_inputs(%ctx: !hipsr.context, %a: tensor<4x1024xf16>,
 // CHECK-SAME:  (%[[CTX:[^:]*]]: !hipsr.context, %[[A:[^:]*]]: tensor<4x1024xf16, #hipsr.mem<device>>, %[[B:[^:]*]]: tensor<4x1024xf16, #hipsr.mem<device>>, %[[C:[^:]*]]: tensor<4x1024xf16, #hipsr.mem<device>>) -> tensor<4x1024xf16, #hipsr.mem<device>> {
 // CHECK-NEXT:  %[[FIRST_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<4x1024xf16, #hipsr.mem<device>>, tensor<4x1024xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4x1024xf16, #hipsr.mem<device>>
 // CHECK-NEXT:  %[[FIRST:.+]] = hipsr.min(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<4x1024xf16, #hipsr.mem<device>>, tensor<4x1024xf16, #hipsr.mem<device>>) outs(%[[FIRST_INIT]] : tensor<4x1024xf16, #hipsr.mem<device>>) : tensor<4x1024xf16, #hipsr.mem<device>>
-// CHECK-NEXT:  %[[SECOND_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[FIRST_INIT]], %[[C]] : tensor<4x1024xf16, #hipsr.mem<device>>, tensor<4x1024xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4x1024xf16, #hipsr.mem<device>>
+// CHECK-NEXT:  %[[SECOND_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[FIRST]], %[[C]] : tensor<4x1024xf16, #hipsr.mem<device>>, tensor<4x1024xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4x1024xf16, #hipsr.mem<device>>
 // CHECK-NEXT:  %[[SECOND:.+]] = hipsr.min(%[[CTX]]) ins(%[[FIRST]], %[[C]] : tensor<4x1024xf16, #hipsr.mem<device>>, tensor<4x1024xf16, #hipsr.mem<device>>) outs(%[[SECOND_INIT]] : tensor<4x1024xf16, #hipsr.mem<device>>) : tensor<4x1024xf16, #hipsr.mem<device>>
 // CHECK-NEXT:  return %[[SECOND]] : tensor<4x1024xf16, #hipsr.mem<device>>
 // CHECK-NOT:   shape_region
@@ -32,7 +32,7 @@ func.func @min_three_inputs(%ctx: !hipsr.context, %a: tensor<4x1024xf16>,
   %0 = "onnx.Min"(%a, %b, %c)
       : (tensor<4x1024xf16>, tensor<4x1024xf16>, tensor<4x1024xf16>)
       -> tensor<4x1024xf16>
-  return %0 : tensor<4x1024xf16>
+  "onnx.Return"(%0) : (tensor<4x1024xf16>) -> ()
 }
 
 // -----
@@ -44,7 +44,7 @@ func.func @min_three_inputs(%ctx: !hipsr.context, %a: tensor<4x1024xf16>,
 func.func @min_single_input(%ctx: !hipsr.context, %a: tensor<4x1024xf16>)
     -> tensor<4x1024xf16> {
   %0 = "onnx.Min"(%a) : (tensor<4x1024xf16>) -> tensor<4x1024xf16>
-  return %0 : tensor<4x1024xf16>
+  "onnx.Return"(%0) : (tensor<4x1024xf16>) -> ()
 }
 
 // -----
@@ -59,5 +59,5 @@ func.func @min_broadcast(%ctx: !hipsr.context, %a: tensor<?x1024xf16>,
                          %b: tensor<1024xf16>) -> tensor<?x1024xf16> {
   %0 = "onnx.Min"(%a, %b) : (tensor<?x1024xf16>, tensor<1024xf16>)
       -> tensor<?x1024xf16>
-  return %0 : tensor<?x1024xf16>
+  "onnx.Return"(%0) : (tensor<?x1024xf16>) -> ()
 }
