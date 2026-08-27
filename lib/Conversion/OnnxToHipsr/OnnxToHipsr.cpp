@@ -28,6 +28,10 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/SmallVectorExtras.h"
 
+#include "mlir/Dialect/PDL/IR/PDL.h"
+#include "mlir/Dialect/PDLInterp/IR/PDLInterp.h"
+#include "mlir/Parser/Parser.h"
+
 namespace mlir {
 namespace hipsr {
 
@@ -35,6 +39,109 @@ namespace hipsr {
 #include "hip/Conversion/Passes.h.inc"
 
 namespace {
+
+// Populate PDLL-based conversion patterns with native rewrites.
+// Returns failure if PDLL patterns could not be loaded.
+static LogicalResult populateOnnxToHipsrPDLLPatterns(RewritePatternSet &patterns) {
+  // Register native constraint for PDLL patterns
+  patterns.getPDLPatterns().registerConstraintFunction(
+      "GetHipsrContext",
+      [](PatternRewriter &rewriter, Operation *op) -> FailureOr<Value> {
+        return getHipsrContextArg(op, rewriter);
+      });
+
+  // Register native rewrites for PDLL patterns
+  patterns.getPDLPatterns().registerRewriteFunction(
+      "RewriteCast",
+      [](PatternRewriter &rewriter, Operation *op) -> Operation * {
+        if (op->getNumOperands() != 1 || op->getNumResults() != 1)
+          return nullptr;
+        FailureOr<Value> ctx = getHipsrContextArg(op, rewriter);
+        if (failed(ctx))
+          return nullptr;
+
+        Location loc = op->getLoc();
+        Value input = op->getOperand(0);
+        auto unconvertedType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+        if (!unconvertedType)
+          return nullptr;
+
+        // Apply type conversion: add device memory encoding
+        auto resultType = tensorTypeInSpace(unconvertedType, MemorySpace::Device);
+
+        Value init = rewriter.create<PlaceholderOp>(
+            loc, TypeRange{resultType}, *ctx, ValueRange{input},
+            PlaceholderType::Normal).getResult(0);
+
+        return rewriter.create<CastOp>(loc, TypeRange{resultType}, *ctx, input, init);
+      });
+
+  patterns.getPDLPatterns().registerRewriteFunction(
+      "RewriteMatMul",
+      [](PatternRewriter &rewriter, Operation *op) -> Operation * {
+        if (op->getNumOperands() != 2 || op->getNumResults() != 1)
+          return nullptr;
+        FailureOr<Value> ctx = getHipsrContextArg(op, rewriter);
+        if (failed(ctx))
+          return nullptr;
+
+        Location loc = op->getLoc();
+        Value lhs = op->getOperand(0);
+        Value rhs = op->getOperand(1);
+        auto unconvertedType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+        if (!unconvertedType)
+          return nullptr;
+
+        // Apply type conversion: add device memory encoding
+        auto resultType = tensorTypeInSpace(unconvertedType, MemorySpace::Device);
+
+        Value init = PlaceholderOp::create(
+            rewriter, loc, TypeRange{resultType}, *ctx, ValueRange{lhs, rhs},
+            PlaceholderType::Normal).getResult(0);
+
+        return MatMulOp::create(rewriter, loc, TypeRange{resultType}, *ctx, lhs, rhs, init);
+      });
+
+  patterns.getPDLPatterns().registerRewriteFunction(
+      "RewriteExpand",
+      [](PatternRewriter &rewriter, Operation *op) -> Operation * {
+        if (op->getNumOperands() != 2 || op->getNumResults() != 1)
+          return nullptr;
+        FailureOr<Value> ctx = getHipsrContextArg(op, rewriter);
+        if (failed(ctx))
+          return nullptr;
+
+        Location loc = op->getLoc();
+        Value data = op->getOperand(0);
+        Value shape = op->getOperand(1);
+        auto unconvertedType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+        if (!unconvertedType)
+          return nullptr;
+
+        // Apply type conversion: add device memory encoding
+        auto resultType = tensorTypeInSpace(unconvertedType, MemorySpace::Device);
+
+        Value init = PlaceholderOp::create(
+            rewriter, loc, TypeRange{resultType}, *ctx, ValueRange{data, shape},
+            PlaceholderType::Barrier).getResult(0);
+
+        return ExpandOp::create(rewriter, loc, TypeRange{resultType}, *ctx, data, shape, init,
+                                ::mlir::DenseI64ArrayAttr{});
+      });
+
+  // Load PDLL patterns from compiled bytecode
+  const char *pdlPath = "lib/Conversion/OnnxToHipsr/OnnxToHipsr.pdl.mlir";
+  OwningOpRef<ModuleOp> pdlModule =
+      parseSourceFile<ModuleOp>(pdlPath, patterns.getContext());
+
+  if (!pdlModule) {
+    llvm::errs() << "Error: Failed to load PDLL patterns from " << pdlPath << "\n";
+    return failure();
+  }
+
+  patterns.add(PDLPatternModule(std::move(pdlModule)));
+  return success();
+}
 
 // Returns the shape-graph value for a placeholder input. A data result becomes
 // the outs operand its producer writes into, which has the same shape.
@@ -114,10 +221,14 @@ struct ConvertOnnxToHipsrPass
     });
 
     RewritePatternSet patterns(&getContext());
+
+    // Load PDLL patterns (required - no fallback)
+    if (failed(populateOnnxToHipsrPDLLPatterns(patterns))) {
+      signalPassFailure();
+      return;
+    }
+
     populateOnnxToHipsrConstantPatterns(converter, patterns);
-    populateCastConversionPatterns(converter, patterns, &getContext());
-    populateMatMulConversionPatterns(converter, patterns, &getContext());
-    populateExpandConversionPatterns(converter, patterns, &getContext());
     populateShapeConversionPatterns(converter, patterns, &getContext());
     populateReshapeConversionPatterns(converter, patterns, &getContext());
     populateUnsqueezeConversionPatterns(converter, patterns, &getContext());
