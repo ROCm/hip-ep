@@ -58,6 +58,8 @@ set(_kernel_sources
     hip/pad_kernel.hip
     hip/layer_norm_kernel.hip
     hip/instance_norm_kernel.hip
+    hip/rms_norm_kernel.hip
+    hip/skip_rms_norm_kernel.hip
     hip/cast_kernel.hip
     hip/range_kernel.hip
     hip/gather_kernel.hip

@@ -119,7 +119,7 @@ Machine-readable form: [scripts/unsupported_reco_rules.json](scripts/unsupported
 - `miopenActivationPOWER` — can express `Reciprocal` / `Sqrt` by parameterization
 - `wrap_miopenConvolutionForward` — convolution family
 - `wrap_hipblasLtMatmul` — matmul family
-- `wrap_miopenT5LayerNormForward` — RMS / T5 layer norm
+- `wrap_rms_norm` — RMS / simplified layer norm (custom HIP kernel)
 - `wrap_layer_normalization` — standard ONNX-17 LayerNormalization (mean + var)
 - `wrap_skip_simplified_layer_norm` — Microsoft SkipSimplifiedLayerNormalization fusion
 - `wrap_reduce_sum` — current custom reduction path

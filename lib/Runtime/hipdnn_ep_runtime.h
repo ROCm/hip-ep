@@ -1166,13 +1166,11 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           int64_t rotary_dim, int64_t cos_cache_num_elements,
                           int64_t element_size_bytes, int64_t is_bnsh);
 
-// SimplifiedLayerNormalization operation wrapper
-int wrap_miopenT5LayerNormForward(RuntimeState *state, int op_state_slot,
-                                  void *input, void *scale, void *output,
-                                  int64_t input_num_elements,
-                                  int64_t scale_num_elements,
-                                  int64_t element_size_bytes, int64_t axis,
-                                  float epsilon, int64_t stash_type);
+// SimplifiedLayerNormalization / RMSNormalization operation wrapper
+int wrap_rms_norm(RuntimeState *state, void *input, void *scale, void *output,
+                  int64_t input_num_elements, int64_t scale_num_elements,
+                  int64_t element_size_bytes, int64_t axis, float epsilon,
+                  int64_t stash_type);
 
 // LayerNormalization operation wrapper (standard ONNX opset 17+)
 // bias, mean, inv_std may be nullptr when optional inputs/outputs are absent
@@ -1194,10 +1192,9 @@ int wrap_instance_normalization(RuntimeState *state, void *input, void *scale,
 // Computes: input_skip_bias_sum = input + skip [+ bias]
 //           output = RMSNorm(input_skip_bias_sum) * gamma
 // bias and input_skip_bias_sum may be nullptr (optional per MS spec)
-int wrap_skip_simplified_layer_norm(RuntimeState *state, int op_state_slot,
-                                    void *input, void *skip, void *gamma,
-                                    void *bias, void *output,
-                                    void *input_skip_bias_sum,
+int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
+                                    void *skip, void *gamma, void *bias,
+                                    void *output, void *input_skip_bias_sum,
                                     int64_t input_num_elements,
                                     int64_t gamma_num_elements,
                                     int64_t element_size_bytes, float epsilon);

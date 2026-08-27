@@ -1098,12 +1098,12 @@ def Hip_GatherBlockQuantizedOp : Hip_DpsOp<"gather_block_quantized"> {
 
 // ===== MIOpen ops ============================================================
 
-def Hip_RmsNormOp : Hip_DpsOp<"rms_norm", /*traits=*/[OpStateOpInterface],
+def Hip_RmsNormOp : Hip_DpsOp<"rms_norm", /*traits=*/[],
                               /*outsAccessor=*/"Output",
                               /*autoReify=*/0,
                               /*autoInfer=*/1,
                               /*declareInfer=*/1> {
-  let summary = "RMS normalization via miopenT5LayerNormForward";
+  let summary = "RMS normalization";
   let description = [{
     Applies simplified (RMS) layer normalization.
 
@@ -1143,19 +1143,6 @@ def Hip_RmsNormOp : Hip_DpsOp<"rms_norm", /*traits=*/[OpStateOpInterface],
     `(` $ctx `)` `ins` `(` $input `,` $scale `:` type($input) `,` type($scale) `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
-  }];
-
-  // OpStateOpInterface: construct this instance's per-session state
-  // (T5NormState), which holds a shared_ptr to the device-wide MIOpen
-  // descriptor table shared across sessions via WeakStore.
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_t5norm",
-          {});
-    }
   }];
 
   let hasVerifier = 1;
@@ -1300,7 +1287,7 @@ def Hip_InstanceNormOp : Hip_DpsOp<"instance_norm", /*traits=*/[],
 }
 
 def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
-    [AttrSizedOperandSegments, OpStateOpInterface]> {
+    [AttrSizedOperandSegments]> {
   let summary = "Fused skip + RMS normalization (com.microsoft.SkipSimplifiedLayerNormalization)";
   let description = [{
     Full alignment with Microsoft ONNX Runtime SkipSimplifiedLayerNormalization
@@ -1373,19 +1360,6 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
     `)`
     `outs` `(` $outputs `:` type($outputs) `)`
     attr-dict (`:` type($result_tensors)^)?
-  }];
-
-  // OpStateOpInterface: construct this instance's per-session state
-  // (SkipT5NormState), which holds a shared_ptr to the device-wide MIOpen
-  // descriptor table shared across sessions via WeakStore.
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot,
-          "hipdnn_ep_op_state_construct_skip_t5norm", {});
-    }
   }];
 
   let hasVerifier = 1;

@@ -24,19 +24,32 @@ from framework.onnx_utils import make_model_from_nodes
 
 SEQ_LENS = [1, 128]
 HIDDEN = 4096
+# Odd row widths: the RMS-norm kernels only take their packed __half2 path
+# when the row is even, so these pin down the scalar fp16 fallback. 33 also
+# lands mid-block (block size 256), exercising the strided loop tail.
+ODD_HIDDENS = [33, 4095]
 
 
-def _make_simplified_layer_norm_model(input_shape: list[int]):
-    """Build a SimplifiedLayerNormalization ONNX model (f16).
+_TENSOR_PROTO = {
+    np.float16: TensorProto.FLOAT16,
+    np.float32: TensorProto.FLOAT,
+}
+
+
+def _make_simplified_layer_norm_model(
+    input_shape: list[int], dtype: np.dtype = np.float16
+):
+    """Build a SimplifiedLayerNormalization ONNX model.
 
     ORT registers this op in the default ONNX domain (not com.microsoft).
     """
     hidden = input_shape[-1]
-    X = helper.make_tensor_value_info("X", TensorProto.FLOAT16, input_shape)
-    Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT16, input_shape)
+    tp = _TENSOR_PROTO[dtype]
+    X = helper.make_tensor_value_info("X", tp, input_shape)
+    Y = helper.make_tensor_value_info("Y", tp, input_shape)
 
     rng = np.random.default_rng(77)
-    scale_data = rng.uniform(0.5, 1.5, [hidden]).astype(np.float16)
+    scale_data = rng.uniform(0.5, 1.5, [hidden]).astype(dtype)
     scale_init = numpy_helper.from_array(scale_data, name="scale")
 
     node = helper.make_node(
@@ -53,19 +66,22 @@ def _make_simplified_layer_norm_model(input_shape: list[int]):
     return model
 
 
-def _make_skip_simplified_layer_norm_model(input_shape: list[int]):
-    """Build a SkipSimplifiedLayerNormalization ONNX model (f16).
+def _make_skip_simplified_layer_norm_model(
+    input_shape: list[int], dtype: np.dtype = np.float16
+):
+    """Build a SkipSimplifiedLayerNormalization ONNX model.
 
     This op is in the com.microsoft domain. ORT CPU provider supports it.
     """
     hidden = input_shape[-1]
-    X = helper.make_tensor_value_info("X", TensorProto.FLOAT16, input_shape)
-    skip = helper.make_tensor_value_info("skip", TensorProto.FLOAT16, input_shape)
-    Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT16, input_shape)
-    Y3 = helper.make_tensor_value_info("Y3", TensorProto.FLOAT16, input_shape)
+    tp = _TENSOR_PROTO[dtype]
+    X = helper.make_tensor_value_info("X", tp, input_shape)
+    skip = helper.make_tensor_value_info("skip", tp, input_shape)
+    Y = helper.make_tensor_value_info("Y", tp, input_shape)
+    Y3 = helper.make_tensor_value_info("Y3", tp, input_shape)
 
     rng = np.random.default_rng(88)
-    scale_data = rng.uniform(0.5, 1.5, [hidden]).astype(np.float16)
+    scale_data = rng.uniform(0.5, 1.5, [hidden]).astype(dtype)
     scale_init = numpy_helper.from_array(scale_data, name="scale")
 
     node = helper.make_node(
@@ -183,7 +199,11 @@ class TestSimplifiedLayerNorm:
 
     @pytest.mark.parametrize("seq_len", SEQ_LENS)
     def test_simplified_layer_norm_llama_shape(self, model_runner, seq_len):
-        """SimplifiedLayerNorm with shapes matching Llama input_layernorm."""
+        """SimplifiedLayerNorm with shapes matching Llama input_layernorm.
+
+        HIDDEN=4096 is also the case that would regress first if the kernel's
+        sum-of-squares accumulator were ever narrowed from fp32 to fp16.
+        """
         input_shape = [1, seq_len, HIDDEN]
         model = _make_simplified_layer_norm_model(input_shape)
 
@@ -192,6 +212,32 @@ class TestSimplifiedLayerNorm:
 
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-4)
+
+    @pytest.mark.parametrize("hidden", ODD_HIDDENS)
+    def test_simplified_layer_norm_odd_hidden(self, model_runner, hidden):
+        """Odd hidden size forces the scalar fp16 body.
+
+        The packed __half2 path needs an even row, so without this the scalar
+        fp16 fallback is never exercised -- every other case here is even.
+        """
+        input_shape = [1, 4, hidden]
+        model = _make_simplified_layer_norm_model(input_shape)
+
+        rng = np.random.default_rng(43)
+        x = rng.uniform(-2, 2, input_shape).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-4)
+
+    @pytest.mark.parametrize("input_shape", [[1, 4, 16], [1, 8, 4096]])
+    def test_simplified_layer_norm_fp32(self, model_runner, input_shape):
+        model = _make_simplified_layer_norm_model(input_shape, np.float32)
+
+        rng = np.random.default_rng(44)
+        x = rng.uniform(-2, 2, input_shape).astype(np.float32)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-5)
 
 
 class TestSkipSimplifiedLayerNorm:
@@ -224,6 +270,30 @@ class TestSkipSimplifiedLayerNorm:
 
         actual, expected = model_runner.run_sample(model, [x, skip_input])
         compare_outputs(actual, expected, atol=2e-3)
+
+    @pytest.mark.parametrize("hidden", ODD_HIDDENS)
+    def test_skip_simplified_layer_norm_odd_hidden(self, model_runner, hidden):
+        """Odd hidden size forces the scalar fp16 body (see the RMS-norm twin)."""
+        input_shape = [1, 4, hidden]
+        model = _make_skip_simplified_layer_norm_model(input_shape)
+
+        rng = np.random.default_rng(56)
+        x = rng.uniform(-2, 2, input_shape).astype(np.float16)
+        skip_input = rng.uniform(-2, 2, input_shape).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x, skip_input])
+        compare_outputs(actual, expected, atol=2e-3)
+
+    @pytest.mark.parametrize("input_shape", [[1, 4, 16], [1, 8, 4096]])
+    def test_skip_simplified_layer_norm_fp32(self, model_runner, input_shape):
+        model = _make_skip_simplified_layer_norm_model(input_shape, np.float32)
+
+        rng = np.random.default_rng(57)
+        x = rng.uniform(-2, 2, input_shape).astype(np.float32)
+        skip_input = rng.uniform(-2, 2, input_shape).astype(np.float32)
+
+        actual, expected = model_runner.run_sample(model, [x, skip_input])
+        compare_outputs(actual, expected, atol=1e-5)
 
 
 # ---------------------------------------------------------------------------
