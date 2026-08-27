@@ -55,6 +55,8 @@ std::string build_compiler_options_json(const CompilationConfig &config) {
        << (config.artifactFormat == ArtifactFormat::NATIVE ? "NATIVE"
                                                            : "LLVM_IR")
        << "\"";
+  json << ", \"use_dynamic_dispatch\": "
+       << (config.useDynamicDispatch ? "true" : "false");
   json << "}";
   return json.str();
 }

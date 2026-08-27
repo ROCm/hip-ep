@@ -40,6 +40,7 @@ struct CompilationConfig {
   ArtifactFormat artifactFormat;
   int optLevel;
   bool skipConstantData = true;
+  bool useDynamicDispatch = false;
 };
 
 // Compiled artifact (bytes + metadata)

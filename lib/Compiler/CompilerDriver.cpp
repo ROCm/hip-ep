@@ -321,6 +321,7 @@ bool CompilerDriver::runMLIRPasses(
 
     mlir::hip::HipToLLVMPipelineOptions hipToLlvmOpts;
     hipToLlvmOpts.constantsFile = options.constants_file;
+    hipToLlvmOpts.useDynamicDispatch = options.use_dynamic_dispatch;
     mlir::hip::buildHipToLLVMPipeline(pm, hipToLlvmOpts);
   }
 
@@ -595,6 +596,28 @@ void CompilerDriver::discoverInTreeLibraries(
     COMPILER_DEBUG_LOG("  Custom kernels (per-arch shared): custom_kernels_"
                        << ck_arch << " from "
                        << (ck_dir.empty() ? "<search path>" : ck_dir) << "\n");
+  }
+
+  // DynamicDispatch (NPU/IPU backend): only linked when models use DD operators
+  // Environment variable DYNAMICDISPATCH_ROOT or VAI_RT_ROOT specifies install path
+  {
+    std::string dd_root = hip_get_env("DYNAMICDISPATCH_ROOT");
+    if (dd_root.empty())
+      dd_root = hip_get_env("VAI_RT_ROOT");
+
+    if (!dd_root.empty()) {
+      std::string dd_lib_dir = dd_root + "/Lib";
+      std::string dd_lib_path = dd_lib_dir + "/dyn_dispatch_core.lib";
+      if (llvm::sys::fs::exists(dd_lib_path)) {
+        library_paths.push_back(dd_lib_dir);
+        libraries.push_back("dyn_dispatch_core");
+        COMPILER_DEBUG_LOG("  DynamicDispatch (NPU/IPU): dyn_dispatch_core from "
+                           << dd_lib_dir << "\n");
+      } else {
+        COMPILER_DEBUG_LOG("  DynamicDispatch not found at: " << dd_lib_path
+                           << " (NPU/IPU backend unavailable)\n");
+      }
+    }
   }
 
   // hipDNN graph runtime: only needed when hipDNN graphs are compiled

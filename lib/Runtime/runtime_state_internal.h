@@ -34,6 +34,13 @@ struct RuntimeState {
   miopenHandle_t miopen_handle;
   hipblasLtHandle_t hipblas_handle;
 
+  // XRT context for DynamicDispatch NPU/IPU backend (optional).
+  // Initialized when --use-dynamic-dispatch lowering is active.
+  // Cast from ryzenai::dynamic_dispatch::xrt_context* (C++ object).
+  // Owned by RuntimeState; allocated in initialize_state_handles,
+  // freed in hipdnn_ep_state_cleanup.
+  void *xrt_context;
+
   // Single allocation holding all constants as one blob.
   // gpu_constants[i] points into gpu_constants_blob at the offset stored in
   // ConstantInfo, so only one allocation/copy is needed at init time.

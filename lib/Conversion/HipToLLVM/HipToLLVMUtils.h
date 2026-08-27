@@ -494,6 +494,12 @@ void populateIfLoweringPatterns(const LLVMTypeConverter &converter,
                                 RewritePatternSet &patterns);
 void populatePoolLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
+// DynamicDispatch backend lowering patterns (NPU/IPU via XRT)
+void populateDynamicDispatchGemmLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
+void populateDynamicDispatchConvLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
+
 void populateResizeLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns);
 void populateGridSampleLoweringPatterns(const LLVMTypeConverter &converter,
