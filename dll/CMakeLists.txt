@@ -3,6 +3,11 @@
 # ** Licensed under the MIT License.
 ##
 
+# The standalone C API DLL is for a tools-only tree. A BUILD_EP tree links the
+# compiler into the EP instead (see lib/CInterface), so building it here too
+# would only add a second, never-loaded copy of LLVM/MLIR.
+if(NOT BUILD_EP)
+
 message(STATUS "Building hip-compiler.dll")
 
 # Create the DLL target
@@ -56,10 +61,12 @@ install(TARGETS hip-compiler-dll
     LIBRARY DESTINATION lib
 )
 
-# Install C API headers
+message(STATUS "hip-compiler.dll configuration complete")
+
+endif()  # NOT BUILD_EP
+
+# Install C API headers regardless of which flavour was built.
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/include/hip
     DESTINATION include
     FILES_MATCHING PATTERN "*.h"
 )
-
-message(STATUS "hip-compiler.dll configuration complete")

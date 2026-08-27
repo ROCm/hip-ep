@@ -5,11 +5,11 @@
 """hipgpu Execution Provider for ONNX Runtime -- packaging marker.
 
 This distribution carries no Python API and no payload in this package. Its
-native artifacts (the EP plugin ``hipgpu.dll``, its hip-compiler JIT plugin, the
-per-arch custom-kernels, and the AMD GPU umbrella chain ``amdgpu-ep.dll`` +
-``hip-backend.dll``) are installed directly into ``onnxruntime/capi/`` -- next
-to ``onnxruntime.dll`` -- by the wheel. The ROCm import libraries come from
-``rocm[devel]``.
+native artifacts (the EP plugin ``hipgpu.dll``, which carries the hip-compiler
+JIT inside it, the per-arch custom-kernels, and the AMD GPU umbrella chain
+``amdgpu-ep.dll`` + ``hip-backend.dll``) are installed directly into
+``onnxruntime/capi/`` -- next to ``onnxruntime.dll`` -- by the wheel. The ROCm
+import libraries come from ``rocm[devel]``.
 
 Install this wheel AFTER ``onnxruntime`` so ``onnxruntime/capi/`` exists. Then:
 

@@ -10,6 +10,10 @@
 
 #include "morphizen-foundation/file_io.hpp"
 
+#ifdef HIP_COMPILER_STATIC
+#include "morphizen-utils/morphizen_plugin.hpp"
+#endif
+
 #include "compilation_options_schema.h"
 
 #include "llvm/ADT/StringRef.h"
@@ -132,3 +136,17 @@ COMPILER_API CompilerErrorCode hip_compile_with_fs(
 COMPILER_API const char *hip_get_version(void) { return COMPILER_VERSION; }
 
 } // extern "C"
+
+#ifdef HIP_COMPILER_STATIC
+namespace {
+
+static ::morphizen::StaticPluginRegister
+    __register_hip_compile("hip-compiler", "hip_compile_with_fs",
+                           reinterpret_cast<void *>(&hip_compile_with_fs));
+
+static ::morphizen::StaticPluginRegister
+    __register_hip_version("hip-compiler", "hip_get_version",
+                           reinterpret_cast<void *>(&hip_get_version));
+
+} // namespace
+#endif
