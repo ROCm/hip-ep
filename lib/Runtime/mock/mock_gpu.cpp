@@ -1733,6 +1733,19 @@ void hipdnn_ep_readback_scalar(RuntimeState *state, void *host_dst,
   memcpy(host_dst, device_scalar, static_cast<size_t>(num_bytes));
 }
 
+int wrap_copy_d2h(RuntimeState *state, void *dst_ptr, const void *src_ptr,
+                  int64_t size_bytes) {
+  (void)state;
+  if (!dst_ptr || !src_ptr || size_bytes < 0) {
+    fprintf(stderr, "Invalid argument in wrap_copy_d2h\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_copy_d2h(size_bytes=%lld)\n", (long long)size_bytes);
+  // Mock "device" memory is host memory, so a plain memcpy is the transfer.
+  memcpy(dst_ptr, src_ptr, static_cast<size_t>(size_bytes));
+  return 0;
+}
+
 int wrap_cos(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type) {
   if (!state) {
