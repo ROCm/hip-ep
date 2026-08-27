@@ -183,20 +183,6 @@ private:
   uint32_t graph_id_;
   mlir::Operation *terminator_;
   mlir::Operation *none_;
-  // Cache of the most recently created onnx.Constant op in entry_block_.
-  // Constants are kept contiguous at the top of the block; new ones are always
-  // inserted after this op, so it is always the last constant. add_node uses it
-  // to place the insertion point without rescanning the whole block (which made
-  // node insertion O(N^2) on large graphs). Invalidated when a constant is
-  // erased; add_node falls back to a bounded prefix scan when it is null/stale.
-  mlir::Operation *last_constant_op_ = nullptr;
-  // Frontier op after which the next add_node inserts. Nodes arrive in
-  // topological order, so every operand-defining op is already at or before
-  // this frontier; the correct insertion point is simply after it. Tracking it
-  // avoids per-node isBeforeInBlock scans, whose order-recompute made insertion
-  // O(N^2). Validated against entry_block_ before use; stale values fall back
-  // to the last constant / none placeholder.
-  mlir::Operation *insertion_frontier_ = nullptr;
   MLIRSymbolTable value_map_;
 
   // Sub MLIRGraphs owned by this graph. Entries come from:

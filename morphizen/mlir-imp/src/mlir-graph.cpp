@@ -759,39 +759,28 @@ MLIRGraph::add_node(const std::string &name, const std::string &op_type,
   // other ops among them changes the constant-streaming backend's results.
   // Loop/If/Scan body captures are folded in after transplant (below).
   {
-    // Nodes arrive in topological order, so all operand-defining ops in this
-    // block are already at or before insertion_frontier_ (the last op inserted
-    // here). Inserting after the frontier therefore dominates every operand
-    // while keeping constants contiguous at the block top. When there is no
-    // frontier yet, fall back to the last constant, then the none placeholder.
-    // This avoids the per-node isBeforeInBlock order-recompute that made node
-    // insertion O(N^2) on 200k-node graphs.
-    mlir::Operation *anchor = insertion_frontier_;
-    if (anchor && anchor->getBlock() != entry_block_)
-      anchor = nullptr; // stale (e.g. erased/moved by a later transform)
-    if (!anchor) {
-      mlir::Operation *lastConstantOp = last_constant_op_;
-      if (lastConstantOp &&
-          (lastConstantOp->getBlock() != entry_block_ ||
-           lastConstantOp->getName().getStringRef() != "onnx.Constant")) {
-        lastConstantOp = nullptr;
-      }
-      if (!lastConstantOp) {
-        for (auto &blockOp : entry_block_->getOperations()) {
-          auto n = blockOp.getName().getStringRef();
-          if (n == "onnx.Constant") {
-            lastConstantOp = &blockOp;
-          } else if (n != onnx_mlir::ONNX_NONE &&
-                     !onnx_mlir::isReturnOp(&blockOp)) {
-            break; // constants are a contiguous prefix; stop at first real op
-          }
-        }
-        last_constant_op_ = lastConstantOp;
-      }
-      anchor = lastConstantOp;
-      if (!anchor && none_ && none_->getBlock() == entry_block_)
-        anchor = none_;
+    mlir::Operation *anchor = nullptr;
+    for (const auto &arg : input_args) {
+      auto *input_node_arg = get_node_arg(arg);
+      if (!input_node_arg)
+        continue;
+      mlir::Value value = input_node_arg->getValue();
+      mlir::Operation *def = value ? value.getDefiningOp() : nullptr;
+      if (!def || def->getBlock() != entry_block_)
+        continue;
+      if (!anchor || anchor->isBeforeInBlock(def))
+        anchor = def;
     }
+    if (none_ && none_->getBlock() == entry_block_ &&
+        (!anchor || anchor->isBeforeInBlock(none_)))
+      anchor = none_;
+    mlir::Operation *lastConstantOp = nullptr;
+    for (auto &blockOp : entry_block_->getOperations()) {
+      if (blockOp.getName().getStringRef() == "onnx.Constant")
+        lastConstantOp = &blockOp;
+    }
+    if (lastConstantOp && (!anchor || anchor->isBeforeInBlock(lastConstantOp)))
+      anchor = lastConstantOp;
     if (anchor)
       builder.setInsertionPointAfter(anchor);
     else
@@ -1019,9 +1008,6 @@ MLIRGraph::add_node(const std::string &name, const std::string &op_type,
   // This requires more infrastructure to map MLIR operations to Node objects
   MY_LOG(1) << "Added MLIR node: " << name << " (" << op_type << ")";
   staging_nodes_.insert(op);
-  // Advance the insertion frontier so the next add_node anchors after this op
-  // without an isBeforeInBlock scan.
-  insertion_frontier_ = op;
   // Return the operation directly
   return op;
 }
@@ -1146,9 +1132,6 @@ void MLIRGraph::add_constant_initialized_tensor(
   mlir::Operation *op = builder.create(state);
   op->setAttr(attr_names::NODE_OUTPUTS,
               builder.getArrayAttr({builder.getStringAttr(name)}));
-  // Newest constant becomes the last one in the contiguous top-of-block run;
-  // cache it so add_node can anchor without a full-block scan.
-  last_constant_op_ = op;
   // update value in MLIRTensor object.
   node_arg->setValue(op->getResult(0));
 
@@ -1582,8 +1565,6 @@ void MLIRGraph::remove_initialized_tensor(const std::string &name) {
           node_attr.get_attribute_as_strings(attr_names::NODE_OUTPUTS);
       for (auto output_name : node_output_names) {
         if (output_name == name) {
-          if (op == last_constant_op_)
-            last_constant_op_ = nullptr; // invalidate stale cache
           op->erase();
           return mlir::WalkResult::interrupt();
         }

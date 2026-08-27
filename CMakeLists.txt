@@ -56,28 +56,6 @@ if(MSVC)
   endforeach()
 endif()
 
-# Release also gets /Z7 plus linker /DEBUG: MSVC's default Release flags carry
-# no debug-info switch at all, so Release builds previously shipped with zero
-# symbols. That leaves the cpptrace-based crash handler (lib/Support/CrashHandler.cpp)
-# unable to resolve real function names on a crash -- every frame falls back to
-# the nearest exported symbol (e.g. everything printed as "hip_get_version").
-# /Z7 does not disable optimizations; it only changes what debug info the
-# linker embeds into the PDB, so this has no runtime perf cost.
-#
-# This project uses the multi-config Visual Studio generator, where
-# CMAKE_BUILD_TYPE is not read by the generated vcxprojs (the config is chosen
-# at build time via --config). Editing CMAKE_CXX_FLAGS_RELEASE etc. directly
-# (as done above for DEBUG/RELWITHDEBINFO) does not reliably propagate through
-# the vendored MorphiZen subtree (a nested add_subdirectory with its own
-# project()-style setup), so use directory-scoped add_compile_options /
-# add_link_options with a $<CONFIG:Release> generator expression instead --
-# same mechanism already used successfully above for /guard:cf, which does
-# propagate correctly into subdirectories added after this point.
-if(MSVC)
-  add_compile_options($<$<AND:$<COMPILE_LANGUAGE:C,CXX>,$<CONFIG:Release>>:/Z7>)
-  add_link_options($<$<CONFIG:Release>:/DEBUG> $<$<CONFIG:Release>:/INCREMENTAL:NO>)
-endif()
-
 option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
 # Build the REAL runtime without the vendor BLAS backend (hipBLASLt).
 # The hipBLASLt-backed op wrappers compile to error-returning stubs that
