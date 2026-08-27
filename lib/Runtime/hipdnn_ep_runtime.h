@@ -617,9 +617,9 @@ void *hipdnn_ep_state_get_op_profile(RuntimeState *state);
 
 // NOTE: the CausalConvWithState descriptor/algo cache (CausalConvCache)
 // formerly lived in RuntimeState::causal_conv_cache with a
-// hipdnn_ep_causal_conv_cache_destroy teardown shim here. It is now
-// per-instance: each causal_conv_with_state instance owns one in its
-// CausalConvState op-state slot, so concurrent sessions no longer share it.
+// hipdnn_ep_causal_conv_cache_destroy teardown shim here, then moved to a
+// per-instance CausalConvState op-state slot. It is now gone outright: the op
+// runs entirely on custom kernels and has no MIOpen descriptors to cache.
 // See docs/design/op-state-slots-design.md.
 
 // Asym zero_points unpack cache lifecycle (qmoe-owned RuntimeState cache;
@@ -717,20 +717,12 @@ int wrap_conv(RuntimeState *state, int32_t op_state_slot, const void *input,
               int64_t p2, int64_t dil0, int64_t dil1, int64_t dil2,
               int64_t group);
 
-//===----------------------------------------------------------------------===//
-// Library Operations (MIOpen, hipBLAS)
-//===----------------------------------------------------------------------===//
-
-// Forward convolution is not here. It runs on the in-tree hip_conv kernel via
-// wrap_conv above; nothing on the forward Conv path calls MIOpen. Only the
-// transpose direction remains on MIOpen, no supported model using it.
-
-// MIOpen transposed convolution (deconvolution) wrapper
-// Uses MIOpen's miopenTranspose convolution mode. Follows the opaque
-// RuntimeState pattern - extracts handle/stream internally.
+// Transposed convolution (deconvolution) wrapper. Runs on the in-tree
+// hip_conv_transpose kernel, so neither convolution direction calls MIOpen.
+// Follows the opaque RuntimeState pattern - extracts the stream internally.
 // Weight layout is ONNX ConvTranspose's [C, M/group, kH, kW] (input channels
 // first); M/group is derived from output_c and group inside the wrapper.
-int wrap_miopenConvolutionTranspose(
+int wrap_conv_transpose(
     RuntimeState *state,   // RuntimeState (opaque)
     int32_t op_state_slot, // Op state slot
     const void *input,     // Input tensor GPU pointer [N, C, H, W]
@@ -758,6 +750,10 @@ int wrap_miopenConvolutionTranspose(
     int64_t output_padding_w, // Output padding width
     int64_t group,            // Number of groups
     int64_t data_type);       // HIPDNN_EP_DATATYPE_* element type
+
+//===----------------------------------------------------------------------===//
+// Library Operations (hipBLAS)
+//===----------------------------------------------------------------------===//
 
 // hipBLASLt GEMM operation wrapper
 // Called by generated IR for matrix multiplication operations

@@ -117,14 +117,13 @@ struct RuntimeState {
   void *qmoe_host_scratch; // pinned host mirror for D2H of expert idx/weights
   size_t qmoe_host_scratch_size;
 
-  // Per-session convolution workspace. Currently allocated by nobody: the
-  // MIOpen Find API migration moved the workspace into the per-problem
-  // solution cache in real/miopen.cpp, and forward Conv has since left MIOpen
-  // entirely for the in-tree hip_conv kernel, which needs no workspace at all.
-  // Kept only because the accessors are part of the runtime's exported
-  // surface. Same grow-on-demand policy as qmoe_scratch above if it is ever
-  // wired up again: lazily allocated on first use, never shrinks, freed in
-  // hipdnn_ep_state_cleanup.
+  // Per-session convolution workspace. Currently allocated by nobody: both
+  // convolution directions now run on in-tree kernels (hip_conv,
+  // hip_conv_transpose) that need no workspace at all, and the MIOpen solution
+  // cache that briefly owned one is gone. Kept only because the accessors are
+  // part of the runtime's exported surface. Same grow-on-demand policy as
+  // qmoe_scratch above if it is ever wired up again: lazily allocated on first
+  // use, never shrinks, freed in hipdnn_ep_state_cleanup.
   void *conv_scratch;
   size_t conv_scratch_size;
 
@@ -166,11 +165,10 @@ struct RuntimeState {
   // op_states below and docs/design/op-state-slots-design.md).
 
   // NOTE: the CausalConvWithState MIOpen descriptor + algorithm cache
-  // (CausalConvCache) formerly lived here as causal_conv_cache. It is now
-  // per-op-instance: each causal_conv_with_state instance owns one in its
-  // CausalConvState op-state slot (see op_states below and
-  // docs/design/op-state-slots-design.md), so concurrent instances no longer
-  // share one descriptor cache.
+  // (CausalConvCache) formerly lived here as causal_conv_cache, then moved to
+  // a per-op-instance CausalConvState op-state slot. It no longer exists at
+  // all: the op runs entirely on custom kernels, so there are no MIOpen
+  // descriptors to cache. See docs/design/op-state-slots-design.md.
 
   // Asym zero_points unpack cache (ZpUnpackCache*) used by wrap_qmoe.
   //

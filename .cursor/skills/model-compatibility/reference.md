@@ -118,7 +118,7 @@ Machine-readable form: [scripts/unsupported_reco_rules.json](scripts/unsupported
 - `wrap_miopenActivationForward` — activation-family elementwise ops
 - `miopenActivationPOWER` — can express `Reciprocal` / `Sqrt` by parameterization
 - `wrap_conv` — forward convolution family (in-tree `hip_conv` kernel)
-- `wrap_miopenConvolutionTranspose` — ConvTranspose
+- `wrap_conv_transpose` — ConvTranspose
 - `wrap_hipblasLtMatmul` — matmul family
 - `wrap_miopenT5LayerNormForward` — RMS / T5 layer norm
 - `wrap_layer_normalization` — standard ONNX-17 LayerNormalization (mean + var)

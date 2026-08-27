@@ -5,6 +5,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
+#include "../op_state.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
@@ -39,6 +40,22 @@
 // Only pads_begin is passed. Pad positions are never read, so the trailing pad
 // affects nothing except how many output positions exist, and that is already
 // in out_d*.
+
+namespace {
+
+// Slot payload shared by Conv and ConvTranspose: both ops emit a construct call
+// for their slot, so the symbol has to exist, but neither kernel caches
+// anything. This used to be the MIOpen descriptor/solution table (ConvState in
+// real/miopen.cpp) and outlived it only as an ABI obligation.
+struct ConvState : OpStateT<ConvState> {};
+
+} // namespace
+
+extern "C" int8_t hipdnn_ep_op_state_construct_conv(RuntimeState *state,
+                                                    int32_t slot) {
+  hipdnn_ep_op_state_set(state, slot, ConvState::create().release());
+  return 0;
+}
 
 static int hipdnn_ep_to_hip_dtype(int64_t data_type) {
   switch (data_type) {
