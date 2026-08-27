@@ -163,19 +163,17 @@ module {
   }
 
   // --------------------------------------------------------------------------
-  // Negative: k=12 is past the custom kernel's 8-tap limit, so this shape can
-  // only run on the channels-first MIOpen path. That path rejects
-  // channels_last outright rather than misreading the buffer, so folding here
-  // would convert a working convolution into a runtime failure.
+  // Positive: k=12 is past the templated kernels' 8 taps, but the channels-last
+  // kernel carries wider filters on its dynamic-K path, so the fold applies.
   // --------------------------------------------------------------------------
-  func.func @no_fold_when_kernel_too_wide(
+  func.func @fold_past_templated_kernel_width(
       %ctx: !hip.context,
       %x: tensor<1x128x64xf16>,
       %w: tensor<64x1x12xf16>)
       -> (tensor<1x128x64xf16>, tensor<1x64x11xf16>) {
-    // CHECK-LABEL: func.func @no_fold_when_kernel_too_wide
-    // CHECK: hip.transpose
-    // CHECK-NOT: channels_last
+    // CHECK-LABEL: func.func @fold_past_templated_kernel_width
+    // CHECK: channels_last
+    // CHECK-NOT: hip.transpose
 
     %e0 = tensor.empty() : tensor<1x64x128xf16>
     %t0 = hip.transpose(%ctx) ins(%x : tensor<1x128x64xf16>)
@@ -196,6 +194,42 @@ module {
         : tensor<1x128x64xf16>
 
     return %z, %s : tensor<1x128x64xf16>, tensor<1x64x11xf16>
+  }
+
+  // --------------------------------------------------------------------------
+  // Negative: k=200 is past the width the fold will commit to. The kernel's own
+  // ceiling is set by how much LDS a block can hold for the per-lane window,
+  // which is not knowable at compile time, so the fold stops well short of it
+  // rather than risk converting a working convolution into a runtime failure.
+  // --------------------------------------------------------------------------
+  func.func @no_fold_when_kernel_too_wide(
+      %ctx: !hip.context,
+      %x: tensor<1x128x64xf16>,
+      %w: tensor<64x1x200xf16>)
+      -> (tensor<1x128x64xf16>, tensor<1x64x199xf16>) {
+    // CHECK-LABEL: func.func @no_fold_when_kernel_too_wide
+    // CHECK: hip.transpose
+    // CHECK-NOT: channels_last
+
+    %e0 = tensor.empty() : tensor<1x64x128xf16>
+    %t0 = hip.transpose(%ctx) ins(%x : tensor<1x128x64xf16>)
+        outs(%e0 : tensor<1x64x128xf16>) {perm = [0, 2, 1]}
+        : tensor<1x64x128xf16>
+
+    %e1 = tensor.empty() : tensor<1x64x128xf16>
+    %e2 = tensor.empty() : tensor<1x64x199xf16>
+    %y, %s = hip.causal_conv_with_state(%ctx)
+        ins(%t0, %w : tensor<1x64x128xf16>, tensor<64x1x200xf16>)
+        outs(%e1, %e2 : tensor<1x64x128xf16>, tensor<1x64x199xf16>)
+        {ndim = 1 : i64}
+        : tensor<1x64x128xf16>, tensor<1x64x199xf16>
+
+    %e3 = tensor.empty() : tensor<1x128x64xf16>
+    %z = hip.transpose(%ctx) ins(%y : tensor<1x64x128xf16>)
+        outs(%e3 : tensor<1x128x64xf16>) {perm = [0, 2, 1]}
+        : tensor<1x128x64xf16>
+
+    return %z, %s : tensor<1x128x64xf16>, tensor<1x64x199xf16>
   }
 
   // --------------------------------------------------------------------------

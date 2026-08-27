@@ -58,12 +58,18 @@ bool isLastTwoAxisSwap(TransposeOp transpose) {
 
 /// Whether the channels-last custom kernel will actually accept this shape.
 ///
-/// Only that kernel can read (B, L, C); the MIOpen fallback behind it is
-/// channels-first and refuses the attribute rather than misreading the buffer.
-/// So folding a shape outside the kernel's envelope would turn a working
-/// convolution into a hard runtime failure. Mirrors the envelope in
-/// wrap_causal_conv_with_state, and reads the kernel width the way
+/// Only that kernel can read (B, L, C), so folding a shape it would refuse
+/// turns a working convolution into a hard runtime failure. Mirrors the
+/// envelope in wrap_causal_conv_with_state, and reads the kernel width the way
 /// CausalConvWithStateLowering does: the product of the weight dims from 2 on.
+///
+/// The width cap is deliberately well below what the kernel can do. Past k=8
+/// the channels-last kernel keeps its sliding window in a per-lane LDS ring, so
+/// its real limit is a function of the device's LDS budget -- around k=500 on a
+/// 64 KB workgroup -- which is not knowable here. 128 stays inside that even on
+/// a 32 KB device while being far past any width a causal convolution actually
+/// uses, which keeps the invariant above true without a compile-time guess at
+/// the hardware.
 bool fastPathAcceptsShape(CausalConvWithStateOp conv) {
   auto weightType = dyn_cast<RankedTensorType>(conv.getWeight().getType());
   if (!weightType || weightType.getRank() < 3)
@@ -74,7 +80,7 @@ bool fastPathAcceptsShape(CausalConvWithStateOp conv) {
       return false; // unknowable here, so leave the Transposes in place
     kernelSize *= weightType.getDimSize(i);
   }
-  if (kernelSize < 1 || kernelSize > 8)
+  if (kernelSize < 1 || kernelSize > 128)
     return false;
 
   auto inputType = dyn_cast<RankedTensorType>(conv.getInput().getType());

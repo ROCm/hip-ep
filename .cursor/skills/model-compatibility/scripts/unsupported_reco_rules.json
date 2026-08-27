@@ -94,8 +94,8 @@
       "op_name_keywords_any": [
         "conv"
       ],
-      "preferred_path": "MIOpen",
-      "wrapper_extension_target": "wrap_miopenConvolutionForward",
+      "preferred_path": "Custom Hip Kernel",
+      "wrapper_extension_target": "wrap_conv",
       "fallback_path": "Custom Hip Kernel"
     },
     {

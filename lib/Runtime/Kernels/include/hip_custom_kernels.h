@@ -2341,7 +2341,9 @@ HIP_KERNEL_API int hip_strided_copy(void *stream, void *dst, const void *src,
  *   present_state [B, C, k-1]
  *
  * Constraints:
- *   - kernel_size in [1, 8]   (k-1 fits in a small register array)
+ *   - kernel_size >= 1. Widths up to 8 take the templated kernels, where k-1
+ *     fits in a small register array; past that a dynamic-K kernel stages the
+ *     window and the taps in LDS instead, which bounds k at roughly 8000.
  *   - element_size_bytes in {2, 4} (fp16 or fp32; matches wrapper validation)
  *   - activation in {0, 1}   (0=none, 1=SiLU)
  *
@@ -2362,11 +2364,12 @@ HIP_KERNEL_API int hip_causal_conv_step_decode(
     int64_t element_size_bytes);
 
 // Prefill (seq_len > 1) fused causal depthwise 1D conv + bias + SiLU. One
-// launch replaces the MIOpen path (Find + 3 pitched memcpys + conv + bias +
-// activation + mul). fp32 accumulate; numerically matches the decode-step
-// kernel at seq_len==1. Same layout/contract as hip_causal_conv_step_decode
-// plus a seq_len argument. Supports kernel_size in [1,8], activation 0/1,
-// element_size 2/4; caller falls back to MIOpen for anything else.
+// launch replaces what used to be a MIOpen path (Find + 3 pitched memcpys +
+// conv + bias + activation + mul). fp32 accumulate; numerically matches the
+// decode-step kernel at seq_len==1. Same layout/contract as
+// hip_causal_conv_step_decode plus a seq_len argument. activation 0/1 and
+// element_size 2/4; kernel_size >= 1, with widths past 8 served by the
+// dynamic-K kernel (bounded by LDS at roughly k=8000).
 HIP_KERNEL_API int hip_causal_conv_prefill(
     void* stream,
     const void* input,
@@ -2391,6 +2394,10 @@ HIP_KERNEL_API int hip_causal_conv_prefill(
 // can fold the transposes away calls this instead, and pays neither. Results are
 // bit-identical to the channels-first kernel on the same data -- same fp32
 // accumulation of the same K taps in the same order.
+//
+// Widths past 8 take a dynamic-K kernel that keeps the sliding window in a
+// per-lane LDS ring rather than in registers. That ring is what bounds k here,
+// at roughly 500, rather than the ~8000 of the channels-first path.
 HIP_KERNEL_API int hip_causal_conv_prefill_nlc(
     void* stream,
     const void* input,
@@ -2405,6 +2412,94 @@ HIP_KERNEL_API int hip_causal_conv_prefill_nlc(
     int64_t kernel_size,
     int64_t activation,
     int64_t element_size_bytes);
+
+/* =========================================================================
+ * Conv — general forward convolution (1D / 2D / 3D spatial)
+ * =========================================================================
+ *
+ * Forward ONNX Conv over an `(N, C_in, D_1[, D_2[, D_3]])` input against a
+ * `(C_out, C_in/group, k_1[, k_2[, k_3]])` filter, writing
+ * `(N, C_out, O_1[, O_2[, O_3]])` in the same row-major layout. Arbitrary
+ * stride, dilation, group and asymmetric padding; per-channel `bias` is
+ * optional (pass NULL) and is fused into the accumulator rather than costing a
+ * second pass over the output.
+ *
+ * Only `pads_begin` is in the ABI. Pad positions are never read -- they fall
+ * outside the input bounds and contribute zero -- so the trailing pad affects
+ * nothing but how many output positions exist, which the caller already passes
+ * as `out_d*`. That makes asymmetric padding fall out for free.
+ *
+ * `spatial_rank` selects how many of the per-axis arrays are read; for
+ * spatial_rank < 3 the trailing slots in `in_d`, `out_d`, `k`, `s` and `dil`
+ * must be 1 and those in `p` must be 0 (the lowering does this).
+ *
+ * Accumulation is in float for every dtype, so a fp16 convolution with a
+ * contraction extent in the thousands does not lose the reduction to rounding.
+ *
+ * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_BFLOAT16. All of input / weights / bias / output share the dtype.
+ * Returns: 0 on success, non-zero on failure.
+ */
+HIP_KERNEL_API int hip_conv(
+    void* stream,
+    const void* input,
+    const void* weights,
+    const void* bias,         /* nullable */
+    void* output,
+    int hip_dtype,
+    int spatial_rank,
+    int64_t N, int64_t Cin, int64_t Cout,
+    int64_t in_d0, int64_t in_d1, int64_t in_d2,
+    int64_t out_d0, int64_t out_d1, int64_t out_d2,
+    int64_t k0, int64_t k1, int64_t k2,
+    int64_t s0, int64_t s1, int64_t s2,
+    int64_t p0, int64_t p1, int64_t p2,
+    int64_t dil0, int64_t dil1, int64_t dil2,
+    int64_t group);
+
+/* =========================================================================
+ * ConvTranspose — forward transposed convolution (2D spatial)
+ * =========================================================================
+ *
+ * Forward ONNX ConvTranspose over an `(N, C, H, W)` input against a
+ * `(C, M/group, kH, kW)` filter -- input channels first, unlike forward Conv's
+ * `(M, C/group, ...)` -- writing `(N, M, out_h, out_w)` in the same row-major
+ * layout. Arbitrary stride, dilation, group and asymmetric padding;
+ * per-channel `bias` is optional (pass NULL) and is fused into the
+ * accumulator.
+ *
+ * ONNX defines this by scattering each input element across a strided footprint
+ * of the output. The kernel inverts that into a gather, so it uses no atomics
+ * and its result does not depend on scheduling order.
+ *
+ * As in `hip_conv`, only `pads_begin` is in the ABI. Padding on a transposed
+ * convolution crops the output, and cropping at the far end only removes
+ * output positions, which the caller has already accounted for in `out_h` /
+ * `out_w`. `output_padding` is absent for the same reason: it only extends
+ * `out_h` / `out_w`, and the cells it adds are ones no input reaches, so they
+ * come out as just the bias.
+ *
+ * Accumulation is in float for every dtype.
+ *
+ * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_BFLOAT16. All of input / weights / bias / output share the dtype.
+ * Returns: 0 on success, non-zero on failure.
+ */
+HIP_KERNEL_API int hip_conv_transpose(
+    void* stream,
+    const void* input,
+    const void* weights,
+    const void* bias,         /* nullable */
+    void* output,
+    int hip_dtype,
+    int64_t N, int64_t Cin, int64_t Cout,
+    int64_t in_h, int64_t in_w,
+    int64_t out_h, int64_t out_w,
+    int64_t k_h, int64_t k_w,
+    int64_t s_h, int64_t s_w,
+    int64_t pad_top, int64_t pad_left,
+    int64_t dil_h, int64_t dil_w,
+    int64_t group);
 
 /* =========================================================================
  * WMMA GEMM (Small-M Matrix Multiply via Wave Matrix Multiply-Accumulate)

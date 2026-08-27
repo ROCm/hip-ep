@@ -117,7 +117,8 @@ Machine-readable form: [scripts/unsupported_reco_rules.json](scripts/unsupported
 - `wrap_elementwise` — elementwise add / mul / min / max
 - `wrap_miopenActivationForward` — activation-family elementwise ops
 - `miopenActivationPOWER` — can express `Reciprocal` / `Sqrt` by parameterization
-- `wrap_miopenConvolutionForward` — convolution family
+- `wrap_conv` — forward convolution family (in-tree `hip_conv` kernel)
+- `wrap_conv_transpose` — ConvTranspose
 - `wrap_hipblasLtMatmul` — matmul family
 - `wrap_rms_norm` — RMS / simplified layer norm (custom HIP kernel)
 - `wrap_layer_normalization` — standard ONNX-17 LayerNormalization (mean + var)
