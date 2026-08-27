@@ -1470,7 +1470,12 @@ gqa_flash_decode_kernel(
     float scale,
     const int* __restrict__ seqlens_k,
     int local_window_size,
-    int K_SPLITS) {  // runtime split-K count (was a template param)
+    int K_SPLITS,                          // runtime split-K count
+    // Additive attention mask, dense [bias_batch, bias_heads, 1, bias_kv_stride]
+    // (sq == 1 on this path). Extent 1 on either leading dim broadcasts. Null
+    // when the model supplies no mask.
+    const __half* __restrict__ attn_bias = nullptr,
+    int bias_batch = 1, int bias_heads = 1, int bias_kv_stride = 0) {
   constexpr bool KV_I8 = (FMT == KvDtype::kI8);
   using KVt = std::conditional_t<KV_I8, int8_t, __half>;
   // Size the K+V LDS tile for block residency, since this kernel is bandwidth
@@ -1593,6 +1598,16 @@ gqa_flash_decode_kernel(
 
   const float scale_log2e = scale * LOG2E;
 
+  // Row of the additive mask this wave's query head reads, with extent-1
+  // broadcast on batch and heads. Loop-invariant, so the null test below is
+  // hoisted out of the KV loop.
+  const __half* bias_row = nullptr;
+  if (attn_bias) {
+    const int bb = (bias_batch > 1) ? batch : 0;
+    const int bh = (bias_heads > 1) ? head_q : 0;
+    bias_row = attn_bias + ((size_t)bb * bias_heads + bh) * (size_t)bias_kv_stride;
+  }
+
   // Online softmax accumulators (per query head, in registers).
   float m_acc = -INFINITY;
   float l_acc = 0.0f;
@@ -1686,7 +1701,22 @@ gqa_flash_decode_kernel(
       for (int offset = WAVE_SIZE >> 1; offset > 0; offset >>= 1)
         dot_partial += __shfl_xor(dot_partial, offset);
 
-      const float score = dot_partial * scale_log2e;
+      // scores = q.k * scale + bias, carried in the log2 domain for exp2f. The
+      // mask is folded in BEFORE the running max, so the FA-2 invariant (m_acc
+      // is the max over every score seen so far) holds and the split merge,
+      // the [B,H,K_SPLITS,D+2] partials layout and the sink term stay correct.
+      float score = dot_partial * scale_log2e;
+      if (bias_row) {
+        score = fmaf(__half2float(bias_row[tile_start + t]), LOG2E, score);
+        // A -inf mask entry contributes nothing, and letting it reach the
+        // rescale below would form (-inf) - (-inf) = NaN for as long as every
+        // key seen so far in this split is masked -- routine for a sliding
+        // window, whose leading splits are entirely outside the window. score
+        // is wave-uniform (dot_partial is an all-reduce and the mask row is
+        // shared), so this skip never diverges.
+        if (score == -INFINITY)
+          continue;
+      }
       const float m_new = fmaxf(m_acc, score);
       const float correction = exp2f(m_acc - m_new);
       const float p = exp2f(score - m_new);
@@ -2257,9 +2287,16 @@ static inline void launchFlashDecodeConfig(
     const float* kSc, const float* vSc, __half* hO, float* hP,
     int B, int H, int G, int d, int hpg, int max_seq, float scale,
     const int* iSeq, int local_window_size,
-    const __half* hSink, int use_smooth_softmax) {
+    const __half* hSink, int use_smooth_softmax,
+    const __half* hBias = nullptr, int bias_batch = 1, int bias_heads = 1,
+    int bias_kv_stride = 0) {
   const int splits = cfg.splits;
-  const bool use_wmma = cfg.use_wmma && flash_decode_wmma_supported(d, hpg);
+  // Only the scalar kernel applies the additive mask; the WMMA variant has no
+  // bias support, so a masked call must not select it or the mask would be
+  // silently dropped. WMMA covers d in {64,128} only, so this costs nothing at
+  // the d=256 geometries that actually carry a mask here.
+  const bool use_wmma =
+      cfg.use_wmma && !hBias && flash_decode_wmma_supported(d, hpg);
   if (use_wmma) {
     // BKV: D=64 has both 16 and 32 instantiated and cfg.bkv picks between them;
     // D=128 has only 32. Grid (G, splits, B), one wave per block.
@@ -2294,7 +2331,8 @@ static inline void launchFlashDecodeConfig(
       gqa_flash_decode_kernel<D_, HPG_, FMT>                                   \
           <<<grid_main, (HPG_) * WAVE_SIZE, 0, stream>>>(                      \
               hQ, hK, hV, kSc, vSc, hP, H, G, max_seq, scale, iSeq,            \
-              local_window_size, splits)
+              local_window_size, splits, hBias, bias_batch, bias_heads,        \
+              bias_kv_stride)
     #define LAUNCH_SCALAR(HPG_)                                                \
       do {                                                                     \
         if (d == 256)      LAUNCH_SCALAR_D(256, HPG_);                         \
@@ -2550,12 +2588,15 @@ static float timeDecodeCandidate(hipStream_t stream, LaunchFn&& launch) {
 template <typename LaunchFn>
 static FlashDecodeCfg tuneFlashDecodeConfig(
     hipStream_t stream, int d, int hpg, int skv, int max_splits,
-    const char* tag, LaunchFn&& launch) {
+    bool wmma_allowed, const char* tag, LaunchFn&& launch) {
   int split_set[7]; int n_splits = 0;
   flashDecodeCandidateSplits(skv, max_splits, split_set, n_splits);
   const bool impls[2] = {false, true};  // {scalar, WMMA}; geometry is identical
 
-  const bool wmma_ok = flash_decode_wmma_supported(d, hpg);
+  // wmma_allowed is the caller's veto: only the scalar kernel applies the
+  // additive mask, so a masked call must not spend tuning iterations on a
+  // candidate the launcher would then refuse to use.
+  const bool wmma_ok = wmma_allowed && flash_decode_wmma_supported(d, hpg);
   FlashDecodeCfg best{wmma_ok && (d == 64), split_set[0]};
   float best_ms = 1e30f;
 
@@ -2627,7 +2668,14 @@ extern "C" int hip_gqa_flash_decode(
     int use_smooth_softmax,
     int kv_dtype,
     const void* k_scale,
-    const void* v_scale) {
+    const void* v_scale,
+    // Additive attention mask (onnx.Attention external mask), dense
+    // [attn_bias_batch, attn_bias_heads, 1, attn_bias_kv_stride] fp16. Null when
+    // the model has no mask. Extent 1 on batch/heads broadcasts. The kv stride
+    // is passed explicitly rather than derived from skv so it matches the
+    // decomposed path's view of the mask exactly.
+    const void* attn_bias,
+    int attn_bias_batch, int attn_bias_heads, int attn_bias_kv_stride) {
   // HPG = heads-per-group (Q heads sharing one KV head). The kernels are
   // instantiated for HPG=4 (Llama-3.x family at d=64 and d=128), HPG=5
   // (Qwen2.5-14B's 40:8 at d=128) and HPG=8 (gpt-oss-20b at d=64). HPG=8 with
@@ -2665,6 +2713,15 @@ extern "C" int hip_gqa_flash_decode(
             "hip_gqa_flash_decode: INT8 KV requires k_scale and v_scale\n");
     return -1;
   }
+  // The int8 launcher does not thread the mask, so a masked int8 call would
+  // drop it silently. Reject instead: the caller can fall back to the
+  // decomposed pipeline, which applies the bias for every cache format.
+  if (kv_i8 && attn_bias != nullptr) {
+    fprintf(stderr,
+            "hip_gqa_flash_decode: attention_bias is not supported with an "
+            "INT8 KV cache\n");
+    return -1;
+  }
 
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
   const __half* hQ = static_cast<const __half*>(Q);
@@ -2672,6 +2729,9 @@ extern "C" int hip_gqa_flash_decode(
   float* hP = static_cast<float*>(partials_workspace);
   const int* iSeq = static_cast<const int*>(seqlens_k);
   const __half* hSink = static_cast<const __half*>(head_sink);
+  const __half* hBias = static_cast<const __half*>(attn_bias);
+  const int bias_b = attn_bias_batch > 0 ? attn_bias_batch : 1;
+  const int bias_h = attn_bias_heads > 0 ? attn_bias_heads : 1;
 
   int cap = max_splits;
   if (cap < 1) cap = 1;
@@ -2685,6 +2745,11 @@ extern "C" int hip_gqa_flash_decode(
   const int tune_len = (local_window_size > 0 && eff_skv > local_window_size)
                            ? local_window_size
                            : eff_skv;
+  // The autotune cache is keyed on geometry only, so a masked and an unmasked
+  // call of the same shape share an entry. That stays correct because the
+  // launcher re-checks the mask before selecting WMMA: a cached WMMA config is
+  // demoted to scalar for a masked call, and a scalar config cached by a masked
+  // call is merely conservative for an unmasked one.
 
   // --- Config selection: env override > autotune cache > one-shot tune ---
   // Heuristic default favours WMMA at d==64, but only where it is templated;
@@ -2722,9 +2787,12 @@ extern "C" int hip_gqa_flash_decode(
       if (it != g_flash_decode_i8_cache.end()) {
         cfg = it->second;
       } else {
+        // The INT8 launcher does not thread the mask at all -- gqa.cpp's bias_ok
+        // rejects a masked call with a quantized cache -- so WMMA is never
+        // vetoed here.
         cfg = tuneFlashDecodeConfig(
-            stream, d, hpg, tune_len, cap, "flash_decode_i8",
-            [&](const FlashDecodeCfg& c) {
+            stream, d, hpg, tune_len, cap, /*wmma_allowed=*/true,
+            "flash_decode_i8", [&](const FlashDecodeCfg& c) {
               launchFlashDecodeConfig<KvDtype::kI8>(
                   c, stream, hQ, hK, hV, kSc, vSc, hO, hP, B, H, G, d, hpg,
                   max_seq, scale, iSeq, local_window_size, hSink,
@@ -2749,12 +2817,13 @@ extern "C" int hip_gqa_flash_decode(
       cfg = it->second;
     } else {
       cfg = tuneFlashDecodeConfig(
-          stream, d, hpg, tune_len, cap, "flash_decode",
-          [&](const FlashDecodeCfg& c) {
+          stream, d, hpg, tune_len, cap, /*wmma_allowed=*/hBias == nullptr,
+          "flash_decode", [&](const FlashDecodeCfg& c) {
             launchFlashDecodeConfig<KvDtype::kF16>(
                 c, stream, hQ, hK, hV, nullptr, nullptr, hO, hP, B, H, G, d,
                 hpg, max_seq, scale, iSeq, local_window_size, hSink,
-                use_smooth_softmax);
+                use_smooth_softmax, hBias, bias_b, bias_h,
+                attn_bias_kv_stride);
           });
       g_flash_decode_cache[key] = cfg;
       CUSTOM_KERNELS_DEBUG_LOG(
@@ -2769,7 +2838,8 @@ extern "C" int hip_gqa_flash_decode(
   // buffers holding the last candidate's result).
   launchFlashDecodeConfig<KvDtype::kF16>(
       cfg, stream, hQ, hK, hV, nullptr, nullptr, hO, hP, B, H, G, d, hpg,
-      max_seq, scale, iSeq, local_window_size, hSink, use_smooth_softmax);
+      max_seq, scale, iSeq, local_window_size, hSink, use_smooth_softmax,
+      hBias, bias_b, bias_h, attn_bias_kv_stride);
 
   return hipGetLastError();
 }

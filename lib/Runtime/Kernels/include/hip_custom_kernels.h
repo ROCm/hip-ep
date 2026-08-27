@@ -884,7 +884,16 @@ HIP_KERNEL_API int hip_gqa_flash_decode(
     int use_smooth_softmax,
     int kv_dtype,
     const void* k_scale,
-    const void* v_scale);
+    const void* v_scale,
+    /* Additive attention mask (onnx.Attention attn_mask), dense fp16
+     * [attn_bias_batch, attn_bias_heads, 1, attn_bias_kv_stride]; sq == 1 on
+     * this path. NULL when the model has no mask. Extent 1 on either leading
+     * dim broadcasts across it. The kv stride is explicit rather than derived
+     * from skv so it matches the decomposed path's view of the mask. Applied by
+     * the scalar kernel only, so a masked call never selects WMMA; rejected
+     * outright with an INT8 KV cache, which does not thread it. */
+    const void* attn_bias,
+    int attn_bias_batch, int attn_bias_heads, int attn_bias_kv_stride);
 
 /* =========================================================================
  * Cast (Element Type Conversion)
