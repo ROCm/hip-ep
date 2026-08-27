@@ -11,6 +11,8 @@
 
 #include <hipblaslt/hipblaslt-ext.hpp>
 
+#include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <functional>
@@ -20,7 +22,6 @@
 #include <vector>
 
 #define HIPBLAS_CHECK(cmd) HIPBLAS_CHECK_GOTO(cmd, cleanup)
-#define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
 
 // Type codes — must match the lowering in HipToLLVM.cpp GemmOpLowering
 static constexpr int64_t kTypeFloat16 = 0;
@@ -128,123 +129,296 @@ extern "C" int8_t hipdnn_ep_op_state_construct_gemm(RuntimeState *state,
 }
 
 // =============================================================================
-// Broadcast helper: write beta * C_broadcast into output using MIOpen
+// Broadcast helper: write beta * broadcast(C) into output[M, N]
 // =============================================================================
-// Uses miopenOpTensor(Add) with broadcasting:
-//   output = beta * C_broadcast
-// C is normalized to 2D [cDim0, cDim1], broadcastable to [M, N].
-// After this, hipblasLtMatmul accumulates with effective_beta=1.0:
+// C is [cDim0, cDim1] and must be unidirectional-broadcastable to [M, N]:
+// each cDim is 1 or equals the corresponding output extent. After this,
+// hipblasLtMatmul accumulates with effective_beta=1.0:
 //   output = alpha * A * B + 1.0 * output  (= alpha*A*B + beta*C_broadcast)
+//
+// Device copies double a filled prefix (rows or columns) so a scalar, a
+// row, or a column becomes a full [M, N] buffer without a library op.
 
-static bool resolveGemmMiopenType(int64_t typeCode, miopenDataType_t &dt) {
-  switch (typeCode) {
-  case kTypeFloat16:
-    dt = miopenHalf;
-    return true;
-  case kTypeFloat32:
-    dt = miopenFloat;
-    return true;
-  case kTypeFloat64:
-    dt = miopenDouble;
-    return true;
-  case kTypeBFloat16:
-    dt = miopenBFloat16;
-    return true;
-  default:
-    return false;
+static size_t gemmElemSize(int64_t typeCode) {
+  if (typeCode == kTypeFloat64)
+    return 8;
+  if (typeCode == kTypeFloat32)
+    return 4;
+  return 2;
+}
+
+static float f16ToFloat(uint16_t h) {
+  const uint32_t sign = (static_cast<uint32_t>(h & 0x8000u) << 16);
+  const uint32_t exp = (h >> 10) & 0x1fu;
+  uint32_t mant = h & 0x3ffu;
+  uint32_t bits;
+  if (exp == 0) {
+    if (mant == 0) {
+      bits = sign;
+    } else {
+      int32_t e = 127 - 15 + 1;
+      while ((mant & 0x400u) == 0) {
+        mant <<= 1;
+        --e;
+      }
+      mant &= 0x3ffu;
+      bits = sign | (static_cast<uint32_t>(e) << 23) | (mant << 13);
+    }
+  } else if (exp == 31) {
+    bits = sign | 0x7f800000u | (mant << 13);
+  } else {
+    bits = sign | ((exp + (127 - 15)) << 23) | (mant << 13);
+  }
+  float value;
+  std::memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+static uint16_t floatToF16(float value) {
+  uint32_t bits;
+  std::memcpy(&bits, &value, sizeof(bits));
+  const uint32_t sign = (bits >> 16) & 0x8000u;
+  const uint32_t absBits = bits & 0x7fffffffu;
+  if (absBits > 0x7f800000u)
+    return static_cast<uint16_t>(sign | 0x7e00u | ((absBits >> 13) & 0x3ffu));
+  int32_t exp = static_cast<int32_t>((bits >> 23) & 0xffu) - 127;
+  uint32_t mant = bits & 0x7fffffu;
+  if (exp > 15)
+    return static_cast<uint16_t>(sign | 0x7c00u);
+  if (exp >= -14) {
+    uint32_t half = (static_cast<uint32_t>(exp + 15) << 10) | (mant >> 13);
+    const uint32_t remainder = mant & 0x1fffu;
+    if (remainder > 0x1000u || (remainder == 0x1000u && (half & 1u)))
+      ++half;
+    return static_cast<uint16_t>(sign | half);
+  }
+  if (exp < -24)
+    return static_cast<uint16_t>(sign);
+  mant |= 0x800000u;
+  const int shift = -14 - exp;
+  uint32_t half = mant >> (13 + shift);
+  const uint32_t halfBit = 1u << (12 + shift);
+  const uint32_t rem = mant & ((1u << (13 + shift)) - 1u);
+  if ((rem & halfBit) && ((rem & (halfBit - 1u)) || (half & 1u)))
+    ++half;
+  return static_cast<uint16_t>(sign | half);
+}
+
+static float bf16ToFloat(uint16_t value) {
+  const uint32_t bits = static_cast<uint32_t>(value) << 16;
+  float out;
+  std::memcpy(&out, &bits, sizeof(out));
+  return out;
+}
+
+static uint16_t floatToBf16(float value) {
+  uint32_t bits;
+  std::memcpy(&bits, &value, sizeof(bits));
+  bits += 0x7fffu + ((bits >> 16) & 1u);
+  return static_cast<uint16_t>(bits >> 16);
+}
+
+static void scaleHostC(unsigned char *data, size_t count, size_t elemSize,
+                       int64_t typeCode, float beta) {
+  for (size_t i = 0; i < count; ++i) {
+    unsigned char *elem = data + i * elemSize;
+    switch (typeCode) {
+    case kTypeFloat32: {
+      float value;
+      std::memcpy(&value, elem, sizeof(value));
+      value *= beta;
+      std::memcpy(elem, &value, sizeof(value));
+      break;
+    }
+    case kTypeFloat64: {
+      double value;
+      std::memcpy(&value, elem, sizeof(value));
+      value *= static_cast<double>(beta);
+      std::memcpy(elem, &value, sizeof(value));
+      break;
+    }
+    case kTypeFloat16: {
+      uint16_t bits;
+      std::memcpy(&bits, elem, sizeof(bits));
+      bits = floatToF16(f16ToFloat(bits) * beta);
+      std::memcpy(elem, &bits, sizeof(bits));
+      break;
+    }
+    case kTypeBFloat16: {
+      uint16_t bits;
+      std::memcpy(&bits, elem, sizeof(bits));
+      bits = floatToBf16(bf16ToFloat(bits) * beta);
+      std::memcpy(elem, &bits, sizeof(bits));
+      break;
+    }
+    default:
+      break;
+    }
   }
 }
 
-// MIOpen contract for miopenOpTensor: the A-operand descriptor and the
-// destination descriptor must have *identical* shapes; only the B operand may
-// broadcast. The previous implementation passed the small bias descriptor
-// (cDesc) as both A and B while the destination was the full-output descriptor,
-// which MIOpen rejected with "A and C Tensors do not match" (status 7) any time
-// the bias actually needed broadcasting (e.g. a [1,N] bias onto [M,N]).
-//
-// Fix: zero the output buffer, then compute
-//     output = 1.0 * output + beta * broadcast(C)
-// so the A operand and destination both use outDesc and only B (the bias)
-// broadcasts. Pre-zeroing avoids dependency on uninitialized output (which
-// could contain NaNs that 1.0*NaN would propagate).
-static int broadcastBiasToOutput(RuntimeState *state, const void *C,
-                                 void *output, int64_t M, int64_t N,
-                                 int64_t cDim0, int64_t cDim1, float beta,
-                                 int64_t typeCode) {
-  miopenHandle_t handle =
-      static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
-  if (!handle) {
-    fprintf(stderr, "wrap_gemm: broadcastBiasToOutput: null MIOpen handle\n");
-    return -1;
+static int expandFilledPrefix(void *dst, size_t blockBytes, size_t count,
+                              hipStream_t stream) {
+  if (count <= 1 || blockBytes == 0)
+    return 0;
+  auto *base = static_cast<char *>(dst);
+  size_t filled = 1;
+  while (filled < count) {
+    const size_t n = std::min(filled, count - filled);
+    hipError_t err =
+        hipMemcpyAsync(base + filled * blockBytes, base, n * blockBytes,
+                       hipMemcpyDeviceToDevice, stream);
+    if (err != hipSuccess) {
+      fprintf(stderr, "wrap_gemm: expandFilledPrefix failed (%s)\n",
+              hipGetErrorString(err));
+      return -1;
+    }
+    filled += n;
   }
+  return 0;
+}
 
+static int expandFilledColumns(void *output, size_t elemSize, int64_t M,
+                               int64_t N, hipStream_t stream) {
+  if (N <= 1)
+    return 0;
+  auto *base = static_cast<char *>(output);
+  const size_t pitch = static_cast<size_t>(N) * elemSize;
+  size_t filled = 1;
+  while (filled < static_cast<size_t>(N)) {
+    const size_t n = std::min(filled, static_cast<size_t>(N) - filled);
+    hipError_t err = hipMemcpy2DAsync(
+        base + filled * elemSize, pitch, base, pitch, n * elemSize,
+        static_cast<size_t>(M), hipMemcpyDeviceToDevice, stream);
+    if (err != hipSuccess) {
+      fprintf(stderr, "wrap_gemm: expandFilledColumns failed (%s)\n",
+              hipGetErrorString(err));
+      return -1;
+    }
+    filled += n;
+  }
+  return 0;
+}
+
+static int writeBroadcastC(RuntimeState *state, const void *C, void *output,
+                           int64_t M, int64_t N, int64_t cDim0, int64_t cDim1,
+                           float beta, int64_t typeCode) {
   hipStream_t stream =
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
   if (!stream) {
-    fprintf(stderr, "wrap_gemm: broadcastBiasToOutput: null stream\n");
+    fprintf(stderr, "wrap_gemm: writeBroadcastC: null stream\n");
     return -1;
   }
-
-  miopenDataType_t dt;
-  if (!resolveGemmMiopenType(typeCode, dt)) {
+  if (M <= 0 || N <= 0 || cDim0 <= 0 || cDim1 <= 0 ||
+      (cDim0 != 1 && cDim0 != M) || (cDim1 != 1 && cDim1 != N)) {
     fprintf(stderr,
-            "wrap_gemm: broadcastBiasToOutput: unsupported typeCode %lld\n",
-            (long long)typeCode);
+            "wrap_gemm: writeBroadcastC: C[%lld,%lld] is not broadcastable "
+            "to [%lld,%lld]\n",
+            (long long)cDim0, (long long)cDim1, (long long)M, (long long)N);
     return -1;
   }
 
-  size_t elemSize = (typeCode == kTypeFloat64)   ? 8
-                    : (typeCode == kTypeFloat32) ? 4
-                                                 : 2; // fp16 / bf16
+  const size_t elemSize = gemmElemSize(typeCode);
+  const size_t outBytes =
+      static_cast<size_t>(M) * static_cast<size_t>(N) * elemSize;
 
-  RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: broadcastBiasToOutput C[%lld,%lld] -> "
+  RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: writeBroadcastC C[%lld,%lld] -> "
                     "[%lld,%lld], beta=%f\n",
                     (long long)cDim0, (long long)cDim1, (long long)M,
                     (long long)N, beta);
 
-  // Pre-zero the destination so 1.0*output contributes 0 in the op below.
-  size_t outBytes = static_cast<size_t>(M) * static_cast<size_t>(N) * elemSize;
-  hipError_t hipErr = hipMemsetAsync(output, 0, outBytes, stream);
-  if (hipErr != hipSuccess) {
-    fprintf(stderr,
-            "wrap_gemm: broadcastBiasToOutput: hipMemsetAsync(%zu bytes) "
-            "failed (%d): %s\n",
-            outBytes, (int)hipErr, hipGetErrorString(hipErr));
+  if (beta == 0.0f) {
+    hipError_t err = hipMemsetAsync(output, 0, outBytes, stream);
+    if (err != hipSuccess) {
+      fprintf(stderr,
+              "wrap_gemm: writeBroadcastC hipMemsetAsync failed (%s)\n",
+              hipGetErrorString(err));
+      return -1;
+    }
+    return 0;
+  }
+
+  const void *src = C;
+  hipMemcpyKind kind = hipMemcpyDeviceToDevice;
+  std::vector<unsigned char> host;
+  if (beta != 1.0f) {
+    const size_t count =
+        static_cast<size_t>(cDim0) * static_cast<size_t>(cDim1);
+    const size_t srcBytes = count * elemSize;
+    host.resize(srcBytes);
+    hipError_t err =
+        hipMemcpy(host.data(), C, srcBytes, hipMemcpyDeviceToHost);
+    if (err != hipSuccess) {
+      fprintf(stderr, "wrap_gemm: writeBroadcastC D2H failed (%s)\n",
+              hipGetErrorString(err));
+      return -1;
+    }
+    scaleHostC(host.data(), count, elemSize, typeCode, beta);
+    src = host.data();
+    kind = hipMemcpyHostToDevice;
+  }
+
+  const bool broadcastRows = (cDim0 == 1);
+  const bool broadcastCols = (cDim1 == 1);
+  hipError_t err;
+  const bool fromHost = (kind == hipMemcpyHostToDevice);
+  auto copySeed = [&](void *dst, const void *s, size_t bytes) -> hipError_t {
+    if (fromHost)
+      return hipMemcpy(dst, s, bytes, kind);
+    return hipMemcpyAsync(dst, s, bytes, kind, stream);
+  };
+  auto copySeed2D = [&](void *dst, size_t dpitch, const void *s, size_t spitch,
+                        size_t width, size_t height) -> hipError_t {
+    if (fromHost)
+      return hipMemcpy2D(dst, dpitch, s, spitch, width, height, kind);
+    return hipMemcpy2DAsync(dst, dpitch, s, spitch, width, height, kind,
+                            stream);
+  };
+
+  if (broadcastRows && broadcastCols) {
+    err = copySeed(output, src, elemSize);
+    if (err != hipSuccess) {
+      fprintf(stderr, "wrap_gemm: writeBroadcastC scalar copy failed (%s)\n",
+              hipGetErrorString(err));
+      return -1;
+    }
+    if (expandFilledPrefix(output, elemSize, static_cast<size_t>(N), stream) !=
+        0)
+      return -1;
+    if (expandFilledPrefix(output, static_cast<size_t>(N) * elemSize,
+                           static_cast<size_t>(M), stream) != 0)
+      return -1;
+    return 0;
+  }
+  if (broadcastRows) {
+    const size_t rowBytes = static_cast<size_t>(N) * elemSize;
+    err = copySeed(output, src, rowBytes);
+    if (err != hipSuccess) {
+      fprintf(stderr, "wrap_gemm: writeBroadcastC row copy failed (%s)\n",
+              hipGetErrorString(err));
+      return -1;
+    }
+    return expandFilledPrefix(output, rowBytes, static_cast<size_t>(M), stream);
+  }
+  if (broadcastCols) {
+    const size_t pitch = static_cast<size_t>(N) * elemSize;
+    err = copySeed2D(output, pitch, src, elemSize, elemSize,
+                     static_cast<size_t>(M));
+    if (err != hipSuccess) {
+      fprintf(stderr, "wrap_gemm: writeBroadcastC col copy failed (%s)\n",
+              hipGetErrorString(err));
+      return -1;
+    }
+    return expandFilledColumns(output, elemSize, M, N, stream);
+  }
+
+  err = copySeed(output, src, outBytes);
+  if (err != hipSuccess) {
+    fprintf(stderr, "wrap_gemm: writeBroadcastC full copy failed (%s)\n",
+            hipGetErrorString(err));
     return -1;
   }
-
-  miopenTensorDescriptor_t cDesc = nullptr;
-  miopenTensorDescriptor_t outDesc = nullptr;
-  int result = 0;
-
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&cDesc));
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&outDesc));
-
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(
-      cDesc, dt, 1, 1, static_cast<int>(cDim0), static_cast<int>(cDim1)));
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(
-      outDesc, dt, 1, 1, static_cast<int>(M), static_cast<int>(N)));
-
-  // output = 1.0 * output + beta * broadcast(C) + 0 * output
-  //        = beta * broadcast(C)              (since output was zeroed)
-  if (typeCode == kTypeFloat64) {
-    double alpha1 = 1.0, alpha2 = static_cast<double>(beta), beta_c = 0.0;
-    MIOPEN_CHECK(miopenOpTensor(handle, miopenTensorOpAdd, &alpha1, outDesc,
-                                output, &alpha2, cDesc, C, &beta_c, outDesc,
-                                output));
-  } else {
-    float alpha1 = 1.0f, alpha2 = beta, beta_c = 0.0f;
-    MIOPEN_CHECK(miopenOpTensor(handle, miopenTensorOpAdd, &alpha1, outDesc,
-                                output, &alpha2, cDesc, C, &beta_c, outDesc,
-                                output));
-  }
-
-cleanup:
-  if (cDesc)
-    miopenDestroyTensorDescriptor(cDesc);
-  if (outDesc)
-    miopenDestroyTensorDescriptor(outDesc);
-  return result;
+  return 0;
 }
 
 // =============================================================================
@@ -534,9 +708,8 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
   // vector -> direct match. Using the epilogue lets us run with beta=0 (D
   // written fresh, no C==output in-place read), which keeps the fast split-K
   // algorithms eligible -- the in-place beta=1 path was selecting a ~14x
-  // slower kernel for the vision GEMM shapes. It also drops the separate
-  // MIOpen broadcast op. (bench: m=1152 n=7296 k=4304 TN is ~3.9 ms with this
-  // config vs ~56 ms for broadcast+beta=1 C==output.)
+  // slower kernel for the vision GEMM shapes. (bench: m=1152 n=7296 k=4304 TN
+  // is ~3.9 ms with this config vs ~56 ms for broadcast+beta=1 C==output.)
   bool use_bias_epilogue =
       C && beta == 1.0f && cDim0 == 1 && cDim1 == N &&
       (typeCode == kTypeFloat16 || typeCode == kTypeFloat32 ||
@@ -544,8 +717,8 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
 
   // Determine if C needs broadcasting.
   // When C is [M, N], hipblasLtMatmul handles it directly (single-pass).
-  // Otherwise, we first broadcast beta*C into output via MIOpen, then let
-  // hipblasLtMatmul accumulate with effective_beta=1.0 on top of it.
+  // Otherwise, write beta*C into output first, then let hipblasLtMatmul
+  // accumulate with effective_beta=1.0 on top of it.
   bool needsBroadcast = C && !(cDim0 == M && cDim1 == N) && !use_bias_epilogue;
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: M=%lld, N=%lld, K=%lld, transA=%lld, "
@@ -557,8 +730,8 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
 
   // Pre-broadcast: write beta * C_broadcast into output before matmul.
   if (needsBroadcast) {
-    int bc_result = broadcastBiasToOutput(state, C, output, M, N, cDim0, cDim1,
-                                          beta, typeCode);
+    int bc_result =
+        writeBroadcastC(state, C, output, M, N, cDim0, cDim1, beta, typeCode);
     if (bc_result != 0)
       return bc_result;
   }
