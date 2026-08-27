@@ -283,19 +283,17 @@ hipblasLtMatmul(hipblasLtHandle_t handle, hipblasLtMatmulDesc_t matmul_desc,
 
 // Mock wrapper implementations (called from generated MLIR code)
 
-int wrap_conv(RuntimeState *state, int32_t op_state_slot, const void *input,
-              const void *weights, const void *bias, void *output,
-              int64_t data_type, int64_t spatial_rank, int64_t N, int64_t Cin,
-              int64_t Cout, int64_t in0, int64_t in1, int64_t in2, int64_t out0,
-              int64_t out1, int64_t out2, int64_t k0, int64_t k1, int64_t k2,
-              int64_t s0, int64_t s1, int64_t s2, int64_t p0, int64_t p1,
-              int64_t p2, int64_t dil0, int64_t dil1, int64_t dil2,
-              int64_t group) {
+int wrap_conv(RuntimeState *state, const void *input, const void *weights,
+              const void *bias, void *output, int64_t data_type,
+              int64_t spatial_rank, int64_t N, int64_t Cin, int64_t Cout,
+              int64_t in0, int64_t in1, int64_t in2, int64_t out0, int64_t out1,
+              int64_t out2, int64_t k0, int64_t k1, int64_t k2, int64_t s0,
+              int64_t s1, int64_t s2, int64_t p0, int64_t p1, int64_t p2,
+              int64_t dil0, int64_t dil1, int64_t dil2, int64_t group) {
   if (!state || !input || !weights || !output) {
     fprintf(stderr, "Invalid arguments to wrap_conv\n");
     return -1;
   }
-  (void)op_state_slot;
 
   MOCK_PRINT(
       "[MOCK] wrap_conv(dtype=%s(%lld), rank=%lld, N=%lld, Cin=%lld, "
@@ -319,17 +317,16 @@ int wrap_conv(RuntimeState *state, int32_t op_state_slot, const void *input,
   return 0;
 }
 
-int wrap_conv_transpose(RuntimeState *state, int32_t op_state_slot,
-                        const void *input, int64_t input_n, int64_t input_c,
-                        int64_t input_h, int64_t input_w, const void *weights,
-                        const void *bias, void *output, int64_t output_c,
-                        int64_t output_h, int64_t output_w, int64_t kernel_h,
-                        int64_t kernel_w, int64_t stride_h, int64_t stride_w,
-                        int64_t pad_top, int64_t pad_left, int64_t pad_bottom,
-                        int64_t pad_right, int64_t dilation_h,
-                        int64_t dilation_w, int64_t output_padding_h,
-                        int64_t output_padding_w, int64_t group,
-                        int64_t data_type) {
+int wrap_conv_transpose(RuntimeState *state, const void *input, int64_t input_n,
+                        int64_t input_c, int64_t input_h, int64_t input_w,
+                        const void *weights, const void *bias, void *output,
+                        int64_t output_c, int64_t output_h, int64_t output_w,
+                        int64_t kernel_h, int64_t kernel_w, int64_t stride_h,
+                        int64_t stride_w, int64_t pad_top, int64_t pad_left,
+                        int64_t pad_bottom, int64_t pad_right,
+                        int64_t dilation_h, int64_t dilation_w,
+                        int64_t output_padding_h, int64_t output_padding_w,
+                        int64_t group, int64_t data_type) {
   if (!state || !input || !weights || !output) {
     fprintf(stderr, "Invalid arguments to wrap_conv_transpose\n");
     return -1;
@@ -360,13 +357,14 @@ int wrap_conv_transpose(RuntimeState *state, int32_t op_state_slot,
   return 0;
 }
 
-int wrap_causal_conv_with_state(
-    RuntimeState *state, int op_state_slot, const void *input,
-    const void *weight, const void *bias, const void *past_state, void *output,
-    void *present_state, int64_t batch_size, int64_t channels, int64_t seq_len,
-    int64_t kernel_size, int64_t ndim, int64_t activation,
-    int64_t element_size_bytes, int64_t channels_last) {
-  (void)op_state_slot;
+int wrap_causal_conv_with_state(RuntimeState *state, const void *input,
+                                const void *weight, const void *bias,
+                                const void *past_state, void *output,
+                                void *present_state, int64_t batch_size,
+                                int64_t channels, int64_t seq_len,
+                                int64_t kernel_size, int64_t ndim,
+                                int64_t activation, int64_t element_size_bytes,
+                                int64_t channels_last) {
   if (!state || !input || !weight || !output || !present_state) {
     fprintf(stderr,
             "Invalid required argument in wrap_causal_conv_with_state\n");

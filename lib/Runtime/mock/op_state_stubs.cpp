@@ -44,23 +44,6 @@ extern "C" int8_t hipdnn_ep_op_state_construct_matmul(RuntimeState *state,
   return 0;
 }
 
-extern "C" int8_t hipdnn_ep_op_state_construct_conv(RuntimeState *state,
-                                                    int32_t slot) {
-  hipdnn_ep_op_state_set(state, slot, MockOpState::create().release());
-  return 0;
-}
-
-// CausalConvWithState: neither runtime holds anything here any more -- the
-// real side's per-shape MIOpen descriptor/algo cache went away with the MIOpen
-// fallback -- but the op still emits a construct call for its slot, so the
-// symbol has to exist on both sides.
-extern "C" int8_t
-hipdnn_ep_op_state_construct_causal_conv_with_state(RuntimeState *state,
-                                                    int32_t slot) {
-  hipdnn_ep_op_state_set(state, slot, MockOpState::create().release());
-  return 0;
-}
-
 // GQA: real runtime owns a per-GEMM-shape hipBLASLt descriptor/algo cache
 // (GqaState in real/gqa.cpp); the mock owns no device/hipBLASLt resources.
 extern "C" int8_t hipdnn_ep_op_state_construct_gqa(RuntimeState *state,

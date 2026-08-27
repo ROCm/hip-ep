@@ -5,7 +5,6 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
-#include "../op_state.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
@@ -24,38 +23,14 @@
 //             k0..k2, s0..s2, p0..p2 (pad_begin), dil0..dil2,
 //             group)
 //
-// This replaced MIOpen on the forward Conv path. The two differences that
-// matter to a caller:
+// `bias` is fused into the kernel, so a convolution is a single launch.
 //
-//   * `bias` is fused. The MIOpen path could not fuse it -- its
-//     miopenConvolutionForwardBias only supports alpha=1/beta=0, i.e. it
-//     overwrites rather than accumulates -- so it followed every convolution
-//     with a separate miopenOpTensor pass over the whole output. That pass is
-//     gone.
-//   * There is no op state, no solution cache and no workspace. MIOpen needed a
-//     per-shape Find() and a cached solution; this kernel derives everything
-//     from its arguments, so `op_state_slot` is accepted for ABI stability and
-//     ignored.
+// The kernel derives everything it needs from its arguments: there is no op
+// state, no solution cache and no workspace.
 //
 // Only pads_begin is passed. Pad positions are never read, so the trailing pad
 // affects nothing except how many output positions exist, and that is already
 // in out_d*.
-
-namespace {
-
-// Slot payload shared by Conv and ConvTranspose: both ops emit a construct call
-// for their slot, so the symbol has to exist, but neither kernel caches
-// anything. This used to be the MIOpen descriptor/solution table (ConvState in
-// real/miopen.cpp) and outlived it only as an ABI obligation.
-struct ConvState : OpStateT<ConvState> {};
-
-} // namespace
-
-extern "C" int8_t hipdnn_ep_op_state_construct_conv(RuntimeState *state,
-                                                    int32_t slot) {
-  hipdnn_ep_op_state_set(state, slot, ConvState::create().release());
-  return 0;
-}
 
 static int hipdnn_ep_to_hip_dtype(int64_t data_type) {
   switch (data_type) {
@@ -70,14 +45,13 @@ static int hipdnn_ep_to_hip_dtype(int64_t data_type) {
   }
 }
 
-int wrap_conv(RuntimeState *state, int32_t op_state_slot, const void *input,
-              const void *weights, const void *bias, void *output,
-              int64_t data_type, int64_t spatial_rank, int64_t N, int64_t Cin,
-              int64_t Cout, int64_t in0, int64_t in1, int64_t in2, int64_t out0,
-              int64_t out1, int64_t out2, int64_t k0, int64_t k1, int64_t k2,
-              int64_t s0, int64_t s1, int64_t s2, int64_t p0, int64_t p1,
-              int64_t p2, int64_t dil0, int64_t dil1, int64_t dil2,
-              int64_t group) {
+int wrap_conv(RuntimeState *state, const void *input, const void *weights,
+              const void *bias, void *output, int64_t data_type,
+              int64_t spatial_rank, int64_t N, int64_t Cin, int64_t Cout,
+              int64_t in0, int64_t in1, int64_t in2, int64_t out0, int64_t out1,
+              int64_t out2, int64_t k0, int64_t k1, int64_t k2, int64_t s0,
+              int64_t s1, int64_t s2, int64_t p0, int64_t p1, int64_t p2,
+              int64_t dil0, int64_t dil1, int64_t dil2, int64_t group) {
   OP_PROFILE(
       "conv",
       [&] {
@@ -115,9 +89,6 @@ int wrap_conv(RuntimeState *state, int32_t op_state_slot, const void *input,
             (long long)data_type);
     return -1;
   }
-
-  // No op state: this kernel needs no cached solution or workspace.
-  (void)op_state_slot;
 
   void *stream = hipdnn_ep_state_get_stream(state);
 

@@ -621,14 +621,14 @@ def Hip_HipblasltGraphOp : Hip_Op<"hipblaslt.graph", [SingleBlock, NoTerminator]
   let assemblyFormat = "$body attr-dict";
 }
 
-// ===== MIOpen DNN Operations =================================================
+// ===== Convolution Operations ================================================
 
-def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[OpStateOpInterface], /*outsAccessor=*/"Output",
+def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[], /*outsAccessor=*/"Output",
                            /*autoReify=*/1,
                            /*autoInfer=*/1, /*declareInfer=*/1> {
-  let summary = "2D convolution operation using MIOpen (in-place)";
+  let summary = "2D convolution operation (in-place)";
   let description = [{
-    Performs 2D convolution using MIOpen (miopenConvolutionForward).
+    Performs 2D convolution with the in-tree `hip_conv` kernel.
 
     Uses destination-passing style: output buffer is provided as argument,
     operation writes result in-place.
@@ -671,25 +671,14 @@ def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[OpStateOpInterface], /*outsAccess
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^ )?
   }];
-
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_conv",
-          {});
-    }
-  }];
 }
 
-def Hip_ConvTransposeOp : Hip_DpsOp<"conv_transpose", /*traits=*/[OpStateOpInterface]> {
-  let summary = "2D transposed convolution / deconvolution using MIOpen "
-                "(in-place)";
+def Hip_ConvTransposeOp : Hip_DpsOp<"conv_transpose", /*traits=*/[]> {
+  let summary = "2D transposed convolution / deconvolution (in-place)";
   let description = [{
-    Performs 2D transposed convolution (a.k.a. deconvolution) using MIOpen's
-    `miopenTranspose` convolution mode (`miopenConvolutionForward` with a
-    transpose-mode descriptor).
+    Performs 2D transposed convolution (a.k.a. deconvolution) with the in-tree
+    `hip_conv_transpose` kernel, which gathers each output element from the
+    input taps that reach it (no atomics).
 
     Uses destination-passing style: output buffer is provided as argument,
     operation writes result in-place.
@@ -741,16 +730,6 @@ def Hip_ConvTransposeOp : Hip_DpsOp<"conv_transpose", /*traits=*/[OpStateOpInter
     type($input) `,` type($weights) (`,` type($bias)^)? `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^ )?
-  }];
-
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_conv",
-          {});
-    }
   }];
 }
 
@@ -3092,7 +3071,7 @@ def Hip_ReduceMinOp : Hip_DpsOp_Reduction<"reduce_min"> {
 // ===== Causal Conv with State ================================================
 
 def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
-    [AttrSizedOperandSegments, OpStateOpInterface]> {
+    [AttrSizedOperandSegments]> {
   let summary = "Stateful causal depthwise convolution";
   let description = [{
     Causal depthwise convolution with carry state for incremental decoding.
@@ -3173,20 +3152,6 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
   // Absorbs a surrounding [0,2,1] Transpose pair into `channels_last`.
   // See lib/Dialect/IR/HipCausalConvCanonicalize.cpp.
   let hasCanonicalizer = 1;
-
-  // OpStateOpInterface: construct this instance's per-session MIOpen
-  // descriptor/algo cache (CausalConvState). No compile-time params — the
-  // cache fills lazily per shape. The construct fn stores the state into
-  // op_states[slot] itself.
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot,
-          "hipdnn_ep_op_state_construct_causal_conv_with_state", {});
-    }
-  }];
 }
 
 // ===== Group Query Attention =================================================

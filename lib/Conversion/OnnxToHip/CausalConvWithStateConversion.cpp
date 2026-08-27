@@ -146,8 +146,8 @@ mlir::LogicalResult CausalConvWithStateToHip::matchAndRewrite(
 //
 // which is exactly the "virtual sequence" hip_causal_conv_prefill slides over
 // with a null past_state (see causal_conv_step_kernel.hip). Routing these here
-// buys two things over the generic hip.conv path: one fused launch instead of
-// MIOpen conv + a separate bias miopenOpTensor, and eligibility for the
+// buys two things over the generic hip.conv path: a kernel specialized for the
+// depthwise causal shape, and eligibility for the
 // canonicalizer in HipCausalConvCanonicalize.cpp, which absorbs the [0,2,1]
 // Transpose pair that a channels-last exporter wraps around every one of these.
 //

@@ -22,9 +22,9 @@
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
 
 // The runtime declaration carries the whole ABI, so check it in full: state,
-// op_state_slot, four pointers, dtype, spatial_rank, N/Cin/Cout, then six
-// three-wide per-axis groups and group.
-// CHECK: llvm.func @wrap_conv(!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// four pointers, dtype, spatial_rank, N/Cin/Cout, then six three-wide per-axis
+// groups and group.
+// CHECK: llvm.func @wrap_conv(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
 module {
   func.func @conv_llvm_test(
