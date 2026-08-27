@@ -29,15 +29,10 @@ static mlir::Value readShapeEntryToIndex(mlir::PatternRewriter &rewriter,
 /// input tensor (right-aligned with the result rank, NumPy-style); leading
 /// dims that are absent from `shape` fall back to the matching input dim.
 ///
-/// `Expand`'s shape operand is a BROADCAST target, not a literal resize: per
-/// ONNX/NumPy broadcasting, the output extent at a position is
-/// `max(input_dim, shape_dim)`, and a `1` in `shape` at a position where the
-/// input already has a real (possibly >1) extent means "do not broadcast
-/// here", i.e. keep the input's extent. Using the shape entry verbatim
-/// silently collapses any such input dim to 1 whenever the shape operand
-/// says 1 there -- see docs/nemotron-mamba-shape-collapse.md for the mamba
-/// `Expand(_, [1,1,1,16,1])` fallout this caused (batch/seq collapsed to 1,
-/// corrupting the residual stream via a stale-pool-memory read one op later).
+/// `Expand`'s shape operand is a BROADCAST target, not a literal resize: the
+/// output extent at a position is `max(input_dim, shape_dim)`, so a `1` in
+/// `shape` where the input carries a real (possibly >1) extent means "do not
+/// broadcast here", i.e. keep the input's extent -- not "resize to 1".
 struct ExpandToHip : public mlir::RewritePattern {
   ExpandToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Expand", /*benefit=*/1, ctx) {}

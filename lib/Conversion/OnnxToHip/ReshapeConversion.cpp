@@ -518,31 +518,11 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
         // static feature dim (where the result type already pins the extent
         // and this code never queries the shape operand for it at all) --
         // but that is only an export convention, not an ONNX guarantee.
-        // Nemotron's mamba blocks reshape [bs*ss, H] -> [bs, ss, H] via
-        // `Reshape(_, [0, 0, H])`, putting BOTH non-literal markers on the
-        // dynamic batch/seq dims instead, where they previously WERE read
-        // (and taken as literal 0) -- collapsing every mamba layer's
-        // batch/seq to 0 sized reads that resolved to garbage extents one op
-        // later. See docs/nemotron-mamba-shape-collapse.md.
         //
         // Resolve `0` (like `-1`) here, before tensor.reshape, replacing it
         // with the corresponding input dim BEFORE computing the `-1`
         // inference product below -- otherwise a shape with both `0` and
         // `-1` would divide by the wrong product.
-        //
-        // Before:
-        //   %r = onnx.Reshape %x, %shape :
-        //          (tensor<?x1152xf16>, tensor<6xi64>) ->
-        //          tensor<?x?x2x?x2x?xf16>
-        //   // %shape may contain a literal -1 at some index
-        // After:
-        //   %total  = product of tensor.dim(%x, i) for i in 0..inputRank
-        //   %d[0..outRank-1] = tensor.extract %shape[i]
-        //   %d[i]   = select(%d[i] == 0, tensor.dim(%x, i), %d[i])   // if i <
-        //   inputRank && !allowzero %pp     = product of max(%d[i], 1) for i in
-        //   0..outRank %inf    = %total / %pp %d'[i]  = select(%d[i] == -1,
-        //   %inf, %d[i]) %newsh  = tensor.from_elements %d'[0..outRank-1] :
-        //   tensor<NxI64> %r      = tensor.reshape %x(%newsh)
         mlir::Type elemTy = shapeTy.getElementType();
         unsigned bits = elemTy.getIntOrFloatBitWidth();
         // `allowzero` is emitted as SI64Attr (signed), not a signless/index
@@ -584,12 +564,21 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
           // garbage dim that collapses the reshape. See ReadbackScalar.h.
           mlir::Value v = readbackShapeEntryToHostOrExtract(rewriter, loc, op,
                                                             shapeOperand, i);
-          // Resolve ONNX's `0` ("keep the input's dim here") BEFORE it feeds
-          // the `-1`-inference product below, so a shape with both `0` and
+          // Case handled here -- allowzero=0 and this position has a
+          // corresponding input dim: resolve ONNX's `0` ("keep the input's
+          // dim at this index") to that dim BEFORE it feeds the
+          // `-1`-inference product below, so a shape carrying both `0` and
           // `-1` infers against the real extent instead of dividing as if
-          // this position were size 1. Only applies to positions that have a
-          // corresponding input dim (i < inputRank); allowzero=1 makes `0` a
-          // literal size like any other entry.
+          // this position were size 1.
+          //
+          // The two cases skipped here need no resolution:
+          //   - allowzero=1: `0` is a literal size, so passing the entry
+          //     through unchanged is already the correct output dim. The
+          //     divisor below substitutes 1 for it, leaving `-1` inference
+          //     unaffected.
+          //   - i >= inputRank: `0` names the input dim at the SAME index and
+          //     there is none, so the graph is invalid ONNX; shape inference
+          //     rejects it upstream ("Invalid position of 0.").
           if (!allowzero && i < inputRank) {
             mlir::Value isZero = mlir::arith::CmpIOp::create(
                 rewriter, loc, mlir::arith::CmpIPredicate::eq, v, cZero);
