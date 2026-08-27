@@ -4,7 +4,7 @@
 ##
 
 # HipDnnEpRuntime - Runtime library for ONNX HIP DNN Execution Provider
-# Provides HIP/MIOpen/hipBLASLt wrappers called by generated LLVM IR
+# Provides HIP/hipBLASLt wrappers called by generated LLVM IR
 #
 # This implements a two-stage compilation:
 # Stage 1 (Build Time): runtime.cpp → bitcode → embedded in library
@@ -125,7 +125,6 @@ if(NOT BUILD_MOCK_RUNTIME)
 
     find_package(hip QUIET)
     if(NOT HIPDNN_EP_DISABLE_VENDOR_BLAS)
-        find_package(MIOpen QUIET)
         find_package(hipblaslt QUIET)
     endif()
 
@@ -141,18 +140,17 @@ if(NOT BUILD_MOCK_RUNTIME)
             message(WARNING "  hip_FOUND=${hip_FOUND}; set THEROCK_DIST to the ROCm SDK path")
             set(BUILD_MOCK_RUNTIME TRUE)
         else()
-            message(STATUS "Building REAL runtime with HIP (vendor MIOpen/hipBLASLt DISABLED)")
+            message(STATUS "Building REAL runtime with HIP (vendor hipBLASLt DISABLED)")
             message(STATUS "  HIP: ${hip_DIR}")
         endif()
-    elseif(NOT hip_FOUND OR NOT MIOpen_FOUND OR NOT hipblaslt_FOUND)
+    elseif(NOT hip_FOUND OR NOT hipblaslt_FOUND)
         message(WARNING "ROCm components not found. Building mock runtime library for testing.")
-        message(WARNING "  hip_FOUND=${hip_FOUND}, MIOpen_FOUND=${MIOpen_FOUND}, hipblaslt_FOUND=${hipblaslt_FOUND}")
+        message(WARNING "  hip_FOUND=${hip_FOUND}, hipblaslt_FOUND=${hipblaslt_FOUND}")
         message(WARNING "  Set THEROCK_DIST environment variable to ROCm SDK path")
         set(BUILD_MOCK_RUNTIME TRUE)
     else()
-        message(STATUS "Building REAL runtime with HIP/MIOpen/hipBLASLt")
+        message(STATUS "Building REAL runtime with HIP/hipBLASLt")
         message(STATUS "  HIP: ${hip_DIR}")
-        message(STATUS "  MIOpen: ${MIOpen_DIR}")
         message(STATUS "  hipBLASLt: ${hipblaslt_DIR}")
     endif()
 else()
@@ -181,8 +179,8 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
     endif()
 
     # Propagate the vendor-BLAS opt-out into the bitcode compile so the
-    # MIOpen/hipBLASLt-backed wrappers (real/{hipblas,elementwise,gemm}.cpp)
-    # compile their stub branch instead of the vendor-backed one.
+    # hipBLASLt-backed wrappers (real/{hipblas,gemm}.cpp) compile their stub
+    # branch instead of the vendor-backed one.
     if(HIPDNN_EP_DISABLE_VENDOR_BLAS)
         list(APPEND COMPILE_FLAGS "-DHIPDNN_EP_DISABLE_VENDOR_BLAS")
     endif()
@@ -305,7 +303,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     # Real GPU runtime implementation
     compile_to_bitcode(real/hip.cpp runtime_hip.bc)
     compile_to_bitcode(real/hipblas.cpp runtime_hipblas.bc)
-    # Vendor-symbol stubs so a model links without libMIOpen / libhipblaslt (see
+    # Vendor-symbol stubs so a model links without libhipblaslt (see
     # real/vendor_blas_stub.cpp).
     if(HIPDNN_EP_DISABLE_VENDOR_BLAS)
         compile_to_bitcode(real/vendor_blas_stub.cpp runtime_vendor_blas_stub.bc)

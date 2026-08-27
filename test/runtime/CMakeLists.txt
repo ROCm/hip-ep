@@ -22,7 +22,7 @@ target_compile_features(test-output-allocator PRIVATE cxx_std_17)
 
 # lib/Runtime  -> hipdnn_ep_runtime.h, runtime_state_internal.h, hipdnn_ep_errors.h
 # lib/Runtime/mock -> runtime_types.h resolves to the GPU-free mock typedefs
-#   (void* handles), so nothing here needs the HIP/MIOpen/hipBLASLt SDK.
+#   (void* handles), so nothing here needs the HIP/hipBLASLt SDK.
 target_include_directories(test-output-allocator PRIVATE
     ${CMAKE_SOURCE_DIR}/lib/Runtime
     ${CMAKE_SOURCE_DIR}/lib/Runtime/mock

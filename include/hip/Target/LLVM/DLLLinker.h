@@ -28,7 +28,7 @@ public:
   // Parameters:
   //   objectFile: Input object file path (.obj on Windows, .o on Linux)
   //   outputDLL: Output DLL path (.dll on Windows, .so on Linux)
-  //   libraries: Library names to link (e.g., "amdhip64", "MIOpen")
+  //   libraries: Library names to link (e.g., "amdhip64", "hipblaslt")
   //   libraryPaths: Directories to search for libraries
   //   exportSymbols: Symbol names to export from DLL (inference_init, etc.)
   //
@@ -42,7 +42,7 @@ public:
   // Parameters:
   //   objectBytes: Input object file data in memory
   //   outDLLBytes: Output DLL data in memory
-  //   libraries: Library names to link (e.g., "amdhip64", "MIOpen")
+  //   libraries: Library names to link (e.g., "amdhip64", "hipblaslt")
   //   libraryPaths: Directories to search for libraries
   //   exportSymbols: Symbol names to export from DLL (inference_init, etc.)
   //

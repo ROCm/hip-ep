@@ -15,8 +15,8 @@ add_library(LibHipCompiler STATIC
   StaticPlugins.cpp
 )
 
-# When the vendor BLAS/DNN backends are disabled, the model link must not add
-# -lMIOpen / -lhipblaslt (CompilerDriver gates those behind this define).
+# When hipBLASLt is disabled, the model link must not add -lhipblaslt
+# (CompilerDriver gates that behind this define).
 if(HIPDNN_EP_DISABLE_VENDOR_BLAS)
   target_compile_definitions(LibHipCompiler PRIVATE HIPDNN_EP_DISABLE_VENDOR_BLAS)
 endif()

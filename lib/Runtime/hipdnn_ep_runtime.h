@@ -18,10 +18,9 @@ extern "C" {
 // Backend-Independent Data Type Identifiers
 //===----------------------------------------------------------------------===//
 //
-// These are our own values -- do NOT assume they match MIOpen, cuDNN, or any
-// other library's enum. Each backend provides an explicit mapping function
-// (e.g. hipdnn_ep_to_miopen_type in real/elementwise.cpp) to convert these
-// to library-specific types.
+// These are our own values -- do NOT assume they match cuDNN or any other
+// library's enum. Each backend provides an explicit mapping function to
+// convert these to library-specific types.
 //
 // To add a new type:
 //   1. Add #define here
@@ -45,7 +44,7 @@ extern "C" {
 //===----------------------------------------------------------------------===//
 //
 // Same design as data types above -- our own values, mapped explicitly to
-// library-specific ops in each backend (e.g. miopenTensorOpMul).
+// library-specific ops in each backend.
 //===----------------------------------------------------------------------===//
 
 #define HIPDNN_EP_TENSOR_OP_MUL 0 // element-wise multiply
@@ -285,11 +284,6 @@ HIPDNN_EP_RT_EXPORT void *hipdnn_ep_get_current_stream(void);
 // hipdnn_ep_runtime_begin_compute (and cleared on stream teardown). Lives in
 // tls_stream.cpp alongside the getter.
 HIPDNN_EP_RT_EXPORT void hipdnn_ep_set_current_stream(void *stream);
-
-// Get MIOpen handle from state (for MIOpen operations)
-// Returns: miopenHandle_t cast to void* (NULL on error)
-// Ownership: Caller does NOT own handle (destroyed in cleanup)
-void *hipdnn_ep_state_get_miopen_handle(RuntimeState *state);
 
 // Get hipBLASLt handle from state (for GEMM operations)
 // Returns: hipblasLtHandle_t cast to void* (NULL on error)
@@ -916,14 +910,11 @@ int wrap_where(RuntimeState *state, void *condition, void *x, void *y,
                int64_t data_type);
 
 // Unified power entry: output = f(input; alpha, beta, gamma).
-// alpha, beta, gamma match the MIOpen POWER activation tuple where the
-// MIOpen path is used. data_type is HIPDNN_EP_DATATYPE_* (FLOAT=0, HALF=1,
-// BFLOAT16=2).
+// data_type is HIPDNN_EP_DATATYPE_* (FLOAT=0, HALF=1, BFLOAT16=2).
 //
 // LLVM lowering always calls this symbol. For (0, 1, -1) and (0, 1, 0.5) the
 // runtime uses HIP elementwise reciprocal and sqrt kernels (ONNX semantics).
-// Other (alpha, beta, gamma) tuples use miopenActivationPOWER /
-// miopenActivationForward.
+// Other (alpha, beta, gamma) tuples are unsupported.
 int wrap_power(RuntimeState *state, void *input, void *output,
                int64_t num_elements, int64_t data_type, double alpha,
                double beta, double gamma);

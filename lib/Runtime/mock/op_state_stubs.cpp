@@ -79,9 +79,9 @@ hipdnn_ep_op_state_construct_multi_head_attention(RuntimeState *state,
   return 0;
 }
 
-// MIOpen OpTensor (miopen.add): real runtime holds a shared_ptr to a
-// device-wide MIOpen descriptor table (OpTensorState in real/elementwise.cpp);
-// the mock owns no device/MIOpen resources.
+// Elementwise OpTensor (hip.add / wrap_elementwise): real runtime holds a
+// shared_ptr to a device-wide descriptor table (OpTensorState in
+// real/elementwise.cpp); the mock owns no device resources.
 extern "C" int8_t hipdnn_ep_op_state_construct_optensor(RuntimeState *state,
                                                         int32_t slot) {
   hipdnn_ep_op_state_set(state, slot, MockOpState::create().release());

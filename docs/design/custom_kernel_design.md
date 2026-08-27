@@ -36,7 +36,7 @@ flowchart TD
         BCIN --> JIT
         EMBED --> JIT
         KSO -->|"dlopen + DynamicLibrarySearchGenerator"| JIT
-        ROCM["amdhip64.dll\nMIOpen.dll\nhipblaslt.dll\nhipdnn_backend.dll"] -->|"DynamicLibrarySearchGenerator::Load"| JIT
+        ROCM["amdhip64.dll\nhipblaslt.dll\nhipdnn_backend.dll"] -->|"DynamicLibrarySearchGenerator::Load"| JIT
     end
 ```
 
