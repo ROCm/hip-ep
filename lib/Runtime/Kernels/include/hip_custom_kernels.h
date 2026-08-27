@@ -893,7 +893,23 @@ HIP_KERNEL_API int hip_gqa_flash_decode(
      * the scalar kernel only, so a masked call never selects WMMA; rejected
      * outright with an INT8 KV cache, which does not thread it. */
     const void* attn_bias,
-    int attn_bias_batch, int attn_bias_heads, int attn_bias_kv_stride);
+    int attn_bias_batch, int attn_bias_heads, int attn_bias_kv_stride,
+    /* Right-sized sliding-window ("ring") KV cache. When a layer's cache is
+     * allocated to its window rather than to max_length, the append wraps and
+     * the buffer holds only its newest ring_cap positions: slot s carries the
+     * one position in [ring_base, ring_base + ring_cap) congruent to s mod
+     * ring_cap. Pass ring_cap == 0 for a linear cache, where slot IS position.
+     *
+     * ring_cap must equal max_seq when non-zero -- the kernel scans the whole
+     * buffer, which for a right-sized cache is exactly the window, so neither
+     * the window nor seqlens_k narrows it further.
+     *
+     * Only attn_bias reads a position rather than a slot, so a ring is
+     * invisible to an unmasked decode: attention sums over an unordered set of
+     * keys. It is emphatically not invisible to a masked one, and the failure
+     * is silent -- pass these rather than letting the kernel infer a ring from
+     * skv > max_seq. */
+    int ring_base, int ring_cap);
 
 /* =========================================================================
  * Cast (Element Type Conversion)

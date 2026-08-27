@@ -1425,12 +1425,20 @@ hipdnn_wmma_f32_16x16x16_f16_w32_unavailable(half16, half16, float8 c) {
 //   - HPG=8  (gpt-oss-20b at d=64; 64 q heads / 8 kv heads)
 //
 // Constraints (asserted at launcher):
-//   - D must be 64, 128 or 256 (EPT = D/32 in 1..8; D=256 -> BKV=16 to keep
-//     the LDS tile ~16KB). The scalar kernel is otherwise D-generic.
+//   - D must be 64, 128, 256 or 512 (EPT = D/32 in 1..16; BKV is chosen per D
+//     to hold the LDS tile at its budget). The scalar kernel is otherwise
+//     D-generic.
 //   - RDNA wave32 (uses __shfl_xor across 32 lanes).
 //===----------------------------------------------------------------------===//
 
 static constexpr int FLASH_DECODE_BKV     = 64;
+
+// D=512's KV tile height, overridable at compile time only so the choice below
+// can be re-measured without editing this file. See the BKV comment in the
+// kernel for why 4 rather than 8.
+#ifndef FLASH_DECODE_BKV_D512
+#define FLASH_DECODE_BKV_D512 4
+#endif
 
 // Partial layout per (b, h_q, k_split): {m: float, l: float, O[D]: float}
 __device__ __forceinline__ size_t flash_decode_partial_offset(
@@ -1475,7 +1483,13 @@ gqa_flash_decode_kernel(
     // (sq == 1 on this path). Extent 1 on either leading dim broadcasts. Null
     // when the model supplies no mask.
     const __half* __restrict__ attn_bias = nullptr,
-    int bias_batch = 1, int bias_heads = 1, int bias_kv_stride = 0) {
+    int bias_batch = 1, int bias_heads = 1, int bias_kv_stride = 0,
+    // Right-sized sliding-window cache. ring_cap is the buffer's capacity in
+    // positions and ring_base the oldest position it still holds, so slot s
+    // carries the one position in [ring_base, ring_base + ring_cap) congruent
+    // to s mod ring_cap. ring_cap == 0 is a linear cache, where slot IS
+    // position and both are ignored.
+    int ring_base = 0, int ring_cap = 0) {
   constexpr bool KV_I8 = (FMT == KvDtype::kI8);
   using KVt = std::conditional_t<KV_I8, int8_t, __half>;
   // Size the K+V LDS tile for block residency, since this kernel is bandwidth
@@ -1494,12 +1508,31 @@ gqa_flash_decode_kernel(
   // Going further the wrong way in either direction is worse: BKV=32 costs 37%
   // on the 9B (halved residency), and BKV=4 costs 6% on the 35B (the tile stops
   // amortizing the per-tile __syncthreads and staging setup).
-  constexpr int BKV = (D >= 256) ? 8 : (D == 128) ? 32 : FLASH_DECODE_BKV;
+  //
+  // D=512 (Gemma-4's global-attention layers) keeps that same 8KB budget rather
+  // than the row count, so BKV halves to 4. Inheriting BKV=8 would put the tile
+  // at 16KB and halve resident blocks, which is the mistake the D>=256 rule was
+  // introduced to avoid in the first place. Measured on gfx1151 at Gemma-4's
+  // global geometry (H16 G2 hpg8 D512), --iters 400, min of 3 runs:
+  //             BKV=2     BKV=4     BKV=8     BKV=16
+  //   skv 2241  0.0270    0.0258    0.0274    0.0296 ms
+  //   skv 16241 0.3087    0.2963    0.3012    0.3126 ms
+  // 4 wins at both ends, and the shape of the curve is the budget argument:
+  // 8 and 16 lose residency, 2 stops amortizing the per-tile __syncthreads.
+  constexpr int BKV = (D >= 512)  ? FLASH_DECODE_BKV_D512
+                    : (D == 256)  ? 8
+                    : (D == 128)  ? 32
+                                  : FLASH_DECODE_BKV;
   constexpr int THREADS = HPG * WAVE_SIZE;  // total threads in block
   constexpr int EPT = D / WAVE_SIZE;  // elements-per-thread along d
 
   static_assert(D % WAVE_SIZE == 0, "D must be a multiple of WAVE_SIZE");
-  static_assert(EPT >= 1 && EPT <= 8, "EPT must be 1..8");
+  // The bound is a register-pressure budget, not a correctness one: Q_f and
+  // O_acc are both EPT floats per lane, so EPT=16 (D=512) holds 32 VGPRs of
+  // accumulator before the unrolled inner loop's temporaries. That still fits
+  // the occupancy this bandwidth-bound kernel needs on RDNA; EPT=32 (D=1024)
+  // would not, and no shipped geometry asks for it.
+  static_assert(EPT >= 1 && EPT <= 16, "EPT must be 1..16");
 
   const int batch     = __builtin_amdgcn_readfirstlane(blockIdx.x / G);
   const int head_kv   = __builtin_amdgcn_readfirstlane(blockIdx.x % G);
@@ -1521,17 +1554,27 @@ gqa_flash_decode_kernel(
   // window <= 0 the attention is full (kv_lo = 0). gpt-oss-20b alternates
   // sliding (local_window_size=128) and full layers; clamping kv_lo here lets
   // sliding layers skip the full KV cache scan and process only ~window slots.
+  //
+  // A ring holds exactly the positions this query may attend to and nothing
+  // else, so the whole buffer is the range and the window has nothing left to
+  // narrow: scan every slot from 0. Stated rather than derived. eff_skv would
+  // already clamp to max_seq == ring_cap and leave kv_lo at 0, but only because
+  // capacity happens to equal the window, and a reader cannot see that
+  // coincidence from here.
   int kv_lo = 0;
-  if (local_window_size > 0 && eff_skv > local_window_size) {
+  int kv_hi = eff_skv;
+  if (ring_cap > 0) {
+    kv_hi = ring_cap;
+  } else if (local_window_size > 0 && eff_skv > local_window_size) {
     kv_lo = eff_skv - local_window_size;
   }
-  const int kv_range = eff_skv - kv_lo;
+  const int kv_range = kv_hi - kv_lo;
 
   // Partition KV range into K_SPLITS roughly-equal chunks.
   const int chunk    = (kv_range + K_SPLITS - 1) / K_SPLITS;
   const int kv_start = kv_lo + chunk * split_idx;
   int kv_end_tmp     = kv_start + chunk;
-  if (kv_end_tmp > eff_skv) kv_end_tmp = eff_skv;
+  if (kv_end_tmp > kv_hi) kv_end_tmp = kv_hi;
   const int kv_end   = kv_end_tmp;
 
   // Output partials destination for THIS wave's query head.
@@ -1707,7 +1750,19 @@ gqa_flash_decode_kernel(
       // the [B,H,K_SPLITS,D+2] partials layout and the sink term stay correct.
       float score = dot_partial * scale_log2e;
       if (bias_row) {
-        score = fmaf(__half2float(bias_row[tile_start + t]), LOG2E, score);
+        // The mask is indexed by absolute position. On a linear cache the slot
+        // is the position; on a ring it is that position mod capacity, so undo
+        // the rotation before reading. Getting this wrong is silent -- every
+        // entry lands on a key some fixed distance from the one it describes,
+        // the attention still sums over the right SET of keys, and the model
+        // emits fluent nonsense rather than a NaN.
+        int bias_col = tile_start + t;
+        if (ring_cap > 0) {
+          int off = (bias_col - ring_base) % ring_cap;
+          if (off < 0) off += ring_cap;
+          bias_col = ring_base + off;
+        }
+        score = fmaf(__half2float(bias_row[bias_col]), LOG2E, score);
         // A -inf mask entry contributes nothing, and letting it reach the
         // rescale below would form (-inf) - (-inf) = NaN for as long as every
         // key seen so far in this split is masked -- routine for a sliding
@@ -1796,7 +1851,7 @@ gqa_flash_decode_kernel(
 //
 // Grid: (G, K_SPLITS, B). Block: 32 (one wave). M=16 rows == HPG query heads
 // (rows >= HPG are inert / never written). Split math mirrors the scalar
-// kernel exactly (eff_skv, kv_lo, chunk).
+// kernel exactly (eff_skv, kv_lo, kv_hi, chunk).
 //===----------------------------------------------------------------------===//
 // FMT==kF16: fp16 K/V cache (k_scale/v_scale ignored, pass nullptr).
 // FMT==kI8 : symmetric per-channel INT8 K/V cache -- the int8 tile is loaded
@@ -1817,7 +1872,8 @@ gqa_flash_decode_wmma_kernel(
     int H, int G, int max_seq, float scale,
     const int* __restrict__ seqlens_k,
     int local_window_size,
-    int K_SPLITS) {  // runtime split-K count (was a template param)
+    int K_SPLITS,     // runtime split-K count (was a template param)
+    int ring_cap = 0) {  // right-sized window cache; 0 == linear (see scalar)
   constexpr bool KV_I8 = (FMT == KvDtype::kI8);
   using KVt = std::conditional_t<KV_I8, int8_t, __half>;
   constexpr int DSTR    = D + 2;
@@ -1846,15 +1902,22 @@ gqa_flash_decode_wmma_kernel(
       : max_seq;
   const int eff_skv = (raw_skv > 0)
       ? (raw_skv < max_seq ? raw_skv : max_seq) : 0;
+  // Ring: the whole buffer is in-window by construction, so scan every slot and
+  // let the window narrow nothing (mirrors the scalar kernel). No ring_base
+  // here because this kernel applies no mask -- the rotation is invisible to
+  // attention itself, which is a sum over an unordered set of keys.
   int kv_lo = 0;
-  if (local_window_size > 0 && eff_skv > local_window_size) {
+  int kv_hi = eff_skv;
+  if (ring_cap > 0) {
+    kv_hi = ring_cap;
+  } else if (local_window_size > 0 && eff_skv > local_window_size) {
     kv_lo = eff_skv - local_window_size;
   }
-  const int kv_range = eff_skv - kv_lo;
+  const int kv_range = kv_hi - kv_lo;
   const int chunk    = (kv_range + K_SPLITS - 1) / K_SPLITS;
   const int kv_start = kv_lo + chunk * split;
   int kv_end_tmp     = kv_start + chunk;
-  if (kv_end_tmp > eff_skv) kv_end_tmp = eff_skv;
+  if (kv_end_tmp > kv_hi) kv_end_tmp = kv_hi;
   const int kv_end   = kv_end_tmp;
 
   // Empty slice: emit identity partials so the reduce ignores this split.
@@ -2289,7 +2352,7 @@ static inline void launchFlashDecodeConfig(
     const int* iSeq, int local_window_size,
     const __half* hSink, int use_smooth_softmax,
     const __half* hBias = nullptr, int bias_batch = 1, int bias_heads = 1,
-    int bias_kv_stride = 0) {
+    int bias_kv_stride = 0, int ring_base = 0, int ring_cap = 0) {
   const int splits = cfg.splits;
   // Only the scalar kernel applies the additive mask; the WMMA variant has no
   // bias support, so a masked call must not select it or the mask would be
@@ -2312,7 +2375,7 @@ static inline void launchFlashDecodeConfig(
       gqa_flash_decode_wmma_kernel<D_, HPG_, BKV_, FMT>                        \
           <<<grid_wmma, 32, smem_bytes(D_, BKV_), stream>>>(                   \
               hQ, hK, hV, kSc, vSc, hP, H, G, max_seq, scale, iSeq,            \
-              local_window_size, splits)
+              local_window_size, splits, ring_cap)
     if (hpg == 4) {
       if (d == 128) LAUNCH_DW(128, 4, 32);
       else if (cfg.bkv == 32) LAUNCH_DW(64, 4, 32);
@@ -2332,10 +2395,11 @@ static inline void launchFlashDecodeConfig(
           <<<grid_main, (HPG_) * WAVE_SIZE, 0, stream>>>(                      \
               hQ, hK, hV, kSc, vSc, hP, H, G, max_seq, scale, iSeq,            \
               local_window_size, splits, hBias, bias_batch, bias_heads,        \
-              bias_kv_stride)
+              bias_kv_stride, ring_base, ring_cap)
     #define LAUNCH_SCALAR(HPG_)                                                \
       do {                                                                     \
-        if (d == 256)      LAUNCH_SCALAR_D(256, HPG_);                         \
+        if (d == 512)      LAUNCH_SCALAR_D(512, HPG_);                         \
+        else if (d == 256) LAUNCH_SCALAR_D(256, HPG_);                         \
         else if (d == 128) LAUNCH_SCALAR_D(128, HPG_);                         \
         else               LAUNCH_SCALAR_D(64, HPG_);                          \
       } while (0)
@@ -2356,7 +2420,10 @@ static inline void launchFlashDecodeConfig(
   // Reduce: one block per query head, block dim D. seqlens_k / sliding-window /
   // head_sink / smooth_softmax are all folded in here (not the partials).
   dim3 grid_reduce(B * H);
-  if (d == 256)
+  if (d == 512)
+    gqa_flash_decode_reduce_kernel<512><<<grid_reduce, 512, 0, stream>>>(
+        hP, hO, H, hSink, H, use_smooth_softmax, splits);
+  else if (d == 256)
     gqa_flash_decode_reduce_kernel<256><<<grid_reduce, 256, 0, stream>>>(
         hP, hO, H, hSink, H, use_smooth_softmax, splits);
   else if (d == 128)
@@ -2675,7 +2742,14 @@ extern "C" int hip_gqa_flash_decode(
     // is passed explicitly rather than derived from skv so it matches the
     // decomposed path's view of the mask exactly.
     const void* attn_bias,
-    int attn_bias_batch, int attn_bias_heads, int attn_bias_kv_stride) {
+    int attn_bias_batch, int attn_bias_heads, int attn_bias_kv_stride,
+    // Right-sized sliding-window cache: the buffer holds only its newest
+    // ring_cap positions, starting at absolute position ring_base, and slot s
+    // carries position ring_base + ((s - ring_base) mod ring_cap). ring_cap == 0
+    // means a linear cache, where slot IS position. Only the mask cares, but it
+    // cares silently, so the caller states it rather than the kernel guessing
+    // from skv > max_seq.
+    int ring_base, int ring_cap) {
   // HPG = heads-per-group (Q heads sharing one KV head). The kernels are
   // instantiated for HPG=4 (Llama-3.x family at d=64 and d=128), HPG=5
   // (Qwen2.5-14B's 40:8 at d=128) and HPG=8 (gpt-oss-20b at d=64). HPG=8 with
@@ -2695,9 +2769,9 @@ extern "C" int hip_gqa_flash_decode(
             hpg, H, G);
     return -1;
   }
-  if (d != 64 && d != 128 && d != 256) {
+  if (d != 64 && d != 128 && d != 256 && d != 512) {
     fprintf(stderr,
-            "hip_gqa_flash_decode: unsupported d=%d (must be 64/128/256)\n",
+            "hip_gqa_flash_decode: unsupported d=%d (must be 64/128/256/512)\n",
             d);
     return -1;
   }
@@ -2722,6 +2796,19 @@ extern "C" int hip_gqa_flash_decode(
             "INT8 KV cache\n");
     return -1;
   }
+  // A ring must be the whole buffer. The scalar kernel scans [0, ring_cap) and
+  // reads the cache with the max_seq stride, so a capacity that is not the
+  // buffer would either skip live slots or read past them, and the mask
+  // rotation would be computed modulo the wrong number. The runtime already
+  // pins capacity to the window; this states the kernel's own requirement so
+  // the two cannot drift apart silently.
+  if (ring_cap < 0 || ring_base < 0 || (ring_cap > 0 && ring_cap != max_seq)) {
+    fprintf(stderr,
+            "hip_gqa_flash_decode: ring_cap=%d must be 0 (linear) or exactly "
+            "max_seq=%d, and ring_base=%d must be non-negative\n",
+            ring_cap, max_seq, ring_base);
+    return -1;
+  }
 
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
   const __half* hQ = static_cast<const __half*>(Q);
@@ -2742,9 +2829,16 @@ extern "C" int hip_gqa_flash_decode(
   // window (e.g. 128), NOT the full context -- they MUST key/tune separately
   // from full-attention layers of the same (B,H,G,d,skv) or they would reuse a
   // large split count and pay reduce/empty-split overhead over a tiny range.
-  const int tune_len = (local_window_size > 0 && eff_skv > local_window_size)
-                           ? local_window_size
-                           : eff_skv;
+  // A ring scans its whole buffer, which IS the window, so it keys on capacity
+  // rather than on eff_skv -- the latter grows with the context while the work
+  // does not, and would spread one steady-state shape across a new cache entry
+  // per bucket, re-tuning each time.
+  const int tune_len =
+      (ring_cap > 0)
+          ? ring_cap
+          : ((local_window_size > 0 && eff_skv > local_window_size)
+                 ? local_window_size
+                 : eff_skv);
   // The autotune cache is keyed on geometry only, so a masked and an unmasked
   // call of the same shape share an entry. That stays correct because the
   // launcher re-checks the mask before selecting WMMA: a cached WMMA config is
@@ -2796,14 +2890,15 @@ extern "C" int hip_gqa_flash_decode(
               launchFlashDecodeConfig<KvDtype::kI8>(
                   c, stream, hQ, hK, hV, kSc, vSc, hO, hP, B, H, G, d, hpg,
                   max_seq, scale, iSeq, local_window_size, hSink,
-                  use_smooth_softmax);
+                  use_smooth_softmax, nullptr, 1, 1, 0, ring_base, ring_cap);
             });
         g_flash_decode_i8_cache[key] = cfg;
       }
     }
     launchFlashDecodeConfig<KvDtype::kI8>(
         cfg, stream, hQ, hK, hV, kSc, vSc, hO, hP, B, H, G, d, hpg, max_seq,
-        scale, iSeq, local_window_size, hSink, use_smooth_softmax);
+        scale, iSeq, local_window_size, hSink, use_smooth_softmax, nullptr, 1,
+        1, 0, ring_base, ring_cap);
     return hipGetLastError();
   }
 
@@ -2823,7 +2918,7 @@ extern "C" int hip_gqa_flash_decode(
                 c, stream, hQ, hK, hV, nullptr, nullptr, hO, hP, B, H, G, d,
                 hpg, max_seq, scale, iSeq, local_window_size, hSink,
                 use_smooth_softmax, hBias, bias_b, bias_h,
-                attn_bias_kv_stride);
+                attn_bias_kv_stride, ring_base, ring_cap);
           });
       g_flash_decode_cache[key] = cfg;
       CUSTOM_KERNELS_DEBUG_LOG(
@@ -2839,7 +2934,7 @@ extern "C" int hip_gqa_flash_decode(
   launchFlashDecodeConfig<KvDtype::kF16>(
       cfg, stream, hQ, hK, hV, nullptr, nullptr, hO, hP, B, H, G, d, hpg,
       max_seq, scale, iSeq, local_window_size, hSink, use_smooth_softmax,
-      hBias, bias_b, bias_h, attn_bias_kv_stride);
+      hBias, bias_b, bias_h, attn_bias_kv_stride, ring_base, ring_cap);
 
   return hipGetLastError();
 }
