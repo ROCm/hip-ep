@@ -17,8 +17,8 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | MatMul | hipBLASLt |
 | Gemm | hipBLASLt |
 | Transpose | Custom HIP kernel |
-| Mul | MIOpen |
-| Add | MIOpen |
+| Mul | Custom HIP kernel |
+| Add | Custom HIP kernel |
 | Softmax | Custom HIP kernel |
 | Sigmoid | Custom HIP kernel |
 | Tanh | Custom HIP kernel |
@@ -52,8 +52,8 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Greater | Decomposed to `Less(B, A)` |
 | GreaterOrEqual | Decomposed to `Not(Less(A, B))` |
 | LessOrEqual | Decomposed to `Not(Less(B, A))` |
-| Min | MIOpen |
-| Max | MIOpen |
+| Min | Custom HIP kernel |
+| Max | Custom HIP kernel |
 | ReduceSum | Custom HIP kernel |
 | ReduceMax | Custom HIP kernel |
 | ReduceMin | Custom HIP kernel |
