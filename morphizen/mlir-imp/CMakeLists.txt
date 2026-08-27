@@ -32,6 +32,7 @@ add_library(${LIB_NAME}
   src/morphizen-ort-api.cpp
   src/mlir-node.hpp
   src/mlir-node.cpp
+  src/llvm-cleanup.cpp
 )
 target_sources(${LIB_NAME}
 	INTERFACE
