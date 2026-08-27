@@ -209,38 +209,58 @@ module {
 // position were size 1 and infer an extent that does not preserve the element
 // count.
 // CHECK-LABEL: func.func @test_reshape_dyn_zero_dim
+// CHECK-SAME: %[[DATA:[^:]*]]: tensor<?x?x?xf16>, %[[SHAPE:[^:]*]]: tensor<4xi64>
+// CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
+// CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
 // CHECK-DAG: %[[CM1:.*]] = arith.constant -1 : i64
 // CHECK-DAG: %[[CZ:.*]] = arith.constant 0 : i64
 // CHECK-DAG: %[[C1I:.*]] = arith.constant 1 : i64
-// CHECK: tensor.extract_slice %{{.*}}[0] [1] [1]
+// Entry 0 resolves against input dim 0 ...
+// CHECK: tensor.extract_slice %[[SHAPE]][0] [1] [1]
 // CHECK: %[[E0:.*]] = hip.readback_scalar
-// CHECK-NEXT: %[[ISZ:.*]] = arith.cmpi eq, %[[E0]], %[[CZ]] : i64
-// CHECK-NEXT: %[[ID:.*]] = tensor.dim
-// CHECK-NEXT: %[[IDC:.*]] = arith.index_cast %[[ID]] : index to i64
-// CHECK-NEXT: %[[R0:.*]] = arith.select %[[ISZ]], %[[IDC]], %[[E0]] : i64
+// CHECK-NEXT: %[[ISZ0:.*]] = arith.cmpi eq, %[[E0]], %[[CZ]] : i64
+// CHECK-NEXT: %[[ID0:.*]] = tensor.dim %[[DATA]], %[[C0]] : tensor<?x?x?xf16>
+// CHECK-NEXT: %[[IDC0:.*]] = arith.index_cast %[[ID0]] : index to i64
+// CHECK-NEXT: %[[R0:.*]] = arith.select %[[ISZ0]], %[[IDC0]], %[[E0]] : i64
 // CHECK-NEXT: arith.cmpi sgt, %[[R0]], %[[C1I]] : i64
+// ... and entry 1 against input dim 1: the dim index tracks the entry index
+// rather than being pinned to one dim.
+// CHECK: tensor.extract_slice %[[SHAPE]][1] [1] [1]
+// CHECK: %[[E1:.*]] = hip.readback_scalar
+// CHECK-NEXT: %[[ISZ1:.*]] = arith.cmpi eq, %[[E1]], %[[CZ]] : i64
+// CHECK-NEXT: %[[ID1:.*]] = tensor.dim %[[DATA]], %[[C1]] : tensor<?x?x?xf16>
+// CHECK-NEXT: %[[IDC1:.*]] = arith.index_cast %[[ID1]] : index to i64
+// CHECK-NEXT: %[[R1:.*]] = arith.select %[[ISZ1]], %[[IDC1]], %[[E1]] : i64
 // The trailing entry has no input dim at its index, so no `0` can legally
 // appear there and none is resolved: the raw entry goes straight to the
 // divisor.
-// CHECK: tensor.extract_slice %{{.*}}[3] [1] [1]
+// CHECK: tensor.extract_slice %[[SHAPE]][3] [1] [1]
 // CHECK: %[[E3:.*]] = hip.readback_scalar
 // CHECK-NEXT: arith.cmpi sgt, %[[E3]], %[[C1I]] : i64
 // CHECK: %[[INF:.*]] = arith.divsi
-// CHECK-NEXT: %[[ISM1:.*]] = arith.cmpi eq, %[[R0]], %[[CM1]] : i64
-// CHECK-NEXT: arith.select %[[ISM1]], %[[INF]], %[[R0]] : i64
-// CHECK: tensor.reshape
+// CHECK-NEXT: %[[ISM0:.*]] = arith.cmpi eq, %[[R0]], %[[CM1]] : i64
+// CHECK-NEXT: %[[F0:.*]] = arith.select %[[ISM0]], %[[INF]], %[[R0]] : i64
+// CHECK-NEXT: %[[ISM1:.*]] = arith.cmpi eq, %[[R1]], %[[CM1]] : i64
+// CHECK-NEXT: %[[F1:.*]] = arith.select %[[ISM1]], %[[INF]], %[[R1]] : i64
+// The resolved dims are what the reshape actually consumes -- the resolution
+// above is live, not dead arithmetic alongside a raw-entry shape vector.
+// CHECK: %[[NEWSH:.*]] = tensor.from_elements %[[F0]], %[[F1]], %{{.*}} : tensor<4xi64>
+// CHECK-NEXT: tensor.reshape %[[DATA]](%[[NEWSH]])
 // CHECK-NOT: onnx.Reshape
 
 // With allowzero=1 the entry is already the output dim, so nothing is resolved:
-// the raw entry feeds the divisor and the `-1` substitution directly.
+// the raw entry feeds the divisor and the `-1` substitution directly, and it is
+// the raw entry that reaches the reshape.
 // CHECK-LABEL: func.func @test_reshape_dyn_allowzero
+// CHECK-SAME: %[[DATA:[^:]*]]: tensor<?x?x?xf16>, %[[SHAPE:[^:]*]]: tensor<4xi64>
 // CHECK-DAG: %[[CM1:.*]] = arith.constant -1 : i64
 // CHECK-DAG: %[[C1I:.*]] = arith.constant 1 : i64
-// CHECK: tensor.extract_slice %{{.*}}[0] [1] [1]
+// CHECK: tensor.extract_slice %[[SHAPE]][0] [1] [1]
 // CHECK: %[[E0:.*]] = hip.readback_scalar
 // CHECK-NEXT: arith.cmpi sgt, %[[E0]], %[[C1I]] : i64
 // CHECK: %[[INF:.*]] = arith.divsi
-// CHECK-NEXT: %[[ISM1:.*]] = arith.cmpi eq, %[[E0]], %[[CM1]] : i64
-// CHECK-NEXT: arith.select %[[ISM1]], %[[INF]], %[[E0]] : i64
-// CHECK: tensor.reshape
+// CHECK-NEXT: %[[ISM:.*]] = arith.cmpi eq, %[[E0]], %[[CM1]] : i64
+// CHECK-NEXT: %[[F0:.*]] = arith.select %[[ISM]], %[[INF]], %[[E0]] : i64
+// CHECK: %[[NEWSH:.*]] = tensor.from_elements %[[F0]], %{{.*}} : tensor<4xi64>
+// CHECK-NEXT: tensor.reshape %[[DATA]](%[[NEWSH]])
 // CHECK-NOT: onnx.Reshape
