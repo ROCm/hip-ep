@@ -55,6 +55,8 @@ LogicalResult populateSliceShapeRegion(OpBuilder &builder, Block &block,
                                        SliceOp op);
 LogicalResult populateScatterNDShapeRegion(OpBuilder &builder, Block &block,
                                            ScatterNDOp op);
+LogicalResult populateNonZeroShapeRegion(OpBuilder &builder, Block &block,
+                                         NonZeroOp op);
 
 #define GEN_PASS_DEF_POPULATESHAPEREGIONPASS
 #include "hip/Dialect/Hipsr/Transforms/Passes.h.inc"
@@ -90,6 +92,8 @@ LogicalResult populatePlaceholderShapeRegion(OpBuilder &builder,
     return populateSliceShapeRegion(builder, block, sliceOp);
   } else if (auto scatterNDOp = dyn_cast<ScatterNDOp>(consumer)) {
     return populateScatterNDShapeRegion(builder, block, scatterNDOp);
+  } else if (auto nonZeroOp = dyn_cast<NonZeroOp>(consumer)) {
+    return populateNonZeroShapeRegion(builder, block, nonZeroOp);
   }
 
   return placeholder.emitOpError(
