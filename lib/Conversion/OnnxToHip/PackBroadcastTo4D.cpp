@@ -8,7 +8,9 @@
 // GatherShapeFold / ReshapeShapeFold / PadShapeFold / SliceShapeFold. It
 // rewrites static high-rank onnx.Add/Sub/Mul/Div/Less/Greater/Max/Min/And
 // operations into collapse_shape -> rank-<=4 ONNX op -> expand_shape before
-// compute conversion creates the corresponding HIP op.
+// compute conversion creates the corresponding HIP op. Only the two-operand
+// form is matched; variadic onnx.Max/onnx.Min (three or more inputs) are left
+// unchanged.
 //
 // Before:
 //   %r = "onnx.Add"(%a, %b) : (...) -> tensor<6x2500x8x1x2x4x2xf32>

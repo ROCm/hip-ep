@@ -42,8 +42,10 @@ module {
       %a: tensor<4x1x6x8x1xi1>, %b: tensor<4x1x6x8x1xi1>)
       -> tensor<4x1x6x8x1xi1> {
     // CHECK-LABEL: func.func @and_5d
+    // CHECK-SAME: (%[[CTX4:.*]]: !hip.context, %[[A4:.*]]: tensor<4x1x6x8x1xi1>, %[[B4:.*]]: tensor<4x1x6x8x1xi1>)
+    // CHECK-NOT: onnx.And
     // CHECK: tensor.collapse_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4]] : tensor<4x1x6x8x1xi1> into tensor<4x1x6x8xi1>
-    // CHECK: hip.and({{.*}}) ins({{.*}}, {{.*}} : tensor<4x1x6x8xi1>, tensor<4x1x6x8xi1>) outs({{.*}} : tensor<4x1x6x8xi1>)
+    // CHECK: hip.and(%[[CTX4]]) ins({{.*}}, {{.*}} : tensor<4x1x6x8xi1>, tensor<4x1x6x8xi1>) outs({{.*}} : tensor<4x1x6x8xi1>)
     // CHECK: tensor.expand_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4]] output_shape [4, 1, 6, 8, 1] : tensor<4x1x6x8xi1> into tensor<4x1x6x8x1xi1>
     %r = "onnx.And"(%a, %b) : (tensor<4x1x6x8x1xi1>, tensor<4x1x6x8x1xi1>) -> tensor<4x1x6x8x1xi1>
     return %r : tensor<4x1x6x8x1xi1>

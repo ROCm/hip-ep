@@ -74,8 +74,10 @@ module {
   func.func @min_5d_scalar(%a: tensor<4x1x6x8x1xf32>, %b: tensor<f32>)
       -> tensor<4x1x6x8x1xf32> {
     // CHECK-LABEL: func.func @min_5d_scalar
+    // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<4x1x6x8x1xf32>, %[[B:.*]]: tensor<f32>)
+    // CHECK-NOT: onnx.Min
     // CHECK: tensor.collapse_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4]] : tensor<4x1x6x8x1xf32> into tensor<4x1x6x8xf32>
-    // CHECK: hip.min({{.*}}) ins({{.*}}, {{.*}} : tensor<4x1x6x8xf32>, tensor<f32>) outs({{.*}} : tensor<4x1x6x8xf32>)
+    // CHECK: hip.min(%[[CTX]]) ins({{.*}}, {{.*}} : tensor<4x1x6x8xf32>, tensor<f32>) outs({{.*}} : tensor<4x1x6x8xf32>)
     // CHECK: tensor.expand_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4]] output_shape [4, 1, 6, 8, 1] : tensor<4x1x6x8xf32> into tensor<4x1x6x8x1xf32>
     %r = "onnx.Min"(%a, %b) : (tensor<4x1x6x8x1xf32>, tensor<f32>) -> tensor<4x1x6x8x1xf32>
     return %r : tensor<4x1x6x8x1xf32>
