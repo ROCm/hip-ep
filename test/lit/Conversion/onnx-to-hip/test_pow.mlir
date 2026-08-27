@@ -22,15 +22,16 @@
 //
 // Covered exponent sources (pre-lowering peeks through Cast chains to either):
 //   * arith.constant (this file's hand-written tests)
-//   * onnx.Constant (production form, before lowerOnnxConstants externalizes)
+//   * onnx.Constant (production form, before lowerOnnxConstants makes carriers)
 //   * onnx.Cast / onnx.CastLike wrapping either of the above (Gemma-3 inlined
 //     Gelu, SAM LayerNorm2d — ORT emits the literal as f32 and casts to the
 //     activation dtype)
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
-// RUN: hip-mlir-opt %s --hip-add-context-arg \
-// RUN:   --convert-onnx-to-hip="externalize-min-num-elements=1" \
+// RUN: mkdir -p %t && hip-mlir-opt %s --hip-add-context-arg \
+// RUN:   --convert-onnx-to-hip \
+// RUN:   --hip-externalize-constants="externalize-min-num-elements=1 externalize-output-dir=%t" \
 // RUN:   | FileCheck %s --check-prefix=EXTERN
 
 module {
@@ -116,8 +117,8 @@ module {
   // Test 7: Production form — onnx.Constant exponent (Pow(x, 3)) wrapped in
   // onnx.Cast. Validates the actual SAM `output_upscaling.1/Pow` pattern.
   // Verified BOTH with externalization off (CHECK) AND on (EXTERN), to lock
-  // in that the decomposition runs before lowerOnnxConstants moves the value
-  // into the constants file.
+  // in that decomposition runs before lowerOnnxConstants creates the carrier
+  // and the later externalizer moves its value into the constants file.
   func.func @test_pow_onnx_const_cast(%arg0: tensor<1x64x128x128xf16>) -> tensor<1x64x128x128xf16> {
     %c = "onnx.Constant"() {value = dense<3.0> : tensor<f32>} : () -> tensor<f32>
     %ec = "onnx.Cast"(%c) {to = 10 : si64} : (tensor<f32>) -> tensor<f16>

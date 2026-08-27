@@ -75,9 +75,17 @@ void populateHipsrToLLVMPatterns(const LLVMTypeConverter &typeConverter,
                                  RewritePatternSet &patterns) {
   populateHipsrConstantLoweringPatterns(typeConverter, patterns);
   populateHipsrAddLoweringPatterns(typeConverter, patterns);
+  populateHipsrMulLoweringPatterns(typeConverter, patterns);
+  populateHipsrEqualLoweringPatterns(typeConverter, patterns);
+  populateHipsrTransposeLoweringPatterns(typeConverter, patterns);
+  populateHipsrGatherLoweringPatterns(typeConverter, patterns);
+  populateHipsrSliceLoweringPatterns(typeConverter, patterns);
+  populateHipsrScatterNDLoweringPatterns(typeConverter, patterns);
   populateHipsrGetPoolLoweringPatterns(typeConverter, patterns);
   populateHipsrCastLoweringPatterns(typeConverter, patterns);
+  populateHipsrCopyD2HLoweringPatterns(typeConverter, patterns);
   populateHipsrMatMulLoweringPatterns(typeConverter, patterns);
+  populateHipsrExpandLoweringPatterns(typeConverter, patterns);
 }
 
 struct HipsrConvertToLLVMInterface : public ConvertToLLVMPatternInterface {
@@ -90,14 +98,14 @@ struct HipsrConvertToLLVMInterface : public ConvertToLLVMPatternInterface {
   void populateConvertToLLVMConversionPatterns(
       ConversionTarget &target, LLVMTypeConverter &typeConverter,
       RewritePatternSet &patterns) const final {
-    // #hipsr.mem<kind> -> integer address space. MemorySpaceKind's numeric
+    // #hipsr.mem<space> -> integer address space. MemorySpace's numeric
     // values already match the AMDGPU address spaces (host=0, device=1,
     // pinned=2, managed=3), so map the enum directly.
     typeConverter.addTypeAttributeConversion(
         [](BaseMemRefType,
            MemorySpaceAttr space) -> TypeConverter::AttributeConversionResult {
           return IntegerAttr::get(IntegerType::get(space.getContext(), 64),
-                                  static_cast<int64_t>(space.getKind()));
+                                  static_cast<int64_t>(space.getValue()));
         });
     typeConverter.addConversion([](ContextType type) -> Type {
       return LLVM::LLVMPointerType::get(type.getContext(), 0);

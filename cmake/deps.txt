@@ -2,18 +2,6 @@
 ## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 ## Licensed under the MIT License.
 ##
-## Dependency manifest read by cmake/deps.cmake.
-##
-## Format per line:  name;url;hash
-##   - hash is a version, git tag/commit, or SHA256 depending on the dep (see the
-##     per-row notes below); a SHA256 archive hash gets "SHA256=" prepended.
-##   - an empty hash column means the download is not yet pinned (unverified).
-##
-## Versions are pinned in the url/hash columns. CI builds LLVM and ONNX Runtime
-## into cached prefixes, so keep the CI workflows' LLVM_TAG / ONNXRUNTIME_VERSION
-## in sync with the llvm/onnxruntime rows below; the other deps are pinned here
-## only.
-##
 ## ONNX Runtime: official release archive. url = release base host; hash column =
 ## version. cmake/deps.cmake derives the per-OS archive basename
 ## (onnxruntime-win-x64-<ver>.zip / onnxruntime-linux-x64-<ver>.tgz). Resolved
@@ -29,7 +17,5 @@ flatbuffers;https://github.com/google/flatbuffers.git;v25.12.19
 ## Crash-backtrace helper (always FetchContent; no find_package path).
 cpptrace;https://github.com/jeremy-rifkin/cpptrace.git;v0.8.3
 ##
-## TheRock ROCm SDK. url = tarball base host; hash = pinned ROCm release. The
-## full tarball basename (therock-dist-<os>-<gfxArch>-<rocmVersion>) is derived
-## in cmake/deps.cmake from the host OS + HIP_ARCHITECTURES. Real builds only.
-therock;https://repo.amd.com/rocm/tarball;7.11.0
+therock_windows;https://github.com/ROCm/hip-ep/releases/download/v0.3.0;therock-dist-windows-gfx1151-7.14.0
+therock_linux;https://repo.amd.com/rocm/tarball;7.11.0

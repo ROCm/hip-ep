@@ -26,9 +26,9 @@ def Hipsr_ExpandOp : Hipsr_DpsOp<"expand"> {
 
   let arguments = (ins
     Hipsr_ContextType:$ctx,
-    Hipsr_TensorOrDeviceMemRef:$input,
-    Optional<Hipsr_TensorOrHostMemRef>:$shape,
-    Hipsr_TensorOrDeviceMemRef:$init,
+    Hipsr_DeviceTensorOrMemRef:$input,
+    Optional<Hipsr_HostTensorOrMemRef>:$shape,
+    Hipsr_DeviceTensorOrMemRef:$init,
     OptionalAttr<DenseI64ArrayAttr>:$shape_attr
   );
 

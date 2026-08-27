@@ -12,12 +12,16 @@ namespace mlir {
 namespace hipsr {
 
 // Predicates for the Hipsr_*MemRef type constraints in HipsrTypes.td. Each
-// returns true only when the type is a memref in that memory space; a memref
-// with no space (or a space set by some other attribute) returns false.
+// returns true only when the type is a memref in that memory space, or in any
+// of them for isAnySpaceMemRef; a memref with no space (or a space set by some
+// other attribute) returns false.
 bool isHostMemRef(::mlir::Type type);
 bool isDeviceMemRef(::mlir::Type type);
 bool isPinnedMemRef(::mlir::Type type);
 bool isManagedMemRef(::mlir::Type type);
+bool isAnySpaceMemRef(::mlir::Type type);
+bool isHostRankedTensor(::mlir::Type type);
+bool isDeviceRankedTensor(::mlir::Type type);
 
 } // namespace hipsr
 } // namespace mlir

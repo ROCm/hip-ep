@@ -7,6 +7,7 @@
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Support/MathExtras.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
@@ -15,6 +16,8 @@
 #include "mlir/IR/SymbolTable.h"
 
 #include "hip/Dialect/IR/HipShapeUtils.h"
+
+#include <limits>
 
 using namespace mlir;
 using namespace mlir::hip;
@@ -109,6 +112,111 @@ LogicalResult AllocOutputOp::verify() {
     return emitOpError("expected ")
            << memrefTy.getNumDynamicDims() << " dynamic size operand(s), got "
            << getDynamicSizes().size();
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// ConstantOp: policy-neutral externalizable constant carrier
+//===----------------------------------------------------------------------===//
+
+ConstantOp::SourceKind ConstantOp::getSourceKind() {
+  if (getValueAttr())
+    return SourceKind::Inline;
+  return getMemoryAddressAttr() ? SourceKind::Memory : SourceKind::File;
+}
+
+LogicalResult ConstantOp::verify() {
+  RankedTensorType resultType = getResult().getType();
+  if (!resultType.hasStaticShape())
+    return emitOpError("requires a statically shaped ranked tensor result");
+
+  Type elementType = resultType.getElementType();
+  unsigned elementBits = 0;
+  if (auto floatType = dyn_cast<FloatType>(elementType)) {
+    if (!elementType.isF16() && !elementType.isBF16() && !elementType.isF32() &&
+        !elementType.isF64())
+      return emitOpError("has unsupported floating-point element type ")
+             << elementType;
+    elementBits = floatType.getWidth();
+  } else if (auto integerType = dyn_cast<IntegerType>(elementType)) {
+    elementBits = integerType.getWidth();
+    if (elementBits != 1 && elementBits != 8 && elementBits != 16 &&
+        elementBits != 32 && elementBits != 64)
+      return emitOpError("has unsupported integer element type ")
+             << elementType;
+  } else {
+    return emitOpError("has unsupported element type ") << elementType;
+  }
+
+  int64_t numElements = 1;
+  for (int64_t dim : resultType.getShape()) {
+    if (llvm::MulOverflow(numElements, dim, numElements))
+      return emitOpError("result element count overflows int64");
+  }
+  int64_t elementBytes = static_cast<int64_t>((elementBits + 7) / 8);
+  int64_t expectedBytes = 0;
+  if (llvm::MulOverflow(numElements, elementBytes, expectedBytes))
+    return emitOpError("result byte size overflows int64");
+
+  if (IntegerAttr order = getSerializationOrderAttr())
+    if (order.getInt() < 0)
+      return emitOpError("serialization order must be non-negative");
+
+  bool hasValue = getValueAttr() != nullptr;
+  bool hasLocation = getLocationAttr() != nullptr;
+  bool hasOffset = getOffsetAttr() != nullptr;
+  bool hasMemoryAddress = getMemoryAddressAttr() != nullptr;
+  bool hasSize = getSizeAttr() != nullptr;
+  if (hasValue) {
+    if (hasLocation || hasOffset || hasMemoryAddress || hasSize)
+      return emitOpError("inline source must contain only `value`");
+    auto denseValue = dyn_cast<DenseElementsAttr>(getValueAttr());
+    if (!denseValue)
+      return emitOpError("inline `value` must be a DenseElementsAttr");
+    if (denseValue.getType() != resultType)
+      return emitOpError("inline `value` type ")
+             << denseValue.getType() << " does not match result type "
+             << resultType;
+    return success();
+  }
+
+  bool hasAnyFileField = hasLocation || hasOffset;
+  if (hasAnyFileField && hasMemoryAddress)
+    return emitOpError("file and memory sources are mutually exclusive");
+  if (!hasAnyFileField && !hasMemoryAddress && !hasSize)
+    return emitOpError(
+        "requires exactly one source: `value`, complete file source, or "
+        "complete memory source");
+  if (hasAnyFileField && (!hasLocation || !hasOffset || !hasSize))
+    return emitOpError(
+        "external source requires `location`, `offset`, and `size` together");
+  if (hasMemoryAddress && !hasSize)
+    return emitOpError(
+        "memory source requires `memory_address` and `size` together");
+  if (!hasAnyFileField && !hasMemoryAddress)
+    return emitOpError(
+        "external source requires a file location or memory address");
+
+  int64_t size = getSizeAttr().getInt();
+  if (size <= 0)
+    return emitOpError("external source `size` must be positive");
+  if (size != expectedBytes)
+    return emitOpError("external source byte size ")
+           << size << " does not match result byte size " << expectedBytes;
+
+  if (hasMemoryAddress) {
+    if (getMemoryAddressAttr().getInt() == 0)
+      return emitOpError("memory-address source has null address");
+  } else {
+    StringRef location = getLocationAttr().getValue();
+    int64_t offset = getOffsetAttr().getInt();
+    if (location.empty())
+      return emitOpError("external source `location` must not be empty");
+    if (offset < 0)
+      return emitOpError("file source `offset` must be non-negative");
+    if (offset > std::numeric_limits<int64_t>::max() - size)
+      return emitOpError("file source range overflows int64");
+  }
   return success();
 }
 
@@ -572,9 +680,9 @@ LogicalResult MatmulOp::verify() {
   // mismatch (in which case it has already issued a diagnostic on `*this`).
   return mlir::hip::verifyHipOpShape(
       *this, [&]() -> SmallVector<SmallVector<int64_t>> {
-        SmallVector<int64_t> outShape =
-            mlir::hip::inferMatmulShape(getShapeOf(getA()), getShapeOf(getB()),
-                                        [&]() { return this->emitOpError(); });
+        SmallVector<int64_t> outShape = mlir::hip::inferMatmulShape(
+            getShapeOf(getA()), getShapeOf(getB()),
+            [&]() { return this->emitOpError(); }, getTransA(), getTransB());
         if (outShape.empty())
           return {};
         return {std::move(outShape)};
@@ -652,6 +760,51 @@ LogicalResult LayerNormOp::verify() {
   for (Value out : getOutputs())
     dataOperands.push_back(out);
   return verifyDpsComputeOp(*this, dataOperands, /*numInits=*/numOutputs);
+}
+
+//===----------------------------------------------------------------------===//
+// InstanceNormOp: ins(input, scale, bias), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange InstanceNormOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void InstanceNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult InstanceNormOp::verify() {
+  SmallVector<Value> dataOperands{getInput(), getScale(), getBias(),
+                                  getOutput()};
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  auto rankedShape = [](Type t) -> std::optional<int64_t> {
+    if (auto tensor = dyn_cast<RankedTensorType>(t))
+      return tensor.getRank();
+    if (auto memref = dyn_cast<MemRefType>(t))
+      return memref.getRank();
+    return std::nullopt;
+  };
+
+  auto inputRank = rankedShape(getInput().getType());
+  if (!inputRank)
+    return emitOpError("expected ranked input of rank >= 3 (N, C, D1, ...)");
+  if (*inputRank < 3)
+    return emitOpError("expected input rank >= 3 (N, C, D1, ...), got ")
+           << *inputRank;
+
+  auto scaleRank = rankedShape(getScale().getType());
+  auto biasRank = rankedShape(getBias().getType());
+  if (scaleRank && *scaleRank != 1)
+    return emitOpError("expected 1-D scale of length C, got rank ")
+           << *scaleRank;
+  if (biasRank && *biasRank != 1)
+    return emitOpError("expected 1-D bias of length C, got rank ") << *biasRank;
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -1060,6 +1213,58 @@ void ResizeOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// GridSampleOp: ins(input, grid), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GridSampleOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void GridSampleOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult GridSampleOp::verify() {
+  SmallVector<Value> dataOperands{getInput(), getGrid(), getOutput()};
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  auto rankedShape = [](Type t) -> std::optional<int64_t> {
+    if (auto tensor = dyn_cast<RankedTensorType>(t))
+      return tensor.getRank();
+    if (auto memref = dyn_cast<MemRefType>(t))
+      return memref.getRank();
+    return std::nullopt;
+  };
+
+  auto inputRank = rankedShape(getInput().getType());
+  auto gridRank = rankedShape(getGrid().getType());
+  auto outputRank = rankedShape(getOutput().getType());
+  if (!inputRank || *inputRank != 4)
+    return emitOpError("expected 4-D input (N, C, H, W)");
+  if (!gridRank || *gridRank != 4)
+    return emitOpError("expected 4-D grid (N, H_out, W_out, 2)");
+  if (!outputRank || *outputRank != 4)
+    return emitOpError("expected 4-D output (N, C, H_out, W_out)");
+
+  int64_t mode = getMode();
+  if (mode != 0 && mode != 1)
+    return emitOpError("mode must be 0 (nearest) or 1 (bilinear), got ")
+           << mode;
+  int64_t padding = getPaddingMode();
+  if (padding < 0 || padding > 2)
+    return emitOpError("padding_mode must be 0 (zeros), 1 (border), or 2 "
+                       "(reflection), got ")
+           << padding;
+  int64_t align = getAlignCorners();
+  if (align != 0 && align != 1)
+    return emitOpError("align_corners must be 0 or 1, got ") << align;
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -1634,6 +1839,18 @@ void CosOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// ErfOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ErfOp::getDpsInitsMutable() { return getYMutable(); }
+
+void ErfOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // SinOp: ins(x), outs(y)
 //===----------------------------------------------------------------------===//
 
@@ -1652,6 +1869,18 @@ void SinOp::getEffects(
 MutableOperandRange CeilOp::getDpsInitsMutable() { return getYMutable(); }
 
 void CeilOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// RoundOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange RoundOp::getDpsInitsMutable() { return getYMutable(); }
+
+void RoundOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);

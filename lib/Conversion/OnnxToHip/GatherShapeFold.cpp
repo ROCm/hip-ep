@@ -19,8 +19,8 @@
 //
 // Why this matters (dynamic-sequence-length regression):
 //   With fully static shapes, this whole chain folds to a compile-time
-//   constant that GenerateInterface places in constants.bin (already on GPU
-//   at init -- no per-step host store).  Dynamic sequence length breaks the
+//   constant handled by the standalone externalizer (already on GPU at init --
+//   no per-step host store). Dynamic sequence length breaks the
 //   constant fold, so the same arithmetic now happens at runtime.  The
 //   bufferized form of the full Shape result is `memref<Nxi64>` written by N
 //   host stores, then absorbed by PoolAllocs into the GPU pool.  On targets
@@ -35,9 +35,10 @@
 // GPU-readable on UMA — avoiding the host-store-into-device-memory SEGV.
 //
 // Implemented as a RewritePattern rooted on `onnx.Gather` and run BEFORE
-// `lowerOnnxConstants` so the index value is still inline in the
-// `onnx.Constant` `value` attribute (after externalization it would be
-// hidden behind `memref.get_global` pointing into the constants blob).
+// `lowerOnnxConstants` so this ONNX-rooted matcher sees the generic
+// `onnx.Constant` index producer and its value. The lowering creates an
+// inspectable hip.constant carrier; standalone externalization happens after
+// compute conversion.
 //
 // Non-goals
 // ---------

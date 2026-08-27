@@ -10,6 +10,7 @@
 #include "morphizen-utils/morphizen_plugin.hpp"
 #include "morphizen/onnxruntime_morphizen_ep.hpp"
 #include <glog/logging.h>
+#include <google/protobuf/message_lite.h>
 #include <google/protobuf/util/json_util.h>
 
 #if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
@@ -66,6 +67,12 @@ MorphiZenEpFactory::MorphiZenEpFactory(const char *ep_name, ApiPtrs apis,
   CreateDataTransfer = CreateDataTransferImpl;
   IsStreamAware = IsStreamAwareImpl;
   CreateSyncStreamForDevice = CreateSyncStreamForDeviceImpl;
+
+  morphizen::add_cleanup_function("protobuf shutdown", []() {
+#ifdef _WIN32
+    google::protobuf::ShutdownProtobufLibrary();
+#endif
+  });
 }
 const char *ORT_API_CALL
 MorphiZenEpFactory::GetNameImpl(const OrtEpFactory *this_ptr) noexcept {

@@ -6,26 +6,21 @@
 //
 // Sibling pre-lowering fold to GatherShapeFold / ReshapeShapeFold. Captures
 // the compile-time value of `onnx.Pad`'s `pads` (and optional `axes`) operand
-// onto the op as attributes BEFORE `lowerOnnxConstants` externalizes the
-// constant -- so the later PadConversion (which runs in `convertComputeOps`,
-// AFTER externalization) can compute the dynamic output shape from those
-// attributes without reading the operand.
+// onto the op while its producer is still a generic ONNX constant. The later
+// `lowerOnnxConstants` sweep creates an inspectable `hip.constant`, and
+// PadConversion runs before the standalone externalizer. Stamping still gives
+// shape construction stable provenance independent of the rewritten producer.
 //
 // Why this matters
 // ----------------
 // `onnx.Pad` with a dynamic output shape needs the per-axis pad amounts on the
 // HOST to size the output buffer (out_dim[i] = data_dim[i] + begin + end).
-// `pads` is almost always a compile-time constant in the ONNX model, but it is
-// frequently large enough (or a model-wide initializer) that
-// `lowerOnnxConstants` externalizes it: the `onnx.Constant` becomes a
-// `memref.global` with a NULL initial_value (bytes live in `constants.bin`).
-// By the time PadConversion runs, the inline value is gone, so a fold attempt
-// fails and the fallback emits a synchronized `hip.readback_scalar` (D2H) per
-// pad entry -- runtime device traffic for a value that is known at compile
-// time. This pre-lowering fold runs while the value is still inline and stamps
-// it onto the op, eliminating the readback for the (overwhelmingly common)
-// constant-`pads` case. Genuinely runtime-dynamic `pads` carry no attribute
-// and still use the readback path in PadConversion (correctness preserved).
+// `pads` is almost always a compile-time ONNX constant. This ONNX-rooted
+// pre-rewrite runs before the producer changes dialect and stamps the values
+// onto the Pad op. PadConversion can then size dynamic outputs without relying
+// on a particular constant producer form or emitting synchronized D2H
+// readbacks. Genuinely runtime-dynamic `pads` carry no attribute and still use
+// the readback path (correctness preserved).
 //
 //   Before (this pattern):
 //     %pads = onnx.Constant {value = dense<[0,1,0,1]> : tensor<4xi64>}
@@ -50,8 +45,8 @@
 //     `arith.constant`). If `pads` is not such an inline constant the op is
 //     left unchanged -- it is a genuine runtime `pads` and PadConversion's
 //     readback fallback handles it.
-//   * Leaves the `onnx.Constant` ops in place; DCE / externalization handle
-//     them as usual.
+//   * Leaves the `onnx.Constant` ops in place; carrier lowering, DCE, and the
+//     later standalone externalizer handle them as usual.
 //
 //===----------------------------------------------------------------------===//
 
@@ -70,7 +65,7 @@
 
 STATISTIC(NumPadConstStamps,
           "Number of onnx.Pad ops whose constant pads/axes were stamped as "
-          "attributes before externalization");
+          "attributes before carrier lowering");
 
 namespace mlir {
 namespace hip {
@@ -80,9 +75,8 @@ namespace {
 /// Return the values of `v` as an int64 vector when `v` is an inline 1-D
 /// integer constant (`arith.constant` or `onnx.Constant {value = dense<...>}`),
 /// or std::nullopt otherwise. Mirrors the inline-constant recognition used by
-/// the sibling shape folds; deliberately does NOT peek through
-/// `bufferization.to_tensor(memref.get_global)` because this pattern runs
-/// BEFORE externalization, where that form does not yet exist.
+/// the sibling shape folds. It deliberately matches generic ONNX/arith
+/// producers because this ONNX-rooted pre-rewrite runs before carrier lowering.
 static std::optional<llvm::SmallVector<int64_t>>
 getInlineIntVector(mlir::Value v) {
   if (!v)
@@ -138,9 +132,9 @@ struct PadStampConstShape : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(op, "pad.pads_not_inline_const");
 
     // `axes` is operand 3 when present and not an onnx.NoValue. Stamp it too so
-    // PadConversion's axis->slot mapping does not have to read an (also
-    // possibly externalized) `axes` constant. Absent/None axes => default
-    // identity, handled by PadConversion without an attribute.
+    // PadConversion's axis->slot mapping does not depend on the rewritten
+    // `axes` producer form. Absent/None axes => default identity, handled by
+    // PadConversion without an attribute.
     std::optional<llvm::SmallVector<int64_t>> axesVec;
     if (op->getNumOperands() > 3) {
       mlir::Value axes = op->getOperand(3);

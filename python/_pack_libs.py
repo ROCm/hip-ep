@@ -68,7 +68,7 @@ def main():
         required=True,
         metavar="PATH",
         help="Path to a native library to bundle (repeatable). The EP plugin "
-        "library and its JIT compiler plugin (hip-compiler) are both required.",
+        "library is required; the JIT compiler is linked into it.",
     )
     ap.add_argument(
         "--dest", required=True, help="Destination dir (the wheel's onnxruntime/capi)."

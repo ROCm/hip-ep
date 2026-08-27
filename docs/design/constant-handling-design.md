@@ -66,7 +66,7 @@ The constants pipeline has two phases separated by the `FileSystem` abstraction:
 ```
 Compile time
   ╔═════════════════════════════════╗                               ╔══════════════════════════════════╗
-  ║         morphizen-ep.dll        ║                               ║       hip-compiler.dll           ║
+  ║         morphizen-ep.dll        ║                               ║       hip-compiler (plugin)      ║
   ║                                 ║                               ║                                  ║
   ║  ┌─────────────────────────┐    ║  hip_compile_with_fs(fs)    ║  fs->create_writer(name)         ║
   ║  │ level-1 pass (HipDnnEP) ├────╫──────────────────────────────▶  → FileWriter → fwrite()        ║
@@ -77,7 +77,7 @@ Compile time
                                                                               DiskFileSystem for
                                                                               CLI / standalone use)
                                                                                         │
-Runtime  (hip-compiler.dll NOT loaded)                                                  │
+Runtime  (the compiler is not involved)                                                 │
   ╔═════════════════════════════════════════════════════════════════════════════════════╗
   ║                                morphizen-ep.dll                                     ║
   ║                                                                                     ║
@@ -95,7 +95,20 @@ Runtime  (hip-compiler.dll NOT loaded)                                          
                                                                               EP tar cache ◀┘
 ```
 
-**Compile time**: the `OnnxToHip` pass calls
+**Compile time**: `convert-onnx-to-hip` preserves its value-based pre-folds and
+two constant sweeps, but each sweep only lowers `onnx.Constant` to the neutral
+`hip.constant` carrier. A carrier contains an inline dense `value`, a complete
+file `location`/`offset`/`size`, or a complete
+`memory_address`/`size`. The ONNX converter translates the ORT memory sentinel
+into the generic memory form; no ORT encoding enters the HIP dialect.
+
+After the `AfterConvertOnnxToHip` plugin slot, `hip-infer-shapes` consumes any
+inspectable carrier payload needed for compile-time shape refinement. The
+standalone `hip-externalize-constants` pass then validates and plans all
+carriers, writes the artifacts, and commits the IR and metadata. Plugins may
+emit `hip.constant` at that slot and receive the same policy as in-tree
+constants.
+The externalizer calls
 `fs->create_writer(constants_filename)` to stream raw constant bytes into
 storage. `constants_filename` is the configured constants file
 (default: `constants.bin`, see [compilation-options.md](compilation-options.md)).
@@ -110,16 +123,14 @@ For the full DLL contract and `FileSystem` interface definition, see
 
 ### constants.bin Format
 
-Chunk-aligned binary layout (default chunk size: 256 bytes; configurable).
-`computeOffsets()` sorts constants by ascending size (a convenience; no strong
-architectural requirement), then bin-packs small constants that fit within the
-remaining space of the current chunk — multiple small constants can share one
-chunk — and places each large constant at the next chunk boundary. A large
-constant may span multiple chunks. Zero-filled padding bytes fill the gaps:
+Constants remain in declaration order. Each constant begins at the next
+64-byte boundary; zero-filled bytes occupy alignment gaps. The file ends at the
+end of the final constant (there is no mandatory trailing 64-byte pad):
 
 ```
-[constant_a (small)][constant_b (small)][padding to chunk boundary]
-[constant_c (large — may span multiple chunks ...  ][padding]
+[constant_a][zero padding to 64-byte boundary]
+[constant_b][zero padding to 64-byte boundary]
+[constant_c]
 ...
 ```
 
@@ -138,7 +149,11 @@ the buffer after a single bulk read.
         │ globalIndex (0,1,2,…)
         ▼
   ┌─────────────────────────────────────────┐  compile time
-  │ Step 1: OnnxToHip                       │
+  │ Step 1a: convert-onnx-to-hip            │
+  │  → hip.constant carriers                │
+  │ Step 1b: hip-infer-shapes               │
+  │  → consume compile-time shape payloads  │
+  │ Step 1c: hip-externalize-constants      │
   │  → constants file (via fs)              │
   │  → hipdnn.constant_sizes                │
   │  → hipdnn.constant_offsets              │
@@ -165,16 +180,39 @@ the buffer after a single bulk read.
 
 `model_metadata` schema: [compiler-runtime-contract.md](compiler-runtime-contract.md).
 
-### Step 1 — Discover constants and assign index
+### Step 1 — Produce carriers, then externalize
 
-The `OnnxToHip` pass (`lib/Conversion/OnnxToHip/OnnxToHip.cpp`) walks the ONNX
-functions, assigns each `onnx.Constant` op a sequential `globalIndex`
-(0, 1, 2, …), and computes its byte size. Layout order in the constants file
-may differ from index order (see [constants.bin Format](#constants.bin-format)
-above), but `hipdnn.constant_offsets` preserves the mapping.
+`convert-onnx-to-hip`
+(`lib/Conversion/OnnxToHip/OnnxToHip.cpp`) lowers each `onnx.Constant` to
+`hip.constant` after the existing Pad/Slice/Tile/Gather/Reshape and
+GatherBlockQuantized value-based rewrites have had access to the original
+literal. It does no filesystem access, layout, index assignment, global
+creation, or constant metadata stamping.
 
-The pass then writes raw constant bytes to the configured constants file via
-`fs`, and emits two module attributes:
+`hip-externalize-constants`
+(`lib/Dialect/Transforms/ExternalizeConstants.cpp`) validates each explicit
+`serialization_order`, then assigns every externalized carrier a sequential
+`globalIndex` (0, 1, 2, …). The ONNX converter's absolute counter preserves its
+original visitation across functions: function 0 imported sweep, function 0
+synthesized sweep, function 1 imported sweep, function 1 synthesized sweep, and
+so on. Unordered plugin carriers follow in stable module walk order. Inline
+values below the threshold become `arith.constant`; larger values and external
+references become the existing extern `memref.global` bridge. The direct pass
+threshold defaults to `0` (inline); production compilation passes the default
+`1`, so every non-empty production constant, including a scalar, is
+externalized. External sources require a positive byte size, matching the
+pre-split behavior.
+
+The ORT memory-address sentinel is handled only by the ONNX converter. It
+becomes the generic carrier `memory_address`, which remains process-local and
+non-serializable. ORT retains initializer storage through compilation, and the
+production pass receives an injected `FileSystem` while that storage is live.
+Direct/textual pass invocation rejects memory-address carriers before
+dereferencing them. Keeping the handoff zero-copy avoids duplicating
+potentially multi-gigabyte weights throughout shape inference.
+
+For externalized constants, the pass writes raw bytes to the configured
+constants file via `fs`, and emits the existing module attributes:
 
 - `hipdnn.constant_sizes` — per-constant byte sizes, indexed by `globalIndex`.
 - `hipdnn.constant_offsets` — byte offset of each constant in the configured
@@ -182,6 +220,31 @@ The pass then writes raw constant bytes to the configured constants file via
 
 The constant count is derived from `hipdnn.constant_sizes`; no separate count
 attribute is emitted.
+
+With `skip-constant-data`, the current streaming/hybrid contract is preserved:
+splat and file references stay in the existing parallel source arrays, while
+live memory-address and non-splat inline bytes are packed into a compact
+64-byte-aligned partial constants file. The runtime FlatBuffer schema and
+`MemSource` contract are unchanged. Pure streaming and hybrid compilation do
+not open file-reference sources because those bytes are read later by the
+runtime. Full-sidecar and threshold-zero inline modes validate/read file ranges
+because compilation actually consumes the bytes.
+
+Threshold-zero inline materialization preserves the carrier's exact tensor
+type, including `ui8` and `si8`. Byte-aligned element types use
+`DenseElementsAttr::getFromRawBuffer` with that exact tensor type, preserving
+MLIR/ONNX raw-storage interpretation without host-endian integer decoding.
+External `i1` is the sole normalization case because the runtime contract uses
+one byte per element while DenseElementsAttr bit-packs it. Type agreement is
+checked before any IR mutation.
+
+The implementation validates carriers, explicit serialization order, source ranges
+that compilation reads, layout arithmetic, metadata freshness, and symbol
+availability before serialization, then mutates IR only after serialization
+succeeds. The shared `ConstantsIO` contract intentionally remains unchanged:
+it does not surface `FileWriter::fwrite` short writes. `FileSystem` also has no
+atomic rename/remove transaction, so a later failed write can leave a partial
+artifact even though the IR remains unchanged.
 
 ### Step 2 — Code generation: `GenerateInterface` pass
 

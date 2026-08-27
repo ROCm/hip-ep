@@ -15,6 +15,7 @@
 #include <fstream>
 #include <glog/logging.h>
 #include <limits>
+#include <string>
 #include <vector>
 
 // Protobuf

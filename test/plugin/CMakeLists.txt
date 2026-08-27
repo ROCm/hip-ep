@@ -27,13 +27,17 @@ target_compile_features(test_static_plugins PRIVATE cxx_std_17)
 target_include_directories(test_static_plugins PRIVATE
   ${MLIR_INCLUDE_DIRS}
   ${LLVM_INCLUDE_DIRS}
+  ${CMAKE_SOURCE_DIR}/morphizen/morphizen-foundation/include
 )
 
 target_link_libraries(test_static_plugins PRIVATE
   LibHipCompiler
+  hip_ep_sample_plugin
   # Direct references from the dialect-path checks; the in-tree dialects that
   # loadAllDialects() registers come transitively via LibHipCompiler.
   MLIRIR
+  MLIRParser
+  MLIRPass
   MLIRSupport
   MLIRConvertToLLVMInterface
 )

@@ -58,17 +58,18 @@ Ops backed by the MIOpen library. Each maps to a specific MIOpen C API call.
 
 ### Normalization
 
-| Op | DPS Syntax | MIOpen API | Status |
-|---|---|---|---|
-| `hip.miopen.rms_norm` | `(%ctx) ins(%input, %weight : ...) outs(%output : ...)` | `miopenT5LayerNormForward` | Full impl |
-| `hip.miopen.skip_rms_norm` | `(%ctx) ins(%x, %skip, %weight : ...) outs(%output, %residual : ...)` | `miopenAddLayerNormForward` (T5 mode) | Stub |
+The norm ops are backed by custom HIP kernels, not MIOpen.
+
+| Op | DPS Syntax | Backend |
+|---|---|---|
+| `hip.rms_norm` | `(%ctx) ins(%input, %weight : ...) outs(%output : ...)` | `rms_norm_kernel.hip` |
+| `hip.skip_rms_norm` | `(%ctx) ins(%x, %skip, %weight : ...) outs(%output, %residual : ...)` | `skip_rms_norm_kernel.hip` |
 
 Rank-generic: for 3D input `[B,S,D]`, the lowering flattens `N = B*S, D = D` and
-passes them to the runtime: `hip_miopen_rms_norm(handle, input, weight, output, N, D)`.
+passes them to the runtime: `wrap_rms_norm(state, input, weight, output, ...)`.
 
 `skip_rms_norm` fuses Add + RMSNorm into a single kernel:
 `residual = x + skip; output = RMSNorm(residual) * weight`.
-Uses `MIOPEN_ELEMENTWISE_AFFINE_T5` normalization mode.
 
 ### Rotary Positional Embeddings
 

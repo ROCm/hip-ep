@@ -243,8 +243,6 @@ def generate_build_tree(args, build_dir, prefix_paths, hip_arch, mock):
         f"-DCMAKE_BUILD_TYPE={args.config}",
         f"-DCMAKE_INSTALL_PREFIX={args.install_dir}",
         "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
-        "-DBUILD_EP=ON",
-        "-DBUILD_HIP_TOOLS=ON",
     ]
     # Build the Python wheel by default for real builds; mock has no ROCm libs
     # to bundle, and --skip_wheel opts out.
@@ -341,10 +339,8 @@ def run_tests(args, build_dir):
     )
 
     # GPU-free ctest unit suites (built as part of the default target above).
-    # -R limits the run to these two -- the plugin registrar (compiler-only) and
-    # the output-allocator test (links the mock runtime) -- so the GPU / hip-test
-    # e2e ctest suites, which need a real device, are not invoked here.
-    step("Test (plugin registrar + output-allocator unit tests)")
+    # GPU / hip-test e2e suites are not invoked here.
+    step("Test (compiler/runtime GPU-free unit tests)")
     run_subprocess(
         [
             "ctest",

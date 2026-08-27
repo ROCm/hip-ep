@@ -442,57 +442,59 @@ hipblasLtMatmul(hipblasLtHandle_t handle, hipblasLtMatmulDesc_t matmul_desc,
 
 // Mock wrapper implementations (called from generated MLIR code)
 
-int wrap_miopenConvolutionForward(
-    RuntimeState *state, const void *input, int64_t input_n, int64_t input_c,
-    int64_t input_h, int64_t input_w, const void *weights, int64_t weights_k,
-    const void *bias, void *output, int64_t output_h, int64_t output_w,
-    int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
-    int64_t pad_top, int64_t pad_left, int64_t pad_bottom, int64_t pad_right,
-    int64_t dilation_h, int64_t dilation_w, int64_t group, int64_t data_type) {
+int wrap_conv(RuntimeState *state, int32_t op_state_slot, const void *input,
+              const void *weights, const void *bias, void *output,
+              int64_t data_type, int64_t spatial_rank, int64_t N, int64_t Cin,
+              int64_t Cout, int64_t in0, int64_t in1, int64_t in2, int64_t out0,
+              int64_t out1, int64_t out2, int64_t k0, int64_t k1, int64_t k2,
+              int64_t s0, int64_t s1, int64_t s2, int64_t p0, int64_t p1,
+              int64_t p2, int64_t dil0, int64_t dil1, int64_t dil2,
+              int64_t group) {
   if (!state || !input || !weights || !output) {
-    fprintf(stderr, "Invalid arguments to wrap_miopenConvolutionForward\n");
+    fprintf(stderr, "Invalid arguments to wrap_conv\n");
     return -1;
   }
+  (void)op_state_slot;
 
-  MOCK_PRINT("[MOCK] wrap_miopenConvolutionForward(\n");
-  MOCK_PRINT("[MOCK]   input=[%lld,%lld,%lld,%lld],\n", (long long)input_n,
-             (long long)input_c, (long long)input_h, (long long)input_w);
-  MOCK_PRINT("[MOCK]   weights=[%lld,%lld,%lld,%lld],\n", (long long)weights_k,
-             (long long)(input_c / (group ? group : 1)), (long long)kernel_h,
-             (long long)kernel_w);
-  MOCK_PRINT("[MOCK]   output=[%lld,%lld,%lld,%lld],\n", (long long)input_n,
-             (long long)weights_k, (long long)output_h, (long long)output_w);
-  MOCK_PRINT("[MOCK]   stride=[%lld,%lld], pad=[%lld,%lld,%lld,%lld], "
-             "dilation=[%lld,%lld], group=%lld)\n",
-             (long long)stride_h, (long long)stride_w, (long long)pad_top,
-             (long long)pad_left, (long long)pad_bottom, (long long)pad_right,
-             (long long)dilation_h, (long long)dilation_w, (long long)group);
+  MOCK_PRINT(
+      "[MOCK] wrap_conv(dtype=%s(%lld), rank=%lld, N=%lld, Cin=%lld, "
+      "Cout=%lld, group=%lld, in=[%lld,%lld,%lld], out=[%lld,%lld,%lld], "
+      "k=[%lld,%lld,%lld], s=[%lld,%lld,%lld], pbegin=[%lld,%lld,%lld], "
+      "dil=[%lld,%lld,%lld], bias=%s)\n",
+      hipdnn_ep_datatype_name(data_type), (long long)data_type,
+      (long long)spatial_rank, (long long)N, (long long)Cin, (long long)Cout,
+      (long long)group, (long long)in0, (long long)in1, (long long)in2,
+      (long long)out0, (long long)out1, (long long)out2, (long long)k0,
+      (long long)k1, (long long)k2, (long long)s0, (long long)s1, (long long)s2,
+      (long long)p0, (long long)p1, (long long)p2, (long long)dil0,
+      (long long)dil1, (long long)dil2, bias ? "yes" : "null");
 
-  // Mock: Fill output with dummy data (zeros in this case)
-  // In a real implementation, this would call MIOpen. Use the actual element
-  // size so fp16 buffers aren't overrun.
+  // Zero the output so a mock run leaves the buffer defined. Use the real
+  // element size so fp16 buffers are not overrun.
   int64_t elem_bytes = hipdnn_ep_datatype_size(data_type);
   size_t elem = (elem_bytes > 0) ? (size_t)elem_bytes : sizeof(float);
-  size_t output_size = (size_t)input_n * weights_k * output_h * output_w * elem;
-  memset(output, 0, output_size);
+  memset(output, 0, (size_t)N * Cout * out0 * out1 * out2 * elem);
 
   return 0;
 }
 
-int wrap_miopenConvolutionTranspose(
-    RuntimeState *state, const void *input, int64_t input_n, int64_t input_c,
-    int64_t input_h, int64_t input_w, const void *weights, const void *bias,
-    void *output, int64_t output_c, int64_t output_h, int64_t output_w,
-    int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
-    int64_t pad_top, int64_t pad_left, int64_t pad_bottom, int64_t pad_right,
-    int64_t dilation_h, int64_t dilation_w, int64_t output_padding_h,
-    int64_t output_padding_w, int64_t group, int64_t data_type) {
+int wrap_conv_transpose(RuntimeState *state, int32_t op_state_slot,
+                        const void *input, int64_t input_n, int64_t input_c,
+                        int64_t input_h, int64_t input_w, const void *weights,
+                        const void *bias, void *output, int64_t output_c,
+                        int64_t output_h, int64_t output_w, int64_t kernel_h,
+                        int64_t kernel_w, int64_t stride_h, int64_t stride_w,
+                        int64_t pad_top, int64_t pad_left, int64_t pad_bottom,
+                        int64_t pad_right, int64_t dilation_h,
+                        int64_t dilation_w, int64_t output_padding_h,
+                        int64_t output_padding_w, int64_t group,
+                        int64_t data_type) {
   if (!state || !input || !weights || !output) {
-    fprintf(stderr, "Invalid arguments to wrap_miopenConvolutionTranspose\n");
+    fprintf(stderr, "Invalid arguments to wrap_conv_transpose\n");
     return -1;
   }
 
-  MOCK_PRINT("[MOCK] wrap_miopenConvolutionTranspose(\n");
+  MOCK_PRINT("[MOCK] wrap_conv_transpose(\n");
   MOCK_PRINT("[MOCK]   input=[%lld,%lld,%lld,%lld],\n", (long long)input_n,
              (long long)input_c, (long long)input_h, (long long)input_w);
   MOCK_PRINT("[MOCK]   weights=[%lld,%lld,%lld,%lld],\n", (long long)input_c,
@@ -510,21 +512,19 @@ int wrap_miopenConvolutionTranspose(
              (long long)output_padding_h, (long long)output_padding_w,
              (long long)group, hipdnn_ep_datatype_name(data_type));
 
-  // Mock: zero the output (real implementation calls MIOpen transpose conv).
+  // Mock: zero the output (the real runtime runs hip_conv_transpose).
   size_t output_size = input_n * output_c * output_h * output_w * sizeof(float);
   memset(output, 0, output_size);
 
   return 0;
 }
 
-int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
-                                const void *input, const void *weight,
-                                const void *bias, const void *past_state,
-                                void *output, void *present_state,
-                                int64_t batch_size, int64_t channels,
-                                int64_t seq_len, int64_t kernel_size,
-                                int64_t ndim, int64_t activation,
-                                int64_t element_size_bytes) {
+int wrap_causal_conv_with_state(
+    RuntimeState *state, int op_state_slot, const void *input,
+    const void *weight, const void *bias, const void *past_state, void *output,
+    void *present_state, int64_t batch_size, int64_t channels, int64_t seq_len,
+    int64_t kernel_size, int64_t ndim, int64_t activation,
+    int64_t element_size_bytes, int64_t channels_last) {
   (void)op_state_slot;
   if (!state || !input || !weight || !output || !present_state) {
     fprintf(stderr,
@@ -533,8 +533,6 @@ int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
   }
 
   // CausalConvWithState fused activation enum: 0=none, 1=silu/swish.
-  // This is independent of hipdnn_ep_activation_name() which maps generic
-  // miopen activations (sigmoid/relu/tanh).
   const char *act_name = (activation == 1) ? "silu" : "none";
 
   MOCK_PRINT("[MOCK] wrap_causal_conv_with_state(\n");
@@ -544,6 +542,8 @@ int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
   MOCK_PRINT("[MOCK]   ndim=%lld, activation=%s(%lld), elem_size=%lld,\n",
              (long long)ndim, act_name, (long long)activation,
              (long long)element_size_bytes);
+  MOCK_PRINT("[MOCK]   layout=%s,\n",
+             channels_last ? "channels_last(B,L,C)" : "channels_first(B,C,L)");
   MOCK_PRINT("[MOCK]   bias=%s, past_state=%s)\n", bias ? "yes" : "null",
              past_state ? "yes" : "null");
 
@@ -595,8 +595,11 @@ int wrap_hipblasLtGemm(void *handle, void *stream, int64_t m, int64_t n,
 int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
                          const void *B, void *output, int64_t M, int64_t N,
                          int64_t K, int64_t batch_count, int64_t elem_size,
-                         int64_t b_batch_stride) {
+                         int64_t b_batch_stride, int64_t transA,
+                         int64_t transB) {
   (void)b_batch_stride;
+  (void)transA;
+  (void)transB;
   (void)op_state_slot;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_hipblasLtMatmul\n");
@@ -604,9 +607,9 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
   }
 
   MOCK_PRINT("[MOCK] wrap_hipblasLtMatmul(M=%lld, N=%lld, K=%lld, "
-             "batch=%lld, elem_size=%lld)\n",
+             "batch=%lld, elem_size=%lld, transA=%lld, transB=%lld)\n",
              (long long)M, (long long)N, (long long)K, (long long)batch_count,
-             (long long)elem_size);
+             (long long)elem_size, (long long)transA, (long long)transB);
 
   return 0;
 }
@@ -780,19 +783,19 @@ int wrap_linear_attention(RuntimeState *state, const void *query,
   return 0;
 }
 
-int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
-                        void *rhs, void *output, int64_t lhs_n, int64_t lhs_c,
-                        int64_t lhs_h, int64_t lhs_w, int64_t rhs_n,
-                        int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
-                        int64_t out_n, int64_t out_c, int64_t out_h,
-                        int64_t out_w, int64_t data_type, int64_t tensor_op) {
+int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
+                     void *rhs, void *output, int64_t lhs_n, int64_t lhs_c,
+                     int64_t lhs_h, int64_t lhs_w, int64_t rhs_n, int64_t rhs_c,
+                     int64_t rhs_h, int64_t rhs_w, int64_t out_n, int64_t out_c,
+                     int64_t out_h, int64_t out_w, int64_t data_type,
+                     int64_t tensor_op) {
   (void)op_state_slot;
   if (!state) {
-    fprintf(stderr, "Invalid state in wrap_miopenOpTensor\n");
+    fprintf(stderr, "Invalid state in wrap_elementwise\n");
     return -1;
   }
 
-  MOCK_PRINT("[MOCK] wrap_miopenOpTensor(op=%s, "
+  MOCK_PRINT("[MOCK] wrap_elementwise(op=%s, "
              "lhs=[%lld,%lld,%lld,%lld], "
              "rhs=[%lld,%lld,%lld,%lld], "
              "out=[%lld,%lld,%lld,%lld], "
@@ -1176,6 +1179,26 @@ int wrap_resize(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_grid_sample(RuntimeState *state, void *input, void *grid, void *output,
+                     int64_t data_type, int64_t n, int64_t c, int64_t in_h,
+                     int64_t in_w, int64_t out_h, int64_t out_w, int64_t mode,
+                     int64_t padding_mode, int64_t align_corners) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_grid_sample\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_grid_sample(dtype=%s(%lld), N=%lld, C=%lld, "
+             "in=%lldx%lld, out=%lldx%lld, mode=%lld, pad=%lld, align=%lld)\n",
+             hipdnn_ep_datatype_name(data_type), (long long)data_type,
+             (long long)n, (long long)c, (long long)in_h, (long long)in_w,
+             (long long)out_h, (long long)out_w, (long long)mode,
+             (long long)padding_mode, (long long)align_corners);
+  (void)input;
+  (void)grid;
+  (void)output;
+  return 0;
+}
+
 int wrap_global_pool(RuntimeState *state, void *input, void *output,
                      int64_t outer, int64_t reduce_size, int64_t data_type,
                      int64_t mode, int64_t p) {
@@ -1192,26 +1215,6 @@ int wrap_global_pool(RuntimeState *state, void *input, void *output,
              hipdnn_ep_datatype_name(data_type), (long long)data_type,
              (long long)hipdnn_ep_datatype_size(data_type),
              input ? "yes" : "null", output ? "yes" : "null");
-
-  return 0;
-}
-
-int wrap_miopenActivationForward(RuntimeState *state, int op_state_slot,
-                                 void *input, void *output,
-                                 int64_t num_elements, int64_t data_type,
-                                 int64_t activation_mode) {
-  (void)op_state_slot;
-  if (!state) {
-    fprintf(stderr, "Invalid state in wrap_miopenActivationForward\n");
-    return -1;
-  }
-
-  MOCK_PRINT("[MOCK] wrap_miopenActivationForward(activation=%s, "
-             "num_elements=%lld, data_type=%s(%lld), element_size=%lld)\n",
-             hipdnn_ep_activation_name(activation_mode),
-             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
-             (long long)data_type,
-             (long long)hipdnn_ep_datatype_size(data_type));
 
   return 0;
 }
@@ -1247,6 +1250,27 @@ int wrap_fast_gelu(RuntimeState *state, void *input, void *bias, void *output,
   return 0;
 }
 
+int wrap_softplus(RuntimeState *state, void *input, void *output,
+                  int64_t num_elements, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_softplus\n");
+    return -1;
+  }
+
+  if (data_type != HIPDNN_EP_DATATYPE_FLOAT &&
+      data_type != HIPDNN_EP_DATATYPE_HALF) {
+    fprintf(stderr, "[MOCK] wrap_softplus: unsupported data_type %s(%lld)\n",
+            hipdnn_ep_datatype_name(data_type), (long long)data_type);
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_softplus(num_elements=%lld, data_type=%s(%lld))\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+
+  return 0;
+}
+
 int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
                     int64_t num_elements, int64_t data_type, double alpha) {
   if (!state) {
@@ -1263,7 +1287,7 @@ int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
 }
 
 // Mock impl of the runtime symbol referenced by the hip.miopen.softmax
-// lowering. Signature must match lib/Runtime/real/miopen.cpp.
+// lowering. Signature must match lib/Runtime/real/activation.cpp.
 extern "C" int hip_miopen_softmax(RuntimeState *state, const void *input,
                                   void *output, int64_t rows, int64_t cols,
                                   int64_t data_type) {
@@ -1302,19 +1326,16 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
   return 0;
 }
 
-int wrap_miopenT5LayerNormForward(RuntimeState *state, int op_state_slot,
-                                  void *input, void *scale, void *output,
-                                  int64_t input_num_elements,
-                                  int64_t scale_num_elements,
-                                  int64_t element_size_bytes, int64_t axis,
-                                  float epsilon, int64_t stash_type) {
-  (void)op_state_slot;
+int wrap_rms_norm(RuntimeState *state, void *input, void *scale, void *output,
+                  int64_t input_num_elements, int64_t scale_num_elements,
+                  int64_t element_size_bytes, int64_t axis, float epsilon,
+                  int64_t stash_type) {
   if (!state) {
-    fprintf(stderr, "Invalid state in wrap_miopenT5LayerNormForward\n");
+    fprintf(stderr, "Invalid state in wrap_rms_norm\n");
     return -1;
   }
 
-  MOCK_PRINT("[MOCK] wrap_miopenT5LayerNormForward(input_num_elements=%lld, "
+  MOCK_PRINT("[MOCK] wrap_rms_norm(input_num_elements=%lld, "
              "scale_num_elements=%lld, element_size=%lld, axis=%lld, "
              "epsilon=%f, stash_type=%lld)\n",
              (long long)input_num_elements, (long long)scale_num_elements,
@@ -1324,14 +1345,12 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, int op_state_slot,
   return 0;
 }
 
-int wrap_skip_simplified_layer_norm(RuntimeState *state, int op_state_slot,
-                                    void *input, void *skip, void *gamma,
-                                    void *bias, void *output,
-                                    void *input_skip_bias_sum,
+int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
+                                    void *skip, void *gamma, void *bias,
+                                    void *output, void *input_skip_bias_sum,
                                     int64_t input_num_elements,
                                     int64_t gamma_num_elements,
                                     int64_t element_size_bytes, float epsilon) {
-  (void)op_state_slot;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_skip_simplified_layer_norm\n");
     return -1;
@@ -1714,6 +1733,19 @@ void hipdnn_ep_readback_scalar(RuntimeState *state, void *host_dst,
   memcpy(host_dst, device_scalar, static_cast<size_t>(num_bytes));
 }
 
+int wrap_copy_d2h(RuntimeState *state, void *dst_ptr, const void *src_ptr,
+                  int64_t size_bytes) {
+  (void)state;
+  if (!dst_ptr || !src_ptr || size_bytes < 0) {
+    fprintf(stderr, "Invalid argument in wrap_copy_d2h\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_copy_d2h(size_bytes=%lld)\n", (long long)size_bytes);
+  // Mock "device" memory is host memory, so a plain memcpy is the transfer.
+  memcpy(dst_ptr, src_ptr, static_cast<size_t>(size_bytes));
+  return 0;
+}
+
 int wrap_cos(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type) {
   if (!state) {
@@ -1723,6 +1755,20 @@ int wrap_cos(RuntimeState *state, void *input, void *output,
   MOCK_PRINT("[MOCK] wrap_cos(num_elements=%lld, data_type=%s(%lld))\n",
              (long long)num_elements, hipdnn_ep_datatype_name(data_type),
              (long long)data_type);
+  return 0;
+}
+
+int wrap_erf(RuntimeState *state, void *input, void *output,
+             int64_t num_elements, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_erf\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_erf(num_elements=%lld, data_type=%s(%lld))\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  (void)input;
+  (void)output;
   return 0;
 }
 
@@ -1750,6 +1796,18 @@ int wrap_ceil(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_round(RuntimeState *state, void *input, void *output,
+               int64_t num_elements, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_round\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_round(num_elements=%lld, data_type=%s(%lld))\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  return 0;
+}
+
 int wrap_exp(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type) {
   if (!state) {
@@ -1757,6 +1815,30 @@ int wrap_exp(RuntimeState *state, void *input, void *output,
     return -1;
   }
   MOCK_PRINT("[MOCK] wrap_exp(num_elements=%lld, data_type=%s(%lld))\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  return 0;
+}
+
+int wrap_sigmoid(RuntimeState *state, void *input, void *output,
+                 int64_t num_elements, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_sigmoid\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_sigmoid(num_elements=%lld, data_type=%s(%lld))\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  return 0;
+}
+
+int wrap_tanh(RuntimeState *state, void *input, void *output,
+              int64_t num_elements, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_tanh\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_tanh(num_elements=%lld, data_type=%s(%lld))\n",
              (long long)num_elements, hipdnn_ep_datatype_name(data_type),
              (long long)data_type);
   return 0;
@@ -2001,6 +2083,26 @@ int wrap_layer_normalization(RuntimeState *state, void *input, void *scale,
              (long long)stash_type, bias ? "yes" : "null",
              mean ? "yes" : "null", inv_std ? "yes" : "null");
 
+  return 0;
+}
+
+int wrap_instance_normalization(RuntimeState *state, void *input, void *scale,
+                                void *bias, void *output, int64_t n, int64_t c,
+                                int64_t spatial, int64_t data_type,
+                                float epsilon) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_instance_normalization\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_instance_normalization(n=%lld, c=%lld, spatial=%lld, "
+             "data_type=%lld, epsilon=%f)\n",
+             (long long)n, (long long)c, (long long)spatial,
+             (long long)data_type, epsilon);
+  (void)input;
+  (void)scale;
+  (void)bias;
+  (void)output;
   return 0;
 }
 

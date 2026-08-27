@@ -5,7 +5,7 @@
 // Companion to test_tanh_model.mlir (static path). With fully dynamic leading
 // dims the EP still compiles the dynamic graph: onnx.Tanh lowers to a hip.tanh
 // DPS op whose num_elements is computed at runtime, then to a
-// wrap_miopenActivationForward call. This verifies the full pipeline
+// wrap_tanh call. This verifies the full pipeline
 // (convert-onnx-to-hip + bufferize + memory-pooling + convert-hip-to-llvm +
 // generate-interface) handles the dynamic path end-to-end and leaves no
 // leftover onnx.Tanh.
@@ -13,7 +13,7 @@
 // CHECK: module attributes {
 // CHECK-SAME: hipdnn.input_count = 1
 // CHECK-SAME: hipdnn.output_count = 1
-// CHECK: llvm.func @wrap_miopenActivationForward
+// CHECK: llvm.func @wrap_tanh
 // CHECK: llvm.func @inference_init
 // CHECK: llvm.func @inference_compute
 // CHECK: llvm.func @inference_cleanup

@@ -27,7 +27,7 @@ class FileSystem;
 
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h.inc"
 
-// Enum header first: MemorySpaceAttr uses MemorySpaceKind.
+// Enum header first: MemorySpaceAttr uses MemorySpace.
 #include "hip/Dialect/Hipsr/IR/HipsrEnums.h.inc"
 
 #define GET_ATTRDEF_CLASSES
@@ -37,8 +37,7 @@ class FileSystem;
 #define GET_TYPEDEF_CLASSES
 #include "hip/Dialect/Hipsr/IR/HipsrTypes.h.inc"
 
-// Predicates for the Hipsr_*MemRef type constraints (used by op verifiers once
-// ops adopt them).
+// Predicates for the Hipsr_*MemRef type constraints used by op verifiers.
 #include "hip/Dialect/Hipsr/IR/HipsrTypes.h"
 
 namespace mlir {

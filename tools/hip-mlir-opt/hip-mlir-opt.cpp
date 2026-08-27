@@ -5,10 +5,11 @@
 
 #include "CrashHandler.h"
 #include "hip/Compiler/PluginRegistry.h"
-#include "hip/Dialect/Hipsr/IR/HipsrBufferize.h"
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
+#include "hip/Dialect/Hipsr/Transforms/BufferizableOpInterfaceImpl.h"
 #include "hip/Dialect/IR/HipBufferize.h"
 #include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/Onnx/IR/OnnxDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/Dialect/Transforms/Pipelines.h"
 
@@ -48,6 +49,22 @@
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
 #include "hip/InitAllPasses.h"
 
+#include "llvm/Support/CommandLine.h"
+
+namespace {
+/// Which dialect claims the `onnx` namespace.
+enum class OnnxDialectKind { Stub, Modeled };
+
+llvm::cl::opt<OnnxDialectKind> onnxDialectKind(
+    "onnx-dialect", llvm::cl::desc("Dialect that claims the `onnx` namespace"),
+    llvm::cl::init(OnnxDialectKind::Stub),
+    llvm::cl::values(
+        clEnumValN(OnnxDialectKind::Stub, "stub",
+                   "Namespace only; every onnx.* op stays unregistered"),
+        clEnumValN(OnnxDialectKind::Modeled, "modeled",
+                   "ODS-modeled ops, verified as they are parsed")));
+} // namespace
+
 int main(int argc, char **argv) {
   hip::install_crash_handlers("hip-mlir-opt");
   mlir::DialectRegistry registry;
@@ -71,7 +88,7 @@ int main(int argc, char **argv) {
   mlir::arith::registerConvertArithToLLVMInterface(registry);
   mlir::cf::registerConvertControlFlowToLLVMInterface(registry);
   mlir::index::registerConvertIndexToLLVMInterface(registry);
-  registry.insert<hip::compiler::detail::OnnxStubDialect>();
+  // `onnx` is claimed further down, once --onnx-dialect is parsed.
 
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::arith::registerBufferDeallocationOpInterfaceExternalModels(registry);
@@ -86,7 +103,7 @@ int main(int argc, char **argv) {
   // in HipBufferize.h so the HIP op bufferization models never drift between
   // the tool and the EP.
   mlir::hip::registerHipBufferizableOpInterfaceModels(registry);
-  mlir::hipsr::registerHipsrBufferizableOpInterfaceModels(registry);
+  mlir::hipsr::registerBufferizableOpInterfaceExternalModels(registry);
 
   // Registers every nameable HIP / pipeline / standard-MLIR pass the tool and
   // the EP share. Defined once (InitAllPasses.h) so the two never drift; see
@@ -110,8 +127,8 @@ int main(int argc, char **argv) {
   // ABI attrs survive the decomposition).
   mlir::memref::registerExpandStridedMetadataPass();
 
-  // Run every statically-linked plugin's registration before MlirOptMain
-  // parses the command line, so `--<plugin-pass>` is recognised by the CL
+  // Run every statically-linked plugin's registration before the command line
+  // is parsed, so `--<plugin-pass>` is recognised by the CL
   // parser and `--hipdnn-pipeline` sees plugin slot requests when it builds
   // its pass manager. No-op when no plugins were selected at configure time
   // (HIPDNN_EP_COMPILER_PLUGINS empty). See cmake/HipEpPlugins.cmake.
@@ -126,6 +143,20 @@ int main(int argc, char **argv) {
   for (auto registerFn : hip::compiler::pluginDialectRegistrations())
     registerFn(registry);
 
-  return mlir::asMainReturnCode(mlir::MlirOptMain(
-      argc, argv, "hip-mlir-opt: HIP dialect compiler driver\n", registry));
+  // A registry holds one dialect per namespace, so --onnx-dialect has to be
+  // read before `onnx` is claimed. Splitting the parse from the run is what
+  // MlirOptMain.h documents for that.
+  auto [inputFilename, outputFilename] = mlir::registerAndParseCLIOptions(
+      argc, argv, "hip-mlir-opt: HIP dialect compiler driver\n", registry);
+
+  // Only convert-onnx-to-hipsr matches generated op classes. Everything else,
+  // including the EP, reads onnx operations by name.
+  if (onnxDialectKind == OnnxDialectKind::Modeled) {
+    registry.insert<mlir::onnx::OnnxDialect>();
+  } else {
+    registry.insert<hip::compiler::detail::OnnxStubDialect>();
+  }
+
+  return mlir::asMainReturnCode(
+      mlir::MlirOptMain(argc, argv, inputFilename, outputFilename, registry));
 }
