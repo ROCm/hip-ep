@@ -116,6 +116,27 @@ module {
     %result = "onnx.Reshape"(%data, %shape) {allowzero = 0 : si64} : (tensor<?x2816xf16>, tensor<3xi64>) -> tensor<?x?x2816xf16>
     return %result : tensor<?x?x2816xf16>
   }
+
+  // --- Dynamic fallback: a shape entry of `0` keeps the input's dim ---
+  // A fully-dynamic source gives the reassoc helpers no static dim to anchor
+  // groups against, so this lands on the tensor.reshape fallback where the
+  // shape operand is consumed as literal extents.  memref.reshape (the
+  // bufferization target) carries no ONNX semantics, so the `0` has to be
+  // resolved here.
+  func.func @test_reshape_dyn_zero_dim(%data: tensor<?x?x?xf16>,
+                                       %shape: tensor<4xi64>)
+      -> tensor<?x?x16x72xf16> {
+    %result = "onnx.Reshape"(%data, %shape) {allowzero = 0 : si64} : (tensor<?x?x?xf16>, tensor<4xi64>) -> tensor<?x?x16x72xf16>
+    return %result : tensor<?x?x16x72xf16>
+  }
+
+  // --- Same reshape with allowzero=1: `0` is a literal size ---
+  func.func @test_reshape_dyn_allowzero(%data: tensor<?x?x?xf16>,
+                                        %shape: tensor<4xi64>)
+      -> tensor<?x?x16x72xf16> {
+    %result = "onnx.Reshape"(%data, %shape) {allowzero = 1 : si64} : (tensor<?x?x?xf16>, tensor<4xi64>) -> tensor<?x?x16x72xf16>
+    return %result : tensor<?x?x16x72xf16>
+  }
 }
 
 // CHECK-LABEL: func.func @test_reshape_expand
@@ -179,5 +200,47 @@ module {
 
 // CHECK-LABEL: func.func @test_reshape_expand_multi_dyn_opaque
 // CHECK-NOT: tensor.expand_shape
+// CHECK: tensor.reshape
+// CHECK-NOT: onnx.Reshape
+
+// A `0` entry must resolve to the input dim at the SAME index, and the RESOLVED
+// value -- not the raw entry -- must feed both the `-1` divisor product and the
+// `-1` substitution.  Feeding the raw entry would make `-1` divide as if this
+// position were size 1 and infer an extent that does not preserve the element
+// count.
+// CHECK-LABEL: func.func @test_reshape_dyn_zero_dim
+// CHECK-DAG: %[[CM1:.*]] = arith.constant -1 : i64
+// CHECK-DAG: %[[CZ:.*]] = arith.constant 0 : i64
+// CHECK-DAG: %[[C1I:.*]] = arith.constant 1 : i64
+// CHECK: tensor.extract_slice %{{.*}}[0] [1] [1]
+// CHECK: %[[E0:.*]] = hip.readback_scalar
+// CHECK-NEXT: %[[ISZ:.*]] = arith.cmpi eq, %[[E0]], %[[CZ]] : i64
+// CHECK-NEXT: %[[ID:.*]] = tensor.dim
+// CHECK-NEXT: %[[IDC:.*]] = arith.index_cast %[[ID]] : index to i64
+// CHECK-NEXT: %[[R0:.*]] = arith.select %[[ISZ]], %[[IDC]], %[[E0]] : i64
+// CHECK-NEXT: arith.cmpi sgt, %[[R0]], %[[C1I]] : i64
+// The trailing entry has no input dim at its index, so no `0` can legally
+// appear there and none is resolved: the raw entry goes straight to the
+// divisor.
+// CHECK: tensor.extract_slice %{{.*}}[3] [1] [1]
+// CHECK: %[[E3:.*]] = hip.readback_scalar
+// CHECK-NEXT: arith.cmpi sgt, %[[E3]], %[[C1I]] : i64
+// CHECK: %[[INF:.*]] = arith.divsi
+// CHECK-NEXT: %[[ISM1:.*]] = arith.cmpi eq, %[[R0]], %[[CM1]] : i64
+// CHECK-NEXT: arith.select %[[ISM1]], %[[INF]], %[[R0]] : i64
+// CHECK: tensor.reshape
+// CHECK-NOT: onnx.Reshape
+
+// With allowzero=1 the entry is already the output dim, so nothing is resolved:
+// the raw entry feeds the divisor and the `-1` substitution directly.
+// CHECK-LABEL: func.func @test_reshape_dyn_allowzero
+// CHECK-DAG: %[[CM1:.*]] = arith.constant -1 : i64
+// CHECK-DAG: %[[C1I:.*]] = arith.constant 1 : i64
+// CHECK: tensor.extract_slice %{{.*}}[0] [1] [1]
+// CHECK: %[[E0:.*]] = hip.readback_scalar
+// CHECK-NEXT: arith.cmpi sgt, %[[E0]], %[[C1I]] : i64
+// CHECK: %[[INF:.*]] = arith.divsi
+// CHECK-NEXT: %[[ISM1:.*]] = arith.cmpi eq, %[[E0]], %[[CM1]] : i64
+// CHECK-NEXT: arith.select %[[ISM1]], %[[INF]], %[[E0]] : i64
 // CHECK: tensor.reshape
 // CHECK-NOT: onnx.Reshape

@@ -511,18 +511,26 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
         // arith chain.
         //
         // ONNX `Reshape` also permits a shape entry of literal `0`, meaning
-        // "keep the input's dim at this position unchanged" -- NOT a size-0
-        // dim -- unless the node's `allowzero` attribute is set (opset >=14),
-        // in which case `0` is a literal size like any other entry. This is
-        // easy to miss because `0` and `-1` conventionally sit on a reshape's
-        // static feature dim (where the result type already pins the extent
-        // and this code never queries the shape operand for it at all) --
-        // but that is only an export convention, not an ONNX guarantee.
+        // "keep the input's dim at the SAME index" -- NOT a size-0 dim --
+        // unless the node's `allowzero` attribute is set (opset >= 14), in
+        // which case `0` is a literal size like any other entry. Resolved
+        // below, before the `-1` inference that consumes it.
         //
-        // Resolve `0` (like `-1`) here, before tensor.reshape, replacing it
-        // with the corresponding input dim BEFORE computing the `-1`
-        // inference product below -- otherwise a shape with both `0` and
-        // `-1` would divide by the wrong product.
+        // clang-format off
+        // Before:
+        //   %r = onnx.Reshape %x, %shape :
+        //          (tensor<?x1152xf16>, tensor<6xi64>) -> tensor<?x?x2x?x2x?xf16>
+        //   // %shape may carry a literal -1 and/or 0 at some index
+        // After:
+        //   %total  = product of tensor.dim(%x, i) for i in 0..inputRank
+        //   %d[i]   = tensor.extract %shape[i]                for i in 0..outRank
+        //   %d[i]   = select(%d[i] == 0, tensor.dim(%x, i), %d[i])  // i < inputRank && !allowzero
+        //   %pp     = product of max(%d[i], 1) for i in 0..outRank
+        //   %inf    = %total / %pp
+        //   %d'[i]  = select(%d[i] == -1, %inf, %d[i])
+        //   %newsh  = tensor.from_elements %d'[0..outRank-1] : tensor<Nxi64>
+        //   %r      = tensor.reshape %x(%newsh)
+        // clang-format on
         mlir::Type elemTy = shapeTy.getElementType();
         unsigned bits = elemTy.getIntOrFloatBitWidth();
         // `allowzero` is emitted as SI64Attr (signed), not a signless/index
@@ -565,11 +573,10 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
           mlir::Value v = readbackShapeEntryToHostOrExtract(rewriter, loc, op,
                                                             shapeOperand, i);
           // Case handled here -- allowzero=0 and this position has a
-          // corresponding input dim: resolve ONNX's `0` ("keep the input's
-          // dim at this index") to that dim BEFORE it feeds the
-          // `-1`-inference product below, so a shape carrying both `0` and
-          // `-1` infers against the real extent instead of dividing as if
-          // this position were size 1.
+          // corresponding input dim: resolve the `0` to that input dim BEFORE
+          // it feeds the `-1`-inference product below, so a shape carrying
+          // both `0` and `-1` infers against the real extent instead of
+          // dividing as if this position were size 1.
           //
           // The two cases skipped here need no resolution:
           //   - allowzero=1: `0` is a literal size, so passing the entry
