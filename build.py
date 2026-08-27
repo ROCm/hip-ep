@@ -243,8 +243,6 @@ def generate_build_tree(args, build_dir, prefix_paths, hip_arch, mock):
         f"-DCMAKE_BUILD_TYPE={args.config}",
         f"-DCMAKE_INSTALL_PREFIX={args.install_dir}",
         "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
-        "-DBUILD_EP=ON",
-        "-DBUILD_HIP_TOOLS=ON",
     ]
     # Build the Python wheel by default for real builds; mock has no ROCm libs
     # to bundle, and --skip_wheel opts out.

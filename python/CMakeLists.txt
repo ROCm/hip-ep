@@ -3,11 +3,6 @@
 # ** Licensed under the MIT License.
 ##
 
-if(NOT BUILD_EP)
-  message(WARNING "BUILD_PYTHON_WHEEL requires BUILD_EP=ON; skipping wheel target")
-  return()
-endif()
-
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 # Build out-of-source: never write into the source python/ tree. The package is
@@ -45,9 +40,9 @@ if(NOT TARGET ${_ep_target})
     "EP target '${_ep_target}' not found; cannot build the Python wheel.")
 endif()
 
-# No separate JIT compiler library to bundle: this file only runs under
-# BUILD_EP (guarded above), where the compiler is linked into the EP itself and
-# resolved in-process through the static "hip-compiler" plugin registration.
+# No separate JIT compiler library to bundle: the compiler is linked into the EP
+# itself and resolved in-process through the static "hip-compiler" plugin
+# registration.
 set(_dll_args "--dll" "$<TARGET_FILE:${_ep_target}>")
 set(_wheel_deps ${_ep_target})
 

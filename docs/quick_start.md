@@ -384,7 +384,7 @@ chain. For plain ORT (direct hipgpu, no OGA), register the colocated plugin via
 ### Model Inference with hip-onnx-runner
 
 `hip-onnx-runner` runs a single ONNX model through hipgpu EP and reports
-timing. It is built automatically when `BUILD_HIP_TOOLS=ON`.
+timing. It is built automatically as part of the default configure.
 
 ```bash
 # first cd to your hip-ep directory

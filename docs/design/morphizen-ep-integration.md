@@ -36,13 +36,12 @@ The compiler is **not invoked at inference time**. `model.dll` is **not
 loaded at compile time**. The EP tar cache — accessed through the `FileSystem`
 abstraction — is the only persistent link between the two phases.
 
-**Where hip-compiler lives.** The default build (`BUILD_EP=ON`) links the
-compiler statically into `morphizen-ep.dll` and reaches it through MorphiZen's
-in-process static plugin registry; no `hip-compiler.dll` is produced. A
-tools-only build (`BUILD_EP=OFF, BUILD_HIP_TOOLS=ON`) still builds the
-standalone `hip-compiler.dll` / `libhip-compiler.so`, which the same
-`morphizen::Plugin` call loads via `LoadLibrary`/`dlopen`. The contract below is
-identical either way, so the diagrams keep the compiler in its own box.
+**Where hip-compiler lives.** The compiler is linked statically into
+`morphizen-ep.dll` and reached through MorphiZen's in-process static plugin
+registry; no standalone `hip-compiler.dll` / `libhip-compiler.so` is produced.
+`morphizen::Plugin::get("hip-compiler")` resolves the C API from that registry
+first and only falls back to `LoadLibrary`/`dlopen` when no static registration
+is present.
 
 `morphizen-ep.dll` integrates with `onnxruntime.dll` via the standard
 [ORT Plugin EP v2 API](https://onnxruntime.ai/docs/execution-providers/plugin-ep-libraries.html).
