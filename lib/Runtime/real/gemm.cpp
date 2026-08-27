@@ -330,8 +330,7 @@ static int writeBroadcastC(RuntimeState *state, const void *C, void *output,
   if (beta == 0.0f) {
     hipError_t err = hipMemsetAsync(output, 0, outBytes, stream);
     if (err != hipSuccess) {
-      fprintf(stderr,
-              "wrap_gemm: writeBroadcastC hipMemsetAsync failed (%s)\n",
+      fprintf(stderr, "wrap_gemm: writeBroadcastC hipMemsetAsync failed (%s)\n",
               hipGetErrorString(err));
       return -1;
     }
@@ -346,8 +345,7 @@ static int writeBroadcastC(RuntimeState *state, const void *C, void *output,
         static_cast<size_t>(cDim0) * static_cast<size_t>(cDim1);
     const size_t srcBytes = count * elemSize;
     host.resize(srcBytes);
-    hipError_t err =
-        hipMemcpy(host.data(), C, srcBytes, hipMemcpyDeviceToHost);
+    hipError_t err = hipMemcpy(host.data(), C, srcBytes, hipMemcpyDeviceToHost);
     if (err != hipSuccess) {
       fprintf(stderr, "wrap_gemm: writeBroadcastC D2H failed (%s)\n",
               hipGetErrorString(err));
