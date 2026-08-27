@@ -13,6 +13,8 @@
 #include "llvm/ADT/Sequence.h"
 #include "llvm/ADT/SmallVectorExtras.h"
 
+#include <algorithm>
+
 using namespace mlir;
 
 int64_t mlir::hipsr::getHipdnnDataType(Type elemType) {
@@ -65,6 +67,28 @@ mlir::hipsr::extractShape(MemRefType type, Value descriptor,
             rewriter, loc, i64Type,
             rewriter.getI64IntegerAttr(type.getDimSize(dim)));
       });
+}
+
+Value mlir::hipsr::emitHostI64Array(ValueRange values,
+                                    ConversionPatternRewriter &rewriter,
+                                    Location loc) {
+  Type i64Type = rewriter.getI64Type();
+  Type hostPtrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
+  Value one = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                       rewriter.getI64IntegerAttr(1));
+  // LLVM rejects a zero-length array type, so a rank-0 shape still gets a slot.
+  Value array = LLVM::AllocaOp::create(
+      rewriter, loc, hostPtrType,
+      LLVM::LLVMArrayType::get(i64Type, std::max<size_t>(values.size(), 1)),
+      one,
+      /*alignment=*/8);
+  for (auto [index, value] : llvm::enumerate(values)) {
+    Value element = LLVM::GEPOp::create(
+        rewriter, loc, hostPtrType, i64Type, array,
+        llvm::ArrayRef<LLVM::GEPArg>{static_cast<int32_t>(index)});
+    LLVM::StoreOp::create(rewriter, loc, value, element);
+  }
+  return array;
 }
 
 llvm::SmallVector<Value, 4>

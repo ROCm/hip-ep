@@ -66,6 +66,10 @@ void populateGatherConversionPatterns(
     const ::mlir::TypeConverter &typeConverter,
     ::mlir::RewritePatternSet &patterns, ::mlir::MLIRContext *ctx);
 
+void populateSliceConversionPatterns(const ::mlir::TypeConverter &typeConverter,
+                                     ::mlir::RewritePatternSet &patterns,
+                                     ::mlir::MLIRContext *ctx);
+
 void populateReturnConversionPatterns(
     const ::mlir::TypeConverter &typeConverter,
     ::mlir::RewritePatternSet &patterns, ::mlir::MLIRContext *ctx);

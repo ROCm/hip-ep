@@ -114,31 +114,15 @@ struct TransposeLowering : ConvertOpToLLVMPattern<TransposeOp> {
       return LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                       rewriter.getI64IntegerAttr(value));
     };
-    // The runtime reads both arrays on the host, so they go on the stack.
-    Type hostPtrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
-    auto createHostArray = [&](ValueRange values) -> Value {
-      Value array = LLVM::AllocaOp::create(
-          rewriter, loc, hostPtrType,
-          LLVM::LLVMArrayType::get(i64Type, values.size()), createI64Const(1),
-          /*alignment=*/8);
-      for (auto [index, value] : llvm::enumerate(values)) {
-        Value element = LLVM::GEPOp::create(
-            rewriter, loc, hostPtrType, i64Type, array,
-            ArrayRef<LLVM::GEPArg>{static_cast<int32_t>(index)});
-        LLVM::StoreOp::create(rewriter, loc, value, element);
-      }
-      return array;
-    };
-
     SmallVector<Value> extents =
         extractShape(inputType, adaptor.getInput(), rewriter, loc, i64Type);
     Value numElements = extents.front();
     for (Value extent : llvm::drop_begin(extents)) {
       numElements = LLVM::MulOp::create(rewriter, loc, numElements, extent);
     }
-    Value inputShape = createHostArray(extents);
-    Value perm =
-        createHostArray(llvm::map_to_vector(op.getPerm(), createI64Const));
+    Value inputShape = emitHostI64Array(extents, rewriter, loc);
+    Value perm = emitHostI64Array(
+        llvm::map_to_vector(op.getPerm(), createI64Const), rewriter, loc);
 
     using TransposeCall = RuntimeFunc<i32, hostPtr, devicePtr, devicePtr, i64,
                                       hostPtr, hostPtr, i64, i64>;

@@ -51,6 +51,8 @@ LogicalResult populateTransposeShapeRegion(OpBuilder &builder, Block &block,
                                            TransposeOp op);
 LogicalResult populateGatherShapeRegion(OpBuilder &builder, Block &block,
                                         GatherOp op);
+LogicalResult populateSliceShapeRegion(OpBuilder &builder, Block &block,
+                                       SliceOp op);
 
 #define GEN_PASS_DEF_POPULATESHAPEREGIONPASS
 #include "hip/Dialect/Hipsr/Transforms/Passes.h.inc"
@@ -82,6 +84,8 @@ LogicalResult populatePlaceholderShapeRegion(OpBuilder &builder,
     return populateTransposeShapeRegion(builder, block, transposeOp);
   } else if (auto gatherOp = dyn_cast<GatherOp>(consumer)) {
     return populateGatherShapeRegion(builder, block, gatherOp);
+  } else if (auto sliceOp = dyn_cast<SliceOp>(consumer)) {
+    return populateSliceShapeRegion(builder, block, sliceOp);
   }
 
   return placeholder.emitOpError(

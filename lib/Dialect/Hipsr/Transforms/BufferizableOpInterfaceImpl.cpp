@@ -658,5 +658,6 @@ void mlir::hipsr::registerBufferizableOpInterfaceExternalModels(
     EqualOp::attachInterface<DpsBufferizableModel<EqualOp>>(*ctx);
     TransposeOp::attachInterface<DpsBufferizableModel<TransposeOp>>(*ctx);
     GatherOp::attachInterface<DpsBufferizableModel<GatherOp>>(*ctx);
+    SliceOp::attachInterface<DpsBufferizableModel<SliceOp>>(*ctx);
   });
 }
