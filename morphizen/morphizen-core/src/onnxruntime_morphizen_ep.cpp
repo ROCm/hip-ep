@@ -26,7 +26,6 @@
 #include <cctype>
 #include <fstream>
 #include <glog/logging.h>
-#include <google/protobuf/message_lite.h>
 DEF_ENV_PARAM(MORPHIZEN_SUPRRESS_DEPRECATED_WARNG, "1")
 DEF_ENV_PARAM(DEBUG_OP_REGISTER, "0")
 DEF_ENV_PARAM_2(DEBUG_LOG_LEVEL, "", std::string)
@@ -313,7 +312,6 @@ BOOL WINAPI DllMain(HINSTANCE /*hinstDLL*/, // handle to DLL module
     if (lpvReserved != nullptr) {
       break; // do not do cleanup if process termination scenario
     }
-    google::protobuf::ShutdownProtobufLibrary();
     break;
   }
   return TRUE; // Successful DLL_PROCESS_ATTACH.
