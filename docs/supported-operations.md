@@ -12,8 +12,8 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 
 | Operation | Backend or lowering |
 |---|---|
-| Conv | MIOpen |
-| ConvTranspose | MIOpen |
+| Conv | Custom HIP kernel |
+| ConvTranspose | Custom HIP kernel |
 | MatMul | hipBLASLt |
 | Gemm | hipBLASLt |
 | Transpose | Custom HIP kernel |
@@ -92,7 +92,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | QMoE (`com.microsoft`) | Custom HIP kernel |
 | GatherBlockQuantized (`com.microsoft`) | Custom HIP kernel |
 | LinearAttention (`com.microsoft`) | Custom HIP kernel |
-| CausalConvWithState (`com.microsoft`) | Custom HIP kernel fast paths with MIOpen fallback |
+| CausalConvWithState (`com.microsoft`) | Custom HIP kernel |
 | Relu | Decomposed to Max |
 | LeakyRelu | Custom HIP kernel |
 | Clip | Decomposed to Max + Min |
