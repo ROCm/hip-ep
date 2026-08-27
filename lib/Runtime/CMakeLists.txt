@@ -181,7 +181,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
     endif()
 
     # Propagate the vendor-BLAS opt-out into the bitcode compile so the
-    # MIOpen/hipBLASLt-backed wrappers (real/{miopen,hipblas,elementwise,gemm}.cpp)
+    # MIOpen/hipBLASLt-backed wrappers (real/{hipblas,elementwise,gemm}.cpp)
     # compile their stub branch instead of the vendor-backed one.
     if(HIPDNN_EP_DISABLE_VENDOR_BLAS)
         list(APPEND COMPILE_FLAGS "-DHIPDNN_EP_DISABLE_VENDOR_BLAS")
@@ -304,7 +304,6 @@ compile_to_bitcode(op_state.cpp runtime_op_state.bc)
 if(NOT BUILD_MOCK_RUNTIME)
     # Real GPU runtime implementation
     compile_to_bitcode(real/hip.cpp runtime_hip.bc)
-    compile_to_bitcode(real/miopen.cpp runtime_miopen.bc)
     compile_to_bitcode(real/hipblas.cpp runtime_hipblas.bc)
     # Vendor-symbol stubs so a model links without libMIOpen / libhipblaslt (see
     # real/vendor_blas_stub.cpp).
@@ -359,6 +358,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/erf.cpp runtime_erf.bc)
     compile_to_bitcode(real/sin.cpp runtime_sin.bc)
     compile_to_bitcode(real/ceil.cpp runtime_ceil.bc)
+    compile_to_bitcode(real/round.cpp runtime_round.bc)
     compile_to_bitcode(real/exp.cpp runtime_exp.bc)
     compile_to_bitcode(real/sigmoid.cpp runtime_sigmoid.bc)
     compile_to_bitcode(real/tanh.cpp runtime_tanh.bc)
@@ -378,6 +378,8 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/nonzero.cpp runtime_nonzero.bc)
     compile_to_bitcode(real/size.cpp runtime_size.bc)
     compile_to_bitcode(real/pool.cpp runtime_pool.bc)
+    compile_to_bitcode(real/conv.cpp runtime_conv.bc)
+    compile_to_bitcode(real/conv_transpose.cpp runtime_conv_transpose.bc)
     compile_to_bitcode(real/resize.cpp runtime_resize.bc)
     compile_to_bitcode(real/grid_sample.cpp runtime_grid_sample.bc)
     compile_to_bitcode(real/global_pool.cpp runtime_global_pool.bc)
@@ -432,7 +434,6 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_memory.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_hip.bc
-        ${CMAKE_CURRENT_BINARY_DIR}/runtime_miopen.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_hipblas.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_elementwise.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_power.bc
@@ -479,6 +480,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_erf.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_sin.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_ceil.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_round.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_exp.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_sigmoid.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tanh.bc
@@ -498,6 +500,8 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_nonzero.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_size.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_pool.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_conv.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_conv_transpose.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_resize.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_grid_sample.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_global_pool.bc

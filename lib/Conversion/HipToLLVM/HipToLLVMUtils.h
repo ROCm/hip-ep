@@ -47,10 +47,8 @@ inline constexpr const char *kWrapHipMemcpyAsync = "wrap_hipMemcpyAsync";
 inline constexpr const char *kWrapHipMemcpy2DAsync = "wrap_hipMemcpy2DAsync";
 inline constexpr const char *kWrapStridedCopy = "wrap_strided_copy";
 
-inline constexpr const char *kMiopenConvolutionForward =
-    "wrap_miopenConvolutionForward";
-inline constexpr const char *kMiopenConvolutionTranspose =
-    "wrap_miopenConvolutionTranspose";
+inline constexpr const char *kWrapConv = "wrap_conv";
+inline constexpr const char *kWrapConvTranspose = "wrap_conv_transpose";
 inline constexpr const char *kWrapHipblasltMatmul = "wrap_hipblasLtMatmul";
 inline constexpr const char *kWrapRmsNorm = "wrap_rms_norm";
 inline constexpr const char *kWrapSkipSimplifiedLayerNorm =
@@ -112,6 +110,7 @@ inline constexpr const char *kWrapCos = "wrap_cos";
 inline constexpr const char *kWrapErf = "wrap_erf";
 inline constexpr const char *kWrapSin = "wrap_sin";
 inline constexpr const char *kWrapCeil = "wrap_ceil";
+inline constexpr const char *kWrapRound = "wrap_round";
 inline constexpr const char *kWrapExp = "wrap_exp";
 inline constexpr const char *kWrapSigmoid = "wrap_sigmoid";
 inline constexpr const char *kWrapTanh = "wrap_tanh";
