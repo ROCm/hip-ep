@@ -65,7 +65,10 @@ getExplicitTransposePerm(mlir::Operation *transposeOp) {
       auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(elem);
       if (!intAttr)
         return std::nullopt;
-      perm.push_back(intAttr.getSInt());
+      // Not getSInt(): only *scalar* ONNX INT attributes import as si64. The
+      // elements of an INTS attribute are signless, as is a perm this pipeline
+      // builds itself through getI64ArrayAttr(), and getSInt() asserts on both.
+      perm.push_back(intAttr.getValue().getSExtValue());
     }
     return perm;
   }
