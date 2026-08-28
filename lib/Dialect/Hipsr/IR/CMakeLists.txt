@@ -15,6 +15,7 @@ add_library(HipsrDialectIR STATIC
   HipsrConstantOp.cpp
   HipsrPlaceholderOp.cpp
   HipsrCastOp.cpp
+  HipsrCopyD2HOp.cpp
   HipsrMatMulOp.cpp
   HipsrExpandOp.cpp
   HipsrAddOp.cpp
@@ -24,6 +25,7 @@ add_library(HipsrDialectIR STATIC
   HipsrGatherOp.cpp
   HipsrSliceOp.cpp
   HipsrScatterNDOp.cpp
+  HipsrNonZeroOp.cpp
   HipsrGetPoolOp.cpp
   HipsrPreserveShapeOp.cpp
   HipsrLLVMLoweringUtils.cpp
