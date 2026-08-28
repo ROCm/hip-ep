@@ -71,7 +71,7 @@ if(_HIPDNN_NEED_TOOLCHAIN)
       set(_therock_root "${CMAKE_BINARY_DIR}/_therock")
       if(NOT EXISTS "${_therock_root}/bin")
         if(WIN32)
-          set(_therock_windows_archs gfx1150 gfx1151 gfx1152 gfx1153)
+          set(_therock_windows_archs gfx1150 gfx1151 gfx1152 gfx1153 gfx1170)
           foreach(_arch IN LISTS HIP_ARCHITECTURES)
             if(NOT _arch IN_LIST _therock_windows_archs)
               message(FATAL_ERROR
