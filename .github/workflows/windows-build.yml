@@ -16,27 +16,27 @@ permissions:
   contents: read
 
 jobs:
-  deps:
+  prebuild:
     uses: ./.github/workflows/windows-deps.yml
 
-  real:
-    needs: deps
+  build_real:
+    needs: prebuild
     uses: ./.github/workflows/windows-build-real.yml
     with:
-      llvm_cache_key: ${{ needs.deps.outputs.llvm_cache_key }}
-      ort_cache_key: ${{ needs.deps.outputs.ort_cache_key }}
-      amdgpu_cache_key: ${{ needs.deps.outputs.amdgpu_cache_key }}
-      oga_cache_key: ${{ needs.deps.outputs.oga_cache_key }}
+      llvm_cache_key: ${{ needs.prebuild.outputs.llvm_cache_key }}
+      ort_cache_key: ${{ needs.prebuild.outputs.ort_cache_key }}
+      amdgpu_cache_key: ${{ needs.prebuild.outputs.amdgpu_cache_key }}
+      oga_cache_key: ${{ needs.prebuild.outputs.oga_cache_key }}
 
-  mock:
-    needs: deps
+  build_mock:
+    needs: prebuild
     uses: ./.github/workflows/windows-build-mock.yml
     with:
-      llvm_cache_key: ${{ needs.deps.outputs.llvm_cache_key }}
-      ort_cache_key: ${{ needs.deps.outputs.ort_cache_key }}
+      llvm_cache_key: ${{ needs.prebuild.outputs.llvm_cache_key }}
+      ort_cache_key: ${{ needs.prebuild.outputs.ort_cache_key }}
 
-  gpu:
-    needs: real
+  gpu_test:
+    needs: build_real
     uses: ./.github/workflows/windows-gpu-test.yml
     # A callee's GITHUB_TOKEN is capped by the caller job, and the GPU job
     # posts perf / L2 results as PR comments.
