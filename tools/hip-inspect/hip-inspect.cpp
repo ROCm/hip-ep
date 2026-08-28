@@ -11,7 +11,7 @@
 //   * LLVM bitcode (.bc): parse the IR and read the `@__metadata_json`
 //     global -- lightweight, no ROCm/JIT needed.
 //   * native .dll/.so: load via morphizen::Plugin and call
-//     inference_get_metadata_json (only when built with BUILD_EP).
+//     inference_get_metadata_json.
 //
 // Usage:
 //   hip-inspect <model.{bc,dll,so}> [--json]
@@ -219,8 +219,7 @@ static void printHelp(const char *argv0) {
   std::cout
       << "Print metadata embedded in a compiled model artifact.\n\n"
       << "Usage: " << argv0 << " <model.{bc,dll,so}> [--json]\n\n"
-      << "Formats: LLVM bitcode (.bc) always; native .dll/.so when built with "
-         "BUILD_EP.\n"
+      << "Formats: LLVM bitcode (.bc) and native .dll/.so.\n"
       << "Options:\n"
       << "  --json   Dump raw metadata JSON instead of formatted summary\n"
       << "  -h, --help   Show this help\n";
@@ -278,9 +277,8 @@ int main(int argc, char **argv) {
       return 1;
 #else
     std::cerr << "'" << bcPath
-              << "' is a native artifact (PE/ELF), but this hip-inspect was "
-                 "built without native support. Reconfigure with BUILD_EP=ON "
-                 "to inspect native artifacts.\n";
+              << "' is a native artifact (PE/ELF), but native inspection "
+                 "support is unavailable in this build.\n";
     return 1;
 #endif
   } else {

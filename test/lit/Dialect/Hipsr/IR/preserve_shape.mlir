@@ -22,6 +22,27 @@ func.func @tensor_form(%d0: index) {
 
 // -----
 
+// The same tensor form, but device-spaced: preserve_shape's data operand is
+// unconstrained on memory space, so a #hipsr.mem<device> tensor is equally
+// accepted.
+// CHECK-LABEL: func.func @tensor_form_device(
+// CHECK-SAME: %[[D0:.+]]: index) {
+// CHECK-NEXT: %[[C2048:.+]] = arith.constant 2048 : index
+// CHECK-NEXT: %[[SHAPE:.+]] = shape.from_extents %[[D0]], %[[C2048]] : index, index
+// CHECK-NEXT: %[[INIT:.+]] = tensor.empty(%[[D0]]) : tensor<?x2048xf16, #hipsr.mem<device>>
+// CHECK-NEXT: hipsr.preserve_shape %[[SHAPE]], %[[INIT]] : tensor<?x2048xf16, #hipsr.mem<device>>
+// CHECK-NEXT: return
+// CHECK-NEXT: }
+func.func @tensor_form_device(%d0: index) {
+  %c2048 = arith.constant 2048 : index
+  %shape = shape.from_extents %d0, %c2048 : index, index
+  %init = tensor.empty(%d0) : tensor<?x2048xf16, #hipsr.mem<device>>
+  hipsr.preserve_shape %shape, %init : tensor<?x2048xf16, #hipsr.mem<device>>
+  return
+}
+
+// -----
+
 // The memref form: same shape operand, data operand now the kind of space-less
 // memref one-shot-bufferize emits.
 // CHECK-LABEL: func.func @memref_form(

@@ -13,6 +13,21 @@
 
 include "mlir/Pass/PassBase.td"
 
+def AddContextArgPass : Pass<"hipsr-add-context-arg", "mlir::ModuleOp"> {
+  let summary = "Insert !hipsr.context as arg 0 into every func.func";
+  let description = [{
+    Inserts a !hipsr.context argument at position 0 into every func.func in
+    the module. The OnnxToHipsr conversion patterns assume that the context
+    value is always available as the first function argument.
+
+    Skips functions that already have a !hipsr.context as argument 0.
+  }];
+  let dependentDialects = [
+    "::mlir::hipsr::HipsrDialect",
+    "::mlir::func::FuncDialect"
+  ];
+}
+
 def PopulateShapeRegionPass
     : Pass<"hipsr-populate-shape-region", "mlir::func::FuncOp"> {
   let summary = "Fill empty hipsr shape regions";
@@ -185,4 +200,27 @@ def HipsrPoolAllocPass : Pass<"hipsr-pool-alloc", "mlir::ModuleOp"> {
   ];
 }
 
+def HipsrUseOutputAllocatorPass
+    : Pass<"hipsr-use-output-allocator", "mlir::func::FuncOp"> {
+  let summary =
+      "Rewrite returned memref.alloc outputs to hipsr.alloc_output";
+  let description = [{
+    Replaces each graph-output `memref.alloc` with `hipsr.alloc_output`, reusing
+    the alloc's dynamic-size operands and setting `out_idx` to its position in
+    `func.return`. Output buffers then come from the EP output allocator and are
+    owned by the EP/runtime instead of being deallocated or pooled.
+
+    An allocation counts as a graph output when `func.return` returns it either
+    directly or through view-like aliases. The view operations are left in
+    place.
+
+    Only public graph-entry functions whose argument 0 is `!hipsr.context` are
+    rewritten. Private helper functions and functions without a HIPSR context
+    are skipped. The function signature and `func.return` are left unchanged.
+  }];
+  let dependentDialects = [
+    "::mlir::hipsr::HipsrDialect",
+    "::mlir::memref::MemRefDialect"
+  ];
+}
 #endif // HIPSR_TRANSFORMS_PASSES

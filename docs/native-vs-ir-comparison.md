@@ -19,12 +19,12 @@ Licensed under the MIT License.
 compile option (`artifact_format` / `CompilationOptions.output_mode`):
 
 **LLVM IR (default, production).**
-- `hip-compiler.dll` emits OS-portable `.bc` into the [EPContext](https://onnxruntime.ai/docs/execution-providers/EP-Context-Design.html) tar via `morphizen::FileSystem` (see [design/compilation-options.md](design/compilation-options.md)). The bitcode is emitted with empty triple and empty datalayout.
+- `hip-compiler` emits OS-portable `.bc` into the [EPContext](https://onnxruntime.ai/docs/execution-providers/EP-Context-Design.html) tar via `morphizen::FileSystem` (see [design/compilation-options.md](design/compilation-options.md)). The bitcode is emitted with empty triple and empty datalayout.
 - `onnxruntime_morphizen_ep.dll` JITs that bitcode in-process at session creation via `LlvmIrJit::create` (`backend-mlir-compiler/custom-op-mlir/src/LlvmIrJit.cpp`). The JIT stamps the host triple/datalayout onto both the per-model module and an embedded per-OS `runtime.bc`, then `addIRModule`s them into one ORC LLJIT JITDylib over a shared `LLVMContext`.
 - At inference time the EP holds function pointers obtained via `LlvmIrJit::lookup_raw` and calls them per `Compute()`. No LLVM machinery runs on that hot path.
 
 **Native DLL (opt-in, benchmarking/dev).**
-- `hip-compiler.dll` merges the embedded `runtime.bc` at producer time (`LLVMBackend::linkRuntimeModule`), emits a host object (`compileToObjectFile`, PIC), and links a per-OS `.dll`/`.so` via `DLLLinker` (in-process `lld-link` COFF on Windows; `clang++ -shared -fuse-ld=lld` subprocess on Linux), linking the per-arch `custom_kernels_<arch>` import lib + ROCm import libs.
+- `hip-compiler` merges the embedded `runtime.bc` at producer time (`LLVMBackend::linkRuntimeModule`), emits a host object (`compileToObjectFile`, PIC), and links a per-OS `.dll`/`.so` via `DLLLinker` (in-process `lld-link` COFF on Windows; `clang++ -shared -fuse-ld=lld` subprocess on Linux), linking the per-arch `custom_kernels_<arch>` import lib + ROCm import libs.
 - `onnxruntime_morphizen_ep.dll` writes the artifact bytes to a temp file and loads it via `morphizen::Plugin` (`LoadLibraryW` / `dlopen`), resolving the same five-symbol C ABI through `get_method` (`GetProcAddress` / `dlsym`). The temp file is deleted on session teardown.
 - The EP picks the loader from the `artifact_format` field in the EPContext metadata (`mlir_metadata::Metadata`); the compiler always records it, and an empty/unknown value is fatal.
 
@@ -70,7 +70,7 @@ The hip-original framing "recompiles every process start" is technically correct
 | EPContext tar portability | One artifact per OS | Single `.bc` works on Linux + Windows |
 | Per-model artifact on disk treated as code | Yes (`.dll` / `.so`) | No (bitcode is data) |
 | EP DLL binary size | Smaller (no LLVM ORC) | +5-10 MB statically linked ORC + codegen ([ClamAV example](https://groups.google.com/g/llvm-dev/c/InMxMlH5fXg)) |
-| Compile-time optimizations | Full LLVM passes in compiler | Full LLVM passes in `hip-compiler.dll` (`opt_level` default 2, run before bitcode emit) |
+| Compile-time optimizations | Full LLVM passes in compiler | Full LLVM passes in `hip-compiler` (`opt_level` default 2, run before bitcode emit) |
 | Session-creation cost | mmap + relocations | LLVM ORC codegen on already-optimized IR |
 | Per-`Compute()` cost | Function pointer call | Function pointer call |
 | Steady-state memory | mmap'd image (single mapping) | JITted code page + retained `llvm::Module` (bitcode `MemoryBuffer` released after `parseBitcodeFile`) |
@@ -79,7 +79,7 @@ The hip-original framing "recompiles every process start" is technically correct
 
 Callouts on the table:
 
-- **"Full LLVM passes" on both rows is intentional.** Optimization passes run in `hip-compiler.dll` *before* bitcode is written. The JIT side does codegen only. The common framing "JIT loses optimizations to time budget" does not apply here.
+- **"Full LLVM passes" on both rows is intentional.** Optimization passes run in `hip-compiler` *before* bitcode is written. The JIT side does codegen only. The common framing "JIT loses optimizations to time budget" does not apply here.
 - **Per-`Compute()` cost is identical.** Both produce a function pointer that ORT calls per inference; LLVM is not on that path.
 - **Both EP DLLs are OS-specific.** The "OS-portable" property is of the *per-model artifact*, not the EP DLL. Native DLL adds per-OS native codegen in the compiler; IR adds a per-OS `runtime.bc` shim.
 
@@ -89,7 +89,7 @@ Callouts on the table:
 
 If the signed-DLL constraint did not apply:
 
-1. `hip-compiler.dll` would run platform codegen, link to `.dll`/`.so`, and write the artifact to the EPContext via `morphizen::FileSystem` (no analogue of the current `output_mode` schema field would exist; the artifact format would be implicit in the consumer pipeline).
+1. `hip-compiler` would run platform codegen, link to `.dll`/`.so`, and write the artifact to the EPContext via `morphizen::FileSystem` (no analogue of the current `output_mode` schema field would exist; the artifact format would be implicit in the consumer pipeline).
 2. The EP DLL embeds an in-memory PE loader on Windows ([MemoryModule](https://github.com/fancycode/MemoryModule), MPL 2.0) and an in-memory ELF loader on Linux (no canonical library; `memfd_create` + `dlopen` from `/proc/self/fd/N` is the common shape). At session creation the EP maps the appropriate artifact and resolves the five-symbol contract documented in [design/compiler-runtime-contract.md](design/compiler-runtime-contract.md).
 3. CRT and runtime symbols are resolved through the loader's import table against host libraries; the embedded `runtime.bc` shim disappears.
 

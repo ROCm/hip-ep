@@ -3,14 +3,15 @@
 # Licensed under the MIT License.
 #
 
-"""Tests for the unary math ops Abs, Ceil, Log.
+"""Tests for the unary math ops Abs, Ceil, Round, Log, Erf.
 
-All three route through the shared unary elementwise HIP kernel family
-(lib/Runtime/real/{abs,ceil,log}.cpp). Per those dtype tables:
+These route through the shared unary elementwise HIP kernel family
+(lib/Runtime/real/{abs,ceil,round,log}.cpp). Per those dtype tables:
 
-    Abs  : f16, f32, i32, i64   (bit-exact; abs is value-preserving)
-    Ceil : f16, f32             (bit-exact; result is integral)
-    Log  : f16, f32             (positive inputs only; fp16 ~1e-3, fp32 ~1e-6)
+    Abs   : f16, f32, i32, i64   (bit-exact; abs is value-preserving)
+    Ceil  : f16, f32             (bit-exact; result is integral)
+    Round : f16, f32             (bit-exact; ONNX ties-to-even)
+    Log   : f16, f32             (positive inputs only; fp16 ~1e-3, fp32 ~1e-6)
 
 Each op is checked at a small smoke shape plus a llama-style [1, S, 4096]
 shape for S in {1, 128}.
@@ -90,6 +91,35 @@ class TestCeil:
 
 
 # ---------------------------------------------------------------------------
+# Round : y = round_ties_to_even(x)  (ONNX Round)
+# ---------------------------------------------------------------------------
+class TestRound:
+    @pytest.mark.parametrize("dtype", [np.float16, np.float32])
+    def test_round(self, model_runner, dtype):
+        shape = [4, 8]
+        model = _make_unary_model("Round", dtype, shape)
+        rng = np.random.default_rng(915)
+        x = rng.uniform(-5.0, 5.0, shape).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    def test_round_ties_to_even(self, model_runner):
+        model = _make_unary_model("Round", np.float32, [7])
+        x = np.array([0.9, 2.5, 2.3, 1.5, -4.5, -1.5, 0.0], dtype=np.float32)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize("seq_len", SEQ_LENS)
+    def test_round_llama_shape(self, model_runner, seq_len):
+        shape = [1, seq_len, HIDDEN]
+        model = _make_unary_model("Round", np.float16, shape)
+        rng = np.random.default_rng(916)
+        x = rng.uniform(-5.0, 5.0, shape).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+
+# ---------------------------------------------------------------------------
 # Log : y = ln(x)  (positive domain)
 # ---------------------------------------------------------------------------
 class TestLog:
@@ -111,3 +141,26 @@ class TestLog:
         x = rng.uniform(0.1, 10.0, shape).astype(np.float16)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-3, rtol=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# Erf : y = erf(x)
+# ---------------------------------------------------------------------------
+class TestErf:
+    @pytest.mark.parametrize("dtype", [np.float16, np.float32])
+    def test_erf(self, model_runner, dtype):
+        shape = [4, 8]
+        model = _make_unary_model("Erf", dtype, shape)
+        rng = np.random.default_rng(907)
+        x = rng.uniform(-3.0, 3.0, shape).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x])
+        atol = 2e-3 if dtype == np.float16 else 1e-5
+        compare_outputs(actual, expected, atol=atol, rtol=1e-3)
+
+    def test_erf_bev_shape(self, model_runner):
+        shape = [1, 128, 200, 200]
+        model = _make_unary_model("Erf", np.float32, shape)
+        rng = np.random.default_rng(908)
+        x = rng.uniform(-2.0, 2.0, shape).astype(np.float32)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)

@@ -10,13 +10,13 @@
 // 4. convert-hip-to-llvm: HIP ops → LLVM runtime calls
 // 5. generate-interface: Create inference_init/compute/cleanup/metadata
 //
-// Softplus directly uses MIOpen's wrap_miopenActivationForward()
-// with HIPDNN_EP_ACTIVATION_SOFTPLUS (activation_mode=3).
+// Softplus lowers to wrap_softplus(); runtime dispatches f32/f16 to the
+// hip_softplus custom kernel.
 
 // CHECK: module attributes {
 // CHECK-SAME: hipdnn.input_count = 1
 // CHECK-SAME: hipdnn.output_count = 1
-// CHECK: llvm.func @wrap_miopenActivationForward
+// CHECK: llvm.func @wrap_softplus
 // CHECK: llvm.func @inference_init
 // CHECK: llvm.func @inference_compute
 // CHECK: llvm.func @inference_cleanup

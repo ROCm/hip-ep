@@ -92,8 +92,14 @@ template <typename Tag, typename ArgType> struct ArgConverter;
 
 template <> struct ArgConverter<DevicePtrTag, Value> {
   static Value convert(ConversionPatternRewriter &rewriter, Location loc,
-                       Value value) {
-    return extractContiguousMemRefPtr(value, rewriter, loc);
+                       Value memref) {
+    // An operand the op does not have goes over as a null pointer.
+    if (!memref) {
+      return LLVM::ZeroOp::create(
+          rewriter, loc,
+          materializeType<DevicePtrTag>(rewriter.getContext(), rewriter));
+    }
+    return extractContiguousMemRefPtr(memref, rewriter, loc);
   }
 };
 
@@ -193,13 +199,29 @@ private:
 
 void populateHipsrAddLoweringPatterns(const LLVMTypeConverter &converter,
                                       RewritePatternSet &patterns);
+void populateHipsrMulLoweringPatterns(const LLVMTypeConverter &converter,
+                                      RewritePatternSet &patterns);
+void populateHipsrEqualLoweringPatterns(const LLVMTypeConverter &converter,
+                                        RewritePatternSet &patterns);
+void populateHipsrTransposeLoweringPatterns(const LLVMTypeConverter &converter,
+                                            RewritePatternSet &patterns);
+void populateHipsrGatherLoweringPatterns(const LLVMTypeConverter &converter,
+                                         RewritePatternSet &patterns);
+void populateHipsrSliceLoweringPatterns(const LLVMTypeConverter &converter,
+                                        RewritePatternSet &patterns);
+void populateHipsrScatterNDLoweringPatterns(const LLVMTypeConverter &converter,
+                                            RewritePatternSet &patterns);
 void populateHipsrConstantLoweringPatterns(const LLVMTypeConverter &converter,
                                            RewritePatternSet &patterns);
 void populateHipsrGetPoolLoweringPatterns(const LLVMTypeConverter &converter,
                                           RewritePatternSet &patterns);
 void populateHipsrCastLoweringPatterns(const LLVMTypeConverter &converter,
                                        RewritePatternSet &patterns);
+void populateHipsrCopyD2HLoweringPatterns(const LLVMTypeConverter &converter,
+                                          RewritePatternSet &patterns);
 void populateHipsrMatMulLoweringPatterns(const LLVMTypeConverter &converter,
+                                         RewritePatternSet &patterns);
+void populateHipsrExpandLoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns);
 
 } // namespace hipsr

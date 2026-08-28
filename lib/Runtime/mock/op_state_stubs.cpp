@@ -44,9 +44,16 @@ extern "C" int8_t hipdnn_ep_op_state_construct_matmul(RuntimeState *state,
   return 0;
 }
 
-// CausalConvWithState: real runtime owns a per-shape MIOpen descriptor/algo
-// cache (CausalConvState in real/causal_conv_with_state.cpp); the mock owns no
-// device/MIOpen resources.
+extern "C" int8_t hipdnn_ep_op_state_construct_conv(RuntimeState *state,
+                                                    int32_t slot) {
+  hipdnn_ep_op_state_set(state, slot, MockOpState::create().release());
+  return 0;
+}
+
+// CausalConvWithState: neither runtime holds anything here any more -- the
+// real side's per-shape MIOpen descriptor/algo cache went away with the MIOpen
+// fallback -- but the op still emits a construct call for its slot, so the
+// symbol has to exist on both sides.
 extern "C" int8_t
 hipdnn_ep_op_state_construct_causal_conv_with_state(RuntimeState *state,
                                                     int32_t slot) {
@@ -72,39 +79,11 @@ hipdnn_ep_op_state_construct_multi_head_attention(RuntimeState *state,
   return 0;
 }
 
-// Activation (sigmoid/tanh/softplus): real runtime holds a shared_ptr to a
-// device-wide MIOpen descriptor table (ActivationState in real/activation.cpp);
-// the mock owns no device/MIOpen resources.
-extern "C" int8_t hipdnn_ep_op_state_construct_activation(RuntimeState *state,
-                                                          int32_t slot) {
-  hipdnn_ep_op_state_set(state, slot, MockOpState::create().release());
-  return 0;
-}
-
 // MIOpen OpTensor (miopen.add): real runtime holds a shared_ptr to a
 // device-wide MIOpen descriptor table (OpTensorState in real/elementwise.cpp);
 // the mock owns no device/MIOpen resources.
 extern "C" int8_t hipdnn_ep_op_state_construct_optensor(RuntimeState *state,
                                                         int32_t slot) {
-  hipdnn_ep_op_state_set(state, slot, MockOpState::create().release());
-  return 0;
-}
-
-// SimplifiedLayerNorm (rms_norm): real runtime holds a shared_ptr to a
-// device-wide MIOpen descriptor table (T5NormState in
-// real/simplified_layer_norm.cpp); the mock owns no device/MIOpen resources.
-extern "C" int8_t hipdnn_ep_op_state_construct_t5norm(RuntimeState *state,
-                                                      int32_t slot) {
-  hipdnn_ep_op_state_set(state, slot, MockOpState::create().release());
-  return 0;
-}
-
-// SkipSimplifiedLayerNorm (skip_rms_norm): real runtime holds a shared_ptr to a
-// device-wide MIOpen descriptor table (SkipT5NormState in
-// real/skip_simplified_layer_norm.cpp); the mock owns no device/MIOpen
-// resources.
-extern "C" int8_t hipdnn_ep_op_state_construct_skip_t5norm(RuntimeState *state,
-                                                           int32_t slot) {
   hipdnn_ep_op_state_set(state, slot, MockOpState::create().release());
   return 0;
 }
