@@ -1040,10 +1040,7 @@ def Hip_QMoEAmdOp : Hip_DpsOp<"qmoe_amd",
     block with sigmoid + correction-bias routing, a shared expert, and
     squared-ReLU ("relu2") activation. Distinct from the com.microsoft QMoE
     operator (`hip.qmoe`): different routing, activation, and a mandatory
-    latent projection + shared-expert branch, so it is implemented as its
-    own op end to end (dialect, conversion, lowering, runtime, kernels) and
-    does not share code with `hip.qmoe` beyond calling the same generic
-    int4 GEMM / gather / bucket / scatter sub-kernels.
+    latent projection + shared-expert branch.
 
     Routing (per token, over `num_experts` derived from
     `fc1_experts_weights`'s leading dim):

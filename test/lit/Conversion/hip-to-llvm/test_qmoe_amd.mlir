@@ -20,7 +20,7 @@
 //   activation_type, routing_type)
 // ============================================================================
 
-// RUN: hip-mlir-opt --convert-hip-to-llvm --split-input-file %s | FileCheck %s
+// RUN: hip-mlir-opt --convert-hip-to-llvm %s | FileCheck %s
 
 module {
   func.func @test_qmoe_amd(%ctx: !hip.context,
@@ -84,58 +84,7 @@ module {
   //   routing_type, elem_size
   //
   // activation_type / routing_type are the trailing i64 pair before elem_size
-  // (0 = relu2 / 0 = sigmoid).
-}
-
-// -----
-
-// A mode string the lowering does not recognize still lowers to a call; it is
-// translated to UNKNOWN (-1) so wrap_qmoe_amd is the layer that refuses it,
-// rather than being mapped onto relu2/sigmoid and computing the wrong function.
-module {
-  func.func @test_qmoe_amd_unknown_mode(%ctx: !hip.context,
-      %hidden_states: memref<1x4x16xf16, 1>,
-      %fc1e_w: memref<4x8x1x4xui8, 1>,
-      %fc1e_s: memref<4x8x1xf16, 1>,
-      %fc2e_w: memref<4x8x1x4xui8, 1>,
-      %fc2e_s: memref<4x8x1xf16, 1>,
-      %fc1l_w: memref<8x2x4xui8, 1>,
-      %fc1l_s: memref<8x2xf16, 1>,
-      %fc2l_w: memref<16x1x4xui8, 1>,
-      %fc2l_s: memref<16x1xf16, 1>,
-      %sh1_w: memref<16x2x4xui8, 1>,
-      %sh1_s: memref<16x2xf16, 1>,
-      %sh2_w: memref<16x2x4xui8, 1>,
-      %sh2_s: memref<16x2xf16, 1>,
-      %router_w: memref<16x4xf16, 1>,
-      %corr_b: memref<4xf16, 1>,
-      %output: memref<1x4x16xf16, 1>) {
-    hip.qmoe_amd(%ctx) ins(
-        %hidden_states,
-        %fc1e_w, %fc1e_s,
-        %fc2e_w, %fc2e_s,
-        %fc1l_w, %fc1l_s,
-        %fc2l_w, %fc2l_s,
-        %sh1_w, %sh1_s,
-        %sh2_w, %sh2_s,
-        %router_w, %corr_b :
-        memref<1x4x16xf16, 1>,
-        memref<4x8x1x4xui8, 1>, memref<4x8x1xf16, 1>,
-        memref<4x8x1x4xui8, 1>, memref<4x8x1xf16, 1>,
-        memref<8x2x4xui8, 1>, memref<8x2xf16, 1>,
-        memref<16x1x4xui8, 1>, memref<16x1xf16, 1>,
-        memref<16x2x4xui8, 1>, memref<16x2xf16, 1>,
-        memref<16x2x4xui8, 1>, memref<16x2xf16, 1>,
-        memref<16x4xf16, 1>, memref<4xf16, 1>)
-        outs(%output : memref<1x4x16xf16, 1>)
-        {k = 2 : i64, expert_weight_bits = 4 : i64, block_size = 8 : i64,
-         normalize_routing_weights = 1 : i64, use_correction_bias = 1 : i64,
-         routed_scaling_factor = 5.000000e+00 : f32,
-         activation_type = "swiglu", routing_type = "softmax"}
-    return
-  }
-
-  // CHECK-LABEL: llvm.func @test_qmoe_amd_unknown_mode
-  // CHECK-DAG: llvm.mlir.constant(-1 : i64)
-  // CHECK: llvm.call @wrap_qmoe_amd
+  // (0 = relu2 / 0 = sigmoid). ONNX-to-HIP declines any other mode, so only
+  // these two values reach this lowering -- see
+  // test/lit/Conversion/onnx-to-hip/test_qmoe_amd_unsupported_mode.mlir.
 }
