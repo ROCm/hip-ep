@@ -24,9 +24,9 @@ def Hipsr_MatMulOp : Hipsr_DpsOp<"matmul"> {
 
   let arguments = (ins
     Hipsr_ContextType:$ctx,
-    Hipsr_DeviceTensorOrMemRef:$A,
-    Hipsr_DeviceTensorOrMemRef:$B,
-    Hipsr_DeviceTensorOrMemRef:$init
+    Hipsr_TensorOrDeviceMemRef:$A,
+    Hipsr_TensorOrDeviceMemRef:$B,
+    Hipsr_TensorOrDeviceMemRef:$init
   );
 
   let assemblyFormat = [{

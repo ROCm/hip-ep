@@ -18,10 +18,9 @@ namespace mlir {
 namespace hip {
 
 /// Compute the shape of `A @ B` for matmul with NumPy-style batch broadcast
-/// over the leading dims. By default last two dims of `aShape` are `[M, K]`
-/// and last two dims of `bShape` are `[K, N]`. When `transA` / `transB` are
-/// set the corresponding operand's last two dims are swapped before the
-/// contraction (compile-time fusion of `Transpose(perm=[..,r,r-2])`).
+/// over the leading dims. Last two dims of `aShape` are `[M, K]`; last two
+/// dims of `bShape` are `[K, N]`. Leading dims are broadcast (right-aligned,
+/// missing dims treated as 1).
 ///
 /// Returns the inferred shape on success. Returns an empty `SmallVector` and
 /// emits a diagnostic via `emitError` on rank-, K-, or batch-broadcast
@@ -40,8 +39,7 @@ namespace hip {
 ///         -> error.
 SmallVector<int64_t>
 inferMatmulShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
-                 function_ref<InFlightDiagnostic()> emitError,
-                 int64_t transA = 0, int64_t transB = 0);
+                 function_ref<InFlightDiagnostic()> emitError);
 
 /// Verify that the actual `outs` operand shapes of a DPS HIP op match the
 /// shapes returned by `computeExpected`. `op` must implement

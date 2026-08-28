@@ -52,10 +52,10 @@ struct CompilationArtifact {
 /**
  * MLIR compiler driver that dispatches to the hip-compiler plugin C API.
  *
- * `compileFromBytecode` serializes the provided MLIR bytecode, calls the
- * plugin's `hip_compile_with_fs`, and reads back the resulting per-model
- * LLVM bitcode artifact for inclusion in the EPContext tar. The downstream
- * EP loads it via LlvmIrJit.
+ * `compileFromBytecode` serializes the provided MLIR bytecode, calls
+ * `hip_compile_with_fs` in `hip-compiler.dll`, and reads back the
+ * resulting per-model LLVM bitcode artifact for inclusion in the
+ * EPContext tar. The downstream EP loads it via LlvmIrJit.
  *
  * NOTE: Mock runtime is not supported. The hip-compiler plugin always
  * targets the real HIP/ROCm runtime; ML inference on a host without

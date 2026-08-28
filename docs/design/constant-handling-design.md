@@ -66,7 +66,7 @@ The constants pipeline has two phases separated by the `FileSystem` abstraction:
 ```
 Compile time
   ╔═════════════════════════════════╗                               ╔══════════════════════════════════╗
-  ║         morphizen-ep.dll        ║                               ║       hip-compiler (plugin)      ║
+  ║         morphizen-ep.dll        ║                               ║       hip-compiler.dll           ║
   ║                                 ║                               ║                                  ║
   ║  ┌─────────────────────────┐    ║  hip_compile_with_fs(fs)    ║  fs->create_writer(name)         ║
   ║  │ level-1 pass (HipDnnEP) ├────╫──────────────────────────────▶  → FileWriter → fwrite()        ║
@@ -77,7 +77,7 @@ Compile time
                                                                               DiskFileSystem for
                                                                               CLI / standalone use)
                                                                                         │
-Runtime  (the compiler is not involved)                                                 │
+Runtime  (hip-compiler.dll NOT loaded)                                                  │
   ╔═════════════════════════════════════════════════════════════════════════════════════╗
   ║                                morphizen-ep.dll                                     ║
   ║                                                                                     ║

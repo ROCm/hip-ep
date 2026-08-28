@@ -34,10 +34,6 @@
 
 namespace {
 
-// Widest kernel the templated ladders below stamp out. Anything past this is
-// served by the dynamic-K kernels, which are slower but unrolled at runtime.
-constexpr int kMaxTemplatedK = 8;
-
 template <typename T> __device__ __forceinline__ float to_f32(T x);
 template <> __device__ __forceinline__ float to_f32(float x) { return x; }
 template <> __device__ __forceinline__ float to_f32(__half x) {
@@ -48,20 +44,6 @@ template <typename T> __device__ __forceinline__ T from_f32(float x);
 template <> __device__ __forceinline__ float from_f32(float x) { return x; }
 template <> __device__ __forceinline__ __half from_f32(float x) {
     return __float2half(x);
-}
-
-// Dynamic LDS a single block may request. Only the dynamic-K paths below need
-// it, and they run once per op call, so this is queried rather than cached --
-// a cache would go stale if the calling thread switches device.
-size_t lds_capacity_bytes() {
-    int dev = 0;
-    int cap = 0;
-    if (hipGetDevice(&dev) != hipSuccess ||
-        hipDeviceGetAttribute(&cap, hipDeviceAttributeMaxSharedMemoryPerBlock,
-                              dev) != hipSuccess ||
-        cap <= 0)
-        return 64u * 1024u;
-    return static_cast<size_t>(cap);
 }
 
 // Per-(b,c) thread:
@@ -216,38 +198,16 @@ hipError_t launch_for_K(
 }
 
 // Prefill (seq_len > 1) fused causal depthwise 1D conv + bias + SiLU.
-// A thread slides a length-K window over its slice of the virtual sequence
-// [past_state[0..K-2], input[0..L-1]], writing that slice's outputs; the thread
-// holding the tail also writes the trailing K-1 present_state. fp32 accumulate
-// -- numerically matches causal_conv_step_kernel at L=1. Replaces the MIOpen
-// prefill path (Find + 3 pitched memcpys + conv + bias + activation + mul)
-// with a single launch. Layout matches wrap_causal_conv_with_state:
-//   input, output            flat [(b*C + c)*L + t]
-//   past_state, present_state flat [(b*C + c)*(K-1) + j]
-//   weight                    flat [c*K + j];   bias flat [c]
-//
-// One block owns one (b, c) plane and a TILE-long run of its outputs: lane i
-// produces output t0 + i, and the block stages virtual[t0 .. t0+TILE+K-2] in LDS
-// first so every global access is contiguous across the wave.
-//
-// Why it is shaped this way rather than one-thread-per-plane walking t. That
-// form fixes the grid at B*C, so a 4k-token prefill launches exactly as many
-// threads as a 40-token one -- 8192 threads, ~6 waves per CU, far too few to
-// cover DRAM latency, which is why it sat at 105 GB/s. But simply splitting t
-// across more blocks while keeping one thread per plane is *worse*, measured
-// 2.6x worse: each lane's addresses are seq_len apart, so a wave touches 32
-// different cache lines per load and only recovers the cost by consuming the
-// rest of each line on later iterations of its own serial walk. Multiply the
-// resident lane count and those lines no longer survive in cache between uses,
-// and the same traffic is refetched per element. Coalescing across lanes is what
-// actually removes the problem: consecutive lanes read consecutive t, so one
-// line serves the whole wave immediately and no cache retention is required.
-//
+// One thread per (b, c) plane slides a length-K window over the virtual
+// sequence [past_state[0..K-2], input[0..L-1]], writing L outputs and the
+// trailing K-1 present_state. fp32 accumulate -- numerically matches
+// causal_conv_step_kernel at L=1. Replaces the MIOpen prefill path (Find +
+// 3 pitched memcpys + conv + bias + activation + mul) with a single launch.
 // Layout matches wrap_causal_conv_with_state:
 //   input, output            flat [(b*C + c)*L + t]
 //   past_state, present_state flat [(b*C + c)*(K-1) + j]
 //   weight                    flat [c*K + j];   bias flat [c]
-template <typename T, int K, int HAS_BIAS, int ACT_SILU, int TILE>
+template <typename T, int K, int HAS_BIAS, int ACT_SILU>
 __global__ void causal_conv_prefill_kernel(
     const T* __restrict__ input,
     const T* __restrict__ weight,
@@ -259,49 +219,15 @@ __global__ void causal_conv_prefill_kernel(
     int channels,
     int seq_len) {
 
-    const int plane = static_cast<int>(blockIdx.x);
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int total = batch_size * channels;
-    if (plane >= total)
+    if (idx >= total)
         return;
 
-    const int t0 = static_cast<int>(blockIdx.y) * TILE;
-    if (t0 >= seq_len)
-        return;
-
-    const int c = plane % channels;
-    const int lane = static_cast<int>(threadIdx.x);
+    const int c = idx % channels;
     constexpr int STATE_LEN = K - 1;
-    constexpr int SMEM_LEN = TILE + K - 1;
 
-    const T* in_row = input + static_cast<int64_t>(plane) * seq_len;
-    T* out_row = output + static_cast<int64_t>(plane) * seq_len;
-
-    // smem[j] = virtual[t0 + j], where the virtual sequence is
-    //   virtual[i] = past_state[i]      for i < K-1
-    //                input[i - (K-1)]   otherwise,
-    // so output t reads virtual[t .. t+K-1] = smem[t-t0 .. t-t0+K-1]. Only the
-    // first tile of the first block touches past_state; every later tile reads
-    // its whole window from input.
-    __shared__ float smem[SMEM_LEN];
-    {
-        const T* ps = (STATE_LEN > 0 && past_state != nullptr)
-                          ? past_state + static_cast<int64_t>(plane) * STATE_LEN
-                          : nullptr;
-        for (int j = lane; j < SMEM_LEN; j += TILE) {
-            const int vi = t0 + j;
-            float v;
-            if (vi < STATE_LEN) {
-                v = ps ? to_f32<T>(ps[vi]) : 0.0f;
-            } else {
-                const int ii = vi - STATE_LEN;
-                v = (ii < seq_len) ? to_f32<T>(in_row[ii]) : 0.0f;
-            }
-            smem[j] = v;
-        }
-    }
-
-    // Per-channel weights (K taps) and optional bias: one channel per block, so
-    // every lane reads the same values and the load broadcasts.
+    // Per-channel weights (K taps) and optional bias.
     float w[K];
     {
         const T* wp = weight + static_cast<int64_t>(c) * K;
@@ -311,14 +237,33 @@ __global__ void causal_conv_prefill_kernel(
     }
     const float bias_v = HAS_BIAS ? to_f32<T>(bias[c]) : 0.0f;
 
-    __syncthreads();
+    // window[0..K-1] holds virtual[t .. t+K-1] for the current output t.
+    // Init for t=0: [past_state[0..K-2], input[0]].
+    float window[K];
+    {
+        const T* ps = (STATE_LEN > 0 && past_state != nullptr)
+                          ? past_state + static_cast<int64_t>(idx) * STATE_LEN
+                          : nullptr;
+        #pragma unroll
+        for (int j = 0; j < STATE_LEN; ++j)
+            window[j] = ps ? to_f32<T>(ps[j]) : 0.0f;
+    }
+    const T* in_row = input + static_cast<int64_t>(idx) * seq_len;
+    T* out_row = output + static_cast<int64_t>(idx) * seq_len;
+    window[K - 1] = to_f32<T>(in_row[0]);
 
-    const int t = t0 + lane;
-    if (t < seq_len) {
+    for (int t = 0; t < seq_len; ++t) {
+        if (t > 0) {
+            // Slide the window: drop oldest, append virtual[t+K-1] = input[t].
+            #pragma unroll
+            for (int j = 0; j < K - 1; ++j)
+                window[j] = window[j + 1];
+            window[K - 1] = to_f32<T>(in_row[t]);
+        }
         float y = 0.0f;
         #pragma unroll
         for (int j = 0; j < K; ++j)
-            y += w[j] * smem[lane + j];
+            y += w[j] * window[j];
         if (HAS_BIAS)
             y += bias_v;
         if (ACT_SILU) {
@@ -328,174 +273,13 @@ __global__ void causal_conv_prefill_kernel(
         out_row[t] = from_f32<T>(y);
     }
 
-    // present_state[j] = virtual[L + j]: the trailing K-1 of the virtual
-    // sequence, owned by whichever block covers the final output.
-    if (STATE_LEN > 0 && t0 + TILE >= seq_len && lane < STATE_LEN) {
-        T* nps = present_state + static_cast<int64_t>(plane) * STATE_LEN;
-        nps[lane] = from_f32<T>(smem[seq_len - t0 + lane]);
-    }
-}
-
-// Channels-last prefill: input and output are [B, L, C] instead of [B, C, L].
-// The recurrent state keeps its native [B, C, K-1] layout either way.
-//
-// This exists because the ONNX export brackets the conv with a Transpose pair --
-// [B,L,C] -> [B,C,L] in, and back out -- purely because ONNX Conv wants its
-// channels first. Those two transposes move 65 MB each on Qwen3.6-35B-A3B and
-// together cost more than the convolution they surround. Nothing about the
-// arithmetic needs channels first, so the layout is a parameter here and the
-// transposes can be folded away by the caller.
-//
-// The shape falls out differently from the channels-first kernel. There, time is
-// the contiguous axis, so a wave must cover consecutive t and the K-deep window
-// overlaps between neighbouring lanes -- hence the LDS staging. Here channels are
-// contiguous, so a lane owns one channel and walks time by itself: the window
-// lives entirely in that lane's registers with no sharing, no LDS and no halo
-// staging, while each load still coalesces because neighbouring lanes read
-// neighbouring channels at the same t. A block covers CTILE channels x TTILE
-// timesteps and re-reads only the K-1 timesteps preceding its tile.
-template <typename T, int K, int HAS_BIAS, int ACT_SILU, int CTILE, int TTILE>
-__global__ void causal_conv_prefill_nlc_kernel(
-    const T* __restrict__ input,
-    const T* __restrict__ weight,
-    const T* __restrict__ bias,
-    const T* __restrict__ past_state,
-    T* __restrict__ output,
-    T* __restrict__ present_state,
-    int batch_size,
-    int channels,
-    int seq_len) {
-
-    const int c = static_cast<int>(blockIdx.x) * CTILE + static_cast<int>(threadIdx.x);
-    const int b = static_cast<int>(blockIdx.z);
-    const int t0 = static_cast<int>(blockIdx.y) * TTILE;
-    if (c >= channels || t0 >= seq_len || b >= batch_size)
-        return;
-
-    constexpr int STATE_LEN = K - 1;
-    const int64_t plane = static_cast<int64_t>(b) * channels + c;
-    const T* ps = (STATE_LEN > 0 && past_state != nullptr)
-                      ? past_state + plane * STATE_LEN
-                      : nullptr;
-    const T* in_b = input + static_cast<int64_t>(b) * seq_len * channels;
-    T* out_b = output + static_cast<int64_t>(b) * seq_len * channels;
-
-    // The virtual sequence the convolution slides over, same definition as the
-    // channels-first kernel: virtual[i] = past_state[i] for i < K-1, else
-    // input[i - (K-1)]. Output t reads virtual[t .. t+K-1].
-    auto virt = [&](int i) -> float {
-        if (i < STATE_LEN)
-            return ps ? to_f32<T>(ps[i]) : 0.0f;
-        const int ti = i - STATE_LEN;
-        return (ti < seq_len)
-                   ? to_f32<T>(in_b[static_cast<int64_t>(ti) * channels + c])
-                   : 0.0f;
-    };
-
-    // One channel per lane, so each lane reads its own K taps. Strided by K
-    // across the wave, but the whole filter bank is C*K elements and is reused
-    // by every timestep this lane walks.
-    float w[K];
-    {
-        const T* wp = weight + static_cast<int64_t>(c) * K;
-        #pragma unroll
-        for (int j = 0; j < K; ++j)
-            w[j] = to_f32<T>(wp[j]);
-    }
-    const float bias_v = HAS_BIAS ? to_f32<T>(bias[c]) : 0.0f;
-
-    // Seed with the K-1 virtual elements preceding this tile's first output.
-    float win[K];
-    #pragma unroll
-    for (int j = 0; j < STATE_LEN; ++j)
-        win[j] = virt(t0 + j);
-
-    const int tend = (t0 + TTILE < seq_len) ? t0 + TTILE : seq_len;
-    for (int t = t0; t < tend; ++t) {
-        win[K - 1] = to_f32<T>(in_b[static_cast<int64_t>(t) * channels + c]);
-        float y = 0.0f;
-        #pragma unroll
-        for (int j = 0; j < K; ++j)
-            y += w[j] * win[j];
-        if (HAS_BIAS)
-            y += bias_v;
-        if (ACT_SILU) {
-            const float s = 1.0f / (1.0f + expf(-y));
-            y *= s;
-        }
-        out_b[static_cast<int64_t>(t) * channels + c] = from_f32<T>(y);
-        #pragma unroll
-        for (int j = 0; j < K - 1; ++j)
-            win[j] = win[j + 1];
-    }
-
-    // present_state[j] = virtual[L + j], written by the tile holding the tail.
-    if (STATE_LEN > 0 && tend == seq_len) {
-        T* nps = present_state + plane * STATE_LEN;
+    // present_state = last K-1 of virtual = window[1..K-1] after the last step.
+    if (STATE_LEN > 0) {
+        T* nps = present_state + static_cast<int64_t>(idx) * STATE_LEN;
         #pragma unroll
         for (int j = 0; j < STATE_LEN; ++j)
-            nps[j] = from_f32<T>(virt(seq_len + j));
+            nps[j] = from_f32<T>(window[j + 1]);
     }
-}
-
-template <typename T>
-hipError_t launch_prefill_nlc_for_K(
-    int K, hipStream_t stream,
-    const T* input, const T* weight, const T* bias, const T* past_state,
-    T* output, T* present_state,
-    int batch_size, int channels, int seq_len, int has_bias, int act_silu) {
-
-    // CTILE is the block size, so it sets the coalesced width; 256 covers four
-    // 64-lane waves of consecutive channels. TTILE trades halo re-reads against
-    // block count: at K=4 a 64-step tile re-reads 3 of every 64 timesteps, ~5%,
-    // while still giving 8192/256 x 3985/64 = 2016 blocks on this model.
-    constexpr int kCTile = 256;
-    constexpr int kTTile = 64;
-    const dim3 grid((channels + kCTile - 1) / kCTile,
-                    (seq_len + kTTile - 1) / kTTile,
-                    batch_size);
-
-    auto launch = [&](auto k_const, auto bias_const, auto act_const) {
-        constexpr int Kc = decltype(k_const)::value;
-        constexpr int Bc = decltype(bias_const)::value;
-        constexpr int Ac = decltype(act_const)::value;
-        hipLaunchKernelGGL(
-            (causal_conv_prefill_nlc_kernel<T, Kc, Bc, Ac, kCTile, kTTile>),
-            grid, dim3(kCTile), 0, stream,
-            input, weight, bias, past_state, output, present_state,
-            batch_size, channels, seq_len);
-        return hipGetLastError();
-    };
-
-#define DISPATCH_PREFILL_NLC_K(KVAL)                                          \
-    case KVAL: {                                                              \
-        using K_t = std::integral_constant<int, KVAL>;                        \
-        if (has_bias && act_silu)                                             \
-            return launch(K_t{}, std::integral_constant<int, 1>{},            \
-                          std::integral_constant<int, 1>{});                  \
-        if (has_bias)                                                         \
-            return launch(K_t{}, std::integral_constant<int, 1>{},            \
-                          std::integral_constant<int, 0>{});                  \
-        if (act_silu)                                                         \
-            return launch(K_t{}, std::integral_constant<int, 0>{},            \
-                          std::integral_constant<int, 1>{});                  \
-        return launch(K_t{}, std::integral_constant<int, 0>{},                \
-                      std::integral_constant<int, 0>{});                      \
-    }
-
-    switch (K) {
-        DISPATCH_PREFILL_NLC_K(1)
-        DISPATCH_PREFILL_NLC_K(2)
-        DISPATCH_PREFILL_NLC_K(3)
-        DISPATCH_PREFILL_NLC_K(4)
-        DISPATCH_PREFILL_NLC_K(5)
-        DISPATCH_PREFILL_NLC_K(6)
-        DISPATCH_PREFILL_NLC_K(7)
-        DISPATCH_PREFILL_NLC_K(8)
-        default:
-            return hipErrorInvalidValue;
-    }
-#undef DISPATCH_PREFILL_NLC_K
 }
 
 template <typename T>
@@ -505,21 +289,17 @@ hipError_t launch_prefill_for_K(
     T* output, T* present_state,
     int batch_size, int channels, int seq_len, int has_bias, int act_silu) {
 
-    // One block per (b, c) plane per kTile outputs. kTile is also the block
-    // size, so it sets the coalesced load width and the LDS staging buffer at
-    // once; 256 keeps that buffer near 1 KB and the halo re-read to K-1 elements
-    // per 256 outputs.
-    constexpr int kTile = 256;
-    const int planes = batch_size * channels;
-    const int tiles = (seq_len + kTile - 1) / kTile;
+    const int total = batch_size * channels;
+    const int block = 256;
+    const int grid = (total + block - 1) / block;
 
     auto launch = [&](auto k_const, auto bias_const, auto act_const) {
         constexpr int Kc = decltype(k_const)::value;
         constexpr int Bc = decltype(bias_const)::value;
         constexpr int Ac = decltype(act_const)::value;
         hipLaunchKernelGGL(
-            (causal_conv_prefill_kernel<T, Kc, Bc, Ac, kTile>),
-            dim3(planes, tiles), dim3(kTile), 0, stream,
+            (causal_conv_prefill_kernel<T, Kc, Bc, Ac>),
+            dim3(grid), dim3(block), 0, stream,
             input, weight, bias, past_state, output, present_state,
             batch_size, channels, seq_len);
         return hipGetLastError();
@@ -556,324 +336,6 @@ hipError_t launch_prefill_for_K(
 #undef DISPATCH_PREFILL_K
 }
 
-// Dynamic-K counterpart of causal_conv_prefill_kernel, for widths past the end
-// of the templated ladder. Same block decomposition and the same virtual
-// sequence; the difference is that K is a runtime value, so the taps and the
-// staged window both live in dynamic LDS instead of registers and the dot
-// product is a runtime loop.
-//
-// This also serves decode. At seq_len == 1 a single tile produces the one
-// output and the same block writes all K-1 state entries, and the flat index of
-// (b, c) is b*C + c under either layout because the permuted axis has extent 1 --
-// so no dynamic-K decode kernel, and no channels-last variant of one, is needed.
-//
-// LDS layout: [TILE + K - 1 window floats][K tap floats].
-template <typename T, int TILE>
-__global__ void causal_conv_prefill_dynk_kernel(
-    const T* __restrict__ input,
-    const T* __restrict__ weight,
-    const T* __restrict__ bias,
-    const T* __restrict__ past_state,
-    T* __restrict__ output,
-    T* __restrict__ present_state,
-    int batch_size,
-    int channels,
-    int seq_len,
-    int K,
-    int has_bias,
-    int act_silu) {
-
-    const int plane = static_cast<int>(blockIdx.x);
-    const int total = batch_size * channels;
-    if (plane >= total)
-        return;
-
-    const int t0 = static_cast<int>(blockIdx.y) * TILE;
-    if (t0 >= seq_len)
-        return;
-
-    const int c = plane % channels;
-    const int lane = static_cast<int>(threadIdx.x);
-    const int state_len = K - 1;
-    const int smem_len = TILE + state_len;
-
-    extern __shared__ float smem_dyn[];
-    float* win = smem_dyn;
-    float* taps = smem_dyn + smem_len;
-
-    const T* in_row = input + static_cast<int64_t>(plane) * seq_len;
-    T* out_row = output + static_cast<int64_t>(plane) * seq_len;
-
-    {
-        const T* ps = (state_len > 0 && past_state != nullptr)
-                          ? past_state + static_cast<int64_t>(plane) * state_len
-                          : nullptr;
-        for (int j = lane; j < smem_len; j += TILE) {
-            const int vi = t0 + j;
-            float v;
-            if (vi < state_len) {
-                v = ps ? to_f32<T>(ps[vi]) : 0.0f;
-            } else {
-                const int ii = vi - state_len;
-                v = (ii < seq_len) ? to_f32<T>(in_row[ii]) : 0.0f;
-            }
-            win[j] = v;
-        }
-        // Strided like the window: K may exceed the block size.
-        const T* wp = weight + static_cast<int64_t>(c) * K;
-        for (int j = lane; j < K; j += TILE)
-            taps[j] = to_f32<T>(wp[j]);
-    }
-
-    __syncthreads();
-
-    const int t = t0 + lane;
-    if (t < seq_len) {
-        float y = 0.0f;
-        for (int j = 0; j < K; ++j)
-            y += taps[j] * win[lane + j];
-        if (has_bias)
-            y += to_f32<T>(bias[c]);
-        if (act_silu) {
-            const float s = 1.0f / (1.0f + expf(-y));
-            y *= s;
-        }
-        out_row[t] = from_f32<T>(y);
-    }
-
-    // present_state[j] = virtual[L + j], written by the tile holding the tail.
-    // Every index is inside the staged window: this block has t0 <= L <= t0 +
-    // TILE, so L + K - 2 <= t0 + TILE + K - 2, the last staged position.
-    if (state_len > 0 && t0 + TILE >= seq_len) {
-        T* nps = present_state + static_cast<int64_t>(plane) * state_len;
-        for (int j = lane; j < state_len; j += TILE)
-            nps[j] = from_f32<T>(win[seq_len - t0 + j]);
-    }
-}
-
-template <typename T>
-hipError_t launch_prefill_dynk(
-    int K, hipStream_t stream,
-    const T* input, const T* weight, const T* bias, const T* past_state,
-    T* output, T* present_state,
-    int batch_size, int channels, int seq_len, int has_bias, int act_silu) {
-
-    constexpr int kTile = 256;
-    const size_t lds =
-        static_cast<size_t>(kTile + K - 1 + K) * sizeof(float);
-    const size_t cap = lds_capacity_bytes();
-    if (lds > cap) {
-        fprintf(stderr,
-                "[custom_kernels] causal conv: kernel_size=%d needs %zu bytes "
-                "of LDS per block, device offers %zu\n",
-                K, lds, cap);
-        return hipErrorInvalidValue;
-    }
-
-    const int planes = batch_size * channels;
-    const int tiles = (seq_len + kTile - 1) / kTile;
-    hipLaunchKernelGGL(
-        (causal_conv_prefill_dynk_kernel<T, kTile>),
-        dim3(planes, tiles), dim3(kTile), lds, stream,
-        input, weight, bias, past_state, output, present_state,
-        batch_size, channels, seq_len, K, has_bias, act_silu);
-    return hipGetLastError();
-}
-
-// Dynamic-K counterpart of causal_conv_prefill_nlc_kernel. The templated form
-// keeps the K-deep window in per-lane registers and rotates it, which a runtime
-// K cannot do -- a dynamically sized local array would land in scratch -- so
-// the window becomes a per-lane ring in LDS. The taps stay in global: one lane
-// per channel means every lane needs its own K of them, but a block only
-// touches ctile*K of the filter bank and re-reads it once per timestep in the
-// tile, so it stays L1-resident.
-//
-// The ring is strided by K+1 rather than K so consecutive lanes start in
-// different LDS banks; at stride K the lanes of a wave collide whenever K
-// shares a factor with the bank count.
-//
-// Slot j of a lane's ring holds virtual index t0 + j, so the slot of
-// virtual[i] is (i - t0) % K. Stepping t by one advances that slot by one, and
-// the element entering the window lands exactly where the one leaving it sat.
-template <typename T>
-__global__ void causal_conv_prefill_nlc_dynk_kernel(
-    const T* __restrict__ input,
-    const T* __restrict__ weight,
-    const T* __restrict__ bias,
-    const T* __restrict__ past_state,
-    T* __restrict__ output,
-    T* __restrict__ present_state,
-    int batch_size,
-    int channels,
-    int seq_len,
-    int K,
-    int has_bias,
-    int act_silu,
-    int ctile,
-    int ttile) {
-
-    const int c =
-        static_cast<int>(blockIdx.x) * ctile + static_cast<int>(threadIdx.x);
-    const int b = static_cast<int>(blockIdx.z);
-    const int t0 = static_cast<int>(blockIdx.y) * ttile;
-    if (c >= channels || t0 >= seq_len || b >= batch_size)
-        return;
-
-    const int state_len = K - 1;
-    const int64_t plane = static_cast<int64_t>(b) * channels + c;
-    const T* ps = (state_len > 0 && past_state != nullptr)
-                      ? past_state + plane * state_len
-                      : nullptr;
-    const T* in_b = input + static_cast<int64_t>(b) * seq_len * channels;
-    T* out_b = output + static_cast<int64_t>(b) * seq_len * channels;
-
-    auto virt = [&](int i) -> float {
-        if (i < state_len)
-            return ps ? to_f32<T>(ps[i]) : 0.0f;
-        const int ti = i - state_len;
-        return (ti < seq_len)
-                   ? to_f32<T>(in_b[static_cast<int64_t>(ti) * channels + c])
-                   : 0.0f;
-    };
-
-    extern __shared__ float smem_dyn[];
-    float* ring = smem_dyn + static_cast<int>(threadIdx.x) * (K + 1);
-
-    for (int j = 0; j < state_len; ++j)
-        ring[j] = virt(t0 + j);
-
-    const T* wp = weight + static_cast<int64_t>(c) * K;
-    const float bias_v = has_bias ? to_f32<T>(bias[c]) : 0.0f;
-
-    const int tend = (t0 + ttile < seq_len) ? t0 + ttile : seq_len;
-    int s0 = 0; // slot holding virtual[t]
-    for (int t = t0; t < tend; ++t) {
-        // virtual[t + K - 1] is input[t] for every t >= 0.
-        int wslot = s0 + K - 1;
-        if (wslot >= K)
-            wslot -= K;
-        ring[wslot] = to_f32<T>(in_b[static_cast<int64_t>(t) * channels + c]);
-
-        float y = 0.0f;
-        int s = s0;
-        for (int j = 0; j < K; ++j) {
-            y += to_f32<T>(wp[j]) * ring[s];
-            if (++s == K)
-                s = 0;
-        }
-        if (has_bias)
-            y += bias_v;
-        if (act_silu) {
-            const float sg = 1.0f / (1.0f + expf(-y));
-            y *= sg;
-        }
-        out_b[static_cast<int64_t>(t) * channels + c] = from_f32<T>(y);
-
-        if (++s0 == K)
-            s0 = 0;
-    }
-
-    if (state_len > 0 && tend == seq_len) {
-        T* nps = present_state + plane * state_len;
-        for (int j = 0; j < state_len; ++j)
-            nps[j] = from_f32<T>(virt(seq_len + j));
-    }
-}
-
-template <typename T>
-hipError_t launch_prefill_nlc_dynk(
-    int K, hipStream_t stream,
-    const T* input, const T* weight, const T* bias, const T* past_state,
-    T* output, T* present_state,
-    int batch_size, int channels, int seq_len, int has_bias, int act_silu) {
-
-    constexpr int kTTile = 64;
-    constexpr int kMaxCTile = 256;
-    constexpr int kLaneGranularity = 32; // whole waves only
-
-    const size_t cap = lds_capacity_bytes();
-    const size_t per_lane = static_cast<size_t>(K + 1) * sizeof(float);
-    size_t fits = cap / per_lane;
-    if (fits > kMaxCTile)
-        fits = kMaxCTile;
-    const int ctile =
-        static_cast<int>(fits) & ~(kLaneGranularity - 1);
-    if (ctile < kLaneGranularity) {
-        fprintf(stderr,
-                "[custom_kernels] causal conv (channels-last): kernel_size=%d "
-                "needs %zu bytes of LDS per channel, so not even %d channels "
-                "fit in the %zu bytes a block may hold\n",
-                K, per_lane, kLaneGranularity, cap);
-        return hipErrorInvalidValue;
-    }
-
-    const size_t lds = static_cast<size_t>(ctile) * per_lane;
-    const dim3 grid((channels + ctile - 1) / ctile,
-                    (seq_len + kTTile - 1) / kTTile,
-                    batch_size);
-    hipLaunchKernelGGL(
-        (causal_conv_prefill_nlc_dynk_kernel<T>),
-        grid, dim3(ctile), lds, stream,
-        input, weight, bias, past_state, output, present_state,
-        batch_size, channels, seq_len, K, has_bias, act_silu, ctile, kTTile);
-    return hipGetLastError();
-}
-
-// ---- Width dispatch: templated ladder first, dynamic-K past its end. -------
-
-template <typename T>
-hipError_t launch_decode_any(
-    int K, hipStream_t stream,
-    const T* input, const T* weight, const T* bias, const T* past_state,
-    T* output, T* present_state,
-    int batch_size, int channels, int has_bias, int act_silu) {
-
-    if (K <= kMaxTemplatedK)
-        return launch_for_K<T>(K, stream, input, weight, bias, past_state,
-                               output, present_state, batch_size, channels,
-                               has_bias, act_silu);
-    // The dynamic-K prefill kernel is the decode kernel at seq_len == 1: same
-    // outputs, same state, and layout-agnostic there. See its comment.
-    return launch_prefill_dynk<T>(K, stream, input, weight, bias, past_state,
-                                  output, present_state, batch_size, channels,
-                                  /*seq_len=*/1, has_bias, act_silu);
-}
-
-template <typename T>
-hipError_t launch_prefill_any(
-    int K, hipStream_t stream,
-    const T* input, const T* weight, const T* bias, const T* past_state,
-    T* output, T* present_state,
-    int batch_size, int channels, int seq_len, int has_bias, int act_silu) {
-
-    if (K <= kMaxTemplatedK)
-        return launch_prefill_for_K<T>(K, stream, input, weight, bias,
-                                       past_state, output, present_state,
-                                       batch_size, channels, seq_len, has_bias,
-                                       act_silu);
-    return launch_prefill_dynk<T>(K, stream, input, weight, bias, past_state,
-                                  output, present_state, batch_size, channels,
-                                  seq_len, has_bias, act_silu);
-}
-
-template <typename T>
-hipError_t launch_prefill_nlc_any(
-    int K, hipStream_t stream,
-    const T* input, const T* weight, const T* bias, const T* past_state,
-    T* output, T* present_state,
-    int batch_size, int channels, int seq_len, int has_bias, int act_silu) {
-
-    if (K <= kMaxTemplatedK)
-        return launch_prefill_nlc_for_K<T>(K, stream, input, weight, bias,
-                                           past_state, output, present_state,
-                                           batch_size, channels, seq_len,
-                                           has_bias, act_silu);
-    return launch_prefill_nlc_dynk<T>(K, stream, input, weight, bias,
-                                      past_state, output, present_state,
-                                      batch_size, channels, seq_len, has_bias,
-                                      act_silu);
-}
-
 } // namespace
 
 extern "C" int hip_causal_conv_step_decode(
@@ -904,10 +366,10 @@ extern "C" int hip_causal_conv_step_decode(
                 (long long)batch_size, (long long)channels);
         return -1;
     }
-    if (kernel_size < 1) {
+    if (kernel_size < 1 || kernel_size > 8) {
         fprintf(stderr,
                 "[custom_kernels] hip_causal_conv_step_decode: kernel_size=%lld "
-                "must be at least 1\n",
+                "outside supported range [1,8]\n",
                 (long long)kernel_size);
         return -1;
     }
@@ -928,7 +390,7 @@ extern "C" int hip_causal_conv_step_decode(
 
     hipError_t err;
     if (element_size_bytes == 4) {
-        err = launch_decode_any<float>(
+        err = launch_for_K<float>(
             K, s,
             static_cast<const float*>(input),
             static_cast<const float*>(weight),
@@ -938,7 +400,7 @@ extern "C" int hip_causal_conv_step_decode(
             static_cast<float*>(present_state),
             B, C, has_bias, act_silu);
     } else if (element_size_bytes == 2) {
-        err = launch_decode_any<__half>(
+        err = launch_for_K<__half>(
             K, s,
             static_cast<const __half*>(input),
             static_cast<const __half*>(weight),
@@ -965,67 +427,6 @@ extern "C" int hip_causal_conv_step_decode(
     return 0;
 }
 
-namespace {
-
-// Shared body of the two prefill entry points: identical contract and
-// validation, differing only in which launcher (and so which activation layout)
-// they use. `who` names the caller in diagnostics.
-template <typename Launch>
-int prefill_common(
-    const char* who,
-    const void* input, const void* weight, const void* output,
-    const void* present_state,
-    int64_t batch_size, int64_t channels, int64_t seq_len,
-    int64_t kernel_size, int64_t activation, int64_t element_size_bytes,
-    Launch&& launch) {
-
-    if (!input || !weight || !output || !present_state) {
-        fprintf(stderr,
-                "[custom_kernels] %s: null required "
-                "pointer (input=%p weight=%p output=%p present_state=%p)\n",
-                who, input, weight, output, present_state);
-        return -1;
-    }
-    if (batch_size <= 0 || channels <= 0 || seq_len <= 0) {
-        fprintf(stderr,
-                "[custom_kernels] %s: invalid "
-                "batch=%lld channels=%lld seq_len=%lld\n",
-                who, (long long)batch_size, (long long)channels,
-                (long long)seq_len);
-        return -1;
-    }
-    if (kernel_size < 1) {
-        fprintf(stderr,
-                "[custom_kernels] %s: kernel_size=%lld must be at least 1\n",
-                who, (long long)kernel_size);
-        return -1;
-    }
-    if (activation != 0 && activation != 1) {
-        fprintf(stderr,
-                "[custom_kernels] %s: unsupported "
-                "activation=%lld (0=none, 1=SiLU)\n",
-                who, (long long)activation);
-        return -1;
-    }
-    if (element_size_bytes != 2 && element_size_bytes != 4) {
-        fprintf(stderr,
-                "[custom_kernels] %s: unsupported "
-                "element_size_bytes=%lld (expect 2 or 4)\n",
-                who, (long long)element_size_bytes);
-        return -1;
-    }
-
-    const hipError_t err = launch(element_size_bytes == 4);
-    if (err != hipSuccess) {
-        fprintf(stderr, "[custom_kernels] %s: launch failed (%s)\n", who,
-                hipGetErrorString(err));
-        return static_cast<int>(err);
-    }
-    return 0;
-}
-
-} // namespace
-
 extern "C" int hip_causal_conv_prefill(
     void* stream,
     const void* input,
@@ -1041,85 +442,77 @@ extern "C" int hip_causal_conv_prefill(
     int64_t activation,
     int64_t element_size_bytes) {
 
-    return prefill_common(
-        "hip_causal_conv_prefill", input, weight, output, present_state,
-        batch_size, channels, seq_len, kernel_size, activation,
-        element_size_bytes,
-        [&](bool is_f32) {
-            hipStream_t s = static_cast<hipStream_t>(stream);
-            const int K = static_cast<int>(kernel_size);
-            const int B = static_cast<int>(batch_size);
-            const int C = static_cast<int>(channels);
-            const int L = static_cast<int>(seq_len);
-            const int has_bias = bias ? 1 : 0;
-            const int act_silu = (activation == 1) ? 1 : 0;
-            if (is_f32)
-                return launch_prefill_any<float>(
-                    K, s,
-                    static_cast<const float*>(input),
-                    static_cast<const float*>(weight),
-                    static_cast<const float*>(bias),
-                    static_cast<const float*>(past_state),
-                    static_cast<float*>(output),
-                    static_cast<float*>(present_state),
-                    B, C, L, has_bias, act_silu);
-            return launch_prefill_any<__half>(
-                K, s,
-                static_cast<const __half*>(input),
-                static_cast<const __half*>(weight),
-                static_cast<const __half*>(bias),
-                static_cast<const __half*>(past_state),
-                static_cast<__half*>(output),
-                static_cast<__half*>(present_state),
-                B, C, L, has_bias, act_silu);
-        });
-}
+    if (!input || !weight || !output || !present_state) {
+        fprintf(stderr,
+                "[custom_kernels] hip_causal_conv_prefill: null required "
+                "pointer (input=%p weight=%p output=%p present_state=%p)\n",
+                input, weight, output, present_state);
+        return -1;
+    }
+    if (batch_size <= 0 || channels <= 0 || seq_len <= 0) {
+        fprintf(stderr,
+                "[custom_kernels] hip_causal_conv_prefill: invalid "
+                "batch=%lld channels=%lld seq_len=%lld\n",
+                (long long)batch_size, (long long)channels, (long long)seq_len);
+        return -1;
+    }
+    if (kernel_size < 1 || kernel_size > 8) {
+        fprintf(stderr,
+                "[custom_kernels] hip_causal_conv_prefill: kernel_size=%lld "
+                "outside supported range [1,8]\n",
+                (long long)kernel_size);
+        return -1;
+    }
+    if (activation != 0 && activation != 1) {
+        fprintf(stderr,
+                "[custom_kernels] hip_causal_conv_prefill: unsupported "
+                "activation=%lld (0=none, 1=SiLU)\n",
+                (long long)activation);
+        return -1;
+    }
 
-extern "C" int hip_causal_conv_prefill_nlc(
-    void* stream,
-    const void* input,
-    const void* weight,
-    const void* bias,
-    const void* past_state,
-    void* output,
-    void* present_state,
-    int64_t batch_size,
-    int64_t channels,
-    int64_t seq_len,
-    int64_t kernel_size,
-    int64_t activation,
-    int64_t element_size_bytes) {
+    hipStream_t s = static_cast<hipStream_t>(stream);
+    const int K = static_cast<int>(kernel_size);
+    const int B = static_cast<int>(batch_size);
+    const int C = static_cast<int>(channels);
+    const int L = static_cast<int>(seq_len);
+    const int has_bias = bias ? 1 : 0;
+    const int act_silu = (activation == 1) ? 1 : 0;
 
-    return prefill_common(
-        "hip_causal_conv_prefill_nlc", input, weight, output, present_state,
-        batch_size, channels, seq_len, kernel_size, activation,
-        element_size_bytes,
-        [&](bool is_f32) {
-            hipStream_t s = static_cast<hipStream_t>(stream);
-            const int K = static_cast<int>(kernel_size);
-            const int B = static_cast<int>(batch_size);
-            const int C = static_cast<int>(channels);
-            const int L = static_cast<int>(seq_len);
-            const int has_bias = bias ? 1 : 0;
-            const int act_silu = (activation == 1) ? 1 : 0;
-            if (is_f32)
-                return launch_prefill_nlc_any<float>(
-                    K, s,
-                    static_cast<const float*>(input),
-                    static_cast<const float*>(weight),
-                    static_cast<const float*>(bias),
-                    static_cast<const float*>(past_state),
-                    static_cast<float*>(output),
-                    static_cast<float*>(present_state),
-                    B, C, L, has_bias, act_silu);
-            return launch_prefill_nlc_any<__half>(
-                K, s,
-                static_cast<const __half*>(input),
-                static_cast<const __half*>(weight),
-                static_cast<const __half*>(bias),
-                static_cast<const __half*>(past_state),
-                static_cast<__half*>(output),
-                static_cast<__half*>(present_state),
-                B, C, L, has_bias, act_silu);
-        });
+    hipError_t err;
+    if (element_size_bytes == 4) {
+        err = launch_prefill_for_K<float>(
+            K, s,
+            static_cast<const float*>(input),
+            static_cast<const float*>(weight),
+            static_cast<const float*>(bias),
+            static_cast<const float*>(past_state),
+            static_cast<float*>(output),
+            static_cast<float*>(present_state),
+            B, C, L, has_bias, act_silu);
+    } else if (element_size_bytes == 2) {
+        err = launch_prefill_for_K<__half>(
+            K, s,
+            static_cast<const __half*>(input),
+            static_cast<const __half*>(weight),
+            static_cast<const __half*>(bias),
+            static_cast<const __half*>(past_state),
+            static_cast<__half*>(output),
+            static_cast<__half*>(present_state),
+            B, C, L, has_bias, act_silu);
+    } else {
+        fprintf(stderr,
+                "[custom_kernels] hip_causal_conv_prefill: unsupported "
+                "element_size_bytes=%lld (expect 2 or 4)\n",
+                (long long)element_size_bytes);
+        return -1;
+    }
+
+    if (err != hipSuccess) {
+        fprintf(stderr,
+                "[custom_kernels] hip_causal_conv_prefill: launch failed (%s)\n",
+                hipGetErrorString(err));
+        return static_cast<int>(err);
+    }
+    return 0;
 }

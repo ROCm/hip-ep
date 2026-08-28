@@ -8,9 +8,16 @@
 
 #include "compiler_types.h"
 
-/* C API linked into the EP; leave symbols unexported so they do not widen the
- * EP's dynamic export surface. */
-#define COMPILER_API
+/* Export macro for DLL visibility */
+#ifdef _WIN32
+#ifdef HIP_COMPILER_EXPORTS
+#define COMPILER_API __declspec(dllexport)
+#else
+#define COMPILER_API __declspec(dllimport)
+#endif
+#else
+#define COMPILER_API __attribute__((visibility("default")))
+#endif
 
 #ifdef __cplusplus
 extern "C" {

@@ -366,14 +366,10 @@ void populateNotConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateCosConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
-void populateErfConversionPatterns(RewritePatternSet &patterns,
-                                   MLIRContext *ctx);
 void populateSinConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateCeilConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
-void populateRoundConversionPatterns(RewritePatternSet &patterns,
-                                     MLIRContext *ctx);
 void populateExpConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateLogConversionPatterns(RewritePatternSet &patterns,
@@ -432,19 +428,10 @@ void populatePoolConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateResizeConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
-void populateGridSampleConversionPatterns(RewritePatternSet &patterns,
-                                          MLIRContext *ctx);
 void populateGlobalPoolConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
 void populateFlattenConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
-
-/// Pre-lowering pattern set: fold `Transpose(perm=[..,r,r-2])` into a
-/// consuming `onnx.MatMul` as `hipdnn.transA` / `hipdnn.transB` so the
-/// runtime can apply the swap inside hipBLASLt. Sibling of GatherShapeFold;
-/// must run while ONNX ops are still present. See TransposeMatMulFold.cpp.
-void populateTransposeMatMulFoldPatterns(RewritePatternSet &patterns,
-                                         MLIRContext *ctx);
 
 /// Pre-lowering pattern set: collapse the Gather(Shape(x), const_idx)
 /// idiom into tensor.from_elements over a tensor.dim of x. Must run
@@ -483,13 +470,6 @@ void populatePadShapeFoldPatterns(RewritePatternSet &patterns,
 /// constants are still directly matchable. See SliceShapeFold.cpp.
 void populateSliceShapeFoldPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
-
-/// Pre-lowering pattern set: rewrite static high-rank onnx.Add/Sub/Mul/Div/
-/// Less/Greater to collapse_shape -> rank-<=4 ONNX op -> expand_shape when
-/// contiguous grouping preserves multidirectional broadcast semantics.
-/// Unsafe or dynamic shapes stay at their original rank for compute conversion.
-void populatePackBroadcastTo4DPatterns(RewritePatternSet &patterns,
-                                       MLIRContext *ctx);
 
 /// Pre-lowering pattern set: collapse ORT's inlined `FastGelu` primitive
 /// chain (Pow / Mul / Sum / Tanh) back into a single

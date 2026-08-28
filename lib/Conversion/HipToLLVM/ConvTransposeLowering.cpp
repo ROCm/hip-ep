@@ -10,17 +10,20 @@ namespace hip {
 namespace {
 
 // hip.conv_transpose(%ctx, %input, %weights, %bias, %output)
-//   -> wrap_conv_transpose(ctx, input, input_n, input_c, input_h, input_w,
-//                          weights, bias, output, output_c, output_h, output_w,
-//                          kernel_h, kernel_w, stride_h, stride_w, pad_top,
-//                          pad_left, pad_bottom, pad_right, dilation_h,
-//                          dilation_w, output_padding_h, output_padding_w,
-//                          group, data_type)
+//   -> wrap_miopenConvolutionTranspose(ctx, input, input_n, input_c, input_h,
+//                                       input_w, weights, bias, output,
+//                                       output_c, output_h, output_w, kernel_h,
+//                                       kernel_w, stride_h, stride_w, pad_top,
+//                                       pad_left, pad_bottom, pad_right,
+//                                       dilation_h, dilation_w,
+//                                       output_padding_h, output_padding_w,
+//                                       group, data_type)
 //
-// The weight layout is ONNX ConvTranspose's [C, M/group, kH, kW] (input
-// channels first); the runtime derives M/group from output_c and group.
-// data_type is derived here from the output element type so the runtime
-// selects the correct kernel instantiation (f16/bf16/f32).
+// The runtime selects MIOpen's miopenTranspose convolution mode. The weight
+// layout is ONNX ConvTranspose's [C, M/group, kH, kW] (input channels first);
+// the runtime derives M/group from output_c and group. data_type is derived
+// here from the output element type so the runtime sets the correct MIOpen
+// dtype (f16/bf16/f32).
 struct ConvTransposeOpLowering
     : public ConvertOpToLLVMPattern<ConvTransposeOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -114,7 +117,6 @@ struct ConvTransposeOpLowering
 
     SmallVector<Type, 27> paramTypes = {
         ptrType, // state
-        i32Type, // op_state_slot
         ptrType, // input
         i64Type, // input_n
         i64Type, // input_c
@@ -143,18 +145,16 @@ struct ConvTransposeOpLowering
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapConvTranspose, paramTypes, i32Type);
+        rewriter, module, kMiopenConvolutionTranspose, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    auto opStateSlot = getOpStateSlotValue(op, rewriter, loc);
     SmallVector<Value, 27> args = {
-        statePtr, opStateSlot, inputPtr,    inputN,    inputC,    inputH,
-        inputW,   weightsPtr,  biasPtr,     outputPtr, outputC,   outputH,
-        outputW,  kernelH,     kernelW,     strideH,   strideW,   padTop,
-        padLeft,  padBottom,   padRight,    dilationH, dilationW, outPadH,
-        outPadW,  groupVal,    dataTypeVal,
-    };
+        statePtr,   inputPtr,   inputN,    inputC,    inputH,  inputW,
+        weightsPtr, biasPtr,    outputPtr, outputC,   outputH, outputW,
+        kernelH,    kernelW,    strideH,   strideW,   padTop,  padLeft,
+        padBottom,  padRight,   dilationH, dilationW, outPadH, outPadW,
+        groupVal,   dataTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 

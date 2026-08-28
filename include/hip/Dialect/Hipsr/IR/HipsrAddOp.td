@@ -11,9 +11,9 @@ def Hipsr_AddOp : Hipsr_DpsOp<"add"> {
 
   let arguments = (ins
     Hipsr_ContextType:$ctx,
-    Hipsr_DeviceTensorOrMemRef:$lhs,
-    Hipsr_DeviceTensorOrMemRef:$rhs,
-    Hipsr_DeviceTensorOrMemRef:$init
+    Hipsr_TensorOrDeviceMemRef:$lhs,
+    Hipsr_TensorOrDeviceMemRef:$rhs,
+    Hipsr_TensorOrDeviceMemRef:$init
   );
 
   let assemblyFormat = [{

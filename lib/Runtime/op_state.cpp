@@ -12,9 +12,9 @@
 //     _set are reached from within the runtime bitcode, so _set is plain C++.
 //
 // The per-op constructors (hipdnn_ep_op_state_construct_<class>) live in each
-// op's runtime TU (e.g. `matmul` in real/matmul.cpp), since their state usually
-// owns device resources. This TU is host-only so the same bitcode serves both
-// the real and mock runtimes.
+// op's runtime TU (e.g. the reference op `conv` in real/miopen.cpp), since
+// their state usually owns device resources. This TU is host-only so the same
+// bitcode serves both the real and mock runtimes.
 //
 //===----------------------------------------------------------------------===//
 

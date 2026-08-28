@@ -2,19 +2,17 @@
 // Licensed under the MIT License.
 
 //===----------------------------------------------------------------------===//
-// onnx.Return becomes func.return, and the function's result types follow the
-// operands it carries. Rejected forms live in return-invalid.mlir.
+// onnx.Return becomes func.return. Rejected forms live in return-invalid.mlir.
 //===----------------------------------------------------------------------===//
 
-// RUN: hip-mlir-opt --onnx-dialect=modeled --convert-onnx-to-hipsr --split-input-file %s | FileCheck %s
+// RUN: hip-mlir-opt --convert-onnx-to-hipsr --split-input-file %s | FileCheck %s
 
 // The shape an ONNX importer produces, with the return carrying the graph's
 // result.
 // CHECK-LABEL: func.func @imported_graph(
 // CHECK-SAME:    %{{.*}}: !hipsr.context,
-// CHECK-SAME:    %[[INPUT:.*]]: tensor<?x4096xf16, #hipsr.mem<device>>) -> tensor<?x4096xf16, #hipsr.mem<device>> {
-// CHECK-NEXT:    return %[[INPUT]] : tensor<?x4096xf16, #hipsr.mem<device>>
-// CHECK-NEXT:  }
+// CHECK-SAME:    %[[INPUT:.*]]: tensor<?x4096xf16>) -> tensor<?x4096xf16> {
+// CHECK-NEXT:    return %[[INPUT]] : tensor<?x4096xf16>
 func.func @imported_graph(%ctx: !hipsr.context, %input: tensor<?x4096xf16>)
     -> tensor<?x4096xf16> {
   "onnx.Return"(%input) : (tensor<?x4096xf16>) -> ()
@@ -24,9 +22,7 @@ func.func @imported_graph(%ctx: !hipsr.context, %input: tensor<?x4096xf16>)
 
 // A graph with no results returns nothing.
 // CHECK-LABEL: func.func @return_no_operands(
-// CHECK-SAME:    %{{.*}}: !hipsr.context) {
 // CHECK-NEXT:    return
-// CHECK-NEXT:  }
 func.func @return_no_operands(%ctx: !hipsr.context) {
   "onnx.Return"() : () -> ()
 }

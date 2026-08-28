@@ -48,18 +48,6 @@ module {
     return %output : tensor<1x128x32xf16>
   }
 
-  // Test 3: rank-5 Add against a scalar. Pre-lowering packs trailing axes so
-  // compute conversion creates a rank-4 hip.add, then expands its result.
-  func.func @test_add_5d_scalar(%input: tensor<1x128x200x8x200xf32>, %bias: tensor<f32>) -> tensor<1x128x200x8x200xf32> {
-    // CHECK-LABEL: func.func @test_add_5d_scalar
-    // CHECK: tensor.collapse_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4]] : tensor<1x128x200x8x200xf32> into tensor<1x128x200x1600xf32>
-    // CHECK: hip.add({{.*}}) ins({{.*}}, {{.*}} : tensor<1x128x200x1600xf32>, tensor<f32>) outs({{.*}} : tensor<1x128x200x1600xf32>)
-    // CHECK: tensor.expand_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4]] output_shape [1, 128, 200, 8, 200] : tensor<1x128x200x1600xf32> into tensor<1x128x200x8x200xf32>
-
-    %output = "onnx.Add"(%input, %bias) : (tensor<1x128x200x8x200xf32>, tensor<f32>) -> tensor<1x128x200x8x200xf32>
-    return %output : tensor<1x128x200x8x200xf32>
-  }
-
   func.func @main_graph(%arg0: tensor<1x128x32xf16>, %arg1: tensor<1x128x32xf16>) -> tensor<1x128x32xf16> {
     return %arg0 : tensor<1x128x32xf16>
   }

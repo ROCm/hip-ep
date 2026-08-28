@@ -9,7 +9,6 @@
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "mlir/IR/Block.h"
-#include "mlir/IR/Builders.h"
 #include "mlir/IR/Value.h"
 
 #include "llvm/ADT/StringRef.h"
@@ -21,23 +20,8 @@
 namespace mlir {
 namespace hipsr {
 
-/// Creates the entry block of a placeholder's shape region, one argument per
-/// entry in `getShapeRegionArgumentTypes`. Shared by
-/// hipsr-populate-shape-region and the conversions that fill a region
-/// themselves.
-inline Block &createPlaceholderShapeBlock(OpBuilder &builder,
-                                          PlaceholderOp placeholder) {
-  Region &shapeRegion = placeholder.getShapeRegion();
-  Block &block = *builder.createBlock(&shapeRegion);
-  for (Type type : placeholder.getShapeRegionArgumentTypes()) {
-    block.addArgument(type, placeholder.getLoc());
-  }
-  return block;
-}
-
 /// Accesses block arguments of a placeholder-owned shape region.
-/// Missing arguments are fatal because createPlaceholderShapeBlock adds one per
-/// entry in `getShapeRegionArgumentTypes`.
+/// Missing arguments are fatal because the population pass creates this block.
 struct PlaceholderShapeRegionArgs {
   PlaceholderShapeRegionArgs(Block &block) : block(block) {}
 

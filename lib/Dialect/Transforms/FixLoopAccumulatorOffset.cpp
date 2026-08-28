@@ -34,16 +34,6 @@
 // `Slice(x, k, k, axis) -> Loop` pattern). Runs after out-param promotion (the
 // alias only exists after that rewrite) and before the pool/hoist passes.
 //
-// The capacity half of that assumption is supplied by SliceToHip in
-// lib/Conversion/OnnxToHip/SliceConversion.cpp, which sizes the seed slice's
-// init at the data dim rather than its exact (zero) extent. #782 briefly made
-// that extent exact and this pass then rewrote offsets into a zero-byte buffer,
-// which Qwen3.6-VL hit as an invalid pitch in the append copy. The capacity is
-// dynamic by the time it reaches this pass -- v_in is `memref<1x?x...>` and the
-// allocation lives in the caller -- so only a statically empty one is visible
-// here; that case is refused below, and SliceConversion.cpp carries the
-// reciprocal note.
-//
 //===----------------------------------------------------------------------===//
 
 #include "hip/Dialect/Transforms/Passes.h"
@@ -160,24 +150,9 @@ struct FixLoopAccumulatorOffsetPass
     SmallVector<memref::DimOp> dimCandidates;
     funcOp.walk([&](memref::DimOp dimOp) {
       auto ba = dyn_cast<BlockArgument>(dimOp.getSource());
-      if (!ba || ba.getOwner() != &entry || !isVIn(ba) ||
-          !dimOp.getConstantIndex())
-        return;
-      // Rewriting an append offset only makes sense into a buffer that has room
-      // for the chunks. A statically empty accumulator axis means the seed was
-      // sized at its exact extent instead of full capacity, so leave the
-      // offsets alone and say why rather than emit subviews past the end.
-      auto memTy = cast<MemRefType>(ba.getType());
-      int64_t d = *dimOp.getConstantIndex();
-      if (d < memTy.getRank() && memTy.getDimSize(d) == 0) {
-        dimOp.emitWarning()
-            << "loop-carried accumulator axis " << d
-            << " has zero capacity; skipping the chunk-append offset rewrite "
-               "(the v_init seed must be pre-sized to the data dim -- see "
-               "SliceToHip in lib/Conversion/OnnxToHip/SliceConversion.cpp)";
-        return;
-      }
-      dimCandidates.push_back(dimOp);
+      if (ba && ba.getOwner() == &entry && isVIn(ba) &&
+          dimOp.getConstantIndex())
+        dimCandidates.push_back(dimOp);
     });
     if (dimCandidates.empty())
       return;

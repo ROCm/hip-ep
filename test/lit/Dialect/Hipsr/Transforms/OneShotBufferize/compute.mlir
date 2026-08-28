@@ -107,7 +107,6 @@ func.func @pool_domain_mlp_flatten(
     }
     %init1 = tensor.empty(%m) : tensor<?x256xf16, #hipsr.mem<device>>
     %init2 = tensor.empty(%m) : tensor<?x256xf16, #hipsr.mem<device>>
-    %init3 = tensor.empty(%flat_size) : tensor<?xf16, #hipsr.mem<device>>
     %cast1 = hipsr.cast(%dctx)
         ins(%input_arg : tensor<?x256xf16, #hipsr.mem<device>>)
         outs(%init1 : tensor<?x256xf16, #hipsr.mem<device>>)
@@ -118,9 +117,9 @@ func.func @pool_domain_mlp_flatten(
         : tensor<?x256xf16, #hipsr.mem<device>>
     %flat = hipsr.compute(%dctx)
         ins(%cast2 : tensor<?x256xf16, #hipsr.mem<device>>)
-        outs(%init3 : tensor<?xf16, #hipsr.mem<device>>) {
+        outs(%cast2 : tensor<?x256xf16, #hipsr.mem<device>>) {
     ^bb0(%body_ctx: !hipsr.context, %in: tensor<?x256xf16, #hipsr.mem<device>>,
-         %dest: tensor<?xf16, #hipsr.mem<device>>):
+         %dest: tensor<?x256xf16, #hipsr.mem<device>>):
       %collapsed = tensor.collapse_shape %in [[0, 1]]
           : tensor<?x256xf16, #hipsr.mem<device>>
           into tensor<?xf16, #hipsr.mem<device>>

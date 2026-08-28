@@ -426,13 +426,6 @@ HIP_KERNEL_API int hip_leaky_relu(
     int hip_dtype,
     double alpha);
 
-HIP_KERNEL_API int hip_softplus(
-    void* stream,
-    const void* input,
-    void* output,
-    int64_t num_elements,
-    int hip_dtype);
-
 /* =========================================================================
  * Rotary Position Embedding (RoPE)
  * =========================================================================

@@ -34,18 +34,4 @@ module {
   // CHECK-LABEL: func.func @less_dynamic
   // CHECK: tensor.empty
   // CHECK: hip.less({{.*}}) ins({{.*}}, {{.*}} : tensor<?x?xf32>, tensor<?x?xf32>) outs({{.*}} : tensor<?x?xi1>)
-
-  func.func @less_5d_broadcast(
-      %a: tensor<2x3x4x5x6xf32>, %b: tensor<2x1x4x5x6xf32>)
-      -> tensor<2x3x4x5x6xi1> {
-    // CHECK-LABEL: func.func @less_5d_broadcast
-    // CHECK: tensor.collapse_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4]] : tensor<2x3x4x5x6xf32> into tensor<2x3x4x30xf32>
-    // CHECK: tensor.collapse_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4]] : tensor<2x1x4x5x6xf32> into tensor<2x1x4x30xf32>
-    // CHECK: hip.less({{.*}}) ins({{.*}}, {{.*}} : tensor<2x3x4x30xf32>, tensor<2x1x4x30xf32>) outs({{.*}} : tensor<2x3x4x30xi1>)
-    // CHECK: tensor.expand_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4]] output_shape [2, 3, 4, 5, 6] : tensor<2x3x4x30xi1> into tensor<2x3x4x5x6xi1>
-    %result = "onnx.Less"(%a, %b) :
-        (tensor<2x3x4x5x6xf32>, tensor<2x1x4x5x6xf32>)
-        -> tensor<2x3x4x5x6xi1>
-    return %result : tensor<2x3x4x5x6xi1>
-  }
 }

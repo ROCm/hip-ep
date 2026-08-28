@@ -40,7 +40,6 @@
 #include "hip_custom_kernels.h"
 
 #include <algorithm>
-#include <atomic>
 #include <cstdio>
 #include <hip/hip_runtime.h>
 #include <vector>
@@ -347,25 +346,6 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
               (long long)start, (long long)end, (long long)step, (long long)dim,
               (long long)data_rank, (long long)K);
       return -1;
-    }
-    // The other direction of the same disagreement. A zero-capacity output on
-    // an axis whose input is non-empty is legal ONNX but is, in every graph
-    // seen so far, the `Slice(x, k, k, axis)` accumulator seed having been
-    // sized at its exact (zero) extent instead of the data dim. Nothing here
-    // can fail: the damage lands later, when the loop appends into the empty
-    // buffer and the strided copy gets a zero pitch. So warn once per axis
-    // rather than abort, and name the shape that has to be fixed upstream in
-    // SliceToHip. See lib/Conversion/OnnxToHip/SliceConversion.cpp.
-    if (output_shape[d] == 0 && dim > 0) {
-      static std::atomic<bool> warned{false};
-      if (!warned.exchange(true)) {
-        fprintf(stderr,
-                "[REAL] wrap_slice: zero-capacity output on sliced axis %d "
-                "with a non-empty input dim (%lld) -- the compile-time extent "
-                "collapsed to 0; a consumer that appends into this buffer "
-                "(e.g. a hip.loop Concat accumulator) will fail\n",
-                d, (long long)dim);
-      }
     }
     logical_extent[d] = expected;
   }

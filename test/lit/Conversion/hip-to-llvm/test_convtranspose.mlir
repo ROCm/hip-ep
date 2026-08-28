@@ -4,10 +4,10 @@
 // ============================================================================
 // TEST PURPOSE:
 // Verify hip.conv_transpose is correctly lowered to an LLVM call into the
-// transpose-convolution runtime wrapper.
+// MIOpen transpose-convolution runtime wrapper.
 //
 // This test validates:
-// - hip.conv_transpose → llvm.call @wrap_conv_transpose
+// - hip.conv_transpose → llvm.call @wrap_miopenConvolutionTranspose
 // - Type conversion: !hip.context → !llvm.ptr
 // - Static and dynamic memref dimensions (dynamic dims extracted from the
 //   memref descriptor via llvm.extractvalue [3, N])
@@ -34,7 +34,7 @@ module {
                    {kernel_shape = [3, 3], strides = [1, 1],
                     pads = [0, 0, 0, 0], dilations = [1, 1],
                     output_padding = [0, 0], group = 1}
-    // CHECK: llvm.call @wrap_conv_transpose
+    // CHECK: llvm.call @wrap_miopenConvolutionTranspose
     return
   }
 
@@ -54,7 +54,7 @@ module {
                     pads = [0, 0, 0, 0], dilations = [1, 1],
                     output_padding = [0, 0], group = 1}
     // CHECK: llvm.extractvalue {{.*}}[3, 0]
-    // CHECK: llvm.call @wrap_conv_transpose
+    // CHECK: llvm.call @wrap_miopenConvolutionTranspose
     return
   }
 }

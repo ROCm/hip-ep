@@ -21,8 +21,8 @@ def Hipsr_CastOp : Hipsr_DpsOp<"cast"> {
 
   let arguments = (ins
     Hipsr_ContextType:$ctx,
-    Hipsr_DeviceTensorOrMemRef:$input,
-    Hipsr_DeviceTensorOrMemRef:$init
+    Hipsr_TensorOrDeviceMemRef:$input,
+    Hipsr_TensorOrDeviceMemRef:$init
   );
 
   let assemblyFormat = [{

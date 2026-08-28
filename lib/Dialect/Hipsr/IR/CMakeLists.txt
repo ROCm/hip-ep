@@ -7,7 +7,6 @@ add_library(HipsrDialectIR STATIC
   HipsrDialect.cpp
   HipsrShapeYieldOp.cpp
   HipsrOps.cpp
-  HipsrAllocOutputOp.cpp
   HipsrPoolDomainYieldOp.cpp
   HipsrPoolDomainOp.cpp
   HipsrComputeYieldOp.cpp
@@ -15,17 +14,9 @@ add_library(HipsrDialectIR STATIC
   HipsrConstantOp.cpp
   HipsrPlaceholderOp.cpp
   HipsrCastOp.cpp
-  HipsrCopyD2HOp.cpp
   HipsrMatMulOp.cpp
   HipsrExpandOp.cpp
   HipsrAddOp.cpp
-  HipsrMulOp.cpp
-  HipsrEqualOp.cpp
-  HipsrTransposeOp.cpp
-  HipsrGatherOp.cpp
-  HipsrSliceOp.cpp
-  HipsrScatterNDOp.cpp
-  HipsrNonZeroOp.cpp
   HipsrGetPoolOp.cpp
   HipsrPreserveShapeOp.cpp
   HipsrLLVMLoweringUtils.cpp

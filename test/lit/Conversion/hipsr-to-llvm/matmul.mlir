@@ -15,9 +15,7 @@
 // CHECK-NEXT:  %[[B_PTR:.*]] = llvm.extractvalue {{.*}}[1] : !llvm.struct<(ptr<1>,
 // CHECK-NEXT:  %[[OUT_PTR:.*]] = llvm.extractvalue {{.*}}[1] : !llvm.struct<(ptr<1>,
 // CHECK-NEXT:  %[[ELEM_SIZE:.*]] = llvm.mlir.constant(2 : i64) : i64
-// CHECK-NEXT:  llvm.mlir.constant(0 : i64) : i64
-// CHECK-NEXT:  llvm.mlir.constant(0 : i64) : i64
-// CHECK-NEXT:  llvm.call @wrap_hipblasLtMatmul(%[[CTX]], %[[SLOT]], %[[A_PTR]], %[[B_PTR]], %[[OUT_PTR]], %[[M]], %[[N]], %[[K]], %[[BATCH]], %[[ELEM_SIZE]], %[[B_STRIDE]], {{.*}}, {{.*}}) : (!llvm.ptr, i32, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK-NEXT:  llvm.call @wrap_hipblasLtMatmul(%[[CTX]], %[[SLOT]], %[[A_PTR]], %[[B_PTR]], %[[OUT_PTR]], %[[M]], %[[N]], %[[K]], %[[BATCH]], %[[ELEM_SIZE]], %[[B_STRIDE]]) : (!llvm.ptr, i32, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64, i64) -> i32
 // CHECK-NEXT:  llvm.return
 func.func @matmul_rank2(
     %ctx: !hipsr.context,
@@ -51,9 +49,7 @@ func.func @matmul_rank2(
 // CHECK-NEXT:  %[[DYN_B_PTR:.*]] = llvm.extractvalue {{.*}}[1] : !llvm.struct<(ptr<1>,
 // CHECK-NEXT:  %[[DYN_OUT_PTR:.*]] = llvm.extractvalue {{.*}}[1] : !llvm.struct<(ptr<1>,
 // CHECK-NEXT:  %[[DYN_ELEM_SIZE:.*]] = llvm.mlir.constant(2 : i64) : i64
-// CHECK-NEXT:  llvm.mlir.constant(0 : i64) : i64
-// CHECK-NEXT:  llvm.mlir.constant(0 : i64) : i64
-// CHECK-NEXT:  llvm.call @wrap_hipblasLtMatmul(%[[DYN_CTX]], %[[DYN_SLOT]], %[[DYN_A_PTR]], %[[DYN_B_PTR]], %[[DYN_OUT_PTR]], %[[DYN_M]], %[[DYN_N]], %[[DYN_K]], %[[DYN_BATCH]], %[[DYN_ELEM_SIZE]], %[[DYN_B_STRIDE]], {{.*}}, {{.*}}) : (!llvm.ptr, i32, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK-NEXT:  llvm.call @wrap_hipblasLtMatmul(%[[DYN_CTX]], %[[DYN_SLOT]], %[[DYN_A_PTR]], %[[DYN_B_PTR]], %[[DYN_OUT_PTR]], %[[DYN_M]], %[[DYN_N]], %[[DYN_K]], %[[DYN_BATCH]], %[[DYN_ELEM_SIZE]], %[[DYN_B_STRIDE]]) : (!llvm.ptr, i32, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64, i64) -> i32
 // CHECK-NEXT:  llvm.return
 func.func @matmul_dynamic_batch(
     %ctx: !hipsr.context,

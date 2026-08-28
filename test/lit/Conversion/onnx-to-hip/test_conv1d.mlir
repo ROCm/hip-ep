@@ -80,10 +80,10 @@ module {
   // CHECK-NOT: hip.conv1d
 
   // --------------------------------------------------------------------------
-  // Depthwise 1D conv with SYMMETRIC padding. group is preserved verbatim
-  // through the unit-H reshape and the depthwise [C,1,K] filter expands to
-  // [C,1,1,K]. This shape is NOT causal, so it stays on hip.conv -- the causal
-  // route requires pads == [k-1, 0] (see test_depthwise_causal_conv1d.mlir).
+  // Depthwise 1D conv (group = channels). Reshapes to a grouped 2D conv; the
+  // `group` attr is preserved verbatim through the unit-H reshape and the
+  // depthwise [C,1,K] filter expands to [C,1,1,K]. Causal pad [4,0] promotes to
+  // 2D pads [0,4,0,0]. Audio-encoder lconv1d uses this shape.
   // --------------------------------------------------------------------------
   func.func @depthwise_conv1d(%input: tensor<1x1024x100xf16>,
                               %weights: tensor<1024x1x5xf16>,
@@ -91,7 +91,7 @@ module {
     %output = "onnx.Conv"(%input, %weights, %bias) {
       kernel_shape = [5],
       strides = [1],
-      pads = [2, 2],
+      pads = [4, 0],
       group = 1024 : i64
     } : (tensor<1x1024x100xf16>, tensor<1024x1x5xf16>, tensor<1024xf16>)
       -> tensor<1x1024x100xf16>
@@ -101,13 +101,13 @@ module {
   // CHECK-LABEL: func.func @depthwise_conv1d
   // CHECK: tensor.expand_shape %{{.*}} {{\[\[}}0], [1], [2, 3]] output_shape [1, 1024, 1, 100] : tensor<1x1024x100xf16> into tensor<1x1024x1x100xf16>
   // CHECK: tensor.expand_shape %{{.*}} {{\[\[}}0], [1], [2, 3]] output_shape [1024, 1, 1, 5] : tensor<1024x1x5xf16> into tensor<1024x1x1x5xf16>
-  // CHECK: hip.conv({{.*}}) outs({{.*}}) {dilations = [1, 1], group = 1024 : i64, kernel_shape = [1, 5], pads = [0, 2, 0, 2], strides = [1, 1]}
+  // CHECK: hip.conv({{.*}}) outs({{.*}}) {dilations = [1, 1], group = 1024 : i64, kernel_shape = [1, 5], pads = [0, 4, 0, 0], strides = [1, 1]}
   // CHECK: tensor.collapse_shape
   // CHECK-NOT: hip.conv1d
 
   // --------------------------------------------------------------------------
-  // Depthwise 1D conv with dynamic batch + length, symmetric pads. The output
-  // extent is resolved at runtime via the conv formula (arith).
+  // Depthwise 1D conv with dynamic batch + length. Causal padding keeps L'=L,
+  // but the extent is still resolved at runtime via the conv formula (arith).
   // --------------------------------------------------------------------------
   func.func @depthwise_conv1d_dynamic(%input: tensor<?x1024x?xf16>,
                                       %weights: tensor<1024x1x5xf16>,
@@ -115,7 +115,7 @@ module {
     %output = "onnx.Conv"(%input, %weights, %bias) {
       kernel_shape = [5],
       strides = [1],
-      pads = [2, 2],
+      pads = [4, 0],
       group = 1024 : i64
     } : (tensor<?x1024x?xf16>, tensor<1024x1x5xf16>, tensor<1024xf16>)
       -> tensor<?x1024x?xf16>
@@ -126,7 +126,7 @@ module {
   // CHECK: arith.divsi
   // CHECK: tensor.empty({{.*}}) : tensor<?x1024x?xf16>
   // CHECK: tensor.expand_shape
-  // CHECK: hip.conv({{.*}}) outs({{.*}}) {dilations = [1, 1], group = 1024 : i64, kernel_shape = [1, 5], pads = [0, 2, 0, 2], strides = [1, 1]}
+  // CHECK: hip.conv({{.*}}) outs({{.*}}) {dilations = [1, 1], group = 1024 : i64, kernel_shape = [1, 5], pads = [0, 4, 0, 0], strides = [1, 1]}
   // CHECK: tensor.collapse_shape
   // CHECK-NOT: hip.conv1d
 }

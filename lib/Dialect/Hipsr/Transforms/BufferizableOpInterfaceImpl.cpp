@@ -146,26 +146,17 @@ struct ComputeOpBufferization
 
   bool bufferizesToMemoryWrite(Operation *op, OpOperand &opOperand,
                                const AnalysisState &state) const {
-    auto computeOp = cast<ComputeOp>(op);
-    if (!isHipsrDestinationOperand(opOperand)) {
+    if (!isHipsrDestinationOperand(opOperand))
       return false;
-    }
-    BlockArgument blockArg =
-        getEntryArgument(computeOp, opOperand.getOperandNumber());
-    // Check each use directly, without tracing through aliases
-    for (OpOperand &use : blockArg.getUses()) {
-      if (state.bufferizesToMemoryWrite(use)) {
-        return true;
-      }
-    }
-    return false;
+    return isValueWritten(
+        getEntryArgument(cast<ComputeOp>(op), opOperand.getOperandNumber()),
+        state);
   }
 
   bool isWritable(Operation *op, Value value, const AnalysisState &) const {
-    if (auto blockArg = dyn_cast<BlockArgument>(value)) {
+    if (auto blockArg = dyn_cast<BlockArgument>(value))
       return isHipsrDestinationOperand(
           op->getOpOperand(blockArg.getArgNumber()));
-    }
     return true;
   }
 
@@ -177,9 +168,8 @@ struct ComputeOpBufferization
     aliases.addAlias({getEntryArgument(computeOp, opOperand.getOperandNumber()),
                       BufferRelation::Equivalent});
 
-    if (OpResult result = getResultHeldIn(computeOp, opOperand)) {
+    if (OpResult result = getResultHeldIn(computeOp, opOperand))
       aliases.addAlias({result, BufferRelation::Equivalent});
-    }
     return aliases;
   }
 
@@ -187,10 +177,9 @@ struct ComputeOpBufferization
                                               const AnalysisState &) const {
     // block argument <-> input operand
     auto computeOp = cast<ComputeOp>(op);
-    if (auto blockArg = dyn_cast<BlockArgument>(value)) {
+    if (auto blockArg = dyn_cast<BlockArgument>(value))
       return {{&op->getOpOperand(blockArg.getArgNumber()),
                BufferRelation::Equivalent}};
-    }
 
     // op result <-> yield op result
     unsigned resultIndex = cast<OpResult>(value).getResultNumber();
@@ -199,49 +188,9 @@ struct ComputeOpBufferization
                       BufferRelation::Equivalent});
 
     // op result <-> output operand
-    if (OpOperand *destination = getDestinationOf(computeOp, resultIndex)) {
+    if (OpOperand *destination = getDestinationOf(computeOp, resultIndex))
       aliases.addAlias({destination, BufferRelation::Equivalent});
-    }
     return aliases;
-  }
-
-  LogicalResult resolveConflicts(Operation *op, RewriterBase &rewriter,
-                                 const AnalysisState &analysisState,
-                                 const BufferizationState &) const {
-    auto computeOp = cast<ComputeOp>(op);
-
-    // Check each output operand to see if it aliases any input operand.
-    // If so, save the mapping as an attribute for use during bufferization.
-    // We use aliasing (not equivalence) because out-of-place decisions break
-    // equivalence but preserve aliasing relationships.
-    SmallVector<int32_t> aliasingMap;
-    for (auto [outIdx, output] : llvm::enumerate(computeOp.getOutputs())) {
-      int32_t aliasedInputIdx = -1; // -1 means no aliasing
-
-      if (isa<TensorType>(output.getType())) {
-        // Find which input (if any) this output aliases
-        for (auto [inIdx, input] : llvm::enumerate(computeOp.getInputs())) {
-          if (!isa<TensorType>(input.getType())) {
-            continue;
-          }
-
-          if (analysisState.areAliasingBufferizedValues(output, input)) {
-            aliasedInputIdx = static_cast<int32_t>(inIdx);
-            break;
-          }
-        }
-      }
-
-      aliasingMap.push_back(aliasedInputIdx);
-    }
-
-    // Save the mapping as an array attribute
-    if (!aliasingMap.empty()) {
-      auto arrayAttr = rewriter.getI32ArrayAttr(aliasingMap);
-      op->setAttr("__output_alias_to_input", arrayAttr);
-    }
-
-    return success();
   }
 
   FailureOr<BufferLikeType>
@@ -249,11 +198,10 @@ struct ComputeOpBufferization
                 const BufferizationState &state,
                 SmallVector<Value> &invocationStack) const {
     // A block argument's buffer is the operand's buffer.
-    if (auto blockArg = dyn_cast<BlockArgument>(value)) {
+    if (auto blockArg = dyn_cast<BlockArgument>(value))
       return bufferization::getBufferType(
           op->getOperand(blockArg.getArgNumber()), options, state,
           invocationStack);
-    }
 
     // The outs operand supplies the memory a result is held in, the yield the
     // type that memory is viewed through, so the type comes from the yield. The
@@ -284,33 +232,13 @@ struct ComputeOpBufferization
       }
     }
 
-    // Get the aliasing mapping saved by resolveConflicts
-    ArrayAttr aliasingAttr =
-        op->getAttrOfType<ArrayAttr>("__output_alias_to_input");
-
     SmallVector<Value> bufferizedOutputs;
-    for (auto [idx, output] : llvm::enumerate(computeOp.getOutputs())) {
+    for (Value output : computeOp.getOutputs()) {
       if (isa<TensorType>(output.getType())) {
-        // Check if this output aliases an input
-        int32_t aliasedInputIdx = -1;
-        if (aliasingAttr && idx < aliasingAttr.size()) {
-          if (auto intAttr = dyn_cast<IntegerAttr>(aliasingAttr[idx])) {
-            aliasedInputIdx = intAttr.getInt();
-          }
-        }
-
-        if (aliasedInputIdx >= 0 &&
-            static_cast<size_t>(aliasedInputIdx) < bufferizedInputs.size()) {
-          // This output aliases an input - reuse that input's buffer
-          bufferizedOutputs.push_back(bufferizedInputs[aliasedInputIdx]);
-        } else {
-          // No aliasing or invalid index - get normal buffer
-          FailureOr<Value> buffer = getBuffer(rewriter, output, options, state);
-          if (failed(buffer)) {
-            return failure();
-          }
-          bufferizedOutputs.push_back(*buffer);
-        }
+        FailureOr<Value> buffer = getBuffer(rewriter, output, options, state);
+        if (failed(buffer))
+          return failure();
+        bufferizedOutputs.push_back(*buffer);
       } else {
         bufferizedOutputs.push_back(output);
       }
@@ -654,12 +582,5 @@ void mlir::hipsr::registerBufferizableOpInterfaceExternalModels(
     PoolDomainOp::attachInterface<PoolDomainOpBufferization>(*ctx);
     PoolDomainYieldOp::attachInterface<PoolDomainYieldOpBufferization>(*ctx);
     CastOp::attachInterface<DpsBufferizableModel<CastOp>>(*ctx);
-    CopyD2HOp::attachInterface<DpsBufferizableModel<CopyD2HOp>>(*ctx);
-    MulOp::attachInterface<DpsBufferizableModel<MulOp>>(*ctx);
-    EqualOp::attachInterface<DpsBufferizableModel<EqualOp>>(*ctx);
-    TransposeOp::attachInterface<DpsBufferizableModel<TransposeOp>>(*ctx);
-    GatherOp::attachInterface<DpsBufferizableModel<GatherOp>>(*ctx);
-    SliceOp::attachInterface<DpsBufferizableModel<SliceOp>>(*ctx);
-    ScatterNDOp::attachInterface<DpsBufferizableModel<ScatterNDOp>>(*ctx);
   });
 }

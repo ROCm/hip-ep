@@ -75,7 +75,7 @@ hip-mlir-opt after_onnx_to_hip.mlir --convert-hip-to-llvm > after_hip_to_llvm.ml
 - `bufferization` - Bufferization operations
 - `llvm` - LLVM dialect
 - `hip` - Custom HIP dialect
-- `onnx` - ONNX operations as the importer writes them. `--onnx-dialect` picks the namespace-only stub (`stub`, the default) or the ODS-modeled op set (`modeled`), which `--convert-onnx-to-hipsr` requires
+- `onnx` (stub) - ONNX dialect stub for testing
 
 ## Comparison with Other Tools
 

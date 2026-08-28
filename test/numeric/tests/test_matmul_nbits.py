@@ -42,10 +42,7 @@ from onnx import TensorProto, helper, numpy_helper
 from framework.comparator import compare_outputs
 from framework.onnx_utils import make_model_from_nodes
 
-# 1 is the row-major GEMV, 128 the WMMA path. 2/7/15 cover the tier between
-# them, where M is below the 16-row WMMA fragment so every tile is a partial
-# one -- the case that depends on the bounds-checked kernel variant.
-SEQ_LENS = [1, 2, 7, 15, 128]
+SEQ_LENS = [1, 128]
 
 # --- GPT-OSS-20B constants ---
 HIDDEN = 2880

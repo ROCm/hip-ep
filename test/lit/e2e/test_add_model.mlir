@@ -9,13 +9,13 @@
 // Verifies the complete hipdnn-pipeline:
 // 1. convert-onnx-to-hip: onnx.Add → hip.add
 // 2. bufferize / canonicalize
-// 3. convert-hip-to-llvm: hip.add → wrap_elementwise(tensor_op=1)
+// 3. convert-hip-to-llvm: hip.add → wrap_miopenOpTensor(tensor_op=1)
 // 4. generate-interface: Create inference_init/compute/cleanup/metadata
 
 // CHECK: module attributes {
 // CHECK-SAME: hipdnn.input_count = 1
 // CHECK-SAME: hipdnn.output_count = 1
-// CHECK: llvm.func @wrap_elementwise
+// CHECK: llvm.func @wrap_miopenOpTensor
 // CHECK: llvm.func @inference_init
 // CHECK: llvm.func @inference_compute
 // CHECK: llvm.func @inference_cleanup

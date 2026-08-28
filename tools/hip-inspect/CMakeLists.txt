@@ -5,7 +5,8 @@
 
 # hip-inspect prints metadata from a compiled model artifact. The .bc path
 # is lightweight (parseBitcodeFile + read the @__metadata_json global, no
-# ROCm/JIT) and always built. The native .dll/.so path uses morphizen::Plugin.
+# ROCm/JIT) and always built. The native .dll/.so path needs morphizen::Plugin,
+# only available under BUILD_EP, so it is compiled in conditionally.
 add_executable(hip-inspect
   hip-inspect.cpp
 )
@@ -30,13 +31,17 @@ target_include_directories(hip-inspect
   ${CMAKE_SOURCE_DIR}/include                                   # hip/artifact_abi.h
 )
 
-target_compile_definitions(hip-inspect PRIVATE HIPDNN_INSPECT_NATIVE=1)
-target_link_libraries(hip-inspect PRIVATE morphizen::morphizen-core-static)
-target_include_directories(hip-inspect
-  PRIVATE
-  ${CMAKE_SOURCE_DIR}/morphizen/morphizen-core/include        # morphizen/plugin.hpp
-  ${CMAKE_SOURCE_DIR}/morphizen/morphizen-foundation/include  # morphizen-foundation
-)
+# Native-artifact inspection via morphizen::Plugin. Only when the morphizen
+# core target exists (BUILD_EP); the .bc path stays dependency-free otherwise.
+if(TARGET morphizen-core-static)
+  target_compile_definitions(hip-inspect PRIVATE HIPDNN_INSPECT_NATIVE=1)
+  target_link_libraries(hip-inspect PRIVATE morphizen::morphizen-core-static)
+  target_include_directories(hip-inspect
+    PRIVATE
+    ${CMAKE_SOURCE_DIR}/morphizen/morphizen-core/include        # morphizen/plugin.hpp
+    ${CMAKE_SOURCE_DIR}/morphizen/morphizen-foundation/include  # morphizen-foundation
+  )
+endif()
 
 install(TARGETS hip-inspect
   RUNTIME DESTINATION bin

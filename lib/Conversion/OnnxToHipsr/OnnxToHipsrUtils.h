@@ -14,21 +14,12 @@
 #define HIP_CONVERSION_ONNXTOHIPSR_UTILS_H
 
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
-#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionPopulationUtils.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/PatternMatch.h"
 
 namespace mlir {
 namespace hipsr {
-
-// Force change memoryspace to space
-inline ::mlir::RankedTensorType tensorTypeInSpace(::mlir::RankedTensorType type,
-                                                  MemorySpace space) {
-  return type.cloneWithEncoding(
-      ::mlir::hipsr::MemorySpaceAttr::get(type.getContext(), space));
-}
 
 /// Gets the `!hipsr.context` from function argument 0. The ONNX phase adds it
 /// as the enclosing function's first argument, so every hipsr op can thread it
@@ -51,31 +42,6 @@ getHipsrContextArg(::mlir::Operation *op, ::mlir::PatternRewriter &rewriter) {
                                        "first argument is not !hipsr.context");
   }
   return ctx;
-}
-
-/// Reads `src` back to the host: builds the host destination placeholder, fills
-/// its shape region, and returns the `hipsr.copy_d2h` that writes it.
-///
-/// A copy only changes memory space, so the destination takes the source shape
-/// and the region just forwards it. Filling it here keeps a readback to one
-/// call, and the shape it yields is the one `AllShapesMatch` already pins.
-inline CopyD2HOp createCopyD2H(::mlir::OpBuilder &builder, ::mlir::Location loc,
-                               ::mlir::Value ctx, ::mlir::Value src) {
-  auto hostType = tensorTypeInSpace(
-      ::mlir::cast<::mlir::RankedTensorType>(src.getType()), MemorySpace::Host);
-  auto init =
-      PlaceholderOp::create(builder, loc, ::mlir::TypeRange{hostType}, ctx,
-                            ::mlir::ValueRange{src}, PlaceholderType::Normal);
-  {
-    ::mlir::OpBuilder::InsertionGuard guard(builder);
-    ::mlir::Block &block = createPlaceholderShapeBlock(builder, init);
-    builder.setInsertionPointToStart(&block);
-    ShapeYieldOp::create(
-        builder, loc,
-        ::mlir::ValueRange{PlaceholderShapeRegionArgs{block}.in(0)});
-  }
-  return CopyD2HOp::create(builder, loc, ::mlir::TypeRange{hostType}, ctx, src,
-                           init.getResult(0));
 }
 
 } // namespace hipsr

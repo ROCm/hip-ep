@@ -11,6 +11,10 @@
 // vendor headers still declare these symbols, so the stubs match the exact ABI.
 #ifdef HIPDNN_EP_DISABLE_VENDOR_BLAS
 
+// MIOPEN_BETA_API unlocks the layernorm types (miopenNormMode_t /
+// miopenT5LayerNormForward), matching real/simplified_layer_norm.cpp.
+#define MIOPEN_BETA_API
+
 #include <hipblaslt/hipblaslt.h>
 #include <miopen/miopen.h>
 
@@ -224,6 +228,26 @@ miopenStatus_t miopenSetTensorDescriptor(miopenTensorDescriptor_t tensorDesc,
   (void)nbDims;
   (void)dimsA;
   (void)stridesA;
+  return miopenStatusNotImplemented;
+}
+miopenStatus_t
+miopenT5LayerNormForward(miopenHandle_t handle, miopenNormMode_t mode,
+                         const miopenTensorDescriptor_t xDesc, const void *x,
+                         const miopenTensorDescriptor_t weightDesc,
+                         const void *weight, const float epsilon,
+                         const miopenTensorDescriptor_t yDesc, void *y,
+                         const miopenTensorDescriptor_t rstdDesc, void *rstd) {
+  (void)handle;
+  (void)mode;
+  (void)xDesc;
+  (void)x;
+  (void)weightDesc;
+  (void)weight;
+  (void)epsilon;
+  (void)yDesc;
+  (void)y;
+  (void)rstdDesc;
+  (void)rstd;
   return miopenStatusNotImplemented;
 }
 hipblasStatus_t hipblasLtCreate(hipblasLtHandle_t *handle) {

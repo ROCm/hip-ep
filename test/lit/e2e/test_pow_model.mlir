@@ -3,7 +3,7 @@
 
 // Test Pow E2E full pipeline (constant scalar exponent decompose path).
 // onnx.Pow(x, 2) is decomposed to hip.mul (x*x), which lowers to the
-// wrap_elementwise runtime call.
+// wrap_miopenOpTensor runtime call.
 //
 // Verifies the complete hipdnn-pipeline:
 // 1. convert-onnx-to-hip: onnx.Pow -> hip.mul (decompose)
@@ -17,7 +17,7 @@
 // CHECK: module attributes {
 // CHECK-SAME: hipdnn.input_count = 1
 // CHECK-SAME: hipdnn.output_count = 1
-// CHECK: llvm.func @wrap_elementwise
+// CHECK: llvm.func @wrap_miopenOpTensor
 // CHECK: llvm.func @inference_init
 // CHECK: llvm.func @inference_compute
 // CHECK: llvm.func @inference_cleanup

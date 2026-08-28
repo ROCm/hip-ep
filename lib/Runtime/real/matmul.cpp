@@ -44,11 +44,23 @@ static bool autotune_enabled() {
 }
 
 struct MatmulCacheKey {
-  int64_t M, N, K, batch_count, elem_size, b_batch_stride, transA, transB;
+  int64_t M, N, K, batch_count, elem_size;
+  // hipBLASLt's STRIDED_BATCH_OFFSET on layA, in elements. Two distinct
+  // values reach this site at the same (M,N,K,batch,elem_size):
+  //   * 0   — B is a broadcast weight (rank-2 [K,N], or rank-N
+  //           [1,...,1,K,N] whose leading-dim product is 1).
+  //   * K*N — B is per-batch (leading-dim product > 1; the buffer holds
+  //           multiple [K,N] matrices laid out contiguously).
+  // Part of the cache key because the layout descriptor is parameterised
+  // by the stride: mixing the two would silently route one path through
+  // the other's stride and read past the end of a broadcast weight buffer.
+  // Keyed on the actual int stride (not a 0/1 bool) so any future site
+  // that legitimately uses a stride other than {0, K*N} also gets its
+  // own cache entry rather than aliasing one of these two.
+  int64_t b_batch_stride;
   bool operator==(const MatmulCacheKey &o) const {
     return M == o.M && N == o.N && K == o.K && batch_count == o.batch_count &&
-           elem_size == o.elem_size && b_batch_stride == o.b_batch_stride &&
-           transA == o.transA && transB == o.transB;
+           elem_size == o.elem_size && b_batch_stride == o.b_batch_stride;
   }
 };
 
@@ -61,8 +73,6 @@ struct MatmulCacheKeyHash {
     hash_combine_val(h, k.batch_count);
     hash_combine_val(h, k.elem_size);
     hash_combine_val(h, k.b_batch_stride);
-    hash_combine_val(h, k.transA);
-    hash_combine_val(h, k.transB);
     return h;
   }
 };
@@ -153,8 +163,6 @@ static MatmulCacheEntry *queryOrCreateMatmul(MatmulAlgoTable &table,
 
   hipDataType dt = (key.elem_size == 2) ? HIP_R_16F : HIP_R_32F;
   int64_t M = key.M, N = key.N, K = key.K;
-  int64_t transA = key.transA;
-  int64_t transB = key.transB;
 
   auto entryPtr = std::make_unique<MatmulCacheEntry>();
   MatmulCacheEntry &entry = *entryPtr;
@@ -176,41 +184,16 @@ static MatmulCacheEntry *queryOrCreateMatmul(MatmulAlgoTable &table,
       hipblasLtMatmulDescCreate(&entry.desc, HIPBLAS_COMPUTE_32F, HIP_R_32F));
 
   {
-    hipblasOperation_t opA = transB ? HIPBLAS_OP_T : HIPBLAS_OP_N;
-    hipblasOperation_t opB = transA ? HIPBLAS_OP_T : HIPBLAS_OP_N;
+    hipblasOperation_t opN = HIPBLAS_OP_N;
     MATMUL_CACHE_CHECK(hipblasLtMatmulDescSetAttribute(
-        entry.desc, HIPBLASLT_MATMUL_DESC_TRANSA, &opA, sizeof(opA)));
+        entry.desc, HIPBLASLT_MATMUL_DESC_TRANSA, &opN, sizeof(opN)));
     MATMUL_CACHE_CHECK(hipblasLtMatmulDescSetAttribute(
-        entry.desc, HIPBLASLT_MATMUL_DESC_TRANSB, &opB, sizeof(opB)));
+        entry.desc, HIPBLASLT_MATMUL_DESC_TRANSB, &opN, sizeof(opN)));
   }
 
-  // Row-major -> col-major trick (see wrap_hipblasLtMatmul banner). Layouts
-  // follow the same transA/transB rules as wrap_gemm, with hipBLASLt "A" =
-  // user's B and "B" = user's A.
-  int64_t hblA_rows, hblA_cols, hblA_ld;
-  if (!transB) {
-    hblA_rows = N;
-    hblA_cols = K;
-    hblA_ld = N;
-  } else {
-    hblA_rows = K;
-    hblA_cols = N;
-    hblA_ld = K;
-  }
-  int64_t hblB_rows, hblB_cols, hblB_ld;
-  if (!transA) {
-    hblB_rows = K;
-    hblB_cols = M;
-    hblB_ld = K;
-  } else {
-    hblB_rows = M;
-    hblB_cols = K;
-    hblB_ld = M;
-  }
-  MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layA, dt, hblA_rows,
-                                                 hblA_cols, hblA_ld));
-  MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layB, dt, hblB_rows,
-                                                 hblB_cols, hblB_ld));
+  // Row-major -> col-major trick: BLAS sees m=N, k=K, n=M with ld = first dim
+  MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layA, dt, N, K, N));
+  MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layB, dt, K, M, K));
   MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layC, dt, N, M, N));
 
   if (key.batch_count > 1) {
@@ -452,8 +435,7 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
 int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
                          const void *B, void *output, int64_t M, int64_t N,
                          int64_t K, int64_t batch_count, int64_t elem_size,
-                         int64_t b_batch_stride, int64_t transA,
-                         int64_t transB) {
+                         int64_t b_batch_stride) {
   OP_PROFILE(
       "matmul",
       [&] {
@@ -486,12 +468,12 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
 
   const char *type_name = (elem_size == 2) ? "f16" : "f32";
   RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: M=%lld, N=%lld, K=%lld, "
-                    "batch=%lld, b_batch_stride=%lld, transA=%lld, "
-                    "transB=%lld, elem_size=%lld (%s), total_bytes=%lld\n",
+                    "batch=%lld, b_batch_stride=%lld, elem_size=%lld (%s), "
+                    "total_bytes=%lld\n",
                     (long long)M, (long long)N, (long long)K,
                     (long long)batch_count, (long long)b_batch_stride,
-                    (long long)transA, (long long)transB, (long long)elem_size,
-                    type_name, (long long)(batch_count * M * N * elem_size));
+                    (long long)elem_size, type_name,
+                    (long long)(batch_count * M * N * elem_size));
 
   MatmulState *ms = MatmulState::get_op_state(state, op_state_slot);
   if (!ms || !ms->table) {
@@ -500,8 +482,7 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
     return -1;
   }
 
-  MatmulCacheKey key{M,      N,     K, batch_count, elem_size, b_batch_stride,
-                     transA, transB};
+  MatmulCacheKey key{M, N, K, batch_count, elem_size, b_batch_stride};
   MatmulCacheEntry *cached = queryOrCreateMatmul(*ms->table, handle, key);
   if (!cached) {
     fprintf(stderr,

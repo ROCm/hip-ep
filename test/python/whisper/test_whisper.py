@@ -284,23 +284,17 @@ def _assert_no_silent_fallback(stderr_text):
     The model DLL prints ``[REAL] wrap_*`` lines to stderr (FD level) when
     ``HIPDNN_EP_DEBUG=1``. Whisper attention must route to
     ``wrap_group_query_attention`` (hip.gqa's runtime entry, the ``no_causal``
-    path), the conv front-end to ``wrap_conv`` (rank-3 Conv reshapes to the
-    shared 2D conv — there is no dedicated conv1d runtime), and the legacy
-    ``wrap_multi_head_attention`` runtime entry must NOT appear.
+    path), the conv front-end to ``wrap_miopenConvolutionForward`` (rank-3 Conv
+    reshapes to the shared 2D conv — there is no dedicated conv1d runtime), and
+    the legacy ``wrap_multi_head_attention`` runtime entry must NOT appear.
 
     NOTE: the model DLL has its OWN static CRT (CLAUDE.md gotcha), so Python's
     ``capsys`` (stream-level) can miss its stderr. Use pytest ``capfd``
     (file-descriptor level). If the captured text is empty, the caller falls
     back to a wall-clock GPU-speed assertion (documented at the call site).
     """
-    assert "[REAL] wrap_conv" in stderr_text, (
-        "no [REAL] wrap_conv — Conv ran on CPU (silent fallback)"
-    )
-    # Forward Conv left MIOpen for the in-tree hip_conv kernel. If this fires,
-    # the lowering regressed to the MIOpen path rather than the Conv failing.
-    assert "[REAL] wrap_miopenConvolutionForward" not in stderr_text, (
-        "wrap_miopenConvolutionForward should NOT appear — forward Conv must "
-        "route to the hip_conv kernel via wrap_conv"
+    assert "[REAL] wrap_miopenConvolutionForward" in stderr_text, (
+        "no [REAL] wrap_miopenConvolutionForward — Conv ran on CPU (silent fallback)"
     )
     # hip.gqa lowers to the runtime symbol wrap_group_query_attention (NOT a
     # symbol literally named wrap_gqa).

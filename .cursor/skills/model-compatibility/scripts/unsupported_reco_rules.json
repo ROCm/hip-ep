@@ -74,7 +74,7 @@
     {
       "op_name": "Div",
       "recommended_path": "MIOpen",
-      "wrapper_extension_target": "compose POWER reciprocal + wrap_elementwise(mul)",
+      "wrapper_extension_target": "compose POWER reciprocal + wrap_miopenOpTensor(mul)",
       "rationale": "No direct OpTensor div, but composable via reciprocal then multiplication."
     }
   ],
@@ -94,8 +94,8 @@
       "op_name_keywords_any": [
         "conv"
       ],
-      "preferred_path": "Custom Hip Kernel",
-      "wrapper_extension_target": "wrap_conv",
+      "preferred_path": "MIOpen",
+      "wrapper_extension_target": "wrap_miopenConvolutionForward",
       "fallback_path": "Custom Hip Kernel"
     },
     {
@@ -135,7 +135,7 @@
         "div"
       ],
       "preferred_path": "MIOpen",
-      "wrapper_extension_target": "wrap_elementwise (or composed path for div)",
+      "wrapper_extension_target": "wrap_miopenOpTensor (or composed path for div)",
       "fallback_path": "Custom Hip Kernel"
     },
     {
@@ -192,8 +192,8 @@
         "rmsnorm",
         "batchnormalization"
       ],
-      "preferred_path": "Custom Hip Kernel",
-      "wrapper_extension_target": "wrap_rms_norm",
+      "preferred_path": "MIOpen",
+      "wrapper_extension_target": "wrap_miopenT5LayerNormForward",
       "fallback_path": "Custom Hip Kernel"
     }
   ],

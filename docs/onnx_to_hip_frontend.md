@@ -61,22 +61,17 @@ existing `--convert-hip-to-llvm` pipeline.
 
 ### Normalization
 
-| ONNX / ORT Contrib | HIP | Backend |
+| ONNX / ORT Contrib | HIP | MIOpen C API |
 |---|---|---|
 | `LayerNormalization` | `hip.miopen.layer_norm` | `miopenLayerNormForward` |
-| `InstanceNormalization` | `hip.instance_norm` | custom HIP kernel |
-| `RMSNormalization` | `hip.rms_norm` | `rms_norm_kernel.hip` |
-| `SimplifiedLayerNormalization` | `hip.rms_norm` | `rms_norm_kernel.hip` |
-| `GridSample` | `hip.grid_sample` | custom HIP kernel |
+| `SimplifiedLayerNormalization` | `hip.miopen.t5_layer_norm` | `miopenT5LayerNormForward` |
 | `SkipLayerNormalization` | `hip.miopen.skip_layer_norm` | `miopenAddLayerNormForward` |
-| `SkipSimplifiedLayerNormalization` | `hip.skip_rms_norm` | `skip_rms_norm_kernel.hip` |
-| LpNorm+Mul pattern (fused) | `hip.rms_norm` | `rms_norm_kernel.hip` |
+| `SkipSimplifiedLayerNormalization` | `hip.miopen.skip_rms_norm` | `miopenAddLayerNormForward` (T5 mode) |
+| LpNorm+Mul pattern (fused) | `hip.miopen.rms_norm` | `miopenT5LayerNormForward` |
 
 `SkipSimplifiedLayerNormalization` fuses Add + RMSNorm into one kernel:
-`residual = x + skip [+ bias]; output = RMSNorm(residual) * weight`.
-
-Both RMS-norm kernels are block-per-row with FP32 accumulation, and take a
-packed `__half2` path for fp16 rows of even width.
+`residual = x + skip; output = RMSNorm(residual) * weight`. In MIOpen this is
+`miopenAddLayerNormForward` with mode `MIOPEN_ELEMENTWISE_AFFINE_T5`.
 
 ### Attention
 
@@ -95,6 +90,7 @@ packed `__half2` path for fp16 rows of even width.
 
 | ONNX | HIP | MIOpen mode |
 |---|---|---|
+| `Sigmoid` | `hip.miopen.sigmoid` | `miopenActivationLOGISTIC` |
 | `Relu` | `hip.miopen.relu` | `miopenActivationRELU` |
 
 ### MIOpen: Softmax (`miopenSoftmaxForward`)

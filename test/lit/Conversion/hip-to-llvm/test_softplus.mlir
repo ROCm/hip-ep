@@ -4,17 +4,17 @@
 // ============================================================================
 // TEST PURPOSE:
 // Verify HIP softplus operation is correctly lowered to LLVM call
-// to wrap_softplus runtime function.
+// to wrap_miopenActivationForward runtime function with activation_mode=3.
 //
 // This test validates:
-// - hip.softplus → llvm.call @wrap_softplus
+// - hip.softplus → llvm.call @wrap_miopenActivationForward
 // - Type conversion: !hip.context → !llvm.ptr
 // - Static shapes: num_elements computed with mul operations
 // - Dynamic shapes: num_elements computed at runtime via extractvalue
 // - Proper function signature for runtime API
 //
-// Expected: wrap_softplus(state, input_ptr, output_ptr,
-//                         num_elements, data_type)
+// Expected: wrap_miopenActivationForward(state, input_ptr, output_ptr,
+//                                         num_elements, data_type, activation_mode)
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
@@ -34,7 +34,8 @@ module {
     // CHECK: %{{.*}} = llvm.mlir.constant(128 : i64) : i64
     // CHECK: %{{.*}} = llvm.mul %{{.*}}, %{{.*}} : i64
     // CHECK: %{{.*}} = llvm.mlir.constant(0 : i64) : i64
-    // CHECK: %{{.*}} = llvm.call @wrap_softplus(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
+    // CHECK: %{{.*}} = llvm.mlir.constant(3 : i64) : i64
+    // CHECK: %{{.*}} = llvm.call @wrap_miopenActivationForward(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
 
     return
   }
@@ -57,7 +58,8 @@ module {
     // CHECK: %{{.*}} = llvm.mlir.constant(4 : i64) : i64
     // CHECK: %{{.*}} = llvm.mul %{{.*}}, %{{.*}} : i64
     // CHECK: %{{.*}} = llvm.mlir.constant(0 : i64) : i64
-    // CHECK: %{{.*}} = llvm.call @wrap_softplus(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
+    // CHECK: %{{.*}} = llvm.mlir.constant(3 : i64) : i64
+    // CHECK: %{{.*}} = llvm.call @wrap_miopenActivationForward(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
 
     return
   }
@@ -78,7 +80,30 @@ module {
     // CHECK: %{{.*}} = llvm.mlir.constant(512 : i64) : i64
     // CHECK: %{{.*}} = llvm.mul %{{.*}}, %{{.*}} : i64
     // CHECK: %{{.*}} = llvm.mlir.constant(1 : i64) : i64
-    // CHECK: %{{.*}} = llvm.call @wrap_softplus(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
+    // CHECK: %{{.*}} = llvm.mlir.constant(3 : i64) : i64
+    // CHECK: %{{.*}} = llvm.call @wrap_miopenActivationForward(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+
+    return
+  }
+
+  // Test 4: Static 2D tensor (bf16) - data_type 2 = bf16
+  func.func @softplus_static_2d_bf16_test(
+      %ctx: !hip.context,
+      %input: memref<128x256xbf16, 1>,
+      %output: memref<128x256xbf16, 1>) {
+    // CHECK-LABEL: llvm.func @softplus_static_2d_bf16_test
+
+    hip.softplus(%ctx) ins(%input : memref<128x256xbf16, 1>)
+                       outs(%output : memref<128x256xbf16, 1>)
+
+    // CHECK: %{{.*}} = llvm.mlir.constant(1 : i64) : i64
+    // CHECK: %{{.*}} = llvm.mlir.constant(128 : i64) : i64
+    // CHECK: %{{.*}} = llvm.mul %{{.*}}, %{{.*}} : i64
+    // CHECK: %{{.*}} = llvm.mlir.constant(256 : i64) : i64
+    // CHECK: %{{.*}} = llvm.mul %{{.*}}, %{{.*}} : i64
+    // CHECK: %{{.*}} = llvm.mlir.constant(2 : i64) : i64
+    // CHECK: %{{.*}} = llvm.mlir.constant(3 : i64) : i64
+    // CHECK: %{{.*}} = llvm.call @wrap_miopenActivationForward(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
 
     return
   }
@@ -99,7 +124,8 @@ module {
     // CHECK-DAG: %{{.*}} = llvm.extractvalue %{{.*}}[3, 1]
     // CHECK-DAG: %{{.*}} = llvm.mul %{{.*}}, %{{.*}} : i64
     // CHECK-DAG: %{{.*}} = llvm.mlir.constant(0 : i64) : i64
-    // CHECK: %{{.*}} = llvm.call @wrap_softplus(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
+    // CHECK-DAG: %{{.*}} = llvm.mlir.constant(3 : i64) : i64
+    // CHECK: %{{.*}} = llvm.call @wrap_miopenActivationForward(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
 
     return
   }
@@ -122,7 +148,8 @@ module {
     // CHECK-DAG: %{{.*}} = llvm.mlir.constant(512 : i64) : i64
     // CHECK-DAG: %{{.*}} = llvm.mul %{{.*}}, %{{.*}} : i64
     // CHECK-DAG: %{{.*}} = llvm.mlir.constant(1 : i64) : i64
-    // CHECK: %{{.*}} = llvm.call @wrap_softplus(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
+    // CHECK-DAG: %{{.*}} = llvm.mlir.constant(3 : i64) : i64
+    // CHECK: %{{.*}} = llvm.call @wrap_miopenActivationForward(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
 
     return
   }

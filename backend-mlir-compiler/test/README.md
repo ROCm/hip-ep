@@ -101,8 +101,7 @@ cmake --build "$BUILD_DIR" --config Debug --parallel
 
 ### Troubleshooting: Missing DLL Dependencies
 
-If the test binary fails to start with a DLL load error due to missing
-dependencies:
+If you encounter an error loading `hip-compiler.dll` due to missing dependencies:
 
 ```bash
 # Workaround: Copy DLLs from local/bin to the binary directory
@@ -122,7 +121,7 @@ This copies all required DLLs from the install directory to the test binary dire
 [Test] Creating session with MorphiZen EP (MLIR backend)...
 [MOCK] hipGetDeviceCount
 [MOCK] hipStreamCreate() -> <address>
-[MOCK] wrap_conv(...)
+[MOCK] wrap_miopenConvolutionForward(...)
 [Test] Session created successfully with MorphiZen EP!
 [  PASSED  ] MlirE2ETest.TwoLayerConvSession
 [==========] 1 test from 1 test suite ran.
@@ -435,8 +434,8 @@ grep "Pattern.*onnx.Conv" "$TEMP_DIR/debug.log"
 
 ### Common Issues
 
-**Missing DLL dependencies**:
-- If the test fails with a DLL load error due to missing dependencies:
+**Missing DLL dependencies (hip-compiler.dll)**:
+- If the test fails to load `hip-compiler.dll` due to missing dependencies:
   ```bash
   # Workaround: Copy DLLs from local/bin to binary directory
   cp "$LOCAL_DIR/bin"/*.dll "$BUILD_DIR/bin/Debug/"

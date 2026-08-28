@@ -536,12 +536,7 @@ void CompilerDriver::discoverInTreeLibraries(
   COMPILER_DEBUG_LOG("THEROCK_DIST detected: " << dist << "\n");
   COMPILER_DEBUG_LOG("  Adding library path: " << lib_dir << "\n");
 
-  if (!llvm::sys::fs::exists(lib_dir + "/amdhip64.lib") &&
-      llvm::sys::fs::exists(lib_dir + "/amdhip64_7.lib")) {
-    libraries.push_back("amdhip64_7");
-  } else {
-    libraries.push_back("amdhip64");
-  }
+  libraries.push_back("amdhip64");
 
   // Skip -lMIOpen/-lhipblaslt when the vendor BLAS/DNN backends are disabled;
   // the runtime's vendor wrappers are then error-returning stubs that reference

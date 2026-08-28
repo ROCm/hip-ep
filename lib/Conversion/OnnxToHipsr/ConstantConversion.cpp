@@ -3,17 +3,13 @@
  * Licensed under the MIT License.
  */
 
-#include "OnnxToHipsrUtils.h"
-
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
-#include "hip/Dialect/Onnx/IR/OnnxOps.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
-#include "mlir/Transforms/DialectConversion.h"
 
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/Twine.h"
@@ -29,24 +25,21 @@ namespace {
 // OnnxToHip.cpp.
 constexpr ::llvm::StringLiteral kOrtMemAddrTag = "*/_ORT_MEM_ADDR_/*";
 
-struct ConstantOpLowering
-    : public ::mlir::OpConversionPattern<::mlir::onnx::ConstantOp> {
-  ConstantOpLowering(const ::mlir::TypeConverter &typeConverter,
-                     ::mlir::MLIRContext *ctx)
-      : OpConversionPattern(ctx) {}
+struct ConstantOpLowering : public ::mlir::RewritePattern {
+  explicit ConstantOpLowering(::mlir::MLIRContext *ctx)
+      : ::mlir::RewritePattern("onnx.Constant", /*benefit=*/1, ctx) {}
 
   ::mlir::LogicalResult
-  matchAndRewrite(::mlir::onnx::ConstantOp op, OpAdaptor adaptor,
-                  ::mlir::ConversionPatternRewriter &rewriter) const override {
+  matchAndRewrite(::mlir::Operation *op,
+                  ::mlir::PatternRewriter &rewriter) const override {
     auto tensorType =
-        ::llvm::dyn_cast<::mlir::RankedTensorType>(op.getOutput().getType());
+        ::llvm::dyn_cast<::mlir::RankedTensorType>(op->getResult(0).getType());
     if (!tensorType) {
       return rewriter.notifyMatchFailure(op, "non-ranked result type");
     }
 
     // Inline dense value.
-    if (auto valueAttr = ::llvm::dyn_cast_or_null<::mlir::ElementsAttr>(
-            adaptor.getValueAttr())) {
+    if (auto valueAttr = op->getAttrOfType<::mlir::ElementsAttr>("value")) {
       // Rank-0 scalar stays a compile-time arith.constant (keeps the tensor<>
       // result type; the elements attr is TypedAttr-compatible).
       if (tensorType.getRank() == 0) {
@@ -55,23 +48,21 @@ struct ConstantOpLowering
         return ::mlir::success();
       }
 
-      ::mlir::RankedTensorType resultType =
-          tensorTypeInSpace(tensorType, MemorySpace::Device);
       rewriter.replaceOpWithNewOp<ConstantOp>(
-          op, /*result=*/resultType, /*value=*/valueAttr,
+          op, /*result=*/tensorType, /*value=*/valueAttr,
           /*index=*/IntegerAttr(), /*offset=*/IntegerAttr(),
           /*size=*/IntegerAttr());
       return ::mlir::success();
     }
 
     // External data: location + offset + size.
-    ::mlir::StringAttr locAttr = adaptor.getLocationAttr();
+    auto locAttr = op->getAttrOfType<::mlir::StringAttr>("location");
     if (!locAttr) {
       return rewriter.notifyMatchFailure(
           op, "onnx.Constant has neither value nor location");
     }
-    ::mlir::IntegerAttr offsetAttr = adaptor.getOffsetAttr();
-    ::mlir::IntegerAttr sizeAttr = adaptor.getSizeAttr();
+    auto offsetAttr = op->getAttrOfType<::mlir::IntegerAttr>("offset");
+    auto sizeAttr = op->getAttrOfType<::mlir::IntegerAttr>("size");
     if (!offsetAttr || !sizeAttr) {
       return rewriter.notifyMatchFailure(
           op, "onnx.Constant with location missing offset/size");
@@ -97,13 +88,11 @@ struct ConstantOpLowering
       data = {buf->getBufferStart() + offset, static_cast<size_t>(size)};
     }
 
-    ::mlir::RankedTensorType resultType =
-        tensorTypeInSpace(tensorType, MemorySpace::Device);
     auto value = DenseResourceElementsAttr::get(
-        resultType, key, UnmanagedAsmResourceBlob::allocateInferAlign(data));
+        tensorType, key, UnmanagedAsmResourceBlob::allocateInferAlign(data));
 
     rewriter.replaceOpWithNewOp<ConstantOp>(
-        op, /*result=*/resultType, value, /*index=*/IntegerAttr(),
+        op, /*result=*/tensorType, value, /*index=*/IntegerAttr(),
         /*offset=*/IntegerAttr(), /*size=*/IntegerAttr());
     return ::mlir::success();
   }
@@ -111,10 +100,8 @@ struct ConstantOpLowering
 
 } // namespace
 
-void populateOnnxToHipsrConstantPatterns(
-    const ::mlir::TypeConverter &typeConverter,
-    ::mlir::RewritePatternSet &patterns) {
-  patterns.add<ConstantOpLowering>(typeConverter, patterns.getContext());
+void populateOnnxToHipsrConstantPatterns(::mlir::RewritePatternSet &patterns) {
+  patterns.add<ConstantOpLowering>(patterns.getContext());
 }
 
 } // namespace hipsr

@@ -26,7 +26,7 @@ def Hipsr_ConstantOp : Hipsr_Op<"constant", [ConstantLike, Pure]> {
     OptionalAttr<I64Attr>:$size     // Size in bytes (after externalization)
   );
 
-  let results = (outs Hipsr_DeviceTensorOrMemRef:$result);
+  let results = (outs Hipsr_TensorOrDeviceMemRef:$result);
 
   let assemblyFormat = "attr-dict `:` type($result)";
 

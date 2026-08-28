@@ -87,14 +87,8 @@ __device__ __forceinline__ half16_t mha_load_dtile(const _Float16 *row, int dt,
 // is shared block-wide (V in LDS, K streamed from global), and each K/V
 // fragment feeds all MT M-tiles so LDS/global K/V traffic is amortized MT x.
 // ---------------------------------------------------------------------------
-// The softmax state (Q fragments, O accumulators, per-row m/l) must stay
-// register-resident; an explicit occupancy target stops the backend from buying
-// extra waves with scratch traffic. The bound tracks register demand, which
-// grows with the D_PAD / kWmmaTile tile count.
 template <int NW, int BKV, int D_PAD, int MT>
-__global__ void __launch_bounds__(NW * 32)
-__attribute__((amdgpu_waves_per_eu(D_PAD <= 32 ? 9 : (D_PAD <= 48 ? 7 : 6))))
-mha_flash_prefill_kernel(
+__global__ void __launch_bounds__(NW * 32) mha_flash_prefill_kernel(
     const _Float16 *__restrict__ Q,       // [B, sq, N, d]
     const _Float16 *__restrict__ Kcache,  // [B, N, max_seq, d]
     const _Float16 *__restrict__ Vcache,  // [B, N, max_seq, d]
@@ -185,7 +179,6 @@ mha_flash_prefill_kernel(
       const int key = kv0 + sj * kWmmaTile + wmma_lane;
       const bool kvalid = key < skv;
       const _Float16 *k_row = &Kcache[kv_base + (size_t)(kvalid ? key : 0) * d];
-#pragma unroll  // static tk keeps Q_reg[][] register-resident
       for (int tk = 0; tk < D_TILES; ++tk) {
         half16_t k_frag = kvalid ? mha_load_dtile(k_row, tk, d) : half16_t{};
 #pragma unroll
@@ -251,7 +244,6 @@ mha_flash_prefill_kernel(
     __syncthreads();  // P_lds produced; V_lds staged -> both read below
 
     // ---- value GEMM: V gathered once per (tj,tk), reused across MT ----
-#pragma unroll  // static tj keeps O_h[][] register-resident
     for (int tj = 0; tj < D_TILES; ++tj) {
       float8_t Of[MT];
 #pragma unroll

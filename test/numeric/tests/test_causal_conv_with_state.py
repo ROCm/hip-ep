@@ -42,9 +42,6 @@ SEQ_LENS = [1, 128]
 CHUNK_OPT_CHANNELS = 8192
 CHUNK_OPT_K = 4  # kernel size; carry state size = K - 1 = 3
 
-# Widths past the templated kernels' 8 taps, which take the dynamic-K path.
-WIDE_KERNELS = [9, 12, 16, 31]
-
 
 _NP_TO_TP = {
     np.float16: TensorProto.FLOAT16,
@@ -113,63 +110,6 @@ def _make_causal_conv_with_state_model(
     )
 
 
-def _make_channels_last_model(
-    batch: int,
-    channels: int,
-    seq_len: int,
-    kernel_size: int,
-    activation: str = "silu",
-    dtype: np.dtype = np.float16,
-):
-    """The same op bracketed by a Transpose pair, i.e. a (B, L, C) graph.
-
-    The canonicalizer absorbs both transposes into `channels_last`, which
-    dispatches to the kernel that reads (B, L, C) directly. The carry state
-    keeps its (B, C, K-1) layout either way.
-    """
-    tp = _NP_TO_TP[dtype]
-    state_len = kernel_size - 1
-
-    X = helper.make_tensor_value_info("x_nlc", tp, [batch, seq_len, channels])
-    State = helper.make_tensor_value_info(
-        "past_state", tp, [batch, channels, state_len]
-    )
-    Y = helper.make_tensor_value_info("y_nlc", tp, [batch, seq_len, channels])
-    Present = helper.make_tensor_value_info(
-        "present_state", tp, [batch, channels, state_len]
-    )
-
-    rng = np.random.default_rng(0xB0BA)
-    weight = (rng.standard_normal((channels, 1, kernel_size)) * 0.1).astype(dtype)
-    bias = (rng.standard_normal((channels,)) * 0.05).astype(dtype)
-
-    nodes = [
-        helper.make_node("Transpose", ["x_nlc"], ["input"], perm=[0, 2, 1]),
-        helper.make_node(
-            "CausalConvWithState",
-            ["input", "weight", "bias", "past_state"],
-            ["output", "present_state"],
-            domain="com.microsoft",
-            activation=activation,
-            ndim=1,
-        ),
-        helper.make_node("Transpose", ["output"], ["y_nlc"], perm=[0, 2, 1]),
-    ]
-
-    ms_opset = helper.make_opsetid("com.microsoft", 1)
-    return make_model_from_nodes(
-        nodes,
-        [X, State],
-        [Y, Present],
-        initializers=[
-            numpy_helper.from_array(weight, name="weight"),
-            numpy_helper.from_array(bias, name="bias"),
-        ],
-        opset=17,
-        extra_opsets=[ms_opset],
-    )
-
-
 class TestCausalConvWithState:
     """SiLU is the only activation observed in chunk_opt; we additionally
     cover 'none' on a tiny shape so a regression in the activation branch
@@ -181,11 +121,11 @@ class TestCausalConvWithState:
             (1, 32, 16, 4, "silu"),
             (1, 32, 16, 4, "none"),
             (1, 32, 1, 4, "silu"),
-            # seq_len=128 on tiny channels: exercises the prefill kernel at
-            # moderate sequence length without the 8192-channel memory
-            # footprint of test_ccws_chunk_opt_shape[128]. Covers both
-            # activation branches so a regression in either surfaces here
-            # independently.
+            # seq_len=128 on tiny channels: exercises the MIOpen prefill
+            # path at moderate sequence length without the 8192-channel
+            # memory footprint of test_ccws_chunk_opt_shape[128]. Covers
+            # both activation branches so a regression in either surfaces
+            # here independently.
             (1, 32, 128, 4, "silu"),
             (1, 32, 128, 4, "none"),
         ],
@@ -281,116 +221,4 @@ class TestCausalConvWithState:
         # Per-channel depthwise conv with K=4 and SiLU; fp16 noise from
         # the activation dominates, so allow a slightly looser absolute
         # tolerance than the tiny-shape variant above.
-        compare_outputs(actual, expected, atol=5e-3, rtol=1e-2)
-
-
-class TestCausalConvWideKernel:
-    """Widths past 8, where the templated kernels stop and a dynamic-K kernel
-    takes over: taps and the sliding window move from registers into LDS and
-    the dot product becomes a runtime loop.
-
-    Nothing reached this range before. It used to be the sole remaining job of
-    the MIOpen fallback, and no test exercised it, so these are the first
-    numerics the range has ever had. The width sizes the taps, the zero-carry
-    prefix and the state slice all at once, so sweep several rather than
-    picking one.
-    """
-
-    @pytest.mark.parametrize("kernel_size", WIDE_KERNELS)
-    @pytest.mark.parametrize("seq_len", SEQ_LENS)
-    def test_ccws_wide_kernel(self, model_runner, seq_len, kernel_size):
-        """Every wide width across both the decode and prefill regimes."""
-        batch, channels = 1, 32
-        model = _make_causal_conv_with_state_model(
-            batch, channels, seq_len, kernel_size, activation="silu"
-        )
-
-        rng = np.random.default_rng(kernel_size * 31 + seq_len)
-        x = (rng.standard_normal((batch, channels, seq_len)) * 0.5).astype(np.float16)
-        state = (rng.standard_normal((batch, channels, kernel_size - 1)) * 0.5).astype(
-            np.float16
-        )
-
-        actual, expected = model_runner.run_sample(model, [x, state])
-        compare_outputs(actual, expected, atol=5e-3, rtol=1e-2)
-
-    @pytest.mark.parametrize("seq_len", [1, 2, 7, 300])
-    def test_ccws_wide_kernel_sequence_edges(self, model_runner, seq_len):
-        """Lengths around the wide kernel's own structure.
-
-        Below k, most taps come from the carry state rather than the input, so
-        an off-by-one in the virtual-sequence indexing shows up large. At 300
-        the sequence spans more than one 256-wide output tile, which is what
-        puts the carry write on the tail tile and makes the halo between tiles
-        have to line up.
-        """
-        batch, channels, kernel_size = 1, 32, 16
-        model = _make_causal_conv_with_state_model(
-            batch, channels, seq_len, kernel_size, activation="silu"
-        )
-
-        rng = np.random.default_rng(seq_len)
-        x = (rng.standard_normal((batch, channels, seq_len)) * 0.5).astype(np.float16)
-        state = (rng.standard_normal((batch, channels, kernel_size - 1)) * 0.5).astype(
-            np.float16
-        )
-
-        actual, expected = model_runner.run_sample(model, [x, state])
-        compare_outputs(actual, expected, atol=5e-3, rtol=1e-2)
-
-    @pytest.mark.parametrize("dtype", [np.float16, np.float32])
-    @pytest.mark.parametrize("with_bias", [True, False])
-    @pytest.mark.parametrize("activation", ["silu", "none"])
-    def test_ccws_wide_kernel_dtype_bias_activation(
-        self, model_runner, dtype, with_bias, activation
-    ):
-        """The dtype, bias and activation branches at a wide width.
-
-        These are separate branches in the dynamic-K kernel from the ones the
-        templated path takes, so covering them there does not cover them here.
-        """
-        batch, channels, seq_len, kernel_size = 1, 32, 96, 12
-        model = _make_causal_conv_with_state_model(
-            batch,
-            channels,
-            seq_len,
-            kernel_size,
-            activation=activation,
-            with_bias=with_bias,
-            dtype=dtype,
-        )
-
-        rng = np.random.default_rng(7)
-        x = (rng.standard_normal((batch, channels, seq_len)) * 0.5).astype(dtype)
-        state = (rng.standard_normal((batch, channels, kernel_size - 1)) * 0.5).astype(
-            dtype
-        )
-
-        actual, expected = model_runner.run_sample(model, [x, state])
-        if dtype == np.float32:
-            compare_outputs(actual, expected, atol=1e-4, rtol=1e-4)
-        else:
-            compare_outputs(actual, expected, atol=5e-3, rtol=1e-2)
-
-    @pytest.mark.parametrize("kernel_size", [12, 31])
-    def test_ccws_wide_kernel_channels_last(self, model_runner, kernel_size):
-        """The (B, L, C) form at a wide width.
-
-        This is a different kernel again: it holds the sliding window in a
-        per-lane LDS ring rather than in registers, so the seeding of the ring,
-        its wraparound and the tail carry write are all specific to this path.
-        Numerics must be unchanged by the layout switch.
-        """
-        batch, channels, seq_len = 1, 64, 200
-        model = _make_channels_last_model(
-            batch, channels, seq_len, kernel_size, activation="silu"
-        )
-
-        rng = np.random.default_rng(0xF0 + kernel_size)
-        x = (rng.standard_normal((batch, seq_len, channels)) * 0.5).astype(np.float16)
-        state = (rng.standard_normal((batch, channels, kernel_size - 1)) * 0.5).astype(
-            np.float16
-        )
-
-        actual, expected = model_runner.run_sample(model, [x, state])
         compare_outputs(actual, expected, atol=5e-3, rtol=1e-2)

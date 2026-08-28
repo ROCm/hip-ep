@@ -50,9 +50,8 @@
 //
 // This fold rewrites the shape operand BEFORE ConvertOnnxToHip so the
 // resulting `tensor.from_elements` is exactly what ReshapeConversion's
-// multi-dyn-per-group branch picks up.  That branch is the other half of
-// the fix and lives in `buildExpandShapeOutputShape`; without it this fold
-// has no effect, because the conversion otherwise never reads operand 1.
+// existing multi-dyn-per-group branch picks up.  Bug fix is structural
+// at the operand level; no change to ReshapeConversion required.
 //
 // Implementation notes
 // --------------------

@@ -31,13 +31,10 @@ inline Value getNullableMemRefPtr(Value memref,
   return extractContiguousMemRefPtr(memref, rewriter, loc);
 }
 
-// hip.rms_norm(%ctx) ins(%input, %scale) outs(%output)
-//   -> wrap_rms_norm(state, input, scale, output,
-//        input_num_elements, scale_num_elements, element_size_bytes,
-//        axis, epsilon, stash_type)
-// Rank-generic: the runtime derives the row count from
-// input_num_elements / scale_num_elements, so a 3D [B,S,D] input normalizes
-// B*S rows of width D.
+// hip.miopen.rms_norm(%handle) ins(%input, %weight) outs(%output)
+//   -> hip_miopen_rms_norm(handle, input, weight, output, N, D)
+// Rank-generic: N = product of all dims except last, D = last dim.
+// For 3D [B,S,D]: N = B*S, D = D.
 struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -47,6 +44,7 @@ struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
     Type i64Type = rewriter.getI64Type();
     Type f32Type = rewriter.getF32Type();
 
@@ -82,30 +80,28 @@ struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
     Value stashTypeVal = LLVM::ConstantOp::create(
         rewriter, loc, i64Type, rewriter.getI64IntegerAttr(op.getStashType()));
 
-    // Runtime function signature (10 params)
+    // Runtime function signature (11 params)
     SmallVector<Type> paramTypes = {
-        ptrType,                   // state
+        ptrType, i32Type,          // state, op_state_slot
         ptrType, ptrType, ptrType, // input, scale, output
         i64Type, i64Type, i64Type, // input_num_elements, scale_num_elements,
                                    // element_size_bytes
         i64Type, f32Type, i64Type  // axis, epsilon, stash_type
     };
 
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapRmsNorm, paramTypes, rewriter.getI32Type());
+    FailureOr<LLVM::LLVMFuncOp> funcOp =
+        LLVM::lookupOrCreateFn(rewriter, module, kWrapMiopenT5LayerNormForward,
+                               paramTypes, rewriter.getI32Type());
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {statePtr,
-                               inputPtr,
-                               scalePtr,
-                               outputPtr,
-                               inputNumElements,
-                               scaleNumElements,
-                               elementSizeBytesVal,
-                               axisVal,
-                               epsilonVal,
-                               stashTypeVal};
+    SmallVector<Value> args = {
+        statePtr,         getOpStateSlotValue(op, rewriter, loc),
+        inputPtr,         scalePtr,
+        outputPtr,        inputNumElements,
+        scaleNumElements, elementSizeBytesVal,
+        axisVal,          epsilonVal,
+        stashTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -123,6 +119,7 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
     Type i64Type = rewriter.getI64Type();
     Type f32Type = rewriter.getF32Type();
 
@@ -164,9 +161,10 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
     Value epsilonVal =
         LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr());
 
-    // Runtime function signature (11 params)
+    // Runtime function signature (12 params)
     SmallVector<Type> paramTypes = {
         ptrType, // state
+        i32Type, // op_state_slot
         ptrType, // input
         ptrType, // skip
         ptrType, // gamma
@@ -185,11 +183,17 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {statePtr,         inputPtr,
-                               skipPtr,          gammaPtr,
-                               biasPtr,          outputPtr,
-                               skipOutputPtr,    inputNumElements,
-                               gammaNumElements, elementSizeBytesVal,
+    SmallVector<Value> args = {statePtr,
+                               getOpStateSlotValue(op, rewriter, loc),
+                               inputPtr,
+                               skipPtr,
+                               gammaPtr,
+                               biasPtr,
+                               outputPtr,
+                               skipOutputPtr,
+                               inputNumElements,
+                               gammaNumElements,
+                               elementSizeBytesVal,
                                epsilonVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
@@ -299,86 +303,12 @@ struct LayerNormOpLowering : public ConvertOpToLLVMPattern<LayerNormOp> {
   }
 };
 
-// hip.instance_norm(%ctx) ins(%input, %scale, %bias) outs(%output)
-//   -> wrap_instance_normalization(state, input, scale, bias, output,
-//        n, c, spatial, data_type, epsilon)
-struct InstanceNormOpLowering : public ConvertOpToLLVMPattern<InstanceNormOp> {
-  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
-
-  LogicalResult
-  matchAndRewrite(InstanceNormOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    Location loc = op.getLoc();
-    ModuleOp module = op->getParentOfType<ModuleOp>();
-    Type ptrType = getPtrType();
-    Type i64Type = rewriter.getI64Type();
-    Type f32Type = rewriter.getF32Type();
-
-    Value statePtr = adaptor.getCtx();
-    Value inputPtr =
-        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
-    Value scalePtr =
-        extractContiguousMemRefPtr(adaptor.getScale(), rewriter, loc);
-    Value biasPtr =
-        extractContiguousMemRefPtr(adaptor.getBias(), rewriter, loc);
-    Value outputPtr =
-        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
-
-    auto inputType = cast<MemRefType>(op.getInput().getType());
-    if (inputType.getRank() < 3)
-      return rewriter.notifyMatchFailure(
-          op, "hip.instance_norm requires input rank >= 3");
-
-    Value n = getMemRefDimSize(inputType, 0, adaptor.getInput(), rewriter, loc);
-    Value c = getMemRefDimSize(inputType, 1, adaptor.getInput(), rewriter, loc);
-    Value spatial = LLVM::ConstantOp::create(rewriter, loc, i64Type,
-                                             rewriter.getI64IntegerAttr(1));
-    for (int64_t dimIdx = 2, rank = inputType.getRank(); dimIdx < rank;
-         ++dimIdx) {
-      spatial = LLVM::MulOp::create(
-          rewriter, loc,
-          getMemRefDimSize(inputType, static_cast<unsigned>(dimIdx),
-                           adaptor.getInput(), rewriter, loc),
-          spatial);
-    }
-
-    int64_t dataType = getHipdnnDataType(inputType.getElementType());
-    if (dataType < 0)
-      return rewriter.notifyMatchFailure(op, "unsupported element type");
-    Value dataTypeVal = LLVM::ConstantOp::create(
-        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(dataType));
-    Value epsilonVal =
-        LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr());
-
-    SmallVector<Type> paramTypes = {
-        ptrType,                   // state
-        ptrType, ptrType, ptrType, // input, scale, bias
-        ptrType,                   // output
-        i64Type, i64Type, i64Type, // n, c, spatial
-        i64Type, f32Type           // data_type, epsilon
-    };
-
-    FailureOr<LLVM::LLVMFuncOp> funcOp =
-        LLVM::lookupOrCreateFn(rewriter, module, kWrapInstanceNormalization,
-                               paramTypes, rewriter.getI32Type());
-    if (failed(funcOp))
-      return failure();
-
-    SmallVector<Value> args = {statePtr,    inputPtr,  scalePtr, biasPtr,
-                               outputPtr,   n,         c,        spatial,
-                               dataTypeVal, epsilonVal};
-    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
-    rewriter.eraseOp(op);
-    return success();
-  }
-};
-
 } // namespace
 
 void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns) {
-  patterns.add<RmsNormOpLowering, SkipRmsNormOpLowering, LayerNormOpLowering,
-               InstanceNormOpLowering>(converter);
+  patterns.add<RmsNormOpLowering, SkipRmsNormOpLowering, LayerNormOpLowering>(
+      converter);
 }
 
 } // namespace hip

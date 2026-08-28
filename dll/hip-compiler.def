@@ -1,0 +1,14 @@
+; Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+; Licensed under the MIT License.
+;
+; Export definitions for hip-compiler.dll
+; This file specifies the C API functions exported from the DLL
+
+LIBRARY hip-compiler
+
+EXPORTS
+    ; Compilation entry point (FileSystem-based, for models with constants)
+    hip_compile_with_fs
+
+    ; Version information
+    hip_get_version

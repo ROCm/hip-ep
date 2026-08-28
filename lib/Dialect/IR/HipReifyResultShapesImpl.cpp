@@ -74,8 +74,7 @@ MatmulOp::reifyResultShapes(OpBuilder &b,
   // Re-run the matmul-shape helper. verify() has already passed by reify
   // time, but bail on empty() in case a pre-verify call sneaks in.
   SmallVector<int64_t> outShape = mlir::hip::inferMatmulShape(
-      aShape, bShape, [&]() { return this->emitOpError(); }, getTransA(),
-      getTransB());
+      aShape, bShape, [&]() { return this->emitOpError(); });
   if (outShape.empty())
     return failure();
 
@@ -94,18 +93,16 @@ MatmulOp::reifyResultShapes(OpBuilder &b,
   SmallVector<OpFoldResult> dims;
   dims.reserve(outRank);
   for (size_t i : llvm::seq<size_t>(0, outRank)) {
-    // M dim: A[-2], or A[-1] when transA.
+    // M dim: A[-2].
     if (i + 2 == outRank) {
-      size_t aDim = getTransA() ? aRank - 1 : aRank - 2;
       dims.push_back(
-          mlir::hip::reifyDimOrConstant(b, loc, outShape[i], A, aDim));
+          mlir::hip::reifyDimOrConstant(b, loc, outShape[i], A, aRank - 2));
       continue;
     }
-    // N dim: B[-1], or B[-2] when transB.
+    // N dim: B[-1].
     if (i + 1 == outRank) {
-      size_t bDim = getTransB() ? bRank - 2 : bRank - 1;
       dims.push_back(
-          mlir::hip::reifyDimOrConstant(b, loc, outShape[i], B, bDim));
+          mlir::hip::reifyDimOrConstant(b, loc, outShape[i], B, bRank - 1));
       continue;
     }
     // Batch dim: prefer the side that contributes the size (in range, not 1).

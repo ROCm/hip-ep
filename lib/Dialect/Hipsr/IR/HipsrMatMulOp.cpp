@@ -201,16 +201,16 @@ struct MatMulLowering : ConvertOpToLLVMPattern<MatMulOp> {
     int64_t elementSize = aType.getElementType().getIntOrFloatBitWidth() / 8;
     using MatMulCall =
         RuntimeFunc<i32, hostPtr, slotIndex, devicePtr, devicePtr, devicePtr,
-                    i64, i64, i64, i64, i64, i64, i64, i64>;
+                    i64, i64, i64, i64, i64, i64>;
     auto matMulFunc = MatMulCall::lookupOrCreateFn(rewriter, loc, module,
                                                    kWrapHipblasLtMatmul);
     if (failed(matMulFunc)) {
       return failure();
     }
-    if (failed(matMulFunc->call(
-            adaptor.getCtx(), SlotIndex{op.getOperation()}, adaptor.getA(),
-            adaptor.getB(), adaptor.getInit(), m, n, k, batchCount, elementSize,
-            bBatchStride, static_cast<int64_t>(0), static_cast<int64_t>(0)))) {
+    if (failed(matMulFunc->call(adaptor.getCtx(), SlotIndex{op.getOperation()},
+                                adaptor.getA(), adaptor.getB(),
+                                adaptor.getInit(), m, n, k, batchCount,
+                                elementSize, bBatchStride))) {
       return failure();
     }
     rewriter.eraseOp(op);

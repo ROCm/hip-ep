@@ -37,11 +37,9 @@ add_library(OnnxToHip STATIC
   CompressConversion.cpp
   OneHotConversion.cpp
   GatherShapeFold.cpp
-  TransposeMatMulFold.cpp
   ReshapeShapeFold.cpp
   PadShapeFold.cpp
   SliceShapeFold.cpp
-  PackBroadcastTo4D.cpp
   ShapeConversion.cpp
   ReshapeConversion.cpp
   CausalConvWithStateConversion.cpp
@@ -61,10 +59,8 @@ add_library(OnnxToHip STATIC
   MaxConversion.cpp
   NotConversion.cpp
   CosConversion.cpp
-  ErfConversion.cpp
   SinConversion.cpp
   CeilConversion.cpp
-  RoundConversion.cpp
   ExpConversion.cpp
   LogConversion.cpp
   CumSumConversion.cpp
@@ -91,7 +87,6 @@ add_library(OnnxToHip STATIC
   ConcatConversion.cpp
   PoolConversion.cpp
   ResizeConversion.cpp
-  GridSampleConversion.cpp
   GlobalPoolConversion.cpp
   FlattenConversion.cpp
   LoopOutline.cpp

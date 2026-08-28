@@ -1,13 +1,13 @@
 // ============================================================
 // custom_kernels GQA flash *decode* with INT8 KV cache (fp16 Q, int8 K/V).
 //
-// Verifies hip_gqa_flash_decode with k_scale/v_scale (symmetric per-channel
+// Verifies hip_gqa_flash_decode_v2 with k_scale/v_scale (symmetric per-channel
 // int8 KV cache) against:
 //   1. a CPU fp32 reference that dequantizes the SAME int8 cache + scales
 //      (exact target -- measures kernel correctness), and
 //   2. a CPU fp32 reference over the ORIGINAL fp16 K/V (measures the quant
 //      error introduced by the int8 KV cache), and
-//   3. the fp16 KV-cache decode kernel (hip_gqa_flash_decode) on the SAME
+//   3. the fp16 KV-cache decode kernel (hip_gqa_flash_decode_v2) on the SAME
 //      shapes for an apples-to-apples latency / speedup comparison.
 //
 // The quantized-KV GroupQueryAttention layout this mirrors (from
@@ -36,7 +36,7 @@ enum { HIP_KV_DTYPE_FP16 = 0, HIP_KV_DTYPE_INT8 = 1 };
 
 // Unified decode entry: kv_dtype selects the cache format (FP16 baseline vs INT8
 // under test); k_scale/v_scale carry the per-channel dequant tables for INT8.
-extern "C" int hip_gqa_flash_decode(
+extern "C" int hip_gqa_flash_decode_v2(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, void* partials_workspace,
     int B, int H, int G, int d, int skv, int max_seq, int max_splits,
@@ -260,7 +260,7 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
   HIP_CHECK(hipMemcpy(dSeq, Seq.data(), Seq.size() * sizeof(int), hipMemcpyHostToDevice));
 
   // Warmup + correctness fetch for the int8 kernel (kv_dtype = INT8).
-  HIP_CHECK((hipError_t)hip_gqa_flash_decode(
+  HIP_CHECK((hipError_t)hip_gqa_flash_decode_v2(
       nullptr, dQ, dK8, dV8, dO8, dPart, B, H, G, D, c.total, max_seq,
       MAX_SPLITS, scale, dSeq, 0, nullptr, 0, HIP_KV_DTYPE_INT8, dKsc, dVsc));
   HIP_CHECK(hipDeviceSynchronize());
@@ -272,7 +272,7 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
   }
 
   // Warmup fp16 kernel (also its correctness for reference; kv_dtype = FP16).
-  HIP_CHECK((hipError_t)hip_gqa_flash_decode(
+  HIP_CHECK((hipError_t)hip_gqa_flash_decode_v2(
       nullptr, dQ, dKh, dVh, dO16, dPart, B, H, G, D, c.total, max_seq,
       MAX_SPLITS, scale, dSeq, 0, nullptr, 0, HIP_KV_DTYPE_FP16, nullptr,
       nullptr));
@@ -296,12 +296,12 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
   };
 
   double ms_int8 = bench([&]() {
-    hip_gqa_flash_decode(nullptr, dQ, dK8, dV8, dO8, dPart, B, H, G, D,
+    hip_gqa_flash_decode_v2(nullptr, dQ, dK8, dV8, dO8, dPart, B, H, G, D,
                             c.total, max_seq, MAX_SPLITS, scale, dSeq, 0,
                             nullptr, 0, HIP_KV_DTYPE_INT8, dKsc, dVsc);
   });
   double ms_fp16 = bench([&]() {
-    hip_gqa_flash_decode(nullptr, dQ, dKh, dVh, dO16, dPart, B, H, G, D,
+    hip_gqa_flash_decode_v2(nullptr, dQ, dKh, dVh, dO16, dPart, B, H, G, D,
                             c.total, max_seq, MAX_SPLITS, scale, dSeq, 0,
                             nullptr, 0, HIP_KV_DTYPE_FP16, nullptr, nullptr);
   });
@@ -357,9 +357,9 @@ static void write_markdown(const char* path, const char* dev, int cus,
              "`v_fp16 = v_i8 * v_scale[g*D + c]`. Attention is then the standard "
              "GQA math over the dequantized K/V.\n\n");
 
-  fprintf(f, "## Kernel implementation (`hip_gqa_flash_decode` + scales)\n\n");
+  fprintf(f, "## Kernel implementation (`hip_gqa_flash_decode_v2` + scales)\n\n");
   fprintf(f, "Same FA-2 split-K algorithm, `[B,H,K_SPLITS,D+2]` partials, autotune "
-             "and reduce as the fp16 `hip_gqa_flash_decode`, so seqlens_k / "
+             "and reduce as the fp16 `hip_gqa_flash_decode_v2`, so seqlens_k / "
              "sliding-window / head-sink / smooth-softmax all carry over unchanged. "
              "The only change is the K/V load:\n\n");
   fprintf(f, "- **Scalar kernel** (MHA + GQA d128 / high-hpg): keeps the tile INT8 "

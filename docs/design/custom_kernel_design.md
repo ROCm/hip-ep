@@ -185,7 +185,7 @@ The header is intentionally NOT installed: the EP-side build always uses the in-
 The top-level `CMakeLists.txt` adds the subdir on real-runtime EP builds (the per-arch SHARED targets are needed by `backend-mlir-compiler/custom-op-mlir/CMakeLists.txt` to register `add_dependencies`):
 
 ```cmake
-if(NOT BUILD_MOCK_RUNTIME AND NOT _CUSTOM_KERNELS_SUBDIR_ADDED)
+if(BUILD_EP AND NOT BUILD_MOCK_RUNTIME AND NOT _CUSTOM_KERNELS_SUBDIR_ADDED)
     add_subdirectory(lib/Runtime/Kernels)
     set(_CUSTOM_KERNELS_SUBDIR_ADDED TRUE)
 endif()

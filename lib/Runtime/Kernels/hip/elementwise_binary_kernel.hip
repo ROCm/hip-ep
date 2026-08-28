@@ -522,10 +522,11 @@ extern "C" int hip_elementwise_and(void *stream, const void *lhs,
 }
 
 // =====================================================================
-// Mul / Add / Sub (typed). Dispatched from wrap_elementwise (Mul/Add) and
-// wrap_elementwise_sub (Sub) for the int16/int32/int64 path. Same-shape
-// only -- broadcasting is materialised upstream via hip_expand before this
-// kernel runs.
+// Mul / Add / Sub (typed). Dispatched from wrap_miopenOpTensor as the
+// integer-dtype fallback, because MIOpen's miopenOpTensor doesn't support
+// integer element types. Same-shape only -- broadcasting is materialised
+// upstream (see wrap_miopenOpTensor's 2-D broadcast fallback for the
+// general case; this kernel is only reached when shapes already match).
 // =====================================================================
 
 template <typename T>
@@ -687,10 +688,11 @@ extern "C" int hip_elementwise_add(void *stream, const void *lhs,
 }
 
 // =====================================================================
-// Min / Max (typed). Dispatched from wrap_elementwise for the
-// int16/int32/int64 path (tensor_op = MIN / MAX). Same-shape only --
-// broadcasting is materialised upstream by wrap_elementwise via
-// hip_expand, identical to the Mul/Add integer path above.
+// Min / Max (typed). Dispatched from wrap_miopenOpTensor as the
+// integer-dtype fallback for tensor_op = MIN / MAX, because MIOpen's
+// miopenOpTensor only supports floating-point element types. Same-shape
+// only -- broadcasting is materialised upstream by wrap_miopenOpTensor
+// via hip_expand, identical to the Mul/Add integer path above.
 //
 // Ternary form `(a < b) ? a : b` is used (rather than the HIP built-in
 // `min(a, b)`) so the integer specialisations don't accidentally pick up
@@ -849,9 +851,9 @@ extern "C" int hip_elementwise_max(void *stream, const void *lhs,
 // =====================================================================
 // Broadcasting binary elementwise (Add / Mul / Min / Max), 4-D.
 //
-// MIOpen's miopenOpTensor was pathologically slow on gfx1151 for the
+// MIOpen's miopenOpTensor is pathologically slow on gfx1151 for the
 // vision-encoder elementwise shapes (measured ~390 ms for a 6.3M-element
-// fp16 op), so wrap_elementwise routes the float/half Add/Mul/Min/Max
+// fp16 op), so wrap_miopenOpTensor routes the float/half Add/Mul/Min/Max
 // path here instead. Operand shapes are 4-D (left-padded with 1 by the
 // HipToLLVM lowering); per-axis broadcast is handled by a 0 stride on any
 // axis whose extent is 1. Output writes are fully coalesced; broadcast

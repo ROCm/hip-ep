@@ -54,8 +54,7 @@ std::string formatShape(ArrayRef<int64_t> shape) {
 
 SmallVector<int64_t>
 mlir::hip::inferMatmulShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
-                            function_ref<InFlightDiagnostic()> emitError,
-                            int64_t transA, int64_t transB) {
+                            function_ref<InFlightDiagnostic()> emitError) {
   if (aShape.size() < 2) {
     emitError() << "matmul A must have rank >= 2, got rank " << aShape.size();
     return {};
@@ -65,10 +64,10 @@ mlir::hip::inferMatmulShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
     return {};
   }
 
-  int64_t M = transA ? aShape.back() : aShape[aShape.size() - 2];
-  int64_t Ka = transA ? aShape[aShape.size() - 2] : aShape.back();
-  int64_t Kb = transB ? bShape.back() : bShape[bShape.size() - 2];
-  int64_t N = transB ? bShape[bShape.size() - 2] : bShape.back();
+  int64_t M = aShape[aShape.size() - 2];
+  int64_t Ka = aShape.back();
+  int64_t Kb = bShape[bShape.size() - 2];
+  int64_t N = bShape.back();
 
   // Contraction K must agree (kDynamic on either side is a wildcard).
   if (!ShapedType::isDynamic(Ka) && !ShapedType::isDynamic(Kb) && Ka != Kb) {

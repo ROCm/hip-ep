@@ -20,8 +20,6 @@ bool isDeviceMemRef(::mlir::Type type);
 bool isPinnedMemRef(::mlir::Type type);
 bool isManagedMemRef(::mlir::Type type);
 bool isAnySpaceMemRef(::mlir::Type type);
-bool isHostRankedTensor(::mlir::Type type);
-bool isDeviceRankedTensor(::mlir::Type type);
 
 } // namespace hipsr
 } // namespace mlir

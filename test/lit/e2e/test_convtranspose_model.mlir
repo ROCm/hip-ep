@@ -12,13 +12,13 @@
 // Verifies the complete hipdnn-pipeline:
 // 1. convert-onnx-to-hip: onnx.ConvTranspose -> hip.conv_transpose
 // 2. bufferize / canonicalize
-// 3. convert-hip-to-llvm: hip.conv_transpose -> wrap_conv_transpose
+// 3. convert-hip-to-llvm: hip.conv_transpose -> wrap_miopenConvolutionTranspose
 // 4. generate-interface: Create inference_init/compute/cleanup/metadata
 
 // CHECK: module attributes {
 // CHECK-SAME: hipdnn.input_count = 1
 // CHECK-SAME: hipdnn.output_count = 1
-// CHECK: llvm.func @wrap_conv_transpose
+// CHECK: llvm.func @wrap_miopenConvolutionTranspose
 // CHECK: llvm.func @inference_init
 // CHECK: llvm.func @inference_compute
 // CHECK: llvm.func @inference_cleanup

@@ -252,8 +252,8 @@ What each piece does:
   against the onnxruntime *package* directory, not cwd -- so the
   relative recipe above would otherwise need to live inside the ORT
   install) and auto-prepends the resolved parent directory to `PATH`
-  so the EP DLL's co-located dependencies are found at registration
-  time.
+  so co-located dependencies (`hip-compiler.dll`) are found at
+  registration time.
 - **`--ep-option config_file=...`** -- forwards the key/value into
   ORT's `provider_options` dict for this EP. **`config_file` is
   MorphiZen's own convention** (the EP's

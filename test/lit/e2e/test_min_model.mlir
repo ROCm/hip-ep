@@ -1,20 +1,20 @@
 // RUN: hip-mlir-opt %s --hipdnn-pipeline | FileCheck %s
 
 // Test Min E2E full pipeline
-// onnx.Min reuses the generic elementwise path with tensor_op = Min.
-// No new runtime function needed — goes through wrap_elementwise.
+// onnx.Min reuses the MIOpen miopenOpTensor path with tensor_op = Min.
+// No new runtime function needed — goes through wrap_miopenOpTensor.
 //
 // Verifies the complete hipdnn-pipeline:
 // 1. convert-onnx-to-hip: onnx.Min → hip.min
 // 2. canonicalize: Simplify redundant operations
 // 3. memory-pooling: Pool output buffer into single allocation
-// 4. convert-hip-to-llvm: hip.min → llvm.call @wrap_elementwise
+// 4. convert-hip-to-llvm: hip.min → llvm.call @wrap_miopenOpTensor
 // 5. generate-interface: Create inference_init/compute/cleanup/metadata
 
 // CHECK: module attributes {
 // CHECK-SAME: hipdnn.input_count = 2
 // CHECK-SAME: hipdnn.output_count = 1
-// CHECK: llvm.func @wrap_elementwise
+// CHECK: llvm.func @wrap_miopenOpTensor
 // CHECK: llvm.func @inference_init
 // CHECK: llvm.func @inference_compute
 // CHECK: llvm.func @inference_cleanup
