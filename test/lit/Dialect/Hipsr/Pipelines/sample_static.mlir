@@ -56,7 +56,8 @@
 // CHECK-NEXT:      }
 // CHECK-NEXT:      %[[CAST:.+]] = hipsr.cast(%[[D0_CTX]]) ins(%[[MM1]] : tensor<2x1xf16, #hipsr.mem<device>>) outs(%[[CAST_INIT]] : tensor<2x1xf32, #hipsr.mem<device>>) : tensor<2x1xf32, #hipsr.mem<device>>
 
-// CHECK-NEXT:      %[[SHAPE_INIT:.+]] = hipsr.placeholder(%[[D0_CTX]]) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<2xi64, #hipsr.mem<host>> shape_region {
+// CHECK-NEXT:      %[[SHAPE_INIT:.+]] = hipsr.placeholder(%[[D0_CTX]]) ins(%[[D0_B]] : tensor<2x4xf32, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<2xi64, #hipsr.mem<host>> shape_region {
+// CHECK-NEXT:      ^bb0(%{{.+}}: !shape.shape):
 // CHECK-NEXT:        %[[RANK:.+]] = arith.constant 2 : index
 // CHECK-NEXT:        %[[RANK_SHAPE:.+]] = shape.from_extents %[[RANK]] : index
 // CHECK-NEXT:        hipsr.shape_yield %[[RANK_SHAPE]] : !shape.shape

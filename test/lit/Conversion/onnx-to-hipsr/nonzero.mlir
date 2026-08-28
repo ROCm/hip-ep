@@ -23,10 +23,9 @@
 // CHECK-NEXT:    ^bb0(%[[COUNT_SHAPE:.+]]: !shape.shape):
 // CHECK-NEXT:      hipsr.shape_yield %[[COUNT_SHAPE]] : !shape.shape
 // CHECK-NEXT:    }
-// The copy's own result goes unused: the shape graph names the destination.
-// CHECK-NEXT:    %{{.+}} = hipsr.copy_d2h(%[[CTX]]) ins(%[[SEARCH]]#1 : tensor<1xi64, #hipsr.mem<device>>) outs(%[[HOST_INIT]] : tensor<1xi64, #hipsr.mem<host>>) : tensor<1xi64, #hipsr.mem<host>>
-// CHECK-NEXT:    %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[HOST_INIT]] : tensor<1xi64, #hipsr.mem<host>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<2x?xi64, #hipsr.mem<device>> shape_region {
-// CHECK-NEXT:    ^bb0(%{{.+}}: !hipsr.context, %[[COUNT:.+]]: tensor<1xi64, #hipsr.mem<host>>):
+// CHECK-NEXT:    %[[HOST_COUNT:.+]] = hipsr.copy_d2h(%[[CTX]]) ins(%[[SEARCH]]#1 : tensor<1xi64, #hipsr.mem<device>>) outs(%[[HOST_INIT]] : tensor<1xi64, #hipsr.mem<host>>) : tensor<1xi64, #hipsr.mem<host>>
+// CHECK-NEXT:    %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[HOST_INIT]], %[[INITS]]#0 : tensor<1xi64, #hipsr.mem<host>>, tensor<2x?xi64, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<2x?xi64, #hipsr.mem<device>> shape_region {
+// CHECK-NEXT:    ^bb0(%{{.+}}: !hipsr.context, %[[COUNT:.+]]: tensor<1xi64, #hipsr.mem<host>>, %{{.+}}: tensor<2x?xi64, #hipsr.mem<device>>):
 // CHECK-NEXT:      %[[ZERO:.+]] = arith.constant 0 : index
 // CHECK-NEXT:      %[[FOUND:.+]] = tensor.extract %[[COUNT]]{{\[}}%[[ZERO]]] : tensor<1xi64, #hipsr.mem<host>>
 // CHECK-NEXT:      %[[COLUMNS:.+]] = arith.index_cast %[[FOUND]] : i64 to index
@@ -34,8 +33,10 @@
 // CHECK-NEXT:      %[[SHAPE:.+]] = shape.from_extents %[[ROWS]], %[[COLUMNS]] : index, index
 // CHECK-NEXT:      hipsr.shape_yield %[[SHAPE]] : !shape.shape
 // CHECK-NEXT:    }
-// CHECK-NEXT:    %[[NARROWED:.+]] = hipsr.compute(%[[CTX]]) ins(%[[SEARCH]]#0 : tensor<2x?xi64, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<2x?xi64, #hipsr.mem<device>>) {
-// CHECK-NEXT:    ^bb0(%{{.+}}: !hipsr.context, %[[POSITIONS:.+]]: tensor<2x?xi64, #hipsr.mem<device>>, %[[DEST:.+]]: tensor<2x?xi64, #hipsr.mem<device>>):
+// The compute lists the count the barrier reads, so the two share a pool
+// domain, and ignores it in the body.
+// CHECK-NEXT:    %[[NARROWED:.+]] = hipsr.compute(%[[CTX]]) ins(%[[HOST_COUNT]], %[[SEARCH]]#0 : tensor<1xi64, #hipsr.mem<host>>, tensor<2x?xi64, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<2x?xi64, #hipsr.mem<device>>) {
+// CHECK-NEXT:    ^bb0(%{{.+}}: !hipsr.context, %{{.+}}: tensor<1xi64, #hipsr.mem<host>>, %[[POSITIONS:.+]]: tensor<2x?xi64, #hipsr.mem<device>>, %[[DEST:.+]]: tensor<2x?xi64, #hipsr.mem<device>>):
 // CHECK-NEXT:      %[[ONE:.+]] = arith.constant 1 : index
 // CHECK-NEXT:      %[[DIM:.+]] = tensor.dim %[[DEST]], %[[ONE]] : tensor<2x?xi64, #hipsr.mem<device>>
 // CHECK-NEXT:      %[[SLICE:.+]] = tensor.extract_slice %[[POSITIONS]][0, 0] [2, %[[DIM]]] [1, 1] : tensor<2x?xi64, #hipsr.mem<device>> to tensor<2x?xi64, #hipsr.mem<device>>
@@ -63,9 +64,9 @@ func.func @nonzero_mask(%ctx: !hipsr.context,
 // CHECK-NEXT:    ^bb0(%[[COUNT_SHAPE:.+]]: !shape.shape):
 // CHECK-NEXT:      hipsr.shape_yield %[[COUNT_SHAPE]] : !shape.shape
 // CHECK-NEXT:    }
-// CHECK-NEXT:    %{{.+}} = hipsr.copy_d2h(%[[CTX]]) ins(%[[SEARCH]]#1 : tensor<1xi64, #hipsr.mem<device>>) outs(%[[HOST_INIT]] : tensor<1xi64, #hipsr.mem<host>>) : tensor<1xi64, #hipsr.mem<host>>
-// CHECK-NEXT:    %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[HOST_INIT]] : tensor<1xi64, #hipsr.mem<host>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<1x?xi64, #hipsr.mem<device>> shape_region {
-// CHECK-NEXT:    ^bb0(%{{.+}}: !hipsr.context, %[[COUNT:.+]]: tensor<1xi64, #hipsr.mem<host>>):
+// CHECK-NEXT:    %[[HOST_COUNT:.+]] = hipsr.copy_d2h(%[[CTX]]) ins(%[[SEARCH]]#1 : tensor<1xi64, #hipsr.mem<device>>) outs(%[[HOST_INIT]] : tensor<1xi64, #hipsr.mem<host>>) : tensor<1xi64, #hipsr.mem<host>>
+// CHECK-NEXT:    %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[HOST_INIT]], %[[INITS]]#0 : tensor<1xi64, #hipsr.mem<host>>, tensor<1x12xi64, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<1x?xi64, #hipsr.mem<device>> shape_region {
+// CHECK-NEXT:    ^bb0(%{{.+}}: !hipsr.context, %[[COUNT:.+]]: tensor<1xi64, #hipsr.mem<host>>, %{{.+}}: tensor<1x12xi64, #hipsr.mem<device>>):
 // CHECK-NEXT:      %[[ZERO:.+]] = arith.constant 0 : index
 // CHECK-NEXT:      %[[FOUND:.+]] = tensor.extract %[[COUNT]]{{\[}}%[[ZERO]]] : tensor<1xi64, #hipsr.mem<host>>
 // CHECK-NEXT:      %[[COLUMNS:.+]] = arith.index_cast %[[FOUND]] : i64 to index
@@ -73,8 +74,8 @@ func.func @nonzero_mask(%ctx: !hipsr.context,
 // CHECK-NEXT:      %[[SHAPE:.+]] = shape.from_extents %[[ROWS]], %[[COLUMNS]] : index, index
 // CHECK-NEXT:      hipsr.shape_yield %[[SHAPE]] : !shape.shape
 // CHECK-NEXT:    }
-// CHECK-NEXT:    %[[NARROWED:.+]] = hipsr.compute(%[[CTX]]) ins(%[[SEARCH]]#0 : tensor<1x12xi64, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<1x?xi64, #hipsr.mem<device>>) {
-// CHECK-NEXT:    ^bb0(%{{.+}}: !hipsr.context, %[[POSITIONS:.+]]: tensor<1x12xi64, #hipsr.mem<device>>, %[[DEST:.+]]: tensor<1x?xi64, #hipsr.mem<device>>):
+// CHECK-NEXT:    %[[NARROWED:.+]] = hipsr.compute(%[[CTX]]) ins(%[[HOST_COUNT]], %[[SEARCH]]#0 : tensor<1xi64, #hipsr.mem<host>>, tensor<1x12xi64, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<1x?xi64, #hipsr.mem<device>>) {
+// CHECK-NEXT:    ^bb0(%{{.+}}: !hipsr.context, %{{.+}}: tensor<1xi64, #hipsr.mem<host>>, %[[POSITIONS:.+]]: tensor<1x12xi64, #hipsr.mem<device>>, %[[DEST:.+]]: tensor<1x?xi64, #hipsr.mem<device>>):
 // CHECK-NEXT:      %[[ONE:.+]] = arith.constant 1 : index
 // CHECK-NEXT:      %[[DIM:.+]] = tensor.dim %[[DEST]], %[[ONE]] : tensor<1x?xi64, #hipsr.mem<device>>
 // CHECK-NEXT:      %[[SLICE:.+]] = tensor.extract_slice %[[POSITIONS]][0, 0] [1, %[[DIM]]] [1, 1] : tensor<1x12xi64, #hipsr.mem<device>> to tensor<1x?xi64, #hipsr.mem<device>>

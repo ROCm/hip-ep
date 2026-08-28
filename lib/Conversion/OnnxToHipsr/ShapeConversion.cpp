@@ -24,8 +24,10 @@
 //
 // After:
 //   %init = hipsr.placeholder(%ctx)
+//       ins(%x : tensor<?x128xf16, #hipsr.mem<device>>)
 //       {placeholder_type = #hipsr.placeholder_type<normal>}
 //       : tensor<2xi64, #hipsr.mem<host>> shape_region {
+//   ^bb0(%x_shape: !shape.shape):
 //     %c2 = arith.constant 2 : index
 //     %shape = shape.from_extents %c2 : index
 //     hipsr.shape_yield %shape : !shape.shape
@@ -185,10 +187,12 @@ struct ShapeToHipsr : public OpConversionPattern<onnx::ShapeOp> {
       return failure();
     }
 
+    // The extent count fixes the shape; the input is there to match the
+    // compute.
     Location loc = op.getLoc();
     auto init =
         PlaceholderOp::create(rewriter, loc, TypeRange{extentsType}, *ctx,
-                              ValueRange{}, PlaceholderType::Normal);
+                              ValueRange{input}, PlaceholderType::Normal);
     populateShapeRegion(rewriter, init, extentsType.getDimSize(0));
 
     auto computeOp =
