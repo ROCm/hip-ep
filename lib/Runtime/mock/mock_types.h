@@ -14,10 +14,8 @@
 // Mock type definitions for testing without GPU
 typedef void *hipStream_t;
 typedef void *hipEvent_t;
-typedef void *miopenHandle_t;
 typedef void *hipblasLtHandle_t;
 typedef int hipError_t;
-typedef int miopenStatus_t;
 typedef int hipblasStatus_t;
 
 struct hipDeviceProp_t {
@@ -27,7 +25,6 @@ struct hipDeviceProp_t {
 };
 
 #define hipSuccess 0
-#define miopenStatusSuccess 0
 #define HIPBLAS_STATUS_SUCCESS 0
 #define hipMemcpyHostToDevice 0
 #define hipMemcpyDeviceToHost 1
@@ -39,10 +36,6 @@ struct hipDeviceProp_t {
 // op_profile.cpp). The mock hipEventCreateWithFlags ignores flags, so the
 // value is irrelevant -- it only needs to be a declared identifier.
 #define hipEventDisableSystemFence 0
-
-// MIOpen tensor layout enum (subset used by the runtime)
-typedef int miopenTensorLayout_t;
-#define miopenTensorNCHW 0
 
 // Forward declarations for mock GPU functions (defined in mock_gpu.cpp)
 extern "C" hipError_t hipGetDeviceCount(int *count);
@@ -73,10 +66,6 @@ extern "C" hipError_t hipEventElapsedTime(float *ms, hipEvent_t start,
 extern "C" hipError_t hipHostGetDevicePointer(void **devPtr, void *hstPtr,
                                               unsigned int flags);
 extern "C" const char *hipGetErrorString(hipError_t error);
-extern "C" miopenStatus_t miopenCreate(miopenHandle_t *handle);
-extern "C" miopenStatus_t miopenDestroy(miopenHandle_t handle);
-extern "C" miopenStatus_t miopenSetStream(miopenHandle_t handle,
-                                          hipStream_t stream);
 extern "C" hipblasStatus_t hipblasLtCreate(hipblasLtHandle_t *handle);
 extern "C" hipblasStatus_t hipblasLtDestroy(hipblasLtHandle_t handle);
 

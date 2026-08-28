@@ -131,8 +131,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   return 0;
 }
 
-// Shared initialization that brings up HIP device, stream, MIOpen and
-// hipBLASLt handles in a fresh RuntimeState. On any failure the partially
+// Shared initialization that brings up HIP device, stream, and hipBLASLt
+// handles in a fresh RuntimeState. On any failure the partially
 // initialized state is released and a non-zero error code (matching the
 // historical exit codes 1-9) is returned. On success *out_state holds the
 // RuntimeState ready for constants_blob allocation; no constant memory has
@@ -147,7 +147,6 @@ static int initialize_state_handles(RuntimeState **out_state) {
   }
 
   state->stream = nullptr;
-  state->miopen_handle = nullptr;
   state->hipblas_handle = nullptr;
   state->gpu_constants_blob = nullptr;
   state->gpu_constants = nullptr;
@@ -218,34 +217,13 @@ static int initialize_state_handles(RuntimeState **out_state) {
 
   TIMING_LOG("[Session] hipStreamCreate: %.3fs\n", record_elapsed(t_prev));
 
-  // Skip vendor-handle creation when the vendor BLAS/DNN backends are disabled:
-  // the stubbed miopenCreate/hipblasLtCreate would fail and abort session
-  // creation even for a model that never dispatches a vendor op. Handles stay
-  // null; cleanup is already null-guarded.
+  // Skip vendor-handle creation when hipBLASLt is disabled: the stubbed
+  // hipblasLtCreate would fail and abort session creation even for a model
+  // that never dispatches a vendor GEMM. Handle stays null; cleanup is
+  // already null-guarded.
 #ifndef HIPDNN_EP_DISABLE_VENDOR_BLAS
-  if (miopenCreate(&state->miopen_handle) != miopenStatusSuccess) {
-    fprintf(stderr, "Failed to create MIOpen handle\n");
-    if (state->stream)
-      HIP_CLEANUP(hipStreamDestroy(state->stream));
-    free(state);
-    return 7;
-  }
-
-  if (miopenSetStream(state->miopen_handle, state->stream) !=
-      miopenStatusSuccess) {
-    fprintf(stderr, "Failed to set MIOpen stream\n");
-    miopenDestroy(state->miopen_handle);
-    if (state->stream)
-      HIP_CLEANUP(hipStreamDestroy(state->stream));
-    free(state);
-    return 8;
-  }
-
-  TIMING_LOG("[Session] MIOpen init: %.3fs\n", record_elapsed(t_prev));
-
   if (hipblasLtCreate(&state->hipblas_handle) != HIPBLAS_STATUS_SUCCESS) {
     fprintf(stderr, "Failed to create hipBLASLt handle\n");
-    miopenDestroy(state->miopen_handle);
     if (state->stream)
       HIP_CLEANUP(hipStreamDestroy(state->stream));
     free(state);
@@ -260,8 +238,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   if (hipMalloc((void **)&state->device_error_flag, sizeof(int)) !=
       hipSuccess) {
     fprintf(stderr, "Failed to allocate device error flag\n");
-    hipblasLtDestroy(state->hipblas_handle);
-    miopenDestroy(state->miopen_handle);
+    if (state->hipblas_handle)
+      hipblasLtDestroy(state->hipblas_handle);
     if (state->stream)
       HIP_CLEANUP(hipStreamDestroy(state->stream));
     free(state);
@@ -272,8 +250,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
     fprintf(stderr, "Failed to initialize device error flag\n");
     HIP_CLEANUP(hipFree(state->device_error_flag));
     state->device_error_flag = nullptr;
-    hipblasLtDestroy(state->hipblas_handle);
-    miopenDestroy(state->miopen_handle);
+    if (state->hipblas_handle)
+      hipblasLtDestroy(state->hipblas_handle);
     if (state->stream)
       HIP_CLEANUP(hipStreamDestroy(state->stream));
     free(state);
@@ -728,7 +706,7 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipHostFree(state->qmoe_host_scratch));
   }
 
-  // Free the MIOpen convolution workspace pool (if allocated). The stream
+  // Free the convolution workspace pool (if allocated). The stream
   // sync above has drained any in-flight conv that may still be reading it.
   if (state->conv_scratch) {
     HIP_CLEANUP(hipFree(state->conv_scratch));
@@ -843,11 +821,6 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     hipblasLtDestroy(state->hipblas_handle);
   }
 
-  // Destroy MIOpen handle
-  if (state->miopen_handle) {
-    miopenDestroy(state->miopen_handle);
-  }
-
   // Destroy HIP stream
   if (state->stream) {
     // Stop ABI-fixed helpers (memrefCopy) from reading this stream after it is
@@ -877,10 +850,6 @@ void *hipdnn_ep_constant_get(RuntimeState *state, int64_t index) {
 
 void *hipdnn_ep_state_get_stream(RuntimeState *state) {
   return state ? static_cast<void *>(state->stream) : nullptr;
-}
-
-void *hipdnn_ep_state_get_miopen_handle(RuntimeState *state) {
-  return state ? static_cast<void *>(state->miopen_handle) : nullptr;
 }
 
 void *hipdnn_ep_state_get_hipblas_handle(RuntimeState *state) {
@@ -1346,10 +1315,10 @@ int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
   return 0;
 }
 
-// MIOpen convolution workspace pool. Same grow-on-demand policy as qmoe_scratch
-// above. Single-buffer reuse is safe because the stream is serialised: the
-// next conv only launches after the previous miopenConvolutionForward (+ bias
-// add) has consumed the workspace.
+// Convolution workspace pool. Same grow-on-demand policy as qmoe_scratch
+// above. Currently unused: both convolution directions run on in-tree kernels
+// that need no workspace. Single-buffer reuse is safe because the stream is
+// serialised.
 void *hipdnn_ep_state_get_conv_scratch(RuntimeState *state) {
   return state ? state->conv_scratch : nullptr;
 }

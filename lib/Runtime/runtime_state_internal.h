@@ -31,7 +31,6 @@
 // This struct is opaque to generated code (passed as void*)
 struct RuntimeState {
   hipStream_t stream;
-  miopenHandle_t miopen_handle;
   hipblasLtHandle_t hipblas_handle;
 
   // Single allocation holding all constants as one blob.
@@ -119,8 +118,8 @@ struct RuntimeState {
 
   // Per-session convolution workspace. Currently allocated by nobody: both
   // convolution directions now run on in-tree kernels (hip_conv,
-  // hip_conv_transpose) that need no workspace at all, and the MIOpen solution
-  // cache that briefly owned one is gone. Kept only because the accessors are
+  // hip_conv_transpose) that need no workspace at all. Kept only because the
+  // accessors are
   // part of the runtime's exported surface. Same grow-on-demand policy as
   // qmoe_scratch above if it is ever wired up again: lazily allocated on first
   // use, never shrinks, freed in hipdnn_ep_state_cleanup.
@@ -164,11 +163,11 @@ struct RuntimeState {
   // multi_head_attention instance owns one in its MhaState op-state slot (see
   // op_states below and docs/design/op-state-slots-design.md).
 
-  // NOTE: the CausalConvWithState MIOpen descriptor + algorithm cache
+  // NOTE: the CausalConvWithState descriptor + algorithm cache
   // (CausalConvCache) formerly lived here as causal_conv_cache, then moved to
   // a per-op-instance CausalConvState op-state slot. It no longer exists at
-  // all: the op runs entirely on custom kernels, so there are no MIOpen
-  // descriptors to cache. See docs/design/op-state-slots-design.md.
+  // all: the op runs entirely on custom kernels. See
+  // docs/design/op-state-slots-design.md.
 
   // Asym zero_points unpack cache (ZpUnpackCache*) used by wrap_qmoe.
   //

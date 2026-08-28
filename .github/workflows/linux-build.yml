@@ -60,7 +60,7 @@ jobs:
 
       # -----------------------------------------------------------------------
       # Regression guard for the HIPDNN_EP_DISABLE_VENDOR_BLAS build mode (build
-      # the real runtime without MIOpen/hipBLASLt). A source-only grep -- no
+      # the real runtime without hipBLASLt). A source-only grep -- no
       # configure, build, or SDK download -- so it costs ~0 CI time and fails
       # fast if the flag's load-bearing pieces are removed or renamed.
       # -----------------------------------------------------------------------

@@ -63,12 +63,12 @@ existing `--convert-hip-to-llvm` pipeline.
 
 | ONNX / ORT Contrib | HIP | Backend |
 |---|---|---|
-| `LayerNormalization` | `hip.miopen.layer_norm` | `miopenLayerNormForward` |
+| `LayerNormalization` | `hip.layer_norm` | custom HIP kernel |
 | `InstanceNormalization` | `hip.instance_norm` | custom HIP kernel |
 | `RMSNormalization` | `hip.rms_norm` | `rms_norm_kernel.hip` |
 | `SimplifiedLayerNormalization` | `hip.rms_norm` | `rms_norm_kernel.hip` |
 | `GridSample` | `hip.grid_sample` | custom HIP kernel |
-| `SkipLayerNormalization` | `hip.miopen.skip_layer_norm` | `miopenAddLayerNormForward` |
+| `SkipLayerNormalization` | `hip.add` + `hip.layer_norm` | decomposed, custom HIP kernels |
 | `SkipSimplifiedLayerNormalization` | `hip.skip_rms_norm` | `skip_rms_norm_kernel.hip` |
 | LpNorm+Mul pattern (fused) | `hip.rms_norm` | `rms_norm_kernel.hip` |
 
@@ -91,36 +91,37 @@ packed `__half2` path for fp16 rows of even width.
 | `QuantizeLinear` | `hip.quantize_linear` |
 | `DequantizeLinear` | `hip.dequantize_linear` |
 
-### MIOpen: Activation (`miopenActivationForward`)
+### Activation
 
-| ONNX | HIP | MIOpen mode |
+| ONNX | HIP | Backend |
 |---|---|---|
-| `Relu` | `hip.miopen.relu` | `miopenActivationRELU` |
+| `Relu` | `hip.max` against a 0-D zero | `wrap_elementwise` |
 
-### MIOpen: Softmax (`miopenSoftmaxForward`)
+### Softmax
 
-| ONNX | HIP | MIOpen API |
+| ONNX | HIP | Backend |
 |---|---|---|
-| `Softmax` | `hip.miopen.softmax` | `miopenSoftmaxForward` |
+| `Softmax` | `hip.miopen.softmax` | `hip_miopen_softmax`, custom HIP kernel |
 
-### MIOpen: Element-wise Tensor Ops (`miopenOpTensor`)
+### Element-wise Tensor Ops
 
-| ONNX | HIP | MIOpen mode |
+| ONNX | HIP | Backend |
 |---|---|---|
-| `Add` | `hip.miopen.add` | `miopenTensorOpAdd` |
-| `Mul` | `hip.miopen.mul` | `miopenTensorOpMul` |
+| `Add` | `hip.add` | `wrap_elementwise` |
+| `Mul` | `hip.mul` | `wrap_elementwise` |
+| `Sub` | `hip.sub` | `wrap_elementwise_sub` |
 
-### MIOpen: Reduction (`miopenReduceTensor`)
+### Reduction
 
-| ONNX | HIP | MIOpen mode |
+| ONNX | HIP | Backend |
 |---|---|---|
-| `ReduceMean` | `hip.miopen.reduce_mean` | `MIOPEN_REDUCE_TENSOR_AVG` |
+| `ReduceMean` | `hip.reduce_mean` | custom HIP kernel |
 
-### MIOpen: Concat (`miopenCatForward`, experimental)
+### Concat
 
-| ONNX | HIP | MIOpen API |
+| ONNX | HIP | Backend |
 |---|---|---|
-| `Concat` | `hip.miopen.cat` | `miopenCatForward` |
+| `Concat` | `tensor.empty` + `tensor.insert_slice` | bufferizes to destination subviews and copies |
 
 ### Zero-cost Metadata Ops (no kernel needed)
 
@@ -130,7 +131,7 @@ packed `__half2` path for fp16 rows of even width.
 | `Unsqueeze` | `hip.unsqueeze` | Shape/stride reinterpretation only |
 | `Squeeze` | `hip.squeeze` | Shape/stride reinterpretation only |
 
-### Custom HIP Kernels (no MIOpen equivalent)
+### Custom HIP Kernels (no vendor-library equivalent)
 
 | ONNX | HIP | Notes |
 |---|---|---|
@@ -152,9 +153,9 @@ Tested on `Llama-3.2-1B-Instruct` quantized ONNX model:
 | HIP Op | Count |
 |---|---|
 | `hip.hipblaslt.matmul` | 80 |
-| `hip.miopen.rms_norm` | 33 |
-| `hip.miopen.add` | 32 |
-| `hip.miopen.mul` | 16 |
+| `hip.rms_norm` | 33 |
+| `hip.add` | 32 |
+| `hip.mul` | 16 |
 | `hip.gqa` | 16 |
 | `hip.silu` | 16 |
 | `hip.quantize_linear` | 193 |

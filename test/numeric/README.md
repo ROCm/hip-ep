@@ -240,7 +240,7 @@ pytest --backend ort_ep \
 What each piece does:
 
 - **`THEROCK_DIST` + `PATH`** -- the EP's compiled-model DLLs link
-  against ROCm runtime libs (`amdhip64_7.dll`, `MIOpen.dll`, ...) at
+  against ROCm runtime libs (`amdhip64_7.dll`, `libhipblaslt.dll`, ...) at
   session-create time; the Windows loader needs `%THEROCK_DIST%\bin`
   on `PATH` to find them. This is the *only* env var the EP requires
   at runtime; everything else is a CLI flag or optional toggle.

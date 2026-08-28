@@ -55,7 +55,7 @@ endif()
 # Bundle the per-arch custom-kernels runtime libraries. The EP dlopens
 # custom_kernels_<arch>.{dll,so} from its own directory at JIT init, so each
 # must ship in onnxruntime/capi next to the EP DLL. ROCm import libs
-# (amdhip64/MIOpen/hipBLASLt) come from the pip rocm[devel] package at runtime.
+# (amdhip64/hipBLASLt) come from the pip rocm[devel] package at runtime.
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
   set(_ck_target custom_kernels_${_arch})
   if(TARGET ${_ck_target})

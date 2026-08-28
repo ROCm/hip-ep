@@ -8,7 +8,6 @@
 #include <cstdio>
 #include <hip/hip_runtime.h>
 #include <hipblaslt/hipblaslt.h>
-#include <miopen/miopen.h>
 
 //===----------------------------------------------------------------------===//
 // Error Checking Macros with Goto Cleanup Pattern
@@ -18,30 +17,7 @@
 // goto-based cleanup. They replace the CHECK macros that return directly,
 // allowing proper resource cleanup on error paths.
 //
-// Usage:
-//   miopenTensorDescriptor_t desc = nullptr;
-//   int result = 0;
-//
-//   MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&desc), cleanup);
-//   MIOPEN_CHECK_GOTO(miopenSetNdTensorDescriptorWithLayout(desc, ...),
-//   cleanup);
-//
-//   cleanup:
-//     if (desc) miopenDestroyTensorDescriptor(desc);
-//     return result;
-//
 //===----------------------------------------------------------------------===//
-
-#define MIOPEN_CHECK_GOTO(expr, label)                                         \
-  do {                                                                         \
-    miopenStatus_t status = (expr);                                            \
-    if (status != miopenStatusSuccess) {                                       \
-      fprintf(stderr, "MIOpen error: %s failed at %s:%d (status=%d)\n", #expr, \
-              __FILE__, __LINE__, status);                                     \
-      result = -1;                                                             \
-      goto label;                                                              \
-    }                                                                          \
-  } while (0)
 
 #define HIP_CHECK_GOTO(expr, label)                                            \
   do {                                                                         \

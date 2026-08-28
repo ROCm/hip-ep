@@ -296,12 +296,6 @@ def _assert_no_silent_fallback(stderr_text):
     assert "[REAL] wrap_conv" in stderr_text, (
         "no [REAL] wrap_conv — Conv ran on CPU (silent fallback)"
     )
-    # Forward Conv left MIOpen for the in-tree hip_conv kernel. If this fires,
-    # the lowering regressed to the MIOpen path rather than the Conv failing.
-    assert "[REAL] wrap_miopenConvolutionForward" not in stderr_text, (
-        "wrap_miopenConvolutionForward should NOT appear — forward Conv must "
-        "route to the hip_conv kernel via wrap_conv"
-    )
     # hip.gqa lowers to the runtime symbol wrap_group_query_attention (NOT a
     # symbol literally named wrap_gqa).
     assert "[REAL] wrap_group_query_attention" in stderr_text, (
