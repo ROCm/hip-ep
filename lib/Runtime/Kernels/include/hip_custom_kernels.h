@@ -2462,6 +2462,98 @@ HIP_KERNEL_API int hip_conv(
     int64_t group);
 
 /* =========================================================================
+ * Conv — Winograd F(2x2, 3x3) path for fp16 3x3 stride-1
+ * =========================================================================
+ *
+ * An alternative to `hip_conv` for the one shape class where the transform
+ * pays: 2D, 3x3, stride 1, dilation 1, group 1, fp16. Trades a 2.25x
+ * reduction in multiplies for two transforms and a scratch buffer.
+ *
+ * Unlike `hip_conv` this path is stateful, because two of its costs are worth
+ * hoisting out of the call:
+ *
+ *   - The filter transform depends only on the weights, so the caller runs
+ *     `hip_conv_winograd_filter` once per weight tensor and keeps the result.
+ *     Doing it per call would cost more than the transform saves.
+ *   - The input transform and the GEMM need scratch, which the caller supplies
+ *     so it can come from the session's pool rather than a per-call
+ *     allocation. Its size is blocked against a fixed budget rather than sized
+ *     to the shape; ask `hip_conv_winograd_scratch_bytes` for it.
+ *
+ * Call `hip_conv_winograd_eligible` first; it returns 0 for anything this path
+ * does not implement, and the caller must then fall back to `hip_conv`.
+ */
+
+/* Non-zero if this shape should use the Winograd path. */
+HIP_KERNEL_API int hip_conv_winograd_eligible(
+    int hip_dtype, int64_t spatial_rank,
+    int64_t k0, int64_t k1,
+    int64_t s0, int64_t s1,
+    int64_t dil0, int64_t dil1,
+    int64_t group, int64_t Cin, int64_t Cout);
+
+/* Non-zero if Winograd is expected to be *faster* than hip_conv on this shape,
+ * as opposed to merely correct on it, which is what _eligible answers.
+ *
+ * Both must pass. Winograd wins on shapes too small to fill the device, where
+ * the direct path's wide tiles leave it parallelism-starved, and loses on large
+ * feature maps, where it is limited by LDS bandwidth and the 2.25x arithmetic
+ * saving does not cover it. The measured spread over 49 shapes from six models
+ * is 1.85x down to 0.36x, so this is not a detail. */
+HIP_KERNEL_API int hip_conv_winograd_profitable(
+    int64_t N, int64_t Cin, int64_t Cout, int64_t out_d0, int64_t out_d1);
+
+/* Elements (not bytes) in the transformed filter: 16 * Cout * Cin. */
+HIP_KERNEL_API int64_t hip_conv_winograd_filter_elems(int64_t Cout,
+                                                      int64_t Cin);
+
+/* Scratch bytes the caller must supply to hip_conv_winograd. */
+HIP_KERNEL_API int64_t hip_conv_winograd_scratch_bytes(
+    int64_t Cin, int64_t Cout, int64_t out_d0, int64_t out_d1);
+
+/* U = G g G^T over every (cout, cin). `u` holds filter_elems fp16 values. */
+HIP_KERNEL_API int hip_conv_winograd_filter(
+    void* stream, const void* weights, void* u, int64_t Cout, int64_t Cin);
+
+/* The convolution. `u_transformed` is the output of hip_conv_winograd_filter
+ * for these weights; `scratch` is at least hip_conv_winograd_scratch_bytes.
+ *
+ * This is the four-stage form, and it is the slower of the two: it exists as
+ * the reference the fused one is checked against. Prefer
+ * hip_conv_winograd_fused. */
+HIP_KERNEL_API int hip_conv_winograd(
+    void* stream,
+    const void* input,
+    const void* u_transformed,
+    const void* bias,        /* nullable */
+    void* output,
+    void* scratch,
+    int64_t N, int64_t Cin, int64_t Cout,
+    int64_t in_h, int64_t in_w,
+    int64_t out_h, int64_t out_w,
+    int64_t pad_top, int64_t pad_left);
+
+/* The same convolution in one kernel, with the input transform fused into the
+ * GEMM's staging so V never reaches memory. No scratch: the only buffer it
+ * needs is `u_transformed`.
+ *
+ * This is the form worth using. The four-stage version writes and reads V and
+ * M, which on these shapes costs more traffic than the im2col it replaces --
+ * measured 2.2x slower than hip_conv on esrgan. Here the input patch is staged
+ * in LDS once and the tile halo shared, which is where the traffic reduction
+ * against im2col actually comes from. */
+HIP_KERNEL_API int hip_conv_winograd_fused(
+    void* stream,
+    const void* input,
+    const void* u_transformed,
+    const void* bias,        /* nullable */
+    void* output,
+    int64_t N, int64_t Cin, int64_t Cout,
+    int64_t in_h, int64_t in_w,
+    int64_t out_h, int64_t out_w,
+    int64_t pad_top, int64_t pad_left);
+
+/* =========================================================================
  * ConvTranspose — forward transposed convolution (2D spatial)
  * =========================================================================
  *

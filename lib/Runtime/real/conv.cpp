@@ -10,6 +10,11 @@
 #include "runtime_types.h"
 
 #include <cstdio>
+#include <cstdlib>
+#include <map>
+#include <utility>
+
+#include <hip/hip_runtime.h>
 
 //===----------------------------------------------------------------------===//
 // Conv — forward convolution via the custom HIP kernel
@@ -32,10 +37,9 @@
 //     overwrites rather than accumulates -- so it followed every convolution
 //     with a separate miopenOpTensor pass over the whole output. That pass is
 //     gone.
-//   * There is no op state, no solution cache and no workspace. MIOpen needed a
-//     per-shape Find() and a cached solution; this kernel derives everything
-//     from its arguments, so `op_state_slot` is accepted for ABI stability and
-//     ignored.
+//   * The direct path needs no op state, no solution cache and no workspace:
+//     it derives everything from its arguments. The Winograd path does need
+//     both, and that is what `op_state_slot` now carries -- see ConvState.
 //
 // Only pads_begin is passed. Pad positions are never read, so the trailing pad
 // affects nothing except how many output positions exist, and that is already
@@ -43,11 +47,74 @@
 
 namespace {
 
-// Slot payload shared by Conv and ConvTranspose: both ops emit a construct call
-// for their slot, so the symbol has to exist, but neither kernel caches
-// anything. This used to be the MIOpen descriptor/solution table (ConvState in
-// real/miopen.cpp) and outlived it only as an ABI obligation.
-struct ConvState : OpStateT<ConvState> {};
+// Slot payload shared by Conv and ConvTranspose. Both ops emit a construct call
+// for their slot, so the symbol has to exist; what it holds is the Winograd
+// path's transformed filter.
+//
+// The transform U = G g G^T depends only on the weights, and for a model
+// constant those never change, so doing it per call would add more work than
+// the algorithm saves. Keying on the weight pointer rather than on the op means
+// weights shared between nodes are transformed once. The buffers are owned
+// here and freed with the slot, which is why this is a state slot and not a
+// function-local cache: the lifetime has to end with the session.
+struct ConvState : OpStateT<ConvState> {
+  // weights pointer -> (device U buffer, elements it holds)
+  std::map<const void *, std::pair<void *, int64_t>> winograd_filters;
+
+  ~ConvState() {
+    for (auto &e : winograd_filters)
+      if (e.second.first)
+        (void)hipFree(e.second.first);
+  }
+};
+
+// HIPDNN_EP_CONV_WINOGRAD overrides the shape gate three ways: unset lets
+// hip_conv_winograd_profitable decide (the shipping behaviour), 0 never takes
+// the Winograd path, and 1 takes it wherever it is correct, ignoring
+// profitability. The last is what makes the A/B measurable -- the gate was
+// fitted by running both arms over the shapes the models contain, and it can
+// only be refitted if forcing is still possible.
+enum class WinogradMode { Gated, Never, Always };
+
+WinogradMode winograd_mode() {
+  static const WinogradMode m = [] {
+    const char *s = std::getenv("HIPDNN_EP_CONV_WINOGRAD");
+    if (!s || !*s)
+      return WinogradMode::Gated;
+    return *s == '0' ? WinogradMode::Never : WinogradMode::Always;
+  }();
+  return m;
+}
+
+// The transformed filter for these weights, transforming on first use.
+// Returns nullptr if it cannot be produced, which sends the caller to the
+// direct path rather than failing the convolution.
+const void *winograd_filter(ConvState *cs, void *stream, const void *weights,
+                            int64_t Cout, int64_t Cin) {
+  auto it = cs->winograd_filters.find(weights);
+  if (it != cs->winograd_filters.end())
+    return it->second.first;
+
+  const int64_t elems = hip_conv_winograd_filter_elems(Cout, Cin);
+  if (elems <= 0)
+    return nullptr;
+  const size_t bytes = static_cast<size_t>(elems) * 2; // fp16
+
+  void *u = nullptr;
+  if (hipMalloc(&u, bytes) != hipSuccess) {
+    fprintf(stderr,
+            "[REAL] wrap_conv: hipMalloc(%zu) for the Winograd filter failed; "
+            "using the direct path\n",
+            bytes);
+    return nullptr;
+  }
+  if (hip_conv_winograd_filter(stream, weights, u, Cout, Cin) != 0) {
+    (void)hipFree(u);
+    return nullptr;
+  }
+  cs->winograd_filters[weights] = {u, elems};
+  return u;
+}
 
 } // namespace
 
@@ -116,10 +183,36 @@ int wrap_conv(RuntimeState *state, int32_t op_state_slot, const void *input,
     return -1;
   }
 
-  // No op state: this kernel needs no cached solution or workspace.
-  (void)op_state_slot;
-
   void *stream = hipdnn_ep_state_get_stream(state);
+
+  // Winograd F(2x2,3x3), for fp16 3x3 stride-1 shapes small enough that the
+  // direct path cannot fill the device. Everything else -- and anything whose
+  // filter transform cannot be had -- falls through to the direct path below
+  // unchanged.
+  const WinogradMode wmode = winograd_mode();
+  ConvState *cs = ConvState::get_op_state(state, op_state_slot);
+  if (cs && wmode != WinogradMode::Never &&
+      hip_conv_winograd_eligible(hip_dtype, spatial_rank, k0, k1, s0, s1, dil0,
+                                 dil1, group, Cin, Cout) &&
+      (wmode == WinogradMode::Always ||
+       hip_conv_winograd_profitable(N, Cin, Cout, out0, out1))) {
+    const void *u = winograd_filter(cs, stream, weights, Cout, Cin);
+    if (u) {
+      RUNTIME_DEBUG_LOG(
+          "[REAL] wrap_conv: winograd F(2x2,3x3) N=%lld Cin=%lld Cout=%lld "
+          "in=[%lld,%lld] out=[%lld,%lld]\n",
+          (long long)N, (long long)Cin, (long long)Cout, (long long)in0,
+          (long long)in1, (long long)out0, (long long)out1);
+      int wrc = hip_conv_winograd_fused(stream, input, u, bias, output, N, Cin,
+                                        Cout, in0, in1, out0, out1, p0, p1);
+      if (wrc == 0)
+        return 0;
+      fprintf(stderr,
+              "[REAL] wrap_conv: winograd path failed (%d); using the direct "
+              "path\n",
+              wrc);
+    }
+  }
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_conv: dtype=%s(%lld) spatial_rank=%lld N=%lld Cin=%lld "
