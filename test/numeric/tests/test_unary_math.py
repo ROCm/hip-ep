@@ -3,14 +3,15 @@
 # Licensed under the MIT License.
 #
 
-"""Tests for the unary math ops Abs, Ceil, Round, Log, Erf.
+"""Tests for the unary math ops Abs, Ceil, Round, Atan, Log, Erf.
 
 These route through the shared unary elementwise HIP kernel family
-(lib/Runtime/real/{abs,ceil,round,log}.cpp). Per those dtype tables:
+(lib/Runtime/real/{abs,ceil,round,atan,log,erf}.cpp). Per those dtype tables:
 
     Abs   : f16, f32, i32, i64   (bit-exact; abs is value-preserving)
     Ceil  : f16, f32             (bit-exact; result is integral)
     Round : f16, f32             (bit-exact; ONNX ties-to-even)
+    Atan  : f16, f32             (fp16 ~1e-3, fp32 ~1e-5)
     Log   : f16, f32             (positive inputs only; fp16 ~1e-3, fp32 ~1e-6)
 
 Each op is checked at a small smoke shape plus a llama-style [1, S, 4096]
@@ -117,6 +118,30 @@ class TestRound:
         x = rng.uniform(-5.0, 5.0, shape).astype(np.float16)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)
+
+
+# ---------------------------------------------------------------------------
+# Atan : y = arctan(x)
+# ---------------------------------------------------------------------------
+class TestAtan:
+    @pytest.mark.parametrize("dtype", [np.float16, np.float32])
+    def test_atan(self, model_runner, dtype):
+        shape = [4, 8]
+        model = _make_unary_model("Atan", dtype, shape)
+        rng = np.random.default_rng(917)
+        x = rng.uniform(-5.0, 5.0, shape).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x])
+        atol = 1e-3 if dtype == np.float16 else 1e-5
+        compare_outputs(actual, expected, atol=atol, rtol=1e-3)
+
+    @pytest.mark.parametrize("seq_len", SEQ_LENS)
+    def test_atan_llama_shape(self, model_runner, seq_len):
+        shape = [1, seq_len, HIDDEN]
+        model = _make_unary_model("Atan", np.float16, shape)
+        rng = np.random.default_rng(918)
+        x = rng.uniform(-5.0, 5.0, shape).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-3, rtol=1e-3)
 
 
 # ---------------------------------------------------------------------------

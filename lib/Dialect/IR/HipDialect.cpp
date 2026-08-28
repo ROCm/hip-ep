@@ -1887,6 +1887,18 @@ void RoundOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// AtanOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange AtanOp::getDpsInitsMutable() { return getYMutable(); }
+
+void AtanOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // ExpOp: ins(x), outs(y)
 //===----------------------------------------------------------------------===//
 
