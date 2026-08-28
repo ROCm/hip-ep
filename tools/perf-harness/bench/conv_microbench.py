@@ -33,6 +33,7 @@ import ctypes
 import json
 import os
 import statistics
+import subprocess
 import sys
 
 # hip_conv's dtype enum (HIP_DTYPE_* in hip_custom_kernels.h).
@@ -132,6 +133,40 @@ def _load_kernels(bindir: str):
     return cands[0], fn
 
 
+def _load_winograd(bindir: str):
+    """The Winograd entry points, or None on a build that predates them.
+
+    Separate from _load_kernels because the Winograd path is not reachable
+    through hip_conv -- the EP dispatches it in wrap_conv, above the kernel
+    ABI -- so timing it means calling it directly.
+    """
+    cands = [os.path.join(bindir, n) for n in os.listdir(bindir)
+             if n.lower().startswith("custom_kernels")
+             and n.lower().endswith((".dll", ".so"))]
+    lib = ctypes.CDLL(cands[0])
+    try:
+        elig = lib.hip_conv_winograd_eligible
+        prof = lib.hip_conv_winograd_profitable
+        felems = lib.hip_conv_winograd_filter_elems
+        xform = lib.hip_conv_winograd_filter
+        fused = lib.hip_conv_winograd_fused
+    except AttributeError:
+        return None
+
+    elig.restype = ctypes.c_int
+    elig.argtypes = [ctypes.c_int] + [ctypes.c_int64] * 10
+    prof.restype = ctypes.c_int
+    prof.argtypes = [ctypes.c_int64] * 5
+    felems.restype = ctypes.c_int64
+    felems.argtypes = [ctypes.c_int64] * 2
+    xform.restype = ctypes.c_int
+    xform.argtypes = [ctypes.c_void_p] * 3 + [ctypes.c_int64] * 2
+    fused.restype = ctypes.c_int
+    fused.argtypes = [ctypes.c_void_p] * 5 + [ctypes.c_int64] * 9
+    return {"eligible": elig, "profitable": prof, "filter_elems": felems,
+            "filter": xform, "fused": fused}
+
+
 def _prod(xs):
     n = 1
     for x in xs:
@@ -202,6 +237,108 @@ def bench_shape(hip: Hip, conv, rec: dict, iters: int, warmup: int):
             hip.free(p)
 
 
+def bench_winograd(hip: Hip, wg, rec: dict, iters: int, warmup: int):
+    """Time the fused Winograd path on one shape, or return None if it does
+    not apply. The filter transform is excluded, as it is in the EP: it is
+    hoisted out of the call and cached per weight tensor."""
+    if rec["dtype"] != "float16" or rec["rank"] != 2:
+        return None
+    k = rec["kernel"][:2]
+    s = rec["stride"][:2]
+    d = rec["dilation"][:2]
+    N, Cin, Cout, g = rec["N"], rec["Cin"], rec["Cout"], rec["group"]
+    if not wg["eligible"](_HIP_DTYPE["float16"], 2, k[0], k[1], s[0], s[1],
+                          d[0], d[1], g, Cin, Cout):
+        return None
+
+    inp, outp, pad = rec["in"][:2], rec["out"][:2], rec["pad_begin"][:2]
+    esz = 2
+    x = w = u = b = y = None
+    try:
+        x = hip.malloc(N * Cin * inp[0] * inp[1] * esz)
+        w = hip.malloc(Cout * Cin * 9 * esz)
+        u = hip.malloc(wg["filter_elems"](Cout, Cin) * esz)
+        b = hip.malloc(Cout * esz)
+        y = hip.malloc(N * Cout * outp[0] * outp[1] * esz)
+
+        rc = wg["filter"](None, w, u, Cout, Cin)
+        if rc != 0:
+            raise RuntimeError(f"winograd_filter returned {rc}")
+
+        args_ = [None, x, u, b, y, N, Cin, Cout, inp[0], inp[1],
+                 outp[0], outp[1], pad[0], pad[1]]
+        for _ in range(warmup):
+            rc = wg["fused"](*args_)
+            if rc != 0:
+                raise RuntimeError(f"winograd_fused returned {rc}")
+        hip.sync()
+
+        start, stop = hip.event(), hip.event()
+        samples = []
+        for _ in range(iters):
+            hip.lib.hipEventRecord(start, None)
+            wg["fused"](*args_)
+            hip.lib.hipEventRecord(stop, None)
+            hip.check(hip.lib.hipEventSynchronize(stop), "hipEventSynchronize")
+            samples.append(hip.elapsed_ms(start, stop))
+        hip.lib.hipEventDestroy(start)
+        hip.lib.hipEventDestroy(stop)
+        return statistics.median(samples)
+    finally:
+        for p in (x, w, u, b, y):
+            hip.free(p)
+
+
+def cmd_winograd(args):
+    """A/B the fused Winograd path against hip_conv, per shape."""
+    with open(args.shapes) as f:
+        shapes = json.load(f)
+
+    dll, conv = _load_kernels(args.bin)
+    wg = _load_winograd(args.bin)
+    if not wg:
+        raise SystemExit("this build has no hip_conv_winograd_fused")
+    hip = Hip(args.bin)
+    print(f"kernels: {dll}", file=sys.stderr)
+
+    # Three totals, because the question is not whether Winograd is faster --
+    # it is faster on some shapes and slower on others -- but whether the gate
+    # picks the right one. `gated` is what actually ships; `oracle` is the best
+    # possible per-shape choice and so the bound the gate is judged against.
+    tot_d = tot_w = tot_g = tot_o = 0.0
+    for model, recs in shapes.items():
+        if args.model and model not in args.model:
+            continue
+        for rec in recs:
+            if rec["op"] != "Conv":
+                continue
+            wms = bench_winograd(hip, wg, rec, args.iters, args.warmup)
+            if wms is None:
+                continue
+            d = bench_shape(hip, conv, rec, args.iters, args.warmup)["ms"]
+            cnt = rec.get("count", 1)
+            gate = bool(wg["profitable"](rec["N"], rec["Cin"], rec["Cout"],
+                                         rec["out"][0], rec["out"][1]))
+            tot_d += d * cnt
+            tot_w += wms * cnt
+            tot_g += (wms if gate else d) * cnt
+            tot_o += min(d, wms) * cnt
+            label = ("Cin=%-4d Cout=%-4d out=%s"
+                     % (rec["Cin"], rec["Cout"], rec["out"][:2]))
+            flag = "USE" if gate else "   "
+            miss = "" if gate == (wms < d) else "  <- gate wrong"
+            print("  %-40s direct %7.3f  winograd %7.3f  %5.2fx %s x%-3d%s"
+                  % (label, d, wms, d / wms, flag, cnt, miss),
+                  file=sys.stderr)
+    if tot_w > 0:
+        print(file=sys.stderr)
+        print("  always direct   %8.3f ms" % tot_d, file=sys.stderr)
+        print("  always winograd %8.3f ms" % tot_w, file=sys.stderr)
+        print("  gated (ships)   %8.3f ms  %.2fx vs direct, %.1f%% of oracle"
+              % (tot_g, tot_d / tot_g, 100.0 * tot_o / tot_g), file=sys.stderr)
+        print("  oracle          %8.3f ms" % tot_o, file=sys.stderr)
+
+
 def cmd_run(args):
     with open(args.shapes) as f:
         shapes = json.load(f)
@@ -243,6 +380,75 @@ def cmd_run(args):
         print(f"wrote {args.out}", file=sys.stderr)
     else:
         print(text)
+
+
+def cmd_tile_sweep(args):
+    """Run every tile against every shape and report the best one for each.
+
+    The cost model in conv_tile_select.h is a handful of ratios standing in for
+    a memory system, and there is no way to know whether it ranks two tiles
+    correctly except to run both. This produces the table it is answerable to.
+
+    Each tile needs its own process: the kernel DLL reads the override once and
+    caches it, which is the right thing for a DLL and the wrong thing for a
+    sweep.
+    """
+    # Four-field names where a block shape appears at more than one register
+    # tile, so the sweep row and the kernel launched agree. See
+    # conv_tile_select.h for which entries share a block shape.
+    tiles = args.tiles or ["128x256", "256x128", "128x128", "64x256", "32x256",
+                           "16x256", "128x256x2x4", "128x128x2x2",
+                           "64x256x2x2",
+                           "128x128x8x8", "64x128x4x8", "128x64x8x4",
+                           "64x64x4x4", "32x128x2x8", "64x32x4x2",
+                           "32x64x2x4", "32x32x2x2", "direct"]
+    results = {}
+    for tile in tiles:
+        out = os.path.join(args.workdir, f"tile_{tile}.json")
+        os.makedirs(args.workdir, exist_ok=True)
+        env = dict(os.environ)
+        env["HIPDNN_EP_CONV_TILE"] = tile
+        cmd = [sys.executable, os.path.abspath(__file__), args.shapes,
+               "--bin", args.bin, "--iters", str(args.iters),
+               "--warmup", str(args.warmup), "--out", out]
+        for m in args.model or []:
+            cmd += ["--model", m]
+        p = subprocess.run(cmd, env=env, capture_output=True, text=True)
+        if not os.path.exists(out):
+            print(f"tile {tile}: no result\n{p.stderr[-800:]}", file=sys.stderr)
+            continue
+        with open(out) as f:
+            results[tile] = json.load(f)
+        tot = sum(r["weighted_ms"] for recs in results[tile].values()
+                  for r in recs)
+        print(f"tile {tile:<10} total {tot:9.3f} ms", file=sys.stderr)
+
+    if not results:
+        sys.exit("no tile produced results")
+
+    # Per shape, which tile actually won.
+    print()
+    print(f"{'model':<20}{'shape':<62}{'best':>9}{'ms':>9}   runners-up")
+    print("-" * 130)
+    table = {}
+    for model in next(iter(results.values())):
+        for tile, data in results.items():
+            for r in data.get(model, []):
+                table.setdefault((model, r["label"]), {})[tile] = r
+
+        rows = [(k, v) for k, v in table.items() if k[0] == model]
+        rows.sort(key=lambda kv: -min(r["weighted_ms"] for r in kv[1].values()))
+        for (m, label), byTile in rows:
+            ranked = sorted(byTile.items(), key=lambda kv: kv[1]["ms"])
+            best, br = ranked[0]
+            rest = "  ".join(f"{t}:{r['ms'] / br['ms']:.2f}x"
+                             for t, r in ranked[1:4])
+            print(f"{m:<20}{label:<62}{best:>9}{br['ms']:>9.3f}   {rest}")
+
+    with open(args.out or os.path.join(args.workdir, "tile_sweep.json"),
+              "w") as f:
+        json.dump({f"{m}|{label}": {t: r["ms"] for t, r in byTile.items()}
+                   for (m, label), byTile in table.items()}, f, indent=2)
 
 
 def cmd_compare(args):
@@ -299,10 +505,26 @@ def main():
                     help="Diff two result files instead of benchmarking.")
     ap.add_argument("--threshold", type=float, default=0.05,
                     help="Hide per-shape rows moving less than this many ms.")
+    ap.add_argument("--tile-sweep", action="store_true",
+                    help="Force each tile in turn and report the best per shape.")
+    ap.add_argument("--tiles", action="append",
+                    help="Restrict --tile-sweep to these tiles (repeatable).")
+    ap.add_argument("--workdir", default=r"C:\Users\zyq\scratch\conv-tiles",
+                    help="Where --tile-sweep writes its per-tile results.")
+    ap.add_argument("--winograd", action="store_true",
+                    help="A/B the fused Winograd path against hip_conv.")
     args = ap.parse_args()
 
     if args.compare:
         cmd_compare(args)
+    elif args.winograd:
+        if not args.shapes:
+            ap.error("--winograd needs a shapes file")
+        cmd_winograd(args)
+    elif args.tile_sweep:
+        if not args.shapes:
+            ap.error("--tile-sweep needs a shapes file")
+        cmd_tile_sweep(args)
     elif args.shapes:
         cmd_run(args)
     else:
