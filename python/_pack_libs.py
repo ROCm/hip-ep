@@ -2,14 +2,6 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
 #
-"""Build helper: stage native artifacts into the wheel's onnxruntime/capi.
-
-Invoked by python/CMakeLists.txt's `wheel` target (NOT shipped at runtime).
-Copies the prebuilt native libraries and, on Windows, the MSVC/WinSDK CRT import
-libraries the JIT linker (lld-link) resolves against. The CRT libs are located
-by scanning the `LIB` environment variable, which the VS dev environment / MSVC
-toolset populates with the MSVC and WinSDK lib directories.
-"""
 
 import argparse
 import os
@@ -29,6 +21,15 @@ CRT_LIBS = [
     "kernel32.lib",
     "user32.lib",
 ]
+
+ROCM_DLL_GROUPS = [
+    ["amdhip64*.dll"],
+    ["amd_comgr*.dll"],
+    ["hipblaslt.dll", "libhipblaslt.dll"],
+    ["hiprtc*.dll"],
+]
+
+HIPBLASLT_DATA = ("hipblaslt", "library")
 
 
 def _find_in_lib_env(name: str):
@@ -60,6 +61,42 @@ def _copy_crt_libs(dest: Path) -> int:
     return len(missing)
 
 
+def _copy_rocm_runtime(dist: Path, arch: str, dest: Path) -> int:
+    bin_dir = dist / "bin"
+    if not bin_dir.is_dir():
+        print(f"ERROR: --rocm-dist has no bin/: {dist}", file=sys.stderr)
+        return 1
+
+    for group in ROCM_DLL_GROUPS:
+        hits = sorted({p for pat in group for p in bin_dir.glob(pat) if p.is_file()})
+        if not hits:
+            print(
+                f"ERROR: no ROCm runtime library matching {' / '.join(group)} "
+                f"in {bin_dir}",
+                file=sys.stderr,
+            )
+            return 1
+        for src in hits:
+            shutil.copy2(src, dest / src.name)
+            print(f"  packaged ROCm dll: {src.name} <- {src}")
+
+    src_data = bin_dir.joinpath(*HIPBLASLT_DATA, arch)
+    if not src_data.is_dir():
+        print(
+            f"ERROR: hipBLASLt Tensile data for {arch} not found: {src_data}",
+            file=sys.stderr,
+        )
+        return 1
+    dst_data = dest.joinpath(*HIPBLASLT_DATA, arch)
+    shutil.copytree(src_data, dst_data)
+    count = sum(1 for p in dst_data.rglob("*") if p.is_file())
+    print(
+        f"  packaged hipBLASLt Tensile data: {'/'.join(HIPBLASLT_DATA)}/{arch} "
+        f"({count} files) <- {src_data}"
+    )
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -72,6 +109,20 @@ def main():
     )
     ap.add_argument(
         "--dest", required=True, help="Destination dir (the wheel's onnxruntime/capi)."
+    )
+    ap.add_argument(
+        "--rocm-dist",
+        required=True,
+        metavar="PATH",
+        help="TheRock ROCm SDK the EP was built against (THEROCK_DIST). Its "
+        "runtime libraries are bundled so the wheel needs no ROCm install.",
+    )
+    ap.add_argument(
+        "--rocm-arch",
+        required=True,
+        metavar="GFX",
+        help="GPU arch whose hipBLASLt Tensile data to bundle, e.g. gfx1151. A "
+        "multi-arch distribution carries every arch; the wheel ships one.",
     )
     ap.add_argument(
         "--extra-lib",
@@ -123,6 +174,10 @@ def main():
             print(f"  packaged optional dll: {lib.name} <- {lib}")
         else:
             print(f"  WARNING: optional dll not found (skipping): {lib}")
+
+    rc = _copy_rocm_runtime(Path(args.rocm_dist), args.rocm_arch, dest)
+    if rc:
+        return rc
 
     if args.with_crt:
         _copy_crt_libs(dest)
