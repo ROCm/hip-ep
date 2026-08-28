@@ -6,9 +6,11 @@
 //
 // Pre-lowering pattern set inside convert-onnx-to-hip, alongside
 // GatherShapeFold / ReshapeShapeFold / PadShapeFold / SliceShapeFold. It
-// rewrites static high-rank onnx.Add/Sub/Mul/Div/Less/Greater operations into
-// collapse_shape -> rank-<=4 ONNX op -> expand_shape before compute conversion
-// creates the corresponding HIP op.
+// rewrites static high-rank onnx.Add/Sub/Mul/Div/Less/Greater/Max/Min/And
+// operations into collapse_shape -> rank-<=4 ONNX op -> expand_shape before
+// compute conversion creates the corresponding HIP op. Only the two-operand
+// form is matched; variadic onnx.Max/onnx.Min (three or more inputs) are left
+// unchanged.
 //
 // Before:
 //   %r = "onnx.Add"(%a, %b) : (...) -> tensor<6x2500x8x1x2x4x2xf32>
@@ -261,8 +263,9 @@ struct PackBroadcastPattern : public RewritePattern {
 
 void populatePackBroadcastTo4DPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx) {
-  for (StringRef opName : {"onnx.Add", "onnx.Sub", "onnx.Mul", "onnx.Div",
-                           "onnx.Less", "onnx.Greater"})
+  for (StringRef opName :
+       {"onnx.Add", "onnx.Sub", "onnx.Mul", "onnx.Div", "onnx.Less",
+        "onnx.Greater", "onnx.Max", "onnx.Min", "onnx.And"})
     patterns.add<PackBroadcastPattern>(opName, ctx);
 }
 
