@@ -564,7 +564,7 @@ jobs:
           cp "${{ runner.workspace }}/install/lib/"*.lib staging/lib/ 2>/dev/null || true
 
           THEROCK_DIR="../build/$(basename "$PWD")/_therock"
-          for dll in amdhip64_7.dll MIOpen.dll amd_comgr.dll rocblas.dll \
+          for dll in amdhip64_7.dll rocm_kpack.dll MIOpen.dll amd_comgr.dll rocblas.dll \
                      libhipblaslt.dll hiprtc0715.dll hiprtc-builtins0715.dll; do
             cp "$THEROCK_DIR/bin/$dll" staging/bin/
           done
