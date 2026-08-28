@@ -110,5 +110,6 @@ int wrap_power(RuntimeState *state, void *input, void *output,
   fprintf(stderr,
           "wrap_power: unsupported (alpha=%.2f, beta=%.2f, gamma=%.2f)\n",
           alpha, beta, gamma);
+  std::abort();
   return -1;
 }
