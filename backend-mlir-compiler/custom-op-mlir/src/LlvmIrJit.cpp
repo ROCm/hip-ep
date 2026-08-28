@@ -13,11 +13,14 @@
 #include <llvm/ADT/ArrayRef.h>
 #include <llvm/ADT/SmallString.h>
 #include <llvm/Bitcode/BitcodeReader.h>
+#include <llvm/ExecutionEngine/JITLink/JITLinkMemoryManager.h>
 #include <llvm/ExecutionEngine/JITSymbol.h>
 #include <llvm/ExecutionEngine/Orc/AbsoluteSymbols.h>
 #include <llvm/ExecutionEngine/Orc/ExecutionUtils.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
+#include <llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
+#include <llvm/ExecutionEngine/SectionMemoryManager.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/Error.h>
@@ -44,6 +47,7 @@ extern "C" const std::size_t runtime_bc_data_size;
 #include <mutex>
 #include <new>
 #include <string>
+#include <type_traits>
 #include <typeinfo>
 #include <vector>
 
@@ -65,6 +69,117 @@ void ensureLLVMNativeTargetInitialized() {
     llvm::InitializeNativeTargetAsmPrinter();
     llvm::InitializeNativeTargetAsmParser();
   });
+}
+
+// Build the LLJITBuilder for this host.
+//
+// On Windows this replaces LLJIT's default object linking layer with one whose
+// memory manager reserves a single contiguous allocation per object. Without
+// it, JITting a model kills the host process at random with
+//
+//   LLVM ERROR: IMAGE_REL_AMD64_ADDR32NB relocation requires an ordered
+//               section layout
+//
+// Why: LLJIT picks the linker by triple (LLJITBuilderState::
+// prepareForConstruction); for x86_64 the rule is
+// `UseJITLink = !TT.isOSBinFormatCOFF()`, so Linux/ELF gets JITLink and
+// Windows/COFF gets RuntimeDyld. MSVC-style x86_64 COFF always carries
+// .pdata/.xdata SEH unwind tables whose entries are image-relative, fixed up
+// with IMAGE_REL_AMD64_ADDR32NB. RuntimeDyldCOFFX86_64 resolves those against a
+// *faked* __ImageBase -- the lowest section load address, cached on first use
+// -- and calls report_fatal_error whenever a target lands below that base or
+// more than 4 GB above it. Its own comment says the memory manager is expected
+// to guarantee CodeSection < ReadOnlySection < ReadWriteSection.
+//
+// LLJIT's default manager is `SectionMemoryManager()`, which does not: it
+// serves code / rodata / rwdata from independent VirtualAlloc slabs and
+// promises neither ordering nor proximity. Whether a process survives is down
+// to where ASLR put those slabs, so failures are intermittent and get likelier
+// the more modules a session JITs and the more fragmented its address space
+// becomes -- worst on large LLMs and on hosts that build many sessions in one
+// process.
+//
+// The fix is SectionMemoryManager's second constructor argument. With
+// ReserveAlloc = true, needsToReserveAllocationSpace() returns true,
+// RuntimeDyld pre-computes the totals and calls reserveAllocationSpace, and the
+// manager takes ONE mapped block and carves code, then rodata, then rwdata out
+// of it in that order -- exactly the precondition RuntimeDyldCOFFX86_64
+// documents. Since LLJIT builds a fresh manager per object, every RuntimeDyld
+// instance then sees a contiguous, correctly ordered image whose base really is
+// its lowest section.
+//
+// Not switching to JITLink instead: its COFF backend adds __ImageBase as a weak
+// *external* symbol (COFFLinkGraphBuilder::addImageBaseSymbol) and expects the
+// client to define it. Nothing in a plain LLJIT does, so it resolves to 0, the
+// Pointer32NB -> Pointer32 lowering subtracts nothing, and every link fails --
+// deterministically, which is worse than the status quo. Upstream's own
+// COFF_addr32nb_reloc.test spells out the requirement: JITLink needs both
+// `-abs __ImageBase=<addr>` and a slab reserved at that same address, i.e. a
+// custom JITLinkMemoryManager, or the full COFFPlatform and the ORC runtime.
+// Not worth it when one bool restores the guarantee RuntimeDyld asks for.
+//
+// Set HIPDNN_EP_JIT_UNRESERVED=1 to fall back to the stock LLJIT layer.
+
+#ifdef _WIN32
+// A functor rather than a lambda because LLJITBuilderState::
+// ObjectLinkingLayerCreator changed arity: through LLVM 22 it is
+// `(ExecutionSession &)`, from LLVM 23 it is
+// `(ExecutionSession &, jitlink::JITLinkMemoryManager &)` -- the extra argument
+// being of no use to an RTDyld-based layer. Supplying both call operators binds
+// to either std::function without a version macro; the static_asserts below
+// keep that property from rotting.
+struct ReservingObjectLayerCreator {
+  using Result = llvm::Expected<std::unique_ptr<llvm::orc::ObjectLayer>>;
+
+  Result operator()(llvm::orc::ExecutionSession &es) const { return make(es); }
+
+  Result operator()(llvm::orc::ExecutionSession &es,
+                    llvm::jitlink::JITLinkMemoryManager &) const {
+    return make(es);
+  }
+
+private:
+  static Result make(llvm::orc::ExecutionSession &es) {
+    auto get_mem_mgr = [](const llvm::MemoryBuffer &) {
+      return std::make_unique<llvm::SectionMemoryManager>(
+          /*MM=*/nullptr, /*ReserveAlloc=*/true);
+    };
+    auto layer = std::make_unique<llvm::orc::RTDyldObjectLinkingLayer>(
+        es, std::move(get_mem_mgr));
+    // Both are what LLJIT::createObjectLinkingLayer sets for COFF; setting a
+    // creator bypasses that code, so repeat them here.
+    layer->setOverrideObjectFlagsWithResponsibilityFlags(true);
+    layer->setAutoClaimResponsibilityForObjectSymbols(true);
+    return std::unique_ptr<llvm::orc::ObjectLayer>(std::move(layer));
+  }
+};
+
+static_assert(std::is_invocable_r_v<ReservingObjectLayerCreator::Result,
+                                    ReservingObjectLayerCreator,
+                                    llvm::orc::ExecutionSession &>,
+              "ObjectLinkingLayerCreator arity for LLVM <= 22");
+static_assert(
+    std::is_invocable_r_v<
+        ReservingObjectLayerCreator::Result, ReservingObjectLayerCreator,
+        llvm::orc::ExecutionSession &, llvm::jitlink::JITLinkMemoryManager &>,
+    "ObjectLinkingLayerCreator arity for LLVM >= 23");
+#endif
+
+llvm::orc::LLJITBuilder makeLLJITBuilder() {
+  llvm::orc::LLJITBuilder builder;
+
+#ifdef _WIN32
+  if (hipdnn_ep::env_enabled("HIPDNN_EP_JIT_UNRESERVED")) {
+    LOG(WARNING) << "LlvmIrJit: HIPDNN_EP_JIT_UNRESERVED=1 -- using the stock "
+                    "LLJIT memory manager; IMAGE_REL_AMD64_ADDR32NB aborts are "
+                    "possible.";
+    return builder;
+  }
+
+  builder.setObjectLinkingLayerCreator(ReservingObjectLayerCreator{});
+#endif
+
+  return builder;
 }
 
 #ifdef _WIN32
@@ -493,8 +608,9 @@ LlvmIrJit::create(const std::vector<uint8_t> &bitcode,
   // LLJIT auto-selects the object linking layer by triple
   // (LLJITBuilderState::prepareForConstruction): RuntimeDyld on Windows
   // (x86_64 COFF), JITLink on Linux (x86_64 ELF). Both are linked in (see this
-  // dir's CMakeLists) for that reason.
-  auto jit_or_err = llvm::orc::LLJITBuilder().create();
+  // dir's CMakeLists) for that reason. makeLLJITBuilder keeps that choice but
+  // fixes the Windows memory layout; see the comment there.
+  auto jit_or_err = makeLLJITBuilder().create();
   if (!jit_or_err) {
     LOG(ERROR) << "LlvmIrJit::create: LLJITBuilder failed: "
                << llvm::toString(jit_or_err.takeError());
