@@ -4,6 +4,7 @@
  */
 
 #include "hip_custom_kernels.h"
+#include "conv_tile_select.h"
 #include "debug_log.h"
 
 #include <hip/hip_runtime.h>
@@ -11,6 +12,9 @@
 #include <hip/hip_bfloat16.h>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <type_traits>
 
 // =============================================================================
 // Conv — general forward convolution (1D / 2D / 3D spatial)
@@ -264,6 +268,30 @@ struct KSlice {
 // one shape in the model with K = 27. Adding pad_begin restores the invariant
 // org.x0 + c0 >= -p0 + in0i + p0 = in0i for all positions. Negative pads (a
 // crop) only push org.x0 further positive, so clamping at zero is safe there.
+//
+// This sentinel has been suspected once already, of producing bevformer-fp16's
+// NaN output, on the theory that boundsRun splits the test it relies on across
+// `outerOk` and the caller's `xi` check and so might let a tail column through.
+// It does not, and the convolution is not where that NaN comes from:
+//
+//   * Forcing each tile in turn (HIPDNN_EP_CONV_TILE) gives byte-identical NaN
+//     counts for all six matrix tiles *and* for conv_direct, which shares no
+//     staging code with them at all -- it has no LDS, no slice cache, and no
+//     vectorised runs. A bug in this sentinel cannot express itself equally
+//     through a kernel that never consults it in a staging loop.
+//   * On an in-range input the whole backbone agrees with the ORT CPU
+//     reference to a cosine similarity of 0.99999917 and a relative L2 error
+//     of 6.9e-4, with no non-finite value on either side.
+//   * On the input that produces the NaN, the CPU reference *itself* pins at
+//     +/-65504 across the same output: that input drives the model past fp16
+//     range, and the infinities that later meet and cancel into NaN originate
+//     upstream. Saturating this convolution's fp16 store instead of letting it
+//     overflow was tried and makes it worse (31,744 NaN to 95,232), which is
+//     the direct evidence that the overflow does not start here.
+//
+// The FPN shapes are in the numeric sweep (test/numeric/tests/conv_cases.py,
+// `bevformer-fpn-*`) with explicit finiteness checks, so a real fault in this
+// sentinel would be caught there rather than inferred from a model output.
 __device__ __forceinline__ KSlice makeKSlice(const ConvParams &pr,
                                              int64_t kidx) {
   KSlice s;
@@ -447,6 +475,17 @@ static inline ConvParams withTileGrid(ConvParams pr, int64_t bm, int64_t bn) {
 // loop wants: a fixed k, contiguous in the tile index, so TM and TN reads
 // vectorise.
 
+// The launch bound is the exact block size and nothing more. Asking the
+// compiler for more occupancy than that -- amdgpu_waves_per_eu(10) on top of
+// it -- does get what it asks for, 64x64 going from 177 VGPR at 8 waves per
+// SIMD to 144 at 10 with no spill reported, and it is much slower:
+// simplebev's convolutions measure 43.8 ms against 24.6. The registers come
+// back by rematerialising the gather's address arithmetic rather than by
+// spilling it, so the report shows no scratch traffic while the inner loop
+// recomputes indices it used to hold, and on this kernel that costs far more
+// than the two extra waves return. Occupancy is not what limits the scalar
+// path; see the tile table in conv_tile_select.h, where every narrower tile
+// reaches 10 or 12 waves and loses too.
 template <typename T, int BM, int BN, int BK, int TM, int TN>
 __global__ __launch_bounds__((BM / TM) * (BN / TN)) void
 conv_tiled_kernel(const T *__restrict__ x, const T *__restrict__ w,
@@ -916,7 +955,9 @@ __global__ void conv_direct_kernel(const T *__restrict__ x,
 
 // Cap on the staged contraction. 7x7 is 49 and 11x11 is 121; anything larger
 // keeps the old path rather than growing LDS for a shape no model asks for.
-constexpr int kMaxDepthwiseK = 128;
+// Selection applies the same cap when it decides a shape is depthwise, so the
+// two have to be the same number and this is where it comes from.
+constexpr int kMaxDepthwiseK = static_cast<int>(conv_tile::kMaxDepthwiseK);
 
 template <typename T, int kThreads, int TN>
 __global__ __launch_bounds__(kThreads) void
@@ -986,14 +1027,6 @@ static void launchDepthwise(hipStream_t stream, const void *x, const void *w,
                      static_cast<T *>(y), pr);
 }
 
-// True depthwise: one input channel and one output channel per group. The
-// channel-multiplier case (MPerGroup > 1) still has a real contraction per
-// output row and is left to the ladder.
-static bool isDepthwise(const ConvParams &pr) {
-  return pr.CinPerGroup == 1 && pr.MPerGroup == 1 &&
-         pr.kvol <= kMaxDepthwiseK && pr.group > 1;
-}
-
 template <typename T>
 static void launchDepthwiseForShape(hipStream_t stream, const void *x,
                                     const void *w, const void *bias, void *y,
@@ -1032,22 +1065,29 @@ static int deviceUnitCount() {
 
 constexpr int kBK = 16;
 
-// Which kernel a shape landed on. Only the pick, so that a model run under
-// HIPDNN_EP_DEBUG can be tallied by kernel without re-deriving the ladder.
-static inline void logPick(const char *what, const ConvParams &pr) {
+// Which kernel a shape landed on, so that a model run under HIPDNN_EP_DEBUG
+// can be tallied by kernel without re-deriving the ladder.
+//
+// The tile is part of the name rather than just the kind: two entries share a
+// block shape and differ only in the register tile, and they do not perform
+// alike -- 64x256 is 176 ms over the guard set at a 2x2 wave tile and 200 at
+// 2x4 -- so "wmma 64x256" does not say which kernel ran. A forced tile that
+// silently failed to resolve reads as a correct run otherwise.
+static inline void logPick(const char *what, const ConvParams &pr, int bm = 0,
+                           int bn = 0, int tm = 0, int tn = 0) {
   CUSTOM_KERNELS_DEBUG_LOG(
-      "[custom_kernels] hip_conv pick=%s Cin/g=%lld M/g=%lld out=[%lld,%lld] "
-      "k=[%lld,%lld] s=[%lld,%lld]\n",
-      what, (long long)pr.CinPerGroup, (long long)pr.MPerGroup,
-      (long long)pr.out0, (long long)pr.out1, (long long)pr.k0,
-      (long long)pr.k1, (long long)pr.s0, (long long)pr.s1);
+      "[custom_kernels] hip_conv pick=%s tile=%dx%dx%dx%d Cin/g=%lld "
+      "M/g=%lld out=[%lld,%lld] k=[%lld,%lld] s=[%lld,%lld]\n",
+      what, bm, bn, tm, tn, (long long)pr.CinPerGroup,
+      (long long)pr.MPerGroup, (long long)pr.out0, (long long)pr.out1,
+      (long long)pr.k0, (long long)pr.k1, (long long)pr.s0, (long long)pr.s1);
 }
 
 template <typename T, int BM, int BN, int TM, int TN>
 static void launchTile(hipStream_t stream, const void *x, const void *w,
                        const void *bias, void *y, const ConvParams &base) {
   const ConvParams pr = withTileGrid(base, BM, BN);
-  logPick("tiled", pr);
+  logPick("tiled", pr, BM, BN, TM, TN);
   dim3 grid(swizzledGridX(pr), 1u,
             static_cast<unsigned>(pr.N * pr.group));
   hipLaunchKernelGGL((conv_tiled_kernel<T, BM, BN, kBK, TM, TN>), grid,
@@ -1061,7 +1101,7 @@ static void launchWmma(hipStream_t stream, const void *x, const void *w,
                        const void *bias, void *y, const ConvParams &base) {
   constexpr int threads = (BM / (WM * kWmma)) * (BN / (WN * kWmma)) * 32;
   const ConvParams pr = withTileGrid(base, BM, BN);
-  logPick("wmma", pr);
+  logPick("wmma", pr, BM, BN, WM, WN);
   dim3 grid(swizzledGridX(pr), 1u,
             static_cast<unsigned>(pr.N * pr.group));
   // The vectorised stage needs a whole wave's worth of column groups, so it is
@@ -1086,115 +1126,122 @@ static void launchWmma(hipStream_t stream, const void *x, const void *w,
                      static_cast<__half *>(y), pr);
 }
 
-// Whether a tile shape is worth using: its row block has to be fully live (a
-// block computes its whole tile whether or not the rows exist) and the grid it
-// produces has to cover the device.
-static bool tileCovers(const ConvParams &pr, int64_t bm, int64_t bn,
-                       int64_t units) {
-  const int64_t blocks = ((pr.MPerGroup + bm - 1) / bm) *
-                         ((pr.Nout + bn - 1) / bn) * pr.N * pr.group;
-  return blocks >= units;
-}
+// Which tile to run is decided in conv_tile_select.h, away from HIP, so it can
+// be compiled and tested natively -- see the header for the thresholds, the
+// measurements behind them, and why the previous heuristic got it wrong.
+// Everything below is dispatch: turning the chosen tile back into a template
+// instantiation.
 
-static bool tileFits(const ConvParams &pr, int64_t bm, int64_t bn,
-                     int64_t units) {
-  return pr.MPerGroup >= bm && tileCovers(pr, bm, bn, units);
-}
-
-// fp16 gets first refusal on the matrix cores; everything else, and every fp16
-// shape too small for a WMMA tile, falls through to the scalar ladder.
 template <typename T>
-static bool launchWmmaIfProfitable(hipStream_t, const void *, const void *,
-                                   const void *, void *, const ConvParams &,
-                                   int64_t) {
-  return false;
+static conv_tile::Shape tileShapeOf(const ConvParams &pr) {
+  conv_tile::Shape s;
+  s.MPerGroup = pr.MPerGroup;
+  s.Nout = pr.Nout;
+  s.K = pr.K;
+  s.N = pr.N;
+  s.group = pr.group;
+  s.CinPerGroup = pr.CinPerGroup;
+  s.kvol = pr.kvol;
+  s.elemBytes = static_cast<int32_t>(sizeof(T));
+  s.wmmaEligible = std::is_same<T, __half>::value;
+  return s;
+}
+
+// The tile tables in the header and the instantiations here have to agree.
+// Anything the header can choose must appear below, and a choice that finds no
+// instantiation is a build-time mistake reported at runtime rather than a
+// silently wrong kernel, so it returns false and the caller falls back.
+template <typename T>
+static bool launchChosenWmma(hipStream_t, const void *, const void *,
+                             const void *, void *, const ConvParams &,
+                             const conv_tile::Choice &) {
+  return false; // only fp16 reaches the matrix cores
 }
 
 template <>
-bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
-                                    const void *w, const void *bias, void *y,
-                                    const ConvParams &pr, int64_t units) {
-  // The window-staging kernel gets first refusal on the multi-tap 2-D shapes.
-  // Every tile below re-reads the input once per kernel tap, and on those
-  // shapes that amplification -- not arithmetic, not occupancy -- is what the
-  // runtime is made of, so a tile that removes it wins by more than any tile
-  // that does not can make up. Widest row block first: the window is staged
-  // once per tile row, so fewer rows is less of the cost this kernel exists to
-  // avoid.
-  // The 4x4 wave tile issues 16 WMMAs off 8 fragment loads where 4x2 issues 8
-  // off 6, so it asks much less of LDS per unit of matrix-core work -- but it
-  // doubles the accumulator register count, which costs occupancy, and it
-  // halves the number of blocks.
-  //
-  // Which of those wins is decided by the row count, and measurably so. Below
-  // a few hundred output channels there are few tile rows, so the swizzle group
-  // is shallow and every block re-reads much of the im2col matrix: doubling BN
-  // cuts that in half and the LDS relief is free (whisper80 384/512 gain
-  // 15-20%). With a thousand-odd channels there is no shortage of blocks, the
-  // reduction is long enough that hiding the filter loads is what matters, and
-  // the lost occupancy dominates (whisper_l1 loses 33%).
-  if (pr.MPerGroup <= 512 && tileFits(pr, 128, 256, units)) {
-    launchWmma<128, 256, 4, 4>(stream, x, w, bias, y, pr);
-    return true;
-  }
-  // A taller row tile, for the shapes with many output channels. What this buys
-  // is not arithmetic but traffic: the im2col matrix is re-read once per tile
-  // row, and it is never materialised, so each re-read is a fresh gather out of
-  // the input. Halving the number of tile rows halves the dominant cost of the
-  // kernel -- on whisper_l1 the gather is 51% of the runtime, moving 236 MB for
-  // 21 MB of unique data at close to what the memory system can deliver, so
-  // there is nothing to win by making it faster, only by doing less of it.
-  if (tileFits(pr, 256, 128, units)) {
-    launchWmma<256, 128, 4, 2>(stream, x, w, bias, y, pr);
-    return true;
-  }
-  if (tileFits(pr, 128, 128, units)) {
-    launchWmma<128, 128, 4, 2>(stream, x, w, bias, y, pr);
-    return true;
-  }
-  // 64 rows, for the shapes with too few output channels for a 128-row tile but
-  // enough to waste half of a 32-row one. Two things make this worth its own
-  // rung rather than letting 32x256 take it.
-  //
-  // The im2col matrix is re-gathered once per tile row and is never
-  // materialised, so tile rows are the multiplier on the dominant cost of this
-  // kernel. At 64 output channels, 32x256 needs two rows and this needs one --
-  // half the gather.
-  //
-  // It also issues more matrix-core work per LDS fragment load: a 2x4 wave tile
-  // is 8 WMMAs off 6 fragments where 2x2 is 4 off 4. That ratio is what the
-  // narrow tiles are short of, and it cannot be had at BM=32, where the B-stage
-  // mapping (one column per thread) pins the block at 256 threads and so pins
-  // WM*WN at 4.
-  //
-  // esrgan is the shape that wants it: 69 of its convs are 192->64 at 250x250,
-  // its most expensive by a wide margin, and they sit exactly on this rung.
-  if (tileFits(pr, 64, 256, units)) {
-    launchWmma<64, 256, 2, 4>(stream, x, w, bias, y, pr);
-    return true;
-  }
-  // Narrow row block for the grouped and low-channel-count shapes -- the audio
-  // encoder's second conv has 32 output channels and would throw away three
-  // quarters of a 128-row tile.
-  if (tileFits(pr, 32, 256, units)) {
-    launchWmma<32, 256, 2, 2>(stream, x, w, bias, y, pr);
-    return true;
-  }
-  // Fewer output channels than any tile above has rows. The alternative is
-  // conv_direct -- one thread per output element, decoding the contraction
-  // index on every tap -- and a 16-row tile beats it even when most of those
-  // rows are padding, because wasted matrix-core work is nearly free and the
-  // decode is not. This is the only rung that does not require its rows to be
-  // live; the staging zeroes the missing ones and the store skips them.
-  //
-  // esrgan is what makes it worth having: its output conv is 64->3 at
-  // 1000x1000, and on the direct path that single node costs more than any
-  // other conv in the model.
-  if (tileCovers(pr, 16, 256, units)) {
-    launchWmma<16, 256, 1, 2>(stream, x, w, bias, y, pr);
-    return true;
-  }
+bool launchChosenWmma<__half>(hipStream_t stream, const void *x, const void *w,
+                              const void *bias, void *y, const ConvParams &pr,
+                              const conv_tile::Choice &c) {
+  // Keyed on all four fields, not just the block shape: two entries share
+  // 128x256 and 128x128 and differ only in the wave tile.
+  const auto is = [&](int bm, int bn, int tm, int tn) {
+    return c.bm == bm && c.bn == bn && c.tm == tm && c.tn == tn;
+  };
+  if (is(256, 128, 4, 2)) { launchWmma<256, 128, 4, 2>(stream, x, w, bias, y, pr); return true; }
+  if (is(128, 256, 4, 4)) { launchWmma<128, 256, 4, 4>(stream, x, w, bias, y, pr); return true; }
+  if (is(128, 128, 4, 2)) { launchWmma<128, 128, 4, 2>(stream, x, w, bias, y, pr); return true; }
+  if (is(64, 256, 2, 4))  { launchWmma<64, 256, 2, 4>(stream, x, w, bias, y, pr);  return true; }
+  if (is(32, 256, 2, 2))  { launchWmma<32, 256, 2, 2>(stream, x, w, bias, y, pr);  return true; }
+  if (is(16, 256, 1, 2))  { launchWmma<16, 256, 1, 2>(stream, x, w, bias, y, pr);  return true; }
+  if (is(128, 256, 2, 4)) { launchWmma<128, 256, 2, 4>(stream, x, w, bias, y, pr); return true; }
+  if (is(128, 128, 2, 2)) { launchWmma<128, 128, 2, 2>(stream, x, w, bias, y, pr); return true; }
+  if (is(64, 256, 2, 2))  { launchWmma<64, 256, 2, 2>(stream, x, w, bias, y, pr);  return true; }
   return false;
+}
+
+template <typename T>
+static bool launchChosenTile(hipStream_t stream, const void *x, const void *w,
+                             const void *bias, void *y, const ConvParams &pr,
+                             const conv_tile::Choice &c) {
+  const auto is = [&](int bm, int bn) { return c.bm == bm && c.bn == bn; };
+  if (is(128, 128)) { launchTile<T, 128, 128, 8, 8>(stream, x, w, bias, y, pr); return true; }
+  if (is(64, 128))  { launchTile<T, 64, 128, 4, 8>(stream, x, w, bias, y, pr);  return true; }
+  if (is(128, 64))  { launchTile<T, 128, 64, 8, 4>(stream, x, w, bias, y, pr);  return true; }
+  if (is(64, 64))   { launchTile<T, 64, 64, 4, 4>(stream, x, w, bias, y, pr);   return true; }
+  if (is(32, 128))  { launchTile<T, 32, 128, 2, 8>(stream, x, w, bias, y, pr);  return true; }
+  if (is(64, 32))   { launchTile<T, 64, 32, 4, 2>(stream, x, w, bias, y, pr);   return true; }
+  if (is(32, 64))   { launchTile<T, 32, 64, 2, 4>(stream, x, w, bias, y, pr);   return true; }
+  if (is(32, 32))   { launchTile<T, 32, 32, 2, 2>(stream, x, w, bias, y, pr);   return true; }
+  return false;
+}
+
+// Force one tile for every convolution, ignoring the selection thresholds:
+//
+//   HIPDNN_EP_CONV_TILE=128x256     a tile from either table
+//   HIPDNN_EP_CONV_TILE=direct      the no-reuse fallback
+//
+// This is where the thresholds in conv_tile_select.h come from. They are
+// measured crossovers, not derived ones, and measuring a crossover means
+// running both sides of it on the shapes that matter -- which needs a way to
+// run the tile selection did *not* pick. Sweeping every tile over every
+// distinct shape in the model zoo takes a few seconds through
+// tools/perf-harness/bench/conv_microbench.py tile-sweep and produces the
+// table those thresholds are answerable to.
+//
+// Not a tuning knob: a forced tile is wrong for most shapes, and a shape whose
+// row block exceeds its output channel count will still compute correctly
+// while wasting most of the device.
+struct TileOverride {
+  bool direct = false;
+  int bm = 0, bn = 0;
+  // 0 means "the table's first register tile for this block shape".
+  int tm = 0, tn = 0;
+};
+
+static const TileOverride *tileOverride() {
+  static TileOverride o{};
+  static const bool present = [] {
+    const char *v = std::getenv("HIPDNN_EP_CONV_TILE");
+    if (!v || !*v) return false;
+    if (std::strcmp(v, "direct") == 0) {
+      o.direct = true;
+      return true;
+    }
+    // Resolved per shape rather than here, because 128x128 names a tile in
+    // both tables and only the dtype says which one is meant. The four-field
+    // form picks between entries sharing a block shape at different register
+    // tiles; the two-field form takes whichever the table lists first.
+    if (std::sscanf(v, "%dx%dx%dx%d", &o.bm, &o.bn, &o.tm, &o.tn) == 4)
+      return true;
+    o.tm = o.tn = 0;
+    if (std::sscanf(v, "%dx%d", &o.bm, &o.bn) != 2) {
+      fprintf(stderr, "[custom_kernels] HIPDNN_EP_CONV_TILE=%s not understood; "
+                      "expected <rows>x<cols>[x<tm>x<tn>] or 'direct'\n", v);
+      return false;
+    }
+    return true;
+  }();
+  return present ? &o : nullptr;
 }
 
 template <typename T>
@@ -1203,12 +1250,28 @@ static int launch(hipStream_t stream, const void *x, const void *w,
   const int64_t totalOut = pr.N * pr.Cout * pr.Nout;
   if (totalOut <= 0 || pr.K <= 0) return 0;
 
-  const int64_t units = deviceUnitCount();
+  const conv_tile::Shape shape = tileShapeOf<T>(pr);
+  conv_tile::Choice choice = conv_tile::select(shape, deviceUnitCount());
+  if (const TileOverride *forced = tileOverride()) {
+    // Depthwise keeps its own kernel: it is not a tile, and forcing one would
+    // measure a shape the calibration is not about. A tile the dtype's table
+    // does not contain is left alone rather than silently demoted to
+    // conv_direct, which would report a 20x slowdown as though it were the
+    // tile's.
+    if (choice.kind != conv_tile::Kind::Depthwise) {
+      if (forced->direct)
+        choice = conv_tile::Choice{conv_tile::Kind::Direct, 0, 0, 0, 0};
+      else
+        conv_tile::resolve(shape, forced->bm, forced->bn, forced->tm,
+                           forced->tn, choice);
+    }
+  }
 
-  // Depthwise first: M == 1 per group clears no tile in the ladder, and the
-  // contraction is shared by the whole block, which neither tiled kernel can
-  // exploit and conv_direct pays for on every tap.
-  if (isDepthwise(pr)) {
+  // Depthwise is decided before any tile is considered: M == 1 per group
+  // leaves a tile nothing to reuse, and the contraction is shared by the whole
+  // block, which neither tiled kernel can exploit and conv_direct pays for on
+  // every tap.
+  if (choice.kind == conv_tile::Kind::Depthwise) {
     logPick("depthwise", pr);
     launchDepthwiseForShape<T>(stream, x, w, bias, y, pr);
     hipError_t derr = hipGetLastError();
@@ -1219,56 +1282,28 @@ static int launch(hipStream_t stream, const void *x, const void *w,
     return static_cast<int>(derr);
   }
 
-  // Two passes over the ladder. The first asks a tile shape to cover the
-  // device; the second takes the widest tile whose rows are live and accepts
-  // whatever grid that gives.
-  //
-  // The second pass exists because coverage is the wrong thing to insist on
-  // when the problem is small. A shape with few output channels over a small
-  // feature map produces few blocks under every tile, so a single-pass ladder
-  // rejects all of them and lands on conv_direct -- and conv_direct is not a
-  // small-problem kernel, it is a no-reuse one: a thread per output element,
-  // re-decoding the contraction index and re-reading the input on every tap.
-  // The ssd detection heads are the case that shows the difference. A 1024
-  // -channel 10x10 feature map into 126 channels gathers 227 MB on the direct
-  // path against roughly 12 MB tiled, and measures 2.95 ms against MIOpen's
-  // 0.24. Half an idle device running a kernel with reuse beats a full one
-  // running a kernel without it.
-  for (int pass = 0; pass < 2; ++pass) {
-    const int64_t need = pass == 0 ? units : 1;
-    if (launchWmmaIfProfitable<T>(stream, x, w, bias, y, pr, need)) {
-      hipError_t err = hipGetLastError();
-      if (err != hipSuccess)
-        fprintf(stderr, "[custom_kernels] hip_conv launch failed: %s\n",
-                hipGetErrorString(err));
-      return static_cast<int>(err);
-    }
-    // Widest scalar tile that fits, then narrower ones. A wider tile does more
-    // FMAs per LDS read -- 8x8 does 64 per 16, where 4x4 does 16 per 8 -- so
-    // the widest one that fits the problem is the fastest.
-    if (tileFits(pr, 128, 128, need)) {
-      launchTile<T, 128, 128, 8, 8>(stream, x, w, bias, y, pr);
-      break;
-    }
-    if (tileFits(pr, 64, 64, need)) {
-      launchTile<T, 64, 64, 4, 4>(stream, x, w, bias, y, pr);
-      break;
-    }
-    if (pr.MPerGroup >= 24 && tileFits(pr, 32, 128, need)) {
-      launchTile<T, 32, 128, 2, 8>(stream, x, w, bias, y, pr);
-      break;
-    }
-    if (pass == 1) {
-      logPick("direct", pr);
-      const int block = 256;
-      const int64_t grid = (totalOut + block - 1) / block;
-      hipLaunchKernelGGL(conv_direct_kernel<T>,
-                         dim3(static_cast<unsigned>(grid)), dim3(block), 0,
-                         stream, static_cast<const T *>(x),
-                         static_cast<const T *>(w),
-                         static_cast<const T *>(bias), static_cast<T *>(y), pr,
-                         totalOut);
-    }
+  bool launched = false;
+  if (choice.kind == conv_tile::Kind::Wmma)
+    launched = launchChosenWmma<T>(stream, x, w, bias, y, pr, choice);
+  else if (choice.kind == conv_tile::Kind::Tiled)
+    launched = launchChosenTile<T>(stream, x, w, bias, y, pr, choice);
+
+  if (!launched) {
+    // conv_direct: a thread per output element, re-decoding the contraction
+    // index and re-reading the input on every tap. Selection reaches for it
+    // only when a shape is too narrow for even the smallest tile, because it
+    // has no reuse at all -- the ssd detection heads showed a 1024-channel
+    // 10x10 map into 126 channels gathering 227 MB here against roughly 12 MB
+    // tiled, 2.95 ms against MIOpen's 0.24. Half an idle device running a
+    // kernel with reuse beats a full one running a kernel without it.
+    logPick("direct", pr);
+    const int block = 256;
+    const int64_t grid = (totalOut + block - 1) / block;
+    hipLaunchKernelGGL(conv_direct_kernel<T>, dim3(static_cast<unsigned>(grid)),
+                       dim3(block), 0, stream, static_cast<const T *>(x),
+                       static_cast<const T *>(w),
+                       static_cast<const T *>(bias), static_cast<T *>(y), pr,
+                       totalOut);
   }
 
   hipError_t err = hipGetLastError();

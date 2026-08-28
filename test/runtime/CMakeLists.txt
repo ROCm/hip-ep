@@ -60,3 +60,18 @@ target_link_libraries(test-gqa-autotune PRIVATE HipSchemasLib)
 
 add_test(NAME GqaAutotuneUnitTest COMMAND test-gqa-autotune)
 set_target_properties(test-gqa-autotune PROPERTIES FOLDER "runtime-tests")
+
+# Convolution tile selection. The heuristic is a pure function of a shape and a
+# CU count, so the header carries no HIP -- it is included by conv_kernel.hip
+# but compiles as plain C++17 here, which is why it was split out of the .hip
+# file in the first place. The invariant it guards is monotonicity in the CU
+# count, and that is precisely the property no GPU can check on one part.
+add_executable(test-conv-tile-select test_conv_tile_select.cpp)
+
+target_compile_features(test-conv-tile-select PRIVATE cxx_std_17)
+target_include_directories(test-conv-tile-select PRIVATE
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip
+)
+
+add_test(NAME ConvTileSelectUnitTest COMMAND test-conv-tile-select)
+set_target_properties(test-conv-tile-select PROPERTIES FOLDER "runtime-tests")
