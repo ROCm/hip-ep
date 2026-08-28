@@ -36,6 +36,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | CastLike | Simplified to Cast |
 | Ceil | Custom HIP kernel |
 | Round | Custom HIP kernel |
+| Floor | Custom HIP kernel |
 | Neg | Custom HIP kernel |
 | Equal | Custom HIP kernel |
 | Not | Custom HIP kernel |
