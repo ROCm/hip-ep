@@ -52,7 +52,7 @@ rg '\bwrap_<xxx>\b|\bhip_<xxx>\b' lib/Runtime/real/
 Apply ROCm family routing from [reference.md](reference.md):
 
 1. Identify family (matmul / conv / activation / elementwise / reduction / data-movement / control-flow / norm-composite) based on ONNX schema semantics.
-2. Map to recommended path: `MIOpen` / `hipBLASLt` / extension of existing wrapper / `Custom Hip Kernel`.
+2. Map to recommended path: `hipBLASLt` / extension of an existing wrapper / new `Custom Hip Kernel`.
 3. Cite the closest existing wrapper if any (machine matrix in [scripts/unsupported_reco_rules.json](scripts/unsupported_reco_rules.json)).
 4. Output: `<Op>` -> recommended path -> closest wrapper -> one-line rationale.
 
@@ -97,7 +97,7 @@ Playbook:
 2. Find construction site in that struct: `mlir::OperationState state(loc, "hip.layer_norm")`.
    `rg 'def Hip_LayerNormOp\b' include/hip/Dialect/IR/HipOps.td` -> hit at line 575.
 3. `rg 'wrap_layer_normalization' lib/Runtime/real/` -> hit in [lib/Runtime/real/layer_normalization.cpp](lib/Runtime/real/layer_normalization.cpp) at `int wrap_layer_normalization(...)`.
-4. Conclusion: **tool-FP, promote to `supported`**. Recommended ROCm impl = `MIOpen (wrap_layer_normalization)`.
+4. Conclusion: **tool-FP, promote to `supported`**. Recommended ROCm impl = `Custom Hip Kernel (wrap_layer_normalization)`.
 5. Recorded FP class "Substring-shadowed struct scope" in the table above; fixed in `_scope_to_rewrite_pattern_body`.
 
 After the fix, re-running the pipeline on BLIP fp16 decoder returned `720 / 720 (100.0%)` supported, matching ground truth.

@@ -104,19 +104,19 @@ Machine-readable form: [scripts/unsupported_reco_rules.json](scripts/unsupported
 | # | Family | Preferred path | Fallback |
 |---|---|---|---|
 | 1 | Matrix multiplication (`matmul`, `gemm`, batched dense linear) | `hipBLASLt` — extend `wrap_hipblasLtMatmul` | `Custom Hip Kernel` |
-| 2 | Convolution (`conv`, depthwise / pointwise variants) | `MIOpen` — extend convolution wrapper | `Custom Hip Kernel` |
-| 3 | Activation (`relu`, `sigmoid`, `tanh`, `softplus`, similar unary) | `MIOpen` activation wrapper extension | `Custom Hip Kernel` |
-| 4 | Elementwise arith / cmp / logical | `MIOpen` op-tensor path when representable by `wrap_elementwise` | `Custom Hip Kernel` |
+| 2 | Convolution (`conv`, depthwise / pointwise variants) | extend `wrap_conv` / `wrap_conv_transpose` (in-tree `hip_conv` kernels) | new `Custom Hip Kernel` |
+| 3 | Activation (`relu`, `sigmoid`, `tanh`, `softplus`, similar unary) | extend the in-tree activation kernels (`wrap_gelu` / `wrap_softplus` / `wrap_leaky_relu` family) | new `Custom Hip Kernel` |
+| 4 | Elementwise arith / cmp / logical | `wrap_elementwise` when the op is representable as add / mul / min / max | new `Custom Hip Kernel` |
 | 5 | Reduction (`reduce_*`, cumulative reductions) | extend existing reduction runtime path (`wrap_reduce_sum` family) | `Custom Hip Kernel` |
 | 6 | Indexing / data movement (`gather / scatter / slice / split / tile / pad / concat / expand`) | reuse / extend existing custom data-movement kernels | `Custom Hip Kernel` |
 | 7 | Control flow / stateful (`loop / if / scan`) | graph-level lowering / runtime orchestration | `Custom Hip Kernel` (unless compile-time eliminable) |
-| 8 | Normalization / composite blocks | decompose into supported primitives if possible, else extend `wrap_miopen*LayerNorm*` family | `Custom Hip Kernel` |
+| 8 | Normalization / composite blocks | decompose into supported primitives if possible, else extend the `wrap_layer_normalization` / `wrap_rms_norm` family | new `Custom Hip Kernel` |
 
 ### Known runtime capabilities (capability inventory examples)
 
-- `wrap_elementwise` — elementwise add / mul / min / max
-- `wrap_miopenActivationForward` — activation-family elementwise ops
-- `miopenActivationPOWER` — can express `Reciprocal` / `Sqrt` by parameterization
+- `wrap_elementwise` — elementwise add / mul / min / max, with per-axis broadcast
+- `wrap_gelu` / `wrap_softplus` / `wrap_leaky_relu` — activation-family elementwise ops
+- `wrap_power` — `Reciprocal` and `Sqrt` only; any other exponent is rejected
 - `wrap_conv` — forward convolution family (in-tree `hip_conv` kernel)
 - `wrap_conv_transpose` — ConvTranspose
 - `wrap_hipblasLtMatmul` — matmul family

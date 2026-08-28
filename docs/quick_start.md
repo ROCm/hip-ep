@@ -332,7 +332,7 @@ pip install \
 > it ships its own native files (EP plugin `hipgpu.dll`, which carries the
 > JIT compiler, plus the custom kernels) straight into `onnxruntime/capi/`
 > next to `onnxruntime.dll`. The ROCm
-> runtime DLLs (amdhip64/MIOpen/hipBLASLt) come from the `rocm[devel]` wheel
+> runtime DLLs (amdhip64/hipBLASLt) come from the `rocm[devel]` wheel
 > (expanded next). The wheel does NOT bundle the AMD GPU umbrella
 > (`amdgpu-ep.dll` + `hip-backend.dll`); driving OGA through the umbrella needs
 > those supplied separately (CI injects them via `HIP_WHEEL_EXTRA_DLLS`).
