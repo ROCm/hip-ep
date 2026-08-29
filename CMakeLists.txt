@@ -28,16 +28,45 @@ project(
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
-if(MSVC)
-  if(NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
-    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-  elseif(CMAKE_MSVC_RUNTIME_LIBRARY MATCHES "DLL")
-    message(FATAL_ERROR
-      "CMAKE_MSVC_RUNTIME_LIBRARY=${CMAKE_MSVC_RUNTIME_LIBRARY} selects the dynamic "
-      "MSVC runtime; released binaries must link it statically.")
+if(WIN32)
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "Clang" )
+    add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-fms-extensions;-fms-compatibility;-fdelayed-template-parsing>")
   endif()
-  add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/guard:cf>)
+
+  option(USE_BINSKIM_COMPLIANT_COMPILE_FLAGS "Prepare HIP EP for BinSkim Binary Analyzer" ON)
+  option(USE_SPECTRE_MITIGATED_LIBRARIES "Use Spectre-mitigated libraries" OFF)
+
+  if(MSVC AND MSVC_VERSION GREATER_EQUAL 1900)
+    if(USE_BINSKIM_COMPLIANT_COMPILE_FLAGS)
+      message(STATUS "Control Flow Guard enabled")
+      add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/guard:cf>)
+      add_link_options(/guard:cf /DYNAMICBASE)
+    endif()
+    if(USE_SPECTRE_MITIGATED_LIBRARIES)
+      message(STATUS "Using Spectre-mitigated libraries")
+      add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/Qspectre>)
+    endif()
+  elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    if(USE_BINSKIM_COMPLIANT_COMPILE_FLAGS)
+      message(STATUS "Control Flow Guard enabled (Clang)")
+      add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:SHELL:-Xclang -cfguard>")
+      add_link_options(-Wl,-guard:cf)
+    endif()
+    if(USE_SPECTRE_MITIGATED_LIBRARIES)
+      message(WARNING "Spectre mitigated libraries are not yet available for Clang in this project.")
+    endif()
+  endif()
+
+  option(USE_MSVC_STATIC_RUNTIME "Link MSVC runtime library statically" ON)
+
+  if(NOT USE_MSVC_STATIC_RUNTIME)
+    set(MSVC_RUNTIME_SUFFIX "DLL")
+  endif()
+  if(NOT CMAKE_MSVC_RUNTIME_LIBRARY)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>${MSVC_RUNTIME_SUFFIX}")
+  endif()
 endif()
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/VersionInfo.cmake)
