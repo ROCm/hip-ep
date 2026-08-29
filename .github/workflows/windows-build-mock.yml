@@ -5,43 +5,34 @@
 name: Windows Build (Mock)
 
 on:
-  workflow_dispatch:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-  merge_group:
-  push:
-    branches: [main, "release/**", "gpuep/releases/**"]
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  workflow_call:
+    inputs:
+      llvm_cache_key:
+        description: Cache key of the prebuilt LLVM/MLIR/LLD install prefix.
+        required: true
+        type: string
+      ort_cache_key:
+        description: Cache key of the prebuilt ONNX Runtime install prefix.
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
-  build-windows-mock:
+  build:
     # Pin to VS 2022: windows-latest now serves the VS 2026 image
     # (actions/runner-images#14017), which the pinned LLVM/ORT deps were
     # not validated against.
     runs-on: windows-2022
+    concurrency:
+      group: build-windows-mock-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
     env:
-      # Dependency pins — kept in lockstep with windows-build.yml so the
-      # source-built ort/llvm/protobuf/flatbuffers/gtest caches are SHARED
-      # across both workflows. The build recipes below are byte-identical to
-      # windows-build.yml's, so identical cache keys resolve to identical
-      # artifacts and each dep's expensive cold build runs once globally.
-      LLVM_TAG: llvmorg-22.1.0
-      ONNXRUNTIME_VERSION: "1.27.0"
-      # Must match windows-build.yml verbatim: it is part of the shared
-      # ort-install cache key and drives the same patch set.
-      ONNXRUNTIME_PR_PATCHES: ""
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
     steps:
-      # MorphiZen is vendored in-tree as a git subtree under morphizen,
-      # so no deploy key or submodule initialization is needed.
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -49,27 +40,19 @@ jobs:
           fetch-depth: 0
           show-progress: false
 
-      # -----------------------------------------------------------------------
-      # Per-dependency caches. Keys are identical to windows-build.yml so the
-      # source-built deps are shared across both workflows (no separate cold
-      # build for the mock job once either workflow has populated a key).
-      # -----------------------------------------------------------------------
-      - name: Cache ort-install
-        id: cache-ort
-        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
-        with:
-          path: ${{ runner.workspace }}/ort-install
-          key: dep-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}
-
-      - name: Cache llvm-install
-        id: cache-llvm
-        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+      - name: Restore llvm-install
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
-          key: dep-llvm-${{ env.LLVM_TAG }}
+          key: ${{ inputs.llvm_cache_key }}
+          fail-on-cache-miss: true
 
-      # protobuf / flatbuffers / gtest: resolved by cmake/deps.cmake during the
-      # build (from-source FetchContent fallback), not pre-built or cached here.
+      - name: Restore ort-install
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/ort-install
+          key: ${{ inputs.ort_cache_key }}
+          fail-on-cache-miss: true
 
       # -----------------------------------------------------------------------
       # llvm-lit.py requires the lit pip package at runtime. Pin Python to
@@ -104,141 +87,7 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
-      # -----------------------------------------------------------------------
-      # Build LLVM/MLIR/LLD from source into llvm-install (clang;mlir;lld, X86,
-      # /MT). Identical recipe to windows-build.yml (shared cache).
-      # -----------------------------------------------------------------------
-      - name: Build LLVM/MLIR/LLD from source
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          SRC="${{ runner.workspace }}/llvm-project"
-          git init "$SRC"
-          git -C "$SRC" remote add origin https://github.com/llvm/llvm-project.git
-          git -C "$SRC" fetch --depth 1 origin "${{ env.LLVM_TAG }}"
-          git -C "$SRC" checkout FETCH_HEAD
-          cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
-            -DLLVM_TARGETS_TO_BUILD=X86 \
-            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
-            -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/llvm-install" \
-            -DLLVM_ENABLE_RTTI=ON \
-            -DLLVM_ENABLE_ZLIB=OFF \
-            -DLLVM_ENABLE_ZSTD=OFF \
-            -DLLVM_INCLUDE_TESTS=OFF \
-            -DLLVM_INCLUDE_EXAMPLES=OFF \
-            -DLLVM_INCLUDE_BENCHMARKS=OFF \
-            -DLLVM_BUILD_TOOLS=ON \
-            -DLLVM_INSTALL_UTILS=ON \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-          cmake --build "${{ runner.workspace }}/build-llvm" --target install
-
-      # -----------------------------------------------------------------------
-      # Build ONNX Runtime from source into ort-install. Recipe is byte-for-
-      # byte identical to windows-build.yml (incl. --use_dml --build_wheel) so
-      # the shared ort-install cache is consistent regardless of which workflow
-      # populates it first. Skipped on cache hit.
-      # -----------------------------------------------------------------------
-      - name: Checkout ONNX Runtime v${{ env.ONNXRUNTIME_VERSION }}
-        if: steps.cache-ort.outputs.cache-hit != 'true'
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          repository: Microsoft/onnxruntime
-          ref: v${{ env.ONNXRUNTIME_VERSION }}
-          path: source-onnxruntime
-          submodules: true
-          fetch-depth: 1
-          show-progress: false
-
-      - name: Apply ONNX Runtime PR patches
-        if: steps.cache-ort.outputs.cache-hit != 'true'
-        shell: pwsh
-        working-directory: ${{ github.workspace }}\source-onnxruntime
-        env:
-          ORT_PRS: ${{ env.ONNXRUNTIME_PR_PATCHES }}
-        run: |
-          $prs = $env:ORT_PRS.Trim()
-          if (-not $prs) {
-            Write-Host "ONNXRUNTIME_PR_PATCHES is empty; nothing to apply"
-            exit 0
-          }
-          foreach ($pr in $prs -split '\s+') {
-            if (-not $pr) { continue }
-            $url = "https://github.com/microsoft/onnxruntime/pull/$pr.patch"
-            $tmp = Join-Path $env:RUNNER_TEMP "ort-pr-$pr.patch"
-            Write-Host "Fetching $url"
-            Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
-            Write-Host "Applying PR #$pr"
-            git apply --whitespace=nowarn $tmp
-            if ($LASTEXITCODE -ne 0) {
-              throw "PR #$pr failed to apply (exit $LASTEXITCODE)"
-            }
-          }
-
-      - name: Build ONNX Runtime
-        if: steps.cache-ort.outputs.cache-hit != 'true'
-        shell: cmd
-        run: |
-          cd /d "${{ github.workspace }}\source-onnxruntime"
-          call build.bat ^
-            --config Release ^
-            --build_shared_lib ^
-            --parallel ^
-            --compile_no_warning_as_error ^
-            --skip_submodule_sync ^
-            --build_dir "${{ runner.workspace }}\build-onnxruntime" ^
-            --skip_tests ^
-            --disable_memleak_checker ^
-            --use_dml ^
-            --cmake_generator Ninja ^
-            --build_wheel
-
-      - name: Install ORT into ort-install
-        if: steps.cache-ort.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          cmake --install "${{ runner.workspace }}/build-onnxruntime/Release" \
-            --prefix "${{ runner.workspace }}/ort-install"
-          PERF_TEST=$(find "${{ runner.workspace }}/build-onnxruntime" \
-            -name "onnxruntime_perf_test.exe" -type f | head -1)
-          if [ -z "$PERF_TEST" ]; then
-            echo "ERROR: onnxruntime_perf_test.exe not found in build tree"
-            exit 1
-          fi
-          cp "$PERF_TEST" "${{ runner.workspace }}/ort-install/bin/"
-          DML_DLL=$(find "${{ runner.workspace }}/build-onnxruntime" \
-            -path "*/x64-win/DirectML.dll" -type f | head -1)
-          if [ -z "$DML_DLL" ]; then
-            echo "ERROR: DirectML.dll not found in build tree"
-            exit 1
-          fi
-          cp "$DML_DLL" "${{ runner.workspace }}/ort-install/bin/"
-          ORT_WHEEL=$(find "${{ runner.workspace }}/build-onnxruntime" \
-            -name "onnxruntime_directml-*.whl" -type f | head -1)
-          if [ -z "$ORT_WHEEL" ]; then
-            echo "ERROR: onnxruntime_directml wheel not found in build tree"
-            exit 1
-          fi
-          mkdir -p "${{ runner.workspace }}/ort-install/wheels"
-          cp "$ORT_WHEEL" "${{ runner.workspace }}/ort-install/wheels/"
-          echo "Cached ORT wheel: $(basename "$ORT_WHEEL")"
-
-      # -----------------------------------------------------------------------
-      # protobuf, flatbuffers and gtest are resolved by cmake/deps.cmake during
-      # Configure/Build (from-source FetchContent fallback), not pre-built here.
-      # -----------------------------------------------------------------------
-
-      # -----------------------------------------------------------------------
-      # Build (mock) via the cross-platform build.py. --mock sets
-      # BUILD_MOCK_RUNTIME=ON (no ROCm/TheRock); ORT + LLVM come from the cached
-      # prefixes and cmake/deps.cmake source-builds the rest. build.py runs the
-      # GPU-free test suites (LIT + the plugin-registrar and output-allocator
-      # unit tests) after install. No compiler plugin is selected here, so the
-      # LIT pipeline stays plugin-free (see the isolated step below for why).
-      # -----------------------------------------------------------------------
-      - name: Build onnx-hipdnn-ep (mock)
+      - name: Build hip-ep (mock)
         shell: bash
         run: |
           python build.py \
