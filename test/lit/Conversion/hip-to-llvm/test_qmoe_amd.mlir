@@ -83,8 +83,7 @@ module {
   //   use_correction_bias, routed_scaling_factor, activation_type,
   //   routing_type, elem_size
   //
-  // activation_type / routing_type are the trailing i64 pair before elem_size
-  // (0 = relu2 / 0 = sigmoid). ONNX-to-HIP declines any other mode, so only
-  // these two values reach this lowering -- see
-  // test/lit/Conversion/onnx-to-hip/test_qmoe_amd_unsupported_mode.mlir.
+  // activation_type / routing_type are the trailing i64 pair before elem_size,
+  // mapped from the mode strings (relu2 -> 0 / sigmoid -> 0). The same mapping
+  // rejects any other mode.
 }

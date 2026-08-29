@@ -84,8 +84,8 @@ int wrap_qmoe_amd(
     return -1;
   }
 
-  // Both compiler stages already decline an unimplemented mode, so these are a
-  // backstop against a caller that bypassed them rather than the primary gate.
+  // The compiler constrains both modes before emitting this call, so these are
+  // a backstop against a caller that bypassed it rather than the primary gate.
   if (activation_type != HIPDNN_EP_QMOE_AMD_ACTIVATION_RELU2) {
     fprintf(stderr,
             "wrap_qmoe_amd: unsupported activation_type=%lld (only relu2 is "

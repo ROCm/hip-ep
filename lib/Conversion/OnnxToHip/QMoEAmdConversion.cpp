@@ -101,28 +101,15 @@ QMoEAmdToHip::matchAndRewrite(mlir::Operation *op,
   auto routedScalingFactorAttr =
       scalingFloatAttr ? scalingFloatAttr : rewriter.getF32FloatAttr(1.0f);
 
-  // Only relu2 / sigmoid are implemented end to end. Declining the match here
-  // is what keeps the node on CPU: the EP determines its supported set from
-  // what compilation produced, so a mode rejected at this point costs a
-  // fallback for the partition, whereas one rejected only at runtime would
-  // fail every inference call instead.
   auto activationTypeStrAttr =
       op->getAttrOfType<mlir::StringAttr>("activation_type");
   auto activationTypeAttr = activationTypeStrAttr
                                 ? activationTypeStrAttr
                                 : rewriter.getStringAttr("relu2");
-  if (activationTypeAttr.getValue() != "relu2") {
-    return rewriter.notifyMatchFailure(
-        op, "QMoE (com.amd): only activation_type 'relu2' is supported");
-  }
 
   auto routingTypeStrAttr = op->getAttrOfType<mlir::StringAttr>("routing_type");
   auto routingTypeAttr = routingTypeStrAttr ? routingTypeStrAttr
                                             : rewriter.getStringAttr("sigmoid");
-  if (routingTypeAttr.getValue() != "sigmoid") {
-    return rewriter.notifyMatchFailure(
-        op, "QMoE (com.amd): only routing_type 'sigmoid' is supported");
-  }
 
   // The custom-op schema deliberately implements no InferOutputShape, so
   // ORT's Resolve() always leaves QMoE's result type UNRANKED:

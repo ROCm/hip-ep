@@ -109,17 +109,24 @@ struct QMoEAmdOpLowering : public ConvertOpToLLVMPattern<QMoEAmdOp> {
     Value sharedInterSizeVal = getMemRefDimSize(
         sharedFc1WeightsType, 0, adaptor.getSharedFc1Weights(), rewriter, loc);
 
-    // ONNX-to-HIP declines modes the runtime does not implement, so the op can
-    // only carry an unsupported one if it came from somewhere else (a
-    // hand-written .mlir). Decline rather than fall through to relu2 / sigmoid,
-    // which would compute the wrong function for a graph that asked for
-    // something else.
-    if (op.getActivationType() != "relu2")
-      return rewriter.notifyMatchFailure(
-          op, "com.amd QMoE: only activation_type 'relu2' is implemented");
-    if (op.getRoutingType() != "sigmoid")
-      return rewriter.notifyMatchFailure(
-          op, "com.amd QMoE: only routing_type 'sigmoid' is implemented");
+    // relu2 and sigmoid are the only modes implemented behind wrap_qmoe_amd.
+    // Selecting the runtime identifier and rejecting every other mode happen
+    // here together on purpose: extending the mapping is then the only way to
+    // widen support, so a newly allowed mode cannot end up being computed as
+    // relu2 / sigmoid.
+    int64_t activationTypeEnum;
+    if (op.getActivationType() == "relu2")
+      activationTypeEnum = kQMoEAmdActivationRelu2;
+    else
+      return op.emitOpError("unsupported activation_type '")
+             << op.getActivationType() << "'";
+
+    int64_t routingTypeEnum;
+    if (op.getRoutingType() == "sigmoid")
+      routingTypeEnum = kQMoEAmdRoutingSigmoid;
+    else
+      return op.emitOpError("unsupported routing_type '")
+             << op.getRoutingType() << "'";
 
     Value kVal = createI64Const(op.getK());
     Value expertWeightBitsVal = createI64Const(op.getExpertWeightBits());
@@ -128,8 +135,8 @@ struct QMoEAmdOpLowering : public ConvertOpToLLVMPattern<QMoEAmdOp> {
     Value useCorrectionBiasVal = createI64Const(op.getUseCorrectionBias());
     Value routedScalingFactorVal =
         createF32Const(op.getRoutedScalingFactor().convertToFloat());
-    Value activationTypeVal = createI64Const(kQMoEAmdActivationRelu2);
-    Value routingTypeVal = createI64Const(kQMoEAmdRoutingSigmoid);
+    Value activationTypeVal = createI64Const(activationTypeEnum);
+    Value routingTypeVal = createI64Const(routingTypeEnum);
     Value elemSizeVal = createI64Const(elemSize);
 
     SmallVector<Type, 32> paramTypes = {
