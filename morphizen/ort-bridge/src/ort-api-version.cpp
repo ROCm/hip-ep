@@ -2,7 +2,7 @@
  * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#include "morphizen/ort-api-version.hpp"
+#include "./ort-api-version.hpp"
 
 #include <atomic>
 #include <onnxruntime_c_api.h>

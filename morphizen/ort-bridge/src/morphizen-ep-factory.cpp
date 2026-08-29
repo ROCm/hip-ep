@@ -6,10 +6,10 @@
 
 #include "./morphizen-ep-factory.hpp"
 #include "./morphizen-ep.hpp"
+#include "./ort-api-version.hpp"
 #include "morphizen-utils/morphizen-utils.hpp"
 #include "morphizen-utils/morphizen_plugin.hpp"
 #include "morphizen/onnxruntime_morphizen_ep.hpp"
-#include "morphizen/ort-api-version.hpp"
 #include <glog/logging.h>
 #include <google/protobuf/message_lite.h>
 #include <google/protobuf/util/json_util.h>

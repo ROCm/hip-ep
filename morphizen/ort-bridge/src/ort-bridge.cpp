@@ -3,9 +3,9 @@
  * Licensed under the MIT License.
  */
 #include "./morphizen-ep-factory.hpp"
+#include "./ort-api-version.hpp"
 #include "morphizen-utils/morphizen-utils.hpp"
 #include "morphizen/onnxruntime_api.hpp"
-#include "morphizen/ort-api-version.hpp"
 #include <glog/logging.h>
 #include <iostream>
 #include <string>

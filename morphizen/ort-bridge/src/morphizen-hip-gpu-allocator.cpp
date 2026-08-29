@@ -10,7 +10,7 @@
 
 #include "./morphizen-hip-gpu-allocator.hpp"
 
-#include "morphizen/ort-api-version.hpp"
+#include "./ort-api-version.hpp"
 #include <glog/logging.h>
 #include <hip/hip_runtime.h>
 
