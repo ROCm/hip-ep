@@ -5,8 +5,10 @@
 #include "./morphizen-ep-factory.hpp"
 #include "morphizen-utils/morphizen-utils.hpp"
 #include "morphizen/onnxruntime_api.hpp"
+#include "morphizen/ort-api-version.hpp"
 #include <glog/logging.h>
 #include <iostream>
+#include <string>
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_ORT_EP_API, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_ORT_EP_API) >= n)
 
@@ -17,11 +19,27 @@ OrtStatus *CreateEpFactories(const char *registration_name,
                              const OrtLogger *default_logger,
                              OrtEpFactory **factories, size_t max_factories,
                              size_t *num_factories) {
-  const OrtApi *ort_api = ort_api_base->GetApi(ORT_API_VERSION);
+  const OrtApi *ort_api =
+      morphizen::NegotiateOrtApi(*ort_api_base, morphizen::kMinOrtApiVersion);
+  if (ort_api == nullptr) {
+    const std::string message =
+        std::string{
+            "onnxruntime runtime too old: this EP requires ORT API >= "} +
+        std::to_string(morphizen::kMinOrtApiVersion) +
+        ", but the host reports " + ort_api_base->GetVersionString();
+    if (const OrtApi *fallback_api =
+            morphizen::FallbackOrtApiForStatus(*ort_api_base)) {
+      return fallback_api->CreateStatus(ORT_EP_FAIL, message.c_str());
+    }
+    LOG(FATAL) << message;
+  }
   // initialize the API in this dll.
   Ort::InitApi(ort_api);
   const OrtEpApi *ort_ep_api = ort_api->GetEpApi();
-  MY_LOG(1) << "ORT is initalized, ORT_API_VERSION=" << ORT_API_VERSION
+  MY_LOG(1) << "ORT is initalized, negotiated API version="
+            << morphizen::NegotiatedOrtApiVersion()
+            << " (built against ORT_API_VERSION=" << ORT_API_VERSION
+            << ", host reports " << ort_api_base->GetVersionString() << ")"
             << ", ptr=" << (void *)ort_ep_api << ", registration_name="
             << "\"" << registration_name << "\"";
 

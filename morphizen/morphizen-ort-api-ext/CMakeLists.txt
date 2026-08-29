@@ -4,10 +4,14 @@
 ##
 include(${CMAKE_CURRENT_SOURCE_DIR}/../morphizen-core/cmake/find_onnxruntime.cmake)
 set(LIB_NAME morphizen-ort-api-ext)
-add_library(${LIB_NAME} STATIC src/morphizen-ort-api-ext.cpp)
+add_library(${LIB_NAME} STATIC
+  src/morphizen-ort-api-ext.cpp
+  src/ort-api-version.cpp
+)
 target_sources(${LIB_NAME} PUBLIC
   FILE_SET modules_public TYPE HEADERS FILES
   ${CMAKE_CURRENT_LIST_DIR}/include/morphizen/morphizen-ort-api-ext.hpp
+  ${CMAKE_CURRENT_LIST_DIR}/include/morphizen/ort-api-version.hpp
 )
 target_include_directories(${LIB_NAME} PUBLIC
   $<BUILD_INTERFACE:${MORPHIZEN_ORT_API_DIR}>

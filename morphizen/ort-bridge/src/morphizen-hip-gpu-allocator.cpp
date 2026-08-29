@@ -10,6 +10,7 @@
 
 #include "./morphizen-hip-gpu-allocator.hpp"
 
+#include "morphizen/ort-api-version.hpp"
 #include <glog/logging.h>
 #include <hip/hip_runtime.h>
 
@@ -98,7 +99,7 @@ int TryGetDeviceId(const OrtMemoryInfo *memory_info) noexcept {
 HipGpuAllocator::HipGpuAllocator(const OrtMemoryInfo *memory_info,
                                  const OrtApi & /*api*/)
     : memory_info_{memory_info}, device_id_{TryGetDeviceId(memory_info)} {
-  version = ORT_API_VERSION;
+  version = NegotiatedOrtApiVersion();
   Alloc = AllocImpl;
   Free = FreeImpl;
   Info = InfoImpl;
@@ -234,7 +235,7 @@ void *ORT_API_CALL HipGpuAllocator::ReserveImpl(OrtAllocator *this_,
 
 HipDataTransferImpl::HipDataTransferImpl(const OrtApi &ort_api_in)
     : ort_api{ort_api_in}, ep_api{*ort_api_in.GetEpApi()} {
-  ort_version_supported = ORT_API_VERSION;
+  ort_version_supported = NegotiatedOrtApiVersion();
   CanCopy = CanCopyImpl;
   CopyTensors = CopyTensorsImpl;
   Release = ReleaseImpl;

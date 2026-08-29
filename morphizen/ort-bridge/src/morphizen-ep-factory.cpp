@@ -9,6 +9,7 @@
 #include "morphizen-utils/morphizen-utils.hpp"
 #include "morphizen-utils/morphizen_plugin.hpp"
 #include "morphizen/onnxruntime_morphizen_ep.hpp"
+#include "morphizen/ort-api-version.hpp"
 #include <glog/logging.h>
 #include <google/protobuf/message_lite.h>
 #include <google/protobuf/util/json_util.h>
@@ -51,8 +52,7 @@ MorphiZenEpFactory::MorphiZenEpFactory(const char *ep_name, ApiPtrs apis,
       ApiPtrs(apis), default_logger_{default_logger}, ep_name_{ep_name},
       ep_metadata_{nullptr, apis.ort_api.ReleaseKeyValuePairs},
       ep_options_{nullptr, apis.ort_api.ReleaseKeyValuePairs} {
-  ort_version_supported =
-      ORT_API_VERSION; // set to the ORT version we were compiled with.
+  ort_version_supported = NegotiatedOrtApiVersion();
   GetName = GetNameImpl;
   GetVendor = GetVendorImpl;
   GetVendorId = GetVendorIdImpl;
