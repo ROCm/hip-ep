@@ -4,6 +4,8 @@
 ##
 set(_ORT_BRIDGE_SOURCES
   src/ort-bridge.cpp
+  src/ort-api-version.hpp
+  src/ort-api-version.cpp
   src/api-ptrs.hpp
   src/api-ptrs.cpp
   src/ort-status-exception.hpp
