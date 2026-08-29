@@ -155,8 +155,6 @@ inline constexpr int64_t kStridesIdx = 4;
 
 // com.amd QMoE (hip.qmoe_amd / wrap_qmoe_amd) activation and routing modes.
 // Values must match HIPDNN_EP_QMOE_AMD_* in lib/Runtime/hipdnn_ep_runtime.h.
-// Deliberately its own numbering: the MIOpen activation set this dialect maps
-// elsewhere has no relu2 equivalent.
 inline constexpr int64_t kQMoEAmdActivationRelu2 = 0;
 inline constexpr int64_t kQMoEAmdRoutingSigmoid = 0;
 

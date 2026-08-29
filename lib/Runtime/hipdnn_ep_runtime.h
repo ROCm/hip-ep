@@ -1299,10 +1299,6 @@ int wrap_qmoe(
 // Weight packing matches MatMulNBits convention: uint8 packed int4,
 // dequantized = (quantized - 8) * scale, always symmetric (no zero_points
 // input for this op).
-//
-// These are deliberately separate from the HIPDNN_EP_ACTIVATION_* set above,
-// which enumerates MIOpen activation modes: relu2 has no MIOpen equivalent,
-// and wrap_qmoe's activation_type is yet another unrelated numbering.
 #define HIPDNN_EP_QMOE_AMD_ACTIVATION_RELU2 0
 #define HIPDNN_EP_QMOE_AMD_ROUTING_SIGMOID 0
 
