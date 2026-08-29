@@ -1353,6 +1353,14 @@ int wrap_qmoe_amd(
             (long long)activation_type, (long long)routing_type);
     return -1;
   }
+  // Same reason: the real path's per-expert strides assume 4-bit packing.
+  if (expert_weight_bits != 4) {
+    fprintf(stderr,
+            "wrap_qmoe_amd: only 4-bit expert weights supported, got "
+            "expert_weight_bits=%lld\n",
+            (long long)expert_weight_bits);
+    return -1;
+  }
 
   MOCK_PRINT("[MOCK] wrap_qmoe_amd(\n");
   MOCK_PRINT("[MOCK]   num_tokens=%lld, hidden_size=%lld, latent_size=%lld,\n",

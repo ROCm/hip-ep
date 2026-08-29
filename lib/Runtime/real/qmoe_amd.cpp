@@ -21,8 +21,8 @@
 // activation (relu2 vs SwiGLU), and a mandatory latent projection +
 // shared-expert branch that com.microsoft::QMoE does not have. Shares only
 // the generic sub-kernels (hip_matmul_nbits, hip_qmoe_gather_tokens,
-// hip_qmoe_bucket_tokens, hip_qmoe_scatter_add, hip_elementwise_add) --
-// none of qmoe.cpp's code is called or modified.
+// hip_qmoe_scatter_add, hip_elementwise_add) -- none of qmoe.cpp's code is
+// called or modified.
 //
 // There are no zero_points inputs in this op's schema (always symmetric
 // zero-point 8, matching MatMulNBits' default), so every hip_matmul_nbits
@@ -33,13 +33,15 @@
 // full math):
 //   1. hip_qmoe_amd_route            : sigmoid+correction-bias routing
 //   2. fc1_latent_proj (matmul_nbits): hidden_states -> h        [latent]
-//   3. hip_qmoe_bucket_tokens        : group routed tokens by expert
-//   4. per active expert:
-//        gather(h) -> fc1 (matmul_nbits) -> relu2 -> fc2 (matmul_nbits)
-//        -> weighted scatter_add into acc                       [latent]
-//   5. fc2_latent_proj (matmul_nbits): acc -> y                 [hidden]
-//   6. shared expert: hidden_states -> fc1 -> relu2 -> fc2 -> s  [hidden]
-//   7. output = y + s (hip_elementwise_add)
+//   3. routed branch -> acc                                     [latent]
+//        decode (num_tokens == 1): hip_qmoe_amd_decode_fused, three launches
+//          that index the expert weights on the device
+//        otherwise: hip_qmoe_amd_bucket_tokens -> count readback -> per
+//          active expert gather(h) -> fc1 -> relu2 -> fc2 -> weighted
+//          scatter_add
+//   4. fc2_latent_proj (matmul_nbits): acc -> y                 [hidden]
+//   5. shared expert: hidden_states -> fc1 -> relu2 -> fc2 -> s  [hidden]
+//   6. output = y + s (hip_elementwise_add)
 int wrap_qmoe_amd(
     RuntimeState *state, const void *hidden_states,
     const void *fc1_experts_weights, const void *fc1_experts_scales,
@@ -109,6 +111,17 @@ int wrap_qmoe_amd(
             (long long)elem_size);
     return -1;
   }
+  // int4 only. hip_matmul_nbits itself accepts 2/3/4/8 bits, but the per-expert
+  // weight strides computed below hardcode the 4-bit blob geometry
+  // (block_size/2 bytes per row-block), so any other width would silently
+  // index the wrong expert slice instead of failing.
+  if (expert_weight_bits != 4) {
+    fprintf(stderr,
+            "wrap_qmoe_amd: only 4-bit expert weights supported, got "
+            "expert_weight_bits=%lld\n",
+            (long long)expert_weight_bits);
+    return -1;
+  }
   if (block_size <= 0 || (block_size & 1) != 0) {
     fprintf(stderr,
             "wrap_qmoe_amd: invalid block_size=%lld (must be a positive "
@@ -148,7 +161,8 @@ int wrap_qmoe_amd(
   int result = 0;
 
   // Per-expert quant block geometry (K_blocks = ceil(K/block_size), blob =
-  // block_size/2 bytes per row for 4-bit packing). See MatMulNBits layout.
+  // block_size/2 bytes per row-block -- 4-bit packing, enforced above). See
+  // MatMulNBits layout.
   int64_t k_blocks_e1 = (latent_size + block_size - 1) / block_size;
   int64_t k_blocks_e2 = (moe_intermediate_size + block_size - 1) / block_size;
   int64_t k_blocks_l1 = (hidden_size + block_size - 1) / block_size;
@@ -158,18 +172,35 @@ int wrap_qmoe_amd(
       (shared_intermediate_size + block_size - 1) / block_size;
   int64_t blob_size = block_size / 2;
 
+  // A single token selects k *distinct* experts, so its k routing slots
+  // already ARE the active expert set: decode needs neither bucketing nor the
+  // per-expert count readback, and the expert id can be looked up on the
+  // device instead. That matters because the general path's readback costs a
+  // full hipStreamSynchronize plus a 5-launch chain per active expert on every
+  // decode step, which at this op's k is ~110 launches per layer.
+  //
+  // Declared here rather than at the branch below because every `goto cleanup`
+  // in between would otherwise jump into its scope.
+  const bool use_decode_fused =
+      num_tokens == 1 && hip_qmoe_amd_decode_fused_supported(
+                             latent_size, moe_intermediate_size, block_size,
+                             expert_weight_bits, elem_size) != 0;
+
   // Per-session grow-on-demand scratch (own qmoe_amd_scratch field --
   // independent from com.microsoft QMoE's qmoe_scratch). 64-byte aligned
   // sub-buffers, offsets recomputed per call.
   auto align_up_64 = [](size_t s) -> size_t { return (s + 63) & ~size_t(63); };
+  // The general path uses the fc1/fc2 buffers for one active expert's rows
+  // (at most num_tokens); the decode fast path reuses them as the [k, ...]
+  // per-slot scratch. Size them for whichever is larger.
+  int64_t fc_rows = num_tokens > k ? num_tokens : k;
   size_t sz_expert_indices = align_up_64(num_tokens * k * sizeof(int32_t));
   size_t sz_expert_weights = align_up_64(num_tokens * k * elem_size);
   size_t sz_h_buf = align_up_64(num_tokens * latent_size * elem_size);
   size_t sz_acc_buf = align_up_64(num_tokens * latent_size * elem_size);
   size_t sz_gather_buf = align_up_64(num_tokens * latent_size * elem_size);
-  size_t sz_fc1_buf =
-      align_up_64(num_tokens * moe_intermediate_size * elem_size);
-  size_t sz_fc2_buf = align_up_64(num_tokens * latent_size * elem_size);
+  size_t sz_fc1_buf = align_up_64(fc_rows * moe_intermediate_size * elem_size);
+  size_t sz_fc2_buf = align_up_64(fc_rows * latent_size * elem_size);
   size_t sz_expert_counts = align_up_64(num_experts * sizeof(int32_t));
   size_t sz_expert_offsets = align_up_64((num_experts + 1) * sizeof(int32_t));
   size_t sz_sorted_token_ids = align_up_64(num_tokens * k * sizeof(int32_t));
@@ -242,18 +273,30 @@ int wrap_qmoe_amd(
                              /*pre_unpacked_zp_u8=*/nullptr,
                              /*pre_unpacked_zp_fp16=*/nullptr));
 
-  HIP_CHECK(hipMemsetAsync(d_acc_buf, 0, num_tokens * latent_size * elem_size,
-                           hip_stream));
+  // 3. Routed branch: fused per-slot chain for decode, bucketed per-expert
+  //    dispatch otherwise (see use_decode_fused above).
+  if (use_decode_fused) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe_amd: fused decode routed branch "
+                      "(k=%lld)\n",
+                      (long long)k);
+    // Writes every element of acc, so it needs no pre-zeroing.
+    HIP_CHECK(hip_qmoe_amd_decode_fused(
+        stream, d_h_buf, d_expert_indices, d_expert_weights,
+        fc1_experts_weights, fc1_experts_scales, fc2_experts_weights,
+        fc2_experts_scales, /*act_scratch=*/d_fc1_buf,
+        /*slot_scratch=*/d_fc2_buf, /*acc=*/d_acc_buf, latent_size,
+        moe_intermediate_size, k, expert_weight_bits, block_size, elem_size));
+  } else {
+    HIP_CHECK(hipMemsetAsync(d_acc_buf, 0, num_tokens * latent_size * elem_size,
+                             hip_stream));
 
-  // 3. GPU-side bucketing (same kernel as com.microsoft::QMoE) + a small
-  //    D2H readback of just the per-expert counts to drive the host-side
-  //    per-expert dispatch loop below.
-  HIP_CHECK(hip_qmoe_bucket_tokens(stream, d_expert_indices, d_expert_weights,
-                                   d_expert_counts, d_expert_offsets,
-                                   d_sorted_token_ids, d_sorted_weights,
-                                   num_tokens, num_experts, k, elem_size));
+    // GPU-side bucketing + a small D2H readback of just the per-expert counts
+    // to drive the host-side per-expert dispatch loop below.
+    HIP_CHECK(hip_qmoe_amd_bucket_tokens(
+        stream, d_expert_indices, d_expert_weights, d_expert_counts,
+        d_expert_offsets, d_sorted_token_ids, d_sorted_weights, num_tokens,
+        num_experts, k, elem_size));
 
-  {
     size_t total_host = align_up_64(num_experts * sizeof(int32_t));
     if (hipdnn_ep_state_ensure_qmoe_amd_host_scratch(state, total_host) != 0) {
       fprintf(stderr,
@@ -283,8 +326,8 @@ int wrap_qmoe_amd(
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe_amd: %lld/%lld experts active\n",
                       (long long)active_experts, (long long)num_experts);
 
-    // 4. Per active expert: gather (from h_buf) -> fc1 -> relu2 -> fc2 ->
-    //    weighted scatter_add into acc_buf.
+    // Per active expert: gather (from h_buf) -> fc1 -> relu2 -> fc2 ->
+    // weighted scatter_add into acc_buf.
     for (int64_t e = 0; e < num_experts; e++) {
       int64_t count = static_cast<int64_t>(h_counts[e]);
       if (count == 0) {
@@ -328,7 +371,7 @@ int wrap_qmoe_amd(
     }
   }
 
-  // 5. fc2_latent_proj: latent_size -> hidden_size, on the routed
+  // 4. fc2_latent_proj: latent_size -> hidden_size, on the routed
   //    accumulator.
   RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe_amd: fc2_latent_proj [%lld x %lld] -> "
                     "[%lld x %lld]\n",
@@ -342,8 +385,8 @@ int wrap_qmoe_amd(
                              /*pre_unpacked_zp_u8=*/nullptr,
                              /*pre_unpacked_zp_fp16=*/nullptr));
 
-  // 6. Shared expert branch: runs for every token, independent of routing.
-  //    Writes directly into `output` (== s) so step 7 only needs one add.
+  // 5. Shared expert branch: runs for every token, independent of routing.
+  //    Writes directly into `output` (== s) so step 6 only needs one add.
   RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe_amd: shared_fc1 [%lld x %lld] -> [%lld "
                     "x %lld]\n",
                     (long long)num_tokens, (long long)hidden_size,
@@ -370,7 +413,7 @@ int wrap_qmoe_amd(
                              /*zp_elem_size=*/1, /*pre_unpacked_zp_u8=*/nullptr,
                              /*pre_unpacked_zp_fp16=*/nullptr));
 
-  // 7. output = y + s.
+  // 6. output = y + s.
   HIP_CHECK(hip_elementwise_add(stream, d_y_buf, output, output,
                                 num_tokens * hidden_size,
                                 /*hip_dtype=*/HIP_DTYPE_FLOAT16));
