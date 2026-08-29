@@ -5,6 +5,7 @@
 #include "./morphizen-ep.hpp"
 #include "./ir-converter.hpp"
 #include "./morphizen-deps.hpp"
+#include "./ort-api-version.hpp"
 #include "./ort-graph-wrapper.hpp"
 #include "glog/logging.h"
 #include "morphizen-utils/morphizen-utils.hpp"
@@ -79,8 +80,7 @@ MorphiZenEP::MorphiZenEP(ApiPtrs apis, const std::string &name,
       session_options, "ep.context_enable", "0", ep_context_enable));
   enable_ep_context_ = ep_context_enable == "1";
 
-  OrtEp::ort_version_supported =
-      ORT_API_VERSION; // set to the ORT version we were compiled with.
+  OrtEp::ort_version_supported = NegotiatedOrtApiVersion();
   OrtEp::GetName = GetNameImpl;
   OrtEp::GetCapability = GetCapabilityImpl;
   OrtEp::Compile = CompileImpl;
@@ -377,7 +377,7 @@ MorphiZenEP::GetCapability(OrtGraphWrapper &graph_viewer,
   }
   // iterator over the execution providers and set the graph support info
   OrtNodeFusionOptions node_fusion_options = {};
-  node_fusion_options.ort_version_supported = ORT_API_VERSION;
+  node_fusion_options.ort_version_supported = NegotiatedOrtApiVersion();
   node_fusion_options.drop_constant_initializers = true;
   auto supported_node_groups = std::vector<std::vector<const OrtNode *>>();
   for (auto &ep : **execution_providers_) {
@@ -518,7 +518,8 @@ OrtStatus *MorphiZenEP::CompileSubgraph(const morphizen::ExecutionProvider &ep,
     }
     auto morphizen_node_compute_info = new MorphiZenEP_ComputeInfo();
     node_compute_info = morphizen_node_compute_info;
-    morphizen_node_compute_info->ort_version_supported = ORT_API_VERSION;
+    morphizen_node_compute_info->ort_version_supported =
+        NegotiatedOrtApiVersion();
     morphizen_node_compute_info->morphizen_ep =
         const_cast<morphizen::ExecutionProvider *>(&ep);
     morphizen_node_compute_info->CreateState =
