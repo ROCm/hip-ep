@@ -77,9 +77,15 @@ endif()
 # Define MORPHIZEN_CUSTOM_OP for conditional compilation
 target_compile_definitions(${LIB_NAME} PRIVATE MORPHIZEN_CUSTOM_OP=1)
 
-find_package(hipblaslt CONFIG REQUIRED)
-target_compile_definitions(${LIB_NAME} PRIVATE
-    HIPDNN_HIPBLASLT_DLL="$<TARGET_FILE_BASE_NAME:roc::hipblaslt>")
+# Mock builds have no ROCm SDK, so this must not be REQUIRED; the JIT never
+# resolves hipBLASLt there. Matches the QUIET probe in lib/Runtime/CMakeLists.txt.
+find_package(hipblaslt CONFIG QUIET)
+if(TARGET roc::hipblaslt)
+  target_compile_definitions(${LIB_NAME} PRIVATE
+      HIPDNN_HIPBLASLT_DLL="$<TARGET_FILE_BASE_NAME:roc::hipblaslt>")
+else()
+  target_compile_definitions(${LIB_NAME} PRIVATE HIPDNN_HIPBLASLT_DLL="hipblaslt")
+endif()
 
 if(HIPDNN_EP_LINK_HIP_HOST)
   target_compile_definitions(${LIB_NAME} PRIVATE HIPDNN_EP_LINK_HIP_HOST=1)

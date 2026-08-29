@@ -35,7 +35,7 @@ if(WIN32)
     add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-fms-extensions;-fms-compatibility;-fdelayed-template-parsing>")
   endif()
 
-  option(USE_BINSKIM_COMPLIANT_COMPILE_FLAGS "Prepare HIP EP for BinSkim Binary Analyzer" OFF)
+  option(USE_BINSKIM_COMPLIANT_COMPILE_FLAGS "Prepare HIP EP for BinSkim Binary Analyzer" ON)
   option(USE_SPECTRE_MITIGATED_LIBRARIES "Use Spectre-mitigated libraries" OFF)
 
   if(MSVC AND MSVC_VERSION GREATER_EQUAL 1900)
@@ -59,7 +59,7 @@ if(WIN32)
     endif()
   endif()
 
-  option(USE_MSVC_STATIC_RUNTIME "Link MSVC runtime library statically" OFF)
+  option(USE_MSVC_STATIC_RUNTIME "Link MSVC runtime library statically" ON)
 
   if(NOT USE_MSVC_STATIC_RUNTIME)
     set(MSVC_RUNTIME_SUFFIX "DLL")
