@@ -10,6 +10,8 @@
 
 #include "llvm/ADT/APInt.h"
 
+#define DEBUG_TYPE "slice-conversion"
+
 namespace mlir {
 namespace hip {
 namespace {

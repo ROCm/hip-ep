@@ -38,8 +38,6 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 
-#define DEBUG_TYPE "convert-onnx-to-hip"
-
 namespace mlir {
 namespace hip {
 
