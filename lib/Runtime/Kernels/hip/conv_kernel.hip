@@ -192,6 +192,12 @@ struct ConvParams {
   int32_t nBlkM, nBlkN;
   int32_t gmLog2; // log2 of the swizzle group height
   FastDiv rGroupSpan;
+
+  // Window kernel only: its column blocks tile the output plane in two
+  // dimensions rather than along the flattened position axis, so a block index
+  // has to split back into a row and a column of that 2-D grid.
+  int32_t nBlkW;
+  FastDiv rBlkW;
 };
 
 // The input coordinate that kernel tap (0,0,0) of an output position reads.
@@ -413,10 +419,12 @@ __device__ __forceinline__ bool swizzledTile(const ConvParams &pr, int &blkM,
   return blkM < pr.nBlkM;
 }
 
-// Fill in the tile-grid geometry the swizzle needs for one tile shape.
-static inline ConvParams withTileGrid(ConvParams pr, int64_t bm, int64_t bn) {
+// Fill in the swizzle geometry for a grid of nBlkM row blocks by nBlkN column
+// blocks, however the caller arrived at the column count.
+static inline ConvParams withBlockGrid(ConvParams pr, int64_t bm,
+                                       int64_t nBlkN) {
   pr.nBlkM = static_cast<int32_t>((pr.MPerGroup + bm - 1) / bm);
-  pr.nBlkN = static_cast<int32_t>((pr.Nout + bn - 1) / bn);
+  pr.nBlkN = static_cast<int32_t>(nBlkN);
   // Largest power of two that is both <= kGroupM and <= the tile rows.
   int lg = 0;
   while ((1 << (lg + 1)) <= kGroupM && (1 << (lg + 1)) <= pr.nBlkM) ++lg;
@@ -424,6 +432,24 @@ static inline ConvParams withTileGrid(ConvParams pr, int64_t bm, int64_t bn) {
   pr.rGroupSpan =
       makeFastDiv(static_cast<int64_t>(pr.nBlkN) << lg);
   return pr;
+}
+
+// Fill in the tile-grid geometry the swizzle needs for one tile shape.
+static inline ConvParams withTileGrid(ConvParams pr, int64_t bm, int64_t bn) {
+  return withBlockGrid(pr, bm, (pr.Nout + bn - 1) / bn);
+}
+
+// The same, for the window kernel's 2-D output tile. Its column blocks are a
+// th x tw rectangle of the output plane, not a run of bn flattened positions,
+// because the whole point of the kernel is to stage the input those positions
+// read -- and that is a rectangle only if the output tile is one.
+static inline ConvParams withWindowGrid(ConvParams pr, int64_t bm, int64_t th,
+                                        int64_t tw) {
+  const int64_t nh = (pr.out0 + th - 1) / th;
+  const int64_t nw = (pr.out1 + tw - 1) / tw;
+  pr.nBlkW = static_cast<int32_t>(nw);
+  pr.rBlkW = makeFastDiv(nw);
+  return withBlockGrid(pr, bm, nh * nw);
 }
 
 // ---------------------------------------------------------------------------
@@ -526,7 +552,29 @@ conv_tiled_kernel(const T *__restrict__ x, const T *__restrict__ w,
     }
     __syncthreads();
 
-#pragma unroll
+    // Unrolled by four, not fully. The bound is a compile-time BK=16, so the
+    // default here was a full unroll -- and that is what made the widest tile
+    // the slowest one.
+    //
+    // Each unrolled step needs TM+TN live LDS reads, and the scheduler hoists
+    // them to cover the ds_read latency, so peak pressure is the unroll factor
+    // times TM+TN on top of the TM*TN accumulator. At 8x8 a full unroll asks
+    // for 16*(8+8) + 64 values at once, which does not fit: the tile compiled
+    // to 256 VGPRs with 100 of them spilled to 396 bytes of scratch per lane,
+    // and 5 waves/SIMD. Every multiply-add in the hottest loop of the kernel
+    // was then a private-memory round trip.
+    //
+    // Four steps is enough to hide LDS latency and cheap enough to keep the
+    // accumulator resident: <float,128,128,16,8,8> becomes 135 VGPRs, no
+    // scratch and 10 waves/SIMD. Measured across the whole shape census,
+    // simplebev's convolution goes from 875 ms to 340 ms.
+    //
+    // The factor is measured, not assumed. Two costs a little throughput for
+    // registers nothing needs (345 ms). Eight leaves the 8x8 tile exactly where
+    // four does, but pushes the narrow tiles that were comfortable -- 64x64
+    // from 71 VGPRs to 103, 32x128 from 79 to 119, both dropping from 16
+    // waves/SIMD to 12 -- and measures worst of the three (398 ms).
+#pragma unroll 4
     for (int kk = 0; kk < BK; ++kk) {
       float a[TM], b[TN];
 #pragma unroll
@@ -854,6 +902,217 @@ void conv_wmma_kernel(const __half *__restrict__ x,
 }
 
 // ---------------------------------------------------------------------------
+// Window-staging WMMA kernel (fp16, 2-D, unit stride and dilation)
+// ---------------------------------------------------------------------------
+//
+// Every kernel above reads the input through the im2col matrix, and the im2col
+// matrix has each input element in it once per kernel tap. A 3x3 therefore
+// reads the input nine times, once more for every tile row, and none of that
+// traffic is recoverable from cache once the feature map is larger than L2.
+// esrgan is the shape where that is the whole cost: its five RRDB convolutions
+// sit at 71% of the memory roofline moving 5.6x-8.6x their irreducible bytes,
+// so no amount of arithmetic or occupancy can move them and only fewer bytes
+// can.
+//
+// So this kernel stages the *input* instead of the im2col matrix. A block owns
+// a TH x TW rectangle of the output plane, reads the (TH+k0-1) x (TW+k1-1)
+// input window those outputs need once per channel slice, and then computes all
+// kvol taps out of LDS. The read amplification stops being kvol and becomes the
+// halo ratio: at 8x32 with a 3x3 that is 10*34/(8*32) = 1.33x against 9x.
+//
+// Three things fall out of staging the window rather than the matrix, and they
+// are why this is a separate kernel rather than a flag on conv_wmma_kernel:
+//
+//   * Padding is resolved once, at staging time. A window element outside the
+//     input is written as zero, so the inner loop has no bounds test at all --
+//     where conv_wmma_kernel tests every element of every tap.
+//   * The contraction is reordered. A WMMA fragment is 16 consecutive k, and
+//     the 16 that are cheap to read here are 16 *channels* at one tap, not 16
+//     entries of the flattened (channel, tap) axis. So the k loop runs taps
+//     outside and channel slices inside, and the window is staged once per
+//     slice and reused by every tap.
+//   * The filter is read strided. A[m][(ic, tap)] for 16 consecutive ic at one
+//     tap steps by kvol, so the A stage gives up its contiguous run. The filter
+//     is small and L2-resident -- 221 KB for esrgan's largest -- and the input
+//     is not, so that is the right trade.
+//
+// Scoped to fp16, rank 2, unit stride and unit dilation, and kernel extents up
+// to KMAX. Stride and dilation are what fix the window extent at compile time,
+// which is what lets it be an LDS array; the ladder enforces all of it.
+
+template <int BM, int TH, int TW, int WM, int WN, int KMAX>
+__global__
+__launch_bounds__((BM / (WM * kWmma)) * ((TH * TW) / (WN * kWmma)) * 32) void
+conv_window_kernel(const __half *__restrict__ x, const __half *__restrict__ w,
+                   const __half *__restrict__ bias, __half *__restrict__ y,
+                   ConvParams pr) {
+  constexpr int BN = TH * TW;
+  constexpr int kWavesM = BM / (WM * kWmma);
+  constexpr int kWavesN = BN / (WN * kWmma);
+  constexpr int kThreads = kWavesM * kWavesN * 32;
+  // 24 halves = 48 B per contraction slice: 16-byte aligned so the fragment
+  // loads stay wide, and an odd multiple of 16 so that the 32 lanes of one
+  // fragment load spread over all 32 banks. See conv_wmma_kernel.
+  constexpr int kLdsK = kWmma + 8;
+  constexpr int WH = TH + KMAX - 1; // window rows, at the largest tap extent
+  constexpr int WW = TW + KMAX - 1; // window columns
+  static_assert(BM % (WM * kWmma) == 0, "M wave tiling");
+  static_assert(BN % (WN * kWmma) == 0, "N wave tiling");
+  static_assert((BM * kWmma) % kThreads == 0, "A stage tiling");
+  // A fragment's 16 lanes must lie in one row of the output tile, or the
+  // window column they read is not lane + constant.
+  static_assert(TW % kWmma == 0, "fragment inside a tile row");
+
+  // The window is indexed [row][col][channel], channel innermost, because that
+  // is the axis a fragment reads 16 of. The input is [channel][row][col], so
+  // the staging loop below transposes: it reads along col and writes along
+  // channel.
+  __shared__ __align__(16) _Float16 win[WH * WW * kLdsK];
+  // Double-buffered, so a tap can stage its filter slice while the previous
+  // tap's fragment reads are still in flight. The alternative is a second
+  // barrier per tap, and there are kvol taps per channel slice against one
+  // window staging, so that barrier is the one worth removing.
+  __shared__ _Float16 As[2][BM][kLdsK];
+
+  const int tid = threadIdx.x;
+  const int wave = tid / 32;
+  const int lane16 = tid % kWmma;
+  const int pair = (tid % 32) / kWmma;
+  const int waveM = wave / kWavesN;
+  const int waveN = wave % kWavesN;
+
+  int blkM, blkN;
+  if (!swizzledTile(pr, blkM, blkN)) return;
+  const int bh = static_cast<int>(fastDiv(static_cast<uint32_t>(blkN), pr.rBlkW));
+  const int bw = blkN - bh * pr.nBlkW;
+  const int64_t m0 = static_cast<int64_t>(blkM) * BM;
+  const int64_t oh0 = static_cast<int64_t>(bh) * TH; // output tile origin
+  const int64_t ow0 = static_cast<int64_t>(bw) * TW;
+  int64_t nbatch, g;
+  blockBases(pr, blockIdx.z, nbatch, g);
+
+  // Input window origin. Unit stride and dilation, so an output at (oh, ow)
+  // reads input rows oh - p0 + tr for tr in [0, k0), and the whole tile's
+  // reads are the rectangle starting here.
+  const int64_t wr0 = oh0 - pr.p0;
+  const int64_t wc0 = ow0 - pr.p1;
+  const _Float16 *xg = reinterpret_cast<const _Float16 *>(x) +
+                       (nbatch * pr.Cin + g * pr.CinPerGroup) * pr.inPlane;
+
+  // Window staging assignment: consecutive threads take consecutive window
+  // columns, so the global read is a contiguous run of WW elements per row.
+  // The LDS write is the strided side of the transpose, which is the right way
+  // round -- the window is written once per channel slice and read kvol times.
+  constexpr int kWinElems = kWmma * WH * WW;
+
+  // Filter staging, as in conv_wmma_kernel but at a stride: for one tap the 16
+  // contraction entries are 16 channels, which sit kvol apart in the filter.
+  constexpr int kVecA = (BM * kWmma) / kThreads;
+  constexpr int kRowThreadsA = kWmma / kVecA;
+  const int rowA = tid / kRowThreadsA;
+  const int kOffA = (tid % kRowThreadsA) * kVecA;
+  const bool rowValidA = m0 + rowA < pr.MPerGroup;
+  const int64_t wRowBase = (g * pr.MPerGroup + m0 + rowA) * pr.K;
+
+  float8 acc[WM][WN];
+#pragma unroll
+  for (int i = 0; i < WM; ++i)
+#pragma unroll
+    for (int j = 0; j < WN; ++j) acc[i][j] = (float8)0.0f;
+
+  const int32_t k0 = static_cast<int32_t>(pr.k0);
+  const int32_t k1 = static_cast<int32_t>(pr.k1);
+  const int32_t wh = TH + k0 - 1;
+  const int32_t ww = TW + k1 - 1;
+
+  int buf = 0;
+  for (int64_t c0 = 0; c0 < pr.CinPerGroup; c0 += kWmma) {
+    // Stage the window for this channel slice. Out-of-input elements are
+    // written as zero, which is what padding means and what removes the bounds
+    // test from every tap below.
+    __syncthreads(); // every tap of the previous slice has finished with win
+    for (int idx = tid; idx < kWinElems; idx += kThreads) {
+      const int e = idx / (WH * WW);
+      const int rem = idx - e * (WH * WW);
+      const int wr = rem / WW;
+      const int wc = rem - wr * WW;
+      _Float16 v = static_cast<_Float16>(0.0f);
+      if (wr < wh && wc < ww && c0 + e < pr.CinPerGroup) {
+        const int64_t r = wr0 + wr, c = wc0 + wc;
+        if (r >= 0 && r < pr.in0i && c >= 0 && c < pr.in1i)
+          v = xg[(c0 + e) * pr.inPlane + r * pr.in1 + c];
+      }
+      win[(wr * WW + wc) * kLdsK + e] = v;
+    }
+
+    for (int32_t t = 0; t < k0 * k1; ++t) {
+      const int32_t tr = t / k1, tc = t - tr * k1;
+      // Filter slice for this (tap, channel-slice), staged k-contiguous.
+      const int64_t wBase = wRowBase + (c0 + kOffA) * pr.kvol + t;
+#pragma unroll
+      for (int i = 0; i < kVecA; ++i) {
+        const int64_t ic = c0 + kOffA + i;
+        As[buf][rowA][kOffA + i] =
+            (rowValidA && ic < pr.CinPerGroup)
+                ? static_cast<_Float16>(w[wBase + i * pr.kvol])
+                : static_cast<_Float16>(0.0f);
+      }
+      __syncthreads();
+
+      half16 aFrag[WM], bFrag[WN];
+#pragma unroll
+      for (int i = 0; i < WM; ++i) {
+        const _Float16 *p = &As[buf][waveM * WM * kWmma + i * kWmma + lane16][0];
+        *reinterpret_cast<half8 *>(&aFrag[i]) =
+            *reinterpret_cast<const half8 *>(p);
+        *(reinterpret_cast<half8 *>(&aFrag[i]) + 1) =
+            *reinterpret_cast<const half8 *>(p + 8);
+      }
+#pragma unroll
+      for (int j = 0; j < WN; ++j) {
+        // This lane's output position inside the tile, and the window element
+        // its tap reads. TW % 16 == 0 keeps all 16 lanes of the fragment in one
+        // tile row, so the row term is uniform and only the column varies.
+        const int n = waveN * WN * kWmma + j * kWmma + lane16;
+        const int oh = n / TW, ow = n - oh * TW;
+        const _Float16 *p = &win[((oh + tr) * WW + (ow + tc)) * kLdsK];
+        *reinterpret_cast<half8 *>(&bFrag[j]) =
+            *reinterpret_cast<const half8 *>(p);
+        *(reinterpret_cast<half8 *>(&bFrag[j]) + 1) =
+            *reinterpret_cast<const half8 *>(p + 8);
+      }
+#pragma unroll
+      for (int i = 0; i < WM; ++i)
+#pragma unroll
+        for (int j = 0; j < WN; ++j)
+          acc[i][j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+              aFrag[i], bFrag[j], acc[i][j]);
+      buf ^= 1; // next tap stages the buffer this one is not reading
+    }
+  }
+
+  const int64_t yBatchBase = nbatch * pr.Cout * pr.Nout;
+#pragma unroll
+  for (int j = 0; j < WN; ++j) {
+    const int n = waveN * WN * kWmma + j * kWmma + lane16;
+    const int64_t oh = oh0 + n / TW, ow = ow0 + (n % TW);
+    if (oh >= pr.out0 || ow >= pr.out1) continue;
+    const int64_t o = oh * pr.out1 + ow;
+#pragma unroll
+    for (int i = 0; i < WM; ++i) {
+#pragma unroll
+      for (int e = 0; e < 8; ++e) {
+        const int64_t m = m0 + waveM * WM * kWmma + i * kWmma + e * 2 + pair;
+        if (m >= pr.MPerGroup) continue;
+        const int64_t oc = g * pr.MPerGroup + m;
+        const float bv = bias ? to_float<__half>(bias[oc]) : 0.0f;
+        y[yBatchBase + oc * pr.Nout + o] = from_float<__half>(acc[i][j][e] + bv);
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Direct kernel — one thread per output element
 // ---------------------------------------------------------------------------
 
@@ -1086,9 +1345,62 @@ static void launchWmma(hipStream_t stream, const void *x, const void *w,
                      static_cast<__half *>(y), pr);
 }
 
+constexpr int kWinKMax = 3; // largest kernel extent the window kernel stages
+
+// deviceUnitCount() reports WGPs, and a WGP is two CUs, so a coverage test
+// stated in units of real compute has to double it. Kept as a named constant
+// because the two ladders below disagree about whether they want WGPs or CUs
+// and the difference is otherwise invisible at the call site.
+constexpr int kUnitsPerWgp = 2;
+
+template <int BM, int TH, int TW, int WM, int WN>
+static void launchWindow(hipStream_t stream, const void *x, const void *w,
+                         const void *bias, void *y, const ConvParams &base) {
+  constexpr int threads =
+      (BM / (WM * kWmma)) * ((TH * TW) / (WN * kWmma)) * 32;
+  const ConvParams pr = withWindowGrid(base, BM, TH, TW);
+  logPick("window", pr);
+  dim3 grid(swizzledGridX(pr), 1u, static_cast<unsigned>(pr.N * pr.group));
+  hipLaunchKernelGGL((conv_window_kernel<BM, TH, TW, WM, WN, kWinKMax>), grid,
+                     dim3(threads), 0, stream,
+                     static_cast<const __half *>(x),
+                     static_cast<const __half *>(w),
+                     static_cast<const __half *>(bias),
+                     static_cast<__half *>(y), pr);
+}
+
+// Whether the window kernel can run this shape at all. Everything here is a
+// correctness gate, not a profitability one: the window extent has to be a
+// compile-time constant for it to be an LDS array, which pins stride, dilation
+// and the largest kernel extent.
+static bool windowEligible(const ConvParams &pr) {
+  return pr.k2 == 1 && pr.in2 == 1 && pr.out2 == 1 && // rank 2
+         pr.s0 == 1 && pr.s1 == 1 && pr.d0 == 1 && pr.d1 == 1 &&
+         pr.k0 >= 1 && pr.k0 <= kWinKMax && pr.k1 >= 1 && pr.k1 <= kWinKMax &&
+         pr.kvol > 1; // a 1x1 has nothing to amortise and no halo to pay for
+}
+
+// How many blocks a window tile makes. Its column blocks tile the plane in two
+// dimensions, so this is not tileCovers with bn = th*tw: a 16x16 tile of a
+// 20x20 output covers it in 2x2 blocks, where 256 flattened positions would
+// cover the same 400 in two.
+static bool windowCovers(const ConvParams &pr, int64_t bm, int64_t th,
+                         int64_t tw, int64_t units) {
+  const int64_t blocks = ((pr.MPerGroup + bm - 1) / bm) *
+                         ((pr.out0 + th - 1) / th) *
+                         ((pr.out1 + tw - 1) / tw) * pr.N * pr.group;
+  return blocks >= units;
+}
+
 // Whether a tile shape is worth using: its row block has to be fully live (a
 // block computes its whole tile whether or not the rows exist) and the grid it
 // produces has to cover the device.
+//
+// `units` is whatever the caller decided a covered device is worth in blocks,
+// and the two ladders disagree: the fp16 one asks for CUs, the scalar one for
+// deviceUnitCount()'s WGPs, which is half as many. Neither is obviously right
+// and both are calibrated rather than derived, so the unit is the caller's to
+// choose and this only does the arithmetic.
 static bool tileCovers(const ConvParams &pr, int64_t bm, int64_t bn,
                        int64_t units) {
   const int64_t blocks = ((pr.MPerGroup + bm - 1) / bm) *
@@ -1114,13 +1426,56 @@ template <>
 bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
                                     const void *w, const void *bias, void *y,
                                     const ConvParams &pr, int64_t units) {
+  // Every coverage test below is in CUs. The rungs were originally calibrated
+  // against deviceUnitCount()'s WGPs, which asked each tile for half the grid
+  // the test was written to demand, and the effect was not that tiles were
+  // accepted too readily in general -- it was that the wide tiles were accepted
+  // on shapes far too small for them.
+  //
+  // Replaying the ladder over a per-shape sweep of every block shape puts
+  // numbers on it. On yolov5lu the wide rungs took shapes making 8 to 28 blocks
+  // and lost 1.06x-1.71x to a narrower tile; raising the bar to CUs and letting
+  // those shapes fall to 128x128 recovers 22.0 ms to 20.8 against a per-shape
+  // optimum of 20.3, and esrgan does not move because the window kernel already
+  // has all of it. The search covered every rung order that promotes one rung
+  // and every threshold in {0, 0.4x, 1x, 2x} per rung; this was the best, and
+  // the rung order it kept is the one already written here.
+  //
+  // Because the last rung is ungated this always dispatches for fp16, so the
+  // caller's second pass and its scalar rungs are now unreachable for __half.
+  // That is the intent: the second pass exists to keep small shapes off
+  // conv_direct, and a WMMA tile does that better than a scalar one.
+  const int64_t cus = units * kUnitsPerWgp;
   // The window-staging kernel gets first refusal on the multi-tap 2-D shapes.
   // Every tile below re-reads the input once per kernel tap, and on those
   // shapes that amplification -- not arithmetic, not occupancy -- is what the
   // runtime is made of, so a tile that removes it wins by more than any tile
-  // that does not can make up. Widest row block first: the window is staged
-  // once per tile row, so fewer rows is less of the cost this kernel exists to
-  // avoid.
+  // that does not can make up. Measured against the best tile below on all 22
+  // eligible shapes in esrgan and yolov5lu, it wins on 21 by 1.08x to 1.96x,
+  // and by 1.6x-1.9x on esrgan's RRDB convolutions, which are the bulk of that
+  // model.
+  //
+  // The exception is the shape it also has a rule against: a channel slice is
+  // a 16-wide WMMA fragment, so a convolution with fewer than 16 input channels
+  // per group stages mostly zeroes and contracts over them too. esrgan's input
+  // conv is 3->64 and measures 0.83x, so require a full fragment's worth of
+  // channels. That is a profitability test and lives here rather than in
+  // windowEligible, which is only about what the kernel can compute at all.
+  //
+  // Widest row block first, for the usual reason -- the window is staged once
+  // per tile row, so fewer rows is less of the cost this kernel exists to
+  // avoid -- but only while the grid still covers the device, because a 16x16
+  // output tile makes few blocks on a 20x20 feature map.
+  if (windowEligible(pr) && pr.CinPerGroup >= kWmma) {
+    if (pr.MPerGroup >= 64 && windowCovers(pr, 64, 16, 16, cus)) {
+      launchWindow<64, 16, 16, 2, 4>(stream, x, w, bias, y, pr);
+      return true;
+    }
+    if (pr.MPerGroup >= 32) {
+      launchWindow<32, 8, 32, 2, 2>(stream, x, w, bias, y, pr);
+      return true;
+    }
+  }
   // The 4x4 wave tile issues 16 WMMAs off 8 fragment loads where 4x2 issues 8
   // off 6, so it asks much less of LDS per unit of matrix-core work -- but it
   // doubles the accumulator register count, which costs occupancy, and it
@@ -1133,7 +1488,7 @@ bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
   // 15-20%). With a thousand-odd channels there is no shortage of blocks, the
   // reduction is long enough that hiding the filter loads is what matters, and
   // the lost occupancy dominates (whisper_l1 loses 33%).
-  if (pr.MPerGroup <= 512 && tileFits(pr, 128, 256, units)) {
+  if (pr.MPerGroup <= 512 && tileFits(pr, 128, 256, cus)) {
     launchWmma<128, 256, 4, 4>(stream, x, w, bias, y, pr);
     return true;
   }
@@ -1144,11 +1499,17 @@ bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
   // kernel -- on whisper_l1 the gather is 51% of the runtime, moving 236 MB for
   // 21 MB of unique data at close to what the memory system can deliver, so
   // there is nothing to win by making it faster, only by doing less of it.
-  if (tileFits(pr, 256, 128, units)) {
+  if (tileFits(pr, 256, 128, cus)) {
     launchWmma<256, 128, 4, 2>(stream, x, w, bias, y, pr);
     return true;
   }
-  if (tileFits(pr, 128, 128, units)) {
+  // No coverage test on this one, deliberately. It is the general-purpose tile
+  // rather than a specialised one, and the sweep says it is what a shape that
+  // fails the two rungs above should get: across yolov5lu's 1x1 shapes and its
+  // strided 3x3s it is the best measured tile or within a few percent of it,
+  // even at 8 blocks on a 40-CU device. Gating it only pushes those shapes onto
+  // the narrow rungs, which is where the 1.3x-1.7x losses were.
+  if (pr.MPerGroup >= 128) {
     launchWmma<128, 128, 4, 2>(stream, x, w, bias, y, pr);
     return true;
   }
@@ -1169,14 +1530,14 @@ bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
   //
   // esrgan is the shape that wants it: 69 of its convs are 192->64 at 250x250,
   // its most expensive by a wide margin, and they sit exactly on this rung.
-  if (tileFits(pr, 64, 256, units)) {
+  if (tileFits(pr, 64, 256, cus)) {
     launchWmma<64, 256, 2, 4>(stream, x, w, bias, y, pr);
     return true;
   }
   // Narrow row block for the grouped and low-channel-count shapes -- the audio
   // encoder's second conv has 32 output channels and would throw away three
   // quarters of a 128-row tile.
-  if (tileFits(pr, 32, 256, units)) {
+  if (tileFits(pr, 32, 256, cus)) {
     launchWmma<32, 256, 2, 2>(stream, x, w, bias, y, pr);
     return true;
   }
@@ -1190,11 +1551,13 @@ bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
   // esrgan is what makes it worth having: its output conv is 64->3 at
   // 1000x1000, and on the direct path that single node costs more than any
   // other conv in the model.
-  if (tileCovers(pr, 16, 256, units)) {
-    launchWmma<16, 256, 1, 2>(stream, x, w, bias, y, pr);
-    return true;
-  }
-  return false;
+  //
+  // Ungated, so this is the floor and no fp16 shape reaches the scalar ladder.
+  // With the tests above stated in CUs two yolov5lu shapes fell off the end,
+  // and the scalar path is not what a shape the matrix cores can take should
+  // get -- a tile that wastes most of its rows still beats conv_direct.
+  launchWmma<16, 256, 1, 2>(stream, x, w, bias, y, pr);
+  return true;
 }
 
 template <typename T>
@@ -1244,8 +1607,18 @@ static int launch(hipStream_t stream, const void *x, const void *w,
       return static_cast<int>(err);
     }
     // Widest scalar tile that fits, then narrower ones. A wider tile does more
-    // FMAs per LDS read -- 8x8 does 64 per 16, where 4x4 does 16 per 8 -- so
-    // the widest one that fits the problem is the fastest.
+    // FMAs per LDS read -- 8x8 does 64 per 16, where 4x4 does 16 per 8 -- and
+    // measured across simplebev's 31 shapes the widest one that fits is indeed
+    // the fastest: 277 ms on 128x128 against 335 on 64x64 and 612 on 32x128,
+    // and the ladder lands within noise of picking the best tile for every
+    // shape individually.
+    //
+    // That ordering was wrong for as long as the register tile spilled. With
+    // the contraction loop fully unrolled the 8x8 tile ran at 5 waves/SIMD out
+    // of scratch and lost by up to 2.3x to 4x4, which reads as "the narrow
+    // tile is better" and is really "the wide tile is broken". The unroll
+    // comment in conv_tiled_kernel has the numbers. Reorder these rungs only
+    // against a sweep taken with a kernel that does not spill.
     if (tileFits(pr, 128, 128, need)) {
       launchTile<T, 128, 128, 8, 8>(stream, x, w, bias, y, pr);
       break;
