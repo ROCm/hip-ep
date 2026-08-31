@@ -7,8 +7,9 @@
 // GQA runtime wrapper (self-contained: optimized fused fast path + legacy
 // decomposed hipBLASLt fallback).
 //
-// The generated IR calls `wrap_group_query_attention` (42-arg ABI, kept in lockstep
-// with the HipToLLVM lowering so the symbol keeps resolving). Path selection:
+// The generated IR calls `wrap_group_query_attention` (42-arg ABI, kept in
+// lockstep with the HipToLLVM lowering so the symbol keeps resolving). Path
+// selection:
 //
 //   * Common fp16 causal GQA (head_dim in {64,128,256}, templated decode
 //     geometry) -> optimized fused custom kernels:
