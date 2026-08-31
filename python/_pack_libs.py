@@ -22,11 +22,11 @@ CRT_LIBS = [
     "user32.lib",
 ]
 
+# amdhip64, amd_comgr and hiprtc are deliberately absent: the upstream
+# onnxruntime-ep-amdgpu wheel installs those into the same package directory, and
+# two distributions writing the same filename break each other on uninstall.
 ROCM_DLL_GROUPS = [
-    ["amdhip64*.dll"],
-    ["amd_comgr*.dll"],
     ["hipblaslt.dll", "libhipblaslt.dll"],
-    ["hiprtc*.dll"],
 ]
 
 HIPBLASLT_DATA = ("hipblaslt", "library")
@@ -108,7 +108,9 @@ def main():
         "library is required; the JIT compiler is linked into it.",
     )
     ap.add_argument(
-        "--dest", required=True, help="Destination dir (the wheel's onnxruntime/capi)."
+        "--dest",
+        required=True,
+        help="Destination dir (the wheel's onnxruntime_ep_amdgpu).",
     )
     ap.add_argument(
         "--rocm-dist",

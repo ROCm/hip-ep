@@ -14,10 +14,11 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 # staged under the build dir, the wheel lands in <build>/python/dist.
 set(_pkg_src "${CMAKE_CURRENT_SOURCE_DIR}")
 set(_stage "${CMAKE_CURRENT_BINARY_DIR}/pkg")
-# Native artifacts are staged into the onnxruntime/capi namespace package so the
-# wheel ships them at onnxruntime/capi/ (platlib), installing next to
-# onnxruntime.dll cross-platform.
-set(_libs_dir "${_stage}/onnxruntime/capi")
+# Native artifacts are staged into the onnxruntime_ep_amdgpu package so they
+# install next to the AMD GPU umbrella EP from the upstream wheel of the same
+# name. hip-backend.dll resolves "hipgpu.dll" by bare name, which only works
+# when both sit in one directory.
+set(_libs_dir "${_stage}/onnxruntime_ep_amdgpu")
 set(_dist_dir "${CMAKE_CURRENT_BINARY_DIR}/dist")
 
 set(MORPHIZEN_HIP_ARCH "${HIP_ARCHITECTURES}")
@@ -87,8 +88,8 @@ add_custom_target(wheel ALL
           "${_pkg_src}/setup.py"
           "${_stage}/"
   # 2. Stage native artifacts (EP lib + per-arch custom-kernels runtime
-  #    DLLs/SOs + CRT import libs) into the onnxruntime/capi namespace
-  #    package dir so the wheel ships them at onnxruntime/capi/ (platlib).
+  #    DLLs/SOs + CRT import libs) into the onnxruntime_ep_amdgpu namespace
+  #    package dir so the wheel ships them at onnxruntime_ep_amdgpu/ (platlib).
   COMMAND ${CMAKE_COMMAND} -E rm -rf "${_libs_dir}"
   COMMAND ${Python3_EXECUTABLE} "${_pkg_src}/_pack_libs.py"
           ${_dll_args}

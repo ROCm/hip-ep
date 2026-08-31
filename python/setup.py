@@ -5,9 +5,10 @@
 """Setuptools shim.
 
 Metadata + packaging live in the generated pyproject.toml (the native artifacts
-ship as package-data of the ``onnxruntime.capi`` namespace package). This file
-only forces a platform-specific, Python-ABI-agnostic wheel tag (py3-none-<plat>),
-since the wheel ships prebuilt native libraries, not a Python extension.
+ship as package-data of the ``onnxruntime_ep_amdgpu`` namespace package). This
+file only forces a platform-specific, Python-ABI-agnostic wheel tag
+(py3-none-<plat>), since the wheel ships prebuilt native libraries, not a Python
+extension.
 """
 
 import sysconfig
@@ -22,8 +23,8 @@ except ImportError:  # older setuptools without the vendored command
 
 class bdist_wheel(_bdist_wheel):
     # Keep the package content at the wheel root (Root-Is-Purelib: true) so it
-    # ships as onnxruntime/capi/... (like ONNX Runtime) rather than relocated
-    # under .data/purelib/. The bundled DLLs don't link libpython, so the tag is
+    # ships as onnxruntime_ep_amdgpu/... rather than relocated under
+    # .data/purelib/. The bundled DLLs don't link libpython, so the tag is
     # py3-none-<platform>: ABI-agnostic but platform-specific. We compute the
     # platform tag ourselves because a "pure" wheel would otherwise report
     # plat == "any".

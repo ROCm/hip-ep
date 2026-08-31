@@ -19,3 +19,11 @@ cpptrace;https://github.com/jeremy-rifkin/cpptrace.git;v0.8.3
 ##
 therock_windows;https://github.com/ROCm/hip-ep/releases/download/v0.3.0;therock-dist-windows-gfx1151-7.14.0
 therock_linux;https://repo.amd.com/rocm/tarball;7.11.0
+##
+## MIGraphX SDK, consumed only by the AMD GPU umbrella EP build in the CI
+## amdgpu job (this project does not link MIGraphX): find_package(migraphx)
+## prefix plus problem_cache.json at its root. hash column = MIGraphX short
+## commit; the tarball is a transfer of the AMDMIGraphX build that ships in the
+## Windows ML MSIX, since its origin (an AMD-internal Artifactory) is not
+## reachable from GitHub-hosted runners.
+migraphx_windows;https://github.com/ROCm/hip-ep/releases/download/v0.3.0;migraphx-sdk-windows-1217ce1d

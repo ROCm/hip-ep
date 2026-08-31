@@ -365,24 +365,30 @@ jobs:
           $model = "${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\amdgpu-oga-models\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml"
           if (-not (Test-Path $model)) { Write-Host "[SKIP] model not found: $model"; exit 0 }
 
-          # The morphizen wheel now bundles the whole AMD GPU umbrella chain
-          # (amdgpu-ep.dll + hip-backend.dll + hipgpu.dll + custom_kernels) into
-          # onnxruntime/capi/, next to onnxruntime.dll where OGA discovers the
-          # EP. No DLL injection needed — exercise the wheel path end-to-end.
+          # The umbrella wheel owns onnxruntime_ep_amdgpu/ (its __init__.py sets
+          # up the DLL search path) and our wheel adds hipgpu.dll + custom_kernels
+          # into that same directory, so the whole chain resolves by co-location.
+          # No DLL injection needed — exercise the wheel path end-to-end.
           $pkg = "$PWD\wheelpkg"
           $venv = "$PWD\oga-smoke-venv"
           if (Test-Path $venv) { Remove-Item $venv -Recurse -Force }
           python -m venv $venv
           $py = "$venv\Scripts\python.exe"
 
+          # --no-index because onnxruntime-ep-hip now depends on
+          # onnxruntime-ep-amdgpu, which is not on PyPI: pip has to take the local
+          # wheel rather than try to resolve it.
           Push-Location "$pkg\wheels"
-          & $py -m pip install --quiet `
+          & $py -m pip install --quiet --no-index `
             (Get-Item onnxruntime_directml-*.whl).Name `
+            (Get-Item onnxruntime_ep_amdgpu-*.whl).Name `
             (Get-Item onnxruntime_ep_hip-*.whl).Name `
-            (Get-Item onnxruntime_genai_directml-*.whl).Name `
-            psutil tqdm pandas
+            (Get-Item onnxruntime_genai_directml-*.whl).Name
           Pop-Location
           if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] wheel install failed"; exit 1 }
+
+          & $py -m pip install --quiet psutil tqdm pandas
+          if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] benchmark deps install failed"; exit 1 }
 
           New-Item -ItemType Directory -Force -Path oga-smoke-results | Out-Null
           & $py "$pkg\run_onnx.py" --benchmark "$pkg\benchmark_e2e.py" `

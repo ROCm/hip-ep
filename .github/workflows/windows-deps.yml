@@ -17,7 +17,7 @@ on:
         description: Cache key holding the ONNX Runtime install prefix.
         value: ${{ jobs.ort.outputs.cache_key }}
       amdgpu_cache_key:
-        description: Cache key holding amdgpu-ep.dll + hip-backend.dll.
+        description: Cache key holding the onnxruntime_ep_amdgpu wheel + problem_cache.json.
         value: ${{ jobs.amdgpu.outputs.cache_key }}
       oga_cache_key:
         description: Cache key holding the OGA artifact set.
@@ -33,6 +33,11 @@ env:
   OGA_VERSION: "0.14.0"
   OGA_PR_PATCHES: "2194"
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
+  # AMD GPU umbrella EP, from the upstream repo's gpuep-releases/gpuep-rel-2610.2
+  # release branch (not main: main defaults USE_HIP to OFF and has no
+  # MIGRAPHX_EP_PROBLEM_CACHE). Pinned to the commit AMD's packaging pipeline
+  # builds, so it matches the MIGraphX SDK pinned in cmake/deps.txt.
+  AMDGPU_EP_REF: "05eaa2a938f71e98b49bd1be3fb03720167be5cc"
 
 jobs:
   llvm:
@@ -273,10 +278,29 @@ jobs:
       cache_key: ${{ steps.key.outputs.value }}
 
     steps:
+      # cmake/deps.txt pins the MIGraphX SDK and TheRock SDK this job downloads,
+      # so it is both the download manifest and the cache-key input. Only cmake/
+      # is needed; the blob hash below reads the tree, not the working copy.
+      - name: Checkout deps manifest
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: source-hip-ep
+          sparse-checkout: cmake
+          fetch-depth: 1
+          show-progress: false
+
+      # Keying on deps.txt's blob hash invalidates the cache on any pin bump
+      # (MIGraphX, TheRock) without enumerating versions here. --short=12 is
+      # explicit because git's default abbreviation length grows with the object
+      # count, which would silently change the key.
       - name: Compute cache key
         id: key
         shell: bash
-        run: echo "value=windows-amdgpu-a1318ed-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
+        working-directory: source-hip-ep
+        run: |
+          DEPS_HASH=$(git rev-parse --short=12 HEAD:cmake/deps.txt)
+          EP_REF="${{ env.AMDGPU_EP_REF }}"
+          echo "value=windows-amdgpu-${EP_REF:0:7}-deps${DEPS_HASH}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
 
       - name: Probe amdgpu-artifacts
         id: cache-amdgpu
@@ -300,10 +324,10 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Setup MSVC environment
-        if: steps.cache-amdgpu.outputs.cache-hit != 'true'
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
-
+      # No msvc-dev-cmd here: build.py replaces os.environ wholesale with what
+      # vcvars64.bat reports, and it skips running vcvars when VSINSTALLDIR is
+      # already set -- which would leave the environment empty and hide ninja and
+      # sccache. It locates the toolchain itself via vswhere.
       - name: Prepare sccache local cache
         if: steps.cache-amdgpu.outputs.cache-hit != 'true'
         shell: bash
@@ -328,41 +352,87 @@ jobs:
         if: steps.cache-amdgpu.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: zz002/onnxruntime-ep-amdgpu
-          ref: a1318edb3c5b87d539bd797eff3addaa7ba2ddda
+          repository: onnxruntime/onnxruntime-ep-amdgpu
+          ref: ${{ env.AMDGPU_EP_REF }}
           path: source-amdgpu
           fetch-depth: 1
           show-progress: false
 
+      # MIGraphX SDK (find_package(migraphx) prefix, and problem_cache.json at
+      # its root) plus the TheRock ROCm SDK (find_package(hip)). This job has no
+      # TheRock otherwise: elsewhere cmake/deps.cmake downloads it during the
+      # project's own configure, which does not happen here.
+      - name: Fetch MIGraphX + TheRock SDKs
+        if: steps.cache-amdgpu.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEPS="source-hip-ep/cmake/deps.txt"
+          fetch_dep() {
+            local name="$1" dest="$2"
+            local line url base
+            line=$(grep -E "^${name};" "$DEPS")
+            url=$(echo "$line" | cut -d';' -f2)
+            base=$(echo "$line" | cut -d';' -f3)
+            echo "[$name] $url/$base.tar.gz"
+            curl -sSL --fail -o "$RUNNER_TEMP/$base.tar.gz" "$url/$base.tar.gz"
+            mkdir -p "$dest"
+            tar -xzf "$RUNNER_TEMP/$base.tar.gz" -C "$dest" --strip-components=1
+          }
+          fetch_dep migraphx_windows "${{ runner.workspace }}/migraphx-sdk"
+          fetch_dep therock_windows "${{ runner.workspace }}/therock"
+          test -f "${{ runner.workspace }}/migraphx-sdk/lib/cmake/migraphx/migraphx-config.cmake"
+          test -f "${{ runner.workspace }}/migraphx-sdk/problem_cache.json"
+          test -f "${{ runner.workspace }}/therock/lib/cmake/hip/hip-config.cmake"
+
+      # Build through the repo's own build.py rather than a hand-written cmake
+      # line: it derives the cmake arguments from --use_amdgpu / the three *_home
+      # paths, and --build_wheel packs every backend plus the MIGraphX and
+      # DirectML runtimes shipped next to them, so the artifact set follows
+      # upstream instead of a list maintained here.
+      #
+      # Do not pass --target: _build_targets emits `-target` (one dash), so the
+      # default all-target build is the working path. --use_cache is skipped too;
+      # on Windows it only sets BUILD_CACHE and never wires up a launcher, hence
+      # sccache goes through --cmake_extra_defines.
       - name: Build amdgpu-ep
         if: steps.cache-amdgpu.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          # onnxruntime-ep-amdgpu requires CMake >= 4.2; the runner's system
-          # cmake is 3.31, so use a pip-provided cmake for this build.
+          set -euo pipefail
+          # The repo needs CMake >= 4.2 and uses 4.x-only syntax; the runner's
+          # system cmake is older.
           python -m pip install -q "cmake>=4.2"
           CMAKE="$(python -c "import cmake, os; print(os.path.join(cmake.CMAKE_BIN_DIR, 'cmake.exe'))")"
           echo "Using $("$CMAKE" --version | head -1)"
-          "$CMAKE" -G Ninja -S source-amdgpu -B "${{ runner.workspace }}/build-amdgpu" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DUSE_AMDGPU=ON \
-            -DCMAKE_PREFIX_PATH="${{ runner.workspace }}/ort-install" \
-            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-          "$CMAKE" --build "${{ runner.workspace }}/build-amdgpu" --target amdgpu-ep hip-ep
+          MIGRAPHX_SDK="${{ runner.workspace }}/migraphx-sdk"
+          python source-amdgpu/tools/ci_build/build.py \
+            --build_dir "${{ runner.workspace }}/build-amdgpu" \
+            --config Release \
+            --cmake_generator Ninja \
+            --cmake_path "$CMAKE" \
+            --use_amdgpu \
+            --onnxrt_home "${{ runner.workspace }}/ort-install" \
+            --migraphx_home "$MIGRAPHX_SDK" \
+            --hip_path "${{ runner.workspace }}/therock" \
+            --build_wheel \
+            --cmake_extra_defines \
+              "MIGRAPHX_EP_PROBLEM_CACHE=$MIGRAPHX_SDK/problem_cache.json" \
+              CMAKE_C_COMPILER_LAUNCHER=sccache \
+              CMAKE_CXX_COMPILER_LAUNCHER=sccache
 
           ARTIFACTS="${{ runner.workspace }}/amdgpu-artifacts"
           mkdir -p "$ARTIFACTS"
-          for dll in amdgpu-ep.dll hip-backend.dll; do
-            SRC=$(find "${{ runner.workspace }}/build-amdgpu" -name "$dll" -type f | head -1)
-            if [ -z "$SRC" ]; then
-              echo "ERROR: $dll not found in build tree"
-              exit 1
-            fi
-            cp "$SRC" "$ARTIFACTS/"
-            echo "Cached $dll"
-          done
+          WHEEL=$(find "${{ runner.workspace }}/build-amdgpu" -name 'onnxruntime_ep_amdgpu-*.whl' -type f | head -1)
+          if [ -z "$WHEEL" ]; then
+            echo "ERROR: onnxruntime_ep_amdgpu wheel not found in build tree"
+            exit 1
+          fi
+          cp "$WHEEL" "$ARTIFACTS/"
+          echo "Cached $(basename "$WHEEL")"
+          # The wheel's packing globs only *.dll/*.pdb/*.exe, so the tuning DB
+          # has to be carried separately.
+          cp "$MIGRAPHX_SDK/problem_cache.json" "$ARTIFACTS/"
 
       - name: Save amdgpu-artifacts
         if: steps.cache-amdgpu.outputs.cache-hit != 'true'
