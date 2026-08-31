@@ -14,21 +14,41 @@ namespace hipep {
 
 // Never invoked on a healthy path: hip-ep's GetCapability claims and fuses
 // the node into a MetaDef before ORT would ever need a CPU kernel for it.
-// Reaching Compute() means hip-ep failed to claim/fuse a node it advertised
-// a schema for; this is a defensive guardrail, not a real implementation.
+// Reaching Compute() means the node was not assigned to hipgpu -- either
+// GetCapability declined it, or hipgpu was never selected for this session,
+// which is possible because schemas must be registered at Model::Load, before
+// any backend selection happens. This is a defensive guardrail that reports
+// what is missing, not a real implementation.
 struct SchemaOnlyStubKernel {
-  explicit SchemaOnlyStubKernel(const OrtKernelInfo *info) : info_(info) {}
+  // The OrtKernelInfo handle is only valid for the duration of CreateKernel:
+  // ORT hands over the address of a stack local (OpKernelInfo built in
+  // KernelRegistryManager::CreateKernel, reinterpret_cast in
+  // CustomOpKernel's ctor), and unlike ORT's own OpKernel base class a custom
+  // op gets no copy of it. Read the node name here or not at all.
+  explicit SchemaOnlyStubKernel(const OrtKernelInfo *info)
+      : node_name_(NodeNameOf(info)) {}
 
   void Compute(OrtKernelContext * /*context*/) {
     ORT_CXX_API_THROW(
-        "hip-ep custom op node '" + Ort::ConstKernelInfo(info_).GetNodeName() +
-            "' was not claimed/fused by the AMD GPU EP; schema-only custom "
-            "ops have no CPU kernel.",
+        "hip-ep-registered custom op node '" + node_name_ +
+            "' fell back to CPU: this op is implemented only as a GPU kernel "
+            "in the hip-ep backend and has no CPU kernel.",
         ORT_NOT_IMPLEMENTED);
   }
 
 private:
-  const OrtKernelInfo *info_;
+  // Kernel construction must not throw, so that an unclaimed node still
+  // reaches Compute and reports ORT_NOT_IMPLEMENTED rather than surfacing as
+  // an opaque session-initialization failure.
+  static std::string NodeNameOf(const OrtKernelInfo *info) noexcept {
+    try {
+      return Ort::ConstKernelInfo(info).GetNodeName();
+    } catch (...) {
+      return "<unknown>";
+    }
+  }
+
+  std::string node_name_;
 };
 
 using SchemaOnlyShapeInferFn =
