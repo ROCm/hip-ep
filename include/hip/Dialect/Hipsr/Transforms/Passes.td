@@ -140,17 +140,30 @@ def MaterializeInitTensorsPass
   let summary = "Materialize hipsr.placeholder inits into tensor.empty";
   let description = [{
     Materializes every `hipsr.placeholder` init tensor inside each
-    `hipsr.pool_domain`, leaving the domain body in three ordered groups:
+    `hipsr.pool_domain`, leaving the domain body in four ordered groups:
 
     1. shape computation: one `scf.execute_region` per placeholder, yielding
        `!shape.shape` and holding the body moved out of the placeholder's
        `shape_region`;
     2. tensor allocation: `shape.get_extent` plus `tensor.empty` per
        placeholder result, taking rank and element type from that result type;
-    3. data: the hipsr DPS ops, now initialized by the `tensor.empty` values.
+    3. data: the hipsr DPS ops, now initialized by the `tensor.empty` values;
+    4. shape preservation: one `hipsr.preserve_shape` per placeholder result,
+       tying a shape to the result its consumer ties to that placeholder, so
+       the association survives bufferization.
 
     Every `scf.execute_region` precedes every `tensor.empty`, which precedes
-    every data op, so `hipsr-pool-alloc` sees all buffer sizes at domain entry.
+    every data op, which precedes every `hipsr.preserve_shape`, so
+    `hipsr-pool-alloc` sees all buffer sizes at domain entry.
+
+    The `hipsr.preserve_shape` link names the consumer's result rather than
+    its `tensor.empty` init: in tensor form those are two different values,
+    and naming the init would describe the value the buffer held before the
+    write. A destination-style consumer's type constraint guarantees
+    `type(outs) == type(result)`, so its link reuses the placeholder's
+    already-computed shape. `hipsr.compute` carries no such guarantee -- its
+    result may be a reshaped or cast view of its `outs` operand -- so its link
+    instead reads the shape straight off the result with `shape.shape_of`.
 
     Runs after `hipsr-partition-pool-domains` and requires shape regions
     already filled by `hipsr-populate-shape-region`. `hipsr.placeholder` has no
