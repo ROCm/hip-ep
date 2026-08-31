@@ -15,7 +15,7 @@ description = "hipgpu Execution Provider for ONNX Runtime (AMD GPU via HIP/ROCm)
 requires-python = ">=3.8"
 license = { text = "MIT" }
 authors = [{ name = "Advanced Micro Devices, Inc." }]
-dependencies = ["onnxruntime-ep-amdgpu"]
+dependencies = []
 
 [tool.setuptools]
 [tool.setuptools.packages.find]
