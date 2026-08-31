@@ -48,9 +48,16 @@ inline bool hipdnn_ep_perf_enabled() {
 // A non-empty path writes a chrome://tracing JSON of the per-op timeline (one
 // fenceless marker per op, GPU time derived by differencing consecutive
 // markers) and also flips hipdnn_ep_perf_enabled() on.
+// Heap-allocated and never destroyed: a function-local static with a
+// non-trivial destructor emits `__cxa_atexit(dtor, &path, &__dso_handle)`, and
+// that `__dso_handle` reference cannot survive JIT-linking this bitcode into
+// the EP process (see the long-form explanation on WeakStore::storage() in
+// op_state.h). The `bool` flags above need no such treatment -- a trivial
+// destructor registers nothing.
 inline const std::string &hipdnn_ep_trace_path() {
-  static const std::string path = hipdnn_ep::env_string("HIPDNN_EP_TRACE_FILE");
-  return path;
+  static const std::string *path =
+      new std::string(hipdnn_ep::env_string("HIPDNN_EP_TRACE_FILE"));
+  return *path;
 }
 inline bool hipdnn_ep_trace_enabled() {
   return !hipdnn_ep_trace_path().empty();

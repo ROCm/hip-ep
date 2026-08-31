@@ -109,9 +109,21 @@ private:
     std::mutex mutex;
     std::map<Key, std::weak_ptr<Val>> entries;
   };
+  // Heap-allocated and never destroyed, rather than a plain `static Storage s`.
+  // A function-local static whose type has a non-trivial destructor makes the
+  // compiler emit `__cxa_atexit(dtor, &s, &__dso_handle)`. `__dso_handle` is
+  // hidden-visibility and per-DSO, so the compiler assumes it is in the same
+  // linked output and reaches it with a direct PC32 -- no GOT entry, no stub,
+  // nothing a linker can redirect. When this bitcode is JIT-linked into the EP
+  // process that symbol instead resolves to the host library's copy, at
+  // whatever distance ASLR chose; past the 2 GB a PC32 reaches, the fixup
+  // fails and the entire runtime module fails to materialize, taking every
+  // symbol in it down with it. Leaking the store is cheap: entries are
+  // weak_ptrs keyed by device id, and the values are owned by the sessions
+  // holding the shared_ptrs, so only the map and mutex shell outlive main.
   static Storage &storage() {
-    static Storage s;
-    return s;
+    static Storage *s = new Storage();
+    return *s;
   }
 };
 
