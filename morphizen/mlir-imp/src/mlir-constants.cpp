@@ -75,6 +75,19 @@ mlir::Type onnxElementTypeToMlirDenseElementType(int element_type,
                                                  mlir::OpBuilder &builder) {
   mlir::Type elem = onnxElementTypeToMlirElementType(element_type, builder);
   if (auto intTy = mlir::dyn_cast<mlir::IntegerType>(elem)) {
+    // Preserve unsigned 16-bit (ONNX UINT16) on inline dense constants so they
+    // retain their unsigned identity through lowering, matching how EXTERNAL
+    // UINT16 initializers are already imported (ui16, via the offset/size path
+    // that bypasses DenseElementsAttr). The HipToLLVM QDQ dtype classifier must
+    // distinguish UINT16 (uint16) from signed INT16 (int16, added for the Quark
+    // ResNet50-INT8 bias): collapsing UINT16 to signless i16 here makes it
+    // indistinguishable from INT16, so small inline quantized constants (e.g.
+    // google_bert's per-layer attention sqrt(d_k) scaling scalar) get read as
+    // INT16 and sign-flip on values >= 32768. LLVM 22 MLIR accepts unsigned
+    // DenseElementsAttr, and ui16 memrefs already flow end-to-end for external
+    // constants, so keeping ui16 here is consistent and safe.
+    if (intTy.getWidth() == 16 && intTy.isUnsigned())
+      return elem;
     if (!intTy.isSignless())
       return mlir::IntegerType::get(builder.getContext(), intTy.getWidth());
   }
