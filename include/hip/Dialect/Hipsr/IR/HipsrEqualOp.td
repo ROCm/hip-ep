@@ -10,8 +10,9 @@ def Hipsr_EqualOp : Hipsr_DpsOp<"equal",
     Elementwise equality with ONNX broadcasting: `init = lhs == rhs`.
 
     Shapes are right-aligned, and each aligned pair must be equal or contain a
-    one. `init` holds `ui8` rather than the operand element type, because the
-    runtime writes one byte per result element.
+    one. `init` holds `i1` rather than the operand element type, because a
+    comparison yields a bool whatever it compared. The runtime stores that bool
+    one byte per element.
   }];
 
   let arguments = (ins
