@@ -116,8 +116,6 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
-      # HIP_WHEEL_EXTRA_DLLS is intentionally unset: the umbrella chain now ships
-      # in the upstream wheel, which ours installs alongside.
       - name: Build hip-ep
         shell: bash
         run: |
@@ -159,34 +157,7 @@ jobs:
           cp "${{ runner.workspace }}/install/bin/"*.dll staging/bin/ 2>/dev/null || true
           cp "${{ runner.workspace }}/install/bin/"*.exe staging/bin/ 2>/dev/null || true
 
-          # Skip the ROCm and DirectML runtimes the wheel also carries: TheRock
-          # below and ort-install above provide the versions hipgpu.dll and
-          # onnxruntime.dll were built against, and staging/bin is flat.
-          AMDGPU_WHEEL=$(find "${{ runner.workspace }}/amdgpu-artifacts" \
-            -name "onnxruntime_ep_amdgpu-*.whl" -type f | head -1)
-          if [ -z "$AMDGPU_WHEEL" ]; then
-            echo "ERROR: onnxruntime_ep_amdgpu wheel missing from amdgpu-artifacts"
-            exit 1
-          fi
-          UNPACK="${{ runner.workspace }}/amdgpu-unpacked"
-          rm -rf "$UNPACK"
-          python -c "import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" \
-            "$AMDGPU_WHEEL" "$UNPACK"
-          for f in "$UNPACK/onnxruntime_ep_amdgpu/"*.dll "$UNPACK/onnxruntime_ep_amdgpu/"*.exe; do
-            [ -f "$f" ] || continue
-            case "$(basename "$f")" in
-              amd_comgr*|amdhip64*|hiprtc*|DirectML.dll) continue ;;
-            esac
-            cp "$f" staging/bin/
-          done
-          # MIGraphX discovers its tuning DB next to migraphx-backend.dll; the
-          # wheel cannot carry it (its packing globs only dll/pdb/exe).
-          cp "${{ runner.workspace }}/amdgpu-artifacts/problem_cache.json" staging/bin/
-          if [ ! -f staging/bin/amdgpu-ep.dll ]; then
-            echo "ERROR: amdgpu-ep.dll missing after unpacking $AMDGPU_WHEEL"
-            ls -1 "$UNPACK/onnxruntime_ep_amdgpu/" || true
-            exit 1
-          fi
+          cp "${{ runner.workspace }}/amdgpu-artifacts/bin/"* staging/bin/
 
           # Smoke: every per-arch kernel DLL must be present in staging/bin/
           # (LlvmIrJit dlopens custom_kernels_<gcnArchName>.dll at runtime).
@@ -296,8 +267,6 @@ jobs:
             -name "onnxruntime_genai_directml-*.whl" -type f | head -1)
           EP_WHEEL=$(find "../build/$(basename "$PWD")/python/dist" \
             -name "onnxruntime_ep_hip-*.whl" -type f | head -1)
-          # The umbrella wheel owns onnxruntime_ep_amdgpu/__init__.py, which our
-          # wheel's files land next to, so it has to ship in the same set.
           AMDGPU_WHEEL=$(find "${{ runner.workspace }}/amdgpu-artifacts" \
             -name "onnxruntime_ep_amdgpu-*.whl" -type f | head -1)
           if [ -z "$ORT_WHEEL" ] || [ -z "$OGA_WHEEL" ] || [ -z "$EP_WHEEL" ] || [ -z "$AMDGPU_WHEEL" ]; then

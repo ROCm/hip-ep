@@ -33,9 +33,6 @@ env:
   OGA_VERSION: "0.14.0"
   OGA_PR_PATCHES: "2194"
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
-  # Upstream's gpuep-rel-2610.2 branch, not main: main defaults USE_HIP off and
-  # has no MIGRAPHX_EP_PROBLEM_CACHE. This commit is the one AMD's packaging
-  # pipeline builds, so it matches the MIGraphX SDK in cmake/deps.txt.
   AMDGPU_EP_REF: "05eaa2a938f71e98b49bd1be3fb03720167be5cc"
 
 jobs:
@@ -277,7 +274,6 @@ jobs:
       cache_key: ${{ steps.key.outputs.value }}
 
     steps:
-      # deps.txt is both the download manifest below and the cache-key input.
       - name: Checkout deps manifest
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -286,8 +282,6 @@ jobs:
           fetch-depth: 1
           show-progress: false
 
-      # deps.txt's blob hash invalidates the cache on any pin bump. --short=12 is
-      # explicit: git's default abbreviation length grows with the object count.
       - name: Compute cache key
         id: key
         shell: bash
@@ -319,9 +313,6 @@ jobs:
         with:
           python-version: "3.14"
 
-      # No msvc-dev-cmd: build.py replaces os.environ with what vcvars reports, and
-      # skips vcvars when VSINSTALLDIR is already set, which would leave the
-      # environment empty. It finds the toolchain itself via vswhere.
       - name: Prepare sccache local cache
         if: steps.cache-amdgpu.outputs.cache-hit != 'true'
         shell: bash
@@ -352,16 +343,12 @@ jobs:
           fetch-depth: 1
           show-progress: false
 
-      # find_package prefixes for migraphx and hip. This job needs its own copy:
-      # deps.cmake fetches TheRock during the project's configure, not run here.
       - name: Fetch MIGraphX + TheRock SDKs
         if: steps.cache-amdgpu.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
           DEPS="source-hip-ep/cmake/deps.txt"
-          # POSIX paths throughout: tar rejects a backslash path for -C, and reads
-          # a leading "D:\..." for the archive itself as a remote "host:path".
           TMP=$(cygpath -u "$RUNNER_TEMP")
           WS=$(cygpath -u '${{ runner.workspace }}')
           fetch_dep() {
@@ -381,11 +368,6 @@ jobs:
           test -f "$WS/migraphx-sdk/problem_cache.json"
           test -f "$WS/therock/lib/cmake/hip/hip-config.cmake"
 
-      # --build_wheel packs every backend plus the MIGraphX and DirectML runtimes
-      # staged beside them, so the artifact set follows upstream rather than a list
-      # maintained here. Two quirks of build.py: --target is unusable
-      # (_build_targets emits `-target`, one dash) and --use_cache wires up no
-      # launcher on Windows, hence sccache via --cmake_extra_defines.
       - name: Build amdgpu-ep
         if: steps.cache-amdgpu.outputs.cache-hit != 'true'
         shell: bash
@@ -412,8 +394,13 @@ jobs:
               CMAKE_C_COMPILER_LAUNCHER=sccache \
               CMAKE_CXX_COMPILER_LAUNCHER=sccache
 
+          INSTALL="${{ runner.workspace }}/amdgpu-install"
+          rm -rf "$INSTALL"
+          "$CMAKE" --install "${{ runner.workspace }}/build-amdgpu/Release" --prefix "$INSTALL"
+
           ARTIFACTS="${{ runner.workspace }}/amdgpu-artifacts"
-          mkdir -p "$ARTIFACTS"
+          rm -rf "$ARTIFACTS"
+          mkdir -p "$ARTIFACTS/bin"
           WHEEL=$(find "${{ runner.workspace }}/build-amdgpu" -name 'onnxruntime_ep_amdgpu-*.whl' -type f | head -1)
           if [ -z "$WHEEL" ]; then
             echo "ERROR: onnxruntime_ep_amdgpu wheel not found in build tree"
@@ -421,9 +408,17 @@ jobs:
           fi
           cp "$WHEEL" "$ARTIFACTS/"
           echo "Cached $(basename "$WHEEL")"
-          # The wheel's packing globs only *.dll/*.pdb/*.exe, so the tuning DB
-          # has to be carried separately.
-          cp "$MIGRAPHX_SDK/problem_cache.json" "$ARTIFACTS/"
+
+          for f in "$INSTALL"/*; do
+            [ -f "$f" ] || continue
+            case "$(basename "$f")" in
+              amd_comgr*|amdhip64*|hiprtc*|DirectML.dll) continue ;;
+            esac
+            cp "$f" "$ARTIFACTS/bin/"
+          done
+          test -f "$ARTIFACTS/bin/amdgpu-ep.dll"
+          test -f "$ARTIFACTS/bin/problem_cache.json"
+          echo "Cached $(ls -1 "$ARTIFACTS/bin" | wc -l) files into bin/"
 
       - name: Save amdgpu-artifacts
         if: steps.cache-amdgpu.outputs.cache-hit != 'true'
