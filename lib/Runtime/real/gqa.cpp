@@ -226,12 +226,21 @@ static inline int kv_dtype_abi(KvCacheFormat f) {
 // plain copy. Only the causal concat/append tail honours it (the no_causal
 // Whisper branches are fp16/fp32-only), so the format decision lives here
 // rather than in a separate helper or at each call site.
+//
+// copy_lo bounds the separate-buffer concat from below: past positions
+// [0, copy_lo) are not copied into present and are left whatever the allocator
+// held. It exists for the one caller that can prove it will not read them back
+// -- a sliding-window layer at decode passes the same lower bound it scores
+// from -- and must be 0 for everyone else. It is required rather than defaulted
+// so that a new call site has to say which it is. The append branches ignore
+// it: they only ever write the new tokens, and an in-place cache has no prefix
+// to copy in the first place.
 static int update_kv_cache(hipStream_t stream, const void *past_key,
                            const void *past_value, const void *new_key,
                            const void *new_value, void *present_key,
                            void *present_value, int B, int past_len, int sq,
                            int G, int d, int past_buf_seq, int present_seq,
-                           const void *seqlens_k_ptr, int elem_sz,
+                           const void *seqlens_k_ptr, int elem_sz, int copy_lo,
                            bool no_causal = false, int skv = -1,
                            KvCacheFormat kv_format = KvCacheFormat::Fp16,
                            const void *k_scale = nullptr,
@@ -286,11 +295,11 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
     // Separate-buffer concat: needs host-side past_len for stride computation.
     if (hip_gqa_kv_cache_concat(stream, past_key, new_key, present_key, B,
                                 past_len, sq, G, d, past_buf_seq, present_seq,
-                                elem_sz, kv_dtype, k_sc) != 0)
+                                elem_sz, kv_dtype, k_sc, copy_lo) != 0)
       return -1;
     if (hip_gqa_kv_cache_concat(stream, past_value, new_value, present_value, B,
                                 past_len, sq, G, d, past_buf_seq, present_seq,
-                                elem_sz, kv_dtype, v_sc) != 0)
+                                elem_sz, kv_dtype, v_sc, copy_lo) != 0)
       return -1;
   } else {
     // In-place append: kernel can read past_len from device via seqlens_k_ptr.
@@ -456,13 +465,22 @@ static int gqa_forward_fused(
     // Append the new token to the KV cache. Quantized cache:
     // quantize-and-append with the static per-channel scale; fp16 cache: plain
     // append. update_kv_cache dispatches on kv_format internally.
+    //
+    // copy_lo stays 0 here even though this path knows its window. Narrowing
+    // the concat needs a separate growing present buffer, and this path never
+    // gets one: seq_len_kv reaches the runtime as the present_key memref's
+    // sequence dim, which for a GroupQueryAttention export with a growing cache
+    // arrives one short of the declared present, and the seqlens_k check above
+    // then rejects the call before it can reach the concat. When the cache is
+    // instead in-place there is no prefix to copy and update_kv_cache appends.
+    // So a bound here would be unreachable, and therefore untestable, code.
     if (update_kv_cache(
             stream, past_key, past_value, kSrc, vSrc, present_key,
             present_value, static_cast<int>(B), static_cast<int>(past_len),
             static_cast<int>(sq), static_cast<int>(G), static_cast<int>(d),
             static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
-            seqlens_k_ptr, static_cast<int>(elem_sz), /*no_causal=*/false,
-            /*skv=*/-1, kv_format, k_scale, v_scale) != 0)
+            seqlens_k_ptr, static_cast<int>(elem_sz), /*copy_lo=*/0,
+            /*no_causal=*/false, /*skv=*/-1, kv_format, k_scale, v_scale) != 0)
       return -1;
 
     {
@@ -661,8 +679,8 @@ static int gqa_forward_fused(
             present_value, static_cast<int>(B), static_cast<int>(past_len),
             static_cast<int>(sq), static_cast<int>(G), static_cast<int>(d),
             static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
-            seqlens_k_ptr, static_cast<int>(elem_sz), /*no_causal=*/false,
-            /*skv=*/-1, kv_format, k_scale, v_scale) != 0)
+            seqlens_k_ptr, static_cast<int>(elem_sz), /*copy_lo=*/0,
+            /*no_causal=*/false, /*skv=*/-1, kv_format, k_scale, v_scale) != 0)
       return -1;
   }
 
@@ -1358,7 +1376,7 @@ static int gqa_forward_hipblaslt(
             present_value, static_cast<int>(B), static_cast<int>(past_len),
             static_cast<int>(sq), static_cast<int>(G), static_cast<int>(d),
             static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
-            seqlens_k_ptr, static_cast<int>(elem_sz)) != 0)
+            seqlens_k_ptr, static_cast<int>(elem_sz), /*copy_lo=*/0) != 0)
       return -1;
 
     // hip_gqa_flash_decode owns every geometry it templates; this fallback
@@ -1555,12 +1573,52 @@ static int gqa_forward_hipblaslt(
   // call argument rather than part of the descriptor, so the offset costs
   // nothing.
   //
+  // The bound is one global lower bound per call rather than a band per query
+  // row. A call's query rows occupy absolute positions
+  // [past_len, past_len + sq), so the oldest key any row of it may attend to is
+  // past_len - local_window_size + 1, and that single value serves the whole
+  // call: rows above the first simply have keys they do not use left in range,
+  // where the mask below drops them exactly as it did before. A true band would
+  // save more on a long windowed prefill, but it needs a per-row score offset
+  // and is a separate effort; this bound needs no per-row state at all.
+  //
+  // At sq == 1 this reduces to total_seq - local_window_size, since past_len is
+  // then total_seq - 1. At a first prefill past_len is 0, the bound is
+  // non-positive, and nothing narrows -- so initial prefill and TTFT are
+  // bit-identical by construction and only continuation prefill changes.
+  //
+  // Applying it to prefill as well as decode is what closes the invariant
+  // rather than just widening the optimisation. The KV copy below skips writing
+  // [0, kv_lo), so some prefix of `present` is never written on a narrowed
+  // step. Every subsequent call reads from its own kv_lo, and because
+  // past_len' == total_seq > past_len, its kv_lo is strictly greater than this
+  // call's: each read range is a strict subset of the previous write range, for
+  // decode and prefill alike. Leaving prefill unnarrowed would break exactly
+  // that -- a continuation prefill would read from 0 into memory a narrowed
+  // decode never wrote, and unwritten memory can hold a non-finite bit pattern
+  // that no finite mask suppresses (the softmax's first pass reduces with
+  // fmaxf, which ignores NaN, but the second pass accumulates it, so one such
+  // key poisons its whole output row).
+  //
   // Restrictions:
-  //  - Decode only (sq == 1). Windowed prefill wants a banded score matrix, not
-  //    a single narrowed range, and that is a separate effort.
-  //  - use_no_expand only. The expand flavour materialises Kexp/Vexp over the
-  //    full range, so narrowing would have to narrow the expand copies too;
-  //    that path is not the default at decode.
+  //  - Not under bidirectional_no_past, which is the one branch where
+  //    total_seq != past_len + sq (there total_seq == skv and past_len == 0, a
+  //    Whisper encoder / cross-attention shape with no past at all). The bound
+  //    above is derived from that identity, so without it kv_lo would be
+  //    computed against the wrong absolute query position.
+  //
+  //    With today's only producer of a window this pairing cannot actually
+  //    occur: the converter recovers a window from the additive mask, so a
+  //    window implies a mask, a mask means attention_bias is non-null, and
+  //    bidirectional_no_past is no_causal && !attention_bias. The guard is kept
+  //    anyway because that is a property of the converter rather than of this
+  //    function's contract -- a producer that stamps a window from a declared
+  //    attribute (opset 25's left_window_size) would not need a mask at all,
+  //    and would reach here with both set.
+  //  - Only with a present cache. kv_lo indexes key positions by their absolute
+  //    position in a BNSD cache page; without present_key / present_value the
+  //    GEMMs read the raw key / value operands, where a past_len derived from
+  //    skv - sq does not describe an offset into anything.
   //
   // A positive local_window_size is a promise that the window is ENFORCED
   // somewhere, and narrowing is exact only because of that. Both of the ways it
@@ -1583,19 +1641,21 @@ static int gqa_forward_hipblaslt(
   // could only arrive as an attribute, because a bidirectional op's window was
   // being ignored rather than applied; now that a window can also come from the
   // mask, gating on no_causal would reject the only case that needs narrowing.
-  // Nothing else changes as a result: no producer emits a window together with
-  // no_causal except the recovery above (GqaConversion sets no_causal=false
-  // explicitly, and the Whisper bidirectional builders set no window).
+  // What no_causal does still gate is bidirectional_no_past below, which is the
+  // shape whose sequence lengths the bound cannot be derived from.
 
   // Number of key positions actually scored, and the first one. kv_span ==
   // total_seq and kv_lo == 0 whenever narrowing is inactive, which keeps every
   // downstream expression below identical to what it was.
   int64_t kv_span = total_seq;
   int64_t kv_lo = 0;
-  if (sq == 1 && use_no_expand && local_window_size > 0 &&
-      local_window_size < total_seq) {
-    kv_span = local_window_size;
-    kv_lo = total_seq - kv_span;
+  if (local_window_size > 0 && !bidirectional_no_past && present_key &&
+      present_value) {
+    const int64_t lo = past_len - local_window_size + 1;
+    if (lo > 0) {
+      kv_lo = lo;
+      kv_span = total_seq - kv_lo;
+    }
   }
 
   //===--------------------------------------------------------------------===//
@@ -1630,8 +1690,11 @@ static int gqa_forward_hipblaslt(
   //===--------------------------------------------------------------------===//
   int64_t sq_chunk = sq;
   if (sq > 1 && !use_no_expand) {
+    // kv_span, matching what the score buffers are actually sized to below: on
+    // a narrowed windowed prefill a row is cheaper, so more rows fit per chunk
+    // and the loop runs fewer times.
     const size_t score_row_bytes =
-        static_cast<size_t>(B) * H * total_seq * (sizeof(float) + elem_sz);
+        static_cast<size_t>(B) * H * kv_span * (sizeof(float) + elem_sz);
     const size_t budget = gqa_score_budget_bytes();
     if (budget > 0 && score_row_bytes > 0 &&
         static_cast<size_t>(sq) * score_row_bytes > budget) {
@@ -1658,8 +1721,13 @@ static int gqa_forward_hipblaslt(
   // explicitly: n is the chunk length but those two operands still advance by
   // the full sq between heads. The score matrices are freshly packed per chunk,
   // so their strides stay at the dense default.
+  //
+  // The key extent is kv_span, not total_seq: Kexp / Vexp are materialised over
+  // the narrowed range and the score matrices are sized to match, so stating
+  // total_seq here would have the GEMMs read and write past the regions
+  // allocated for them.
   auto makeKeys = [&](int64_t n_rows, GqaGemmKey *score, GqaGemmKey *value) {
-    *score = {total_seq,
+    *score = {kv_span,
               n_rows,
               d,
               B * H,
@@ -1671,7 +1739,7 @@ static int gqa_forward_hipblaslt(
               /*strideC=*/0};
     *value = {d,
               n_rows,
-              total_seq,
+              kv_span,
               B * H,
               false,
               /*outputFp32=*/gemm_fp32,
@@ -1761,8 +1829,11 @@ static int gqa_forward_hipblaslt(
   // sq whenever chunking is inactive, so this is the full matrix in that case.
   size_t Qtrans_bytes =
       need_transpose ? static_cast<size_t>(B) * H * sq * d * elem_sz : 0;
+  // Kexp / Vexp span kv_span key positions, not total_seq: the expand copies
+  // below start at kv_lo, so the out-of-window prefix is neither copied nor
+  // allocated for.
   size_t Kexp_bytes =
-      use_no_expand ? 0 : static_cast<size_t>(B) * H * total_seq * d * elem_sz;
+      use_no_expand ? 0 : static_cast<size_t>(B) * H * kv_span * d * elem_sz;
   size_t Vexp_bytes = Kexp_bytes;
   // Both score buffers span kv_span keys, not total_seq: they hold exactly what
   // the Score GEMM writes. These offsets chain into off_S_fp16, off_O, temp_end
@@ -1899,25 +1970,61 @@ static int gqa_forward_hipblaslt(
       // seqlens_k to the append kernel (it would apply the +1 convention).
       // ONNX Attention with is_causal=0 + external mask keeps the standard
       // decode KV path (bidirectional_no_past=false).
+      //
+      // copy_lo is kv_lo, deliberately the identical value and not a separately
+      // derived one: the bytes this skips writing are then exactly the bytes
+      // the Score and Value GEMMs below skip reading, so the narrowing cannot
+      // be half-applied, and a wrong window is wrong identically for both. That
+      // equality is why this needs no gate of its own -- kv_lo is already 0
+      // whenever no window applies.
+      //
+      // It holds across calls as well as within one. This call writes
+      // [kv_lo, total_seq); the next call has past_len' == total_seq >
+      // past_len, so its own kv_lo == past_len' - W + 1 is strictly greater
+      // than this call's, and its read range is a strict subset of what this
+      // call wrote. That is an induction over calls, not a claim about one
+      // step's stride, so it covers a prefill following a decode as well as
+      // decode following decode -- which is the reason the bound above is
+      // applied at every sq rather than only at sq == 1.
+      //
+      // Only the separate-buffer concat can skip anything. When the cache is
+      // in-place (past_key == present_key) the prefix is already there and
+      // update_kv_cache appends, ignoring this.
       HIP_CHECK(update_kv_cache(
           stream, past_key, past_value, kSrc, vSrc, present_key, present_value,
           static_cast<int>(B), static_cast<int>(past_len), static_cast<int>(sq),
           static_cast<int>(G), static_cast<int>(d),
           static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
           (use_no_expand && !bidirectional_no_past) ? seqlens_k_ptr : nullptr,
-          static_cast<int>(elem_sz), bidirectional_no_past,
-          static_cast<int>(skv)));
+          static_cast<int>(elem_sz), static_cast<int>(kv_lo),
+          bidirectional_no_past, static_cast<int>(skv)));
     }
 
     // ---- Steps 6-7: KV Expand [B*G,present_seq,d] -> [B*H,total_seq,d] ----
     // Skipped in no-expand mode: the Score/Value GEMMs read K/V directly from
     // the BNSD cache via per-operand batch strides instead.
     if (!use_no_expand) {
-      const void *kCache = present_key ? present_key : key;
-      const void *vCache = present_value ? present_value : value;
+      // The window is selected by advancing the source base pointer rather than
+      // by a new kernel argument. expand_kv_kernel reads
+      // src[g * src_stride + idx], so one offset shifts every group by the same
+      // amount and src_stride keeps describing the untouched cache page -- the
+      // same trick scoreA / valueA use below. The destination is packed over
+      // kv_span, so its stride and the copy length both shrink with it, which
+      // is what makes the skipped positions cost no threads instead of one
+      // predicated-off thread each.
+      // kv_lo is non-zero only when both present pointers exist (see the
+      // narrowing gate above), so this offset never applies to the raw key /
+      // value fallback.
+      const size_t kvExpandOff = static_cast<size_t>(kv_lo) * d * elem_sz;
+      const void *kCache =
+          static_cast<const char *>(present_key ? present_key : key) +
+          kvExpandOff;
+      const void *vCache =
+          static_cast<const char *>(present_value ? present_value : value) +
+          kvExpandOff;
       int kvSrcStride = static_cast<int>(present_seq * d);
-      int kvDstStride = static_cast<int>(total_seq * d);
-      int expandCopy = static_cast<int>(total_seq * d);
+      int kvDstStride = static_cast<int>(kv_span * d);
+      int expandCopy = static_cast<int>(kv_span * d);
 
       HIP_CHECK(
           hip_gqa_expand_kv(stream, kCache, d_Kexp, static_cast<int>(B * H),
@@ -1937,6 +2044,11 @@ static int gqa_forward_hipblaslt(
     // BNSD with d fastest, so this selects a contiguous span and leaves the
     // per-(b,g) batch stride at present_seq*d. kv_lo is 0 unless the sliding
     // window narrowed the range.
+    //
+    // elem_sz is the cache's element size as well as the GEMM's: unlike
+    // update_kv_cache, gqa_forward_hipblaslt takes no separate kv_format, so
+    // the two cannot differ here. A quantized KV cache would have to pass its
+    // own element size for this offset to stay correct.
     const size_t kv_byte_off = static_cast<size_t>(kv_lo) * d * elem_sz;
     const void *scoreA =
         (use_no_expand ? static_cast<const char *>(present_key) + kv_byte_off
@@ -2065,14 +2177,24 @@ static int gqa_forward_hipblaslt(
           static_cast<int>(elem_sz)));
     }
 
+    // kv_inplace and the three sequence lengths are here because they decide
+    // whether any of this narrowing does anything: the copy can only be skipped
+    // on the separate-buffer branch, which is exactly kv_inplace=0, and that in
+    // turn is visible only as present_seq differing from past_buf_seq. A model
+    // exporting its cache in place takes the append branch and the copy_lo
+    // below is inert, which is otherwise indistinguishable from the narrowing
+    // failing to engage.
     RUNTIME_DEBUG_LOG(
         "[REAL] GQA hipBLASLt: B=%lld sq=%lld sq_chunk=%lld total_seq=%lld "
         "kv_lo=%lld kv_span=%lld H=%lld G=%lld d=%lld no_expand=%d "
-        "transpose=%d\n",
+        "transpose=%d kv_inplace=%d past_len=%lld past_buf_seq=%lld "
+        "present_seq=%lld\n",
         (long long)B, (long long)sq, (long long)sq_chunk, (long long)total_seq,
         (long long)kv_lo, (long long)kv_span, (long long)H, (long long)G,
         (long long)d, static_cast<int>(use_no_expand),
-        static_cast<int>(need_transpose));
+        static_cast<int>(need_transpose),
+        static_cast<int>(past_key != nullptr && past_key == present_key),
+        (long long)past_len, (long long)past_buf_seq, (long long)present_seq);
   }
 
 cleanup:
