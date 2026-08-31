@@ -244,9 +244,7 @@ def generate_build_tree(args, build_dir, prefix_paths, hip_arch, mock):
         f"-DCMAKE_INSTALL_PREFIX={args.install_dir}",
         "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
     ]
-    # Build the Python wheel by default for real builds; mock has no ROCm libs
-    # to bundle, and --skip_wheel opts out.
-    if not mock and not args.skip_wheel:
+    if IS_WINDOWS and not mock and not args.skip_wheel:
         cmd.append("-DBUILD_PYTHON_WHEEL=ON")
     if prefix_paths:
         # CMAKE_PREFIX_PATH always uses ';' as the list separator.
@@ -417,7 +415,7 @@ def parse_arguments():
     p.add_argument(
         "--skip_wheel",
         action="store_true",
-        help="do not build the Python wheel (built by default for real builds)",
+        help="do not build the Python wheel (built by default on real Windows builds)",
     )
     p.add_argument(
         "--skip_tests",

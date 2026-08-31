@@ -3,6 +3,11 @@
 # ** Licensed under the MIT License.
 ##
 
+if(NOT WIN32)
+  message(FATAL_ERROR
+    "BUILD_PYTHON_WHEEL is Windows-only; re-configure without it.")
+endif()
+
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 # Build out-of-source: never write into the source python/ tree. The package is
@@ -15,9 +20,6 @@ set(_stage "${CMAKE_CURRENT_BINARY_DIR}/pkg")
 set(_libs_dir "${_stage}/onnxruntime/capi")
 set(_dist_dir "${CMAKE_CURRENT_BINARY_DIR}/dist")
 
-# GPU arch this wheel targets, for the rocm --extra-index-url hint in
-# pyproject.toml. Take the first if HIP_ARCHITECTURES is a list; fall back to
-# gfx1151 when unset (e.g. mock builds).
 set(MORPHIZEN_HIP_ARCH "${HIP_ARCHITECTURES}")
 if(MORPHIZEN_HIP_ARCH MATCHES ";")
   list(GET MORPHIZEN_HIP_ARCH 0 MORPHIZEN_HIP_ARCH)
@@ -26,7 +28,6 @@ if(NOT MORPHIZEN_HIP_ARCH)
   set(MORPHIZEN_HIP_ARCH "gfx1151")
 endif()
 
-# Inject the project version + target arch into the staged pyproject.toml.
 configure_file(
   "${_pkg_src}/pyproject.toml.in"
   "${_stage}/pyproject.toml"
@@ -46,16 +47,11 @@ endif()
 set(_dll_args "--dll" "$<TARGET_FILE:${_ep_target}>")
 set(_wheel_deps ${_ep_target})
 
-if(WIN32)
-  set(_with_crt "--with-crt")
-else()
-  set(_with_crt "")
+if(NOT THEROCK_DIST)
+  message(FATAL_ERROR
+    "THEROCK_DIST is empty; the wheel cannot bundle the ROCm runtime.")
 endif()
 
-# Bundle the per-arch custom-kernels runtime libraries. The EP dlopens
-# custom_kernels_<arch>.{dll,so} from its own directory at JIT init, so each
-# must ship in onnxruntime/capi next to the EP DLL. ROCm import libs
-# (amdhip64/hipBLASLt) come from the pip rocm[devel] package at runtime.
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
   set(_ck_target custom_kernels_${_arch})
   if(TARGET ${_ck_target})
@@ -97,7 +93,9 @@ add_custom_target(wheel ALL
   COMMAND ${Python3_EXECUTABLE} "${_pkg_src}/_pack_libs.py"
           ${_dll_args}
           --dest "${_libs_dir}"
-          ${_with_crt}
+          --rocm-dist "${THEROCK_DIST}"
+          --rocm-arch "${MORPHIZEN_HIP_ARCH}"
+          --with-crt
   # 3. Build the wheel (PEP 517). Drop setuptools' build cache + egg-info first:
   #    they linger across runs and would re-pack stale (e.g. removed) artifacts.
   #    --no-deps: do not pull deps here.

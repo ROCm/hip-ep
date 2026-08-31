@@ -312,43 +312,36 @@ below. `onnxruntime_perf_test.exe` is staged separately in
 
 If you also want to drive ORT / OGA from Python (e.g. to write your own
 generation script instead of using `model_benchmark.exe`), install the wheels.
-The hipgpu EP wheel is built by default by `build.py` (pass `--skip_wheel` to
-opt out, or build just it with `cmake --build <build> --target wheel`) at
-`../build/hip-ep/python/dist/`.
+The hipgpu EP wheel is built by default by `build.py` on Windows (pass
+`--skip_wheel` to opt out, or build just it with
+`cmake --build <build> --target wheel`) at `../build/hip-ep/python/dist/`.
 
-**Install** -- give ORT / EP / OGA as local `.whl` files (so pip uses your custom
-builds, not the stock PyPI ones), and let `--extra-index-url` resolve ROCm:
+**Install** -- give ORT / EP / OGA as local `.whl` files so pip uses your custom
+builds, not the stock PyPI ones:
 
 ```bash
 cd ../hip-ep  # Back to the project root
 pip install \
   ../build/onnxruntime/Release/dist/onnxruntime_directml-*.whl \
   ../build/hip-ep/python/dist/onnxruntime_ep_hip-*.whl \
-  ../build/onnxruntime-genai/Release/wheel/onnxruntime_genai_directml-*.whl \
-  --extra-index-url https://repo.amd.com/rocm/whl/gfx1151/
+  ../build/onnxruntime-genai/Release/wheel/onnxruntime_genai_directml-*.whl
 ```
 > **Note**: the ORT whl may be under `../build/onnxruntime/Release/Release/dist/`.
-> Replace `gfx1151` with your GPU arch. Install the EP wheel AFTER onnxruntime:
-> it ships its own native files (EP plugin `hipgpu.dll`, which carries the
-> JIT compiler, plus the custom kernels) straight into `onnxruntime/capi/`
-> next to `onnxruntime.dll`. The ROCm
-> runtime DLLs (amdhip64/hipBLASLt) come from the `rocm[devel]` wheel
-> (expanded next). The wheel does NOT bundle the AMD GPU umbrella
-> (`amdgpu-ep.dll` + `hip-backend.dll`); driving OGA through the umbrella needs
-> those supplied separately (CI injects them via `HIP_WHEEL_EXTRA_DLLS`).
+> Install the EP wheel AFTER onnxruntime: it ships its own native files straight
+> into `onnxruntime/capi/`, next to `onnxruntime.dll` -- the EP plugin
+> `hipgpu.dll` (which carries the JIT compiler), the custom kernels, and the
+> ROCm runtime it was built against (amdhip64 + hipBLASLt and their
+> dependencies), so no separate ROCm install is needed. The wheel does NOT
+> bundle the AMD GPU umbrella (`amdgpu-ep.dll` + `hip-backend.dll`); driving OGA
+> through the umbrella needs those supplied separately (CI injects them via
+> `HIP_WHEEL_EXTRA_DLLS`).
 
-**Expand ROCm devel** -- the EP's JIT linker needs the ROCm import libs, which
-`rocm[devel]` ships compressed. Expand them once:
-
-```bash
-rocm-sdk init   # populates site-packages/_rocm_sdk_devel/lib
-```
-
-**Runtime env** -- depends on the artifact mode:
-
-- Default (bitcode): the ROCm runtime DLLs on `PATH`.
-- NATIVE artifact (opt-in): the above plus `THEROCK_DIST` and `LIB`, used by the
-  lld-link step that builds the per-model `.dll`.
+**Runtime env** -- the bundled ROCm DLLs sit next to `hipgpu.dll`, but Windows
+does not search a DLL's own directory for its dependencies, so
+`onnxruntime/capi` has to be on the DLL search path before ORT loads the EP.
+`python/examples/run_onnx.py` does that (and forwards it to the `--benchmark`
+child process). NATIVE artifacts are not supported from a wheel: their lld-link
+step needs the ROCm import libs, which only a `THEROCK_DIST` install has.
 
 **Use** -- there is no Python API to import; the native files are found by
 location. Run a model whose `genai_config.json` selects the EP via
@@ -357,17 +350,13 @@ the CI wheel smoke does (`Run OGA wheel smoke (Python)` in
 `.github/workflows/windows-gpu-test.yml`):
 
 ```bash
-# site-packages root + the colocated capi dir
-SP=$(python -c "import onnxruntime, os; print(os.path.dirname(os.path.dirname(onnxruntime.__file__)))")
-CAPI="$SP/onnxruntime/capi"
-
-# Default (bitcode): the ROCm runtime DLLs + colocated capi on PATH.
-# Replace gfx1151 with your GPU arch.
-export PATH="$CAPI:$SP/_rocm_sdk_core/bin:$SP/_rocm_sdk_libraries_gfx1151/bin:$PATH"
-
-# Run OGA's own end-to-end benchmark from the OGA source cloned in step 3
-python onnxruntime-genai/benchmark/python/benchmark_e2e.py \
+# OGA's own end-to-end benchmark, from the OGA source cloned in step 3
+python python/examples/run_onnx.py \
+  --benchmark onnxruntime-genai/benchmark/python/benchmark_e2e.py \
   -i /path/to/model_dir -l 128 -g 128 -r 5 -w 1 -b 1 -m -1 -v
+
+# Or a plain ONNX model with random inputs
+python python/examples/run_onnx.py /path/to/model.onnx
 ```
 
 `benchmark_e2e.py` runs with the default `-e follow_config`, so the model's
@@ -376,8 +365,8 @@ python onnxruntime-genai/benchmark/python/benchmark_e2e.py \
 (`provider_options [{ "AMDGPU": {"profile": "hip"} }]`), which loads
 `amdgpu-ep.dll` and needs the umbrella DLLs colocated (see
 `.github/workflows/windows-build-real.yml`); the default wheel ships only the hipgpu
-chain. For plain ORT (direct hipgpu, no OGA), register the colocated plugin via
-`ort.register_execution_provider_library("hipgpu", "$CAPI/hipgpu.dll")`.
+chain. For plain ORT (direct hipgpu, no OGA), the model form above registers the
+colocated plugin itself via `ort.register_execution_provider_library`.
 
 ## Testing & Benchmarking
 
