@@ -40,6 +40,42 @@ namespace {
 
 constexpr llvm::StringLiteral kOrtMemoryAddressLocation = "*/_ORT_MEM_ADDR_/*";
 
+/// Mark the DequantizeLinear consumers of a 4-bit-packed constant.
+///
+/// ONNX INT4/UINT4 has no MLIR element type, so 4-bit initializers are imported
+/// as i8/ui8 carrying the LOGICAL element count while the backing buffer holds
+/// only ceil(numel/2) packed bytes (two nibbles per byte, low nibble first). A
+/// consumer that trusts the i8 element type would read two bytes per logical
+/// element and run off the end of the packed buffer. The byte size is the only
+/// surviving signal, and it is authoritative here (the true backing size: the
+/// inline dense-attr length, or the external `size` attribute), so mark it at
+/// import rather than leaving each consumer to re-derive it. Stamp
+/// `packed_int4` on the consuming DequantizeLinear ops so their downstream
+/// lowering nibble-unpacks instead of over-reading. `packedBytes` is the true
+/// backing byte count. Only 8-bit-typed storage can hide a 4-bit value this
+/// way; wider element types never halve, so the size relation is unambiguous.
+static void markPackedInt4Consumers(mlir::Operation *constOp,
+                                    mlir::RankedTensorType tensorType,
+                                    int64_t packedBytes) {
+  auto elemIntTy =
+      mlir::dyn_cast<mlir::IntegerType>(tensorType.getElementType());
+  if (!elemIntTy || elemIntTy.getWidth() != 8 || !tensorType.hasStaticShape())
+    return;
+  int64_t numel = tensorType.getNumElements();
+  if (numel <= 0 || packedBytes <= 0 || packedBytes * 2 != numel)
+    return;
+  mlir::OpBuilder builder(constOp->getContext());
+  for (mlir::Operation *user : constOp->getResult(0).getUsers()) {
+    llvm::StringRef opName = user->getName().getStringRef();
+    bool isDq = opName == "onnx.DequantizeLinear";
+    if (!isDq && opName == "onnx.Custom")
+      if (auto fn = user->getAttrOfType<mlir::StringAttr>("function_name"))
+        isDq = fn.getValue() == "DequantizeLinear";
+    if (isDq)
+      user->setAttr("packed_int4", builder.getUnitAttr());
+  }
+}
+
 /// Lower every onnx.Constant to a policy-neutral hip.constant carrier.
 ///
 /// Both conversion sweeps call this helper: the first handles imported
@@ -66,8 +102,15 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::func::FuncOp funcOp,
     mlir::OpBuilder builder(constOp);
     auto orderAttr = builder.getI64IntegerAttr(nextOrder);
     mlir::hip::ConstantOp carrier;
+    // True backing byte count of the constant's data, used to detect 4-bit
+    // packing (packedBytes == numel/2). -1 until a branch sets it.
+    int64_t packedBytes = -1;
     if (auto valueAttr = mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
             constOp->getAttrOfType<mlir::ElementsAttr>("value"))) {
+      // Splat raw data is a single element, not the full buffer, so its length
+      // is not comparable to the logical element count -- skip it.
+      if (!valueAttr.isSplat())
+        packedBytes = static_cast<int64_t>(valueAttr.getRawData().size());
       carrier = mlir::hip::ConstantOp::create(builder, constOp->getLoc(),
                                               tensorType, valueAttr);
     } else if (auto location =
@@ -77,6 +120,7 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::func::FuncOp funcOp,
       if (!offset || !size)
         return constOp->emitError(
             "onnx.Constant external source requires location/offset/size");
+      packedBytes = size.getInt();
       carrier = location.getValue() == kOrtMemoryAddressLocation
                     ? mlir::hip::ConstantOp::create(builder, constOp->getLoc(),
                                                     tensorType, offset, size)
@@ -101,6 +145,10 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::func::FuncOp funcOp,
         if (auto outputName = mlir::dyn_cast<mlir::StringAttr>(outputs[0]))
           carrier.setSourceNameAttr(outputName);
     }
+    // Mark 4-bit-packed constants before rewiring: markPackedInt4Consumers
+    // walks constOp's users (the DequantizeLinear ops), which still reference
+    // it here.
+    markPackedInt4Consumers(constOp, tensorType, packedBytes);
     constOp->getResult(0).replaceAllUsesWith(carrier.getResult());
     constOp->erase();
   }
