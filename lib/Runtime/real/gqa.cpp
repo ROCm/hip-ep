@@ -249,6 +249,12 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
   if (no_causal && skv >= 0 && skv != sq) {
     // Cross-attn: key/value arrive rank-4 BNSD [B,G,skv,d]; straight D2D copy.
     // elem_sz is 2 (fp16) or 4 (fp32); the decomposed pipeline supports both.
+    //
+    // A KV-sharing decoder layer (Gemma-3n) reaches this branch from the
+    // onnx.Attention lowering, which hands K/V as rank-3 BSHD [B,skv,G*d]
+    // instead. That is byte-identical to BNSD only because those models are
+    // G == 1; a BSHD source with G > 1 would need the transposing append below
+    // (called with skv tokens) rather than this copy.
     size_t bytes = static_cast<size_t>(B) * G * static_cast<size_t>(skv) * d *
                    static_cast<size_t>(elem_sz);
     if (hipMemcpyAsync(present_key, new_key, bytes, hipMemcpyDeviceToDevice,
@@ -1126,10 +1132,17 @@ static int gqa_forward_hipblaslt(
     int64_t do_rotary, int64_t local_window_size, bool no_causal,
     int64_t element_size_bytes, int op_state_slot) {
 
-  // Whisper bidirectional no-past path only when no_causal AND no external
-  // attention_bias. ONNX Attention with is_causal=0 still carries past KV and
-  // uses the standard decode seqlens_k convention.
-  const bool bidirectional_no_past = no_causal && (attention_bias == nullptr);
+  // Bidirectional no-past path. The discriminator is the ABSENCE of a past KV
+  // operand, not the absence of an external mask: an additive mask is
+  // orthogonal (Step 8b adds it on either path). With a past cache, is_causal=0
+  // still follows the ORT decode convention (total_seq = seqlens_k+1). With no
+  // past cache, `key`/`value` ARE the full Skv-length KV -- Whisper encoder /
+  // cross-attn, and Gemma-3n-style KV-cache-sharing layers, which re-read an
+  // earlier layer's complete cache behind an external mask -- so total_seq is
+  // exactly skv and past_len is 0. Gating this on the mask instead sent those
+  // sharing layers down the decode path, where seqlens_k+1 (the full history)
+  // exceeds present_seq and the call was rejected outright.
+  const bool bidirectional_no_past = no_causal && (past_key == nullptr);
 
   int64_t HPG = H / G;
   int64_t present_seq = skv;
@@ -1415,8 +1428,8 @@ static int gqa_forward_hipblaslt(
   // give total_seq = skv+1 > present_seq = skv -> rc=-1 -> zeroed output, and
   // past_len = total_seq - sq is invalid when sq != skv (cross-attn has sq=1,
   // skv=1500 => bogus past_len=1499). Gated on bidirectional_no_past (not raw
-  // no_causal): an onnx.Attention with an external mask still carries past KV,
-  // so it keeps the standard seqlens_k path below. For the no-past case
+  // no_causal): an onnx.Attention that DOES carry a past KV cache keeps the
+  // standard seqlens_k path below regardless of is_causal. For the no-past case
   // total_seq = skv (== present_seq) and past_len = 0; skip the readback.
   if (bidirectional_no_past) {
     total_seq = skv;
@@ -1805,10 +1818,10 @@ static int gqa_forward_hipblaslt(
     // no-expand hands seqlens_k_ptr to the append kernel (on-device past_len,
     // no D2H); the expand path already read total_seq host-side so passes null.
     if (present_key && present_value) {
-      // bidirectional_no_past (Whisper encoder / cross-attn): never hand
-      // seqlens_k to the append kernel (it would apply the +1 convention).
-      // ONNX Attention with is_causal=0 + external mask keeps the standard
-      // decode KV path (bidirectional_no_past=false).
+      // bidirectional_no_past (Whisper encoder / cross-attn, KV-sharing decoder
+      // layers): never hand seqlens_k to the append kernel (it would apply the
+      // +1 convention). An onnx.Attention with a past KV cache keeps the
+      // standard decode KV path (bidirectional_no_past=false).
       HIP_CHECK(update_kv_cache(
           stream, past_key, past_value, kSrc, vSrc, present_key, present_value,
           static_cast<int>(B), static_cast<int>(past_len), static_cast<int>(sq),

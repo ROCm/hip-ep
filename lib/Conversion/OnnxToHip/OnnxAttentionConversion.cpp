@@ -50,7 +50,10 @@ namespace {
 ///     and correct when it does not (e.g. a padding-only mask + is_causal).
 ///   - An external float mask is threaded through the `attention_bias` operand
 ///     and is always added to the scores.
-///   - `no_causal && !attention_bias` selects the bidirectional no-past path.
+///   - `no_causal && !past_key` selects the bidirectional no-past path, where
+///     K/V are the full Skv-length KV and total_seq comes from present's seq
+///     extent rather than the seqlens_k+1 decode convention. An additive mask
+///     is orthogonal to that choice and is applied on either path.
 /// Combinations the runtime cannot express are rejected loudly rather than
 /// silently miscompiled (see the guards below).
 ///
@@ -70,7 +73,7 @@ namespace {
 ///       {q_num_heads = 16, kv_num_heads = 8, is_causal = 0, scale = 1.0}
 ///
 /// After:
-///   %cur       = tensor.dim %q, %c1        // current KV tokens (== query seq)
+///   %cur       = tensor.dim %k, %c1        // incoming KV tokens
 ///   %past      = tensor.dim %past_k, %c2   // valid past KV length (0 prefill)
 ///   %tot       = arith.addi %past, %cur    // present seq = past + current
 ///   %seqlens_k = tensor.from_elements (%tot - 1)  : tensor<1xi32>
@@ -329,12 +332,17 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
   // === seqlens_k / total_seq_len ======================================
   //
   // present KV = concat(past, current) along the seq axis, so the present seq
-  // extent is past_seq + current_seq. The current KV token count equals the
-  // query sequence length (Q/K/V share the seq axis); q3 is rank-3
-  // [B, S, hidden], so take S from q3 dim 1. The valid past length is
-  // dim(past_key, 2) (rank-4 BNSH), or 0 when there is no past operand.
+  // extent is past_seq + current_seq. The incoming KV token count is K's seq
+  // extent -- dim(k3, 1), k3 being rank-3 [B, S_kv, hidden] -- NOT the query's.
+  // With a past cache the two coincide (K/V carry only the new tokens), but two
+  // shapes hand us the ENTIRE KV history with no past operand and S_kv > S_q:
+  // cross-attention, and a KV-cache-sharing decoder layer (Gemma-3n style,
+  // where the layers past the sharing point re-read an earlier layer's full
+  // present.* cache). Sizing present from the query there collapses the KV
+  // buffer to the current token and silently drops the history. The valid past
+  // length is dim(past_key, 2) (rank-4 BNSH), or 0 with no past operand.
   mlir::Value curSeqIdx =
-      mlir::tensor::DimOp::create(rewriter, loc, q3, 1).getResult();
+      mlir::tensor::DimOp::create(rewriter, loc, k3, 1).getResult();
   mlir::Value pastSeqIdx =
       pastKey
           ? mlir::tensor::DimOp::create(rewriter, loc, pastKey, 2).getResult()
