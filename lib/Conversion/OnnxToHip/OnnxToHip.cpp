@@ -42,18 +42,12 @@ constexpr llvm::StringLiteral kOrtMemoryAddressLocation = "*/_ORT_MEM_ADDR_/*";
 
 /// Mark the DequantizeLinear consumers of a 4-bit-packed constant.
 ///
-/// ONNX INT4/UINT4 has no MLIR element type, so 4-bit initializers are imported
-/// as i8/ui8 carrying the LOGICAL element count while the backing buffer holds
-/// only ceil(numel/2) packed bytes (two nibbles per byte, low nibble first). A
-/// consumer that trusts the i8 element type would read two bytes per logical
-/// element and run off the end of the packed buffer. The byte size is the only
-/// surviving signal, and it is authoritative here (the true backing size: the
-/// inline dense-attr length, or the external `size` attribute), so mark it at
-/// import rather than leaving each consumer to re-derive it. Stamp
-/// `packed_int4` on the consuming DequantizeLinear ops so their downstream
-/// lowering nibble-unpacks instead of over-reading. `packedBytes` is the true
-/// backing byte count. Only 8-bit-typed storage can hide a 4-bit value this
-/// way; wider element types never halve, so the size relation is unambiguous.
+/// ONNX INT4/UINT4 is imported as i8/ui8 at the logical element count, but its
+/// buffer holds only ceil(numel/2) packed bytes; a consumer trusting the i8
+/// element type over-reads. The halved byte size is the only surviving signal,
+/// so stamp `packed_int4` on the consuming DequantizeLinear ops here (where the
+/// backing size is known) to make their lowering nibble-unpack. `packedBytes`
+/// is that true backing byte count; only 8-bit storage can halve this way.
 static void markPackedInt4Consumers(mlir::Operation *constOp,
                                     mlir::RankedTensorType tensorType,
                                     int64_t packedBytes) {

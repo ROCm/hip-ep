@@ -351,13 +351,9 @@ private:
       return failure();
     plan.size = *size;
 
-    // ONNX INT4/UINT4 has no MLIR element type, so 4-bit initializers are
-    // imported as an i8/ui8 tensor of the LOGICAL element count while the
-    // backing buffer holds only ceil(numElements/2) packed bytes. For such an
-    // external source the op's `size` attribute is that true (half) packed byte
-    // count -- honor it so the file read and storage layout use the real size
-    // rather than the logical `checkedByteSize`. The consuming ops carry a
-    // `packed_int4` marker so downstream lowering unpacks the nibbles.
+    // A packed INT4/UINT4 source is an i8 tensor whose buffer is only
+    // ceil(numElements/2) bytes; its `size` attr already holds that packed
+    // count, so honor it rather than the logical `checkedByteSize`.
     if (plan.source != SourceKind::Inline)
       if (auto sizeAttr = op.getSizeAttr()) {
         int64_t declared = sizeAttr.getInt();
