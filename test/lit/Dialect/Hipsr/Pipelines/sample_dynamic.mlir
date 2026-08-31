@@ -57,7 +57,8 @@
 
 // The extent vector's length is still a constant -- the operand's rank fixes it.
 // The dynamic extent appears one level down, as a tensor.dim in the body.
-// CHECK-NEXT:      %[[SHAPE_INIT:.+]] = hipsr.placeholder(%[[D0_CTX]]) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<2xi64, #hipsr.mem<host>> shape_region {
+// CHECK-NEXT:      %[[SHAPE_INIT:.+]] = hipsr.placeholder(%[[D0_CTX]]) ins(%[[D0_B]] : tensor<?x4xf32, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<2xi64, #hipsr.mem<host>> shape_region {
+// CHECK-NEXT:      ^bb0(%{{.+}}: !shape.shape):
 // CHECK-NEXT:        %[[RANK:.+]] = arith.constant 2 : index
 // CHECK-NEXT:        %[[RANK_SHAPE:.+]] = shape.from_extents %[[RANK]] : index
 // CHECK-NEXT:        hipsr.shape_yield %[[RANK_SHAPE]] : !shape.shape

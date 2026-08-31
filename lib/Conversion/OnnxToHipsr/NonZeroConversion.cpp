@@ -15,10 +15,8 @@
 //   resolve the published column count.
 // - hipsr.compute narrows the search destination to the positions found. Its
 //   placeholder is a barrier reading that host count, so the conversion fills
-//   that shape region itself.
-//
-// The count never becomes a compute operand: the body sizes the slice from its
-// own destination, which the barrier region already resolved.
+//   that shape region itself. The barrier and the compute list the same two
+//   values, each reading the one it needs, so they share a pool domain.
 //
 // Before:
 //   %p = "onnx.NonZero"(%mask) : (tensor<?x?xi8, #hipsr.mem<device>>)
@@ -49,10 +47,13 @@
 //       outs(%host_init : tensor<1xi64, #hipsr.mem<host>>)
 //       : tensor<1xi64, #hipsr.mem<host>>
 //   %init = hipsr.placeholder(%ctx)
-//       ins(%host_init : tensor<1xi64, #hipsr.mem<host>>)
+//       ins(%host_init, %cap_init
+//           : tensor<1xi64, #hipsr.mem<host>>,
+//             tensor<2x?xi64, #hipsr.mem<device>>)
 //       {placeholder_type = #hipsr.placeholder_type<barrier>}
 //       : tensor<2x?xi64, #hipsr.mem<device>> shape_region {
-//   ^bb0(%shape_ctx: !hipsr.context, %host: tensor<1xi64, #hipsr.mem<host>>):
+//   ^bb0(%shape_ctx: !hipsr.context, %host: tensor<1xi64, #hipsr.mem<host>>,
+//        %positions: tensor<2x?xi64, #hipsr.mem<device>>):
 //     %c0 = arith.constant 0 : index
 //     %found = tensor.extract %host[%c0] : tensor<1xi64, #hipsr.mem<host>>
 //     %columns = arith.index_cast %found : i64 to index
@@ -61,9 +62,12 @@
 //     hipsr.shape_yield %shape : !shape.shape
 //   }
 //   %p = hipsr.compute(%ctx)
-//       ins(%cap : tensor<2x?xi64, #hipsr.mem<device>>)
+//       ins(%host_count, %cap
+//           : tensor<1xi64, #hipsr.mem<host>>,
+//             tensor<2x?xi64, #hipsr.mem<device>>)
 //       outs(%init : tensor<2x?xi64, #hipsr.mem<device>>) {
 //   ^bb0(%body_ctx: !hipsr.context,
+//        %count: tensor<1xi64, #hipsr.mem<host>>,
 //        %in: tensor<2x?xi64, #hipsr.mem<device>>,
 //        %dest: tensor<2x?xi64, #hipsr.mem<device>>):
 //     %c1 = arith.constant 1 : index
@@ -151,9 +155,9 @@ void populateNarrowBody(OpBuilder &builder, ComputeOp computeOp) {
       builder.createBlock(&computeOp.getBody(), {}, argTypes, argLocs);
   builder.setInsertionPointToStart(body);
 
-  // The destination carries the count the barrier region resolved, so its own
-  // extents size the slice.
-  Value capacity = body->getArgument(1);
+  // Argument 1 is the count, read only by the barrier's shape region. The
+  // destination it sized gives the slice its extents.
+  Value capacity = body->getArgument(2);
   Value destination = body->getArguments().back();
   SmallVector<OpFoldResult> sizes =
       tensor::getMixedSizes(builder, loc, destination);
@@ -231,14 +235,16 @@ struct NonZeroToHipsr : public OpConversionPattern<onnx::NonZeroOp> {
 
     auto copyOp = createCopyD2H(rewriter, loc, *ctx, searchOp.getResult(1));
 
-    auto init = PlaceholderOp::create(rewriter, loc, TypeRange{resultType},
-                                      *ctx, ValueRange{copyOp.getResult(0)},
-                                      PlaceholderType::Barrier);
+    // One list for both keeps them in one pool domain.
+    SmallVector<Value> narrowInputs{copyOp.getResult(0), searchOp.getResult(0)};
+    auto init =
+        PlaceholderOp::create(rewriter, loc, TypeRange{resultType}, *ctx,
+                              narrowInputs, PlaceholderType::Barrier);
     populateNarrowShapeRegion(rewriter, init, inputType.getRank());
 
-    auto computeOp = ComputeOp::create(rewriter, loc, TypeRange{resultType},
-                                       *ctx, ValueRange{searchOp.getResult(0)},
-                                       ValueRange{init.getResult(0)});
+    auto computeOp =
+        ComputeOp::create(rewriter, loc, TypeRange{resultType}, *ctx,
+                          narrowInputs, ValueRange{init.getResult(0)});
     populateNarrowBody(rewriter, computeOp);
 
     rewriter.replaceOp(op, computeOp.getResult(0));

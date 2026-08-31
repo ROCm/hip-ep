@@ -36,21 +36,6 @@ namespace hipsr {
 
 namespace {
 
-// Returns the shape-graph value for a placeholder input. A data result becomes
-// the outs operand its producer writes into, which has the same shape.
-Value resolveShapeGraphInput(Value input) {
-  if (PlaceholderOp::isAllowedShapeGraphInput(input)) {
-    return input;
-  }
-  // Block arguments are allowed, so anything left is a result.
-  auto result = cast<OpResult>(input);
-  OperandRange destinations = getHipsrDestinationOperands(result.getOwner());
-  if (result.getResultNumber() >= destinations.size()) {
-    return input;
-  }
-  return destinations[result.getResultNumber()];
-}
-
 // onnx.NoValue stands in for an omitted optional operand, so it only becomes
 // dead once the conversion of its consumer drops that operand. Sweeping it up
 // therefore belongs after the conversion.
@@ -71,7 +56,7 @@ void eraseDeadNoValue(ModuleOp module) {
 void rewirePlaceholderInputs(ModuleOp module) {
   module.walk([](PlaceholderOp placeholder) {
     SmallVector<Value> resolvedInputs =
-        llvm::map_to_vector(placeholder.getInputs(), resolveShapeGraphInput);
+        llvm::map_to_vector(placeholder.getInputs(), getShapeGraphCounterpart);
     placeholder.getInputsMutable().assign(resolvedInputs);
   });
 }

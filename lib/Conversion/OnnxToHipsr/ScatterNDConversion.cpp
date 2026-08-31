@@ -19,7 +19,7 @@
 //          tensor<?xf16, #hipsr.mem<device>>) -> tensor<?x?x4096xf16>
 //
 // After, with the ins types left out:
-//   %init = hipsr.placeholder(%ctx) ins(%embeds)
+//   %init = hipsr.placeholder(%ctx) ins(%embeds, %positions, %features)
 //       {placeholder_type = #hipsr.placeholder_type<normal>}
 //       : tensor<?x?x4096xf16, #hipsr.mem<device>>
 //   %o = hipsr.scatter_nd(%ctx) ins(%embeds, %positions, %features)
@@ -76,14 +76,15 @@ struct ScatterNDToHipsr : public OpConversionPattern<onnx::ScatterNDOp> {
       return failure();
     }
 
-    // The output takes the data's shape, so the data alone drives the
-    // placeholder.
+    // Only the data shapes the result; the rest is there to match the scatter.
     Location loc = op.getLoc();
     Value data = adaptor.getData();
     resultType = tensorTypeInSpace(resultType, MemorySpace::Device);
     Value init =
-        PlaceholderOp::create(rewriter, loc, TypeRange{resultType}, *ctx,
-                              ValueRange{data}, PlaceholderType::Normal)
+        PlaceholderOp::create(
+            rewriter, loc, TypeRange{resultType}, *ctx,
+            ValueRange{data, adaptor.getIndices(), adaptor.getUpdates()},
+            PlaceholderType::Normal)
             .getResult(0);
     auto scatterOp =
         ScatterNDOp::create(rewriter, loc, TypeRange{resultType}, *ctx, data,

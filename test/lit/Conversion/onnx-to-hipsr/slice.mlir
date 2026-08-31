@@ -17,9 +17,14 @@
 // CHECK-LABEL: func.func @strided_window(
 // CHECK-SAME:    %[[CTX:.+]]: !hipsr.context,
 // CHECK-SAME:    %[[DATA:.+]]: tensor<8x4xf16, #hipsr.mem<device>>) -> tensor<3x4xf16, #hipsr.mem<device>> {
-// CHECK:         %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[DATA]] : tensor<8x4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<3x4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:    %{{.+}} = hipsr.constant {value = dense<1> : tensor<1xi64>} : tensor<1xi64, #hipsr.mem<device>>
+// CHECK-NEXT:    %{{.+}} = hipsr.constant {value = dense<7> : tensor<1xi64>} : tensor<1xi64, #hipsr.mem<device>>
+// CHECK-NEXT:    %{{.+}} = hipsr.constant {value = dense<0> : tensor<1xi64>} : tensor<1xi64, #hipsr.mem<device>>
+// CHECK-NEXT:    %{{.+}} = hipsr.constant {value = dense<2> : tensor<1xi64>} : tensor<1xi64, #hipsr.mem<device>>
+// CHECK-NEXT:    %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[DATA]] : tensor<8x4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<3x4xf16, #hipsr.mem<device>>
 // CHECK-NEXT:    %[[RESULT:.+]] = hipsr.slice(%[[CTX]]) ins(%[[DATA]] : tensor<8x4xf16, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<3x4xf16, #hipsr.mem<device>>) {axes_attr = array<i64: 0>, ends_attr = array<i64: 7>, starts_attr = array<i64: 1>, steps_attr = array<i64: 2>} : tensor<3x4xf16, #hipsr.mem<device>>
 // CHECK-NEXT:    return %[[RESULT]] : tensor<3x4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:  }
 func.func @strided_window(%ctx: !hipsr.context,
                           %data: tensor<8x4xf16>) -> tensor<3x4xf16> {
   %starts = "onnx.Constant"() {value = dense<1> : tensor<1xi64>} : () -> tensor<1xi64>
@@ -43,11 +48,25 @@ func.func @strided_window(%ctx: !hipsr.context,
 // CHECK-SAME:    %[[CTX:.+]]: !hipsr.context,
 // CHECK-SAME:    %[[DATA:.+]]: tensor<8xf16, #hipsr.mem<device>>,
 // CHECK-SAME:    %[[OTHER:.+]]: tensor<?x4096xf16, #hipsr.mem<device>>) -> tensor<?xf16, #hipsr.mem<device>> {
-// CHECK:         %[[ENDS_INIT:.+]] = hipsr.placeholder(%[[CTX]]) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<1xi64, #hipsr.mem<host>>
-// CHECK:         %[[ENDS:.+]] = hipsr.compute(%[[CTX]]) ins(%[[OTHER]]
-// CHECK:         %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[DATA]], %[[ENDS_INIT]] : tensor<8xf16, #hipsr.mem<device>>, tensor<1xi64, #hipsr.mem<host>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<?xf16, #hipsr.mem<device>>
+// CHECK-NEXT:    %[[ENDS_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[OTHER]] : tensor<?x4096xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<1xi64, #hipsr.mem<host>> shape_region {
+// CHECK-NEXT:    ^bb0(%{{.+}}: !shape.shape):
+// CHECK-NEXT:      %[[LEN:.+]] = arith.constant 1 : index
+// CHECK-NEXT:      %[[ENDS_SHAPE:.+]] = shape.from_extents %[[LEN]] : index
+// CHECK-NEXT:      hipsr.shape_yield %[[ENDS_SHAPE]] : !shape.shape
+// CHECK-NEXT:    }
+// CHECK-NEXT:    %[[ENDS:.+]] = hipsr.compute(%[[CTX]]) ins(%[[OTHER]] : tensor<?x4096xf16, #hipsr.mem<device>>) outs(%[[ENDS_INIT]] : tensor<1xi64, #hipsr.mem<host>>) {
+// CHECK-NEXT:    ^bb0(%{{.+}}: !hipsr.context, %[[BODY_OTHER:.+]]: tensor<?x4096xf16, #hipsr.mem<device>>, %{{.+}}: tensor<1xi64, #hipsr.mem<host>>):
+// CHECK-NEXT:      %[[AXIS:.+]] = arith.constant 0 : index
+// CHECK-NEXT:      %[[DIM:.+]] = tensor.dim %[[BODY_OTHER]], %[[AXIS]] : tensor<?x4096xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      %[[BOUND:.+]] = arith.index_cast %[[DIM]] : index to i64
+// CHECK-NEXT:      %[[BOUND_VECTOR:.+]] = tensor.from_elements %[[BOUND]] : tensor<1xi64, #hipsr.mem<host>>
+// CHECK-NEXT:      hipsr.compute_yield %[[BOUND_VECTOR]] : tensor<1xi64, #hipsr.mem<host>>
+// CHECK-NEXT:    } : tensor<1xi64, #hipsr.mem<host>>
+// CHECK-NEXT:    %{{.+}} = hipsr.constant {value = dense<0> : tensor<1xi64>} : tensor<1xi64, #hipsr.mem<device>>
+// CHECK-NEXT:    %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[DATA]], %[[ENDS_INIT]] : tensor<8xf16, #hipsr.mem<device>>, tensor<1xi64, #hipsr.mem<host>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<?xf16, #hipsr.mem<device>>
 // CHECK-NEXT:    %[[RESULT:.+]] = hipsr.slice(%[[CTX]]) ins(%[[DATA]] : tensor<8xf16, #hipsr.mem<device>>) ends(%[[ENDS]] : tensor<1xi64, #hipsr.mem<host>>) outs(%[[INIT]] : tensor<?xf16, #hipsr.mem<device>>) {axes_attr = array<i64: 0>, starts_attr = array<i64: 0>, steps_attr = array<i64: 1>} : tensor<?xf16, #hipsr.mem<device>>
 // CHECK-NEXT:    return %[[RESULT]] : tensor<?xf16, #hipsr.mem<device>>
+// CHECK-NEXT:  }
 func.func @computed_bound(%ctx: !hipsr.context, %data: tensor<8xf16>,
                           %other: tensor<?x4096xf16>) -> tensor<?xf16> {
   %ends = "onnx.Shape"(%other) {start = 0 : si64, end = 1 : si64}
