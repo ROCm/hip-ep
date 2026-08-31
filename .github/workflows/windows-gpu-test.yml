@@ -365,20 +365,18 @@ jobs:
           $model = "${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\amdgpu-oga-models\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml"
           if (-not (Test-Path $model)) { Write-Host "[SKIP] model not found: $model"; exit 0 }
 
-          # The umbrella wheel owns onnxruntime_ep_amdgpu/ (its __init__.py sets
-          # up the DLL search path) and our wheel adds hipgpu.dll + custom_kernels
-          # into that same directory, so the whole chain resolves by co-location.
-          # No DLL injection needed — exercise the wheel path end-to-end.
+          # Our wheel adds hipgpu.dll + custom_kernels into the umbrella wheel's
+          # package directory, so the chain resolves by co-location. No DLL
+          # injection needed — exercise the wheel path end-to-end.
           $pkg = "$PWD\wheelpkg"
           $venv = "$PWD\oga-smoke-venv"
           if (Test-Path $venv) { Remove-Item $venv -Recurse -Force }
           python -m venv $venv
           $py = "$venv\Scripts\python.exe"
 
-          # --find-links, not --no-index: onnxruntime-ep-hip now depends on
-          # onnxruntime-ep-amdgpu, which is not on PyPI and has to come from this
-          # directory, while onnxruntime-directml still needs PyPI for its own
-          # dependencies (flatbuffers, numpy, ...).
+          # --find-links, not --no-index: onnxruntime-ep-amdgpu is not on PyPI and
+          # has to come from this directory, while onnxruntime-directml still needs
+          # PyPI for its own dependencies.
           Push-Location "$pkg\wheels"
           & $py -m pip install --quiet --find-links . `
             (Get-Item onnxruntime_directml-*.whl).Name `

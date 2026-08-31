@@ -14,10 +14,9 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 # staged under the build dir, the wheel lands in <build>/python/dist.
 set(_pkg_src "${CMAKE_CURRENT_SOURCE_DIR}")
 set(_stage "${CMAKE_CURRENT_BINARY_DIR}/pkg")
-# Native artifacts are staged into the onnxruntime_ep_amdgpu package so they
-# install next to the AMD GPU umbrella EP from the upstream wheel of the same
-# name. hip-backend.dll resolves "hipgpu.dll" by bare name, which only works
-# when both sit in one directory.
+# Native artifacts stage into the onnxruntime_ep_amdgpu package, next to the
+# umbrella EP from the upstream wheel of the same name: hip-backend.dll resolves
+# "hipgpu.dll" by bare name, which needs both in one directory.
 set(_libs_dir "${_stage}/onnxruntime_ep_amdgpu")
 set(_dist_dir "${CMAKE_CURRENT_BINARY_DIR}/dist")
 

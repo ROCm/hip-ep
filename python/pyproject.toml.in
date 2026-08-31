@@ -15,18 +15,15 @@ description = "hipgpu Execution Provider for ONNX Runtime (AMD GPU via HIP/ROCm)
 requires-python = ">=3.8"
 license = { text = "MIT" }
 authors = [{ name = "Advanced Micro Devices, Inc." }]
-# Owns onnxruntime_ep_amdgpu/__init__.py (which puts the package directory on
-# the DLL search path) and the umbrella EP that loads hip-backend.dll, so it has
-# to be installed for the chain below to resolve.
+# Owns onnxruntime_ep_amdgpu/__init__.py (which puts the package directory on the
+# DLL search path) and the umbrella EP that loads hip-backend.dll.
 dependencies = ["onnxruntime-ep-amdgpu"]
 
 [tool.setuptools]
-# The EP's native artifacts ship under onnxruntime_ep_amdgpu/ (platlib), the
-# package the upstream onnxruntime-ep-amdgpu wheel owns, which puts the whole
-# chain in one directory: hip-backend.dll resolves "hipgpu.dll" by bare name,
-# and Windows searches the loading module's own directory only when it is on the
-# DLL search path -- which that package's __init__.py arranges. We treat it as a
-# PEP 420 namespace package and ship NO __init__.py, so the upstream one stands.
+# Native artifacts ship under onnxruntime_ep_amdgpu/ (platlib), the package the
+# upstream wheel owns, so the whole chain sits in one directory -- required for
+# hip-backend.dll's bare-name load of hipgpu.dll. Treated as a PEP 420 namespace
+# package with NO __init__.py of ours, leaving the upstream one in place.
 
 [tool.setuptools.packages.find]
 include = ["onnxruntime_ep_hip", "onnxruntime_ep_amdgpu"]

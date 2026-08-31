@@ -24,9 +24,8 @@ import sys
 import numpy as np
 import onnxruntime as ort
 
-# Importing the package runs os.add_dll_directory on its own directory, which is
-# where every DLL in the chain lives, so this has to happen before ORT loads any
-# of them.
+# Importing this runs os.add_dll_directory on the package directory, where every
+# DLL in the chain lives, so it has to precede ORT loading any of them.
 import onnxruntime_ep_amdgpu
 
 EP_NAME = "MorphiZenEP"
@@ -48,9 +47,9 @@ def _setup_env():
 
     # The JIT linker resolves the CRT and ROCm import libs off %LIB%.
     os.environ["LIB"] = os.pathsep.join(filter(None, [pkg, os.environ.get("LIB", "")]))
-    # OGA looks for the umbrella next to onnxruntime-genai.dll / onnxruntime.dll /
-    # the executable, none of which is this package directory, so point it here.
-    # Unlike an in-process registration, this survives into the --benchmark child.
+    # OGA looks for the umbrella next to its own DLL / onnxruntime.dll / the exe,
+    # none of which is this directory. An env var also reaches the --benchmark
+    # child, unlike an in-process registration.
     os.environ["AMDGPU_EP_PATH"] = onnxruntime_ep_amdgpu.get_library_path()
     return pkg
 

@@ -33,10 +33,9 @@ env:
   OGA_VERSION: "0.14.0"
   OGA_PR_PATCHES: "2194"
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
-  # AMD GPU umbrella EP, from the upstream repo's gpuep-releases/gpuep-rel-2610.2
-  # release branch (not main: main defaults USE_HIP to OFF and has no
-  # MIGRAPHX_EP_PROBLEM_CACHE). Pinned to the commit AMD's packaging pipeline
-  # builds, so it matches the MIGraphX SDK pinned in cmake/deps.txt.
+  # Upstream's gpuep-rel-2610.2 branch, not main: main defaults USE_HIP off and
+  # has no MIGRAPHX_EP_PROBLEM_CACHE. This commit is the one AMD's packaging
+  # pipeline builds, so it matches the MIGraphX SDK in cmake/deps.txt.
   AMDGPU_EP_REF: "05eaa2a938f71e98b49bd1be3fb03720167be5cc"
 
 jobs:
@@ -278,9 +277,7 @@ jobs:
       cache_key: ${{ steps.key.outputs.value }}
 
     steps:
-      # cmake/deps.txt pins the MIGraphX SDK and TheRock SDK this job downloads,
-      # so it is both the download manifest and the cache-key input. Only cmake/
-      # is needed; the blob hash below reads the tree, not the working copy.
+      # deps.txt is both the download manifest below and the cache-key input.
       - name: Checkout deps manifest
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -289,10 +286,8 @@ jobs:
           fetch-depth: 1
           show-progress: false
 
-      # Keying on deps.txt's blob hash invalidates the cache on any pin bump
-      # (MIGraphX, TheRock) without enumerating versions here. --short=12 is
-      # explicit because git's default abbreviation length grows with the object
-      # count, which would silently change the key.
+      # deps.txt's blob hash invalidates the cache on any pin bump. --short=12 is
+      # explicit: git's default abbreviation length grows with the object count.
       - name: Compute cache key
         id: key
         shell: bash
@@ -324,10 +319,9 @@ jobs:
         with:
           python-version: "3.14"
 
-      # No msvc-dev-cmd here: build.py replaces os.environ wholesale with what
-      # vcvars64.bat reports, and it skips running vcvars when VSINSTALLDIR is
-      # already set -- which would leave the environment empty and hide ninja and
-      # sccache. It locates the toolchain itself via vswhere.
+      # No msvc-dev-cmd: build.py replaces os.environ with what vcvars reports, and
+      # skips vcvars when VSINSTALLDIR is already set, which would leave the
+      # environment empty. It finds the toolchain itself via vswhere.
       - name: Prepare sccache local cache
         if: steps.cache-amdgpu.outputs.cache-hit != 'true'
         shell: bash
@@ -358,10 +352,8 @@ jobs:
           fetch-depth: 1
           show-progress: false
 
-      # MIGraphX SDK (find_package(migraphx) prefix, and problem_cache.json at
-      # its root) plus the TheRock ROCm SDK (find_package(hip)). This job has no
-      # TheRock otherwise: elsewhere cmake/deps.cmake downloads it during the
-      # project's own configure, which does not happen here.
+      # find_package prefixes for migraphx and hip. This job needs its own copy:
+      # deps.cmake fetches TheRock during the project's configure, not run here.
       - name: Fetch MIGraphX + TheRock SDKs
         if: steps.cache-amdgpu.outputs.cache-hit != 'true'
         shell: bash
@@ -389,16 +381,11 @@ jobs:
           test -f "$WS/migraphx-sdk/problem_cache.json"
           test -f "$WS/therock/lib/cmake/hip/hip-config.cmake"
 
-      # Build through the repo's own build.py rather than a hand-written cmake
-      # line: it derives the cmake arguments from --use_amdgpu / the three *_home
-      # paths, and --build_wheel packs every backend plus the MIGraphX and
-      # DirectML runtimes shipped next to them, so the artifact set follows
-      # upstream instead of a list maintained here.
-      #
-      # Do not pass --target: _build_targets emits `-target` (one dash), so the
-      # default all-target build is the working path. --use_cache is skipped too;
-      # on Windows it only sets BUILD_CACHE and never wires up a launcher, hence
-      # sccache goes through --cmake_extra_defines.
+      # --build_wheel packs every backend plus the MIGraphX and DirectML runtimes
+      # staged beside them, so the artifact set follows upstream rather than a list
+      # maintained here. Two quirks of build.py: --target is unusable
+      # (_build_targets emits `-target`, one dash) and --use_cache wires up no
+      # launcher on Windows, hence sccache via --cmake_extra_defines.
       - name: Build amdgpu-ep
         if: steps.cache-amdgpu.outputs.cache-hit != 'true'
         shell: bash

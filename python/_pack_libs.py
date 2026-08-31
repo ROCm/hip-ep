@@ -22,9 +22,8 @@ CRT_LIBS = [
     "user32.lib",
 ]
 
-# amdhip64, amd_comgr and hiprtc are deliberately absent: the upstream
-# onnxruntime-ep-amdgpu wheel installs those into the same package directory, and
-# two distributions writing the same filename break each other on uninstall.
+# amdhip64, amd_comgr and hiprtc are absent on purpose: the upstream
+# onnxruntime-ep-amdgpu wheel installs those same filenames into this directory.
 ROCM_DLL_GROUPS = [
     ["hipblaslt.dll", "libhipblaslt.dll"],
 ]

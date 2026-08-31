@@ -117,8 +117,7 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.9
 
       # HIP_WHEEL_EXTRA_DLLS is intentionally unset: the umbrella chain now ships
-      # in the upstream onnxruntime-ep-amdgpu wheel, which our wheel installs
-      # alongside (both land in onnxruntime_ep_amdgpu/).
+      # in the upstream wheel, which ours installs alongside.
       - name: Build hip-ep
         shell: bash
         run: |
@@ -160,11 +159,9 @@ jobs:
           cp "${{ runner.workspace }}/install/bin/"*.dll staging/bin/ 2>/dev/null || true
           cp "${{ runner.workspace }}/install/bin/"*.exe staging/bin/ 2>/dev/null || true
 
-          # AMD GPU umbrella EP + its backends + the MIGraphX runtime, unpacked
-          # from the wheel the amdgpu job built. The ROCm and DirectML runtimes
-          # it also carries are skipped: TheRock below and ort-install above
-          # provide the versions hipgpu.dll and onnxruntime.dll were built
-          # against, and staging/bin is flat so duplicates would collide.
+          # Skip the ROCm and DirectML runtimes the wheel also carries: TheRock
+          # below and ort-install above provide the versions hipgpu.dll and
+          # onnxruntime.dll were built against, and staging/bin is flat.
           AMDGPU_WHEEL=$(find "${{ runner.workspace }}/amdgpu-artifacts" \
             -name "onnxruntime_ep_amdgpu-*.whl" -type f | head -1)
           if [ -z "$AMDGPU_WHEEL" ]; then
