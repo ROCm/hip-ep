@@ -85,14 +85,15 @@
 // Dispatch helpers (shared by the fused and decomposed paths)
 //===----------------------------------------------------------------------===//
 
-// Env-var gate to cache seqlens_k_val across the GQA layers in a single
-// forward pass. Default ON. Caching skips the per-layer
-// hipMemcpyAsync(D2H) + hipStreamSynchronize on both paths after the first
-// GQA call -- a 32-layer Llama decode then issues one D2H instead of 32,
-// eliminating ~30-45 ms/token of pipeline stalls on Strix Halo. Set
-// HIPDNN_EP_GQA_CACHE_SEQLENS=0 to disable (escape hatch for running against
-// an older per-model bitcode without the begin_compute export, or for A/B
-// measurement).
+// Env-var gate for the seqlens_k read optimizations. Default ON. Both exist to
+// avoid the per-layer hipMemcpyAsync(D2H) + hipStreamSynchronize on both paths:
+// a 32-layer decode that pays one stream drain per layer loses ~30-45 ms/token
+// to pipeline stalls on Strix Halo. Which optimization applies depends on where
+// the buffer lives (see classify_seqlens_k_home below): an externally owned
+// buffer is cached across layers, a host-mapped one is read directly on the
+// host. Setting HIPDNN_EP_GQA_CACHE_SEQLENS=0 disables both and falls back to
+// an unconditional D2H + sync -- an escape hatch for running against older
+// per-model bitcode without the begin_compute export, and for A/B measurement.
 //
 // Correctness depends on the EP-side MlirCustomOp::Compute() invoking
 // hipdnn_ep_runtime_begin_compute(state) at the start of each forward pass to
@@ -116,6 +117,39 @@ static bool gqa_cache_seqlens_enabled() {
 // pre-read available" and fall back to the legacy per-call D2H readback site
 // they already implement.
 static constexpr int32_t kSeqlensKNotRead = -2;
+// Where a seqlens_k buffer lives -- decides how to read it. A property of the
+// compilation, not the model; the last two come from OnnxAttentionConversion,
+// which synthesizes a separate seqlens_k per layer.
+//   * External   -- graph input (ORT GQA), one buffer for all layers, so its
+//                   address identifies its contents and caching is sound.
+//   * HostMapped -- host_scratch_base. hip-materialize-host-scalars guarantees
+//                   a host store, in program order, before the consuming call,
+//                   so a plain host load beats both D2H and caching.
+//   * DevicePool -- fresh D2H, never cached: the pool recycles addresses
+//                   across disjoint live ranges, so a pointer-keyed hit
+//                   returns another layer's value.
+enum class SeqlensKHome { External, HostMapped, DevicePool };
+
+static SeqlensKHome classify_seqlens_k_home(const RuntimeState *state,
+                                            const void *ptr) {
+  auto within = [ptr](const void *base, size_t size) {
+    if (!base || size == 0)
+      return false;
+    auto p = static_cast<const char *>(ptr);
+    auto b = static_cast<const char *>(base);
+    return p >= b && p < b + size;
+  };
+
+  if (within(state->host_scratch_base, state->host_scratch_size))
+    return SeqlensKHome::HostMapped;
+  if (state->pool_base && state->pool_size) {
+    for (int domain = 0; domain < state->num_pool_domains; ++domain) {
+      if (within(state->pool_base[domain], state->pool_size[domain]))
+        return SeqlensKHome::DevicePool;
+    }
+  }
+  return SeqlensKHome::External;
+}
 
 // Read seqlens_k_val from device (or the per-Compute() cache when
 // HIPDNN_EP_GQA_CACHE_SEQLENS=1) once per call before the fused/decomposed
@@ -130,10 +164,11 @@ static constexpr int32_t kSeqlensKNotRead = -2;
 // kSeqlensKNotRead because per-batch validation in the multi-batch path
 // requires reading every entry; the legacy readback site there handles it.
 //
-// Behaviour:
-//   - cache enabled and hit:  zero D2H, return cached value.
-//   - cache enabled and miss: one D2H + sync, populate cache, return.
-//   - cache disabled:         one D2H + sync, return (no cache write).
+// Behaviour, by SeqlensKHome (see classify_seqlens_k_home):
+//   - HostMapped:         plain host load, zero D2H, no sync, no caching.
+//   - External, hit:      zero D2H, return cached value.
+//   - External, miss:     one D2H + sync, populate cache, return.
+//   - DevicePool:         one D2H + sync, return (no cache read or write).
 //   - B != 1, !seqlens_k_ptr, or D2H/sync failure: return kSeqlensKNotRead.
 //
 // The returned int32_t is the raw device value: -1 is ORT's prefill sentinel
@@ -145,9 +180,32 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
   if (!seqlens_k_ptr || B != 1)
     return kSeqlensKNotRead;
 
-  if (gqa_cache_seqlens_enabled() && state && state->seqlens_k_cached_valid &&
+  // With the optimizations disabled every home degrades to the unconditional
+  // D2H + sync, which is correct for all three.
+  const SeqlensKHome home = (state && gqa_cache_seqlens_enabled())
+                                ? classify_seqlens_k_home(state, seqlens_k_ptr)
+                                : SeqlensKHome::DevicePool;
+
+  if (home == SeqlensKHome::HostMapped) {
+    // memcpy rather than a deref: the ABI hands us a void* and the producer
+    // may have staged an i64 that hip.cast reinterprets as i32.
+    int32_t host_val = 0;
+    std::memcpy(&host_val, seqlens_k_ptr, sizeof(host_val));
+    return host_val;
+  }
+
+  const bool cacheable = (home == SeqlensKHome::External);
+
+  if (cacheable && state->seqlens_k_cached_valid &&
       state->seqlens_k_cached_ptr == seqlens_k_ptr)
     return state->seqlens_k_cached_val;
+
+  // Whether a synthesized seqlens_k lands in host scratch or in the GPU pool is
+  // an outcome of hip-materialize-host-scalars, not something a caller
+  // controls, and only the pool case costs a stream drain per layer. Log it so
+  // that cost is attributable without a profiler.
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] gqa seqlens_k drain: home=%s\n",
+                    cacheable ? "External(cache miss)" : "DevicePool");
 
   int32_t seqlens_k_val = 0;
   if (hipMemcpyAsync(&seqlens_k_val, seqlens_k_ptr, sizeof(int32_t),
@@ -156,7 +214,7 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
   if (hipStreamSynchronize(stream) != hipSuccess)
     return kSeqlensKNotRead;
 
-  if (gqa_cache_seqlens_enabled() && state) {
+  if (cacheable) {
     state->seqlens_k_cached_val = seqlens_k_val;
     state->seqlens_k_cached_ptr = seqlens_k_ptr;
     state->seqlens_k_cached_valid = true;
@@ -217,15 +275,21 @@ static inline int kv_dtype_abi(KvCacheFormat f) {
 // past_buf_seq is the buffer dim of past_key (may exceed past_len for
 // pre-allocated caches). seqlens_k_ptr: when non-null on the append path the
 // kernel reads past_len from device memory (zero D2H). The fused path calls
-// this with the default no_causal=false / skv=-1; the decomposed pipeline
-// passes them for the Whisper no_causal cases. Returns 0 on success.
+// this with the defaults no_causal=false / skv=-1 / kv_bnsh=false; the
+// decomposed pipeline passes them for the no_causal cases. Returns 0 on
+// success.
+//
+// kv_bnsh describes the layout of new_key/new_value and is only consulted on
+// the no_causal populate: false = BSHD [B, seq, G, d] (needs the transposing
+// append), true = BNSH [B, G, seq, d] (already in present order, plain copy).
+// The causal concat/append tail below is BSHD-only by contract.
 //
 // kv_format: for any quantized format (Int8PerChannel today, INT4/FP8 later)
 // the (causal) concat/append quantizes the incoming fp16 K/V with the static
 // per-channel k_scale/v_scale into the quantized present cache instead of a
 // plain copy. Only the causal concat/append tail honours it (the no_causal
-// Whisper branches are fp16/fp32-only), so the format decision lives here
-// rather than in a separate helper or at each call site.
+// branches are fp16/fp32-only), so the format decision lives here rather than
+// in a separate helper or at each call site.
 static int update_kv_cache(hipStream_t stream, const void *past_key,
                            const void *past_value, const void *new_key,
                            const void *new_value, void *present_key,
@@ -235,46 +299,58 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
                            bool no_causal = false, int skv = -1,
                            KvCacheFormat kv_format = KvCacheFormat::Fp16,
                            const void *k_scale = nullptr,
-                           const void *v_scale = nullptr) {
-  // no_causal (Whisper encoder / cross-attn): bidirectional, no past KV.
-  // The KV to attend over is the FULL `new_key`/`new_value` (Skv tokens), not
-  // `sq` newly-appended tokens. Two sub-cases distinguished by sq vs Skv:
-  //   * Cross-attn (sq != Skv): `key`/`value` arrive as rank-4 BNSD
-  //     [B, G, Skv, d] -- already in the present_key layout. A straight
-  //     device-to-device copy of all Skv tokens populates present_*.
-  //   * Encoder self-attn (sq == Skv): `key`/`value` are BSHD [B, Skv, G, d];
-  //     fall through to the append kernel below with past_len forced to 0 and
-  //     seqlens_k=nullptr so it transposes all Skv tokens to offset 0 WITHOUT
-  //     the +1 PAST-token convention.
-  if (no_causal && skv >= 0 && skv != sq) {
-    // Cross-attn: key/value arrive rank-4 BNSD [B,G,skv,d]; straight D2D copy.
-    // elem_sz is 2 (fp16) or 4 (fp32); the decomposed pipeline supports both.
-    size_t bytes = static_cast<size_t>(B) * G * static_cast<size_t>(skv) * d *
-                   static_cast<size_t>(elem_sz);
-    if (hipMemcpyAsync(present_key, new_key, bytes, hipMemcpyDeviceToDevice,
-                       stream) != hipSuccess)
-      return -1;
-    if (hipMemcpyAsync(present_value, new_value, bytes, hipMemcpyDeviceToDevice,
-                       stream) != hipSuccess)
-      return -1;
-    return 0;
-  }
+                           const void *v_scale = nullptr,
+                           bool kv_bnsh = false) {
+  // no_causal with no past KV (bidirectional): the KV to attend over is the
+  // FULL `new_key`/`new_value` (Skv tokens), not `sq` newly-appended ones, so
+  // present is populated from scratch rather than appended to. Which mechanism
+  // does that depends on the SOURCE LAYOUT, not on how Skv compares to sq --
+  // bare pointers cannot reveal the layout, so kv_bnsh carries it down from the
+  // key operand's rank (see wrap_group_query_attention). Guessing "Skv != sq
+  // implies the source is already BNSH" held for Whisper cross-attn but broke
+  // every BSHD producer with Skv != sq above G == 1, where BSHD and BNSH stop
+  // being byte-identical and the copy scrambled heads against seq.
+  // no_causal is fp16/fp32 only (decomposed pipeline), never quantized.
   if (no_causal) {
-    // Encoder self-attn: append all Skv (== sq) tokens at offset 0, bypassing
-    // the seqlens_k +1 convention (pass nullptr so the kernel uses past_len=0).
-    // no_causal is fp16/fp32 only (decomposed pipeline), never quantized.
-    if (hip_gqa_kv_cache_append(stream, new_key, present_key, B, sq, G, d,
+    const int ntok = (skv >= 0) ? skv : sq;
+    if (kv_bnsh) {
+      // Already in present order [B, G, ntok, d]: straight D2D copy.
+      // elem_sz is 2 (fp16) or 4 (fp32); the decomposed pipeline supports both.
+      size_t bytes = static_cast<size_t>(B) * G * static_cast<size_t>(ntok) *
+                     d * static_cast<size_t>(elem_sz);
+      if (hipMemcpyAsync(present_key, new_key, bytes, hipMemcpyDeviceToDevice,
+                         stream) != hipSuccess)
+        return -1;
+      if (hipMemcpyAsync(present_value, new_value, bytes,
+                         hipMemcpyDeviceToDevice, stream) != hipSuccess)
+        return -1;
+      return 0;
+    }
+    // BSHD [B, ntok, G, d]: the append kernel transposes into the BNSD present
+    // at offset 0. past_len=0 and seqlens_k=nullptr bypass the +1 PAST-token
+    // convention, which does not apply without a past buffer.
+    if (hip_gqa_kv_cache_append(stream, new_key, present_key, B, ntok, G, d,
                                 present_seq, /*past_len=*/0,
                                 /*seqlens_k_ptr=*/nullptr, elem_sz,
                                 HIP_KV_DTYPE_FP16, /*scale=*/nullptr) != 0)
       return -1;
-    if (hip_gqa_kv_cache_append(stream, new_value, present_value, B, sq, G, d,
+    if (hip_gqa_kv_cache_append(stream, new_value, present_value, B, ntok, G, d,
                                 present_seq, /*past_len=*/0,
                                 /*seqlens_k_ptr=*/nullptr, elem_sz,
                                 HIP_KV_DTYPE_FP16, /*scale=*/nullptr) != 0)
       return -1;
     return 0;
   }
+  // Everything below concatenates/appends `sq` new tokens into a BNSD present
+  // and reads them as BSHD. A BNSH source here means a converter emitted a
+  // layout this path cannot consume; fail loudly rather than transpose nothing.
+  if (kv_bnsh) {
+    fprintf(stderr,
+            "update_kv_cache: BNSH key/value with a past KV cache is not "
+            "supported (causal concat/append reads BSHD)\n");
+    return -1;
+  }
+
   // Quantized cache: pass the per-channel scale so the kernel quantizes on
   // write; fp16/fp32: pass nullptr for a plain copy. The append/concat entries
   // dispatch on kv_dtype, so no separate per-format code path is needed here.
@@ -1124,12 +1200,14 @@ static int gqa_forward_hipblaslt(
     void *present_value, int64_t B, int64_t sq, int64_t skv,
     int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
     int64_t do_rotary, int64_t local_window_size, bool no_causal,
-    int64_t element_size_bytes, int op_state_slot) {
+    int64_t element_size_bytes, int op_state_slot, bool kv_bnsh) {
 
-  // Whisper bidirectional no-past path only when no_causal AND no external
-  // attention_bias. ONNX Attention with is_causal=0 still carries past KV and
-  // uses the standard decode seqlens_k convention.
-  const bool bidirectional_no_past = no_causal && (attention_bias == nullptr);
+  // Bidirectional bookkeeping: total_seq = s_{kv}, past_len = 0, KV populate
+  // takes all skv tokens. Gated on past_key, not attention_bias: a masked layer
+  // can still own no past buffer, e.g. when its K/V is another layer's present
+  // cache.
+  //
+  const bool bidirectional_no_past = no_causal && (past_key == nullptr);
 
   int64_t HPG = H / G;
   int64_t present_seq = skv;
@@ -1146,8 +1224,11 @@ static int gqa_forward_hipblaslt(
   // its own D2H). On B>1 this returns kSeqlensKNotRead and both downstream
   // paths fall back to their legacy per-call reads. Stored in seqlens_k_pre;
   // total_seq_pre is the derived total_seq (-1 means unknown / not applicable).
+  // bidirectional_no_past means no past key buffer.
   int32_t seqlens_k_pre =
-      read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state);
+      bidirectional_no_past
+          ? kSeqlensKNotRead
+          : read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state);
   int64_t total_seq_pre = -1;
   if (bidirectional_no_past) {
     // bidirectional_no_past (Whisper encoder / cross-attn): seqlens_k = skv
@@ -1408,16 +1489,15 @@ static int gqa_forward_hipblaslt(
   // validated multi-batch decode workload yet.
   int64_t total_seq = skv;
   int64_t past_len = skv - sq;
-  // no_causal (Whisper encoder self-attn + decoder cross-attn) is bidirectional
-  // with NO past KV: the converters emit a compile-time seqlens_k = skv meaning
-  // "all skv keys are valid". The ORT decode convention below (seqlens_k[b] =
-  // PAST tokens => total_seq = seqlens_k+1) does NOT apply here -- it would
-  // give total_seq = skv+1 > present_seq = skv -> rc=-1 -> zeroed output, and
-  // past_len = total_seq - sq is invalid when sq != skv (cross-attn has sq=1,
-  // skv=1500 => bogus past_len=1499). Gated on bidirectional_no_past (not raw
-  // no_causal): an onnx.Attention with an external mask still carries past KV,
-  // so it keeps the standard seqlens_k path below. For the no-past case
-  // total_seq = skv (== present_seq) and past_len = 0; skip the readback.
+  // bidirectional with NO past KV operand: every one of the skv keys handed in
+  // is valid, so total_seq = skv (== present_seq) and past_len = 0, and the
+  // readback is skipped entirely. The ORT decode convention below (seqlens_k[b]
+  // = PAST tokens => total_seq = seqlens_k+1) does NOT apply -- it would give
+  // total_seq = skv+1 > present_seq = skv -> rc=-1 -> zeroed output, and
+  // past_len = total_seq - sq is meaningless when sq != skv (Whisper cross-attn
+  // has sq=1, skv=1500 => bogus past_len=1499; a KV-shared decoder layer at
+  // decode has sq=1, skv=past+1 => past_len exceeding past_buf_seq == 0).
+  // is_causal=0 layers that DO own a past cache keep the standard path below.
   if (bidirectional_no_past) {
     total_seq = skv;
     past_len = 0;
@@ -1805,10 +1885,9 @@ static int gqa_forward_hipblaslt(
     // no-expand hands seqlens_k_ptr to the append kernel (on-device past_len,
     // no D2H); the expand path already read total_seq host-side so passes null.
     if (present_key && present_value) {
-      // bidirectional_no_past (Whisper encoder / cross-attn): never hand
-      // seqlens_k to the append kernel (it would apply the +1 convention).
-      // ONNX Attention with is_causal=0 + external mask keeps the standard
-      // decode KV path (bidirectional_no_past=false).
+      // bidirectional_no_past: never hand seqlens_k to the append kernel (it
+      // would apply the +1 PAST-token convention). Layers that own a past cache
+      // keep the standard decode KV path.
       HIP_CHECK(update_kv_cache(
           stream, past_key, past_value, kSrc, vSrc, present_key, present_value,
           static_cast<int>(B), static_cast<int>(past_len), static_cast<int>(sq),
@@ -1816,7 +1895,8 @@ static int gqa_forward_hipblaslt(
           static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
           (use_no_expand && !bidirectional_no_past) ? seqlens_k_ptr : nullptr,
           static_cast<int>(elem_sz), bidirectional_no_past,
-          static_cast<int>(skv)));
+          static_cast<int>(skv), KvCacheFormat::Fp16, /*k_scale=*/nullptr,
+          /*v_scale=*/nullptr, kv_bnsh));
     }
 
     // ---- Steps 6-7: KV Expand [B*G,present_seq,d] -> [B*H,total_seq,d] ----
@@ -2075,7 +2155,8 @@ int wrap_group_query_attention(
     // Shape values (6)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
-    int64_t attn_bias_batch, int64_t attn_bias_num_heads) {
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads,
+    int32_t kv_layout_bnsh) {
   OP_PROFILE(
       "gqa",
       [&] {
@@ -2249,7 +2330,8 @@ int wrap_group_query_attention(
         attention_bias, attn_bias_batch, attn_bias_num_heads, output,
         present_key, present_value, batch_size, seq_len_q, seq_len_kv,
         past_buf_seq, num_heads, kv_num_heads, head_dim, scale, do_rotary,
-        local_window_size, no_causal != 0, element_size_bytes, op_state_slot);
+        local_window_size, no_causal != 0, element_size_bytes, op_state_slot,
+        kv_layout_bnsh != 0);
     if (lrc != 0)
       fprintf(stderr,
               "wrap_group_query_attention: legacy decomposed pipeline failed "
