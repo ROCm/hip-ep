@@ -18,4 +18,4 @@ flatbuffers;https://github.com/google/flatbuffers.git;v25.12.19
 cpptrace;https://github.com/jeremy-rifkin/cpptrace.git;v0.8.3
 ##
 therock_windows;https://github.com/ROCm/hip-ep/releases/download/v0.3.0;therock-dist-windows-gfx1151-7.14.0
-therock_linux;https://repo.amd.com/rocm/tarball;7.11.0
+therock_linux;https://repo.amd.com/rocm/tarball;therock-dist-linux-gfx1151-7.11.0
