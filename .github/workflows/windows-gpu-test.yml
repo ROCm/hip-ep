@@ -372,14 +372,16 @@ jobs:
           $py = "$venv\Scripts\python.exe"
 
           Push-Location "$pkg\wheels"
-          & $py -m pip install --quiet --find-links . `
+          & $py -m pip install --quiet `
             (Get-Item onnxruntime_directml-*.whl).Name `
-            (Get-Item onnxruntime_ep_amdgpu-*.whl).Name `
-            (Get-Item onnxruntime_ep_hip-*.whl).Name `
             (Get-Item onnxruntime_genai_directml-*.whl).Name `
             psutil tqdm pandas
+          if ($LASTEXITCODE -ne 0) { Pop-Location; Write-Host "[ERROR] wheels install failed"; exit 1 }
+          & $py -m pip install --quiet --no-deps `
+            (Get-Item onnxruntime_ep_amdgpu-*.whl).Name `
+            (Get-Item onnxruntime_ep_hip-*.whl).Name
           Pop-Location
-          if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] wheel install failed"; exit 1 }
+          if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] EP wheel install failed"; exit 1 }
 
           New-Item -ItemType Directory -Force -Path oga-smoke-results | Out-Null
           & $py "$pkg\run_onnx.py" --benchmark "$pkg\benchmark_e2e.py" `
