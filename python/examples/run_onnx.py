@@ -4,13 +4,8 @@
 #
 """Run an ONNX model or OGA benchmark on the MorphiZen EP.
 
-Sets up the JIT linker's LIB and the umbrella EP path from the installed wheels,
-then either:
-  - Runs a plain ONNX model with random inputs (default), or
-  - Delegates to benchmark_e2e.py for OGA benchmarks (--benchmark).
-
-Prerequisites (see docs/quick_start.md):
-  - pip install the onnxruntime + onnxruntime_ep_amdgpu + onnxruntime_ep_hip wheels
+Runs a plain ONNX model with random inputs (default), or delegates to
+benchmark_e2e.py for OGA benchmarks (--benchmark).
 
 Usage:
   python run_onnx.py path/to/model.onnx
@@ -24,8 +19,6 @@ import sys
 import numpy as np
 import onnxruntime as ort
 
-# Importing this runs os.add_dll_directory on the package directory, where every
-# DLL in the chain lives, so it has to precede ORT loading any of them.
 import onnxruntime_ep_amdgpu
 
 EP_NAME = "MorphiZenEP"
@@ -44,12 +37,7 @@ _NP_DTYPE = {
 
 def _setup_env():
     pkg = os.path.dirname(onnxruntime_ep_amdgpu.__file__)
-
-    # The JIT linker resolves the CRT and ROCm import libs off %LIB%.
     os.environ["LIB"] = os.pathsep.join(filter(None, [pkg, os.environ.get("LIB", "")]))
-    # OGA looks for the umbrella next to its own DLL / onnxruntime.dll / the exe,
-    # none of which is this directory. An env var also reaches the --benchmark
-    # child, unlike an in-process registration.
     os.environ["AMDGPU_EP_PATH"] = onnxruntime_ep_amdgpu.get_library_path()
     return pkg
 
