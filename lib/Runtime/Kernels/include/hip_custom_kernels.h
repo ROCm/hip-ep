@@ -704,19 +704,24 @@ HIP_KERNEL_API int hip_gqa_causal_mask_f32(
     int batch_stride, int past_len, int local_window_size);
 
 /* Add an attention bias onto the fp32 score matrix before softmax.
- * scores layout: [total_heads, sq, total_seq] row-major with batch_stride
- * = sq * total_seq per head.
- * bias layout: [bias_batch, bias_heads, bias_sq, total_seq], row-major.
+ * scores layout: [total_heads, sq, score_cols] row-major with batch_stride
+ * = sq * score_cols per head.
+ * bias layout: [bias_batch, bias_heads, bias_sq, bias_total_seq], row-major.
  * bias_batch / bias_heads may be 1 for ONNX-style broadcast.
- * sq is the number of query rows in `scores`, which is a chunk of the full
- * query range when the caller tiles the prefill; bias_sq is the bias tensor's
- * full query extent and bias_row_offset locates the chunk within it. Pass
- * bias_sq = sq (or 0) and bias_row_offset = 0 for the untiled case. */
+ * `scores` may be a sub-block of the full logical score matrix on either axis,
+ * so both axes carry a bias extent and an offset:
+ *   sq / bias_sq / bias_row_offset -- sq is the number of query rows present,
+ *     a chunk of the full range when the caller tiles the prefill.
+ *   score_cols / bias_total_seq / bias_col_offset -- score_cols is the number
+ *     of key columns present, just the sliding window when the caller narrowed
+ *     the decode key range.
+ * Pass bias_sq = sq (or 0) and bias_row_offset = 0, and bias_total_seq =
+ * score_cols (or 0) and bias_col_offset = 0, for the untiled/unnarrowed case. */
 HIP_KERNEL_API int hip_gqa_add_attention_bias_f32(
     void* stream, void* scores, const void* bias,
     int total_heads, int num_heads, int bias_batch, int bias_heads,
-    int sq, int total_seq, int score_batch_stride, int bias_element_size_bytes,
-    int bias_sq, int bias_row_offset);
+    int sq, int score_cols, int score_batch_stride, int bias_element_size_bytes,
+    int bias_sq, int bias_row_offset, int bias_total_seq, int bias_col_offset);
 
 /* Column-wise softmax in-place. One threadblock per (head, query).
  * Smooth softmax is activated when head_sink is non-null OR use_smooth_softmax
