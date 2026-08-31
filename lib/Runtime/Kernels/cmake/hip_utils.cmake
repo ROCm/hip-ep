@@ -44,7 +44,15 @@ endif()
 
 # GPU architectures - must be set by developer
 set(HIP_ARCHITECTURES "" CACHE STRING
-    "Target GPU architectures (e.g., gfx1100;gfx1102). Required for HIP compilation.")
+    "Target GPU architectures (semicolon- or comma-separated, e.g. gfx1100;gfx1151). Required for HIP compilation.")
+
+# CMake lists use ';'. Accept comma-separated -DHIP_ARCHITECTURES=a,b,c (common on
+# Windows shells). Root CMakeLists normalizes before deps.cmake; repeat here if
+# hip_utils is ever included standalone.
+include(${CMAKE_SOURCE_DIR}/cmake/HipArchitectures.cmake OPTIONAL)
+if(COMMAND hipdnn_ep_normalize_hip_architectures)
+    hipdnn_ep_normalize_hip_architectures()
+endif()
 
 # Global compile options
 set(HIP_COMPILE_OPTIONS "" CACHE STRING "Additional compile options for HIP sources")
@@ -85,6 +93,38 @@ if(WIN32)
     message(STATUS "[hip_utils] HIP_PATH: ${HIP_PATH}")
     message(STATUS "[hip_utils] hipcc: ${HIPCC_EXECUTABLE}")
     message(STATUS "[hip_utils] HIP_ARCHITECTURES: ${HIP_ARCHITECTURES}")
+
+    # TheRock SDK layout puts device bitcode under lib/llvm/amdgcn/bitcode and
+    # clang's resource dir under lib/llvm/lib/clang/<ver>, not the stock
+    # lib/clang/<ver>/lib/amdgcn/bitcode tree that --rocm-path alone expects.
+    # lld also lives in lib/llvm/bin and must be on PATH for the amdgcn-link
+    # step during hipcc -c.
+    set(_HIP_ROCM_COMPILE_FLAGS "--rocm-path=${HIP_PATH}")
+    set(_HIP_LLVM_BIN_DIR "")
+    if(EXISTS "${HIP_PATH}/lib/llvm/amdgcn/bitcode")
+        list(APPEND _HIP_ROCM_COMPILE_FLAGS
+            "--rocm-device-lib-path=${HIP_PATH}/lib/llvm/amdgcn/bitcode")
+        file(GLOB _hip_clang_resource_dirs LIST_DIRECTORIES true
+            "${HIP_PATH}/lib/llvm/lib/clang/*")
+        if(_hip_clang_resource_dirs)
+            list(SORT _hip_clang_resource_dirs COMPARE NATURAL ORDER DESCENDING)
+            list(GET _hip_clang_resource_dirs 0 _hip_clang_resource_dir)
+            list(APPEND _HIP_ROCM_COMPILE_FLAGS
+                "-resource-dir=${_hip_clang_resource_dir}")
+        else()
+            message(WARNING
+                "[hip_utils] TheRock layout detected but no clang resource dir "
+                "found under ${HIP_PATH}/lib/llvm/lib/clang/")
+        endif()
+        if(EXISTS "${HIP_PATH}/lib/llvm/bin")
+            set(_HIP_LLVM_BIN_DIR "${HIP_PATH}/lib/llvm/bin")
+        endif()
+        message(STATUS "[hip_utils] TheRock ROCm layout: ${_HIP_ROCM_COMPILE_FLAGS}")
+        if(_HIP_LLVM_BIN_DIR)
+            message(STATUS "[hip_utils] prepending PATH for hipcc: ${_HIP_LLVM_BIN_DIR}")
+        endif()
+    endif()
+
     if(TARGET hip::host)
         message(STATUS "[hip_utils] hip::host target available - using imported target")
     else()
@@ -193,6 +233,20 @@ endfunction()
 function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS ARCH_LIST OUTPUT_OBJS)
     _hip_get_arch_flags("${ARCH_LIST}" arch_flags)
 
+    # On Windows, optionally wrap hipcc so lib/llvm/bin (lld) is on PATH for
+    # TheRock distributions. A small .bat wrapper avoids CMake list-splitting
+    # on semicolons inside %PATH%.
+    set(HIPCC_LAUNCHER ${HIPCC_EXECUTABLE})
+    if(WIN32 AND _HIP_LLVM_BIN_DIR)
+        set(_HIPCC_WRAPPER "${CMAKE_BINARY_DIR}/hipcc_with_lld.bat")
+        file(WRITE "${_HIPCC_WRAPPER}"
+"@echo off
+set \"PATH=${_HIP_LLVM_BIN_DIR};%PATH%\"
+\"${HIPCC_EXECUTABLE}\" %*
+")
+        set(HIPCC_LAUNCHER "${_HIPCC_WRAPPER}")
+    endif()
+
     # Build include flags
     # NOTE: -I and path are separate list items to handle paths with spaces
     # (e.g., "C:/Program Files/..."). Clang supports "-I" "<path>" as two args.
@@ -288,9 +342,10 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
             # Use generator expressions for config-specific flags
             add_custom_command(
                 OUTPUT ${output_obj}
-                COMMAND ${HIPCC_EXECUTABLE}
+                COMMAND ${HIPCC_LAUNCHER}
                     -c "${source_abs}"
                     -o "${output_obj}"
+                    ${_HIP_ROCM_COMPILE_FLAGS}
                     ${arch_flags}
                     ${include_flags}
                     ${define_flags}
@@ -328,9 +383,10 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
 
             add_custom_command(
                 OUTPUT ${output_obj}
-                COMMAND ${HIPCC_EXECUTABLE}
+                COMMAND ${HIPCC_LAUNCHER}
                     -c "${source_abs}"
                     -o "${output_obj}"
+                    ${_HIP_ROCM_COMPILE_FLAGS}
                     ${arch_flags}
                     ${include_flags}
                     ${define_flags}

@@ -115,6 +115,7 @@ target_include_directories(${LIB_NAME} PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_BINARY_DIR}/..  # For generated protobuf headers (metadata.pb.h)
   ${CMAKE_SOURCE_DIR}/include     # Shared project headers (timing.h, etc.)
+  ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/include
   ${LLVM_INCLUDE_DIRS}            # LLVM ORC headers consumed by LlvmIrJit.cpp
 )
 
@@ -127,15 +128,24 @@ if(DEFINED morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET AND
     PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${LIB_NAME}>"
   )
 
-  # Per-arch GPU kernel libs (custom_kernels_<arch>.{dll,so}) are dlopen'd by
-  # LlvmIrJit at JIT init, not linked into the EP DLL -- sequence them as
-  # build deps only, so the install step co-locates them with the EP binary.
+  # Family-common + per-arch-accel GPU kernel libs are dlopen'd by LlvmIrJit at
+  # JIT init, not linked into the EP DLL -- sequence them as build deps only.
   if(HIPDNN_EP_LOAD_KERNEL_DLLS AND HIP_ARCHITECTURES)
+    if(TARGET custom_kernels_gfx115x)
+      add_dependencies(${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET}
+        custom_kernels_gfx115x)
+    endif()
     foreach(_arch IN LISTS HIP_ARCHITECTURES)
       if(TARGET custom_kernels_${_arch})
         add_dependencies(
           ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET}
           custom_kernels_${_arch}
+        )
+      endif()
+      if(TARGET custom_kernels_${_arch}_common)
+        add_dependencies(
+          ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET}
+          custom_kernels_${_arch}_common
         )
       endif()
     endforeach()

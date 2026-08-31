@@ -164,11 +164,25 @@ jobs:
           cp "${{ runner.workspace }}/amdgpu-artifacts/amdgpu-ep.dll" staging/bin/
           cp "${{ runner.workspace }}/amdgpu-artifacts/hip-backend.dll" staging/bin/
 
-          # Smoke: every per-arch kernel DLL must be present in staging/bin/
-          # (LlvmIrJit dlopens custom_kernels_<gcnArchName>.dll at runtime).
-          # Failure here means the install rule in lib/Runtime/Kernels/CMakeLists.txt
-          # regressed or HIP_ARCHITECTURES was trimmed.
+          # Smoke: family-common + per-arch-accel kernel DLLs must sit in staging/bin/
+          # (LlvmIrJit dlopens family common then accel at runtime).
           IFS=';' read -ra HIP_ARCHS <<< "${{ env.HIP_ARCHITECTURES }}"
+          _CK_FAMILY_GFX115X="gfx1150 gfx1151 gfx1152 gfx1153"
+          _CK_NEEDS_GFX115X=0
+          for arch in "${HIP_ARCHS[@]}"; do
+            case " $_CK_FAMILY_GFX115X " in
+              *" $arch "*) _CK_NEEDS_GFX115X=1 ;;
+            esac
+          done
+          if [ "$_CK_NEEDS_GFX115X" -eq 1 ]; then
+            FAMILY_DLL="staging/bin/custom_kernels_gfx115x.dll"
+            if [ ! -f "$FAMILY_DLL" ]; then
+              echo "ERROR: $FAMILY_DLL missing (gfx115x family common)"
+              ls -1 "${{ runner.workspace }}/install/bin/" || true
+              exit 1
+            fi
+            echo "OK: $(basename "$FAMILY_DLL") present"
+          fi
           for arch in "${HIP_ARCHS[@]}"; do
             KERNEL_DLL="staging/bin/custom_kernels_${arch}.dll"
             if [ ! -f "$KERNEL_DLL" ]; then

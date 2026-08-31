@@ -10,6 +10,8 @@
 #include <hip/hip_runtime_api.h>
 #endif
 
+#include "hip_custom_kernels_family.h"
+
 #include <llvm/ADT/ArrayRef.h>
 #include <llvm/ADT/SmallString.h>
 #include <llvm/Bitcode/BitcodeReader.h>
@@ -462,30 +464,41 @@ bool installSearchGenerators(llvm::orc::LLJIT &jit) {
   }
 
 #ifdef HIPDNN_EP_LOAD_KERNEL_DLLS
-  // Per-arch GPU kernel DLL/SO, dlopen'd from the EP binary's own directory.
+  // Family-common + per-arch-accel kernel libraries, dlopen'd from the EP
+  // binary's own directory (see hip_custom_kernels_family.h).
   {
     const std::string arch = detectCustomKernelArch();
 #ifdef _WIN32
-    const std::string basename = "custom_kernels_" + arch + ".dll";
     const char sep = '\\';
 #else
-    const std::string basename = "libcustom_kernels_" + arch + ".so";
     const char sep = '/';
 #endif
-    std::string kernel_lib = thisModuleDirectory();
-    if (!kernel_lib.empty())
-      kernel_lib.push_back(sep);
-    kernel_lib += basename;
+    const std::string module_dir = thisModuleDirectory();
 
-    auto gen = llvm::orc::DynamicLibrarySearchGenerator::Load(
-        kernel_lib.c_str(), global_prefix);
-    if (!gen) {
-      LOG(ERROR) << "LlvmIrJit: Load(" << kernel_lib << ") for arch=" << arch
-                 << " failed: " << llvm::toString(gen.takeError())
-                 << ". Install " << basename << " next to the EP DLL/SO.";
+    auto loadKernelLib = [&](const std::string &fileName) -> bool {
+      std::string path = module_dir;
+      if (!path.empty())
+        path.push_back(sep);
+      path += fileName;
+      auto gen = llvm::orc::DynamicLibrarySearchGenerator::Load(path.c_str(),
+                                                                global_prefix);
+      if (!gen) {
+        LOG(ERROR) << "LlvmIrJit: Load(" << path << ") for arch=" << arch
+                   << " failed: " << llvm::toString(gen.takeError())
+                   << ". Install " << fileName << " next to the EP DLL/SO.";
+        return false;
+      }
+      jd.addGenerator(std::move(*gen));
+      return true;
+    };
+
+    const std::string family_common =
+        hipdnn_ep::custom_kernels::familyCommonFileName(arch);
+    const std::string accel = hipdnn_ep::custom_kernels::accelFileName(arch);
+    if (!loadKernelLib(family_common))
       return false;
-    }
-    jd.addGenerator(std::move(*gen));
+    if (!loadKernelLib(accel))
+      return false;
   }
 #endif // HIPDNN_EP_LOAD_KERNEL_DLLS
 

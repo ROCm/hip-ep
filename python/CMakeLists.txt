@@ -52,6 +52,33 @@ if(NOT THEROCK_DIST)
     "THEROCK_DIST is empty; the wheel cannot bundle the ROCm runtime.")
 endif()
 
+# Bundle family-common + per-arch-accel custom-kernels runtime libraries. The EP
+# dlopens both from its own directory at JIT init, so each must ship in
+# onnxruntime/capi next to the EP DLL.
+set(_CK_FAMILY_GFX115X_MEMBERS gfx1150 gfx1151 gfx1152 gfx1153)
+set(_CK_NEEDS_GFX115X FALSE)
+foreach(_arch IN LISTS HIP_ARCHITECTURES)
+  if(_arch IN_LIST _CK_FAMILY_GFX115X_MEMBERS)
+    set(_CK_NEEDS_GFX115X TRUE)
+  endif()
+endforeach()
+
+if(_CK_NEEDS_GFX115X AND TARGET custom_kernels_gfx115x)
+  list(APPEND _dll_args "--dll" "$<TARGET_FILE:custom_kernels_gfx115x>")
+  list(APPEND _wheel_deps custom_kernels_gfx115x)
+endif()
+
+foreach(_arch IN LISTS HIP_ARCHITECTURES)
+  if(_arch IN_LIST _CK_FAMILY_GFX115X_MEMBERS)
+    continue()
+  endif()
+  set(_ck_common_target custom_kernels_${_arch}_common)
+  if(TARGET ${_ck_common_target})
+    list(APPEND _dll_args "--dll" "$<TARGET_FILE:${_ck_common_target}>")
+    list(APPEND _wheel_deps ${_ck_common_target})
+  endif()
+endforeach()
+
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
   set(_ck_target custom_kernels_${_arch})
   if(TARGET ${_ck_target})
@@ -59,8 +86,8 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
     list(APPEND _wheel_deps ${_ck_target})
   else()
     message(WARNING
-      "custom kernels target '${_ck_target}' not found; the wheel cannot "
-      "JIT-load GPU kernels for ${_arch}.")
+      "custom kernels accel target '${_ck_target}' not found; the wheel cannot "
+      "JIT-load GPU accel kernels for ${_arch}.")
   endif()
 endforeach()
 

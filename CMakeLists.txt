@@ -105,8 +105,12 @@ option(BUILD_PYTHON_WHEEL "Configure the 'wheel' target that packages the EP as 
 # is included below (after the LLVM/MLIR toolchain is resolved) and defines
 # HIPDNN_EP_COMPILER_PLUGINS.
 
-# Centralized dependency resolution (LLVM/MLIR/LLD, flatbuffers, cpptrace,
-# TheRock, morphizen, ONNX Runtime, protobuf).
+# Centralized dependency resolution. Always included; internally partitions by
+# BUILD_EP / BUILD_HIP_TOOLS so a tools-only tree (BUILD_EP=OFF) still gets the
+# shared toolchain (LLVM/MLIR/LLD, flatbuffers, cpptrace, TheRock) without the
+# EP-only bits (morphizen, ORT, protobuf).
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/HipArchitectures.cmake)
+hipdnn_ep_normalize_hip_architectures()
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
 
 # Which config source GQA sessions take by default. OFF is the offline LUT; ON

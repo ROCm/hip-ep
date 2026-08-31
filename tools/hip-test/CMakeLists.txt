@@ -23,17 +23,45 @@ target_link_libraries(hip-test
   ${llvm_libs}
 )
 
-# LlvmIrJit (linked in via morphizen-custom-op-mlir above) dlopens the matching
-# custom_kernels_<arch>.{dll,so} at JIT init using an EXPLICIT path built from
-# its own module directory (thisModuleDirectory() == the hip-test binary's dir).
+# LlvmIrJit (linked in via morphizen-custom-op-mlir above) dlopens family-common
+# then per-arch-accel custom_kernels_* at JIT init using an EXPLICIT path built
+# from its own module directory (thisModuleDirectory() == the hip-test binary's dir).
 # An explicit-path dlopen bypasses RPATH search, so INSTALL_RPATH does NOT help
-# the kernel load -- the .so must physically sit next to hip-test. The kernel
-# target emits into lib/Runtime/Kernels/, so co-locate a copy beside hip-test
-# after each build or the JIT load fails at run time (LlvmIrJit::create ->
-# "Load(<dir>/libcustom_kernels_<arch>.so) failed"). copy_if_different is
-# idempotent and a no-op when the two dirs already coincide. Skipped on mock /
+# the kernel load -- both libraries must physically sit next to hip-test. copy_if_different
+# is idempotent and a no-op when the two dirs already coincide. Skipped on mock /
 # GPU-less builds, where the per-arch targets are not registered.
 if(NOT BUILD_MOCK_RUNTIME AND HIP_ARCHITECTURES)
+  set(_CK_FAMILY_GFX115X_MEMBERS gfx1150 gfx1151 gfx1152 gfx1153)
+  set(_CK_NEEDS_GFX115X FALSE)
+  foreach(_arch IN LISTS HIP_ARCHITECTURES)
+    if(_arch IN_LIST _CK_FAMILY_GFX115X_MEMBERS)
+      set(_CK_NEEDS_GFX115X TRUE)
+    endif()
+  endforeach()
+
+  if(_CK_NEEDS_GFX115X AND TARGET custom_kernels_gfx115x)
+    add_dependencies(hip-test custom_kernels_gfx115x)
+    add_custom_command(TARGET hip-test POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "$<TARGET_FILE:custom_kernels_gfx115x>"
+        "$<TARGET_FILE_DIR:hip-test>"
+      VERBATIM)
+  endif()
+
+  foreach(_arch IN LISTS HIP_ARCHITECTURES)
+    if(_arch IN_LIST _CK_FAMILY_GFX115X_MEMBERS)
+      continue()
+    endif()
+    if(TARGET custom_kernels_${_arch}_common)
+      add_dependencies(hip-test custom_kernels_${_arch}_common)
+      add_custom_command(TARGET hip-test POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "$<TARGET_FILE:custom_kernels_${_arch}_common>"
+          "$<TARGET_FILE_DIR:hip-test>"
+        VERBATIM)
+    endif()
+  endforeach()
+
   foreach(_arch IN LISTS HIP_ARCHITECTURES)
     if(TARGET custom_kernels_${_arch})
       add_dependencies(hip-test custom_kernels_${_arch})

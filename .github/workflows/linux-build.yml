@@ -533,11 +533,18 @@ jobs:
 
           cp "${{ github.workspace }}/etc/morphizen_config.json" staging/etc/
 
-          # Smoke: per-arch kernel SO must sit next to libhipgpu.so (the EP, named
-          # via morphizen_OUTPUT_NAME); the EP anchors dlopen via dladdr() + RPATH=$ORIGIN.
+          # Smoke: family-common + per-arch-accel kernel SOs must sit next to libhipgpu.so
+          # (the EP anchors dlopen via dladdr() + RPATH=$ORIGIN).
+          FAMILY_SO="staging/lib/libcustom_kernels_gfx115x.so"
+          if [ ! -f "$FAMILY_SO" ]; then
+            echo "ERROR: $FAMILY_SO missing from install (gfx115x family common)"
+            ls -1 staging/lib/ | head -40
+            exit 1
+          fi
+          echo "OK: $(basename "$FAMILY_SO") present"
           KERNEL_SO="staging/lib/libcustom_kernels_gfx1151.so"
           if [ ! -f "$KERNEL_SO" ]; then
-            echo "ERROR: $KERNEL_SO missing from install (HIP_ARCHITECTURES=gfx1151)"
+            echo "ERROR: $KERNEL_SO missing from install (HIP_ARCHITECTURES=gfx1151 accel)"
             ls -1 staging/lib/ | head -40
             exit 1
           fi

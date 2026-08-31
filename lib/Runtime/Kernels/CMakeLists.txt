@@ -5,41 +5,31 @@
 
 # Custom HIP kernels for ops without ROCm library support.
 #
-# This tree lives under lib/Runtime/ because the kernels are the
-# GPU-architecture-dependent half of the runtime (the EP/compiler proper are
-# arch-independent). The build artifacts intentionally keep the
-# custom_kernels_<arch> name regardless of the directory: the EP's JIT
-# arch-probing (LlvmIrJit) and the CI co-location checks key on that exact
-# filename, so the output names are decoupled from the directory name -- do not
-# rename the targets to match the folder.
+# Split layout (family common + per-arch accel):
+#   custom_kernels_gfx115x.{dll,so}  -- common .hip TUs, one RDNA3.5 device slice
+#   custom_kernels_<arch>.{dll,so}   -- accel .hip TUs (WMMA/GQA/MatMulNBits/...)
 #
-# Per-arch shared libraries: one SHARED library per arch in HIP_ARCHITECTURES,
-# each carrying a single fatbin slice. The EP DLL dlopens the matching variant
-# at JIT init via gcnArchName probing. No static archive is produced; the EP
-# DLL no longer carries hip_* launcher symbols.
+# Older monolithic custom_kernels_<arch> targets are no longer produced.
 #
 # Build flow (per arch):
-#   .hip files -> hipcc -c --offload-arch=<arch> -> .obj
-#                                               -> custom_kernels_<arch>.{dll,so}
+#   .hip files -> hipcc -c --offload-arch=<arch> -> .obj -> SHARED lib
 
 cmake_minimum_required(VERSION 3.18)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/hip_utils.cmake)
 
-# Require HIP_ARCHITECTURES to be set (no silent defaults that may not match hardware)
 if(NOT HIP_ARCHITECTURES)
     message(FATAL_ERROR
         "[custom_kernels] HIP_ARCHITECTURES is not set.\n"
-        "Pass -DHIP_ARCHITECTURES=<arch>[;<arch>...] to cmake (e.g. gfx1100;gfx1151).\n"
+        "Pass -DHIP_ARCHITECTURES=<arch>[;<arch>...] to cmake (e.g. gfx1100;gfx1151;gfx1152).\n"
+        "Comma-separated lists are also accepted (gfx1150,gfx1151,gfx1152).\n"
         "Run 'rocminfo | grep gfx' or 'hipInfo' to find your GPU architecture.")
 endif()
 message(STATUS "[custom_kernels] Using HIP_ARCHITECTURES: ${HIP_ARCHITECTURES}")
 
-set(_kernel_sources
+# Common kernels: no WMMA / per-arch autotune megakernels (see docs/design/custom_kernel_family_split.md).
+set(_kernel_sources_common
     hip/rope_kernel.hip
-    hip/gqa_kernel.hip
-    hip/multi_head_attention_kernel.hip
-    hip/gemm_wmma_kernel.hip
     hip/elementwise_sub_kernel.hip
     hip/elementwise_reciprocal_kernel.hip
     hip/elementwise_sqrt_kernel.hip
@@ -50,7 +40,7 @@ set(_kernel_sources
     hip/softplus_kernel.hip
     hip/elementwise_where_kernel.hip
     hip/elementwise_unary_kernel.hip
-    hip/elementwise_binary_kernel.hip  # Mul/Add/Min/Max/Div/Mod/Equal/Less
+    hip/elementwise_binary_kernel.hip
     hip/tile_kernel.hip
     hip/expand_kernel.hip
     hip/gather_nd_kernel.hip
@@ -75,9 +65,6 @@ set(_kernel_sources
     hip/resize_kernel.hip
     hip/grid_sample_kernel.hip
     hip/global_pool_kernel.hip
-    hip/matmul_nbits_kernel.hip
-    hip/qmoe_kernel.hip
-    hip/linear_attention_kernel.hip
     hip/transpose_kernel.hip
     hip/causal_conv_step_kernel.hip
     hip/slice_kernel.hip
@@ -88,12 +75,76 @@ set(_kernel_sources
     hip/strided_copy_kernel.hip
 )
 
-# One SHARED target per arch. Each builds a fatbin with that single slice;
-# OFFLOAD_ARCHS narrows the global list to one element so the resulting
-# DLL/SO is not bloated with code for archs the consumer won't load.
+# Accel kernels: WMMA/GQA/MatMulNBits/QMoE/attention megakernels + autotune.
+set(_kernel_sources_accel
+    hip/gqa_kernel.hip
+    hip/multi_head_attention_kernel.hip
+    hip/gemm_wmma_kernel.hip
+    hip/matmul_nbits_kernel.hip
+    hip/qmoe_kernel.hip
+    hip/linear_attention_kernel.hip
+)
+
+set(_CK_FAMILY_GFX115X_MEMBERS gfx1150 gfx1151 gfx1152 gfx1153)
+set(_CK_NEEDS_GFX115X FALSE)
+foreach(_arch IN LISTS HIP_ARCHITECTURES)
+    if(_arch IN_LIST _CK_FAMILY_GFX115X_MEMBERS)
+        set(_CK_NEEDS_GFX115X TRUE)
+    endif()
+endforeach()
+
+function(_hip_ep_install_custom_kernels_target _target _desc)
+    hipdnn_ep_apply_binary_compliance(${_target} DESCRIPTION "${_desc}")
+    install(TARGETS ${_target}
+        RUNTIME DESTINATION bin
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+    )
+endfunction()
+
+# RDNA 3.5 family common library (device slice: gfx1151 representative).
+if(_CK_NEEDS_GFX115X)
+    set(_target custom_kernels_gfx115x)
+    hip_add_library(${_target} SHARED ${_kernel_sources_common}
+        INCLUDE_DIRECTORIES
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        OFFLOAD_ARCHS
+            gfx1151
+    )
+    set_target_properties(${_target} PROPERTIES
+        OUTPUT_NAME custom_kernels_gfx115x
+        FOLDER "custom_kernels"
+    )
+    _hip_ep_install_custom_kernels_target(${_target}
+        "AMD GPU EP common kernels (RDNA3.5 family gfx115x)")
+    message(STATUS "[custom_kernels] Adding family common SHARED target: ${_target}")
+endif()
+
+# Per-arch common for GPUs outside the gfx115x family.
+foreach(_arch IN LISTS HIP_ARCHITECTURES)
+    if(_arch IN_LIST _CK_FAMILY_GFX115X_MEMBERS)
+        continue()
+    endif()
+    set(_target custom_kernels_${_arch}_common)
+    hip_add_library(${_target} SHARED ${_kernel_sources_common}
+        INCLUDE_DIRECTORIES
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        OFFLOAD_ARCHS
+            ${_arch}
+    )
+    set_target_properties(${_target} PROPERTIES
+        OUTPUT_NAME custom_kernels_${_arch}_common
+        FOLDER "custom_kernels"
+    )
+    _hip_ep_install_custom_kernels_target(${_target}
+        "AMD GPU EP common kernels (${_arch})")
+    message(STATUS "[custom_kernels] Adding per-arch common SHARED target: ${_target}")
+endforeach()
+
+# Per-arch accel libraries.
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
     set(_target custom_kernels_${_arch})
-    hip_add_library(${_target} SHARED ${_kernel_sources}
+    hip_add_library(${_target} SHARED ${_kernel_sources_accel}
         INCLUDE_DIRECTORIES
             ${CMAKE_CURRENT_SOURCE_DIR}/include
         OFFLOAD_ARCHS
@@ -103,17 +154,11 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
         OUTPUT_NAME custom_kernels_${_arch}
         FOLDER "custom_kernels"
     )
-    hipdnn_ep_apply_binary_compliance(${_target}
-        DESCRIPTION "AMD GPU Execution Provider kernels (${_arch})")
-    install(TARGETS ${_target}
-        RUNTIME DESTINATION bin   # Windows .dll co-located with EP .dll
-        LIBRARY DESTINATION lib   # Linux .so co-located with EP .so
-        ARCHIVE DESTINATION lib   # Windows import lib; unused by the EP but harmless
-    )
-    message(STATUS "[custom_kernels] Adding per-arch SHARED target: ${_target}")
+    _hip_ep_install_custom_kernels_target(${_target}
+        "AMD GPU EP accel kernels (${_arch})")
+    message(STATUS "[custom_kernels] Adding per-arch accel SHARED target: ${_target}")
 endforeach()
 
-# Export include directory for Runtime bitcode compilation
 set(HIP_CUSTOM_KERNELS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include" PARENT_SCOPE)
 
 # The GQA offline-autotune LUT is compiled into runtime.bc (see
