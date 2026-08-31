@@ -377,7 +377,9 @@ jobs:
             echo "[$name] $url/$base.tar.gz"
             curl -sSL --fail -o "$RUNNER_TEMP/$base.tar.gz" "$url/$base.tar.gz"
             mkdir -p "$dest"
-            tar -xzf "$RUNNER_TEMP/$base.tar.gz" -C "$dest" --strip-components=1
+            # Name the archive relatively, from its own directory: GNU tar reads a
+            # leading "D:\..." as a remote "host:path". -C is unaffected.
+            ( cd "$RUNNER_TEMP" && tar -xzf "$base.tar.gz" -C "$dest" --strip-components=1 )
           }
           fetch_dep migraphx_windows "${{ runner.workspace }}/migraphx-sdk"
           fetch_dep therock_windows "${{ runner.workspace }}/therock"
