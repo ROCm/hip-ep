@@ -90,7 +90,8 @@ int main() {
 
   // --- Wider signless integers pass through untouched ------------------------
   {
-    auto i32 = asInt(onnxElementTypeToMlirDenseElementType(ONNX_INT32, builder));
+    auto i32 =
+        asInt(onnxElementTypeToMlirDenseElementType(ONNX_INT32, builder));
     check(i32 && i32.getWidth() == 32 && i32.isSignless(),
           "dense(INT32) -> signless i32 (unchanged)");
   }
