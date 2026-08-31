@@ -3303,8 +3303,8 @@ gqa_flash_prefill_v7_kernel(
             Q_reg[mt][tk] = valid ? HALF16_LOAD(&Q[q_row_base + tk * 16]) : half16_t{};
     }
 
-    // ---- running state: O stored compactly as half8 (fp16 carry) ----
-    half8_t O_h[MT][D_TILES] = {};
+    // ---- running state: O in fp32 (avoids fp16 pack/unpack per KV tile, safe under clang 23) ----
+    float8_t O_acc[MT][D_TILES] = {};
     float   m_reg[MT][8];
     float   l_reg[MT][8];
     #pragma unroll
@@ -3409,25 +3409,20 @@ gqa_flash_prefill_v7_kernel(
                     m_reg[mt][e] = m_new;
                     l_reg[mt][e] = corr * l_reg[mt][e] + rsum;
                 }
-                // rescale this M-tile's running O by correction (fp16 carry)
+                // rescale running O by correction
                 #pragma unroll
                 for (int tj = 0; tj < D_TILES; ++tj)
                     #pragma unroll
                     for (int e = 0; e < 8; ++e)
-                        O_h[mt][tj][e] =
-                            static_cast<_Float16>((float)O_h[mt][tj][e] * corr_e[e]);
+                        O_acc[mt][tj][e] *= corr_e[e];
             }
         }
         __syncthreads();   // B2
 
         // ---- value GEMM: V gathered once per (tj,tk), reused across MT ----
         if (!(abl & 2))
+        #pragma unroll
         for (int tj = 0; tj < D_TILES; ++tj) {
-            float8_t Of[MT];
-            #pragma unroll
-            for (int mt = 0; mt < MT; ++mt)
-                #pragma unroll
-                for (int e = 0; e < 8; ++e) Of[mt][e] = (float)O_h[mt][tj][e];
             #pragma unroll
             for (int tk = 0; tk < S_TILES_J; ++tk) {
                 half16_t v_frag;
@@ -3438,15 +3433,10 @@ gqa_flash_prefill_v7_kernel(
                 for (int mt = 0; mt < MT; ++mt) {
                     half16_t p_frag = HALF16_LOAD(
                         &P_lds[(pbase + mt * kWmmaTile + wmma_lane) * P_STR + tk * 16]);
-                    Of[mt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
-                        p_frag, v_frag, Of[mt]);
+                    O_acc[mt][tj] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                        p_frag, v_frag, O_acc[mt][tj]);
                 }
             }
-            #pragma unroll
-            for (int mt = 0; mt < MT; ++mt)
-                #pragma unroll
-                for (int e = 0; e < 8; ++e)
-                    O_h[mt][tj][e] = static_cast<_Float16>(Of[mt][e]);
         }
         __syncthreads();   // B3: WAR -- V_lds reused next tile
     }
@@ -3463,7 +3453,7 @@ gqa_flash_prefill_v7_kernel(
                 const int q_pos = row_base + mt * kWmmaTile + row;
                 if (q_pos < sq && c < D) {
                     const float l_val   = fmaxf(l_reg[mt][e], 1e-6f);
-                    const float out_val = (float)O_h[mt][tj][e] / l_val;
+                    const float out_val = O_acc[mt][tj][e] / l_val;
                     O[(static_cast<size_t>(batch * sq + q_pos) * Hq + head_q) * D + c] =
                         static_cast<_Float16>(out_val);
                 }

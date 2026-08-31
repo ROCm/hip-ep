@@ -87,7 +87,7 @@ namespace fbs = mlir::hip;
 // 6: 13-byte rows (added head_count field); new ExactHeadGroup tier keyed on
 //    exact (num_heads, kv_num_heads) pairs for finest-grain matching; existing
 //    Geometry and HeadGroup tiers serve as fuzzy fallback for new models.
-constexpr uint32_t kGqaLutSchemaVersion = 7;
+constexpr uint32_t kGqaLutSchemaVersion = 7;  // v7: prefill Length rows use seq_kv=Any
 
 // What a row resolves to once the config name has been expanded.
 struct Answer {
@@ -365,6 +365,8 @@ static bool prefillKnobs(fbs::GqaTuneConfig name, GqaPrefillVariant *variant,
     return v7(4, 64, 1);
   case C::NW4_BKV64_MT2:
     return v7(4, 64, 2);
+  case C::ND2_MT1_BKV16:
+    return v8(2, 1, 16);
   case C::ND2_MT1_BKV32:
     return v8(2, 1, 32);
   case C::ND2_MT1_BKV64:
@@ -373,10 +375,14 @@ static bool prefillKnobs(fbs::GqaTuneConfig name, GqaPrefillVariant *variant,
     return v8(2, 2, 32);
   case C::ND2_MT2_BKV64:
     return v8(2, 2, 64);
+  case C::ND4_MT1_BKV16:
+    return v8(4, 1, 16);
   case C::ND4_MT1_BKV32:
     return v8(4, 1, 32);
   case C::ND4_MT2_BKV32:
     return v8(4, 2, 32);
+  case C::ND8_MT1_BKV16:
+    return v8(8, 1, 16);
   default:
     return false;
   }
@@ -1251,7 +1257,7 @@ gqa_autotune_resolve_prefill(void *opaque_policy,
         headCountClass(request.num_heads, request.kv_num_heads),
         parClass(request.batch, request.num_heads), batchClass(request.batch),
         seqBucket(std::max(request.seq_q, 1)),
-        seqBucket(std::max(request.seq_kv, 1)),
+        fbs::GqaSeqBucket::Any,  // prefill config is independent of seq_kv
         v5 ? windowClass(request.local_window) : fbs::GqaWindowClass::NoWindow,
         probes);
     for (int i = 0; i < n; ++i) {
