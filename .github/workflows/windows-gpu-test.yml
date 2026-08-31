@@ -375,20 +375,19 @@ jobs:
           python -m venv $venv
           $py = "$venv\Scripts\python.exe"
 
-          # --no-index because onnxruntime-ep-hip now depends on
-          # onnxruntime-ep-amdgpu, which is not on PyPI: pip has to take the local
-          # wheel rather than try to resolve it.
+          # --find-links, not --no-index: onnxruntime-ep-hip now depends on
+          # onnxruntime-ep-amdgpu, which is not on PyPI and has to come from this
+          # directory, while onnxruntime-directml still needs PyPI for its own
+          # dependencies (flatbuffers, numpy, ...).
           Push-Location "$pkg\wheels"
-          & $py -m pip install --quiet --no-index `
+          & $py -m pip install --quiet --find-links . `
             (Get-Item onnxruntime_directml-*.whl).Name `
             (Get-Item onnxruntime_ep_amdgpu-*.whl).Name `
             (Get-Item onnxruntime_ep_hip-*.whl).Name `
-            (Get-Item onnxruntime_genai_directml-*.whl).Name
+            (Get-Item onnxruntime_genai_directml-*.whl).Name `
+            psutil tqdm pandas
           Pop-Location
           if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] wheel install failed"; exit 1 }
-
-          & $py -m pip install --quiet psutil tqdm pandas
-          if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] benchmark deps install failed"; exit 1 }
 
           New-Item -ItemType Directory -Force -Path oga-smoke-results | Out-Null
           & $py "$pkg\run_onnx.py" --benchmark "$pkg\benchmark_e2e.py" `
