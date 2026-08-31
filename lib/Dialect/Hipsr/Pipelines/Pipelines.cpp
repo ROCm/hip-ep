@@ -16,12 +16,14 @@
 //   --convert-onnx-to-hipsr
 //   --hipsr-populate-shape-region
 //   --hipsr-partition-pool-domains
+//   --hipsr-materialize-init-tensors
 void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
                                      const HipsrPipelineOptions & /*options*/) {
   pm.addPass(createAddContextArgPass());
   pm.addPass(createConvertOnnxToHipsrPass());
   pm.addNestedPass<func::FuncOp>(createPopulateShapeRegionPass());
   pm.addNestedPass<func::FuncOp>(createPartitionPoolDomainsPass());
+  pm.addPass(createMaterializeInitTensorsPass());
 }
 
 void mlir::hipsr::registerHipsrPipelines() {
