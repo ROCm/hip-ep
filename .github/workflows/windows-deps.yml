@@ -368,6 +368,10 @@ jobs:
         run: |
           set -euo pipefail
           DEPS="source-hip-ep/cmake/deps.txt"
+          # POSIX paths throughout: tar rejects a backslash path for -C, and reads
+          # a leading "D:\..." for the archive itself as a remote "host:path".
+          TMP=$(cygpath -u "$RUNNER_TEMP")
+          WS=$(cygpath -u '${{ runner.workspace }}')
           fetch_dep() {
             local name="$1" dest="$2"
             local line url base
@@ -375,17 +379,15 @@ jobs:
             url=$(echo "$line" | cut -d';' -f2)
             base=$(echo "$line" | cut -d';' -f3)
             echo "[$name] $url/$base.tar.gz"
-            curl -sSL --fail -o "$RUNNER_TEMP/$base.tar.gz" "$url/$base.tar.gz"
+            curl -sSL --fail -o "$TMP/$base.tar.gz" "$url/$base.tar.gz"
             mkdir -p "$dest"
-            # Name the archive relatively, from its own directory: GNU tar reads a
-            # leading "D:\..." as a remote "host:path". -C is unaffected.
-            ( cd "$RUNNER_TEMP" && tar -xzf "$base.tar.gz" -C "$dest" --strip-components=1 )
+            ( cd "$TMP" && tar -xzf "$base.tar.gz" -C "$dest" --strip-components=1 )
           }
-          fetch_dep migraphx_windows "${{ runner.workspace }}/migraphx-sdk"
-          fetch_dep therock_windows "${{ runner.workspace }}/therock"
-          test -f "${{ runner.workspace }}/migraphx-sdk/lib/cmake/migraphx/migraphx-config.cmake"
-          test -f "${{ runner.workspace }}/migraphx-sdk/problem_cache.json"
-          test -f "${{ runner.workspace }}/therock/lib/cmake/hip/hip-config.cmake"
+          fetch_dep migraphx_windows "$WS/migraphx-sdk"
+          fetch_dep therock_windows "$WS/therock"
+          test -f "$WS/migraphx-sdk/lib/cmake/migraphx/migraphx-config.cmake"
+          test -f "$WS/migraphx-sdk/problem_cache.json"
+          test -f "$WS/therock/lib/cmake/hip/hip-config.cmake"
 
       # Build through the repo's own build.py rather than a hand-written cmake
       # line: it derives the cmake arguments from --use_amdgpu / the three *_home
