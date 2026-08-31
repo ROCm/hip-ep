@@ -133,9 +133,11 @@ void populateHostShapeRegion(OpBuilder &builder, PlaceholderOp placeholder,
   builder.setInsertionPointToStart(&block);
 
   Location loc = placeholder.getLoc();
-  Value shape = shape::ConstShapeOp::create(
-      builder, loc, shape::ShapeType::get(builder.getContext()),
-      builder.getIndexTensorAttr(resultShape));
+  Value shape = createExtentTensor(
+      builder, loc,
+      llvm::map_to_vector(resultShape, [&](int64_t extent) -> Value {
+        return arith::ConstantIndexOp::create(builder, loc, extent);
+      }));
   ShapeYieldOp::create(builder, loc, ValueRange{shape});
 }
 

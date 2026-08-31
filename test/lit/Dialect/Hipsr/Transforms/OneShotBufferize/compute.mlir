@@ -25,6 +25,15 @@
 // cast is destination-passing, so a bufferized cast keeps no result and every
 // use of its tensor result reads the buffer of its init instead.
 //
+// The shape regions hold extent tensors, so bufferization descends into them:
+//
+//   - each tensor.from_elements becomes a host memref.alloc, one store per
+//     extent;
+//   - the region yields that buffer, and preserve_shape reads it back with
+//     bufferization.to_tensor;
+//   - only the data operands become bare memrefs, because preserve_shape names
+//     its shape instead of reading through it.
+//
 // compute takes %cast2 as both ins and outs, so the two entry block arguments
 // name one buffer and collapsing the ins argument still holds the result in the
 // destination. The body only builds that collapse view, so the result lands in
@@ -47,18 +56,31 @@
 // CHECK-NEXT: %[[M:.+]] = memref.dim %[[IN]], %[[C0]] : memref<?x256xf16, #hipsr.mem<device>>
 // CHECK-NEXT: %[[N:.+]] = memref.dim %[[IN]], %[[C1]] : memref<?x256xf16, #hipsr.mem<device>>
 // CHECK-NEXT: %[[FLAT_SIZE:.+]] = arith.muli %[[M]], %[[N]] : index
-// CHECK-NEXT: %[[SHAPE1:.+]] = scf.execute_region -> !shape.shape {
-// CHECK-NEXT: %[[S1:.+]] = shape.from_extents %[[M]], %[[N]] : index, index
-// CHECK-NEXT: scf.yield %[[S1]] : !shape.shape
+// CHECK-NEXT: %[[SHAPE1_BUF:.+]] = scf.execute_region -> memref<2xindex> {
+// CHECK-NEXT: %[[E1:.+]] = memref.alloc(){{.*}} : memref<2xindex>
+// CHECK-NEXT: %[[E1_C0:.+]] = arith.constant 0 : index
+// CHECK-NEXT: %[[E1_C1:.+]] = arith.constant 1 : index
+// CHECK-NEXT: memref.store %[[M]], %[[E1]]{{\[}}%[[E1_C0]]] : memref<2xindex>
+// CHECK-NEXT: memref.store %[[N]], %[[E1]]{{\[}}%[[E1_C1]]] : memref<2xindex>
+// CHECK-NEXT: scf.yield %[[E1]] : memref<2xindex>
 // CHECK-NEXT: }
-// CHECK-NEXT: %[[SHAPE2:.+]] = scf.execute_region -> !shape.shape {
-// CHECK-NEXT: %[[S2:.+]] = shape.from_extents %[[M]], %[[N]] : index, index
-// CHECK-NEXT: scf.yield %[[S2]] : !shape.shape
+// CHECK-NEXT: %[[SHAPE1:.+]] = bufferization.to_tensor %[[SHAPE1_BUF]] : memref<2xindex> to tensor<2xindex>
+// CHECK-NEXT: %[[SHAPE2_BUF:.+]] = scf.execute_region -> memref<2xindex> {
+// CHECK-NEXT: %[[E2:.+]] = memref.alloc(){{.*}} : memref<2xindex>
+// CHECK-NEXT: %[[E2_C0:.+]] = arith.constant 0 : index
+// CHECK-NEXT: %[[E2_C1:.+]] = arith.constant 1 : index
+// CHECK-NEXT: memref.store %[[M]], %[[E2]]{{\[}}%[[E2_C0]]] : memref<2xindex>
+// CHECK-NEXT: memref.store %[[N]], %[[E2]]{{\[}}%[[E2_C1]]] : memref<2xindex>
+// CHECK-NEXT: scf.yield %[[E2]] : memref<2xindex>
 // CHECK-NEXT: }
-// CHECK-NEXT: %[[SHAPE3:.+]] = scf.execute_region -> !shape.shape {
-// CHECK-NEXT: %[[S3:.+]] = shape.from_extents %[[FLAT_SIZE]] : index
-// CHECK-NEXT: scf.yield %[[S3]] : !shape.shape
+// CHECK-NEXT: %[[SHAPE2:.+]] = bufferization.to_tensor %[[SHAPE2_BUF]] : memref<2xindex> to tensor<2xindex>
+// CHECK-NEXT: %[[SHAPE3_BUF:.+]] = scf.execute_region -> memref<1xindex> {
+// CHECK-NEXT: %[[E3:.+]] = memref.alloc(){{.*}} : memref<1xindex>
+// CHECK-NEXT: %[[E3_C0:.+]] = arith.constant 0 : index
+// CHECK-NEXT: memref.store %[[FLAT_SIZE]], %[[E3]]{{\[}}%[[E3_C0]]] : memref<1xindex>
+// CHECK-NEXT: scf.yield %[[E3]] : memref<1xindex>
 // CHECK-NEXT: }
+// CHECK-NEXT: %[[SHAPE3:.+]] = bufferization.to_tensor %[[SHAPE3_BUF]] : memref<1xindex> to tensor<1xindex>
 // CHECK-NEXT: %[[INIT1:.+]] = memref.alloc(%[[M]]){{.*}} : memref<?x256xf16, #hipsr.mem<device>>
 // CHECK-NEXT: hipsr.cast(%[[DCTX]]) ins(%[[IN]] : memref<?x256xf16, #hipsr.mem<device>>)
 // CHECK-SAME: outs(%[[INIT1]] : memref<?x256xf16, #hipsr.mem<device>>)
@@ -73,9 +95,9 @@
 // CHECK-SAME: : memref<?x256xf16, #hipsr.mem<device>> into memref<?xf16, #hipsr.mem<device>>
 // CHECK-NEXT: hipsr.compute_yield %[[COLLAPSED]] : memref<?xf16, #hipsr.mem<device>>
 // CHECK-NEXT: } : memref<?xf16, #hipsr.mem<device>>{{$}}
-// CHECK-NEXT: hipsr.preserve_shape %[[SHAPE1]], %[[INIT1]] : memref<?x256xf16, #hipsr.mem<device>>
-// CHECK-NEXT: hipsr.preserve_shape %[[SHAPE2]], %[[INIT2]] : memref<?x256xf16, #hipsr.mem<device>>
-// CHECK-NEXT: hipsr.preserve_shape %[[SHAPE3]], %[[FLAT]] : memref<?xf16, #hipsr.mem<device>>
+// CHECK-NEXT: hipsr.preserve_shape %[[SHAPE1]], %[[INIT1]] : tensor<2xindex>, memref<?x256xf16, #hipsr.mem<device>>
+// CHECK-NEXT: hipsr.preserve_shape %[[SHAPE2]], %[[INIT2]] : tensor<2xindex>, memref<?x256xf16, #hipsr.mem<device>>
+// CHECK-NEXT: hipsr.preserve_shape %[[SHAPE3]], %[[FLAT]] : tensor<1xindex>, memref<?xf16, #hipsr.mem<device>>
 // CHECK-NEXT: hipsr.pool_domain_yield %[[FLAT]] : memref<?xf16, #hipsr.mem<device>>
 // CHECK-NEXT: } -> memref<?xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
 // CHECK-NEXT: return %[[OUT]] : memref<?xf16, #hipsr.mem<device>>
@@ -93,17 +115,17 @@ func.func @pool_domain_mlp_flatten(
     %m = tensor.dim %input_arg, %c0 : tensor<?x256xf16, #hipsr.mem<device>>
     %n = tensor.dim %input_arg, %c1 : tensor<?x256xf16, #hipsr.mem<device>>
     %flat_size = arith.muli %m, %n : index
-    %shape1 = scf.execute_region -> !shape.shape {
-      %s = shape.from_extents %m, %n : index, index
-      scf.yield %s : !shape.shape
+    %shape1 = scf.execute_region -> tensor<2xindex> {
+      %s = tensor.from_elements %m, %n : tensor<2xindex>
+      scf.yield %s : tensor<2xindex>
     }
-    %shape2 = scf.execute_region -> !shape.shape {
-      %s = shape.from_extents %m, %n : index, index
-      scf.yield %s : !shape.shape
+    %shape2 = scf.execute_region -> tensor<2xindex> {
+      %s = tensor.from_elements %m, %n : tensor<2xindex>
+      scf.yield %s : tensor<2xindex>
     }
-    %shape3 = scf.execute_region -> !shape.shape {
-      %s = shape.from_extents %flat_size : index
-      scf.yield %s : !shape.shape
+    %shape3 = scf.execute_region -> tensor<1xindex> {
+      %s = tensor.from_elements %flat_size : tensor<1xindex>
+      scf.yield %s : tensor<1xindex>
     }
     %init1 = tensor.empty(%m) : tensor<?x256xf16, #hipsr.mem<device>>
     %init2 = tensor.empty(%m) : tensor<?x256xf16, #hipsr.mem<device>>
@@ -126,9 +148,9 @@ func.func @pool_domain_mlp_flatten(
           into tensor<?xf16, #hipsr.mem<device>>
       hipsr.compute_yield %collapsed : tensor<?xf16, #hipsr.mem<device>>
     } : tensor<?xf16, #hipsr.mem<device>>
-    hipsr.preserve_shape %shape1, %cast1 : tensor<?x256xf16, #hipsr.mem<device>>
-    hipsr.preserve_shape %shape2, %cast2 : tensor<?x256xf16, #hipsr.mem<device>>
-    hipsr.preserve_shape %shape3, %flat : tensor<?xf16, #hipsr.mem<device>>
+    hipsr.preserve_shape %shape1, %cast1 : tensor<2xindex>, tensor<?x256xf16, #hipsr.mem<device>>
+    hipsr.preserve_shape %shape2, %cast2 : tensor<2xindex>, tensor<?x256xf16, #hipsr.mem<device>>
+    hipsr.preserve_shape %shape3, %flat : tensor<1xindex>, tensor<?xf16, #hipsr.mem<device>>
     hipsr.pool_domain_yield %flat : tensor<?xf16, #hipsr.mem<device>>
   } -> tensor<?xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
   return %out : tensor<?xf16, #hipsr.mem<device>>

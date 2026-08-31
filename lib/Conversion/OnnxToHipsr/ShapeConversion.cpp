@@ -101,9 +101,7 @@ void populateShapeRegion(OpBuilder &builder, PlaceholderOp placeholder,
 
   Location loc = placeholder.getLoc();
   Value extent = arith::ConstantIndexOp::create(builder, loc, numExtents);
-  Value shape = shape::FromExtentsOp::create(
-      builder, loc, shape::ShapeType::get(builder.getContext()),
-      ValueRange{extent});
+  Value shape = createExtentTensor(builder, loc, ValueRange{extent});
   ShapeYieldOp::create(builder, loc, ValueRange{shape});
 }
 

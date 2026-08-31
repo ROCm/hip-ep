@@ -131,12 +131,8 @@ SmallVector<OpFoldResult> buildInputDims(OpBuilder &builder, Location loc,
         if (!inputType.isDynamicDim(axis)) {
           return builder.getIndexAttr(inputType.getDimSize(axis));
         }
-        // shape.get_extent returns a `!shape.size`, which converts to index
-        // because it can hold an error.
-        Value size = shape::GetExtentOp::create(builder, loc, inputShape, axis);
-        Value dim = shape::SizeToIndexOp::create(builder, loc,
-                                                 builder.getIndexType(), size);
-        return dim;
+        return Value{
+            shape::GetExtentOp::create(builder, loc, inputShape, axis)};
       });
 }
 
@@ -161,9 +157,8 @@ void populateShapeRegion(OpBuilder &builder, PlaceholderOp placeholder,
                                               reassociation, inputDims);
   assert(succeeded(resultDims) &&
          "a group holds one input dimension, so only it can be dynamic");
-  Value shape = shape::FromExtentsOp::create(
-      builder, loc, shape::ShapeType::get(builder.getContext()),
-      getValueOrCreateConstantIndexOp(builder, loc, *resultDims));
+  Value shape = createExtentTensor(
+      builder, loc, getValueOrCreateConstantIndexOp(builder, loc, *resultDims));
   ShapeYieldOp::create(builder, loc, ValueRange{shape});
 }
 

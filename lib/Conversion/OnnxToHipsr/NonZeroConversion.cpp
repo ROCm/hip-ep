@@ -136,9 +136,7 @@ void populateNarrowShapeRegion(OpBuilder &builder, PlaceholderOp placeholder,
   Value columns =
       arith::IndexCastOp::create(builder, loc, builder.getIndexType(), found);
   Value rowCount = arith::ConstantIndexOp::create(builder, loc, rows);
-  Value shape = shape::FromExtentsOp::create(
-      builder, loc, shape::ShapeType::get(builder.getContext()),
-      ValueRange{rowCount, columns});
+  Value shape = createExtentTensor(builder, loc, ValueRange{rowCount, columns});
   ShapeYieldOp::create(builder, loc, ValueRange{shape});
 }
 

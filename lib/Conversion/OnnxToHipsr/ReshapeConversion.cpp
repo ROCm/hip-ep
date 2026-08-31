@@ -129,9 +129,7 @@ Value buildInferredDim(OpBuilder &builder, Location loc, Value inputShape,
   assert(resultStaticCount > 0 &&
          "a 0 result dimension is rejected before this point");
 
-  Value count = shape::NumElementsOp::create(builder, loc, inputShape);
-  Value dividend =
-      shape::SizeToIndexOp::create(builder, loc, builder.getIndexType(), count);
+  Value dividend = shape::NumElementsOp::create(builder, loc, inputShape);
   Value divisor =
       arith::ConstantIndexOp::create(builder, loc, resultStaticCount);
   return arith::DivUIOp::create(builder, loc, dividend, divisor);
@@ -158,8 +156,7 @@ void populateShapeRegion(OpBuilder &builder, PlaceholderOp placeholder,
         }
         return arith::ConstantIndexOp::create(builder, loc, dim);
       });
-  Value shape = shape::FromExtentsOp::create(
-      builder, loc, shape::ShapeType::get(builder.getContext()), dims);
+  Value shape = createExtentTensor(builder, loc, dims);
   ShapeYieldOp::create(builder, loc, ValueRange{shape});
 }
 

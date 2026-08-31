@@ -145,12 +145,13 @@ Operation *PlaceholderOp::getConsumer() {
 }
 
 SmallVector<Type> PlaceholderOp::getShapeRegionArgumentTypes() {
-  SmallVector<Type> types;
   if (getPlaceholderType() == PlaceholderType::Normal) {
-    types.assign(getInputs().size(), shape::ShapeType::get(getContext()));
-    return types;
+    return llvm::map_to_vector(getInputs(), [](Value input) -> Type {
+      return getExtentTensorTypeOf(input);
+    });
   }
 
+  SmallVector<Type> types;
   types.reserve(getNumOperands());
   types.push_back(getCtx().getType());
   llvm::append_range(types, getInputs().getTypes());

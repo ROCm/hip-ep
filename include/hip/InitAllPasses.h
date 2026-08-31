@@ -34,6 +34,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/MemRef/Transforms/AllocationOpInterfaceImpl.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
+#include "mlir/Dialect/Shape/Transforms/Passes.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Tensor/IR/TensorInferTypeOpInterfaceImpl.h"
 #include "mlir/Dialect/Tensor/Transforms/BufferizableOpInterfaceImpl.h"
@@ -185,6 +186,10 @@ inline void registerAllPasses() {
     mlir::registerSCFToControlFlowPass();
     mlir::registerReconcileUnrealizedCastsPass();
     mlir::memref::registerResolveShapedTypeResultDimsPass();
+    // registerShapePasses covers remove-shape-constraints and
+    // shape-to-shape-lowering, which --hipsr-pipeline runs.
+    mlir::registerShapePasses();
+    mlir::registerConvertShapeToStandardPass();
   });
 }
 

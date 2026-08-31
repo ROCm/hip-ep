@@ -42,30 +42,35 @@ SmallVector<int64_t> inferGatherResultShape(ArrayRef<int64_t> dataShape,
                                   dataShape.drop_front(axis + 1)));
 }
 
-// The same rule on symbolic shapes: splitting the data shape around the axis
-// leaves the two pieces the indices shape goes between, whatever the ranks are.
+// The same rule on symbolic shapes, one extent per output dimension.
 LogicalResult populateGatherShapeRegion(OpBuilder &builder, Block &shapeBlock,
                                         GatherOp op) {
   OpBuilder::InsertionGuard guard(builder);
   builder.setInsertionPointToStart(&shapeBlock);
 
   Location loc = op.getLoc();
-  Type shapeType = shape::ShapeType::get(builder.getContext());
   GatherPlaceholderShapeArgs args{shapeBlock};
-
-  auto splitDataAt = [&](int64_t position) {
-    Value index = shape::ConstSizeOp::create(builder, loc, position);
-    return shape::SplitAtOp::create(
-        builder, loc, TypeRange{shapeType, shapeType}, args.getData(), index);
-  };
+  int64_t dataRank = cast<ShapedType>(op.getData().getType()).getRank();
+  int64_t indicesRank = cast<ShapedType>(op.getIndices().getType()).getRank();
   int64_t axis = op.getAxis();
-  Value leading = splitDataAt(axis).getHead();
-  Value trailing = splitDataAt(axis + 1).getTail();
 
-  Value gathered = shape::ConcatOp::create(builder, loc, shapeType, leading,
-                                           args.getIndices());
-  Value outputShape =
-      shape::ConcatOp::create(builder, loc, shapeType, gathered, trailing);
+  auto extent = [&](Value shape, int64_t index) -> Value {
+    return shape::GetExtentOp::create(builder, loc, shape, index);
+  };
+  auto appendExtents = [&](SmallVectorImpl<Value> &extents, Value shape,
+                           int64_t begin, int64_t end) {
+    for (int64_t index : llvm::seq(begin, end)) {
+      extents.push_back(extent(shape, index));
+    }
+  };
+
+  SmallVector<Value> outputExtents;
+  outputExtents.reserve(dataRank - 1 + indicesRank);
+  appendExtents(outputExtents, args.getData(), 0, axis);
+  appendExtents(outputExtents, args.getIndices(), 0, indicesRank);
+  appendExtents(outputExtents, args.getData(), axis + 1, dataRank);
+
+  Value outputShape = createExtentTensor(builder, loc, outputExtents);
   ShapeYieldOp::create(builder, loc, ValueRange{outputShape});
   return success();
 }

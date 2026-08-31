@@ -12,8 +12,8 @@
 // CHECK-SAME:    %[[POSITIONS:.+]]: tensor<?x3xi64, #hipsr.mem<device>>,
 // CHECK-SAME:    %[[FEATURES:.+]]: tensor<?xf16, #hipsr.mem<device>>) {
 // CHECK-NEXT:    %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[EMBEDS]] : tensor<?x?x4096xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x?x4096xf16, #hipsr.mem<device>> shape_region {
-// CHECK-NEXT:    ^bb0(%[[EMBEDS_SHAPE:.+]]: !shape.shape):
-// CHECK-NEXT:      hipsr.shape_yield %[[EMBEDS_SHAPE]] : !shape.shape
+// CHECK-NEXT:    ^bb0(%[[EMBEDS_SHAPE:.+]]: tensor<3xindex>):
+// CHECK-NEXT:      hipsr.shape_yield %[[EMBEDS_SHAPE]] : tensor<3xindex>
 // CHECK-NEXT:    }
 // CHECK-NEXT:    %[[RESULT:.+]] = hipsr.scatter_nd(%[[CTX]]) ins(%[[EMBEDS]], %[[POSITIONS]], %[[FEATURES]] : tensor<?x?x4096xf16, #hipsr.mem<device>>, tensor<?x3xi64, #hipsr.mem<device>>, tensor<?xf16, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<?x?x4096xf16, #hipsr.mem<device>>) : tensor<?x?x4096xf16, #hipsr.mem<device>>
 // CHECK-NEXT:    return

@@ -7,8 +7,8 @@
 // CHECK-LABEL: func.func @cast_normal(
 // CHECK-SAME: %[[CTX:.+]]: !hipsr.context, %[[INPUT:.+]]: tensor<?x8xf32, #hipsr.mem<device>>) {
 // CHECK-NEXT: %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<?x8xf32, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16, #hipsr.mem<device>> shape_region {
-// CHECK-NEXT: ^bb0(%[[INPUT_SHAPE:.+]]: !shape.shape):
-// CHECK-NEXT: hipsr.shape_yield %[[INPUT_SHAPE]] : !shape.shape
+// CHECK-NEXT: ^bb0(%[[INPUT_SHAPE:.+]]: tensor<2xindex>):
+// CHECK-NEXT: hipsr.shape_yield %[[INPUT_SHAPE]] : tensor<2xindex>
 // CHECK-NEXT: }
 // CHECK-NEXT: %[[RESULT:.+]] = hipsr.cast(%[[CTX]]) ins(%[[INPUT]] : tensor<?x8xf32, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<?x8xf16, #hipsr.mem<device>>) : tensor<?x8xf16, #hipsr.mem<device>>
 // CHECK-NEXT: return

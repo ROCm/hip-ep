@@ -36,8 +36,9 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
     constants, are outside the rule.
 
     The optional `shape_region` computes the result shapes and ends with
-    `hipsr.shape_yield`. A `normal` region takes one `!shape.shape` per input
-    and omits `ctx`; a `barrier` region takes `ctx` followed by its inputs.
+    `hipsr.shape_yield`. A `normal` region omits `ctx` and takes one extent
+    tensor per input, with one extent per input dimension; a `barrier` region
+    takes `ctx` followed by its inputs.
 
     All results must fill `outs` slots of one op, one slot each, and may also
     feed other placeholders or leave a pool domain through

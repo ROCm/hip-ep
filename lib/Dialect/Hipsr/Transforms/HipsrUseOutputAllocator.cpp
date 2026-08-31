@@ -128,9 +128,8 @@ static SmallVector<Value> materializeDimensions(Value preservedShape,
     Value size;
     if (type.isDynamicDim(dimension)) {
       assert(preservedShape && "dynamic dims require a preserved shape");
-      Value extent =
-          builder.create<shape::GetExtentOp>(loc, preservedShape, dimension);
-      size = builder.create<shape::SizeToIndexOp>(loc, extent);
+      size =
+          shape::GetExtentOp::create(builder, loc, preservedShape, dimension);
     } else {
       size = arith::ConstantIndexOp::create(builder, loc,
                                             type.getDimSize(dimension));

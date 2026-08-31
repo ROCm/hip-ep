@@ -98,7 +98,7 @@ func.func @non_hipsr_outs(%ctx: !hipsr.context, %input: tensor<4x8xf32, #hipsr.m
 }
 
 // -----
-// A normal shape region takes one !shape.shape per input.
+// A normal shape region takes one extent tensor per input.
 func.func @shape_region_argument_count(
     %ctx: !hipsr.context, %input: tensor<4x8xf32, #hipsr.mem<device>>) -> tensor<4x8xf16, #hipsr.mem<device>> {
   // expected-error @+1 {{shape region block argument count does not match the placeholder type layout; expected 1, got 0}}
@@ -106,8 +106,8 @@ func.func @shape_region_argument_count(
       ins(%input : tensor<4x8xf32, #hipsr.mem<device>>)
       {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16, #hipsr.mem<device>>
       shape_region {
-    %shape = shape.const_shape [4, 8] : !shape.shape
-    hipsr.shape_yield %shape : !shape.shape
+    %shape = shape.const_shape [4, 8] : tensor<2xindex>
+    hipsr.shape_yield %shape : tensor<2xindex>
   }
   %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32, #hipsr.mem<device>>)
       outs(%init : tensor<4x8xf16, #hipsr.mem<device>>) : tensor<4x8xf16, #hipsr.mem<device>>
@@ -119,14 +119,14 @@ func.func @shape_region_argument_count(
 // takes the tensor types, led by ctx.
 func.func @shape_region_argument_type(
     %ctx: !hipsr.context, %input: tensor<4x8xf32, #hipsr.mem<device>>) -> tensor<4x8xf16, #hipsr.mem<device>> {
-  // expected-error @+1 {{shape region block argument 0 type 'tensor<4x8xf32, #hipsr.mem<device>>' does not match expected type '!shape.shape'}}
+  // expected-error @+1 {{shape region block argument 0 type 'tensor<4x8xf32, #hipsr.mem<device>>' does not match expected type 'tensor<2xindex>'}}
   %init = hipsr.placeholder(%ctx)
       ins(%input : tensor<4x8xf32, #hipsr.mem<device>>)
       {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16, #hipsr.mem<device>>
       shape_region {
   ^bb0(%input_shape: tensor<4x8xf32, #hipsr.mem<device>>):
-    %shape = shape.const_shape [4, 8] : !shape.shape
-    hipsr.shape_yield %shape : !shape.shape
+    %shape = shape.const_shape [4, 8] : tensor<2xindex>
+    hipsr.shape_yield %shape : tensor<2xindex>
   }
   %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32, #hipsr.mem<device>>)
       outs(%init : tensor<4x8xf16, #hipsr.mem<device>>) : tensor<4x8xf16, #hipsr.mem<device>>
@@ -138,14 +138,14 @@ func.func @shape_region_argument_type(
 // shapes of a normal region do not fit.
 func.func @barrier_shape_region_layout(
     %ctx: !hipsr.context, %input: tensor<4x8xf32, #hipsr.mem<device>>) -> tensor<4x8xf16, #hipsr.mem<device>> {
-  // expected-error @+1 {{shape region block argument 0 type '!shape.shape' does not match expected type '!hipsr.context'}}
+  // expected-error @+1 {{shape region block argument 0 type 'tensor<2xindex>' does not match expected type '!hipsr.context'}}
   %init = hipsr.placeholder(%ctx)
       ins(%input : tensor<4x8xf32, #hipsr.mem<device>>)
       {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4x8xf16, #hipsr.mem<device>>
       shape_region {
-  ^bb0(%input_shape: !shape.shape, %data: tensor<4x8xf32, #hipsr.mem<device>>):
-    %shape = shape.const_shape [4, 8] : !shape.shape
-    hipsr.shape_yield %shape : !shape.shape
+  ^bb0(%input_shape: tensor<2xindex>, %data: tensor<4x8xf32, #hipsr.mem<device>>):
+    %shape = shape.const_shape [4, 8] : tensor<2xindex>
+    hipsr.shape_yield %shape : tensor<2xindex>
   }
   %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32, #hipsr.mem<device>>)
       outs(%init : tensor<4x8xf16, #hipsr.mem<device>>) : tensor<4x8xf16, #hipsr.mem<device>>
@@ -162,10 +162,10 @@ func.func @shape_region_capture(
       ins(%input : tensor<?x8xf32, #hipsr.mem<device>>)
       {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16, #hipsr.mem<device>>
       shape_region {
-  ^bb0(%input_shape: !shape.shape):
+  ^bb0(%input_shape: tensor<2xindex>):
     // expected-error @+1 {{using value defined outside the region}}
-    %captured = shape.shape_of %input : tensor<?x8xf32, #hipsr.mem<device>> -> !shape.shape
-    hipsr.shape_yield %captured : !shape.shape
+    %captured = shape.shape_of %input : tensor<?x8xf32, #hipsr.mem<device>> -> tensor<2xindex>
+    hipsr.shape_yield %captured : tensor<2xindex>
   }
   %result = hipsr.cast(%ctx) ins(%input : tensor<?x8xf32, #hipsr.mem<device>>)
       outs(%init : tensor<?x8xf16, #hipsr.mem<device>>) : tensor<?x8xf16, #hipsr.mem<device>>
@@ -181,11 +181,11 @@ func.func @two_shape_region_blocks(
       ins(%input : tensor<4x8xf32, #hipsr.mem<device>>)
       {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16, #hipsr.mem<device>>
       shape_region {
-  ^bb0(%input_shape: !shape.shape):
-    hipsr.shape_yield %input_shape : !shape.shape
+  ^bb0(%input_shape: tensor<2xindex>):
+    hipsr.shape_yield %input_shape : tensor<2xindex>
   ^bb1:
-    %shape = shape.const_shape [4, 8] : !shape.shape
-    hipsr.shape_yield %shape : !shape.shape
+    %shape = shape.const_shape [4, 8] : tensor<2xindex>
+    hipsr.shape_yield %shape : tensor<2xindex>
   }
   %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32, #hipsr.mem<device>>)
       outs(%init : tensor<4x8xf16, #hipsr.mem<device>>) : tensor<4x8xf16, #hipsr.mem<device>>
@@ -199,7 +199,7 @@ func.func @wrong_shape_region_terminator(
   // expected-error @+2 {{expects regions to end with 'hipsr.shape_yield', found 'llvm.unreachable'}}
   // expected-note @+1 {{in custom textual format, the absence of terminator implies 'hipsr.shape_yield'}}
   %init = "hipsr.placeholder"(%ctx, %input) ({
-  ^bb0(%input_shape: !shape.shape):
+  ^bb0(%input_shape: tensor<2xindex>):
     llvm.unreachable
   }) {placeholder_type = #hipsr.placeholder_type<normal>}
       : (!hipsr.context, tensor<4x8xf32, #hipsr.mem<device>>) -> tensor<4x8xf16, #hipsr.mem<device>>

@@ -9,12 +9,12 @@
 // same rules as index arithmetic, because its size only arrives with the shape.
 // Axis 3, which the window leaves out, keeps the data's size.
 // CHECK-LABEL: func.func @slice_constant_window(
-// CHECK:      shape_region {
-// CHECK-NEXT: ^bb0(%[[DATA_SHAPE:.+]]: !shape.shape):
+// CHECK-SAME: %[[CTX:.+]]: !hipsr.context, %[[DATA:.+]]: tensor<8x?x6x?xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT: %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[DATA]] : tensor<8x?x6x?xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<3x?x2x?xf16, #hipsr.mem<device>> shape_region {
+// CHECK-NEXT: ^bb0(%[[DATA_SHAPE:.+]]: tensor<4xindex>):
 // CHECK-NEXT: %[[SIZE0:.+]] = arith.constant 3 : index
-// CHECK-NEXT: %[[AXIS1:.+]] = shape.const_size 1
-// CHECK-NEXT: %[[DIM1:.+]] = shape.get_extent %[[DATA_SHAPE]], %[[AXIS1]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT: %[[DATA_SIZE1:.+]] = shape.size_to_index %[[DIM1]] : !shape.size
+// CHECK-NEXT: %[[AXIS1:.+]] = arith.constant 1 : index
+// CHECK-NEXT: %[[DATA_SIZE1:.+]] = shape.get_extent %[[DATA_SHAPE]], %[[AXIS1]] : tensor<4xindex>, index -> index
 // CHECK-NEXT: %[[ZERO:.+]] = arith.constant 0 : index
 // CHECK-NEXT: %[[START:.+]] = arith.constant 1 : index
 // CHECK-NEXT: %[[LOW:.+]] = arith.minsi %[[DATA_SIZE1]], %[[START]] : index
@@ -23,11 +23,13 @@
 // CHECK-NEXT: %[[SPAN:.+]] = arith.subi %[[HIGH]], %[[LOW]] : index
 // CHECK-NEXT: %[[SIZE1:.+]] = arith.maxsi %[[SPAN]], %[[ZERO]] : index
 // CHECK-NEXT: %[[SIZE2:.+]] = arith.constant 2 : index
-// CHECK-NEXT: %[[AXIS3:.+]] = shape.const_size 3
-// CHECK-NEXT: %[[DIM3:.+]] = shape.get_extent %[[DATA_SHAPE]], %[[AXIS3]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT: %[[SIZE3:.+]] = shape.size_to_index %[[DIM3]] : !shape.size
-// CHECK-NEXT: %[[SHAPE:.+]] = shape.from_extents %[[SIZE0]], %[[SIZE1]], %[[SIZE2]], %[[SIZE3]] : index, index, index, index
-// CHECK-NEXT: hipsr.shape_yield %[[SHAPE]] : !shape.shape
+// CHECK-NEXT: %[[AXIS3:.+]] = arith.constant 3 : index
+// CHECK-NEXT: %[[SIZE3:.+]] = shape.get_extent %[[DATA_SHAPE]], %[[AXIS3]] : tensor<4xindex>, index -> index
+// CHECK-NEXT: %[[EXTENTS:.+]] = tensor.from_elements %[[SIZE0]], %[[SIZE1]], %[[SIZE2]], %[[SIZE3]] : tensor<4xindex>
+// CHECK-NEXT: hipsr.shape_yield %[[EXTENTS]] : tensor<4xindex>
+// CHECK-NEXT: }
+// CHECK-NEXT: %[[RESULT:.+]] = hipsr.slice(%[[CTX]]) ins(%[[DATA]] : tensor<8x?x6x?xf16, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<3x?x2x?xf16, #hipsr.mem<device>>) {axes_attr = array<i64: 0, 1, -2>, ends_attr = array<i64: 1, 5, 9223372036854775807>, starts_attr = array<i64: 6, 1, -4>, steps_attr = array<i64: -2, 1, 2>} : tensor<3x?x2x?xf16, #hipsr.mem<device>>
+// CHECK-NEXT: return
 // CHECK-NEXT: }
 func.func @slice_constant_window(%ctx: !hipsr.context,
                                  %data: tensor<8x?x6x?xf16, #hipsr.mem<device>>) {
@@ -54,7 +56,27 @@ func.func @slice_constant_window(%ctx: !hipsr.context,
 // over and clamps it against the data's own size. The start is in an attribute,
 // so it needs no read, and folding drops the branch it cannot take.
 // CHECK-LABEL: func.func @slice_runtime_bound(
-// CHECK:      placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<?xf16, #hipsr.mem<device>> shape_region {
+// CHECK-SAME: %[[CTX:.+]]: !hipsr.context, %[[IN:.+]]: tensor<?xf16, #hipsr.mem<device>>) {
+
+// The bound's own destination is a rank-1 host buffer, so its region is a lone
+// constant.
+// CHECK-NEXT: %[[ENDS_INIT:.+]] = hipsr.placeholder(%[[CTX]]) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<1xi64, #hipsr.mem<host>> shape_region {
+// CHECK-NEXT: %[[ONE:.+]] = arith.constant 1 : index
+// CHECK-NEXT: %[[ENDS_SHAPE:.+]] = tensor.from_elements %[[ONE]] : tensor<1xindex>
+// CHECK-NEXT: hipsr.shape_yield %[[ENDS_SHAPE]] : tensor<1xindex>
+// CHECK-NEXT: }
+
+// The compute that writes the bound is left as it was.
+// CHECK-NEXT: %[[ENDS_VALUE:.+]] = hipsr.compute(%[[CTX]]) ins(%[[IN]] : tensor<?xf16, #hipsr.mem<device>>) outs(%[[ENDS_INIT]] : tensor<1xi64, #hipsr.mem<host>>) {
+// CHECK-NEXT: ^bb0(%{{.+}}: !hipsr.context, %[[BODY_IN:.+]]: tensor<?xf16, #hipsr.mem<device>>, %{{.+}}: tensor<1xi64, #hipsr.mem<host>>):
+// CHECK-NEXT: %[[BODY_AXIS:.+]] = arith.constant 0 : index
+// CHECK-NEXT: %[[BODY_SIZE:.+]] = tensor.dim %[[BODY_IN]], %[[BODY_AXIS]] : tensor<?xf16, #hipsr.mem<device>>
+// CHECK-NEXT: %[[BODY_ENTRY:.+]] = arith.index_cast %[[BODY_SIZE]] : index to i64
+// CHECK-NEXT: %[[BODY_ENTRIES:.+]] = tensor.from_elements %[[BODY_ENTRY]] : tensor<1xi64, #hipsr.mem<host>>
+// CHECK-NEXT: hipsr.compute_yield %[[BODY_ENTRIES]] : tensor<1xi64, #hipsr.mem<host>>
+// CHECK-NEXT: } : tensor<1xi64, #hipsr.mem<host>>
+
+// CHECK-NEXT: %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[IN]], %[[ENDS_INIT]] : tensor<?xf16, #hipsr.mem<device>>, tensor<1xi64, #hipsr.mem<host>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<?xf16, #hipsr.mem<device>> shape_region {
 // CHECK-NEXT: ^bb0(%{{.+}}: !hipsr.context, %[[DATA:.+]]: tensor<?xf16, #hipsr.mem<device>>, %[[ENDS:.+]]: tensor<1xi64, #hipsr.mem<host>>):
 // CHECK-NEXT: %[[AXIS:.+]] = arith.constant 0 : index
 // CHECK-NEXT: %[[DATA_SIZE:.+]] = tensor.dim %[[DATA]], %[[AXIS]]
@@ -71,16 +93,20 @@ func.func @slice_constant_window(%ctx: !hipsr.context,
 // CHECK-NEXT: %[[HIGH:.+]] = arith.minsi %[[LAST_UP]], %[[DATA_SIZE]] : index
 // CHECK-NEXT: %[[SPAN:.+]] = arith.subi %[[HIGH]], %[[LOW]] : index
 // CHECK-NEXT: %[[SIZE:.+]] = arith.maxsi %[[SPAN]], %[[ZERO]] : index
-// CHECK-NEXT: %[[SHAPE:.+]] = shape.from_extents %[[SIZE]] : index
-// CHECK-NEXT: hipsr.shape_yield %[[SHAPE]] : !shape.shape
+// CHECK-NEXT: %[[EXTENTS:.+]] = tensor.from_elements %[[SIZE]] : tensor<1xindex>
+// CHECK-NEXT: hipsr.shape_yield %[[EXTENTS]] : tensor<1xindex>
+// CHECK-NEXT: }
+// CHECK-NEXT: %[[RESULT:.+]] = hipsr.slice(%[[CTX]]) ins(%[[IN]] : tensor<?xf16, #hipsr.mem<device>>) ends(%[[ENDS_VALUE]] : tensor<1xi64, #hipsr.mem<host>>) outs(%[[INIT]] : tensor<?xf16, #hipsr.mem<device>>) {axes_attr = array<i64: 0>, starts_attr = array<i64: 0>, steps_attr = array<i64: 1>} : tensor<?xf16, #hipsr.mem<device>>
+// CHECK-NEXT: return
+// CHECK-NEXT: }
 func.func @slice_runtime_bound(%ctx: !hipsr.context,
                                %data: tensor<?xf16, #hipsr.mem<device>>) {
   %ends_init = hipsr.placeholder(%ctx)
       {placeholder_type = #hipsr.placeholder_type<normal>}
       : tensor<1xi64, #hipsr.mem<host>> shape_region {
     %one = arith.constant 1 : index
-    %ends_shape = shape.from_extents %one : index
-    hipsr.shape_yield %ends_shape : !shape.shape
+    %ends_shape = tensor.from_elements %one : tensor<1xindex>
+    hipsr.shape_yield %ends_shape : tensor<1xindex>
   }
   %ends = hipsr.compute(%ctx) ins(%data : tensor<?xf16, #hipsr.mem<device>>)
                               outs(%ends_init : tensor<1xi64, #hipsr.mem<host>>) {

@@ -141,7 +141,8 @@ LogicalResult populateExpandShapeRegion(OpBuilder &builder, Block &shapeBlock,
           arith::ConstantIndexOp::create(builder, loc, extent));
     }
   } else {
-    inputShape = shape::ShapeOfOp::create(builder, loc, args.getInput());
+    inputShape = shape::ShapeOfOp::create(
+        builder, loc, getExtentTensorTypeOf(args.getInput()), args.getInput());
     Value requestedShapeArg = args.getRequestedShape();
     auto requestedShapeType = cast<ShapedType>(requestedShapeArg.getType());
     int64_t requestedRank = requestedShapeType.getDimSize(0);
@@ -161,9 +162,7 @@ LogicalResult populateExpandShapeRegion(OpBuilder &builder, Block &shapeBlock,
     }
   }
 
-  auto shapeType = shape::ShapeType::get(builder.getContext());
-  Value requestedShape = shape::FromExtentsOp::create(
-      builder, loc, shapeType, ValueRange{requestedExtents});
+  Value requestedShape = createExtentTensor(builder, loc, requestedExtents);
 
   // ONNX Expand uses right-aligned multidirectional broadcasting.
   Value witness = shape::CstrBroadcastableOp::create(builder, loc, inputShape,
@@ -172,7 +171,8 @@ LogicalResult populateExpandShapeRegion(OpBuilder &builder, Block &shapeBlock,
       builder, loc, witness,
       [&](OpBuilder &b, Location) -> SmallVector<Value, 2> {
         Value broadcastShape = shape::BroadcastOp::create(
-            b, loc, shapeType, inputShape, requestedShape, StringAttr{});
+            b, loc, getBroadcastExtentTensorType({inputShape, requestedShape}),
+            inputShape, requestedShape, StringAttr{});
         return SmallVector<Value, 2>{broadcastShape};
       });
 

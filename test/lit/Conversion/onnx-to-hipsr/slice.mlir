@@ -49,10 +49,10 @@ func.func @strided_window(%ctx: !hipsr.context,
 // CHECK-SAME:    %[[DATA:.+]]: tensor<8xf16, #hipsr.mem<device>>,
 // CHECK-SAME:    %[[OTHER:.+]]: tensor<?x4096xf16, #hipsr.mem<device>>) -> tensor<?xf16, #hipsr.mem<device>> {
 // CHECK-NEXT:    %[[ENDS_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[OTHER]] : tensor<?x4096xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<1xi64, #hipsr.mem<host>> shape_region {
-// CHECK-NEXT:    ^bb0(%{{.+}}: !shape.shape):
+// CHECK-NEXT:    ^bb0(%{{.+}}: tensor<2xindex>):
 // CHECK-NEXT:      %[[LEN:.+]] = arith.constant 1 : index
-// CHECK-NEXT:      %[[ENDS_SHAPE:.+]] = shape.from_extents %[[LEN]] : index
-// CHECK-NEXT:      hipsr.shape_yield %[[ENDS_SHAPE]] : !shape.shape
+// CHECK-NEXT:      %[[ENDS_EXTENTS:.+]] = tensor.from_elements %[[LEN]] : tensor<1xindex>
+// CHECK-NEXT:      hipsr.shape_yield %[[ENDS_EXTENTS]] : tensor<1xindex>
 // CHECK-NEXT:    }
 // CHECK-NEXT:    %[[ENDS:.+]] = hipsr.compute(%[[CTX]]) ins(%[[OTHER]] : tensor<?x4096xf16, #hipsr.mem<device>>) outs(%[[ENDS_INIT]] : tensor<1xi64, #hipsr.mem<host>>) {
 // CHECK-NEXT:    ^bb0(%{{.+}}: !hipsr.context, %[[BODY_OTHER:.+]]: tensor<?x4096xf16, #hipsr.mem<device>>, %{{.+}}: tensor<1xi64, #hipsr.mem<host>>):

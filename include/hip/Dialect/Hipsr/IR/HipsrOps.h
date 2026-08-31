@@ -60,6 +60,22 @@ bool isHipsrDestinationOperand(::mlir::OpOperand &use);
 //          getResultForDestination(%d) -> %r
 ::mlir::OpResult getResultForDestination(::mlir::OpOperand &use);
 
+// Example: getExtentTensorTypeForRank(ctx, 2) -> tensor<2xindex>
+::mlir::RankedTensorType getExtentTensorTypeForRank(::mlir::MLIRContext *ctx,
+                                                    int64_t rank);
+
+// Takes a ranked data tensor, not a shape or a buffer.
+//
+// Example: %d : tensor<?x4xf16> -> tensor<2xindex>
+::mlir::RankedTensorType getExtentTensorTypeOf(::mlir::Value data);
+
+// Broadcasting left-pads, so the result is as long as the longest input. Every
+// input must state its extent count.
+//
+// Example: {tensor<3xindex>, tensor<1xindex>} -> tensor<3xindex>
+::mlir::RankedTensorType
+getBroadcastExtentTensorType(::mlir::ValueRange shapes);
+
 } // namespace hipsr
 } // namespace mlir
 

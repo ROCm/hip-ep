@@ -48,8 +48,8 @@ func.func @barrier_over_placeholder(%ctx: !hipsr.context, %in: tensor<?x1xf16, #
         ins(%domain_in : tensor<?x1xf16, #hipsr.mem<device>>)
         {placeholder_type = #hipsr.placeholder_type<normal>}
         : tensor<?x1xf32, #hipsr.mem<device>> shape_region {
-    ^bb0(%in_shape: !shape.shape):
-      hipsr.shape_yield %in_shape : !shape.shape
+    ^bb0(%in_shape: tensor<2xindex>):
+      hipsr.shape_yield %in_shape : tensor<2xindex>
     }
     %cast = hipsr.cast(%domain_ctx)
         ins(%domain_in : tensor<?x1xf16, #hipsr.mem<device>>)
@@ -61,8 +61,8 @@ func.func @barrier_over_placeholder(%ctx: !hipsr.context, %in: tensor<?x1xf16, #
         : tensor<?x1xf16, #hipsr.mem<device>> shape_region {
     ^bb0(%region_ctx: !hipsr.context, %region_cast: tensor<?x1xf32, #hipsr.mem<device>>):
       %cast_shape = shape.shape_of %region_cast
-          : tensor<?x1xf32, #hipsr.mem<device>> -> !shape.shape
-      hipsr.shape_yield %cast_shape : !shape.shape
+          : tensor<?x1xf32, #hipsr.mem<device>> -> tensor<2xindex>
+      hipsr.shape_yield %cast_shape : tensor<2xindex>
     }
     %out = hipsr.cast(%domain_ctx)
         ins(%cast : tensor<?x1xf32, #hipsr.mem<device>>)

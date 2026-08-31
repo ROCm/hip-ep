@@ -21,22 +21,26 @@ def Hipsr_PreserveShapeOp : Hipsr_Op<"preserve_shape",
     memory, produce results, or generate code.
 
     ```mlir
-    %shape = scf.execute_region -> !shape.shape { ... }
+    %shape = scf.execute_region -> tensor<2xindex> { ... }
     %d0 = ...
     %init = tensor.empty(%d0) : tensor<?x2048xf16>
-    hipsr.preserve_shape %shape, %init : tensor<?x2048xf16>
+    hipsr.preserve_shape %shape, %init : tensor<2xindex>, tensor<?x2048xf16>
     ```
 
     ```mlir
     %alloc = memref.alloc(%d0) : memref<?x2048xf16>
-    hipsr.preserve_shape %shape, %alloc : memref<?x2048xf16>
+    hipsr.preserve_shape %shape, %alloc : tensor<2xindex>, memref<?x2048xf16>
     ```
 
-    `$shape` has the same rank as `$data`.
+    `$shape` holds one extent per dimension of `$data`.
   }];
 
-  let arguments = (ins Shape_ShapeType:$shape, Hipsr_TensorOrMemRef:$data);
+  let arguments = (ins Shape_ExtentTensorType:$shape,
+                       Hipsr_TensorOrMemRef:$data);
   let results = (outs);
 
-  let assemblyFormat = "$shape `,` $data attr-dict `:` type($data)";
+  let assemblyFormat =
+      "$shape `,` $data attr-dict `:` type($shape) `,` type($data)";
+
+  let hasVerifier = 1;
 }

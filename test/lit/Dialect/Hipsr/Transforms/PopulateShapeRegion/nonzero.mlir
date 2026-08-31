@@ -11,12 +11,13 @@
 // CHECK-SAME: %[[CTX:.+]]: !hipsr.context,
 // CHECK-SAME: %[[MASK:.+]]: tensor<?x?xi8, #hipsr.mem<device>>) {
 // CHECK-NEXT: %[[INITS:.+]]:2 = hipsr.placeholder(%[[CTX]]) ins(%[[MASK]] : tensor<?x?xi8, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<2x?xi64, #hipsr.mem<device>>, tensor<1xi64, #hipsr.mem<device>> shape_region {
-// CHECK-NEXT: ^bb0(%[[MASK_SHAPE:.+]]: !shape.shape):
-// CHECK-NEXT: %[[ROWS:.+]] = shape.const_size 2
-// CHECK-NEXT: %[[CAPACITY:.+]] = shape.num_elements %[[MASK_SHAPE]] : !shape.shape -> !shape.size
-// CHECK-NEXT: %[[INDICES_SHAPE:.+]] = shape.from_extents %[[ROWS]], %[[CAPACITY]] : !shape.size, !shape.size
-// CHECK-NEXT: %[[COUNT_SHAPE:.+]] = shape.const_shape [1] : !shape.shape
-// CHECK-NEXT: hipsr.shape_yield %[[INDICES_SHAPE]], %[[COUNT_SHAPE]] : !shape.shape, !shape.shape
+// CHECK-NEXT: ^bb0(%[[MASK_SHAPE:.+]]: tensor<2xindex>):
+// CHECK-NEXT: %[[ROWS:.+]] = arith.constant 2 : index
+// CHECK-NEXT: %[[CAPACITY:.+]] = shape.num_elements %[[MASK_SHAPE]] : tensor<2xindex> -> index
+// CHECK-NEXT: %[[INDICES_EXTENTS:.+]] = tensor.from_elements %[[ROWS]], %[[CAPACITY]] : tensor<2xindex>
+// CHECK-NEXT: %[[ONE:.+]] = arith.constant 1 : index
+// CHECK-NEXT: %[[COUNT_EXTENTS:.+]] = tensor.from_elements %[[ONE]] : tensor<1xindex>
+// CHECK-NEXT: hipsr.shape_yield %[[INDICES_EXTENTS]], %[[COUNT_EXTENTS]] : tensor<2xindex>, tensor<1xindex>
 // CHECK-NEXT: }
 // CHECK-NEXT: hipsr.nonzero(%[[CTX]]) ins(%[[MASK]] : tensor<?x?xi8, #hipsr.mem<device>>) outs(%[[INITS]]#0, %[[INITS]]#1 : tensor<2x?xi64, #hipsr.mem<device>>, tensor<1xi64, #hipsr.mem<device>>) : tensor<2x?xi64, #hipsr.mem<device>>, tensor<1xi64, #hipsr.mem<device>>
 // CHECK-NEXT: return

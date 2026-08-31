@@ -61,9 +61,10 @@ LogicalResult populateEqualShapeRegion(OpBuilder &builder, Block &shapeBlock,
   builder.setInsertionPointToStart(&shapeBlock);
 
   EqualPlaceholderShapeArgs args{shapeBlock};
+  SmallVector<Value> operandShapes{args.getLhs(), args.getRhs()};
   Value broadcast = shape::BroadcastOp::create(
-      builder, op.getLoc(), shape::ShapeType::get(builder.getContext()),
-      ValueRange{args.getLhs(), args.getRhs()}, /*error=*/nullptr);
+      builder, op.getLoc(), getBroadcastExtentTensorType(operandShapes),
+      operandShapes, /*error=*/nullptr);
   ShapeYieldOp::create(builder, op.getLoc(), ValueRange{broadcast});
   return success();
 }

@@ -227,11 +227,10 @@ LogicalResult populateSliceShapeRegion(OpBuilder &builder, Block &shapeBlock,
                                             dataType.getDimSize(axis));
     }
     Value data = args.getData();
-    if (isa<ShapedType>(data.getType())) {
+    if (args.holdsDataValues()) {
       return tensor::DimOp::create(builder, loc, data, axis);
     }
-    return shape::SizeToIndexOp::create(
-        builder, loc, shape::GetExtentOp::create(builder, loc, data, axis));
+    return shape::GetExtentOp::create(builder, loc, data, axis);
   };
 
   SmallVector<Value> sizes =
@@ -243,8 +242,7 @@ LogicalResult populateSliceShapeRegion(OpBuilder &builder, Block &shapeBlock,
         return windowSize(builder, loc, boundOf(starts, *entry),
                           boundOf(ends, *entry), steps[*entry], sizeOf(axis));
       });
-  Value outputShape = shape::FromExtentsOp::create(
-      builder, loc, shape::ShapeType::get(builder.getContext()), sizes);
+  Value outputShape = createExtentTensor(builder, loc, sizes);
   ShapeYieldOp::create(builder, loc, ValueRange{outputShape});
 
   // Folding on creation leaves dead constants behind.

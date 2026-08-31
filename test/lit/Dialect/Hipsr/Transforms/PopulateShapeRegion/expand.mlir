@@ -21,13 +21,13 @@
 // CHECK-NEXT: %[[INDEX2:.+]] = arith.constant 2 : index
 // CHECK-NEXT: %[[REQUEST2_I64:.+]] = tensor.extract %[[SHAPE_REQUEST]][%[[INDEX2]]] : tensor<3xi64, #hipsr.mem<host>>
 // CHECK-NEXT: %[[REQUEST2:.+]] = arith.index_cast %[[REQUEST2_I64]] : i64 to index
-// CHECK-NEXT: %[[REQUEST_SHAPE:.+]] = shape.from_extents %[[REQUEST0]], %[[REQUEST1]], %[[REQUEST2]] : index, index, index
-// CHECK-NEXT: %[[WITNESS:.+]] = shape.cstr_broadcastable %[[INPUT_SHAPE]], %[[REQUEST_SHAPE]] : tensor<2xindex>, !shape.shape
-// CHECK-NEXT: %[[RESULT_SHAPE:.+]] = shape.assuming %[[WITNESS]] -> (!shape.shape) {
-// CHECK-NEXT: %[[BROADCAST:.+]] = shape.broadcast %[[INPUT_SHAPE]], %[[REQUEST_SHAPE]] : tensor<2xindex>, !shape.shape -> !shape.shape
-// CHECK-NEXT: shape.assuming_yield %[[BROADCAST]] : !shape.shape
+// CHECK-NEXT: %[[REQUEST_EXTENTS:.+]] = tensor.from_elements %[[REQUEST0]], %[[REQUEST1]], %[[REQUEST2]] : tensor<3xindex>
+// CHECK-NEXT: %[[WITNESS:.+]] = shape.cstr_broadcastable %[[INPUT_SHAPE]], %[[REQUEST_EXTENTS]] : tensor<2xindex>, tensor<3xindex>
+// CHECK-NEXT: %[[RESULT_SHAPE:.+]] = shape.assuming %[[WITNESS]] -> (tensor<3xindex>) {
+// CHECK-NEXT: %[[BROADCAST:.+]] = shape.broadcast %[[INPUT_SHAPE]], %[[REQUEST_EXTENTS]] : tensor<2xindex>, tensor<3xindex> -> tensor<3xindex>
+// CHECK-NEXT: shape.assuming_yield %[[BROADCAST]] : tensor<3xindex>
 // CHECK-NEXT: }
-// CHECK-NEXT: hipsr.shape_yield %[[RESULT_SHAPE]] : !shape.shape
+// CHECK-NEXT: hipsr.shape_yield %[[RESULT_SHAPE]] : tensor<3xindex>
 // CHECK-NEXT: }
 // CHECK-NEXT: %[[RESULT:.+]] = hipsr.expand(%[[CTX]]) ins(%[[INPUT]], %[[REQUEST]] : tensor<?x3xf16, #hipsr.mem<device>>, tensor<3xi64, #hipsr.mem<host>>) outs(%[[INIT]] : tensor<?x?x?xf16, #hipsr.mem<device>>) : tensor<?x?x?xf16, #hipsr.mem<device>>
 // CHECK-NEXT: return
@@ -51,15 +51,15 @@ func.func @expand_runtime_shape(
 // CHECK-LABEL: func.func @expand_shape_attr(
 // CHECK-SAME: %[[CTX:.+]]: !hipsr.context, %[[INPUT:.+]]: tensor<?x3xf16, #hipsr.mem<device>>) {
 // CHECK-NEXT: %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<?x3xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x3xf16, #hipsr.mem<device>> shape_region {
-// CHECK-NEXT: ^bb0(%[[INPUT_SHAPE:.+]]: !shape.shape):
+// CHECK-NEXT: ^bb0(%[[INPUT_SHAPE:.+]]: tensor<2xindex>):
 // CHECK-NEXT: %[[REQUEST0:.+]] = arith.constant 3 : index
-// CHECK-NEXT: %[[REQUEST_SHAPE:.+]] = shape.from_extents %[[REQUEST0]] : index
-// CHECK-NEXT: %[[WITNESS:.+]] = shape.cstr_broadcastable %[[INPUT_SHAPE]], %[[REQUEST_SHAPE]] : !shape.shape, !shape.shape
-// CHECK-NEXT: %[[RESULT_SHAPE:.+]] = shape.assuming %[[WITNESS]] -> (!shape.shape) {
-// CHECK-NEXT: %[[BROADCAST:.+]] = shape.broadcast %[[INPUT_SHAPE]], %[[REQUEST_SHAPE]] : !shape.shape, !shape.shape -> !shape.shape
-// CHECK-NEXT: shape.assuming_yield %[[BROADCAST]] : !shape.shape
+// CHECK-NEXT: %[[REQUEST_EXTENTS:.+]] = tensor.from_elements %[[REQUEST0]] : tensor<1xindex>
+// CHECK-NEXT: %[[WITNESS:.+]] = shape.cstr_broadcastable %[[INPUT_SHAPE]], %[[REQUEST_EXTENTS]] : tensor<2xindex>, tensor<1xindex>
+// CHECK-NEXT: %[[RESULT_SHAPE:.+]] = shape.assuming %[[WITNESS]] -> (tensor<2xindex>) {
+// CHECK-NEXT: %[[BROADCAST:.+]] = shape.broadcast %[[INPUT_SHAPE]], %[[REQUEST_EXTENTS]] : tensor<2xindex>, tensor<1xindex> -> tensor<2xindex>
+// CHECK-NEXT: shape.assuming_yield %[[BROADCAST]] : tensor<2xindex>
 // CHECK-NEXT: }
-// CHECK-NEXT: hipsr.shape_yield %[[RESULT_SHAPE]] : !shape.shape
+// CHECK-NEXT: hipsr.shape_yield %[[RESULT_SHAPE]] : tensor<2xindex>
 // CHECK-NEXT: }
 // CHECK-NEXT: %[[RESULT:.+]] = hipsr.expand(%[[CTX]]) ins(%[[INPUT]] : tensor<?x3xf16, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<?x3xf16, #hipsr.mem<device>>) {shape_attr = array<i64: 3>} : tensor<?x3xf16, #hipsr.mem<device>>
 // CHECK-NEXT: return

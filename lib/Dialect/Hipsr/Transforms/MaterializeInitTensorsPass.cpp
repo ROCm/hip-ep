@@ -10,20 +10,21 @@
 //
 // Before:
 //   %init = hipsr.placeholder(%ctx) ins(%a) : tensor<?x4xf32> shape_region {
-//   ^bb0(%a_shape: !shape.shape):
-//     hipsr.shape_yield %a_shape : !shape.shape
+//   ^bb0(%a_shape: tensor<2xindex>):
+//     hipsr.shape_yield %a_shape : tensor<2xindex>
 //   }
 //   %0 = hipsr.cast(%ctx) ins(%a) outs(%init) : tensor<?x4xf32>
 //
 // After:
-//   %s = scf.execute_region -> !shape.shape {
-//     %a_shape = shape.shape_of %a : tensor<?x4xf16> -> !shape.shape
-//     scf.yield %a_shape : !shape.shape
+//   %s = scf.execute_region -> tensor<2xindex> {
+//     %a_shape = shape.shape_of %a : tensor<?x4xf32> -> tensor<2xindex>
+//     scf.yield %a_shape : tensor<2xindex>
 //   }
-//   %d0 = shape.size_to_index (shape.get_extent %s, 0)
+//   %c0 = arith.constant 0 : index
+//   %d0 = shape.get_extent %s, %c0 : tensor<2xindex>, index -> index
 //   %empty = tensor.empty(%d0) : tensor<?x4xf32>
 //   %0 = hipsr.cast(%ctx) ins(%a) outs(%empty) : tensor<?x4xf32>
-//   hipsr.preserve_shape %s, %0 : tensor<?x4xf32>
+//   hipsr.preserve_shape %s, %0 : tensor<2xindex>, tensor<?x4xf32>
 //
 // The domain is rebuilt in a fresh block in five steps: constants, shape
 // computations, allocations, every other op, then one shape link per
@@ -72,7 +73,7 @@ namespace {
 //   d. block argument     -> the new block argument
 //   e. placeholder result -> rejected by verifyMaterializable
 //
-// Normal, one !shape.shape per input:
+// Normal, one extent tensor per input:
 //   a. arith.constant     -> shape.shape_of it
 //   b. hipsr.constant     -> shape.shape_of it
 //   c. block argument     -> shape.shape_of it
@@ -88,14 +89,14 @@ SmallVector<Value> getArgumentReplacements(PlaceholderOp placeholder,
   }
 
   Location loc = placeholder.getLoc();
-  auto shapeType = shape::ShapeType::get(builder.getContext());
   return llvm::map_to_vector(
       placeholder.getInputs(), [&](Value input) -> Value {
         if (Value recorded = shapes.lookupOrNull(input)) {
           return recorded;
         }
-        return shape::ShapeOfOp::create(builder, loc, shapeType,
-                                        cloned.lookup(input));
+        Value data = cloned.lookup(input);
+        return shape::ShapeOfOp::create(builder, loc,
+                                        getExtentTensorTypeOf(data), data);
       });
 }
 
@@ -104,8 +105,10 @@ ResultRange materializeShapeRegion(PlaceholderOp placeholder,
                                    const IRMapping &shapes, IRMapping &cloned,
                                    RewriterBase &rewriter) {
   OpBuilder::InsertionGuard guard(rewriter);
-  SmallVector<Type> shapeTypes(placeholder.getNumResults(),
-                               shape::ShapeType::get(rewriter.getContext()));
+  SmallVector<Type> shapeTypes =
+      llvm::map_to_vector(placeholder.getResults(), [](Value result) -> Type {
+        return getExtentTensorTypeOf(result);
+      });
   auto executeRegion =
       scf::ExecuteRegionOp::create(rewriter, placeholder.getLoc(), shapeTypes);
 
@@ -138,9 +141,7 @@ Value createInitTensor(Value result, Value resultShape, OpBuilder &builder) {
     return tensorType.isDynamicDim(dimension);
   };
   auto readExtent = [&](int64_t dimension) -> Value {
-    Value extent =
-        shape::GetExtentOp::create(builder, loc, resultShape, dimension);
-    return shape::SizeToIndexOp::create(builder, loc, extent);
+    return shape::GetExtentOp::create(builder, loc, resultShape, dimension);
   };
 
   SmallVector<Value> dynamicSizes = llvm::map_to_vector(

@@ -143,8 +143,8 @@ def MaterializeInitTensorsPass
     `hipsr.pool_domain`, leaving the domain body in three ordered groups:
 
     1. shape computation: one `scf.execute_region` per placeholder, yielding
-       `!shape.shape` and holding the body moved out of the placeholder's
-       `shape_region`;
+       one extent tensor per result and holding the body moved out of the
+       placeholder's `shape_region`;
     2. tensor allocation: `shape.get_extent` plus `tensor.empty` per
        placeholder result, taking rank and element type from that result type;
     3. data: the hipsr DPS ops, now initialized by the `tensor.empty` values.

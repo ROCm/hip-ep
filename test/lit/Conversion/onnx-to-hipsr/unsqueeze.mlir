@@ -21,19 +21,17 @@
 // CHECK-SAME:    %[[INPUT:.*]]: tensor<?x?xi1, #hipsr.mem<device>>) -> tensor<?x?x1xi1, #hipsr.mem<device>> {
 // CHECK-NEXT:    %{{.*}} = hipsr.constant {value = dense<-1> : tensor<1xi64>} : tensor<1xi64, #hipsr.mem<device>>
 // CHECK-NEXT:    %[[INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<?x?xi1, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x?x1xi1, #hipsr.mem<device>> shape_region {
-// CHECK-NEXT:    ^bb0(%[[IN_SHAPE:.*]]: !shape.shape):
-// CHECK-NEXT:      %[[AXIS0:.*]] = shape.const_size 0
-// CHECK-NEXT:      %[[SIZE0:.*]] = shape.get_extent %[[IN_SHAPE]], %[[AXIS0]]
-// CHECK-NEXT:      %[[ROWS:.*]] = shape.size_to_index %[[SIZE0]] : !shape.size
-// CHECK-NEXT:      %[[AXIS1:.*]] = shape.const_size 1
-// CHECK-NEXT:      %[[SIZE1:.*]] = shape.get_extent %[[IN_SHAPE]], %[[AXIS1]]
-// CHECK-NEXT:      %[[COLS:.*]] = shape.size_to_index %[[SIZE1]] : !shape.size
+// CHECK-NEXT:    ^bb0(%[[IN_SHAPE:.*]]: tensor<2xindex>):
+// CHECK-NEXT:      %[[AXIS0:.*]] = arith.constant 0 : index
+// CHECK-NEXT:      %[[ROWS:.*]] = shape.get_extent %[[IN_SHAPE]], %[[AXIS0]] : tensor<2xindex>, index -> index
+// CHECK-NEXT:      %[[AXIS1:.*]] = arith.constant 1 : index
+// CHECK-NEXT:      %[[COLS:.*]] = shape.get_extent %[[IN_SHAPE]], %[[AXIS1]] : tensor<2xindex>, index -> index
 // One unused divisor per dynamic group, left by the expand's shape inference.
 // CHECK-NEXT:      arith.constant 1 : index
 // CHECK-NEXT:      arith.constant 1 : index
 // CHECK-NEXT:      %[[ONE:.*]] = arith.constant 1 : index
-// CHECK-NEXT:      %[[SHAPE:.*]] = shape.from_extents %[[ROWS]], %[[COLS]], %[[ONE]] : index, index, index
-// CHECK-NEXT:      hipsr.shape_yield %[[SHAPE]] : !shape.shape
+// CHECK-NEXT:      %[[EXTENTS:.*]] = tensor.from_elements %[[ROWS]], %[[COLS]], %[[ONE]] : tensor<3xindex>
+// CHECK-NEXT:      hipsr.shape_yield %[[EXTENTS]] : tensor<3xindex>
 // CHECK-NEXT:    }
 // CHECK-NEXT:    %[[RESULT:.*]] = hipsr.compute(%[[CTX]]) ins(%[[INPUT]] : tensor<?x?xi1, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<?x?x1xi1, #hipsr.mem<device>>) {
 // CHECK-NEXT:    ^bb0(%{{.*}}: !hipsr.context, %[[IN:.*]]: tensor<?x?xi1, #hipsr.mem<device>>, %[[DEST:.*]]: tensor<?x?x1xi1, #hipsr.mem<device>>):
@@ -64,19 +62,17 @@ func.func @trailing_axis(%ctx: !hipsr.context,
 // CHECK-SAME:    %[[INPUT:.*]]: tensor<?x?xi1, #hipsr.mem<device>>) -> tensor<?x1x?xi1, #hipsr.mem<device>> {
 // CHECK-NEXT:    %{{.*}} = hipsr.constant {value = dense<1> : tensor<1xi64>} : tensor<1xi64, #hipsr.mem<device>>
 // CHECK-NEXT:    %[[INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<?x?xi1, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x1x?xi1, #hipsr.mem<device>> shape_region {
-// CHECK-NEXT:    ^bb0(%[[IN_SHAPE:.*]]: !shape.shape):
-// CHECK-NEXT:      %[[AXIS0:.*]] = shape.const_size 0
-// CHECK-NEXT:      %[[SIZE0:.*]] = shape.get_extent %[[IN_SHAPE]], %[[AXIS0]]
-// CHECK-NEXT:      %[[ROWS:.*]] = shape.size_to_index %[[SIZE0]] : !shape.size
-// CHECK-NEXT:      %[[AXIS1:.*]] = shape.const_size 1
-// CHECK-NEXT:      %[[SIZE1:.*]] = shape.get_extent %[[IN_SHAPE]], %[[AXIS1]]
-// CHECK-NEXT:      %[[COLS:.*]] = shape.size_to_index %[[SIZE1]] : !shape.size
+// CHECK-NEXT:    ^bb0(%[[IN_SHAPE:.*]]: tensor<2xindex>):
+// CHECK-NEXT:      %[[AXIS0:.*]] = arith.constant 0 : index
+// CHECK-NEXT:      %[[ROWS:.*]] = shape.get_extent %[[IN_SHAPE]], %[[AXIS0]] : tensor<2xindex>, index -> index
+// CHECK-NEXT:      %[[AXIS1:.*]] = arith.constant 1 : index
+// CHECK-NEXT:      %[[COLS:.*]] = shape.get_extent %[[IN_SHAPE]], %[[AXIS1]] : tensor<2xindex>, index -> index
 // One unused divisor per dynamic group, then the inserted unit.
 // CHECK-NEXT:      arith.constant 1 : index
 // CHECK-NEXT:      arith.constant 1 : index
 // CHECK-NEXT:      %[[ONE:.*]] = arith.constant 1 : index
-// CHECK-NEXT:      %[[SHAPE:.*]] = shape.from_extents %[[ROWS]], %[[ONE]], %[[COLS]] : index, index, index
-// CHECK-NEXT:      hipsr.shape_yield %[[SHAPE]] : !shape.shape
+// CHECK-NEXT:      %[[EXTENTS:.*]] = tensor.from_elements %[[ROWS]], %[[ONE]], %[[COLS]] : tensor<3xindex>
+// CHECK-NEXT:      hipsr.shape_yield %[[EXTENTS]] : tensor<3xindex>
 // CHECK-NEXT:    }
 // CHECK-NEXT:    %[[RESULT:.*]] = hipsr.compute(%[[CTX]]) ins(%[[INPUT]] : tensor<?x?xi1, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<?x1x?xi1, #hipsr.mem<device>>) {
 // CHECK-NEXT:    ^bb0(%{{.*}}: !hipsr.context, %[[IN:.*]]: tensor<?x?xi1, #hipsr.mem<device>>, %[[DEST:.*]]: tensor<?x1x?xi1, #hipsr.mem<device>>):
@@ -107,11 +103,11 @@ func.func @interior_axis(%ctx: !hipsr.context,
 // CHECK-SAME:    %[[INPUT:.*]]: tensor<2xi64, #hipsr.mem<host>>) -> tensor<1x2xi64, #hipsr.mem<host>> {
 // CHECK-NEXT:    %{{.*}} = hipsr.constant {value = dense<0> : tensor<1xi64>} : tensor<1xi64, #hipsr.mem<device>>
 // CHECK-NEXT:    %[[INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<2xi64, #hipsr.mem<host>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<1x2xi64, #hipsr.mem<host>> shape_region {
-// CHECK-NEXT:    ^bb0(%{{.*}}: !shape.shape):
+// CHECK-NEXT:    ^bb0(%{{.*}}: tensor<1xindex>):
 // CHECK-NEXT:      %[[D0:.*]] = arith.constant 1 : index
 // CHECK-NEXT:      %[[D1:.*]] = arith.constant 2 : index
-// CHECK-NEXT:      %[[SHAPE:.*]] = shape.from_extents %[[D0]], %[[D1]] : index, index
-// CHECK-NEXT:      hipsr.shape_yield %[[SHAPE]] : !shape.shape
+// CHECK-NEXT:      %[[EXTENTS:.*]] = tensor.from_elements %[[D0]], %[[D1]] : tensor<2xindex>
+// CHECK-NEXT:      hipsr.shape_yield %[[EXTENTS]] : tensor<2xindex>
 // CHECK-NEXT:    }
 // CHECK-NEXT:    %[[RESULT:.*]] = hipsr.compute(%[[CTX]]) ins(%[[INPUT]] : tensor<2xi64, #hipsr.mem<host>>) outs(%[[INIT]] : tensor<1x2xi64, #hipsr.mem<host>>) {
 // CHECK-NEXT:    ^bb0(%{{.*}}: !hipsr.context, %[[IN:.*]]: tensor<2xi64, #hipsr.mem<host>>, %{{.*}}: tensor<1x2xi64, #hipsr.mem<host>>):
@@ -138,13 +134,13 @@ func.func @host_input(%ctx: !hipsr.context,
 // CHECK-SAME:    %[[INPUT:.*]]: tensor<3x4xf16, #hipsr.mem<device>>) -> tensor<1x3x4x1xf16, #hipsr.mem<device>> {
 // CHECK-NEXT:    %{{.*}} = hipsr.constant {value = dense<[3, 0]> : tensor<2xi64>} : tensor<2xi64, #hipsr.mem<device>>
 // CHECK-NEXT:    %[[INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<3x4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<1x3x4x1xf16, #hipsr.mem<device>> shape_region {
-// CHECK-NEXT:    ^bb0(%{{.*}}: !shape.shape):
+// CHECK-NEXT:    ^bb0(%{{.*}}: tensor<2xindex>):
 // CHECK-NEXT:      %[[D0:.*]] = arith.constant 1 : index
 // CHECK-NEXT:      %[[D1:.*]] = arith.constant 3 : index
 // CHECK-NEXT:      %[[D2:.*]] = arith.constant 4 : index
 // CHECK-NEXT:      %[[D3:.*]] = arith.constant 1 : index
-// CHECK-NEXT:      %[[SHAPE:.*]] = shape.from_extents %[[D0]], %[[D1]], %[[D2]], %[[D3]] : index, index, index, index
-// CHECK-NEXT:      hipsr.shape_yield %[[SHAPE]] : !shape.shape
+// CHECK-NEXT:      %[[EXTENTS:.*]] = tensor.from_elements %[[D0]], %[[D1]], %[[D2]], %[[D3]] : tensor<4xindex>
+// CHECK-NEXT:      hipsr.shape_yield %[[EXTENTS]] : tensor<4xindex>
 // CHECK-NEXT:    }
 // CHECK-NEXT:    %[[RESULT:.*]] = hipsr.compute(%[[CTX]]) ins(%[[INPUT]] : tensor<3x4xf16, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<1x3x4x1xf16, #hipsr.mem<device>>) {
 // CHECK-NEXT:    ^bb0(%{{.*}}: !hipsr.context, %[[IN:.*]]: tensor<3x4xf16, #hipsr.mem<device>>, %{{.*}}: tensor<1x3x4x1xf16, #hipsr.mem<device>>):

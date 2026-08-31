@@ -15,20 +15,26 @@ def Hipsr_ShapeYieldOp : Hipsr_Op<
     "shape_yield", [Pure, Terminator, HasParent<"PlaceholderOp">]> {
   let summary = "Yield result shapes from a placeholder shape region";
   let description = [{
-    Ends a `hipsr.placeholder` shape region and yields one `!shape.shape`
-    value for each placeholder result. Element types and ranked tensor types
-    remain on the placeholder results.
+    Ends a `hipsr.placeholder` shape region and yields one extent tensor for
+    each placeholder result. Element types and ranked tensor types remain on
+    the placeholder results.
 
-    A scalar result still has one shape operand whose extent list is empty.
+    Each extent tensor holds one extent per dimension of the result it
+    describes, so a static length must equal that result's rank. A scalar
+    result still has one shape operand: an extent tensor of length zero.
     For example:
     ```mlir
-    hipsr.shape_yield %shape : !shape.shape
+    // result rank 2
+    hipsr.shape_yield %shape : tensor<2xindex>
+    // result ranks 2 and 1
     hipsr.shape_yield %values_shape, %indices_shape
-        : !shape.shape, !shape.shape
+        : tensor<2xindex>, tensor<1xindex>
+    // scalar result
+    hipsr.shape_yield %scalar_shape : tensor<0xindex>
     ```
   }];
 
-  let arguments = (ins Variadic<Shape_ShapeType>:$shapes);
+  let arguments = (ins Variadic<Shape_ExtentTensorType>:$shapes);
   let assemblyFormat = "$shapes attr-dict `:` type($shapes)";
   let hasVerifier = 1;
 

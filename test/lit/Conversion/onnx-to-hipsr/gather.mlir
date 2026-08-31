@@ -57,10 +57,10 @@ func.func @negative_axis(%ctx: !hipsr.context, %data: tensor<2x3x4xf16>,
 // CHECK-SAME:    %[[CTX:.+]]: !hipsr.context,
 // CHECK-SAME:    %[[INPUT:.+]]: tensor<?x4096xf16, #hipsr.mem<device>>) {
 // CHECK-NEXT:    %[[EXTENTS_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<?x4096xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<2xi64, #hipsr.mem<host>> shape_region {
-// CHECK-NEXT:    ^bb0(%{{.+}}: !shape.shape):
+// CHECK-NEXT:    ^bb0(%{{.+}}: tensor<2xindex>):
 // CHECK-NEXT:      %[[LEN:.+]] = arith.constant 2 : index
-// CHECK-NEXT:      %[[EXTENTS_SHAPE:.+]] = shape.from_extents %[[LEN]] : index
-// CHECK-NEXT:      hipsr.shape_yield %[[EXTENTS_SHAPE]] : !shape.shape
+// CHECK-NEXT:      %[[SHAPE_EXTENTS:.+]] = tensor.from_elements %[[LEN]] : tensor<1xindex>
+// CHECK-NEXT:      hipsr.shape_yield %[[SHAPE_EXTENTS]] : tensor<1xindex>
 // CHECK-NEXT:    }
 // CHECK-NEXT:    %[[SHAPE:.+]] = hipsr.compute(%[[CTX]]) ins(%[[INPUT]] : tensor<?x4096xf16, #hipsr.mem<device>>) outs(%[[EXTENTS_INIT]] : tensor<2xi64, #hipsr.mem<host>>) {
 // CHECK-NEXT:    ^bb0(%{{.+}}: !hipsr.context, %[[DATA:.+]]: tensor<?x4096xf16, #hipsr.mem<device>>, %{{.+}}: tensor<2xi64, #hipsr.mem<host>>):
@@ -73,9 +73,9 @@ func.func @negative_axis(%ctx: !hipsr.context, %data: tensor<2x3x4xf16>,
 // CHECK-NEXT:    } : tensor<2xi64, #hipsr.mem<host>>
 // CHECK-NEXT:    %{{.+}} = arith.constant dense<0> : tensor<i64>
 // CHECK-NEXT:    %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[EXTENTS_INIT]] : tensor<2xi64, #hipsr.mem<host>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<i64, #hipsr.mem<host>> shape_region {
-// CHECK-NEXT:    ^bb0(%{{.+}}: !shape.shape):
-// CHECK-NEXT:      %[[RESULT_SHAPE:.+]] = shape.const_shape [] : !shape.shape
-// CHECK-NEXT:      hipsr.shape_yield %[[RESULT_SHAPE]] : !shape.shape
+// CHECK-NEXT:    ^bb0(%{{.+}}: tensor<1xindex>):
+// CHECK-NEXT:      %[[NO_EXTENTS:.+]] = arith.constant dense<> : tensor<0xindex>
+// CHECK-NEXT:      hipsr.shape_yield %[[NO_EXTENTS]] : tensor<0xindex>
 // CHECK-NEXT:    }
 // CHECK-NEXT:    %{{.+}} = hipsr.compute(%[[CTX]]) ins(%[[SHAPE]] : tensor<2xi64, #hipsr.mem<host>>) outs(%[[INIT]] : tensor<i64, #hipsr.mem<host>>) {
 // CHECK-NEXT:    ^bb0(%{{.+}}: !hipsr.context, %[[IN:.+]]: tensor<2xi64, #hipsr.mem<host>>, %{{.+}}: tensor<i64, #hipsr.mem<host>>):
@@ -106,10 +106,10 @@ func.func @host_leading_dim(%ctx: !hipsr.context,
 // CHECK-SAME:    %[[CTX:.+]]: !hipsr.context,
 // CHECK-SAME:    %[[INPUT:.+]]: tensor<?x?x4096xf16, #hipsr.mem<device>>) {
 // CHECK-NEXT:    %[[EXTENTS_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<?x?x4096xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<3xi64, #hipsr.mem<host>> shape_region {
-// CHECK-NEXT:    ^bb0(%{{.+}}: !shape.shape):
+// CHECK-NEXT:    ^bb0(%{{.+}}: tensor<3xindex>):
 // CHECK-NEXT:      %[[LEN:.+]] = arith.constant 3 : index
-// CHECK-NEXT:      %[[EXTENTS_SHAPE:.+]] = shape.from_extents %[[LEN]] : index
-// CHECK-NEXT:      hipsr.shape_yield %[[EXTENTS_SHAPE]] : !shape.shape
+// CHECK-NEXT:      %[[SHAPE_EXTENTS:.+]] = tensor.from_elements %[[LEN]] : tensor<1xindex>
+// CHECK-NEXT:      hipsr.shape_yield %[[SHAPE_EXTENTS]] : tensor<1xindex>
 // CHECK-NEXT:    }
 // CHECK-NEXT:    %[[SHAPE:.+]] = hipsr.compute(%[[CTX]]) ins(%[[INPUT]] : tensor<?x?x4096xf16, #hipsr.mem<device>>) outs(%[[EXTENTS_INIT]] : tensor<3xi64, #hipsr.mem<host>>) {
 // CHECK-NEXT:    ^bb0(%{{.+}}: !hipsr.context, %[[DATA:.+]]: tensor<?x?x4096xf16, #hipsr.mem<device>>, %{{.+}}: tensor<3xi64, #hipsr.mem<host>>):
@@ -125,9 +125,10 @@ func.func @host_leading_dim(%ctx: !hipsr.context,
 // CHECK-NEXT:    } : tensor<3xi64, #hipsr.mem<host>>
 // CHECK-NEXT:    %{{.+}} = hipsr.constant {value = dense<[-1, 0]> : tensor<2xi64>} : tensor<2xi64, #hipsr.mem<device>>
 // CHECK-NEXT:    %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[EXTENTS_INIT]] : tensor<3xi64, #hipsr.mem<host>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<2xi64, #hipsr.mem<host>> shape_region {
-// CHECK-NEXT:    ^bb0(%{{.+}}: !shape.shape):
-// CHECK-NEXT:      %[[RESULT_SHAPE:.+]] = shape.const_shape [2] : !shape.shape
-// CHECK-NEXT:      hipsr.shape_yield %[[RESULT_SHAPE]] : !shape.shape
+// CHECK-NEXT:    ^bb0(%{{.+}}: tensor<1xindex>):
+// CHECK-NEXT:      %[[RESULT_LEN:.+]] = arith.constant 2 : index
+// CHECK-NEXT:      %[[RESULT_EXTENTS:.+]] = tensor.from_elements %[[RESULT_LEN]] : tensor<1xindex>
+// CHECK-NEXT:      hipsr.shape_yield %[[RESULT_EXTENTS]] : tensor<1xindex>
 // CHECK-NEXT:    }
 // CHECK-NEXT:    %{{.+}} = hipsr.compute(%[[CTX]]) ins(%[[SHAPE]] : tensor<3xi64, #hipsr.mem<host>>) outs(%[[INIT]] : tensor<2xi64, #hipsr.mem<host>>) {
 // CHECK-NEXT:    ^bb0(%{{.+}}: !hipsr.context, %[[IN:.+]]: tensor<3xi64, #hipsr.mem<host>>, %{{.+}}: tensor<2xi64, #hipsr.mem<host>>):

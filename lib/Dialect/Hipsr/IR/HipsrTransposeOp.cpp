@@ -68,8 +68,7 @@ LogicalResult populateTransposeShapeRegion(OpBuilder &builder,
       llvm::map_to_vector(op.getPerm(), [&](int64_t axis) -> Value {
         return shape::GetExtentOp::create(builder, loc, inputShape, axis);
       });
-  Value outputShape = shape::FromExtentsOp::create(
-      builder, loc, shape::ShapeType::get(builder.getContext()), extents);
+  Value outputShape = createExtentTensor(builder, loc, extents);
   ShapeYieldOp::create(builder, loc, ValueRange{outputShape});
   return success();
 }

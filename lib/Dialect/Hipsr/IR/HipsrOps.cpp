@@ -7,6 +7,8 @@
 
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 
+#include "llvm/ADT/STLExtras.h"
+
 using namespace mlir;
 using namespace mlir::hipsr;
 
@@ -59,6 +61,30 @@ bool mlir::hipsr::isHipsrDestinationOperand(OpOperand &use) {
   unsigned index = use.getOperandNumber();
   unsigned begin = destinations.getBeginOperandIndex();
   return index >= begin && index < begin + destinations.size();
+}
+
+RankedTensorType mlir::hipsr::getExtentTensorTypeForRank(MLIRContext *ctx,
+                                                         int64_t rank) {
+  return RankedTensorType::get({rank}, IndexType::get(ctx));
+}
+
+RankedTensorType mlir::hipsr::getExtentTensorTypeOf(Value data) {
+  auto tensorType = cast<RankedTensorType>(data.getType());
+  return getExtentTensorTypeForRank(data.getContext(), tensorType.getRank());
+}
+
+RankedTensorType mlir::hipsr::getBroadcastExtentTensorType(ValueRange shapes) {
+  assert(!shapes.empty() && "broadcast needs at least one shape");
+  auto extentCount = [](Value shape) {
+    int64_t count = cast<RankedTensorType>(shape.getType()).getDimSize(0);
+    // kDynamic is the smallest int64, so an unknown count would lose the
+    // comparison below and silently understate the broadcast rank.
+    assert(!ShapedType::isDynamic(count) &&
+           "broadcast operand must state its extent count");
+    return count;
+  };
+  int64_t rank = *llvm::max_element(llvm::map_range(shapes, extentCount));
+  return getExtentTensorTypeForRank(shapes.front().getContext(), rank);
 }
 
 OpResult mlir::hipsr::getResultForDestination(OpOperand &use) {

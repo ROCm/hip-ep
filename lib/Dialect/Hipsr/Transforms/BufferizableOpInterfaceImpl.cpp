@@ -67,6 +67,12 @@ struct PreserveShapeBufferizableModel
     return {};
   }
 
+  // `$shape` stays an extent tensor after bufferize, so the default
+  // hasTensorSemantics would still call the rewritten op tensor-like.
+  bool hasTensorSemantics(Operation *op) const {
+    return isa<TensorType>(cast<PreserveShapeOp>(op).getData().getType());
+  }
+
   LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
                           const BufferizationOptions &options,
                           BufferizationState &state) const {

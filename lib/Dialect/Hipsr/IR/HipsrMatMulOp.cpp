@@ -68,49 +68,60 @@ LogicalResult populateMatMulShapeRegion(OpBuilder &builder, Block &shapeBlock,
   // K is A's last dim; B's last dim when B is 1-D, else its second-to-last.
   int64_t kAIndex = aRank - 1;
   int64_t kBIndex = bIs1D ? bRank - 1 : bRank - 2;
-  Type shapeType = shape::ShapeType::get(ctx);
   Type witnessType = shape::WitnessType::get(ctx);
-  Value aKShape = shape::FromExtentsOp::create(
-      builder, loc, shapeType, ValueRange{extent(builder, aShape, kAIndex)});
-  Value bKShape = shape::FromExtentsOp::create(
-      builder, loc, shapeType, ValueRange{extent(builder, bShape, kBIndex)});
+  Value aKShape = createExtentTensor(
+      builder, loc, ValueRange{extent(builder, aShape, kAIndex)});
+  Value bKShape = createExtentTensor(
+      builder, loc, ValueRange{extent(builder, bShape, kBIndex)});
   Value kWitness = shape::CstrEqOp::create(builder, loc, witnessType,
                                            ValueRange{aKShape, bKShape});
 
-  // Only leading dimensions participate in MatMul batch broadcasting.
-  auto getBatchShape = [&](Value inputShape, int64_t rank) -> Value {
-    int64_t batchRank = std::max<int64_t>(rank - 2, 0);
-    Value splitIndex = shape::ConstSizeOp::create(builder, loc, batchRank);
-    return shape::SplitAtOp::create(builder, loc,
-                                    TypeRange{shapeType, shapeType}, inputShape,
-                                    splitIndex)
-        .getHead();
-  };
-  Value aBatchShape = getBatchShape(aShape, aRank);
-  Value bBatchShape = getBatchShape(bShape, bRank);
-  Value batchWitness = shape::CstrBroadcastableOp::create(
-      builder, loc, aBatchShape, bBatchShape);
-  Value witness = shape::AssumingAllOp::create(
-      builder, loc, witnessType, ValueRange{kWitness, batchWitness});
+  // Only leading dimensions take part in batch broadcasting, so a 1-D or 2-D
+  // operand adds no constraint and no extent.
+  int64_t aBatchRank = std::max<int64_t>(aRank - 2, 0);
+  int64_t bBatchRank = std::max<int64_t>(bRank - 2, 0);
+  int64_t batchRank = std::max(aBatchRank, bBatchRank);
+  Value aBatchShape;
+  Value bBatchShape;
+  SmallVector<Value, 2> witnesses{kWitness};
+  if (batchRank > 0) {
+    auto getBatchShape = [&](Value inputShape, int64_t rank) -> Value {
+      SmallVector<Value> batchExtents =
+          llvm::map_to_vector(llvm::seq<int64_t>(rank), [&](int64_t index) {
+            return extent(builder, inputShape, index);
+          });
+      return createExtentTensor(builder, loc, batchExtents);
+    };
+    aBatchShape = getBatchShape(aShape, aBatchRank);
+    bBatchShape = getBatchShape(bShape, bBatchRank);
+    witnesses.push_back(shape::CstrBroadcastableOp::create(
+        builder, loc, aBatchShape, bBatchShape));
+  }
+  Value witness =
+      witnesses.size() == 1
+          ? witnesses.front()
+          : shape::AssumingAllOp::create(builder, loc, witnessType, witnesses)
+                .getResult();
 
   auto assuming = shape::AssumingOp::create(
       builder, loc, witness,
       [&](OpBuilder &b, Location) -> SmallVector<Value, 2> {
-        Value batchShape = shape::BroadcastOp::create(
-            b, loc, shapeType, aBatchShape, bBatchShape, StringAttr{});
-
-        SmallVector<Value, 2> matrixExtents;
+        SmallVector<Value> resultExtents;
+        if (batchRank > 0) {
+          Value batchShape = shape::BroadcastOp::create(
+              b, loc, getBroadcastExtentTensorType({aBatchShape, bBatchShape}),
+              aBatchShape, bBatchShape, StringAttr{});
+          for (int64_t index : llvm::seq<int64_t>(batchRank)) {
+            resultExtents.push_back(extent(b, batchShape, index));
+          }
+        }
         if (!aIs1D) {
-          matrixExtents.push_back(extent(b, aShape, aRank - 2));
+          resultExtents.push_back(extent(b, aShape, aRank - 2));
         }
         if (!bIs1D) {
-          matrixExtents.push_back(extent(b, bShape, bRank - 1));
+          resultExtents.push_back(extent(b, bShape, bRank - 1));
         }
-        Value matrixShape = shape::FromExtentsOp::create(
-            b, loc, shapeType, ValueRange{matrixExtents});
-        Value resultShape =
-            shape::ConcatOp::create(b, loc, shapeType, batchShape, matrixShape);
-        return {resultShape};
+        return {createExtentTensor(b, loc, resultExtents)};
       });
 
   ShapeYieldOp::create(builder, loc, ValueRange{assuming.getResult(0)});

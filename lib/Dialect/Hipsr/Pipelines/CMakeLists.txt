@@ -13,4 +13,8 @@ target_link_libraries(HipsrDialectPipelines PUBLIC
   MLIRPass
   MLIRIR
   MLIRSupport
+  # Upstream passes that lower shape regions.
+  MLIRShapeOpsTransforms
+  MLIRShapeToStandard
+  MLIRTransforms
 )

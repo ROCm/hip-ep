@@ -30,17 +30,16 @@ LogicalResult populateNonZeroShapeRegion(OpBuilder &builder, Block &shapeBlock,
   builder.setInsertionPointToStart(&shapeBlock);
 
   Location loc = op.getLoc();
-  Type shapeType = shape::ShapeType::get(builder.getContext());
   NonZeroPlaceholderShapeArgs args{shapeBlock};
   Value inputShape = args.getInput();
 
   int64_t rank = cast<ShapedType>(op.getInput().getType()).getRank();
-  Value rows = shape::ConstSizeOp::create(builder, loc, rank);
+  Value rows = arith::ConstantIndexOp::create(builder, loc, rank);
   Value capacity = shape::NumElementsOp::create(builder, loc, inputShape);
-  Value indicesShape = shape::FromExtentsOp::create(builder, loc, shapeType,
-                                                    ValueRange{rows, capacity});
-  Value countShape = shape::ConstShapeOp::create(
-      builder, loc, shapeType, builder.getIndexTensorAttr({1}));
+  Value indicesShape =
+      createExtentTensor(builder, loc, ValueRange{rows, capacity});
+  Value one = arith::ConstantIndexOp::create(builder, loc, 1);
+  Value countShape = createExtentTensor(builder, loc, ValueRange{one});
   ShapeYieldOp::create(builder, loc, ValueRange{indicesShape, countShape});
   return success();
 }
