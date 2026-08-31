@@ -17,7 +17,7 @@ on:
         description: Cache key holding the ONNX Runtime install prefix.
         value: ${{ jobs.ort.outputs.cache_key }}
       amdgpu_cache_key:
-        description: Cache key holding the onnxruntime_ep_amdgpu wheel + problem_cache.json.
+        description: Cache key holding the amdgpu-ep build artifacts.
         value: ${{ jobs.amdgpu.outputs.cache_key }}
       oga_cache_key:
         description: Cache key holding the OGA artifact set.

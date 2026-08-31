@@ -16,7 +16,7 @@ on:
         required: true
         type: string
       amdgpu_cache_key:
-        description: Cache key of the prebuilt onnxruntime_ep_amdgpu wheel + problem_cache.json.
+        description: Cache key of the prebuilt amdgpu-ep build artifacts.
         required: true
         type: string
       oga_cache_key:
