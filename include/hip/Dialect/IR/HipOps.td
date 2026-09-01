@@ -121,6 +121,16 @@ class Hip_DpsOp_Semantic<string mnemonic,
                          string outsAccessor = "Output"> :
     Hip_DpsOp_WithInfer<mnemonic, outsAccessor, traits>;
 
+/// Multi-result semantic operation with handwritten reification.
+class Hip_DpsOp_SemanticNoInfer<string mnemonic,
+                                list<Trait> traits = []> :
+    Hip_DpsOp<mnemonic, traits>;
+
+/// Semantic operation using the default destination-based reification only.
+class Hip_DpsOp_SemanticAutoReify<string mnemonic,
+                                  list<Trait> traits = []> :
+    Hip_DpsOp_AutoReify<mnemonic, traits>;
+
 // Parameterized sub-base for ONNX-style reduction ops (reduce_sum,
 // reduce_max, reduce_prod). Auto-emits a `reifyResultShapes` body
 // that calls `mlir::hip::reifyReductionShape`. The axes operand must
@@ -3045,7 +3055,10 @@ def Hip_CausalConvWithStateOp :
 
 // ===== Group Query Attention =================================================
 
-def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpInterface]> {
+def Hip_GqaOp :
+    Hip_DpsOp_SemanticAutoReify<"gqa",
+                                [AttrSizedOperandSegments,
+                                 OpStateOpInterface]> {
   let summary = "Group Query Attention - Full MS spec implementation";
   let description = [{
     Complete implementation of com.microsoft.GroupQueryAttention (v1) specification.
