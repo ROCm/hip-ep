@@ -20,6 +20,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/MathExtras.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -57,7 +58,9 @@ struct AllocationSize {
 constexpr int64_t kPoolAlignment = 256;
 
 int64_t staticByteFactor(MemRefType memTy) {
-  int64_t factor = memTy.getElementTypeBitWidth() / 8;
+  // The runtime gives every element its own byte, so a sub-byte element such as
+  // an i1 mask rounds up to one rather than down to zero.
+  int64_t factor = llvm::divideCeil(memTy.getElementTypeBitWidth(), 8);
   for (int64_t dim : memTy.getShape()) {
     if (!ShapedType::isDynamic(dim)) {
       factor *= dim;

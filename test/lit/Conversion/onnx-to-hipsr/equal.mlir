@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 //===----------------------------------------------------------------------===//
-// onnx.Equal becomes hipsr.equal with a ui8 mask, the byte the runtime writes.
+// onnx.Equal becomes hipsr.equal with the i1 mask a comparison yields.
 // Both operands must be on the device, so a host constant gets a device copy.
 // Rejected forms are in equal-invalid.mlir.
 //===----------------------------------------------------------------------===//
@@ -16,13 +16,13 @@
 // hipsr-populate-shape-region fills it in later.
 // CHECK-LABEL: func.func @host_scalar_on_device(
 // CHECK-SAME:    %[[CTX:.+]]: !hipsr.context,
-// CHECK-SAME:    %[[IDS:.+]]: tensor<?x?xi64, #hipsr.mem<device>>) -> tensor<?x?xui8, #hipsr.mem<device>> {
+// CHECK-SAME:    %[[IDS:.+]]: tensor<?x?xi64, #hipsr.mem<device>>) -> tensor<?x?xi1, #hipsr.mem<device>> {
 // The host constant has no use left and waits for canonicalization.
 // CHECK-NEXT:    arith.constant dense<248056> : tensor<i64>
 // CHECK-NEXT:    %[[TOKEN:.+]] = hipsr.constant {value = dense<248056> : tensor<i64>} : tensor<i64, #hipsr.mem<device>>
-// CHECK-NEXT:    %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[IDS]], %[[TOKEN]] : tensor<?x?xi64, #hipsr.mem<device>>, tensor<i64, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x?xui8, #hipsr.mem<device>>
-// CHECK-NEXT:    %[[RESULT:.+]] = hipsr.equal(%[[CTX]]) ins(%[[IDS]], %[[TOKEN]] : tensor<?x?xi64, #hipsr.mem<device>>, tensor<i64, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<?x?xui8, #hipsr.mem<device>>) : tensor<?x?xui8, #hipsr.mem<device>>
-// CHECK-NEXT:    return %[[RESULT]] : tensor<?x?xui8, #hipsr.mem<device>>
+// CHECK-NEXT:    %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[IDS]], %[[TOKEN]] : tensor<?x?xi64, #hipsr.mem<device>>, tensor<i64, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x?xi1, #hipsr.mem<device>>
+// CHECK-NEXT:    %[[RESULT:.+]] = hipsr.equal(%[[CTX]]) ins(%[[IDS]], %[[TOKEN]] : tensor<?x?xi64, #hipsr.mem<device>>, tensor<i64, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<?x?xi1, #hipsr.mem<device>>) : tensor<?x?xi1, #hipsr.mem<device>>
+// CHECK-NEXT:    return %[[RESULT]] : tensor<?x?xi1, #hipsr.mem<device>>
 // CHECK-NEXT:  }
 func.func @host_scalar_on_device(%ctx: !hipsr.context, %ids: tensor<?x?xi64>)
     -> tensor<?x?xi1> {

@@ -8,6 +8,7 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
+#include "hip/datatype_abi.h"
 #include "hip/debug_log.h"
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
@@ -167,31 +168,31 @@ inline constexpr int64_t kGlobalPoolAverage = 0;
 inline constexpr int64_t kGlobalPoolMax = 1;
 inline constexpr int64_t kGlobalPoolLp = 2;
 
-// Maps MLIR element type to runtime data type enum (HIPDNN_EP_DATATYPE_*).
-// Values must match the #defines in hipdnn_ep_runtime.h.
-// Returns -1 for unsupported types.
+// Maps MLIR element type to the runtime data type identifier shared through
+// hip/datatype_abi.h. Returns HIPDNN_EP_DATATYPE_UNSUPPORTED for types the
+// runtime cannot name.
 inline int64_t getHipdnnDataType(Type elemType) {
   if (elemType.isF32())
-    return 0; // HIPDNN_EP_DATATYPE_FLOAT
+    return HIPDNN_EP_DATATYPE_FLOAT;
   if (elemType.isF16())
-    return 1; // HIPDNN_EP_DATATYPE_HALF
+    return HIPDNN_EP_DATATYPE_HALF;
   if (elemType.isBF16())
-    return 2; // HIPDNN_EP_DATATYPE_BFLOAT16
+    return HIPDNN_EP_DATATYPE_BFLOAT16;
   if (elemType.isInteger(32))
-    return 3; // HIPDNN_EP_DATATYPE_INT32
+    return HIPDNN_EP_DATATYPE_INT32;
   if (elemType.isInteger(64))
-    return 4; // HIPDNN_EP_DATATYPE_INT64
+    return HIPDNN_EP_DATATYPE_INT64;
   if (elemType.isUnsignedInteger(8))
-    return 7; // HIPDNN_EP_DATATYPE_UINT8
+    return HIPDNN_EP_DATATYPE_UINT8;
   if (elemType.isSignedInteger(8) || elemType.isSignlessInteger(8))
-    return 5; // HIPDNN_EP_DATATYPE_INT8
+    return HIPDNN_EP_DATATYPE_INT8;
   if (elemType.isF64())
-    return 6; // HIPDNN_EP_DATATYPE_DOUBLE
-  if (elemType.isInteger(16))
-    return 8; // HIPDNN_EP_DATATYPE_INT16
+    return HIPDNN_EP_DATATYPE_DOUBLE;
   if (elemType.isUnsignedInteger(16))
-    return 9; // HIPDNN_EP_DATATYPE_UINT16
-  return -1;
+    return HIPDNN_EP_DATATYPE_UINT16;
+  if (elemType.isInteger(16))
+    return HIPDNN_EP_DATATYPE_INT16;
+  return HIPDNN_EP_DATATYPE_UNSUPPORTED;
 }
 
 // Tensor operation types (must match runtime enum).

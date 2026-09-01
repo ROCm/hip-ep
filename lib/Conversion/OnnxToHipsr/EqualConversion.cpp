@@ -4,9 +4,10 @@
  */
 //===- EqualConversion.cpp - Convert onnx.Equal to hipsr.equal ------------===//
 //
-// The mask becomes ui8, the byte the runtime writes per element. The runtime
-// reads both operands from device memory, so a host constant operand gets a
-// device constant of its own.
+// The mask becomes i1, the element type onnx.Equal declares. It still occupies
+// one byte per element in memory, which is what the runtime writes and reads.
+// The runtime reads both operands from device memory, so a host constant
+// operand gets a device constant of its own.
 //
 // The placeholder's shape region is left empty: hipsr.equal is DPS, so
 // hipsr-populate-shape-region fills it in later, as for every DPS op.
@@ -22,10 +23,10 @@
 //       : tensor<i64, #hipsr.mem<device>>
 //   %init = hipsr.placeholder(%ctx) ins(%ids, %token)
 //       {placeholder_type = #hipsr.placeholder_type<normal>}
-//       : tensor<?x?xui8, #hipsr.mem<device>>
+//       : tensor<?x?xi1, #hipsr.mem<device>>
 //   %m = hipsr.equal(%ctx) ins(%ids, %token)
-//       outs(%init : tensor<?x?xui8, #hipsr.mem<device>>)
-//       : tensor<?x?xui8, #hipsr.mem<device>>
+//       outs(%init : tensor<?x?xi1, #hipsr.mem<device>>)
+//       : tensor<?x?xi1, #hipsr.mem<device>>
 //
 //===----------------------------------------------------------------------===//
 
@@ -112,10 +113,10 @@ struct EqualToHipsr : public OpConversionPattern<onnx::EqualOp> {
       operand = *deviceOperand;
     }
 
-    // ONNX declares a bool mask; hipsr uses the byte the runtime writes.
+    // The mask keeps the bool ONNX declares. The runtime stores it one byte per
+    // element, which the pool sizing and the lowering's data type carry.
     RankedTensorType maskType = tensorTypeInSpace(
-        RankedTensorType::get(resultType.getShape(),
-                              rewriter.getIntegerType(8, /*isSigned=*/false)),
+        RankedTensorType::get(resultType.getShape(), rewriter.getI1Type()),
         MemorySpace::Device);
     Value init = PlaceholderOp::create(rewriter, loc, TypeRange{maskType}, *ctx,
                                        operands, PlaceholderType::Normal)

@@ -3,16 +3,11 @@
 // Licensed under the MIT License.
 //
 
-def Hipsr_EqualOp : Hipsr_DpsOp<"equal",
-    [AllElementTypesMatch<["lhs", "rhs"]>]> {
-  let summary = "Elementwise equality, destination-passing style";
+def Hipsr_MinOp : Hipsr_DpsOp<"min"> {
+  let summary = "Elementwise min, destination-passing style";
   let description = [{
-    Elementwise equality with ONNX broadcasting: `init = lhs == rhs`.
-
-    Shapes are right-aligned, and each aligned pair must be equal or contain a
-    one. `init` holds `i1` rather than the operand element type, because a
-    comparison yields a bool whatever it compared. The runtime stores that bool
-    one byte per element.
+    Elementwise minimum with ONNX/NumPy broadcasting:
+    `init = minimum(lhs, rhs)`.
   }];
 
   let arguments = (ins
@@ -28,6 +23,4 @@ def Hipsr_EqualOp : Hipsr_DpsOp<"equal",
     `outs` `(` $init `:` type($init) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
-
-  let hasVerifier = 1;
 }

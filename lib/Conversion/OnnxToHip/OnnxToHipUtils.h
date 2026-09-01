@@ -17,6 +17,7 @@
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
+#include "hip/datatype_abi.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
@@ -190,23 +191,23 @@ getContextArg(mlir::Operation *op, mlir::PatternRewriter &rewriter) {
 /// wrappers take as an `input_data_type` argument. Only the subset needed by
 /// the converters that scan a raw buffer (hip.nonzero, and the Compress
 /// selected-count scan built on top of it) is enumerated; any other element
-/// type returns -1 so the caller fails conversion explicitly instead of
-/// silently mis-classifying the buffer.
+/// type returns HIPDNN_EP_DATATYPE_UNSUPPORTED so the caller fails conversion
+/// explicitly instead of silently mis-classifying the buffer.
 inline int64_t getHipdnnInputDataType(mlir::Type elemType) {
   if (elemType.isF32())
-    return 0; // HIPDNN_EP_DATATYPE_FLOAT
+    return HIPDNN_EP_DATATYPE_FLOAT;
   if (elemType.isF16())
-    return 1; // HIPDNN_EP_DATATYPE_HALF
+    return HIPDNN_EP_DATATYPE_HALF;
   if (elemType.isInteger(32))
-    return 3; // HIPDNN_EP_DATATYPE_INT32
+    return HIPDNN_EP_DATATYPE_INT32;
   if (elemType.isInteger(64))
-    return 4; // HIPDNN_EP_DATATYPE_INT64
+    return HIPDNN_EP_DATATYPE_INT64;
   if (elemType.isUnsignedInteger(8))
-    return 7; // HIPDNN_EP_DATATYPE_UINT8 (ORT bool, ui8)
+    return HIPDNN_EP_DATATYPE_UINT8; // ORT bool, ui8
   if (elemType.isInteger(1) || elemType.isSignedInteger(8) ||
       elemType.isSignlessInteger(8))
-    return 5; // HIPDNN_EP_DATATYPE_INT8 (bool/i1, signed/signless i8)
-  return -1;
+    return HIPDNN_EP_DATATYPE_INT8; // bool/i1, signed/signless i8
+  return HIPDNN_EP_DATATYPE_UNSUPPORTED;
 }
 
 /// Build a hip.gqa op for the Whisper-MHA / Whisper-encoder-Attention paths.
@@ -497,6 +498,17 @@ void populateSliceShapeFoldPatterns(RewritePatternSet &patterns,
 /// Unsafe or dynamic shapes stay at their original rank for compute conversion.
 void populatePackBroadcastTo4DPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
+
+/// Pre-lowering pattern set: recover a sliding window from `onnx.Attention`'s
+/// additive mask subgraph and stamp it as `hipdnn.local_window_size`, which
+/// OnnxAttentionConversion then puts on `hip.gqa`. `onnx.Attention` has no
+/// window attribute, so a windowed model expresses the window only in the mask
+/// data and the runtime would otherwise score its whole key range. Must run
+/// BEFORE `convertComputeOps`, which rewrites the mask's producers into
+/// `hip.*` in an order this matcher cannot rely on. See
+/// AttentionWindowFold.cpp.
+void populateAttentionWindowFoldPatterns(RewritePatternSet &patterns,
+                                         MLIRContext *ctx);
 
 /// Pre-lowering pattern set: collapse ORT's inlined `FastGelu` primitive
 /// chain (Pow / Mul / Sum / Tanh) back into a single

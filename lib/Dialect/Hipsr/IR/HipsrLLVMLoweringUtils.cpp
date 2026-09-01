@@ -5,6 +5,8 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrLLVMLoweringUtils.h"
 
+#include "hip/datatype_abi.h"
+
 #include "mlir/Conversion/LLVMCommon/MemRefBuilder.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
@@ -19,33 +21,36 @@ using namespace mlir;
 
 int64_t mlir::hipsr::getHipdnnDataType(Type elemType) {
   if (elemType.isF32()) {
-    return 0;
+    return HIPDNN_EP_DATATYPE_FLOAT;
   }
   if (elemType.isF16()) {
-    return 1;
+    return HIPDNN_EP_DATATYPE_HALF;
   }
   if (elemType.isBF16()) {
-    return 2;
+    return HIPDNN_EP_DATATYPE_BFLOAT16;
   }
   if (elemType.isInteger(32)) {
-    return 3;
+    return HIPDNN_EP_DATATYPE_INT32;
   }
   if (elemType.isInteger(64)) {
-    return 4;
+    return HIPDNN_EP_DATATYPE_INT64;
   }
-  if (elemType.isUnsignedInteger(8)) {
-    return 7;
+  // A bool shares the unsigned-byte slot. The runtime gives every element its
+  // own byte and reads a mask as 0 or 1, so an i1 tensor and a ui8 one have the
+  // same representation.
+  if (elemType.isUnsignedInteger(8) || elemType.isInteger(1)) {
+    return HIPDNN_EP_DATATYPE_UINT8;
   }
   if (elemType.isSignedInteger(8) || elemType.isSignlessInteger(8)) {
-    return 5;
+    return HIPDNN_EP_DATATYPE_INT8;
   }
   if (elemType.isF64()) {
-    return 6;
+    return HIPDNN_EP_DATATYPE_DOUBLE;
   }
   if (elemType.isInteger(16)) {
-    return 8;
+    return HIPDNN_EP_DATATYPE_INT16;
   }
-  return -1;
+  return HIPDNN_EP_DATATYPE_UNSUPPORTED;
 }
 
 Value mlir::hipsr::extractContiguousMemRefPtr(
