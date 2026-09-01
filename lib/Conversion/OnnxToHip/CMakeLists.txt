@@ -42,7 +42,6 @@ add_library(OnnxToHip STATIC
   TransposeMatMulFold.cpp
   ShapeProvenanceAnalysis.cpp
   ReshapeShapeFold.cpp
-  PadShapeFold.cpp
   SliceShapeFold.cpp
   PackBroadcastTo4D.cpp
   ShapeConversion.cpp

@@ -116,9 +116,10 @@ createOnnxBroadcastEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
                                                operands, sources);
 }
 
-/// Return the dense payload of a structurally known compile-time tensor
-/// constant: `arith.constant`, exact generic `onnx.Constant`, or inline
-/// `hip.constant`. The payload type must equal the SSA value type.
+/// Return the dense payload of a structurally valid compile-time tensor
+/// constant. Matching is intentionally limited to `arith.constant`, the exact
+/// generic `onnx.Constant` form needed by semantic pre-rewrites, and inline
+/// `hip.constant` carriers. Every dense payload type must match its result.
 mlir::DenseElementsAttr getCompileTimeConstantTensor(mlir::Value value);
 
 /// Recognize \p value as a compile-time rank-0/rank-1 integer tensor.
@@ -146,6 +147,12 @@ std::optional<llvm::ArrayRef<int64_t>>
 resolveReductionAxes(mlir::Operation *op, mlir::Value data,
                      int64_t noopWithEmptyAxes,
                      llvm::SmallVectorImpl<int64_t> &storage);
+
+/// Compatibility check for a pure payload shape. A dynamic imported or
+/// inferred extent is compatible with its counterpart; unequal static extents
+/// are contradictions.
+bool isResultTypeCompatibleWithPayloadShape(
+    mlir::RankedTensorType resultType, llvm::ArrayRef<int64_t> inferredShape);
 
 /// Resolve the ranked result type of an ONNX reduction op (ReduceMax / Sum /
 /// Mean / Prod / ...).
@@ -628,6 +635,12 @@ void populateModConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateConstantOfShapeConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
+/// Preserve the semantic scalar-consumer optimization and the special
+/// `onnx.Shape(static-tensor)` fold before compute conversion can rewrite their
+/// ONNX structure. Ordinary constant payloads are intentionally excluded and
+/// fold from dense hip.constant carriers during normal compute conversion.
+void populateConstantOfShapePreLoweringPatterns(RewritePatternSet &patterns,
+                                                MLIRContext *ctx);
 void populateSliceConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateScatterNDConversionPatterns(RewritePatternSet &patterns,
@@ -679,20 +692,8 @@ void populateTransposeMatMulFoldPatterns(RewritePatternSet &patterns,
 void populateGatherShapeFoldPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 
-/// Pre-lowering pattern set: stamp `onnx.Pad`'s compile-time `pads` (and
-/// optional `axes`) constant onto the op as `hipdnn.pad_amounts` /
-/// `hipdnn.pad_axes` attributes so PadConversion can compute the dynamic
-/// output shape from stable provenance attributes. Sibling of GatherShapeFold;
-/// runs while generic ONNX constants are still available, before carrier
-/// creation and the later standalone externalization. See PadShapeFold.cpp.
-void populatePadShapeFoldPatterns(RewritePatternSet &patterns,
-                                  MLIRContext *ctx);
-
-/// Pre-lowering pattern set: stamp compile-time `onnx.Slice` starts/ends/axes/
-/// steps onto the op as `hipdnn.slice_*` attributes so SliceDecompose can
-/// rewrite to `tensor.extract_slice` after lowerOnnxConstants creates the
-/// operand carriers. Sibling of PadShapeFold; it runs while the generic ONNX
-/// constants are still directly matchable. See SliceShapeFold.cpp.
+/// Preserve compile-time Slice controls until the shared normalization layer
+/// replaces this pre-lowering fold.
 void populateSliceShapeFoldPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 

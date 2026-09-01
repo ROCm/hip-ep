@@ -71,4 +71,29 @@ module {
   // CHECK: %[[D2:.*]] = hip.readback_scalar(%{{.*}}, %[[C]] : tensor<i64>) -> i64
   // CHECK: arith.index_cast %[[D2]] : i64 to index
   // CHECK-NOT: onnx.OneHot
+
+  // Dense depth/value carriers remain inspectable during compute conversion.
+  // The constant depth sizes the dynamic axis without a synchronized readback.
+  func.func @onehot_constant_carriers(
+      %indices: tensor<?xi64>) -> tensor<?x?xf32> {
+    %depth = "onnx.Constant"() {
+      value = dense<7> : tensor<i32>
+    } : () -> tensor<i32>
+    %values = "onnx.Constant"() {
+      value = dense<[0.0, 1.0]> : tensor<2xf32>
+    } : () -> tensor<2xf32>
+    %result = "onnx.OneHot"(%indices, %depth, %values)
+        : (tensor<?xi64>, tensor<i32>, tensor<2xf32>) -> tensor<?x?xf32>
+    return %result : tensor<?x?xf32>
+  }
+
+  // CHECK-LABEL: func.func @onehot_constant_carriers
+  // CHECK-DAG: %[[D7:.*]] = arith.constant 7 : index
+  // CHECK-DAG: hip.constant
+  // CHECK-SAME: value = dense<7> : tensor<i32>
+  // CHECK-DAG: hip.constant
+  // CHECK-SAME: value = dense<[0.000000e+00, 1.000000e+00]>
+  // CHECK-NOT: hip.readback_scalar
+  // CHECK: tensor.empty({{.*}}, %[[D7]]) : tensor<?x?xf32>
+  // CHECK: hip.one_hot
 }

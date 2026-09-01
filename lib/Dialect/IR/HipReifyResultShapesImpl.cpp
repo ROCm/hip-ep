@@ -622,9 +622,12 @@ LogicalResult GatherNDOp::reifyResultShapes(
 LogicalResult
 PadOp::reifyResultShapes(OpBuilder &b,
                          ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  std::optional<ArrayRef<int64_t>> staticPads = getStaticPads();
+  std::optional<ArrayRef<int64_t>> staticAxes = getStaticAxes();
   SmallVector<OpFoldResult> dims;
   if (succeeded(mlir::hip::reifyPadShape(b, getLoc(), getData(), getPads(),
-                                         getAxes(), dims))) {
+                                         getAxes(), staticPads, staticAxes,
+                                         dims))) {
     reifiedReturnShapes.assign({std::move(dims)});
     return success();
   }

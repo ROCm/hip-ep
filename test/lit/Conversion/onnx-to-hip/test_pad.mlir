@@ -77,18 +77,15 @@ module {
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[D:.*]]: tensor<?x4xf32>)
   // CHECK-DAG: %[[A0:.*]] = arith.constant 0 : index
   // CHECK-DAG: %[[D0:.*]] = tensor.dim %[[D]], %[[A0]] : tensor<?x4xf32>
-  // CHECK-DAG: %[[B0:.*]] = arith.constant 1 : index
-  // CHECK-DAG: %[[E0:.*]] = arith.constant 2 : index
-  // CHECK: %[[S0:.*]] = arith.addi %[[D0]], %[[B0]] : index
-  // CHECK: %[[OUT0:.*]] = arith.addi %[[S0]], %[[E0]] : index
+  // CHECK-DAG: %[[OFFSET:.*]] = arith.constant 3 : index
+  // CHECK: %[[OUT0:.*]] = arith.addi %[[D0]], %[[OFFSET]] : index
   // CHECK: tensor.empty(%[[OUT0]]) : tensor<?x6xf32>
   // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<?x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<?x6xf32>)
 
   // Dynamic output with `pads` supplied as an onnx.Constant -- the form that
-  // lowerOnnxConstants turns into a carrier. The pre-lowering PadShapeFold
-  // stamps the constant onto the op BEFORE carrier conversion and later
-  // externalization, so the output shape folds to arith.constants here: no
-  // hip.readback_scalar and no device read of the pads buffer.
+  // lowerOnnxConstants turns into a dense hip.constant carrier. Pad conversion
+  // reads that carrier directly, computes the output shape, and attaches
+  // durable static_pads metadata for post-conversion externalization.
   func.func @pad_dyn_output_onnx_const_pads(%data: tensor<?x4xf32>) -> tensor<?x6xf32> {
     %pads = "onnx.Constant"() {value = dense<[1, 1, 2, 1]> : tensor<4xi64>} : () -> tensor<4xi64>
     %none = "onnx.NoValue"() {value} : () -> none
@@ -103,8 +100,33 @@ module {
   // tensor.dim of the data plus arith.constant pad amounts.
   // CHECK-NOT: hip.readback_scalar
   // CHECK-NOT: tensor.extract_slice
+  // CHECK-NOT: hipdnn.pad_
   // CHECK: tensor.empty({{.*}}) : tensor<?x6xf32>
-  // CHECK: hip.pad({{.*}}) ins({{.*}} : tensor<?x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<?x6xf32>)
+  // CHECK: hip.pad({{.*}}) ins({{.*}} : tensor<?x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<?x6xf32>) {static_pads = array<i64: 1, 1, 2, 1>}
+
+  // Both pads and axes are consumed directly from carriers and preserved as
+  // durable HIP-op metadata.
+  func.func @pad_dyn_output_carrier_axes(
+      %data: tensor<?x4xf32>) -> tensor<?x4xf32> {
+    %pads = "onnx.Constant"() {
+      value = dense<[1, 2]> : tensor<2xi64>
+    } : () -> tensor<2xi64>
+    %axes = "onnx.Constant"() {
+      value = dense<[0]> : tensor<1xi64>
+    } : () -> tensor<1xi64>
+    %none = "onnx.NoValue"() {value} : () -> none
+    %r = "onnx.Pad"(%data, %pads, %none, %axes) {mode = "constant"}
+      : (tensor<?x4xf32>, tensor<2xi64>, none, tensor<1xi64>)
+        -> tensor<?x4xf32>
+    return %r : tensor<?x4xf32>
+  }
+
+  // CHECK-LABEL: func.func @pad_dyn_output_carrier_axes
+  // CHECK-NOT: hip.readback_scalar
+  // CHECK-NOT: hipdnn.pad_
+  // CHECK: hip.pad
+  // CHECK-SAME: static_axes = array<i64: 0>
+  // CHECK-SAME: static_pads = array<i64: 1, 2>
 
   // Dynamic output dims with a non-constant `pads` (function arg): the
   // per-axis padding amounts are read on the HOST through a synchronized
