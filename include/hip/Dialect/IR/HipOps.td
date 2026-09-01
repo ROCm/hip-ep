@@ -4642,4 +4642,79 @@ def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
     `(` $ctx `,` $scalar `:` type($scalar) `)` attr-dict `->` type($value)
   }];
 }
+
+def Hip_QuantizeLinearOp : Hip_DpsOp<"quantize_linear", /*traits=*/[],
+                                     /*outsAccessor=*/"Output",
+                                     /*autoReify=*/1,
+                                     /*autoInfer=*/1,
+                                     /*declareInfer=*/1> {
+  let summary = "ONNX QuantizeLinear";
+  let description = [{
+    The linear quantization operator consumes a high-precision tensor, a scale,
+    and a zero point to compute the low-precision/quantized tensor.
+    The scale factor and zero point must have the same shape, determining
+    the quantization granularity. The quantization formula is
+    y = saturate((x / y_scale) + y_zero_point).
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$scale,
+    Optional<Hip_TensorOrMemRef>:$zero_point,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$axis,
+    I64Attr:$block_size,
+    I64Attr:$output_dtype,
+    I64Attr:$precision,
+    I64Attr:$saturate
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $scale `:`
+        type($input) `,` type($scale) `)`
+    (`zero_point` `(` $zero_point^ `:` type($zero_point) `)`)?
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
+def Hip_DequantizeLinearOp : Hip_DpsOp<"dequantize_linear", /*traits=*/[],
+                                       /*outsAccessor=*/"Output",
+                                       /*autoReify=*/1,
+                                       /*autoInfer=*/1,
+                                       /*declareInfer=*/1> {
+  let summary = "ONNX DequantizeLinear";
+  let description = [{
+    The linear dequantization operator. It consumes a quantized tensor,
+    a scale, and a zero point to compute the full-precision tensor
+    The dequantization formula is y = (x - x_zero_point) * x_scale.
+    x_scale and x_zero_point must have the same shape, determining the
+    quantization's granularity: a scalar for per-tensor/per-layer
+    quantization, a 1-D tensor for per-axis quantization,
+    or have a rank identical to the input for blocked quantization.
+    See QuantizeLinear for details on quantization granularity.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$scale,
+    Optional<Hip_TensorOrMemRef>:$zero_point,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$axis,
+    I64Attr:$block_size,
+    I64Attr:$output_dtype
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $scale `:`
+        type($input) `,` type($scale) `)`
+    (`zero_point` `(` $zero_point^ `:` type($zero_point) `)`)?
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
 #endif // HIP_OPS
