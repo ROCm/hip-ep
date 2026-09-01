@@ -96,7 +96,6 @@ module {
   // CHECK: %[[M0:.*]] = hip.max{{.*}}outs(%[[E0]] : tensor<2x3xf32>)
   // CHECK: %[[E1:.*]] = tensor.empty() : tensor<2x3xf32>
   // CHECK: hip.max{{.*}}ins(%[[M0]], {{.*}} : tensor<2x3xf32>, tensor<2x3xf32>) outs(%[[E1]] : tensor<2x3xf32>)
-
   // --- Case 6: static final result refines dynamic pairwise inference ---
   func.func @max_variadic_static_refinement(%a: tensor<?x1xf32>, %b: tensor<1x?xf32>, %c: tensor<?x?xf32>) -> tensor<2x3xf32> {
     %result = "onnx.Max"(%a, %b, %c) : (tensor<?x1xf32>, tensor<1x?xf32>, tensor<?x?xf32>) -> tensor<2x3xf32>
@@ -108,4 +107,31 @@ module {
   // CHECK: %[[M0:.*]] = hip.max{{.*}}outs(%[[E0]] : tensor<?x?xf32>)
   // CHECK: %[[E1:.*]] = tensor.empty() : tensor<2x3xf32>
   // CHECK: hip.max{{.*}}ins(%[[M0]], {{.*}} : tensor<?x?xf32>, tensor<?x?xf32>) outs(%[[E1]] : tensor<2x3xf32>)
+
+  // --- Case 7: different operands contribute different dynamic axes ---
+  func.func @max_asymmetric_broadcast(%a: tensor<?x1xf32>, %b: tensor<1x?xf32>) -> tensor<?x?xf32> {
+    %result = "onnx.Max"(%a, %b) : (tensor<?x1xf32>, tensor<1x?xf32>) -> tensor<?x?xf32>
+    return %result : tensor<?x?xf32>
+  }
+
+  // CHECK-LABEL: func.func @max_asymmetric_broadcast
+  // CHECK-SAME: (%{{.*}}: !hip.context, %[[A:[A-Za-z0-9_]+]]: tensor<?x1xf32>, %[[B:[A-Za-z0-9_]+]]: tensor<1x?xf32>)
+  // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
+  // CHECK: %[[M:.*]] = tensor.dim %[[A]], %[[C0]] : tensor<?x1xf32>
+  // CHECK: %[[N:.*]] = tensor.dim %[[B]], %[[C1]] : tensor<1x?xf32>
+  // CHECK: %[[INIT:.*]] = tensor.empty(%[[M]], %[[N]]) : tensor<?x?xf32>
+  // CHECK: hip.max
+
+  // --- Case 8: variadic pairwise lowering grows intermediate rank ---
+  func.func @max_variadic_rank_growth(%a: tensor<4xf32>, %b: tensor<3x4xf32>, %c: tensor<2x3x4xf32>) -> tensor<2x3x4xf32> {
+    %result = "onnx.Max"(%a, %b, %c) : (tensor<4xf32>, tensor<3x4xf32>, tensor<2x3x4xf32>) -> tensor<2x3x4xf32>
+    return %result : tensor<2x3x4xf32>
+  }
+
+  // CHECK-LABEL: func.func @max_variadic_rank_growth
+  // CHECK: %[[E0:.*]] = tensor.empty() : tensor<3x4xf32>
+  // CHECK: %[[M0:.*]] = hip.max{{.*}}outs(%[[E0]] : tensor<3x4xf32>)
+  // CHECK: %[[E1:.*]] = tensor.empty() : tensor<2x3x4xf32>
+  // CHECK: hip.max{{.*}}ins(%[[M0]], {{.*}} : tensor<3x4xf32>, tensor<2x3x4xf32>) outs(%[[E1]] : tensor<2x3x4xf32>)
 }
