@@ -43,6 +43,7 @@ does not claim that every handwritten reifier is free of destination fallback.
 | `abs` | `same_shape` | Result shape equals `input` | shared named-source base |
 | `add` | `broadcast` | NumPy right-aligned broadcast over declared inputs | shared |
 | `and` | `broadcast` | NumPy right-aligned broadcast over declared inputs | shared |
+| `atan` | `same_shape` | Result shape equals `x` | shared named-source base |
 | `bias_gelu` | `same_shape` | Result shape equals `data` | shared named-source base |
 | `cast` | `same_shape` | Result shape equals `input` | shared named-source base |
 | `causal_conv_with_state` | `semantic` | Runtime-supported 1D: output=input; state `[B,C,weight.K-1]` | shared infer/reify/verifier |
@@ -54,9 +55,11 @@ does not claim that every handwritten reifier is free of destination fallback.
 | `cumsum` | `same_shape` | Result shape equals `x` | shared named-source base |
 | `div` | `broadcast` | NumPy right-aligned broadcast over declared inputs | shared |
 | `equal` | `broadcast` | NumPy right-aligned broadcast over declared inputs | shared |
+| `erf` | `same_shape` | Result shape equals `x` | shared named-source base |
 | `exp` | `same_shape` | Result shape equals `input` | shared named-source base |
 | `expand` | `payload` | Target shape tensor; constant fold or synchronized readback | audited payload policy |
 | `fast_gelu` | `same_shape` | Result shape equals `input` | shared named-source base |
+| `floor` | `same_shape` | Result shape equals `x` | shared named-source base |
 | `gather` | `semantic` | data prefix + indices shape + data suffix | shared infer/reify/verifier |
 | `gather_block_quantized` | `outs_authoritative` | Existing converter destination remains authoritative until the runtime-tail semantic/signedness layer | audited outs-authoritative |
 | `gather_elements` | `same_shape` | Result shape equals `indices` | shared named-source base |
@@ -65,7 +68,9 @@ does not claim that every handwritten reifier is free of destination fallback.
 | `gemm` | `semantic` | Transpose-aware M/N from A/B; C validates only | shared |
 | `global_pool` | `outs_authoritative` | Existing converter destination remains authoritative until the pooling semantic layer | audited outs-authoritative |
 | `gqa` | `semantic` | Output follows query; present BNSH capacity is `max(matching past dim 2, total_seq_len)` (or logical length alone without past); optional QK stays `[B,H,Sq,logical Skv]` | shared converter extent utility + payload fallback + partial static verifier |
+| `grid_sample` | `semantic` | Output `[input.N, input.C, grid.H_out, grid.W_out]` | destination-based reify + manual verifier |
 | `hipdnn_graph` | `outs_authoritative` | Outlined hipDNN graph owns output metadata | audited outs-authoritative |
+| `instance_norm` | `same_shape` | Result shape equals `input` | shared named-source base |
 | `layer_norm` | `semantic` | Y=input shape; Mean/InvStdDev=keepdims reduction at axis | shared |
 | `leaky_relu` | `same_shape` | Result shape equals `x` | shared named-source base |
 | `less` | `broadcast` | NumPy right-aligned broadcast over declared inputs | shared |
@@ -99,6 +104,7 @@ does not claim that every handwritten reifier is free of destination fallback.
 | `resize` | `semantic` | N/C from input; static spatial extents from imported output template because sizes/scales are not carried | shared infer/reify/verifier |
 | `rms_norm` | `same_shape` | Result shape equals `input` | shared named-source base |
 | `rope` | `same_shape` | Result shape equals `input` | shared named-source base |
+| `round` | `same_shape` | Result shape equals `x` | shared named-source base |
 | `scatter_elements` | `same_shape` | Result shape equals `data` | shared named-source base |
 | `scatter_nd` | `same_shape` | Result shape equals `data` | shared named-source base |
 | `sigmoid` | `same_shape` | Result shape equals `input` | shared named-source base |
