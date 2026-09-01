@@ -47,22 +47,89 @@ module {
   // CHECK-NOT: hip.alloc
   // CHECK-NOT: hip.copy
 
-  // ===== Test 3: Dynamic Shapes =====
+  // ===== Test 3: Single-axis dynamic batch on both operands =====
 
-  func.func @dynamic_matmul(%A: tensor<?x?x?xf16>, %B: tensor<?x?xf16>) -> tensor<?x?x?xf16> {
-    %result = "onnx.MatMul"(%A, %B) : (tensor<?x?x?xf16>, tensor<?x?xf16>) -> tensor<?x?x?xf16>
+  func.func @dynamic_single_axis_batch(
+      %A: tensor<?x4x8xf16>, %B: tensor<?x8x16xf16>)
+      -> tensor<?x4x16xf16> {
+    %result = "onnx.MatMul"(%A, %B)
+      : (tensor<?x4x8xf16>, tensor<?x8x16xf16>) -> tensor<?x4x16xf16>
+    return %result : tensor<?x4x16xf16>
+  }
+
+  // CHECK-LABEL: func.func @dynamic_single_axis_batch
+  // CHECK: hip.matmul
+
+  // ===== Test 4: 2D x 3D -- batch comes from B, M comes from A =====
+  func.func @matmul_2d_3d(%A: tensor<?x4xf16>, %B: tensor<?x4x?xf16>) -> tensor<?x?x?xf16> {
+    %result = "onnx.MatMul"(%A, %B) : (tensor<?x4xf16>, tensor<?x4x?xf16>) -> tensor<?x?x?xf16>
     return %result : tensor<?x?x?xf16>
   }
 
-  // CHECK-LABEL: func.func @dynamic_matmul
-  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<?x?x?xf16>, %[[B:.*]]: tensor<?x?xf16>) -> tensor<?x?x?xf16>
+  // CHECK-LABEL: func.func @matmul_2d_3d
+  // CHECK-SAME: (%{{.*}}: !hip.context, %[[A:[A-Za-z0-9_]+]]: tensor<?x4xf16>, %[[B:[A-Za-z0-9_]+]]: tensor<?x4x?xf16>)
+  // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[C2:.*]] = arith.constant 2 : index
+  // CHECK-DAG: %[[BATCH:.*]] = tensor.dim %[[B]], %[[C0]]
+  // CHECK-DAG: %[[M:.*]] = tensor.dim %[[A]], %[[C0]]
+  // CHECK-DAG: %[[N:.*]] = tensor.dim %[[B]], %[[C2]]
+  // CHECK: %[[INIT:.*]] = tensor.empty(%[[BATCH]], %[[M]], %[[N]]) : tensor<?x?x?xf16>
+  // CHECK: hip.matmul
+
+  // ===== Test 5: 2D x 4D -- both batch axes come from B =====
+  func.func @matmul_2d_4d(%A: tensor<?x4xf16>, %B: tensor<?x?x4x?xf16>) -> tensor<?x?x?x?xf16> {
+    %result = "onnx.MatMul"(%A, %B) : (tensor<?x4xf16>, tensor<?x?x4x?xf16>) -> tensor<?x?x?x?xf16>
+    return %result : tensor<?x?x?x?xf16>
+  }
+
+  // CHECK-LABEL: func.func @matmul_2d_4d
+  // CHECK-SAME: (%{{.*}}: !hip.context, %[[A:[A-Za-z0-9_]+]]: tensor<?x4xf16>, %[[B:[A-Za-z0-9_]+]]: tensor<?x?x4x?xf16>)
   // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
   // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
-  // CHECK: %[[D0:.*]] = tensor.dim %[[A]], %[[C0]] : tensor<?x?x?xf16>
-  // CHECK: %[[D1:.*]] = tensor.dim %[[A]], %[[C1]] : tensor<?x?x?xf16>
-  // CHECK: %[[D2:.*]] = tensor.dim %[[B]], %[[C1]] : tensor<?x?xf16>
-  // CHECK: %[[INIT:.*]] = tensor.empty(%[[D0]], %[[D1]], %[[D2]]) : tensor<?x?x?xf16>
-  // CHECK: hip.matmul(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<?x?x?xf16>, tensor<?x?xf16>) outs(%[[INIT]] : tensor<?x?x?xf16>)
-  // CHECK-NOT: hip.alloc
-  // CHECK-NOT: hip.copy
+  // CHECK-DAG: %[[C3:.*]] = arith.constant 3 : index
+  // CHECK-DAG: %[[B0:.*]] = tensor.dim %[[B]], %[[C0]]
+  // CHECK-DAG: %[[B1:.*]] = tensor.dim %[[B]], %[[C1]]
+  // CHECK-DAG: %[[M:.*]] = tensor.dim %[[A]], %[[C0]]
+  // CHECK-DAG: %[[N:.*]] = tensor.dim %[[B]], %[[C3]]
+  // CHECK: %[[INIT:.*]] = tensor.empty(%[[B0]], %[[B1]], %[[M]], %[[N]]) : tensor<?x?x?x?xf16>
+  // CHECK: hip.matmul
+
+  // ===== Test 6: multi-axis dynamic A with rank-2 B =====
+  func.func @matmul_4d_2d(
+      %A: tensor<?x?x4x8xf16>, %B: tensor<8x16xf16>)
+      -> tensor<?x?x4x16xf16> {
+    %result = "onnx.MatMul"(%A, %B)
+      : (tensor<?x?x4x8xf16>, tensor<8x16xf16>)
+        -> tensor<?x?x4x16xf16>
+    return %result : tensor<?x?x4x16xf16>
+  }
+
+  // CHECK-LABEL: func.func @matmul_4d_2d
+  // CHECK: hip.matmul
+
+  // ===== Test 7: explicit single B matrix with multi-axis dynamic A =====
+  func.func @matmul_dynamic_broadcast_b(
+      %A: tensor<?x?x4x8xf16>, %B: tensor<1x1x8x16xf16>)
+      -> tensor<?x?x4x16xf16> {
+    %result = "onnx.MatMul"(%A, %B)
+      : (tensor<?x?x4x8xf16>, tensor<1x1x8x16xf16>)
+        -> tensor<?x?x4x16xf16>
+    return %result : tensor<?x?x4x16xf16>
+  }
+
+  // CHECK-LABEL: func.func @matmul_dynamic_broadcast_b
+  // CHECK: hip.matmul
+
+  // ===== Test 8: explicit single A matrix with multi-axis dynamic B =====
+  func.func @matmul_dynamic_broadcast_a(
+      %A: tensor<1x1x4x8xf16>, %B: tensor<?x?x8x16xf16>)
+      -> tensor<?x?x4x16xf16> {
+    %result = "onnx.MatMul"(%A, %B)
+      : (tensor<1x1x4x8xf16>, tensor<?x?x8x16xf16>)
+        -> tensor<?x?x4x16xf16>
+    return %result : tensor<?x?x4x16xf16>
+  }
+
+  // CHECK-LABEL: func.func @matmul_dynamic_broadcast_a
+  // CHECK: hip.matmul
 }

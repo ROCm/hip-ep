@@ -25,9 +25,10 @@ module {
 // CHECK-NOT: llvm.icmp
 // CHECK-NOT: llvm.select
 // CHECK: llvm.call @wrap_hipblasLtMatmul({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
-// Verify 11 parameters:
+// Verify 13 parameters:
 // - 4 pointers: state, A, B, output
-// - 6 i64: M=128, N=1024, K=4096, batch_count=1, elem_size=2, b_batch_stride=0
+// - 8 i64: M=128, N=1024, K=4096, batch_count=1, elem_size=2,
+//   b_batch_stride=0, transA=0, transB=0
 //   (B is rank-2 [K, N] = broadcast weight → stride = 0, compile-time const)
 // - 1 i32: op_state_slot (-1 here — --assign-op-state-slots not run in this RUN)
 
