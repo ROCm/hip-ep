@@ -1089,33 +1089,31 @@ LogicalResult TransposeOp::verify() {
           verifyDpsComputeOp(*this, {getInput(), getOutput()}, /*numInits=*/1)))
     return failure();
 
-  // Determine input rank when available (ranked tensor or memref).
-  int64_t rank = -1;
-  if (auto t = dyn_cast<RankedTensorType>(getInput().getType()))
-    rank = t.getRank();
-  else if (auto m = dyn_cast<MemRefType>(getInput().getType()))
-    rank = m.getRank();
+  auto inputType = cast<ShapedType>(getInput().getType());
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  if (inputType.getElementType() != outputType.getElementType())
+    return emitOpError("input and output element types must match");
 
+  int64_t rank = inputType.getRank();
   ArrayAttr permAttr = getPerm();
-  if (rank >= 0 && static_cast<int64_t>(permAttr.size()) != rank)
-    return emitOpError("perm length (")
-           << permAttr.size() << ") must match input rank (" << rank << ")";
-
-  // perm must be a permutation of [0, rank).
-  llvm::SmallVector<bool> seen(permAttr.size(), false);
+  if (rank >= 0 && static_cast<int64_t>(permAttr.size()) != rank) {
+    SmallVector<int64_t> placeholder(permAttr.size());
+    return detail::validatePermutation(placeholder, rank,
+                                       [&]() { return this->emitOpError(); });
+  }
+  SmallVector<int64_t> perm;
+  perm.reserve(permAttr.size());
   for (Attribute a : permAttr) {
     auto intAttr = dyn_cast<IntegerAttr>(a);
     if (!intAttr)
       return emitOpError("perm must be a list of integers");
-    int64_t v = intAttr.getValue().getSExtValue();
-    if (v < 0 || v >= static_cast<int64_t>(permAttr.size()))
-      return emitOpError("perm value ") << v << " is out of range";
-    if (seen[v])
-      return emitOpError("perm must be a permutation (duplicate value ")
-             << v << ")";
-    seen[v] = true;
+    perm.push_back(intAttr.getValue().getSExtValue());
   }
-  return success();
+  if (failed(detail::validatePermutation(
+          perm, rank, [&]() { return this->emitOpError(); })))
+    return failure();
+  return verifyHipOpShape(
+      *this, [&] { return inferTransposeShape(inputType.getShape(), perm); });
 }
 
 //===----------------------------------------------------------------------===//
@@ -1130,6 +1128,26 @@ void GatherOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult GatherOp::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getData(), getIndices(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+  auto dataType = cast<ShapedType>(getData().getType());
+  auto indicesType = cast<ShapedType>(getIndices().getType());
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  if (!indicesType.getElementType().isInteger(32) &&
+      !indicesType.getElementType().isInteger(64))
+    return emitOpError("indices element type must be i32 or i64");
+  if (outputType.getElementType() != dataType.getElementType())
+    return emitOpError("output element type must match data");
+  FailureOr<SmallVector<int64_t>> expected =
+      inferGatherShape(dataType.getShape(), indicesType.getShape(), getAxis());
+  if (failed(expected))
+    return emitOpError("axis must be in the range [-data.rank, data.rank)");
+  return verifyHipOpShape(
+      *this, [&]() -> FailureOr<SmallVector<int64_t>> { return *expected; });
 }
 
 //===----------------------------------------------------------------------===//
@@ -1355,6 +1373,35 @@ void ResizeOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult ResizeOp::verify() {
+  if (failed(
+          verifyDpsComputeOp(*this, {getInput(), getOutput()}, /*numInits=*/1)))
+    return failure();
+
+  auto inputType = cast<ShapedType>(getInput().getType());
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  Type elementType = inputType.getElementType();
+  if ((!elementType.isF16() && !elementType.isF32() && !elementType.isBF16() &&
+       !elementType.isF64()) ||
+      outputType.getElementType() != elementType)
+    return emitOpError(
+        "input and output must have the same f16/f32/bf16/f64 element type");
+  if (getMode() < 0 || getMode() > 1)
+    return emitOpError("mode must be 0 (nearest) or 1 (linear)");
+  if (getCoordTransform() < 0 || getCoordTransform() > 2)
+    return emitOpError(
+        "coord_transform must be 0 (half_pixel), 1 (asymmetric), or 2 "
+        "(align_corners)");
+  if (getNearestMode() < 0 || getNearestMode() > 3)
+    return emitOpError("nearest_mode must be in [0, 3]");
+
+  return verifyHipOpShape(*this, [&] {
+    return inferResizeShape(detail::getShapeOf(getInput()),
+                            detail::getShapeOf(getOutput()),
+                            [&]() { return this->emitOpError(); });
+  });
 }
 
 //===----------------------------------------------------------------------===//
@@ -2601,6 +2648,47 @@ void GatherNDOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult GatherNDOp::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getData(), getIndices(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+  auto dataType = cast<ShapedType>(getData().getType());
+  auto indicesType = cast<ShapedType>(getIndices().getType());
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  if (!indicesType.getElementType().isInteger(64))
+    return emitOpError(
+        "indices element type must be i64 because the runtime ABI reads "
+        "int64 indices");
+  if (outputType.getElementType() != dataType.getElementType())
+    return emitOpError("output element type must match data");
+  if (indicesType.getRank() < 1)
+    return emitOpError("indices must have rank at least 1");
+  if (getBatchDims() < 0 || getBatchDims() >= indicesType.getRank() ||
+      getBatchDims() > dataType.getRank())
+    return emitOpError(
+        "batch_dims must be in [0, indices.rank) and not exceed data.rank");
+
+  for (int64_t dim : llvm::seq<int64_t>(0, getBatchDims())) {
+    int64_t dataDim = dataType.getDimSize(dim);
+    int64_t indicesDim = indicesType.getDimSize(dim);
+    if (!ShapedType::isDynamic(dataDim) && !ShapedType::isDynamic(indicesDim) &&
+        dataDim != indicesDim)
+      return emitOpError("data and indices batch dimensions must match");
+  }
+
+  // A dynamic tuple width makes the output rank unknowable. The converter's
+  // outs type remains authoritative in that legal case.
+  if (indicesType.isDynamicDim(indicesType.getRank() - 1))
+    return success();
+  FailureOr<SmallVector<int64_t>> expected = inferGatherNDShape(
+      dataType.getShape(), indicesType.getShape(), getBatchDims());
+  if (failed(expected))
+    return emitOpError(
+        "indices tuple width and batch_dims are incompatible with data rank");
+  return verifyHipOpShape(
+      *this, [&]() -> FailureOr<SmallVector<int64_t>> { return *expected; });
+}
+
 //===----------------------------------------------------------------------===//
 // SliceOp: ins(data, starts, ends, [axes], [steps]), outs(output)
 //===----------------------------------------------------------------------===//
@@ -2706,6 +2794,15 @@ void SizeOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult SizeOp::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getX(), getY()}, /*numInits=*/1)))
+    return failure();
+  auto outputType = cast<ShapedType>(getY().getType());
+  if (outputType.getRank() != 0 || !outputType.getElementType().isInteger(64))
+    return emitOpError("output must be a rank-zero i64 tensor or memref");
+  return verifyHipOpShape(*this, [] { return inferSizeShape(); });
 }
 
 #define GET_OP_CLASSES

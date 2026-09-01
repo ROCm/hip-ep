@@ -13,6 +13,10 @@
 
 using namespace mlir;
 
+FailureOr<SmallVector<int64_t>> mlir::hip::inferSizeShape() {
+  return SmallVector<int64_t>{};
+}
+
 LogicalResult mlir::hip::reifyPadShape(OpBuilder &b, Location loc, Value data,
                                        Value pads, Value axes,
                                        SmallVectorImpl<OpFoldResult> &out) {

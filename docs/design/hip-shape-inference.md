@@ -166,11 +166,12 @@ Choose the smallest mechanism that matches the operation's semantics:
 | Shape contract | Mechanism |
 |---|---|
 | Result shape equals DPS init shape, including most multi-result DPS ops | Shared `HipDpsOpInterface` default |
-| Result shape equals a named input | `reifyElementwiseSameShape` or a small dedicated thunk |
+| Result shape equals a named input | `Hip_DpsOp_SameShape`, `reifyElementwiseSameShape`, and `verifySameShapeDpsOp` |
 | NumPy-style broadcast | `Hip_DpsOp_Broadcast`, `reifyBroadcastResultShape`, and the shared converter bridge |
 | Reduction with constant axes/keepdims | `Hip_DpsOp_Reduction` and reduction helpers |
-| Permutation | `reifyTransposeByPerm` |
-| Gather/GatherND/GatherElements | Gather-specific helpers or thunks |
+| Permutation | Shared pure `inferTransposeShape` plus `reifyTransposeByPerm` and verifier |
+| Gather/GatherND | Shared pure Gather/GatherND helpers plus reify/verifier thunks; dynamic GatherND tuple width falls back to outs |
+| GatherElements | `Hip_DpsOp_SameShape` with `indices` as its named source |
 | OneHot, Compress, TopK | Dedicated reification thunks |
 | Pad, Tile, Expand, Slice, Range | Fold-or-bail helpers with fallback to DPS-init shape |
 | MatMul/Gemm/MatMulNBits | Dedicated shape logic based on operand dimensions and attributes |
@@ -182,7 +183,7 @@ Choose the smallest mechanism that matches the operation's semantics:
 | Forward Conv (rank-3 converter/rank-4 HIP op) | Shared signed-floor spatial-window formula used by converter, reification, and verifier |
 | Rank-4 NCHW ConvTranspose | Shared ONNX formula used by converter, reification, and verifier |
 | CausalConvWithState | Runtime-supported 1D output/state formulas from input and depthwise kernel |
-| Resize | DPS-init shape, with semantic validity handled by conversion |
+| Resize | N/C from input plus static spatial extents from the imported output template |
 | Runtime-dependent count, such as NonZero or Compress | DPS-init shape; unresolved dimensions remain dynamic |
 
 Shared declarations live in `HipShapeUtils.h`; common implementation lives in
@@ -315,6 +316,16 @@ Do not replace this with an integer maximum: broadcasting dimensions 0 and 1
 produces 0, not 1. Variadic Max/Min share one
 `lowerVariadicBroadcastChain` helper that derives every pairwise intermediate
 type from this shared broadcast shape.
+
+GatherND accepts only i64 indices at the HIP boundary. Its runtime call carries
+no index-width argument, and the custom kernel reads the indices pointer as
+`int64_t *`; conversion therefore rejects i32 before emitting shape SSA or a
+destination, while verification, reification, and lowering enforce the same
+contract defensively. A static trailing tuple width uses the shared exact shape
+rule. An already-formed HIP op whose i64 tuple width is dynamic remains legal:
+its reifier cannot know the result rank from the operands and falls back to the
+DPS destination shape.
+
 
 Forward Conv uses a validated signed-floor spatial-window formula:
 `floor((input + pads - effectiveKernel) / stride) + 1`. Signed floor and
@@ -540,6 +551,16 @@ Static refinements propagate into bufferization sizing and downstream pool plann
 
 A data-dependent extent that reaches a graph output must additionally be a real SSA value *before* the allocation, because `hip.alloc_output` takes the extent as an operand and ORT rejects an output request whose shape differs from the one it computed for the run. The converter therefore materializes the count with a device scan plus a synchronized `hip.readback_dim` and sizes the DPS init with it; reification then reports that init extent. `onnx.Compress` follows this pattern (scanning its `condition` with `hip.nonzero`), so a padded-input encoder that drops its pad slices reports the kept-slice count rather than the padded capacity. Reporting the upper bound instead is not merely conservative — it is the wrong output shape.
 
+
+Resize is semantic rather than payload-dependent at the HIP level. ONNX
+`sizes`/`scales` have already been resolved by the importer and are not operands
+of `hip.resize`; the runtime recovers each scale from the input/output
+descriptors. The shared rule therefore takes N/C from the input and the spatial
+extents from the imported output type, requiring every spatial extent to be
+static. A dynamic input N/C extent requires a dynamic output template extent;
+a static input extent may refine a dynamic template. This deliberately does not
+claim dynamic spatial support without carrying the payload.
+
 ## Pre-conversion loop-body rank inference
 
 `--hip-infer-loop-body-shapes` is a narrow pre-conversion backstop. It runs after loop outlining and before ONNX-to-HIP conversion to establish rank for unranked loop-carried values that would otherwise block conversion; it is not the general HIP shape-inference mechanism.
@@ -581,6 +602,11 @@ Primary regression coverage:
 | `test/lit/Dialect/hip-broadcast-shape-verifier.mlir` | Generated NumPy broadcast shape verification |
 | `test/lit/Dialect/hip-reduction-shape-verifier.mlir` | Generated reduction shape and axes verification |
 | `test/lit/Conversion/onnx-to-hip/test_reshape_shape_provenance.mlir` | Proven host Reshape shapes, dataflow joins/shared producers, unknown-payload fallback, and `-1` handling |
+| `test/lit/Conversion/onnx-to-hip/test_gather_nd_invalid.mlir` | Mutation-free rejection of i32 GatherND indices |
+| `test/lit/Dialect/hip-gather-nd-reify-shapes.mlir` | Static tuple-width reification and dynamic tuple-width destination fallback |
+| `test/lit/Dialect/hip-gather-nd-shape-verifier.mlir` | GatherND i64 ABI and static/dynamic tuple-width verification |
+| `test/lit/Dialect/hip-resize-reify-shapes.mlir` | Dynamic N/C and static spatial Resize reification |
+| `test/lit/Dialect/hip-resize-shape-verifier.mlir` | Resize semantic destination validation |
 | `test/lit/Dialect/hip-matmul-reify-shapes.mlir` | Per-op reification through `--resolve-shaped-type-result-dims` |
 | `test/lit/Dialect/hip-matmul-shape-verifier.mlir` | Static MatMul shape validation |
 | `test/lit/Conversion/onnx-to-hip/test_reduce_sum.mlir` | Reduction destinations, including the non-positional `keepdims = 0` dimension mapping |
