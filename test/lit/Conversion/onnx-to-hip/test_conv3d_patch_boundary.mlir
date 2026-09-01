@@ -1,8 +1,8 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// RUN: hip-mlir-opt --hip-add-ctx-arg --convert-onnx-to-hip %s | FileCheck %s --check-prefix=CONVERT
-// RUN: hip-mlir-opt --hip-add-ctx-arg --convert-onnx-to-hip --hip-fusion-transform %s | FileCheck %s --check-prefix=FUSE
+// RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s --check-prefix=CONVERT
+// RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip --hip-fusion-transform %s | FileCheck %s --check-prefix=FUSE
 
 // Conversion preserves the general rank-5 Conv. Patch embedding is a HIP
 // fusion decision, after the shared shape contract has sized its destination.
