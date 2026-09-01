@@ -66,13 +66,30 @@ def main():
     B_uint4 = np.random.randint(0, 16, (N, K), dtype=np.uint8)
     B_even = B_uint4[:, 0::2]
     B_odd  = B_uint4[:, 1::2]
-    B_packed = (B_even | (B_odd << 4)).astype(np.uint8)
+    B_packed_real = (B_even | (B_odd << 4)).astype(np.uint8)
+
+    # ONNX MatMulNBits pads each row's blob to num_groups_k * (group_size/2)
+    # bytes -- the last group is padded to a full group_size even when K is not
+    # a multiple of group_size. hip_matmul_nbits' row stride assumes this
+    # padded layout (see matmul_nbits_kernel.hip row-stride comments), so an
+    # unpadded K/2-byte row misaligns every row n>0 whenever K % group_size != 0.
+    row_bytes = num_groups_k * (group_size // 2)
+    B_packed = np.zeros((N, row_bytes), dtype=np.uint8)
+    B_packed[:, :B_packed_real.shape[1]] = B_packed_real
 
     scales = np.random.uniform(0.01, 0.05, (N, num_groups_k)).astype(np.float16)
 
     zeros = None
     if not args.no_zeros:
-        zeros = np.random.uniform(7.0, 9.0, (N, num_groups_k)).astype(np.float16)
+        # ONNX MatMulNBits zero_points are packed at `bits` bits (4 bits here),
+        # so they are always small integers (0..15), never fractional -- the
+        # FP16 buffer this test passes to hip_matmul_nbits (zp_elem_size==2)
+        # is a pre-converted cast of those integers, not an independently
+        # continuous value. Matches the integer convention already used by
+        # ../gemm_fp16u3/gen_matmul_nbits_u3_data.py and
+        # ../gemm_fp16u2/gen_matmul_nbits_u2_data.py's zero_points.
+        zeros = np.random.randint(7, 10, (N, num_groups_k)).astype(np.uint8) \
+                    .astype(np.float16)
 
     # A stored row-major (C order)
     file_A = os.path.join(out_dir, "matmul_nbits_A.bin")
