@@ -48,7 +48,7 @@
 // namespace gives the kernel the same linkage on both paths.
 #include "hip/rtc/multi_head_attention_device.h"
 
-// Same header, embedded as bytes at build time (see Kernels/CMakeLists.txt).
+// The same header, embedded as bytes at build time.
 extern "C" const unsigned char kMhaDeviceSource[];
 extern "C" const size_t kMhaDeviceSource_size;
 
@@ -66,8 +66,7 @@ constexpr int kMhaNW = 4;
 constexpr int kMhaBKV = 64;
 constexpr int kMhaMT = 1;
 
-// The head dims hip_mha_flash_prefill dispatches over; every one of them has to
-// be registered with hipRTC up front, since name expressions must be added
+// All of these get registered up front: hipRTC name expressions must be added
 // before the program is compiled.
 constexpr int kMhaDPads[] = {16, 32, 48, 64, 80, 96, 112, 128, 256};
 

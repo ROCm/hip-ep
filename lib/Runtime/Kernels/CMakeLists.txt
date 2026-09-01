@@ -90,15 +90,11 @@ set(_kernel_sources
     hip/strided_copy_kernel.hip
 )
 
-# hipRTC path (opt-in at runtime via HIPDNN_EP_RTC=1): the same device source
-# that hipcc compiles below is also embedded as bytes and handed to hipRTC at
-# runtime, so the two code objects are built from identical text.
 find_package(hiprtc CONFIG REQUIRED)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 # Identical text is not enough -- hipRTC defaults to -O3 while the AOT compile
-# runs at -O2, which alone changes the generated code. Hand the runtime the very
-# flags _hip_compile_sources uses.
+# runs at -O2, which alone changes the generated code.
 _hip_get_build_flags(_rtc_aot_flags)
 list(JOIN _rtc_aot_flags " " _rtc_aot_flags_str)
 file(GENERATE
@@ -106,7 +102,7 @@ file(GENERATE
     CONTENT "#define HIPDNN_EP_RTC_AOT_COMPILE_FLAGS \"${_rtc_aot_flags_str}\"\n"
 )
 
-# Emit <VAR_NAME>[] plus <VAR_NAME>_size holding the bytes of HEADER.
+# Emits <VAR_NAME>[] and <VAR_NAME>_size.
 function(_rtc_embed_device_source VAR_NAME HEADER OUT_VAR)
     set(_out ${CMAKE_CURRENT_BINARY_DIR}/${VAR_NAME}.cpp)
     add_custom_command(
@@ -126,17 +122,41 @@ function(_rtc_embed_device_source VAR_NAME HEADER OUT_VAR)
     set(${OUT_VAR} ${_out} PARENT_SCOPE)
 endfunction()
 
+# Splitting a kernel file by hand only scales while its device code is one
+# contiguous block. matmul_nbits has 33 device blocks interleaved with 71 host
+# ones, so its device half is extracted at build time instead; the rule lives in
+# cmake/rtc_extract_device.py. Local headers are listed ahead of the kernel file
+# because hipRTC resolves no include paths and they have to be inlined.
+function(_rtc_extract_device_source VAR_NAME OUT_VAR)
+    set(_extracted ${CMAKE_CURRENT_BINARY_DIR}/${VAR_NAME}_extracted.h)
+    add_custom_command(
+        OUTPUT ${_extracted}
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/cmake/rtc_extract_device.py
+                ${ARGN} --output ${_extracted}
+        DEPENDS ${ARGN} ${CMAKE_SOURCE_DIR}/cmake/rtc_extract_device.py
+        COMMENT "Extracting device source for ${VAR_NAME}"
+        VERBATIM
+    )
+    _rtc_embed_device_source(${VAR_NAME} ${_extracted} _embedded)
+    set(${OUT_VAR} ${_embedded} PARENT_SCOPE)
+endfunction()
+
 _rtc_embed_device_source(kElementwiseSubDeviceSource
     ${CMAKE_CURRENT_SOURCE_DIR}/hip/rtc/elementwise_sub_device.h
     _rtc_embedded_sub)
 _rtc_embed_device_source(kMhaDeviceSource
     ${CMAKE_CURRENT_SOURCE_DIR}/hip/rtc/multi_head_attention_device.h
     _rtc_embedded_mha)
+_rtc_extract_device_source(kMatMulNBitsDeviceSource _rtc_embedded_mnb
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/hip_arch_compat.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/hip/matmul_nbits_kernel.hip)
 
 set(_rtc_sources
     rtc/hiprtc_module.hip
     ${_rtc_embedded_sub}
     ${_rtc_embedded_mha}
+    ${_rtc_embedded_mnb}
 )
 
 # One SHARED target per arch. Each builds a fatbin with that single slice;

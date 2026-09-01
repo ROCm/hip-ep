@@ -4,17 +4,13 @@
  */
 
 // Device half of the MultiHeadAttention flash-prefill kernel, split out so the
-// same text can be compiled two ways: included by multi_head_attention_kernel.hip
-// for the AOT build, and fed verbatim to hipRTC as an embedded string at
-// runtime. Both paths must see identical source or the two code objects are not
-// comparable.
+// AOT build and hipRTC compile the same text; if the two diverge their code
+// objects stop being comparable.
 //
-// hipRTC constraints this file must respect:
-//   * no <hip/*.h> includes -- hipRTC injects its own preamble and those paths
-//     do not resolve
-//   * no host-only headers (hip_custom_kernels.h)
-//   * <cstdint> is required: without it int64_t resolves only inside
-//     __hip_internal and the translation unit fails to compile
+// hipRTC injects its own preamble, so <hip/*.h> must not be included here and
+// neither may host-only headers. <cstdint> on the other hand is required:
+// without it int64_t resolves only inside __hip_internal and the translation
+// unit fails to compile.
 
 #ifndef HIPDNN_EP_RTC_MULTI_HEAD_ATTENTION_DEVICE_H
 #define HIPDNN_EP_RTC_MULTI_HEAD_ATTENTION_DEVICE_H

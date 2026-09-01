@@ -17,7 +17,7 @@
 // hipRTC path compile byte-identical source.
 #include "hip/rtc/elementwise_sub_device.h"
 
-// Same header, embedded as bytes at build time (see Kernels/CMakeLists.txt).
+// The same header, embedded as bytes at build time.
 extern "C" const unsigned char kElementwiseSubDeviceSource[];
 extern "C" const size_t kElementwiseSubDeviceSource_size;
 
