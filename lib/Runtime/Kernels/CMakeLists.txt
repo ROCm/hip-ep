@@ -122,23 +122,19 @@ function(_rtc_embed_device_source VAR_NAME HEADER OUT_VAR)
     set(${OUT_VAR} ${_out} PARENT_SCOPE)
 endfunction()
 
-# Splitting a kernel file by hand only scales while its device code is one
-# contiguous block. matmul_nbits has 33 device blocks interleaved with 71 host
-# ones, so its device half is extracted at build time instead; the rule lives in
-# cmake/rtc_extract_device.py. Local headers are listed ahead of the kernel file
-# because hipRTC resolves no include paths and they have to be inlined.
-function(_rtc_extract_device_source VAR_NAME OUT_VAR)
-    set(_extracted ${CMAKE_CURRENT_BINARY_DIR}/${VAR_NAME}_extracted.h)
+# A device header may rely on another header having been included first, which
+# the AOT build gets for free but hipRTC does not (it resolves no include
+# paths). Concatenate them in order and embed the result.
+function(_rtc_embed_concatenated VAR_NAME OUT_VAR)
+    set(_joined ${CMAKE_CURRENT_BINARY_DIR}/${VAR_NAME}_joined.h)
     add_custom_command(
-        OUTPUT ${_extracted}
-        COMMAND ${Python3_EXECUTABLE}
-                ${CMAKE_SOURCE_DIR}/cmake/rtc_extract_device.py
-                ${ARGN} --output ${_extracted}
-        DEPENDS ${ARGN} ${CMAKE_SOURCE_DIR}/cmake/rtc_extract_device.py
-        COMMENT "Extracting device source for ${VAR_NAME}"
+        OUTPUT ${_joined}
+        COMMAND ${CMAKE_COMMAND} -E cat ${ARGN} > ${_joined}
+        DEPENDS ${ARGN}
+        COMMENT "Concatenating device source for ${VAR_NAME}"
         VERBATIM
     )
-    _rtc_embed_device_source(${VAR_NAME} ${_extracted} _embedded)
+    _rtc_embed_device_source(${VAR_NAME} ${_joined} _embedded)
     set(${OUT_VAR} ${_embedded} PARENT_SCOPE)
 endfunction()
 
@@ -148,9 +144,9 @@ _rtc_embed_device_source(kElementwiseSubDeviceSource
 _rtc_embed_device_source(kMhaDeviceSource
     ${CMAKE_CURRENT_SOURCE_DIR}/hip/rtc/multi_head_attention_device.h
     _rtc_embedded_mha)
-_rtc_extract_device_source(kMatMulNBitsDeviceSource _rtc_embedded_mnb
+_rtc_embed_concatenated(kMatMulNBitsDeviceSource _rtc_embedded_mnb
     ${CMAKE_CURRENT_SOURCE_DIR}/include/hip_arch_compat.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/hip/matmul_nbits_kernel.hip)
+    ${CMAKE_CURRENT_SOURCE_DIR}/hip/rtc/matmul_nbits_device.h)
 
 set(_rtc_sources
     rtc/hiprtc_module.hip
