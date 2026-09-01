@@ -47,8 +47,15 @@ namespace hipsr {
 // dps: use is in Init
 bool isHipsrDestinationOperand(::mlir::OpOperand &use);
 
-// return the result held in the destination use names, or null if none.
-::mlir::OpResult getHipsrResultHeldIn(::mlir::OpOperand &use);
+// Returns the result that aliases this destination operand.
+// DPS pattern: outs()[i] and result[i] occupy the same buffer.
+// hipsr.compute is not DPS but holds its results in the same positions.
+// Returns null if the operand is not a destination.
+//
+// Example: %r0, %r1 = hipsr.foo outs(%init0, %init1)
+//          getResultForDestination(%init0) -> %r0
+//          getResultForDestination(%init1) -> %r1
+::mlir::OpResult getResultForDestination(::mlir::OpOperand &use);
 
 } // namespace hipsr
 } // namespace mlir

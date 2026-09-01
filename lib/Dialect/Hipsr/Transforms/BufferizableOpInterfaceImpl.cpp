@@ -164,7 +164,7 @@ struct ComputeOpBufferization
     aliases.addAlias({getEntryArgument(computeOp, opOperand.getOperandNumber()),
                       BufferRelation::Equivalent});
 
-    if (OpResult result = getHipsrResultHeldIn(opOperand)) {
+    if (OpResult result = getResultForDestination(opOperand)) {
       aliases.addAlias({result, BufferRelation::Equivalent});
     }
     return aliases;

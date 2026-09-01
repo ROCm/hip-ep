@@ -213,7 +213,7 @@ void cloneRemainingOps(Block &oldBlock, IRMapping &cloned,
 // Linking the allocation would miss a hipsr.compute result that is only a view.
 Value getTiedConsumerResult(OpResult init) {
   for (OpOperand &use : init.getUses()) {
-    if (OpResult held = getHipsrResultHeldIn(use)) {
+    if (OpResult held = getResultForDestination(use)) {
       return held;
     }
   }

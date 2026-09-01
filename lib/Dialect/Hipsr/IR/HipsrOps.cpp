@@ -61,7 +61,7 @@ bool mlir::hipsr::isHipsrDestinationOperand(OpOperand &use) {
   return index >= begin && index < begin + destinations.size();
 }
 
-OpResult mlir::hipsr::getHipsrResultHeldIn(OpOperand &use) {
+OpResult mlir::hipsr::getResultForDestination(OpOperand &use) {
   if (!isHipsrDestinationOperand(use)) {
     return {};
   }
