@@ -96,31 +96,47 @@ set(_kernel_sources
 find_package(hiprtc CONFIG REQUIRED)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
-set(_rtc_device_header
-    ${CMAKE_CURRENT_SOURCE_DIR}/hip/rtc/elementwise_sub_device.h)
-set(_rtc_embedded_source
-    ${CMAKE_CURRENT_BINARY_DIR}/elementwise_sub_device_source.cpp)
-
-add_custom_command(
-    OUTPUT ${_rtc_embedded_source}
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_SOURCE_DIR}/cmake/xxd.py
-            --var kElementwiseSubDeviceSource
-            --output ${_rtc_embedded_source}.tmp
-            ${_rtc_device_header}
-    # xxd.py emits a `static` array with a trailing padding byte; rewrite it to
-    # an extern "C" symbol and record the true byte count separately.
-    COMMAND ${Python3_EXECUTABLE} -c
-            "import os; data = open('${_rtc_embedded_source}.tmp').read(); data = data.replace('static const unsigned char', 'extern \"C\" const unsigned char'); n = os.path.getsize('${_rtc_device_header}'); data = '#include <cstddef>\\n' + data + f'\\nextern \"C\" const size_t kElementwiseSubDeviceSource_size = {n};\\n'; open('${_rtc_embedded_source}', 'w').write(data)"
-    COMMAND ${CMAKE_COMMAND} -E remove ${_rtc_embedded_source}.tmp
-    DEPENDS ${_rtc_device_header} ${CMAKE_SOURCE_DIR}/cmake/xxd.py
-    COMMENT "Embedding elementwise_sub device source for hipRTC"
-    VERBATIM
+# Identical text is not enough -- hipRTC defaults to -O3 while the AOT compile
+# runs at -O2, which alone changes the generated code. Hand the runtime the very
+# flags _hip_compile_sources uses.
+_hip_get_build_flags(_rtc_aot_flags)
+list(JOIN _rtc_aot_flags " " _rtc_aot_flags_str)
+file(GENERATE
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/rtc_compile_flags.h
+    CONTENT "#define HIPDNN_EP_RTC_AOT_COMPILE_FLAGS \"${_rtc_aot_flags_str}\"\n"
 )
+
+# Emit <VAR_NAME>[] plus <VAR_NAME>_size holding the bytes of HEADER.
+function(_rtc_embed_device_source VAR_NAME HEADER OUT_VAR)
+    set(_out ${CMAKE_CURRENT_BINARY_DIR}/${VAR_NAME}.cpp)
+    add_custom_command(
+        OUTPUT ${_out}
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/cmake/xxd.py
+                --var ${VAR_NAME} --output ${_out}.tmp ${HEADER}
+        # xxd.py emits a `static` array with a trailing padding byte; rewrite it
+        # to an extern "C" symbol and record the true byte count separately.
+        COMMAND ${Python3_EXECUTABLE} -c
+                "import os; data = open('${_out}.tmp').read(); data = data.replace('static const unsigned char', 'extern \"C\" const unsigned char'); n = os.path.getsize('${HEADER}'); data = '#include <cstddef>\\n' + data + f'\\nextern \"C\" const size_t ${VAR_NAME}_size = {n};\\n'; open('${_out}', 'w').write(data)"
+        COMMAND ${CMAKE_COMMAND} -E remove ${_out}.tmp
+        DEPENDS ${HEADER} ${CMAKE_SOURCE_DIR}/cmake/xxd.py
+        COMMENT "Embedding ${VAR_NAME} for hipRTC"
+        VERBATIM
+    )
+    set(${OUT_VAR} ${_out} PARENT_SCOPE)
+endfunction()
+
+_rtc_embed_device_source(kElementwiseSubDeviceSource
+    ${CMAKE_CURRENT_SOURCE_DIR}/hip/rtc/elementwise_sub_device.h
+    _rtc_embedded_sub)
+_rtc_embed_device_source(kMhaDeviceSource
+    ${CMAKE_CURRENT_SOURCE_DIR}/hip/rtc/multi_head_attention_device.h
+    _rtc_embedded_mha)
 
 set(_rtc_sources
     rtc/hiprtc_module.hip
-    ${_rtc_embedded_source}
+    ${_rtc_embedded_sub}
+    ${_rtc_embedded_mha}
 )
 
 # One SHARED target per arch. Each builds a fatbin with that single slice;
@@ -132,6 +148,7 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
         INCLUDE_DIRECTORIES
             ${CMAKE_CURRENT_SOURCE_DIR}/include
             ${CMAKE_CURRENT_SOURCE_DIR}
+            ${CMAKE_CURRENT_BINARY_DIR}
         LINK_LIBRARIES
             hiprtc::hiprtc
         OFFLOAD_ARCHS
