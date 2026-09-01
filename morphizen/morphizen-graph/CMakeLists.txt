@@ -17,6 +17,7 @@ set(MORPHIZEN_GRAPH_SOURCES
     src/node_arg.cpp
     src/node_input.cpp
     src/node_attr.cpp
+    src/symbolic_dims.cpp
 )
 
 # Header files
@@ -26,6 +27,7 @@ set(MORPHIZEN_GRAPH_HEADERS
     include/morphizen/node_arg.hpp
     include/morphizen/node_input.hpp
     include/morphizen/node_attr.hpp
+    include/morphizen/symbolic_dims.hpp
     include/morphizen/_sanity_check.hpp
 )
 
