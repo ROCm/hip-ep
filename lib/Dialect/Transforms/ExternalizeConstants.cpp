@@ -68,6 +68,28 @@ namespace {
 
 constexpr int64_t kConstantAlignment = 64;
 
+/// For single-element signless-integer extern constants, stash the host-visible
+/// value on the global so compile-time folds (e.g. axis-0 Gather ->
+/// tensor.extract_slice) can emit static subview offsets instead of a runtime
+/// host load from GPU-resident constants.bin.
+static void attachCompileTimeScalarAttr(memref::GlobalOp global,
+                                        RankedTensorType tensorType,
+                                        const void *hostBytes) {
+  if (!hostBytes || tensorType.getNumElements() != 1)
+    return;
+  auto intTy = dyn_cast<IntegerType>(tensorType.getElementType());
+  if (!intTy || !intTy.isSignlessInteger() ||
+      (intTy.getWidth() != 32 && intTy.getWidth() != 64))
+    return;
+  int64_t value =
+      intTy.getWidth() == 64
+          ? *reinterpret_cast<const int64_t *>(hostBytes)
+          : static_cast<int64_t>(*reinterpret_cast<const int32_t *>(hostBytes));
+  global->setAttr(
+      "hip.compile_time_scalar",
+      IntegerAttr::get(IntegerType::get(global.getContext(), 64), value));
+}
+
 using SourceKind = hip::ConstantOp::SourceKind;
 
 struct ConstantPlan {
@@ -694,6 +716,7 @@ private:
         /*initial_value=*/nullptr, /*constant=*/false,
         moduleBuilder.getI64IntegerAttr(kConstantAlignment));
     global->setAttr("hip.external_data", externalData);
+    attachCompileTimeScalarAttr(global, plan.type, plan.data());
 
     OpBuilder builder(plan.op);
     auto getGlobal = memref::GetGlobalOp::create(builder, plan.op.getLoc(),
