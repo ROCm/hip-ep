@@ -114,16 +114,19 @@ class Hip_DpsOp_Semantic<string mnemonic,
 
 // Parameterized sub-base for ONNX-style reduction ops (reduce_sum,
 // reduce_max, reduce_prod). Auto-emits a `reifyResultShapes` body
-// that calls `mlir::hip::reifyReductionShape` — which tries
-// `reifyReductionWithKeepdims` first to recover per-input-dim
-// mappings from a constant `axes` operand and falls back to the
-// shared `HipDpsOp` outs-lift default when `axes` is not a
-// recognised constant. Each leaf op contributes only its TableGen
-// declaration; no per-op `.cpp` thunk is needed.
+// that calls `mlir::hip::reifyReductionShape`. The axes operand must
+// have a structurally-proven constant source: inline arith.constant in
+// tensor form, or constant memref.global after bufferization. Conversion
+// materializes normalized, sorted axes. Verification requires one
+// contiguous span because the runtime flattens that span into a single
+// reduction dimension. Runtime axes are never supported. Each leaf op
+// contributes only its TableGen declaration; no per-op `.cpp` thunk is
+// needed.
 //
 // Contract on the leaf op: must declare operands `$data` (input
-// tensor), `$axes` (rank-1 i64 tensor), `$output` (DPS init),
-// integer attributes `$keepdims` and `$noop_with_empty_axes`.
+// tensor), `$axes` (rank-0 or rank-1 i64 tensor), `$output` (DPS init),
+// integer attributes `$keepdims` and `$noop_with_empty_axes`, and the
+// `$normalized_axes` dense i64 array validated against `$axes`.
 class Hip_DpsOp_Reduction<string mnemonic, list<Trait> traits = []> :
     Hip_DpsOp_WithInfer<mnemonic, /*outsAccessor=*/"Output", traits> {
   code reifyClassDefinition = [{
@@ -136,7 +139,16 @@ class Hip_DpsOp_Reduction<string mnemonic, list<Trait> traits = []> :
           getOperation(), reified);
     }
   }];
-  let extraClassDefinition = reifyClassDefinition # inferClassDefinition;
+  code verifyClassDefinition = [{
+    ::mlir::LogicalResult $cppClass::verify() {
+      return ::mlir::hip::verifyReductionDpsOp(
+          getOperation(), getData(), getAxes(), getKeepdims(),
+          getNoopWithEmptyAxes());
+    }
+  }];
+  let extraClassDefinition =
+      reifyClassDefinition # inferClassDefinition # verifyClassDefinition;
+  let hasVerifier = 1;
 }
 
 // Parameterized sub-base for elementwise NumPy-broadcast ops (add,
@@ -2727,9 +2739,9 @@ def Hip_ReduceSumOp : Hip_DpsOp_Reduction<"reduce_sum"> {
 
     Uses destination-passing style: output buffer is provided as argument.
 
-    When axes is not provided in ONNX, an empty tensor<0xi64> is passed.
-    Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
-    optional axes semantics while keeping all operands required.
+    Conversion materializes normalized constant axes: absent or empty axes
+    become the all-axis span when noop_with_empty_axes=0 and remain empty when
+    noop_with_empty_axes=1.
 
     Example:
     ```mlir
@@ -2744,7 +2756,8 @@ def Hip_ReduceSumOp : Hip_DpsOp_Reduction<"reduce_sum"> {
     Hip_TensorOrMemRef:$axes,
     Hip_TensorOrMemRef:$output,
     DefaultValuedAttr<I64Attr, "1">:$keepdims,
-    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes,
+    DenseI64ArrayAttr:$normalized_axes
   );
 
   let assemblyFormat = [{
@@ -2763,16 +2776,16 @@ def Hip_ReduceMeanOp : Hip_DpsOp_Reduction<"reduce_mean"> {
     Uses destination-passing style: output buffer is provided as argument.
 
     The division by the reduced-element count is performed inside the runtime
-    kernel (`reduce_size = num_input / num_output`), so this op is tolerant of
-    a dynamic reduce axis -- no compile-time static reduce dim is required.
+    kernel (`reduce_size = num_input / num_output`), so extents in a
+    compile-time-resolved contiguous reduction span may be dynamic.
     Result dims are refined post-conversion by `--hip-infer-shapes` through the
     upstream MLIR `ReifyRankedShapedTypeOpInterface` / `InferTypeOpInterface`
     that `Hip_DpsOp_Reduction` implements (no ONNX-level shape refinement
     needed).
 
-    When axes is not provided in ONNX, an empty tensor<0xi64> is passed.
-    Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
-    optional axes semantics while keeping all operands required.
+    Conversion materializes normalized constant axes: absent or empty axes
+    become the all-axis span when noop_with_empty_axes=0 and remain empty when
+    noop_with_empty_axes=1.
 
     Example:
     ```mlir
@@ -2787,7 +2800,8 @@ def Hip_ReduceMeanOp : Hip_DpsOp_Reduction<"reduce_mean"> {
     Hip_TensorOrMemRef:$axes,
     Hip_TensorOrMemRef:$output,
     DefaultValuedAttr<I64Attr, "1">:$keepdims,
-    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes,
+    DenseI64ArrayAttr:$normalized_axes
   );
 
   let assemblyFormat = [{
@@ -2806,12 +2820,12 @@ def Hip_ReduceL2Op : Hip_DpsOp_Reduction<"reduce_l2"> {
 
     Uses destination-passing style: output buffer is provided as argument.
     The sum-of-squares and sqrt are performed inside the runtime kernel
-    (`reduce_size = num_input / num_output`), so this op is tolerant of a
-    dynamic reduce axis.
+    (`reduce_size = num_input / num_output`), so extents in a
+    compile-time-resolved contiguous reduction span may be dynamic.
 
-    When axes is not provided in ONNX, an empty tensor<0xi64> is passed.
-    Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
-    optional axes semantics while keeping all operands required.
+    Conversion materializes normalized constant axes: absent or empty axes
+    become the all-axis span when noop_with_empty_axes=0 and remain empty when
+    noop_with_empty_axes=1.
 
     Example:
     ```mlir
@@ -2826,7 +2840,8 @@ def Hip_ReduceL2Op : Hip_DpsOp_Reduction<"reduce_l2"> {
     Hip_TensorOrMemRef:$axes,
     Hip_TensorOrMemRef:$output,
     DefaultValuedAttr<I64Attr, "1">:$keepdims,
-    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes,
+    DenseI64ArrayAttr:$normalized_axes
   );
 
   let assemblyFormat = [{
@@ -2844,9 +2859,9 @@ def Hip_ReduceMaxOp : Hip_DpsOp_Reduction<"reduce_max"> {
 
     Uses destination-passing style: output buffer is provided as argument.
 
-    When axes is not provided in ONNX, an empty tensor<0xi64> is passed.
-    Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
-    optional axes semantics while keeping all operands required.
+    Conversion materializes normalized constant axes: absent or empty axes
+    become the all-axis span when noop_with_empty_axes=0 and remain empty when
+    noop_with_empty_axes=1.
 
     Example:
     ```mlir
@@ -2861,7 +2876,8 @@ def Hip_ReduceMaxOp : Hip_DpsOp_Reduction<"reduce_max"> {
     Hip_TensorOrMemRef:$axes,
     Hip_TensorOrMemRef:$output,
     DefaultValuedAttr<I64Attr, "1">:$keepdims,
-    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes,
+    DenseI64ArrayAttr:$normalized_axes
   );
 
   let assemblyFormat = [{
@@ -2879,9 +2895,9 @@ def Hip_ReduceMinOp : Hip_DpsOp_Reduction<"reduce_min"> {
 
     Uses destination-passing style: output buffer is provided as argument.
 
-    When axes is not provided in ONNX, an empty tensor<0xi64> is passed.
-    Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
-    optional axes semantics while keeping all operands required.
+    Conversion materializes normalized constant axes: absent or empty axes
+    become the all-axis span when noop_with_empty_axes=0 and remain empty when
+    noop_with_empty_axes=1.
 
     Example:
     ```mlir
@@ -2896,7 +2912,8 @@ def Hip_ReduceMinOp : Hip_DpsOp_Reduction<"reduce_min"> {
     Hip_TensorOrMemRef:$axes,
     Hip_TensorOrMemRef:$output,
     DefaultValuedAttr<I64Attr, "1">:$keepdims,
-    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes,
+    DenseI64ArrayAttr:$normalized_axes
   );
 
   let assemblyFormat = [{
@@ -3793,9 +3810,9 @@ def Hip_ReduceProdOp : Hip_DpsOp_Reduction<"reduce_prod"> {
 
     Uses destination-passing style: output buffer is provided as argument.
 
-    When axes is not provided in ONNX, an empty tensor<0xi64> is passed.
-    Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
-    optional axes semantics while keeping all operands required.
+    Conversion materializes normalized constant axes: absent or empty axes
+    become the all-axis span when noop_with_empty_axes=0 and remain empty when
+    noop_with_empty_axes=1.
 
     Example:
     ```mlir
@@ -3810,7 +3827,8 @@ def Hip_ReduceProdOp : Hip_DpsOp_Reduction<"reduce_prod"> {
     Hip_TensorOrMemRef:$axes,
     Hip_TensorOrMemRef:$output,
     DefaultValuedAttr<I64Attr, "1">:$keepdims,
-    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes,
+    DenseI64ArrayAttr:$normalized_axes
   );
 
   let assemblyFormat = [{
