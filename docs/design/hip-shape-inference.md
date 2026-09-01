@@ -186,13 +186,13 @@ Choose the smallest mechanism that matches the operation's semantics:
 | Resize | N/C from input plus static spatial extents from the imported output template |
 | Runtime-dependent count, such as NonZero or Compress | DPS-init shape; unresolved dimensions remain dynamic |
 
-Shared declarations live in `HipShapeUtils.h`; common implementation lives in
-`HipShapeUtils.cpp`, with focused category translation units introduced by the
-stack layer that first consumes each family. This foundation includes
-matmul/Gemm, reduction, gather, and shape-operation helpers; later family PRs
-add attention and convolution/pooling implementations. Operations that select
-a manual-reification family define their member functions in
-`HipReifyResultShapesImpl.cpp`.
+Shared declarations are split across `HipShapeUtilsCommon.h` and focused
+category headers for broadcast, matmul/Gemm, reduction, convolution/pooling,
+gather/tensor, attention/normalization, and payload/shape operations.
+`HipShapeUtils.h` remains a compatibility umbrella for broad dialect
+consumers. The implementation translation units mirror those category
+boundaries. Operations that select a manual-reification family define their
+member functions in `HipReifyResultShapesImpl.cpp`.
 
 Frontend-neutral destination construction lives in
 `hip/Conversion/HipConversionUtils.h`: result-shape compatibility, reified

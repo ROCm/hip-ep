@@ -4,6 +4,7 @@
  */
 
 #include "OnnxToHipUtils.h"
+#include "hip/Dialect/IR/HipShapeUtilsGather.h"
 
 namespace mlir {
 namespace hip {

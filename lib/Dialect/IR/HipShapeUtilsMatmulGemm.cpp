@@ -5,12 +5,12 @@
 //===- HipShapeUtilsMatmulGemm.cpp - MatMul and Gemm shape helpers --------===//
 //
 // Category implementation for the public shape helpers declared in
-// `hip/Dialect/IR/HipShapeUtils.h`.
+// `hip/Dialect/IR/HipShapeUtilsMatmulGemm.h`.
 //
 //===----------------------------------------------------------------------===//
 
+#include "hip/Dialect/IR/HipShapeUtilsMatmulGemm.h"
 #include "HipShapeUtilsInternal.h"
-#include "hip/Dialect/IR/HipShapeUtils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
@@ -196,7 +196,7 @@ mlir::hip::reifyMatmulResultShape(OpBuilder &b, Location loc, Value A, Value B,
     return failure();
   }
   // Validate before emitting any `tensor.dim`, so a failure leaves the IR
-  // unchanged (see the contract in HipShapeUtils.h). Strided-batch
+  // unchanged (see the contract in HipShapeUtilsCommon.h). Strided-batch
   // representability is a backend capability rather than a shape rule, so it
   // stays with `MatmulOp::verify` and the converter.
   if (failed(inferMatmulShape(aType.getShape(), bType.getShape(), emitError,
@@ -264,7 +264,7 @@ mlir::hip::reifyGemmResultShape(OpBuilder &b, Location loc, Value A, Value B,
     cShape = cType.getShape();
   }
   // Validate before emitting any `tensor.dim`, so a failure leaves the IR
-  // unchanged (see the contract in HipShapeUtils.h).
+  // unchanged (see the contract in HipShapeUtilsCommon.h).
   if (failed(inferGemmShape(aType.getShape(), bType.getShape(), cShape, transA,
                             transB, emitError)))
     return failure();

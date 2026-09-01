@@ -4,14 +4,15 @@
  */
 //===- HipShapeUtils.cpp - Core and broadcast shape helpers ---------------===//
 //
-// Category implementation for the public shape helpers declared in
-// `hip/Dialect/IR/HipShapeUtils.h`.
+// Category implementation for the public shape helpers declared in the common
+// and broadcast shape utility headers.
 //
 //===----------------------------------------------------------------------===//
 
-#include "hip/Dialect/IR/HipShapeUtils.h"
 #include "HipShapeUtilsInternal.h"
 #include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/IR/HipShapeUtilsBroadcast.h"
+#include "hip/Dialect/IR/HipShapeUtilsCommon.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
@@ -480,7 +481,7 @@ FailureOr<SmallVector<OpFoldResult>> mlir::hip::reifyBroadcastResultShape(
     staticShapes.push_back(operandType.getShape());
   }
   // Validate broadcastability before emitting any `tensor.dim`, so a failure
-  // leaves the IR unchanged (see the contract in HipShapeUtils.h).
+  // leaves the IR unchanged (see the contract in HipShapeUtilsCommon.h).
   if (failed(mlir::hip::inferBroadcastShape(staticShapes, emitError)))
     return failure();
 
