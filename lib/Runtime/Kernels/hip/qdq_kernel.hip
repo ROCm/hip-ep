@@ -96,9 +96,22 @@ template <> struct FloatIO<__half> {
   __device__ static inline __half store(float x) { return __float2half(x); }
 };
 
+// ---- quantized storage carriers -------------------------------------------
+
+// ONNX INT4 / UINT4 stores two values per byte, low nibble first, over the
+// flattened row-major sequence, while every shape it declares stays logical.
+// These carriers stand in for the storage type so the packing lives in the
+// load and store helpers below rather than in each kernel.
+struct PackedInt4 {
+  uint8_t byte;
+};
+struct PackedUint4 {
+  uint8_t byte;
+};
+
 // ---- saturation bounds ----------------------------------------------------
 
-// Representable range per quantized storage type, as int32 (all four fit).
+// Representable range per quantized storage type, as int32 (all six fit).
 // Spelled out rather than taken from std::numeric_limits, which is not
 // available in device code.
 template <typename QuantT> struct QuantRange;
@@ -114,6 +127,40 @@ template <> struct QuantRange<int16_t> {
 };
 template <> struct QuantRange<uint16_t> {
   static constexpr int32_t lo = 0, hi = 65535;
+};
+// The carrier is a byte wide, but the value it holds is a nibble.
+template <> struct QuantRange<PackedInt4> {
+  static constexpr int32_t lo = -8, hi = 7;
+};
+template <> struct QuantRange<PackedUint4> {
+  static constexpr int32_t lo = 0, hi = 15;
+};
+
+// ---- quantized element load ----------------------------------------------
+
+__device__ inline uint32_t qdq_nibble(uint8_t byte, int64_t index) {
+  return (byte >> ((index & 1) * 4)) & 0xF;
+}
+
+// Widens one logical element to int32, which represents every supported
+// storage type exactly and is where dequantize subtracts the zero point.
+template <typename QuantT> struct QuantLoad {
+  __device__ static inline int32_t load(const QuantT *p, int64_t i) {
+    return static_cast<int32_t>(p[i]);
+  }
+};
+
+template <> struct QuantLoad<PackedInt4> {
+  __device__ static inline int32_t load(const PackedInt4 *p, int64_t i) {
+    int32_t v = static_cast<int32_t>(qdq_nibble(p[i >> 1].byte, i));
+    return v >= 8 ? v - 16 : v; // sign-extend the nibble
+  }
+};
+
+template <> struct QuantLoad<PackedUint4> {
+  __device__ static inline int32_t load(const PackedUint4 *p, int64_t i) {
+    return static_cast<int32_t>(qdq_nibble(p[i >> 1].byte, i));
+  }
 };
 
 // ---- scale / zero_point index --------------------------------------------
@@ -146,6 +193,32 @@ __device__ inline int64_t qdq_param_index(int64_t lin, int mode, int rank,
 
 // ---- kernels -------------------------------------------------------------
 
+// The spec formula for the single logical element `i`, whose scale and zero
+// point sit at `p`. Shared by the byte-per-value and the packed kernels so
+// their rounding and clamping cannot drift apart.
+template <typename InT, typename ScaleT, typename QuantT>
+__device__ inline int32_t quantize_one(const InT *input, const ScaleT *scale,
+                                       const QuantT *zero_point, int64_t i,
+                                       int64_t p) {
+  float x = FloatIO<InT>::load(input[i]);
+  float s = FloatIO<ScaleT>::load(scale[p]);
+  int32_t zp = zero_point ? QuantLoad<QuantT>::load(zero_point, p) : 0;
+
+  // rintf() rounds to nearest with ties to even, which is what the spec asks
+  // for; roundf() (ties away from zero) would be wrong. The division stays a
+  // division on purpose: folding it into a multiply by a precomputed 1/s adds
+  // a second rounding that can flip the result by one LSB at tie boundaries.
+  float q = rintf(x / s) + static_cast<float>(zp);
+
+  // Clamp in fp32 before narrowing, because converting an out-of-range or NaN
+  // float to an integer is undefined in C++. This also pins NaN to `lo`
+  // deterministically, since IEEE fmaxf/fminf return the non-NaN operand.
+  // Every bound and every sum above is exact in fp32 for 4/8/16-bit storage.
+  q = fmaxf(q, static_cast<float>(QuantRange<QuantT>::lo));
+  q = fminf(q, static_cast<float>(QuantRange<QuantT>::hi));
+  return static_cast<int32_t>(q);
+}
+
 template <typename InT, typename ScaleT, typename QuantT>
 __global__ void quantize_linear_kernel(
     const InT *__restrict__ input, const ScaleT *__restrict__ scale,
@@ -158,23 +231,40 @@ __global__ void quantize_linear_kernel(
 
   int64_t p = qdq_param_index(tid, mode, rank, axis, block_size, inner,
                               axis_dim, input_shape, scale_shape);
-  float x = FloatIO<InT>::load(input[tid]);
-  float s = FloatIO<ScaleT>::load(scale[p]);
-  int32_t zp = zero_point ? static_cast<int32_t>(zero_point[p]) : 0;
+  output[tid] = static_cast<QuantT>(
+      quantize_one<InT, ScaleT, QuantT>(input, scale, zero_point, tid, p));
+}
 
-  // rintf() rounds to nearest with ties to even, which is what the spec asks
-  // for; roundf() (ties away from zero) would be wrong. The division stays a
-  // division on purpose: folding it into a multiply by a precomputed 1/s adds
-  // a second rounding that can flip the result by one LSB at tie boundaries.
-  float q = rintf(x / s) + static_cast<float>(zp);
+// One thread per output BYTE rather than per element, because a packed byte is
+// shared by two logical values. A thread-per-element mapping would have to
+// read-modify-write that byte and would race with its neighbour.
+template <typename InT, typename ScaleT, typename QuantT>
+__global__ void quantize_linear_packed_kernel(
+    const InT *__restrict__ input, const ScaleT *__restrict__ scale,
+    const QuantT *__restrict__ zero_point, QuantT *__restrict__ output,
+    int64_t total, int mode, int rank, int axis, int block_size, int64_t inner,
+    int64_t axis_dim, QdqDimsND input_shape, QdqDimsND scale_shape) {
+  int64_t byte_idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  int64_t base = byte_idx * 2;
+  if (base >= total)
+    return;
 
-  // Clamp in fp32 before narrowing, because converting an out-of-range or NaN
-  // float to an integer is undefined in C++. This also pins NaN to `lo`
-  // deterministically, since IEEE fmaxf/fminf return the non-NaN operand.
-  // Every bound and every sum above is exact in fp32 for 8/16-bit storage.
-  q = fmaxf(q, static_cast<float>(QuantRange<QuantT>::lo));
-  q = fminf(q, static_cast<float>(QuantRange<QuantT>::hi));
-  output[tid] = static_cast<QuantT>(static_cast<int32_t>(q));
+  uint32_t packed = 0;
+  for (int half = 0; half < 2; ++half) {
+    int64_t i = base + half;
+    // An odd element count pads the final byte; leave its high nibble zero.
+    if (i >= total)
+      break;
+    int64_t p = qdq_param_index(i, mode, rank, axis, block_size, inner,
+                                axis_dim, input_shape, scale_shape);
+    int32_t q =
+        quantize_one<InT, ScaleT, QuantT>(input, scale, zero_point, i, p);
+    // Already clamped to the nibble's range, so the mask only drops the sign
+    // extension that a negative value carries in int32.
+    packed |= (static_cast<uint32_t>(q) & 0xF) << (half * 4);
+  }
+  output[byte_idx].byte = static_cast<uint8_t>(packed);
 }
 
 template <typename QuantT, typename ScaleT, typename OutT>
@@ -189,8 +279,10 @@ __global__ void dequantize_linear_kernel(
 
   int64_t p = qdq_param_index(tid, mode, rank, axis, block_size, inner,
                               axis_dim, input_shape, scale_shape);
-  int32_t x = static_cast<int32_t>(input[tid]);
-  int32_t zp = zero_point ? static_cast<int32_t>(zero_point[p]) : 0;
+  // Both loads take a logical index; QuantLoad hides whether the buffer is
+  // one element per byte or two.
+  int32_t x = QuantLoad<QuantT>::load(input, tid);
+  int32_t zp = zero_point ? QuantLoad<QuantT>::load(zero_point, p) : 0;
   float s = FloatIO<ScaleT>::load(scale[p]);
 
   // Subtract in int32 so nothing is lost before the widening; doing it in the
@@ -340,6 +432,21 @@ int qdq_grid_size(const char *name, int64_t total, int block, int *grid) {
   return 0;
 }
 
+// Storage width a quantized hip_dtype_t implies, or 0 when it names no
+// integer storage type. Used to cross-check the caller's declared bit width.
+int qdq_storage_bits(int dtype) {
+  switch (dtype) {
+  case HIP_DTYPE_INT8:
+  case HIP_DTYPE_UINT8:
+    return 8;
+  case HIP_DTYPE_INT16:
+  case HIP_DTYPE_UINT16:
+    return 16;
+  default:
+    return 0;
+  }
+}
+
 // ---- quantize dispatch ---------------------------------------------------
 
 template <typename InT, typename ScaleT, typename QuantT>
@@ -361,11 +468,46 @@ int launch_quantize(hipStream_t stream, const void *input, const void *scale,
   return 0;
 }
 
+template <typename InT, typename ScaleT, typename QuantT>
+int launch_quantize_packed(hipStream_t stream, const void *input,
+                           const void *scale, const void *zero_point,
+                           void *output, const QdqLaunchPlan &p) {
+  constexpr int kBlockSize = 256;
+  int grid = 0;
+  // One thread per output byte, so half as many as there are elements.
+  int64_t bytes = (p.total + 1) / 2;
+  if (qdq_grid_size("hip_quantize_linear", bytes, kBlockSize, &grid) != 0)
+    return -1;
+  hipLaunchKernelGGL((quantize_linear_packed_kernel<InT, ScaleT, QuantT>),
+                     dim3(grid), dim3(kBlockSize), 0, stream,
+                     static_cast<const InT *>(input),
+                     static_cast<const ScaleT *>(scale),
+                     static_cast<const QuantT *>(zero_point),
+                     static_cast<QuantT *>(output), p.total, p.mode, p.rank,
+                     p.axis, p.block_size, p.inner, p.axis_dim, p.input_shape,
+                     p.scale_shape);
+  return 0;
+}
+
 template <typename InT, typename ScaleT>
 int dispatch_quantize_storage(hipStream_t stream, const void *input,
                               const void *scale, const void *zero_point,
                               void *output, const QdqLaunchPlan &p,
-                              int out_dtype) {
+                              int out_dtype, int out_bits) {
+  // A 4-bit target keeps the 8-bit dtype it will be imported as, so out_dtype
+  // contributes only the signedness and out_bits picks the packed carrier.
+  if (out_bits == 4) {
+    switch (out_dtype) {
+    case HIP_DTYPE_INT8:
+      return launch_quantize_packed<InT, ScaleT, PackedInt4>(
+          stream, input, scale, zero_point, output, p);
+    case HIP_DTYPE_UINT8:
+      return launch_quantize_packed<InT, ScaleT, PackedUint4>(
+          stream, input, scale, zero_point, output, p);
+    default:
+      return kUnsupportedDtype;
+    }
+  }
   switch (out_dtype) {
   case HIP_DTYPE_INT8:
     return launch_quantize<InT, ScaleT, int8_t>(stream, input, scale,
@@ -388,16 +530,14 @@ template <typename InT>
 int dispatch_quantize_scale(hipStream_t stream, const void *input,
                             const void *scale, const void *zero_point,
                             void *output, const QdqLaunchPlan &p,
-                            int scale_dtype, int out_dtype) {
+                            int scale_dtype, int out_dtype, int out_bits) {
   switch (scale_dtype) {
   case HIP_DTYPE_FLOAT32:
-    return dispatch_quantize_storage<InT, float>(stream, input, scale,
-                                                 zero_point, output, p,
-                                                 out_dtype);
+    return dispatch_quantize_storage<InT, float>(
+        stream, input, scale, zero_point, output, p, out_dtype, out_bits);
   case HIP_DTYPE_FLOAT16:
-    return dispatch_quantize_storage<InT, __half>(stream, input, scale,
-                                                  zero_point, output, p,
-                                                  out_dtype);
+    return dispatch_quantize_storage<InT, __half>(
+        stream, input, scale, zero_point, output, p, out_dtype, out_bits);
   default:
     return kUnsupportedDtype;
   }
@@ -468,7 +608,7 @@ hip_quantize_linear(void *stream, const void *input, const void *scale,
                     const int64_t *input_shape, int input_rank,
                     const int64_t *scale_shape, int scale_rank, int axis,
                     int block_size, int precision, int in_dtype,
-                    int scale_dtype, int out_dtype) {
+                    int scale_dtype, int out_dtype, int out_bits) {
   QdqLaunchPlan plan;
   int rc = plan_qdq("hip_quantize_linear", input, scale, output, input_shape,
                     input_rank, scale_shape, scale_rank, axis, block_size,
@@ -490,12 +630,25 @@ hip_quantize_linear(void *stream, const void *input, const void *scale,
     return -1;
   }
 
+  // out_bits must either restate the width out_dtype already implies or drop
+  // to 4, the one case out_dtype cannot express. Anything else means the
+  // caller and this kernel disagree on the output stride, which would write
+  // silently wrong data rather than fail.
+  int dtype_bits = qdq_storage_bits(out_dtype);
+  if (out_bits != 4 && out_bits != dtype_bits) {
+    fprintf(stderr,
+            "[custom_kernels] hip_quantize_linear: out_bits=%d contradicts "
+            "out_dtype=%d (%d-bit storage); expected 4 or %d\n",
+            out_bits, out_dtype, dtype_bits, dtype_bits);
+    return -1;
+  }
+
   CUSTOM_KERNELS_DEBUG_LOG(
       "[custom_kernels] hip_quantize_linear: total=%lld, mode=%d, "
       "input_rank=%d, scale_rank=%d, axis=%d, block_size=%d, precision=%d, "
-      "in_dtype=%d, scale_dtype=%d, out_dtype=%d, has_zp=%d\n",
+      "in_dtype=%d, scale_dtype=%d, out_dtype=%d, out_bits=%d, has_zp=%d\n",
       (long long)plan.total, plan.mode, input_rank, scale_rank, plan.axis,
-      block_size, precision, in_dtype, scale_dtype, out_dtype,
+      block_size, precision, in_dtype, scale_dtype, out_dtype, out_bits,
       zero_point != nullptr ? 1 : 0);
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
@@ -505,11 +658,13 @@ hip_quantize_linear(void *stream, const void *input, const void *scale,
   switch (in_dtype) {
   case HIP_DTYPE_FLOAT32:
     lrc = dispatch_quantize_scale<float>(hip_stream, input, scale, zero_point,
-                                         output, plan, scale_dtype, out_dtype);
+                                         output, plan, scale_dtype, out_dtype,
+                                         out_bits);
     break;
   case HIP_DTYPE_FLOAT16:
     lrc = dispatch_quantize_scale<__half>(hip_stream, input, scale, zero_point,
-                                          output, plan, scale_dtype, out_dtype);
+                                          output, plan, scale_dtype, out_dtype,
+                                          out_bits);
     break;
   default:
     lrc = kUnsupportedDtype;
@@ -518,9 +673,10 @@ hip_quantize_linear(void *stream, const void *input, const void *scale,
   if (lrc == kUnsupportedDtype) {
     fprintf(stderr,
             "[custom_kernels] hip_quantize_linear: unsupported dtype "
-            "combination (input=%d scale=%d output=%d); expected float32 or "
-            "float16 input and scale, and int8/uint8/int16/uint16 output\n",
-            in_dtype, scale_dtype, out_dtype);
+            "combination (input=%d scale=%d output=%d bits=%d); expected "
+            "float32 or float16 input and scale, and int8/uint8/int16/uint16 "
+            "output (int8/uint8 when bits=4)\n",
+            in_dtype, scale_dtype, out_dtype, out_bits);
     return -1;
   }
   if (lrc != 0)
@@ -540,7 +696,7 @@ hip_dequantize_linear(void *stream, const void *input, const void *scale,
                       const int64_t *input_shape, int input_rank,
                       const int64_t *scale_shape, int scale_rank, int axis,
                       int block_size, int in_dtype, int scale_dtype,
-                      int out_dtype) {
+                      int out_dtype, int in_bits) {
   QdqLaunchPlan plan;
   int rc = plan_qdq("hip_dequantize_linear", input, scale, output, input_shape,
                     input_rank, scale_shape, scale_rank, axis, block_size,
@@ -548,50 +704,83 @@ hip_dequantize_linear(void *stream, const void *input, const void *scale,
   if (rc != 0)
     return rc < 0 ? -1 : 0;
 
+  // in_bits must either restate the width in_dtype already implies or drop to
+  // 4, the one case in_dtype cannot express. Anything else means the caller
+  // and this kernel disagree on the input stride, which would read silently
+  // wrong data rather than fail.
+  int dtype_bits = qdq_storage_bits(in_dtype);
+  if (in_bits != 4 && in_bits != dtype_bits) {
+    fprintf(stderr,
+            "[custom_kernels] hip_dequantize_linear: in_bits=%d contradicts "
+            "in_dtype=%d (%d-bit storage); expected 4 or %d\n",
+            in_bits, in_dtype, dtype_bits, dtype_bits);
+    return -1;
+  }
+
   CUSTOM_KERNELS_DEBUG_LOG(
       "[custom_kernels] hip_dequantize_linear: total=%lld, mode=%d, "
       "input_rank=%d, scale_rank=%d, axis=%d, block_size=%d, in_dtype=%d, "
-      "scale_dtype=%d, out_dtype=%d, has_zp=%d\n",
+      "in_bits=%d, scale_dtype=%d, out_dtype=%d, has_zp=%d\n",
       (long long)plan.total, plan.mode, input_rank, scale_rank, plan.axis,
-      block_size, in_dtype, scale_dtype, out_dtype,
+      block_size, in_dtype, in_bits, scale_dtype, out_dtype,
       zero_point != nullptr ? 1 : 0);
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
   (void)hipGetLastError();
 
+  // A 4-bit source keeps the 8-bit dtype it was imported as, so in_dtype
+  // contributes only the signedness and in_bits picks the packed carrier.
   int lrc;
-  switch (in_dtype) {
-  case HIP_DTYPE_INT8:
-    lrc = dispatch_dequantize_scale<int8_t>(hip_stream, input, scale,
-                                            zero_point, output, plan,
-                                            scale_dtype, out_dtype);
-    break;
-  case HIP_DTYPE_UINT8:
-    lrc = dispatch_dequantize_scale<uint8_t>(hip_stream, input, scale,
-                                             zero_point, output, plan,
-                                             scale_dtype, out_dtype);
-    break;
-  case HIP_DTYPE_INT16:
-    lrc = dispatch_dequantize_scale<int16_t>(hip_stream, input, scale,
-                                             zero_point, output, plan,
-                                             scale_dtype, out_dtype);
-    break;
-  case HIP_DTYPE_UINT16:
-    lrc = dispatch_dequantize_scale<uint16_t>(hip_stream, input, scale,
+  if (in_bits == 4) {
+    switch (in_dtype) {
+    case HIP_DTYPE_INT8:
+      lrc = dispatch_dequantize_scale<PackedInt4>(hip_stream, input, scale,
+                                                  zero_point, output, plan,
+                                                  scale_dtype, out_dtype);
+      break;
+    case HIP_DTYPE_UINT8:
+      lrc = dispatch_dequantize_scale<PackedUint4>(hip_stream, input, scale,
+                                                   zero_point, output, plan,
+                                                   scale_dtype, out_dtype);
+      break;
+    default:
+      lrc = kUnsupportedDtype;
+      break;
+    }
+  } else {
+    switch (in_dtype) {
+    case HIP_DTYPE_INT8:
+      lrc = dispatch_dequantize_scale<int8_t>(hip_stream, input, scale,
                                               zero_point, output, plan,
                                               scale_dtype, out_dtype);
-    break;
-  default:
-    lrc = kUnsupportedDtype;
-    break;
+      break;
+    case HIP_DTYPE_UINT8:
+      lrc = dispatch_dequantize_scale<uint8_t>(hip_stream, input, scale,
+                                               zero_point, output, plan,
+                                               scale_dtype, out_dtype);
+      break;
+    case HIP_DTYPE_INT16:
+      lrc = dispatch_dequantize_scale<int16_t>(hip_stream, input, scale,
+                                               zero_point, output, plan,
+                                               scale_dtype, out_dtype);
+      break;
+    case HIP_DTYPE_UINT16:
+      lrc = dispatch_dequantize_scale<uint16_t>(hip_stream, input, scale,
+                                                zero_point, output, plan,
+                                                scale_dtype, out_dtype);
+      break;
+    default:
+      lrc = kUnsupportedDtype;
+      break;
+    }
   }
   if (lrc == kUnsupportedDtype) {
     fprintf(stderr,
             "[custom_kernels] hip_dequantize_linear: unsupported dtype "
-            "combination (input=%d scale=%d output=%d); expected "
-            "int8/uint8/int16/uint16 input and float32 or float16 scale and "
-            "output\n",
-            in_dtype, scale_dtype, out_dtype);
+            "combination (input=%d bits=%d scale=%d output=%d); expected "
+            "int8/uint8/int16/uint16 input (int8/uint8 when bits=4) and "
+            "float32 or float16 scale and output\n",
+            in_dtype, in_bits, scale_dtype, out_dtype);
     return -1;
   }
   if (lrc != 0)

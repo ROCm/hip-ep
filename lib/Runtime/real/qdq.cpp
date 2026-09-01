@@ -142,6 +142,32 @@ int prepare_qdq(const char *name, RuntimeState *state, const void *input,
   return 0;
 }
 
+// 4 is the only width the dtype cannot state for itself: ONNX INT4/UINT4
+// arrives as an 8-bit dtype carrying just the signedness. Every other value
+// has to agree with the dtype, so reject the disagreement here rather than
+// hand the kernel a stride neither side agreed on.
+int check_quant_bits(const char *name, int64_t bits, int hip_dtype,
+                     int64_t hipdnn_dtype) {
+  if (bits == 4) {
+    if (hip_dtype != HIP_DTYPE_INT8 && hip_dtype != HIP_DTYPE_UINT8) {
+      fprintf(stderr,
+              "[REAL] %s: a 4-bit quantized side needs an 8-bit dtype for its "
+              "signedness, got %s\n",
+              name, hipdnn_ep_datatype_name(hipdnn_dtype));
+      return -1;
+    }
+    return 0;
+  }
+  if (bits != 8 && bits != 16) {
+    fprintf(stderr,
+            "[REAL] %s: unsupported quantized bit width %lld; expected 4, 8, "
+            "or 16\n",
+            name, (long long)bits);
+    return -1;
+  }
+  return 0;
+}
+
 } // namespace
 
 extern "C" int wrap_quantize_linear(
@@ -149,14 +175,15 @@ extern "C" int wrap_quantize_linear(
     const void *zero_point, void *output, const int64_t *input_shape,
     int64_t input_rank, const int64_t *scale_shape, int64_t scale_rank,
     int64_t axis, int64_t block_size, int64_t precision, int64_t saturate,
-    int64_t input_dtype, int64_t scale_dtype, int64_t output_dtype) {
+    int64_t input_dtype, int64_t scale_dtype, int64_t output_dtype,
+    int64_t output_bits) {
   OP_PROFILE(
       "quantize_linear",
       [&] {
         char b[128];
-        snprintf(b, sizeof(b), "axis=%lld bs=%lld ir=%lld sr=%lld",
+        snprintf(b, sizeof(b), "axis=%lld bs=%lld ir=%lld sr=%lld bits=%lld",
                  (long long)axis, (long long)block_size, (long long)input_rank,
-                 (long long)scale_rank);
+                 (long long)scale_rank, (long long)output_bits);
         return std::string(b);
       },
       state);
@@ -168,15 +195,21 @@ extern "C" int wrap_quantize_linear(
   if (rc != 0)
     return rc < 0 ? rc : 0;
 
+  if (check_quant_bits("wrap_quantize_linear", output_bits, p.out_dtype,
+                       output_dtype) != 0)
+    return -1;
+
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_quantize_linear: input_dtype=%s scale_dtype=%s "
-      "output_dtype=%s axis=%d block_size=%lld precision=%lld saturate=%lld "
-      "has_zp=%d input_rank=%lld scale_rank=%lld total=%lld\n",
+      "output_dtype=%s output_bits=%lld axis=%d block_size=%lld "
+      "precision=%lld saturate=%lld has_zp=%d input_rank=%lld scale_rank=%lld "
+      "total=%lld\n",
       hipdnn_ep_datatype_name(input_dtype),
       hipdnn_ep_datatype_name(scale_dtype),
-      hipdnn_ep_datatype_name(output_dtype), p.axis, (long long)block_size,
-      (long long)precision, (long long)saturate, zero_point ? 1 : 0,
-      (long long)input_rank, (long long)scale_rank, (long long)p.total);
+      hipdnn_ep_datatype_name(output_dtype), (long long)output_bits, p.axis,
+      (long long)block_size, (long long)precision, (long long)saturate,
+      zero_point ? 1 : 0, (long long)input_rank, (long long)scale_rank,
+      (long long)p.total);
 
   // `saturate` stops here. Per the ONNX spec it only affects float8 targets,
   // and every quantized type the kernel supports is an integer whose range
@@ -186,23 +219,22 @@ extern "C" int wrap_quantize_linear(
       p.stream, input, scale, zero_point, output, input_shape,
       static_cast<int>(input_rank), scale_shape, static_cast<int>(scale_rank),
       p.axis, static_cast<int>(block_size), static_cast<int>(precision),
-      p.in_dtype, p.scale_dtype, p.out_dtype);
+      p.in_dtype, p.scale_dtype, p.out_dtype, static_cast<int>(output_bits));
 }
 
-extern "C" int
-wrap_dequantize_linear(RuntimeState *state, const void *input,
-                       const void *scale, const void *zero_point, void *output,
-                       const int64_t *input_shape, int64_t input_rank,
-                       const int64_t *scale_shape, int64_t scale_rank,
-                       int64_t axis, int64_t block_size, int64_t input_dtype,
-                       int64_t scale_dtype, int64_t output_dtype) {
+extern "C" int wrap_dequantize_linear(
+    RuntimeState *state, const void *input, const void *scale,
+    const void *zero_point, void *output, const int64_t *input_shape,
+    int64_t input_rank, const int64_t *scale_shape, int64_t scale_rank,
+    int64_t axis, int64_t block_size, int64_t input_dtype, int64_t scale_dtype,
+    int64_t output_dtype, int64_t input_bits) {
   OP_PROFILE(
       "dequantize_linear",
       [&] {
         char b[128];
-        snprintf(b, sizeof(b), "axis=%lld bs=%lld ir=%lld sr=%lld",
+        snprintf(b, sizeof(b), "axis=%lld bs=%lld ir=%lld sr=%lld bits=%lld",
                  (long long)axis, (long long)block_size, (long long)input_rank,
-                 (long long)scale_rank);
+                 (long long)scale_rank, (long long)input_bits);
         return std::string(b);
       },
       state);
@@ -214,19 +246,23 @@ wrap_dequantize_linear(RuntimeState *state, const void *input,
   if (rc != 0)
     return rc < 0 ? rc : 0;
 
+  if (check_quant_bits("wrap_dequantize_linear", input_bits, p.in_dtype,
+                       input_dtype) != 0)
+    return -1;
+
   RUNTIME_DEBUG_LOG(
-      "[REAL] wrap_dequantize_linear: input_dtype=%s scale_dtype=%s "
-      "output_dtype=%s axis=%d block_size=%lld has_zp=%d input_rank=%lld "
-      "scale_rank=%lld total=%lld\n",
-      hipdnn_ep_datatype_name(input_dtype),
+      "[REAL] wrap_dequantize_linear: input_dtype=%s input_bits=%lld "
+      "scale_dtype=%s output_dtype=%s axis=%d block_size=%lld has_zp=%d "
+      "input_rank=%lld scale_rank=%lld total=%lld\n",
+      hipdnn_ep_datatype_name(input_dtype), (long long)input_bits,
       hipdnn_ep_datatype_name(scale_dtype),
       hipdnn_ep_datatype_name(output_dtype), p.axis, (long long)block_size,
       zero_point ? 1 : 0, (long long)input_rank, (long long)scale_rank,
       (long long)p.total);
 
-  return hip_dequantize_linear(p.stream, input, scale, zero_point, output,
-                               input_shape, static_cast<int>(input_rank),
-                               scale_shape, static_cast<int>(scale_rank),
-                               p.axis, static_cast<int>(block_size), p.in_dtype,
-                               p.scale_dtype, p.out_dtype);
+  return hip_dequantize_linear(
+      p.stream, input, scale, zero_point, output, input_shape,
+      static_cast<int>(input_rank), scale_shape, static_cast<int>(scale_rank),
+      p.axis, static_cast<int>(block_size), p.in_dtype, p.scale_dtype,
+      p.out_dtype, static_cast<int>(input_bits));
 }

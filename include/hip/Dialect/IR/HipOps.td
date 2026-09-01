@@ -4655,6 +4655,16 @@ def Hip_QuantizeLinearOp : Hip_DpsOp<"quantize_linear", /*traits=*/[],
     The scale factor and zero point must have the same shape, determining
     the quantization granularity. The quantization formula is
     y = saturate((x / y_scale) + y_zero_point).
+
+    `packed_int4` marks an ONNX INT4 / UINT4 target. `$output` and
+    `$zero_point` keep their i8 / ui8 element type and logical shape, but only
+    the first ceil(numel/2) bytes of `$output` are written: two values per
+    byte, low nibble first, over the flattened row-major sequence. The buffer
+    is still allocated at the logical element count, so its upper half is left
+    untouched, and only a `packed_int4` consumer reads the result correctly.
+    Nothing sets this today -- unlike a packed constant, a 4-bit target leaves
+    no trace in the IR to detect -- and whatever does must first establish that
+    every consumer can be marked as well.
   }];
 
   let arguments = (ins
@@ -4666,7 +4676,8 @@ def Hip_QuantizeLinearOp : Hip_DpsOp<"quantize_linear", /*traits=*/[],
     I64Attr:$axis,
     I64Attr:$block_size,
     I64Attr:$precision,
-    I64Attr:$saturate
+    I64Attr:$saturate,
+    UnitAttr:$packed_int4
   );
 
   let assemblyFormat = [{
@@ -4693,6 +4704,15 @@ def Hip_DequantizeLinearOp : Hip_DpsOp<"dequantize_linear", /*traits=*/[],
     quantization, a 1-D tensor for per-axis quantization,
     or have a rank identical to the input for blocked quantization.
     See QuantizeLinear for details on quantization granularity.
+
+    `packed_int4` marks an ONNX INT4 / UINT4 source. Those import as i8 / ui8
+    at the LOGICAL element count while `$input` and `$zero_point` only hold
+    ceil(numel/2) bytes, two values per byte, low nibble first, over the
+    flattened row-major sequence. The element type keeps the signedness but
+    cannot express the width, so without this flag a consumer reads twice the
+    buffer. `$output` and every shape stay logical, so nothing else changes.
+    Set by convert-onnx-to-hip from the marker that constant lowering stamps
+    on the ONNX op once it sees the halved backing size.
   }];
 
   let arguments = (ins
@@ -4702,7 +4722,8 @@ def Hip_DequantizeLinearOp : Hip_DpsOp<"dequantize_linear", /*traits=*/[],
     Optional<Hip_TensorOrMemRef>:$zero_point,
     Hip_TensorOrMemRef:$output,
     I64Attr:$axis,
-    I64Attr:$block_size
+    I64Attr:$block_size,
+    UnitAttr:$packed_int4
   );
 
   let assemblyFormat = [{

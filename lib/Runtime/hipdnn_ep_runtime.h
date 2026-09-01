@@ -1243,8 +1243,12 @@ int wrap_gather_block_quantized(
 // ONNX element type to a distinct MLIR type (UINT8 -> ui8, INT8 -> i8,
 // UINT16 -> ui16, INT16 -> i16), so `output_dtype` below -- derived from the
 // output memref -- already carries it. That equivalence only holds for the
-// 8/16-bit integer types; int4 and float8 outputs would need the attribute
-// back.
+// 8/16-bit integer types; a float8 output would need the attribute back.
+//
+// INT4 / UINT4 breaks it in the other direction: both import as i8 / ui8, so
+// the dtype keeps the signedness but loses the width. Each side therefore
+// takes an explicit bit width for its quantized end -- `output_bits` for
+// quantize, `input_bits` for dequantize.
 //
 // `saturate` is carried across this boundary but goes no further: the
 // custom-kernel entry point does not take it, because it only applies to
@@ -1259,18 +1263,25 @@ int wrap_quantize_linear(
     const void *input,      // high precision (T1)
     const void *scale,      // T2
     const void *zero_point, // (nullable) same type as output
-    void *output,           // quantized (T3)
+    void *output,           // quantized (T3); packed when output_bits == 4
     const int64_t *input_shape, int64_t input_rank, const int64_t *scale_shape,
     int64_t scale_rank,
     int64_t axis,       // may be negative; normalized by the wrapper
     int64_t block_size, // 0 = not blocked
     int64_t precision,  // 0 = take the scale's precision
     int64_t saturate,   // float8 only; not forwarded to the kernel
-    int64_t input_dtype, int64_t scale_dtype, int64_t output_dtype);
+    int64_t input_dtype, int64_t scale_dtype, int64_t output_dtype,
+    // Value width of `output` and `zero_point`: 8 or 16 to match
+    // output_dtype, or 4 for ONNX INT4/UINT4. At 4 the dtype supplies only
+    // the signedness, `zero_point` is packed, and only the first
+    // ceil(numel/2) bytes of `output` are written -- two values per byte, low
+    // nibble first. The caller still sizes that buffer by the logical element
+    // count, so its upper half is left untouched. `input_shape` stays logical.
+    int64_t output_bits);
 
 int wrap_dequantize_linear(
     RuntimeState *state,
-    const void *input,      // quantized (T1)
+    const void *input,      // quantized (T1); packed when input_bits == 4
     const void *scale,      // T2
     const void *zero_point, // (nullable) same type as input
     void *output,           // high precision (T3)
@@ -1278,7 +1289,13 @@ int wrap_dequantize_linear(
     int64_t scale_rank,
     int64_t axis,       // may be negative; normalized by the wrapper
     int64_t block_size, // 0 = not blocked
-    int64_t input_dtype, int64_t scale_dtype, int64_t output_dtype);
+    int64_t input_dtype, int64_t scale_dtype, int64_t output_dtype,
+    // Value width of `input` and `zero_point`: 8 or 16 to match input_dtype,
+    // or 4 for ONNX INT4/UINT4. At 4 the dtype supplies only the signedness
+    // and both buffers hold ceil(numel/2) bytes, two values per byte, low
+    // nibble first, over the flattened row-major sequence. `input_shape`
+    // stays logical either way.
+    int64_t input_bits);
 
 // QMoE operation wrapper (quantized Mixture-of-Experts)
 // Routes tokens to top-k experts, performs quantized MLP per expert,

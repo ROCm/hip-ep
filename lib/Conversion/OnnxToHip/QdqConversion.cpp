@@ -24,7 +24,7 @@ mlir::Value getOptionalOperand(mlir::Operation *op, size_t idx) {
 }
 
 static int64_t getOnnxIntAttr(mlir::Operation *op, llvm::StringRef name,
-  int64_t defaultValue) {
+                              int64_t defaultValue) {
   if (auto attr = op->getAttrOfType<mlir::IntegerAttr>(name))
     return attr.getValue().getSExtValue();
   return defaultValue;
@@ -39,7 +39,7 @@ struct QdqOperands {
   mlir::RankedTensorType resultType;
 };
 
-// The reason for bringing this up is that there might 
+// The reason for bringing this up is that there might
 // be a future conversion from com.ms.qdq to hip.
 mlir::FailureOr<QdqOperands> matchQdqCommon(mlir::Operation *op,
                                             mlir::PatternRewriter &rewriter) {
@@ -91,6 +91,11 @@ struct QuantizeLinearToHip : public mlir::RewritePattern {
         rewriter, op->getLoc(), mlir::TypeRange{in.resultType}, in.context,
         in.input, in.scale, in.zeroPoint, in.init, axisAttr, blockSizeAttr,
         precisionAttr, saturateAttr);
+    // Nothing stamps `packed_int4` onto a QuantizeLinear yet -- unlike a
+    // packed constant, a 4-bit target leaves no trace in the IR to detect.
+    // Forwarded so the lowering and runtime below are reachable once one does.
+    if (op->hasAttr(kPackedInt4Attr))
+      hipOp->setAttr(kPackedInt4Attr, rewriter.getUnitAttr());
     rewriter.replaceOp(op, hipOp->getResults());
     return mlir::success();
   }
@@ -115,6 +120,10 @@ struct DequantizeLinearToHip : public mlir::RewritePattern {
     auto hipOp = mlir::hip::DequantizeLinearOp::create(
         rewriter, op->getLoc(), mlir::TypeRange{in.resultType}, in.context,
         in.input, in.scale, in.zeroPoint, in.init, axisAttr, blockSizeAttr);
+    // Carried over verbatim: constant lowering already decided this, and the
+    // types here cannot show it.
+    if (op->hasAttr(kPackedInt4Attr))
+      hipOp->setAttr(kPackedInt4Attr, rewriter.getUnitAttr());
     rewriter.replaceOp(op, hipOp->getResults());
     return mlir::success();
   }

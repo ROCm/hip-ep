@@ -10,8 +10,8 @@ namespace hip {
 namespace {
 
 //===----------------------------------------------------------------------===//
-// hip.quantize_linear   -> wrap_quantize_linear   (16 params)
-// hip.dequantize_linear -> wrap_dequantize_linear (14 params)
+// hip.quantize_linear   -> wrap_quantize_linear   (17 params)
+// hip.dequantize_linear -> wrap_dequantize_linear (15 params)
 //===----------------------------------------------------------------------===//
 
 // Stack-allocates i64[max(rank, 1)] so rank-0 still has a buffer, reading
@@ -55,6 +55,23 @@ LogicalResult isDataTypeSupported(Operation *op, Type quantElem, Type floatElem,
   return success();
 }
 
+// Value width the runtime should assume for the quantized side. A packed
+// 4-bit tensor keeps its i8/ui8 element type -- which carries only the
+// signedness -- and its logical shape, so the width has to travel separately.
+// Anything but 8-bit storage under the flag means the producer and this
+// lowering disagree, which would hand the runtime a stride nothing agreed on.
+FailureOr<int64_t> resolveQuantBits(Operation *op, Type quantElem,
+                                    bool packedInt4,
+                                    ConversionPatternRewriter &rewriter) {
+  unsigned bits = quantElem.getIntOrFloatBitWidth();
+  if (!packedInt4)
+    return static_cast<int64_t>(bits);
+  if (bits != 8)
+    return rewriter.notifyMatchFailure(
+        op, "packed_int4 requires 8-bit storage for the quantized side");
+  return static_cast<int64_t>(4);
+}
+
 struct QuantizeLinearOpLowering
     : public ConvertOpToLLVMPattern<QuantizeLinearOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -72,9 +89,14 @@ struct QuantizeLinearOpLowering
     auto scaleType = cast<MemRefType>(op.getScale().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
 
-    if (failed(isDataTypeSupported(op, outputType.getElementType(),
-                                       inputType.getElementType(),
+    Type quantElem = outputType.getElementType();
+    if (failed(isDataTypeSupported(op, quantElem, inputType.getElementType(),
                                        scaleType.getElementType(), rewriter)))
+      return failure();
+
+    FailureOr<int64_t> outputBits =
+        resolveQuantBits(op, quantElem, op.getPackedInt4(), rewriter);
+    if (failed(outputBits))
       return failure();
 
     auto createI64Const = [&](int64_t v) -> Value {
@@ -83,7 +105,7 @@ struct QuantizeLinearOpLowering
     };
     Value one = createI64Const(1);
 
-    SmallVector<Type, 16> paramTypes = {
+    SmallVector<Type, 17> paramTypes = {
         ptrType,                   // state
         ptrType, ptrType, ptrType, // input, scale, zero_point (nullable)
         ptrType,                   // output
@@ -92,8 +114,9 @@ struct QuantizeLinearOpLowering
         i64Type, i64Type,          // axis, block_size
         i64Type, i64Type,          // precision, saturate
         i64Type, i64Type, i64Type, // input_dtype, scale_dtype, output_dtype
+        i64Type,                   // output_bits
     };
-    SmallVector<Value, 16> args = {
+    SmallVector<Value, 17> args = {
         adaptor.getCtx(),
         extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getScale(), rewriter, loc),
@@ -111,7 +134,8 @@ struct QuantizeLinearOpLowering
         createI64Const(op.getSaturate()),
         createI64Const(getHipdnnDataType(inputType.getElementType())),
         createI64Const(getHipdnnDataType(scaleType.getElementType())),
-        createI64Const(getHipdnnDataType(outputType.getElementType())),
+        createI64Const(getHipdnnDataType(quantElem)),
+        createI64Const(*outputBits),
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -142,9 +166,14 @@ struct DequantizeLinearOpLowering
     auto scaleType = cast<MemRefType>(op.getScale().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
 
-    if (failed(isDataTypeSupported(op, inputType.getElementType(),
-                                       outputType.getElementType(),
+    Type quantElem = inputType.getElementType();
+    if (failed(isDataTypeSupported(op, quantElem, outputType.getElementType(),
                                        scaleType.getElementType(), rewriter)))
+      return failure();
+
+    FailureOr<int64_t> inputBits =
+        resolveQuantBits(op, quantElem, op.getPackedInt4(), rewriter);
+    if (failed(inputBits))
       return failure();
 
     auto createI64Const = [&](int64_t v) -> Value {
@@ -153,7 +182,7 @@ struct DequantizeLinearOpLowering
     };
     Value one = createI64Const(1);
 
-    SmallVector<Type, 14> paramTypes = {
+    SmallVector<Type, 15> paramTypes = {
         ptrType,                   // state
         ptrType, ptrType, ptrType, // input, scale, zero_point (nullable)
         ptrType,                   // output
@@ -161,8 +190,9 @@ struct DequantizeLinearOpLowering
         ptrType, i64Type,          // scale_shape, scale_rank
         i64Type, i64Type,          // axis, block_size
         i64Type, i64Type, i64Type, // input_dtype, scale_dtype, output_dtype
+        i64Type,                   // input_bits
     };
-    SmallVector<Value, 14> args = {
+    SmallVector<Value, 15> args = {
         adaptor.getCtx(),
         extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getScale(), rewriter, loc),
@@ -176,9 +206,10 @@ struct DequantizeLinearOpLowering
         createI64Const(scaleType.getRank()),
         createI64Const(op.getAxis()),
         createI64Const(op.getBlockSize()),
-        createI64Const(getHipdnnDataType(inputType.getElementType())),
+        createI64Const(getHipdnnDataType(quantElem)),
         createI64Const(getHipdnnDataType(scaleType.getElementType())),
         createI64Const(getHipdnnDataType(outputType.getElementType())),
+        createI64Const(*inputBits),
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
