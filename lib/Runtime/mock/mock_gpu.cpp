@@ -1638,6 +1638,21 @@ int wrap_not(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_isinf(RuntimeState *state, void *input, void *output,
+               int64_t num_elements, int64_t data_type,
+               int64_t detect_negative, int64_t detect_positive) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_isinf\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_isinf(num_elements=%lld, data_type=%s(%lld), "
+             "detect_negative=%lld, detect_positive=%lld)\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type, (long long)detect_negative,
+             (long long)detect_positive);
+  return 0;
+}
+
 // Mock memory is plain host memory, so we can compute the true non-zero count
 // directly from `input`. This makes the host-readback path (hip.readback_dim
 // -> hipdnn_ep_readback_i32) return a meaningful dynamic dim under mock builds.

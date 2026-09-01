@@ -206,6 +206,10 @@ HIP_KERNEL_API int hip_elementwise_floor(
     void *stream, const void *input, void *output, int64_t num_elements,
     int hip_dtype);
 
+HIP_KERNEL_API int hip_elementwise_isinf(
+    void *stream, const void *input, void *output, int64_t num_elements,
+    int hip_dtype, int detect_negative, int detect_positive);
+
 HIP_KERNEL_API int hip_elementwise_exp(
     void* stream,
     const void* input,

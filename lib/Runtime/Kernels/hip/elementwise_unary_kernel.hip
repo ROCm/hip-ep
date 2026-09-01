@@ -609,6 +609,126 @@ extern "C" int hip_elementwise_floor(void *stream, const void *input,
   return static_cast<int>(err);
 }
 
+__device__ inline uint8_t isinf_to_bool(double x, int detect_negative,
+                                        int detect_positive) {
+  if (!isinf(x))
+    return 0;
+  if (x < 0.0 && detect_negative)
+    return 1;
+  if (x > 0.0 && detect_positive)
+    return 1;
+  return 0;
+}
+
+__device__ inline uint8_t isinf_to_bool(float x, int detect_negative,
+                                        int detect_positive) {
+  if (!isinf(x))
+    return 0;
+  if (x < 0.0f && detect_negative)
+    return 1;
+  if (x > 0.0f && detect_positive)
+    return 1;
+  return 0;
+}
+
+__global__ void elementwise_isinf_f16_kernel(const __half *__restrict__ input,
+                                             uint8_t *__restrict__ output,
+                                             int64_t num_elements,
+                                             int detect_negative,
+                                             int detect_positive) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    float x = __half2float(input[idx]);
+    output[idx] = isinf_to_bool(x, detect_negative, detect_positive);
+  }
+}
+
+__global__ void elementwise_isinf_f32_kernel(const float *__restrict__ input,
+                                             uint8_t *__restrict__ output,
+                                             int64_t num_elements,
+                                             int detect_negative,
+                                             int detect_positive) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = isinf_to_bool(input[idx], detect_negative, detect_positive);
+  }
+}
+
+__global__ void elementwise_isinf_f64_kernel(const double *__restrict__ input,
+                                             uint8_t *__restrict__ output,
+                                             int64_t num_elements,
+                                             int detect_negative,
+                                             int detect_positive) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = isinf_to_bool(input[idx], detect_negative, detect_positive);
+  }
+}
+
+extern "C" int hip_elementwise_isinf(void *stream, const void *input,
+                                     void *output, int64_t num_elements,
+                                     int hip_dtype, int detect_negative,
+                                     int detect_positive) {
+  if (num_elements <= 0)
+    return 0;
+
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  constexpr int kBlockSize = 256;
+  int grid_size =
+      static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
+
+  (void)hipGetLastError();
+
+  switch (hip_dtype) {
+  case HIP_DTYPE_FLOAT16:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_isinf: f16, num=%lld\n",
+        (long long)num_elements);
+    hipLaunchKernelGGL(elementwise_isinf_f16_kernel, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const __half *>(input),
+                       static_cast<uint8_t *>(output), num_elements,
+                       detect_negative, detect_positive);
+    break;
+  case HIP_DTYPE_FLOAT32:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_isinf: f32, num=%lld\n",
+        (long long)num_elements);
+    hipLaunchKernelGGL(elementwise_isinf_f32_kernel, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const float *>(input),
+                       static_cast<uint8_t *>(output), num_elements,
+                       detect_negative, detect_positive);
+    break;
+  case HIP_DTYPE_FLOAT64:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_isinf: f64, num=%lld\n",
+        (long long)num_elements);
+    hipLaunchKernelGGL(elementwise_isinf_f64_kernel, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const double *>(input),
+                       static_cast<uint8_t *>(output), num_elements,
+                       detect_negative, detect_positive);
+    break;
+  default:
+    fprintf(stderr,
+            "[custom_kernels] hip_elementwise_isinf: unsupported dtype=%d\n",
+            hip_dtype);
+    return -1;
+  }
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr,
+            "[custom_kernels] hip_elementwise_isinf launch failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
+}
+
 __global__ void elementwise_exp_f16_kernel(const __half *__restrict__ input,
                                            __half *__restrict__ output,
                                            int64_t num_elements) {
