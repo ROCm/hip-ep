@@ -1639,8 +1639,8 @@ int wrap_not(RuntimeState *state, void *input, void *output,
 }
 
 int wrap_isinf(RuntimeState *state, void *input, void *output,
-               int64_t num_elements, int64_t data_type,
-               int64_t detect_negative, int64_t detect_positive) {
+               int64_t num_elements, int64_t data_type, int64_t detect_negative,
+               int64_t detect_positive) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_isinf\n");
     return -1;

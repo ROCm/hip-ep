@@ -25,8 +25,8 @@ static int isinf_hipdnn_to_hip_dtype(int64_t hipdnn_type) {
 }
 
 int wrap_isinf(RuntimeState *state, void *input, void *output,
-               int64_t num_elements, int64_t data_type,
-               int64_t detect_negative, int64_t detect_positive) {
+               int64_t num_elements, int64_t data_type, int64_t detect_negative,
+               int64_t detect_positive) {
   OP_PROFILE(
       "isinf",
       [&] {

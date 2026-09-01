@@ -240,9 +240,7 @@ class TestIsInf:
     @pytest.mark.parametrize("dtype", [np.float16, np.float32])
     def test_isinf_detect_positive_only(self, model_runner, dtype):
         shape = [4]
-        model = _make_isinf_model(
-            dtype, shape, detect_negative=0, detect_positive=1
-        )
+        model = _make_isinf_model(dtype, shape, detect_negative=0, detect_positive=1)
         x = np.array([0.0, np.inf, -np.inf, 1.0], dtype=dtype)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)
