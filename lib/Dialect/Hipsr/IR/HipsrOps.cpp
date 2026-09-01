@@ -60,3 +60,18 @@ bool mlir::hipsr::isHipsrDestinationOperand(OpOperand &use) {
   unsigned begin = destinations.getBeginOperandIndex();
   return index >= begin && index < begin + destinations.size();
 }
+
+// A hipsr op holds the result in the destination slot at the same position.
+OpResult mlir::hipsr::getHipsrResultHeldIn(OpOperand &use) {
+  if (!isHipsrDestinationOperand(use)) {
+    return {};
+  }
+  Operation *op = use.getOwner();
+  unsigned slot = use.getOperandNumber() -
+                  getHipsrDestinationOperands(op).getBeginOperandIndex();
+  // Bufferization keeps the destinations and drops the results they held.
+  if (slot >= op->getNumResults()) {
+    return {};
+  }
+  return op->getResult(slot);
+}

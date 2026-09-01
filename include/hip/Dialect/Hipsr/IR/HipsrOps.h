@@ -47,6 +47,9 @@ namespace hipsr {
 // dps: use is in Init
 bool isHipsrDestinationOperand(::mlir::OpOperand &use);
 
+// return the result held in the destination use names, or null if none.
+::mlir::OpResult getHipsrResultHeldIn(::mlir::OpOperand &use);
+
 } // namespace hipsr
 } // namespace mlir
 
