@@ -46,7 +46,8 @@ std::string tempDir() {
 }
 
 // gcnArchName can carry feature suffixes (":xnack-"), which are not portable
-// in a filename.
+// in a filename. They are kept for --gpu-architecture, where they affect
+// codegen, and only stripped for the cache path.
 std::string sanitize(const std::string &s) {
   std::string out = s;
   for (char &c : out) {
@@ -57,6 +58,9 @@ std::string sanitize(const std::string &s) {
   return out;
 }
 
+// Device 0, matching LlvmIrJit::detectCustomKernelArch, which picks the
+// custom_kernels_<arch> DLL the AOT kernels come from. Probing the current
+// device instead would let the two paths compile for different targets.
 std::string archName() {
   hipDeviceProp_t prop;
   if (hipGetDeviceProperties(&prop, 0) != hipSuccess ||
@@ -91,6 +95,13 @@ Module::Module(std::string name, const char *source, size_t source_size,
       source_(source),
       source_size_(source_size),
       kernel_names_(std::move(kernel_names)) {}
+
+Module::~Module() {
+  if (module_ != nullptr) {
+    // Best effort: on process teardown the HIP runtime may already be gone.
+    hipModuleUnload(module_);
+  }
+}
 
 // <TEMP>/morphizen_rtc_<name>_<arch>_<hash>.co plus a ".map" sidecar holding
 // the mangled names, which cannot be recovered from the code object alone.
