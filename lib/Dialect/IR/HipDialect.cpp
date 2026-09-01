@@ -739,8 +739,10 @@ void RmsNormOp::getEffects(
 }
 
 LogicalResult RmsNormOp::verify() {
-  return verifyDpsComputeOp(*this, {getInput(), getScale(), getOutput()},
-                            /*numInits=*/1);
+  if (failed(verifyDpsComputeOp(*this, {getInput(), getScale(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+  return mlir::hip::verifySameShapeDpsOp(*this, getInput());
 }
 
 //===----------------------------------------------------------------------===//
@@ -1057,7 +1059,10 @@ void MiopenSoftmaxOp::getEffects(
 }
 
 LogicalResult MiopenSoftmaxOp::verify() {
-  return verifyDpsComputeOp(*this, {getInput(), getOutput()}, /*numInits=*/1);
+  if (failed(
+          verifyDpsComputeOp(*this, {getInput(), getOutput()}, /*numInits=*/1)))
+    return failure();
+  return mlir::hip::verifySameShapeDpsOp(*this, getInput());
 }
 
 ParseResult MiopenSoftmaxOp::parse(OpAsmParser &parser,
@@ -1247,7 +1252,10 @@ void SiluOp::getEffects(
 }
 
 LogicalResult SiluOp::verify() {
-  return verifyDpsComputeOp(*this, {getInput(), getOutput()}, /*numInits=*/1);
+  if (failed(
+          verifyDpsComputeOp(*this, {getInput(), getOutput()}, /*numInits=*/1)))
+    return failure();
+  return mlir::hip::verifySameShapeDpsOp(*this, getInput());
 }
 
 ParseResult SiluOp::parse(OpAsmParser &parser, OperationState &result) {

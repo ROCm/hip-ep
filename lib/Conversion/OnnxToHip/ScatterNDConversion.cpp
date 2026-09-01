@@ -61,17 +61,11 @@ struct ScatterNDToHip : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "ScatterND requires result rank == data rank");
 
-    // Output shape == data shape; reuse data's dim values for any dynamic
-    // dims of the destination empty.
-    llvm::SmallVector<mlir::Value> dynSizes;
-    for (int64_t i = 0; i < resultType.getRank(); ++i) {
-      if (!resultType.isDynamicDim(i))
-        continue;
-      dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, data, i));
-    }
-    mlir::Value init =
-        mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
-                                      resultType.getElementType(), dynSizes);
+    mlir::FailureOr<mlir::Value> init =
+        createSameShapeEmptyTensor(rewriter, loc, resultType, data);
+    if (mlir::failed(init))
+      return rewriter.notifyMatchFailure(
+          op, "result shape contradicts ScatterND data shape");
 
     // `reduction` is optional (default "none" per ONNX spec). Preserve the
     // exact string so the runtime side can switch on it.
@@ -82,7 +76,7 @@ struct ScatterNDToHip : public mlir::RewritePattern {
       reductionAttr = rewriter.getStringAttr("none");
 
     auto hipOp = mlir::hip::ScatterNDOp::create(
-        rewriter, loc, context, data, indices, updates, init, reductionAttr);
+        rewriter, loc, context, data, indices, updates, *init, reductionAttr);
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }
