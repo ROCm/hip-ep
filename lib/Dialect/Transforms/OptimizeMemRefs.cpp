@@ -107,13 +107,14 @@ static bool canReuse(const Slot &slot, MemRefType neededType,
   if (slot.type.getMemorySpace() != neededType.getMemorySpace())
     return false;
 
-  int64_t slotBytes = getStaticByteSize(slot.type);
-  int64_t neededBytes = getStaticByteSize(neededType);
+  FailureOr<int64_t> slotBytes = getStaticByteSize(slot.type);
+  FailureOr<int64_t> neededBytes = getStaticByteSize(neededType);
 
-  if (slotBytes > 0 && neededBytes > 0)
-    return slotBytes >= neededBytes;
+  if (succeeded(slotBytes) && succeeded(neededBytes))
+    return *slotBytes >= *neededBytes;
 
-  if (slotBytes == 0 && neededBytes == 0 && slot.type == neededType) {
+  if (!slot.type.hasStaticShape() && !neededType.hasStaticShape() &&
+      slot.type == neededType) {
     if (slot.dynamicSizes.size() != static_cast<size_t>(neededDynSizes.size()))
       return false;
     for (auto [slotDyn, neededDyn] :
@@ -203,8 +204,10 @@ void OptimizeMemRefsPass::runOnOperation() {
         continue;
       if (!canReuse(slot, neededType, neededDynSizes))
         continue;
+      FailureOr<int64_t> slotBytes = getStaticByteSize(slot.type);
+      FailureOr<int64_t> neededBytes = getStaticByteSize(neededType);
       int64_t waste =
-          getStaticByteSize(slot.type) - getStaticByteSize(neededType);
+          succeeded(slotBytes) ? *slotBytes - *neededBytes : int64_t{0};
       if (waste < bestWaste) {
         bestWaste = waste;
         bestSlot = &slot;
