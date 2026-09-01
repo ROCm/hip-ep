@@ -146,9 +146,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateBiasGeluConversionPatterns(patterns, ctx);
   populateFastGeluConversionPatterns(patterns, ctx);
   populateCastConversionPatterns(patterns, ctx);
-  populateReduceSumConversionPatterns(patterns, ctx);
-  populateReduceMeanConversionPatterns(patterns, ctx);
-  populateReduceL2ConversionPatterns(patterns, ctx);
+  populateReductionConversionPatterns(patterns, ctx);
   populateGatherConversionPatterns(patterns, ctx);
   populateCompressConversionPatterns(patterns, ctx);
   populateOneHotConversionPatterns(patterns, ctx);
@@ -176,8 +174,6 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateRangeConversionPatterns(patterns, ctx);
   populateEqualConversionPatterns(patterns, ctx);
   populateDivConversionPatterns(patterns, ctx);
-  populateReduceMaxConversionPatterns(patterns, ctx);
-  populateReduceMinConversionPatterns(patterns, ctx);
   populateMinConversionPatterns(patterns, ctx);
   populateMaxConversionPatterns(patterns, ctx);
   populateNotConversionPatterns(patterns, ctx);
@@ -194,7 +190,6 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populatePadConversionPatterns(patterns, ctx);
   populateTileConversionPatterns(patterns, ctx);
   populateExpandConversionPatterns(patterns, ctx);
-  populateReduceProdConversionPatterns(patterns, ctx);
   populateLessConversionPatterns(patterns, ctx);
   populateGreaterConversionPatterns(patterns, ctx);
   populateGreaterOrEqualConversionPatterns(patterns, ctx);
