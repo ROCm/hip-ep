@@ -907,8 +907,12 @@ static int buildProbes(fbs::GqaTuneHeadDim head_dim, unsigned hpg,
     // HeadGroup: hpg only, fuzzy fallback for new models with known hpg.
     // seq_q is clamped to S4096: configs measured at S4096 apply to all longer
     // prefill chunks, so there is no benefit to probing beyond that bucket.
+    // seq_kv is clamped to Any for buckets above S128: only skv<=128 has
+    // distinct LUT rows; longer KV caches use the seq_kv-agnostic Any rows.
     const fbs::GqaSeqBucket hg_seq_q =
         seq_q > fbs::GqaSeqBucket::S4096 ? fbs::GqaSeqBucket::S4096 : seq_q;
+    const fbs::GqaSeqBucket hg_seq_kv =
+        seq_kv <= fbs::GqaSeqBucket::S128 ? seq_kv : fbs::GqaSeqBucket::Any;
     out[n++] = Probe{fbs::GqaTuneTier::HeadGroup,
                      GqaTuneSource::HeadGroup,
                      head_dim,
@@ -917,7 +921,7 @@ static int buildProbes(fbs::GqaTuneHeadDim head_dim, unsigned hpg,
                      any_par,
                      any_batch,
                      hg_seq_q,
-                     seq_kv,
+                     hg_seq_kv,
                      window};
   }
   out[n++] = Probe{fbs::GqaTuneTier::Length,
@@ -1261,7 +1265,7 @@ gqa_autotune_resolve_prefill(void *opaque_policy,
         headCountClass(request.num_heads, request.kv_num_heads),
         parClass(request.batch, request.num_heads), batchClass(request.batch),
         seqBucket(std::max(request.seq_q, 1)),
-        fbs::GqaSeqBucket::Any,  // prefill config is independent of seq_kv
+        seqBucket(std::max(request.seq_kv, 1)),  // actual skv bucket; HeadGroup clamps >S128 to Any
         v5 ? windowClass(request.local_window) : fbs::GqaWindowClass::NoWindow,
         probes);
     for (int i = 0; i < n; ++i) {
