@@ -29,7 +29,7 @@ mlir::hip::inferCausalConvWithStateOutputShapes(
     ArrayRef<int64_t> inputShape, ArrayRef<int64_t> weightShape,
     std::optional<ArrayRef<int64_t>> biasShape,
     std::optional<ArrayRef<int64_t>> pastStateShape, int64_t ndim,
-    function_ref<InFlightDiagnostic()> emitError) {
+    bool channelsLast, function_ref<InFlightDiagnostic()> emitError) {
   if (ndim != 1) {
     emitError() << "causal_conv_with_state runtime supports only ndim=1";
     return failure();
@@ -40,7 +40,8 @@ mlir::hip::inferCausalConvWithStateOutputShapes(
     return failure();
   }
 
-  if (!areCompatibleStaticExtents(inputShape[1], weightShape[0])) {
+  const size_t channelDim = channelsLast ? 2 : 1;
+  if (!areCompatibleStaticExtents(inputShape[channelDim], weightShape[0])) {
     emitError() << "causal_conv_with_state weight channels must match input "
                    "channels";
     return failure();
@@ -60,7 +61,7 @@ mlir::hip::inferCausalConvWithStateOutputShapes(
       emitError() << "causal_conv_with_state bias must have rank 1";
       return failure();
     }
-    if (!areCompatibleStaticExtents((*biasShape)[0], inputShape[1])) {
+    if (!areCompatibleStaticExtents((*biasShape)[0], inputShape[channelDim])) {
       emitError() << "causal_conv_with_state bias length must match input "
                      "channels";
       return failure();
@@ -70,7 +71,8 @@ mlir::hip::inferCausalConvWithStateOutputShapes(
   int64_t stateLength = ShapedType::isDynamic(weightShape[2])
                             ? ShapedType::kDynamic
                             : weightShape[2] - 1;
-  SmallVector<int64_t> stateShape = {inputShape[0], inputShape[1], stateLength};
+  SmallVector<int64_t> stateShape = {inputShape[0], inputShape[channelDim],
+                                     stateLength};
   if (pastStateShape) {
     if (pastStateShape->size() != stateShape.size()) {
       emitError() << "causal_conv_with_state past_state must have rank 3";
@@ -93,7 +95,7 @@ mlir::hip::inferCausalConvWithStateOutputShapes(
 FailureOr<ReifiedRankedShapedTypeDims>
 mlir::hip::reifyCausalConvWithStateOutputShapes(
     OpBuilder &b, Location loc, Value input, Value weight, Value bias,
-    Value pastState, int64_t ndim,
+    Value pastState, int64_t ndim, bool channelsLast,
     function_ref<InFlightDiagnostic()> emitError) {
   auto inputType = dyn_cast<RankedTensorType>(input.getType());
   auto weightType = dyn_cast<RankedTensorType>(weight.getType());
@@ -116,7 +118,7 @@ mlir::hip::reifyCausalConvWithStateOutputShapes(
     pastStateShape = pastStateType.getShape();
   if (failed(inferCausalConvWithStateOutputShapes(
           inputType.getShape(), weightType.getShape(), biasShape,
-          pastStateShape, ndim, emitError)))
+          pastStateShape, ndim, channelsLast, emitError)))
     return failure();
 
   SmallVector<OpFoldResult> outputShape = tensor::getMixedSizes(b, loc, input);
@@ -125,9 +127,10 @@ mlir::hip::reifyCausalConvWithStateOutputShapes(
                                 /*scale=*/1, /*offset=*/-1);
   if (failed(stateLength))
     return failure();
+  const int64_t channelDim = channelsLast ? 2 : 1;
   SmallVector<OpFoldResult> presentStateShape = {
       tensor::getMixedSize(b, loc, input, 0),
-      tensor::getMixedSize(b, loc, input, 1), *stateLength};
+      tensor::getMixedSize(b, loc, input, channelDim), *stateLength};
   return ReifiedRankedShapedTypeDims{std::move(outputShape),
                                      std::move(presentStateShape)};
 }
