@@ -300,6 +300,22 @@ FailureOr<SmallVector<OpFoldResult>>
 reifyReductionResultShape(OpBuilder &b, Location loc, Value data,
                           ArrayRef<int64_t> axes, int64_t keepdims);
 
+/// ONNX LayerNormalization output shapes. Output 0 (Y) equals the input;
+/// optional Mean and InvStdDev outputs use the keepdims reduction shape over
+/// `[axis, rank)`.
+FailureOr<SmallVector<SmallVector<int64_t>>>
+inferLayerNormOutputShapes(ArrayRef<int64_t> inputShape, int64_t axis,
+                           unsigned numOutputs);
+
+/// Mixed-shape form of `inferLayerNormOutputShapes`.
+FailureOr<ReifiedRankedShapedTypeDims>
+reifyLayerNormOutputShapes(OpBuilder &b, Location loc, Value input,
+                           int64_t axis, unsigned numOutputs);
+
+/// Runtime-supported LayerNormalization stats element type for ONNX
+/// `stash_type` (TensorProto enum): 0/1 -> f32, 10 -> f16.
+FailureOr<Type> inferLayerNormStatsType(MLIRContext *ctx, int64_t stashType);
+
 /// CausalConvWithState output shapes for the runtime-supported 1D layout:
 ///   output        = input = [B, C, L] or [B, L, C] when channels-last
 ///   present_state = [B, C, weight[2] - 1]
@@ -319,6 +335,23 @@ FailureOr<ReifiedRankedShapedTypeDims> reifyCausalConvWithStateOutputShapes(
     OpBuilder &b, Location loc, Value input, Value weight, Value bias,
     Value pastState, int64_t ndim, bool channelsLast,
     function_ref<InFlightDiagnostic()> emitError);
+
+/// SkipSimplifiedLayerNormalization output shapes. The normalized output and
+/// optional `input_skip_bias_sum` both equal the input shape. The runtime
+/// flattens every non-final input axis into rows, requires skip with the same
+/// shape, and rank-1 gamma/optional bias whose length equals the input's final
+/// extent.
+FailureOr<SmallVector<SmallVector<int64_t>>> inferSkipRmsNormOutputShapes(
+    ArrayRef<int64_t> inputShape, ArrayRef<int64_t> skipShape,
+    ArrayRef<int64_t> gammaShape, std::optional<ArrayRef<int64_t>> biasShape,
+    unsigned numOutputs, function_ref<InFlightDiagnostic()> emitError);
+
+/// Mixed-shape form of `inferSkipRmsNormOutputShapes`.
+FailureOr<ReifiedRankedShapedTypeDims>
+reifySkipRmsNormOutputShapes(OpBuilder &b, Location loc, Value input,
+                             Value skip, Value gamma, Value bias,
+                             unsigned numOutputs,
+                             function_ref<InFlightDiagnostic()> emitError);
 
 /// One-shot reify body for ONNX-style reduction ops. Structurally-proven
 /// constant `axes` use the shared semantic dimension map. Runtime,

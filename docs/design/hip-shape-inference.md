@@ -123,7 +123,7 @@ This gives two related but distinct jobs:
 | `InferTypeOpInterface` | Builds result types from DPS init operand types |
 | `ReifyRankedShapedTypeOpInterface` | Materializes static dimensions as attributes and dynamic dimensions as SSA values |
 | `InferShapedTypeOpInterface` | Not used as the primary HIP DPS contract |
-| `HipDpsOpInterface` | Dialect marker interface extending `DestinationStyleOpInterface`; owns the shared default reification body |
+| `HipDpsOpInterface` | Dialect marker extending `DestinationStyleOpInterface`; owns shared whole-shape and direct-dimension reification |
 
 `HipDpsOpInterface` is a generated MLIR `OpInterface`, but it is not a replacement for the standard InferType/Reify contracts. It marks HIP DPS compute operations and provides their shared default reification behavior. In tensor mode it walks `DestinationStyleOpInterface::getDpsInits()` and returns each destination's mixed sizes through `tensor::getMixedSizes`, exactly one vector per SSA result. In memref mode there are no SSA results, so it succeeds with an empty list.
 
@@ -174,7 +174,8 @@ Choose the smallest mechanism that matches the operation's semantics:
 | OneHot, Compress, TopK | Dedicated reification thunks |
 | Pad, Tile, Expand, Slice, Range | Fold-or-bail helpers with fallback to DPS-init shape |
 | MatMul/Gemm/MatMulNBits | Dedicated shape logic based on operand dimensions and attributes |
-| Attention or normalization with multiple destinations | One shape vector per DPS init unless an op supplies a dedicated thunk |
+| LayerNormalization | Y equals input; Mean/InvStdDev use keepdims reduction shape over `[axis, rank)` |
+| SkipSimplifiedLayerNormalization | Output and optional residual sum equal input; training stats rejected |
 | Forward Conv (rank-3 converter/rank-4 HIP op) | Shared signed-floor spatial-window formula used by converter, reification, and verifier |
 | Rank-4 NCHW ConvTranspose | Shared ONNX formula used by converter, reification, and verifier |
 | CausalConvWithState | Runtime-supported 1D output/state formulas from input and depthwise kernel |
@@ -270,6 +271,10 @@ Reification is allowed to create IR at the caller's insertion point. Helpers the
 
 Reification is per result: `reifyResultShapes` returns one shape vector for every tensor result. The number and rank of those vectors must match the operation's tensor results even when the implementation derives them from DPS init operands.
 
+Dimension-only consumers use the standard `ReifyRankedShapedTypeOpInterface::reifyDimOfResult` hook. HIP DPS operations implement it directly from `DestinationStyleOpInterface::getTiedOpOperand`, whose contract gives every tensor result one destination with the same type and runtime extents. This direct path validates the result/init cardinality, exact types, and dimension index before emitting IR, then materializes only the requested destination extent.
+
+Whole-shape semantic reification remains the authority for inference and refinement. The direct hook is its bounded, destination-based equivalent for a valid DPS operation.
+
 ### Shared converter/reification shape helpers
 
 Converter destination construction and result reification are two views of one
@@ -337,6 +342,16 @@ more dynamic than the weight, the state length still comes from `weight.K-1`.
 The mixed helper emits subtraction only after its pure helper has validated
 rank, depthwise layout, channel agreement, optional bias/state, and the current
 runtime restriction `ndim=1`.
+
+SkipSimplifiedLayerNormalization's implemented outputs are the normalized
+output and optional `input_skip_bias_sum`; both have the input shape. The
+runtime flattens every non-final input axis into `num_rows`, requires skip to
+match input, and takes `hidden_dim` from rank-1 gamma (and optional bias).
+The ONNX schema's optional mean and inverse-standard-deviation outputs are
+training outputs and are not implemented by `hip.skip_rms_norm`. Conversion
+accepts every inference output arity (one to four schema slots with omitted
+stats) but rejects a real stats tensor rather than treating the last present
+tensor as the residual output.
 
 Reductions resolve to one internal out-to-in dimension map, consumed by both
 `inferReductionShape` (static extents) and `reifyReductionResultShape` (mixed

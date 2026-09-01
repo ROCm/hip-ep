@@ -12,7 +12,8 @@ include "mlir/Interfaces/DestinationStyleOpInterface.td"
 def HipDpsOpInterface : OpInterface<"HipDpsOp", [DestinationStyleOpInterface]> {
   let description = [{
     Marker interface for HIP destination-passing-style compute ops. Carries
-    a single shared default `reifyResultShapes` body. In tensor mode it walks
+    shared `reifyResultShapes` and `reifyDimOfResult` bodies. In tensor mode
+    whole-shape reification walks
     `DestinationStyleOpInterface::getDpsInits()` and lifts each init operand's
     runtime shape via `tensor::getMixedSizes`, producing exactly one vector per
     SSA result. In memref mode the operation has no SSA results, so reification
@@ -21,9 +22,11 @@ def HipDpsOpInterface : OpInterface<"HipDpsOp", [DestinationStyleOpInterface]> {
     `B.shape[-1]` rather than from the outs operand -- select a manual-reify
     family and provide a per-op override.
 
-    The interface owns the default body in a sibling `.cpp` file, and
-    the per-op `ReifyRankedShapedTypeOpInterface::reifyResultShapes` is
-    a three-line dispatcher emitted by the operation's behavior family.
+    Single-dimension reification follows the exact tied DPS destination through
+    `DestinationStyleOpInterface::getTiedOpOperand`. This avoids rebuilding
+    every result dimension when an upstream dim-resolution pattern requests
+    only one. The interface owns both default bodies in a sibling `.cpp` file;
+    operation behavior families emit the standard-interface dispatchers.
   }];
 
   let cppNamespace = "::mlir::hip";
@@ -43,6 +46,11 @@ def HipDpsOpInterface : OpInterface<"HipDpsOp", [DestinationStyleOpInterface]> {
     ::mlir::LogicalResult reifyResultShapes(
         ::mlir::OpBuilder &b,
         ::mlir::ReifiedRankedShapedTypeDims &reifiedReturnShapes);
+
+    /// Return one result dimension from its tied DPS destination. All result,
+    /// destination, and dimension checks complete before this method emits IR.
+    ::llvm::FailureOr<::mlir::OpFoldResult> reifyDimOfResult(
+        ::mlir::OpBuilder &b, int resultIndex, int dim);
   }];
 }
 
