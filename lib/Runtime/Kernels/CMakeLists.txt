@@ -90,14 +90,50 @@ set(_kernel_sources
     hip/strided_copy_kernel.hip
 )
 
+# hipRTC path (opt-in at runtime via HIPDNN_EP_RTC=1): the same device source
+# that hipcc compiles below is also embedded as bytes and handed to hipRTC at
+# runtime, so the two code objects are built from identical text.
+find_package(hiprtc CONFIG REQUIRED)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+set(_rtc_device_header
+    ${CMAKE_CURRENT_SOURCE_DIR}/hip/rtc/elementwise_sub_device.h)
+set(_rtc_embedded_source
+    ${CMAKE_CURRENT_BINARY_DIR}/elementwise_sub_device_source.cpp)
+
+add_custom_command(
+    OUTPUT ${_rtc_embedded_source}
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/cmake/xxd.py
+            --var kElementwiseSubDeviceSource
+            --output ${_rtc_embedded_source}.tmp
+            ${_rtc_device_header}
+    # xxd.py emits a `static` array with a trailing padding byte; rewrite it to
+    # an extern "C" symbol and record the true byte count separately.
+    COMMAND ${Python3_EXECUTABLE} -c
+            "import os; data = open('${_rtc_embedded_source}.tmp').read(); data = data.replace('static const unsigned char', 'extern \"C\" const unsigned char'); n = os.path.getsize('${_rtc_device_header}'); data = '#include <cstddef>\\n' + data + f'\\nextern \"C\" const size_t kElementwiseSubDeviceSource_size = {n};\\n'; open('${_rtc_embedded_source}', 'w').write(data)"
+    COMMAND ${CMAKE_COMMAND} -E remove ${_rtc_embedded_source}.tmp
+    DEPENDS ${_rtc_device_header} ${CMAKE_SOURCE_DIR}/cmake/xxd.py
+    COMMENT "Embedding elementwise_sub device source for hipRTC"
+    VERBATIM
+)
+
+set(_rtc_sources
+    rtc/hiprtc_module.hip
+    ${_rtc_embedded_source}
+)
+
 # One SHARED target per arch. Each builds a fatbin with that single slice;
 # OFFLOAD_ARCHS narrows the global list to one element so the resulting
 # DLL/SO is not bloated with code for archs the consumer won't load.
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
     set(_target custom_kernels_${_arch})
-    hip_add_library(${_target} SHARED ${_kernel_sources}
+    hip_add_library(${_target} SHARED ${_kernel_sources} ${_rtc_sources}
         INCLUDE_DIRECTORIES
             ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}
+        LINK_LIBRARIES
+            hiprtc::hiprtc
         OFFLOAD_ARCHS
             ${_arch}
     )
