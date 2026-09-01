@@ -3595,6 +3595,13 @@ static _Float16* ensureOutColBuffer(int M, int N) {
     return g_out_col_buf;
 }
 
+/* b_row_bytes = 0 means the arrival stride, num_groups_k * (group_size/2).
+ *
+ * A non-zero stride has to be measured with rather than assumed away: a
+ * power-of-two stride makes small tiles look up to 8x worse than they are
+ * (64x64 at N=5120 K=4096: 1575 us unpadded against 193 us padded), so a table
+ * tuned at one stride ranks the tiles wrongly for the other. Tuning at the
+ * stride that will actually be used is the whole point of threading it here. */
 static int tuneWmmaConfig(
     hipStream_t stream,
     int M, int N, int K,
@@ -3602,13 +3609,19 @@ static int tuneWmmaConfig(
     const unsigned char* B,
     const _Float16* scales, const _Float16* zeros,
     int gs, int ngk,
-    _Float16* C, int ldc, bool has_zp)
+    _Float16* C, int ldc, bool has_zp, int b_row_bytes = 0)
 {
     hipEvent_t ev0, ev1;
     hipEventCreate(&ev0);
     hipEventCreate(&ev1);
 
     _Float16* dq_buf = ensureDqBuffer(N, K);
+
+    // Separate-dequant configs read B only through launchDequant, which has no
+    // stride argument, so at a padded stride they would decode the padding as
+    // weights. Measuring them here would let the tuner crown a config the
+    // padded path cannot serve.
+    const bool fused_only = (b_row_bytes != 0);
 
     float best_ms = 1e30f;
     int   best_id = 9;
@@ -3629,9 +3642,11 @@ static int tuneWmmaConfig(
     // Bring clocks to their sustained-load state before anything is timed.
     for (int cid = 0; cid < kNumWmmaConfigs; cid++) {
         if (!wmmaConfigApplies(kWmmaConfigs[cid], N, gs)) continue;
+        if (fused_only && !kWmmaConfigs[cid].fused) continue;
         for (int w = 0; w < 20; w++)
             launchWmmaConfig(cid, stream, M, N, K, A, lda, B,
-                             scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf);
+                             scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf,
+                             b_row_bytes);
         break;
     }
     hipStreamSynchronize(stream);
@@ -3652,15 +3667,18 @@ static int tuneWmmaConfig(
         for (int cid = 0; cid < kNumWmmaConfigs; cid++) {
             auto& cfg = kWmmaConfigs[cid];
             if (!wmmaConfigApplies(cfg, N, gs)) continue;
+            if (fused_only && !cfg.fused) continue;
 
             for (int w = 0; w < WARMUP; w++)
                 launchWmmaConfig(cid, stream, M, N, K, A, lda, B,
-                                 scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf);
+                                 scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf,
+                                 b_row_bytes);
 
             hipEventRecord(ev0, stream);
             for (int i = 0; i < ITERS; i++)
                 launchWmmaConfig(cid, stream, M, N, K, A, lda, B,
-                                 scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf);
+                                 scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf,
+                                 b_row_bytes);
             hipEventRecord(ev1, stream);
             hipEventSynchronize(ev1);
 
@@ -3702,6 +3720,10 @@ static int tuneWmmaConfig(
     constexpr float TIE_BAND = 1.03f;
     int tie_id = best_id;
     for (int cid = 0; cid < kNumWmmaConfigs; cid++) {
+        // Skipped configs sit at the 1e30 sentinel; without this they compare
+        // favourably against a best_ms that is itself the sentinel (nothing
+        // measured) and the tie-break hands back a config never timed at all.
+        if (cfg_ms[cid] > 1e29f) continue;
         if (cfg_ms[cid] > best_ms * TIE_BAND) continue;
         const auto& c = kWmmaConfigs[cid];
         const auto& t = kWmmaConfigs[tie_id];
@@ -3740,10 +3762,18 @@ static std::once_flag wmma_cache_init_flag;
 // Rebuild invalidates cache: __DATE__/__TIME__ change on every recompilation.
 static constexpr const char kWmmaBuildTimestamp[] = __DATE__ " " __TIME__;
 
-static std::string wmmaCacheKey(int M, int N, int K, int gs, bool has_zp) {
-    return std::to_string(M) + "_" + std::to_string(N) + "_" +
-           std::to_string(K) + "_" + std::to_string(gs) + "_" +
-           (has_zp ? "1" : "0");
+/* The stride is part of the key because it changes the answer, not just the
+ * timing: the winner at the arrival stride is the most alias-tolerant tile,
+ * which is a different tile from the fastest one at a padded stride (at
+ * N=5120 K=4096, cfg11 -> cfg3). Appended only when padding is in use, so
+ * entries written by earlier builds for the arrival stride still hit. */
+static std::string wmmaCacheKey(int M, int N, int K, int gs, bool has_zp,
+                                int b_row_bytes = 0) {
+    std::string key = std::to_string(M) + "_" + std::to_string(N) + "_" +
+                      std::to_string(K) + "_" + std::to_string(gs) + "_" +
+                      (has_zp ? "1" : "0");
+    if (b_row_bytes != 0) key += "_p" + std::to_string(b_row_bytes);
+    return key;
 }
 
 // Disk-persistent WMMA autotune cache: avoids re-tuning ~1500 kernel launches
@@ -3867,15 +3897,18 @@ static int getOrTuneWmmaConfig(
     const unsigned char* B,
     const _Float16* scales, const _Float16* zeros,
     int gs, int ngk,
-    _Float16* C, int ldc, bool has_zp)
+    _Float16* C, int ldc, bool has_zp, int b_row_bytes = 0)
 {
     const int forced = forcedWmmaConfig();
-    if (forced >= 0 && wmmaConfigApplies(kWmmaConfigs[forced], N, gs))
+    // A forced config at a padded stride must still read B directly; the
+    // dequant pass behind a !fused config has no stride argument.
+    if (forced >= 0 && wmmaConfigApplies(kWmmaConfigs[forced], N, gs) &&
+        (b_row_bytes == 0 || kWmmaConfigs[forced].fused))
         return forced;
 
     std::call_once(wmma_cache_init_flag, loadWmmaCache);
 
-    std::string key = wmmaCacheKey(M, N, K, gs, has_zp);
+    std::string key = wmmaCacheKey(M, N, K, gs, has_zp, b_row_bytes);
 
     std::lock_guard<std::mutex> lock(wmma_tune_mutex);
 
@@ -3884,7 +3917,8 @@ static int getOrTuneWmmaConfig(
         return it->second;
 
     int best = tuneWmmaConfig(stream, M, N, K, A, lda, B,
-                               scales, zeros, gs, ngk, C, ldc, has_zp);
+                               scales, zeros, gs, ngk, C, ldc, has_zp,
+                               b_row_bytes);
     wmma_cache[key] = best;
     saveWmmaCache();
 
@@ -3894,6 +3928,108 @@ static int getOrTuneWmmaConfig(
         key.c_str(), best, wmma_cache.size());
 
     return best;
+}
+
+/* =======================================================================
+ * Section 2b-padrow: row-stride padding for the fused int4 WMMA path
+ *
+ * The arrival row stride is num_groups_k * (group_size/2) bytes, which is K/2
+ * whenever group_size divides K -- so a power-of-two K gives a power-of-two
+ * stride. A 128-column tile then reads 128 rows that are an exact power-of-two
+ * multiple of the 128-byte cache line apart, so they land in a handful of the
+ * 64 cache sets and evict each other even though the 2 KB working set fits in
+ * L1 easily. Adding one line to the stride makes it an odd number of lines and
+ * spreads the rows over every set.
+ *
+ * Nothing is reordered, so the padded buffer is readable by any tile and the
+ * autotuner stays free -- which is what separates this from a repack.
+ * ======================================================================= */
+
+/* Copies B into a buffer whose row stride is padded by one cache line, leaving
+ * the within-row layout untouched. One thread per 16 bytes of a row. */
+__global__ void u4_prepack_padrow_kernel(
+    const unsigned char* __restrict__ src,
+    unsigned char* __restrict__ dst,
+    int N, int row_bytes, int pad_bytes)
+{
+    const int chunk = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int n = static_cast<int>(blockIdx.y);
+    const int chunks = (row_bytes + 15) / 16;
+    if (n >= N || chunk >= chunks) return;
+
+    const size_t off = static_cast<size_t>(chunk) * 16;
+    const unsigned char* in = src + static_cast<size_t>(n) * row_bytes + off;
+    unsigned char* out =
+        dst + static_cast<size_t>(n) * (row_bytes + pad_bytes) + off;
+    const int bytes = (off + 16 <= static_cast<size_t>(row_bytes))
+                          ? 16 : (row_bytes - static_cast<int>(off));
+    if (bytes == 16)
+        *reinterpret_cast<u32x4*>(out) = *reinterpret_cast<const u32x4*>(in);
+    else
+        for (int i = 0; i < bytes; i++) out[i] = in[i];
+}
+
+// One cache line. Enough to take the stride off a power of two, and the
+// smallest amount that does: the pathology is the line-granular set index.
+static constexpr int kU4PadRowBytes = 128;
+
+// Row-padded B keeps the arrival layout, so its size is just the padded rows.
+extern "C" size_t hip_matmul_nbits_u4_padrow_bytes(int N, int K) {
+    return static_cast<size_t>(N) * ((K / 2) + kU4PadRowBytes);
+}
+
+/* Callers are gated on group_size dividing K (see the host wrapper), so the
+ * arrival stride num_groups_k*(group_size/2) equals K/2 here and the copy can
+ * take the shape without the quant geometry. */
+extern "C" int hip_matmul_nbits_u4_prepack_padrow(
+    void* stream, const void* B, void* dst, int N, int K)
+{
+    const int row_bytes = K / 2;
+    constexpr int BLK = 256;
+    const int chunks = (row_bytes + 15) / 16;
+    hipLaunchKernelGGL(
+        u4_prepack_padrow_kernel,
+        dim3(static_cast<unsigned>((chunks + BLK - 1) / BLK),
+             static_cast<unsigned>(N)),
+        dim3(BLK), 0, static_cast<hipStream_t>(stream),
+        static_cast<const unsigned char*>(B), static_cast<unsigned char*>(dst),
+        N, row_bytes, kU4PadRowBytes);
+    return static_cast<int>(hipGetLastError());
+}
+
+/* Fused int4 WMMA prefill against a B whose row stride may be padded.
+ *
+ * cfg < 0 autotunes, and because the stride is passed through to the tuning
+ * launches and into the cache key, the winner is chosen for the layout that
+ * will actually be used. Returns -1 when no fused config can serve the shape,
+ * which lets the caller fall back to the arrival-layout path. */
+extern "C" int hip_matmul_nbits_u4_wmma_stride(
+    void* stream, int cfg, int M, int N, int K, int group_size,
+    const void* A, int lda, const void* B, const void* scales,
+    const void* zeros, void* C, int ldc, int b_row_bytes)
+{
+    const int ngk = (K + group_size - 1) / group_size;
+    const bool has_zp = (zeros != nullptr);
+    auto s  = static_cast<hipStream_t>(stream);
+    auto ap = static_cast<const _Float16*>(A);
+    auto bp = static_cast<const unsigned char*>(B);
+    auto sp = static_cast<const _Float16*>(scales);
+    auto zp = static_cast<const _Float16*>(zeros);
+    auto cp = static_cast<_Float16*>(C);
+
+    int id = cfg;
+    if (id < 0 || id >= kNumWmmaConfigs ||
+        !wmmaConfigApplies(kWmmaConfigs[id], N, group_size))
+        id = getOrTuneWmmaConfig(s, M, N, K, ap, lda, bp, sp, zp, group_size,
+                                 ngk, cp, ldc, has_zp, b_row_bytes);
+
+    // Only fused configs read B directly; a separate-dequant config would need
+    // the dequant pass taught about the stride too.
+    if (!kWmmaConfigs[id].fused) return -1;
+
+    launchWmmaConfig(id, s, M, N, K, ap, lda, bp, sp, zp, group_size, ngk, cp,
+                     ldc, has_zp, nullptr, b_row_bytes);
+    return static_cast<int>(hipGetLastError());
 }
 
 /* =======================================================================
