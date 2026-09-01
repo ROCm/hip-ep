@@ -1268,6 +1268,66 @@ int wrap_gather_block_quantized(
   return 0;
 }
 
+int wrap_quantize_linear(RuntimeState *state, const void *input,
+                         const void *scale, const void *zero_point,
+                         void *output, const int64_t *input_shape,
+                         int64_t input_rank, const int64_t *scale_shape,
+                         int64_t scale_rank, int64_t axis, int64_t block_size,
+                         int64_t precision, int64_t saturate,
+                         int64_t input_dtype, int64_t scale_dtype,
+                         int64_t output_dtype) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_quantize_linear\n");
+    return -1;
+  }
+  (void)input;
+  (void)scale;
+  (void)output;
+  (void)input_shape;
+  (void)scale_shape;
+
+  MOCK_PRINT("[MOCK] wrap_quantize_linear(input_rank=%lld, scale_rank=%lld, "
+             "axis=%lld, block_size=%lld, precision=%lld, saturate=%lld, "
+             "input_dtype=%s(%lld), "
+             "scale_dtype=%s(%lld), output_dtype=%s(%lld), zero_point=%s)\n",
+             (long long)input_rank, (long long)scale_rank, (long long)axis,
+             (long long)block_size, (long long)precision, (long long)saturate,
+             hipdnn_ep_datatype_name(input_dtype), (long long)input_dtype,
+             hipdnn_ep_datatype_name(scale_dtype), (long long)scale_dtype,
+             hipdnn_ep_datatype_name(output_dtype), (long long)output_dtype,
+             zero_point ? "yes" : "null");
+  return 0;
+}
+
+int wrap_dequantize_linear(RuntimeState *state, const void *input,
+                           const void *scale, const void *zero_point,
+                           void *output, const int64_t *input_shape,
+                           int64_t input_rank, const int64_t *scale_shape,
+                           int64_t scale_rank, int64_t axis, int64_t block_size,
+                           int64_t input_dtype, int64_t scale_dtype,
+                           int64_t output_dtype) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_dequantize_linear\n");
+    return -1;
+  }
+  (void)input;
+  (void)scale;
+  (void)output;
+  (void)input_shape;
+  (void)scale_shape;
+
+  MOCK_PRINT("[MOCK] wrap_dequantize_linear(input_rank=%lld, scale_rank=%lld, "
+             "axis=%lld, block_size=%lld, "
+             "input_dtype=%s(%lld), scale_dtype=%s(%lld), "
+             "output_dtype=%s(%lld), zero_point=%s)\n",
+             (long long)input_rank, (long long)scale_rank, (long long)axis,
+             (long long)block_size, hipdnn_ep_datatype_name(input_dtype),
+             (long long)input_dtype, hipdnn_ep_datatype_name(scale_dtype),
+             (long long)scale_dtype, hipdnn_ep_datatype_name(output_dtype),
+             (long long)output_dtype, zero_point ? "yes" : "null");
+  return 0;
+}
+
 int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               const void *router_weights, const void *fc1_weights,
               const void *fc1_scales, const void *fc1_bias,

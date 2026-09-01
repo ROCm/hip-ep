@@ -1999,7 +1999,11 @@ HIP_KERNEL_API int hip_gather_block_quantized(
  * INT16 -> i16). The ONNX output_dtype attribute is therefore not passed
  * down. int4 and float8 outputs would break that one-to-one mapping.
  *
- * precision and saturate exist only on QuantizeLinear per the ONNX spec.
+ * precision exists only on QuantizeLinear per the ONNX spec. The ONNX
+ * `saturate` attribute is carried all the way to wrap_quantize_linear but
+ * stops there: it only affects float8 targets, and the range clamp for every
+ * integer target supported here is unconditional. It would have to be
+ * forwarded again if float8 support is added.
  */
 HIP_KERNEL_API int hip_quantize_linear(
     void* stream,
@@ -2011,8 +2015,7 @@ HIP_KERNEL_API int hip_quantize_linear(
     const int64_t* scale_shape,  int scale_rank,
     int axis,                    // normalized
     int block_size,              // 0 = not blocked
-    int precision,               // 0 = take the scale's precision
-    int saturate,                // float8 only
+    int precision,               // TensorProto enum; only 0 (unset) or 1 (FLOAT)
     int in_dtype,                // hip_dtype_t
     int scale_dtype,
     int out_dtype);

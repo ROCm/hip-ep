@@ -1268,20 +1268,26 @@ int wrap_gather_block_quantized(
 // 8/16-bit integer types; int4 and float8 outputs would need the attribute
 // back.
 //
-// `precision` and `saturate` only exist on QuantizeLinear per the ONNX
-// spec, so they are absent from the dequantize signature.
+// `saturate` is carried across this boundary but goes no further: the
+// custom-kernel entry point does not take it, because it only applies to
+// float8 targets and the range clamp for every supported integer target is
+// unconditional. Keeping it here preserves the attribute for a future float8
+// path without letting the kernel branch on something inert.
+//
+// `precision` and `saturate` only exist on QuantizeLinear per the ONNX spec,
+// so both are absent from the dequantize signature.
 int wrap_quantize_linear(
     RuntimeState *state,
-    const void *input,       // high precision (T1)
-    const void *scale,       // T2
-    const void *zero_point,  // (nullable) same type as output
-    void *output,            // quantized (T3)
-    const int64_t *input_shape, int64_t input_rank,
-    const int64_t *scale_shape, int64_t scale_rank,
+    const void *input,      // high precision (T1)
+    const void *scale,      // T2
+    const void *zero_point, // (nullable) same type as output
+    void *output,           // quantized (T3)
+    const int64_t *input_shape, int64_t input_rank, const int64_t *scale_shape,
+    int64_t scale_rank,
     int64_t axis,       // may be negative; normalized by the wrapper
     int64_t block_size, // 0 = not blocked
     int64_t precision,  // 0 = take the scale's precision
-    int64_t saturate,   // float8 only
+    int64_t saturate,   // float8 only; not forwarded to the kernel
     int64_t input_dtype, int64_t scale_dtype, int64_t output_dtype);
 
 int wrap_dequantize_linear(
@@ -1290,8 +1296,8 @@ int wrap_dequantize_linear(
     const void *scale,      // T2
     const void *zero_point, // (nullable) same type as input
     void *output,           // high precision (T3)
-    const int64_t *input_shape, int64_t input_rank,
-    const int64_t *scale_shape, int64_t scale_rank,
+    const int64_t *input_shape, int64_t input_rank, const int64_t *scale_shape,
+    int64_t scale_rank,
     int64_t axis,       // may be negative; normalized by the wrapper
     int64_t block_size, // 0 = not blocked
     int64_t input_dtype, int64_t scale_dtype, int64_t output_dtype);
