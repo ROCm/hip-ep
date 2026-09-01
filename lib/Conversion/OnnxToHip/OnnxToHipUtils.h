@@ -45,10 +45,15 @@
 
 #include <optional>
 
-#define DEBUG_TYPE "convert-onnx-to-hip"
-
 namespace mlir {
 namespace hip {
+
+inline constexpr llvm::StringLiteral kHostShapeOperandAttr =
+    "hip.host_shape_operand";
+inline constexpr llvm::StringLiteral kHostShapeNoMinusOneAttr =
+    "hip.host_shape_no_minus_one";
+inline constexpr llvm::StringLiteral kHostShapeInputDimMapAttr =
+    "hip.host_shape_input_dim_map";
 
 //===----------------------------------------------------------------------===//
 // Helpers
@@ -71,6 +76,20 @@ inline mlir::Value createEmptyTensor(mlir::OpBuilder &builder,
   return mlir::tensor::EmptyOp::create(builder, loc, resultType.getShape(),
                                        resultType.getElementType(), dynSizes);
 }
+
+/// Return the dense payload of a structurally known compile-time tensor
+/// constant: `arith.constant`, exact generic `onnx.Constant`, or inline
+/// `hip.constant`. The payload type must equal the SSA value type.
+mlir::DenseElementsAttr getCompileTimeConstantTensor(mlir::Value value);
+
+/// Recognize \p value as a compile-time rank-0/rank-1 integer tensor.
+bool extractConstantIntTensor(
+    mlir::Value value, llvm::SmallVectorImpl<int64_t> &out,
+    std::optional<int64_t> expectedRank = std::nullopt);
+
+/// Rank-1 convenience wrapper around `extractConstantIntTensor`.
+bool extractConstantIntVector(mlir::Value value,
+                              llvm::SmallVectorImpl<int64_t> &out);
 
 /// Resolve the ranked result type of an ONNX reduction op (ReduceMax / Sum /
 /// Mean / Prod / ...).
@@ -492,18 +511,6 @@ void populateTransposeMatMulFoldPatterns(RewritePatternSet &patterns,
 /// compute conversion. See GatherShapeFold.cpp for the dynseqlen rationale.
 void populateGatherShapeFoldPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
-
-/// Pre-lowering pattern set: rewrite the `Reshape(data, Shape(src))` idiom
-/// so the shape operand becomes an explicit
-/// `tensor.from_elements(tensor.dim(src, *))`. This lets ReshapeConversion's
-/// `tensor.reshape` fallback recover per-output-dim sizes when the result has
-/// >1 dynamic dim in one reassociation group (otherwise ReshapeConversion
-/// ignores its second operand and emits the same SSA dim twice — the [N, N]
-/// bug). Sibling of GatherShapeFold; must run while the producer is still a
-/// generic ONNX op, before lowerOnnxConstants creates its carrier. See
-/// ReshapeShapeFold.cpp.
-void populateReshapeShapeFoldPatterns(RewritePatternSet &patterns,
-                                      MLIRContext *ctx);
 
 /// Pre-lowering pattern set: stamp `onnx.Pad`'s compile-time `pads` (and
 /// optional `axes`) constant onto the op as `hipdnn.pad_amounts` /
