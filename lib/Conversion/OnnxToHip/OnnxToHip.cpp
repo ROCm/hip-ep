@@ -11,12 +11,14 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "OnnxDimParams.h"
 #include "OnnxToHipUtils.h"
 #include "ShapeProvenanceAnalysis.h"
 
 #include "hip/debug_log.h"
 #include "hip/timing.h"
 
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/FormatVariadic.h"
@@ -24,6 +26,7 @@
 
 #include <limits>
 #include <map>
+#include <optional>
 
 #define DEBUG_TYPE "convert-onnx-to-hip"
 
@@ -332,6 +335,30 @@ void ConvertOnnxToHipPass::runOnOperation() {
   mlir::MLIRContext *ctx = module.getContext();
   const bool timing = hipdnn_ep_timing_enabled();
 
+  bool hasUntrustedPlan = false;
+  module.walk([&](Operation *op) {
+    if (op->hasAttr(kBroadcastDimSourcesAttr)) {
+      op->emitError("pre-existing broadcast dimension-source plan is not "
+                    "trusted compiler metadata");
+      hasUntrustedPlan = true;
+    }
+  });
+  if (hasUntrustedPlan)
+    return signalPassFailure();
+  llvm::scope_exit clearPlans([&]() {
+    module.walk(
+        [&](Operation *op) { op->removeAttr(kBroadcastDimSourcesAttr); });
+  });
+
+  std::optional<OnnxDimParams> dimParams;
+  if (module->hasAttr(kOnnxDimParamsModuleAttr)) {
+    auto parsed = OnnxDimParams::parse(module);
+    if (failed(parsed))
+      return signalPassFailure();
+    dimParams.emplace(std::move(*parsed));
+    module->removeAttr(kOnnxDimParamsModuleAttr);
+  }
+
   auto passStart = timing_now();
   auto phaseStart = passStart;
 
@@ -480,6 +507,9 @@ void ConvertOnnxToHipPass::runOnOperation() {
               funcOp, std::move(preFoldPatterns), cfg)))
         return signalPassFailure();
     }
+    if (dimParams && funcOp.getSymName() == "main_graph")
+      if (failed(dimParams->annotateBroadcastDimSources(funcOp)))
+        return signalPassFailure();
     if (mlir::failed(lowerOnnxConstants(funcOp, constantOrder)))
       return signalPassFailure();
     lowerOnnxReturns(funcOp);

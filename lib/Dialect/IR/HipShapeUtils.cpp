@@ -133,7 +133,8 @@ namespace mlir::hip::detail {
 FailureOr<SmallVector<OpFoldResult>>
 reifyBroadcastShape(OpBuilder &b, Location loc,
                     ArrayRef<SmallVector<OpFoldResult>> inputShapes,
-                    function_ref<InFlightDiagnostic()> emitError) {
+                    function_ref<InFlightDiagnostic()> emitError,
+                    ArrayRef<int64_t> canonicalOperandForResultDim) {
   if (inputShapes.empty()) {
     emitError() << "broadcast requires at least one input shape";
     return failure();
@@ -142,11 +143,39 @@ reifyBroadcastShape(OpBuilder &b, Location loc,
   size_t resultRank = 0;
   for (const SmallVector<OpFoldResult> &shape : inputShapes)
     resultRank = std::max(resultRank, shape.size());
+  if (!canonicalOperandForResultDim.empty() &&
+      canonicalOperandForResultDim.size() != resultRank) {
+    emitError() << "broadcast dimension-source plan has rank "
+                << canonicalOperandForResultDim.size() << ", expected "
+                << resultRank;
+    return failure();
+  }
 
   SmallVector<OpFoldResult> result(resultRank, b.getIndexAttr(1));
+  for (size_t axis : llvm::seq<size_t>(0, resultRank)) {
+    if (canonicalOperandForResultDim.empty() ||
+        canonicalOperandForResultDim[axis] < 0)
+      continue;
+    int64_t source = canonicalOperandForResultDim[axis];
+    if (source >= static_cast<int64_t>(inputShapes.size())) {
+      emitError() << "broadcast dimension-source operand " << source
+                  << " is out of range";
+      return failure();
+    }
+    size_t padding = resultRank - inputShapes[source].size();
+    if (axis < padding) {
+      emitError() << "broadcast dimension-source operand " << source
+                  << " does not span result axis " << axis;
+      return failure();
+    }
+    result[axis] = inputShapes[source][axis - padding];
+  }
   for (const SmallVector<OpFoldResult> &shape : inputShapes) {
     size_t pad = resultRank - shape.size();
     for (size_t i : llvm::seq<size_t>(0, resultRank)) {
+      if (!canonicalOperandForResultDim.empty() &&
+          canonicalOperandForResultDim[i] >= 0)
+        continue;
       OpFoldResult inputDim =
           i < pad ? OpFoldResult(b.getIndexAttr(1)) : shape[i - pad];
       FailureOr<OpFoldResult> merged =
@@ -296,7 +325,8 @@ mlir::hip::reifyElementwiseSameShapeFor(OpBuilder &b, Location loc,
 
 FailureOr<SmallVector<OpFoldResult>> mlir::hip::reifyBroadcastResultShape(
     OpBuilder &b, Location loc, ValueRange operands,
-    function_ref<InFlightDiagnostic()> emitError) {
+    function_ref<InFlightDiagnostic()> emitError,
+    ArrayRef<int64_t> canonicalOperandForResultDim) {
   if (operands.empty()) {
     emitError() << "broadcast requires at least one operand";
     return failure();
@@ -337,7 +367,8 @@ FailureOr<SmallVector<OpFoldResult>> mlir::hip::reifyBroadcastResultShape(
       continue;
     shapes.push_back(tensor::getMixedSizes(b, loc, operand));
   }
-  return detail::reifyBroadcastShape(b, loc, shapes, emitError);
+  return detail::reifyBroadcastShape(b, loc, shapes, emitError,
+                                     canonicalOperandForResultDim);
 }
 
 bool mlir::hip::parseDenseIntElements(DenseElementsAttr dense,
