@@ -16,7 +16,6 @@
 namespace hipdnn_ep {
 namespace rtc {
 
-// True when HIPDNN_EP_RTC=1. Queried once per process.
 bool enabled();
 
 // One device translation unit compiled at runtime.
@@ -31,7 +30,7 @@ bool enabled();
 // callers never spell a mangled name themselves.
 class Module {
  public:
-  // source must outlive the Module; it is the embedded .h text, not a copy.
+  // source is borrowed, not copied, and must outlive the Module.
   Module(std::string name, const char *source, size_t source_size,
          std::vector<std::string> kernel_names);
   ~Module();
@@ -56,14 +55,50 @@ class Module {
   std::once_flag load_once_;
   bool load_ok_ = false;
   hipModule_t module_ = nullptr;
-  // Source-level expression -> resolved device function.
   std::unordered_map<std::string, hipFunction_t> functions_;
-  // Populated by the hipRTC path; empty when the code object came from cache,
-  // in which case the mangled names are read back from the sidecar file.
   std::unordered_map<std::string, std::string> lowered_names_;
 };
 
+// Args are taken by value so the addresses handed to hipModuleLaunchKernel stay
+// valid for the call; the driver requires an array of pointers to the actual
+// arguments. Order and types have to track the __global__ signature by hand --
+// nothing here is type-checked against it.
+template <typename... Args>
+hipError_t launchKernel(hipFunction_t fn, dim3 grid, dim3 block, size_t smem,
+                        hipStream_t stream, Args... args) {
+  void *argv[] = {static_cast<void *>(&args)...};
+  return hipModuleLaunchKernel(fn, grid.x, grid.y, grid.z, block.x, block.y,
+                               block.z, static_cast<unsigned>(smem), stream,
+                               argv, nullptr);
+}
+
 }  // namespace rtc
 }  // namespace hipdnn_ep
+
+// Dispatch one launch through hipRTC, falling back to the AOT kernel when the
+// module is unavailable. The kernel expression goes last because it contains
+// commas that would otherwise split the macro's argument list; the real launch
+// arguments are parenthesised for the same reason.
+//
+//   HIPDNN_RTC_LAUNCH(fn_lookup, grid, block, 0, stream,
+//                     (a, b, c), some_kernel<32, 1, true>);
+#define HIPDNN_RTC_UNPAREN(...) __VA_ARGS__
+#define HIPDNN_RTC_STR_(...) #__VA_ARGS__
+#define HIPDNN_RTC_STR(...) HIPDNN_RTC_STR_(__VA_ARGS__)
+
+// The lookup is cached per launch site: resolving a name expression costs a
+// string construction and a hash probe, and these sites run on the hot path
+// (autotune alone launches thousands of times).
+#define HIPDNN_RTC_LAUNCH(LOOKUP, GRID, BLOCK, SMEM, STREAM, ARGS, ...)       \
+  do {                                                                        \
+    static hipFunction_t _rtc_fn = (LOOKUP)(HIPDNN_RTC_STR(__VA_ARGS__));     \
+    if (_rtc_fn != nullptr) {                                                 \
+      hipdnn_ep::rtc::launchKernel(_rtc_fn, GRID, BLOCK, SMEM, STREAM,        \
+                                   HIPDNN_RTC_UNPAREN ARGS);                  \
+    } else {                                                                  \
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(__VA_ARGS__), GRID, BLOCK, SMEM,     \
+                         STREAM, HIPDNN_RTC_UNPAREN ARGS);                    \
+    }                                                                         \
+  } while (0)
 
 #endif  // HIPDNN_EP_KERNELS_RTC_HIPRTC_MODULE_H

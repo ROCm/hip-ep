@@ -94,7 +94,7 @@ std::string hashHex(uint64_t h) {
 }  // namespace
 
 bool enabled() {
-  static const bool on = (getEnvVar("HIPDNN_EP_RTC") == "1");
+  static const bool on = (getEnvVar("HIPDNN_EP_RTC") != "0");
   return on;
 }
 
@@ -112,10 +112,9 @@ Module::~Module() {
   }
 }
 
-// <TEMP>/morphizen_rtc_<name>_<arch>_<hash>.co plus a ".map" sidecar holding
-// the mangled names, which cannot be recovered from the code object alone.
-// The compile flags are part of the hash: the same source at -O2 and -O3
-// yields different code objects.
+// The ".map" sidecar carries the mangled names, which cannot be recovered from
+// the code object alone. Compile flags join the hash: the same source at -O2
+// and at -O3 is not the same code object.
 static std::string cachePathBase(const std::string &name, const char *source,
                                  size_t source_size) {
   const std::string dir = tempDir();
@@ -180,13 +179,9 @@ bool Module::loadFromCache(std::vector<char> &code) {
   return true;
 }
 
-// comgr keeps its own on-disk cache of hipRTC compilations, in a machine-wide
-// 1 GiB LRU shared with every other comgr user (MIOpen, hipBLASLt). We cannot
-// redirect it from here: comgr latches AMD_COMGR_CACHE_DIR when it initialises,
-// which happens with the HIP runtime long before this DLL is loaded, so setting
-// the variable at this point measurably has no effect. Doing so would have to
-// happen in the host process before HIP loads. The code object cache below
-// makes it largely moot anyway -- a warm start never reaches hipRTC.
+// No attempt is made to redirect comgr's own compilation cache: it latches
+// AMD_COMGR_CACHE_DIR when it initialises, which happens with the HIP runtime
+// before this DLL is loaded, so setting it here has no effect.
 bool Module::compileAndCache(std::vector<char> &code) {
   const std::string arch = archName();
   if (arch.empty()) {
@@ -211,10 +206,8 @@ bool Module::compileAndCache(std::vector<char> &code) {
     hiprtcAddNameExpression(prog, k.c_str());
   }
 
-  // The optimisation flags must match the AOT compile. hipRTC defaults to -O3
-  // while the kernels ship at -O2; leaving them to diverge produces a different
-  // code object (measured: 9-14% more instructions on mha_flash_prefill, though
-  // the register allocation happened to survive).
+  // hipRTC defaults to -O3 while the kernels are built at -O2; the flags have to
+  // match or this is not the same code the AOT path produces.
   std::vector<std::string> opt_storage{"--gpu-architecture=" + arch};
   {
     std::istringstream flags{HIPDNN_EP_RTC_AOT_COMPILE_FLAGS};

@@ -60,6 +60,7 @@
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -67,6 +68,21 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
+
+#include "rtc/hiprtc_module.h"
+
+// Unlike the other RTC-enabled kernels, the device half of this file is not
+// split into a header: 33 device blocks are interleaved with the autotune state
+// machines. The build extracts it instead (cmake/rtc_extract_device.py) and
+// embeds the result here.
+extern "C" const unsigned char kMatMulNBitsDeviceSource[];
+extern "C" const size_t kMatMulNBitsDeviceSource_size;
+
+// nullptr whenever RTC is off or the module failed to build, which is the
+// signal for HIPDNN_RTC_LAUNCH to use the AOT kernel. Defined at the bottom of
+// the file, once every family has contributed its name expressions.
+static hipFunction_t mnbRtcFunction(const char* name_expression);
 
 /* -----------------------------------------------------------------------
  * Autotune config caches are in-process only.
@@ -1053,30 +1069,44 @@ struct GemvConfig {
     int tile_n;
 };
 
+// One list drives the config table, the launch switch and the hipRTC name
+// expressions, so a config cannot end up in one and not the others. The id must
+// stay equal to the position, since it indexes kGemvConfigs.
+//
+// TILE_N stops at 16 on purpose.
+//
+// Every kernel that reads this table stages TILE_N B-vectors into registers
+// before consuming any of them, so the hot loop holds a uint4 (or uint2/uint3)
+// per column plus a scale and a running sum per column. At TILE_N=64 the B
+// array alone is 256 VGPRs -- the entire per-thread budget on gfx1151 -- and
+// the tail spills: 732-1436 B of scratch depending on bit width, and 68-364 B
+// still at TILE_N=32. Those were the only kernels in this file with any
+// scratch at all.
+//
+// They also never won. Across 50 autotune runs (u4 / i8 / u3 / u2 / dp4a, five
+// shapes each, with and without zero points) the winner was always TILE_N <= 8;
+// the best TILE_N>=32 candidate was 1.13x-3.1x slower and the best TILE_N=64
+// candidate 2.45x-9.3x slower, never once inside the noise. They cost 31% of
+// the sweep time to measure and discard, because being the slowest candidates
+// they dominate it.
+#define MNB_GEMV_CONFIG_LIST(X)                                               \
+    /* BLOCK_SIZE=32: single warp (wave32) -- shuffle-only reduction, no LDS */ \
+    X( 0,   32,  1) X( 1,   32,  2) X( 2,   32,  4) X( 3,   32,  8)           \
+    X( 4,   64,  1) X( 5,   64,  2) X( 6,   64,  4) X( 7,   64,  8)           \
+    X( 8,   64, 16)                                                           \
+    X( 9,  128,  1) X(10,  128,  2) X(11,  128,  4) X(12,  128,  8)           \
+    X(13,  128, 16)                                                           \
+    X(14,  256,  1) X(15,  256,  2) X(16,  256,  4) X(17,  256,  8)           \
+    X(18,  256, 16)                                                           \
+    X(19,  512,  1) X(20,  512,  2) X(21,  512,  4) X(22,  512,  8)           \
+    X(23,  512, 16)                                                           \
+    X(24, 1024,  1) X(25, 1024,  2) X(26, 1024,  4) X(27, 1024,  8)           \
+    X(28, 1024, 16)
+
 static constexpr GemvConfig kGemvConfigs[] = {
-    // BLOCK_SIZE=32: single warp (wave32) — shuffle-only reduction, no LDS
-    { 32, 1}, { 32, 2}, { 32, 4}, { 32, 8},
-    { 64, 1}, { 64, 2}, { 64, 4}, { 64, 8}, { 64, 16},
-    {128, 1}, {128, 2}, {128, 4}, {128, 8}, {128, 16},
-    {256, 1}, {256, 2}, {256, 4}, {256, 8}, {256, 16},
-    {512, 1}, {512, 2}, {512, 4}, {512, 8}, {512, 16},
-    {1024, 1}, {1024, 2}, {1024, 4}, {1024, 8}, {1024, 16},
-    /* TILE_N stops at 16 on purpose.
-     *
-     * Every kernel that reads this table stages TILE_N B-vectors into registers
-     * before consuming any of them, so the hot loop holds a uint4 (or uint2/
-     * uint3) per column plus a scale and a running sum per column. At TILE_N=64
-     * the B array alone is 256 VGPRs -- the entire per-thread budget on gfx1151
-     * -- and the tail spills: 732-1436 B of scratch depending on bit width, and
-     * 68-364 B still at TILE_N=32. Those were the only kernels in this file
-     * with any scratch at all.
-     *
-     * They also never won. Across 50 autotune runs (u4 / i8 / u3 / u2 / dp4a,
-     * five shapes each, with and without zero points) the winner was always
-     * TILE_N <= 8; the best TILE_N>=32 candidate was 1.13x-3.1x slower and the
-     * best TILE_N=64 candidate 2.45x-9.3x slower, never once inside the noise.
-     * They cost 31% of the sweep time to measure and discard, because being the
-     * slowest candidates they dominate it. */
+#define X(ID, BS, TN) {BS, TN},
+    MNB_GEMV_CONFIG_LIST(X)
+#undef X
 };
 static constexpr int kNumGemvConfigs =
     static_cast<int>(sizeof(kGemvConfigs) / sizeof(kGemvConfigs[0]));
@@ -1099,36 +1129,30 @@ static void launchGemvConfig(
 #define GEMV_CASE(ID, BS, TN) \
     case ID: \
         if (col_major) \
-            hipLaunchKernelGGL( \
-                HIP_KERNEL_NAME(matmul_nbits_gemv_kernel<BS, TN, true>), \
-                grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs); \
+            HIPDNN_RTC_LAUNCH(mnbRtcFunction, grid, block, 0, stream, \
+                (A, B, sc, zp, bi, out, M, N, K, bs), \
+                matmul_nbits_gemv_kernel<BS, TN, true>); \
         else \
-            hipLaunchKernelGGL( \
-                HIP_KERNEL_NAME(matmul_nbits_gemv_kernel<BS, TN, false>), \
-                grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs); \
-        break
+            HIPDNN_RTC_LAUNCH(mnbRtcFunction, grid, block, 0, stream, \
+                (A, B, sc, zp, bi, out, M, N, K, bs), \
+                matmul_nbits_gemv_kernel<BS, TN, false>); \
+        break;
 
     switch (config_id) {
-        GEMV_CASE( 0,  32,  1);  GEMV_CASE( 1,  32,  2);
-        GEMV_CASE( 2,  32,  4);  GEMV_CASE( 3,  32,  8);
-        GEMV_CASE( 4,  64,  1);  GEMV_CASE( 5,  64,  2);
-        GEMV_CASE( 6,  64,  4);  GEMV_CASE( 7,  64,  8);
-        GEMV_CASE( 8,  64, 16);
-        GEMV_CASE( 9, 128,  1);  GEMV_CASE(10, 128,  2);
-        GEMV_CASE(11, 128,  4);  GEMV_CASE(12, 128,  8);
-        GEMV_CASE(13, 128, 16);
-        GEMV_CASE(14, 256,  1);  GEMV_CASE(15, 256,  2);
-        GEMV_CASE(16, 256,  4);  GEMV_CASE(17, 256,  8);
-        GEMV_CASE(18, 256, 16);
-        GEMV_CASE(19, 512,  1);  GEMV_CASE(20, 512,  2);
-        GEMV_CASE(21, 512,  4);  GEMV_CASE(22, 512,  8);
-        GEMV_CASE(23, 512, 16);
-        GEMV_CASE(24, 1024,  1); GEMV_CASE(25, 1024,  2);
-        GEMV_CASE(26, 1024,  4); GEMV_CASE(27, 1024,  8);
-        GEMV_CASE(28, 1024, 16);
+#define X(ID, BS, TN) GEMV_CASE(ID, BS, TN)
+        MNB_GEMV_CONFIG_LIST(X)
+#undef X
         default: break;
     }
 #undef GEMV_CASE
+}
+
+static void appendGemvNames(std::vector<std::string>& names) {
+#define X(ID, BS, TN) \
+    names.push_back(HIPDNN_RTC_STR(matmul_nbits_gemv_kernel<BS, TN, true>)); \
+    names.push_back(HIPDNN_RTC_STR(matmul_nbits_gemv_kernel<BS, TN, false>));
+    MNB_GEMV_CONFIG_LIST(X)
+#undef X
 }
 
 static int tuneGemvConfig(
@@ -1372,33 +1396,25 @@ static void launchDp4aConfig(
 
 #define DP4A_CASE(ID, BS, TN) \
     case ID: \
-        hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(matmul_nbits_gemv_dp4a_kernel<BS, TN>), \
-            grid, block, 0, stream, a_qb, a_scale, B, sc, zp, bi, out, \
-            N, K, bs); \
-        break
+        HIPDNN_RTC_LAUNCH(mnbRtcFunction, grid, block, 0, stream, \
+            (a_qb, a_scale, B, sc, zp, bi, out, N, K, bs), \
+            matmul_nbits_gemv_dp4a_kernel<BS, TN>); \
+        break;
 
     switch (config_id) {
-        DP4A_CASE( 0,  32,  1);  DP4A_CASE( 1,  32,  2);
-        DP4A_CASE( 2,  32,  4);  DP4A_CASE( 3,  32,  8);
-        DP4A_CASE( 4,  64,  1);  DP4A_CASE( 5,  64,  2);
-        DP4A_CASE( 6,  64,  4);  DP4A_CASE( 7,  64,  8);
-        DP4A_CASE( 8,  64, 16);
-        DP4A_CASE( 9, 128,  1);  DP4A_CASE(10, 128,  2);
-        DP4A_CASE(11, 128,  4);  DP4A_CASE(12, 128,  8);
-        DP4A_CASE(13, 128, 16);
-        DP4A_CASE(14, 256,  1);  DP4A_CASE(15, 256,  2);
-        DP4A_CASE(16, 256,  4);  DP4A_CASE(17, 256,  8);
-        DP4A_CASE(18, 256, 16);
-        DP4A_CASE(19, 512,  1);  DP4A_CASE(20, 512,  2);
-        DP4A_CASE(21, 512,  4);  DP4A_CASE(22, 512,  8);
-        DP4A_CASE(23, 512, 16);
-        DP4A_CASE(24, 1024,  1); DP4A_CASE(25, 1024,  2);
-        DP4A_CASE(26, 1024,  4); DP4A_CASE(27, 1024,  8);
-        DP4A_CASE(28, 1024, 16);
+#define X(ID, BS, TN) DP4A_CASE(ID, BS, TN)
+        MNB_GEMV_CONFIG_LIST(X)
+#undef X
         default: break;
     }
 #undef DP4A_CASE
+}
+
+static void appendDp4aNames(std::vector<std::string>& names) {
+#define X(ID, BS, TN) \
+    names.push_back(HIPDNN_RTC_STR(matmul_nbits_gemv_dp4a_kernel<BS, TN>));
+    MNB_GEMV_CONFIG_LIST(X)
+#undef X
 }
 
 static int tuneDp4aConfig(
@@ -1518,9 +1534,10 @@ extern "C" int hip_matmul_nbits_dp4a(
     // Step 1: dynamic per-group int8 quantization of the activation row.
     // One block per K-group, fixed 128 threads (handles bs in {32,64,128,256}).
     (void)hipGetLastError();
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(matmul_nbits_quant_act_i8_kernel<128>),
-                       dim3(static_cast<unsigned>(k_blocks)), dim3(128), 0,
-                       stream, Ah, a_qb, a_sc, K, block_size);
+    HIPDNN_RTC_LAUNCH(mnbRtcFunction,
+                      dim3(static_cast<unsigned>(k_blocks)), dim3(128), 0,
+                      stream, (Ah, a_qb, a_sc, K, block_size),
+                      matmul_nbits_quant_act_i8_kernel<128>);
 
     // Step 2: dp4a GEMV (autotuned config).
     int cfg = getOrTuneDp4aConfig(stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
@@ -1556,46 +1573,27 @@ static void launchGemvConfigI8(
               static_cast<unsigned>(batch));
     dim3 block(c.threads);
 
-    // The (BS, TN) at every case ID below MUST match kGemvConfigs[ID].
-    // grid/block above are computed from kGemvConfigs[config_id], while the
-    // kernel template parameters BLOCK_SIZE/TILE_N are baked in here at
-    // compile time. If the two ever drift, the launched grid/block won't
-    // match the template the kernel was compiled for: cross-warp reduction
-    // reads uninitialized warp_sums slots (NaN/Inf in output), the K
-    // accumulation stride (BLOCK_SIZE) won't match the launched thread
-    // count, and only a fraction of the N outputs get written -- the rest
-    // keep whatever was in the (often reused) output buffer beforehand.
-    // This kept layers.0 in_proj_a inheriting in_proj_b's residual values
-    // and was masked for in_proj_b only because autotune's prior launches
-    // happened to leave the slot in a "looks correct" state.
 #define GEMV_I8_CASE(ID, BS, TN) \
     case ID: \
-        hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(matmul_nbits_gemv_kernel_i8<BS, TN>), \
-            grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs); \
-        break
+        HIPDNN_RTC_LAUNCH(mnbRtcFunction, grid, block, 0, stream, \
+            (A, B, sc, zp, bi, out, M, N, K, bs), \
+            matmul_nbits_gemv_kernel_i8<BS, TN>); \
+        break;
 
     switch (config_id) {
-        GEMV_I8_CASE( 0,  32,  1);  GEMV_I8_CASE( 1,  32,  2);
-        GEMV_I8_CASE( 2,  32,  4);  GEMV_I8_CASE( 3,  32,  8);
-        GEMV_I8_CASE( 4,  64,  1);  GEMV_I8_CASE( 5,  64,  2);
-        GEMV_I8_CASE( 6,  64,  4);  GEMV_I8_CASE( 7,  64,  8);
-        GEMV_I8_CASE( 8,  64, 16);
-        GEMV_I8_CASE( 9, 128,  1);  GEMV_I8_CASE(10, 128,  2);
-        GEMV_I8_CASE(11, 128,  4);  GEMV_I8_CASE(12, 128,  8);
-        GEMV_I8_CASE(13, 128, 16);
-        GEMV_I8_CASE(14, 256,  1);  GEMV_I8_CASE(15, 256,  2);
-        GEMV_I8_CASE(16, 256,  4);  GEMV_I8_CASE(17, 256,  8);
-        GEMV_I8_CASE(18, 256, 16);
-        GEMV_I8_CASE(19, 512,  1);  GEMV_I8_CASE(20, 512,  2);
-        GEMV_I8_CASE(21, 512,  4);  GEMV_I8_CASE(22, 512,  8);
-        GEMV_I8_CASE(23, 512, 16);
-        GEMV_I8_CASE(24, 1024,  1); GEMV_I8_CASE(25, 1024,  2);
-        GEMV_I8_CASE(26, 1024,  4); GEMV_I8_CASE(27, 1024,  8);
-        GEMV_I8_CASE(28, 1024, 16);
+#define X(ID, BS, TN) GEMV_I8_CASE(ID, BS, TN)
+        MNB_GEMV_CONFIG_LIST(X)
+#undef X
         default: break;
     }
 #undef GEMV_I8_CASE
+}
+
+static void appendGemvI8Names(std::vector<std::string>& names) {
+#define X(ID, BS, TN) \
+    names.push_back(HIPDNN_RTC_STR(matmul_nbits_gemv_kernel_i8<BS, TN>));
+    MNB_GEMV_CONFIG_LIST(X)
+#undef X
 }
 
 static int tuneGemvConfigI8(
@@ -1998,32 +1996,25 @@ static void launchGemvConfigU3(
 
 #define GEMV_U3_CASE(ID, BS, TN) \
     case ID: \
-        hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(matmul_nbits_gemv_kernel_u3<BS, TN>), \
-            grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs); \
-        break
+        HIPDNN_RTC_LAUNCH(mnbRtcFunction, grid, block, 0, stream, \
+            (A, B, sc, zp, bi, out, M, N, K, bs), \
+            matmul_nbits_gemv_kernel_u3<BS, TN>); \
+        break;
 
     switch (config_id) {
-        GEMV_U3_CASE( 0,  32,  1);  GEMV_U3_CASE( 1,  32,  2);
-        GEMV_U3_CASE( 2,  32,  4);  GEMV_U3_CASE( 3,  32,  8);
-        GEMV_U3_CASE( 4,  64,  1);  GEMV_U3_CASE( 5,  64,  2);
-        GEMV_U3_CASE( 6,  64,  4);  GEMV_U3_CASE( 7,  64,  8);
-        GEMV_U3_CASE( 8,  64, 16);
-        GEMV_U3_CASE( 9, 128,  1);  GEMV_U3_CASE(10, 128,  2);
-        GEMV_U3_CASE(11, 128,  4);  GEMV_U3_CASE(12, 128,  8);
-        GEMV_U3_CASE(13, 128, 16);
-        GEMV_U3_CASE(14, 256,  1);  GEMV_U3_CASE(15, 256,  2);
-        GEMV_U3_CASE(16, 256,  4);  GEMV_U3_CASE(17, 256,  8);
-        GEMV_U3_CASE(18, 256, 16);
-        GEMV_U3_CASE(19, 512,  1);  GEMV_U3_CASE(20, 512,  2);
-        GEMV_U3_CASE(21, 512,  4);  GEMV_U3_CASE(22, 512,  8);
-        GEMV_U3_CASE(23, 512, 16);
-        GEMV_U3_CASE(24, 1024,  1); GEMV_U3_CASE(25, 1024,  2);
-        GEMV_U3_CASE(26, 1024,  4); GEMV_U3_CASE(27, 1024,  8);
-        GEMV_U3_CASE(28, 1024, 16);
+#define X(ID, BS, TN) GEMV_U3_CASE(ID, BS, TN)
+        MNB_GEMV_CONFIG_LIST(X)
+#undef X
         default: break;
     }
 #undef GEMV_U3_CASE
+}
+
+static void appendGemvU3Names(std::vector<std::string>& names) {
+#define X(ID, BS, TN) \
+    names.push_back(HIPDNN_RTC_STR(matmul_nbits_gemv_kernel_u3<BS, TN>));
+    MNB_GEMV_CONFIG_LIST(X)
+#undef X
 }
 
 static int tuneGemvConfigU3(
@@ -2397,32 +2388,25 @@ static void launchGemvConfigU2(
 
 #define GEMV_U2_CASE(ID, BS, TN) \
     case ID: \
-        hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(matmul_nbits_gemv_kernel_u2<BS, TN>), \
-            grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs); \
-        break
+        HIPDNN_RTC_LAUNCH(mnbRtcFunction, grid, block, 0, stream, \
+            (A, B, sc, zp, bi, out, M, N, K, bs), \
+            matmul_nbits_gemv_kernel_u2<BS, TN>); \
+        break;
 
     switch (config_id) {
-        GEMV_U2_CASE( 0,  32,  1);  GEMV_U2_CASE( 1,  32,  2);
-        GEMV_U2_CASE( 2,  32,  4);  GEMV_U2_CASE( 3,  32,  8);
-        GEMV_U2_CASE( 4,  64,  1);  GEMV_U2_CASE( 5,  64,  2);
-        GEMV_U2_CASE( 6,  64,  4);  GEMV_U2_CASE( 7,  64,  8);
-        GEMV_U2_CASE( 8,  64, 16);
-        GEMV_U2_CASE( 9, 128,  1);  GEMV_U2_CASE(10, 128,  2);
-        GEMV_U2_CASE(11, 128,  4);  GEMV_U2_CASE(12, 128,  8);
-        GEMV_U2_CASE(13, 128, 16);
-        GEMV_U2_CASE(14, 256,  1);  GEMV_U2_CASE(15, 256,  2);
-        GEMV_U2_CASE(16, 256,  4);  GEMV_U2_CASE(17, 256,  8);
-        GEMV_U2_CASE(18, 256, 16);
-        GEMV_U2_CASE(19, 512,  1);  GEMV_U2_CASE(20, 512,  2);
-        GEMV_U2_CASE(21, 512,  4);  GEMV_U2_CASE(22, 512,  8);
-        GEMV_U2_CASE(23, 512, 16);
-        GEMV_U2_CASE(24, 1024,  1); GEMV_U2_CASE(25, 1024,  2);
-        GEMV_U2_CASE(26, 1024,  4); GEMV_U2_CASE(27, 1024,  8);
-        GEMV_U2_CASE(28, 1024, 16);
+#define X(ID, BS, TN) GEMV_U2_CASE(ID, BS, TN)
+        MNB_GEMV_CONFIG_LIST(X)
+#undef X
         default: break;
     }
 #undef GEMV_U2_CASE
+}
+
+static void appendGemvU2Names(std::vector<std::string>& names) {
+#define X(ID, BS, TN) \
+    names.push_back(HIPDNN_RTC_STR(matmul_nbits_gemv_kernel_u2<BS, TN>));
+    MNB_GEMV_CONFIG_LIST(X)
+#undef X
 }
 
 static int tuneGemvConfigU2(
@@ -3297,6 +3281,24 @@ static int matmulNbitsLutWmmaConfig(int M, int N, int K, int gs, bool has_zp,
     return cid;
 }
 
+// The (BM, BN) tiles the dispatch below can reach, each with the warp-tile,
+// occupancy and BK template arguments it is instantiated with. Several
+// kWmmaConfigs entries (one per swizzle_n) map onto the same tile, so this is a
+// separate list; it drives both the dispatch and the hipRTC name expressions.
+// BK is spelled out rather than left to the default because the WT_N=4 forms
+// need one that differs from BM/(WT_M*WT_N).
+#define MNB_WMMA_TILE_LIST(X)                                                 \
+    X(128, 128, 2, 4, 8, 32) X(128, 256, 2, 4, 8, 32)                         \
+    X(256, 128, 4, 2, 6, 32)                                                  \
+    X(128,  32, 2, 1, 8, 64) X( 64,  32, 2, 1, 8, 32)                         \
+    X( 64,  64, 2, 2, 8, 16) X( 64, 128, 2, 2, 8, 16)                         \
+    X(128,  64, 2, 2, 8, 32) X(128, 256, 2, 2, 8, 32) X(128, 128, 2, 2, 8, 32)
+
+// The fused dispatch reaches one more tile than the dequant+GEMM one, so its
+// MatMulNBitsFp16GEMM instantiation would never be launched.
+#define MNB_WMMA_FUSED_ONLY_TILE_LIST(X)                                      \
+    X(128, 128, 4, 4, 8, 32)
+
 static void launchDequant(
     hipStream_t stream,
     const unsigned char* B_packed, const _Float16* scales,
@@ -3307,8 +3309,9 @@ static void launchDequant(
     int k_groups = (K + DQ_THR * 8 - 1) / (DQ_THR * 8);
     dim3 dq_grid(static_cast<unsigned>(k_groups), static_cast<unsigned>(N));
     dim3 dq_block(DQ_THR);
-    hipLaunchKernelGGL(dequant_u4_to_fp16, dq_grid, dq_block, 0, stream,
-                       B_packed, scales, zeros, B_fp16, N, K, gs, ngk);
+    HIPDNN_RTC_LAUNCH(mnbRtcFunction, dq_grid, dq_block, 0, stream,
+                      (B_packed, scales, zeros, B_fp16, N, K, gs, ngk),
+                      dequant_u4_to_fp16);
 }
 
 static void launchWmmaConfig(
@@ -3327,265 +3330,124 @@ static void launchWmmaConfig(
     if (!c.fused) {
         launchDequant(stream, B, scales, zeros, B_fp16_buf, N, K, gs, ngk);
 
-#define FP16_GEMM_LAUNCH(BM_V, BN_V, BC_V) do { \
-    constexpr int WM_ = BM_V / (2 * 16); \
-    constexpr int WN_ = BN_V / (2 * 16); \
+#define FP16_GEMM_LAUNCH(BM_V, BN_V, WTM_V, WTN_V, WEU_V, BK_V, BC_V) do { \
+    constexpr int WM_ = BM_V / (WTM_V * 16); \
+    constexpr int WN_ = BN_V / (WTN_V * 16); \
     constexpr int THR_ = WM_ * WN_ * 32; \
     dim3 grid_(static_cast<unsigned>((N + BN_V - 1) / BN_V), \
                static_cast<unsigned>((M + BM_V - 1) / BM_V)); \
     dim3 block_(THR_); \
-    hipLaunchKernelGGL( \
-        HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 2, 2, 8, BC_V>), \
-        grid_, block_, 0, stream, \
-        M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n); \
+    HIPDNN_RTC_LAUNCH(mnbRtcFunction, grid_, block_, 0, stream, \
+        (M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n), \
+        MatMulNBitsFp16GEMM<BM_V, BN_V, WTM_V, WTN_V, WEU_V, BC_V, BK_V>); \
 } while(0)
 
-#define FP16_TILE_CASE(BM_V, BN_V) \
-    if (need_bc) FP16_GEMM_LAUNCH(BM_V, BN_V, true); \
-    else         FP16_GEMM_LAUNCH(BM_V, BN_V, false)
+#define FP16_TILE_CASE(BM_V, BN_V, WTM_V, WTN_V, WEU_V, BK_V) \
+    if (need_bc) FP16_GEMM_LAUNCH(BM_V, BN_V, WTM_V, WTN_V, WEU_V, BK_V, true); \
+    else         FP16_GEMM_LAUNCH(BM_V, BN_V, WTM_V, WTN_V, WEU_V, BK_V, false)
 
-#define FP16_GEMM_LAUNCH_WT4(BM_V, BN_V, BC_V) do { \
-    constexpr int WM_ = BM_V / (4 * 16); \
-    constexpr int WN_ = BN_V / (2 * 16); \
-    constexpr int THR_ = WM_ * WN_ * 32; \
-    dim3 grid_(static_cast<unsigned>((N + BN_V - 1) / BN_V), \
-               static_cast<unsigned>((M + BM_V - 1) / BM_V)); \
-    dim3 block_(THR_); \
-    hipLaunchKernelGGL( \
-        HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 4, 2, 6, BC_V>), \
-        grid_, block_, 0, stream, \
-        M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n); \
-} while(0)
-
-#define FP16_TILE_CASE_WT4(BM_V, BN_V) \
-    if (need_bc) FP16_GEMM_LAUNCH_WT4(BM_V, BN_V, true); \
-    else         FP16_GEMM_LAUNCH_WT4(BM_V, BN_V, false)
-
-#define FP16_GEMM_LAUNCH_WT21(BM_V, BN_V, BC_V) do { \
-    constexpr int WM_ = BM_V / (2 * 16); \
-    constexpr int WN_ = BN_V / (1 * 16); \
-    constexpr int THR_ = WM_ * WN_ * 32; \
-    dim3 grid_(static_cast<unsigned>((N + BN_V - 1) / BN_V), \
-               static_cast<unsigned>((M + BM_V - 1) / BM_V)); \
-    dim3 block_(THR_); \
-    hipLaunchKernelGGL( \
-        HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 2, 1, 8, BC_V>), \
-        grid_, block_, 0, stream, \
-        M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n); \
-} while(0)
-
-#define FP16_TILE_CASE_WT21(BM_V, BN_V) \
-    if (need_bc) FP16_GEMM_LAUNCH_WT21(BM_V, BN_V, true); \
-    else         FP16_GEMM_LAUNCH_WT21(BM_V, BN_V, false)
-
-#define FP16_GEMM_LAUNCH_WT24(BM_V, BN_V, BK_V, BC_V) do { \
-    constexpr int WM_ = BM_V / (2 * 16); \
-    constexpr int WN_ = BN_V / (4 * 16); \
-    constexpr int THR_ = WM_ * WN_ * 32; \
-    dim3 grid_(static_cast<unsigned>((N + BN_V - 1) / BN_V), \
-               static_cast<unsigned>((M + BM_V - 1) / BM_V)); \
-    dim3 block_(THR_); \
-    hipLaunchKernelGGL( \
-        HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 2, 4, 8, BC_V, BK_V>), \
-        grid_, block_, 0, stream, \
-        M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n); \
-} while(0)
-
-#define FP16_TILE_CASE_WT24(BM_V, BN_V, BK_V) \
-    if (need_bc) FP16_GEMM_LAUNCH_WT24(BM_V, BN_V, BK_V, true); \
-    else         FP16_GEMM_LAUNCH_WT24(BM_V, BN_V, BK_V, false)
-
+        // The WT_N=4 forms carry a BK that differs from the default, so each
+        // (tile, BK) pair needs its own case. Matching on wmmaBk() rather than
+        // assuming 32 keeps a future table entry with a different BK from
+        // silently launching the wrong instantiation.
         const int c_bk = wmmaBk(c);
         if      (c.wt_m == 2 && c.wt_n == 4 && c.bm == 128 && c.bn == 128 && c_bk == 32)
-                                                  FP16_TILE_CASE_WT24(128, 128, 32);
+                                          FP16_TILE_CASE(128, 128, 2, 4, 8, 32);
         else if (c.wt_m == 2 && c.wt_n == 4 && c.bm == 128 && c.bn == 256 && c_bk == 32)
-                                                  FP16_TILE_CASE_WT24(128, 256, 32);
+                                          FP16_TILE_CASE(128, 256, 2, 4, 8, 32);
         else if (c.wt_m == 4 && c.bm == 256 && c.bn == 128)
-                                                  FP16_TILE_CASE_WT4(256, 128);
+                                          FP16_TILE_CASE(256, 128, 4, 2, 6, 32);
         else if (c.wt_n == 1 && c.bm == 128 && c.bn == 32)
-                                                  FP16_TILE_CASE_WT21(128, 32);
+                                          FP16_TILE_CASE(128,  32, 2, 1, 8, 64);
         else if (c.wt_n == 1 && c.bm ==  64 && c.bn == 32)
-                                                  FP16_TILE_CASE_WT21( 64, 32);
-        else if (c.bm ==  64 && c.bn ==  64) FP16_TILE_CASE( 64,  64);
-        else if (c.bm ==  64 && c.bn == 128) FP16_TILE_CASE( 64, 128);
-        else if (c.bm == 128 && c.bn ==  64) FP16_TILE_CASE(128,  64);
-        else if (c.bm == 128 && c.bn == 256) FP16_TILE_CASE(128, 256);
-        else                                  FP16_TILE_CASE(128, 128);
+                                          FP16_TILE_CASE( 64,  32, 2, 1, 8, 32);
+        else if (c.bm ==  64 && c.bn ==  64) FP16_TILE_CASE( 64,  64, 2, 2, 8, 16);
+        else if (c.bm ==  64 && c.bn == 128) FP16_TILE_CASE( 64, 128, 2, 2, 8, 16);
+        else if (c.bm == 128 && c.bn ==  64) FP16_TILE_CASE(128,  64, 2, 2, 8, 32);
+        else if (c.bm == 128 && c.bn == 256) FP16_TILE_CASE(128, 256, 2, 2, 8, 32);
+        else                                 FP16_TILE_CASE(128, 128, 2, 2, 8, 32);
 
-#undef FP16_TILE_CASE_WT24
-#undef FP16_GEMM_LAUNCH_WT24
-#undef FP16_TILE_CASE_WT21
-#undef FP16_GEMM_LAUNCH_WT21
-#undef FP16_TILE_CASE_WT4
-#undef FP16_GEMM_LAUNCH_WT4
 #undef FP16_TILE_CASE
 #undef FP16_GEMM_LAUNCH
         return;
     }
 
-#define WMMA_LAUNCH(BM_V, BN_V, BC_V) do { \
-    constexpr int WM_ = BM_V / (2 * 16); \
-    constexpr int WN_ = BN_V / (2 * 16); \
+#define WMMA_LAUNCH(BM_V, BN_V, WTM_V, WTN_V, WEU_V, BK_V, BC_V) do { \
+    constexpr int WM_ = BM_V / (WTM_V * 16); \
+    constexpr int WN_ = BN_V / (WTN_V * 16); \
     constexpr int THR_ = WM_ * WN_ * 32; \
     dim3 grid_(static_cast<unsigned>((N + BN_V - 1) / BN_V), \
                static_cast<unsigned>((M + BM_V - 1) / BM_V)); \
     dim3 block_(THR_); \
     if (has_zp) { \
-        hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 2, 8, BC_V>), \
-            grid_, block_, 0, stream, \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
-            b_row_bytes); \
+        HIPDNN_RTC_LAUNCH(mnbRtcFunction, grid_, block_, 0, stream, \
+            (M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
+             b_row_bytes), \
+            MatMulNBitsWMMA_ZP<BM_V, BN_V, WTM_V, WTN_V, WEU_V, BC_V, BK_V>); \
     } else { \
-        hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 2, 8, BC_V>), \
-            grid_, block_, 0, stream, \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
-            b_row_bytes); \
+        HIPDNN_RTC_LAUNCH(mnbRtcFunction, grid_, block_, 0, stream, \
+            (M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
+             b_row_bytes), \
+            MatMulNBitsWMMA_NoZP<BM_V, BN_V, WTM_V, WTN_V, WEU_V, BC_V, BK_V>); \
     } \
 } while(0)
 
-#define WMMA_TILE_CASE(BM_V, BN_V) \
-    if (need_bc) WMMA_LAUNCH(BM_V, BN_V, true); \
-    else         WMMA_LAUNCH(BM_V, BN_V, false)
+#define WMMA_TILE_CASE(BM_V, BN_V, WTM_V, WTN_V, WEU_V, BK_V) \
+    if (need_bc) WMMA_LAUNCH(BM_V, BN_V, WTM_V, WTN_V, WEU_V, BK_V, true); \
+    else         WMMA_LAUNCH(BM_V, BN_V, WTM_V, WTN_V, WEU_V, BK_V, false)
 
-#define WMMA_LAUNCH_WT4(BM_V, BN_V, BC_V) do { \
-    constexpr int WM_ = BM_V / (4 * 16); \
-    constexpr int WN_ = BN_V / (2 * 16); \
-    constexpr int THR_ = WM_ * WN_ * 32; \
-    dim3 grid_(static_cast<unsigned>((N + BN_V - 1) / BN_V), \
-               static_cast<unsigned>((M + BM_V - 1) / BM_V)); \
-    dim3 block_(THR_); \
-    if (has_zp) { \
-        hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 4, 2, 6, BC_V>), \
-            grid_, block_, 0, stream, \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
-            b_row_bytes); \
-    } else { \
-        hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 4, 2, 6, BC_V>), \
-            grid_, block_, 0, stream, \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
-            b_row_bytes); \
-    } \
-} while(0)
-
-#define WMMA_TILE_CASE_WT4(BM_V, BN_V) \
-    if (need_bc) WMMA_LAUNCH_WT4(BM_V, BN_V, true); \
-    else         WMMA_LAUNCH_WT4(BM_V, BN_V, false)
-
-#define WMMA_LAUNCH_WT21(BM_V, BN_V, BC_V) do { \
-    constexpr int WM_ = BM_V / (2 * 16); \
-    constexpr int WN_ = BN_V / (1 * 16); \
-    constexpr int THR_ = WM_ * WN_ * 32; \
-    dim3 grid_(static_cast<unsigned>((N + BN_V - 1) / BN_V), \
-               static_cast<unsigned>((M + BM_V - 1) / BM_V)); \
-    dim3 block_(THR_); \
-    if (has_zp) { \
-        hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 1, 8, BC_V>), \
-            grid_, block_, 0, stream, \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
-            b_row_bytes); \
-    } else { \
-        hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 1, 8, BC_V>), \
-            grid_, block_, 0, stream, \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
-            b_row_bytes); \
-    } \
-} while(0)
-
-#define WMMA_TILE_CASE_WT21(BM_V, BN_V) \
-    if (need_bc) WMMA_LAUNCH_WT21(BM_V, BN_V, true); \
-    else         WMMA_LAUNCH_WT21(BM_V, BN_V, false)
-
-#define WMMA_LAUNCH_WT24(BM_V, BN_V, BK_V, BC_V) do { \
-    constexpr int WM_ = BM_V / (2 * 16); \
-    constexpr int WN_ = BN_V / (4 * 16); \
-    constexpr int THR_ = WM_ * WN_ * 32; \
-    dim3 grid_(static_cast<unsigned>((N + BN_V - 1) / BN_V), \
-               static_cast<unsigned>((M + BM_V - 1) / BM_V)); \
-    dim3 block_(THR_); \
-    if (has_zp) { \
-        hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 4, 8, BC_V, BK_V>), \
-            grid_, block_, 0, stream, \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
-            b_row_bytes); \
-    } else { \
-        hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 4, 8, BC_V, BK_V>), \
-            grid_, block_, 0, stream, \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
-            b_row_bytes); \
-    } \
-} while(0)
-
-#define WMMA_TILE_CASE_WT24(BM_V, BN_V, BK_V) \
-    if (need_bc) WMMA_LAUNCH_WT24(BM_V, BN_V, BK_V, true); \
-    else         WMMA_LAUNCH_WT24(BM_V, BN_V, BK_V, false)
-
-#define WMMA_LAUNCH_WT44(BM_V, BN_V, BK_V, BC_V) do { \
-    constexpr int WM_ = BM_V / (4 * 16); \
-    constexpr int WN_ = BN_V / (4 * 16); \
-    constexpr int THR_ = WM_ * WN_ * 32; \
-    dim3 grid_(static_cast<unsigned>((N + BN_V - 1) / BN_V), \
-               static_cast<unsigned>((M + BM_V - 1) / BM_V)); \
-    dim3 block_(THR_); \
-    if (has_zp) { \
-        hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 4, 4, 8, BC_V, BK_V>), \
-            grid_, block_, 0, stream, \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
-            b_row_bytes); \
-    } else { \
-        hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 4, 4, 8, BC_V, BK_V>), \
-            grid_, block_, 0, stream, \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
-            b_row_bytes); \
-    } \
-} while(0)
-
-#define WMMA_TILE_CASE_WT44(BM_V, BN_V, BK_V) \
-    if (need_bc) WMMA_LAUNCH_WT44(BM_V, BN_V, BK_V, true); \
-    else         WMMA_LAUNCH_WT44(BM_V, BN_V, BK_V, false)
-
-    // The WT_N=4 forms carry BK as a template argument, so each (tile, BK) pair
-    // needs its own case. Matching on wmmaBk() rather than assuming 32 keeps a
-    // future table entry with a different BK from silently launching the wrong
-    // instantiation.
+    // The WT_N=4 forms carry a BK that differs from the default, so each
+    // (tile, BK) pair needs its own case. Matching on wmmaBk() rather than
+    // assuming 32 keeps a future table entry with a different BK from silently
+    // launching the wrong instantiation.
     const int c_bk = wmmaBk(c);
     if      (c.wt_m == 4 && c.wt_n == 4 && c.bm == 128 && c.bn == 128 && c_bk == 32)
-                                              WMMA_TILE_CASE_WT44(128, 128, 32);
+                                      WMMA_TILE_CASE(128, 128, 4, 4, 8, 32);
     else if (c.wt_m == 2 && c.wt_n == 4 && c.bm == 128 && c.bn == 128 && c_bk == 32)
-                                              WMMA_TILE_CASE_WT24(128, 128, 32);
+                                      WMMA_TILE_CASE(128, 128, 2, 4, 8, 32);
     else if (c.wt_m == 2 && c.wt_n == 4 && c.bm == 128 && c.bn == 256 && c_bk == 32)
-                                              WMMA_TILE_CASE_WT24(128, 256, 32);
+                                      WMMA_TILE_CASE(128, 256, 2, 4, 8, 32);
     else if (c.wt_m == 4 && c.bm == 256 && c.bn == 128)
-                                              WMMA_TILE_CASE_WT4(256, 128);
+                                      WMMA_TILE_CASE(256, 128, 4, 2, 6, 32);
     else if (c.wt_n == 1 && c.bm == 128 && c.bn == 32)
-                                              WMMA_TILE_CASE_WT21(128, 32);
+                                      WMMA_TILE_CASE(128,  32, 2, 1, 8, 64);
     else if (c.wt_n == 1 && c.bm ==  64 && c.bn == 32)
-                                              WMMA_TILE_CASE_WT21( 64, 32);
-    else if (c.bm ==  64 && c.bn ==  64) WMMA_TILE_CASE( 64,  64);
-    else if (c.bm ==  64 && c.bn == 128) WMMA_TILE_CASE( 64, 128);
-    else if (c.bm == 128 && c.bn ==  64) WMMA_TILE_CASE(128,  64);
-    else if (c.bm == 128 && c.bn == 256) WMMA_TILE_CASE(128, 256);
-    else                                  WMMA_TILE_CASE(128, 128);
+                                      WMMA_TILE_CASE( 64,  32, 2, 1, 8, 32);
+    else if (c.bm ==  64 && c.bn ==  64) WMMA_TILE_CASE( 64,  64, 2, 2, 8, 16);
+    else if (c.bm ==  64 && c.bn == 128) WMMA_TILE_CASE( 64, 128, 2, 2, 8, 16);
+    else if (c.bm == 128 && c.bn ==  64) WMMA_TILE_CASE(128,  64, 2, 2, 8, 32);
+    else if (c.bm == 128 && c.bn == 256) WMMA_TILE_CASE(128, 256, 2, 2, 8, 32);
+    else                                 WMMA_TILE_CASE(128, 128, 2, 2, 8, 32);
 
-#undef WMMA_TILE_CASE_WT44
-#undef WMMA_LAUNCH_WT44
-#undef WMMA_TILE_CASE_WT24
-#undef WMMA_LAUNCH_WT24
-#undef WMMA_TILE_CASE_WT21
-#undef WMMA_LAUNCH_WT21
-#undef WMMA_TILE_CASE_WT4
-#undef WMMA_LAUNCH_WT4
 #undef WMMA_TILE_CASE
 #undef WMMA_LAUNCH
+}
+
+static void appendWmmaNames(std::vector<std::string>& names) {
+#define MNB_WMMA_FUSED_NAMES(BM, BN, WTM, WTN, WEU, BK) \
+    names.push_back( \
+        HIPDNN_RTC_STR(MatMulNBitsWMMA_ZP<BM, BN, WTM, WTN, WEU, false, BK>)); \
+    names.push_back( \
+        HIPDNN_RTC_STR(MatMulNBitsWMMA_ZP<BM, BN, WTM, WTN, WEU, true, BK>)); \
+    names.push_back( \
+        HIPDNN_RTC_STR(MatMulNBitsWMMA_NoZP<BM, BN, WTM, WTN, WEU, false, BK>)); \
+    names.push_back( \
+        HIPDNN_RTC_STR(MatMulNBitsWMMA_NoZP<BM, BN, WTM, WTN, WEU, true, BK>));
+
+#define X(BM, BN, WTM, WTN, WEU, BK) \
+    names.push_back( \
+        HIPDNN_RTC_STR(MatMulNBitsFp16GEMM<BM, BN, WTM, WTN, WEU, false, BK>)); \
+    names.push_back( \
+        HIPDNN_RTC_STR(MatMulNBitsFp16GEMM<BM, BN, WTM, WTN, WEU, true, BK>)); \
+    MNB_WMMA_FUSED_NAMES(BM, BN, WTM, WTN, WEU, BK)
+    MNB_WMMA_TILE_LIST(X)
+#undef X
+
+#define X(BM, BN, WTM, WTN, WEU, BK) \
+    MNB_WMMA_FUSED_NAMES(BM, BN, WTM, WTN, WEU, BK)
+    MNB_WMMA_FUSED_ONLY_TILE_LIST(X)
+#undef X
+#undef MNB_WMMA_FUSED_NAMES
 }
 
 // Cached temp buffer for dequant+GEMM path
@@ -3647,10 +3509,10 @@ static void launchTranspose2DFp16(hipStream_t stream,
     constexpr int TILE = 32;
     dim3 block(TILE, 8);
     dim3 grid((cols + TILE - 1) / TILE, (rows + TILE - 1) / TILE);
-    hipLaunchKernelGGL(transpose2d_fp16_kernel, grid, block, 0, stream,
-                       static_cast<const _Float16*>(src),
-                       static_cast<_Float16*>(dst),
-                       rows, cols);
+    HIPDNN_RTC_LAUNCH(mnbRtcFunction, grid, block, 0, stream,
+                      (static_cast<const _Float16*>(src),
+                       static_cast<_Float16*>(dst), rows, cols),
+                      transpose2d_fp16_kernel);
 }
 
 static _Float16* g_a_col_buf = nullptr;
@@ -4450,6 +4312,9 @@ static constexpr WmmaConfigI8 kWmmaI8Configs[] = {
 static constexpr int kNumWmmaI8Configs =
     static_cast<int>(sizeof(kWmmaI8Configs) / sizeof(kWmmaI8Configs[0]));
 
+#define MNB_WMMA_I8_TILE_LIST(X)                                              \
+    X( 64,  64) X( 64, 128) X(128,  64) X(128, 256) X(128, 128)
+
 static void launchWmmaConfigI8(
     int config_id, hipStream_t stream,
     int M, int N, int K,
@@ -4470,17 +4335,15 @@ static void launchWmmaConfigI8(
                static_cast<unsigned>((M + BM_V - 1) / BM_V));                 \
     dim3 block_(THR_);                                                        \
     if (has_zp) {                                                             \
-        hipLaunchKernelGGL(                                                   \
-            HIP_KERNEL_NAME(                                                  \
-                MatMulNBitsWMMA_I8_ZP<BM_V, BN_V, 2, 2, 8, BC_V>),            \
-            grid_, block_, 0, stream,                                         \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
+        HIPDNN_RTC_LAUNCH(mnbRtcFunction, grid_, block_, 0, stream,           \
+            (M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc,              \
+             c.swizzle_n),                                                    \
+            MatMulNBitsWMMA_I8_ZP<BM_V, BN_V, 2, 2, 8, BC_V>);                \
     } else {                                                                  \
-        hipLaunchKernelGGL(                                                   \
-            HIP_KERNEL_NAME(                                                  \
-                MatMulNBitsWMMA_I8_NoZP<BM_V, BN_V, 2, 2, 8, BC_V>),          \
-            grid_, block_, 0, stream,                                         \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
+        HIPDNN_RTC_LAUNCH(mnbRtcFunction, grid_, block_, 0, stream,           \
+            (M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc,              \
+             c.swizzle_n),                                                    \
+            MatMulNBitsWMMA_I8_NoZP<BM_V, BN_V, 2, 2, 8, BC_V>);              \
     }                                                                         \
 } while (0)
 
@@ -4496,6 +4359,20 @@ static void launchWmmaConfigI8(
 
 #undef WMMA_I8_TILE_CASE
 #undef WMMA_I8_LAUNCH
+}
+
+static void appendWmmaI8Names(std::vector<std::string>& names) {
+#define X(BM, BN) \
+    names.push_back( \
+        HIPDNN_RTC_STR(MatMulNBitsWMMA_I8_ZP<BM, BN, 2, 2, 8, false>)); \
+    names.push_back( \
+        HIPDNN_RTC_STR(MatMulNBitsWMMA_I8_ZP<BM, BN, 2, 2, 8, true>)); \
+    names.push_back( \
+        HIPDNN_RTC_STR(MatMulNBitsWMMA_I8_NoZP<BM, BN, 2, 2, 8, false>)); \
+    names.push_back( \
+        HIPDNN_RTC_STR(MatMulNBitsWMMA_I8_NoZP<BM, BN, 2, 2, 8, true>));
+    MNB_WMMA_I8_TILE_LIST(X)
+#undef X
 }
 
 static int tuneWmmaConfigI8(
@@ -5013,8 +4890,9 @@ static void launchDequantU3(
     int k_groups = (K + DQ_THR * 8 - 1) / (DQ_THR * 8);
     dim3 dq_grid(static_cast<unsigned>(k_groups), static_cast<unsigned>(N));
     dim3 dq_block(DQ_THR);
-    hipLaunchKernelGGL(dequant_u3_to_fp16, dq_grid, dq_block, 0, stream,
-                       B, scales, zeros, B_fp16, N, K, gs, ngk);
+    HIPDNN_RTC_LAUNCH(mnbRtcFunction, dq_grid, dq_block, 0, stream,
+                      (B, scales, zeros, B_fp16, N, K, gs, ngk),
+                      dequant_u3_to_fp16);
 }
 
 struct WmmaConfigU3 {
@@ -5049,6 +4927,11 @@ static constexpr WmmaConfigU3 kWmmaU3Configs[] = {
 static constexpr int kNumWmmaU3Configs =
     static_cast<int>(sizeof(kWmmaU3Configs) / sizeof(kWmmaU3Configs[0]));
 
+#define MNB_WMMA_U3_TILE_LIST(X)                                              \
+    X(256, 128, 4, 2, 6)                                                      \
+    X( 64,  64, 2, 2, 8) X( 64, 128, 2, 2, 8)                                 \
+    X(128,  64, 2, 2, 8) X(128, 256, 2, 2, 8) X(128, 128, 2, 2, 8)
+
 static void launchWmmaConfigU3(
     int config_id, hipStream_t stream,
     int M, int N, int K,
@@ -5069,119 +4952,95 @@ static void launchWmmaConfigU3(
     if (!c.fused) {
         launchDequantU3(stream, B, scales, zeros, B_fp16_buf, N, K, gs, ngk);
 
-#define U3_FP16_GEMM_LAUNCH(BM_V, BN_V, BC_V) do {                            \
-    constexpr int WM_  = BM_V / (2 * 16);                                     \
-    constexpr int WN_  = BN_V / (2 * 16);                                     \
+#define U3_FP16_GEMM_LAUNCH(BM_V, BN_V, WTM_V, WTN_V, WEU_V, BC_V) do {       \
+    constexpr int WM_  = BM_V / (WTM_V * 16);                                 \
+    constexpr int WN_  = BN_V / (WTN_V * 16);                                 \
     constexpr int THR_ = WM_ * WN_ * 32;                                      \
     dim3 grid_(static_cast<unsigned>((N + BN_V - 1) / BN_V),                  \
                static_cast<unsigned>((M + BM_V - 1) / BM_V));                 \
     dim3 block_(THR_);                                                        \
-    hipLaunchKernelGGL(                                                       \
-        HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 2, 2, 8, BC_V>),      \
-        grid_, block_, 0, stream,                                             \
-        M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n);                    \
+    HIPDNN_RTC_LAUNCH(mnbRtcFunction, grid_, block_, 0, stream,               \
+        (M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n),                   \
+        MatMulNBitsFp16GEMM<BM_V, BN_V, WTM_V, WTN_V, WEU_V, BC_V>);          \
 } while (0)
 
-#define U3_FP16_TILE_CASE(BM_V, BN_V) \
-    if (need_bc) U3_FP16_GEMM_LAUNCH(BM_V, BN_V, true);  \
-    else         U3_FP16_GEMM_LAUNCH(BM_V, BN_V, false)
-
-#define U3_FP16_GEMM_LAUNCH_WT4(BM_V, BN_V, BC_V) do {                        \
-    constexpr int WM_  = BM_V / (4 * 16);                                     \
-    constexpr int WN_  = BN_V / (2 * 16);                                     \
-    constexpr int THR_ = WM_ * WN_ * 32;                                      \
-    dim3 grid_(static_cast<unsigned>((N + BN_V - 1) / BN_V),                  \
-               static_cast<unsigned>((M + BM_V - 1) / BM_V));                 \
-    dim3 block_(THR_);                                                        \
-    hipLaunchKernelGGL(                                                       \
-        HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 4, 2, 6, BC_V>),      \
-        grid_, block_, 0, stream,                                             \
-        M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n);                    \
-} while (0)
-
-#define U3_FP16_TILE_CASE_WT4(BM_V, BN_V) \
-    if (need_bc) U3_FP16_GEMM_LAUNCH_WT4(BM_V, BN_V, true);  \
-    else         U3_FP16_GEMM_LAUNCH_WT4(BM_V, BN_V, false)
+#define U3_FP16_TILE_CASE(BM_V, BN_V, WTM_V, WTN_V, WEU_V) \
+    if (need_bc) U3_FP16_GEMM_LAUNCH(BM_V, BN_V, WTM_V, WTN_V, WEU_V, true); \
+    else         U3_FP16_GEMM_LAUNCH(BM_V, BN_V, WTM_V, WTN_V, WEU_V, false)
 
              if (c.wt_m == 4 && c.bm == 256 && c.bn == 128)
-                                                 U3_FP16_TILE_CASE_WT4(256, 128);
-        else if (c.bm ==  64 && c.bn ==  64) U3_FP16_TILE_CASE( 64,  64);
-        else if (c.bm ==  64 && c.bn == 128) U3_FP16_TILE_CASE( 64, 128);
-        else if (c.bm == 128 && c.bn ==  64) U3_FP16_TILE_CASE(128,  64);
-        else if (c.bm == 128 && c.bn == 256) U3_FP16_TILE_CASE(128, 256);
-        else                                  U3_FP16_TILE_CASE(128, 128);
+                                    U3_FP16_TILE_CASE(256, 128, 4, 2, 6);
+        else if (c.bm ==  64 && c.bn ==  64)
+                                    U3_FP16_TILE_CASE( 64,  64, 2, 2, 8);
+        else if (c.bm ==  64 && c.bn == 128)
+                                    U3_FP16_TILE_CASE( 64, 128, 2, 2, 8);
+        else if (c.bm == 128 && c.bn ==  64)
+                                    U3_FP16_TILE_CASE(128,  64, 2, 2, 8);
+        else if (c.bm == 128 && c.bn == 256)
+                                    U3_FP16_TILE_CASE(128, 256, 2, 2, 8);
+        else                        U3_FP16_TILE_CASE(128, 128, 2, 2, 8);
 
-#undef U3_FP16_TILE_CASE_WT4
-#undef U3_FP16_GEMM_LAUNCH_WT4
 #undef U3_FP16_TILE_CASE
 #undef U3_FP16_GEMM_LAUNCH
         return;
     }
 
-#define WMMA_U3_LAUNCH(BM_V, BN_V, BC_V) do {                                \
-    constexpr int WM_  = BM_V / (2 * 16);                                     \
-    constexpr int WN_  = BN_V / (2 * 16);                                     \
+#define WMMA_U3_LAUNCH(BM_V, BN_V, WTM_V, WTN_V, WEU_V, BC_V) do {            \
+    constexpr int WM_  = BM_V / (WTM_V * 16);                                 \
+    constexpr int WN_  = BN_V / (WTN_V * 16);                                 \
     constexpr int THR_ = WM_ * WN_ * 32;                                      \
     dim3 grid_(static_cast<unsigned>((N + BN_V - 1) / BN_V),                  \
                static_cast<unsigned>((M + BM_V - 1) / BM_V));                 \
     dim3 block_(THR_);                                                        \
     if (has_zp) {                                                             \
-        hipLaunchKernelGGL(                                                   \
-            HIP_KERNEL_NAME(                                                  \
-                MatMulNBitsWMMA_U3_ZP<BM_V, BN_V, 2, 2, 8, BC_V>),            \
-            grid_, block_, 0, stream,                                         \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
+        HIPDNN_RTC_LAUNCH(mnbRtcFunction, grid_, block_, 0, stream,           \
+            (M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc,              \
+             c.swizzle_n),                                                    \
+            MatMulNBitsWMMA_U3_ZP<BM_V, BN_V, WTM_V, WTN_V, WEU_V, BC_V>);    \
     } else {                                                                  \
-        hipLaunchKernelGGL(                                                   \
-            HIP_KERNEL_NAME(                                                  \
-                MatMulNBitsWMMA_U3_NoZP<BM_V, BN_V, 2, 2, 8, BC_V>),          \
-            grid_, block_, 0, stream,                                         \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
+        HIPDNN_RTC_LAUNCH(mnbRtcFunction, grid_, block_, 0, stream,           \
+            (M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc,              \
+             c.swizzle_n),                                                    \
+            MatMulNBitsWMMA_U3_NoZP<BM_V, BN_V, WTM_V, WTN_V, WEU_V, BC_V>);  \
     }                                                                         \
 } while (0)
 
-#define WMMA_U3_TILE_CASE(BM_V, BN_V) \
-    if (need_bc) WMMA_U3_LAUNCH(BM_V, BN_V, true);  \
-    else         WMMA_U3_LAUNCH(BM_V, BN_V, false)
-
-#define WMMA_U3_LAUNCH_WT4(BM_V, BN_V, BC_V) do {                            \
-    constexpr int WM_  = BM_V / (4 * 16);                                     \
-    constexpr int WN_  = BN_V / (2 * 16);                                     \
-    constexpr int THR_ = WM_ * WN_ * 32;                                      \
-    dim3 grid_(static_cast<unsigned>((N + BN_V - 1) / BN_V),                  \
-               static_cast<unsigned>((M + BM_V - 1) / BM_V));                 \
-    dim3 block_(THR_);                                                        \
-    if (has_zp) {                                                             \
-        hipLaunchKernelGGL(                                                   \
-            HIP_KERNEL_NAME(                                                  \
-                MatMulNBitsWMMA_U3_ZP<BM_V, BN_V, 4, 2, 6, BC_V>),            \
-            grid_, block_, 0, stream,                                         \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
-    } else {                                                                  \
-        hipLaunchKernelGGL(                                                   \
-            HIP_KERNEL_NAME(                                                  \
-                MatMulNBitsWMMA_U3_NoZP<BM_V, BN_V, 4, 2, 6, BC_V>),          \
-            grid_, block_, 0, stream,                                         \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
-    }                                                                         \
-} while (0)
-
-#define WMMA_U3_TILE_CASE_WT4(BM_V, BN_V) \
-    if (need_bc) WMMA_U3_LAUNCH_WT4(BM_V, BN_V, true);  \
-    else         WMMA_U3_LAUNCH_WT4(BM_V, BN_V, false)
+#define WMMA_U3_TILE_CASE(BM_V, BN_V, WTM_V, WTN_V, WEU_V) \
+    if (need_bc) WMMA_U3_LAUNCH(BM_V, BN_V, WTM_V, WTN_V, WEU_V, true);  \
+    else         WMMA_U3_LAUNCH(BM_V, BN_V, WTM_V, WTN_V, WEU_V, false)
 
          if (c.wt_m == 4 && c.bm == 256 && c.bn == 128)
-                                             WMMA_U3_TILE_CASE_WT4(256, 128);
-    else if (c.bm ==  64 && c.bn ==  64) WMMA_U3_TILE_CASE( 64,  64);
-    else if (c.bm ==  64 && c.bn == 128) WMMA_U3_TILE_CASE( 64, 128);
-    else if (c.bm == 128 && c.bn ==  64) WMMA_U3_TILE_CASE(128,  64);
-    else if (c.bm == 128 && c.bn == 256) WMMA_U3_TILE_CASE(128, 256);
-    else                                  WMMA_U3_TILE_CASE(128, 128);
+                                WMMA_U3_TILE_CASE(256, 128, 4, 2, 6);
+    else if (c.bm ==  64 && c.bn ==  64)
+                                WMMA_U3_TILE_CASE( 64,  64, 2, 2, 8);
+    else if (c.bm ==  64 && c.bn == 128)
+                                WMMA_U3_TILE_CASE( 64, 128, 2, 2, 8);
+    else if (c.bm == 128 && c.bn ==  64)
+                                WMMA_U3_TILE_CASE(128,  64, 2, 2, 8);
+    else if (c.bm == 128 && c.bn == 256)
+                                WMMA_U3_TILE_CASE(128, 256, 2, 2, 8);
+    else                        WMMA_U3_TILE_CASE(128, 128, 2, 2, 8);
 
-#undef WMMA_U3_TILE_CASE_WT4
-#undef WMMA_U3_LAUNCH_WT4
 #undef WMMA_U3_TILE_CASE
 #undef WMMA_U3_LAUNCH
+}
+
+static void appendWmmaU3Names(std::vector<std::string>& names) {
+#define X(BM, BN, WTM, WTN, WEU) \
+    names.push_back( \
+        HIPDNN_RTC_STR(MatMulNBitsWMMA_U3_ZP<BM, BN, WTM, WTN, WEU, false>)); \
+    names.push_back( \
+        HIPDNN_RTC_STR(MatMulNBitsWMMA_U3_ZP<BM, BN, WTM, WTN, WEU, true>)); \
+    names.push_back( \
+        HIPDNN_RTC_STR(MatMulNBitsWMMA_U3_NoZP<BM, BN, WTM, WTN, WEU, false>)); \
+    names.push_back( \
+        HIPDNN_RTC_STR(MatMulNBitsWMMA_U3_NoZP<BM, BN, WTM, WTN, WEU, true>)); \
+    names.push_back( \
+        HIPDNN_RTC_STR(MatMulNBitsFp16GEMM<BM, BN, WTM, WTN, WEU, false>)); \
+    names.push_back( \
+        HIPDNN_RTC_STR(MatMulNBitsFp16GEMM<BM, BN, WTM, WTN, WEU, true>));
+    MNB_WMMA_U3_TILE_LIST(X)
+#undef X
 }
 
 static int tuneWmmaConfigU3(
@@ -5670,8 +5529,9 @@ static void launchDequantU2(
     int k_groups = (K + DQ_THR * 8 - 1) / (DQ_THR * 8);
     dim3 dq_grid(static_cast<unsigned>(k_groups), static_cast<unsigned>(N));
     dim3 dq_block(DQ_THR);
-    hipLaunchKernelGGL(dequant_u2_to_fp16, dq_grid, dq_block, 0, stream,
-                       B, scales, zeros, B_fp16, N, K, gs, ngk);
+    HIPDNN_RTC_LAUNCH(mnbRtcFunction, dq_grid, dq_block, 0, stream,
+                      (B, scales, zeros, B_fp16, N, K, gs, ngk),
+                      dequant_u2_to_fp16);
 }
 
 struct WmmaConfigU2 {
@@ -5704,6 +5564,11 @@ static constexpr WmmaConfigU2 kWmmaU2Configs[] = {
 static constexpr int kNumWmmaU2Configs =
     static_cast<int>(sizeof(kWmmaU2Configs) / sizeof(kWmmaU2Configs[0]));
 
+#define MNB_WMMA_U2_TILE_LIST(X)                                              \
+    X(256, 128, 4, 2, 6)                                                      \
+    X( 64,  64, 2, 2, 8) X( 64, 128, 2, 2, 8)                                 \
+    X(128,  64, 2, 2, 8) X(128, 256, 2, 2, 8) X(128, 128, 2, 2, 8)
+
 static void launchWmmaConfigU2(
     int config_id, hipStream_t stream,
     int M, int N, int K,
@@ -5720,119 +5585,95 @@ static void launchWmmaConfigU2(
     if (!c.fused) {
         launchDequantU2(stream, B, scales, zeros, B_fp16_buf, N, K, gs, ngk);
 
-#define U2_FP16_GEMM_LAUNCH(BM_V, BN_V, BC_V) do {                            \
-    constexpr int WM_  = BM_V / (2 * 16);                                     \
-    constexpr int WN_  = BN_V / (2 * 16);                                     \
+#define U2_FP16_GEMM_LAUNCH(BM_V, BN_V, WTM_V, WTN_V, WEU_V, BC_V) do {       \
+    constexpr int WM_  = BM_V / (WTM_V * 16);                                 \
+    constexpr int WN_  = BN_V / (WTN_V * 16);                                 \
     constexpr int THR_ = WM_ * WN_ * 32;                                      \
     dim3 grid_(static_cast<unsigned>((N + BN_V - 1) / BN_V),                  \
                static_cast<unsigned>((M + BM_V - 1) / BM_V));                 \
     dim3 block_(THR_);                                                        \
-    hipLaunchKernelGGL(                                                       \
-        HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 2, 2, 8, BC_V>),      \
-        grid_, block_, 0, stream,                                             \
-        M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n);                    \
+    HIPDNN_RTC_LAUNCH(mnbRtcFunction, grid_, block_, 0, stream,               \
+        (M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n),                   \
+        MatMulNBitsFp16GEMM<BM_V, BN_V, WTM_V, WTN_V, WEU_V, BC_V>);          \
 } while (0)
 
-#define U2_FP16_TILE_CASE(BM_V, BN_V) \
-    if (need_bc) U2_FP16_GEMM_LAUNCH(BM_V, BN_V, true);  \
-    else         U2_FP16_GEMM_LAUNCH(BM_V, BN_V, false)
-
-#define U2_FP16_GEMM_LAUNCH_WT4(BM_V, BN_V, BC_V) do {                        \
-    constexpr int WM_  = BM_V / (4 * 16);                                     \
-    constexpr int WN_  = BN_V / (2 * 16);                                     \
-    constexpr int THR_ = WM_ * WN_ * 32;                                      \
-    dim3 grid_(static_cast<unsigned>((N + BN_V - 1) / BN_V),                  \
-               static_cast<unsigned>((M + BM_V - 1) / BM_V));                 \
-    dim3 block_(THR_);                                                        \
-    hipLaunchKernelGGL(                                                       \
-        HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 4, 2, 6, BC_V>),      \
-        grid_, block_, 0, stream,                                             \
-        M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n);                    \
-} while (0)
-
-#define U2_FP16_TILE_CASE_WT4(BM_V, BN_V) \
-    if (need_bc) U2_FP16_GEMM_LAUNCH_WT4(BM_V, BN_V, true);  \
-    else         U2_FP16_GEMM_LAUNCH_WT4(BM_V, BN_V, false)
+#define U2_FP16_TILE_CASE(BM_V, BN_V, WTM_V, WTN_V, WEU_V) \
+    if (need_bc) U2_FP16_GEMM_LAUNCH(BM_V, BN_V, WTM_V, WTN_V, WEU_V, true); \
+    else         U2_FP16_GEMM_LAUNCH(BM_V, BN_V, WTM_V, WTN_V, WEU_V, false)
 
              if (c.wt_m == 4 && c.bm == 256 && c.bn == 128)
-                                                 U2_FP16_TILE_CASE_WT4(256, 128);
-        else if (c.bm ==  64 && c.bn ==  64) U2_FP16_TILE_CASE( 64,  64);
-        else if (c.bm ==  64 && c.bn == 128) U2_FP16_TILE_CASE( 64, 128);
-        else if (c.bm == 128 && c.bn ==  64) U2_FP16_TILE_CASE(128,  64);
-        else if (c.bm == 128 && c.bn == 256) U2_FP16_TILE_CASE(128, 256);
-        else                                  U2_FP16_TILE_CASE(128, 128);
+                                    U2_FP16_TILE_CASE(256, 128, 4, 2, 6);
+        else if (c.bm ==  64 && c.bn ==  64)
+                                    U2_FP16_TILE_CASE( 64,  64, 2, 2, 8);
+        else if (c.bm ==  64 && c.bn == 128)
+                                    U2_FP16_TILE_CASE( 64, 128, 2, 2, 8);
+        else if (c.bm == 128 && c.bn ==  64)
+                                    U2_FP16_TILE_CASE(128,  64, 2, 2, 8);
+        else if (c.bm == 128 && c.bn == 256)
+                                    U2_FP16_TILE_CASE(128, 256, 2, 2, 8);
+        else                        U2_FP16_TILE_CASE(128, 128, 2, 2, 8);
 
-#undef U2_FP16_TILE_CASE_WT4
-#undef U2_FP16_GEMM_LAUNCH_WT4
 #undef U2_FP16_TILE_CASE
 #undef U2_FP16_GEMM_LAUNCH
         return;
     }
 
-#define WMMA_U2_LAUNCH(BM_V, BN_V, BC_V) do {                                \
-    constexpr int WM_  = BM_V / (2 * 16);                                     \
-    constexpr int WN_  = BN_V / (2 * 16);                                     \
+#define WMMA_U2_LAUNCH(BM_V, BN_V, WTM_V, WTN_V, WEU_V, BC_V) do {            \
+    constexpr int WM_  = BM_V / (WTM_V * 16);                                 \
+    constexpr int WN_  = BN_V / (WTN_V * 16);                                 \
     constexpr int THR_ = WM_ * WN_ * 32;                                      \
     dim3 grid_(static_cast<unsigned>((N + BN_V - 1) / BN_V),                  \
                static_cast<unsigned>((M + BM_V - 1) / BM_V));                 \
     dim3 block_(THR_);                                                        \
     if (has_zp) {                                                             \
-        hipLaunchKernelGGL(                                                   \
-            HIP_KERNEL_NAME(                                                  \
-                MatMulNBitsWMMA_U2_ZP<BM_V, BN_V, 2, 2, 8, BC_V>),            \
-            grid_, block_, 0, stream,                                         \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
+        HIPDNN_RTC_LAUNCH(mnbRtcFunction, grid_, block_, 0, stream,           \
+            (M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc,              \
+             c.swizzle_n),                                                    \
+            MatMulNBitsWMMA_U2_ZP<BM_V, BN_V, WTM_V, WTN_V, WEU_V, BC_V>);    \
     } else {                                                                  \
-        hipLaunchKernelGGL(                                                   \
-            HIP_KERNEL_NAME(                                                  \
-                MatMulNBitsWMMA_U2_NoZP<BM_V, BN_V, 2, 2, 8, BC_V>),          \
-            grid_, block_, 0, stream,                                         \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
+        HIPDNN_RTC_LAUNCH(mnbRtcFunction, grid_, block_, 0, stream,           \
+            (M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc,              \
+             c.swizzle_n),                                                    \
+            MatMulNBitsWMMA_U2_NoZP<BM_V, BN_V, WTM_V, WTN_V, WEU_V, BC_V>);  \
     }                                                                         \
 } while (0)
 
-#define WMMA_U2_TILE_CASE(BM_V, BN_V) \
-    if (need_bc) WMMA_U2_LAUNCH(BM_V, BN_V, true);  \
-    else         WMMA_U2_LAUNCH(BM_V, BN_V, false)
-
-#define WMMA_U2_LAUNCH_WT4(BM_V, BN_V, BC_V) do {                            \
-    constexpr int WM_  = BM_V / (4 * 16);                                     \
-    constexpr int WN_  = BN_V / (2 * 16);                                     \
-    constexpr int THR_ = WM_ * WN_ * 32;                                      \
-    dim3 grid_(static_cast<unsigned>((N + BN_V - 1) / BN_V),                  \
-               static_cast<unsigned>((M + BM_V - 1) / BM_V));                 \
-    dim3 block_(THR_);                                                        \
-    if (has_zp) {                                                             \
-        hipLaunchKernelGGL(                                                   \
-            HIP_KERNEL_NAME(                                                  \
-                MatMulNBitsWMMA_U2_ZP<BM_V, BN_V, 4, 2, 6, BC_V>),            \
-            grid_, block_, 0, stream,                                         \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
-    } else {                                                                  \
-        hipLaunchKernelGGL(                                                   \
-            HIP_KERNEL_NAME(                                                  \
-                MatMulNBitsWMMA_U2_NoZP<BM_V, BN_V, 4, 2, 6, BC_V>),          \
-            grid_, block_, 0, stream,                                         \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
-    }                                                                         \
-} while (0)
-
-#define WMMA_U2_TILE_CASE_WT4(BM_V, BN_V) \
-    if (need_bc) WMMA_U2_LAUNCH_WT4(BM_V, BN_V, true);  \
-    else         WMMA_U2_LAUNCH_WT4(BM_V, BN_V, false)
+#define WMMA_U2_TILE_CASE(BM_V, BN_V, WTM_V, WTN_V, WEU_V) \
+    if (need_bc) WMMA_U2_LAUNCH(BM_V, BN_V, WTM_V, WTN_V, WEU_V, true);  \
+    else         WMMA_U2_LAUNCH(BM_V, BN_V, WTM_V, WTN_V, WEU_V, false)
 
          if (c.wt_m == 4 && c.bm == 256 && c.bn == 128)
-                                             WMMA_U2_TILE_CASE_WT4(256, 128);
-    else if (c.bm ==  64 && c.bn ==  64) WMMA_U2_TILE_CASE( 64,  64);
-    else if (c.bm ==  64 && c.bn == 128) WMMA_U2_TILE_CASE( 64, 128);
-    else if (c.bm == 128 && c.bn ==  64) WMMA_U2_TILE_CASE(128,  64);
-    else if (c.bm == 128 && c.bn == 256) WMMA_U2_TILE_CASE(128, 256);
-    else                                  WMMA_U2_TILE_CASE(128, 128);
+                                WMMA_U2_TILE_CASE(256, 128, 4, 2, 6);
+    else if (c.bm ==  64 && c.bn ==  64)
+                                WMMA_U2_TILE_CASE( 64,  64, 2, 2, 8);
+    else if (c.bm ==  64 && c.bn == 128)
+                                WMMA_U2_TILE_CASE( 64, 128, 2, 2, 8);
+    else if (c.bm == 128 && c.bn ==  64)
+                                WMMA_U2_TILE_CASE(128,  64, 2, 2, 8);
+    else if (c.bm == 128 && c.bn == 256)
+                                WMMA_U2_TILE_CASE(128, 256, 2, 2, 8);
+    else                        WMMA_U2_TILE_CASE(128, 128, 2, 2, 8);
 
-#undef WMMA_U2_TILE_CASE_WT4
-#undef WMMA_U2_LAUNCH_WT4
 #undef WMMA_U2_TILE_CASE
 #undef WMMA_U2_LAUNCH
+}
+
+static void appendWmmaU2Names(std::vector<std::string>& names) {
+#define X(BM, BN, WTM, WTN, WEU) \
+    names.push_back( \
+        HIPDNN_RTC_STR(MatMulNBitsWMMA_U2_ZP<BM, BN, WTM, WTN, WEU, false>)); \
+    names.push_back( \
+        HIPDNN_RTC_STR(MatMulNBitsWMMA_U2_ZP<BM, BN, WTM, WTN, WEU, true>)); \
+    names.push_back( \
+        HIPDNN_RTC_STR(MatMulNBitsWMMA_U2_NoZP<BM, BN, WTM, WTN, WEU, false>)); \
+    names.push_back( \
+        HIPDNN_RTC_STR(MatMulNBitsWMMA_U2_NoZP<BM, BN, WTM, WTN, WEU, true>)); \
+    names.push_back( \
+        HIPDNN_RTC_STR(MatMulNBitsFp16GEMM<BM, BN, WTM, WTN, WEU, false>)); \
+    names.push_back( \
+        HIPDNN_RTC_STR(MatMulNBitsFp16GEMM<BM, BN, WTM, WTN, WEU, true>));
+    MNB_WMMA_U2_TILE_LIST(X)
+#undef X
 }
 
 static int tuneWmmaConfigU2(
@@ -6089,11 +5930,12 @@ extern "C" void hip_matmul_nbits_unpack_zp_u8(
     dim3 grid(static_cast<unsigned>((packed_cols + THR - 1) / THR),
               static_cast<unsigned>(N));
     dim3 block(THR);
-    hipLaunchKernelGGL(unpack_zp_nibbles_to_u8_kernel,
-                       grid, block, 0, static_cast<hipStream_t>(stream),
-                       static_cast<const uint8_t*>(zp_packed),
+    HIPDNN_RTC_LAUNCH(mnbRtcFunction,
+                      grid, block, 0, static_cast<hipStream_t>(stream),
+                      (static_cast<const uint8_t*>(zp_packed),
                        static_cast<uint8_t*>(dst_u8),
-                       N, groups_k, packed_cols);
+                       N, groups_k, packed_cols),
+                      unpack_zp_nibbles_to_u8_kernel);
 }
 
 extern "C" void hip_matmul_nbits_unpack_zp_u8_2bit(
@@ -6104,11 +5946,12 @@ extern "C" void hip_matmul_nbits_unpack_zp_u8_2bit(
     dim3 grid(static_cast<unsigned>((packed_cols + THR - 1) / THR),
               static_cast<unsigned>(N));
     dim3 block(THR);
-    hipLaunchKernelGGL(unpack_zp_2bit_to_u8_kernel,
-                       grid, block, 0, static_cast<hipStream_t>(stream),
-                       static_cast<const uint8_t*>(zp_packed),
+    HIPDNN_RTC_LAUNCH(mnbRtcFunction,
+                      grid, block, 0, static_cast<hipStream_t>(stream),
+                      (static_cast<const uint8_t*>(zp_packed),
                        static_cast<uint8_t*>(dst_u8),
-                       N, groups_k, packed_cols);
+                       N, groups_k, packed_cols),
+                      unpack_zp_2bit_to_u8_kernel);
 }
 
 extern "C" void hip_matmul_nbits_unpack_zp_u8_3bit(
@@ -6119,11 +5962,12 @@ extern "C" void hip_matmul_nbits_unpack_zp_u8_3bit(
     dim3 grid(static_cast<unsigned>((groups_k + THR - 1) / THR),
               static_cast<unsigned>(N));
     dim3 block(THR);
-    hipLaunchKernelGGL(unpack_zp_3bit_to_u8_kernel,
-                       grid, block, 0, static_cast<hipStream_t>(stream),
-                       static_cast<const uint8_t*>(zp_packed),
+    HIPDNN_RTC_LAUNCH(mnbRtcFunction,
+                      grid, block, 0, static_cast<hipStream_t>(stream),
+                      (static_cast<const uint8_t*>(zp_packed),
                        static_cast<uint8_t*>(dst_u8),
-                       N, groups_k, packed_cols);
+                       N, groups_k, packed_cols),
+                      unpack_zp_3bit_to_u8_kernel);
 }
 
 extern "C" void hip_matmul_nbits_convert_zp_fp16(
@@ -6134,11 +5978,12 @@ extern "C" void hip_matmul_nbits_convert_zp_fp16(
     dim3 grid(static_cast<unsigned>((packed_cols + THR - 1) / THR),
               static_cast<unsigned>(N));
     dim3 block(THR);
-    hipLaunchKernelGGL(unpack_zp_u8_to_fp16_kernel,
-                       grid, block, 0, static_cast<hipStream_t>(stream),
-                       static_cast<const unsigned char*>(zp_packed),
+    HIPDNN_RTC_LAUNCH(mnbRtcFunction,
+                      grid, block, 0, static_cast<hipStream_t>(stream),
+                      (static_cast<const unsigned char*>(zp_packed),
                        static_cast<_Float16*>(dst_fp16),
-                       N, groups_k, packed_cols);
+                       N, groups_k, packed_cols),
+                      unpack_zp_u8_to_fp16_kernel);
 }
 
 // Full-weight int4 -> fp16 dequantization into a row-major [N, K] buffer, used
@@ -6156,13 +6001,14 @@ extern "C" void hip_matmul_nbits_dequant_b_fp16(
     dim3 grid(static_cast<unsigned>((threads_along_k + THR - 1) / THR),
               static_cast<unsigned>(N));
     dim3 block(THR);
-    hipLaunchKernelGGL(dequant_u4_to_fp16, grid, block, 0,
-                       static_cast<hipStream_t>(stream),
-                       static_cast<const unsigned char*>(B_packed),
+    HIPDNN_RTC_LAUNCH(mnbRtcFunction, grid, block, 0,
+                      static_cast<hipStream_t>(stream),
+                      (static_cast<const unsigned char*>(B_packed),
                        static_cast<const _Float16*>(scales_fp16),
                        static_cast<const _Float16*>(zeros_fp16),
                        static_cast<_Float16*>(B_fp16_out),
-                       N, K, group_size, num_groups_k);
+                       N, K, group_size, num_groups_k),
+                      dequant_u4_to_fp16);
 }
 
 extern "C" int hip_matmul_nbits(
@@ -6277,10 +6123,10 @@ extern "C" int hip_matmul_nbits(
         dim3 bias_grid(static_cast<unsigned>((iN + 255) / 256),
                        static_cast<unsigned>(iM));
         dim3 bias_block(256);
-        hipLaunchKernelGGL(
-            matmul_nbits_add_bias_rowmajor, bias_grid, bias_block,
-            0, hip_stream,
-            o_ptr, static_cast<const _Float16*>(bias), iM, iN, ldc);
+        HIPDNN_RTC_LAUNCH(
+            mnbRtcFunction, bias_grid, bias_block, 0, hip_stream,
+            (o_ptr, static_cast<const _Float16*>(bias), iM, iN, ldc),
+            matmul_nbits_add_bias_rowmajor);
       }
     } else if (use_gemv_i8) {
       const auto* a_ptr  = static_cast<const __half*>(A);
@@ -6316,13 +6162,14 @@ extern "C" int hip_matmul_nbits(
                static_cast<unsigned>((M + kBlockDim - 1) / kBlockDim),
                static_cast<unsigned>(batch_count));
 
-      hipLaunchKernelGGL(
-          matmul_nbits_kernel_i8, grd, blk, 0, hip_stream,
-          static_cast<const __half*>(A), static_cast<const uint8_t*>(B),
-          static_cast<const __half*>(scales),
-          static_cast<const uint8_t*>(zero_points),
-          static_cast<const __half*>(bias), static_cast<__half*>(output),
-          M, N, K, block_size);
+      HIPDNN_RTC_LAUNCH(
+          mnbRtcFunction, grd, blk, 0, hip_stream,
+          (static_cast<const __half*>(A), static_cast<const uint8_t*>(B),
+           static_cast<const __half*>(scales),
+           static_cast<const uint8_t*>(zero_points),
+           static_cast<const __half*>(bias), static_cast<__half*>(output),
+           M, N, K, block_size),
+          matmul_nbits_kernel_i8);
     }
 
     hipError_t err = hipGetLastError();
@@ -6408,10 +6255,10 @@ extern "C" int hip_matmul_nbits(
         dim3 bias_grid(static_cast<unsigned>((iN + 255) / 256),
                        static_cast<unsigned>(iM));
         dim3 bias_block(256);
-        hipLaunchKernelGGL(
-            matmul_nbits_add_bias_rowmajor, bias_grid, bias_block,
-            0, hip_stream,
-            o_ptr, static_cast<const _Float16*>(bias), iM, iN, ldc);
+        HIPDNN_RTC_LAUNCH(
+            mnbRtcFunction, bias_grid, bias_block, 0, hip_stream,
+            (o_ptr, static_cast<const _Float16*>(bias), iM, iN, ldc),
+            matmul_nbits_add_bias_rowmajor);
       }
     } else if (use_gemv_u2) {
       const auto* a_ptr  = static_cast<const __half*>(A);
@@ -6447,13 +6294,14 @@ extern "C" int hip_matmul_nbits(
                static_cast<unsigned>((M + kBlockDim - 1) / kBlockDim),
                static_cast<unsigned>(batch_count));
 
-      hipLaunchKernelGGL(
-          matmul_nbits_kernel_u2, grd, blk, 0, hip_stream,
-          static_cast<const __half*>(A), static_cast<const uint8_t*>(B),
-          static_cast<const __half*>(scales),
-          static_cast<const uint8_t*>(z_u2),
-          static_cast<const __half*>(bias), static_cast<__half*>(output),
-          M, N, K, block_size);
+      HIPDNN_RTC_LAUNCH(
+          mnbRtcFunction, grd, blk, 0, hip_stream,
+          (static_cast<const __half*>(A), static_cast<const uint8_t*>(B),
+           static_cast<const __half*>(scales),
+           static_cast<const uint8_t*>(z_u2),
+           static_cast<const __half*>(bias), static_cast<__half*>(output),
+           M, N, K, block_size),
+          matmul_nbits_kernel_u2);
     }
 
     hipError_t err = hipGetLastError();
@@ -6551,10 +6399,10 @@ extern "C" int hip_matmul_nbits(
         dim3 bias_grid(static_cast<unsigned>((iN + 255) / 256),
                        static_cast<unsigned>(iM));
         dim3 bias_block(256);
-        hipLaunchKernelGGL(
-            matmul_nbits_add_bias_rowmajor, bias_grid, bias_block,
-            0, hip_stream,
-            o_ptr, static_cast<const _Float16*>(bias), iM, iN, ldc);
+        HIPDNN_RTC_LAUNCH(
+            mnbRtcFunction, bias_grid, bias_block, 0, hip_stream,
+            (o_ptr, static_cast<const _Float16*>(bias), iM, iN, ldc),
+            matmul_nbits_add_bias_rowmajor);
       }
     } else if (use_gemv_u3) {
       const auto* a_ptr  = static_cast<const __half*>(A);
@@ -6590,13 +6438,14 @@ extern "C" int hip_matmul_nbits(
                static_cast<unsigned>((M + kBlockDim - 1) / kBlockDim),
                static_cast<unsigned>(batch_count));
 
-      hipLaunchKernelGGL(
-          matmul_nbits_kernel_u3, grd, blk, 0, hip_stream,
-          static_cast<const __half*>(A), static_cast<const uint8_t*>(B),
-          static_cast<const __half*>(scales),
-          static_cast<const uint8_t*>(z_u3),
-          static_cast<const __half*>(bias), static_cast<__half*>(output),
-          M, N, K, block_size);
+      HIPDNN_RTC_LAUNCH(
+          mnbRtcFunction, grd, blk, 0, hip_stream,
+          (static_cast<const __half*>(A), static_cast<const uint8_t*>(B),
+           static_cast<const __half*>(scales),
+           static_cast<const uint8_t*>(z_u3),
+           static_cast<const __half*>(bias), static_cast<__half*>(output),
+           M, N, K, block_size),
+          matmul_nbits_kernel_u3);
     }
 
     hipError_t err = hipGetLastError();
@@ -6798,10 +6647,10 @@ extern "C" int hip_matmul_nbits(
       dim3 bias_grid(static_cast<unsigned>((iN + 255) / 256),
                      static_cast<unsigned>(iM));
       dim3 bias_block(256);
-      hipLaunchKernelGGL(
-          matmul_nbits_add_bias_rowmajor, bias_grid, bias_block,
-          0, hip_stream,
-          out_ptr, static_cast<const _Float16*>(bias), iM, iN, ldc);
+      HIPDNN_RTC_LAUNCH(
+          mnbRtcFunction, bias_grid, bias_block, 0, hip_stream,
+          (out_ptr, static_cast<const _Float16*>(bias), iM, iN, ldc),
+          matmul_nbits_add_bias_rowmajor);
 
       err = hipGetLastError();
       if (err != hipSuccess) {
@@ -6948,13 +6797,14 @@ extern "C" int hip_matmul_nbits(
            static_cast<unsigned>((M + kBlockDim - 1) / kBlockDim),
            static_cast<unsigned>(batch_count));
 
-  hipLaunchKernelGGL(
-      matmul_nbits_kernel, grd, blk, 0, hip_stream,
-      static_cast<const __half*>(A), static_cast<const uint8_t*>(B),
-      static_cast<const __half*>(scales),
-      static_cast<const uint8_t*>(zp_for_u8_paths),
-      static_cast<const __half*>(bias), static_cast<__half*>(output),
-      M, N, K, block_size);
+  HIPDNN_RTC_LAUNCH(
+      mnbRtcFunction, grd, blk, 0, hip_stream,
+      (static_cast<const __half*>(A), static_cast<const uint8_t*>(B),
+       static_cast<const __half*>(scales),
+       static_cast<const uint8_t*>(zp_for_u8_paths),
+       static_cast<const __half*>(bias), static_cast<__half*>(output),
+       M, N, K, block_size),
+      matmul_nbits_kernel);
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess) {
@@ -6963,4 +6813,63 @@ extern "C" int hip_matmul_nbits(
             hipGetErrorString(err));
   }
   return static_cast<int>(err);
+}
+
+// ---------------------------------------------------------------------------
+// hipRTC module
+//
+// Every family contributes its name expressions through the same X-macro lists
+// that drive its launch switch, so a registered name and a launched one cannot
+// drift apart. All of them are registered before the single compile: hipRTC
+// resolves name expressions while parsing.
+// ---------------------------------------------------------------------------
+
+// The kernels launched outside a config-list family: one instance each, so the
+// name expression is spelled here rather than generated.
+static void appendMiscNames(std::vector<std::string>& names) {
+  names.push_back(HIPDNN_RTC_STR(matmul_nbits_kernel));
+  names.push_back(HIPDNN_RTC_STR(matmul_nbits_kernel_i8));
+  names.push_back(HIPDNN_RTC_STR(matmul_nbits_kernel_u3));
+  names.push_back(HIPDNN_RTC_STR(matmul_nbits_kernel_u2));
+  names.push_back(HIPDNN_RTC_STR(matmul_nbits_quant_act_i8_kernel<128>));
+  names.push_back(HIPDNN_RTC_STR(matmul_nbits_add_bias_rowmajor));
+  names.push_back(HIPDNN_RTC_STR(dequant_u4_to_fp16));
+  names.push_back(HIPDNN_RTC_STR(dequant_u3_to_fp16));
+  names.push_back(HIPDNN_RTC_STR(dequant_u2_to_fp16));
+  names.push_back(HIPDNN_RTC_STR(transpose2d_fp16_kernel));
+  names.push_back(HIPDNN_RTC_STR(unpack_zp_nibbles_to_u8_kernel));
+  names.push_back(HIPDNN_RTC_STR(unpack_zp_2bit_to_u8_kernel));
+  names.push_back(HIPDNN_RTC_STR(unpack_zp_3bit_to_u8_kernel));
+  names.push_back(HIPDNN_RTC_STR(unpack_zp_u8_to_fp16_kernel));
+}
+
+static hipdnn_ep::rtc::Module& mnbRtcModule() {
+  static hipdnn_ep::rtc::Module module(
+      "matmul_nbits", reinterpret_cast<const char*>(kMatMulNBitsDeviceSource),
+      kMatMulNBitsDeviceSource_size, [] {
+        std::vector<std::string> names;
+        appendGemvNames(names);
+        appendDp4aNames(names);
+        appendGemvI8Names(names);
+        appendGemvU3Names(names);
+        appendGemvU2Names(names);
+        appendWmmaNames(names);
+        appendWmmaI8Names(names);
+        appendWmmaU3Names(names);
+        appendWmmaU2Names(names);
+        appendMiscNames(names);
+        // The u2/u3 dequant paths reuse the bits=4 fp16 GEMM tiles, so the
+        // lists overlap; a repeated name expression would be registered twice.
+        std::sort(names.begin(), names.end());
+        names.erase(std::unique(names.begin(), names.end()), names.end());
+        return names;
+      }());
+  return module;
+}
+
+static hipFunction_t mnbRtcFunction(const char* name_expression) {
+  if (!hipdnn_ep::rtc::enabled()) {
+    return nullptr;
+  }
+  return mnbRtcModule().getFunction(name_expression);
 }
