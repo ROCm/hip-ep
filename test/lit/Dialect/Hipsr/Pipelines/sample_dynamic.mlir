@@ -15,7 +15,7 @@
 // CHECK-SAME:      attributes {onnx.graph.name = "main_graph"} {
 
 // The domains split exactly where they do in sample_static.mlir, and so do the
-// four zones inside each one: neither the barrier's position nor the shape
+// five zones inside each one: neither the barrier's position nor the shape
 // graph depends on whether the extents are known.
 // CHECK-NEXT:    %[[D0:.+]]:5 = hipsr.pool_domain(%[[CTX]], %[[A]], %[[B]] : !hipsr.context, tensor<?x3xf16, #hipsr.mem<device>>, tensor<?x4xf32, #hipsr.mem<device>>) {
 // CHECK-NEXT:    ^bb0(%[[D0_CTX:.+]]: !hipsr.context, %[[D0_A:.+]]: tensor<?x3xf16, #hipsr.mem<device>>, %[[D0_B:.+]]: tensor<?x4xf32, #hipsr.mem<device>>):
@@ -89,6 +89,10 @@
 // CHECK-NEXT:        hipsr.compute_yield %[[EXTENT_VECTOR]] : tensor<2xi64, #hipsr.mem<host>>
 // CHECK-NEXT:      } : tensor<2xi64, #hipsr.mem<host>>
 
+// CHECK-NEXT:      hipsr.preserve_shape %[[MM1_SHAPE]], %[[MM1]] : tensor<?x1xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      hipsr.preserve_shape %[[CAST_SHAPE]], %[[CAST]] : tensor<?x1xf32, #hipsr.mem<device>>
+// CHECK-NEXT:      hipsr.preserve_shape %[[EXTENTS_SHAPE]], %[[EXTENTS]] : tensor<2xi64, #hipsr.mem<host>>
+
 // CHECK-NEXT:      hipsr.pool_domain_yield %[[CAST_INIT]], %[[CAST]], %[[EXTENTS_INIT]], %[[EXTENTS]], %[[W2]] : tensor<?x1xf32, #hipsr.mem<device>>, tensor<?x1xf32, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>, tensor<2xi64, #hipsr.mem<host>>, tensor<4x2xf32, #hipsr.mem<device>>
 // CHECK-NEXT:    } -> tensor<?x1xf32, #hipsr.mem<device>>, tensor<?x1xf32, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>, tensor<2xi64, #hipsr.mem<host>>, tensor<4x2xf32, #hipsr.mem<device>> {domain_id = 0 : i64}
 
@@ -150,6 +154,8 @@
 // CHECK-NEXT:      %[[MM2_INIT:.+]] = tensor.empty(%[[MM2_M]]) : tensor<?x2xf32, #hipsr.mem<device>>
 // CHECK-NEXT:      %[[EXPAND:.+]] = hipsr.expand(%[[D1_CTX]]) ins(%[[D1_CAST]], %[[D1_EXTENTS]] : tensor<?x1xf32, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>) outs(%[[EXPAND_INIT]] : tensor<?x4xf32, #hipsr.mem<device>>) : tensor<?x4xf32, #hipsr.mem<device>>
 // CHECK-NEXT:      %[[MM2:.+]] = hipsr.matmul(%[[D1_CTX]]) ins(%[[EXPAND]], %[[D1_W2]] : tensor<?x4xf32, #hipsr.mem<device>>, tensor<4x2xf32, #hipsr.mem<device>>) outs(%[[MM2_INIT]] : tensor<?x2xf32, #hipsr.mem<device>>) : tensor<?x2xf32, #hipsr.mem<device>>
+// CHECK-NEXT:      hipsr.preserve_shape %[[EXPAND_SHAPE]], %[[EXPAND]] : tensor<?x4xf32, #hipsr.mem<device>>
+// CHECK-NEXT:      hipsr.preserve_shape %[[MM2_SHAPE]], %[[MM2]] : tensor<?x2xf32, #hipsr.mem<device>>
 // CHECK-NEXT:      hipsr.pool_domain_yield %[[MM2]] : tensor<?x2xf32, #hipsr.mem<device>>
 // CHECK-NEXT:    } -> tensor<?x2xf32, #hipsr.mem<device>> {domain_id = 1 : i64}
 

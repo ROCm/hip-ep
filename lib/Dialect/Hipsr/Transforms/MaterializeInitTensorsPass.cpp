@@ -23,11 +23,14 @@
 //   %d0 = shape.size_to_index (shape.get_extent %s, 0)
 //   %empty = tensor.empty(%d0) : tensor<?x4xf32>
 //   %0 = hipsr.cast(%ctx) ins(%a) outs(%empty) : tensor<?x4xf32>
+//   hipsr.preserve_shape %s, %0 : tensor<?x4xf32>
 //
-// The domain is rebuilt in a fresh block in four steps: constants, shape
-// computations, allocations, then every other op. hipsr-pool-alloc replaces the
-// allocations in a domain with views of one pool it emits after the last of
-// them, so every allocation has to come before the first op that reads one.
+// The domain is rebuilt in a fresh block in five steps: constants, shape
+// computations, allocations, every other op, then one shape link per
+// allocation. hipsr-pool-alloc replaces the allocations in a domain with views
+// of one pool it emits after the last of them, so every allocation has to come
+// before the first op that reads one. A link names the result of the op that
+// fills the buffer, so it can only come after the data ops.
 //
 //===----------------------------------------------------------------------===//
 
@@ -197,12 +200,34 @@ void createAllocations(ArrayRef<PlaceholderOp> placeholders,
   }
 }
 
-// The terminator comes along, so it closes the new block.
+// Whatever an earlier step did not emit, still in its original order.
 void cloneRemainingOps(Block &oldBlock, IRMapping &cloned,
                        RewriterBase &rewriter) {
-  for (Operation &op : oldBlock) {
+  for (Operation &op : oldBlock.without_terminator()) {
     if (!isa<PlaceholderOp>(op) && !cloned.contains(&op)) {
       rewriter.clone(op, cloned);
+    }
+  }
+}
+
+// Linking the allocation would miss a hipsr.compute result that is only a view.
+Value getTiedConsumerResult(OpResult init) {
+  for (OpOperand &use : init.getUses()) {
+    if (OpResult held = getHipsrResultHeldIn(use)) {
+      return held;
+    }
+  }
+  return init;
+}
+
+// -hip-use-output-allocator reads these links to size a graph output.
+void preserveShapes(ArrayRef<PlaceholderOp> placeholders,
+                    const IRMapping &shapes, const IRMapping &cloned,
+                    OpBuilder &builder) {
+  for (PlaceholderOp placeholder : placeholders) {
+    for (OpResult result : placeholder.getResults()) {
+      PreserveShapeOp::create(builder, result.getLoc(), shapes.lookup(result),
+                              cloned.lookup(getTiedConsumerResult(result)));
     }
   }
 }
@@ -234,6 +259,8 @@ LogicalResult materializePoolDomain(Region &body, RewriterBase &rewriter) {
   IRMapping shapes = createShapeComputations(placeholders, cloned, rewriter);
   createAllocations(placeholders, shapes, cloned, rewriter);
   cloneRemainingOps(oldBlock, cloned, rewriter);
+  preserveShapes(placeholders, shapes, cloned, rewriter);
+  rewriter.clone(*oldBlock.getTerminator(), cloned);
 
   rewriter.eraseBlock(&oldBlock);
   return success();

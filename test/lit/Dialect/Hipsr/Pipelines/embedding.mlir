@@ -58,14 +58,15 @@
 // through 4 each open with a shape computation that extracts extents from a
 // host buffer an earlier domain filled, which is what a cut looks like below.
 //
-// The three zones of a domain
-// ---------------------------
+// The four zones of a domain
+// --------------------------
 //
 // hipsr-materialize-init-tensors leaves each domain body in order: the
 // scf.execute_region shape computations, then the tensor.empty allocations that
-// read their dynamic extents back out of those shapes, then the data ops. A
-// constant a shape computation reads moves up with it; the rest stay where
-// conversion left them.
+// read their dynamic extents back out of those shapes, then the data ops, then
+// a hipsr.preserve_shape per allocation tying the shape that sized it to the
+// result that fills it. A constant a shape computation reads moves up with it;
+// the rest stay where conversion left them.
 //===----------------------------------------------------------------------===//
 
 // RUN: %python %S/../../../Inputs/make_external_data.py %t/embedding.onnx.data 2034237440 && cd %t && hip-mlir-opt --onnx-dialect=modeled --hipsr-pipeline --mlir-elide-resource-strings-if-larger=32 %s | FileCheck %s
@@ -194,6 +195,16 @@ module {
 // CHECK-NEXT:               %[[FROM_ELEMENTS_0:.*]] = tensor.from_elements %[[INDEX_CAST_0]], %[[INDEX_CAST_1]], %[[CONSTANT_15]] : tensor<3xi64, #hipsr.mem<host>>
 // CHECK-NEXT:               hipsr.compute_yield %[[FROM_ELEMENTS_0]] : tensor<3xi64, #hipsr.mem<host>>
 // CHECK-NEXT:             } : tensor<3xi64, #hipsr.mem<host>>
+
+// The link zone. One hipsr.preserve_shape per allocation, in allocation order,
+// each naming the result of the op that fills that buffer, so a later pass can
+// still read the shape once bufferization has replaced the tensor values with
+// the buffers behind them.
+// CHECK-NEXT:             hipsr.preserve_shape %[[EXECUTE_REGION_0]], %[[COMPUTE_0]] : tensor<?xf16, #hipsr.mem<device>>
+// CHECK-NEXT:             hipsr.preserve_shape %[[EXECUTE_REGION_1]], %[[EQUAL_0]] : tensor<?x?xi1, #hipsr.mem<device>>
+// CHECK-NEXT:             hipsr.preserve_shape %[[EXECUTE_REGION_2]], %[[COMPUTE_1]] : tensor<?x?x1xi1, #hipsr.mem<device>>
+// CHECK-NEXT:             hipsr.preserve_shape %[[EXECUTE_REGION_3]], %[[GATHER_0]] : tensor<?x?x4096xf16, #hipsr.mem<device>>
+// CHECK-NEXT:             hipsr.preserve_shape %[[EXECUTE_REGION_4]], %[[COMPUTE_2]] : tensor<3xi64, #hipsr.mem<host>>
 // CHECK-NEXT:             hipsr.pool_domain_yield %[[EMPTY_0]], %[[COMPUTE_0]], %[[EMPTY_2]], %[[COMPUTE_1]], %[[EMPTY_3]], %[[GATHER_0]], %[[EMPTY_4]], %[[COMPUTE_2]] : tensor<?xf16, #hipsr.mem<device>>, tensor<?xf16, #hipsr.mem<device>>, tensor<?x?x1xi1, #hipsr.mem<device>>, tensor<?x?x1xi1, #hipsr.mem<device>>, tensor<?x?x4096xf16, #hipsr.mem<device>>, tensor<?x?x4096xf16, #hipsr.mem<device>>, tensor<3xi64, #hipsr.mem<host>>, tensor<3xi64, #hipsr.mem<host>>
 // CHECK-NEXT:           } -> tensor<?xf16, #hipsr.mem<device>>, tensor<?xf16, #hipsr.mem<device>>, tensor<?x?x1xi1, #hipsr.mem<device>>, tensor<?x?x1xi1, #hipsr.mem<device>>, tensor<?x?x4096xf16, #hipsr.mem<device>>, tensor<?x?x4096xf16, #hipsr.mem<device>>, tensor<3xi64, #hipsr.mem<host>>, tensor<3xi64, #hipsr.mem<host>> {domain_id = 0 : i64}
 
@@ -232,6 +243,7 @@ module {
 // CHECK-NEXT:             %[[SIZE_TO_INDEX_12:.*]] = shape.size_to_index %[[GET_EXTENT_11]] : !shape.size
 // CHECK-NEXT:             %[[EMPTY_5:.*]] = tensor.empty(%[[SIZE_TO_INDEX_10]], %[[SIZE_TO_INDEX_11]], %[[SIZE_TO_INDEX_12]]) : tensor<?x?x?xi1, #hipsr.mem<device>>
 // CHECK-NEXT:             %[[EXPAND_0:.*]] = hipsr.expand(%[[VAL_17]]) ins(%[[VAL_20]], %[[VAL_21]] : tensor<?x?x1xi1, #hipsr.mem<device>>, tensor<3xi64, #hipsr.mem<host>>) outs(%[[EMPTY_5]] : tensor<?x?x?xi1, #hipsr.mem<device>>) : tensor<?x?x?xi1, #hipsr.mem<device>>
+// CHECK-NEXT:             hipsr.preserve_shape %[[EXECUTE_REGION_5]], %[[EXPAND_0]] : tensor<?x?x?xi1, #hipsr.mem<device>>
 // CHECK-NEXT:             hipsr.pool_domain_yield %[[EMPTY_5]], %[[EXPAND_0]] : tensor<?x?x?xi1, #hipsr.mem<device>>, tensor<?x?x?xi1, #hipsr.mem<device>>
 // CHECK-NEXT:           } -> tensor<?x?x?xi1, #hipsr.mem<device>>, tensor<?x?x?xi1, #hipsr.mem<device>> {domain_id = 1 : i64}
 
@@ -291,6 +303,13 @@ module {
 // CHECK-NEXT:             %[[EXPAND_1:.*]] = hipsr.expand(%[[VAL_24]]) ins(%[[VAL_27]], %[[VAL_28]] : tensor<?x?x?xi1, #hipsr.mem<device>>, tensor<3xi64, #hipsr.mem<host>>) outs(%[[EMPTY_6]] : tensor<?x?x?xi1, #hipsr.mem<device>>) : tensor<?x?x?xi1, #hipsr.mem<device>>
 // CHECK-NEXT:             %[[NONZERO_0:.*]]:2 = hipsr.nonzero(%[[VAL_24]]) ins(%[[EXPAND_1]] : tensor<?x?x?xi1, #hipsr.mem<device>>) outs(%[[EMPTY_7]], %[[EMPTY_8]] : tensor<3x?xi64, #hipsr.mem<device>>, tensor<1xi64, #hipsr.mem<device>>) : tensor<3x?xi64, #hipsr.mem<device>>, tensor<1xi64, #hipsr.mem<device>>
 // CHECK-NEXT:             %[[VAL_31:.*]] = hipsr.copy_d2h(%[[VAL_24]]) ins(%[[NONZERO_0]]#1 : tensor<1xi64, #hipsr.mem<device>>) outs(%[[EMPTY_9]] : tensor<1xi64, #hipsr.mem<host>>) : tensor<1xi64, #hipsr.mem<host>>
+
+// The search sizes two buffers, so its one shape computation yields two shapes
+// and each links to the matching result.
+// CHECK-NEXT:             hipsr.preserve_shape %[[EXECUTE_REGION_6]], %[[EXPAND_1]] : tensor<?x?x?xi1, #hipsr.mem<device>>
+// CHECK-NEXT:             hipsr.preserve_shape %[[EXECUTE_REGION_7]]#0, %[[NONZERO_0]]#0 : tensor<3x?xi64, #hipsr.mem<device>>
+// CHECK-NEXT:             hipsr.preserve_shape %[[EXECUTE_REGION_7]]#1, %[[NONZERO_0]]#1 : tensor<1xi64, #hipsr.mem<device>>
+// CHECK-NEXT:             hipsr.preserve_shape %[[EXECUTE_REGION_8]], %[[VAL_31]] : tensor<1xi64, #hipsr.mem<host>>
 // CHECK-NEXT:             hipsr.pool_domain_yield %[[EMPTY_7]], %[[NONZERO_0]]#0, %[[EMPTY_9]], %[[VAL_31]] : tensor<3x?xi64, #hipsr.mem<device>>, tensor<3x?xi64, #hipsr.mem<device>>, tensor<1xi64, #hipsr.mem<host>>, tensor<1xi64, #hipsr.mem<host>>
 // CHECK-NEXT:           } -> tensor<3x?xi64, #hipsr.mem<device>>, tensor<3x?xi64, #hipsr.mem<device>>, tensor<1xi64, #hipsr.mem<host>>, tensor<1xi64, #hipsr.mem<host>> {domain_id = 2 : i64}
 
@@ -371,6 +390,11 @@ module {
 // CHECK-NEXT:               %[[EXPAND_SHAPE_1:.*]] = tensor.expand_shape %[[VAL_49]] [] output_shape [1] : tensor<i64, #hipsr.mem<host>> into tensor<1xi64, #hipsr.mem<host>>
 // CHECK-NEXT:               hipsr.compute_yield %[[EXPAND_SHAPE_1]] : tensor<1xi64, #hipsr.mem<host>>
 // CHECK-NEXT:             } : tensor<1xi64, #hipsr.mem<host>>
+// CHECK-NEXT:             hipsr.preserve_shape %[[EXECUTE_REGION_9]], %[[COMPUTE_3]] : tensor<3x?xi64, #hipsr.mem<device>>
+// CHECK-NEXT:             hipsr.preserve_shape %[[EXECUTE_REGION_10]], %[[TRANSPOSE_0]] : tensor<?x3xi64, #hipsr.mem<device>>
+// CHECK-NEXT:             hipsr.preserve_shape %[[EXECUTE_REGION_11]], %[[COMPUTE_4]] : tensor<2xi64, #hipsr.mem<host>>
+// CHECK-NEXT:             hipsr.preserve_shape %[[EXECUTE_REGION_12]], %[[COMPUTE_5]] : tensor<i64, #hipsr.mem<host>>
+// CHECK-NEXT:             hipsr.preserve_shape %[[EXECUTE_REGION_13]], %[[COMPUTE_6]] : tensor<1xi64, #hipsr.mem<host>>
 // CHECK-NEXT:             hipsr.pool_domain_yield %[[EMPTY_11]], %[[TRANSPOSE_0]], %[[EMPTY_14]], %[[COMPUTE_6]] : tensor<?x3xi64, #hipsr.mem<device>>, tensor<?x3xi64, #hipsr.mem<device>>, tensor<1xi64, #hipsr.mem<host>>, tensor<1xi64, #hipsr.mem<host>>
 // CHECK-NEXT:           } -> tensor<?x3xi64, #hipsr.mem<device>>, tensor<?x3xi64, #hipsr.mem<device>>, tensor<1xi64, #hipsr.mem<host>>, tensor<1xi64, #hipsr.mem<host>> {domain_id = 3 : i64}
 
@@ -415,6 +439,8 @@ module {
 // CHECK-NEXT:             %[[EMPTY_16:.*]] = tensor.empty(%[[SIZE_TO_INDEX_20]], %[[SIZE_TO_INDEX_21]]) : tensor<?x?x4096xf16, #hipsr.mem<device>>
 // CHECK-NEXT:             %[[SLICE_0:.*]] = hipsr.slice(%[[VAL_53]]) ins(%[[VAL_56]] : tensor<?xf16, #hipsr.mem<device>>) ends(%[[VAL_57]] : tensor<1xi64, #hipsr.mem<host>>) outs(%[[EMPTY_15]] : tensor<?xf16, #hipsr.mem<device>>) {axes_attr = array<i64: 0>, starts_attr = array<i64: 0>, steps_attr = array<i64: 1>} : tensor<?xf16, #hipsr.mem<device>>
 // CHECK-NEXT:             %[[SCATTER_ND_0:.*]] = hipsr.scatter_nd(%[[VAL_53]]) ins(%[[VAL_60]], %[[VAL_61]], %[[SLICE_0]] : tensor<?x?x4096xf16, #hipsr.mem<device>>, tensor<?x3xi64, #hipsr.mem<device>>, tensor<?xf16, #hipsr.mem<device>>) outs(%[[EMPTY_16]] : tensor<?x?x4096xf16, #hipsr.mem<device>>) : tensor<?x?x4096xf16, #hipsr.mem<device>>
+// CHECK-NEXT:             hipsr.preserve_shape %[[EXECUTE_REGION_14]], %[[SLICE_0]] : tensor<?xf16, #hipsr.mem<device>>
+// CHECK-NEXT:             hipsr.preserve_shape %[[EXECUTE_REGION_15]], %[[SCATTER_ND_0]] : tensor<?x?x4096xf16, #hipsr.mem<device>>
 // CHECK-NEXT:             hipsr.pool_domain_yield %[[SCATTER_ND_0]] : tensor<?x?x4096xf16, #hipsr.mem<device>>
 // CHECK-NEXT:           } -> tensor<?x?x4096xf16, #hipsr.mem<device>> {domain_id = 4 : i64}
 // CHECK-NEXT:           return %[[POOL_DOMAIN_4]] : tensor<?x?x4096xf16, #hipsr.mem<device>>
