@@ -68,6 +68,13 @@ target_link_libraries(hip-mlir-opt PRIVATE
   ${llvm_libs}
 )
 
+if(BUILD_HIP_UNIT_TESTS)
+  target_compile_definitions(hip-mlir-opt PRIVATE
+    HIPDNN_EP_INCLUDE_TEST_PASSES=1
+  )
+  target_link_libraries(hip-mlir-opt PRIVATE HipTestPasses)
+endif()
+
 # Install target
 install(TARGETS hip-mlir-opt
   RUNTIME DESTINATION bin

@@ -28,87 +28,11 @@ class Hip_Op<string mnemonic, list<Trait> traits = []> :
 //   - ReifyRankedShapedTypeOpInterface (decl; body auto-emitted below)
 //   - Variadic<AnyRankedTensor>:$result_tensors (empty in memref mode)
 //
-// `extraClassDefinition` auto-emits per-op dispatchers via TableGen so
-// the bulk of HIP DPS ops contribute zero per-op `.cpp` boilerplate for
-// shape inference. The dispatchers are gated by `autoReify` /
-// `autoInfer` bits so bespoke ops (matmul, gemm, ...) opt out and
-// provide their own per-op bodies. See
-// `docs/design/hip-shape-inference.md` for the rationale.
-//
-// Parameters:
-//   `outsAccessor`  : ODS-generated accessor name for the DPS init
-//                     operand, used by the auto-emitted `inferReturnTypes`
-//                     body to read the result type from the outs operand.
-//                     Default `"Output"` matches the 37 ops whose outs is
-//                     named `$output`. Ops with `$y` pass `"Y"`, etc.
-//   `autoReify`     : when 1, emit a per-op `reifyResultShapes` that
-//                     forwards to the `HipDpsOpInterface` default body
-//                     (walks `getDpsInits()`, reads each init's runtime
-//                     shape — covers the typical same-shape DPS case).
-//                     Default 1. Ops with a tighter shape source opt
-//                     out with `autoReify=0` and either pass a
-//                     `customReifyBody` (sub-bases) or write a
-//                     hand-written body in `HipReifyResultShapesImpl.cpp`.
-//                     Examples: matmul (recomputes M/N from input
-//                     operands); rope, rms_norm, qmoe (source dims
-//                     from `$input` so refinement tracks the operand's
-//                     runtime shape rather than freezing at the
-//                     destination buffer's allocation-time shape);
-//                     matmul_nbits, gemm (mixed input + attribute dims).
-//   `autoInfer`     : when 1, emit a per-op `inferReturnTypes` that
-//                     pushes the outs operand's tensor type into
-//                     `results` (or pushes nothing for memref mode, so
-//                     memref-mode ops correctly produce zero SSA
-//                     results). Default 0; ops opt in explicitly. The
-//                     auto-emit body is correct for any single-result
-//                     Hip_DpsOp (DPS post-bufferize convention: result
-//                     type == outs operand type) and is independent of
-//                     `autoReify` — ops with bespoke runtime reify
-//                     still benefit from auto-emitted `inferReturnTypes`
-//                     because at converter callsites the typed outs
-//                     already encodes the result shape. Multi-result
-//                     Hip_DpsOps (gqa, layer_norm, skip_rms_norm) keep
-//                     `autoInfer=0` because the auto-emit body pushes a
-//                     single result type and would need a hand-written
-//                     replacement that walks every `outs` operand.
-//   `declareInfer`  : when 1, declare `InferTypeOpInterface` on the op
-//                     so ODS emits the inferred-type `Op::create`
-//                     overload (lets converter callsites drop the
-//                     explicit `resultType` argument). Default 0; ops
-//                     opt in in lockstep with `autoInfer`.
-//   `customReifyBody` : optional string; when non-empty, replaces the
-//                     `autoReify` body with a custom one. The string
-//                     is the function BODY (between `{` and `}`) of
-//                     `<Op>::reifyResultShapes(OpBuilder &b,
-//                     ReifiedRankedShapedTypeDims &reified)`. Used by
-//                     parameterized sub-bases (`Hip_DpsOp_Reduction`,
-//                     `Hip_DpsOp_Broadcast`) to inject per-shape-class
-//                     boilerplate without each leaf op duplicating it.
-//                     Mutually exclusive with `autoReify=1` (sub-bases
-//                     pass `autoReify=0` and a non-empty
-//                     `customReifyBody`). Default `""`.
-//
-// Generated dispatcher example for matmul:
-//   - `extraClassDefinition` produces:
-//       LogicalResult MatmulOp::reifyResultShapes(...) {  // omitted: autoReify=0
-//       LogicalResult MatmulOp::inferReturnTypes(...) {   // emitted: autoInfer=1
-//         MatmulOp::Adaptor adaptor(operands, attrs, props, regions);
-//         Value outs = adaptor.getOutput();
-//         if (auto t = dyn_cast<RankedTensorType>(outs.getType()))
-//           results.push_back(t);
-//         return success();
-//       }
-//   - The reify body for matmul is hand-written in
-//     `HipReifyResultShapesImpl.cpp` (recovers M/K/N from operand
-//     shapes via `inferMatmulShape`, then `reifyDimOrConstant` per
-//     dim).
-class Hip_DpsOp<string mnemonic,
-                list<Trait> traits = [],
-                string outsAccessor = "Output",
-                bit autoReify = 1,
-                bit autoInfer = 0,
-                bit declareInfer = 0,
-                string customReifyBody = ""> :
+// Shape behavior is selected by named family subclasses below rather than by
+// boolean and string-body parameters on this structural root. Simple families
+// emit fixed forwarding methods; semantic long-tail ops implement reification
+// in `HipReifyResultShapesImpl.cpp`.
+class Hip_DpsOp<string mnemonic, list<Trait> traits = []> :
     Hip_Op<mnemonic, !listconcat([
         DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
         DeclareOpInterfaceMethods<DestinationStyleOpInterface,
@@ -117,32 +41,20 @@ class Hip_DpsOp<string mnemonic,
         DeclareOpInterfaceMethods<ReifyRankedShapedTypeOpInterface,
                                   ["reifyResultShapes"]>
       ],
-      !if(declareInfer,
-          [DeclareOpInterfaceMethods<InferTypeOpInterface,
-                                     ["inferReturnTypes"]>],
-          []),
       traits)> {
   let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
-  let extraClassDefinition = !strconcat(
-    !if(!ne(customReifyBody, ""),
-        !strconcat([{
-          ::mlir::LogicalResult $cppClass::reifyResultShapes(
-              ::mlir::OpBuilder &b,
-              ::mlir::ReifiedRankedShapedTypeDims &reified) {
-        }],
-        customReifyBody,
-        [{
-          }
-        }]),
-        !if(autoReify, [{
-          ::mlir::LogicalResult $cppClass::reifyResultShapes(
-              ::mlir::OpBuilder &b,
-              ::mlir::ReifiedRankedShapedTypeDims &reified) {
-            return ::llvm::cast<::mlir::hip::HipDpsOp>(getOperation())
-                .reifyResultShapes(b, reified);
-          }
-        }], "")),
-    !if(autoInfer, !strconcat([{
+}
+
+// Adds the single-result DPS inference convention: tensor mode returns the
+// typed outs operand, while memref mode has no SSA result.
+class Hip_DpsOp_WithInfer<string mnemonic,
+                          string outsAccessor = "Output",
+                          list<Trait> traits = []> :
+    Hip_DpsOp<mnemonic, !listconcat([
+        DeclareOpInterfaceMethods<InferTypeOpInterface,
+                                  ["inferReturnTypes"]>
+      ], traits)> {
+  code inferClassDefinition = !strconcat([{
       ::llvm::LogicalResult $cppClass::inferReturnTypes(
           ::mlir::MLIRContext *,
           ::std::optional<::mlir::Location>,
@@ -158,8 +70,40 @@ class Hip_DpsOp<string mnemonic,
           results.push_back(t);
         return ::mlir::success();
       }
-    }]), "")
-  );
+    }]);
+  let extraClassDefinition = inferClassDefinition;
+}
+
+// Uses the shared HipDpsOpInterface implementation to lift the runtime shape
+// from destination operands.
+class Hip_DpsOp_AutoReify<string mnemonic, list<Trait> traits = []> :
+    Hip_DpsOp<mnemonic, traits> {
+  code reifyClassDefinition = [{
+    ::mlir::LogicalResult $cppClass::reifyResultShapes(
+        ::mlir::OpBuilder &b,
+        ::mlir::ReifiedRankedShapedTypeDims &reified) {
+      return ::llvm::cast<::mlir::hip::HipDpsOp>(getOperation())
+          .reifyResultShapes(b, reified);
+    }
+  }];
+  let extraClassDefinition = reifyClassDefinition;
+}
+
+// Combines the two common generated methods without exposing independent
+// behavior switches to leaf operations.
+class Hip_DpsOp_AutoReifyInfer<string mnemonic,
+                               string outsAccessor = "Output",
+                               list<Trait> traits = []> :
+    Hip_DpsOp_WithInfer<mnemonic, outsAccessor, traits> {
+  code reifyClassDefinition = [{
+    ::mlir::LogicalResult $cppClass::reifyResultShapes(
+        ::mlir::OpBuilder &b,
+        ::mlir::ReifiedRankedShapedTypeDims &reified) {
+      return ::llvm::cast<::mlir::hip::HipDpsOp>(getOperation())
+          .reifyResultShapes(b, reified);
+    }
+  }];
+  let extraClassDefinition = reifyClassDefinition # inferClassDefinition;
 }
 
 // Parameterized sub-base for ONNX-style reduction ops (reduce_sum,
@@ -175,17 +119,19 @@ class Hip_DpsOp<string mnemonic,
 // tensor), `$axes` (rank-1 i64 tensor), `$output` (DPS init),
 // integer attributes `$keepdims` and `$noop_with_empty_axes`.
 class Hip_DpsOp_Reduction<string mnemonic, list<Trait> traits = []> :
-    Hip_DpsOp<mnemonic, traits,
-              /*outsAccessor=*/"Output",
-              /*autoReify=*/0,
-              /*autoInfer=*/1,
-              /*declareInfer=*/1,
-              /*customReifyBody=*/[{
-                return ::mlir::hip::reifyReductionShape(
-                    b, getLoc(), getData(), getAxes(),
-                    getKeepdims(), getNoopWithEmptyAxes(),
-                    getOperation(), reified);
-              }]>;
+    Hip_DpsOp_WithInfer<mnemonic, /*outsAccessor=*/"Output", traits> {
+  code reifyClassDefinition = [{
+    ::mlir::LogicalResult $cppClass::reifyResultShapes(
+        ::mlir::OpBuilder &b,
+        ::mlir::ReifiedRankedShapedTypeDims &reified) {
+      return ::mlir::hip::reifyReductionShape(
+          b, getLoc(), getData(), getAxes(),
+          getKeepdims(), getNoopWithEmptyAxes(),
+          getOperation(), reified);
+    }
+  }];
+  let extraClassDefinition = reifyClassDefinition # inferClassDefinition;
+}
 
 // Parameterized sub-base for elementwise NumPy-broadcast ops (add,
 // mul, sub, div, min, mod, equal, less, and, where, miopen.add).
@@ -207,19 +153,20 @@ class Hip_DpsOp_Reduction<string mnemonic, list<Trait> traits = []> :
 class Hip_DpsOp_Broadcast<string mnemonic, list<string> operandGetters,
                           string outsAccessor = "Output",
                           list<Trait> traits = []> :
-    Hip_DpsOp<mnemonic, traits,
-              outsAccessor,
-              /*autoReify=*/0,
-              /*autoInfer=*/1,
-              /*declareInfer=*/1,
-              /*customReifyBody=*/!strconcat(
-                "return ::mlir::hip::reifyBroadcastShapeFor("
-                "b, getLoc(), {",
-                !interleave(
-                  !foreach(g, operandGetters, "get" # g # "()"),
-                  ", "),
-                "}, getOperation(), reified);"
-              )>;
+    Hip_DpsOp_WithInfer<mnemonic, outsAccessor, traits> {
+  code reifyClassDefinition = !strconcat([{
+    ::mlir::LogicalResult $cppClass::reifyResultShapes(
+        ::mlir::OpBuilder &b,
+        ::mlir::ReifiedRankedShapedTypeDims &reified) {
+      return ::mlir::hip::reifyBroadcastShapeFor(
+          b, getLoc(), {
+  }],
+  !interleave(!foreach(g, operandGetters, "get" # g # "()"), ", "),
+  [{}, getOperation(), reified);
+    }
+  }]);
+  let extraClassDefinition = reifyClassDefinition # inferClassDefinition;
+}
 
 // Accepts both ranked tensor (pre-bufferization) and memref (post-bufferization).
 def Hip_TensorOrMemRef : AnyTypeOf<[AnyRankedTensor, AnyMemRef],
@@ -623,9 +570,8 @@ def Hip_HipblasltGraphOp : Hip_Op<"hipblaslt.graph", [SingleBlock, NoTerminator]
 
 // ===== MIOpen DNN Operations =================================================
 
-def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[OpStateOpInterface], /*outsAccessor=*/"Output",
-                           /*autoReify=*/1,
-                           /*autoInfer=*/1, /*declareInfer=*/1> {
+def Hip_ConvOp : Hip_DpsOp_AutoReifyInfer<
+    "conv", /*outsAccessor=*/"Output", /*traits=*/[OpStateOpInterface]> {
   let summary = "2D convolution operation using MIOpen (in-place)";
   let description = [{
     Performs 2D convolution using MIOpen (miopenConvolutionForward).
@@ -683,7 +629,8 @@ def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[OpStateOpInterface], /*outsAccess
   }];
 }
 
-def Hip_ConvTransposeOp : Hip_DpsOp<"conv_transpose", /*traits=*/[OpStateOpInterface]> {
+def Hip_ConvTransposeOp : Hip_DpsOp_AutoReify<
+    "conv_transpose", /*traits=*/[OpStateOpInterface]> {
   let summary = "2D transposed convolution / deconvolution using MIOpen "
                 "(in-place)";
   let description = [{
@@ -756,22 +703,10 @@ def Hip_ConvTransposeOp : Hip_DpsOp<"conv_transpose", /*traits=*/[OpStateOpInter
 
 // ===== hipBLASLt ops =========================================================
 
-// `autoReify=0` opts out of the shared default reify body: matmul
-// recovers its result dims from operand shapes (M, K from A; K, N from
-// B) rather than echoing the outs shape, so the body is hand-written
-// in `HipReifyResultShapesImpl.cpp`. `autoInfer=1, declareInfer=1`
-// keep the op on the parameterized auto-emit path for
-// `inferReturnTypes` because at construction time the converter passes
-// a typed outs operand whose tensor type already encodes the result
-// shape -- the auto-emitted body just reads it back, so there is no
-// reason to write that boilerplate by hand. Matmul is the worked
-// example for the orthogonality of these two layers on #260; #262
-// extends the same split to gemm / qmoe / matmul_nbits.
-def Hip_MatmulOp : Hip_DpsOp<"matmul", /*traits=*/[OpStateOpInterface],
-                             /*outsAccessor=*/"Output",
-                             /*autoReify=*/0,
-                             /*autoInfer=*/1,
-                             /*declareInfer=*/1> {
+// Matmul selects a manual-reify/generated-infer family: reification recovers
+// M/K/N from operand shapes in `HipReifyResultShapesImpl.cpp`, while the
+// generated `inferReturnTypes` body reads the typed outs operand.
+def Hip_MatmulOp : Hip_DpsOp_WithInfer<"matmul", "Output", [OpStateOpInterface]> {
   let summary = "Matrix multiplication (supports batched N-D x N-D)";
   let description = [{
     Performs matrix multiplication: output = A @ B
@@ -848,13 +783,8 @@ def Hip_MatmulOp : Hip_DpsOp<"matmul", /*traits=*/[OpStateOpInterface],
 // Quantized Operations
 //===----------------------------------------------------------------------===//
 
-def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
-                                  /*traits=*/[AttrSizedOperandSegments,
-                                              OpStateOpInterface],
-                                  /*outsAccessor=*/"Output",
-                                  /*autoReify=*/0,
-                                  /*autoInfer=*/1,
-                                  /*declareInfer=*/1> {
+def Hip_MatMulNBitsOp : Hip_DpsOp_WithInfer<"matmul_nbits", "Output", [AttrSizedOperandSegments,
+                                              OpStateOpInterface]> {
   let summary = "Quantized N-bit matrix multiplication (com.microsoft MatMulNBits)";
   let description = [{
     Performs matrix multiplication with N-bit quantized weights.
@@ -929,12 +859,7 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
   }];
 }
 
-def Hip_QMoEOp : Hip_DpsOp<"qmoe",
-                           /*traits=*/[AttrSizedOperandSegments],
-                           /*outsAccessor=*/"Output",
-                           /*autoReify=*/0,
-                           /*autoInfer=*/1,
-                           /*declareInfer=*/1> {
+def Hip_QMoEOp : Hip_DpsOp_WithInfer<"qmoe", "Output", [AttrSizedOperandSegments]> {
   let summary = "Quantized Mixture-of-Experts (com.microsoft QMoE)";
   let description = [{
     Implements the com.microsoft QMoE operator (ONNX v1.25+ compatible): quantized
@@ -1028,7 +953,7 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe",
   }];
 }
 
-def Hip_GatherBlockQuantizedOp : Hip_DpsOp<"gather_block_quantized"> {
+def Hip_GatherBlockQuantizedOp : Hip_DpsOp_AutoReify<"gather_block_quantized"> {
   let summary = "Gather + block-wise dequantize "
                 "(com.microsoft GatherBlockQuantized)";
   let description = [{
@@ -1098,11 +1023,7 @@ def Hip_GatherBlockQuantizedOp : Hip_DpsOp<"gather_block_quantized"> {
 
 // ===== MIOpen ops ============================================================
 
-def Hip_RmsNormOp : Hip_DpsOp<"rms_norm", /*traits=*/[],
-                              /*outsAccessor=*/"Output",
-                              /*autoReify=*/0,
-                              /*autoInfer=*/1,
-                              /*declareInfer=*/1> {
+def Hip_RmsNormOp : Hip_DpsOp_WithInfer<"rms_norm", "Output"> {
   let summary = "RMS normalization";
   let description = [{
     Applies simplified (RMS) layer normalization.
@@ -1148,8 +1069,7 @@ def Hip_RmsNormOp : Hip_DpsOp<"rms_norm", /*traits=*/[],
   let hasVerifier = 1;
 }
 
-def Hip_LayerNormOp : Hip_DpsOp<"layer_norm",
-    [AttrSizedOperandSegments]> {
+def Hip_LayerNormOp : Hip_DpsOp_AutoReify<"layer_norm", [AttrSizedOperandSegments]> {
   let summary = "Standard layer normalization (ONNX LayerNormalization opset 17)";
   let description = [{
     Full ONNX LayerNormalization (opset 17+) with mean subtraction and an
@@ -1240,11 +1160,7 @@ def Hip_LayerNormOp : Hip_DpsOp<"layer_norm",
   let hasVerifier = 1;
 }
 
-def Hip_InstanceNormOp : Hip_DpsOp<"instance_norm", /*traits=*/[],
-                                   /*outsAccessor=*/"Output",
-                                   /*autoReify=*/1,
-                                   /*autoInfer=*/1,
-                                   /*declareInfer=*/1> {
+def Hip_InstanceNormOp : Hip_DpsOp_AutoReifyInfer<"instance_norm"> {
   let summary = "ONNX InstanceNormalization (per-instance per-channel mean/var)";
   let description = [{
     Carries out instance normalization as described in
@@ -1286,8 +1202,8 @@ def Hip_InstanceNormOp : Hip_DpsOp<"instance_norm", /*traits=*/[],
   let hasVerifier = 1;
 }
 
-def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
-    [AttrSizedOperandSegments]> {
+def Hip_SkipRmsNormOp :
+    Hip_DpsOp_AutoReify<"skip_rms_norm", [AttrSizedOperandSegments]> {
   let summary = "Fused skip + RMS normalization (com.microsoft.SkipSimplifiedLayerNormalization)";
   let description = [{
     Full alignment with Microsoft ONNX Runtime SkipSimplifiedLayerNormalization
@@ -1365,11 +1281,7 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
   let hasVerifier = 1;
 }
 
-def Hip_RopeOp : Hip_DpsOp<"rope", /*traits=*/[],
-                           /*outsAccessor=*/"Output",
-                           /*autoReify=*/0,
-                           /*autoInfer=*/1,
-                           /*declareInfer=*/1> {
+def Hip_RopeOp : Hip_DpsOp_WithInfer<"rope"> {
   let summary = "Rotary position embedding (RoPE)";
   let description = [{
     Applies rotary position embedding to the input tensor.
@@ -1575,7 +1487,10 @@ def Hip_MinOp : Hip_DpsOp_Broadcast<"min", /*operandGetters=*/["Lhs", "Rhs"],
   }];
 }
 
-def Hip_MaxOp : Hip_DpsOp<"max", /*traits=*/[OpStateOpInterface]> {
+def Hip_MaxOp : Hip_DpsOp_Broadcast<"max",
+                                    /*operandGetters=*/["Lhs", "Rhs"],
+                                    /*outsAccessor=*/"Output",
+                                    /*traits=*/[OpStateOpInterface]> {
   let summary = "Elementwise maximum";
 
   // OpStateOpInterface: shared OpTensorState (see hip.mul).
@@ -1618,11 +1533,7 @@ def Hip_MaxOp : Hip_DpsOp<"max", /*traits=*/[OpStateOpInterface]> {
   }];
 }
 
-def Hip_MiopenSoftmaxOp : Hip_DpsOp<"miopen.softmax",
-                                    /*traits=*/[],
-                                    /*outsAccessor=*/"Output",
-                                    /*autoReify=*/1,
-                                    /*autoInfer=*/1, /*declareInfer=*/1> {
+def Hip_MiopenSoftmaxOp : Hip_DpsOp_AutoReifyInfer<"miopen.softmax"> {
   let summary = "Softmax via miopenSoftmaxForward_V2 (row-wise, last dim)";
   let arguments = (ins
     Hip_ContextType:$ctx,
@@ -1636,11 +1547,7 @@ def Hip_MiopenSoftmaxOp : Hip_DpsOp<"miopen.softmax",
 
 // ===== Custom HIP kernel ops (no library equivalent) =========================
 
-def Hip_TransposeOp : Hip_DpsOp<"transpose", /*traits=*/[],
-                                /*outsAccessor=*/"Output",
-                                /*autoReify=*/0,
-                                /*autoInfer=*/1,
-                                /*declareInfer=*/1> {
+def Hip_TransposeOp : Hip_DpsOp_WithInfer<"transpose"> {
   let summary = "N-D transpose with arbitrary permutation (ONNX Transpose)";
   let description = [{
     Permutes the dimensions of the input tensor according to the `perm`
@@ -1676,11 +1583,7 @@ def Hip_TransposeOp : Hip_DpsOp<"transpose", /*traits=*/[],
   let hasVerifier = 1;
 }
 
-def Hip_GatherOp : Hip_DpsOp<"gather", /*traits=*/[],
-                             /*outsAccessor=*/"Output",
-                             /*autoReify=*/0,
-                             /*autoInfer=*/1,
-                             /*declareInfer=*/1> {
+def Hip_GatherOp : Hip_DpsOp_WithInfer<"gather"> {
   let summary = "Gather elements along an axis";
   let description = [{
     Gathers elements from data tensor along the given axis using indices.
@@ -1709,11 +1612,7 @@ def Hip_GatherOp : Hip_DpsOp<"gather", /*traits=*/[],
   }];
 }
 
-def Hip_OneHotOp : Hip_DpsOp<"one_hot", /*traits=*/[],
-                             /*outsAccessor=*/"Output",
-                             /*autoReify=*/0,
-                             /*autoInfer=*/1,
-                             /*declareInfer=*/1> {
+def Hip_OneHotOp : Hip_DpsOp_WithInfer<"one_hot"> {
   let summary = "Expand indices into a one-hot tensor along an axis";
   let description = [{
     Implements ONNX OneHot: inserts a `depth`-sized axis into the output
@@ -1743,11 +1642,7 @@ def Hip_OneHotOp : Hip_DpsOp<"one_hot", /*traits=*/[],
   }];
 }
 
-def Hip_CompressOp : Hip_DpsOp<"compress", /*traits=*/[],
-                               /*outsAccessor=*/"Output",
-                               /*autoReify=*/0,
-                               /*autoInfer=*/1,
-                               /*declareInfer=*/1> {
+def Hip_CompressOp : Hip_DpsOp_WithInfer<"compress"> {
   let summary = "Select slices or elements where a 1-D condition is true";
   let description = [{
     Implements ONNX Compress: along `axis`, keep only slices whose
@@ -1786,11 +1681,7 @@ def Hip_CompressOp : Hip_DpsOp<"compress", /*traits=*/[],
   }];
 }
 
-def Hip_ScatterElementsOp : Hip_DpsOp<"scatter_elements", /*traits=*/[],
-                                      /*outsAccessor=*/"Output",
-                                      /*autoReify=*/1,
-                                      /*autoInfer=*/1,
-                                      /*declareInfer=*/1> {
+def Hip_ScatterElementsOp : Hip_DpsOp_AutoReifyInfer<"scatter_elements"> {
   let summary = "Scatter updates along an axis using same-rank indices";
   let description = [{
     Implements ONNX ScatterElements: produce an `output` tensor with the
@@ -1822,11 +1713,7 @@ def Hip_ScatterElementsOp : Hip_DpsOp<"scatter_elements", /*traits=*/[],
   }];
 }
 
-def Hip_GatherElementsOp : Hip_DpsOp<"gather_elements", /*traits=*/[],
-                                      /*outsAccessor=*/"Output",
-                                      /*autoReify=*/0,
-                                      /*autoInfer=*/1,
-                                      /*declareInfer=*/1> {
+def Hip_GatherElementsOp : Hip_DpsOp_WithInfer<"gather_elements"> {
   let summary = "Gather elements along an axis using same-rank indices";
   let description = [{
     Gathers values from the data tensor at positions specified by the
@@ -1854,12 +1741,7 @@ def Hip_GatherElementsOp : Hip_DpsOp<"gather_elements", /*traits=*/[],
   }];
 }
 
-def Hip_TopKOp : Hip_DpsOp<"top_k",
-    /*traits=*/[],
-    /*outsAccessor=*/"Values",
-    /*autoReify=*/0,
-    /*autoInfer=*/0,
-    /*declareInfer=*/0> {
+def Hip_TopKOp : Hip_DpsOp<"top_k"> {
   let summary = "Retrieve top-K values and indices along an axis";
   let description = [{
     Implements the ONNX TopK operator: along `axis`, select the top `K`
@@ -1898,11 +1780,7 @@ def Hip_TopKOp : Hip_DpsOp<"top_k",
   }];
 }
 
-def Hip_RangeOp : Hip_DpsOp<"range", /*traits=*/[],
-                            /*outsAccessor=*/"Output",
-                            /*autoReify=*/0,
-                            /*autoInfer=*/1,
-                            /*declareInfer=*/1> {
+def Hip_RangeOp : Hip_DpsOp_WithInfer<"range"> {
   let summary = "Generate 1-D range tensor";
   let description = [{
     Implements ONNX Range semantics:
@@ -1928,11 +1806,7 @@ def Hip_RangeOp : Hip_DpsOp<"range", /*traits=*/[],
   }];
 }
 
-def Hip_SiluOp : Hip_DpsOp<"silu", /*traits=*/[],
-                           /*outsAccessor=*/"Output",
-                           /*autoReify=*/1,
-                           /*autoInfer=*/1,
-                           /*declareInfer=*/1> {
+def Hip_SiluOp : Hip_DpsOp_AutoReifyInfer<"silu"> {
   let summary = "SiLU activation: output = input * sigmoid(input)";
   let arguments = (ins
     Hip_ContextType:$ctx,
@@ -1944,11 +1818,7 @@ def Hip_SiluOp : Hip_DpsOp<"silu", /*traits=*/[],
   let hasVerifier = 1;
 }
 
-def Hip_SigmoidOp : Hip_DpsOp<"sigmoid", /*traits=*/[],
-                              /*outsAccessor=*/"Y",
-                              /*autoReify=*/1,
-                              /*autoInfer=*/1,
-                              /*declareInfer=*/1> {
+def Hip_SigmoidOp : Hip_DpsOp_AutoReifyInfer<"sigmoid", "Y"> {
   let summary = "Sigmoid activation";
   let description = [{
     Applies sigmoid activation: y = 1 / (1 + exp(-x))
@@ -1977,11 +1847,7 @@ def Hip_SigmoidOp : Hip_DpsOp<"sigmoid", /*traits=*/[],
   }];
 }
 
-def Hip_TanhOp : Hip_DpsOp<"tanh", /*traits=*/[],
-                           /*outsAccessor=*/"Y",
-                           /*autoReify=*/1,
-                           /*autoInfer=*/1,
-                           /*declareInfer=*/1> {
+def Hip_TanhOp : Hip_DpsOp_AutoReifyInfer<"tanh", "Y"> {
   let summary = "Tanh activation";
   let description = [{
     Applies hyperbolic-tangent activation: y = tanh(x)
@@ -2010,11 +1876,7 @@ def Hip_TanhOp : Hip_DpsOp<"tanh", /*traits=*/[],
   }];
 }
 
-def Hip_SoftplusOp : Hip_DpsOp<"softplus", /*traits=*/[],
-                               /*outsAccessor=*/"Y",
-                               /*autoReify=*/1,
-                               /*autoInfer=*/1,
-                               /*declareInfer=*/1> {
+def Hip_SoftplusOp : Hip_DpsOp_AutoReifyInfer<"softplus", "Y"> {
   let summary = "Softplus activation: y = ln(exp(x) + 1)";
 
   let description = [{
@@ -2045,11 +1907,7 @@ def Hip_SoftplusOp : Hip_DpsOp<"softplus", /*traits=*/[],
   }];
 }
 
-def Hip_GeluOp : Hip_DpsOp<"gelu", /*traits=*/[],
-                           /*outsAccessor=*/"Output",
-                           /*autoReify=*/1,
-                           /*autoInfer=*/1,
-                           /*declareInfer=*/1> {
+def Hip_GeluOp : Hip_DpsOp_AutoReifyInfer<"gelu"> {
   let summary = "GELU activation (Gaussian Error Linear Unit)";
   let description = [{
     Applies the GELU activation function element-wise.
@@ -2085,11 +1943,7 @@ def Hip_GeluOp : Hip_DpsOp<"gelu", /*traits=*/[],
   }];
 }
 
-def Hip_BiasGeluOp : Hip_DpsOp<"bias_gelu", /*traits=*/[],
-                               /*outsAccessor=*/"Output",
-                               /*autoReify=*/1,
-                               /*autoInfer=*/1,
-                               /*declareInfer=*/1> {
+def Hip_BiasGeluOp : Hip_DpsOp_AutoReifyInfer<"bias_gelu"> {
   let summary = "Fused bias-add + GELU (erf) activation";
   let description = [{
     Computes Gelu(data + bias) where bias is a 1D tensor broadcast along the
@@ -2117,11 +1971,7 @@ def Hip_BiasGeluOp : Hip_DpsOp<"bias_gelu", /*traits=*/[],
   }];
 }
 
-def Hip_FastGeluOp : Hip_DpsOp<"fast_gelu", /*traits=*/[],
-                               /*outsAccessor=*/"Output",
-                               /*autoReify=*/1,
-                               /*autoInfer=*/1,
-                               /*declareInfer=*/1> {
+def Hip_FastGeluOp : Hip_DpsOp_AutoReifyInfer<"fast_gelu"> {
   let summary = "Fast GELU (tanh approx) with optional 1D bias broadcast";
   let description = [{
     Computes FastGelu(x [+ broadcast(bias)]) using the tanh approximation.
@@ -2153,7 +2003,7 @@ def Hip_FastGeluOp : Hip_DpsOp<"fast_gelu", /*traits=*/[],
   }];
 }
 
-def Hip_LeakyReluOp : Hip_DpsOp<"leaky_relu"> {
+def Hip_LeakyReluOp : Hip_DpsOp_AutoReify<"leaky_relu"> {
   let summary = "LeakyRelu activation: y = x >= 0 ? x : alpha * x";
   let description = [{
     Applies LeakyRelu activation element-wise.
@@ -2185,11 +2035,7 @@ def Hip_LeakyReluOp : Hip_DpsOp<"leaky_relu"> {
   }];
 }
 
-def Hip_ReciprocalOp : Hip_DpsOp<"reciprocal", /*traits=*/[],
-                                 /*outsAccessor=*/"Y",
-                                 /*autoReify=*/1,
-                                 /*autoInfer=*/1,
-                                 /*declareInfer=*/1> {
+def Hip_ReciprocalOp : Hip_DpsOp_AutoReifyInfer<"reciprocal", "Y"> {
   let summary = "Element-wise reciprocal: y = 1/x";
   let description = [{
     Computes the reciprocal of each element.
@@ -2219,11 +2065,7 @@ def Hip_ReciprocalOp : Hip_DpsOp<"reciprocal", /*traits=*/[],
   }];
 }
 
-def Hip_SqrtOp : Hip_DpsOp<"sqrt", /*traits=*/[],
-                           /*outsAccessor=*/"Y",
-                           /*autoReify=*/1,
-                           /*autoInfer=*/1,
-                           /*declareInfer=*/1> {
+def Hip_SqrtOp : Hip_DpsOp_AutoReifyInfer<"sqrt", "Y"> {
   let summary = "Element-wise square root: y = sqrt(x)";
   let description = [{
     Computes the square root of each element.
@@ -2380,11 +2222,7 @@ def Hip_OrOp : Hip_DpsOp_Broadcast<"or", /*operandGetters=*/["Lhs", "Rhs"]> {
   }];
 }
 
-def Hip_NotOp : Hip_DpsOp<"not", /*traits=*/[],
-                          /*outsAccessor=*/"Y",
-                          /*autoReify=*/1,
-                          /*autoInfer=*/1,
-                          /*declareInfer=*/1> {
+def Hip_NotOp : Hip_DpsOp_AutoReifyInfer<"not", "Y"> {
   let summary = "Element-wise logical NOT: y = !x";
   let description = [{
     Computes the logical NOT of each element (boolean/i1).
@@ -2414,11 +2252,7 @@ def Hip_NotOp : Hip_DpsOp<"not", /*traits=*/[],
   }];
 }
 
-def Hip_CosOp : Hip_DpsOp<"cos", /*traits=*/[],
-                          /*outsAccessor=*/"Y",
-                          /*autoReify=*/1,
-                          /*autoInfer=*/1,
-                          /*declareInfer=*/1> {
+def Hip_CosOp : Hip_DpsOp_AutoReifyInfer<"cos", "Y"> {
   let summary = "Element-wise cosine: y = cos(x)";
   let description = [{
     Computes the cosine of each element.
@@ -2448,11 +2282,7 @@ def Hip_CosOp : Hip_DpsOp<"cos", /*traits=*/[],
   }];
 }
 
-def Hip_ErfOp : Hip_DpsOp<"erf", /*traits=*/[],
-                          /*outsAccessor=*/"Y",
-                          /*autoReify=*/1,
-                          /*autoInfer=*/1,
-                          /*declareInfer=*/1> {
+def Hip_ErfOp : Hip_DpsOp_AutoReifyInfer<"erf", "Y"> {
   let summary = "Element-wise error function: y = erf(x)";
   let description = [{
     Computes the Gauss error function of each element.
@@ -2482,11 +2312,7 @@ def Hip_ErfOp : Hip_DpsOp<"erf", /*traits=*/[],
   }];
 }
 
-def Hip_SinOp : Hip_DpsOp<"sin", /*traits=*/[],
-                          /*outsAccessor=*/"Y",
-                          /*autoReify=*/1,
-                          /*autoInfer=*/1,
-                          /*declareInfer=*/1> {
+def Hip_SinOp : Hip_DpsOp_AutoReifyInfer<"sin", "Y"> {
   let summary = "Element-wise sine: y = sin(x)";
   let description = [{
     Computes the sine of each element.
@@ -2516,11 +2342,7 @@ def Hip_SinOp : Hip_DpsOp<"sin", /*traits=*/[],
   }];
 }
 
-def Hip_CeilOp : Hip_DpsOp<"ceil", /*traits=*/[],
-                           /*outsAccessor=*/"Y",
-                           /*autoReify=*/1,
-                           /*autoInfer=*/1,
-                           /*declareInfer=*/1> {
+def Hip_CeilOp : Hip_DpsOp_AutoReifyInfer<"ceil", "Y"> {
   let summary = "Element-wise ceiling: y = ceil(x)";
   let description = [{
     Rounds each element upward to the nearest integer.
@@ -2552,11 +2374,7 @@ def Hip_CeilOp : Hip_DpsOp<"ceil", /*traits=*/[],
   }];
 }
 
-def Hip_RoundOp : Hip_DpsOp<"round", /*traits=*/[],
-                            /*outsAccessor=*/"Y",
-                            /*autoReify=*/1,
-                            /*autoInfer=*/1,
-                            /*declareInfer=*/1> {
+def Hip_RoundOp : Hip_DpsOp_AutoReifyInfer<"round", "Y"> {
   let summary = "Element-wise round-ties-to-even: y = round(x)";
   let description = [{
     Rounds each element to the nearest integer; halfway cases go to the
@@ -2588,11 +2406,7 @@ def Hip_RoundOp : Hip_DpsOp<"round", /*traits=*/[],
   }];
 }
 
-def Hip_AtanOp : Hip_DpsOp<"atan", /*traits=*/[],
-                           /*outsAccessor=*/"Y",
-                           /*autoReify=*/1,
-                           /*autoInfer=*/1,
-                           /*declareInfer=*/1> {
+def Hip_AtanOp : Hip_DpsOp_AutoReifyInfer<"atan", "Y"> {
   let summary = "Element-wise arctangent: y = atan(x)";
   let description = [{
     Computes the arctangent of each element.
@@ -2624,11 +2438,7 @@ def Hip_AtanOp : Hip_DpsOp<"atan", /*traits=*/[],
   }];
 }
 
-def Hip_FloorOp : Hip_DpsOp<"floor", /*traits=*/[],
-                            /*outsAccessor=*/"Y",
-                            /*autoReify=*/1,
-                            /*autoInfer=*/1,
-                            /*declareInfer=*/1> {
+def Hip_FloorOp : Hip_DpsOp_AutoReifyInfer<"floor", "Y"> {
   let summary = "Element-wise floor: y = floor(x)";
   let description = [{
     Rounds each element downward to the nearest integer.
@@ -2660,7 +2470,7 @@ def Hip_FloorOp : Hip_DpsOp<"floor", /*traits=*/[],
   }];
 }
 
-def Hip_ExpOp : Hip_DpsOp<"exp"> {
+def Hip_ExpOp : Hip_DpsOp_AutoReify<"exp"> {
   let summary = "Element-wise natural exponential: y = exp(x)";
   let description = [{
     Computes the natural exponential of each element.
@@ -2692,7 +2502,7 @@ def Hip_ExpOp : Hip_DpsOp<"exp"> {
   }];
 }
 
-def Hip_LogOp : Hip_DpsOp<"log"> {
+def Hip_LogOp : Hip_DpsOp_AutoReify<"log"> {
   let summary = "Element-wise natural logarithm: y = log(x)";
   let description = [{
     Computes the natural logarithm of each element.
@@ -2724,11 +2534,7 @@ def Hip_LogOp : Hip_DpsOp<"log"> {
   }];
 }
 
-def Hip_AbsOp : Hip_DpsOp<"abs", /*traits=*/[],
-                          /*outsAccessor=*/"Y",
-                          /*autoReify=*/1,
-                          /*autoInfer=*/1,
-                          /*declareInfer=*/1> {
+def Hip_AbsOp : Hip_DpsOp_AutoReifyInfer<"abs", "Y"> {
   let summary = "Element-wise absolute value: y = abs(x)";
   let description = [{
     Computes the absolute value of each element.
@@ -2760,11 +2566,7 @@ def Hip_AbsOp : Hip_DpsOp<"abs", /*traits=*/[],
   }];
 }
 
-def Hip_NegOp : Hip_DpsOp<"neg", /*traits=*/[],
-                          /*outsAccessor=*/"Y",
-                          /*autoReify=*/1,
-                          /*autoInfer=*/1,
-                          /*declareInfer=*/1> {
+def Hip_NegOp : Hip_DpsOp_AutoReifyInfer<"neg", "Y"> {
   let summary = "Element-wise negation: y = -x";
   let description = [{
     Negates each element of the input tensor.
@@ -2868,11 +2670,7 @@ def Hip_WhereOp : Hip_DpsOp_Broadcast<"where",
   }];
 }
 
-def Hip_CastOp : Hip_DpsOp<"cast", /*traits=*/[],
-                           /*outsAccessor=*/"Output",
-                           /*autoReify=*/1,
-                           /*autoInfer=*/1,
-                           /*declareInfer=*/1> {
+def Hip_CastOp : Hip_DpsOp_AutoReifyInfer<"cast"> {
   let summary = "Type conversion operation";
   let description = [{
     Converts input tensor from one data type to another.
@@ -3091,8 +2889,7 @@ def Hip_ReduceMinOp : Hip_DpsOp_Reduction<"reduce_min"> {
 
 // ===== Causal Conv with State ================================================
 
-def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
-    [AttrSizedOperandSegments, OpStateOpInterface]> {
+def Hip_CausalConvWithStateOp : Hip_DpsOp_AutoReify<"causal_conv_with_state", [AttrSizedOperandSegments, OpStateOpInterface]> {
   let summary = "Stateful causal depthwise convolution";
   let description = [{
     Causal depthwise convolution with carry state for incremental decoding.
@@ -3191,8 +2988,7 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
 
 // ===== Group Query Attention =================================================
 
-def Hip_GqaOp : Hip_DpsOp<"gqa",
-    [AttrSizedOperandSegments, OpStateOpInterface]> {
+def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpInterface]> {
   let summary = "Group Query Attention - Full MS spec implementation";
   let description = [{
     Complete implementation of com.microsoft.GroupQueryAttention (v1) specification.
@@ -3414,7 +3210,7 @@ def Hip_HipDNNGraphOutlineOp : Hip_Op<"hipdnn_graph_outline", [
 
 // ===== hipDNN Graph Execution ================================================
 
-def Hip_HipDNNGraphOp : Hip_DpsOp<"hipdnn_graph", [
+def Hip_HipDNNGraphOp : Hip_DpsOp_AutoReify<"hipdnn_graph", [
     AttrSizedOperandSegments
 ]> {
   let summary = "Execute a pre-compiled hipDNN graph";
@@ -3458,8 +3254,7 @@ def Hip_HipDNNGraphOp : Hip_DpsOp<"hipdnn_graph", [
 
 // ===== Multi-Head Attention =================================================
 
-def Hip_MultiHeadAttentionOp : Hip_DpsOp<"multi_head_attention",
-    [AttrSizedOperandSegments, OpStateOpInterface]> {
+def Hip_MultiHeadAttentionOp : Hip_DpsOp_AutoReify<"multi_head_attention", [AttrSizedOperandSegments, OpStateOpInterface]> {
   let summary = "Multi-Head Attention (com.microsoft.MultiHeadAttention v1)";
   let description = [{
     Implements the com.microsoft.MultiHeadAttention operator (opset v1).
@@ -3616,8 +3411,7 @@ def Hip_MultiHeadAttentionOp : Hip_DpsOp<"multi_head_attention",
   }];
 }
 
-def Hip_LinearAttentionOp : Hip_DpsOp<"linear_attention",
-    [AttrSizedOperandSegments]> {
+def Hip_LinearAttentionOp : Hip_DpsOp_AutoReify<"linear_attention", [AttrSizedOperandSegments]> {
   let summary = "Linear attention with recurrent state (com.microsoft.LinearAttention)";
   let description = [{
     Unified linear attention operator for autoregressive decoding (T=1) and
@@ -3715,11 +3509,7 @@ def Hip_LinearAttentionOp : Hip_DpsOp<"linear_attention",
   }];
 }
 
-def Hip_GemmOp : Hip_DpsOp<"gemm", /*traits=*/[OpStateOpInterface],
-                           /*outsAccessor=*/"Output",
-                           /*autoReify=*/0,
-                           /*autoInfer=*/1,
-                           /*declareInfer=*/1> {
+def Hip_GemmOp : Hip_DpsOp_WithInfer<"gemm", "Output", [OpStateOpInterface]> {
   let summary = "General matrix multiplication (ONNX Gemm)";
   let description = [{
     Computes Y = alpha * A' * B' + beta * C, where:
@@ -3776,11 +3566,7 @@ def Hip_GemmOp : Hip_DpsOp<"gemm", /*traits=*/[OpStateOpInterface],
   }];
 }
 
-def Hip_CumSumOp : Hip_DpsOp<"cumsum", /*traits=*/[],
-                             /*outsAccessor=*/"Y",
-                             /*autoReify=*/1,
-                             /*autoInfer=*/1,
-                             /*declareInfer=*/1> {
+def Hip_CumSumOp : Hip_DpsOp_AutoReifyInfer<"cumsum", "Y"> {
   let summary = "Cumulative sum along an axis";
   let description = [{
     Computes the cumulative sum of input tensor elements along the given axis.
@@ -3816,12 +3602,7 @@ def Hip_CumSumOp : Hip_DpsOp<"cumsum", /*traits=*/[],
   }];
 }
 
-def Hip_PadOp : Hip_DpsOp<"pad",
-                          /*traits=*/[AttrSizedOperandSegments],
-                          /*outsAccessor=*/"Output",
-                          /*autoReify=*/0,
-                          /*autoInfer=*/1,
-                          /*declareInfer=*/1> {
+def Hip_PadOp : Hip_DpsOp_WithInfer<"pad", "Output", [AttrSizedOperandSegments]> {
   let summary = "Pad a tensor with constant / reflect / edge / wrap";
   let description = [{
     Pads input tensor along the axes selected by `axes` (or all axes if
@@ -3867,11 +3648,7 @@ def Hip_PadOp : Hip_DpsOp<"pad",
   }];
 }
 
-def Hip_TileOp : Hip_DpsOp<"tile", /*traits=*/[],
-                           /*outsAccessor=*/"Output",
-                           /*autoReify=*/0,
-                           /*autoInfer=*/1,
-                           /*declareInfer=*/1> {
+def Hip_TileOp : Hip_DpsOp_WithInfer<"tile"> {
   let summary = "Tile a tensor by repeating along each dimension";
   let description = [{
     Constructs a new tensor by repeating `input` along each dimension by the
@@ -3903,11 +3680,7 @@ def Hip_TileOp : Hip_DpsOp<"tile", /*traits=*/[],
   }];
 }
 
-def Hip_ExpandOp : Hip_DpsOp<"expand", /*traits=*/[],
-                             /*outsAccessor=*/"Output",
-                             /*autoReify=*/0,
-                             /*autoInfer=*/1,
-                             /*declareInfer=*/1> {
+def Hip_ExpandOp : Hip_DpsOp_WithInfer<"expand"> {
   let summary = "Broadcast a tensor to a target shape";
   let description = [{
     Broadcasts `input` to the target `shape` following NumPy broadcast rules.
@@ -3940,7 +3713,7 @@ def Hip_ExpandOp : Hip_DpsOp<"expand", /*traits=*/[],
   }];
 }
 
-def Hip_GlobalPoolOp : Hip_DpsOp<"global_pool"> {
+def Hip_GlobalPoolOp : Hip_DpsOp_AutoReify<"global_pool"> {
   let summary = "Global pooling over spatial dimensions (average / max / lp)";
   let description = [{
     Unified lowering for ONNX GlobalAveragePool / GlobalMaxPool / GlobalLpPool.
@@ -4052,12 +3825,7 @@ def Hip_LessOp : Hip_DpsOp_Broadcast<"less", /*operandGetters=*/["Lhs", "Rhs"]> 
   }];
 }
 
-def Hip_SliceOp : Hip_DpsOp<"slice",
-                            /*traits=*/[AttrSizedOperandSegments],
-                            /*outsAccessor=*/"Output",
-                            /*autoReify=*/0,
-                            /*autoInfer=*/1,
-                            /*declareInfer=*/1> {
+def Hip_SliceOp : Hip_DpsOp_WithInfer<"slice", "Output", [AttrSizedOperandSegments]> {
   let summary = "Slice a tensor along multiple axes (ONNX Slice fallback)";
   let description = [{
     Native fallback for ONNX Slice when the OnnxToHip pass cannot decompose
@@ -4111,11 +3879,7 @@ def Hip_SliceOp : Hip_DpsOp<"slice",
   }];
 }
 
-def Hip_GatherNDOp : Hip_DpsOp<"gather_nd", /*traits=*/[],
-                               /*outsAccessor=*/"Output",
-                               /*autoReify=*/0,
-                               /*autoInfer=*/1,
-                               /*declareInfer=*/1> {
+def Hip_GatherNDOp : Hip_DpsOp_WithInfer<"gather_nd"> {
   let summary = "GatherND: gather slices using N-D index tuples";
   let description = [{
     Gathers slices of `data` indexed by the trailing dimension of `indices`.
@@ -4151,11 +3915,7 @@ def Hip_GatherNDOp : Hip_DpsOp<"gather_nd", /*traits=*/[],
   }];
 }
 
-def Hip_ScatterNDOp : Hip_DpsOp<"scatter_nd", /*traits=*/[],
-                                /*outsAccessor=*/"Output",
-                                /*autoReify=*/1,
-                                /*autoInfer=*/1,
-                                /*declareInfer=*/1> {
+def Hip_ScatterNDOp : Hip_DpsOp_AutoReifyInfer<"scatter_nd"> {
   let summary = "ScatterND: scatter updates into a data tensor using N-D index tuples";
   let description = [{
     Implements the standard ONNX ScatterND operator: produce an `output`
@@ -4210,11 +3970,7 @@ def Hip_ScatterNDOp : Hip_DpsOp<"scatter_nd", /*traits=*/[],
   }];
 }
 
-def Hip_SignOp : Hip_DpsOp<"sign", /*traits=*/[],
-                           /*outsAccessor=*/"Y",
-                           /*autoReify=*/1,
-                           /*autoInfer=*/1,
-                           /*declareInfer=*/1> {
+def Hip_SignOp : Hip_DpsOp_AutoReifyInfer<"sign", "Y"> {
   let summary = "Element-wise sign: y = sign(x)";
   let description = [{
     Computes the element-wise sign of the input. Returns +1 / 0 / -1 for
@@ -4280,11 +4036,7 @@ def Hip_ModOp : Hip_DpsOp_Broadcast<"mod", /*operandGetters=*/["Lhs", "Rhs"]> {
   }];
 }
 
-def Hip_SizeOp : Hip_DpsOp<"size", /*traits=*/[],
-                           /*outsAccessor=*/"Y",
-                           /*autoReify=*/1,
-                           /*autoInfer=*/1,
-                           /*declareInfer=*/1> {
+def Hip_SizeOp : Hip_DpsOp_AutoReifyInfer<"size", "Y"> {
   let summary = "Total element count of a tensor (ONNX Size, dynamic-shape path)";
   let description = [{
     Implements the runtime path of the standard ONNX Size operator
@@ -4325,9 +4077,7 @@ def Hip_SizeOp : Hip_DpsOp<"size", /*traits=*/[],
   }];
 }
 
-def Hip_NonZeroOp : Hip_DpsOp<"nonzero", /*traits=*/[], /*outsAccessor=*/"Y",
-                              /*autoReify=*/1,
-                              /*autoInfer=*/0, /*declareInfer=*/0> {
+def Hip_NonZeroOp : Hip_DpsOp_AutoReify<"nonzero"> {
   let summary = "Indices of non-zero elements (ONNX NonZero)";
   let description = [{
     Implements the standard ONNX NonZero operator (opset 13+):
@@ -4348,8 +4098,8 @@ def Hip_NonZeroOp : Hip_DpsOp<"nonzero", /*traits=*/[], /*outsAccessor=*/"Y",
     to the host via `hip.readback_dim` and slices `y` to `[R, N]` so the
     real extent (not the capacity) flows to consumers and to the
     ORT-reported output shape. Two destinations means the op is
-    multi-result (`y`, `count`); like the other multi-output DPS ops it
-    keeps `autoInfer=0` (converters pass explicit result types).
+    multi-result (`y`, `count`); like the other multi-output DPS ops it does
+    not use the single-result inference family (converters pass explicit types).
 
     Uses destination-passing style: both output buffers are provided as
     arguments.
@@ -4377,7 +4127,7 @@ def Hip_NonZeroOp : Hip_DpsOp<"nonzero", /*traits=*/[], /*outsAccessor=*/"Y",
   }];
 }
 
-def Hip_PoolOp : Hip_DpsOp<"pool"> {
+def Hip_PoolOp : Hip_DpsOp_AutoReify<"pool"> {
   let summary = "Spatial pooling (ONNX MaxPool / AveragePool / LpPool)";
   let description = [{
     Unified window pooling for ONNX MaxPool / AveragePool / LpPool. For an
@@ -4455,7 +4205,7 @@ def Hip_PoolOp : Hip_DpsOp<"pool"> {
   }];
 }
 
-def Hip_ResizeOp : Hip_DpsOp<"resize"> {
+def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize"> {
   let summary = "Spatial resize / interpolation (ONNX Resize)";
   let description = [{
     Implements a subset of ONNX Resize that covers the common image / volume
@@ -4504,11 +4254,7 @@ def Hip_ResizeOp : Hip_DpsOp<"resize"> {
   }];
 }
 
-def Hip_GridSampleOp : Hip_DpsOp<"grid_sample", /*traits=*/[],
-                                 /*outsAccessor=*/"Output",
-                                 /*autoReify=*/1,
-                                 /*autoInfer=*/1,
-                                 /*declareInfer=*/1> {
+def Hip_GridSampleOp : Hip_DpsOp_AutoReifyInfer<"grid_sample"> {
   let summary = "ONNX GridSample (4D NCHW bilinear / nearest)";
   let description = [{
     Samples a 4-D input `X` of shape (N, C, H_in, W_in) at normalized
