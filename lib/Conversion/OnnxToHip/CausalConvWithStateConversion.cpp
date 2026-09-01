@@ -101,7 +101,8 @@ mlir::LogicalResult CausalConvWithStateToHip::matchAndRewrite(
     pastStateShape = pastStateType.getShape();
   auto staticShapes = mlir::hip::inferCausalConvWithStateOutputShapes(
       inputType.getShape(), weightType.getShape(), biasShape, pastStateShape,
-      ndimAttr.getInt(), [&]() { return op->emitError(); });
+      ndimAttr.getInt(), /*channelsLast=*/false,
+      [&]() { return op->emitError(); });
   if (mlir::failed(staticShapes))
     return mlir::failure();
 
@@ -126,7 +127,7 @@ mlir::LogicalResult CausalConvWithStateToHip::matchAndRewrite(
   // precondition before emitting dynamic dimension arithmetic.
   auto resultShapes = mlir::hip::reifyCausalConvWithStateOutputShapes(
       rewriter, loc, input, weight, bias, pastState, ndimAttr.getInt(),
-      [&]() { return op->emitError(); });
+      /*channelsLast=*/false, [&]() { return op->emitError(); });
   if (mlir::failed(resultShapes))
     return mlir::failure();
   auto outputInit = createEmptyTensorFromReifiedShape(rewriter, loc, outputType,
