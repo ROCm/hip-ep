@@ -18,16 +18,9 @@ authors = [{ name = "Advanced Micro Devices, Inc." }]
 dependencies = []
 
 [tool.setuptools]
-# The EP's native artifacts ship directly under onnxruntime/capi/ (platlib),
-# the same layout ONNX Runtime itself uses -- so they install next to
-# onnxruntime.dll cross-platform (pip resolves platlib per OS, unlike a
-# hardcoded lib/site-packages data_files path). onnxruntime.capi is treated as
-# a PEP 420 namespace package (we ship NO __init__.py for onnxruntime/ or
-# onnxruntime/capi/, so we never clobber ONNX Runtime's own files).
-
 [tool.setuptools.packages.find]
-include = ["onnxruntime_ep_hip", "onnxruntime.capi"]
+include = ["onnxruntime_ep_hip", "onnxruntime_ep_amdgpu"]
 namespaces = true
 
 [tool.setuptools.package-data]
-"onnxruntime.capi" = ["*.dll", "*.lib", "*.dll.a", "*.so", "hipblaslt/library/*/*"]
+"onnxruntime_ep_amdgpu" = ["*.dll", "*.lib", "*.dll.a", "*.so", "hipblaslt/library/*/*"]

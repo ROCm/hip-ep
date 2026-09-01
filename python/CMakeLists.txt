@@ -14,10 +14,7 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 # staged under the build dir, the wheel lands in <build>/python/dist.
 set(_pkg_src "${CMAKE_CURRENT_SOURCE_DIR}")
 set(_stage "${CMAKE_CURRENT_BINARY_DIR}/pkg")
-# Native artifacts are staged into the onnxruntime/capi namespace package so the
-# wheel ships them at onnxruntime/capi/ (platlib), installing next to
-# onnxruntime.dll cross-platform.
-set(_libs_dir "${_stage}/onnxruntime/capi")
+set(_libs_dir "${_stage}/onnxruntime_ep_amdgpu")
 set(_dist_dir "${CMAKE_CURRENT_BINARY_DIR}/dist")
 
 set(MORPHIZEN_HIP_ARCH "${HIP_ARCHITECTURES}")
@@ -64,20 +61,6 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
   endif()
 endforeach()
 
-# Externally-built DLLs to also bundle next to the EP (absolute paths, ;-list).
-# Used to ship the AMD GPU umbrella chain (amdgpu-ep.dll + hip-backend.dll),
-# which is built in the separate onnxruntime-ep-amdgpu repo and has no target
-# here. Passed as --optional-dll so a plain EP-only wheel (var unset) is
-# unaffected and a missing path warns instead of failing. The caller (CI) is
-# responsible for building those DLLs before this wheel target runs.
-set(HIP_WHEEL_EXTRA_DLLS "" CACHE STRING
-  "Absolute paths (;-list) of externally-built DLLs to bundle into the wheel")
-foreach(_extra IN LISTS HIP_WHEEL_EXTRA_DLLS)
-  if(_extra)
-    list(APPEND _dll_args "--optional-dll" "${_extra}")
-  endif()
-endforeach()
-
 add_custom_target(wheel ALL
   # 1. Stage the package sources into the build dir (keep source tree clean).
   COMMAND ${CMAKE_COMMAND} -E copy_directory
@@ -87,8 +70,8 @@ add_custom_target(wheel ALL
           "${_pkg_src}/setup.py"
           "${_stage}/"
   # 2. Stage native artifacts (EP lib + per-arch custom-kernels runtime
-  #    DLLs/SOs + CRT import libs) into the onnxruntime/capi namespace
-  #    package dir so the wheel ships them at onnxruntime/capi/ (platlib).
+  #    DLLs/SOs + CRT import libs) into the onnxruntime_ep_amdgpu namespace
+  #    package dir so the wheel ships them at onnxruntime_ep_amdgpu/ (platlib).
   COMMAND ${CMAKE_COMMAND} -E rm -rf "${_libs_dir}"
   COMMAND ${Python3_EXECUTABLE} "${_pkg_src}/_pack_libs.py"
           ${_dll_args}
