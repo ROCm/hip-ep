@@ -2030,6 +2030,42 @@ LogicalResult LinearAttentionOp::verify() {
 }
 
 LogicalResult GqaOp::verify() {
+  SmallVector<Value> operands = {getQuery()};
+  auto appendIfPresent = [&](Value value) {
+    if (value)
+      operands.push_back(value);
+  };
+  appendIfPresent(getKey());
+  appendIfPresent(getValue());
+  appendIfPresent(getPastKey());
+  appendIfPresent(getPastValue());
+  operands.push_back(getSeqlensK());
+  operands.push_back(getTotalSeqLen());
+  appendIfPresent(getCosCache());
+  appendIfPresent(getSinCache());
+  appendIfPresent(getPositionIds());
+  appendIfPresent(getAttentionBias());
+  appendIfPresent(getHeadSink());
+  appendIfPresent(getKScale());
+  appendIfPresent(getVScale());
+  operands.push_back(getOutput());
+  operands.push_back(getPresentKey());
+  operands.push_back(getPresentValue());
+  appendIfPresent(getOutputQk());
+  unsigned numInits = getOutputQk() ? 4 : 3;
+  if (failed(verifyDpsComputeOp(*this, operands, numInits)))
+    return failure();
+
+  bool hasPastKey = getPastKey() != nullptr;
+  bool hasPastValue = getPastValue() != nullptr;
+  if (hasPastKey != hasPastValue)
+    return emitOpError(
+        "past_key and past_value must both be provided or both be omitted");
+  if (getNumHeads() <= 0 || getKvNumHeads() <= 0)
+    return emitOpError("num_heads and kv_num_heads must be positive");
+  if (getNumHeads() % getKvNumHeads() != 0)
+    return emitOpError("num_heads must be divisible by kv_num_heads");
+
   // Verify quantization parameter consistency
   auto kQuantType = getKQuantType().str();
   auto vQuantType = getVQuantType().str();
@@ -2073,11 +2109,9 @@ LogicalResult GqaOp::verify() {
     return emitOpError("qk_output must be 0, 1, or 2, got ") << qkOutput;
   }
 
-  // If qk_output != 0, output_qk must be provided
-  if (qkOutput != 0 && !getOutputQk()) {
-    return emitOpError("qk_output is ")
-           << qkOutput << " but output_qk buffer is not provided";
-  }
+  if ((qkOutput != 0) != static_cast<bool>(getOutputQk()))
+    return emitOpError(
+        "output_qk must be present exactly when qk_output is nonzero");
 
   // Verify paired optional inputs: cos_cache/sin_cache must both be present or
   // both absent
@@ -2099,6 +2133,173 @@ LogicalResult GqaOp::verify() {
                        "(found key=")
            << (hasKey ? "present" : "absent")
            << ", value=" << (hasValue ? "present" : "absent") << ")";
+  }
+
+  auto queryType = cast<ShapedType>(getQuery().getType());
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  auto presentKeyType = cast<ShapedType>(getPresentKey().getType());
+  auto presentValueType = cast<ShapedType>(getPresentValue().getType());
+  if (queryType.getRank() != 3 || outputType.getRank() != 3)
+    return emitOpError("query and output must be rank-3");
+  if (presentKeyType.getRank() != 4 || presentValueType.getRank() != 4)
+    return emitOpError("present_key and present_value must be rank-4 BNSH");
+
+  auto checkCompatible = [&](int64_t lhs, int64_t rhs,
+                             const Twine &what) -> LogicalResult {
+    if (!ShapedType::isDynamic(lhs) && !ShapedType::isDynamic(rhs) &&
+        lhs != rhs)
+      return emitOpError() << what << " (" << lhs << " vs " << rhs << ")";
+    return success();
+  };
+  auto checkDim = [&](ShapedType lhsType, int64_t lhsDim, ShapedType rhsType,
+                      int64_t rhsDim, const Twine &what) -> LogicalResult {
+    return checkCompatible(lhsType.getDimSize(lhsDim),
+                           rhsType.getDimSize(rhsDim), what);
+  };
+  auto checkStaticValue = [&](ShapedType type, int64_t dim, int64_t expected,
+                              const Twine &what) -> LogicalResult {
+    int64_t actual = type.getDimSize(dim);
+    if (!ShapedType::isDynamic(actual) && actual != expected)
+      return emitOpError() << what << " (expected " << expected << ", got "
+                           << actual << ")";
+    return success();
+  };
+
+  if (failed(checkDim(outputType, 0, queryType, 0,
+                      "output batch must match query batch")) ||
+      failed(checkDim(outputType, 1, queryType, 1,
+                      "output sequence must match query sequence")) ||
+      failed(checkDim(presentKeyType, 0, queryType, 0,
+                      "present_key batch must match query batch")) ||
+      failed(checkDim(presentValueType, 0, queryType, 0,
+                      "present_value batch must match query batch")) ||
+      failed(
+          checkStaticValue(presentKeyType, 1, getKvNumHeads(),
+                           "present_key head count must equal kv_num_heads")) ||
+      failed(
+          checkStaticValue(presentValueType, 1, getKvNumHeads(),
+                           "present_value head count must equal kv_num_heads")))
+    return failure();
+  for (int64_t dim : llvm::seq<int64_t>(0, 4))
+    if (failed(checkDim(presentKeyType, dim, presentValueType, dim,
+                        "present_key and present_value shapes must match")))
+      return failure();
+
+  int64_t headDivisor =
+      hasKey ? getNumHeads() : getNumHeads() + 2 * getKvNumHeads();
+  int64_t queryHidden = queryType.getDimSize(2);
+  std::optional<int64_t> knownHeadSize;
+  if (!ShapedType::isDynamic(queryHidden)) {
+    if (queryHidden % headDivisor != 0)
+      return emitOpError("query hidden extent must be divisible by ")
+             << (hasKey ? "num_heads" : "num_heads + 2 * kv_num_heads");
+    knownHeadSize = queryHidden / headDivisor;
+  }
+
+  auto mergeKnownHeadSize = [&](int64_t candidate,
+                                const Twine &name) -> LogicalResult {
+    if (ShapedType::isDynamic(candidate))
+      return success();
+    if (knownHeadSize && *knownHeadSize != candidate)
+      return emitOpError() << name
+                           << " head size must match the query head size";
+    knownHeadSize = candidate;
+    return success();
+  };
+  auto mergeHeadSize = [&](int64_t hidden, int64_t heads,
+                           const Twine &name) -> LogicalResult {
+    if (ShapedType::isDynamic(hidden))
+      return success();
+    if (hidden % heads != 0)
+      return emitOpError() << name << " hidden extent must be divisible by "
+                           << heads;
+    return mergeKnownHeadSize(hidden / heads, name);
+  };
+
+  if (hasKey) {
+    auto keyType = cast<ShapedType>(getKey().getType());
+    auto valueType = cast<ShapedType>(getValue().getType());
+    if ((keyType.getRank() != 3 && keyType.getRank() != 4) ||
+        valueType.getRank() != keyType.getRank())
+      return emitOpError(
+          "key and value must have the same rank, either rank-3 or rank-4");
+    if (failed(checkDim(keyType, 0, queryType, 0,
+                        "key batch must match query batch")) ||
+        failed(checkDim(valueType, 0, queryType, 0,
+                        "value batch must match query batch")))
+      return failure();
+    if (keyType.getRank() == 3) {
+      if (failed(checkDim(keyType, 1, valueType, 1,
+                          "key and value sequence extents must match")) ||
+          failed(
+              mergeHeadSize(keyType.getDimSize(2), getKvNumHeads(), "key")) ||
+          failed(
+              mergeHeadSize(valueType.getDimSize(2), getKvNumHeads(), "value")))
+        return failure();
+    } else {
+      for (int64_t dim : llvm::seq<int64_t>(0, 4))
+        if (failed(checkDim(keyType, dim, valueType, dim,
+                            "key and value shapes must match")))
+          return failure();
+      if (failed(checkStaticValue(keyType, 1, getKvNumHeads(),
+                                  "key head count must equal kv_num_heads")) ||
+          failed(mergeKnownHeadSize(keyType.getDimSize(3), "key")))
+        return failure();
+    }
+  }
+
+  if (knownHeadSize) {
+    if (failed(checkStaticValue(outputType, 2, getNumHeads() * *knownHeadSize,
+                                "output hidden extent is incompatible with "
+                                "num_heads")) ||
+        failed(checkStaticValue(presentKeyType, 3, *knownHeadSize,
+                                "present_key head size is incompatible")) ||
+        failed(checkStaticValue(presentValueType, 3, *knownHeadSize,
+                                "present_value head size is incompatible")))
+      return failure();
+  }
+
+  if (hasPastKey) {
+    auto pastKeyType = cast<ShapedType>(getPastKey().getType());
+    auto pastValueType = cast<ShapedType>(getPastValue().getType());
+    if (pastKeyType.getRank() != 4 || pastValueType.getRank() != 4)
+      return emitOpError("past_key and past_value must be rank-4 BNSH");
+    for (int64_t dim : llvm::seq<int64_t>(0, 4))
+      if (failed(checkDim(pastKeyType, dim, pastValueType, dim,
+                          "past_key and past_value shapes must match")))
+        return failure();
+    if (failed(checkDim(pastKeyType, 0, queryType, 0,
+                        "past cache batch must match query batch")) ||
+        failed(checkStaticValue(pastKeyType, 1, getKvNumHeads(),
+                                "past cache head count must equal "
+                                "kv_num_heads")) ||
+        failed(checkDim(pastKeyType, 0, presentKeyType, 0,
+                        "past and present cache batches must match")) ||
+        failed(checkDim(pastKeyType, 1, presentKeyType, 1,
+                        "past and present cache head counts must match")) ||
+        failed(checkDim(pastKeyType, 3, presentKeyType, 3,
+                        "past and present cache head sizes must match")))
+      return failure();
+    int64_t pastCapacity = pastKeyType.getDimSize(2);
+    int64_t presentCapacity = presentKeyType.getDimSize(2);
+    if (!ShapedType::isDynamic(pastCapacity) &&
+        !ShapedType::isDynamic(presentCapacity) &&
+        presentCapacity < pastCapacity)
+      return emitOpError(
+          "present cache capacity cannot be smaller than past capacity");
+  }
+
+  if (Value outputQk = getOutputQk()) {
+    auto outputQkType = cast<ShapedType>(outputQk.getType());
+    if (outputQkType.getRank() != 4)
+      return emitOpError("output_qk must be rank-4");
+    if (failed(checkDim(outputQkType, 0, queryType, 0,
+                        "output_qk batch must match query batch")) ||
+        failed(checkStaticValue(outputQkType, 1, getNumHeads(),
+                                "output_qk head count must equal num_heads")) ||
+        failed(checkDim(outputQkType, 2, queryType, 1,
+                        "output_qk query sequence must match query")))
+      return failure();
   }
 
   return success();

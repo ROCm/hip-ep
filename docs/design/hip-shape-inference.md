@@ -177,6 +177,7 @@ Choose the smallest mechanism that matches the operation's semantics:
 | LayerNormalization | Y equals input; Mean/InvStdDev use keepdims reduction shape over `[axis, rank)` |
 | LinearAttention | Shared output/state formula used by converter, reification, and verifier |
 | SkipSimplifiedLayerNormalization | Output and optional residual sum equal input; training stats rejected |
+| GroupQueryAttention | Semantic query/head mapping plus `max(past capacity, total_seq_len)` or logical length alone without past |
 | MultiHeadAttention | Default rank-3 fp16 Q/K/V result equals query; optional/cache forms route to GQA or are rejected |
 | Forward Conv (rank-3 converter/rank-4 HIP op) | Shared signed-floor spatial-window formula used by converter, reification, and verifier |
 | Rank-4 NCHW ConvTranspose | Shared ONNX formula used by converter, reification, and verifier |
@@ -362,6 +363,18 @@ LinearAttention uses one two-result rule in `HipShapeUtils`:
 call that rule. In particular, a missing `past_state` does not make key's
 positional dimensions authoritative for the state destination.
 
+GroupQueryAttention has one payload-dependent exception. With past/present
+buffer sharing, a matching past extent can be larger than the currently valid
+logical prefix; with a growing non-shared cache, the logical prefix can be
+larger than the past allocation. Conversion therefore sizes each dynamic
+present-cache sequence dimension as the nonnegative index maximum of its
+matching past dim 2 and `total_seq_len`. Without past operands, the dynamic
+present extent is `total_seq_len` directly. Conversion performs exactly one
+synchronized logical-length readback per op when any dynamic present or QK
+extent needs it, reusing that value for separate past-key/past-value maxima.
+Optional QK always uses the logical extent rather than cache capacity.
+Reification keeps the DPS-init fallback for these payload-dependent extents.
+
 The default `hip.multi_head_attention` rule matches its implemented runtime
 path, not the full Microsoft schema: Q/K/V are separate rank-3 fp16 tensors,
 Q/K/V batch and hidden extents agree, K/V sequence extents agree, hidden is
@@ -372,6 +385,7 @@ positive and divisible by `num_heads`, `unidirectional` is 0 or 1,
 masks, packed layouts, past/cache inputs, cache indirection, and present/QK
 outputs are rejected before the HIP op is created. The existing decoder
 self-attention and rank-4 cross-attention routes to `hip.gqa` run first and
+retain their separate contracts.
 
 Reductions resolve to one internal out-to-in dimension map, consumed by both
 `inferReductionShape` (static extents) and `reifyReductionResultShape` (mixed
