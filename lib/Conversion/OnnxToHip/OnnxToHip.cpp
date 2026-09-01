@@ -78,12 +78,14 @@ markPackedInt4Consumers(mlir::Operation *constOp,
       packedBytes < 0)
     return PackedInt4Result::NotApplicable;
   int64_t numel = tensorType.getNumElements();
+  int64_t numel = tensorType.getNumElements();
   if (numel <= 0)
     return PackedInt4Result::NotApplicable;
   // Full-width storage is plain int8; leave it untouched. ceil(numel/2) is the
   // packed nibble count -- the same relation hip.constant's verifier accepts
-  // (an odd numel packs its last nibble into a padded byte). Any other size is
-  // a malformed source.
+  // (an odd numel packs its last nibble into a padded byte). A single element
+  // occupies one byte either way, so it classifies as Unpacked here. Any other
+  // size is a malformed source.
   if (packedBytes == numel)
     return PackedInt4Result::Unpacked;
   if (packedBytes != (numel + 1) / 2)

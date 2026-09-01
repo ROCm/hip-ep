@@ -14,8 +14,8 @@
 //   - ONNX `output_dtype` is dropped, since the result element type already
 //     encodes it (the importer maps UINT8 -> ui8, INT8 -> i8, and so on)
 //   - Output init shape follows the input positionally
-//   - INT4 / UINT4, the one case the result type cannot encode: dequantize
-//     forwards the `packed_int4` marker, quantize refuses the op
+//   - INT4 / UINT4, the one case the result type cannot encode: both
+//     directions forward the `packed_int4` marker onto the hip op
 // ============================================================================
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
@@ -23,7 +23,7 @@
 
 
 module {
-  
+
 // ===== Test 1: Q/DQ pair, both with zero_point =====
 // The quantize omits precision, so the hip op must come out carrying the
 // ONNX default of 0.
@@ -105,57 +105,29 @@ module {
     return %y : tensor<4096x64xf16>
   }
 
-// ===== Test 4: QuantizeLinear to UINT4, consumed by DequantizeLinear =====
-// output_dtype 21 is ONNX UINT4, and it is the only thing saying so -- the
-// result type is plain ui8 at the logical element count. Marking is a
-// property of the pair: the quantize writes two values per byte, so the
-// dequantize reading it back must be told, and here it is the only consumer
-// so both ops come out carrying `packed_int4`. output_dtype itself must not
-// reach the hip op.
+// ===== Test 4: QuantizeLinear marked as a packed UINT4 target =====
+// The mirror of Test 3 on the quantize side. No pass stamps `packed_int4`
+// onto a QuantizeLinear yet -- a 4-bit target leaves no trace in the IR the
+// way a half-size constant buffer does -- so the marker is written by hand
+// here to cover the forwarding the rest of the stack depends on. output_dtype
+// 21 (ONNX UINT4) must not reach the hip op; the marker is what carries the
+// width, and the result type stays ui8 at the logical element count.
 
-// CHECK-LABEL: func.func @test_quantize_linear_uint4_pair
+// CHECK-LABEL: func.func @test_quantize_linear_packed_uint4
 // CHECK-SAME:  (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<128x64xf32>, %[[SCALE:.*]]: tensor<f32>)
-// CHECK-NEXT:  %[[QINIT:.*]] = tensor.empty() : tensor<128x64xui8>
-// CHECK-NEXT:  %[[Q:.*]] = hip.quantize_linear(%[[CTX]]) ins(%[[X]], %[[SCALE]] : tensor<128x64xf32>, tensor<f32>) outs(%[[QINIT]] : tensor<128x64xui8>) {axis = 1 : i64, block_size = 0 : i64, packed_int4, precision = 0 : i64, saturate = 1 : i64} : tensor<128x64xui8>
-// CHECK-NEXT:  %[[DQINIT:.*]] = tensor.empty() : tensor<128x64xf32>
-// CHECK-NEXT:  %[[DQ:.*]] = hip.dequantize_linear(%[[CTX]]) ins(%[[Q]], %[[SCALE]] : tensor<128x64xui8>, tensor<f32>) outs(%[[DQINIT]] : tensor<128x64xf32>) {axis = 1 : i64, block_size = 0 : i64, packed_int4} : tensor<128x64xf32>
-// CHECK-NEXT:  return %[[DQ]] : tensor<128x64xf32>
-  func.func @test_quantize_linear_uint4_pair(%x: tensor<128x64xf32>,
-                                             %scale: tensor<f32>)
-      -> tensor<128x64xf32> {
-    %q = "onnx.QuantizeLinear"(%x, %scale) {
-      axis = 1 : si64,
-      block_size = 0 : si64,
-      output_dtype = 21 : si64,
-      saturate = 1 : si64,
-      onnx_node_name = "QuantizeLinear_uint4"
-    } : (tensor<128x64xf32>, tensor<f32>) -> tensor<128x64xui8>
-    %y = "onnx.DequantizeLinear"(%q, %scale) {
-      axis = 1 : si64,
-      block_size = 0 : si64,
-      onnx_node_name = "DequantizeLinear_uint4"
-    } : (tensor<128x64xui8>, tensor<f32>) -> tensor<128x64xf32>
-    return %y : tensor<128x64xf32>
-  }
-
-// ===== Test 5: 4-bit QuantizeLinear whose result escapes is refused =====
-// Same op as Test 4, but the packed result is the graph output. Nothing
-// downstream can be told about the packing, and the buffer is still sized by
-// the logical element count, so a reader would take the untouched upper half
-// for data. Leave it to ORT instead.
-
-// CHECK-LABEL: func.func @test_quantize_linear_uint4_escapes
-// CHECK-NOT:   hip.quantize_linear
-// CHECK:       onnx.QuantizeLinear
-  func.func @test_quantize_linear_uint4_escapes(%x: tensor<128x64xf32>,
-                                                %scale: tensor<f32>)
+// CHECK-NEXT:  %[[INIT:.*]] = tensor.empty() : tensor<128x64xui8>
+// CHECK-NEXT:  %[[Y:.*]] = hip.quantize_linear(%[[CTX]]) ins(%[[X]], %[[SCALE]] : tensor<128x64xf32>, tensor<f32>) outs(%[[INIT]] : tensor<128x64xui8>) {axis = 1 : i64, block_size = 0 : i64, packed_int4, precision = 0 : i64, saturate = 1 : i64} : tensor<128x64xui8>
+// CHECK-NEXT:  return %[[Y]] : tensor<128x64xui8>
+  func.func @test_quantize_linear_packed_uint4(%x: tensor<128x64xf32>,
+                                               %scale: tensor<f32>)
       -> tensor<128x64xui8> {
     %y = "onnx.QuantizeLinear"(%x, %scale) {
       axis = 1 : si64,
       block_size = 0 : si64,
       output_dtype = 21 : si64,
+      packed_int4,
       saturate = 1 : si64,
-      onnx_node_name = "QuantizeLinear_uint4_escapes"
+      onnx_node_name = "QuantizeLinear_packed_uint4"
     } : (tensor<128x64xf32>, tensor<f32>) -> tensor<128x64xui8>
     return %y : tensor<128x64xui8>
   }
