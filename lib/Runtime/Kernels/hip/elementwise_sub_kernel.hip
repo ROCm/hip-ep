@@ -11,49 +11,66 @@
 #include <cstdint>
 #include <cstdio>
 
-__global__ void elementwise_sub_i64_kernel(
-    const int64_t* __restrict__ lhs,
-    const int64_t* __restrict__ rhs,
-    int64_t* __restrict__ output,
-    int64_t num_elements) {
-  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (idx < num_elements) {
-    output[idx] = lhs[idx] - rhs[idx];
+#include "rtc/hiprtc_module.h"
+
+// The __global__ definitions live in a header so the AOT build below and the
+// hipRTC path compile byte-identical source.
+#include "hip/rtc/elementwise_sub_device.h"
+
+// Same header, embedded as bytes at build time (see Kernels/CMakeLists.txt).
+extern "C" const unsigned char kElementwiseSubDeviceSource[];
+extern "C" const size_t kElementwiseSubDeviceSource_size;
+
+namespace {
+
+const char* rtcKernelName(int hip_dtype) {
+  switch (hip_dtype) {
+    case HIP_DTYPE_INT64:   return "elementwise_sub_i64_kernel";
+    case HIP_DTYPE_INT32:   return "elementwise_sub_i32_kernel";
+    case HIP_DTYPE_FLOAT32: return "elementwise_sub_f32_kernel";
+    case HIP_DTYPE_FLOAT16: return "elementwise_sub_f16_kernel";
+    default:                return nullptr;
   }
 }
 
-__global__ void elementwise_sub_i32_kernel(
-    const int32_t* __restrict__ lhs,
-    const int32_t* __restrict__ rhs,
-    int32_t* __restrict__ output,
-    int64_t num_elements) {
-  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (idx < num_elements) {
-    output[idx] = lhs[idx] - rhs[idx];
-  }
+hipdnn_ep::rtc::Module& rtcModule() {
+  static hipdnn_ep::rtc::Module module(
+      "elementwise_sub",
+      reinterpret_cast<const char*>(kElementwiseSubDeviceSource),
+      kElementwiseSubDeviceSource_size,
+      {"elementwise_sub_i64_kernel", "elementwise_sub_i32_kernel",
+       "elementwise_sub_f32_kernel", "elementwise_sub_f16_kernel"});
+  return module;
 }
 
-__global__ void elementwise_sub_f32_kernel(
-    const float* __restrict__ lhs,
-    const float* __restrict__ rhs,
-    float* __restrict__ output,
-    int64_t num_elements) {
-  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (idx < num_elements) {
-    output[idx] = lhs[idx] - rhs[idx];
+// Argument packing is unchecked by the compiler here -- the order and types
+// must track the __global__ signatures in the device header by hand.
+int launchRtc(int hip_dtype, hipStream_t stream, int grid_size, int block_size,
+              const void* lhs, const void* rhs, void* output,
+              int64_t num_elements) {
+  const char* kernel_name = rtcKernelName(hip_dtype);
+  if (!kernel_name) return -1;
+
+  hipFunction_t fn = rtcModule().getFunction(kernel_name);
+  if (!fn) {
+    fprintf(stderr,
+            "[custom_kernels] hip_elementwise_sub: RTC kernel %s unavailable\n",
+            kernel_name);
+    return -1;
   }
+
+  void* args[] = {&lhs, &rhs, &output, &num_elements};
+  hipError_t err = hipModuleLaunchKernel(fn, grid_size, 1, 1, block_size, 1, 1,
+                                         0, stream, args, nullptr);
+  if (err != hipSuccess) {
+    fprintf(stderr,
+            "[custom_kernels] hip_elementwise_sub RTC launch failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
 }
 
-__global__ void elementwise_sub_f16_kernel(
-    const __half* __restrict__ lhs,
-    const __half* __restrict__ rhs,
-    __half* __restrict__ output,
-    int64_t num_elements) {
-  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (idx < num_elements) {
-    output[idx] = __float2half(__half2float(lhs[idx]) - __half2float(rhs[idx]));
-  }
-}
+}  // namespace
 
 extern "C" int hip_elementwise_sub(
     void* stream,
@@ -67,6 +84,11 @@ extern "C" int hip_elementwise_sub(
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
   constexpr int kBlockSize = 256;
   int grid_size = static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
+
+  if (hipdnn_ep::rtc::enabled() && rtcKernelName(hip_dtype) != nullptr) {
+    return launchRtc(hip_dtype, hip_stream, grid_size, kBlockSize, lhs, rhs,
+                     output, num_elements);
+  }
 
   switch (hip_dtype) {
     case HIP_DTYPE_INT64:
