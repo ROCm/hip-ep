@@ -32,16 +32,22 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
                                       rewriter.getI64IntegerAttr(value));
     };
 
-    // Extract pointers
+    // Use extractMemRefDataPtr (alignedPtr + GEP(offset)) so that subview
+    // operands with non-zero descriptor offsets are correctly adjusted.
+    // extractContiguousMemRefPtr returns alignedPtr only and silently reads
+    // the parent buffer base when offset != 0.
     Value statePtr = adaptor.getCtx();
-    Value APtr = extractContiguousMemRefPtr(adaptor.getA(), rewriter, loc);
-    Value BPtr = extractContiguousMemRefPtr(adaptor.getB(), rewriter, loc);
-    Value outputPtr =
-        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
-
-    // Get memref types and shapes
     auto AType = cast<MemRefType>(op.getA().getType());
     auto BType = cast<MemRefType>(op.getB().getType());
+    auto OutType = cast<MemRefType>(op.getOutput().getType());
+    Value APtr = extractMemRefDataPtr(adaptor.getA(), AType, getTypeConverter(),
+                                      rewriter, loc);
+    Value BPtr = extractMemRefDataPtr(adaptor.getB(), BType, getTypeConverter(),
+                                      rewriter, loc);
+    Value outputPtr = extractMemRefDataPtr(adaptor.getOutput(), OutType,
+                                           getTypeConverter(), rewriter, loc);
+
+    // Get memref types and shapes
     int64_t ARank = AType.getRank();
     int64_t BRank = BType.getRank();
     int64_t transA = op.getTransA();
