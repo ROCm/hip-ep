@@ -29,7 +29,7 @@ struct ModToHip : public mlir::RewritePattern {
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
     mlir::FailureOr<mlir::Value> initOrFailure =
-        createBroadcastEmptyTensor(rewriter, loc, resultType, {a, b});
+        createOnnxBroadcastEmptyTensor(rewriter, loc, resultType, {a, b}, op);
     if (mlir::failed(initOrFailure))
       return rewriter.notifyMatchFailure(
           op, "Mod: no ranked operand spans dynamic result dim");
