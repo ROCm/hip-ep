@@ -86,9 +86,8 @@ hipError_t launchKernel(hipFunction_t fn, dim3 grid, dim3 block, size_t smem,
 #define HIPDNN_RTC_STR_(...) #__VA_ARGS__
 #define HIPDNN_RTC_STR(...) HIPDNN_RTC_STR_(__VA_ARGS__)
 
-// The lookup is cached per launch site: resolving a name expression costs a
-// string construction and a hash probe, and these sites run on the hot path
-// (autotune alone launches thousands of times).
+// Cached per launch site: resolving a name expression costs a string
+// construction and a hash probe, and these sites sit on the hot path.
 #define HIPDNN_RTC_LAUNCH(LOOKUP, GRID, BLOCK, SMEM, STREAM, ARGS, ...)       \
   do {                                                                        \
     static hipFunction_t _rtc_fn = (LOOKUP)(HIPDNN_RTC_STR(__VA_ARGS__));     \
