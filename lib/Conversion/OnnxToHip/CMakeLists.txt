@@ -3,6 +3,50 @@
 # ** Licensed under the MIT License.
 ##
 
+# ============================================================================
+# PDLL Pattern Compilation
+# ============================================================================
+# Locate mlir-pdll from the LLVM build tree (self-built, not system)
+find_program(MLIR_PDLL_EXE mlir-pdll
+    HINTS
+        "${CMAKE_BINARY_DIR}/_deps/llvm-project-build/bin"
+    NO_DEFAULT_PATH
+)
+
+if(MLIR_PDLL_EXE)
+    message(STATUS "OnnxToHip: mlir-pdll found: ${MLIR_PDLL_EXE}")
+    
+    set(PDL_INPUT "${CMAKE_CURRENT_SOURCE_DIR}/pdl/QDQMatMulFusion.pdll")
+    set(PDL_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/pdl")
+    file(MAKE_DIRECTORY "${PDL_BUILD_DIR}")
+    set(PDL_OUTPUT "${PDL_BUILD_DIR}/QDQMatMulFusion.pdl.mlir")
+    
+    # Compile PDLL to MLIR bytecode
+    add_custom_command(
+        OUTPUT "${PDL_OUTPUT}"
+        COMMAND "${MLIR_PDLL_EXE}"
+                -x mlir
+                "${PDL_INPUT}"
+                -o "${PDL_OUTPUT}"
+        DEPENDS "${PDL_INPUT}"
+        COMMENT "Compiling PDLL pattern: QDQMatMulFusion.pdll -> QDQMatMulFusion.pdl.mlir"
+        VERBATIM
+    )
+    
+    add_custom_target(QDQMatMulFusionPDLL DEPENDS "${PDL_OUTPUT}")
+    
+    # Pass bytecode path to C++ via compile definition
+    # Will be set via target_compile_definitions after library is defined: QDQMATMUL_FUSION_PDL_FILE="${PDL_OUTPUT}")
+    
+    message(STATUS "OnnxToHip: PDLL fusion enabled — bytecode: ${PDL_OUTPUT}")
+else()
+    message(WARNING "OnnxToHip: mlir-pdll not found — PDLL fusion disabled")
+endif()
+
+# ============================================================================
+# OnnxToHip Library
+# ============================================================================
+
 add_library(OnnxToHip STATIC
   OnnxToHip.cpp
   SimplifyOnnx.cpp
@@ -104,6 +148,10 @@ add_library(OnnxToHip STATIC
   ClipConversion.cpp
 )
 
+if(MLIR_PDLL_EXE)
+    add_dependencies(OnnxToHip QDQMatMulFusionPDLL)
+endif()
+
 add_dependencies(OnnxToHip
   HipDialectIncGen
   HipTypesIncGen
@@ -123,4 +171,14 @@ target_link_libraries(OnnxToHip PUBLIC
   MLIRIR
   MLIRSupport
   MLIRTransforms
+  MLIRPDLDialect
+  MLIRPDLInterpDialect
+  MLIRParser
 )
+
+# Set compile definition with bytecode path (must be after library is defined)
+if(MLIR_PDLL_EXE)
+    target_compile_definitions(OnnxToHip PRIVATE
+        "QDQMATMUL_FUSION_PDL_FILE=\"${PDL_OUTPUT}\""
+    )
+endif()
