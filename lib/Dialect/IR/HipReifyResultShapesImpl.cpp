@@ -77,7 +77,7 @@ LogicalResult CausalConvWithStateOp::reifyResultShapes(
   FailureOr<ReifiedRankedShapedTypeDims> shapes =
       mlir::hip::reifyCausalConvWithStateOutputShapes(
           b, getLoc(), getInput(), getWeight(), getBias(), getPastState(),
-          getNdim(), [&]() { return this->emitOpError(); });
+          getNdim(), getChannelsLast(), [&]() { return this->emitOpError(); });
   if (failed(shapes))
     return failure();
   reifiedReturnShapes = std::move(*shapes);
