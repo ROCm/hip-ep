@@ -1240,7 +1240,8 @@ def Hip_RmsNormOp :
 }
 
 def Hip_LayerNormOp :
-    Hip_DpsOp<"layer_norm", /*traits=*/[AttrSizedOperandSegments]> {
+    Hip_DpsOp_SemanticNoInfer<"layer_norm",
+                              /*traits=*/[AttrSizedOperandSegments]> {
   let summary = "Standard layer normalization (ONNX LayerNormalization opset 17)";
   let description = [{
     Full ONNX LayerNormalization (opset 17+) with mean subtraction and an
@@ -1375,7 +1376,7 @@ def Hip_InstanceNormOp :
 }
 
 def Hip_SkipRmsNormOp :
-    Hip_DpsOp<"skip_rms_norm", [AttrSizedOperandSegments]> {
+    Hip_DpsOp_SemanticNoInfer<"skip_rms_norm", [AttrSizedOperandSegments]> {
   let summary = "Fused skip + RMS normalization (com.microsoft.SkipSimplifiedLayerNormalization)";
   let description = [{
     Full alignment with Microsoft ONNX Runtime SkipSimplifiedLayerNormalization
@@ -3117,8 +3118,9 @@ def Hip_ReduceMinOp : Hip_DpsOp_Reduction<"reduce_min"> {
 // ===== Causal Conv with State ================================================
 
 def Hip_CausalConvWithStateOp :
-    Hip_DpsOp<"causal_conv_with_state",
-              [AttrSizedOperandSegments, OpStateOpInterface]> {
+    Hip_DpsOp_SemanticNoInfer<"causal_conv_with_state",
+                              [AttrSizedOperandSegments,
+                               OpStateOpInterface]> {
   let summary = "Stateful causal depthwise convolution";
   let description = [{
     Causal depthwise convolution with carry state for incremental decoding.
@@ -3487,8 +3489,9 @@ def Hip_HipDNNGraphOp :
 // ===== Multi-Head Attention =================================================
 
 def Hip_MultiHeadAttentionOp :
-    Hip_DpsOp<"multi_head_attention",
-              [AttrSizedOperandSegments, OpStateOpInterface]> {
+    Hip_DpsOp_SemanticNoInfer<"multi_head_attention",
+                              [AttrSizedOperandSegments,
+                               OpStateOpInterface]> {
   let summary = "Multi-Head Attention (com.microsoft.MultiHeadAttention v1)";
   let description = [{
     Implements the com.microsoft.MultiHeadAttention operator (opset v1).
@@ -3656,7 +3659,8 @@ def Hip_MultiHeadAttentionOp :
 }
 
 def Hip_LinearAttentionOp :
-    Hip_DpsOp<"linear_attention", [AttrSizedOperandSegments]> {
+    Hip_DpsOp_SemanticNoInfer<"linear_attention",
+                              [AttrSizedOperandSegments]> {
   let summary = "Linear attention with recurrent state (com.microsoft.LinearAttention)";
   let description = [{
     Unified linear attention operator for autoregressive decoding (T=1) and
