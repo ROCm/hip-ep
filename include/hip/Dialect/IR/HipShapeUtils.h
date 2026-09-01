@@ -25,9 +25,12 @@ bool parseDenseIntElements(DenseElementsAttr dense,
                            SmallVectorImpl<int64_t> &out,
                            std::optional<int64_t> expectedRank = std::nullopt);
 
-/// Match an inline `arith.constant` rank-0/rank-1 integer tensor and parse it
-/// with `parseDenseIntElements`. Generic HIP dialect code intentionally does
-/// not inspect frontend operations or conversion-side storage wrappers.
+/// Match a rank-0/rank-1 integer constant and parse it with
+/// `parseDenseIntElements`. Recognized structural sources are an inline
+/// `arith.constant` tensor and a `memref.get_global` referencing a constant
+/// global with a dense initializer. The latter preserves constant provenance
+/// across tensor-to-memref bufferization. Generic HIP dialect code does not
+/// inspect frontend operations.
 bool matchConstantIntTensor(Value value, SmallVectorImpl<int64_t> &out,
                             std::optional<int64_t> expectedRank = std::nullopt);
 
@@ -211,50 +214,56 @@ FailureOr<SmallVector<OpFoldResult>> reifyGatherND(OpBuilder &b, Location loc,
                                                    Value data, Value indices,
                                                    int64_t batchDims);
 
-/// Reify the result shape of a reduction op (reduce_sum / reduce_max /
-/// reduce_prod) given `data`, the `axes` operand (rank-1 i64 tensor),
-/// and the `keepdims` / `noop_with_empty_axes` attributes.
+/// ONNX reduction result shape over `axes`, from static extents only.
 ///
-/// Tries to introspect `axes` as an `arith.constant` (the typical case
-/// after the OnnxToHip converter materializes it from the ONNX
-/// attribute). When successful:
-///   - keepdims=1: axes-listed dims become `IndexAttr(1)`; non-axes
-///     dims pass through from `data`.
-///   - keepdims=0: axes-listed dims are dropped from the output rank;
-///     non-axes dims pass through.
-///   - Empty axes + noop_with_empty_axes=0: ALL dims become 1
-///     (keepdims=1) or output is rank-0 (keepdims=0).
-///   - Empty axes + noop_with_empty_axes=1: output equals input
-///     (no reduction).
+/// `axes` holds the already-resolved reduced axis indices (ONNX negative-axis
+/// convention); an empty list means no reduction. `keepdims = 0` drops reduced
+/// axes from the output rank, so the output dimension order is *not* positional
+/// in the input: reducing axes `[1, 2]` of a rank-4 input maps output dimension
+/// 1 to input dimension 3.
 ///
-/// Returns `success()` and writes the reified dim list into `out` when
-/// `axes` can be introspected. Returns `failure()` when `axes` is not a
-/// recognised constant — the caller should then fall back to
-/// `reifyElementwiseSameShape(output)` to keep the reify interface
-/// non-failing.
-///
-/// Uses `LogicalResult` (rather than the empty-vector sentinel used by
-/// the other helpers in this header) because a valid rank-0 reduction
-/// result has an empty dim list, which would otherwise be
-/// indistinguishable from the bail path.
-LogicalResult reifyReductionWithKeepdims(OpBuilder &b, Location loc, Value data,
-                                         Value axes, int64_t keepdims,
-                                         int64_t noopWithEmptyAxes,
-                                         SmallVectorImpl<OpFoldResult> &out);
+/// This and `reifyReductionResultShape` share one internal output-to-input
+/// dimension mapping, so a destination built from either cannot disagree with
+/// the shape `reifyResultShapes` reports. Returns failure when axes are invalid
+/// or do not form the one contiguous span supported by the runtime kernel.
+FailureOr<SmallVector<int64_t>> inferReductionShape(ArrayRef<int64_t> dataShape,
+                                                    ArrayRef<int64_t> axes,
+                                                    int64_t keepdims);
 
-/// One-shot reify body for ONNX-style reduction ops (reduce_sum,
-/// reduce_max, reduce_prod). Tries `reifyReductionWithKeepdims` first
-/// to recover per-input-dim mappings from a constant `axes` operand.
-/// When `axes` is not a recognised constant, falls back to the shared
-/// `HipDpsOp` outs-lift default so the reify interface always
-/// succeeds (the only honest answer when we cannot decide which dims
-/// were reduced is the type of the `outs` operand the converter
-/// already picked).
+/// Normalize ONNX negative axes, reject duplicates/out-of-range values, sort
+/// them, and require one contiguous span. Empty axes remain empty.
+FailureOr<SmallVector<int64_t>> normalizeReductionAxes(int64_t dataRank,
+                                                       ArrayRef<int64_t> axes);
+
+/// Resolve a structurally-proven tensor or memref constant axes operand,
+/// applying `noop_with_empty_axes` semantics before normalization. Runtime
+/// operands and non-contiguous/malformed axis sets fail.
+FailureOr<SmallVector<int64_t>>
+resolveConstantReductionAxes(Value axes, int64_t dataRank,
+                             int64_t noopWithEmptyAxes);
+
+/// Generated-verifier target for `Hip_DpsOp_Reduction`. Tensor and memref
+/// forms both require a structurally-proven constant axes source, one
+/// representable contiguous normalized span, and an exact semantic result
+/// shape.
+LogicalResult verifyReductionDpsOp(Operation *op, Value data, Value axes,
+                                   int64_t keepdims, int64_t noopWithEmptyAxes);
+
+/// ONNX reduction result shape over `axes` as mixed extents, emitting
+/// `tensor.dim` only for dimensions that are dynamic in `data`. Same mapping
+/// as `inferReductionShape`; see it for the `keepdims` semantics. `data` must
+/// be a `RankedTensorType`-typed Value.
+FailureOr<SmallVector<OpFoldResult>>
+reifyReductionResultShape(OpBuilder &b, Location loc, Value data,
+                          ArrayRef<int64_t> axes, int64_t keepdims);
+
+/// One-shot reify body for ONNX-style reduction ops. Structurally-proven
+/// constant `axes` use the shared semantic dimension map. Runtime,
+/// malformed, and non-contiguous axes fail without emitting IR.
 ///
-/// `op` must implement both `HipDpsOp` (so the fallback can walk
-/// `getDpsInits()`) and have a `RankedTensorType` `data` operand.
-/// Returns `failure()` only on the no-tensor-results / non-tensor
-/// `data` defensive paths; otherwise always returns `success()`.
+/// `op` must have a `RankedTensorType` `data` operand.
+/// Returns `failure()` on defensive type/result checks, invalid constant axes,
+/// or an unsupported axes source/span.
 ///
 /// Used as the body of `Hip_DpsOp_Reduction`'s auto-emitted reify
 /// dispatcher; see `Hip_DpsOp_Reduction` in `HipOps.td`.
