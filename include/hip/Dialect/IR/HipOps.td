@@ -3312,9 +3312,8 @@ def Hip_HipDNNGraphOp : Hip_DpsOp_AutoReify<"hipdnn_graph", [
 // ===== Multi-Head Attention =================================================
 
 def Hip_MultiHeadAttentionOp :
-    Hip_DpsOp_SemanticNoInfer<"multi_head_attention",
-                              [AttrSizedOperandSegments,
-                               OpStateOpInterface]> {
+    Hip_DpsOp<"multi_head_attention",
+              [AttrSizedOperandSegments, OpStateOpInterface]> {
   let summary = "Multi-Head Attention (com.microsoft.MultiHeadAttention v1)";
   let description = [{
     Implements the com.microsoft.MultiHeadAttention operator (opset v1).
@@ -3482,8 +3481,7 @@ def Hip_MultiHeadAttentionOp :
 }
 
 def Hip_LinearAttentionOp :
-    Hip_DpsOp_SemanticNoInfer<"linear_attention",
-                              [AttrSizedOperandSegments]> {
+    Hip_DpsOp<"linear_attention", [AttrSizedOperandSegments]> {
   let summary = "Linear attention with recurrent state (com.microsoft.LinearAttention)";
   let description = [{
     Unified linear attention operator for autoregressive decoding (T=1) and
