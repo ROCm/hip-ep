@@ -15,9 +15,9 @@
 //===----------------------------------------------------------------------===//
 // hip_causal_conv_step_decode -- single-step fused causal depthwise 1D conv.
 //
-// Replaces the MIOpen "build virtual buffer with hipMemcpy2DAsync, run
-// depthwise conv, run bias + SiLU as separate ops" chain for the seq_len == 1
-// decode path. Single launch, one block per (batch, channel), each thread is
+// Handles the seq_len == 1 decode path in a single launch, fusing the
+// convolution, bias and SiLU that would otherwise be separate ops over a
+// materialized virtual buffer. One block per (batch, channel), each thread is
 // responsible for one channel.
 //
 // At decode the math is laughably small:
@@ -219,9 +219,9 @@ hipError_t launch_for_K(
 // A thread slides a length-K window over its slice of the virtual sequence
 // [past_state[0..K-2], input[0..L-1]], writing that slice's outputs; the thread
 // holding the tail also writes the trailing K-1 present_state. fp32 accumulate
-// -- numerically matches causal_conv_step_kernel at L=1. Replaces the MIOpen
-// prefill path (Find + 3 pitched memcpys + conv + bias + activation + mul)
-// with a single launch. Layout matches wrap_causal_conv_with_state:
+// -- numerically matches causal_conv_step_kernel at L=1. Fuses the pitched
+// copies, convolution, bias and activation into a single launch.
+// Layout matches wrap_causal_conv_with_state:
 //   input, output            flat [(b*C + c)*L + t]
 //   past_state, present_state flat [(b*C + c)*(K-1) + j]
 //   weight                    flat [c*K + j];   bias flat [c]

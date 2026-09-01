@@ -5,7 +5,6 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
-#include "../op_state.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
@@ -34,40 +33,19 @@
 // past_state and input directly and fuse steps 2-4 into a single launch -- so
 // this wrapper is only validation and a two-way dispatch on sequence length.
 //
-// There used to be a MIOpen fallback here for widths past the templated
-// kernels' k=8: build the virtual buffer with pitched device copies, then
-// Find + ConvolutionForward, then a separate OpTensor pass for the bias, then
-// Activation + Mul for the SiLU. The kernels now carry every width themselves
-// through a dynamic-K path, so that fallback is gone, and with it the
-// per-shape descriptor/algorithm cache it needed, the scratch workspace it
-// packed, and the MIOpen handle. Nothing on this path calls MIOpen.
+// Kernel widths past the templated kernels' k=8 are carried by a dynamic-K
+// path, so there is no per-shape cache, no scratch workspace and no state to
+// hold on to.
 //===----------------------------------------------------------------------===//
 
-namespace {
-
-// Slot payload for this op. The op emits a construct call for its slot, so the
-// symbol has to exist, but with the descriptor cache gone there is no
-// per-instance state left to hold.
-struct CausalConvState : OpStateT<CausalConvState> {};
-
-} // namespace
-
-extern "C" int8_t
-hipdnn_ep_op_state_construct_causal_conv_with_state(RuntimeState *state,
-                                                    int32_t slot) {
-  hipdnn_ep_op_state_set(state, slot, CausalConvState::create().release());
-  return 0;
-}
-
-int wrap_causal_conv_with_state(
-    RuntimeState *state, int op_state_slot, const void *input,
-    const void *weight, const void *bias, const void *past_state, void *output,
-    void *present_state, int64_t batch_size, int64_t channels, int64_t seq_len,
-    int64_t kernel_size, int64_t ndim, int64_t activation,
-    int64_t element_size_bytes, int64_t channels_last) {
-  // Retained for ABI stability; this op holds no state (see above).
-  (void)op_state_slot;
-
+int wrap_causal_conv_with_state(RuntimeState *state, const void *input,
+                                const void *weight, const void *bias,
+                                const void *past_state, void *output,
+                                void *present_state, int64_t batch_size,
+                                int64_t channels, int64_t seq_len,
+                                int64_t kernel_size, int64_t ndim,
+                                int64_t activation, int64_t element_size_bytes,
+                                int64_t channels_last) {
   // ---- Cheap, configuration-level validation FIRST. None of these touch the
   // device, so do them before any device work to keep the OP_PROFILE scope
   // tight around the actual GPU work.
@@ -126,13 +104,12 @@ int wrap_causal_conv_with_state(
                     (long long)channels_last);
 
   // ---- Single-step decode (seq_len == 1) ---------------------------------
-  // The decode kernel skips the virtual buffer, the conv API and the bias /
-  // activation chain entirely: one grid that reads past_state and input
-  // directly, computes the dot product in registers, applies optional SiLU,
-  // and writes output and present_state. Against the MIOpen chain this used to
-  // replace, that was ~17 us/call versus ~7 ms/call -- the concat alone was
-  // dominated by per-row hipMemcpy2DAsync overhead, since thousands of rows of
-  // ~k bytes each is a degenerate DMA shape.
+  // The decode kernel skips the virtual buffer and the bias / activation chain
+  // entirely: one grid that reads past_state and input directly, computes the
+  // dot product in registers, applies optional SiLU, and writes output and
+  // present_state. Materializing the concatenation instead would cost ~7 ms per
+  // call against this kernel's ~17 us, because thousands of rows of ~k bytes
+  // each is a degenerate DMA shape.
   //
   // channels_last needs no separate kernel here: at seq_len == 1 the flat
   // index of element (b, c) is b*channels + c under both layouts, since the

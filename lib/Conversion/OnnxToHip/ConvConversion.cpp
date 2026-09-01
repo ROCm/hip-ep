@@ -13,8 +13,8 @@ namespace {
 /// (1D) input is reshaped to rank-4 with a unit H dimension (NCL -> NC1L) via
 /// tensor.expand_shape, run through the same hip.conv, then collapsed back to
 /// NCL via tensor.collapse_shape. Both expand/collapse lower to zero-cost
-/// metadata ops (no data movement), so 1D conv reuses the 2D MIOpen path
-/// instead of a dedicated op/kernel. The `group` attribute is preserved
+/// metadata ops (no data movement), so 1D conv reuses the 2D path instead of a
+/// dedicated op/kernel. The `group` attribute is preserved
 /// through the 1D reshape (grouped/depthwise 1D convs -> grouped/depthwise 2D
 /// convs), and dynamic result dims (batch, channels, and spatial extents) are
 /// sized at runtime from the conv input + attributes.

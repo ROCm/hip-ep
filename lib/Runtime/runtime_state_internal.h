@@ -116,21 +116,11 @@ struct RuntimeState {
   void *qmoe_host_scratch; // pinned host mirror for D2H of expert idx/weights
   size_t qmoe_host_scratch_size;
 
-  // Per-session convolution workspace. Currently allocated by nobody: both
-  // convolution directions now run on in-tree kernels (hip_conv,
-  // hip_conv_transpose) that need no workspace at all. Kept only because the
-  // accessors are
-  // part of the runtime's exported surface. Same grow-on-demand policy as
-  // qmoe_scratch above if it is ever wired up again: lazily allocated on first
-  // use, never shrinks, freed in hipdnn_ep_state_cleanup.
-  void *conv_scratch;
-  size_t conv_scratch_size;
-
   // Per-session scratch for the W4A8 dp4a matmul_nbits decode path
   // (hip_matmul_nbits_dp4a). One contiguous device buffer holding the
   // per-token quantized activation (int8, K bytes, nibble-deinterleaved) plus
   // the per-group activation scales (float, ceil(K/block_size)). Same
-  // grow-on-demand / never-shrink policy as conv_scratch; lazily allocated on
+  // grow-on-demand / never-shrink policy as qmoe_scratch; lazily allocated on
   // first dp4a call, freed in hipdnn_ep_state_cleanup. Single-buffer reuse is
   // safe because the HIP stream is serialised (the next matmul_nbits only
   // launches after the previous dp4a gemv has consumed the quantized row).
@@ -143,7 +133,7 @@ struct RuntimeState {
   // chunk-start states for one window of the sequence, plus the cross-window
   // carry of the recurrent state. Sized by the window rather than by seq_len,
   // so it stops growing once the sequence exceeds one window. Same
-  // grow-on-demand / never-shrink policy as conv_scratch; lazily allocated on
+  // grow-on-demand / never-shrink policy as qmoe_scratch; lazily allocated on
   // first prefill, freed in hipdnn_ep_state_cleanup. Single-buffer reuse is
   // safe because the HIP stream is serialised (the three prefill passes consume
   // it before the next linear-attention layer launches). Replaces a
@@ -165,9 +155,9 @@ struct RuntimeState {
 
   // NOTE: the CausalConvWithState descriptor + algorithm cache
   // (CausalConvCache) formerly lived here as causal_conv_cache, then moved to
-  // a per-op-instance CausalConvState op-state slot. It no longer exists at
-  // all: the op runs entirely on custom kernels. See
-  // docs/design/op-state-slots-design.md.
+  // a per-op-instance op-state slot. Neither exists any more: the op runs
+  // entirely on custom kernels and carries no per-instance state, so it is not
+  // slot-backed either. See docs/design/op-state-slots-design.md.
 
   // Asym zero_points unpack cache (ZpUnpackCache*) used by wrap_qmoe.
   //

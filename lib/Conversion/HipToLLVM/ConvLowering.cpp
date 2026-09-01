@@ -21,7 +21,7 @@ namespace {
 //                          outs(%o : memref<1x1152x64x64xf16, 1>)
 //                          {kernel_shape=[14,14], strides=[14,14], ...}
 // After:
-//   llvm.call @wrap_conv(%ctx, slot, %in, %w, %b, %o,
+//   llvm.call @wrap_conv(%ctx, %in, %w, %b, %o,
 //                        /*data_type=*/1 /* f16 */, /*spatial_rank=*/2,
 //                        1, 3, 1152,             // N, Cin, Cout
 //                        896, 896, 1,            // in extents  (slot 2 unused)
@@ -152,9 +152,8 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
       return op.emitError("hip.conv: unsupported output element type ")
              << outputType.getElementType();
 
-    SmallVector<Type, 32> paramTypes = {
+    SmallVector<Type, 31> paramTypes = {
         ptrType, // state
-        i32Type, // op_state_slot
         ptrType, // input
         ptrType, // weights
         ptrType, // bias (nullable)
@@ -173,8 +172,7 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 32> args = {statePtr,
-                                   getOpStateSlotValue(op, rewriter, loc),
+    SmallVector<Value, 31> args = {statePtr,
                                    inputPtr,
                                    weightsPtr,
                                    biasPtr,

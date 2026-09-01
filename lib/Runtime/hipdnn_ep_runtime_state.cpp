@@ -170,8 +170,6 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->qmoe_scratch_size = 0;
   state->qmoe_host_scratch = nullptr;
   state->qmoe_host_scratch_size = 0;
-  state->conv_scratch = nullptr;
-  state->conv_scratch_size = 0;
   state->matmul_dp4a_scratch = nullptr;
   state->matmul_dp4a_scratch_size = 0;
   state->la_scratch = nullptr;
@@ -704,12 +702,6 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   }
   if (state->qmoe_host_scratch) {
     HIP_CLEANUP(hipHostFree(state->qmoe_host_scratch));
-  }
-
-  // Free the convolution workspace pool (if allocated). The stream
-  // sync above has drained any in-flight conv that may still be reading it.
-  if (state->conv_scratch) {
-    HIP_CLEANUP(hipFree(state->conv_scratch));
   }
 
   // Free the W4A8 dp4a matmul_nbits scratch (if allocated).
@@ -1315,54 +1307,6 @@ int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
   return 0;
 }
 
-// Convolution workspace pool. Same grow-on-demand policy as qmoe_scratch
-// above. Currently unused: both convolution directions run on in-tree kernels
-// that need no workspace. Single-buffer reuse is safe because the stream is
-// serialised.
-void *hipdnn_ep_state_get_conv_scratch(RuntimeState *state) {
-  return state ? state->conv_scratch : nullptr;
-}
-
-int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
-                                        size_t needed_size) {
-  if (!state)
-    return -1;
-  if (needed_size == 0)
-    return 0;
-  if (state->conv_scratch_size >= needed_size)
-    return 0;
-
-  // 1.5x growth amortisation mirrors workspace / qmoe_scratch.
-  size_t alloc_size = needed_size;
-  if (state->conv_scratch_size > 0) {
-    size_t grown = state->conv_scratch_size + state->conv_scratch_size / 2;
-    if (grown > alloc_size)
-      alloc_size = grown;
-  }
-
-  if (state->conv_scratch) {
-    // Drain any in-flight conv that may still be reading the old workspace
-    // before we free it. Growth is rare (only on first call per new shape)
-    // so the sync cost is amortised away.
-    if (state->stream) {
-      hipStreamSynchronize(state->stream);
-    }
-    HIP_CLEANUP(hipFree(state->conv_scratch));
-    state->conv_scratch = nullptr;
-    state->conv_scratch_size = 0;
-  }
-
-  if (hipMalloc(&state->conv_scratch, alloc_size) != hipSuccess) {
-    fprintf(stderr,
-            "hipdnn_ep_state_ensure_conv_scratch: hipMalloc failed for %zu "
-            "bytes\n",
-            alloc_size);
-    return -1;
-  }
-  state->conv_scratch_size = alloc_size;
-  return 0;
-}
-
 void *hipdnn_ep_state_get_matmul_dp4a_scratch(RuntimeState *state) {
   return state ? state->matmul_dp4a_scratch : nullptr;
 }
@@ -1376,7 +1320,7 @@ int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
   if (state->matmul_dp4a_scratch_size >= needed_size)
     return 0;
 
-  // 1.5x growth amortisation mirrors conv_scratch / qmoe_scratch.
+  // 1.5x growth amortisation mirrors workspace / qmoe_scratch.
   size_t alloc_size = needed_size;
   if (state->matmul_dp4a_scratch_size > 0) {
     size_t grown =
@@ -1408,10 +1352,10 @@ int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
 }
 
 // Linear-attention chunk-parallel prefill scratch pool. Same grow-on-demand /
-// never-shrink policy as conv_scratch / qmoe_scratch, freed in cleanup. Holds
-// the per-(head,chunk) Uloc/W/rlast/alast tiles + chunk-start states for one
-// window of the prefill, plus the cross-window state carry; the prefill reuses
-// it window by window. Single-buffer reuse across LA layers is safe because the
+// never-shrink policy as qmoe_scratch, freed in cleanup. Holds the
+// per-(head,chunk) Uloc/W/rlast/alast tiles + chunk-start states for one window
+// of the prefill, plus the cross-window state carry; the prefill reuses it
+// window by window. Single-buffer reuse across LA layers is safe because the
 // stream is serialised: the three prefill passes fully consume it before the
 // next launch.
 void *hipdnn_ep_state_get_la_scratch(RuntimeState *state) {
@@ -1426,7 +1370,7 @@ int hipdnn_ep_state_ensure_la_scratch(RuntimeState *state, size_t needed_size) {
   if (state->la_scratch_size >= needed_size)
     return 0;
 
-  // 1.5x growth amortisation mirrors conv_scratch / qmoe_scratch.
+  // 1.5x growth amortisation mirrors workspace / qmoe_scratch.
   size_t alloc_size = needed_size;
   if (state->la_scratch_size > 0) {
     size_t grown = state->la_scratch_size + state->la_scratch_size / 2;

@@ -16,7 +16,7 @@
 //===----------------------------------------------------------------------===//
 //
 // Lowering signature (matches ConvTransposeLowering.cpp):
-//   wrap_conv_transpose(state, slot, input, input_n, input_c, input_h, input_w,
+//   wrap_conv_transpose(state, input, input_n, input_c, input_h, input_w,
 //                       weights, bias, output, output_c, output_h, output_w,
 //                       kernel_h, kernel_w, stride_h, stride_w,
 //                       pad_top, pad_left, pad_bottom, pad_right,
@@ -24,17 +24,10 @@
 //                       output_padding_h, output_padding_w,
 //                       group, data_type)
 //
-// This replaced MIOpen on the transpose path, which was the last thing calling
-// it from either convolution direction, and took the descriptor/solution cache
-// (ConvTable in the former real/miopen.cpp) with it. What changes for a caller:
-//
-//   * `bias` is fused. MIOpen could not fuse it here -- and
-//     miopenConvolutionForwardBias was observed to double the deconvolution
-//     result outright -- so the old path followed every deconvolution with a
-//     separate miopenOpTensor add over the whole output. That pass is gone.
-//   * There is no op state, no solution cache and no workspace. MIOpen needed a
-//     per-shape Find(); this kernel derives everything from its arguments, so
-//     `op_state_slot` is accepted for ABI stability and ignored.
+// The kernel gathers each output element from the input taps that reach it, so
+// it needs no atomics. `bias` is fused, making a deconvolution a single launch,
+// and the kernel derives everything from its arguments: no op state, no
+// solution cache, no workspace.
 //
 // Four arguments are accepted and not used, all for the same reason: they
 // affect only how many output positions exist, and the caller already passes
@@ -62,17 +55,16 @@ static int hipdnn_ep_to_hip_dtype(int64_t data_type) {
   }
 }
 
-int wrap_conv_transpose(RuntimeState *state, int32_t op_state_slot,
-                        const void *input, int64_t input_n, int64_t input_c,
-                        int64_t input_h, int64_t input_w, const void *weights,
-                        const void *bias, void *output, int64_t output_c,
-                        int64_t output_h, int64_t output_w, int64_t kernel_h,
-                        int64_t kernel_w, int64_t stride_h, int64_t stride_w,
-                        int64_t pad_top, int64_t pad_left, int64_t pad_bottom,
-                        int64_t pad_right, int64_t dilation_h,
-                        int64_t dilation_w, int64_t output_padding_h,
-                        int64_t output_padding_w, int64_t group,
-                        int64_t data_type) {
+int wrap_conv_transpose(RuntimeState *state, const void *input, int64_t input_n,
+                        int64_t input_c, int64_t input_h, int64_t input_w,
+                        const void *weights, const void *bias, void *output,
+                        int64_t output_c, int64_t output_h, int64_t output_w,
+                        int64_t kernel_h, int64_t kernel_w, int64_t stride_h,
+                        int64_t stride_w, int64_t pad_top, int64_t pad_left,
+                        int64_t pad_bottom, int64_t pad_right,
+                        int64_t dilation_h, int64_t dilation_w,
+                        int64_t output_padding_h, int64_t output_padding_w,
+                        int64_t group, int64_t data_type) {
   OP_PROFILE(
       "conv_transpose",
       [&] {
@@ -90,8 +82,6 @@ int wrap_conv_transpose(RuntimeState *state, int32_t op_state_slot,
   (void)pad_right;
   (void)output_padding_h;
   (void)output_padding_w;
-  // No op state: this kernel needs no cached solution or workspace.
-  (void)op_state_slot;
 
   if (!state || !input || !weights || !output) {
     fprintf(stderr, "[REAL] wrap_conv_transpose: null argument\n");

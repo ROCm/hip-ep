@@ -327,21 +327,11 @@ void *hipdnn_ep_state_get_qmoe_host_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
                                              size_t needed_size);
 
-// Per-session convolution workspace pool. No wrapper allocates from it today
-// -- MIOpen's Find API owns its own per-problem workspace, and forward Conv
-// runs on hip_conv, which needs none. Lazily grown via
-// hipdnn_ep_state_ensure_conv_scratch (same policy as qmoe_scratch above:
-// never shrinks, freed in hipdnn_ep_state_cleanup). See
-// runtime_state_internal.h.
-void *hipdnn_ep_state_get_conv_scratch(RuntimeState *state);
-int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
-                                        size_t needed_size);
-
 // Per-session scratch for the W4A8 dp4a matmul_nbits decode path
 // (hip_matmul_nbits_dp4a). One contiguous device buffer holding the quantized
 // activation row (int8) plus the per-group activation scales (float). Lazily
 // grown via hipdnn_ep_state_ensure_matmul_dp4a_scratch (same policy as
-// conv_scratch: never shrinks, freed in hipdnn_ep_state_cleanup). Single buffer
+// qmoe_scratch: never shrinks, freed in hipdnn_ep_state_cleanup). Single buffer
 // reused across all matmul_nbits calls in the session -- safe because the
 // stream is serialised. See runtime_state_internal.h for design rationale.
 void *hipdnn_ep_state_get_matmul_dp4a_scratch(RuntimeState *state);
@@ -350,7 +340,7 @@ int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
 
 // Per-session scratch for the linear-attention chunk-parallel gated_delta
 // prefill (hip_linear_attention_prefill_chunked). Lazily grown via
-// hipdnn_ep_state_ensure_la_scratch (same policy as conv_scratch: never
+// hipdnn_ep_state_ensure_la_scratch (same policy as qmoe_scratch: never
 // shrinks, freed in hipdnn_ep_state_cleanup). Single buffer reused across all
 // linear-attention layers in the session -- safe because the stream is
 // serialised. See runtime_state_internal.h for design rationale.
@@ -588,13 +578,6 @@ void *hipdnn_ep_state_get_op_profile(RuntimeState *state);
 // instance owns one in its MhaState op-state slot. See
 // docs/design/op-state-slots-design.md.
 
-// NOTE: the CausalConvWithState descriptor/algo cache (CausalConvCache)
-// formerly lived in RuntimeState::causal_conv_cache with a
-// hipdnn_ep_causal_conv_cache_destroy teardown shim here, then moved to a
-// per-instance CausalConvState op-state slot. It is now gone outright: the op
-// runs entirely on custom kernels and has no MIOpen descriptors to cache.
-// See docs/design/op-state-slots-design.md.
-
 // Asym zero_points unpack cache lifecycle (qmoe-owned RuntimeState cache;
 // matmul_nbits keeps a per-instance cache in its op-state slot).
 void hipdnn_ep_zp_unpack_cache_destroy(void *cache);
@@ -688,49 +671,44 @@ int wrap_copy_d2h(RuntimeState *state, void *dst_ptr, const void *src_ptr,
 // trailing pad affects nothing beyond the output extent, which out_* already
 // carries.
 //
-// `op_state_slot` is accepted for ABI stability and ignored -- unlike the
-// MIOpen path this replaced, the kernel needs no cached solution or workspace.
-//
 // data_type: HIPDNN_EP_DATATYPE_* (FLOAT, HALF, BFLOAT16), applied uniformly to
 // input / weights / bias / output.
-int wrap_conv(RuntimeState *state, int32_t op_state_slot, const void *input,
-              const void *weights, const void *bias, void *output,
-              int64_t data_type, int64_t spatial_rank, int64_t N, int64_t Cin,
-              int64_t Cout, int64_t in0, int64_t in1, int64_t in2, int64_t out0,
-              int64_t out1, int64_t out2, int64_t k0, int64_t k1, int64_t k2,
-              int64_t s0, int64_t s1, int64_t s2, int64_t p0, int64_t p1,
-              int64_t p2, int64_t dil0, int64_t dil1, int64_t dil2,
-              int64_t group);
+int wrap_conv(RuntimeState *state, const void *input, const void *weights,
+              const void *bias, void *output, int64_t data_type,
+              int64_t spatial_rank, int64_t N, int64_t Cin, int64_t Cout,
+              int64_t in0, int64_t in1, int64_t in2, int64_t out0, int64_t out1,
+              int64_t out2, int64_t k0, int64_t k1, int64_t k2, int64_t s0,
+              int64_t s1, int64_t s2, int64_t p0, int64_t p1, int64_t p2,
+              int64_t dil0, int64_t dil1, int64_t dil2, int64_t group);
 
 // Transposed convolution (deconvolution) wrapper. Runs on the in-tree
-// hip_conv_transpose kernel, so neither convolution direction calls MIOpen.
+// hip_conv_transpose kernel.
 // Follows the opaque RuntimeState pattern - extracts the stream internally.
 // Weight layout is ONNX ConvTranspose's [C, M/group, kH, kW] (input channels
 // first); M/group is derived from output_c and group inside the wrapper.
 int wrap_conv_transpose(
-    RuntimeState *state,   // RuntimeState (opaque)
-    int32_t op_state_slot, // Op state slot
-    const void *input,     // Input tensor GPU pointer [N, C, H, W]
-    int64_t input_n,       // Input batch size
-    int64_t input_c,       // Input channels (C)
-    int64_t input_h,       // Input height
-    int64_t input_w,       // Input width
-    const void *weights,   // Weights GPU pointer [C, M/group, kH, kW]
-    const void *bias,      // Bias GPU pointer (nullable) [M]
-    void *output,       // Output tensor GPU pointer (in-place) [N, M, H', W']
-    int64_t output_c,   // Output channels (M)
-    int64_t output_h,   // Output height
-    int64_t output_w,   // Output width
-    int64_t kernel_h,   // Kernel height
-    int64_t kernel_w,   // Kernel width
-    int64_t stride_h,   // Stride height
-    int64_t stride_w,   // Stride width
-    int64_t pad_top,    // Padding top
-    int64_t pad_left,   // Padding left
-    int64_t pad_bottom, // Padding bottom
-    int64_t pad_right,  // Padding right
-    int64_t dilation_h, // Dilation height
-    int64_t dilation_w, // Dilation width
+    RuntimeState *state, // RuntimeState (opaque)
+    const void *input,   // Input tensor GPU pointer [N, C, H, W]
+    int64_t input_n,     // Input batch size
+    int64_t input_c,     // Input channels (C)
+    int64_t input_h,     // Input height
+    int64_t input_w,     // Input width
+    const void *weights, // Weights GPU pointer [C, M/group, kH, kW]
+    const void *bias,    // Bias GPU pointer (nullable) [M]
+    void *output,        // Output tensor GPU pointer (in-place) [N, M, H', W']
+    int64_t output_c,    // Output channels (M)
+    int64_t output_h,    // Output height
+    int64_t output_w,    // Output width
+    int64_t kernel_h,    // Kernel height
+    int64_t kernel_w,    // Kernel width
+    int64_t stride_h,    // Stride height
+    int64_t stride_w,    // Stride width
+    int64_t pad_top,     // Padding top
+    int64_t pad_left,    // Padding left
+    int64_t pad_bottom,  // Padding bottom
+    int64_t pad_right,   // Padding right
+    int64_t dilation_h,  // Dilation height
+    int64_t dilation_w,  // Dilation width
     int64_t output_padding_h, // Output padding height (ONNX "adjs")
     int64_t output_padding_w, // Output padding width
     int64_t group,            // Number of groups
@@ -1263,11 +1241,10 @@ int wrap_qmoe(
 //   k-1) activation: 0=none, 1=silu/swish
 int wrap_causal_conv_with_state(
     RuntimeState *state,
-    int op_state_slot,  // per-instance op-state slot (descriptor cache home)
-    const void *input,  // (batch, channels, seq_len), or (batch, seq_len,
-                        // channels) when channels_last
-    const void *weight, // (channels, 1, kernel_size)
-    const void *bias,   // nullable, (channels)
+    const void *input,      // (batch, channels, seq_len), or (batch, seq_len,
+                            // channels) when channels_last
+    const void *weight,     // (channels, 1, kernel_size)
+    const void *bias,       // nullable, (channels)
     const void *past_state, // nullable, (batch, channels, kernel_size - 1)
     void *output,           // same layout as input
     void *present_state,    // (batch, channels, kernel_size - 1)
