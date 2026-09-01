@@ -1,3 +1,8 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
 // ============================================================
 // GQA prefill (TTFT) with INT8 KV cache -- validates the ACTUAL runtime path
 // (real/gqa.cpp gqa_forward_fused, kv_i8 branch):

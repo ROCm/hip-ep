@@ -25,7 +25,7 @@ def Onnx_QuantizeLinearOp : Onnx_Op<"QuantizeLinear", [Pure]> {
     - uint2: [0, 3]
     - int2: [-2, 1]
 
-    For `(x / y_scale)`, it rounds to the nearest even. Refer to https://en.wikipedia.org/wiki/Rounding for details.
+    For `(x / y_scale)`, it rounds to the nearest even.
 
     `y_zero_point` and `y` must have the same type. `y_zero_point` is usually not used for quantization to float8 and 4bit types, but the quantization
     formula remains the same for consistency, and the type of the attribute `y_zero_point` still determines the quantization type.
