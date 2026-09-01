@@ -4,10 +4,11 @@
  */
 //===- HipDpsOpInterface.cpp - HipDpsOp default reify body ----------------===//
 //
-// Single shared default `reifyResultShapes` body for HIP DPS ops. In tensor
-// mode, walks `DestinationStyleOpInterface::getDpsInits()` and lifts each
-// init's runtime shape via `tensor::getMixedSizes`. In memref mode there are
-// no SSA results, so it returns an empty reified-result list.
+// Shared reification bodies for HIP DPS ops. Whole-shape reification walks
+// `DestinationStyleOpInterface::getDpsInits()` and lifts each init's runtime
+// shape. Direct dimension reification follows one result's tied destination
+// and materializes only the requested extent. In memref mode there are no SSA
+// results, so whole-shape reification returns an empty list.
 // Ops that need a tighter contract select a manual-reify family and provide a
 // per-op override in `HipReifyResultShapesImpl.cpp`.
 //
@@ -80,4 +81,32 @@ HipDpsOp::reifyResultShapes(OpBuilder &b,
     reified.emplace_back(std::move(dims));
   }
   return success();
+}
+
+FailureOr<OpFoldResult> HipDpsOp::reifyDimOfResult(OpBuilder &b,
+                                                   int resultIndex, int dim) {
+  Operation *op = getOperation();
+  auto dpsOp = cast<DestinationStyleOpInterface>(op);
+  Operation::operand_range inits = dpsOp.getDpsInits();
+
+  // getTiedOpOperand asserts that the result and init indices are valid. Check
+  // the complete DPS relationship before asking for the tie or emitting a
+  // tensor.dim operation.
+  if (resultIndex < 0 || resultIndex >= static_cast<int>(op->getNumResults()) ||
+      inits.size() != op->getNumResults())
+    return failure();
+
+  OpResult result = op->getResult(resultIndex);
+  auto resultType = dyn_cast<RankedTensorType>(result.getType());
+  if (!resultType || dim < 0 || dim >= resultType.getRank())
+    return failure();
+
+  OpOperand *tiedOperand = dpsOp.getTiedOpOperand(result);
+  if (!tiedOperand)
+    return failure();
+  auto initType = dyn_cast<RankedTensorType>(tiedOperand->get().getType());
+  if (!initType || initType != resultType)
+    return failure();
+
+  return tensor::getMixedSize(b, op->getLoc(), tiedOperand->get(), dim);
 }
