@@ -141,11 +141,10 @@ mlir::Type onnxElementTypeToMlirElementType(int element_type,
 
 // Element type for DenseElementsAttr / getFromRawBuffer. MLIR requires signless
 // integers (or index), so ONNX signed/unsigned integers map to signless storage
-// -- EXCEPT 16-bit unsigned (ONNX UINT16), which is kept as ui16. The
-// downstream HipToLLVM QDQ dtype classifier reads signless i16 as signed INT16
-// (the Quark ResNet50-INT8 bias path), so collapsing UINT16 to signless i16
-// here would sign-flip inline UINT16 constants >= 32768. See mlir-constants.cpp
-// for the full rationale.
+// -- EXCEPT 16-bit unsigned (ONNX UINT16), which is kept as ui16. A downstream
+// QDQ dtype classifier reads signless i16 as signed INT16, so folding UINT16
+// to signless i16 here would sign-flip inline UINT16 constants >= 32768. See
+// mlir-constants.cpp for the full rationale.
 mlir::Type onnxElementTypeToMlirDenseElementType(int element_type,
                                                  mlir::OpBuilder &builder);
 

@@ -6,11 +6,9 @@
 // Unit test for onnxElementTypeToMlirDenseElementType (morphizen/mlir-imp).
 //
 // Regression guard for the QDQ UINT16 sign-flip: inline ONNX UINT16 dense
-// constants must import as *unsigned* i16 (ui16), not signless i16. The
-// downstream HipToLLVM QDQ dtype classifier (added for the Quark ResNet50-INT8
-// signed-int16 bias) treats signless i16 as INT16, which sign-flips any UINT16
-// value >= 32768 (e.g. google_bert's per-layer attention sqrt(d_k) scaling
-// scalar) and corrupts DequantizeLinear output.
+// constants must import as *unsigned* i16 (ui16), not signless i16. A
+// downstream QDQ dtype classifier treats signless i16 as signed INT16, which
+// sign-flips any UINT16 value >= 32768 and corrupts DequantizeLinear output.
 //
 // This cannot be a LIT test: hip-mlir-opt has no ONNX-protobuf front end and
 // only consumes textual MLIR, so the ONNX-dtype -> MLIR-type mapping is only
