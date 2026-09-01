@@ -4677,7 +4677,6 @@ def Hip_QuantizeLinearOp : Hip_DpsOp<"quantize_linear", /*traits=*/[],
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
-  let hasVerifier = 1;
 }
 
 def Hip_DequantizeLinearOp : Hip_DpsOp<"dequantize_linear", /*traits=*/[],
@@ -4715,6 +4714,5 @@ def Hip_DequantizeLinearOp : Hip_DpsOp<"dequantize_linear", /*traits=*/[],
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
-  let hasVerifier = 1;
 }
 #endif // HIP_OPS
