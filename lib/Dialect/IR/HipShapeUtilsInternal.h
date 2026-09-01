@@ -16,6 +16,10 @@ namespace mlir::hip::detail {
 /// reification callers use the empty view as a silent bail-out.
 ArrayRef<int64_t> getShapeOf(Value value);
 
+/// Decode an integer ArrayAttr. Hip op definitions constrain the element type,
+/// so malformed entries retain the existing cast/assert behavior.
+SmallVector<int64_t> getI64Array(ArrayAttr attr);
+
 /// Pretty-print a static shape for implementation diagnostics.
 std::string formatShape(ArrayRef<int64_t> shape);
 
@@ -25,6 +29,14 @@ reifyBroadcastShape(OpBuilder &b, Location loc,
                     ArrayRef<SmallVector<OpFoldResult>> inputShapes,
                     function_ref<InFlightDiagnostic()> emitError,
                     ArrayRef<int64_t> canonicalOperandForResultDim = {});
+
+/// Apply `dim * scale + offset`, folding constants when possible. Static
+/// arithmetic is checked before narrowing to an index attribute. Dynamic SSA
+/// arithmetic intentionally retains the existing index operations; callers
+/// must validate every statically-derived scale and offset before calling.
+FailureOr<OpFoldResult> scaleAndOffsetDim(OpBuilder &b, Location loc,
+                                          OpFoldResult dim, int64_t scale,
+                                          int64_t offset);
 
 } // namespace mlir::hip::detail
 
