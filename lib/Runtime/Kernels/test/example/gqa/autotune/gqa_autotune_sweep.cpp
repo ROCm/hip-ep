@@ -1,3 +1,8 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
 // ============================================================
 // GQA autotune sweep: enumerate EVERY autotune candidate for a list of real
 // model shapes and report the winner per shape.

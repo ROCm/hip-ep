@@ -1,3 +1,8 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
 // ============================================================
 // Minimal EP-runtime substrate for the standalone GQA dispatch harness.
 //

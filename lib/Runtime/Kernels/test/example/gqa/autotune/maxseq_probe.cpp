@@ -1,3 +1,8 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
 // ============================================================
 // Does the decode winner depend on max_seq, or only on seq_kv?
 //
