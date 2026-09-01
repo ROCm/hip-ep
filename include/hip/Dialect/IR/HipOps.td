@@ -1121,8 +1121,7 @@ def Hip_RmsNormOp : Hip_DpsOp_WithInfer<"rms_norm", "Output"> {
 }
 
 def Hip_LayerNormOp :
-    Hip_DpsOp_SemanticNoInfer<"layer_norm",
-                              /*traits=*/[AttrSizedOperandSegments]> {
+    Hip_DpsOp<"layer_norm", /*traits=*/[AttrSizedOperandSegments]> {
   let summary = "Standard layer normalization (ONNX LayerNormalization opset 17)";
   let description = [{
     Full ONNX LayerNormalization (opset 17+) with mean subtraction and an
@@ -1256,7 +1255,7 @@ def Hip_InstanceNormOp : Hip_DpsOp_AutoReifyInfer<"instance_norm"> {
 }
 
 def Hip_SkipRmsNormOp :
-    Hip_DpsOp_SemanticNoInfer<"skip_rms_norm", [AttrSizedOperandSegments]> {
+    Hip_DpsOp<"skip_rms_norm", [AttrSizedOperandSegments]> {
   let summary = "Fused skip + RMS normalization (com.microsoft.SkipSimplifiedLayerNormalization)";
   let description = [{
     Full alignment with Microsoft ONNX Runtime SkipSimplifiedLayerNormalization
