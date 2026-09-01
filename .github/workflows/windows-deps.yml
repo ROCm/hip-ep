@@ -34,6 +34,7 @@ env:
   OGA_PR_PATCHES: "2194"
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
   AMDGPU_EP_REF: "05eaa2a938f71e98b49bd1be3fb03720167be5cc"
+  AMDGPU_PR_PATCHES: "102"
 
 jobs:
   llvm:
@@ -289,7 +290,7 @@ jobs:
         run: |
           DEPS_HASH=$(git rev-parse --short=12 HEAD:cmake/deps.txt)
           EP_REF="${{ env.AMDGPU_EP_REF }}"
-          echo "value=windows-amdgpu-${EP_REF:0:7}-deps${DEPS_HASH}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
+          echo "value=windows-amdgpu-${EP_REF:0:7}-amdpr${{ env.AMDGPU_PR_PATCHES }}-deps${DEPS_HASH}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
 
       - name: Probe amdgpu-artifacts
         id: cache-amdgpu
@@ -342,6 +343,31 @@ jobs:
           path: source-amdgpu
           fetch-depth: 1
           show-progress: false
+
+      - name: Apply amdgpu-ep PR patches
+        if: steps.cache-amdgpu.outputs.cache-hit != 'true'
+        shell: pwsh
+        working-directory: ${{ github.workspace }}\source-amdgpu
+        env:
+          AMDGPU_PRS: ${{ env.AMDGPU_PR_PATCHES }}
+        run: |
+          $prs = $env:AMDGPU_PRS.Trim()
+          if (-not $prs) {
+            Write-Host "AMDGPU_PR_PATCHES is empty; nothing to apply"
+            exit 0
+          }
+          foreach ($pr in $prs -split '\s+') {
+            if (-not $pr) { continue }
+            $url = "https://github.com/onnxruntime/onnxruntime-ep-amdgpu/pull/$pr.patch"
+            $tmp = Join-Path $env:RUNNER_TEMP "amdgpu-pr-$pr.patch"
+            Write-Host "Fetching $url"
+            Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+            Write-Host "Applying PR #$pr"
+            git apply --whitespace=nowarn $tmp
+            if ($LASTEXITCODE -ne 0) {
+              throw "PR #$pr failed to apply (exit $LASTEXITCODE)"
+            }
+          }
 
       - name: Fetch MIGraphX + TheRock SDKs
         if: steps.cache-amdgpu.outputs.cache-hit != 'true'
