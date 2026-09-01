@@ -21,7 +21,7 @@
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
 
 module {
-  func.func @main_graph() -> (tensor<8xf32>, tensor<8xf32>) {
+  func.func @main_graph() -> (tensor<8xf32>, tensor<8xf32>, tensor<7xf32>) {
     // Packed INT4 weight: i8 tensor of 8 LOGICAL elements backed by 4 bytes
     // (external size = 4 = ceil(8/2)) -> hip.constant accepts it; DQ is marked.
     %w4 = "onnx.Constant"() {location = "weights.bin", offset = 0 : i64,
@@ -45,7 +45,19 @@ module {
       onnx_node_name = "DQ_int8"
     } : (tensor<8xi8>, tensor<f32>, tensor<i8>) -> tensor<8xf32>
 
-    return %dq4, %dq8 : tensor<8xf32>, tensor<8xf32>
+    // Odd-count packed INT4 weight: 7 LOGICAL elements backed by 4 bytes
+    // (size = 4 = ceil(7/2); the last byte's high nibble is padding) -> still
+    // packed, so it must be accepted and marked.
+    %w4o = "onnx.Constant"() {location = "weights.bin", offset = 24 : i64,
+                              size = 4 : i64} : () -> tensor<7xi8>
+    %z4o = "onnx.Constant"() {location = "weights.bin", offset = 28 : i64,
+                              size = 1 : i64} : () -> tensor<1xi8>
+    %dq4o = "onnx.Custom"(%w4o, %s4, %z4o) {
+      function_name = "DequantizeLinear", domain_name = "com.microsoft",
+      onnx_node_name = "DQ_int4_odd"
+    } : (tensor<7xi8>, tensor<f32>, tensor<1xi8>) -> tensor<7xf32>
+
+    return %dq4, %dq8, %dq4o : tensor<8xf32>, tensor<8xf32>, tensor<7xf32>
   }
   "onnx.EntryPoint"() {func = @main_graph} : () -> ()
 }
@@ -65,3 +77,9 @@ module {
 // CHECK: onnx.Custom
 // CHECK-NOT: packed_int4
 // CHECK-SAME: onnx_node_name = "DQ_int8"
+
+// The odd-count (7-element, size 4 = ceil(7/2)) packed weight is also accepted
+// and marked -- odd logical counts pack their last nibble into a padded byte.
+// CHECK: onnx.Custom
+// CHECK-SAME: onnx_node_name = "DQ_int4_odd"
+// CHECK-SAME: packed_int4

@@ -200,8 +200,9 @@ LogicalResult ConstantOp::verify() {
   int64_t size = getSizeAttr().getInt();
   if (size <= 0)
     return emitOpError("external source `size` must be positive");
-  // ONNX INT4/UINT4 imports as i8/ui8 at the logical element count, but its
-  // buffer is ceil(numElements/2) packed bytes; accept that half-size source.
+  // A 4-bit initializer with no MLIR element type is carried as an 8-bit result
+  // of the logical element count while its buffer holds only ceil(n/2) packed
+  // bytes (two values per byte); accept that half-size external source.
   int64_t packedBytes = (numElements + 1) / 2;
   bool isPacked4Bit = elementBits == 8 && size == packedBytes;
   if (size != expectedBytes && !isPacked4Bit)

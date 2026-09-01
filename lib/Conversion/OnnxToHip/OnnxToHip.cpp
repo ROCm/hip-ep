@@ -45,9 +45,15 @@ constexpr llvm::StringLiteral kOrtMemoryAddressLocation = "*/_ORT_MEM_ADDR_/*";
 /// ONNX INT4/UINT4 is imported as i8/ui8 at the logical element count, but its
 /// buffer holds only ceil(numel/2) packed bytes; a consumer trusting the i8
 /// element type over-reads. The halved byte size is the only surviving signal,
-/// so stamp `packed_int4` on the consuming DequantizeLinear ops here (where the
-/// backing size is known) to make their lowering nibble-unpack. `packedBytes`
-/// is that true backing byte count; only 8-bit storage can halve this way.
+/// so stamp `packed_int4` here (where the backing size is known) to make the
+/// lowering nibble-unpack. `packedBytes` is that true backing byte count.
+///
+/// The marker is scoped to DequantizeLinear rather than every user because the
+/// dequant is the one op whose lowering reinterprets the packed storage; the
+/// packed operand does not otherwise reach an op that reads it directly (a
+/// generic "mark all users" would tag ops that never unpack). ONNX guarantees
+/// zero_point.dtype == x.dtype, so tagging the dequant covers both its packed
+/// operands.
 static void markPackedInt4Consumers(mlir::Operation *constOp,
                                     mlir::RankedTensorType tensorType,
                                     int64_t packedBytes) {
@@ -56,7 +62,10 @@ static void markPackedInt4Consumers(mlir::Operation *constOp,
   if (!elemIntTy || elemIntTy.getWidth() != 8 || !tensorType.hasStaticShape())
     return;
   int64_t numel = tensorType.getNumElements();
-  if (numel <= 0 || packedBytes <= 0 || packedBytes * 2 != numel)
+  // Packed iff the backing buffer is exactly the ceil(numel/2) nibble count --
+  // the same relation hip.constant's verifier accepts (an odd numel packs its
+  // last nibble into a padded byte). Anything else is genuine 8-bit storage.
+  if (numel <= 0 || packedBytes != (numel + 1) / 2)
     return;
   mlir::OpBuilder builder(constOp->getContext());
   for (mlir::Operation *user : constOp->getResult(0).getUsers()) {
