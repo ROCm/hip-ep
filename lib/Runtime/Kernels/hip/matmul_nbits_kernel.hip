@@ -554,14 +554,21 @@ __global__ void matmul_nbits_gemv_kernel_i8(
  * Launch: grid(ceil(N/TILE_N), M, batch), block(BLOCK_SIZE)
  * ======================================================================= */
 
-template <int BLOCK_SIZE, int TILE_N, bool COL_MAJOR = false>
+// OutT selects the store precision: __half (default — every existing caller,
+// byte-identical) or float. float is requested only by hip_matmul_nbits_fp32out
+// (QMoE down_proj), where a raw per-expert GEMM channel can exceed the fp16 max
+// (65504) and overflow to inf BEFORE the routing weight scales it back into
+// range. The accumulator (`partial`) is already fp32; OutT only changes the
+// final narrowing at the store, so the fp16 path is bit-for-bit unchanged.
+template <int BLOCK_SIZE, int TILE_N, bool COL_MAJOR = false,
+          typename OutT = __half>
 __global__ void matmul_nbits_gemv_kernel(
     const __half* __restrict__ A,
     const uint8_t* __restrict__ B,
     const __half* __restrict__ scales,
     const uint8_t* __restrict__ zp,
     const __half* __restrict__ bias,
-    __half* __restrict__ output,
+    OutT* __restrict__ output,
     int64_t M, int64_t N, int64_t K,
     int64_t block_size)
 {
@@ -832,10 +839,10 @@ __global__ void matmul_nbits_gemv_kernel(
                     // (28KB) to pollute cache, and NT writes compete with read
                     // traffic on the shared memory bus.
                     if constexpr (COL_MAJOR)
-                        output[n * M + m] = static_cast<__half>(val);
+                        output[n * M + m] = static_cast<OutT>(val);
                     else
                         output[batch * M * N + m * N + n] =
-                            static_cast<__half>(val);
+                            static_cast<OutT>(val);
                 }
             }
         }
@@ -863,10 +870,10 @@ __global__ void matmul_nbits_gemv_kernel(
                         if (bias)
                             val += static_cast<float>(bias[n]);
                         if constexpr (COL_MAJOR)
-                            output[n * M + m] = static_cast<__half>(val);
+                            output[n * M + m] = static_cast<OutT>(val);
                         else
                             output[batch * M * N + m * N + n] =
-                                static_cast<__half>(val);
+                                static_cast<OutT>(val);
                     }
                 }
             }
@@ -2580,8 +2587,16 @@ hipdnn_wmma_f32_16x16x16_f16_unavailable(half16, half16, float8 c) {
 
 #define WMMA_TILE 16
 
+// OutT selects the store precision: _Float16 (default — every existing WMMA
+// instantiation, byte-identical) or float. float is requested only by
+// hip_matmul_nbits_fp32out (QMoE down_proj), where a raw per-expert GEMM
+// channel can exceed the fp16 max (65504) and overflow to inf BEFORE the
+// routing weight scales it back into range. The WMMA accumulator (`acc`) is
+// already fp32; OutT only changes the final narrowing at the store, so the
+// fp16 path is bit-for-bit unchanged.
 template <int BM_T, int BN_T, int WT_M, int WT_N, bool USE_ZEROS,
-          bool BOUNDS_CHECK = false, bool FUSED_DQ = true>
+          bool BOUNDS_CHECK = false, bool FUSED_DQ = true,
+          typename OutT = _Float16>
 __device__ __forceinline__
 void GemmFp16U4Impl(
     int M, int N, int K,
@@ -2590,7 +2605,7 @@ void GemmFp16U4Impl(
     const _Float16* __restrict__ scales,
     const _Float16* __restrict__ zeros,
     int group_size, int num_groups_k,
-    _Float16* __restrict__ C, int ldc,
+    OutT* __restrict__ C, int ldc,
     int swizzle_n = 4)
 {
     constexpr int WM_L   = BM_T / (WT_M * 16);
@@ -2879,10 +2894,10 @@ void GemmFp16U4Impl(
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
                         C[(mbase + r) * ldc + nbase + lane] =
-                            (_Float16)acc[wm][wn][e];
+                            (OutT)acc[wm][wn][e];
                 } else {
                     C[(mbase + r) * ldc + nbase + lane] =
-                        (_Float16)acc[wm][wn][e];
+                        (OutT)acc[wm][wn][e];
                 }
             }
         }
@@ -2895,7 +2910,7 @@ void GemmFp16U4Impl(
     ((BM / (WM * 16)) * (BN / (WN * 16)) * 32)
 
 template <int BM_T = 128, int BN_T = 128, int WT_M = 2, int WT_N = 2,
-          int WAVES_EU = 8, bool BC = false>
+          int WAVES_EU = 8, bool BC = false, typename OutT = _Float16>
 __global__
 __attribute__((amdgpu_flat_work_group_size(
     GEMM_WG_SZ(BM_T, BN_T, WT_M, WT_N),
@@ -2908,16 +2923,16 @@ void MatMulNBitsWMMA_NoZP(
     const _Float16* __restrict__ scales,
     const _Float16* __restrict__ zeros,
     int group_size, int num_groups_k,
-    _Float16* __restrict__ C, int ldc,
+    OutT* __restrict__ C, int ldc,
     int swizzle_n = 4)
 {
-    GemmFp16U4Impl<BM_T, BN_T, WT_M, WT_N, false, BC>(
+    GemmFp16U4Impl<BM_T, BN_T, WT_M, WT_N, false, BC, true, OutT>(
         M, N, K, A, lda, B_packed, scales, zeros,
         group_size, num_groups_k, C, ldc, swizzle_n);
 }
 
 template <int BM_T = 128, int BN_T = 128, int WT_M = 2, int WT_N = 2,
-          int WAVES_EU = 8, bool BC = false>
+          int WAVES_EU = 8, bool BC = false, typename OutT = _Float16>
 __global__
 __attribute__((amdgpu_flat_work_group_size(
     GEMM_WG_SZ(BM_T, BN_T, WT_M, WT_N),
@@ -2930,10 +2945,10 @@ void MatMulNBitsWMMA_ZP(
     const _Float16* __restrict__ scales,
     const _Float16* __restrict__ zeros,
     int group_size, int num_groups_k,
-    _Float16* __restrict__ C, int ldc,
+    OutT* __restrict__ C, int ldc,
     int swizzle_n = 4)
 {
-    GemmFp16U4Impl<BM_T, BN_T, WT_M, WT_N, true, BC>(
+    GemmFp16U4Impl<BM_T, BN_T, WT_M, WT_N, true, BC, true, OutT>(
         M, N, K, A, lda, B_packed, scales, zeros,
         group_size, num_groups_k, C, ldc, swizzle_n);
 }
@@ -6295,6 +6310,150 @@ extern "C" int hip_matmul_nbits(
   if (err != hipSuccess) {
     fprintf(stderr,
             "[custom_kernels] hip_matmul_nbits naive launch failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
+}
+
+/* -----------------------------------------------------------------------
+ * hip_matmul_nbits_fp32out: bits=4 quantized GEMM with an fp32 output.
+ *
+ * WHY a separate entry point (rather than an out_elem_size flag on
+ * hip_matmul_nbits): the fp16 dispatch above has four data-dependent code
+ * paths (WMMA, col-major GEMV, row-major GEMV, naive) plus disk-persistent
+ * autotune caches that every other model depends on. Widening the output of
+ * ALL of them would ripple through the autotune timing/config machinery and
+ * risk a regression in the exact file the codebase warns is fragile. This
+ * function instead reuses the SAME two int4 kernels the fp16 dispatch uses —
+ * instantiated with OutT=float — and picks between them on M exactly like the
+ * fp16 path does, but with FIXED configs (no autotune, no autotune-cache
+ * touched):
+ *   - M >= kFp32OutWmmaMinM (16) and K % 32 == 0 → fused-dequant WMMA
+ *     (GemmFp16U4Impl, 128x128 tile, WT 2x2, bounds-checked). Needs fp16 zeros.
+ *   - otherwise                                  → row-major int4 GEMV
+ *     (matmul_nbits_gemv_kernel, 256x8; valid for any M). Needs uint8 zeros.
+ * The fp16 WMMA/GEMV code paths and their disk-persistent autotune caches are
+ * NOT touched — OutT only changes the final store narrowing (accumulators were
+ * always fp32).
+ *
+ * The sole caller is QMoE down_proj (fc2): a raw per-expert GEMM channel can
+ * exceed the fp16 max (65504) and overflow to inf BEFORE the routing weight
+ * scales it back into range, so the GEMM output must stay fp32 until the
+ * weighted cross-expert accumulation. Caller passes bias=null and folds the
+ * (weighted) bias in the fp32 scatter, so this only computes W . h in fp32.
+ *
+ *   A              : fp16 [M, K] row-major
+ *   B              : packed int4 weights [N, k_blocks*(block_size/2)]
+ *   scales         : fp16 [N, k_blocks]
+ *   zero_points_u8 : UNPACKED uint8 [N, k_blocks] for the GEMV path (asym),
+ *                    or null (sym → zp=8)
+ *   zero_points_fp16 : fp16 [N, k_blocks] for the WMMA path (asym), or null
+ *                    (sym). Only consulted when the WMMA path is taken; the
+ *                    caller may pass null when it knows M < 16.
+ *   bias           : fp16 [N], or null (GEMV path only — WMMA has no bias
+ *                    epilogue here; QMoE fc2 passes null)
+ *   output         : fp32 [M, N] row-major
+ * ----------------------------------------------------------------------- */
+static constexpr int64_t kFp32OutWmmaMinM = 16;
+
+extern "C" int hip_matmul_nbits_fp32out(
+    void* stream,
+    const void* A,
+    const void* B,
+    const void* scales,
+    const void* zero_points_u8,
+    const void* zero_points_fp16,
+    const void* bias,
+    void* output,
+    int64_t M, int64_t N, int64_t K,
+    int64_t bits,
+    int64_t block_size) {
+  if (bits != 4) {
+    fprintf(stderr,
+            "[custom_kernels] hip_matmul_nbits_fp32out: only bits=4 "
+            "supported, got %lld\n",
+            (long long)bits);
+    return -1;
+  }
+  if (M <= 0 || N <= 0 || K <= 0) return 0;
+
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+
+  // WMMA fused-dequant path for the larger-M (prefill) regime — same M>=16
+  // threshold the fp16 dispatch uses, gated on K%32==0 so the 32-wide K tile
+  // (BK_T = 128/(2*2)) is whole. bias must be folded by the caller (WMMA has
+  // no bias epilogue here); QMoE fc2 already passes bias=null.
+  if (M >= kFp32OutWmmaMinM && (K % 32) == 0) {
+    const bool has_zp = (zero_points_fp16 != nullptr);
+    const int ngk = static_cast<int>((K + block_size - 1) / block_size);
+    constexpr int BM = 128, BN = 128;
+    constexpr int WM_ = BM / (2 * 16);    // 4
+    constexpr int WN_ = BN / (2 * 16);    // 4
+    constexpr int THR_ = WM_ * WN_ * 32;  // 512
+    dim3 grid(static_cast<unsigned>((N + BN - 1) / BN),
+              static_cast<unsigned>((M + BM - 1) / BM));
+    dim3 block(THR_);
+
+    (void)hipGetLastError();  // clear any stale sticky error before launch
+    if (has_zp) {
+      hipLaunchKernelGGL(
+          HIP_KERNEL_NAME(
+              MatMulNBitsWMMA_ZP<128, 128, 2, 2, 8, true, float>),
+          grid, block, 0, hip_stream,
+          static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
+          static_cast<const _Float16*>(A), static_cast<int>(K),
+          static_cast<const unsigned char*>(B),
+          static_cast<const _Float16*>(scales),
+          static_cast<const _Float16*>(zero_points_fp16),
+          static_cast<int>(block_size), ngk,
+          static_cast<float*>(output), static_cast<int>(N), 4);
+    } else {
+      hipLaunchKernelGGL(
+          HIP_KERNEL_NAME(
+              MatMulNBitsWMMA_NoZP<128, 128, 2, 2, 8, true, float>),
+          grid, block, 0, hip_stream,
+          static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
+          static_cast<const _Float16*>(A), static_cast<int>(K),
+          static_cast<const unsigned char*>(B),
+          static_cast<const _Float16*>(scales),
+          static_cast<const _Float16*>(zero_points_fp16),
+          static_cast<int>(block_size), ngk,
+          static_cast<float*>(output), static_cast<int>(N), 4);
+    }
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+      fprintf(stderr,
+              "[custom_kernels] hip_matmul_nbits_fp32out WMMA launch failed: "
+              "%s\n",
+              hipGetErrorString(err));
+    }
+    return static_cast<int>(err);
+  }
+
+  // Decode / small-M regime (and non-32-aligned K): row-major int4 GEMV,
+  // valid for any M (grid.y = M, one block per output row).
+  constexpr int BS = 256;
+  constexpr int TN = 8;
+  dim3 grid(static_cast<unsigned>((N + TN - 1) / TN),
+            static_cast<unsigned>(M),
+            1u);
+  dim3 block(BS);
+
+  (void)hipGetLastError();  // clear any stale sticky error before launch
+  hipLaunchKernelGGL(
+      HIP_KERNEL_NAME(matmul_nbits_gemv_kernel<BS, TN, false, float>),
+      grid, block, 0, hip_stream,
+      static_cast<const __half*>(A), static_cast<const uint8_t*>(B),
+      static_cast<const __half*>(scales),
+      static_cast<const uint8_t*>(zero_points_u8),
+      static_cast<const __half*>(bias), static_cast<float*>(output),
+      M, N, K, block_size);
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr,
+            "[custom_kernels] hip_matmul_nbits_fp32out launch failed: %s\n",
             hipGetErrorString(err));
   }
   return static_cast<int>(err);
