@@ -52,6 +52,64 @@ func.func @reify_2d_static(%ctx: !hip.context,
 
 // -----
 
+// Dynamic contraction extents are runtime-checked and do not contribute to the
+// result shape. Reification therefore emits only M/N dimensions.
+// CHECK-LABEL: func.func @reify_dynamic_k_both
+// CHECK-SAME: %[[A:[A-Za-z0-9_]+]]: tensor<?x?xf16>, %[[B:[A-Za-z0-9_]+]]: tensor<?x?xf16>
+// CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+// CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
+// CHECK: %[[M:.*]] = tensor.dim %[[A]], %[[C0]]
+// CHECK: %[[N:.*]] = tensor.dim %[[B]], %[[C1]]
+// CHECK: return %[[M]], %[[N]]
+func.func @reify_dynamic_k_both(
+    %ctx: !hip.context, %a: tensor<?x?xf16>, %b: tensor<?x?xf16>,
+    %out: tensor<?x?xf16>) -> (index, index) {
+  %r = hip.matmul(%ctx)
+    ins(%a, %b : tensor<?x?xf16>, tensor<?x?xf16>)
+    outs(%out : tensor<?x?xf16>) : tensor<?x?xf16>
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %d0 = tensor.dim %r, %c0 : tensor<?x?xf16>
+  %d1 = tensor.dim %r, %c1 : tensor<?x?xf16>
+  return %d0, %d1 : index, index
+}
+
+// -----
+
+// CHECK-LABEL: func.func @reify_dynamic_k_a_only
+// CHECK: return
+func.func @reify_dynamic_k_a_only(
+    %ctx: !hip.context, %a: tensor<2x?xf16>, %b: tensor<4x8xf16>,
+    %out: tensor<2x8xf16>) -> (index, index) {
+  %r = hip.matmul(%ctx)
+    ins(%a, %b : tensor<2x?xf16>, tensor<4x8xf16>)
+    outs(%out : tensor<2x8xf16>) : tensor<2x8xf16>
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %d0 = tensor.dim %r, %c0 : tensor<2x8xf16>
+  %d1 = tensor.dim %r, %c1 : tensor<2x8xf16>
+  return %d0, %d1 : index, index
+}
+
+// -----
+
+// CHECK-LABEL: func.func @reify_dynamic_k_b_only
+// CHECK: return
+func.func @reify_dynamic_k_b_only(
+    %ctx: !hip.context, %a: tensor<2x4xf16>, %b: tensor<?x8xf16>,
+    %out: tensor<2x8xf16>) -> (index, index) {
+  %r = hip.matmul(%ctx)
+    ins(%a, %b : tensor<2x4xf16>, tensor<?x8xf16>)
+    outs(%out : tensor<2x8xf16>) : tensor<2x8xf16>
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %d0 = tensor.dim %r, %c0 : tensor<2x8xf16>
+  %d1 = tensor.dim %r, %c1 : tensor<2x8xf16>
+  return %d0, %d1 : index, index
+}
+
+// -----
+
 // CHECK-LABEL: func.func @reify_dynamic_batch
 // CHECK-SAME:   %[[A:[A-Za-z0-9_]+]]: tensor<?x4x8xf16>
 // CHECK-DAG:   %[[C0:.*]] = arith.constant 0 : index
@@ -121,24 +179,50 @@ func.func @reify_dynamic_N(%ctx: !hip.context,
 
 // -----
 
-// Pin the "dynamic + static>1 -> static" tightening: A's batch dim is dynamic,
-// B's is static-5; per NumPy / TF / ONNX broadcast contract A must be 1 or 5
-// at runtime. Reify therefore picks the static side, so tensor.dim of the
-// result's batch dim folds to constant 5 (CHECK-NOT: tensor.dim) — even though
-// the result type is left as ?x4x16. Delegated to upstream
-// mlir::OpTrait::util::getBroadcastedShape.
-// CHECK-LABEL: func.func @reify_dyn_static_batch_broadcast
-// CHECK-NOT:   tensor.dim
-// CHECK-DAG:   %[[C5:.*]] = arith.constant 5 : index
+// Gemma-shaped multi-axis dynamic batch. Each broadcasted batch extent is
+// reified independently; runtime matrix-count validation handles layouts that
+// turn out to be partial broadcasts.
+// CHECK-LABEL: func.func @reify_gemma_dynamic_batches
+// CHECK: %[[BATCH0:.*]] = arith.select
+// CHECK: %[[BATCH1:.*]] = arith.select
+// CHECK: return %[[BATCH0]], %[[BATCH1]], %{{.*}}, %{{.*}}
+func.func @reify_gemma_dynamic_batches(
+    %ctx: !hip.context,
+    %a: tensor<?x?x4x8xf16>,
+    %b: tensor<?x?x8x16xf16>,
+    %c: tensor<?x?x4x16xf16>) -> (index, index, index, index) {
+  %r = hip.matmul(%ctx)
+    ins(%a, %b : tensor<?x?x4x8xf16>, tensor<?x?x8x16xf16>)
+    outs(%c : tensor<?x?x4x16xf16>) : tensor<?x?x4x16xf16>
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c3 = arith.constant 3 : index
+  %d0 = tensor.dim %r, %c0 : tensor<?x?x4x16xf16>
+  %d1 = tensor.dim %r, %c1 : tensor<?x?x4x16xf16>
+  %d2 = tensor.dim %r, %c2 : tensor<?x?x4x16xf16>
+  %d3 = tensor.dim %r, %c3 : tensor<?x?x4x16xf16>
+  return %d0, %d1, %d2, %d3 : index, index, index, index
+}
+
+// -----
+
+// Whole-matrix broadcast remains safe with a dynamic batch: A contains one
+// matrix and B supplies every output batch, so no runtime-only validation is
+// needed.
+// CHECK-LABEL: func.func @reify_dynamic_whole_matrix_broadcast
+// CHECK-SAME: %[[B:[A-Za-z0-9_]+]]: tensor<?x8x16xf16>
+// CHECK-DAG:   %[[C0:.*]] = arith.constant 0 : index
 // CHECK-DAG:   %[[C4:.*]] = arith.constant 4 : index
 // CHECK-DAG:   %[[C16:.*]] = arith.constant 16 : index
-// CHECK:       return %[[C5]], %[[C4]], %[[C16]]
-func.func @reify_dyn_static_batch_broadcast(%ctx: !hip.context,
-                                            %a: tensor<?x4x8xf16>,
-                                            %b: tensor<5x8x16xf16>,
+// CHECK:       %[[BATCH:.*]] = tensor.dim %[[B]], %[[C0]]
+// CHECK:       return %[[BATCH]], %[[C4]], %[[C16]]
+func.func @reify_dynamic_whole_matrix_broadcast(%ctx: !hip.context,
+                                            %a: tensor<1x4x8xf16>,
+                                            %b: tensor<?x8x16xf16>,
                                             %c: tensor<?x4x16xf16>) -> (index, index, index) {
   %r = hip.matmul(%ctx)
-    ins(%a, %b : tensor<?x4x8xf16>, tensor<5x8x16xf16>)
+    ins(%a, %b : tensor<1x4x8xf16>, tensor<?x8x16xf16>)
     outs(%c : tensor<?x4x16xf16>) : tensor<?x4x16xf16>
   %d0_idx = arith.constant 0 : index
   %d1_idx = arith.constant 1 : index
@@ -146,5 +230,32 @@ func.func @reify_dyn_static_batch_broadcast(%ctx: !hip.context,
   %d0 = tensor.dim %r, %d0_idx : tensor<?x4x16xf16>
   %d1 = tensor.dim %r, %d1_idx : tensor<?x4x16xf16>
   %d2 = tensor.dim %r, %d2_idx : tensor<?x4x16xf16>
+  return %d0, %d1, %d2 : index, index, index
+}
+
+// -----
+
+// Unequal ranks: B supplies the leading batch dim, A supplies M, B supplies N.
+// CHECK-LABEL: func.func @reify_2d_3d
+// CHECK-SAME: (%{{.*}}: !hip.context, %[[A:[A-Za-z0-9_]+]]: tensor<?x4xf16>, %[[B:[A-Za-z0-9_]+]]: tensor<?x4x?xf16>
+// CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+// CHECK-DAG: %[[C2:.*]] = arith.constant 2 : index
+// CHECK-DAG: %[[BATCH:.*]] = tensor.dim %[[B]], %[[C0]]
+// CHECK-DAG: %[[M:.*]] = tensor.dim %[[A]], %[[C0]]
+// CHECK-DAG: %[[N:.*]] = tensor.dim %[[B]], %[[C2]]
+// CHECK: return %[[BATCH]], %[[M]], %[[N]]
+func.func @reify_2d_3d(%ctx: !hip.context,
+                       %a: tensor<?x4xf16>,
+                       %b: tensor<?x4x?xf16>,
+                       %c: tensor<?x?x?xf16>) -> (index, index, index) {
+  %r = hip.matmul(%ctx)
+    ins(%a, %b : tensor<?x4xf16>, tensor<?x4x?xf16>)
+    outs(%c : tensor<?x?x?xf16>) : tensor<?x?x?xf16>
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %d0 = tensor.dim %r, %c0 : tensor<?x?x?xf16>
+  %d1 = tensor.dim %r, %c1 : tensor<?x?x?xf16>
+  %d2 = tensor.dim %r, %c2 : tensor<?x?x?xf16>
   return %d0, %d1, %d2 : index, index, index
 }
