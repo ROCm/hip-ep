@@ -1261,13 +1261,12 @@ int wrap_gather_block_quantized(
 // Its element type matches `output` for quantize and `input` for
 // dequantize, so it needs no dtype parameter of its own.
 //
-// `onnx_output_dtype` carries the op's ONNX `output_dtype` attribute
-// verbatim, i.e. a TensorProto enum (UINT8=2, INT8=3, UINT16=4, INT16=5,
-// FLOAT=1, FLOAT16=10) with 0 meaning "not set". It is NOT the same
-// numbering as the trailing `*_dtype` parameters, which are
-// HIPDNN_EP_DATATYPE_* values derived from the memref element types.
-// For quantize it is the authoritative source of the quantized type,
-// because MLIR signless i8 / i16 cannot express unsignedness.
+// The ONNX `output_dtype` attribute is not forwarded. The importer maps each
+// ONNX element type to a distinct MLIR type (UINT8 -> ui8, INT8 -> i8,
+// UINT16 -> ui16, INT16 -> i16), so `output_dtype` below -- derived from the
+// output memref -- already carries it. That equivalence only holds for the
+// 8/16-bit integer types; int4 and float8 outputs would need the attribute
+// back.
 //
 // `precision` and `saturate` only exist on QuantizeLinear per the ONNX
 // spec, so they are absent from the dequantize signature.
@@ -1279,11 +1278,10 @@ int wrap_quantize_linear(
     void *output,            // quantized (T3)
     const int64_t *input_shape, int64_t input_rank,
     const int64_t *scale_shape, int64_t scale_rank,
-    int64_t axis,              // may be negative; normalized by the wrapper
-    int64_t block_size,        // 0 = not blocked
-    int64_t onnx_output_dtype, // TensorProto enum, 0 = not set
-    int64_t precision,         // 0 = take the scale's precision
-    int64_t saturate,          // float8 only
+    int64_t axis,       // may be negative; normalized by the wrapper
+    int64_t block_size, // 0 = not blocked
+    int64_t precision,  // 0 = take the scale's precision
+    int64_t saturate,   // float8 only
     int64_t input_dtype, int64_t scale_dtype, int64_t output_dtype);
 
 int wrap_dequantize_linear(
@@ -1294,9 +1292,8 @@ int wrap_dequantize_linear(
     void *output,           // high precision (T3)
     const int64_t *input_shape, int64_t input_rank,
     const int64_t *scale_shape, int64_t scale_rank,
-    int64_t axis,              // may be negative; normalized by the wrapper
-    int64_t block_size,        // 0 = not blocked
-    int64_t onnx_output_dtype, // TensorProto enum of the float output
+    int64_t axis,       // may be negative; normalized by the wrapper
+    int64_t block_size, // 0 = not blocked
     int64_t input_dtype, int64_t scale_dtype, int64_t output_dtype);
 
 // QMoE operation wrapper (quantized Mixture-of-Experts)

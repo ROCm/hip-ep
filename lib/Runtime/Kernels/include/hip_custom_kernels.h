@@ -1993,11 +1993,11 @@ HIP_KERNEL_API int hip_gather_block_quantized(
  *
  * axis must be normalized to [0, input_rank) by the caller.
  *
- * onnx_output_dtype is the op's ONNX output_dtype attribute (TensorProto
- * enum: UINT8=2, INT8=3, UINT16=4, INT16=5, FLOAT=1, FLOAT16=10), 0 when
- * unset. in_dtype/out_dtype carry signedness only when the MLIR type did;
- * a signless i8/i16 lands on INT8/INT16, so onnx_output_dtype is the
- * authoritative source when the two disagree.
+ * out_dtype fully determines the quantized storage type, including its
+ * signedness: the compiler derives it from a MLIR element type that the
+ * ONNX importer maps one-to-one (UINT8 -> ui8, INT8 -> i8, UINT16 -> ui16,
+ * INT16 -> i16). The ONNX output_dtype attribute is therefore not passed
+ * down. int4 and float8 outputs would break that one-to-one mapping.
  *
  * precision and saturate exist only on QuantizeLinear per the ONNX spec.
  */
@@ -2011,7 +2011,6 @@ HIP_KERNEL_API int hip_quantize_linear(
     const int64_t* scale_shape,  int scale_rank,
     int axis,                    // normalized
     int block_size,              // 0 = not blocked
-    int onnx_output_dtype,       // TensorProto enum, 0 = unset
     int precision,               // 0 = take the scale's precision
     int saturate,                // float8 only
     int in_dtype,                // hip_dtype_t
@@ -2028,7 +2027,6 @@ HIP_KERNEL_API int hip_dequantize_linear(
     const int64_t* scale_shape,  int scale_rank,
     int axis,                    // normalized
     int block_size,              // 0 = not blocked
-    int onnx_output_dtype,       // TensorProto enum, 0 = unset
     int in_dtype,                // hip_dtype_t
     int scale_dtype,
     int out_dtype);

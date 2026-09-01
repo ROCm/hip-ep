@@ -82,8 +82,6 @@ struct QuantizeLinearToHip : public mlir::RewritePattern {
     auto axisAttr = rewriter.getI64IntegerAttr(getOnnxIntAttr(op, "axis", 1));
     auto blockSizeAttr =
         rewriter.getI64IntegerAttr(getOnnxIntAttr(op, "block_size", 0));
-    auto outputDtypeAttr =
-        rewriter.getI64IntegerAttr(getOnnxIntAttr(op, "output_dtype", 0));
     auto precisionAttr =
         rewriter.getI64IntegerAttr(getOnnxIntAttr(op, "precision", 0));
     auto saturateAttr =
@@ -92,7 +90,7 @@ struct QuantizeLinearToHip : public mlir::RewritePattern {
     auto hipOp = mlir::hip::QuantizeLinearOp::create(
         rewriter, op->getLoc(), mlir::TypeRange{in.resultType}, in.context,
         in.input, in.scale, in.zeroPoint, in.init, axisAttr, blockSizeAttr,
-        outputDtypeAttr, precisionAttr, saturateAttr);
+        precisionAttr, saturateAttr);
     rewriter.replaceOp(op, hipOp->getResults());
     return mlir::success();
   }
@@ -113,13 +111,10 @@ struct DequantizeLinearToHip : public mlir::RewritePattern {
     auto axisAttr = rewriter.getI64IntegerAttr(getOnnxIntAttr(op, "axis", 1));
     auto blockSizeAttr =
         rewriter.getI64IntegerAttr(getOnnxIntAttr(op, "block_size", 0));
-    auto outputDtypeAttr =
-        rewriter.getI64IntegerAttr(getOnnxIntAttr(op, "output_dtype", 0));
 
     auto hipOp = mlir::hip::DequantizeLinearOp::create(
         rewriter, op->getLoc(), mlir::TypeRange{in.resultType}, in.context,
-        in.input, in.scale, in.zeroPoint, in.init, axisAttr, blockSizeAttr,
-        outputDtypeAttr);
+        in.input, in.scale, in.zeroPoint, in.init, axisAttr, blockSizeAttr);
     rewriter.replaceOp(op, hipOp->getResults());
     return mlir::success();
   }

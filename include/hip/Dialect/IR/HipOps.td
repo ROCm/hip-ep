@@ -4665,7 +4665,6 @@ def Hip_QuantizeLinearOp : Hip_DpsOp<"quantize_linear", /*traits=*/[],
     Hip_TensorOrMemRef:$output,
     I64Attr:$axis,
     I64Attr:$block_size,
-    I64Attr:$output_dtype,
     I64Attr:$precision,
     I64Attr:$saturate
   );
@@ -4703,8 +4702,7 @@ def Hip_DequantizeLinearOp : Hip_DpsOp<"dequantize_linear", /*traits=*/[],
     Optional<Hip_TensorOrMemRef>:$zero_point,
     Hip_TensorOrMemRef:$output,
     I64Attr:$axis,
-    I64Attr:$block_size,
-    I64Attr:$output_dtype
+    I64Attr:$block_size
   );
 
   let assemblyFormat = [{

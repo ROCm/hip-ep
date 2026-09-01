@@ -10,8 +10,8 @@ namespace hip {
 namespace {
 
 //===----------------------------------------------------------------------===//
-// hip.quantize_linear   -> wrap_quantize_linear   (17 params)
-// hip.dequantize_linear -> wrap_dequantize_linear (15 params)
+// hip.quantize_linear   -> wrap_quantize_linear   (16 params)
+// hip.dequantize_linear -> wrap_dequantize_linear (14 params)
 //===----------------------------------------------------------------------===//
 
 // Stack-allocates i64[max(rank, 1)] so rank-0 still has a buffer, reading
@@ -83,17 +83,17 @@ struct QuantizeLinearOpLowering
     };
     Value one = createI64Const(1);
 
-    SmallVector<Type, 17> paramTypes = {
+    SmallVector<Type, 16> paramTypes = {
         ptrType,                   // state
         ptrType, ptrType, ptrType, // input, scale, zero_point (nullable)
         ptrType,                   // output
         ptrType, i64Type,          // input_shape, input_rank
         ptrType, i64Type,          // scale_shape, scale_rank
-        i64Type, i64Type, i64Type, // axis, block_size, onnx_output_dtype
+        i64Type, i64Type,          // axis, block_size
         i64Type, i64Type,          // precision, saturate
         i64Type, i64Type, i64Type, // input_dtype, scale_dtype, output_dtype
     };
-    SmallVector<Value, 17> args = {
+    SmallVector<Value, 16> args = {
         adaptor.getCtx(),
         extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getScale(), rewriter, loc),
@@ -107,7 +107,6 @@ struct QuantizeLinearOpLowering
         createI64Const(scaleType.getRank()),
         createI64Const(op.getAxis()),
         createI64Const(op.getBlockSize()),
-        createI64Const(op.getOutputDtype()),
         createI64Const(op.getPrecision()),
         createI64Const(op.getSaturate()),
         createI64Const(getHipdnnDataType(inputType.getElementType())),
@@ -154,16 +153,16 @@ struct DequantizeLinearOpLowering
     };
     Value one = createI64Const(1);
 
-    SmallVector<Type, 15> paramTypes = {
+    SmallVector<Type, 14> paramTypes = {
         ptrType,                   // state
         ptrType, ptrType, ptrType, // input, scale, zero_point (nullable)
         ptrType,                   // output
         ptrType, i64Type,          // input_shape, input_rank
         ptrType, i64Type,          // scale_shape, scale_rank
-        i64Type, i64Type, i64Type, // axis, block_size, onnx_output_dtype
+        i64Type, i64Type,          // axis, block_size
         i64Type, i64Type, i64Type, // input_dtype, scale_dtype, output_dtype
     };
-    SmallVector<Value, 15> args = {
+    SmallVector<Value, 14> args = {
         adaptor.getCtx(),
         extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getScale(), rewriter, loc),
@@ -177,7 +176,6 @@ struct DequantizeLinearOpLowering
         createI64Const(scaleType.getRank()),
         createI64Const(op.getAxis()),
         createI64Const(op.getBlockSize()),
-        createI64Const(op.getOutputDtype()),
         createI64Const(getHipdnnDataType(inputType.getElementType())),
         createI64Const(getHipdnnDataType(scaleType.getElementType())),
         createI64Const(getHipdnnDataType(outputType.getElementType())),
