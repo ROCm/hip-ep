@@ -43,20 +43,26 @@ hipdnn_ep::rtc::Module& rtcModule() {
   return module;
 }
 
-// Argument packing is unchecked by the compiler here -- the order and types
-// must track the __global__ signatures in the device header by hand.
-int launchRtc(int hip_dtype, hipStream_t stream, int grid_size, int block_size,
-              const void* lhs, const void* rhs, void* output,
-              int64_t num_elements) {
+// Returns false when the RTC path is unavailable, leaving the caller to fall
+// through to AOT. Once the kernel has actually been launched the result is
+// reported through *status instead -- a launch that started and then failed
+// must not be retried on the other path.
+//
+// Argument packing is unchecked by the compiler here: the order and types must
+// track the __global__ signatures in the device header by hand.
+bool tryLaunchRtc(int hip_dtype, hipStream_t stream, int grid_size,
+                  int block_size, const void* lhs, const void* rhs,
+                  void* output, int64_t num_elements, int* status) {
   const char* kernel_name = rtcKernelName(hip_dtype);
-  if (!kernel_name) return -1;
+  if (!kernel_name) return false;
 
   hipFunction_t fn = rtcModule().getFunction(kernel_name);
   if (!fn) {
     fprintf(stderr,
-            "[custom_kernels] hip_elementwise_sub: RTC kernel %s unavailable\n",
+            "[custom_kernels] hip_elementwise_sub: RTC kernel %s unavailable, "
+            "using AOT\n",
             kernel_name);
-    return -1;
+    return false;
   }
 
   void* args[] = {&lhs, &rhs, &output, &num_elements};
@@ -67,7 +73,8 @@ int launchRtc(int hip_dtype, hipStream_t stream, int grid_size, int block_size,
             "[custom_kernels] hip_elementwise_sub RTC launch failed: %s\n",
             hipGetErrorString(err));
   }
-  return static_cast<int>(err);
+  *status = static_cast<int>(err);
+  return true;
 }
 
 }  // namespace
@@ -85,9 +92,12 @@ extern "C" int hip_elementwise_sub(
   constexpr int kBlockSize = 256;
   int grid_size = static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
 
-  if (hipdnn_ep::rtc::enabled() && rtcKernelName(hip_dtype) != nullptr) {
-    return launchRtc(hip_dtype, hip_stream, grid_size, kBlockSize, lhs, rhs,
-                     output, num_elements);
+  if (hipdnn_ep::rtc::enabled()) {
+    int status = 0;
+    if (tryLaunchRtc(hip_dtype, hip_stream, grid_size, kBlockSize, lhs, rhs,
+                     output, num_elements, &status)) {
+      return status;
+    }
   }
 
   switch (hip_dtype) {

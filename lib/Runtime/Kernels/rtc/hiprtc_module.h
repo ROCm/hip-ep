@@ -34,11 +34,13 @@ class Module {
   // source must outlive the Module; it is the embedded .h text, not a copy.
   Module(std::string name, const char *source, size_t source_size,
          std::vector<std::string> kernel_names);
+  ~Module();
 
   Module(const Module &) = delete;
   Module &operator=(const Module &) = delete;
 
-  // nullptr if compilation failed or kernel_name was not registered.
+  // nullptr if compilation failed or kernel_name was not registered. Callers
+  // must treat that as "RTC unavailable" and fall back to their AOT path.
   hipFunction_t getFunction(const std::string &kernel_name);
 
  private:
