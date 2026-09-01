@@ -1896,7 +1896,8 @@ LogicalResult CausalConvWithStateOp::verify() {
   FailureOr<SmallVector<SmallVector<int64_t>>> expected =
       inferCausalConvWithStateOutputShapes(
           inputType.getShape(), weightType.getShape(), biasShape,
-          pastStateShape, getNdim(), [&]() { return this->emitOpError(); });
+          pastStateShape, getNdim(), getChannelsLast(),
+          [&]() { return this->emitOpError(); });
   if (failed(expected))
     return failure();
   if (getActivation() != "none" && getActivation() != "silu" &&
