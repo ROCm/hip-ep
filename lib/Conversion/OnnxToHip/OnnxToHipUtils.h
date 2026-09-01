@@ -561,6 +561,13 @@ void populateProjectorOpsRewritePatterns(RewritePatternSet &patterns,
 void populateLpNormalizationConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 
+/// Pre-lowering patterns for window-attention score prep: fold
+/// MatMul->Mul(scale) into Mul(A,scale)->MatMul, and compile-time expand
+/// broadcast constant biases to same-shape Add. Must run BEFORE
+/// lowerOnnxConstants. See AttentionScorePrepOptimizations.cpp.
+void populateAttentionScorePrepOptimizationPatterns(RewritePatternSet &patterns,
+                                                    MLIRContext *ctx);
+
 } // namespace hip
 } // namespace mlir
 
