@@ -160,15 +160,15 @@ module {
   func.func @guard_overlapping(%x: tensor<1x3x896x896xf16>,
                                %w: tensor<1152x3x14x14xf16>,
                                %b: tensor<1152xf16>)
-      -> tensor<1x1152x128x128xf16> {
+      -> tensor<1x1152x127x127xf16> {
     %y = "onnx.Conv"(%x, %w, %b) {
       kernel_shape = [14, 14],
       strides = [7, 7],
       pads = [0, 0, 0, 0],
       group = 1 : i64
     } : (tensor<1x3x896x896xf16>, tensor<1152x3x14x14xf16>, tensor<1152xf16>)
-      -> tensor<1x1152x128x128xf16>
-    return %y : tensor<1x1152x128x128xf16>
+      -> tensor<1x1152x127x127xf16>
+    return %y : tensor<1x1152x127x127xf16>
   }
 
   // CHECK-LABEL: func.func @guard_overlapping
@@ -243,7 +243,7 @@ module {
   func.func @guard_dilated(%x: tensor<1x3x64x64xf16>,
                            %w: tensor<1152x3x2x2xf16>,
                            %b: tensor<1152xf16>)
-      -> tensor<1x1152x32x32xf16> {
+      -> tensor<1x1152x31x31xf16> {
     %y = "onnx.Conv"(%x, %w, %b) {
       kernel_shape = [2, 2],
       strides = [2, 2],
@@ -251,8 +251,8 @@ module {
       pads = [0, 0, 0, 0],
       group = 1 : i64
     } : (tensor<1x3x64x64xf16>, tensor<1152x3x2x2xf16>, tensor<1152xf16>)
-      -> tensor<1x1152x32x32xf16>
-    return %y : tensor<1x1152x32x32xf16>
+      -> tensor<1x1152x31x31xf16>
+    return %y : tensor<1x1152x31x31xf16>
   }
 
   // CHECK-LABEL: func.func @guard_dilated

@@ -27,6 +27,7 @@ def _make_conv_model(
     k: int = 3,
     spatial: int = 8,
     seed: int = 7,
+    dynamic: bool = False,
 ):
     """Build an fp16 2D Conv model with weight+bias initializers.
 
@@ -38,12 +39,12 @@ def _make_conv_model(
     assert in_c % group == 0 and out_c % group == 0
     pad = k // 2
 
-    inp = helper.make_tensor_value_info(
-        "input", TensorProto.FLOAT16, [1, in_c, spatial, spatial]
+    input_shape = [None, in_c, None, None] if dynamic else [1, in_c, spatial, spatial]
+    output_shape = (
+        [None, out_c, None, None] if dynamic else [1, out_c, spatial, spatial]
     )
-    out = helper.make_tensor_value_info(
-        "output", TensorProto.FLOAT16, [1, out_c, spatial, spatial]
-    )
+    inp = helper.make_tensor_value_info("input", TensorProto.FLOAT16, input_shape)
+    out = helper.make_tensor_value_info("output", TensorProto.FLOAT16, output_shape)
 
     rng = np.random.default_rng(seed)
     w = rng.uniform(-0.1, 0.1, [out_c, in_c // group, k, k]).astype(np.float16)
@@ -86,5 +87,13 @@ class TestConv:
         rng = np.random.default_rng(123)
         x = rng.uniform(-1.0, 1.0, [1, in_c, 8, 8]).astype(np.float16)
 
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-2, rtol=1e-2, cos_threshold=0.999)
+
+    def test_conv_dynamic_spatial_valid(self, model_runner):
+        """A valid dynamic Conv keeps the same GPU-vs-CPU numeric result."""
+        model = _make_conv_model(4, 8, 1, dynamic=True)
+        rng = np.random.default_rng(321)
+        x = rng.uniform(-1.0, 1.0, [1, 4, 8, 8]).astype(np.float16)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-2, rtol=1e-2, cos_threshold=0.999)
