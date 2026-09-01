@@ -905,6 +905,10 @@ static int buildProbes(fbs::GqaTuneHeadDim head_dim, unsigned hpg,
                        window};
     }
     // HeadGroup: hpg only, fuzzy fallback for new models with known hpg.
+    // seq_q is clamped to S4096: configs measured at S4096 apply to all longer
+    // prefill chunks, so there is no benefit to probing beyond that bucket.
+    const fbs::GqaSeqBucket hg_seq_q =
+        seq_q > fbs::GqaSeqBucket::S4096 ? fbs::GqaSeqBucket::S4096 : seq_q;
     out[n++] = Probe{fbs::GqaTuneTier::HeadGroup,
                      GqaTuneSource::HeadGroup,
                      head_dim,
@@ -912,7 +916,7 @@ static int buildProbes(fbs::GqaTuneHeadDim head_dim, unsigned hpg,
                      any_head_count,
                      any_par,
                      any_batch,
-                     seq_q,
+                     hg_seq_q,
                      seq_kv,
                      window};
   }
