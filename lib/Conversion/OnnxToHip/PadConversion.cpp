@@ -231,7 +231,7 @@ struct PadToHip : public mlir::RewritePattern {
       if (mlir::failed(inferredShape))
         return rewriter.notifyMatchFailure(
             op, "constant Pad parameters are invalid for the data shape");
-      if (!isResultTypeCompatibleWithPayloadShape(resultType, *inferredShape))
+      if (!isResultTypeCompatibleWithInferredShape(resultType, *inferredShape))
         return rewriter.notifyMatchFailure(
             op, "Pad result type contradicts constant parameters");
     }

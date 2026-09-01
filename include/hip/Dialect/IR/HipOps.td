@@ -4564,6 +4564,7 @@ def Hip_ResizeOp :
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
   let hasVerifier = 1;
 }
 
