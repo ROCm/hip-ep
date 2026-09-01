@@ -427,6 +427,11 @@ __global__ void kv_cache_append_vec_kernel(
 // Performs both the strided past copy and the BSHD->BNSD new-token transpose
 // in a single kernel launch, avoiding host-side loop overhead.
 // Thread: one per (b, s_present, g, d_i) element. blockIdx.y = batch.
+//
+// s_lo is the first present position written; [0, s_lo) is left untouched, for
+// a caller that will not read it back (a sliding-window layer at decode). The
+// grid is sized to (total_seq - s_lo) so the skipped positions cost no threads,
+// which is the entire point -- the indices below stay absolute in s.
 // -------------------------------------------------------------------------
 
 template <typename T>
@@ -435,17 +440,17 @@ __global__ void kv_cache_concat_kernel(
     const T* __restrict__ current,
     T* __restrict__ present,
     int past_len, int sq, int G, int d,
-    int past_seq, int present_seq) {
+    int past_seq, int present_seq, int s_lo) {
   const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   int total_seq = past_len + sq;
-  int total_per_batch = total_seq * G * d;
+  int total_per_batch = (total_seq - s_lo) * G * d;
   if (idx >= total_per_batch) return;
 
   int di = idx % d;
   int remaining = idx / d;
   int g = remaining % G;
-  int s = remaining / G;
+  int s = s_lo + remaining / G;
 
   int dst_idx = ((batch_idx * G + g) * present_seq + s) * d + di;
 
@@ -468,18 +473,18 @@ __global__ void kv_cache_concat_vec_kernel(
     const T* __restrict__ current,
     T* __restrict__ present,
     int past_len, int sq, int G, int d,
-    int past_seq, int present_seq) {
+    int past_seq, int present_seq, int s_lo) {
   const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   const int dv = d / VEC;
   int total_seq = past_len + sq;
-  int total_per_batch = total_seq * G * dv;
+  int total_per_batch = (total_seq - s_lo) * G * dv;
   if (idx >= total_per_batch) return;
 
   int dvi = idx % dv;
   int remaining = idx / dv;
   int g = remaining % G;
-  int s = remaining / G;
+  int s = s_lo + remaining / G;
 
   int dst_idx = ((batch_idx * G + g) * present_seq + s) * d + dvi * VEC;
 
@@ -538,15 +543,16 @@ __global__ void kv_cache_concat_quant_i8_kernel(
     const _Float16* __restrict__ current, // BSHD fp16 [B, sq, G, d]
     int8_t* __restrict__ present,         // BNSD int8 [B, G, present_seq, d]
     const float* __restrict__ scale,      // [G, d]
-    int past_len, int sq, int G, int d, int past_seq, int present_seq) {
+    int past_len, int sq, int G, int d, int past_seq, int present_seq,
+    int s_lo) {
   const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   int total_seq = past_len + sq;
-  if (idx >= total_seq * G * d) return;
+  if (idx >= (total_seq - s_lo) * G * d) return;
   int di = idx % d;
   int r = idx / d;
   int g = r % G;
-  int s = r / G;
+  int s = s_lo + r / G;
   int dst_idx = ((batch_idx * G + g) * present_seq + s) * d + di;
   if (s < past_len) {
     present[dst_idx] = past[((batch_idx * G + g) * past_seq + s) * d + di];
@@ -852,25 +858,27 @@ template <typename T>
 static void launch_kv_cache_concat(
     hipStream_t stream, const void* past, const void* current, void* present,
     int batch_size, int past_len, int sq, int G, int d,
-    int past_seq, int present_seq) {
+    int past_seq, int present_seq, int s_lo) {
   int total_seq = past_len + sq;
   constexpr int VEC = 16 / sizeof(T);
   if ((d % VEC) == 0 && kv_is_16b_aligned(past) && kv_is_16b_aligned(current) &&
       kv_is_16b_aligned(present)) {
-    int total = total_seq * G * (d / VEC);
+    int total = (total_seq - s_lo) * G * (d / VEC);
     int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
     kv_cache_concat_vec_kernel<T, VEC><<<dim3(blocks, batch_size), GQA_THREADS,
                                          0, stream>>>(
         static_cast<const T*>(past), static_cast<const T*>(current),
-        static_cast<T*>(present), past_len, sq, G, d, past_seq, present_seq);
+        static_cast<T*>(present), past_len, sq, G, d, past_seq, present_seq,
+        s_lo);
     return;
   }
-  int total = total_seq * G * d;
+  int total = (total_seq - s_lo) * G * d;
   int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
   kv_cache_concat_kernel<T><<<dim3(blocks, batch_size), GQA_THREADS, 0,
                               stream>>>(
       static_cast<const T*>(past), static_cast<const T*>(current),
-      static_cast<T*>(present), past_len, sq, G, d, past_seq, present_seq);
+      static_cast<T*>(present), past_len, sq, G, d, past_seq, present_seq,
+      s_lo);
 }
 
 template <typename T>
@@ -958,19 +966,27 @@ extern "C" int hip_gqa_kv_cache_append(
 
 // Step 4-5: KV cache concat (separate-buffer). `kv_dtype` selects the format, as
 // in hip_gqa_kv_cache_append (FP16 -> plain copy, INT8 -> INT8 quant).
+//
+// s_lo skips the past prefix below it. It is clamped to [0, past_len] here, once
+// for all three kernels: past_len is the hard ceiling because [past_len,
+// total_seq) is the new tokens, which are the one thing this call must never
+// drop. A caller asking for more than that is asking for silent data loss, so
+// the boundary refuses rather than obeys.
 extern "C" int hip_gqa_kv_cache_concat(
     void* stream_ptr, const void* past, const void* current, void* present,
     int batch_size, int past_len, int sq, int G, int d,
     int past_seq, int present_seq, int element_size_bytes,
-    int kv_dtype, const void* scale) {
+    int kv_dtype, const void* scale, int s_lo) {
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  if (s_lo < 0) s_lo = 0;
+  if (s_lo > past_len) s_lo = past_len;
   if (kv_dtype == HIP_KV_DTYPE_INT8) {
     if (scale == nullptr) {
       fprintf(stderr, "hip_gqa_kv_cache_concat: INT8 requires scale\n");
       return -1;
     }
     int total_seq = past_len + sq;
-    int total = total_seq * G * d;
+    int total = (total_seq - s_lo) * G * d;
     int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
     (void)hipGetLastError();
     kv_cache_concat_quant_i8_kernel<<<dim3(blocks, batch_size), GQA_THREADS, 0,
@@ -978,7 +994,7 @@ extern "C" int hip_gqa_kv_cache_concat(
         static_cast<const int8_t*>(past),
         static_cast<const _Float16*>(current), static_cast<int8_t*>(present),
         static_cast<const float*>(scale), past_len, sq, G, d, past_seq,
-        present_seq);
+        present_seq, s_lo);
     GQA_RETURN_LAUNCH_STATUS();
   }
   if (kv_dtype != HIP_KV_DTYPE_FP16) {
@@ -988,7 +1004,7 @@ extern "C" int hip_gqa_kv_cache_concat(
   }
   GQA_DISPATCH_BY_ELEM_SIZE(element_size_bytes, launch_kv_cache_concat, stream,
                             past, current, present, batch_size, past_len, sq, G,
-                            d, past_seq, present_seq);
+                            d, past_seq, present_seq, s_lo);
   GQA_RETURN_LAUNCH_STATUS();
 }
 
@@ -1064,60 +1080,79 @@ extern "C" int hip_gqa_causal_mask_f32(
   GQA_RETURN_LAUNCH_STATUS();
 }
 
-// `sq` counts the query rows present in `scores`, which is a chunk of the full
-// query range when the caller is tiling the prefill. `bias_sq` is the full query
-// extent of the bias tensor and `bias_row_offset` locates the chunk inside it --
-// the two cannot be folded together because the bias plane stride is set by the
-// full extent while the score plane stride is set by the chunk.
+// The score matrix and the bias tensor are indexed independently on both axes,
+// because `scores` can be a sub-block of the full [sq, total_seq] logical
+// matrix while the bias always describes the whole thing.
+//
+// Query axis: `sq` counts the query rows present in `scores`, which is a chunk
+// of the full query range when the caller is tiling the prefill. `bias_sq` is
+// the full query extent of the bias tensor and `bias_row_offset` locates the
+// chunk inside it.
+//
+// Key axis: `score_cols` counts the key columns present in `scores`, which is
+// just the sliding window when the caller narrowed the decode key range.
+// `bias_total_seq` is the bias tensor's true last dim and `bias_col_offset`
+// locates the narrowed range inside it.
+//
+// Neither offset can be folded into the `bias` pointer: `bias_plane` must stay
+// on the bias tensor's own full extents or every batch/head plane after the
+// first mis-strides, so with bias_batch > 1 or bias_heads > 1 a pointer bump
+// would be wrong.
 template <typename TBias>
 __global__ void add_attention_bias_kernel(
     float* __restrict__ scores, const TBias* __restrict__ bias,
     int total_heads, int num_heads, int bias_batch, int bias_heads, int sq,
-    int total_seq, int score_batch_stride, int bias_sq, int bias_row_offset) {
+    int score_cols, int score_batch_stride, int bias_sq, int bias_row_offset,
+    int bias_total_seq, int bias_col_offset) {
   int head = blockIdx.y;
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  int n = sq * total_seq;
+  int n = sq * score_cols;
   if (tid >= n)
     return;
-  int row = tid / total_seq;
-  int col = tid % total_seq;
+  int row = tid / score_cols;
+  int col = tid % score_cols;
   int b = head / num_heads;
   int h = head % num_heads;
   int bias_b = (bias_batch == 1) ? 0 : b;
   int bias_h = (bias_heads == 1) ? 0 : h;
-  size_t bias_plane = static_cast<size_t>(bias_sq) * total_seq;
+  size_t bias_plane = static_cast<size_t>(bias_sq) * bias_total_seq;
   size_t bias_idx = static_cast<size_t>(bias_b) * bias_heads * bias_plane +
                     static_cast<size_t>(bias_h) * bias_plane +
-                    static_cast<size_t>(bias_row_offset + row) * total_seq + col;
+                    static_cast<size_t>(bias_row_offset + row) * bias_total_seq +
+                    (bias_col_offset + col);
   scores[static_cast<size_t>(head) * score_batch_stride + tid] +=
       static_cast<float>(bias[bias_idx]);
 }
 
 extern "C" int hip_gqa_add_attention_bias_f32(
     void* stream_ptr, void* scores, const void* bias, int total_heads,
-    int num_heads, int bias_batch, int bias_heads, int sq, int total_seq,
+    int num_heads, int bias_batch, int bias_heads, int sq, int score_cols,
     int score_batch_stride, int bias_element_size_bytes, int bias_sq,
-    int bias_row_offset) {
+    int bias_row_offset, int bias_total_seq, int bias_col_offset) {
   if (!scores || !bias)
     return -1;
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
   if (bias_sq <= 0)
     bias_sq = sq;
-  int n = sq * total_seq;
+  if (bias_total_seq <= 0)
+    bias_total_seq = score_cols;
+  int n = sq * score_cols;
   int blocksX = (n + GQA_THREADS - 1) / GQA_THREADS;
   (void)hipGetLastError();
   if (bias_element_size_bytes == 2) {
     add_attention_bias_kernel<__half>
         <<<dim3(blocksX, total_heads), GQA_THREADS, 0, stream>>>(
             static_cast<float*>(scores), static_cast<const __half*>(bias),
-            total_heads, num_heads, bias_batch, bias_heads, sq, total_seq,
-            score_batch_stride, bias_sq, bias_row_offset);
+            total_heads, num_heads, bias_batch, bias_heads, sq, score_cols,
+            score_batch_stride, bias_sq, bias_row_offset, bias_total_seq,
+            bias_col_offset);
   } else if (bias_element_size_bytes == 4) {
     add_attention_bias_kernel<float>
         <<<dim3(blocksX, total_heads), GQA_THREADS, 0, stream>>>(
             static_cast<float*>(scores), static_cast<const float*>(bias),
-            total_heads, num_heads, bias_batch, bias_heads, sq, total_seq,
-            score_batch_stride, bias_sq, bias_row_offset);
+            total_heads, num_heads, bias_batch, bias_heads, sq, score_cols,
+            score_batch_stride, bias_sq, bias_row_offset, bias_total_seq,
+            bias_col_offset);
   } else {
     fprintf(stderr,
             "hip_gqa_add_attention_bias_f32: unsupported bias elem size %d\n",
@@ -1280,32 +1315,51 @@ extern "C" int hip_gqa_softmax_inplace(
 }
 
 //===----------------------------------------------------------------------===//
-// WMMA types for fused kernels (RDNA 3 / 3.5, wave32)
+// WMMA types for fused kernels (RDNA 3 / 3.5 / 4, wave32)
 //===----------------------------------------------------------------------===//
+// Two WMMA f16 16x16x16 encodings exist across these architectures (see
+// hip_arch_compat.h for how each was empirically verified): the original
+// gfx11 encoding (half16 fragments, K replicated across the wave's two
+// lane-halves) and the newer gfx12-style encoding gfx1170/gfx12xx use (half8
+// fragments, K split by pair = lane/16, no replication). HIPDNN_WMMA_FRAG_ELEMS
+// / HIPDNN_WMMA_F32_16X16X16_F16 / hipdnn_wmma_k_off / hipdnn_wmma_acc_row
+// abstract the three points of difference so the kernels below are written
+// once and compile correctly for either encoding.
 
-static constexpr int kWmmaTile = 16;  // RDNA 3 WMMA tile dimension (16x16x16)
+static constexpr int kWmmaTile = 16;  // WMMA tile dimension (16x16x16)
 
-typedef _Float16 half16 __attribute__((ext_vector_type(16)));
+// half16 holds one WMMA A/B fragment; its vector width matches
+// HIPDNN_WMMA_FRAG_ELEMS (16 on gfx11, 8 on the gfx12-style encoding). The
+// name is kept for continuity with the existing RDNA3-era call sites even
+// though the width is arch-dependent.
+typedef _Float16 half16 __attribute__((ext_vector_type(HIPDNN_WMMA_FRAG_ELEMS)));
 typedef float    float8 __attribute__((ext_vector_type(8)));
-#define HALF16(pointer) (reinterpret_cast<half16*>((void *)&(pointer))[0])
+// Loads one A/B fragment of HIPDNN_WMMA_FRAG_ELEMS contiguous K-major
+// elements starting at `pointer`, offset by this lane's pair-half
+// (hipdnn_wmma_k_off(pair): 0 on gfx11, pair*8 on the gfx12-style encoding).
+// Only valid when the source is contiguous along K, as it is at every call
+// site below (Q rows, K/P cache rows are all D- or BKV-contiguous).
+#define HALF16(pointer, pair)                                                  \
+  (reinterpret_cast<half16*>(                                                  \
+       (void *)(&(pointer) + hipdnn_wmma_k_off(pair)))[0])
 
 // 16-byte opaque vector, used only to widen KV cache global loads to a single
 // dwordx4 per lane. The element type is irrelevant; the bytes are memcpy'd
 // into the typed prefetch registers.
 typedef unsigned int bytes16 __attribute__((ext_vector_type(4)));
 
-// The WMMA builtin below is RDNA3-family (wave32) only. Where __has_builtin
-// reports it absent, trap instead so this file still compiles and a WMMA
-// launch on an unsupported arch aborts loudly rather than returning garbage.
-#if !defined(__has_builtin) ||                                                  \
-    !__has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_f16_w32)
+// Where neither WMMA builtin is available (non-RDNA3/3.5/4 arch), trap
+// instead so this file still compiles and a WMMA launch on an unsupported
+// arch aborts loudly rather than returning garbage.
+#if !HIPDNN_HAS_WMMA
 static __device__ __forceinline__ float8
-hipdnn_wmma_f32_16x16x16_f16_w32_unavailable(half16, half16, float8 c) {
+hipdnn_wmma_f32_16x16x16_f16_unavailable(half16, half16, float8 c) {
   __builtin_trap();
   return c;
 }
-#define __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c)                     \
-  hipdnn_wmma_f32_16x16x16_f16_w32_unavailable((a), (b), (c))
+#undef HIPDNN_WMMA_F32_16X16X16_F16
+#define HIPDNN_WMMA_F32_16X16X16_F16(a, b, c)                                  \
+  hipdnn_wmma_f32_16x16x16_f16_unavailable((a), (b), (c))
 #endif
 
 // [removed] fused_gqa_decode_kernel / hip_gqa_fused_decode: the legacy
@@ -1786,20 +1840,22 @@ gqa_flash_decode_wmma_kernel(
     const size_t q_row = (static_cast<size_t>(batch) * H + head) * D;
     if constexpr (KV_I8) {
       const float* ks = k_scale + (size_t)head_kv * D;
+      const int k_off = hipdnn_wmma_k_off(pair);
       #pragma unroll
       for (int tk = 0; tk < Q_TILES; ++tk) {
         half16 q{};
         if (valid) {
           #pragma unroll
-          for (int e = 0; e < 16; ++e)
-            q[e] = (_Float16)((float)Q[q_row + tk * 16 + e] * ks[tk * 16 + e]);
+          for (int e = 0; e < HIPDNN_WMMA_FRAG_ELEMS; ++e)
+            q[e] = (_Float16)((float)Q[q_row + tk * 16 + k_off + e] *
+                               ks[tk * 16 + k_off + e]);
         }
         Q_reg[tk] = q;
       }
     } else {
       #pragma unroll
       for (int tk = 0; tk < Q_TILES; ++tk)
-        Q_reg[tk] = valid ? HALF16(Q[q_row + tk * 16]) : half16{};
+        Q_reg[tk] = valid ? HALF16(Q[q_row + tk * 16], pair) : half16{};
     }
   }
 
@@ -1926,12 +1982,12 @@ gqa_flash_decode_wmma_kernel(
       float8 s_frag = {};
       #pragma unroll
       for (int tk = 0; tk < Q_TILES; ++tk) {
-        half16 kf = HALF16(K_lds[(sj * 16 + wmma_lane) * DSTR + tk * 16]);
-        s_frag = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(Q_reg[tk], kf, s_frag);
+        half16 kf = HALF16(K_lds[(sj * 16 + wmma_lane) * DSTR + tk * 16], pair);
+        s_frag = HIPDNN_WMMA_F32_16X16X16_F16(Q_reg[tk], kf, s_frag);
       }
       #pragma unroll
       for (int ele = 0; ele < 8; ++ele) {
-        const int r = ele * 2 + pair;
+        const int r = hipdnn_wmma_acc_row(pair, ele);
         const int c = sj * 16 + wmma_lane;
         S_lds[r * S_STR + c] = s_frag[ele] * scale_log2e;
       }
@@ -1982,18 +2038,19 @@ gqa_flash_decode_wmma_kernel(
     for (int tj = 0; tj < O_TILES; ++tj)
       #pragma unroll
       for (int ele = 0; ele < 8; ++ele)
-        O_frag[tj][ele] *= ml[(ele * 2 + pair) * 3 + 2];
+        O_frag[tj][ele] *= ml[hipdnn_wmma_acc_row(pair, ele) * 3 + 2];
 
     #pragma unroll
     for (int tj = 0; tj < O_TILES; ++tj) {
       #pragma unroll
       for (int tk = 0; tk < N_TILES; ++tk) {
-        half16 p = HALF16(P_lds[wmma_lane * P_STR + tk * 16]);
+        half16 p = HALF16(P_lds[wmma_lane * P_STR + tk * 16], pair);
         half16 v;
+        const int v_k_off = hipdnn_wmma_k_off(pair);
         #pragma unroll
-        for (int e = 0; e < 16; ++e)
-          v[e] = V_lds[(tk * 16 + e) * DSTR + tj * 16 + wmma_lane];
-        O_frag[tj] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(p, v, O_frag[tj]);
+        for (int e = 0; e < HIPDNN_WMMA_FRAG_ELEMS; ++e)
+          v[e] = V_lds[(tk * 16 + v_k_off + e) * DSTR + tj * 16 + wmma_lane];
+        O_frag[tj] = HIPDNN_WMMA_F32_16X16X16_F16(p, v, O_frag[tj]);
       }
     }
     __syncthreads();
@@ -2008,7 +2065,7 @@ gqa_flash_decode_wmma_kernel(
   for (int tj = 0; tj < O_TILES; ++tj)
     #pragma unroll
     for (int ele = 0; ele < 8; ++ele) {
-      const int r = ele * 2 + pair;
+      const int r = hipdnn_wmma_acc_row(pair, ele);
       const int c = tj * 16 + wmma_lane;
       if (r < HPG) {
         const int head_q = head_kv * HPG + r;
@@ -2792,12 +2849,24 @@ extern "C" int hip_gqa_flash_decode_configured(
 //                 reduction; halves per-wave Q_reg/O_h to lift occupancy)
 //===----------------------------------------------------------------------===//
 namespace {
-typedef _Float16 half16_t __attribute__((ext_vector_type(16)));
+// half16_t is a WMMA A/B fragment; width matches HIPDNN_WMMA_FRAG_ELEMS (see
+// the shared WMMA block above). half8_t is unrelated: a genuinely fixed
+// 8-wide fp16 vector used for O storage further below, not a WMMA operand.
+typedef _Float16 half16_t __attribute__((ext_vector_type(HIPDNN_WMMA_FRAG_ELEMS)));
 typedef _Float16 half8_t __attribute__((ext_vector_type(8)));
 typedef float float8_t __attribute__((ext_vector_type(8)));
 #ifndef HALF16_LOAD
-#define HALF16_LOAD(ptr) (*reinterpret_cast<const half16_t*>(ptr))
+// Loads one fragment of HIPDNN_WMMA_FRAG_ELEMS contiguous K-major elements
+// starting at `ptr`, offset by this lane's pair-half (see HALF16 above).
+#define HALF16_LOAD(ptr, pair)                                                 \
+  (*reinterpret_cast<const half16_t*>((ptr) + hipdnn_wmma_k_off(pair)))
 #endif
+// Always-16-wide vector, for coalesced bulk copies of a 16-element D-chunk
+// from global into LDS staging (e.g. the V tile below). This is plain memory
+// movement, not a WMMA operand, so unlike half16_t its width must NOT track
+// HIPDNN_WMMA_FRAG_ELEMS.
+typedef _Float16 half16_raw_t __attribute__((ext_vector_type(16)));
+#define HALF16_RAW_LOAD(ptr) (*reinterpret_cast<const half16_raw_t*>(ptr))
 
 
 
@@ -2869,7 +2938,7 @@ gqa_flash_prefill_v5_kernel(
             (static_cast<size_t>(batch * sq + (valid ? q_pos : 0)) * Hq + head_q) * D;
         #pragma unroll
         for (int tk = 0; tk < D_TILES; ++tk)
-            Q_reg[mi][tk] = valid ? HALF16_LOAD(&Q[q_row_base + tk * 16]) : half16_t{};
+            Q_reg[mi][tk] = valid ? HALF16_LOAD(&Q[q_row_base + tk * 16], pair) : half16_t{};
     }
 
     // ---- running state in registers (per owned row) ----
@@ -2897,11 +2966,11 @@ gqa_flash_prefill_v5_kernel(
             #pragma unroll
             for (int tk = 0; tk < D_TILES; ++tk) {
                 half16_t k_frag = (kvalid && !(abl & 8))
-                                         ? HALF16_LOAD(&Kcache[k_row + tk * 16])
+                                         ? HALF16_LOAD(&Kcache[k_row + tk * 16], pair)
                                          : half16_t{};
                 #pragma unroll
                 for (int mi = 0; mi < M_TILES; ++mi)
-                    S_reg[mi][sj] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                    S_reg[mi][sj] = HIPDNN_WMMA_F32_16X16X16_F16(
                         Q_reg[mi][tk], k_frag, S_reg[mi][sj]);
             }
         }
@@ -2939,10 +3008,10 @@ gqa_flash_prefill_v5_kernel(
                 const int kv_local = i / D_TILES;
                 const int dt       = i % D_TILES;
                 const int kv_pos   = kv0 + kv_local;
-                half16_t vv = (kv_pos < skv)
-                    ? HALF16_LOAD(&Vcache[kv_base + (size_t)kv_pos * D + dt * 16])
-                    : half16_t{};
-                *reinterpret_cast<half16_t*>(&V_lds[kv_local * V_STR + dt * 16]) = vv;
+                half16_raw_t vv = (kv_pos < skv)
+                    ? HALF16_RAW_LOAD(&Vcache[kv_base + (size_t)kv_pos * D + dt * 16])
+                    : half16_raw_t{};
+                *reinterpret_cast<half16_raw_t*>(&V_lds[kv_local * V_STR + dt * 16]) = vv;
             }
         }
 
@@ -2960,7 +3029,7 @@ gqa_flash_prefill_v5_kernel(
         for (int mi = 0; mi < M_TILES; ++mi) {
             #pragma unroll
             for (int e = 0; e < 8; ++e) {
-                const int row    = mi * 16 + e * 2 + pair;        // local q row
+                const int row    = mi * 16 + hipdnn_wmma_acc_row(pair, e);  // local q row
                 const int q_pos  = q_start + row;
                 // causal mask, sliding-window lower bound, and per-row partial
                 // max over this lane's columns
@@ -3029,14 +3098,15 @@ gqa_flash_prefill_v5_kernel(
             for (int tk = 0; tk < S_TILES_J; ++tk) {
                 // V as B-fragment from LDS: v[e=kv] for column d = tj*16+wmma_lane
                 half16_t v_frag;
+                const int v_k_off = hipdnn_wmma_k_off(pair);
                 #pragma unroll
-                for (int e = 0; e < 16; ++e)
-                    v_frag[e] = V_lds[(tk * 16 + e) * V_STR + tj * 16 + wmma_lane];
+                for (int e = 0; e < HIPDNN_WMMA_FRAG_ELEMS; ++e)
+                    v_frag[e] = V_lds[(tk * 16 + v_k_off + e) * V_STR + tj * 16 + wmma_lane];
                 #pragma unroll
                 for (int mi = 0; mi < M_TILES; ++mi) {
                     half16_t p_frag = HALF16_LOAD(
-                        &P_lds[(mi * 16 + wmma_lane) * P_STR + tk * 16]);
-                    O_frag[mi][tj] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                        &P_lds[(mi * 16 + wmma_lane) * P_STR + tk * 16], pair);
+                    O_frag[mi][tj] = HIPDNN_WMMA_F32_16X16X16_F16(
                         p_frag, v_frag, O_frag[mi][tj]);
                 }
             }
@@ -3081,7 +3151,7 @@ gqa_flash_prefill_v5_kernel(
         for (int tj = 0; tj < D_TILES; ++tj) {
             #pragma unroll
             for (int e = 0; e < 8; ++e) {
-                const int row   = mi * 16 + e * 2 + pair;
+                const int row   = mi * 16 + hipdnn_wmma_acc_row(pair, e);
                 const int c     = tj * 16 + wmma_lane;
                 const int q_pos = q_start + row;
                 if (q_pos < sq && c < D) {
@@ -3300,7 +3370,7 @@ gqa_flash_prefill_v7_kernel(
             (static_cast<size_t>(batch * sq + (valid ? q_pos : 0)) * Hq + head_q) * D;
         #pragma unroll
         for (int tk = 0; tk < D_TILES; ++tk)
-            Q_reg[mt][tk] = valid ? HALF16_LOAD(&Q[q_row_base + tk * 16]) : half16_t{};
+            Q_reg[mt][tk] = valid ? HALF16_LOAD(&Q[q_row_base + tk * 16], pair) : half16_t{};
     }
 
     // ---- running state: O stored compactly as half8 (fp16 carry) ----
@@ -3328,8 +3398,8 @@ gqa_flash_prefill_v7_kernel(
                 const int kv_pos   = kv0 + kv_local;
                 const bool kvalid  = kv_pos < skv;
                 const size_t off   = kv_base + (size_t)(kvalid ? kv_pos : 0) * D + dt * 16;
-                half16_t vv = kvalid ? HALF16_LOAD(&Vcache[off]) : half16_t{};
-                *reinterpret_cast<half16_t*>(&V_lds[kv_local * KV_STR + dt * 16]) = vv;
+                half16_raw_t vv = kvalid ? HALF16_RAW_LOAD(&Vcache[off]) : half16_raw_t{};
+                *reinterpret_cast<half16_raw_t*>(&V_lds[kv_local * KV_STR + dt * 16]) = vv;
             }
         }
         // NB: no barrier here. v7 streams K from global and softmax only touches
@@ -3351,10 +3421,10 @@ gqa_flash_prefill_v7_kernel(
                 const size_t k_row = kv_base + (size_t)(kvalid ? key : 0) * D;
                 for (int tk = 0; tk < D_TILES; ++tk) {
                     half16_t k_frag = (kvalid && !(abl & 16))
-                        ? HALF16_LOAD(&Kcache[k_row + tk * 16]) : half16_t{};
+                        ? HALF16_LOAD(&Kcache[k_row + tk * 16], pair) : half16_t{};
                     #pragma unroll
                     for (int mt = 0; mt < MT; ++mt)
-                        S_reg[mt][sj] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                        S_reg[mt][sj] = HIPDNN_WMMA_F32_16X16X16_F16(
                             Q_reg[mt][tk], k_frag, S_reg[mt][sj]);
                 }
             }
@@ -3373,7 +3443,7 @@ gqa_flash_prefill_v7_kernel(
                 float corr_e[8];
                 #pragma unroll
                 for (int e = 0; e < 8; ++e) {
-                    const int row    = e * 2 + pair;
+                    const int row    = hipdnn_wmma_acc_row(pair, e);
                     const int q_pos  = row_base + mt * kWmmaTile + row;
                     float rmax = -INFINITY;
                     #pragma unroll
@@ -3431,14 +3501,15 @@ gqa_flash_prefill_v7_kernel(
             #pragma unroll
             for (int tk = 0; tk < S_TILES_J; ++tk) {
                 half16_t v_frag;
+                const int v_k_off = hipdnn_wmma_k_off(pair);
                 #pragma unroll
-                for (int e = 0; e < 16; ++e)
-                    v_frag[e] = V_lds[(tk * 16 + e) * KV_STR + tj * 16 + wmma_lane];
+                for (int e = 0; e < HIPDNN_WMMA_FRAG_ELEMS; ++e)
+                    v_frag[e] = V_lds[(tk * 16 + v_k_off + e) * KV_STR + tj * 16 + wmma_lane];
                 #pragma unroll
                 for (int mt = 0; mt < MT; ++mt) {
                     half16_t p_frag = HALF16_LOAD(
-                        &P_lds[(pbase + mt * kWmmaTile + wmma_lane) * P_STR + tk * 16]);
-                    Of[mt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                        &P_lds[(pbase + mt * kWmmaTile + wmma_lane) * P_STR + tk * 16], pair);
+                    Of[mt] = HIPDNN_WMMA_F32_16X16X16_F16(
                         p_frag, v_frag, Of[mt]);
                 }
             }
@@ -3458,7 +3529,7 @@ gqa_flash_prefill_v7_kernel(
         for (int tj = 0; tj < D_TILES; ++tj) {
             #pragma unroll
             for (int e = 0; e < 8; ++e) {
-                const int row   = e * 2 + pair;
+                const int row   = hipdnn_wmma_acc_row(pair, e);
                 const int c     = tj * 16 + wmma_lane;
                 const int q_pos = row_base + mt * kWmmaTile + row;
                 if (q_pos < sq && c < D) {
@@ -3634,9 +3705,9 @@ gqa_flash_prefill_v8_kernel(
     constexpr int S_TILES_J = BKV / kWmmaTile;
     constexpr int D_TILES   = D / kWmmaTile;
     constexpr int DPG       = D_TILES / ND;    // D-tiles owned per wave
-    // A WMMA accumulator holds 8 rows per lane (row = e*2 + pair), and the
-    // softmax over those rows is row-independent, so it splits ND ways instead of
-    // being repeated ND times or dumped on one wave while the rest wait.
+    // A WMMA accumulator holds 8 rows per lane (row = hipdnn_wmma_acc_row(pair, e)),
+    // and the softmax over those rows is row-independent, so it splits ND ways
+    // instead of being repeated ND times or dumped on one wave while the rest wait.
     constexpr int EPW       = 8 / ND;          // accumulator rows per wave
     static_assert(EPW * ND == 8, "ND must divide 8 for the softmax row split");
     constexpr int P_STR     = BKV + 2;
@@ -3684,7 +3755,7 @@ gqa_flash_prefill_v8_kernel(
         #pragma unroll
         for (int tk = 0; tk < DPG; ++tk)
             Q_reg[mt][tk] = valid
-                ? HALF16_LOAD(&Q[q_row_base + (dt_base + tk) * 16]) : half16_t{};
+                ? HALF16_LOAD(&Q[q_row_base + (dt_base + tk) * 16], pair) : half16_t{};
     }
 
     // Accumulate O in fp32 registers. The WMMA accumulator is already fp32, so
@@ -3717,8 +3788,8 @@ gqa_flash_prefill_v8_kernel(
                 const int kv_pos   = kv0 + kv_local;
                 const bool kvalid  = kv_pos < skv;
                 const size_t off   = kv_base + (size_t)(kvalid ? kv_pos : 0) * D + dt * 16;
-                half16_t vv = kvalid ? HALF16_LOAD(&Vcache[off]) : half16_t{};
-                *reinterpret_cast<half16_t*>(&V_lds[kv_local * KV_STR + dt * 16]) = vv;
+                half16_raw_t vv = kvalid ? HALF16_RAW_LOAD(&Vcache[off]) : half16_raw_t{};
+                *reinterpret_cast<half16_raw_t*>(&V_lds[kv_local * KV_STR + dt * 16]) = vv;
             }
         }
 
@@ -3737,10 +3808,10 @@ gqa_flash_prefill_v8_kernel(
                 #pragma unroll
                 for (int tk = 0; tk < DPG; ++tk) {
                     half16_t k_frag = (kvalid && !(abl & 16))
-                        ? HALF16_LOAD(&Kcache[k_row + (dt_base + tk) * 16]) : half16_t{};
+                        ? HALF16_LOAD(&Kcache[k_row + (dt_base + tk) * 16], pair) : half16_t{};
                     #pragma unroll
                     for (int mt = 0; mt < MT; ++mt)
-                        S_reg[mt][sj] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                        S_reg[mt][sj] = HIPDNN_WMMA_F32_16X16X16_F16(
                             Q_reg[mt][tk], k_frag, S_reg[mt][sj]);
                 }
             }
@@ -3753,7 +3824,7 @@ gqa_flash_prefill_v8_kernel(
             for (int sj = 0; sj < S_TILES_J; ++sj)
                 #pragma unroll
                 for (int e = 0; e < 8; ++e) {
-                    const int rl  = e * 2 + pair;
+                    const int rl  = hipdnn_wmma_acc_row(pair, e);
                     const int col = sj * 16 + wmma_lane;
                     Sp_lds[((size_t)group * ROWS + mt * 16 + rl) * SP_STR + col] =
                         S_reg[mt][sj][e];
@@ -3791,7 +3862,7 @@ gqa_flash_prefill_v8_kernel(
                 #pragma unroll
                 for (int ei = 0; ei < EPW; ++ei) {
                     const int e     = group * EPW + ei;
-                    const int rl    = e * 2 + pair;
+                    const int rl    = hipdnn_wmma_acc_row(pair, e);
                     const int q_pos = q_start + mt * 16 + rl;
 
                     // Sum the ND partial scores for this row only.
@@ -3855,7 +3926,7 @@ gqa_flash_prefill_v8_kernel(
                 float corr_e[8];
                 #pragma unroll
                 for (int e = 0; e < 8; ++e)
-                    corr_e[e] = Cr_lds[mt * 16 + e * 2 + pair];
+                    corr_e[e] = Cr_lds[mt * 16 + hipdnn_wmma_acc_row(pair, e)];
                 #pragma unroll
                 for (int tj = 0; tj < DPG; ++tj)
                     #pragma unroll
@@ -3871,14 +3942,15 @@ gqa_flash_prefill_v8_kernel(
             #pragma unroll
             for (int tk = 0; tk < S_TILES_J; ++tk) {
                 half16_t v_frag;
+                const int v_k_off = hipdnn_wmma_k_off(pair);
                 #pragma unroll
-                for (int e = 0; e < 16; ++e)
-                    v_frag[e] = V_lds[(tk * 16 + e) * KV_STR + d_tile * 16 + wmma_lane];
+                for (int e = 0; e < HIPDNN_WMMA_FRAG_ELEMS; ++e)
+                    v_frag[e] = V_lds[(tk * 16 + v_k_off + e) * KV_STR + d_tile * 16 + wmma_lane];
                 #pragma unroll
                 for (int mt = 0; mt < MT; ++mt) {
                     half16_t p_frag = HALF16_LOAD(
-                        &P_lds[(mt * 16 + wmma_lane) * P_STR + tk * 16]);
-                    O_acc[mt][tj] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                        &P_lds[(mt * 16 + wmma_lane) * P_STR + tk * 16], pair);
+                    O_acc[mt][tj] = HIPDNN_WMMA_F32_16X16X16_F16(
                         p_frag, v_frag, O_acc[mt][tj]);
                 }
             }
@@ -3894,14 +3966,14 @@ gqa_flash_prefill_v8_kernel(
     for (int mt = 0; mt < MT; ++mt)
         #pragma unroll
         for (int ei = 0; ei < EPW; ++ei)
-            Cr_lds[mt * 16 + (group * EPW + ei) * 2 + pair] = l_reg[mt][ei];
+            Cr_lds[mt * 16 + hipdnn_wmma_acc_row(pair, group * EPW + ei)] = l_reg[mt][ei];
     __syncthreads();
     float l_fin[MT][8];
     #pragma unroll
     for (int mt = 0; mt < MT; ++mt)
         #pragma unroll
         for (int e = 0; e < 8; ++e)
-            l_fin[mt][e] = Cr_lds[mt * 16 + e * 2 + pair];
+            l_fin[mt][e] = Cr_lds[mt * 16 + hipdnn_wmma_acc_row(pair, e)];
 
     // ---- Epilogue: this wave writes its owned D tiles ----
     #pragma unroll
@@ -3911,7 +3983,7 @@ gqa_flash_prefill_v8_kernel(
             const int c = (dt_base + tj) * 16 + wmma_lane;
             #pragma unroll
             for (int e = 0; e < 8; ++e) {
-                const int rl    = e * 2 + pair;
+                const int rl    = hipdnn_wmma_acc_row(pair, e);
                 const int q_pos = q_start + mt * 16 + rl;
                 if (q_pos < sq && c < D) {
                     const float l_val   = fmaxf(l_fin[mt][e], 1e-6f);

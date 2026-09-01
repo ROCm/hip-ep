@@ -393,7 +393,9 @@ bool testCompareShape(int M, int N, int K, int group_size,
     size_t countC         = static_cast<size_t>(M) * N;
     size_t rowBytesU3     = (static_cast<size_t>(K) * 3 + 7) / 8;
     size_t countB_u3      = static_cast<size_t>(N) * rowBytesU3;
-    size_t countB_u4      = static_cast<size_t>(N) * K / 2;
+    // B_packed rows are padded to num_groups_k * (group_size/2) bytes (ONNX
+    // MatMulNBits blob layout), NOT a plain K/2 -- see ../gemm_fp16u4/test_matmul_nbits.cpp.
+    size_t countB_u4      = static_cast<size_t>(N) * num_groups_k * (group_size / 2);
     size_t countS         = static_cast<size_t>(N) * num_groups_k;
 
     // ---- Load shared A ----

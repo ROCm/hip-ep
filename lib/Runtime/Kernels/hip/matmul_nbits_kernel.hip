@@ -2531,8 +2531,12 @@ __global__ void dequant_u4_to_fp16(
     _Float16 scale = scales[n * num_groups_k + grp];
     _Float16 zp    = zeros ? zeros[n * num_groups_k + grp] : (_Float16)8;
 
+    // Row stride is num_groups_k * (group_size/2) bytes (ONNX MatMulNBits
+    // padding: the last group is padded to a full group_size even when
+    // K % group_size != 0), not a plain K/2 -- see GemmFp16U4Impl's
+    // b_byte_base comment. The intra-row offset (k8/2) is unaffected.
     uint32_t four = *reinterpret_cast<const uint32_t*>(
-        &B_packed[n * (K / 2) + k8 / 2]);
+        &B_packed[n * (num_groups_k * (group_size / 2)) + k8 / 2]);
 
     _Float16 bv[8];
     bv[0] = (static_cast<_Float16>(static_cast<int>((four      ) & 0xF)) - zp) * scale;
@@ -2553,21 +2557,25 @@ __global__ void dequant_u4_to_fp16(
  * Section 2b: WMMA kernel (supports both fused dequant and fp16 B)
  * ======================================================================= */
 
-typedef _Float16 half16 __attribute__((ext_vector_type(16)));
+// half16 holds one WMMA A/B fragment; its vector width matches
+// HIPDNN_WMMA_FRAG_ELEMS (16 on gfx11, 8 on the gfx12-style encoding
+// gfx1170/gfx12xx use -- see hip_arch_compat.h). The name is kept for
+// continuity even though the width is arch-dependent.
+typedef _Float16 half16 __attribute__((ext_vector_type(HIPDNN_WMMA_FRAG_ELEMS)));
 typedef float    float8 __attribute__((ext_vector_type(8)));
 
-// The WMMA builtin below is RDNA3-family (wave32) only. Where __has_builtin
-// reports it absent, trap instead so this file still compiles and a WMMA
-// launch on an unsupported arch aborts loudly rather than returning garbage.
-#if !defined(__has_builtin) ||                                                  \
-    !__has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_f16_w32)
+// Where neither WMMA builtin is available (non-RDNA3/3.5/4 arch), trap
+// instead so this file still compiles and a WMMA launch on an unsupported
+// arch aborts loudly rather than returning garbage.
+#if !HIPDNN_HAS_WMMA
 static __device__ __forceinline__ float8
-hipdnn_wmma_f32_16x16x16_f16_w32_unavailable(half16, half16, float8 c) {
+hipdnn_wmma_f32_16x16x16_f16_unavailable(half16, half16, float8 c) {
   __builtin_trap();
   return c;
 }
-#define __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c)                     \
-  hipdnn_wmma_f32_16x16x16_f16_w32_unavailable((a), (b), (c))
+#undef HIPDNN_WMMA_F32_16X16X16_F16
+#define HIPDNN_WMMA_F32_16X16X16_F16(a, b, c)                                  \
+  hipdnn_wmma_f32_16x16x16_f16_unavailable((a), (b), (c))
 #endif
 
 #define WMMA_TILE 16
@@ -2646,9 +2654,16 @@ void GemmFp16U4Impl(
     const bool b_valid    = BOUNDS_CHECK ? (b_n_g_raw < N) : true;
     const int b_n_g       = (BOUNDS_CHECK && !b_valid) ? 0 : b_n_g_raw;
 
-    // Fused dequant state (compile-time eliminated when FUSED_DQ=false)
+    // Fused dequant state (compile-time eliminated when FUSED_DQ=false).
+    // B_packed rows are padded to num_groups_k * (group_size/2) bytes (ONNX
+    // MatMulNBits blob layout -- the last group is padded to a full
+    // group_size even when K % group_size != 0), NOT a plain K/2 bytes/row;
+    // see the row-stride comment on matmul_nbits_gemv_kernel's b_base_arr.
+    // Within a row the nibbles are still packed compactly from k=0 (only the
+    // tail beyond K is padding), so the intra-row byte offset (b_k8 >> 1)
+    // below is unaffected -- only the per-row stride changes.
     [[maybe_unused]] const int b_byte_base =
-        FUSED_DQ ? (b_n_g * (K >> 1) + (b_k8 >> 1)) : 0;
+        FUSED_DQ ? (b_n_g * (num_groups_k * (group_size >> 1)) + (b_k8 >> 1)) : 0;
     [[maybe_unused]] const int b_gid_base =
         FUSED_DQ ? (b_n_g * num_groups_k) : 0;
     // cached_k_grp is the quant-group index currently loaded into cached_s/
@@ -2801,15 +2816,16 @@ void GemmFp16U4Impl(
         for(int ks = 0; ks < K_STEPS; ks++)
         {
             half16 b_frag[WT_N];
+            const int k_off = hipdnn_wmma_k_off(sub);
 #pragma unroll
             for(int wn = 0; wn < WT_N; wn++)
             {
                 int noff              = (wcol * WT_N + wn) * WMMA_TILE;
                 uint32_t* dst         = reinterpret_cast<uint32_t*>(&b_frag[wn]);
                 const uint32_t* src   = reinterpret_cast<const uint32_t*>(
-                    &smB[buf][noff + lane][ks * WMMA_TILE]);
+                    &smB[buf][noff + lane][ks * WMMA_TILE + k_off]);
 #pragma unroll
-                for(int i = 0; i < 8; i++)
+                for(int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 2; i++)
                     dst[i] = src[i];
             }
 #pragma unroll
@@ -2819,14 +2835,14 @@ void GemmFp16U4Impl(
                 half16 a_frag;
                 uint32_t* dst         = reinterpret_cast<uint32_t*>(&a_frag);
                 const uint32_t* src   = reinterpret_cast<const uint32_t*>(
-                    &smA[buf][moff + lane][ks * WMMA_TILE]);
+                    &smA[buf][moff + lane][ks * WMMA_TILE + k_off]);
 #pragma unroll
-                for(int i = 0; i < 8; i++)
+                for(int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 2; i++)
                     dst[i] = src[i];
 
 #pragma unroll
                 for(int wn = 0; wn < WT_N; wn++)
-                    acc[wm][wn] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                    acc[wm][wn] = HIPDNN_WMMA_F32_16X16X16_F16(
                         a_frag, b_frag[wn], acc[wm][wn]);
             }
         }
@@ -2859,7 +2875,7 @@ void GemmFp16U4Impl(
 #pragma unroll
             for(int e = 0; e < 8; e++)
             {
-                int r = e * 2 + sub;
+                int r = hipdnn_wmma_acc_row(sub, e);
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
                         C[(mbase + r) * ldc + nbase + lane] =
@@ -3703,14 +3719,15 @@ void GemmFp16I8Impl(
 #pragma unroll
         for (int ks = 0; ks < K_STEPS; ks++) {
             half16 b_frag[WT_N];
+            const int k_off = hipdnn_wmma_k_off(sub);
 #pragma unroll
             for (int wn = 0; wn < WT_N; wn++) {
                 int noff              = (wcol * WT_N + wn) * WMMA_TILE;
                 uint32_t* dst         = reinterpret_cast<uint32_t*>(&b_frag[wn]);
                 const uint32_t* src   = reinterpret_cast<const uint32_t*>(
-                    &smB[buf][noff + lane][ks * WMMA_TILE]);
+                    &smB[buf][noff + lane][ks * WMMA_TILE + k_off]);
 #pragma unroll
-                for (int i = 0; i < 8; i++)
+                for (int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 2; i++)
                     dst[i] = src[i];
             }
 #pragma unroll
@@ -3719,14 +3736,14 @@ void GemmFp16I8Impl(
                 half16 a_frag;
                 uint32_t* dst         = reinterpret_cast<uint32_t*>(&a_frag);
                 const uint32_t* src   = reinterpret_cast<const uint32_t*>(
-                    &smA[buf][moff + lane][ks * WMMA_TILE]);
+                    &smA[buf][moff + lane][ks * WMMA_TILE + k_off]);
 #pragma unroll
-                for (int i = 0; i < 8; i++)
+                for (int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 2; i++)
                     dst[i] = src[i];
 
 #pragma unroll
                 for (int wn = 0; wn < WT_N; wn++)
-                    acc[wm][wn] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                    acc[wm][wn] = HIPDNN_WMMA_F32_16X16X16_F16(
                         a_frag, b_frag[wn], acc[wm][wn]);
             }
         }
@@ -3755,7 +3772,7 @@ void GemmFp16I8Impl(
             int nbase = col0 + (wcol * WT_N + wn) * WMMA_TILE;
 #pragma unroll
             for (int e = 0; e < 8; e++) {
-                int r = e * 2 + sub;
+                int r = hipdnn_wmma_acc_row(sub, e);
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
                         C[(mbase + r) * ldc + nbase + lane] =
@@ -4229,14 +4246,15 @@ void GemmFp16U3Impl(
 #pragma unroll
         for (int ks = 0; ks < K_STEPS; ks++) {
             half16 b_frag[WT_N];
+            const int k_off = hipdnn_wmma_k_off(sub);
 #pragma unroll
             for (int wn = 0; wn < WT_N; wn++) {
                 int noff              = (wcol * WT_N + wn) * WMMA_TILE;
                 uint32_t* dst         = reinterpret_cast<uint32_t*>(&b_frag[wn]);
                 const uint32_t* src   = reinterpret_cast<const uint32_t*>(
-                    &smB[buf][noff + lane][ks * WMMA_TILE]);
+                    &smB[buf][noff + lane][ks * WMMA_TILE + k_off]);
 #pragma unroll
-                for (int i = 0; i < 8; i++)
+                for (int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 2; i++)
                     dst[i] = src[i];
             }
 #pragma unroll
@@ -4245,14 +4263,14 @@ void GemmFp16U3Impl(
                 half16 a_frag;
                 uint32_t* dst         = reinterpret_cast<uint32_t*>(&a_frag);
                 const uint32_t* src   = reinterpret_cast<const uint32_t*>(
-                    &smA[buf][moff + lane][ks * WMMA_TILE]);
+                    &smA[buf][moff + lane][ks * WMMA_TILE + k_off]);
 #pragma unroll
-                for (int i = 0; i < 8; i++)
+                for (int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 2; i++)
                     dst[i] = src[i];
 
 #pragma unroll
                 for (int wn = 0; wn < WT_N; wn++)
-                    acc[wm][wn] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                    acc[wm][wn] = HIPDNN_WMMA_F32_16X16X16_F16(
                         a_frag, b_frag[wn], acc[wm][wn]);
             }
         }
@@ -4281,7 +4299,7 @@ void GemmFp16U3Impl(
             int nbase = col0 + (wcol * WT_N + wn) * WMMA_TILE;
 #pragma unroll
             for (int e = 0; e < 8; e++) {
-                int r = e * 2 + sub;
+                int r = hipdnn_wmma_acc_row(sub, e);
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
                         C[(mbase + r) * ldc + nbase + lane] =
@@ -4901,14 +4919,15 @@ void GemmFp16U2Impl(
 #pragma unroll
         for (int ks = 0; ks < K_STEPS; ks++) {
             half16 b_frag[WT_N];
+            const int k_off = hipdnn_wmma_k_off(sub);
 #pragma unroll
             for (int wn = 0; wn < WT_N; wn++) {
                 int noff              = (wcol * WT_N + wn) * WMMA_TILE;
                 uint32_t* dst         = reinterpret_cast<uint32_t*>(&b_frag[wn]);
                 const uint32_t* src   = reinterpret_cast<const uint32_t*>(
-                    &smB[buf][noff + lane][ks * WMMA_TILE]);
+                    &smB[buf][noff + lane][ks * WMMA_TILE + k_off]);
 #pragma unroll
-                for (int i = 0; i < 8; i++)
+                for (int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 2; i++)
                     dst[i] = src[i];
             }
 #pragma unroll
@@ -4917,14 +4936,14 @@ void GemmFp16U2Impl(
                 half16 a_frag;
                 uint32_t* dst         = reinterpret_cast<uint32_t*>(&a_frag);
                 const uint32_t* src   = reinterpret_cast<const uint32_t*>(
-                    &smA[buf][moff + lane][ks * WMMA_TILE]);
+                    &smA[buf][moff + lane][ks * WMMA_TILE + k_off]);
 #pragma unroll
-                for (int i = 0; i < 8; i++)
+                for (int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 2; i++)
                     dst[i] = src[i];
 
 #pragma unroll
                 for (int wn = 0; wn < WT_N; wn++)
-                    acc[wm][wn] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                    acc[wm][wn] = HIPDNN_WMMA_F32_16X16X16_F16(
                         a_frag, b_frag[wn], acc[wm][wn]);
             }
         }
@@ -4953,7 +4972,7 @@ void GemmFp16U2Impl(
             int nbase = col0 + (wcol * WT_N + wn) * WMMA_TILE;
 #pragma unroll
             for (int e = 0; e < 8; e++) {
-                int r = e * 2 + sub;
+                int r = hipdnn_wmma_acc_row(sub, e);
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
                         C[(mbase + r) * ldc + nbase + lane] =
@@ -5998,9 +6017,16 @@ extern "C" int hip_matmul_nbits(
   }
 
   // Packed nibble ZPs [N, ceil(k_blocks/2)] must be unpacked before use:
-  //   - FP16 for WMMA and col-major GEMV paths (only when M > 1)
+  //   - FP16 for WMMA and col-major GEMV paths
   //   - Individual uint8 for row-major GEMV and naive fallback paths
-  // When zp_elem_size == 2 (FP16) or ZPs are NULL, no conversion needed.
+  // When zp_elem_size == 2, zero_points is already FP16 [N, num_groups_k]
+  // (not nibble-packed) and is used as zp_for_fp16_paths directly, with no
+  // conversion. zp_for_u8_paths is deliberately left unset in that case: the
+  // dispatch below never reads it when zp_elem_size==2, because M==1 is
+  // routed to the FP16-capable col-major GEMV kernel instead of the
+  // uint8-only row-major one (see fp16_zp_ready below) -- reinterpreting the
+  // FP16 buffer as raw uint8 bytes there previously produced garbage
+  // zero-points.
   // The runtime wrapper (lib/Runtime/real/matmul_nbits.cpp) caches the
   // unpacked buffers per zero_points pointer and passes them via
   // pre_unpacked_zp_{u8,fp16} so we skip the kernel launches here.
@@ -6020,6 +6046,15 @@ extern "C" int hip_matmul_nbits(
     if (pre_unpacked_zp_fp16)
       zp_for_fp16_paths = pre_unpacked_zp_fp16;
   }
+  // True once zp_for_fp16_paths is a genuinely-ready FP16 buffer (or there
+  // are no zero points at all): zp_elem_size==2 supplies it directly above;
+  // zp_elem_size==1 only pre-builds pre_unpacked_zp_fp16 for M>1 (see the
+  // wrapper), so M==1 with zp_elem_size==1 is deliberately excluded here and
+  // keeps using the row-major kernel's pre_unpacked_zp_u8 below instead of
+  // paying for an extra fp16 conversion on the M==1 decode hot path.
+  const bool fp16_zp_ready =
+      !zero_points || zp_elem_size == 2 ||
+      (zp_elem_size == 1 && pre_unpacked_zp_fp16 != nullptr);
 
   /* -------------------------------------------------------------------
    * WMMA data format: batch==1 && K%32==0
@@ -6116,16 +6151,19 @@ extern "C" int hip_matmul_nbits(
   }
 
   /* -------------------------------------------------------------------
-   * GEMV path with col-major data — small M (>1), WMMA data format
+   * GEMV path with col-major data — small M, WMMA data format
    *
-   * When batch==1, K%32==0, but 1 < M < kWmmaMinM: internally transpose
-   * A row->col and output col->row so the caller sees row-major I/O.
-   * GEMV kernel runs with COL_MAJOR=true for K-parallel reduction.
-   *
-   * M=1 skips this path entirely — row/col layouts are identical for a
-   * single row, and the row-major GEMV avoids the ZP conversion kernel.
+   * When batch==1, K%32==0, M < kWmmaMinM: internally transpose A row->col
+   * and output col->row so the caller sees row-major I/O (skipped for M==1,
+   * where row-major and col-major are the identical single row/column).
+   * GEMV kernel runs with COL_MAJOR=true, reading zero_points as FP16
+   * directly -- the only kernel variant that can, so M==1 must also take
+   * this path whenever an FP16 zp buffer is actually available
+   * (fp16_zp_ready above); M==1 with zp_elem_size==1 and no pre-built
+   * pre_unpacked_zp_fp16 instead falls through to the row-major path below,
+   * which already has the uint8 zp it needs at no extra cost.
    * ------------------------------------------------------------------- */
-  if (wmma_data_format && M > 1 && M < kWmmaMinM) {
+  if (wmma_data_format && M < kWmmaMinM && (M > 1 || fp16_zp_ready)) {
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_matmul_nbits: GEMV col-major path M=%lld "
         "N=%lld K=%lld bs=%lld zp=%s bias=%s\n",

@@ -28,6 +28,30 @@ OperandRange mlir::hipsr::getHipsrDestinationOperands(Operation *op) {
   return none;
 }
 
+// A hipsr op orders its operands as context, inputs, then destinations.
+OperandRange mlir::hipsr::getHipsrInputOperands(Operation *op) {
+  OperandRange destinations = getHipsrDestinationOperands(op);
+  if (destinations.empty()) {
+    return OperandRange(nullptr, 0);
+  }
+  unsigned contextAndInputs = destinations.getBeginOperandIndex();
+  return op->getOperands().slice(1, contextAndInputs - 1);
+}
+
+Value mlir::hipsr::getShapeGraphCounterpart(Value value) {
+  if (PlaceholderOp::isAllowedShapeGraphInput(value)) {
+    return value;
+  }
+
+  // Block arguments are allowed, so anything left is a result.
+  auto result = cast<OpResult>(value);
+  OperandRange destinations = getHipsrDestinationOperands(result.getOwner());
+  if (result.getResultNumber() >= destinations.size()) {
+    return value;
+  }
+  return destinations[result.getResultNumber()];
+}
+
 bool mlir::hipsr::isHipsrDestinationOperand(OpOperand &use) {
   OperandRange destinations = getHipsrDestinationOperands(use.getOwner());
   if (destinations.empty())

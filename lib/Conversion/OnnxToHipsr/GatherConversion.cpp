@@ -39,9 +39,10 @@
 //       : (tensor<2xi64, #hipsr.mem<host>>, tensor<i64>) -> tensor<i64>
 //
 // After, with the region types left out:
-//   %init = hipsr.placeholder(%ctx)
+//   %init = hipsr.placeholder(%ctx) ins(%shape)
 //       {placeholder_type = #hipsr.placeholder_type<normal>}
 //       : tensor<i64, #hipsr.mem<host>> shape_region {
+//   ^bb0(%shape_shape):
 //     %s = shape.const_shape []
 //     hipsr.shape_yield %s
 //   }
@@ -209,9 +210,10 @@ LogicalResult replaceWithHostCompute(onnx::GatherOp op, Value data,
                                        "expected every index within the axis");
   }
 
+  // Constant indices fix the shape; the data is there to match the compute.
   Location loc = op.getLoc();
   auto init = PlaceholderOp::create(rewriter, loc, TypeRange{resultType}, ctx,
-                                    ValueRange{}, PlaceholderType::Normal);
+                                    ValueRange{data}, PlaceholderType::Normal);
   populateHostShapeRegion(rewriter, init, resultType.getShape());
 
   auto computeOp =

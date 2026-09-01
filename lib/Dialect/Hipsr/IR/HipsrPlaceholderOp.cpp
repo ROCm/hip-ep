@@ -57,6 +57,45 @@ LogicalResult verifyResultUses(PlaceholderOp op) {
   return success();
 }
 
+// A placeholder and its consumer share one destination buffer, so both must
+// land in the same pool domain. That holds when the two read the same values,
+// the placeholder on the shape-graph side and the consumer on the data side.
+//
+// Only a value another placeholder holds is checked. A block argument or a
+// constant cannot reach a later domain, and inside a pool domain a data value
+// and its counterpart are two block arguments that no longer name each other.
+LogicalResult verifyConsumerTopology(PlaceholderOp op) {
+  Operation *consumer = op.getConsumer();
+  if (!consumer) {
+    return success();
+  }
+
+  SmallVector<Value> counterparts = llvm::map_to_vector(
+      getHipsrInputOperands(consumer), getShapeGraphCounterpart);
+
+  for (auto [index, counterpart] : llvm::enumerate(counterparts)) {
+    if (!counterpart.getDefiningOp<PlaceholderOp>()) {
+      continue;
+    }
+    if (!llvm::is_contained(op.getInputs(), counterpart)) {
+      return op.emitOpError("must read the shape-graph value of input ")
+             << index << " of its consumer '" << consumer->getName() << "'";
+    }
+  }
+
+  for (auto [index, input] : llvm::enumerate(op.getInputs())) {
+    if (!input.getDefiningOp<PlaceholderOp>()) {
+      continue;
+    }
+    if (!llvm::is_contained(counterparts, input)) {
+      return op.emitOpError("input ")
+             << index << " has no matching operand in its consumer '"
+             << consumer->getName() << "'";
+    }
+  }
+  return success();
+}
+
 // The placeholder type sets the shape region's block arguments.
 LogicalResult verifyShapeRegionSignature(PlaceholderOp op) {
   if (op.getBodyRegion().empty()) {
@@ -126,6 +165,9 @@ LogicalResult PlaceholderOp::verify() {
     return failure();
   }
   if (failed(verifyResultUses(*this))) {
+    return failure();
+  }
+  if (failed(verifyConsumerTopology(*this))) {
     return failure();
   }
   if (failed(verifyShapeRegionSignature(*this))) {

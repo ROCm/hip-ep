@@ -34,6 +34,15 @@ namespace hipsr {
 // hipsr DPS op. return empty range if op is not a hipsr op.
 ::mlir::OperandRange getHipsrDestinationOperands(::mlir::Operation *op);
 
+// return the data operands of a hipsr op, which sit between the context and
+// the destinations. return empty range if op is not a hipsr op.
+::mlir::OperandRange getHipsrInputOperands(::mlir::Operation *op);
+
+// return the shape-graph value holding value's shape: value itself when it is
+// already a legal placeholder input, otherwise the destination its producer
+// writes into. return value unchanged when no destination matches.
+::mlir::Value getShapeGraphCounterpart(::mlir::Value value);
+
 // compute: use is in Outputs
 // dps: use is in Init
 bool isHipsrDestinationOperand(::mlir::OpOperand &use);

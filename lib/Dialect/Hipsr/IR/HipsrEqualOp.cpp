@@ -35,10 +35,10 @@ LogicalResult EqualOp::verify() {
   auto rhsType = cast<ShapedType>(getRhs().getType());
   auto outputType = cast<ShapedType>(getInit().getType());
 
-  // The runtime writes one byte per element, so the mask is that byte rather
-  // than the bit ONNX declares.
-  if (!outputType.getElementType().isUnsignedInteger(8)) {
-    return emitOpError("output element type must be ui8");
+  // A comparison yields a bool whatever it compared, so the mask never takes
+  // the operand element type.
+  if (!outputType.getElementType().isInteger(1)) {
+    return emitOpError("output element type must be i1");
   }
 
   SmallVector<int64_t> broadcastShape;

@@ -9,12 +9,12 @@
 // CHECK-SAME: %[[CTX:.+]]: !hipsr.context,
 // CHECK-SAME: %[[LHS:.+]]: tensor<?x1024xi64, #hipsr.mem<device>>,
 // CHECK-SAME: %[[RHS:.+]]: tensor<1024xi64, #hipsr.mem<device>>) {
-// CHECK-NEXT: %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[LHS]], %[[RHS]] : tensor<?x1024xi64, #hipsr.mem<device>>, tensor<1024xi64, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x1024xui8, #hipsr.mem<device>> shape_region {
+// CHECK-NEXT: %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[LHS]], %[[RHS]] : tensor<?x1024xi64, #hipsr.mem<device>>, tensor<1024xi64, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x1024xi1, #hipsr.mem<device>> shape_region {
 // CHECK-NEXT: ^bb0(%[[LHS_SHAPE:.+]]: !shape.shape, %[[RHS_SHAPE:.+]]: !shape.shape):
 // CHECK-NEXT: %[[BROADCAST:.+]] = shape.broadcast %[[LHS_SHAPE]], %[[RHS_SHAPE]] : !shape.shape, !shape.shape -> !shape.shape
 // CHECK-NEXT: hipsr.shape_yield %[[BROADCAST]] : !shape.shape
 // CHECK-NEXT: }
-// CHECK-NEXT: %[[RESULT:.+]] = hipsr.equal(%[[CTX]]) ins(%[[LHS]], %[[RHS]] : tensor<?x1024xi64, #hipsr.mem<device>>, tensor<1024xi64, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<?x1024xui8, #hipsr.mem<device>>) : tensor<?x1024xui8, #hipsr.mem<device>>
+// CHECK-NEXT: %[[RESULT:.+]] = hipsr.equal(%[[CTX]]) ins(%[[LHS]], %[[RHS]] : tensor<?x1024xi64, #hipsr.mem<device>>, tensor<1024xi64, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<?x1024xi1, #hipsr.mem<device>>) : tensor<?x1024xi1, #hipsr.mem<device>>
 // CHECK-NEXT: return
 // CHECK-NEXT: }
 func.func @equal_normal(
@@ -23,9 +23,9 @@ func.func @equal_normal(
   %init = hipsr.placeholder(%ctx)
       ins(%lhs, %rhs : tensor<?x1024xi64, #hipsr.mem<device>>, tensor<1024xi64, #hipsr.mem<device>>)
       {placeholder_type = #hipsr.placeholder_type<normal>}
-      : tensor<?x1024xui8, #hipsr.mem<device>>
+      : tensor<?x1024xi1, #hipsr.mem<device>>
   %result = hipsr.equal(%ctx)
       ins(%lhs, %rhs : tensor<?x1024xi64, #hipsr.mem<device>>, tensor<1024xi64, #hipsr.mem<device>>)
-      outs(%init : tensor<?x1024xui8, #hipsr.mem<device>>) : tensor<?x1024xui8, #hipsr.mem<device>>
+      outs(%init : tensor<?x1024xi1, #hipsr.mem<device>>) : tensor<?x1024xi1, #hipsr.mem<device>>
   return
 }

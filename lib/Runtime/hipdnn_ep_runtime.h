@@ -5,6 +5,7 @@
 #ifndef HIP_EP_RUNTIME_H
 #define HIP_EP_RUNTIME_H
 
+#include "hip/datatype_abi.h"
 #include "hipdnn_ep_errors.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -14,30 +15,8 @@
 extern "C" {
 #endif
 
-//===----------------------------------------------------------------------===//
-// Backend-Independent Data Type Identifiers
-//===----------------------------------------------------------------------===//
-//
-// These are our own values -- do NOT assume they match cuDNN or any other
-// library's enum. Each backend provides an explicit mapping function to
-// convert these to library-specific types.
-//
-// To add a new type:
-//   1. Add #define here
-//   2. Update hipdnn_ep_datatype_size() and hipdnn_ep_datatype_name()
-//   3. Update compiler mapping getHipdnnDataType() in HipToLLVM.cpp
-//   4. Update each backend mapping function
-//===----------------------------------------------------------------------===//
-
-#define HIPDNN_EP_DATATYPE_FLOAT 0    // f32, 4 bytes
-#define HIPDNN_EP_DATATYPE_HALF 1     // f16, 2 bytes
-#define HIPDNN_EP_DATATYPE_BFLOAT16 2 // bf16, 2 bytes
-#define HIPDNN_EP_DATATYPE_INT32 3    // i32, 4 bytes
-#define HIPDNN_EP_DATATYPE_INT64 4    // i64, 8 bytes
-#define HIPDNN_EP_DATATYPE_INT8 5     // i8, 1 byte
-#define HIPDNN_EP_DATATYPE_DOUBLE 6   // f64, 8 bytes
-#define HIPDNN_EP_DATATYPE_UINT8 7    // ui8, 1 byte
-#define HIPDNN_EP_DATATYPE_INT16 8    // i16, 2 byte
+// The HIPDNN_EP_DATATYPE_* identifiers come from hip/datatype_abi.h, which the
+// compiler includes as well so neither side can redefine a value on its own.
 
 //===----------------------------------------------------------------------===//
 // Backend-Independent Tensor Operation Identifiers
