@@ -2633,7 +2633,16 @@ void GemmFp16U4Impl(
     const _Float16* __restrict__ zeros,
     int group_size, int num_groups_k,
     _Float16* __restrict__ C, int ldc,
-    int swizzle_n = 4)
+    int swizzle_n = 4,
+    /* Bytes between B rows. 0 derives the arrival stride,
+     * num_groups_k * (group_size/2); a larger value reads a buffer whose rows
+     * were padded to break cache-set aliasing.
+     *
+     * Runtime rather than a template parameter so one set of instantiations
+     * serves both layouts and the autotuner stays free to pick any tile for a
+     * padded buffer. As a template parameter it would multiply the
+     * instantiation count of every tile shape. */
+    int b_row_bytes = 0)
 {
     constexpr int WM_L   = BM_T / (WT_M * 16);
     constexpr int WN_L   = BN_T / (WT_N * 16);
@@ -2747,9 +2756,12 @@ void GemmFp16U4Impl(
     [[maybe_unused]] const _Float16*      s_src    = nullptr;
     [[maybe_unused]] const _Float16*      z_src    = nullptr;
     if constexpr (FUSED_DQ) {
+        // 0 means the arrival layout, whose stride carries the ONNX group
+        // padding described above; a repacked buffer passes its own.
+        const int row_bytes =
+            b_row_bytes ? b_row_bytes : (num_groups_k * (group_size >> 1));
         b_src_u4 = static_cast<const unsigned char*>(B_data) +
-                   (static_cast<size_t>(b_n_g) * (num_groups_k * (group_size >> 1)) +
-                    (b_k8 >> 1));
+                   (static_cast<size_t>(b_n_g) * row_bytes + (b_k8 >> 1));
         s_src = scales + static_cast<size_t>(b_n_g) * num_groups_k;
         if constexpr (USE_ZEROS)
             z_src = zeros + static_cast<size_t>(b_n_g) * num_groups_k;
@@ -3065,11 +3077,11 @@ void MatMulNBitsWMMA_NoZP(
     const _Float16* __restrict__ zeros,
     int group_size, int num_groups_k,
     _Float16* __restrict__ C, int ldc,
-    int swizzle_n = 4)
+    int swizzle_n = 4, int b_row_bytes = 0)
 {
     GemmFp16U4Impl<BM_T, BN_T, WT_M, WT_N, false, BC, true, BK_T>(
         M, N, K, A, lda, B_packed, scales, zeros,
-        group_size, num_groups_k, C, ldc, swizzle_n);
+        group_size, num_groups_k, C, ldc, swizzle_n, b_row_bytes);
 }
 
 template <int BM_T = 128, int BN_T = 128, int WT_M = 2, int WT_N = 2,
@@ -3088,11 +3100,11 @@ void MatMulNBitsWMMA_ZP(
     const _Float16* __restrict__ zeros,
     int group_size, int num_groups_k,
     _Float16* __restrict__ C, int ldc,
-    int swizzle_n = 4)
+    int swizzle_n = 4, int b_row_bytes = 0)
 {
     GemmFp16U4Impl<BM_T, BN_T, WT_M, WT_N, true, BC, true, BK_T>(
         M, N, K, A, lda, B_packed, scales, zeros,
-        group_size, num_groups_k, C, ldc, swizzle_n);
+        group_size, num_groups_k, C, ldc, swizzle_n, b_row_bytes);
 }
 
 /* fp16 GEMM kernel entry (for pre-dequantized B, FUSED_DQ=false) */
@@ -3225,7 +3237,7 @@ static void launchWmmaConfig(
     const _Float16* scales, const _Float16* zeros,
     int gs, int ngk,
     _Float16* C, int ldc, bool has_zp,
-    _Float16* B_fp16_buf = nullptr)
+    _Float16* B_fp16_buf = nullptr, int b_row_bytes = 0)
 {
     auto& c = kWmmaConfigs[config_id];
     bool need_bc = (M % c.bm != 0) || (N % c.bn != 0);
@@ -3340,12 +3352,14 @@ static void launchWmmaConfig(
         hipLaunchKernelGGL( \
             HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 2, 8, BC_V>), \
             grid_, block_, 0, stream, \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
+            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
+            b_row_bytes); \
     } else { \
         hipLaunchKernelGGL( \
             HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 2, 8, BC_V>), \
             grid_, block_, 0, stream, \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
+            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
+            b_row_bytes); \
     } \
 } while(0)
 
@@ -3364,12 +3378,14 @@ static void launchWmmaConfig(
         hipLaunchKernelGGL( \
             HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 4, 2, 6, BC_V>), \
             grid_, block_, 0, stream, \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
+            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
+            b_row_bytes); \
     } else { \
         hipLaunchKernelGGL( \
             HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 4, 2, 6, BC_V>), \
             grid_, block_, 0, stream, \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
+            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
+            b_row_bytes); \
     } \
 } while(0)
 
@@ -3388,12 +3404,14 @@ static void launchWmmaConfig(
         hipLaunchKernelGGL( \
             HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 1, 8, BC_V>), \
             grid_, block_, 0, stream, \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
+            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
+            b_row_bytes); \
     } else { \
         hipLaunchKernelGGL( \
             HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 1, 8, BC_V>), \
             grid_, block_, 0, stream, \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
+            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
+            b_row_bytes); \
     } \
 } while(0)
 
@@ -3412,12 +3430,14 @@ static void launchWmmaConfig(
         hipLaunchKernelGGL( \
             HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 4, 8, BC_V, BK_V>), \
             grid_, block_, 0, stream, \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
+            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
+            b_row_bytes); \
     } else { \
         hipLaunchKernelGGL( \
             HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 4, 8, BC_V, BK_V>), \
             grid_, block_, 0, stream, \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
+            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
+            b_row_bytes); \
     } \
 } while(0)
 
@@ -3436,12 +3456,14 @@ static void launchWmmaConfig(
         hipLaunchKernelGGL( \
             HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 4, 4, 8, BC_V, BK_V>), \
             grid_, block_, 0, stream, \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
+            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
+            b_row_bytes); \
     } else { \
         hipLaunchKernelGGL( \
             HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 4, 4, 8, BC_V, BK_V>), \
             grid_, block_, 0, stream, \
-            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
+            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
+            b_row_bytes); \
     } \
 } while(0)
 
