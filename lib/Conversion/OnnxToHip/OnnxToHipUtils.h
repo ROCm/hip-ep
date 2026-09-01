@@ -443,11 +443,8 @@ void populateGlobalPoolConversionPatterns(RewritePatternSet &patterns,
 void populateFlattenConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
 
-void populateQuantizeLinearConversionPatterns(RewritePatternSet &patterns,
-                                              MLIRContext *ctx);
-
-void populateDequantizeLinearConversionPatterns(RewritePatternSet &patterns,
-                                                MLIRContext *ctx);
+void populateQdqConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
 
 /// Pre-lowering pattern set: fold `Transpose(perm=[..,r,r-2])` into a
 /// consuming `onnx.MatMul` as `hipdnn.transA` / `hipdnn.transB` so the

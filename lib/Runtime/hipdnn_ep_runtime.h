@@ -38,6 +38,7 @@ extern "C" {
 #define HIPDNN_EP_DATATYPE_DOUBLE 6   // f64, 8 bytes
 #define HIPDNN_EP_DATATYPE_UINT8 7    // ui8, 1 byte
 #define HIPDNN_EP_DATATYPE_INT16 8    // i16, 2 byte
+#define HIPDNN_EP_DATATYPE_UINT16 9   // ui16, 2 byte
 
 //===----------------------------------------------------------------------===//
 // Backend-Independent Tensor Operation Identifiers
@@ -87,6 +88,8 @@ static inline int64_t hipdnn_ep_datatype_size(int64_t data_type) {
     return 8;
   case HIPDNN_EP_DATATYPE_INT16:
     return 2;
+  case HIPDNN_EP_DATATYPE_UINT16:
+    return 2;
   default:
     return -1;
   }
@@ -112,6 +115,8 @@ static inline const char *hipdnn_ep_datatype_name(int64_t data_type) {
     return "f64";
   case HIPDNN_EP_DATATYPE_INT16:
     return "i16";
+  case HIPDNN_EP_DATATYPE_UINT16:
+    return "ui16";
   default:
     return "unknown";
   }
@@ -1241,6 +1246,58 @@ int wrap_gather_block_quantized(
     int64_t data_dtype,    // HIPDNN_EP_DATATYPE_* (uint8 packed)
     int64_t indices_dtype, // INT32 / INT64
     int64_t scales_dtype); // FLOAT / HALF / BFLOAT16
+
+// QuantizeLinear / DequantizeLinear wrappers (ONNX opset 23).
+//
+//   quantize:   output = saturate((input / scale) + zero_point)
+//   dequantize: output = (input - zero_point) * scale
+//
+// Output is elementwise the same shape as input, so only `input_shape` is
+// passed. `scale_shape` plus `axis` / `block_size` select the granularity:
+//   scale_rank == 0 (or a single element) .... per-tensor
+//   scale_rank == 1 .......................... per-axis along `axis`
+//   block_size > 0 ........................... blocked along `axis`
+// `zero_point` is nullable; when null the zero point is 0 (symmetric).
+// Its element type matches `output` for quantize and `input` for
+// dequantize, so it needs no dtype parameter of its own.
+//
+// `onnx_output_dtype` carries the op's ONNX `output_dtype` attribute
+// verbatim, i.e. a TensorProto enum (UINT8=2, INT8=3, UINT16=4, INT16=5,
+// FLOAT=1, FLOAT16=10) with 0 meaning "not set". It is NOT the same
+// numbering as the trailing `*_dtype` parameters, which are
+// HIPDNN_EP_DATATYPE_* values derived from the memref element types.
+// For quantize it is the authoritative source of the quantized type,
+// because MLIR signless i8 / i16 cannot express unsignedness.
+//
+// `precision` and `saturate` only exist on QuantizeLinear per the ONNX
+// spec, so they are absent from the dequantize signature.
+int wrap_quantize_linear(
+    RuntimeState *state,
+    const void *input,       // high precision (T1)
+    const void *scale,       // T2
+    const void *zero_point,  // (nullable) same type as output
+    void *output,            // quantized (T3)
+    const int64_t *input_shape, int64_t input_rank,
+    const int64_t *scale_shape, int64_t scale_rank,
+    int64_t axis,              // may be negative; normalized by the wrapper
+    int64_t block_size,        // 0 = not blocked
+    int64_t onnx_output_dtype, // TensorProto enum, 0 = not set
+    int64_t precision,         // 0 = take the scale's precision
+    int64_t saturate,          // float8 only
+    int64_t input_dtype, int64_t scale_dtype, int64_t output_dtype);
+
+int wrap_dequantize_linear(
+    RuntimeState *state,
+    const void *input,      // quantized (T1)
+    const void *scale,      // T2
+    const void *zero_point, // (nullable) same type as input
+    void *output,           // high precision (T3)
+    const int64_t *input_shape, int64_t input_rank,
+    const int64_t *scale_shape, int64_t scale_rank,
+    int64_t axis,              // may be negative; normalized by the wrapper
+    int64_t block_size,        // 0 = not blocked
+    int64_t onnx_output_dtype, // TensorProto enum of the float output
+    int64_t input_dtype, int64_t scale_dtype, int64_t output_dtype);
 
 // QMoE operation wrapper (quantized Mixture-of-Experts)
 // Routes tokens to top-k experts, performs quantized MLP per expert,

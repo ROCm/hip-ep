@@ -83,6 +83,7 @@ set(_kernel_sources
     hip/slice_kernel.hip
     hip/scatter_nd_kernel.hip
     hip/gather_block_quantized_kernel.hip
+    hip/qdq_kernel.hip
     hip/softmax_kernel.hip
     hip/nonzero_kernel.hip
     hip/strided_copy_kernel.hip
