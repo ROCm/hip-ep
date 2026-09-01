@@ -23,10 +23,7 @@ CRT_LIBS = [
 ]
 
 ROCM_DLL_GROUPS = [
-    ["amdhip64*.dll"],
-    ["amd_comgr*.dll"],
     ["hipblaslt.dll", "libhipblaslt.dll"],
-    ["hiprtc*.dll"],
 ]
 
 HIPBLASLT_DATA = ("hipblaslt", "library")
@@ -108,7 +105,9 @@ def main():
         "library is required; the JIT compiler is linked into it.",
     )
     ap.add_argument(
-        "--dest", required=True, help="Destination dir (the wheel's onnxruntime/capi)."
+        "--dest",
+        required=True,
+        help="Destination dir (the wheel's onnxruntime_ep_amdgpu).",
     )
     ap.add_argument(
         "--rocm-dist",
@@ -131,15 +130,6 @@ def main():
         metavar="PATH",
         help="Additional import library to bundle (repeatable), e.g. "
         "hip_custom_kernels.lib.",
-    )
-    ap.add_argument(
-        "--optional-dll",
-        action="append",
-        default=[],
-        metavar="PATH",
-        help="Externally-built runtime library to bundle if present (repeatable), "
-        "e.g. the amdgpu-ep/hip-backend DLLs built in a separate repo. Missing "
-        "paths warn instead of failing, so a plain EP-only wheel build still works.",
     )
     ap.add_argument(
         "--with-crt",
@@ -166,14 +156,6 @@ def main():
             print(f"  packaged import lib: {lib.name} <- {lib}")
         else:
             print(f"  WARNING: extra import lib not found: {lib}")
-
-    for raw in args.optional_dll:
-        lib = Path(raw)
-        if lib.is_file():
-            shutil.copy2(lib, dest / lib.name)
-            print(f"  packaged optional dll: {lib.name} <- {lib}")
-        else:
-            print(f"  WARNING: optional dll not found (skipping): {lib}")
 
     rc = _copy_rocm_runtime(Path(args.rocm_dist), args.rocm_arch, dest)
     if rc:

@@ -323,25 +323,28 @@ builds, not the stock PyPI ones:
 cd ../hip-ep  # Back to the project root
 pip install \
   ../build/onnxruntime/Release/dist/onnxruntime_directml-*.whl \
+  onnxruntime_ep_amdgpu-*.whl \
   ../build/hip-ep/python/dist/onnxruntime_ep_hip-*.whl \
   ../build/onnxruntime-genai/Release/wheel/onnxruntime_genai_directml-*.whl
 ```
 > **Note**: the ORT whl may be under `../build/onnxruntime/Release/Release/dist/`.
-> Install the EP wheel AFTER onnxruntime: it ships its own native files straight
-> into `onnxruntime/capi/`, next to `onnxruntime.dll` -- the EP plugin
-> `hipgpu.dll` (which carries the JIT compiler), the custom kernels, and the
-> ROCm runtime it was built against (amdhip64 + hipBLASLt and their
-> dependencies), so no separate ROCm install is needed. The wheel does NOT
-> bundle the AMD GPU umbrella (`amdgpu-ep.dll` + `hip-backend.dll`); driving OGA
-> through the umbrella needs those supplied separately (CI injects them via
-> `HIP_WHEEL_EXTRA_DLLS`).
+> `onnxruntime_ep_amdgpu` is the AMD GPU umbrella EP from the upstream
+> [onnxruntime-ep-amdgpu](https://github.com/onnxruntime/onnxruntime-ep-amdgpu)
+> repo (CI builds it in the `amdgpu` deps job and ships it in the
+> `hip-python-package` artifact). Install the EP wheel AFTER it: our native files
+> -- the EP plugin `hipgpu.dll` (which carries the JIT compiler), the custom
+> kernels, hipBLASLt and its Tensile data -- land in that same
+> `onnxruntime_ep_amdgpu/` package directory, which is what lets
+> `hip-backend.dll` resolve `hipgpu.dll` by bare name.
 
-**Runtime env** -- the bundled ROCm DLLs sit next to `hipgpu.dll`, but Windows
-does not search a DLL's own directory for its dependencies, so
-`onnxruntime/capi` has to be on the DLL search path before ORT loads the EP.
-`python/examples/run_onnx.py` does that (and forwards it to the `--benchmark`
-child process). NATIVE artifacts are not supported from a wheel: their lld-link
-step needs the ROCm import libs, which only a `THEROCK_DIST` install has.
+**Runtime env** -- `onnxruntime_ep_amdgpu/__init__.py` puts its own directory on
+the DLL search path, which covers the whole chain since everything lives there.
+Two things still need setting: `AMDGPU_EP_PATH`, because the umbrella is no
+longer next to `onnxruntime.dll` where OGA looks for it, and `LIB` for the JIT
+linker. `python/examples/run_onnx.py` does both (and forwards them to the
+`--benchmark` child process). NATIVE artifacts are not supported from a wheel:
+their lld-link step needs the ROCm import libs, which only a `THEROCK_DIST`
+install has.
 
 **Use** -- there is no Python API to import; the native files are found by
 location. Run a model whose `genai_config.json` selects the EP via
