@@ -4254,11 +4254,7 @@ def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize"> {
   }];
 }
 
-def Hip_GridSampleOp : Hip_DpsOp<"grid_sample", /*traits=*/[],
-                                 /*outsAccessor=*/"Output",
-                                 /*autoReify=*/1,
-                                 /*autoInfer=*/1,
-                                 /*declareInfer=*/1> {
+def Hip_GridSampleOp : Hip_DpsOp_AutoReifyInfer<"grid_sample"> {
   let summary = "ONNX GridSample (4D NCHW bilinear / nearest)";
   let description = [{
     Samples a 4-D input `X` of shape (N, C, H_in, W_in) at normalized
