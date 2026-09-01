@@ -38,8 +38,11 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
 
     auto AType = cast<MemRefType>(op.getA().getType());
     auto BType = cast<MemRefType>(op.getB().getType());
-    if (failed(inferMatmulShape(AType.getShape(), BType.getShape(),
-                                [&]() { return op.emitOpError(); })))
+    int64_t transA = op.getTransA();
+    int64_t transB = op.getTransB();
+    if (failed(inferMatmulShape(
+            AType.getShape(), BType.getShape(),
+            [&]() { return op.emitOpError(); }, transA, transB)))
       return failure();
     if (failed(verifyStridedBatchMatmul(AType.getShape(), BType.getShape(),
                                         [&]() { return op.emitOpError(); })))
@@ -56,8 +59,6 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     // Get memref ranks.
     int64_t ARank = AType.getRank();
     int64_t BRank = BType.getRank();
-    int64_t transA = op.getTransA();
-    int64_t transB = op.getTransB();
 
     // === DYNAMIC SHAPE SUPPORT ===
     // For dynamic shapes, we compute dimensions at runtime
