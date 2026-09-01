@@ -1159,6 +1159,31 @@ size_t hipdnn_ep_state_get_workspace_size(RuntimeState *state) {
   return state ? state->workspace_size : 0;
 }
 
+// Round a workspace request up onto a coarse grid so that two requests
+// differing by less than the grid step resolve to the same allocation and the
+// second one reuses the buffer.
+//
+// The step is the largest power-of-two multiple of 64 KiB at or below a
+// sixteenth of the request, which bounds the slack at 6.25% of what was asked
+// for at every scale. A sixteenth rather than something smaller because slack
+// only has to cover the increment between one request and the next: measured
+// across a Gemma-4 prefill the two attention geometries ask for sizes 2% apart,
+// so a 6.25% step absorbs the second request into the first allocation. The
+// 64 KiB floor stops buffers that are a few kilobytes from reallocating over a
+// few bytes.
+static size_t quantize_workspace_request(size_t needed_size) {
+  constexpr size_t kMinStep = size_t{64} * 1024;
+  size_t step = kMinStep;
+  const size_t bound = needed_size / 16;
+  while (step <= bound / 2)
+    step <<= 1;
+  // Unsigned wraparound is the overflow signal: a rounded size below the
+  // request means the grid step pushed it past the address space, so ask for
+  // exactly what was requested.
+  const size_t rounded = ((needed_size + step - 1) / step) * step;
+  return rounded < needed_size ? needed_size : rounded;
+}
+
 int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
   if (!state)
     return -1;
@@ -1167,21 +1192,27 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
   if (state->workspace_size >= needed_size)
     return 0;
 
-  // Amortize growth: when enlarging an existing workspace, round the new
-  // size up to at least 1.5x the current buffer. Callers whose request
-  // size grows monotonically by a small increment per inference (e.g. the
-  // GQA decode path, which sizes S buffers to B*H*total_seq and adds B*H
-  // elements per token) would otherwise trigger a hipStreamSynchronize +
-  // hipFree + hipMalloc cycle on every decode step; with the 1.5x factor
-  // that drops to O(log N) reallocations over the whole generation.
-  // Cold-start (no existing workspace) keeps the exact requested size so
-  // warmup doesn't silently double large initial allocations.
-  size_t alloc_size = needed_size;
-  if (state->workspace_size > 0) {
-    size_t grown = state->workspace_size + state->workspace_size / 2; // 1.5x
-    if (grown > alloc_size)
-      alloc_size = grown;
-  }
+  // Amortize growth by quantizing the request rather than by scaling whatever
+  // is already allocated.
+  //
+  // This used to round up to 1.5x the current buffer, which reacts to the
+  // buffer instead of to the request: a caller asking for 2% more than the last
+  // time got an allocation 50% larger than the last one, and because the factor
+  // applies to a base that is itself unbounded, the overshoot grows with the
+  // model. Measured on a Gemma-4 26B-A4B 16K prefill, the decomposed attention
+  // path asked for 24.08 GiB and then 24.57 GiB as the layer geometry changed,
+  // and the second request turned into a 36.12 GiB hipMalloc -- 11.5 GiB beyond
+  // anything anyone asked for, on a 63.6 GiB shared-memory part that already
+  // held the weights, which failed while the 24.57 GiB it actually needed would
+  // have fit.
+  //
+  // Quantizing keeps the property the 1.5x factor existed for. A caller whose
+  // request creeps up by a few elements per decode step (the GQA decode path
+  // sizes its score buffers to B*H*total_seq and adds B*H elements per token)
+  // still reallocates a logarithmic number of times overall, because the step
+  // scales with the buffer -- but the slack is bounded at a sixteenth of the
+  // request instead of half of the buffer.
+  size_t alloc_size = quantize_workspace_request(needed_size);
 
   // Grow: free old, allocate new.
   // Sync the stream first to ensure no in-flight kernel is still using the
@@ -1196,10 +1227,25 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
   }
 
   if (hipMalloc(&state->workspace, alloc_size) != hipSuccess) {
+    // Slack is an optimization, so it must never be the reason a model stops
+    // running. Retry at the exact request before giving up, so an abort here
+    // means the workspace genuinely does not fit rather than that the rounding
+    // pushed it over.
+    if (alloc_size > needed_size) {
+      fprintf(stderr,
+              "hipdnn_ep_state_ensure_workspace: hipMalloc failed for %zu "
+              "bytes; retrying at the exact request of %zu bytes\n",
+              alloc_size, needed_size);
+      fflush(stderr);
+      if (hipMalloc(&state->workspace, needed_size) == hipSuccess) {
+        state->workspace_size = needed_size;
+        return 0;
+      }
+    }
     fprintf(
         stderr,
         "hipdnn_ep_state_ensure_workspace: hipMalloc failed for %zu bytes\n",
-        alloc_size);
+        needed_size);
     std::abort();
   }
 
