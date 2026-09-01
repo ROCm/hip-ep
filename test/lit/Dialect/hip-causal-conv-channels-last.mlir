@@ -135,7 +135,7 @@ module {
   func.func @no_fold_wrong_permutation(
       %ctx: !hip.context,
       %x: tensor<128x1x64xf16>,
-      %w: tensor<1x1x4xf16>)
+      %w: tensor<128x1x4xf16>)
       -> (tensor<128x1x64xf16>, tensor<1x128x3xf16>) {
     // CHECK-LABEL: func.func @no_fold_wrong_permutation
     // CHECK: hip.transpose
@@ -149,7 +149,7 @@ module {
     %e1 = tensor.empty() : tensor<1x128x64xf16>
     %e2 = tensor.empty() : tensor<1x128x3xf16>
     %y, %s = hip.causal_conv_with_state(%ctx)
-        ins(%t0, %w : tensor<1x128x64xf16>, tensor<1x1x4xf16>)
+        ins(%t0, %w : tensor<1x128x64xf16>, tensor<128x1x4xf16>)
         outs(%e1, %e2 : tensor<1x128x64xf16>, tensor<1x128x3xf16>)
         {ndim = 1 : i64}
         : tensor<1x128x64xf16>, tensor<1x128x3xf16>
