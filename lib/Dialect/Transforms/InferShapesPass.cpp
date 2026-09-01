@@ -82,37 +82,83 @@ namespace {
 /// `OpFoldResult` is a constant integer, the constant replaces it.
 /// Returns true iff at least one dim moved from `kDynamic` to static.
 ///
-/// In debug builds, asserts that a constant reified dim agrees with an
-/// existing static dim — a contradiction signals a buggy
-/// `reifyResultShapes` impl on the op being refined.
-///
-/// Precondition: `cur.size() == reif.size()`. The
-/// `ReifyRankedShapedTypeOpInterface` contract guarantees one
-/// `OpFoldResult` per dim of the reified result; a mismatch signals a
-/// programmer error in the op's `reifyResultShapes` impl.
+/// Precondition: the complete reification has passed
+/// `validateReifiedResultShapes`, including rank and static-extent checks.
 static bool composeRefinedShape(ArrayRef<int64_t> cur,
                                 ArrayRef<OpFoldResult> reif,
                                 SmallVectorImpl<int64_t> &out) {
-  assert(cur.size() == reif.size() &&
-         "rank mismatch between current type and reified shape");
   bool refined = false;
   out.assign(cur.begin(), cur.end());
   for (size_t d : llvm::seq<size_t>(0, cur.size())) {
     std::optional<int64_t> reifCst = getConstantIntValue(reif[d]);
-    if (!ShapedType::isDynamic(cur[d])) {
-      // Static dim must agree with reify if reify gave a constant. A
-      // mismatch is an op-author bug in `reifyResultShapes` and would
-      // otherwise be silently swallowed by the pass.
-      assert((!reifCst || *reifCst == cur[d]) &&
-             "reifyResultShapes contradicts existing static dim");
+    if (!ShapedType::isDynamic(cur[d]))
       continue;
-    }
     if (reifCst) {
       out[d] = *reifCst;
       refined = true;
     }
   }
   return refined;
+}
+
+/// Validate every result slot before the pass mutates a result or DPS init.
+/// A malformed successful reifier is an op-author/compiler defect, so diagnose
+/// it and fail in release builds rather than relying on assertions.
+static LogicalResult
+validateReifiedResultShapes(Operation *op,
+                            const ReifiedRankedShapedTypeDims &reified) {
+  if (reified.size() != op->getNumResults())
+    return op->emitOpError()
+           << "--hip-infer-shapes: successful reification returned "
+           << reified.size() << " shape vector(s) for " << op->getNumResults()
+           << " result(s); expected exactly one vector per result";
+
+  for (auto [resultIdx, dims] : llvm::enumerate(reified)) {
+    Type resultType = op->getResult(resultIdx).getType();
+    auto shapedType = dyn_cast<ShapedType>(resultType);
+    if (!shapedType) {
+      if (!dims.empty())
+        return op->emitOpError()
+               << "--hip-infer-shapes: successful reification described "
+                  "non-shaped result #"
+               << resultIdx;
+      continue;
+    }
+    if (!shapedType.hasRank())
+      return op->emitOpError()
+             << "--hip-infer-shapes: successful reification described "
+                "unranked result #"
+             << resultIdx;
+
+    ArrayRef<int64_t> currentShape = shapedType.getShape();
+    if (dims.size() != currentShape.size())
+      return op->emitOpError()
+             << "--hip-infer-shapes: successful reification returned "
+             << dims.size() << " dimension(s) for result #" << resultIdx
+             << " of rank " << currentShape.size();
+
+    for (auto [dimIdx, dim] : llvm::enumerate(dims)) {
+      if (!dim)
+        continue;
+      std::optional<int64_t> constant = getConstantIntValue(dim);
+      if (!constant)
+        continue;
+      if (*constant < 0)
+        return op->emitOpError()
+               << "--hip-infer-shapes: successful reification returned "
+                  "negative extent "
+               << *constant << " for result #" << resultIdx << ", dimension #"
+               << dimIdx;
+      int64_t current = currentShape[dimIdx];
+      if (!ShapedType::isDynamic(current) && *constant != current)
+        return op->emitOpError()
+               << "--hip-infer-shapes: successful reification returned extent "
+               << *constant << " for result #" << resultIdx << ", dimension #"
+               << dimIdx << ", contradicting existing static extent "
+               << current;
+    }
+  }
+  return success();
 }
 
 /// Rebuild `emptyOp` with the refined shape. Dynamic-dim operands whose
@@ -267,7 +313,7 @@ static LogicalResult refineOneResult(RewriterBase &rewriter,
 /// HIP-dialect ops only. Upstream ops with the same interface (e.g.
 /// `tensor.empty`) carry operand-shape invariants this pass would
 /// desync, and they have their own canonicalizers anyway.
-static void refineFuncBody(func::FuncOp funcOp, IRRewriter &rewriter) {
+static LogicalResult refineFuncBody(func::FuncOp funcOp, IRRewriter &rewriter) {
   HipDialect *hipDialect = funcOp->getContext()->getLoadedDialect<HipDialect>();
   SmallVector<ReifyRankedShapedTypeOpInterface> ops;
   funcOp.walk([&](ReifyRankedShapedTypeOpInterface reifyOp) {
@@ -290,12 +336,13 @@ static void refineFuncBody(func::FuncOp funcOp, IRRewriter &rewriter) {
     ReifiedRankedShapedTypeDims reified;
     if (failed(reifyOp.reifyResultShapes(rewriter, reified)))
       continue;
-    if (reified.size() != op->getNumResults())
-      continue;
+    if (failed(validateReifiedResultShapes(op, reified)))
+      return failure();
 
     for (auto [resultIdx, dims] : llvm::enumerate(reified))
       (void)refineOneResult(rewriter, reifyOp, resultIdx, dims);
   }
+  return success();
 }
 
 /// Sync `bodyFunc`'s `FunctionType` + entry-block-arg types at the
@@ -423,7 +470,8 @@ static bool syncLoopResultsAndInsertCasts(IRRewriter &rewriter,
 ///   // non-DPS-init use of %r so consumer signatures are preserved.
 ///   func.func @loop_body(%ctx, %iter, %cond, %carry: tensor<128xf32>, ...)
 ///                       -> (i1, tensor<128xf32>) { ... }
-static void refineLoopSignatures(ModuleOp module, IRRewriter &rewriter) {
+static LogicalResult refineLoopSignatures(ModuleOp module,
+                                          IRRewriter &rewriter) {
   // Hard cap. Each iteration narrows a finite type lattice across a
   // finite set of hip.loop ops — bounded; the cap is a paranoia guard
   // against a buggy reify impl that returns a wider type than the
@@ -431,11 +479,11 @@ static void refineLoopSignatures(ModuleOp module, IRRewriter &rewriter) {
   static constexpr unsigned kMaxIters = 16;
   for (unsigned iter = 0; iter < kMaxIters; ++iter) {
     bool changed = false;
-    module.walk([&](hip::LoopOp loopOp) {
+    WalkResult walkResult = module.walk([&](hip::LoopOp loopOp) -> WalkResult {
       auto bodyFunc =
           module.lookupSymbol<func::FuncOp>(loopOp.getBodyFuncAttr());
       if (!bodyFunc || bodyFunc.getBody().empty())
-        return;
+        return WalkResult::advance();
 
       bool bodyChanged = syncBodyFuncSignatureFromVInit(bodyFunc, loopOp);
       bool resultsChanged = syncLoopResultsAndInsertCasts(rewriter, loopOp);
@@ -448,15 +496,19 @@ static void refineLoopSignatures(ModuleOp module, IRRewriter &rewriter) {
       // types disagree with the now-tighter entry block arg types; a
       // re-walk of this body func via `refineFuncBody` lets each
       // body op's `reifyResultShapes` catch up.
-      if (bodyChanged)
-        refineFuncBody(bodyFunc, rewriter);
+      if (bodyChanged && failed(refineFuncBody(bodyFunc, rewriter)))
+        return WalkResult::interrupt();
+      return WalkResult::advance();
     });
+    if (walkResult.wasInterrupted())
+      return failure();
     if (!changed)
-      return;
+      return success();
   }
   module.emitWarning() << "--hip-infer-shapes: hip.loop signature refinement "
                           "did not converge after "
                        << kMaxIters << " iterations; bailing";
+  return success();
 }
 
 struct InferShapesPass : public impl::InferShapesPassBase<InferShapesPass> {
@@ -477,14 +529,21 @@ void InferShapesPass::runOnOperation() {
   // signatures except on DPS-init uses (which propagate refinement
   // directly — `hip.loop`'s `$v_init` operands are DPS-init by
   // `LoopOp::getDpsInitsMutable`, see HipDialect.cpp).
-  module.walk([&](func::FuncOp funcOp) { refineFuncBody(funcOp, rewriter); });
+  WalkResult walkResult = module.walk([&](func::FuncOp funcOp) -> WalkResult {
+    return succeeded(refineFuncBody(funcOp, rewriter))
+               ? WalkResult::advance()
+               : WalkResult::interrupt();
+  });
+  if (walkResult.wasInterrupted())
+    return signalPassFailure();
 
   // Phase 2: hip.loop signature catch-up. Sync each loop's result
   // types and its body func's signature from the (potentially
   // Phase-1-refined) v_init operand types, then re-walk the body func
   // so body op result types catch up with the tighter entry-block
   // arg types.
-  refineLoopSignatures(module, rewriter);
+  if (failed(refineLoopSignatures(module, rewriter)))
+    signalPassFailure();
 }
 
 } // namespace

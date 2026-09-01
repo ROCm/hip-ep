@@ -42,6 +42,8 @@
 #include "mlir/Dialect/Tensor/IR/TensorInferTypeOpInterfaceImpl.h"
 #include "mlir/Dialect/Tensor/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/IR/BuiltinDialect.h"
+#include "mlir/IR/OpDefinition.h"
+#include "mlir/Pass/Pass.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 #include "mlir/Transforms/Passes.h"
 
@@ -50,6 +52,10 @@
 #include "hip/InitAllPasses.h"
 
 #include "llvm/Support/CommandLine.h"
+
+#ifdef HIPDNN_EP_INCLUDE_TEST_PASSES
+#include "Dialect/Hip/TestHipPasses.h"
+#endif
 
 namespace {
 /// Which dialect claims the `onnx` namespace.
@@ -109,6 +115,10 @@ int main(int argc, char **argv) {
   // the EP share. Defined once (InitAllPasses.h) so the two never drift; see
   // that function for the set and docs/pipeline_pass_menu.md for the catalogue.
   hip::compiler::registerAllPasses();
+
+#ifdef HIPDNN_EP_INCLUDE_TEST_PASSES
+  mlir::hip::test::registerHipTestPasses(registry);
+#endif
 
   // Tool-only extras: the standalone LLVM-lowering conversion passes. The
   // production pipeline reaches LLVM through `convert-hip-to-llvm` (which

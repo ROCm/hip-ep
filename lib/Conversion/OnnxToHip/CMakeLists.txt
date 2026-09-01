@@ -111,6 +111,7 @@ add_dependencies(OnnxToHip
 )
 
 target_link_libraries(OnnxToHip PUBLIC
+  HipConversionUtils
   HipDialectIR
   MLIRPass
   MLIRFuncDialect
