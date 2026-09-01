@@ -28,6 +28,8 @@
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/SourceMgr.h"
+
+#include "hip_custom_kernels_family.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include "hip/debug_log.h"
@@ -563,14 +565,12 @@ void CompilerDriver::discoverInTreeLibraries(
     COMPILER_DEBUG_LOG("  WARNING: hipblaslt import library not found\n");
 #endif // HIPDNN_EP_DISABLE_VENDOR_BLAS
 
-  // Custom kernels: per-arch shared library (custom_kernels_<arch>.{dll,so}).
-  // The native model DLL imports the hip_* launcher symbols from it; the EP
-  // installs the matching arch variant side-by-side. The launcher symbols are
-  // identical across arches (only the embedded fatbin differs), so the import
-  // binds to the arch the build/EP ships.
+  // Custom kernels: family-common + per-arch-accel shared libraries. The native
+  // model DLL imports hip_* launcher symbols from both; the EP installs them
+  // side-by-side. See lib/Runtime/Kernels/include/hip_custom_kernels_family.h.
   //
   // Library directory:   env HIP_CUSTOM_KERNELS_DIR  -> CMake HIPDNN_CK_LIB_DIR
-  // Arch:                env HIP_CUSTOM_KERNELS_ARCH  -> CMake
+  // Accel arch:          env HIP_CUSTOM_KERNELS_ARCH  -> CMake
   // HIPDNN_CK_DEFAULT_ARCH
   {
     std::string ck_dir = hip_get_env("HIP_CUSTOM_KERNELS_DIR");
@@ -589,8 +589,13 @@ void CompilerDriver::discoverInTreeLibraries(
     if (ck_arch.empty())
       ck_arch = "gfx1151"; // last-resort default (matches LlvmIrJit)
 
-    libraries.push_back("custom_kernels_" + ck_arch);
-    COMPILER_DEBUG_LOG("  Custom kernels (per-arch shared): custom_kernels_"
+    libraries.push_back(
+        hipdnn_ep::custom_kernels::familyCommonBaseName(ck_arch));
+    libraries.push_back(hipdnn_ep::custom_kernels::accelBaseName(ck_arch));
+    COMPILER_DEBUG_LOG(
+        "  Custom kernels (family common): "
+        << hipdnn_ep::custom_kernels::familyCommonBaseName(ck_arch) << "\n");
+    COMPILER_DEBUG_LOG("  Custom kernels (per-arch accel): custom_kernels_"
                        << ck_arch << " from "
                        << (ck_dir.empty() ? "<search path>" : ck_dir) << "\n");
   }

@@ -6,7 +6,7 @@ Licensed under the MIT License.
 
 ## Architecture
 
-The existing ops (Conv, Gemm, etc.) call ROCm library APIs (hipBLASLt) which ship as `.lib` + `.dll`. GQA, RoPE, and the other ops without ROCm-library coverage are built as **per-arch shared libraries** (`custom_kernels_<arch>.{dll,so}`) that ship next to the EP binary. `LlvmIrJit` `dlopen`s the matching variant at JIT init based on the device's `gcnArchName`, so the per-model bitcode never carries kernel code.
+The existing ops (Conv, Gemm, etc.) call ROCm library APIs (MIOpen, hipBLASLt) which ship as `.lib` + `.dll`. GQA, RoPE, and the other ops without ROCm-library coverage are built as **family-common + per-arch-accel shared libraries** that ship next to the EP binary. For RDNA 3.5 (`gfx1150`–`gfx1153`), common kernels live in `custom_kernels_gfx115x.{dll,so}` (device slice `gfx1151`); WMMA/GQA/MatMulNBits accel kernels stay in `custom_kernels_<arch>.{dll,so}`. `LlvmIrJit` `dlopen`s both at JIT init based on the device's `gcnArchName`, so the per-model bitcode never carries kernel code. See [custom_kernel_family_split.md](custom_kernel_family_split.md) for the full split, build targets, and gfx115x numeric validation plan.
 
 ```mermaid
 flowchart TD
