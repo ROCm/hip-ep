@@ -525,7 +525,7 @@ __global__ void matmul_nbits_gemv_kernel_i8(
  *
  * Template parameters:
  *   BLOCK_SIZE - threads per block (K-reduction parallelism)
- *   TILE_N     - N columns per block (1..64, amortizes A loads)
+ *   TILE_N     - N columns per block (1..16, amortizes A loads)
  *
  * When M is small (e.g. M=1 decode token), each threadblock computes
  * TILE_N output elements sharing the same A row load, with BLOCK_SIZE
@@ -538,18 +538,18 @@ __global__ void matmul_nbits_gemv_kernel_i8(
  *   - Explicit __fmaf_rn intrinsics for dot product accumulation
  *   - Factored dequant:  (dot - a_sum*zp) * scale  (saves ~40% FLOPs)
  *   - Bit-shift group index (block_size is always power-of-2)
- *   - TILE_N up to 64 for large-N shapes (N>=2048)
+ *   - TILE_N up to 16; wider tiles are register-bound (see kGemvConfigs)
  *   - Compile-time WARP_SIZE=32 for RDNA 3 dead-code elimination
  *     (runtime __builtin_amdgcn_wavefrontsize() caused 13% regression)
  *   - Single-warp fast path: BLOCK_SIZE=32 uses shuffle-only reduction
  *     (no LDS sync needed)
  *
- * At runtime, an autotune pass benchmarks all 35 (BLOCK_SIZE, TILE_N)
+ * At runtime, an autotune pass benchmarks all 29 (BLOCK_SIZE, TILE_N)
  * combinations on the first call for each problem shape and caches the
  * fastest configuration for subsequent calls.
- * BLOCK_SIZE ∈ {32,64,128,256,512,1024}, TILE_N ∈ {1,2,4,8,16,32,64}.
+ * BLOCK_SIZE ∈ {32,64,128,256,512,1024}, TILE_N ∈ {1,2,4,8,16}.
  * BS=32 configs use single-warp shuffle-only reduction (no LDS).
- * TILE_N=32 tested only when N>=1024; TILE_N=64 only when N>=2048.
+ * See kGemvConfigs for why TILE_N stops at 16.
  *
  * Launch: grid(ceil(N/TILE_N), M, batch), block(BLOCK_SIZE)
  * ======================================================================= */
@@ -1126,8 +1126,22 @@ static constexpr GemvConfig kGemvConfigs[] = {
     {256, 1}, {256, 2}, {256, 4}, {256, 8}, {256, 16},
     {512, 1}, {512, 2}, {512, 4}, {512, 8}, {512, 16},
     {1024, 1}, {1024, 2}, {1024, 4}, {1024, 8}, {1024, 16},
-    { 64, 32}, {128, 32}, {256, 32},
-    { 64, 64}, {128, 64}, {256, 64},
+    /* TILE_N stops at 16 on purpose.
+     *
+     * Every kernel that reads this table stages TILE_N B-vectors into registers
+     * before consuming any of them, so the hot loop holds a uint4 (or uint2/
+     * uint3) per column plus a scale and a running sum per column. At TILE_N=64
+     * the B array alone is 256 VGPRs -- the entire per-thread budget on gfx1151
+     * -- and the tail spills: 732-1436 B of scratch depending on bit width, and
+     * 68-364 B still at TILE_N=32. Those were the only kernels in this file
+     * with any scratch at all.
+     *
+     * They also never won. Across 50 autotune runs (u4 / i8 / u3 / u2 / dp4a,
+     * five shapes each, with and without zero points) the winner was always
+     * TILE_N <= 8; the best TILE_N>=32 candidate was 1.13x-3.1x slower and the
+     * best TILE_N=64 candidate 2.45x-9.3x slower, never once inside the noise.
+     * They cost 31% of the sweep time to measure and discard, because being the
+     * slowest candidates they dominate it. */
 };
 static constexpr int kNumGemvConfigs =
     static_cast<int>(sizeof(kGemvConfigs) / sizeof(kGemvConfigs[0]));
@@ -1177,10 +1191,6 @@ static void launchGemvConfig(
         GEMV_CASE(24, 1024,  1); GEMV_CASE(25, 1024,  2);
         GEMV_CASE(26, 1024,  4); GEMV_CASE(27, 1024,  8);
         GEMV_CASE(28, 1024, 16);
-        GEMV_CASE(29,  64, 32);  GEMV_CASE(30, 128, 32);
-        GEMV_CASE(31, 256, 32);
-        GEMV_CASE(32,  64, 64);  GEMV_CASE(33, 128, 64);
-        GEMV_CASE(34, 256, 64);
         default: break;
     }
 #undef GEMV_CASE
@@ -1205,10 +1215,6 @@ static int tuneGemvConfig(
     constexpr int ITERS  = 5;
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
-        auto& cfg = kGemvConfigs[cid];
-        if (cfg.tile_n >= 64 && N < 2048) continue;
-        if (cfg.tile_n >= 32 && cfg.tile_n < 64 && N < 1024) continue;
-
         for (int w = 0; w < WARMUP; w++)
             launchGemvConfig(cid, stream, A, B, sc, zp, bi, out,
                              M, N, K, batch, bs, col_major);
@@ -1350,10 +1356,6 @@ static void launchDp4aConfig(
         DP4A_CASE(24, 1024,  1); DP4A_CASE(25, 1024,  2);
         DP4A_CASE(26, 1024,  4); DP4A_CASE(27, 1024,  8);
         DP4A_CASE(28, 1024, 16);
-        DP4A_CASE(29,  64, 32);  DP4A_CASE(30, 128, 32);
-        DP4A_CASE(31, 256, 32);
-        DP4A_CASE(32,  64, 64);  DP4A_CASE(33, 128, 64);
-        DP4A_CASE(34, 256, 64);
         default: break;
     }
 #undef DP4A_CASE
@@ -1375,10 +1377,6 @@ static int tuneDp4aConfig(
     constexpr int ITERS  = 5;
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
-        auto& cfg = kGemvConfigs[cid];
-        if (cfg.tile_n >= 64 && N < 2048) continue;
-        if (cfg.tile_n >= 32 && cfg.tile_n < 64 && N < 1024) continue;
-
         for (int w = 0; w < WARMUP; w++)
             launchDp4aConfig(cid, stream, a_qb, a_scale, B, sc, zp, bi, out,
                              N, K, bs);
@@ -1479,7 +1477,7 @@ extern "C" int hip_matmul_nbits_dp4a(
 /* -----------------------------------------------------------------------
  * GEMV (int8) Autotune: dispatch, benchmark, cache
  *
- * Reuses kGemvConfigs (28 configs of BLOCK_SIZE x TILE_N) and the same
+ * Reuses kGemvConfigs (29 configs of BLOCK_SIZE x TILE_N) and the same
  * autotune mechanics as the int4 path, but launches the int8 GEMV kernel
  * matmul_nbits_gemv_kernel_i8 instead. A separate cache is used because
  * the int8 kernel's per-config performance ranking differs from int4 (B
@@ -1539,10 +1537,6 @@ static void launchGemvConfigI8(
         GEMV_I8_CASE(24, 1024,  1); GEMV_I8_CASE(25, 1024,  2);
         GEMV_I8_CASE(26, 1024,  4); GEMV_I8_CASE(27, 1024,  8);
         GEMV_I8_CASE(28, 1024, 16);
-        GEMV_I8_CASE(29,  64, 32);  GEMV_I8_CASE(30, 128, 32);
-        GEMV_I8_CASE(31, 256, 32);
-        GEMV_I8_CASE(32,  64, 64);  GEMV_I8_CASE(33, 128, 64);
-        GEMV_I8_CASE(34, 256, 64);
         default: break;
     }
 #undef GEMV_I8_CASE
@@ -1566,9 +1560,6 @@ static int tuneGemvConfigI8(
     constexpr int ITERS  = 5;
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
-        auto& cfg = kGemvConfigs[cid];
-        if (cfg.tile_n >= 32 && N < 1024) continue;
-
         for (int w = 0; w < WARMUP; w++)
             launchGemvConfigI8(cid, stream, A, B, sc, zp, bi, out,
                                M, N, K, batch, bs);
@@ -1982,10 +1973,6 @@ static void launchGemvConfigU3(
         GEMV_U3_CASE(24, 1024,  1); GEMV_U3_CASE(25, 1024,  2);
         GEMV_U3_CASE(26, 1024,  4); GEMV_U3_CASE(27, 1024,  8);
         GEMV_U3_CASE(28, 1024, 16);
-        GEMV_U3_CASE(29,  64, 32);  GEMV_U3_CASE(30, 128, 32);
-        GEMV_U3_CASE(31, 256, 32);
-        GEMV_U3_CASE(32,  64, 64);  GEMV_U3_CASE(33, 128, 64);
-        GEMV_U3_CASE(34, 256, 64);
         default: break;
     }
 #undef GEMV_U3_CASE
@@ -2009,9 +1996,6 @@ static int tuneGemvConfigU3(
     constexpr int ITERS  = 5;
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
-        auto& cfg = kGemvConfigs[cid];
-        if (cfg.tile_n >= 32 && N < 1024) continue;
-
         for (int w = 0; w < WARMUP; w++)
             launchGemvConfigU3(cid, stream, A, B, sc, zp, bi, out,
                                M, N, K, batch, bs);
@@ -2388,10 +2372,6 @@ static void launchGemvConfigU2(
         GEMV_U2_CASE(24, 1024,  1); GEMV_U2_CASE(25, 1024,  2);
         GEMV_U2_CASE(26, 1024,  4); GEMV_U2_CASE(27, 1024,  8);
         GEMV_U2_CASE(28, 1024, 16);
-        GEMV_U2_CASE(29,  64, 32);  GEMV_U2_CASE(30, 128, 32);
-        GEMV_U2_CASE(31, 256, 32);
-        GEMV_U2_CASE(32,  64, 64);  GEMV_U2_CASE(33, 128, 64);
-        GEMV_U2_CASE(34, 256, 64);
         default: break;
     }
 #undef GEMV_U2_CASE
@@ -2415,9 +2395,6 @@ static int tuneGemvConfigU2(
     constexpr int ITERS  = 5;
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
-        auto& cfg = kGemvConfigs[cid];
-        if (cfg.tile_n >= 32 && N < 1024) continue;
-
         for (int w = 0; w < WARMUP; w++)
             launchGemvConfigU2(cid, stream, A, B, sc, zp, bi, out,
                                M, N, K, batch, bs);
