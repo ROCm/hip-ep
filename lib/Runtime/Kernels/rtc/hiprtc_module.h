@@ -44,8 +44,7 @@ class Module {
 
  private:
   void ensureLoaded();
-  bool compileAndCache(std::vector<char> &code);
-  bool loadFromCache(std::vector<char> &code);
+  bool compile(std::vector<char> &code);
 
   const std::string name_;
   const char *const source_;
