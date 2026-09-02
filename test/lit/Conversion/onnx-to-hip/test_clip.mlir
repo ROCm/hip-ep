@@ -43,4 +43,33 @@ module {
   // CHECK-NOT: onnx.Clip
   // CHECK: hip.max
   // CHECK: hip.min
+
+  // Rank-5 input, packed to the 4-D path before the max/min decomposition.
+  // The scalar bounds are forwarded unchanged. Shape taken from bevformer's
+  // Clip_1113, which the elementwise ABI rejects above rank 4.
+  func.func @clip_5d_scalar_bounds(%x: tensor<4x1x6x2500x1xf32>, %lo: tensor<f32>)
+      -> tensor<4x1x6x2500x1xf32> {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %y = "onnx.Clip"(%x, %lo, %none) : (tensor<4x1x6x2500x1xf32>, tensor<f32>, none) -> tensor<4x1x6x2500x1xf32>
+    return %y : tensor<4x1x6x2500x1xf32>
+  }
+
+  // CHECK-LABEL: func.func @clip_5d_scalar_bounds
+  // CHECK-SAME: (%[[CTX5:.*]]: !hip.context, %[[X5:.*]]: tensor<4x1x6x2500x1xf32>, %[[LO5:.*]]: tensor<f32>)
+  // CHECK-NOT: onnx.Clip
+  // CHECK: tensor.collapse_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4]] : tensor<4x1x6x2500x1xf32> into tensor<4x1x6x2500xf32>
+  // CHECK: hip.max(%[[CTX5]]) ins({{.*}}, {{.*}} : tensor<4x1x6x2500xf32>, tensor<f32>) outs({{.*}} : tensor<4x1x6x2500xf32>)
+  // CHECK: tensor.expand_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4]] output_shape [4, 1, 6, 2500, 1] : tensor<4x1x6x2500xf32> into tensor<4x1x6x2500x1xf32>
+
+  // Rank-5 relu: same ceiling, reached through hip.max(x, 0).
+  func.func @relu_5d(%x: tensor<4x1x6x2500x1xf32>) -> tensor<4x1x6x2500x1xf32> {
+    %y = "onnx.Relu"(%x) : (tensor<4x1x6x2500x1xf32>) -> tensor<4x1x6x2500x1xf32>
+    return %y : tensor<4x1x6x2500x1xf32>
+  }
+
+  // CHECK-LABEL: func.func @relu_5d
+  // CHECK-NOT: onnx.Relu
+  // CHECK: tensor.collapse_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4]] : tensor<4x1x6x2500x1xf32> into tensor<4x1x6x2500xf32>
+  // CHECK: hip.max
+  // CHECK: tensor.expand_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4]] output_shape [4, 1, 6, 2500, 1] : tensor<4x1x6x2500xf32> into tensor<4x1x6x2500x1xf32>
 }
