@@ -556,6 +556,11 @@ jobs:
         if: steps.cache-oga.outputs.cache-hit != 'true'
         shell: bash
         run: |
+          # build.py imports tools/python/util, whose dependency_resolver
+          # imports requests at module scope. --ort_home means nothing is
+          # actually downloaded, but the import still has to resolve.
+          python -m pip install -q requests
+
           python "${{ github.workspace }}/source-oga/build.py" \
             --config Release \
             --cmake_generator Ninja \
