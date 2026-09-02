@@ -4,6 +4,7 @@
  */
 #include "morphizen/util.hpp"
 #include "md5.h"
+#include "sha256.h"
 #include <cstdio>
 
 #include <glog/logging.h>
@@ -247,5 +248,37 @@ std::string get_md5_of_file(const std::filesystem::path &path) {
   }
   file.close();
   return MD5_computer.getHash();
+}
+
+std::string get_sha256_of_buffer(const void *buffer, size_t size) {
+  return SHA256()(buffer, size);
+}
+
+std::string get_sha256_of_file_slice(const std::filesystem::path &path,
+                                     int64_t offset, size_t size) {
+  if (offset < 0)
+    throw std::invalid_argument("negative external initializer offset");
+  std::ifstream file(path, std::ios::binary);
+  if (!file)
+    throw std::runtime_error("cannot open external initializer: " +
+                             path.string());
+  file.seekg(offset);
+  if (!file)
+    throw std::runtime_error("cannot seek external initializer: " +
+                             path.string());
+
+  SHA256 sha256;
+  char buffer[64 * 1024];
+  size_t remaining = size;
+  while (remaining != 0) {
+    size_t chunk = std::min(remaining, sizeof(buffer));
+    file.read(buffer, static_cast<std::streamsize>(chunk));
+    if (static_cast<size_t>(file.gcount()) != chunk)
+      throw std::runtime_error("cannot read external initializer: " +
+                               path.string());
+    sha256.add(buffer, chunk);
+    remaining -= chunk;
+  }
+  return sha256.getHash();
 }
 } // namespace morphizen
