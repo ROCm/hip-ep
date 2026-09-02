@@ -90,19 +90,6 @@ ComputeYieldOp getYieldOp(ComputeOp computeOp) {
   return cast<ComputeYieldOp>(computeOp.getBody().front().getTerminator());
 }
 
-// get result by output operand
-OpResult getResultHeldIn(ComputeOp computeOp, OpOperand &opOperand) {
-  OperandRange outputs = computeOp.getOutputs();
-  if (outputs.empty())
-    return {};
-
-  unsigned begin = outputs.getBeginOperandIndex();
-  unsigned number = opOperand.getOperandNumber();
-  if (number < begin || number - begin >= computeOp->getNumResults())
-    return {};
-  return computeOp->getResult(number - begin);
-}
-
 // get output operand by result index
 OpOperand *getDestinationOf(ComputeOp computeOp, unsigned resultIndex) {
   OperandRange outputs = computeOp.getOutputs();
@@ -177,7 +164,7 @@ struct ComputeOpBufferization
     aliases.addAlias({getEntryArgument(computeOp, opOperand.getOperandNumber()),
                       BufferRelation::Equivalent});
 
-    if (OpResult result = getResultHeldIn(computeOp, opOperand)) {
+    if (OpResult result = getResultForDestination(opOperand)) {
       aliases.addAlias({result, BufferRelation::Equivalent});
     }
     return aliases;
