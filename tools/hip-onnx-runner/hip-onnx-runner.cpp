@@ -872,6 +872,18 @@ int main(int argc, char *argv[]) {
       "graph; the value only sizes the input tensors. Symbolic dims without a "
       "matching override default to 1.",
       "");
+  mo.add_option(
+      "", "log-level",
+      "ORT log severity for the env and the session: 0=verbose, 1=info, "
+      "2=warning, 3=error, 4=fatal. The EP routes its glog output through the "
+      "ORT logger, so 1 or 0 is required to see any EP debug logging.",
+      "3");
+  mo.add_option(
+      "", "run-option",
+      "Add a RunOptions config entry for every Run(): 'key=value' (repeatable "
+      "or comma-separated), e.g. --run-option my.key=value. Reaches passes and "
+      "custom ops through PassContext::get_run_option().",
+      "");
   mo.add_option("", "dump-compiler-mlir",
                 "Dump MLIR fed to hip-compiler (mlir_bytecode_dump.mlir) and "
                 "per-pass snapshots; sets MorphiZen env before EP load",
@@ -965,7 +977,15 @@ int main(int argc, char *argv[]) {
   }
 
   // ORT environment
-  Ort::Env env(ORT_LOGGING_LEVEL_ERROR, "hip-onnx-runner");
+  const int log_level_raw = mo.get<int>("log-level");
+  if (log_level_raw < 0 || log_level_raw > 4) {
+    std::cerr << "Error: --log-level must be 0..4, got: " << log_level_raw
+              << "\n";
+    return 1;
+  }
+  const auto ort_log_level =
+      static_cast<OrtLoggingLevel>(static_cast<unsigned>(log_level_raw));
+  Ort::Env env(ort_log_level, "hip-onnx-runner");
 
   const std::string kEpName = "hipgpu";
 #ifdef _WIN32
@@ -1018,7 +1038,7 @@ int main(int argc, char *argv[]) {
 
   // Session options
   Ort::SessionOptions session_opts;
-  session_opts.SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);
+  session_opts.SetLogSeverityLevel(log_level_raw);
   if (graph_optimization_level != -1) {
     std::cout << "Setting graph_optimization_level to "
               << graph_optimization_level << "\n";
@@ -1234,15 +1254,31 @@ int main(int argc, char *argv[]) {
     }
   }
 
+  // RunOptions config entries. The EP hands these to PassContext for the
+  // duration of each Run(), so passes and custom ops can read them by key.
+  Ort::RunOptions run_options;
+  for (const std::string &entry : mo.get_vector<std::string>("run-option")) {
+    const auto eq = entry.find('=');
+    if (eq == std::string::npos || eq == 0) {
+      std::cerr << "Error: --run-option expects 'key=value', got: " << entry
+                << "\n";
+      return 1;
+    }
+    const std::string key = trim_string(entry.substr(0, eq));
+    const std::string value = trim_string(entry.substr(eq + 1));
+    run_options.AddConfigEntry(key.c_str(), value.c_str());
+    std::cout << "Run option '" << key << "' -> '" << value << "'\n";
+  }
+
   // Run inference
   std::cout << "Running inference...\n";
   std::vector<Ort::Value> outputs;
   {
     auto t0 = std::chrono::steady_clock::now();
     try {
-      outputs = session->Run(Ort::RunOptions{}, input_names.data(),
-                             input_tensors.data(), input_count,
-                             output_names.data(), output_count);
+      outputs =
+          session->Run(run_options, input_names.data(), input_tensors.data(),
+                       input_count, output_names.data(), output_count);
       std::cout << "Inference: "
                 << static_cast<int64_t>(elapsed_since(t0) * 1e6) << " us\n";
       std::cout << "OK - " << outputs.size() << " output tensor(s)\n";
