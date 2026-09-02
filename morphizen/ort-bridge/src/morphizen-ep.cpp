@@ -12,6 +12,8 @@
 #include "morphizen/morphizen-ort-api-ext.hpp"
 #include "morphizen/morphizen.hpp"
 #include "morphizen/onnxruntime_morphizen_ep.hpp"
+#include <algorithm>
+#include <cctype>
 #include <google/protobuf/util/json_util.h>
 #include <set>
 
@@ -110,8 +112,10 @@ void MorphiZenEP::update_provider_options_from_session_config(
 
     MY_LOG(2) << "Processing " << num_keys << " config entries";
 
-    const std::string morphizen_ep_prefix =
-        "ep." MORPHIZEN_EP_REGISTRATION_NAME_LOWER ".";
+    std::string name_lower = name_;
+    std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(),
+                   ::tolower);
+    const std::string morphizen_ep_prefix = "ep." + name_lower + ".";
     for (size_t i = 0; i < num_keys; ++i) {
       if (keys[i] != nullptr && values[i] != nullptr) {
         std::string key_str(keys[i]);
