@@ -30,6 +30,20 @@ inline bool hipdnn_ep_matmul_dp4a_enabled() {
   return enabled;
 }
 
+// Master switch for the matmul_nbits autotuners: the on-device config sweep in
+// the custom-kernel DLL (kGemvConfigs / kWmmaConfigs) and the hipBLASLt algo
+// selection on the CDNA prefill fallback. DEFAULT-ON; set
+// HIPDNN_EP_MATMUL_NBITS_AUTOTUNE=0 to skip tuning and use each path's built-in
+// safe default -- for a quick correctness run that should not pay the
+// first-call sweep, or to A/B the default configs. Latched on first read like
+// the flags above. Separate from HIPDNN_EP_AUTOTUNE (which gates the generic
+// hipBLASLt matmul), since the two tune different subsystems.
+inline bool hipdnn_ep_matmul_nbits_autotune_enabled() {
+  static const bool enabled =
+      hipdnn_ep::env_enabled_default_on("HIPDNN_EP_MATMUL_NBITS_AUTOTUNE");
+  return enabled;
+}
+
 inline bool hipdnn_ep_perf_enabled() {
   // PERF intentionally does NOT inherit from HIPDNN_EP_DEBUG: enabling PERF
   // forces a hipStreamSynchronize on every inference (so hipEventElapsedTime

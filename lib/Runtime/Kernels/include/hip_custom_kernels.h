@@ -1775,7 +1775,11 @@ HIP_KERNEL_API int hip_matmul_nbits(
     // zero_points is non-null and zp_elem_size==1; zp_fp16 is only consumed
     // by the WMMA / col-major-GEMV (M>1) paths and may be null otherwise.
     const void* pre_unpacked_zp_u8,
-    const void* pre_unpacked_zp_fp16);
+    const void* pre_unpacked_zp_fp16,
+    // Autotune master switch (1 = tune, 0 = use each path's safe default). The
+    // runtime passes hipdnn_ep_matmul_nbits_autotune_enabled(); defaulted to 1
+    // so other callers (qmoe, standalone kernel tests) keep tuning unchanged.
+    int autotune_enabled = 1);
 
 /* W4A8 integer-dot-product (dp4a) GEMV for a single decode row (M==1).
  * Dynamically quantizes the fp16 activation row to per-group int8 (into
@@ -1796,7 +1800,9 @@ HIP_KERNEL_API int hip_matmul_nbits_dp4a(
     const void* A, const void* B, const void* scales, const void* zp_u8,
     const void* bias, void* out,
     int64_t N, int64_t K, int64_t block_size,
-    void* a_qb_scratch, void* a_scale_scratch);
+    void* a_qb_scratch, void* a_scale_scratch,
+    // Autotune master switch (1 = tune, 0 = safe default); see hip_matmul_nbits.
+    int autotune_enabled = 1);
 
 /* Stand-alone launchers for the zero_points unpack/convert kernels, used by
  * the asym matmul_nbits cache in lib/Runtime/real/matmul_nbits.cpp.
