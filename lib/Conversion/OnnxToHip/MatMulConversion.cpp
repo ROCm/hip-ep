@@ -33,12 +33,15 @@ MatMulToHip::matchAndRewrite(mlir::Operation *op,
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
+  // Not getSInt(): TransposeMatMulFold stamps these, so they are signless like
+  // every other hipdnn.* attribute rather than the si64 the ONNX importer
+  // produces for imported scalars.
   int64_t transA = 0;
   int64_t transB = 0;
   if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("hipdnn.transA"))
-    transA = attr.getSInt();
+    transA = attr.getValue().getSExtValue();
   if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("hipdnn.transB"))
-    transB = attr.getSInt();
+    transB = attr.getValue().getSExtValue();
 
   // MatMul: result[..., M, N] = A[..., M, K] @ B[..., K, N].
   // Batch and M dims come from A; N comes from B's last dim.
