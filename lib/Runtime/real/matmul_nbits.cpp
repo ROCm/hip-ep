@@ -276,10 +276,15 @@ namespace {
 // explicitly rather than leaning on the implication.
 static bool shouldPadRow(int64_t K) {
   const int64_t stride = K / 2;
-  if (stride % 128 != 0) return false;
+  if (stride % 128 != 0)
+    return false;
   const int64_t stride_lines = stride / 128;
   int64_t a = stride_lines, b = 64;
-  while (b) { int64_t t = b; b = a % b; a = t; }
+  while (b) {
+    int64_t t = b;
+    b = a % b;
+    a = t;
+  }
   return a >= 8;
 }
 
@@ -304,7 +309,8 @@ const void *get_or_prepack_padrow(MatmulNbitsState *mst, void *stream,
   }
   if (hip_matmul_nbits_u4_prepack_padrow(stream, B, dst, N, K) != 0) {
     hipFree(dst);
-    fprintf(stderr, "matmul_nbits: hip_matmul_nbits_u4_prepack_padrow failed\n");
+    fprintf(stderr,
+            "matmul_nbits: hip_matmul_nbits_u4_prepack_padrow failed\n");
     return nullptr;
   }
 
@@ -737,9 +743,10 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   // inferred.
   //
   // The padded buffer is cached per weight pointer in MatmulNbitsState, so the
-  // repack is paid once per weight at model load. hip_matmul_nbits_u4_wmma_stride
-  // runs its own autotune keyed with the padded stride and returns -1 if no
-  // fused config is eligible, in which case we fall through unpadded.
+  // repack is paid once per weight at model load.
+  // hip_matmul_nbits_u4_wmma_stride runs its own autotune keyed with the padded
+  // stride and returns -1 if no fused config is eligible, in which case we fall
+  // through unpadded.
   //
   // Decode (M=1) and bias shapes never enter: the M>=16 and !bias gates stop
   // them. wave64 (CDNA) has already taken the hipBLASLt path above.
@@ -769,8 +776,8 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
           const int iK = static_cast<int>(K);
           const int b_row_bytes = iK / 2 + 128;
           int rc = hip_matmul_nbits_u4_wmma_stride(
-              stream, /*cfg=*/-1, iM, iN, iK, static_cast<int>(block_size),
-              A, /*lda=*/iK, b_pad, scales, zeros_fp16, output,
+              stream, /*cfg=*/-1, iM, iN, iK, static_cast<int>(block_size), A,
+              /*lda=*/iK, b_pad, scales, zeros_fp16, output,
               /*ldc=*/iN, b_row_bytes);
           if (rc == 0)
             goto cleanup;
