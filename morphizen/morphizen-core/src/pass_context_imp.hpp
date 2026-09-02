@@ -5,6 +5,7 @@
 #pragma once
 #include "morphizen/morphizen.hpp"
 #include <deque>
+#include <mutex>
 
 #include <morphizen/custom_op.h>
 #include <morphizen/dll_safe.h>
