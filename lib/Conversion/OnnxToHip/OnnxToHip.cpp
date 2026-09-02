@@ -78,7 +78,6 @@ markPackedInt4Consumers(mlir::Operation *constOp,
       packedBytes < 0)
     return PackedInt4Result::NotApplicable;
   int64_t numel = tensorType.getNumElements();
-  int64_t numel = tensorType.getNumElements();
   if (numel <= 0)
     return PackedInt4Result::NotApplicable;
   // Full-width storage is plain int8; leave it untouched. ceil(numel/2) is the
