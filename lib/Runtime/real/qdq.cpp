@@ -170,13 +170,14 @@ int check_quant_bits(const char *name, int64_t bits, int hip_dtype,
 
 } // namespace
 
-extern "C" int wrap_quantize_linear(
-    RuntimeState *state, const void *input, const void *scale,
-    const void *zero_point, void *output, const int64_t *input_shape,
-    int64_t input_rank, const int64_t *scale_shape, int64_t scale_rank,
-    int64_t axis, int64_t block_size, int64_t precision, int64_t saturate,
-    int64_t input_dtype, int64_t scale_dtype, int64_t output_dtype,
-    int64_t output_bits) {
+extern "C" int
+wrap_quantize_linear(RuntimeState *state, const void *input, const void *scale,
+                     const void *zero_point, void *output,
+                     const int64_t *input_shape, int64_t input_rank,
+                     const int64_t *scale_shape, int64_t scale_rank,
+                     int64_t axis, int64_t block_size, int64_t precision,
+                     int64_t saturate, int64_t input_dtype, int64_t scale_dtype,
+                     int64_t output_dtype, int64_t output_bits) {
   OP_PROFILE(
       "quantize_linear",
       [&] {

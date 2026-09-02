@@ -91,7 +91,7 @@ struct QuantizeLinearOpLowering
 
     Type quantElem = outputType.getElementType();
     if (failed(isDataTypeSupported(op, quantElem, inputType.getElementType(),
-                                       scaleType.getElementType(), rewriter)))
+                                   scaleType.getElementType(), rewriter)))
       return failure();
 
     FailureOr<int64_t> outputBits =
@@ -168,7 +168,7 @@ struct DequantizeLinearOpLowering
 
     Type quantElem = inputType.getElementType();
     if (failed(isDataTypeSupported(op, quantElem, outputType.getElementType(),
-                                       scaleType.getElementType(), rewriter)))
+                                   scaleType.getElementType(), rewriter)))
       return failure();
 
     FailureOr<int64_t> inputBits =
