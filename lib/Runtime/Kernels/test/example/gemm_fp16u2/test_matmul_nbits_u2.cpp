@@ -1,3 +1,8 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
 // ============================================================
 // custom_kernels MatMulNBits bits=2 vs bits=4 Verification + Benchmark
 //

@@ -12,7 +12,6 @@ def Onnx_GemmOp : Onnx_Op<"Gemm", [Pure]> {
 
   let description = [{
     General Matrix multiplication:
-    https://en.wikipedia.org/wiki/Basic_Linear_Algebra_Subprograms#Level_3
 
     * A' = transpose(A) if transA else A
     * B' = transpose(B) if transB else B
