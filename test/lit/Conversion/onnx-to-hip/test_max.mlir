@@ -78,4 +78,15 @@ module {
     %r = "onnx.Max"(%a, %b) : (tensor<4x1x6x8x1xf32>, tensor<f32>) -> tensor<4x1x6x8x1xf32>
     return %r : tensor<4x1x6x8x1xf32>
   }
+
+  // --- Case 6: only the two-operand form is packed. A variadic rank-5 max is
+  // left at full rank even when every extra input is a scalar. ---
+  func.func @max_5d_variadic(%a: tensor<4x1x6x8x1xf32>, %b: tensor<f32>, %c: tensor<f32>)
+      -> tensor<4x1x6x8x1xf32> {
+    // CHECK-LABEL: func.func @max_5d_variadic
+    // CHECK-NOT: tensor.collapse_shape
+    // CHECK: hip.max({{.*}}) ins({{.*}}, {{.*}} : tensor<4x1x6x8x1xf32>, tensor<f32>) outs({{.*}} : tensor<4x1x6x8x1xf32>)
+    %r = "onnx.Max"(%a, %b, %c) : (tensor<4x1x6x8x1xf32>, tensor<f32>, tensor<f32>) -> tensor<4x1x6x8x1xf32>
+    return %r : tensor<4x1x6x8x1xf32>
+  }
 }

@@ -240,16 +240,21 @@ static FailureOr<PackedBroadcast> packBroadcast(OpBuilder &builder,
 
 struct PackBroadcastPattern : public RewritePattern {
   // The first `numDataOperands` operands carry the broadcast and get packed.
-  // Anything after them -- onnx.Clip's optional min/max -- rides along
-  // unchanged, so it must be a rank-0 tensor or `none`.
+  // `maxOperands` bounds the total operand count; it exceeds
+  // `numDataOperands` only for onnx.Clip, whose optional min/max bounds ride
+  // along unchanged and so must be rank-0 tensors or `none`. Every other op
+  // is matched at an exact count, which keeps variadic onnx.Max/onnx.Min out
+  // of the pattern.
   PackBroadcastPattern(StringRef opName, MLIRContext *ctx,
-                       unsigned numDataOperands)
+                       unsigned numDataOperands, unsigned maxOperands)
       : RewritePattern(opName, /*benefit=*/1, ctx),
-        numDataOperands(numDataOperands) {}
+        numDataOperands(numDataOperands), maxOperands(maxOperands) {}
 
   LogicalResult matchAndRewrite(Operation *op,
                                 PatternRewriter &rewriter) const override {
-    if (op->getNumOperands() < numDataOperands || op->getNumResults() != 1)
+    unsigned numOperands = op->getNumOperands();
+    if (numOperands < numDataOperands || numOperands > maxOperands ||
+        op->getNumResults() != 1)
       return failure();
     auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
     if (!resultType || resultType.getRank() <= 4)
@@ -292,6 +297,7 @@ struct PackBroadcastPattern : public RewritePattern {
 
 private:
   unsigned numDataOperands;
+  unsigned maxOperands;
 };
 
 } // namespace
@@ -301,12 +307,15 @@ void populatePackBroadcastTo4DPatterns(RewritePatternSet &patterns,
   for (StringRef opName :
        {"onnx.Add", "onnx.Sub", "onnx.Mul", "onnx.Div", "onnx.Less",
         "onnx.Greater", "onnx.Max", "onnx.Min", "onnx.And"})
-    patterns.add<PackBroadcastPattern>(opName, ctx, /*numDataOperands=*/2);
+    patterns.add<PackBroadcastPattern>(opName, ctx, /*numDataOperands=*/2,
+                                       /*maxOperands=*/2);
   // hip.max and hip.min are also produced by onnx.Clip and onnx.Relu, which
   // carry the whole broadcast on their first operand; Clip's min/max bounds
   // are scalars that pack through untouched.
-  for (StringRef opName : {"onnx.Clip", "onnx.Relu"})
-    patterns.add<PackBroadcastPattern>(opName, ctx, /*numDataOperands=*/1);
+  patterns.add<PackBroadcastPattern>("onnx.Relu", ctx, /*numDataOperands=*/1,
+                                     /*maxOperands=*/1);
+  patterns.add<PackBroadcastPattern>("onnx.Clip", ctx, /*numDataOperands=*/1,
+                                     /*maxOperands=*/3);
 }
 
 } // namespace hip
