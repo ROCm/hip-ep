@@ -63,6 +63,7 @@ typedef enum {
     HIP_DTYPE_INT16    = 6,
     HIP_DTYPE_UINT8    = 7,
     HIP_DTYPE_INT8     = 8,
+    HIP_DTYPE_UINT16   = 9,
 } hip_dtype_t;
 
 /* =========================================================================
@@ -1983,6 +1984,82 @@ HIP_KERNEL_API int hip_gather_block_quantized(
     int is_signed_data,          // 1 if int4 / int8, 0 if uint4 / uint8
     int indices_is_int64,        // 1 = i64, 0 = i32
     int out_dtype);              // hip_dtype_t (FLOAT16 / FLOAT32 / BFLOAT16)
+
+/* =========================================================================
+ * QuantizeLinear / DequantizeLinear
+ * =========================================================================
+ *
+ * quantize:   output = saturate(round(input / scale) + zero_point)
+ * dequantize: output = (input - zero_point) * scale
+ *
+ * output is elementwise the same shape as input, so only input_shape is
+ * passed. Granularity is derived from scale_shape together with axis and
+ * block_size:
+ *   scale_rank == 0, or a single element ..... per-tensor
+ *   scale_rank == 1 .......................... per-axis along `axis`
+ *   block_size > 0 ........................... blocked along `axis`
+ *
+ * zero_point is nullable; a null pointer means a zero point of 0 for every
+ * block. Its element type is out_dtype for quantize and in_dtype for
+ * dequantize.
+ *
+ * axis must be normalized to [0, input_rank) by the caller.
+ *
+ * out_dtype fully determines the quantized storage type, including its
+ * signedness: the compiler derives it from a MLIR element type that the
+ * ONNX importer maps one-to-one (UINT8 -> ui8, INT8 -> i8, UINT16 -> ui16,
+ * INT16 -> i16). The ONNX output_dtype attribute is therefore not passed
+ * down. A float8 output would break that one-to-one mapping.
+ *
+ * INT4 / UINT4 breaks it too, since both import as an 8-bit type. Each entry
+ * point therefore takes an explicit bit width for its quantized end:
+ * out_bits for quantize, in_bits for dequantize.
+ *
+ * precision exists only on QuantizeLinear per the ONNX spec. The ONNX
+ * `saturate` attribute is carried all the way to wrap_quantize_linear but
+ * stops there: it only affects float8 targets, and the range clamp for every
+ * integer target supported here is unconditional. It would have to be
+ * forwarded again if float8 support is added.
+ */
+HIP_KERNEL_API int hip_quantize_linear(
+    void* stream,
+    const void* input,           // high precision
+    const void* scale,
+    const void* zero_point,      // nullable, same type as output
+    void* output,                // quantized; packed when out_bits == 4
+    const int64_t* input_shape,  int input_rank,
+    const int64_t* scale_shape,  int scale_rank,
+    int axis,                    // normalized
+    int block_size,              // 0 = not blocked
+    int precision,               // TensorProto enum; only 0 (unset) or 1 (FLOAT)
+    int in_dtype,                // hip_dtype_t
+    int scale_dtype,
+    int out_dtype,
+    // Value width of output and zero_point: 8 or 16 to agree with out_dtype,
+    // or 4 for ONNX INT4/UINT4. At 4 out_dtype supplies only the signedness,
+    // zero_point is packed, and only the first ceil(numel/2) bytes of output
+    // are written -- two values per byte, low nibble first. input_shape stays
+    // logical.
+    int out_bits);
+
+HIP_KERNEL_API int hip_dequantize_linear(
+    void* stream,
+    const void* input,           // quantized; packed when in_bits == 4
+    const void* scale,
+    const void* zero_point,      // nullable, same type as input
+    void* output,                // high precision
+    const int64_t* input_shape,  int input_rank,
+    const int64_t* scale_shape,  int scale_rank,
+    int axis,                    // normalized
+    int block_size,              // 0 = not blocked
+    int in_dtype,                // hip_dtype_t
+    int scale_dtype,
+    int out_dtype,
+    // Value width of input and zero_point: 8 or 16 to agree with in_dtype, or
+    // 4 for ONNX INT4/UINT4. At 4 in_dtype supplies only the signedness and
+    // both buffers hold ceil(numel/2) bytes, two values per byte, low nibble
+    // first, over the flattened row-major sequence. input_shape stays logical.
+    int in_bits);
 
 /* =========================================================================
  * QMoE Sub-Kernels

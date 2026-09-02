@@ -373,7 +373,19 @@ IRConverterImp::convert_graph_initializers(morphizen::Graph &graph) const {
       const void *tensor_data = tensor_value.GetTensorRawData();
       size_t data_size = tensor_value.GetTensorSizeInBytes();
 
-      if (data_size > config_.external_data_threshold) {
+      // ONNX packs INT4/UINT4 two values per byte, so `data_size` is
+      // ceil(numel/2) while the importers map both to an 8-bit MLIR element
+      // type. The inline copy path ends in
+      // DenseElementsAttr::getFromRawBuffer, which derives the expected buffer
+      // size from that 8-bit type and aborts on the halved buffer. The
+      // mem-addr path instead records the true byte count, which is also the
+      // signal the packed-nibble lowering keys on, so 4-bit initializers take
+      // it regardless of size.
+      const bool is_packed_4bit =
+          element_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT4 ||
+          element_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT4;
+
+      if (data_size > config_.external_data_threshold || is_packed_4bit) {
         // Large tensor: use the no-copy memory-address mechanism. Encode the
         // raw pointer as an int64 in the external_data offset field with
         // location sentinel "*/_ORT_MEM_ADDR_/*". ORT owns the tensor data

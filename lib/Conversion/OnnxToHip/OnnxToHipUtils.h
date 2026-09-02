@@ -210,6 +210,25 @@ inline int64_t getHipdnnInputDataType(mlir::Type elemType) {
   return HIPDNN_EP_DATATYPE_UNSUPPORTED;
 }
 
+//===----------------------------------------------------------------------===//
+// ONNX INT4 / UINT4 packing
+//
+// Both import as an 8-bit MLIR type at the LOGICAL element count, so the
+// element type keeps the signedness but cannot express the width, and the
+// buffer holds only ceil(numel/2) bytes -- two values per byte, low nibble
+// first, over the flattened row-major sequence. `packed_int4` is how that
+// width travels from wherever it is still observable to the QDQ converters.
+//
+// Constant lowering is the only producer of the marker, and it can only reach
+// DequantizeLinear: a packed buffer is observable there as a halved backing
+// size, whereas a QuantizeLinear writing 4-bit output looks identical to one
+// writing 8-bit. The quantize side of the pipeline understands the marker end
+// to end but nothing stamps it yet.
+//===----------------------------------------------------------------------===//
+
+/// Marks a QuantizeLinear / DequantizeLinear whose quantized side is packed.
+constexpr llvm::StringLiteral kPackedInt4Attr = "packed_int4";
+
 /// Build a hip.gqa op for the Whisper-MHA / Whisper-encoder-Attention paths.
 ///
 /// Emits one `hip.gqa` op with the 19-slot AttrSizedOperandSegments layout
@@ -443,6 +462,9 @@ void populateGlobalPoolConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
 void populateFlattenConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
+
+void populateQdqConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
 
 /// Pre-lowering pattern set: fold `Transpose(perm=[..,r,r-2])` into a
 /// consuming `onnx.MatMul` as `hipdnn.transA` / `hipdnn.transB` so the
