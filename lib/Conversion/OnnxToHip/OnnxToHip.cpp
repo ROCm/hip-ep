@@ -12,6 +12,13 @@
 //===----------------------------------------------------------------------===//
 
 #include "OnnxToHipUtils.h"
+
+// ConvertOnnxToHipPass lists the PDL dialects unconditionally in
+// `dependentDialects`, so the generated getDependentDialects() needs these
+// declarations even in builds where PDLL pattern compilation is disabled.
+#include "mlir/Dialect/PDL/IR/PDL.h"
+#include "mlir/Dialect/PDLInterp/IR/PDLInterp.h"
+
 #ifdef QDQMATMUL_FUSION_PDL_FILE
 #include "pdl/qdq_fusion_pass.hpp"
 #endif
