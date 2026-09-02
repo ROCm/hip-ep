@@ -46,9 +46,11 @@ BlockArgument getEntryArgument(OpTy op, unsigned operandIndex) {
 //===----------------------------------------------------------------------===//
 
 // hipsr.preserve_shape only records that `$shape` describes `$data`. It has no
-// results and no init operand, so it is not DPS and cannot reuse
-// DstBufferizableOpInterfaceExternalModel. It touches no memory, so nothing
-// needs copying and a later DPS op can write the buffer in place.
+// result and no init operand, so it is not DPS and cannot reuse
+// DstBufferizableOpInterfaceExternalModel.
+//
+// It reads and writes neither operand, so nothing needs copying and a later
+// DPS op can write either buffer in place.
 struct PreserveShapeBufferizableModel
     : public BufferizableOpInterface::ExternalModel<
           PreserveShapeBufferizableModel, PreserveShapeOp> {
@@ -76,8 +78,20 @@ struct PreserveShapeBufferizableModel
     if (failed(dataBuf)) {
       return failure();
     }
-    replaceOpWithNewBufferizedOp<PreserveShapeOp>(
-        rewriter, op, preserveOp.getShape(), *dataBuf);
+
+    // After -hipsr-convert-shape-to-extent `$shape` is a tensor, so it needs a
+    // buffer of its own.
+    Value shape = preserveOp.getShape();
+    if (isa<TensorType>(shape.getType())) {
+      FailureOr<Value> shapeBuf = getBuffer(rewriter, shape, options, state);
+      if (failed(shapeBuf)) {
+        return failure();
+      }
+      shape = *shapeBuf;
+    }
+
+    replaceOpWithNewBufferizedOp<PreserveShapeOp>(rewriter, op, shape,
+                                                  *dataBuf);
     return success();
   }
 };
