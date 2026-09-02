@@ -3765,69 +3765,32 @@ static int tuneWmmaConfig(
     int   best_id = 9;
     constexpr int WARMUP = 1;
     constexpr int ITERS  = 5;
-    /* Two passes, keeping the fastest time seen for each config.
-     *
-     * A single in-order pass systematically favours whatever is near the top of
-     * the table. The GPU starts the sweep idle at boost clock and drops as the
-     * sweep loads it, so early configs are timed under better conditions than
-     * late ones -- on an APU that was enough to make config 0 (64x64) win a
-     * shape where the best config is 11% faster. Timing every config twice,
-     * once early and once late, and taking the minimum removes the ordering
-     * bias; the whole sweep is a few hundred launches and its result is cached
-     * to disk, so the cost does not reach steady-state inference. */
-    constexpr int PASSES = 2;
 
-    // Bring clocks to their sustained-load state before anything is timed.
+    /* Single in-order pass, keeping each config's batch time. Deliberately the
+     * original, minimal measurement: the kernel tuner is on the runtime dispatch
+     * path, so it stays simple and fast. Any more careful measurement (clock
+     * settling, multi-pass, structural tie-breaks) belongs in the offline LUT
+     * sweep, not here -- see autotune/matmul_nbits. */
     for (int cid = 0; cid < kNumWmmaConfigs; cid++) {
-        if (!wmmaConfigApplies(kWmmaConfigs[cid], N, gs)) continue;
-        if (fused_only && !kWmmaConfigs[cid].fused) continue;
-        for (int w = 0; w < 20; w++)
+        auto& cfg = kWmmaConfigs[cid];
+        if (!wmmaConfigApplies(cfg, N, gs)) continue;
+        if (fused_only && !cfg.fused) continue;
+
+        for (int w = 0; w < WARMUP; w++)
             launchWmmaConfig(cid, stream, M, N, K, A, lda, B,
                              scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf,
                              b_row_bytes);
-        break;
-    }
-    hipStreamSynchronize(stream);
 
-    float cfg_ms[kNumWmmaConfigs];
-    for (int cid = 0; cid < kNumWmmaConfigs; cid++) cfg_ms[cid] = 1e30f;
+        hipEventRecord(ev0, stream);
+        for (int i = 0; i < ITERS; i++)
+            launchWmmaConfig(cid, stream, M, N, K, A, lda, B,
+                             scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf,
+                             b_row_bytes);
+        hipEventRecord(ev1, stream);
+        hipEventSynchronize(ev1);
 
-    /* One event pair per batch of ITERS launches, not per launch.
-     *
-     * Timing each dispatch on its own was tried and is worse: the GPU idles at
-     * every hipEventSynchronize, so launch overhead and clock ramp land in every
-     * sample with a variance as large as the difference between good configs,
-     * and the sweep picked a different winner on every run. Batch timing is
-     * stable; what it cannot see is cross-dispatch tail overlap, which favours
-     * configs with many small workgroups. The tie-break below is what keeps that
-     * from deciding the result. */
-    for (int pass = 0; pass < PASSES; pass++) {
-        for (int cid = 0; cid < kNumWmmaConfigs; cid++) {
-            auto& cfg = kWmmaConfigs[cid];
-            if (!wmmaConfigApplies(cfg, N, gs)) continue;
-            if (fused_only && !cfg.fused) continue;
-
-            for (int w = 0; w < WARMUP; w++)
-                launchWmmaConfig(cid, stream, M, N, K, A, lda, B,
-                                 scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf,
-                                 b_row_bytes);
-
-            hipEventRecord(ev0, stream);
-            for (int i = 0; i < ITERS; i++)
-                launchWmmaConfig(cid, stream, M, N, K, A, lda, B,
-                                 scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf,
-                                 b_row_bytes);
-            hipEventRecord(ev1, stream);
-            hipEventSynchronize(ev1);
-
-            float ms = 0.0f;
-            hipEventElapsedTime(&ms, ev0, ev1);
-            if (ms < cfg_ms[cid]) cfg_ms[cid] = ms;
-        }
-    }
-
-    for (int cid = 0; cid < kNumWmmaConfigs; cid++) {
-        if (cfg_ms[cid] > 1e29f) continue;
+        float ms = 0.0f;
+        hipEventElapsedTime(&ms, ev0, ev1);
 
         CUSTOM_KERNELS_DEBUG_LOG(
             "[custom_kernels]   wmma config[%2d] %s bm=%3d bn=%3d sw=%d "
@@ -3836,48 +3799,12 @@ static int tuneWmmaConfig(
             kWmmaConfigs[cid].bm, kWmmaConfigs[cid].bn,
             kWmmaConfigs[cid].swizzle_n, kWmmaConfigs[cid].wt_m,
             kWmmaConfigs[cid].wt_n, wmmaBk(kWmmaConfigs[cid]),
-            cfg_ms[cid] / ITERS);
+            ms / ITERS);
 
-        if (cfg_ms[cid] < best_ms) {
-            best_ms = cfg_ms[cid];
+        if (ms < best_ms) {
+            best_ms = ms;
             best_id = cid;
         }
-    }
-
-    /* Break near-ties towards the larger warp tile.
-     *
-     * Configs within measurement noise of the winner are not equally good: a
-     * K-step issues WT_M*WT_N WMMA per (WT_M+WT_N) fragment loads, so a 2x4 warp
-     * tile does the same arithmetic with a quarter fewer LDS reads and a
-     * correspondingly smaller share of non-WMMA instructions than 2x2. When the
-     * sweep cannot tell them apart -- which is the normal case on an APU, and is
-     * made worse by the cross-dispatch overlap the batch timing cannot see --
-     * that structural argument is a better tie-breaker than the noise. Measured:
-     * the untied sweep picked a 64x64 2x2 config whose isolated dispatch is 11%
-     * slower than the 128x128 2x4 config it was tied with. */
-    constexpr float TIE_BAND = 1.03f;
-    int tie_id = best_id;
-    for (int cid = 0; cid < kNumWmmaConfigs; cid++) {
-        // Skipped configs sit at the 1e30 sentinel; without this they compare
-        // favourably against a best_ms that is itself the sentinel (nothing
-        // measured) and the tie-break hands back a config never timed at all.
-        if (cfg_ms[cid] > 1e29f) continue;
-        if (cfg_ms[cid] > best_ms * TIE_BAND) continue;
-        const auto& c = kWmmaConfigs[cid];
-        const auto& t = kWmmaConfigs[tie_id];
-        const int c_rank = c.wt_m * c.wt_n;
-        const int t_rank = t.wt_m * t.wt_n;
-        if (c_rank > t_rank ||
-            (c_rank == t_rank && c.bm * c.bn > t.bm * t.bn))
-            tie_id = cid;
-    }
-    if (tie_id != best_id) {
-        CUSTOM_KERNELS_DEBUG_LOG(
-            "[custom_kernels]   wmma tie-break: config[%d] (%.4f ms) -> "
-            "config[%d] (%.4f ms), larger warp tile\n",
-            best_id, best_ms / ITERS, tie_id, cfg_ms[tie_id] / ITERS);
-        best_id = tie_id;
-        best_ms = cfg_ms[tie_id];
     }
 
     hipEventDestroy(ev0);

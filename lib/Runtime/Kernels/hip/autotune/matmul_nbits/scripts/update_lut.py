@@ -265,22 +265,56 @@ def drop_implausible(times):
     return (kept, len(times) - len(kept)) if kept else (times, 0)
 
 
+# Near-tie band for the winner selection below. Configs within this factor of
+# the fastest are treated as measurement-equal and separated structurally.
+# Mirrors the value the WMMA kernel tuner used before that logic was moved here.
+TIE_BAND = 1.03
+
+
+def _tiebreak_rank(ans_key):
+    """Structural preference among measurement-tied configs: larger warp tile
+    (WT_M*WT_N) first, then larger tile area (BM*BN). A K-step issues WT_M*WT_N
+    WMMA per (WT_M+WT_N) fragment loads, so the wider tile does the same
+    arithmetic with fewer LDS reads -- a better tie-breaker than batch-timing
+    noise, which cannot see cross-dispatch overlap. GEMV/dp4a configs have no
+    warp tile, so they rank (0, 0) and the tie reduces to fastest-wins."""
+    if ans_key[0] == "Wmma":
+        _, bm, bn, _sw, wt_m, wt_n, _bk, _fused = ans_key
+        return (wt_m * wt_n, bm * bn)
+    return (0, 0)
+
+
+def select_winner(times):
+    """Fastest config, breaking near-ties (within TIE_BAND) toward the larger
+    warp tile then tile area.
+
+    This is the selection the WMMA kernel tuner used to do inline. It was moved
+    here so the runtime tuner stays a plain single pass (no clock-settling,
+    no multi-pass, no tie-break on the dispatch path); the table -- built from
+    the full per-config timings the sweep logs -- carries the more careful
+    choice instead. On the fp GEMV / dp4a paths there is no warp tile, so this
+    reduces to argmin."""
+    fastest = min(times.values())
+    band = fastest * TIE_BAND
+    cands = [a for a, ms in times.items() if ms <= band]
+    # Largest warp tile, then area; ties broken toward the faster config, then
+    # the answer key itself so the choice is reproducible from the readings.
+    return max(cands, key=lambda a: (_tiebreak_rank(a), -times[a], a))
+
+
 def collate(readings):
     """readings -> {point_key: (winner, {answer: ms})}.
 
-    A point measured in several models is one point: the winners agree in the
-    overwhelming majority of cases, and where they do not, the timings are
-    averaged and the winner recomputed rather than letting log order decide.
+    A point measured in several models is one point: its per-config timings are
+    averaged across the models that measured it, then the winner is chosen by
+    select_winner() from those timings -- fastest, with near-ties broken toward
+    the larger warp tile. The winner is deliberately NOT taken from the tuner's
+    logged choice: the runtime tuner is a plain single pass now, so its logged
+    winner is a raw argmin (and occasionally a phantom); the careful selection
+    lives here, offline, where it costs nothing at runtime.
 
-    The winner is the one the tuner logged, not the fastest timing. They differ
-    on purpose: the tuner breaks near-ties towards the larger warp tile, which
-    is a deliberate policy (a wider tile amortises fragment loads that the batch
-    timing cannot resolve), and recomputing an argmin here would quietly undo
-    it. The table has to answer with what the runtime would have chosen.
-
-    The one exception is a winner that only won because of a phantom reading:
-    there the logged choice is not policy, it is an artifact, and the best
-    surviving timing replaces it.
+    drop_implausible strips phantom readings from each measurement before they
+    are averaged, so a near-zero (or negative) timing cannot win a point.
     """
     acc = collections.defaultdict(lambda: collections.defaultdict(list))
     winners_seen = collections.defaultdict(collections.Counter)
@@ -298,25 +332,26 @@ def collate(readings):
             winners_seen[key][winner] += 1
 
     out = {}
-    n_repaired = 0
+    n_tiebroken = 0
     for key, per_ans in acc.items():
         times = {a: sum(v) / len(v) for a, v in per_ans.items()}
-        if winners_seen[key]:
-            winner = winners_seen[key].most_common(1)[0][0]
-        elif times:
-            winner = min(times.items(), key=lambda kv: (kv[1], kv[0]))[0]
-            n_repaired += 1
-        else:
+        if not times:
             continue
+        winner = select_winner(times)
+        # Count where the structural tie-break overrode the raw fastest.
+        if winner != min(times.items(), key=lambda kv: (kv[1], kv[0]))[0]:
+            n_tiebroken += 1
         out[key] = (winner, times)
 
     if n_dropped:
-        print(f"[build] dropped {n_dropped} implausible readings; repaired "
-              f"{n_repaired} of {len(poisoned)} points whose logged winner was "
-              f"one of them")
+        print(f"[build] dropped {n_dropped} implausible readings "
+              f"({len(poisoned)} points had their logged winner dropped)")
+    print(f"[build] tie-break moved {n_tiebroken} points off the raw fastest "
+          f"to a larger warp tile")
 
     # A point whose log had a winner but no timing table (an older log, or a
-    # truncated one) still contributes its winner; it just cannot be scored.
+    # truncated one) still contributes its winner; it just cannot be scored or
+    # tie-broken.
     for key, counter in winners_seen.items():
         if key not in out:
             out[key] = (counter.most_common(1)[0][0], {})
