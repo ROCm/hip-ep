@@ -18,13 +18,14 @@ os.environ['MORPHIZEN_DEBUG_MLIR_BACKEND'] = '1'
 os.environ['HIPDNN_EP_DEBUG'] = '1'  # Enable COMPILER_DEBUG_LOG
 os.environ['HIPEP_USE_DYNAMIC_DISPATCH'] = '1'
 # Point to the actual install location (one level up from repo)
-os.environ['HIPEP_EP_BIN'] = str(pathlib.Path(__file__).resolve().parent.parent / "install" / "bin")
+##### os.environ['HIPEP_EP_BIN'] = str(pathlib.Path(__file__).resolve().parent.parent / "install" / "bin")
 
 # Add DynamicDispatch and XRT DLL directories to PATH (if DYNAMICDISPATCH_ROOT is set)
 dd_root = os.environ.get('DYNAMICDISPATCH_ROOT')
+xrt_root = os.environ.get('XILINX_XRT')
 if dd_root:
     dd_bin_dir = os.path.join(dd_root, "bin")
-    xrt_bin_dir = os.path.join(dd_root, "xrt", "bin")
+    xrt_bin_dir = xrt_root
     path_additions = dd_bin_dir + os.pathsep + xrt_bin_dir
     if 'PATH' in os.environ:
         os.environ['PATH'] = path_additions + os.pathsep + os.environ['PATH']

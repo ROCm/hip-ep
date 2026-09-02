@@ -20,6 +20,7 @@ target_link_libraries(hip-test
   morphizen-custom-op-mlir       # Provides LlvmIrJit and its LLVM ORC deps.
   morphizen::morphizen-core-static # morphizen::Plugin (native .dll/.so loader)
   HipSupport
+  hipdnn-ep-dd                   # DynamicDispatch runtime (real or mock)
   ${llvm_libs}
 )
 

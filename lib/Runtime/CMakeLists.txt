@@ -160,6 +160,32 @@ else()
 endif()
 
 # ============================================================================
+# STEP 2.5: Detect DynamicDispatch (for NPU/IPU backend)
+# ============================================================================
+# DynamicDispatch is an optional dependency. If found, the real runtime will
+# use it for NPU/IPU offload. Otherwise, the runtime includes stub wrappers
+# that return errors at runtime.
+
+if(NOT BUILD_MOCK_RUNTIME)
+    find_package(DynamicDispatch QUIET)
+    if(DynamicDispatch_FOUND)
+        message(STATUS "DynamicDispatch found - enabling NPU/IPU backend support")
+        message(STATUS "  Include: ${DynamicDispatch_INCLUDE_DIR}")
+        message(STATUS "  Library: ${DynamicDispatch_LIBRARY}")
+        set(HIPDNN_EP_HAS_DYNAMIC_DISPATCH TRUE)
+    else()
+        message(STATUS "DynamicDispatch not found - NPU/IPU backend will use stubs")
+        message(STATUS "  Set DYNAMICDISPATCH_ROOT environment variable to enable")
+        set(HIPDNN_EP_HAS_DYNAMIC_DISPATCH FALSE)
+    endif()
+else()
+    set(HIPDNN_EP_HAS_DYNAMIC_DISPATCH FALSE)
+endif()
+
+message(STATUS "HIPDNN_EP_HAS_DYNAMIC_DISPATCH = ${HIPDNN_EP_HAS_DYNAMIC_DISPATCH}")
+message(STATUS "DynamicDispatch_FOUND = ${DynamicDispatch_FOUND}")
+
+# ============================================================================
 # STEP 3: Generate LLVM Bitcode from Runtime Modules
 # ============================================================================
 
@@ -224,6 +250,13 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
             message(STATUS "Adding TheRock includes for ${OUTPUT_BC}: ${THEROCK_DIST}/include")
             list(APPEND COMPILE_FLAGS "-I" "${THEROCK_DIST}/include")
             list(APPEND COMPILE_FLAGS "-D__HIP_PLATFORM_AMD__")
+        endif()
+
+        # Add DynamicDispatch includes (for real/dynamic_dispatch.cpp)
+        # Use DD_INCLUDE_DIR which is set by the existing DD detection code (around line 650)
+        if(DD_INCLUDE_DIR)
+            message(STATUS "Adding DynamicDispatch includes for ${OUTPUT_BC}: ${DD_INCLUDE_DIR}")
+            list(APPEND COMPILE_FLAGS "-I" "${DD_INCLUDE_DIR}")
         endif()
 
         list(APPEND IMPL_DEPS
@@ -358,8 +391,10 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/pool.cpp runtime_pool.bc)
     compile_to_bitcode(real/resize.cpp runtime_resize.bc)
     compile_to_bitcode(real/global_pool.cpp runtime_global_pool.bc)
-    # DynamicDispatch: compile mock stubs for when DD library is not available
-    compile_to_bitcode(mock/dynamic_dispatch_mock.cpp runtime_dynamic_dispatch.bc)
+
+    # DynamicDispatch: Do NOT compile to bitcode
+    # The implementation (real or mock) is in the native hipdnn-ep-dd library (line ~790)
+    # The bitcode just needs external declarations, which are in hipdnn_ep_runtime.h
 
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
@@ -436,7 +471,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_resize.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_global_pool.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather_block_quantized.bc
-        ${CMAKE_CURRENT_BINARY_DIR}/runtime_dynamic_dispatch.bc
+        # DynamicDispatch implementation is in native hipdnn-ep-dd library, not bitcode
     )
     # Vendor-symbol stubs (see the compile_to_bitcode above) join runtime.bc only
     # when the vendor BLAS/DNN backends are disabled.
@@ -945,6 +980,12 @@ if(NOT BUILD_MOCK_RUNTIME)
 
                 # Install the library
                 install(TARGETS hipdnn-ep-dd ARCHIVE DESTINATION lib)
+
+                # Link hipdnn-ep-dd into the EP DLL so DynamicDispatch functions are available at runtime
+                if(DEFINED morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET AND TARGET ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET})
+                    target_link_libraries(${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET} PRIVATE hipdnn-ep-dd)
+                    message(STATUS "Linked DynamicDispatch via hipdnn-ep-dd target")
+                endif()
 
                 message(STATUS "Building DynamicDispatch native library (XRT backend)")
             endif()  # XRT_INCLUDE_DIR found
