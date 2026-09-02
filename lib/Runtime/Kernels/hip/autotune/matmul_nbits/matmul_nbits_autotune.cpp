@@ -179,14 +179,28 @@ bool compatible(const fbs::MnAutotuneLut* lut) {
 }
 
 void loadBuffer(Table& t, const unsigned char* data, size_t size) {
-  if (!data || size == 0) return;
+  // No table embedded for this arch (the size-0 stub cmake emits). Logged, not
+  // silent, so HIPDNN_MATMUL_LUT_LOG=1 distinguishes "no table in this build"
+  // from "log not wired": every shape will fall through to the runtime sweep.
+  if (!data || size == 0) {
+    if (logOn())
+      fprintf(stderr, "[mn-lut] no embedded table (size 0); shapes will "
+                      "autotune at runtime\n");
+    return;
+  }
   flatbuffers::Verifier verifier(data, size);
   if (!fbs::VerifyMnAutotuneLutBuffer(verifier)) {
     if (logOn()) fprintf(stderr, "[mn-lut] buffer failed verification\n");
     return;
   }
   const fbs::MnAutotuneLut* lut = fbs::GetMnAutotuneLut(data);
-  if (!lut || !lut->points() || !lut->configs() || !compatible(lut)) return;
+  if (!lut || !lut->points() || !lut->configs() || !compatible(lut)) {
+    if (logOn())
+      fprintf(stderr, "[mn-lut] table present (%zu bytes) but unusable "
+                      "(malformed or incompatible); shapes will autotune\n",
+              size);
+    return;
+  }
 
   // A non-positive weight would collapse a dimension out of the metric, which
   // is never what a fit meant to express; treat the table as unusable rather
