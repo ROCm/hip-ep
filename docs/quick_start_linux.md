@@ -264,7 +264,7 @@ prebuilt package to get it.
 
 The EP is selected by the model's `genai_config.json` `provider_options` and
 auto-discovered next to the OGA runtime lib -- do NOT pass `--ep_library`
-(upstream `model_benchmark` rejects it). With the upstream OGA (v0.14.0 + PR2194)
+(upstream `model_benchmark` rejects it). With the upstream OGA (v0.15.2 + PR2165)
 the EP is the AMD GPU umbrella (`provider_options [{ "AMDGPU": {"profile": "hip"} }]`);
 the prebuilt package bundles the umbrella libs.
 

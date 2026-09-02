@@ -30,8 +30,8 @@ env:
   LLVM_TAG: llvmorg-22.1.0
   ONNXRUNTIME_VERSION: "1.27.0"
   ONNXRUNTIME_PR_PATCHES: ""
-  OGA_VERSION: "0.14.0"
-  OGA_PR_PATCHES: "2194"
+  OGA_VERSION: "0.15.2"
+  OGA_PR_PATCHES: "2165"
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
   AMDGPU_EP_REF: "05eaa2a938f71e98b49bd1be3fb03720167be5cc"
 
@@ -442,7 +442,7 @@ jobs:
       - name: Compute cache key
         id: key
         shell: bash
-        run: echo "value=oga-dml-mm2-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
+        run: echo "value=windows-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
 
       - name: Probe oga-artifacts
         id: cache-oga
@@ -465,6 +465,12 @@ jobs:
         uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
         with:
           python-version: "3.14"
+
+      # requests: OGA build.py's util.dependency_resolver imports it at
+      # module load (the pinned Python 3.14 has no preinstalled requests).
+      - name: Install pip dependencies
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        run: pip install requests
 
       - name: Setup MSVC environment
         if: steps.cache-oga.outputs.cache-hit != 'true'
@@ -554,6 +560,7 @@ jobs:
             --config Release \
             --cmake_generator Ninja \
             --use_dml \
+            --no_telemetry \
             --ort_home "$ORT_HOME" \
             --skip_tests --skip_examples \
             --parallel \
