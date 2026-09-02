@@ -17,6 +17,15 @@ install(
  RUNTIME DESTINATION bin
  ARCHIVE DESTINATION lib
  LIBRARY DESTINATION lib)
+if(MSVC)
+  # install(TARGETS) does not cover the linker PDB, so an installed EP DLL used
+  # outside this build tree has no symbols. The EP is loaded into a host process
+  # (onnxruntime, or the AMDGPU umbrella EP), which is exactly where a crash has
+  # to be symbolized from the install prefix alone. OPTIONAL keeps this working
+  # for a configuration that emits no PDB.
+  install(FILES $<TARGET_PDB_FILE:${morphizen_CORE_DYNAMIC_UNIQUE_ID}>
+          DESTINATION bin OPTIONAL)
+endif()
 # install(
 #  EXPORT morphizen-core-targets
 #  NAMESPACE ${PROJECT_NAME}::
