@@ -74,6 +74,20 @@ MORPHIZEN_DLL_SPEC int morphizen_ep_on_run_start(
         const void *state, const char *entry_name));
 
 /**
+ * @brief Called when InferenceSession::Run() finished.
+ *
+ * Drops the run_option accessor that morphizen_ep_on_run_start() installed for
+ * the calling thread. The state it captured refers to the OrtRunOptions of that
+ * run, which does not outlive the run, so it must stop being reachable from
+ * PassContext::get_run_option() once the run ends.
+ *
+ * Called by `MorphiZenEP::OnRunEndImpl()`.
+ *
+ * @return Status code indicating success or failure.
+ */
+MORPHIZEN_DLL_SPEC int morphizen_ep_on_run_end();
+
+/**
  * @brief Set DynamicOptions for the MorphiZen Execution Provider.
  *
  * Called when InferenceSession::SetEpDynamicOptions() is called.

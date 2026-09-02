@@ -5,7 +5,6 @@
 #pragma once
 #include "morphizen/morphizen.hpp"
 #include <deque>
-#include <shared_mutex>
 
 #include <morphizen/custom_op.h>
 #include <morphizen/dll_safe.h>
@@ -20,6 +19,15 @@
 namespace morphizen {
 // Forward declaration for logger adapter
 class LoggerAdapter;
+
+// Publishes the accessor that PassContextImp::get_run_option() uses to reach
+// the OrtRunOptions of the run in progress. Installed by
+// morphizen_ep_on_run_start() and cleared by passing nulls when the run ends.
+// The accessor is per-thread, because a session may be run concurrently from
+// several threads with different OrtRunOptions.
+void set_run_option_accessor(const void *state,
+                             DllSafe<std::string> (*get_entry)(
+                                 const void *state, const char *entry_name));
 
 class CacheFileReaderImp : public CacheFileReader {
 public:
@@ -363,13 +371,6 @@ public:
   virtual std::unique_ptr<FileSystem> get_file_system() override final;
 
 private:
-  std::function<std::optional<std::string>(std::string)> get_run_options_;
-  std::shared_mutex rw_mutex_;
-  friend int morphizen_ep_on_run_start(
-      const std::vector<std::unique_ptr<morphizen::ExecutionProvider>> &eps,
-      const void *state,
-      morphizen::DllSafe<std::string> (*get_config_entry)(
-          const void *state, const char *entry_name));
   friend int morphizen_ep_set_ep_dynamic_options(
       const std::vector<std::unique_ptr<morphizen::ExecutionProvider>> &eps,
       const char *const *keys, const char *const *values, size_t kv_len);

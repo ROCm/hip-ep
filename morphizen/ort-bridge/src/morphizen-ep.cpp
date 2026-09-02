@@ -34,6 +34,30 @@ DEF_ENV_PARAM(XLNX_ABI_2_0_CLONE_EXTERNAL_DATA_THRESHOLD, "127")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MORPHIZEN_EP) >= n)
 namespace morphizen {
 
+namespace {
+// Set for the duration of one Session::Run() on the calling thread, so that
+// PassContext::get_run_option() can reach that run's OrtRunOptions.
+struct RunConfigLookup {
+  const OrtApi *api = nullptr;
+  const OrtRunOptions *run_options = nullptr;
+};
+thread_local RunConfigLookup g_run_config_lookup;
+
+DllSafe<std::string> get_run_config_entry(const void *state,
+                                          const char *entry_name) {
+  const auto *lookup = static_cast<const RunConfigLookup *>(state);
+  if (lookup == nullptr || lookup->run_options == nullptr) {
+    return DllSafe<std::string>();
+  }
+  const char *value =
+      lookup->api->GetRunConfigEntry(lookup->run_options, entry_name);
+  if (value == nullptr) {
+    return DllSafe<std::string>();
+  }
+  return DllSafe<std::string>(std::string(value));
+}
+} // namespace
+
 /**
  * @brief Get supported nodes from graph viewer based on execution provider
  * meta definition
@@ -87,6 +111,8 @@ MorphiZenEP::MorphiZenEP(ApiPtrs apis, const std::string &name,
   OrtEp::ReleaseNodeComputeInfos = ReleaseNodeComputeInfosImpl;
   OrtEp::GetCompiledModelCompatibilityInfo =
       GetCompiledModelCompatibilityInfoImpl;
+  OrtEp::OnRunStart = OnRunStartImpl;
+  OrtEp::OnRunEnd = OnRunEndImpl;
   ir_converter = morphizen::IRConverter::to_onnx_model;
 }
 MorphiZenEP::~MorphiZenEP() {}
@@ -291,6 +317,29 @@ const char *ORT_API_CALL MorphiZenEP::GetCompiledModelCompatibilityInfoImpl(
   }
   return get_compiled_model_compatibility_info(
       (*self->execution_providers_).get(), graph);
+}
+
+OrtStatus *ORT_API_CALL MorphiZenEP::OnRunStartImpl(
+    OrtEp *this_ptr, const OrtRunOptions *run_options) noexcept {
+  MorphiZenEP *self = static_cast<MorphiZenEP *>(this_ptr);
+  if (!self->execution_providers_) {
+    return nullptr;
+  }
+  g_run_config_lookup = {&self->ort_api, run_options};
+  morphizen_ep_on_run_start(**self->execution_providers_, &g_run_config_lookup,
+                            &get_run_config_entry);
+  return nullptr;
+}
+
+OrtStatus *ORT_API_CALL MorphiZenEP::OnRunEndImpl(
+    OrtEp * /*this_ptr*/, const OrtRunOptions * /*unused*/,
+    bool /*sync_stream*/) noexcept {
+  // The OrtRunOptions does not outlive this call, so drop it before any later
+  // get_run_option() on this thread can dereference it. sync_stream is moot
+  // here because MorphiZenEpFactory::IsStreamAwareImpl() reports no stream.
+  morphizen_ep_on_run_end();
+  g_run_config_lookup = {};
+  return nullptr;
 }
 
 OrtStatus *
