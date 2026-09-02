@@ -75,16 +75,17 @@ mlir::Type onnxElementTypeToMlirDenseElementType(int element_type,
                                                  mlir::OpBuilder &builder) {
   mlir::Type elem = onnxElementTypeToMlirElementType(element_type, builder);
   if (auto intTy = mlir::dyn_cast<mlir::IntegerType>(elem)) {
-    // Preserve unsigned 16-bit (ONNX UINT16) on inline dense constants so they
+    // Preserve unsigned integers (ONNX UINTx) on inline dense constants so they
     // retain their unsigned identity through lowering, matching how EXTERNAL
-    // UINT16 initializers are already imported (ui16, via the offset/size path
-    // that bypasses DenseElementsAttr). A downstream QDQ dtype classifier must
-    // distinguish UINT16 from signed INT16: collapsing UINT16 to signless i16
-    // here makes the two indistinguishable, so inline unsigned constants with
-    // values >= 32768 get read as INT16 and sign-flip. LLVM 22 MLIR accepts
-    // unsigned DenseElementsAttr, and ui16 memrefs already flow end-to-end for
-    // external constants, so keeping ui16 here is consistent and safe.
-    if (intTy.getWidth() == 16 && intTy.isUnsigned())
+    // unsigned initializers are already imported (via the offset/size path that
+    // bypasses DenseElementsAttr). A downstream QDQ dtype classifier must
+    // distinguish an unsigned type from the signed type of the same width:
+    // collapsing e.g. UINT16 to signless i16 makes the two indistinguishable,
+    // so inline unsigned constants with values >= 2^(width-1) get read as
+    // signed and sign-flip. LLVM 22 MLIR accepts unsigned DenseElementsAttr,
+    // and unsigned memrefs already flow end-to-end for external constants, so
+    // keeping the unsigned type here is consistent and safe.
+    if (intTy.isUnsigned())
       return elem;
     if (!intTy.isSignless())
       return mlir::IntegerType::get(builder.getContext(), intTy.getWidth());

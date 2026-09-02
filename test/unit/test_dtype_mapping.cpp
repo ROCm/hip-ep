@@ -76,11 +76,12 @@ int main() {
           "dense(INT16) -> signless i16 (ResNet50-INT8 bias path unchanged)");
   }
 
-  // --- 8-bit integers keep the pre-existing signless-flatten behavior -------
+  // --- Unsigned 8-bit keeps its unsigned identity (ui8) too; signed INT8 still
+  // flattens to signless i8 ---------------------------------------------------
   {
     auto u8 = asInt(onnxElementTypeToMlirDenseElementType(ONNX_UINT8, builder));
-    check(u8 && u8.getWidth() == 8 && u8.isSignless(),
-          "dense(UINT8) -> signless i8 (unchanged)");
+    check(u8 && u8.getWidth() == 8 && u8.isUnsigned(),
+          "dense(UINT8) -> unsigned i8 (ui8)");
     auto i8 = asInt(onnxElementTypeToMlirDenseElementType(ONNX_INT8, builder));
     check(i8 && i8.getWidth() == 8 && i8.isSignless(),
           "dense(INT8) -> signless i8 (unchanged)");

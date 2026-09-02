@@ -140,11 +140,11 @@ mlir::Type onnxElementTypeToMlirElementType(int element_type,
                                             mlir::OpBuilder &builder);
 
 // Element type for DenseElementsAttr / getFromRawBuffer. MLIR requires signless
-// integers (or index), so ONNX signed/unsigned integers map to signless storage
-// -- EXCEPT 16-bit unsigned (ONNX UINT16), which is kept as ui16. A downstream
-// QDQ dtype classifier reads signless i16 as signed INT16, so folding UINT16
-// to signless i16 here would sign-flip inline UINT16 constants >= 32768. See
-// mlir-constants.cpp for the full rationale.
+// integers (or index), so ONNX signed integers map to signless storage -- but
+// ONNX unsigned integers keep their unsigned type (e.g. ui8, ui16). A
+// downstream QDQ dtype classifier reads signless i16 as signed INT16, so
+// folding an unsigned type to signless here would sign-flip inline unsigned
+// constants >= 2^(width-1). See mlir-constants.cpp for the full rationale.
 mlir::Type onnxElementTypeToMlirDenseElementType(int element_type,
                                                  mlir::OpBuilder &builder);
 
