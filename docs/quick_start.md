@@ -248,16 +248,12 @@ cp "$LOCAL_DIR/bin/onnxruntime_providers_shared.dll" "$ORT_HOME/lib/"
 
 ```bash
 cd ..  # Go to workspace directory (sibling of hip-ep)
-git clone -b v0.14.0 https://github.com/microsoft/onnxruntime-genai.git
+git clone -b v0.15.0 https://github.com/microsoft/onnxruntime-genai.git
 cd onnxruntime-genai
 git submodule update --init --recursive
 
-# Apply the AMDGPU integration PR on top of the upstream tag. pull/<n>.patch is
-# a format-patch series (it renames src/morphizen_ep -> src/amdgpu mid-series),
-# so apply it with `git am` -- `git apply` flattens the series and fails on the
-# rename whose pre-image only exists after an earlier commit.
-curl -fsSL https://github.com/microsoft/onnxruntime-genai/pull/2194.patch -o /tmp/oga-2194.patch
-git am --3way --whitespace=nowarn /tmp/oga-2194.patch
+curl -fsSL https://github.com/microsoft/onnxruntime-genai/pull/2165.patch -o /tmp/oga-2165.patch
+git am --3way --whitespace=nowarn /tmp/oga-2165.patch
 ```
 
 > **Note**: the upstream tag + PR list are pinned in CI via `OGA_VERSION` and
@@ -279,6 +275,7 @@ python build.py \
   --config Release \
   --cmake_generator Ninja \
   --use_dml \
+  --no_telemetry \
   --ort_home "$ORT_HOME" \
   --skip_tests --skip_examples \
   --parallel \
@@ -364,7 +361,7 @@ python python/examples/run_onnx.py /path/to/model.onnx
 
 `benchmark_e2e.py` runs with the default `-e follow_config`, so the model's
 `genai_config.json` selects the EP via `provider_options`. With the upstream OGA
-(v0.14.0 + PR2194, DeviceType AMDGPU) this is the AMD GPU umbrella
+(v0.15.0 + PR2165, DeviceType AMDGPU) this is the AMD GPU umbrella
 (`provider_options [{ "AMDGPU": {"profile": "hip"} }]`), which loads
 `amdgpu-ep.dll` and needs the umbrella DLLs colocated (see
 `.github/workflows/windows-build-real.yml`); the default wheel ships only the hipgpu
@@ -481,8 +478,8 @@ present there too.
 
 The EP is selected by the model's `genai_config.json` `provider_options` and
 auto-discovered next to `onnxruntime-genai.dll` -- do NOT pass `--ep_library`
-(upstream `model_benchmark` rejects it). With the upstream OGA (v0.14.0 +
-PR2194) the EP is the AMD GPU umbrella (`provider_options [{ "AMDGPU":
+(upstream `model_benchmark` rejects it). With the upstream OGA (v0.15.0 +
+PR2165) the EP is the AMD GPU umbrella (`provider_options [{ "AMDGPU":
 {"profile": "hip"} }]`), so `amdgpu-ep.dll` must sit next to the OGA DLLs (see
 `.github/workflows/windows-build-real.yml`).
 
