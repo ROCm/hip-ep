@@ -653,6 +653,19 @@ void QMatMulOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// QAddOp: ins(lhs, rhs), outs(output)
+// Quantized elementwise add with integrated QDQ scales and zero points
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QAddOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void QAddOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // HipblasltMatmulOp: ins(A, B), outs(C)
 //===----------------------------------------------------------------------===//
 

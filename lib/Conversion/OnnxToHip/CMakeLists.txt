@@ -6,39 +6,37 @@
 # ============================================================================
 # PDLL Pattern Compilation
 # ============================================================================
-# Locate mlir-pdll from the LLVM build tree (self-built, not system)
+# Locate mlir-pdll. LLVM_TOOLS_BINARY_DIR is exported by find_package(MLIR) and
+# covers both the prebuilt SDK and an installed LLVM; the _deps path covers an
+# LLVM built inside this project's FetchContent tree. Default search paths stay
+# enabled so a tool on PATH is still usable.
 find_program(MLIR_PDLL_EXE mlir-pdll
     HINTS
         "${CMAKE_BINARY_DIR}/_deps/llvm-project-build/bin"
-    NO_DEFAULT_PATH
+        "${LLVM_TOOLS_BINARY_DIR}"
+        "${LLVM_BINARY_DIR}/bin"
 )
 
 if(MLIR_PDLL_EXE)
     message(STATUS "OnnxToHip: mlir-pdll found: ${MLIR_PDLL_EXE}")
-    
-    set(PDL_INPUT "${CMAKE_CURRENT_SOURCE_DIR}/pdl/QDQMatMulFusion.pdll")
+    # HipFusionPatterns.pdll #includes every pattern file, so mlir-pdll runs
+    # once and emits one PDL module. Every .pdll is still globbed as a
+    # dependency, otherwise editing an included pattern would not rebuild it.
+    set(PDL_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/pdl")
+    set(PDL_ENTRY "${PDL_SOURCE_DIR}/HipFusionPatterns.pdll")
+    file(GLOB PDL_SOURCES CONFIGURE_DEPENDS "${PDL_SOURCE_DIR}/*.pdll")
     set(PDL_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/pdl")
     file(MAKE_DIRECTORY "${PDL_BUILD_DIR}")
-    set(PDL_OUTPUT "${PDL_BUILD_DIR}/QDQMatMulFusion.pdl.mlir")
-    
-    # Compile PDLL to MLIR bytecode
-    add_custom_command(
-        OUTPUT "${PDL_OUTPUT}"
-        COMMAND "${MLIR_PDLL_EXE}"
-                -x mlir
-                "${PDL_INPUT}"
-                -o "${PDL_OUTPUT}"
-        DEPENDS "${PDL_INPUT}"
-        COMMENT "Compiling PDLL pattern: QDQMatMulFusion.pdll -> QDQMatMulFusion.pdl.mlir"
-        VERBATIM
-    )
-    
-    add_custom_target(QDQMatMulFusionPDLL DEPENDS "${PDL_OUTPUT}")
-    
-    # Pass bytecode path to C++ via compile definition
-    # Will be set via target_compile_definitions after library is defined: QDQMATMUL_FUSION_PDL_FILE="${PDL_OUTPUT}")
-    
-    message(STATUS "OnnxToHip: PDLL fusion enabled — bytecode: ${PDL_OUTPUT}")
+    set(PDL_OUTPUT "${PDL_BUILD_DIR}/HipFusionPatterns.pdl.mlir")
+    add_custom_command(OUTPUT "${PDL_OUTPUT}"
+        COMMAND "${MLIR_PDLL_EXE}" -x mlir "-I${PDL_SOURCE_DIR}"
+                "${PDL_ENTRY}" -o "${PDL_OUTPUT}"
+        DEPENDS ${PDL_SOURCES}
+        COMMENT "Compiling PDLL patterns: HipFusionPatterns.pdll -> HipFusionPatterns.pdl.mlir"
+        VERBATIM)
+    add_custom_target(HipPdllPatterns DEPENDS "${PDL_OUTPUT}")
+    install(FILES "${PDL_OUTPUT}" DESTINATION bin)
+    message(STATUS "OnnxToHip: PDLL fusion enabled — patterns: ${PDL_OUTPUT}")
 else()
     message(WARNING "OnnxToHip: mlir-pdll not found — PDLL fusion disabled")
 endif()
@@ -140,8 +138,8 @@ add_library(OnnxToHip STATIC
   ClipConversion.cpp
 )
 
-if(MLIR_PDLL_EXE)
-    add_dependencies(OnnxToHip QDQMatMulFusionPDLL)
+if(TARGET HipPdllPatterns)
+    add_dependencies(OnnxToHip HipPdllPatterns)
 endif()
 
 add_dependencies(OnnxToHip
@@ -167,10 +165,3 @@ target_link_libraries(OnnxToHip PUBLIC
   MLIRPDLInterpDialect
   MLIRParser
 )
-
-# Set compile definition with bytecode path (must be after library is defined)
-if(MLIR_PDLL_EXE)
-    target_compile_definitions(OnnxToHip PRIVATE
-        "QDQMATMUL_FUSION_PDL_FILE=\"${PDL_OUTPUT}\""
-    )
-endif()

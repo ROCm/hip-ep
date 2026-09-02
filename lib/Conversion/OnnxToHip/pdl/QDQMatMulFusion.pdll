@@ -1,25 +1,25 @@
 //===- QDQMatMulFusion.pdll -----------------------------------------------===//
 //
 // PDLL pattern for QDQ MatMul fusion - pure PDLL approach.
+//
+// Included by HipFusionPatterns.pdll, which declares the native constraints
+// used below. Not compilable on its own.
 //===----------------------------------------------------------------------===//
 
-// Declare native constraints (implemented in qdq_fusion_pass.hpp)
-Constraint GetContextArg(op: Op) -> Value;
-Constraint ExtractScaleValue(val: Value) -> Attr;
-
 Pattern QDQMatMulFusion with benefit(10) {
-  // Match the QDQ chain: QuantizeLinear -> MatMul -> DequantizeLinear
-  let quant = op<onnx.QuantizeLinear>(lhs_input: Value, lhs_scale: Value, lhs_zp: Value);
+  // Match the QDQ chain: QuantizeLinear -> MatMul -> DequantizeLinear.
+  // scale is a required ONNX input; only zero_point is optional, so a trailing
+  // range absorbs both the two- and three-operand forms.
+  let quant = op<onnx.QuantizeLinear>(lhs_input: Value, lhs_scale: Value, lhs_tail: ValueRange);
   let matmul = op<onnx.MatMul>(quant.0, rhs: Value);
-  let dequant = op<onnx.DequantizeLinear>(matmul.0, output_scale: Value, output_zp: Value) -> (output_type: Type);
-  
+  let dequant = op<onnx.DequantizeLinear>(matmul.0, output_scale: Value, output_tail: ValueRange) -> (output_type: Type);
+
+  let ctx = GetContextArg(dequant);
+  let lhs_scale_attr = ExtractScaleValue(lhs_scale);
+  let output_scale_attr = ExtractScaleValue(output_scale);
+
   // Replace with fused operation
   rewrite dequant with {
-    // Get context and scale attributes via native constraints
-    let ctx = GetContextArg(dequant);
-    let lhs_scale_attr = ExtractScaleValue(lhs_scale);
-    let output_scale_attr = ExtractScaleValue(output_scale);
-    
     let empty = op<tensor.empty> -> (output_type);
     let qmatmul = op<hip.qmatmul>(ctx, lhs_input, rhs, empty.0) {
       lhs_scale = lhs_scale_attr,

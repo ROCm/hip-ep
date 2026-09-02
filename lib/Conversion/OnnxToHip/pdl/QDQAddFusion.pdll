@@ -1,0 +1,38 @@
+//===- QDQAddFusion.pdll --------------------------------------------------===//
+//
+// PDLL pattern for QDQ Add fusion - pure PDLL approach.
+//
+// Included by HipFusionPatterns.pdll, which declares the native constraints
+// used below. Not compilable on its own.
+//===----------------------------------------------------------------------===//
+
+Pattern QDQAdd with benefit(10) {
+  // Match the QDQ chain: DequantizeLinear, DequantizeLinear -> Add -> QuantizeLinear
+  let dquant1 = op<onnx.DequantizeLinear>(lhs_input: Value, lhs_scale: Value, lhs_tail: ValueRange);
+  let dquant2 = op<onnx.DequantizeLinear>(rhs_input: Value, rhs_scale: Value, rhs_tail: ValueRange);
+
+  let add = op<onnx.Add>(dquant1.0, dquant2.0);
+  let quant = op<onnx.QuantizeLinear>(add.0, output_scale: Value, output_tail: ValueRange) -> (output_type: Type);
+
+  let ctx = GetContextArg(quant);
+  let lhs_scale_attr = ExtractScaleValue(lhs_scale);
+  let rhs_scale_attr = ExtractScaleValue(rhs_scale);
+  let output_scale_attr = ExtractScaleValue(output_scale);
+  let lhs_zeropoint_attr = ExtractZeropointValue(dquant1, attr<"2 : i64">, attr<"0 : i64">);
+  let rhs_zeropoint_attr = ExtractZeropointValue(dquant2, attr<"2 : i64">, attr<"0 : i64">);
+  let output_zeropoint_attr = ExtractZeropointValue(quant, attr<"2 : i64">, attr<"0 : i64">);
+
+  // Replace with fused operation
+  rewrite quant with {
+    let empty = op<tensor.empty> -> (output_type);
+    let qadd = op<hip.qadd>(ctx, lhs_input, rhs_input, empty.0) {
+      lhs_scale = lhs_scale_attr,
+      rhs_scale = rhs_scale_attr,
+      output_scale = output_scale_attr,
+      lhs_zp = lhs_zeropoint_attr,
+      rhs_zp = rhs_zeropoint_attr,
+      output_zp = output_zeropoint_attr
+    } -> (output_type);
+    replace quant with qadd;
+  };
+}

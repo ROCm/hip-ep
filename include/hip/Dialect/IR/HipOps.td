@@ -4486,4 +4486,35 @@ def Hip_QMatMulOp : Hip_DpsOp<"qmatmul",
     attr-dict (`:` type($result_tensors)^)?
   }];
 }
+
+def Hip_QAddOp : Hip_DpsOp<"qadd",
+                              /*traits=*/[],
+                              /*outsAccessor=*/"Output",
+                              /*autoReify=*/1,
+                              /*autoInfer=*/1,
+                              /*declareInfer=*/1> {
+  let summary = "Quantized elementwise add with integrated QDQ";
+  let description = [{
+    todo
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$lhs,           // Left operand (quant)
+    Hip_TensorOrMemRef:$rhs,           // Right operand (quant)
+    Hip_TensorOrMemRef:$output,        // Output buffer (quant)
+    F32Attr:$lhs_scale,                // Quantization scale for LHS
+    I64Attr:$lhs_zp,                   // Quantization zeropoint for LHS
+    F32Attr:$rhs_scale,                // Quantization scale for RHS
+    I64Attr:$rhs_zp,                   // Quantization zeropoint for RHS
+    F32Attr:$output_scale,             // Dequantization scale for output
+    I64Attr:$output_zp                 // Quantization zeropoint for output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
 #endif // HIP_OPS
