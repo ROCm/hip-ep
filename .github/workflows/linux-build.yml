@@ -30,7 +30,7 @@ env:
   # ORT is still built from source either way). Part of the ort-install cache
   # key. Remove a PR once its fix lands in the pinned ONNX Runtime release.
   ONNXRUNTIME_PR_PATCHES: ""
-  OGA_VERSION: "0.15.0"
+  OGA_VERSION: "0.15.2"
   OGA_PR_PATCHES: "2165"
   # The GPU arch the artifact targets. CI runners have no GPU, so it is passed
   # explicitly (build.py auto-detects from /sys on a real GPU host).
@@ -290,31 +290,12 @@ jobs:
       # build.py (whose target is the project .so) because OGA is a
       # CI/artifact concern.
       # -----------------------------------------------------------------------
-      - name: Resolve OGA PR head SHAs
-        id: oga-shas
-        env:
-          GH_TOKEN: ${{ github.token }}
-          OGA_PRS: ${{ env.OGA_PR_PATCHES }}
-        run: |
-          set -euo pipefail
-          tokens=""
-          for pr in $(echo "$OGA_PRS" | xargs || true); do
-            sha="$(gh api "repos/microsoft/onnxruntime-genai/pulls/${pr}" --jq .head.sha)"
-            if [ -z "$sha" ]; then
-              echo "Cannot resolve the head of OGA PR #${pr}"
-              exit 1
-            fi
-            echo "OGA PR #${pr} -> ${sha}"
-            tokens="${tokens:+${tokens}_}${pr}-${sha:0:12}"
-          done
-          echo "shas=${tokens}" >> "$GITHUB_OUTPUT"
-
       - name: Cache OGA artifacts
         id: cache-oga
         uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/oga-artifacts
-          key: linux-oga-${{ env.OGA_VERSION }}-pr${{ steps.oga-shas.outputs.shas }}-am-whl-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
+          key: linux-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
 
       # Checkout + build are skipped on an OGA cache hit (step-level gate); the
       # install-copy below always runs so the
