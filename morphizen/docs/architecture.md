@@ -633,6 +633,11 @@ class MorphiZenEP : public OrtEp {
 
     // Compatibility validation
     GetCompiledModelCompatibilityInfoImpl() → JSON info
+
+    // Publish/clear this run's OrtRunOptions for
+    // PassContext::get_run_option()
+    OnRunStartImpl(run_options)
+    OnRunEndImpl(run_options, sync_stream)
 };
 ```
 

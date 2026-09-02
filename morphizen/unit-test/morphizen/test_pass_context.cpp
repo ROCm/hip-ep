@@ -95,6 +95,37 @@ protected:
 };
 } // namespace morphizen
 using namespace morphizen;
+
+// The accessor is per-thread process state, so clear it before returning to
+// keep the remaining tests on this thread unaffected.
+TEST_F(PassContextTest, GetRunOption) {
+  const std::map<std::string, std::string> run_options{
+      {"qnn.htp_perf_mode", "burst"}};
+  auto get_entry = [](const void *state,
+                      const char *name) -> morphizen::DllSafe<std::string> {
+    const auto &options =
+        *static_cast<const std::map<std::string, std::string> *>(state);
+    auto it = options.find(name);
+    if (it == options.end()) {
+      return morphizen::DllSafe<std::string>();
+    }
+    return morphizen::DllSafe<std::string>(it->second);
+  };
+
+  // No accessor installed yet: every lookup falls back to the default.
+  EXPECT_EQ(passContext->get_run_option("qnn.htp_perf_mode", "default"),
+            "default");
+
+  morphizen::set_run_option_accessor(&run_options, get_entry);
+  EXPECT_EQ(passContext->get_run_option("qnn.htp_perf_mode", "default"),
+            "burst");
+  EXPECT_EQ(passContext->get_run_option("absent.key", "default"), "default");
+
+  morphizen::set_run_option_accessor(nullptr, nullptr);
+  EXPECT_EQ(passContext->get_run_option("qnn.htp_perf_mode", "default"),
+            "default");
+}
+
 TEST_F(PassContextConfigTest, Config) {
 #ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
   // TODO(Issue #058): MLIR model node names differ from ONNX
