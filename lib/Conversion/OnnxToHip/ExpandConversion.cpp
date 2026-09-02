@@ -28,6 +28,11 @@ static mlir::Value readShapeEntryToIndex(mlir::PatternRewriter &rewriter,
 /// dims in the result we extract the corresponding entry from the `shape`
 /// input tensor (right-aligned with the result rank, NumPy-style); leading
 /// dims that are absent from `shape` fall back to the matching input dim.
+///
+/// `Expand`'s shape operand is a BROADCAST target, not a literal resize: the
+/// output extent at a position is `max(input_dim, shape_dim)`, so a `1` in
+/// `shape` where the input carries a real (possibly >1) extent means "do not
+/// broadcast here", i.e. keep the input's extent -- not "resize to 1".
 struct ExpandToHip : public mlir::RewritePattern {
   ExpandToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Expand", /*benefit=*/1, ctx) {}
@@ -65,14 +70,32 @@ struct ExpandToHip : public mlir::RewritePattern {
       if (!resultType.isDynamicDim(i))
         continue;
       int64_t shapeIdx = i - (resultRank - shapeLen);
+      int64_t inputIdx = i - (resultRank - inputRank);
       mlir::Value dim;
       if (shapeIdx >= 0) {
         // The shape entry may be GPU-computed; read it back with a stream sync
         // (constants fold) instead of a bare host load of device memory. See
         // readShapeEntryToIndex for the correctness rationale.
-        dim = readShapeEntryToIndex(rewriter, loc, context, shape, shapeIdx);
+        mlir::Value shapeDim =
+            readShapeEntryToIndex(rewriter, loc, context, shape, shapeIdx);
+        if (inputIdx >= 0) {
+          // Broadcast semantics (see the struct doc comment above): a `1`
+          // here means "keep the input's extent", not "resize to 1".
+          mlir::Value inputDim =
+              mlir::tensor::DimOp::create(rewriter, loc, input, inputIdx);
+          mlir::Value one =
+              mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
+          mlir::Value shapeSaysOne = mlir::arith::CmpIOp::create(
+              rewriter, loc, mlir::arith::CmpIPredicate::eq, shapeDim, one);
+          dim = mlir::arith::SelectOp::create(rewriter, loc, shapeSaysOne,
+                                              inputDim, shapeDim);
+        } else {
+          // No corresponding input dim (this is a purely-broadcast leading
+          // dim absent from the input rank): the shape entry is the literal
+          // extent, nothing to compare it against.
+          dim = shapeDim;
+        }
       } else {
-        int64_t inputIdx = i - (resultRank - inputRank);
         if (inputIdx < 0)
           return rewriter.notifyMatchFailure(
               op, "cannot resolve dynamic dim from input or shape");
