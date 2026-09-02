@@ -240,56 +240,73 @@ ONNX MatMulNBits 允许最后一个 block 不满，所以这是合法 shape，
 三项方向已定。因为改 tuner 必须重跑全量 sweep，**补 shape 要排在重跑之前**，
 一遍 sweep 覆盖所有事。
 
-### 步骤 1：修内核 tuner 的计时（多遍取中位数）
+### 步骤 1：修内核 tuner 的计时 — 作废（不动内核）
 
-改动目标：把"取最小值"换成"多遍取中位数"，从测量层面根治，不引入任何
-硬编码阈值或硬件常量。
+原计划把内核 tuner 的"取最小值"改成"多遍取中位数"。**已放弃**：任何在内核
+tuner 里加遍数的做法都会让在线 autotune 变慢，而 LUT 的全部意义就是绕开慢的
+在线 sweep——本末倒置。
 
-- 统一改成 `PASSES = 3`，每个 config 保留 3 遍的耗时，取**中位数**
-- 现在是单遍的 tuner 需要加 passes：
-  `tuneGemvConfig`（~1212）、`tuneDp4aConfig`（~1451）、
-  `tuneI8Config`（~1659）、`tuneU3Config`（~2095）、`tuneU2Config`（~2494）、
-  `tuneWmmaI8Config`（~4616）、`tuneWmmaU3Config`（~5302）、
-  `tuneWmmaU2Config`（~5953）
-- 现在是两遍取 min 的：`tuneWmmaConfig`（~3764）→ 三遍取中位数
-
-代价：WMMA tune 时间 +50%，GEMV 类 ×3（kernel 很小，绝对值可忽略）。
-结果会写盘缓存，不影响稳态推理。
-
-注意：`update_lut.py` 里的 `drop_implausible` 净化**保留**，作为第二道防线。
+结论：**内核 tuner 逻辑保持原样，一行不改。** 幽灵读数只在离线侧处理，而且
+已经在做——`update_lut.py` 的 `drop_implausible`（建表时丢弃低于该 shape 中位
+数/20 的读数并重算 winner）。sweep 工具只是触发内核 autotune 并读日志，过滤发生
+在建表阶段，不碰生产代码、不影响任何在线路径。
 
 ### 步骤 2：补齐 shape
 
-**2a. 修 sweep 的两个限制**（在 `tools/mn_autotune_sweep.cpp`）
+**2a. 修 sweep 的两个限制**（在 `tools/mn_autotune_sweep.cpp`）— 已完成
 
-- 放宽 `K % 32` 过滤，允许最后一个 block 不满的 K（如 K=4304）
-- 词表投影和大 N 高 M 档的输出缓冲上限：改成按需分档，
-  或对超限的 (M,N) 组合复用输出缓冲/分块，把 (a)(b) 两类缺口补上
+已落地的改动：
 
-**2b. 扩充真实模型 shape**
+- loader 不再整条丢弃 K%32≠0，只要求 K/N/gs>0；
+- `max_out_elems` 默认 32Mi→256Mi：旧值把 N<65536 的真实 prefill 高 M 档
+  （如 N=17408 K=5120 的 M=2048/4096）误杀了；新值放行到 M=4096，
+  同时 lm_head（N≥big_n）仍由 big_n 强制 M=1；
+- K%32≠0 的处理跟随下面的"选项 B"：decode 用真实 K，prefill 用 k_pad
+  （dispatch 内部把 K 补到 32 的倍数走 WMMA），dp4a 仍跳过（内核要求
+  K%32==0）。prefill 的 `#SHAPE` 标记打印 k_pad，与运行时 LUT 查询的 K 一致。
 
-目标是让常见部署直接精确命中。从各模型的
-`hidden_size / intermediate_size / num_heads / num_kv_heads / vocab_size`
-推导 `(N, K)`，覆盖至少：
+本地模拟确认 `max_out_elems` 修复关掉 20 个 prefill 高 M 缺口；`N=1152 K=4304`
+的 decode 由"丢弃"恢复，prefill 由选项 B 走 WMMA。
 
-- Qwen 2.5 / 3.x 全尺寸（0.5B / 1.5B / 3B / 7B / 14B / 32B / 72B，含 MoE）
-- Llama 3.x（1B / 3B / 8B / 70B）
-- Mistral / Mixtral
-- Phi-3 / Phi-4
-- Gemma 2 / 3
-- DeepSeek V2 / V3 / R1 蒸馏系列
+剩余的 lm_head M=1 缺口（N≥65536）工具本就支持 M=1，之前只是没跑到——
+步骤 3 重跑整份 CSV 即可补上。4 个非 last-token lm_head 模型
+（gemma-4-12B/E2B/E4B、Nemotron）的宽 M 档需 `--big-n 0` 或单独 CSV，
+工具已支持。
 
-每个模型的 4 类矩阵：QKV 投影（含 GQA 的非对称 N）、O 投影、
-gate/up（含合并与不合并两种导出）、down、lm_head。
+**选项 B：K%32≠0 的 int4 prefill 走 WMMA（K 补零）— 已完成并本地验证**
 
-gs 取 32 和 128，zp 取对称和非对称。
+问题：某些模型的 intermediate_size 不是 32 的倍数（如 gemma-4-26B-A4B 的
+down_proj，K=4304=16×269），WMMA 要求 K%32==0，这些 shape 的 prefill 会掉到
+naive，性能很差，且每层每次 prefill 都踩。
 
-产出：`shapes/industry_models_bits4.csv`，格式同 `oga_models_bits4.csv`。
-与 oga_models 合并去重后一起 sweep——oga_models 的 shape 必然被包含。
+做法（`matmul_nbits_kernel.hip` 的 host dispatch，**不改 WMMA kernel**）：
+K%32≠0 且 M≥kWmmaMinM 时，把 K 补到 32 的倍数 K_pad，用一个补零的激活拷贝
+（`ensureAPadBuffer` + `hipMemcpy2DAsync` 拷真实列 + `hipMemset2DAsync` 清尾部）
+走原封不动的 WMMA。权重行距本就按满组补齐到 K_pad，无需改。补的激活是 0，对
+点积贡献 0，输出 [M,N] 不变，无需裁切。K%32==0 的 shape 不进这个分支，逐字节
+不受影响。
 
-预估：现在 140 个 (N,K,gs,zp) → 目标 600~1000 个。
-按每 shape 12 个点（10 个 prefill M 档 + decode + dp4a）算，
-约 7000~12000 点，`.fb` 约 150~250 KB。可以接受。
+本地单 kernel 验证（gfx1151，对 CPU fp32 参考）：
+
+| 路径 | shape | max_abs | rel |
+|---|---|---|---|
+| 新 K-pad | M=32/128/17, N=1152, K=4304, gs=32 | 0.0004 | 0.05% |
+| 控制（未改动） | K=4096；N=14336 | 0.0003–0.0007 | 0.06–0.10% |
+
+测试在 `tools/mn_kpad_test.cpp`。构建要点（避免重蹈覆辙）：
+- flatc 默认生成 C 风格 enum（`MnBits_B4`），代码用 scoped → 必须
+  `flatc --cpp --scoped-enums`；
+- 这个 Windows flatc 的 `-o` 是坏的（报成功不写文件）→ cd 进目标目录不带 `-o`；
+- 用 therock 自带 clang（`therock-dist/lib/llvm/bin/clang++`），和它的 device
+  libs 配套；链接 `matmul_nbits_autotune.cpp` + `tools/empty_lut_data.cpp`。
+
+**2b. 扩充业界模型 shape — 已放弃（超出当前目标）**
+
+当前目标就是"oga_models 全覆盖、每个 shape 命中自己实测的最佳 config"，
+不需要扩充别的模型。手推业界模型的 (N,K) 还有导出融合方式不确定的风险
+（QKV 是否合并、gate/up 是否合并、GQA kv 维度、head_dim），容易产出与真实
+导出对不上的死点。若将来要做，应沿用 `extract_shapes.py` 从真实 ONNX 图抽取，
+而不是手算。
 
 ### 步骤 3：重跑全量 sweep 并重建表
 
