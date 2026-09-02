@@ -1828,6 +1828,33 @@ HIP_KERNEL_API void hip_matmul_nbits_dequant_b_fp16(
     void* stream, const void* B_packed, const void* scales_fp16,
     const void* zeros_fp16, void* B_fp16_out, int N, int K, int group_size);
 
+/* -------------------------------------------------------------------------
+ * int4 row-stride padding and stride-aware WMMA dispatch.
+ *
+ * hip_matmul_nbits_u4_padrow_bytes: allocation size for the padded weight
+ *   buffer (N rows of K/2 + 128 bytes).
+ *
+ * hip_matmul_nbits_u4_prepack_padrow: copy B into dst with the padded stride.
+ *   Source row stride is K/2, so the caller must have established that
+ *   group_size divides K; dst needs padrow_bytes(N, K) bytes.
+ *
+ * hip_matmul_nbits_u4_wmma_stride: fused int4 WMMA prefill against a B whose
+ *   row stride may be padded. b_row_bytes == 0 means the arrival stride.
+ *   Non-zero restricts the autotune to fused configs (the separate-dequant
+ *   pass has no stride argument) and keys the cache with the stride, so the
+ *   winner reflects the layout actually in use. Returns -1 when no fused
+ *   config is eligible, leaving the caller to use the arrival-layout path.
+ * ------------------------------------------------------------------------- */
+HIP_KERNEL_API size_t hip_matmul_nbits_u4_padrow_bytes(int N, int K);
+
+HIP_KERNEL_API int hip_matmul_nbits_u4_prepack_padrow(
+    void* stream, const void* B, void* dst, int N, int K);
+
+HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_stride(
+    void* stream, int cfg, int M, int N, int K, int group_size,
+    const void* A, int lda, const void* B, const void* scales,
+    const void* zeros, void* C, int ldc, int b_row_bytes);
+
 /* =========================================================================
  * GatherBlockQuantized (com.microsoft)
  * =========================================================================
