@@ -352,6 +352,13 @@ int matmul_nbits_prefill_hipblaslt(MatmulNbitsState *mst, RuntimeState *state,
     if (it != mst->prefill_algos.end()) {
       chosen = it->second;
       have_algo = chosen.has_algo;
+    } else if (!hipdnn_ep_matmul_nbits_autotune_enabled()) {
+      // Autotune off: skip enumerating and timing candidate algos and use
+      // hipBLASLt's default internal kernel (algo=nullptr). Cache the decision
+      // so the lookup above answers on later calls for this shape.
+      chosen = MatmulNbitsState::PrefillAlgo{};
+      have_algo = false;
+      mst->prefill_algos.emplace(key, chosen);
     } else {
       // Cold miss: collect candidates (perf-ranked heuristic first, then the
       // full enumeration as a fallback) and benchmark them into a scratch
@@ -610,8 +617,9 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
       if (base) {
         void *a_qb = base;
         void *a_scale = base + scale_off;
-        int rc = hip_matmul_nbits_dp4a(stream, A, B, scales, pre_zp_u8, bias,
-                                       output, N, K, block_size, a_qb, a_scale);
+        int rc = hip_matmul_nbits_dp4a(
+            stream, A, B, scales, pre_zp_u8, bias, output, N, K, block_size,
+            a_qb, a_scale, hipdnn_ep_matmul_nbits_autotune_enabled() ? 1 : 0);
         if (rc == 0) {
           result = 0;
           goto cleanup;
@@ -658,9 +666,10 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
     // the general kernel dispatch below.
   }
 
-  HIP_CHECK(hip_matmul_nbits(stream, A, B, scales, zero_points, bias, output, M,
-                             N, K, batch_count, bits, block_size, elem_size,
-                             zp_elem_size, pre_zp_u8, pre_zp_fp16));
+  HIP_CHECK(hip_matmul_nbits(
+      stream, A, B, scales, zero_points, bias, output, M, N, K, batch_count,
+      bits, block_size, elem_size, zp_elem_size, pre_zp_u8, pre_zp_fp16,
+      hipdnn_ep_matmul_nbits_autotune_enabled() ? 1 : 0));
 
 cleanup:
   return result;
