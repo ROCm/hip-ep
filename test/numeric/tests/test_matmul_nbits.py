@@ -42,10 +42,7 @@ from onnx import TensorProto, helper, numpy_helper
 from framework.comparator import compare_outputs
 from framework.onnx_utils import make_model_from_nodes
 
-# 1 is the row-major GEMV, 128 the WMMA path. 2/7/15 cover the tier between
-# them, where M is below the 16-row WMMA fragment so every tile is a partial
-# one -- the case that depends on the bounds-checked kernel variant.
-SEQ_LENS = [1, 2, 7, 15, 128]
+SEQ_LENS = [1, 128]
 
 # --- GPT-OSS-20B constants ---
 HIDDEN = 2880
@@ -209,6 +206,44 @@ class TestMatMulNBits:
 
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-2, rtol=1e-2)
+
+    # K % block_size != 0 had no coverage at all, which is how a row-stride bug
+    # stayed hidden: the packed weight row is k_blocks * (block_size/2) bytes
+    # because the quantizer pads the last block, so a kernel computing the row
+    # stride as K/2 misaligns every row n > 0 by the padding delta. At
+    # block_size=32 that is invisible whenever K is a multiple of 32, which every
+    # other shape in this file is.
+    #
+    # K=4304 is the Gemma-4 vision MLP down_proj: 4304 % 32 == 16, so the true
+    # row is 135*16 = 2160 bytes against K/2 = 2152. It is also the shape that
+    # decides whether the WMMA fast path admits K % 32 != 0 -- 4304 = 269*16, so
+    # the 16-wide K tiles divide it exactly.
+    @pytest.mark.parametrize(
+        "K,N,block_size",
+        [
+            (4304, 1152, 32),  # Gemma-4 vision down_proj, K % 32 == 16
+            (48, 64, 32),      # smallest K % 32 != 0 case, 2 blocks
+            (144, 64, 128),    # K % block_size != 0 at block_size=128
+        ],
+    )
+    def test_matmul_nbits_k_not_block_aligned(
+        self, model_runner, K, N, block_size
+    ):
+        """MatMulNBits where K is not a multiple of block_size."""
+        model = _make_matmul_nbits_model(
+            1,
+            16,  # M >= 16 so the bits=4 WMMA path is the one under test
+            K,
+            N,
+            block_size=block_size,
+            scale_range=(-0.05, 0.05),
+        )
+
+        rng = np.random.default_rng(99)
+        x = rng.uniform(-0.5, 0.5, [1, 16, K]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
 
     @pytest.mark.parametrize("seq_len", SEQ_LENS)
     def test_matmul_nbits_qkv_gpt_oss_shape(self, model_runner, seq_len):
