@@ -127,4 +127,6 @@ An arch with no measured table still builds — CMake emits the zero-size stub,
 the loader finds no table, and every shape falls through to the sweep. Adding an
 arch is a table addition, never a build break.
 
-`HIPDNN_MN_LUT_LOG=1` logs load status, per-lookup tier hits, and misses.
+`HIPDNN_MATMUL_LUT_LOG=1` logs load status, per-lookup tier hits, and misses.
+`HIPDNN_MATMUL_AUTOTUNE_MODE=online` bypasses the table and runs the in-kernel
+autotune sweep instead (default `lookup` uses the table).

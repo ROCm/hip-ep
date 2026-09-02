@@ -39,10 +39,11 @@ bool logOn() {
   static const bool on = [] {
 #ifdef _WIN32
     char buf[8];
-    return GetEnvironmentVariableA("HIPDNN_MN_LUT_LOG", buf, sizeof(buf)) > 0 &&
+    return GetEnvironmentVariableA("HIPDNN_MATMUL_LUT_LOG", buf,
+                                   sizeof(buf)) > 0 &&
            buf[0] >= '1';
 #else
-    const char* v = getenv("HIPDNN_MN_LUT_LOG");
+    const char* v = getenv("HIPDNN_MATMUL_LUT_LOG");
     return v && v[0] >= '1';
 #endif
   }();

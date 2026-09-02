@@ -1282,6 +1282,43 @@ static int tuneGemvConfig(
 
 namespace mn_lut = hipdnn_ep::mn_autotune;
 
+/* Config source, mirroring GQA's HIPDNN_GQA_AUTOTUNE_MODE:
+ *   lookup (default) - resolve from the offline LUT, falling to the in-kernel
+ *                      autotune sweep only on a miss.
+ *   online           - bypass the LUT and always run the in-kernel sweep (the
+ *                      behaviour that predates the table), for A/B comparison.
+ * Both paths are compiled in; this only picks which one a process takes. Read
+ * once and latched: the tuners sit on the dispatch path, and getenv per call
+ * would serialize decode through the CRT environment lock. */
+static bool mnLutLookupEnabled() {
+    static const bool lookup = [] {
+        std::string raw;   // cross-platform env read, as in getTuneCachePath
+#ifdef _WIN32
+        char* v = nullptr;
+        size_t len = 0;
+        if (_dupenv_s(&v, &len, "HIPDNN_MATMUL_AUTOTUNE_MODE") == 0 && v) {
+            raw = v;
+            free(v);
+        }
+#else
+        if (const char* v = getenv("HIPDNN_MATMUL_AUTOTUNE_MODE")) raw = v;
+#endif
+        std::string s;
+        for (char c : raw) {
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') continue;
+            s.push_back(c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c);
+        }
+        if (s == "online") return false;
+        if (!s.empty() && s != "lookup")
+            fprintf(stderr,
+                    "[custom_kernels] unrecognised HIPDNN_MATMUL_AUTOTUNE_MODE="
+                    "\"%s\" (expected \"lookup\" or \"online\"); using lookup\n",
+                    raw.c_str());
+        return true;   // default, and explicit "lookup"
+    }();
+    return lookup;
+}
+
 static int gemvConfigFromGeometry(const mn_lut::GemvAnswer& g) {
     for (int cid = 0; cid < kNumGemvConfigs; cid++)
         if (kGemvConfigs[cid].threads == g.threads &&
@@ -1301,6 +1338,7 @@ static bool mnGemvValidator(void*, const mn_lut::GemvAnswer& g) {
  * Wmma answer on this path would be a malformed table and is rejected. */
 static int mnLutGemvConfig(mn_lut::Phase phase, int M, int N, int K, int gs,
                            bool has_zp) {
+    if (!mnLutLookupEnabled()) return -1;   // online mode: sweep, skip the LUT
     mn_lut::Request req;
     req.phase = phase;
     req.bits = 4;
@@ -3327,6 +3365,7 @@ static bool mnWmmaValidator(void* ctx, const mn_lut::WmmaAnswer& g) {
 // Returns a kWmmaConfigs index from the LUT, or -1 on a miss.
 static int mnLutWmmaConfig(int M, int N, int K, int gs, bool has_zp,
                            int b_row_bytes) {
+    if (!mnLutLookupEnabled()) return -1;   // online mode: sweep, skip the LUT
     mn_lut::Request req;
     req.phase = mn_lut::Phase::Prefill;
     req.bits = 4;
