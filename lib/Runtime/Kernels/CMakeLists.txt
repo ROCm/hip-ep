@@ -26,6 +26,11 @@ cmake_minimum_required(VERSION 3.18)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/hip_utils.cmake)
 
+# Needed by the MatMulNBits LUT embedding below. lib/Runtime/CMakeLists.txt also
+# looks for it, but that directory is traversed after this one, so the lookup
+# has to happen here too -- find_package caches, so this is not a second search.
+find_package(Python3 COMPONENTS Interpreter)
+
 # Require HIP_ARCHITECTURES to be set (no silent defaults that may not match hardware)
 if(NOT HIP_ARCHITECTURES)
     message(FATAL_ERROR
@@ -83,16 +88,73 @@ set(_kernel_sources
     hip/strided_copy_kernel.hip
 )
 
+# MatMulNBits offline autotune table.
+#
+# The table is per-arch and so is this target, which is why the bytes are
+# embedded here rather than in runtime.bc the way the GQA table is: a
+# custom_kernels_<arch>.dll carries exactly the table it can use.
+#
+# An arch with no measured table still builds -- the stub below defines the
+# symbol with size 0, the loader finds no table, and every shape falls through
+# to the runtime sweep exactly as before. Shipping a new arch is therefore a
+# table addition, never a build break.
+set(_matmul_nbits_autotune_dir ${CMAKE_CURRENT_SOURCE_DIR}/hip/autotune/matmul_nbits)
+
+function(_matmul_nbits_lut_data_source arch out_var)
+    set(_fb ${_matmul_nbits_autotune_dir}/lut/${arch}.fb)
+    set(_gen ${CMAKE_CURRENT_BINARY_DIR}/matmul_nbits_lut_data_${arch}.cpp)
+    if(EXISTS ${_fb})
+        add_custom_command(
+            OUTPUT ${_gen}
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/xxd.py
+                    --var kMatmulNbitsLutData
+                    --output ${_gen}.tmp
+                    ${_fb}
+            # xxd.py emits a `static` array; rewrite it to the extern "C" symbol
+            # matmul_nbits_autotune.cpp declares, and append the true size. The
+            # symbol is arch-neutral on purpose: each custom_kernels_<arch> DLL
+            # links exactly one of these, so a fixed name lets the one
+            # matmul_nbits_autotune.cpp reference it whatever arch it is built for.
+            COMMAND ${Python3_EXECUTABLE} -c
+                    "import os,sys; p=sys.argv[1]; q=sys.argv[2]; n=os.path.getsize(sys.argv[3]); d=open(p).read().replace('static const unsigned char','extern \"C\" const unsigned char'); open(q,'w').write('#include <cstddef>\\n'+d+f'\\nextern \"C\" const size_t kMatmulNbitsLutData_size = {n};\\n')"
+                    ${_gen}.tmp ${_gen} ${_fb}
+            COMMAND ${CMAKE_COMMAND} -E remove ${_gen}.tmp
+            DEPENDS ${_fb} ${CMAKE_SOURCE_DIR}/cmake/xxd.py
+            COMMENT "Embedding MatMulNBits LUT (${arch}.fb)"
+            VERBATIM
+        )
+    else()
+        message(STATUS
+            "[custom_kernels] no MatMulNBits LUT for ${arch}; "
+            "shapes will fall back to the runtime autotune")
+        file(WRITE ${_gen}
+"// Auto-generated: no measured MatMulNBits LUT for ${arch}.\n"
+"#include <cstddef>\n"
+"extern \"C\" const unsigned char kMatmulNbitsLutData[1] = {0};\n"
+"extern \"C\" const size_t kMatmulNbitsLutData_size = 0;\n")
+    endif()
+    set(${out_var} ${_gen} PARENT_SCOPE)
+endfunction()
+
 # One SHARED target per arch. Each builds a fatbin with that single slice;
 # OFFLOAD_ARCHS narrows the global list to one element so the resulting
 # DLL/SO is not bloated with code for archs the consumer won't load.
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
     set(_target custom_kernels_${_arch})
+    _matmul_nbits_lut_data_source(${_arch} _matmul_lut_src)
     hip_add_library(${_target} SHARED ${_kernel_sources}
+            ${_matmul_nbits_autotune_dir}/matmul_nbits_autotune.cpp
+            ${_matmul_lut_src}
         INCLUDE_DIRECTORIES
             ${CMAKE_CURRENT_SOURCE_DIR}/include
+            # matmul_nbits_autotune_generated.h; flatbuffers itself is
+            # header-only for reading, so no link library is needed.
+            ${CMAKE_BINARY_DIR}/schemas
+            $<TARGET_PROPERTY:flatbuffers::flatbuffers,INTERFACE_INCLUDE_DIRECTORIES>
         OFFLOAD_ARCHS
             ${_arch}
+        DEPENDS
+            HipSchemas
     )
     set_target_properties(${_target} PROPERTIES
         OUTPUT_NAME custom_kernels_${_arch}

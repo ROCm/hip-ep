@@ -1,0 +1,5 @@
+model,K,N,bits,block_size,has_zp,node_count
+gemma-4-12B-it-fp16-int4-kquant,3840,262144,4,32,1,1
+gemma-4-E2B-it-fp16-int4-kquant,1536,262144,4,32,1,1
+gemma-4-E4B-it-fp16-int4-kquant,2560,262144,4,32,1,1
+NVIDIA-Nemotron-3-Super-120B-A12B-BF16-onnx-fp16-int4-rtn-onnx,4096,131072,4,32,0,1

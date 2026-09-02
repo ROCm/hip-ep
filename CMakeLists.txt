@@ -145,6 +145,16 @@ if(BUILD_EP)
   # nesting the add there would create the targets too late for this path. The
   # guard makes a combined BUILD_EP + BUILD_HIP_TOOLS configure add it exactly
   # once (the block below is the BUILD_HIP_TOOLS-only fallback).
+  #
+  # schemas/ must be configured before lib/Runtime/Kernels: the per-arch
+  # custom_kernels target compiles matmul_nbits_autotune.cpp, which includes the
+  # flatbuffers-generated matmul_nbits_autotune_generated.h and depends on the
+  # HipSchemas target. Same one-shot guard idea as the kernels add below, so a
+  # combined BUILD_EP + BUILD_HIP_TOOLS configure adds schemas exactly once.
+  if(NOT _SCHEMAS_SUBDIR_ADDED)
+    add_subdirectory(schemas)
+    set(_SCHEMAS_SUBDIR_ADDED TRUE)
+  endif()
   if(NOT BUILD_MOCK_RUNTIME AND NOT _CUSTOM_KERNELS_SUBDIR_ADDED)
     add_subdirectory(lib/Runtime/Kernels)
     set(_CUSTOM_KERNELS_SUBDIR_ADDED TRUE)
@@ -199,8 +209,12 @@ if(BUILD_HIP_TOOLS)
 
   llvm_map_components_to_libnames(llvm_libs Support Core)
 
-  # FlatBuffers schemas (GenerateInterface pass metadata)
-  add_subdirectory(schemas)
+  # FlatBuffers schemas (GenerateInterface pass metadata). Guarded because the
+  # BUILD_EP block above may have already added it.
+  if(NOT _SCHEMAS_SUBDIR_ADDED)
+    add_subdirectory(schemas)
+    set(_SCHEMAS_SUBDIR_ADDED TRUE)
+  endif()
 
   # Real-runtime GPU kernels (lib/Runtime/Kernels) for a tools-only build
   # (BUILD_HIP_TOOLS without BUILD_EP). The guard skips this when the BUILD_EP
