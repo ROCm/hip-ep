@@ -628,6 +628,11 @@ if(NOT BUILD_MOCK_RUNTIME)
             message(STATUS "Found DynamicDispatch library: ${DD_CORE_LIB}")
 
             # Find additional DD libraries
+            find_library(DD_BINS_LIB
+                NAMES dyn_bins
+                PATHS ${DD_SEARCH_PATHS}
+                NO_DEFAULT_PATH
+            )
             find_library(DD_TRANSACTION_LIB
                 NAMES transaction
                 PATHS ${DD_SEARCH_PATHS}
@@ -744,8 +749,21 @@ if(NOT BUILD_MOCK_RUNTIME)
                 add_library(hipdnn-ep-dd STATIC
                     real/dynamic_dispatch.cpp
                     real/dd_static_init.cpp
+                    # real/dd_template_instantiations.cpp  # Not usable - see note below
                     op_state.cpp
                 )
+
+                # NOTE: DynamicDispatch template instantiation requirement
+                # ========================================================
+                # The link will currently FAIL with unresolved externals for:
+                #   - ryzenai::combined_gemm<uint16_t, uint8_t, uint16_t>::combined_gemm(...)
+                #   - ryzenai::iconv<uint16_t, uint8_t, uint16_t>::iconv(...)
+                #
+                # These template instantiations must be added to the DynamicDispatch DLL build.
+                # The DD team needs to explicitly instantiate and export these in dyn_dispatch_core.dll
+                # or dyn_bins.dll.
+                #
+                # Once DD is rebuilt with these symbols, this build will succeed and the warning will disappear.
 
                 # Determine DD installation layout
                 # There are three known layouts:
@@ -862,9 +880,14 @@ if(NOT BUILD_MOCK_RUNTIME)
 
                 # Link additional DD libraries ONLY if dyn_dispatch_core is a static library.
                 # When it's a DLL/shared library, these dependencies are already inside it.
+                # EXCEPTION: XRT must always be linked because dynamic_dispatch.cpp uses XRT C++ types directly.
                 if(DD_IS_STATIC_LIB)
                     message(STATUS "Linking transitive dependencies for static dyn_dispatch_core:")
 
+                    if(DD_BINS_LIB)
+                        target_link_libraries(hipdnn-ep-dd PRIVATE ${DD_BINS_LIB})
+                        message(STATUS "  - dyn_bins:     ${DD_BINS_LIB}")
+                    endif()
                     if(DD_TRANSACTION_LIB)
                         target_link_libraries(hipdnn-ep-dd PRIVATE ${DD_TRANSACTION_LIB})
                         message(STATUS "  - transaction:  ${DD_TRANSACTION_LIB}")
@@ -903,6 +926,16 @@ if(NOT BUILD_MOCK_RUNTIME)
                     endif()
                 else()
                     message(STATUS "Skipping transitive dependencies (already in dyn_dispatch_core DLL)")
+                    # XRT must always be linked, even in DLL mode, because our wrapper uses XRT C++ types
+                    if(XRT_COREUTIL_LIB)
+                        target_link_libraries(hipdnn-ep-dd PRIVATE ${XRT_COREUTIL_LIB})
+                        message(STATUS "  - xrt_coreutil: ${XRT_COREUTIL_LIB} (required for XRT C++ symbols)")
+                    endif()
+                    # dyn_bins contains operator template instantiations
+                    if(DD_BINS_LIB)
+                        target_link_libraries(hipdnn-ep-dd PRIVATE ${DD_BINS_LIB})
+                        message(STATUS "  - dyn_bins:     ${DD_BINS_LIB} (contains operator implementations)")
+                    endif()
                 endif()
 
                 set_target_properties(hipdnn-ep-dd PROPERTIES
