@@ -466,6 +466,12 @@ jobs:
         with:
           python-version: "3.14"
 
+      # requests: OGA build.py's util.dependency_resolver imports it at
+      # module load (the pinned Python 3.14 has no preinstalled requests).
+      - name: Install pip dependencies
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        run: pip install requests
+
       - name: Setup MSVC environment
         if: steps.cache-oga.outputs.cache-hit != 'true'
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
