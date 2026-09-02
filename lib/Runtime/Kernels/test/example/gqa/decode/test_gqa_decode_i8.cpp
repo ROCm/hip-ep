@@ -1,3 +1,8 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
 // ============================================================
 // custom_kernels GQA flash *decode* with INT8 KV cache (fp16 Q, int8 K/V).
 //

@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
+
 """Update the GQA autotune LUT from fresh measurements.
 
 Three steps, run individually or all at once:

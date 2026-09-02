@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
+
 """
 Verify true-data folder: reload inputs, compute C = A @ dequant(B)^T in NumPy,
 compare against the provided reference output and GPU output.
