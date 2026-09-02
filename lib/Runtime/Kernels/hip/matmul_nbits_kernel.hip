@@ -65,6 +65,19 @@
 #include <string>
 #include <unordered_map>
 
+// Master switch for this DLL's matmul_nbits autotuners (the on-device
+// GEMV/WMMA config sweeps below). The kernel does NOT read the environment
+// itself: the runtime (real/matmul_nbits.cpp) reads HIPDNN_EP_MATMUL_NBITS_AUTOTUNE
+// through its /MT-safe reader (hipdnn_ep_matmul_nbits_autotune_enabled) and
+// passes the decision into the entry points, which store it here -- the same
+// "runtime decides, kernel receives" split HIPDNN_GQA_AUTOTUNE_MODE uses (its
+// env read lives in the runtime-bitcode gqa_autotune.cpp, not the kernel).
+// DEFAULT-ON; =0 skips the sweeps and returns each tuner's best_id. Set by
+// hip_matmul_nbits / hip_matmul_nbits_dp4a before any getOrTune* runs. The
+// value is process-constant (the runtime latches it once), so every entry-point
+// write stores the same value and the unsynchronized write is benign.
+static bool g_matmul_nbits_autotune = true;
+
 /* -----------------------------------------------------------------------
  * Shared disk-persistent autotune cache (GEMV int4 / int8 paths)
  *
@@ -1273,6 +1286,12 @@ static int getOrTuneGemvConfig(
     int64_t batch, int64_t bs,
     bool col_major = false)
 {
+    // Autotune off: return the safe default without sweeping or touching the
+    // cache. Config 8 is tuneGemvConfig's best_id -- the value it keeps when no
+    // candidate beats it -- so this matches the existing no-better-found path.
+    if (!g_matmul_nbits_autotune)
+        return 8;
+
     // M=1: col_major and row_major layouts are identical (single row) —
     // reuse the row_major autotune result to avoid a redundant tuning pass.
     bool effective_col_major = (M == 1) ? false : col_major;
@@ -1411,6 +1430,10 @@ static int getOrTuneDp4aConfig(
     const __half* bi, __half* out,
     int64_t N, int64_t K, int64_t bs)
 {
+    // Autotune off: safe default (tuneDp4aConfig's best_id), no sweep/cache.
+    if (!g_matmul_nbits_autotune)
+        return 9;
+
     std::string key = std::to_string(N) + "_" + std::to_string(K) + "_" +
                       std::to_string(bs) + "_" + (zp ? "1" : "0");
 
@@ -1445,9 +1468,12 @@ extern "C" int hip_matmul_nbits_dp4a(
     const void* A, const void* B, const void* scales, const void* zp_u8,
     const void* bias, void* out,
     int64_t N, int64_t K, int64_t block_size,
-    void* a_qb_scratch, void* a_scale_scratch)
+    void* a_qb_scratch, void* a_scale_scratch,
+    int autotune_enabled)
 {
     if (K % 32 != 0) return hipErrorInvalidValue;
+    // Runtime-supplied autotune switch (see g_matmul_nbits_autotune).
+    g_matmul_nbits_autotune = (autotune_enabled != 0);
     hipStream_t stream = static_cast<hipStream_t>(stream_v);
 
     const __half*  Ah   = static_cast<const __half*>(A);
@@ -1629,6 +1655,10 @@ static int getOrTuneGemvConfigI8(
     int64_t M, int64_t N, int64_t K,
     int64_t batch, int64_t bs)
 {
+    // Autotune off: safe default (tuneGemvConfigI8's best_id), no sweep/cache.
+    if (!g_matmul_nbits_autotune)
+        return 8;
+
     const bool has_zp = (zp != nullptr);
     std::string key = gemvI8CacheKey(M, N, K, bs, has_zp);
 
@@ -2068,6 +2098,10 @@ static int getOrTuneGemvConfigU3(
     int64_t M, int64_t N, int64_t K,
     int64_t batch, int64_t bs)
 {
+    // Autotune off: safe default (tuneGemvConfigU3's best_id), no sweep/cache.
+    if (!g_matmul_nbits_autotune)
+        return 8;
+
     const bool has_zp = (zp != nullptr);
     std::string key = gemvU3CacheKey(M, N, K, bs, has_zp);
 
@@ -2474,6 +2508,10 @@ static int getOrTuneGemvConfigU2(
     int64_t M, int64_t N, int64_t K,
     int64_t batch, int64_t bs)
 {
+    // Autotune off: safe default (tuneGemvConfigU2's best_id), no sweep/cache.
+    if (!g_matmul_nbits_autotune)
+        return 8;
+
     const bool has_zp = (zp != nullptr);
     std::string key = gemvU2CacheKey(M, N, K, bs, has_zp);
 
@@ -3449,6 +3487,10 @@ static int getOrTuneWmmaConfig(
     int gs, int ngk,
     _Float16* C, int ldc, bool has_zp)
 {
+    // Autotune off: safe default (tuneWmmaConfig's best_id), no sweep/cache.
+    if (!g_matmul_nbits_autotune)
+        return 9;
+
     std::call_once(wmma_cache_init_flag, loadWmmaCache);
 
     std::string key = wmmaCacheKey(M, N, K, gs, has_zp);
@@ -3967,6 +4009,10 @@ static int getOrTuneWmmaConfigI8(
     int gs, int ngk,
     _Float16* C, int ldc, bool has_zp)
 {
+    // Autotune off: safe default (tuneWmmaConfigI8's best_id), no sweep/cache.
+    if (!g_matmul_nbits_autotune)
+        return 12;
+
     std::string key = wmmaI8CacheKey(M, N, K, gs, has_zp);
 
     std::lock_guard<std::mutex> lock(wmma_i8_tune_mutex);
@@ -4685,6 +4731,10 @@ static int getOrTuneWmmaConfigU3(
     int gs, int ngk,
     _Float16* C, int ldc, bool has_zp)
 {
+    // Autotune off: safe default (tuneWmmaConfigU3's best_id), no sweep/cache.
+    if (!g_matmul_nbits_autotune)
+        return 12;
+
     std::string key = wmmaU3CacheKey(M, N, K, gs, has_zp);
 
     std::lock_guard<std::mutex> lock(wmma_u3_tune_mutex);
@@ -5323,6 +5373,10 @@ static int getOrTuneWmmaConfigU2(
     int gs, int ngk,
     _Float16* C, int ldc, bool has_zp)
 {
+    // Autotune off: safe default (tuneWmmaConfigU2's best_id), no sweep/cache.
+    if (!g_matmul_nbits_autotune)
+        return 12;
+
     std::string key = wmmaU2CacheKey(M, N, K, gs, has_zp);
 
     std::lock_guard<std::mutex> lock(wmma_u2_tune_mutex);
@@ -5569,7 +5623,10 @@ extern "C" int hip_matmul_nbits(
     int64_t element_size_bytes,
     int64_t zp_elem_size,
     const void* pre_unpacked_zp_u8,
-    const void* pre_unpacked_zp_fp16) {
+    const void* pre_unpacked_zp_fp16,
+    int autotune_enabled) {
+  // Runtime-supplied autotune switch (see g_matmul_nbits_autotune).
+  g_matmul_nbits_autotune = (autotune_enabled != 0);
   if (bits != 2 && bits != 3 && bits != 4 && bits != 8) {
     fprintf(stderr,
             "[custom_kernels] hip_matmul_nbits: only bits=2, bits=3, bits=4 "
