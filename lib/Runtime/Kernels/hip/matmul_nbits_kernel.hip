@@ -1280,7 +1280,7 @@ static int tuneGemvConfig(
  * next-nearest point instead of returning something unlaunchable.
  * ----------------------------------------------------------------------- */
 
-namespace mn_lut = hipdnn_ep::mn_autotune;
+namespace matmul_lut = hipdnn_ep::matmul_nbits_autotune;
 
 /* Config source, mirroring GQA's HIPDNN_GQA_AUTOTUNE_MODE:
  *   lookup (default) - resolve from the offline LUT, falling to the in-kernel
@@ -1290,7 +1290,7 @@ namespace mn_lut = hipdnn_ep::mn_autotune;
  * Both paths are compiled in; this only picks which one a process takes. Read
  * once and latched: the tuners sit on the dispatch path, and getenv per call
  * would serialize decode through the CRT environment lock. */
-static bool mnLutLookupEnabled() {
+static bool matmulNbitsLutLookupEnabled() {
     static const bool lookup = [] {
         std::string raw;   // cross-platform env read, as in getTuneCachePath
 #ifdef _WIN32
@@ -1319,7 +1319,7 @@ static bool mnLutLookupEnabled() {
     return lookup;
 }
 
-static int gemvConfigFromGeometry(const mn_lut::GemvAnswer& g) {
+static int gemvConfigFromGeometry(const matmul_lut::GemvAnswer& g) {
     for (int cid = 0; cid < kNumGemvConfigs; cid++)
         if (kGemvConfigs[cid].threads == g.threads &&
             kGemvConfigs[cid].tile_n == g.tile_n)
@@ -1327,7 +1327,7 @@ static int gemvConfigFromGeometry(const mn_lut::GemvAnswer& g) {
     return -1;
 }
 
-static bool mnGemvValidator(void*, const mn_lut::GemvAnswer& g) {
+static bool matmulNbitsGemvValidator(void*, const matmul_lut::GemvAnswer& g) {
     return gemvConfigFromGeometry(g) >= 0;
 }
 
@@ -1336,10 +1336,10 @@ static bool mnGemvValidator(void*, const mn_lut::GemvAnswer& g) {
  * The WMMA validator is null here: a Decode/DecodeDp4a lookup can only reach a
  * point whose payload is Gemv (pointConsistent enforces that at load), so a
  * Wmma answer on this path would be a malformed table and is rejected. */
-static int mnLutGemvConfig(mn_lut::Phase phase, int M, int N, int K, int gs,
+static int matmulNbitsLutGemvConfig(matmul_lut::Phase phase, int M, int N, int K, int gs,
                            bool has_zp) {
-    if (!mnLutLookupEnabled()) return -1;   // online mode: sweep, skip the LUT
-    mn_lut::Request req;
+    if (!matmulNbitsLutLookupEnabled()) return -1;   // online mode: sweep, skip the LUT
+    matmul_lut::Request req;
     req.phase = phase;
     req.bits = 4;
     req.m = M;
@@ -1347,9 +1347,9 @@ static int mnLutGemvConfig(mn_lut::Phase phase, int M, int N, int K, int gs,
     req.k = K;
     req.group_size = gs;
     req.has_zp = has_zp;
-    const mn_lut::Result r =
-        mn_lut::resolve(req, nullptr, mnGemvValidator, nullptr);
-    if (r.source == mn_lut::Source::None) return -1;
+    const matmul_lut::Result r =
+        matmul_lut::resolve(req, nullptr, matmulNbitsGemvValidator, nullptr);
+    if (r.source == matmul_lut::Source::None) return -1;
     const int cid = gemvConfigFromGeometry(r.gemv);
     if (cid >= 0)
         CUSTOM_KERNELS_DEBUG_LOG(
@@ -1407,7 +1407,7 @@ static int getOrTuneGemvConfig(
     // Map miss: try the offline table before paying for a sweep. A hit is
     // written into the map (and the disk file) so this shape never consults the
     // LUT again in this process.
-    const int lut = mnLutGemvConfig(mn_lut::Phase::Decode, static_cast<int>(M),
+    const int lut = matmulNbitsLutGemvConfig(matmul_lut::Phase::Decode, static_cast<int>(M),
                                     static_cast<int>(N), static_cast<int>(K),
                                     static_cast<int>(bs), zp != nullptr);
     if (lut >= 0) {
@@ -1556,7 +1556,7 @@ static int getOrTuneDp4aConfig(
 
     // Keyed as DecodeDp4a, not Decode: this kernel ranks kGemvConfigs
     // differently from the fp GEMV, which is why the two keep separate caches.
-    const int lut = mnLutGemvConfig(mn_lut::Phase::DecodeDp4a, 1,
+    const int lut = matmulNbitsLutGemvConfig(matmul_lut::Phase::DecodeDp4a, 1,
                                     static_cast<int>(N), static_cast<int>(K),
                                     static_cast<int>(bs), zp != nullptr);
     if (lut >= 0) {
@@ -3339,12 +3339,12 @@ static bool wmmaConfigApplies(const WmmaConfig& c, int N, int gs) {
  * cache-then-LUT-then-sweep ordering this serves. */
 
 // wmmaConfigApplies needs the shape, so the validator carries it through ctx.
-struct MnWmmaLutCtx {
+struct MatmulNbitsWmmaLutCtx {
     int n;
     int gs;
 };
 
-static int wmmaConfigFromGeometry(const mn_lut::WmmaAnswer& g, int N, int gs) {
+static int wmmaConfigFromGeometry(const matmul_lut::WmmaAnswer& g, int N, int gs) {
     for (int cid = 0; cid < kNumWmmaConfigs; cid++) {
         const WmmaConfig& c = kWmmaConfigs[cid];
         if (c.bm != g.bm || c.bn != g.bn || c.swizzle_n != g.swizzle_n ||
@@ -3357,17 +3357,17 @@ static int wmmaConfigFromGeometry(const mn_lut::WmmaAnswer& g, int N, int gs) {
     return -1;
 }
 
-static bool mnWmmaValidator(void* ctx, const mn_lut::WmmaAnswer& g) {
-    const auto* c = static_cast<const MnWmmaLutCtx*>(ctx);
+static bool matmulNbitsWmmaValidator(void* ctx, const matmul_lut::WmmaAnswer& g) {
+    const auto* c = static_cast<const MatmulNbitsWmmaLutCtx*>(ctx);
     return wmmaConfigFromGeometry(g, c->n, c->gs) >= 0;
 }
 
 // Returns a kWmmaConfigs index from the LUT, or -1 on a miss.
-static int mnLutWmmaConfig(int M, int N, int K, int gs, bool has_zp,
+static int matmulNbitsLutWmmaConfig(int M, int N, int K, int gs, bool has_zp,
                            int b_row_bytes) {
-    if (!mnLutLookupEnabled()) return -1;   // online mode: sweep, skip the LUT
-    mn_lut::Request req;
-    req.phase = mn_lut::Phase::Prefill;
+    if (!matmulNbitsLutLookupEnabled()) return -1;   // online mode: sweep, skip the LUT
+    matmul_lut::Request req;
+    req.phase = matmul_lut::Phase::Prefill;
     req.bits = 4;
     req.m = M;
     req.n = N;
@@ -3375,10 +3375,10 @@ static int mnLutWmmaConfig(int M, int N, int K, int gs, bool has_zp,
     req.group_size = gs;
     req.has_zp = has_zp;
     req.b_row_bytes = b_row_bytes;
-    MnWmmaLutCtx ctx{N, gs};
-    const mn_lut::Result r =
-        mn_lut::resolve(req, mnWmmaValidator, nullptr, &ctx);
-    if (r.source == mn_lut::Source::None) return -1;
+    MatmulNbitsWmmaLutCtx ctx{N, gs};
+    const matmul_lut::Result r =
+        matmul_lut::resolve(req, matmulNbitsWmmaValidator, nullptr, &ctx);
+    if (r.source == matmul_lut::Source::None) return -1;
     const int cid = wmmaConfigFromGeometry(r.wmma, N, gs);
     // A padded stride can only be served by a fused config; the dequant pass
     // behind a !fused one has no stride argument.
@@ -4044,7 +4044,7 @@ static int getOrTuneWmmaConfig(
     // Map miss: the offline table before the sweep. The stride is part of the
     // LUT key for the same reason it is part of the cache key -- a padded
     // buffer has a different winner.
-    const int lut = mnLutWmmaConfig(M, N, K, gs, has_zp, b_row_bytes);
+    const int lut = matmulNbitsLutWmmaConfig(M, N, K, gs, has_zp, b_row_bytes);
     if (lut >= 0) {
         wmma_cache[key] = lut;
         saveWmmaCache();

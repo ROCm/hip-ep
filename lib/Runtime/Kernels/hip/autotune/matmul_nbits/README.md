@@ -39,7 +39,7 @@ table, or when the table is rejected as incompatible.
 | `shapes/oga_models_bits4.csv` | the shape inventory the exact tier is built from |
 | `scripts/extract_shapes.py` | ONNX graphs -> shape inventory |
 | `scripts/update_lut.py` | measure -> build -> compile |
-| `tools/mn_autotune_sweep.cpp` | GPU sweep driver |
+| `tools/matmul_nbits_autotune_sweep.cpp` | GPU sweep driver |
 | `tools/empty_lut_data.cpp` | zero-size payload, for builds that must not consult a table |
 
 ## The three tiers
@@ -77,7 +77,7 @@ this shape, makes the probe **fall through to the next tier** instead of
 returning something unlaunchable. Stale table, degraded answer, never a wrong
 one.
 
-`kernel_abi` (`"mn-v1"`) is the coarser guard: bump it when a config's *meaning*
+`kernel_abi` (`"matmul_nbits-v1"`) is the coarser guard: bump it when a config's *meaning*
 changes rather than its existence, and the whole table is rejected.
 
 ## Regenerating
@@ -93,7 +93,7 @@ python scripts/extract_shapes.py `
 #    supposed to be measuring.
 clang++ -x hip --offload-arch=gfx1151 -O3 -std=c++17 -w `
     -I lib/Runtime/Kernels/include -I <flatbuffers include> -I <generated header dir> `
-    tools/mn_autotune_sweep.cpp tools/empty_lut_data.cpp matmul_nbits_autotune.cpp `
+    tools/matmul_nbits_autotune_sweep.cpp tools/empty_lut_data.cpp matmul_nbits_autotune.cpp `
     ../../matmul_nbits_kernel.hip -o mn_sweep.exe
 
 # 3. measure -> build -> compile

@@ -16,15 +16,15 @@
  * Build (from the repo root):
  *   clang++ -std=c++17 -I <flatbuffers include> -I <generated header dir> \
  *       -I lib/Runtime/Kernels/hip/autotune/matmul_nbits \
- *       lib/Runtime/Kernels/hip/autotune/matmul_nbits/tools/mn_lut_test.cpp \
+ *       lib/Runtime/Kernels/hip/autotune/matmul_nbits/tools/matmul_nbits_lut_test.cpp \
  *       lib/Runtime/Kernels/hip/autotune/matmul_nbits/matmul_nbits_autotune.cpp \
- *       <generated mn_lut_data_gfx1151.cpp> -o mn_lut_test
+ *       <generated matmul_nbits_lut_data_gfx1151.cpp> -o matmul_nbits_lut_test
  */
 #include "matmul_nbits_autotune.h"
 
 #include <cstdio>
 
-using namespace hipdnn_ep::mn_autotune;
+using namespace hipdnn_ep::matmul_nbits_autotune;
 
 static bool acceptWmma(void*, const WmmaAnswer&) { return true; }
 static bool acceptGemv(void*, const GemvAnswer&) { return true; }

@@ -103,22 +103,22 @@ set(_kernel_sources
 # symbol with size 0, the loader finds no table, and every shape falls through
 # to the runtime sweep exactly as before. Shipping a new arch is therefore a
 # table addition, never a build break.
-set(_mn_autotune_dir ${CMAKE_CURRENT_SOURCE_DIR}/hip/autotune/matmul_nbits)
+set(_matmul_nbits_autotune_dir ${CMAKE_CURRENT_SOURCE_DIR}/hip/autotune/matmul_nbits)
 
-function(_mn_lut_data_source arch out_var)
-    set(_fb ${_mn_autotune_dir}/lut/${arch}.fb)
-    set(_gen ${CMAKE_CURRENT_BINARY_DIR}/mn_lut_data_${arch}.cpp)
+function(_matmul_nbits_lut_data_source arch out_var)
+    set(_fb ${_matmul_nbits_autotune_dir}/lut/${arch}.fb)
+    set(_gen ${CMAKE_CURRENT_BINARY_DIR}/matmul_nbits_lut_data_${arch}.cpp)
     if(EXISTS ${_fb})
         add_custom_command(
             OUTPUT ${_gen}
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/xxd.py
-                    --var kMnLutData_${arch}
+                    --var kMatmulNbitsLutData_${arch}
                     --output ${_gen}.tmp
                     ${_fb}
             # xxd.py emits a `static` array; rewrite it to the extern "C" symbol
             # matmul_nbits_autotune.cpp declares, and append the true size.
             COMMAND ${Python3_EXECUTABLE} -c
-                    "import os,sys; p=sys.argv[1]; q=sys.argv[2]; n=os.path.getsize(sys.argv[3]); d=open(p).read().replace('static const unsigned char','extern \"C\" const unsigned char'); open(q,'w').write('#include <cstddef>\\n'+d+f'\\nextern \"C\" const size_t kMnLutData_${arch}_size = {n};\\n')"
+                    "import os,sys; p=sys.argv[1]; q=sys.argv[2]; n=os.path.getsize(sys.argv[3]); d=open(p).read().replace('static const unsigned char','extern \"C\" const unsigned char'); open(q,'w').write('#include <cstddef>\\n'+d+f'\\nextern \"C\" const size_t kMatmulNbitsLutData_${arch}_size = {n};\\n')"
                     ${_gen}.tmp ${_gen} ${_fb}
             COMMAND ${CMAKE_COMMAND} -E remove ${_gen}.tmp
             DEPENDS ${_fb} ${CMAKE_SOURCE_DIR}/cmake/xxd.py
@@ -132,8 +132,8 @@ function(_mn_lut_data_source arch out_var)
         file(WRITE ${_gen}
 "// Auto-generated: no measured MatMulNBits LUT for ${arch}.\n"
 "#include <cstddef>\n"
-"extern \"C\" const unsigned char kMnLutData_${arch}[1] = {0};\n"
-"extern \"C\" const size_t kMnLutData_${arch}_size = 0;\n")
+"extern \"C\" const unsigned char kMatmulNbitsLutData_${arch}[1] = {0};\n"
+"extern \"C\" const size_t kMatmulNbitsLutData_${arch}_size = 0;\n")
     endif()
     set(${out_var} ${_gen} PARENT_SCOPE)
 endfunction()
@@ -143,10 +143,10 @@ endfunction()
 # DLL/SO is not bloated with code for archs the consumer won't load.
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
     set(_target custom_kernels_${_arch})
-    _mn_lut_data_source(${_arch} _mn_lut_src)
+    _matmul_nbits_lut_data_source(${_arch} _matmul_lut_src)
     hip_add_library(${_target} SHARED ${_kernel_sources}
-            ${_mn_autotune_dir}/matmul_nbits_autotune.cpp
-            ${_mn_lut_src}
+            ${_matmul_nbits_autotune_dir}/matmul_nbits_autotune.cpp
+            ${_matmul_lut_src}
         INCLUDE_DIRECTORIES
             ${CMAKE_CURRENT_SOURCE_DIR}/include
             # matmul_nbits_autotune_generated.h; flatbuffers itself is

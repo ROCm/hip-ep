@@ -20,8 +20,8 @@
  * Build (from the repo root):
  *   clang++ -x hip --offload-arch=gfx1151 -O3 -std=c++17 -w \
  *       -I lib/Runtime/Kernels/include \
- *       lib/Runtime/Kernels/hip/autotune/matmul_nbits/tools/mn_autotune_sweep.cpp \
- *       lib/Runtime/Kernels/hip/matmul_nbits_kernel.hip -o mn_sweep.exe
+ *       lib/Runtime/Kernels/hip/autotune/matmul_nbits/tools/matmul_nbits_autotune_sweep.cpp \
+ *       lib/Runtime/Kernels/hip/matmul_nbits_kernel.hip -o matmul_nbits_sweep.exe
  */
 #include <hip/hip_runtime.h>
 

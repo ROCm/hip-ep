@@ -54,12 +54,12 @@ d = sqrt( (wm·log2(M/Mp))² + (wn·log2(N/Np))² + (wk·log2(K/Kp))² )
 
 | 文件 | 内容 |
 |---|---|
-| `matmul_nbits_autotune.fbs` | schema v3：`MnTunePoint` / `MnFallback` / `weight_*`；删掉 `MnTier` `MnMBucket` `MnDimBucket` |
+| `matmul_nbits_autotune.fbs` | schema v3：`MatmulNbitsTunePoint` / `MatmulNbitsFallback` / `weight_*`；删掉 `MnTier` `MnMBucket` `MnDimBucket` |
 | `matmul_nbits_autotune.h` | `Source::Fuzzy` → `Source::Nearest`；`Result` 增加 `distance`；`Stats` 字段改名 |
 | `matmul_nbits_autotune.cpp` | 重写 `resolve()` 为最近邻；载入时预算 log 并按类别键分组 |
 | `scripts/update_lut.py` | build 产出点集；新增 `fit` 子命令；解析每 config 耗时；净化假读数 |
-| `tools/mn_lut_test.cpp` | 距离断言取代分层断言 |
-| `tools/mn_lut_query.cpp` | 输出距离直方图 |
+| `tools/matmul_nbits_lut_test.cpp` | 距离断言取代分层断言 |
+| `tools/matmul_nbits_lut_query.cpp` | 输出距离直方图 |
 | `matmul_nbits_kernel.hip` | 只改了注释和日志（`src=%d d=%.3f`），逻辑未动 |
 
 ### 尚未验证
@@ -253,7 +253,7 @@ tuner 里加遍数的做法都会让在线 autotune 变慢，而 LUT 的全部�
 
 ### 步骤 2：补齐 shape
 
-**2a. 修 sweep 的两个限制**（在 `tools/mn_autotune_sweep.cpp`）— 已完成
+**2a. 修 sweep 的两个限制**（在 `tools/matmul_nbits_autotune_sweep.cpp`）— 已完成
 
 已落地的改动：
 
@@ -293,8 +293,8 @@ K%32≠0 且 M≥kWmmaMinM 时，把 K 补到 32 的倍数 K_pad，用一个补�
 | 新 K-pad | M=32/128/17, N=1152, K=4304, gs=32 | 0.0004 | 0.05% |
 | 控制（未改动） | K=4096；N=14336 | 0.0003–0.0007 | 0.06–0.10% |
 
-测试在 `tools/mn_kpad_test.cpp`。构建要点（避免重蹈覆辙）：
-- flatc 默认生成 C 风格 enum（`MnBits_B4`），代码用 scoped → 必须
+测试在 `tools/matmul_nbits_kpad_test.cpp`。构建要点（避免重蹈覆辙）：
+- flatc 默认生成 C 风格 enum（`MatmulNbitsBits_B4`），代码用 scoped → 必须
   `flatc --cpp --scoped-enums`；
 - 这个 Windows flatc 的 `-o` 是坏的（报成功不写文件）→ cd 进目标目录不带 `-o`；
 - 用 therock 自带 clang（`therock-dist/lib/llvm/bin/clang++`），和它的 device
@@ -340,7 +340,7 @@ python $d/scripts/update_lut.py compile --flatc <flatc.exe>
   Python 参考实现和 C++ 的 `resolve()` 语义一致
   （两者必须一致，否则 `fit` 拟合的是运行时不使用的度量）
 
-`tools/mn_lut_test.cpp` 和 `tools/mn_lut_query.cpp` 保留，交给能构建的机器
+`tools/matmul_nbits_lut_test.cpp` 和 `tools/matmul_nbits_lut_query.cpp` 保留，交给能构建的机器
 或 CI 跑。
 
 ### 步骤 5：收尾文档

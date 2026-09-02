@@ -44,7 +44,7 @@ DATA_DIR = ROOT / "scripts" / "data"
 SHAPES = ROOT / "shapes" / "oga_models_bits4.csv"
 
 SCHEMA_VERSION = 3
-KERNEL_ABI = "mn-v1"
+KERNEL_ABI = "matmul_nbits-v1"
 
 GROUP_SIZES = {16: "G16", 32: "G32", 64: "G64", 128: "G128", 256: "G256",
                512: "G512"}
@@ -135,7 +135,7 @@ def answer_key(ans: dict):
 
 
 def config_entry(key) -> dict:
-    """answer_key tuple -> a MnTuneConfig dict."""
+    """answer_key tuple -> a MatmulNbitsTuneConfig dict."""
     if key[0] == "Wmma":
         _, bm, bn, sw, wm, wn, bk, fused = key
         return {"kind": "Wmma", "bm16": bm // 16, "bn16": bn // 16,
@@ -649,8 +649,8 @@ def main() -> int:
     ap.add_argument("command",
                     choices=["measure", "fit", "build", "compile", "all"])
     ap.add_argument("--arch", default="gfx1151")
-    ap.add_argument("--sweep", default="mn_sweep.exe",
-                    help="path to the built mn_autotune_sweep binary")
+    ap.add_argument("--sweep", default="matmul_nbits_sweep.exe",
+                    help="path to the built matmul_nbits_autotune_sweep binary")
     ap.add_argument("--shapes", default=str(SHAPES))
     ap.add_argument("--m", default=None,
                     help="comma-separated M list for the sweep")

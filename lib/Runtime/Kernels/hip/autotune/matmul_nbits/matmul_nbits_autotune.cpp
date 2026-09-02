@@ -24,16 +24,16 @@
 #endif
 
 namespace hipdnn_ep {
-namespace mn_autotune {
+namespace matmul_nbits_autotune {
 namespace {
 
-namespace fbs = hipdnn_ep::mn_autotune::fbs;
+namespace fbs = hipdnn_ep::matmul_nbits_autotune::fbs;
 
 constexpr uint32_t kSchemaVersion = 3;
 // Bump when the config tables or the meaning of a stored geometry changes.
 // A table stamped with an older ABI is rejected outright rather than allowed to
 // pick configs that no longer mean what they meant when they were measured.
-constexpr const char kKernelAbi[] = "mn-v1";
+constexpr const char kKernelAbi[] = "matmul_nbits-v1";
 
 bool logOn() {
   static const bool on = [] {
@@ -54,32 +54,32 @@ bool logOn() {
 // Classification
 // ---------------------------------------------------------------------------
 
-fbs::MnBits bitsClass(int bits) {
+fbs::MatmulNbitsBits bitsClass(int bits) {
   switch (bits) {
-  case 4: return fbs::MnBits::B4;
-  case 8: return fbs::MnBits::B8;
-  case 3: return fbs::MnBits::B3;
-  case 2: return fbs::MnBits::B2;
-  default: return fbs::MnBits::Any;
+  case 4: return fbs::MatmulNbitsBits::B4;
+  case 8: return fbs::MatmulNbitsBits::B8;
+  case 3: return fbs::MatmulNbitsBits::B3;
+  case 2: return fbs::MatmulNbitsBits::B2;
+  default: return fbs::MatmulNbitsBits::Any;
   }
 }
 
-fbs::MnGroupSize groupSizeClass(int gs) {
+fbs::MatmulNbitsGroupSize groupSizeClass(int gs) {
   switch (gs) {
-  case 16: return fbs::MnGroupSize::G16;
-  case 32: return fbs::MnGroupSize::G32;
-  case 64: return fbs::MnGroupSize::G64;
-  case 128: return fbs::MnGroupSize::G128;
-  case 256: return fbs::MnGroupSize::G256;
-  case 512: return fbs::MnGroupSize::G512;
-  default: return fbs::MnGroupSize::Any;
+  case 16: return fbs::MatmulNbitsGroupSize::G16;
+  case 32: return fbs::MatmulNbitsGroupSize::G32;
+  case 64: return fbs::MatmulNbitsGroupSize::G64;
+  case 128: return fbs::MatmulNbitsGroupSize::G128;
+  case 256: return fbs::MatmulNbitsGroupSize::G256;
+  case 512: return fbs::MatmulNbitsGroupSize::G512;
+  default: return fbs::MatmulNbitsGroupSize::Any;
   }
 }
 
 /* The exact-match part of the key. Points sharing one of these are mutually
  * comparable by distance; points across two of them are not. */
-uint32_t groupKey(fbs::MnPhase phase, fbs::MnBits bits, fbs::MnGroupSize gs,
-                  fbs::MnZeroPoint zp, fbs::MnRowStride stride) {
+uint32_t groupKey(fbs::MatmulNbitsPhase phase, fbs::MatmulNbitsBits bits, fbs::MatmulNbitsGroupSize gs,
+                  fbs::MatmulNbitsZeroPoint zp, fbs::MatmulNbitsRowStride stride) {
   return (static_cast<uint32_t>(phase) & 0x3u) |
          ((static_cast<uint32_t>(bits) & 0x7u) << 2) |
          ((static_cast<uint32_t>(gs) & 0x7u) << 5) |
@@ -87,7 +87,7 @@ uint32_t groupKey(fbs::MnPhase phase, fbs::MnBits bits, fbs::MnGroupSize gs,
          ((static_cast<uint32_t>(stride) & 0x3u) << 10);
 }
 
-uint32_t fallbackKey(fbs::MnPhase phase, fbs::MnBits bits) {
+uint32_t fallbackKey(fbs::MatmulNbitsPhase phase, fbs::MatmulNbitsBits bits) {
   return (static_cast<uint32_t>(phase) & 0x3u) |
          ((static_cast<uint32_t>(bits) & 0x7u) << 2);
 }
@@ -97,7 +97,7 @@ uint32_t fallbackKey(fbs::MnPhase phase, fbs::MnBits bits) {
 // ---------------------------------------------------------------------------
 
 struct Answer {
-  fbs::MnConfigKind kind;
+  fbs::MatmulNbitsConfigKind kind;
   WmmaAnswer wmma;
   GemvAnswer gemv;
 };
@@ -138,39 +138,39 @@ std::string currentGpuArch() {
  * lets the lookup trust what it finds: a point that slipped through with an
  * unclassified field would sit in a group nothing ever queries, or worse, in
  * one it does. */
-bool pointConsistent(const fbs::MnTunePoint& p, fbs::MnConfigKind kind) {
-  if (p.phase() == fbs::MnPhase::Any || p.bits() == fbs::MnBits::Any ||
-      p.group_size() == fbs::MnGroupSize::Any ||
-      p.zero_point() == fbs::MnZeroPoint::Any)
+bool pointConsistent(const fbs::MatmulNbitsTunePoint& p, fbs::MatmulNbitsConfigKind kind) {
+  if (p.phase() == fbs::MatmulNbitsPhase::Any || p.bits() == fbs::MatmulNbitsBits::Any ||
+      p.group_size() == fbs::MatmulNbitsGroupSize::Any ||
+      p.zero_point() == fbs::MatmulNbitsZeroPoint::Any)
     return false;
   if (p.m() == 0 || p.n() == 0 || p.k() == 0) return false;
 
   // Only prefill distinguishes row stride, and it must: a decode point naming
   // one would land in a group no decode lookup builds.
-  const bool prefill = p.phase() == fbs::MnPhase::Prefill;
-  if (prefill != (p.row_stride() != fbs::MnRowStride::Any)) return false;
+  const bool prefill = p.phase() == fbs::MatmulNbitsPhase::Prefill;
+  if (prefill != (p.row_stride() != fbs::MatmulNbitsRowStride::Any)) return false;
 
   // The referenced config has to match the path it will be handed to.
-  return kind == (prefill ? fbs::MnConfigKind::Wmma : fbs::MnConfigKind::Gemv);
+  return kind == (prefill ? fbs::MatmulNbitsConfigKind::Wmma : fbs::MatmulNbitsConfigKind::Gemv);
 }
 
-bool compatible(const fbs::MnAutotuneLut* lut) {
+bool compatible(const fbs::MatmulNbitsAutotuneLut* lut) {
   if (lut->schema_version() != kSchemaVersion) {
     if (logOn())
-      fprintf(stderr, "[mn-lut] schema %u != %u, ignoring table\n",
+      fprintf(stderr, "[matmul-lut] schema %u != %u, ignoring table\n",
               lut->schema_version(), kSchemaVersion);
     return false;
   }
   if (!lut->kernel_abi() || lut->kernel_abi()->str() != kKernelAbi) {
     if (logOn())
-      fprintf(stderr, "[mn-lut] kernel_abi mismatch, ignoring table\n");
+      fprintf(stderr, "[matmul-lut] kernel_abi mismatch, ignoring table\n");
     return false;
   }
   if (lut->gpu_arch() && !lut->gpu_arch()->str().empty()) {
     const std::string actual = currentGpuArch();
     if (actual.empty() || actual != lut->gpu_arch()->str()) {
       if (logOn())
-        fprintf(stderr, "[mn-lut] arch \"%s\" != device \"%s\", ignoring\n",
+        fprintf(stderr, "[matmul-lut] arch \"%s\" != device \"%s\", ignoring\n",
                 lut->gpu_arch()->c_str(), actual.c_str());
       return false;
     }
@@ -184,19 +184,19 @@ void loadBuffer(Table& t, const unsigned char* data, size_t size) {
   // from "log not wired": every shape will fall through to the runtime sweep.
   if (!data || size == 0) {
     if (logOn())
-      fprintf(stderr, "[mn-lut] no embedded table (size 0); shapes will "
+      fprintf(stderr, "[matmul-lut] no embedded table (size 0); shapes will "
                       "autotune at runtime\n");
     return;
   }
   flatbuffers::Verifier verifier(data, size);
-  if (!fbs::VerifyMnAutotuneLutBuffer(verifier)) {
-    if (logOn()) fprintf(stderr, "[mn-lut] buffer failed verification\n");
+  if (!fbs::VerifyMatmulNbitsAutotuneLutBuffer(verifier)) {
+    if (logOn()) fprintf(stderr, "[matmul-lut] buffer failed verification\n");
     return;
   }
-  const fbs::MnAutotuneLut* lut = fbs::GetMnAutotuneLut(data);
+  const fbs::MatmulNbitsAutotuneLut* lut = fbs::GetMatmulNbitsAutotuneLut(data);
   if (!lut || !lut->points() || !lut->configs() || !compatible(lut)) {
     if (logOn())
-      fprintf(stderr, "[mn-lut] table present (%zu bytes) but unusable "
+      fprintf(stderr, "[matmul-lut] table present (%zu bytes) but unusable "
                       "(malformed or incompatible); shapes will autotune\n",
               size);
     return;
@@ -207,7 +207,7 @@ void loadBuffer(Table& t, const unsigned char* data, size_t size) {
   // than quietly matching across it.
   if (!(lut->weight_m() > 0.0f) || !(lut->weight_n() > 0.0f) ||
       !(lut->weight_k() > 0.0f)) {
-    if (logOn()) fprintf(stderr, "[mn-lut] non-positive metric weight\n");
+    if (logOn()) fprintf(stderr, "[matmul-lut] non-positive metric weight\n");
     return;
   }
   t.wm = lut->weight_m();
@@ -217,10 +217,10 @@ void loadBuffer(Table& t, const unsigned char* data, size_t size) {
   // Decode the de-duplicated config pool once; points reference it by index.
   const auto* configs = lut->configs();
   t.pool.reserve(configs->size());
-  for (const fbs::MnTuneConfig* c : *configs) {
+  for (const fbs::MatmulNbitsTuneConfig* c : *configs) {
     Answer a{};
     a.kind = c->kind();
-    if (a.kind == fbs::MnConfigKind::Wmma) {
+    if (a.kind == fbs::MatmulNbitsConfigKind::Wmma) {
       a.wmma.bm = static_cast<int>(c->bm16()) * 16;
       a.wmma.bn = static_cast<int>(c->bn16()) * 16;
       a.wmma.swizzle_n = c->swizzle();
@@ -235,7 +235,7 @@ void loadBuffer(Table& t, const unsigned char* data, size_t size) {
     t.pool.push_back(a);
   }
 
-  for (const fbs::MnTunePoint* p : *lut->points()) {
+  for (const fbs::MatmulNbitsTunePoint* p : *lut->points()) {
     const unsigned idx = p->config();
     if (idx >= t.pool.size()) {   // dangling index: same treatment as a bad key
       ++t.invalid_points;
@@ -260,14 +260,14 @@ void loadBuffer(Table& t, const unsigned char* data, size_t size) {
   }
 
   if (lut->fallbacks()) {
-    for (const fbs::MnFallback* f : *lut->fallbacks()) {
+    for (const fbs::MatmulNbitsFallback* f : *lut->fallbacks()) {
       const unsigned idx = f->config();
-      if (idx >= t.pool.size() || f->phase() == fbs::MnPhase::Any ||
-          f->bits() == fbs::MnBits::Any)
+      if (idx >= t.pool.size() || f->phase() == fbs::MatmulNbitsPhase::Any ||
+          f->bits() == fbs::MatmulNbitsBits::Any)
         continue;
-      const bool prefill = f->phase() == fbs::MnPhase::Prefill;
+      const bool prefill = f->phase() == fbs::MatmulNbitsPhase::Prefill;
       if (t.pool[idx].kind !=
-          (prefill ? fbs::MnConfigKind::Wmma : fbs::MnConfigKind::Gemv))
+          (prefill ? fbs::MatmulNbitsConfigKind::Wmma : fbs::MatmulNbitsConfigKind::Gemv))
         continue;
       t.fallbacks.emplace(fallbackKey(f->phase(), f->bits()),
                           static_cast<uint16_t>(idx));
@@ -277,28 +277,28 @@ void loadBuffer(Table& t, const unsigned char* data, size_t size) {
   t.loaded = true;
   if (logOn())
     fprintf(stderr,
-            "[mn-lut] loaded %u points in %zu groups (%u rejected), "
+            "[matmul-lut] loaded %u points in %zu groups (%u rejected), "
             "weights m=%.2f n=%.2f k=%.2f, for %s\n",
             t.points, t.groups.size(), t.invalid_points, t.wm, t.wn, t.wk,
             lut->gpu_arch() ? lut->gpu_arch()->c_str() : "?");
 }
 
 }  // namespace
-}  // namespace mn_autotune
+}  // namespace matmul_nbits_autotune
 }  // namespace hipdnn_ep
 
 // Emitted by cmake/xxd.py from lut/gfx1151.fb; see lib/Runtime/CMakeLists.txt.
-extern "C" const unsigned char kMnLutData_gfx1151[];
-extern "C" const size_t kMnLutData_gfx1151_size;
+extern "C" const unsigned char kMatmulNbitsLutData_gfx1151[];
+extern "C" const size_t kMatmulNbitsLutData_gfx1151_size;
 
 namespace hipdnn_ep {
-namespace mn_autotune {
+namespace matmul_nbits_autotune {
 namespace {
 
 Table& table() {
   static Table* t = [] {
     auto* fresh = new Table();
-    loadBuffer(*fresh, kMnLutData_gfx1151, kMnLutData_gfx1151_size);
+    loadBuffer(*fresh, kMatmulNbitsLutData_gfx1151, kMatmulNbitsLutData_gfx1151_size);
     return fresh;
   }();
   return *t;
@@ -309,7 +309,7 @@ Table& table() {
  * refused here rather than returned: the caller would launch it. */
 bool accept(const Answer& answer, WmmaValidator wmma_valid,
             GemvValidator gemv_valid, void* ctx, Result& out) {
-  if (answer.kind == fbs::MnConfigKind::Wmma) {
+  if (answer.kind == fbs::MatmulNbitsConfigKind::Wmma) {
     if (!wmma_valid || !wmma_valid(ctx, answer.wmma)) return false;
     out.wmma = answer.wmma;
     return true;
@@ -327,24 +327,24 @@ Result resolve(const Request& request, WmmaValidator wmma_valid,
   Table& t = table();
   if (!t.loaded) return result;
 
-  fbs::MnPhase phase = fbs::MnPhase::Prefill;
+  fbs::MatmulNbitsPhase phase = fbs::MatmulNbitsPhase::Prefill;
   switch (request.phase) {
-  case Phase::Prefill:    phase = fbs::MnPhase::Prefill; break;
-  case Phase::Decode:     phase = fbs::MnPhase::Decode; break;
-  case Phase::DecodeDp4a: phase = fbs::MnPhase::DecodeDp4a; break;
+  case Phase::Prefill:    phase = fbs::MatmulNbitsPhase::Prefill; break;
+  case Phase::Decode:     phase = fbs::MatmulNbitsPhase::Decode; break;
+  case Phase::DecodeDp4a: phase = fbs::MatmulNbitsPhase::DecodeDp4a; break;
   }
-  const fbs::MnBits bits = bitsClass(request.bits);
-  if (bits == fbs::MnBits::Any) return result;
+  const fbs::MatmulNbitsBits bits = bitsClass(request.bits);
+  if (bits == fbs::MatmulNbitsBits::Any) return result;
   if (request.n <= 0 || request.k <= 0) return result;
 
-  const bool prefill = phase == fbs::MnPhase::Prefill;
-  const fbs::MnGroupSize gs = groupSizeClass(request.group_size);
-  const fbs::MnZeroPoint zp =
-      request.has_zp ? fbs::MnZeroPoint::Asymmetric : fbs::MnZeroPoint::Symmetric;
-  const fbs::MnRowStride stride =
-      !prefill ? fbs::MnRowStride::Any
-               : (request.b_row_bytes ? fbs::MnRowStride::Padded
-                                      : fbs::MnRowStride::Arrival);
+  const bool prefill = phase == fbs::MatmulNbitsPhase::Prefill;
+  const fbs::MatmulNbitsGroupSize gs = groupSizeClass(request.group_size);
+  const fbs::MatmulNbitsZeroPoint zp =
+      request.has_zp ? fbs::MatmulNbitsZeroPoint::Asymmetric : fbs::MatmulNbitsZeroPoint::Symmetric;
+  const fbs::MatmulNbitsRowStride stride =
+      !prefill ? fbs::MatmulNbitsRowStride::Any
+               : (request.b_row_bytes ? fbs::MatmulNbitsRowStride::Padded
+                                      : fbs::MatmulNbitsRowStride::Arrival);
 
   const float qm = std::log2(static_cast<float>(request.m < 1 ? 1 : request.m));
   const float qn = std::log2(static_cast<float>(request.n));
@@ -406,7 +406,7 @@ Result resolve(const Request& request, WmmaValidator wmma_valid,
       result.distance = std::sqrt(best_d2);
       if (logOn())
         fprintf(stderr,
-                "[mn-lut] %s phase=%d M=%d N=%d K=%d gs=%d zp=%d -> "
+                "[matmul-lut] %s phase=%d M=%d N=%d K=%d gs=%d zp=%d -> "
                 "point M=%u N=%u K=%u d=%.3f\n",
                 exact ? "exact" : "nearest", static_cast<int>(phase), request.m,
                 request.n, request.k, request.group_size,
@@ -421,14 +421,14 @@ Result resolve(const Request& request, WmmaValidator wmma_valid,
       accept(t.pool[fit->second], wmma_valid, gemv_valid, ctx, result)) {
     result.source = Source::Fallback;
     if (logOn())
-      fprintf(stderr, "[mn-lut] fallback phase=%d M=%d N=%d K=%d gs=%d zp=%d\n",
+      fprintf(stderr, "[matmul-lut] fallback phase=%d M=%d N=%d K=%d gs=%d zp=%d\n",
               static_cast<int>(phase), request.m, request.n, request.k,
               request.group_size, static_cast<int>(request.has_zp));
     return result;
   }
 
   if (logOn())
-    fprintf(stderr, "[mn-lut] miss phase=%d M=%d N=%d K=%d gs=%d zp=%d\n",
+    fprintf(stderr, "[matmul-lut] miss phase=%d M=%d N=%d K=%d gs=%d zp=%d\n",
             static_cast<int>(phase), request.m, request.n, request.k,
             request.group_size, static_cast<int>(request.has_zp));
   return result;
@@ -444,5 +444,5 @@ Stats stats() {
   return s;
 }
 
-}  // namespace mn_autotune
+}  // namespace matmul_nbits_autotune
 }  // namespace hipdnn_ep

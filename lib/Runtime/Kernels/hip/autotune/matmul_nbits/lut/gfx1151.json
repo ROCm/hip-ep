@@ -2,7 +2,7 @@
  "schema_version": 3,
  "gpu_arch": "gfx1151",
  "rocm_version": 70100,
- "kernel_abi": "mn-v1",
+ "kernel_abi": "matmul_nbits-v1",
  "model_key": "oga_models bits=4",
  "weight_m": 0.25,
  "weight_n": 1.0,

@@ -28,7 +28,7 @@
 #include <string>
 #include <vector>
 
-using namespace hipdnn_ep::mn_autotune;
+using namespace hipdnn_ep::matmul_nbits_autotune;
 
 static bool acceptWmma(void*, const WmmaAnswer&) { return true; }
 static bool acceptGemv(void*, const GemvAnswer&) { return true; }

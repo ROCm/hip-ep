@@ -15,11 +15,11 @@
  *     -I lib/Runtime/Kernels/include \
  *     -I lib/Runtime/Kernels/hip/autotune/matmul_nbits \
  *     -I <gen> -I <flatbuffers include> \
- *     lib/Runtime/Kernels/hip/autotune/matmul_nbits/tools/mn_kpad_test.cpp \
+ *     lib/Runtime/Kernels/hip/autotune/matmul_nbits/tools/matmul_nbits_kpad_test.cpp \
  *     lib/Runtime/Kernels/hip/matmul_nbits_kernel.hip \
  *     lib/Runtime/Kernels/hip/autotune/matmul_nbits/matmul_nbits_autotune.cpp \
  *     lib/Runtime/Kernels/hip/autotune/matmul_nbits/tools/empty_lut_data.cpp \
- *     -o mn_kpad_test
+ *     -o matmul_nbits_kpad_test
  */
 #include <hip/hip_runtime.h>
 

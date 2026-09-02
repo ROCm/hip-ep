@@ -26,7 +26,7 @@
  */
 
 namespace hipdnn_ep {
-namespace mn_autotune {
+namespace matmul_nbits_autotune {
 
 /* Where a resolved config came from. Reported so a caller (or a test) can tell
  * a real table hit from the compiled-in last resort.
@@ -122,7 +122,7 @@ struct Stats {
 
 Stats stats();
 
-}  // namespace mn_autotune
+}  // namespace matmul_nbits_autotune
 }  // namespace hipdnn_ep
 
 #endif  // HIPDNN_EP_MATMUL_NBITS_AUTOTUNE_H

@@ -14,5 +14,5 @@
  */
 #include <cstddef>
 
-extern "C" const unsigned char kMnLutData_gfx1151[1] = {0};
-extern "C" const size_t kMnLutData_gfx1151_size = 0;
+extern "C" const unsigned char kMatmulNbitsLutData_gfx1151[1] = {0};
+extern "C" const size_t kMatmulNbitsLutData_gfx1151_size = 0;
