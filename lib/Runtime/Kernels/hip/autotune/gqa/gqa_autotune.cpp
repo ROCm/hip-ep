@@ -87,7 +87,7 @@ namespace fbs = mlir::hip;
 // 6: 13-byte rows (added head_count field); new ExactHeadGroup tier keyed on
 //    exact (num_heads, kv_num_heads) pairs for finest-grain matching; existing
 //    Geometry and HeadGroup tiers serve as fuzzy fallback for new models.
-constexpr uint32_t kGqaLutSchemaVersion = 7;
+constexpr uint32_t kGqaLutSchemaVersion = 7;  // v7: prefill Length rows use seq_kv=Any
 
 // What a row resolves to once the config name has been expanded.
 struct Answer {
@@ -365,6 +365,8 @@ static bool prefillKnobs(fbs::GqaTuneConfig name, GqaPrefillVariant *variant,
     return v7(4, 64, 1);
   case C::NW4_BKV64_MT2:
     return v7(4, 64, 2);
+  case C::ND2_MT1_BKV16:
+    return v8(2, 1, 16);
   case C::ND2_MT1_BKV32:
     return v8(2, 1, 32);
   case C::ND2_MT1_BKV64:
@@ -373,10 +375,14 @@ static bool prefillKnobs(fbs::GqaTuneConfig name, GqaPrefillVariant *variant,
     return v8(2, 2, 32);
   case C::ND2_MT2_BKV64:
     return v8(2, 2, 64);
+  case C::ND4_MT1_BKV16:
+    return v8(4, 1, 16);
   case C::ND4_MT1_BKV32:
     return v8(4, 1, 32);
   case C::ND4_MT2_BKV32:
     return v8(4, 2, 32);
+  case C::ND8_MT1_BKV16:
+    return v8(8, 1, 16);
   default:
     return false;
   }
@@ -899,6 +905,14 @@ static int buildProbes(fbs::GqaTuneHeadDim head_dim, unsigned hpg,
                        window};
     }
     // HeadGroup: hpg only, fuzzy fallback for new models with known hpg.
+    // seq_q is clamped to S4096: configs measured at S4096 apply to all longer
+    // prefill chunks, so there is no benefit to probing beyond that bucket.
+    // seq_kv is clamped to Any for buckets above S128: only skv<=128 has
+    // distinct LUT rows; longer KV caches use the seq_kv-agnostic Any rows.
+    const fbs::GqaSeqBucket hg_seq_q =
+        seq_q > fbs::GqaSeqBucket::S4096 ? fbs::GqaSeqBucket::S4096 : seq_q;
+    const fbs::GqaSeqBucket hg_seq_kv =
+        seq_kv <= fbs::GqaSeqBucket::S128 ? seq_kv : fbs::GqaSeqBucket::Any;
     out[n++] = Probe{fbs::GqaTuneTier::HeadGroup,
                      GqaTuneSource::HeadGroup,
                      head_dim,
@@ -906,8 +920,8 @@ static int buildProbes(fbs::GqaTuneHeadDim head_dim, unsigned hpg,
                      any_head_count,
                      any_par,
                      any_batch,
-                     seq_q,
-                     seq_kv,
+                     hg_seq_q,
+                     hg_seq_kv,
                      window};
   }
   out[n++] = Probe{fbs::GqaTuneTier::Length,
@@ -1251,7 +1265,7 @@ gqa_autotune_resolve_prefill(void *opaque_policy,
         headCountClass(request.num_heads, request.kv_num_heads),
         parClass(request.batch, request.num_heads), batchClass(request.batch),
         seqBucket(std::max(request.seq_q, 1)),
-        seqBucket(std::max(request.seq_kv, 1)),
+        seqBucket(std::max(request.seq_kv, 1)),  // actual skv bucket; HeadGroup clamps >S128 to Any
         v5 ? windowClass(request.local_window) : fbs::GqaWindowClass::NoWindow,
         probes);
     for (int i = 0; i < n; ++i) {
