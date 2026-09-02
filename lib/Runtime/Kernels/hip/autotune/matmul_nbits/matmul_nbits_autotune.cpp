@@ -287,9 +287,12 @@ void loadBuffer(Table& t, const unsigned char* data, size_t size) {
 }  // namespace matmul_nbits_autotune
 }  // namespace hipdnn_ep
 
-// Emitted by cmake/xxd.py from lut/gfx1151.fb; see lib/Runtime/CMakeLists.txt.
-extern "C" const unsigned char kMatmulNbitsLutData_gfx1151[];
-extern "C" const size_t kMatmulNbitsLutData_gfx1151_size;
+// Emitted by cmake/xxd.py from lut/<arch>.fb; see lib/Runtime/Kernels/CMakeLists.txt.
+// The symbol is arch-neutral: each custom_kernels_<arch> DLL links exactly one
+// such payload (its own arch's table, or an empty stub), so this one reference
+// resolves whatever arch the DLL is built for.
+extern "C" const unsigned char kMatmulNbitsLutData[];
+extern "C" const size_t kMatmulNbitsLutData_size;
 
 namespace hipdnn_ep {
 namespace matmul_nbits_autotune {
@@ -298,7 +301,7 @@ namespace {
 Table& table() {
   static Table* t = [] {
     auto* fresh = new Table();
-    loadBuffer(*fresh, kMatmulNbitsLutData_gfx1151, kMatmulNbitsLutData_gfx1151_size);
+    loadBuffer(*fresh, kMatmulNbitsLutData, kMatmulNbitsLutData_size);
     return fresh;
   }();
   return *t;
