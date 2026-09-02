@@ -1467,6 +1467,20 @@ void QMoEOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// QMoEAmdOp
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QMoEAmdOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QMoEAmdOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // GatherBlockQuantizedOp: ins(data, indices, scales, [zero_points])
 //                          outs(output)
 //===----------------------------------------------------------------------===//

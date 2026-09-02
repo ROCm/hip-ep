@@ -92,6 +92,7 @@ inline constexpr const char *kWrapMultiHeadAttention =
     "wrap_multi_head_attention";
 inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
 inline constexpr const char *kWrapQMoE = "wrap_qmoe";
+inline constexpr const char *kWrapQMoEAmd = "wrap_qmoe_amd";
 inline constexpr const char *kWrapGatherBlockQuantized =
     "wrap_gather_block_quantized";
 inline constexpr const char *kWrapQuantizeLinear = "wrap_quantize_linear";
@@ -154,6 +155,11 @@ inline constexpr int64_t kAlignedPtrIdx = 1;
 inline constexpr int64_t kOffsetIdx = 2;
 inline constexpr int64_t kSizesIdx = 3;
 inline constexpr int64_t kStridesIdx = 4;
+
+// com.amd QMoE (hip.qmoe_amd / wrap_qmoe_amd) activation and routing modes.
+// Values must match HIPDNN_EP_QMOE_AMD_* in lib/Runtime/hipdnn_ep_runtime.h.
+inline constexpr int64_t kQMoEAmdActivationRelu2 = 0;
+inline constexpr int64_t kQMoEAmdRoutingSigmoid = 0;
 
 // Window-pool reduction mode constants (hip.pool / wrap_pool).
 // Values must match HIPDNN_EP_POOL_* in lib/Runtime/hipdnn_ep_runtime.h
@@ -440,6 +446,8 @@ void populateMatMulNBitsLoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns);
 void populateQMoELoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
+void populateQMoEAmdLoweringPatterns(const LLVMTypeConverter &converter,
+                                     RewritePatternSet &patterns);
 void populateGatherBlockQuantizedLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateQdqLoweringPatterns(const LLVMTypeConverter &converter,

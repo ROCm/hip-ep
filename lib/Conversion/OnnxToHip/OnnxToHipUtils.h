@@ -322,6 +322,8 @@ void populateMatMulNBitsConversionPatterns(RewritePatternSet &patterns,
                                            MLIRContext *ctx);
 void populateQMoEConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateQMoEAmdConversionPatterns(RewritePatternSet &patterns,
+                                       MLIRContext *ctx);
 void populateGatherBlockQuantizedPreparePatterns(RewritePatternSet &patterns,
                                                  MLIRContext *ctx);
 void populateGatherBlockQuantizedConversionPatterns(RewritePatternSet &patterns,
