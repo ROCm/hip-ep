@@ -131,9 +131,11 @@ static std::vector<Shape> loadShapes(const char* path) {
     s.n = std::atoi(cells[cn].c_str());
     s.gs = std::atoi(cells[cb].c_str());
     s.zp = std::atoi(cells[cz].c_str()) != 0;
-    // The WMMA/GEMV fast paths need K%32==0; anything else falls to the naive
-    // kernel, which has no config to tune.
-    if (s.k % 32 != 0 || s.n <= 0 || s.gs <= 0) continue;
+    // Drop only genuinely untunable shapes. K%32!=0 is kept: its decode GEMV
+    // is still tunable (that kernel has a K%32 remainder phase, verified for
+    // K=4304), it just has no WMMA prefill and no dp4a path. The sweep loop
+    // measures decode only for those (see the k32 handling below).
+    if (s.k <= 0 || s.n <= 0 || s.gs <= 0) continue;
     uniq.insert(s);
   }
   return {uniq.begin(), uniq.end()};
@@ -160,12 +162,12 @@ int main(int argc, char** argv) {
   std::vector<int> m_list = {1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096};
   bool do_prefill = true, do_decode = true, do_dp4a = true, do_padrow = true;
   int limit = 0;
-  /* Skip (M, N) pairs whose C alone would exceed this. The lm_head columns run
-   * to N=262208, and pairing that with M=4096 asks for a 2 GB output for a
-   * combination inference never issues -- prefill computes logits for the last
-   * token, not the whole chunk. Skipping keeps the sweep off the OOM edge and
-   * out of rows nothing can reach. */
-  long long max_out_elems = 32ll << 20;  // 32 Mi halfs = 64 MB
+  /* Skip (M, N) pairs whose C alone would exceed this. Sized to pass every real
+   * prefill shape below big_n at the full M ladder -- the widest is N~32768 x
+   * M=4096 = 134 Mi halfs (268 MB) -- while still capping the lm_head columns,
+   * which big_n already forces to M=1. The old 32 Mi cap wrongly dropped real
+   * up/down-proj shapes at M=2048/4096 (e.g. N=17408 K=5120). */
+  long long max_out_elems = 256ll << 20;  // 256 Mi halfs = 512 MB
   /* Columns at or above this are the lm_head / vocab projection, whose B runs
    * to 600 MB and whose WMMA sweep is ~680 dispatches over it -- tens of
    * minutes per M.
@@ -229,6 +231,12 @@ int main(int argc, char** argv) {
     const size_t row = static_cast<size_t>(ngk) * (s.gs / 2);
     const size_t b_bytes = static_cast<size_t>(s.n) * row;
 
+    const bool k32 = (s.k % 32 == 0);
+    // K%32!=0 (e.g. K=4304): decode runs the fp GEMV on the real K, prefill
+    // runs the WMMA K-padding path (dispatch pads K up to a multiple of 32).
+    // dp4a is unavailable. The prefill/LUT key is the padded K, so its markers
+    // below print k_pad rather than s.k.
+    const int k_pad = k32 ? s.k : ((s.k + 31) & ~31);
     std::vector<int> ms;
     if (s.n >= big_n) {
       ms.push_back(1);
@@ -289,7 +297,7 @@ int main(int argc, char** argv) {
                            nullptr);
           HIP_OK(hipDeviceSynchronize());
         }
-        if (do_dp4a) {
+        if (do_dp4a && k32) {   // dp4a kernel requires K%32==0
           static size_t qb_have = 0, qs_have = 0;
           buf.grow(&buf.qb, &qb_have, static_cast<size_t>(s.k));
           buf.grow(&buf.qs, &qs_have, static_cast<size_t>(ngk) * sizeof(float));
@@ -303,8 +311,11 @@ int main(int argc, char** argv) {
       }
       if (!do_prefill) continue;
 
+      // Marker prints k_pad: for K%32!=0 the dispatch pads to k_pad and the
+      // WMMA tuner (and the runtime LUT query) key on the padded K. For k32
+      // shapes k_pad == s.k, so this is unchanged.
       std::fprintf(stderr, "#SHAPE path=prefill M=%d N=%d K=%d gs=%d zp=%d\n",
-                   m, s.n, s.k, s.gs, int(s.zp));
+                   m, s.n, k_pad, s.gs, int(s.zp));
       hip_matmul_nbits(nullptr, buf.a, buf.b, buf.sc, zp_f, nullptr, buf.out,
                        m, s.n, s.k, 1, 4, s.gs, 2, 2, nullptr, nullptr);
       HIP_OK(hipDeviceSynchronize());

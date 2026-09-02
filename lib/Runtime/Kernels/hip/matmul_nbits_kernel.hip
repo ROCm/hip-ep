@@ -3721,6 +3721,22 @@ static _Float16* ensureAColBuffer(int M, int K) {
     return g_a_col_buf;
 }
 
+// Zero-padded activation copy for the K%32!=0 int4 WMMA path (see the dispatch
+// site). Sized [M, K_pad]; the caller writes the real [M, K] columns and zeroes
+// the tail every call, so the buffer may be reused across shapes with different
+// K_pad without stale tail data leaking into the padded reduction steps.
+static _Float16* g_a_pad_buf = nullptr;
+static size_t    g_a_pad_buf_elems = 0;
+
+static _Float16* ensureAPadBuffer(int M, int K_pad) {
+    size_t need = static_cast<size_t>(M) * K_pad;
+    if (g_a_pad_buf && g_a_pad_buf_elems >= need) return g_a_pad_buf;
+    if (g_a_pad_buf) hipFree(g_a_pad_buf);
+    hipMalloc(&g_a_pad_buf, need * sizeof(_Float16));
+    g_a_pad_buf_elems = need;
+    return g_a_pad_buf;
+}
+
 static _Float16* g_out_col_buf = nullptr;
 static size_t    g_out_col_buf_elems = 0;
 
@@ -6705,6 +6721,79 @@ extern "C" int hip_matmul_nbits(
   // Any cutoff is safe for partial tiles: need_bc in launchWmmaConfig selects
   // the bounds-checked variant whenever M is not a multiple of the tile.
   static constexpr int kWmmaMinM = 8;
+
+  /* int4 prefill with K%32!=0 (e.g. a model whose intermediate_size is not a
+   * multiple of 32, so down_proj has K=4304): the WMMA kernel requires K%32==0,
+   * so this shape would otherwise fall to the naive kernel on every prefill.
+   *
+   * Pad K up to the next multiple of 32 and run the *unchanged* WMMA path on a
+   * zero-padded copy of A. The extra reduction steps read zero activations, so
+   * they contribute nothing and the [M,N] output is unchanged -- no output
+   * cropping, since only the contraction dim is padded. The weight rows are
+   * already stored padded to full groups (num_groups_k*(group_size/2) bytes),
+   * so B needs nothing. K%32==0 shapes never enter here and are byte-for-byte
+   * unaffected. Verified against the CPU reference for K=4304. */
+  if ((batch_count == 1) && (K % 32 != 0) && M >= kWmmaMinM &&
+      !hipdnn_device_is_wave64()) {
+    int iM = static_cast<int>(M);
+    int iN = static_cast<int>(N);
+    int iK = static_cast<int>(K);
+    int gs = static_cast<int>(block_size);
+    int K_pad = (iK + 31) & ~31;
+    // ceil(K/gs); the last group is partial but its storage is padded to full.
+    int ngk = static_cast<int>((K + block_size - 1) / block_size);
+    int ldc = iN;
+
+    const auto* b_ptr = static_cast<const unsigned char*>(B);
+    const auto* s_ptr = static_cast<const _Float16*>(scales);
+    const auto* z_ptr = static_cast<const _Float16*>(zp_for_fp16_paths);
+    auto* out_ptr = static_cast<_Float16*>(output);
+    const bool has_zp = (z_ptr != nullptr);
+
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_matmul_nbits: WMMA K-pad path M=%d N=%d K=%d -> "
+        "K_pad=%d bs=%d zp=%s bias=%s\n",
+        iM, iN, iK, K_pad, gs, zero_points ? "yes" : "null",
+        bias ? "yes" : "null");
+
+    // Zero-padded copy of A: real [M,K] columns, then the K_pad-K tail zeroed.
+    // The tail is re-zeroed every call so the buffer can be reused across
+    // shapes with a different K_pad.
+    _Float16* a_pad = ensureAPadBuffer(iM, K_pad);
+    hipMemcpy2DAsync(a_pad, static_cast<size_t>(K_pad) * sizeof(_Float16), A,
+                     static_cast<size_t>(iK) * sizeof(_Float16),
+                     static_cast<size_t>(iK) * sizeof(_Float16), iM,
+                     hipMemcpyDeviceToDevice, hip_stream);
+    hipMemset2DAsync(
+        reinterpret_cast<char*>(a_pad) + static_cast<size_t>(iK) * sizeof(_Float16),
+        static_cast<size_t>(K_pad) * sizeof(_Float16), 0,
+        static_cast<size_t>(K_pad - iK) * sizeof(_Float16), iM, hip_stream);
+
+    int wmma_cfg = getOrTuneWmmaConfig(hip_stream, iM, iN, K_pad, a_pad, K_pad,
+                                       b_ptr, s_ptr, z_ptr, gs, ngk, out_ptr,
+                                       ldc, has_zp);
+    _Float16* dq_buf =
+        kWmmaConfigs[wmma_cfg].fused ? nullptr : ensureDqBuffer(iN, K_pad);
+    launchWmmaConfig(wmma_cfg, hip_stream, iM, iN, K_pad, a_pad, K_pad, b_ptr,
+                     s_ptr, z_ptr, gs, ngk, out_ptr, ldc, has_zp, dq_buf);
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+      fprintf(stderr,
+              "[custom_kernels] hip_matmul_nbits WMMA K-pad launch failed: %s\n",
+              hipGetErrorString(err));
+      return static_cast<int>(err);
+    }
+
+    if (bias) {
+      dim3 bias_grid(static_cast<unsigned>((iN + 255) / 256),
+                     static_cast<unsigned>(iM));
+      hipLaunchKernelGGL(matmul_nbits_add_bias_rowmajor, bias_grid, dim3(256), 0,
+                         hip_stream, out_ptr,
+                         static_cast<const _Float16*>(bias), iM, iN, ldc);
+    }
+    return static_cast<int>(hipGetLastError());
+  }
 
   // WMMA is an RDNA3/RDNA4 (wave32) intrinsic. On CDNA (wave64, e.g. MI350)
   // there is no WMMA, so the prefill fast path is unavailable here; int4
