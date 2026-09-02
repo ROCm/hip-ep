@@ -54,6 +54,9 @@
 #include "hip_custom_kernels.h"
 #include "hip_arch_compat.h"
 #include "debug_log.h"
+// Offline autotune table. Only the lightweight lookup API is pulled in here;
+// the flatbuffers dependency lives entirely in matmul_nbits_autotune.cpp.
+#include "autotune/matmul_nbits/matmul_nbits_autotune.h"
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
@@ -1253,6 +1256,71 @@ static int tuneGemvConfig(
     return best_id;
 }
 
+/* -----------------------------------------------------------------------
+ * Offline LUT bridge
+ *
+ * Order of consultation, for every tuner below:
+ *
+ *   1. process map cache (backed by the on-disk file)  -> use it
+ *   2. offline LUT                                     -> use it, and store it
+ *                                                         into the map cache so
+ *                                                         step 1 answers next
+ *                                                         time
+ *   3. runtime sweep                                   -> as before
+ *
+ * The map stays in front because it holds measurements from this exact machine
+ * and build; the LUT's job is to make the *first* encounter with a shape free,
+ * not to override something already measured locally. Writing LUT hits into the
+ * map means the lookup happens once per shape per process, not per call.
+ *
+ * The LUT stores tile geometry rather than a config index. These helpers turn a
+ * geometry back into an index against the live tables, and double as the
+ * validators the lookup calls while searching: a geometry the table no longer
+ * contains (or that is illegal for this shape) makes the search move on to the
+ * next-nearest point instead of returning something unlaunchable.
+ * ----------------------------------------------------------------------- */
+
+namespace mn_lut = hipdnn_ep::mn_autotune;
+
+static int gemvConfigFromGeometry(const mn_lut::GemvAnswer& g) {
+    for (int cid = 0; cid < kNumGemvConfigs; cid++)
+        if (kGemvConfigs[cid].threads == g.threads &&
+            kGemvConfigs[cid].tile_n == g.tile_n)
+            return cid;
+    return -1;
+}
+
+static bool mnGemvValidator(void*, const mn_lut::GemvAnswer& g) {
+    return gemvConfigFromGeometry(g) >= 0;
+}
+
+/* Returns a kGemvConfigs index from the LUT, or -1 on a miss.
+ *
+ * The WMMA validator is null here: a Decode/DecodeDp4a lookup can only reach a
+ * point whose payload is Gemv (pointConsistent enforces that at load), so a
+ * Wmma answer on this path would be a malformed table and is rejected. */
+static int mnLutGemvConfig(mn_lut::Phase phase, int M, int N, int K, int gs,
+                           bool has_zp) {
+    mn_lut::Request req;
+    req.phase = phase;
+    req.bits = 4;
+    req.m = M;
+    req.n = N;
+    req.k = K;
+    req.group_size = gs;
+    req.has_zp = has_zp;
+    const mn_lut::Result r =
+        mn_lut::resolve(req, nullptr, mnGemvValidator, nullptr);
+    if (r.source == mn_lut::Source::None) return -1;
+    const int cid = gemvConfigFromGeometry(r.gemv);
+    if (cid >= 0)
+        CUSTOM_KERNELS_DEBUG_LOG(
+            "[custom_kernels] LUT hit (src=%d d=%.3f) M=%d N=%d K=%d gs=%d -> "
+            "config[%d]\n",
+            static_cast<int>(r.source), r.distance, M, N, K, gs, cid);
+    return cid;
+}
+
 static std::unordered_map<std::string, int> gemv_cache;
 static std::mutex gemv_tune_mutex;
 static std::once_flag gemv_cache_init_flag;
@@ -1297,6 +1365,18 @@ static int getOrTuneGemvConfig(
     auto it = gemv_cache.find(key);
     if (it != gemv_cache.end())
         return it->second;
+
+    // Map miss: try the offline table before paying for a sweep. A hit is
+    // written into the map (and the disk file) so this shape never consults the
+    // LUT again in this process.
+    const int lut = mnLutGemvConfig(mn_lut::Phase::Decode, static_cast<int>(M),
+                                    static_cast<int>(N), static_cast<int>(K),
+                                    static_cast<int>(bs), zp != nullptr);
+    if (lut >= 0) {
+        gemv_cache[key] = lut;
+        saveTuneCacheFile(gemv_cache_path, gemv_cache);
+        return lut;
+    }
 
     int best = tuneGemvConfig(stream, A, B, sc, zp, bi, out,
                                M, N, K, batch, bs, col_major);
@@ -1390,10 +1470,24 @@ static int tuneDp4aConfig(
 
         float ms = 0.0f;
         hipEventElapsedTime(&ms, ev0, ev1);
+
+        CUSTOM_KERNELS_DEBUG_LOG(
+            "[custom_kernels]   dp4a config[%2d] threads=%3d tile_n=%d : %.4f ms\n",
+            cid, kGemvConfigs[cid].threads, kGemvConfigs[cid].tile_n,
+            ms / ITERS);
+
         if (ms < best_ms) { best_ms = ms; best_id = cid; }
     }
     hipEventDestroy(ev0);
     hipEventDestroy(ev1);
+
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] GEMV-dp4a autotune: N=%lld K=%lld bs=%lld zp=%s -> "
+        "best config[%d] threads=%d tile_n=%d (%.4f ms/iter)\n",
+        (long long)N, (long long)K, (long long)bs, zp ? "yes" : "no",
+        best_id, kGemvConfigs[best_id].threads,
+        kGemvConfigs[best_id].tile_n, best_ms / ITERS);
+
     return best_id;
 }
 
@@ -1421,6 +1515,17 @@ static int getOrTuneDp4aConfig(
     auto it = dp4a_cache.find(key);
     if (it != dp4a_cache.end())
         return it->second;
+
+    // Keyed as DecodeDp4a, not Decode: this kernel ranks kGemvConfigs
+    // differently from the fp GEMV, which is why the two keep separate caches.
+    const int lut = mnLutGemvConfig(mn_lut::Phase::DecodeDp4a, 1,
+                                    static_cast<int>(N), static_cast<int>(K),
+                                    static_cast<int>(bs), zp != nullptr);
+    if (lut >= 0) {
+        dp4a_cache[key] = lut;
+        saveTuneCacheFile(dp4a_cache_path, dp4a_cache);
+        return lut;
+    }
 
     int best = tuneDp4aConfig(stream, a_qb, a_scale, B, sc, zp, bi, out,
                               N, K, bs);
@@ -3192,6 +3297,62 @@ static bool wmmaConfigApplies(const WmmaConfig& c, int N, int gs) {
     return gs % wmmaBNibblesPerThread(c) == 0;
 }
 
+/* WMMA half of the LUT bridge; see the GEMV half above kGemvConfigs for the
+ * cache-then-LUT-then-sweep ordering this serves. */
+
+// wmmaConfigApplies needs the shape, so the validator carries it through ctx.
+struct MnWmmaLutCtx {
+    int n;
+    int gs;
+};
+
+static int wmmaConfigFromGeometry(const mn_lut::WmmaAnswer& g, int N, int gs) {
+    for (int cid = 0; cid < kNumWmmaConfigs; cid++) {
+        const WmmaConfig& c = kWmmaConfigs[cid];
+        if (c.bm != g.bm || c.bn != g.bn || c.swizzle_n != g.swizzle_n ||
+            c.wt_m != g.wt_m || c.wt_n != g.wt_n || c.fused != g.fused)
+            continue;
+        if (wmmaBk(c) != g.bk) continue;
+        if (!wmmaConfigApplies(c, N, gs)) continue;
+        return cid;
+    }
+    return -1;
+}
+
+static bool mnWmmaValidator(void* ctx, const mn_lut::WmmaAnswer& g) {
+    const auto* c = static_cast<const MnWmmaLutCtx*>(ctx);
+    return wmmaConfigFromGeometry(g, c->n, c->gs) >= 0;
+}
+
+// Returns a kWmmaConfigs index from the LUT, or -1 on a miss.
+static int mnLutWmmaConfig(int M, int N, int K, int gs, bool has_zp,
+                           int b_row_bytes) {
+    mn_lut::Request req;
+    req.phase = mn_lut::Phase::Prefill;
+    req.bits = 4;
+    req.m = M;
+    req.n = N;
+    req.k = K;
+    req.group_size = gs;
+    req.has_zp = has_zp;
+    req.b_row_bytes = b_row_bytes;
+    MnWmmaLutCtx ctx{N, gs};
+    const mn_lut::Result r =
+        mn_lut::resolve(req, mnWmmaValidator, nullptr, &ctx);
+    if (r.source == mn_lut::Source::None) return -1;
+    const int cid = wmmaConfigFromGeometry(r.wmma, N, gs);
+    // A padded stride can only be served by a fused config; the dequant pass
+    // behind a !fused one has no stride argument.
+    if (cid >= 0 && b_row_bytes != 0 && !kWmmaConfigs[cid].fused) return -1;
+    if (cid >= 0)
+        CUSTOM_KERNELS_DEBUG_LOG(
+            "[custom_kernels] LUT hit (src=%d d=%.3f) M=%d N=%d K=%d gs=%d "
+            "stride=%d -> config[%d]\n",
+            static_cast<int>(r.source), r.distance, M, N, K, gs, b_row_bytes,
+            cid);
+    return cid;
+}
+
 static void launchDequant(
     hipStream_t stream,
     const unsigned char* B_packed, const _Float16* scales,
@@ -3722,13 +3883,18 @@ static int tuneWmmaConfig(
     hipEventDestroy(ev0);
     hipEventDestroy(ev1);
 
+    // The full tile geometry is logged, not just the config index, so an
+    // offline consumer can record what won without depending on this table's
+    // ordering -- indices shift whenever the table is edited.
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] WMMA autotune: M=%d N=%d K=%d gs=%d zp=%s -> "
-        "best config[%d] %s bm=%d bn=%d sw=%d (%.4f ms/iter)\n",
+        "best config[%d] %s bm=%d bn=%d sw=%d wt=%dx%d bk=%d (%.4f ms/iter)\n",
         M, N, K, gs, has_zp ? "yes" : "no",
         best_id, kWmmaConfigs[best_id].fused ? "fused" : "dq+gemm",
         kWmmaConfigs[best_id].bm, kWmmaConfigs[best_id].bn,
-        kWmmaConfigs[best_id].swizzle_n, best_ms / ITERS);
+        kWmmaConfigs[best_id].swizzle_n, kWmmaConfigs[best_id].wt_m,
+        kWmmaConfigs[best_id].wt_n, wmmaBk(kWmmaConfigs[best_id]),
+        best_ms / ITERS);
 
     return best_id;
 }
@@ -3892,6 +4058,16 @@ static int getOrTuneWmmaConfig(
     auto it = wmma_cache.find(key);
     if (it != wmma_cache.end())
         return it->second;
+
+    // Map miss: the offline table before the sweep. The stride is part of the
+    // LUT key for the same reason it is part of the cache key -- a padded
+    // buffer has a different winner.
+    const int lut = mnLutWmmaConfig(M, N, K, gs, has_zp, b_row_bytes);
+    if (lut >= 0) {
+        wmma_cache[key] = lut;
+        saveWmmaCache();
+        return lut;
+    }
 
     int best = tuneWmmaConfig(stream, M, N, K, A, lda, B,
                                scales, zeros, gs, ngk, C, ldc, has_zp,

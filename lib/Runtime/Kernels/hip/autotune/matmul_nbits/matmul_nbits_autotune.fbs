@@ -1,0 +1,189 @@
+// MatMulNBits offline autotune lookup table.
+//
+// The table is a set of measured points plus a per-phase last resort. A lookup
+// matches the categorical fields exactly, then takes the nearest measured point
+// in log space over (M, N, K):
+//
+//   Nearest   the closest measured point in the same categorical group.
+//             Distance 0 -- every dim equal -- is an exact hit, so "exact" is
+//             not a separate tier, it is the degenerate case of this one.
+//   Fallback  phase + bits only; guarantees a hit so the caller never has to
+//             fall back to a runtime sweep for lack of a row.
+//
+// This replaces an earlier three-tier design whose middle tier collapsed N and
+// K to octave buckets and took a majority vote inside each bucket. Voting
+// throws away the measurement nearest the query in favour of whatever won most
+// often in a bucket that spans a factor of two per dimension, so a shape could
+// be handed a config measured on a shape further away than one already in the
+// table. Nearest-neighbour in log space is what Tensile (AMD's own GEMM
+// library, solving this same problem for rocBLAS) does, and it degrades
+// smoothly: the answer is always the closest thing actually measured.
+//
+// Categorical fields are matched exactly rather than by distance because they
+// are not distances. A different group size or zero-point layout changes what
+// the kernel reads per step, and the padded row stride changes which tile wins
+// outright (measured: cfg11 -> cfg3 at N=5120 K=4096). Interpolating across
+// them would be meaningless.
+//
+// Only bits=4 is populated today. The enums reserve the other widths so adding
+// i8/u3/u2 later is a table regeneration, not a schema break.
+
+namespace hipdnn_ep.mn_autotune.fbs;
+
+// ---------------------------------------------------------------------------
+// Request classification
+// ---------------------------------------------------------------------------
+
+// Any = 0 throughout, so a memset field reads as "unclassified" and is rejected
+// at load rather than silently matching something.
+
+// Which kernel serves the shape. Not just a prefill/decode split: the two
+// decode kernels read the same kGemvConfigs table but rank it differently
+// (integer dot vs float FMA changes the occupancy/latency tradeoff), which is
+// why they keep separate tune caches at runtime. They need separate groups here
+// for the same reason.
+enum MnPhase : ubyte {
+  Any = 0,
+  Prefill = 1,      // WMMA tiles, kWmmaConfigs
+  Decode = 2,       // fp16 GEMV reduction, kGemvConfigs
+  DecodeDp4a = 3    // W4A8 integer-dot GEMV, kGemvConfigs
+}
+
+// Reserved beyond B4: the i8/u3/u2 GEMV kernels already share kGemvConfigs and
+// have their own tuners, so they slot in without touching the point layout.
+enum MnBits : ubyte {
+  Any = 0,
+  B4 = 1,
+  B8 = 2,
+  B3 = 3,
+  B2 = 4
+}
+
+// ONNX MatMulNBits block_size is a power of two >= 16. The shipped model set
+// only uses 32 and 128; the rest are listed so an unusual export still has a
+// class rather than silently reading as Any.
+enum MnGroupSize : ubyte {
+  Any = 0,
+  G16 = 1,
+  G32 = 2,
+  G64 = 3,
+  G128 = 4,
+  G256 = 5,
+  G512 = 6
+}
+
+enum MnZeroPoint : ubyte {
+  Any = 0,
+  Symmetric = 1,   // no zero_points tensor
+  Asymmetric = 2
+}
+
+// Prefill only; decode points carry Any.
+enum MnRowStride : ubyte {
+  Any = 0,
+  Arrival = 1,     // num_groups_k * (block_size/2) bytes per row
+  Padded = 2       // arrival + one 128 B cache line
+}
+
+// ---------------------------------------------------------------------------
+// Answer payload
+// ---------------------------------------------------------------------------
+
+// Which config table the payload fields refer to. A config whose kind does not
+// match the phase being resolved is rejected at load.
+enum MnConfigKind : ubyte {
+  None = 0,
+  Wmma = 1,        // bm/bn/swizzle/wt_m/wt_n/bk/fused
+  Gemv = 2         // threads/tile_n
+}
+
+// The answer is a tile geometry rather than an index into
+// kWmmaConfigs/kGemvConfigs on purpose. Those indices shift whenever the tables
+// are edited -- the TILE_N=32/64 removal renumbered nothing only by luck -- and
+// a stale index silently launches the wrong kernel. Geometry is checked against
+// the live table at load: no match means the point is dropped and the search
+// moves to the next-nearest, which is the failure mode we want.
+//
+// The geometry is de-duplicated into `configs` and referenced by index from the
+// points, because thousands of points share a few dozen distinct configs and
+// inlining the payload in every one of them wasted most of the table.
+struct MnTuneConfig {
+  kind: MnConfigKind;
+
+  // Wmma payload. bm/bn are stored divided by 16 so they fit a ubyte
+  // (bm, bn <= 256). Zero on Gemv configs.
+  bm16: ubyte;
+  bn16: ubyte;
+  swizzle: ubyte;
+  wt_m: ubyte;
+  wt_n: ubyte;
+  bk: ubyte;
+  fused: ubyte;            // 1 = fused dequant, 0 = separate dequant + fp16 GEMM
+
+  // Gemv payload. Zero on Wmma configs.
+  threads: uint16;
+  tile_n: ubyte;
+}
+
+// ---------------------------------------------------------------------------
+// Measured point
+// ---------------------------------------------------------------------------
+
+// One winner, as read off the in-kernel autotuner for one (categorical key,
+// M, N, K). M/N/K are literal dims, not buckets: the whole point of the
+// nearest-neighbour metric is that it can use how far away a point actually is.
+struct MnTunePoint {
+  // Exact-match key.
+  phase: MnPhase;
+  bits: MnBits;
+  group_size: MnGroupSize;
+  zero_point: MnZeroPoint;
+  row_stride: MnRowStride;
+
+  // Index into MnAutotuneLut.configs. Out of range means the point is dropped
+  // at load, same as an unusable geometry.
+  config: ubyte;
+
+  // Distance key. uint32 because lm_head N reaches 262208.
+  m: uint32;
+  n: uint32;
+  k: uint32;
+}
+
+// Last resort for a phase, used when its group has no usable point at all.
+struct MnFallback {
+  phase: MnPhase;
+  bits: MnBits;
+  config: ubyte;
+}
+
+table MnAutotuneLut {
+  schema_version: uint32 = 3;
+  gpu_arch: string;         // must equal the running device, e.g. "gfx1151"
+  rocm_version: int32;      // advisory; mismatch warns but still loads
+  // Bumped whenever the config tables or kernel semantics change in a way that
+  // invalidates measured winners. Rejects stale tables loudly instead of
+  // letting them pick a config that no longer means the same thing.
+  kernel_abi: string;       // "mn-v1"
+  model_key: string;        // provenance label for logging
+
+  // Per-dimension weights of the log-space distance:
+  //
+  //   d = sqrt( (wm*log2(M/Mp))^2 + (wn*log2(N/Np))^2 + (wk*log2(K/Kp))^2 )
+  //
+  // They live in the table rather than in the lookup code so that the offline
+  // fit and the runtime metric cannot drift apart: refitting the weights is a
+  // table regeneration, not a code change that has to land in lockstep.
+  weight_m: float = 1.0;
+  weight_n: float = 1.0;
+  weight_k: float = 1.0;
+
+  // De-duplicated answers. At most 256 (the point's index is a ubyte), which
+  // is ample: the measured set uses well under a hundred.
+  configs: [MnTuneConfig];
+  points: [MnTunePoint];
+  fallbacks: [MnFallback];
+}
+
+root_type MnAutotuneLut;
+file_identifier "MNAL";
