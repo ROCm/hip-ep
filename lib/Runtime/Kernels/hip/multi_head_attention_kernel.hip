@@ -39,6 +39,7 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "hip_arch_compat.h"
 #include "hip_custom_kernels.h"
 
 namespace {
@@ -46,38 +47,60 @@ namespace {
 constexpr int kWmmaTile = 16;  // RDNA3 WMMA 16x16x16 tile
 constexpr float kLog2e = 1.4426950408889634f;
 
-typedef _Float16 half16_t __attribute__((ext_vector_type(16)));
+// half16_t holds one WMMA A/B fragment; its width tracks HIPDNN_WMMA_FRAG_ELEMS
+// (16 on gfx11, 8 on the gfx12-style encoding gfx1170/gfx12xx use). half16_raw_t
+// stays a fixed 16 for the plain D-tile copies that stage V into LDS -- those
+// are not fragments and must move a whole tile regardless of encoding.
+typedef _Float16 half16_t __attribute__((ext_vector_type(HIPDNN_WMMA_FRAG_ELEMS)));
+typedef _Float16 half16_raw_t __attribute__((ext_vector_type(16)));
 typedef _Float16 half8_t __attribute__((ext_vector_type(8)));
 typedef float float8_t __attribute__((ext_vector_type(8)));
 
-#define MHA_HALF16_LOAD(ptr) (*reinterpret_cast<const half16_t *>(ptr))
+#define MHA_FRAG_LOAD(ptr) (*reinterpret_cast<const half16_t *>(ptr))
+#define MHA_HALF16_LOAD(ptr) (*reinterpret_cast<const half16_raw_t *>(ptr))
 
-// WMMA builtin is RDNA3-family (wave32) only; trap on unsupported arch so the
-// file still compiles and a bad launch aborts loudly instead of silent garbage.
-#if !defined(__has_builtin) ||                                                  \
-    !__has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_f16_w32)
+// Trap only where NEITHER encoding exists (e.g. CDNA/wave64). Keying on the
+// gfx11 spelling alone made every WMMA site here a __builtin_trap() on gfx1170.
+#if !HIPDNN_HAS_WMMA
 static __device__ __forceinline__ float8_t
 mha_wmma_unavailable(half16_t, half16_t, float8_t c) {
   __builtin_trap();
   return c;
 }
-#define __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c)                     \
-  mha_wmma_unavailable((a), (b), (c))
+#undef HIPDNN_WMMA_F32_16X16X16_F16
+#define HIPDNN_WMMA_F32_16X16X16_F16(a, b, c) mha_wmma_unavailable((a), (b), (c))
 #endif
 
-// Load one 16-wide D-tile of a contiguous head-dim row, zero-padding columns
-// >= d. The common case (full tile) is a single vectorized 128-bit load; only
-// the tail tile of a non-multiple-of-16 head dim takes the masked path.
-__device__ __forceinline__ half16_t mha_load_dtile(const _Float16 *row, int dt,
-                                                   int d) {
+// Load a whole 16-wide D-tile of a contiguous head-dim row, zero-padding
+// columns >= d. Used to stage V into LDS, where a full tile is always needed.
+// The common case is a single vectorized 128-bit load; only the tail tile of a
+// non-multiple-of-16 head dim takes the masked path.
+__device__ __forceinline__ half16_raw_t mha_load_dtile(const _Float16 *row,
+                                                       int dt, int d) {
   if ((dt + 1) * kWmmaTile <= d)
     return MHA_HALF16_LOAD(row + dt * kWmmaTile);
-  half16_t r{};
+  half16_raw_t r{};
 #pragma unroll
   for (int e = 0; e < kWmmaTile; ++e) {
     const int c = dt * kWmmaTile + e;
     r[e] = (c < d) ? row[c] : (_Float16)0.0f;
   }
+  return r;
+}
+
+// Load this lane's WMMA A/B fragment from a D-tile: HIPDNN_WMMA_FRAG_ELEMS
+// halves starting at dt*16 + k_off, where k_off is 0 on gfx11 (each lane takes
+// the full 16-wide K range) and pair*8 on the gfx12-style encoding (each lane
+// takes only its half of K).
+__device__ __forceinline__ half16_t mha_load_frag(const _Float16 *row, int dt,
+                                                  int k_off, int d) {
+  const int base = dt * kWmmaTile + k_off;
+  if (base + HIPDNN_WMMA_FRAG_ELEMS <= d)
+    return MHA_FRAG_LOAD(row + base);
+  half16_t r{};
+#pragma unroll
+  for (int e = 0; e < HIPDNN_WMMA_FRAG_ELEMS; ++e)
+    r[e] = (base + e < d) ? row[base + e] : (_Float16)0.0f;
   return r;
 }
 
@@ -115,7 +138,11 @@ mha_flash_prefill_kernel(
   const int wave_id = tid / 32;
   const int lane_id = tid % 32;
   const int wmma_lane = lane_id % kWmmaTile;
-  const int pair = lane_id / kWmmaTile;  // 0 -> even rows, 1 -> odd rows
+  const int pair = lane_id / kWmmaTile;  // selects this lane's accumulator rows
+  // K-axis base this lane's pair-half contributes to every A/B fragment: 0 on
+  // gfx11 (lanes 0-15 and 16-31 hold identical data), pair*8 on the gfx12-style
+  // encoding (K split across the lane halves, no replication).
+  const int k_off = hipdnn_wmma_k_off(pair);
 
   const int q_start = q_tile_idx * ROWS;
   const int row_base = q_start + wave_id * MT * kWmmaTile;  // wave's first row
@@ -140,7 +167,8 @@ mha_flash_prefill_kernel(
         ((size_t)(batch * sq + (valid ? q_pos : 0)) * N + head) * (size_t)d;
 #pragma unroll
     for (int tk = 0; tk < D_TILES; ++tk)
-      Q_reg[mt][tk] = valid ? mha_load_dtile(&Q[q_row], tk, d) : half16_t{};
+      Q_reg[mt][tk] =
+          valid ? mha_load_frag(&Q[q_row], tk, k_off, d) : half16_t{};
   }
 
   // ---- running softmax state; O carried compactly as fp16 ----
@@ -167,10 +195,11 @@ mha_flash_prefill_kernel(
       const int dt = i % D_TILES;
       const int kv_pos = kv0 + kv_local;
       const bool kvalid = kv_pos < skv;
-      half16_t vv = kvalid ? mha_load_dtile(&Vcache[kv_base + (size_t)kv_pos * d],
-                                            dt, d)
-                           : half16_t{};
-      *reinterpret_cast<half16_t *>(&V_lds[kv_local * KV_STR + dt * kWmmaTile]) = vv;
+      half16_raw_t vv =
+          kvalid ? mha_load_dtile(&Vcache[kv_base + (size_t)kv_pos * d], dt, d)
+                 : half16_raw_t{};
+      *reinterpret_cast<half16_raw_t *>(
+          &V_lds[kv_local * KV_STR + dt * kWmmaTile]) = vv;
     }
 
     // ---- score GEMM: K streamed from global, reused across MT M-tiles ----
@@ -187,10 +216,11 @@ mha_flash_prefill_kernel(
       const _Float16 *k_row = &Kcache[kv_base + (size_t)(kvalid ? key : 0) * d];
 #pragma unroll  // static tk keeps Q_reg[][] register-resident
       for (int tk = 0; tk < D_TILES; ++tk) {
-        half16_t k_frag = kvalid ? mha_load_dtile(k_row, tk, d) : half16_t{};
+        half16_t k_frag =
+            kvalid ? mha_load_frag(k_row, tk, k_off, d) : half16_t{};
 #pragma unroll
         for (int mt = 0; mt < MT; ++mt)
-          S_reg[mt][sj] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+          S_reg[mt][sj] = HIPDNN_WMMA_F32_16X16X16_F16(
               Q_reg[mt][tk], k_frag, S_reg[mt][sj]);
       }
     }
@@ -224,7 +254,7 @@ mha_flash_prefill_kernel(
         const float corr = exp2f(m_old - m_new);
         corr_e[e] = corr;
 
-        const int row = e * 2 + pair;
+        const int row = hipdnn_wmma_acc_row(pair, e);
         float rsum = 0.0f;
 #pragma unroll
         for (int sj = 0; sj < S_TILES_J; ++sj) {
@@ -262,16 +292,15 @@ mha_flash_prefill_kernel(
       for (int tk = 0; tk < S_TILES_J; ++tk) {
         half16_t v_frag;
 #pragma unroll
-        for (int e = 0; e < kWmmaTile; ++e)
-          v_frag[e] = V_lds[(tk * kWmmaTile + e) * KV_STR + tj * kWmmaTile +
-                            wmma_lane];
+        for (int e = 0; e < HIPDNN_WMMA_FRAG_ELEMS; ++e)
+          v_frag[e] = V_lds[(tk * kWmmaTile + k_off + e) * KV_STR +
+                            tj * kWmmaTile + wmma_lane];
 #pragma unroll
         for (int mt = 0; mt < MT; ++mt) {
-          half16_t p_frag = MHA_HALF16_LOAD(
+          half16_t p_frag = MHA_FRAG_LOAD(
               &P_lds[(pbase + mt * kWmmaTile + wmma_lane) * P_STR +
-                     tk * kWmmaTile]);
-          Of[mt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(p_frag, v_frag,
-                                                              Of[mt]);
+                     tk * kWmmaTile + k_off]);
+          Of[mt] = HIPDNN_WMMA_F32_16X16X16_F16(p_frag, v_frag, Of[mt]);
         }
       }
 #pragma unroll
@@ -290,7 +319,7 @@ mha_flash_prefill_kernel(
     for (int tj = 0; tj < D_TILES; ++tj)
 #pragma unroll
       for (int e = 0; e < 8; ++e) {
-        const int row = e * 2 + pair;
+        const int row = hipdnn_wmma_acc_row(pair, e);
         const int c = tj * kWmmaTile + wmma_lane;
         const int q_pos = row_base + mt * kWmmaTile + row;
         if (q_pos < sq && c < d) {
