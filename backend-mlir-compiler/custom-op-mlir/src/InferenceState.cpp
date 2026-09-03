@@ -54,6 +54,9 @@ void InferenceState::resolveEntryPoints(const LoadedArtifact &artifact) {
   set_output_allocator_fn_ =
       artifact.get_method<void, void *, const output_allocator_t *>(
           hipdnn::abi::kSetOutputAllocator);
+  set_provider_option_fn_ =
+      artifact.get_method<void, void *, const char *, const char *>(
+          hipdnn::abi::kRuntimeSetProviderOption);
   flush_op_profile_fn_ =
       artifact.get_method<void, void *>(hipdnn::abi::kRuntimeFlushOpProfile);
   // Perf-only hook; its name is a plain literal (not an artifact_abi.h
@@ -67,14 +70,16 @@ InferenceState::InferenceState(PrivateTag, void *state,
                                std::unique_ptr<LoadedArtifact> artifact)
     : state_(state), artifact_(std::move(artifact)), compute_fn_(nullptr),
       cleanup_fn_(nullptr), begin_compute_fn_(nullptr),
-      set_output_allocator_fn_(nullptr), flush_op_profile_fn_(nullptr),
-      add_cpu_profile_fn_(nullptr) {
+      set_output_allocator_fn_(nullptr), set_provider_option_fn_(nullptr),
+      flush_op_profile_fn_(nullptr), add_cpu_profile_fn_(nullptr) {
   resolveEntryPoints(*artifact_);
 
   MY_LOG(2) << "begin_compute symbol "
             << (begin_compute_fn_ ? "resolved" : "not exported (no-op)");
   MY_LOG(2) << "set_output_allocator symbol "
             << (set_output_allocator_fn_ ? "resolved" : "not exported (no-op)");
+  MY_LOG(2) << "set_provider_option symbol "
+            << (set_provider_option_fn_ ? "resolved" : "not exported (no-op)");
   MY_LOG(2) << "flush_op_profile symbol "
             << (flush_op_profile_fn_ ? "resolved" : "not exported (no-op)");
   MY_LOG(2) << "add_cpu_profile symbol "
@@ -189,6 +194,13 @@ void InferenceState::set_output_allocator(
   }
   if (state_) {
     set_output_allocator_fn_(state_, allocator);
+  }
+}
+
+void InferenceState::set_provider_option(const char *key,
+                                         const char *value) const {
+  if (set_provider_option_fn_ && state_) {
+    set_provider_option_fn_(state_, key, value);
   }
 }
 

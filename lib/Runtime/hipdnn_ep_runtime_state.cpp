@@ -19,6 +19,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <unordered_map>
+
+namespace {
+using ProviderOptions = std::unordered_map<std::string, std::string>;
+}
 
 // Forward decl of static helpers defined later in this file.
 static int initialize_state_handles(RuntimeState **out_state);
@@ -183,6 +189,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->zp_unpack_cache = nullptr;
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
   state->gqa_autotune_policy = nullptr;
+  state->provider_options = nullptr;
   state->device_error_flag = nullptr;
   state->hipdnn_handle = nullptr;
   state->hipdnn_graph_registry = nullptr;
@@ -828,6 +835,9 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     state->op_profile = nullptr;
   }
 
+  delete static_cast<ProviderOptions *>(state->provider_options);
+  state->provider_options = nullptr;
+
   // Destroy hipBLASLt handle
   if (state->hipblas_handle) {
     hipblasLtDestroy(state->hipblas_handle);
@@ -870,6 +880,42 @@ void *hipdnn_ep_state_get_hipblas_handle(RuntimeState *state) {
 
 void *hipdnn_ep_state_get_op_profile(RuntimeState *state) {
   return state ? state->op_profile : nullptr;
+}
+
+extern "C" HIPDNN_EP_RT_EXPORT void
+hipdnn_ep_runtime_set_provider_option(RuntimeState *state, const char *key,
+                                      const char *value) {
+  if (!state || !key)
+    return;
+
+  auto *options = static_cast<ProviderOptions *>(state->provider_options);
+  if (!value) {
+    if (options)
+      options->erase(key);
+    return;
+  }
+
+  if (!options) {
+    options = new ProviderOptions();
+    state->provider_options = options;
+  }
+  (*options)[key] = value;
+
+#if defined(HIPDNN_EP_REAL_RUNTIME)
+  if (std::strcmp(key, "gqa_autotune_mode") == 0)
+    hipdnn_ep::gqa_autotune_apply_provider_mode(state->gqa_autotune_policy,
+                                                value);
+#endif
+}
+
+extern "C" HIPDNN_EP_RT_EXPORT const char *
+hipdnn_ep_runtime_get_provider_option(RuntimeState *state, const char *key) {
+  if (!state || !key || !state->provider_options)
+    return nullptr;
+  const auto *options =
+      static_cast<const ProviderOptions *>(state->provider_options);
+  const auto it = options->find(key);
+  return it == options->end() ? nullptr : it->second.c_str();
 }
 
 // Per-Compute() cache invalidation hook. Today this only resets the GQA

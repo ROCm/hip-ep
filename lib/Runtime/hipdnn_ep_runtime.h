@@ -220,6 +220,23 @@ HIPDNN_EP_RT_EXPORT void
 hipdnn_ep_set_output_allocator(RuntimeState *state,
                                const hipdnn_output_allocator_t *allocator);
 
+// Copy one session-scoped EP provider option into RuntimeState. The EP calls
+// this after inference_init and before the first inference_compute for every
+// entry returned by PassContext::get_all_provider_options(). Unknown keys are
+// retained for future runtime consumers. Passing value=nullptr erases a key.
+//
+// Backwards compatibility: the EP resolves this symbol optionally. A cached
+// artifact predating this export continues to use environment variables and
+// build defaults.
+HIPDNN_EP_RT_EXPORT void
+hipdnn_ep_runtime_set_provider_option(RuntimeState *state, const char *key,
+                                      const char *value);
+
+// Return a borrowed pointer to a copied provider-option value, or nullptr when
+// absent. Valid until that key is changed or RuntimeState is destroyed.
+HIPDNN_EP_RT_EXPORT const char *
+hipdnn_ep_runtime_get_provider_option(RuntimeState *state, const char *key);
+
 // generated main_graph -> runtime (internal), forwards to the installed
 // callback. Returns a generic address-space-0 device pointer (the lowering
 // casts to the memref's address space). Returns null if none is installed.

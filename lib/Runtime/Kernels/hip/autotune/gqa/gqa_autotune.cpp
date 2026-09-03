@@ -136,6 +136,9 @@ static int currentComputeUnits() {
 
 struct GqaAutotunePolicy {
   GqaAutotuneMode mode = GqaAutotuneMode::Lookup;
+  // A non-empty HIPDNN_GQA_AUTOTUNE_MODE outranks the provider option, even
+  // when its value was invalid and the build default was used instead.
+  bool env_mode_present = false;
   // One map, keyed on the packed row key. The tier is part of the key, so the
   // probe order is a loop over four keys rather than a walk over four
   // containers.
@@ -1094,15 +1097,15 @@ static const char *modeName(GqaAutotuneMode mode) {
 
 struct ModeChoice {
   GqaAutotuneMode mode = kDefaultMode;
+  // Set by any non-empty value, so an invalid one still outranks the provider
+  // option; from_env additionally means the value parsed.
+  bool env_present = false;
   bool from_env = false;
 };
 
-// Matched case-insensitively and with whitespace stripped, and an unrecognised
-// value says so instead of quietly leaving the session on the default. The
-// point of the switch is to compare the two paths, so silently running the
-// other one is the failure worth a message.
-static ModeChoice chooseMode() {
-  const std::string raw = hipdnn_ep::env_string("HIPDNN_GQA_AUTOTUNE_MODE");
+// Lowercased with whitespace stripped, shared by the environment variable and
+// the provider option so one cannot accept a spelling the other rejects.
+static std::string normalizeMode(const std::string &raw) {
   std::string mode;
   mode.reserve(raw.size());
   for (const char c : raw) {
@@ -1110,19 +1113,40 @@ static ModeChoice chooseMode() {
       continue;
     mode.push_back(c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c);
   }
-  if (mode.empty())
-    return {kDefaultMode, false};
-  if (mode == "lookup")
-    return {GqaAutotuneMode::Lookup, true};
-  if (mode == "online")
-    return {GqaAutotuneMode::Online, true};
+  return mode;
+}
+
+static bool parseMode(const std::string &raw, GqaAutotuneMode *mode) {
+  const std::string normalized = normalizeMode(raw);
+  if (normalized == "lookup") {
+    *mode = GqaAutotuneMode::Lookup;
+    return true;
+  }
+  if (normalized == "online") {
+    *mode = GqaAutotuneMode::Online;
+    return true;
+  }
+  return false;
+}
+
+// Matched case-insensitively and with whitespace stripped, and an unrecognised
+// value says so instead of quietly leaving the session on the default. The
+// point of the switch is to compare the two paths, so silently running the
+// other one is the failure worth a message.
+static ModeChoice chooseMode() {
+  const std::string raw = hipdnn_ep::env_string("HIPDNN_GQA_AUTOTUNE_MODE");
+  if (normalizeMode(raw).empty())
+    return {kDefaultMode, false, false};
+  GqaAutotuneMode mode;
+  if (parseMode(raw, &mode))
+    return {mode, true, true};
   if (gqaLutLogOn())
     fprintf(stderr,
             "GQA autotune: unrecognised HIPDNN_GQA_AUTOTUNE_MODE=\"%s\" "
             "(expected \"lookup\" or \"online\"); using the build default, "
             "%s\n",
             raw.c_str(), modeName(kDefaultMode));
-  return {kDefaultMode, false};
+  return {kDefaultMode, true, false};
 }
 
 } // namespace
@@ -1132,6 +1156,7 @@ void *gqa_autotune_create(morphizen::FileSystem *fs) {
   policy->compute_units = currentComputeUnits();
   const ModeChoice choice = chooseMode();
   policy->mode = choice.mode;
+  policy->env_mode_present = choice.env_present;
   // The table is compiled into runtime.bc (see lib/Runtime/CMakeLists.txt) and
   // travels with the build, so it is available to a JIT'd model with no file on
   // disk and nothing embedded per-model. The EP FileSystem is unused now that
@@ -1174,6 +1199,29 @@ GqaAutotuneMode gqa_autotune_mode(const void *policy) {
   if (!policy)
     return GqaAutotuneMode::Lookup;
   return static_cast<const GqaAutotunePolicy *>(policy)->mode;
+}
+
+void gqa_autotune_apply_provider_mode(void *opaque_policy, const char *mode) {
+  auto *policy = static_cast<GqaAutotunePolicy *>(opaque_policy);
+  if (!policy || !mode || policy->env_mode_present)
+    return;
+  const std::string raw(mode);
+  if (normalizeMode(raw).empty())
+    return;
+  GqaAutotuneMode parsed;
+  if (!parseMode(raw, &parsed)) {
+    if (gqaLutLogOn())
+      fprintf(stderr,
+              "GQA autotune: unrecognised provider option "
+              "gqa_autotune_mode=\"%s\" (expected \"lookup\" or \"online\"); "
+              "keeping %s\n",
+              raw.c_str(), modeName(policy->mode));
+    return;
+  }
+  policy->mode = parsed;
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] GQA autotune mode: %s (from provider "
+                    "option gqa_autotune_mode)\n",
+                    modeName(policy->mode));
 }
 
 GqaDecodeResult gqa_autotune_resolve_decode(void *opaque_policy,
