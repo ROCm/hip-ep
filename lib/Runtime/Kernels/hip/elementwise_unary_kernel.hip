@@ -674,6 +674,12 @@ extern "C" int hip_elementwise_isinf(void *stream, const void *input,
                                      int detect_positive) {
   if (num_elements <= 0)
     return 0;
+  if (!detect_negative && !detect_positive) {
+    fprintf(stderr,
+            "[custom_kernels] hip_elementwise_isinf: at least one of "
+            "detect_negative or detect_positive must be set\n");
+    return -1;
+  }
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
   constexpr int kBlockSize = 256;

@@ -45,6 +45,12 @@ int wrap_isinf(RuntimeState *state, void *input, void *output,
   if (num_elements <= 0) {
     return 0;
   }
+  if (!detect_negative && !detect_positive) {
+    fprintf(stderr,
+            "[REAL] wrap_isinf: at least one of detect_negative or "
+            "detect_positive must be set\n");
+    return -1;
+  }
 
   int hip_dtype = isinf_hipdnn_to_hip_dtype(data_type);
   if (hip_dtype < 0) {

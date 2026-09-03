@@ -1645,6 +1645,12 @@ int wrap_isinf(RuntimeState *state, void *input, void *output,
     fprintf(stderr, "Invalid state in wrap_isinf\n");
     return -1;
   }
+  if (!detect_negative && !detect_positive) {
+    fprintf(stderr,
+            "wrap_isinf: at least one of detect_negative or detect_positive "
+            "must be set\n");
+    return -1;
+  }
   MOCK_PRINT("[MOCK] wrap_isinf(num_elements=%lld, data_type=%s(%lld), "
              "detect_negative=%lld, detect_positive=%lld)\n",
              (long long)num_elements, hipdnn_ep_datatype_name(data_type),
