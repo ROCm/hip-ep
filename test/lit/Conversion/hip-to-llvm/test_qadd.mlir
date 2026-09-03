@@ -17,13 +17,10 @@ module {
                     rhs_scale = 5.000000e-02 : f32, rhs_zp = 3 : i64,
                     output_scale = 2.000000e-01 : f32, output_zp = 7 : i64}
 
-    // The three scales reach the runtime unfolded. Folding them into
-    // s_lhs/s_out and s_rhs/s_out here would emit 0.5 and 0.25 instead, and
-    // diverge from the ONNX DQ->Add->Q rounding.
-    // CHECK-DAG: %[[SLHS:.*]] = llvm.mlir.constant(1.000000e-01 : f32)
-    // CHECK-DAG: %[[SRHS:.*]] = llvm.mlir.constant(5.000000e-02 : f32)
-    // CHECK-DAG: %[[SOUT:.*]] = llvm.mlir.constant(2.000000e-01 : f32)
-    // CHECK: llvm.call @wrap_qelementwise({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64, f32, i64, f32, i64, f32, i64) -> i32
+    // Lowering folds scales into M_a = s_lhs/s_out and M_b = s_rhs/s_out.
+    // CHECK-DAG: llvm.mlir.constant(5.000000e-01 : f32)
+    // CHECK-DAG: llvm.mlir.constant(2.500000e-01 : f32)
+    // CHECK: llvm.call @wrap_qelementwise({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64, f32, i64, f32, i64, i64) -> i32
     return
   }
 }

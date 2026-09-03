@@ -20,10 +20,9 @@
 // checks prove the extracted values reach the attributes with their sign
 // intact, rather than matching an incidental zero.
 //
-// Only the LHS/RHS scale and zero-point carriers survive: fusion roots on the
-// QuantizeLinear, so the greedy driver cleans up its output-side constants
-// while the ones feeding the erased DequantizeLinear chain reach
-// lowerOnnxConstants and become dead hip.constant carriers.
+// PDL fusion runs before lowerOnnxConstants and folds scale/zp into hip.qadd
+// attributes, so the onnx.Constant carriers are dead and get DCE'd — no
+// hip.constant survivors in the output IR.
 //
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
 // ============================================================================
@@ -58,10 +57,6 @@ module {
 
 // CHECK-LABEL: module
 // CHECK-NEXT:  func.func @main_graph(%[[CTX:.*]]: !hip.context, %[[LHS:.*]]: tensor<1x128x32xi8>, %[[RHS:.*]]: tensor<1x128x32xi8>) -> tensor<1x128x32xi8> {
-// CHECK-NEXT:    %[[C0:.*]] = hip.constant {serialization_order = 0 : i64, value = dense<1.000000e-01> : tensor<f32>} : tensor<f32>
-// CHECK-NEXT:    %[[C1:.*]] = hip.constant {serialization_order = 1 : i64, value = dense<-5> : tensor<i8>} : tensor<i8>
-// CHECK-NEXT:    %[[C2:.*]] = hip.constant {serialization_order = 2 : i64, value = dense<5.000000e-02> : tensor<f32>} : tensor<f32>
-// CHECK-NEXT:    %[[C3:.*]] = hip.constant {serialization_order = 3 : i64, value = dense<3> : tensor<i8>} : tensor<i8>
 // CHECK-NEXT:    %[[EMPTY:.*]] = tensor.empty() : tensor<1x128x32xi8>
 // CHECK-NEXT:    %[[QADD:.*]] = hip.qadd(%[[CTX]]) ins(%[[LHS]], %[[RHS]] : tensor<1x128x32xi8>, tensor<1x128x32xi8>) outs(%[[EMPTY]] : tensor<1x128x32xi8>) {lhs_scale = 1.000000e-01 : f32, lhs_zp = -5 : i64, output_scale = 2.000000e-01 : f32, output_zp = 7 : i64, rhs_scale = 5.000000e-02 : f32, rhs_zp = 3 : i64} : tensor<1x128x32xi8>
 // CHECK-NEXT:    return %[[QADD]] : tensor<1x128x32xi8>
