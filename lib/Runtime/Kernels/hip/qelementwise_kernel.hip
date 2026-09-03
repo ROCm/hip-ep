@@ -11,7 +11,6 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <limits>
 
 #define HIP_QELEMENTWISE_MAX_RANK 8
 #define HIP_QELEMENTWISE_ADD 0
@@ -20,11 +19,49 @@ struct QElemDimsND {
   int64_t v[HIP_QELEMENTWISE_MAX_RANK];
 };
 
+// The HIP compile flags include `-Xclang -fno-cuda-host-device-constexpr`
+// (see lib/Runtime/Kernels/cmake/hip_utils.cmake), which makes
+// `std::numeric_limits<T>` members host-only. Device-side bounds therefore come
+// from the <cstdint> macros through explicitly annotated helpers.
+template <typename T>
+struct QElemBounds;
+
+template <>
+struct QElemBounds<int8_t> {
+  __device__ static float lowest() { return static_cast<float>(INT8_MIN); }
+  __device__ static float highest() { return static_cast<float>(INT8_MAX); }
+};
+
+template <>
+struct QElemBounds<uint8_t> {
+  __device__ static float lowest() { return 0.0f; }
+  __device__ static float highest() { return static_cast<float>(UINT8_MAX); }
+};
+
+template <>
+struct QElemBounds<int16_t> {
+  __device__ static float lowest() { return static_cast<float>(INT16_MIN); }
+  __device__ static float highest() { return static_cast<float>(INT16_MAX); }
+};
+
+template <>
+struct QElemBounds<uint16_t> {
+  __device__ static float lowest() { return 0.0f; }
+  __device__ static float highest() { return static_cast<float>(UINT16_MAX); }
+};
+
+template <>
+struct QElemBounds<int32_t> {
+  __device__ static float lowest() { return static_cast<float>(INT32_MIN); }
+  // INT32_MAX is not representable in f32 and rounds up to 2^31, which would
+  // overflow the cast back to int32_t. Clamp to the largest f32 below 2^31.
+  __device__ static float highest() { return 2147483520.0f; }
+};
+
 template <typename T>
 __device__ inline T q_saturate(float v) {
-  float lo = static_cast<float>(std::numeric_limits<T>::lowest());
-  float hi = static_cast<float>(std::numeric_limits<T>::max());
-  return static_cast<T>(fminf(hi, fmaxf(lo, v)));
+  return static_cast<T>(
+      fminf(QElemBounds<T>::highest(), fmaxf(QElemBounds<T>::lowest(), v)));
 }
 
 template <typename T>
