@@ -133,3 +133,95 @@ func.func @pool_domain_mlp_flatten(
   } -> tensor<?xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
   return %out : tensor<?xf16, #hipsr.mem<device>>
 }
+
+// -----
+// Two copies of one compute op that differ only in whether the body reads its
+// destination entry argument. Holding a result in an input's buffer also
+// retypes that argument, so bufferization only does it when the body never
+// touches the argument.
+//
+// The destination is a rank wider than the input here. Reusing the input buffer
+// for @compute_reads_destination would hand the body a memref<?x?xi1> where it
+// reads a tensor<?x?x1xi1>, so the destination keeps an allocation of its own.
+// CHECK-LABEL: func.func @compute_reads_destination(
+// CHECK-SAME: %[[CTX:.+]]: !hipsr.context, %[[ROWS:.+]]: index, %[[COLS:.+]]: index,
+// CHECK-SAME: %[[INPUT:.+]]: memref<?x?xi1, #hipsr.mem<device>>) -> memref<?x?x1xi1, #hipsr.mem<device>> {
+// CHECK-NEXT: %[[DEST:.+]] = memref.alloc(%[[ROWS]], %[[COLS]]){{.*}} : memref<?x?x1xi1, #hipsr.mem<device>>
+// CHECK-NEXT: %[[OUT:.+]] = hipsr.compute(%[[CTX]]) ins(%[[INPUT]] : memref<?x?xi1, #hipsr.mem<device>>)
+// CHECK-SAME: outs(%[[DEST]] : memref<?x?x1xi1, #hipsr.mem<device>>) {
+// CHECK-NEXT: ^bb0(%{{.+}}: !hipsr.context, %[[IN:.+]]: memref<?x?xi1, #hipsr.mem<device>>,
+// CHECK-SAME: %[[BODY_DEST:.+]]: memref<?x?x1xi1, #hipsr.mem<device>>):
+// CHECK-NEXT: %[[C0:.+]] = arith.constant 0 : index
+// CHECK-NEXT: %[[C1:.+]] = arith.constant 1 : index
+// CHECK-NEXT: %[[D0:.+]] = memref.dim %[[BODY_DEST]], %[[C0]] : memref<?x?x1xi1, #hipsr.mem<device>>
+// CHECK-NEXT: %[[D1:.+]] = memref.dim %[[BODY_DEST]], %[[C1]] : memref<?x?x1xi1, #hipsr.mem<device>>
+// CHECK-NEXT: %[[EXPANDED:.+]] = memref.expand_shape %[[IN]] {{\[\[}}0], [1, 2]] output_shape {{\[}}%[[D0]], %[[D1]], 1]
+// CHECK-SAME: : memref<?x?xi1, #hipsr.mem<device>> into memref<?x?x1xi1, #hipsr.mem<device>>
+// CHECK-NEXT: hipsr.compute_yield %[[EXPANDED]] : memref<?x?x1xi1, #hipsr.mem<device>>
+// CHECK-NEXT: } : memref<?x?x1xi1, #hipsr.mem<device>>{{$}}
+// CHECK-NEXT: return %[[OUT]] : memref<?x?x1xi1, #hipsr.mem<device>>
+// CHECK-NEXT: }
+func.func @compute_reads_destination(
+    %ctx: !hipsr.context, %rows: index, %cols: index,
+    %input: tensor<?x?xi1, #hipsr.mem<device>>)
+    -> tensor<?x?x1xi1, #hipsr.mem<device>> {
+  %init = tensor.empty(%rows, %cols) : tensor<?x?x1xi1, #hipsr.mem<device>>
+  %out = hipsr.compute(%ctx)
+      ins(%input : tensor<?x?xi1, #hipsr.mem<device>>)
+      outs(%init : tensor<?x?x1xi1, #hipsr.mem<device>>) {
+  ^bb0(%body_ctx: !hipsr.context, %in: tensor<?x?xi1, #hipsr.mem<device>>,
+       %dest: tensor<?x?x1xi1, #hipsr.mem<device>>):
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %d0 = tensor.dim %dest, %c0 : tensor<?x?x1xi1, #hipsr.mem<device>>
+    %d1 = tensor.dim %dest, %c1 : tensor<?x?x1xi1, #hipsr.mem<device>>
+    %expanded = tensor.expand_shape %in [[0], [1, 2]] output_shape [%d0, %d1, 1]
+        : tensor<?x?xi1, #hipsr.mem<device>>
+        into tensor<?x?x1xi1, #hipsr.mem<device>>
+    hipsr.compute_yield %expanded : tensor<?x?x1xi1, #hipsr.mem<device>>
+  } : tensor<?x?x1xi1, #hipsr.mem<device>>
+  return %out : tensor<?x?x1xi1, #hipsr.mem<device>>
+}
+
+// The dimensions come off the input here, which leaves the destination argument
+// unused, so the result lands in the input's buffer and tensor.empty allocates
+// nothing. The destination argument comes back a rank lower with it, which is
+// what the body above could not have tolerated.
+// CHECK-LABEL: func.func @compute_ignores_destination(
+// CHECK-SAME: %[[CTX:.+]]: !hipsr.context, %{{.+}}: index, %{{.+}}: index,
+// CHECK-SAME: %[[INPUT:.+]]: memref<?x?xi1, #hipsr.mem<device>>) -> memref<?x?x1xi1, #hipsr.mem<device>> {
+// CHECK-NEXT: %[[OUT:.+]] = hipsr.compute(%[[CTX]]) ins(%[[INPUT]] : memref<?x?xi1, #hipsr.mem<device>>)
+// CHECK-SAME: outs(%[[INPUT]] : memref<?x?xi1, #hipsr.mem<device>>) {
+// CHECK-NEXT: ^bb0(%{{.+}}: !hipsr.context, %[[IN:.+]]: memref<?x?xi1, #hipsr.mem<device>>,
+// CHECK-SAME: %{{.+}}: memref<?x?xi1, #hipsr.mem<device>>):
+// CHECK-NEXT: %[[C0:.+]] = arith.constant 0 : index
+// CHECK-NEXT: %[[C1:.+]] = arith.constant 1 : index
+// CHECK-NEXT: %[[D0:.+]] = memref.dim %[[IN]], %[[C0]] : memref<?x?xi1, #hipsr.mem<device>>
+// CHECK-NEXT: %[[D1:.+]] = memref.dim %[[IN]], %[[C1]] : memref<?x?xi1, #hipsr.mem<device>>
+// CHECK-NEXT: %[[EXPANDED:.+]] = memref.expand_shape %[[IN]] {{\[\[}}0], [1, 2]] output_shape {{\[}}%[[D0]], %[[D1]], 1]
+// CHECK-SAME: : memref<?x?xi1, #hipsr.mem<device>> into memref<?x?x1xi1, #hipsr.mem<device>>
+// CHECK-NEXT: hipsr.compute_yield %[[EXPANDED]] : memref<?x?x1xi1, #hipsr.mem<device>>
+// CHECK-NEXT: } : memref<?x?x1xi1, #hipsr.mem<device>>{{$}}
+// CHECK-NEXT: return %[[OUT]] : memref<?x?x1xi1, #hipsr.mem<device>>
+// CHECK-NEXT: }
+func.func @compute_ignores_destination(
+    %ctx: !hipsr.context, %rows: index, %cols: index,
+    %input: tensor<?x?xi1, #hipsr.mem<device>>)
+    -> tensor<?x?x1xi1, #hipsr.mem<device>> {
+  %init = tensor.empty(%rows, %cols) : tensor<?x?x1xi1, #hipsr.mem<device>>
+  %out = hipsr.compute(%ctx)
+      ins(%input : tensor<?x?xi1, #hipsr.mem<device>>)
+      outs(%init : tensor<?x?x1xi1, #hipsr.mem<device>>) {
+  ^bb0(%body_ctx: !hipsr.context, %in: tensor<?x?xi1, #hipsr.mem<device>>,
+       %dest: tensor<?x?x1xi1, #hipsr.mem<device>>):
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %d0 = tensor.dim %in, %c0 : tensor<?x?xi1, #hipsr.mem<device>>
+    %d1 = tensor.dim %in, %c1 : tensor<?x?xi1, #hipsr.mem<device>>
+    %expanded = tensor.expand_shape %in [[0], [1, 2]] output_shape [%d0, %d1, 1]
+        : tensor<?x?xi1, #hipsr.mem<device>>
+        into tensor<?x?x1xi1, #hipsr.mem<device>>
+    hipsr.compute_yield %expanded : tensor<?x?x1xi1, #hipsr.mem<device>>
+  } : tensor<?x?x1xi1, #hipsr.mem<device>>
+  return %out : tensor<?x?x1xi1, #hipsr.mem<device>>
+}
