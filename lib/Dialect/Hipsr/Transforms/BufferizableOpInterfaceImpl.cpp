@@ -108,7 +108,6 @@ struct PreserveShapeBufferizableModel
 struct ConstantBufferizableModel
     : public BufferizableOpInterface::ExternalModel<ConstantBufferizableModel,
                                                     ConstantOp> {
-  // The runtime owns the blob, so a DPS op with a constant init must copy.
   bool isWritable(Operation *, Value, const AnalysisState &) const {
     return false;
   }
@@ -139,7 +138,6 @@ struct ConstantBufferizableModel
       return failure();
     }
 
-    // index, offset, and size describe the blob, not the type, so they stay.
     replaceOpWithNewBufferizedOp<ConstantOp>(
         rewriter, op, *bufferType, constantOp.getValue(),
         constantOp.getIndexAttr(), constantOp.getOffsetAttr(),
