@@ -83,9 +83,13 @@ module {
   // left at full rank even when every extra input is a scalar. ---
   func.func @max_5d_variadic(%a: tensor<4x1x6x8x1xf32>, %b: tensor<f32>, %c: tensor<f32>)
       -> tensor<4x1x6x8x1xf32> {
+    // Both chained maxes are checked so that dropping the third input during
+    // lowering fails here rather than silently changing results.
     // CHECK-LABEL: func.func @max_5d_variadic
+    // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<4x1x6x8x1xf32>, %[[B:.*]]: tensor<f32>, %[[C:.*]]: tensor<f32>)
     // CHECK-NOT: tensor.collapse_shape
-    // CHECK: hip.max({{.*}}) ins({{.*}}, {{.*}} : tensor<4x1x6x8x1xf32>, tensor<f32>) outs({{.*}} : tensor<4x1x6x8x1xf32>)
+    // CHECK: %[[M1:.*]] = hip.max(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<4x1x6x8x1xf32>, tensor<f32>) outs({{.*}} : tensor<4x1x6x8x1xf32>)
+    // CHECK: hip.max(%[[CTX]]) ins(%[[M1]], %[[C]] : tensor<4x1x6x8x1xf32>, tensor<f32>) outs({{.*}} : tensor<4x1x6x8x1xf32>)
     %r = "onnx.Max"(%a, %b, %c) : (tensor<4x1x6x8x1xf32>, tensor<f32>, tensor<f32>) -> tensor<4x1x6x8x1xf32>
     return %r : tensor<4x1x6x8x1xf32>
   }

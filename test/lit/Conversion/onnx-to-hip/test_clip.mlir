@@ -61,6 +61,21 @@ module {
   // CHECK: hip.max(%[[CTX5]]) ins({{.*}}, {{.*}} : tensor<4x1x6x2500xf32>, tensor<f32>) outs({{.*}} : tensor<4x1x6x2500xf32>)
   // CHECK: tensor.expand_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4]] output_shape [4, 1, 6, 2500, 1] : tensor<4x1x6x2500xf32> into tensor<4x1x6x2500x1xf32>
 
+  // A rank-5 Clip with both bounds absent is an identity, so it is left alone
+  // rather than packed: there is no hip.max/hip.min to keep under the ceiling.
+  func.func @clip_5d_no_bounds(%x: tensor<4x1x6x2500x1xf32>) -> tensor<4x1x6x2500x1xf32> {
+    %n1 = "onnx.NoValue"() {value} : () -> none
+    %n2 = "onnx.NoValue"() {value} : () -> none
+    %y = "onnx.Clip"(%x, %n1, %n2) : (tensor<4x1x6x2500x1xf32>, none, none) -> tensor<4x1x6x2500x1xf32>
+    return %y : tensor<4x1x6x2500x1xf32>
+  }
+
+  // CHECK-LABEL: func.func @clip_5d_no_bounds
+  // CHECK-SAME: (%[[CTXN:.*]]: !hip.context, %[[XN:.*]]: tensor<4x1x6x2500x1xf32>)
+  // CHECK-NOT: tensor.collapse_shape
+  // CHECK-NOT: hip.max
+  // CHECK: return %[[XN]] : tensor<4x1x6x2500x1xf32>
+
   // Rank-5 relu: same ceiling, reached through hip.max(x, 0).
   func.func @relu_5d(%x: tensor<4x1x6x2500x1xf32>) -> tensor<4x1x6x2500x1xf32> {
     %y = "onnx.Relu"(%x) : (tensor<4x1x6x2500x1xf32>) -> tensor<4x1x6x2500x1xf32>

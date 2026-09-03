@@ -262,11 +262,19 @@ struct PackBroadcastPattern : public RewritePattern {
 
     // A pass-through operand that carried shape would silently disagree with
     // the packed result, so only scalars and `none` may ride along.
-    for (Value extra : op->getOperands().drop_front(numDataOperands)) {
+    OperandRange trailing = op->getOperands().drop_front(numDataOperands);
+    for (Value extra : trailing) {
       auto extraType = dyn_cast<RankedTensorType>(extra.getType());
       if (extraType && extraType.getRank() != 0)
         return failure();
     }
+
+    // An op whose optional operands are all absent is an identity: onnx.Clip
+    // with neither bound does nothing, so packing it would churn reshapes and
+    // inflate the statistic for no gain.
+    auto isAbsent = [](Value v) { return isa<NoneType>(v.getType()); };
+    if (maxOperands > numDataOperands && llvm::all_of(trailing, isAbsent))
+      return failure();
 
     SmallVector<Value> dataOperands(
         op->getOperands().take_front(numDataOperands));
