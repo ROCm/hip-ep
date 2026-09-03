@@ -27,7 +27,9 @@ module {
   func.func @clip_5d_unranked_bound(%x: tensor<2x3x4x5x6xf32>, %lo: tensor<*xf32>)
       -> tensor<2x3x4x5x6xf32> {
     %n = "onnx.NoValue"() {value} : () -> none
-    // expected-error @+1 {{'hip.max' op operand #2 must be ranked tensor or memref, but got 'tensor<*xf32>'}}
+    // Matching only the stable prefix: the trailing "but got ..." text is
+    // formatted by MLIR and can change between versions.
+    // expected-error @+1 {{'hip.max' op operand #2 must be ranked tensor or memref}}
     %y = "onnx.Clip"(%x, %lo, %n) : (tensor<2x3x4x5x6xf32>, tensor<*xf32>, none) -> tensor<2x3x4x5x6xf32>
     return %y : tensor<2x3x4x5x6xf32>
   }

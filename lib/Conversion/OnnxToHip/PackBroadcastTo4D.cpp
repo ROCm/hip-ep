@@ -16,7 +16,8 @@
 // but both expand into hip.max/hip.min during conversion and so hit the same
 // rank-4 ceiling in the elementwise ABI; their broadcast lives entirely on the
 // first operand, and Clip's optional min/max bounds are scalars that are
-// forwarded unchanged.
+// forwarded unchanged. A Clip supplying neither bound is an identity and is
+// left alone.
 //
 // Before:
 //   %r = "onnx.Add"(%a, %b) : (...) -> tensor<6x2500x8x1x2x4x2xf32>
@@ -265,19 +266,20 @@ struct PackBroadcastPattern : public RewritePattern {
     // whitelist on purpose: an unranked operand carries no rank to check, so
     // rejecting merely the ranked-and-non-scalar case would let it through.
     OperandRange trailing = op->getOperands().drop_front(numDataOperands);
+    bool anyTrailingPresent = false;
     for (Value extra : trailing) {
       if (isa<NoneType>(extra.getType()))
         continue;
       auto extraType = dyn_cast<RankedTensorType>(extra.getType());
       if (!extraType || extraType.getRank() != 0)
         return failure();
+      anyTrailingPresent = true;
     }
 
     // An op whose optional operands are all absent is an identity: onnx.Clip
     // with neither bound does nothing, so packing it would churn reshapes and
     // inflate the statistic for no gain.
-    auto isAbsent = [](Value v) { return isa<NoneType>(v.getType()); };
-    if (maxOperands > numDataOperands && llvm::all_of(trailing, isAbsent))
+    if (maxOperands > numDataOperands && !anyTrailingPresent)
       return failure();
 
     SmallVector<Value> dataOperands(
@@ -289,7 +291,7 @@ struct PackBroadcastPattern : public RewritePattern {
 
     OperationState state(op->getLoc(), op->getName().getStringRef());
     state.addOperands(packing->operands);
-    state.addOperands(op->getOperands().drop_front(numDataOperands));
+    state.addOperands(trailing);
     state.addTypes(packing->packedResultType);
     state.addAttributes(op->getAttrs());
     Operation *packedOp = rewriter.create(state);
