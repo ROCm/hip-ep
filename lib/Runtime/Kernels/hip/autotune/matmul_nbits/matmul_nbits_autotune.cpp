@@ -29,7 +29,7 @@ namespace {
 
 namespace fbs = hipdnn_ep::matmul_nbits_autotune::fbs;
 
-constexpr uint32_t kSchemaVersion = 3;
+constexpr uint32_t kSchemaVersion = 4;
 // Bump when the config tables or the meaning of a stored geometry changes.
 // A table stamped with an older ABI is rejected outright rather than allowed to
 // pick configs that no longer mean what they meant when they were measured.

@@ -43,7 +43,7 @@ LUT_DIR = ROOT / "lut"
 DATA_DIR = ROOT / "scripts" / "data"
 SHAPES = ROOT / "shapes" / "oga_models_bits4.csv"
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 KERNEL_ABI = "matmul_nbits-v1"
 
 GROUP_SIZES = {16: "G16", 32: "G32", 64: "G64", 128: "G128", 256: "G256",

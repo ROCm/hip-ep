@@ -144,10 +144,13 @@ struct MatmulNbitsTunePoint {
   // at load, same as an unusable geometry.
   config: ubyte;
 
-  // Distance key. uint32 because lm_head N reaches 262208.
-  m: uint32;
+  // Distance key. M (prefill tokens, <= 16384) and K (in_features, <= ~17408)
+  // fit a uint16; N stays uint32 because the lm_head/vocab projection reaches
+  // 262208. Narrowing M/K halves their storage with no change to the log-space
+  // metric -- the values are identical, only the field width shrinks.
+  m: uint16;
   n: uint32;
-  k: uint32;
+  k: uint16;
 }
 
 // Last resort for a phase, used when its group has no usable point at all.
@@ -158,7 +161,7 @@ struct MatmulNbitsFallback {
 }
 
 table MatmulNbitsAutotuneLut {
-  schema_version: uint32 = 3;
+  schema_version: uint32 = 4;
   gpu_arch: string;         // must equal the running device, e.g. "gfx1151"
   rocm_version: int32;      // advisory; mismatch warns but still loads
   // Bumped whenever the config tables or kernel semantics change in a way that

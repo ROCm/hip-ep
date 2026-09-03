@@ -1,5 +1,5 @@
 {
- "schema_version": 3,
+ "schema_version": 4,
  "gpu_arch": "gfx1151",
  "rocm_version": 70100,
  "kernel_abi": "matmul_nbits-v1",
