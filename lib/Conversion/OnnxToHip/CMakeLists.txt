@@ -28,13 +28,17 @@ if(MLIR_PDLL_EXE)
     set(PDL_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/pdl")
     file(MAKE_DIRECTORY "${PDL_BUILD_DIR}")
     set(PDL_OUTPUT "${PDL_BUILD_DIR}/HipFusionPatterns.pdl.mlir")
-    add_custom_command(OUTPUT "${PDL_OUTPUT}"
+    set(PDL_RUNTIME_OUTPUT "${CMAKE_BINARY_DIR}/bin/HipFusionPatterns.pdl.mlir")
+    add_custom_command(OUTPUT "${PDL_OUTPUT}" "${PDL_RUNTIME_OUTPUT}"
         COMMAND "${MLIR_PDLL_EXE}" -x mlir "-I${PDL_SOURCE_DIR}"
                 "${PDL_ENTRY}" -o "${PDL_OUTPUT}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/bin"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${PDL_OUTPUT}" "${PDL_RUNTIME_OUTPUT}"
         DEPENDS ${PDL_SOURCES}
-        COMMENT "Compiling PDLL patterns: HipFusionPatterns.pdll -> HipFusionPatterns.pdl.mlir"
+        COMMENT "Compiling PDLL patterns: HipFusionPatterns.pdll -> HipFusionPatterns.pdl.mlir (+ bin copy)"
         VERBATIM)
-    add_custom_target(HipPdllPatterns DEPENDS "${PDL_OUTPUT}")
+    add_custom_target(HipPdllPatterns DEPENDS "${PDL_OUTPUT}" "${PDL_RUNTIME_OUTPUT}")
     install(FILES "${PDL_OUTPUT}" DESTINATION bin)
     message(STATUS "OnnxToHip: PDLL fusion enabled — patterns: ${PDL_OUTPUT}")
 else()

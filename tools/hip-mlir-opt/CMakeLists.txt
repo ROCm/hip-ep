@@ -15,6 +15,9 @@ add_dependencies(hip-mlir-opt
   HipOpsIncGen
   HipPassesIncGen
 )
+if(TARGET HipPdllPatterns)
+  add_dependencies(hip-mlir-opt HipPdllPatterns)
+endif()
 
 target_link_libraries(hip-mlir-opt PRIVATE
   HipSupport
