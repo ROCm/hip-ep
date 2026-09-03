@@ -261,11 +261,15 @@ struct PackBroadcastPattern : public RewritePattern {
       return failure();
 
     // A pass-through operand that carried shape would silently disagree with
-    // the packed result, so only scalars and `none` may ride along.
+    // the packed result, so only scalars and `none` may ride along. This is a
+    // whitelist on purpose: an unranked operand carries no rank to check, so
+    // rejecting merely the ranked-and-non-scalar case would let it through.
     OperandRange trailing = op->getOperands().drop_front(numDataOperands);
     for (Value extra : trailing) {
+      if (isa<NoneType>(extra.getType()))
+        continue;
       auto extraType = dyn_cast<RankedTensorType>(extra.getType());
-      if (extraType && extraType.getRank() != 0)
+      if (!extraType || extraType.getRank() != 0)
         return failure();
     }
 
