@@ -131,11 +131,11 @@ void gqa_autotune_destroy(void *policy);
 
 GqaAutotuneMode gqa_autotune_mode(const void *policy);
 
-// Apply the session's gqa_autotune_mode provider option.
-// HIPDNN_GQA_AUTOTUNE_MODE has higher priority, so this is a no-op when that
-// variable was set. `mode` is parsed into the typed policy during the call and
-// is never retained.
-void gqa_autotune_apply_provider_mode(void *policy, const char *mode);
+// Resolve the session's gqa_autotune_mode provider option. `mode` is the raw
+// value, or null when none was supplied. Runs once per policy and is a no-op
+// afterwards, so callers may invoke it on every read; HIPDNN_GQA_AUTOTUNE_MODE
+// outranks it. Parsed during the call, never retained.
+void gqa_autotune_resolve_provider_mode(void *policy, const char *mode);
 
 GqaDecodeResult gqa_autotune_resolve_decode(void *policy,
                                             const GqaDecodeRequest &request);

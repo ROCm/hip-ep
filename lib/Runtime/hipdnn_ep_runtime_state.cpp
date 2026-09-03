@@ -900,12 +900,6 @@ hipdnn_ep_runtime_set_provider_option(RuntimeState *state, const char *key,
     state->provider_options = options;
   }
   (*options)[key] = value;
-
-#if defined(HIPDNN_EP_REAL_RUNTIME)
-  if (std::strcmp(key, "gqa_autotune_mode") == 0)
-    hipdnn_ep::gqa_autotune_apply_provider_mode(state->gqa_autotune_policy,
-                                                value);
-#endif
 }
 
 extern "C" HIPDNN_EP_RT_EXPORT const char *

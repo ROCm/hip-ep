@@ -318,23 +318,39 @@ int main(int argc, char **argv) {
   REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
           hipdnn_ep::GqaAutotuneMode::Lookup);
 
-  hipdnn_ep::gqa_autotune_apply_provider_mode(policy, " OnLiNe ");
+  hipdnn_ep::gqa_autotune_resolve_provider_mode(policy, " OnLiNe ");
+  REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
+          hipdnn_ep::GqaAutotuneMode::Online);
+  // Resolution happens once, so the decode path can call it on every read: a
+  // later value cannot move a session that already answered.
+  hipdnn_ep::gqa_autotune_resolve_provider_mode(policy, "lookup");
   REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
           hipdnn_ep::GqaAutotuneMode::Online);
   hipdnn_ep::gqa_autotune_destroy(policy);
 
+  // Nothing supplied leaves the mode alone and still counts as resolved.
   policy = hipdnn_ep::gqa_autotune_create(&fs);
-  hipdnn_ep::gqa_autotune_apply_provider_mode(policy, "invalid");
+  hipdnn_ep::gqa_autotune_resolve_provider_mode(policy, nullptr);
+  hipdnn_ep::gqa_autotune_resolve_provider_mode(policy, "online");
   REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
           hipdnn_ep::GqaAutotuneMode::Lookup);
-  hipdnn_ep::gqa_autotune_apply_provider_mode(policy, "");
+  hipdnn_ep::gqa_autotune_destroy(policy);
+
+  policy = hipdnn_ep::gqa_autotune_create(&fs);
+  hipdnn_ep::gqa_autotune_resolve_provider_mode(policy, "invalid");
+  REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
+          hipdnn_ep::GqaAutotuneMode::Lookup);
+  hipdnn_ep::gqa_autotune_destroy(policy);
+
+  policy = hipdnn_ep::gqa_autotune_create(&fs);
+  hipdnn_ep::gqa_autotune_resolve_provider_mode(policy, "");
   REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
           hipdnn_ep::GqaAutotuneMode::Lookup);
   hipdnn_ep::gqa_autotune_destroy(policy);
 
   setModeEnv("lookup");
   policy = hipdnn_ep::gqa_autotune_create(&fs);
-  hipdnn_ep::gqa_autotune_apply_provider_mode(policy, "online");
+  hipdnn_ep::gqa_autotune_resolve_provider_mode(policy, "online");
   REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
           hipdnn_ep::GqaAutotuneMode::Lookup);
   hipdnn_ep::gqa_autotune_destroy(policy);
@@ -343,7 +359,7 @@ int main(int argc, char **argv) {
   // slot and preserves the historical fallback to the build default.
   setModeEnv("invalid");
   policy = hipdnn_ep::gqa_autotune_create(&fs);
-  hipdnn_ep::gqa_autotune_apply_provider_mode(policy, "online");
+  hipdnn_ep::gqa_autotune_resolve_provider_mode(policy, "online");
   REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
           hipdnn_ep::GqaAutotuneMode::Lookup);
   hipdnn_ep::gqa_autotune_destroy(policy);
