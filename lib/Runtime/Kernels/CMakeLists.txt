@@ -151,6 +151,35 @@ _rtc_embed_concatenated(kGqaDeviceSource _rtc_embedded_gqa
     ${CMAKE_CURRENT_SOURCE_DIR}/include/hip_arch_compat.h
     ${CMAKE_CURRENT_SOURCE_DIR}/hip/rtc/gqa_device.h)
 
+# Derive the GQA hipRTC registration set for one arch from its offline autotune
+# LUT. Emits <out-dir>/gqa_rtc_tuned_names.h; the directory is per-arch because
+# each arch has its own LUT and the header name is fixed by the #include.
+set(_GQA_RTC_NAMES_SCRIPT
+    ${CMAKE_CURRENT_SOURCE_DIR}/hip/autotune/gqa/scripts/gen_rtc_names.py)
+function(_gqa_rtc_names ARCH OUT_DIR_VAR OUT_HEADER_VAR)
+    set(_dir ${CMAKE_CURRENT_BINARY_DIR}/rtc_names/${ARCH})
+    set(_header ${_dir}/gqa_rtc_tuned_names.h)
+    set(_lut ${CMAKE_CURRENT_SOURCE_DIR}/hip/autotune/gqa/lut/${ARCH}.json)
+    set(_lut_dep "")
+    if(EXISTS ${_lut})
+        set(_lut_dep ${_lut})
+    endif()
+    add_custom_command(
+        OUTPUT ${_header}
+        COMMAND ${Python3_EXECUTABLE} ${_GQA_RTC_NAMES_SCRIPT}
+                --arch ${ARCH}
+                --kernel-source ${CMAKE_CURRENT_SOURCE_DIR}/hip/gqa_kernel.hip
+                --output ${_header}
+        DEPENDS ${_GQA_RTC_NAMES_SCRIPT}
+                ${CMAKE_CURRENT_SOURCE_DIR}/hip/gqa_kernel.hip
+                ${_lut_dep}
+        COMMENT "Generating GQA hipRTC name expressions for ${ARCH}"
+        VERBATIM
+    )
+    set(${OUT_DIR_VAR} ${_dir} PARENT_SCOPE)
+    set(${OUT_HEADER_VAR} ${_header} PARENT_SCOPE)
+endfunction()
+
 set(_rtc_sources
     rtc/hiprtc_module.hip
     ${_rtc_embedded_sub}
@@ -164,16 +193,33 @@ set(_rtc_sources
 # DLL/SO is not bloated with code for archs the consumer won't load.
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
     set(_target custom_kernels_${_arch})
+    _gqa_rtc_names(${_arch} _gqa_names_dir _gqa_names_header)
     hip_add_library(${_target} SHARED ${_kernel_sources} ${_rtc_sources}
         INCLUDE_DIRECTORIES
             ${CMAKE_CURRENT_SOURCE_DIR}/include
             ${CMAKE_CURRENT_SOURCE_DIR}
             ${CMAKE_CURRENT_BINARY_DIR}
+            ${_gqa_names_dir}
         LINK_LIBRARIES
             hiprtc::hiprtc
         OFFLOAD_ARCHS
             ${_arch}
     )
+    # hip_utils.cmake's per-.hip custom command depends on the source alone;
+    # appending the generated header to its DEPENDS is what orders the
+    # generator first and recompiles this TU when the LUT changes.
+    if(WIN32)
+        get_property(_is_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+        if(_is_multi_config)
+            set(_gqa_obj ${CMAKE_CURRENT_BINARY_DIR}/${_target}_hip_objs/$<CONFIG>/gqa_kernel.obj)
+        else()
+            set(_gqa_obj ${CMAKE_CURRENT_BINARY_DIR}/${_target}_hip_objs/gqa_kernel.obj)
+        endif()
+        add_custom_command(OUTPUT ${_gqa_obj} APPEND DEPENDS ${_gqa_names_header})
+    else()
+        add_custom_target(gqa_rtc_names_${_arch} DEPENDS ${_gqa_names_header})
+        add_dependencies(${_target} gqa_rtc_names_${_arch})
+    endif()
     set_target_properties(${_target} PROPERTIES
         OUTPUT_NAME custom_kernels_${_arch}
         FOLDER "custom_kernels"
