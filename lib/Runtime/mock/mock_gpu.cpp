@@ -1567,11 +1567,11 @@ int wrap_or(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
 }
 
 int wrap_qelementwise(RuntimeState *state, void *lhs, void *rhs, void *output,
-                     int64_t kind, const int64_t *lhs_shape, int64_t lhs_rank,
-                     const int64_t *rhs_shape, int64_t rhs_rank,
-                     const int64_t *out_shape, int64_t out_rank,
-                     int64_t data_type, float M_a, int64_t lhs_zp, float M_b,
-                     int64_t rhs_zp, int64_t output_zp) {
+                      int64_t kind, const int64_t *lhs_shape, int64_t lhs_rank,
+                      const int64_t *rhs_shape, int64_t rhs_rank,
+                      const int64_t *out_shape, int64_t out_rank,
+                      int64_t data_type, float M_a, int64_t lhs_zp, float M_b,
+                      int64_t rhs_zp, int64_t output_zp) {
   (void)lhs;
   (void)rhs;
   (void)output;

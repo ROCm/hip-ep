@@ -59,7 +59,8 @@ namespace {
 
 constexpr llvm::StringLiteral kOrtMemoryAddressLocation = "*/_ORT_MEM_ADDR_/*";
 
-// This function is defined in a static library, so its return value depends on the final link target: either the executable path or the library path.
+// This function is defined in a static library, so its return value depends on
+// the final link target: either the executable path or the library path.
 static std::string dll_path() {
 #ifdef _WIN32
   HMODULE module = nullptr;

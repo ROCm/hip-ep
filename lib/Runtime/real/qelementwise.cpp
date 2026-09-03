@@ -34,6 +34,11 @@ static int hipdnn_to_hip_dtype_qelem(int64_t hipdnn_type) {
   }
 }
 
+// Notes on function reuse: the current function declaration does not support
+// multiplication or division because the formula optimization needs to be
+// modified. Additionally, the current function interface does not provide
+// sufficient information to support mixed quantization precisions. We can
+// update it if such a case arises.
 int wrap_qelementwise(RuntimeState *state, void *lhs, void *rhs, void *output,
                       int64_t kind, const int64_t *lhs_shape, int64_t lhs_rank,
                       const int64_t *rhs_shape, int64_t rhs_rank,

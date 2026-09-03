@@ -189,7 +189,7 @@ inline int64_t getHipdnnDataType(Type elemType) {
   if (elemType.isF64())
     return 6; // HIPDNN_EP_DATATYPE_DOUBLE
   if (elemType.isSignedInteger(16) || elemType.isSignlessInteger(16) ||
-        elemType.isInteger(16))
+      elemType.isInteger(16))
     return 8; // HIPDNN_EP_DATATYPE_INT16
   if (elemType.isUnsignedInteger(16))
     return 9; // HIPDNN_EP_DATATYPE_UINT16
@@ -510,7 +510,7 @@ void populateResizeLoweringPatterns(const LLVMTypeConverter &converter,
 void populateGlobalPoolLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns);
 void populateQAddLoweringPatterns(const LLVMTypeConverter &converter,
-                                        RewritePatternSet &patterns);
+                                  RewritePatternSet &patterns);
 } // namespace hip
 } // namespace mlir
 

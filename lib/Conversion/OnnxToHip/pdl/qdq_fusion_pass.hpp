@@ -75,8 +75,9 @@ extractScaleValue(mlir::PatternRewriter &rewriter, mlir::PDLResultList &results,
 // Native constraint: Extract integer value from onnx.Constant
 // Low-level signature required by MLIR PDL infrastructure
 inline mlir::LogicalResult
-extractZeropointValue(mlir::PatternRewriter &rewriter, mlir::PDLResultList &results,
-                llvm::ArrayRef<mlir::PDLValue> args) {
+extractZeropointValue(mlir::PatternRewriter &rewriter,
+                      mlir::PDLResultList &results,
+                      llvm::ArrayRef<mlir::PDLValue> args) {
   if (args.size() != 3)
     return mlir::failure();
   auto *op = args[0].dyn_cast<mlir::Operation *>();

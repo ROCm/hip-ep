@@ -69,16 +69,16 @@ struct QElementwiseLowering : public ConvertOpToLLVMPattern<OpTy> {
     Value lhsShape = emitShapeArray(lhsType, adaptor.getLhs());
     Value rhsShape = emitShapeArray(rhsType, adaptor.getRhs());
     Value outShape = emitShapeArray(outputType, adaptor.getOutput());
-    SmallVector<Type, 17> paramTypes = {
-        ptrType, ptrType, ptrType, ptrType, // state + 3 data ptrs
-        i64Type,                            // kind
-        ptrType, i64Type,                   // lhs_shape, lhs_rank
-        ptrType, i64Type,                   // rhs_shape, rhs_rank
-        ptrType, i64Type,                   // out_shape, out_rank
-        i64Type,                            // data_type
-        f32Type, i64Type,                   // M_a, lhs_zp
-        f32Type, i64Type,                   // M_b, rhs_zp
-        i64Type};                           // output_zp
+    SmallVector<Type, 17> paramTypes = {ptrType, ptrType,
+                                        ptrType, ptrType, // state + 3 data ptrs
+                                        i64Type,          // kind
+                                        ptrType, i64Type, // lhs_shape, lhs_rank
+                                        ptrType, i64Type, // rhs_shape, rhs_rank
+                                        ptrType, i64Type, // out_shape, out_rank
+                                        i64Type,          // data_type
+                                        f32Type, i64Type, // M_a, lhs_zp
+                                        f32Type, i64Type, // M_b, rhs_zp
+                                        i64Type};         // output_zp
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapQElementwise, paramTypes, i32Type);
