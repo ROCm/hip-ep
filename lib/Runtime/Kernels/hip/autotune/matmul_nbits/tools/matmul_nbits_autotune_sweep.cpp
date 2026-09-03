@@ -10,9 +10,9 @@
  * print configs itself, so there is exactly one implementation of "which config
  * wins", the one that ships.
  *
- * Run with HIPDNN_EP_DEBUG=1 and delete the tune caches first, or shapes that
- * are already cached will be silently skipped:
- *     Remove-Item "$env:TEMP\morphizen_*cache*"
+ * Run with HIPDNN_EP_DEBUG=1 so the in-kernel autotuner logs its winner. Each
+ * run starts with an empty in-process tune map (the tuners no longer persist to
+ * an on-disk cache), so every shape is measured fresh.
  *
  * Shape list is CSV with a header, columns K,N,block_size,has_zp (extra columns
  * ignored) -- i.e. what extract_shapes.py emits.

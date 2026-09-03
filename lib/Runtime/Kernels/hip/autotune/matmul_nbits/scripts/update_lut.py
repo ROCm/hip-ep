@@ -65,17 +65,9 @@ def cmd_measure(args) -> int:
     tag = f"_{args.tag}" if args.tag else ""
     log = DATA_DIR / f"{args.arch}{tag}_sweep.log"
 
-    # A cached shape is not re-tuned, so a stale cache silently truncates the
-    # sweep. Clear it rather than trusting it.
-    tmp = os.environ.get("TEMP") or os.environ.get("TMPDIR") or "/tmp"
-    removed = 0
-    for p in Path(tmp).glob("morphizen_*cache*"):
-        try:
-            p.unlink()
-            removed += 1
-        except OSError:
-            pass
-    print(f"[measure] cleared {removed} tune cache files")
+    # The tuners no longer persist winners to a %TEMP% cache file (that layer
+    # was removed once the offline LUT became the durable source), so each sweep
+    # process already starts with an empty in-process map -- nothing to clear.
 
     env = dict(os.environ, HIPDNN_EP_DEBUG="1")
     cmd = [args.sweep, "--shapes", str(args.shapes)]
@@ -197,8 +189,7 @@ def parse_log(path: Path):
                 yield cur, ("Gemv", int(g.group(2)), int(g.group(3))), times
                 cur, times = None, {}
     if n_orphan:
-        # Usually means the shape hit a cached entry (sweep run without a cache
-        # clear) or fell through to a path with no tuner.
+        # Usually means the shape fell through to a path with no tuner.
         print(f"[build] {n_orphan} shape markers had no autotune line",
               file=sys.stderr)
 

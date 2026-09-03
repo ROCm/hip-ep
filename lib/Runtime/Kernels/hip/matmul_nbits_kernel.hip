@@ -1193,7 +1193,7 @@ static int tuneGemvConfig(
  *
  * Order of consultation, for every tuner below:
  *
- *   1. process map cache (backed by the on-disk file)  -> use it
+ *   1. process map cache (in-process only, per run)     -> use it
  *   2. offline LUT                                     -> use it, and store it
  *                                                         into the map cache so
  *                                                         step 1 answers next
@@ -1203,7 +1203,9 @@ static int tuneGemvConfig(
  * The map stays in front because it holds measurements from this exact machine
  * and build; the LUT's job is to make the *first* encounter with a shape free,
  * not to override something already measured locally. Writing LUT hits into the
- * map means the lookup happens once per shape per process, not per call.
+ * map means the lookup happens once per shape per process, not per call. The
+ * map lives only for the process lifetime -- the tuners no longer persist
+ * winners to a %TEMP% cache file; the offline LUT is the durable source now.
  *
  * The LUT stores tile geometry rather than a config index. These helpers turn a
  * geometry back into an index against the live tables, and double as the

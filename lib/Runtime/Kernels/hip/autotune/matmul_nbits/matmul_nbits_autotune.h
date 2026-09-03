@@ -9,20 +9,21 @@
 
 /* MatMulNBits offline autotune lookup.
  *
- * Sits between the on-disk tune cache and the runtime sweep:
+ * Sits between the in-process tune map and the runtime sweep:
  *
- *     cache hit            -> use it
- *     cache miss, LUT hit  -> use it, and write it into the cache
+ *     map hit              -> use it
+ *     map miss, LUT hit    -> use it, and write it into the map
  *     both miss            -> run the sweep (unchanged behaviour)
  *
- * Cache-first rather than LUT-first because the cache holds measurements from
+ * Map-first rather than LUT-first because the map holds measurements from
  * this exact machine and build, which beat a table tuned on a reference part;
  * the LUT's job is to make the first encounter with a shape free, not to
- * override something already measured locally.
+ * override something already measured locally. The map is in-process only and
+ * lives for the process lifetime -- there is no on-disk tune cache.
  *
- * The table is compiled into the binary (see lib/Runtime/CMakeLists.txt) and
- * gated on GPU arch, schema version and kernel ABI, so a mismatched table is
- * ignored rather than silently applied.
+ * The table is compiled into custom_kernels_<arch> (see
+ * lib/Runtime/Kernels/CMakeLists.txt) and gated on GPU arch, schema version and
+ * kernel ABI, so a mismatched table is ignored rather than silently applied.
  */
 
 namespace hipdnn_ep {

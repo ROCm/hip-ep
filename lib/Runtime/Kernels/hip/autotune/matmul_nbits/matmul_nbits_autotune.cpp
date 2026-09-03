@@ -287,7 +287,9 @@ void loadBuffer(Table& t, const unsigned char* data, size_t size) {
 }  // namespace matmul_nbits_autotune
 }  // namespace hipdnn_ep
 
-// Emitted by cmake/xxd.py from lut/<arch>.fb; see lib/Runtime/Kernels/CMakeLists.txt.
+// Defined by the checked-in lut/<arch>_lut_data.cpp (produced by
+// update_lut.py compile), or tools/empty_lut_data.cpp for an arch with no
+// table; see lib/Runtime/Kernels/CMakeLists.txt.
 // The symbol is arch-neutral: each custom_kernels_<arch> DLL links exactly one
 // such payload (its own arch's table, or an empty stub), so this one reference
 // resolves whatever arch the DLL is built for.

@@ -13,7 +13,7 @@ bit widths; adding them is a table regeneration, not a schema change.
 
 ```
 map cache hit           -> use it
-map miss, LUT hit       -> use it, and write it into the map (and the disk file)
+map miss, LUT hit       -> use it, and write it into the map
 both miss               -> runtime sweep, as before
 ```
 
@@ -101,8 +101,9 @@ clang++ -x hip --offload-arch=gfx1151 -O3 -std=c++17 -w `
 python scripts/update_lut.py all --sweep mn_sweep.exe --flatc <flatc>
 ```
 
-`measure` clears the on-disk tune caches first; without that, an already-cached
-shape is never re-tuned and would be silently missing from the table.
+Each sweep process starts with an empty in-process tune map (the tuners no
+longer persist to an on-disk cache), so every shape is measured fresh and none
+is silently skipped.
 
 The winners come from the in-kernel autotuner, read off its debug log. Nothing
 in the pipeline re-implements "which config is fastest" — there is one
