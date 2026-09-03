@@ -4167,6 +4167,107 @@ extern "C" int hip_matmul_nbits_u4_wmma_stride(
     return static_cast<int>(hipGetLastError());
 }
 
+// One reusable scratch for the padded-row-stride B copy, shared across every
+// MatMulNBits layer. The padded buffer is only live for the duration of one
+// layer's prefill -- it is a WMMA input, not persistent state -- and layers run
+// in order on the stream, so a single grow-to-max buffer (like g_dq_buf above)
+// replaces the former per-weight persistent cache that kept a full padded copy
+// of every weight matrix alive for the whole session.
+//
+// EXTRA GPU MEMORY (the only allocation this feature adds):
+//   bytes = max over padrow-eligible layers of  N * (K/2 + kU4PadRowBytes)
+// It is a MAX over layers, not a sum: the scratch grows to the largest single
+// layer it ever sees, then is reused (overwritten) by every later layer, so the
+// footprint does not scale with layer count and never grows during a run.
+//   N, K here are the weight's out/in dims (independent of prompt length).
+//   Padrow-eligible = fused int4 prefill with M>=16, K%32==0, gs|K, shouldPadRow(K).
+// Worked peaks (one loaded model at a time):
+//   * Generation (lm_head runs at M=1, excluded): ~6 MB (small) up to ~115 MB
+//     (DeepSeek-70B, N=28672 K=8192). Most 7-14B models are 15-70 MB.
+//   * Full-sequence logits (e.g. PPL eval) pulls the vocab layer in at M>=16;
+//     it then dominates at N_vocab*(K/2+128) ~= 0.5 GB (e.g. DeepSeek/Qwen vocab).
+// Contrast: the old per-weight cache held ~all padrow weights at once (the SUM),
+// e.g. +32 GB on DeepSeek-70B; this bounds it to the single MAX layer above.
+//
+// Hard cap: a layer whose padded copy would exceed the cap falls back to the
+// arrival layout instead of sizing the scratch to it, so a vocab/lm_head
+// projection or any other extreme shape cannot balloon this buffer. padrow is a
+// bandwidth optimization, so a capped-out layer only loses that speedup, never
+// correctness. Override with HIPDNN_MATMUL_PADROW_MAX_MB (0 disables padrow
+// entirely; unset = default).
+//
+// 256 MB is chosen from measured benefit-vs-size on gfx1151, not arbitrarily:
+//   * Every real *dense* layer (N <= 32768) is <= ~115 MB padded (DeepSeek-70B
+//     FFN N=28672 K=8192) and gets 1.1-2.2x from padrow -- clearly worth it.
+//     256 MB covers them all with ~2x headroom.
+//   * The only shapes above the cap are vocab/lm_head (N=128k-256k, ~0.5 GB
+//     padded), which only reach M>=16 in full-sequence-logits paths (e.g. PPL,
+//     or [batch,seq,vocab] exports). There padrow's benefit at realistic
+//     prefill M is small -- ~1.02x (K=4096) to ~1.13x (K=8192) at M=512 -- so
+//     spending ~0.5 GB on them is a poor trade; skipping them is deliberate.
+// Machines that want a different balance (e.g. lots of memory + PPL-heavy) can
+// raise the cap via the env var above.
+static constexpr size_t kU4PadRowDefaultMaxBytes = 256ull * 1024 * 1024;
+
+static size_t matmulNbitsPadRowMaxBytes() {
+    static const size_t cap = []() -> size_t {
+        std::string raw;   // cross-platform env read, as in matmulNbitsLutLookupEnabled
+#ifdef _WIN32
+        char* v = nullptr;
+        size_t len = 0;
+        if (_dupenv_s(&v, &len, "HIPDNN_MATMUL_PADROW_MAX_MB") == 0 && v) {
+            raw = v;
+            free(v);
+        }
+#else
+        if (const char* v = getenv("HIPDNN_MATMUL_PADROW_MAX_MB")) raw = v;
+#endif
+        if (raw.empty()) return kU4PadRowDefaultMaxBytes;
+        unsigned long long mb = std::strtoull(raw.c_str(), nullptr, 10);
+        return static_cast<size_t>(mb) * 1024ull * 1024ull;  // 0 => padrow off
+    }();
+    return cap;
+}
+
+static unsigned char* g_bpad_buf   = nullptr;
+static size_t         g_bpad_bytes = 0;
+
+static unsigned char* ensureBPadBuffer(size_t bytes) {
+    if (g_bpad_buf && g_bpad_bytes >= bytes) return g_bpad_buf;
+    if (g_bpad_buf) hipFree(g_bpad_buf);
+    if (hipMalloc(&g_bpad_buf, bytes) != hipSuccess) {
+        g_bpad_buf = nullptr;
+        g_bpad_bytes = 0;
+        return nullptr;
+    }
+    g_bpad_bytes = bytes;
+    return g_bpad_buf;
+}
+
+/* Fused int4 WMMA prefill against a row-padded B, repacking into the shared
+ * scratch on each call. This bounds padded-B memory to one layer rather than a
+ * persistent per-weight copy: the repack is a single strided copy (cheap next
+ * to the prefill GEMM), and the config autotune/cache still keys on the padded
+ * stride via hip_matmul_nbits_u4_wmma_stride. Returns -1 (caller falls back to
+ * the arrival layout) on scratch/repack failure or when no fused config fits. */
+extern "C" int hip_matmul_nbits_u4_wmma_padrow(
+    void* stream, int cfg, int M, int N, int K, int group_size,
+    const void* A, int lda, const void* B, const void* scales,
+    const void* zeros, void* C, int ldc)
+{
+    const size_t need = hip_matmul_nbits_u4_padrow_bytes(N, K);
+    // Too big to pad (vocab/lm_head or other extreme shape): fall back to the
+    // arrival layout so the shared scratch never balloons past the cap.
+    if (need > matmulNbitsPadRowMaxBytes()) return -1;
+    unsigned char* dst = ensureBPadBuffer(need);
+    if (!dst) return -1;
+    if (hip_matmul_nbits_u4_prepack_padrow(stream, B, dst, N, K) != 0) return -1;
+    const int b_row_bytes = (K / 2) + kU4PadRowBytes;
+    return hip_matmul_nbits_u4_wmma_stride(stream, cfg, M, N, K, group_size, A,
+                                           lda, dst, scales, zeros, C, ldc,
+                                           b_row_bytes);
+}
+
 /* =======================================================================
  * Section 2c: WMMA kernel for int8 weights (fused dequant)
  *

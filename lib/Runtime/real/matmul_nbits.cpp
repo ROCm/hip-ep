@@ -213,10 +213,6 @@ struct MatmulNbitsState : OpStateT<MatmulNbitsState> {
   std::mutex b_mu;
   std::unordered_map<const void *, std::pair<void *, size_t>> b_fp16;
 
-  // Padded-row-stride B buffers for the RDNA WMMA prefill path, keyed the same
-  // way. Each entry is (padded_device_ptr, allocated_bytes).
-  std::unordered_map<const void *, std::pair<void *, size_t>> b_padrow;
-
   // Per-shape hipBLASLt algo cache for the prefill GEMM. hipBLASLt's default
   // internal kernel (algo=nullptr) is pathologically slow for some transposed
   // small-N shapes, so we enumerate + cache a concrete supported algo per
@@ -231,8 +227,6 @@ struct MatmulNbitsState : OpStateT<MatmulNbitsState> {
 
   ~MatmulNbitsState() {
     for (auto &[k, v] : b_fp16)
-      hipFree(v.first);
-    for (auto &[k, v] : b_padrow)
       hipFree(v.first);
   }
 };
@@ -286,41 +280,6 @@ static bool shouldPadRow(int64_t K) {
     a = t;
   }
   return a >= 8;
-}
-
-// Returns the cached padded-row-stride copy of B, repacking on first use.
-// Returns nullptr on allocation or repack failure, which the caller treats as
-// "use the arrival layout".
-const void *get_or_prepack_padrow(MatmulNbitsState *mst, void *stream,
-                                  const void *B, int N, int K) {
-  const size_t need =
-      static_cast<size_t>(hip_matmul_nbits_u4_padrow_bytes(N, K));
-
-  std::lock_guard<std::mutex> lock(mst->b_mu);
-  auto it = mst->b_padrow.find(B);
-  if (it != mst->b_padrow.end() && it->second.second >= need)
-    return it->second.first;
-
-  void *dst = nullptr;
-  if (hipMalloc(&dst, need) != hipSuccess) {
-    fprintf(stderr, "matmul_nbits: hipMalloc(%zu) for padrow cache failed\n",
-            need);
-    return nullptr;
-  }
-  if (hip_matmul_nbits_u4_prepack_padrow(stream, B, dst, N, K) != 0) {
-    hipFree(dst);
-    fprintf(stderr,
-            "matmul_nbits: hip_matmul_nbits_u4_prepack_padrow failed\n");
-    return nullptr;
-  }
-
-  if (it != mst->b_padrow.end()) {
-    hipFree(it->second.first);
-    it->second = {dst, need};
-  } else {
-    mst->b_padrow.emplace(B, std::make_pair(dst, need));
-  }
-  return dst;
 }
 
 // Returns the cached row-major fp16 [N,K] dequant of `B`, dequantizing on the
@@ -742,10 +701,11 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   // nothing in practice, but it keeps the assumption checked rather than
   // inferred.
   //
-  // The padded buffer is cached per weight pointer in MatmulNbitsState, so the
-  // repack is paid once per weight at model load.
-  // hip_matmul_nbits_u4_wmma_stride runs its own autotune keyed with the padded
-  // stride and returns -1 if no fused config is eligible, in which case we fall
+  // The repack goes into a single shared scratch inside the kernel (see
+  // hip_matmul_nbits_u4_wmma_padrow), so padded-B memory is bounded to the
+  // largest layer instead of a persistent per-weight copy of every matrix.
+  // The stride-aware WMMA runs its own autotune keyed with the padded stride
+  // and returns -1 if no fused config is eligible, in which case we fall
   // through unpadded.
   //
   // Decode (M=1) and bias shapes never enter: the M>=16 and !bias gates stop
@@ -765,27 +725,15 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
     }
 
     if (zeros_ok) {
-      MatmulNbitsState *mst =
-          MatmulNbitsState::get_op_state(state, op_state_slot);
-      if (mst) {
-        const void *b_pad = get_or_prepack_padrow(
-            mst, stream, B, static_cast<int>(N), static_cast<int>(K));
-        if (b_pad) {
-          const int iM = static_cast<int>(M);
-          const int iN = static_cast<int>(N);
-          const int iK = static_cast<int>(K);
-          const int b_row_bytes = iK / 2 + 128;
-          int rc = hip_matmul_nbits_u4_wmma_stride(
-              stream, /*cfg=*/-1, iM, iN, iK, static_cast<int>(block_size), A,
-              /*lda=*/iK, b_pad, scales, zeros_fp16, output,
-              /*ldc=*/iN, b_row_bytes);
-          if (rc == 0)
-            goto cleanup;
-          RUNTIME_DEBUG_LOG(
-              "[REAL] matmul_nbits padrow wmma_stride rc=%d, falling back\n",
-              rc);
-        }
-      }
+      int rc = hip_matmul_nbits_u4_wmma_padrow(
+          stream, /*cfg=*/-1, static_cast<int>(M), static_cast<int>(N),
+          static_cast<int>(K), static_cast<int>(block_size), A,
+          /*lda=*/static_cast<int>(K), B, scales, zeros_fp16, output,
+          /*ldc=*/static_cast<int>(N));
+      if (rc == 0)
+        goto cleanup;
+      RUNTIME_DEBUG_LOG("[REAL] matmul_nbits padrow wmma rc=%d, falling back\n",
+                        rc);
     }
   }
 
