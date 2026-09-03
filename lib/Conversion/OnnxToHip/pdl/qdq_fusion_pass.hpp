@@ -72,6 +72,27 @@ extractScaleValue(mlir::PatternRewriter &rewriter, mlir::PDLResultList &results,
   return mlir::success();
 }
 
+// Element type of the quantized side of a Q/DQ op: the result for
+// QuantizeLinear, operand 0 for DequantizeLinear. It is the only tensor that
+// still carries ONNX signedness, because the importer gives inline constants --
+// including the zero point -- signless storage.
+inline mlir::IntegerType getQuantizedElementType(mlir::Operation *op) {
+  llvm::SmallVector<mlir::Type, 2> candidates;
+  if (op->getNumOperands() > 0)
+    candidates.push_back(op->getOperand(0).getType());
+  if (op->getNumResults() > 0)
+    candidates.push_back(op->getResult(0).getType());
+  for (mlir::Type type : candidates) {
+    auto shaped = mlir::dyn_cast<mlir::ShapedType>(type);
+    if (!shaped)
+      continue;
+    if (auto intType =
+            mlir::dyn_cast<mlir::IntegerType>(shaped.getElementType()))
+      return intType;
+  }
+  return {};
+}
+
 // Native constraint: Extract integer value from onnx.Constant
 // Low-level signature required by MLIR PDL infrastructure
 inline mlir::LogicalResult
@@ -100,14 +121,13 @@ extractZeropointValue(mlir::PatternRewriter &rewriter,
       mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(defOp->getAttr("value"));
   if (!denseAttr || !denseAttr.isSplat())
     return mlir::failure();
-  auto intType = mlir::dyn_cast<mlir::IntegerType>(denseAttr.getElementType());
-  if (!intType)
+  // Sign-extending unsigned storage would read a ui16 zero point of 57835 back
+  // as -7701, so pick the extension that matches the quantized element type.
+  auto quantType = getQuantizedElementType(op);
+  if (!quantType)
     return mlir::failure();
-  // ONNX zero points are int8/uint8/int32. Sign-extending an unsigned type
-  // would read a uint8 zero point of 128 back as -128, so pick the extension
-  // that matches the element type. Signless types keep signed semantics.
   llvm::APInt raw = denseAttr.getSplatValue<llvm::APInt>();
-  int64_t i64Value = intType.isUnsigned()
+  int64_t i64Value = quantType.isUnsigned()
                          ? static_cast<int64_t>(raw.getZExtValue())
                          : raw.getSExtValue();
   results.push_back(rewriter.getI64IntegerAttr(i64Value));
