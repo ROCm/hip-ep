@@ -69,84 +69,16 @@
 #include <unordered_map>
 
 /* -----------------------------------------------------------------------
- * Shared disk-persistent autotune cache (GEMV int4 / int8 paths)
+ * Autotune config caches are in-process only.
  *
- * WHY: the GEMV autotune (kGemvConfigs) picks the fastest (threads, tile_n)
- * by on-device timing. Kept purely in-process, every process re-runs that
- * timing and -- because several configs are within measurement noise of each
- * other -- can settle on a DIFFERENT winner run-to-run, so single-token
- * decode TPS swings run-to-run between otherwise-identical processes.
- * Persisting the winning config to disk (keyed by problem shape + a build
- * stamp) makes the first process prime the file and every later process load
- * the SAME config -> deterministic decode. Mirrors the WMMA disk cache
- * (getWmmaCachePath / loadWmmaCache / saveWmmaCache) further down this file.
- *
- * File format: first line = build stamp (invalidates the file on recompile),
- * then "<key> <config_id>" per line. One file per GPU arch in %TEMP%.
+ * Each tuner (WMMA / GEMV int4 / int8 / dp4a) memoizes its winner in an
+ * in-memory std::unordered_map for the lifetime of the process. There is no
+ * disk persistence: the offline LUT (matmul_nbits_autotune) is the durable,
+ * cross-process source of configs, so writing a per-shape tune cache to
+ * %TEMP% was redundant (and rewrote the file on every newly seen shape). A
+ * LUT miss still falls back to an on-device sweep, whose result lives only in
+ * the in-process map.
  * ----------------------------------------------------------------------- */
-static constexpr const char kTuneCacheBuildStamp[] = __DATE__ " " __TIME__;
-
-static std::string getTuneCachePath(const char *name) {
-    std::string tmp_dir;
-#ifdef _WIN32
-    char *v = nullptr;
-    size_t len = 0;
-    if (_dupenv_s(&v, &len, "TEMP") == 0 && v != nullptr) {
-        tmp_dir = v;
-        free(v);
-    }
-#else
-    const char *v = getenv("TEMP");
-    if (!v) v = getenv("TMPDIR");
-    if (!v) v = "/tmp";
-    tmp_dir = v;
-#endif
-    if (tmp_dir.empty()) return std::string();
-
-    hipDeviceProp_t prop;
-    if (hipGetDeviceProperties(&prop, 0) != hipSuccess ||
-        prop.gcnArchName[0] == '\0')
-        return std::string();
-
-    return tmp_dir + "/morphizen_" + name + "_cache_" + prop.gcnArchName +
-           ".txt";
-}
-
-static void loadTuneCacheFile(const std::string &path,
-                              std::unordered_map<std::string, int> &cache,
-                              int maxConfigId) {
-    if (path.empty()) return;
-    FILE *f = fopen(path.c_str(), "r");
-    if (!f) return;
-    // First line is the build stamp -- discard the cache if the binary was
-    // rebuilt (config ids / timings may have changed).
-    char ts_line[64];
-    if (!fgets(ts_line, sizeof(ts_line), f)) {
-        fclose(f);
-        return;
-    }
-    size_t ts_len = strlen(ts_line);
-    if (ts_len > 0 && ts_line[ts_len - 1] == '\n') ts_line[ts_len - 1] = '\0';
-    if (strcmp(ts_line, kTuneCacheBuildStamp) != 0) {
-        fclose(f);
-        return;
-    }
-    char key[128];
-    int cfg;
-    while (fscanf(f, "%127s %d", key, &cfg) == 2)
-        if (cfg >= 0 && cfg < maxConfigId) cache[key] = cfg;
-    fclose(f);
-}
-
-static void saveTuneCacheFile(const std::string &path,
-                              const std::unordered_map<std::string, int> &cache) {
-    if (path.empty()) return;
-    FILE *f = fopen(path.c_str(), "w");
-    if (!f) return;
-    fprintf(f, "%s\n", kTuneCacheBuildStamp);
-    for (const auto &e : cache) fprintf(f, "%s %d\n", e.first.c_str(), e.second);
-    fclose(f);
-}
 
 /* =======================================================================
  * Section 1: Naive fallback kernel (row-major, any alignment, batched)
@@ -1292,7 +1224,7 @@ namespace matmul_lut = hipdnn_ep::matmul_nbits_autotune;
  * would serialize decode through the CRT environment lock. */
 static bool matmulNbitsLutLookupEnabled() {
     static const bool lookup = [] {
-        std::string raw;   // cross-platform env read, as in getTuneCachePath
+        std::string raw;   // cross-platform env read (_dupenv_s / getenv)
 #ifdef _WIN32
         char* v = nullptr;
         size_t len = 0;
@@ -1361,8 +1293,6 @@ static int matmulNbitsLutGemvConfig(matmul_lut::Phase phase, int M, int N, int K
 
 static std::unordered_map<std::string, int> gemv_cache;
 static std::mutex gemv_tune_mutex;
-static std::once_flag gemv_cache_init_flag;
-static std::string gemv_cache_path;
 
 static std::string gemvCacheKey(int64_t M, int64_t N, int64_t K, int64_t bs,
                                 bool col_major, bool has_zp) {
@@ -1391,13 +1321,6 @@ static int getOrTuneGemvConfig(
     std::string key = gemvCacheKey(M, N, K, bs, effective_col_major,
                                    /*has_zp=*/zp != nullptr);
 
-    // Load the disk-persisted cache once per process so repeated runs settle on
-    // the same config -> deterministic decode (see kTuneCacheBuildStamp above).
-    std::call_once(gemv_cache_init_flag, [] {
-        gemv_cache_path = getTuneCachePath("gemv");
-        loadTuneCacheFile(gemv_cache_path, gemv_cache, kNumGemvConfigs);
-    });
-
     std::lock_guard<std::mutex> lock(gemv_tune_mutex);
 
     auto it = gemv_cache.find(key);
@@ -1405,21 +1328,18 @@ static int getOrTuneGemvConfig(
         return it->second;
 
     // Map miss: try the offline table before paying for a sweep. A hit is
-    // written into the map (and the disk file) so this shape never consults the
-    // LUT again in this process.
+    // memoized in the in-process map so this shape never consults the LUT again.
     const int lut = matmulNbitsLutGemvConfig(matmul_lut::Phase::Decode, static_cast<int>(M),
                                     static_cast<int>(N), static_cast<int>(K),
                                     static_cast<int>(bs), zp != nullptr);
     if (lut >= 0) {
         gemv_cache[key] = lut;
-        saveTuneCacheFile(gemv_cache_path, gemv_cache);
         return lut;
     }
 
     int best = tuneGemvConfig(stream, A, B, sc, zp, bi, out,
                                M, N, K, batch, bs, col_major);
     gemv_cache[key] = best;
-    saveTuneCacheFile(gemv_cache_path, gemv_cache);
 
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] GEMV cache: stored key=\"%s\" -> config[%d] "
@@ -1531,8 +1451,6 @@ static int tuneDp4aConfig(
 
 static std::unordered_map<std::string, int> dp4a_cache;
 static std::mutex dp4a_tune_mutex;
-static std::once_flag dp4a_cache_init_flag;
-static std::string dp4a_cache_path;
 
 static int getOrTuneDp4aConfig(
     hipStream_t stream,
@@ -1543,11 +1461,6 @@ static int getOrTuneDp4aConfig(
 {
     std::string key = std::to_string(N) + "_" + std::to_string(K) + "_" +
                       std::to_string(bs) + "_" + (zp ? "1" : "0");
-
-    std::call_once(dp4a_cache_init_flag, [] {
-        dp4a_cache_path = getTuneCachePath("dp4a");
-        loadTuneCacheFile(dp4a_cache_path, dp4a_cache, kNumGemvConfigs);
-    });
 
     std::lock_guard<std::mutex> lock(dp4a_tune_mutex);
     auto it = dp4a_cache.find(key);
@@ -1561,14 +1474,12 @@ static int getOrTuneDp4aConfig(
                                     static_cast<int>(bs), zp != nullptr);
     if (lut >= 0) {
         dp4a_cache[key] = lut;
-        saveTuneCacheFile(dp4a_cache_path, dp4a_cache);
         return lut;
     }
 
     int best = tuneDp4aConfig(stream, a_qb, a_scale, B, sc, zp, bi, out,
                               N, K, bs);
     dp4a_cache[key] = best;
-    saveTuneCacheFile(dp4a_cache_path, dp4a_cache);
     return best;
 }
 
@@ -1743,8 +1654,6 @@ static int tuneGemvConfigI8(
 
 static std::unordered_map<std::string, int> gemv_i8_cache;
 static std::mutex gemv_i8_tune_mutex;
-static std::once_flag gemv_i8_cache_init_flag;
-static std::string gemv_i8_cache_path;
 
 static std::string gemvI8CacheKey(int64_t M, int64_t N, int64_t K,
                                    int64_t bs, bool has_zp) {
@@ -1766,11 +1675,6 @@ static int getOrTuneGemvConfigI8(
     const bool has_zp = (zp != nullptr);
     std::string key = gemvI8CacheKey(M, N, K, bs, has_zp);
 
-    std::call_once(gemv_i8_cache_init_flag, [] {
-        gemv_i8_cache_path = getTuneCachePath("gemv_i8");
-        loadTuneCacheFile(gemv_i8_cache_path, gemv_i8_cache, kNumGemvConfigs);
-    });
-
     std::lock_guard<std::mutex> lock(gemv_i8_tune_mutex);
 
     auto it = gemv_i8_cache.find(key);
@@ -1780,7 +1684,6 @@ static int getOrTuneGemvConfigI8(
     int best = tuneGemvConfigI8(stream, A, B, sc, zp, bi, out,
                                  M, N, K, batch, bs);
     gemv_i8_cache[key] = best;
-    saveTuneCacheFile(gemv_i8_cache_path, gemv_i8_cache);
 
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] GEMV-i8 cache: stored key=\"%s\" -> config[%d] "
@@ -3883,9 +3786,6 @@ static int tuneWmmaConfig(
 
 static std::unordered_map<std::string, int> wmma_cache;
 static std::mutex wmma_tune_mutex;
-static std::once_flag wmma_cache_init_flag;
-// Rebuild invalidates cache: __DATE__/__TIME__ change on every recompilation.
-static constexpr const char kWmmaBuildTimestamp[] = __DATE__ " " __TIME__;
 
 /* The stride is part of the key because it changes the answer, not just the
  * timing: the winner at the arrival stride is the most alias-tolerant tile,
@@ -3899,92 +3799,6 @@ static std::string wmmaCacheKey(int M, int N, int K, int gs, bool has_zp,
                       (has_zp ? "1" : "0");
     if (b_row_bytes != 0) key += "_p" + std::to_string(b_row_bytes);
     return key;
-}
-
-// Disk-persistent WMMA autotune cache: avoids re-tuning ~1500 kernel launches
-// on every process start. File is per-GPU-arch in %TEMP%.
-static const std::string& getWmmaCachePath() {
-    static std::string path = [] {
-        std::string tmp_dir;
-#ifdef _WIN32
-        char* v = nullptr;
-        size_t len = 0;
-        if (_dupenv_s(&v, &len, "TEMP") == 0 && v != nullptr) {
-            tmp_dir = v;
-            free(v);
-        }
-#else
-        const char* v = getenv("TEMP");
-        if (!v) v = getenv("TMPDIR");
-        if (!v) v = "/tmp";
-        tmp_dir = v;
-#endif
-        if (tmp_dir.empty()) return std::string();
-
-        hipDeviceProp_t prop;
-        if (hipGetDeviceProperties(&prop, 0) != hipSuccess || prop.gcnArchName[0] == '\0')
-            return std::string();
-
-        return tmp_dir + "/morphizen_wmma_cache_" + prop.gcnArchName + ".txt";
-    }();
-    return path;
-}
-
-static void loadWmmaCache() {
-    const std::string& path = getWmmaCachePath();
-    if (path.empty()) return;
-
-    FILE* f = fopen(path.c_str(), "r");
-    if (!f) return;
-
-    // First line is the build timestamp — discard cache if binary was rebuilt.
-    char ts_line[64];
-    if (!fgets(ts_line, sizeof(ts_line), f)) { fclose(f); return; }
-    size_t ts_len = strlen(ts_line);
-    if (ts_len > 0 && ts_line[ts_len - 1] == '\n') ts_line[ts_len - 1] = '\0';
-    if (strcmp(ts_line, kWmmaBuildTimestamp) != 0) {
-        fclose(f);
-        CUSTOM_KERNELS_DEBUG_LOG(
-            "[custom_kernels] WMMA cache: build mismatch (file=\"%s\", "
-            "binary=\"%s\"), will re-tune\n", ts_line, kWmmaBuildTimestamp);
-        return;
-    }
-
-    char key[128];
-    int config_id;
-    int loaded = 0;
-    while (fscanf(f, "%127s %d", key, &config_id) == 2) {
-        if (config_id >= 0 && config_id < kNumWmmaConfigs) {
-            wmma_cache[key] = config_id;
-            loaded++;
-        }
-    }
-    fclose(f);
-
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] WMMA cache: loaded %d entries from %s\n",
-        loaded, path.c_str());
-}
-
-static void saveWmmaCache() {
-    const std::string& path = getWmmaCachePath();
-    if (path.empty()) return;
-
-    FILE* f = fopen(path.c_str(), "w");
-    if (!f) {
-        CUSTOM_KERNELS_DEBUG_LOG(
-            "[custom_kernels] WMMA cache: failed to write %s\n", path.c_str());
-        return;
-    }
-
-    fprintf(f, "%s\n", kWmmaBuildTimestamp);
-    for (const auto& entry : wmma_cache)
-        fprintf(f, "%s %d\n", entry.first.c_str(), entry.second);
-    fclose(f);
-
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] WMMA cache: saved %zu entries to %s\n",
-        wmma_cache.size(), path.c_str());
 }
 
 // HIPDNN_MATMUL_NBITS_WMMA_CFG pins one entry of kWmmaConfigs and skips the
@@ -4031,8 +3845,6 @@ static int getOrTuneWmmaConfig(
         (b_row_bytes == 0 || kWmmaConfigs[forced].fused))
         return forced;
 
-    std::call_once(wmma_cache_init_flag, loadWmmaCache);
-
     std::string key = wmmaCacheKey(M, N, K, gs, has_zp, b_row_bytes);
 
     std::lock_guard<std::mutex> lock(wmma_tune_mutex);
@@ -4047,7 +3859,6 @@ static int getOrTuneWmmaConfig(
     const int lut = matmulNbitsLutWmmaConfig(M, N, K, gs, has_zp, b_row_bytes);
     if (lut >= 0) {
         wmma_cache[key] = lut;
-        saveWmmaCache();
         return lut;
     }
 
@@ -4055,7 +3866,6 @@ static int getOrTuneWmmaConfig(
                                scales, zeros, gs, ngk, C, ldc, has_zp,
                                b_row_bytes);
     wmma_cache[key] = best;
-    saveWmmaCache();
 
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] WMMA cache: stored key=\"%s\" -> config[%d] "
