@@ -37,16 +37,14 @@ void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
   pm.addNestedPass<func::FuncOp>(createRemoveShapeConstraintsPass());
   pm.addNestedPass<func::FuncOp>(createConvertShapeToExtentPass());
 
-  // convert-shape-to-std cannot lower shape.num_elements, so
-  // shape-to-shape-lowering rewrites it as a shape.reduce first.
-  // It runs after hipsr-convert-shape-to-extent because ReduceOpConverter
-  // rejects a !shape.shape operand.
+  // convert-shape-to-std cannot lower shape.num_elements, so rewrite it as a
+  // shape.reduce first. This must follow hipsr-convert-shape-to-extent, since
+  // ReduceOpConverter rejects a !shape.shape operand.
   pm.addNestedPass<func::FuncOp>(createShapeToShapeLoweringPass());
   pm.addPass(createConvertShapeToStandardPass());
 
-  // useEncodingForMemorySpace keeps the memory space, so
-  // tensor<4xf16, #hipsr.mem<device>> bufferizes to
-  // memref<4xf16, #hipsr.mem<device>>.
+  // useEncodingForMemorySpace turns the #hipsr.mem<...> tensor encoding into
+  // the memref memory space.
   bufferization::OneShotBufferizePassOptions bufferizeOptions;
   bufferizeOptions.bufferizeFunctionBoundaries = true;
   bufferizeOptions.functionBoundaryTypeConversion =
@@ -54,9 +52,8 @@ void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
   bufferizeOptions.useEncodingForMemorySpace = true;
   pm.addPass(bufferization::createOneShotBufferizePass(bufferizeOptions));
 
-  // shape.broadcast lowers to tensor.generate, which bufferizes to a
-  // memref.alloc and a linalg.map. That linalg.map is the only linalg op this
-  // pipeline produces.
+  // shape.broadcast becomes a tensor.generate, which bufferizes to a
+  // linalg.map. That is the only linalg op this pipeline produces.
   pm.addNestedPass<func::FuncOp>(createConvertLinalgToLoopsPass());
 }
 
