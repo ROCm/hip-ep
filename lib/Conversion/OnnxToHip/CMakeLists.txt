@@ -3,6 +3,52 @@
 # ** Licensed under the MIT License.
 ##
 
+# ============================================================================
+# PDLL Pattern Compilation
+# ============================================================================
+# Locate mlir-pdll. LLVM_TOOLS_BINARY_DIR is exported by find_package(MLIR) and
+# covers both the prebuilt SDK and an installed LLVM; the _deps path covers an
+# LLVM built inside this project's FetchContent tree. Default search paths stay
+# enabled so a tool on PATH is still usable.
+find_program(MLIR_PDLL_EXE mlir-pdll
+    HINTS
+        "${CMAKE_BINARY_DIR}/_deps/llvm-project-build/bin"
+        "${LLVM_TOOLS_BINARY_DIR}"
+        "${LLVM_BINARY_DIR}/bin"
+)
+
+if(MLIR_PDLL_EXE)
+    message(STATUS "OnnxToHip: mlir-pdll found: ${MLIR_PDLL_EXE}")
+    # HipFusionPatterns.pdll #includes every pattern file, so mlir-pdll runs
+    # once and emits one PDL module. Every .pdll is still globbed as a
+    # dependency, otherwise editing an included pattern would not rebuild it.
+    set(PDL_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/pdl")
+    set(PDL_ENTRY "${PDL_SOURCE_DIR}/HipFusionPatterns.pdll")
+    file(GLOB PDL_SOURCES CONFIGURE_DEPENDS "${PDL_SOURCE_DIR}/*.pdll")
+    set(PDL_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/pdl")
+    file(MAKE_DIRECTORY "${PDL_BUILD_DIR}")
+    set(PDL_OUTPUT "${PDL_BUILD_DIR}/HipFusionPatterns.pdl.mlir")
+    set(PDL_RUNTIME_OUTPUT "${CMAKE_BINARY_DIR}/bin/HipFusionPatterns.pdl.mlir")
+    add_custom_command(OUTPUT "${PDL_OUTPUT}" "${PDL_RUNTIME_OUTPUT}"
+        COMMAND "${MLIR_PDLL_EXE}" -x mlir "-I${PDL_SOURCE_DIR}"
+                "${PDL_ENTRY}" -o "${PDL_OUTPUT}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/bin"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${PDL_OUTPUT}" "${PDL_RUNTIME_OUTPUT}"
+        DEPENDS ${PDL_SOURCES}
+        COMMENT "Compiling PDLL patterns: HipFusionPatterns.pdll -> HipFusionPatterns.pdl.mlir (+ bin copy)"
+        VERBATIM)
+    add_custom_target(HipPdllPatterns DEPENDS "${PDL_OUTPUT}" "${PDL_RUNTIME_OUTPUT}")
+    install(FILES "${PDL_OUTPUT}" DESTINATION bin)
+    message(STATUS "OnnxToHip: PDLL fusion enabled — patterns: ${PDL_OUTPUT}")
+else()
+    message(WARNING "OnnxToHip: mlir-pdll not found — PDLL fusion disabled")
+endif()
+
+# ============================================================================
+# OnnxToHip Library
+# ============================================================================
+
 add_library(OnnxToHip STATIC
   OnnxToHip.cpp
   SimplifyOnnx.cpp
@@ -106,6 +152,10 @@ add_library(OnnxToHip STATIC
   ClipConversion.cpp
 )
 
+if(TARGET HipPdllPatterns)
+    add_dependencies(OnnxToHip HipPdllPatterns)
+endif()
+
 add_dependencies(OnnxToHip
   HipDialectIncGen
   HipTypesIncGen
@@ -125,4 +175,7 @@ target_link_libraries(OnnxToHip PUBLIC
   MLIRIR
   MLIRSupport
   MLIRTransforms
+  MLIRPDLDialect
+  MLIRPDLInterpDialect
+  MLIRParser
 )

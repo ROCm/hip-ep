@@ -386,6 +386,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/resize.cpp runtime_resize.bc)
     compile_to_bitcode(real/grid_sample.cpp runtime_grid_sample.bc)
     compile_to_bitcode(real/global_pool.cpp runtime_global_pool.bc)
+    compile_to_bitcode(real/qelementwise.cpp runtime_qelementwise.bc)
 
     # GQA offline-autotune LUT, embedded into runtime.bc so the JIT'd runtime
     # always has it: it ships with the project build (inside runtime.bc), not
@@ -513,6 +514,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_global_pool.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather_block_quantized.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qdq.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_qelementwise.bc
     )
     # Vendor-symbol stubs (see the compile_to_bitcode above) join runtime.bc only
     # when the vendor BLAS/DNN backends are disabled.

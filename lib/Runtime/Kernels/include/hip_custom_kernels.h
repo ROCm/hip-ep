@@ -136,6 +136,36 @@ HIP_KERNEL_API int hip_elementwise_where(
     int hip_dtype);
 
 /* =========================================================================
+ * Quantized elementwise (Q(DQ(A) [OP] DQ(B))), OP belongs to {+,-,*,/}
+ * =========================================================================
+ *
+ * lhs/rhs/output are integer quantized buffers of the same hip_dtype.
+ * Operand shapes are left-padded with 1s to out_rank (NumPy broadcast).
+ * Rank must be <= HIP_QELEMENTWISE_MAX_RANK (8).
+ *
+ * kind: 0 = add (HIPDNN_EP_QELEMENTWISE_ADD).
+ * Scales are folded by lowering: M_a = s_a / s_out, M_b = s_b / s_out.
+ *
+ *   OUT = saturate(round(M_a * (A - z_a) [OP] M_b * (B - z_b)) + z_out)
+ *
+ * Supported hip_dtype: HIP_DTYPE_INT8, HIP_DTYPE_UINT8, HIP_DTYPE_INT16,
+ * HIP_DTYPE_UINT16, HIP_DTYPE_INT32.
+ */
+HIP_KERNEL_API int hip_qelementwise(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t kind,
+    const int64_t* lhs_shape, int64_t lhs_rank,
+    const int64_t* rhs_shape, int64_t rhs_rank,
+    const int64_t* out_shape, int64_t out_rank,
+    int hip_dtype,
+    float M_a, int64_t lhs_zp,
+    float M_b, int64_t rhs_zp,
+    int64_t output_zp);
+
+/* =========================================================================
  * Elementwise Unary (Neg / Sign / Cos / Sin / Not)
  * =========================================================================
  *

@@ -13,6 +13,14 @@
 
 #include "OnnxToHipUtils.h"
 
+// ConvertOnnxToHipPass lists the PDL dialects unconditionally in
+// `dependentDialects`, so the generated getDependentDialects() needs these
+// declarations even in builds where PDLL pattern compilation is disabled.
+#include "mlir/Dialect/PDL/IR/PDL.h"
+#include "mlir/Dialect/PDLInterp/IR/PDLInterp.h"
+
+#include "pdl/qdq_fusion_pass.hpp"
+
 #include "hip/debug_log.h"
 #include "hip/timing.h"
 
@@ -21,8 +29,19 @@
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <filesystem>
 #include <limits>
 #include <map>
+#include <string>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+// windows.h defines min/max macros that break std::numeric_limits<>::max().
+#define NOMINMAX
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 
 #define DEBUG_TYPE "convert-onnx-to-hip"
 
@@ -39,6 +58,28 @@ namespace {
 //===----------------------------------------------------------------------===//
 
 constexpr llvm::StringLiteral kOrtMemoryAddressLocation = "*/_ORT_MEM_ADDR_/*";
+
+// This function is defined in a static library, so its return value depends on
+// the final link target: either the executable path or the library path.
+static std::string dll_path() {
+#ifdef _WIN32
+  HMODULE module = nullptr;
+  GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                         GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                     reinterpret_cast<LPCSTR>(&dll_path), &module);
+
+  char path[MAX_PATH];
+  DWORD len = GetModuleFileNameA(module, path, MAX_PATH);
+  return std::string(path, len);
+#else
+  Dl_info info{};
+  if (dladdr(reinterpret_cast<void *>(&dll_path), &info) == 0 ||
+      info.dli_fname == nullptr)
+    return {};
+
+  return std::string(info.dli_fname);
+#endif
+}
 
 /// Classification of an 8-bit constant's backing byte size against its element
 /// count, returned by markPackedInt4Consumers so the caller can diagnose a
@@ -434,6 +475,17 @@ void ConvertOnnxToHipPass::runOnOperation() {
   if (mlir::failed(generateModuleMetadata(module)))
     return signalPassFailure();
   logSubpass("metadata");
+
+  const std::string pdlFusionFile =
+      (std::filesystem::path(dll_path()).parent_path() /
+       "HipFusionPatterns.pdl.mlir")
+          .string();
+  if (std::filesystem::exists(pdlFusionFile)) {
+    if (!::hip::pdl::run(module, pdlFusionFile)) {
+      module.emitWarning() << "Failed to load/apply fusion PDL patterns from "
+                           << pdlFusionFile;
+    }
+  }
 
   int64_t constantOrder = 0;
   for (auto funcOp :
