@@ -188,8 +188,11 @@ inline int64_t getHipdnnDataType(Type elemType) {
     return 5; // HIPDNN_EP_DATATYPE_INT8
   if (elemType.isF64())
     return 6; // HIPDNN_EP_DATATYPE_DOUBLE
-  if (elemType.isInteger(16))
+  if (elemType.isSignedInteger(16) || elemType.isSignlessInteger(16) ||
+        elemType.isInteger(16))
     return 8; // HIPDNN_EP_DATATYPE_INT16
+  if (elemType.isUnsignedInteger(16))
+    return 9; // HIPDNN_EP_DATATYPE_UINT16
   return -1;
 }
 

@@ -48,6 +48,7 @@ set(_kernel_sources
     hip/fast_gelu_kernel.hip
     hip/leaky_relu_kernel.hip
     hip/elementwise_where_kernel.hip
+    hip/qelementwise_kernel.hip
     hip/elementwise_unary_kernel.hip
     hip/elementwise_binary_kernel.hip  # Mul/Add/Min/Max/Div/Mod/Equal/Less
     hip/tile_kernel.hip
