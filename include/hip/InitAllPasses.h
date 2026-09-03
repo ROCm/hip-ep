@@ -192,7 +192,6 @@ inline void registerAllPasses() {
     mlir::registerReconcileUnrealizedCastsPass();
     mlir::memref::registerResolveShapedTypeResultDimsPass();
     mlir::registerConvertLinalgToLoopsPass();
-    // Upstream passes that lower what hipsr-convert-shape-to-extent retypes.
     mlir::registerRemoveShapeConstraintsPass();
     mlir::registerShapeToShapeLoweringPass();
     mlir::registerConvertShapeToStandardPass();
