@@ -16,7 +16,7 @@ on:
         required: true
         type: string
       amdgpu_cache_key:
-        description: Cache key of the prebuilt amdgpu-ep.dll + hip-backend.dll.
+        description: Cache key of the prebuilt amdgpu-ep build artifacts.
         required: true
         type: string
       oga_cache_key:
@@ -119,16 +119,12 @@ jobs:
       - name: Build hip-ep
         shell: bash
         run: |
-          AMDGPU_ARTIFACTS="${{ runner.workspace }}/amdgpu-artifacts"
-          AMDGPU_EP="$AMDGPU_ARTIFACTS/amdgpu-ep.dll"
-          HIP_BACKEND="$AMDGPU_ARTIFACTS/hip-backend.dll"
           python build.py \
             --config Release \
             --cmake_generator Ninja \
             --hip_arch "${{ env.HIP_ARCHITECTURES }}" \
             --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
-            --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON \
-            --cmake_extra_defines "HIP_WHEEL_EXTRA_DLLS=$AMDGPU_EP;$HIP_BACKEND"
+            --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON
 
       # -----------------------------------------------------------------------
       # Stage GPU test package:
@@ -161,8 +157,7 @@ jobs:
           cp "${{ runner.workspace }}/install/bin/"*.dll staging/bin/ 2>/dev/null || true
           cp "${{ runner.workspace }}/install/bin/"*.exe staging/bin/ 2>/dev/null || true
 
-          cp "${{ runner.workspace }}/amdgpu-artifacts/amdgpu-ep.dll" staging/bin/
-          cp "${{ runner.workspace }}/amdgpu-artifacts/hip-backend.dll" staging/bin/
+          cp "${{ runner.workspace }}/amdgpu-artifacts/bin/"* staging/bin/
 
           # Smoke: every per-arch kernel DLL must be present in staging/bin/
           # (LlvmIrJit dlopens custom_kernels_<gcnArchName>.dll at runtime).
@@ -272,12 +267,14 @@ jobs:
             -name "onnxruntime_genai_directml-*.whl" -type f | head -1)
           EP_WHEEL=$(find "../build/$(basename "$PWD")/python/dist" \
             -name "onnxruntime_ep_hip-*.whl" -type f | head -1)
-          if [ -z "$ORT_WHEEL" ] || [ -z "$OGA_WHEEL" ] || [ -z "$EP_WHEEL" ]; then
+          AMDGPU_WHEEL=$(find "${{ runner.workspace }}/amdgpu-artifacts" \
+            -name "onnxruntime_ep_amdgpu-*.whl" -type f | head -1)
+          if [ -z "$ORT_WHEEL" ] || [ -z "$OGA_WHEEL" ] || [ -z "$EP_WHEEL" ] || [ -z "$AMDGPU_WHEEL" ]; then
             echo "ERROR: wheel(s) missing"
-            echo "  ORT=$ORT_WHEEL OGA=$OGA_WHEEL EP=$EP_WHEEL"
+            echo "  ORT=$ORT_WHEEL OGA=$OGA_WHEEL EP=$EP_WHEEL AMDGPU=$AMDGPU_WHEEL"
             exit 1
           fi
-          cp "$ORT_WHEEL" "$OGA_WHEEL" "$EP_WHEEL" wheelpkg/wheels/
+          cp "$ORT_WHEEL" "$OGA_WHEEL" "$EP_WHEEL" "$AMDGPU_WHEEL" wheelpkg/wheels/
           cp python/examples/run_onnx.py wheelpkg/
           cp "${{ runner.workspace }}/oga-artifacts/benchmark-python/"*.py wheelpkg/
           curl -fsSL --retry 3 -o wheelpkg/vlm_benchmark.py \

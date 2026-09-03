@@ -1028,6 +1028,128 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe",
   }];
 }
 
+def Hip_QMoEAmdOp : Hip_DpsOp<"qmoe_amd",
+                              /*traits=*/[],
+                              /*outsAccessor=*/"Output",
+                              /*autoReify=*/0,
+                              /*autoInfer=*/1,
+                              /*declareInfer=*/1> {
+    let summary = "Latent Mixture-of-Experts (com.amd QMoE)";
+  let description = [{
+    Implements the com.amd QMoE operator: a latent-space Mixture-of-Experts
+    block with sigmoid + correction-bias routing, a shared expert, and
+    squared-ReLU ("relu2") activation. Distinct from the com.microsoft QMoE
+    operator (`hip.qmoe`): different routing, activation, and a mandatory
+    latent projection + shared-expert branch.
+
+    Routing (per token, over `num_experts` derived from
+    `fc1_experts_weights`'s leading dim):
+      logits = hidden_states @ router_weight        (dense fp16, unquantized)
+      probs  = sigmoid(logits)
+      sel    = top_k(probs + correction_bias, k)     // select on biased score
+      w      = probs[sel]                            // weight on raw prob
+      w      = w / (sum(w) + eps)                    // if normalize_routing_weights
+      w      = w * routed_scaling_factor
+
+    Latent + expert computation (per token, `h` in the `latent_size`-dim
+    compressed space):
+      h   = dequant(fc1_latent_weights) @ hidden_states       // hidden -> latent
+      acc = sum_{j,e in sel} w[j] * (
+              dequant(fc2_experts_weights[e]) @ relu2(
+                dequant(fc1_experts_weights[e]) @ h))          // latent -> latent
+      y   = dequant(fc2_latent_weights) @ acc                  // latent -> hidden
+
+    Shared expert (runs for every token, independent of routing):
+      s = dequant(shared_fc2_weights) @ relu2(
+            dequant(shared_fc1_weights) @ hidden_states)        // hidden -> hidden
+
+    Output: moe_out = y + s. The caller adds the block's residual separately.
+
+    Weight packing follows MatMulNBits convention (same as `hip.qmoe`):
+    uint8 packed int4, dequantized = (quantized - 8) * scale, no zero_points
+    input (always symmetric zero-point 8 for this op).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.qmoe_amd(%handle) ins(
+        %hidden_states,
+        %fc1_experts_weights, %fc1_experts_scales,
+        %fc2_experts_weights, %fc2_experts_scales,
+        %fc1_latent_weights, %fc1_latent_scales,
+        %fc2_latent_weights, %fc2_latent_scales,
+        %shared_fc1_weights, %shared_fc1_scales,
+        %shared_fc2_weights, %shared_fc2_scales,
+        %router_weight, %correction_bias :
+        memref<1x128x4096xf16, 1>,
+        memref<512x2688x16x16xui8, 1>, memref<512x2688x16xf16, 1>,
+        memref<512x1024x84x16xui8, 1>, memref<512x1024x84xf16, 1>,
+        memref<1024x128x16xui8, 1>, memref<1024x128xf16, 1>,
+        memref<4096x32x16xui8, 1>, memref<4096x32xf16, 1>,
+        memref<5376x128x16xui8, 1>, memref<5376x128xf16, 1>,
+        memref<4096x168x16xui8, 1>, memref<4096x168xf16, 1>,
+        memref<4096x512xf16, 1>, memref<512xf16, 1>)
+        outs(%output : memref<1x128x4096xf16, 1>)
+        {k = 22, expert_weight_bits = 4, block_size = 32,
+         normalize_routing_weights = 1, use_correction_bias = 1,
+         routed_scaling_factor = 5.0, activation_type = "relu2",
+         routing_type = "sigmoid"}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$handle,
+    Hip_TensorOrMemRef:$hidden_states,          // [batch, seq, hidden]
+    Hip_TensorOrMemRef:$fc1_experts_weights,    // [num_experts, moe_inter, latent/pack]
+    Hip_TensorOrMemRef:$fc1_experts_scales,     // [num_experts, moe_inter, latent/bs]
+    Hip_TensorOrMemRef:$fc2_experts_weights,    // [num_experts, latent, moe_inter/pack]
+    Hip_TensorOrMemRef:$fc2_experts_scales,     // [num_experts, latent, moe_inter/bs]
+    Hip_TensorOrMemRef:$fc1_latent_weights,     // [latent, hidden/pack]
+    Hip_TensorOrMemRef:$fc1_latent_scales,      // [latent, hidden/bs] (or flattened)
+    Hip_TensorOrMemRef:$fc2_latent_weights,     // [hidden, latent/pack]
+    Hip_TensorOrMemRef:$fc2_latent_scales,      // [hidden, latent/bs] (or flattened)
+    Hip_TensorOrMemRef:$shared_fc1_weights,     // [shared_inter, hidden/pack]
+    Hip_TensorOrMemRef:$shared_fc1_scales,      // [shared_inter, hidden/bs] (or flattened)
+    Hip_TensorOrMemRef:$shared_fc2_weights,     // [hidden, shared_inter/pack]
+    Hip_TensorOrMemRef:$shared_fc2_scales,      // [hidden, shared_inter/bs] (or flattened)
+    Hip_TensorOrMemRef:$router_weight,          // [hidden, num_experts], not quantized
+    Hip_TensorOrMemRef:$correction_bias,        // [num_experts]
+    Hip_TensorOrMemRef:$output,                 // DPS init [batch, seq, hidden]
+    I64Attr:$k,
+    I64Attr:$expert_weight_bits,
+    I64Attr:$block_size,
+    I64Attr:$normalize_routing_weights,
+    I64Attr:$use_correction_bias,
+    F32Attr:$routed_scaling_factor,
+    StrAttr:$activation_type,
+    StrAttr:$routing_type
+  );
+
+  let assemblyFormat = [{
+    `(` $handle `)` `ins` `(`
+        $hidden_states `,`
+        $fc1_experts_weights `,` $fc1_experts_scales `,`
+        $fc2_experts_weights `,` $fc2_experts_scales `,`
+        $fc1_latent_weights `,` $fc1_latent_scales `,`
+        $fc2_latent_weights `,` $fc2_latent_scales `,`
+        $shared_fc1_weights `,` $shared_fc1_scales `,`
+        $shared_fc2_weights `,` $shared_fc2_scales `,`
+        $router_weight `,` $correction_bias `:`
+        type($hidden_states) `,`
+        type($fc1_experts_weights) `,` type($fc1_experts_scales) `,`
+        type($fc2_experts_weights) `,` type($fc2_experts_scales) `,`
+        type($fc1_latent_weights) `,` type($fc1_latent_scales) `,`
+        type($fc2_latent_weights) `,` type($fc2_latent_scales) `,`
+        type($shared_fc1_weights) `,` type($shared_fc1_scales) `,`
+        type($shared_fc2_weights) `,` type($shared_fc2_scales) `,`
+        type($router_weight) `,` type($correction_bias)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_GatherBlockQuantizedOp : Hip_DpsOp<"gather_block_quantized"> {
   let summary = "Gather + block-wise dequantize "
                 "(com.microsoft GatherBlockQuantized)";
@@ -4640,6 +4762,98 @@ def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
 
   let assemblyFormat = [{
     `(` $ctx `,` $scalar `:` type($scalar) `)` attr-dict `->` type($value)
+  }];
+}
+
+def Hip_QuantizeLinearOp : Hip_DpsOp<"quantize_linear", /*traits=*/[],
+                                     /*outsAccessor=*/"Output",
+                                     /*autoReify=*/1,
+                                     /*autoInfer=*/1,
+                                     /*declareInfer=*/1> {
+  let summary = "ONNX QuantizeLinear";
+  let description = [{
+    The linear quantization operator consumes a high-precision tensor, a scale,
+    and a zero point to compute the low-precision/quantized tensor.
+    The scale factor and zero point must have the same shape, determining
+    the quantization granularity. The quantization formula is
+    y = saturate((x / y_scale) + y_zero_point).
+
+    `packed_int4` marks an ONNX INT4 / UINT4 target. `$output` and
+    `$zero_point` keep their i8 / ui8 element type and logical shape, but only
+    the first ceil(numel/2) bytes of `$output` are written: two values per
+    byte, low nibble first, over the flattened row-major sequence. The buffer
+    is still allocated at the logical element count, so its upper half is left
+    untouched, and only a `packed_int4` consumer reads the result correctly.
+    Nothing sets this today -- unlike a packed constant, a 4-bit target leaves
+    no trace in the IR to detect -- and whatever does must first establish that
+    every consumer can be marked as well.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$scale,
+    Optional<Hip_TensorOrMemRef>:$zero_point,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$axis,
+    I64Attr:$block_size,
+    I64Attr:$precision,
+    I64Attr:$saturate,
+    UnitAttr:$packed_int4
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $scale `:`
+        type($input) `,` type($scale) `)`
+    (`zero_point` `(` $zero_point^ `:` type($zero_point) `)`)?
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_DequantizeLinearOp : Hip_DpsOp<"dequantize_linear", /*traits=*/[],
+                                       /*outsAccessor=*/"Output",
+                                       /*autoReify=*/1,
+                                       /*autoInfer=*/1,
+                                       /*declareInfer=*/1> {
+  let summary = "ONNX DequantizeLinear";
+  let description = [{
+    The linear dequantization operator. It consumes a quantized tensor,
+    a scale, and a zero point to compute the full-precision tensor
+    The dequantization formula is y = (x - x_zero_point) * x_scale.
+    x_scale and x_zero_point must have the same shape, determining the
+    quantization's granularity: a scalar for per-tensor/per-layer
+    quantization, a 1-D tensor for per-axis quantization,
+    or have a rank identical to the input for blocked quantization.
+    See QuantizeLinear for details on quantization granularity.
+
+    `packed_int4` marks an ONNX INT4 / UINT4 source. Those import as i8 / ui8
+    at the LOGICAL element count while `$input` and `$zero_point` only hold
+    ceil(numel/2) bytes, two values per byte, low nibble first, over the
+    flattened row-major sequence. The element type keeps the signedness but
+    cannot express the width, so without this flag a consumer reads twice the
+    buffer. `$output` and every shape stay logical, so nothing else changes.
+    Set by convert-onnx-to-hip from the marker that constant lowering stamps
+    on the ONNX op once it sees the halved backing size.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$scale,
+    Optional<Hip_TensorOrMemRef>:$zero_point,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$axis,
+    I64Attr:$block_size,
+    UnitAttr:$packed_int4
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $scale `:`
+        type($input) `,` type($scale) `)`
+    (`zero_point` `(` $zero_point^ `:` type($zero_point) `)`)?
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
   }];
 }
 #endif // HIP_OPS

@@ -339,7 +339,9 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/reduce_min.cpp runtime_reduce_min.bc)
     compile_to_bitcode(real/matmul_nbits.cpp runtime_matmul_nbits.bc)
     compile_to_bitcode(real/qmoe.cpp runtime_qmoe.bc)
+    compile_to_bitcode(real/qmoe_amd.cpp runtime_qmoe_amd.bc)
     compile_to_bitcode(real/gather_block_quantized.cpp runtime_gather_block_quantized.bc)
+    compile_to_bitcode(real/qdq.cpp runtime_qdq.bc)
     compile_to_bitcode(real/causal_conv_with_state.cpp runtime_causal_conv_with_state.bc)
     compile_to_bitcode(real/test_hip_from_dll.cpp test_hip_from_dll.bc)
     compile_to_bitcode(real/gemm.cpp runtime_gemm.bc)
@@ -464,6 +466,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_min.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_matmul_nbits.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmoe.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmoe_amd.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_causal_conv_with_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/test_hip_from_dll.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gemm.bc
@@ -509,6 +512,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_grid_sample.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_global_pool.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather_block_quantized.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_qdq.bc
     )
     # Vendor-symbol stubs (see the compile_to_bitcode above) join runtime.bc only
     # when the vendor BLAS/DNN backends are disabled.

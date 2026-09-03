@@ -42,6 +42,7 @@ target_link_libraries(LibHipCompiler PUBLIC
   MLIRBufferizationTransforms
   MLIRTensorInferTypeOpInterfaceImpl
   MLIRSCFDialect
+  MLIRSCFTransforms
   MLIRSCFToControlFlow
   MLIRParser
   MLIRLLVMToLLVMIRTranslation

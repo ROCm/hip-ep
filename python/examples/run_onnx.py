@@ -4,13 +4,8 @@
 #
 """Run an ONNX model or OGA benchmark on the MorphiZen EP.
 
-Sets up the DLL search path and the JIT linker's LIB from the installed wheels,
-then either:
-  - Runs a plain ONNX model with random inputs (default), or
-  - Delegates to benchmark_e2e.py for OGA benchmarks (--benchmark).
-
-Prerequisites (see docs/quick_start.md):
-  - pip install the onnxruntime + onnxruntime_ep_hip wheels
+Runs a plain ONNX model with random inputs (default), or delegates to
+benchmark_e2e.py for OGA benchmarks (--benchmark).
 
 Usage:
   python run_onnx.py path/to/model.onnx
@@ -23,6 +18,8 @@ import sys
 
 import numpy as np
 import onnxruntime as ort
+
+import onnxruntime_ep_amdgpu
 
 EP_NAME = "MorphiZenEP"
 
@@ -39,13 +36,10 @@ _NP_DTYPE = {
 
 
 def _setup_env():
-    sp = os.path.dirname(os.path.dirname(ort.__file__))
-    capi = os.path.join(sp, "onnxruntime", "capi")
-
-    os.environ["LIB"] = os.pathsep.join(filter(None, [capi, os.environ.get("LIB", "")]))
-    os.environ["PATH"] = os.pathsep.join([capi, os.environ.get("PATH", "")])
-    os.add_dll_directory(capi)
-    return capi
+    pkg = os.path.dirname(onnxruntime_ep_amdgpu.__file__)
+    os.environ["LIB"] = os.pathsep.join(filter(None, [pkg, os.environ.get("LIB", "")]))
+    os.environ["AMDGPU_EP_PATH"] = onnxruntime_ep_amdgpu.get_library_path()
+    return pkg
 
 
 def _random_input(spec):
@@ -58,8 +52,8 @@ def _random_input(spec):
     return np.random.randint(0, 2, size=shape).astype(dtype)
 
 
-def _run_onnx(model_path, capi):
-    ort.register_execution_provider_library(EP_NAME, os.path.join(capi, "hipgpu.dll"))
+def _run_onnx(model_path, pkg):
+    ort.register_execution_provider_library(EP_NAME, os.path.join(pkg, "hipgpu.dll"))
 
     devices = [d for d in ort.get_ep_devices() if d.ep_name == EP_NAME]
     if not devices:
@@ -95,8 +89,8 @@ def main():
         )
         return 2
 
-    capi = _setup_env()
-    return _run_onnx(sys.argv[1], capi)
+    pkg = _setup_env()
+    return _run_onnx(sys.argv[1], pkg)
 
 
 if __name__ == "__main__":

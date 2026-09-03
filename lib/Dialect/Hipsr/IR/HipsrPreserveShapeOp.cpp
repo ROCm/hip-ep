@@ -19,3 +19,19 @@ void PreserveShapeOp::getEffects(
   effects.emplace_back(MemoryEffects::Write::get(),
                        SideEffects::DefaultResource::get());
 }
+
+// An extent tensor or memref holds one entry per dimension of $data, so its
+// length must equal the data rank. An opaque !shape.shape carries no length.
+LogicalResult PreserveShapeOp::verify() {
+  auto shapeType = dyn_cast<ShapedType>(getShape().getType());
+  auto dataType = dyn_cast<ShapedType>(getData().getType());
+  if (!shapeType || !dataType || !dataType.hasRank() ||
+      shapeType.isDynamicDim(0)) {
+    return success();
+  }
+  if (shapeType.getDimSize(0) != dataType.getRank()) {
+    return emitOpError() << "extent count " << shapeType.getDimSize(0)
+                         << " does not match data rank " << dataType.getRank();
+  }
+  return success();
+}

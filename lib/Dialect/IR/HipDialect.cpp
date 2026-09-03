@@ -200,7 +200,12 @@ LogicalResult ConstantOp::verify() {
   int64_t size = getSizeAttr().getInt();
   if (size <= 0)
     return emitOpError("external source `size` must be positive");
-  if (size != expectedBytes)
+  // A 4-bit initializer with no MLIR element type is carried as an 8-bit result
+  // of the logical element count while its buffer holds only ceil(n/2) packed
+  // bytes (two values per byte); accept that half-size external source.
+  int64_t packedBytes = (numElements + 1) / 2;
+  bool isPacked4Bit = elementBits == 8 && size == packedBytes;
+  if (size != expectedBytes && !isPacked4Bit)
     return emitOpError("external source byte size ")
            << size << " does not match result byte size " << expectedBytes;
 
@@ -1462,6 +1467,20 @@ void QMoEOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// QMoEAmdOp
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QMoEAmdOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QMoEAmdOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // GatherBlockQuantizedOp: ins(data, indices, scales, [zero_points])
 //                          outs(output)
 //===----------------------------------------------------------------------===//
@@ -2126,6 +2145,34 @@ void ReadbackScalarOp::getEffects(
 MutableOperandRange SizeOp::getDpsInitsMutable() { return getYMutable(); }
 
 void SizeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// QuantizeLinearOp: ins(x, scale, zero_point), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QuantizeLinearOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QuantizeLinearOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// DequantizeLinearOp: ins(x, scale, zero_point), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange DequantizeLinearOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void DequantizeLinearOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);

@@ -365,10 +365,6 @@ jobs:
           $model = "${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\amdgpu-oga-models\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml"
           if (-not (Test-Path $model)) { Write-Host "[SKIP] model not found: $model"; exit 0 }
 
-          # The morphizen wheel now bundles the whole AMD GPU umbrella chain
-          # (amdgpu-ep.dll + hip-backend.dll + hipgpu.dll + custom_kernels) into
-          # onnxruntime/capi/, next to onnxruntime.dll where OGA discovers the
-          # EP. No DLL injection needed — exercise the wheel path end-to-end.
           $pkg = "$PWD\wheelpkg"
           $venv = "$PWD\oga-smoke-venv"
           if (Test-Path $venv) { Remove-Item $venv -Recurse -Force }
@@ -378,11 +374,14 @@ jobs:
           Push-Location "$pkg\wheels"
           & $py -m pip install --quiet `
             (Get-Item onnxruntime_directml-*.whl).Name `
-            (Get-Item onnxruntime_ep_hip-*.whl).Name `
             (Get-Item onnxruntime_genai_directml-*.whl).Name `
             psutil tqdm pandas
+          if ($LASTEXITCODE -ne 0) { Pop-Location; Write-Host "[ERROR] wheels install failed"; exit 1 }
+          & $py -m pip install --quiet --no-deps `
+            (Get-Item onnxruntime_ep_amdgpu-*.whl).Name `
+            (Get-Item onnxruntime_ep_hip-*.whl).Name
           Pop-Location
-          if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] wheel install failed"; exit 1 }
+          if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] EP wheel install failed"; exit 1 }
 
           New-Item -ItemType Directory -Force -Path oga-smoke-results | Out-Null
           & $py "$pkg\run_onnx.py" --benchmark "$pkg\benchmark_e2e.py" `

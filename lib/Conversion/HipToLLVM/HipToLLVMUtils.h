@@ -92,8 +92,11 @@ inline constexpr const char *kWrapMultiHeadAttention =
     "wrap_multi_head_attention";
 inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
 inline constexpr const char *kWrapQMoE = "wrap_qmoe";
+inline constexpr const char *kWrapQMoEAmd = "wrap_qmoe_amd";
 inline constexpr const char *kWrapGatherBlockQuantized =
     "wrap_gather_block_quantized";
+inline constexpr const char *kWrapQuantizeLinear = "wrap_quantize_linear";
+inline constexpr const char *kWrapDequantizeLinear = "wrap_dequantize_linear";
 inline constexpr const char *kWrapGemm = "wrap_gemm";
 inline constexpr const char *kWrapLinearAttention = "wrap_linear_attention";
 inline constexpr const char *kHipGetConstant = "hipdnn_ep_constant_get";
@@ -153,6 +156,11 @@ inline constexpr int64_t kOffsetIdx = 2;
 inline constexpr int64_t kSizesIdx = 3;
 inline constexpr int64_t kStridesIdx = 4;
 
+// com.amd QMoE (hip.qmoe_amd / wrap_qmoe_amd) activation and routing modes.
+// Values must match HIPDNN_EP_QMOE_AMD_* in lib/Runtime/hipdnn_ep_runtime.h.
+inline constexpr int64_t kQMoEAmdActivationRelu2 = 0;
+inline constexpr int64_t kQMoEAmdRoutingSigmoid = 0;
+
 // Window-pool reduction mode constants (hip.pool / wrap_pool).
 // Values must match HIPDNN_EP_POOL_* in lib/Runtime/hipdnn_ep_runtime.h
 // and the `pool_mode` constants used in OnnxToHip/PoolConversion.cpp.
@@ -186,6 +194,8 @@ inline int64_t getHipdnnDataType(Type elemType) {
     return HIPDNN_EP_DATATYPE_INT8;
   if (elemType.isF64())
     return HIPDNN_EP_DATATYPE_DOUBLE;
+  if (elemType.isUnsignedInteger(16))
+    return HIPDNN_EP_DATATYPE_UINT16;
   if (elemType.isInteger(16))
     return HIPDNN_EP_DATATYPE_INT16;
   return HIPDNN_EP_DATATYPE_UNSUPPORTED;
@@ -436,8 +446,12 @@ void populateMatMulNBitsLoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns);
 void populateQMoELoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
+void populateQMoEAmdLoweringPatterns(const LLVMTypeConverter &converter,
+                                     RewritePatternSet &patterns);
 void populateGatherBlockQuantizedLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
+void populateQdqLoweringPatterns(const LLVMTypeConverter &converter,
+                                 RewritePatternSet &patterns);
 void populateGraphLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateCausalConvWithStateLoweringPatterns(
