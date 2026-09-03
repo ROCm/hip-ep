@@ -476,7 +476,10 @@ int wrap_group_query_attention(
     // Shape values (6)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
-    int64_t attn_bias_batch, int64_t attn_bias_num_heads) {
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads,
+    // key/value layout: 0 = rank-3 BSHD, 1 = rank-4 BNSD (mock stub ignores
+    // it).
+    int64_t kv_bnsd) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_group_query_attention\n");
     return -1;
@@ -500,6 +503,7 @@ int wrap_group_query_attention(
   (void)present_value;
   (void)attn_bias_batch;
   (void)attn_bias_num_heads;
+  (void)kv_bnsd;
 
   MOCK_PRINT("[MOCK] wrap_group_query_attention(\n");
   MOCK_PRINT("[MOCK]   num_heads=%lld, kv_num_heads=%lld,\n",

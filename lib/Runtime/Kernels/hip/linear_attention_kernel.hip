@@ -11,19 +11,30 @@
 #include <cmath>
 #include <cstdlib>
 
+#include "hip_arch_compat.h"
 #include "hip_custom_kernels.h"
 #include "debug_log.h"
 
 static constexpr int LA_THREADS = 256;
 
-// --- WMMA (RDNA3 wave32) support, mirrors gemm_wmma_kernel.hip ---
-typedef _Float16 la_half16 __attribute__((ext_vector_type(16)));
+// --- WMMA (wave32) support, mirrors gemm_wmma_kernel.hip ---
+// la_half16 holds one WMMA A/B fragment; its vector width tracks
+// HIPDNN_WMMA_FRAG_ELEMS (16 on gfx11, 8 on the gfx12-style encoding
+// gfx1170/gfx12xx use) so it binds to whichever builtin
+// HIPDNN_WMMA_F32_16X16X16_F16 selects. The name is kept for continuity with
+// the surrounding comments even though the width is arch-dependent.
+typedef _Float16 la_half16 __attribute__((ext_vector_type(HIPDNN_WMMA_FRAG_ELEMS)));
 typedef float    la_float8 __attribute__((ext_vector_type(8)));
-#if !defined(__has_builtin) ||                                                  \
-    !__has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_f16_w32)
+// Trap only where NEITHER encoding exists (e.g. CDNA/wave64). This used to key
+// on the gfx11 spelling alone, which is absent on gfx1170: every WMMA site
+// below then expanded to __builtin_trap(), so any linear-attention prefill
+// faulted the device with "unspecified launch failure" while the scalar decode
+// path (S==1, no WMMA) kept working.
+#if !HIPDNN_HAS_WMMA
 static __device__ __forceinline__ la_float8
 la_wmma_unavailable(la_half16, la_half16, la_float8 c) { __builtin_trap(); return c; }
-#define __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c) la_wmma_unavailable((a),(b),(c))
+#undef HIPDNN_WMMA_F32_16X16X16_F16
+#define HIPDNN_WMMA_F32_16X16X16_F16(a, b, c) la_wmma_unavailable((a), (b), (c))
 #endif
 static constexpr int LA_WT = 16;   // WMMA 16x16x16 tile dim
 
@@ -838,15 +849,18 @@ __global__ void la_pf_pass1_local(
     if (tid < 32) {
         const int ln = tid % LA_WT;
         const int pr = tid / LA_WT;
+        // K-axis base for this lane's pair-half: 0 on gfx11 (each lane loads
+        // the full 16-wide K range), pair*8 on the gfx12-style encoding.
+        const int k_off = hipdnn_wmma_k_off(pr);
         la_float8 acc = {};
         for (int k = 0; k < dk; k += LA_WT) {
             la_half16 frag;
-            for (int ele = 0; ele < LA_WT; ele++)
-                frag[ele] = (_Float16)__half2float(Ksm[ln * dk + k + ele]);
-            acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(frag, frag, acc);
+            for (int ele = 0; ele < HIPDNN_WMMA_FRAG_ELEMS; ele++)
+                frag[ele] = (_Float16)__half2float(Ksm[ln * dk + k + k_off + ele]);
+            acc = HIPDNN_WMMA_F32_16X16X16_F16(frag, frag, acc);
         }
         for (int ele = 0; ele < 8; ele++) {
-            const int t = ele * 2 + pr, s = ln;
+            const int t = hipdnn_wmma_acc_row(pr, ele), s = ln;
             if (t < Ceff && s < Ceff)
                 Tm[t * Ceff + s] =
                     (s < t) ? bsm[t] * expf(clog[t] - clog[s]) * acc[ele] : 0.f;
@@ -1002,18 +1016,19 @@ __global__ void la_pf_scan(
             const int m_base = (tile / ntv) * LA_WT;
             const int n_base = (tile % ntv) * LA_WT;
             la_float8 acc = {};
+            const int k_off = hipdnn_wmma_k_off(pair);
             for (int k = 0; k < dk; k += LA_WT) {
                 la_half16 a_frag, b_frag;
-                for (int ele = 0; ele < LA_WT; ele++) {
-                    a_frag[ele] = (_Float16)__half2float(Ah[(m_base + lane) * dk + k + ele]);
-                    b_frag[ele] = (_Float16)__half2float(Ssm[(n_base + lane) * sst + k + ele]);
+                for (int ele = 0; ele < HIPDNN_WMMA_FRAG_ELEMS; ele++) {
+                    a_frag[ele] = (_Float16)__half2float(Ah[(m_base + lane) * dk + k + k_off + ele]);
+                    b_frag[ele] = (_Float16)__half2float(Ssm[(n_base + lane) * sst + k + k_off + ele]);
                 }
-                acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag, b_frag, acc);
+                acc = HIPDNN_WMMA_F32_16X16X16_F16(a_frag, b_frag, acc);
             }
             // land it as U^T so GEMM 2 can read it as a column-major B operand
             const int jj = n_base + lane;
             for (int ele = 0; ele < 8; ele++) {
-                const int t = m_base + ele * 2 + pair;
+                const int t = m_base + hipdnn_wmma_acc_row(pair, ele);
                 Ubuf[jj * LA_CHUNK + t] = __float2half(
                     Uloc_g[base * (LA_CHUNK * dv) + (int64_t)t * dv + j0 + jj] - acc[ele]);
             }
@@ -1037,17 +1052,18 @@ __global__ void la_pf_scan(
             const int m_base = (tile / ntv) * LA_WT;
             const int n_base = (tile % ntv) * LA_WT;
             la_float8 acc = {};
+            const int k_off = hipdnn_wmma_k_off(pair);
             for (int k = 0; k < LA_CHUNK; k += LA_WT) {
                 la_half16 a_frag, b_frag;
-                for (int ele = 0; ele < LA_WT; ele++) {
-                    a_frag[ele] = (_Float16)__half2float(Ah[(m_base + lane) * ktt + k + ele]);
-                    b_frag[ele] = (_Float16)__half2float(Ubuf[(n_base + lane) * LA_CHUNK + k + ele]);
+                for (int ele = 0; ele < HIPDNN_WMMA_FRAG_ELEMS; ele++) {
+                    a_frag[ele] = (_Float16)__half2float(Ah[(m_base + lane) * ktt + k + k_off + ele]);
+                    b_frag[ele] = (_Float16)__half2float(Ubuf[(n_base + lane) * LA_CHUNK + k + k_off + ele]);
                 }
-                acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag, b_frag, acc);
+                acc = HIPDNN_WMMA_F32_16X16X16_F16(a_frag, b_frag, acc);
             }
             __half* srow = Ssm + (n_base + lane) * sst + m_base;
             for (int ele = 0; ele < 8; ele++) {
-                const int i = ele * 2 + pair;
+                const int i = hipdnn_wmma_acc_row(pair, ele);
                 srow[i] = __float2half(a_last * __half2float(srow[i]) + acc[ele]);
             }
         }
@@ -1148,17 +1164,18 @@ __global__ void __launch_bounds__(256) la_pf_pass3_wmma(
     if (tid < 32) {
         const int ln = tid % LA_WT;
         const int pr = tid / LA_WT;
+        const int k_off = hipdnn_wmma_k_off(pr);
         la_float8 acc = {};
         for (int k = 0; k < dk; k += LA_WT) {
             la_half16 a_frag, b_frag;
-            for (int ele = 0; ele < LA_WT; ele++) {
-                a_frag[ele] = (_Float16)__half2float(QW[ln * dk + k + ele]);
-                b_frag[ele] = (_Float16)__half2float(Kh[ln * dk + k + ele]);
+            for (int ele = 0; ele < HIPDNN_WMMA_FRAG_ELEMS; ele++) {
+                a_frag[ele] = (_Float16)__half2float(QW[ln * dk + k + k_off + ele]);
+                b_frag[ele] = (_Float16)__half2float(Kh[ln * dk + k + k_off + ele]);
             }
-            acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag, b_frag, acc);
+            acc = HIPDNN_WMMA_F32_16X16X16_F16(a_frag, b_frag, acc);
         }
         for (int ele = 0; ele < 8; ele++) {
-            const int t = ele * 2 + pr, s = ln;
+            const int t = hipdnn_wmma_acc_row(pr, ele), s = ln;
             if (t < Ceff && s <= t)
                 Pm[t * Ceff + s] = expf(clog[t] - clog[s]) * acc[ele];
         }
@@ -1176,17 +1193,18 @@ __global__ void __launch_bounds__(256) la_pf_pass3_wmma(
         const int m_base = (tile / nt) * LA_WT;
         const int n_base = (tile % nt) * LA_WT;
         la_float8 acc = {};
+        const int k_off = hipdnn_wmma_k_off(pair);
         for (int k = 0; k < dk; k += LA_WT) {
             la_half16 a_frag, b_frag;
-            for (int ele = 0; ele < LA_WT; ele++) {
-                a_frag[ele] = (_Float16)__half2float(QW[(m_base + lane) * dk + k + ele]);
-                // S0 is [dv][dk], so the B fragment is 16 contiguous halves
-                b_frag[ele] = (_Float16)__half2float(S0[(n_base + lane) * dk + k + ele]);
+            for (int ele = 0; ele < HIPDNN_WMMA_FRAG_ELEMS; ele++) {
+                a_frag[ele] = (_Float16)__half2float(QW[(m_base + lane) * dk + k + k_off + ele]);
+                // S0 is [dv][dk], so the B fragment is contiguous halves
+                b_frag[ele] = (_Float16)__half2float(S0[(n_base + lane) * dk + k + k_off + ele]);
             }
-            acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag, b_frag, acc);
+            acc = HIPDNN_WMMA_F32_16X16X16_F16(a_frag, b_frag, acc);
         }
         for (int ele = 0; ele < 8; ele++)
-            QWS[(m_base + ele * 2 + pair) * dv + n_base + lane] = acc[ele];
+            QWS[(m_base + hipdnn_wmma_acc_row(pair, ele)) * dv + n_base + lane] = acc[ele];
     }
     __syncthreads();
 

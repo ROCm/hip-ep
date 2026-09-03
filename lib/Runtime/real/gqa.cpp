@@ -7,8 +7,9 @@
 // GQA runtime wrapper (self-contained: optimized fused fast path + legacy
 // decomposed hipBLASLt fallback).
 //
-// The generated IR calls `wrap_group_query_attention` (39-arg ABI, unchanged so
-// the HipToLLVM lowering keeps resolving). Path selection:
+// The generated IR calls `wrap_group_query_attention` (42-arg ABI, kept in
+// lockstep with the HipToLLVM lowering so the symbol keeps resolving). Path
+// selection:
 //
 //   * Common fp16 causal GQA (head_dim in {64,128,256}, templated decode
 //     geometry) -> optimized fused custom kernels:
@@ -217,8 +218,10 @@ static inline int kv_dtype_abi(KvCacheFormat f) {
 // past_buf_seq is the buffer dim of past_key (may exceed past_len for
 // pre-allocated caches). seqlens_k_ptr: when non-null on the append path the
 // kernel reads past_len from device memory (zero D2H). The fused path calls
-// this with the default no_causal=false / skv=-1; the decomposed pipeline
-// passes them for the Whisper no_causal cases. Returns 0 on success.
+// this with the default no_causal=false / skv=-1 / kv_bnsd=false; the
+// decomposed pipeline passes them for the no_causal cases, where kv_bnsd states
+// whether new_key/new_value are rank-4 BNSD (MultiHeadAttention cross-attn) or
+// rank-3 BSHD (onnx.Attention / GQA). Returns 0 on success.
 //
 // kv_format: for any quantized format (Int8PerChannel today, INT4/FP8 later)
 // the (causal) concat/append quantizes the incoming fp16 K/V with the static
@@ -244,19 +247,30 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
                            bool no_causal = false, int skv = -1,
                            KvCacheFormat kv_format = KvCacheFormat::Fp16,
                            const void *k_scale = nullptr,
-                           const void *v_scale = nullptr) {
-  // no_causal (Whisper encoder / cross-attn): bidirectional, no past KV.
-  // The KV to attend over is the FULL `new_key`/`new_value` (Skv tokens), not
-  // `sq` newly-appended tokens. Two sub-cases distinguished by sq vs Skv:
-  //   * Cross-attn (sq != Skv): `key`/`value` arrive as rank-4 BNSD
-  //     [B, G, Skv, d] -- already in the present_key layout. A straight
-  //     device-to-device copy of all Skv tokens populates present_*.
-  //   * Encoder self-attn (sq == Skv): `key`/`value` are BSHD [B, Skv, G, d];
-  //     fall through to the append kernel below with past_len forced to 0 and
-  //     seqlens_k=nullptr so it transposes all Skv tokens to offset 0 WITHOUT
-  //     the +1 PAST-token convention.
-  if (no_causal && skv >= 0 && skv != sq) {
-    // Cross-attn: key/value arrive rank-4 BNSD [B,G,skv,d]; straight D2D copy.
+                           const void *v_scale = nullptr,
+                           bool kv_bnsd = false) {
+  // no_causal: bidirectional attention with no past KV (Whisper encoder /
+  // cross-attn, and Gemma-3n-style KV-cache-sharing decoder layers). The KV to
+  // attend over is the FULL `new_key`/`new_value` (Skv tokens), not `sq`
+  // newly-appended ones, and it must be staged into the BNSD present cache the
+  // GEMMs read. Which staging is correct depends on the SOURCE LAYOUT, not on
+  // sq vs Skv:
+  //   * kv_bnsd (MultiHeadAttention cross-attn): `key`/`value` are rank-4 BNSD
+  //     [B, G, Skv, d], already in the present_key layout, so a straight D2D
+  //     copy of all Skv tokens populates present_*.
+  //   * otherwise (onnx.Attention / GQA lowerings): `key`/`value` are BSHD
+  //     [B, Skv, G, d], so the append kernel transposes all Skv tokens to
+  //     offset 0 -- past_len forced to 0 and seqlens_k=nullptr so it does NOT
+  //     apply the +1 PAST-token convention.
+  //
+  // This used to key on sq != Skv, which held only by coincidence: the BNSD
+  // producer happened to be the one with sq != Skv. A KV-sharing decode (sq=1,
+  // Skv=history) is BSHD but took the copy, and since BSHD and BNSD are
+  // byte-identical only at G == 1 that silently interleaved the KV heads across
+  // the sequence for any G > 1 (Gemma 4 E4B, kv_num_heads=2), time-warping the
+  // history each head saw.
+  if (no_causal && skv >= 0 && kv_bnsd) {
+    // Rank-4 BNSD source: layouts already match; straight D2D copy.
     // elem_sz is 2 (fp16) or 4 (fp32); the decomposed pipeline supports both.
     size_t bytes = static_cast<size_t>(B) * G * static_cast<size_t>(skv) * d *
                    static_cast<size_t>(elem_sz);
@@ -269,16 +283,18 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
     return 0;
   }
   if (no_causal) {
-    // Encoder self-attn: append all Skv (== sq) tokens at offset 0, bypassing
-    // the seqlens_k +1 convention (pass nullptr so the kernel uses past_len=0).
+    // BSHD source: transpose all the KV to offset 0. `src_tokens` is Skv when
+    // the caller supplied it (KV-sharing decode hands us the full history with
+    // Skv != sq) and sq otherwise (encoder self-attn, where they are equal).
     // no_causal is fp16/fp32 only (decomposed pipeline), never quantized.
-    if (hip_gqa_kv_cache_append(stream, new_key, present_key, B, sq, G, d,
-                                present_seq, /*past_len=*/0,
+    const int src_tokens = (skv >= 0) ? skv : sq;
+    if (hip_gqa_kv_cache_append(stream, new_key, present_key, B, src_tokens, G,
+                                d, present_seq, /*past_len=*/0,
                                 /*seqlens_k_ptr=*/nullptr, elem_sz,
                                 HIP_KV_DTYPE_FP16, /*scale=*/nullptr) != 0)
       return -1;
-    if (hip_gqa_kv_cache_append(stream, new_value, present_value, B, sq, G, d,
-                                present_seq, /*past_len=*/0,
+    if (hip_gqa_kv_cache_append(stream, new_value, present_value, B, src_tokens,
+                                G, d, present_seq, /*past_len=*/0,
                                 /*seqlens_k_ptr=*/nullptr, elem_sz,
                                 HIP_KV_DTYPE_FP16, /*scale=*/nullptr) != 0)
       return -1;
@@ -1142,12 +1158,19 @@ static int gqa_forward_hipblaslt(
     void *present_value, int64_t B, int64_t sq, int64_t skv,
     int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
     int64_t do_rotary, int64_t local_window_size, bool no_causal,
-    int64_t element_size_bytes, int op_state_slot) {
+    int64_t element_size_bytes, int op_state_slot, bool kv_bnsd) {
 
-  // Whisper bidirectional no-past path only when no_causal AND no external
-  // attention_bias. ONNX Attention with is_causal=0 still carries past KV and
-  // uses the standard decode seqlens_k convention.
-  const bool bidirectional_no_past = no_causal && (attention_bias == nullptr);
+  // Bidirectional no-past path. The discriminator is the ABSENCE of a past KV
+  // operand, not the absence of an external mask: an additive mask is
+  // orthogonal (Step 8b adds it on either path). With a past cache, is_causal=0
+  // still follows the ORT decode convention (total_seq = seqlens_k+1). With no
+  // past cache, `key`/`value` ARE the full Skv-length KV -- Whisper encoder /
+  // cross-attn, and Gemma-3n-style KV-cache-sharing layers, which re-read an
+  // earlier layer's complete cache behind an external mask -- so total_seq is
+  // exactly skv and past_len is 0. Gating this on the mask instead sent those
+  // sharing layers down the decode path, where seqlens_k+1 (the full history)
+  // exceeds present_seq and the call was rejected outright.
+  const bool bidirectional_no_past = no_causal && (past_key == nullptr);
 
   int64_t HPG = H / G;
   int64_t present_seq = skv;
@@ -1433,8 +1456,8 @@ static int gqa_forward_hipblaslt(
   // give total_seq = skv+1 > present_seq = skv -> rc=-1 -> zeroed output, and
   // past_len = total_seq - sq is invalid when sq != skv (cross-attn has sq=1,
   // skv=1500 => bogus past_len=1499). Gated on bidirectional_no_past (not raw
-  // no_causal): an onnx.Attention with an external mask still carries past KV,
-  // so it keeps the standard seqlens_k path below. For the no-past case
+  // no_causal): an onnx.Attention that DOES carry a past KV cache keeps the
+  // standard seqlens_k path below regardless of is_causal. For the no-past case
   // total_seq = skv (== present_seq) and past_len = 0; skip the readback.
   if (bidirectional_no_past) {
     total_seq = skv;
@@ -1966,10 +1989,10 @@ static int gqa_forward_hipblaslt(
     // no-expand hands seqlens_k_ptr to the append kernel (on-device past_len,
     // no D2H); the expand path already read total_seq host-side so passes null.
     if (present_key && present_value) {
-      // bidirectional_no_past (Whisper encoder / cross-attn): never hand
-      // seqlens_k to the append kernel (it would apply the +1 convention).
-      // ONNX Attention with is_causal=0 + external mask keeps the standard
-      // decode KV path (bidirectional_no_past=false).
+      // bidirectional_no_past (Whisper encoder / cross-attn, KV-sharing decoder
+      // layers): never hand seqlens_k to the append kernel (it would apply the
+      // +1 convention). An onnx.Attention with a past KV cache keeps the
+      // standard decode KV path (bidirectional_no_past=false).
       //
       // copy_lo is kv_lo, deliberately the identical value and not a separately
       // derived one: the bytes this skips writing are then exactly the bytes
@@ -1997,7 +2020,8 @@ static int gqa_forward_hipblaslt(
           static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
           (use_no_expand && !bidirectional_no_past) ? seqlens_k_ptr : nullptr,
           static_cast<int>(elem_sz), static_cast<int>(kv_lo),
-          bidirectional_no_past, static_cast<int>(skv)));
+          bidirectional_no_past, static_cast<int>(skv), KvCacheFormat::Fp16,
+          /*k_scale=*/nullptr, /*v_scale=*/nullptr, kv_bnsd));
     }
 
     // ---- Steps 6-7: KV Expand [B*G,present_seq,d] -> [B*H,total_seq,d] ----
@@ -2286,7 +2310,7 @@ static bool classify_kv_cache(int64_t k_quant_type, int64_t v_quant_type,
 
 //===----------------------------------------------------------------------===//
 // Public wrapper called by generated IR. ABI MUST stay identical to the
-// HipToLLVM lowering (kWrapGQA = "wrap_group_query_attention", 41 params).
+// HipToLLVM lowering (kWrapGQA = "wrap_group_query_attention", 42 params).
 //===----------------------------------------------------------------------===//
 int wrap_group_query_attention(
     RuntimeState *state, int op_state_slot,
@@ -2307,7 +2331,7 @@ int wrap_group_query_attention(
     // Shape values (6)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
-    int64_t attn_bias_batch, int64_t attn_bias_num_heads) {
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd) {
   OP_PROFILE(
       "gqa",
       [&] {
@@ -2481,7 +2505,8 @@ int wrap_group_query_attention(
         attention_bias, attn_bias_batch, attn_bias_num_heads, output,
         present_key, present_value, batch_size, seq_len_q, seq_len_kv,
         past_buf_seq, num_heads, kv_num_heads, head_dim, scale, do_rotary,
-        local_window_size, no_causal != 0, element_size_bytes, op_state_slot);
+        local_window_size, no_causal != 0, element_size_bytes, op_state_slot,
+        kv_bnsd != 0);
     if (lrc != 0)
       fprintf(stderr,
               "wrap_group_query_attention: legacy decomposed pipeline failed "
