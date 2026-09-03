@@ -4487,12 +4487,8 @@ def Hip_QMatMulOp : Hip_DpsOp<"qmatmul",
   }];
 }
 
-def Hip_QAddOp : Hip_DpsOp<"qadd",
-                              /*traits=*/[],
-                              /*outsAccessor=*/"Output",
-                              /*autoReify=*/1,
-                              /*autoInfer=*/1,
-                              /*declareInfer=*/1> {
+def Hip_QAddOp : Hip_DpsOp_Broadcast<"qadd",
+                                     /*operandGetters=*/["Lhs", "Rhs"]> {
   let summary = "Quantized elementwise add with integrated QDQ";
   let description = [{
     Quantized elementwise add. Performs element-wise binary 
