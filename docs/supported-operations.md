@@ -40,6 +40,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Neg | Custom HIP kernel |
 | Equal | Custom HIP kernel |
 | Not | Custom HIP kernel |
+| IsInf | Custom HIP kernel |
 | And | Custom HIP kernel |
 | Or | Custom HIP kernel |
 | Abs | Custom HIP kernel |
