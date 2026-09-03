@@ -1566,6 +1566,34 @@ int wrap_or(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
   return 0;
 }
 
+int wrap_qelementwise(RuntimeState *state, void *lhs, void *rhs, void *output,
+                     int64_t kind, const int64_t *lhs_shape, int64_t lhs_rank,
+                     const int64_t *rhs_shape, int64_t rhs_rank,
+                     const int64_t *out_shape, int64_t out_rank,
+                     int64_t data_type, float M_a, int64_t lhs_zp, float M_b,
+                     int64_t rhs_zp, int64_t output_zp) {
+  (void)lhs;
+  (void)rhs;
+  (void)output;
+  (void)kind;
+  (void)lhs_shape;
+  (void)lhs_rank;
+  (void)rhs_shape;
+  (void)rhs_rank;
+  (void)out_shape;
+  (void)out_rank;
+  (void)data_type;
+  (void)M_a;
+  (void)lhs_zp;
+  (void)M_b;
+  (void)rhs_zp;
+  (void)output_zp;
+  if (!state)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_qelementwise,kind=%lld", (long long)kind);
+  return 0;
+}
+
 int wrap_and(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
              int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n, int64_t b_c,
              int64_t b_h, int64_t b_w, int64_t out_n, int64_t out_c,

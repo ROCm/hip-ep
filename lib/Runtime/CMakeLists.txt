@@ -358,6 +358,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/pool.cpp runtime_pool.bc)
     compile_to_bitcode(real/resize.cpp runtime_resize.bc)
     compile_to_bitcode(real/global_pool.cpp runtime_global_pool.bc)
+    compile_to_bitcode(real/qelementwise.cpp runtime_qelementwise.bc)
 
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
@@ -434,6 +435,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_resize.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_global_pool.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather_block_quantized.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_qelementwise.bc
     )
     # Vendor-symbol stubs (see the compile_to_bitcode above) join runtime.bc only
     # when the vendor BLAS/DNN backends are disabled.

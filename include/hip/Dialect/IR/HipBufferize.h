@@ -193,10 +193,11 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     SliceOp::attachInterface<HipDstBufferizableModel<SliceOp>>(*ctx);
     ScatterNDOp::attachInterface<HipDstBufferizableModel<ScatterNDOp>>(*ctx);
     MultiHeadAttentionOp::attachInterface<
-        HipDstBufferizableModel<MultiHeadAttentionOp>>(*ctx);
+    HipDstBufferizableModel<MultiHeadAttentionOp>>(*ctx);
     NonZeroOp::attachInterface<HipDstBufferizableModel<NonZeroOp>>(*ctx);
     SizeOp::attachInterface<HipDstBufferizableModel<SizeOp>>(*ctx);
     LoopOp::attachInterface<HipDstBufferizableModel<LoopOp>>(*ctx);
+    QAddOp::attachInterface<HipDstBufferizableModel<QAddOp>>(*ctx);
     // hip.if is a DPS control-flow op (getDpsInitsMutable, results alias
     // o_init) just like hip.loop. Without this model one-shot-bufferize aborts
     // with "op was not bufferized: hip.if" for any graph containing onnx.If,

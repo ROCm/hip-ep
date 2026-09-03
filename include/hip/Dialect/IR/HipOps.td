@@ -4495,7 +4495,9 @@ def Hip_QAddOp : Hip_DpsOp<"qadd",
                               /*declareInfer=*/1> {
   let summary = "Quantized elementwise add with integrated QDQ";
   let description = [{
-    todo
+    Quantized elementwise add. Performs element-wise binary 
+    addition (with Numpy-style broadcasting support).
+    This operator supports multidirectional (i.e., Numpy-style) broadcasting
   }];
 
   let arguments = (ins

@@ -53,6 +53,8 @@ extern "C" {
 #define HIPDNN_EP_TENSOR_OP_MIN 2 // element-wise min
 #define HIPDNN_EP_TENSOR_OP_MAX 3 // element-wise max
 
+#define HIPDNN_EP_QELEMENTWISE_ADD 0
+
 static inline const char *hipdnn_ep_tensor_op_name(int64_t op) {
   switch (op) {
   case HIPDNN_EP_TENSOR_OP_MUL:
@@ -936,6 +938,22 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
                          int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
                          int64_t out_n, int64_t out_c, int64_t out_h,
                          int64_t out_w, int64_t data_type);
+
+// Quantized element-wise wrapper (NumPy-style multidirectional broadcasting,
+// arbitrary rank). `kind` selects the operation (HIPDNN_EP_QELEMENTWISE_*).
+//
+// Each operand carries its own (shape, rank) pair: the shape array holds
+// `rank` i64 dims in row-major order. Operand shapes are left-padded with 1s
+// up to `out_rank`, and dims of 1 broadcast against the output dim.
+//
+// lhs/rhs/output are quantized buffers of `data_type`.
+// M_a = s_a / s_out, M_b = s_b / s_out (folded by lowering).
+int wrap_qelementwise(RuntimeState *state, void *lhs, void *rhs, void *output,
+                     int64_t kind, const int64_t *lhs_shape, int64_t lhs_rank,
+                     const int64_t *rhs_shape, int64_t rhs_rank,
+                     const int64_t *out_shape, int64_t out_rank,
+                     int64_t data_type, float M_a, int64_t lhs_zp, float M_b,
+                     int64_t rhs_zp, int64_t output_zp);
 
 // Element-wise Where wrapper (NumPy-style multidirectional broadcasting,
 // arbitrary rank). Computes output[i] = condition[i] ? x[i] : y[i] with
