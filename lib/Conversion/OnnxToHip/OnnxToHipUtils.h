@@ -210,6 +210,25 @@ inline int64_t getHipdnnInputDataType(mlir::Type elemType) {
   return HIPDNN_EP_DATATYPE_UNSUPPORTED;
 }
 
+//===----------------------------------------------------------------------===//
+// ONNX INT4 / UINT4 packing
+//
+// Both import as an 8-bit MLIR type at the LOGICAL element count, so the
+// element type keeps the signedness but cannot express the width, and the
+// buffer holds only ceil(numel/2) bytes -- two values per byte, low nibble
+// first, over the flattened row-major sequence. `packed_int4` is how that
+// width travels from wherever it is still observable to the QDQ converters.
+//
+// Constant lowering is the only producer of the marker, and it can only reach
+// DequantizeLinear: a packed buffer is observable there as a halved backing
+// size, whereas a QuantizeLinear writing 4-bit output looks identical to one
+// writing 8-bit. The quantize side of the pipeline understands the marker end
+// to end but nothing stamps it yet.
+//===----------------------------------------------------------------------===//
+
+/// Marks a QuantizeLinear / DequantizeLinear whose quantized side is packed.
+constexpr llvm::StringLiteral kPackedInt4Attr = "packed_int4";
+
 /// Build a hip.gqa op for the Whisper-MHA / Whisper-encoder-Attention paths.
 ///
 /// Emits one `hip.gqa` op with the 19-slot AttrSizedOperandSegments layout
@@ -303,6 +322,8 @@ void populateMatMulNBitsConversionPatterns(RewritePatternSet &patterns,
                                            MLIRContext *ctx);
 void populateQMoEConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateQMoEAmdConversionPatterns(RewritePatternSet &patterns,
+                                       MLIRContext *ctx);
 void populateGatherBlockQuantizedPreparePatterns(RewritePatternSet &patterns,
                                                  MLIRContext *ctx);
 void populateGatherBlockQuantizedConversionPatterns(RewritePatternSet &patterns,
@@ -444,6 +465,9 @@ void populateGlobalPoolConversionPatterns(RewritePatternSet &patterns,
 void populateFlattenConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
 
+void populateQdqConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
+
 /// Pre-lowering pattern set: fold `Transpose(perm=[..,r,r-2])` into a
 /// consuming `onnx.MatMul` as `hipdnn.transA` / `hipdnn.transB` so the
 /// runtime can apply the swap inside hipBLASLt. Sibling of GatherShapeFold;
@@ -495,6 +519,17 @@ void populateSliceShapeFoldPatterns(RewritePatternSet &patterns,
 /// Unsafe or dynamic shapes stay at their original rank for compute conversion.
 void populatePackBroadcastTo4DPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
+
+/// Pre-lowering pattern set: recover a sliding window from `onnx.Attention`'s
+/// additive mask subgraph and stamp it as `hipdnn.local_window_size`, which
+/// OnnxAttentionConversion then puts on `hip.gqa`. `onnx.Attention` has no
+/// window attribute, so a windowed model expresses the window only in the mask
+/// data and the runtime would otherwise score its whole key range. Must run
+/// BEFORE `convertComputeOps`, which rewrites the mask's producers into
+/// `hip.*` in an order this matcher cannot rely on. See
+/// AttentionWindowFold.cpp.
+void populateAttentionWindowFoldPatterns(RewritePatternSet &patterns,
+                                         MLIRContext *ctx);
 
 /// Pre-lowering pattern set: collapse ORT's inlined `FastGelu` primitive
 /// chain (Pow / Mul / Sum / Tanh) back into a single

@@ -19,6 +19,7 @@ add_library(OnnxToHip STATIC
   ReduceL2Conversion.cpp
   MatMulNBitsConversion.cpp
   QMoEConversion.cpp
+  QMoEAmdConversion.cpp
   GatherBlockQuantizedConversion.cpp
   ConvConversion.cpp
   ConvTransposeConversion.cpp
@@ -42,6 +43,7 @@ add_library(OnnxToHip STATIC
   PadShapeFold.cpp
   SliceShapeFold.cpp
   PackBroadcastTo4D.cpp
+  AttentionWindowFold.cpp
   ShapeConversion.cpp
   ReshapeConversion.cpp
   CausalConvWithStateConversion.cpp
@@ -96,6 +98,7 @@ add_library(OnnxToHip STATIC
   GridSampleConversion.cpp
   GlobalPoolConversion.cpp
   FlattenConversion.cpp
+  QdqConversion.cpp
   LoopOutline.cpp
   IfOutline.cpp
   ReluConversion.cpp

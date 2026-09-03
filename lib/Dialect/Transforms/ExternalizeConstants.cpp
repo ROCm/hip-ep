@@ -351,6 +351,17 @@ private:
       return failure();
     plan.size = *size;
 
+    // A packed INT4/UINT4 source is an i8 tensor whose buffer is only
+    // ceil(numElements/2) bytes; its `size` attr already holds that packed
+    // count, so honor it rather than the logical `checkedByteSize`.
+    if (plan.source != SourceKind::Inline)
+      if (auto sizeAttr = op.getSizeAttr()) {
+        int64_t declared = sizeAttr.getInt();
+        int64_t packedBytes = (plan.numElements + 1) / 2;
+        if (plan.type.getElementTypeBitWidth() == 8 && declared == packedBytes)
+          plan.size = declared;
+      }
+
     if (plan.source == SourceKind::Inline) {
       if (failed(planInlineSource(plan)))
         return failure();

@@ -1,3 +1,8 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
 // ============================================================
 // GQA autotune sweep: enumerate EVERY autotune candidate for a list of real
 // model shapes and report the winner per shape.
@@ -500,7 +505,7 @@ struct KernelVersion {
 constexpr KernelVersion kKernelVersions[] = {
     {"flash_decode", "decode-2"},
     {"prefill_v5", "v5-1"},
-    {"prefill_v7", "v7-1"},
+    {"prefill_v7", "v7-2"},
     {"prefill_v8", "v8-1"},
 };
 

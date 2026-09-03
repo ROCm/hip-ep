@@ -60,3 +60,16 @@ bool mlir::hipsr::isHipsrDestinationOperand(OpOperand &use) {
   unsigned begin = destinations.getBeginOperandIndex();
   return index >= begin && index < begin + destinations.size();
 }
+
+OpResult mlir::hipsr::getResultForDestination(OpOperand &use) {
+  if (!isHipsrDestinationOperand(use)) {
+    return {};
+  }
+  Operation *op = use.getOwner();
+  unsigned slot = use.getOperandNumber() -
+                  getHipsrDestinationOperands(op).getBeginOperandIndex();
+  if (slot >= op->getNumResults()) {
+    return {};
+  }
+  return op->getResult(slot);
+}

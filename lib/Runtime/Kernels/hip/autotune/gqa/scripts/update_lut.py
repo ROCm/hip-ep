@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
+
 """Update the GQA autotune LUT from fresh measurements.
 
 Three steps, run individually or all at once:
@@ -33,7 +39,7 @@ LUT_DIR = HERE.parent / 'lut'
 FBS_FILE = HERE.parent / 'gqa_autotune.fbs'
 SWEEP_EXE = HERE.parent.parent.parent.parent.parent / 'test' / 'example' / 'gqa' / 'autotune' / 'build' / 'gqa_autotune_sweep.exe'
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7  # bumped: prefill Length/HeadGroup/ExactHeadGroup rows now use seq_kv=Any
 
 # All measured geometries: (H, G, d, sink, group, prefill_kernel)
 # Every entry becomes a row in the decode LUT; entries with a prefill_kernel
@@ -327,7 +333,17 @@ def _config_parts(config_str):
     name_map = {
         'mt1_bkv32': 'MT1_BKV32', 'mt2_bkv32': 'MT2_BKV32',
         'nw2_bkv32_mt1': 'NW2_BKV32_MT1', 'nw4_bkv32_mt1': 'NW4_BKV32_MT1',
-        'nd4_mt1_bkv32': 'ND4_MT1_BKV32',
+        'nw2_bkv64_mt1': 'NW2_BKV64_MT1', 'nw4_bkv64_mt1': 'NW4_BKV64_MT1',
+        'nw1_bkv32_mt1': 'NW1_BKV32_MT1', 'nw1_bkv64_mt1': 'NW1_BKV64_MT1',
+        'nw1_bkv32_mt2': 'NW1_BKV32_MT2', 'nw2_bkv32_mt2': 'NW2_BKV32_MT2',
+        'nw4_bkv32_mt2': 'NW4_BKV32_MT2', 'nw1_bkv64_mt2': 'NW1_BKV64_MT2',
+        'nw2_bkv64_mt2': 'NW2_BKV64_MT2', 'nw4_bkv64_mt2': 'NW4_BKV64_MT2',
+        'nd2_mt1_bkv16': 'ND2_MT1_BKV16', 'nd2_mt1_bkv32': 'ND2_MT1_BKV32',
+        'nd2_mt1_bkv64': 'ND2_MT1_BKV64', 'nd2_mt2_bkv32': 'ND2_MT2_BKV32',
+        'nd2_mt2_bkv64': 'ND2_MT2_BKV64',
+        'nd4_mt1_bkv16': 'ND4_MT1_BKV16', 'nd4_mt1_bkv32': 'ND4_MT1_BKV32',
+        'nd4_mt2_bkv32': 'ND4_MT2_BKV32',
+        'nd8_mt1_bkv16': 'ND8_MT1_BKV16',
     }
     return name_map.get(s, config_str), 0
 
@@ -370,9 +386,13 @@ def _emit_fallback(rows):
 def _emit_length(readings, rows):
     groups = defaultdict(list)
     for r in readings:
+        is_decode = r['kernel'] == 'flash_decode'
+        # decode: key on seq_kv; prefill: key on seq_q (config independent of seq_kv)
+        sq_key  = 'Any'                      if is_decode else seq_bucket(r['sq'])
+        skv_key = seq_bucket(r['skv'])       if is_decode else 'Any'
         key = (PHASE_OF_KERNEL.get(r['kernel'], r['kernel']),
                head_dim_class(r['d']),
-               seq_bucket(r['skv'] if r['kernel'] == 'flash_decode' else r['skv']),
+               sq_key, skv_key,
                'NoWindow' if r['window'] <= 0 else 'Any')
         groups[key].append(r)
     seen = set()
@@ -380,9 +400,9 @@ def _emit_length(readings, rows):
         if key in seen:
             continue
         seen.add(key)
-        phase, hd, skv, win = key
+        phase, hd, sq, skv, win = key
         rows.append(_make_row(phase, 'Length', hd, 0, 'Any', 'Any', 'Any',
-                              'Any', skv, win, _best_config(group)))
+                              sq, skv, win, _best_config(group)))
 
 
 def _emit_head_group(readings, rows):
@@ -391,9 +411,12 @@ def _emit_head_group(readings, rows):
         if not r['G'] or r['H'] % r['G'] != 0:
             continue
         hpg = r['H'] // r['G']
+        is_decode = r['kernel'] == 'flash_decode'
+        sq_key  = 'Any'                if is_decode else seq_bucket(r['sq'])
+        skv_key = seq_bucket(r['skv']) if is_decode else 'Any'
         key = (PHASE_OF_KERNEL.get(r['kernel'], r['kernel']),
                head_dim_class(r['d']), hpg,
-               seq_bucket(r['skv']),
+               sq_key, skv_key,
                'NoWindow' if r['window'] <= 0 else 'Any')
         groups[key].append(r)
     seen = set()
@@ -401,9 +424,9 @@ def _emit_head_group(readings, rows):
         if key in seen:
             continue
         seen.add(key)
-        phase, hd, hpg, skv, win = key
+        phase, hd, hpg, sq, skv, win = key
         rows.append(_make_row(phase, 'HeadGroup', hd, hpg, 'Any', 'Any', 'Any',
-                              'Any', skv, win, _best_config(group)))
+                              sq, skv, win, _best_config(group)))
 
 
 def _emit_exact_head_group(readings, rows):
@@ -415,9 +438,12 @@ def _emit_exact_head_group(readings, rows):
         if r['H'] % r['G'] != 0:
             continue
         hpg = r['H'] // r['G']
+        is_decode = r['kernel'] == 'flash_decode'
+        sq_key  = 'Any'                if is_decode else seq_bucket(r['sq'])
+        skv_key = seq_bucket(r['skv']) if is_decode else 'Any'
         key = (PHASE_OF_KERNEL.get(r['kernel'], r['kernel']),
                head_dim_class(r['d']), hpg, hcc,
-               seq_bucket(r['skv']),
+               sq_key, skv_key,
                'NoWindow' if r['window'] <= 0 else 'Any')
         groups[key].append(r)
     seen = set()
@@ -425,9 +451,9 @@ def _emit_exact_head_group(readings, rows):
         if key in seen:
             continue
         seen.add(key)
-        phase, hd, hpg, hcc, skv, win = key
+        phase, hd, hpg, hcc, sq, skv, win = key
         rows.append(_make_row(phase, 'ExactHeadGroup', hd, hpg, hcc, 'Any', 'Any',
-                              'Any', skv, win, _best_config(group)))
+                              sq, skv, win, _best_config(group)))
 
 
 def _emit_geometry(readings, rows):
@@ -437,9 +463,12 @@ def _emit_geometry(readings, rows):
             continue
         hpg = r['H'] // r['G']
         par = par_class(r['B'], r['H'])
+        is_decode = r['kernel'] == 'flash_decode'
+        sq_key  = 'Any'                if is_decode else seq_bucket(r['sq'])
+        skv_key = seq_bucket(r['skv']) if is_decode else 'Any'
         key = (PHASE_OF_KERNEL.get(r['kernel'], r['kernel']),
                head_dim_class(r['d']), hpg,
-               par, seq_bucket(r['skv']),
+               par, sq_key, skv_key,
                'NoWindow' if r['window'] <= 0 else 'Any')
         groups[key].append(r)
     seen = set()
@@ -447,9 +476,9 @@ def _emit_geometry(readings, rows):
         if key in seen:
             continue
         seen.add(key)
-        phase, hd, hpg, par, skv, win = key
+        phase, hd, hpg, par, sq, skv, win = key
         rows.append(_make_row(phase, 'Geometry', hd, hpg, 'Any', par, 'Any',
-                              'Any', skv, win, _best_config(group)))
+                              sq, skv, win, _best_config(group)))
 
 
 # ---------------------------------------------------------------------------

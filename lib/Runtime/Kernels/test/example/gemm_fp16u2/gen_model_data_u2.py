@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
+
 """
 Generate bits=2 vs bits=4 comparison test data for every shape defined in a
 model config JSON. Mirrors ../gemm_fp16u4/gen_model_data.py but calls

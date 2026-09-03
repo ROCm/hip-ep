@@ -510,25 +510,43 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
         // zero-copy for the data path; only the shape side gets the extra
         // arith chain.
         //
+        // ONNX `Reshape` also permits a shape entry of literal `0`, meaning
+        // "keep the input's dim at the SAME index" -- NOT a size-0 dim --
+        // unless the node's `allowzero` attribute is set (opset >= 14), in
+        // which case `0` is a literal size like any other entry. Resolved
+        // below, before the `-1` inference that consumes it.
+        //
+        // clang-format off
         // Before:
         //   %r = onnx.Reshape %x, %shape :
-        //          (tensor<?x1152xf16>, tensor<6xi64>) ->
-        //          tensor<?x?x2x?x2x?xf16>
-        //   // %shape may contain a literal -1 at some index
+        //          (tensor<?x1152xf16>, tensor<6xi64>) -> tensor<?x?x2x?x2x?xf16>
+        //   // %shape may carry a literal -1 and/or 0 at some index
         // After:
         //   %total  = product of tensor.dim(%x, i) for i in 0..inputRank
-        //   %d[0..outRank-1] = tensor.extract %shape[i]
+        //   %d[i]   = tensor.extract %shape[i]                for i in 0..outRank
+        //   %d[i]   = select(%d[i] == 0, tensor.dim(%x, i), %d[i])  // i < inputRank && !allowzero
         //   %pp     = product of max(%d[i], 1) for i in 0..outRank
         //   %inf    = %total / %pp
         //   %d'[i]  = select(%d[i] == -1, %inf, %d[i])
-        //   %newsh  = tensor.from_elements %d'[0..outRank-1] : tensor<NxI64>
+        //   %newsh  = tensor.from_elements %d'[0..outRank-1] : tensor<Nxi64>
         //   %r      = tensor.reshape %x(%newsh)
+        // clang-format on
         mlir::Type elemTy = shapeTy.getElementType();
         unsigned bits = elemTy.getIntOrFloatBitWidth();
+        // `allowzero` is emitted as SI64Attr (signed), not a signless/index
+        // integer, so IntegerAttr::getInt() asserts. Read via getValue()
+        // (APInt) + getSExtValue(), matching every other SI64Attr read in
+        // this codebase (e.g. GqaConversion.cpp, TransposeConversion.cpp).
+        bool allowzero = false;
+        if (auto allowzeroAttr =
+                op->getAttrOfType<mlir::IntegerAttr>("allowzero"))
+          allowzero = allowzeroAttr.getValue().getSExtValue() != 0;
         mlir::Value cMinusOne = mlir::arith::ConstantOp::create(
             rewriter, loc,
             rewriter.getIntegerAttr(elemTy, mlir::APInt(bits, /*val=*/-1,
                                                         /*isSigned=*/true)));
+        mlir::Value cZero = mlir::arith::ConstantOp::create(
+            rewriter, loc, rewriter.getIntegerAttr(elemTy, 0));
         mlir::Value cOne = mlir::arith::ConstantOp::create(
             rewriter, loc, rewriter.getIntegerAttr(elemTy, 1));
 
@@ -554,6 +572,30 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
           // garbage dim that collapses the reshape. See ReadbackScalar.h.
           mlir::Value v = readbackShapeEntryToHostOrExtract(rewriter, loc, op,
                                                             shapeOperand, i);
+          // Case handled here -- allowzero=0 and this position has a
+          // corresponding input dim: resolve the `0` to that input dim BEFORE
+          // it feeds the `-1`-inference product below, so a shape carrying
+          // both `0` and `-1` infers against the real extent instead of
+          // dividing as if this position were size 1.
+          //
+          // The two cases skipped here need no resolution:
+          //   - allowzero=1: `0` is a literal size, so passing the entry
+          //     through unchanged is already the correct output dim. The
+          //     divisor below substitutes 1 for it, leaving `-1` inference
+          //     unaffected.
+          //   - i >= inputRank: `0` names the input dim at the SAME index and
+          //     there is none, so the graph is invalid ONNX; shape inference
+          //     rejects it upstream ("Invalid position of 0.").
+          if (!allowzero && i < inputRank) {
+            mlir::Value isZero = mlir::arith::CmpIOp::create(
+                rewriter, loc, mlir::arith::CmpIPredicate::eq, v, cZero);
+            mlir::Value inputDimIdx =
+                mlir::tensor::DimOp::create(rewriter, loc, data, i);
+            mlir::Value inputDimElemTy = mlir::arith::IndexCastOp::create(
+                rewriter, loc, elemTy, inputDimIdx);
+            v = mlir::arith::SelectOp::create(rewriter, loc, isZero,
+                                              inputDimElemTy, v);
+          }
           dims.push_back(v);
           mlir::Value isPositive = mlir::arith::CmpIOp::create(
               rewriter, loc, mlir::arith::CmpIPredicate::sgt, v, cOne);
