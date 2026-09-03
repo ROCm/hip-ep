@@ -36,8 +36,9 @@
 //     hipsr.compute_yield %out
 //   } : tensor<2x3x1xf16, #hipsr.mem<device>>
 //
-// A dynamic input dimension is read off %x_shape in the region. The body reads
-// it off %dest, which already carries the result dimensions.
+// A dynamic input dimension is read off %x_shape in the region and off %x in
+// the body. The body leaves %dest alone so that bufferization can hold the
+// result in %x's buffer.
 //
 //===----------------------------------------------------------------------===//
 
@@ -171,8 +172,10 @@ void populateShapeRegion(OpBuilder &builder, PlaceholderOp placeholder,
 // The compute body
 //===----------------------------------------------------------------------===//
 
-// The destination already carries the result dimensions, so the expand takes
-// them off it rather than computing them again.
+// The expand infers its dimensions from the input, the same way the shape
+// region does. The destination carries them too, but reading it would leave the
+// destination argument used, and bufferization only holds the result in the
+// input's buffer when the body never touches that argument.
 void populateComputeBody(OpBuilder &builder, ComputeOp computeOp,
                          ArrayRef<ReassociationIndices> reassociation) {
   OpBuilder::InsertionGuard guard(builder);
@@ -186,10 +189,16 @@ void populateComputeBody(OpBuilder &builder, ComputeOp computeOp,
   builder.setInsertionPointToStart(body);
 
   Value input = body->getArgument(1);
-  Value dest = body->getArguments().back();
+  auto resultType =
+      cast<RankedTensorType>(body->getArguments().back().getType());
+  FailureOr<SmallVector<OpFoldResult>> resultDims =
+      tensor::ExpandShapeOp::inferOutputShape(
+          builder, loc, resultType, reassociation,
+          tensor::getMixedSizes(builder, loc, input));
+  assert(succeeded(resultDims) &&
+         "a group holds one input dimension, so only it can be dynamic");
   Value expanded = tensor::ExpandShapeOp::create(
-      builder, loc, dest.getType(), input, reassociation,
-      tensor::getMixedSizes(builder, loc, dest));
+      builder, loc, resultType, input, reassociation, *resultDims);
   ComputeYieldOp::create(builder, loc, ValueRange{expanded});
 }
 

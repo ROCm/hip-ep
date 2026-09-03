@@ -114,12 +114,12 @@
 // CHECK-NEXT:        } : memref<?xf16, #hipsr.mem<device>>
 // CHECK-NEXT:        %[[ALLOC_15:.*]] = memref.alloc(%[[LOAD_6]], %[[LOAD_7]]) {alignment = 64 : i64} : memref<?x?xi1, #hipsr.mem<device>>
 // CHECK-NEXT:        hipsr.equal(%[[VAL_0]]) ins(%[[VAL_2]], %[[CONSTANT_3]] : memref<?x?xi64, #hipsr.mem<device>>, memref<i64, #hipsr.mem<device>>) outs(%[[ALLOC_15]] : memref<?x?xi1, #hipsr.mem<device>>)
-// CHECK-NEXT:        %[[COMPUTE_1:.*]] = hipsr.compute(%[[VAL_0]]) ins(%[[ALLOC_15]] : memref<?x?xi1, #hipsr.mem<device>>) outs(%[[ALLOC_12]] : memref<?x?x1xi1, #hipsr.mem<device>>) {
-// CHECK-NEXT:        ^bb0(%[[VAL_9:.*]]: !hipsr.context, %[[VAL_10:.*]]: memref<?x?xi1, #hipsr.mem<device>>, %[[VAL_11:.*]]: memref<?x?x1xi1, #hipsr.mem<device>>):
+// CHECK-NEXT:        %[[COMPUTE_1:.*]] = hipsr.compute(%[[VAL_0]]) ins(%[[ALLOC_15]] : memref<?x?xi1, #hipsr.mem<device>>) outs(%[[ALLOC_15]] : memref<?x?xi1, #hipsr.mem<device>>) {
+// CHECK-NEXT:        ^bb0(%[[VAL_9:.*]]: !hipsr.context, %[[VAL_10:.*]]: memref<?x?xi1, #hipsr.mem<device>>, %[[VAL_11:.*]]: memref<?x?xi1, #hipsr.mem<device>>):
 // CHECK-NEXT:          %[[CONSTANT_8:.*]] = arith.constant 1 : index
 // CHECK-NEXT:          %[[CONSTANT_9:.*]] = arith.constant 0 : index
-// CHECK-NEXT:          %[[DIM_5:.*]] = memref.dim %[[VAL_11]], %[[CONSTANT_9]] : memref<?x?x1xi1, #hipsr.mem<device>>
-// CHECK-NEXT:          %[[DIM_6:.*]] = memref.dim %[[VAL_11]], %[[CONSTANT_8]] : memref<?x?x1xi1, #hipsr.mem<device>>
+// CHECK-NEXT:          %[[DIM_5:.*]] = memref.dim %[[VAL_10]], %[[CONSTANT_9]] : memref<?x?xi1, #hipsr.mem<device>>
+// CHECK-NEXT:          %[[DIM_6:.*]] = memref.dim %[[VAL_10]], %[[CONSTANT_8]] : memref<?x?xi1, #hipsr.mem<device>>
 // CHECK-NEXT:          %[[EXPAND_SHAPE_0:.*]] = memref.expand_shape %[[VAL_10]] {{\[\[}}0], [1, 2]] output_shape {{\[}}%[[DIM_5]], %[[DIM_6]], 1] : memref<?x?xi1, #hipsr.mem<device>> into memref<?x?x1xi1, #hipsr.mem<device>>
 // CHECK-NEXT:          hipsr.compute_yield %[[EXPAND_SHAPE_0]] : memref<?x?x1xi1, #hipsr.mem<device>>
 // CHECK-NEXT:        } : memref<?x?x1xi1, #hipsr.mem<device>>
