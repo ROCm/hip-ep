@@ -6,6 +6,40 @@
 // domains. Each domain starts with a shape computation that reads a host
 // buffer an earlier domain filled.
 //
+// Pool domains and what cuts them
+// -------------------------------
+//
+// A domain is one pool allocation, so every buffer inside it must be sized
+// before it runs. The pipeline therefore starts a new domain wherever a shape
+// depends on a value the host cannot know until the previous domain has
+// finished.
+//
+//   domain 0   collapse(image_features)              -> flat
+//              equal(input_ids, 248056) -> unsqueeze -> mask
+//              gather(table, input_ids)              -> embeds
+//              shape(embeds)                         -> extents  host 3xi64
+//                   |
+//                   |  extents: the broadcast destination is not in any type
+//                   v
+//   domain 1   expand(mask, extents)                 -> mask3d
+//                   |
+//                   |  extents: the second broadcast reads them again
+//                   v
+//   domain 2   expand(mask3d, extents)               -> mask3d'
+//              nonzero(mask3d')                      -> coords 3x?, count
+//              copy_d2h(count)                       -> count    host 1xi64
+//                   |
+//                   |  count: how many coordinates the search actually found
+//                   v
+//   domain 3   extract_slice(coords, count)          -> coords 3x?
+//              transpose(coords)                     -> coords ?x3
+//              shape -> gather -> unsqueeze          -> window   host 1xi64
+//                   |
+//                   |  window: where the update slice ends
+//                   v
+//   domain 4   slice(flat, window)                   -> updates
+//              scatter_nd(embeds, coords, updates)   -> inputs_embeds
+//
 // This is the only pipeline test that reaches shape.num_elements. Its two
 // reducing scf.for loops show that shape-to-shape-lowering ran.
 //
