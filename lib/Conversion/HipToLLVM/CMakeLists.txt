@@ -30,7 +30,9 @@ add_library(HipToLLVM STATIC
   MultiHeadAttentionLowering.cpp
   MatMulNBitsLowering.cpp
   QMoELowering.cpp
+  QMoEAmdLowering.cpp
   GatherBlockQuantizedLowering.cpp
+  QdqLowering.cpp
   GraphLowering.cpp
   CausalConvWithStateLowering.cpp
   GemmLowering.cpp

@@ -1268,6 +1268,68 @@ int wrap_gather_block_quantized(
   return 0;
 }
 
+int wrap_quantize_linear(RuntimeState *state, const void *input,
+                         const void *scale, const void *zero_point,
+                         void *output, const int64_t *input_shape,
+                         int64_t input_rank, const int64_t *scale_shape,
+                         int64_t scale_rank, int64_t axis, int64_t block_size,
+                         int64_t precision, int64_t saturate,
+                         int64_t input_dtype, int64_t scale_dtype,
+                         int64_t output_dtype, int64_t output_bits) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_quantize_linear\n");
+    return -1;
+  }
+  (void)input;
+  (void)scale;
+  (void)output;
+  (void)input_shape;
+  (void)scale_shape;
+
+  MOCK_PRINT("[MOCK] wrap_quantize_linear(input_rank=%lld, scale_rank=%lld, "
+             "axis=%lld, block_size=%lld, precision=%lld, saturate=%lld, "
+             "input_dtype=%s(%lld), "
+             "scale_dtype=%s(%lld), output_dtype=%s(%lld), output_bits=%lld, "
+             "zero_point=%s)\n",
+             (long long)input_rank, (long long)scale_rank, (long long)axis,
+             (long long)block_size, (long long)precision, (long long)saturate,
+             hipdnn_ep_datatype_name(input_dtype), (long long)input_dtype,
+             hipdnn_ep_datatype_name(scale_dtype), (long long)scale_dtype,
+             hipdnn_ep_datatype_name(output_dtype), (long long)output_dtype,
+             (long long)output_bits, zero_point ? "yes" : "null");
+  return 0;
+}
+
+int wrap_dequantize_linear(RuntimeState *state, const void *input,
+                           const void *scale, const void *zero_point,
+                           void *output, const int64_t *input_shape,
+                           int64_t input_rank, const int64_t *scale_shape,
+                           int64_t scale_rank, int64_t axis, int64_t block_size,
+                           int64_t input_dtype, int64_t scale_dtype,
+                           int64_t output_dtype, int64_t input_bits) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_dequantize_linear\n");
+    return -1;
+  }
+  (void)input;
+  (void)scale;
+  (void)output;
+  (void)input_shape;
+  (void)scale_shape;
+
+  MOCK_PRINT("[MOCK] wrap_dequantize_linear(input_rank=%lld, scale_rank=%lld, "
+             "axis=%lld, block_size=%lld, "
+             "input_dtype=%s(%lld), input_bits=%lld, scale_dtype=%s(%lld), "
+             "output_dtype=%s(%lld), zero_point=%s)\n",
+             (long long)input_rank, (long long)scale_rank, (long long)axis,
+             (long long)block_size, hipdnn_ep_datatype_name(input_dtype),
+             (long long)input_dtype, (long long)input_bits,
+             hipdnn_ep_datatype_name(scale_dtype), (long long)scale_dtype,
+             hipdnn_ep_datatype_name(output_dtype), (long long)output_dtype,
+             zero_point ? "yes" : "null");
+  return 0;
+}
+
 int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               const void *router_weights, const void *fc1_weights,
               const void *fc1_scales, const void *fc1_bias,
@@ -1308,6 +1370,82 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
              fc3_weights ? "yes" : "null", fc1_zero_points ? "yes" : "null",
              fc2_zero_points ? "yes" : "null", router_weights ? "yes" : "null");
 
+  return 0;
+}
+
+// com.amd::QMoE (LatentMoE) mock stub. Independent pipeline from wrap_qmoe
+// above -- see lib/Runtime/real/qmoe_amd.cpp for the real implementation.
+// Just logs and zero-fills the output.
+int wrap_qmoe_amd(
+    RuntimeState *state, const void *hidden_states,
+    const void *fc1_experts_weights, const void *fc1_experts_scales,
+    const void *fc2_experts_weights, const void *fc2_experts_scales,
+    const void *fc1_latent_weights, const void *fc1_latent_scales,
+    const void *fc2_latent_weights, const void *fc2_latent_scales,
+    const void *shared_fc1_weights, const void *shared_fc1_scales,
+    const void *shared_fc2_weights, const void *shared_fc2_scales,
+    const void *router_weight, const void *correction_bias, void *output,
+    int64_t num_tokens, int64_t hidden_size, int64_t latent_size,
+    int64_t moe_intermediate_size, int64_t shared_intermediate_size,
+    int64_t num_experts, int64_t k, int64_t expert_weight_bits,
+    int64_t block_size, int64_t normalize_routing_weights,
+    int64_t use_correction_bias, float routed_scaling_factor,
+    int64_t activation_type, int64_t routing_type, int64_t elem_size) {
+  if (!state || !hidden_states || !fc1_experts_weights || !fc1_experts_scales ||
+      !fc2_experts_weights || !fc2_experts_scales || !fc1_latent_weights ||
+      !fc1_latent_scales || !fc2_latent_weights || !fc2_latent_scales ||
+      !shared_fc1_weights || !shared_fc1_scales || !shared_fc2_weights ||
+      !shared_fc2_scales || !router_weight || !output) {
+    fprintf(stderr, "Invalid state or null tensor in wrap_qmoe_amd\n");
+    return -1;
+  }
+  if (use_correction_bias != 0 && !correction_bias) {
+    fprintf(stderr,
+            "wrap_qmoe_amd: use_correction_bias=1 but correction_bias is "
+            "null\n");
+    return -1;
+  }
+  // Mirror the real implementation's mode rejection so a mock run cannot pass
+  // a configuration the GPU path refuses.
+  if (activation_type != HIPDNN_EP_QMOE_AMD_ACTIVATION_RELU2 ||
+      routing_type != HIPDNN_EP_QMOE_AMD_ROUTING_SIGMOID) {
+    fprintf(stderr,
+            "wrap_qmoe_amd: unsupported activation_type=%lld / "
+            "routing_type=%lld (only relu2 / sigmoid are implemented)\n",
+            (long long)activation_type, (long long)routing_type);
+    return -1;
+  }
+  // Same reason: the real path's per-expert strides assume 4-bit packing.
+  if (expert_weight_bits != 4) {
+    fprintf(stderr,
+            "wrap_qmoe_amd: only 4-bit expert weights supported, got "
+            "expert_weight_bits=%lld\n",
+            (long long)expert_weight_bits);
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_qmoe_amd(\n");
+  MOCK_PRINT("[MOCK]   num_tokens=%lld, hidden_size=%lld, latent_size=%lld,\n",
+             (long long)num_tokens, (long long)hidden_size,
+             (long long)latent_size);
+  MOCK_PRINT("[MOCK]   moe_intermediate_size=%lld, "
+             "shared_intermediate_size=%lld, num_experts=%lld,\n",
+             (long long)moe_intermediate_size,
+             (long long)shared_intermediate_size, (long long)num_experts);
+  MOCK_PRINT("[MOCK]   k=%lld, expert_weight_bits=%lld, block_size=%lld,\n",
+             (long long)k, (long long)expert_weight_bits,
+             (long long)block_size);
+  MOCK_PRINT("[MOCK]   normalize_routing_weights=%lld, "
+             "use_correction_bias=%lld, routed_scaling_factor=%f, "
+             "elem_size=%lld)\n",
+             (long long)normalize_routing_weights,
+             (long long)use_correction_bias, (double)routed_scaling_factor,
+             (long long)elem_size);
+
+  hipStream_t stream =
+      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  HIP_CHECK(
+      hipMemsetAsync(output, 0, num_tokens * hidden_size * elem_size, stream));
   return 0;
 }
 

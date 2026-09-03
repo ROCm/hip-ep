@@ -63,6 +63,7 @@ typedef enum {
     HIP_DTYPE_INT16    = 6,
     HIP_DTYPE_UINT8    = 7,
     HIP_DTYPE_INT8     = 8,
+    HIP_DTYPE_UINT16   = 9,
 } hip_dtype_t;
 
 /* =========================================================================
@@ -2022,6 +2023,82 @@ HIP_KERNEL_API int hip_gather_block_quantized(
     int out_dtype);              // hip_dtype_t (FLOAT16 / FLOAT32 / BFLOAT16)
 
 /* =========================================================================
+ * QuantizeLinear / DequantizeLinear
+ * =========================================================================
+ *
+ * quantize:   output = saturate(round(input / scale) + zero_point)
+ * dequantize: output = (input - zero_point) * scale
+ *
+ * output is elementwise the same shape as input, so only input_shape is
+ * passed. Granularity is derived from scale_shape together with axis and
+ * block_size:
+ *   scale_rank == 0, or a single element ..... per-tensor
+ *   scale_rank == 1 .......................... per-axis along `axis`
+ *   block_size > 0 ........................... blocked along `axis`
+ *
+ * zero_point is nullable; a null pointer means a zero point of 0 for every
+ * block. Its element type is out_dtype for quantize and in_dtype for
+ * dequantize.
+ *
+ * axis must be normalized to [0, input_rank) by the caller.
+ *
+ * out_dtype fully determines the quantized storage type, including its
+ * signedness: the compiler derives it from a MLIR element type that the
+ * ONNX importer maps one-to-one (UINT8 -> ui8, INT8 -> i8, UINT16 -> ui16,
+ * INT16 -> i16). The ONNX output_dtype attribute is therefore not passed
+ * down. A float8 output would break that one-to-one mapping.
+ *
+ * INT4 / UINT4 breaks it too, since both import as an 8-bit type. Each entry
+ * point therefore takes an explicit bit width for its quantized end:
+ * out_bits for quantize, in_bits for dequantize.
+ *
+ * precision exists only on QuantizeLinear per the ONNX spec. The ONNX
+ * `saturate` attribute is carried all the way to wrap_quantize_linear but
+ * stops there: it only affects float8 targets, and the range clamp for every
+ * integer target supported here is unconditional. It would have to be
+ * forwarded again if float8 support is added.
+ */
+HIP_KERNEL_API int hip_quantize_linear(
+    void* stream,
+    const void* input,           // high precision
+    const void* scale,
+    const void* zero_point,      // nullable, same type as output
+    void* output,                // quantized; packed when out_bits == 4
+    const int64_t* input_shape,  int input_rank,
+    const int64_t* scale_shape,  int scale_rank,
+    int axis,                    // normalized
+    int block_size,              // 0 = not blocked
+    int precision,               // TensorProto enum; only 0 (unset) or 1 (FLOAT)
+    int in_dtype,                // hip_dtype_t
+    int scale_dtype,
+    int out_dtype,
+    // Value width of output and zero_point: 8 or 16 to agree with out_dtype,
+    // or 4 for ONNX INT4/UINT4. At 4 out_dtype supplies only the signedness,
+    // zero_point is packed, and only the first ceil(numel/2) bytes of output
+    // are written -- two values per byte, low nibble first. input_shape stays
+    // logical.
+    int out_bits);
+
+HIP_KERNEL_API int hip_dequantize_linear(
+    void* stream,
+    const void* input,           // quantized; packed when in_bits == 4
+    const void* scale,
+    const void* zero_point,      // nullable, same type as input
+    void* output,                // high precision
+    const int64_t* input_shape,  int input_rank,
+    const int64_t* scale_shape,  int scale_rank,
+    int axis,                    // normalized
+    int block_size,              // 0 = not blocked
+    int in_dtype,                // hip_dtype_t
+    int scale_dtype,
+    int out_dtype,
+    // Value width of input and zero_point: 8 or 16 to agree with in_dtype, or
+    // 4 for ONNX INT4/UINT4. At 4 in_dtype supplies only the signedness and
+    // both buffers hold ceil(numel/2) bytes, two values per byte, low nibble
+    // first, over the flattened row-major sequence. input_shape stays logical.
+    int in_bits);
+
+/* =========================================================================
  * QMoE Sub-Kernels
  * =========================================================================
  *
@@ -2199,6 +2276,158 @@ HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a(
     int64_t hidden_size, int64_t inter_size,
     int64_t k, int64_t block_size,
     float swiglu_alpha, float swiglu_beta, float swiglu_limit,
+    int64_t element_size_bytes);
+
+/* =========================================================================
+ * com.amd QMoE Sub-Kernels (LatentMoE)
+ * =========================================================================
+ *
+ * The two kernels genuinely new to this op: sigmoid + correction-bias
+ * routing (raw prob for weighting, biased score for top-k selection), and
+ * the relu2 activation. Everything else in the com.amd QMoE runtime path
+ * (lib/Runtime/real/qmoe_amd.cpp) reuses hip_matmul_nbits, the
+ * hip_qmoe_gather_tokens / hip_qmoe_bucket_tokens / hip_qmoe_scatter_add
+ * kernels declared above unmodified.
+ */
+
+/* com.amd QMoE routing (fp16 only):
+ *   logits = hidden_states @ router_weight   (dense, NOT quantized)
+ *   probs  = sigmoid(logits)
+ *   sel    = top_k(probs + correction_bias, k)   -- selection only
+ *   w      = probs[sel]                           -- raw prob for weighting
+ *   w      = (normalize) ? w / (sum(w) + eps) : w; w *= routed_scaling_factor
+ *
+ *   hidden_states   - GPU [num_tokens, hidden_size]
+ *   router_weight   - GPU [hidden_size, num_experts] (dense, unquantized)
+ *   correction_bias - GPU [num_experts] (nullable iff use_correction_bias==0)
+ *   expert_indices  - GPU [num_tokens, k] int32 (output)
+ *   expert_weights  - GPU [num_tokens, k] (output, same type as hidden_states)
+ */
+HIP_KERNEL_API int hip_qmoe_amd_route(
+    void* stream,
+    const void* hidden_states,
+    const void* router_weight,
+    const void* correction_bias,
+    void* expert_indices,
+    void* expert_weights,
+    int64_t num_tokens,
+    int64_t hidden_size,
+    int64_t num_experts,
+    int64_t k,
+    int64_t normalize,
+    int64_t use_correction_bias,
+    float routed_scaling_factor,
+    int64_t element_size_bytes);
+
+/* relu2 activation (fp16 only): output[i] = relu(input[i])^2, elementwise
+ * over n*width elements. Used by com.amd QMoE for both the per-expert and
+ * shared-expert branches. input == output is allowed (the callers activate in
+ * place), so neither pointer is declared __restrict__ in the kernel.
+ */
+HIP_KERNEL_API int hip_qmoe_amd_relu2(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t n,
+    int64_t width,
+    int64_t element_size_bytes);
+
+/* Expert bucketing for com.amd QMoE. Same inputs/outputs and the same
+ * token-major in-expert ordering as hip_qmoe_bucket_tokens, but parallelized
+ * over experts (one block each) instead of running one thread per expert in a
+ * single block. The shared kernel's serial-per-expert scan is tuned for the
+ * ~32 experts / k<=4 of com.microsoft::QMoE; this op runs a far larger
+ * (num_tokens * k) pair space, where that layout leaves all the work on one
+ * compute unit.
+ *
+ * The sorted_* layout is byte-identical to the serial version: each thread
+ * owns a contiguous slice of the pair space and a block-wide exclusive scan
+ * places its matches so that concatenating the threads' writes reproduces the
+ * ascending (token, slot) order exactly.
+ *
+ * Unlike hip_qmoe_bucket_tokens there is no num_experts <= 1024 limit, since
+ * experts map to blocks rather than to threads within one block.
+ *
+ *   expert_indices   - GPU [num_tokens, k] int32
+ *   expert_weights   - GPU [num_tokens, k] fp16
+ *   expert_counts    - GPU [num_experts] int32 (output)
+ *   expert_offsets   - GPU [num_experts + 1] int32 (output, exclusive scan)
+ *   sorted_token_ids - GPU [num_tokens * k] int32 (output)
+ *   sorted_weights   - GPU [num_tokens * k] fp16 (output)
+ */
+HIP_KERNEL_API int hip_qmoe_amd_bucket_tokens(
+    void* stream,
+    const void* expert_indices,
+    const void* expert_weights,
+    void* expert_counts,
+    void* expert_offsets,
+    void* sorted_token_ids,
+    void* sorted_weights,
+    int64_t num_tokens,
+    int64_t num_experts,
+    int64_t k,
+    int64_t element_size_bytes);
+
+/* Fully fused routed branch for com.amd QMoE decode (num_tokens == 1).
+ *
+ * A single token selects k distinct experts, so the k routing slots ARE the
+ * active expert set: no bucketing, no count readback, and no host-side
+ * dispatch loop are needed. This collapses the general path's
+ * (bucket + D2H + hipStreamSynchronize + 5 launches per active expert) into
+ * three launches that look the expert id up from expert_indices on the device.
+ *
+ *   latent [latent_size] -> per-slot fc1 -> relu2 -> per-slot fc2
+ *   -> weighted sum over slots -> acc [latent_size]
+ *
+ * acc is fully overwritten (no pre-zeroing needed) and the k slot
+ * contributions are summed in fp32 before the single fp16 store, where the
+ * general path's scatter_add rounds to fp16 after every expert.
+ *
+ * FP16 activations, 4-bit symmetric (zero-point 8) weights, no bias -- the
+ * only configuration com.amd QMoE has. Call
+ * hip_qmoe_amd_decode_fused_supported() first: the packed-nibble main loop
+ * needs 32-element K tiles and power-of-two quant blocks, so shapes outside
+ * that must keep using the general path.
+ *
+ *   latent           - GPU [latent_size] fp16 (fc1_latent_proj output)
+ *   expert_indices   - GPU [k] int32
+ *   expert_weights   - GPU [k] fp16
+ *   fc1_weights      - GPU [num_experts, moe_intermediate_size, latent/2]
+ *   fc1_scales       - GPU [num_experts, moe_intermediate_size, latent/block]
+ *   fc2_weights      - GPU [num_experts, latent_size, moe_inter/2]
+ *   fc2_scales       - GPU [num_experts, latent_size, moe_inter/block]
+ *   act_scratch      - GPU [k, moe_intermediate_size] fp16 (scratch)
+ *   slot_scratch     - GPU [k, latent_size] fp16 (scratch)
+ *   acc              - GPU [latent_size] fp16 (output)
+ */
+HIP_KERNEL_API int hip_qmoe_amd_decode_fused(
+    void* stream,
+    const void* latent,
+    const void* expert_indices,
+    const void* expert_weights,
+    const void* fc1_weights,
+    const void* fc1_scales,
+    const void* fc2_weights,
+    const void* fc2_scales,
+    void* act_scratch,
+    void* slot_scratch,
+    void* acc,
+    int64_t latent_size,
+    int64_t moe_intermediate_size,
+    int64_t k,
+    int64_t expert_weight_bits,
+    int64_t block_size,
+    int64_t element_size_bytes);
+
+/* Returns 1 if hip_qmoe_amd_decode_fused can handle this shape, 0 otherwise.
+ * Lets the caller fall back to the general path silently rather than failing
+ * the op on an unsupported geometry.
+ */
+HIP_KERNEL_API int hip_qmoe_amd_decode_fused_supported(
+    int64_t latent_size,
+    int64_t moe_intermediate_size,
+    int64_t block_size,
+    int64_t expert_weight_bits,
     int64_t element_size_bytes);
 
 /* =========================================================================

@@ -1467,6 +1467,20 @@ void QMoEOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// QMoEAmdOp
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QMoEAmdOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QMoEAmdOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // GatherBlockQuantizedOp: ins(data, indices, scales, [zero_points])
 //                          outs(output)
 //===----------------------------------------------------------------------===//
@@ -2131,6 +2145,34 @@ void ReadbackScalarOp::getEffects(
 MutableOperandRange SizeOp::getDpsInitsMutable() { return getYMutable(); }
 
 void SizeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// QuantizeLinearOp: ins(x, scale, zero_point), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QuantizeLinearOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QuantizeLinearOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// DequantizeLinearOp: ins(x, scale, zero_point), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange DequantizeLinearOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void DequantizeLinearOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);

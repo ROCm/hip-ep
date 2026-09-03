@@ -77,12 +77,14 @@ set(_kernel_sources
     hip/global_pool_kernel.hip
     hip/matmul_nbits_kernel.hip
     hip/qmoe_kernel.hip
+    hip/qmoe_amd_kernel.hip
     hip/linear_attention_kernel.hip
     hip/transpose_kernel.hip
     hip/causal_conv_step_kernel.hip
     hip/slice_kernel.hip
     hip/scatter_nd_kernel.hip
     hip/gather_block_quantized_kernel.hip
+    hip/qdq_kernel.hip
     hip/softmax_kernel.hip
     hip/nonzero_kernel.hip
     hip/strided_copy_kernel.hip

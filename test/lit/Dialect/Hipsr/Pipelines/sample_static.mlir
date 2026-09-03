@@ -1,166 +1,162 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
-//
-//===----------------------------------------------------------------------===//
-// A sample for testing --hipsr-pipeline, with every extent static.
-//===----------------------------------------------------------------------===//
+
+// The hipsr pipeline on a graph where every extent is static. The shape graph
+// folds to constants, so no allocation has to read an extent back.
 
 // RUN: hip-mlir-opt %s --onnx-dialect=modeled --hipsr-pipeline | FileCheck %s
 
-// CHECK-LABEL: func.func @main_graph(
-// CHECK-SAME:      %[[CTX:.+]]: !hipsr.context,
-// CHECK-SAME:      %[[A:.+]]: tensor<2x3xf16, #hipsr.mem<device>> {onnx.name = "a"},
-// CHECK-SAME:      %[[B:.+]]: tensor<2x4xf32, #hipsr.mem<device>> {onnx.name = "b"})
-// CHECK-SAME:      -> (tensor<2x2xf32, #hipsr.mem<device>> {onnx.name = "y"})
-// CHECK-SAME:      attributes {onnx.graph.name = "main_graph"} {
+// CHECK:         memref.global "private" constant @__constant_2xi64 : memref<2xi64, #hipsr.mem<host>> = dense<[2, 4]> {alignment = 64 : i64}
 
-// The barrier the expand needs splits the graph in two. Everything up to it
-// lands in domain 0, which yields both halves of the shape and data graphs for
-// domain 1 to pick up. Inside a domain the constants come first, then the shape
-// computations, then the allocations they size, then the data ops, and last a
-// hipsr.preserve_shape tying each shape to the value filling the buffer it
-// sized.
-// CHECK-NEXT:    %[[D0:.+]]:5 = hipsr.pool_domain(%[[CTX]], %[[A]], %[[B]] : !hipsr.context, tensor<2x3xf16, #hipsr.mem<device>>, tensor<2x4xf32, #hipsr.mem<device>>) {
-// CHECK-NEXT:    ^bb0(%[[D0_CTX:.+]]: !hipsr.context, %[[D0_A:.+]]: tensor<2x3xf16, #hipsr.mem<device>>, %[[D0_B:.+]]: tensor<2x4xf32, #hipsr.mem<device>>):
-
-// Both weights lead the domain. Only the first one has a shape a computation
-// reads; the second is here because a constant takes no operands, so the pass
-// brings every one of them over ahead of the computations.
-// CHECK-NEXT:      %[[W1:.+]] = hipsr.constant {value = dense<{{.*}}> : tensor<3x1xf16>} : tensor<3x1xf16, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[W2:.+]] = hipsr.constant {value = dense<{{.*}}> : tensor<4x2xf32>} : tensor<4x2xf32, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[MM1_SHAPE:.+]] = scf.execute_region -> !shape.shape {
-// CHECK-NEXT:        %[[A_SHAPE:.+]] = shape.shape_of %[[D0_A]] : tensor<2x3xf16, #hipsr.mem<device>> -> !shape.shape
-// CHECK-NEXT:        %[[W1_SHAPE:.+]] = shape.shape_of %[[W1]] : tensor<3x1xf16, #hipsr.mem<device>> -> !shape.shape
-// CHECK-NEXT:        %[[A_K_IDX:.+]] = shape.const_size 1
-// CHECK-NEXT:        %[[A_K:.+]] = shape.get_extent %[[A_SHAPE]], %[[A_K_IDX]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:        %[[A_K_SHAPE:.+]] = shape.from_extents %[[A_K]] : !shape.size
-// CHECK-NEXT:        %[[W1_K_IDX:.+]] = shape.const_size 0
-// CHECK-NEXT:        %[[W1_K:.+]] = shape.get_extent %[[W1_SHAPE]], %[[W1_K_IDX]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:        %[[W1_K_SHAPE:.+]] = shape.from_extents %[[W1_K]] : !shape.size
-// CHECK-NEXT:        %[[K_WITNESS:.+]] = shape.cstr_eq %[[A_K_SHAPE]], %[[W1_K_SHAPE]] : !shape.shape, !shape.shape
-// CHECK-NEXT:        %[[A_SPLIT_IDX:.+]] = shape.const_size 0
-// CHECK-NEXT:        %[[A_BATCH:.+]], %[[A_TAIL:.+]] = "shape.split_at"(%[[A_SHAPE]], %[[A_SPLIT_IDX]]) : (!shape.shape, !shape.size) -> (!shape.shape, !shape.shape)
-// CHECK-NEXT:        %[[W1_SPLIT_IDX:.+]] = shape.const_size 0
-// CHECK-NEXT:        %[[W1_BATCH:.+]], %[[W1_TAIL:.+]] = "shape.split_at"(%[[W1_SHAPE]], %[[W1_SPLIT_IDX]]) : (!shape.shape, !shape.size) -> (!shape.shape, !shape.shape)
-// CHECK-NEXT:        %[[BATCH_WITNESS:.+]] = shape.cstr_broadcastable %[[A_BATCH]], %[[W1_BATCH]] : !shape.shape, !shape.shape
-// CHECK-NEXT:        %[[WITNESS:.+]] = shape.assuming_all %[[K_WITNESS]], %[[BATCH_WITNESS]]
-// CHECK-NEXT:        %[[MM1_SHAPE_VAL:.+]] = shape.assuming %[[WITNESS]] -> (!shape.shape) {
-// CHECK-NEXT:          %[[BATCH:.+]] = shape.broadcast %[[A_BATCH]], %[[W1_BATCH]] : !shape.shape, !shape.shape -> !shape.shape
-// CHECK-NEXT:          %[[M_IDX:.+]] = shape.const_size 0
-// CHECK-NEXT:          %[[M:.+]] = shape.get_extent %[[A_SHAPE]], %[[M_IDX]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:          %[[N_IDX:.+]] = shape.const_size 1
-// CHECK-NEXT:          %[[N:.+]] = shape.get_extent %[[W1_SHAPE]], %[[N_IDX]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:          %[[MATRIX:.+]] = shape.from_extents %[[M]], %[[N]] : !shape.size, !shape.size
-// CHECK-NEXT:          %[[RESULT:.+]] = shape.concat %[[BATCH]], %[[MATRIX]] : !shape.shape, !shape.shape -> !shape.shape
-// CHECK-NEXT:          shape.assuming_yield %[[RESULT]] : !shape.shape
+// CHECK-LABEL:   func.func @main_graph(
+// CHECK-SAME:      %[[ARG0:.*]]: !hipsr.context,
+// CHECK-SAME:      %[[ARG1:.*]]: memref<2x3xf16, #hipsr.mem<device>> {onnx.name = "a"},
+// CHECK-SAME:      %[[ARG2:.*]]: memref<2x4xf32, #hipsr.mem<device>> {onnx.name = "b"}) -> (memref<2x2xf32, #hipsr.mem<device>> {onnx.name = "y"}) attributes {onnx.graph.name = "main_graph"} {
+// CHECK-NEXT:      %[[POOL_DOMAIN_0:.*]]:5 = hipsr.pool_domain(%[[ARG0]], %[[ARG1]], %[[ARG2]] : !hipsr.context, memref<2x3xf16, #hipsr.mem<device>>, memref<2x4xf32, #hipsr.mem<device>>) {
+// CHECK-NEXT:      ^bb0(%[[VAL_0:.*]]: !hipsr.context, %[[VAL_1:.*]]: memref<2x3xf16, #hipsr.mem<device>>, %[[VAL_2:.*]]: memref<2x4xf32, #hipsr.mem<device>>):
+// CHECK-NEXT:        %[[CONSTANT_0:.*]] = arith.constant 3 : index
+// CHECK-NEXT:        %[[CONSTANT_1:.*]] = hipsr.constant {value = dense<{{\[\[}}1.000000e+00, 2.000000e+00], [3.000000e+00, 4.000000e+00], [5.000000e+00, 6.000000e+00], [7.000000e+00, 8.000000e+00]]> : tensor<4x2xf32>} : memref<4x2xf32, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CONSTANT_2:.*]] = hipsr.constant {value = dense<{{\[\[}}1.000000e+00], [2.000000e+00], [3.000000e+00]]> : tensor<3x1xf16>} : memref<3x1xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CONSTANT_3:.*]] = arith.constant 1 : index
+// CHECK-NEXT:        %[[CONSTANT_4:.*]] = arith.constant 0 : index
+// CHECK-NEXT:        %[[CONSTANT_5:.*]] = arith.constant 2 : index
+// CHECK-NEXT:        %[[ALLOC_0:.*]] = memref.alloc() {alignment = 64 : i64} : memref<1xindex>
+// CHECK-NEXT:        memref.store %[[CONSTANT_5]], %[[ALLOC_0]]{{\[}}%[[CONSTANT_4]]] : memref<1xindex>
+// CHECK-NEXT:        %[[ALLOC_1:.*]] = memref.alloc() {alignment = 64 : i64} : memref<2xindex>
+// CHECK-NEXT:        memref.store %[[CONSTANT_5]], %[[ALLOC_1]]{{\[}}%[[CONSTANT_4]]] : memref<2xindex>
+// CHECK-NEXT:        memref.store %[[CONSTANT_0]], %[[ALLOC_1]]{{\[}}%[[CONSTANT_3]]] : memref<2xindex>
+// CHECK-NEXT:        %[[ALLOC_2:.*]] = memref.alloc() {alignment = 64 : i64} : memref<2xindex>
+// CHECK-NEXT:        memref.store %[[CONSTANT_0]], %[[ALLOC_2]]{{\[}}%[[CONSTANT_4]]] : memref<2xindex>
+// CHECK-NEXT:        memref.store %[[CONSTANT_3]], %[[ALLOC_2]]{{\[}}%[[CONSTANT_3]]] : memref<2xindex>
+// CHECK-NEXT:        %[[SUBVIEW_0:.*]] = memref.subview %[[ALLOC_1]]{{\[}}%[[CONSTANT_4]]] {{\[}}%[[CONSTANT_4]]] {{\[}}%[[CONSTANT_3]]] : memref<2xindex> to memref<?xindex, strided<[?], offset: ?>>
+// CHECK-NEXT:        %[[SUBVIEW_1:.*]] = memref.subview %[[ALLOC_2]]{{\[}}%[[CONSTANT_4]]] {{\[}}%[[CONSTANT_4]]] {{\[}}%[[CONSTANT_3]]] : memref<2xindex> to memref<?xindex, strided<[?], offset: ?>>
+// CHECK-NEXT:        %[[ALLOC_3:.*]] = memref.alloc(%[[CONSTANT_4]]) {alignment = 64 : i64} : memref<?xindex>
+// CHECK-NEXT:        scf.for %[[VAL_3:.*]] = %[[CONSTANT_4]] to %[[CONSTANT_4]] step %[[CONSTANT_3]] {
+// CHECK-NEXT:          %[[CMPI_0:.*]] = arith.cmpi ult, %[[VAL_3]], %[[CONSTANT_4]] : index
+// CHECK-NEXT:          %[[IF_0:.*]] = scf.if %[[CMPI_0]] -> (index) {
+// CHECK-NEXT:            scf.yield %[[CONSTANT_3]] : index
+// CHECK-NEXT:          } else {
+// CHECK-NEXT:            %[[LOAD_0:.*]] = memref.load %[[SUBVIEW_0]]{{\[}}%[[VAL_3]]] : memref<?xindex, strided<[?], offset: ?>>
+// CHECK-NEXT:            scf.yield %[[LOAD_0]] : index
+// CHECK-NEXT:          }
+// CHECK-NEXT:          %[[CMPI_1:.*]] = arith.cmpi ult, %[[VAL_3]], %[[CONSTANT_4]] : index
+// CHECK-NEXT:          %[[IF_1:.*]] = scf.if %[[CMPI_1]] -> (index) {
+// CHECK-NEXT:            scf.yield %[[IF_0]] : index
+// CHECK-NEXT:          } else {
+// CHECK-NEXT:            %[[LOAD_1:.*]] = memref.load %[[SUBVIEW_1]]{{\[}}%[[VAL_3]]] : memref<?xindex, strided<[?], offset: ?>>
+// CHECK-NEXT:            %[[CMPI_2:.*]] = arith.cmpi eq, %[[LOAD_1]], %[[CONSTANT_3]] : index
+// CHECK-NEXT:            %[[SELECT_0:.*]] = arith.select %[[CMPI_2]], %[[IF_0]], %[[LOAD_1]] : index
+// CHECK-NEXT:            scf.yield %[[SELECT_0]] : index
+// CHECK-NEXT:          }
+// CHECK-NEXT:          memref.store %[[IF_1]], %[[ALLOC_3]]{{\[}}%[[VAL_3]]] : memref<?xindex>
 // CHECK-NEXT:        }
-// CHECK-NEXT:        scf.yield %[[MM1_SHAPE_VAL]] : !shape.shape
-// CHECK-NEXT:      }
-
-// The cast keeps its operand's shape, so its shape computation forwards the one
-// next to it.
-// CHECK-NEXT:      %[[CAST_SHAPE:.+]] = scf.execute_region -> !shape.shape {
-// CHECK-NEXT:        scf.yield %[[MM1_SHAPE]] : !shape.shape
-// CHECK-NEXT:      }
-
-// The extent vector's length follows the rank of the operand, not its extents,
-// so the operand's shape goes unread here.
-// CHECK-NEXT:      %[[EXTENTS_SHAPE:.+]] = scf.execute_region -> !shape.shape {
-// CHECK-NEXT:        %[[B_SHAPE:.+]] = shape.shape_of %[[D0_B]] : tensor<2x4xf32, #hipsr.mem<device>> -> !shape.shape
-// CHECK-NEXT:        %[[RANK:.+]] = arith.constant 2 : index
-// CHECK-NEXT:        %[[RANK_SHAPE:.+]] = shape.from_extents %[[RANK]] : index
-// CHECK-NEXT:        scf.yield %[[RANK_SHAPE]] : !shape.shape
-// CHECK-NEXT:      }
-
-// Every extent is in the types, so no allocation reads a shape back.
-// CHECK-NEXT:      %[[MM1_INIT:.+]] = tensor.empty() : tensor<2x1xf16, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[CAST_INIT:.+]] = tensor.empty() : tensor<2x1xf32, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[EXTENTS_INIT:.+]] = tensor.empty() : tensor<2xi64, #hipsr.mem<host>>
-
-// CHECK-NEXT:      %[[MM1:.+]] = hipsr.matmul(%[[D0_CTX]]) ins(%[[D0_A]], %[[W1]] : tensor<2x3xf16, #hipsr.mem<device>>, tensor<3x1xf16, #hipsr.mem<device>>) outs(%[[MM1_INIT]] : tensor<2x1xf16, #hipsr.mem<device>>) : tensor<2x1xf16, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[CAST:.+]] = hipsr.cast(%[[D0_CTX]]) ins(%[[MM1]] : tensor<2x1xf16, #hipsr.mem<device>>) outs(%[[CAST_INIT]] : tensor<2x1xf32, #hipsr.mem<device>>) : tensor<2x1xf32, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[EXTENTS:.+]] = hipsr.compute(%[[D0_CTX]]) ins(%[[D0_B]] : tensor<2x4xf32, #hipsr.mem<device>>) outs(%[[EXTENTS_INIT]] : tensor<2xi64, #hipsr.mem<host>>) {
-// CHECK-NEXT:      ^bb0(%{{.+}}: !hipsr.context, %{{.+}}: tensor<2x4xf32, #hipsr.mem<device>>, %{{.+}}: tensor<2xi64, #hipsr.mem<host>>):
-// CHECK-NEXT:        %[[D0_EXT:.+]] = arith.constant 2 : i64
-// CHECK-NEXT:        %[[D1_EXT:.+]] = arith.constant 4 : i64
-// CHECK-NEXT:        %[[EXTENT_VECTOR:.+]] = tensor.from_elements %[[D0_EXT]], %[[D1_EXT]] : tensor<2xi64, #hipsr.mem<host>>
-// CHECK-NEXT:        hipsr.compute_yield %[[EXTENT_VECTOR]] : tensor<2xi64, #hipsr.mem<host>>
-// CHECK-NEXT:      } : tensor<2xi64, #hipsr.mem<host>>
-
-// CHECK-NEXT:      hipsr.preserve_shape %[[MM1_SHAPE]], %[[MM1]] : tensor<2x1xf16, #hipsr.mem<device>>
-// CHECK-NEXT:      hipsr.preserve_shape %[[CAST_SHAPE]], %[[CAST]] : tensor<2x1xf32, #hipsr.mem<device>>
-// CHECK-NEXT:      hipsr.preserve_shape %[[EXTENTS_SHAPE]], %[[EXTENTS]] : tensor<2xi64, #hipsr.mem<host>>
-
-// The second weight has no inputs, which keeps it in domain 0, and only the
-// yield uses it there.
-// CHECK-NEXT:      hipsr.pool_domain_yield %[[CAST_INIT]], %[[CAST]], %[[EXTENTS_INIT]], %[[EXTENTS]], %[[W2]] : tensor<2x1xf32, #hipsr.mem<device>>, tensor<2x1xf32, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>, tensor<2xi64, #hipsr.mem<host>>, tensor<4x2xf32, #hipsr.mem<device>>
-// CHECK-NEXT:    } -> tensor<2x1xf32, #hipsr.mem<device>>, tensor<2x1xf32, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>, tensor<2xi64, #hipsr.mem<host>>, tensor<4x2xf32, #hipsr.mem<device>> {domain_id = 0 : i64}
-
-// Domain 1 takes the shape-graph results first and the data results after, so
-// the barrier keeps reading the buffers the shape graph names while the
-// operations keep following results.
-// CHECK-NEXT:    %[[D1:.+]] = hipsr.pool_domain(%[[CTX]], %[[D0]]#0, %[[D0]]#2, %[[D0]]#1, %[[D0]]#3, %[[D0]]#4 : !hipsr.context, tensor<2x1xf32, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>, tensor<2x1xf32, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>, tensor<4x2xf32, #hipsr.mem<device>>) {
-// CHECK-NEXT:    ^bb0(%[[D1_CTX:.+]]: !hipsr.context, %[[D1_CAST_INIT:.+]]: tensor<2x1xf32, #hipsr.mem<device>>, %[[D1_EXTENTS_INIT:.+]]: tensor<2xi64, #hipsr.mem<host>>, %[[D1_CAST:.+]]: tensor<2x1xf32, #hipsr.mem<device>>, %[[D1_EXTENTS:.+]]: tensor<2xi64, #hipsr.mem<host>>, %[[D1_W2:.+]]: tensor<4x2xf32, #hipsr.mem<device>>):
-
-// The expand's destination is the reason for the cut: its extents come out of
-// the host vector domain 0 wrote, so the barrier's shape computation reads that
-// buffer instead of a shape.
-// CHECK-NEXT:      %[[EXPAND_SHAPE:.+]] = scf.execute_region -> !shape.shape {
-// CHECK-NEXT:        %[[IN_SHAPE:.+]] = shape.shape_of %[[D1_CAST_INIT]] : tensor<2x1xf32, #hipsr.mem<device>> -> tensor<2xindex>
-// CHECK-NEXT:        %[[I0:.+]] = arith.constant 0 : index
-// CHECK-NEXT:        %[[E0:.+]] = tensor.extract %[[D1_EXTENTS_INIT]]{{\[}}%[[I0]]] : tensor<2xi64, #hipsr.mem<host>>
-// CHECK-NEXT:        %[[X0:.+]] = arith.index_cast %[[E0]] : i64 to index
-// CHECK-NEXT:        %[[I1:.+]] = arith.constant 1 : index
-// CHECK-NEXT:        %[[E1:.+]] = tensor.extract %[[D1_EXTENTS_INIT]]{{\[}}%[[I1]]] : tensor<2xi64, #hipsr.mem<host>>
-// CHECK-NEXT:        %[[X1:.+]] = arith.index_cast %[[E1]] : i64 to index
-// CHECK-NEXT:        %[[REQ:.+]] = shape.from_extents %[[X0]], %[[X1]] : index, index
-// CHECK-NEXT:        %[[EXPAND_WITNESS:.+]] = shape.cstr_broadcastable %[[IN_SHAPE]], %[[REQ]] : tensor<2xindex>, !shape.shape
-// CHECK-NEXT:        %[[EXPAND_SHAPE_VAL:.+]] = shape.assuming %[[EXPAND_WITNESS]] -> (!shape.shape) {
-// CHECK-NEXT:          %[[BROADCAST:.+]] = shape.broadcast %[[IN_SHAPE]], %[[REQ]] : tensor<2xindex>, !shape.shape -> !shape.shape
-// CHECK-NEXT:          shape.assuming_yield %[[BROADCAST]] : !shape.shape
+// CHECK-NEXT:        %[[ALLOC_4:.*]] = memref.alloc() {alignment = 64 : i64} : memref<2xindex>
+// CHECK-NEXT:        memref.store %[[CONSTANT_5]], %[[ALLOC_4]]{{\[}}%[[CONSTANT_4]]] : memref<2xindex>
+// CHECK-NEXT:        memref.store %[[CONSTANT_3]], %[[ALLOC_4]]{{\[}}%[[CONSTANT_3]]] : memref<2xindex>
+// CHECK-NEXT:        %[[ALLOC_5:.*]] = memref.alloc(%[[CONSTANT_5]]) {alignment = 64 : i64} : memref<?xindex>
+// CHECK-NEXT:        %[[SUBVIEW_2:.*]] = memref.subview %[[ALLOC_5]][0] {{\[}}%[[CONSTANT_4]]] [1] : memref<?xindex> to memref<?xindex, strided<[1]>>
+// CHECK-NEXT:        memref.copy %[[ALLOC_3]], %[[SUBVIEW_2]] : memref<?xindex> to memref<?xindex, strided<[1]>>
+// CHECK-NEXT:        %[[SUBVIEW_3:.*]] = memref.subview %[[ALLOC_5]]{{\[}}%[[CONSTANT_4]]] [2] [1] : memref<?xindex> to memref<2xindex, strided<[1], offset: ?>>
+// CHECK-NEXT:        memref.copy %[[ALLOC_4]], %[[SUBVIEW_3]] : memref<2xindex> to memref<2xindex, strided<[1], offset: ?>>
+// CHECK-NEXT:        %[[ALLOC_6:.*]] = memref.alloc() {alignment = 64 : i64} : memref<2x1xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[ALLOC_7:.*]] = memref.alloc() {alignment = 64 : i64} : memref<2x1xf32, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[ALLOC_8:.*]] = memref.alloc() {alignment = 64 : i64} : memref<2xi64, #hipsr.mem<host>>
+// CHECK-NEXT:        hipsr.matmul(%[[VAL_0]]) ins(%[[VAL_1]], %[[CONSTANT_2]] : memref<2x3xf16, #hipsr.mem<device>>, memref<3x1xf16, #hipsr.mem<device>>) outs(%[[ALLOC_6]] : memref<2x1xf16, #hipsr.mem<device>>)
+// CHECK-NEXT:        %[[ALLOC_9:.*]] = memref.alloc() {alignment = 64 : i64} : memref<2x1xf32, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.cast(%[[VAL_0]]) ins(%[[ALLOC_6]] : memref<2x1xf16, #hipsr.mem<device>>) outs(%[[ALLOC_9]] : memref<2x1xf32, #hipsr.mem<device>>)
+// CHECK-NEXT:        %[[COMPUTE_0:.*]] = hipsr.compute(%[[VAL_0]]) ins(%[[VAL_2]] : memref<2x4xf32, #hipsr.mem<device>>) outs(%[[ALLOC_8]] : memref<2xi64, #hipsr.mem<host>>) {
+// CHECK-NEXT:        ^bb0(%[[VAL_4:.*]]: !hipsr.context, %[[VAL_5:.*]]: memref<2x4xf32, #hipsr.mem<device>>, %[[VAL_6:.*]]: memref<2xi64, #hipsr.mem<host>>):
+// CHECK-NEXT:          %[[GET_GLOBAL_0:.*]] = memref.get_global @__constant_2xi64 : memref<2xi64, #hipsr.mem<host>>
+// CHECK-NEXT:          hipsr.compute_yield %[[GET_GLOBAL_0]] : memref<2xi64, #hipsr.mem<host>>
+// CHECK-NEXT:        } : memref<2xi64, #hipsr.mem<host>>
+// CHECK-NEXT:        hipsr.preserve_shape %[[ALLOC_5]], %[[ALLOC_6]] : memref<?xindex>, memref<2x1xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.preserve_shape %[[ALLOC_5]], %[[ALLOC_9]] : memref<?xindex>, memref<2x1xf32, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.preserve_shape %[[ALLOC_0]], %[[COMPUTE_0]] : memref<1xindex>, memref<2xi64, #hipsr.mem<host>>
+// CHECK-NEXT:        hipsr.pool_domain_yield %[[ALLOC_7]], %[[ALLOC_9]], %[[ALLOC_8]], %[[COMPUTE_0]], %[[CONSTANT_1]] : memref<2x1xf32, #hipsr.mem<device>>, memref<2x1xf32, #hipsr.mem<device>>, memref<2xi64, #hipsr.mem<host>>, memref<2xi64, #hipsr.mem<host>>, memref<4x2xf32, #hipsr.mem<device>>
+// CHECK-NEXT:      } -> memref<2x1xf32, #hipsr.mem<device>>, memref<2x1xf32, #hipsr.mem<device>>, memref<2xi64, #hipsr.mem<host>>, memref<2xi64, #hipsr.mem<host>>, memref<4x2xf32, #hipsr.mem<device>> {domain_id = 0 : i64}
+// CHECK-NEXT:      %[[POOL_DOMAIN_1:.*]] = hipsr.pool_domain(%[[ARG0]], %[[POOL_DOMAIN_0]]#0, %[[POOL_DOMAIN_0]]#2, %[[POOL_DOMAIN_0]]#1, %[[POOL_DOMAIN_0]]#3, %[[POOL_DOMAIN_0]]#4 : !hipsr.context, memref<2x1xf32, #hipsr.mem<device>>, memref<2xi64, #hipsr.mem<host>>, memref<2x1xf32, #hipsr.mem<device>>, memref<2xi64, #hipsr.mem<host>>, memref<4x2xf32, #hipsr.mem<device>>) {
+// CHECK-NEXT:      ^bb0(%[[VAL_8:.*]]: !hipsr.context, %[[VAL_9:.*]]: memref<2x1xf32, #hipsr.mem<device>>, %[[VAL_10:.*]]: memref<2xi64, #hipsr.mem<host>>, %[[VAL_11:.*]]: memref<2x1xf32, #hipsr.mem<device>>, %[[VAL_12:.*]]: memref<2xi64, #hipsr.mem<host>>, %[[VAL_13:.*]]: memref<4x2xf32, #hipsr.mem<device>>):
+// CHECK-NEXT:        %[[CONSTANT_6:.*]] = arith.constant 4 : index
+// CHECK-NEXT:        %[[CONSTANT_7:.*]] = arith.constant 0 : index
+// CHECK-NEXT:        %[[CONSTANT_8:.*]] = arith.constant 1 : index
+// CHECK-NEXT:        %[[CONSTANT_9:.*]] = arith.constant 2 : index
+// CHECK-NEXT:        %[[ALLOC_10:.*]] = memref.alloc() {alignment = 64 : i64} : memref<2xindex>
+// CHECK-NEXT:        memref.store %[[CONSTANT_9]], %[[ALLOC_10]]{{\[}}%[[CONSTANT_7]]] : memref<2xindex>
+// CHECK-NEXT:        memref.store %[[CONSTANT_8]], %[[ALLOC_10]]{{\[}}%[[CONSTANT_8]]] : memref<2xindex>
+// CHECK-NEXT:        %[[LOAD_2:.*]] = memref.load %[[VAL_10]]{{\[}}%[[CONSTANT_7]]] : memref<2xi64, #hipsr.mem<host>>
+// CHECK-NEXT:        %[[INDEX_CAST_0:.*]] = arith.index_cast %[[LOAD_2]] : i64 to index
+// CHECK-NEXT:        %[[LOAD_3:.*]] = memref.load %[[VAL_10]]{{\[}}%[[CONSTANT_8]]] : memref<2xi64, #hipsr.mem<host>>
+// CHECK-NEXT:        %[[INDEX_CAST_1:.*]] = arith.index_cast %[[LOAD_3]] : i64 to index
+// CHECK-NEXT:        %[[ALLOC_11:.*]] = memref.alloc() {alignment = 64 : i64} : memref<2xindex>
+// CHECK-NEXT:        memref.store %[[INDEX_CAST_0]], %[[ALLOC_11]]{{\[}}%[[CONSTANT_7]]] : memref<2xindex>
+// CHECK-NEXT:        memref.store %[[INDEX_CAST_1]], %[[ALLOC_11]]{{\[}}%[[CONSTANT_8]]] : memref<2xindex>
+// CHECK-NEXT:        %[[ALLOC_12:.*]] = memref.alloc(%[[CONSTANT_9]]) {alignment = 64 : i64} : memref<?xindex>
+// CHECK-NEXT:        scf.for %[[VAL_14:.*]] = %[[CONSTANT_7]] to %[[CONSTANT_9]] step %[[CONSTANT_8]] {
+// CHECK-NEXT:          %[[CMPI_3:.*]] = arith.cmpi ult, %[[VAL_14]], %[[CONSTANT_7]] : index
+// CHECK-NEXT:          %[[IF_2:.*]] = scf.if %[[CMPI_3]] -> (index) {
+// CHECK-NEXT:            scf.yield %[[CONSTANT_8]] : index
+// CHECK-NEXT:          } else {
+// CHECK-NEXT:            %[[LOAD_4:.*]] = memref.load %[[ALLOC_10]]{{\[}}%[[VAL_14]]] : memref<2xindex>
+// CHECK-NEXT:            scf.yield %[[LOAD_4]] : index
+// CHECK-NEXT:          }
+// CHECK-NEXT:          %[[CMPI_4:.*]] = arith.cmpi ult, %[[VAL_14]], %[[CONSTANT_7]] : index
+// CHECK-NEXT:          %[[IF_3:.*]] = scf.if %[[CMPI_4]] -> (index) {
+// CHECK-NEXT:            scf.yield %[[IF_2]] : index
+// CHECK-NEXT:          } else {
+// CHECK-NEXT:            %[[LOAD_5:.*]] = memref.load %[[ALLOC_11]]{{\[}}%[[VAL_14]]] : memref<2xindex>
+// CHECK-NEXT:            %[[CMPI_5:.*]] = arith.cmpi eq, %[[LOAD_5]], %[[CONSTANT_8]] : index
+// CHECK-NEXT:            %[[SELECT_1:.*]] = arith.select %[[CMPI_5]], %[[IF_2]], %[[LOAD_5]] : index
+// CHECK-NEXT:            scf.yield %[[SELECT_1]] : index
+// CHECK-NEXT:          }
+// CHECK-NEXT:          memref.store %[[IF_3]], %[[ALLOC_12]]{{\[}}%[[VAL_14]]] : memref<?xindex>
 // CHECK-NEXT:        }
-// CHECK-NEXT:        scf.yield %[[EXPAND_SHAPE_VAL]] : !shape.shape
-// CHECK-NEXT:      }
-
-// CHECK-NEXT:      %[[MM2_SHAPE:.+]] = scf.execute_region -> !shape.shape {
-// CHECK-NEXT:        %[[W2_SHAPE:.+]] = shape.shape_of %[[D1_W2]] : tensor<4x2xf32, #hipsr.mem<device>> -> !shape.shape
-// CHECK-NEXT:        %[[E_K_IDX:.+]] = shape.const_size 1
-// CHECK-NEXT:        %[[E_K:.+]] = shape.get_extent %[[EXPAND_SHAPE]], %[[E_K_IDX]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:        %[[E_K_SHAPE:.+]] = shape.from_extents %[[E_K]] : !shape.size
-// CHECK-NEXT:        %[[W2_K_IDX:.+]] = shape.const_size 0
-// CHECK-NEXT:        %[[W2_K:.+]] = shape.get_extent %[[W2_SHAPE]], %[[W2_K_IDX]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:        %[[W2_K_SHAPE:.+]] = shape.from_extents %[[W2_K]] : !shape.size
-// CHECK-NEXT:        %[[K2_WITNESS:.+]] = shape.cstr_eq %[[E_K_SHAPE]], %[[W2_K_SHAPE]] : !shape.shape, !shape.shape
-// CHECK-NEXT:        %[[E_SPLIT_IDX:.+]] = shape.const_size 0
-// CHECK-NEXT:        %[[E_BATCH:.+]], %[[E_TAIL:.+]] = "shape.split_at"(%[[EXPAND_SHAPE]], %[[E_SPLIT_IDX]]) : (!shape.shape, !shape.size) -> (!shape.shape, !shape.shape)
-// CHECK-NEXT:        %[[W2_SPLIT_IDX:.+]] = shape.const_size 0
-// CHECK-NEXT:        %[[W2_BATCH:.+]], %[[W2_TAIL:.+]] = "shape.split_at"(%[[W2_SHAPE]], %[[W2_SPLIT_IDX]]) : (!shape.shape, !shape.size) -> (!shape.shape, !shape.shape)
-// CHECK-NEXT:        %[[BATCH2_WITNESS:.+]] = shape.cstr_broadcastable %[[E_BATCH]], %[[W2_BATCH]] : !shape.shape, !shape.shape
-// CHECK-NEXT:        %[[WITNESS2:.+]] = shape.assuming_all %[[K2_WITNESS]], %[[BATCH2_WITNESS]]
-// CHECK-NEXT:        %[[MM2_SHAPE_VAL:.+]] = shape.assuming %[[WITNESS2]] -> (!shape.shape) {
-// CHECK-NEXT:          %[[BATCH2:.+]] = shape.broadcast %[[E_BATCH]], %[[W2_BATCH]] : !shape.shape, !shape.shape -> !shape.shape
-// CHECK-NEXT:          %[[M2_IDX:.+]] = shape.const_size 0
-// CHECK-NEXT:          %[[M2:.+]] = shape.get_extent %[[EXPAND_SHAPE]], %[[M2_IDX]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:          %[[N2_IDX:.+]] = shape.const_size 1
-// CHECK-NEXT:          %[[N2:.+]] = shape.get_extent %[[W2_SHAPE]], %[[N2_IDX]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:          %[[MATRIX2:.+]] = shape.from_extents %[[M2]], %[[N2]] : !shape.size, !shape.size
-// CHECK-NEXT:          %[[RESULT2:.+]] = shape.concat %[[BATCH2]], %[[MATRIX2]] : !shape.shape, !shape.shape -> !shape.shape
-// CHECK-NEXT:          shape.assuming_yield %[[RESULT2]] : !shape.shape
+// CHECK-NEXT:        %[[CAST_0:.*]] = memref.cast %[[ALLOC_12]] : memref<?xindex> to memref<2xindex>
+// CHECK-NEXT:        %[[ALLOC_13:.*]] = memref.alloc() {alignment = 64 : i64} : memref<2xindex>
+// CHECK-NEXT:        memref.store %[[CONSTANT_6]], %[[ALLOC_13]]{{\[}}%[[CONSTANT_7]]] : memref<2xindex>
+// CHECK-NEXT:        memref.store %[[CONSTANT_9]], %[[ALLOC_13]]{{\[}}%[[CONSTANT_8]]] : memref<2xindex>
+// CHECK-NEXT:        %[[SUBVIEW_4:.*]] = memref.subview %[[CAST_0]]{{\[}}%[[CONSTANT_7]]] {{\[}}%[[CONSTANT_7]]] {{\[}}%[[CONSTANT_8]]] : memref<2xindex> to memref<?xindex, strided<[?], offset: ?>>
+// CHECK-NEXT:        %[[SUBVIEW_5:.*]] = memref.subview %[[ALLOC_13]]{{\[}}%[[CONSTANT_7]]] {{\[}}%[[CONSTANT_7]]] {{\[}}%[[CONSTANT_8]]] : memref<2xindex> to memref<?xindex, strided<[?], offset: ?>>
+// CHECK-NEXT:        %[[ALLOC_14:.*]] = memref.alloc(%[[CONSTANT_7]]) {alignment = 64 : i64} : memref<?xindex>
+// CHECK-NEXT:        scf.for %[[VAL_15:.*]] = %[[CONSTANT_7]] to %[[CONSTANT_7]] step %[[CONSTANT_8]] {
+// CHECK-NEXT:          %[[CMPI_6:.*]] = arith.cmpi ult, %[[VAL_15]], %[[CONSTANT_7]] : index
+// CHECK-NEXT:          %[[IF_4:.*]] = scf.if %[[CMPI_6]] -> (index) {
+// CHECK-NEXT:            scf.yield %[[CONSTANT_8]] : index
+// CHECK-NEXT:          } else {
+// CHECK-NEXT:            %[[LOAD_6:.*]] = memref.load %[[SUBVIEW_4]]{{\[}}%[[VAL_15]]] : memref<?xindex, strided<[?], offset: ?>>
+// CHECK-NEXT:            scf.yield %[[LOAD_6]] : index
+// CHECK-NEXT:          }
+// CHECK-NEXT:          %[[CMPI_7:.*]] = arith.cmpi ult, %[[VAL_15]], %[[CONSTANT_7]] : index
+// CHECK-NEXT:          %[[IF_5:.*]] = scf.if %[[CMPI_7]] -> (index) {
+// CHECK-NEXT:            scf.yield %[[IF_4]] : index
+// CHECK-NEXT:          } else {
+// CHECK-NEXT:            %[[LOAD_7:.*]] = memref.load %[[SUBVIEW_5]]{{\[}}%[[VAL_15]]] : memref<?xindex, strided<[?], offset: ?>>
+// CHECK-NEXT:            %[[CMPI_8:.*]] = arith.cmpi eq, %[[LOAD_7]], %[[CONSTANT_8]] : index
+// CHECK-NEXT:            %[[SELECT_2:.*]] = arith.select %[[CMPI_8]], %[[IF_4]], %[[LOAD_7]] : index
+// CHECK-NEXT:            scf.yield %[[SELECT_2]] : index
+// CHECK-NEXT:          }
+// CHECK-NEXT:          memref.store %[[IF_5]], %[[ALLOC_14]]{{\[}}%[[VAL_15]]] : memref<?xindex>
 // CHECK-NEXT:        }
-// CHECK-NEXT:        scf.yield %[[MM2_SHAPE_VAL]] : !shape.shape
-// CHECK-NEXT:      }
-
-// CHECK-NEXT:      %[[EXPAND_INIT:.+]] = tensor.empty() : tensor<2x4xf32, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[MM2_INIT:.+]] = tensor.empty() : tensor<2x2xf32, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[EXPAND:.+]] = hipsr.expand(%[[D1_CTX]]) ins(%[[D1_CAST]], %[[D1_EXTENTS]] : tensor<2x1xf32, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>) outs(%[[EXPAND_INIT]] : tensor<2x4xf32, #hipsr.mem<device>>) : tensor<2x4xf32, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[MM2:.+]] = hipsr.matmul(%[[D1_CTX]]) ins(%[[EXPAND]], %[[D1_W2]] : tensor<2x4xf32, #hipsr.mem<device>>, tensor<4x2xf32, #hipsr.mem<device>>) outs(%[[MM2_INIT]] : tensor<2x2xf32, #hipsr.mem<device>>) : tensor<2x2xf32, #hipsr.mem<device>>
-// CHECK-NEXT:      hipsr.preserve_shape %[[EXPAND_SHAPE]], %[[EXPAND]] : tensor<2x4xf32, #hipsr.mem<device>>
-// CHECK-NEXT:      hipsr.preserve_shape %[[MM2_SHAPE]], %[[MM2]] : tensor<2x2xf32, #hipsr.mem<device>>
-// CHECK-NEXT:      hipsr.pool_domain_yield %[[MM2]] : tensor<2x2xf32, #hipsr.mem<device>>
-// CHECK-NEXT:    } -> tensor<2x2xf32, #hipsr.mem<device>> {domain_id = 1 : i64}
-
-// CHECK-NEXT:    return %[[D1]] : tensor<2x2xf32, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[LOAD_8:.*]] = memref.load %[[ALLOC_12]]{{\[}}%[[CONSTANT_7]]] : memref<?xindex>
+// CHECK-NEXT:        %[[ALLOC_15:.*]] = memref.alloc() {alignment = 64 : i64} : memref<2xindex>
+// CHECK-NEXT:        memref.store %[[LOAD_8]], %[[ALLOC_15]]{{\[}}%[[CONSTANT_7]]] : memref<2xindex>
+// CHECK-NEXT:        memref.store %[[CONSTANT_9]], %[[ALLOC_15]]{{\[}}%[[CONSTANT_8]]] : memref<2xindex>
+// CHECK-NEXT:        %[[ALLOC_16:.*]] = memref.alloc(%[[CONSTANT_9]]) {alignment = 64 : i64} : memref<?xindex>
+// CHECK-NEXT:        %[[SUBVIEW_6:.*]] = memref.subview %[[ALLOC_16]][0] {{\[}}%[[CONSTANT_7]]] [1] : memref<?xindex> to memref<?xindex, strided<[1]>>
+// CHECK-NEXT:        memref.copy %[[ALLOC_14]], %[[SUBVIEW_6]] : memref<?xindex> to memref<?xindex, strided<[1]>>
+// CHECK-NEXT:        %[[SUBVIEW_7:.*]] = memref.subview %[[ALLOC_16]]{{\[}}%[[CONSTANT_7]]] [2] [1] : memref<?xindex> to memref<2xindex, strided<[1], offset: ?>>
+// CHECK-NEXT:        memref.copy %[[ALLOC_15]], %[[SUBVIEW_7]] : memref<2xindex> to memref<2xindex, strided<[1], offset: ?>>
+// CHECK-NEXT:        %[[ALLOC_17:.*]] = memref.alloc() {alignment = 64 : i64} : memref<2x4xf32, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[ALLOC_18:.*]] = memref.alloc() {alignment = 64 : i64} : memref<2x2xf32, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.expand(%[[VAL_8]]) ins(%[[VAL_11]], %[[VAL_12]] : memref<2x1xf32, #hipsr.mem<device>>, memref<2xi64, #hipsr.mem<host>>) outs(%[[ALLOC_17]] : memref<2x4xf32, #hipsr.mem<device>>)
+// CHECK-NEXT:        hipsr.matmul(%[[VAL_8]]) ins(%[[ALLOC_17]], %[[VAL_13]] : memref<2x4xf32, #hipsr.mem<device>>, memref<4x2xf32, #hipsr.mem<device>>) outs(%[[ALLOC_18]] : memref<2x2xf32, #hipsr.mem<device>>)
+// CHECK-NEXT:        hipsr.preserve_shape %[[CAST_0]], %[[ALLOC_17]] : memref<2xindex>, memref<2x4xf32, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.preserve_shape %[[ALLOC_16]], %[[ALLOC_18]] : memref<?xindex>, memref<2x2xf32, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.pool_domain_yield %[[ALLOC_18]] : memref<2x2xf32, #hipsr.mem<device>>
+// CHECK-NEXT:      } -> memref<2x2xf32, #hipsr.mem<device>> {domain_id = 1 : i64}
+// CHECK-NEXT:      return %[[POOL_DOMAIN_1]] : memref<2x2xf32, #hipsr.mem<device>>
+// CHECK-NEXT:    }
 // CHECK-NEXT:  }
+
 func.func @main_graph(%a: tensor<2x3xf16> {onnx.name = "a"},
                       %b: tensor<2x4xf32> {onnx.name = "b"})
     -> (tensor<2x2xf32> {onnx.name = "y"})

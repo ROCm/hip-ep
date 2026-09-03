@@ -165,6 +165,50 @@ def MaterializeInitTensorsPass
   ];
 }
 
+def ConvertShapeToExtentPass
+    : Pass<"hipsr-convert-shape-to-extent", "mlir::func::FuncOp"> {
+  let summary =
+      "Retype !shape.shape as extent tensors and !shape.size as index";
+  let description = [{
+    Retypes shape values so the upstream shape passes can lower them.
+    `!shape.shape` becomes `tensor<Nxindex>`, and `!shape.size` becomes
+    `index`.
+
+    - `--convert-shape-to-std` only matches those new types, so it does
+      nothing until this pass runs.
+    - The pass first inlines the `scf.execute_region` and `shape.assuming`
+      regions, so the conversion sees straight-line code.
+    - Run `--remove-shape-constraints` first. It makes the passing witness
+      that lets `shape.assuming` inline.
+    - Upstream has no pattern for `shape.from_extents`, `shape.concat`,
+      `shape.size_to_index`, or `shape.const_size`, so this pass lowers them.
+
+    Before:
+    ```mlir
+    %s = scf.execute_region -> !shape.shape {
+      %0 = shape.shape_of %a : tensor<?x4xf16> -> !shape.shape
+      scf.yield %0 : !shape.shape
+    }
+    %c0 = shape.const_size 0
+    %d = shape.get_extent %s, %c0 : !shape.shape, !shape.size -> !shape.size
+    ```
+
+    After:
+    ```mlir
+    %s = shape.shape_of %a : tensor<?x4xf16> -> tensor<2xindex>
+    %c0 = arith.constant 0 : index
+    %d = shape.get_extent %s, %c0 : tensor<2xindex>, index -> index
+    ```
+  }];
+  let dependentDialects = [
+    "::mlir::hipsr::HipsrDialect",
+    "::mlir::arith::ArithDialect",
+    "::mlir::scf::SCFDialect",
+    "::mlir::shape::ShapeDialect",
+    "::mlir::tensor::TensorDialect"
+  ];
+}
+
 def HipsrExternalizeConstantsPass
     : Pass<"hipsr-externalize-constants", "mlir::ModuleOp"> {
   let summary = "Externalize hipsr.constant: stamp offset/size/index, write constants file";

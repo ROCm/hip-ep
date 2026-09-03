@@ -12,6 +12,13 @@
 // form is matched; variadic onnx.Max/onnx.Min (three or more inputs) are left
 // unchanged.
 //
+// onnx.Clip and onnx.Relu are packed the same way. They are not broadcasts,
+// but both expand into hip.max/hip.min during conversion and so hit the same
+// rank-4 ceiling in the elementwise ABI; their broadcast lives entirely on the
+// first operand, and Clip's optional min/max bounds are scalars that are
+// forwarded unchanged. A Clip supplying neither bound is an identity and is
+// left alone.
+//
 // Before:
 //   %r = "onnx.Add"(%a, %b) : (...) -> tensor<6x2500x8x1x2x4x2xf32>
 //
@@ -51,8 +58,7 @@ namespace hip {
 namespace {
 
 struct PackedBroadcast {
-  Value lhs;
-  Value rhs;
+  SmallVector<Value> operands;
   RankedTensorType packedResultType;
   RankedTensorType originalResultType;
   SmallVector<ReassociationIndices> reassociation;
@@ -116,45 +122,54 @@ collapseTensor(OpBuilder &builder, Location loc, Value value,
 }
 
 static FailureOr<PackedBroadcast> packBroadcast(OpBuilder &builder,
-                                                Location loc, Value lhs,
-                                                Value rhs,
+                                                Location loc,
+                                                ArrayRef<Value> dataOperands,
                                                 RankedTensorType resultType) {
   int64_t rank = resultType.getRank();
   if (rank <= 4 || !resultType.hasStaticShape())
     return failure();
-
-  auto lhsType = dyn_cast<RankedTensorType>(lhs.getType());
-  auto rhsType = dyn_cast<RankedTensorType>(rhs.getType());
-  if (!lhsType || !rhsType || !lhsType.hasStaticShape() ||
-      !rhsType.hasStaticShape() || lhsType.getRank() > rank ||
-      rhsType.getRank() > rank)
+  if (dataOperands.empty())
     return failure();
 
-  SmallVector<int64_t> lhsShape(rank, 1);
-  SmallVector<int64_t> rhsShape(rank, 1);
-  llvm::copy(lhsType.getShape(), lhsShape.begin() + rank - lhsType.getRank());
-  llvm::copy(rhsType.getShape(), rhsShape.begin() + rank - rhsType.getRank());
+  // Right-align every operand against the result rank so the broadcast checks
+  // below can compare them axis by axis.
+  SmallVector<SmallVector<int64_t>> operandShapes;
+  for (Value operand : dataOperands) {
+    auto type = dyn_cast<RankedTensorType>(operand.getType());
+    if (!type || !type.hasStaticShape() || type.getRank() > rank)
+      return failure();
+    SmallVector<int64_t> shape(rank, 1);
+    llvm::copy(type.getShape(), shape.begin() + rank - type.getRank());
+    operandShapes.push_back(std::move(shape));
+  }
   ArrayRef<int64_t> outShape = resultType.getShape();
 
   for (int64_t dim : llvm::seq<int64_t>(rank)) {
-    if ((lhsShape[dim] != 1 && lhsShape[dim] != outShape[dim]) ||
-        (rhsShape[dim] != 1 && rhsShape[dim] != outShape[dim]) ||
-        (outShape[dim] != lhsShape[dim] && outShape[dim] != rhsShape[dim]))
+    bool someOperandCoversOut = false;
+    for (const SmallVector<int64_t> &shape : operandShapes) {
+      if (shape[dim] != 1 && shape[dim] != outShape[dim])
+        return failure();
+      if (shape[dim] == outShape[dim])
+        someOperandCoversOut = true;
+    }
+    if (!someOperandCoversOut)
       return failure();
   }
 
   auto groupIsSafe = [&](int64_t begin, int64_t end) {
-    int64_t lhsProduct = 1;
-    int64_t rhsProduct = 1;
     int64_t outProduct = 1;
-    for (int64_t axis = begin; axis < end; ++axis) {
-      if (!multiplyDim(lhsProduct, lhsShape[axis]) ||
-          !multiplyDim(rhsProduct, rhsShape[axis]) ||
-          !multiplyDim(outProduct, outShape[axis]))
+    for (int64_t axis = begin; axis < end; ++axis)
+      if (!multiplyDim(outProduct, outShape[axis]))
+        return false;
+    for (const SmallVector<int64_t> &shape : operandShapes) {
+      int64_t product = 1;
+      for (int64_t axis = begin; axis < end; ++axis)
+        if (!multiplyDim(product, shape[axis]))
+          return false;
+      if (product != 1 && product != outProduct)
         return false;
     }
-    return (lhsProduct == 1 || lhsProduct == outProduct) &&
-           (rhsProduct == 1 || rhsProduct == outProduct);
+    return true;
   };
 
   SmallVector<ReassociationIndices> chosen;
@@ -202,10 +217,13 @@ static FailureOr<PackedBroadcast> packBroadcast(OpBuilder &builder,
     return collapseTensor(builder, loc, *aligned, chosen);
   };
 
-  FailureOr<Value> packedLhs = packOperand(lhs);
-  FailureOr<Value> packedRhs = packOperand(rhs);
-  if (failed(packedLhs) || failed(packedRhs))
-    return failure();
+  SmallVector<Value> packedOperands;
+  for (Value operand : dataOperands) {
+    FailureOr<Value> packed = packOperand(operand);
+    if (failed(packed))
+      return failure();
+    packedOperands.push_back(*packed);
+  }
 
   SmallVector<int64_t> packedResultShape;
   for (const ReassociationIndices &group : chosen) {
@@ -217,30 +235,63 @@ static FailureOr<PackedBroadcast> packBroadcast(OpBuilder &builder,
   }
   auto packedResultType = RankedTensorType::get(
       packedResultShape, resultType.getElementType(), resultType.getEncoding());
-  return PackedBroadcast{*packedLhs, *packedRhs, packedResultType, resultType,
-                         std::move(chosen)};
+  return PackedBroadcast{std::move(packedOperands), packedResultType,
+                         resultType, std::move(chosen)};
 }
 
 struct PackBroadcastPattern : public RewritePattern {
-  PackBroadcastPattern(StringRef opName, MLIRContext *ctx)
-      : RewritePattern(opName, /*benefit=*/1, ctx) {}
+  // The first `numDataOperands` operands carry the broadcast and get packed.
+  // `maxOperands` bounds the total operand count; it exceeds
+  // `numDataOperands` only for onnx.Clip, whose optional min/max bounds ride
+  // along unchanged and so must be rank-0 tensors or `none`. Every other op
+  // is matched at an exact count, which keeps variadic onnx.Max/onnx.Min out
+  // of the pattern.
+  PackBroadcastPattern(StringRef opName, MLIRContext *ctx,
+                       unsigned numDataOperands, unsigned maxOperands)
+      : RewritePattern(opName, /*benefit=*/1, ctx),
+        numDataOperands(numDataOperands), maxOperands(maxOperands) {}
 
   LogicalResult matchAndRewrite(Operation *op,
                                 PatternRewriter &rewriter) const override {
-    if (op->getNumOperands() != 2 || op->getNumResults() != 1)
+    unsigned numOperands = op->getNumOperands();
+    if (numOperands < numDataOperands || numOperands > maxOperands ||
+        op->getNumResults() != 1)
       return failure();
     auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
     if (!resultType || resultType.getRank() <= 4)
       return failure();
 
+    // A pass-through operand that carried shape would silently disagree with
+    // the packed result, so only scalars and `none` may ride along. This is a
+    // whitelist on purpose: an unranked operand carries no rank to check, so
+    // rejecting merely the ranked-and-non-scalar case would let it through.
+    OperandRange trailing = op->getOperands().drop_front(numDataOperands);
+    bool anyTrailingPresent = false;
+    for (Value extra : trailing) {
+      if (isa<NoneType>(extra.getType()))
+        continue;
+      auto extraType = dyn_cast<RankedTensorType>(extra.getType());
+      if (!extraType || extraType.getRank() != 0)
+        return failure();
+      anyTrailingPresent = true;
+    }
+
+    // An op whose optional operands are all absent is an identity: onnx.Clip
+    // with neither bound does nothing, so packing it would churn reshapes and
+    // inflate the statistic for no gain.
+    if (maxOperands > numDataOperands && !anyTrailingPresent)
+      return failure();
+
+    SmallVector<Value> dataOperands(
+        op->getOperands().take_front(numDataOperands));
     FailureOr<PackedBroadcast> packing =
-        packBroadcast(rewriter, op->getLoc(), op->getOperand(0),
-                      op->getOperand(1), resultType);
+        packBroadcast(rewriter, op->getLoc(), dataOperands, resultType);
     if (failed(packing))
       return failure();
 
     OperationState state(op->getLoc(), op->getName().getStringRef());
-    state.addOperands({packing->lhs, packing->rhs});
+    state.addOperands(packing->operands);
+    state.addOperands(trailing);
     state.addTypes(packing->packedResultType);
     state.addAttributes(op->getAttrs());
     Operation *packedOp = rewriter.create(state);
@@ -257,6 +308,10 @@ struct PackBroadcastPattern : public RewritePattern {
     ++NumBroadcastsPacked;
     return success();
   }
+
+private:
+  unsigned numDataOperands;
+  unsigned maxOperands;
 };
 
 } // namespace
@@ -266,7 +321,15 @@ void populatePackBroadcastTo4DPatterns(RewritePatternSet &patterns,
   for (StringRef opName :
        {"onnx.Add", "onnx.Sub", "onnx.Mul", "onnx.Div", "onnx.Less",
         "onnx.Greater", "onnx.Max", "onnx.Min", "onnx.And"})
-    patterns.add<PackBroadcastPattern>(opName, ctx);
+    patterns.add<PackBroadcastPattern>(opName, ctx, /*numDataOperands=*/2,
+                                       /*maxOperands=*/2);
+  // hip.max and hip.min are also produced by onnx.Clip and onnx.Relu, which
+  // carry the whole broadcast on their first operand; Clip's min/max bounds
+  // are scalars that pack through untouched.
+  patterns.add<PackBroadcastPattern>("onnx.Relu", ctx, /*numDataOperands=*/1,
+                                     /*maxOperands=*/1);
+  patterns.add<PackBroadcastPattern>("onnx.Clip", ctx, /*numDataOperands=*/1,
+                                     /*maxOperands=*/3);
 }
 
 } // namespace hip
