@@ -79,6 +79,8 @@ static std::string dll_path() {
 
   return std::string(info.dli_fname);
 #endif
+}
+
 /// Classification of an 8-bit constant's backing byte size against its element
 /// count, returned by markPackedInt4Consumers so the caller can diagnose a
 /// genuine mismatch.
@@ -562,7 +564,6 @@ void ConvertOnnxToHipPass::runOnOperation() {
         populateAttentionWindowFoldPatterns(preLoweringPatterns, ctx);
         populateFastGeluFusionPatterns(preLoweringPatterns, ctx);
         populateErfGeluFusionPatterns(preLoweringPatterns, ctx);
-
         populateProjectorOpsRewritePatterns(preLoweringPatterns, ctx);
         populateLpNormalizationConversionPatterns(preLoweringPatterns, ctx);
         populatePowDecompositionPatterns(preLoweringPatterns, ctx);
