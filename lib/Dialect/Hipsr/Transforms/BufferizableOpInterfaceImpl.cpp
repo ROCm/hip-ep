@@ -97,6 +97,56 @@ struct PreserveShapeBufferizableModel
 };
 
 //===----------------------------------------------------------------------===//
+// ConstantOp
+//===----------------------------------------------------------------------===//
+
+// hipsr.constant points into the constants blob, which the runtime owns. It
+// bufferizes like upstream arith.constant.
+//
+// Before: %0 = hipsr.constant {...} : tensor<4x2xf32, #hipsr.mem<device>>
+// After:  %0 = hipsr.constant {...} : memref<4x2xf32, #hipsr.mem<device>>
+struct ConstantBufferizableModel
+    : public BufferizableOpInterface::ExternalModel<ConstantBufferizableModel,
+                                                    ConstantOp> {
+  bool isWritable(Operation *, Value, const AnalysisState &) const {
+    return false;
+  }
+
+  FailureOr<BufferLikeType> getBufferType(Operation *op, Value value,
+                                          const BufferizationOptions &options,
+                                          const BufferizationState &,
+                                          SmallVector<Value> &) const {
+    auto tensorType = cast<TensorType>(value.getType());
+    std::optional<Attribute> memorySpace =
+        options.defaultMemorySpaceFn(tensorType);
+    if (!memorySpace) {
+      return op->emitError("could not infer memory space");
+    }
+    // A constant is contiguous, so use the identity layout. The default from
+    // unknownTypeConverterFn has a fully dynamic layout.
+    return cast<BufferLikeType>(
+        getMemRefTypeWithStaticIdentityLayout(tensorType, *memorySpace));
+  }
+
+  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
+                          const BufferizationOptions &options,
+                          BufferizationState &state) const {
+    auto constantOp = cast<ConstantOp>(op);
+    FailureOr<BufferLikeType> bufferType =
+        bufferization::getBufferType(constantOp.getResult(), options, state);
+    if (failed(bufferType)) {
+      return failure();
+    }
+
+    replaceOpWithNewBufferizedOp<ConstantOp>(
+        rewriter, op, *bufferType, constantOp.getValue(),
+        constantOp.getIndexAttr(), constantOp.getOffsetAttr(),
+        constantOp.getSizeAttr());
+    return success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // ComputeOp / ComputeYieldOp
 //===----------------------------------------------------------------------===//
 
@@ -219,7 +269,11 @@ struct ComputeOpBufferization
     for (auto [outIdx, output] : llvm::enumerate(computeOp.getOutputs())) {
       int32_t aliasedInputIdx = -1; // -1 means no aliasing
 
-      if (isa<TensorType>(output.getType())) {
+      // Reusing the input buffer also changes the type of the matching entry
+      // argument, so only do this when the body never reads that argument.
+      BlockArgument destination = getEntryArgument(
+          computeOp, computeOp.getOutputs().getBeginOperandIndex() + outIdx);
+      if (isa<TensorType>(output.getType()) && destination.use_empty()) {
         // Find which input (if any) this output aliases
         for (auto [inIdx, input] : llvm::enumerate(computeOp.getInputs())) {
           if (!isa<TensorType>(input.getType())) {
@@ -654,8 +708,11 @@ void mlir::hipsr::registerBufferizableOpInterfaceExternalModels(
     ComputeYieldOp::attachInterface<ComputeYieldOpBufferization>(*ctx);
     PoolDomainOp::attachInterface<PoolDomainOpBufferization>(*ctx);
     PoolDomainYieldOp::attachInterface<PoolDomainYieldOpBufferization>(*ctx);
+    MatMulOp::attachInterface<DpsBufferizableModel<MatMulOp>>(*ctx);
+    ExpandOp::attachInterface<DpsBufferizableModel<ExpandOp>>(*ctx);
     CastOp::attachInterface<DpsBufferizableModel<CastOp>>(*ctx);
     CopyD2HOp::attachInterface<DpsBufferizableModel<CopyD2HOp>>(*ctx);
+    AddOp::attachInterface<DpsBufferizableModel<AddOp>>(*ctx);
     MulOp::attachInterface<DpsBufferizableModel<MulOp>>(*ctx);
     MinOp::attachInterface<DpsBufferizableModel<MinOp>>(*ctx);
     EqualOp::attachInterface<DpsBufferizableModel<EqualOp>>(*ctx);
@@ -663,5 +720,7 @@ void mlir::hipsr::registerBufferizableOpInterfaceExternalModels(
     GatherOp::attachInterface<DpsBufferizableModel<GatherOp>>(*ctx);
     SliceOp::attachInterface<DpsBufferizableModel<SliceOp>>(*ctx);
     ScatterNDOp::attachInterface<DpsBufferizableModel<ScatterNDOp>>(*ctx);
+    NonZeroOp::attachInterface<DpsBufferizableModel<NonZeroOp>>(*ctx);
+    ConstantOp::attachInterface<ConstantBufferizableModel>(*ctx);
   });
 }

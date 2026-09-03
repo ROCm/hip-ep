@@ -8,7 +8,10 @@
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
 
+#include "mlir/Conversion/ShapeToStandard/ShapeToStandard.h"
+#include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/Shape/Transforms/Passes.h"
 #include "mlir/Pass/PassRegistry.h"
 
@@ -20,6 +23,10 @@
 //   --hipsr-materialize-init-tensors
 //   --remove-shape-constraints
 //   --hipsr-convert-shape-to-extent
+//   --shape-to-shape-lowering
+//   --convert-shape-to-std
+//   --one-shot-bufferize
+//   --convert-linalg-to-loops
 void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
                                      const HipsrPipelineOptions & /*options*/) {
   pm.addPass(createAddContextArgPass());
@@ -29,6 +36,25 @@ void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
   pm.addPass(createMaterializeInitTensorsPass());
   pm.addNestedPass<func::FuncOp>(createRemoveShapeConstraintsPass());
   pm.addNestedPass<func::FuncOp>(createConvertShapeToExtentPass());
+
+  // convert-shape-to-std cannot lower shape.num_elements, so rewrite it as a
+  // shape.reduce first. This must follow hipsr-convert-shape-to-extent, since
+  // ReduceOpConverter rejects a !shape.shape operand.
+  pm.addNestedPass<func::FuncOp>(createShapeToShapeLoweringPass());
+  pm.addPass(createConvertShapeToStandardPass());
+
+  // useEncodingForMemorySpace turns the #hipsr.mem<...> tensor encoding into
+  // the memref memory space.
+  bufferization::OneShotBufferizePassOptions bufferizeOptions;
+  bufferizeOptions.bufferizeFunctionBoundaries = true;
+  bufferizeOptions.functionBoundaryTypeConversion =
+      bufferization::LayoutMapOption::IdentityLayoutMap;
+  bufferizeOptions.useEncodingForMemorySpace = true;
+  pm.addPass(bufferization::createOneShotBufferizePass(bufferizeOptions));
+
+  // shape.broadcast becomes a tensor.generate, which bufferizes to a
+  // linalg.map. That is the only linalg op this pipeline produces.
+  pm.addNestedPass<func::FuncOp>(createConvertLinalgToLoopsPass());
 }
 
 void mlir::hipsr::registerHipsrPipelines() {
