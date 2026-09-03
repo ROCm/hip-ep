@@ -36,9 +36,7 @@
 //     hipsr.compute_yield %out
 //   } : tensor<2x3x1xf16, #hipsr.mem<device>>
 //
-// A dynamic input dimension is read off %x_shape in the region and off %x in
-// the body. The body leaves %dest alone so that bufferization can hold the
-// result in %x's buffer.
+// A dynamic input dimension is read off %x_shape in the region.
 //
 //===----------------------------------------------------------------------===//
 
@@ -172,10 +170,6 @@ void populateShapeRegion(OpBuilder &builder, PlaceholderOp placeholder,
 // The compute body
 //===----------------------------------------------------------------------===//
 
-// The expand infers its dimensions from the input, the same way the shape
-// region does. The destination carries them too, but reading it would leave the
-// destination argument used, and bufferization only holds the result in the
-// input's buffer when the body never touches that argument.
 void populateComputeBody(OpBuilder &builder, ComputeOp computeOp,
                          ArrayRef<ReassociationIndices> reassociation) {
   OpBuilder::InsertionGuard guard(builder);
