@@ -15,6 +15,7 @@
 
 #include "gqa_autotune.h"
 #include "gqa_autotune_generated.h"
+#include "hip/env.h"
 #include "morphizen-foundation/file_io.hpp"
 
 #include <cstdio>
@@ -33,6 +34,31 @@ void require(bool condition, const char *expression, int line) {
 }
 
 #define REQUIRE(expr) require((expr), #expr, __LINE__)
+
+void setModeEnv(const char *value) {
+#ifdef _WIN32
+  _putenv_s("HIPDNN_GQA_AUTOTUNE_MODE", value ? value : "");
+#else
+  if (value)
+    setenv("HIPDNN_GQA_AUTOTUNE_MODE", value, 1);
+  else
+    unsetenv("HIPDNN_GQA_AUTOTUNE_MODE");
+#endif
+}
+
+class ScopedModeEnv {
+public:
+  ScopedModeEnv()
+      : original_(hipdnn_ep::env_string("HIPDNN_GQA_AUTOTUNE_MODE")) {
+    setModeEnv(nullptr);
+  }
+  ~ScopedModeEnv() {
+    setModeEnv(original_.empty() ? nullptr : original_.c_str());
+  }
+
+private:
+  std::string original_;
+};
 
 class MemoryReader final : public morphizen::FileReader {
 public:
@@ -285,11 +311,61 @@ int inspect(const char *path) {
 int main(int argc, char **argv) {
   if (argc > 1)
     return inspect(argv[1]);
+  ScopedModeEnv mode_env;
   MemoryFileSystem fs(makeLut());
   void *policy = hipdnn_ep::gqa_autotune_create(&fs);
   REQUIRE(policy != nullptr);
   REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
           hipdnn_ep::GqaAutotuneMode::Lookup);
+
+  hipdnn_ep::gqa_autotune_resolve_provider_mode(policy, " OnLiNe ");
+  REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
+          hipdnn_ep::GqaAutotuneMode::Online);
+  // Resolution happens once, so the decode path can call it on every read: a
+  // later value cannot move a session that already answered.
+  hipdnn_ep::gqa_autotune_resolve_provider_mode(policy, "lookup");
+  REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
+          hipdnn_ep::GqaAutotuneMode::Online);
+  hipdnn_ep::gqa_autotune_destroy(policy);
+
+  // Nothing supplied leaves the mode alone and still counts as resolved.
+  policy = hipdnn_ep::gqa_autotune_create(&fs);
+  hipdnn_ep::gqa_autotune_resolve_provider_mode(policy, nullptr);
+  hipdnn_ep::gqa_autotune_resolve_provider_mode(policy, "online");
+  REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
+          hipdnn_ep::GqaAutotuneMode::Lookup);
+  hipdnn_ep::gqa_autotune_destroy(policy);
+
+  policy = hipdnn_ep::gqa_autotune_create(&fs);
+  hipdnn_ep::gqa_autotune_resolve_provider_mode(policy, "invalid");
+  REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
+          hipdnn_ep::GqaAutotuneMode::Lookup);
+  hipdnn_ep::gqa_autotune_destroy(policy);
+
+  policy = hipdnn_ep::gqa_autotune_create(&fs);
+  hipdnn_ep::gqa_autotune_resolve_provider_mode(policy, "");
+  REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
+          hipdnn_ep::GqaAutotuneMode::Lookup);
+  hipdnn_ep::gqa_autotune_destroy(policy);
+
+  setModeEnv("lookup");
+  policy = hipdnn_ep::gqa_autotune_create(&fs);
+  hipdnn_ep::gqa_autotune_resolve_provider_mode(policy, "online");
+  REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
+          hipdnn_ep::GqaAutotuneMode::Lookup);
+  hipdnn_ep::gqa_autotune_destroy(policy);
+
+  // Even an invalid non-empty environment setting owns the highest-priority
+  // slot and preserves the historical fallback to the build default.
+  setModeEnv("invalid");
+  policy = hipdnn_ep::gqa_autotune_create(&fs);
+  hipdnn_ep::gqa_autotune_resolve_provider_mode(policy, "online");
+  REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
+          hipdnn_ep::GqaAutotuneMode::Lookup);
+  hipdnn_ep::gqa_autotune_destroy(policy);
+  setModeEnv(nullptr);
+
+  policy = hipdnn_ep::gqa_autotune_create(&fs);
 
   // 64:8:64, one sequence: batch*num_heads is 64, which no Geometry row names,
   // so the pooled heads-per-group row answers.

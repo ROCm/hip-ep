@@ -206,6 +206,13 @@ struct RuntimeState {
   // ABI-facing struct opaque.
   void *gqa_autotune_policy;
 
+  // Session-scoped provider options copied from PassContext after
+  // inference_init. The concrete ProviderOptions map remains private to
+  // hipdnn_ep_runtime_state.cpp so this ABI-facing state does not expose C++
+  // containers. Lazily allocated by hipdnn_ep_runtime_set_provider_option and
+  // destroyed by hipdnn_ep_state_cleanup.
+  void *provider_options;
+
   // Device-side error flag used by kernels to report runtime-invalid inputs.
   // 0 = no error, non-zero = error code (currently -1).
   int *device_error_flag;

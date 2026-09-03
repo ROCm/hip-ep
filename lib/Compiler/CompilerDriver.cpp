@@ -190,6 +190,8 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
     //                                          its wall_ms window closes so the
     //                                          resolve cost doesn't pollute
     //                                          TPS)
+    //   hipdnn_ep_runtime_set/get_provider_option
+    //                                       — session-scoped runtime options
     //   hipdnn_ep_runtime_add_cpu_profile    — EP pushes its outer (whole-
     //                                          Compute) steady_clock total into
     //                                          the per-op table + trace for
@@ -207,6 +209,8 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
         hipdnn::abi::kRuntimeBeginCompute,
         hipdnn::abi::kSetOutputAllocator,
         hipdnn::abi::kRuntimeFlushOpProfile,
+        hipdnn::abi::kRuntimeSetProviderOption,
+        hipdnn::abi::kRuntimeGetProviderOption,
         "hipdnn_ep_runtime_add_cpu_profile"};
     std::vector<std::string> libraries;
     std::vector<std::string> library_paths;

@@ -76,6 +76,11 @@ public:
   // output buffer).
   void set_output_allocator(const output_allocator_t *allocator) const;
 
+  // Copy one session-scoped provider option into the loaded artifact's
+  // RuntimeState. No-op when an older cached artifact does not export the
+  // optional setter.
+  void set_provider_option(const char *key, const char *value) const;
+
   // Invokes the optional `hipdnn_ep_runtime_begin_compute` hook to invalidate
   // per-forward-pass runtime caches (e.g. the GQA seqlens_k cache). create()
   // warns when the symbol is absent.
@@ -141,6 +146,9 @@ private:
   // begin_compute_fn_). Null when the model.dll predates the export.
   using SetOutputAllocatorFn = void (*)(void *, const output_allocator_t *);
   SetOutputAllocatorFn set_output_allocator_fn_;
+
+  using SetProviderOptionFn = void (*)(void *, const char *, const char *);
+  SetProviderOptionFn set_provider_option_fn_;
 
   // Cached function pointer for hipdnn_ep_runtime_flush_op_profile. Same
   // contract as begin_compute_fn_: resolved once at session creation, null

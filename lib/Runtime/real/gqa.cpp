@@ -85,6 +85,17 @@
 // Dispatch helpers (shared by the fused and decomposed paths)
 //===----------------------------------------------------------------------===//
 
+// The session's effective mode. The provider option only reaches the state
+// after gqa_autotune_create() has run, so the first GQA call of the session
+// resolves it; resolve is a no-op from then on.
+static hipdnn_ep::GqaAutotuneMode gqa_autotune_mode(RuntimeState *state) {
+  void *policy = state->gqa_autotune_policy;
+  hipdnn_ep::gqa_autotune_resolve_provider_mode(
+      policy,
+      hipdnn_ep_runtime_get_provider_option(state, "gqa_autotune_mode"));
+  return hipdnn_ep::gqa_autotune_mode(policy);
+}
+
 // Env-var gate to cache seqlens_k_val across the GQA layers in a single
 // forward pass. Default ON. Caching skips the per-layer
 // hipMemcpyAsync(D2H) + hipStreamSynchronize on both paths after the first
@@ -495,8 +506,7 @@ static int gqa_forward_fused(
       // scan and therefore the split count that wins.
       const int kv_dtype = kv_dtype_abi(kv_format);
       int drc;
-      if (hipdnn_ep::gqa_autotune_mode(state->gqa_autotune_policy) ==
-          hipdnn_ep::GqaAutotuneMode::Online) {
+      if (gqa_autotune_mode(state) == hipdnn_ep::GqaAutotuneMode::Online) {
         drc = hip_gqa_flash_decode(
             stream, qSrc, present_key, present_value, output, partials,
             static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
@@ -717,8 +727,7 @@ static int gqa_forward_fused(
   }
 
   int fp_rc;
-  if (hipdnn_ep::gqa_autotune_mode(state->gqa_autotune_policy) ==
-      hipdnn_ep::GqaAutotuneMode::Online) {
+  if (gqa_autotune_mode(state) == hipdnn_ep::GqaAutotuneMode::Online) {
     fp_rc = hip_gqa_flash_prefill(
         stream, qSrc, kAttn, vAttn, output, static_cast<int>(B),
         static_cast<int>(H), static_cast<int>(G), static_cast<int>(sq),
