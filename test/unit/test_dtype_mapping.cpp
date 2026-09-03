@@ -5,10 +5,12 @@
 
 // Unit test for onnxElementTypeToMlirDenseElementType (morphizen/mlir-imp).
 //
-// Regression guard for the QDQ UINT16 sign-flip: inline ONNX UINT16 dense
-// constants must import as *unsigned* i16 (ui16), not signless i16. A
-// downstream QDQ dtype classifier treats signless i16 as signed INT16, which
-// sign-flips any UINT16 value >= 32768 and corrupts DequantizeLinear output.
+// Regression guard for the QDQ unsigned-integer sign-flip: inline ONNX
+// unsigned dense constants (UINT8, UINT16, ...) must import as *unsigned*
+// integers (ui8, ui16, ...), not signless. A downstream QDQ dtype classifier
+// treats a signless integer as the signed type of the same width, which
+// sign-flips any unsigned value >= 2^(width-1) and corrupts DequantizeLinear
+// output.
 //
 // This cannot be a LIT test: hip-mlir-opt has no ONNX-protobuf front end and
 // only consumes textual MLIR, so the ONNX-dtype -> MLIR-type mapping is only
@@ -69,11 +71,11 @@ int main() {
   }
 
   // --- INT16 must remain SIGNLESS i16 so the QDQ classifier still reads it as
-  // INT16 (Quark ResNet50-INT8 bias path is unaffected by the fix) -----------
+  // signed INT16 (signed integers are unaffected by the fix) -----------------
   {
     auto t = asInt(onnxElementTypeToMlirDenseElementType(ONNX_INT16, builder));
     check(t && t.getWidth() == 16 && t.isSignless(),
-          "dense(INT16) -> signless i16 (ResNet50-INT8 bias path unchanged)");
+          "dense(INT16) -> signless i16 (signed path unchanged)");
   }
 
   // --- Unsigned 8-bit keeps its unsigned identity (ui8) too; signed INT8 still
