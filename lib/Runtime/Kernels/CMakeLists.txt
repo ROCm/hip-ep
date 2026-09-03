@@ -147,12 +147,16 @@ _rtc_embed_device_source(kMhaDeviceSource
 _rtc_embed_concatenated(kMatMulNBitsDeviceSource _rtc_embedded_mnb
     ${CMAKE_CURRENT_SOURCE_DIR}/include/hip_arch_compat.h
     ${CMAKE_CURRENT_SOURCE_DIR}/hip/rtc/matmul_nbits_device.h)
+_rtc_embed_concatenated(kGqaDeviceSource _rtc_embedded_gqa
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/hip_arch_compat.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/hip/rtc/gqa_device.h)
 
 set(_rtc_sources
     rtc/hiprtc_module.hip
     ${_rtc_embedded_sub}
     ${_rtc_embedded_mha}
     ${_rtc_embedded_mnb}
+    ${_rtc_embedded_gqa}
 )
 
 # One SHARED target per arch. Each builds a fatbin with that single slice;
