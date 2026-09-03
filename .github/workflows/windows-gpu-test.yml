@@ -1,0 +1,766 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+name: Windows GPU Test
+
+# Runs the perf / smoke / OGA / L2 suites on the self-hosted AMD GPU box
+# against the gpu-test-package and hip-python-package artifacts of the same
+# run.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: StrixHalo
+    # Never cancel an in-progress GPU run: queue newer runs of the same ref
+    # behind it instead of killing the long-running perf / OGA / L2 suites.
+    # The self-hosted StrixHalo runner already serializes physically, so
+    # this group only adds explicit logical queueing for clarity.
+    concurrency:
+      group: gpu-test-${{ github.ref }}
+      cancel-in-progress: false
+
+    permissions:
+      contents: read
+      pull-requests: write
+
+    env:
+      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
+
+    steps:
+      - name: Clean workspace
+        shell: cmd
+        run: |
+          taskkill /f /im hip-onnx-runner.exe >nul 2>&1 || ver >nul
+          taskkill /f /im onnxruntime_perf_test.exe >nul 2>&1 || ver >nul
+          taskkill /f /im model_benchmark.exe >nul 2>&1 || ver >nul
+          if exist gpu-test-package rd /s /q gpu-test-package
+          if exist l2-results rd /s /q l2-results
+          if exist oga-results rd /s /q oga-results
+          if exist oga-smoke-venv rd /s /q oga-smoke-venv
+          if exist oga-smoke-results rd /s /q oga-smoke-results
+          if exist wheelpkg rd /s /q wheelpkg
+          if exist vlm-venv rd /s /q vlm-venv
+          if exist vlm-results rd /s /q vlm-results
+
+      - name: Download GPU test package
+        uses: actions/download-artifact@v4
+        with:
+          name: gpu-test-package
+          path: gpu-test-package
+
+      - name: Download Python wheel package
+        uses: actions/download-artifact@v4
+        with:
+          name: hip-python-package
+          path: wheelpkg
+
+      - name: Run onnxruntime_perf_test (GPU)
+        shell: cmd
+        run: |
+          set PATH=%CD%\gpu-test-package\bin;%PATH%
+          set MODEL_DIR=${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\model
+          if not exist "%MODEL_DIR%" (
+            echo [ERROR] MODEL_DIR not found: %MODEL_DIR%
+            exit /b 1
+          )
+          set FOUND=0
+          for /r "%MODEL_DIR%" %%M in (*seq128.onnx) do set FOUND=1
+          if "%FOUND%"=="0" (
+            echo [ERROR] No *seq128.onnx models found in %MODEL_DIR%
+            exit /b 1
+          )
+          set FAILED=0
+          cd gpu-test-package\bin
+          mkdir ..\results 2>nul
+          for /r "%MODEL_DIR%" %%M in (*seq128.onnx) do (
+            echo === Testing %%~nxM ===
+            onnxruntime_perf_test.exe ^
+              --plugin_ep_libs "hipgpu|hipgpu.dll" ^
+              --plugin_eps "hipgpu" ^
+              --plugin_ep_options "config_file|..\morphizen_config.json" ^
+              -C "session.disable_cpu_ep_fallback|1" ^
+              -t 30 -c 1 -s ^
+              "%%M" > "..\results\%%~nxM.txt" 2>&1
+            type "..\results\%%~nxM.txt"
+            if errorlevel 1 set FAILED=1
+          )
+          exit /b %FAILED%
+
+      # ----------------------------------------------------------------------
+      # Native artifact smoke test (artifact_format=NATIVE), direct hipgpu EP.
+      # Exercises the dual-format path: CompilerDriver emits a per-model .dll
+      # (lld-link in-process), InferenceState loads it via morphizen::Plugin
+      # (LoadLibrary). LLVM IR stays the production default; native is opt-in.
+      # lld-link consumes the MSVC/UCRT release CRT import libs + hipdnn-ep-tls.lib
+      # staged into gpu-test-package/lib (+ LIB) to link the model .dll. This is
+      # now a real gate (no exit /b 0): if native breaks, the job fails.
+      # ----------------------------------------------------------------------
+      - name: Run native-artifact smoke test (GPU)
+        if: always()
+        shell: cmd
+        run: |
+          set THEROCK_DIST=%CD%\gpu-test-package
+          set PATH=%CD%\gpu-test-package\bin;%PATH%
+          set LIB=%CD%\gpu-test-package\lib
+          set MODEL_DIR=${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\model
+          if not exist "%MODEL_DIR%" (
+            echo [SKIP] MODEL_DIR not found: %MODEL_DIR%
+            exit /b 0
+          )
+          cd gpu-test-package\bin
+          mkdir ..\results-native 2>nul
+          rem Smoke, not a benchmark: first seq128 model, ONE inference (-r 1).
+          rem Exercises native compile -> link -> load -> execute end-to-end
+          rem without a full perf sweep (native is opt-in / non-production; the
+          rem LLVM-IR default path is what the perf jobs above measure).
+          set "SMOKE_MODEL="
+          for /r "%MODEL_DIR%" %%M in (*seq128.onnx) do if not defined SMOKE_MODEL set "SMOKE_MODEL=%%M"
+          if not defined SMOKE_MODEL (
+            echo [SKIP] no *seq128.onnx model under %MODEL_DIR%
+            exit /b 0
+          )
+          echo === Native smoke %SMOKE_MODEL% ===
+          onnxruntime_perf_test.exe ^
+            --plugin_ep_libs "hipgpu|hipgpu.dll" ^
+            --plugin_eps "hipgpu" ^
+            --plugin_ep_options "config_file|..\morphizen_config.json artifact_format|NATIVE" ^
+            -C "session.disable_cpu_ep_fallback|1" ^
+            -r 1 -c 1 -s ^
+            "%SMOKE_MODEL%" > "..\results-native\smoke.txt" 2>&1
+          set RC=%ERRORLEVEL%
+          type "..\results-native\smoke.txt"
+          rem Real gate: hipdnn-ep-tls.lib is now staged into gpu-test-package/lib
+          rem so the NATIVE compile -> lld-link -> load -> execute path must pass.
+          exit /b %RC%
+
+      # ----------------------------------------------------------------------
+      # AMD GPU umbrella NATIVE smoke test: same NATIVE compile/link/load path,
+      # but driven through the amdgpu-ep umbrella instead of the hipgpu EP
+      # directly. profile=hip (an umbrella option, ep.amdgpuexecutionprovider.
+      # prefix) selects the hipgpu backend; the umbrella forwards non-umbrella
+      # session-config entries verbatim, so artifact_format is passed as a raw
+      # ep.hipgpu.* entry to reach the backend. Real gate (no exit /b 0).
+      # ----------------------------------------------------------------------
+      - name: Run AMD GPU umbrella native smoke test (GPU)
+        if: always()
+        shell: cmd
+        run: |
+          set THEROCK_DIST=%CD%\gpu-test-package
+          set PATH=%CD%\gpu-test-package\bin;%PATH%
+          set LIB=%CD%\gpu-test-package\lib
+          set MODEL_DIR=${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\model
+          if not exist "%MODEL_DIR%" (
+            echo [SKIP] MODEL_DIR not found: %MODEL_DIR%
+            exit /b 0
+          )
+          cd gpu-test-package\bin
+          mkdir ..\results-amdgpu-native 2>nul
+          set "SMOKE_MODEL="
+          for /r "%MODEL_DIR%" %%M in (*seq128.onnx) do if not defined SMOKE_MODEL set "SMOKE_MODEL=%%M"
+          if not defined SMOKE_MODEL (
+            echo [SKIP] no *seq128.onnx model under %MODEL_DIR%
+            exit /b 0
+          )
+          echo === AMD GPU umbrella native smoke %SMOKE_MODEL% ===
+          onnxruntime_perf_test.exe ^
+            --plugin_ep_libs "AMDGPUExecutionProvider|amdgpu-ep.dll" ^
+            --plugin_eps "AMDGPUExecutionProvider" ^
+            --plugin_ep_options "profile|hip" ^
+            -C "session.disable_cpu_ep_fallback|1" ^
+            -C "ep.hipgpu.artifact_format|NATIVE" ^
+            -r 1 -c 1 -s ^
+            "%SMOKE_MODEL%" > "..\results-amdgpu-native\smoke.txt" 2>&1
+          set RC=%ERRORLEVEL%
+          type "..\results-amdgpu-native\smoke.txt"
+          exit /b %RC%
+
+      # ----------------------------------------------------------------------
+      # EPContext export + import perf test (PR #132 constants-file-in-tar path).
+      # Limited to full_model_seq128 to bound runtime: each model triggers
+      # one export pass (~60 s + N GB constants-file write) plus one import perf
+      # pass (-t 30). The _ctx.onnx + _MORPHIZEN.bin are deleted right after
+      # import to keep runner disk usage bounded.
+      # ----------------------------------------------------------------------
+      - name: Run EPContext export/import perf test (GPU)
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $pkgBin = Join-Path $PWD "gpu-test-package\bin"
+          $env:PATH = "$pkgBin;$env:PATH"
+
+          $modelDir = "${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\model"
+          if (-not (Test-Path $modelDir)) {
+            Write-Host "[SKIP] MODEL_DIR not found: $modelDir"
+            exit 0
+          }
+          $models = @(Get-ChildItem $modelDir -Recurse -Filter "full_model_seq128.onnx" -ErrorAction SilentlyContinue)
+          if ($models.Count -eq 0) {
+            Write-Host "[SKIP] No full_model_seq128.onnx in $modelDir"
+            exit 0
+          }
+
+          New-Item -ItemType Directory -Force -Path "gpu-test-package\results-epctx-export" | Out-Null
+          New-Item -ItemType Directory -Force -Path "gpu-test-package\results-epctx-import" | Out-Null
+          $cacheDir = Join-Path $PWD "gpu-test-package\epctx-cache"
+          New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+
+          $failed = 0
+          Push-Location gpu-test-package\bin
+          foreach ($m in $models) {
+            $exportFile = "..\results-epctx-export\$($m.Name).txt"
+            $importFile = "..\results-epctx-import\$($m.Name).txt"
+            $ctxPath = Join-Path $cacheDir "$($m.BaseName)_ctx.onnx"
+            Remove-Item "$ctxPath*" -ErrorAction SilentlyContinue
+
+            Write-Host "=== EPContext export: $($m.Name) ==="
+            & .\onnxruntime_perf_test.exe `
+              --plugin_ep_libs "hipgpu|hipgpu.dll" `
+              --plugin_eps "hipgpu" `
+              --plugin_ep_options "config_file|..\morphizen_config.json" `
+              -C "session.disable_cpu_ep_fallback|1 ep.context_enable|1 ep.context_embed_mode|0 ep.context_file_path|$ctxPath" `
+              -t 5 -c 1 -s -I `
+              $m.FullName 2>&1 | Tee-Object -FilePath $exportFile
+            if ($LASTEXITCODE -ne 0) {
+              Add-Content $exportFile "[ERROR] EPContext export failed"
+              $failed = 1
+              Remove-Item "$ctxPath*" -ErrorAction SilentlyContinue
+              continue
+            }
+            if (-not (Test-Path $ctxPath)) {
+              Add-Content $exportFile "[ERROR] _ctx.onnx not produced"
+              $failed = 1
+              continue
+            }
+
+            Write-Host "=== EPContext import: $($m.Name) ==="
+            & .\onnxruntime_perf_test.exe `
+              --plugin_ep_libs "hipgpu|hipgpu.dll" `
+              --plugin_eps "hipgpu" `
+              --plugin_ep_options "config_file|..\morphizen_config.json" `
+              -C "session.disable_cpu_ep_fallback|1" `
+              -t 30 -c 1 -s -I `
+              $ctxPath 2>&1 | Tee-Object -FilePath $importFile
+            if ($LASTEXITCODE -ne 0) { $failed = 1 }
+
+            Remove-Item "$ctxPath*" -ErrorAction SilentlyContinue
+          }
+          Pop-Location
+          Remove-Item $cacheDir -Recurse -Force -ErrorAction SilentlyContinue
+          exit $failed
+
+      # -----------------------------------------------------------------------
+      # OGA benchmark: run model_benchmark against pre-placed LLM models.
+      # Models are at ${{ runner.workspace }}/oga-models/<model>/
+      # with genai_config.json pre-configured for MorphiZenEP pipeline.
+      # Skipped gracefully when model directory does not exist.
+      # -----------------------------------------------------------------------
+      - name: Run OGA benchmark
+        if: always()
+        timeout-minutes: 30
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $pkgBin = Join-Path $PWD "gpu-test-package\bin"
+          $env:PATH = "$pkgBin;$env:PATH"
+
+          # amdgpu-oga-models holds AMDGPU-profile genai_config copies; it was
+          # generated once on the GPU runner and persists across runs, so just
+          # consume it here (no re-copy / no config rewrite). It must be present
+          # -- treat its absence as an error, not a skip.
+          $ogaModelRoot = "${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\amdgpu-oga-models"
+          if (-not (Test-Path $ogaModelRoot)) {
+            Write-Host "[ERROR] AMDGPU OGA model directory not found: $ogaModelRoot"
+            exit 1
+          }
+
+          $benchmark = Join-Path $pkgBin "model_benchmark.exe"
+          if (-not (Test-Path $benchmark)) {
+            Write-Host "[SKIP] model_benchmark.exe not found"
+            exit 0
+          }
+
+          New-Item -ItemType Directory -Force -Path "oga-results" | Out-Null
+
+          $failed = 0
+          foreach ($modelDir in (Get-ChildItem $ogaModelRoot -Directory)) {
+            $genaiCfgPath = Join-Path $modelDir.FullName "genai_config.json"
+            if (-not (Test-Path $genaiCfgPath)) {
+              Write-Host "[SKIP] No genai_config.json in $($modelDir.Name)"
+              continue
+            }
+            $promptFile = Join-Path $modelDir.FullName "prompt.txt"
+            $promptArgs = if (Test-Path $promptFile) {
+              @("--prompt_file", $promptFile)
+            } else {
+              @("-l", "128")
+            }
+            $outFile = "oga-results\$($modelDir.Name).txt"
+            # MorphiZenEP is selected via genai_config.json provider_options and
+            # the EP DLL is auto-discovered next to onnxruntime-genai.dll. Do NOT
+            # pass --ep_library: upstream model_benchmark rejects it, and where
+            # supported it double-registers the EP and crashes on shutdown.
+            Write-Host "=== OGA Benchmark: $($modelDir.Name) ==="
+            $bargs = @('-i', $modelDir.FullName, '-g', '128', '-r', '5', '-w', '1', '-b', '1') + $promptArgs + @('-v')
+            $tmpOut = [System.IO.Path]::GetTempFileName()
+            $tmpErr = [System.IO.Path]::GetTempFileName()
+            # Launch model_benchmark and sample its per-process GPU memory via
+            # Windows perf counters while it runs (peak of dedicated + shared).
+            # External measurement keeps the EP/inference path untouched.
+            $proc = Start-Process -FilePath $benchmark -ArgumentList $bargs `
+              -NoNewWindow -PassThru `
+              -RedirectStandardOutput $tmpOut -RedirectStandardError $tmpErr
+            # Cache the native handle so $proc.ExitCode is readable after exit;
+            # without this Start-Process -PassThru can leave ExitCode $null, and
+            # `$null -ne 0` is $true in PowerShell -> false failure.
+            $null = $proc.Handle
+            $peakDed = 0L
+            $peakShared = 0L
+            while (-not $proc.HasExited) {
+              Start-Sleep -Milliseconds 1500
+              try {
+                $d = (Get-Counter "\GPU Process Memory(pid_$($proc.Id)_*)\Dedicated Usage" -ErrorAction Stop).CounterSamples |
+                  Measure-Object -Property CookedValue -Sum
+                if ($d.Sum -gt $peakDed) { $peakDed = [long]$d.Sum }
+                $s = (Get-Counter "\GPU Process Memory(pid_$($proc.Id)_*)\Shared Usage" -ErrorAction Stop).CounterSamples |
+                  Measure-Object -Property CookedValue -Sum
+                if ($s.Sum -gt $peakShared) { $peakShared = [long]$s.Sum }
+              } catch { }
+            }
+            $proc.WaitForExit()
+            # Reassemble tool output into $outFile (so the publish-step parsers
+            # see model_benchmark's TTFT/TPS/Peak working set), echo to the log,
+            # then append the sampled GPU peaks for the publish step.
+            Get-Content $tmpOut, $tmpErr -ErrorAction SilentlyContinue | Set-Content $outFile
+            Add-Content $outFile "[GPUMEM] Dedicated GPU memory: $peakDed bytes"
+            Add-Content $outFile "[GPUMEM] Shared GPU memory: $peakShared bytes"
+            Get-Content $outFile | Write-Host
+            Remove-Item $tmpOut, $tmpErr -ErrorAction SilentlyContinue
+            $ec = $proc.ExitCode
+            if ($null -ne $ec -and $ec -ne 0) { $failed = 1 }
+          }
+          exit $failed
+
+      - name: Setup Python 3.14 (wheel smoke)
+        if: always()
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Run OGA wheel smoke (Python)
+        if: always()
+        timeout-minutes: 40
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          $model = "${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\amdgpu-oga-models\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml"
+          if (-not (Test-Path $model)) { Write-Host "[SKIP] model not found: $model"; exit 0 }
+
+          $pkg = "$PWD\wheelpkg"
+          $venv = "$PWD\oga-smoke-venv"
+          if (Test-Path $venv) { Remove-Item $venv -Recurse -Force }
+          python -m venv $venv
+          $py = "$venv\Scripts\python.exe"
+
+          Push-Location "$pkg\wheels"
+          & $py -m pip install --quiet `
+            (Get-Item onnxruntime_directml-*.whl).Name `
+            (Get-Item onnxruntime_genai_directml-*.whl).Name `
+            psutil tqdm pandas
+          if ($LASTEXITCODE -ne 0) { Pop-Location; Write-Host "[ERROR] wheels install failed"; exit 1 }
+          & $py -m pip install --quiet --no-deps `
+            (Get-Item onnxruntime_ep_amdgpu-*.whl).Name `
+            (Get-Item onnxruntime_ep_hip-*.whl).Name
+          Pop-Location
+          if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] EP wheel install failed"; exit 1 }
+
+          New-Item -ItemType Directory -Force -Path oga-smoke-results | Out-Null
+          & $py "$pkg\run_onnx.py" --benchmark "$pkg\benchmark_e2e.py" `
+            -i $model -l 128 -g 128 -r 5 -w 1 -b 1 -m -1 -v `
+            2>&1 | Tee-Object -FilePath "oga-smoke-results\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml.txt"
+          exit $LASTEXITCODE
+
+      - name: Run VLM benchmark (Python + C++ bin)
+        if: always()
+        timeout-minutes: 40
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          $vlmRoot = "${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\amdgpu-vlm-models"
+          $vlmImage = "${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\amdgpu-vlm-images\dog.jpg"
+          if (-not (Test-Path $vlmRoot)) { Write-Host "[SKIP] VLM model dir not found: $vlmRoot"; exit 0 }
+          if (-not (Test-Path $vlmImage)) { Write-Host "[SKIP] VLM image not found: $vlmImage"; exit 0 }
+
+          $bin = "$PWD\gpu-test-package\bin"
+          $script = "$PWD\wheelpkg\vlm_benchmark.py"
+          if (-not (Test-Path $script)) { Write-Host "[SKIP] vlm_benchmark.py not found: $script"; exit 0 }
+
+          $venv = "$PWD\vlm-venv"
+          if (Test-Path $venv) { Remove-Item $venv -Recurse -Force }
+          python -m venv $venv
+          $py = "$venv\Scripts\python.exe"
+          Push-Location "$PWD\gpu-test-package\wheels"
+          & $py -m pip install --quiet `
+            (Get-Item onnxruntime_directml-*.whl).Name `
+            (Get-Item onnxruntime_genai_directml-*.whl).Name `
+            Pillow numpy psutil
+          Pop-Location
+          if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] wheel install failed"; exit 1 }
+
+          $launcher = "$PWD\run_vlm.py"
+          @'
+          import ctypes, os, runpy, sys
+          BIN = sys.argv[1]
+          os.add_dll_directory(BIN)
+          os.environ["PATH"] = BIN + os.pathsep + os.environ.get("PATH", "")
+          ctypes.CDLL(os.path.join(BIN, "onnxruntime.dll"))
+          sys.argv = sys.argv[2:]
+          runpy.run_path(sys.argv[0], run_name="__main__")
+          '@ | Set-Content -Path $launcher -Encoding UTF8
+
+          New-Item -ItemType Directory -Force -Path "vlm-results" | Out-Null
+          $failed = 0
+          foreach ($modelDir in (Get-ChildItem $vlmRoot -Directory)) {
+            if (-not (Test-Path (Join-Path $modelDir.FullName "genai_config.json"))) {
+              Write-Host "[SKIP] No genai_config.json in $($modelDir.Name)"
+              continue
+            }
+            $outFile = "vlm-results\$($modelDir.Name).txt"
+            Write-Host "=== VLM Benchmark: $($modelDir.Name) ==="
+            & $py $launcher $bin $script `
+              -m $modelDir.FullName -i $vlmImage -p "Describe this image in detail." `
+              --max_tokens 128 --max_length 4096 -n 3 -w 1 -v `
+              2>&1 | Tee-Object -FilePath $outFile
+            if ($LASTEXITCODE -ne 0) { $failed = 1 }
+          }
+          exit $failed
+
+      # -----------------------------------------------------------------------
+      # L2 accuracy test: compare MorphiZen EP vs CPU output for each model
+      # in l2-test-models/. Skipped gracefully when directory does not exist.
+      # -----------------------------------------------------------------------
+      - name: Run L2 accuracy tests
+        if: always()
+        timeout-minutes: 10
+        shell: cmd
+        run: |
+          setlocal enabledelayedexpansion
+          set PATH=%CD%\gpu-test-package\bin;%PATH%
+          rem The EP DLL is now hipgpu.dll; hip-onnx-runner's legacy default name
+          rem is onnxruntime_morphizen_ep.dll, so point it at the new DLL.
+          set MORPHIZEN_EP_LIB=%CD%\gpu-test-package\bin\hipgpu.dll
+          set L2_MODEL_DIR=${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\l2-test-models
+          if not exist "%L2_MODEL_DIR%" (
+            echo [SKIP] L2 model directory not found: %L2_MODEL_DIR%
+            exit /b 0
+          )
+          set FOUND=0
+          for /r "%L2_MODEL_DIR%" %%M in (*.onnx) do set FOUND=1
+          if "!FOUND!"=="0" (
+            echo [SKIP] No .onnx models found in %L2_MODEL_DIR%
+            exit /b 0
+          )
+          cd gpu-test-package\bin
+          set FAILED=0
+          for /r "%L2_MODEL_DIR%" %%M in (*.onnx) do (
+            set "MDIR=%%~dpM"
+            set "REL=!MDIR:%L2_MODEL_DIR%\=!"
+            set "OUT=..\..\l2-results\!REL!%%~nM.txt"
+            mkdir "..\..\l2-results\!REL!" 2>nul
+            echo === L2 test: !REL!%%~nxM ===
+            rd /s /q "%%~nM_o_dump" 2>nul
+            rd /s /q "%%~nM_cpu_o_dump" 2>nul
+            hip-onnx-runner.exe -m "%%M" -d 2 -s 42 > "!OUT!" 2>&1
+            if errorlevel 1 (
+              echo [ERROR] EP inference failed>> "!OUT!"
+              type "!OUT!"
+              set FAILED=1
+            ) else (
+              hip-onnx-runner.exe -m "%%M" -d 2 -s 42 -n >> "!OUT!" 2>&1
+              if errorlevel 1 (
+                echo [ERROR] CPU inference failed>> "!OUT!"
+                type "!OUT!"
+                set FAILED=1
+              ) else (
+                hip-onnx-runner.exe -L "%%~nM_o_dump,%%~nM_cpu_o_dump" >> "!OUT!" 2>&1
+                type "!OUT!"
+              )
+            )
+          )
+          exit /b !FAILED!
+
+      - name: Publish L2 results
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $l2Dir = "l2-results"
+          if (-not (Test-Path $l2Dir)) {
+            Write-Host "No L2 results to publish (directory not found)"
+            return
+          }
+          $files = Get-ChildItem $l2Dir -Recurse -Filter "*.txt" -ErrorAction SilentlyContinue
+          if (-not $files) {
+            Write-Host "No L2 result files found"
+            return
+          }
+
+          $runUrl = "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          $rawSha = if ("${{ github.event_name }}" -eq "pull_request") { "${{ github.event.pull_request.head.sha }}" } else { "${{ github.sha }}" }
+          $sha = $rawSha.Substring(0, 7)
+          $prNumber = "${{ github.event.pull_request.number }}"
+          $threshold = 0.01
+          $l2Root = (Resolve-Path $l2Dir).Path
+
+          $tableRows = ""
+          foreach ($f in $files) {
+            $rel = $f.FullName.Substring($l2Root.Length).TrimStart('\', '/')
+            $model = $rel -replace '\.txt$', '' -replace '\\', '/'
+            $content = Get-Content $f.FullName -Raw
+            $l2Match = [regex]::Match($content, 'Combined L2 \(stacked diffs\):\s+([\d.eE+-]+)\s+\(total_elems:\s+(\d+),.*?skipped_nonfinite:\s+(\d+)\)')
+            $errMatch = [regex]::Match($content, '\[ERROR\]\s*(.+)')
+            if ($l2Match.Success) {
+              $l2val = [double]$l2Match.Groups[1].Value
+              $elems = $l2Match.Groups[2].Value
+              $skipped = $l2Match.Groups[3].Value
+              $tableRows += "| $model | $l2val | $elems | $skipped |`n"
+            } elseif ($errMatch.Success) {
+              $reason = $errMatch.Groups[1].Value.Trim()
+              $tableRows += "| $model | $reason | - | - |`n"
+            } else {
+              $tableRows += "| $model | error | - | - |`n"
+            }
+          }
+
+          $header = "## L2 Accuracy Results (EP vs CPU)`n`n" +
+                    "| Model | Combined L2 | Total Elems | Skipped NaN/Inf |`n" +
+                    "|-------|------------|------------|----------------|`n"
+          $footer = "`nThreshold: $threshold | Run: [${{ github.run_number }}]($runUrl) - Commit: ``$sha``"
+          $summary = $header + $tableRows + $footer
+
+          Write-Host $summary
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+
+          if ("${{ github.event_name }}" -eq "pull_request" -and $prNumber) {
+            $marker = "<!-- morphizen-l2-results -->"
+            $body = "$marker`n$summary"
+
+            $commentsJson = gh api "repos/${{ github.repository }}/issues/$prNumber/comments" 2>$null
+            $ghOk = ($LASTEXITCODE -eq 0)
+            $existing = $null
+            if ($ghOk -and $commentsJson) {
+              $comments = $commentsJson | ConvertFrom-Json
+              $found = $comments | Where-Object { $_.body -and $_.body.StartsWith($marker) } | Select-Object -First 1
+              if ($found) { $existing = $found.id }
+            }
+
+            if ($ghOk -and $existing) {
+              Write-Host "Updating existing L2 PR comment $existing"
+              gh api --method PATCH "repos/${{ github.repository }}/issues/comments/$existing" `
+                -f body="$body"
+              if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: Failed to update L2 PR comment" }
+            } elseif ($ghOk) {
+              Write-Host "Creating new L2 PR comment"
+              gh pr comment $prNumber -R "${{ github.repository }}" --body "$body"
+              if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: Failed to create L2 PR comment" }
+            } else {
+              Write-Host "WARNING: gh api unreachable, skipping L2 PR comment"
+            }
+          }
+
+      # Parse QPS from result files and publish:
+      #   - PR trigger  → post/update a PR comment via gh CLI (github-actions[bot])
+      #   - other trigger → write to GITHUB_STEP_SUMMARY only
+      - name: Publish perf results
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $resultsDir = "gpu-test-package/results"
+          $runUrl = "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          $rawSha = if ("${{ github.event_name }}" -eq "pull_request") { "${{ github.event.pull_request.head.sha }}" } else { "${{ github.sha }}" }
+          $sha = $rawSha.Substring(0, 7)
+          $prNumber = "${{ github.event.pull_request.number }}"
+
+          # Helper: build table rows from a results dir.
+          # Each file: extract Number of inferences per second / Session
+          # creation / 1st infer / Avg CPU / Peak WS for the standard
+          # 6-column format (Model | QPS | Session (s) | 1st Infer (ms) |
+          # CPU% | Mem (MB)).
+          function Get-PerfRows($dir) {
+            $rows = ""
+            foreach ($f in (Get-ChildItem "$dir/*.txt" -ErrorAction SilentlyContinue)) {
+              $model = $f.BaseName -replace '\.onnx$', ''
+              $content = Get-Content $f.FullName -Raw
+              $qpsMatch = [regex]::Match($content, 'Number of inferences per second:\s+([\d.]+)')
+              $sessMatch = [regex]::Match($content, 'Session creation time cost:\s+([\d.]+)\s+s')
+              $firstMatch = [regex]::Match($content, 'First inference time cost:\s+(\d+)\s+ms')
+              $cpuMatch = [regex]::Match($content, 'Avg CPU usage:\s+(\d+)\s+%')
+              $memMatch = [regex]::Match($content, 'Peak working set size:\s+(\d+)\s+bytes')
+              $sess = if ($sessMatch.Success) { $sessMatch.Groups[1].Value } else { "-" }
+              $first = if ($firstMatch.Success) { $firstMatch.Groups[1].Value } else { "-" }
+              $cpu = if ($cpuMatch.Success) { $cpuMatch.Groups[1].Value } else { "-" }
+              $memMB = if ($memMatch.Success) { "{0:F0}" -f ([double]$memMatch.Groups[1].Value / 1MB) } else { "-" }
+              if ($qpsMatch.Success) {
+                $qps = "{0:F2}" -f [double]$qpsMatch.Groups[1].Value
+                $rows += "| $model | $qps | $sess | $first | $cpu | $memMB |`n"
+              } else {
+                $rows += "| $model | failed | $sess | $first | $cpu | $memMB |`n"
+              }
+            }
+            return $rows
+          }
+
+          # Build table rows from result files
+          $tableRows = Get-PerfRows $resultsDir
+          if (-not $tableRows) { $tableRows = "| (no results) | - | - | - | - | - |`n" }
+
+          $perfHeader = "| Model | QPS | Session (s) | 1st Infer (ms) | CPU% | Mem (MB) |`n" +
+                        "|-------|----:|----:|----:|----:|----:|`n"
+          $header = "## MorphiZen EP Performance Results`n`n" + $perfHeader
+
+          # EPContext export/import perf tables (full_model_seq128 only).
+          $epctxExportRows = Get-PerfRows "gpu-test-package/results-epctx-export"
+          $epctxImportRows = Get-PerfRows "gpu-test-package/results-epctx-import"
+          $epctxSection = ""
+          if ($epctxExportRows) {
+            $epctxSection += "`n## EPContext Export Performance`n`n" + $perfHeader + $epctxExportRows
+          }
+          if ($epctxImportRows) {
+            $epctxSection += "`n## EPContext Import Performance`n`n" + $perfHeader + $epctxImportRows
+          }
+
+          # --- OGA benchmark results ---
+          $ogaRows = ""
+          foreach ($f in (Get-ChildItem "oga-results/*.txt" -ErrorAction SilentlyContinue)) {
+            $model = $f.BaseName
+            $content = Get-Content $f.FullName -Raw
+            $ttftMatch = [regex]::Match($content, 'Prompt processing \(time to first token\):\s*\n\s*avg \(us\):\s+([\d.]+)')
+            $tpsMatch  = [regex]::Match($content, 'Token generation:\s*\n\s*avg \(us\):\s+([\d.]+)\s*\n\s*avg \(tokens/s\):\s+([\d.]+)')
+            $memMatch  = [regex]::Match($content, 'Peak working set size \(bytes\):\s+(\d+)')
+            $ttft = if ($ttftMatch.Success) { "{0:F1}" -f ([double]$ttftMatch.Groups[1].Value / 1000) } else { "-" }
+            $tps  = if ($tpsMatch.Success) { "{0:F1}" -f [double]$tpsMatch.Groups[2].Value } else { "-" }
+            $mem  = if ($memMatch.Success) { "{0:F2}" -f ([double]$memMatch.Groups[1].Value / 1GB) } else { "-" }
+            # GPU peak sampled externally during the run (see OGA benchmark
+            # step). Report the total (dedicated + shared): on the UMA APU the
+            # WDDM dedicated/shared split drifts with memory pressure run-to-run,
+            # but their sum -- the real footprint -- is stable.
+            $gpuDed = [regex]::Match($content, '\[GPUMEM\]\s*Dedicated GPU memory:\s+(\d+)\s+bytes')
+            $gpuSh  = [regex]::Match($content, '\[GPUMEM\]\s*Shared GPU memory:\s+(\d+)\s+bytes')
+            $gpuGB = if ($gpuDed.Success -or $gpuSh.Success) {
+              $tot = 0.0
+              if ($gpuDed.Success) { $tot += [double]$gpuDed.Groups[1].Value }
+              if ($gpuSh.Success) { $tot += [double]$gpuSh.Groups[1].Value }
+              "{0:F2}" -f ($tot / 1GB)
+            } else { "-" }
+            $ogaRows += "| $model | 1 | 5 | 128 | 128 | $ttft | $tps | $mem | $gpuGB |`n"
+          }
+          $ogaSection = ""
+          if ($ogaRows) {
+            $ogaSection = "`n## OGA Benchmark Results`n`n" +
+                          "| Model | Warmup | Reps | Prompt Len | Gen Tokens | TTFT (ms) | TPS | Peak Mem (GB) | GPU Mem (GB) |`n" +
+                          "|-------|----:|----:|----:|----:|----:|----:|----:|----:|`n" +
+                          $ogaRows
+          }
+
+          # --- OGA Python wheel smoke (benchmark_e2e.py) results ---
+          $smokeRows = ""
+          foreach ($f in (Get-ChildItem "oga-smoke-results/*.txt" -ErrorAction SilentlyContinue)) {
+            $model = $f.BaseName
+            $content = Get-Content $f.FullName -Raw
+            $ppMatch = [regex]::Match($content, 'Average Prompt Processing Throughput \(per token\):\s+([\d.]+)')
+            $tgMatch = [regex]::Match($content, 'Average Token Generation Throughput \(per token\):\s+([\d.]+)')
+            $ttft = if ($ppMatch.Success) { "{0:F0}" -f (128.0 / [double]$ppMatch.Groups[1].Value * 1000) } else { "-" }
+            $tps  = if ($tgMatch.Success) { "{0:F1}" -f [double]$tgMatch.Groups[1].Value } else { "-" }
+            if ($tgMatch.Success) {
+              $smokeRows += "| $model | $ttft | $tps |`n"
+            } else {
+              $smokeRows += "| $model | failed | - |`n"
+            }
+          }
+          $smokeSection = ""
+          if ($smokeRows) {
+            $smokeSection = "`n## OGA Wheel Smoke (Python benchmark_e2e.py)`n`n" +
+                            "| Model | TTFT (ms) | TPS |`n" +
+                            "|-------|----:|----:|`n" +
+                            $smokeRows
+          }
+
+          # --- VLM benchmark (vlm_benchmark.py) results ---
+          $vlmRows = ""
+          foreach ($f in (Get-ChildItem "vlm-results/*.txt" -ErrorAction SilentlyContinue)) {
+            $model = $f.BaseName
+            $content = Get-Content $f.FullName -Raw
+            $ttftMatch = [regex]::Match($content, 'Time To First Token \(TTFT\):\s*\n\s*Average:\s+([\d.]+)\s*ms')
+            $tpsMatch  = [regex]::Match($content, 'TPS:\s+([\d.]+)\s*tokens/sec')
+            $ttft = if ($ttftMatch.Success) { "{0:F1}" -f [double]$ttftMatch.Groups[1].Value } else { "-" }
+            $tps  = if ($tpsMatch.Success) { "{0:F1}" -f [double]$tpsMatch.Groups[1].Value } else { "-" }
+            $genMatch = [regex]::Match($content, '(?s)Generated output:\s*\n\s*-{10,}\s*\n(.*?)\n\s*-{10,}')
+            $gen = if ($genMatch.Success) {
+              $g = $genMatch.Groups[1].Value.Trim()
+              if ($g.Length -gt 128) { $g = $g.Substring(0, 128) }
+              ($g -replace '\r?\n', ' ' -replace '\|', '\|').Trim()
+            } else { "-" }
+            if ($ttftMatch.Success) {
+              $vlmRows += "| $model | $ttft | $tps | $gen |`n"
+            } else {
+              $vlmRows += "| $model | failed | - | $gen |`n"
+            }
+          }
+          $vlmSection = ""
+          if ($vlmRows) {
+            $vlmSection = "`n## VLM Benchmark Results`n`n" +
+                          "| Model | TTFT (ms) | TPS | Output |`n" +
+                          "|-------|----:|----:|-------|`n" +
+                          $vlmRows
+          }
+
+          $footer = "`nRun: [${{ github.run_number }}]($runUrl) - Commit: ``$sha``"
+          $summary = $header + $tableRows + $epctxSection + $ogaSection + $smokeSection + $vlmSection + $footer
+
+          # Always write to step summary and log
+          Write-Host $summary
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+
+          # On pull_request events, also post/update a PR comment via gh CLI.
+          # Errors are non-fatal — step summary is already written above.
+          if ("${{ github.event_name }}" -eq "pull_request" -and $prNumber) {
+            $marker = "<!-- morphizen-perf-results -->"
+            $body = "$marker`n$summary"
+
+            # Find existing comment with marker using PowerShell JSON parsing (avoids jq escaping issues)
+            $commentsJson = gh api "repos/${{ github.repository }}/issues/$prNumber/comments" 2>$null
+            $ghOk = ($LASTEXITCODE -eq 0)
+            $existing = $null
+            if ($ghOk -and $commentsJson) {
+              $comments = $commentsJson | ConvertFrom-Json
+              $found = $comments | Where-Object { $_.body -and $_.body.StartsWith($marker) } | Select-Object -First 1
+              if ($found) { $existing = $found.id }
+            }
+
+            if ($ghOk -and $existing) {
+              Write-Host "Updating existing PR comment $existing"
+              gh api --method PATCH "repos/${{ github.repository }}/issues/comments/$existing" `
+                -f body="$body"
+              if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: Failed to update PR comment" }
+            } elseif ($ghOk) {
+              Write-Host "Creating new PR comment"
+              gh pr comment $prNumber -R "${{ github.repository }}" --body "$body"
+              if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: Failed to create PR comment" }
+            } else {
+              Write-Host "WARNING: gh api unreachable, skipping PR comment"
+            }
+          }

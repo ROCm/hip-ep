@@ -3,9 +3,9 @@
 # ** Licensed under the MIT License.
 ##
 
-if(NOT BUILD_EP)
-  message(WARNING "BUILD_PYTHON_WHEEL requires BUILD_EP=ON; skipping wheel target")
-  return()
+if(NOT WIN32)
+  message(FATAL_ERROR
+    "BUILD_PYTHON_WHEEL is Windows-only; re-configure without it.")
 endif()
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -14,15 +14,9 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 # staged under the build dir, the wheel lands in <build>/python/dist.
 set(_pkg_src "${CMAKE_CURRENT_SOURCE_DIR}")
 set(_stage "${CMAKE_CURRENT_BINARY_DIR}/pkg")
-# Native artifacts are staged into the onnxruntime/capi namespace package so the
-# wheel ships them at onnxruntime/capi/ (platlib), installing next to
-# onnxruntime.dll cross-platform.
-set(_libs_dir "${_stage}/onnxruntime/capi")
+set(_libs_dir "${_stage}/onnxruntime_ep_amdgpu")
 set(_dist_dir "${CMAKE_CURRENT_BINARY_DIR}/dist")
 
-# GPU arch this wheel targets, for the rocm --extra-index-url hint in
-# pyproject.toml. Take the first if HIP_ARCHITECTURES is a list; fall back to
-# gfx1151 when unset (e.g. mock builds).
 set(MORPHIZEN_HIP_ARCH "${HIP_ARCHITECTURES}")
 if(MORPHIZEN_HIP_ARCH MATCHES ";")
   list(GET MORPHIZEN_HIP_ARCH 0 MORPHIZEN_HIP_ARCH)
@@ -31,7 +25,6 @@ if(NOT MORPHIZEN_HIP_ARCH)
   set(MORPHIZEN_HIP_ARCH "gfx1151")
 endif()
 
-# Inject the project version + target arch into the staged pyproject.toml.
 configure_file(
   "${_pkg_src}/pyproject.toml.in"
   "${_stage}/pyproject.toml"
@@ -45,30 +38,17 @@ if(NOT TARGET ${_ep_target})
     "EP target '${_ep_target}' not found; cannot build the Python wheel.")
 endif()
 
-# The JIT compiler plugin (hip-compiler.dll) is loaded at runtime by the EP via
-# Plugin::get("hip-compiler"); it MUST ship in the wheel or model compilation
-# falls back to whatever (possibly stale) hip-compiler is on PATH.
+# No separate JIT compiler library to bundle: the compiler is linked into the EP
+# itself and resolved in-process through the static "hip-compiler" plugin
+# registration.
 set(_dll_args "--dll" "$<TARGET_FILE:${_ep_target}>")
 set(_wheel_deps ${_ep_target})
-if(TARGET hip-compiler-dll)
-  list(APPEND _dll_args "--dll" "$<TARGET_FILE:hip-compiler-dll>")
-  list(APPEND _wheel_deps hip-compiler-dll)
-else()
-  message(WARNING
-    "hip-compiler-dll target not found (BUILD_HIP_TOOLS=OFF?); the wheel will "
-    "not be able to JIT-compile models. Build with BUILD_HIP_TOOLS=ON.")
+
+if(NOT THEROCK_DIST)
+  message(FATAL_ERROR
+    "THEROCK_DIST is empty; the wheel cannot bundle the ROCm runtime.")
 endif()
 
-if(WIN32)
-  set(_with_crt "--with-crt")
-else()
-  set(_with_crt "")
-endif()
-
-# Bundle the per-arch custom-kernels runtime libraries. The EP dlopens
-# custom_kernels_<arch>.{dll,so} from its own directory at JIT init, so each
-# must ship in onnxruntime/capi next to the EP DLL. ROCm import libs
-# (amdhip64/MIOpen/hipBLASLt) come from the pip rocm[devel] package at runtime.
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
   set(_ck_target custom_kernels_${_arch})
   if(TARGET ${_ck_target})
@@ -81,20 +61,6 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
   endif()
 endforeach()
 
-# Externally-built DLLs to also bundle next to the EP (absolute paths, ;-list).
-# Used to ship the AMD GPU umbrella chain (amdgpu-ep.dll + hip-backend.dll),
-# which is built in the separate onnxruntime-ep-amdgpu repo and has no target
-# here. Passed as --optional-dll so a plain EP-only wheel (var unset) is
-# unaffected and a missing path warns instead of failing. The caller (CI) is
-# responsible for building those DLLs before this wheel target runs.
-set(HIP_WHEEL_EXTRA_DLLS "" CACHE STRING
-  "Absolute paths (;-list) of externally-built DLLs to bundle into the wheel")
-foreach(_extra IN LISTS HIP_WHEEL_EXTRA_DLLS)
-  if(_extra)
-    list(APPEND _dll_args "--optional-dll" "${_extra}")
-  endif()
-endforeach()
-
 add_custom_target(wheel ALL
   # 1. Stage the package sources into the build dir (keep source tree clean).
   COMMAND ${CMAKE_COMMAND} -E copy_directory
@@ -103,14 +69,16 @@ add_custom_target(wheel ALL
   COMMAND ${CMAKE_COMMAND} -E copy
           "${_pkg_src}/setup.py"
           "${_stage}/"
-  # 2. Stage native artifacts (EP lib + hip-compiler + per-arch custom-kernels
-  #    runtime DLLs/SOs + CRT import libs) into the onnxruntime/capi namespace
-  #    package dir so the wheel ships them at onnxruntime/capi/ (platlib).
+  # 2. Stage native artifacts (EP lib + per-arch custom-kernels runtime
+  #    DLLs/SOs + CRT import libs) into the onnxruntime_ep_amdgpu namespace
+  #    package dir so the wheel ships them at onnxruntime_ep_amdgpu/ (platlib).
   COMMAND ${CMAKE_COMMAND} -E rm -rf "${_libs_dir}"
   COMMAND ${Python3_EXECUTABLE} "${_pkg_src}/_pack_libs.py"
           ${_dll_args}
           --dest "${_libs_dir}"
-          ${_with_crt}
+          --rocm-dist "${THEROCK_DIST}"
+          --rocm-arch "${MORPHIZEN_HIP_ARCH}"
+          --with-crt
   # 3. Build the wheel (PEP 517). Drop setuptools' build cache + egg-info first:
   #    they linger across runs and would re-pack stale (e.g. removed) artifacts.
   #    --no-deps: do not pull deps here.

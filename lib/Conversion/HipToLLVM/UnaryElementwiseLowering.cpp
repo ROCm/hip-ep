@@ -10,7 +10,8 @@ namespace hip {
 namespace {
 
 // Generic template for unary elementwise operations lowering.
-// Handles: hip.neg, hip.not, hip.cos, hip.sin, hip.sign (and future unary
+// Handles: hip.neg, hip.not, hip.cos, hip.erf, hip.sin, hip.round, hip.atan,
+// hip.floor, hip.sign, hip.exp, hip.sigmoid, hip.tanh (and other unary
 // elementwise ops).
 //
 // Ops lower to wrap_{op}(state, input, output, num_elements, data_type).
@@ -97,12 +98,24 @@ void populateUnaryElementwiseLoweringPatterns(
                                                      "not");
   patterns.insert<UnaryElementwiseOpLowering<CosOp>>(converter, kWrapCos,
                                                      "cos");
+  patterns.insert<UnaryElementwiseOpLowering<ErfOp>>(converter, kWrapErf,
+                                                     "erf");
   patterns.insert<UnaryElementwiseOpLowering<SinOp>>(converter, kWrapSin,
                                                      "sin");
   patterns.insert<UnaryElementwiseOpLowering<CeilOp>>(converter, kWrapCeil,
                                                       "ceil");
+  patterns.insert<UnaryElementwiseOpLowering<RoundOp>>(converter, kWrapRound,
+                                                       "round");
+  patterns.insert<UnaryElementwiseOpLowering<AtanOp>>(converter, kWrapAtan,
+                                                      "atan");
+  patterns.insert<UnaryElementwiseOpLowering<FloorOp>>(converter, kWrapFloor,
+                                                       "floor");
   patterns.insert<UnaryElementwiseOpLowering<ExpOp>>(converter, kWrapExp,
                                                      "exp");
+  patterns.insert<UnaryElementwiseOpLowering<SigmoidOp>>(
+      converter, kWrapSigmoid, "sigmoid");
+  patterns.insert<UnaryElementwiseOpLowering<TanhOp>>(converter, kWrapTanh,
+                                                      "tanh");
   patterns.insert<UnaryElementwiseOpLowering<LogOp>>(converter, kWrapLog,
                                                      "log");
   patterns.insert<UnaryElementwiseOpLowering<SignOp>>(converter, kWrapSign,

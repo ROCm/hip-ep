@@ -1,17 +1,35 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
 // ============================================================
-// custom_kernels GQA flash *decode* (TPS) test + A/B benchmark.
+// custom_kernels GQA flash *decode* (TPS) test + 3-column history benchmark.
 //
-// Verifies the WMMA decode kernel (default path of hip_gqa_flash_decode_v2)
-// against:
-//   1. a CPU fp32 reference (correctness, incl. seqlens_k / sliding-window /
-//      head-sink / smooth-softmax), and
-//   2. the original scalar split-K kernel (HIPDNN_GQA_DECODE_SCALAR=1) for an
-//      apples-to-apples latency comparison on the SAME inputs.
+// Verifies the SINGLE production decode kernel (hip_gqa_flash_decode) for
+// correctness against a CPU fp32 reference (incl. seqlens_k / sliding-window /
+// head-sink / smooth-softmax), then reports a three-column latency comparison.
 //
-// Both kernels emit the same [B,H,K_SPLITS,D+2] partials and share the FA-2
-// reduce, so any output divergence is a real bug. The benchmark reports the
-// per-decode-step latency (the quantity that bounds tokens/sec) and the WMMA
-// speedup over the scalar baseline.
+// IMPORTANT: all three columns run on the CURRENT v2 kernel, toggled by env.
+// They measure the value of v2's per-shape autotune RELATIVE TO fixed configs
+// on the SAME kernel -- they are NOT the historical legacy code. (In
+// particular fix-def8 forces the v2 kernel's WMMA path at 8 splits, whose
+// absolute cost differs from the real legacy WMMA kernel; do not read it as
+// "PR438".) Apples-to-apples on identical inputs:
+//
+//   [fix-scalar8] force scalar split kernel @ 8 splits
+//                 (HIPDNN_GQA_DECODE_SCALAR=1, SPLITS=8)
+//   [fix-def8]    force default impl (WMMA@d64 / scalar else) @ 8 splits
+//                 (HIPDNN_GQA_DECODE_SPLITS=8)
+//   [v2]          autotune (impl, split-count<=64) per shape + cache (no env)
+//
+// Coverage spans MHA (HpG==1) and GQA (HpG in {2,4,5,8,16}) x head_dim in
+// {64,128,256} x context length in {512..32768}, plus gpt-oss-20b full/sliding
+// (head_sink) and a smooth-softmax variant. Pass --md to emit a Markdown table.
+//
+// To benchmark one build against another, add --prod-only (times just the
+// autotuned config, so the fixed-config runs cannot disturb the clock state
+// around it) and --only <model> (one model per process, for the same reason).
 //
 // Self-contained: random inputs generated in-process, no data files.
 // ============================================================
@@ -31,7 +49,7 @@
 // KV-cache dtype ABI (mirrors hip_kv_dtype_t in hip_custom_kernels.h).
 enum { HIP_KV_DTYPE_FP16 = 0, HIP_KV_DTYPE_INT8 = 1 };
 
-extern "C" int hip_gqa_flash_decode_v2(
+extern "C" int hip_gqa_flash_decode(
     void* stream,
     const void* Q, const void* Kcache, const void* Vcache,
     void* O,
@@ -75,6 +93,25 @@ struct Case {
   int sink;                         // head_sink present
   int smooth;                       // use_smooth_softmax (no explicit sink)
 };
+
+// One collected result row for the Markdown perf report. The three latency
+// columns are fixed-config vs autotune on the SAME kernel (see file header);
+// under --prod-only the two fixed-config columns are left at zero:
+//   ms_fix_scalar8 = [fix-scalar8] force scalar split kernel @ 8 splits
+//   ms_fix_def8    = [fix-def8]    force default impl @ 8 splits
+//   ms_v2          = [v2]          autotuned (impl, split-count)
+struct Row {
+  std::string name;
+  int H, G, D, len, window, sink, smooth;
+  double ms_fix_scalar8, ms_fix_def8, ms_v2;
+  double l2_v2;
+  bool ok;
+};
+static std::vector<Row> g_rows;
+static bool g_do_fused = false;  // --fused: also time the oldest one-block/head decode
+static bool g_md = false;        // --md: suppress per-case text, emit Markdown table
+static bool g_prod_only = false; // --prod-only: time only the autotuned config
+static std::string g_only;       // --only: run just the models matching this
 
 // ---- CPU fp32 reference ---------------------------------------------------
 static void cpu_reference(const Case& c,
@@ -194,7 +231,7 @@ static double run_kernel(DecodeMode mode, const Case& c, float scale,
 
   // Warmup + correctness fetch. For AUTO this first call also runs the autotune
   // pass (timed candidates) and caches the winner; subsequent calls reuse it.
-  HIP_CHECK((hipError_t)hip_gqa_flash_decode_v2(
+  HIP_CHECK((hipError_t)hip_gqa_flash_decode(
       nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, c.total, max_seq, MAX_SPLITS,
       scale, dSeq, c.window, sinkp, c.smooth, HIP_KV_DTYPE_FP16, nullptr,
       nullptr));
@@ -212,7 +249,7 @@ static double run_kernel(DecodeMode mode, const Case& c, float scale,
   HIP_CHECK(hipEventCreate(&b));
   HIP_CHECK(hipEventRecord(a));
   for (int it = 0; it < iters; ++it) {
-    hip_gqa_flash_decode_v2(nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, c.total,
+    hip_gqa_flash_decode(nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, c.total,
                             max_seq, MAX_SPLITS, scale, dSeq, c.window, sinkp,
                             c.smooth, HIP_KV_DTYPE_FP16, nullptr, nullptr);
   }
@@ -304,56 +341,102 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose) {
 
   // ours = autotuned (impl + dynamic split-K); ori = production baseline
   // (default impl @ 8 splits). scalar8/wmma8 give per-impl correctness coverage.
+  // --prod-only drops all three: when comparing two builds, the extra configs
+  // would run between the timed ones and move the clock state under them.
   std::vector<float> O_auto, O_base, O_wmma, O_scalar;
   double ms_auto   = run_kernel(MODE_AUTO,     c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink, iters, O_auto);
-  double ms_base   = run_kernel(MODE_BASELINE, c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink, iters, O_base);
-  double ms_wmma   = run_kernel(MODE_WMMA8,    c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink, iters, O_wmma);
-  double ms_scalar = run_kernel(MODE_SCALAR8,  c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink, iters, O_scalar);
+  double ms_base = 0.0, ms_wmma = 0.0, ms_scalar = 0.0;
+  double l2_base = 0.0, l2_wmma = 0.0, l2_scalar = 0.0, l2_ab = 0.0;
+  if (!g_prod_only) {
+    ms_base   = run_kernel(MODE_BASELINE, c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink, iters, O_base);
+    ms_wmma   = run_kernel(MODE_WMMA8,    c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink, iters, O_wmma);
+    ms_scalar = run_kernel(MODE_SCALAR8,  c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink, iters, O_scalar);
+    l2_base   = rel_l2(O_base, ref);
+    l2_wmma   = rel_l2(O_wmma, ref);
+    l2_scalar = rel_l2(O_scalar, ref);
+    l2_ab     = rel_l2(O_wmma, O_scalar);
+  }
 
   double l2_auto   = rel_l2(O_auto, ref);
-  double l2_base   = rel_l2(O_base, ref);
-  double l2_wmma   = rel_l2(O_wmma, ref);
-  double l2_scalar = rel_l2(O_scalar, ref);
-  double l2_ab     = rel_l2(O_wmma, O_scalar);
 
-  // Legacy fused decode = the ORIGINAL baseline; only valid without window/sink.
-  const bool fused_ok_shape = (c.window <= 0 && !c.sink && !c.smooth);
+  // One-block-per-head fused decode = the OLDEST baseline (pre-split-K); only
+  // valid without window/sink, and very slow at long context, so it is opt-in
+  // (--fused) and timed with fewer iters.
+  const bool fused_ok_shape =
+      g_do_fused && (c.window <= 0 && !c.sink && !c.smooth);
   double ms_fused = 0.0; double l2_fused = 0.0; bool fused_ran = false;
   if (fused_ok_shape) {
     std::vector<float> O_fused;
-    ms_fused = run_fused(c, scale, dQ, dK, dV, dO, dSeq, iters, O_fused);
+    int fiters = iters < 16 ? iters : 16;
+    ms_fused = run_fused(c, scale, dQ, dK, dV, dO, dSeq, fiters, O_fused);
     l2_fused = rel_l2(O_fused, ref);
     fused_ran = true;
   }
 
   const double tol = 2e-2;  // fp16 accumulation tolerance
-  bool ok = (l2_auto < tol) && (l2_base < tol) && (l2_wmma < tol) &&
-            (l2_scalar < tol) && (!fused_ran || l2_fused < tol);
+  bool ok = (l2_auto < tol) && (!fused_ran || l2_fused < tol);
+  if (!g_prod_only)
+    ok = ok && (l2_base < tol) && (l2_wmma < tol) && (l2_scalar < tol);
 
-  printf("%-22s B%d H%d G%d(hpg%d) D%d | len=%d win=%d sink=%d smooth=%d\n",
-         c.name, B, H, G, H / G, D, c.total, c.window, c.sink, c.smooth);
-  printf("   relL2  ours=%.2e  ori=%.2e  wmma=%.2e  scalar=%.2e  (wmma-vs-scalar=%.2e)\n",
-         l2_auto, l2_base, l2_wmma, l2_scalar, l2_ab);
-  printf("   latency  ours(auto)=%.4f ms  ori(8-split)=%.4f ms\n",
-         ms_auto, ms_base);
-  if (fused_ran) {
-    printf("            scalar8=%.4f ms  wmma8=%.4f ms  fused(legacy)=%.4f ms\n",
-           ms_scalar, ms_wmma, ms_fused);
-    printf("   speedup  ours-vs-ori=%.2fx  ours-vs-fused=%.2fx   %s\n",
-           ms_base / ms_auto, ms_fused / ms_auto, ok ? "PASS" : "*** FAIL ***");
+  // Three columns: fixed-config vs autotune on the SAME kernel, so they measure
+  // the value of per-shape tuning, not the difference between two versions:
+  //   [fix-scalar8] = force scalar @ 8 splits  (ms_scalar / MODE_SCALAR8)
+  //   [fix-def8]    = force default @ 8 splits (ms_base   / MODE_BASELINE)
+  //   [v2]          = autotuned impl + splits  (ms_auto    / MODE_AUTO)
+  if (g_md) {
+    // nothing per case; emit_markdown prints the collected rows at the end
+  } else if (g_prod_only) {
+    printf("%-24s H%d G%d(hpg%d) D%d | len=%5d win=%3d sink=%d smooth=%d | "
+           "relL2=%.2e  %.4f ms  %s\n",
+           c.name, H, G, H / G, D, c.total, c.window, c.sink, c.smooth,
+           l2_auto, ms_auto, ok ? "PASS" : "*** FAIL ***");
   } else {
-    printf("            scalar8=%.4f ms  wmma8=%.4f ms\n", ms_scalar, ms_wmma);
-    printf("   speedup  ours-vs-ori=%.2fx   %s\n",
-           ms_base / ms_auto, ok ? "PASS" : "*** FAIL ***");
+    printf("%-24s H%d G%d(hpg%d) D%d | len=%d win=%d sink=%d smooth=%d\n",
+           c.name, H, G, H / G, D, c.total, c.window, c.sink, c.smooth);
+    printf("   relL2(v2 vs cpu)=%.2e  A/B(wmma vs scalar)=%.2e\n", l2_auto, l2_ab);
+    printf("   latency  [fix-scalar8]=%.4f  [fix-def8]=%.4f  [v2]auto=%.4f ms\n",
+           ms_scalar, ms_base, ms_auto);
+    if (fused_ran) {
+      printf("   speedup  v2-vs-scalar8=%.2fx  v2-vs-def8=%.2fx  (v2-vs-one-block/head=%.1fx)   %s\n",
+             ms_scalar / ms_auto, ms_base / ms_auto, ms_fused / ms_auto,
+             ok ? "PASS" : "*** FAIL ***");
+    } else {
+      printf("   speedup  v2-vs-scalar8=%.2fx  v2-vs-def8=%.2fx   %s\n",
+             ms_scalar / ms_auto, ms_base / ms_auto, ok ? "PASS" : "*** FAIL ***");
+    }
   }
+  (void)l2_base; (void)l2_wmma; (void)l2_fused;
   if (verbose && !ok) {
     for (int i = 0; i < std::min(8, B * H * D); ++i)
-      printf("      [%d] ref=%.5f ours=%.5f ori=%.5f\n", i, ref[i], O_auto[i], O_base[i]);
+      printf("      [%d] ref=%.5f v2=%.5f scalar8=%.5f\n", i, ref[i], O_auto[i], O_scalar[i]);
   }
+
+  g_rows.push_back({std::string(c.name), H, G, D, c.total, c.window, c.sink,
+                    c.smooth, ms_scalar, ms_base, ms_auto, l2_auto, ok});
 
   hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO);
   hipFree(dSink); hipFree(dSeq); hipFree(dPart);
   return ok ? 0 : 1;
+}
+
+// Markdown table for the perf report. Columns are fixed-config vs autotune on
+// the SAME v2 kernel (NOT historical code): fix-scalar8 = force scalar @ 8
+// splits; fix-def8 = force default impl @ 8 splits; v2 = autotune. This
+// isolates the value of per-shape autotune over a fixed 8-split policy.
+static void emit_markdown(int iters, const char* dev, int cus) {
+  printf("<!-- device: %s | %d CUs | iters=%d | per-decode-step latency (ms) | B=1 | fixed-config vs autotune on the v2 kernel (NOT historical code) -->\n\n",
+         dev, cus, iters);
+  // Speedup columns "v2 vs xxx" = fixed_ms / v2_ms (unified so >1 always = v2 faster).
+  printf("| # | model / geometry | HpG | D | len | win | feat | fix-scalar8 (ms) | fix-def8 (ms) | v2 (ms) | v2 vs scalar8 | v2 vs def8 | result |\n");
+  printf("|--:|---|--:|--:|--:|--:|:--|--:|--:|--:|--:|--:|:--|\n");
+  int i = 1;
+  for (const auto& r : g_rows) {
+    const char* feat = r.sink ? "sink" : (r.smooth ? "smooth" : "-");
+    printf("| %d | %s | %d | %d | %d | %d | %s | %.4f | %.4f | %.4f | %.2fx | %.2fx | %s |\n",
+           i++, r.name.c_str(), r.H / r.G, r.D, r.len, r.window, feat,
+           r.ms_fix_scalar8, r.ms_fix_def8, r.ms_v2, r.ms_fix_scalar8 / r.ms_v2,
+           r.ms_fix_def8 / r.ms_v2, r.ok ? "PASS" : "FAIL");
+  }
 }
 
 int main(int argc, char** argv) {
@@ -368,6 +451,10 @@ int main(int argc, char** argv) {
     auto next = [&](int& v) { if (i + 1 < argc) v = atoi(argv[++i]); };
     if (a == "--all") all = true;
     else if (a == "--verbose") verbose = true;
+    else if (a == "--md") { g_md = true; all = true; }
+    else if (a == "--fused") g_do_fused = true;
+    else if (a == "--prod-only") g_prod_only = true;
+    else if (a == "--only" && i + 1 < argc) { g_only = argv[++i]; all = true; }
     else if (a == "--iters") next(iters);
     else if (a == "--seed") { int s; next(s); seed = (unsigned)s; }
     else if (a == "--b") { next(single.B); have_single = true; }
@@ -385,28 +472,57 @@ int main(int argc, char** argv) {
   HIP_CHECK(hipGetDevice(&dev));
   hipDeviceProp_t prop;
   HIP_CHECK(hipGetDeviceProperties(&prop, dev));
-  printf("Device: %s (%d CUs)  iters=%d  max_splits=%d (ori baseline=%d)\n\n",
-         prop.name, prop.multiProcessorCount, iters, MAX_SPLITS, BASELINE_SPLITS);
+  if (!g_md)
+    printf("Device: %s (%d CUs)  iters=%d  max_splits=%d (PR438 baseline=%d)\n\n",
+           prop.name, prop.multiProcessorCount, iters, MAX_SPLITS, BASELINE_SPLITS);
 
   int fails = 0;
   if (all || !have_single) {
-    // Representative model decode shapes (B=1 single-stream decode).
+    // B=1 single-stream decode. Coverage: real models + a geometry sweep over
+    // MHA (HpG==1) and GQA (HpG in {2,4,5,8,16}) x head_dim in {64,128,256}.
     const int lens[] = {512, 2048, 8192, 32768};
+    auto maybe = [&](const Case& c) {
+      if (!g_only.empty() &&
+          std::string(c.name).find(g_only) == std::string::npos)
+        return;
+      fails += run_case(c, iters, seed, verbose);
+    };
     for (int L : lens) {
-      // gpt-oss-20b: H64 G8 (hpg8) D64 -- full layer + smooth softmax sink.
-      fails += run_case({"gpt_oss-20b full",  1, 64, 8, 64, L, L, 0, 0, 1}, iters, seed, verbose);
-      // gpt-oss-20b sliding layer: window 128 + head_sink.
-      fails += run_case({"gpt_oss-20b sliding",1, 64, 8, 64, L, L, 128, 1, 0}, iters, seed, verbose);
+      // ---- Real models ----
+      // gpt-oss-20b carries a learnable per-head attention SINK on ALL 24
+      // layers; the layer TYPE alternates between full attention and a 128
+      // sliding window. So "full"/"sliding" names the attention type, and
+      // head_sink is present in BOTH -- it is NOT "full=smooth, sliding=sink".
+      // full attention layer: HpG8 D64 + head_sink.
+      maybe({"gpt_oss-20b full",    1, 64,  8,  64, L, L,   0, 1, 0});
+      // sliding-window layer: window 128 + head_sink.
+      maybe({"gpt_oss-20b sliding", 1, 64,  8,  64, L, L, 128, 1, 0});
+      // smooth-softmax variant (sink logit fixed to 0): keeps the smooth path
+      // under correctness coverage even though real gpt-oss ships head_sink.
+      maybe({"gpt_oss-20b smooth",  1, 64,  8,  64, L, L,   0, 0, 1});
       // llama-3.1-8b: H32 G8 (hpg4) D128.
-      fails += run_case({"llama-3.1-8b",       1, 32, 8, 128, L, L, 0, 0, 0}, iters, seed, verbose);
+      maybe({"llama-3.1-8b",        1, 32,  8, 128, L, L,   0, 0, 0});
       // llama-3.2-1b: H32 G8 (hpg4) D64.
-      fails += run_case({"llama-3.2-1b",       1, 32, 8, 64, L, L, 0, 0, 0}, iters, seed, verbose);
-      printf("\n");
+      maybe({"llama-3.2-1b",        1, 32,  8,  64, L, L,   0, 0, 0});
+      // qwen2.5-14b: H40 G8 (hpg5) D128 -- HpG=5 has no WMMA path (scalar).
+      maybe({"qwen2.5-14b",         1, 40,  8, 128, L, L,   0, 0, 0});
+      // ---- Geometry sweep: MHA (hpg1) x head_dim ----
+      maybe({"MHA hpg1 D64",        1, 16, 16,  64, L, L,   0, 0, 0});
+      maybe({"MHA hpg1 D128",       1, 16, 16, 128, L, L,   0, 0, 0});
+      maybe({"MHA hpg1 D256",       1,  8,  8, 256, L, L,   0, 0, 0});
+      // ---- Geometry sweep: GQA HpG {2,8,16} and D256 ----
+      maybe({"GQA hpg2 D128",       1, 16,  8, 128, L, L,   0, 0, 0});
+      maybe({"GQA hpg8 D128",       1, 64,  8, 128, L, L,   0, 0, 0});
+      maybe({"GQA hpg16 D64",       1, 32,  2,  64, L, L,   0, 0, 0});
+      maybe({"GQA hpg4 D256",       1, 32,  8, 256, L, L,   0, 0, 0});
+      if (!g_md) printf("\n");
     }
   } else {
     fails += run_case(single, iters, seed, verbose);
   }
 
-  printf("%s (%d failing case(s))\n", fails == 0 ? "ALL PASS" : "FAILURES", fails);
+  if (g_md) emit_markdown(iters, prop.name, prop.multiProcessorCount);
+  printf("%s%s (%d failing case(s))\n", g_md ? "\n" : "",
+         fails == 0 ? "ALL PASS" : "FAILURES", fails);
   return fails == 0 ? 0 : 1;
 }

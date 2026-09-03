@@ -15,10 +15,10 @@
 
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
+#include "hip/Dialect/Onnx/IR/OnnxOps.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/Func/Transforms/FuncConversions.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -36,33 +36,18 @@ namespace hipsr {
 
 namespace {
 
-// Returns the shape-graph value for a placeholder input. A data result becomes
-// the outs operand its producer writes into, which has the same shape.
-Value resolveShapeGraphInput(Value input) {
-  if (PlaceholderOp::isAllowedShapeGraphInput(input)) {
-    return input;
-  }
-  // Block arguments are allowed, so anything left is a result.
-  auto result = cast<OpResult>(input);
-  OperandRange destinations = getHipsrDestinationOperands(result.getOwner());
-  if (result.getResultNumber() >= destinations.size()) {
-    return input;
-  }
-  return destinations[result.getResultNumber()];
-}
-
 // onnx.NoValue stands in for an omitted optional operand, so it only becomes
 // dead once the conversion of its consumer drops that operand. Sweeping it up
 // therefore belongs after the conversion.
 void eraseDeadNoValue(ModuleOp module) {
-  SmallVector<Operation *> dead;
-  module.walk([&](Operation *op) {
-    if (op->getName().getStringRef() == "onnx.NoValue" && op->use_empty()) {
+  SmallVector<onnx::NoValueOp> dead;
+  module.walk([&](onnx::NoValueOp op) {
+    if (op->use_empty()) {
       dead.push_back(op);
     }
   });
-  for (Operation *op : dead) {
-    op->erase();
+  for (onnx::NoValueOp op : dead) {
+    op.erase();
   }
 }
 
@@ -71,7 +56,7 @@ void eraseDeadNoValue(ModuleOp module) {
 void rewirePlaceholderInputs(ModuleOp module) {
   module.walk([](PlaceholderOp placeholder) {
     SmallVector<Value> resolvedInputs =
-        llvm::map_to_vector(placeholder.getInputs(), resolveShapeGraphInput);
+        llvm::map_to_vector(placeholder.getInputs(), getShapeGraphCounterpart);
     placeholder.getInputsMutable().assign(resolvedInputs);
   });
 }
@@ -94,10 +79,10 @@ struct ConvertOnnxToHipsrPass
     });
 
     ConversionTarget target(getContext());
-    target.addIllegalDialect("onnx");
+    target.addIllegalDialect<onnx::OnnxDialect>();
     // The consumer's conversion drops the operand this stands for, so the
     // placeholder has to survive until then.
-    target.addLegalOp(OperationName("onnx.NoValue", &getContext()));
+    target.addLegalOp<onnx::NoValueOp>();
     target.addLegalDialect<HipsrDialect>();
     target.addLegalOp<ModuleOp>();
     target.addLegalOp<arith::ConstantOp>();
@@ -118,11 +103,19 @@ struct ConvertOnnxToHipsrPass
     populateCastConversionPatterns(converter, patterns, &getContext());
     populateMatMulConversionPatterns(converter, patterns, &getContext());
     populateExpandConversionPatterns(converter, patterns, &getContext());
+    populateMinConversionPatterns(converter, patterns, &getContext());
     populateShapeConversionPatterns(converter, patterns, &getContext());
-    populateReturnConversionPatterns(patterns, &getContext());
+    populateReshapeConversionPatterns(converter, patterns, &getContext());
+    populateUnsqueezeConversionPatterns(converter, patterns, &getContext());
+    populateEqualConversionPatterns(converter, patterns, &getContext());
+    populateTransposeConversionPatterns(converter, patterns, &getContext());
+    populateGatherConversionPatterns(converter, patterns, &getContext());
+    populateSliceConversionPatterns(converter, patterns, &getContext());
+    populateScatterNDConversionPatterns(converter, patterns, &getContext());
+    populateNonZeroConversionPatterns(converter, patterns, &getContext());
+    populateReturnConversionPatterns(converter, patterns, &getContext());
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns,
                                                                    converter);
-    populateReturnOpTypeConversionPattern(patterns, converter);
 
     if (failed(applyFullConversion(module, target, std::move(patterns)))) {
       signalPassFailure();

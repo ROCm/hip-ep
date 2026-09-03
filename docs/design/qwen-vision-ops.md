@@ -82,11 +82,10 @@ Verification method: each CUDA `.cc` was grepped for `cudnn`, `cublas`,
 `CudnnTensor`). Everything else lives entirely in the EP's own `.cu`
 files.
 
-Note: `lib/Runtime/real/simplified_layer_norm.cpp` in this repo *does*
-call `miopenT5LayerNormForward` -- that's a **MorphiZen-side choice**
-for `SimplifiedLayerNormalization` (RMS-norm), **not** what ORT does
-for plain `LayerNormalization`. Our `wrap_layer_normalization` in this
-round matches ORT's pure-custom CUDA path.
+Note: normalization in this repo is pure custom HIP as well.
+`wrap_rms_norm` (`SimplifiedLayerNormalization`) dispatches the in-tree
+`hip_rms_norm` kernel and `wrap_layer_normalization` dispatches the
+in-tree `hip_layer_norm` kernel, matching ORT's pure-custom CUDA path.
 
 ### Why we don't use MIOpen for ReduceMax / ReduceProd
 
@@ -104,9 +103,8 @@ After hipify this becomes a `miopenReduceTensor` call. To use it we
 would need:
 
 - A MIOpen tensor-descriptor cache keyed on
-  `(input_shape, output_shape, data_type, reduce_op)` -- the same
-  shape of cache as `T5NormCacheKey` in
-  `lib/Runtime/real/simplified_layer_norm.cpp`.
+  `(input_shape, output_shape, data_type, reduce_op)`, plus its
+  per-session lifetime management.
 - A per-shape `miopenGetReductionWorkspaceSize` query and integration
   with the shared `hipdnn_ep_state_ensure_workspace` buffer.
 - A separate "indices workspace" allocation for ReduceMax (which is
@@ -144,10 +142,11 @@ op pulls in:
 | Reduction (general)    | cuDNN  | **MIOpen**             |
 
 When implementing any of those, the right first move is to grep the
-matching CUDA `.cc` for `cudnn*` / `cublas*` symbols and follow the
-existing `wrap_miopenT5LayerNormForward` pattern in
-`lib/Runtime/real/simplified_layer_norm.cpp` (descriptor cache +
-shared workspace + `MIOPEN_BETA_API` opt-in if needed).
+matching CUDA `.cc` for `cudnn*` / `cublas*` symbols to see what ORT
+relies on, then choose between a vendor-library call and a custom
+kernel. The only vendor library this repo links is hipBLASLt, so a new
+vendor-backed op should follow the hipBLASLt op-state pattern documented
+in [op-state-slots-design.md](op-state-slots-design.md).
 
 ## 3. Recurring design choices
 

@@ -200,7 +200,12 @@ LogicalResult ConstantOp::verify() {
   int64_t size = getSizeAttr().getInt();
   if (size <= 0)
     return emitOpError("external source `size` must be positive");
-  if (size != expectedBytes)
+  // A 4-bit initializer with no MLIR element type is carried as an 8-bit result
+  // of the logical element count while its buffer holds only ceil(n/2) packed
+  // bytes (two values per byte); accept that half-size external source.
+  int64_t packedBytes = (numElements + 1) / 2;
+  bool isPacked4Bit = elementBits == 8 && size == packedBytes;
+  if (size != expectedBytes && !isPacked4Bit)
     return emitOpError("external source byte size ")
            << size << " does not match result byte size " << expectedBytes;
 
@@ -708,9 +713,9 @@ LogicalResult MatmulOp::verify() {
   // mismatch (in which case it has already issued a diagnostic on `*this`).
   return mlir::hip::verifyHipOpShape(
       *this, [&]() -> SmallVector<SmallVector<int64_t>> {
-        SmallVector<int64_t> outShape =
-            mlir::hip::inferMatmulShape(getShapeOf(getA()), getShapeOf(getB()),
-                                        [&]() { return this->emitOpError(); });
+        SmallVector<int64_t> outShape = mlir::hip::inferMatmulShape(
+            getShapeOf(getA()), getShapeOf(getB()),
+            [&]() { return this->emitOpError(); }, getTransA(), getTransB());
         if (outShape.empty())
           return {};
         return {std::move(outShape)};
@@ -788,6 +793,51 @@ LogicalResult LayerNormOp::verify() {
   for (Value out : getOutputs())
     dataOperands.push_back(out);
   return verifyDpsComputeOp(*this, dataOperands, /*numInits=*/numOutputs);
+}
+
+//===----------------------------------------------------------------------===//
+// InstanceNormOp: ins(input, scale, bias), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange InstanceNormOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void InstanceNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult InstanceNormOp::verify() {
+  SmallVector<Value> dataOperands{getInput(), getScale(), getBias(),
+                                  getOutput()};
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  auto rankedShape = [](Type t) -> std::optional<int64_t> {
+    if (auto tensor = dyn_cast<RankedTensorType>(t))
+      return tensor.getRank();
+    if (auto memref = dyn_cast<MemRefType>(t))
+      return memref.getRank();
+    return std::nullopt;
+  };
+
+  auto inputRank = rankedShape(getInput().getType());
+  if (!inputRank)
+    return emitOpError("expected ranked input of rank >= 3 (N, C, D1, ...)");
+  if (*inputRank < 3)
+    return emitOpError("expected input rank >= 3 (N, C, D1, ...), got ")
+           << *inputRank;
+
+  auto scaleRank = rankedShape(getScale().getType());
+  auto biasRank = rankedShape(getBias().getType());
+  if (scaleRank && *scaleRank != 1)
+    return emitOpError("expected 1-D scale of length C, got rank ")
+           << *scaleRank;
+  if (biasRank && *biasRank != 1)
+    return emitOpError("expected 1-D bias of length C, got rank ") << *biasRank;
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -1199,6 +1249,58 @@ void ResizeOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// GridSampleOp: ins(input, grid), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GridSampleOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void GridSampleOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult GridSampleOp::verify() {
+  SmallVector<Value> dataOperands{getInput(), getGrid(), getOutput()};
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  auto rankedShape = [](Type t) -> std::optional<int64_t> {
+    if (auto tensor = dyn_cast<RankedTensorType>(t))
+      return tensor.getRank();
+    if (auto memref = dyn_cast<MemRefType>(t))
+      return memref.getRank();
+    return std::nullopt;
+  };
+
+  auto inputRank = rankedShape(getInput().getType());
+  auto gridRank = rankedShape(getGrid().getType());
+  auto outputRank = rankedShape(getOutput().getType());
+  if (!inputRank || *inputRank != 4)
+    return emitOpError("expected 4-D input (N, C, H, W)");
+  if (!gridRank || *gridRank != 4)
+    return emitOpError("expected 4-D grid (N, H_out, W_out, 2)");
+  if (!outputRank || *outputRank != 4)
+    return emitOpError("expected 4-D output (N, C, H_out, W_out)");
+
+  int64_t mode = getMode();
+  if (mode != 0 && mode != 1)
+    return emitOpError("mode must be 0 (nearest) or 1 (bilinear), got ")
+           << mode;
+  int64_t padding = getPaddingMode();
+  if (padding < 0 || padding > 2)
+    return emitOpError("padding_mode must be 0 (zeros), 1 (border), or 2 "
+                       "(reflection), got ")
+           << padding;
+  int64_t align = getAlignCorners();
+  if (align != 0 && align != 1)
+    return emitOpError("align_corners must be 0 or 1, got ") << align;
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // GlobalPoolOp: ins(input), outs(output)
 //===----------------------------------------------------------------------===//
 
@@ -1387,6 +1489,20 @@ void MatMulNBitsOp::getEffects(
 MutableOperandRange QMoEOp::getDpsInitsMutable() { return getOutputMutable(); }
 
 void QMoEOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// QMoEAmdOp
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QMoEAmdOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QMoEAmdOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
@@ -1770,6 +1886,18 @@ void CosOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// ErfOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ErfOp::getDpsInitsMutable() { return getYMutable(); }
+
+void ErfOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // SinOp: ins(x), outs(y)
 //===----------------------------------------------------------------------===//
 
@@ -1788,6 +1916,42 @@ void SinOp::getEffects(
 MutableOperandRange CeilOp::getDpsInitsMutable() { return getYMutable(); }
 
 void CeilOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// RoundOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange RoundOp::getDpsInitsMutable() { return getYMutable(); }
+
+void RoundOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// AtanOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange AtanOp::getDpsInitsMutable() { return getYMutable(); }
+
+void AtanOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// FloorOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange FloorOp::getDpsInitsMutable() { return getYMutable(); }
+
+void FloorOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
@@ -2009,6 +2173,34 @@ void ReadbackScalarOp::getEffects(
 MutableOperandRange SizeOp::getDpsInitsMutable() { return getYMutable(); }
 
 void SizeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// QuantizeLinearOp: ins(x, scale, zero_point), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QuantizeLinearOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QuantizeLinearOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// DequantizeLinearOp: ins(x, scale, zero_point), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange DequantizeLinearOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void DequantizeLinearOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);

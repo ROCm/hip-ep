@@ -6,10 +6,12 @@
 
 #include "./morphizen-ep-factory.hpp"
 #include "./morphizen-ep.hpp"
+#include "./ort-api-version.hpp"
 #include "morphizen-utils/morphizen-utils.hpp"
 #include "morphizen-utils/morphizen_plugin.hpp"
 #include "morphizen/onnxruntime_morphizen_ep.hpp"
 #include <glog/logging.h>
+#include <google/protobuf/message_lite.h>
 #include <google/protobuf/util/json_util.h>
 
 #if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
@@ -50,8 +52,7 @@ MorphiZenEpFactory::MorphiZenEpFactory(const char *ep_name, ApiPtrs apis,
       ApiPtrs(apis), default_logger_{default_logger}, ep_name_{ep_name},
       ep_metadata_{nullptr, apis.ort_api.ReleaseKeyValuePairs},
       ep_options_{nullptr, apis.ort_api.ReleaseKeyValuePairs} {
-  ort_version_supported =
-      ORT_API_VERSION; // set to the ORT version we were compiled with.
+  ort_version_supported = NegotiatedOrtApiVersion();
   GetName = GetNameImpl;
   GetVendor = GetVendorImpl;
   GetVendorId = GetVendorIdImpl;
@@ -66,6 +67,18 @@ MorphiZenEpFactory::MorphiZenEpFactory(const char *ep_name, ApiPtrs apis,
   CreateDataTransfer = CreateDataTransferImpl;
   IsStreamAware = IsStreamAwareImpl;
   CreateSyncStreamForDevice = CreateSyncStreamForDeviceImpl;
+  GetNumCustomOpDomains = GetNumCustomOpDomainsImpl;
+  GetCustomOpDomains = GetCustomOpDomainsImpl;
+
+  // Populate custom_op_domains_ once here so its lifetime is tied to this
+  // factory instance instead of the process.
+  CollectCustomOpDomains(custom_op_domains_);
+
+  morphizen::add_cleanup_function("protobuf shutdown", []() {
+#ifdef _WIN32
+    google::protobuf::ShutdownProtobufLibrary();
+#endif
+  });
 }
 const char *ORT_API_CALL
 MorphiZenEpFactory::GetNameImpl(const OrtEpFactory *this_ptr) noexcept {
@@ -339,6 +352,29 @@ OrtStatus *ORT_API_CALL MorphiZenEpFactory::CreateSyncStreamForDeviceImpl(
   return factory->ort_api.CreateStatus(
       ORT_INVALID_ARGUMENT, "CreateSyncStreamForDevice should not be called as "
                             "IsStreamAware returned false.");
+}
+
+// ORT calls GetNumCustomOpDomainsImpl then GetCustomOpDomainsImpl back to
+// back and requires both to agree on the same set; custom_op_domains_ is
+// populated once in the constructor (see MorphiZenEpFactory::
+// MorphiZenEpFactory above), so both accessors simply read the same
+// factory-owned vector.
+OrtStatus *ORT_API_CALL MorphiZenEpFactory::GetNumCustomOpDomainsImpl(
+    OrtEpFactory *this_ptr, size_t *num_domains) noexcept {
+  *num_domains =
+      static_cast<MorphiZenEpFactory *>(this_ptr)->custom_op_domains_.size();
+  return nullptr;
+}
+
+OrtStatus *ORT_API_CALL MorphiZenEpFactory::GetCustomOpDomainsImpl(
+    OrtEpFactory *this_ptr, OrtCustomOpDomain **domains,
+    size_t num_domains) noexcept {
+  const auto &domains_vec =
+      static_cast<MorphiZenEpFactory *>(this_ptr)->custom_op_domains_;
+  for (size_t i = 0; i < num_domains && i < domains_vec.size(); ++i) {
+    domains[i] = domains_vec[i];
+  }
+  return nullptr;
 }
 
 } // namespace morphizen

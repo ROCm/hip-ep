@@ -5,9 +5,8 @@
 #ifndef HIPDNN_EP_RUNTIME_TYPES_REAL_H
 #define HIPDNN_EP_RUNTIME_TYPES_REAL_H
 
-// Real runtime: include HIP/MIOpen/hipBLASLt headers
+// Real runtime: include HIP/hipBLASLt headers
 #include <hip/hip_runtime.h>
 #include <hipblaslt/hipblaslt.h>
-#include <miopen/miopen.h>
 
 #endif // HIPDNN_EP_RUNTIME_TYPES_REAL_H

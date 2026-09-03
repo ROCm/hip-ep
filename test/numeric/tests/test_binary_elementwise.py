@@ -94,6 +94,23 @@ class TestDiv:
             atol = 1e-5
         compare_outputs(actual, expected, atol=atol, rtol=1e-3)
 
+    def test_div_5d_broadcast(self, model_runner):
+        """Rank-5 Div with a broadcast channel axis."""
+        lhs_shape = [2, 3, 4, 2, 5]
+        rhs_shape = [2, 1, 4, 2, 5]
+        in_tp = np_to_onnx_type(np.float32)
+        A = helper.make_tensor_value_info("A", in_tp, lhs_shape)
+        B = helper.make_tensor_value_info("B", in_tp, rhs_shape)
+        Y = helper.make_tensor_value_info("Y", in_tp, lhs_shape)
+        node = helper.make_node("Div", ["A", "B"], ["Y"])
+        model = make_model_from_nodes([node], [A, B], [Y])
+
+        rng = np.random.default_rng(202)
+        a = rng.uniform(-3.0, 3.0, lhs_shape).astype(np.float32)
+        b = _safe_divisor(rng, np.float32, rhs_shape)
+        actual, expected = model_runner.run_sample(model, [a, b])
+        compare_outputs(actual, expected, atol=1e-5, rtol=1e-3)
+
 
 # ---------------------------------------------------------------------------
 # Equal : y = (a == b), bool output
@@ -169,6 +186,24 @@ class TestLess:
         actual, expected = model_runner.run_sample(model, [a, b])
         compare_outputs(actual, expected, atol=0)
 
+    def test_less_5d_broadcast(self, model_runner):
+        """Rank-5 Less with a broadcast channel axis."""
+        lhs_shape = [2, 3, 4, 2, 5]
+        rhs_shape = [2, 1, 4, 2, 5]
+        in_tp = np_to_onnx_type(np.float32)
+        out_tp = np_to_onnx_type(np.bool_)
+        A = helper.make_tensor_value_info("A", in_tp, lhs_shape)
+        B = helper.make_tensor_value_info("B", in_tp, rhs_shape)
+        Y = helper.make_tensor_value_info("Y", out_tp, lhs_shape)
+        node = helper.make_node("Less", ["A", "B"], ["Y"])
+        model = make_model_from_nodes([node], [A, B], [Y])
+
+        rng = np.random.default_rng(206)
+        a = rng.uniform(-3.0, 3.0, lhs_shape).astype(np.float32)
+        b = rng.uniform(-3.0, 3.0, rhs_shape).astype(np.float32)
+        actual, expected = model_runner.run_sample(model, [a, b])
+        compare_outputs(actual, expected, atol=0)
+
 
 # ---------------------------------------------------------------------------
 # Mod : y = a % b   (fmod=0 -> Python-style int; fmod=1 -> C fmod, float)
@@ -234,6 +269,16 @@ class TestAnd:
         shape = [1, seq_len]
         model = _make_binary_model("And", np.bool_, np.bool_, shape)
         rng = np.random.default_rng(209)
+        a = rng.integers(0, 2, shape).astype(np.bool_)
+        b = rng.integers(0, 2, shape).astype(np.bool_)
+        actual, expected = model_runner.run_sample(model, [a, b])
+        compare_outputs(actual, expected, atol=0)
+
+    def test_and_5d(self, model_runner):
+        """Rank-5 And packed through the 4-D path (BEVFormer reference mask)."""
+        shape = [2, 1, 3, 4, 1]
+        model = _make_binary_model("And", np.bool_, np.bool_, shape)
+        rng = np.random.default_rng(210)
         a = rng.integers(0, 2, shape).astype(np.bool_)
         b = rng.integers(0, 2, shape).astype(np.bool_)
         actual, expected = model_runner.run_sample(model, [a, b])

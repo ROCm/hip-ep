@@ -17,6 +17,7 @@
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
+#include "hip/datatype_abi.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
@@ -190,24 +191,43 @@ getContextArg(mlir::Operation *op, mlir::PatternRewriter &rewriter) {
 /// wrappers take as an `input_data_type` argument. Only the subset needed by
 /// the converters that scan a raw buffer (hip.nonzero, and the Compress
 /// selected-count scan built on top of it) is enumerated; any other element
-/// type returns -1 so the caller fails conversion explicitly instead of
-/// silently mis-classifying the buffer.
+/// type returns HIPDNN_EP_DATATYPE_UNSUPPORTED so the caller fails conversion
+/// explicitly instead of silently mis-classifying the buffer.
 inline int64_t getHipdnnInputDataType(mlir::Type elemType) {
   if (elemType.isF32())
-    return 0; // HIPDNN_EP_DATATYPE_FLOAT
+    return HIPDNN_EP_DATATYPE_FLOAT;
   if (elemType.isF16())
-    return 1; // HIPDNN_EP_DATATYPE_HALF
+    return HIPDNN_EP_DATATYPE_HALF;
   if (elemType.isInteger(32))
-    return 3; // HIPDNN_EP_DATATYPE_INT32
+    return HIPDNN_EP_DATATYPE_INT32;
   if (elemType.isInteger(64))
-    return 4; // HIPDNN_EP_DATATYPE_INT64
+    return HIPDNN_EP_DATATYPE_INT64;
   if (elemType.isUnsignedInteger(8))
-    return 7; // HIPDNN_EP_DATATYPE_UINT8 (ORT bool, ui8)
+    return HIPDNN_EP_DATATYPE_UINT8; // ORT bool, ui8
   if (elemType.isInteger(1) || elemType.isSignedInteger(8) ||
       elemType.isSignlessInteger(8))
-    return 5; // HIPDNN_EP_DATATYPE_INT8 (bool/i1, signed/signless i8)
-  return -1;
+    return HIPDNN_EP_DATATYPE_INT8; // bool/i1, signed/signless i8
+  return HIPDNN_EP_DATATYPE_UNSUPPORTED;
 }
+
+//===----------------------------------------------------------------------===//
+// ONNX INT4 / UINT4 packing
+//
+// Both import as an 8-bit MLIR type at the LOGICAL element count, so the
+// element type keeps the signedness but cannot express the width, and the
+// buffer holds only ceil(numel/2) bytes -- two values per byte, low nibble
+// first, over the flattened row-major sequence. `packed_int4` is how that
+// width travels from wherever it is still observable to the QDQ converters.
+//
+// Constant lowering is the only producer of the marker, and it can only reach
+// DequantizeLinear: a packed buffer is observable there as a halved backing
+// size, whereas a QuantizeLinear writing 4-bit output looks identical to one
+// writing 8-bit. The quantize side of the pipeline understands the marker end
+// to end but nothing stamps it yet.
+//===----------------------------------------------------------------------===//
+
+/// Marks a QuantizeLinear / DequantizeLinear whose quantized side is packed.
+constexpr llvm::StringLiteral kPackedInt4Attr = "packed_int4";
 
 /// Build a hip.gqa op for the Whisper-MHA / Whisper-encoder-Attention paths.
 ///
@@ -302,6 +322,8 @@ void populateMatMulNBitsConversionPatterns(RewritePatternSet &patterns,
                                            MLIRContext *ctx);
 void populateQMoEConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateQMoEAmdConversionPatterns(RewritePatternSet &patterns,
+                                       MLIRContext *ctx);
 void populateGatherBlockQuantizedPreparePatterns(RewritePatternSet &patterns,
                                                  MLIRContext *ctx);
 void populateGatherBlockQuantizedConversionPatterns(RewritePatternSet &patterns,
@@ -366,10 +388,18 @@ void populateNotConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateCosConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
+void populateErfConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
 void populateSinConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateCeilConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateRoundConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
+void populateAtanConversionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx);
+void populateFloorConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
 void populateExpConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateLogConversionPatterns(RewritePatternSet &patterns,
@@ -428,10 +458,22 @@ void populatePoolConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateResizeConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+void populateGridSampleConversionPatterns(RewritePatternSet &patterns,
+                                          MLIRContext *ctx);
 void populateGlobalPoolConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
 void populateFlattenConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
+
+void populateQdqConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
+
+/// Pre-lowering pattern set: fold `Transpose(perm=[..,r,r-2])` into a
+/// consuming `onnx.MatMul` as `hipdnn.transA` / `hipdnn.transB` so the
+/// runtime can apply the swap inside hipBLASLt. Sibling of GatherShapeFold;
+/// must run while ONNX ops are still present. See TransposeMatMulFold.cpp.
+void populateTransposeMatMulFoldPatterns(RewritePatternSet &patterns,
+                                         MLIRContext *ctx);
 
 /// Pre-lowering pattern set: collapse the Gather(Shape(x), const_idx)
 /// idiom into tensor.from_elements over a tensor.dim of x. Must run
@@ -470,6 +512,24 @@ void populatePadShapeFoldPatterns(RewritePatternSet &patterns,
 /// constants are still directly matchable. See SliceShapeFold.cpp.
 void populateSliceShapeFoldPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+
+/// Pre-lowering pattern set: rewrite static high-rank onnx.Add/Sub/Mul/Div/
+/// Less/Greater to collapse_shape -> rank-<=4 ONNX op -> expand_shape when
+/// contiguous grouping preserves multidirectional broadcast semantics.
+/// Unsafe or dynamic shapes stay at their original rank for compute conversion.
+void populatePackBroadcastTo4DPatterns(RewritePatternSet &patterns,
+                                       MLIRContext *ctx);
+
+/// Pre-lowering pattern set: recover a sliding window from `onnx.Attention`'s
+/// additive mask subgraph and stamp it as `hipdnn.local_window_size`, which
+/// OnnxAttentionConversion then puts on `hip.gqa`. `onnx.Attention` has no
+/// window attribute, so a windowed model expresses the window only in the mask
+/// data and the runtime would otherwise score its whole key range. Must run
+/// BEFORE `convertComputeOps`, which rewrites the mask's producers into
+/// `hip.*` in an order this matcher cannot rely on. See
+/// AttentionWindowFold.cpp.
+void populateAttentionWindowFoldPatterns(RewritePatternSet &patterns,
+                                         MLIRContext *ctx);
 
 /// Pre-lowering pattern set: collapse ORT's inlined `FastGelu` primitive
 /// chain (Pow / Mul / Sum / Tanh) back into a single

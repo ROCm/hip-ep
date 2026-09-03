@@ -1,3 +1,8 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
 // ============================================================
 // custom_kernels MatMulNBits Verification
 //
@@ -347,7 +352,10 @@ bool test_matmul_nbits(int M, int N, int K, int group_size,
     std::vector<__half>  h_zeros;
 
     size_t countA = static_cast<size_t>(M) * K;
-    size_t countB = static_cast<size_t>(N) * K / 2;
+    // B_packed rows are padded to num_groups_k * (group_size/2) bytes (ONNX
+    // MatMulNBits blob layout -- the last group is padded to a full
+    // group_size even when K % group_size != 0), NOT a plain K/2 bytes/row.
+    size_t countB = static_cast<size_t>(N) * num_groups_k * (group_size / 2);
     size_t countS = static_cast<size_t>(N) * num_groups_k;
     size_t countZ = static_cast<size_t>(N) * num_groups_k;
     size_t countC = static_cast<size_t>(M) * N;
@@ -421,7 +429,10 @@ bool test_matmul_nbits(int M, int N, int K, int group_size,
             1,         // batch_count
             4,         // bits
             group_size,// block_size
-            2);        // element_size_bytes (fp16)
+            2,         // element_size_bytes (fp16)
+            2,         // zp_elem_size (fp16 zero_points, used as-is)
+            nullptr,   // pre_unpacked_zp_u8 (unused, zp_elem_size==2)
+            nullptr);  // pre_unpacked_zp_fp16 (unused, zero_points is already fp16)
     };
 
     constexpr int PRE_WARMUP = 2000;
@@ -449,7 +460,7 @@ bool test_matmul_nbits(int M, int N, int K, int group_size,
             nullptr,
             d_C,
             M, N, K,
-            1, 4, group_size, 2);
+            1, 4, group_size, 2, 2, nullptr, nullptr);
         if(status != 0) break;
     }
     HIP_CHECK(hipStreamSynchronize(stream));
@@ -609,7 +620,9 @@ static int runModelSweep(const std::string& json_path, int group_size,
 
             int num_groups_k = (K + group_size - 1) / group_size;
             size_t countA = (size_t)M * K;
-            size_t countB = (size_t)N * K / 2;
+            // See test_matmul_nbits() above: B_packed rows are padded to
+            // num_groups_k * (group_size/2) bytes, not a plain K/2.
+            size_t countB = (size_t)N * num_groups_k * (group_size / 2);
             size_t countS = (size_t)N * num_groups_k;
             size_t countZ = (size_t)N * num_groups_k;
             size_t countC = (size_t)M * N;
@@ -664,7 +677,7 @@ static int runModelSweep(const std::string& json_path, int group_size,
             auto launch = [&]() {
                 hip_matmul_nbits(stream, dA, dB, dS,
                                  use_zeros ? dZ : nullptr, nullptr, dC,
-                                 M, N, K, 1, 4, group_size, 2);
+                                 M, N, K, 1, 4, group_size, 2, 2, nullptr, nullptr);
             };
 
             // Pre-warmup (once, on first successfully loaded shape)
@@ -693,7 +706,7 @@ static int runModelSweep(const std::string& json_path, int group_size,
             {
                 status = hip_matmul_nbits(stream, dA, dB, dS,
                                           use_zeros ? dZ : nullptr, nullptr, dC,
-                                          M, N, K, 1, 4, group_size, 2);
+                                          M, N, K, 1, 4, group_size, 2, 2, nullptr, nullptr);
                 if(status != 0) break;
             }
             HIP_CHECK(hipStreamSynchronize(stream));

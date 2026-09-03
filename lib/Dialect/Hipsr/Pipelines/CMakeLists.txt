@@ -9,7 +9,10 @@ add_library(HipsrDialectPipelines STATIC
 
 target_link_libraries(HipsrDialectPipelines PUBLIC
   HipsrDialectTransforms
+  OnnxToHipsr
   MLIRPass
   MLIRIR
   MLIRSupport
+  MLIRShapeOpsTransforms
+  MLIRShapeToStandard
 )

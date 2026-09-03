@@ -2,8 +2,8 @@
 // Licensed under the MIT License.
 
 //===----------------------------------------------------------------------===//
-// Verifier and region-trait rules for hipsr.placeholder. Every case but the
-// last is invalid IR that trips one rule.
+// Verifier and region-trait rules for hipsr.placeholder. A case without CHECK
+// lines is invalid IR that trips one rule.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics %s | FileCheck %s
@@ -35,6 +35,26 @@ func.func @data_result_input(
   %second = hipsr.cast(%ctx) ins(%first : tensor<4x8xf16, #hipsr.mem<device>>)
       outs(%second_init : tensor<4x8xf32, #hipsr.mem<device>>) : tensor<4x8xf32, #hipsr.mem<device>>
   return %second : tensor<4x8xf32, #hipsr.mem<device>>
+}
+
+// -----
+// A placeholder that skips an operand its consumer reads can land in an
+// earlier pool domain than the consumer.
+func.func @input_missing_from_placeholder(
+    %ctx: !hipsr.context, %input: tensor<4x8xf32, #hipsr.mem<device>>) -> tensor<4x8xf32, #hipsr.mem<device>> {
+  %first_init = hipsr.placeholder(%ctx)
+      ins(%input : tensor<4x8xf32, #hipsr.mem<device>>)
+      {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4x8xf32, #hipsr.mem<device>>
+  %first = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32, #hipsr.mem<device>>)
+      outs(%first_init : tensor<4x8xf32, #hipsr.mem<device>>) : tensor<4x8xf32, #hipsr.mem<device>>
+  // expected-error @+1 {{must read the shape-graph value of input 1 of its consumer 'hipsr.add'}}
+  %sum_init = hipsr.placeholder(%ctx)
+      ins(%input : tensor<4x8xf32, #hipsr.mem<device>>)
+      {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4x8xf32, #hipsr.mem<device>>
+  %sum = hipsr.add(%ctx)
+      ins(%input, %first : tensor<4x8xf32, #hipsr.mem<device>>, tensor<4x8xf32, #hipsr.mem<device>>)
+      outs(%sum_init : tensor<4x8xf32, #hipsr.mem<device>>) : tensor<4x8xf32, #hipsr.mem<device>>
+  return %sum : tensor<4x8xf32, #hipsr.mem<device>>
 }
 
 // -----
@@ -210,4 +230,29 @@ func.func @constant_shape_roots(
   %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32, #hipsr.mem<device>>)
       outs(%init : tensor<4x8xf16, #hipsr.mem<device>>) : tensor<4x8xf16, #hipsr.mem<device>>
   return %result : tensor<4x8xf16, #hipsr.mem<device>>
+}
+
+// -----
+// A placeholder that reads a value its consumer skips can land in a later pool
+// domain than the consumer.
+func.func @input_missing_from_consumer(
+    %ctx: !hipsr.context, %input: tensor<4x8xf32, #hipsr.mem<device>>) -> tensor<4x8xf32, #hipsr.mem<device>> {
+  %extra_init = hipsr.placeholder(%ctx)
+      ins(%input : tensor<4x8xf32, #hipsr.mem<device>>)
+      {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16, #hipsr.mem<device>>
+  %extra = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32, #hipsr.mem<device>>)
+      outs(%extra_init : tensor<4x8xf16, #hipsr.mem<device>>) : tensor<4x8xf16, #hipsr.mem<device>>
+  %first_init = hipsr.placeholder(%ctx)
+      ins(%input : tensor<4x8xf32, #hipsr.mem<device>>)
+      {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16, #hipsr.mem<device>>
+  %first = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32, #hipsr.mem<device>>)
+      outs(%first_init : tensor<4x8xf16, #hipsr.mem<device>>) : tensor<4x8xf16, #hipsr.mem<device>>
+  // expected-error @+1 {{input 1 has no matching operand in its consumer 'hipsr.cast'}}
+  %result_init = hipsr.placeholder(%ctx)
+      ins(%first_init, %extra_init
+          : tensor<4x8xf16, #hipsr.mem<device>>, tensor<4x8xf16, #hipsr.mem<device>>)
+      {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4x8xf32, #hipsr.mem<device>>
+  %result = hipsr.cast(%ctx) ins(%first : tensor<4x8xf16, #hipsr.mem<device>>)
+      outs(%result_init : tensor<4x8xf32, #hipsr.mem<device>>) : tensor<4x8xf32, #hipsr.mem<device>>
+  return %result : tensor<4x8xf32, #hipsr.mem<device>>
 }

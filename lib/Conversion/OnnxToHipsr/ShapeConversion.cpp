@@ -24,8 +24,10 @@
 //
 // After:
 //   %init = hipsr.placeholder(%ctx)
+//       ins(%x : tensor<?x128xf16, #hipsr.mem<device>>)
 //       {placeholder_type = #hipsr.placeholder_type<normal>}
 //       : tensor<2xi64, #hipsr.mem<host>> shape_region {
+//   ^bb0(%x_shape: !shape.shape):
 //     %c2 = arith.constant 2 : index
 //     %shape = shape.from_extents %c2 : index
 //     hipsr.shape_yield %shape : !shape.shape
@@ -50,6 +52,7 @@
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 #include "hip/Dialect/Hipsr/IR/HipsrShapeRegionPopulationUtils.h"
 #include "hip/Dialect/Hipsr/IR/HipsrTypes.h"
+#include "hip/Dialect/Onnx/IR/OnnxOps.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
@@ -70,19 +73,14 @@ namespace mlir {
 namespace hipsr {
 namespace {
 
-// Resolves the optional start/end attributes against the input rank. ONNX adds
-// the rank to a negative bound and clamps the result into [0, rank], so a bound
-// past either end is legal and names that end rather than being an error.
-std::pair<int64_t, int64_t> resolveAxisRange(Operation *op, int64_t rank) {
-  int64_t start = 0;
-  int64_t end = rank;
-  // getSInt/getInt assert on a signedness this attribute may not carry.
-  if (auto startAttr = op->getAttrOfType<IntegerAttr>("start")) {
-    start = startAttr.getValue().getSExtValue();
-  }
-  if (auto endAttr = op->getAttrOfType<IntegerAttr>("end")) {
-    end = endAttr.getValue().getSExtValue();
-  }
+// Resolves the start/end bounds against the input rank. `start` carries the
+// schema's default of 0, while `end` has none: an absent one means the rank.
+// ONNX adds the rank to a negative bound and clamps the result into [0, rank],
+// so a bound past either end is legal and names that end rather than being an
+// error.
+std::pair<int64_t, int64_t> resolveAxisRange(onnx::ShapeOp op, int64_t rank) {
+  int64_t start = op.getStart();
+  int64_t end = op.getEnd().value_or(rank);
   if (start < 0) {
     start += rank;
   }
@@ -142,27 +140,23 @@ void populateComputeBody(OpBuilder &builder, ComputeOp computeOp,
   ComputeYieldOp::create(builder, loc, ValueRange{shape});
 }
 
-struct ShapeToHipsr : public ConversionPattern {
-  // Takes the pass converter to match the other patterns; converts no type
-  // itself.
+// Converts no type itself: the result is the extents vector, whose length the
+// input's rank fixes.
+struct ShapeToHipsr : public OpConversionPattern<onnx::ShapeOp> {
+  // Takes the pass converter to match the other patterns.
   ShapeToHipsr(const TypeConverter &typeConverter, MLIRContext *ctx)
-      : ConversionPattern("onnx.Shape", /*benefit=*/1, ctx) {}
+      : OpConversionPattern(ctx) {}
 
   LogicalResult
-  matchAndRewrite(Operation *op, ArrayRef<Value> operands,
+  matchAndRewrite(onnx::ShapeOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    if (operands.size() != 1 || op->getNumResults() != 1) {
-      return rewriter.notifyMatchFailure(
-          op, "expected one operand and a single result");
-    }
-
-    Value input = operands[0];
+    Value input = adaptor.getData();
     auto inputType = dyn_cast<RankedTensorType>(input.getType());
     if (!inputType) {
       return rewriter.notifyMatchFailure(op, "expected ranked tensor input");
     }
 
-    auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+    auto resultType = dyn_cast<RankedTensorType>(op.getShape().getType());
     if (!resultType || resultType.getRank() != 1 ||
         !resultType.getElementType().isInteger(64)) {
       return rewriter.notifyMatchFailure(op, "expected a rank-1 i64 result");
@@ -193,10 +187,12 @@ struct ShapeToHipsr : public ConversionPattern {
       return failure();
     }
 
-    Location loc = op->getLoc();
+    // The extent count fixes the shape; the input is there to match the
+    // compute.
+    Location loc = op.getLoc();
     auto init =
         PlaceholderOp::create(rewriter, loc, TypeRange{extentsType}, *ctx,
-                              ValueRange{}, PlaceholderType::Normal);
+                              ValueRange{input}, PlaceholderType::Normal);
     populateShapeRegion(rewriter, init, extentsType.getDimSize(0));
 
     auto computeOp =

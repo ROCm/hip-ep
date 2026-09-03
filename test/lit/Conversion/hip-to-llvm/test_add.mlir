@@ -4,18 +4,18 @@
 // ============================================================================
 // TEST PURPOSE:
 // Verify HIP add operation is correctly lowered to LLVM call
-// to wrap_miopenOpTensor runtime function with 4D per-operand shapes
+// to wrap_elementwise runtime function with 4D per-operand shapes
 // and tensor_op = 1 (ADD).
 //
 // This test validates:
-// - hip.add → llvm.call @wrap_miopenOpTensor
-// - Per-operand 4D shapes passed for MIOpen-native broadcasting
+// - hip.add → llvm.call @wrap_elementwise
+// - Per-operand 4D shapes passed for per-axis broadcasting
 // - Shapes left-padded with 1 for rank < 4
 // - Data type enum (f32=0, f16=1) and tensor_op = 1 (ADD)
 // - 18-param signature: state, lhs, rhs, out, lhs_nchw(4), rhs_nchw(4),
 //                        out_nchw(4), data_type, tensor_op
 //
-// Expected: wrap_miopenOpTensor(state, lhs_ptr, rhs_ptr, output_ptr,
+// Expected: wrap_elementwise(state, lhs_ptr, rhs_ptr, output_ptr,
 //             lhs_n, lhs_c, lhs_h, lhs_w,
 //             rhs_n, rhs_c, rhs_h, rhs_w,
 //             out_n, out_c, out_h, out_w,
@@ -38,7 +38,7 @@ module {
 
     // 4D shape constants for lhs/rhs/out: [1, 1, 128, 512]
     // data_type = 0 (f32), tensor_op = 1 (ADD)
-    // CHECK: llvm.call @wrap_miopenOpTensor({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_elementwise({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -55,7 +55,7 @@ module {
                          outs(%c : memref<1x128x32xf16, 1>)
 
     // lhs padded: [1, 1, 128, 32], rhs padded: [1, 1, 1, 32] (broadcast dim)
-    // CHECK: llvm.call @wrap_miopenOpTensor({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_elementwise({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }

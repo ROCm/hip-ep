@@ -143,6 +143,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     FastGeluOp::attachInterface<HipDstBufferizableModel<FastGeluOp>>(*ctx);
     LeakyReluOp::attachInterface<HipDstBufferizableModel<LeakyReluOp>>(*ctx);
     ResizeOp::attachInterface<HipDstBufferizableModel<ResizeOp>>(*ctx);
+    GridSampleOp::attachInterface<HipDstBufferizableModel<GridSampleOp>>(*ctx);
     GlobalPoolOp::attachInterface<HipDstBufferizableModel<GlobalPoolOp>>(*ctx);
     ReciprocalOp::attachInterface<HipDstBufferizableModel<ReciprocalOp>>(*ctx);
     SqrtOp::attachInterface<HipDstBufferizableModel<SqrtOp>>(*ctx);
@@ -156,8 +157,13 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     MatMulNBitsOp::attachInterface<HipDstBufferizableModel<MatMulNBitsOp>>(
         *ctx);
     QMoEOp::attachInterface<HipDstBufferizableModel<QMoEOp>>(*ctx);
+    QMoEAmdOp::attachInterface<HipDstBufferizableModel<QMoEAmdOp>>(*ctx);
     GatherBlockQuantizedOp::attachInterface<
         HipDstBufferizableModel<GatherBlockQuantizedOp>>(*ctx);
+    QuantizeLinearOp::attachInterface<
+        HipDstBufferizableModel<QuantizeLinearOp>>(*ctx);
+    DequantizeLinearOp::attachInterface<
+        HipDstBufferizableModel<DequantizeLinearOp>>(*ctx);
     CausalConvWithStateOp::attachInterface<
         HipDstBufferizableModel<CausalConvWithStateOp>>(*ctx);
     HipDNNGraphOp::attachInterface<HipDstBufferizableModel<HipDNNGraphOp>>(
@@ -167,6 +173,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     LinearAttentionOp::attachInterface<
         HipDstBufferizableModel<LinearAttentionOp>>(*ctx);
     LayerNormOp::attachInterface<HipDstBufferizableModel<LayerNormOp>>(*ctx);
+    InstanceNormOp::attachInterface<HipDstBufferizableModel<InstanceNormOp>>(
+        *ctx);
     MinOp::attachInterface<HipDstBufferizableModel<MinOp>>(*ctx);
     MaxOp::attachInterface<HipDstBufferizableModel<MaxOp>>(*ctx);
     AbsOp::attachInterface<HipDstBufferizableModel<AbsOp>>(*ctx);
@@ -177,8 +185,12 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     OrOp::attachInterface<HipDstBufferizableModel<OrOp>>(*ctx);
     AndOp::attachInterface<HipDstBufferizableModel<AndOp>>(*ctx);
     CosOp::attachInterface<HipDstBufferizableModel<CosOp>>(*ctx);
+    ErfOp::attachInterface<HipDstBufferizableModel<ErfOp>>(*ctx);
     SinOp::attachInterface<HipDstBufferizableModel<SinOp>>(*ctx);
     CeilOp::attachInterface<HipDstBufferizableModel<CeilOp>>(*ctx);
+    RoundOp::attachInterface<HipDstBufferizableModel<RoundOp>>(*ctx);
+    AtanOp::attachInterface<HipDstBufferizableModel<AtanOp>>(*ctx);
+    FloorOp::attachInterface<HipDstBufferizableModel<FloorOp>>(*ctx);
     ExpOp::attachInterface<HipDstBufferizableModel<ExpOp>>(*ctx);
     LogOp::attachInterface<HipDstBufferizableModel<LogOp>>(*ctx);
     CumSumOp::attachInterface<HipDstBufferizableModel<CumSumOp>>(*ctx);

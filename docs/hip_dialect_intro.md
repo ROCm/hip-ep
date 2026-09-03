@@ -52,58 +52,59 @@ batches (`stride_B = 0`). Supports strided batched GEMM via hipBLASLt.
 
 ---
 
-## MIOpen Ops
-
-Ops backed by the MIOpen library. Each maps to a specific MIOpen C API call.
 
 ### Normalization
 
-| Op | DPS Syntax | MIOpen API | Status |
-|---|---|---|---|
-| `hip.miopen.rms_norm` | `(%ctx) ins(%input, %weight : ...) outs(%output : ...)` | `miopenT5LayerNormForward` | Full impl |
-| `hip.miopen.skip_rms_norm` | `(%ctx) ins(%x, %skip, %weight : ...) outs(%output, %residual : ...)` | `miopenAddLayerNormForward` (T5 mode) | Stub |
+The norm ops are backed by custom HIP kernels.
+
+| Op | DPS Syntax | Backend |
+|---|---|---|
+| `hip.rms_norm` | `(%ctx) ins(%input, %weight : ...) outs(%output : ...)` | `rms_norm_kernel.hip` |
+| `hip.skip_rms_norm` | `(%ctx) ins(%x, %skip, %weight : ...) outs(%output, %residual : ...)` | `skip_rms_norm_kernel.hip` |
 
 Rank-generic: for 3D input `[B,S,D]`, the lowering flattens `N = B*S, D = D` and
-passes them to the runtime: `hip_miopen_rms_norm(handle, input, weight, output, N, D)`.
+passes them to the runtime: `wrap_rms_norm(state, input, weight, output, ...)`.
 
 `skip_rms_norm` fuses Add + RMSNorm into a single kernel:
 `residual = x + skip; output = RMSNorm(residual) * weight`.
-Uses `MIOPEN_ELEMENTWISE_AFFINE_T5` normalization mode.
 
 ### Rotary Positional Embeddings
 
-| Op | DPS Syntax | MIOpen API |
+| Op | DPS Syntax | Runtime entry |
 |---|---|---|
-| `hip.miopen.rope` | `(%ctx, %start_pos) ins(%cos, %sin : ...) outs(%q, %k : ...)` | `miopenRotaryPositionalEmbeddings` (experimental) |
+| `hip.miopen.rope` | `(%ctx, %start_pos) ins(%cos, %sin : ...) outs(%q, %k : ...)` | `wrap_rotary_embedding` |
 
 ### Element-wise Tensor Ops
 
-| Op | DPS Syntax | MIOpen API | Status |
-|---|---|---|---|
-| `hip.miopen.add` | `(%ctx) ins(%A, %B : ...) outs(%C : ...)` | `miopenOpTensor(miopenTensorOpAdd)` | Full impl |
-| `hip.miopen.mul` | `(%ctx) ins(%A, %B : ...) outs(%C : ...)` | `miopenOpTensor(miopenTensorOpMul)` | Full impl |
+| Op | DPS Syntax | Runtime entry |
+|---|---|---|
+| `hip.add` | `(%ctx) ins(%lhs, %rhs : ...) outs(%output : ...)` | `wrap_elementwise` |
+| `hip.mul` | `(%ctx) ins(%lhs, %rhs : ...) outs(%output : ...)` | `wrap_elementwise` |
+| `hip.min` | `(%ctx) ins(%lhs, %rhs : ...) outs(%output : ...)` | `wrap_elementwise` |
+| `hip.max` | `(%ctx) ins(%lhs, %rhs : ...) outs(%output : ...)` | `wrap_elementwise` |
+| `hip.sub` | `(%ctx) ins(%lhs, %rhs : ...) outs(%output : ...)` | `wrap_elementwise_sub` |
 
-The binary op lowering computes `numA` and `numB` (product of all memref dimensions
-for each operand) and passes both to the runtime:
-`hip_miopen_{add,mul}(handle, A, B, C, numA, numB)`.
-When `numB == 1` (e.g. `memref<f32>` scalar), the runtime broadcasts B across all
-elements of A via MIOpen's tensor broadcasting support.
+The lowering passes full 4D shapes for both operands and the result, so the
+runtime broadcasts per axis. `hip.add(memref<1x128x32xf16>, memref<32xf16>)`
+passes `lhs=[1,1,128,32]`, `rhs=[1,1,1,32]`, `out=[1,1,128,32]`; a dim of 1
+broadcasts against the corresponding larger dim. `hip.sub` requires equal
+shapes -- broadcasting is resolved before conversion.
 
 ### Softmax
 
-| Op | DPS Syntax | MIOpen API | Status |
-|---|---|---|---|
-| `hip.miopen.softmax` | `(%ctx) ins(%input : ...) outs(%output : ...)` | `miopenSoftmaxForward_V2` | Full impl |
+| Op | DPS Syntax | Runtime entry |
+|---|---|---|
+| `hip.miopen.softmax` | `(%ctx) ins(%input : ...) outs(%output : ...)` | `hip_miopen_softmax` |
 
-Row-wise softmax over the last dimension. Rank-generic: for 3D `[B,S,S]`, the
-lowering flattens `rows = B*S, cols = S`. The runtime uses a 4D descriptor
-`[rows, cols, 1, 1]` with `MIOPEN_SOFTMAX_MODE_CHANNEL` to normalize over cols.
+Row-wise softmax over the last dimension. Rank-generic: for 3D `[B,S,D]`, the
+lowering flattens `rows = B*S, cols = D` and passes `elem_size_bytes` (2 for
+fp16, 4 for fp32) so the runtime dispatches the matching dtype.
 
 ---
 
 ## Custom HIP Kernel Ops
 
-Ops with no MIOpen or hipBLASLt equivalent. Implemented as pure C++ kernels.
+Ops with no hipBLASLt equivalent. Implemented as pure C++ kernels.
 
 | Op | DPS Syntax | Purpose | Status |
 |---|---|---|---|
@@ -121,7 +122,7 @@ No runtime -- inlined and erased during lowering to LLVM.
 
 | Op | Syntax | Purpose |
 |---|---|---|
-| `hip.miopen.graph` | `hip.miopen.graph { ... }` | Groups MIOpen-dispatched ops |
+| `hip.miopen.graph` | `hip.miopen.graph { ... }` | Groups custom-kernel-dispatched ops (name predates the MIOpen removal) |
 | `hip.hipblaslt.graph` | `hip.hipblaslt.graph { ... }` | Groups hipBLASLt-dispatched ops |
 
 ---
@@ -182,8 +183,8 @@ Details of `--convert-hip-to-llvm`:
   `alignedPtr`, not `allocatedPtr`, so that `memref.view` offsets into a memory
   pool are correctly preserved).
   Shape metadata is extracted rank-generically from memref descriptors.
-- **Binary ops** (`hip.miopen.add`, `hip.miopen.mul`) pass both `numA` and `numB`
-  to the runtime, enabling scalar broadcast when B is rank-0 (`memref<f32>`).
+- **Binary ops** (`hip.add`, `hip.mul`, `hip.min`, `hip.max`) pass full 4D shapes
+  for both operands and the result, so the runtime broadcasts per axis.
 - **`memref.alloc` / `memref.dealloc`** (if any remain) are converted
   to device allocation calls (`hip_device_malloc` / `hip_device_free`).
 - **Region ops** are inlined: body ops moved to parent block, region op erased.
@@ -235,15 +236,14 @@ lib/Runtime/                   (compiled to runtime.bc bitcode by CMake)
   hipdnn_ep_runtime.h     Runtime C API header
   hipdnn_ep_runtime_state.cpp   Runtime state management
   hipdnn_ep_runtime_tensor.cpp  Tensor descriptor helpers
-  real/                   Real GPU runtime (ROCm/MIOpen/hipBLASLt)
+  real/                   Real GPU runtime (HIP / hipBLASLt / custom kernels)
     hip.cpp               HIP device management
     memory.cpp            Device memory allocation
     matmul.cpp            hipBLASLt matmul
-    miopen.cpp            MIOpen handle lifecycle
-    elementwise.cpp       MIOpen add/mul
-    simplified_layer_norm.cpp     MIOpen RMS norm
-    skip_simplified_layer_norm.cpp  MIOpen skip + RMS norm
-    rotary_embedding.cpp  MIOpen RoPE
+    elementwise.cpp       add / mul / min / max / sub
+    simplified_layer_norm.cpp     RMS norm
+    skip_simplified_layer_norm.cpp  skip + RMS norm
+    rotary_embedding.cpp  RoPE
     activation.cpp        SiLU activation
     cast.cpp              Type casting
     gather.cpp            Embedding gather
@@ -256,10 +256,10 @@ lib/Runtime/                   (compiled to runtime.bc bitcode by CMake)
 
 examples/
   gemm.hip.mlir           Two chained matmuls (hipBLASLt)
-  add.hip.mlir            Two chained adds (MIOpen)
-  mul.hip.mlir            Two chained muls (MIOpen)
-  rms_norm.hip.mlir       Two chained RMS norms (MIOpen)
-  softmax.hip.mlir        Two chained softmaxes (MIOpen)
+  add.hip.mlir            Two chained adds
+  mul.hip.mlir            Two chained muls
+  rms_norm.hip.mlir       Two chained RMS norms
+  softmax.hip.mlir        Two chained softmaxes
   attention.hip.mlir      Attention (memref pool + embedded weights)
   main_gemm.cpp           C++ driver for gemm.hip.mlir
   main_add.cpp            C++ driver for add.hip.mlir

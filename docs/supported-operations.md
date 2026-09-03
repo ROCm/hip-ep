@@ -12,17 +12,17 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 
 | Operation | Backend or lowering |
 |---|---|
-| Conv | MIOpen |
-| ConvTranspose | MIOpen |
+| Conv | Custom HIP kernel |
+| ConvTranspose | Custom HIP kernel |
 | MatMul | hipBLASLt |
 | Gemm | hipBLASLt |
 | Transpose | Custom HIP kernel |
-| Mul | MIOpen |
-| Add | MIOpen |
+| Mul | Custom HIP kernel |
+| Add | Custom HIP kernel |
 | Softmax | Custom HIP kernel |
-| Sigmoid | MIOpen |
-| Tanh | MIOpen |
-| Softplus | MIOpen |
+| Sigmoid | Custom HIP kernel |
+| Tanh | Custom HIP kernel |
+| Softplus | Custom HIP kernel (f32/f16) |
 | Gelu | Custom HIP kernel |
 | BiasGelu (`com.microsoft`) | Custom HIP kernel |
 | FastGelu (`com.microsoft`) | Custom HIP kernel |
@@ -35,6 +35,8 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Cast | Custom HIP kernel |
 | CastLike | Simplified to Cast |
 | Ceil | Custom HIP kernel |
+| Round | Custom HIP kernel |
+| Floor | Custom HIP kernel |
 | Neg | Custom HIP kernel |
 | Equal | Custom HIP kernel |
 | Not | Custom HIP kernel |
@@ -42,7 +44,9 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Or | Custom HIP kernel |
 | Abs | Custom HIP kernel |
 | Cos | Custom HIP kernel |
+| Erf | Custom HIP kernel |
 | Sin | Custom HIP kernel |
+| Atan | Custom HIP kernel |
 | Div | Custom HIP kernel |
 | Mod | Custom HIP kernel |
 | Sign | Custom HIP kernel |
@@ -51,8 +55,8 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Greater | Decomposed to `Less(B, A)` |
 | GreaterOrEqual | Decomposed to `Not(Less(A, B))` |
 | LessOrEqual | Decomposed to `Not(Less(B, A))` |
-| Min | MIOpen |
-| Max | MIOpen |
+| Min | Custom HIP kernel |
+| Max | Custom HIP kernel |
 | ReduceSum | Custom HIP kernel |
 | ReduceMax | Custom HIP kernel |
 | ReduceMin | Custom HIP kernel |
@@ -74,10 +78,11 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Compress | Custom HIP kernel; a dynamic selected extent is scanned and read back before allocation |
 | OneHot | Custom HIP kernel |
 | LayerNormalization | Custom HIP kernel |
+| InstanceNormalization | Custom HIP kernel |
 | SkipLayerNormalization (`com.microsoft`) | Decomposed to Add + LayerNormalization |
-| RMSNormalization | MIOpen |
-| SimplifiedLayerNormalization | MIOpen |
-| SkipSimplifiedLayerNormalization (`com.microsoft`) | MIOpen |
+| RMSNormalization | Custom HIP kernel |
+| SimplifiedLayerNormalization | Custom HIP kernel |
+| SkipSimplifiedLayerNormalization (`com.microsoft`) | Custom HIP kernel, add and norm fused |
 | LpNormalization | Decomposed to Mul / ReduceSum / Sqrt / Div |
 | RotaryEmbedding (`com.microsoft`) | Custom HIP kernel |
 | RotaryEmbedding (`ai.onnx`) | Custom HIP kernel |
@@ -88,8 +93,10 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | MatMulNBits (`com.microsoft`) | Custom HIP kernel |
 | QMoE (`com.microsoft`) | Custom HIP kernel |
 | GatherBlockQuantized (`com.microsoft`) | Custom HIP kernel |
+| QuantizeLinear | Custom HIP kernel |
+| DequantizeLinear | Custom HIP kernel |
 | LinearAttention (`com.microsoft`) | Custom HIP kernel |
-| CausalConvWithState (`com.microsoft`) | Custom HIP kernel fast paths with MIOpen fallback |
+| CausalConvWithState (`com.microsoft`) | Custom HIP kernel |
 | Relu | Decomposed to Max |
 | LeakyRelu | Custom HIP kernel |
 | Clip | Decomposed to Max + Min |
@@ -97,6 +104,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | AveragePool | Custom HIP kernel |
 | LpPool | Custom HIP kernel |
 | Resize | Custom HIP kernel |
+| GridSample | Custom HIP kernel |
 | GlobalAveragePool | Custom HIP kernel |
 | GlobalMaxPool | Custom HIP kernel |
 | GlobalLpPool | Custom HIP kernel |

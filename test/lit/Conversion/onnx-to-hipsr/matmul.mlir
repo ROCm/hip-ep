@@ -7,7 +7,7 @@
 // ONNX case).
 //===----------------------------------------------------------------------===//
 
-// RUN: hip-mlir-opt %s --split-input-file -allow-unregistered-dialect -convert-onnx-to-hipsr | FileCheck %s
+// RUN: hip-mlir-opt %s --onnx-dialect=modeled --split-input-file -allow-unregistered-dialect -convert-onnx-to-hipsr | FileCheck %s
 
 // 2-D x 2-D (dynamic M).
 // CHECK-LABEL: func.func @matmul_2d(
@@ -22,7 +22,7 @@ func.func @matmul_2d(%ctx: !hipsr.context, %a: tensor<?x4096xf16>,
                      %b: tensor<4096x1024xf16>) -> tensor<?x1024xf16> {
   %0 = "onnx.MatMul"(%a, %b) : (tensor<?x4096xf16>, tensor<4096x1024xf16>)
       -> tensor<?x1024xf16>
-  return %0 : tensor<?x1024xf16>
+  "onnx.Return"(%0) : (tensor<?x1024xf16>) -> ()
 }
 
 // -----
@@ -40,5 +40,5 @@ func.func @matmul_1d_rhs(%ctx: !hipsr.context, %a: tensor<?x4096xf16>,
                          %b: tensor<4096xf16>) -> tensor<?xf16> {
   %0 = "onnx.MatMul"(%a, %b) : (tensor<?x4096xf16>, tensor<4096xf16>)
       -> tensor<?xf16>
-  return %0 : tensor<?xf16>
+  "onnx.Return"(%0) : (tensor<?xf16>) -> ()
 }

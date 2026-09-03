@@ -34,6 +34,6 @@ echo ============================================================
 echo.
 echo  NOTE: Ensure these DLLs are in PATH at runtime:
 echo    - amdhip64_7.dll     (from %THEROCK_DIST%\bin)
-echo    - libhipblaslt.dll   (from %THEROCK_DIST%\bin)
+echo    - hipblaslt.dll      (from %THEROCK_DIST%\bin)
 echo    - gemm.dll           (generated)
 echo ============================================================

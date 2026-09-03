@@ -21,7 +21,7 @@ if not defined CONDA_PREFIX (
 REM --- LLVM/MLIR build output (contains mlir-translate, llc) ---
 set LLVM_BIN=C:\Users\chiz\work\gpu\llvm-project\build\Debug\bin
 
-REM --- TheRock ROCm dist (contains amdhip64, hipblaslt, MIOpen) ---
+REM --- TheRock ROCm dist (contains amdhip64, hipblaslt) ---
 set THEROCK_DIST=C:\Users\chiz\work\gpu\TheRock\build\dist\rocm
 
 REM --- MLIR tools build output ---
@@ -53,14 +53,5 @@ if not exist amdhip64.lib (
   for /f "tokens=4" %%a in (_exports_raw.txt) do echo   %%a >> amdhip64.def
   lib /def:amdhip64.def /out:amdhip64.lib /machine:x64 >nul 2>&1
   del _exports_raw.txt amdhip64.def amdhip64.exp 2>nul
-)
-if not exist MIOpen.lib (
-  echo Generating MIOpen.lib from MIOpen.dll...
-  dumpbin /EXPORTS "%THEROCK_DIST%\bin\MIOpen.dll" | findstr /R "^  *[0-9]" > _exports_raw.txt
-  echo LIBRARY MIOpen.dll > MIOpen.def
-  echo EXPORTS >> MIOpen.def
-  for /f "tokens=4" %%a in (_exports_raw.txt) do echo   %%a >> MIOpen.def
-  lib /def:MIOpen.def /out:MIOpen.lib /machine:x64 >nul 2>&1
-  del _exports_raw.txt MIOpen.def MIOpen.exp 2>nul
 )
 popd

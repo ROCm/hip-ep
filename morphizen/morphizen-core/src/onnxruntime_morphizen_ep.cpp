@@ -171,8 +171,12 @@ intialize_op_defs_old(std::vector<OrtCustomOpDomain *> &contrib_domains,
   //  }
   //}
 }
-static void intialize_op_defs(std::vector<OrtCustomOpDomain *> &ret_domain) {
-  // This function is used to initialize the op_def_map
+// Collects every OrtCustomOpDomain contributed by "morphizen_register_ops"
+// plugin symbols (see morphizen/op_def.hpp's OpRegister) into ret_domain.
+// Does a fresh plugin scan on every call -- callers that need this to run
+// at most once must cache their own call (see MorphiZenEpFactory's
+// custom_op_domains_ member in morphizen-ep-factory.cpp).
+void CollectCustomOpDomains(std::vector<OrtCustomOpDomain *> &ret_domain) {
   typedef void (*register_ops_t)(void *, add_op_t);
   auto &op_holder = get_global_op_holder();
   auto add_op = [](void *state, const char *domain, OrtCustomOp *op,
@@ -196,6 +200,7 @@ static void intialize_op_defs(std::vector<OrtCustomOpDomain *> &ret_domain) {
   auto tmp = op_holder.get_domains();
   ret_domain.insert(ret_domain.end(), tmp.begin(), tmp.end());
 }
+
 MORPHIZEN_DLL_SPEC
 const ::OrtCustomOp *morphizen_get_registered_custom_op(const char *domain,
                                                         const char *op_name) {
@@ -218,7 +223,7 @@ void initialize_onnxruntime_morphizen_ep(
     // to to delete deconstruct objects, so the memory leak here.
     intialize_op_defs_old(contrib_domains, ret_domain);
   }
-  intialize_op_defs(ret_domain);
+  CollectCustomOpDomains(ret_domain);
   morphizen::add_cleanup_function("protobuf shutdown", []() {
 #ifdef _WIN32
     google::protobuf::ShutdownProtobufLibrary();

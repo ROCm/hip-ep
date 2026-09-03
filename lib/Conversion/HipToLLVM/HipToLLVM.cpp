@@ -256,7 +256,9 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateMultiHeadAttentionLoweringPatterns(typeConverter, patterns);
   populateMatMulNBitsLoweringPatterns(typeConverter, patterns);
   populateQMoELoweringPatterns(typeConverter, patterns);
+  populateQMoEAmdLoweringPatterns(typeConverter, patterns);
   populateGatherBlockQuantizedLoweringPatterns(typeConverter, patterns);
+  populateQdqLoweringPatterns(typeConverter, patterns);
   populateGemmLoweringPatterns(typeConverter, patterns);
   populateLinearAttentionLoweringPatterns(typeConverter, patterns);
   populateGraphLoweringPatterns(typeConverter, patterns);
@@ -284,6 +286,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateSizeLoweringPatterns(typeConverter, patterns);
   populatePoolLoweringPatterns(typeConverter, patterns);
   populateResizeLoweringPatterns(typeConverter, patterns);
+  populateGridSampleLoweringPatterns(typeConverter, patterns);
   populateGlobalPoolLoweringPatterns(typeConverter, patterns);
   populateQAddLoweringPatterns(typeConverter, patterns);
 

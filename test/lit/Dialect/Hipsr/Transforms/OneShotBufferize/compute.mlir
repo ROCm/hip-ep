@@ -73,9 +73,9 @@
 // CHECK-SAME: : memref<?x256xf16, #hipsr.mem<device>> into memref<?xf16, #hipsr.mem<device>>
 // CHECK-NEXT: hipsr.compute_yield %[[COLLAPSED]] : memref<?xf16, #hipsr.mem<device>>
 // CHECK-NEXT: } : memref<?xf16, #hipsr.mem<device>>{{$}}
-// CHECK-NEXT: hipsr.preserve_shape %[[SHAPE1]], %[[INIT1]] : memref<?x256xf16, #hipsr.mem<device>>
-// CHECK-NEXT: hipsr.preserve_shape %[[SHAPE2]], %[[INIT2]] : memref<?x256xf16, #hipsr.mem<device>>
-// CHECK-NEXT: hipsr.preserve_shape %[[SHAPE3]], %[[FLAT]] : memref<?xf16, #hipsr.mem<device>>
+// CHECK-NEXT: hipsr.preserve_shape %[[SHAPE1]], %[[INIT1]] : !shape.shape, memref<?x256xf16, #hipsr.mem<device>>
+// CHECK-NEXT: hipsr.preserve_shape %[[SHAPE2]], %[[INIT2]] : !shape.shape, memref<?x256xf16, #hipsr.mem<device>>
+// CHECK-NEXT: hipsr.preserve_shape %[[SHAPE3]], %[[FLAT]] : !shape.shape, memref<?xf16, #hipsr.mem<device>>
 // CHECK-NEXT: hipsr.pool_domain_yield %[[FLAT]] : memref<?xf16, #hipsr.mem<device>>
 // CHECK-NEXT: } -> memref<?xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
 // CHECK-NEXT: return %[[OUT]] : memref<?xf16, #hipsr.mem<device>>
@@ -107,6 +107,7 @@ func.func @pool_domain_mlp_flatten(
     }
     %init1 = tensor.empty(%m) : tensor<?x256xf16, #hipsr.mem<device>>
     %init2 = tensor.empty(%m) : tensor<?x256xf16, #hipsr.mem<device>>
+    %init3 = tensor.empty(%flat_size) : tensor<?xf16, #hipsr.mem<device>>
     %cast1 = hipsr.cast(%dctx)
         ins(%input_arg : tensor<?x256xf16, #hipsr.mem<device>>)
         outs(%init1 : tensor<?x256xf16, #hipsr.mem<device>>)
@@ -117,17 +118,17 @@ func.func @pool_domain_mlp_flatten(
         : tensor<?x256xf16, #hipsr.mem<device>>
     %flat = hipsr.compute(%dctx)
         ins(%cast2 : tensor<?x256xf16, #hipsr.mem<device>>)
-        outs(%cast2 : tensor<?x256xf16, #hipsr.mem<device>>) {
+        outs(%init3 : tensor<?xf16, #hipsr.mem<device>>) {
     ^bb0(%body_ctx: !hipsr.context, %in: tensor<?x256xf16, #hipsr.mem<device>>,
-         %dest: tensor<?x256xf16, #hipsr.mem<device>>):
+         %dest: tensor<?xf16, #hipsr.mem<device>>):
       %collapsed = tensor.collapse_shape %in [[0, 1]]
           : tensor<?x256xf16, #hipsr.mem<device>>
           into tensor<?xf16, #hipsr.mem<device>>
       hipsr.compute_yield %collapsed : tensor<?xf16, #hipsr.mem<device>>
     } : tensor<?xf16, #hipsr.mem<device>>
-    hipsr.preserve_shape %shape1, %cast1 : tensor<?x256xf16, #hipsr.mem<device>>
-    hipsr.preserve_shape %shape2, %cast2 : tensor<?x256xf16, #hipsr.mem<device>>
-    hipsr.preserve_shape %shape3, %flat : tensor<?xf16, #hipsr.mem<device>>
+    hipsr.preserve_shape %shape1, %cast1 : !shape.shape, tensor<?x256xf16, #hipsr.mem<device>>
+    hipsr.preserve_shape %shape2, %cast2 : !shape.shape, tensor<?x256xf16, #hipsr.mem<device>>
+    hipsr.preserve_shape %shape3, %flat : !shape.shape, tensor<?xf16, #hipsr.mem<device>>
     hipsr.pool_domain_yield %flat : tensor<?xf16, #hipsr.mem<device>>
   } -> tensor<?xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
   return %out : tensor<?xf16, #hipsr.mem<device>>

@@ -1,0 +1,287 @@
+// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+
+// Offline GQA autotune table: one flat vector of fixed-size rows.
+//
+// Every field is a ubyte or a ubyte-backed enum, so a row is 12 bytes with no
+// padding and no vtable, and the whole table is a length-prefixed array. The
+// previous schema spelled a row as two nested tables of int32 fields, which cost
+// 61 bytes per row for the same information -- 122 KB for a table that is 33 KB
+// here. Size is the point: what fits in the file is how many measured shapes the
+// policy can distinguish.
+//
+// Two things follow from encoding lengths as enum labels rather than as integers.
+// The bucket ladder is now *in the schema*, so the generator cannot name a bucket
+// the runtime does not compute (the previous scheme could only be caught by
+// bumping schema_version). And the JSON stays readable -- flatc writes and reads
+// the enum names, so a row diffs as `seq_kv: "S16384"`, not as a magic byte.
+
+namespace mlir.hip;
+
+enum GqaTunePhase : ubyte {
+  Decode = 0,
+  PrefillV5 = 1,
+  PrefillV7 = 2,
+  PrefillV8 = 3
+}
+
+// Exact (num_heads, kv_num_heads) pairs measured in practice. Used by ExactHeadGroup tier.
+enum GqaHeadCountClass : ubyte {
+  Any     = 0,
+  // hpg=2: gemma3-4b
+  H8_G4   = 1,
+  // hpg=4: Llama-3.1-8B, Mistral-7B; Qwen3.5-9B
+  H32_G8  = 2,
+  H16_G4  = 3,
+  // hpg=4: phi-4
+  H40_G10 = 4,
+  // hpg=5: Qwen2.5-14B, Qwen2.5-Coder-14B
+  H40_G8  = 5,
+  // hpg=6: Qwen3.6-27B, Qwen3.8-27B (corrected from earlier data: G=4, not G=6 or G=3)
+  H24_G4  = 6,
+  // hpg=8: DeepSeek-R1-Distill-Llama-70B; Qwen3.5/3.6-35B-A3B
+  H64_G8  = 7,
+  H16_G2  = 8,
+  // hpg=1: gpt-oss-20b (MHA)
+  H32_G32 = 9
+}
+
+// How much of the key a row leaves wildcarded. Every tier is a row, so what to
+// run is never decided in code -- and which tier answers is decided by which row
+// exists, not by a branch.
+//
+// The order is the probe order, and it is also the order of decreasing
+// measurement support. Measured on the 460-shape decode grid, with each tier used
+// alone (tools/analyze_key_space.py):
+//
+//   tier             rows  median  p90    max    <=5% of optimum
+//   Geometry         190   1.000   1.007  1.130  99%
+//   ExactHeadGroup    ?    TBD     TBD    TBD    TBD (new tier: exact H+G match)
+//   HeadGroup        133   1.000   1.015  1.130  98% (fuzzy fallback for new H/G combos)
+//   Length            57   1.000   1.063  1.246  84%
+//   Fallback           3   1.003   1.213  1.515  69%
+//
+// Probe order (finest to coarsest): Geometry (par-walk) → ExactHeadGroup → HeadGroup (HpG-only) → Length → Fallback.
+// Geometry is the tier that carries production traffic when a batch-specific measurement exists.
+// ExactHeadGroup is the new finest tier for exact (H, G) pairs, answering models whose head counts
+// match exactly. HeadGroup remains as fuzzy fallback for new models with known HpG but unseen (H,G).
+enum GqaTuneTier : ubyte {
+  // hpg, par and the length labels are all set. For a geometry whose absolute
+  // head count or batch changes the answer, which measurement has so far found
+  // only on decode at head_dim 256.
+  Geometry = 0,
+  // Exact (num_heads, kv_num_heads) pair + length labels set, par and batch are Any.
+  // Finest-grain matching: answers models whose head counts match exactly, e.g. H=32,G=8.
+  // Falls through to HeadGroup if no row exists for the requested (H, G) pair.
+  ExactHeadGroup = 1,
+  // hpg and the length labels are set, par is Any: one row per
+  // (head_dim, heads-per-group, length bucket), pooled over head counts.
+  // Fuzzy fallback for new models with known HpG ratio but unmeasured (H, G) pair.
+  HeadGroup = 2,
+  // Only the length labels are set. Answers a geometry whose heads-per-group has
+  // no row, and most prefill shapes: the prefill kernels are templated on head_dim
+  // alone, so their rows depend on the geometry only where the query-to-KV ratio
+  // changes how much of the cache a tile re-reads. Prefill v8 is the extreme case
+  // -- one config wins all 599 shapes measured, over seven geometries.
+  Length = 3,
+  // phase, kv_dtype and head_dim only. The last resort, ranked on its worst case.
+  Fallback = 4
+}
+
+enum GqaTuneKvDtype : ubyte {
+  Any = 0,
+  Fp16 = 1,
+  Int8 = 2
+}
+
+// The three head_dim values the fused kernels are instantiated for. `Any` is for a
+// Fallback row that covers a head_dim nobody measured.
+enum GqaTuneHeadDim : ubyte {
+  Any = 0,
+  D64 = 1,
+  D128 = 2,
+  D256 = 3
+}
+
+// Bucket labels: four to the octave, at 1, 1.25, 1.5 and 1.75 times each power of
+// two, which is what seqBucket() in gqa_autotune.cpp rounds a request length up
+// to. A row labelled S12288 answers every request in (10240, 12288].
+//
+// The step has been halved twice, each time because a wider interval was measured
+// straddling a change in the optimum, and each time the cost was rows rather than
+// accuracy:
+//
+//   step        decode buckets within 5% of optimum   worst bucket
+//   2x (octave)                                  92%        86.9%
+//   1.5x                                         97%        88.5%
+//   1.25x                                        99%        95.4%
+//
+// 64:8:64 is the geometry that forced it: its decode switches between the WMMA and
+// scalar kernels twice inside (512, 1024] and once inside (16384, 32768], and its
+// prefill v5 flips between MT1 and MT2 inside (8192, 12288]. At 1.25x those land in
+// different buckets. Rows are 11 bytes, so buying that costs a few hundred bytes --
+// which is the reason to keep a row small.
+//
+// The values ascend with the label, so a reader can walk to the next coarser bucket
+// by adding one.
+enum GqaSeqBucket : ubyte {
+  Any = 0,
+  S1 = 1, S2 = 2, S3 = 3, S4 = 4, S5 = 5, S6 = 6,
+  S7 = 7, S8 = 8, S10 = 9, S12 = 10, S14 = 11, S16 = 12,
+  S20 = 13, S24 = 14, S28 = 15, S32 = 16, S40 = 17, S48 = 18,
+  S56 = 19, S64 = 20, S80 = 21, S96 = 22, S112 = 23, S128 = 24,
+  S160 = 25, S192 = 26, S224 = 27, S256 = 28, S320 = 29, S384 = 30,
+  S448 = 31, S512 = 32, S640 = 33, S768 = 34, S896 = 35, S1024 = 36,
+  S1280 = 37, S1536 = 38, S1792 = 39, S2048 = 40, S2560 = 41, S3072 = 42,
+  S3584 = 43, S4096 = 44, S5120 = 45, S6144 = 46, S7168 = 47, S8192 = 48,
+  S10240 = 49, S12288 = 50, S14336 = 51, S16384 = 52, S20480 = 53, S24576 = 54,
+  S28672 = 55, S32768 = 56, S40960 = 57, S49152 = 58, S57344 = 59, S65536 = 60,
+  S81920 = 61, S98304 = 62, S114688 = 63, S131072 = 64, S163840 = 65,
+  S196608 = 66, S229376 = 67, S262144 = 68
+}
+
+// The sliding window, rounded up to a power of two. Only prefill v5 ever sees one:
+// window_ok in gqa.cpp admits a window to the fused path at head_dim 64 alone, and
+// the fused decode path hard-codes local_window = 0.
+//
+// `Any` is a wildcard over the window, which a Fallback row needs because it has
+// to answer both a windowed and an unwindowed request. `NoWindow` is the concrete
+// "no window" case, which is not the same thing.
+enum GqaWindowClass : ubyte {
+  Any = 0,
+  NoWindow = 1,
+  W128 = 2, W256 = 3, W512 = 4, W1024 = 5, W2048 = 6, W4096 = 7,
+  W8192 = 8, W16384 = 9, W32768 = 10, W65536 = 11
+}
+
+// batch * num_heads, rounded up to a power of two: the number of independent work
+// items the launch has. This is the first-order way the head count and the batch
+// size matter, and both were previously *exact* fields of every key, which is why a
+// batched deployment reached the last-resort row for every shape: nothing was ever
+// measured at batch > 1, so nothing matched.
+//
+// A row storing `Any` is a wildcard over parallelism, and the tiers below Geometry
+// all do.
+enum GqaParClass : ubyte {
+  Any = 0,
+  P1 = 1, P2 = 2, P4 = 3, P8 = 4, P16 = 5, P32 = 6, P64 = 7, P128 = 8,
+  P256 = 9, P512 = 10, P1024 = 11, P2048 = 12, P4096 = 13, P8192 = 14
+}
+
+// The batch size, rounded up to a power of two -- the second-order term, and not a
+// redundant one: `8:1:64` at batch 32 and `64:8:64` at batch 4 are the same 256 work
+// items and disagree about WMMA in 7 shapes out of 7. Keying on the product alone
+// puts them on one row, and whichever way that row goes it is 25-36% wrong for the
+// other. Measured over 2999 decode keys, splitting the product into its two factors
+// takes the worst case from 68.7% of optimum to 80.3% and the share within 5% from
+// 97% to 99%, for 714 more rows before pruning.
+//
+// Once a key carries heads-per-group, the parallelism class and this, the exact head
+// counts and the exact batch add nothing at all: the same measurements group into
+// exactly the same 3713 keys either way, with the same quality to a decimal.
+//
+// `Any` is a wildcard. Most rows use it, because pruning keeps a batch-specific row
+// only where it disagrees with the batch-agnostic one.
+enum GqaBatchClass : ubyte {
+  Any = 0,
+  B1 = 1, B2 = 2, B4 = 3, B8 = 4, B16 = 5, B32 = 6, B64 = 7, B128 = 8,
+  B256 = 9, B512 = 10
+}
+
+// A named point of the launch-config space, one byte, spelled the way the
+// dispatchers and the offline sweep spell it.
+//
+// Naming the whole config instead of storing its knobs separately is what makes an
+// illegal config unrepresentable: the previous schema carried seven independent
+// ints and the loader had to check, per phase, which combinations of them were
+// real. `nd == 4 && bkv == 64` is not in this list, so no table can ask for it.
+//
+// Decode carries its split count in the row's `splits` field instead of here,
+// because the split ladder is not closed -- the runtime clamps it per request.
+enum GqaTuneConfig : ubyte {
+  None = 0,
+  // decode
+  Scalar = 1,
+  // d128 WMMA is fixed at BKV=32 in the kernel. Keep its established name;
+  // gqa-v2 rows use the explicit BKV names below only for d64.
+  Wmma = 2,
+  // PR #675 makes the d64 WMMA KV tile height a performance choice. It stays
+  // in this enum rather than adding a row field, preserving the 12-byte struct.
+  WmmaBkv16 = 3,
+  WmmaBkv32 = 4,
+  // prefill v5: m_tiles, bkv
+  MT1_BKV32 = 16,
+  MT1_BKV64 = 17,
+  MT2_BKV32 = 18,
+  MT2_BKV64 = 19,
+  // prefill v7: nw, bkv, mt
+  NW1_BKV32_MT1 = 32,
+  NW1_BKV32_MT2 = 33,
+  NW1_BKV64_MT1 = 34,
+  NW1_BKV64_MT2 = 35,
+  NW2_BKV32_MT1 = 36,
+  NW2_BKV32_MT2 = 37,
+  NW2_BKV64_MT1 = 38,
+  NW2_BKV64_MT2 = 39,
+  NW4_BKV32_MT1 = 40,
+  NW4_BKV32_MT2 = 41,
+  NW4_BKV64_MT1 = 42,
+  NW4_BKV64_MT2 = 43,
+  // prefill v8: nd, mt, bkv.
+  ND2_MT1_BKV16 = 44,
+  ND2_MT1_BKV32 = 48,
+  ND2_MT1_BKV64 = 49,
+  ND2_MT2_BKV32 = 50,
+  ND2_MT2_BKV64 = 51,
+  ND4_MT1_BKV16 = 54,
+  ND4_MT1_BKV32 = 52,
+  ND4_MT2_BKV32 = 53,
+  ND8_MT1_BKV16 = 55
+}
+
+// 13 bytes, alignment 1. Fields a tier does not use hold their `Any` value, and
+// the loader rejects a row whose wildcards disagree with its tier.
+//
+//   phase      which kernel and, for prefill, which variant
+//   tier       how much of the key is wildcarded; see GqaTuneTier
+//   kv_dtype   Fp16 or Int8 KV cache
+//   head_dim   64, 128 or 256
+//   hpg        heads per group, 1..16, or 0 for Any
+//   head_count exact (num_heads, kv_num_heads) pair; Any for all tiers except ExactHeadGroup
+//   par        batch * num_heads, bucketed
+//   batch      the batch size, bucketed; Any unless the row is batch-specific
+//   seq_q      prefill chunk length, bucketed. Any on decode.
+//   seq_kv     context length, bucketed. On decode this is the effective work
+//              length after the sliding-window clamp.
+//   window     the sliding window, or NoWindow
+//   config     which launch config to use
+//   splits     decode split count, 1..64; 0 elsewhere. The runtime clamps it to
+//              ceil(effective_len/16) per request, so a row holds the value the
+//              top of its bucket wants and stays right lower down.
+struct GqaTuneRow {
+  phase: GqaTunePhase;
+  tier: GqaTuneTier;
+  kv_dtype: GqaTuneKvDtype;
+  head_dim: GqaTuneHeadDim;
+  hpg: ubyte;
+  head_count: GqaHeadCountClass;
+  par: GqaParClass;
+  batch: GqaBatchClass;
+  seq_q: GqaSeqBucket;
+  seq_kv: GqaSeqBucket;
+  window: GqaWindowClass;
+  config: GqaTuneConfig;
+  splits: ubyte;
+}
+
+table GqaAutotuneLut {
+  schema_version: uint32 = 7;
+  gpu_arch: string;
+  rocm_version: int32;
+  kernel_abi: string;
+  model_key: string;
+  rows: [GqaTuneRow];
+}
+
+root_type GqaAutotuneLut;
+file_identifier "GQAL";

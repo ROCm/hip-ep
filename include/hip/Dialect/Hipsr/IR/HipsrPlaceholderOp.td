@@ -29,6 +29,12 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
     results, which keeps the shape graph parallel to the data graph.
     `placeholder_type` is `normal` or `barrier`.
 
+    A placeholder and its consumer read the same values, the placeholder on the
+    shape-graph side and the consumer on the data side, even when one of them
+    ignores a value. Matching the two lists is what keeps the pair in one pool
+    domain. Values with no placeholder behind them, such as block arguments and
+    constants, are outside the rule.
+
     The optional `shape_region` computes the result shapes and ends with
     `hipsr.shape_yield`. A `normal` region takes one `!shape.shape` per input
     and omits `ctx`; a `barrier` region takes `ctx` followed by its inputs.
@@ -39,10 +45,12 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
     CSE cannot merge placeholders.
 
     The pool-domain pass requires a placeholder and its consumer to sit
-    directly in the function body, and moves each placeholder before its
-    consumer. Placeholders do not set domain boundaries. A result that a later
-    domain needs is returned from the domain holding it, which keeps the shape
-    graph connected across the boundary.
+    directly in the function body. Both share one destination buffer, so the
+    input rule above keeps them in one pool domain. A `barrier` puts that pair
+    in the domain after the values its shape region reads; a `normal`
+    placeholder sets no boundary. A result that a later domain needs is returned
+    from the domain holding it, which keeps the shape graph connected across the
+    boundary.
 
     This op is temporary: it has no bufferization interface and must be
     replaced before bufferization.

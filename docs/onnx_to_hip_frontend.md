@@ -61,17 +61,22 @@ existing `--convert-hip-to-llvm` pipeline.
 
 ### Normalization
 
-| ONNX / ORT Contrib | HIP | MIOpen C API |
+| ONNX / ORT Contrib | HIP | Backend |
 |---|---|---|
-| `LayerNormalization` | `hip.miopen.layer_norm` | `miopenLayerNormForward` |
-| `SimplifiedLayerNormalization` | `hip.miopen.t5_layer_norm` | `miopenT5LayerNormForward` |
-| `SkipLayerNormalization` | `hip.miopen.skip_layer_norm` | `miopenAddLayerNormForward` |
-| `SkipSimplifiedLayerNormalization` | `hip.miopen.skip_rms_norm` | `miopenAddLayerNormForward` (T5 mode) |
-| LpNorm+Mul pattern (fused) | `hip.miopen.rms_norm` | `miopenT5LayerNormForward` |
+| `LayerNormalization` | `hip.layer_norm` | custom HIP kernel |
+| `InstanceNormalization` | `hip.instance_norm` | custom HIP kernel |
+| `RMSNormalization` | `hip.rms_norm` | `rms_norm_kernel.hip` |
+| `SimplifiedLayerNormalization` | `hip.rms_norm` | `rms_norm_kernel.hip` |
+| `GridSample` | `hip.grid_sample` | custom HIP kernel |
+| `SkipLayerNormalization` | `hip.add` + `hip.layer_norm` | decomposed, custom HIP kernels |
+| `SkipSimplifiedLayerNormalization` | `hip.skip_rms_norm` | `skip_rms_norm_kernel.hip` |
+| LpNorm+Mul pattern (fused) | `hip.rms_norm` | `rms_norm_kernel.hip` |
 
 `SkipSimplifiedLayerNormalization` fuses Add + RMSNorm into one kernel:
-`residual = x + skip; output = RMSNorm(residual) * weight`. In MIOpen this is
-`miopenAddLayerNormForward` with mode `MIOPEN_ELEMENTWISE_AFFINE_T5`.
+`residual = x + skip [+ bias]; output = RMSNorm(residual) * weight`.
+
+Both RMS-norm kernels are block-per-row with FP32 accumulation, and take a
+packed `__half2` path for fp16 rows of even width.
 
 ### Attention
 
@@ -79,44 +84,57 @@ existing `--convert-hip-to-llvm` pipeline.
 |---|---|
 | `GroupQueryAttention` | `hip.gqa` |
 
-### Quantization (placeholder, no-op for now)
+### Quantization
 
-| ONNX | HIP |
-|---|---|
-| `QuantizeLinear` | `hip.quantize_linear` |
-| `DequantizeLinear` | `hip.dequantize_linear` |
-
-### MIOpen: Activation (`miopenActivationForward`)
-
-| ONNX | HIP | MIOpen mode |
+| ONNX | HIP | Backend |
 |---|---|---|
-| `Sigmoid` | `hip.miopen.sigmoid` | `miopenActivationLOGISTIC` |
-| `Relu` | `hip.miopen.relu` | `miopenActivationRELU` |
+| `QuantizeLinear` | `hip.quantize_linear` | `qdq_kernel.hip` |
+| `DequantizeLinear` | `hip.dequantize_linear` | `qdq_kernel.hip` |
 
-### MIOpen: Softmax (`miopenSoftmaxForward`)
+Storage is int8/uint8/int16/uint16 plus int4/uint4. Granularity comes from the
+shape of `scale` rather than a flag: a single element is per-tensor, a 1-D
+tensor is per-axis along `axis`, and `block_size > 0` is blocked.
 
-| ONNX | HIP | MIOpen API |
+int4/uint4 imports as an 8-bit element type at the logical element count, two
+values per byte, so the width travels as a `packed_int4` marker rather than in
+the type. Constant lowering is the only producer of that marker and can only
+reach `DequantizeLinear`, where the halved backing size makes the packing
+observable; a `QuantizeLinear` writing 4-bit output looks identical in the IR to
+one writing 8-bit. The quantize direction is implemented through the dialect,
+lowering, and kernel, but nothing reaches it today, so its packed kernel has no
+runtime coverage.
+
+### Activation
+
+| ONNX | HIP | Backend |
 |---|---|---|
-| `Softmax` | `hip.miopen.softmax` | `miopenSoftmaxForward` |
+| `Relu` | `hip.max` against a 0-D zero | `wrap_elementwise` |
 
-### MIOpen: Element-wise Tensor Ops (`miopenOpTensor`)
+### Softmax
 
-| ONNX | HIP | MIOpen mode |
+| ONNX | HIP | Backend |
 |---|---|---|
-| `Add` | `hip.miopen.add` | `miopenTensorOpAdd` |
-| `Mul` | `hip.miopen.mul` | `miopenTensorOpMul` |
+| `Softmax` | `hip.miopen.softmax` | `hip_miopen_softmax`, custom HIP kernel |
 
-### MIOpen: Reduction (`miopenReduceTensor`)
+### Element-wise Tensor Ops
 
-| ONNX | HIP | MIOpen mode |
+| ONNX | HIP | Backend |
 |---|---|---|
-| `ReduceMean` | `hip.miopen.reduce_mean` | `MIOPEN_REDUCE_TENSOR_AVG` |
+| `Add` | `hip.add` | `wrap_elementwise` |
+| `Mul` | `hip.mul` | `wrap_elementwise` |
+| `Sub` | `hip.sub` | `wrap_elementwise_sub` |
 
-### MIOpen: Concat (`miopenCatForward`, experimental)
+### Reduction
 
-| ONNX | HIP | MIOpen API |
+| ONNX | HIP | Backend |
 |---|---|---|
-| `Concat` | `hip.miopen.cat` | `miopenCatForward` |
+| `ReduceMean` | `hip.reduce_mean` | custom HIP kernel |
+
+### Concat
+
+| ONNX | HIP | Backend |
+|---|---|---|
+| `Concat` | `tensor.empty` + `tensor.insert_slice` | bufferizes to destination subviews and copies |
 
 ### Zero-cost Metadata Ops (no kernel needed)
 
@@ -126,7 +144,7 @@ existing `--convert-hip-to-llvm` pipeline.
 | `Unsqueeze` | `hip.unsqueeze` | Shape/stride reinterpretation only |
 | `Squeeze` | `hip.squeeze` | Shape/stride reinterpretation only |
 
-### Custom HIP Kernels (no MIOpen equivalent)
+### Custom HIP Kernels (no vendor-library equivalent)
 
 | ONNX | HIP | Notes |
 |---|---|---|
@@ -148,9 +166,9 @@ Tested on `Llama-3.2-1B-Instruct` quantized ONNX model:
 | HIP Op | Count |
 |---|---|
 | `hip.hipblaslt.matmul` | 80 |
-| `hip.miopen.rms_norm` | 33 |
-| `hip.miopen.add` | 32 |
-| `hip.miopen.mul` | 16 |
+| `hip.rms_norm` | 33 |
+| `hip.add` | 32 |
+| `hip.mul` | 16 |
 | `hip.gqa` | 16 |
 | `hip.silu` | 16 |
 | `hip.quantize_linear` | 193 |

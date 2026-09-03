@@ -74,7 +74,8 @@ MatmulOp::reifyResultShapes(OpBuilder &b,
   // Re-run the matmul-shape helper. verify() has already passed by reify
   // time, but bail on empty() in case a pre-verify call sneaks in.
   SmallVector<int64_t> outShape = mlir::hip::inferMatmulShape(
-      aShape, bShape, [&]() { return this->emitOpError(); });
+      aShape, bShape, [&]() { return this->emitOpError(); }, getTransA(),
+      getTransB());
   if (outShape.empty())
     return failure();
 
@@ -93,16 +94,18 @@ MatmulOp::reifyResultShapes(OpBuilder &b,
   SmallVector<OpFoldResult> dims;
   dims.reserve(outRank);
   for (size_t i : llvm::seq<size_t>(0, outRank)) {
-    // M dim: A[-2].
+    // M dim: A[-2], or A[-1] when transA.
     if (i + 2 == outRank) {
+      size_t aDim = getTransA() ? aRank - 1 : aRank - 2;
       dims.push_back(
-          mlir::hip::reifyDimOrConstant(b, loc, outShape[i], A, aRank - 2));
+          mlir::hip::reifyDimOrConstant(b, loc, outShape[i], A, aDim));
       continue;
     }
-    // N dim: B[-1].
+    // N dim: B[-1], or B[-2] when transB.
     if (i + 1 == outRank) {
+      size_t bDim = getTransB() ? bRank - 2 : bRank - 1;
       dims.push_back(
-          mlir::hip::reifyDimOrConstant(b, loc, outShape[i], B, bRank - 1));
+          mlir::hip::reifyDimOrConstant(b, loc, outShape[i], B, bDim));
       continue;
     }
     // Batch dim: prefer the side that contributes the size (in range, not 1).
@@ -207,6 +210,28 @@ QMoEOp::reifyResultShapes(OpBuilder &b,
     return failure();
   reifiedReturnShapes.assign(
       {mlir::hip::reifyElementwiseSameShape(b, getLoc(), getInput())});
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// QMoEAmdOp
+//
+// Result shape == hidden_states' shape (same reasoning as QMoEOp above):
+// routing / latent projection / expert dispatch happen inside the kernel
+// and produce per-token outputs accumulated back into the original token
+// slot. Verified against `lib/Runtime/real/qmoe_amd.cpp`'s output buffer
+// sizing (num_tokens * hidden_size * elem_size).
+//===----------------------------------------------------------------------===//
+
+LogicalResult
+QMoEAmdOp::reifyResultShapes(OpBuilder &b,
+                             ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() == 0)
+    return failure();
+  if (!isa<RankedTensorType>(getHiddenStates().getType()))
+    return failure();
+  reifiedReturnShapes.assign(
+      {mlir::hip::reifyElementwiseSameShape(b, getLoc(), getHiddenStates())});
   return success();
 }
 

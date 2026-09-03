@@ -184,7 +184,7 @@ protected:
  * (BUILD_MOCK_RUNTIME=OFF)
  *
  * Expected behavior:
- * - MOCK runtime: Logs show [MOCK] prefixes for HIP/MIOpen calls
+ * - MOCK runtime: Logs show [MOCK] prefixes for HIP/hipBLASLt calls
  * - REAL runtime: Actual GPU execution (requires ROCm hardware)
  *
  * TODO: Add actual inference with input data and output validation
