@@ -95,8 +95,11 @@
 #if defined(__HIPCC__)
 /* __device__/__forceinline__ come from hip_runtime.h; some callers (e.g.
  * matmul_nbits_kernel.hip) include this header before it, so pull it in here
- * too rather than depending on include order. */
+ * too rather than depending on include order. hipRTC is the exception: it
+ * injects its own preamble and the path does not resolve. */
+#if !defined(__HIPCC_RTC__)
 #include <hip/hip_runtime.h>
+#endif
 /* K-axis base offset (within a 16-wide K tile) that a fragment load must add
  * for this lane's pair-half (pair = lane/16). Zero on gfx11 (each lane loads
  * the whole 16-wide K range); pair*8 on the gfx12-style encoding (each lane
@@ -161,8 +164,11 @@ __device__ static inline int hipdnn_sudot4(int a, int b, int acc) {
  * may drive several GPUs of different families (e.g. a gfx1151 APU alongside a
  * discrete card), and a single cached answer would then be applied to the wrong
  * device after hipSetDevice. Query failure yields 32, the RDNA/WMMA-capable
- * default, so dispatch decisions stay as they were before CDNA support. */
-#ifdef __cplusplus
+ * default, so dispatch decisions stay as they were before CDNA support.
+ *
+ * Excluded from hipRTC: it compiles device code only, and the HIP host API this
+ * needs is not available there. */
+#if defined(__cplusplus) && !defined(__HIPCC_RTC__)
 #include <hip/hip_runtime.h>
 static inline int hipdnn_device_wave_size() {
   constexpr int kMaxCachedDevices = 16;

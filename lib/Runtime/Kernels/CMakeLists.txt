@@ -90,14 +90,87 @@ set(_kernel_sources
     hip/strided_copy_kernel.hip
 )
 
+find_package(hiprtc CONFIG REQUIRED)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+# Identical text is not enough -- hipRTC defaults to -O3 while the AOT compile
+# runs at -O2, which alone changes the generated code.
+_hip_get_build_flags(_rtc_aot_flags)
+list(JOIN _rtc_aot_flags " " _rtc_aot_flags_str)
+file(GENERATE
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/rtc_compile_flags.h
+    CONTENT "#define HIPDNN_EP_RTC_AOT_COMPILE_FLAGS \"${_rtc_aot_flags_str}\"\n"
+)
+
+# Emits <VAR_NAME>[] and <VAR_NAME>_size.
+function(_rtc_embed_device_source VAR_NAME HEADER OUT_VAR)
+    set(_out ${CMAKE_CURRENT_BINARY_DIR}/${VAR_NAME}.cpp)
+    add_custom_command(
+        OUTPUT ${_out}
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/cmake/xxd.py
+                --var ${VAR_NAME} --output ${_out}.tmp ${HEADER}
+        # xxd.py emits a `static` array with a trailing padding byte; rewrite it
+        # to an extern "C" symbol and record the true byte count separately.
+        COMMAND ${Python3_EXECUTABLE} -c
+                "import os; data = open('${_out}.tmp').read(); data = data.replace('static const unsigned char', 'extern \"C\" const unsigned char'); n = os.path.getsize('${HEADER}'); data = '#include <cstddef>\\n' + data + f'\\nextern \"C\" const size_t ${VAR_NAME}_size = {n};\\n'; open('${_out}', 'w').write(data)"
+        COMMAND ${CMAKE_COMMAND} -E remove ${_out}.tmp
+        DEPENDS ${HEADER} ${CMAKE_SOURCE_DIR}/cmake/xxd.py
+        COMMENT "Embedding ${VAR_NAME} for hipRTC"
+        VERBATIM
+    )
+    set(${OUT_VAR} ${_out} PARENT_SCOPE)
+endfunction()
+
+# A device header may rely on another header having been included first, which
+# the AOT build gets for free but hipRTC does not (it resolves no include
+# paths). Concatenate them in order and embed the result.
+function(_rtc_embed_concatenated VAR_NAME OUT_VAR)
+    set(_joined ${CMAKE_CURRENT_BINARY_DIR}/${VAR_NAME}_joined.h)
+    add_custom_command(
+        OUTPUT ${_joined}
+        COMMAND ${CMAKE_COMMAND} -E cat ${ARGN} > ${_joined}
+        DEPENDS ${ARGN}
+        COMMENT "Concatenating device source for ${VAR_NAME}"
+        VERBATIM
+    )
+    _rtc_embed_device_source(${VAR_NAME} ${_joined} _embedded)
+    set(${OUT_VAR} ${_embedded} PARENT_SCOPE)
+endfunction()
+
+_rtc_embed_device_source(kElementwiseSubDeviceSource
+    ${CMAKE_CURRENT_SOURCE_DIR}/hip/rtc/elementwise_sub_device.h
+    _rtc_embedded_sub)
+_rtc_embed_device_source(kMhaDeviceSource
+    ${CMAKE_CURRENT_SOURCE_DIR}/hip/rtc/multi_head_attention_device.h
+    _rtc_embedded_mha)
+_rtc_embed_concatenated(kMatMulNBitsDeviceSource _rtc_embedded_mnb
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/hip_arch_compat.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/hip/rtc/matmul_nbits_device.h)
+_rtc_embed_concatenated(kGqaDeviceSource _rtc_embedded_gqa
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/hip_arch_compat.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/hip/rtc/gqa_device.h)
+
+set(_rtc_sources
+    rtc/hiprtc_module.hip
+    ${_rtc_embedded_sub}
+    ${_rtc_embedded_mha}
+    ${_rtc_embedded_mnb}
+    ${_rtc_embedded_gqa}
+)
+
 # One SHARED target per arch. Each builds a fatbin with that single slice;
 # OFFLOAD_ARCHS narrows the global list to one element so the resulting
 # DLL/SO is not bloated with code for archs the consumer won't load.
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
     set(_target custom_kernels_${_arch})
-    hip_add_library(${_target} SHARED ${_kernel_sources}
+    hip_add_library(${_target} SHARED ${_kernel_sources} ${_rtc_sources}
         INCLUDE_DIRECTORIES
             ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}
+            ${CMAKE_CURRENT_BINARY_DIR}
+        LINK_LIBRARIES
+            hiprtc::hiprtc
         OFFLOAD_ARCHS
             ${_arch}
     )
