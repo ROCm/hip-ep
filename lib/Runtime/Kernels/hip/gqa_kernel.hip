@@ -21,6 +21,10 @@
 
 #include "rtc/hiprtc_module.h"
 
+// Generated per arch from hip/autotune/gqa/lut/<arch>.json; see
+// hip/autotune/gqa/scripts/gen_rtc_names.py.
+#include "gqa_rtc_tuned_names.h"
+
 static constexpr int GQA_THREADS = 256;
 
 // Element-size dispatch helper for the pure data-movement kernels (transpose,
@@ -877,6 +881,16 @@ static inline void launchFlashDecodeConfig(
   #undef LAUNCH_REDUCE
 }
 
+// Not autotuned: every split-K decode config launches the same reduce, so it
+// stays registered even when the LUT narrows the decode kernels themselves.
+static void appendGqaDecodeReduceNames(std::vector<std::string>& names) {
+#define X(D_)                                                                  \
+  names.push_back(HIPDNN_RTC_STR(gqa_flash_decode_reduce_kernel<D_>));
+  GQA_DECODE_D_LIST(X)
+#undef X
+}
+
+#if !HIPDNN_GQA_RTC_TUNED_SUBSET
 static void appendGqaDecodeNames(std::vector<std::string>& names) {
 #define X(D_, HPG_, BKV_)                                                      \
   names.push_back(HIPDNN_RTC_STR(                                              \
@@ -900,11 +914,8 @@ static void appendGqaDecodeNames(std::vector<std::string>& names) {
       HIPDNN_RTC_STR(gqa_flash_decode_kernel<64, HPG_, KvDtype::kI8>));
   GQA_DECODE_HPG_LIST(X)
 #undef X
-#define X(D_)                                                                  \
-  names.push_back(HIPDNN_RTC_STR(gqa_flash_decode_reduce_kernel<D_>));
-  GQA_DECODE_D_LIST(X)
-#undef X
 }
+#endif  // !HIPDNN_GQA_RTC_TUNED_SUBSET
 
 // Candidate split counts, clamped to [1, cap] and to the useful range for skv
 // (no point launching more splits than there are 16-key tiles). Deduplicated.
@@ -1511,6 +1522,7 @@ static inline void dispatchPrefillV5(
     X(2, 64, 128, false) X(2, 32, 128, false)                                 \
     X(1, 64, 128, false) X(1, 32, 128, false)
 
+#if !HIPDNN_GQA_RTC_TUNED_SUBSET
 static void appendGqaPrefillV5Names(std::vector<std::string>& names) {
 #define X(MT_, BKV_, D_, HW_)                                                 \
     names.push_back(                                                          \
@@ -1518,6 +1530,7 @@ static void appendGqaPrefillV5Names(std::vector<std::string>& names) {
     GQA_PREFILL_V5_LIST(X)
 #undef X
 }
+#endif  // !HIPDNN_GQA_RTC_TUNED_SUBSET
 
 struct PrefillV5Cfg { int m_tiles; int bkv; };
 static inline int prefillV5Candidates(int d, PrefillV5Cfg* out) {
@@ -1668,6 +1681,7 @@ static inline void dispatchPrefillV7(
     X(4, 64, 256, 2) X(4, 32, 256, 2) X(2, 64, 256, 2)                        \
     X(2, 32, 256, 2) X(1, 64, 256, 2) X(1, 32, 256, 2)
 
+#if !HIPDNN_GQA_RTC_TUNED_SUBSET
 static void appendGqaPrefillV7Names(std::vector<std::string>& names) {
 #define X(NW_, BKV_, D_, MT_)                                                 \
     names.push_back(                                                          \
@@ -1675,6 +1689,7 @@ static void appendGqaPrefillV7Names(std::vector<std::string>& names) {
     GQA_PREFILL_V7_LIST(X)
 #undef X
 }
+#endif  // !HIPDNN_GQA_RTC_TUNED_SUBSET
 
 struct PrefillV7Cfg { int nw; int bkv; int mt; };
 static inline int prefillV7Candidates(int d, PrefillV7Cfg* out) {
@@ -1811,6 +1826,7 @@ static inline void dispatchPrefillV8(
     X(8, 1, 16) X(8, 1, 32) X(2, 2, 16) X(4, 2, 16)                           \
     X(1, 1, 16) X(1, 2, 16)
 
+#if !HIPDNN_GQA_RTC_TUNED_SUBSET
 static void appendGqaPrefillV8Names(std::vector<std::string>& names) {
 #define X(ND_, MT_, BKV_)                                                     \
     names.push_back(                                                          \
@@ -1818,6 +1834,7 @@ static void appendGqaPrefillV8Names(std::vector<std::string>& names) {
     GQA_PREFILL_V8_LIST(X)
 #undef X
 }
+#endif  // !HIPDNN_GQA_RTC_TUNED_SUBSET
 
 struct PrefillV8Cfg { int nd; int mt; int bkv; };
 
@@ -2296,6 +2313,21 @@ static void appendGqaMiscNames(std::vector<std::string>& names) {
 #undef X
 }
 
+// The autotuned families register only what the offline LUT picks; a config
+// left out resolves to nullptr and HIPDNN_RTC_LAUNCH takes its AOT kernel.
+static void appendGqaTunedNames(std::vector<std::string>& names) {
+#if HIPDNN_GQA_RTC_TUNED_SUBSET
+#define X(NAME_) names.push_back(NAME_);
+  HIPDNN_GQA_RTC_TUNED_NAME_LIST(X)
+#undef X
+#else
+  appendGqaDecodeNames(names);
+  appendGqaPrefillV5Names(names);
+  appendGqaPrefillV7Names(names);
+  appendGqaPrefillV8Names(names);
+#endif
+}
+
 static hipdnn_ep::rtc::Module& gqaRtcModule() {
   static hipdnn_ep::rtc::Module module(
       "gqa", reinterpret_cast<const char*>(kGqaDeviceSource),
@@ -2303,10 +2335,8 @@ static hipdnn_ep::rtc::Module& gqaRtcModule() {
         std::vector<std::string> names;
         appendGqaElemNames(names);
         appendGqaMiscNames(names);
-        appendGqaDecodeNames(names);
-        appendGqaPrefillV5Names(names);
-        appendGqaPrefillV7Names(names);
-        appendGqaPrefillV8Names(names);
+        appendGqaDecodeReduceNames(names);
+        appendGqaTunedNames(names);
         return names;
       }());
   return module;
