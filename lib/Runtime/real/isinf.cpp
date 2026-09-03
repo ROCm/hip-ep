@@ -46,9 +46,8 @@ int wrap_isinf(RuntimeState *state, void *input, void *output,
     return 0;
   }
   if (!detect_negative && !detect_positive) {
-    fprintf(stderr,
-            "[REAL] wrap_isinf: at least one of detect_negative or "
-            "detect_positive must be set\n");
+    fprintf(stderr, "[REAL] wrap_isinf: at least one of detect_negative or "
+                    "detect_positive must be set\n");
     return -1;
   }
 
