@@ -46,7 +46,11 @@ thread_local RunConfigLookup g_run_config_lookup;
 DllSafe<std::string> get_run_config_entry(const void *state,
                                           const char *entry_name) {
   const auto *lookup = static_cast<const RunConfigLookup *>(state);
-  if (lookup == nullptr || lookup->run_options == nullptr) {
+  // Both fields are checked rather than just run_options: OnRunStart assigns
+  // them together, but nothing enforces that, and getting it wrong would be a
+  // null dereference inside the host process.
+  if (lookup == nullptr || lookup->api == nullptr ||
+      lookup->run_options == nullptr) {
     return DllSafe<std::string>();
   }
   const char *value =
