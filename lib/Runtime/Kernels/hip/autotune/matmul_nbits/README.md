@@ -35,7 +35,8 @@ table, or when the table is rejected as incompatible.
 | `matmul_nbits_autotune.h` | lookup API (no flatbuffers in the header, so the kernel .hip can include it cheaply) |
 | `matmul_nbits_autotune.cpp` | loader, key packing, tier probe |
 | `lut/<arch>.json` | reviewable source of truth |
-| `lut/<arch>.fb` | binary artifact, embedded into `custom_kernels_<arch>` |
+| `lut/<arch>.fb` | binary artifact from flatc |
+| `lut/<arch>_lut_data.cpp` | embedded payload, checked in; produced by `compile` |
 | `shapes/oga_models_bits4.csv` | the shape inventory the exact tier is built from |
 | `scripts/extract_shapes.py` | ONNX graphs -> shape inventory |
 | `scripts/update_lut.py` | measure -> build -> compile |
@@ -117,15 +118,17 @@ token. Fuzzy and Fallback still answer if some caller does hand one a wide M.
 
 ## Embedding
 
-`lut/<arch>.fb` is xxd'd into `custom_kernels_<arch>` (see
+`lut/<arch>_lut_data.cpp` is linked into `custom_kernels_<arch>` (see
 `lib/Runtime/Kernels/CMakeLists.txt`), not into `runtime.bc` the way the GQA
 table is: the table is per-arch and so is that target, so each DLL carries
-exactly the table it can use. flatbuffers is header-only for reading, so this
-adds an include path and no link dependency.
+exactly the table it can use. The C++ file is generated at LUT regeneration
+time by `update_lut.py compile` — the hip-ep customer build does not run Python.
+flatbuffers is header-only for reading, so this adds an include path and no
+link dependency.
 
-An arch with no measured table still builds — CMake emits the zero-size stub,
-the loader finds no table, and every shape falls through to the sweep. Adding an
-arch is a table addition, never a build break.
+An arch with no measured table still builds — CMake falls back to
+`tools/empty_lut_data.cpp`, the loader finds no table, and every shape falls
+through to the sweep. Adding an arch is a table addition, never a build break.
 
 `HIPDNN_MATMUL_LUT_LOG=1` logs load status, per-lookup tier hits, and misses.
 `HIPDNN_MATMUL_AUTOTUNE_MODE=online` bypasses the table and runs the in-kernel

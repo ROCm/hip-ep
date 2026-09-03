@@ -9,7 +9,7 @@
  * measuring, and the next table would be a copy of the previous one rather than
  * a fresh measurement.
  *
- * The same stub is what CMake emits for an arch with no measured table, so this
+ * The same stub is what CMake uses for an arch with no measured table, so this
  * is also the "no table" path exercised in ordinary builds.
  */
 #include <cstddef>

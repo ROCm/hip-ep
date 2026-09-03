@@ -4,7 +4,7 @@
     python update_lut.py measure   # drive the GPU sweep, write data/*.log
     python update_lut.py fit       # choose the distance weights, report error
     python update_lut.py build     # logs -> lut/<arch>.json
-    python update_lut.py compile   # json -> lut/<arch>.fb (needs flatc)
+    python update_lut.py compile   # json -> lut/<arch>.fb + lut/<arch>_lut_data.cpp (needs flatc)
     python update_lut.py all
 
 The winners come from the in-kernel autotuner, read off its debug log. Nothing
@@ -622,6 +622,30 @@ def cmd_build(args) -> int:
 # compile
 # ---------------------------------------------------------------------------
 
+def embed_lut_data_cpp(fb: Path, out: Path) -> None:
+    """Turn lut/<arch>.fb into the checked-in C++ source the build links."""
+    data = fb.read_bytes()
+    lines = [
+        f"// Auto-generated from {fb.name} by update_lut.py compile; do not edit.",
+        "#include <cstddef>",
+        'extern "C" const unsigned char kMatmulNbitsLutData[] = {',
+    ]
+    col = 16
+    for i in range(0, len(data), col):
+        chunk = data[i : i + col]
+        hex_chunk = ",".join(f"0x{b:02x}" for b in chunk)
+        ascii_chunk = "".join(
+            chr(b) if 32 <= b < 127 and b not in (ord("*"), ord("/"), ord("\\"))
+            else "."
+            for b in chunk
+        )
+        lines.append(
+            f"/*{i:08x} */  {hex_chunk:<{col * 3}}, /* {ascii_chunk} */")
+    lines.append("0x00};")
+    lines.append(f'extern "C" const size_t kMatmulNbitsLutData_size = {len(data)};')
+    out.write_text("\n".join(lines) + "\n")
+
+
 def cmd_compile(args) -> int:
     lut_json = LUT_DIR / f"{args.arch}.json"
     if not lut_json.exists():
@@ -640,7 +664,10 @@ def cmd_compile(args) -> int:
             return 1
         dst = LUT_DIR / f"{args.arch}.fb"
         shutil.copy(produced[0], dst)
+    cpp = LUT_DIR / f"{args.arch}_lut_data.cpp"
+    embed_lut_data_cpp(dst, cpp)
     print(f"[compile] -> {dst} ({dst.stat().st_size} bytes)")
+    print(f"[compile] -> {cpp} ({cpp.stat().st_size} bytes)")
     return 0
 
 
