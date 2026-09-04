@@ -250,7 +250,14 @@ void ConvertHipToLLVMPass::runOnOperation() {
     populateConvLoweringPatterns(typeConverter, patterns);
   }
   populateConvTransposeLoweringPatterns(typeConverter, patterns);
+
+  // Backend selection for Matmul: DynamicDispatch (NPU/IPU) vs GPU (hipBLASLt)
+  // Note: This is separate from GEMM lowering. Matmul uses hipBLASLt on GPU,
+  // while GEMM can use either hipBLASLt or custom kernels.
+  // DynamicDispatch matmul patterns are added later with GEMM patterns (see line ~290)
+  // and handle only rank-2 operations; GPU patterns are needed as fallback for batched matmuls.
   populateMatmulLoweringPatterns(typeConverter, patterns);
+
   populateElementwiseLoweringPatterns(typeConverter, patterns);
   populatePowerLoweringPatterns(typeConverter, patterns);
   populateActivationLoweringPatterns(typeConverter, patterns);
@@ -278,6 +285,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   if (useDynamicDispatch) {
     COMPILER_DEBUG_LOG("[HipToLLVM] Selecting DynamicDispatch GEMM lowering patterns\n");
     // NPU/IPU path via DynamicDispatch (XRT)
+    // Note: This also adds MatmulOpDynamicDispatchLowering
     populateDynamicDispatchGemmLoweringPatterns(typeConverter, patterns);
   } else {
     COMPILER_DEBUG_LOG("[HipToLLVM] Selecting GPU (hipBLASLt) GEMM lowering patterns\n");
