@@ -528,9 +528,20 @@ static int benchmarkGemmAlgos(
   for (int i = 0; i < returned; ++i)
     if (heurs[i].workspaceSize > maxws)
       maxws = heurs[i].workspaceSize;
+  // Size the shared workspace for the widest candidate, but never treat a
+  // failed grow as "no workspace": the shared buffer never shrinks, so the
+  // state may already own one large enough for most candidates. Halve the
+  // request until the allocator accepts it, then adopt whatever the state
+  // actually holds. Reporting zero here would leave only the workspace-free
+  // algorithms eligible below, dropping split-K from the race and costing
+  // every GEMM shape in the model at once -- worst on large batches, where
+  // the pool leaves the least room for the request to succeed.
   void *bench_ws = nullptr;
   size_t bench_ws_size = 0;
-  if (maxws > 0 && hipdnn_ep_state_ensure_workspace(state, maxws) == 0) {
+  if (maxws > 0) {
+    for (size_t budget = maxws; budget > 0; budget /= 2)
+      if (hipdnn_ep_state_ensure_workspace(state, budget) == 0)
+        break;
     bench_ws = hipdnn_ep_state_get_workspace(state);
     bench_ws_size = hipdnn_ep_state_get_workspace_size(state);
   }
@@ -547,11 +558,14 @@ static int benchmarkGemmAlgos(
                              stream);
     };
     double best_ms = 1e30;
+    int skipped_for_workspace = 0;
     for (int i = 0; i < returned; ++i) {
       // Skip candidates that need more workspace than we allocated --
       // running them with a smaller/null workspace just errors out.
-      if (heurs[i].workspaceSize > bench_ws_size)
+      if (heurs[i].workspaceSize > bench_ws_size) {
+        ++skipped_for_workspace;
         continue;
+      }
       if (run_cand(i) != HIPBLAS_STATUS_SUCCESS) // warmup
         continue;
       if (hipEventRecord(bs, stream) != hipSuccess)
@@ -570,6 +584,11 @@ static int benchmarkGemmAlgos(
         best_idx = i;
       }
     }
+    if (skipped_for_workspace)
+      RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: %d/%d algo candidates skipped, need "
+                        "more than the %zu-byte workspace (M=%lld N=%lld)\n",
+                        skipped_for_workspace, returned, bench_ws_size,
+                        (long long)M, (long long)N);
   }
   if (bs)
     hipEventDestroy(bs);
