@@ -132,6 +132,13 @@ if(HIPDNN_EP_LOAD_KERNEL_DLLS AND NOT HIPDNN_EP_LINK_HIP_HOST)
     "(LlvmIrJit::detectCustomKernelArch needs hipGetDeviceProperties).")
 endif()
 
+# FlatBuffers schemas. Added here rather than with the other subdirectories
+# below because lib/Runtime/Kernels (next) consumes one of them: the
+# MatMulNBits autotune table's generated header. schemas/ needs only the
+# flatbuffers that cmake/deps.cmake already resolved above -- no LLVM/MLIR --
+# so it is safe this early.
+add_subdirectory(schemas)
+
 # Add the GPU kernels subdirectory (lib/Runtime/Kernels) here -- driven from
 # the top-level lists, NOT from lib/Runtime/CMakeLists.txt -- so the per-arch
 # custom_kernels_<arch> SHARED targets exist before backend-mlir-compiler
@@ -182,8 +189,8 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/HipEpPlugins.cmake)
 
 llvm_map_components_to_libnames(llvm_libs Support Core)
 
-# FlatBuffers schemas (GenerateInterface pass metadata)
-add_subdirectory(schemas)
+# (schemas is added earlier, before lib/Runtime/Kernels, which consumes the
+#  MatMulNBits autotune generated header.)
 
 # TableGen targets
 add_subdirectory(include/hip)

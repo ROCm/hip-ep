@@ -1,0 +1,4 @@
+# raw autotune sweep logs (large, machine-specific; inputs to update_lut.py
+# build). The reviewable source of truth is lut/<arch>.json; the built
+# artifacts are lut/<arch>.fb and lut/<arch>_lut_data.cpp.
+data/
