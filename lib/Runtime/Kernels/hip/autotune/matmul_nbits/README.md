@@ -134,3 +134,9 @@ through to the sweep. Adding an arch is a table addition, never a build break.
 `HIPDNN_MATMUL_LUT_LOG=1` logs load status, per-lookup tier hits, and misses.
 `HIPDNN_MATMUL_AUTOTUNE_MODE=online` bypasses the table and runs the in-kernel
 autotune sweep instead (default `lookup` uses the table).
+`HIPDNN_MATMUL_AUTOTUNE_LOG=1` logs the in-kernel tuner's decisions — every
+candidate's timing, the winning config's full geometry, LUT hits, and the
+cached selection — to stderr. Unlike `HIPDNN_MATMUL_LUT_LOG` (which only covers
+the offline-table lookup that `online` mode skips), this shows what the sweep
+actually picked, so an `online` run can be diffed against the shipped table.
+`HIPDNN_EP_DEBUG=1` still enables these lines too (plus everything else).
