@@ -30,8 +30,14 @@ env:
   LLVM_TAG: llvmorg-22.1.0
   ONNXRUNTIME_VERSION: "1.27.0"
   ONNXRUNTIME_PR_PATCHES: ""
-  OGA_VERSION: "0.14.0"
-  OGA_PR_PATCHES: "2194"
+  # Fork branch carrying the AMDGPU MorphiZen integration (former PR 2194) plus
+  # sliding_window support, which upstream v0.14.0 does not have.
+  OGA_REPO: "amd-genmingz/onnxruntime-genai"
+  OGA_REF: "test_0_3"
+  # Optional space-separated microsoft/onnxruntime-genai PR numbers applied on
+  # top of the fork checkout via pull/<n>.patch + git am. Empty because the fork
+  # branch already carries the integration that 2194 used to supply.
+  OGA_PR_PATCHES: ""
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
   AMDGPU_EP_REF: "05eaa2a938f71e98b49bd1be3fb03720167be5cc"
 
@@ -442,7 +448,7 @@ jobs:
       - name: Compute cache key
         id: key
         shell: bash
-        run: echo "value=oga-dml-mm2-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
+        run: echo "value=oga-dml-mm3-${{ env.OGA_REPO }}-${{ env.OGA_REF }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}-2" >> "$GITHUB_OUTPUT"
 
       - name: Probe oga-artifacts
         id: cache-oga
@@ -494,8 +500,8 @@ jobs:
         if: steps.cache-oga.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: microsoft/onnxruntime-genai
-          ref: v${{ env.OGA_VERSION }}
+          repository: ${{ env.OGA_REPO }}
+          ref: ${{ env.OGA_REF }}
           path: source-oga
           submodules: true
           fetch-depth: 1
@@ -550,6 +556,11 @@ jobs:
         if: steps.cache-oga.outputs.cache-hit != 'true'
         shell: bash
         run: |
+          # build.py imports tools/python/util, whose dependency_resolver
+          # imports requests at module scope. --ort_home means nothing is
+          # actually downloaded, but the import still has to resolve.
+          python -m pip install -q requests
+
           python "${{ github.workspace }}/source-oga/build.py" \
             --config Release \
             --cmake_generator Ninja \
