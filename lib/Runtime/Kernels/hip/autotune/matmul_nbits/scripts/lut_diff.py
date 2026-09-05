@@ -158,6 +158,17 @@ def main() -> int:
     ap.add_argument("--lut", type=Path, default=DEFAULT_LUT)
     ap.add_argument("--all", action="store_true",
                     help="also print shapes where LUT == online")
+    ap.add_argument("--min-ms", type=float, default=0.0,
+                    help="ignore winners faster than this (sub-us timing noise)")
+    ap.add_argument("--substantive", action="store_true",
+                    help="only count diffs in tile shape (bm/bn/wt/bk/fused), "
+                         "treating swizzle-only flips as noise")
+    ap.add_argument("--exact-only", action="store_true",
+                    help="only compare shapes the LUT measured exactly (distance "
+                         "0); isolates genuine staleness from coverage/M-granularity")
+    ap.add_argument("--csv", type=Path, default=None,
+                    help="write every unique shape's online winner + LUT config "
+                         "+ status to this CSV")
     args = ap.parse_args()
 
     lut = Lut(args.lut)
@@ -167,9 +178,19 @@ def main() -> int:
               "set (correct name), stderr captured, and MODE=online?")
         return 1
 
-    n_diff = n_match = n_nolut = 0
+    def substantive(geo):
+        # WMMA: drop swizzle (index 3), which flips on sub-us timing noise.
+        # GEMV: (threads, tile_n) -- both substantive.
+        if geo is None:
+            return None
+        return (geo[0], geo[1], geo[2], geo[4], geo[5], geo[6]) if len(geo) == 7 else geo
+
+    n_diff = n_match = n_nolut = n_swz = 0
     rows = []
+    csv_rows = []
     for r in recs:
+        if r["ms"] < args.min_ms:
+            continue
         gsc = gs_class(r["gs"])
         if r["phase"] == "Prefill":
             zp = "Asymmetric" if r["zp"] else "Symmetric"
@@ -202,20 +223,37 @@ def main() -> int:
             online_geo = r["geo"]
             fmt = lambda g: (f"threads{g[0]} tile_n{g[1]}" if g else "(ambiguous/none)")
 
+        if args.exact_only and not exact:
+            continue
+
         if lut_geo is None:
             n_nolut += 1
             status = "NO-LUT"
         elif tuple(lut_geo) == tuple(online_geo):
             n_match += 1
             status = "match"
+        elif substantive(tuple(lut_geo)) == substantive(tuple(online_geo)):
+            # only swizzle differs -- treat as timing noise
+            n_swz += 1
+            status = "match" if args.substantive else "swz"
         else:
             n_diff += 1
             status = "DIFF"
 
+        zpc = "asym" if r["zp"] else ("sym" if r["zp"] is not None else "?")
         if status != "match" or args.all:
-            zpc = "asym" if r["zp"] else ("sym" if r["zp"] is not None else "?")
             rows.append((status, r["phase"], r["n"], r["k"], r["m"], gsc, zpc,
                          stride, fmt(lut_geo), fmt(online_geo), r["ms"]))
+
+        kind = {"Prefill": "wmma", "Decode": "gemv",
+                "DecodeDp4a": "gemv-dp4a"}[r["phase"]]
+        csv_rows.append({
+            "phase": r["phase"], "N": r["n"], "K": r["k"], "M": r["m"],
+            "gs": gsc, "zp": zpc, "stride": stride, "kind": kind,
+            "exact": int(bool(exact)),
+            "online_config": fmt(online_geo), "online_ms": f"{r['ms']:.4f}",
+            "lut_config": fmt(lut_geo), "status": status,
+        })
 
     # sort: DIFFs first, then by shape
     rows.sort(key=lambda x: (x[0] != "DIFF", x[1], x[2], x[3], x[4]))
@@ -228,11 +266,26 @@ def main() -> int:
         print(f"{row[0]:6} {row[1]:10} {row[2]:>6} {row[3]:>6} {row[4]:>6} "
               f"{row[5]:5} {row[6]:4} {row[7]:8} {row[8]:42} {row[9]:42} {row[10]:>9.4f}")
 
-    total = n_diff + n_match + n_nolut
+    total = n_diff + n_match + n_nolut + n_swz
     print("-" * 150)
-    print(f"{total} unique shapes: {n_diff} DIFF, {n_match} match, {n_nolut} no-LUT")
+    print(f"{total} unique shapes: {n_diff} DIFF (tile shape), {n_swz} swizzle-only, "
+          f"{n_match} match, {n_nolut} no-LUT"
+          + (f"   [min-ms={args.min_ms}]" if args.min_ms else ""))
     if n_diff:
-        print(f"=> the shipped table serves a suboptimal config on {n_diff} shape(s).")
+        print(f"=> the table serves a substantively different config on {n_diff} shape(s); "
+              f"swizzle-only flips ({n_swz}) are timing noise.")
+
+    if args.csv:
+        import csv as _csv
+        cols = ["phase", "N", "K", "M", "gs", "zp", "stride", "kind", "exact",
+                "online_config", "online_ms", "lut_config", "status"]
+        # stable order: by phase, N, K, M
+        csv_rows.sort(key=lambda x: (x["phase"], x["N"], x["K"], x["M"]))
+        with open(args.csv, "w", newline="", encoding="utf-8") as f:
+            w = _csv.DictWriter(f, fieldnames=cols)
+            w.writeheader()
+            w.writerows(csv_rows)
+        print(f"\nwrote {len(csv_rows)} rows -> {args.csv}")
     return 0
 
 
