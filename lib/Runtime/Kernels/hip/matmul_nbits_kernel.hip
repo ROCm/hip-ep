@@ -1164,7 +1164,7 @@ static int tuneGemvConfig(
         float ms = 0.0f;
         hipEventElapsedTime(&ms, ev0, ev1);
 
-        CUSTOM_KERNELS_DEBUG_LOG(
+        MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   config[%2d] threads=%3d tile_n=%d : %.4f ms\n",
             cid, kGemvConfigs[cid].threads, kGemvConfigs[cid].tile_n,
             ms / ITERS);
@@ -1178,7 +1178,7 @@ static int tuneGemvConfig(
     hipEventDestroy(ev0);
     hipEventDestroy(ev1);
 
-    CUSTOM_KERNELS_DEBUG_LOG(
+    MATMUL_NBITS_AUTOTUNE_LOG(
         "[custom_kernels] GEMV autotune: M=%lld N=%lld K=%lld bs=%lld col_major=%d -> "
         "best config[%d] threads=%d tile_n=%d (%.4f ms/iter)\n",
         (long long)M, (long long)N, (long long)K, (long long)bs, col_major,
@@ -1286,7 +1286,7 @@ static int matmulNbitsLutGemvConfig(matmul_lut::Phase phase, int M, int N, int K
     if (r.source == matmul_lut::Source::None) return -1;
     const int cid = gemvConfigFromGeometry(r.gemv);
     if (cid >= 0)
-        CUSTOM_KERNELS_DEBUG_LOG(
+        MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels] LUT hit (src=%d d=%.3f) M=%d N=%d K=%d gs=%d -> "
             "config[%d]\n",
             static_cast<int>(r.source), r.distance, M, N, K, gs, cid);
@@ -1343,7 +1343,7 @@ static int getOrTuneGemvConfig(
                                M, N, K, batch, bs, col_major);
     gemv_cache[key] = best;
 
-    CUSTOM_KERNELS_DEBUG_LOG(
+    MATMUL_NBITS_AUTOTUNE_LOG(
         "[custom_kernels] GEMV cache: stored key=\"%s\" -> config[%d] "
         "(cache size=%zu)\n",
         key.c_str(), best, gemv_cache.size());
@@ -1431,7 +1431,7 @@ static int tuneDp4aConfig(
         float ms = 0.0f;
         hipEventElapsedTime(&ms, ev0, ev1);
 
-        CUSTOM_KERNELS_DEBUG_LOG(
+        MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   dp4a config[%2d] threads=%3d tile_n=%d : %.4f ms\n",
             cid, kGemvConfigs[cid].threads, kGemvConfigs[cid].tile_n,
             ms / ITERS);
@@ -1441,7 +1441,7 @@ static int tuneDp4aConfig(
     hipEventDestroy(ev0);
     hipEventDestroy(ev1);
 
-    CUSTOM_KERNELS_DEBUG_LOG(
+    MATMUL_NBITS_AUTOTUNE_LOG(
         "[custom_kernels] GEMV-dp4a autotune: N=%lld K=%lld bs=%lld zp=%s -> "
         "best config[%d] threads=%d tile_n=%d (%.4f ms/iter)\n",
         (long long)N, (long long)K, (long long)bs, zp ? "yes" : "no",
@@ -1630,7 +1630,7 @@ static int tuneGemvConfigI8(
         float ms = 0.0f;
         hipEventElapsedTime(&ms, ev0, ev1);
 
-        CUSTOM_KERNELS_DEBUG_LOG(
+        MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   i8 config[%2d] threads=%3d tile_n=%d : %.4f ms\n",
             cid, kGemvConfigs[cid].threads, kGemvConfigs[cid].tile_n,
             ms / ITERS);
@@ -1644,7 +1644,7 @@ static int tuneGemvConfigI8(
     hipEventDestroy(ev0);
     hipEventDestroy(ev1);
 
-    CUSTOM_KERNELS_DEBUG_LOG(
+    MATMUL_NBITS_AUTOTUNE_LOG(
         "[custom_kernels] GEMV-i8 autotune: M=%lld N=%lld K=%lld bs=%lld -> "
         "best config[%d] threads=%d tile_n=%d (%.4f ms/iter)\n",
         (long long)M, (long long)N, (long long)K, (long long)bs,
@@ -1687,7 +1687,7 @@ static int getOrTuneGemvConfigI8(
                                  M, N, K, batch, bs);
     gemv_i8_cache[key] = best;
 
-    CUSTOM_KERNELS_DEBUG_LOG(
+    MATMUL_NBITS_AUTOTUNE_LOG(
         "[custom_kernels] GEMV-i8 cache: stored key=\"%s\" -> config[%d] "
         "(cache size=%zu)\n",
         key.c_str(), best, gemv_i8_cache.size());
@@ -2058,7 +2058,7 @@ static int tuneGemvConfigU3(
         float ms = 0.0f;
         hipEventElapsedTime(&ms, ev0, ev1);
 
-        CUSTOM_KERNELS_DEBUG_LOG(
+        MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   u3 config[%2d] threads=%3d tile_n=%d : %.4f ms\n",
             cid, kGemvConfigs[cid].threads, kGemvConfigs[cid].tile_n,
             ms / ITERS);
@@ -2072,7 +2072,7 @@ static int tuneGemvConfigU3(
     hipEventDestroy(ev0);
     hipEventDestroy(ev1);
 
-    CUSTOM_KERNELS_DEBUG_LOG(
+    MATMUL_NBITS_AUTOTUNE_LOG(
         "[custom_kernels] GEMV-u3 autotune: M=%lld N=%lld K=%lld bs=%lld -> "
         "best config[%d] threads=%d tile_n=%d (%.4f ms/iter)\n",
         (long long)M, (long long)N, (long long)K, (long long)bs,
@@ -2113,7 +2113,7 @@ static int getOrTuneGemvConfigU3(
                                 M, N, K, batch, bs);
     gemv_u3_cache[key] = best;
 
-    CUSTOM_KERNELS_DEBUG_LOG(
+    MATMUL_NBITS_AUTOTUNE_LOG(
         "[custom_kernels] GEMV-u3 cache: stored key=\"%s\" -> config[%d] "
         "(cache size=%zu)\n",
         key.c_str(), best, gemv_u3_cache.size());
@@ -2457,7 +2457,7 @@ static int tuneGemvConfigU2(
         float ms = 0.0f;
         hipEventElapsedTime(&ms, ev0, ev1);
 
-        CUSTOM_KERNELS_DEBUG_LOG(
+        MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   u2 config[%2d] threads=%3d tile_n=%d : %.4f ms\n",
             cid, kGemvConfigs[cid].threads, kGemvConfigs[cid].tile_n,
             ms / ITERS);
@@ -2471,7 +2471,7 @@ static int tuneGemvConfigU2(
     hipEventDestroy(ev0);
     hipEventDestroy(ev1);
 
-    CUSTOM_KERNELS_DEBUG_LOG(
+    MATMUL_NBITS_AUTOTUNE_LOG(
         "[custom_kernels] GEMV-u2 autotune: M=%lld N=%lld K=%lld bs=%lld -> "
         "best config[%d] threads=%d tile_n=%d (%.4f ms/iter)\n",
         (long long)M, (long long)N, (long long)K, (long long)bs,
@@ -2512,7 +2512,7 @@ static int getOrTuneGemvConfigU2(
                                 M, N, K, batch, bs);
     gemv_u2_cache[key] = best;
 
-    CUSTOM_KERNELS_DEBUG_LOG(
+    MATMUL_NBITS_AUTOTUNE_LOG(
         "[custom_kernels] GEMV-u2 cache: stored key=\"%s\" -> config[%d] "
         "(cache size=%zu)\n",
         key.c_str(), best, gemv_u2_cache.size());
@@ -3289,7 +3289,7 @@ static int matmulNbitsLutWmmaConfig(int M, int N, int K, int gs, bool has_zp,
     // behind a !fused one has no stride argument.
     if (cid >= 0 && b_row_bytes != 0 && !kWmmaConfigs[cid].fused) return -1;
     if (cid >= 0)
-        CUSTOM_KERNELS_DEBUG_LOG(
+        MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels] LUT hit (src=%d d=%.3f) M=%d N=%d K=%d gs=%d "
             "stride=%d -> config[%d]\n",
             static_cast<int>(r.source), r.distance, M, N, K, gs, b_row_bytes,
@@ -3752,7 +3752,7 @@ static int tuneWmmaConfig(
         float ms = 0.0f;
         hipEventElapsedTime(&ms, ev0, ev1);
 
-        CUSTOM_KERNELS_DEBUG_LOG(
+        MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   wmma config[%2d] %s bm=%3d bn=%3d sw=%d "
             "wt=%dx%d bk=%2d : %.4f ms\n",
             cid, kWmmaConfigs[cid].fused ? "fused " : "dq+gem",
@@ -3773,7 +3773,7 @@ static int tuneWmmaConfig(
     // The full tile geometry is logged, not just the config index, so an
     // offline consumer can record what won without depending on this table's
     // ordering -- indices shift whenever the table is edited.
-    CUSTOM_KERNELS_DEBUG_LOG(
+    MATMUL_NBITS_AUTOTUNE_LOG(
         "[custom_kernels] WMMA autotune: M=%d N=%d K=%d gs=%d zp=%s -> "
         "best config[%d] %s bm=%d bn=%d sw=%d wt=%dx%d bk=%d (%.4f ms/iter)\n",
         M, N, K, gs, has_zp ? "yes" : "no",
@@ -3869,7 +3869,7 @@ static int getOrTuneWmmaConfig(
                                b_row_bytes);
     wmma_cache[key] = best;
 
-    CUSTOM_KERNELS_DEBUG_LOG(
+    MATMUL_NBITS_AUTOTUNE_LOG(
         "[custom_kernels] WMMA cache: stored key=\"%s\" -> config[%d] "
         "(cache size=%zu)\n",
         key.c_str(), best, wmma_cache.size());
@@ -4535,7 +4535,7 @@ static int tuneWmmaConfigI8(
         float ms = 0.0f;
         hipEventElapsedTime(&ms, ev0, ev1);
 
-        CUSTOM_KERNELS_DEBUG_LOG(
+        MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   wmma-i8 config[%2d] bm=%3d bn=%3d sw=%d : %.4f ms\n",
             cid, cfg.bm, cfg.bn, cfg.swizzle_n, ms / ITERS);
 
@@ -4548,7 +4548,7 @@ static int tuneWmmaConfigI8(
     hipEventDestroy(ev0);
     hipEventDestroy(ev1);
 
-    CUSTOM_KERNELS_DEBUG_LOG(
+    MATMUL_NBITS_AUTOTUNE_LOG(
         "[custom_kernels] WMMA-i8 autotune: M=%d N=%d K=%d gs=%d zp=%s -> "
         "best config[%d] bm=%d bn=%d sw=%d (%.4f ms/iter)\n",
         M, N, K, gs, has_zp ? "yes" : "no",
@@ -4588,7 +4588,7 @@ static int getOrTuneWmmaConfigI8(
                                  scales, zeros, gs, ngk, C, ldc, has_zp);
     wmma_i8_cache[key] = best;
 
-    CUSTOM_KERNELS_DEBUG_LOG(
+    MATMUL_NBITS_AUTOTUNE_LOG(
         "[custom_kernels] WMMA-i8 cache: stored key=\"%s\" -> config[%d] "
         "(cache size=%zu)\n",
         key.c_str(), best, wmma_i8_cache.size());
@@ -5252,7 +5252,7 @@ static int tuneWmmaConfigU3(
         float ms = 0.0f;
         hipEventElapsedTime(&ms, ev0, ev1);
 
-        CUSTOM_KERNELS_DEBUG_LOG(
+        MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   wmma-u3 config[%2d] %s bm=%3d bn=%3d sw=%d : %.4f ms\n",
             cid, cfg.fused ? "fused " : "dq+gem",
             cfg.bm, cfg.bn, cfg.swizzle_n, ms / ITERS);
@@ -5266,7 +5266,7 @@ static int tuneWmmaConfigU3(
     hipEventDestroy(ev0);
     hipEventDestroy(ev1);
 
-    CUSTOM_KERNELS_DEBUG_LOG(
+    MATMUL_NBITS_AUTOTUNE_LOG(
         "[custom_kernels] WMMA-u3 autotune: M=%d N=%d K=%d gs=%d zp=%s -> "
         "best config[%d] %s bm=%d bn=%d sw=%d (%.4f ms/iter)\n",
         M, N, K, gs, has_zp ? "yes" : "no",
@@ -5307,7 +5307,7 @@ static int getOrTuneWmmaConfigU3(
                                  scales, zeros, gs, ngk, C, ldc, has_zp);
     wmma_u3_cache[key] = best;
 
-    CUSTOM_KERNELS_DEBUG_LOG(
+    MATMUL_NBITS_AUTOTUNE_LOG(
         "[custom_kernels] WMMA-u3 cache: stored key=\"%s\" -> config[%d] "
         "(cache size=%zu)\n",
         key.c_str(), best, wmma_u3_cache.size());
@@ -5891,7 +5891,7 @@ static int tuneWmmaConfigU2(
         float ms = 0.0f;
         hipEventElapsedTime(&ms, ev0, ev1);
 
-        CUSTOM_KERNELS_DEBUG_LOG(
+        MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   wmma-u2 config[%2d] %s bm=%3d bn=%3d sw=%d : %.4f ms\n",
             cid, cfg.fused ? "fused " : "dq+gem",
             cfg.bm, cfg.bn, cfg.swizzle_n, ms / ITERS);
@@ -5905,7 +5905,7 @@ static int tuneWmmaConfigU2(
     hipEventDestroy(ev0);
     hipEventDestroy(ev1);
 
-    CUSTOM_KERNELS_DEBUG_LOG(
+    MATMUL_NBITS_AUTOTUNE_LOG(
         "[custom_kernels] WMMA-u2 autotune: M=%d N=%d K=%d gs=%d zp=%s -> "
         "best config[%d] %s bm=%d bn=%d sw=%d (%.4f ms/iter)\n",
         M, N, K, gs, has_zp ? "yes" : "no",
@@ -5946,7 +5946,7 @@ static int getOrTuneWmmaConfigU2(
                                  scales, zeros, gs, ngk, C, ldc, has_zp);
     wmma_u2_cache[key] = best;
 
-    CUSTOM_KERNELS_DEBUG_LOG(
+    MATMUL_NBITS_AUTOTUNE_LOG(
         "[custom_kernels] WMMA-u2 cache: stored key=\"%s\" -> config[%d] "
         "(cache size=%zu)\n",
         key.c_str(), best, wmma_u2_cache.size());
