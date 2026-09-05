@@ -173,3 +173,8 @@ Qwen3.8-27B-fp16-ve-fp16-int4-k_quant-gs128-text-dml-onnx,5120,17408,4,128,1,128
 Qwen3.8-27B-fp16-ve-fp16-int4-k_quant-gs128-text-dml-onnx,5120,248320,4,128,1,1
 Qwen3.8-27B-fp16-ve-fp16-int4-k_quant-gs128-text-dml-onnx,6144,5120,4,128,1,64
 Qwen3.8-27B-fp16-ve-fp16-int4-k_quant-gs128-text-dml-onnx,17408,5120,4,128,1,64
+added-713-coverage-gs32,2048,1024,4,32,0,1
+added-713-coverage-gs32,2880,2880,4,32,0,1
+added-713-coverage-gs32,2880,2880,4,32,1,1
+added-713-coverage-gs32,2880,5760,4,32,0,1
+added-713-coverage-gs32,2880,5760,4,32,1,1
