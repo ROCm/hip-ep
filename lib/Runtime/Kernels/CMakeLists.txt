@@ -96,17 +96,34 @@ set(_kernel_sources
 # embedded here rather than in runtime.bc the way the GQA table is: a
 # custom_kernels_<arch>.dll carries exactly the table it can use.
 #
-# lut/<arch>_lut_data.cpp is checked in and produced by update_lut.py compile
-# (dev workflow only -- the hip-ep build does not require Python). An arch with
-# no measured table still builds via tools/empty_lut_data.cpp: the loader finds
-# no table, and every shape falls through to the runtime sweep exactly as
-# before. Shipping a new arch is therefore a table addition, never a build break.
+# Only the checked-in lut/<arch>.fb ships; the linkable kMatmulNbitsLutData[]
+# symbol is generated from it below with pure CMake (file(READ ... HEX)) -- the
+# hip-ep build does not require Python, and no generated .cpp is committed (the
+# compiled array is just the .fb's bytes). An arch with no measured table still
+# builds via tools/empty_lut_data.cpp: the loader finds no table, and every
+# shape falls through to the runtime sweep exactly as before. Shipping a new
+# arch is therefore a table addition (a .fb), never a build break.
 set(_matmul_nbits_autotune_dir ${CMAKE_CURRENT_SOURCE_DIR}/hip/autotune/matmul_nbits)
 
 function(_matmul_nbits_lut_data_source arch out_var)
-    set(_cpp ${_matmul_nbits_autotune_dir}/lut/${arch}_lut_data.cpp)
-    if(EXISTS ${_cpp})
-        set(${out_var} ${_cpp} PARENT_SCOPE)
+    set(_fb ${_matmul_nbits_autotune_dir}/lut/${arch}.fb)
+    if(EXISTS ${_fb})
+        # Re-run CMake configure if the table changes, so the generated source
+        # below stays in sync with the checked-in .fb.
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_fb})
+        file(READ ${_fb} _hex HEX)
+        string(LENGTH "${_hex}" _len)
+        math(EXPR _n "${_len} / 2")
+        # Each byte "nn" -> "0xnn,". The trailing comma before '}' is valid C++;
+        # one long line is fine (compiled by hipcc/clang, no line-length limit).
+        string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," _body "${_hex}")
+        set(_gen ${CMAKE_CURRENT_BINARY_DIR}/matmul_nbits_lut_data_${arch}.cpp)
+        file(WRITE ${_gen}
+"// Auto-generated from ${arch}.fb by lib/Runtime/Kernels/CMakeLists.txt; do not edit, do not commit.\n"
+"#include <cstddef>\n"
+"extern \"C\" const unsigned char kMatmulNbitsLutData[] = {${_body}};\n"
+"extern \"C\" const size_t kMatmulNbitsLutData_size = ${_n};\n")
+        set(${out_var} ${_gen} PARENT_SCOPE)
     else()
         message(STATUS
             "[custom_kernels] no MatMulNBits LUT for ${arch}; "
