@@ -1,3 +1,8 @@
+##
+# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
+
 # Chez Scheme Integration for HipSR Dialect
 # Builds Chez with rime embedded in custom boot file
 
