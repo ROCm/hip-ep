@@ -4,6 +4,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "hip/Dialect/Hipsr/Scheme/Passes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Support/LogicalResult.h"
@@ -58,6 +59,12 @@ struct SchemePrintPass
 
 std::unique_ptr<Pass> createSchemePrintPass() {
   return std::make_unique<SchemePrintPass>();
+}
+
+void registerHipsrSchemePasses() {
+  registerPass([]() -> std::unique_ptr<Pass> {
+    return createSchemePrintPass();
+  });
 }
 
 } // namespace hipsr

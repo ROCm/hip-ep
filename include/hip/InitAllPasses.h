@@ -12,6 +12,7 @@
 #include "hip/Conversion/Passes.h"
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 #include "hip/Dialect/Hipsr/Pipelines/Pipelines.h"
+#include "hip/Dialect/Hipsr/Scheme/Passes.h"
 #include "hip/Dialect/Hipsr/Transforms/BufferizableOpInterfaceImpl.h"
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
 #include "hip/Dialect/IR/HipBufferize.h"
@@ -162,6 +163,9 @@ inline void registerAllPasses() {
     // hipsr-populate-shape-region, hipsr-externalize-constants, ...
     mlir::hipsr::registerHipsrPasses();
     mlir::hipsr::registerHipsrPipelines();
+
+    // hipsr Scheme passes (Chez Scheme integration for pattern DSL)
+    mlir::hipsr::registerHipsrSchemePasses();
 
     // Conversion passes (convert-onnx-to-hip, outline-onnx-to-hipdnn,
     // convert-hip-to-llvm); onnx-loop-outline and its sibling onnx-if-outline
