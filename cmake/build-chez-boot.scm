@@ -1,7 +1,3 @@
-#!/usr/bin/env scheme-script
-;; Build custom Chez boot file
-;; Usage: scheme --script build-chez-boot.scm petite.boot scheme.boot output.boot
-
 (import (chezscheme))
 
 (define (main args)
@@ -18,8 +14,6 @@
     (fprintf (current-output-port) "  Source: ~a\n" scheme-boot)
     (fprintf (current-output-port) "  Output: ~a\n" output-boot)
 
-    ;; scheme.boot already includes petite, just copy it
-    ;; TODO: later compile rime into the boot file
     (call-with-port (open-file-output-port output-boot (file-options replace))
       (lambda (out)
         (call-with-port (open-file-input-port scheme-boot)
