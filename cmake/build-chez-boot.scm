@@ -14,15 +14,16 @@
         [scheme-boot (list-ref args 1)]
         [output-boot (list-ref args 2)])
 
-    (fprintf (current-output-port) "Building custom boot file with rime...\n")
+    (fprintf (current-output-port) "Building custom boot file...\n")
     (fprintf (current-output-port) "  Base boots: ~a, ~a\n" petite-boot scheme-boot)
     (fprintf (current-output-port) "  Output: ~a\n" output-boot)
 
-    ;; Create custom boot with rime compiled in
+    ;; For now, just create a combined boot from petite+scheme
+    ;; TODO: compile rime into the boot file
     (make-boot-file output-boot
                     (list petite-boot scheme-boot)
-                    "hip"
-                    "")
+                    '()
+                    '())
 
     (fprintf (current-output-port) "Boot file created successfully.\n")))
 
