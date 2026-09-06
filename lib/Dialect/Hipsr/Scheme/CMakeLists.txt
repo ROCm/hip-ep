@@ -31,6 +31,7 @@ ExternalProject_Add(ChezScheme
     <SOURCE_DIR>/${CHEZ_MACHINE}/bin/${CHEZ_MACHINE}/scheme
     <SOURCE_DIR>/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/petite.boot
     <SOURCE_DIR>/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/scheme.boot
+    <SOURCE_DIR>/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/libkernel.a
 )
 
 ExternalProject_Get_Property(ChezScheme SOURCE_DIR)
@@ -79,12 +80,17 @@ add_library(HipsrSchemePass
 
 target_include_directories(HipsrSchemePass PRIVATE
   ${CMAKE_SOURCE_DIR}/include
+  ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}
+  ${ChezScheme_SOURCE_DIR}/boot/pb
 )
 
 add_dependencies(HipsrSchemePass ChezScheme)
 
 target_link_libraries(HipsrSchemePass
   ChezBoot
+  ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/libkernel.a
+  ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/lz4/lib/liblz4.a
+  ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/zlib/libz.a
   MLIRPass
   MLIRSupport
   MLIRIR
@@ -92,4 +98,6 @@ target_link_libraries(HipsrSchemePass
   ${CMAKE_DL_LIBS}
   m
   pthread
+  ncurses
+  util
 )
