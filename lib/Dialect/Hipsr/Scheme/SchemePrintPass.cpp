@@ -1,34 +1,29 @@
-//===- SchemePrintPass.cpp - Print MLIR in generic form from Scheme -------===//
-//
-// MLIR pass that uses Scheme to pretty-print operations in generic form
-//
-//===----------------------------------------------------------------------===//
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
 
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
-#include "mlir/Support/LogicalResult.h"
 #include "llvm/Support/raw_ostream.h"
+#include <string>
 
 namespace mlir {
 namespace hipsr {
 
-bool initializeSchemeRuntime(); // from SchemeRuntime.cpp
+bool initializeSchemeRuntime();
+void printOperation(const char* opName, int numOperands, int numResults, const char* genericForm);
+
+#define GEN_PASS_DEF_SCHEMEPRINTPASS
+#include "hip/Dialect/Hipsr/Transforms/Passes.h.inc"
 
 namespace {
 
-struct SchemePrintPass
-    : public PassWrapper<SchemePrintPass, OperationPass<ModuleOp>> {
-
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SchemePrintPass)
-
-  StringRef getArgument() const final { return "scheme-print"; }
-  StringRef getDescription() const final {
-    return "Print MLIR operations in generic form using Scheme";
-  }
+struct SchemePrintPass : public impl::SchemePrintPassBase<SchemePrintPass> {
+  using impl::SchemePrintPassBase<SchemePrintPass>::SchemePrintPassBase;
 
   void runOnOperation() override {
-    // Initialize Scheme runtime (with rime embedded)
     if (!initializeSchemeRuntime()) {
       signalPassFailure();
       return;
@@ -39,16 +34,18 @@ struct SchemePrintPass
     llvm::errs() << "\n=== Scheme-based MLIR Printer ===\n";
     llvm::errs() << "Module: " << module.getName().value_or("<unnamed>") << "\n\n";
 
-    // Walk all operations and print in generic form
     module.walk([](Operation *op) {
-      llvm::errs() << "Operation: \"" << op->getName().getStringRef() << "\"\n";
-      llvm::errs() << "  Operands: " << op->getNumOperands() << "\n";
-      llvm::errs() << "  Results: " << op->getNumResults() << "\n";
+      std::string genericFormStr;
+      llvm::raw_string_ostream os(genericFormStr);
+      op->print(os, OpPrintingFlags().printGenericOpForm());
+      os.flush();
 
-      // Print in generic form
-      llvm::errs() << "  Generic form: ";
-      op->print(llvm::errs(), OpPrintingFlags().printGenericOpForm());
-      llvm::errs() << "\n\n";
+      printOperation(
+        op->getName().getStringRef().str().c_str(),
+        op->getNumOperands(),
+        op->getNumResults(),
+        genericFormStr.c_str()
+      );
     });
 
     llvm::errs() << "=== End Scheme Printer ===\n\n";
@@ -56,16 +53,5 @@ struct SchemePrintPass
 };
 
 } // namespace
-
-std::unique_ptr<Pass> createSchemePrintPass() {
-  return std::make_unique<SchemePrintPass>();
-}
-
-void registerHipsrSchemePasses() {
-  registerPass([]() -> std::unique_ptr<Pass> {
-    return createSchemePrintPass();
-  });
-}
-
 } // namespace hipsr
 } // namespace mlir
