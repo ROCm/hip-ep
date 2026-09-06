@@ -22,8 +22,8 @@
     ;; TODO: compile rime into the boot file
     (make-boot-file output-boot
                     (list petite-boot scheme-boot)
-                    '()
-                    '())
+                    ""    ;; base library name (empty = no additional libs)
+                    "")
 
     (fprintf (current-output-port) "Boot file created successfully.\n")))
 
