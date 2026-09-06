@@ -18,7 +18,6 @@ ExternalProject_Add(ChezScheme
     <SOURCE_DIR>/ta6le/bin/ta6le/scheme
     <SOURCE_DIR>/ta6le/boot/ta6le/petite.boot
     <SOURCE_DIR>/ta6le/boot/ta6le/scheme.boot
-    <SOURCE_DIR>/ta6le/kernel.o
 )
 
 ExternalProject_Get_Property(ChezScheme SOURCE_DIR)
@@ -71,7 +70,6 @@ add_library(HipsrSchemePass
 
 target_include_directories(HipsrSchemePass PRIVATE
   ${CMAKE_SOURCE_DIR}/include
-  ${ChezScheme_SOURCE_DIR}/ta6le
 )
 
 # Link with Chez Scheme kernel
@@ -79,11 +77,10 @@ add_dependencies(HipsrSchemePass ChezScheme)
 
 target_link_libraries(HipsrSchemePass
   ChezBoot
-  ${ChezScheme_SOURCE_DIR}/ta6le/kernel.o
   MLIRPass
   MLIRSupport
   MLIRIR
-  HipsrDialect
+  HipsrDialectIR
   ${CMAKE_DL_LIBS}
   m
   pthread

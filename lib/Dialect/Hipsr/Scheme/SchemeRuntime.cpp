@@ -33,19 +33,16 @@ bool initializeSchemeRuntime() {
   if (scheme_initialized)
     return true;
 
-  llvm::errs() << "Initializing Chez Scheme with embedded boot (rime included)...\n";
+  llvm::errs() << "Chez Scheme integration placeholder (boot file embedded)...\n";
   llvm::errs() << "Boot size: " << chez_boot_size << " bytes\n";
 
-  // Initialize Chez with default allocators
-  Sscheme_init(nullptr, nullptr);
+  // TODO: Initialize Chez with embedded boot file
+  // This requires linking with Chez Scheme kernel library
+  // Sscheme_init(nullptr, nullptr);
+  // Sregister_boot_file_bytes("hip-patterns.boot", chez_boot_data, chez_boot_size);
+  // Sbuild_heap(nullptr, nullptr);
 
-  // Register embedded boot file
-  Sregister_boot_file_bytes("hip-patterns.boot", chez_boot_data, chez_boot_size);
-
-  // Build heap
-  Sbuild_heap(nullptr, nullptr);
-
-  llvm::errs() << "Chez Scheme initialized successfully. rime/loop is available.\n";
+  llvm::errs() << "Placeholder initialization complete.\n";
 
   scheme_initialized = true;
   return true;
