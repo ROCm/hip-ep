@@ -1,5 +1,5 @@
 #!/usr/bin/env scheme-script
-;; Build custom Chez boot file with rime embedded
+;; Build custom Chez boot file
 ;; Usage: scheme --script build-chez-boot.scm petite.boot scheme.boot output.boot
 
 (import (chezscheme))
@@ -14,16 +14,21 @@
         [scheme-boot (list-ref args 1)]
         [output-boot (list-ref args 2)])
 
-    (fprintf (current-output-port) "Building custom boot file...\n")
-    (fprintf (current-output-port) "  Base boots: ~a, ~a\n" petite-boot scheme-boot)
+    (fprintf (current-output-port) "Creating boot file...\n")
+    (fprintf (current-output-port) "  Source: ~a\n" scheme-boot)
     (fprintf (current-output-port) "  Output: ~a\n" output-boot)
 
-    ;; For now, just create a combined boot from petite+scheme
-    ;; TODO: compile rime into the boot file
-    (make-boot-file output-boot
-                    (list petite-boot scheme-boot)
-                    ""    ;; base library name (empty = no additional libs)
-                    "")
+    ;; scheme.boot already includes petite, just copy it
+    ;; TODO: later compile rime into the boot file
+    (call-with-port (open-file-output-port output-boot (file-options replace))
+      (lambda (out)
+        (call-with-port (open-file-input-port scheme-boot)
+          (lambda (in)
+            (let loop ()
+              (let ([byte (get-u8 in)])
+                (unless (eof-object? byte)
+                  (put-u8 out byte)
+                  (loop))))))))
 
     (fprintf (current-output-port) "Boot file created successfully.\n")))
 
