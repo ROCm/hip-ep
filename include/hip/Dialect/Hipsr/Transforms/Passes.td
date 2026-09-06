@@ -272,4 +272,13 @@ def HipsrUseOutputAllocatorPass
     "::mlir::memref::MemRefDialect"
   ];
 }
+
+def SchemePrintPass : Pass<"scheme-print", "mlir::ModuleOp"> {
+  let summary = "Print MLIR operations in generic form using Scheme";
+  let description = [{
+    Demonstration pass that initializes Chez Scheme runtime with embedded
+    boot file and prints all MLIR operations in generic form.
+  }];
+}
+
 #endif // HIPSR_TRANSFORMS_PASSES
