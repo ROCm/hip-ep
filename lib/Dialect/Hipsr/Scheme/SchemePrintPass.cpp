@@ -4,7 +4,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "hip/Dialect/Hipsr/Scheme/Passes.h"
+#include "hip/Dialect/Hipsr/Transforms/Passes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Support/LogicalResult.h"
