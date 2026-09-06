@@ -26,6 +26,35 @@ namespace hipsr {
 
 namespace {
 
+// Points each barrier at the DPS results it waits on, not the inits the
+// conversion wired up. A DPS op returns its init after writing it, but a
+// hipsr.compute result is a separate value its init only names a destination
+// for, so waiting on the init waits on nothing the body produced:
+//
+//   %init = hipsr.placeholder(%ctx) ins(%in) {normal} : tensor<4xf16>
+//   %data = hipsr.compute(%ctx) ins(%in) outs(%init) { ... } : tensor<4xf16>
+//
+//   // Before: waits on %init, a buffer the body never wrote
+//   %wait = hipsr.placeholder(%ctx) ins(%init) {barrier} : tensor<4xf16>
+//   // After
+//   %wait = hipsr.placeholder(%ctx) ins(%data) {barrier} : tensor<4xf16>
+void makeBarriersReadDpsResults(Block &block) {
+  for (PlaceholderOp placeholder : block.getOps<PlaceholderOp>()) {
+    if (placeholder.getPlaceholderType() != PlaceholderType::Barrier) {
+      continue;
+    }
+    placeholder.getInputsMutable().assign(
+        llvm::map_to_vector(placeholder.getInputs(), [](Value init) -> Value {
+          for (OpOperand &use : init.getUses()) {
+            if (OpResult result = getResultForDestination(use)) {
+              return result;
+            }
+          }
+          return init;
+        }));
+  }
+}
+
 namespace partition_analysis {
 
 struct Domain {
@@ -283,6 +312,8 @@ struct PartitionPoolDomainsPass
       return;
     }
     Value context = entryBlock.getArgument(0);
+
+    makeBarriersReadDpsResults(entryBlock);
 
     partition_analysis::DomainAssignment assignment =
         partition_analysis::buildDomainAssignment(entryBlock);
