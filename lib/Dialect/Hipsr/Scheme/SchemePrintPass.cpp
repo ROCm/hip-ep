@@ -1,8 +1,3 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
-
 //===- SchemePrintPass.cpp - Print MLIR in generic form from Scheme -------===//
 //
 // MLIR pass that uses Scheme to pretty-print operations in generic form
@@ -42,8 +37,7 @@ struct SchemePrintPass
     ModuleOp module = getOperation();
 
     llvm::errs() << "\n=== Scheme-based MLIR Printer ===\n";
-    llvm::errs() << "Module: " << module.getName().value_or("<unnamed>")
-                 << "\n\n";
+    llvm::errs() << "Module: " << module.getName().value_or("<unnamed>") << "\n\n";
 
     // Walk all operations and print in generic form
     module.walk([](Operation *op) {
@@ -68,8 +62,9 @@ std::unique_ptr<Pass> createSchemePrintPass() {
 }
 
 void registerHipsrSchemePasses() {
-  registerPass(
-      []() -> std::unique_ptr<Pass> { return createSchemePrintPass(); });
+  registerPass([]() -> std::unique_ptr<Pass> {
+    return createSchemePrintPass();
+  });
 }
 
 } // namespace hipsr
