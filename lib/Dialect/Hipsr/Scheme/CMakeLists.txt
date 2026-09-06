@@ -15,10 +15,10 @@ ExternalProject_Add(ChezScheme
   INSTALL_COMMAND ""
   BUILD_IN_SOURCE 1
   BUILD_BYPRODUCTS
-    <SOURCE_DIR>/bin/ti3le/scheme
-    <SOURCE_DIR>/boot/ti3le/petite.boot
-    <SOURCE_DIR>/boot/ti3le/scheme.boot
-    <SOURCE_DIR>/ti3le/kernel.o
+    <SOURCE_DIR>/ta6le/bin/ta6le/scheme
+    <SOURCE_DIR>/ta6le/boot/ta6le/petite.boot
+    <SOURCE_DIR>/ta6le/boot/ta6le/scheme.boot
+    <SOURCE_DIR>/ta6le/kernel.o
 )
 
 ExternalProject_Get_Property(ChezScheme SOURCE_DIR)
@@ -27,10 +27,10 @@ set(ChezScheme_SOURCE_DIR "${SOURCE_DIR}")
 # Step 2: Create custom boot file with rime
 add_custom_command(
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/hip-patterns.boot
-  COMMAND ${ChezScheme_SOURCE_DIR}/bin/ti3le/scheme
+  COMMAND ${ChezScheme_SOURCE_DIR}/ta6le/bin/ta6le/scheme
           --script ${CMAKE_SOURCE_DIR}/cmake/build-chez-boot.scm
-          ${ChezScheme_SOURCE_DIR}/boot/ti3le/petite.boot
-          ${ChezScheme_SOURCE_DIR}/boot/ti3le/scheme.boot
+          ${ChezScheme_SOURCE_DIR}/ta6le/boot/ta6le/petite.boot
+          ${ChezScheme_SOURCE_DIR}/ta6le/boot/ta6le/scheme.boot
           ${CMAKE_CURRENT_BINARY_DIR}/hip-patterns.boot
   DEPENDS ChezScheme
           ${CMAKE_SOURCE_DIR}/cmake/build-chez-boot.scm
@@ -79,7 +79,7 @@ add_dependencies(HipsrSchemePass ChezScheme)
 
 target_link_libraries(HipsrSchemePass
   ChezBoot
-  ${ChezScheme_SOURCE_DIR}/ti3le/kernel.o
+  ${ChezScheme_SOURCE_DIR}/ta6le/kernel.o
   MLIRPass
   MLIRSupport
   MLIRIR
