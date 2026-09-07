@@ -14,21 +14,27 @@ typedef long iptr;
 void Sscheme_init(void (*)(void));
 void Sregister_boot_file_bytes(const char*, const unsigned char*, size_t);
 void Sbuild_heap(const char*, void (*)(void));
+ptr Scall1(ptr, ptr);
 ptr Scall2(ptr, ptr, ptr);
+ptr Scall4(ptr, ptr, ptr, ptr, ptr);
 ptr Sstring_to_symbol(const char*);
 ptr Stop_level_value(ptr);
 ptr Sinteger(iptr);
 iptr Sinteger_value(ptr);
+ptr Sstring(const char*);
 const char* Skernel_version();
 
 extern const unsigned char petite_boot_data[];
 extern const size_t petite_boot_size;
 extern const unsigned char scheme_boot_data[];
 extern const size_t scheme_boot_size;
+extern const unsigned char print_operation_scm_data[];
+extern const size_t print_operation_scm_size;
 }
 
 namespace {
 static bool scheme_initialized = false;
+static ptr g_print_operation = nullptr;
 }
 
 namespace mlir {
@@ -53,6 +59,19 @@ bool initializeSchemeRuntime() {
   iptr answer = Sinteger_value(result);
 
   llvm::errs() << "Scheme test: (* 6 7) = " << answer << "\n";
+
+  std::string scm_code(reinterpret_cast<const char*>(print_operation_scm_data),
+                       print_operation_scm_size);
+  ptr eval_sym = Stop_level_value(Sstring_to_symbol("eval"));
+  ptr read_sym = Stop_level_value(Sstring_to_symbol("read"));
+  ptr open_string_input_port_sym = Stop_level_value(Sstring_to_symbol("open-string-input-port"));
+
+  ptr port = Scall1(open_string_input_port_sym, Sstring(scm_code.c_str()));
+  ptr expr = Scall1(read_sym, port);
+  Scall2(eval_sym, expr, Stop_level_value(Sstring_to_symbol("interaction-environment")));
+
+  g_print_operation = Stop_level_value(Sstring_to_symbol("print-operation"));
+
   llvm::errs() << "Chez Scheme runtime initialized successfully!\n\n";
 
   scheme_initialized = true;
@@ -60,13 +79,14 @@ bool initializeSchemeRuntime() {
 }
 
 void printOperation(const char* opName, int numOperands, int numResults, const char* genericForm) {
-  if (!scheme_initialized)
+  if (!scheme_initialized || !g_print_operation)
     return;
 
-  llvm::errs() << "Operation: \"" << opName << "\"\n";
-  llvm::errs() << "  Operands: " << numOperands << "\n";
-  llvm::errs() << "  Results: " << numResults << "\n";
-  llvm::errs() << "  Generic form: " << genericForm << "\n\n";
+  Scall4(g_print_operation,
+         Sstring(opName),
+         Sinteger(numOperands),
+         Sinteger(numResults),
+         Sstring(genericForm));
 }
 
 } // namespace hipsr
