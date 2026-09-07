@@ -51,11 +51,16 @@ add_custom_command(
           --var scheme_boot_data
           --output ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.cpp
           ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/scheme.boot
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_SOURCE_DIR}/cmake/xxd.py
+          --var print_operation_scm_data
+          --output ${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/print-operation.scm
   COMMAND ${Python3_EXECUTABLE} -c
-          "import os; petite_size = os.path.getsize('${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/petite.boot'); scheme_size = os.path.getsize('${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/scheme.boot'); petite_data = open('${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.cpp').read().replace('static const unsigned char', 'extern \"C\" const unsigned char'); scheme_data = open('${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.cpp').read().replace('static const unsigned char', 'extern \"C\" const unsigned char'); merged = '#include <cstddef>\\n' + petite_data + '\\nextern \"C\" const size_t petite_boot_size = ' + str(petite_size) + ';\\n\\n' + scheme_data + '\\nextern \"C\" const size_t scheme_boot_size = ' + str(scheme_size) + ';\\n'; open('${CMAKE_CURRENT_BINARY_DIR}/ChezBootEmbedded.cpp', 'w').write(merged)"
-  COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.cpp ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.cpp
-  DEPENDS ChezScheme
-  COMMENT "Embedding Chez boot files (petite and scheme) as C arrays"
+          "import os; petite_size = os.path.getsize('${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/petite.boot'); scheme_size = os.path.getsize('${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/scheme.boot'); scm_size = os.path.getsize('${CMAKE_CURRENT_SOURCE_DIR}/print-operation.scm'); petite_data = open('${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.cpp').read().replace('static const unsigned char', 'extern \"C\" const unsigned char'); scheme_data = open('${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.cpp').read().replace('static const unsigned char', 'extern \"C\" const unsigned char'); scm_data = open('${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.cpp').read().replace('static const unsigned char', 'extern \"C\" const unsigned char'); merged = '#include <cstddef>\\n' + petite_data + '\\nextern \"C\" const size_t petite_boot_size = ' + str(petite_size) + ';\\n\\n' + scheme_data + '\\nextern \"C\" const size_t scheme_boot_size = ' + str(scheme_size) + ';\\n\\n' + scm_data + '\\nextern \"C\" const size_t print_operation_scm_size = ' + str(scm_size) + ';\\n'; open('${CMAKE_CURRENT_BINARY_DIR}/ChezBootEmbedded.cpp', 'w').write(merged)"
+  COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.cpp ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.cpp ${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.cpp
+  DEPENDS ChezScheme ${CMAKE_CURRENT_SOURCE_DIR}/print-operation.scm
+  COMMENT "Embedding Chez boot files and Scheme code as C arrays"
   VERBATIM
 )
 
