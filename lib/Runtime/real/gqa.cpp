@@ -168,11 +168,11 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
 static constexpr int kFlashDecodeMaxSplits = 64;
 
 // Geometry gate for the flash_decode kernel template instantiations. The scalar
-// decode kernel is templated for HpG in {1,2,3,4,5,8,16} (so it covers MHA and
-// the common GQA ratios, incl. Qwen2.5-14B's 40:8=5) at d in {64,128,256}
-// (d=256 covers Qwen3-family 16:4 heads); WMMA is layered on top inside the
-// kernel where it helps (d<=128 only). Anything outside this set has no decode
-// kernel.
+// decode kernel is templated for HpG in {1,2,3,4,5,6,8,16} (so it covers MHA
+// and the common GQA ratios, incl. Qwen2.5-14B's 40:8=5 and Qwen3.6-27B's
+// 24:4=6) at d in {64,128,256} (d=256 covers Qwen3-family 16:4 heads); WMMA is
+// layered on top inside the kernel where it helps (d<=128 only). Anything
+// outside this set has no decode kernel.
 static inline bool flash_decode_geometry_ok(int64_t H, int64_t G, int64_t d) {
   if (G <= 0)
     return false;
@@ -181,8 +181,8 @@ static inline bool flash_decode_geometry_ok(int64_t H, int64_t G, int64_t d) {
   int64_t hpg = H / G;
   if (hpg * G != H)
     return false;
-  return hpg == 1 || hpg == 2 || hpg == 3 || hpg == 4 || hpg == 5 || hpg == 8 ||
-         hpg == 16;
+  return hpg == 1 || hpg == 2 || hpg == 3 || hpg == 4 || hpg == 5 || hpg == 6 ||
+         hpg == 8 || hpg == 16;
 }
 
 // Logical storage format of the KV cache the fused path must read/write. This
@@ -403,7 +403,7 @@ static int gqa_forward_fused(
     if (!flash_decode_geometry_ok(H, G, d)) {
       fprintf(stderr,
               "gqa_forward_fused (decode): unsupported geometry H=%lld G=%lld "
-              "d=%lld (HpG must be 1/2/3/4/5/8/16 and d 64/128/256)\n",
+              "d=%lld (HpG must be 1/2/3/4/5/6/8/16 and d 64/128/256)\n",
               (long long)H, (long long)G, (long long)d);
       return -1;
     }
@@ -2390,7 +2390,7 @@ int wrap_group_query_attention(
   //===------------------------------------------------------------------===//
   // Path selection. The optimized fused/flash kernels are fp16 causal GQA with
   // head_dim in {64,128,256} and a templated decode geometry (HpG in
-  // {1,2,3,4,5,8,16}). Decode supports sink/window for every templated
+  // {1,2,3,4,5,6,8,16}). Decode supports sink/window for every templated
   // geometry; prefill v3 supports them at head_dim == 64. Everything else uses
   // the feature-complete decomposed hipBLASLt fallback.
   //===------------------------------------------------------------------===//

@@ -20,7 +20,7 @@
 // kv_num_heads) pair was never measured could only be answered by the
 // last-resort row, and a batched deployment always was. It now carries
 // heads-per-group and, optionally, a bucket of batch*num_heads. That set is
-// closed -- flash_decode_geometry_ok admits heads-per-group in {1,2,3,4,5,8,16}
+// closed -- flash_decode_geometry_ok admits heads-per-group in {1,2,3,4,5,6,8,16}
 // at head_dim in {64,128,256} -- so a complete table has a row for every
 // geometry that can reach it. Measurement puts the cost of pooling head counts
 // at one percentage point of shapes within 5% of optimum and nothing on the

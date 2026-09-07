@@ -82,7 +82,7 @@ struct Case {
 };
 
 // Mirror of gqa.cpp's decode-geometry gate (flash_decode_geometry_ok): the
-// optimized flash_decode kernel is templated for HpG in {1,2,3,4,5,8,16} and
+// optimized flash_decode kernel is templated for HpG in {1,2,3,4,5,6,8,16} and
 // head_dim in {64,128,256} (d=256 covers Qwen3-family 16:4).
 static bool geometry_ok(int H, int G, int D) {
   if (D != 64 && D != 128 && D != 256)
@@ -90,8 +90,8 @@ static bool geometry_ok(int H, int G, int D) {
   if (G <= 0 || H % G != 0)
     return false;
   const int hpg = H / G;
-  return hpg == 1 || hpg == 2 || hpg == 3 || hpg == 4 || hpg == 5 || hpg == 8 ||
-         hpg == 16;
+  return hpg == 1 || hpg == 2 || hpg == 3 || hpg == 4 || hpg == 5 || hpg == 6 ||
+         hpg == 8 || hpg == 16;
 }
 
 // Mirror of gqa.cpp::wrap_group_query_attention path selection: true => the optimized

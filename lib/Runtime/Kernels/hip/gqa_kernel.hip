@@ -2295,6 +2295,7 @@ static inline void launchFlashDecodeConfig(
       case 3:  LAUNCH_SCALAR(3);  break;
       case 4:  LAUNCH_SCALAR(4);  break;
       case 5:  LAUNCH_SCALAR(5);  break;
+      case 6:  LAUNCH_SCALAR(6);  break;
       case 8:  LAUNCH_SCALAR(8);  break;
       case 16: LAUNCH_SCALAR(16); break;
       default: break;  // unsupported HpG is rejected in hip_gqa_flash_decode
@@ -2631,11 +2632,11 @@ static int runGqaFlashDecode(
   const int hpg = H / G;
   // Scalar decode is templated for these HpG (GQA + MHA); WMMA is layered on
   // top where flash_decode_wmma_supported() says so. Anything else is rejected.
-  if (hpg != 1 && hpg != 2 && hpg != 3 && hpg != 4 && hpg != 5 && hpg != 8 &&
-      hpg != 16) {
+  if (hpg != 1 && hpg != 2 && hpg != 3 && hpg != 4 && hpg != 5 && hpg != 6 &&
+      hpg != 8 && hpg != 16) {
     fprintf(stderr,
             "hip_gqa_flash_decode: unsupported HPG=%d (must be "
-            "1/2/3/4/5/8/16; H=%d, G=%d)\n",
+            "1/2/3/4/5/6/8/16; H=%d, G=%d)\n",
             hpg, H, G);
     return -1;
   }
