@@ -23,8 +23,13 @@ def main(argv):
 
     with open(args.file, "rb") as f:
         data = f.read()
+
+    file_size = len(data)
+    size_var = args.var.replace('_data', '_size')
+
     with open(args.output, "w") as output_fh:
-        print(f"static const unsigned char {args.var}[] = {{", file=output_fh)
+        print("#include <cstddef>\n", file=output_fh)
+        print(f"extern \"C\" const unsigned char {args.var}[] = {{", file=output_fh)
         for i in range(0, len(data), args.column):
             chunk = data[i : i + args.column]
             hex_chunk = ",".join(f"0x{byte:02x}" for byte in chunk)
@@ -38,7 +43,8 @@ def main(argv):
                 f"/*{i:08x} */  {hex_chunk:<{args.column * 3}}, /* {ascii_chunk} */",
                 file=output_fh,
             )
-        print("0x00};", file=output_fh)
+        print("0x00};\n", file=output_fh)
+        print(f"extern \"C\" const size_t {size_var} = {file_size};", file=output_fh)
 
 
 if __name__ == "__main__":
