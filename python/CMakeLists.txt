@@ -17,12 +17,19 @@ set(_stage "${CMAKE_CURRENT_BINARY_DIR}/pkg")
 set(_libs_dir "${_stage}/onnxruntime_ep_amdgpu")
 set(_dist_dir "${CMAKE_CURRENT_BINARY_DIR}/dist")
 
-set(MORPHIZEN_HIP_ARCH "${HIP_ARCHITECTURES}")
-if(MORPHIZEN_HIP_ARCH MATCHES ";")
-  list(GET MORPHIZEN_HIP_ARCH 0 MORPHIZEN_HIP_ARCH)
-endif()
-if(NOT MORPHIZEN_HIP_ARCH)
-  set(MORPHIZEN_HIP_ARCH "gfx1151")
+# hipBLASLt resolves Tensile data as library/<device-isa>/, so this tracks the
+# ISA the pinned dist ships, not HIP_ARCHITECTURES (a generic compile target
+# like gfx11-generic has no such directory).
+if(DEP_HASH_therock_windows MATCHES "(gfx[0-9]+)")
+  set(MORPHIZEN_HIP_ARCH "${CMAKE_MATCH_1}")
+else()
+  set(MORPHIZEN_HIP_ARCH "${HIP_ARCHITECTURES}")
+  if(MORPHIZEN_HIP_ARCH MATCHES ";")
+    list(GET MORPHIZEN_HIP_ARCH 0 MORPHIZEN_HIP_ARCH)
+  endif()
+  if(NOT MORPHIZEN_HIP_ARCH)
+    set(MORPHIZEN_HIP_ARCH "gfx1151")
+  endif()
 endif()
 
 configure_file(
