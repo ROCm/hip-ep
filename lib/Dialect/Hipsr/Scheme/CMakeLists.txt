@@ -40,30 +40,22 @@ ExternalProject_Get_Property(ChezScheme SOURCE_DIR)
 set(ChezScheme_SOURCE_DIR "${SOURCE_DIR}")
 
 add_custom_command(
-  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/hip-patterns.boot
-  COMMAND ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/bin/${CHEZ_MACHINE}/scheme
-          --script ${CMAKE_SOURCE_DIR}/cmake/build-chez-boot.scm
-          ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/petite.boot
-          ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/scheme.boot
-          ${CMAKE_CURRENT_BINARY_DIR}/hip-patterns.boot
-  DEPENDS ChezScheme
-          ${CMAKE_SOURCE_DIR}/cmake/build-chez-boot.scm
-  COMMENT "Creating custom boot file for ${CHEZ_MACHINE}"
-  VERBATIM
-)
-
-add_custom_command(
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ChezBootEmbedded.cpp
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_SOURCE_DIR}/cmake/xxd.py
-          --var chez_boot_data
-          --output ${CMAKE_CURRENT_BINARY_DIR}/ChezBootEmbedded.cpp.tmp
-          ${CMAKE_CURRENT_BINARY_DIR}/hip-patterns.boot
+          --var petite_boot_data
+          --output ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.cpp
+          ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/petite.boot
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_SOURCE_DIR}/cmake/xxd.py
+          --var scheme_boot_data
+          --output ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.cpp
+          ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/scheme.boot
   COMMAND ${Python3_EXECUTABLE} -c
-          "import os; data = open('${CMAKE_CURRENT_BINARY_DIR}/ChezBootEmbedded.cpp.tmp').read(); size = os.path.getsize('${CMAKE_CURRENT_BINARY_DIR}/hip-patterns.boot'); data = data.replace('static const unsigned char', 'extern \"C\" const unsigned char'); data = '#include <cstddef>\\n' + data + f'\\nextern \"C\" const size_t chez_boot_size = {size};\\n'; open('${CMAKE_CURRENT_BINARY_DIR}/ChezBootEmbedded.cpp', 'w').write(data)"
-  COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_CURRENT_BINARY_DIR}/ChezBootEmbedded.cpp.tmp
-  DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/hip-patterns.boot
-  COMMENT "Embedding Chez boot file as C array"
+          "import os; petite_size = os.path.getsize('${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/petite.boot'); scheme_size = os.path.getsize('${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/scheme.boot'); petite_data = open('${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.cpp').read().replace('static const unsigned char', 'extern \"C\" const unsigned char'); scheme_data = open('${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.cpp').read().replace('static const unsigned char', 'extern \"C\" const unsigned char'); merged = '#include <cstddef>\\n' + petite_data + '\\nextern \"C\" const size_t petite_boot_size = ' + str(petite_size) + ';\\n\\n' + scheme_data + '\\nextern \"C\" const size_t scheme_boot_size = ' + str(scheme_size) + ';\\n'; open('${CMAKE_CURRENT_BINARY_DIR}/ChezBootEmbedded.cpp', 'w').write(merged)"
+  COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.cpp ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.cpp
+  DEPENDS ChezScheme
+  COMMENT "Embedding Chez boot files (petite and scheme) as C arrays"
   VERBATIM
 )
 
