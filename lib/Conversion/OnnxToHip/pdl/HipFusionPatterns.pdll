@@ -17,3 +17,4 @@ Constraint ExtractScaleValue(val: Value) -> Attr;
 Constraint ExtractZeropointValue(op: Op, index: Attr, defaultValue: Attr) -> Attr;
 
 #include "QDQAddFusion.pdll"
+#include "QDQMulFusion.pdll"
