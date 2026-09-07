@@ -143,10 +143,16 @@ HIP_KERNEL_API int hip_elementwise_where(
  * Operand shapes are left-padded with 1s to out_rank (NumPy broadcast).
  * Rank must be <= HIP_QELEMENTWISE_MAX_RANK (8).
  *
- * kind: 0 = add (HIPDNN_EP_QELEMENTWISE_ADD).
- * Scales are folded by lowering: M_a = s_a / s_out, M_b = s_b / s_out.
+ * kind: 0 = add (HIPDNN_EP_QELEMENTWISE_ADD),
+ *       1 = mul (HIPDNN_EP_QELEMENTWISE_MUL).
  *
- *   OUT = saturate(round(M_a * (A - z_a) [OP] M_b * (B - z_b)) + z_out)
+ * Scales are folded by lowering, and how they collapse depends on kind
+ * because multiplying the dequantized operands also multiplies their scales:
+ *
+ *   add: M_a = s_a / s_out, M_b = s_b / s_out
+ *        OUT = saturate(round(M_a * (A - z_a) + M_b * (B - z_b)) + z_out)
+ *   mul: M_a = s_a * s_b / s_out, M_b unused
+ *        OUT = saturate(round(M_a * (A - z_a) * (B - z_b)) + z_out)
  *
  * Supported hip_dtype: HIP_DTYPE_INT8, HIP_DTYPE_UINT8, HIP_DTYPE_INT16,
  * HIP_DTYPE_UINT16, HIP_DTYPE_INT32.
