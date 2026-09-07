@@ -486,8 +486,8 @@ void ConvertOnnxToHipPass::runOnOperation() {
                            << pdlFusionFile;
     }
   } else {
-    module.emitError() << "Fusion PDL patterns not found at "
-                       << pdlFusionFile << "; QDQ fusion is disabled";
+    module.emitError() << "Fusion PDL patterns not found at " << pdlFusionFile
+                       << "; QDQ fusion is disabled";
     return signalPassFailure();
   }
 

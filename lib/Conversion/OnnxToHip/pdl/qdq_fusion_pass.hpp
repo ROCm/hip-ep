@@ -19,7 +19,6 @@
 namespace hip {
 namespace pdl {
 
-
 inline mlir::Value tryContextArg(mlir::Operation *op) {
   if (!op)
     return {};
@@ -66,9 +65,8 @@ inline std::optional<float> trySplatScale(mlir::Value value) {
 
 // ONNX makes the Q/DQ zero point optional, so an absent operand contributes
 // `absentValue` instead of rejecting the chain.
-inline std::optional<int64_t> trySplatZeropoint(mlir::Operation *op,
-                                                uint64_t index,
-                                                int64_t absentValue) {
+inline std::optional<int64_t>
+trySplatZeropoint(mlir::Operation *op, uint64_t index, int64_t absentValue) {
   if (!op)
     return std::nullopt;
   if (index >= op->getNumOperands())
@@ -164,10 +162,9 @@ extractZeropointValue(mlir::PatternRewriter &rewriter,
       args[2].dyn_cast<mlir::Attribute>());
   if (!indexAttr || !defaultValue)
     return mlir::failure();
-  std::optional<int64_t> zeropoint =
-      trySplatZeropoint(args[0].dyn_cast<mlir::Operation *>(),
-                        indexAttr.getValue().getZExtValue(),
-                        defaultValue.getInt());
+  std::optional<int64_t> zeropoint = trySplatZeropoint(
+      args[0].dyn_cast<mlir::Operation *>(),
+      indexAttr.getValue().getZExtValue(), defaultValue.getInt());
   if (!zeropoint)
     return mlir::failure();
   results.push_back(rewriter.getI64IntegerAttr(*zeropoint));
