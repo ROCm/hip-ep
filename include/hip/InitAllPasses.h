@@ -38,7 +38,6 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
-#include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/Linalg/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/MemRef/Transforms/AllocationOpInterfaceImpl.h"
@@ -126,7 +125,6 @@ registerAllDialects(mlir::DialectRegistry &registry,
   mlir::tensor::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::tensor::registerInferTypeOpInterfaceExternalModels(registry);
   mlir::linalg::registerBufferizableOpInterfaceExternalModels(registry);
-  mlir::scf::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
       registry);
   mlir::memref::registerAllocationOpInterfaceExternalModels(registry);
@@ -200,8 +198,6 @@ inline void registerAllPasses() {
     mlir::hipsr::registerHipsrPasses();
     mlir::hipsr::registerHipsrPipelines();
 
-    // hipsr Scheme passes (Chez Scheme integration for pattern DSL)
-
     // Conversion passes (convert-onnx-to-hip, outline-onnx-to-hipdnn,
     // convert-hip-to-llvm); onnx-loop-outline and its sibling onnx-if-outline
     // are hand-written, not in the .td set, so they are registered separately
@@ -230,10 +226,6 @@ inline void registerAllPasses() {
     mlir::registerSCFToControlFlowPass();
     mlir::registerReconcileUnrealizedCastsPass();
     mlir::memref::registerResolveShapedTypeResultDimsPass();
-    mlir::registerConvertLinalgToLoopsPass();
-    mlir::registerRemoveShapeConstraintsPass();
-    mlir::registerShapeToShapeLoweringPass();
-    mlir::registerConvertShapeToStandardPass();
   });
 }
 
