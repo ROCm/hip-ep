@@ -13,6 +13,10 @@ typedef long iptr;
 
 void Sscheme_init(void (*)(void));
 void Sregister_boot_file_bytes(const char*, const unsigned char*, size_t);
+void Sbuild_heap(const char*, void (*)(void));
+ptr Scall0(ptr);
+ptr Sstring_to_symbol(const char*);
+ptr Stop_level_value(ptr);
 const char* Skernel_version();
 
 extern const unsigned char chez_boot_data[];
@@ -30,21 +34,18 @@ bool initializeSchemeRuntime() {
   if (scheme_initialized)
     return true;
 
-  llvm::errs() << "Initializing Chez Scheme C API...\n";
-  llvm::errs() << "Boot size: " << chez_boot_size << " bytes\n";
-  llvm::errs() << "Chez Scheme version: " << Skernel_version() << "\n";
+  llvm::errs() << "Initializing Chez Scheme runtime...\n";
+  llvm::errs() << "  Version: " << Skernel_version() << "\n";
+  llvm::errs() << "  Boot size: " << chez_boot_size << " bytes\n";
 
   Sscheme_init(nullptr);
   Sregister_boot_file_bytes("hip-patterns.boot", chez_boot_data, chez_boot_size);
+  Sbuild_heap(nullptr, nullptr);
 
-  llvm::errs() << "Chez Scheme C API linked successfully.\n";
-  llvm::errs() << "\nNote: Full Scheme evaluation (Sbuild_heap) requires additional\n";
-  llvm::errs() << "integration work for embedded use. Current implementation demonstrates:\n";
-  llvm::errs() << "  - Boot file embedding (1.16 MB)\n";
-  llvm::errs() << "  - C API linkage (libkernel.a, liblz4.a, libz.a)\n";
-  llvm::errs() << "  - Scheme function calls will use C++ for now\n";
-  llvm::errs() << "\nFuture work: Complete Sbuild_heap initialization and actual\n";
-  llvm::errs() << "Scheme-based pattern DSL implementation.\n\n";
+  ptr display = Stop_level_value(Sstring_to_symbol("display"));
+  Scall0(display);
+
+  llvm::errs() << "Chez Scheme runtime initialized successfully!\n\n";
 
   scheme_initialized = true;
   return true;

@@ -32,6 +32,8 @@ ExternalProject_Add(ChezScheme
     <SOURCE_DIR>/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/petite.boot
     <SOURCE_DIR>/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/scheme.boot
     <SOURCE_DIR>/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/libkernel.a
+    <SOURCE_DIR>/${CHEZ_MACHINE}/lz4/lib/liblz4.a
+    <SOURCE_DIR>/${CHEZ_MACHINE}/zlib/libz.a
 )
 
 ExternalProject_Get_Property(ChezScheme SOURCE_DIR)
