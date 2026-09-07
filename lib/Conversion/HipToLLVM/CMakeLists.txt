@@ -62,6 +62,7 @@ add_library(HipToLLVM STATIC
   ResizeLowering.cpp
   GridSampleLowering.cpp
   GlobalPoolLowering.cpp
+  QAddLowering.cpp
 )
 
 add_dependencies(HipToLLVM
