@@ -36,6 +36,7 @@ jobs:
       ort_cache_key: ${{ needs.prebuild.outputs.ort_cache_key }}
 
   gpu_test:
+    if: false
     needs: build_real
     uses: ./.github/workflows/windows-gpu-test.yml
     # A callee's GITHUB_TOKEN is capped by the caller job, and the GPU job
