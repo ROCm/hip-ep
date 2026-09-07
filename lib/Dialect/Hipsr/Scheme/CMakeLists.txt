@@ -56,10 +56,16 @@ add_custom_command(
           --var print_operation_scm_data
           --output ${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/print-operation.scm
-  COMMAND ${Python3_EXECUTABLE} -c
-          "import os; petite_size = os.path.getsize('${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/petite.boot'); scheme_size = os.path.getsize('${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/scheme.boot'); scm_size = os.path.getsize('${CMAKE_CURRENT_SOURCE_DIR}/print-operation.scm'); petite_data = open('${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.cpp').read().replace('static const unsigned char', 'extern \"C\" const unsigned char'); scheme_data = open('${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.cpp').read().replace('static const unsigned char', 'extern \"C\" const unsigned char'); scm_data = open('${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.cpp').read().replace('static const unsigned char', 'extern \"C\" const unsigned char'); merged = '#include <cstddef>\\n' + petite_data + '\\nextern \"C\" const size_t petite_boot_size = ' + str(petite_size) + ';\\n\\n' + scheme_data + '\\nextern \"C\" const size_t scheme_boot_size = ' + str(scheme_size) + ';\\n\\n' + scm_data + '\\nextern \"C\" const size_t print_operation_scm_size = ' + str(scm_size) + ';\\n'; open('${CMAKE_CURRENT_BINARY_DIR}/ChezBootEmbedded.cpp', 'w').write(merged)"
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_SOURCE_DIR}/cmake/merge-embedded-files.py
+          ${CMAKE_CURRENT_BINARY_DIR}/ChezBootEmbedded.cpp
+          ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.cpp:${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/petite.boot:petite_boot_size
+          ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.cpp:${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/scheme.boot:scheme_boot_size
+          ${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.cpp:${CMAKE_CURRENT_SOURCE_DIR}/print-operation.scm:print_operation_scm_size
   COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.cpp ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.cpp ${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.cpp
-  DEPENDS ChezScheme ${CMAKE_CURRENT_SOURCE_DIR}/print-operation.scm
+  DEPENDS ChezScheme
+          ${CMAKE_CURRENT_SOURCE_DIR}/print-operation.scm
+          ${CMAKE_SOURCE_DIR}/cmake/merge-embedded-files.py
   COMMENT "Embedding Chez boot files and Scheme code as C arrays"
   VERBATIM
 )
