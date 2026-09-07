@@ -53,7 +53,7 @@
 //   --hipsr-main-graph-abi
 //   --generate-interface
 void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
-                                     const HipsrPipelineOptions & /*options*/) {
+                                     const HipsrPipelineOptions &options) {
   pm.addPass(createAddContextArgPass());
   pm.addPass(createConvertOnnxToHipsrPass());
   pm.addNestedPass<func::FuncOp>(createPopulateShapeRegionPass());
@@ -90,7 +90,9 @@ void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
   pm.addNestedPass<func::FuncOp>(
       bufferization::createOptimizeAllocationLivenessPass());
 
-  pm.addPass(createHipsrExternalizeConstantsPass());
+  HipsrExternalizeConstantsPassOptions extOpts;
+  extOpts.constantsFile = options.constantsFile;
+  pm.addPass(createHipsrExternalizeConstantsPass(extOpts));
 
   pm.addPass(hip::createAssignOpStateSlotsPass());
   pm.addPass(hip::createGenerateOpStateInitPass());
@@ -112,6 +114,7 @@ void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
   pm.addPass(createMainGraphAbiPass());
 
   mlir::hip::CompilationOptionsT compOpts;
+  compOpts.constants_file = options.constantsFile;
   pm.addPass(hip::createGenerateInterfacePass(compOpts));
 }
 
