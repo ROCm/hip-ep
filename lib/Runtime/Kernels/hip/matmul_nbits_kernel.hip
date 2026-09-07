@@ -2630,7 +2630,7 @@ hipdnn_wmma_f32_16x16x16_f16_unavailable(half16, half16, float8 c) {
  * gfx12 retired s_barrier for the s_barrier_signal/s_barrier_wait pair, so the
  * asm does not assemble there and the arch falls back to __syncthreads(). */
 #if defined(__HIP_DEVICE_COMPILE__) && defined(__AMDGCN__) &&                   \
-    !defined(__GFX12__)
+    !defined(__GFX12__) && !defined(__GFX13__)
 #define HIPDNN_LDS_BARRIER()                                                    \
     __asm__ __volatile__("s_waitcnt lgkmcnt(0)\n\ts_barrier" ::: "memory")
 #else
