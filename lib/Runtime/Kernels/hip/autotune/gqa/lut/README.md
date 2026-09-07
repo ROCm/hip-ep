@@ -1,122 +1,105 @@
 # GQA offline autotune LUTs
 
-`gfx1151.json` is the reviewable source; `gfx1151.fb` is the FlatBuffer the runtime
-loads. Rows are generated from measurement, never edited by hand:
+`gfx1151.json` is the reviewable source; `gfx1151.fb` is the FlatBuffer the DLL
+embeds (see `../README.md`, "Where it lives"). Points are generated from
+measurement, never edited by hand.
+
+The full pipeline is `../scripts/update_lut.py`:
 
 ```bash
-# from RdpCapture/ops_analyze/gqa -- see that directory for the full pipeline
-python tools/build_lut.py --store --prune-tolerance 1.02 \
-    --selection data/gqa_lut_selection.csv \
-    --json ../../../hip-ep/lib/Runtime/Kernels/hip/autotune/gqa/lut/gfx1151.json
+SCRIPTS=lib/Runtime/Kernels/hip/autotune/gqa/scripts
+
+# 1. Enumerate the shapes to measure (writes lut/shapes_gfx1151.json, config=TBD).
+python $SCRIPTS/update_lut.py plan
+
+# 2. Sweep them on the GPU (writes scripts/data/*_best.csv).
+#    GPU only -- run it when the card is idle, one sweep at a time.
+python $SCRIPTS/update_lut.py measure --sweep <build>/.../gqa_autotune_sweep.exe
+
+# 3. Build the JSON from the winners: dedupe configs, one point per shape.
+python $SCRIPTS/update_lut.py build
+
+# 4. Compile to the FlatBuffer the DLL embeds.
+python $SCRIPTS/update_lut.py compile --flatc flatc
 ```
 
-These are the flags the shipped table was built with, and they reproduce it byte for
-byte. `--store` reads every reading ever taken, keyed on the shape rather than on the
-grid that asked for it, and takes only those from the current timing harness and the
-current version of each kernel; passing result CSVs with `--hipevent` instead is for
-looking at a fresh sweep before it has been ingested. **After a kernel change this
-command alone is not enough** — see `../README.md`, "Keeping it current".
+`build` reads `data/*_best.csv` (each row is a measured shape plus its winning
+`cfg_*` columns), collects the distinct configs into `configs[]`, and emits one
+`points[]` entry per shape with a 1-byte `config` index and literal numeric dims
+(no bucketing — the nearest-neighbour metric uses the real distance), plus the
+fixed per-`(phase, head_dim)` `fallbacks[]`. The five `weight_*` fields default
+to 1.0.
 
-Check the JSON before packing it. `flatc` validates field names and enum spellings
-and nothing else: a duplicate key is not an error (the loader keeps whichever it
-parsed last) and neither is a row `rowConsistent()` will refuse, and both are silent
-row loss.
+It then **prunes saturated points**: within each exact-geometry group it drops a
+point whenever every measured coordinate in the group still resolves to the same
+`(config, splits)` without it — i.e. a run of lengths that share a winner (a
+decode split count that has saturated, or a prefill config that barely depends on
+`seq_kv`) collapses to its endpoints, while every boundary where the answer
+changes is kept. This is the nearest-neighbour analogue of the old tier table's
+bucketing; it is answer-preserving on every measured shape (verified by replay in
+`build`) and roughly halves the point count and the `.fb`.
 
-```bash
-python tools/validate_lut_json.py \
-    --fbs ../../../hip-ep/lib/Runtime/Kernels/hip/autotune/gqa/gqa_autotune.fbs \
-    --json ../../../hip-ep/lib/Runtime/Kernels/hip/autotune/gqa/lut/gfx1151.json
-```
-
-Then, from this directory:
+**`compile` is just `flatc`** against the schema one level up:
 
 ```bash
 flatc --binary --strict-json -o /tmp ../gqa_autotune.fbs gfx1151.json
 cp /tmp/gfx1151.bin gfx1151.fb
 ```
 
-Nothing has to be kept in sync by hand any more: the bucket ladder, the window and
-parallelism classes and the legal config names are all enums in
-`../gqa_autotune.fbs`, and `tools/lut_schema.py` reads them from there and checks
-that the ladder is the sequence `seqBucket()` computes. The generator cannot name a
-bucket the runtime does not produce.
+`flatc` validates field names and enum spellings and nothing else — a point whose
+config kind does not match its phase, or whose categorical key is `Any`, is not a
+`flatc` error. Those are dropped at *load* by `pointConsistent()`, and silent
+coverage loss, so `test-gqa-autotune` loads this `.fb` and asserts
+`hip_gqa_autotune_invalid_points() == 0`. Run that test after regenerating.
 
-Compatibility:
+**Do not use `update_lut.py --rdpcapture`.** That path delegates to RdpCapture's
+`build_lut.py`, which still emits the old tier schema; this loader rejects it. The
+standalone best-csv path above is the supported one.
 
-- GPU architecture: `gfx1151`
-- HIP runtime version: `70151803` (`hipcc 7.1.51803`)
-- GQA kernel ABI: `gqa-v1`
-- LUT schema version: **5**
-- KV-cache format: rows are `kv_dtype = Any`; only fp16 has been measured
+## Compatibility gates
 
-Schema 5 is not backward compatible, and the break is the point: a version-4 row
-carries exact head counts, an exact batch and a `max_seq`, which this loader has no
-field for. An older file is rejected with a message rather than loaded with rows
-quietly dropped.
+`compatible()` in `../gqa_autotune.cpp` rejects the whole table on any of these; a
+mismatch is a loud rejection (fall to heuristic) rather than a silently wrong pick:
+
+- **GPU architecture** — must equal the running device, e.g. `gfx1151`.
+- **LUT schema version** — **9** (the nearest-neighbour layout: `configs[]` /
+  `points[]` / `fallbacks[]`, `file_identifier "GQAL"`, 16-byte points). Not
+  compatible with the old tier files (they carried buckets and per-field
+  wildcards this loader has no field for).
+- **GQA kernel ABI** — `gqa-v3`. Bumped whenever a config knob's meaning changes,
+  so a stale `.fb` swept against different kernels is rejected, not misread.
+- **ROCm/HIP version** — advisory: a mismatch warns but still loads.
+- **KV-cache dtype** — points are `Fp16` today; the schema reserves `Int8` for the
+  W4A8 decode path, so adding it is a regeneration, not a schema break.
 
 ## What the table covers
 
 The fused decode path admits **heads-per-group ∈ {1,2,3,4,5,8,16}** at
-**head_dim ∈ {64,128,256}** (`flash_decode_geometry_ok` in `real/gqa.cpp`) — 21
-pairs, a closed set — and all 21 are measured. That is the coverage claim worth
-making: every geometry that can reach this table has rows keyed on its own pair, so
-a model with an unusual q:kv ratio does not fall to the last resort for being
-unusual. A ratio outside the set (Qwen2.5-7B's 28:4, heads-per-group 7) never
-reaches the fused decode path at all.
+**head_dim ∈ {64,128,256}** (`flash_decode_geometry_ok` in `real/gqa.cpp`). The
+sweep measures the production model geometries plus, for each, the multi-query
+floor (`G = 1`) so the same-hpg fuzzy search always lands on something measured.
+Prefill kernels are templated on `head_dim` alone, so a prefill config is nearly
+geometry- and KV-length-independent and needs far fewer points.
 
-| head_dim | heads-per-group measured, as `H:G` |
-|---|---|
-| 64 | 1 `8:8` `32:32`, 2 `8:4` `16:8`, 3 `6:2` `12:4` `24:8`, 4 `4:1` `16:4` `32:8`, 5 `5:1` `20:4` `40:8`, 8 `8:1` `64:8`, 16 `16:1` `32:2` |
-| 128 | 1 `4:4` `16:16` `32:32` `40:40`, 2 `4:2` `16:8` `32:16` `64:32`, 3 `6:2` `12:4` `24:8`, 4 `8:2` `16:4` `32:8` `40:10`, 5 `5:1` `20:4` `40:8`, 8 `8:1` `64:8` `128:16`, 16 `16:1` `32:2` `64:4` |
-| 256 | 1 `8:8` `16:16`, 2 `8:4` `16:8` `32:16`, 3 `6:2` `12:4` `24:8`, 4 `8:2` `16:4` `24:6`, 5 `5:1` `20:4` `40:8`, 8 `8:1` `16:2` `24:3` `48:6`, 16 `32:2` `64:4` |
+The current `gfx1151` table is schema 9 / `gqa-v3`: 18 configs, 1614 points and 6
+per-`(phase, head_dim)` fallbacks, over the model geometries at lengths from 128
+to 65536, batch 1. The points are the saturation-pruned survivors of ~3200
+measured shapes (the rest were reconstructable by nearest-neighbour and dropped).
+A sliding window is folded into the scanned length (`effective_len`) at query
+time, so the schema has no window field and the table needs no separate windowed
+rows. Every production geometry resolves `Exact` or short-distance `Nearest`; an
+unmeasured length resolves to its nearest measured neighbour rather than the
+heuristic.
 
-Prefill needs much less of that: its kernels are templated on `head_dim` alone, so
-most of its rows are keyed on lengths and answer any geometry. It is not none —
-adding MHA and heads-per-group 16 to the grid put 58 v5 and 73 v7 rows on the
-heads-per-group tier, where the ten original geometries (all between 2 and 8) had
-shown nothing. v8 stays a single row: `ND4_MT1_BKV32` wins all 599 of its measured
-shapes across seven geometries.
-
-Each pair is measured at both ends of the **parallelism axis** (`batch*num_heads`),
-which is the axis a new model actually moves along. The floor is the pair's smallest
-possible geometry — `H = heads-per-group, G = 1`, multi-query attention — and the
-ceiling comes from batch 32 on the largest head counts, so a request always has a row
-at or below its own parallelism for the probe to walk down to. Scoring the table on
-ten geometries at head counts nothing was measured on puts decode within 6.5% of
-optimum by total time.
-
-Other axes:
-
-- **Lengths** at every bucket label from 128 to 65536 plus points inside each
-  interval (1.03, 1.25, 1.5, 1.75 of each edge). Prefill `seq_q` stops at 4096,
-  since `seq_q` is the prefill chunk and a single-shot 64 k prefill is ~13 s per
-  layer on this part.
-- **Batch** at 1, 2, 3, 4, 8, 16 and 32, keyed both through `batch*num_heads` and,
-  where measurement says the factors are not interchangeable, as a batch class of
-  its own.
-- **Sliding window** for v5 prefill at 128 only. `window_ok` in `real/gqa.cpp` keeps
-  windowed decode off the fused path entirely, so rows for it would be unreachable.
-
-## What it costs
-
-See `RdpCapture/ops_analyze/gqa/capture_autotune_lut.md` for the numbers, how they
-were measured, and the design alternatives that were measured and rejected. The
-reviewable workbook is `RdpCapture/ops_analyze/gqa/GQA_LUT_Capture.xlsx`, where green
-marks the config that shipped for each shape.
-
-Two things about reading the per-shape resolution are worth knowing here. Landing on
-a coarse tier is not a gap: rows that repeat what a coarser row already says are
-pruned, so on a measured geometry a `Fallback` hit means measurement found nothing
-finer to say — the whole prefill v8 policy is one row, because `ND4_MT1_BKV32` won
-every one of 465 measured v8 shapes. And `Heuristic` is not a tier: it means no
-table loaded.
+`../scripts/update_lut.py plan` prints the exact shape list, and `GEOMETRIES` in
+that script is the source of truth for which geometries are swept. To widen
+coverage, add a geometry there and re-run the pipeline; nothing already measured is
+invalidated.
 
 ## Packaging
 
-```text
-gqa_autotune_lut=/path/to/lib/Runtime/Kernels/hip/autotune/gqa/lut/gfx1151.fb
-```
-
-The schema (`../gqa_autotune.fbs`) and the code that reads these tables
-(`../gqa_autotune.cpp`) sit one level up; see `../README.md` for the probe order and
-what is in each key.
+The `.fb` is embedded into `custom_kernels_<arch>` at build time by
+`lib/Runtime/Kernels/CMakeLists.txt` (pure-CMake `file(READ ... HEX)`), so there is
+no separate packaging step and no runtime file path. The schema
+(`../gqa_autotune.fbs`) and the loader/resolver (`../gqa_autotune.cpp`) sit one
+level up; see `../README.md` for how a config is resolved.

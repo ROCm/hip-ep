@@ -51,10 +51,11 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
 
   auto *fileSystem = static_cast<morphizen::FileSystem *>(fs);
 #if defined(HIPDNN_EP_REAL_RUNTIME)
-  // LUT loading is independent of constants metadata. Keep it before the
-  // metadata early returns so constant-free models still get lookup-only GQA.
-  (*out_state)->gqa_autotune_policy =
-      hipdnn_ep::gqa_autotune_create(fileSystem);
+  // The GQA autotune table is embedded in custom_kernels_<arch> now, so the
+  // policy is created by an exported DLL shim and no longer needs a FileSystem.
+  // Kept before the metadata early returns so constant-free models still get
+  // lookup-only GQA.
+  (*out_state)->gqa_autotune_policy = hip_gqa_autotune_create();
 #endif
 
   if (!metadata_blob || blob_size == 0) {
@@ -688,7 +689,7 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   // Cleanup in reverse order of initialization (LIFO)
 
 #if defined(HIPDNN_EP_REAL_RUNTIME)
-  hipdnn_ep::gqa_autotune_destroy(state->gqa_autotune_policy);
+  hip_gqa_autotune_destroy(state->gqa_autotune_policy);
   state->gqa_autotune_policy = nullptr;
 #endif
 

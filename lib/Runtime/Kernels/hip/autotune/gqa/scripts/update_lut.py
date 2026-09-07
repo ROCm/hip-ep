@@ -7,10 +7,11 @@
 
 """Update the GQA autotune LUT from fresh measurements.
 
-Three steps, run individually or all at once:
+Steps, run individually or all at once:
 
+    python update_lut.py plan             # list shapes to measure -> shapes_gfx1151.json (config=TBD)
     python update_lut.py measure          # sweep GPU, write CSVs to --data
-    python update_lut.py build            # CSVs -> gfx1151.json
+    python update_lut.py build            # *_best.csv -> gfx1151.json (dedup + saturation-prune)
     python update_lut.py compile          # gfx1151.json -> gfx1151.fb (needs flatc)
     python update_lut.py all              # measure + build + compile
 
@@ -20,26 +21,33 @@ The sweep executable must be built first:
 Measurement data is written to --data (default: ./scripts/data/).
 The LUT files live in ./lut/ relative to this script's parent directory.
 
-Optional: point --rdpcapture at RdpCapture/ops_analyze/gqa to use the full
-measurement store (deduplication, outlier repair, prune-tolerance tuning).
-Without it, build uses only the CSVs written by the latest measure run.
+The supported build is the standalone one (build reads the *_best.csv the sweep
+wrote and emits the nearest-neighbour schema this loader expects).
+
+Do NOT use --rdpcapture yet: that path delegates to RdpCapture's build_lut.py,
+which still emits the old tier schema (buckets + per-field wildcards) that
+gqa_autotune.cpp rejects. The flag is kept for when build_lut.py is ported to the
+new configs[]/points[] format.
 """
 import argparse
 import csv
 import json
-import os
+import math
 import subprocess
 import sys
 import tempfile
-from collections import defaultdict, OrderedDict
+from collections import OrderedDict
 from pathlib import Path
 
 HERE = Path(__file__).parent
 LUT_DIR = HERE.parent / 'lut'
 FBS_FILE = HERE.parent / 'gqa_autotune.fbs'
-SWEEP_EXE = HERE.parent.parent.parent.parent.parent / 'test' / 'example' / 'gqa' / 'autotune' / 'build' / 'gqa_autotune_sweep.exe'
+SWEEP_EXE = (HERE.parent.parent.parent.parent / 'test' / 'example' / 'gqa' /
+             'autotune' / 'build' / 'gqa_autotune_sweep.exe')
 
-SCHEMA_VERSION = 7  # bumped: prefill Length/HeadGroup/ExactHeadGroup rows now use seq_kv=Any
+# Defined again (with KERNEL_ABI) in the build section below; kept here only so
+# the module reads top-down. Both are the same value.
+SCHEMA_VERSION = 9
 
 # All measured geometries: (H, G, d, sink, group, prefill_kernel)
 # Every entry becomes a row in the decode LUT; entries with a prefill_kernel
@@ -113,50 +121,12 @@ GEOMETRIES = [
     (64,  4, 128,  0, 'hpg16-highpar',      'prefill_v7'),
 ]
 
-# (H, G) pairs with an ExactHeadGroup enum entry -- mirrors GqaHeadCountClass in .fbs
-HEAD_COUNT_CLASS = {
-    ( 8,  4): 'H8_G4',
-    (16,  2): 'H16_G2',
-    (16,  4): 'H16_G4',
-    (24,  4): 'H24_G4',
-    (32,  8): 'H32_G8',
-    (32, 32): 'H32_G32',
-    (40,  8): 'H40_G8',
-    (40, 10): 'H40_G10',
-    (64,  8): 'H64_G8',
-}
-
 PHASE_OF_KERNEL = {
     'flash_decode': 'Decode',
     'prefill_v5': 'PrefillV5',
     'prefill_v7': 'PrefillV7',
     'prefill_v8': 'PrefillV8',
 }
-
-SEQ_BUCKETS = [1,2,3,4,6,8,12,16,24,32,48,64,96,128,192,256,384,512,
-               768,1024,1280,1536,1792,2048,2560,3072,3584,4096,
-               5120,6144,7168,8192,10240,12288,14336,16384,
-               20480,24576,28672,32768,40960,49152,57344,65536]
-
-
-def seq_bucket(length):
-    for label in SEQ_BUCKETS:
-        if length <= label:
-            return 'S' + str(label)
-    return 'S' + str(SEQ_BUCKETS[-1])
-
-
-def head_dim_class(d):
-    return 'D' + str(d) if d in (64, 128, 256) else 'Any'
-
-
-def par_class(batch, heads):
-    work = max(1, batch) * max(1, heads)
-    for p in [1,2,4,8,16,32,64,128,256,512,1024]:
-        if work <= p:
-            return 'P' + str(p)
-    return 'P1024'
-
 
 # ---------------------------------------------------------------------------
 # measure
@@ -218,25 +188,143 @@ def run_measure(args):
     print('[measure] done -- results in ' + str(data_dir))
 
 
-def _write_builtin_shapes(data_dir, phase):
-    """Fallback: write simple decode shape grid from GEOMETRIES."""
-    BOUNDARIES = [128,256,512,1024,2048,4096,8192,16384,32768,65536]
-    paths = []
-    for ph in (['decode', 'prefill'] if phase == 'both' else [phase]):
-        if ph != 'decode':
-            print('[measure] prefill shape generation requires --rdpcapture; skipping')
+# ---------------------------------------------------------------------------
+# Coverage grid: the shapes to measure. One place defines what the sweep runs
+# and what the plan manifest lists.
+#
+#   decode  : every model geometry x a length ladder (octave boundaries plus
+#             interior points, since a generation loop's seq_kv is essentially
+#             never a power of two -- the nearest-neighbour metric then answers
+#             any length between two measured ones), batch 1, window folded into
+#             the scanned length so no separate windowed rows are needed.
+#   prefill : every model geometry x chunk size (seq_q) x a short and a long KV.
+#             The config is largely seq_kv-independent above the short end, so
+#             two KV points per (geometry, seq_q) bracket it.
+# ---------------------------------------------------------------------------
+SHAPE_FIELDS = ['id', 'group', 'phase', 'B', 'H', 'G', 'd', 'sq', 'skv',
+                'max_seq', 'window', 'sink', 'grid_role', 'note']
+
+DECODE_BOUNDARIES = [128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
+INTERIOR_FRACTIONS = [1.03, 1.25, 1.5, 1.75]
+PREFILL_SQ = [128, 256, 512, 1024, 2048, 4096]
+PREFILL_SKV = [128, 65536]
+
+VARIANT_OF_HEAD_DIM = {64: 'PrefillV5', 128: 'PrefillV7', 256: 'PrefillV8'}
+
+
+def _interior(lo, hi):
+    out = []
+    for fr in INTERIOR_FRACTIONS:
+        v = int(round(lo * fr))
+        if lo < v < hi:
+            out.append(v)
+    return sorted(set(out))
+
+
+def _decode_lengths():
+    lens = set(DECODE_BOUNDARIES)
+    for lo, hi in zip(DECODE_BOUNDARIES, DECODE_BOUNDARIES[1:]):
+        lens.update(_interior(lo, hi))
+    return sorted(lens)
+
+
+def _grid_shapes():
+    """Canonical list of shapes to measure, as sweep-CSV row dicts."""
+    shapes = []
+    lengths = _decode_lengths()
+    di = 0
+    for H, G, d, sink, group, _kernel in GEOMETRIES:
+        for skv in lengths:
+            di += 1
+            shapes.append(dict(
+                id='D{:04d}'.format(di), group=group, phase='decode', B=1,
+                H=H, G=G, d=d, sq=1, skv=skv, max_seq=skv, window=-1,
+                sink=sink,
+                grid_role='boundary' if skv in DECODE_BOUNDARIES else 'interior',
+                note=''))
+    pi = 0
+    for H, G, d, sink, group, _kernel in GEOMETRIES:
+        for sq in PREFILL_SQ:
+            for skv in PREFILL_SKV:
+                if skv < sq:
+                    continue
+                pi += 1
+                shapes.append(dict(
+                    id='P{:04d}'.format(pi), group=group, phase='prefill', B=1,
+                    H=H, G=G, d=d, sq=sq, skv=skv, max_seq=skv, window=-1,
+                    sink=sink, grid_role='boundary', note=''))
+    return shapes
+
+
+def _shape_to_tbd_point(s):
+    """A grid shape as a table point with the config still to be measured."""
+    if s['phase'] == 'decode':
+        phase, seq_q, seq_kv = 'Decode', 1, s['skv']
+    else:
+        phase = VARIANT_OF_HEAD_DIM[s['d']]
+        seq_q, seq_kv = s['sq'], s['skv']
+    return OrderedDict([
+        ('phase', phase),
+        ('head_dim', 'D{}'.format(s['d'])),
+        ('kv_dtype', 'Fp16'),
+        ('num_heads', s['H']),
+        ('kv_num_heads', s['G']),
+        ('batch', s['B']),
+        ('seq_q', seq_q),
+        ('seq_kv', seq_kv),
+        ('config', 'TBD'),
+        ('splits', 'TBD'),
+    ])
+
+
+def run_plan(args):
+    """Write the shapes-to-measure manifest: every planned point with its config
+    marked TBD. This is the coverage plan a sweep fills in; `build` produces the
+    real table with configs resolved from the measurements."""
+    shapes = _grid_shapes()
+    points = [_shape_to_tbd_point(s) for s in shapes]
+    # De-dup on the point key (a geometry can repeat a length across groups).
+    seen, uniq = set(), []
+    for p in points:
+        key = (p['phase'], p['head_dim'], p['num_heads'], p['kv_num_heads'],
+               p['batch'], p['seq_q'], p['seq_kv'])
+        if key in seen:
             continue
-        out = data_dir / 'shapes_decode.csv'
+        seen.add(key)
+        uniq.append(p)
+    uniq.sort(key=lambda p: (p['phase'], p['head_dim'], p['num_heads'],
+                             p['kv_num_heads'], p['batch'], p['seq_q'],
+                             p['seq_kv']))
+    out = LUT_DIR / ('shapes_gfx' + args.arch + '.json')
+    with open(out, 'w', encoding='utf-8') as f:
+        f.write('{\n')
+        f.write(' "note": "GQA shapes to measure. config/splits = TBD until a '
+                'sweep fills them in; run update_lut.py measure then build.",\n')
+        f.write(' "schema_version": {},\n'.format(SCHEMA_VERSION))
+        f.write(' "gpu_arch": "gfx{}",\n'.format(args.arch))
+        f.write(' "kernel_abi": "{}",\n'.format(KERNEL_ABI))
+        f.write(' "points": [\n')
+        f.write(',\n'.join('  ' + json.dumps(p, sort_keys=True) for p in uniq))
+        f.write('\n ]\n}\n')
+    n_dec = sum(1 for p in uniq if p['phase'] == 'Decode')
+    print('[plan] {} shapes ({} decode, {} prefill) -> {}'.format(
+        len(uniq), n_dec, len(uniq) - n_dec, out))
+
+
+def _write_builtin_shapes(data_dir, phase):
+    """Write the coverage grid (decode + prefill) to sweep CSVs."""
+    paths = []
+    phases = ['decode', 'prefill'] if phase == 'both' else [phase]
+    shapes = _grid_shapes()
+    for ph in phases:
+        rows = [s for s in shapes if s['phase'] == ph]
+        out = data_dir / ('shapes_' + ph + '.csv')
         with open(out, 'w', newline='') as f:
             w = csv.writer(f)
-            w.writerow(['id','group','phase','B','H','G','d','sq','skv',
-                        'max_seq','window','sink','grid_role','note'])
-            idx = 1
-            for H, G, d, sink, group, _ in GEOMETRIES:
-                for skv in BOUNDARIES:
-                    w.writerow(['D{:04d}'.format(idx), group, 'decode', 1,
-                                H, G, d, 1, skv, skv, -1, sink, 'boundary', ''])
-                    idx += 1
+            w.writerow(SHAPE_FIELDS)
+            for s in rows:
+                w.writerow([s[k] for k in SHAPE_FIELDS])
+        print('[measure] {}: {} shapes -> {}'.format(ph, len(rows), out))
         paths.append(out)
     return paths
 
@@ -245,271 +333,325 @@ def _write_builtin_shapes(data_dir, phase):
 # build
 # ---------------------------------------------------------------------------
 
-def run_build(args):
-    data_dir = Path(args.data)
 
+# ---------------------------------------------------------------------------
+# build: measured *_best.csv -> new-format lut/<arch>.json
+#
+# The table follows the matmul_nbits layout: a de-duplicated `configs` list plus
+# `points` that reference a config by 1-byte index, so thousands of measured
+# shapes cost one config byte each instead of inlining the knobs. A lookup
+# matches the categorical key (phase, head_dim, kv_dtype) exactly, then takes the
+# nearest measured point in log space over the numeric dims (num_heads,
+# kv_num_heads, batch, seq_q, seq_kv); see gqa_autotune.cpp.
+# ---------------------------------------------------------------------------
+
+SCHEMA_VERSION = 9
+KERNEL_ABI = 'gqa-v3'
+ROCM_VERSION = 70151803
+
+HEAD_DIM_CLASS = {64: 'D64', 128: 'D128', 256: 'D256'}
+
+
+def _int(row, key, default=0):
+    try:
+        return int(row.get(key, ''))
+    except (TypeError, ValueError):
+        return default
+
+
+def _config_and_splits(row):
+    """(config-dict, splits) for a *_best.csv row, or (None, 0) if unusable.
+
+    A config carries every knob field (the .fbs struct has no defaults), with the
+    ones a variant does not use left at 0. Decode's split count is per-point, not
+    part of the config, because the runtime clamps it per request.
+    """
+    kernel = row.get('kernel', '')
+    if kernel == 'flash_decode':
+        cfg = {'kind': 'Decode',
+               'use_wmma': 1 if 'wmma' in row.get('cfg_impl', '').lower() else 0,
+               'bkv': _int(row, 'cfg_BKV', 16) or 16,
+               'm_tiles': 0, 'nw': 0, 'mt': 0, 'nd': 0}
+        return cfg, (_int(row, 'cfg_splits', 1) or 1)
+    if kernel == 'prefill_v5':
+        return {'kind': 'Prefill', 'use_wmma': 0,
+                'bkv': _int(row, 'cfg_BKV', 32) or 32,
+                'm_tiles': _int(row, 'cfg_MT', 1) or 1,
+                'nw': 0, 'mt': 0, 'nd': 0}, 0
+    if kernel == 'prefill_v7':
+        return {'kind': 'Prefill', 'use_wmma': 0,
+                'bkv': _int(row, 'cfg_BKV', 32) or 32, 'm_tiles': 0,
+                'nw': _int(row, 'cfg_NW', 1) or 1,
+                'mt': _int(row, 'cfg_MT', 1) or 1, 'nd': 0}, 0
+    if kernel == 'prefill_v8':
+        return {'kind': 'Prefill', 'use_wmma': 0,
+                'bkv': _int(row, 'cfg_BKV', 32) or 32, 'm_tiles': 0, 'nw': 0,
+                'mt': _int(row, 'cfg_MT', 1) or 1,
+                'nd': _int(row, 'cfg_ND', 2) or 2}, 0
+    return None, 0
+
+
+# Deterministic, always-runnable last resort per (phase, head_dim); mirrors the
+# heuristic in gqa_autotune.cpp so a group with no usable point still launches.
+# Decode uses scalar (valid for every geometry) with a split count the runtime
+# clamps down; prefill uses each variant's safe default.
+def _fallback_specs():
+    return [
+        ('Decode', 'D64', {'kind': 'Decode', 'use_wmma': 0, 'bkv': 16,
+                           'm_tiles': 0, 'nw': 0, 'mt': 0, 'nd': 0}, 32),
+        ('Decode', 'D128', {'kind': 'Decode', 'use_wmma': 0, 'bkv': 16,
+                            'm_tiles': 0, 'nw': 0, 'mt': 0, 'nd': 0}, 32),
+        ('Decode', 'D256', {'kind': 'Decode', 'use_wmma': 0, 'bkv': 16,
+                            'm_tiles': 0, 'nw': 0, 'mt': 0, 'nd': 0}, 32),
+        ('PrefillV5', 'D64', {'kind': 'Prefill', 'use_wmma': 0, 'bkv': 32,
+                             'm_tiles': 1, 'nw': 0, 'mt': 0, 'nd': 0}, 0),
+        ('PrefillV7', 'D128', {'kind': 'Prefill', 'use_wmma': 0, 'bkv': 32,
+                              'm_tiles': 0, 'nw': 1, 'mt': 1, 'nd': 0}, 0),
+        ('PrefillV8', 'D256', {'kind': 'Prefill', 'use_wmma': 0, 'bkv': 32,
+                              'm_tiles': 0, 'nw': 0, 'mt': 1, 'nd': 2}, 0),
+    ]
+
+
+def _cfg_key(cfg):
+    return (cfg['kind'], cfg['use_wmma'], cfg['bkv'], cfg['m_tiles'], cfg['nw'],
+            cfg['mt'], cfg['nd'])
+
+
+_DIST_DIMS = ('num_heads', 'kv_num_heads', 'batch', 'seq_q', 'seq_kv')
+
+
+def _dist2(a, b):
+    """Squared weighted-log2 distance between two points over the numeric dims,
+    mirroring the runtime metric with the shipped weights (all 1.0)."""
+    s = 0.0
+    for dim in _DIST_DIMS:
+        s += math.log2(a[dim] / b[dim]) ** 2
+    return s
+
+
+def _nearest_answer(coord, pool):
+    """(config, splits) of the nearest point to `coord` in `pool`, and whether the
+    result is ambiguous (a differently-answered point sits at the same distance).
+    Ambiguity is treated as unsafe so pruning never depends on the runtime's
+    tie-break order."""
+    eps = 1e-9
+    best_d = None
+    best_ans = None
+    tied = False
+    for q in pool:
+        d = _dist2(coord, q)
+        ans = (q['config'], q['splits'])
+        if best_d is None or d < best_d - eps:
+            best_d, best_ans, tied = d, ans, False
+        elif abs(d - best_d) <= eps and ans != best_ans:
+            tied = True
+    return best_ans, tied
+
+
+def _prune_saturated(points):
+    """Drop points a nearest-neighbour lookup can reconstruct exactly.
+
+    Within each exact-geometry group (phase, head_dim, kv_dtype, num_heads,
+    kv_num_heads, batch) the swept axes are seq_q and seq_kv. A point is removed
+    only when every original coordinate in the group still resolves to the same
+    (config, splits) against the reduced set -- so the answer at every measured
+    shape is unchanged, and a dropped coordinate is served by a neighbour that
+    was measured to want the same config. This is the nearest-neighbour analogue
+    of the old tier table's bucketing: a run of lengths that share a config
+    collapses to its endpoints (e.g. once the decode split count saturates, or
+    since a prefill config barely depends on seq_kv), while every boundary where
+    the answer changes is kept.
+
+    Returns (kept_points, n_removed).
+    """
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for p in points:
+        groups[(p['phase'], p['head_dim'], p['kv_dtype'],
+                p['num_heads'], p['kv_num_heads'], p['batch'])].append(p)
+
+    kept = []
+    removed = 0
+    for _, lst in groups.items():
+        # Fixed reference of every original coordinate's required answer.
+        required = [(p, (p['config'], p['splits'])) for p in lst]
+        # Try interior points first (sorted by the swept axes) so runs collapse
+        # to their endpoints.
+        survivors = sorted(lst, key=lambda p: (p['seq_q'], p['seq_kv']))
+        changed = True
+        while changed:
+            changed = False
+            for p in list(survivors):
+                if len(survivors) == 1:
+                    break
+                trial = [q for q in survivors if q is not p]
+                if all(_nearest_answer(c, trial) == (ans, False)
+                       for c, ans in required):
+                    survivors = trial
+                    removed += 1
+                    changed = True
+        kept.extend(survivors)
+    return kept, removed
+
+
+def _build_from_csvs(data_dir, out_json, arch):
+    """Build gfx<arch>.json (new nearest-neighbour layout) from *_best.csv.
+
+    One point per measured shape, literal dims (no bucketing), configs
+    de-duplicated and referenced by index. Then `_prune_saturated` drops points a
+    nearest-neighbour lookup can reconstruct exactly (saturated length runs),
+    which is answer-preserving on every measured shape and roughly halves the
+    table. Outlier repair is not done here (the sweep's *_best.csv is already the
+    per-shape winner).
+    """
+    configs = []          # list of config dicts
+    cfg_index = {}        # _cfg_key -> index
+
+    def intern(cfg):
+        k = _cfg_key(cfg)
+        if k not in cfg_index:
+            cfg_index[k] = len(configs)
+            configs.append(cfg)
+        return cfg_index[k]
+
+    points = {}           # point-key -> point dict (dedup, last wins)
+    n_rows = 0
+    for csv_path in sorted(Path(data_dir).glob('*_best.csv')):
+        with open(csv_path) as f:
+            for row in csv.DictReader(f):
+                cfg, splits = _config_and_splits(row)
+                if cfg is None:
+                    continue
+                d = _int(row, 'd')
+                if d not in HEAD_DIM_CLASS:
+                    continue
+                H, G, B = _int(row, 'H'), _int(row, 'G'), _int(row, 'B', 1) or 1
+                sq, skv = _int(row, 'sq', 1) or 1, _int(row, 'skv', 1) or 1
+                window = _int(row, 'window', -1)
+                phase = PHASE_OF_KERNEL.get(row.get('kernel', ''))
+                if phase is None or H <= 0 or G <= 0:
+                    continue
+                if phase == 'Decode':
+                    # The window folds into the scanned length: a windowed decode
+                    # does the work of its effective length, which is what the
+                    # runtime queries with.
+                    seq_q = 1
+                    seq_kv = min(skv, window) if window > 0 else skv
+                else:
+                    seq_q, seq_kv = sq, skv
+                cfg_id = intern(cfg)
+                key = (phase, d, H, G, B, seq_q, seq_kv)
+                points[key] = {
+                    'phase': phase, 'head_dim': HEAD_DIM_CLASS[d],
+                    'kv_dtype': 'Fp16', 'config': cfg_id, 'splits': splits,
+                    'num_heads': H, 'kv_num_heads': G, 'batch': B,
+                    'seq_q': seq_q, 'seq_kv': seq_kv}
+                n_rows += 1
+
+    if not points:
+        sys.exit('[build] no usable *_best.csv rows in ' + str(data_dir))
+
+    fallbacks = []
+    for phase, hd, cfg, splits in _fallback_specs():
+        fallbacks.append({'phase': phase, 'head_dim': hd,
+                          'config': intern(cfg), 'splits': splits})
+
+    scalars = OrderedDict([
+        ('schema_version', SCHEMA_VERSION),
+        ('gpu_arch', 'gfx' + arch),
+        ('rocm_version', ROCM_VERSION),
+        ('kernel_abi', KERNEL_ABI),
+        ('model_key', 'update_lut/best-csv'),
+        ('weight_num_heads', 1.0),
+        ('weight_kv_num_heads', 1.0),
+        ('weight_batch', 1.0),
+        ('weight_seq_q', 1.0),
+        ('weight_seq_kv', 1.0),
+    ])
+    # Head counts and batch are ubyte in the schema (packs the point to 16
+    # bytes); fail loudly if a geometry ever exceeds that rather than let flatc
+    # truncate silently.
+    for p in points.values():
+        for dim in ('num_heads', 'kv_num_heads', 'batch'):
+            if p[dim] > 255:
+                sys.exit('[build] {}={} exceeds the ubyte schema field; widen '
+                         'GqaTunePoint.{} and bump schema_version'.format(
+                             dim, p[dim], dim))
+
+    # Drop points a nearest-neighbour lookup reconstructs exactly (saturated
+    # runs), then garbage-collect configs that no surviving point/fallback uses
+    # and renumber the indices so `configs` stays tight.
+    n_before = len(points)
+    kept, n_removed = _prune_saturated(list(points.values()))
+    used = sorted({p['config'] for p in kept}
+                  | {r['config'] for r in fallbacks})
+    remap = {old: new for new, old in enumerate(used)}
+    configs = [configs[old] for old in used]
+    for p in kept:
+        p['config'] = remap[p['config']]
+    for r in fallbacks:
+        r['config'] = remap[r['config']]
+    print('[build] pruned {} saturated points ({} -> {}), {} configs'.format(
+        n_removed, n_before, len(kept), len(configs)))
+
+    point_rows = sorted(kept, key=lambda p: (
+        p['phase'], p['head_dim'], p['num_heads'], p['kv_num_heads'],
+        p['batch'], p['seq_q'], p['seq_kv']))
+
+    # One entry per line (matmul_nbits style): compact enough to keep the file
+    # reviewable and to make a regeneration diff readable, without the blowup of
+    # indent-per-field.
+    with open(out_json, 'w', encoding='utf-8') as f:
+        f.write('{\n')
+        for k in scalars:
+            f.write(' "{}": {},\n'.format(k, json.dumps(scalars[k])))
+        f.write(' "configs": [\n')
+        f.write(',\n'.join('  ' + json.dumps(c, sort_keys=True) for c in configs))
+        f.write('\n ],\n "points": [\n')
+        f.write(',\n'.join('  ' + json.dumps(p, sort_keys=True)
+                           for p in point_rows))
+        f.write('\n ],\n "fallbacks": [\n')
+        f.write(',\n'.join('  ' + json.dumps(r, sort_keys=True)
+                           for r in fallbacks))
+        f.write('\n ]\n}\n')
+    print('[build] {} points ({} rows), {} configs, {} fallbacks -> {}'.format(
+        len(point_rows), n_rows, len(configs), len(fallbacks), out_json))
+
+
+def run_build(args):
+    lut_json = LUT_DIR / ('gfx' + args.arch + '.json')
     if args.rdpcapture:
-        # Delegate to the full build_lut.py pipeline (measurement store, pruning, etc.)
         tools = Path(args.rdpcapture) / 'ops_analyze' / 'gqa' / 'tools'
-        lut_json = LUT_DIR / ('gfx' + args.arch + '.json')
         cmd = [sys.executable, str(tools / 'build_lut.py'),
-               '--store',
-               '--prune-tolerance', str(args.prune_tolerance),
-               '--fbs', str(FBS_FILE),
-               '--arch', args.arch,
+               '--store', '--prune-tolerance', str(args.prune_tolerance),
+               '--fbs', str(FBS_FILE), '--arch', args.arch,
                '--json', str(lut_json)]
         print('[build] ' + ' '.join(cmd))
         subprocess.run(cmd, check=True, cwd=str(tools.parent))
     else:
-        # Standalone: read *_best.csv files from data_dir and build JSON directly
-        lut_json = LUT_DIR / ('gfx' + args.arch + '.json')
-        _build_from_csvs(data_dir, lut_json, args.arch)
-
+        _build_from_csvs(Path(args.data), lut_json, args.arch)
     print('[build] wrote ' + str(lut_json))
 
-
-def _build_from_csvs(data_dir, out_json, arch):
-    """Build gfx<arch>.json directly from *_best.csv measurement files.
-
-    Groups readings by their LUT key, picks the best config per group,
-    and emits Geometry + ExactHeadGroup + HeadGroup + Length + Fallback rows.
-    No pruning or outlier repair -- use --rdpcapture mode for that.
-    """
-    # Load all *_best.csv
-    readings = []
-    for csv_path in sorted(data_dir.glob('*_best.csv')):
-        with open(csv_path) as f:
-            for row in csv.DictReader(f):
-                try:
-                    readings.append({
-                        'phase': row['phase'],
-                        'kernel': row['kernel'],
-                        'B': int(row['B']),
-                        'H': int(row['H']),
-                        'G': int(row['G']),
-                        'd': int(row['d']),
-                        'sq': int(row['sq']),
-                        'skv': int(row['skv']),
-                        'window': int(row['window']),
-                        'sink': int(row['sink']),
-                        'config': row['best_config'],
-                    })
-                except (KeyError, ValueError):
-                    pass
-
-    if not readings:
-        sys.exit('No *_best.csv files found in ' + str(data_dir))
-
-    # Emit rows for each tier
-    rows = []
-    _emit_fallback(rows)
-    _emit_length(readings, rows)
-    _emit_head_group(readings, rows)
-    _emit_exact_head_group(readings, rows)
-    _emit_geometry(readings, rows)
-
-    doc = OrderedDict([
-        ('schema_version', SCHEMA_VERSION),
-        ('gpu_arch', 'gfx' + arch),
-        ('rocm_version', 70151803),
-        ('kernel_abi', 'gqa-v2'),
-        ('model_key', 'update_lut/direct'),
-        ('rows', rows),
-    ])
-    with open(out_json, 'w') as f:
-        json.dump(doc, f, indent=1)
-        f.write('\n')
-
-
-def _config_parts(config_str):
-    """Split 'scalar_SPLITS32' -> ('Scalar', 32) etc."""
-    s = config_str.lower()
-    if '_splits' in s:
-        impl, _, splits = s.partition('_splits')
-        name = {'scalar': 'Scalar', 'wmma': 'Wmma',
-                'wmma_bkv16': 'WmmaBkv16', 'wmma_bkv32': 'WmmaBkv32'}.get(impl, impl)
-        return name, int(splits)
-    # prefill configs
-    name_map = {
-        'mt1_bkv32': 'MT1_BKV32', 'mt2_bkv32': 'MT2_BKV32',
-        'nw2_bkv32_mt1': 'NW2_BKV32_MT1', 'nw4_bkv32_mt1': 'NW4_BKV32_MT1',
-        'nw2_bkv64_mt1': 'NW2_BKV64_MT1', 'nw4_bkv64_mt1': 'NW4_BKV64_MT1',
-        'nw1_bkv32_mt1': 'NW1_BKV32_MT1', 'nw1_bkv64_mt1': 'NW1_BKV64_MT1',
-        'nw1_bkv32_mt2': 'NW1_BKV32_MT2', 'nw2_bkv32_mt2': 'NW2_BKV32_MT2',
-        'nw4_bkv32_mt2': 'NW4_BKV32_MT2', 'nw1_bkv64_mt2': 'NW1_BKV64_MT2',
-        'nw2_bkv64_mt2': 'NW2_BKV64_MT2', 'nw4_bkv64_mt2': 'NW4_BKV64_MT2',
-        'nd2_mt1_bkv16': 'ND2_MT1_BKV16', 'nd2_mt1_bkv32': 'ND2_MT1_BKV32',
-        'nd2_mt1_bkv64': 'ND2_MT1_BKV64', 'nd2_mt2_bkv32': 'ND2_MT2_BKV32',
-        'nd2_mt2_bkv64': 'ND2_MT2_BKV64',
-        'nd4_mt1_bkv16': 'ND4_MT1_BKV16', 'nd4_mt1_bkv32': 'ND4_MT1_BKV32',
-        'nd4_mt2_bkv32': 'ND4_MT2_BKV32',
-        'nd8_mt1_bkv16': 'ND8_MT1_BKV16',
-    }
-    return name_map.get(s, config_str), 0
-
-
-def _best_config(group):
-    """Pick config seen most often (majority vote among best readings)."""
-    counts = defaultdict(int)
-    for r in group:
-        counts[r['config']] += 1
-    return max(counts, key=counts.__getitem__)
-
-
-def _make_row(phase, tier, head_dim, hpg, head_count, par, batch,
-              seq_q, seq_kv, window, config_str):
-    name, splits = _config_parts(config_str)
-    return OrderedDict([
-        ('phase', phase), ('tier', tier), ('kv_dtype', 'Any'),
-        ('head_dim', head_dim), ('hpg', hpg), ('head_count', head_count),
-        ('par', par), ('batch', 'Any'), ('seq_q', seq_q), ('seq_kv', seq_kv),
-        ('window', window), ('config', name), ('splits', splits),
-    ])
-
-
-def _emit_fallback(rows):
-    for phase, d, cfg, splits in [
-        ('Decode', 'D128', 'Scalar', 32), ('Decode', 'D256', 'Scalar', 32),
-        ('Decode', 'D64', 'Scalar', 48),
-        ('PrefillV5', 'D64', 'MT1_BKV32', 0),
-        ('PrefillV7', 'D128', 'NW2_BKV32_MT1', 0),
-        ('PrefillV8', 'D256', 'ND4_MT1_BKV32', 0),
-    ]:
-        rows.append(OrderedDict([
-            ('phase', phase), ('tier', 'Fallback'), ('kv_dtype', 'Any'),
-            ('head_dim', d), ('hpg', 0), ('head_count', 'Any'),
-            ('par', 'Any'), ('batch', 'Any'), ('seq_q', 'Any'), ('seq_kv', 'Any'),
-            ('window', 'Any'), ('config', cfg), ('splits', splits),
-        ]))
-
-
-def _emit_length(readings, rows):
-    groups = defaultdict(list)
-    for r in readings:
-        is_decode = r['kernel'] == 'flash_decode'
-        # decode: key on seq_kv; prefill: key on seq_q (config independent of seq_kv)
-        sq_key  = 'Any'                      if is_decode else seq_bucket(r['sq'])
-        skv_key = seq_bucket(r['skv'])       if is_decode else 'Any'
-        key = (PHASE_OF_KERNEL.get(r['kernel'], r['kernel']),
-               head_dim_class(r['d']),
-               sq_key, skv_key,
-               'NoWindow' if r['window'] <= 0 else 'Any')
-        groups[key].append(r)
-    seen = set()
-    for key, group in groups.items():
-        if key in seen:
-            continue
-        seen.add(key)
-        phase, hd, sq, skv, win = key
-        rows.append(_make_row(phase, 'Length', hd, 0, 'Any', 'Any', 'Any',
-                              sq, skv, win, _best_config(group)))
-
-
-def _emit_head_group(readings, rows):
-    groups = defaultdict(list)
-    for r in readings:
-        if not r['G'] or r['H'] % r['G'] != 0:
-            continue
-        hpg = r['H'] // r['G']
-        is_decode = r['kernel'] == 'flash_decode'
-        sq_key  = 'Any'                if is_decode else seq_bucket(r['sq'])
-        skv_key = seq_bucket(r['skv']) if is_decode else 'Any'
-        key = (PHASE_OF_KERNEL.get(r['kernel'], r['kernel']),
-               head_dim_class(r['d']), hpg,
-               sq_key, skv_key,
-               'NoWindow' if r['window'] <= 0 else 'Any')
-        groups[key].append(r)
-    seen = set()
-    for key, group in groups.items():
-        if key in seen:
-            continue
-        seen.add(key)
-        phase, hd, hpg, sq, skv, win = key
-        rows.append(_make_row(phase, 'HeadGroup', hd, hpg, 'Any', 'Any', 'Any',
-                              sq, skv, win, _best_config(group)))
-
-
-def _emit_exact_head_group(readings, rows):
-    groups = defaultdict(list)
-    for r in readings:
-        hcc = HEAD_COUNT_CLASS.get((r['H'], r['G']))
-        if not hcc:
-            continue
-        if r['H'] % r['G'] != 0:
-            continue
-        hpg = r['H'] // r['G']
-        is_decode = r['kernel'] == 'flash_decode'
-        sq_key  = 'Any'                if is_decode else seq_bucket(r['sq'])
-        skv_key = seq_bucket(r['skv']) if is_decode else 'Any'
-        key = (PHASE_OF_KERNEL.get(r['kernel'], r['kernel']),
-               head_dim_class(r['d']), hpg, hcc,
-               sq_key, skv_key,
-               'NoWindow' if r['window'] <= 0 else 'Any')
-        groups[key].append(r)
-    seen = set()
-    for key, group in groups.items():
-        if key in seen:
-            continue
-        seen.add(key)
-        phase, hd, hpg, hcc, sq, skv, win = key
-        rows.append(_make_row(phase, 'ExactHeadGroup', hd, hpg, hcc, 'Any', 'Any',
-                              sq, skv, win, _best_config(group)))
-
-
-def _emit_geometry(readings, rows):
-    groups = defaultdict(list)
-    for r in readings:
-        if not r['G'] or r['H'] % r['G'] != 0:
-            continue
-        hpg = r['H'] // r['G']
-        par = par_class(r['B'], r['H'])
-        is_decode = r['kernel'] == 'flash_decode'
-        sq_key  = 'Any'                if is_decode else seq_bucket(r['sq'])
-        skv_key = seq_bucket(r['skv']) if is_decode else 'Any'
-        key = (PHASE_OF_KERNEL.get(r['kernel'], r['kernel']),
-               head_dim_class(r['d']), hpg,
-               par, sq_key, skv_key,
-               'NoWindow' if r['window'] <= 0 else 'Any')
-        groups[key].append(r)
-    seen = set()
-    for key, group in groups.items():
-        if key in seen:
-            continue
-        seen.add(key)
-        phase, hd, hpg, par, sq, skv, win = key
-        rows.append(_make_row(phase, 'Geometry', hd, hpg, 'Any', par, 'Any',
-                              sq, skv, win, _best_config(group)))
-
-
-# ---------------------------------------------------------------------------
-# compile
-# ---------------------------------------------------------------------------
 
 def run_compile(args):
     lut_json = LUT_DIR / ('gfx' + args.arch + '.json')
     lut_fb = LUT_DIR / ('gfx' + args.arch + '.fb')
-
     with open(lut_json) as f:
         doc = json.load(f)
-    print('[compile] schema_version={} rows={}'.format(
-        doc.get('schema_version'), len(doc.get('rows', []))))
-
-    flatc = args.flatc
+    print('[compile] schema_version={} configs={} points={}'.format(
+        doc.get('schema_version'), len(doc.get('configs', [])),
+        len(doc.get('points', []))))
     with tempfile.TemporaryDirectory() as tmp:
-        cmd = [flatc, '--binary', '--strict-json',
-               '-o', tmp, str(FBS_FILE), str(lut_json)]
+        cmd = [args.flatc, '--binary', '--strict-json', '-o', tmp,
+               str(FBS_FILE), str(lut_json)]
         print('[compile] ' + ' '.join(cmd))
         subprocess.run(cmd, check=True)
-
-        # flatc names the output after the root_type; find it
         generated = list(Path(tmp).glob('*.bin'))
         if not generated:
             sys.exit('[compile] flatc produced no .bin file')
         import shutil
         shutil.copy(generated[0], lut_fb)
-
-    print('[compile] wrote ' + str(lut_fb) +
-          ' ({} KB)'.format(lut_fb.stat().st_size // 1024))
+    print('[compile] wrote {} ({} KB)'.format(lut_fb, lut_fb.stat().st_size // 1024))
 
 
 # ---------------------------------------------------------------------------
@@ -519,15 +661,16 @@ def run_compile(args):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('command', choices=['measure', 'build', 'compile', 'all'])
+    ap.add_argument('command',
+                    choices=['plan', 'measure', 'build', 'compile', 'all'])
     ap.add_argument('--arch', default='1151', help='GPU arch suffix (default: 1151)')
     ap.add_argument('--data', default=str(HERE / 'data'),
-                    help='Directory for measurement CSVs (default: scripts/data/)')
+                    help='Directory of *_best.csv (default: scripts/data/)')
     ap.add_argument('--sweep', default=str(SWEEP_EXE),
                     help='Path to gqa_autotune_sweep executable')
     ap.add_argument('--rdpcapture', default=None,
-                    help='Path to RdpCapture root. Enables full pipeline: '
-                         'measurement store, outlier repair, prune-tolerance tuning.')
+                    help='RdpCapture root. UNSUPPORTED: build_lut.py still emits '
+                         'the old tier schema; use the standalone build instead.')
     ap.add_argument('--phase', choices=['decode', 'prefill', 'both'], default='both',
                     help='Which phase to measure (default: both)')
     ap.add_argument('--target-ms', type=float, default=40.0,
@@ -543,7 +686,8 @@ def main():
     cmds = ['measure', 'build', 'compile'] if args.command == 'all' else [args.command]
     for cmd in cmds:
         print('\n=== {} ==='.format(cmd))
-        {'measure': run_measure, 'build': run_build, 'compile': run_compile}[cmd](args)
+        {'plan': run_plan, 'measure': run_measure, 'build': run_build,
+         'compile': run_compile}[cmd](args)
 
 
 if __name__ == '__main__':
