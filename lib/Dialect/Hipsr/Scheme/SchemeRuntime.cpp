@@ -85,12 +85,18 @@ void printOperation(const char* opName, int numOperands, int numResults, const c
   if (!scheme_initialized || !g_print_operation)
     return;
 
-  ptr apply = Stop_level_value(Sstring_to_symbol("apply"));
-  ptr args = Scons(Sstring(opName),
-             Scons(Sinteger(numOperands),
-             Scons(Sinteger(numResults),
-             Scons(Sstring(genericForm), Snil))));
-  Scall2(apply, g_print_operation, args);
+  ptr null_sym = Stop_level_value(Sstring_to_symbol("null"));
+  ptr empty_list = Scall0(null_sym);
+
+  ptr arg1 = Sstring(opName);
+  ptr arg2 = Sinteger(numOperands);
+  ptr arg3 = Sinteger(numResults);
+  ptr arg4 = Sstring(genericForm);
+
+  ptr args_list = Scons(arg1, Scons(arg2, Scons(arg3, Scons(arg4, empty_list))));
+
+  ptr apply_proc = Stop_level_value(Sstring_to_symbol("apply"));
+  Scall2(apply_proc, g_print_operation, args_list);
 }
 
 } // namespace hipsr
