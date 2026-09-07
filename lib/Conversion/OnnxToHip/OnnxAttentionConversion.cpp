@@ -329,24 +329,21 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
   // === seqlens_k / total_seq_len ======================================
   //
   // present KV = concat(past, current) along the seq axis, so the present seq
-  // extent is past_seq + current_seq. The current KV token count equals the
-  // query sequence length (Q/K/V share the seq axis); q3 is rank-3
-  // [B, S, hidden], so take S from q3 dim 1. The valid past length is
-  // dim(past_key, 2) (rank-4 BNSH), or 0 when there is no past operand.
-  mlir::Value curSeqIdx =
-      mlir::tensor::DimOp::create(rewriter, loc, q3, 1).getResult();
+  // extent is past_seq + current_seq.
+  mlir::Value curKvSeqIdx =
+      mlir::tensor::DimOp::create(rewriter, loc, k3, 1).getResult();
   mlir::Value pastSeqIdx =
       pastKey
           ? mlir::tensor::DimOp::create(rewriter, loc, pastKey, 2).getResult()
           : mlir::arith::ConstantIndexOp::create(rewriter, loc, 0).getResult();
   mlir::Value totalKvIdx =
-      mlir::arith::AddIOp::create(rewriter, loc, pastSeqIdx, curSeqIdx)
+      mlir::arith::AddIOp::create(rewriter, loc, pastSeqIdx, curKvSeqIdx)
           .getResult();
 
   // seqlens_k[b] = total_seq - 1 (ORT GQA convention total_seq = seqlens_k + 1;
   // the runtime derives past_len = total_seq - sq). Ignored by the runtime on
-  // the bidirectional no-past path (no_causal && no mask), but computed
-  // uniformly here.
+  // the bidirectional no-past path (no_causal with no past operand, where
+  // total_seq is just the KV extent), but computed uniformly here.
   mlir::Value oneIdx =
       mlir::arith::ConstantIndexOp::create(rewriter, loc, 1).getResult();
   mlir::Value totalKvM1Idx =
