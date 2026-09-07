@@ -40,38 +40,45 @@ ExternalProject_Get_Property(ChezScheme SOURCE_DIR)
 set(ChezScheme_SOURCE_DIR "${SOURCE_DIR}")
 
 add_custom_command(
-  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ChezBootEmbedded.cpp
+  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.cpp
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_SOURCE_DIR}/cmake/xxd.py
           --var petite_boot_data
           --output ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.cpp
           ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/petite.boot
+  DEPENDS ChezScheme
+  COMMENT "Embedding petite.boot"
+  VERBATIM
+)
+
+add_custom_command(
+  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.cpp
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_SOURCE_DIR}/cmake/xxd.py
           --var scheme_boot_data
           --output ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.cpp
           ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/scheme.boot
+  DEPENDS ChezScheme
+  COMMENT "Embedding scheme.boot"
+  VERBATIM
+)
+
+add_custom_command(
+  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.cpp
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_SOURCE_DIR}/cmake/xxd.py
           --var print_operation_scm_data
           --output ${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/print-operation.scm
-  COMMAND ${Python3_EXECUTABLE}
-          ${CMAKE_SOURCE_DIR}/cmake/merge-embedded-files.py
-          ${CMAKE_CURRENT_BINARY_DIR}/ChezBootEmbedded.cpp
-          ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.cpp:${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/petite.boot:petite_boot_size
-          ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.cpp:${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/scheme.boot:scheme_boot_size
-          ${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.cpp:${CMAKE_CURRENT_SOURCE_DIR}/print-operation.scm:print_operation_scm_size
-  COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.cpp ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.cpp ${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.cpp
-  DEPENDS ChezScheme
-          ${CMAKE_CURRENT_SOURCE_DIR}/print-operation.scm
-          ${CMAKE_SOURCE_DIR}/cmake/merge-embedded-files.py
-  COMMENT "Embedding Chez boot files and Scheme code as C arrays"
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/print-operation.scm
+  COMMENT "Embedding print-operation.scm"
   VERBATIM
 )
 
 add_library(ChezBoot STATIC
-  ${CMAKE_CURRENT_BINARY_DIR}/ChezBootEmbedded.cpp
+  ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.cpp
+  ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.cpp
+  ${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.cpp
 )
 set_target_properties(ChezBoot PROPERTIES
   POSITION_INDEPENDENT_CODE ON
