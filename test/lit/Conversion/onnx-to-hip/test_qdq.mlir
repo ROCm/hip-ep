@@ -15,7 +15,7 @@
 //     encodes it (the importer maps UINT8 -> ui8, INT8 -> i8, and so on)
 //   - Output init shape follows the input positionally
 //   - INT4 / UINT4, the one case the result type cannot encode: both
-//     directions forward the `packed_int4` marker onto the hip op
+//     directions forward the `packed_bits` marker onto the hip op
 // ============================================================================
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
@@ -81,7 +81,7 @@ module {
 
 // ===== Test 3: DequantizeLinear of a packed INT4 source =====
 // ONNX INT4 imports as i8 at the LOGICAL element count, so nothing in the
-// types distinguishes this from Test 1; only `packed_int4` -- stamped by
+// types distinguishes this from Test 1; only `packed_bits` -- stamped by
 // constant lowering once it saw a half-size buffer -- does, and it has to
 // survive onto the hip op. Both the input and the zero_point are packed, and
 // every shape stays logical.
@@ -89,7 +89,7 @@ module {
 // CHECK-LABEL: func.func @test_dequantize_linear_packed_int4
 // CHECK-SAME:  (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<4096x64xi8>, %[[SCALE:.*]]: tensor<128x64xf16>, %[[ZP:.*]]: tensor<128x64xi8>)
 // CHECK-NEXT:  %[[INIT:.*]] = tensor.empty() : tensor<4096x64xf16>
-// CHECK-NEXT:  %[[Y:.*]] = hip.dequantize_linear(%[[CTX]]) ins(%[[X]], %[[SCALE]] : tensor<4096x64xi8>, tensor<128x64xf16>) zero_point(%[[ZP]] : tensor<128x64xi8>) outs(%[[INIT]] : tensor<4096x64xf16>) {axis = 0 : i64, block_size = 32 : i64, packed_int4} : tensor<4096x64xf16>
+// CHECK-NEXT:  %[[Y:.*]] = hip.dequantize_linear(%[[CTX]]) ins(%[[X]], %[[SCALE]] : tensor<4096x64xi8>, tensor<128x64xf16>) zero_point(%[[ZP]] : tensor<128x64xi8>) outs(%[[INIT]] : tensor<4096x64xf16>) {axis = 0 : i64, block_size = 32 : i64, packed_bits = 4 : i64} : tensor<4096x64xf16>
 // CHECK-NEXT:  return %[[Y]] : tensor<4096x64xf16>
   func.func @test_dequantize_linear_packed_int4(%x: tensor<4096x64xi8>,
                                                 %scale: tensor<128x64xf16>,
@@ -98,7 +98,7 @@ module {
     %y = "onnx.DequantizeLinear"(%x, %scale, %zp) {
       axis = 0 : si64,
       block_size = 32 : si64,
-      packed_int4,
+      packed_bits = 4 : i64,
       onnx_node_name = "DequantizeLinear_int4"
     } : (tensor<4096x64xi8>, tensor<128x64xf16>, tensor<128x64xi8>)
         -> tensor<4096x64xf16>
@@ -106,7 +106,7 @@ module {
   }
 
 // ===== Test 4: QuantizeLinear marked as a packed UINT4 target =====
-// The mirror of Test 3 on the quantize side. No pass stamps `packed_int4`
+// The mirror of Test 3 on the quantize side. No pass stamps `packed_bits`
 // onto a QuantizeLinear yet -- a 4-bit target leaves no trace in the IR the
 // way a half-size constant buffer does -- so the marker is written by hand
 // here to cover the forwarding the rest of the stack depends on. output_dtype
@@ -116,7 +116,7 @@ module {
 // CHECK-LABEL: func.func @test_quantize_linear_packed_uint4
 // CHECK-SAME:  (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<128x64xf32>, %[[SCALE:.*]]: tensor<f32>)
 // CHECK-NEXT:  %[[INIT:.*]] = tensor.empty() : tensor<128x64xui8>
-// CHECK-NEXT:  %[[Y:.*]] = hip.quantize_linear(%[[CTX]]) ins(%[[X]], %[[SCALE]] : tensor<128x64xf32>, tensor<f32>) outs(%[[INIT]] : tensor<128x64xui8>) {axis = 1 : i64, block_size = 0 : i64, packed_int4, precision = 0 : i64, saturate = 1 : i64} : tensor<128x64xui8>
+// CHECK-NEXT:  %[[Y:.*]] = hip.quantize_linear(%[[CTX]]) ins(%[[X]], %[[SCALE]] : tensor<128x64xf32>, tensor<f32>) outs(%[[INIT]] : tensor<128x64xui8>) {axis = 1 : i64, block_size = 0 : i64, packed_bits = 4 : i64, precision = 0 : i64, saturate = 1 : i64} : tensor<128x64xui8>
 // CHECK-NEXT:  return %[[Y]] : tensor<128x64xui8>
   func.func @test_quantize_linear_packed_uint4(%x: tensor<128x64xf32>,
                                                %scale: tensor<f32>)
@@ -125,7 +125,7 @@ module {
       axis = 1 : si64,
       block_size = 0 : si64,
       output_dtype = 21 : si64,
-      packed_int4,
+      packed_bits = 4 : i64,
       saturate = 1 : si64,
       onnx_node_name = "QuantizeLinear_packed_uint4"
     } : (tensor<128x64xf32>, tensor<f32>) -> tensor<128x64xui8>

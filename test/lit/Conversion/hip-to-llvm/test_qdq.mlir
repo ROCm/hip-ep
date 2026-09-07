@@ -34,7 +34,7 @@
 // ===== 1: QuantizeLinear, blocked along axis 1, with zero_point =====
 // The ui8 output must reach the runtime as HIPDNN_EP_DATATYPE_UINT8 = 7, not
 // as INT8 = 5. precision = 16 pins the attribute only QuantizeLinear carries.
-// Without packed_int4, output_bits restates the storage width as 8.
+// Without packed_bits = 4 : i64, output_bits restates the storage width as 8.
 
 // CHECK-LABEL: llvm.func @quantize_linear_blocked
 // CHECK-DAG:   llvm.mlir.constant(16 : i64)
@@ -61,7 +61,7 @@ func.func @quantize_linear_blocked(%ctx: !hip.context,
 // An absent zero_point lowers to llvm.mlir.zero and leaves the signature
 // unchanged. The signless i16 input is ONNX INT16, so it must reach the
 // runtime as HIPDNN_EP_DATATYPE_INT16 = 8; no dimension is 8, so that
-// constant can only come from input_dtype. Without packed_int4, input_bits
+// constant can only come from input_dtype. Without packed_bits = 4 : i64, input_bits
 // restates the storage width, so it is 16 here.
 
 // CHECK-LABEL: llvm.func @dequantize_linear_no_zp
@@ -120,7 +120,7 @@ func.func @dequantize_linear_bad_float(%ctx: !hip.context,
 // -----
 
 // ===== 5: DequantizeLinear, packed INT4, blocked with a packed zero_point ====
-// packed_int4 changes exactly one thing in the ABI: input_bits becomes 4. The
+// packed_bits = 4 changes exactly one thing in the ABI: input_bits becomes 4. The
 // input keeps its i8 element type, so input_dtype stays INT8 = 5, and every
 // shape stays logical -- 4096 elements on the block axis, not the 2048 bytes
 // actually backing them. The zero_point rides the same flag; it is packed too
@@ -140,7 +140,7 @@ func.func @dequantize_linear_packed_int4(%ctx: !hip.context,
       ins(%x, %scale : memref<4096x64xi8, 1>, memref<128x64xf16, 1>)
       zero_point(%zp : memref<128x64xi8, 1>)
       outs(%y : memref<4096x64xf16, 1>)
-      {axis = 0 : i64, block_size = 32 : i64, packed_int4}
+      {axis = 0 : i64, block_size = 32 : i64, packed_bits = 4 : i64}
   return
 }
 
@@ -162,7 +162,7 @@ func.func @dequantize_linear_packed_uint4(%ctx: !hip.context,
   hip.dequantize_linear(%ctx)
       ins(%x, %scale : memref<32x256xui8, 1>, memref<256xf32, 1>)
       outs(%y : memref<32x256xf32, 1>)
-      {axis = 1 : i64, block_size = 0 : i64, packed_int4}
+      {axis = 1 : i64, block_size = 0 : i64, packed_bits = 4 : i64}
   return
 }
 
@@ -181,7 +181,7 @@ func.func @dequantize_linear_packed_int4_bad_width(%ctx: !hip.context,
   hip.dequantize_linear(%ctx)
       ins(%x, %scale : memref<8x128xi16, 1>, memref<f32, 1>)
       outs(%y : memref<8x128xf32, 1>)
-      {axis = 1 : i64, block_size = 0 : i64, packed_int4}
+      {axis = 1 : i64, block_size = 0 : i64, packed_bits = 4 : i64}
   return
 }
 
@@ -206,7 +206,7 @@ func.func @quantize_linear_packed_uint4(%ctx: !hip.context,
       zero_point(%zp : memref<256xui8, 1>)
       outs(%y : memref<32x256xui8, 1>)
       {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
-       saturate = 1 : i64, packed_int4}
+       saturate = 1 : i64, packed_bits = 4 : i64}
   return
 }
 
@@ -223,7 +223,7 @@ func.func @quantize_linear_packed_int4_bad_width(%ctx: !hip.context,
       ins(%x, %scale : memref<8x128xf32, 1>, memref<f32, 1>)
       outs(%y : memref<8x128xi16, 1>)
       {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
-       saturate = 1 : i64, packed_int4}
+       saturate = 1 : i64, packed_bits = 4 : i64}
   return
 }
 

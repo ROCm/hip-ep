@@ -133,11 +133,11 @@ struct QuantizeLinearToHip : public mlir::RewritePattern {
         rewriter, op->getLoc(), mlir::TypeRange{in.resultType}, in.context,
         in.input, in.scale, in.zeroPoint, in.init, axisAttr, blockSizeAttr,
         precisionAttr, saturateAttr);
-    // Nothing stamps `packed_int4` onto a QuantizeLinear yet -- unlike a
-    // packed constant, a 4-bit target leaves no trace in the IR to detect.
+    // Nothing stamps `packed_bits` onto a QuantizeLinear yet -- unlike a
+    // packed constant, a sub-byte target leaves no trace in the IR to detect.
     // Forwarded so the lowering and runtime below are reachable once one does.
-    if (op->hasAttr(kPackedInt4Attr))
-      hipOp->setAttr(kPackedInt4Attr, rewriter.getUnitAttr());
+    if (auto packed = op->getAttrOfType<mlir::IntegerAttr>(kPackedBitsAttr))
+      hipOp->setAttr(kPackedBitsAttr, packed);
     rewriter.replaceOp(op, hipOp->getResults());
     return mlir::success();
   }
@@ -164,8 +164,8 @@ struct DequantizeLinearToHip : public mlir::RewritePattern {
         in.input, in.scale, in.zeroPoint, in.init, axisAttr, blockSizeAttr);
     // Carried over verbatim: constant lowering already decided this, and the
     // types here cannot show it.
-    if (op->hasAttr(kPackedInt4Attr))
-      hipOp->setAttr(kPackedInt4Attr, rewriter.getUnitAttr());
+    if (auto packed = op->getAttrOfType<mlir::IntegerAttr>(kPackedBitsAttr))
+      hipOp->setAttr(kPackedBitsAttr, packed);
     rewriter.replaceOp(op, hipOp->getResults());
     return mlir::success();
   }

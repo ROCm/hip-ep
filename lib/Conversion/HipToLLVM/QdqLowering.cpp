@@ -72,15 +72,24 @@ LogicalResult isDataTypeSupported(Operation *op, Type quantElem, Type floatElem,
 // Anything but 8-bit storage under the flag means the producer and this
 // lowering disagree, which would hand the runtime a stride nothing agreed on.
 FailureOr<int64_t> resolveQuantBits(Operation *op, Type quantElem,
-                                    bool packedInt4,
+                                    int64_t packedBits,
                                     ConversionPatternRewriter &rewriter) {
   unsigned bits = quantElem.getIntOrFloatBitWidth();
-  if (!packedInt4)
+  if (packedBits == 0)
     return static_cast<int64_t>(bits);
   if (bits != 8)
     return rewriter.notifyMatchFailure(
-        op, "packed_int4 requires 8-bit storage for the quantized side");
-  return static_cast<int64_t>(4);
+        op, "packed_bits requires 8-bit storage for the quantized side");
+  // The qdq kernel dispatches on a QuantRange specialization and has one for
+  // PackedInt4 only. A narrower width is representable here - it is what lets
+  // a fold read the payload and hand it to an op that does implement it, such
+  // as hip.matmul_nbits - but it has no kernel of its own to lower into, so
+  // one left standing is reported rather than read at the wrong width.
+  if (packedBits != 4)
+    return rewriter.notifyMatchFailure(
+        op, "only packed_bits = 4 has a qdq kernel; a narrower packing has to "
+            "be folded into an op that unpacks it");
+  return packedBits;
 }
 
 struct QuantizeLinearOpLowering
@@ -107,7 +116,7 @@ struct QuantizeLinearOpLowering
       return failure();
 
     FailureOr<int64_t> outputBits =
-        resolveQuantBits(op, quantElem, op.getPackedInt4(), rewriter);
+        resolveQuantBits(op, quantElem, op.getPackedBits(), rewriter);
     if (failed(outputBits))
       return failure();
 
@@ -185,7 +194,7 @@ struct DequantizeLinearOpLowering
       return failure();
 
     FailureOr<int64_t> inputBits =
-        resolveQuantBits(op, quantElem, op.getPackedInt4(), rewriter);
+        resolveQuantBits(op, quantElem, op.getPackedBits(), rewriter);
     if (failed(inputBits))
       return failure();
 
