@@ -14,14 +14,17 @@ typedef long iptr;
 void Sscheme_init(void (*)(void));
 void Sregister_boot_file_bytes(const char*, const unsigned char*, size_t);
 void Sbuild_heap(const char*, void (*)(void));
+ptr Scall0(ptr);
 ptr Scall1(ptr, ptr);
 ptr Scall2(ptr, ptr, ptr);
-ptr Scall4(ptr, ptr, ptr, ptr, ptr);
+ptr Scall3(ptr, ptr, ptr, ptr);
 ptr Sstring_to_symbol(const char*);
 ptr Stop_level_value(ptr);
 ptr Sinteger(iptr);
 iptr Sinteger_value(ptr);
 ptr Sstring(const char*);
+ptr Scons(ptr, ptr);
+ptr Snil;
 const char* Skernel_version();
 
 extern const unsigned char petite_boot_data[];
@@ -82,11 +85,12 @@ void printOperation(const char* opName, int numOperands, int numResults, const c
   if (!scheme_initialized || !g_print_operation)
     return;
 
-  Scall4(g_print_operation,
-         Sstring(opName),
-         Sinteger(numOperands),
-         Sinteger(numResults),
-         Sstring(genericForm));
+  ptr apply = Stop_level_value(Sstring_to_symbol("apply"));
+  ptr args = Scons(Sstring(opName),
+             Scons(Sinteger(numOperands),
+             Scons(Sinteger(numResults),
+             Scons(Sstring(genericForm), Snil))));
+  Scall2(apply, g_print_operation, args);
 }
 
 } // namespace hipsr
