@@ -136,6 +136,12 @@ struct HipdnnPipelineOptions
 void buildHipdnnPipeline(OpPassManager &pm,
                          const HipdnnPipelineOptions &options);
 
+struct RocMlirPipelineOptions : PassPipelineOptions<RocMlirPipelineOptions> {};
+
+/// Build rocmlirTriton pipeline
+void buildRocMlirPipeline(OpPassManager &pm,
+                          const RocMlirPipelineOptions &options);
+
 /// Register all pipelines with MLIR's global pass registry so they appear
 /// in hip-mlir-opt --help and are usable as single-flag invocations.
 /// Follows the torch-mlir PassPipelineRegistration pattern.

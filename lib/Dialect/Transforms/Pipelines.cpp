@@ -17,6 +17,7 @@
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Func/Transforms/Passes.h"
 #include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Pass/PassRegistry.h"
@@ -521,6 +522,12 @@ void mlir::hip::buildHipdnnPipeline(OpPassManager &pm,
   buildHipToLLVMPipeline(pm, llvmOpts);
 }
 
+void mlir::hip::buildRocMlirPipeline(
+    OpPassManager &pm, const mlir::hip::RocMlirPipelineOptions &options) {
+  pm.addPass(mlir::hip::createFuseROCMlirPass());
+  pm.addPass(func::createDuplicateFunctionEliminationPass());
+}
+
 void mlir::hip::registerHipPipelines() {
   PassPipelineRegistration<OnnxToHipPipelineOptions>(
       "onnx-to-hip-pipeline",
@@ -538,4 +545,7 @@ void mlir::hip::registerHipPipelines() {
   PassPipelineRegistration<HipdnnPipelineOptions>(
       "hipdnn-pipeline", "Complete HIPDNN ONNX→HIP→LLVM→Interface pipeline",
       buildHipdnnPipeline);
+
+  PassPipelineRegistration<RocMlirPipelineOptions>(
+      "rocmlir-pipeline", "RocMLIR pipeline", buildRocMlirPipeline);
 }
