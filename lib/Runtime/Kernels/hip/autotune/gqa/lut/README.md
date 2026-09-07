@@ -58,13 +58,15 @@ quietly dropped.
 
 The fused decode path admits **heads-per-group ∈ {1,2,3,4,5,6,8,16}** at
 **head_dim ∈ {64,128,256}** (`flash_decode_geometry_ok` in `real/gqa.cpp`) — 24
-pairs, a closed set — of which 21 are measured. The three heads-per-group 6 pairs
-are not, so Qwen3.6-27B's 24:4 answers from the tiers below the heads-per-group
-key until the grid is re-run. For the measured 21 the coverage claim holds: every
-geometry that can reach this table has rows keyed on its own pair, so a model with
-an unusual q:kv ratio does not fall to the last resort for being unusual. A ratio
-outside the set (Qwen2.5-7B's 28:4, heads-per-group 7) never reaches the fused
-decode path at all.
+pairs, a closed set. 21 of them have rows that can be relied on. The three
+heads-per-group 6 pairs do not: D64 and D128 have no rows, and the 30 D256 decode
+rows were recorded before the kernel was instantiated for HpG=6, when
+`launchFlashDecodeConfig` had no `case 6` and the dispatch therefore launched no
+producer at all. They must be re-measured before they answer anything. For the
+other 21 the coverage claim holds: every geometry that can reach this table has
+rows keyed on its own pair, so a model with an unusual q:kv ratio does not fall to
+the last resort for being unusual. A ratio outside the set (Qwen2.5-7B's 28:4,
+heads-per-group 7) never reaches the fused decode path at all.
 
 | head_dim | heads-per-group measured, as `H:G` |
 |---|---|
