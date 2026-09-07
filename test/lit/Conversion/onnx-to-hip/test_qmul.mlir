@@ -34,13 +34,13 @@ module {
 // broadcast pre-passes, so the rank-1 rhs must reach hip.qmul unpadded and
 // unpacked -- no collapse_shape/expand_shape around the fused op.
 
-// CHECK-LABEL: func.func @qmul_broadcast
+// CHECK-LABEL: func.func @main_graph
 // CHECK-SAME:  (%[[CTX:.*]]: !hip.context, %[[LHS:.*]]: tensor<1x128x32xi8>, %[[RHS:.*]]: tensor<32xi8>) -> tensor<1x128x32xi8> {
 // CHECK-NEXT:    %[[EMPTY:.*]] = tensor.empty() : tensor<1x128x32xi8>
 // CHECK-NEXT:    %[[QMUL:.*]] = hip.qmul(%[[CTX]]) ins(%[[LHS]], %[[RHS]] : tensor<1x128x32xi8>, tensor<32xi8>) outs(%[[EMPTY]] : tensor<1x128x32xi8>) {lhs_scale = 2.500000e-01 : f32, lhs_zp = -12 : i64, output_scale = 1.250000e-01 : f32, output_zp = 4 : i64, rhs_scale = 5.000000e-01 : f32, rhs_zp = 9 : i64} : tensor<1x128x32xi8>
 // CHECK-NEXT:    return %[[QMUL]] : tensor<1x128x32xi8>
 // CHECK-NEXT:  }
-  func.func @qmul_broadcast(%lhs: tensor<1x128x32xi8>,
+  func.func @main_graph(%lhs: tensor<1x128x32xi8>,
                             %rhs: tensor<32xi8>) -> tensor<1x128x32xi8> {
     %lhs_scale = "onnx.Constant"() {value = dense<0.25> : tensor<f32>} : () -> tensor<f32>
     %lhs_zp = "onnx.Constant"() {value = dense<-12> : tensor<i8>} : () -> tensor<i8>
