@@ -16,9 +16,9 @@ module {
       %value: memref<1x128x4096xf16, 1>,
       %output: memref<1x128x4096xf16, 1>) {
     hip.multi_head_attention(%ctx)
-        ins(%query, %key, %value :
-            memref<1x128x4096xf16, 1>, memref<1x128x4096xf16, 1>,
-            memref<1x128x4096xf16, 1>)
+        ins(%query : memref<1x128x4096xf16, 1>)
+        key(%key : memref<1x128x4096xf16, 1>)
+        value(%value : memref<1x128x4096xf16, 1>)
         outs(%output : memref<1x128x4096xf16, 1>)
         {num_heads = 32 : i64,
          mask_filter_value = -1.000000e+04 : f32,
@@ -58,8 +58,9 @@ module {
       %value: memref<?x?x?xf16, 1>,
       %output: memref<?x?x?xf16, 1>) {
     hip.multi_head_attention(%ctx)
-        ins(%query, %key, %value :
-            memref<?x?x?xf16, 1>, memref<?x?x?xf16, 1>, memref<?x?x?xf16, 1>)
+        ins(%query : memref<?x?x?xf16, 1>)
+        key(%key : memref<?x?x?xf16, 1>)
+        value(%value : memref<?x?x?xf16, 1>)
         outs(%output : memref<?x?x?xf16, 1>)
         {num_heads = 32 : i64,
          mask_filter_value = -1.000000e+04 : f32,
