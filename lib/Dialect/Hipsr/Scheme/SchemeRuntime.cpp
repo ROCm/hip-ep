@@ -65,11 +65,13 @@ bool initializeSchemeRuntime() {
 
   std::string scm_code(reinterpret_cast<const char*>(print_operation_scm_data),
                        print_operation_scm_size);
-  ptr load_sym = Stop_level_value(Sstring_to_symbol("load"));
+  ptr eval_sym = Stop_level_value(Sstring_to_symbol("eval"));
+  ptr read_sym = Stop_level_value(Sstring_to_symbol("read"));
   ptr open_string_input_port_sym = Stop_level_value(Sstring_to_symbol("open-string-input-port"));
 
   ptr port = Scall1(open_string_input_port_sym, Sstring(scm_code.c_str()));
-  Scall1(load_sym, port);
+  ptr expr = Scall1(read_sym, port);
+  Scall1(eval_sym, expr);
 
   g_print_operation = Stop_level_value(Sstring_to_symbol("print-operation"));
 
