@@ -14,17 +14,27 @@ Pattern QDQMul with benefit(10) {
   let mul = op<onnx.Mul>(dquant1.0, dquant2.0);
   let quant = op<onnx.QuantizeLinear>(mul.0, output_scale: Value, output_tail: ValueRange) -> (output_type: Type);
 
-  let ctx = GetContextArg(quant);
-  let lhs_scale_attr = ExtractScaleValue(lhs_scale);
-  let rhs_scale_attr = ExtractScaleValue(rhs_scale);
-  let output_scale_attr = ExtractScaleValue(output_scale);
-  let lhs_zeropoint_attr = ExtractZeropointValue(dquant1, attr<"2 : i64">, attr<"0 : i64">);
-  let rhs_zeropoint_attr = ExtractZeropointValue(dquant2, attr<"2 : i64">, attr<"0 : i64">);
-  let output_zeropoint_attr = ExtractZeropointValue(quant, attr<"2 : i64">, attr<"0 : i64">);
+  // Fusability only: every scale must be a per-tensor splat constant and every
+  // zero point must be readable (or absent, which means zero).
+  HasContextArg(quant);
+  IsSplatConstantValue(lhs_scale);
+  IsSplatConstantValue(rhs_scale);
+  IsSplatConstantValue(output_scale);
+  HasExtractableZeropoint(dquant1, attr<"2 : i64">);
+  HasExtractableZeropoint(dquant2, attr<"2 : i64">);
+  HasExtractableZeropoint(quant, attr<"2 : i64">);
 
   // Replace with fused operation. The two operand scales stay separate here;
   // HipToLLVM folds them into the single coefficient the kernel consumes.
   rewrite quant with {
+    let ctx = GetContextArg(quant);
+    let lhs_scale_attr = ExtractScaleValue(lhs_scale);
+    let rhs_scale_attr = ExtractScaleValue(rhs_scale);
+    let output_scale_attr = ExtractScaleValue(output_scale);
+    let lhs_zeropoint_attr = ExtractZeropointValue(dquant1, attr<"2 : i64">, attr<"0 : i64">);
+    let rhs_zeropoint_attr = ExtractZeropointValue(dquant2, attr<"2 : i64">, attr<"0 : i64">);
+    let output_zeropoint_attr = ExtractZeropointValue(quant, attr<"2 : i64">, attr<"0 : i64">);
+
     let empty = op<tensor.empty> -> (output_type);
     let qmul = op<hip.qmul>(ctx, lhs_input, rhs_input, empty.0) {
       lhs_scale = lhs_scale_attr,

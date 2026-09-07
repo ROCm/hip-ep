@@ -14,68 +14,23 @@
 #include "mlir/Parser/Parser.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
+#include <optional>
+
 namespace hip {
 namespace pdl {
 
-// Native constraint: Get context argument from function
-// Low-level signature required by MLIR PDL infrastructure
-inline mlir::LogicalResult getContextArg(mlir::PatternRewriter &rewriter,
-                                         mlir::PDLResultList &results,
-                                         llvm::ArrayRef<mlir::PDLValue> args) {
-  // args[0] should be the operation
-  if (args.size() != 1)
-    return mlir::failure();
 
-  auto *op = args[0].dyn_cast<mlir::Operation *>();
+inline mlir::Value tryContextArg(mlir::Operation *op) {
   if (!op)
-    return mlir::failure();
-
+    return {};
   auto funcOp = op->getParentOfType<mlir::func::FuncOp>();
   if (!funcOp || funcOp.getNumArguments() == 0)
-    return mlir::failure();
-
-  // Return the context (first function argument) as a Value
-  results.push_back(funcOp.getArgument(0));
-  return mlir::success();
-}
-
-// Native constraint: Extract float value from an optional onnx.Constant operand
-// Low-level signature required by MLIR PDL infrastructure
-inline mlir::LogicalResult
-extractScaleValue(mlir::PatternRewriter &rewriter, mlir::PDLResultList &results,
-                  llvm::ArrayRef<mlir::PDLValue> args) {
-  // args[0] should be the constant value
-  if (args.size() != 1)
-    return mlir::failure();
-
-  auto constValue = args[0].dyn_cast<mlir::Value>();
-  if (!constValue)
-    return mlir::failure();
-
-  auto defOp = constValue.getDefiningOp();
-  if (!defOp)
-    return mlir::failure();
-
-  auto valueAttr = defOp->getAttr("value");
-  if (!valueAttr)
-    return mlir::failure();
-
-  auto denseAttr = mlir::dyn_cast<mlir::DenseElementsAttr>(valueAttr);
-  if (!denseAttr || !denseAttr.isSplat())
-    return mlir::failure();
-
-  float scaleValue =
-      denseAttr.getSplatValue<mlir::FloatAttr>().getValueAsDouble();
-
-  // Return the extracted float as an f32 attribute
-  results.push_back(rewriter.getF32FloatAttr(scaleValue));
-  return mlir::success();
+    return {};
+  return funcOp.getArgument(0);
 }
 
 // Element type of the quantized side of a Q/DQ op: the result for
-// QuantizeLinear, operand 0 for DequantizeLinear. It is the only tensor that
-// still carries ONNX signedness, because the importer gives inline constants --
-// including the zero point -- signless storage.
+// QuantizeLinear, operand 0 for DequantizeLinear.
 inline mlir::IntegerType getQuantizedElementType(mlir::Operation *op) {
   llvm::SmallVector<mlir::Type, 2> candidates;
   if (op->getNumOperands() > 0)
@@ -93,44 +48,129 @@ inline mlir::IntegerType getQuantizedElementType(mlir::Operation *op) {
   return {};
 }
 
-// Native constraint: Extract integer value from onnx.Constant
-// Low-level signature required by MLIR PDL infrastructure
+// Per-tensor quantization only: a non-splat scale is per-axis and would not
+// fold into a single coefficient.
+inline std::optional<float> trySplatScale(mlir::Value value) {
+  if (!value)
+    return std::nullopt;
+  mlir::Operation *defOp = value.getDefiningOp();
+  if (!defOp)
+    return std::nullopt;
+  auto denseAttr =
+      mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(defOp->getAttr("value"));
+  if (!denseAttr || !denseAttr.isSplat())
+    return std::nullopt;
+  return static_cast<float>(
+      denseAttr.getSplatValue<mlir::FloatAttr>().getValueAsDouble());
+}
+
+// ONNX makes the Q/DQ zero point optional, so an absent operand contributes
+// `absentValue` instead of rejecting the chain.
+inline std::optional<int64_t> trySplatZeropoint(mlir::Operation *op,
+                                                uint64_t index,
+                                                int64_t absentValue) {
+  if (!op)
+    return std::nullopt;
+  if (index >= op->getNumOperands())
+    return absentValue;
+  mlir::Operation *defOp = op->getOperand(index).getDefiningOp();
+  if (!defOp)
+    return std::nullopt;
+  auto denseAttr =
+      mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(defOp->getAttr("value"));
+  if (!denseAttr || !denseAttr.isSplat())
+    return std::nullopt;
+  auto quantType = getQuantizedElementType(op);
+  if (!quantType)
+    return std::nullopt;
+  llvm::APInt raw = denseAttr.getSplatValue<llvm::APInt>();
+  return quantType.isUnsigned() ? static_cast<int64_t>(raw.getZExtValue())
+                                : raw.getSExtValue();
+}
+
+//===----------------------------------------------------------------------===//
+// Match constraints -- result-free, so several patterns may share them.
+//===----------------------------------------------------------------------===//
+
+inline mlir::LogicalResult hasContextArg(mlir::PatternRewriter &,
+                                         mlir::PDLResultList &,
+                                         llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 1)
+    return mlir::failure();
+  return mlir::success(
+      static_cast<bool>(tryContextArg(args[0].dyn_cast<mlir::Operation *>())));
+}
+
+inline mlir::LogicalResult
+isSplatConstantValue(mlir::PatternRewriter &, mlir::PDLResultList &,
+                     llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 1)
+    return mlir::failure();
+  return mlir::success(
+      trySplatScale(args[0].dyn_cast<mlir::Value>()).has_value());
+}
+
+inline mlir::LogicalResult
+hasExtractableZeropoint(mlir::PatternRewriter &, mlir::PDLResultList &,
+                        llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 2)
+    return mlir::failure();
+  auto indexAttr = mlir::dyn_cast_or_null<mlir::IntegerAttr>(
+      args[1].dyn_cast<mlir::Attribute>());
+  if (!indexAttr)
+    return mlir::failure();
+  return mlir::success(trySplatZeropoint(args[0].dyn_cast<mlir::Operation *>(),
+                                         indexAttr.getValue().getZExtValue(), 0)
+                           .has_value());
+}
+
+//===----------------------------------------------------------------------===//
+// Rewrite functions -- reached only after the constraints above accepted.
+//===----------------------------------------------------------------------===//
+
+inline mlir::LogicalResult getContextArg(mlir::PatternRewriter &,
+                                         mlir::PDLResultList &results,
+                                         llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 1)
+    return mlir::failure();
+  mlir::Value ctx = tryContextArg(args[0].dyn_cast<mlir::Operation *>());
+  if (!ctx)
+    return mlir::failure();
+  results.push_back(ctx);
+  return mlir::success();
+}
+
+inline mlir::LogicalResult
+extractScaleValue(mlir::PatternRewriter &rewriter, mlir::PDLResultList &results,
+                  llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 1)
+    return mlir::failure();
+  std::optional<float> scale = trySplatScale(args[0].dyn_cast<mlir::Value>());
+  if (!scale)
+    return mlir::failure();
+  results.push_back(rewriter.getF32FloatAttr(*scale));
+  return mlir::success();
+}
+
 inline mlir::LogicalResult
 extractZeropointValue(mlir::PatternRewriter &rewriter,
                       mlir::PDLResultList &results,
                       llvm::ArrayRef<mlir::PDLValue> args) {
   if (args.size() != 3)
     return mlir::failure();
-  auto *op = args[0].dyn_cast<mlir::Operation *>();
   auto indexAttr = mlir::dyn_cast_or_null<mlir::IntegerAttr>(
       args[1].dyn_cast<mlir::Attribute>());
   auto defaultValue = mlir::dyn_cast_or_null<mlir::IntegerAttr>(
       args[2].dyn_cast<mlir::Attribute>());
-  if (!op || !indexAttr || !defaultValue)
+  if (!indexAttr || !defaultValue)
     return mlir::failure();
-
-  uint64_t index = indexAttr.getValue().getZExtValue();
-  if (index >= op->getNumOperands()) {
-    results.push_back(defaultValue);
-    return mlir::success();
-  }
-  auto *defOp = op->getOperand(index).getDefiningOp();
-  if (!defOp)
+  std::optional<int64_t> zeropoint =
+      trySplatZeropoint(args[0].dyn_cast<mlir::Operation *>(),
+                        indexAttr.getValue().getZExtValue(),
+                        defaultValue.getInt());
+  if (!zeropoint)
     return mlir::failure();
-  auto denseAttr =
-      mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(defOp->getAttr("value"));
-  if (!denseAttr || !denseAttr.isSplat())
-    return mlir::failure();
-  // Sign-extending unsigned storage would read a ui16 zero point of 57835 back
-  // as -7701, so pick the extension that matches the quantized element type.
-  auto quantType = getQuantizedElementType(op);
-  if (!quantType)
-    return mlir::failure();
-  llvm::APInt raw = denseAttr.getSplatValue<llvm::APInt>();
-  int64_t i64Value = quantType.isUnsigned()
-                         ? static_cast<int64_t>(raw.getZExtValue())
-                         : raw.getSExtValue();
-  results.push_back(rewriter.getI64IntegerAttr(i64Value));
+  results.push_back(rewriter.getI64IntegerAttr(*zeropoint));
   return mlir::success();
 }
 
@@ -149,12 +189,16 @@ inline bool run(mlir::ModuleOp mlirModule, llvm::StringRef pdlBytecodeFile) {
 
   mlir::PDLPatternModule pdlPatterns(std::move(pdlModule));
 
-  // Register native constraints with low-level signatures
-  pdlPatterns.registerConstraintFunction("GetContextArg", getContextArg);
-  pdlPatterns.registerConstraintFunction("ExtractScaleValue",
-                                         extractScaleValue);
-  pdlPatterns.registerConstraintFunction("ExtractZeropointValue",
-                                         extractZeropointValue);
+  // Register native helpers with low-level signatures
+  pdlPatterns.registerConstraintFunction("HasContextArg", hasContextArg);
+  pdlPatterns.registerConstraintFunction("IsSplatConstantValue",
+                                         isSplatConstantValue);
+  pdlPatterns.registerConstraintFunction("HasExtractableZeropoint",
+                                         hasExtractableZeropoint);
+  pdlPatterns.registerRewriteFunction("GetContextArg", getContextArg);
+  pdlPatterns.registerRewriteFunction("ExtractScaleValue", extractScaleValue);
+  pdlPatterns.registerRewriteFunction("ExtractZeropointValue",
+                                      extractZeropointValue);
 
   mlir::RewritePatternSet patterns(ctx);
   patterns.add(std::move(pdlPatterns));
