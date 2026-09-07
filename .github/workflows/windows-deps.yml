@@ -35,9 +35,9 @@ env:
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
   AMDGPU_EP_REF: "05eaa2a938f71e98b49bd1be3fb03720167be5cc"
   # Space-separated onnxruntime/onnxruntime-ep-amdgpu PR numbers applied on top
-  # of AMDGPU_EP_REF. 105: forward unknown / Hip-owned provider options through
-  # the AMDGPU umbrella into the Hip backend under the shared ep.<amdgpu>.* prefix.
-  AMDGPU_PR_PATCHES: "105"
+  # of AMDGPU_EP_REF. 102: forward Hip custom-op domains; 105: forward unknown /
+  # Hip-owned provider options under the shared ep.<amdgpu>.* prefix.
+  AMDGPU_PR_PATCHES: "102 105"
 
 jobs:
   llvm:
@@ -293,7 +293,9 @@ jobs:
         run: |
           DEPS_HASH=$(git rev-parse --short=12 HEAD:cmake/deps.txt)
           EP_REF="${{ env.AMDGPU_EP_REF }}"
-          echo "value=windows-amdgpu-${EP_REF:0:7}-amdpr${{ env.AMDGPU_PR_PATCHES }}-deps${DEPS_HASH}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
+          AMDPR_KEY="${{ env.AMDGPU_PR_PATCHES }}"
+          AMDPR_KEY="${AMDPR_KEY// /-}"
+          echo "value=windows-amdgpu-${EP_REF:0:7}-amdpr${AMDPR_KEY}-deps${DEPS_HASH}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
 
       - name: Probe amdgpu-artifacts
         id: cache-amdgpu

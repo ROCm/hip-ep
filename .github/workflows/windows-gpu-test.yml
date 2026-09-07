@@ -143,7 +143,7 @@ jobs:
       # but driven through the amdgpu-ep umbrella instead of the hipgpu EP
       # directly. profile=hip selects the hipgpu backend; artifact_format=NATIVE
       # is a Hip-owned option forwarded under the shared ep.<amdgpu>.* prefix
-      # (requires amdgpu-ep PR 105 / AMDGPU_PR_PATCHES). Real gate (no exit /b 0).
+      # (amdgpu-ep PR 102/105 via AMDGPU_PR_PATCHES). Real gate (no exit /b 0).
       # ----------------------------------------------------------------------
       - name: Run AMD GPU umbrella native smoke test (GPU)
         if: always()
