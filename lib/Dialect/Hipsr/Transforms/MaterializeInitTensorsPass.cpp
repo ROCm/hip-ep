@@ -23,14 +23,17 @@
 //   %d0 = shape.size_to_index (shape.get_extent %s, 0)
 //   %empty = tensor.empty(%d0) : tensor<?x4xf32>
 //   %0 = hipsr.cast(%ctx) ins(%a) outs(%empty) : tensor<?x4xf32>
-//   hipsr.preserve_shape %s, %0 : tensor<?x4xf32>
+//   hipsr.preserve_shape %s, %0 : !shape.shape, tensor<?x4xf32>
 //
-// The domain is rebuilt in a fresh block in five steps: constants, shape
-// computations, allocations, every other op, then one shape link per
-// allocation. hipsr-pool-alloc replaces the allocations in a domain with views
-// of one pool it emits after the last of them, so every allocation has to come
-// before the first op that reads one. A link names the result of the op that
-// fills the buffer, so it can only come after the data ops.
+// The domain is rebuilt in a fresh block in five steps:
+//
+//   1. constants
+//   2. shape computations
+//   3. allocations, all before the first op that reads one, because
+//      hipsr-pool-alloc acquires the pool in front of the first allocation
+//   4. every other op
+//   5. one shape link per allocation, which names the result of the op that
+//      fills the buffer and so has to follow the data ops
 //
 //===----------------------------------------------------------------------===//
 
@@ -131,7 +134,8 @@ ResultRange materializeShapeRegion(PlaceholderOp placeholder,
 }
 
 // Only dynamic dimensions come from the shape; a static extent is in the type.
-Value createInitTensor(Value result, Value resultShape, OpBuilder &builder) {
+SmallVector<Value> readDynamicSizes(Value result, Value resultShape,
+                                    OpBuilder &builder) {
   Location loc = result.getLoc();
   auto tensorType = cast<RankedTensorType>(result.getType());
   auto isDynamic = [tensorType](int64_t dimension) {
@@ -143,11 +147,10 @@ Value createInitTensor(Value result, Value resultShape, OpBuilder &builder) {
     return shape::SizeToIndexOp::create(builder, loc, extent);
   };
 
-  SmallVector<Value> dynamicSizes = llvm::map_to_vector(
+  return llvm::map_to_vector(
       llvm::make_filter_range(llvm::seq<int64_t>(tensorType.getRank()),
                               isDynamic),
       readExtent);
-  return tensor::EmptyOp::create(builder, loc, tensorType, dynamicSizes);
 }
 
 LogicalResult verifyMaterializable(ArrayRef<PlaceholderOp> placeholders) {
@@ -191,14 +194,30 @@ IRMapping createShapeComputations(ArrayRef<PlaceholderOp> placeholders,
 }
 
 // Each result maps to its tensor.empty, so ops cloned later use that buffer.
+//
+// Every extent comes before the first tensor.empty. hipsr-pool-alloc acquires
+// the pool in front of the first allocation and reads every extent there, so
+// each extent has to dominate that point.
+//
+//   %d0 = shape.size_to_index ...
+//   %d1 = shape.size_to_index ...
+//   %a0 = tensor.empty(%d0) : tensor<?x4xf32>
+//   %a1 = tensor.empty(%d1) : tensor<?x8xf32>
 void createAllocations(ArrayRef<PlaceholderOp> placeholders,
                        const IRMapping &shapes, IRMapping &cloned,
                        OpBuilder &builder) {
+  SmallVector<std::pair<OpResult, SmallVector<Value>>> allocations;
   for (PlaceholderOp placeholder : placeholders) {
     for (OpResult result : placeholder.getResults()) {
-      cloned.map(result,
-                 createInitTensor(result, shapes.lookup(result), builder));
+      allocations.emplace_back(
+          result, readDynamicSizes(result, shapes.lookup(result), builder));
     }
+  }
+  for (auto &[result, dynamicSizes] : allocations) {
+    cloned.map(result,
+               tensor::EmptyOp::create(builder, result.getLoc(),
+                                       cast<RankedTensorType>(result.getType()),
+                                       dynamicSizes));
   }
 }
 

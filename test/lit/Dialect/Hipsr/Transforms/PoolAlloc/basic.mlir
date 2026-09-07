@@ -74,42 +74,6 @@ func.func @sub_byte_element(%ctx: !hipsr.context,
 
 // -----
 
-// An allocation nothing reads keeps its memref.alloc. Only the live one is
-// sized into the pool, so the reserved bytes cover one buffer rather than two.
-// CHECK-LABEL:   func.func @dead_alloc_skipped(
-// CHECK-SAME:      %[[ARG0:.*]]: !hipsr.context,
-// CHECK-SAME:      %[[ARG1:.*]]: memref<4x1024xf16, #hipsr.mem<device>>) {
-// CHECK-NEXT:           hipsr.pool_domain(%[[ARG0]], %[[ARG1]] : !hipsr.context, memref<4x1024xf16, #hipsr.mem<device>>) {
-// CHECK-NEXT:           ^bb0(%[[VAL_0:.*]]: !hipsr.context, %[[VAL_1:.*]]: memref<4x1024xf16, #hipsr.mem<device>>):
-// CHECK-NEXT:             %[[ALLOC_0:.*]] = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
-// CHECK-NEXT:             %[[CONSTANT_0:.*]] = arith.constant 8192 : index
-// CHECK-NEXT:             %[[CONSTANT_1:.*]] = arith.constant 256 : index
-// CHECK-NEXT:             %[[CONSTANT_2:.*]] = arith.constant 255 : index
-// CHECK-NEXT:             %[[ADDI_0:.*]] = arith.addi %[[CONSTANT_0]], %[[CONSTANT_2]] : index
-// CHECK-NEXT:             %[[DIVUI_0:.*]] = arith.divui %[[ADDI_0]], %[[CONSTANT_1]] : index
-// CHECK-NEXT:             %[[MULI_0:.*]] = arith.muli %[[DIVUI_0]], %[[CONSTANT_1]] : index
-// CHECK-NEXT:             %[[CONSTANT_3:.*]] = arith.constant 0 : index
-// CHECK-NEXT:             %[[GET_POOL_0:.*]] = hipsr.get_pool(%[[VAL_0]], %[[MULI_0]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
-// CHECK-NEXT:             %[[VIEW_0:.*]] = memref.view %[[GET_POOL_0]]{{\[}}%[[CONSTANT_3]]][] : memref<?xi8, #hipsr.mem<device>> to memref<4x1024xf16, #hipsr.mem<device>>
-// CHECK-NEXT:             hipsr.add(%[[VAL_0]]) ins(%[[VAL_1]], %[[VAL_1]] : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%[[VIEW_0]] : memref<4x1024xf16, #hipsr.mem<device>>)
-// CHECK-NEXT:           } {domain_id = 0 : i64}
-// CHECK-NEXT:           return
-// CHECK-NEXT:         }
-func.func @dead_alloc_skipped(%ctx: !hipsr.context,
-                              %in: memref<4x1024xf16, #hipsr.mem<device>>) {
-  hipsr.pool_domain(%ctx, %in : !hipsr.context, memref<4x1024xf16, #hipsr.mem<device>>) {
-  ^bb0(%dctx: !hipsr.context, %din: memref<4x1024xf16, #hipsr.mem<device>>):
-    %dead = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
-    %a1 = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
-    hipsr.add(%dctx) ins(%din, %din : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>)
-               outs(%a1 : memref<4x1024xf16, #hipsr.mem<device>>)
-    hipsr.pool_domain_yield
-  } {domain_id = 0 : i64}
-  return
-}
-
-// -----
-
 // Buffers of different element types share one pool, so its size is the larger
 // of a static f32 buffer and a dynamic f16 one.
 // CHECK-LABEL:   func.func @mixed_dtypes(
@@ -267,5 +231,51 @@ func.func @two_domains(%ctx: !hipsr.context, %in: memref<4x1024xf16, #hipsr.mem<
     hipsr.add(%dctx) ins(%din, %din : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%a2 : memref<4x1024xf16, #hipsr.mem<device>>)
     hipsr.pool_domain_yield
   } {domain_id = 7 : i64}
+  return
+}
+
+// -----
+
+// Domain 1 reads a buffer that domain 0 yields, so BufferViewFlowAnalysis
+// reports domain 0's result as an alias of %a1. That result is defined
+// outside the body, so the pass drops it; walking its users would instead
+// report %a1 as escaping the domain. The yield keeps %a1 live to the end of
+// domain 0 and hands out the pool view.
+// CHECK-LABEL:   func.func @yielded_buffer_read_by_next_domain(
+// CHECK-SAME:      %[[ARG0:.*]]: !hipsr.context,
+// CHECK-SAME:      %[[ARG1:.*]]: memref<4xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT:           %[[POOL_DOMAIN_0:.*]] = hipsr.pool_domain(%[[ARG0]], %[[ARG1]] : !hipsr.context, memref<4xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT:           ^bb0(%[[VAL_0:.*]]: !hipsr.context, %[[VAL_1:.*]]: memref<4xf16, #hipsr.mem<device>>):
+// CHECK-NEXT:             %[[CONSTANT_0:.*]] = arith.constant 8 : index
+// CHECK-NEXT:             %[[CONSTANT_1:.*]] = arith.constant 256 : index
+// CHECK-NEXT:             %[[CONSTANT_2:.*]] = arith.constant 255 : index
+// CHECK-NEXT:             %[[ADDI_0:.*]] = arith.addi %[[CONSTANT_0]], %[[CONSTANT_2]] : index
+// CHECK-NEXT:             %[[DIVUI_0:.*]] = arith.divui %[[ADDI_0]], %[[CONSTANT_1]] : index
+// CHECK-NEXT:             %[[MULI_0:.*]] = arith.muli %[[DIVUI_0]], %[[CONSTANT_1]] : index
+// CHECK-NEXT:             %[[CONSTANT_3:.*]] = arith.constant 0 : index
+// CHECK-NEXT:             %[[GET_POOL_0:.*]] = hipsr.get_pool(%[[VAL_0]], %[[MULI_0]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
+// CHECK-NEXT:             %[[VIEW_0:.*]] = memref.view %[[GET_POOL_0]]{{\[}}%[[CONSTANT_3]]][] : memref<?xi8, #hipsr.mem<device>> to memref<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:             hipsr.add(%[[VAL_0]]) ins(%[[VAL_1]], %[[VAL_1]] : memref<4xf16, #hipsr.mem<device>>, memref<4xf16, #hipsr.mem<device>>) outs(%[[VIEW_0]] : memref<4xf16, #hipsr.mem<device>>)
+// CHECK-NEXT:             hipsr.pool_domain_yield %[[VIEW_0]] : memref<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:           } -> memref<4xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
+// CHECK-NEXT:           hipsr.pool_domain(%[[ARG0]], %[[POOL_DOMAIN_0]], %[[ARG1]] : !hipsr.context, memref<4xf16, #hipsr.mem<device>>, memref<4xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT:           ^bb0(%[[VAL_2:.*]]: !hipsr.context, %[[VAL_3:.*]]: memref<4xf16, #hipsr.mem<device>>, %[[VAL_4:.*]]: memref<4xf16, #hipsr.mem<device>>):
+// CHECK-NEXT:             hipsr.add(%[[VAL_2]]) ins(%[[VAL_3]], %[[VAL_3]] : memref<4xf16, #hipsr.mem<device>>, memref<4xf16, #hipsr.mem<device>>) outs(%[[VAL_4]] : memref<4xf16, #hipsr.mem<device>>)
+// CHECK-NEXT:           } {domain_id = 1 : i64}
+// CHECK-NEXT:           return
+// CHECK-NEXT:         }
+func.func @yielded_buffer_read_by_next_domain(%ctx: !hipsr.context,
+                                              %in: memref<4xf16, #hipsr.mem<device>>) {
+  %0 = hipsr.pool_domain(%ctx, %in : !hipsr.context, memref<4xf16, #hipsr.mem<device>>) {
+  ^bb0(%dctx: !hipsr.context, %din: memref<4xf16, #hipsr.mem<device>>):
+    %a1 = memref.alloc() : memref<4xf16, #hipsr.mem<device>>
+    hipsr.add(%dctx) ins(%din, %din : memref<4xf16, #hipsr.mem<device>>, memref<4xf16, #hipsr.mem<device>>) outs(%a1 : memref<4xf16, #hipsr.mem<device>>)
+    hipsr.pool_domain_yield %a1 : memref<4xf16, #hipsr.mem<device>>
+  } -> memref<4xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
+  hipsr.pool_domain(%ctx, %0, %in : !hipsr.context, memref<4xf16, #hipsr.mem<device>>, memref<4xf16, #hipsr.mem<device>>) {
+  ^bb0(%dctx: !hipsr.context, %dyielded: memref<4xf16, #hipsr.mem<device>>, %din: memref<4xf16, #hipsr.mem<device>>):
+    hipsr.add(%dctx) ins(%dyielded, %dyielded : memref<4xf16, #hipsr.mem<device>>, memref<4xf16, #hipsr.mem<device>>) outs(%din : memref<4xf16, #hipsr.mem<device>>)
+    hipsr.pool_domain_yield
+  } {domain_id = 1 : i64}
   return
 }

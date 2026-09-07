@@ -7,6 +7,7 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
+#include "hip/Dialect/Hipsr/IR/HipsrTypes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/Transforms/BufferViewFlowAnalysis.h"
@@ -178,11 +179,27 @@ computeLiveness(PoolDomainOp domain) {
   };
 
   auto processAllocation =
-      [&aliases, &processUser, &blockLevelIndex](
+      [&aliases, &processUser, &blockLevelIndex,
+       domainOp = domain.getOperation()](
           memref::AllocOp allocOp) -> FailureOr<std::optional<Lifetime>> {
     Value buffer = allocOp.getResult();
     llvm::SmallVector<std::pair<Value, Operation *>> users;
     for (Value alias : aliases.resolve(buffer)) {
+      // pool_domain implements RegionBranchOpInterface, so the domain's result
+      // aliases the buffer the body yields:
+      //
+      //   %0 = hipsr.pool_domain(...) {   // domainOp; %0 is one `alias`
+      //     %a1 = memref.alloc()          // allocOp, so %a1 is `buffer`
+      //     hipsr.pool_domain_yield %a1
+      //   } -> memref<4xf16, #hipsr.mem<device>>
+      //   hipsr.pool_domain(%ctx, %0)     // only user of %0, outside the body
+      //
+      // processUser rejects a user outside the body with "allocation escapes
+      // IsolatedFromAbove domain". The yield already holds %a1 live to the end
+      // of the domain.
+      if (alias.getDefiningOp() == domainOp) {
+        continue;
+      }
       for (Operation *user : alias.getUsers()) {
         users.emplace_back(alias, user);
       }
@@ -204,6 +221,11 @@ computeLiveness(PoolDomainOp domain) {
   for (Operation &op : body) {
     auto allocOp = dyn_cast<memref::AllocOp>(&op);
     if (!allocOp) {
+      continue;
+    }
+    // The pool is device memory, so a host buffer keeps its own allocation.
+    if (!isDeviceMemRef(allocOp.getType())) {
+      LLVM_DEBUG(DBGS() << "  " << allocOp.getResult() << ": host memory\n");
       continue;
     }
     FailureOr<std::optional<Lifetime>> lifetimeOrErr =
@@ -440,16 +462,39 @@ emitPoolLayout(OpBuilder &builder, Location loc,
   return {offsets, poolSize};
 }
 
-void replaceAllocsWithViews(OpBuilder &builder, llvm::ArrayRef<Value> group,
-                            Value pool, Value offset) {
-  for (Value alloc : group) {
-    auto allocOp = alloc.getDefiningOp<memref::AllocOp>();
-    auto view =
-        memref::ViewOp::create(builder, allocOp.getLoc(), allocOp.getType(),
-                               pool, offset, allocOp.getDynamicSizes());
-    allocOp.getResult().replaceAllUsesWith(view.getResult());
+void replaceAllocsWithViews(OpBuilder &builder,
+                            llvm::ArrayRef<llvm::SmallVector<Value>> groups,
+                            llvm::ArrayRef<Value> offsets, Value pool) {
+  llvm::SmallVector<std::pair<memref::AllocOp, Value>> replacements;
+  for (auto [group, offset] : llvm::zip_equal(groups, offsets)) {
+    for (Value alloc : group) {
+      auto allocOp = alloc.getDefiningOp<memref::AllocOp>();
+      auto view =
+          memref::ViewOp::create(builder, allocOp.getLoc(), allocOp.getType(),
+                                 pool, offset, allocOp.getDynamicSizes());
+      replacements.emplace_back(allocOp, view.getResult());
+    }
+  }
+  for (auto [allocOp, view] : replacements) {
+    allocOp.getResult().replaceAllUsesWith(view);
     allocOp.erase();
   }
+}
+
+/// Reports the first device allocation left in the body of `domain`.
+///
+/// The pool replaces the body's device allocations, so one surviving there
+/// would call the device allocator on every inference. Allocations in nested
+/// regions are outside what the pass pools.
+LogicalResult verifyDeviceAllocsPooled(PoolDomainOp domain) {
+  for (Operation &op : domain.getBody().front()) {
+    auto allocOp = dyn_cast<memref::AllocOp>(&op);
+    if (allocOp && isDeviceMemRef(allocOp.getType())) {
+      return allocOp.emitError(
+          "hipsr-pool-alloc: device allocation is not backed by the pool");
+    }
+  }
+  return success();
 }
 
 struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
@@ -472,9 +517,10 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
       llvm::DenseMap<Value, Lifetime> lifetimes = std::move(*lifetimesOrErr);
       Operation *insertionPoint = findInsertionPoint(body, lifetimes);
       if (!insertionPoint) {
-        domain.emitError(
-            "hipsr-pool-alloc: pool_domain has no poolable allocation");
-        signalPassFailure();
+        LLVM_DEBUG(DBGS() << "  nothing poolable, domain left unchanged\n");
+        if (failed(verifyDeviceAllocsPooled(domain))) {
+          signalPassFailure();
+        }
         return;
       }
       LLVM_DEBUG({
@@ -515,8 +561,9 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
           emitPoolLayout(builder, domain.getLoc(), groupSizes);
       Value pool = emitPool(builder, domain.getLoc(), ctx, poolSize,
                             domain.getDomainId());
-      for (auto [group, offset] : llvm::zip_equal(groups, offsets)) {
-        replaceAllocsWithViews(builder, group, pool, offset);
+      replaceAllocsWithViews(builder, groups, offsets, pool);
+      if (failed(verifyDeviceAllocsPooled(domain))) {
+        signalPassFailure();
       }
     });
   }
