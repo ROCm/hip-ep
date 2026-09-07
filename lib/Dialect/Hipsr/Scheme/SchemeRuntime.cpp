@@ -14,9 +14,11 @@ typedef long iptr;
 void Sscheme_init(void (*)(void));
 void Sregister_boot_file_bytes(const char*, const unsigned char*, size_t);
 void Sbuild_heap(const char*, void (*)(void));
-ptr Scall0(ptr);
+ptr Scall2(ptr, ptr, ptr);
 ptr Sstring_to_symbol(const char*);
 ptr Stop_level_value(ptr);
+ptr Sinteger(iptr);
+iptr Sinteger_value(ptr);
 const char* Skernel_version();
 
 extern const unsigned char chez_boot_data[];
@@ -42,9 +44,11 @@ bool initializeSchemeRuntime() {
   Sregister_boot_file_bytes("hip-patterns.boot", chez_boot_data, chez_boot_size);
   Sbuild_heap(nullptr, nullptr);
 
-  ptr display = Stop_level_value(Sstring_to_symbol("display"));
-  Scall0(display);
+  ptr multiply = Stop_level_value(Sstring_to_symbol("*"));
+  ptr result = Scall2(multiply, Sinteger(6), Sinteger(7));
+  iptr answer = Sinteger_value(result);
 
+  llvm::errs() << "Scheme test: (* 6 7) = " << answer << "\n";
   llvm::errs() << "Chez Scheme runtime initialized successfully!\n\n";
 
   scheme_initialized = true;

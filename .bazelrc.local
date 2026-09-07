@@ -1,0 +1,9 @@
+# Local development overrides (gitignored)
+# Use local build and install directories
+
+build --sandbox_writable_path=$HOME/w/build/hip-ep-1
+build --sandbox_writable_path=$HOME/w/local
+
+# If using CMake locally, set these in your shell:
+# export CMAKE_BUILD_DIR=$HOME/w/build/hip-ep-1
+# export CMAKE_INSTALL_PREFIX=$HOME/w/local
