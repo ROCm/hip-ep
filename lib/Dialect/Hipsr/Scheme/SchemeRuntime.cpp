@@ -24,8 +24,9 @@ ptr Sinteger(iptr);
 iptr Sinteger_value(ptr);
 ptr Sstring(const char*);
 ptr Scons(ptr, ptr);
-ptr Snil;
 const char* Skernel_version();
+
+#define Snil ((ptr)0x26)
 
 extern const unsigned char petite_boot_data[];
 extern const size_t petite_boot_size;
@@ -85,15 +86,10 @@ void printOperation(const char* opName, int numOperands, int numResults, const c
   if (!scheme_initialized || !g_print_operation)
     return;
 
-  ptr null_sym = Stop_level_value(Sstring_to_symbol("null"));
-  ptr empty_list = Scall0(null_sym);
-
-  ptr arg1 = Sstring(opName);
-  ptr arg2 = Sinteger(numOperands);
-  ptr arg3 = Sinteger(numResults);
-  ptr arg4 = Sstring(genericForm);
-
-  ptr args_list = Scons(arg1, Scons(arg2, Scons(arg3, Scons(arg4, empty_list))));
+  ptr args_list = Scons(Sstring(opName),
+                  Scons(Sinteger(numOperands),
+                  Scons(Sinteger(numResults),
+                  Scons(Sstring(genericForm), Snil))));
 
   ptr apply_proc = Stop_level_value(Sstring_to_symbol("apply"));
   Scall2(apply_proc, g_print_operation, args_list);
