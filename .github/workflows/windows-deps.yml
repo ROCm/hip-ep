@@ -923,7 +923,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install -q cget
+          # hipamd's configure imports CppHeaderParser to generate its API headers.
+          python -m pip install -q cget CppHeaderParser
           DEPS="${{ runner.workspace }}/hipruntime-deps"
           cget install facebook/zstd@v1.5.7 -X subdir -DCMAKE_DIR=build/cmake \
             -DZSTD_USE_STATIC_RUNTIME=On -DBUILD_TESTING=Off -DZSTD_BUILD_TESTS=Off \
@@ -1113,7 +1114,11 @@ jobs:
         working-directory: source-rocm-libraries/projects/hipblaslt
         run: |
           set -euo pipefail
-          python -m pip install -q cget
+          # TensileLite runs during the hipBLASLt build. Installed explicitly
+          # rather than from requirements.txt, which also pins cmake<4 and would
+          # shadow the runner's toolchain.
+          python -m pip install -q cget invoke PyYAML joblib packaging msgpack \
+            simplejson ujson orjson yappi numpy
           DEPS="${{ runner.workspace }}/hipblaslt-deps"
           # Versions and flags copied from AMD's build; the static-CRT setting
           # has to match hipBLASLt itself or the link fails.
