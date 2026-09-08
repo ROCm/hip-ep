@@ -42,6 +42,7 @@ target_link_libraries(HipDialectTransforms PUBLIC
   HipDialectIR
   HipConstantsIO
   HipToLLVM
+  HipToTosa
   OnnxToHip
   OnnxToHipDNN
   HipSchemasLib

@@ -526,6 +526,7 @@ void mlir::hip::buildRocMlirPipeline(
     OpPassManager &pm, const mlir::hip::RocMlirPipelineOptions &options) {
   pm.addPass(mlir::hip::createFuseROCMlirPass());
   pm.addPass(func::createDuplicateFunctionEliminationPass());
+  pm.addPass(mlir::hip::createConvertHipToTosaPass());
 }
 
 void mlir::hip::registerHipPipelines() {
