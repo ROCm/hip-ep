@@ -27,6 +27,7 @@
 //   --convert-shape-to-std
 //   --one-shot-bufferize
 //   --convert-linalg-to-loops
+//   --hipsr-use-output-allocator
 void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
                                      const HipsrPipelineOptions & /*options*/) {
   pm.addPass(createAddContextArgPass());
@@ -55,6 +56,8 @@ void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
   // shape.broadcast becomes a tensor.generate, which bufferizes to a
   // linalg.map. That is the only linalg op this pipeline produces.
   pm.addNestedPass<func::FuncOp>(createConvertLinalgToLoopsPass());
+
+  pm.addNestedPass<func::FuncOp>(createHipsrUseOutputAllocatorPass());
 }
 
 void mlir::hipsr::registerHipsrPipelines() {
