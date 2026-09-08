@@ -527,6 +527,7 @@ void mlir::hip::buildRocMlirPipeline(
   pm.addPass(mlir::hip::createFuseROCMlirPass());
   pm.addPass(func::createDuplicateFunctionEliminationPass());
   pm.addPass(mlir::hip::createConvertHipToTosaPass());
+  pm.addPass(mlir::createCanonicalizerPass());
 }
 
 void mlir::hip::registerHipPipelines() {

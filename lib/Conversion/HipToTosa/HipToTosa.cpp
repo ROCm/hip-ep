@@ -8,6 +8,7 @@
 
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/Tosa/IR/TosaOps.h>
+#include <mlir/Dialect/UB/IR/UBOps.h>
 #include <mlir/IR/MLIRContext.h>
 #include <mlir/IR/PatternMatch.h>
 #include <mlir/Pass/Pass.h>
@@ -77,6 +78,7 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     ConversionTarget conversion(*ctx);
     conversion.addIllegalDialect<HipDialect>();
     conversion.addLegalDialect<tosa::TosaDialect, func::FuncDialect>();
+    conversion.addLegalOp<ub::PoisonOp>();
 
     RewritePatternSet patterns(ctx);
     patterns.add<AddConverter>(ctx);
