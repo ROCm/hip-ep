@@ -90,7 +90,7 @@ bool initializeSchemeRuntime() {
 }
 
 std::string callSchemeFunction(const char* functionName,
-                                const std::vector<SchemeValue>& args) {
+                                const std::vector<void*>& args) {
   if (!scheme_initialized)
     return "";
 
@@ -115,11 +115,11 @@ std::string callSchemeFunction(const char* functionName,
   return "";
 }
 
-SchemeValue makeSchemeString(const char* str) {
+void* makeSchemeString(const char* str) {
   return Sstring(str);
 }
 
-SchemeValue makeSchemeInteger(long value) {
+void* makeSchemeInteger(long value) {
   return Sinteger(value);
 }
 
