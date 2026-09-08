@@ -72,10 +72,13 @@
 
 #include "rtc/hiprtc_module.h"
 
-// Unlike the other RTC-enabled kernels, the device half of this file is not
-// split into a header: 33 device blocks are interleaved with the autotune state
-// machines. The build extracts it instead (cmake/rtc_extract_device.py) and
-// embeds the result here.
+// Generated per arch from hip/autotune/matmul_nbits/lut/<arch>.json; see
+// hip/autotune/matmul_nbits/scripts/gen_rtc_names.py.
+#include "matmul_nbits_rtc_tuned_names.h"
+
+// hip/rtc/matmul_nbits_device.h, included below, embedded as bytes at build
+// time with hip_arch_compat.h prepended: the device half uses HIPDNN_WAVE_SIZE
+// and the WMMA macros without including it.
 extern "C" const unsigned char kMatMulNBitsDeviceSource[];
 extern "C" const size_t kMatMulNBitsDeviceSource_size;
 
@@ -3850,17 +3853,30 @@ static void appendMiscNames(std::vector<std::string>& names) {
   names.push_back(HIPDNN_RTC_STR(unpack_zp_u8_to_fp16_kernel));
 }
 
+// The bits=4 families register only what the offline LUT picks; a config left
+// out resolves to nullptr and HIPDNN_RTC_LAUNCH takes its AOT kernel. The
+// i8 / u3 / u2 families have no LUT rows, so they stay fully registered.
+static void appendTunedNames(std::vector<std::string>& names) {
+#if HIPDNN_MATMUL_NBITS_RTC_TUNED_SUBSET
+#define X(NAME_) names.push_back(NAME_);
+  HIPDNN_MATMUL_NBITS_RTC_TUNED_NAME_LIST(X)
+#undef X
+#else
+  appendGemvNames(names);
+  appendDp4aNames(names);
+  appendWmmaNames(names);
+#endif
+}
+
 static hipdnn_ep::rtc::Module& mnbRtcModule() {
   static hipdnn_ep::rtc::Module module(
       "matmul_nbits", reinterpret_cast<const char*>(kMatMulNBitsDeviceSource),
       kMatMulNBitsDeviceSource_size, [] {
         std::vector<std::string> names;
-        appendGemvNames(names);
-        appendDp4aNames(names);
+        appendTunedNames(names);
         appendGemvI8Names(names);
         appendGemvU3Names(names);
         appendGemvU2Names(names);
-        appendWmmaNames(names);
         appendWmmaI8Names(names);
         appendWmmaU3Names(names);
         appendWmmaU2Names(names);

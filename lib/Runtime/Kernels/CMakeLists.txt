@@ -182,6 +182,54 @@ _rtc_embed_concatenated(kGqaDeviceSource _rtc_embedded_gqa
     ${CMAKE_CURRENT_SOURCE_DIR}/include/hip_arch_compat.h
     ${CMAKE_CURRENT_SOURCE_DIR}/hip/rtc/gqa_device.h)
 
+# Derive a family's hipRTC registration set for one arch from its offline
+# autotune LUT. Emits <out-dir>/<family>_rtc_tuned_names.h; the directory is
+# per-arch because each arch has its own LUT and the header name is fixed by
+# the #include. An arch with no LUT gets a header that keeps the full set.
+function(_rtc_tuned_names FAMILY ARCH OUT_DIR_VAR OUT_HEADER_VAR)
+    set(_dir ${CMAKE_CURRENT_BINARY_DIR}/rtc_names/${ARCH})
+    set(_header ${_dir}/${FAMILY}_rtc_tuned_names.h)
+    set(_script
+        ${CMAKE_CURRENT_SOURCE_DIR}/hip/autotune/${FAMILY}/scripts/gen_rtc_names.py)
+    set(_kernel ${CMAKE_CURRENT_SOURCE_DIR}/hip/${FAMILY}_kernel.hip)
+    set(_lut ${CMAKE_CURRENT_SOURCE_DIR}/hip/autotune/${FAMILY}/lut/${ARCH}.json)
+    set(_lut_dep "")
+    if(EXISTS ${_lut})
+        set(_lut_dep ${_lut})
+    endif()
+    add_custom_command(
+        OUTPUT ${_header}
+        COMMAND ${Python3_EXECUTABLE} ${_script}
+                --arch ${ARCH}
+                --kernel-source ${_kernel}
+                --output ${_header}
+        DEPENDS ${_script} ${_kernel} ${_lut_dep}
+        COMMENT "Generating ${FAMILY} hipRTC name expressions for ${ARCH}"
+        VERBATIM
+    )
+    set(${OUT_DIR_VAR} ${_dir} PARENT_SCOPE)
+    set(${OUT_HEADER_VAR} ${_header} PARENT_SCOPE)
+endfunction()
+
+# hip_utils.cmake's per-.hip custom command depends on the source alone;
+# appending the generated header to its DEPENDS is what orders the generator
+# first and recompiles that TU when the LUT changes.
+function(_rtc_tuned_names_order TARGET FAMILY HEADER)
+    if(WIN32)
+        get_property(_is_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+        if(_is_multi_config)
+            set(_obj
+                ${CMAKE_CURRENT_BINARY_DIR}/${TARGET}_hip_objs/$<CONFIG>/${FAMILY}_kernel.obj)
+        else()
+            set(_obj ${CMAKE_CURRENT_BINARY_DIR}/${TARGET}_hip_objs/${FAMILY}_kernel.obj)
+        endif()
+        add_custom_command(OUTPUT ${_obj} APPEND DEPENDS ${HEADER})
+    else()
+        add_custom_target(${FAMILY}_rtc_names_${TARGET} DEPENDS ${HEADER})
+        add_dependencies(${TARGET} ${FAMILY}_rtc_names_${TARGET})
+    endif()
+endfunction()
+
 set(_rtc_sources
     rtc/hiprtc_module.hip
     ${_rtc_embedded_sub}
@@ -196,6 +244,8 @@ set(_rtc_sources
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
     set(_target custom_kernels_${_arch})
     _matmul_nbits_lut_data_source(${_arch} _matmul_lut_src)
+    _rtc_tuned_names(gqa ${_arch} _gqa_names_dir _gqa_names_header)
+    _rtc_tuned_names(matmul_nbits ${_arch} _mnb_names_dir _mnb_names_header)
     hip_add_library(${_target} SHARED ${_kernel_sources} ${_rtc_sources}
             ${_matmul_nbits_autotune_dir}/matmul_nbits_autotune.cpp
             ${_matmul_lut_src}
@@ -203,6 +253,8 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
             ${CMAKE_CURRENT_SOURCE_DIR}/include
             ${CMAKE_CURRENT_SOURCE_DIR}
             ${CMAKE_CURRENT_BINARY_DIR}
+            ${_gqa_names_dir}
+            ${_mnb_names_dir}
             # matmul_nbits_autotune_generated.h; flatbuffers itself is
             # header-only for reading, so no link library is needed.
             ${CMAKE_BINARY_DIR}/schemas
@@ -214,6 +266,8 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
         DEPENDS
             HipSchemas
     )
+    _rtc_tuned_names_order(${_target} gqa ${_gqa_names_header})
+    _rtc_tuned_names_order(${_target} matmul_nbits ${_mnb_names_header})
     set_target_properties(${_target} PROPERTIES
         OUTPUT_NAME custom_kernels_${_arch}
         FOLDER "custom_kernels"
