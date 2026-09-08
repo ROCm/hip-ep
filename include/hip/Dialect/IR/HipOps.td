@@ -4914,15 +4914,23 @@ def Hip_QMatMulOp : Hip_DpsOp<"qmatmul", /*traits=*/[],
     M = A_scale * B_scale / Y_scale   (folded at lowering time)
     ```
 
-    Shape contract matches `hip.matmul` without the transpose attributes:
+    Shape contract matches `hip.matmul`:
       A: [..., M, K], B: [..., K, N], Y: [broadcast(A.batch, B.batch), M, N].
+
+    Optional `transA` / `transB` (0/1) apply a last-dimension swap on the
+    corresponding operand before multiply, with the same meaning as on
+    `hip.matmul`: `transA` reads A as [..., K, M] and `transB` reads B as
+    [..., N, K]. They carry the compile-time fold of
+    `Transpose(perm=[..,r,r-2])` into MatMul, so a quantized attention
+    `Q @ K^T` still fuses. When unset they default to 0.
 
     Quantization is per-tensor, so every scale and zero point is an attribute.
     A, B and Y each carry their own quantized element type: real QDQ graphs
     commonly pair a `ui8` asymmetric activation with an `i8` symmetric weight.
     A and Y may be 8- or 16-bit, which is what makes A16W8 expressible; B is
     8-bit only, because the lowering's kernel keeps a 16-bit A exact by
-    splitting it into two bytes and that split needs an 8-bit other operand.
+    splitting it into two bytes and splits only A, leaving a wider B with no
+    path through it.
 
     Example:
     ```mlir
@@ -4944,7 +4952,9 @@ def Hip_QMatMulOp : Hip_DpsOp<"qmatmul", /*traits=*/[],
     F32Attr:$B_scale,
     I64Attr:$B_zero_point,
     F32Attr:$Y_scale,
-    I64Attr:$Y_zero_point
+    I64Attr:$Y_zero_point,
+    DefaultValuedAttr<I64Attr, "0">:$transA,
+    DefaultValuedAttr<I64Attr, "0">:$transB
   );
 
   let assemblyFormat = [{

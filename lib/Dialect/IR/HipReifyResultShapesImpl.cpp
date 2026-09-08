@@ -124,8 +124,8 @@ MatmulOp::reifyResultShapes(OpBuilder &b,
 LogicalResult
 QMatMulOp::reifyResultShapes(OpBuilder &b,
                              ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
-  return reifyMatmulLikeShape(getOperation(), b, getA(), getB(), /*transA=*/0,
-                              /*transB=*/0, reifiedReturnShapes);
+  return reifyMatmulLikeShape(getOperation(), b, getA(), getB(), getTransA(),
+                              getTransB(), reifiedReturnShapes);
 }
 
 //===----------------------------------------------------------------------===//

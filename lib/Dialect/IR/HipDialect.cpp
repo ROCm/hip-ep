@@ -733,8 +733,7 @@ LogicalResult QMatMulOp::verify() {
       *this, [&]() -> SmallVector<SmallVector<int64_t>> {
         SmallVector<int64_t> outShape = mlir::hip::inferMatmulShape(
             getShapeOf(getA()), getShapeOf(getB()),
-            [&]() { return this->emitOpError(); }, /*transA=*/0,
-            /*transB=*/0);
+            [&]() { return this->emitOpError(); }, getTransA(), getTransB());
         if (outShape.empty())
           return {};
         return {std::move(outShape)};
