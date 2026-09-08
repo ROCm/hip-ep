@@ -6,7 +6,6 @@
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
-#include "llvm/Support/raw_ostream.h"
 #include "SchemeRuntime.h"
 #include <string>
 
@@ -29,9 +28,13 @@ struct SchemePrintPass : public impl::SchemePrintPassBase<SchemePrintPass> {
 
     ModuleOp module = getOperation();
 
-    llvm::errs() << "\n=== Scheme-based MLIR Printer ===\n";
-    llvm::errs() << "Module: " << module.getName().value_or("<unnamed>") << "\n\n";
+    // Call Scheme function to initialize the pass
+    std::vector<SchemeValue> initArgs = {
+      makeSchemeString(module.getName().value_or("<unnamed>").str().c_str())
+    };
+    callSchemeFunction("pass-initialize", initArgs);
 
+    // Walk all operations and call Scheme function for each
     module.walk([](Operation *op) {
       std::string genericFormStr;
       llvm::raw_string_ostream os(genericFormStr);
@@ -45,13 +48,14 @@ struct SchemePrintPass : public impl::SchemePrintPassBase<SchemePrintPass> {
         makeSchemeString(genericFormStr.c_str())
       };
 
-      std::string result = callSchemeFunction("format-operation", args);
-      if (!result.empty()) {
-        llvm::errs() << result;
-      }
+      // Call Scheme to process this operation
+      // The Scheme function decides what to do (print, transform, etc.)
+      callSchemeFunction("process-operation", args);
     });
 
-    llvm::errs() << "=== End Scheme Printer ===\n\n";
+    // Call Scheme function to finalize the pass
+    std::vector<SchemeValue> finalizeArgs = {};
+    callSchemeFunction("pass-finalize", finalizeArgs);
   }
 };
 

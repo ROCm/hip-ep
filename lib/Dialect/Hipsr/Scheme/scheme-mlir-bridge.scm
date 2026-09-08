@@ -1,7 +1,38 @@
 ;; MLIR-Scheme Bridge Library
 ;; Provides Scheme functions for working with MLIR operations
 
-;; Format an operation as a human-readable string
+;; Print operation information
+;; Called for each operation during the pass
+(define (process-operation op-name num-operands num-results generic-form)
+  (display "Operation: \"")
+  (display op-name)
+  (display "\"\n")
+  (display "  Operands: ")
+  (display num-operands)
+  (display "\n")
+  (display "  Results: ")
+  (display num-results)
+  (display "\n")
+  (display "  Generic form: ")
+  (display generic-form)
+  (display "\n\n"))
+
+;; Pass initialization
+;; Called once when the pass starts
+(define (pass-initialize module-name)
+  (display "\n=== Scheme-based MLIR Printer ===\n")
+  (display "Module: ")
+  (display module-name)
+  (display "\n\n"))
+
+;; Pass finalization
+;; Called once when the pass ends
+(define (pass-finalize)
+  (display "=== End Scheme Printer ===\n\n"))
+
+;; Utility functions below
+
+;; Format an operation as a string (returns string instead of printing)
 (define (format-operation op-name num-operands num-results generic-form)
   (string-append
     "Operation: \"" op-name "\"\n"
