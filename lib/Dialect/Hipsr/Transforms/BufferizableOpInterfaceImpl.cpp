@@ -172,10 +172,12 @@ bool isValueWritten(Value value, const AnalysisState &state) {
 
   while (!worklist.empty()) {
     OpOperand *use = worklist.pop_back_val();
-    if (!visited.insert(use).second)
+    if (!visited.insert(use).second) {
       continue;
-    if (state.bufferizesToMemoryWrite(*use))
+    }
+    if (state.bufferizesToMemoryWrite(*use)) {
       return true;
+    }
     if (state.bufferizesToAliasOnly(*use)) {
       for (const AliasingValue &alias : state.getAliasingValues(*use)) {
         for (OpOperand &aliasUse : alias.value.getUses())
@@ -212,10 +214,19 @@ struct ComputeOpBufferization
     return false;
   }
 
-  bool isWritable(Operation *op, Value value, const AnalysisState &) const {
+  // isWritable is asked about every buffer an argument aliases, so marking an
+  // input read-only also forbids writing whatever produced it. With the input
+  // %a read-only, the buffer it names cannot be written, so %data got copied:
+  //   %a = memref.alloc(%dim) : memref<3x?xi64, #hipsr.mem<device>>
+  //   memref.copy %data, %a
+  //   hipsr.compute(%ctx) ins(%a) outs(%dest) { ... }
+  // An input that the body does write stays read-only.
+  bool isWritable(Operation *op, Value value,
+                  const AnalysisState &state) const {
     if (auto blockArg = dyn_cast<BlockArgument>(value)) {
       return isHipsrDestinationOperand(
-          op->getOpOperand(blockArg.getArgNumber()));
+                 op->getOpOperand(blockArg.getArgNumber())) ||
+             !isValueWritten(blockArg, state);
     }
     return true;
   }
@@ -483,8 +494,10 @@ struct PoolDomainOpBufferization
     return false;
   }
 
-  bool isWritable(Operation *, Value value, const AnalysisState &) const {
-    return !isa<BlockArgument>(value);
+  // An entry argument names its operand's buffer, so it is writable whenever
+  // that buffer is.
+  bool isWritable(Operation *, Value, const AnalysisState &) const {
+    return true;
   }
 
   AliasingValueList getAliasingValues(Operation *op, OpOperand &opOperand,
