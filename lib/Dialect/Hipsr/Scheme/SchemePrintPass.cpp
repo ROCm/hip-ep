@@ -3,7 +3,6 @@
  * Licensed under the MIT License.
  */
 
-#include "SchemeRuntime.h"
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
@@ -12,6 +11,8 @@
 
 #define GEN_PASS_DEF_SCHEMEPRINTPASS
 #include "hip/Dialect/Hipsr/Transforms/Passes.h.inc"
+
+#include "SchemeRuntime.h"
 
 namespace mlir {
 namespace hipsr {
