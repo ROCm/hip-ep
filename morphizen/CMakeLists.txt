@@ -3,7 +3,7 @@
 # ** Licensed under the MIT License.
 ##
 
-cmake_minimum_required(VERSION 3.26)
+cmake_minimum_required(VERSION 3.27)
 project(
   morphizen
   VERSION 1.0.0
