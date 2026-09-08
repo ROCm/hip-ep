@@ -276,14 +276,25 @@ while ops with a declarative `assemblyFormat` ending in
 `attr-dict (`:` type($result_tensors)^)?` print `: tensor<...>`. Using the wrong
 one fails to parse with `error: cannot name an operation with no results`.
 
-Among the elementwise ops, `hip.add` and `hip.mul` are the custom-format
-outliers that take `->`. Everything else takes `:` — `hip.sub`, `hip.min`,
-`hip.max`, and all twelve unary ops. So copying one of the `hip.add` cases in
-`test_binary.mlir` as a starting point means fixing the result separator, which
-is easy to miss because the error points at the following line. Confirm with:
+Only five of the 103 ops in `HipOps.td` are custom-format and take `->`:
+`hip.add`, `hip.mul`, `hip.silu`, `hip.miopen_add` and `hip.miopen_softmax`.
+Three of those are elementwise, so `hip.silu` will hit this the next time the
+decomposition list below is picked up. Everything else takes `:`, including
+`hip.sub`, `hip.min`, `hip.max` and all twelve unary ops.
+
+Copying one of the `hip.add` cases in `test_binary.mlir` as a starting point
+therefore means fixing the result separator, which is easy to miss because the
+error points at the *following* line. Do not infer the format from whether an
+op is unary or binary — `hip.silu` is unary and still takes `->`. Get the full
+list with:
 
 ```powershell
-Select-String -Path include\hip\Dialect\IR\HipOps.td -Pattern 'hasCustomAssemblyFormat'
+$lines = Get-Content include\hip\Dialect\IR\HipOps.td
+$cur = $null
+for ($i = 0; $i -lt $lines.Count; $i++) {
+  if ($lines[$i] -match '^def (Hip_\w+)\s*:') { $cur = $matches[1] }
+  if ($lines[$i] -match 'hasCustomAssemblyFormat\s*=\s*1') { $cur }
+}
 ```
 
 ```mlir
