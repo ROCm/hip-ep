@@ -10,6 +10,7 @@
 extern "C" {
 typedef void* ptr;
 typedef long iptr;
+typedef unsigned int string_char;
 
 void Sscheme_init(void (*)(void));
 void Sregister_boot_file_bytes(const char*, const unsigned char*, size_t);
@@ -23,12 +24,15 @@ ptr Stop_level_value(ptr);
 ptr Sinteger(iptr);
 iptr Sinteger_value(ptr);
 ptr Sstring(const char*);
-const char* Sstring_value(ptr);
 ptr Scons(ptr, ptr);
 const char* Skernel_version();
 
 #define Snil ((ptr)0x26)
 #define Sfalse ((ptr)0x6)
+#define TO_VOIDP(x) ((void*)(x))
+#define Sstring_length(x) ((iptr)((unsigned long)(*((iptr *)TO_VOIDP((unsigned long)(x)+1)))>>4))
+#define Schar_value(x) ((string_char)((unsigned long)(x)>>8))
+#define Sstring_ref(x,i) Schar_value(((string_char *)TO_VOIDP((unsigned long)(x)+9))[i])
 }
 
 #include "ChezBootPetite.h"
@@ -73,12 +77,14 @@ bool initializeSchemeRuntime() {
   ptr eval_sym = Stop_level_value(Sstring_to_symbol("eval"));
   ptr read_sym = Stop_level_value(Sstring_to_symbol("read"));
   ptr open_string_input_port_sym = Stop_level_value(Sstring_to_symbol("open-string-input-port"));
+  ptr eof_object_p = Stop_level_value(Sstring_to_symbol("eof-object?"));
 
   ptr port = Scall1(open_string_input_port_sym, Sstring(scm_code.c_str()));
 
   while (true) {
     ptr expr = Scall1(read_sym, port);
-    if (expr == Stop_level_value(Sstring_to_symbol("eof-object")))
+    // Check if we hit EOF using eof-object? predicate
+    if (Scall1(eof_object_p, expr) != Sfalse)
       break;
     Scall1(eval_sym, expr);
   }
@@ -108,8 +114,14 @@ std::string callSchemeFunction(const char* functionName,
 
   ptr string_p = Stop_level_value(Sstring_to_symbol("string?"));
   if (Scall1(string_p, result) != Sfalse) {
-    const char* Sstring_value(ptr);
-    return std::string(Sstring_value(result));
+    // Extract string using macros - Chez strings are 32-bit chars, convert to C string
+    iptr len = Sstring_length(result);
+    std::string str;
+    str.reserve(len);
+    for (iptr i = 0; i < len; i++) {
+      str.push_back(static_cast<char>(Sstring_ref(result, i)));
+    }
+    return str;
   }
 
   return "";
