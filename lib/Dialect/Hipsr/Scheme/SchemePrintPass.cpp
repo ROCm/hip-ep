@@ -7,15 +7,14 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/Support/raw_ostream.h"
+#include "SchemeRuntime.h"
 #include <string>
-
-#define GEN_PASS_DEF_SCHEMEPRINTPASS
-#include "hip/Dialect/Hipsr/Transforms/Passes.h.inc"
 
 namespace mlir {
 namespace hipsr {
 
-#include "SchemeRuntime.h"
+#define GEN_PASS_DEF_SCHEMEPRINTPASS
+#include "hip/Dialect/Hipsr/Transforms/Passes.h.inc"
 
 namespace {
 
