@@ -713,9 +713,11 @@ extern "C" int hip_linear_attention_decode(
 // instead of per-token rank-1 updates.  Validated bit-close to the naive
 // per-token recurrence (== ORT CPU) in fp64, and cosine ~0.9999999 in fp16.
 //
-// Only the gated_delta rule with scalar log-decay (decay_per_key_dim==0) is
-// implemented here; the launcher declines other configs so the runtime falls
-// back to the per-token loop.
+// The gated and gated_delta rules with scalar log-decay
+// (decay_per_key_dim==0) are implemented here; the launcher declines other
+// configs so the runtime falls back to the per-token loop. Gated is the
+// beta=1, T=0, W=0 special case of the affine chunk formulation below:
+// Uloc=V and no triangular solve is required.
 static constexpr int LA_CHUNK         = 16;   // tokens per chunk
 
 //===----------------------------------------------------------------------===//
@@ -766,7 +768,7 @@ static constexpr int LA_PAR_THREADS = 256;
 #define LA_SST_PAD 8   // state tile,    row stride dk + pad
 #define LA_KT_PAD  8   // Ktilde^T tile, row stride LA_CHUNK + pad
 
-template <typename T>
+template <typename T, bool GATED_ONLY>
 __global__ void la_pf_pass1_local(
     const T* __restrict__ key,
     const T* __restrict__ value,
@@ -811,22 +813,30 @@ __global__ void la_pf_pass1_local(
     float*  rlast= bsm + LA_CHUNK;                 // C
     __half* Ksm  = (__half*)(rlast + LA_CHUNK);    // C*dk (half)
 
-    // The Tm fragment load below reads the whole C*dk tile, including the rows
-    // past Ceff that the scalar version never touched, so they have to hold
+    // Only the delta rules read Ksm (the T fragment load and the W solve).
+    // Gated has T=0 and no W, so it neither fills nor reserves the tile.
+    // The Tm fragment load reads the whole C*dk tile, including the rows past
+    // Ceff that the scalar version never touched, so they have to hold
     // something finite.
-    for (int idx = Ceff * dk + tid; idx < LA_CHUNK * dk; idx += nthreads)
-        Ksm[idx] = __float2half(0.f);
-    for (int idx = tid; idx < Ceff * dk; idx += nthreads) {
-        int t = idx / dk, i = idx % dk;
-        Ksm[t * dk + i] = __float2half(to_float(
-            key[b * k_bs + (int64_t)(c0 + t) * n_k * dk +
-                (int64_t)h_k * dk + i]));
+    if constexpr (!GATED_ONLY) {
+        for (int idx = Ceff * dk + tid; idx < LA_CHUNK * dk; idx += nthreads)
+            Ksm[idx] = __float2half(0.f);
+        for (int idx = tid; idx < Ceff * dk; idx += nthreads) {
+            int t = idx / dk, i = idx % dk;
+            Ksm[t * dk + i] = __float2half(to_float(
+                key[b * k_bs + (int64_t)(c0 + t) * n_k * dk +
+                    (int64_t)h_k * dk + i]));
+        }
     }
     for (int t = tid; t < Ceff; t += nthreads) {
-        const int64_t beta_idx =
-            beta_per_head ? b * beta_bs + (int64_t)(c0 + t) * Hkv + g
-                          : b * beta_bs + (int64_t)(c0 + t);
-        bsm[t] = to_float(beta_in[beta_idx]);
+        if constexpr (GATED_ONLY) {
+            bsm[t] = 1.f;
+        } else {
+            const int64_t beta_idx =
+                beta_per_head ? b * beta_bs + (int64_t)(c0 + t) * Hkv + g
+                              : b * beta_bs + (int64_t)(c0 + t);
+            bsm[t] = to_float(beta_in[beta_idx]);
+        }
     }
     __syncthreads();
     if (tid == 0) {
@@ -846,7 +856,10 @@ __global__ void la_pf_pass1_local(
     // T[t][s] strict-lower, on the matrix cores. Same shape as pass 3's Pm: A
     // is K row-major, B wants K^T column-major, which is the same row-major
     // Ksm, so one operand serves as both.
-    if (tid < 32) {
+    if constexpr (GATED_ONLY) {
+        for (int idx = tid; idx < LA_CHUNK * LA_CHUNK; idx += nthreads)
+            Tm[idx] = 0.f;
+    } else if (tid < 32) {
         const int ln = tid % LA_WT;
         const int pr = tid / LA_WT;
         // K-axis base for this lane's pair-half: 0 on gfx11 (each lane loads
@@ -882,14 +895,16 @@ __global__ void la_pf_pass1_local(
         Buf[t * dv + j] = bsm[t] * vtj;
     }
     __syncthreads();
-    for (int t = 1; t < Ceff; t++) {
-        for (int j = tid; j < dv; j += nthreads) {
-            float acc = Buf[t * dv + j];
-            for (int s = 0; s < t; s++)
-                acc -= Tm[t * Ceff + s] * Buf[s * dv + j];
-            Buf[t * dv + j] = acc;
+    if constexpr (!GATED_ONLY) {
+        for (int t = 1; t < Ceff; t++) {
+            for (int j = tid; j < dv; j += nthreads) {
+                float acc = Buf[t * dv + j];
+                for (int s = 0; s < t; s++)
+                    acc -= Tm[t * Ceff + s] * Buf[s * dv + j];
+                Buf[t * dv + j] = acc;
+            }
+            __syncthreads();
         }
-        __syncthreads();
     }
     for (int idx = tid; idx < LA_CHUNK * dv; idx += nthreads) {
         int t = idx / dv;
@@ -898,23 +913,30 @@ __global__ void la_pf_pass1_local(
     __syncthreads();
 
     // --- Solve 2: W = (I-trilT)^{-1}(diag(beta.*A) K) ---
-    for (int idx = tid; idx < Ceff * dk; idx += nthreads) {
-        int t = idx / dk, i = idx % dk;
-        Buf[t * dk + i] = bsm[t] * Asm[t] * __half2float(Ksm[t * dk + i]);
-    }
-    __syncthreads();
-    for (int t = 1; t < Ceff; t++) {
-        for (int i = tid; i < dk; i += nthreads) {
-            float acc = Buf[t * dk + i];
-            for (int s = 0; s < t; s++)
-                acc -= Tm[t * Ceff + s] * Buf[s * dk + i];
-            Buf[t * dk + i] = acc;
+    // Pure gated recurrence has no state-dependent delta correction, hence
+    // W does not exist and the fp32 gated scan/pass3 never reads W_g. Do not
+    // clear/store it through Buf: Buf is sized C*dv, which may be smaller than
+    // C*dk (Nemotron has dv=64, dk=128) and would overwrite Asm/clog/bsm/rlast.
+    if constexpr (!GATED_ONLY) {
+        for (int idx = tid; idx < Ceff * dk; idx += nthreads) {
+            int t = idx / dk, i = idx % dk;
+            Buf[t * dk + i] = bsm[t] * Asm[t] * __half2float(Ksm[t * dk + i]);
         }
         __syncthreads();
-    }
-    for (int idx = tid; idx < LA_CHUNK * dk; idx += nthreads) {
-        int t = idx / dk;
-        W_g[base * (LA_CHUNK * dk) + idx] = (t < Ceff) ? Buf[idx] : 0.f;
+        for (int t = 1; t < Ceff; t++) {
+            for (int i = tid; i < dk; i += nthreads) {
+                float acc = Buf[t * dk + i];
+                for (int s = 0; s < t; s++)
+                    acc -= Tm[t * Ceff + s] * Buf[s * dk + i];
+                Buf[t * dk + i] = acc;
+            }
+            __syncthreads();
+        }
+        for (int idx = tid; idx < LA_CHUNK * dk; idx += nthreads) {
+            int t = idx / dk;
+            W_g[base * (LA_CHUNK * dk) + idx] =
+                (t < Ceff) ? Buf[idx] : 0.f;
+        }
     }
     // Store only the per-token rlast scalar (C floats/chunk) instead of the
     // full Ktilde = rlast*K tile (C*dk floats/chunk). The scan rebuilds Ktilde
@@ -1237,6 +1259,190 @@ __global__ void __launch_bounds__(256) la_pf_pass3_wmma(
     }
 }
 
+// Gated (not gated_delta) fp32 scan/output. Nemotron-H keeps LinearAttention
+// in fp32; the WMMA path above downcasts S/Q/K to fp16 every chunk and that
+// is enough to derail generation. Gated has W=0 and U=V, so these kernels
+// keep the affine recurrence in fp32 and skip the W GEMMs.
+template <typename T>
+__global__ void la_pf_scan_f32(
+    const T* __restrict__ key,
+    const float* __restrict__ Uloc_g,
+    const float* __restrict__ rlast_g,
+    const float* __restrict__ alast_g,
+    float* __restrict__ S0_g,
+    float* __restrict__ carry_g,
+    T* __restrict__ state,
+    int seq_len, int Hkv, int n_k, int dk, int dv,
+    int nchunks_win, int chunk_begin, int is_first, int is_last)
+{
+    const int split = blockIdx.x % LA_SCAN_NSPLIT;
+    const int bg = blockIdx.x / LA_SCAN_NSPLIT;
+    const int b  = bg / Hkv;
+    const int g  = bg % Hkv;
+    const int dvs = dv / LA_SCAN_NSPLIT;
+    const int j0  = split * dvs;
+    const int tid = threadIdx.x;
+    const int nthreads = blockDim.x;
+    const int h_k = g * n_k / Hkv;
+    const int64_t k_bs = (int64_t)seq_len * n_k * dk;
+    const int64_t state_bs = (int64_t)Hkv * dk * dv;
+    T* Sout = state + b * state_bs + (int64_t)g * dk * dv;
+    float* carry = carry_g + (int64_t)bg * dk * dv;
+
+    extern __shared__ float smem[];
+    float* Ssm  = smem;                               // [dvs, dk]
+    float* Ubuf = Ssm + dvs * dk;                     // [C, dvs]
+    float* Kbuf = Ubuf + LA_CHUNK * dvs;              // [C, dk]
+
+    for (int idx = tid; idx < dk * dvs; idx += nthreads) {
+        const int i = idx / dvs, jj = idx % dvs;
+        const int64_t gi = (int64_t)i * dv + j0 + jj;
+        Ssm[jj * dk + i] = is_first ? to_float(Sout[gi]) : carry[gi];
+    }
+    __syncthreads();
+
+    for (int cw = 0; cw < nchunks_win; cw++) {
+        const int64_t base = ((int64_t)(b * Hkv + g) * nchunks_win + cw);
+        const int c0   = (chunk_begin + cw) * LA_CHUNK;
+        const int Ceff = min(LA_CHUNK, seq_len - c0);
+        for (int idx = tid; idx < dvs * dk; idx += nthreads) {
+            const int jj = idx / dk, i = idx % dk;
+            S0_g[base * (dk * dv) + (int64_t)(j0 + jj) * dk + i] =
+                Ssm[jj * dk + i];
+        }
+        for (int idx = tid; idx < LA_CHUNK * dvs; idx += nthreads) {
+            const int t = idx / dvs, jj = idx % dvs;
+            Ubuf[t * dvs + jj] =
+                (t < Ceff) ? Uloc_g[base * (LA_CHUNK * dv) +
+                                    (int64_t)t * dv + j0 + jj]
+                           : 0.f;
+        }
+        for (int idx = tid; idx < LA_CHUNK * dk; idx += nthreads) {
+            const int t = idx / dk, i = idx % dk;
+            const float rl = rlast_g[base * LA_CHUNK + t];
+            Kbuf[t * dk + i] = (t < Ceff)
+                ? rl * to_float(key[b * k_bs + (int64_t)(c0 + t) * n_k * dk +
+                                    (int64_t)h_k * dk + i])
+                : 0.f;
+        }
+        const float a_last = alast_g[base];
+        __syncthreads();
+        for (int idx = tid; idx < dvs * dk; idx += nthreads) {
+            const int jj = idx / dk, i = idx % dk;
+            float acc = a_last * Ssm[jj * dk + i];
+            for (int t = 0; t < Ceff; t++)
+                acc += Kbuf[t * dk + i] * Ubuf[t * dvs + jj];
+            Ssm[jj * dk + i] = acc;
+        }
+        __syncthreads();
+    }
+    for (int idx = tid; idx < dk * dvs; idx += nthreads) {
+        const int i = idx / dvs, jj = idx % dvs;
+        const int64_t gi = (int64_t)i * dv + j0 + jj;
+        if (is_last)
+            Sout[gi] = from_float<T>(Ssm[jj * dk + i]);
+        else
+            carry[gi] = Ssm[jj * dk + i];
+    }
+}
+
+template <typename T>
+__global__ void la_pf_pass3_f32(
+    const T* __restrict__ query,
+    const T* __restrict__ key,
+    const T* __restrict__ decay,
+    const float* __restrict__ Uloc_g,
+    const float* __restrict__ S0_g,
+    T* __restrict__ output,
+    int seq_len, int Hq, int Hkv, int n_k, int dk, int dv,
+    float scale, int nchunks_win, int chunk_begin)
+{
+    const int cw  = blockIdx.x % nchunks_win;
+    int tmp       = blockIdx.x / nchunks_win;
+    const int g   = tmp % Hkv;
+    const int b   = tmp / Hkv;
+    const int tid = threadIdx.x;
+    const int nthreads = blockDim.x;
+    const int c0   = (chunk_begin + cw) * LA_CHUNK;
+    const int Ceff = min(LA_CHUNK, seq_len - c0);
+
+    const bool inverse_gqa = (Hq < Hkv);
+    const int Hout  = Hq >= Hkv ? Hq : Hkv;
+    const int h_q   = inverse_gqa ? (g * Hq / Hkv) : (g * (Hq / Hkv));
+    const int h_out = inverse_gqa ? g : (g * (Hq / Hkv));
+    const int h_k   = g * n_k / Hkv;
+
+    const int64_t q_bs     = (int64_t)seq_len * Hq   * dk;
+    const int64_t k_bs     = (int64_t)seq_len * n_k  * dk;
+    const int64_t out_bs   = (int64_t)seq_len * Hout * dv;
+    const int64_t decay_bs = (int64_t)seq_len * Hkv;
+    const int64_t base = ((int64_t)(b * Hkv + g) * nchunks_win + cw);
+    const float* S0 = S0_g + base * (dk * dv);
+    const float* Ul = Uloc_g + base * (LA_CHUNK * dv);
+
+    extern __shared__ float smem[];
+    float* Qsm  = smem;                               // C*dk
+    float* Ksm  = Qsm + LA_CHUNK * dk;                // C*dk
+    float* Pm   = Ksm + LA_CHUNK * dk;                // C*C
+    float* Asm  = Pm + LA_CHUNK * LA_CHUNK;
+    float* clog = Asm + LA_CHUNK;
+
+    for (int idx = tid; idx < LA_CHUNK * dk; idx += nthreads) {
+        Qsm[idx] = 0.f;
+        Ksm[idx] = 0.f;
+    }
+    __syncthreads();
+    for (int idx = tid; idx < Ceff * dk; idx += nthreads) {
+        int t = idx / dk, i = idx % dk;
+        Qsm[t * dk + i] = to_float(
+            query[b * q_bs + (int64_t)(c0 + t) * Hq * dk +
+                  (int64_t)h_q * dk + i]);
+        Ksm[t * dk + i] = to_float(
+            key[b * k_bs + (int64_t)(c0 + t) * n_k * dk +
+                (int64_t)h_k * dk + i]);
+    }
+    __syncthreads();
+    if (tid == 0) {
+        float acc = 0.f;
+        for (int t = 0; t < Ceff; t++) {
+            acc += to_float(decay[b * decay_bs + (int64_t)(c0 + t) * Hkv + g]);
+            clog[t] = acc;
+            Asm[t]  = expf(acc);
+        }
+    }
+    __syncthreads();
+    for (int idx = tid; idx < Ceff * Ceff; idx += nthreads) {
+        const int t = idx / Ceff, s = idx % Ceff;
+        if (s > t) {
+            Pm[t * Ceff + s] = 0.f;
+            continue;
+        }
+        const float* qr = Qsm + t * dk;
+        const float* kr = Ksm + s * dk;
+        float qk = 0.f;
+        for (int i = 0; i < dk; i++)
+            qk += qr[i] * kr[i];
+        Pm[t * Ceff + s] = expf(clog[t] - clog[s]) * qk;
+    }
+    __syncthreads();
+    for (int idx = tid; idx < Ceff * dv; idx += nthreads) {
+        const int t = idx / dv, j = idx % dv;
+        const float* qr = Qsm + t * dk;
+        // la_pf_scan_f32 writes each chunk's S0 as [dv][dk], so row j is
+        // contiguous over i.
+        const float* sr = S0 + (int64_t)j * dk;
+        float qs = 0.f;
+        for (int i = 0; i < dk; i++)
+            qs += qr[i] * sr[i];
+        float intra = 0.f;
+        for (int s = 0; s <= t; s++)
+            intra += Pm[t * Ceff + s] * Ul[s * dv + j];
+        output[b * out_bs + (int64_t)(c0 + t) * Hout * dv +
+               (int64_t)h_out * dv + j] =
+            from_float<T>(scale * (Asm[t] * qs + intra));
+    }
+}
+
 // Chunks processed per launch window. The passes run one window at a time, so
 // the per-(head,chunk) scratch is sized for a window instead of the whole
 // sequence and stops growing with seq_len. 32 chunks = 512 tokens still gives
@@ -1264,12 +1470,14 @@ static inline LaScratchLayout la_scratch_layout(int B, int seq_len, int Hkv,
     const size_t sz_W     = (size_t)ncb * LA_CHUNK * dk * sizeof(float);
     const size_t sz_rlast = (size_t)ncb * LA_CHUNK * sizeof(float);
     const size_t sz_alast = (size_t)ncb * sizeof(float);
-    const size_t sz_S0    = (size_t)ncb * dk * dv * sizeof(__half);
+    // Sized for the fp32 gated scan (Nemotron-H). The gated_delta WMMA path
+    // only fills the leading half of each tile and ignores the rest.
+    const size_t sz_S0    = (size_t)ncb * dk * dv * sizeof(float);
     // Cross-window carry of the recurrent state, one tile per (batch, kv head).
     // A single-window prefill hands off through `state` directly and never
     // touches the carry, so it does not pay for it.
     const size_t sz_carry = (nchunks > win)
-        ? (size_t)B * Hkv * dk * dv * sizeof(__half) : 0;
+        ? (size_t)B * Hkv * dk * dv * sizeof(float) : 0;
     LaScratchLayout L;
     L.oU = 0;
     L.oW = align(L.oU + sz_Uloc);
@@ -1289,7 +1497,7 @@ extern "C" HIP_KERNEL_API size_t hip_linear_attention_prefill_scratch_bytes(
     return la_scratch_layout(B, seq_len, Hkv, dk, dv).total;
 }
 
-template <typename T>
+template <typename T, bool GATED_ONLY>
 static int la_launch_parallel(
     hipStream_t s, const T* q, const T* k, const T* v, const T* dec,
     const T* beta, T* state, T* out,
@@ -1307,27 +1515,38 @@ static int la_launch_parallel(
     float*  alast_g = (float*)(sp + L.oA);
     __half* S0_g    = (__half*)(sp + L.oS);
     __half* carry_g = (__half*)(sp + L.oC);
+    float*  S0_f    = (float*)(sp + L.oS);
+    float*  carry_f = (float*)(sp + L.oC);
 
     const int block = LA_PAR_THREADS;
-    // Pass 1 LDS: Tm + Buf(=C*dv) + 4 vecs (float), plus K tile (half).
+    // Pass 1 LDS: Tm + Buf(=C*dv) + 4 vecs (float), plus the K tile (half) that
+    // only the delta rules read. At dk=128 that tile is 43% of the budget and
+    // is what holds the gated instantiation to 6 blocks/CU, so gated does not
+    // reserve it.
     const size_t s1 = (size_t)(LA_CHUNK * LA_CHUNK + LA_CHUNK * dv +
                                4 * LA_CHUNK) * sizeof(float) +
-                      (size_t)(LA_CHUNK * dk) * sizeof(__half);
+                      (GATED_ONLY ? 0
+                                  : (size_t)(LA_CHUNK * dk) * sizeof(__half));
     // Pass 2 (scan) LDS: padded state tile + the shared A-operand buffer + U,
     // all fp16 now that the scan runs on the matrix cores, which leaves it
     // smaller than the 18,432 B the scalar version needed. The dv-split
     // shrinks everything except the dv-independent A buffer.
     if (dv % LA_SCAN_NSPLIT != 0) return 1;
     const int dvs = dv / LA_SCAN_NSPLIT;
-    if (dvs % LA_WT || dk % LA_WT || LA_CHUNK % LA_WT) return 1;
-    const size_t s2 = (size_t)(dvs * (dk + LA_SST_PAD) +
-                               (LA_CHUNK * dk > dk * (LA_CHUNK + LA_KT_PAD)
-                                    ? LA_CHUNK * dk : dk * (LA_CHUNK + LA_KT_PAD)) +
-                               dvs * LA_CHUNK) * sizeof(__half);
-    // Pass 3 (WMMA) LDS: QWS(M*dv) + Pm + (Asm,clog) floats, QW(M*dk) + K(C*dk) half.
-    const size_t s3 = (size_t)(2 * LA_CHUNK * dv + LA_CHUNK * LA_CHUNK +
-                               2 * LA_CHUNK) * sizeof(float) +
-                      (size_t)(2 * LA_CHUNK * dk + LA_CHUNK * dk) * sizeof(__half);
+    const bool gated_f32 = GATED_ONLY;
+    if (!gated_f32 && (dvs % LA_WT || dk % LA_WT || LA_CHUNK % LA_WT)) return 1;
+    const size_t s2 = gated_f32
+        ? (size_t)(dvs * dk + LA_CHUNK * dvs + LA_CHUNK * dk) * sizeof(float)
+        : (size_t)(dvs * (dk + LA_SST_PAD) +
+                   (LA_CHUNK * dk > dk * (LA_CHUNK + LA_KT_PAD)
+                        ? LA_CHUNK * dk : dk * (LA_CHUNK + LA_KT_PAD)) +
+                   dvs * LA_CHUNK) * sizeof(__half);
+    const size_t s3 = gated_f32
+        ? (size_t)(2 * LA_CHUNK * dk + LA_CHUNK * LA_CHUNK + 2 * LA_CHUNK) *
+              sizeof(float)
+        : (size_t)(2 * LA_CHUNK * dv + LA_CHUNK * LA_CHUNK +
+                   2 * LA_CHUNK) * sizeof(float) +
+              (size_t)(2 * LA_CHUNK * dk + LA_CHUNK * dk) * sizeof(__half);
     if (s1 > 64 * 1024 || s2 > 64 * 1024 || s3 > 64 * 1024) return 1;
 
     // With the dv-split there are LA_SCAN_NSPLIT times as many scan blocks and
@@ -1348,16 +1567,27 @@ static int la_launch_parallel(
         const int is_first = (cbeg == 0) ? 1 : 0;
         const int is_last  = (cbeg + win >= nchunks) ? 1 : 0;
 
-        hipLaunchKernelGGL(la_pf_pass1_local<T>, dim3((unsigned)ncb), dim3(block),
+        hipLaunchKernelGGL((la_pf_pass1_local<T, GATED_ONLY>),
+            dim3((unsigned)ncb), dim3(block),
             s1, s, k, v, dec, beta, Uloc_g, W_g, rlast_g, alast_g,
             seq_len, Hkv, Nk, dk, dv, beta_per_head, win, cbeg);
-        hipLaunchKernelGGL(la_pf_scan<T>,
-            dim3((unsigned)(B * Hkv * LA_SCAN_NSPLIT)), dim3(scan_block),
-            s2, s, k, Uloc_g, W_g, rlast_g, alast_g, S0_g, carry_g, state,
-            seq_len, Hkv, Nk, dk, dv, win, cbeg, is_first, is_last);
-        hipLaunchKernelGGL(la_pf_pass3_wmma<T>, dim3((unsigned)ncb), dim3(256),
-            s3, s, q, k, dec, Uloc_g, W_g, S0_g, out,
-            seq_len, Hq, Hkv, Nk, dk, dv, scale, win, cbeg);
+        if (gated_f32) {
+            hipLaunchKernelGGL(la_pf_scan_f32<T>,
+                dim3((unsigned)(B * Hkv * LA_SCAN_NSPLIT)), dim3(scan_block),
+                s2, s, k, Uloc_g, rlast_g, alast_g, S0_f, carry_f, state,
+                seq_len, Hkv, Nk, dk, dv, win, cbeg, is_first, is_last);
+            hipLaunchKernelGGL(la_pf_pass3_f32<T>, dim3((unsigned)ncb),
+                dim3(256), s3, s, q, k, dec, Uloc_g, S0_f, out, seq_len, Hq,
+                Hkv, Nk, dk, dv, scale, win, cbeg);
+        } else {
+            hipLaunchKernelGGL(la_pf_scan<T>,
+                dim3((unsigned)(B * Hkv * LA_SCAN_NSPLIT)), dim3(scan_block),
+                s2, s, k, Uloc_g, W_g, rlast_g, alast_g, S0_g, carry_g, state,
+                seq_len, Hkv, Nk, dk, dv, win, cbeg, is_first, is_last);
+            hipLaunchKernelGGL(la_pf_pass3_wmma<T>, dim3((unsigned)ncb),
+                dim3(256), s3, s, q, k, dec, Uloc_g, W_g, S0_g, out, seq_len,
+                Hq, Hkv, Nk, dk, dv, scale, win, cbeg);
+        }
     }
 
     hipError_t err = hipGetLastError();
@@ -1395,45 +1625,67 @@ extern "C" int hip_linear_attention_prefill_chunked(
 {
     // Decline (return 1 -> caller falls back to per-token loop) for any config
     // this kernel does not implement.
-    if (update_rule != LA_RULE_GATED_DELTA) return 1;
+    if (update_rule != LA_RULE_GATED &&
+        update_rule != LA_RULE_GATED_DELTA) return 1;
     if (decay_per_key_dim != 0) return 1;          // only scalar log-decay
     if (seq_len <= 1) return 1;                      // decode handled elsewhere
     if (B <= 0 || Hkv <= 0 || Hq <= 0 || Nk <= 0) return 1;
     if (Hq >= Hkv ? (Hq % Hkv != 0) : (Hkv % Hq != 0)) return 1;
     if (Hkv % Nk != 0) return 1;
-    if (!decay || !beta) return 1;                  // gated_delta needs both
+    if (!decay) return 1;
+    if (update_rule == LA_RULE_GATED_DELTA && !beta) return 1;
 
     const int dk_i = static_cast<int>(dk);
     const int dv_i = static_cast<int>(dv);
 
     const int beta_per_head_i = beta_per_head ? 1 : 0;
 
-    // Pass 3 runs the stacked [Q;W]@S0 GEMM on the RDNA3 WMMA cores
-    // (16x16x16), which requires dk and dv to be multiples of 16; decline
-    // otherwise (return 1) so the runtime falls back to the per-token loop.
-    if (dk_i % 16 != 0 || dv_i % 16 != 0) return 1;
+    // Pass 3 of gated_delta runs stacked [Q;W]@S0 on WMMA (16x16x16).
+    // Gated uses the fp32 scan/output kernels and does not need that alignment.
+    if (update_rule == LA_RULE_GATED_DELTA &&
+        (dk_i % 16 != 0 || dv_i % 16 != 0)) return 1;
 
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
 
+    const bool gated_only = update_rule == LA_RULE_GATED;
     int rc;
-    if (type == 0)
-        rc = la_launch_parallel<float>(hip_stream,
+    if (type == 0) {
+      if (gated_only)
+        rc = la_launch_parallel<float, true>(hip_stream,
             static_cast<const float*>(query), static_cast<const float*>(key),
             static_cast<const float*>(value), static_cast<const float*>(decay),
             static_cast<const float*>(beta), static_cast<float*>(state),
             static_cast<float*>(output), (int)B, (int)seq_len, (int)Hq,
             (int)Hkv, (int)Nk, dk_i, dv_i, scale, beta_per_head_i,
             scratch, scratch_bytes);
-    else if (type == 1)
-        rc = la_launch_parallel<__half>(hip_stream,
+      else
+        rc = la_launch_parallel<float, false>(hip_stream,
+            static_cast<const float*>(query), static_cast<const float*>(key),
+            static_cast<const float*>(value), static_cast<const float*>(decay),
+            static_cast<const float*>(beta), static_cast<float*>(state),
+            static_cast<float*>(output), (int)B, (int)seq_len, (int)Hq,
+            (int)Hkv, (int)Nk, dk_i, dv_i, scale, beta_per_head_i,
+            scratch, scratch_bytes);
+    } else if (type == 1) {
+      if (gated_only)
+        rc = la_launch_parallel<__half, true>(hip_stream,
             static_cast<const __half*>(query), static_cast<const __half*>(key),
             static_cast<const __half*>(value), static_cast<const __half*>(decay),
             static_cast<const __half*>(beta), static_cast<__half*>(state),
             static_cast<__half*>(output), (int)B, (int)seq_len, (int)Hq,
             (int)Hkv, (int)Nk, dk_i, dv_i, scale, beta_per_head_i,
             scratch, scratch_bytes);
-    else if (type == 2)
-        rc = la_launch_parallel<__hip_bfloat16>(hip_stream,
+      else
+        rc = la_launch_parallel<__half, false>(hip_stream,
+            static_cast<const __half*>(query), static_cast<const __half*>(key),
+            static_cast<const __half*>(value), static_cast<const __half*>(decay),
+            static_cast<const __half*>(beta), static_cast<__half*>(state),
+            static_cast<__half*>(output), (int)B, (int)seq_len, (int)Hq,
+            (int)Hkv, (int)Nk, dk_i, dv_i, scale, beta_per_head_i,
+            scratch, scratch_bytes);
+    } else if (type == 2) {
+      if (gated_only)
+        rc = la_launch_parallel<__hip_bfloat16, true>(hip_stream,
             static_cast<const __hip_bfloat16*>(query),
             static_cast<const __hip_bfloat16*>(key),
             static_cast<const __hip_bfloat16*>(value),
@@ -1443,8 +1695,20 @@ extern "C" int hip_linear_attention_prefill_chunked(
             static_cast<__hip_bfloat16*>(output), (int)B, (int)seq_len,
             (int)Hq, (int)Hkv, (int)Nk, dk_i, dv_i, scale, beta_per_head_i,
             scratch, scratch_bytes);
-    else
+      else
+        rc = la_launch_parallel<__hip_bfloat16, false>(hip_stream,
+            static_cast<const __hip_bfloat16*>(query),
+            static_cast<const __hip_bfloat16*>(key),
+            static_cast<const __hip_bfloat16*>(value),
+            static_cast<const __hip_bfloat16*>(decay),
+            static_cast<const __hip_bfloat16*>(beta),
+            static_cast<__hip_bfloat16*>(state),
+            static_cast<__hip_bfloat16*>(output), (int)B, (int)seq_len,
+            (int)Hq, (int)Hkv, (int)Nk, dk_i, dv_i, scale, beta_per_head_i,
+            scratch, scratch_bytes);
+    } else {
         return 1;
+    }
 
     // 0 on success; nonzero -> caller falls back to the per-token loop.
     return rc;

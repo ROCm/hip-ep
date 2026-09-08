@@ -93,6 +93,27 @@ inline mlir::Value readbackShapeEntryToHost(mlir::OpBuilder &b,
   if (mlir::DenseElementsAttr dense = getConstantDense(shape))
     if (idx < dense.getNumElements())
       return materializeConstScalar(b, loc, dense, elemTy, idx);
+
+  // `ReshapeShapeFold` rewrites Reshape(data, Shape(src)) into a
+  // tensor.from_elements of host-side tensor.dim/index_cast values.  Those
+  // values are already available on the host; materialising the temporary
+  // shape tensor and reading each entry back through the device would add one
+  // D2H copy + stream synchronization per dimension.  This is particularly
+  // costly for Nemotron's Mamba norm reshape (three dimensions x 40 layers).
+  //
+  // Peel shape-refining tensor.cast ops, then forward the requested SSA value
+  // directly.  This preserves the exact dynamic extent while avoiding the
+  // otherwise redundant host -> device -> host round trip.
+  mlir::Value shapeSource = shape;
+  while (auto castOp = shapeSource.getDefiningOp<mlir::tensor::CastOp>())
+    shapeSource = castOp.getSource();
+  if (auto fromElements =
+          shapeSource.getDefiningOp<mlir::tensor::FromElementsOp>()) {
+    auto elements = fromElements.getElements();
+    if (idx >= 0 && idx < static_cast<int64_t>(elements.size()))
+      return elements[idx];
+  }
+
   llvm::SmallVector<mlir::OpFoldResult> offsets{b.getIndexAttr(idx)};
   llvm::SmallVector<mlir::OpFoldResult> sizes{b.getIndexAttr(1)};
   llvm::SmallVector<mlir::OpFoldResult> strides{b.getIndexAttr(1)};

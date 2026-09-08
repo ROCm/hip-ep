@@ -1999,6 +1999,35 @@ HIP_KERNEL_API int hip_matmul_nbits(
     const void* pre_unpacked_zp_u8,
     const void* pre_unpacked_zp_fp16);
 
+/* Ragged expert-batch int4 WMMA for QMoE prefill.
+ *
+ * A/output store the expert slices back-to-back in routing order, so slice e
+ * starts at row expert_row_offsets[e] and holds expert_counts[e] valid rows.
+ * That keeps the buffers at valid_rows rows instead of num_experts*max_m.
+ * B/scales are contiguous expert-major tensors. One launch covers every expert
+ * and skips empty/invalid row tiles on device; max_m is only the host-side
+ * upper bound on any single expert_counts entry and sizes grid.y. Wide-N (FC1)
+ * uses a 32x64 tile; long-K shapes use 64x64 on architectures whose policy
+ * enables it. valid_rows is the sum of expert_counts and lets the selector
+ * account for ragged density.
+ */
+HIP_KERNEL_API int hip_matmul_nbits_grouped_wmma(
+    void* stream,
+    const void* A,
+    const void* B,
+    const void* scales,
+    const void* expert_counts,
+    const void* expert_row_offsets,
+    void* output,
+    int64_t max_m,
+    int64_t valid_rows,
+    int64_t num_experts,
+    int64_t N,
+    int64_t K,
+    int64_t bits,
+    int64_t block_size,
+    int64_t element_size_bytes);
+
 /* W4A8 integer-dot-product (dp4a) GEMV for a single decode row (M==1).
  * Dynamically quantizes the fp16 activation row to per-group int8 (into
  * caller-owned scratch) and runs a `v_dot4_i32_iu8` (`__builtin_amdgcn_sudot4`)
@@ -2423,6 +2452,9 @@ HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a(
  *   correction_bias - GPU [num_experts] (nullable iff use_correction_bias==0)
  *   expert_indices  - GPU [num_tokens, k] int32 (output)
  *   expert_weights  - GPU [num_tokens, k] (output, same type as hidden_states)
+ *   decode_logits_scratch - GPU [num_experts] fp32 scratch for the parallel
+ *                           num_tokens==1 path; nullable to force the generic
+ *                           one-block route kernel
  */
 HIP_KERNEL_API int hip_qmoe_amd_route(
     void* stream,
@@ -2431,6 +2463,7 @@ HIP_KERNEL_API int hip_qmoe_amd_route(
     const void* correction_bias,
     void* expert_indices,
     void* expert_weights,
+    void* decode_logits_scratch,
     int64_t num_tokens,
     int64_t hidden_size,
     int64_t num_experts,
@@ -2489,6 +2522,73 @@ HIP_KERNEL_API int hip_qmoe_amd_bucket_tokens(
     int64_t k,
     int64_t element_size_bytes);
 
+/* Expert-grouped routed branch for com.amd QMoE prefill (num_tokens > 1).
+ *
+ * GPU bucketing (no D2H sync) followed by per-expert FC1/FC2 GEMV tiles that
+ * load each expert's weights once, then a per-token reduce over the k routing
+ * slots. Same geometry constraints as hip_qmoe_amd_decode_fused_supported().
+ *
+ *   latent [num_tokens, latent_size] -> bucket -> per-expert fc1 -> relu2
+ *   -> per-expert fc2 (weighted, pair layout) -> reduce -> acc [num_tokens, latent]
+ */
+HIP_KERNEL_API int hip_qmoe_amd_prefill_grouped_fused(
+    void* stream,
+    const void* latent,
+    const void* expert_indices,
+    const void* expert_weights,
+    const void* fc1_weights,
+    const void* fc1_scales,
+    const void* fc2_weights,
+    const void* fc2_scales,
+    void* expert_counts,
+    void* expert_offsets,
+    void* sorted_token_ids,
+    void* sorted_weights,
+    void* act_scratch,
+    void* slot_scratch,
+    void* acc,
+    int64_t num_tokens,
+    int64_t num_experts,
+    int64_t latent_size,
+    int64_t moe_intermediate_size,
+    int64_t k,
+    int64_t expert_weight_bits,
+    int64_t block_size,
+    int64_t element_size_bytes);
+
+/* Fully device-side expert-grouped QMoE prefill using a specialized ragged
+ * WMMA batch (32x64 FC1, 64x64 FC2). packed_latent/packed_act use fixed
+ * [num_experts, num_tokens, width] storage; pair maps are [num_tokens*k].
+ * packed_latent is reused for the FC2 output.
+ */
+HIP_KERNEL_API int hip_qmoe_amd_prefill_grouped_wmma(
+    void* stream,
+    const void* latent,
+    const void* expert_indices,
+    const void* expert_weights,
+    const void* fc1_weights,
+    const void* fc1_scales,
+    const void* fc2_weights,
+    const void* fc2_scales,
+    void* expert_counts,
+    void* expert_offsets,
+    void* sorted_token_ids,
+    void* sorted_weights,
+    void* pair_to_padded,
+    void* pair_to_slot,
+    void* packed_latent,
+    void* packed_act,
+    void* slot_scratch,
+    void* acc,
+    int64_t num_tokens,
+    int64_t num_experts,
+    int64_t latent_size,
+    int64_t moe_intermediate_size,
+    int64_t k,
+    int64_t expert_weight_bits,
+    int64_t block_size,
+    int64_t element_size_bytes);
+
 /* Fully fused routed branch for com.amd QMoE decode (num_tokens == 1).
  *
  * A single token selects k distinct experts, so the k routing slots ARE the
@@ -2510,16 +2610,16 @@ HIP_KERNEL_API int hip_qmoe_amd_bucket_tokens(
  * needs 32-element K tiles and power-of-two quant blocks, so shapes outside
  * that must keep using the general path.
  *
- *   latent           - GPU [latent_size] fp16 (fc1_latent_proj output)
- *   expert_indices   - GPU [k] int32
- *   expert_weights   - GPU [k] fp16
+ *   latent           - GPU [num_tokens, latent_size] fp16 (fc1_latent_proj output)
+ *   expert_indices   - GPU [num_tokens * k] int32
+ *   expert_weights   - GPU [num_tokens * k] fp16
  *   fc1_weights      - GPU [num_experts, moe_intermediate_size, latent/2]
  *   fc1_scales       - GPU [num_experts, moe_intermediate_size, latent/block]
  *   fc2_weights      - GPU [num_experts, latent_size, moe_inter/2]
  *   fc2_scales       - GPU [num_experts, latent_size, moe_inter/block]
- *   act_scratch      - GPU [k, moe_intermediate_size] fp16 (scratch)
- *   slot_scratch     - GPU [k, latent_size] fp16 (scratch)
- *   acc              - GPU [latent_size] fp16 (output)
+ *   act_scratch      - GPU [num_tokens * k, moe_intermediate_size] fp16 (scratch)
+ *   slot_scratch     - GPU [num_tokens * k, latent_size] fp16 (scratch)
+ *   acc              - GPU [num_tokens, latent_size] fp16 (output)
  */
 HIP_KERNEL_API int hip_qmoe_amd_decode_fused(
     void* stream,
@@ -2533,6 +2633,7 @@ HIP_KERNEL_API int hip_qmoe_amd_decode_fused(
     void* act_scratch,
     void* slot_scratch,
     void* acc,
+    int64_t num_tokens,
     int64_t latent_size,
     int64_t moe_intermediate_size,
     int64_t k,
@@ -2662,11 +2763,14 @@ HIP_KERNEL_API int hip_linear_attention_decode(
     int64_t beta_per_head,
     int64_t type);
 
-// Chunked-parallel gated-delta prefill kernel (single launch, processes the
-// whole sequence). Returns >0 (=1) when it declines the launch (caller must
+// Chunked-parallel gated/gated-delta prefill kernel (windowed launches,
+// processes the whole sequence). Returns >0 (=1) when it declines (caller must
 // fall back to the per-token decode loop); 0 on success; <0 on launch error.
-// Only the gated_delta rule with scalar log-decay (decay_per_key_dim==0) is
-// supported; other rules/layouts/oversized smem are declined.
+// The gated and gated_delta rules with scalar log-decay
+// (decay_per_key_dim==0) are supported; other rules/layouts/oversized smem are
+// declined. beta may be null for gated and is required for gated_delta.
+// Gated keeps the chunk scan and output in fp32 (Nemotron-H LinearAttention
+// is fp32; the gated_delta WMMA path's fp16 S/Q/K round-trip is not used).
 // scratch / scratch_bytes: caller-owned device scratch for the chunk-parallel
 // path (RuntimeState::la_scratch, grown on demand, freed on session cleanup).
 // Size it with hip_linear_attention_prefill_scratch_bytes() below. When null or

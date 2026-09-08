@@ -117,6 +117,19 @@ module {
     return %result : tensor<?x?x2816xf16>
   }
 
+  // --- Dynamic fallback with Shape(src): extents are already host SSA ---
+  // ReshapeShapeFold turns Shape(src) into tensor.from_elements(tensor.dim).
+  // Even if the fully dynamic ranks force the tensor.reshape fallback, those
+  // host-side values must be forwarded directly rather than copied to the
+  // device and read back with one synchronization per dimension.
+  func.func @test_reshape_dynamic_from_shape(
+      %data: tensor<?x?x?xf16>, %ref: tensor<?x?x?x?xf16>)
+      -> tensor<?x?x?x?xf16> {
+    %shape = "onnx.Shape"(%ref) : (tensor<?x?x?x?xf16>) -> tensor<4xi64>
+    %result = "onnx.Reshape"(%data, %shape) {allowzero = 0 : si64} : (tensor<?x?x?xf16>, tensor<4xi64>) -> tensor<?x?x?x?xf16>
+    return %result : tensor<?x?x?x?xf16>
+  }
+
   // --- Dynamic fallback: a shape entry of `0` keeps the input's dim ---
   // A fully-dynamic source gives the reassoc helpers no static dim to anchor
   // groups against, so this lands on the tensor.reshape fallback where the
@@ -201,6 +214,15 @@ module {
 // CHECK-LABEL: func.func @test_reshape_expand_multi_dyn_opaque
 // CHECK-NOT: tensor.expand_shape
 // CHECK: tensor.reshape
+// CHECK-NOT: onnx.Reshape
+
+// Shape(src) is rewritten to host-side tensor.dim values. The dynamic reshape
+// fallback may consume them, but it must not round-trip them through the GPU.
+// CHECK-LABEL: func.func @test_reshape_dynamic_from_shape
+// CHECK-NOT: hip.readback_scalar
+// CHECK-DAG: tensor.dim
+// CHECK: tensor.reshape
+// CHECK-NOT: hip.readback_scalar
 // CHECK-NOT: onnx.Reshape
 
 // A `0` entry must resolve to the input dim at the SAME index, and the RESOLVED
