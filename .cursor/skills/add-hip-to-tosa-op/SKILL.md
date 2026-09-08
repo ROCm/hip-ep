@@ -232,17 +232,33 @@ hand-written `main_graph` with a `hip.gemm` anchor even with
 `convert-hip-to-tosa` out of the pipeline, so `--rocmlir-pipeline` cannot
 currently confirm a pattern. Verify with `--convert-hip-to-tosa` alone.
 
-Add two lit tests per op under `test/lit/Conversion/hip-to-tosa/`:
+Tests live under `test/lit/Conversion/hip-to-tosa/`, split by **operand group
+rather than by op**, since a whole group shares one converter template:
+`test_binary.mlir` / `binary-invalid.mlir` and `test_unary.mlir` /
+`unary-invalid.mlir`. Add a new op to the existing group file instead of
+creating a per-op file.
 
-- `test_<op>.mlir` for what converts — the plain shape, a size-1 broadcast, a
-  rank-extending operand for binary ops (expect a `tosa.reshape` ahead of the
-  op), and a function without `rock.kernel` (the pass early-returns, so the op
-  survives).
-- `<op>-invalid.mlir` for what the conversion rejects, using
-  `--split-input-file --verify-diagnostics` with
-  `// expected-error @+1 {{failed to legalize operation 'hip.<op>'}}`. Rejected
-  forms cannot go in the positive test, because full conversion makes them a
-  pass failure that produces no output for `FileCheck` to read.
+In the positive file, cover the op mapping itself plus anything specific to
+that op's operands. Do **not** repeat the group's shape and broadcast cases per
+op — the template makes them redundant. Those are exercised once (through
+`hip.add` for binary) as a size-1 broadcast, a rank-extending operand and a
+rank-0 scalar, both of the latter expecting a `tosa.reshape` ahead of the op.
+The `rock.kernel` guard is a property of the pass, so one case covers it.
+
+Keep rejections in the `*-invalid.mlir` file, using `--split-input-file
+--verify-diagnostics` with
+`// expected-error @+1 {{failed to legalize operation 'hip.<op>'}}`. The
+`--split-input-file` chunking is not optional: full conversion turns a
+rejection into a pass failure that aborts the run for the entire module, so
+without its own chunk one rejection would mask every case after it.
+
+Mixing rejections into the positive file does technically work — the failing
+chunk simply contributes no output while the others still print for
+`FileCheck`. Do not do it anyway. Every rejection test under
+`test/lit/Conversion/` is a separate `*-invalid.mlir`, mixing appears only in
+`Dialect/` verifier tests, and merging would force `--split-input-file` onto
+the positive cases too, losing the coverage that comes from converting several
+ops in a single module.
 
 **Check how the op prints its result before writing the test.** It varies by op
 in `HipOps.td`: ops with `hasCustomAssemblyFormat = 1` print `-> tensor<...>`,

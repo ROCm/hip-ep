@@ -2,10 +2,14 @@
 // Licensed under the MIT License.
 
 //===----------------------------------------------------------------------===//
-// hip.add forms the conversion rejects.
+// Binary-op forms the conversion rejects, exercised through hip.add on behalf
+// of the shared BinaryConverter template.
 //
 // The pass runs applyFullConversion with the whole hip dialect marked illegal,
 // so a rejected op fails legalization rather than surviving in the output.
+// That failure aborts the pass for the whole module, which is why each case
+// needs its own --split-input-file chunk and why these live apart from the
+// FileCheck coverage in test_binary.mlir.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --convert-hip-to-tosa --split-input-file --verify-diagnostics %s

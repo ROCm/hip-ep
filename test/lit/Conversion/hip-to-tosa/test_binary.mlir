@@ -3,20 +3,42 @@
 
 // ============================================================================
 // TEST PURPOSE:
-// Verify the elementwise binary hip ops that share hip.add's operand shape
-// lower 1-1 to their TOSA counterparts inside a rock.kernel function.
+// Verify the elementwise binary hip ops lower to their TOSA counterparts
+// inside a rock.kernel function, so rocMLIR can absorb them into a fused
+// kernel.
 //
-// hip.add's own coverage lives in test_add.mlir. This file covers the ops
-// added on top of the shared BinaryConverter template.
+// All five ops share the BinaryConverter template, so the shape and broadcast
+// behaviour is exercised once (through hip.add) rather than repeated per op.
+// The per-op cases below prove the op mapping itself, plus the operand
+// handling specific to hip.mul.
 //
 // This test validates:
-// - hip.sub and hip.min map to tosa.sub and tosa.minimum
+// - add, sub, min, max and mul map to their TOSA counterparts
+// - The hip context and DPS outs operand are both dropped
 // - Size-1 dimensions rely on TOSA's implicit broadcast
-// - tosa.minimum's nan_mode defaults to PROPAGATE (omitted in pretty form)
+// - Lower-rank operands are reshaped with leading 1s first
+// - tosa.minimum/maximum's nan_mode defaults to PROPAGATE (omitted in the
+//   pretty form)
+// - tosa.mul's shift operand is materialized as a zero tensor<1xi8>
 // - The pass is a no-op on functions without rock.kernel
 // ============================================================================
 
 // RUN: hip-mlir-opt --convert-hip-to-tosa %s | FileCheck %s
+
+//===----------------------------------------------------------------------===//
+// Op mappings.
+//===----------------------------------------------------------------------===//
+
+// CHECK-LABEL: func.func @add
+// CHECK: tosa.add %arg1, %arg2 : (tensor<2x8xf16>, tensor<2x8xf16>) -> tensor<2x8xf16>
+// CHECK-NOT: hip.add
+func.func @add(%ctx: !hip.context, %x: tensor<2x8xf16>, %y: tensor<2x8xf16>,
+               %init: tensor<2x8xf16>) -> tensor<2x8xf16>
+    attributes {rock.kernel} {
+  %r = hip.add(%ctx) ins(%x, %y : tensor<2x8xf16>, tensor<2x8xf16>)
+                     outs(%init : tensor<2x8xf16>) -> tensor<2x8xf16>
+  return %r : tensor<2x8xf16>
+}
 
 // CHECK-LABEL: func.func @sub
 // CHECK: tosa.sub %arg1, %arg2 : (tensor<2x8xf16>, tensor<2x8xf16>) -> tensor<2x8xf16>
@@ -27,17 +49,6 @@ func.func @sub(%ctx: !hip.context, %x: tensor<2x8xf16>, %y: tensor<2x8xf16>,
   %r = hip.sub(%ctx) ins(%x, %y : tensor<2x8xf16>, tensor<2x8xf16>)
                      outs(%init : tensor<2x8xf16>) : tensor<2x8xf16>
   return %r : tensor<2x8xf16>
-}
-
-// CHECK-LABEL: func.func @sub_broadcast
-// CHECK: tosa.sub
-// CHECK-NOT: hip.sub
-func.func @sub_broadcast(%ctx: !hip.context, %x: tensor<1x128x32xf16>,
-                         %y: tensor<1x1x32xf16>, %init: tensor<1x128x32xf16>)
-    -> tensor<1x128x32xf16> attributes {rock.kernel} {
-  %r = hip.sub(%ctx) ins(%x, %y : tensor<1x128x32xf16>, tensor<1x1x32xf16>)
-                     outs(%init : tensor<1x128x32xf16>) : tensor<1x128x32xf16>
-  return %r : tensor<1x128x32xf16>
 }
 
 // CHECK-LABEL: func.func @min
@@ -51,17 +62,6 @@ func.func @min(%ctx: !hip.context, %x: tensor<2x8xf16>, %y: tensor<2x8xf16>,
   return %r : tensor<2x8xf16>
 }
 
-// CHECK-LABEL: func.func @min_broadcast
-// CHECK: tosa.minimum
-// CHECK-NOT: hip.min
-func.func @min_broadcast(%ctx: !hip.context, %x: tensor<1x128x32xf16>,
-                         %y: tensor<1x1x32xf16>, %init: tensor<1x128x32xf16>)
-    -> tensor<1x128x32xf16> attributes {rock.kernel} {
-  %r = hip.min(%ctx) ins(%x, %y : tensor<1x128x32xf16>, tensor<1x1x32xf16>)
-                     outs(%init : tensor<1x128x32xf16>) : tensor<1x128x32xf16>
-  return %r : tensor<1x128x32xf16>
-}
-
 // CHECK-LABEL: func.func @max
 // CHECK: tosa.maximum %arg1, %arg2 : (tensor<2x8xf16>, tensor<2x8xf16>) -> tensor<2x8xf16>
 // CHECK-NOT: hip.max
@@ -71,21 +71,6 @@ func.func @max(%ctx: !hip.context, %x: tensor<2x8xf16>, %y: tensor<2x8xf16>,
   %r = hip.max(%ctx) ins(%x, %y : tensor<2x8xf16>, tensor<2x8xf16>)
                      outs(%init : tensor<2x8xf16>) : tensor<2x8xf16>
   return %r : tensor<2x8xf16>
-}
-
-// ResNet's first ReLU: hip.max(activation, dense<0> : tensor<f16>). The scalar
-// is reshaped to 1x1x1x1, then tosa.maximum broadcasts the size-1 dims.
-// CHECK-LABEL: func.func @max_relu_scalar
-// CHECK: tosa.reshape
-// CHECK: tosa.maximum
-// CHECK-NOT: hip.max
-func.func @max_relu_scalar(%ctx: !hip.context, %x: tensor<1x64x112x112xf16>,
-                           %zero: tensor<f16>, %init: tensor<1x64x112x112xf16>)
-    -> tensor<1x64x112x112xf16> attributes {rock.kernel} {
-  %r = hip.max(%ctx) ins(%x, %zero : tensor<1x64x112x112xf16>, tensor<f16>)
-                     outs(%init : tensor<1x64x112x112xf16>)
-                     : tensor<1x64x112x112xf16>
-  return %r : tensor<1x64x112x112xf16>
 }
 
 // tosa.mul takes a third shift operand, which hip.mul has no equivalent for:
@@ -100,6 +85,72 @@ func.func @mul(%ctx: !hip.context, %x: tensor<2x8xf16>, %y: tensor<2x8xf16>,
   %r = hip.mul(%ctx) ins(%x, %y : tensor<2x8xf16>, tensor<2x8xf16>)
                      outs(%init : tensor<2x8xf16>) -> tensor<2x8xf16>
   return %r : tensor<2x8xf16>
+}
+
+//===----------------------------------------------------------------------===//
+// Broadcasting, exercised through hip.add on behalf of the shared template.
+//===----------------------------------------------------------------------===//
+
+// Size-1 dims are TOSA-broadcastable, so this still maps 1-1.
+// CHECK-LABEL: func.func @add_broadcast
+// CHECK: tosa.add
+// CHECK-NOT: hip.add
+func.func @add_broadcast(%ctx: !hip.context, %x: tensor<1x128x32xf16>,
+                         %y: tensor<1x1x32xf16>, %init: tensor<1x128x32xf16>)
+    -> tensor<1x128x32xf16> attributes {rock.kernel} {
+  %r = hip.add(%ctx) ins(%x, %y : tensor<1x128x32xf16>, tensor<1x1x32xf16>)
+                     outs(%init : tensor<1x128x32xf16>) -> tensor<1x128x32xf16>
+  return %r : tensor<1x128x32xf16>
+}
+
+// hip rank-extends the way ONNX/NumPy do, so a lower-rank operand is reshaped
+// with leading 1s before tosa.add broadcasts it.
+// CHECK-LABEL: func.func @add_rank_extending_broadcast
+// CHECK: tosa.reshape
+// CHECK: tosa.add
+// CHECK-NOT: hip.add
+func.func @add_rank_extending_broadcast(%ctx: !hip.context,
+                                        %x: tensor<1x128x32xf16>,
+                                        %y: tensor<32xf16>,
+                                        %init: tensor<1x128x32xf16>)
+    -> tensor<1x128x32xf16> attributes {rock.kernel} {
+  %r = hip.add(%ctx) ins(%x, %y : tensor<1x128x32xf16>, tensor<32xf16>)
+                     outs(%init : tensor<1x128x32xf16>) -> tensor<1x128x32xf16>
+  return %r : tensor<1x128x32xf16>
+}
+
+// A rank-0 scalar is the same rank mismatch, and is how a bias add shows up
+// after onnx-to-hip lowering.
+// CHECK-LABEL: func.func @add_scalar_operand
+// CHECK: tosa.reshape
+// CHECK: tosa.add
+// CHECK-NOT: hip.add
+func.func @add_scalar_operand(%ctx: !hip.context, %x: tensor<1x64x112x112xf16>,
+                              %y: tensor<f16>, %init: tensor<1x64x112x112xf16>)
+    -> tensor<1x64x112x112xf16> attributes {rock.kernel} {
+  %r = hip.add(%ctx) ins(%x, %y : tensor<1x64x112x112xf16>, tensor<f16>)
+                     outs(%init : tensor<1x64x112x112xf16>)
+                     -> tensor<1x64x112x112xf16>
+  return %r : tensor<1x64x112x112xf16>
+}
+
+//===----------------------------------------------------------------------===//
+// Cases that are not covered by the shared shape handling above.
+//===----------------------------------------------------------------------===//
+
+// ResNet's first ReLU: hip.max(activation, dense<0> : tensor<f16>). Kept as
+// its own case because it is the shape that motivated rank equalization.
+// CHECK-LABEL: func.func @max_relu_scalar
+// CHECK: tosa.reshape
+// CHECK: tosa.maximum
+// CHECK-NOT: hip.max
+func.func @max_relu_scalar(%ctx: !hip.context, %x: tensor<1x64x112x112xf16>,
+                           %zero: tensor<f16>, %init: tensor<1x64x112x112xf16>)
+    -> tensor<1x64x112x112xf16> attributes {rock.kernel} {
+  %r = hip.max(%ctx) ins(%x, %zero : tensor<1x64x112x112xf16>, tensor<f16>)
+                     outs(%init : tensor<1x64x112x112xf16>)
+                     : tensor<1x64x112x112xf16>
+  return %r : tensor<1x64x112x112xf16>
 }
 
 // A zero shift is what makes the integer case a plain multiply rather than a
@@ -131,14 +182,18 @@ func.func @mul_scalar_operand(%ctx: !hip.context, %x: tensor<1x64x112x112xf16>,
   return %r : tensor<1x64x112x112xf16>
 }
 
-// The pass early-returns unless the function is an outlined kernel.
-// CHECK-LABEL: func.func @sub_not_a_kernel
-// CHECK: hip.sub
-// CHECK-NOT: tosa.sub
-func.func @sub_not_a_kernel(%ctx: !hip.context, %x: tensor<2x8xf16>,
+//===----------------------------------------------------------------------===//
+// The rock.kernel guard, which is a property of the pass rather than of any
+// one op.
+//===----------------------------------------------------------------------===//
+
+// CHECK-LABEL: func.func @add_not_a_kernel
+// CHECK: hip.add
+// CHECK-NOT: tosa.add
+func.func @add_not_a_kernel(%ctx: !hip.context, %x: tensor<2x8xf16>,
                             %y: tensor<2x8xf16>, %init: tensor<2x8xf16>)
     -> tensor<2x8xf16> {
-  %r = hip.sub(%ctx) ins(%x, %y : tensor<2x8xf16>, tensor<2x8xf16>)
-                     outs(%init : tensor<2x8xf16>) : tensor<2x8xf16>
+  %r = hip.add(%ctx) ins(%x, %y : tensor<2x8xf16>, tensor<2x8xf16>)
+                     outs(%init : tensor<2x8xf16>) -> tensor<2x8xf16>
   return %r : tensor<2x8xf16>
 }
