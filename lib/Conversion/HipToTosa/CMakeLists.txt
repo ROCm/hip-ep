@@ -8,7 +8,6 @@ add_library(HipToTosa STATIC
 )
 
 add_dependencies(HipToTosa
-	MLIRTosaOpsIncGen
 	HipDialectIncGen
 	HipTypesIncGen
 	HipOpsIncGen
