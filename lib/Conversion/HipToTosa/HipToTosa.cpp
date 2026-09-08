@@ -17,6 +17,8 @@
 #include <mlir/Transforms/DialectConversion.h>
 #include <mlir/Transforms/GreedyPatternRewriteDriver.h>
 
+#include <type_traits>
+
 namespace mlir::hip {
 
 #define GEN_PASS_DEF_CONVERTHIPTOTOSAPASS
@@ -101,12 +103,23 @@ struct MatMulConverter final : public OpConversionPattern<hip::MatmulOp> {
 // The hip context and the DPS `outs` buffer are both dropped: the result type
 // already encodes the destination.
 //
+// tosa.mul's shift operand right-shifts the product of i32 inputs. hip.mul is
+// a plain multiply with no rescale, so the shift is zero; for float operands
+// the op's verifier requires zero as well.
+Value createZeroMulShift(ConversionPatternRewriter &rewriter, Location loc) {
+  auto shiftType = RankedTensorType::get({1}, rewriter.getI8Type());
+  return tosa::ConstOp::create(
+      rewriter, loc, shiftType,
+      DenseElementsAttr::get(shiftType,
+                             rewriter.getIntegerAttr(rewriter.getI8Type(), 0)));
+}
+
 // Covers the hip ops whose operands are (ctx, lhs, rhs, output) and whose TOSA
-// counterpart takes two operands and preserves the element type. Comparisons
-// (hip.equal, hip.less) do not belong here: they produce i1, which
-// isTosaCompatibleOperand's element-type check rejects. hip.mul does not
-// either, since tosa.mul carries a third shift operand with no convenience
-// builder.
+// counterpart preserves the element type. Comparisons (hip.equal, hip.less) do
+// not belong here: they produce i1, which isTosaCompatibleOperand's
+// element-type check rejects. hip.div does not either, since TOSA has no
+// floating-point divide (tosa.intdiv is i32/i64 only, and floats decompose
+// into tosa.reciprocal plus tosa.mul).
 //
 // tosa.maximum and tosa.minimum additionally carry a nan_mode attribute, but
 // ODS defaults it to PROPAGATE, which is what ONNX Max/Min do, so the
@@ -142,7 +155,14 @@ struct BinaryConverter final : public OpConversionPattern<HipOpTy> {
         !isTosaCompatibleOperand(rhs, resultType))
       return rewriter.notifyMatchFailure(op, "operands not tosa-broadcastable");
 
-    rewriter.replaceOpWithNewOp<TosaOpTy>(op, resultType, lhs, rhs);
+    // tosa.mul is the one op in this set that is not two-operand; its shift
+    // is excluded from its own same-rank verification, so equalizing the two
+    // data operands above is still all that is required.
+    if constexpr (std::is_same_v<TosaOpTy, tosa::MulOp>)
+      rewriter.replaceOpWithNewOp<TosaOpTy>(
+          op, resultType, lhs, rhs, createZeroMulShift(rewriter, op.getLoc()));
+    else
+      rewriter.replaceOpWithNewOp<TosaOpTy>(op, resultType, lhs, rhs);
     return success();
   }
 };
@@ -206,6 +226,7 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
                  BinaryConverter<SubOp, tosa::SubOp>,
                  BinaryConverter<MinOp, tosa::MinimumOp>,
                  BinaryConverter<MaxOp, tosa::MaximumOp>,
+                 BinaryConverter<MulOp, tosa::MulOp>,
                  UnaryConverter<AbsOp, tosa::AbsOp>,
                  UnaryConverter<NegOp, tosa::NegateOp>,
                  UnaryConverter<CeilOp, tosa::CeilOp, /*FloatOnly=*/true>,

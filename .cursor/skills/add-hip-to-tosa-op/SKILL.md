@@ -86,9 +86,14 @@ at all. Require `operand type == result type` exactly, and do **not** reuse
 needs broadcasting and emit invalid TOSA.
 
 Special cases within this set:
-- `tosa.mul` takes a third **shift** operand (`Tosa_ScalarInt8Tensor`, an `i8`
-  zero const for float) and has **no** convenience builder, so it cannot use
-  `BinaryConverter` as-is.
+- `tosa.mul` takes a third **shift** operand (`Tosa_ScalarInt8Tensor`, i.e.
+  `tensor<1xi8>`) that right-shifts the product of `i32` inputs, and it has
+  **no** convenience builder. `BinaryConverter` handles it with an
+  `if constexpr` that materializes a zero shift via `createZeroMulShift`; zero
+  is required, not merely conventional, since `tosa::MulOp::verify` rejects a
+  nonzero shift for float types and a rescale is not what `hip.mul` means. The
+  shift is excluded from that verifier's same-rank check, so equalizing the two
+  data operands is still sufficient.
 - `tosa.equal` / `tosa.greater` produce `i1`. `hip.equal` / `hip.less` already
   produce `tensor<...xi1>`, so the mapping is 1-1, but they still cannot use
   `BinaryConverter`: `isTosaCompatibleOperand` compares the operand element type
@@ -121,7 +126,12 @@ Decompositions — every piece is supported, so these are safe to emit:
 - `hip.sqrt` → `tosa.reciprocal(tosa.rsqrt(x))`. TOSA has no sqrt; rocMLIR
   explicitly folds this pair back into a single `math.sqrt`. Use this idiom.
 - `hip.div` → `tosa.mul(a, tosa.reciprocal(b))`. TOSA's only division is
-  `IntDivOp` (integer-only).
+  `tosa.intdiv`, restricted to `Tosa_Int32Or64Tensor`, so `BinaryConverter`
+  can cover *integer* div only if gated to i32/i64 — anything else would emit
+  an invalid `tosa.intdiv`. Take the reciprocal on the rank-equalized `rhs`,
+  since `tosa.reciprocal` demands operand type == result type, and let the
+  `tosa.mul` broadcast. Flag in review that this adds a rounding step and
+  changes divide-by-zero behaviour versus a true divide.
 - `hip.silu` → `tosa.mul(x, tosa.sigmoid(x))`
 - `hip.softplus` → `tosa.log(tosa.add(tosa.exp(x), 1))`
 - `hip.leaky_relu` → `tosa.maximum(x, tosa.mul(x, alpha))`

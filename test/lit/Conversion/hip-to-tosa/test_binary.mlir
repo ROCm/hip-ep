@@ -88,6 +88,49 @@ func.func @max_relu_scalar(%ctx: !hip.context, %x: tensor<1x64x112x112xf16>,
   return %r : tensor<1x64x112x112xf16>
 }
 
+// tosa.mul takes a third shift operand, which hip.mul has no equivalent for:
+// it is a plain multiply, so the shift is a zero tensor<1xi8>.
+// CHECK-LABEL: func.func @mul
+// CHECK: %[[SHIFT:.*]] = "tosa.const"{{.*}}dense<0> : tensor<1xi8>
+// CHECK: tosa.mul %arg1, %arg2, %[[SHIFT]] : (tensor<2x8xf16>, tensor<2x8xf16>, tensor<1xi8>) -> tensor<2x8xf16>
+// CHECK-NOT: hip.mul
+func.func @mul(%ctx: !hip.context, %x: tensor<2x8xf16>, %y: tensor<2x8xf16>,
+               %init: tensor<2x8xf16>) -> tensor<2x8xf16>
+    attributes {rock.kernel} {
+  %r = hip.mul(%ctx) ins(%x, %y : tensor<2x8xf16>, tensor<2x8xf16>)
+                     outs(%init : tensor<2x8xf16>) -> tensor<2x8xf16>
+  return %r : tensor<2x8xf16>
+}
+
+// A zero shift is what makes the integer case a plain multiply rather than a
+// rescaled one.
+// CHECK-LABEL: func.func @mul_integer
+// CHECK: dense<0> : tensor<1xi8>
+// CHECK: tosa.mul
+// CHECK-NOT: hip.mul
+func.func @mul_integer(%ctx: !hip.context, %x: tensor<4x4xi32>,
+                       %y: tensor<4x4xi32>, %init: tensor<4x4xi32>)
+    -> tensor<4x4xi32> attributes {rock.kernel} {
+  %r = hip.mul(%ctx) ins(%x, %y : tensor<4x4xi32>, tensor<4x4xi32>)
+                     outs(%init : tensor<4x4xi32>) -> tensor<4x4xi32>
+  return %r : tensor<4x4xi32>
+}
+
+// The shift is excluded from tosa.mul's same-rank verification, so equalizing
+// the two data operands is all that is needed.
+// CHECK-LABEL: func.func @mul_scalar_operand
+// CHECK: tosa.reshape
+// CHECK: tosa.mul
+// CHECK-NOT: hip.mul
+func.func @mul_scalar_operand(%ctx: !hip.context, %x: tensor<1x64x112x112xf16>,
+                              %y: tensor<f16>, %init: tensor<1x64x112x112xf16>)
+    -> tensor<1x64x112x112xf16> attributes {rock.kernel} {
+  %r = hip.mul(%ctx) ins(%x, %y : tensor<1x64x112x112xf16>, tensor<f16>)
+                     outs(%init : tensor<1x64x112x112xf16>)
+                     -> tensor<1x64x112x112xf16>
+  return %r : tensor<1x64x112x112xf16>
+}
+
 // The pass early-returns unless the function is an outlined kernel.
 // CHECK-LABEL: func.func @sub_not_a_kernel
 // CHECK: hip.sub
