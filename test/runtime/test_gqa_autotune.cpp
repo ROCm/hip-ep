@@ -267,7 +267,7 @@ int inspect(const char *path) {
     return 1;
   }
   MemoryFileSystem fs(std::move(bytes));
-  void *policy = hipdnn_ep::gqa_autotune_create(&fs);
+  void *policy = hipdnn_ep::gqa_autotune_create(&fs, nullptr);
   if (!policy)
     return 1;
   // A decode step and a prefill chunk on a geometry the table should know, plus
@@ -313,65 +313,52 @@ int main(int argc, char **argv) {
     return inspect(argv[1]);
   ScopedModeEnv mode_env;
   MemoryFileSystem fs(makeLut());
-  void *policy = hipdnn_ep::gqa_autotune_create(&fs);
+  // The mode is decided once, at construction, from the environment variable
+  // and the provider option together. Each case below is therefore a fresh
+  // policy: there is nothing to apply afterwards.
+  void *policy = hipdnn_ep::gqa_autotune_create(&fs, nullptr);
   REQUIRE(policy != nullptr);
   REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
           hipdnn_ep::GqaAutotuneMode::Lookup);
+  hipdnn_ep::gqa_autotune_destroy(policy);
 
-  hipdnn_ep::gqa_autotune_apply_provider_mode(policy, " OnLiNe ");
-  REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
-          hipdnn_ep::GqaAutotuneMode::Online);
-  // Settles on the first call, which is what lets the decode path apply on
-  // every read without re-parsing or re-logging.
-  hipdnn_ep::gqa_autotune_apply_provider_mode(policy, "lookup");
+  // The provider option decides when the environment says nothing, and is
+  // matched case-insensitively with whitespace stripped.
+  policy = hipdnn_ep::gqa_autotune_create(&fs, " OnLiNe ");
   REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
           hipdnn_ep::GqaAutotuneMode::Online);
   hipdnn_ep::gqa_autotune_destroy(policy);
 
-  // Nothing supplied settles it too, so a later value cannot take over.
-  policy = hipdnn_ep::gqa_autotune_create(&fs);
-  hipdnn_ep::gqa_autotune_apply_provider_mode(policy, nullptr);
-  hipdnn_ep::gqa_autotune_apply_provider_mode(policy, "online");
+  // An unusable provider value falls back to the build default rather than
+  // guessing; likewise a value that is only whitespace.
+  policy = hipdnn_ep::gqa_autotune_create(&fs, "invalid");
   REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
           hipdnn_ep::GqaAutotuneMode::Lookup);
   hipdnn_ep::gqa_autotune_destroy(policy);
 
-  policy = hipdnn_ep::gqa_autotune_create(&fs);
-  hipdnn_ep::gqa_autotune_apply_provider_mode(policy, nullptr);
+  policy = hipdnn_ep::gqa_autotune_create(&fs, "  ");
   REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
           hipdnn_ep::GqaAutotuneMode::Lookup);
   hipdnn_ep::gqa_autotune_destroy(policy);
 
-  policy = hipdnn_ep::gqa_autotune_create(&fs);
-  hipdnn_ep::gqa_autotune_apply_provider_mode(policy, "invalid");
-  REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
-          hipdnn_ep::GqaAutotuneMode::Lookup);
-  hipdnn_ep::gqa_autotune_destroy(policy);
-
-  policy = hipdnn_ep::gqa_autotune_create(&fs);
-  hipdnn_ep::gqa_autotune_apply_provider_mode(policy, "");
-  REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
-          hipdnn_ep::GqaAutotuneMode::Lookup);
-  hipdnn_ep::gqa_autotune_destroy(policy);
-
+  // The environment variable outranks the provider option.
   setModeEnv("lookup");
-  policy = hipdnn_ep::gqa_autotune_create(&fs);
-  hipdnn_ep::gqa_autotune_apply_provider_mode(policy, "online");
+  policy = hipdnn_ep::gqa_autotune_create(&fs, "online");
   REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
           hipdnn_ep::GqaAutotuneMode::Lookup);
   hipdnn_ep::gqa_autotune_destroy(policy);
 
-  // Even an invalid non-empty environment setting owns the highest-priority
-  // slot and preserves the historical fallback to the build default.
+  // Including when it was typed wrong: a global override that did not parse
+  // falls back to the build default instead of handing the session to a
+  // provider option the caller may not know is set.
   setModeEnv("invalid");
-  policy = hipdnn_ep::gqa_autotune_create(&fs);
-  hipdnn_ep::gqa_autotune_apply_provider_mode(policy, "online");
+  policy = hipdnn_ep::gqa_autotune_create(&fs, "online");
   REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
           hipdnn_ep::GqaAutotuneMode::Lookup);
   hipdnn_ep::gqa_autotune_destroy(policy);
   setModeEnv(nullptr);
 
-  policy = hipdnn_ep::gqa_autotune_create(&fs);
+  policy = hipdnn_ep::gqa_autotune_create(&fs, nullptr);
 
   // 64:8:64, one sequence: batch*num_heads is 64, which no Geometry row names,
   // so the pooled heads-per-group row answers.
@@ -614,8 +601,8 @@ int main(int argc, char **argv) {
   // silently, since both requests hash to the same question.
   MemoryFileSystem four_fs(makeOneRowLut(4));
   MemoryFileSystem eight_fs(makeOneRowLut(8));
-  void *four = hipdnn_ep::gqa_autotune_create(&four_fs);
-  void *eight = hipdnn_ep::gqa_autotune_create(&eight_fs);
+  void *four = hipdnn_ep::gqa_autotune_create(&four_fs, nullptr);
+  void *eight = hipdnn_ep::gqa_autotune_create(&eight_fs, nullptr);
   REQUIRE(four != nullptr && eight != nullptr);
   const auto shared = decodeRequest(64, 8, 64, 128);
   REQUIRE(hipdnn_ep::gqa_autotune_resolve_decode(four, shared).config.splits ==
@@ -631,7 +618,7 @@ int main(int argc, char **argv) {
   // entry was reused is not observable from here; that it is still the right
   // answer is.
   MemoryFileSystem reload_fs(makeOneRowLut(4));
-  void *reloaded = hipdnn_ep::gqa_autotune_create(&reload_fs);
+  void *reloaded = hipdnn_ep::gqa_autotune_create(&reload_fs, nullptr);
   REQUIRE(
       hipdnn_ep::gqa_autotune_resolve_decode(reloaded, shared).config.splits ==
       4);

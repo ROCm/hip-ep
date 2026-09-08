@@ -220,20 +220,11 @@ HIPDNN_EP_RT_EXPORT void
 hipdnn_ep_set_output_allocator(RuntimeState *state,
                                const hipdnn_output_allocator_t *allocator);
 
-// Copy one session-scoped EP provider option into RuntimeState. The EP calls
-// this after inference_init and before the first inference_compute for every
-// entry returned by PassContext::get_all_provider_options(). Unknown keys are
-// retained for future runtime consumers. Passing value=nullptr erases a key.
-//
-// Backwards compatibility: the EP resolves this symbol optionally. A cached
-// artifact predating this export continues to use environment variables and
-// build defaults.
-HIPDNN_EP_RT_EXPORT void
-hipdnn_ep_runtime_set_provider_option(RuntimeState *state, const char *key,
-                                      const char *value);
-
-// Return a borrowed pointer to a copied provider-option value, or nullptr when
-// absent. Valid until that key is changed or RuntimeState is destroyed.
+// Return a borrowed pointer to a provider-option value copied into the state by
+// hipdnn_ep_state_init_with_fs, or nullptr when absent. Valid for the lifetime
+// of the state. This is how a runtime consumer reads a session option it cares
+// about; the options themselves arrive as init parameters, so a consumer built
+// during init already sees them.
 HIPDNN_EP_RT_EXPORT const char *
 hipdnn_ep_runtime_get_provider_option(RuntimeState *state, const char *key);
 
@@ -253,9 +244,19 @@ void *hipdnn_ep_alloc_output(RuntimeState *state, int64_t out_idx,
 //   fs:            morphizen::FileSystem* (void* for C ABI) - must not be null
 //   metadata_blob: FlatBuffers binary blob (HipModelMetaInfo) baked into DLL
 //   blob_size:     Size of metadata_blob in bytes
+//   option_keys / option_values / option_count:
+//       The session's EP provider options, copied into the state before
+//       anything it builds consults them. Passing them here rather than
+//       setting them afterwards is what lets each consumer decide once, at
+//       construction, from every source it cares about -- the GQA autotune
+//       mode weighs HIPDNN_GQA_AUTOTUNE_MODE against gqa_autotune_mode in one
+//       place. May be null / 0 when the caller has no options.
 // Return codes: 0=success, 1=alloc/read error, 2-11=GPU/runtime init error
 int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
-                                 const void *metadata_blob, size_t blob_size);
+                                 const void *metadata_blob, size_t blob_size,
+                                 const char *const *option_keys,
+                                 const char *const *option_values,
+                                 size_t option_count);
 
 // Cleanup runtime state (destroys handles, frees memory)
 // Best-effort cleanup - continues even if individual operations fail

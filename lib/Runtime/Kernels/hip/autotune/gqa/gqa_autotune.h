@@ -126,17 +126,15 @@ struct GqaPrefillResult {
 // Opaque session-owned policy. Missing or incompatible LUT files produce an
 // empty policy rather than an initialization failure; lookup mode then uses the
 // deterministic heuristic and never benchmarks on the GPU.
-void *gqa_autotune_create(morphizen::FileSystem *fs);
+// `provider_mode` is the session's gqa_autotune_mode provider option, or null
+// when none was supplied. It is weighed here against HIPDNN_GQA_AUTOTUNE_MODE
+// and the build default, so the mode is decided once, at construction, and
+// every diagnostic below reports the mode the session will actually run.
+void *gqa_autotune_create(morphizen::FileSystem *fs, const char *provider_mode);
 void gqa_autotune_destroy(void *policy);
 
 GqaAutotuneMode gqa_autotune_mode(const void *policy);
 
-// Apply the session's gqa_autotune_mode provider option. `mode` may be null
-// when none was supplied. No-op when HIPDNN_GQA_AUTOTUNE_MODE was set (env
-// keeps highest priority, including when its value was unrecognised), and a
-// no-op after the first call, so a caller on the decode path may apply on
-// every read. The string is parsed during this call and never retained.
-void gqa_autotune_apply_provider_mode(void *policy, const char *mode);
 
 GqaDecodeResult gqa_autotune_resolve_decode(void *policy,
                                             const GqaDecodeRequest &request);

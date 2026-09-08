@@ -31,8 +31,6 @@ inline constexpr const char *kSetOutputAllocator =
     "hipdnn_ep_set_output_allocator";
 inline constexpr const char *kRuntimeFlushOpProfile =
     "hipdnn_ep_runtime_flush_op_profile";
-inline constexpr const char *kRuntimeSetProviderOption =
-    "hipdnn_ep_runtime_set_provider_option";
 inline constexpr const char *kRuntimeGetProviderOption =
     "hipdnn_ep_runtime_get_provider_option";
 

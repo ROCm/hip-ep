@@ -136,13 +136,7 @@ static int currentComputeUnits() {
 
 struct GqaAutotunePolicy {
   GqaAutotuneMode mode = GqaAutotuneMode::Lookup;
-  // Set once the mode is settled. Seeded true when HIPDNN_GQA_AUTOTUNE_MODE was
-  // non-empty at create() time, including when its value was unrecognised,
-  // which is how the env var keeps highest priority; otherwise set by the first
-  // gqa_autotune_apply_provider_mode call. Callers sit on the decode path and
-  // apply on every read, so this is also what stops the re-parsing and the
-  // repeated logging.
-  bool mode_settled = false;
+
   // One map, keyed on the packed row key. The tier is part of the key, so the
   // probe order is a loop over four keys rather than a walk over four
   // containers.
@@ -1101,12 +1095,8 @@ static const char *modeName(GqaAutotuneMode mode) {
 
 struct ModeChoice {
   GqaAutotuneMode mode = kDefaultMode;
-  // The value parsed, so the mode really came from the variable. This is what
-  // the create() log reports as the source.
-  bool from_env = false;
-  // The variable was set at all, parsed or not. This is what decides whether
-  // the provider option gets a turn.
-  bool env_present = false;
+  // Which lever decided the mode, for the log. Nothing else needs to know.
+  const char *source = "the build default";
 };
 
 // Lowercased with whitespace stripped. Both levers go through this and
@@ -1134,39 +1124,53 @@ static bool matchMode(const std::string &normalized, GqaAutotuneMode *out) {
   return false;
 }
 
-// Matched case-insensitively and with whitespace stripped, and an unrecognised
-// value says so instead of quietly leaving the session on the default. The
-// point of the switch is to compare the two paths, so silently running the
-// other one is the failure worth a message.
-static ModeChoice chooseMode() {
-  const std::string raw = hipdnn_ep::env_string("HIPDNN_GQA_AUTOTUNE_MODE");
-  const std::string normalized = normalizedMode(raw);
-  if (normalized.empty())
-    return {kDefaultMode, false, false};
-  GqaAutotuneMode mode = kDefaultMode;
-  if (matchMode(normalized, &mode))
-    return {mode, true, true};
-  if (gqaLutLogOn())
-    fprintf(stderr,
-            "GQA autotune: unrecognised HIPDNN_GQA_AUTOTUNE_MODE=\"%s\" "
-            "(expected \"lookup\" or \"online\"); using the build default, "
-            "%s\n",
-            raw.c_str(), modeName(kDefaultMode));
-  // A non-empty but unrecognised value still counts as the env var having
-  // spoken, so the provider option cannot silently override the fallback. It
-  // did not decide the mode, though, so from_env stays false and the log below
-  // still names the build default.
-  return {kDefaultMode, false, true};
+// Every lever, weighed once. Both are matched case-insensitively and with
+// whitespace stripped, and an unrecognised value says so instead of quietly
+// leaving the session on the default -- the point of the switch is to compare
+// the two paths, so silently running the other one is the failure worth a
+// message.
+//
+// HIPDNN_GQA_AUTOTUNE_MODE outranks the provider option, and a non-empty but
+// unrecognised value still counts as the variable having spoken: a global
+// debugging override that was typed wrong should fall back to the documented
+// default rather than hand the session to a provider option the caller may not
+// know is set.
+static ModeChoice chooseMode(const char *provider_mode) {
+  struct Lever {
+    const char *name;
+    std::string value;
+  };
+  const Lever levers[] = {
+      {"HIPDNN_GQA_AUTOTUNE_MODE",
+       hipdnn_ep::env_string("HIPDNN_GQA_AUTOTUNE_MODE")},
+      {"provider option gqa_autotune_mode",
+       provider_mode ? std::string(provider_mode) : std::string()},
+  };
+  for (const Lever &lever : levers) {
+    const std::string normalized = normalizedMode(lever.value);
+    if (normalized.empty())
+      continue;
+    GqaAutotuneMode mode = kDefaultMode;
+    if (matchMode(normalized, &mode))
+      return {mode, lever.name};
+    if (gqaLutLogOn())
+      fprintf(stderr,
+              "GQA autotune: unrecognised %s=\"%s\" (expected \"lookup\" or "
+              "\"online\"); using the build default, %s\n",
+              lever.name, lever.value.c_str(), modeName(kDefaultMode));
+    break;
+  }
+  return {kDefaultMode, "the build default"};
 }
 
 } // namespace
 
-void *gqa_autotune_create(morphizen::FileSystem *fs) {
+void *gqa_autotune_create(morphizen::FileSystem *fs,
+                          const char *provider_mode) {
   auto policy = std::make_unique<GqaAutotunePolicy>();
   policy->compute_units = currentComputeUnits();
-  const ModeChoice choice = chooseMode();
+  const ModeChoice choice = chooseMode(provider_mode);
   policy->mode = choice.mode;
-  policy->mode_settled = choice.env_present;
   // The table is compiled into runtime.bc (see lib/Runtime/CMakeLists.txt) and
   // travels with the build, so it is available to a JIT'd model with no file on
   // disk and nothing embedded per-model. The EP FileSystem is unused now that
@@ -1195,9 +1199,7 @@ void *gqa_autotune_create(morphizen::FileSystem *fs) {
   // is the only way to tell a deliberate default from an override that did not
   // take.
   RUNTIME_DEBUG_LOG("[Runtime DEBUG] GQA autotune mode: %s (from %s)\n",
-                    modeName(policy->mode),
-                    choice.from_env ? "HIPDNN_GQA_AUTOTUNE_MODE"
-                                    : "the build default");
+                    modeName(policy->mode), choice.source);
   return policy.release();
 }
 
@@ -1211,31 +1213,6 @@ GqaAutotuneMode gqa_autotune_mode(const void *policy) {
   return static_cast<const GqaAutotunePolicy *>(policy)->mode;
 }
 
-void gqa_autotune_apply_provider_mode(void *opaque_policy, const char *mode) {
-  auto *policy = static_cast<GqaAutotunePolicy *>(opaque_policy);
-  if (!policy || policy->mode_settled)
-    return;
-  // Settled even when nothing was supplied: the flag retires the parse and the
-  // log, it does not record that a value arrived.
-  policy->mode_settled = true;
-  const std::string normalized = normalizedMode(mode ? mode : "");
-  if (normalized.empty())
-    return;
-  GqaAutotuneMode parsed = kDefaultMode;
-  if (!matchMode(normalized, &parsed)) {
-    if (gqaLutLogOn())
-      fprintf(stderr,
-              "GQA autotune: unrecognised provider option "
-              "gqa_autotune_mode=\"%s\" (expected \"lookup\" or \"online\"); "
-              "using the build default, %s\n",
-              mode, modeName(kDefaultMode));
-    return;
-  }
-  policy->mode = parsed;
-  RUNTIME_DEBUG_LOG("[Runtime DEBUG] GQA autotune mode: %s (from provider "
-                    "option gqa_autotune_mode)\n",
-                    modeName(policy->mode));
-}
 
 GqaDecodeResult gqa_autotune_resolve_decode(void *opaque_policy,
                                             const GqaDecodeRequest &request) {

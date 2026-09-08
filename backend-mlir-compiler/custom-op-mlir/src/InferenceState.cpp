@@ -12,7 +12,10 @@
 #include <cstddef>
 #include <cstdlib>
 #include <glog/logging.h>
+#include <map>
+#include <string>
 #include <utility>
+#include <vector>
 
 // Environment parameters (global scope, before namespace)
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND, "0")
@@ -25,14 +28,29 @@ namespace {
 // Resolve inference_init from the loaded artifact, call it, and return the
 // opaque state. FATALs (like the rest of create()) on a missing symbol or
 // non-zero return.
-void *runInit(const LoadedArtifact &artifact, morphizen::FileSystem *fs) {
-  auto init_fn =
-      artifact.get_method<int, void **, void *>(hipdnn::abi::kInferenceInit);
+void *runInit(const LoadedArtifact &artifact, morphizen::FileSystem *fs,
+              const std::map<std::string, std::string> &provider_options) {
+  auto init_fn = artifact.get_method<int, void **, void *, const char *const *,
+                                     const char *const *, size_t>(
+      hipdnn::abi::kInferenceInit);
   if (!init_fn) {
     LOG(FATAL) << "inference_init not found in artifact.";
   }
+  // Flattened for the C ABI. The runtime copies both arrays during init, so
+  // these only need to outlive the call.
+  std::vector<const char *> keys;
+  std::vector<const char *> values;
+  keys.reserve(provider_options.size());
+  values.reserve(provider_options.size());
+  for (const auto &[key, value] : provider_options) {
+    keys.push_back(key.c_str());
+    values.push_back(value.c_str());
+  }
+
   void *state = nullptr;
-  int ret = init_fn(&state, static_cast<void *>(fs));
+  int ret = init_fn(&state, static_cast<void *>(fs),
+                    keys.empty() ? nullptr : keys.data(),
+                    values.empty() ? nullptr : values.data(), keys.size());
   if (ret != 0) {
     LOG(FATAL) << "inference_init() failed with code: " << ret;
   }
@@ -54,9 +72,7 @@ void InferenceState::resolveEntryPoints(const LoadedArtifact &artifact) {
   set_output_allocator_fn_ =
       artifact.get_method<void, void *, const output_allocator_t *>(
           hipdnn::abi::kSetOutputAllocator);
-  set_provider_option_fn_ =
-      artifact.get_method<void, void *, const char *, const char *>(
-          hipdnn::abi::kRuntimeSetProviderOption);
+
   flush_op_profile_fn_ =
       artifact.get_method<void, void *>(hipdnn::abi::kRuntimeFlushOpProfile);
   // Perf-only hook; its name is a plain literal (not an artifact_abi.h
@@ -70,16 +86,15 @@ InferenceState::InferenceState(PrivateTag, void *state,
                                std::unique_ptr<LoadedArtifact> artifact)
     : state_(state), artifact_(std::move(artifact)), compute_fn_(nullptr),
       cleanup_fn_(nullptr), begin_compute_fn_(nullptr),
-      set_output_allocator_fn_(nullptr), set_provider_option_fn_(nullptr),
-      flush_op_profile_fn_(nullptr), add_cpu_profile_fn_(nullptr) {
+      set_output_allocator_fn_(nullptr), flush_op_profile_fn_(nullptr),
+      add_cpu_profile_fn_(nullptr) {
   resolveEntryPoints(*artifact_);
 
   MY_LOG(2) << "begin_compute symbol "
             << (begin_compute_fn_ ? "resolved" : "not exported (no-op)");
   MY_LOG(2) << "set_output_allocator symbol "
             << (set_output_allocator_fn_ ? "resolved" : "not exported (no-op)");
-  MY_LOG(2) << "set_provider_option symbol "
-            << (set_provider_option_fn_ ? "resolved" : "not exported (no-op)");
+
   MY_LOG(2) << "flush_op_profile symbol "
             << (flush_op_profile_fn_ ? "resolved" : "not exported (no-op)");
   MY_LOG(2) << "add_cpu_profile symbol "
@@ -106,9 +121,10 @@ InferenceState::InferenceState(PrivateTag, void *state,
   }
 }
 
-std::unique_ptr<InferenceState>
-InferenceState::create(const std::vector<uint8_t> &artifact_bytes,
-                       morphizen::FileSystem *fs, ArtifactKind kind) {
+std::unique_ptr<InferenceState> InferenceState::create(
+    const std::vector<uint8_t> &artifact_bytes, morphizen::FileSystem *fs,
+    const std::map<std::string, std::string> &provider_options,
+    ArtifactKind kind) {
   auto t0 = timing_now();
   auto t_prev = t0;
 
@@ -136,7 +152,7 @@ InferenceState::create(const std::vector<uint8_t> &artifact_bytes,
 
   // The inference_init lookup also triggers ORC's lazy codegen for the host
   // wrappers (LLVM IR), so this also covers first-symbol materialization.
-  void *state = runInit(*artifact, fs);
+  void *state = runInit(*artifact, fs, provider_options);
 
   TIMING_LOG("[Session] inference_init (lookup + lazy codegen): %.3fs\n",
              record_elapsed(t_prev));
@@ -194,13 +210,6 @@ void InferenceState::set_output_allocator(
   }
   if (state_) {
     set_output_allocator_fn_(state_, allocator);
-  }
-}
-
-void InferenceState::set_provider_option(const char *key,
-                                         const char *value) const {
-  if (set_provider_option_fn_ && state_) {
-    set_provider_option_fn_(state_, key, value);
   }
 }
 

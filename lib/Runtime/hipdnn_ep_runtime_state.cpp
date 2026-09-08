@@ -28,6 +28,8 @@ using ProviderOptions = std::unordered_map<std::string, std::string>;
 
 // Forward decl of static helpers defined later in this file.
 static int initialize_state_handles(RuntimeState **out_state);
+static void store_provider_options(RuntimeState *state, const char *const *keys,
+                                   const char *const *values, size_t count);
 static int prepare_constants_array(RuntimeState *state,
                                    const mlir::hip::HipModelMetaInfo *meta);
 static size_t
@@ -43,7 +45,10 @@ static int per_entry_load_constants(RuntimeState *state,
                                     const char *constants_filename);
 
 int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
-                                 const void *metadata_blob, size_t blob_size) {
+                                 const void *metadata_blob, size_t blob_size,
+                                 const char *const *option_keys,
+                                 const char *const *option_values,
+                                 size_t option_count) {
   auto t0 = timing_now();
 
   if (!out_state || !fs) {
@@ -55,12 +60,17 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
     return rc;
   }
 
+  // Before anything that reads them: the options are an input to construction,
+  // not something applied to a state that already decided.
+  store_provider_options(*out_state, option_keys, option_values, option_count);
+
   auto *fileSystem = static_cast<morphizen::FileSystem *>(fs);
 #if defined(HIPDNN_EP_REAL_RUNTIME)
   // LUT loading is independent of constants metadata. Keep it before the
   // metadata early returns so constant-free models still get lookup-only GQA.
-  (*out_state)->gqa_autotune_policy =
-      hipdnn_ep::gqa_autotune_create(fileSystem);
+  (*out_state)->gqa_autotune_policy = hipdnn_ep::gqa_autotune_create(
+      fileSystem,
+      hipdnn_ep_runtime_get_provider_option(*out_state, "gqa_autotune_mode"));
 #endif
 
   if (!metadata_blob || blob_size == 0) {
@@ -882,24 +892,18 @@ void *hipdnn_ep_state_get_op_profile(RuntimeState *state) {
   return state ? state->op_profile : nullptr;
 }
 
-extern "C" HIPDNN_EP_RT_EXPORT void
-hipdnn_ep_runtime_set_provider_option(RuntimeState *state, const char *key,
-                                      const char *value) {
-  if (!state || !key)
+// Copy the caller's provider options into the state. Values are copied, so
+// nothing afterwards depends on the caller's string lifetimes.
+static void store_provider_options(RuntimeState *state, const char *const *keys,
+                                   const char *const *values, size_t count) {
+  if (!state || !keys || !values || count == 0)
     return;
-
-  auto *options = static_cast<ProviderOptions *>(state->provider_options);
-  if (!value) {
-    if (options)
-      options->erase(key);
-    return;
+  auto *options = new ProviderOptions();
+  state->provider_options = options;
+  for (size_t i = 0; i < count; ++i) {
+    if (keys[i] && values[i])
+      (*options)[keys[i]] = values[i];
   }
-
-  if (!options) {
-    options = new ProviderOptions();
-    state->provider_options = options;
-  }
-  (*options)[key] = value;
 }
 
 extern "C" HIPDNN_EP_RT_EXPORT const char *
