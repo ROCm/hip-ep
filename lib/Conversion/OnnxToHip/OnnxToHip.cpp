@@ -13,6 +13,14 @@
 
 #include "OnnxToHipUtils.h"
 
+// ConvertOnnxToHipPass lists the PDL dialects unconditionally in
+// `dependentDialects`, so the generated getDependentDialects() needs these
+// declarations even in builds where PDLL pattern compilation is disabled.
+#include "mlir/Dialect/PDL/IR/PDL.h"
+#include "mlir/Dialect/PDLInterp/IR/PDLInterp.h"
+
+#include "pdl/qdq_fusion_pass.hpp"
+
 #include "hip/debug_log.h"
 #include "hip/timing.h"
 
@@ -21,8 +29,19 @@
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <filesystem>
 #include <limits>
 #include <map>
+#include <string>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+// windows.h defines min/max macros that break std::numeric_limits<>::max().
+#define NOMINMAX
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 
 #define DEBUG_TYPE "convert-onnx-to-hip"
 
@@ -39,6 +58,90 @@ namespace {
 //===----------------------------------------------------------------------===//
 
 constexpr llvm::StringLiteral kOrtMemoryAddressLocation = "*/_ORT_MEM_ADDR_/*";
+
+// This function is defined in a static library, so its return value depends on
+// the final link target: either the executable path or the library path.
+static std::string dll_path() {
+#ifdef _WIN32
+  HMODULE module = nullptr;
+  GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                         GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                     reinterpret_cast<LPCSTR>(&dll_path), &module);
+
+  char path[MAX_PATH];
+  DWORD len = GetModuleFileNameA(module, path, MAX_PATH);
+  return std::string(path, len);
+#else
+  Dl_info info{};
+  if (dladdr(reinterpret_cast<void *>(&dll_path), &info) == 0 ||
+      info.dli_fname == nullptr)
+    return {};
+
+  return std::string(info.dli_fname);
+#endif
+}
+
+/// Classification of an 8-bit constant's backing byte size against its element
+/// count, returned by markPackedInt4Consumers so the caller can diagnose a
+/// genuine mismatch.
+enum class PackedInt4Result {
+  NotApplicable, ///< Not an 8-bit static constant, or byte size unknown.
+  Unpacked,      ///< Full-width storage (bytes == numElements): plain int8.
+  Packed,        ///< Half-width storage (bytes == ceil(numElements/2)): int4.
+  SizeMismatch   ///< 8-bit storage that is neither full nor packed: malformed.
+};
+
+/// Mark the DequantizeLinear consumers of a 4-bit-packed constant.
+///
+/// ONNX INT4/UINT4 is imported as i8/ui8 at the logical element count, but its
+/// buffer holds only ceil(numel/2) packed bytes; a consumer trusting the i8
+/// element type over-reads. The halved byte size is the only surviving signal,
+/// so stamp `packed_int4` here (where the backing size is known) to make the
+/// lowering nibble-unpack. `packedBytes` is that true backing byte count.
+///
+/// The marker is scoped to DequantizeLinear rather than every user because the
+/// dequant is the one op whose lowering reinterprets the packed storage; the
+/// packed operand does not otherwise reach an op that reads it directly (a
+/// generic "mark all users" would tag ops that never unpack). ONNX guarantees
+/// zero_point.dtype == x.dtype, so tagging the dequant covers both its packed
+/// operands.
+///
+/// Returns how the backing size compared to the element count so the caller can
+/// reject a size that is neither full nor packed (a malformed source that would
+/// otherwise silently lower as int8 over a wrong-length buffer).
+static PackedInt4Result
+markPackedInt4Consumers(mlir::Operation *constOp,
+                        mlir::RankedTensorType tensorType,
+                        int64_t packedBytes) {
+  auto elemIntTy =
+      mlir::dyn_cast<mlir::IntegerType>(tensorType.getElementType());
+  if (!elemIntTy || elemIntTy.getWidth() != 8 || !tensorType.hasStaticShape() ||
+      packedBytes < 0)
+    return PackedInt4Result::NotApplicable;
+  int64_t numel = tensorType.getNumElements();
+  if (numel <= 0)
+    return PackedInt4Result::NotApplicable;
+  // Full-width storage is plain int8; leave it untouched. ceil(numel/2) is the
+  // packed nibble count -- the same relation hip.constant's verifier accepts
+  // (an odd numel packs its last nibble into a padded byte). A single element
+  // occupies one byte either way, so it classifies as Unpacked here. Any other
+  // size is a malformed source.
+  if (packedBytes == numel)
+    return PackedInt4Result::Unpacked;
+  if (packedBytes != (numel + 1) / 2)
+    return PackedInt4Result::SizeMismatch;
+  mlir::OpBuilder builder(constOp->getContext());
+  for (mlir::Operation *user : constOp->getResult(0).getUsers()) {
+    llvm::StringRef opName = user->getName().getStringRef();
+    bool isDq = opName == "onnx.DequantizeLinear";
+    if (!isDq && opName == "onnx.Custom")
+      if (auto fn = user->getAttrOfType<mlir::StringAttr>("function_name"))
+        isDq = fn.getValue() == "DequantizeLinear";
+    if (isDq)
+      user->setAttr("packed_int4", builder.getUnitAttr());
+  }
+  return PackedInt4Result::Packed;
+}
 
 /// Lower every onnx.Constant to a policy-neutral hip.constant carrier.
 ///
@@ -66,8 +169,15 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::func::FuncOp funcOp,
     mlir::OpBuilder builder(constOp);
     auto orderAttr = builder.getI64IntegerAttr(nextOrder);
     mlir::hip::ConstantOp carrier;
+    // True backing byte count of the constant's data, used to detect 4-bit
+    // packing (packedBytes == numel/2). -1 until a branch sets it.
+    int64_t packedBytes = -1;
     if (auto valueAttr = mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
             constOp->getAttrOfType<mlir::ElementsAttr>("value"))) {
+      // Splat raw data is a single element, not the full buffer, so its length
+      // is not comparable to the logical element count -- skip it.
+      if (!valueAttr.isSplat())
+        packedBytes = static_cast<int64_t>(valueAttr.getRawData().size());
       carrier = mlir::hip::ConstantOp::create(builder, constOp->getLoc(),
                                               tensorType, valueAttr);
     } else if (auto location =
@@ -77,6 +187,7 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::func::FuncOp funcOp,
       if (!offset || !size)
         return constOp->emitError(
             "onnx.Constant external source requires location/offset/size");
+      packedBytes = size.getInt();
       carrier = location.getValue() == kOrtMemoryAddressLocation
                     ? mlir::hip::ConstantOp::create(builder, constOp->getLoc(),
                                                     tensorType, offset, size)
@@ -101,6 +212,15 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::func::FuncOp funcOp,
         if (auto outputName = mlir::dyn_cast<mlir::StringAttr>(outputs[0]))
           carrier.setSourceNameAttr(outputName);
     }
+    // Mark 4-bit-packed constants before rewiring: markPackedInt4Consumers
+    // walks constOp's users (the DequantizeLinear ops), which still reference
+    // it here.
+    if (markPackedInt4Consumers(constOp, tensorType, packedBytes) ==
+        PackedInt4Result::SizeMismatch)
+      return constOp->emitError("8-bit external source byte size ")
+             << packedBytes << " matches neither the full element count "
+             << tensorType.getNumElements() << " nor the packed nibble count "
+             << (tensorType.getNumElements() + 1) / 2;
     constOp->getResult(0).replaceAllUsesWith(carrier.getResult());
     constOp->erase();
   }
@@ -163,6 +283,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateOnnxAttentionConversionPatterns(patterns, ctx);
   populateMatMulNBitsConversionPatterns(patterns, ctx);
   populateQMoEConversionPatterns(patterns, ctx);
+  populateQMoEAmdConversionPatterns(patterns, ctx);
   populateGatherBlockQuantizedConversionPatterns(patterns, ctx);
   populateReshapeConversionPatterns(patterns, ctx);
   populateCausalConvWithStateConversionPatterns(patterns, ctx);
@@ -216,6 +337,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateGridSampleConversionPatterns(patterns, ctx);
   populateGlobalPoolConversionPatterns(patterns, ctx);
   populateFlattenConversionPatterns(patterns, ctx);
+  populateQdqConversionPatterns(patterns, ctx);
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
@@ -353,6 +475,17 @@ void ConvertOnnxToHipPass::runOnOperation() {
   if (mlir::failed(generateModuleMetadata(module)))
     return signalPassFailure();
   logSubpass("metadata");
+
+  const std::string pdlFusionFile =
+      (std::filesystem::path(dll_path()).parent_path() /
+       "HipFusionPatterns.pdl.mlir")
+          .string();
+  if (std::filesystem::exists(pdlFusionFile)) {
+    if (!::hip::pdl::run(module, pdlFusionFile)) {
+      module.emitWarning() << "Failed to load/apply fusion PDL patterns from "
+                           << pdlFusionFile;
+    }
+  }
 
   int64_t constantOrder = 0;
   for (auto funcOp :

@@ -10,7 +10,6 @@
 #include "mlir/Dialect/Bufferization/Transforms/BufferViewFlowAnalysis.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/PatternMatch.h"
@@ -118,36 +117,26 @@ findAliasedPoolResults(BufferViewFlowAnalysis &aliasAnalysis, Value value) {
   return poolResults;
 }
 
-static SmallVector<Value> materializeDimensions(Value preservedShape,
-                                                MemRefType type, Location loc,
-                                                OpBuilder &builder) {
-  SmallVector<Value> dimensions;
-  dimensions.reserve(type.getRank());
-
-  for (int64_t dimension : llvm::seq<int64_t>(0, type.getRank())) {
-    Value size;
-    if (type.isDynamicDim(dimension)) {
-      assert(preservedShape && "dynamic dims require a preserved shape");
-      Value extent =
-          builder.create<shape::GetExtentOp>(loc, preservedShape, dimension);
-      size = builder.create<shape::SizeToIndexOp>(loc, extent);
-    } else {
-      size = arith::ConstantIndexOp::create(builder, loc,
-                                            type.getDimSize(dimension));
-    }
-
-    dimensions.push_back(size);
-  }
-  return dimensions;
+static bool isBufferizedShape(Value shape) {
+  return shape && isa<MemRefType>(shape.getType());
 }
 
-static SmallVector<Value> getDynamicDimensions(ArrayRef<Value> dimensions,
-                                               MemRefType type) {
-  SmallVector<Value> dynamicDimensions;
-  for (int64_t dimension : llvm::seq<int64_t>(0, type.getRank()))
-    if (type.isDynamicDim(dimension))
-      dynamicDimensions.push_back(dimensions[dimension]);
-  return dynamicDimensions;
+static SmallVector<Value> materializeDynamicDimensions(Value preservedShape,
+                                                       MemRefType type,
+                                                       Location loc,
+                                                       OpBuilder &builder) {
+  SmallVector<Value> dimensions;
+  dimensions.reserve(type.getNumDynamicDims());
+
+  for (int64_t dimension : llvm::seq<int64_t>(0, type.getRank())) {
+    if (!type.isDynamicDim(dimension)) {
+      continue;
+    }
+    Value position = arith::ConstantIndexOp::create(builder, loc, dimension);
+    dimensions.push_back(
+        memref::LoadOp::create(builder, loc, preservedShape, position));
+  }
+  return dimensions;
 }
 
 static OpFoldResult multiplyIndexValues(OpFoldResult lhs, OpFoldResult rhs,
@@ -168,15 +157,9 @@ static OpFoldResult multiplyIndexValues(OpFoldResult lhs, OpFoldResult rhs,
 
 static Value createContiguousView(OpBuilder &builder, Location loc,
                                   Value source, MemRefType targetType,
-                                  ArrayRef<Value> targetDimensions) {
-  SmallVector<OpFoldResult> sizes;
-  sizes.reserve(targetType.getRank());
-  for (int64_t dimension : llvm::seq<int64_t>(0, targetType.getRank())) {
-    if (targetType.isDynamicDim(dimension))
-      sizes.push_back(targetDimensions[dimension]);
-    else
-      sizes.push_back(builder.getIndexAttr(targetType.getDimSize(dimension)));
-  }
+                                  ValueRange dynamicDimensions) {
+  SmallVector<OpFoldResult> sizes =
+      getMixedValues(targetType.getShape(), dynamicDimensions, builder);
 
   SmallVector<OpFoldResult> strides(targetType.getRank());
   OpFoldResult runningStride = builder.getIndexAttr(1);
@@ -203,11 +186,6 @@ struct OutputInfo {
 
 struct HipsrUseOutputAllocatorPass
     : impl::HipsrUseOutputAllocatorPassBase<HipsrUseOutputAllocatorPass> {
-
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<arith::ArithDialect, hipsr::HipsrDialect,
-                    memref::MemRefDialect, shape::ShapeDialect>();
-  }
 
   void runOnOperation() override {
     func::FuncOp funcOp = getOperation();
@@ -327,17 +305,19 @@ struct HipsrUseOutputAllocatorPass
 
       MemRefType internalType = allocOp.getType();
 
-      if (externalType.getNumDynamicDims() != 0 && !externalShape) {
+      if (externalType.getNumDynamicDims() != 0 &&
+          !isBufferizedShape(externalShape)) {
         returnOp.emitError()
             << "graph output " << outIdx
-            << " has dynamic dims but no preserved external shape";
+            << " has dynamic dims but no preserved external shape memref";
         signalPassFailure();
         return;
       }
 
-      if (internalType.getNumDynamicDims() != 0 && !internalShape) {
+      if (internalType.getNumDynamicDims() != 0 &&
+          !isBufferizedShape(internalShape)) {
         allocOp.emitError()
-            << "has dynamic dims but no preserved internal shape";
+            << "has dynamic dims but no preserved internal shape memref";
         signalPassFailure();
         return;
       }
@@ -413,22 +393,20 @@ struct HipsrUseOutputAllocatorPass
       Location loc = allocOp.getLoc();
       builder.setInsertionPoint(allocOp);
 
-      SmallVector<Value> externalDimensions = materializeDimensions(
+      SmallVector<Value> externalDynamicSizes = materializeDynamicDimensions(
           output.externalShape, output.externalType, loc, builder);
-      SmallVector<Value> internalDimensions = materializeDimensions(
-          output.internalShape, internalType, loc, builder);
-
-      SmallVector<Value> externalDynamicSizes =
-          getDynamicDimensions(externalDimensions, output.externalType);
       auto allocOutput = AllocOutputOp::create(
           builder, loc, output.externalType, output.context,
           externalDynamicSizes, builder.getI64IntegerAttr(output.outIdx));
 
       Value replacement = allocOutput.getResult();
       if (output.externalType != internalType ||
-          output.externalShape != output.internalShape)
+          output.externalShape != output.internalShape) {
+        SmallVector<Value> internalDimensions = materializeDynamicDimensions(
+            output.internalShape, internalType, loc, builder);
         replacement = createContiguousView(builder, loc, replacement,
                                            internalType, internalDimensions);
+      }
 
       for (Operation *user : llvm::make_early_inc_range(allocOp->getUsers()))
         if (auto dealloc = dyn_cast<memref::DeallocOp>(user))

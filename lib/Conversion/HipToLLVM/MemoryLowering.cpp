@@ -671,8 +671,10 @@ static bool strideVectorsEqual(ArrayRef<int64_t> a, ArrayRef<int64_t> b) {
 }
 
 /// Lowers memref.copy on GPU memrefs to wrap_hipMemcpyAsync /
-/// wrap_hipMemcpy2DAsync when strides are statically known. Otherwise leaves
-/// conversion to the default MemRef→LLVM copy lowering (benefit 1).
+/// wrap_hipMemcpy2DAsync when strides are statically known, plus the flat case
+/// where both sides are identity-layout but their extents are dynamic.
+/// Otherwise leaves conversion to the default MemRef→LLVM copy lowering
+/// (benefit 1).
 struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
   MemRefCopyOpLowering(const LLVMTypeConverter &converter)
       : ConvertOpToLLVMPattern(converter, PatternBenefit(10)) {}
@@ -701,11 +703,17 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
 
     FailureOr<SmallVector<int64_t>> srcStridesOr = tryStaticStridesElems(srcTy);
     FailureOr<SmallVector<int64_t>> dstStridesOr = tryStaticStridesElems(dstTy);
-    if (failed(srcStridesOr) || failed(dstStridesOr))
+    // An identity layout is contiguous whatever its extents are, so a copy
+    // between two of them stays a single flat transfer when the shape is only
+    // known at runtime; just the byte count has to come from the descriptor.
+    // Bailing out would hand the op to the default MemRef->LLVM lowering, whose
+    // host memcpy faults on device pointers.
+    const bool needStaticStrides = failed(srcStridesOr) || failed(dstStridesOr);
+    const bool dynamicContiguous = needStaticStrides &&
+                                   srcTy.getLayout().isIdentity() &&
+                                   dstTy.getLayout().isIdentity();
+    if (needStaticStrides && !dynamicContiguous)
       return rewriter.notifyMatchFailure(op, "need static strides/layout");
-
-    ArrayRef<int64_t> srcStrides = *srcStridesOr;
-    ArrayRef<int64_t> dstStrides = *dstStridesOr;
 
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
@@ -728,6 +736,32 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
                                       rewriter.getI64IntegerAttr(v));
     };
 
+    auto emitFlatCopy = [&](Value totalBytes) -> LogicalResult {
+      FailureOr<LLVM::LLVMFuncOp> memcpyFn =
+          LLVM::lookupOrCreateFn(rewriter, module, kWrapHipMemcpyAsync,
+                                 {ptrType, ptrType, ptrType, i64Type}, i32Type);
+      if (failed(memcpyFn))
+        return failure();
+
+      LLVM::CallOp::create(rewriter, loc, *memcpyFn,
+                           ValueRange{statePtr, dstPtr, srcPtr, totalBytes});
+      rewriter.eraseOp(op);
+      return success();
+    };
+
+    if (dynamicContiguous) {
+      MemRefDescriptor srcDesc(adaptor.getSource());
+      Value totalBytes = i64Const(elemBytes);
+      for (int64_t i = 0; i < rank; ++i)
+        totalBytes = LLVM::MulOp::create(
+            rewriter, loc, totalBytes,
+            srcDesc.size(rewriter, loc, static_cast<unsigned>(i)));
+      return emitFlatCopy(totalBytes);
+    }
+
+    ArrayRef<int64_t> srcStrides = *srcStridesOr;
+    ArrayRef<int64_t> dstStrides = *dstStridesOr;
+
     FailureOr<SmallVector<int64_t>> denseStridesOr =
         computeRowMajorStridesElems(shape);
     if (failed(denseStridesOr))
@@ -739,19 +773,7 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
       int64_t numElems = 1;
       for (int64_t d : shape)
         numElems *= d;
-      int64_t totalBytes = numElems * elemBytes;
-
-      FailureOr<LLVM::LLVMFuncOp> memcpyFn =
-          LLVM::lookupOrCreateFn(rewriter, module, kWrapHipMemcpyAsync,
-                                 {ptrType, ptrType, ptrType, i64Type}, i32Type);
-      if (failed(memcpyFn))
-        return failure();
-
-      LLVM::CallOp::create(
-          rewriter, loc, *memcpyFn,
-          ValueRange{statePtr, dstPtr, srcPtr, i64Const(totalBytes)});
-      rewriter.eraseOp(op);
-      return success();
+      return emitFlatCopy(i64Const(numElems * elemBytes));
     }
 
     // Pitched 2D copy: last dim contiguous (stride 1) on BOTH sides, and a

@@ -8,6 +8,7 @@
 
 include "mlir/IR/OpBase.td"
 include "mlir/IR/AttrTypeBase.td"
+include "mlir/Dialect/Shape/IR/ShapeBase.td"
 include "hip/Dialect/Hipsr/IR/HipsrDialect.td"
 
 // Type constraints for ops that need a memref in a named memory space, one per
@@ -39,6 +40,14 @@ def Hipsr_HostIndexVector : Type<
          CPred<"::llvm::cast<::mlir::ShapedType>($_self).getElementType()"
                ".isInteger(64)">]>,
     "rank-1 i64 host tensor or memref">;
+
+// The three forms a shape value takes as it lowers: opaque !shape.shape, an
+// extent tensor after -hipsr-convert-shape-to-extent, then an extent memref
+// after bufferization.
+def Hipsr_ExtentMemRef : MemRefRankOf<[Index], [1]>;
+def Hipsr_ShapeValue : AnyTypeOf<[Shape_ShapeType, Shape_ExtentTensorType,
+                                  Hipsr_ExtentMemRef],
+                                 "shape, extent tensor, or extent memref">;
 
 // Base class for hipsr types.
 class Hipsr_Type<string name, string typeMnemonic> : TypeDef<Hipsr_Dialect, name> {

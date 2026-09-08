@@ -214,6 +214,28 @@ QMoEOp::reifyResultShapes(OpBuilder &b,
 }
 
 //===----------------------------------------------------------------------===//
+// QMoEAmdOp
+//
+// Result shape == hidden_states' shape (same reasoning as QMoEOp above):
+// routing / latent projection / expert dispatch happen inside the kernel
+// and produce per-token outputs accumulated back into the original token
+// slot. Verified against `lib/Runtime/real/qmoe_amd.cpp`'s output buffer
+// sizing (num_tokens * hidden_size * elem_size).
+//===----------------------------------------------------------------------===//
+
+LogicalResult
+QMoEAmdOp::reifyResultShapes(OpBuilder &b,
+                             ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() == 0)
+    return failure();
+  if (!isa<RankedTensorType>(getHiddenStates().getType()))
+    return failure();
+  reifiedReturnShapes.assign(
+      {mlir::hip::reifyElementwiseSameShape(b, getLoc(), getHiddenStates())});
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // MatMulNBitsOp
 //
 // `$A` has shape `[..., K]`. Output has shape `[..., N]` where leading

@@ -84,12 +84,25 @@ packed `__half2` path for fp16 rows of even width.
 |---|---|
 | `GroupQueryAttention` | `hip.gqa` |
 
-### Quantization (placeholder, no-op for now)
+### Quantization
 
-| ONNX | HIP |
-|---|---|
-| `QuantizeLinear` | `hip.quantize_linear` |
-| `DequantizeLinear` | `hip.dequantize_linear` |
+| ONNX | HIP | Backend |
+|---|---|---|
+| `QuantizeLinear` | `hip.quantize_linear` | `qdq_kernel.hip` |
+| `DequantizeLinear` | `hip.dequantize_linear` | `qdq_kernel.hip` |
+
+Storage is int8/uint8/int16/uint16 plus int4/uint4. Granularity comes from the
+shape of `scale` rather than a flag: a single element is per-tensor, a 1-D
+tensor is per-axis along `axis`, and `block_size > 0` is blocked.
+
+int4/uint4 imports as an 8-bit element type at the logical element count, two
+values per byte, so the width travels as a `packed_int4` marker rather than in
+the type. Constant lowering is the only producer of that marker and can only
+reach `DequantizeLinear`, where the halved backing size makes the packing
+observable; a `QuantizeLinear` writing 4-bit output looks identical in the IR to
+one writing 8-bit. The quantize direction is implemented through the dialect,
+lowering, and kernel, but nothing reaches it today, so its packed kernel has no
+runtime coverage.
 
 ### Activation
 

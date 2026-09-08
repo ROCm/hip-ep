@@ -227,13 +227,16 @@ enum GqaTuneConfig : ubyte {
   NW4_BKV32_MT2 = 41,
   NW4_BKV64_MT1 = 42,
   NW4_BKV64_MT2 = 43,
-  // prefill v8: nd, mt, bkv. nd = 4 exists at bkv = 32 only.
+  // prefill v8: nd, mt, bkv.
+  ND2_MT1_BKV16 = 44,
   ND2_MT1_BKV32 = 48,
   ND2_MT1_BKV64 = 49,
   ND2_MT2_BKV32 = 50,
   ND2_MT2_BKV64 = 51,
+  ND4_MT1_BKV16 = 54,
   ND4_MT1_BKV32 = 52,
-  ND4_MT2_BKV32 = 53
+  ND4_MT2_BKV32 = 53,
+  ND8_MT1_BKV16 = 55
 }
 
 // 13 bytes, alignment 1. Fields a tier does not use hold their `Any` value, and

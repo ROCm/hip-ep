@@ -49,6 +49,7 @@ set(_kernel_sources
     hip/leaky_relu_kernel.hip
     hip/softplus_kernel.hip
     hip/elementwise_where_kernel.hip
+    hip/qelementwise_kernel.hip
     hip/elementwise_unary_kernel.hip
     hip/elementwise_binary_kernel.hip  # Mul/Add/Min/Max/Div/Mod/Equal/Less
     hip/tile_kernel.hip
@@ -77,27 +78,65 @@ set(_kernel_sources
     hip/global_pool_kernel.hip
     hip/matmul_nbits_kernel.hip
     hip/qmoe_kernel.hip
+    hip/qmoe_amd_kernel.hip
     hip/linear_attention_kernel.hip
     hip/transpose_kernel.hip
     hip/causal_conv_step_kernel.hip
     hip/slice_kernel.hip
     hip/scatter_nd_kernel.hip
     hip/gather_block_quantized_kernel.hip
+    hip/qdq_kernel.hip
     hip/softmax_kernel.hip
     hip/nonzero_kernel.hip
     hip/strided_copy_kernel.hip
 )
+
+# MatMulNBits offline autotune table.
+#
+# The table is per-arch and so is this target, which is why the bytes are
+# embedded here rather than in runtime.bc the way the GQA table is: a
+# custom_kernels_<arch>.dll carries exactly the table it can use.
+#
+# lut/<arch>_lut_data.cpp is checked in and produced by update_lut.py compile
+# (dev workflow only -- the hip-ep build does not require Python). An arch with
+# no measured table still builds via tools/empty_lut_data.cpp: the loader finds
+# no table, and every shape falls through to the runtime sweep exactly as
+# before. Shipping a new arch is therefore a table addition, never a build break.
+set(_matmul_nbits_autotune_dir ${CMAKE_CURRENT_SOURCE_DIR}/hip/autotune/matmul_nbits)
+
+function(_matmul_nbits_lut_data_source arch out_var)
+    set(_cpp ${_matmul_nbits_autotune_dir}/lut/${arch}_lut_data.cpp)
+    if(EXISTS ${_cpp})
+        set(${out_var} ${_cpp} PARENT_SCOPE)
+    else()
+        message(STATUS
+            "[custom_kernels] no MatMulNBits LUT for ${arch}; "
+            "shapes will fall back to the runtime autotune")
+        set(${out_var}
+            ${_matmul_nbits_autotune_dir}/tools/empty_lut_data.cpp
+            PARENT_SCOPE)
+    endif()
+endfunction()
 
 # One SHARED target per arch. Each builds a fatbin with that single slice;
 # OFFLOAD_ARCHS narrows the global list to one element so the resulting
 # DLL/SO is not bloated with code for archs the consumer won't load.
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
     set(_target custom_kernels_${_arch})
+    _matmul_nbits_lut_data_source(${_arch} _matmul_lut_src)
     hip_add_library(${_target} SHARED ${_kernel_sources}
+            ${_matmul_nbits_autotune_dir}/matmul_nbits_autotune.cpp
+            ${_matmul_lut_src}
         INCLUDE_DIRECTORIES
             ${CMAKE_CURRENT_SOURCE_DIR}/include
+            # matmul_nbits_autotune_generated.h; flatbuffers itself is
+            # header-only for reading, so no link library is needed.
+            ${CMAKE_BINARY_DIR}/schemas
+            $<TARGET_PROPERTY:flatbuffers::flatbuffers,INTERFACE_INCLUDE_DIRECTORIES>
         OFFLOAD_ARCHS
             ${_arch}
+        DEPENDS
+            HipSchemas
     )
     set_target_properties(${_target} PROPERTIES
         OUTPUT_NAME custom_kernels_${_arch}

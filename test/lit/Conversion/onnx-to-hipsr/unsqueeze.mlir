@@ -14,8 +14,8 @@
 // RUN: hip-mlir-opt %s --onnx-dialect=modeled --split-input-file -allow-unregistered-dialect -convert-onnx-to-hipsr | FileCheck %s
 
 // A trailing axis on a fully dynamic input, which is what an embedding graph
-// inserts on a token mask. Every dynamic dimension is read off the input's
-// shape, and the expand takes its dimensions off the destination.
+// inserts on a token mask. The region reads every dynamic dimension off the
+// input's shape, and the body reads them off the input itself.
 // CHECK-LABEL: func.func @trailing_axis(
 // CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,
 // CHECK-SAME:    %[[INPUT:.*]]: tensor<?x?xi1, #hipsr.mem<device>>) -> tensor<?x?x1xi1, #hipsr.mem<device>> {
@@ -36,12 +36,15 @@
 // CHECK-NEXT:      hipsr.shape_yield %[[SHAPE]] : !shape.shape
 // CHECK-NEXT:    }
 // CHECK-NEXT:    %[[RESULT:.*]] = hipsr.compute(%[[CTX]]) ins(%[[INPUT]] : tensor<?x?xi1, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<?x?x1xi1, #hipsr.mem<device>>) {
-// CHECK-NEXT:    ^bb0(%{{.*}}: !hipsr.context, %[[IN:.*]]: tensor<?x?xi1, #hipsr.mem<device>>, %[[DEST:.*]]: tensor<?x?x1xi1, #hipsr.mem<device>>):
+// CHECK-NEXT:    ^bb0(%{{.*}}: !hipsr.context, %[[IN:.*]]: tensor<?x?xi1, #hipsr.mem<device>>, %{{.*}}: tensor<?x?x1xi1, #hipsr.mem<device>>):
 // CHECK-NEXT:      %[[C0:.*]] = arith.constant 0 : index
-// CHECK-NEXT:      %[[DEST_ROWS:.*]] = tensor.dim %[[DEST]], %[[C0]] : tensor<?x?x1xi1, #hipsr.mem<device>>
+// CHECK-NEXT:      %[[IN_ROWS:.*]] = tensor.dim %[[IN]], %[[C0]] : tensor<?x?xi1, #hipsr.mem<device>>
 // CHECK-NEXT:      %[[C1:.*]] = arith.constant 1 : index
-// CHECK-NEXT:      %[[DEST_COLS:.*]] = tensor.dim %[[DEST]], %[[C1]] : tensor<?x?x1xi1, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[OUT:.*]] = tensor.expand_shape %[[IN]] {{\[}}[0], [1, 2]] output_shape {{\[}}%[[DEST_ROWS]], %[[DEST_COLS]], 1] : tensor<?x?xi1, #hipsr.mem<device>> into tensor<?x?x1xi1, #hipsr.mem<device>>
+// CHECK-NEXT:      %[[IN_COLS:.*]] = tensor.dim %[[IN]], %[[C1]] : tensor<?x?xi1, #hipsr.mem<device>>
+// One unused divisor per dynamic group, as in the region above.
+// CHECK-NEXT:      arith.constant 1 : index
+// CHECK-NEXT:      arith.constant 1 : index
+// CHECK-NEXT:      %[[OUT:.*]] = tensor.expand_shape %[[IN]] {{\[}}[0], [1, 2]] output_shape {{\[}}%[[IN_ROWS]], %[[IN_COLS]], 1] : tensor<?x?xi1, #hipsr.mem<device>> into tensor<?x?x1xi1, #hipsr.mem<device>>
 // CHECK-NEXT:      hipsr.compute_yield %[[OUT]] : tensor<?x?x1xi1, #hipsr.mem<device>>
 // CHECK-NEXT:    } : tensor<?x?x1xi1, #hipsr.mem<device>>{{$}}
 // CHECK-NEXT:    return %[[RESULT]] : tensor<?x?x1xi1, #hipsr.mem<device>>
@@ -57,7 +60,7 @@ func.func @trailing_axis(%ctx: !hipsr.context,
 // -----
 
 // The axes resolve a dimension the declared tensor<?x?x?xi1> leaves dynamic.
-// The unit lands between the two dimensions the input gives, so the destination
+// The unit lands between the two dimensions the input gives, so the result
 // carries its dynamic dimensions at axes 0 and 2.
 // CHECK-LABEL: func.func @interior_axis(
 // CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,
@@ -79,12 +82,15 @@ func.func @trailing_axis(%ctx: !hipsr.context,
 // CHECK-NEXT:      hipsr.shape_yield %[[SHAPE]] : !shape.shape
 // CHECK-NEXT:    }
 // CHECK-NEXT:    %[[RESULT:.*]] = hipsr.compute(%[[CTX]]) ins(%[[INPUT]] : tensor<?x?xi1, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<?x1x?xi1, #hipsr.mem<device>>) {
-// CHECK-NEXT:    ^bb0(%{{.*}}: !hipsr.context, %[[IN:.*]]: tensor<?x?xi1, #hipsr.mem<device>>, %[[DEST:.*]]: tensor<?x1x?xi1, #hipsr.mem<device>>):
+// CHECK-NEXT:    ^bb0(%{{.*}}: !hipsr.context, %[[IN:.*]]: tensor<?x?xi1, #hipsr.mem<device>>, %{{.*}}: tensor<?x1x?xi1, #hipsr.mem<device>>):
 // CHECK-NEXT:      %[[C0:.*]] = arith.constant 0 : index
-// CHECK-NEXT:      %[[DEST_ROWS:.*]] = tensor.dim %[[DEST]], %[[C0]] : tensor<?x1x?xi1, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[C2:.*]] = arith.constant 2 : index
-// CHECK-NEXT:      %[[DEST_COLS:.*]] = tensor.dim %[[DEST]], %[[C2]] : tensor<?x1x?xi1, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[OUT:.*]] = tensor.expand_shape %[[IN]] {{\[}}[0], [1, 2]] output_shape {{\[}}%[[DEST_ROWS]], 1, %[[DEST_COLS]]] : tensor<?x?xi1, #hipsr.mem<device>> into tensor<?x1x?xi1, #hipsr.mem<device>>
+// CHECK-NEXT:      %[[IN_ROWS:.*]] = tensor.dim %[[IN]], %[[C0]] : tensor<?x?xi1, #hipsr.mem<device>>
+// CHECK-NEXT:      %[[C1:.*]] = arith.constant 1 : index
+// CHECK-NEXT:      %[[IN_COLS:.*]] = tensor.dim %[[IN]], %[[C1]] : tensor<?x?xi1, #hipsr.mem<device>>
+// One unused divisor per dynamic group, as in the region above.
+// CHECK-NEXT:      arith.constant 1 : index
+// CHECK-NEXT:      arith.constant 1 : index
+// CHECK-NEXT:      %[[OUT:.*]] = tensor.expand_shape %[[IN]] {{\[}}[0], [1, 2]] output_shape {{\[}}%[[IN_ROWS]], 1, %[[IN_COLS]]] : tensor<?x?xi1, #hipsr.mem<device>> into tensor<?x1x?xi1, #hipsr.mem<device>>
 // CHECK-NEXT:      hipsr.compute_yield %[[OUT]] : tensor<?x1x?xi1, #hipsr.mem<device>>
 // CHECK-NEXT:    } : tensor<?x1x?xi1, #hipsr.mem<device>>{{$}}
 // CHECK-NEXT:    return %[[RESULT]] : tensor<?x1x?xi1, #hipsr.mem<device>>

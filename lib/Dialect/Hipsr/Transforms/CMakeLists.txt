@@ -6,6 +6,7 @@
 add_library(HipsrDialectTransforms STATIC
   AddContextArgPass.cpp
   BufferizableOpInterfaceImpl.cpp
+  ConvertShapeToExtentPass.cpp
   ExternalizeConstants.cpp
   HipsrPoolAllocPass.cpp
   MaterializeInitTensorsPass.cpp

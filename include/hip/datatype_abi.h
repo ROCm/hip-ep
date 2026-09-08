@@ -39,6 +39,7 @@
 #define HIPDNN_EP_DATATYPE_DOUBLE 6   // f64, 8 bytes
 #define HIPDNN_EP_DATATYPE_UINT8 7    // ui8, 1 byte
 #define HIPDNN_EP_DATATYPE_INT16 8    // i16, 2 byte
+#define HIPDNN_EP_DATATYPE_UINT16 9   // ui16, 2 byte
 
 // Returned by the compiler-side mappings for an element type with no runtime
 // identifier, so a caller fails conversion explicitly instead of passing a

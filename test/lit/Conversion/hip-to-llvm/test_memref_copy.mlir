@@ -144,3 +144,24 @@ func.func @copy_degenerate_thin_interleave(
         to memref<1x25x25x64x1xf16, strided<[80000, 3200, 128, 2, 1], offset: 0>>
   return
 }
+
+// -----
+
+// Test 7: dense copy whose extents are only known at runtime -- the
+// `[1, 8, max_seq_len, 128]` KV cache a decoder graph writes to a graph
+// output. An identity layout stays contiguous whatever its extents are, so
+// this is still one flat transfer; only the byte count comes from the
+// descriptor. A dynamic dim used to fail the static-stride check and drop the
+// op into MLIR's default lowering, whose host memcpy faults on device pointers.
+//
+// CHECK-LABEL: llvm.func @copy_dense_dynamic_kv_cache
+// CHECK:         llvm.call @wrap_hipMemcpyAsync({{.*}}) :
+// CHECK-NOT:     llvm.intr.memcpy
+// CHECK-NOT:     llvm.call @memrefCopy
+func.func @copy_dense_dynamic_kv_cache(
+    %ctx: !hip.context,
+    %src: memref<1x8x?x128xf16>,
+    %dst: memref<1x8x?x128xf16>) {
+  memref.copy %src, %dst : memref<1x8x?x128xf16> to memref<1x8x?x128xf16>
+  return
+}

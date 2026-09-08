@@ -505,7 +505,7 @@ struct KernelVersion {
 constexpr KernelVersion kKernelVersions[] = {
     {"flash_decode", "decode-2"},
     {"prefill_v5", "v5-1"},
-    {"prefill_v7", "v7-1"},
+    {"prefill_v7", "v7-2"},
     {"prefill_v8", "v8-1"},
 };
 
