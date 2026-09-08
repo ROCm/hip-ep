@@ -699,8 +699,8 @@ private:
           moduleBuilder.getStringAttr("private"), memrefType, plan.value,
           /*constant=*/true,
           moduleBuilder.getI64IntegerAttr(kConstantAlignment));
-      auto getGlobal = memref::GetGlobalOp::create(
-          builder, plan.op.getLoc(), memrefType, symbolName);
+      auto getGlobal = memref::GetGlobalOp::create(builder, plan.op.getLoc(),
+                                                   memrefType, symbolName);
       auto tensor = bufferization::ToTensorOp::create(
           builder, plan.op.getLoc(), plan.type, getGlobal,
           /*restrict=*/builder.getUnitAttr(), /*writable=*/nullptr);

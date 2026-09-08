@@ -267,30 +267,31 @@ struct ConvertShapeToExtentPass
     typeConverter.addConversion([](shape::SizeType type) -> Type {
       return IndexType::get(type.getContext());
     });
-    typeConverter.addTargetMaterialization(
-        [](OpBuilder &builder, Type resultType, ValueRange inputs,
-           Location loc) -> Value {
-          if (inputs.size() != 1)
-            return {};
-          if (isa<shape::ShapeType>(inputs.front().getType()) &&
-              shape::isExtentTensorType(resultType))
-            return shape::ToExtentTensorOp::create(
-                       builder, loc, resultType, inputs.front())
-                .getResult();
-          if (!tensor::CastOp::areCastCompatible(inputs.front().getType(),
-                                                 resultType))
-            return {};
-          return tensor::CastOp::create(builder, loc, resultType, inputs.front())
-              .getResult();
-        });
+    typeConverter.addTargetMaterialization([](OpBuilder &builder,
+                                              Type resultType,
+                                              ValueRange inputs,
+                                              Location loc) -> Value {
+      if (inputs.size() != 1)
+        return {};
+      if (isa<shape::ShapeType>(inputs.front().getType()) &&
+          shape::isExtentTensorType(resultType))
+        return shape::ToExtentTensorOp::create(builder, loc, resultType,
+                                               inputs.front())
+            .getResult();
+      if (!tensor::CastOp::areCastCompatible(inputs.front().getType(),
+                                             resultType))
+        return {};
+      return tensor::CastOp::create(builder, loc, resultType, inputs.front())
+          .getResult();
+    });
     typeConverter.addSourceMaterialization(
         [](OpBuilder &builder, Type resultType, ValueRange inputs,
            Location loc) -> Value {
           if (inputs.size() != 1 || !isa<shape::ShapeType>(resultType) ||
               !shape::isExtentTensorType(inputs.front().getType()))
             return {};
-          return shape::FromExtentTensorOp::create(
-                     builder, loc, resultType, inputs.front())
+          return shape::FromExtentTensorOp::create(builder, loc, resultType,
+                                                   inputs.front())
               .getResult();
         });
 
