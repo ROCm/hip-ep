@@ -63,6 +63,7 @@ add_library(HipToLLVM STATIC
   GridSampleLowering.cpp
   GlobalPoolLowering.cpp
   QElementwiseLowering.cpp
+  QMatMulLowering.cpp
 )
 
 add_dependencies(HipToLLVM
