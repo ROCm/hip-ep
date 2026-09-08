@@ -232,18 +232,18 @@ hand-written `main_graph` with a `hip.gemm` anchor even with
 `convert-hip-to-tosa` out of the pipeline, so `--rocmlir-pipeline` cannot
 currently confirm a pattern. Verify with `--convert-hip-to-tosa` alone.
 
-Tests live under `test/lit/Conversion/hip-to-tosa/`, split by **operand group
-rather than by op**, since a whole group shares one converter template:
-`test_binary.mlir` / `binary-invalid.mlir` and `test_unary.mlir` /
-`unary-invalid.mlir`. Add a new op to the existing group file instead of
-creating a per-op file.
+Tests live under `test/lit/Conversion/hip-to-tosa/`, which holds exactly two
+files, split by **operand group rather than by op** since a whole group shares
+one converter template: `test_binary.mlir` and `test_unary.mlir`. Each one
+holds both what converts and what is rejected. Add a new op to its group file
+instead of creating a per-op file or a separate rejection file.
 
-In the positive file, cover the op mapping itself plus anything specific to
-that op's operands. Do **not** repeat the group's shape and broadcast cases per
-op — the template makes them redundant. Those are exercised once (through
-`hip.add` for binary) as a size-1 broadcast, a rank-extending operand and a
-rank-0 scalar, both of the latter expecting a `tosa.reshape` ahead of the op.
-The `rock.kernel` guard is a property of the pass, so one case covers it.
+Cover the op mapping itself plus anything specific to that op's operands. Do
+**not** repeat the group's shape and broadcast cases per op — the template
+makes them redundant. Those are exercised once (through `hip.add` for binary)
+as a size-1 broadcast, a rank-extending operand and a rank-0 scalar, both of
+the latter expecting a `tosa.reshape` ahead of the op. The `rock.kernel` guard
+is a property of the pass, so one case covers it.
 
 Rejections live in the **same** file, after the converting cases, using
 `// expected-error @+1 {{failed to legalize operation 'hip.<op>'}}`. Note this
@@ -278,16 +278,17 @@ one fails to parse with `error: cannot name an operation with no results`.
 
 Among the elementwise ops, `hip.add` and `hip.mul` are the custom-format
 outliers that take `->`. Everything else takes `:` — `hip.sub`, `hip.min`,
-`hip.max`, and all twelve unary ops. So copying `test_add.mlir` as a starting
-point means fixing the result separator, which is easy to miss because the
-error points at the following line. Confirm with:
+`hip.max`, and all twelve unary ops. So copying one of the `hip.add` cases in
+`test_binary.mlir` as a starting point means fixing the result separator, which
+is easy to miss because the error points at the following line. Confirm with:
 
 ```powershell
 Select-String -Path include\hip\Dialect\IR\HipOps.td -Pattern 'hasCustomAssemblyFormat'
 ```
 
 ```mlir
-// RUN: hip-mlir-opt --convert-hip-to-tosa %s | FileCheck %s
+// RUN: hip-mlir-opt --convert-hip-to-tosa --split-input-file \
+// RUN:   --verify-diagnostics %s | FileCheck %s
 
 // CHECK-LABEL: func.func @add
 // CHECK: tosa.add %arg1, %arg2
