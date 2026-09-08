@@ -59,10 +59,46 @@ These pairs are 1-1 **and** lowerable by `RockTosaToElementwise`. Prefer them:
 | `hip.equal` | `tosa.equal` | `hip.where` | `tosa.select` |
 | `hip.less` | `tosa.greater`, operands swapped | | |
 
+The set splits by operand signature, and that decides which template an op
+plugs into rather than how much new code it needs:
+
+- **Binary** `(ctx, lhs, rhs, output)` — `add`, `sub`, `mul`, `min`, `max`,
+  `div`, `equal`, `less`, `and`, `or`, `mod`. Read `adaptor.getLhs()` /
+  `getRhs()`. `BinaryConverter` covers the ones that keep the element type.
+- **Unary** `(ctx, x, y)` — `abs`, `neg`, `ceil`, `floor`, `exp`, `log`, `sin`,
+  `cos`, `tanh`, `erf`, `sigmoid`, `reciprocal`. Read `adaptor.getX()`; the outs
+  accessor is `Y`. All twelve are already registered via `UnaryConverter`.
+- **Ternary** — `where` is `(ctx, condition, x, y, output)`.
+
+Unary ops are the safe ones. Their TOSA counterparts are
+`Tosa_ElementwiseUnaryOp`, which carries `SameOperandsAndResultShape` and
+`SameOperandsAndResultElementType`, so there is no broadcasting to reason about
+at all. Require `operand type == result type` exactly, and do **not** reuse
+`isTosaCompatibleOperand` — its size-1 tolerance would admit an operand that
+needs broadcasting and emit invalid TOSA.
+
 Special cases within this set:
-- `tosa.mul` takes a third **shift** operand (`i8` zero const for float).
-- `tosa.equal` / `tosa.greater` produce `i1`; cast back to the original element
-  type if consumers expect it.
+- `tosa.mul` takes a third **shift** operand (`Tosa_ScalarInt8Tensor`, an `i8`
+  zero const for float) and has **no** convenience builder, so it cannot use
+  `BinaryConverter` as-is.
+- `tosa.equal` / `tosa.greater` produce `i1`. `hip.equal` / `hip.less` already
+  produce `tensor<...xi1>`, so the mapping is 1-1, but they still cannot use
+  `BinaryConverter`: `isTosaCompatibleOperand` compares the operand element type
+  against the *result* element type and so rejects every comparison. They need a
+  check that compares the operands to each other instead.
+- **`tosa.negate` is not a plain unary op.** It is a `Tosa_InferShapedTypeOp`
+  taking `input1`, `input1_zp` and `output_zp`. It still shares `UnaryConverter`
+  unchanged, because `Tosa_NegateOpQuantInfoBuilder` exposes a
+  `(Type outputType, Value input)` builder — the same signature as the plain
+  unary builder — and `buildNegateOpWithQuantInfo` materializes both zero
+  points. It expands to three ops, so a test must expect `tosa.const` ahead of
+  `tosa.negate` rather than a single op.
+- `tosa.sin` and `tosa.cos` take `Tosa_FloatTensor`, so an integer operand fails
+  the TOSA verifier. The other float ops (`ceil`, `floor`, `exp`, `log`, `tanh`,
+  `erf`, `sigmoid`, `reciprocal`) take `Tosa_Tensor` but are only available in
+  TOSA's FP profile, so an integer would verify and then have no lowering. Gate
+  all ten on a float element type; `abs` and `negate` are the only two that
+  legitimately accept integers.
 - `tosa.maximum` / `tosa.minimum` carry a `nan_mode` attribute, but ODS emits a
   builder defaulting it to `PROPAGATE`, so the two-operand `replaceOpWithNewOp`
   below still works unchanged. `MIGraphXToTosa.cpp` instead passes `IGNORE`
@@ -101,42 +137,27 @@ HIP ops are destination-passing style: they carry a `!hip.context` and an `outs`
 buffer. Drop both — the result type already encodes the destination. After
 `hip-fuse-rocmlir` the context is a `ub.poison` value.
 
-The pass uses the dialect conversion driver, so write an `OpConversionPattern`
-and read operands off the `adaptor`:
+The pass uses the dialect conversion driver, so patterns are
+`OpConversionPattern`s that read operands off the `adaptor`. `BinaryConverter`
+and `UnaryConverter` are already templated over the hip/TOSA pair, mirroring
+`TrivialConverter` in `MIGraphXToTosa.cpp`, so an op that fits either signature
+is **one line** in `HipToTosaPass::runOnOperation`:
 
 ```cpp
-struct AddConverter final : public OpConversionPattern<hip::AddOp> {
-  using OpConversionPattern<hip::AddOp>::OpConversionPattern;
-
-  LogicalResult
-  matchAndRewrite(hip::AddOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    if (op.getNumResults() != 1)
-      return rewriter.notifyMatchFailure(op, "expected tensor mode");
-
-    auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
-    if (!resultType || !resultType.hasStaticShape())
-      return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
-    if (!isTosaCompatibleOperand(adaptor.getLhs(), resultType) ||
-        !isTosaCompatibleOperand(adaptor.getRhs(), resultType))
-      return rewriter.notifyMatchFailure(op, "operands not tosa-broadcastable");
-
-    rewriter.replaceOpWithNewOp<tosa::AddOp>(op, resultType, adaptor.getLhs(),
-                                             adaptor.getRhs());
-    return success();
-  }
-};
+patterns.add<BinaryConverter<AddOp, tosa::AddOp>,
+             BinaryConverter<SubOp, tosa::SubOp>,
+             UnaryConverter<AbsOp, tosa::AbsOp>,
+             UnaryConverter<ExpOp, tosa::ExpOp, /*FloatOnly=*/true>>(ctx);
 ```
 
-Register it in `HipToTosaPass::runOnOperation`:
+Write a standalone pattern only when the op needs something the templates do
+not express — a third TOSA operand, a rank-equalizing reshape, an attribute
+translation, or a comparison's `i1` result. When you do, follow the template
+bodies: bail on `getNumResults() != 1` (memref mode has no SSA result to
+replace), require a static `RankedTensorType` result, then check operands.
 
-```cpp
-patterns.add<AddConverter, /* ... */>(ctx);
-```
-
-Once a second `lhs`/`rhs`/`output` op needs the same treatment, lift this into a
-`template <typename HipOpTy, typename TosaOpTy>` and reduce each op to one
-`using` alias, mirroring `TrivialConverter` in `MIGraphXToTosa.cpp`.
+Note the templates take the hip op class unqualified (`AddOp`, not `hip::AddOp`)
+because the file is inside `namespace mlir::hip`.
 
 Use `notifyMatchFailure` for anything unsupported (dynamic shapes, memref mode,
 unhandled attributes) rather than asserting.
@@ -147,12 +168,18 @@ left in a `rock.kernel` function fails legalization and the pass reports
 `failed to legalize operation 'hip.<op>'`. So a partially supported op takes the
 whole kernel down rather than degrading.
 
-For the same reason every dialect the kernel contains must be marked legal:
+For the same reason every op the kernel contains must be marked legal:
 `applyFullConversion` treats an op with *no registered legality* as illegal, so
-an unlisted dialect fails the pass even when no pattern touches it. The target
-currently lists `tosa` and `func`; add to that `addLegalDialect` call if a new
-op's lowering introduces another dialect (e.g. `arith` for a materialized
-constant).
+an unlisted dialect fails the pass even when no pattern touches it and even when
+the op has no uses. The target lists the `tosa` and `func` dialects plus
+`ub::PoisonOp`, which is needed because `hip-fuse-rocmlir` maps the
+`!hip.context` to a `ub.poison` inside the outlined kernel. Extend that legality
+set if a new op's lowering introduces another dialect (e.g. `arith` for a
+materialized constant).
+
+Because of this, a test that passes the context in as a `!hip.context` block
+argument does **not** exercise the shape the pipeline actually produces. Cover
+the `ub.poison` form too when a pattern is meant for real fused kernels.
 
 ## 4. Build and verify
 
@@ -198,11 +225,20 @@ Add two lit tests per op under `test/lit/Conversion/hip-to-tosa/`:
   pass failure that produces no output for `FileCheck` to read.
 
 **Check how the op prints its result before writing the test.** It varies by op
-in `HipOps.td`: ops with `hasCustomAssemblyFormat = 1` (`hip.add`, `hip.mul`)
-print `-> tensor<...>`, while ops with a declarative `assemblyFormat` ending in
-`attr-dict (`:` type($result_tensors)^)?` (`hip.max`, `hip.min`, `hip.gemm`)
-print `: tensor<...>`. Using the wrong one fails to parse with
-`error: cannot name an operation with no results`.
+in `HipOps.td`: ops with `hasCustomAssemblyFormat = 1` print `-> tensor<...>`,
+while ops with a declarative `assemblyFormat` ending in
+`attr-dict (`:` type($result_tensors)^)?` print `: tensor<...>`. Using the wrong
+one fails to parse with `error: cannot name an operation with no results`.
+
+Among the elementwise ops, `hip.add` and `hip.mul` are the custom-format
+outliers that take `->`. Everything else takes `:` — `hip.sub`, `hip.min`,
+`hip.max`, and all twelve unary ops. So copying `test_add.mlir` as a starting
+point means fixing the result separator, which is easy to miss because the
+error points at the following line. Confirm with:
+
+```powershell
+Select-String -Path include\hip\Dialect\IR\HipOps.td -Pattern 'hasCustomAssemblyFormat'
+```
 
 ```mlir
 // RUN: hip-mlir-opt --convert-hip-to-tosa %s | FileCheck %s

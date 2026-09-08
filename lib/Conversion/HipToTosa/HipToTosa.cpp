@@ -99,11 +99,20 @@ struct MatMulConverter final : public OpConversionPattern<hip::MatmulOp> {
 
 // The hip context and the DPS `outs` buffer are both dropped: the result type
 // already encodes the destination.
-struct AddConverter final : public OpConversionPattern<hip::AddOp> {
-  using OpConversionPattern<hip::AddOp>::OpConversionPattern;
+//
+// Covers the hip ops whose operands are (ctx, lhs, rhs, output) and whose TOSA
+// counterpart takes two operands and preserves the element type. Comparisons
+// (hip.equal, hip.less) do not belong here: they produce i1, which
+// isTosaCompatibleOperand's element-type check rejects. hip.mul does not
+// either, since tosa.mul carries a third shift operand with no convenience
+// builder.
+template <typename HipOpTy, typename TosaOpTy>
+struct BinaryConverter final : public OpConversionPattern<HipOpTy> {
+  using OpConversionPattern<HipOpTy>::OpConversionPattern;
+  using OpAdaptor = typename OpConversionPattern<HipOpTy>::OpAdaptor;
 
   LogicalResult
-  matchAndRewrite(hip::AddOp op, OpAdaptor adaptor,
+  matchAndRewrite(HipOpTy op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     // Memref mode (post-bufferization) has no SSA result to replace.
     if (op.getNumResults() != 1)
@@ -116,8 +125,48 @@ struct AddConverter final : public OpConversionPattern<hip::AddOp> {
         !isTosaCompatibleOperand(adaptor.getRhs(), resultType))
       return rewriter.notifyMatchFailure(op, "operands not tosa-broadcastable");
 
-    rewriter.replaceOpWithNewOp<tosa::AddOp>(op, resultType, adaptor.getLhs(),
-                                             adaptor.getRhs());
+    rewriter.replaceOpWithNewOp<TosaOpTy>(op, resultType, adaptor.getLhs(),
+                                          adaptor.getRhs());
+    return success();
+  }
+};
+
+// Elementwise unary hip ops all share the (ctx, x, y) operand shape, and their
+// TOSA counterparts are Tosa_ElementwiseUnaryOp, which carries
+// SameOperandsAndResultShape and SameOperandsAndResultElementType. So unlike
+// the binary ops there is no broadcasting to reason about: the operand has to
+// match the result exactly, and the broadcast-tolerant check above would wrongly
+// admit a size-1 operand and emit invalid TOSA.
+//
+// FloatOnly marks the ops that must not see an integer operand. tosa.sin and
+// tosa.cos take Tosa_FloatTensor, so an integer would fail the TOSA verifier
+// outright; the rest take Tosa_Tensor but are only available in TOSA's FP
+// profile, so an integer would verify and then have no lowering. Both are
+// unreachable from a valid ONNX model, where all ten are float-only, so the
+// gate documents the constraint rather than rejecting real inputs.
+template <typename HipOpTy, typename TosaOpTy, bool FloatOnly = false>
+struct UnaryConverter final : public OpConversionPattern<HipOpTy> {
+  using OpConversionPattern<HipOpTy>::OpConversionPattern;
+  using OpAdaptor = typename OpConversionPattern<HipOpTy>::OpAdaptor;
+
+  LogicalResult
+  matchAndRewrite(HipOpTy op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!resultType || !resultType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
+    if (adaptor.getX().getType() != resultType)
+      return rewriter.notifyMatchFailure(
+          op, "operand and result types must match exactly");
+    if (FloatOnly && !isa<FloatType>(resultType.getElementType()))
+      return rewriter.notifyMatchFailure(op, "tosa op requires a float tensor");
+
+    // tosa.negate takes zero-point operands, but its quant-info builder
+    // materializes them from this same (result type, input) signature.
+    rewriter.replaceOpWithNewOp<TosaOpTy>(op, resultType, adaptor.getX());
     return success();
   }
 };
@@ -136,7 +185,23 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     conversion.addLegalOp<ub::PoisonOp>();
 
     RewritePatternSet patterns(ctx);
-    patterns.add<AddConverter, MatMulConverter>(ctx);
+    patterns.add<MatMulConverter,
+                 BinaryConverter<AddOp, tosa::AddOp>,
+                 BinaryConverter<SubOp, tosa::SubOp>,
+                 BinaryConverter<MinOp, tosa::MinimumOp>,
+                 UnaryConverter<AbsOp, tosa::AbsOp>,
+                 UnaryConverter<NegOp, tosa::NegateOp>,
+                 UnaryConverter<CeilOp, tosa::CeilOp, /*FloatOnly=*/true>,
+                 UnaryConverter<FloorOp, tosa::FloorOp, /*FloatOnly=*/true>,
+                 UnaryConverter<ExpOp, tosa::ExpOp, /*FloatOnly=*/true>,
+                 UnaryConverter<LogOp, tosa::LogOp, /*FloatOnly=*/true>,
+                 UnaryConverter<SinOp, tosa::SinOp, /*FloatOnly=*/true>,
+                 UnaryConverter<CosOp, tosa::CosOp, /*FloatOnly=*/true>,
+                 UnaryConverter<TanhOp, tosa::TanhOp, /*FloatOnly=*/true>,
+                 UnaryConverter<ErfOp, tosa::ErfOp, /*FloatOnly=*/true>,
+                 UnaryConverter<SigmoidOp, tosa::SigmoidOp, /*FloatOnly=*/true>,
+                 UnaryConverter<ReciprocalOp, tosa::ReciprocalOp,
+                                /*FloatOnly=*/true>>(ctx);
 
     if (failed(applyFullConversion(funcOp, conversion, std::move(patterns))))
       signalPassFailure();
