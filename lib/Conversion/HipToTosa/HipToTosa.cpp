@@ -171,8 +171,8 @@ struct BinaryConverter final : public OpConversionPattern<HipOpTy> {
 // TOSA counterparts are Tosa_ElementwiseUnaryOp, which carries
 // SameOperandsAndResultShape and SameOperandsAndResultElementType. So unlike
 // the binary ops there is no broadcasting to reason about: the operand has to
-// match the result exactly, and the broadcast-tolerant check above would wrongly
-// admit a size-1 operand and emit invalid TOSA.
+// match the result exactly, and the broadcast-tolerant check above would
+// wrongly admit a size-1 operand and emit invalid TOSA.
 //
 // FloatOnly marks the ops that must not see an integer operand. tosa.sin and
 // tosa.cos take Tosa_FloatTensor, so an integer would fail the TOSA verifier
