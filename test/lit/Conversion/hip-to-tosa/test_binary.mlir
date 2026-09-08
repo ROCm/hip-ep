@@ -5,12 +5,21 @@
 // TEST PURPOSE:
 // Verify the elementwise binary hip ops lower to their TOSA counterparts
 // inside a rock.kernel function, so rocMLIR can absorb them into a fused
-// kernel.
+// kernel, and verify the forms the conversion rejects.
 //
 // All five ops share the BinaryConverter template, so the shape and broadcast
 // behaviour is exercised once (through hip.add) rather than repeated per op.
-// The per-op cases below prove the op mapping itself, plus the operand
-// handling specific to hip.mul.
+// The per-op cases prove the op mapping itself, plus the operand handling
+// specific to hip.mul.
+//
+// FILE LAYOUT:
+// Everything that converts lives in the first --split-input-file chunk, so it
+// is one module and therefore also covers several ops converting in a single
+// pass run. Each rejected form then gets its own chunk: full conversion turns
+// a rejection into a pass failure that aborts the run for the whole module, so
+// sharing a chunk would let one rejection mask the cases after it. A failing
+// chunk contributes no output, while the chunks that convert still print for
+// FileCheck.
 //
 // This test validates:
 // - add, sub, min, max and mul map to their TOSA counterparts
@@ -21,9 +30,12 @@
 //   pretty form)
 // - tosa.mul's shift operand is materialized as a zero tensor<1xi8>
 // - The pass is a no-op on functions without rock.kernel
+// - Dynamic shapes, un-broadcastable dimensions and mismatched element types
+//   are rejected rather than lowered to invalid TOSA
 // ============================================================================
 
-// RUN: hip-mlir-opt --convert-hip-to-tosa %s | FileCheck %s
+// RUN: hip-mlir-opt --convert-hip-to-tosa --split-input-file \
+// RUN:   --verify-diagnostics %s | FileCheck %s
 
 //===----------------------------------------------------------------------===//
 // Op mappings.
@@ -194,6 +206,53 @@ func.func @add_not_a_kernel(%ctx: !hip.context, %x: tensor<2x8xf16>,
                             %y: tensor<2x8xf16>, %init: tensor<2x8xf16>)
     -> tensor<2x8xf16> {
   %r = hip.add(%ctx) ins(%x, %y : tensor<2x8xf16>, tensor<2x8xf16>)
+                     outs(%init : tensor<2x8xf16>) -> tensor<2x8xf16>
+  return %r : tensor<2x8xf16>
+}
+
+// -----
+
+//===----------------------------------------------------------------------===//
+// Rejected forms, one per chunk. Exercised through hip.add on behalf of the
+// shared template. The pass marks the whole hip dialect illegal, so these fail
+// legalization rather than surviving in the output.
+//===----------------------------------------------------------------------===//
+
+// Dynamic shapes give the pattern no static shape to reason about.
+func.func @dynamic_shape(%ctx: !hip.context, %x: tensor<?x8xf16>,
+                         %y: tensor<?x8xf16>, %init: tensor<?x8xf16>)
+    -> tensor<?x8xf16> attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.add'}}
+  %r = hip.add(%ctx) ins(%x, %y : tensor<?x8xf16>, tensor<?x8xf16>)
+                     outs(%init : tensor<?x8xf16>) -> tensor<?x8xf16>
+  return %r : tensor<?x8xf16>
+}
+
+// -----
+
+// Rank equalization prepends 1s, so tensor<8xf16> becomes 1x1x1x8. The
+// trailing 8 still cannot broadcast to 112, which the post-equalization check
+// catches rather than emitting invalid TOSA.
+func.func @incompatible_broadcast(%ctx: !hip.context,
+                                  %x: tensor<1x64x112x112xf16>,
+                                  %y: tensor<8xf16>,
+                                  %init: tensor<1x64x112x112xf16>)
+    -> tensor<1x64x112x112xf16> attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.add'}}
+  %r = hip.add(%ctx) ins(%x, %y : tensor<1x64x112x112xf16>, tensor<8xf16>)
+                     outs(%init : tensor<1x64x112x112xf16>)
+                     -> tensor<1x64x112x112xf16>
+  return %r : tensor<1x64x112x112xf16>
+}
+
+// -----
+
+// A mismatched element type is not a broadcast question at all.
+func.func @element_type_mismatch(%ctx: !hip.context, %x: tensor<2x8xf16>,
+                                 %y: tensor<2x8xf32>, %init: tensor<2x8xf16>)
+    -> tensor<2x8xf16> attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.add'}}
+  %r = hip.add(%ctx) ins(%x, %y : tensor<2x8xf16>, tensor<2x8xf32>)
                      outs(%init : tensor<2x8xf16>) -> tensor<2x8xf16>
   return %r : tensor<2x8xf16>
 }

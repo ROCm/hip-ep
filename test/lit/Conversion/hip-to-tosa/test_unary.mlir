@@ -5,16 +5,28 @@
 // TEST PURPOSE:
 // Verify the elementwise unary hip ops lower 1-1 to their TOSA counterparts
 // inside a rock.kernel function, so rocMLIR can absorb them into a fused
-// kernel.
+// kernel, and verify the forms the conversion rejects.
+//
+// FILE LAYOUT:
+// Everything that converts lives in the first --split-input-file chunk, so it
+// is one module and therefore also covers several ops converting in a single
+// pass run. Each rejected form then gets its own chunk: full conversion turns
+// a rejection into a pass failure that aborts the run for the whole module, so
+// sharing a chunk would let one rejection mask the cases after it. A failing
+// chunk contributes no output, while the chunks that convert still print for
+// FileCheck.
 //
 // This test validates:
 // - Each of the twelve unary ops maps to its TOSA counterpart
 // - The hip context and the DPS `y` operand are both dropped
 // - hip.neg picks up tosa.negate's materialized zero-point operands
 // - The pass is a no-op on functions without rock.kernel
+// - Dynamic shapes, operands that would have to broadcast, and integer
+//   operands to the float-only ops are all rejected
 // ============================================================================
 
-// RUN: hip-mlir-opt --convert-hip-to-tosa %s | FileCheck %s
+// RUN: hip-mlir-opt --convert-hip-to-tosa --split-input-file \
+// RUN:   --verify-diagnostics %s | FileCheck %s
 
 // CHECK-LABEL: func.func @abs
 // CHECK: tosa.abs %arg1 : (tensor<2x8xf16>) -> tensor<2x8xf16>
@@ -177,4 +189,48 @@ func.func @abs_not_a_kernel(%ctx: !hip.context, %x: tensor<2x8xf16>,
   %r = hip.abs(%ctx) ins(%x : tensor<2x8xf16>)
                      outs(%init : tensor<2x8xf16>) : tensor<2x8xf16>
   return %r : tensor<2x8xf16>
+}
+
+// -----
+
+//===----------------------------------------------------------------------===//
+// Rejected forms, one per chunk. The pass marks the whole hip dialect illegal,
+// so these fail legalization rather than surviving in the output.
+//===----------------------------------------------------------------------===//
+
+// Dynamic shapes give the pattern no static shape to reason about.
+func.func @dynamic_shape(%ctx: !hip.context, %x: tensor<?x8xf16>,
+                         %init: tensor<?x8xf16>) -> tensor<?x8xf16>
+    attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.abs'}}
+  %r = hip.abs(%ctx) ins(%x : tensor<?x8xf16>)
+                     outs(%init : tensor<?x8xf16>) : tensor<?x8xf16>
+  return %r : tensor<?x8xf16>
+}
+
+// -----
+
+// TOSA unary ops carry SameOperandsAndResultShape, so an operand that would
+// have to broadcast to the result is not a 1-1 mapping. Unlike the binary ops
+// there is no size-1 broadcast to fall back on.
+func.func @shape_mismatch(%ctx: !hip.context, %x: tensor<1x1x32xf16>,
+                          %init: tensor<1x128x32xf16>) -> tensor<1x128x32xf16>
+    attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.exp'}}
+  %r = hip.exp(%ctx) ins(%x : tensor<1x1x32xf16>)
+                     outs(%init : tensor<1x128x32xf16>) : tensor<1x128x32xf16>
+  return %r : tensor<1x128x32xf16>
+}
+
+// -----
+
+// tosa.sin takes Tosa_FloatTensor, so an integer operand would fail the TOSA
+// verifier. Reject it here instead of emitting invalid TOSA.
+func.func @integer_operand(%ctx: !hip.context, %x: tensor<4xi32>,
+                           %init: tensor<4xi32>) -> tensor<4xi32>
+    attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.sin'}}
+  %r = hip.sin(%ctx) ins(%x : tensor<4xi32>)
+                     outs(%init : tensor<4xi32>) : tensor<4xi32>
+  return %r : tensor<4xi32>
 }

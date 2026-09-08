@@ -245,20 +245,30 @@ op — the template makes them redundant. Those are exercised once (through
 rank-0 scalar, both of the latter expecting a `tosa.reshape` ahead of the op.
 The `rock.kernel` guard is a property of the pass, so one case covers it.
 
-Keep rejections in the `*-invalid.mlir` file, using `--split-input-file
---verify-diagnostics` with
-`// expected-error @+1 {{failed to legalize operation 'hip.<op>'}}`. The
-`--split-input-file` chunking is not optional: full conversion turns a
-rejection into a pass failure that aborts the run for the entire module, so
-without its own chunk one rejection would mask every case after it.
+Rejections live in the **same** file, after the converting cases, using
+`// expected-error @+1 {{failed to legalize operation 'hip.<op>'}}`. Note this
+departs from the rest of `test/lit/Conversion/`, where rejections sit in a
+separate `*-invalid.mlir`; the hip-to-tosa tests deliberately keep one file per
+operand group. One RUN line serves both:
 
-Mixing rejections into the positive file does technically work — the failing
-chunk simply contributes no output while the others still print for
-`FileCheck`. Do not do it anyway. Every rejection test under
-`test/lit/Conversion/` is a separate `*-invalid.mlir`, mixing appears only in
-`Dialect/` verifier tests, and merging would force `--split-input-file` onto
-the positive cases too, losing the coverage that comes from converting several
-ops in a single module.
+```
+// RUN: hip-mlir-opt --convert-hip-to-tosa --split-input-file \
+// RUN:   --verify-diagnostics %s | FileCheck %s
+```
+
+Two rules make that work. Keep every converting case in the **first** chunk so
+they stay a single module, which is what covers several ops converting in one
+pass run. Then give every rejection its **own** chunk: full conversion turns a
+rejection into a pass failure that aborts the run for the whole module, so
+sharing a chunk would let one rejection mask the cases after it. A failing
+chunk contributes no output while the converting chunks still print for
+`FileCheck`, so the two kinds of check coexist.
+
+Both kinds of coverage stay live under this layout — verified by mutation, as
+deleting an `expected-error` or corrupting a `CHECK` each turn the file red.
+The one cost is that converting cases must stay diagnostic-clean: if the pass
+ever emits a warning or remark on an op that converts, `--verify-diagnostics`
+fails the whole file on the unexpected diagnostic.
 
 **Check how the op prints its result before writing the test.** It varies by op
 in `HipOps.td`: ops with `hasCustomAssemblyFormat = 1` print `-> tensor<...>`,
