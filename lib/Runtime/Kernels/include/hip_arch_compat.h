@@ -153,6 +153,50 @@ __device__ static inline int hipdnn_sudot4(int a, int b, int acc) {
 }
 #endif  /* __HIPCC__ */
 
+/* Portable 4x8-bit integer dot-product with i32 accumulate where BOTH operand
+ * signednesses are chosen by the caller. hipdnn_sudot4 above hard-codes
+ * "signed a, non-negative b", which does not cover an i8 x i8 or ui8 x ui8
+ * quantized GEMM.
+ *
+ * The intrinsic's sign flags must be compile-time constants, hence template
+ * parameters rather than runtime bools.
+ *
+ * RDNA3/RDNA4 (gfx11xx/gfx12xx) take both flags directly on the mixed-sign
+ * v_dot4_i32_iu8. CDNA (gfx9xx) has only the uniformly-signed v_dot4_i32_i8 and
+ * uniformly-unsigned v_dot4_i32_u8, so a mixed-sign pair there falls through to
+ * the scalar branch. The scalar branch also keeps the host pass (and any arch
+ * without dot instructions) compilable. Only defined in a HIP translation
+ * unit. */
+#if defined(__HIPCC__)
+template <bool ASigned, bool BSigned>
+__device__ static inline int hipdnn_dot4(int a, int b, int acc) {
+#if defined(__HIP_DEVICE_COMPILE__) && (defined(__GFX11__) || defined(__GFX12__))
+  return __builtin_amdgcn_sudot4(ASigned, a, BSigned, b, acc, false);
+#else
+#if defined(__HIP_DEVICE_COMPILE__) && defined(__GFX9__)
+  if constexpr (ASigned && BSigned)
+    return __builtin_amdgcn_sdot4(a, b, acc, false);
+  else if constexpr (!ASigned && !BSigned)
+    return static_cast<int>(__builtin_amdgcn_udot4(
+        static_cast<unsigned>(a), static_cast<unsigned>(b),
+        static_cast<unsigned>(acc), false));
+#endif
+  int r = acc;
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    const int a_byte = (a >> (i * 8)) & 0xFF;
+    const int b_byte = (b >> (i * 8)) & 0xFF;
+    const int av =
+        ASigned ? static_cast<int>(static_cast<signed char>(a_byte)) : a_byte;
+    const int bv =
+        BSigned ? static_cast<int>(static_cast<signed char>(b_byte)) : b_byte;
+    r += av * bv;
+  }
+  return r;
+#endif
+}
+#endif  /* __HIPCC__ */
+
 /* Host-side runtime probe for the wavefront size of the *currently selected*
  * device. Used by the host dispatch to avoid launching WMMA kernels on CDNA
  * (where they compile to a trap) and to size blocks as whole waves.

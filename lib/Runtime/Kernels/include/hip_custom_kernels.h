@@ -172,6 +172,38 @@ HIP_KERNEL_API int hip_qelementwise(
     int64_t output_zp);
 
 /* =========================================================================
+ * Quantized batched matmul (Q(DQ(A) @ DQ(B)))
+ * =========================================================================
+ *
+ * A: [batch_count x M x K], B: [K x N] when b_batch_stride == 0 or
+ * [batch_count x K x N] when b_batch_stride == K*N, Y: [batch_count x M x N].
+ * All row-major and contiguous.
+ *
+ * trans_a / trans_b swap the trailing two extents of the corresponding operand
+ * in memory -- A stored as [batch_count x K x M], B as [N x K] -- while M, N, K
+ * stay the logical extents and b_batch_stride stays K*N. Only the load stride
+ * changes; Y is never transposed.
+ *
+ * Supported hip_dtype, independently per edge:
+ *   a: HIP_DTYPE_INT8, HIP_DTYPE_UINT8, HIP_DTYPE_INT16, HIP_DTYPE_UINT16
+ *   b: HIP_DTYPE_INT8, HIP_DTYPE_UINT8
+ *   y: HIP_DTYPE_INT8, HIP_DTYPE_UINT8, HIP_DTYPE_INT16, HIP_DTYPE_UINT16
+ *
+ */
+HIP_KERNEL_API int hip_qmatmul(
+    void* stream,
+    const void* A,
+    const void* B,
+    void* Y,
+    int64_t M, int64_t N, int64_t K,
+    int64_t batch_count,
+    int64_t b_batch_stride,
+    int trans_a, int trans_b,
+    int a_dtype, int b_dtype, int y_dtype,
+    float M_scale,
+    int64_t a_zp, int64_t b_zp, int64_t y_zp);
+
+/* =========================================================================
  * Elementwise Unary (Neg / Sign / Cos / Sin / Not)
  * =========================================================================
  *
