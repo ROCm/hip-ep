@@ -62,6 +62,32 @@ func.func @min_broadcast(%ctx: !hip.context, %x: tensor<1x128x32xf16>,
   return %r : tensor<1x128x32xf16>
 }
 
+// CHECK-LABEL: func.func @max
+// CHECK: tosa.maximum %arg1, %arg2 : (tensor<2x8xf16>, tensor<2x8xf16>) -> tensor<2x8xf16>
+// CHECK-NOT: hip.max
+func.func @max(%ctx: !hip.context, %x: tensor<2x8xf16>, %y: tensor<2x8xf16>,
+               %init: tensor<2x8xf16>) -> tensor<2x8xf16>
+    attributes {rock.kernel} {
+  %r = hip.max(%ctx) ins(%x, %y : tensor<2x8xf16>, tensor<2x8xf16>)
+                     outs(%init : tensor<2x8xf16>) : tensor<2x8xf16>
+  return %r : tensor<2x8xf16>
+}
+
+// ResNet's first ReLU: hip.max(activation, dense<0> : tensor<f16>). The scalar
+// is reshaped to 1x1x1x1, then tosa.maximum broadcasts the size-1 dims.
+// CHECK-LABEL: func.func @max_relu_scalar
+// CHECK: tosa.reshape
+// CHECK: tosa.maximum
+// CHECK-NOT: hip.max
+func.func @max_relu_scalar(%ctx: !hip.context, %x: tensor<1x64x112x112xf16>,
+                           %zero: tensor<f16>, %init: tensor<1x64x112x112xf16>)
+    -> tensor<1x64x112x112xf16> attributes {rock.kernel} {
+  %r = hip.max(%ctx) ins(%x, %zero : tensor<1x64x112x112xf16>, tensor<f16>)
+                     outs(%init : tensor<1x64x112x112xf16>)
+                     : tensor<1x64x112x112xf16>
+  return %r : tensor<1x64x112x112xf16>
+}
+
 // The pass early-returns unless the function is an outlined kernel.
 // CHECK-LABEL: func.func @sub_not_a_kernel
 // CHECK: hip.sub

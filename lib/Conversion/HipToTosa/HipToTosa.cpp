@@ -8,6 +8,7 @@
 
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/Tosa/IR/TosaOps.h>
+#include <mlir/Dialect/Tosa/Utils/ConversionUtils.h>
 #include <mlir/Dialect/UB/IR/UBOps.h>
 #include <mlir/IR/BuiltinTypes.h>
 #include <mlir/IR/MLIRContext.h>
@@ -106,6 +107,10 @@ struct MatMulConverter final : public OpConversionPattern<hip::MatmulOp> {
 // isTosaCompatibleOperand's element-type check rejects. hip.mul does not
 // either, since tosa.mul carries a third shift operand with no convenience
 // builder.
+//
+// tosa.maximum and tosa.minimum additionally carry a nan_mode attribute, but
+// ODS defaults it to PROPAGATE, which is what ONNX Max/Min do, so the
+// two-operand builder below is correct for them unchanged.
 template <typename HipOpTy, typename TosaOpTy>
 struct BinaryConverter final : public OpConversionPattern<HipOpTy> {
   using OpConversionPattern<HipOpTy>::OpConversionPattern;
@@ -121,12 +126,23 @@ struct BinaryConverter final : public OpConversionPattern<HipOpTy> {
     auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
     if (!resultType || !resultType.hasStaticShape())
       return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
-    if (!isTosaCompatibleOperand(adaptor.getLhs(), resultType) ||
-        !isTosaCompatibleOperand(adaptor.getRhs(), resultType))
+
+    // hip broadcasting rank-extends the way ONNX/NumPy do, so a ReLU lowered
+    // from ONNX arrives as hip.max(tensor<1x64x112x112xf16>, tensor<f16>),
+    // while TOSA requires both operands to already carry the result's rank and
+    // broadcasts size-1 dimensions only. EqualizeRanks reshapes the shorter
+    // operand by prepending 1s; the TOSA op then broadcasts those dimensions.
+    Value lhs = adaptor.getLhs();
+    Value rhs = adaptor.getRhs();
+    if (failed(tosa::EqualizeRanks(rewriter, op.getLoc(), lhs, rhs)))
+      return rewriter.notifyMatchFailure(op, "operand ranks not equalizable");
+    // Re-check after equalization so a dimension that still cannot broadcast is
+    // rejected rather than emitting invalid TOSA.
+    if (!isTosaCompatibleOperand(lhs, resultType) ||
+        !isTosaCompatibleOperand(rhs, resultType))
       return rewriter.notifyMatchFailure(op, "operands not tosa-broadcastable");
 
-    rewriter.replaceOpWithNewOp<TosaOpTy>(op, resultType, adaptor.getLhs(),
-                                          adaptor.getRhs());
+    rewriter.replaceOpWithNewOp<TosaOpTy>(op, resultType, lhs, rhs);
     return success();
   }
 };
@@ -189,6 +205,7 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
                  BinaryConverter<AddOp, tosa::AddOp>,
                  BinaryConverter<SubOp, tosa::SubOp>,
                  BinaryConverter<MinOp, tosa::MinimumOp>,
+                 BinaryConverter<MaxOp, tosa::MaximumOp>,
                  UnaryConverter<AbsOp, tosa::AbsOp>,
                  UnaryConverter<NegOp, tosa::NegateOp>,
                  UnaryConverter<CeilOp, tosa::CeilOp, /*FloatOnly=*/true>,

@@ -64,7 +64,15 @@ plugs into rather than how much new code it needs:
 
 - **Binary** `(ctx, lhs, rhs, output)` — `add`, `sub`, `mul`, `min`, `max`,
   `div`, `equal`, `less`, `and`, `or`, `mod`. Read `adaptor.getLhs()` /
-  `getRhs()`. `BinaryConverter` covers the ones that keep the element type.
+  `getRhs()`. `BinaryConverter` covers the ones that keep the element type, and
+  handles the broadcasting mismatch for them: hip rank-extends the way
+  ONNX/NumPy do, while TOSA needs both operands to already carry the result's
+  rank and broadcasts size-1 dimensions only. The template calls
+  `tosa::EqualizeRanks` (from `Tosa/Utils/ConversionUtils.h`) to reshape the
+  shorter operand with leading 1s, then re-checks compatibility so a dimension
+  that still cannot broadcast is rejected instead of emitting invalid TOSA.
+  This is what lets a ReLU arriving as `hip.max(tensor<1x64x112x112xf16>,
+  tensor<f16>)` convert at all.
 - **Unary** `(ctx, x, y)` — `abs`, `neg`, `ceil`, `floor`, `exp`, `log`, `sin`,
   `cos`, `tanh`, `erf`, `sigmoid`, `reciprocal`. Read `adaptor.getX()`; the outs
   accessor is `Y`. All twelve are already registered via `UnaryConverter`.
@@ -216,8 +224,10 @@ currently confirm a pattern. Verify with `--convert-hip-to-tosa` alone.
 
 Add two lit tests per op under `test/lit/Conversion/hip-to-tosa/`:
 
-- `test_<op>.mlir` for what converts — the plain shape, a size-1 broadcast, and
-  a function without `rock.kernel` (the pass early-returns, so the op survives).
+- `test_<op>.mlir` for what converts — the plain shape, a size-1 broadcast, a
+  rank-extending operand for binary ops (expect a `tosa.reshape` ahead of the
+  op), and a function without `rock.kernel` (the pass early-returns, so the op
+  survives).
 - `<op>-invalid.mlir` for what the conversion rejects, using
   `--split-input-file --verify-diagnostics` with
   `// expected-error @+1 {{failed to legalize operation 'hip.<op>'}}`. Rejected

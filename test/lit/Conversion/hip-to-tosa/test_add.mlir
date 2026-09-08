@@ -38,6 +38,37 @@ func.func @add_broadcast(%ctx: !hip.context, %x: tensor<1x128x32xf16>,
   return %r : tensor<1x128x32xf16>
 }
 
+// hip rank-extends the way ONNX/NumPy do, so a lower-rank operand is reshaped
+// with leading 1s before tosa.add broadcasts it.
+// CHECK-LABEL: func.func @add_rank_extending_broadcast
+// CHECK: tosa.reshape
+// CHECK: tosa.add
+// CHECK-NOT: hip.add
+func.func @add_rank_extending_broadcast(%ctx: !hip.context,
+                                        %x: tensor<1x128x32xf16>,
+                                        %y: tensor<32xf16>,
+                                        %init: tensor<1x128x32xf16>)
+    -> tensor<1x128x32xf16> attributes {rock.kernel} {
+  %r = hip.add(%ctx) ins(%x, %y : tensor<1x128x32xf16>, tensor<32xf16>)
+                     outs(%init : tensor<1x128x32xf16>) -> tensor<1x128x32xf16>
+  return %r : tensor<1x128x32xf16>
+}
+
+// A rank-0 scalar is the same rank mismatch, and is how a bias add shows up
+// after onnx-to-hip lowering.
+// CHECK-LABEL: func.func @add_scalar_operand
+// CHECK: tosa.reshape
+// CHECK: tosa.add
+// CHECK-NOT: hip.add
+func.func @add_scalar_operand(%ctx: !hip.context, %x: tensor<1x64x112x112xf16>,
+                              %y: tensor<f16>, %init: tensor<1x64x112x112xf16>)
+    -> tensor<1x64x112x112xf16> attributes {rock.kernel} {
+  %r = hip.add(%ctx) ins(%x, %y : tensor<1x64x112x112xf16>, tensor<f16>)
+                     outs(%init : tensor<1x64x112x112xf16>)
+                     -> tensor<1x64x112x112xf16>
+  return %r : tensor<1x64x112x112xf16>
+}
+
 // The pass early-returns unless the function is an outlined kernel.
 // CHECK-LABEL: func.func @add_not_a_kernel
 // CHECK: hip.add
