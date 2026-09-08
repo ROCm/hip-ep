@@ -1134,6 +1134,10 @@ jobs:
           if [ -n "${{ env.HIPBLASLT_LOGIC_FILTER }}" ]; then
             LOGIC_ARGS+=("-DTENSILELITE_LOGIC_FILTER=${{ env.HIPBLASLT_LOGIC_FILTER }}")
           fi
+          # BLIS and OpenMP default to ON and are REQUIRED once enabled. AMD's
+          # build has both; this one has neither (the LLVM stage does not build
+          # an OpenMP runtime). Both only serve host-side paths -- BLIS is the
+          # CPU reference used by the clients that are already disabled here.
           cmake -S "$SRC/projects/hipblaslt" -B "${{ runner.workspace }}/build-hipblaslt" -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$PREFIX" \
@@ -1146,6 +1150,8 @@ jobs:
             -DTENSILELITE_BUILD_TESTING=OFF \
             -DHIPBLASLT_BUILD_TESTING=OFF \
             -DHIPBLASLT_ENABLE_CLIENT=OFF \
+            -DHIPBLASLT_ENABLE_BLIS=OFF \
+            -DHIPBLASLT_ENABLE_OPENMP=OFF \
             "${LOGIC_ARGS[@]}"
           cmake --build "${{ runner.workspace }}/build-hipblaslt" --target install
 
