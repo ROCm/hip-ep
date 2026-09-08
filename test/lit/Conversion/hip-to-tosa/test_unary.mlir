@@ -153,6 +153,21 @@ func.func @reciprocal(%ctx: !hip.context, %x: tensor<2x8xf16>,
   return %r : tensor<2x8xf16>
 }
 
+// The shape hip-fuse-rocmlir actually produces: the !hip.context is a
+// ub.poison materialized inside the outlined kernel rather than a block
+// argument. The ConversionTarget marks ub.poison legal so it survives as dead
+// IR for the canonicalizer to drop, instead of failing legalization.
+// CHECK-LABEL: func.func @abs_outlined_kernel
+// CHECK: tosa.abs
+// CHECK-NOT: hip.abs
+func.func @abs_outlined_kernel(%x: tensor<2x8xf16>, %init: tensor<2x8xf16>)
+    -> tensor<2x8xf16> attributes {rock.kernel} {
+  %ctx = ub.poison : !hip.context
+  %r = hip.abs(%ctx) ins(%x : tensor<2x8xf16>)
+                     outs(%init : tensor<2x8xf16>) : tensor<2x8xf16>
+  return %r : tensor<2x8xf16>
+}
+
 // The pass early-returns unless the function is an outlined kernel.
 // CHECK-LABEL: func.func @abs_not_a_kernel
 // CHECK: hip.abs
