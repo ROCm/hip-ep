@@ -904,9 +904,11 @@ jobs:
           repository: ROCm/rocm-systems
           ref: ${{ env.ROCM_SYSTEMS_REF }}
           path: source-rocm-systems
+          # ~7 GB monorepo. projects/hip is what clr wants as HIP_COMMON_DIR.
           sparse-checkout: |
             shared
             projects/clr
+            projects/hip
           fetch-depth: 1
           show-progress: false
 
@@ -939,21 +941,34 @@ jobs:
           SRC="${{ github.workspace }}/source-rocm-systems"
           export HIP_PATH="$PREFIX"
           export ROCM_PATH="$PREFIX"
+
           # Same order AMD uses: kpack first, then the HIP runtime out of clr.
-          for pair in "kpack:shared/kpack" "clr:projects/clr"; do
-            name="${pair%%:*}"; sub="${pair#*:}"
-            cmake -S "$SRC/$sub" -B "${{ runner.workspace }}/build-$name" -G Ninja \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-              -DCMAKE_PREFIX_PATH="$PREFIX;$DEPS" \
-              -DROCM_PATH="$PREFIX" \
-              -DHIP_PATH="$PREFIX" \
-              -DGPU_TARGETS="${{ env.THEROCK_GPU_TARGETS }}" \
-              -DBUILD_TESTING=OFF \
-              -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-              -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-            cmake --build "${{ runner.workspace }}/build-$name" --target install
-          done
+          cmake -S "$SRC/shared/kpack" -B "${{ runner.workspace }}/build-kpack" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+            -DCMAKE_PREFIX_PATH="$PREFIX;$DEPS" \
+            -DROCM_PATH="$PREFIX" \
+            -DBUILD_TESTING=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+          cmake --build "${{ runner.workspace }}/build-kpack" --target install
+
+          # clr builds nothing unless a runtime is selected, and it hard-fails
+          # without HIP_COMMON_DIR. HIP_PLATFORM is passed explicitly because
+          # the auto-detect path shells out to hipconfig.
+          cmake -S "$SRC/projects/clr" -B "${{ runner.workspace }}/build-clr" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+            -DCMAKE_PREFIX_PATH="$PREFIX;$DEPS" \
+            -DROCM_PATH="$PREFIX" \
+            -DCLR_BUILD_HIP=ON \
+            -DCLR_BUILD_OCL=OFF \
+            -DHIP_COMMON_DIR="$SRC/projects/hip" \
+            -DHIP_PLATFORM=amd \
+            -DGPU_TARGETS="${{ env.THEROCK_GPU_TARGETS }}" \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+          cmake --build "${{ runner.workspace }}/build-clr" --target install
 
       - name: Verify HIP runtime landed in the prefix
         if: steps.cache-hip.outputs.cache-hit != 'true'
