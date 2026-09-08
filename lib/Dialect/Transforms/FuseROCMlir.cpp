@@ -72,6 +72,8 @@ public:
       newFunc = func::FuncOp::create(rewriter, rewriter.getUnknownLoc(),
                                      "rocMlir" + std::to_string((*counter)++),
                                      funcType);
+      newFunc->setAttr("rock.kernel", rewriter.getUnitAttr());
+      newFunc->setAttr("rock.arch", rewriter.getStringAttr("gfx1151"));
       auto *funcBlock = newFunc.addEntryBlock();
       rewriter.setInsertionPointToStart(funcBlock);
       IRMapping mapping;
