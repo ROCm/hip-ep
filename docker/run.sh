@@ -51,7 +51,7 @@ detect_hip_arch() {
     return 1
 }
 
-: "${IMAGE:=hipdnn-ep-build:llvm22-noble}"
+: "${IMAGE:=hipdnn-ep-build:llvm23-noble}"
 : "${CONTAINER_NAME:=${USER}.hipdnn-ep.shell}"
 if [ -z "${HIP_ARCHITECTURES:-}" ]; then
     if HIP_ARCHITECTURES="$(detect_hip_arch)"; then
