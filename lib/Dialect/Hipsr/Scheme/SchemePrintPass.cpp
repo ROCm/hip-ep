@@ -39,7 +39,7 @@ struct SchemePrintPass : public impl::SchemePrintPassBase<SchemePrintPass> {
       op->print(os, OpPrintingFlags().printGenericOpForm());
       os.flush();
 
-      std::vector<ptr> args = {
+      std::vector<SchemeValue> args = {
         makeSchemeString(op->getName().getStringRef().str().c_str()),
         makeSchemeInteger(op->getNumOperands()),
         makeSchemeInteger(op->getNumResults()),

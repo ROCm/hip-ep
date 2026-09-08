@@ -9,20 +9,18 @@
 #include <string>
 #include <vector>
 
-extern "C" {
-typedef void* ptr;
-}
-
 namespace mlir {
 namespace hipsr {
+
+using SchemeValue = void*;
 
 bool initializeSchemeRuntime();
 
 std::string callSchemeFunction(const char* functionName,
-                                const std::vector<ptr>& args);
+                                const std::vector<SchemeValue>& args);
 
-ptr makeSchemeString(const char* str);
-ptr makeSchemeInteger(long value);
+SchemeValue makeSchemeString(const char* str);
+SchemeValue makeSchemeInteger(long value);
 
 } // namespace hipsr
 } // namespace mlir
