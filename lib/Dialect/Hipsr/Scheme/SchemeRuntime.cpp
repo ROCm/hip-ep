@@ -7,32 +7,10 @@
 #include <cstddef>
 #include <cstring>
 
+// Include Chez Scheme C API header - use the ta6le machine-specific version
+// where ptr is defined as void*, not the portable boot (pb) version
 extern "C" {
-typedef void* ptr;
-typedef long iptr;
-typedef unsigned int string_char;
-
-void Sscheme_init(void (*)(void));
-void Sregister_boot_file_bytes(const char*, const unsigned char*, size_t);
-void Sbuild_heap(const char*, void (*)(void));
-ptr Scall0(ptr);
-ptr Scall1(ptr, ptr);
-ptr Scall2(ptr, ptr, ptr);
-ptr Scall3(ptr, ptr, ptr, ptr);
-ptr Sstring_to_symbol(const char*);
-ptr Stop_level_value(ptr);
-ptr Sinteger(iptr);
-iptr Sinteger_value(ptr);
-ptr Sstring(const char*);
-ptr Scons(ptr, ptr);
-const char* Skernel_version();
-
-#define Snil ((ptr)0x26)
-#define Sfalse ((ptr)0x6)
-#define TO_VOIDP(x) ((void*)(x))
-#define Sstring_length(x) ((iptr)((unsigned long)(*((iptr *)TO_VOIDP((unsigned long)(x)+1)))>>4))
-#define Schar_value(x) ((string_char)((unsigned long)(x)>>8))
-#define Sstring_ref(x,i) Schar_value(((string_char *)TO_VOIDP((unsigned long)(x)+9))[i])
+#include "boot/ta6le/scheme.h"
 }
 
 #include "ChezBootPetite.h"
@@ -62,8 +40,8 @@ bool initializeSchemeRuntime() {
   llvm::errs() << "  Scheme boot: " << scheme_boot_size << " bytes\n";
 
   Sscheme_init(nullptr);
-  Sregister_boot_file_bytes("petite.boot", petite_boot_data, petite_boot_size);
-  Sregister_boot_file_bytes("scheme.boot", scheme_boot_data, scheme_boot_size);
+  Sregister_boot_file_bytes("petite.boot", const_cast<void*>(static_cast<const void*>(petite_boot_data)), petite_boot_size);
+  Sregister_boot_file_bytes("scheme.boot", const_cast<void*>(static_cast<const void*>(scheme_boot_data)), scheme_boot_size);
   Sbuild_heap("hip-mlir-opt", nullptr);
 
   ptr multiply = Stop_level_value(Sstring_to_symbol("*"));
