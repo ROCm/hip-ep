@@ -29,11 +29,14 @@ const char* Skernel_version();
 #define Snil ((ptr)0x26)
 
 extern const unsigned char petite_boot_data[];
-extern const size_t petite_boot_size;
 extern const unsigned char scheme_boot_data[];
-extern const size_t scheme_boot_size;
 extern const unsigned char print_operation_scm_data[];
-extern const size_t print_operation_scm_size;
+}
+
+namespace {
+const size_t petite_boot_size = sizeof(petite_boot_data) - 1;
+const size_t scheme_boot_size = sizeof(scheme_boot_data) - 1;
+const size_t print_operation_scm_size = sizeof(print_operation_scm_data) - 1;
 }
 
 namespace {
