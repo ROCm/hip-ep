@@ -4885,4 +4885,71 @@ def Hip_QAddOp : Hip_DpsOp_Broadcast<"qadd",
     attr-dict (`:` type($result_tensors)^)?
   }];
 }
+
+def Hip_QMatMulOp : Hip_DpsOp<"qmatmul", /*traits=*/[],
+                              /*outsAccessor=*/"Y",
+                              /*autoReify=*/0,
+                              /*autoInfer=*/1,
+                              /*declareInfer=*/1> {
+  let summary = "Quantized matrix multiplication with integrated QDQ";
+  let description = [{
+    Fuses DequantizeLinear x2 -> MatMul -> QuantizeLinear into a single
+    integer-domain batched GEMM.
+
+    ```
+    a = (A - A_zero_point) * A_scale
+    b = (B - B_zero_point) * B_scale
+    Y = saturate(round((a @ b) / Y_scale) + Y_zero_point)
+    ```
+
+    Expanded over the integer accumulator, with
+    `acc[m,n] = sum_k A[m,k]*B[k,n]`, `rowA[m] = sum_k A[m,k]` and
+    `colB[n] = sum_k B[k,n]`:
+
+    ```
+    Y[m,n] = saturate(round(M * (acc[m,n] - B_zero_point * rowA[m]
+                                          - A_zero_point * colB[n]
+                                          + K * A_zero_point * B_zero_point))
+                      + Y_zero_point)
+    M = A_scale * B_scale / Y_scale   (folded at lowering time)
+    ```
+
+    Shape contract matches `hip.matmul` without the transpose attributes:
+      A: [..., M, K], B: [..., K, N], Y: [broadcast(A.batch, B.batch), M, N].
+
+    Quantization is per-tensor, so every scale and zero point is an attribute.
+    A, B and Y each carry their own 8-bit element type: real QDQ graphs
+    commonly pair a `ui8` asymmetric activation with an `i8` symmetric weight.
+
+    Example:
+    ```mlir
+    hip.qmatmul(%ctx) ins(%A, %B : memref<64x128xi8, 1>, memref<128x32xi8, 1>)
+                      outs(%Y : memref<64x32xi8, 1>)
+                      {A_scale = 2.500000e-01 : f32, A_zero_point = -5 : i64,
+                       B_scale = 1.250000e-01 : f32, B_zero_point = 3 : i64,
+                       Y_scale = 5.000000e-01 : f32, Y_zero_point = 7 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$A,             // Left operand (quantized)
+    Hip_TensorOrMemRef:$B,             // Right operand (quantized)
+    Hip_TensorOrMemRef:$Y,             // Output buffer (quantized), DPS init
+    F32Attr:$A_scale,
+    I64Attr:$A_zero_point,
+    F32Attr:$B_scale,
+    I64Attr:$B_zero_point,
+    F32Attr:$Y_scale,
+    I64Attr:$Y_zero_point
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $A `,` $B `:` type($A) `,` type($B) `)`
+    `outs` `(` $Y `:` type($Y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
 #endif // HIP_OPS
