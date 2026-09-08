@@ -904,11 +904,14 @@ jobs:
           repository: ROCm/rocm-systems
           ref: ${{ env.ROCM_SYSTEMS_REF }}
           path: source-rocm-systems
-          # ~7 GB monorepo. projects/hip is what clr wants as HIP_COMMON_DIR.
+          # ~7 GB monorepo. projects/hip is HIP_COMMON_DIR; projects/rocr-runtime
+          # is picked up by rocclr as a subdirectory build of hsa-runtime64
+          # (see the AMD_COMPUTE_WIN note in the build step).
           sparse-checkout: |
             shared
             projects/clr
             projects/hip
+            projects/rocr-runtime
           fetch-depth: 1
           show-progress: false
 
@@ -956,6 +959,12 @@ jobs:
           # clr builds nothing unless a runtime is selected, and it hard-fails
           # without HIP_COMMON_DIR. HIP_PLATFORM is passed explicitly because
           # the auto-detect path shells out to hipconfig.
+          #
+          # rocclr/cmake/ROCclrHSA.cmake takes one of two paths: when
+          # projects/rocr-runtime is present next to clr it builds hsa-runtime64
+          # as a subdirectory, otherwise it falls back to find_package and fails
+          # because nothing installs that package. AMD_COMPUTE_WIN supplies the
+          # Windows libelf and SC paths that build needs.
           cmake -S "$SRC/projects/clr" -B "${{ runner.workspace }}/build-clr" -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$PREFIX" \
@@ -965,6 +974,7 @@ jobs:
             -DCLR_BUILD_OCL=OFF \
             -DHIP_COMMON_DIR="$SRC/projects/hip" \
             -DHIP_PLATFORM=amd \
+            -DAMD_COMPUTE_WIN="$SRC/shared/amdgpu-windows-interop" \
             -DGPU_TARGETS="${{ env.THEROCK_GPU_TARGETS }}" \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
