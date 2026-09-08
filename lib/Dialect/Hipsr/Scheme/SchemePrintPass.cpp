@@ -12,10 +12,10 @@
 #define GEN_PASS_DEF_SCHEMEPRINTPASS
 #include "hip/Dialect/Hipsr/Transforms/Passes.h.inc"
 
-#include "SchemeRuntime.h"
-
 namespace mlir {
 namespace hipsr {
+
+#include "SchemeRuntime.h"
 
 namespace {
 
