@@ -249,10 +249,14 @@ def HipsrUseOutputAllocatorPass
   let summary =
       "Rewrite returned memref.alloc outputs to hipsr.alloc_output";
   let description = [{
-    Replaces each graph-output `memref.alloc` with `hipsr.alloc_output`, reusing
-    the alloc's dynamic-size operands and setting `out_idx` to its position in
-    `func.return`. Output buffers then come from the EP output allocator and are
-    owned by the EP/runtime instead of being deallocated or pooled.
+    Replaces each graph-output `memref.alloc` with `hipsr.alloc_output`, taking
+    dynamic sizes from the allocation's `hipsr.preserve_shape` and setting
+    `out_idx` to its position in `func.return`. Output buffers then come from
+    the EP output allocator and are owned by the EP/runtime instead of being
+    deallocated or pooled.
+
+    Runs after bufferization, since a shape it reads must be an index memref,
+    and before `hipsr-pool-alloc` and `hipsr-remove-preserve-shape`.
 
     An allocation counts as a graph output when `func.return` returns it either
     directly or through view-like aliases. The view operations are left in
@@ -263,6 +267,7 @@ def HipsrUseOutputAllocatorPass
     are skipped. The function signature and `func.return` are left unchanged.
   }];
   let dependentDialects = [
+    "::mlir::arith::ArithDialect",
     "::mlir::hipsr::HipsrDialect",
     "::mlir::memref::MemRefDialect"
   ];
