@@ -42,11 +42,11 @@ set(ChezScheme_SOURCE_DIR "${SOURCE_DIR}")
 add_custom_command(
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.cpp
   COMMAND ${Python3_EXECUTABLE}
-          ${CMAKE_SOURCE_DIR}/cmake/xxd.py
+          ${CMAKE_SOURCE_DIR}/cmake/xxd-with-size.py
           --var petite_boot_data
           --output ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.cpp
           ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/petite.boot
-  DEPENDS ChezScheme
+  DEPENDS ChezScheme ${CMAKE_SOURCE_DIR}/cmake/xxd-with-size.py
   COMMENT "Embedding petite.boot"
   VERBATIM
 )
@@ -54,11 +54,11 @@ add_custom_command(
 add_custom_command(
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.cpp
   COMMAND ${Python3_EXECUTABLE}
-          ${CMAKE_SOURCE_DIR}/cmake/xxd.py
+          ${CMAKE_SOURCE_DIR}/cmake/xxd-with-size.py
           --var scheme_boot_data
           --output ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.cpp
           ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/scheme.boot
-  DEPENDS ChezScheme
+  DEPENDS ChezScheme ${CMAKE_SOURCE_DIR}/cmake/xxd-with-size.py
   COMMENT "Embedding scheme.boot"
   VERBATIM
 )
@@ -66,11 +66,12 @@ add_custom_command(
 add_custom_command(
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.cpp
   COMMAND ${Python3_EXECUTABLE}
-          ${CMAKE_SOURCE_DIR}/cmake/xxd.py
+          ${CMAKE_SOURCE_DIR}/cmake/xxd-with-size.py
           --var print_operation_scm_data
           --output ${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/print-operation.scm
   DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/print-operation.scm
+          ${CMAKE_SOURCE_DIR}/cmake/xxd-with-size.py
   COMMENT "Embedding print-operation.scm"
   VERBATIM
 )
