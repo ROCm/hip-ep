@@ -26,7 +26,7 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
 
     ConversionTarget conversion(*ctx);
     conversion.addIllegalDialect<HipDialect>();
-    conversion.addLegalDialect<tosa::TosaDialect>();
+    conversion.addLegalDialect<tosa::TosaDialect, func::FuncDialect>();
 
     RewritePatternSet patterns(ctx);
 
