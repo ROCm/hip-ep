@@ -31,7 +31,10 @@ extern "C" {
 #define HIPDNN_EP_TENSOR_OP_MIN 2 // element-wise min
 #define HIPDNN_EP_TENSOR_OP_MAX 3 // element-wise max
 
+// Must match HipdnnQElementwiseKind in
+// lib/Conversion/HipToLLVM/HipToLLVMUtils.h
 #define HIPDNN_EP_QELEMENTWISE_ADD 0
+#define HIPDNN_EP_QELEMENTWISE_MUL 1
 
 static inline const char *hipdnn_ep_tensor_op_name(int64_t op) {
   switch (op) {
@@ -907,7 +910,11 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
 // up to `out_rank`, and dims of 1 broadcast against the output dim.
 //
 // lhs/rhs/output are quantized buffers of `data_type`.
-// M_a = s_a / s_out, M_b = s_b / s_out (folded by lowering).
+//
+// The coefficients are folded by lowering and their meaning depends on `kind`,
+// because a product of dequantized operands also multiplies their scales:
+//   ADD: M_a = s_a / s_out, M_b = s_b / s_out
+//   MUL: M_a = s_a * s_b / s_out, M_b unused (lowering passes 1.0f)
 int wrap_qelementwise(RuntimeState *state, void *lhs, void *rhs, void *output,
                       int64_t kind, const int64_t *lhs_shape, int64_t lhs_rank,
                       const int64_t *rhs_shape, int64_t rhs_rank,
