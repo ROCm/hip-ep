@@ -30,6 +30,14 @@ inline bool hipdnn_ep_matmul_dp4a_enabled() {
   return enabled;
 }
 
+// Custom wrap_gemm kernel (gemm_kernel.hip) instead of hipBLASLt. DEFAULT-ON
+// on the real runtime; set HIPDNN_EP_GEMM_KERNEL=0 to force hipBLASLt.
+inline bool hipdnn_ep_gemm_kernel_enabled() {
+  static const bool enabled =
+      hipdnn_ep::env_enabled_default_on("HIPDNN_EP_GEMM_KERNEL");
+  return enabled;
+}
+
 inline bool hipdnn_ep_perf_enabled() {
   // PERF intentionally does NOT inherit from HIPDNN_EP_DEBUG: enabling PERF
   // forces a hipStreamSynchronize on every inference (so hipEventElapsedTime
