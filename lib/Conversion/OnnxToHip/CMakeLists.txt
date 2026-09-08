@@ -40,7 +40,17 @@ if(MLIR_PDLL_EXE)
     set(PDL_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/pdl")
     file(MAKE_DIRECTORY "${PDL_BUILD_DIR}")
     set(PDL_OUTPUT "${PDL_BUILD_DIR}/HipFusionPatterns.pdl.mlir")
-    set(PDL_RUNTIME_OUTPUT "${CMAKE_BINARY_DIR}/bin/HipFusionPatterns.pdl.mlir")
+    # ConvertOnnxToHipPass resolves the patterns next to the loaded module, so
+    # the copy has to land in the directory the binaries land in. Multi-config
+    # generators (Visual Studio) append the config to
+    # CMAKE_RUNTIME_OUTPUT_DIRECTORY, so bin/ alone would miss bin/Release/.
+    get_property(_pdl_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+    if(_pdl_multi_config)
+        set(PDL_RUNTIME_DIR "${CMAKE_BINARY_DIR}/bin/$<CONFIG>")
+    else()
+        set(PDL_RUNTIME_DIR "${CMAKE_BINARY_DIR}/bin")
+    endif()
+    set(PDL_RUNTIME_OUTPUT "${PDL_RUNTIME_DIR}/HipFusionPatterns.pdl.mlir")
     if(TARGET mlir-pdll)
         set(MLIR_PDLL_COMMAND "$<TARGET_FILE:mlir-pdll>")
         set(MLIR_PDLL_DEPENDS mlir-pdll)
@@ -51,13 +61,15 @@ if(MLIR_PDLL_EXE)
     add_custom_command(OUTPUT "${PDL_OUTPUT}" "${PDL_RUNTIME_OUTPUT}"
         COMMAND "${MLIR_PDLL_COMMAND}" -x mlir "-I${PDL_SOURCE_DIR}"
                 "${PDL_ENTRY}" -o "${PDL_OUTPUT}"
-        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/bin"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${PDL_RUNTIME_DIR}"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
                 "${PDL_OUTPUT}" "${PDL_RUNTIME_OUTPUT}"
         DEPENDS ${PDL_SOURCES} ${MLIR_PDLL_DEPENDS}
         COMMENT "Compiling PDLL patterns: HipFusionPatterns.pdll -> HipFusionPatterns.pdl.mlir (+ bin copy)"
         VERBATIM)
-    add_custom_target(HipPdllPatterns DEPENDS "${PDL_OUTPUT}" "${PDL_RUNTIME_OUTPUT}")
+    # One command produces both outputs, so depending on PDL_OUTPUT alone is
+    # enough to run it; PDL_RUNTIME_OUTPUT is config-dependent.
+    add_custom_target(HipPdllPatterns DEPENDS "${PDL_OUTPUT}")
     install(FILES "${PDL_OUTPUT}" DESTINATION bin)
     # ConvertOnnxToHipPass resolves the patterns next to the loaded EP module,
     # so every packaging path (install tree, wheel, staged test package) has to
