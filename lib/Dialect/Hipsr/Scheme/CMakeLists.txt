@@ -69,9 +69,9 @@ add_custom_command(
           ${CMAKE_SOURCE_DIR}/cmake/xxd.py
           --var print_operation_scm_data
           --output ${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.h
-          ${CMAKE_CURRENT_SOURCE_DIR}/print-operation.scm
-  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/print-operation.scm
-  COMMENT "Embedding print-operation.scm"
+          ${CMAKE_CURRENT_SOURCE_DIR}/scheme-mlir-bridge.scm
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/scheme-mlir-bridge.scm
+  COMMENT "Embedding scheme-mlir-bridge.scm"
   VERBATIM
 )
 
