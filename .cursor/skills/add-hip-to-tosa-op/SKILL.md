@@ -11,8 +11,8 @@ description: Add a 1-1 HIP-to-TOSA conversion pattern to the convert-hip-to-tosa
 
 `convert-hip-to-tosa` (`lib/Conversion/HipToTosa/HipToTosa.cpp`) lowers `hip.*`
 ops inside outlined `rock.kernel` functions to TOSA, so rocMLIR/rocmlirTriton
-can absorb them into a fused kernel. It ships as a stub with an empty
-`RewritePatternSet` — every op needs a pattern added.
+can absorb them into a fused kernel. Coverage is opt-in: every op needs its own
+pattern added, and `AddConverter` (`hip.add`) is the model to copy.
 
 Pointwise ops need **no Rock counterpart**. rocMLIR's `TosaToRock` marks only
 six ops illegal (`Conv2DOp`, `Conv3DOp`, `MatMulOp`, `MatmulTBlockScaledOp`,
@@ -22,35 +22,24 @@ six ops illegal (`Conv2DOp`, `Conv3DOp`, `MatMulOp`, `MatmulTBlockScaledOp`,
 Every edit below lands in `HipToTosa.cpp` alone. Do not touch `Passes.td`,
 `InitAllPasses.h`, or any CMake file unless step 1's parsing note applies.
 
-## 1. Load the TOSA dialect (one time only)
+## 1. Dialect loading is already wired up
 
-TOSA is linked but **not loaded into the context**, so creating a `tosa.*` op
-fails with ``Dialect `tosa' not found``. Linking `MLIRTosaDialect` in
-`lib/Conversion/HipToTosa/CMakeLists.txt` only provides the C++ symbols.
+Linking `MLIRTosaDialect` only provides the C++ symbols; the dialect also has to
+be **loaded into the context** or creating a `tosa.*` op fails with ``Dialect
+`tosa' not found``. `ConvertHipToTosaPass` in `Passes.td` already declares
 
-Keep this change inside `HipToTosa.cpp`. The TableGen base emits an empty
-*virtual* `getDependentDialects`, so override it in the pass class:
-
-```cpp
-#include "mlir/Dialect/Tosa/IR/TosaOps.h"
-
-class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<mlir::tosa::TosaDialect>();
-  }
-
-  void runOnOperation() override { /* ... */ }
-};
+```
+let dependentDialects = ["mlir::tosa::TosaDialect"];
 ```
 
-That is sufficient for the pass to emit TOSA and for `hip-mlir-opt` to print it.
-No `Passes.td` or `InitAllPasses.h` edit is required, and no build wiring.
+so nothing is needed to emit TOSA. Do not override `getDependentDialects` in the
+pass class — TableGen generates it from that list.
 
 Only if `hip-mlir-opt` must also **parse** IR that already contains `tosa.*`
 (round-tripping its own output, or a lit test whose input is TOSA) add
 `registry.insert<mlir::tosa::TosaDialect>();` to `registerAllDialects` in
 `include/hip/InitAllPasses.h`. Parsing happens before the pass manager runs, so
-`getDependentDialects` does not cover it.
+`dependentDialects` does not cover it.
 
 ## 2. Pick the mapping
 
@@ -155,11 +144,15 @@ unhandled attributes) rather than asserting.
 **A rejected op is a hard error, not a passthrough.** The pass runs
 `applyFullConversion` with `addIllegalDialect<HipDialect>()`, so any `hip.*` op
 left in a `rock.kernel` function fails legalization and the pass reports
-`failed to legalize operation 'hip.<op>'`. Two consequences: a partially
-supported op takes the whole kernel down rather than degrading, and the target
-must keep non-hip ops legal via
-`markUnknownOpDynamicallyLegal([](Operation *) { return true; })` — otherwise
-`applyFullConversion` rejects even the enclosing `func.func`.
+`failed to legalize operation 'hip.<op>'`. So a partially supported op takes the
+whole kernel down rather than degrading.
+
+For the same reason every dialect the kernel contains must be marked legal:
+`applyFullConversion` treats an op with *no registered legality* as illegal, so
+an unlisted dialect fails the pass even when no pattern touches it. The target
+currently lists `tosa` and `func`; add to that `addLegalDialect` call if a new
+op's lowering introduces another dialect (e.g. `arith` for a materialized
+constant).
 
 ## 4. Build and verify
 
