@@ -2307,6 +2307,36 @@ def Hip_LeakyReluOp : Hip_DpsOp<"leaky_relu"> {
   }];
 }
 
+def Hip_SwishOp : Hip_DpsOp<"swish"> {
+  let summary = "Swish activation: y = x * sigmoid(alpha * x)";
+  let description = [{
+    Applies the ONNX Swish activation element-wise.
+
+    Uses destination-passing style: the output buffer is provided as an
+    argument. The fused runtime kernel supports f16, f32, bf16, and f64.
+
+    Example:
+    ```mlir
+    hip.swish(%ctx) ins(%x : memref<3x4xf32, 1>)
+                    outs(%y : memref<3x4xf32, 1>)
+                    {alpha = 0.5 : f64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<F64Attr, "1.0">:$alpha
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_ReciprocalOp : Hip_DpsOp<"reciprocal", /*traits=*/[],
                                  /*outsAccessor=*/"Y",
                                  /*autoReify=*/1,

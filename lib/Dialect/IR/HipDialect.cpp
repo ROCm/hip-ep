@@ -1221,6 +1221,20 @@ void LeakyReluOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// SwishOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SwishOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void SwishOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // PoolOp: ins(input), outs([output] or [output, indices])
 //===----------------------------------------------------------------------===//
 
