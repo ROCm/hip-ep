@@ -5,6 +5,7 @@
 #include <llvm/Support/Debug.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/UB/IR/UBOps.h>
+#include <mlir/IR/BuiltinAttributes.h>
 #include <mlir/IR/BuiltinOps.h>
 #include <mlir/IR/IRMapping.h>
 #include <mlir/IR/PatternMatch.h>
@@ -99,10 +100,13 @@ public:
     }
 
     rewriter.setInsertionPointAfter(endOp);
-    auto callOp = func::CallOp::create(
-        rewriter, rewriter.getUnknownLoc(), newFunc,
-        SmallVector<Value>(operands.begin(), operands.end()));
-    rewriter.replaceOp(endOp, callOp);
+    auto rocMlirOp = RocMlirOp::create(
+        rewriter, rewriter.getUnknownLoc(), endOp->getResultTypes(),
+        SymbolRefAttr::get(newFunc), context,
+        SmallVector<Value>(operands.begin(), operands.end()),
+        endOp.getDpsInits().front());
+
+    rewriter.replaceOp(endOp, rocMlirOp);
     return success();
   }
 
