@@ -210,6 +210,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     SizeOp::attachInterface<HipDstBufferizableModel<SizeOp>>(*ctx);
     LoopOp::attachInterface<HipDstBufferizableModel<LoopOp>>(*ctx);
     QAddOp::attachInterface<HipDstBufferizableModel<QAddOp>>(*ctx);
+    QMulOp::attachInterface<HipDstBufferizableModel<QMulOp>>(*ctx);
     QMatMulOp::attachInterface<HipDstBufferizableModel<QMatMulOp>>(*ctx);
     // hip.if is a DPS control-flow op (getDpsInitsMutable, results alias
     // o_init) just like hip.loop. Without this model one-shot-bufferize aborts

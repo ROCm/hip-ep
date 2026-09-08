@@ -124,6 +124,15 @@ def main():
         "multi-arch distribution carries every arch; the wheel ships one.",
     )
     ap.add_argument(
+        "--data-file",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Non-library file the EP loads from its own directory at runtime "
+        "(repeatable), e.g. HipFusionPatterns.pdl.mlir. Missing files are a "
+        "hard error: the EP cannot compile a model without them.",
+    )
+    ap.add_argument(
         "--extra-lib",
         action="append",
         default=[],
@@ -148,6 +157,14 @@ def main():
             return 1
         shutil.copy2(lib, dest / lib.name)
         print(f"  packaged library: {lib.name} <- {lib}")
+
+    for raw in args.data_file:
+        data = Path(raw)
+        if not data.is_file():
+            print(f"ERROR: data file not found: {data}", file=sys.stderr)
+            return 1
+        shutil.copy2(data, dest / data.name)
+        print(f"  packaged data file: {data.name} <- {data}")
 
     for raw in args.extra_lib:
         lib = Path(raw)
