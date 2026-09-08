@@ -40,11 +40,11 @@ ExternalProject_Get_Property(ChezScheme SOURCE_DIR)
 set(ChezScheme_SOURCE_DIR "${SOURCE_DIR}")
 
 add_custom_command(
-  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.cpp
+  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.h
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_SOURCE_DIR}/cmake/xxd.py
           --var petite_boot_data
-          --output ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.cpp
+          --output ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.h
           ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/petite.boot
   DEPENDS ChezScheme
   COMMENT "Embedding petite.boot"
@@ -52,11 +52,11 @@ add_custom_command(
 )
 
 add_custom_command(
-  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.cpp
+  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.h
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_SOURCE_DIR}/cmake/xxd.py
           --var scheme_boot_data
-          --output ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.cpp
+          --output ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.h
           ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/scheme.boot
   DEPENDS ChezScheme
   COMMENT "Embedding scheme.boot"
@@ -64,27 +64,22 @@ add_custom_command(
 )
 
 add_custom_command(
-  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.cpp
+  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.h
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_SOURCE_DIR}/cmake/xxd.py
           --var print_operation_scm_data
-          --output ${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.cpp
+          --output ${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.h
           ${CMAKE_CURRENT_SOURCE_DIR}/print-operation.scm
   DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/print-operation.scm
   COMMENT "Embedding print-operation.scm"
   VERBATIM
 )
 
-add_library(ChezBoot STATIC
-  ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.cpp
-  ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.cpp
-  ${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.cpp
+add_custom_target(ChezBootHeaders DEPENDS
+  ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.h
+  ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.h
+  ${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.h
 )
-set_target_properties(ChezBoot PROPERTIES
-  POSITION_INDEPENDENT_CODE ON
-  LINKER_LANGUAGE CXX
-)
-
 add_library(HipsrSchemePass
   SchemeRuntime.cpp
   SchemePrintPass.cpp
@@ -92,14 +87,14 @@ add_library(HipsrSchemePass
 
 target_include_directories(HipsrSchemePass PRIVATE
   ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_CURRENT_BINARY_DIR}
   ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}
   ${ChezScheme_SOURCE_DIR}/boot/pb
 )
 
-add_dependencies(HipsrSchemePass ChezScheme)
+add_dependencies(HipsrSchemePass ChezScheme ChezBootHeaders)
 
 target_link_libraries(HipsrSchemePass
-  ChezBoot
   ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/libkernel.a
   ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/lz4/lib/liblz4.a
   ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/zlib/libz.a

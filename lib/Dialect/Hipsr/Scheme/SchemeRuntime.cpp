@@ -27,11 +27,11 @@ ptr Scons(ptr, ptr);
 const char* Skernel_version();
 
 #define Snil ((ptr)0x26)
-
-extern const unsigned char petite_boot_data[];
-extern const unsigned char scheme_boot_data[];
-extern const unsigned char print_operation_scm_data[];
 }
+
+#include "ChezBootPetite.h"
+#include "ChezBootScheme.h"
+#include "PrintOperationScm.h"
 
 namespace {
 const size_t petite_boot_size = sizeof(petite_boot_data) - 1;
