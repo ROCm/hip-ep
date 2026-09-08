@@ -965,6 +965,11 @@ jobs:
           # as a subdirectory, otherwise it falls back to find_package and fails
           # because nothing installs that package. AMD_COMPUTE_WIN supplies the
           # Windows libelf and SC paths that build needs.
+          #
+          # HIP_LLVM_ROOT has to be explicit: hipamd derives it by probing for
+          # "<root>/bin/clang", which never matches on Windows where the file is
+          # clang.exe, so it would fall through to the <root>/lib/llvm layout
+          # that AMD's ROCm install uses and this prefix does not.
           cmake -S "$SRC/projects/clr" -B "${{ runner.workspace }}/build-clr" -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$PREFIX" \
@@ -974,6 +979,7 @@ jobs:
             -DCLR_BUILD_OCL=OFF \
             -DHIP_COMMON_DIR="$SRC/projects/hip" \
             -DHIP_PLATFORM=amd \
+            -DHIP_LLVM_ROOT="$PREFIX" \
             -DAMD_COMPUTE_WIN="$SRC/shared/amdgpu-windows-interop" \
             -DGPU_TARGETS="${{ env.THEROCK_GPU_TARGETS }}" \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
