@@ -20,10 +20,15 @@
 Constraint HasContextArg(op: Op);
 Constraint IsSplatConstantValue(val: Value);
 Constraint HasExtractableZeropoint(op: Op, index: Attr);
+Constraint IsEightBitQuantized(op: Op);
+Constraint IsEightOrSixteenBitQuantized(op: Op);
+Constraint HasStaticShapedResults(op: Op);
 
 Rewrite GetContextArg(op: Op) -> Value;
 Rewrite ExtractScaleValue(val: Value) -> Attr;
 Rewrite ExtractZeropointValue(op: Op, index: Attr, defaultValue: Attr) -> Attr;
+Rewrite ExtractAttrInt64(op: Op, name: Attr, defaultValue: Attr) -> Attr;
 
 #include "QDQAddFusion.pdll"
 #include "QDQMulFusion.pdll"
+#include "QDQMatMulFusion.pdll"
