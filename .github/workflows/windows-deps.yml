@@ -906,14 +906,30 @@ jobs:
           path: source-rocm-systems
           # ~7 GB monorepo. projects/hip is HIP_COMMON_DIR; projects/rocr-runtime
           # is picked up by rocclr as a subdirectory build of hsa-runtime64
-          # (see the AMD_COMPUTE_WIN note in the build step).
+          # (see the AMD_COMPUTE_WIN note in the build step). .dvc carries the
+          # remote config needed to fetch the prebuilt Windows libraries.
           sparse-checkout: |
+            .dvc
             shared
             projects/clr
             projects/hip
             projects/rocr-runtime
           fetch-depth: 1
           show-progress: false
+
+      # shared/amdgpu-windows-interop ships its prebuilt libraries through DVC:
+      # git only carries pointer files such as wkmi.lib.dvc, and hipamd links
+      # against the real wkmi.lib. The remote allows anonymous access, so no
+      # credentials are needed.
+      - name: Fetch DVC-tracked Windows interop libraries
+        if: steps.cache-hip.outputs.cache-hit != 'true'
+        shell: bash
+        working-directory: source-rocm-systems
+        run: |
+          set -euo pipefail
+          python -m pip install -q "dvc[s3]"
+          dvc pull shared/amdgpu-windows-interop
+          find shared/amdgpu-windows-interop -name '*.lib' -o -name '*.dll' | head -20
 
       # shared/kpack does find_package(msgpack-cxx REQUIRED) and
       # find_package(zstd REQUIRED). Flags copied from AMD's build -- the
