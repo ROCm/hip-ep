@@ -973,6 +973,11 @@ jobs:
           # "<root>/bin/clang", which never matches on Windows where the file is
           # clang.exe, so it would fall through to the <root>/lib/llvm layout
           # that AMD's ROCm install uses and this prefix does not.
+          #
+          # __HIP_ENABLE_PCH defaults ON but AMD's own build never runs it (no
+          # trace of hip_embed_pch.sh in their logs), and on Windows it drives
+          # clang over the MSVC headers in GNU driver mode, which does not parse.
+          # It only precompiles headers for runtime compilation.
           cmake -S "$SRC/projects/clr" -B "${{ runner.workspace }}/build-clr" -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$PREFIX" \
@@ -983,6 +988,7 @@ jobs:
             -DHIP_COMMON_DIR="$SRC/projects/hip" \
             -DHIP_PLATFORM=amd \
             -DHIP_LLVM_ROOT="$PREFIX" \
+            -D__HIP_ENABLE_PCH=OFF \
             -DAMD_COMPUTE_WIN="$SRC/shared/amdgpu-windows-interop" \
             -DGPU_TARGETS="${{ env.THEROCK_GPU_TARGETS }}" \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
