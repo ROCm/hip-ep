@@ -39,47 +39,37 @@ ExternalProject_Add(ChezScheme
 ExternalProject_Get_Property(ChezScheme SOURCE_DIR)
 set(ChezScheme_SOURCE_DIR "${SOURCE_DIR}")
 
-add_custom_command(
-  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.h
-  COMMAND ${Python3_EXECUTABLE}
-          ${CMAKE_SOURCE_DIR}/cmake/xxd.py
-          --var petite_boot_data
-          --output ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.h
-          ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/petite.boot
-  DEPENDS ChezScheme
-  COMMENT "Embedding petite.boot"
-  VERBATIM
+set(CHEZ_EMBEDDED_FILES
+  "ChezBootPetite:petite_boot_data:${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/petite.boot:ChezScheme"
+  "ChezBootScheme:scheme_boot_data:${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/scheme.boot:ChezScheme"
+  "PrintOperationScm:print_operation_scm_data:${CMAKE_CURRENT_SOURCE_DIR}/print-operation.scm:${CMAKE_CURRENT_SOURCE_DIR}/print-operation.scm"
 )
 
-add_custom_command(
-  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.h
-  COMMAND ${Python3_EXECUTABLE}
-          ${CMAKE_SOURCE_DIR}/cmake/xxd.py
-          --var scheme_boot_data
-          --output ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.h
-          ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/scheme.boot
-  DEPENDS ChezScheme
-  COMMENT "Embedding scheme.boot"
-  VERBATIM
-)
+set(CHEZ_HEADER_FILES "")
+foreach(ENTRY ${CHEZ_EMBEDDED_FILES})
+  string(REPLACE ":" ";" PARTS ${ENTRY})
+  list(GET PARTS 0 HEADER_NAME)
+  list(GET PARTS 1 VAR_NAME)
+  list(GET PARTS 2 INPUT_FILE)
+  list(GET PARTS 3 DEPENDS_TARGET)
 
-add_custom_command(
-  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.h
-  COMMAND ${Python3_EXECUTABLE}
-          ${CMAKE_SOURCE_DIR}/cmake/xxd.py
-          --var print_operation_scm_data
-          --output ${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.h
-          ${CMAKE_CURRENT_SOURCE_DIR}/print-operation.scm
-  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/print-operation.scm
-  COMMENT "Embedding print-operation.scm"
-  VERBATIM
-)
+  set(OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/${HEADER_NAME}.h)
+  list(APPEND CHEZ_HEADER_FILES ${OUTPUT_FILE})
 
-add_custom_target(ChezBootHeaders DEPENDS
-  ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.h
-  ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.h
-  ${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.h
-)
+  add_custom_command(
+    OUTPUT ${OUTPUT_FILE}
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/cmake/xxd.py
+            --var ${VAR_NAME}
+            --output ${OUTPUT_FILE}
+            ${INPUT_FILE}
+    DEPENDS ${DEPENDS_TARGET}
+    COMMENT "Embedding ${INPUT_FILE}"
+    VERBATIM
+  )
+endforeach()
+
+add_custom_target(ChezBootHeaders DEPENDS ${CHEZ_HEADER_FILES})
 add_library(HipsrSchemePass
   SchemeRuntime.cpp
   SchemePrintPass.cpp
