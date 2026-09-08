@@ -38,6 +38,11 @@ jobs:
           taskkill /f /im hip-onnx-runner.exe >nul 2>&1 || ver >nul
           taskkill /f /im onnxruntime_perf_test.exe >nul 2>&1 || ver >nul
           taskkill /f /im model_benchmark.exe >nul 2>&1 || ver >nul
+          rem comgr's code object cache is machine-wide and survives runs, so on
+          rem this self-hosted runner a hipRTC compile would otherwise never be
+          rem measured cold. Dropping it makes the first compile of each op in
+          rem the run a real one (see the Report hipRTC compile times step).
+          if exist "%LOCALAPPDATA%\comgr" rd /s /q "%LOCALAPPDATA%\comgr"
           if exist gpu-test-package rd /s /q gpu-test-package
           if exist l2-results rd /s /q l2-results
           if exist oga-results rd /s /q oga-results
@@ -756,6 +761,123 @@ jobs:
               if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: Failed to update PR comment" }
             } elseif ($ghOk) {
               Write-Host "Creating new PR comment"
+              gh pr comment $prNumber -R "${{ github.repository }}" --body "$body"
+              if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: Failed to create PR comment" }
+            } else {
+              Write-Host "WARNING: gh api unreachable, skipping PR comment"
+            }
+          }
+      # hipRTC compile cost. Clean workspace drops the comgr cache, so the
+      # first compile of each op in a run is cold and every later one measures
+      # the cached path. Every kernel-running step already redirects
+      # stdout+stderr to a file, so one pass over those in mtime order
+      # reconstructs the order the compiles happened in.
+      - name: Report hipRTC compile times
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $logDirs = @(
+            "gpu-test-package/results",
+            "gpu-test-package/results-native",
+            "gpu-test-package/results-amdgpu-native",
+            "gpu-test-package/results-epctx-export",
+            "gpu-test-package/results-epctx-import",
+            "oga-results",
+            "oga-smoke-results",
+            "vlm-results",
+            "l2-results"
+          )
+          $files = @()
+          foreach ($d in $logDirs) {
+            $files += Get-ChildItem -Path $d -Filter *.txt -Recurse -File -ErrorAction SilentlyContinue
+          }
+          $files = @($files | Sort-Object LastWriteTime)
+
+          $rx = [regex]'\[custom_kernels\] rtc\((\w+)\): (\d+) kernels, (\d+) bytes, compiled in ([\d.]+) ms'
+          $order = [System.Collections.Generic.List[string]]::new()
+          $cold = @{}; $warm = @{}; $kern = @{}; $bytes = @{}
+          foreach ($f in $files) {
+            foreach ($line in (Get-Content $f.FullName -ErrorAction SilentlyContinue)) {
+              $m = $rx.Match($line)
+              if (-not $m.Success) { continue }
+              $op = $m.Groups[1].Value
+              $ms = [double]$m.Groups[4].Value
+              if ($cold.ContainsKey($op)) {
+                $warm[$op].Add($ms)
+              } else {
+                $order.Add($op)
+                $cold[$op] = $ms
+                $kern[$op] = [int]$m.Groups[2].Value
+                $bytes[$op] = [long]$m.Groups[3].Value
+                $warm[$op] = [System.Collections.Generic.List[double]]::new()
+              }
+            }
+          }
+
+          function Get-Median([double[]]$v) {
+            $s = @($v | Sort-Object)
+            $n = $s.Count
+            if ($n % 2 -eq 1) { return $s[($n - 1) / 2] }
+            return ($s[$n / 2 - 1] + $s[$n / 2]) / 2
+          }
+
+          $rows = ""
+          $totK = 0; $totB = 0L; $totCold = 0.0; $totWarm = 0.0
+          $noWarm = @()
+          foreach ($op in $order) {
+            if ($warm[$op].Count -gt 0) {
+              $med = Get-Median $warm[$op].ToArray()
+              $wCell = "{0:F1}" -f $med
+              $totWarm += $med
+            } else {
+              $wCell = "n/a"
+              $noWarm += $op
+            }
+            $rows += "| $op | $($kern[$op]) | $($bytes[$op]) | $("{0:F1}" -f $cold[$op]) | $wCell |`n"
+            $totK += $kern[$op]; $totB += $bytes[$op]; $totCold += $cold[$op]
+          }
+
+          if (-not $rows) {
+            Write-Host "No [custom_kernels] rtc(...) records found; nothing to report."
+            exit 0
+          }
+
+          $rows += "| **Total** | **$totK** | **$totB** | **$("{0:F1}" -f $totCold)** | **$("{0:F1}" -f $totWarm)** |`n"
+          $warmNote = if ($noWarm.Count -gt 0) {
+            ", and excludes " + ($noWarm -join ", ") + " which compile once per run and have no warm sample"
+          } else { "" }
+
+          $runUrl = "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          $rawSha = if ("${{ github.event_name }}" -eq "pull_request") { "${{ github.event.pull_request.head.sha }}" } else { "${{ github.sha }}" }
+          $summary = "## hipRTC Compile Times`n`n" +
+                     "| Op | Kernels | Bytes | Cold (ms) | Warm (ms) |`n" +
+                     "|----|--------:|------:|----------:|----------:|`n" +
+                     $rows +
+                     "`nCold is the first compile of the run, with the comgr cache dropped in Clean workspace; " +
+                     "warm is the median of the later ones. Total cold is what one process pays against an empty " +
+                     "cache, total warm what every process pays afterwards$warmNote.`n" +
+                     "`nRun: [${{ github.run_number }}]($runUrl) - Commit: ``$($rawSha.Substring(0, 7))```n"
+
+          Write-Host $summary
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+
+          $prNumber = "${{ github.event.pull_request.number }}"
+          if ("${{ github.event_name }}" -eq "pull_request" -and $prNumber) {
+            $marker = "<!-- morphizen-rtc-compile -->"
+            $body = "$marker`n$summary"
+            $commentsJson = gh api "repos/${{ github.repository }}/issues/$prNumber/comments" 2>$null
+            $ghOk = ($LASTEXITCODE -eq 0)
+            $existing = $null
+            if ($ghOk -and $commentsJson) {
+              $found = ($commentsJson | ConvertFrom-Json) | Where-Object { $_.body -and $_.body.StartsWith($marker) } | Select-Object -First 1
+              if ($found) { $existing = $found.id }
+            }
+            if ($ghOk -and $existing) {
+              gh api --method PATCH "repos/${{ github.repository }}/issues/comments/$existing" -f body="$body"
+              if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: Failed to update PR comment" }
+            } elseif ($ghOk) {
               gh pr comment $prNumber -R "${{ github.repository }}" --body "$body"
               if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: Failed to create PR comment" }
             } else {
