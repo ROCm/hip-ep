@@ -129,14 +129,21 @@ struct GqaPrefillResult {
 void *gqa_autotune_create(morphizen::FileSystem *fs);
 void gqa_autotune_destroy(void *policy);
 
+// The mode the policy settled on, or Lookup before anything resolved it. This
+// only reports the answer; gqa_autotune_resolve_mode asks the question.
 GqaAutotuneMode gqa_autotune_mode(const void *policy);
 
-// Apply the session's gqa_autotune_mode provider option. `mode` may be null
-// when none was supplied. No-op when HIPDNN_GQA_AUTOTUNE_MODE was set (env
-// keeps highest priority, including when its value was unrecognised), and a
-// no-op after the first call, so a caller on the decode path may apply on
-// every read. The string is parsed during this call and never retained.
-void gqa_autotune_apply_provider_mode(void *policy, const char *mode);
+// Decide the session's mode and return it. `provider_mode` is the raw
+// gqa_autotune_mode provider option, or null when none was supplied; it is
+// weighed against HIPDNN_GQA_AUTOTUNE_MODE and the build default in one pass.
+//
+// gqa_autotune_create() cannot do this, because the provider option only
+// reaches the runtime after inference_init. The decision therefore waits for
+// the first read and runs once per policy; later calls return the settled mode,
+// which is what lets a caller on the decode path ask on every read. The string
+// is parsed during the call and never retained.
+GqaAutotuneMode gqa_autotune_resolve_mode(void *policy,
+                                          const char *provider_mode);
 
 GqaDecodeResult gqa_autotune_resolve_decode(void *policy,
                                             const GqaDecodeRequest &request);

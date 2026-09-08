@@ -313,60 +313,53 @@ int main(int argc, char **argv) {
     return inspect(argv[1]);
   ScopedModeEnv mode_env;
   MemoryFileSystem fs(makeLut());
+  // create() no longer decides the mode -- the provider option is not
+  // available to it -- so resolve_mode weighs every lever on the first read.
   void *policy = hipdnn_ep::gqa_autotune_create(&fs);
   REQUIRE(policy != nullptr);
-  REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
-          hipdnn_ep::GqaAutotuneMode::Lookup);
-
-  hipdnn_ep::gqa_autotune_apply_provider_mode(policy, " OnLiNe ");
-  REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
+  REQUIRE(hipdnn_ep::gqa_autotune_resolve_mode(policy, " OnLiNe ") ==
           hipdnn_ep::GqaAutotuneMode::Online);
-  // Settles on the first call, which is what lets the decode path apply on
-  // every read without re-parsing or re-logging.
-  hipdnn_ep::gqa_autotune_apply_provider_mode(policy, "lookup");
+  // Settles once, which is what lets the decode path ask on every read: a
+  // later value cannot move a session that already answered.
+  REQUIRE(hipdnn_ep::gqa_autotune_resolve_mode(policy, "lookup") ==
+          hipdnn_ep::GqaAutotuneMode::Online);
   REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
           hipdnn_ep::GqaAutotuneMode::Online);
   hipdnn_ep::gqa_autotune_destroy(policy);
 
-  // Nothing supplied settles it too, so a later value cannot take over.
+  // Nothing supplied settles it too, on the build default.
   policy = hipdnn_ep::gqa_autotune_create(&fs);
-  hipdnn_ep::gqa_autotune_apply_provider_mode(policy, nullptr);
-  hipdnn_ep::gqa_autotune_apply_provider_mode(policy, "online");
-  REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
+  REQUIRE(hipdnn_ep::gqa_autotune_resolve_mode(policy, nullptr) ==
+          hipdnn_ep::GqaAutotuneMode::Lookup);
+  REQUIRE(hipdnn_ep::gqa_autotune_resolve_mode(policy, "online") ==
+          hipdnn_ep::GqaAutotuneMode::Lookup);
+  hipdnn_ep::gqa_autotune_destroy(policy);
+
+  // An unusable value falls back to the build default rather than guessing;
+  // likewise one that is only whitespace.
+  policy = hipdnn_ep::gqa_autotune_create(&fs);
+  REQUIRE(hipdnn_ep::gqa_autotune_resolve_mode(policy, "invalid") ==
           hipdnn_ep::GqaAutotuneMode::Lookup);
   hipdnn_ep::gqa_autotune_destroy(policy);
 
   policy = hipdnn_ep::gqa_autotune_create(&fs);
-  hipdnn_ep::gqa_autotune_apply_provider_mode(policy, nullptr);
-  REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
+  REQUIRE(hipdnn_ep::gqa_autotune_resolve_mode(policy, "  ") ==
           hipdnn_ep::GqaAutotuneMode::Lookup);
   hipdnn_ep::gqa_autotune_destroy(policy);
 
-  policy = hipdnn_ep::gqa_autotune_create(&fs);
-  hipdnn_ep::gqa_autotune_apply_provider_mode(policy, "invalid");
-  REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
-          hipdnn_ep::GqaAutotuneMode::Lookup);
-  hipdnn_ep::gqa_autotune_destroy(policy);
-
-  policy = hipdnn_ep::gqa_autotune_create(&fs);
-  hipdnn_ep::gqa_autotune_apply_provider_mode(policy, "");
-  REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
-          hipdnn_ep::GqaAutotuneMode::Lookup);
-  hipdnn_ep::gqa_autotune_destroy(policy);
-
+  // The environment variable outranks the provider option.
   setModeEnv("lookup");
   policy = hipdnn_ep::gqa_autotune_create(&fs);
-  hipdnn_ep::gqa_autotune_apply_provider_mode(policy, "online");
-  REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
+  REQUIRE(hipdnn_ep::gqa_autotune_resolve_mode(policy, "online") ==
           hipdnn_ep::GqaAutotuneMode::Lookup);
   hipdnn_ep::gqa_autotune_destroy(policy);
 
-  // Even an invalid non-empty environment setting owns the highest-priority
-  // slot and preserves the historical fallback to the build default.
+  // Including when it was typed wrong: a global override that did not parse
+  // falls back to the build default instead of handing the session to a
+  // provider option the caller may not know is set.
   setModeEnv("invalid");
   policy = hipdnn_ep::gqa_autotune_create(&fs);
-  hipdnn_ep::gqa_autotune_apply_provider_mode(policy, "online");
-  REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
+  REQUIRE(hipdnn_ep::gqa_autotune_resolve_mode(policy, "online") ==
           hipdnn_ep::GqaAutotuneMode::Lookup);
   hipdnn_ep::gqa_autotune_destroy(policy);
   setModeEnv(nullptr);

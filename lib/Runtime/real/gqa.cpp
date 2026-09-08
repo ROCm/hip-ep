@@ -333,10 +333,11 @@ static int gqa_forward_fused(
     const void *head_sink = nullptr, bool use_smooth_softmax = false,
     int local_window_size = -1) {
 
-  // The provider option only reaches the state after gqa_autotune_create() has
-  // run, so it is applied here, ahead of the decode and prefill mode reads
-  // below. Settles on the first call and is a no-op afterwards.
-  hipdnn_ep::gqa_autotune_apply_provider_mode(
+  // The autotune policy is built during inference_init, before the EP forwards
+  // the session's provider options, so the mode is decided here instead --
+  // from the environment variable and the option together, ahead of the decode
+  // and prefill reads below. Settles once; later calls take the decided mode.
+  hipdnn_ep::gqa_autotune_resolve_mode(
       state->gqa_autotune_policy,
       hipdnn_ep_runtime_get_provider_option(state, "gqa_autotune_mode"));
 
