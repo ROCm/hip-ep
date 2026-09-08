@@ -939,9 +939,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          PREFIX="${{ runner.workspace }}/therock-prefix"
-          DEPS="${{ runner.workspace }}/hipruntime-deps"
-          SRC="${{ github.workspace }}/source-rocm-systems"
+          # Forward slashes throughout: hipamd runs hip_embed_pch.sh via sh -c,
+          # and a backslash path like D:\a\hip-ep loses its separators to shell
+          # escaping ("\a" becomes a bell character) before clang ever sees it.
+          PREFIX=$(cygpath -m "${{ runner.workspace }}/therock-prefix")
+          DEPS=$(cygpath -m "${{ runner.workspace }}/hipruntime-deps")
+          SRC=$(cygpath -m "${{ github.workspace }}/source-rocm-systems")
           export HIP_PATH="$PREFIX"
           export ROCM_PATH="$PREFIX"
 
