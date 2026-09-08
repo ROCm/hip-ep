@@ -2112,22 +2112,11 @@ static int gqa_forward_hipblaslt(
           sSt->layB, &beta, d_S_f32, sSt->layC, d_S_f32, sSt->layD, &sAlgo,
           gemm_ws_ptr, gemm_ws_bytes, stream));
 
-      // ---- Step 8b: Add external attention bias (onnx.Attention attn_mask) --
-      // The bias is indexed over the full query and key ranges, so the chunk's
-      // row offset and the window's key offset are passed through rather than
-      // folded into the pointer: with bias_batch or bias_heads > 1 the plane
-      // stride still spans all sq rows and all total_seq columns.
-      if (attention_bias) {
-        HIP_CHECK(hip_gqa_add_attention_bias_f32(
-            stream, d_S_f32, const_cast<void *>(attention_bias),
-            static_cast<int>(B * H), static_cast<int>(H),
-            static_cast<int>(attn_bias_batch),
-            static_cast<int>(attn_bias_num_heads), static_cast<int>(c),
-            static_cast<int>(kv_span), scoreBatchStride,
-            static_cast<int>(elem_sz), static_cast<int>(sq),
-            static_cast<int>(q0), static_cast<int>(total_seq),
-            static_cast<int>(kv_lo)));
-      }
+      // ---- Step 8b: external attention bias (onnx.Attention attn_mask) ----
+      // Folded into the softmax's own score read below rather than added by a
+      // pass of its own. hip_gqa_add_attention_bias_f32 was a full
+      // read-modify-write over this buffer -- 2.14 GB per head at a 16K prompt
+      // -- to deliver a value the softmax was about to read anyway.
 
       // ---- Step 9: Causal Mask (fp32) + Softmax (fp32 -> fp16/fp32) ----
       // S is treated as [B*H, c, kv_span] (head stride c*kv_span) by both
@@ -2167,7 +2156,31 @@ static int gqa_forward_hipblaslt(
       // fp32 Value GEMM. d_S_fp16 is the probabilities buffer either way (sized
       // by elem_sz above), so the name is fp16-specific but holds fp32 when
       // gemm_fp32.
-      if (gemm_fp32) {
+      //
+      // With a bias, the biased entry folds it in while reading the score. It
+      // takes the bias's own extents and the chunk's / window's offsets into
+      // them, for the same reason hip_gqa_add_attention_bias_f32 did: the score
+      // block is a sub-block of the logical [sq, total_seq] matrix, and with
+      // attn_bias_batch or attn_bias_num_heads > 1 a bumped pointer would
+      // mis-stride every plane after the first.
+      //
+      // Folding here applies the bias AFTER the causal triangle above, which
+      // inverts the order documented at Step 8b. That is safe only because the
+      // triangle writes -INFINITY: adding any finite bias to it leaves
+      // -INFINITY, and where the triangle wrote nothing the sum is the same
+      // either way.
+      if (attention_bias) {
+        HIP_CHECK(hip_gqa_softmax_f32_to_out_biased(
+            stream, d_S_f32, d_S_fp16, static_cast<int>(B * H * c),
+            static_cast<int>(kv_span), static_cast<int>(c), scoreBatchStride,
+            scoreBatchStride, head_sink, static_cast<int>(H),
+            static_cast<int>(use_smooth_softmax), attention_bias,
+            static_cast<int>(attn_bias_batch),
+            static_cast<int>(attn_bias_num_heads), static_cast<int>(elem_sz),
+            static_cast<int>(gemm_fp32), static_cast<int>(sq),
+            static_cast<int>(q0), static_cast<int>(total_seq),
+            static_cast<int>(kv_lo)));
+      } else if (gemm_fp32) {
         HIP_CHECK(hip_gqa_softmax_f32_to_f32(
             stream, d_S_f32, d_S_fp16, static_cast<int>(B * H * c),
             static_cast<int>(kv_span), static_cast<int>(c), scoreBatchStride,
