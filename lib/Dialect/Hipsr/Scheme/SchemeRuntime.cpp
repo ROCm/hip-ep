@@ -23,10 +23,12 @@ ptr Stop_level_value(ptr);
 ptr Sinteger(iptr);
 iptr Sinteger_value(ptr);
 ptr Sstring(const char*);
+const char* Sstring_value(ptr);
 ptr Scons(ptr, ptr);
 const char* Skernel_version();
 
 #define Snil ((ptr)0x26)
+#define Sfalse ((ptr)0x6)
 }
 
 #include "ChezBootPetite.h"
@@ -41,7 +43,6 @@ const size_t print_operation_scm_size = sizeof(print_operation_scm_data) - 1;
 
 namespace {
 static bool scheme_initialized = false;
-static ptr g_print_operation = nullptr;
 }
 
 namespace mlir {
@@ -74,10 +75,13 @@ bool initializeSchemeRuntime() {
   ptr open_string_input_port_sym = Stop_level_value(Sstring_to_symbol("open-string-input-port"));
 
   ptr port = Scall1(open_string_input_port_sym, Sstring(scm_code.c_str()));
-  ptr expr = Scall1(read_sym, port);
-  Scall1(eval_sym, expr);
 
-  g_print_operation = Stop_level_value(Sstring_to_symbol("print-operation"));
+  while (true) {
+    ptr expr = Scall1(read_sym, port);
+    if (expr == Stop_level_value(Sstring_to_symbol("eof-object")))
+      break;
+    Scall1(eval_sym, expr);
+  }
 
   llvm::errs() << "Chez Scheme runtime initialized successfully!\n\n";
 
@@ -85,17 +89,38 @@ bool initializeSchemeRuntime() {
   return true;
 }
 
-void printOperation(const char* opName, int numOperands, int numResults, const char* genericForm) {
-  if (!scheme_initialized || !g_print_operation)
-    return;
+std::string callSchemeFunction(const char* functionName,
+                                const std::vector<ptr>& args) {
+  if (!scheme_initialized)
+    return "";
 
-  ptr args_list = Scons(Sstring(opName),
-                  Scons(Sinteger(numOperands),
-                  Scons(Sinteger(numResults),
-                  Scons(Sstring(genericForm), Snil))));
+  ptr func = Stop_level_value(Sstring_to_symbol(functionName));
+  if (func == Sfalse)
+    return "";
+
+  ptr args_list = Snil;
+  for (auto it = args.rbegin(); it != args.rend(); ++it) {
+    args_list = Scons(*it, args_list);
+  }
 
   ptr apply_proc = Stop_level_value(Sstring_to_symbol("apply"));
-  Scall2(apply_proc, g_print_operation, args_list);
+  ptr result = Scall2(apply_proc, func, args_list);
+
+  ptr string_p = Stop_level_value(Sstring_to_symbol("string?"));
+  if (Scall1(string_p, result) != Sfalse) {
+    const char* Sstring_value(ptr);
+    return std::string(Sstring_value(result));
+  }
+
+  return "";
+}
+
+ptr makeSchemeString(const char* str) {
+  return Sstring(str);
+}
+
+ptr makeSchemeInteger(long value) {
+  return Sinteger(value);
 }
 
 } // namespace hipsr

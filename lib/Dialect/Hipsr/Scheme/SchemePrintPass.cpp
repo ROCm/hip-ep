@@ -3,20 +3,18 @@
  * Licensed under the MIT License.
  */
 
+#include "SchemeRuntime.h"
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/Support/raw_ostream.h"
 #include <string>
 
-namespace mlir {
-namespace hipsr {
-
-bool initializeSchemeRuntime();
-void printOperation(const char* opName, int numOperands, int numResults, const char* genericForm);
-
 #define GEN_PASS_DEF_SCHEMEPRINTPASS
 #include "hip/Dialect/Hipsr/Transforms/Passes.h.inc"
+
+namespace mlir {
+namespace hipsr {
 
 namespace {
 
@@ -40,12 +38,17 @@ struct SchemePrintPass : public impl::SchemePrintPassBase<SchemePrintPass> {
       op->print(os, OpPrintingFlags().printGenericOpForm());
       os.flush();
 
-      printOperation(
-        op->getName().getStringRef().str().c_str(),
-        op->getNumOperands(),
-        op->getNumResults(),
-        genericFormStr.c_str()
-      );
+      std::vector<ptr> args = {
+        makeSchemeString(op->getName().getStringRef().str().c_str()),
+        makeSchemeInteger(op->getNumOperands()),
+        makeSchemeInteger(op->getNumResults()),
+        makeSchemeString(genericFormStr.c_str())
+      };
+
+      std::string result = callSchemeFunction("format-operation", args);
+      if (!result.empty()) {
+        llvm::errs() << result;
+      }
     });
 
     llvm::errs() << "=== End Scheme Printer ===\n\n";
