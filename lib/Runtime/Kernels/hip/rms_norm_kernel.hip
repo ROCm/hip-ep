@@ -7,9 +7,12 @@
  *
  *   y = x * rsqrt(mean(x^2) + epsilon) * scale
  *
- * Layout: input is reshaped as `[outer, norm_size]` on the host
- *         (outer = input_num_elements / scale_num_elements,
- *          norm_size = scale_num_elements).
+ * Layout: input is reshaped as `[outer, norm_size]` on the host, where
+ *         norm_size is the ONNX reduction width (the product of the input
+ *         dims from `axis` on) and outer = input_num_elements / norm_size.
+ *         `scale` holds `scale_rows` gain vectors of that width; row r uses
+ *         group r % scale_rows. scale_rows == 1 is the ordinary case where
+ *         every row shares one gain vector.
  *
  * Algorithm: one block per row, two passes with a shared-memory block
  * reduction.
@@ -64,13 +67,18 @@ template <typename T, bool VEC2>
 __global__ void hip_rms_norm_kernel(const T *__restrict__ input,
                                     const T *__restrict__ scale,
                                     T *__restrict__ output, int64_t outer,
-                                    int64_t norm_size, float epsilon) {
+                                    int64_t norm_size, int64_t scale_rows,
+                                    float epsilon) {
   int64_t row = blockIdx.x;
   if (row >= outer)
     return;
 
   const T *x_row = input + row * norm_size;
   T *y_row = output + row * norm_size;
+  // A scale that spans several rows (grouped norm: scale [G, D] against input
+  // [N, G, D] with axis = -1) tiles over the row index, and row-major order
+  // makes the group the fastest-varying leading dim -- hence r % scale_rows.
+  const T *g_row = scale + (row % scale_rows) * norm_size;
 
   __shared__ float s_reduce[kRmsNormBlockSize];
   __shared__ float s_inv_rms;
@@ -101,7 +109,7 @@ __global__ void hip_rms_norm_kernel(const T *__restrict__ input,
   if constexpr (VEC2) {
     const int64_t norm_size2 = norm_size / 2;
     const __half2 *x2 = reinterpret_cast<const __half2 *>(x_row);
-    const __half2 *g2 = reinterpret_cast<const __half2 *>(scale);
+    const __half2 *g2 = reinterpret_cast<const __half2 *>(g_row);
     __half2 *y2 = reinterpret_cast<__half2 *>(y_row);
     for (int64_t i = threadIdx.x; i < norm_size2; i += blockDim.x) {
       float2 v = __half22float2(x2[i]);
@@ -114,7 +122,7 @@ __global__ void hip_rms_norm_kernel(const T *__restrict__ input,
   } else {
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
       float v = rms_load(x_row + i);
-      float g = rms_load(scale + i);
+      float g = rms_load(g_row + i);
       rms_store(y_row + i, v * inv_rms * g);
     }
   }
@@ -136,9 +144,14 @@ inline bool rms_can_vectorize(const void *input, const void *scale,
 
 extern "C" int hip_rms_norm(void *stream, const void *input, const void *scale,
                             void *output, int64_t outer, int64_t norm_size,
-                            float epsilon, int hip_dtype) {
+                            int64_t scale_rows, float epsilon, int hip_dtype) {
   if (outer <= 0 || norm_size <= 0)
     return 0;
+  if (scale_rows <= 0) {
+    fprintf(stderr, "[custom_kernels] hip_rms_norm: scale_rows=%lld\n",
+            (long long)scale_rows);
+    return -1;
+  }
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
   dim3 grid(static_cast<unsigned int>(outer));
@@ -156,9 +169,9 @@ extern "C" int hip_rms_norm(void *stream, const void *input, const void *scale,
 
   CUSTOM_KERNELS_DEBUG_LOG(
       "[custom_kernels] hip_rms_norm: dtype=%d, outer=%lld, norm_size=%lld, "
-      "epsilon=%f, vec2=%s\n",
-      hip_dtype, (long long)outer, (long long)norm_size, epsilon,
-      vec2 ? "yes" : "no");
+      "scale_rows=%lld, epsilon=%f, vec2=%s\n",
+      hip_dtype, (long long)outer, (long long)norm_size, (long long)scale_rows,
+      epsilon, vec2 ? "yes" : "no");
 
   if (hip_dtype == HIP_DTYPE_FLOAT16) {
     if (vec2) {
@@ -167,20 +180,21 @@ extern "C" int hip_rms_norm(void *stream, const void *input, const void *scale,
                          static_cast<const __half *>(input),
                          static_cast<const __half *>(scale),
                          static_cast<__half *>(output), outer, norm_size,
-                         epsilon);
+                         scale_rows, epsilon);
     } else {
       hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_rms_norm_kernel<__half, false>),
                          grid, block, 0, hip_stream,
                          static_cast<const __half *>(input),
                          static_cast<const __half *>(scale),
                          static_cast<__half *>(output), outer, norm_size,
-                         epsilon);
+                         scale_rows, epsilon);
     }
   } else if (hip_dtype == HIP_DTYPE_FLOAT32) {
     hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_rms_norm_kernel<float, false>), grid,
                        block, 0, hip_stream, static_cast<const float *>(input),
                        static_cast<const float *>(scale),
-                       static_cast<float *>(output), outer, norm_size, epsilon);
+                       static_cast<float *>(output), outer, norm_size,
+                       scale_rows, epsilon);
   } else {
     fprintf(stderr, "[custom_kernels] hip_rms_norm: unsupported dtype=%d\n",
             hip_dtype);

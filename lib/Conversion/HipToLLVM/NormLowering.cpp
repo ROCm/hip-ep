@@ -33,11 +33,15 @@ inline Value getNullableMemRefPtr(Value memref,
 
 // hip.rms_norm(%ctx) ins(%input, %scale) outs(%output)
 //   -> wrap_rms_norm(state, input, scale, output,
-//        input_num_elements, scale_num_elements, element_size_bytes,
-//        axis, epsilon, stash_type)
-// Rank-generic: the runtime derives the row count from
-// input_num_elements / scale_num_elements, so a 3D [B,S,D] input normalizes
-// B*S rows of width D.
+//        input_num_elements, scale_num_elements, norm_num_elements,
+//        element_size_bytes, axis, epsilon, stash_type)
+// Rank-generic. norm_num_elements is the ONNX reduction width -- the product
+// of the input dims from `axis` on -- so a 3D [B,S,D] input with axis = -1
+// normalizes B*S rows of width D. It has to be computed here, the only place
+// that sees both the attribute and the input shape. Taking it from
+// scale_num_elements instead is wrong for any norm whose scale spans more than
+// the reduced axes, such as a grouped scale [G,D] against an [N,G,D] input:
+// that reduces over G*D rather than D.
 struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -68,6 +72,21 @@ struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
     Value scaleNumElements =
         computeNumElements(scaleType, adaptor.getScale(), rewriter, loc);
 
+    // Reduction width = product of the input dims from `axis` on.
+    int64_t rank = inputType.getRank();
+    int64_t normAxis = op.getAxis();
+    if (normAxis < 0)
+      normAxis += rank;
+    if (normAxis < 0 || normAxis >= rank)
+      return rewriter.notifyMatchFailure(op, "rms_norm.axis_out_of_range");
+    Value normNumElements = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(1));
+    for (int64_t dimIdx = normAxis; dimIdx < rank; ++dimIdx)
+      normNumElements = LLVM::MulOp::create(
+          rewriter, loc, normNumElements,
+          getMemRefDimSize(inputType, static_cast<unsigned>(dimIdx),
+                           adaptor.getInput(), rewriter, loc));
+
     // Compute element_size_bytes based on element type
     Type elementType = inputType.getElementType();
     unsigned elementSizeBytes = elementType.getIntOrFloatBitWidth() / 8;
@@ -82,12 +101,12 @@ struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
     Value stashTypeVal = LLVM::ConstantOp::create(
         rewriter, loc, i64Type, rewriter.getI64IntegerAttr(op.getStashType()));
 
-    // Runtime function signature (10 params)
+    // Runtime function signature (11 params)
     SmallVector<Type> paramTypes = {
         ptrType,                   // state
         ptrType, ptrType, ptrType, // input, scale, output
-        i64Type, i64Type, i64Type, // input_num_elements, scale_num_elements,
-                                   // element_size_bytes
+        i64Type, i64Type,          // input_num_elements, scale_num_elements
+        i64Type, i64Type,          // norm_num_elements, element_size_bytes
         i64Type, f32Type, i64Type  // axis, epsilon, stash_type
     };
 
@@ -96,15 +115,11 @@ struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {statePtr,
-                               inputPtr,
-                               scalePtr,
-                               outputPtr,
-                               inputNumElements,
-                               scaleNumElements,
-                               elementSizeBytesVal,
-                               axisVal,
-                               epsilonVal,
+    SmallVector<Value> args = {statePtr,         inputPtr,
+                               scalePtr,         outputPtr,
+                               inputNumElements, scaleNumElements,
+                               normNumElements,  elementSizeBytesVal,
+                               axisVal,          epsilonVal,
                                stashTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
