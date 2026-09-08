@@ -7,6 +7,7 @@
 #include <mlir/IR/BuiltinOps.h>
 #include <mlir/IR/IRMapping.h>
 #include <mlir/IR/PatternMatch.h>
+#include <mlir/Interfaces/DestinationStyleOpInterface.h>
 #include <mlir/Support/LLVM.h>
 #include <mlir/Transforms/GreedyPatternRewriteDriver.h>
 
@@ -18,77 +19,80 @@ namespace mlir::hip {
 
 namespace {
 
-class FuseGemmPointwise : public OpRewritePattern<GemmOp> {
+template <typename AnchorOp>
+class FuseAnchorPointwise : public OpRewritePattern<AnchorOp> {
 public:
-  using OpRewritePattern<GemmOp>::OpRewritePattern;
+  FuseAnchorPointwise(MLIRContext *context, int *counter,
+                      PatternBenefit benefit = 1)
+      : OpRewritePattern<AnchorOp>(context, benefit), counter(counter) {}
 
-  LogicalResult matchAndRewrite(GemmOp op,
+  LogicalResult matchAndRewrite(AnchorOp anchorOp,
                                 PatternRewriter &rewriter) const override {
-    return rewriter.notifyMatchFailure(op, "no-op");
-  }
-};
+    DestinationStyleOpInterface endOp = anchorOp;
+    Operation *prevOp = nullptr;
+    SetVector<Value> operands;
+    SetVector<Operation *> ops;
 
-class FuseConvPointwise : public OpRewritePattern<ConvOp> {
-public:
-  using OpRewritePattern<ConvOp>::OpRewritePattern;
+    do {
+      if (prevOp) {
+        endOp = dyn_cast<DestinationStyleOpInterface>(*prevOp->user_begin());
+      }
+      auto newOperands = endOp.getDpsInputs();
+      if (prevOp) {
+        newOperands.erase(newOperands.begin() +
+                          prevOp->use_begin()->getOperandNumber());
+      }
+      operands.insert_range(newOperands);
+      for (auto init : endOp.getDpsInits()) {
+        ops.insert(init.getDefiningOp());
+      }
+      ops.insert(endOp);
+      prevOp = endOp;
+    } while (endOp->hasOneUse() && isaPointwiseOp(*endOp->user_begin()));
 
-  LogicalResult matchAndRewrite(ConvOp op,
-                                PatternRewriter &rewriter) const override {
-    if (!op->hasOneUse())
-      return rewriter.notifyMatchFailure(op, "multi-use");
+    auto parentModule = anchorOp->template getParentOfType<ModuleOp>();
+    func::FuncOp newFunc;
+    {
+      PatternRewriter::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(parentModule.getBody());
+      auto funcType = rewriter.getFunctionType(
+          llvm::map_to_vector(operands, [](Value v) { return v.getType(); }),
+          endOp->getResultTypes());
 
-    if (auto maxOp = dyn_cast_if_present<MaxOp>(*op->user_begin())) {
-      // Create a new function
-      auto parentModule = op->getParentOfType<ModuleOp>();
-      func::FuncOp newFunc;
-      {
-        PatternRewriter::InsertionGuard guard(rewriter);
-        rewriter.setInsertionPointToStart(parentModule.getBody());
-        auto funcType = rewriter.getFunctionType(
-            llvm::map_to_vector(op.getDpsInputs(),
-                                [](Value v) { return v.getType(); }),
-            maxOp->getResultTypes());
-        newFunc = func::FuncOp::create(rewriter, rewriter.getUnknownLoc(),
-                                       "convRelu" + std::to_string(counter++),
-                                       funcType);
-        auto *funcBlock = newFunc.addEntryBlock();
-        IRMapping mapping;
-        for (auto [idx, operand] : llvm::enumerate(op.getDpsInputs())) {
-          mapping.map(operand, funcBlock->getArgument(idx));
-        }
-
-        // Clone Conv op
-        rewriter.setInsertionPointToStart(&newFunc.getRegion().front());
-        for (auto init : op.getDpsInits()) {
-          rewriter.clone(*init.getDefiningOp(), mapping);
-        }
-        rewriter.clone(*op, mapping);
-
-        // Clone Max op
-        for (auto init : maxOp.getDpsInits()) {
-          rewriter.clone(*init.getDefiningOp(), mapping);
-        }
-        auto maxSecondOperand =
-            rewriter.clone(*maxOp->getOperand(2).getDefiningOp(), mapping);
-        if (auto maxConstOp =
-                dyn_cast_if_present<ConstantOp>(maxSecondOperand)) {
-          maxConstOp->removeAttr("serialization_order");
-        }
-        rewriter.clone(*maxOp, mapping);
-        func::ReturnOp::create(rewriter, rewriter.getUnknownLoc(),
-                               mapping.lookup(maxOp->getResult(0)));
+      newFunc = func::FuncOp::create(rewriter, rewriter.getUnknownLoc(),
+                                     "rocMlir" + std::to_string((*counter)++),
+                                     funcType);
+      auto *funcBlock = newFunc.addEntryBlock();
+      IRMapping mapping;
+      for (auto [idx, operand] : llvm::enumerate(operands)) {
+        mapping.map(operand, funcBlock->getArgument(idx));
       }
 
-      auto callOp = func::CallOp::create(rewriter, rewriter.getUnknownLoc(),
-                                         newFunc, op.getDpsInputs());
-      rewriter.replaceOp(maxOp, callOp);
-      return success();
+      rewriter.setInsertionPointToStart(&newFunc.getRegion().front());
+      for (auto *op : ops) {
+        rewriter.clone(*op, mapping);
+      }
+      auto returns =
+          llvm::map_to_vector(endOp->getResults(), [&mapping](Value v) {
+            return mapping.lookup(v);
+          });
+      func::ReturnOp::create(rewriter, rewriter.getUnknownLoc(), returns);
     }
-    return rewriter.notifyMatchFailure(op, "failure");
+
+    rewriter.setInsertionPointAfter(endOp);
+    auto callOp = func::CallOp::create(
+        rewriter, rewriter.getUnknownLoc(), newFunc,
+        SmallVector<Value>(operands.begin(), operands.end()));
+    rewriter.replaceOp(endOp, callOp);
+    return success();
+  }
+
+  bool isaPointwiseOp(Operation *op) const {
+    return isa_and_present<AddOp, MaxOp>(op);
   }
 
 private:
-  static inline int counter = 0;
+  int *counter = nullptr;
 };
 
 class FuseROCMlirPass : public impl::FuseROCMlirPassBase<FuseROCMlirPass> {
@@ -100,11 +104,16 @@ public:
 
     MLIRContext *ctx = &getContext();
     RewritePatternSet patterns(ctx);
-    patterns.add<FuseGemmPointwise, FuseConvPointwise>(ctx);
+    int counter = 0;
+    patterns.add<FuseAnchorPointwise<ConvOp>, FuseAnchorPointwise<GemmOp>>(
+        ctx, &counter);
 
     if (failed(applyPatternsGreedily(funcOp, std::move(patterns))))
       signalPassFailure();
   }
+
+private:
+  int counter = 0;
 };
 
 } // namespace
