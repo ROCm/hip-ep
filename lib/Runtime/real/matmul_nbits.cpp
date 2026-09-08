@@ -585,6 +585,12 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
     // for bits=4, 4-per-byte for bits=2, and a continuous per-row 3-bit
     // stream for bits=3. Unpack to one-byte-per-group so the kernel's
     // GEMV/naive/WMMA paths can index zp[n*ngk + grp] directly.
+    //
+    // bits=2 with FP16 zero_points (zp_elem_size==2, e.g. AMD Quark 2-bit with
+    // a fractional zero-point of 1.5) is not unpacked here: the FP16 buffer is
+    // already one value per group [N, ngk] and is passed straight through to
+    // the u2 kernels, which read it as fp16 (rounding to uint8 would corrupt a
+    // fractional zero-point).
     pre_zp_u8 =
         (bits == 2)
             ? hipdnn_ep_real::lookup_or_unpack_zp_u8_2bit(
