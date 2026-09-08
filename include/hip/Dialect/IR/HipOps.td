@@ -4918,8 +4918,11 @@ def Hip_QMatMulOp : Hip_DpsOp<"qmatmul", /*traits=*/[],
       A: [..., M, K], B: [..., K, N], Y: [broadcast(A.batch, B.batch), M, N].
 
     Quantization is per-tensor, so every scale and zero point is an attribute.
-    A, B and Y each carry their own 8-bit element type: real QDQ graphs
+    A, B and Y each carry their own quantized element type: real QDQ graphs
     commonly pair a `ui8` asymmetric activation with an `i8` symmetric weight.
+    A and Y may be 8- or 16-bit, which is what makes A16W8 expressible; B is
+    8-bit only, because the lowering's kernel keeps a 16-bit A exact by
+    splitting it into two bytes and that split needs an 8-bit other operand.
 
     Example:
     ```mlir
