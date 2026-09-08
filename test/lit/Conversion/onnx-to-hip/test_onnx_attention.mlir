@@ -22,7 +22,8 @@
 // dim(past_key, 2) alone -> zero-length present buffer -> null present_key ->
 // zeroed attention output), the Gemma-4-E2B decoder self-attn (is_causal=1 +
 // fp16 mask + past KV + 3 outputs -- previously rejected), a single-output
-// causal case, a bidirectional no-mask case, a rank-4 BNSH case, and the
+// causal case, a bidirectional no-mask case, a rank-4 BNSH case, a
+// KV-cache-sharing decoder layer (K/V seq longer than the query's), and the
 // window-recovery cases: windowed layer, global layer, unrecognized OR leg,
 // the segment leg stripped of its CumSum provenance, the window leg's indices
 // stripped of their shared position source, and the window leg's indices drawn
@@ -299,6 +300,57 @@ module {
     // CHECK-NOT: onnx.Attention
 
     return %y : tensor<1x16x8x64xf16>
+  }
+}
+
+// -----
+
+// KV-cache-sharing decoder layer (Gemma-4-E2B layers 15..34): the layers past
+// the sharing point have NO past_key/past_value and NO present outputs -- they
+// re-read an earlier layer's COMPLETE present.* cache, so K/V arrive at full
+// history length while the query is a single decode token. is_causal=0 with the
+// external mask carrying causality.
+//
+// The KV extent must come from K (dim 1), not the query: sizing present from the
+// query collapsed it to 1 token, so the runtime saw total_seq (the full history,
+// from seqlens_k) exceed present_seq and rejected the call outright
+// ("invalid seqlens_k[0]+1=N ... present_seq=1"), zeroing the layer's output.
+module {
+  func.func @main_graph(
+      %query: tensor<1x1x2048xf16>,
+      %key: tensor<1x?x256xf16>,
+      %value: tensor<1x?x256xf16>,
+      %attn_mask: tensor<1x1x1x?xf16>)
+      -> tensor<1x1x2048xf16> {
+
+    // CHECK-LABEL: func.func @main_graph
+    // CHECK-SAME: (%[[CTX6:.*]]: !hip.context,
+
+    %y = "onnx.Attention"(%query, %key, %value, %attn_mask)
+        {q_num_heads = 8 : si64,
+         kv_num_heads = 1 : si64,
+         is_causal = 0 : si64,
+         scale = 1.000000e+00 : f32,
+         softcap = 0.000000e+00 : f32}
+        : (tensor<1x1x2048xf16>, tensor<1x?x256xf16>, tensor<1x?x256xf16>,
+           tensor<1x1x1x?xf16>)
+        -> tensor<1x1x2048xf16>
+
+    // The synthesized present buffers are sized from K's seq extent (dynamic),
+    // NOT the query's static 1. past is the 0 constant (no past operand), so
+    // the total is 0 + dim(K, 1) and seqlens_k = total - 1.
+    // CHECK: %[[KVLEN:.*]] = tensor.dim %{{.*}}, %c1 : tensor<1x?x256xf16>
+    // CHECK: %[[TOT:.*]] = arith.addi %c0, %[[KVLEN]]
+    // CHECK: arith.subi %[[TOT]], %c1
+    // CHECK: tensor.from_elements %{{.*}} : tensor<1xi32>
+    // CHECK: tensor.empty(%[[TOT]]) : tensor<1x1x?x256xf16>
+    // CHECK: hip.gqa(%[[CTX6]])
+    // Mask is threaded as attention_bias; no past_key/past_value operands.
+    // CHECK-SAME: ins({{.*}}tensor<1x1x1x?xf16>) outs
+    // CHECK-SAME: {kv_num_heads = 1 : i64, no_causal = true, num_heads = 8 : i64
+    // CHECK-NOT: onnx.Attention
+
+    return %y : tensor<1x1x2048xf16>
   }
 }
 
