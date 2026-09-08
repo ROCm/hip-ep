@@ -1,9 +1,12 @@
+#include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include <mlir/Dialect/Func/IR/FuncOps.h>
+#include <mlir/Dialect/Tosa/IR/TosaOps.h>
 #include <mlir/IR/MLIRContext.h>
 #include <mlir/IR/PatternMatch.h>
 #include <mlir/Pass/Pass.h>
+#include <mlir/Transforms/DialectConversion.h>
 #include <mlir/Transforms/GreedyPatternRewriteDriver.h>
 
 namespace mlir::hip {
@@ -20,8 +23,14 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
       return;
 
     MLIRContext *ctx = &getContext();
+
+    ConversionTarget conversion(*ctx);
+    conversion.addIllegalDialect<HipDialect>();
+    conversion.addLegalDialect<tosa::TosaDialect>();
+
     RewritePatternSet patterns(ctx);
-    if (failed(applyPatternsGreedily(funcOp, std::move(patterns))))
+
+    if (failed(applyFullConversion(funcOp, conversion, std::move(patterns))))
       signalPassFailure();
   }
 };
