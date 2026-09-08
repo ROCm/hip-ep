@@ -910,12 +910,32 @@ jobs:
           fetch-depth: 1
           show-progress: false
 
+      # shared/kpack does find_package(msgpack-cxx REQUIRED) and
+      # find_package(zstd REQUIRED). Flags copied from AMD's build -- the
+      # static-CRT and static-lib settings have to match the consumer.
+      - name: Install zstd and msgpack via cget
+        if: steps.cache-hip.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -q cget
+          DEPS="${{ runner.workspace }}/hipruntime-deps"
+          cget install facebook/zstd@v1.5.7 -X subdir -DCMAKE_DIR=build/cmake \
+            -DZSTD_USE_STATIC_RUNTIME=On -DBUILD_TESTING=Off -DZSTD_BUILD_TESTS=Off \
+            -DZSTD_BUILD_STATIC=On -DZSTD_BUILD_SHARED=Off -DBUILD_SHARED_LIBS=Off \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 --build-type Release --insecure -G Ninja -p "$DEPS"
+          cget install msgpack/msgpack-c@cpp-7.0.0 \
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DMSGPACK_CXX17=ON \
+            -DMSGPACK_BUILD_TESTS=Off -DMSGPACK_BUILD_DOCS=OFF -DMSGPACK_USE_BOOST=OFF \
+            -DBUILD_SHARED_LIBS=OFF --build-type Release --insecure -G Ninja -p "$DEPS"
+
       - name: Build rocm-kpack and hipRuntime
         if: steps.cache-hip.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
           PREFIX="${{ runner.workspace }}/therock-prefix"
+          DEPS="${{ runner.workspace }}/hipruntime-deps"
           SRC="${{ github.workspace }}/source-rocm-systems"
           export HIP_PATH="$PREFIX"
           export ROCM_PATH="$PREFIX"
@@ -925,10 +945,11 @@ jobs:
             cmake -S "$SRC/$sub" -B "${{ runner.workspace }}/build-$name" -G Ninja \
               -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-              -DCMAKE_PREFIX_PATH="$PREFIX" \
+              -DCMAKE_PREFIX_PATH="$PREFIX;$DEPS" \
               -DROCM_PATH="$PREFIX" \
               -DHIP_PATH="$PREFIX" \
               -DGPU_TARGETS="${{ env.THEROCK_GPU_TARGETS }}" \
+              -DBUILD_TESTING=OFF \
               -DCMAKE_C_COMPILER_LAUNCHER=sccache \
               -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
             cmake --build "${{ runner.workspace }}/build-$name" --target install
@@ -1056,13 +1077,13 @@ jobs:
           DEPS="${{ runner.workspace }}/hipblaslt-deps"
           # Versions and flags copied from AMD's build; the static-CRT setting
           # has to match hipBLASLt itself or the link fails.
-          cget -p "$DEPS" install madler/zlib@v1.3.1 \
+          cget install madler/zlib@v1.3.1 \
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DZLIB_BUILD_EXAMPLES=Off \
-            --build-type Release --insecure -G Ninja
-          cget -p "$DEPS" install msgpack/msgpack-c@cpp-7.0.0 \
+            --build-type Release --insecure -G Ninja -p "$DEPS"
+          cget install msgpack/msgpack-c@cpp-7.0.0 \
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DMSGPACK_CXX17=ON \
-            -DMSGPACK_BUILD_TESTS=Off -DMSGPACK_BUILD_DOCS=Off \
-            --build-type Release --insecure -G Ninja
+            -DMSGPACK_BUILD_TESTS=Off -DMSGPACK_BUILD_DOCS=OFF -DMSGPACK_USE_BOOST=OFF \
+            -DBUILD_SHARED_LIBS=OFF --build-type Release --insecure -G Ninja -p "$DEPS"
 
       - name: Build hipBLAS-Common and hipBLASLt
         if: steps.cache-dist.outputs.cache-hit != 'true'
