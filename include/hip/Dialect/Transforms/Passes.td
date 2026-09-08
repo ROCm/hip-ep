@@ -181,6 +181,9 @@ def FuseROCMlirPass : Pass<"hip-fuse-rocmlir", "mlir::func::FuncOp"> {
 }
 
 def ConvertHipToTosaPass : Pass<"convert-hip-to-tosa", "mlir::func::FuncOp"> {
+  let dependentDialects = [
+    "mlir::tosa::TosaDialect"
+  ];
 }
 
 def PromoteStridedHipOperandsPass
