@@ -28,7 +28,7 @@ permissions:
 
 env:
   LLVM_TAG: llvmorg-22.1.0
-  ONNXRUNTIME_VERSION: "1.27.0"
+  ONNXRUNTIME_VERSION: "1.29.0"
   ONNXRUNTIME_PR_PATCHES: ""
   # Fork branch carrying AMDGPU MorphiZen integration (former PR 2194) plus
   # sliding_window support.
@@ -254,7 +254,7 @@ jobs:
           cp "$DML_DLL" "${{ runner.workspace }}/ort-install/bin/"
           # Cache the cp314 ORT Python wheel inside ort-install so it
           # rides the same cache key as the rest of the ORT artifacts.
-          # Output path: build-onnxruntime/Release/dist/onnxruntime_directml-1.27.0-cp314-cp314-win_amd64.whl
+          # Output path: build-onnxruntime/Release/dist/onnxruntime_directml-1.29.0-cp314-cp314-win_amd64.whl
           ORT_WHEEL=$(find "${{ runner.workspace }}/build-onnxruntime" \
             -name "onnxruntime_directml-*.whl" -type f | head -1)
           if [ -z "$ORT_WHEEL" ]; then
