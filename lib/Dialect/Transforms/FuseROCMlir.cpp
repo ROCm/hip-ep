@@ -1,9 +1,10 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include <llvm/ADT/SmallVectorExtras.h>
 #include <llvm/Support/Debug.h>
+#include <mlir/Dialect/Func/IR/FuncOps.h>
+#include <mlir/Dialect/UB/IR/UBOps.h>
 #include <mlir/IR/BuiltinOps.h>
 #include <mlir/IR/IRMapping.h>
 #include <mlir/IR/PatternMatch.h>
@@ -33,6 +34,7 @@ public:
     SetVector<Value> operands;
     SetVector<Operation *> ops;
 
+    // Match all pointwise-ops
     do {
       if (prevOp) {
         endOp = dyn_cast<DestinationStyleOpInterface>(*prevOp->user_begin());
@@ -50,6 +52,14 @@ public:
       prevOp = endOp;
     } while (endOp->hasOneUse() && isaPointwiseOp(*endOp->user_begin()));
 
+    // Remove the hip.context operand
+    auto context = operands.front();
+    if (!isa<mlir::hip::ContextType>(context.getType())) {
+      return rewriter.notifyMatchFailure(anchorOp,
+                                         "first operand not hip.context");
+    }
+    operands.erase(operands.begin());
+
     auto parentModule = anchorOp->template getParentOfType<ModuleOp>();
     func::FuncOp newFunc;
     {
@@ -63,12 +73,19 @@ public:
                                      "rocMlir" + std::to_string((*counter)++),
                                      funcType);
       auto *funcBlock = newFunc.addEntryBlock();
+      rewriter.setInsertionPointToStart(funcBlock);
       IRMapping mapping;
+
+      // Map the hip.context to ub.poison
+      mapping.map(context,
+                  ub::PoisonOp::create(rewriter, rewriter.getUnknownLoc(),
+                                       context.getType()));
+
+      // Map other operands
       for (auto [idx, operand] : llvm::enumerate(operands)) {
         mapping.map(operand, funcBlock->getArgument(idx));
       }
 
-      rewriter.setInsertionPointToStart(&newFunc.getRegion().front());
       for (auto *op : ops) {
         rewriter.clone(*op, mapping);
       }
