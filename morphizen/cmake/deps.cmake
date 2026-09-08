@@ -238,6 +238,15 @@ FetchContent_MakeAvailable(hash-library)
 if(morphizen_ENABLE_MLIR_BACKEND)
   message(STATUS "Configuring LLVM/MLIR for MorphiZen")
 
+  # hip-ep already resolved LLVM/MLIR (possibly as a FetchContent sub-build
+  # with no package config). Do not find_package a different LLVM from
+  # CMAKE_PREFIX_PATH (TheRock / LLVM 22) or FetchContent a second copy.
+  if(HIPDNN_LLVM_EMBEDDED)
+    message(STATUS
+      "Using parent hip-ep embedded LLVM/MLIR; skipping MorphiZen LLVM lookup")
+    set(MORPHIZEN_LLVM_PREINSTALLED OFF CACHE BOOL "Using FetchContent LLVM" FORCE)
+  else()
+
   # LLVM configuration options (applied when building from source)
   set(LLVM_ENABLE_PROJECTS "mlir" CACHE STRING "LLVM projects to build")
   set(LLVM_TARGETS_TO_BUILD "host" CACHE STRING "LLVM targets to build")
@@ -258,6 +267,12 @@ if(morphizen_ENABLE_MLIR_BACKEND)
   if(MLIR_FOUND)
     # MLIR found, now find LLVM (which must exist if MLIR exists)
     find_package(LLVM REQUIRED CONFIG)
+    if(DEFINED _HIPDNN_LLVM_REQUIRED_MAJOR AND
+       NOT LLVM_VERSION_MAJOR EQUAL _HIPDNN_LLVM_REQUIRED_MAJOR)
+      message(FATAL_ERROR
+        "MorphiZen found LLVM ${LLVM_PACKAGE_VERSION} at ${LLVM_DIR}, "
+        "but hip-ep requires LLVM ${_HIPDNN_LLVM_REQUIRED_MAJOR}")
+    endif()
     message(STATUS "Found pre-installed LLVM and MLIR")
     message(STATUS "LLVM_DIR: ${LLVM_DIR}")
     message(STATUS "MLIR_DIR: ${MLIR_DIR}")
@@ -337,4 +352,5 @@ if(morphizen_ENABLE_MLIR_BACKEND)
   endif()
 
   message(STATUS "LLVM/MLIR configuration complete")
+  endif()
 endif()

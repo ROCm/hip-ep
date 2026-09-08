@@ -159,7 +159,8 @@ add_subdirectory(tools/hip-onnx-runner)
 # (included above): find_package against a prefix, or a from-source FetchContent
 # build that sets the LLVM_*/MLIR_* consumer variables and helper functions
 # directly. The block below only consumes what deps.cmake already populated.
-message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
+# deps.cmake rejects any LLVM whose major is not the deps.txt pin (LLVM 23).
+message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION} (required major ${_HIPDNN_LLVM_REQUIRED_MAJOR})")
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 message(STATUS "Using MLIRConfig.cmake in: ${MLIR_DIR}")
 message(STATUS "Using FlatBuffers version: ${flatbuffers_VERSION}")

@@ -18,10 +18,15 @@ OperandRange ComputeOp::getEntrySuccessorOperands(RegionSuccessor successor) {
   return getOperands();
 }
 
+ValueRange ComputeOp::getSuccessorInputs(RegionSuccessor successor) {
+  return successor.isOperation() ? ValueRange(getResults())
+                                 : ValueRange(getBody().getArguments());
+}
+
 void ComputeOp::getSuccessorRegions(RegionBranchPoint point,
                                     SmallVectorImpl<RegionSuccessor> &regions) {
   if (point.isParent()) {
-    regions.emplace_back(&getBody(), getBody().getArguments());
+    regions.emplace_back(&getBody());
     return;
   }
 
@@ -30,7 +35,7 @@ void ComputeOp::getSuccessorRegions(RegionBranchPoint point,
     llvm::report_fatal_error(
         "hipsr.compute received an unexpected branch point");
   }
-  regions.emplace_back(getOperation(), getResults());
+  regions.emplace_back(getOperation());
 }
 
 LogicalResult ComputeOp::verify() {
