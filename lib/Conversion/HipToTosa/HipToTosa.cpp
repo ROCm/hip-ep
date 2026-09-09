@@ -122,8 +122,7 @@ struct MatMulConverter final : public OpConversionPattern<hip::MatmulOp> {
         tosa::MatMulOp::create(rewriter, op.getLoc(), matmulType, a, b)
             .getResult();
 
-    rewriter.replaceOp(
-        op, reshapeTo(matmul, resultType.getShape(), rewriter));
+    rewriter.replaceOp(op, reshapeTo(matmul, resultType.getShape(), rewriter));
     return success();
   }
 };
