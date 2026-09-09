@@ -35,8 +35,7 @@ table, or when the table is rejected as incompatible.
 | `matmul_nbits_autotune.h` | lookup API (no flatbuffers in the header, so the kernel .hip can include it cheaply) |
 | `matmul_nbits_autotune.cpp` | loader, key packing, tier probe |
 | `lut/<arch>.json` | reviewable source of truth |
-| `lut/<arch>.fb` | binary artifact from flatc |
-| `lut/<arch>_lut_data.cpp` | embedded payload, checked in; produced by `compile` |
+| `lut/<arch>.fb` | binary artifact from flatc; the only shipped table form, embedded at build time |
 | `shapes/oga_models_bits4.csv` | the shape inventory the exact tier is built from |
 | `scripts/extract_shapes.py` | ONNX graphs -> shape inventory |
 | `scripts/update_lut.py` | measure -> build -> compile |
@@ -119,18 +118,25 @@ token. Fuzzy and Fallback still answer if some caller does hand one a wide M.
 
 ## Embedding
 
-`lut/<arch>_lut_data.cpp` is linked into `custom_kernels_<arch>` (see
-`lib/Runtime/Kernels/CMakeLists.txt`), not into `runtime.bc` the way the GQA
-table is: the table is per-arch and so is that target, so each DLL carries
-exactly the table it can use. The C++ file is generated at LUT regeneration
-time by `update_lut.py compile` — the hip-ep customer build does not run Python.
-flatbuffers is header-only for reading, so this adds an include path and no
-link dependency.
+Only `lut/<arch>.fb` ships. `lib/Runtime/Kernels/CMakeLists.txt` turns it into
+the `kMatmulNbitsLutData[]` symbol linked into `custom_kernels_<arch>` using
+pure CMake (`file(READ ... HEX)`) — no Python, and no generated `.cpp` is
+committed (the compiled array is exactly the `.fb`'s bytes, ~40 KB; the source
+text is not). This is per-arch, not in `runtime.bc` the way the GQA table is, so
+each DLL carries exactly the table it can use. flatbuffers is header-only for
+reading, so this adds an include path and no link dependency.
 
-An arch with no measured table still builds — CMake falls back to
+An arch with no measured `.fb` still builds — CMake falls back to
 `tools/empty_lut_data.cpp`, the loader finds no table, and every shape falls
-through to the sweep. Adding an arch is a table addition, never a build break.
+through to the sweep. Adding an arch is a table addition (a `.fb`), never a
+build break.
 
 `HIPDNN_MATMUL_LUT_LOG=1` logs load status, per-lookup tier hits, and misses.
 `HIPDNN_MATMUL_AUTOTUNE_MODE=online` bypasses the table and runs the in-kernel
 autotune sweep instead (default `lookup` uses the table).
+`HIPDNN_MATMUL_AUTOTUNE_LOG=1` logs the in-kernel tuner's decisions — every
+candidate's timing, the winning config's full geometry, LUT hits, and the
+cached selection — to stderr. Unlike `HIPDNN_MATMUL_LUT_LOG` (which only covers
+the offline-table lookup that `online` mode skips), this shows what the sweep
+actually picked, so an `online` run can be diffed against the shipped table.
+`HIPDNN_EP_DEBUG=1` still enables these lines too (plus everything else).

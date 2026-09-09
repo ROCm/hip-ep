@@ -256,7 +256,7 @@ func.func @result_names_no_space(%ctx: !hipsr.context,
 // CHECK-NEXT:        %[[EXTENTS1:.*]] = tensor.insert %[[EXT1]] into %[[EXTENTS0]]{{\[}}%[[C1]]] : tensor<2xi64, #hipsr.mem<host>>
 // CHECK-NEXT:        hipsr.compute_yield %[[EXTENTS1]] : tensor<2xi64, #hipsr.mem<host>>
 // CHECK-NEXT:      } : tensor<2xi64, #hipsr.mem<host>>{{$}}
-// CHECK-NEXT:      %[[INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]], %[[EXTENTS_INIT]] : tensor<?x3xf16, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<?x?xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      %[[INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]], %[[RESULT]] : tensor<?x3xf16, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<?x?xf16, #hipsr.mem<device>>
 // CHECK-NEXT:      %[[EXPANDED:.*]] = hipsr.expand(%[[CTX]]) ins(%[[INPUT]], %[[RESULT]] : tensor<?x3xf16, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>) outs(%[[INIT]] : tensor<?x?xf16, #hipsr.mem<device>>) : tensor<?x?xf16, #hipsr.mem<device>>
 // CHECK-NEXT:      return %[[EXPANDED]] : tensor<?x?xf16, #hipsr.mem<device>>
 // CHECK-NEXT:    }

@@ -400,6 +400,67 @@ static bool benchmarkPackedZpPath(
 }
 
 // ============================================================
+// Fractional FP16 zero-point path (bits=2, zp_elem_size==2)
+//
+// AMD Quark 2-bit models encode the non-uniform levels [-1,-1/3,1/3,1] as
+// (index - 1.5) * scale, shipping a *fractional* FP16 zero-point per group.
+// This must be read as fp16 and never rounded to an integer. The kernel's u2
+// paths (WMMA / GEMV / naive) are templated on the zero-point element type;
+// here we pass the FP16 zero_points straight through with zp_elem_size=2 (no
+// pre_unpacked buffer) and verify against a dedicated fractional reference.
+// ============================================================
+static bool benchmarkFp16ZpPath(
+    hipStream_t stream,
+    const __half* d_A, const uint8_t* d_B_u2, const __half* d_S_u2,
+    const __half* d_Z_fp16,
+    int M, int N, int K, int group_size,
+    __half* d_C, size_t countC, double mem_bytes,
+    const std::vector<__half>& h_C_ref_fp16zp, bool has_ref,
+    const KernelStat& u4_stat)
+{
+    std::cout << "\n  --- u2 fp16-zp path (fractional zero-point, AMD Quark 1.5) ---"
+              << std::endl;
+
+    if(!has_ref)
+    {
+        std::cout << "  SKIPPED: no fractional-zp reference "
+                  << "(matmul_nbits_u2_C_ref_fp16zp.bin missing)" << std::endl;
+        return true;
+    }
+
+    // FP16 zero_points passed directly (zp_elem_size=2); the kernel reads them
+    // as fp16, so no pre_unpacked buffer is needed.
+    auto launch_checked = [&]() -> int {
+        return hip_matmul_nbits(
+            stream, d_A, d_B_u2, d_S_u2,
+            d_Z_fp16,          // zero_points (FP16 [N, num_groups_k])
+            nullptr,           // bias
+            d_C,
+            M, N, K, 1, 2, group_size, 2,
+            2,                 // zp_elem_size = 2 (fp16, fractional)
+            nullptr,           // pre_unpacked_zp_u8 (kernel reads fp16 directly)
+            nullptr);          // pre_unpacked_zp_fp16
+    };
+    auto launch = [&]() { launch_checked(); };
+
+    KernelStat st = benchmarkAndVerify(
+        "u2(fp16-zp)", stream, launch_checked, launch, M, N, K,
+        mem_bytes, d_C, countC, h_C_ref_fp16zp, has_ref);
+
+    if(st.launch_ok && u4_stat.launch_ok)
+    {
+        double speedup = u4_stat.avg_ms / st.avg_ms;
+        std::cout << "  u2(fp16-zp) vs u4(zp) speed: " << std::fixed
+                  << std::setprecision(2) << speedup << "x "
+                  << (speedup >= 1.0 ? "(u2 faster)" : "(u4 faster)")
+                  << "   [u2 " << st.gflops << " GFLOPS / " << st.bw_gbs
+                  << " GB/s]" << std::endl;
+    }
+
+    return st.launch_ok && (!has_ref || st.errors == 0);
+}
+
+// ============================================================
 // Single-shape comparison test
 // ============================================================
 bool testCompareShape(int M, int N, int K, int group_size,
@@ -438,7 +499,9 @@ bool testCompareShape(int M, int N, int K, int group_size,
     std::vector<__half>  h_S_u2;
     std::vector<uint8_t> h_Z_u2_u8;
     std::vector<uint8_t> h_Z_u2_packed;
+    std::vector<__half>  h_Z_u2_fp16;
     std::vector<__half>  h_Cref_u2;
+    std::vector<__half>  h_Cref_u2_fp16zp;
     bool ok_u2 = readBin(data_dir + "/matmul_nbits_u2_B.bin", h_B_u2, countB_u2)
               && readBin(data_dir + "/matmul_nbits_u2_scales.bin", h_S_u2, countS);
     if(use_zeros)
@@ -446,6 +509,10 @@ bool testCompareShape(int M, int N, int K, int group_size,
               && readBin(data_dir + "/matmul_nbits_u2_zeros_u8.bin", h_Z_u2_u8, countS)
               && readBin(data_dir + "/matmul_nbits_u2_zeros_packed.bin", h_Z_u2_packed, countZ_packed);
     bool has_ref_u2 = readBin(data_dir + "/matmul_nbits_u2_C_ref.bin", h_Cref_u2, countC);
+    // Fractional FP16 zero-point data (optional; only present with zeros).
+    bool has_fp16zp = use_zeros
+        && readBin(data_dir + "/matmul_nbits_u2_zeros_fp16.bin", h_Z_u2_fp16, countS)
+        && readBin(data_dir + "/matmul_nbits_u2_C_ref_fp16zp.bin", h_Cref_u2_fp16zp, countC);
 
     // ---- Load u4 data ----
     std::vector<uint8_t> h_B_u4;
@@ -490,6 +557,7 @@ bool testCompareShape(int M, int N, int K, int group_size,
     __half*  d_S_u2 = nullptr;
     uint8_t* d_Z_u2_u8 = nullptr;
     uint8_t* d_Z_u2_packed = nullptr;
+    __half*  d_Z_u2_fp16 = nullptr;
     HIP_CHECK(hipMalloc(&d_B_u2, countB_u2));
     HIP_CHECK(hipMalloc(&d_S_u2, countS * sizeof(__half)));
     HIP_CHECK(hipMemcpy(d_B_u2, h_B_u2.data(), countB_u2, hipMemcpyHostToDevice));
@@ -500,6 +568,12 @@ bool testCompareShape(int M, int N, int K, int group_size,
         HIP_CHECK(hipMemcpy(d_Z_u2_u8, h_Z_u2_u8.data(), countS, hipMemcpyHostToDevice));
         HIP_CHECK(hipMalloc(&d_Z_u2_packed, countZ_packed));
         HIP_CHECK(hipMemcpy(d_Z_u2_packed, h_Z_u2_packed.data(), countZ_packed, hipMemcpyHostToDevice));
+        if(has_fp16zp)
+        {
+            HIP_CHECK(hipMalloc(&d_Z_u2_fp16, countS * sizeof(__half)));
+            HIP_CHECK(hipMemcpy(d_Z_u2_fp16, h_Z_u2_fp16.data(),
+                                countS * sizeof(__half), hipMemcpyHostToDevice));
+        }
     }
 
     // ---- u4 device buffers ----
@@ -577,24 +651,35 @@ bool testCompareShape(int M, int N, int K, int group_size,
 
     // ---- Packed-zp real-model path (only meaningful with zeros) ----
     bool packed_ok = true;
+    bool fp16zp_ok = true;
     if(use_zeros)
     {
         packed_ok = benchmarkPackedZpPath(
             stream, d_A, d_B_u2, d_S_u2, d_Z_u2_packed, h_Z_u2_u8,
             M, N, K, group_size, num_groups_k,
             d_C_u2, countC, mem_bytes_u2, h_Cref_u2, has_ref_u2, stat_u4);
+
+        // Fractional FP16 zero-point path (AMD Quark 2-bit). zp is fp16, so the
+        // zero-point contributes countS*2 bytes to the memory footprint.
+        double mem_bytes_u2_fp16zp = mem_bytes_u2 + static_cast<double>(countS);
+        fp16zp_ok = benchmarkFp16ZpPath(
+            stream, d_A, d_B_u2, d_S_u2, d_Z_u2_fp16,
+            M, N, K, group_size,
+            d_C_u2, countC, mem_bytes_u2_fp16zp, h_Cref_u2_fp16zp,
+            has_fp16zp, stat_u4);
     }
 
     bool pass = stat_u2.launch_ok && stat_u4.launch_ok
              && (!stat_u2.has_ref || stat_u2.errors == 0)
              && (!stat_u4.has_ref || stat_u4.errors == 0)
-             && packed_ok;
+             && packed_ok && fp16zp_ok;
 
     hipFree(d_A);
     hipFree(d_C_u2); hipFree(d_C_u4);
     hipFree(d_B_u2); hipFree(d_S_u2);
     if(d_Z_u2_u8) hipFree(d_Z_u2_u8);
     if(d_Z_u2_packed) hipFree(d_Z_u2_packed);
+    if(d_Z_u2_fp16) hipFree(d_Z_u2_fp16);
     hipFree(d_B_u4); hipFree(d_S_u4);
     if(d_Zu8_u4) hipFree(d_Zu8_u4);
     if(d_Zfp16_u4) hipFree(d_Zfp16_u4);

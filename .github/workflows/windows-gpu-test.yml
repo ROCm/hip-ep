@@ -63,7 +63,7 @@ jobs:
         shell: cmd
         run: |
           set PATH=%CD%\gpu-test-package\bin;%PATH%
-          set MODEL_DIR=${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\model
+          set MODEL_DIR=${{ runner.workspace }}\model
           if not exist "%MODEL_DIR%" (
             echo [ERROR] MODEL_DIR not found: %MODEL_DIR%
             exit /b 1
@@ -107,13 +107,14 @@ jobs:
           set THEROCK_DIST=%CD%\gpu-test-package
           set PATH=%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib
-          set MODEL_DIR=${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\model
+          set ROOT=%CD%
+          set MODEL_DIR=${{ runner.workspace }}\model
           if not exist "%MODEL_DIR%" (
             echo [SKIP] MODEL_DIR not found: %MODEL_DIR%
             exit /b 0
           )
-          cd gpu-test-package\bin
-          mkdir ..\results-native 2>nul
+          mkdir "%ROOT%\gpu-test-package\results-native" 2>nul
+          cd /d "%ROOT%\gpu-test-package\bin"
           rem Smoke, not a benchmark: first seq128 model, ONE inference (-r 1).
           rem Exercises native compile -> link -> load -> execute end-to-end
           rem without a full perf sweep (native is opt-in / non-production; the
@@ -131,9 +132,9 @@ jobs:
             --plugin_ep_options "config_file|..\morphizen_config.json artifact_format|NATIVE" ^
             -C "session.disable_cpu_ep_fallback|1" ^
             -r 1 -c 1 -s ^
-            "%SMOKE_MODEL%" > "..\results-native\smoke.txt" 2>&1
+            "%SMOKE_MODEL%" > "%ROOT%\gpu-test-package\results-native\smoke.txt" 2>&1
           set RC=%ERRORLEVEL%
-          type "..\results-native\smoke.txt"
+          type "%ROOT%\gpu-test-package\results-native\smoke.txt"
           rem Real gate: hipdnn-ep-tls.lib is now staged into gpu-test-package/lib
           rem so the NATIVE compile -> lld-link -> load -> execute path must pass.
           exit /b %RC%
@@ -152,13 +153,14 @@ jobs:
           set THEROCK_DIST=%CD%\gpu-test-package
           set PATH=%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib
-          set MODEL_DIR=${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\model
+          set ROOT=%CD%
+          set MODEL_DIR=${{ runner.workspace }}\model
           if not exist "%MODEL_DIR%" (
             echo [SKIP] MODEL_DIR not found: %MODEL_DIR%
             exit /b 0
           )
-          cd gpu-test-package\bin
-          mkdir ..\results-amdgpu-native 2>nul
+          mkdir "%ROOT%\gpu-test-package\results-amdgpu-native" 2>nul
+          cd /d "%ROOT%\gpu-test-package\bin"
           set "SMOKE_MODEL="
           for /r "%MODEL_DIR%" %%M in (*seq128.onnx) do if not defined SMOKE_MODEL set "SMOKE_MODEL=%%M"
           if not defined SMOKE_MODEL (
@@ -172,9 +174,9 @@ jobs:
             --plugin_ep_options "profile|hip artifact_format|NATIVE" ^
             -C "session.disable_cpu_ep_fallback|1" ^
             -r 1 -c 1 -s ^
-            "%SMOKE_MODEL%" > "..\results-amdgpu-native\smoke.txt" 2>&1
+            "%SMOKE_MODEL%" > "%ROOT%\gpu-test-package\results-amdgpu-native\smoke.txt" 2>&1
           set RC=%ERRORLEVEL%
-          type "..\results-amdgpu-native\smoke.txt"
+          type "%ROOT%\gpu-test-package\results-amdgpu-native\smoke.txt"
           exit /b %RC%
 
       # ----------------------------------------------------------------------
@@ -193,7 +195,7 @@ jobs:
           $pkgBin = Join-Path $PWD "gpu-test-package\bin"
           $env:PATH = "$pkgBin;$env:PATH"
 
-          $modelDir = "${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\model"
+          $modelDir = "${{ runner.workspace }}\model"
           if (-not (Test-Path $modelDir)) {
             Write-Host "[SKIP] MODEL_DIR not found: $modelDir"
             exit 0
@@ -253,12 +255,6 @@ jobs:
           Remove-Item $cacheDir -Recurse -Force -ErrorAction SilentlyContinue
           exit $failed
 
-      # -----------------------------------------------------------------------
-      # OGA benchmark: run model_benchmark against pre-placed LLM models.
-      # Models are at ${{ runner.workspace }}/oga-models/<model>/
-      # with genai_config.json pre-configured for MorphiZenEP pipeline.
-      # Skipped gracefully when model directory does not exist.
-      # -----------------------------------------------------------------------
       - name: Run OGA benchmark
         if: always()
         timeout-minutes: 30
@@ -273,7 +269,7 @@ jobs:
           # generated once on the GPU runner and persists across runs, so just
           # consume it here (no re-copy / no config rewrite). It must be present
           # -- treat its absence as an error, not a skip.
-          $ogaModelRoot = "${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\amdgpu-oga-models"
+          $ogaModelRoot = "${{ runner.workspace }}\amdgpu-oga-models"
           if (-not (Test-Path $ogaModelRoot)) {
             Write-Host "[ERROR] AMDGPU OGA model directory not found: $ogaModelRoot"
             exit 1
@@ -360,7 +356,7 @@ jobs:
           $ErrorActionPreference = 'Continue'
           $PSNativeCommandUseErrorActionPreference = $false
 
-          $model = "${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\amdgpu-oga-models\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml"
+          $model = "${{ runner.workspace }}\amdgpu-oga-models\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml"
           if (-not (Test-Path $model)) { Write-Host "[SKIP] model not found: $model"; exit 0 }
 
           $pkg = "$PWD\wheelpkg"
@@ -395,8 +391,8 @@ jobs:
           $ErrorActionPreference = 'Continue'
           $PSNativeCommandUseErrorActionPreference = $false
 
-          $vlmRoot = "${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\amdgpu-vlm-models"
-          $vlmImage = "${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\amdgpu-vlm-images\dog.jpg"
+          $vlmRoot = "${{ runner.workspace }}\amdgpu-vlm-models"
+          $vlmImage = "${{ runner.workspace }}\amdgpu-vlm-images\dog.jpg"
           if (-not (Test-Path $vlmRoot)) { Write-Host "[SKIP] VLM model dir not found: $vlmRoot"; exit 0 }
           if (-not (Test-Path $vlmImage)) { Write-Host "[SKIP] VLM image not found: $vlmImage"; exit 0 }
 
@@ -458,7 +454,7 @@ jobs:
           rem The EP DLL is now hipgpu.dll; hip-onnx-runner's legacy default name
           rem is onnxruntime_morphizen_ep.dll, so point it at the new DLL.
           set MORPHIZEN_EP_LIB=%CD%\gpu-test-package\bin\hipgpu.dll
-          set L2_MODEL_DIR=${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\l2-test-models
+          set L2_MODEL_DIR=${{ runner.workspace }}\l2-test-models
           if not exist "%L2_MODEL_DIR%" (
             echo [SKIP] L2 model directory not found: %L2_MODEL_DIR%
             exit /b 0

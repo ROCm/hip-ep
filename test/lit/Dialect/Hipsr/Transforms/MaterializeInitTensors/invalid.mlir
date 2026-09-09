@@ -34,11 +34,11 @@ func.func @unpopulated_shape_region(%ctx: !hipsr.context, %a: tensor<?x256xf16, 
 // -----
 
 // A barrier reads its inputs as buffers, and the pool hands a buffer out only
-// after the last allocation in the domain, so an input allocated here has no
-// value to name yet. The placeholder verifier allows the edge, because a
-// placeholder result is a legal shape-graph input, and
-// -hipsr-partition-pool-domains never builds it, because it starts a barrier one
-// domain past every input. That leaves the pass to reject it.
+// after the last allocation in the domain, so an input produced here is not
+// ready yet. The placeholder verifier allows the edge, because a barrier names
+// the data value its consumer reads, and -hipsr-partition-pool-domains never
+// builds one, because it starts a barrier one domain past every input. That
+// leaves this pass to reject it.
 func.func @barrier_over_placeholder(%ctx: !hipsr.context, %in: tensor<?x1xf16, #hipsr.mem<device>>)
     -> tensor<?x1xf16, #hipsr.mem<device>> {
   %0 = hipsr.pool_domain(%ctx, %in
@@ -56,7 +56,7 @@ func.func @barrier_over_placeholder(%ctx: !hipsr.context, %in: tensor<?x1xf16, #
         outs(%cast_init : tensor<?x1xf32, #hipsr.mem<device>>) : tensor<?x1xf32, #hipsr.mem<device>>
     // expected-error@+1 {{barrier input must be allocated outside this pool domain}}
     %barrier_init = hipsr.placeholder(%domain_ctx)
-        ins(%cast_init : tensor<?x1xf32, #hipsr.mem<device>>)
+        ins(%cast : tensor<?x1xf32, #hipsr.mem<device>>)
         {placeholder_type = #hipsr.placeholder_type<barrier>}
         : tensor<?x1xf16, #hipsr.mem<device>> shape_region {
     ^bb0(%region_ctx: !hipsr.context, %region_cast: tensor<?x1xf32, #hipsr.mem<device>>):

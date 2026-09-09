@@ -251,3 +251,41 @@ int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
   RUNTIME_DEBUG_LOG("[REAL] wrap_leaky_relu: completed successfully\n");
   return 0;
 }
+
+int wrap_swish(RuntimeState *state, void *input, void *output,
+               int64_t num_elements, int64_t data_type, double alpha) {
+  OP_PROFILE(
+      "swish",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "n=%lld", (long long)num_elements);
+        return std::string(b);
+      },
+      state);
+  if (!state || !input || !output) {
+    fprintf(stderr, "[REAL] wrap_swish: null argument\n");
+    return -1;
+  }
+
+  int hip_dtype = hipdnn_ep_to_hip_dtype_elementwise_unary(data_type);
+  if (hip_dtype < 0) {
+    fprintf(stderr, "[REAL] wrap_swish: unsupported data_type %lld\n",
+            (long long)data_type);
+    return -1;
+  }
+
+  void *stream = hipdnn_ep_state_get_stream(state);
+  RUNTIME_DEBUG_LOG("[REAL] wrap_swish: num_elements=%lld, "
+                    "data_type=%s(%lld), alpha=%f\n",
+                    (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+                    (long long)data_type, alpha);
+
+  int result = hip_swish(stream, input, output, num_elements, hip_dtype, alpha);
+  if (result != 0) {
+    fprintf(stderr, "[REAL] wrap_swish: kernel launch failed (%d)\n", result);
+    return -1;
+  }
+
+  RUNTIME_DEBUG_LOG("[REAL] wrap_swish: completed successfully\n");
+  return 0;
+}
