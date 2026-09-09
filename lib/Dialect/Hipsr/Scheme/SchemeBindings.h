@@ -22,11 +22,12 @@ using SchemeValue = void*;
 
 // Log levels for Scheme logging
 enum class SchemeLogLevel {
-  Debug = 0,
-  Info = 1,
-  Warning = 2,
-  Error = 3,
-  Fatal = 4
+  Trace = 0,
+  Debug = 1,
+  Info = 2,
+  Warning = 3,
+  Error = 4,
+  Fatal = 5
 };
 
 // Parse log level from string

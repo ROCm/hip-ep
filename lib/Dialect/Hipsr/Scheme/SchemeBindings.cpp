@@ -45,6 +45,7 @@ static SchemeLogLevel current_log_level = SchemeLogLevel::Warning;
 }
 
 SchemeLogLevel parseLogLevel(const std::string& level) {
+  if (level == "trace") return SchemeLogLevel::Trace;
   if (level == "debug") return SchemeLogLevel::Debug;
   if (level == "info") return SchemeLogLevel::Info;
   if (level == "warning") return SchemeLogLevel::Warning;
@@ -277,6 +278,11 @@ static void mlir_operation_walk(uint64_t op, ptr callback) {
 }
 
 // Logging functions callable from Scheme
+static void mlir_log_trace(const char* msg) {
+  if (current_log_level <= SchemeLogLevel::Trace)
+    llvm::errs() << "[trace] " << msg << "\n";
+}
+
 static void mlir_log_debug(const char* msg) {
   if (current_log_level <= SchemeLogLevel::Debug)
     llvm::errs() << "[debug] " << msg << "\n";
@@ -315,13 +321,14 @@ void registerMlirForeignFunctions() {
   Sregister_symbol("mlir_operation_walk", (void*)mlir_operation_walk);
 
   // Register logging functions
+  Sregister_symbol("mlir_log_trace", (void*)mlir_log_trace);
   Sregister_symbol("mlir_log_debug", (void*)mlir_log_debug);
   Sregister_symbol("mlir_log_info", (void*)mlir_log_info);
   Sregister_symbol("mlir_log_warning", (void*)mlir_log_warning);
   Sregister_symbol("mlir_log_error", (void*)mlir_log_error);
   Sregister_symbol("mlir_log_fatal", (void*)mlir_log_fatal);
 
-  LLVM_DEBUG(llvm::dbgs() << "Registered " << 11 << " MLIR FFI functions\n");
+  LLVM_DEBUG(llvm::dbgs() << "Registered " << 12 << " MLIR FFI functions\n");
 }
 
 } // namespace hipsr

@@ -39,7 +39,7 @@
                               (iota num-results))
                          '())))
 
-        (mlir-log-debug
+        (mlir-log-trace
           (string-append "Operation: \"" name "\""
                         (if (null? operands)
                             ""
