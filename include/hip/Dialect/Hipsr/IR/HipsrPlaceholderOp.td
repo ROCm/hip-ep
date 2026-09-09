@@ -15,8 +15,10 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
     [IsolatedFromAbove, SingleBlockImplicitTerminator<"ShapeYieldOp">]> {
   let summary = "Typed placeholder for hipsr `outs` operands";
   let description = [{
-    Supplies a hipsr op's `outs` values before its output shape is known. The
-    result type follows the consumer:
+    Supplies a hipsr op's `outs` values before its output shape is known. That
+    op is called the consumer throughout: it consumes the values this
+    placeholder supplies, and it writes those buffers rather than reading them.
+    The result type follows the consumer:
 
     - A DPS op ties each init to the result in the same position, so the
       placeholder carries the op's result types.
