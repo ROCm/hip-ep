@@ -270,6 +270,9 @@ shell before invoking pytest:
 |---|---|
 | `HIPDNN_EP_DEBUG=1` | Verbose debug logging from the EP DLL. |
 | `HIPDNN_EP_PERF=1` | Per-op GPU/CPU profiling output. **Do not use for tok/s measurements** -- adds ~58% overhead (see CLAUDE.md). |
+| `HIPDNN_EP_ROCTX=1` | Emit balanced ROCTx ranges for runtime operators instrumented with `OP_PROFILE`; disabled by default. |
+| `HIPDNN_EP_ROCTX_LIB=<path>` | Optional explicit path to `roctx64.dll` / `libroctx64.so`. If the library or required symbols are unavailable, ROCTx annotation safely becomes a no-op. |
+| `HIPDNN_EP_ROCTX_VERBOSE=1` | Print one diagnostic showing whether the optional ROCTx runtime was loaded. |
 | `HIPDNN_EP_GQA_*` | Various GQA path toggles (`HIPDNN_EP_GQA_FLASH_DECODE`, `HIPDNN_EP_GQA_CACHE_SEQLENS`, ...). |
 
 These are read by the DLL directly; the framework neither sets them
