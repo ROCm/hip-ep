@@ -1633,14 +1633,15 @@ static int gqa_forward_hipblaslt(
   //    above is derived from that identity, so without it kv_lo would be
   //    computed against the wrong absolute query position.
   //
-  //    With today's only producer of a window this pairing cannot actually
-  //    occur: the converter recovers a window from the additive mask, so a
-  //    window implies a mask, a mask means attention_bias is non-null, and
-  //    bidirectional_no_past is no_causal && !attention_bias. The guard is kept
-  //    anyway because that is a property of the converter rather than of this
-  //    function's contract -- a producer that stamps a window from a declared
-  //    attribute (opset 25's left_window_size) would not need a mask at all,
-  //    and would reach here with both set.
+  //    This pairing is reachable, and on the shape that matters most: #882
+  //    redefined bidirectional_no_past as no_causal && !past_key, so a windowed
+  //    Gemma-4 PREFILL now sets it (no_causal, and no past cache on the first
+  //    call) where the older no_causal && !attention_bias did not. It stays a
+  //    correct guard for the op-level bound below, which is taken at past_len
+  //    and is inert at a prefill anyway, but it is the wrong question to ask of
+  //    the per-chunk bound -- see chunk_narrow_ok below, which tests the
+  //    identity this restriction is really about instead of a flag that now
+  //    happens to imply more than it did.
   //  - Only with a present cache. kv_lo indexes key positions by their absolute
   //    position in a BNSD cache page; without present_key / present_value the
   //    GEMMs read the raw key / value operands, where a past_len derived from
@@ -1673,16 +1674,81 @@ static int gqa_forward_hipblaslt(
   // Number of key positions actually scored, and the first one. kv_span ==
   // total_seq and kv_lo == 0 whenever narrowing is inactive, which keeps every
   // downstream expression below identical to what it was.
+  //
+  // This is the OP-LEVEL range: the union over every query row in the call.
+  // The KV copy, the K/V expand and the score buffers are all sized against it,
+  // and copy_lo's write-skip invariant above is stated in terms of it, so it
+  // has to stay the union even though individual chunks below read less than
+  // it.
+  const bool kv_narrow_ok =
+      !bidirectional_no_past && present_key && present_value;
   int64_t kv_span = total_seq;
   int64_t kv_lo = 0;
-  if (local_window_size > 0 && !bidirectional_no_past && present_key &&
-      present_value) {
+  if (local_window_size > 0 && kv_narrow_ok) {
     const int64_t lo = past_len - local_window_size + 1;
     if (lo > 0) {
       kv_lo = lo;
       kv_span = total_seq - kv_lo;
     }
   }
+
+  // The bound above is taken at past_len, the absolute position of the FIRST
+  // query row of the call. That is why it does nothing at a fresh prefill:
+  // past_len is 0, so `lo` is negative and every chunk goes on scoring all
+  // total_seq keys even when the window is known. Narrowing per chunk instead,
+  // from the chunk's own query range, is what makes a recovered window pay at
+  // prefill rather than only at decode.
+  //
+  // Dropping keys ABOVE a chunk's last query row needs the op to be causal,
+  // and only the is_causal attribute establishes that. hip_gqa_causal_mask_f32
+  // below then masks exactly the entries being dropped, so narrowing is
+  // provably the same arithmetic. An additive mask cannot reinstate any of them
+  // either, since the causal mask is applied on top of it.
+  //
+  // A recovered window does NOT establish it. That is worth stating outright,
+  // because the shape of the match invites the opposite reading: the window
+  // comes from AttentionWindowFold matching `And(q >= k, q - k < W)`, whose
+  // first conjunct is the causal predicate. But the fold matches that as one
+  // DISJUNCT of the keep-condition, not as the whole of it. Gemma-4's windowed
+  // mask is `And(pad, Or(win, seg))`, and the fold accepts it because the
+  // same-image-block leg `seg` cannot reach further BACK than the window: 256
+  // soft tokens per image block against a window of 1024. That argument bounds
+  // the range below and says nothing about above. `seg` is bidirectional, so it
+  // reaches one image block ABOVE the diagonal, and it keeps those entries at a
+  // bias of 0 -- they are attended, and a diagonal bound would drop them. Text
+  // prompts hide this: `seg` is identically false with no image, which leaves
+  // the keep-condition causal after all and the diagonal bound exact.
+  //
+  // So no_causal takes its upper bound from the mask instead, whether or not a
+  // window was recovered -- see mask_chunk_hi below. That scan floors at the
+  // diagonal, so wherever nothing above it is attended it returns this same
+  // bound and nothing is given up. Whisper's encoder self-attention and decoder
+  // cross-attention have no mask to read and keep their full range, as before.
+  //
+  // The window still supplies the LOWER bound in chunkKeyRange, which is where
+  // the fold's reach-back argument actually applies.
+  const bool causal_narrow_ok = !no_causal;
+
+  // Whether a chunk's row range can be placed in absolute key coordinates at
+  // all. Every bound above is of the form past_len + q0, so it says exactly one
+  // thing: query row q0 of this call sits at absolute position past_len + q0,
+  // and therefore the last row of the call sits at total_seq - 1.
+  //
+  // That is stated as the identity rather than as !bidirectional_no_past, which
+  // is the flag the op-level bound uses. The two agreed until #882 redefined
+  // the flag from no_causal && !attention_bias to no_causal && !past_key, which
+  // set it on windowed Gemma-4 prefills -- shapes where sq == skv and past_len
+  // == 0, so the identity holds perfectly and narrowing is exact. Testing the
+  // flag there silently disabled the narrowing on the only shape that needs it
+  // while looking entirely correct.
+  //
+  // The identity is what actually fails on the shapes that must be excluded: a
+  // Whisper cross-attention has sq == 1 against skv == 1500, so past_len + q0
+  // addresses nothing, and a KV-cache-sharing decode re-reads a full history it
+  // did not produce. Both are caught, and both are also no_causal, so
+  // causal_narrow_ok already refuses them the diagonal bound.
+  const bool chunk_narrow_ok =
+      present_key && present_value && total_seq == past_len + sq;
 
   //===--------------------------------------------------------------------===//
   // Query-row chunking of the score matrix
@@ -1737,46 +1803,204 @@ static int gqa_forward_hipblaslt(
     }
   }
   const bool chunked = (sq_chunk < sq);
-  const int64_t sq_tail = chunked ? (sq % sq_chunk) : 0;
+
+  //===--------------------------------------------------------------------===//
+  // Per-chunk key bound recovered from the additive mask
+  //
+  // For a bidirectional op the diagonal bound above is unavailable, so this is
+  // the only thing that can bound a chunk from above -- and for a WINDOWED
+  // bidirectional op it is also what keeps the narrowing correct, since the
+  // diagonal would cut through the mask's same-image-block leg. Where such an
+  // op carries an additive mask, the mask already states which keys are
+  // attended, and the entries it rules out are exactly the ones a chunk can
+  // drop: an additive bias at or below -65504 contributes exactly zero to the
+  // softmax, so dropping it is bit-exact. That makes this a recovery of a bound
+  // the graph already contains rather than an assumption about the model, which
+  // is what the alternative would have been -- AttentionWindowFold cannot
+  // supply it, because the reach of Gemma-4's same-image-block leg is a
+  // property of the input, not of the mask's shape.
+  //
+  // Only worth doing when the op is actually chunked: a single chunk spans
+  // every query row, so its bound is the whole key range either way.
+  //
+  // One kernel over half the mask plus one D2H of a few ints per call, on each
+  // of Gemma-4's 30 layers: ~250 MB read apiece, against the ~6 GB of score
+  // traffic it removes on the 5 global ones and correctness on the 25 local
+  // ones. The mask is shared across layers of a kind, so a cache keyed on the
+  // bias pointer and this call's geometry would collapse the 30 scans to 2 and
+  // their stream syncs with them; that is left for later because the scan is
+  // already small against the score GEMMs it bounds, and because such a cache
+  // belongs on RuntimeState rather than in a file-static -- per-session, and so
+  // safe against a second session and against teardown. A failure anywhere here
+  // leaves the vector empty and the op scores its full range, which is exactly
+  // the old behaviour.
+  //===--------------------------------------------------------------------===//
+  std::vector<int32_t> mask_chunk_hi;
+  if (chunked && chunk_narrow_ok && !causal_narrow_ok && attention_bias &&
+      !use_no_expand) {
+    const int64_t nchunks = (sq + sq_chunk - 1) / sq_chunk;
+    // The scan's output lands at the front of the state workspace, which the
+    // layout below re-sizes and re-partitions for the score buffers. Both uses
+    // are safe together: the result is copied out and the stream synchronized
+    // before that happens, so the region is dead by the time it is reused, and
+    // ensure_workspace only ever grows. On a warm call the workspace already
+    // dwarfs the few hundred bytes wanted here and the request is a no-op; only
+    // a cold first inference pays an extra allocation for it.
+    const size_t hi_bytes = static_cast<size_t>(nchunks) * sizeof(int32_t);
+    int32_t *d_hi = nullptr;
+    if (hipdnn_ep_state_ensure_workspace(state, hi_bytes) == 0)
+      d_hi = static_cast<int32_t *>(hipdnn_ep_state_get_workspace(state));
+    if (d_hi &&
+        hip_gqa_bias_key_extent(
+            stream, attention_bias, d_hi, static_cast<int>(attn_bias_batch),
+            static_cast<int>(attn_bias_num_heads), static_cast<int>(sq),
+            static_cast<int>(total_seq), static_cast<int>(sq),
+            static_cast<int>(sq_chunk), static_cast<int>(past_len),
+            static_cast<int>(nchunks), static_cast<int>(elem_sz)) == 0) {
+      std::vector<int32_t> hi(static_cast<size_t>(nchunks), 0);
+      if (hipMemcpyAsync(hi.data(), d_hi, hi_bytes, hipMemcpyDeviceToHost,
+                         stream) == hipSuccess &&
+          hipStreamSynchronize(stream) == hipSuccess)
+        mask_chunk_hi = std::move(hi);
+    }
+    // Never expected: only a failed scratch allocation or a failed launch gets
+    // here, and both mean the prefill silently reverts to scoring every key.
+    if (mask_chunk_hi.empty())
+      fprintf(stderr,
+              "gqa_forward_hipblaslt: mask key-extent recovery failed; "
+              "scoring the full key range for sq=%lld total_seq=%lld\n",
+              (long long)sq, (long long)total_seq);
+  }
 
   // GEMM descriptor keys. The no-expand flavour uses explicit per-operand
-  // strides (non-zero stride fields); the expand flavour leaves them zero so
-  // queryOrCreateGemmState falls back to the dense packed-batch defaults.
+  // strides (non-zero stride fields); the expand flavour leaves them zero,
+  // so queryOrCreateGemmState falls back to the dense packed-batch defaults,
+  // except where a per-chunk key range makes a dense default wrong (strideA
+  // below).
   //
   // When chunking, the expand flavour must state Q's and O's strides
   // explicitly: n is the chunk length but those two operands still advance by
   // the full sq between heads. The score matrices are freshly packed per chunk,
   // so their strides stay at the dense default.
   //
-  // The key extent is kv_span, not total_seq: Kexp / Vexp are materialised over
-  // the narrowed range and the score matrices are sized to match, so stating
-  // total_seq here would have the GEMMs read and write past the regions
-  // allocated for them.
-  auto makeKeys = [&](int64_t n_rows, GqaGemmKey *score, GqaGemmKey *value) {
-    *score = {kv_span,
+  // The key extent is kv_ext, the chunk's own narrowed range, which is at most
+  // kv_span: Kexp / Vexp are materialised over the op-level narrowed range and
+  // the score matrices are sized to match, so stating total_seq here would have
+  // the GEMMs read and write past the regions allocated for them.
+  //
+  // strideA has to be stated explicitly the moment kv_ext differs from kv_span.
+  // Both keys otherwise leave it 0, which queryOrCreateGemmState resolves to
+  // the dense default m*k: kv_ext*d for the score GEMM and d*kv_ext for the
+  // value one, while Kexp / Vexp are packed at kv_span*d per head. Those agree
+  // only while the chunk reads the whole op-level range; once it reads a
+  // sub-range
+  // the dense default is short and every head after the first is mis-strided,
+  // silently, with no shape for hipBLASLt to reject. Keeping the 0 in the
+  // un-narrowed case is deliberate rather than tidy: it leaves the cache key
+  // bit-identical to what it was, so a shape that narrows nothing reuses
+  // exactly the descriptor it used before.
+  auto makeKeys = [&](int64_t n_rows, int64_t kv_ext, GqaGemmKey *score,
+                      GqaGemmKey *value) {
+    const int64_t strideA = (kv_ext != kv_span) ? kv_span * d : 0;
+    *score = {kv_ext,
               n_rows,
               d,
               B * H,
               true,
               /*outputFp32=*/true,
               gemm_fp32,
-              /*strideA=*/0,
+              strideA,
               /*strideB=*/chunked ? sq * d : 0,
               /*strideC=*/0};
     *value = {d,
               n_rows,
-              kv_span,
+              kv_ext,
               B * H,
               false,
               /*outputFp32=*/gemm_fp32,
               gemm_fp32,
-              /*strideA=*/0,
+              strideA,
               /*strideB=*/0,
               /*strideC=*/chunked ? sq * d : 0};
   };
 
-  GqaGemmKey scoreKey, valueKey;
+  //===--------------------------------------------------------------------===//
+  // Per-chunk key ranges
+  //
+  // One entry per iteration of the Steps 8-10 loop, resolved up front. Two
+  // things force that rather than deriving each chunk's shape inside the loop:
+  // the GEMM workspace region is sized once below and cannot grow afterwards,
+  // so every algorithm the loop will use has to be known before the allocation;
+  // and the score buffers need the widest chunk, which is not in general the
+  // first or the last one.
+  //
+  // A chunk is now its own GEMM shape, but far fewer distinct ones than that
+  // suggests. With a window the interior chunks all sit at the same extent
+  // (window + chunk rows, capped by the sequence), so at a 16K prefill with
+  // sq_chunk 640 and a 1024 window the 26 chunks collapse to four descriptors:
+  // the two leading partial ones, the interior extent, and the ragged tail.
+  // queryOrCreateGemmState is keyed on shape, so the duplicates cost a hash
+  // lookup and nothing else -- no extra hipblasLtMatmulAlgoGetHeuristic calls.
+  //===--------------------------------------------------------------------===//
+  struct GqaChunkPlan {
+    int64_t q0;     // first query row of the chunk
+    int64_t c;      // query rows in the chunk
+    int64_t kv_off; // first key read, RELATIVE to kv_lo
+    int64_t kv_ext; // key positions read
+    const GqaGemmCacheEntry *score;
+    const GqaGemmCacheEntry *value;
+  };
+  std::vector<GqaChunkPlan> chunks;
+
+  // Key range a chunk of query rows can attend, as [lo, hi) in absolute key
+  // positions. Clamped into the op-level [kv_lo, total_seq) so a chunk can only
+  // ever read a sub-range of what the expand actually materialised.
+  auto chunkKeyRange = [&](int64_t q0, int64_t c, int64_t *lo, int64_t *hi) {
+    int64_t k_lo = kv_lo;
+    int64_t k_hi = total_seq;
+    if (chunk_narrow_ok) {
+      if (causal_narrow_ok) {
+        // The chunk's last query row is at absolute position
+        // past_len + q0 + c - 1, so no key above it is attended.
+        const int64_t h = past_len + q0 + c;
+        if (h < k_hi)
+          k_hi = h;
+      } else if (!mask_chunk_hi.empty()) {
+        // Bidirectional op, windowed or not: no diagonal bound is available,
+        // but the mask stated one. The stored value is the highest key position
+        // any row in this chunk attends, so the exclusive end is one past it.
+        // It is floored at the diagonal, so this is never looser than the bound
+        // a causal op would take.
+        const size_t idx = static_cast<size_t>(q0 / sq_chunk);
+        if (idx < mask_chunk_hi.size()) {
+          const int64_t h = static_cast<int64_t>(mask_chunk_hi[idx]) + 1;
+          if (h < k_hi)
+            k_hi = h;
+        }
+      }
+      if (local_window_size > 0) {
+        // The chunk's first query row has the lowest lower bound in the chunk,
+        // so it covers every row in it.
+        const int64_t l = past_len + q0 - local_window_size + 1;
+        if (l > k_lo)
+          k_lo = l;
+      }
+    }
+    // A degenerate range would give the GEMMs a zero extent. It cannot arise
+    // from the arithmetic above (the chunk's own diagonal is always in range),
+    // but the GEMM descriptors must not be built from one if it ever did.
+    if (k_hi <= k_lo)
+      k_hi = k_lo + 1;
+    *lo = k_lo;
+    *hi = k_hi;
+  };
+
   if (use_no_expand) {
+    // No-expand is not chunked (see above), so it has exactly one iteration,
+    // spanning the whole query range and therefore the whole op-level key
+    // range: the per-chunk bound would reduce to kv_lo / kv_span anyway, and
+    // its operand layout is different enough that it keeps its own keys.
+    //
     // Score: C[kv_span, HPG*sq] = K^T[d,kv_span] * Q[d, HPG*sq] per (b, g)
     // pair. strideA steps over the buffer page (present_seq*d) even though only
     // kv_span tokens are read, keeping the descriptor stable across token
@@ -1784,59 +2008,65 @@ static int gqa_forward_hipblaslt(
     // the context passes the window, so the descriptor cache stops missing on
     // every token and the per-token hipblasLtMatmulAlgoGetHeuristic calls
     // collapse to one entry per shape.
-    scoreKey = {/*m=*/kv_span,
-                /*n=*/HPG * sq,
-                /*k=*/d,
-                /*batch=*/B * G,
-                /*transA=*/true,
-                /*outputFp32=*/true,
-                /*inputFp32=*/gemm_fp32,
-                /*strideA=*/present_seq * d,
-                /*strideB=*/HPG * sq * d,
-                /*strideC=*/HPG * sq * kv_span};
+    const GqaGemmKey scoreKey = {/*m=*/kv_span,
+                                 /*n=*/HPG * sq,
+                                 /*k=*/d,
+                                 /*batch=*/B * G,
+                                 /*transA=*/true,
+                                 /*outputFp32=*/true,
+                                 /*inputFp32=*/gemm_fp32,
+                                 /*strideA=*/present_seq * d,
+                                 /*strideB=*/HPG * sq * d,
+                                 /*strideC=*/HPG * sq * kv_span};
     // Value: C[d, HPG*sq] = V[d, kv_span] * S[kv_span, HPG*sq] per (b, g)
     // pair, writing into BNSD [B, G, HPG, sq, d] which at sq==1 coincides with
     // BSHD [B, 1, H, d].
-    valueKey = {/*m=*/d,
-                /*n=*/HPG * sq,
-                /*k=*/kv_span,
-                /*batch=*/B * G,
-                /*transA=*/false,
-                /*outputFp32=*/gemm_fp32,
-                /*inputFp32=*/gemm_fp32,
-                /*strideA=*/present_seq * d,
-                /*strideB=*/HPG * sq * kv_span,
-                /*strideC=*/HPG * sq * d};
+    const GqaGemmKey valueKey = {/*m=*/d,
+                                 /*n=*/HPG * sq,
+                                 /*k=*/kv_span,
+                                 /*batch=*/B * G,
+                                 /*transA=*/false,
+                                 /*outputFp32=*/gemm_fp32,
+                                 /*inputFp32=*/gemm_fp32,
+                                 /*strideA=*/present_seq * d,
+                                 /*strideB=*/HPG * sq * kv_span,
+                                 /*strideC=*/HPG * sq * d};
+    const GqaGemmCacheEntry *sSt =
+        queryOrCreateGemmState(state, ltHandle, scoreKey, op_state_slot);
+    if (!sSt)
+      return -1;
+    const GqaGemmCacheEntry *vSt =
+        queryOrCreateGemmState(state, ltHandle, valueKey, op_state_slot);
+    if (!vSt)
+      return -1;
+    chunks.push_back({0, sq, 0, kv_span, sSt, vSt});
   } else {
-    makeKeys(sq_chunk, &scoreKey, &valueKey);
+    for (int64_t q0 = 0; q0 < sq; q0 += sq_chunk) {
+      const int64_t c = std::min<int64_t>(sq_chunk, sq - q0);
+      int64_t lo, hi;
+      chunkKeyRange(q0, c, &lo, &hi);
+      const int64_t ext = hi - lo;
+
+      GqaGemmKey sKey, vKey;
+      makeKeys(c, ext, &sKey, &vKey);
+      const GqaGemmCacheEntry *sSt =
+          queryOrCreateGemmState(state, ltHandle, sKey, op_state_slot);
+      if (!sSt)
+        return -1;
+      const GqaGemmCacheEntry *vSt =
+          queryOrCreateGemmState(state, ltHandle, vKey, op_state_slot);
+      if (!vSt)
+        return -1;
+      chunks.push_back({q0, c, lo - kv_lo, ext, sSt, vSt});
+    }
   }
 
-  const GqaGemmCacheEntry *scoreState =
-      queryOrCreateGemmState(state, ltHandle, scoreKey, op_state_slot);
-  if (!scoreState)
-    return -1;
-  const GqaGemmCacheEntry *valueState =
-      queryOrCreateGemmState(state, ltHandle, valueKey, op_state_slot);
-  if (!valueState)
-    return -1;
-
-  // A ragged final chunk is a different n and so a different descriptor. Both
-  // shapes are resolved before sizing the workspace because the GEMM workspace
-  // region has to cover whichever algorithm asks for more.
-  const GqaGemmCacheEntry *scoreTailState = nullptr;
-  const GqaGemmCacheEntry *valueTailState = nullptr;
-  if (sq_tail > 0) {
-    GqaGemmKey scoreTailKey, valueTailKey;
-    makeKeys(sq_tail, &scoreTailKey, &valueTailKey);
-    scoreTailState =
-        queryOrCreateGemmState(state, ltHandle, scoreTailKey, op_state_slot);
-    if (!scoreTailState)
-      return -1;
-    valueTailState =
-        queryOrCreateGemmState(state, ltHandle, valueTailKey, op_state_slot);
-    if (!valueTailState)
-      return -1;
-  }
+  // The widest chunk, which is what the two score buffers have to hold. This is
+  // at most sq_chunk * kv_span (the size they had before any per-chunk
+  // narrowing) and usually far less, so the allocation only ever shrinks.
+  int64_t max_chunk_score_elems = 0;
+  for (const GqaChunkPlan &cp : chunks)
+    max_chunk_score_elems = std::max(max_chunk_score_elems, cp.c * cp.kv_ext);
 
   // ---- Workspace layout ----
   // All temp buffers are packed contiguously into the shared workspace,
@@ -1861,15 +2091,18 @@ static int gqa_forward_hipblaslt(
   size_t Kexp_bytes =
       use_no_expand ? 0 : static_cast<size_t>(B) * H * kv_span * d * elem_sz;
   size_t Vexp_bytes = Kexp_bytes;
-  // Both score buffers span kv_span keys, not total_seq: they hold exactly what
-  // the Score GEMM writes. These offsets chain into off_S_fp16, off_O, temp_end
-  // and the GEMM workspace, so kv_span has to appear in both or the region
-  // boundaries disagree with the GEMM extents and it is a silent heap
-  // overwrite rather than a crash.
+  // Both score buffers are sized to the widest chunk, not to
+  // sq_chunk * total_seq: they hold exactly what the Score GEMM writes on the
+  // heaviest iteration. These offsets chain into off_S_fp16, off_O, temp_end
+  // and the GEMM workspace, so the same extent has to appear in both or the
+  // region boundaries disagree with the GEMM extents and it is a silent heap
+  // overwrite rather than a crash. It must be the max over chunks and not the
+  // current chunk's own extent for the same reason: the offsets are fixed for
+  // the whole call while the extent varies per iteration.
   size_t S_f32_bytes =
-      static_cast<size_t>(B) * H * sq_chunk * kv_span * sizeof(float);
+      static_cast<size_t>(B) * H * max_chunk_score_elems * sizeof(float);
   size_t S_fp16_bytes =
-      static_cast<size_t>(B) * H * sq_chunk * kv_span * elem_sz;
+      static_cast<size_t>(B) * H * max_chunk_score_elems * elem_sz;
   size_t O_bytes =
       need_transpose ? static_cast<size_t>(B) * H * sq * d * elem_sz : 0;
 
@@ -1909,12 +2142,13 @@ static int gqa_forward_hipblaslt(
 
   // Single workspace allocation: temp buffers + GEMM workspace.
   {
-    size_t gemm_ws =
-        std::max(scoreState->workspace_size, valueState->workspace_size);
-    if (scoreTailState)
-      gemm_ws = std::max(gemm_ws, scoreTailState->workspace_size);
-    if (valueTailState)
-      gemm_ws = std::max(gemm_ws, valueTailState->workspace_size);
+    // Over every chunk's pair of algorithms, since the region is allocated once
+    // and the loop below cannot grow it.
+    size_t gemm_ws = 0;
+    for (const GqaChunkPlan &cp : chunks) {
+      gemm_ws = std::max(gemm_ws, cp.score->workspace_size);
+      gemm_ws = std::max(gemm_ws, cp.value->workspace_size);
+    }
     size_t total_needed = temp_end + gemm_ws;
     HIP_CHECK(hipdnn_ep_state_ensure_workspace(state, total_needed));
   }
@@ -2089,11 +2323,17 @@ static int gqa_forward_hipblaslt(
     float beta = 0.0f;
     float valAlpha = 1.0f;
 
-    for (int64_t q0 = 0; q0 < sq; q0 += sq_chunk) {
-      const int64_t c = std::min<int64_t>(sq_chunk, sq - q0);
-      const bool is_tail = (c != sq_chunk);
-      const GqaGemmCacheEntry *sSt = is_tail ? scoreTailState : scoreState;
-      const GqaGemmCacheEntry *vSt = is_tail ? valueTailState : valueState;
+    for (const GqaChunkPlan &cp : chunks) {
+      const int64_t q0 = cp.q0;
+      const int64_t c = cp.c;
+      // Key positions this chunk actually scores, and where they start.
+      // chunk_kv_lo is absolute (it indexes the bias and drives the mask's
+      // shift); cp.kv_off is the same position relative to kv_lo, which is what
+      // indexes the K / V operands because the expand packed them from kv_lo.
+      const int64_t kv_ext = cp.kv_ext;
+      const int64_t chunk_kv_lo = kv_lo + cp.kv_off;
+      const GqaGemmCacheEntry *sSt = cp.score;
+      const GqaGemmCacheEntry *vSt = cp.value;
 
       // Q and O keep their full-sq batch strides (stated in the GEMM key), so
       // selecting a chunk is a plain offset into the query axis of each.
@@ -2101,9 +2341,17 @@ static int gqa_forward_hipblaslt(
                            static_cast<size_t>(q0) * d * elem_sz;
       void *valueC = static_cast<char *>(valueCBase) +
                      static_cast<size_t>(q0) * d * elem_sz;
+      // The chunk's key range is selected the same way the op-level one is: by
+      // advancing the K / V base pointers. The cache and the expand destination
+      // are both BNSD with d fastest, so a key offset is a contiguous byte
+      // offset, and the per-head batch stride stated in the GEMM key keeps
+      // describing the whole buffer rather than the slice.
+      const size_t chunkKvOff = static_cast<size_t>(cp.kv_off) * d * elem_sz;
+      const void *scoreAc = static_cast<const char *>(scoreA) + chunkKvOff;
+      const void *valueAc = static_cast<const char *>(valueA) + chunkKvOff;
       // The score buffers are re-packed per chunk, so their per-head stride is
       // the chunk's own row count over the key range actually scored.
-      const int scoreBatchStride = static_cast<int>(c * kv_span);
+      const int scoreBatchStride = static_cast<int>(c * kv_ext);
 
       // ---- Step 8: Score GEMM (fp16/fp32 in, fp32 out) ----
       // A = K: no-expand reads present_key directly, expand reads d_Kexp.
@@ -2111,7 +2359,7 @@ static int gqa_forward_hipblaslt(
       // (BSHD==BNSD@sq=1).
       hipblasLtMatmulAlgo_t sAlgo = sSt->algo;
       HIPBLAS_CHECK(hipblasLtMatmul(
-          ltHandle, sSt->desc, &scoreAlpha, scoreA, sSt->layA, scoreB,
+          ltHandle, sSt->desc, &scoreAlpha, scoreAc, sSt->layA, scoreB,
           sSt->layB, &beta, d_S_f32, sSt->layC, d_S_f32, sSt->layD, &sAlgo,
           gemm_ws_ptr, gemm_ws_bytes, stream));
 
@@ -2149,9 +2397,9 @@ static int gqa_forward_hipblaslt(
       // so the kernel then writes nothing -- correct, just redundant.)
       if ((sq > 1 || local_window_size > 0) && !no_causal) {
         HIP_CHECK(hip_gqa_causal_mask_f32(
-            stream, d_S_f32, static_cast<int>(B * H), static_cast<int>(kv_span),
+            stream, d_S_f32, static_cast<int>(B * H), static_cast<int>(kv_ext),
             static_cast<int>(c), scoreBatchStride,
-            static_cast<int>(past_len + q0 - kv_lo),
+            static_cast<int>(past_len + q0 - chunk_kv_lo),
             static_cast<int>(local_window_size)));
       }
       // fp16 GQA: softmax writes fp16 probabilities for the fp16 Value GEMM.
@@ -2175,24 +2423,24 @@ static int gqa_forward_hipblaslt(
       if (attention_bias) {
         HIP_CHECK(hip_gqa_softmax_f32_to_out_biased(
             stream, d_S_f32, d_S_fp16, static_cast<int>(B * H * c),
-            static_cast<int>(kv_span), static_cast<int>(c), scoreBatchStride,
+            static_cast<int>(kv_ext), static_cast<int>(c), scoreBatchStride,
             scoreBatchStride, head_sink, static_cast<int>(H),
             static_cast<int>(use_smooth_softmax), attention_bias,
             static_cast<int>(attn_bias_batch),
             static_cast<int>(attn_bias_num_heads), static_cast<int>(elem_sz),
             static_cast<int>(gemm_fp32), static_cast<int>(sq),
             static_cast<int>(q0), static_cast<int>(total_seq),
-            static_cast<int>(kv_lo)));
+            static_cast<int>(chunk_kv_lo)));
       } else if (gemm_fp32) {
         HIP_CHECK(hip_gqa_softmax_f32_to_f32(
             stream, d_S_f32, d_S_fp16, static_cast<int>(B * H * c),
-            static_cast<int>(kv_span), static_cast<int>(c), scoreBatchStride,
+            static_cast<int>(kv_ext), static_cast<int>(c), scoreBatchStride,
             scoreBatchStride, head_sink, static_cast<int>(H),
             static_cast<int>(use_smooth_softmax)));
       } else {
         HIP_CHECK(hip_gqa_softmax_f32_to_f16(
             stream, d_S_f32, d_S_fp16, static_cast<int>(B * H * c),
-            static_cast<int>(kv_span), static_cast<int>(c), scoreBatchStride,
+            static_cast<int>(kv_ext), static_cast<int>(c), scoreBatchStride,
             scoreBatchStride, head_sink, static_cast<int>(H),
             static_cast<int>(use_smooth_softmax)));
       }
@@ -2203,7 +2451,7 @@ static int gqa_forward_hipblaslt(
       //        GEMM writes straight to output (BSHD==BNSD).
       hipblasLtMatmulAlgo_t vAlgo = vSt->algo;
       HIPBLAS_CHECK(hipblasLtMatmul(
-          ltHandle, vSt->desc, &valAlpha, valueA, vSt->layA, d_S_fp16,
+          ltHandle, vSt->desc, &valAlpha, valueAc, vSt->layA, d_S_fp16,
           vSt->layB, &beta, valueC, vSt->layC, valueC, vSt->layD, &vAlgo,
           gemm_ws_ptr, gemm_ws_bytes, stream));
     }
@@ -2224,15 +2472,28 @@ static int gqa_forward_hipblaslt(
     // exporting its cache in place takes the append branch and the copy_lo
     // below is inert, which is otherwise indistinguishable from the narrowing
     // failing to engage.
+    // The per-chunk key extents are summarised as their range and their sum
+    // rather than listed: the sum against sq*kv_span is the whole point of the
+    // narrowing (it is the score-matrix area actually computed), and chunks is
+    // what says how many descriptors the loop cycled through.
+    int64_t kv_ext_min = chunks.empty() ? 0 : chunks.front().kv_ext;
+    int64_t kv_ext_max = 0, score_elems = 0;
+    for (const GqaChunkPlan &cp : chunks) {
+      kv_ext_min = std::min(kv_ext_min, cp.kv_ext);
+      kv_ext_max = std::max(kv_ext_max, cp.kv_ext);
+      score_elems += cp.c * cp.kv_ext;
+    }
     RUNTIME_DEBUG_LOG(
         "[REAL] GQA hipBLASLt: B=%lld sq=%lld sq_chunk=%lld total_seq=%lld "
-        "kv_lo=%lld kv_span=%lld H=%lld G=%lld d=%lld no_expand=%d "
+        "kv_lo=%lld kv_span=%lld chunks=%zu kv_ext=[%lld,%lld] "
+        "score_elems=%lld/%lld H=%lld G=%lld d=%lld no_expand=%d "
         "transpose=%d kv_inplace=%d past_len=%lld past_buf_seq=%lld "
         "present_seq=%lld\n",
         (long long)B, (long long)sq, (long long)sq_chunk, (long long)total_seq,
-        (long long)kv_lo, (long long)kv_span, (long long)H, (long long)G,
-        (long long)d, static_cast<int>(use_no_expand),
-        static_cast<int>(need_transpose),
+        (long long)kv_lo, (long long)kv_span, chunks.size(),
+        (long long)kv_ext_min, (long long)kv_ext_max, (long long)score_elems,
+        (long long)(sq * kv_span), (long long)H, (long long)G, (long long)d,
+        static_cast<int>(use_no_expand), static_cast<int>(need_transpose),
         static_cast<int>(past_key != nullptr && past_key == present_key),
         (long long)past_len, (long long)past_buf_seq, (long long)present_seq);
   }
