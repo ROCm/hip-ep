@@ -92,6 +92,10 @@ target_include_directories(HipsrSchemePass PRIVATE
   ${ChezScheme_SOURCE_DIR}/boot/pb
 )
 
+target_compile_definitions(HipsrSchemePass PRIVATE
+  SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
 add_dependencies(HipsrSchemePass ChezScheme ChezBootHeaders)
 
 target_link_libraries(HipsrSchemePass

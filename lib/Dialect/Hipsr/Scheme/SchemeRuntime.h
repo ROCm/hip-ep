@@ -37,12 +37,15 @@ SchemeValue makeSchemeValue(mlir::Value val);
 SchemeValue makeSchemeType(mlir::Type type);
 SchemeValue makeSchemeAttribute(mlir::Attribute attr);
 
-// Call Scheme callback from C++ with MLIR objects
-// Used for walk functions where Scheme function is called for each operation
-void callSchemeCallback(SchemeValue callback, mlir::Operation* op);
-
 // Register MLIR foreign functions accessible from Scheme
 void registerMlirForeignFunctions();
+
+// Load and evaluate a Scheme script file
+bool loadSchemeScript(const char* scriptPath);
+
+// Call a Scheme function with a single MLIR operation argument
+// Used to invoke Scheme-defined pass entry points
+void callSchemePassFunction(const char* functionName, mlir::Operation* op);
 
 } // namespace hipsr
 } // namespace mlir

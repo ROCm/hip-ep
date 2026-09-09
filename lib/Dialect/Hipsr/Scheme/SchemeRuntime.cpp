@@ -12,6 +12,7 @@
 #include "mlir/CAPI/Wrap.h"
 #include <cstddef>
 #include <cstring>
+#include <fstream>
 
 // Include Chez Scheme C API header - use the ta6le machine-specific version
 // where ptr is defined as void*, not the portable boot (pb) version
@@ -145,29 +146,56 @@ SchemeValue makeSchemeAttribute(mlir::Attribute attr) {
   return const_cast<void*>(cAttr.ptr);
 }
 
-// Call Scheme callback with MLIR operation
-void callSchemeCallback(SchemeValue callback, mlir::Operation* op) {
+// Load and evaluate a Scheme script file
+bool loadSchemeScript(const char* scriptPath) {
+  if (!scheme_initialized)
+    return false;
+
+  // Read the file
+  std::ifstream file(scriptPath);
+  if (!file.is_open()) {
+    llvm::errs() << "Error: Cannot open Scheme script: " << scriptPath << "\n";
+    return false;
+  }
+
+  std::string scm_code((std::istreambuf_iterator<char>(file)),
+                       std::istreambuf_iterator<char>());
+  file.close();
+
+  llvm::errs() << "Loading Scheme script: " << scriptPath << "\n";
+
+  // Evaluate the script
+  ptr eval_sym = Stop_level_value(Sstring_to_symbol("eval"));
+  ptr read_sym = Stop_level_value(Sstring_to_symbol("read"));
+  ptr open_string_input_port_sym = Stop_level_value(Sstring_to_symbol("open-string-input-port"));
+  ptr eof_object_p = Stop_level_value(Sstring_to_symbol("eof-object?"));
+
+  ptr port = Scall1(open_string_input_port_sym, Sstring(scm_code.c_str()));
+
+  while (true) {
+    ptr expr = Scall1(read_sym, port);
+    if (Scall1(eof_object_p, expr) != Sfalse)
+      break;
+    Scall1(eval_sym, expr);
+  }
+
+  llvm::errs() << "Loaded Scheme script: " << scriptPath << "\n";
+  return true;
+}
+
+// Call a Scheme function with a single MLIR operation argument
+void callSchemePassFunction(const char* functionName, mlir::Operation* op) {
   if (!scheme_initialized)
     return;
 
-  // Get the process-operation function
-  llvm::errs() << "[callSchemeCallback] Looking up process-operation\n";
-  ptr process_op = Stop_level_value(Sstring_to_symbol("process-operation"));
-  if (process_op == Sfalse) {
-    llvm::errs() << "Warning: process-operation not found\n";
+  ptr func = Stop_level_value(Sstring_to_symbol(functionName));
+  if (func == Sfalse) {
+    llvm::errs() << "Warning: Scheme function '" << functionName << "' not found\n";
     return;
   }
-  llvm::errs() << "[callSchemeCallback] Found process-operation\n";
 
-  // Convert operation to Scheme uptr
-  llvm::errs() << "[callSchemeCallback] Converting op to Scheme: " << op << "\n";
   ptr schemeOp = makeSchemeOperation(op);
-  llvm::errs() << "[callSchemeCallback] schemeOp = " << schemeOp << "\n";
-
-  // Call process-operation with the operation
-  llvm::errs() << "[callSchemeCallback] About to call Scall1...\n";
-  Scall1(process_op, schemeOp);
-  llvm::errs() << "[callSchemeCallback] Scall1 completed\n";
+  Scall1(func, schemeOp);
 }
 
 // C functions callable from Scheme via FFI
@@ -175,10 +203,8 @@ extern "C" {
 
 // Get operation name - takes unsigned-64 (pointer as uint64_t)
 static const char* mlir_operation_get_name(uint64_t op) {
-  llvm::errs() << "[C] mlir_operation_get_name called\n";
   if (!op) return "";
   mlir::Operation* cppOp = reinterpret_cast<mlir::Operation*>(op);
-  llvm::errs() << "[C] Got operation: " << cppOp->getName() << "\n";
   return cppOp->getName().getStringRef().data();
 }
 
@@ -216,6 +242,18 @@ static uint64_t mlir_operation_get_result(uint64_t op, int64_t index) {
   return reinterpret_cast<uint64_t>(const_cast<void*>(cVal.ptr));
 }
 
+// Walk operation tree and call Scheme callback for each operation
+// callback: Scheme procedure (lambda (op) ...)
+static void mlir_operation_walk(uint64_t op, ptr callback) {
+  if (!op) return;
+  mlir::Operation* cppOp = reinterpret_cast<mlir::Operation*>(op);
+
+  cppOp->walk([callback](mlir::Operation* walkOp) {
+    ptr schemeOp = Sunsigned64(reinterpret_cast<uint64_t>(walkOp));
+    Scall1(callback, schemeOp);
+  });
+}
+
 } // extern "C"
 
 // Register all MLIR foreign functions in Scheme
@@ -226,6 +264,7 @@ void registerMlirForeignFunctions() {
   Sregister_symbol("mlir_operation_num_results", (void*)mlir_operation_num_results);
   Sregister_symbol("mlir_operation_get_operand", (void*)mlir_operation_get_operand);
   Sregister_symbol("mlir_operation_get_result", (void*)mlir_operation_get_result);
+  Sregister_symbol("mlir_operation_walk", (void*)mlir_operation_walk);
 
   llvm::errs() << "Registered MLIR foreign functions for Scheme\n";
 }

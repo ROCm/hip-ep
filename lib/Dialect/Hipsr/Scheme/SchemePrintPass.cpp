@@ -25,33 +25,17 @@ struct SchemePrintPass : public impl::SchemePrintPassBase<SchemePrintPass> {
       return;
     }
 
-    ModuleOp module = getOperation();
-
-    // Call Scheme to initialize the pass
-    std::vector<SchemeValue> initArgs = {
-      makeSchemeString(module.getName().value_or("<unnamed>").str().c_str())
-    };
-    callSchemeFunction("pass-initialize", initArgs);
-
-    // Walk operations and call Scheme for each one
-    // Collect operations first, then process to avoid calling Scheme from lambda
-    std::vector<Operation*> ops;
-    module.walk([&ops](Operation *op) {
-      ops.push_back(op);
-    });
-
-    llvm::errs() << "Processing " << ops.size() << " operations...\n";
-    for (size_t i = 0; i < ops.size(); i++) {
-      Operation* op = ops[i];
-      llvm::errs() << "  Op " << i << ": " << op->getName() << "\n";
-      llvm::errs() << "  Calling Scheme directly...\n";
-      callSchemeCallback(nullptr, op);  // Use the callback helper
-      llvm::errs() << "  Done\n";
+    // Load the pure Scheme pass implementation
+    // TODO: Make script path configurable via pass option
+    const char* scriptPath = SOURCE_DIR "/lib/Dialect/Hipsr/Scheme/print-pass.scm";
+    if (!loadSchemeScript(scriptPath)) {
+      signalPassFailure();
+      return;
     }
 
-    // Call Scheme to finalize the pass
-    std::vector<SchemeValue> finalizeArgs = {};
-    callSchemeFunction("pass-finalize", finalizeArgs);
+    // Call the Scheme pass entry point with the module
+    ModuleOp module = getOperation();
+    callSchemePassFunction("run-pass", module);
   }
 };
 
