@@ -35,20 +35,37 @@ const size_t scheme_bindings_scm_size = sizeof(scheme_bindings_scm_data) - 1;
 
 namespace {
 static bool scheme_initialized = false;
+static SchemeLogLevel current_log_level = SchemeLogLevel::Warning;
 }
 
 namespace mlir {
 namespace hipsr {
 
-bool initializeSchemeRuntime(bool verbose) {
+SchemeLogLevel parseLogLevel(const std::string& level) {
+  if (level == "debug") return SchemeLogLevel::Debug;
+  if (level == "info") return SchemeLogLevel::Info;
+  if (level == "warning") return SchemeLogLevel::Warning;
+  if (level == "error") return SchemeLogLevel::Error;
+  if (level == "fatal") return SchemeLogLevel::Fatal;
+
+  llvm::errs() << "Warning: unknown log level '" << level
+               << "', defaulting to 'warning'\n";
+  return SchemeLogLevel::Warning;
+}
+
+bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
   if (scheme_initialized)
     return true;
 
-  if (verbose) {
-    llvm::errs() << "Initializing Chez Scheme runtime "
+  current_log_level = logLevel;
+
+  if (logLevel <= SchemeLogLevel::Info) {
+    llvm::errs() << "[info] Initializing Chez Scheme runtime "
                  << Skernel_version() << "\n";
-    llvm::errs() << "  Petite boot: " << petite_boot_size << " bytes\n";
-    llvm::errs() << "  Scheme boot: " << scheme_boot_size << " bytes\n";
+  }
+  if (logLevel <= SchemeLogLevel::Debug) {
+    llvm::errs() << "[debug] Petite boot: " << petite_boot_size << " bytes\n";
+    llvm::errs() << "[debug] Scheme boot: " << scheme_boot_size << " bytes\n";
   }
   LLVM_DEBUG(llvm::dbgs() << "Initializing Chez Scheme runtime "
                           << Skernel_version() << "\n");
@@ -79,8 +96,8 @@ bool initializeSchemeRuntime(bool verbose) {
     Scall1(eval_sym, expr);
   }
 
-  if (verbose)
-    llvm::errs() << "Scheme runtime initialized\n";
+  if (logLevel <= SchemeLogLevel::Info)
+    llvm::errs() << "[info] Scheme runtime initialized\n";
   LLVM_DEBUG(llvm::dbgs() << "Scheme runtime initialized\n");
 
   scheme_initialized = true;
@@ -256,6 +273,32 @@ static void mlir_operation_walk(uint64_t op, ptr callback) {
   });
 }
 
+// Logging functions callable from Scheme
+static void mlir_log_debug(const char* msg) {
+  if (current_log_level <= SchemeLogLevel::Debug)
+    llvm::errs() << "[debug] " << msg << "\n";
+}
+
+static void mlir_log_info(const char* msg) {
+  if (current_log_level <= SchemeLogLevel::Info)
+    llvm::errs() << "[info] " << msg << "\n";
+}
+
+static void mlir_log_warning(const char* msg) {
+  if (current_log_level <= SchemeLogLevel::Warning)
+    llvm::errs() << "[warning] " << msg << "\n";
+}
+
+static void mlir_log_error(const char* msg) {
+  if (current_log_level <= SchemeLogLevel::Error)
+    llvm::errs() << "[error] " << msg << "\n";
+}
+
+static void mlir_log_fatal(const char* msg) {
+  if (current_log_level <= SchemeLogLevel::Fatal)
+    llvm::errs() << "[fatal] " << msg << "\n";
+}
+
 } // extern "C"
 
 // Register all MLIR foreign functions in Scheme
@@ -268,7 +311,14 @@ void registerMlirForeignFunctions() {
   Sregister_symbol("mlir_operation_get_result", (void*)mlir_operation_get_result);
   Sregister_symbol("mlir_operation_walk", (void*)mlir_operation_walk);
 
-  LLVM_DEBUG(llvm::dbgs() << "Registered " << 6 << " MLIR FFI functions\n");
+  // Register logging functions
+  Sregister_symbol("mlir_log_debug", (void*)mlir_log_debug);
+  Sregister_symbol("mlir_log_info", (void*)mlir_log_info);
+  Sregister_symbol("mlir_log_warning", (void*)mlir_log_warning);
+  Sregister_symbol("mlir_log_error", (void*)mlir_log_error);
+  Sregister_symbol("mlir_log_fatal", (void*)mlir_log_fatal);
+
+  LLVM_DEBUG(llvm::dbgs() << "Registered " << 11 << " MLIR FFI functions\n");
 }
 
 } // namespace hipsr

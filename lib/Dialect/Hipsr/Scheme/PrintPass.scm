@@ -1,12 +1,11 @@
 ;; Pure Scheme MLIR Pass - Print Operations
 ;; This is a complete MLIR pass written entirely in Scheme
+;; Demonstrates the MLIR logging API with different verbosity levels
 
 ;; Entry point called by C++ - receives the module operation
 (define (run-pass module-op)
-  (display "\n=== Pure Scheme MLIR Pass ===\n")
-  (display "Module: ")
-  (display (mlir-operation-name module-op))
-  (display "\n\n")
+  (mlir-log-info "Starting Pure Scheme MLIR Pass")
+  (mlir-log-debug (string-append "Module: " (mlir-operation-name module-op)))
 
   ;; Walk all operations and print details
   (mlir-operation-walk module-op
@@ -47,4 +46,4 @@
 
         (display "\n"))))
 
-  (display "\n=== End Pure Scheme Pass ===\n\n"))
+  (mlir-log-info "Completed Pure Scheme MLIR Pass"))
