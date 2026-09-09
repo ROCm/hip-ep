@@ -687,6 +687,12 @@ void hip_gqa_autotune_resolve_decode(void *policy,
           out->config = cfg;
           out->source = GqaTuneSource::Fallback;
           out->distance = 0.0f;
+          if (logOn())
+            fprintf(stderr,
+                    "[gqa-lut] decode fallback H=%d G=%d d=%d skv=%d -> wmma=%d "
+                    "splits=%d bkv=%d\n",
+                    req->num_heads, req->kv_num_heads, req->head_dim, eff,
+                    cfg.use_wmma, cfg.splits, cfg.bkv);
           return;
         }
       }
@@ -696,6 +702,13 @@ void hip_gqa_autotune_resolve_decode(void *policy,
   out->config = decodeHeuristic(*req, cus > 0 ? cus : kAssumedCus);
   out->source = GqaTuneSource::Heuristic;
   out->distance = 0.0f;
+  if (logOn())
+    fprintf(stderr,
+            "[gqa-lut] decode heuristic H=%d G=%d d=%d skv=%d -> wmma=%d "
+            "splits=%d bkv=%d\n",
+            req->num_heads, req->kv_num_heads, req->head_dim,
+            decodeEffectiveLen(*req), out->config.use_wmma, out->config.splits,
+            out->config.bkv);
 }
 
 void hip_gqa_autotune_resolve_prefill(void *policy,
@@ -756,6 +769,11 @@ void hip_gqa_autotune_resolve_prefill(void *policy,
       out->config = t.pool[fit->second.first].prefill;
       out->source = GqaTuneSource::Fallback;
       out->distance = 0.0f;
+      if (logOn())
+        fprintf(stderr,
+                "[gqa-lut] prefill fallback H=%d G=%d d=%d sq=%d skv=%d\n",
+                req->num_heads, req->kv_num_heads, req->head_dim, req->seq_q,
+                req->seq_kv);
       return;
     }
   }
@@ -763,6 +781,11 @@ void hip_gqa_autotune_resolve_prefill(void *policy,
   out->config = prefillHeuristic(*req);
   out->source = GqaTuneSource::Heuristic;
   out->distance = 0.0f;
+  if (logOn())
+    fprintf(stderr,
+            "[gqa-lut] prefill heuristic H=%d G=%d d=%d sq=%d skv=%d\n",
+            req->num_heads, req->kv_num_heads, req->head_dim, req->seq_q,
+            req->seq_kv);
 }
 
 void hip_gqa_autotune_fallback_prefill(const hipdnn_ep::GqaPrefillRequest *req,

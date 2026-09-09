@@ -198,5 +198,5 @@ fallbacks are runnable. It compiles the same `gqa_autotune.cpp` that ships in
 | Control | Effect |
 |---|---|
 | `HIPDNN_GQA_AUTOTUNE_MODE=lookup\|online` | `lookup` (default) resolves from the table; `online` bypasses it and benchmarks on the GPU (the pre-table path, kept for A/B). Read once per session in `hip_gqa_autotune_create()`. Mirrors matmul_nbits' `HIPDNN_MATMUL_AUTOTUNE_MODE`. |
-| `HIPDNN_GQA_LUT_LOG=1` | logs the table load (`loaded N points ...`) and each query's resolution (`exact`/`nearest`/`fallback` with the distance). Mirrors `HIPDNN_MATMUL_LUT_LOG`. Verification only — do not benchmark with it on. |
+| `HIPDNN_GQA_LUT_LOG=1` | logs the table load (`loaded N points ...`) and every query's resolution — `exact`/`nearest` (with the distance), or `fallback`/`heuristic` with the shape — so a run's fallback rate is visible from this one switch. Mirrors `HIPDNN_MATMUL_LUT_LOG`. Verification only — do not benchmark with it on. |
 | `HIPDNN_GQA_AUTOTUNE_LOG=1` | in `gqa_kernel.hip`, logs the config the kernel actually launched (in both `lookup` and `online` modes), so an `online` run can be diffed against the shipped table. Mirrors `HIPDNN_MATMUL_AUTOTUNE_LOG`: setting it alone prints **only** these autotune lines (not the rest of the debug firehose), while `HIPDNN_EP_DEBUG=1` also pulls them in as part of the full `[custom_kernels]` output. |
