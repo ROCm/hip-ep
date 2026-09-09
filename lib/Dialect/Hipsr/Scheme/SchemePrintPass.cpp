@@ -7,7 +7,6 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 #include "SchemeRuntime.h"
-#include <string>
 
 namespace mlir {
 namespace hipsr {
@@ -28,32 +27,29 @@ struct SchemePrintPass : public impl::SchemePrintPassBase<SchemePrintPass> {
 
     ModuleOp module = getOperation();
 
-    // Call Scheme function to initialize the pass
+    // Call Scheme to initialize the pass
     std::vector<SchemeValue> initArgs = {
       makeSchemeString(module.getName().value_or("<unnamed>").str().c_str())
     };
     callSchemeFunction("pass-initialize", initArgs);
 
-    // Walk all operations and call Scheme function for each
-    module.walk([](Operation *op) {
-      std::string genericFormStr;
-      llvm::raw_string_ostream os(genericFormStr);
-      op->print(os, OpPrintingFlags().printGenericOpForm());
-      os.flush();
-
-      std::vector<SchemeValue> args = {
-        makeSchemeString(op->getName().getStringRef().str().c_str()),
-        makeSchemeInteger(op->getNumOperands()),
-        makeSchemeInteger(op->getNumResults()),
-        makeSchemeString(genericFormStr.c_str())
-      };
-
-      // Call Scheme to process this operation
-      // The Scheme function decides what to do (print, transform, etc.)
-      callSchemeFunction("process-operation", args);
+    // Walk operations and call Scheme for each one
+    // Collect operations first, then process to avoid calling Scheme from lambda
+    std::vector<Operation*> ops;
+    module.walk([&ops](Operation *op) {
+      ops.push_back(op);
     });
 
-    // Call Scheme function to finalize the pass
+    llvm::errs() << "Processing " << ops.size() << " operations...\n";
+    for (size_t i = 0; i < ops.size(); i++) {
+      Operation* op = ops[i];
+      llvm::errs() << "  Op " << i << ": " << op->getName() << "\n";
+      llvm::errs() << "  Calling Scheme directly...\n";
+      callSchemeCallback(nullptr, op);  // Use the callback helper
+      llvm::errs() << "  Done\n";
+    }
+
+    // Call Scheme to finalize the pass
     std::vector<SchemeValue> finalizeArgs = {};
     callSchemeFunction("pass-finalize", finalizeArgs);
   }

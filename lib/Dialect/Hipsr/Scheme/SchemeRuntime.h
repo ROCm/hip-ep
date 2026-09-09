@@ -8,19 +8,41 @@
 
 #include <string>
 #include <vector>
+#include <functional>
 
 namespace mlir {
+class Operation;
+class Value;
+class Type;
+class Attribute;
+
 namespace hipsr {
 
 using SchemeValue = void*;
 
+// Initialize Scheme runtime and register MLIR FFI bindings
 bool initializeSchemeRuntime();
 
+// Call a Scheme function with primitive arguments (legacy API)
 std::string callSchemeFunction(const char* functionName,
                                 const std::vector<SchemeValue>& args);
 
+// Create Scheme values from C++ primitives
 SchemeValue makeSchemeString(const char* str);
 SchemeValue makeSchemeInteger(long value);
+
+// MLIR C++ to Scheme conversions - wrap MLIR objects as foreign pointers
+SchemeValue makeSchemeOperation(mlir::Operation* op);
+SchemeValue makeSchemeValue(mlir::Value val);
+SchemeValue makeSchemeType(mlir::Type type);
+SchemeValue makeSchemeAttribute(mlir::Attribute attr);
+
+// Call Scheme callback from C++ with MLIR objects
+// Used for walk functions where Scheme function is called for each operation
+void callSchemeCallback(SchemeValue callback, mlir::Operation* op);
+
+// Register MLIR foreign functions accessible from Scheme
+void registerMlirForeignFunctions();
 
 } // namespace hipsr
 } // namespace mlir
