@@ -725,6 +725,38 @@ LogicalResult MatmulOp::verify() {
 // that file and `docs/design/hip-shape-inference.md` for the rationale.
 
 //===----------------------------------------------------------------------===//
+// QMatMulOp: ins(A, B), outs(Y)
+// Quantized matrix multiplication with integrated QDQ scales and zero points
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QMatMulOp::getDpsInitsMutable() { return getYMutable(); }
+
+void QMatMulOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult QMatMulOp::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getA(), getB(), getY()},
+                                /*numInits=*/1)))
+    return failure();
+
+  return mlir::hip::verifyHipOpShape(
+      *this, [&]() -> SmallVector<SmallVector<int64_t>> {
+        SmallVector<int64_t> outShape = mlir::hip::inferMatmulShape(
+            getShapeOf(getA()), getShapeOf(getB()),
+            [&]() { return this->emitOpError(); }, getTransA(), getTransB());
+        if (outShape.empty())
+          return {};
+        return {std::move(outShape)};
+      });
+}
+
+// `QMatMulOp::reifyResultShapes` lives in
+// `lib/Dialect/IR/HipReifyResultShapesImpl.cpp`.
+
+//===----------------------------------------------------------------------===//
 // RmsNormOp: ins(input, scale), outs(output)
 //===----------------------------------------------------------------------===//
 
@@ -1215,6 +1247,18 @@ MutableOperandRange LeakyReluOp::getDpsInitsMutable() {
 }
 
 void LeakyReluOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// SwishOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SwishOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void SwishOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);

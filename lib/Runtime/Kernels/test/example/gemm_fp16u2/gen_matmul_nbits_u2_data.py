@@ -25,7 +25,7 @@ uint2 packing: value k occupies bits [2k, 2k+2) of row n's bitstream,
 LSB-first. Row byte stride = K/4 bytes (K must be a multiple of 4; the GEMV
 fast path in the kernel additionally requires K % 32 == 0).
 
-zero_points, TWO layouts (both emitted when zeros are enabled):
+zero_points, THREE layouts (all emitted when zeros are enabled):
   - *_zeros_u8      : uint8 [N, num_groups_k]  one byte per group (0..3).
                       This is what the u2 kernels index directly, and what
                       the runtime's zp-unpack kernel produces.
@@ -36,6 +36,16 @@ zero_points, TWO layouts (both emitted when zeros are enabled):
                       checks it reproduces *_zeros_u8, then feeds the result
                       through the kernel as pre_unpacked_zp_u8 — i.e. the
                       real runtime integration path.
+  - *_zeros_fp16    : FP16 [N, num_groups_k]  *fractional* per-group zero-
+                      points (values drawn from {0.5, 1.5, 2.5}). AMD Quark
+                      2-bit models express the non-uniform levels
+                      [-1,-1/3,1/3,1] as (index - 1.5) * scale, so they ship
+                      an FP16 zero-point (zp_elem_size==2) that MUST NOT be
+                      rounded to an integer. The test binary passes this
+                      straight through as zero_points with zp_elem_size=2 and
+                      checks the kernel's fp16-zp path against a dedicated
+                      fractional reference. Uses the SAME B/scales as the
+                      integer path — only the zero-point differs.
 
 Data layout (all row-major):
   A               : FP16  [M, K]                    (shared by both kernels)
@@ -142,10 +152,17 @@ def main():
     scales_u2 = np.random.uniform(0.01, 0.05, (N, num_groups_k)).astype(np.float16)
     zeros_u2 = None
     zeros_u2_packed = None
+    zeros_u2_fp16 = None
     if not args.no_zeros:
         # 2-bit zero_points are in 0..3; default (symmetric) zp is 2.
         zeros_u2 = np.random.randint(1, 3, (N, num_groups_k)).astype(np.uint8)
         zeros_u2_packed = pack_2bit(zeros_u2)
+        # Fractional FP16 zero-points (AMD Quark 2-bit uses 1.5). Vary per group
+        # among fractional values so the test exercises both fp16 reading AND
+        # per-group indexing; all are non-integer to prove no rounding occurs.
+        zeros_u2_fp16 = np.random.choice(
+            np.array([0.5, 1.5, 2.5], dtype=np.float32),
+            size=(N, num_groups_k)).astype(np.float16)
 
     B_u2_packed.flatten(order='C').tofile(
         os.path.join(out_dir, "matmul_nbits_u2_B.bin"))
@@ -156,6 +173,8 @@ def main():
             os.path.join(out_dir, "matmul_nbits_u2_zeros_u8.bin"))
         zeros_u2_packed.flatten(order='C').tofile(
             os.path.join(out_dir, "matmul_nbits_u2_zeros_packed.bin"))
+        zeros_u2_fp16.flatten(order='C').tofile(
+            os.path.join(out_dir, "matmul_nbits_u2_zeros_fp16.bin"))
 
     # ================= uint4 (nibble-packed, ONNX convention) =================
     B_u4 = np.random.randint(0, 16, (N, K), dtype=np.uint8)
@@ -202,6 +221,17 @@ def main():
         C_ref_u2 = (A.astype(np.float32) @ B_u2_dq.T).astype(np.float16)
         C_ref_u2.flatten(order='C').tofile(
             os.path.join(out_dir, "matmul_nbits_u2_C_ref.bin"))
+
+        # Fractional FP16 zero-point reference: SAME B/scales, fractional zp.
+        if zeros_u2_fp16 is not None:
+            zp_u2_fp16_f32 = zeros_u2_fp16.astype(np.float32)
+            B_u2_dq_fp16 = (B_u2.astype(np.float32)
+                            - zp_u2_fp16_f32[:, group_idx]) \
+                * scales_u2_f32[:, group_idx]
+            C_ref_u2_fp16 = (A.astype(np.float32) @ B_u2_dq_fp16.T) \
+                .astype(np.float16)
+            C_ref_u2_fp16.flatten(order='C').tofile(
+                os.path.join(out_dir, "matmul_nbits_u2_C_ref_fp16zp.bin"))
 
         scales_u4_f32 = scales_u4.astype(np.float32)
         if zeros_u4_u8 is not None:

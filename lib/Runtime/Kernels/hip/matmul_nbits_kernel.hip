@@ -66,6 +66,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 
 /* -----------------------------------------------------------------------
@@ -2132,15 +2133,19 @@ static int getOrTuneGemvConfigU3(
  * byte-identical, so no cross-byte straddling ever occurs (max shift 6 ->
  * value bits [6,8), always inside one byte). Row byte stride = ceil(K/4).
  *
- * Zero points (if present) are plain uint8, one byte per group (mirroring
- * the u3 path). Default zp = 2^(bits-1) = 2.
+ * Zero points (if present) are one value per group. ZPT selects the element
+ * type: uint8_t for the ONNX packed-integer convention (default zp =
+ * 2^(bits-1) = 2), or _Float16 for models that supply fractional FP16
+ * zero-points (e.g. AMD Quark 2-bit with zp = 1.5). The dequant math is float
+ * either way, so a fractional zp is handled with no change to the arithmetic.
  * ======================================================================= */
 
+template <typename ZPT>
 __global__ void matmul_nbits_kernel_u2(
     const __half* __restrict__ A,
     const uint8_t* __restrict__ B,
     const __half* __restrict__ scales,
-    const uint8_t* __restrict__ zp,
+    const ZPT* __restrict__ zp,
     const __half* __restrict__ bias,
     __half* __restrict__ output,
     int64_t M, int64_t N, int64_t K,
@@ -2197,12 +2202,12 @@ __global__ void matmul_nbits_kernel_u2(
  * loop, which had to special-case lanes 10 and 21).
  * ======================================================================= */
 
-template <int BLOCK_SIZE, int TILE_N>
+template <int BLOCK_SIZE, int TILE_N, typename ZPT = uint8_t>
 __global__ void matmul_nbits_gemv_kernel_u2(
     const __half* __restrict__ A,
     const uint8_t* __restrict__ B,
     const __half* __restrict__ scales,
-    const uint8_t* __restrict__ zp,
+    const ZPT* __restrict__ zp,
     const __half* __restrict__ bias,
     __half* __restrict__ output,
     int64_t M, int64_t N, int64_t K,
@@ -2381,10 +2386,11 @@ __global__ void matmul_nbits_gemv_kernel_u2(
  * into a dedicated map -- the u2 decode cost differs from u3/u4.
  * ----------------------------------------------------------------------- */
 
+template <typename ZPT = uint8_t>
 static void launchGemvConfigU2(
     int config_id, hipStream_t stream,
     const __half* A, const uint8_t* B,
-    const __half* sc, const uint8_t* zp,
+    const __half* sc, const ZPT* zp,
     const __half* bi, __half* out,
     int64_t M, int64_t N, int64_t K,
     int64_t batch, int64_t bs)
@@ -2398,7 +2404,7 @@ static void launchGemvConfigU2(
 #define GEMV_U2_CASE(ID, BS, TN) \
     case ID: \
         hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(matmul_nbits_gemv_kernel_u2<BS, TN>), \
+            HIP_KERNEL_NAME(matmul_nbits_gemv_kernel_u2<BS, TN, ZPT>), \
             grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs); \
         break
 
@@ -2425,10 +2431,11 @@ static void launchGemvConfigU2(
 #undef GEMV_U2_CASE
 }
 
+template <typename ZPT = uint8_t>
 static int tuneGemvConfigU2(
     hipStream_t stream,
     const __half* A, const uint8_t* B,
-    const __half* sc, const uint8_t* zp,
+    const __half* sc, const ZPT* zp,
     const __half* bi, __half* out,
     int64_t M, int64_t N, int64_t K,
     int64_t batch, int64_t bs)
@@ -2485,22 +2492,26 @@ static std::unordered_map<std::string, int> gemv_u2_cache;
 static std::mutex gemv_u2_tune_mutex;
 
 static std::string gemvU2CacheKey(int64_t M, int64_t N, int64_t K,
-                                  int64_t bs, bool has_zp) {
+                                  int64_t bs, bool has_zp, bool zp_fp16) {
     return std::to_string(M) + "_" + std::to_string(N) + "_" +
            std::to_string(K) + "_" + std::to_string(bs) + "_" +
-           (has_zp ? "1" : "0");
+           (has_zp ? "1" : "0") + "_" + (zp_fp16 ? "f16" : "u8");
 }
 
+template <typename ZPT = uint8_t>
 static int getOrTuneGemvConfigU2(
     hipStream_t stream,
     const __half* A, const uint8_t* B,
-    const __half* sc, const uint8_t* zp,
+    const __half* sc, const ZPT* zp,
     const __half* bi, __half* out,
     int64_t M, int64_t N, int64_t K,
     int64_t batch, int64_t bs)
 {
     const bool has_zp = (zp != nullptr);
-    std::string key = gemvU2CacheKey(M, N, K, bs, has_zp);
+    // fp16 (fractional) and uint8 (integer) zero-points compile to distinct
+    // kernels with different perf, so they must not share a tuned config.
+    std::string key = gemvU2CacheKey(M, N, K, bs, has_zp,
+                                     !std::is_same<ZPT, uint8_t>::value);
 
     std::lock_guard<std::mutex> lock(gemv_u2_tune_mutex);
 
@@ -2508,8 +2519,8 @@ static int getOrTuneGemvConfigU2(
     if (it != gemv_u2_cache.end())
         return it->second;
 
-    int best = tuneGemvConfigU2(stream, A, B, sc, zp, bi, out,
-                                M, N, K, batch, bs);
+    int best = tuneGemvConfigU2<ZPT>(stream, A, B, sc, zp, bi, out,
+                                     M, N, K, batch, bs);
     gemv_u2_cache[key] = best;
 
     MATMUL_NBITS_AUTOTUNE_LOG(
@@ -5327,20 +5338,26 @@ static int getOrTuneWmmaConfigU3(
  *
  *   B      : uint8 [N, (K*2)/8]                  (2-bit stream, 4 vals/byte)
  *   scales : fp16  [N, num_groups_k]
- *   zeros  : uint8 [N, num_groups_k]             (or NULL, default zp=2)
+ *   zeros  : ZPT   [N, num_groups_k]             (or NULL, default zp=2)
+ *
+ * ZPT selects the zero-point element type: `unsigned char` for the ONNX
+ * packed-integer convention, or `_Float16` for models that supply fractional
+ * FP16 zero-points (e.g. AMD Quark 2-bit, zp = 1.5). Only the per-group zp load
+ * differs; the fused inline-decode WMMA math is identical, so the FP16 path is
+ * as fast as the uint8 one.
  *
  * Everything else is byte-for-byte identical to GemmFp16U3Impl.
  * ======================================================================= */
 
 template <int BM_T, int BN_T, int WT_M, int WT_N, bool USE_ZEROS,
-          bool BOUNDS_CHECK = false>
+          bool BOUNDS_CHECK = false, typename ZPT = unsigned char>
 __device__ __forceinline__
 void GemmFp16U2Impl(
     int M, int N, int K,
     const _Float16* __restrict__ A, int lda,
     const unsigned char* __restrict__ B,
     const _Float16* __restrict__ scales,
-    const unsigned char* __restrict__ zeros,
+    const ZPT* __restrict__ zeros,
     int group_size, int num_groups_k,
     _Float16* __restrict__ C, int ldc,
     int swizzle_n = 4)
@@ -5579,7 +5596,7 @@ void GemmFp16U2Impl(
 }
 
 template <int BM_T = 128, int BN_T = 128, int WT_M = 2, int WT_N = 2,
-          int WAVES_EU = 8, bool BC = false>
+          int WAVES_EU = 8, bool BC = false, typename ZPT = unsigned char>
 __global__
 __attribute__((amdgpu_flat_work_group_size(
     GEMM_WG_SZ(BM_T, BN_T, WT_M, WT_N),
@@ -5590,18 +5607,18 @@ void MatMulNBitsWMMA_U2_NoZP(
     const _Float16* __restrict__ A, int lda,
     const unsigned char* __restrict__ B,
     const _Float16* __restrict__ scales,
-    const unsigned char* __restrict__ zeros,
+    const ZPT* __restrict__ zeros,
     int group_size, int num_groups_k,
     _Float16* __restrict__ C, int ldc,
     int swizzle_n = 4)
 {
-    GemmFp16U2Impl<BM_T, BN_T, WT_M, WT_N, false, BC>(
+    GemmFp16U2Impl<BM_T, BN_T, WT_M, WT_N, false, BC, ZPT>(
         M, N, K, A, lda, B, scales, zeros,
         group_size, num_groups_k, C, ldc, swizzle_n);
 }
 
 template <int BM_T = 128, int BN_T = 128, int WT_M = 2, int WT_N = 2,
-          int WAVES_EU = 8, bool BC = false>
+          int WAVES_EU = 8, bool BC = false, typename ZPT = unsigned char>
 __global__
 __attribute__((amdgpu_flat_work_group_size(
     GEMM_WG_SZ(BM_T, BN_T, WT_M, WT_N),
@@ -5612,12 +5629,12 @@ void MatMulNBitsWMMA_U2_ZP(
     const _Float16* __restrict__ A, int lda,
     const unsigned char* __restrict__ B,
     const _Float16* __restrict__ scales,
-    const unsigned char* __restrict__ zeros,
+    const ZPT* __restrict__ zeros,
     int group_size, int num_groups_k,
     _Float16* __restrict__ C, int ldc,
     int swizzle_n = 4)
 {
-    GemmFp16U2Impl<BM_T, BN_T, WT_M, WT_N, true, BC>(
+    GemmFp16U2Impl<BM_T, BN_T, WT_M, WT_N, true, BC, ZPT>(
         M, N, K, A, lda, B, scales, zeros,
         group_size, num_groups_k, C, ldc, swizzle_n);
 }
@@ -5628,10 +5645,11 @@ void MatMulNBitsWMMA_U2_ZP(
  * single uint16, so the read never crosses a 3rd byte. Mirrors
  * dequant_u3_to_fp16.
  * ----------------------------------------------------------------------- */
+template <typename ZPT = unsigned char>
 __global__ void dequant_u2_to_fp16(
     const unsigned char* __restrict__ B,       // [N, (K*2)/8] stream
     const _Float16* __restrict__ scales,       // [N, num_groups_k]
-    const unsigned char* __restrict__ zeros,   // [N, num_groups_k] or null
+    const ZPT* __restrict__ zeros,             // [N, num_groups_k] or null
     _Float16* __restrict__ B_fp16,             // [N, K]
     int N, int K, int group_size, int num_groups_k)
 {
@@ -5660,17 +5678,19 @@ __global__ void dequant_u2_to_fp16(
     *reinterpret_cast<uint2*>(dst + 4) = *reinterpret_cast<uint2*>(&bv[4]);
 }
 
+template <typename ZPT = unsigned char>
 static void launchDequantU2(
     hipStream_t stream,
     const unsigned char* B, const _Float16* scales,
-    const unsigned char* zeros, _Float16* B_fp16,
+    const ZPT* zeros, _Float16* B_fp16,
     int N, int K, int gs, int ngk)
 {
     constexpr int DQ_THR = 256;
     int k_groups = (K + DQ_THR * 8 - 1) / (DQ_THR * 8);
     dim3 dq_grid(static_cast<unsigned>(k_groups), static_cast<unsigned>(N));
     dim3 dq_block(DQ_THR);
-    hipLaunchKernelGGL(dequant_u2_to_fp16, dq_grid, dq_block, 0, stream,
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(dequant_u2_to_fp16<ZPT>),
+                       dq_grid, dq_block, 0, stream,
                        B, scales, zeros, B_fp16, N, K, gs, ngk);
 }
 
@@ -5704,12 +5724,13 @@ static constexpr WmmaConfigU2 kWmmaU2Configs[] = {
 static constexpr int kNumWmmaU2Configs =
     static_cast<int>(sizeof(kWmmaU2Configs) / sizeof(kWmmaU2Configs[0]));
 
+template <typename ZPT = unsigned char>
 static void launchWmmaConfigU2(
     int config_id, hipStream_t stream,
     int M, int N, int K,
     const _Float16* A, int lda,
     const unsigned char* B,
-    const _Float16* scales, const unsigned char* zeros,
+    const _Float16* scales, const ZPT* zeros,
     int gs, int ngk,
     _Float16* C, int ldc, bool has_zp,
     _Float16* B_fp16_buf = nullptr)
@@ -5779,13 +5800,13 @@ static void launchWmmaConfigU2(
     if (has_zp) {                                                             \
         hipLaunchKernelGGL(                                                   \
             HIP_KERNEL_NAME(                                                  \
-                MatMulNBitsWMMA_U2_ZP<BM_V, BN_V, 2, 2, 8, BC_V>),            \
+                MatMulNBitsWMMA_U2_ZP<BM_V, BN_V, 2, 2, 8, BC_V, ZPT>),       \
             grid_, block_, 0, stream,                                         \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
     } else {                                                                  \
         hipLaunchKernelGGL(                                                   \
             HIP_KERNEL_NAME(                                                  \
-                MatMulNBitsWMMA_U2_NoZP<BM_V, BN_V, 2, 2, 8, BC_V>),          \
+                MatMulNBitsWMMA_U2_NoZP<BM_V, BN_V, 2, 2, 8, BC_V, ZPT>),     \
             grid_, block_, 0, stream,                                         \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
     }                                                                         \
@@ -5805,13 +5826,13 @@ static void launchWmmaConfigU2(
     if (has_zp) {                                                             \
         hipLaunchKernelGGL(                                                   \
             HIP_KERNEL_NAME(                                                  \
-                MatMulNBitsWMMA_U2_ZP<BM_V, BN_V, 4, 2, 6, BC_V>),            \
+                MatMulNBitsWMMA_U2_ZP<BM_V, BN_V, 4, 2, 6, BC_V, ZPT>),       \
             grid_, block_, 0, stream,                                         \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
     } else {                                                                  \
         hipLaunchKernelGGL(                                                   \
             HIP_KERNEL_NAME(                                                  \
-                MatMulNBitsWMMA_U2_NoZP<BM_V, BN_V, 4, 2, 6, BC_V>),          \
+                MatMulNBitsWMMA_U2_NoZP<BM_V, BN_V, 4, 2, 6, BC_V, ZPT>),     \
             grid_, block_, 0, stream,                                         \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
     }                                                                         \
@@ -5835,12 +5856,13 @@ static void launchWmmaConfigU2(
 #undef WMMA_U2_LAUNCH
 }
 
+template <typename ZPT = unsigned char>
 static int tuneWmmaConfigU2(
     hipStream_t stream,
     int M, int N, int K,
     const _Float16* A, int lda,
     const unsigned char* B,
-    const _Float16* scales, const unsigned char* zeros,
+    const _Float16* scales, const ZPT* zeros,
     int gs, int ngk,
     _Float16* C, int ldc, bool has_zp)
 {
@@ -5919,22 +5941,27 @@ static int tuneWmmaConfigU2(
 static std::unordered_map<std::string, int> wmma_u2_cache;
 static std::mutex wmma_u2_tune_mutex;
 
-static std::string wmmaU2CacheKey(int M, int N, int K, int gs, bool has_zp) {
+static std::string wmmaU2CacheKey(int M, int N, int K, int gs, bool has_zp,
+                                  bool zp_fp16) {
     return std::to_string(M) + "_" + std::to_string(N) + "_" +
            std::to_string(K) + "_" + std::to_string(gs) + "_" +
-           (has_zp ? "1" : "0");
+           (has_zp ? "1" : "0") + "_" + (zp_fp16 ? "f16" : "u8");
 }
 
+template <typename ZPT = unsigned char>
 static int getOrTuneWmmaConfigU2(
     hipStream_t stream,
     int M, int N, int K,
     const _Float16* A, int lda,
     const unsigned char* B,
-    const _Float16* scales, const unsigned char* zeros,
+    const _Float16* scales, const ZPT* zeros,
     int gs, int ngk,
     _Float16* C, int ldc, bool has_zp)
 {
-    std::string key = wmmaU2CacheKey(M, N, K, gs, has_zp);
+    // fp16 (fractional) and uint8 (integer) zero-points compile to distinct
+    // kernels, so they must not share a tuned config.
+    std::string key = wmmaU2CacheKey(M, N, K, gs, has_zp,
+                                     !std::is_same<ZPT, unsigned char>::value);
 
     std::lock_guard<std::mutex> lock(wmma_u2_tune_mutex);
 
@@ -5942,8 +5969,8 @@ static int getOrTuneWmmaConfigU2(
     if (it != wmma_u2_cache.end())
         return it->second;
 
-    int best = tuneWmmaConfigU2(stream, M, N, K, A, lda, B,
-                                 scales, zeros, gs, ngk, C, ldc, has_zp);
+    int best = tuneWmmaConfigU2<ZPT>(stream, M, N, K, A, lda, B,
+                                     scales, zeros, gs, ngk, C, ldc, has_zp);
     wmma_u2_cache[key] = best;
 
     MATMUL_NBITS_AUTOTUNE_LOG(
@@ -6344,23 +6371,33 @@ extern "C" int hip_matmul_nbits(
    * bits=3 (WMMA fast path / GEMV / naive), specialized for the 2-bit decode.
    * ------------------------------------------------------------------- */
   if (bits == 2) {
-    if (zero_points && zp_elem_size != 1) {
+    // zero_points arrive in one of two element types:
+    //   zp_elem_size==1: the ONNX packed 2-bit integer stream (4 per byte),
+    //     unpacked by the runtime wrapper to one uint8 per group and handed
+    //     back via pre_unpacked_zp_u8 (direct callers may instead pass
+    //     one-byte-per-group zp with pre_unpacked_zp_u8 null); default zp = 2.
+    //   zp_elem_size==2: per-group FP16 zero-points [N, num_groups_k], used
+    //     directly. AMD Quark 2-bit uses a *fractional* zero-point (1.5) so the
+    //     non-uniform levels [-1,-1/3,1/3,1] fit (q-1.5)*scale; it must be read
+    //     as fp16, never rounded to an integer. The u2 kernels are templated on
+    //     the zp element type, so the (already float) dequant math handles the
+    //     fractional value at no extra cost to the uint8 path.
+    if (zero_points && zp_elem_size != 1 && zp_elem_size != 2) {
       fprintf(stderr,
-              "[custom_kernels] hip_matmul_nbits bits=2: zero_points must "
-              "be uint8 (zp_elem_size=1), got zp_elem_size=%lld\n",
+              "[custom_kernels] hip_matmul_nbits bits=2: zero_points must be "
+              "uint8 (zp_elem_size=1) or fp16 (zp_elem_size=2), got "
+              "zp_elem_size=%lld\n",
               (long long)zp_elem_size);
       return -1;
     }
+    const bool zp_fp16 = (zero_points != nullptr) && (zp_elem_size == 2);
 
-    // ONNX MatMulNBits packs 2-bit zero_points 4-per-byte ([N, ceil(gk/4)]).
-    // All u2 kernels below index zp one byte per group, so the runtime wrapper
-    // unpacks the packed stream to one-byte-per-group and hands it back via
-    // pre_unpacked_zp_u8. When that buffer is present prefer it; direct
-    // callers that already supply one-byte-per-group zp leave it null and use
-    // zero_points as-is.
-    const void* z_u2 = (zero_points && zp_elem_size == 1 && pre_unpacked_zp_u8)
-                           ? pre_unpacked_zp_u8
-                           : zero_points;
+    // uint8 path: prefer the wrapper's one-byte-per-group unpack; fp16 path:
+    // zero_points is already [N, num_groups_k] fp16 and used directly.
+    const void* z_u2 = zp_fp16 ? zero_points
+                       : ((zero_points && pre_unpacked_zp_u8)
+                              ? pre_unpacked_zp_u8
+                              : zero_points);
 
     constexpr int kU2GemvMinBs = 32;
     const bool u2_data_format = (batch_count == 1) && (K % 32 == 0);
@@ -6385,24 +6422,36 @@ extern "C" int hip_matmul_nbits(
       const auto* a_ptr = static_cast<const _Float16*>(A);
       const auto* b_ptr = static_cast<const unsigned char*>(B);
       const auto* s_ptr = static_cast<const _Float16*>(scales);
-      const auto* z_ptr = static_cast<const unsigned char*>(z_u2);
       auto*       o_ptr = static_cast<_Float16*>(output);
 
-      bool has_zp = (z_ptr != nullptr);
-      int cfg_id = getOrTuneWmmaConfigU2(
-          hip_stream, iM, iN, iK, a_ptr, lda, b_ptr,
-          s_ptr, z_ptr, gs, ngk, o_ptr, ldc, has_zp);
+      const bool has_zp = (z_u2 != nullptr);
 
       CUSTOM_KERNELS_DEBUG_LOG(
           "[custom_kernels] hip_matmul_nbits: u2 WMMA M=%d N=%d K=%d "
-          "bs=%d zp=%s bias=%s cfg=%d\n",
-          iM, iN, iK, gs, has_zp ? "yes" : "null",
-          bias ? "yes" : "null", cfg_id);
+          "bs=%d zp=%s%s bias=%s\n",
+          iM, iN, iK, gs, has_zp ? "yes" : "null", zp_fp16 ? "(fp16)" : "",
+          bias ? "yes" : "null");
 
-      _Float16* dq_buf = kWmmaU2Configs[cfg_id].fused
-                             ? nullptr : ensureDqBuffer(iN, iK);
-      launchWmmaConfigU2(cfg_id, hip_stream, iM, iN, iK, a_ptr, lda, b_ptr,
-                         s_ptr, z_ptr, gs, ngk, o_ptr, ldc, has_zp, dq_buf);
+      if (zp_fp16) {
+        const auto* z_ptr = static_cast<const _Float16*>(z_u2);
+        int cfg_id = getOrTuneWmmaConfigU2<_Float16>(
+            hip_stream, iM, iN, iK, a_ptr, lda, b_ptr,
+            s_ptr, z_ptr, gs, ngk, o_ptr, ldc, has_zp);
+        _Float16* dq_buf = kWmmaU2Configs[cfg_id].fused
+                               ? nullptr : ensureDqBuffer(iN, iK);
+        launchWmmaConfigU2<_Float16>(cfg_id, hip_stream, iM, iN, iK, a_ptr, lda,
+                                     b_ptr, s_ptr, z_ptr, gs, ngk, o_ptr, ldc,
+                                     has_zp, dq_buf);
+      } else {
+        const auto* z_ptr = static_cast<const unsigned char*>(z_u2);
+        int cfg_id = getOrTuneWmmaConfigU2(
+            hip_stream, iM, iN, iK, a_ptr, lda, b_ptr,
+            s_ptr, z_ptr, gs, ngk, o_ptr, ldc, has_zp);
+        _Float16* dq_buf = kWmmaU2Configs[cfg_id].fused
+                               ? nullptr : ensureDqBuffer(iN, iK);
+        launchWmmaConfigU2(cfg_id, hip_stream, iM, iN, iK, a_ptr, lda, b_ptr,
+                           s_ptr, z_ptr, gs, ngk, o_ptr, ldc, has_zp, dq_buf);
+      }
 
       if (bias) {
         dim3 bias_grid(static_cast<unsigned>((iN + 255) / 256),
@@ -6417,43 +6466,64 @@ extern "C" int hip_matmul_nbits(
       const auto* a_ptr  = static_cast<const __half*>(A);
       const auto* b_ptr  = static_cast<const uint8_t*>(B);
       const auto* sc_ptr = static_cast<const __half*>(scales);
-      const auto* zp_ptr = static_cast<const uint8_t*>(z_u2);
       const auto* bi_ptr = static_cast<const __half*>(bias);
       auto*       o_ptr  = static_cast<__half*>(output);
 
-      int cfg_id = getOrTuneGemvConfigU2(
-          hip_stream, a_ptr, b_ptr, sc_ptr, zp_ptr, bi_ptr, o_ptr,
-          M, N, K, batch_count, block_size);
-
       CUSTOM_KERNELS_DEBUG_LOG(
           "[custom_kernels] hip_matmul_nbits: u2 GEMV M=%lld N=%lld "
-          "K=%lld batch=%lld bs=%lld zp=%s bias=%s cfg=%d\n",
+          "K=%lld batch=%lld bs=%lld zp=%s%s bias=%s\n",
           (long long)M, (long long)N, (long long)K, (long long)batch_count,
           (long long)block_size, zero_points ? "yes" : "null",
-          bias ? "yes" : "null", cfg_id);
+          zp_fp16 ? "(fp16)" : "", bias ? "yes" : "null");
 
-      launchGemvConfigU2(cfg_id, hip_stream, a_ptr, b_ptr, sc_ptr, zp_ptr,
-                         bi_ptr, o_ptr, M, N, K, batch_count, block_size);
+      if (zp_fp16) {
+        const auto* zp_ptr = static_cast<const __half*>(z_u2);
+        int cfg_id = getOrTuneGemvConfigU2<__half>(
+            hip_stream, a_ptr, b_ptr, sc_ptr, zp_ptr, bi_ptr, o_ptr,
+            M, N, K, batch_count, block_size);
+        launchGemvConfigU2<__half>(cfg_id, hip_stream, a_ptr, b_ptr, sc_ptr,
+                                   zp_ptr, bi_ptr, o_ptr, M, N, K, batch_count,
+                                   block_size);
+      } else {
+        const auto* zp_ptr = static_cast<const uint8_t*>(z_u2);
+        int cfg_id = getOrTuneGemvConfigU2(
+            hip_stream, a_ptr, b_ptr, sc_ptr, zp_ptr, bi_ptr, o_ptr,
+            M, N, K, batch_count, block_size);
+        launchGemvConfigU2(cfg_id, hip_stream, a_ptr, b_ptr, sc_ptr, zp_ptr,
+                           bi_ptr, o_ptr, M, N, K, batch_count, block_size);
+      }
     } else {
       CUSTOM_KERNELS_DEBUG_LOG(
           "[custom_kernels] hip_matmul_nbits: u2 naive M=%lld N=%lld K=%lld "
-          "batch=%lld bs=%lld zp=%s bias=%s\n",
+          "batch=%lld bs=%lld zp=%s%s bias=%s\n",
           (long long)M, (long long)N, (long long)K, (long long)batch_count,
           (long long)block_size, zero_points ? "yes" : "null",
-          bias ? "yes" : "null");
+          zp_fp16 ? "(fp16)" : "", bias ? "yes" : "null");
 
       dim3 blk(kBlockDim, kBlockDim);
       dim3 grd(static_cast<unsigned>((N + kBlockDim - 1) / kBlockDim),
                static_cast<unsigned>((M + kBlockDim - 1) / kBlockDim),
                static_cast<unsigned>(batch_count));
 
-      hipLaunchKernelGGL(
-          matmul_nbits_kernel_u2, grd, blk, 0, hip_stream,
-          static_cast<const __half*>(A), static_cast<const uint8_t*>(B),
-          static_cast<const __half*>(scales),
-          static_cast<const uint8_t*>(z_u2),
-          static_cast<const __half*>(bias), static_cast<__half*>(output),
-          M, N, K, block_size);
+      if (zp_fp16) {
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(matmul_nbits_kernel_u2<__half>), grd, blk, 0,
+            hip_stream,
+            static_cast<const __half*>(A), static_cast<const uint8_t*>(B),
+            static_cast<const __half*>(scales),
+            static_cast<const __half*>(z_u2),
+            static_cast<const __half*>(bias), static_cast<__half*>(output),
+            M, N, K, block_size);
+      } else {
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(matmul_nbits_kernel_u2<uint8_t>), grd, blk, 0,
+            hip_stream,
+            static_cast<const __half*>(A), static_cast<const uint8_t*>(B),
+            static_cast<const __half*>(scales),
+            static_cast<const uint8_t*>(z_u2),
+            static_cast<const __half*>(bias), static_cast<__half*>(output),
+            M, N, K, block_size);
+      }
     }
 
     hipError_t err = hipGetLastError();

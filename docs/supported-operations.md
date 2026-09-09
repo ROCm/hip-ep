@@ -24,6 +24,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Tanh | Custom HIP kernel |
 | Softplus | Custom HIP kernel (f32/f16) |
 | Gelu | Custom HIP kernel |
+| Swish | Custom HIP kernel |
 | BiasGelu (`com.microsoft`) | Custom HIP kernel |
 | FastGelu (`com.microsoft`) | Custom HIP kernel |
 | Reciprocal | Custom HIP kernel |

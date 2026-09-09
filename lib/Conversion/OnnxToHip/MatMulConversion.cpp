@@ -35,10 +35,12 @@ MatMulToHip::matchAndRewrite(mlir::Operation *op,
 
   int64_t transA = 0;
   int64_t transB = 0;
+  // TransposeMatMulFold stamps these with getI64IntegerAttr, i.e. signless i64,
+  // so read through getValue(); getSInt() asserts on a non-signed type.
   if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("hipdnn.transA"))
-    transA = attr.getSInt();
+    transA = attr.getValue().getSExtValue();
   if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("hipdnn.transB"))
-    transB = attr.getSInt();
+    transB = attr.getValue().getSExtValue();
 
   // MatMul: result[..., M, N] = A[..., M, K] @ B[..., K, N].
   // Batch and M dims come from A; N comes from B's last dim.
