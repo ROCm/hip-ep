@@ -70,6 +70,7 @@ struct Options
     uint32_t    group_size    = 256;
     unsigned    seed          = 42;
     bool        verbose       = false;
+    bool        assume_gfx1151 = false;
 };
 
 void print_usage(const char* argv0)
@@ -87,6 +88,7 @@ void print_usage(const char* argv0)
         "  --elements <n>      Number of float32 elements (default: 16)\n"
         "  --group-size <n>    Threads per group (default: 256)\n"
         "  --adapter <sel>     Dx12Runner adapter selector (default: auto)\n"
+        "  --assume-gfx1151    Accept the selected AMD adapter as gfx1151\n"
         "  --seed <n>          RNG seed for random inputs (default: 42)\n"
         "  --verbose           Verbose Dx12Runner logging\n";
 }
@@ -116,6 +118,8 @@ bool parse_args(int argc, char** argv, Options& opts)
             opts.adapter = next("--adapter");
         else if(arg == "--seed")
             opts.seed = static_cast<unsigned>(std::stoul(next("--seed")));
+        else if(arg == "--assume-gfx1151")
+            opts.assume_gfx1151 = true;
         else if(arg == "--verbose")
             opts.verbose = true;
         else if(arg == "--help" || arg == "-h")
@@ -209,20 +213,19 @@ int main(int argc, char** argv)
         std::vector<std::vector<char>> inputs;
         inputs.push_back(to_char_buf(lhs));
         inputs.push_back(to_char_buf(rhs));
-        inputs.emplace_back(opts.num_elements * sizeof(float), 0); // output placeholder
 
         std::cout << "Loading kernel ELF: " << opts.kernel_path
                    << " (entry=" << opts.entry_point << ", format=" << opts.elf_format
                    << ", elements=" << opts.num_elements << ")\n";
 
-        hip_ep::dx12::Dx12Runner runner(opts.adapter, opts.verbose);
+        hip_ep::dx12::Dx12Runner runner(opts.adapter, opts.verbose, opts.assume_gfx1151);
         std::vector<float> output = runner.execute(kd, inputs);
 
         double max_abs_diff = 0.0;
         for(uint64_t i = 0; i < opts.num_elements; ++i)
         {
             float expected = lhs[i] + rhs[i];
-            max_abs_diff   = std::max(max_abs_diff,
+            max_abs_diff   = (std::max)(max_abs_diff,
                                       static_cast<double>(std::fabs(output[i] - expected)));
         }
 

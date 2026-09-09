@@ -140,7 +140,7 @@ void Dx12Runner::ensure_initialized()
         switch(sel_mode)
         {
         case SelMode::Auto:
-            matches = is_rdna3_plus;
+            matches = is_rdna3_plus || assume_gfx1151_;
             break;
         case SelMode::Index:
             matches = (amd_index == sel_index);
@@ -161,7 +161,7 @@ void Dx12Runner::ensure_initialized()
 
         if(!matches) { adapter.Reset(); continue; }
 
-        if(!is_rdna3_plus)
+        if(!is_rdna3_plus && !assume_gfx1151_)
         {
             std::cerr << "[dx12_runner] adapter rejected: DeviceId=0x" << std::hex << desc.DeviceId
                       << " is below RDNA3 minimum (0x" << RDNA3_MIN_DEVICE_ID << std::dec
@@ -261,6 +261,9 @@ void Dx12Runner::load_amd_ext()
         __uuidof(IAmdExtD3DDevice7),
         reinterpret_cast<void**>(amd_ext_device_.ReleaseAndGetAddressOf())));
 
+    DX12_CHECK(amd_ext_device_->QueryInterface(__uuidof(IAmdExtD3DDevice5),
+        reinterpret_cast<void**>(amd_ext_device5_.ReleaseAndGetAddressOf())));
+
     // Query v10 for DispatchPalElf (direct PAL ELF dispatch replicating metacommand path).
     HRESULT hr10 = amd_ext_device_->QueryInterface(__uuidof(IAmdExtD3DDevice10),
         reinterpret_cast<void**>(amd_ext_device10_.ReleaseAndGetAddressOf()));
@@ -296,9 +299,17 @@ static bool is_pal_elf(const void* data, std::size_t size)
 {
     if(!data || size < 8u) return false;
     const auto* p = static_cast<const uint8_t*>(data);
-    // ELF magic: 0x7F 'E' 'L' 'F'
     if(p[0] != 0x7fu || p[1] != 'E' || p[2] != 'L' || p[3] != 'F') return false;
-    return p[7] == 0x41u;  // EI_OSABI = 0x41 = AMDGPU PAL
+    return p[7] == 0x41u;
+}
+
+static bool is_hsa_rel_elf(const void* data, std::size_t size)
+{
+    if(!data || size < 20u) return false;
+    const auto* p = static_cast<const uint8_t*>(data);
+    if(p[0] != 0x7fu || p[1] != 'E' || p[2] != 'L' || p[3] != 'F') return false;
+    if(p[7] != 0x40u) return false;
+    return p[16] == 1u && p[17] == 0u;
 }
 
 // Convert an HSA ET_REL blob to PAL ELF format for ElfPal DX12 cross-compile.
@@ -388,7 +399,7 @@ ComPtr<ID3D12PipelineState> Dx12Runner::create_pso(const KernelDescriptor& kd)
 {
     // Check pipelineCrossCompileElfHsa support — required for our HSA ELF kernels.
     // pipelinePalElf would be needed for PAL ELF blobs (not used for GEMM kernels).
-    if(!elf_hsa_supported_)
+    if(!elf_hsa_supported_ && !is_hsa_rel_elf(kd.hsaco_data.data(), kd.hsaco_data.size()))
         throw std::runtime_error(
             "Dx12Runner::create_pso: pipelineCrossCompileElfHsa not supported by installed driver.");
 
@@ -407,9 +418,24 @@ ComPtr<ID3D12PipelineState> Dx12Runner::create_pso(const KernelDescriptor& kd)
 
     // All ELF blobs go through CreateComputePipelineCrossCompile with ElfHsa.
     // dxcp handles routing to PAL's InitFromElf-equivalent path internally.
+    const bool hsa_rel = is_hsa_rel_elf(blob_data, blob_size);
     auto do_create_pso = [&](ComPtr<ID3D12PipelineState>& out_pso) -> HRESULT
     {
-        // Determine shader type from elf_format field.
+        if(hsa_rel)
+        {
+            if(!amd_ext_device5_) return E_NOINTERFACE;
+            AmdExtD3DPipelineElfInfo elf{};
+            elf.type = AmdExtD3DStructPipelineElf;
+            elf.pNext = nullptr;
+            elf.pElfBinary = blob_data;
+            elf.elfSizeInBytes = blob_size;
+            elf.threadsPerGroup = {kd.group_size_x, kd.group_size_y, kd.group_size_z};
+            std::cerr << "[dx12_runner] CreatePipelineFromElf HSA ET_REL blob="
+                      << blob_size << " kernel=" << kd.entry_point << "\n";
+            return amd_ext_device5_->CreateComputePipelineFromElf(
+                &elf, IID_PPV_ARGS(&out_pso));
+        }
+
         AmdShaderType sh = AmdShaderType::ElfHsa;
         switch(kd.elf_format)
         {
@@ -422,12 +448,11 @@ ComPtr<ID3D12PipelineState> Dx12Runner::create_pso(const KernelDescriptor& kd)
             sh = AmdShaderType::ElfHsa;
             break;
         default:
-            // Fallback: detect from ELF header bytes.
             if(is_pal_elf(blob_data, blob_size)) sh = AmdShaderType::ElfPal;
             break;
         }
         AmdExtD3DPipelineCrossCompileInfo cc{};
-        cc.type              = AmdExtD3DStructPipelineCrossCompile;
+        cc.type                  = AmdExtD3DStructPipelineCrossCompile;
         cc.pNext             = nullptr;
         cc.pBlob             = blob_data;
         cc.blobSizeInBytes   = blob_size;
@@ -589,12 +614,15 @@ Dx12Runner::execute(const KernelDescriptor&              kd,
 
     // Validate: arg_sizes = GPU-buffer inputs + 1 output + N scalars.
     // Skip for PAL ELF dispatch — CbData replaces the arg_sizes mechanism.
-    const std::size_t n_args   = kd.arg_sizes.size();
+    const std::size_t buffer_args = kd.arg_sizes.size();
     const std::size_t n_scalar = kd.scalar_slots.size();
+    std::size_t n_args = buffer_args;
+    for(const auto& slot : kd.scalar_slots)
+        n_args = (std::max)(n_args, slot.arg_index + 1);
     const bool is_pal_elf = (kd.elf_format == ElfFormat::PalRel || kd.elf_format == ElfFormat::PalDyn);
     if(n_args < 1)
         throw std::runtime_error("Dx12Runner::execute: no arguments in descriptor");
-    if(!is_pal_elf && input_data.size() + 1 + n_scalar != n_args)
+    if(!is_pal_elf && input_data.size() + 1 != buffer_args)
         throw std::runtime_error(
             "Dx12Runner::execute: arg count mismatch (gpu_inputs=" +
             std::to_string(input_data.size()) + " scalars=" + std::to_string(n_scalar) +
@@ -640,11 +668,11 @@ Dx12Runner::execute(const KernelDescriptor&              kd,
     std::unordered_map<std::size_t, D3D12_GPU_VIRTUAL_ADDRESS> dbl_ptr_data_vas;
     {
         std::size_t ib = 0;
-        const std::size_t n_args = kd.arg_sizes.size();
+        const std::size_t total_args = n_args;
         std::unordered_map<std::size_t, bool> scalar_set;
         for(const auto& ss : kd.scalar_slots)
             scalar_set[ss.arg_index] = true;
-        for(std::size_t i = 0; i < n_args; ++i)
+        for(std::size_t i = 0; i < total_args; ++i)
         {
             if(scalar_set.count(i)) continue;
             D3D12_GPU_VIRTUAL_ADDRESS dva =
@@ -1041,7 +1069,10 @@ std::vector<char> Dx12Runner::execute_raw(const KernelDescriptor&               
 
     std::vector<D3D12_GPU_VIRTUAL_ADDRESS> gpu_vas;
     gpu_vas.reserve(input_data.size() + 1);
-    const std::size_t n_args = kd.arg_sizes.size();
+    const std::size_t buffer_args = kd.arg_sizes.size();
+    std::size_t n_args = buffer_args;
+    for(const auto& slot : kd.scalar_slots)
+        n_args = (std::max)(n_args, slot.arg_index + 1);
     std::vector<const void*> arg_ptrs(n_args, nullptr);
 
     std::size_t input_buf_idx = 0;
