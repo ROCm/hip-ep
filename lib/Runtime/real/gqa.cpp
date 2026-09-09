@@ -898,6 +898,28 @@ static bool gqa_fused_decode_disabled() {
   return disabled;
 }
 
+// Per-chunk key bounds recovered from the additive mask, one int per query
+// chunk. Grown on demand and never freed, for the same reason the GEMM
+// workspace is: it is at most one int per chunk (26 at a 16K prefill), so a
+// hipMalloc per call would cost more than the buffer holds.
+static int32_t *g_gqa_chunk_hi_buf = nullptr;
+static int64_t g_gqa_chunk_hi_elems = 0;
+
+static int32_t *gqa_ensure_chunk_hi_buffer(int64_t n) {
+  if (g_gqa_chunk_hi_buf && g_gqa_chunk_hi_elems >= n)
+    return g_gqa_chunk_hi_buf;
+  if (g_gqa_chunk_hi_buf)
+    (void)hipFree(g_gqa_chunk_hi_buf);
+  g_gqa_chunk_hi_buf = nullptr;
+  g_gqa_chunk_hi_elems = 0;
+  void *p = nullptr;
+  if (hipMalloc(&p, static_cast<size_t>(n) * sizeof(int32_t)) != hipSuccess)
+    return nullptr;
+  g_gqa_chunk_hi_buf = static_cast<int32_t *>(p);
+  g_gqa_chunk_hi_elems = n;
+  return g_gqa_chunk_hi_buf;
+}
+
 // Smart-dispatch threshold for the legacy GQA decode (sq == 1). When total_seq
 // exceeds this value, dispatch routes through the decomposed hipBLASLt pipeline
 // instead of the fused custom kernel hip_gqa_fused_decode. The fused kernel
@@ -1711,11 +1733,12 @@ static int gqa_forward_hipblaslt(
   //    dropped are ones the mask already set to its large-negative value. This
   //    is Gemma-4's 25 local layers.
   //
-  // What is deliberately NOT narrowed from above is a bidirectional op with no
-  // window (Whisper encoder self-attn / decoder cross-attn): it attends future
-  // keys, nothing has proved otherwise, and narrowing would silently drop real
-  // contributions. Gemma-4's 5 global d=512 layers are also this shape --
-  // no_causal with no recovered window -- so they keep the full key range.
+  // A bidirectional op with no window (Whisper encoder self-attn / decoder
+  // cross-attn, and Gemma-4's 5 global d=512 layers) satisfies neither of
+  // those: it may attend future keys and no attribute says otherwise. Those
+  // do not get the diagonal bound. Where they carry an additive mask they can
+  // still be narrowed to whatever bound the mask itself encodes, which is
+  // recovered below rather than assumed -- see mask_chunk_hi.
   const bool causal_narrow_ok = !no_causal || local_window_size > 0;
 
   // Whether a chunk's row range can be placed in absolute key coordinates at
@@ -1792,6 +1815,55 @@ static int gqa_forward_hipblaslt(
     }
   }
   const bool chunked = (sq_chunk < sq);
+
+  //===--------------------------------------------------------------------===//
+  // Per-chunk key bound recovered from the additive mask
+  //
+  // For a bidirectional op the diagonal bound above is unavailable, so every
+  // chunk scores every key. Where such an op carries an additive mask, the
+  // mask already states which keys are attended, and the entries it rules out
+  // are exactly the ones a chunk can drop: an additive bias at or below -65504
+  // contributes exactly zero to the softmax, so dropping it is bit-exact. That
+  // makes this a recovery of a bound the graph already contains rather than an
+  // assumption about the model, which is what the alternative would have been
+  // -- AttentionWindowFold cannot supply it, because the reach of Gemma-4's
+  // same-image-block leg is a property of the input, not of the mask's shape.
+  //
+  // Only worth doing when the op is actually chunked: a single chunk spans
+  // every query row, so its bound is the whole key range either way.
+  //
+  // One kernel over half the mask plus one D2H of a few ints per call. At 16K
+  // that is ~250 MB read against the 5 global layers' ~6 GB of score traffic it
+  // removes. A failure anywhere here leaves the vector empty and the op scores
+  // its full range, which is exactly the old behaviour.
+  //===--------------------------------------------------------------------===//
+  std::vector<int32_t> mask_chunk_hi;
+  if (chunked && chunk_narrow_ok && !causal_narrow_ok && attention_bias &&
+      !use_no_expand) {
+    const int64_t nchunks = (sq + sq_chunk - 1) / sq_chunk;
+    int32_t *d_hi = gqa_ensure_chunk_hi_buffer(nchunks);
+    if (d_hi &&
+        hip_gqa_bias_key_extent(
+            stream, attention_bias, d_hi, static_cast<int>(attn_bias_batch),
+            static_cast<int>(attn_bias_num_heads), static_cast<int>(sq),
+            static_cast<int>(total_seq), static_cast<int>(sq),
+            static_cast<int>(sq_chunk), static_cast<int>(past_len),
+            static_cast<int>(nchunks), static_cast<int>(elem_sz)) == 0) {
+      std::vector<int32_t> hi(static_cast<size_t>(nchunks), 0);
+      if (hipMemcpyAsync(hi.data(), d_hi,
+                         static_cast<size_t>(nchunks) * sizeof(int32_t),
+                         hipMemcpyDeviceToHost, stream) == hipSuccess &&
+          hipStreamSynchronize(stream) == hipSuccess)
+        mask_chunk_hi = std::move(hi);
+    }
+    // Never expected: only a failed scratch allocation or a failed launch gets
+    // here, and both mean the prefill silently reverts to scoring every key.
+    if (mask_chunk_hi.empty())
+      fprintf(stderr,
+              "gqa_forward_hipblaslt: mask key-extent recovery failed; "
+              "scoring the full key range for sq=%lld total_seq=%lld\n",
+              (long long)sq, (long long)total_seq);
+  }
 
   // GEMM descriptor keys. The no-expand flavour uses explicit per-operand
   // strides (non-zero stride fields); the expand flavour leaves them zero,
@@ -1886,6 +1958,16 @@ static int gqa_forward_hipblaslt(
         const int64_t h = past_len + q0 + c;
         if (h < k_hi)
           k_hi = h;
+      } else if (!mask_chunk_hi.empty()) {
+        // Bidirectional op: no diagonal bound, but the mask stated one. The
+        // stored value is the highest key position any row in this chunk
+        // attends, so the exclusive end is one past it.
+        const size_t idx = static_cast<size_t>(q0 / sq_chunk);
+        if (idx < mask_chunk_hi.size()) {
+          const int64_t h = static_cast<int64_t>(mask_chunk_hi[idx]) + 1;
+          if (h < k_hi)
+            k_hi = h;
+        }
       }
       if (local_window_size > 0) {
         // The chunk's first query row has the lowest lower bound in the chunk,

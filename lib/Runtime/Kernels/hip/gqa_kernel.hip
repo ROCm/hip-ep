@@ -1162,6 +1162,123 @@ extern "C" int hip_gqa_add_attention_bias_f32(
   GQA_RETURN_LAUNCH_STATUS();
 }
 
+// Highest key position any query row in a chunk can attend, read off the
+// additive mask instead of assumed.
+//
+// The decomposed prefill tiles the query range into chunks and gives each its
+// own key extent. For a causal op that extent is the chunk's own last row,
+// which is exact and needs no mask inspection. A BIDIRECTIONAL op
+// (onnx.Attention is_causal=0) has no such bound in its attributes, so every
+// chunk scores every key -- and on Gemma-4's 5 global layers that is the
+// largest single block of wasted work in a 16K prefill, because their mask is
+// causal apart from a same-image-block leg reaching one image block above the
+// diagonal. AttentionWindowFold cannot supply the bound: the block extent is a
+// property of the input, not of the mask's structure.
+//
+// The mask itself already carries it, exactly, for one streaming read. An entry
+// whose additive bias is at or below -65504 -- the fp16 lower bound, and the
+// sentinel HF exports write for "not attended" -- cannot survive the softmax:
+// relative to any score the GEMM ahead of it can produce, exp() of it
+// underflows to exactly zero. That is the same property the mask relies on to
+// mask at all, and softmax_f32_to_out_kernel above already documents this
+// value for the same reason. So dropping those key positions from a chunk's
+// range is bit-exact rather than an approximation, and anything less negative
+// than the sentinel is treated as attended, which only narrows less.
+//
+// Only the region ABOVE the chunk's last row is scanned. Keys at or below it
+// are kept whatever the mask says, so the answer is max(diagonal, highest
+// attended key above it) and the work is half the mask rather than all of it.
+// The max is reduced over every bias batch/head plane as well as every row in
+// the chunk, so a broadcast plane and a per-head mask both yield a bound valid
+// for all of them.
+#define GQA_BIAS_EXTENT_THREADS 256
+
+// Additive bias at or below this cannot survive the softmax. Not a tolerance:
+// it is the fp16 lower bound, which is the sentinel itself.
+#define GQA_BIAS_MASKED_MAX (-65504.0f)
+
+template <typename TBias>
+__global__ void bias_key_extent_kernel(
+    const TBias* __restrict__ bias, int* __restrict__ out,
+    int bias_batch, int bias_heads, int bias_sq, int bias_total_seq,
+    int sq, int sq_chunk, int past_len) {
+  const int chunk = blockIdx.x;
+  const int q0 = chunk * sq_chunk;
+  if (q0 >= sq)
+    return;
+  const int c = min(sq_chunk, sq - q0);
+
+  // Absolute key position of the chunk's last query row. Keys at or below it
+  // are attended by the causal leg and are never dropped, so it is the floor.
+  const int diag = past_len + q0 + c - 1;
+  int best = diag;
+
+  const int scan_lo = diag + 1;
+  if (scan_lo < bias_total_seq) {
+    const size_t plane = static_cast<size_t>(bias_sq) * bias_total_seq;
+    const int planes = bias_batch * bias_heads;
+    for (int p = 0; p < planes; ++p) {
+      for (int r = 0; r < c; ++r) {
+        const size_t row_base = static_cast<size_t>(p) * plane +
+                                static_cast<size_t>(q0 + r) * bias_total_seq;
+        // `k > best` first: once this thread has seen a high hit, the lower
+        // columns cannot raise the answer and the load is skipped.
+        for (int k = scan_lo + threadIdx.x; k < bias_total_seq;
+             k += blockDim.x) {
+          if (k > best &&
+              static_cast<float>(bias[row_base + k]) > GQA_BIAS_MASKED_MAX)
+            best = k;
+        }
+      }
+    }
+  }
+
+  __shared__ int red[GQA_BIAS_EXTENT_THREADS];
+  red[threadIdx.x] = best;
+  __syncthreads();
+  for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if (threadIdx.x < s)
+      red[threadIdx.x] = max(red[threadIdx.x], red[threadIdx.x + s]);
+    __syncthreads();
+  }
+  if (threadIdx.x == 0)
+    out[chunk] = red[0];
+}
+
+extern "C" int hip_gqa_bias_key_extent(
+    void* stream_ptr, const void* bias, void* out_chunk_hi,
+    int bias_batch, int bias_heads, int bias_sq, int bias_total_seq,
+    int sq, int sq_chunk, int past_len, int num_chunks,
+    int bias_element_size_bytes) {
+  if (!bias || !out_chunk_hi || num_chunks <= 0 || sq_chunk <= 0 ||
+      bias_total_seq <= 0 || bias_sq <= 0)
+    return -1;
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  if (bias_batch <= 0)
+    bias_batch = 1;
+  if (bias_heads <= 0)
+    bias_heads = 1;
+  (void)hipGetLastError();
+  if (bias_element_size_bytes == 2) {
+    bias_key_extent_kernel<__half>
+        <<<dim3(num_chunks), GQA_BIAS_EXTENT_THREADS, 0, stream>>>(
+            static_cast<const __half*>(bias), static_cast<int*>(out_chunk_hi),
+            bias_batch, bias_heads, bias_sq, bias_total_seq, sq, sq_chunk,
+            past_len);
+  } else if (bias_element_size_bytes == 4) {
+    bias_key_extent_kernel<float>
+        <<<dim3(num_chunks), GQA_BIAS_EXTENT_THREADS, 0, stream>>>(
+            static_cast<const float*>(bias), static_cast<int*>(out_chunk_hi),
+            bias_batch, bias_heads, bias_sq, bias_total_seq, sq, sq_chunk,
+            past_len);
+  } else {
+    fprintf(stderr, "hip_gqa_bias_key_extent: unsupported bias elem size %d\n",
+            bias_element_size_bytes);
+    return -1;
+  }
+  GQA_RETURN_LAUNCH_STATUS();
+}
+
 // Step 9b (fp32->fp16 variant): Softmax reading fp32 scores, writing fp16 output
 // Avoids inf-inf=NaN by operating entirely in fp32 before the final fp16 store.
 
