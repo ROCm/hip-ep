@@ -22,6 +22,22 @@
 (define mlir-operation-walk
   (foreign-procedure "mlir_operation_walk" (unsigned-64 scheme-object) void))
 
+;; Logging functions
+(define mlir-log-debug
+  (foreign-procedure "mlir_log_debug" (string) void))
+
+(define mlir-log-info
+  (foreign-procedure "mlir_log_info" (string) void))
+
+(define mlir-log-warning
+  (foreign-procedure "mlir_log_warning" (string) void))
+
+(define mlir-log-error
+  (foreign-procedure "mlir_log_error" (string) void))
+
+(define mlir-log-fatal
+  (foreign-procedure "mlir_log_fatal" (string) void))
+
 ;; High-level Scheme API
 
 ;; Process a single operation - gets called from C++ for each operation

@@ -22,7 +22,8 @@ struct SchemeScriptPass : public impl::SchemeScriptPassBase<SchemeScriptPass> {
   using impl::SchemeScriptPassBase<SchemeScriptPass>::SchemeScriptPassBase;
 
   void runOnOperation() override {
-    if (!initializeSchemeRuntime(verbose)) {
+    SchemeLogLevel level = parseLogLevel(logLevel);
+    if (!initializeSchemeRuntime(level)) {
       signalPassFailure();
       return;
     }

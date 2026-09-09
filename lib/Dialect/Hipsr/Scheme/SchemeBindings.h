@@ -20,8 +20,20 @@ namespace hipsr {
 
 using SchemeValue = void*;
 
+// Log levels for Scheme logging
+enum class SchemeLogLevel {
+  Debug = 0,
+  Info = 1,
+  Warning = 2,
+  Error = 3,
+  Fatal = 4
+};
+
+// Parse log level from string
+SchemeLogLevel parseLogLevel(const std::string& level);
+
 // Initialize Scheme runtime and register MLIR FFI bindings
-bool initializeSchemeRuntime(bool verbose = false);
+bool initializeSchemeRuntime(SchemeLogLevel logLevel = SchemeLogLevel::Warning);
 
 // Call a Scheme function with primitive arguments (legacy API)
 std::string callSchemeFunction(const char* functionName,

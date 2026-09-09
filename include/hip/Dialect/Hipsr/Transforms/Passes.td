@@ -281,8 +281,8 @@ def SchemeScriptPass : Pass<"scheme-script", "mlir::ModuleOp"> {
     This allows writing complete MLIR passes in pure Scheme without C++ code.
   }];
   let options = [
-    Option<"verbose", "verbose", "bool", /*default=*/"false",
-           "Enable verbose Scheme runtime logging">
+    Option<"logLevel", "log-level", "std::string", /*default=*/"\"warning\"",
+           "Logging level: debug, info, warning, error, fatal">
   ];
 }
 
