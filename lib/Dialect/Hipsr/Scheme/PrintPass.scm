@@ -3,7 +3,7 @@
 ;; Demonstrates the MLIR logging API with different verbosity levels
 ;; Extensively uses rime loop macro for functional iteration
 
-(import (rnrs) (rime loop))
+(import (chezscheme) (rime loop))
 
 ;; Helper: format operands list using rime loop
 (define (format-operands op num-operands)
