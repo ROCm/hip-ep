@@ -96,9 +96,10 @@ set(_kernel_sources
 
 # MatMulNBits offline autotune table.
 #
-# The table is per-arch and so is this target, which is why the bytes are
-# embedded here in custom_kernels_<arch>.dll (as is the GQA table below): a DLL
-# carries exactly the table it can use.
+# The table is embedded here in custom_kernels_<arch>.dll (as is the GQA
+# table below). A generic target may carry a concrete-ISA table: compatible()
+# checks the device ISA before loading it, so other family members fall back to
+# runtime autotune.
 #
 # Only the checked-in lut/<arch>.fb ships; the linkable kMatmulNbitsLutData[]
 # symbol is generated from it below with pure CMake (file(READ ... HEX)) -- the
@@ -110,7 +111,11 @@ set(_kernel_sources
 set(_matmul_nbits_autotune_dir ${CMAKE_CURRENT_SOURCE_DIR}/hip/autotune/matmul_nbits)
 
 function(_matmul_nbits_lut_data_source arch out_var)
-    set(_fb ${_matmul_nbits_autotune_dir}/lut/${arch}.fb)
+    set(_lut_arch ${arch})
+    if(arch STREQUAL "gfx11-generic")
+        set(_lut_arch gfx1151)
+    endif()
+    set(_fb ${_matmul_nbits_autotune_dir}/lut/${_lut_arch}.fb)
     if(EXISTS ${_fb})
         # Re-run CMake configure if the table changes, so the generated source
         # below stays in sync with the checked-in .fb.
@@ -123,7 +128,7 @@ function(_matmul_nbits_lut_data_source arch out_var)
         string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," _body "${_hex}")
         set(_gen ${CMAKE_CURRENT_BINARY_DIR}/matmul_nbits_lut_data_${arch}.cpp)
         file(WRITE ${_gen}
-"// Auto-generated from ${arch}.fb by lib/Runtime/Kernels/CMakeLists.txt; do not edit, do not commit.\n"
+"// Auto-generated from ${_lut_arch}.fb by lib/Runtime/Kernels/CMakeLists.txt; do not edit, do not commit.\n"
 "#include <cstddef>\n"
 "extern \"C\" const unsigned char kMatmulNbitsLutData[] = {${_body}};\n"
 "extern \"C\" const size_t kMatmulNbitsLutData_size = ${_n};\n")
@@ -157,7 +162,11 @@ endfunction()
 set(_gqa_autotune_dir ${CMAKE_CURRENT_SOURCE_DIR}/hip/autotune/gqa)
 
 function(_gqa_lut_data_source arch out_var)
-    set(_fb ${_gqa_autotune_dir}/lut/${arch}.fb)
+    set(_lut_arch ${arch})
+    if(arch STREQUAL "gfx11-generic")
+        set(_lut_arch gfx1151)
+    endif()
+    set(_fb ${_gqa_autotune_dir}/lut/${_lut_arch}.fb)
     set(_gen ${CMAKE_CURRENT_BINARY_DIR}/gqa_lut_data_${arch}.cpp)
     # Arch-neutral symbol on purpose: each custom_kernels_<arch> DLL links
     # exactly one payload, so a fixed name lets gqa_autotune.cpp reference it
@@ -173,7 +182,7 @@ function(_gqa_lut_data_source arch out_var)
         # one long line is fine (compiled by hipcc/clang, no line-length limit).
         string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," _body "${_hex}")
         file(WRITE ${_gen}
-"// Auto-generated from ${arch}.fb by lib/Runtime/Kernels/CMakeLists.txt; do not edit, do not commit.\n"
+"// Auto-generated from ${_lut_arch}.fb by lib/Runtime/Kernels/CMakeLists.txt; do not edit, do not commit.\n"
 "#include <cstddef>\n"
 "extern \"C\" const unsigned char kGqaLutData[] = {${_body}};\n"
 "extern \"C\" const size_t kGqaLutData_size = ${_n};\n")
