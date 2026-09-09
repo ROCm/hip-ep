@@ -244,7 +244,8 @@ jobs:
             --build_wheel \
             --cmake_extra_defines \
               CMAKE_C_COMPILER_LAUNCHER=sccache \
-              CMAKE_CXX_COMPILER_LAUNCHER=sccache
+              CMAKE_CXX_COMPILER_LAUNCHER=sccache \
+              ENABLE_TESTS=OFF
 
       - name: Install ORT into ort-install
         if: steps.cache-ort.outputs.cache-hit != 'true'
