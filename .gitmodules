@@ -1,3 +1,0 @@
-[submodule "third_party/rime"]
-	path = third_party/rime
-	url = https://github.com/wcy123/rime.git
