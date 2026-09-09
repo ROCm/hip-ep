@@ -79,6 +79,29 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
   Sregister_boot_file_bytes("scheme.boot", const_cast<void*>(static_cast<const void*>(scheme_boot_data)), scheme_boot_size);
   Sbuild_heap("hip-mlir-opt", nullptr);
 
+  // Set up library path to find rime libraries
+  // Find rime relative to the library module path (same as PrintPass.scm)
+  std::string modulePath = llvm::sys::fs::getMainExecutable(nullptr, (void*)&initializeSchemeRuntime);
+  llvm::SmallString<256> rimePath(modulePath);
+  llvm::sys::path::remove_filename(rimePath);  // Remove binary name
+  if (llvm::sys::path::filename(rimePath) == "bin")
+    llvm::sys::path::remove_filename(rimePath);  // Remove bin/
+  llvm::sys::path::append(rimePath, "lib", "scheme", "rime");
+
+  // Add rime to library-directories using Scheme code
+  std::string setup_code = "(library-directories (cons \"" + std::string(rimePath.c_str()) + "\" (library-directories)))";
+  ptr eval_sym = Stop_level_value(Sstring_to_symbol("eval"));
+  ptr read_sym = Stop_level_value(Sstring_to_symbol("read"));
+  ptr open_string_input_port_sym = Stop_level_value(Sstring_to_symbol("open-string-input-port"));
+
+  ptr setup_port = Scall1(open_string_input_port_sym, Sstring(setup_code.c_str()));
+  ptr setup_expr = Scall1(read_sym, setup_port);
+  Scall1(eval_sym, setup_expr);
+
+  if (logLevel <= SchemeLogLevel::Debug) {
+    llvm::errs() << "[debug] Added rime library path: " << rimePath.c_str() << "\n";
+  }
+
   // Register MLIR foreign functions AFTER Scheme is initialized
   // but BEFORE loading user Scheme code
   registerMlirForeignFunctions();

@@ -121,9 +121,18 @@ configure_file(
   COPYONLY
 )
 
-# Install Scheme scripts to <prefix>/lib/scheme/
+# Copy rime library to build tree for testing
+file(COPY ${CMAKE_SOURCE_DIR}/third_party/rime/rime
+     DESTINATION ${CMAKE_BINARY_DIR}/lib/scheme)
+
+# Install Scheme scripts and rime library to <prefix>/lib/scheme/
 install(FILES
   ${CMAKE_CURRENT_SOURCE_DIR}/PrintPass.scm
   ${CMAKE_CURRENT_SOURCE_DIR}/SchemeBindings.scm
   DESTINATION lib/scheme
 )
+
+# Install rime library
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/third_party/rime/rime
+        DESTINATION lib/scheme
+        FILES_MATCHING PATTERN "*.sls" PATTERN "*.scm")
