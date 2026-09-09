@@ -271,6 +271,77 @@ struct TransposeConverter final : public OpConversionPattern<hip::TransposeOp> {
   }
 };
 
+// The multiply-by-ones spelling below needs the result shape at compile time,
+// and needs every input dimension -- right-aligned against the result the way
+// ONNX broadcasting is -- to be either 1 or already the result's extent. Both
+// hold for any Expand whose shape ONNX inference could resolve; what they rule
+// out is the dynamic case, where OnnxToHip reads the extents off the device.
+static bool isTosaExpressibleExpand(hip::ExpandOp op) {
+  // Memref mode (post-bufferization) has no SSA result to replace.
+  if (op.getNumResults() != 1)
+    return false;
+
+  auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+  auto inputType = dyn_cast<RankedTensorType>(op.getInput().getType());
+  if (!resultType || !resultType.hasStaticShape() || !inputType ||
+      !inputType.hasStaticShape())
+    return false;
+  if (resultType.getElementType() != inputType.getElementType())
+    return false;
+
+  // Expand only ever grows the rank; a shorter result is malformed.
+  int64_t offset = resultType.getRank() - inputType.getRank();
+  if (offset < 0)
+    return false;
+
+  ArrayRef<int64_t> shape = inputType.getShape();
+  ArrayRef<int64_t> resultShape = resultType.getShape();
+  for (int64_t i = 0, e = inputType.getRank(); i < e; ++i)
+    if (shape[i] != resultShape[i + offset] && shape[i] != 1)
+      return false;
+  return true;
+}
+
+// hip.expand broadcasts to a target shape, and TOSA has no op that spells one.
+// rocMLIR's answer, which MIGraphXToTosa uses for migraphx.multibroadcast, is a
+// multiply by a tensor of ones at the result shape: TOSA broadcasts the size-1
+// dimensions of the other operand implicitly. It is not a workaround that
+// leaves a stray multiply behind -- TosaToRock's mulBroadcast matches this
+// exact idiom, drops the multiply once isConstantOne recognises the constant,
+// and rewrites the broadcast into a rock.transform, a coordinate remap rather
+// than a copy. Left as hip.expand it would instead be a wrap_expand kernel that
+// materialises the whole result.
+//
+// The `shape` operand is deliberately unread. ONNX shape inference has already
+// resolved the broadcast into the result type, which is the only form that can
+// be used here anyway: a shape computed on the device is not available to the
+// compiler, and OnnxToHip emits exactly that for a dynamic Expand.
+struct ExpandConverter final : public OpConversionPattern<hip::ExpandOp> {
+  using OpConversionPattern<hip::ExpandOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(hip::ExpandOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isTosaExpressibleExpand(op))
+      return rewriter.notifyMatchFailure(op, "expected a static broadcast");
+
+    auto resultType = cast<RankedTensorType>(op.getResult(0).getType());
+    Value ones = tosa::ConstOp::create(
+        rewriter, op.getLoc(), resultType,
+        cast<ElementsAttr>(rewriter.getOneAttr(resultType)));
+
+    // TOSA broadcasts size-1 dimensions only once both operands carry the
+    // result's rank; EqualizeRanks prepends 1s the way ONNX right-aligns.
+    Value input = adaptor.getInput();
+    if (failed(tosa::EqualizeRanks(rewriter, op.getLoc(), input, ones)))
+      return rewriter.notifyMatchFailure(op, "operand ranks not equalizable");
+
+    rewriter.replaceOpWithNewOp<tosa::MulOp>(
+        op, resultType, input, ones, createZeroMulShift(rewriter, op.getLoc()));
+    return success();
+  }
+};
+
 // tosa.reshape's shape is a compile-time constant, so both sides have to be
 // statically shaped.
 template <typename TensorOpTy> static bool isStaticReshape(TensorOpTy op) {
@@ -385,6 +456,16 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     // for the canonicalizer that follows this pass to remove.
     conversion.addLegalOp<ub::PoisonOp, tensor::EmptyOp>();
 
+    // hip.expand is the one hip op here that is conditionally rather than
+    // unconditionally illegal. OnnxToHip goes out of its way to support a
+    // dynamically shaped Expand, reading the extents back from the device with
+    // a stream sync, so that form is one the compiler deliberately produces
+    // rather than a malformed input. It has no TOSA spelling and must stay a
+    // wrap_expand, which an unconditional addIllegalOp would turn into a hard
+    // failure of the pass.
+    conversion.addDynamicallyLegalOp<ExpandOp>(
+        [](ExpandOp op) { return !isTosaExpressibleExpand(op); });
+
     // The tensor metadata ops are borrowed rather than owned. A kernel can
     // legitimately hold forms with no TOSA spelling -- a dynamically shaped
     // reshape, a strided or rank-reducing extract -- and rocMLIR consumes
@@ -399,7 +480,7 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         [](tensor::ExtractSliceOp op) { return !isTosaExpressibleSlice(op); });
 
     RewritePatternSet patterns(ctx);
-    patterns.add<MatMulConverter, TransposeConverter,
+    patterns.add<MatMulConverter, TransposeConverter, ExpandConverter,
                  ReshapeConverter<tensor::CollapseShapeOp>,
                  ReshapeConverter<tensor::ExpandShapeOp>, ExtractSliceConverter,
                  BinaryConverter<AddOp, tosa::AddOp>,
