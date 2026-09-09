@@ -7,6 +7,7 @@
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include <mlir/Dialect/Func/IR/FuncOps.h>
+#include <mlir/Dialect/Tensor/IR/Tensor.h>
 #include <mlir/Dialect/Tosa/IR/TosaOps.h>
 #include <mlir/Dialect/Tosa/Utils/ConversionUtils.h>
 #include <mlir/Dialect/UB/IR/UBOps.h>
@@ -46,17 +47,10 @@ bool isTosaCompatibleOperand(Value operand, RankedTensorType resultType) {
   return true;
 }
 
-// tosa.matmul requires both operands to be rank-3 (batch, M/K, K/N). hip.matmul
-// accepts NumPy-style broadcasting where B may be rank-2. Prepend a unit batch
-// dimension to any rank-2 operand via tosa.reshape; a batch of 1 is broadcast
-// against the other operand's batch by tosa.matmul.
-static Value reshapeTo3D(Value input, ConversionPatternRewriter &rewriter) {
-  auto type = dyn_cast<RankedTensorType>(input.getType());
-  if (!type || type.getRank() != 2)
-    return input;
-
-  SmallVector<int64_t> shape(type.getShape());
-  shape.insert(shape.begin(), 1);
+// Reshape `input` to `shape` via tosa.reshape + tosa.const_shape.
+static Value reshapeTo(Value input, ArrayRef<int64_t> shape,
+                       ConversionPatternRewriter &rewriter) {
+  auto type = cast<RankedTensorType>(input.getType());
   auto shapeConst = tosa::ConstShapeOp::create(
       rewriter, rewriter.getUnknownLoc(),
       tosa::shapeType::get(rewriter.getContext(), shape.size()),
@@ -82,20 +76,45 @@ struct MatMulConverter final : public OpConversionPattern<hip::MatmulOp> {
       return rewriter.notifyMatchFailure(op, "transA/transB unsupported");
 
     auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
-    if (!resultType || !resultType.hasStaticShape() ||
-        resultType.getRank() != 3)
-      return rewriter.notifyMatchFailure(op, "expected a static rank-3 tensor");
+    if (!resultType || !resultType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
 
-    Value a = reshapeTo3D(adaptor.getA(), rewriter);
-    Value b = reshapeTo3D(adaptor.getB(), rewriter);
-    auto aType = dyn_cast<RankedTensorType>(a.getType());
-    auto bType = dyn_cast<RankedTensorType>(b.getType());
-    if (!aType || aType.getRank() != 3 || !bType || bType.getRank() != 3)
-      return rewriter.notifyMatchFailure(op, "operands not rank-3");
+    auto aType = dyn_cast<RankedTensorType>(adaptor.getA().getType());
+    auto bType = dyn_cast<RankedTensorType>(adaptor.getB().getType());
+    if (!aType || !aType.hasStaticShape() || !bType || !bType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "operands not static ranked");
+    if (aType.getRank() < 2 || bType.getRank() != 2)
+      return rewriter.notifyMatchFailure(
+          op, "only [..,M,K] x [K,N] (rank-2 B) is supported");
 
+    // tosa.matmul requires rank-3 operands with *equal* batch sizes -- it does
+    // not broadcast a size-1 batch against a larger one. hip.matmul here has an
+    // unbatched (rank-2) B, so instead of broadcasting B's batch up to A's,
+    // collapse all of A's leading dims and M into a single dimension:
+    //
+    //   A[.., M, K] -> [1, prod(..)*M, K]
+    //   B[K, N]     -> [1, K, N]
+    //   matmul      -> [1, prod(..)*M, N]
+    //   result      -> [.., M, N]   (original result shape)
+    ArrayRef<int64_t> aShape = aType.getShape();
+    int64_t k = aShape.back();
+    int64_t collapsedM = 1;
+    for (int64_t d : aShape.drop_back())
+      collapsedM *= d;
+    int64_t n = bType.getShape().back();
+
+    Value a = reshapeTo(adaptor.getA(), {1, collapsedM, k}, rewriter);
+    Value b = reshapeTo(adaptor.getB(), {1, k, n}, rewriter);
+
+    auto matmulType = resultType.clone({1, collapsedM, n});
     // The quant-info builder appends the (zero) zero-point operands that
     // tosa.matmul requires for float inputs.
-    rewriter.replaceOpWithNewOp<tosa::MatMulOp>(op, resultType, a, b);
+    Value matmul =
+        tosa::MatMulOp::create(rewriter, op.getLoc(), matmulType, a, b)
+            .getResult();
+
+    rewriter.replaceOp(
+        op, reshapeTo(matmul, resultType.getShape(), rewriter));
     return success();
   }
 };
@@ -233,6 +252,13 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     conversion.addIllegalOp<MatmulOp, AddOp, SubOp, MinOp, MaxOp, MulOp, AbsOp,
                             NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
                             TanhOp, ErfOp, SigmoidOp, ReciprocalOp>();
+    // tosa.matmul (and other tosa ops) are not destination-passing, so
+    // MatMulConverter drops each hip op's DPS `outs` operand. The
+    // `tensor.empty` that fed it is then dead, but a full conversion still
+    // requires every remaining op to be legal -- the framework does not DCE
+    // this pre-existing op on its own. Mark it legal so conversion succeeds;
+    // the canonicalizer that follows this pass removes the dead empty.
+    conversion.addLegalOp<ub::PoisonOp, tensor::EmptyOp>();
 
     RewritePatternSet patterns(ctx);
     patterns.add<MatMulConverter, BinaryConverter<AddOp, tosa::AddOp>,
