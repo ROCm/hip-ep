@@ -113,6 +113,10 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     ConvTransposeOp::attachInterface<HipDstBufferizableModel<ConvTransposeOp>>(
         *ctx);
     MatmulOp::attachInterface<HipDstBufferizableModel<MatmulOp>>(*ctx);
+    // RocMlirOp carries its compiled kernel inline (kernel_binary attr) and is
+    // a DPS op (variadic tensor inputs, tied output); the generic DPS model
+    // bufferizes it like any other hip.* compute op.
+    RocMlirOp::attachInterface<HipDstBufferizableModel<RocMlirOp>>(*ctx);
     RmsNormOp::attachInterface<HipDstBufferizableModel<RmsNormOp>>(*ctx);
     SkipRmsNormOp::attachInterface<HipDstBufferizableModel<SkipRmsNormOp>>(
         *ctx);

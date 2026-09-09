@@ -25,7 +25,9 @@
 
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Dialect/Transforms/Passes.h"
+#include "hip/Dialect/Transforms/Pipelines.h"
 #include "hip/InitAllPasses.h"
+#include "hip/Support/DiskFileSystem.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/Passes.h"
@@ -571,6 +573,31 @@ int main(int argc, char **argv) {
                << "grid_size=" << compiled.gridSize
                << " block_size=" << compiled.blockSize << "; deleted "
                << kernelFuncs.size() << " kernel func(s)\n";
+
+  // Stage 4: run the standard ONNX-to-HIP tail (shape inference, constant
+  // externalization, bufferization, output-allocator rewrite, pooling, extern-
+  // constant resolution) -- everything hip-compiler runs after OnnxToHip up to,
+  // but not including, the HIP-to-LLVM lowering. The `hip.rocmlir` op now
+  // carries its kernel inline and bufferizes like any other DPS op.
+  //
+  // ExternalizeConstants only accepts `memory_address` constant sources when a
+  // FileSystem is injected (the production externalization path). Inject a
+  // DiskFileSystem writing to the cwd and skip the constant payload: the
+  // in-process `memory_address` pointers are not valid to read here, so emit
+  // metadata only (matching the EP live-compile path).
+  {
+    mlir::hip::DiskFileSystem fs(".");
+    mlir::hip::OnnxToHipPipelineOptions tailOpts;
+    tailOpts.externalizeMinNumElements =
+        mlir::hip::kDefaultExternalizeMinNumElements;
+    tailOpts.skipConstantData = true;
+    mlir::PassManager tailPm(module->getContext());
+    mlir::hip::buildOnnxToHipPipelineTail(tailPm, tailOpts, &fs);
+    if (mlir::failed(tailPm.run(*module))) {
+      llvm::errs() << "error: ONNX-to-HIP tail passes failed\n";
+      return 1;
+    }
+  }
 
   module->print(llvm::outs());
   llvm::outs() << "\n";

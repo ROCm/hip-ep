@@ -77,6 +77,17 @@ struct HipToLLVMPipelineOptions
       llvm::cl::init("constants.bin")};
 };
 
+/// Build the common tail of the ONNX-to-HIP pipeline: everything after the
+/// OnnxToHip conversion (shape inference, constant externalization,
+/// bufferization, output-allocator rewrite, pooling, extern-constant
+/// resolution) up to -- but not including -- the HIP-to-LLVM lowering. Exposed
+/// so tools that build a custom head (e.g. hip-rocmlir-compiler, which inserts
+/// fuse-rocmlir + a rocMLIR compile/embed step) can run the standard tail
+/// without duplicating its load-bearing pass ordering.
+void buildOnnxToHipPipelineTail(OpPassManager &pm,
+                                const OnnxToHipPipelineOptions &options,
+                                morphizen::FileSystem *fs = nullptr);
+
 /// Build the ONNX-to-HIP compilation pipeline.
 ///
 /// Converts ONNX-level tensor IR into fully bufferized HIP memref IR with
