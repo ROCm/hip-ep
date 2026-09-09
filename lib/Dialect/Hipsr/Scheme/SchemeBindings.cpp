@@ -35,11 +35,14 @@ const size_t scheme_bindings_scm_size = sizeof(scheme_bindings_scm_data) - 1;
 
 namespace {
 static bool scheme_initialized = false;
-static SchemeLogLevel current_log_level = SchemeLogLevel::Warning;
 }
 
 namespace mlir {
 namespace hipsr {
+
+namespace {
+static SchemeLogLevel current_log_level = SchemeLogLevel::Warning;
+}
 
 SchemeLogLevel parseLogLevel(const std::string& level) {
   if (level == "debug") return SchemeLogLevel::Debug;
