@@ -76,6 +76,19 @@ int wrap_rms_norm(RuntimeState *state, void *input, void *scale, void *output,
     return -1;
   }
 
+  // ONNX only broadcasts Scale onto X, never the reverse. For that
+  // unidirectional broadcast, |X| must be a multiple of |Scale|. Together
+  // with the check above this also implies |X| is a multiple of the
+  // normalized width, so the integer row split below does not truncate.
+  if (input_num_elements % scale_num_elements != 0) {
+    fprintf(stderr,
+            "wrap_rms_norm: input_num_elements=%lld is not a multiple of "
+            "scale_num_elements=%lld; Scale is not unidirectional-"
+            "broadcastable onto X under row-tiled packing\n",
+            (long long)input_num_elements, (long long)scale_num_elements);
+    return -1;
+  }
+
   int hip_dtype;
   if (element_size_bytes == 2)
     hip_dtype = HIP_DTYPE_FLOAT16;
