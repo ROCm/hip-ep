@@ -53,8 +53,14 @@ void eraseDeadNoValue(ModuleOp module) {
 
 // Placeholder inputs form the shape graph, not the data graph.
 // PlaceholderOp::verify reports any input this cannot fix.
+//
+// A barrier is the exception: its region reads the inputs themselves, not just
+// their shapes, so it stays on the data values.
 void rewirePlaceholderInputs(ModuleOp module) {
   module.walk([](PlaceholderOp placeholder) {
+    if (placeholder.getPlaceholderType() == PlaceholderType::Barrier) {
+      return;
+    }
     SmallVector<Value> resolvedInputs =
         llvm::map_to_vector(placeholder.getInputs(), getShapeGraphCounterpart);
     placeholder.getInputsMutable().assign(resolvedInputs);
