@@ -21,7 +21,7 @@ namespace hipsr {
 using SchemeValue = void*;
 
 // Initialize Scheme runtime and register MLIR FFI bindings
-bool initializeSchemeRuntime();
+bool initializeSchemeRuntime(bool verbose = false);
 
 // Call a Scheme function with primitive arguments (legacy API)
 std::string callSchemeFunction(const char* functionName,

@@ -22,7 +22,7 @@ struct SchemeScriptPass : public impl::SchemeScriptPassBase<SchemeScriptPass> {
   using impl::SchemeScriptPassBase<SchemeScriptPass>::SchemeScriptPassBase;
 
   void runOnOperation() override {
-    if (!initializeSchemeRuntime()) {
+    if (!initializeSchemeRuntime(verbose)) {
       signalPassFailure();
       return;
     }
