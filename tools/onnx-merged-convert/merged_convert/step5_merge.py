@@ -42,9 +42,7 @@ def normalize_gqa_kv_cache_shapes(graph: onnx.GraphProto) -> int:
             and _node_int_attribute(node, "sliding_window_cache", 0) == 1
         )
         sequence_dim = (
-            SLIDING_KV_SEQUENCE_DIM
-            if is_sliding_cache
-            else FULL_KV_SEQUENCE_DIM
+            SLIDING_KV_SEQUENCE_DIM if is_sliding_cache else FULL_KV_SEQUENCE_DIM
         )
 
         # GQA inputs 3/4 are past K/V and outputs 1/2 are present K/V.
@@ -60,9 +58,7 @@ def normalize_gqa_kv_cache_shapes(graph: onnx.GraphProto) -> int:
                 )
 
     changed = 0
-    for value_info in (
-        list(graph.input) + list(graph.output) + list(graph.value_info)
-    ):
+    for value_info in list(graph.input) + list(graph.output) + list(graph.value_info):
         sequence_dim = tensor_dims.get(value_info.name)
         if sequence_dim is None:
             continue
