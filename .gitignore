@@ -164,3 +164,12 @@ test/python/data/whisper/librispeech/
 .depend/
 CMakeUserPresets.json
 build.*/
+
+# Generated compiler artifacts (regenerate with driver/dx12/lower_hip_add_to_amdgpu.ps1
+# and driver/dx12/dump_hip_lowering.ps1; hand-written .mlir/.hip inputs are kept)
+driver/dx12/artifacts/
+*.elf
+*.bc
+*.amdgcn.ll
+*lowered.mlir
+*.dx12-device.hip
