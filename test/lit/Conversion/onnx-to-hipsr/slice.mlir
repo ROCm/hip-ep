@@ -41,9 +41,10 @@ func.func @strided_window(%ctx: !hipsr.context,
 
 // A bound the graph computes stays an operand and leaves the sliced axis
 // dynamic, so the init is a barrier placeholder holding the data and that one
-// operand for its region to read. The barrier takes the destination the compute
-// writes into, the same as an expand's shape operand. `axes` and `steps` arrive
-// as onnx.NoValue and get ONNX's defaults, the leading axis and a unit step.
+// operand for its region to read. The barrier names the value the compute
+// wrote, not the destination it was given, because its region reads the bound
+// itself. `axes` and `steps` arrive as onnx.NoValue and get ONNX's defaults,
+// the leading axis and a unit step.
 // CHECK-LABEL: func.func @computed_bound(
 // CHECK-SAME:    %[[CTX:.+]]: !hipsr.context,
 // CHECK-SAME:    %[[DATA:.+]]: tensor<8xf16, #hipsr.mem<device>>,
@@ -64,7 +65,7 @@ func.func @strided_window(%ctx: !hipsr.context,
 // CHECK-NEXT:      hipsr.compute_yield %[[BOUND_VECTOR]] : tensor<1xi64, #hipsr.mem<host>>
 // CHECK-NEXT:    } : tensor<1xi64, #hipsr.mem<host>>
 // CHECK-NEXT:    %{{.+}} = hipsr.constant {value = dense<0> : tensor<1xi64>} : tensor<1xi64, #hipsr.mem<device>>
-// CHECK-NEXT:    %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[DATA]], %[[ENDS_INIT]] : tensor<8xf16, #hipsr.mem<device>>, tensor<1xi64, #hipsr.mem<host>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<?xf16, #hipsr.mem<device>>
+// CHECK-NEXT:    %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[DATA]], %[[ENDS]] : tensor<8xf16, #hipsr.mem<device>>, tensor<1xi64, #hipsr.mem<host>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<?xf16, #hipsr.mem<device>>
 // CHECK-NEXT:    %[[RESULT:.+]] = hipsr.slice(%[[CTX]]) ins(%[[DATA]] : tensor<8xf16, #hipsr.mem<device>>) ends(%[[ENDS]] : tensor<1xi64, #hipsr.mem<host>>) outs(%[[INIT]] : tensor<?xf16, #hipsr.mem<device>>) {axes_attr = array<i64: 0>, starts_attr = array<i64: 0>, steps_attr = array<i64: 1>} : tensor<?xf16, #hipsr.mem<device>>
 // CHECK-NEXT:    return %[[RESULT]] : tensor<?xf16, #hipsr.mem<device>>
 // CHECK-NEXT:  }

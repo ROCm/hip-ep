@@ -24,16 +24,17 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
       body writes into, so the placeholder carries that destination's shape,
       which may differ from the result held there.
 
-    Inputs feed the shape graph and must be block arguments or results of
-    `hipsr.placeholder`, `arith.constant`, or `hipsr.constant` — never data
-    results, which keeps the shape graph parallel to the data graph.
-    `placeholder_type` is `normal` or `barrier`.
+    A `normal` placeholder's inputs feed the shape graph and must be block
+    arguments or results of `hipsr.placeholder`, `arith.constant`, or
+    `hipsr.constant` — never data results, which keeps the shape graph parallel
+    to the data graph. It and its consumer must read the same values, the
+    placeholder on the shape-graph side and the consumer on the data side, even
+    when one of them ignores a value. A value with no placeholder behind it,
+    such as a block argument or a constant, is outside that rule.
 
-    A placeholder and its consumer read the same values, the placeholder on the
-    shape-graph side and the consumer on the data side, even when one of them
-    ignores a value. Matching the two lists is what keeps the pair in one pool
-    domain. Values with no placeholder behind them, such as block arguments and
-    constants, are outside the rule.
+    A `barrier` names the data values its consumer reads, matched one for one.
+    Its region reads their contents, not just their shapes, and a destination
+    has nothing to read until its consumer writes it.
 
     The optional `shape_region` computes the result shapes and ends with
     `hipsr.shape_yield`. A `normal` region takes one `!shape.shape` per input
@@ -80,14 +81,12 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
   let hasVerifier = 1;
 
   let extraClassDeclaration = [{
-    /// Returns whether a value may be used as a placeholder shape-graph input.
     static bool isAllowedShapeGraphInput(::mlir::Value value);
 
     /// Returns the hipsr operation whose `outs` this placeholder fills, or
     /// null if no such use exists.
     ::mlir::Operation *getConsumer();
 
-    /// Returns this placeholder's shape-region block argument types.
     ::llvm::SmallVector<::mlir::Type> getShapeRegionArgumentTypes();
   }];
 }

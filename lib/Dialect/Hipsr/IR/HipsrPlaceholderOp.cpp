@@ -16,7 +16,11 @@ using namespace mlir::hipsr;
 namespace {
 
 // Keep the shape graph apart from the data graph: no data results as inputs.
+// A barrier is exempt, because its region reads the values themselves.
 LogicalResult verifyShapeGraphInputs(PlaceholderOp op) {
+  if (op.getPlaceholderType() == PlaceholderType::Barrier) {
+    return success();
+  }
   for (auto [index, input] : llvm::enumerate(op.getInputs())) {
     if (!PlaceholderOp::isAllowedShapeGraphInput(input)) {
       return op.emitOpError("input ")
@@ -61,7 +65,8 @@ LogicalResult verifyResultUses(PlaceholderOp op) {
 // land in the same pool domain. That holds when the two read the same values,
 // the placeholder on the shape-graph side and the consumer on the data side.
 //
-// Only a value another placeholder holds is checked. A block argument or a
+// Only a value that can pin a domain has to match: a placeholder result on the
+// shape-graph side, the data result itself for a barrier. A block argument or a
 // constant cannot reach a later domain, and inside a pool domain a data value
 // and its counterpart are two block arguments that no longer name each other.
 LogicalResult verifyConsumerTopology(PlaceholderOp op) {
@@ -70,21 +75,32 @@ LogicalResult verifyConsumerTopology(PlaceholderOp op) {
     return success();
   }
 
-  SmallVector<Value> counterparts = llvm::map_to_vector(
-      getHipsrInputOperands(consumer), getShapeGraphCounterpart);
+  // A barrier names the data values, so its list matches the consumer's
+  // directly rather than through the shape graph.
+  bool isBarrier = op.getPlaceholderType() == PlaceholderType::Barrier;
+  OperandRange consumerInputs = getHipsrInputOperands(consumer);
+  SmallVector<Value> counterparts =
+      isBarrier ? llvm::to_vector(consumerInputs)
+                : llvm::map_to_vector(consumerInputs, getShapeGraphCounterpart);
+  auto mustMatch = [isBarrier](Value value) {
+    return isBarrier ? !PlaceholderOp::isAllowedShapeGraphInput(value)
+                     : static_cast<bool>(value.getDefiningOp<PlaceholderOp>());
+  };
 
   for (auto [index, counterpart] : llvm::enumerate(counterparts)) {
-    if (!counterpart.getDefiningOp<PlaceholderOp>()) {
+    if (!mustMatch(counterpart)) {
       continue;
     }
     if (!llvm::is_contained(op.getInputs(), counterpart)) {
-      return op.emitOpError("must read the shape-graph value of input ")
+      return op.emitOpError(isBarrier ? "must read input "
+                                      : "must read the shape-graph value of "
+                                        "input ")
              << index << " of its consumer '" << consumer->getName() << "'";
     }
   }
 
   for (auto [index, input] : llvm::enumerate(op.getInputs())) {
-    if (!input.getDefiningOp<PlaceholderOp>()) {
+    if (!mustMatch(input)) {
       continue;
     }
     if (!llvm::is_contained(counterparts, input)) {

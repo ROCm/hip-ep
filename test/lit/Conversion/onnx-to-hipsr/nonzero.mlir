@@ -24,7 +24,7 @@
 // CHECK-NEXT:      hipsr.shape_yield %[[COUNT_SHAPE]] : !shape.shape
 // CHECK-NEXT:    }
 // CHECK-NEXT:    %[[HOST_COUNT:.+]] = hipsr.copy_d2h(%[[CTX]]) ins(%[[SEARCH]]#1 : tensor<1xi64, #hipsr.mem<device>>) outs(%[[HOST_INIT]] : tensor<1xi64, #hipsr.mem<host>>) : tensor<1xi64, #hipsr.mem<host>>
-// CHECK-NEXT:    %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[HOST_INIT]], %[[INITS]]#0 : tensor<1xi64, #hipsr.mem<host>>, tensor<2x?xi64, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<2x?xi64, #hipsr.mem<device>> shape_region {
+// CHECK-NEXT:    %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[HOST_COUNT]], %[[SEARCH]]#0 : tensor<1xi64, #hipsr.mem<host>>, tensor<2x?xi64, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<2x?xi64, #hipsr.mem<device>> shape_region {
 // CHECK-NEXT:    ^bb0(%{{.+}}: !hipsr.context, %[[COUNT:.+]]: tensor<1xi64, #hipsr.mem<host>>, %{{.+}}: tensor<2x?xi64, #hipsr.mem<device>>):
 // CHECK-NEXT:      %[[ZERO:.+]] = arith.constant 0 : index
 // CHECK-NEXT:      %[[FOUND:.+]] = tensor.extract %[[COUNT]]{{\[}}%[[ZERO]]] : tensor<1xi64, #hipsr.mem<host>>
@@ -65,7 +65,7 @@ func.func @nonzero_mask(%ctx: !hipsr.context,
 // CHECK-NEXT:      hipsr.shape_yield %[[COUNT_SHAPE]] : !shape.shape
 // CHECK-NEXT:    }
 // CHECK-NEXT:    %[[HOST_COUNT:.+]] = hipsr.copy_d2h(%[[CTX]]) ins(%[[SEARCH]]#1 : tensor<1xi64, #hipsr.mem<device>>) outs(%[[HOST_INIT]] : tensor<1xi64, #hipsr.mem<host>>) : tensor<1xi64, #hipsr.mem<host>>
-// CHECK-NEXT:    %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[HOST_INIT]], %[[INITS]]#0 : tensor<1xi64, #hipsr.mem<host>>, tensor<1x12xi64, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<1x?xi64, #hipsr.mem<device>> shape_region {
+// CHECK-NEXT:    %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[HOST_COUNT]], %[[SEARCH]]#0 : tensor<1xi64, #hipsr.mem<host>>, tensor<1x12xi64, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<1x?xi64, #hipsr.mem<device>> shape_region {
 // CHECK-NEXT:    ^bb0(%{{.+}}: !hipsr.context, %[[COUNT:.+]]: tensor<1xi64, #hipsr.mem<host>>, %{{.+}}: tensor<1x12xi64, #hipsr.mem<device>>):
 // CHECK-NEXT:      %[[ZERO:.+]] = arith.constant 0 : index
 // CHECK-NEXT:      %[[FOUND:.+]] = tensor.extract %[[COUNT]]{{\[}}%[[ZERO]]] : tensor<1xi64, #hipsr.mem<host>>
