@@ -8,6 +8,7 @@
 #pragma once
 
 #include "mlir/Dialect/PDL/IR/PDL.h"
+#include "mlir/Dialect/PDL/IR/PDLOps.h"
 #include "mlir/Dialect/PDLInterp/IR/PDLInterp.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
@@ -256,6 +257,13 @@ inline bool run(mlir::ModuleOp mlirModule, llvm::StringRef pdlBytecodeFile) {
       mlir::parseSourceFile<mlir::ModuleOp>(pdlBytecodeFile, parseConfig);
   if (!pdlModule)
     return false;
+
+  // FrozenRewritePatternSet skips the PDL-to-PDLInterp lowering for a module
+  // holding no pdl.pattern, then still asks the bytecode generator for the
+  // @matcher function that lowering would have produced. Bail out first so a
+  // pattern set that is empty (every pattern disabled) stays a no-op.
+  if (pdlModule->getOps<mlir::pdl::PatternOp>().empty())
+    return true;
 
   mlir::PDLPatternModule pdlPatterns(std::move(pdlModule));
 
