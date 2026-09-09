@@ -1,0 +1,77 @@
+name: Makefile CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  Run-on-Ubuntu:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: "true"
+
+      - name: Install chezscheme and guile
+        run: sudo apt-get install -y chezscheme guile-3.0
+
+      - name: make
+        run: make
+
+      - name: test with chez
+        run: make test-chez
+
+      - name: test with guile
+        run: make test-guile
+
+  Run-on-Macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: "true"
+
+      - name: Configure git on Windows
+        if: ${{ runner.os == 'Windows' }}
+        run: git config --global core.autocrlf false
+      
+      - name: Install chezscheme and guile
+        run: brew install chezscheme guile
+
+      - name: make
+        run: make
+
+      - name: test with chez
+        run: make test-chez
+
+      - name: test with guile
+        run: make test-guile
+
+  Run-on-Winodws:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: "true"
+
+      - name: Install chezscheme
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://github.com/cisco/ChezScheme/releases/download/v10.0.0/ChezScheme10.0.0.exe -OutFile ChezScheme10.0.0.exe
+          dir .
+          gci env:* | sort-object name
+          Start-Process -Wait -FilePath ".\ChezScheme10.0.0.exe" -ArgumentList "/S /log log.txt"  -PassThru
+          cat log.txt
+
+      - name: test with chez
+        run: |
+          $env:Path += ';c:\Program Files\Chez Scheme 10.0.0\bin\ta6nt'
+          make test-chez
