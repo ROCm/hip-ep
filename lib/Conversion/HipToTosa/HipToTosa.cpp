@@ -215,14 +215,27 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
 
     MLIRContext *ctx = &getContext();
 
+    // Mark only the ops this pass has patterns for, and use a partial
+    // conversion so everything else in the kernel is left alone.
+    //
+    // A full conversion over an illegal hip dialect cannot work here. An
+    // outlined kernel keeps the fusion anchor it was built around -- hip.conv,
+    // hip.pool, hip.global_pool -- which rocMLIR consumes and this pass must
+    // not touch, and it carries the ops feeding the anchors' DPS operands:
+    // ub.poison for the !hip.context and tensor.empty for each outs buffer.
+    // Full conversion legalizes every op in the region, so each of those has
+    // to be enumerated as legal or the pass fails on IR it never meant to
+    // convert. Listing the illegal ops instead keeps the useful half of the
+    // guarantee: a hip op this pass claims still has to convert or the pass
+    // fails.
     ConversionTarget conversion(*ctx);
-    conversion.addIllegalDialect<HipDialect>();
     conversion.addLegalDialect<tosa::TosaDialect, func::FuncDialect>();
-    conversion.addLegalOp<ub::PoisonOp>();
+    conversion.addIllegalOp<MatmulOp, AddOp, SubOp, MinOp, MaxOp, MulOp, AbsOp,
+                            NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
+                            TanhOp, ErfOp, SigmoidOp, ReciprocalOp>();
 
     RewritePatternSet patterns(ctx);
-    patterns.add<MatMulConverter,
-                 BinaryConverter<AddOp, tosa::AddOp>,
+    patterns.add<MatMulConverter, BinaryConverter<AddOp, tosa::AddOp>,
                  BinaryConverter<SubOp, tosa::SubOp>,
                  BinaryConverter<MinOp, tosa::MinimumOp>,
                  BinaryConverter<MaxOp, tosa::MaximumOp>,
@@ -241,7 +254,7 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
                  UnaryConverter<ReciprocalOp, tosa::ReciprocalOp,
                                 /*FloatOnly=*/true>>(ctx);
 
-    if (failed(applyFullConversion(funcOp, conversion, std::move(patterns))))
+    if (failed(applyPartialConversion(funcOp, conversion, std::move(patterns))))
       signalPassFailure();
   }
 };
