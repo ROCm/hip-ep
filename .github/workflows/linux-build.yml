@@ -22,11 +22,11 @@ concurrency:
 env:
   # Pins (kept in lockstep with cmake/deps.txt).
   # LLVM/MLIR/LLD are built from the rocmlirTriton LLVM snapshot: the upstream
-  # SHA below plus cmake/patches/rocmlir-llvm-source.patch. Bumping either only
-  # invalidates the llvm-install cache, so keep LLVM_PATCHSET in step with the
-  # patch content.
+  # SHA below plus cmake/patches/rocmlir-llvm-source.patch. LLVM_PATCHSET keys
+  # the llvm-install cache, so bump it whenever the patch content or the LLVM
+  # build flags below change.
   LLVM_TAG: 62b7cf9623fc310525f39ed69aaecc318a909731
-  LLVM_PATCHSET: rocmlirTriton-28a5a7a40cfd6aceab0047c7fc92cb5cf90b6540-src2
+  LLVM_PATCHSET: rocmlirTriton-28a5a7a40cfd6aceab0047c7fc92cb5cf90b6540-src3
   ONNXRUNTIME_VERSION: "1.27.0"
   # Space-separated microsoft/onnxruntime PR numbers `git apply`-ed on top of
   # the pinned tag during the from-source build (an empty list applies nothing;
@@ -134,12 +134,15 @@ jobs:
 
       # -----------------------------------------------------------------------
       # LLVM/MLIR/LLD from the rocmlirTriton snapshot -> llvm-install (cached).
-      # Matches cmake/deps.cmake: mlir;lld, X86+AMDGPU, RTTI off, assertions on.
+      # Matches cmake/deps.cmake: mlir;lld, X86+AMDGPU, RTTI on, assertions on.
       # Clang is not built in-tree; runtime bitcode uses the HIP SDK clang.
       # -----------------------------------------------------------------------
-      - name: Cache LLVM install prefix
+      # restore/save rather than actions/cache: that saves in a post step, which
+      # is skipped when the job fails, so any later failure would discard a
+      # multi-hour LLVM build. Saving right after the build keeps it.
+      - name: Restore LLVM install prefix
         id: cache-llvm
-        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
           # Keyed only on the LLVM tag: a protobuf/ORT bump must not evict the
@@ -162,7 +165,7 @@ jobs:
             -DLLVM_ENABLE_PROJECTS="mlir;lld" \
             -DLLVM_TARGETS_TO_BUILD="X86;AMDGPU" \
             -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/llvm-install" \
-            -DLLVM_ENABLE_RTTI=OFF \
+            -DLLVM_ENABLE_RTTI=ON \
             -DLLVM_ENABLE_ASSERTIONS=ON \
             -DLLVM_ENABLE_ZLIB=OFF \
             -DLLVM_ENABLE_ZSTD=OFF \
@@ -180,6 +183,14 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
           cmake --build "${{ runner.workspace }}/build-llvm" --target install
           rm -rf "$SRC" "${{ runner.workspace }}/build-llvm"
+
+      - name: Save LLVM install prefix
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/llvm-install
+          key: linux-llvm-${{ env.LLVM_TAG }}-${{ env.LLVM_PATCHSET }}
 
       # -----------------------------------------------------------------------
       # ONNX Runtime built from source into ort-install (cached): checkout ->

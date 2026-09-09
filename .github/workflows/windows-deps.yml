@@ -28,9 +28,10 @@ permissions:
 
 env:
   # Upstream SHA plus cmake/patches/rocmlir-llvm-source.patch. LLVM_PATCHSET
-  # keys the llvm-install cache, so keep it in step with the patch content.
+  # keys the llvm-install cache, so bump it whenever the patch content or the
+  # LLVM build flags change.
   LLVM_TAG: 62b7cf9623fc310525f39ed69aaecc318a909731
-  LLVM_PATCHSET: rocmlirTriton-28a5a7a40cfd6aceab0047c7fc92cb5cf90b6540-src2
+  LLVM_PATCHSET: rocmlirTriton-28a5a7a40cfd6aceab0047c7fc92cb5cf90b6540-src3
   ONNXRUNTIME_VERSION: "1.27.0"
   ONNXRUNTIME_PR_PATCHES: ""
   OGA_VERSION: "0.14.0"
@@ -122,7 +123,7 @@ jobs:
             -DLLVM_TARGETS_TO_BUILD="X86;AMDGPU" \
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
             -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/llvm-install" \
-            -DLLVM_ENABLE_RTTI=OFF \
+            -DLLVM_ENABLE_RTTI=ON \
             -DLLVM_ENABLE_ASSERTIONS=ON \
             -DLLVM_ENABLE_ZLIB=OFF \
             -DLLVM_ENABLE_ZSTD=OFF \
