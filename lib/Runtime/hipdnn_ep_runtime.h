@@ -948,6 +948,39 @@ int wrap_qmatmul(RuntimeState *state, const void *A, const void *B, void *Y,
                  float M_scale, int64_t A_zero_point, int64_t B_zero_point,
                  int64_t Y_zero_point);
 
+// Fused quantized 1x1 convolution: Q(Conv(DQ(input), DQ(weights))) with the
+// weights never leaving their packed 4-bit form. See QConvLowering.cpp.
+//
+// The geometry is fixed by construction -- 1x1 kernel, unit stride, unit
+// dilation, no padding, no grouping -- which makes the convolution one dot
+// product per output position down the channel axis, i.e. a GEMM with
+// M = out_channels, K = in_channels, N = spatial_size. That is why no per-axis
+// extents appear here the way they do in wrap_conv: every one of them would be
+// a constant 1 or 0. `spatial_size` is the product of the output spatial dims,
+// and unit stride with no padding makes the input's identical.
+//
+// Activation quantization is per-tensor, so input_scale/zp and output_scale/zp
+// are scalars. Weight quantization is per OUTPUT CHANNEL, so weight_scales and
+// weight_zero_points are device arrays of one value each per output channel --
+// they cannot fold into scalars, and on a real model they arrive as external
+// constants whose values are not even known at compile time.
+//
+// weights and weight_zero_points carry their LOGICAL element counts with an
+// 8-bit element type; weight_bits == 4 means each byte holds two values, low
+// nibble first. weight_dtype's signedness decides how a nibble widens.
+//
+// activation_dtype: HIPDNN_EP_DATATYPE_UINT16 (input and output).
+// weight_dtype: HIPDNN_EP_DATATYPE_INT8 / UINT8 (storage of both weight
+// arrays). bias is nullable; bias_dtype is meaningful only when it is non-null
+// and is HIPDNN_EP_DATATYPE_UNSUPPORTED otherwise, meaning "no bias type".
+int wrap_qconv(RuntimeState *state, const void *input, const void *weights,
+               const void *weight_scales, const void *weight_zero_points,
+               const void *bias, void *output, int64_t batch,
+               int64_t in_channels, int64_t out_channels, int64_t spatial_size,
+               int64_t activation_dtype, int64_t weight_dtype,
+               int64_t weight_bits, int64_t bias_dtype, float input_scale,
+               int64_t input_zp, float output_scale, int64_t output_zp);
+
 // Element-wise Where wrapper (NumPy-style multidirectional broadcasting,
 // arbitrary rank). Computes output[i] = condition[i] ? x[i] : y[i] with
 // per-operand broadcasting.
