@@ -1777,8 +1777,14 @@ HIP_KERNEL_API int hip_instance_norm(
  * Per-row reduction with FP32 accumulators, regardless of I/O dtype. Unlike
  * LayerNormalization there is no mean subtraction and no bias term.
  *
- * `outer` / `norm_size`: input viewed as [outer, norm_size], where norm_size
- *                        equals the scale element count.
+ * `outer` / `norm_size`: input viewed as [outer, norm_size], where norm_size is
+ *                        the ONNX reduction width (product of the input dims
+ *                        from `axis` on) -- NOT the scale element count.
+ * `scale_rows`         : number of gain vectors packed in `scale`
+ *                        (scale_num_elements / norm_size). Row r uses group
+ *                        r % scale_rows; 1 is the ordinary shared-gain case,
+ *                        >1 is a grouped norm such as scale [G, D] applied to
+ *                        input [N, G, D] with axis = -1.
  * `hip_dtype`          : I/O type for input/scale/output -- FLOAT16 or FLOAT32.
  *
  * FLOAT16 automatically uses a packed __half2 body when norm_size is even and
@@ -1791,6 +1797,7 @@ HIP_KERNEL_API int hip_rms_norm(
     void* output,
     int64_t outer,
     int64_t norm_size,
+    int64_t scale_rows,
     float epsilon,
     int hip_dtype);
 
