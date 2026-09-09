@@ -150,9 +150,10 @@ set(BUILD_SHARED_LIBS ${_saved_bsl_cpptrace})
 #   in-tree-defined helper functions (mlir_tablegen, llvm_map_components_to_libnames,
 #   add_mlir_dialect, ...). See llvm/docs/CMake.rst + the FOSDEM MLIR-dialect talk.
 #
-# Keep this in lockstep with rocmlirTriton's external/llvm-project subtree and
-# llvm-patches directory. This is a post-22, pre-release LLVM 23 snapshot, so
-# LLVM_PACKAGE_VERSION alone is not a sufficient identity.
+# Keep this in lockstep with rocmlirTriton's external/llvm-project subtree: the
+# upstream SHA below plus cmake/patches/rocmlir-llvm-source.patch, which carries
+# that subtree's downstream source changes. This is a post-22, pre-release LLVM
+# 23 snapshot, so LLVM_PACKAGE_VERSION alone is not a sufficient identity.
 set(_HIPDNN_LLVM_UPSTREAM_SHA
     "62b7cf9623fc310525f39ed69aaecc318a909731")
 set(_HIPDNN_ROCMLIRTRITON_REV
@@ -167,7 +168,7 @@ if(NOT DEP_HASH_llvm STREQUAL _HIPDNN_LLVM_UPSTREAM_SHA)
     "rocmlirTriton LLVM pin '${_HIPDNN_LLVM_UPSTREAM_SHA}'")
 endif()
 set(HIPDNN_ROCMLIRTRITON_SOURCE_DIR "" CACHE PATH
-    "Optional rocmlirTriton checkout providing external/llvm-project and llvm-patches")
+    "Optional rocmlirTriton checkout providing external/llvm-project")
 message(STATUS
   "hip-ep requires rocmlirTriton LLVM ${_HIPDNN_LLVM_PINNED_VERSION} "
   "(${_HIPDNN_LLVM_PATCHSET_ID})")

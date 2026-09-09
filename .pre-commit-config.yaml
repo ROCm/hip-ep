@@ -9,12 +9,18 @@ repos:
 -   repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
+    # cmake/patches/ holds vendored diffs that must stay byte-exact: a context
+    # line for a blank source line is a single space, and git apply rejects the
+    # patch once that space is stripped.
     -   id: trailing-whitespace
+        exclude: ^cmake/patches/
     -   id: end-of-file-fixer
+        exclude: ^cmake/patches/
     -   id: check-yaml
     -   id: check-added-large-files
     -   id: fix-byte-order-marker
     -   id: mixed-line-ending
+        exclude: ^cmake/patches/
     -   id: check-merge-conflict
 -   repo: local
     hooks:
@@ -34,10 +40,11 @@ repos:
         name: licenseheaders
         entry: python -m licenseheaders
         # -x excludes paths from license-header insertion. morphizen/* (the
-        # vendored subtree) keeps its own upstream copyright headers, and
+        # vendored subtree) keeps its own upstream copyright headers,
         # lib/Runtime/Kernels/* (the hand-written GPU kernels) keeps its existing
-        # headers untouched.
-        args: [-t,./LICENSES/license.txt,-x,morphizen/*,lib/Runtime/Kernels/*,-s,./LICENSES/settings.json,-f]
+        # headers untouched, and cmake/patches/* holds vendored diffs that must
+        # stay byte-exact.
+        args: [-t,./LICENSES/license.txt,-x,morphizen/*,lib/Runtime/Kernels/*,cmake/patches/*,-s,./LICENSES/settings.json,-f]
         language: python
         additional_dependencies: [licenseheaders==0.8.8]
         types: [file]
