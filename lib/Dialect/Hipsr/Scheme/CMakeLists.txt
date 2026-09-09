@@ -64,24 +64,24 @@ add_custom_command(
 )
 
 add_custom_command(
-  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.h
+  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/SchemeBindingsScm.h
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_SOURCE_DIR}/cmake/xxd.py
-          --var print_operation_scm_data
-          --output ${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.h
-          ${CMAKE_CURRENT_SOURCE_DIR}/scheme-mlir-bridge.scm
-  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/scheme-mlir-bridge.scm
-  COMMENT "Embedding scheme-mlir-bridge.scm"
+          --var scheme_bindings_scm_data
+          --output ${CMAKE_CURRENT_BINARY_DIR}/SchemeBindingsScm.h
+          ${CMAKE_CURRENT_SOURCE_DIR}/SchemeBindings.scm
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/SchemeBindings.scm
+  COMMENT "Embedding SchemeBindings.scm"
   VERBATIM
 )
 
 add_custom_target(ChezBootHeaders DEPENDS
   ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.h
   ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.h
-  ${CMAKE_CURRENT_BINARY_DIR}/PrintOperationScm.h
+  ${CMAKE_CURRENT_BINARY_DIR}/SchemeBindingsScm.h
 )
 add_library(HipsrSchemePass
-  SchemeRuntime.cpp
+  SchemeBindings.cpp
   SchemeScriptPass.cpp
 )
 
@@ -111,19 +111,19 @@ target_link_libraries(HipsrSchemePass
 
 # Copy Scheme scripts to build tree for testing
 configure_file(
-  ${CMAKE_CURRENT_SOURCE_DIR}/print-pass.scm
-  ${CMAKE_BINARY_DIR}/lib/scheme/print-pass.scm
+  ${CMAKE_CURRENT_SOURCE_DIR}/PrintPass.scm
+  ${CMAKE_BINARY_DIR}/lib/scheme/PrintPass.scm
   COPYONLY
 )
 configure_file(
-  ${CMAKE_CURRENT_SOURCE_DIR}/scheme-mlir-bridge.scm
-  ${CMAKE_BINARY_DIR}/lib/scheme/scheme-mlir-bridge.scm
+  ${CMAKE_CURRENT_SOURCE_DIR}/SchemeBindings.scm
+  ${CMAKE_BINARY_DIR}/lib/scheme/SchemeBindings.scm
   COPYONLY
 )
 
 # Install Scheme scripts to <prefix>/lib/scheme/
 install(FILES
-  ${CMAKE_CURRENT_SOURCE_DIR}/print-pass.scm
-  ${CMAKE_CURRENT_SOURCE_DIR}/scheme-mlir-bridge.scm
+  ${CMAKE_CURRENT_SOURCE_DIR}/PrintPass.scm
+  ${CMAKE_CURRENT_SOURCE_DIR}/SchemeBindings.scm
   DESTINATION lib/scheme
 )

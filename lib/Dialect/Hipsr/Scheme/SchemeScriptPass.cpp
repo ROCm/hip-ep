@@ -6,7 +6,7 @@
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
-#include "SchemeRuntime.h"
+#include "SchemeBindings.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 
@@ -33,7 +33,7 @@ struct SchemeScriptPass : public impl::SchemeScriptPassBase<SchemeScriptPass> {
     // module (DLL/SO) containing this code, not just the main executable.
     // This works whether we're statically linked or a dynamic plugin.
     // Expected layout: <install>/bin/hip-mlir-opt (or <install>/lib/libHipsrSchemePass.so)
-    //                  <install>/lib/scheme/print-pass.scm
+    //                  <install>/lib/scheme/PrintPass.scm
     std::string modulePath = llvm::sys::fs::getMainExecutable(nullptr, (void*)&initializeSchemeRuntime);
     llvm::SmallString<256> scriptPath(modulePath);
     llvm::sys::path::remove_filename(scriptPath);  // Remove binary name
@@ -42,7 +42,7 @@ struct SchemeScriptPass : public impl::SchemeScriptPassBase<SchemeScriptPass> {
     if (llvm::sys::path::filename(scriptPath) == "bin")
       llvm::sys::path::remove_filename(scriptPath);  // Remove bin/
 
-    llvm::sys::path::append(scriptPath, "lib", "scheme", "print-pass.scm");
+    llvm::sys::path::append(scriptPath, "lib", "scheme", "PrintPass.scm");
 
     if (!loadSchemeScript(scriptPath.c_str())) {
       signalPassFailure();
