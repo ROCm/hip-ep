@@ -159,8 +159,9 @@ public:
     //   "0","1"…  — 0-based AMD-only adapter index
     //   "0x…"     — DXGI LUID as 64-bit hex string
     //   other     — case-insensitive substring of adapter description name
-    explicit Dx12Runner(std::string adapter_selector = "", bool verbose = false)
-        : adapter_selector_(std::move(adapter_selector)), verbose_(verbose) {}
+    explicit Dx12Runner(std::string adapter_selector = "", bool verbose = false, bool assume_gfx1151 = false)
+        : adapter_selector_(std::move(adapter_selector)),
+          assume_gfx1151_(assume_gfx1151), verbose_(verbose) {}
     ~Dx12Runner() = default;
 
     Dx12Runner(const Dx12Runner&)            = delete;
@@ -208,6 +209,7 @@ private:
     // ---------------------------------------------------------------------------
     std::string                  adapter_selector_;
     bool                         initialized_    = false;
+    bool                         assume_gfx1151_ = false;
     ComPtr<ID3D12Device>         device_;
     ComPtr<ID3D12CommandQueue>   queue_;
     ComPtr<ID3D12CommandAllocator>      allocator_;
@@ -219,6 +221,7 @@ private:
     // AMD extension objects
     HMODULE                      amd_ext_module_  = nullptr;
     ComPtr<IAmdExtD3DFactory>    amd_ext_factory_;
+    ComPtr<IAmdExtD3DDevice5>    amd_ext_device5_;  // v5: HSA ET_REL pipeline creation
     ComPtr<IAmdExtD3DDevice7>    amd_ext_device_;
     ComPtr<IAmdExtD3DDevice10>   amd_ext_device10_;  // v10: DispatchPalElf
     bool                         elf_hsa_supported_ = false;
