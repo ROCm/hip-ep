@@ -82,7 +82,7 @@ add_custom_target(ChezBootHeaders DEPENDS
 )
 add_library(HipsrSchemePass
   SchemeRuntime.cpp
-  SchemePrintPass.cpp
+  SchemeScriptPass.cpp
 )
 
 target_include_directories(HipsrSchemePass PRIVATE
