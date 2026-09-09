@@ -387,6 +387,7 @@ inline SmallVector<Value, 4> extractShape4D(MemRefType type, Value descriptor,
 // Must match HIPDNN_EP_QELEMENTWISE_* in lib/Runtime/hipdnn_ep_runtime.h
 enum HipdnnQElementwiseKind : int64_t {
   kQElementwiseAdd = 0,
+  kQElementwiseMul = 1,
 };
 
 // Must match HIPDNN_EP_TENSOR_OP_* in lib/Runtime/hipdnn_ep_runtime.h
@@ -521,8 +522,8 @@ void populateGridSampleLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns);
 void populateGlobalPoolLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns);
-void populateQAddLoweringPatterns(const LLVMTypeConverter &converter,
-                                  RewritePatternSet &patterns);
+void populateQElementwiseLoweringPatterns(const LLVMTypeConverter &converter,
+                                          RewritePatternSet &patterns);
 } // namespace hip
 } // namespace mlir
 

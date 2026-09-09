@@ -1168,16 +1168,65 @@ extern "C" int hip_gqa_add_attention_bias_f32(
 // Output-type-templated: reads fp32 scores, writes TOut ∈ {__half, float}.
 // fp16 output (TOut=__half) feeds the fp16 Value GEMM; fp32 output (TOut=float)
 // feeds the fp32 Value GEMM on the Whisper no_causal fp32 decomposed path.
-template <typename TOut>
+//
+// HAS_BIAS folds the external additive mask in here instead of running
+// add_attention_bias_kernel first. That kernel was a full read-modify-write
+// over the score buffer -- 2.14 GB per head at a 16K prompt -- purely to hand
+// this kernel a value it is about to read anyway. A block owns one query row,
+// and the bias runs along the key axis in the same order the reduction below
+// does, so the fold is one extra contiguous stream to read. The three passes
+// re-read it, but a row is 32-64 KB and stays resident across them, so the cost
+// is one stream from memory against the two the separate pass spent on the
+// scores alone.
+//
+// The bias is indexed on its own full extents rather than through a bumped
+// pointer, for the reason add_attention_bias_kernel gives at length: `input`
+// can be a sub-block of the logical [bias_sq, bias_total_seq] matrix -- `cols`
+// query rows from bias_row_offset when the caller tiles the prefill, and `rows`
+// key columns from bias_col_offset when it narrows to a sliding window -- while
+// the bias always describes the whole thing. Folding either offset into the
+// pointer would mis-stride every batch/head plane after the first.
+//
+// The bias is added to the score BEFORE the max is taken, which is required
+// rather than incidental: taking the max of unbiased scores and then adding the
+// bias could leave a masked entry (bias -65504) as the column max and put every
+// exponent off scale.
+template <typename TOut, bool HAS_BIAS = false, typename TBias = __half>
 __global__ void softmax_f32_to_out_kernel(
     const float* input, TOut* output,
     int rows, int cols, int input_batch_stride, int output_batch_stride,
-    const __half* head_sink, int num_heads, int use_smooth_softmax) {
+    const __half* head_sink, int num_heads, int use_smooth_softmax,
+    const TBias* __restrict__ bias, int bias_batch, int bias_heads,
+    int bias_sq, int bias_row_offset, int bias_total_seq, int bias_col_offset) {
   const int linear = __builtin_amdgcn_readfirstlane(blockIdx.x);
   const int head = __builtin_amdgcn_readfirstlane(linear / cols);
   const int col  = __builtin_amdgcn_readfirstlane(linear % cols);
   const float* in_col = input + (size_t)head * input_batch_stride + (size_t)col * rows;
   TOut* out_col = output + (size_t)head * output_batch_stride + (size_t)col * rows;
+
+  // Start of this query row inside the bias, resolved exactly as
+  // add_attention_bias_kernel resolves it. `col` is the query row (this kernel
+  // reduces along `rows`, the key axis), so it indexes the bias's row axis.
+  const TBias* bias_row = nullptr;
+  if (HAS_BIAS) {
+    const int b = head / num_heads;
+    const int h = head % num_heads;
+    const int bias_b = (bias_batch == 1) ? 0 : b;
+    const int bias_h = (bias_heads == 1) ? 0 : h;
+    const size_t bias_plane = (size_t)bias_sq * bias_total_seq;
+    bias_row = bias + (size_t)bias_b * bias_heads * bias_plane +
+               (size_t)bias_h * bias_plane +
+               (size_t)(bias_row_offset + col) * bias_total_seq +
+               bias_col_offset;
+  }
+
+  // Score with the bias already folded in, or the raw score when there is none.
+  auto score_at = [&](int i) -> float {
+    float s = in_col[i];
+    if (HAS_BIAS)
+      s += static_cast<float>(bias_row[i]);
+    return s;
+  };
 
   const int tid = threadIdx.x;
   const int wave_id = tid / WAVE_SIZE;
@@ -1188,7 +1237,7 @@ __global__ void softmax_f32_to_out_kernel(
   // Pass 1: find max (fp32, no overflow risk)
   float local_max = -INFINITY;
   for (int i = tid; i < rows; i += blockDim.x)
-    local_max = fmaxf(local_max, in_col[i]);
+    local_max = fmaxf(local_max, score_at(i));
 
   local_max = warp_reduce_max(local_max);
   if (tid % WAVE_SIZE == 0)
@@ -1206,7 +1255,7 @@ __global__ void softmax_f32_to_out_kernel(
   // Pass 2: exp2f + sum (fp32 throughout, values recomputed in Pass 3)
   float local_sum = 0.0f;
   for (int i = tid; i < rows; i += blockDim.x)
-    local_sum += exp2f((in_col[i] - max_val) * LOG2E);
+    local_sum += exp2f((score_at(i) - max_val) * LOG2E);
 
   local_sum = warp_reduce_sum(local_sum);
   if (tid % WAVE_SIZE == 0)
@@ -1232,17 +1281,19 @@ __global__ void softmax_f32_to_out_kernel(
   // Pass 3: normalize and write output (fp16 or fp32 per TOut).
   float inv_sum = 1.0f / sum_val;
   for (int i = tid; i < rows; i += blockDim.x) {
-    float e = exp2f((in_col[i] - max_val) * LOG2E);
+    float e = exp2f((score_at(i) - max_val) * LOG2E);
     out_col[i] = gqa_from_float<TOut>(e * inv_sum);
   }
 }
 
-template <typename TOut>
+template <typename TOut, bool HAS_BIAS, typename TBias>
 static void launch_softmax_f32_to_out(
     hipStream_t stream, const void* input_f32, void* output,
     int total_head_queries, int rows, int cols,
     int input_batch_stride, int output_batch_stride,
-    const void* head_sink, int num_heads, int use_smooth_softmax) {
+    const void* head_sink, int num_heads, int use_smooth_softmax,
+    const void* bias, int bias_batch, int bias_heads,
+    int bias_sq, int bias_row_offset, int bias_total_seq, int bias_col_offset) {
   // The block must be a whole multiple of the hardware wave, else the tail of a
   // partial wave is inactive and the __shfl_xor reduction folds in its lanes.
   // The floor is therefore the device wave size: 32 on wave32 (RDNA, unchanged
@@ -1254,11 +1305,27 @@ static void launch_softmax_f32_to_out(
   while (threads < std::min(rows, 256)) threads *= 2;
   if (threads > 256) threads = 256;
   int num_waves = threads / wave;
-  softmax_f32_to_out_kernel<TOut><<<total_head_queries, threads,
-                                    num_waves * sizeof(float), stream>>>(
-      static_cast<const float*>(input_f32), static_cast<TOut*>(output),
-      rows, cols, input_batch_stride, output_batch_stride,
-      static_cast<const __half*>(head_sink), num_heads, use_smooth_softmax);
+  softmax_f32_to_out_kernel<TOut, HAS_BIAS, TBias>
+      <<<total_head_queries, threads, num_waves * sizeof(float), stream>>>(
+          static_cast<const float*>(input_f32), static_cast<TOut*>(output),
+          rows, cols, input_batch_stride, output_batch_stride,
+          static_cast<const __half*>(head_sink), num_heads, use_smooth_softmax,
+          static_cast<const TBias*>(bias), bias_batch, bias_heads, bias_sq,
+          bias_row_offset, bias_total_seq, bias_col_offset);
+}
+
+// Selects the no-bias instantiation, so the existing callers stay on exactly
+// the code they had.
+template <typename TOut>
+static void launch_softmax_f32_to_out(
+    hipStream_t stream, const void* input_f32, void* output,
+    int total_head_queries, int rows, int cols,
+    int input_batch_stride, int output_batch_stride,
+    const void* head_sink, int num_heads, int use_smooth_softmax) {
+  launch_softmax_f32_to_out<TOut, false, __half>(
+      stream, input_f32, output, total_head_queries, rows, cols,
+      input_batch_stride, output_batch_stride, head_sink, num_heads,
+      use_smooth_softmax, nullptr, 1, 1, 0, 0, 0, 0);
 }
 
 extern "C" int hip_gqa_softmax_f32_to_f16(
@@ -1289,6 +1356,58 @@ extern "C" int hip_gqa_softmax_f32_to_f32(
       stream, input_f32, output_f32, total_head_queries, rows, cols,
       input_batch_stride, output_batch_stride, head_sink, num_heads,
       use_smooth_softmax);
+  GQA_RETURN_LAUNCH_STATUS();
+}
+
+// Bias-folding variant: adds the external additive mask while reading the score
+// column, replacing a separate hip_gqa_add_attention_bias_f32 pass over the
+// same buffer. bias_element_size_bytes selects the mask dtype (2 = fp16, the
+// usual ONNX Attention export; 4 = fp32). output_fp32 picks the probability
+// dtype, matching the two entries above. The bias extents follow
+// hip_gqa_add_attention_bias_f32, including its convention that a
+// non-positive bias_sq / bias_total_seq means the bias covers exactly the block
+// passed in; note this kernel's `cols` is the query count and `rows` the key
+// extent, the transpose of the names that entry uses.
+extern "C" int hip_gqa_softmax_f32_to_out_biased(
+    void* stream_ptr, const void* input_f32, void* output,
+    int total_head_queries, int rows, int cols,
+    int input_batch_stride, int output_batch_stride,
+    const void* head_sink, int num_heads, int use_smooth_softmax,
+    const void* bias, int bias_batch, int bias_heads,
+    int bias_element_size_bytes, int output_fp32,
+    int bias_sq, int bias_row_offset, int bias_total_seq, int bias_col_offset) {
+  if (!bias)
+    return -1;
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  (void)hipGetLastError();  // clear stale error for correct attribution
+  if (bias_element_size_bytes != 2 && bias_element_size_bytes != 4) {
+    fprintf(stderr,
+            "hip_gqa_softmax_f32_to_out_biased: unsupported bias elem size %d\n",
+            bias_element_size_bytes);
+    return -1;
+  }
+  if (bias_sq <= 0)
+    bias_sq = cols;
+  if (bias_total_seq <= 0)
+    bias_total_seq = rows;
+#define GQA_SOFTMAX_BIASED(TOUT, TBIAS)                                        \
+  launch_softmax_f32_to_out<TOUT, true, TBIAS>(                                \
+      stream, input_f32, output, total_head_queries, rows, cols,               \
+      input_batch_stride, output_batch_stride, head_sink, num_heads,           \
+      use_smooth_softmax, bias, bias_batch, bias_heads, bias_sq,               \
+      bias_row_offset, bias_total_seq, bias_col_offset)
+  if (output_fp32) {
+    if (bias_element_size_bytes == 2)
+      GQA_SOFTMAX_BIASED(float, __half);
+    else
+      GQA_SOFTMAX_BIASED(float, float);
+  } else {
+    if (bias_element_size_bytes == 2)
+      GQA_SOFTMAX_BIASED(__half, __half);
+    else
+      GQA_SOFTMAX_BIASED(__half, float);
+  }
+#undef GQA_SOFTMAX_BIASED
   GQA_RETURN_LAUNCH_STATUS();
 }
 

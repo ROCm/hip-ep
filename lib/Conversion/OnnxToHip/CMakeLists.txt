@@ -40,6 +40,11 @@ if(MLIR_PDLL_EXE)
         VERBATIM)
     add_custom_target(HipPdllPatterns DEPENDS "${PDL_OUTPUT}" "${PDL_RUNTIME_OUTPUT}")
     install(FILES "${PDL_OUTPUT}" DESTINATION bin)
+    # ConvertOnnxToHipPass resolves the patterns next to the loaded EP module,
+    # so every packaging path (install tree, wheel, staged test package) has to
+    # ship this file beside the EP library. Export it for those consumers.
+    set(HIP_PDL_FUSION_PATTERNS "${PDL_OUTPUT}" CACHE INTERNAL
+        "Compiled PDL fusion patterns that must ship beside the EP library")
     message(STATUS "OnnxToHip: PDLL fusion enabled — patterns: ${PDL_OUTPUT}")
 else()
     message(WARNING "OnnxToHip: mlir-pdll not found — PDLL fusion disabled")

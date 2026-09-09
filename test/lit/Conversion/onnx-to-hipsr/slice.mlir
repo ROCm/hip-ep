@@ -55,11 +55,12 @@ func.func @strided_window(%ctx: !hipsr.context,
 // CHECK-NEXT:      hipsr.shape_yield %[[ENDS_SHAPE]] : !shape.shape
 // CHECK-NEXT:    }
 // CHECK-NEXT:    %[[ENDS:.+]] = hipsr.compute(%[[CTX]]) ins(%[[OTHER]] : tensor<?x4096xf16, #hipsr.mem<device>>) outs(%[[ENDS_INIT]] : tensor<1xi64, #hipsr.mem<host>>) {
-// CHECK-NEXT:    ^bb0(%{{.+}}: !hipsr.context, %[[BODY_OTHER:.+]]: tensor<?x4096xf16, #hipsr.mem<device>>, %{{.+}}: tensor<1xi64, #hipsr.mem<host>>):
+// CHECK-NEXT:    ^bb0(%{{.+}}: !hipsr.context, %[[BODY_OTHER:.+]]: tensor<?x4096xf16, #hipsr.mem<device>>, %[[DEST:.+]]: tensor<1xi64, #hipsr.mem<host>>):
 // CHECK-NEXT:      %[[AXIS:.+]] = arith.constant 0 : index
 // CHECK-NEXT:      %[[DIM:.+]] = tensor.dim %[[BODY_OTHER]], %[[AXIS]] : tensor<?x4096xf16, #hipsr.mem<device>>
 // CHECK-NEXT:      %[[BOUND:.+]] = arith.index_cast %[[DIM]] : index to i64
-// CHECK-NEXT:      %[[BOUND_VECTOR:.+]] = tensor.from_elements %[[BOUND]] : tensor<1xi64, #hipsr.mem<host>>
+// CHECK-NEXT:      %[[SLOT0:.+]] = arith.constant 0 : index
+// CHECK-NEXT:      %[[BOUND_VECTOR:.+]] = tensor.insert %[[BOUND]] into %[[DEST]]{{\[}}%[[SLOT0]]] : tensor<1xi64, #hipsr.mem<host>>
 // CHECK-NEXT:      hipsr.compute_yield %[[BOUND_VECTOR]] : tensor<1xi64, #hipsr.mem<host>>
 // CHECK-NEXT:    } : tensor<1xi64, #hipsr.mem<host>>
 // CHECK-NEXT:    %{{.+}} = hipsr.constant {value = dense<0> : tensor<1xi64>} : tensor<1xi64, #hipsr.mem<device>>

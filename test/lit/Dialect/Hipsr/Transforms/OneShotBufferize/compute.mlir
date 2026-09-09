@@ -60,9 +60,9 @@
 // CHECK-NEXT: scf.yield %[[S3]] : !shape.shape
 // CHECK-NEXT: }
 // CHECK-NEXT: %[[INIT1:.+]] = memref.alloc(%[[M]]){{.*}} : memref<?x256xf16, #hipsr.mem<device>>
+// CHECK-NEXT: %[[INIT2:.+]] = memref.alloc(%[[M]]){{.*}} : memref<?x256xf16, #hipsr.mem<device>>
 // CHECK-NEXT: hipsr.cast(%[[DCTX]]) ins(%[[IN]] : memref<?x256xf16, #hipsr.mem<device>>)
 // CHECK-SAME: outs(%[[INIT1]] : memref<?x256xf16, #hipsr.mem<device>>)
-// CHECK-NEXT: %[[INIT2:.+]] = memref.alloc(%[[M]]){{.*}} : memref<?x256xf16, #hipsr.mem<device>>
 // CHECK-NEXT: hipsr.cast(%[[DCTX]]) ins(%[[INIT1]] : memref<?x256xf16, #hipsr.mem<device>>)
 // CHECK-SAME: outs(%[[INIT2]] : memref<?x256xf16, #hipsr.mem<device>>)
 // CHECK-NEXT: %[[FLAT:.+]] = hipsr.compute(%[[DCTX]]) ins(%[[INIT2]] : memref<?x256xf16, #hipsr.mem<device>>)
