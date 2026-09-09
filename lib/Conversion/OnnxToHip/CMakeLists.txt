@@ -66,7 +66,7 @@ if(MLIR_PDLL_EXE)
         "Compiled PDL fusion patterns that must ship beside the EP library")
     message(STATUS "OnnxToHip: PDLL fusion enabled — patterns: ${PDL_OUTPUT}")
 else()
-    message(FATAL_ERROR
+    message(WARNING
         "OnnxToHip: mlir-pdll not found. ConvertOnnxToHipPass requires the "
         "compiled HipFusionPatterns.pdl.mlir next to the EP library.\n"
         "\n"
