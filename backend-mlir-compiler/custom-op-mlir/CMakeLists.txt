@@ -77,9 +77,18 @@ endif()
 # Define MORPHIZEN_CUSTOM_OP for conditional compilation
 target_compile_definitions(${LIB_NAME} PRIVATE MORPHIZEN_CUSTOM_OP=1)
 
-find_package(hipblaslt CONFIG REQUIRED)
+# LlvmIrJit dlopens hipBLASLt by name, and that base name has moved across ROCm
+# releases, so take it from the imported target when there is one. REQUIRED here
+# breaks the mock build, which configures this target but has no ROCm installed
+# and never loads the library at runtime.
+find_package(hipblaslt CONFIG QUIET)
+if(TARGET roc::hipblaslt)
+  set(HIPBLASLT_DLL_NAME "$<TARGET_FILE_BASE_NAME:roc::hipblaslt>")
+else()
+  set(HIPBLASLT_DLL_NAME "libhipblaslt")
+endif()
 target_compile_definitions(${LIB_NAME} PRIVATE
-    HIPDNN_HIPBLASLT_DLL="$<TARGET_FILE_BASE_NAME:roc::hipblaslt>")
+    HIPDNN_HIPBLASLT_DLL="${HIPBLASLT_DLL_NAME}")
 
 if(HIPDNN_EP_LINK_HIP_HOST)
   target_compile_definitions(${LIB_NAME} PRIVATE HIPDNN_EP_LINK_HIP_HOST=1)
