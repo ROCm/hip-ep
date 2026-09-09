@@ -51,6 +51,17 @@ static inline const char *hipdnn_ep_tensor_op_name(int64_t op) {
   }
 }
 
+static inline const char *hipdnn_ep_qelementwise_kind_name(int64_t kind) {
+  switch (kind) {
+  case HIPDNN_EP_QELEMENTWISE_ADD:
+    return "qadd";
+  case HIPDNN_EP_QELEMENTWISE_MUL:
+    return "qmul";
+  default:
+    return "qelementwise_unknown";
+  }
+}
+
 static inline int64_t hipdnn_ep_datatype_size(int64_t data_type) {
   switch (data_type) {
   case HIPDNN_EP_DATATYPE_FLOAT:
