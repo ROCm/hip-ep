@@ -80,6 +80,14 @@ target_link_libraries(HipToLLVM PUBLIC
   MLIRMemRefDialect
   MLIRTransforms
   MLIRArithTransforms
+  # convert-hip-to-llvm populates the standard dialect->LLVM lowering patterns
+  # (func/memref/arith/cf) directly in HipToLLVM.cpp. Link them here so every
+  # consumer inherits them transitively in the correct order instead of each
+  # executable re-listing them (and getting the link order right by luck).
+  MLIRFuncToLLVM
+  MLIRMemRefToLLVM
+  MLIRArithToLLVM
+  MLIRControlFlowToLLVM
   # ConvertToLLVMPatternInterface: convert-hip-to-llvm walks the module and
   # collects HIP->LLVM lowerings from out-of-tree (plugin) dialects that
   # implement this interface. See the guarded walk in HipToLLVM.cpp.
