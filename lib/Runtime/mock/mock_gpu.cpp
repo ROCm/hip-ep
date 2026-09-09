@@ -1610,6 +1610,31 @@ int wrap_qelementwise(RuntimeState *state, void *lhs, void *rhs, void *output,
   return 0;
 }
 
+int wrap_qmatmul(RuntimeState *state, const void *A, const void *B, void *Y,
+                 int64_t M, int64_t N, int64_t K, int64_t batch_count,
+                 int64_t b_batch_stride, int64_t trans_a, int64_t trans_b,
+                 int64_t a_data_type, int64_t b_data_type, int64_t y_data_type,
+                 float M_scale, int64_t A_zero_point, int64_t B_zero_point,
+                 int64_t Y_zero_point) {
+  (void)A;
+  (void)B;
+  (void)Y;
+  (void)b_batch_stride;
+  (void)a_data_type;
+  (void)b_data_type;
+  (void)y_data_type;
+  (void)A_zero_point;
+  (void)B_zero_point;
+  (void)Y_zero_point;
+  if (!state)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_qmatmul(M=%lld, N=%lld, K=%lld, batch=%lld, "
+             "trans=(%lld,%lld), M_scale=%g)",
+             (long long)M, (long long)N, (long long)K, (long long)batch_count,
+             (long long)trans_a, (long long)trans_b, (double)M_scale);
+  return 0;
+}
+
 int wrap_and(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
              int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n, int64_t b_c,
              int64_t b_h, int64_t b_w, int64_t out_n, int64_t out_c,

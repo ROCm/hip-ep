@@ -3,11 +3,12 @@
  * Licensed under the MIT License.
  */
 
-// qdq_fusion_pass.hpp — PDL fusion pass for QDQ MatMul patterns
+// qdq_fusion_pass.hpp — PDL fusion pass for QDQ patterns
 
 #pragma once
 
 #include "mlir/Dialect/PDL/IR/PDL.h"
+#include "mlir/Dialect/PDL/IR/PDLOps.h"
 #include "mlir/Dialect/PDLInterp/IR/PDLInterp.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
@@ -122,6 +123,52 @@ hasExtractableZeropoint(mlir::PatternRewriter &, mlir::PDLResultList &,
                            .has_value());
 }
 
+// Restrict a Q/DQ op to an 8-bit quantized side.
+inline mlir::LogicalResult
+isEightBitQuantized(mlir::PatternRewriter &, mlir::PDLResultList &,
+                    llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 1)
+    return mlir::failure();
+  auto *op = args[0].dyn_cast<mlir::Operation *>();
+  if (!op)
+    return mlir::failure();
+  auto quantType = getQuantizedElementType(op);
+  return mlir::success(quantType && quantType.getWidth() == 8);
+}
+
+// Restrict a Q/DQ op to an 8- or 16-bit quantized side.
+inline mlir::LogicalResult
+isEightOrSixteenBitQuantized(mlir::PatternRewriter &, mlir::PDLResultList &,
+                             llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 1)
+    return mlir::failure();
+  auto *op = args[0].dyn_cast<mlir::Operation *>();
+  if (!op)
+    return mlir::failure();
+  auto quantType = getQuantizedElementType(op);
+  if (!quantType)
+    return mlir::failure();
+  unsigned width = quantType.getWidth();
+  return mlir::success(width == 8 || width == 16);
+}
+
+// Require every result of `op` to have a static shape.
+inline mlir::LogicalResult
+hasStaticShapedResults(mlir::PatternRewriter &, mlir::PDLResultList &,
+                       llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 1)
+    return mlir::failure();
+  auto *op = args[0].dyn_cast<mlir::Operation *>();
+  if (!op || op->getNumResults() == 0)
+    return mlir::failure();
+  for (mlir::Value result : op->getResults()) {
+    auto shaped = mlir::dyn_cast<mlir::ShapedType>(result.getType());
+    if (!shaped || !shaped.hasStaticShape())
+      return mlir::failure();
+  }
+  return mlir::success();
+}
+
 //===----------------------------------------------------------------------===//
 // Rewrite functions -- reached only after the constraints above accepted.
 //===----------------------------------------------------------------------===//
@@ -171,6 +218,32 @@ extractZeropointValue(mlir::PatternRewriter &rewriter,
   return mlir::success();
 }
 
+// args[0] = op, args[1] = attribute name, args[2] = value to use when absent.
+// Return failure if the attribute is not an i64 integer attribute.
+inline mlir::LogicalResult
+extractAttrInt64(mlir::PatternRewriter &rewriter, mlir::PDLResultList &results,
+                 llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 3)
+    return mlir::failure();
+
+  auto *op = args[0].dyn_cast<mlir::Operation *>();
+  auto nameAttr = mlir::dyn_cast_or_null<mlir::StringAttr>(
+      args[1].dyn_cast<mlir::Attribute>());
+  auto defaultValue = mlir::dyn_cast_or_null<mlir::IntegerAttr>(
+      args[2].dyn_cast<mlir::Attribute>());
+
+  if (!op || !nameAttr || !defaultValue)
+    return mlir::failure();
+
+  auto attr = op->getAttrOfType<mlir::IntegerAttr>(nameAttr.getValue());
+
+  if (attr && !attr.getType().isInteger(64))
+    return mlir::failure();
+
+  results.push_back(attr ? attr : defaultValue);
+  return mlir::success();
+}
+
 // Apply PDL patterns
 inline bool run(mlir::ModuleOp mlirModule, llvm::StringRef pdlBytecodeFile) {
   if (pdlBytecodeFile.empty())
@@ -184,6 +257,13 @@ inline bool run(mlir::ModuleOp mlirModule, llvm::StringRef pdlBytecodeFile) {
   if (!pdlModule)
     return false;
 
+  // FrozenRewritePatternSet skips the PDL-to-PDLInterp lowering for a module
+  // holding no pdl.pattern, then still asks the bytecode generator for the
+  // @matcher function that lowering would have produced. Bail out first so a
+  // pattern set that is empty (every pattern disabled) stays a no-op.
+  if (pdlModule->getOps<mlir::pdl::PatternOp>().empty())
+    return true;
+
   mlir::PDLPatternModule pdlPatterns(std::move(pdlModule));
 
   // Register native helpers with low-level signatures
@@ -192,10 +272,17 @@ inline bool run(mlir::ModuleOp mlirModule, llvm::StringRef pdlBytecodeFile) {
                                          isSplatConstantValue);
   pdlPatterns.registerConstraintFunction("HasExtractableZeropoint",
                                          hasExtractableZeropoint);
+  pdlPatterns.registerConstraintFunction("IsEightBitQuantized",
+                                         isEightBitQuantized);
+  pdlPatterns.registerConstraintFunction("IsEightOrSixteenBitQuantized",
+                                         isEightOrSixteenBitQuantized);
+  pdlPatterns.registerConstraintFunction("HasStaticShapedResults",
+                                         hasStaticShapedResults);
   pdlPatterns.registerRewriteFunction("GetContextArg", getContextArg);
   pdlPatterns.registerRewriteFunction("ExtractScaleValue", extractScaleValue);
   pdlPatterns.registerRewriteFunction("ExtractZeropointValue",
                                       extractZeropointValue);
+  pdlPatterns.registerRewriteFunction("ExtractAttrInt64", extractAttrInt64);
 
   mlir::RewritePatternSet patterns(ctx);
   patterns.add(std::move(pdlPatterns));

@@ -930,6 +930,24 @@ int wrap_qelementwise(RuntimeState *state, void *lhs, void *rhs, void *output,
                       int64_t data_type, float M_a, int64_t lhs_zp, float M_b,
                       int64_t rhs_zp, int64_t output_zp);
 
+// Quantized batched matmul wrapper: the integer-domain form of the fused
+// DequantizeLinear x2 -> MatMul -> QuantizeLinear chain.
+//
+//   A: [batch_count x M x K], B: [K x N] (broadcast when b_batch_stride == 0)
+//      or [batch_count x K x N], Y: [batch_count x M x N], all row-major.
+//
+// With acc[m,n] = sum_k A[m,k]*B[k,n], rowA[m] = sum_k A[m,k] and
+// colB[n] = sum_k B[k,n], all exact in int32:
+//
+//   Y = saturate(round(M_scale * (acc - B_zp*rowA - A_zp*colB + K*A_zp*B_zp))
+//                + Y_zp)
+int wrap_qmatmul(RuntimeState *state, const void *A, const void *B, void *Y,
+                 int64_t M, int64_t N, int64_t K, int64_t batch_count,
+                 int64_t b_batch_stride, int64_t trans_a, int64_t trans_b,
+                 int64_t a_data_type, int64_t b_data_type, int64_t y_data_type,
+                 float M_scale, int64_t A_zero_point, int64_t B_zero_point,
+                 int64_t Y_zero_point);
+
 // Element-wise Where wrapper (NumPy-style multidirectional broadcasting,
 // arbitrary rank). Computes output[i] = condition[i] ? x[i] : y[i] with
 // per-operand broadcasting.
