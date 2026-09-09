@@ -9,6 +9,7 @@
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/Tosa/IR/TosaOps.h>
 #include <mlir/Dialect/UB/IR/UBOps.h>
+#include <mlir/IR/BuiltinTypes.h>
 #include <mlir/IR/MLIRContext.h>
 #include <mlir/IR/PatternMatch.h>
 #include <mlir/Pass/Pass.h>
@@ -41,6 +42,60 @@ bool isTosaCompatibleOperand(Value operand, RankedTensorType resultType) {
       return false;
   return true;
 }
+
+// tosa.matmul requires both operands to be rank-3 (batch, M/K, K/N). hip.matmul
+// accepts NumPy-style broadcasting where B may be rank-2. Prepend a unit batch
+// dimension to any rank-2 operand via tosa.reshape; a batch of 1 is broadcast
+// against the other operand's batch by tosa.matmul.
+static Value reshapeTo3D(Value input, ConversionPatternRewriter &rewriter) {
+  auto type = dyn_cast<RankedTensorType>(input.getType());
+  if (!type || type.getRank() != 2)
+    return input;
+
+  SmallVector<int64_t> shape(type.getShape());
+  shape.insert(shape.begin(), 1);
+  auto shapeConst = tosa::ConstShapeOp::create(
+      rewriter, rewriter.getUnknownLoc(),
+      tosa::shapeType::get(rewriter.getContext(), shape.size()),
+      rewriter.getIndexTensorAttr(shape));
+  return tosa::ReshapeOp::create(rewriter, rewriter.getUnknownLoc(),
+                                 type.clone(shape), input, shapeConst);
+}
+
+// The hip context and the DPS `outs` buffer are both dropped: the result type
+// already encodes the destination.
+struct MatMulConverter final : public OpConversionPattern<hip::MatmulOp> {
+  using OpConversionPattern<hip::MatmulOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(hip::MatmulOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // Memref mode (post-bufferization) has no SSA result to replace.
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    // tosa.matmul is a plain A @ B; transposes must have been folded away.
+    if (op.getTransA() != 0 || op.getTransB() != 0)
+      return rewriter.notifyMatchFailure(op, "transA/transB unsupported");
+
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!resultType || !resultType.hasStaticShape() ||
+        resultType.getRank() != 3)
+      return rewriter.notifyMatchFailure(op, "expected a static rank-3 tensor");
+
+    Value a = reshapeTo3D(adaptor.getA(), rewriter);
+    Value b = reshapeTo3D(adaptor.getB(), rewriter);
+    auto aType = dyn_cast<RankedTensorType>(a.getType());
+    auto bType = dyn_cast<RankedTensorType>(b.getType());
+    if (!aType || aType.getRank() != 3 || !bType || bType.getRank() != 3)
+      return rewriter.notifyMatchFailure(op, "operands not rank-3");
+
+    // The quant-info builder appends the (zero) zero-point operands that
+    // tosa.matmul requires for float inputs.
+    rewriter.replaceOpWithNewOp<tosa::MatMulOp>(op, resultType, a, b);
+    return success();
+  }
+};
 
 // The hip context and the DPS `outs` buffer are both dropped: the result type
 // already encodes the destination.
@@ -81,7 +136,7 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     conversion.addLegalOp<ub::PoisonOp>();
 
     RewritePatternSet patterns(ctx);
-    patterns.add<AddConverter>(ctx);
+    patterns.add<AddConverter, MatMulConverter>(ctx);
 
     if (failed(applyFullConversion(funcOp, conversion, std::move(patterns))))
       signalPassFailure();

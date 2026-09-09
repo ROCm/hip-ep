@@ -138,8 +138,8 @@ public:
     MLIRContext *ctx = &getContext();
     RewritePatternSet patterns(ctx);
     int counter = 0;
-    patterns.add<FuseAnchorPointwise<ConvOp>, FuseAnchorPointwise<GemmOp>>(
-        ctx, &counter);
+    patterns.add<FuseAnchorPointwise<MatmulOp>, FuseAnchorPointwise<ConvOp>,
+                 FuseAnchorPointwise<GemmOp>>(ctx, &counter);
 
     if (failed(applyPatternsGreedily(funcOp, std::move(patterns))))
       signalPassFailure();
