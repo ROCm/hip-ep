@@ -42,8 +42,8 @@ jobs:
       # ilammy/msvc-dev-cmd and mozilla-actions/sccache-action have no
       # Node.js 24 releases yet; allow Node.js 20 until they are updated.
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
-      # gfx1151 first: TheRock tarball selection, NATIVE default import lib, and
-      # wheel rocm index hint all take the first list entry (see cmake/deps.cmake).
+      # One generic target covering the whole gfx11 family; the pinned TheRock
+      # dist carries the per-ISA vendor data every member needs at runtime.
       HIP_ARCHITECTURES: "gfx11-generic"
 
     steps:
