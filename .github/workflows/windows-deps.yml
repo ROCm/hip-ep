@@ -663,7 +663,8 @@ jobs:
             --cmake_extra_defines \
               ENABLE_TESTS=OFF \
               CMAKE_C_COMPILER_LAUNCHER=sccache \
-              CMAKE_CXX_COMPILER_LAUNCHER=sccache
+              CMAKE_CXX_COMPILER_LAUNCHER=sccache \
+              ENABLE_TESTS=OFF
 
           mkdir -p "${{ runner.workspace }}/oga-artifacts"
           OGA_OUT="${{ runner.workspace }}/build-oga/Release"
