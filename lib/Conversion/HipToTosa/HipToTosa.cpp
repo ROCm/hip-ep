@@ -11,6 +11,7 @@
 #include <mlir/Dialect/Tosa/IR/TosaOps.h>
 #include <mlir/Dialect/Tosa/Utils/ConversionUtils.h>
 #include <mlir/Dialect/UB/IR/UBOps.h>
+#include <mlir/Dialect/Utils/StaticValueUtils.h>
 #include <mlir/IR/BuiltinTypes.h>
 #include <mlir/IR/MLIRContext.h>
 #include <mlir/IR/PatternMatch.h>
@@ -47,14 +48,22 @@ bool isTosaCompatibleOperand(Value operand, RankedTensorType resultType) {
   return true;
 }
 
+// TOSA carries the shapes that reshape and slice operate on as !tosa.shape SSA
+// operands rather than attributes, so each one needs a tosa.const_shape.
+static Value createConstShape(ConversionPatternRewriter &rewriter, Location loc,
+                              ArrayRef<int64_t> extents) {
+  return tosa::ConstShapeOp::create(
+      rewriter, loc,
+      tosa::shapeType::get(rewriter.getContext(), extents.size()),
+      rewriter.getIndexTensorAttr(extents));
+}
+
 // Reshape `input` to `shape` via tosa.reshape + tosa.const_shape.
 static Value reshapeTo(Value input, ArrayRef<int64_t> shape,
                        ConversionPatternRewriter &rewriter) {
   auto type = cast<RankedTensorType>(input.getType());
-  auto shapeConst = tosa::ConstShapeOp::create(
-      rewriter, rewriter.getUnknownLoc(),
-      tosa::shapeType::get(rewriter.getContext(), shape.size()),
-      rewriter.getIndexTensorAttr(shape));
+  Value shapeConst =
+      createConstShape(rewriter, rewriter.getUnknownLoc(), shape);
   return tosa::ReshapeOp::create(rewriter, rewriter.getUnknownLoc(),
                                  type.clone(shape), input, shapeConst);
 }
@@ -226,6 +235,125 @@ struct UnaryConverter final : public OpConversionPattern<HipOpTy> {
   }
 };
 
+// hip.transpose and tosa.transpose share the ONNX convention -- output
+// dimension i reads input dimension perm[i] -- so the permutation carries over
+// unchanged, only respelled from hip's I64ArrayAttr as a DenseI32ArrayAttr.
+// The op's own verifier already guarantees perm is a permutation of the input's
+// dimensions, so there is nothing left to check here beyond the shapes.
+struct TransposeConverter final : public OpConversionPattern<hip::TransposeOp> {
+  using OpConversionPattern<hip::TransposeOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(hip::TransposeOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // Memref mode (post-bufferization) has no SSA result to replace.
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    auto inputType = dyn_cast<RankedTensorType>(adaptor.getInput().getType());
+    if (!resultType || !resultType.hasStaticShape() || !inputType ||
+        !inputType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected static ranked tensors");
+    // tosa.transpose takes a Tosa_TensorAtLeast1D; a rank-0 transpose is the
+    // identity anyway.
+    if (inputType.getRank() < 1)
+      return rewriter.notifyMatchFailure(op, "expected rank 1 or higher");
+
+    SmallVector<int32_t> perms;
+    perms.reserve(op.getPerm().size());
+    for (Attribute perm : op.getPerm())
+      perms.push_back(static_cast<int32_t>(cast<IntegerAttr>(perm).getInt()));
+
+    rewriter.replaceOpWithNewOp<tosa::TransposeOp>(
+        op, resultType, adaptor.getInput(),
+        rewriter.getDenseI32ArrayAttr(perms));
+    return success();
+  }
+};
+
+// tosa.reshape's shape is a compile-time constant, so both sides have to be
+// statically shaped.
+template <typename TensorOpTy> static bool isStaticReshape(TensorOpTy op) {
+  auto srcType = dyn_cast<RankedTensorType>(op.getSrc().getType());
+  auto resultType = dyn_cast<RankedTensorType>(op.getResult().getType());
+  return srcType && srcType.hasStaticShape() && resultType &&
+         resultType.hasStaticShape();
+}
+
+// onnx.Reshape, Squeeze, Unsqueeze and Flatten never reach this pass as hip
+// ops: OnnxToHip decomposes all four into the builtin tensor metadata ops
+// below, which are zero-cost views. Both spell the same thing in TOSA, a
+// reshape onto the result shape, which rocMLIR's tosa-to-tensor turns back
+// into a collapse/expand it can fold into the neighbouring conv or gemm.
+template <typename TensorOpTy>
+struct ReshapeConverter final : public OpConversionPattern<TensorOpTy> {
+  using OpConversionPattern<TensorOpTy>::OpConversionPattern;
+  using OpAdaptor = typename OpConversionPattern<TensorOpTy>::OpAdaptor;
+
+  LogicalResult
+  matchAndRewrite(TensorOpTy op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isStaticReshape(op))
+      return rewriter.notifyMatchFailure(op, "expected static ranked tensors");
+
+    auto resultType = cast<RankedTensorType>(op.getResult().getType());
+    rewriter.replaceOpWithNewOp<tosa::ReshapeOp>(
+        op, resultType, adaptor.getSrc(),
+        createConstShape(rewriter, op.getLoc(), resultType.getShape()));
+    return success();
+  }
+};
+
+// tosa.slice reads a contiguous, same-rank window, so it can only stand in for
+// an unstrided extract whose bounds are known at compile time.
+static bool isTosaExpressibleSlice(tensor::ExtractSliceOp op) {
+  auto sourceType = dyn_cast<RankedTensorType>(op.getSource().getType());
+  auto resultType = dyn_cast<RankedTensorType>(op.getResult().getType());
+  if (!sourceType || !sourceType.hasStaticShape() || !resultType ||
+      !resultType.hasStaticShape())
+    return false;
+  if (resultType.getRank() != sourceType.getRank())
+    return false;
+  for (OpFoldResult stride : op.getMixedStrides())
+    if (getConstantIntValue(stride) != std::optional<int64_t>(1))
+      return false;
+  for (OpFoldResult offset : op.getMixedOffsets())
+    if (!getConstantIntValue(offset))
+      return false;
+  return true;
+}
+
+// The TOSA-expressible half of onnx.Slice. OnnxToHip decomposes the constant,
+// positive-unit-stride case to tensor.extract_slice and routes everything else
+// -- negative steps, runtime bounds -- to hip.slice, which has no tosa.slice
+// spelling at all and so is left for the runtime to handle.
+struct ExtractSliceConverter final
+    : public OpConversionPattern<tensor::ExtractSliceOp> {
+  using OpConversionPattern<tensor::ExtractSliceOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(tensor::ExtractSliceOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isTosaExpressibleSlice(op))
+      return rewriter.notifyMatchFailure(
+          op, "expected a static, unstrided, same-rank extract");
+
+    SmallVector<int64_t> starts;
+    for (OpFoldResult offset : op.getMixedOffsets())
+      starts.push_back(*getConstantIntValue(offset));
+
+    // Sizes come from the result type rather than getMixedSizes: the ranks
+    // match and both are static, so the result shape is the window.
+    auto resultType = cast<RankedTensorType>(op.getResult().getType());
+    rewriter.replaceOpWithNewOp<tosa::SliceOp>(
+        op, resultType, adaptor.getSource(),
+        createConstShape(rewriter, op.getLoc(), starts),
+        createConstShape(rewriter, op.getLoc(), resultType.getShape()));
+    return success();
+  }
+};
+
 class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
   void runOnOperation() override {
     auto funcOp = getOperation();
@@ -249,19 +377,33 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     // fails.
     ConversionTarget conversion(*ctx);
     conversion.addLegalDialect<tosa::TosaDialect, func::FuncDialect>();
-    conversion.addIllegalOp<MatmulOp, AddOp, SubOp, MinOp, MaxOp, MulOp, AbsOp,
-                            NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
-                            TanhOp, ErfOp, SigmoidOp, ReciprocalOp>();
-    // tosa.matmul (and other tosa ops) are not destination-passing, so
-    // MatMulConverter drops each hip op's DPS `outs` operand. The
-    // `tensor.empty` that fed it is then dead, but a full conversion still
-    // requires every remaining op to be legal -- the framework does not DCE
-    // this pre-existing op on its own. Mark it legal so conversion succeeds;
-    // the canonicalizer that follows this pass removes the dead empty.
+    conversion
+        .addIllegalOp<MatmulOp, TransposeOp, AddOp, SubOp, MinOp, MaxOp, MulOp,
+                      AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
+                      TanhOp, ErfOp, SigmoidOp, ReciprocalOp>();
+    // tosa ops are not destination-passing, so the converters drop each hip
+    // op's DPS `outs` operand and the `tensor.empty` that fed it is left dead
+    // for the canonicalizer that follows this pass to remove.
     conversion.addLegalOp<ub::PoisonOp, tensor::EmptyOp>();
 
+    // The tensor metadata ops are borrowed rather than owned. A kernel can
+    // legitimately hold forms with no TOSA spelling -- a dynamically shaped
+    // reshape, a strided or rank-reducing extract -- and rocMLIR consumes
+    // those directly, so they are only illegal where a pattern will succeed.
+    // The hip ops above stay unconditionally illegal: this pass claims them,
+    // so one that cannot convert is an error rather than a silent passthrough.
+    conversion.addDynamicallyLegalOp<tensor::CollapseShapeOp>(
+        [](tensor::CollapseShapeOp op) { return !isStaticReshape(op); });
+    conversion.addDynamicallyLegalOp<tensor::ExpandShapeOp>(
+        [](tensor::ExpandShapeOp op) { return !isStaticReshape(op); });
+    conversion.addDynamicallyLegalOp<tensor::ExtractSliceOp>(
+        [](tensor::ExtractSliceOp op) { return !isTosaExpressibleSlice(op); });
+
     RewritePatternSet patterns(ctx);
-    patterns.add<MatMulConverter, BinaryConverter<AddOp, tosa::AddOp>,
+    patterns.add<MatMulConverter, TransposeConverter,
+                 ReshapeConverter<tensor::CollapseShapeOp>,
+                 ReshapeConverter<tensor::ExpandShapeOp>, ExtractSliceConverter,
+                 BinaryConverter<AddOp, tosa::AddOp>,
                  BinaryConverter<SubOp, tosa::SubOp>,
                  BinaryConverter<MinOp, tosa::MinimumOp>,
                  BinaryConverter<MaxOp, tosa::MaximumOp>,
