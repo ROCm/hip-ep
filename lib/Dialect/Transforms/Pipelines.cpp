@@ -111,10 +111,9 @@ std::unique_ptr<Pass> createVerifyNoConstantCarriersPass() {
 /// (allocated in-graph at runtime via the EP's output-allocator callback).
 /// It must run before pool-allocs (slot 6); the reason is at that slot. See
 /// docs/design/output-allocator-design.md.
-static void
-buildOnnxToHipPipelineTail(OpPassManager &pm,
-                           const mlir::hip::OnnxToHipPipelineOptions &options,
-                           morphizen::FileSystem *fs) {
+void mlir::hip::buildOnnxToHipPipelineTail(
+    OpPassManager &pm, const mlir::hip::OnnxToHipPipelineOptions &options,
+    morphizen::FileSystem *fs) {
   // 1b. Refine `?` (kDynamic) dims on HIP DPS op result types using each
   //     op's `ReifyRankedShapedTypeOpInterface` impl. Placed here so the
   //     refinements propagate through bufferize and into pool / alloc
