@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-#include "SchemeRuntime.h"
+#include "SchemeBindings.h"
 #include "llvm/Support/raw_ostream.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Value.h"
@@ -22,12 +22,12 @@ extern "C" {
 
 #include "ChezBootPetite.h"
 #include "ChezBootScheme.h"
-#include "PrintOperationScm.h"
+#include "SchemeBindingsScm.h"
 
 namespace {
 const size_t petite_boot_size = sizeof(petite_boot_data) - 1;
 const size_t scheme_boot_size = sizeof(scheme_boot_data) - 1;
-const size_t print_operation_scm_size = sizeof(print_operation_scm_data) - 1;
+const size_t scheme_bindings_scm_size = sizeof(scheme_bindings_scm_data) - 1;
 }
 
 namespace {
@@ -61,8 +61,8 @@ bool initializeSchemeRuntime() {
 
   llvm::errs() << "Scheme test: (* 6 7) = " << answer << "\n";
 
-  std::string scm_code(reinterpret_cast<const char*>(print_operation_scm_data),
-                       print_operation_scm_size);
+  std::string scm_code(reinterpret_cast<const char*>(scheme_bindings_scm_data),
+                       scheme_bindings_scm_size);
   ptr eval_sym = Stop_level_value(Sstring_to_symbol("eval"));
   ptr read_sym = Stop_level_value(Sstring_to_symbol("read"));
   ptr open_string_input_port_sym = Stop_level_value(Sstring_to_symbol("open-string-input-port"));
