@@ -1,0 +1,110 @@
+---
+name: CI
+on: [push, pull_request]
+jobs:
+  ci:
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - machine: tpb
+            os: ubuntu-24.04
+            configure: --pb --threads --enable-libffi
+            test: test-some-fast
+          - machine: a6osx
+            os: macos-26-intel
+          - machine: ta6osx
+            os: macos-26-intel
+          - machine: arm64osx
+            os: macos-26
+          - machine: tarm64osx
+            os: macos-26
+          - machine: i3le
+            os: ubuntu-24.04
+          - machine: ti3le
+            os: ubuntu-24.04
+          - machine: a6le
+            os: ubuntu-24.04
+          - machine: ta6le
+            os: ubuntu-24.04
+            configure: CFLAGS+=-std=gnu89
+          - machine: ta6le
+            os: ubuntu-24.04
+            variant: reboot
+            configure: -m=ta6le --force
+            make: re.boot SCHEME="chezscheme"
+            test: test-some-fast
+          - machine: i3nt
+            os: windows-2025
+            toolchain: vs
+          - machine: ti3nt
+            os: windows-2025
+            toolchain: vs
+          - machine: a6nt
+            os: windows-2025
+            toolchain: vs
+          - machine: ta6nt
+            os: windows-2025
+            toolchain: vs
+          - machine: ta6nt
+            os: windows-2025
+            toolchain: gcc
+            configure: CFLAGS+=-std=gnu89
+          - machine: ta6le
+            os: ubuntu-24.04
+            test: test-more
+            variant: more
+    runs-on: ${{ matrix.config.os }}
+    env:
+      TARGET_MACHINE: ${{ matrix.config.machine }}
+      TOOLCHAIN: ${{ matrix.config.toolchain }}
+      VARIANT: ${{ matrix.config.variant }}
+      CONFIGURE_ARGS: ${{ matrix.config.configure }}
+      MAKE_ARGS: ${{ matrix.config.make }}
+      TEST_TARGET: ${{ matrix.config.test }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ github.workspace }}
+    steps:
+      - name: Configure git on Windows
+        if: ${{ runner.os == 'Windows' }}
+        run: git config --global core.autocrlf false
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: 'recursive'
+      - name: Setup 32-bit Linux
+        if: ${{ endsWith(matrix.config.machine, 'i3le') }}
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install gcc-multilib lib32ncurses-dev
+      - name: Setup X11 client-side libraries on Linux
+        if: ${{ endsWith(matrix.config.machine, 'le') }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install libx11-dev
+      - name: Setup existing Chez Scheme for reboot
+        if: ${{ startsWith(matrix.config.make, 're.boot') }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install chezscheme
+      - name: Build Chez Scheme
+        run: .github/workflows/build.sh
+      - name: Run tests
+        timeout-minutes: 60
+        run: .github/workflows/test.sh
+      - name: Archive workspace
+        if: always()
+        run: tar -c -h -z -f $TARGET_MACHINE$TOOLCHAIN$VARIANT.tgz $TARGET_MACHINE
+      - name: Upload archive
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.config.machine }}${{ matrix.config.toolchain }}${{ matrix.config.variant }}
+          path: ${{ matrix.config.machine }}${{ matrix.config.toolchain }}${{ matrix.config.variant }}.tgz
+      - name: Check test results
+        run: |
+          cat $TARGET_MACHINE/mats/summary
+          diff -q .github/workflows/summary${{ matrix.config.test }} $TARGET_MACHINE/mats/summary
