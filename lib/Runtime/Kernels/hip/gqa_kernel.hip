@@ -2360,7 +2360,7 @@ static inline void launchFlashDecodeConfig(
   const bool use_wmma = cfg.use_wmma && flash_decode_wmma_supported(d, hpg);
   // Diagnostic: print the config actually launched (works in both lookup and
   // online/autotune modes) so a run can be diffed against the other mode.
-  static const bool s_log_cfg = getenv("HIPDNN_EP_GQA_LOG_CONFIG") != nullptr;
+  static const bool s_log_cfg = gqa_autotune_log_enabled() || custom_kernels_debug_enabled();
   if (s_log_cfg)
     fprintf(stderr,
             "[gqa-cfg] decode B=%d H=%d G=%d d=%d hpg=%d maxseq=%d -> "
@@ -3303,7 +3303,7 @@ static inline void dispatchPrefillV5(
     const _Float16* head_sink, int num_heads, int smooth_softmax,
     int local_window_size)
 {
-    static const bool s_log_cfg = getenv("HIPDNN_EP_GQA_LOG_CONFIG") != nullptr;
+    static const bool s_log_cfg = gqa_autotune_log_enabled() || custom_kernels_debug_enabled();
     if (s_log_cfg)
         fprintf(stderr,
                 "[gqa-cfg] prefill v5 B=%d H=%d G=%d d=%d sq=%d skv=%d -> "
@@ -3669,7 +3669,7 @@ static inline void dispatchPrefillV7(
     _Float16* O, int B, int Hq, int G, int sq, int skv, int max_seq,
     int past_len, float scale)
 {
-    static const bool s_log_cfg = getenv("HIPDNN_EP_GQA_LOG_CONFIG") != nullptr;
+    static const bool s_log_cfg = gqa_autotune_log_enabled() || custom_kernels_debug_enabled();
     if (s_log_cfg)
         fprintf(stderr,
                 "[gqa-cfg] prefill v7 B=%d H=%d G=%d d=%d sq=%d skv=%d -> "
@@ -4124,7 +4124,7 @@ static inline void dispatchPrefillV8(
     _Float16* O, int B, int Hq, int G, int sq, int skv, int max_seq,
     int past_len, float scale)
 {
-    static const bool s_log_cfg = getenv("HIPDNN_EP_GQA_LOG_CONFIG") != nullptr;
+    static const bool s_log_cfg = gqa_autotune_log_enabled() || custom_kernels_debug_enabled();
     if (s_log_cfg)
         fprintf(stderr,
                 "[gqa-cfg] prefill v8 B=%d H=%d G=%d d=%d sq=%d skv=%d -> "

@@ -26,6 +26,9 @@
 // (JIT dlopen, or native import). Pre-dual-format the kernels were linked into
 // model.dll, so no export was needed -- hence this is new. EXPORTS is defined
 // only when building that library (hip_utils.cmake); consumers leave it empty.
+// Guarded so this coexists with gqa_autotune.h, which defines the same macro
+// (identically) to stay independent of this header in the mock build.
+#ifndef HIP_KERNEL_API
 #if defined(_WIN32)
   #if defined(HIP_CUSTOM_KERNELS_EXPORTS)
     #define HIP_KERNEL_API __declspec(dllexport)
@@ -37,6 +40,7 @@
 #else
   #define HIP_KERNEL_API
 #endif
+#endif // HIP_KERNEL_API
 
 #ifdef __cplusplus
 extern "C" {
@@ -1829,8 +1833,14 @@ HIP_KERNEL_API int hip_instance_norm(
  * Per-row reduction with FP32 accumulators, regardless of I/O dtype. Unlike
  * LayerNormalization there is no mean subtraction and no bias term.
  *
- * `outer` / `norm_size`: input viewed as [outer, norm_size], where norm_size
- *                        equals the scale element count.
+ * `outer` / `norm_size`: input viewed as [outer, norm_size], where norm_size is
+ *                        the ONNX reduction width (product of the input dims
+ *                        from `axis` on) -- NOT the scale element count.
+ * `scale_rows`         : number of gain vectors packed in `scale`
+ *                        (scale_num_elements / norm_size). Row r uses group
+ *                        r % scale_rows; 1 is the ordinary shared-gain case,
+ *                        >1 is a grouped norm such as scale [G, D] applied to
+ *                        input [N, G, D] with axis = -1.
  * `hip_dtype`          : I/O type for input/scale/output -- FLOAT16 or FLOAT32.
  *
  * FLOAT16 automatically uses a packed __half2 body when norm_size is even and
@@ -1843,6 +1853,7 @@ HIP_KERNEL_API int hip_rms_norm(
     void* output,
     int64_t outer,
     int64_t norm_size,
+    int64_t scale_rows,
     float epsilon,
     int hip_dtype);
 

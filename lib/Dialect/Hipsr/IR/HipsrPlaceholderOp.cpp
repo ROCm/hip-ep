@@ -16,7 +16,11 @@ using namespace mlir::hipsr;
 namespace {
 
 // Keep the shape graph apart from the data graph: no data results as inputs.
+// A barrier is exempt, because its region reads the values themselves.
 LogicalResult verifyShapeGraphInputs(PlaceholderOp op) {
+  if (op.getPlaceholderType() == PlaceholderType::Barrier) {
+    return success();
+  }
   for (auto [index, input] : llvm::enumerate(op.getInputs())) {
     if (!PlaceholderOp::isAllowedShapeGraphInput(input)) {
       return op.emitOpError("input ")
@@ -67,6 +71,16 @@ LogicalResult verifyResultUses(PlaceholderOp op) {
 LogicalResult verifyConsumerTopology(PlaceholderOp op) {
   Operation *consumer = op.getConsumer();
   if (!consumer) {
+    return success();
+  }
+
+  // A barrier reads the data values themselves, so it names exactly what its
+  // consumer names.
+  if (op.getPlaceholderType() == PlaceholderType::Barrier) {
+    if (!llvm::equal(op.getInputs(), getHipsrInputOperands(consumer))) {
+      return op.emitOpError("inputs must match the operands of its consumer '")
+             << consumer->getName() << "'";
+    }
     return success();
   }
 

@@ -51,6 +51,17 @@ static inline const char *hipdnn_ep_tensor_op_name(int64_t op) {
   }
 }
 
+static inline const char *hipdnn_ep_qelementwise_kind_name(int64_t kind) {
+  switch (kind) {
+  case HIPDNN_EP_QELEMENTWISE_ADD:
+    return "qadd";
+  case HIPDNN_EP_QELEMENTWISE_MUL:
+    return "qmul";
+  default:
+    return "qelementwise_unknown";
+  }
+}
+
 static inline int64_t hipdnn_ep_datatype_size(int64_t data_type) {
   switch (data_type) {
   case HIPDNN_EP_DATATYPE_FLOAT:
@@ -1242,10 +1253,13 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           int64_t element_size_bytes, int64_t is_bnsh);
 
 // SimplifiedLayerNormalization / RMSNormalization operation wrapper
+// norm_num_elements is the reduction width the lowering derived from `axis`
+// (the product of the input dims from `axis` on). It is independent of
+// scale_num_elements, which may cover several rows for a grouped norm.
 int wrap_rms_norm(RuntimeState *state, void *input, void *scale, void *output,
                   int64_t input_num_elements, int64_t scale_num_elements,
-                  int64_t element_size_bytes, int64_t axis, float epsilon,
-                  int64_t stash_type);
+                  int64_t norm_num_elements, int64_t element_size_bytes,
+                  int64_t axis, float epsilon, int64_t stash_type);
 
 // LayerNormalization operation wrapper (standard ONNX opset 17+)
 // bias, mean, inv_std may be nullptr when optional inputs/outputs are absent

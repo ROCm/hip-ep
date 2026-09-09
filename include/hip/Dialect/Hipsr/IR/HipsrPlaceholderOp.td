@@ -24,15 +24,16 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
       body writes into, so the placeholder carries that destination's shape,
       which may differ from the result held there.
 
-    Inputs feed the shape graph and must be block arguments or results of
-    `hipsr.placeholder`, `arith.constant`, or `hipsr.constant` — never data
-    results, which keeps the shape graph parallel to the data graph.
-    `placeholder_type` is `normal` or `barrier`.
+    A `normal` placeholder's inputs feed the shape graph and must be block
+    arguments or results of `hipsr.placeholder`, `arith.constant`, or
+    `hipsr.constant` — never data results, which keeps the shape graph parallel
+    to the data graph. A `barrier`'s inputs are the data values themselves,
+    because its region reads their contents rather than only their shapes.
 
-    A placeholder and its consumer read the same values, the placeholder on the
-    shape-graph side and the consumer on the data side, even when one of them
-    ignores a value. Matching the two lists is what keeps the pair in one pool
-    domain. Values with no placeholder behind them, such as block arguments and
+    A placeholder and its consumer read the same values, a `normal` placeholder
+    through their shape-graph counterparts, even when one of them ignores a
+    value. Matching the two lists is what keeps the pair in one pool domain.
+    Values with no placeholder behind them, such as block arguments and
     constants, are outside the rule.
 
     The optional `shape_region` computes the result shapes and ends with

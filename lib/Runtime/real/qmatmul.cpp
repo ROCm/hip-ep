@@ -26,6 +26,7 @@
 // byte; see lib/Runtime/Kernels/hip/qmatmul_kernel.hip for the derivation.
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../op_profile.h"
 #include "hip_custom_kernels.h"
 
 #include <cstdint>
@@ -69,6 +70,19 @@ int wrap_qmatmul(RuntimeState *state, const void *A, const void *B, void *Y,
                  int64_t a_data_type, int64_t b_data_type, int64_t y_data_type,
                  float M_scale, int64_t A_zero_point, int64_t B_zero_point,
                  int64_t Y_zero_point) {
+  OP_PROFILE(
+      "qmatmul",
+      [&] {
+        char b[96];
+        snprintf(b, sizeof(b), "m=%lld,n=%lld,k=%lld,b=%lld:%s/%s->%s",
+                 (long long)M, (long long)N, (long long)K,
+                 (long long)batch_count, hipdnn_ep_datatype_name(a_data_type),
+                 hipdnn_ep_datatype_name(b_data_type),
+                 hipdnn_ep_datatype_name(y_data_type));
+        return std::string(b);
+      },
+      state);
+
   if (!state || !A || !B || !Y) {
     fprintf(stderr, "wrap_qmatmul: null tensor argument\n");
     return -1;

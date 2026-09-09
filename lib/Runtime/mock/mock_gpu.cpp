@@ -1187,19 +1187,19 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
 
 int wrap_rms_norm(RuntimeState *state, void *input, void *scale, void *output,
                   int64_t input_num_elements, int64_t scale_num_elements,
-                  int64_t element_size_bytes, int64_t axis, float epsilon,
-                  int64_t stash_type) {
+                  int64_t norm_num_elements, int64_t element_size_bytes,
+                  int64_t axis, float epsilon, int64_t stash_type) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_rms_norm\n");
     return -1;
   }
 
   MOCK_PRINT("[MOCK] wrap_rms_norm(input_num_elements=%lld, "
-             "scale_num_elements=%lld, element_size=%lld, axis=%lld, "
-             "epsilon=%f, stash_type=%lld)\n",
+             "scale_num_elements=%lld, norm_num_elements=%lld, "
+             "element_size=%lld, axis=%lld, epsilon=%f, stash_type=%lld)\n",
              (long long)input_num_elements, (long long)scale_num_elements,
-             (long long)element_size_bytes, (long long)axis, (double)epsilon,
-             (long long)stash_type);
+             (long long)norm_num_elements, (long long)element_size_bytes,
+             (long long)axis, (double)epsilon, (long long)stash_type);
 
   return 0;
 }

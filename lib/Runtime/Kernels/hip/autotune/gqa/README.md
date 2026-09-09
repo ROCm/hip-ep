@@ -3,362 +3,200 @@
 How a GQA launch config is chosen, and where each piece lives.
 
 **Changing a GQA kernel? Start at [Keeping it current](#keeping-it-current).** The
-rows here are measurements of a specific kernel, and the failure mode is not a stale
-table — it is a table rebuilt from readings the old kernel produced, which is silent.
-There is a stamp that prevents it and a four-step procedure that uses it.
+table is measurements of a specific kernel built with a specific compiler; the
+expensive mistake is not a stale table but one rebuilt from readings the old kernel
+produced, which fails silently.
 
-New to this? `RdpCapture/ops_analyze/gqa/gqa_autotune_guide.html` explains the whole
-ruleset from nothing, in one browser page, with a tool for putting a shape in and
-seeing which keys it probes.
+## How a config is resolved
 
-## Four tiers, all of them rows
+A config is resolved by the `hip_gqa_autotune_resolve_decode/prefill()` shims
+exported from `custom_kernels_<arch>` (implemented in `gqa_autotune.cpp`). The lookup
+is **nearest-neighbour**, matmul_nbits style, and hierarchical — most-impactful axis
+first:
 
-A config is resolved by `gqa_autotune_resolve_decode/prefill()` in
-`gqa_autotune.cpp`. It builds one key per tier and probes them in order:
+1. **Kernel identity — exact match.** `phase` (Decode / PrefillV5 / PrefillV7 /
+   PrefillV8), `head_dim` (D64/D128/D256), `kv_dtype` (Fp16/Int8). These are not
+   distances: `d64` and `d128` are different kernel instantiations, and prefill's
+   variant *is* its head_dim, so borrowing across them is meaningless.
+2. **Geometry.** The exact `(num_heads, kv_num_heads)` pair is preferred; if it was
+   never measured, the search stays within the same **heads-per-group** ratio (the
+   axis the kernels template on), never crossing to a different ratio.
+3. **Lengths — nearest measured point in weighted log2 space** over `num_heads`,
+   `kv_num_heads`, `batch`, `seq_q`, `seq_kv`:
 
-| Tier | Key | What it answers |
-|---|---|---|
-| `Geometry` | head_dim, heads-per-group, a bucket of `batch*num_heads`, optionally a batch class, bucketed lengths | the geometry at its own parallelism — the tier nearly every request lands on |
-| `HeadGroup` | head_dim, heads-per-group, bucketed lengths | the geometry, pooled over head counts |
-| `Length` | head_dim, bucketed lengths | a heads-per-group with no rows of its own, and most prefill shapes |
-| `Fallback` | phase, kv_dtype, head_dim | anything else; ranked on its worst case |
-| — `Heuristic` | — | computed, not stored: reached only when no table loaded |
+   ```
+   d = sqrt( Σ (w_dim * log2(query_dim / point_dim))^2 )
+   ```
 
-Every tier is **data in the FlatBuffer**; they differ only in how much of the key
-is wildcarded, and the tier is itself a field of the key. Nothing is computed on
-the dispatch path — no timing, no scoring, no floating point, one hash of one
-64-bit word per probe. A config that has to be derived at runtime is a config
-nobody reviewed, so deriving one is an offline job (see below) and its output ships
-as more rows.
+   Distance 0 — every dim equal — is an **Exact** hit; otherwise **Nearest**.
 
-The probe order above is walked **once per distinct question**. A resolved answer is
-memoised against the request's own classes, so the second and every later dispatch
-of a shape is a single lookup instead of up to `kMaxProbes` misses — which is what a
-served model does, once per layer per token. Three properties of that memo are
-load-bearing:
+If a geometry has no usable point, the per-`(phase, head_dim)` **Fallback** row
+answers. If no table loaded at all (arch/schema/ABI mismatch, or an empty embed),
+the compiled-in **Heuristic** answers. Both last resorts return a runnable config, so
+the op never fails for lack of a table. `GqaTuneSource` reports which of
+`Exact / Nearest / Fallback / Heuristic` was used — worth logging.
 
-- **It holds the row, not the config.** The decode split clamp below is per request,
-  so two lengths sharing a bucket still get their own split count.
-- **It is process-wide**, like the online tuner's caches in `gqa_kernel.hip`, because
-  a host loads and unloads models repeatedly in one process and a per-session memo
-  would be cold for most of the dispatches it exists to serve.
-- **Its key names the table**, interned by content in `internTable()`. The answer
-  comes out of a file that ships inside the model package, so two models can carry
-  different tables and legitimately disagree about the same geometry; a reload of the
-  same package interns to the same id and reuses everything the last load resolved.
+The tiering lives in the resolver, not the schema, so a later experiment can
+re-order or re-tier the axes (or refit the weights) without regenerating the table.
+One distance function serves both the exact-geometry search (where the head terms
+are zero, so it reduces to lengths + batch) and the same-hpg fuzzy search (where the
+head terms pick the closest measured head pair).
 
-Its size is bounded by construction, since every field of the key is a bucket or a
-class.
+### The validator keeps a stale or illegal config from being launched
 
-`Heuristic` is not a tier so much as a failure mode: no file, an arch or schema
-mismatch, or a table shipped without `Fallback` rows. **A table that loads answers
-every shape**, so `Heuristic` in a log means the table did not load, not that a
-shape was missed. `gqa_tune_source_name()` is worth logging for exactly this.
-
-What it answers with is a calculation rather than a constant, borrowed from
-llama.cpp's `launch_fattn`: the decode split count that fills the machine without
-opening another wave, given the compute unit count the driver reports. Against the
-fixed `min(8, useful_splits)` it replaces, over every measured decode shape, that
-takes the median from 91.0% of optimum to 96.5% and the share within 10% from 52% to
-75%. It is deliberately not used above this tier — measured rows beat it, 96% within
-10% against 84% — because occupancy is not the only term: each extra split re-reads
-the KV and adds a row to the reduce.
-
-Each tier probes twice, once with the request's `kv_dtype` and once with
-`GqaTuneKvDtype::Any`. Every shipped row is `Any`: prefill dequantises an Int8
-cache to fp16 scratch before it dispatches, so its tuning cannot depend on the
-dtype, and decode's Int8 path has not been swept. Measuring one later adds rows
-without a schema change.
-
-### What is in the key, and why that and nothing else
-
-The kernels are templated on `(head_dim, heads-per-group)` for decode and on
-`head_dim` alone for prefill, and the key follows that rather than the request's
-head counts:
-
-- **`heads-per-group`, not `num_heads` and `kv_num_heads`.** Adding the exact head
-  counts on top of heads-per-group and the parallelism class splits 1661 decode keys
-  into 1885 and changes the median, the p90, the worst case and the share of shapes
-  within 5% of optimum by nothing at all. What dropping them buys is *completeness*:
-  `flash_decode_geometry_ok` in `real/gqa.cpp` admits heads-per-group in
-  {1,2,3,4,5,8,16} at head_dim in {64,128,256}, 21 pairs in all, so a table with rows
-  for each pair answers every geometry that can reach it. A key on head counts can
-  only ever cover the counts somebody measured — which is why 16:4 and 24:8 used to
-  land on the last resort.
-- **`batch*num_heads` bucketed, and the batch class as well.** The product is where
-  batch and the absolute head count enter together, because what they change is the
-  number of independent work items, and it is not a small effect: at batch 4 the
-  optimal decode split count drops by about the batch factor, and ignoring batch
-  costs a median of 1.10x and up to 1.68x. The previous schema keyed on exact `batch`
-  with only batch-1 rows measured, so every batched request reached the last resort.
-
-  The product alone is not enough either. `8:1:64` at batch 32 and `64:8:64` at batch
-  4 are the same 256 work items and disagree about WMMA in 7 shapes of 7, so a
-  Geometry row may also name a batch class; splitting the product into its two
-  factors takes the worst case from 68.7% of optimum to 80.3%. Pruning keeps such a
-  row only where the batch changes the answer, which in the shipped table is 362 rows
-  of 2788. Beyond those two, exact head counts and exact batch add nothing at all:
-  the same measurements group into exactly the same keys either way.
-
-- **A missing parallelism class falls back to a lower one.** The Geometry probe walks
-  the axis downward before giving up on the tier, the way a length rounds up to a
-  label — both round the request to a key the table has, in the direction that is
-  safe. Down is safe because a row measured at less parallelism holds more splits and
-  the clamp bounds what that costs, while too few splits leaves the machine idle.
-  Measured on held-out geometries, walking beats the pooled row: worst case 66.5% to
-  78.7%, share within 10% of optimum 81% to 90%. The grid also measures each pair's
-  *floor* (`H = heads-per-group, G = 1`, i.e. multi-query attention), so the walk
-  always lands on something measured.
-- **Bucketed lengths, four labels to the octave.** `seqBucket()` rounds a length up
-  to `{1, 1.25, 1.5, 1.75} x 2^k`, so the row labelled `S12288` answers every
-  request in `(10240, 12288]`. The step has been halved twice, each time because a
-  wider interval was measured straddling a change in the optimum: `64:8:64` decode
-  trades the lead between the WMMA and scalar kernels twice inside `(512, 1024]`,
-  and its prefill v5 flips between `MT1` and `MT2` inside `(8192, 12288]`.
-- **No `max_seq`.** It is the KV cache capacity, not the current length. Sweeping
-  it from `seq_kv` to 128 k at fixed work moves every candidate by the same factor
-  and never changes which one wins — at most 1.025x in ranking terms. Keying on it
-  would multiply the table by the capacities a deployment might use and match none
-  of them. (It does change absolute time — a 64 k+ cache costs about 25% on d=64
-  decode — but that is a capacity-planning fact, not a tuning one.)
-- **No exact lengths.** There used to be a tier keyed on the request's own
-  lengths. It answers nothing a bucket row does not: `effective_skv` grows by one
-  token per step, so generating 1000 tokens from an 8 k prompt matches *zero* exact
-  keys, and on the boundary shapes where one would match, the bucket row already
-  lands on the optimum. It was a third of the table's bytes.
-- **`local_window` on prefill v5 only.** `window_ok` in `real/gqa.cpp` admits a
-  window to the fused path at head_dim 64 alone, and the fused decode path
-  hard-codes `local_window = 0`, so rows for windowed decode would be unreachable.
-  `NoWindow` is a concrete value and `Any` is the wildcard; a `Fallback` row needs
-  `Any` because it answers both.
-
-A row's wildcards have to agree with its tier, and `rowConsistent()` rejects it
-otherwise: wildcarding a field the tier keys on would make the row answer far more
-than it was measured on, and setting a field the tier ignores would make it answer
-far less than it looks like it does. Both are silent, so both are refused.
-
-### A bucket row serves shapes smaller than its label
-
-The key rounds lengths **up**, so a row must hold the config with the lowest regret
-*across its whole interval*, not the config that won at its label.
-`RdpCapture/ops_analyze/gqa/tools/build_lut.py` chooses rows that way, from
-measurements taken inside the intervals, and pools a row's group over every
-geometry it will serve.
+A candidate config is checked before it is returned. For decode: WMMA is templated
+only for some `(head_dim, heads-per-group)` pairs, the split count must be in
+`1..64`, and the KV tile height must be a compiled one. A candidate that fails is
+rejected and the search moves to the next-nearest point — the same self-correction
+matmul_nbits uses — so a table measured against a wider kernel set than the running
+one degrades to the nearest *usable* point instead of launching something illegal.
 
 ### Decode split counts are clamped
 
 A resolved decode config has its `splits` clamped to `ceil(effective_len/16)`, the
-splits that have work to do. This is what lets one row cover a whole interval at
-short context, where the measured optimum *is* that bound: on `64:8:64` the winner
-at 132/160/192/224/256 keys is exactly 9/10/12/14/16 splits. Without the clamp a
-row would have to hold the value its shortest length tolerates and would give up
-17% at the top of the interval.
+splits that have work to do. This is what lets one measured point serve a whole
+neighbourhood of lengths: the stored split count is what the top of the
+neighbourhood wants, and the clamp makes the same point right at a shorter length.
+`effective_len` is `min(seq_kv, window)` — a sliding window shows up here, as a
+smaller scanned length, which is why the table needs no separate windowed rows.
 
-### A config is a name, not a bag of knobs
+## The table layout
 
-`GqaTuneConfig` names one point of the launch space — `Scalar`, `Wmma`,
-`WmmaBkv16`, `WmmaBkv32`, `MT2_BKV32`, `NW4_BKV32_MT1`, `ND4_MT1_BKV32` — spelled
-the way the dispatchers and the offline sweep spell it. PR #675 made BKV=16 versus
-BKV=32 a real d64-WMMA decode choice; it belongs in the config name, not as an
-unconstrained row field. The previous schema carried seven independent ints and the
-loader had to check, per phase, which combinations were real. `nd = 4` with
-`bkv = 64` has no name, so no table can ask for it.
+The table is FlatBuffers, one arch per file, and de-duplicates configs the way
+matmul_nbits does:
 
-Decode carries its split count separately, in `splits`, because the split ladder is
-not closed: the runtime clamps it per request.
+- **`configs[]`** — every distinct launch config once. A config is `kind`
+  (`Decode`/`Prefill`) plus its knobs: decode carries `use_wmma` + `bkv`; prefill
+  carries the v5/v7/v8 tuple (`m_tiles`, `bkv`, `nw`, `mt`, `nd`). At most 256.
+- **`points[]`** — one measured winner per shape: the categorical key, a 1-byte
+  `config` index into `configs[]`, a per-point `splits` (decode only), and the
+  literal numeric dims `num_heads / kv_num_heads / batch / seq_q / seq_kv`. Thousands
+  of points cost one config byte each instead of inlining the knobs.
+- **`fallbacks[]`** — one per `(phase, head_dim)`: a `config` index + `splits`, the
+  runnable last resort.
+- **weights** — `weight_num_heads / _kv_num_heads / _batch / _seq_q / _seq_kv`, the
+  per-dim log-space weights. They live in the table so the offline fit and the
+  runtime metric cannot drift apart; refitting is a table regeneration.
 
-## A row is 12 bytes
+`Any = 0` on every categorical enum, so a memset field reads as "unclassified" and
+is rejected at load rather than silently matched. `pointConsistent()` drops a point
+whose key is unclassified, whose dims are non-positive, or whose config kind does not
+match its phase; `compatible()` rejects the whole table on a `schema_version`,
+`kernel_abi`, or `gpu_arch` mismatch. A rejected row is silent coverage loss, so the
+loader counts them and `test-gqa-autotune` asserts the count is zero.
 
-`GqaTuneRow` is a FlatBuffers **struct** of twelve `ubyte` fields, so the table is
-a length-prefixed array with no vtables and no padding. The same information cost
-61 bytes a row in the previous schema, 122 KB for a table that is 33 KB here — and
-size is the point: what fits in the file is how many measured shapes the policy can
-distinguish. Both halvings of the bucket ladder were affordable because of it.
+## Where it lives — in the kernel DLL, not runtime.bc
 
-Lengths, windows and parallelism classes are ubyte-backed **enums**, which buys two
-things. The bucket ladder lives in the schema, so the generator cannot name a
-bucket the runtime does not compute — the previous scheme could only be caught by
-bumping `schema_version`. And the JSON stays readable: a row diffs as
-`seq_kv: "S16384"`, not as a magic byte.
+The resolver **and** its table ride inside the per-arch `custom_kernels_<arch>`
+shared library, next to `gqa_kernel.hip`:
+
+- `lut/<arch>.fb` is embedded by `lib/Runtime/Kernels/CMakeLists.txt` with pure
+  CMake (`file(READ ... HEX)` → a `kGqaLutData[]` C array), so the hip-ep build needs
+  no Python and no generated `.cpp` is committed. An arch with no `.fb` gets a size-0
+  stub and falls to the heuristic.
+- `gqa_autotune.cpp` reads that array as an **in-DLL data symbol**. It is *not*
+  compiled into `runtime.bc` any more.
+- `real/gqa.cpp` (compiled to bitcode) reaches the resolver through the exported
+  `extern "C"` `hip_gqa_autotune_*` shims — the same way it already calls
+  `hip_gqa_flash_decode_configured`.
+
+This mirrors matmul_nbits, and it is deliberate: the JIT resolves DLL **function**
+symbols reliably, but a **data** symbol does not cross that boundary safely on
+Windows. Moving the table into the DLL means the only cross-boundary symbols are
+functions. (The old design embedded the table in `runtime.bc`; this replaced it.)
 
 ## Files here
 
 | File | Role | Built by |
 |---|---|---|
-| `gqa_autotune.fbs` | LUT **schema** — the format, not the data. Lives here, not in `schemas/`, so it sits next to its only reader. | `schemas/CMakeLists.txt` (flatc) |
-| `gqa_autotune.h` | Policy API: requests, configs, `GqaTuneSource`. | — |
-| `gqa_autotune.cpp` | Key encoding, the four probes, the resolved-answer memo, the split clamp, the loader. | `lib/Runtime/CMakeLists.txt` (bitcode) |
-| `lut/*.json` | The tables, per arch. Reviewable source of truth. | `build_lut.py` |
-| `lut/*.fb` | What the runtime loads, produced from the JSON by `flatc`. | `flatc` |
-
-`gqa_autotune.cpp` is host code compiled into the runtime bitcode: it needs
-flatbuffers and the EP `FileSystem`. It contains no device code; `.hip` is not
-involved.
+| `gqa_autotune.fbs` | LUT **schema**. Lives here, next to its only reader. | `schemas/CMakeLists.txt` (flatc) → `gqa_autotune_generated.h` |
+| `gqa_autotune.h` | POD request/config/result structs, `GqaTuneSource`, and the `extern "C"` `hip_gqa_autotune_*` C-ABI. | — |
+| `gqa_autotune.cpp` | The loader + nearest-neighbour resolver + validator + heuristic + the exported shims. | `lib/Runtime/Kernels/CMakeLists.txt` (into `custom_kernels_<arch>`) |
+| `lut/<arch>.json` | The table, per arch. Reviewable source of truth (one entry per line). | `scripts/update_lut.py build` |
+| `lut/<arch>.fb` | What the DLL embeds, produced from the JSON by `flatc`. | `scripts/update_lut.py compile` |
+| `scripts/update_lut.py` | `plan` / `measure` / `build` / `compile` pipeline. | — |
+| `../../test/example/gqa/autotune/` | the GPU sweep driver + Makefile. | — |
 
 ## Using it
 
+The EP calls the C-ABI (POD structs by pointer):
+
 ```c
 hipdnn_ep::GqaDecodeRequest request{
-    kv_dtype, batch, num_heads, kv_heads, head_dim,
+    kv_dtype, batch, num_heads, kv_num_heads, head_dim,
     effective_skv, kFlashDecodeMaxSplits, /*local_window=*/0};
-auto selected = hipdnn_ep::gqa_autotune_resolve_decode(policy, request);
-// selected.source is Geometry / HeadGroup / Length / Fallback / Heuristic
+hipdnn_ep::GqaDecodeResult selected;
+hip_gqa_autotune_resolve_decode(policy, &request, &selected);
+// selected.source is Exact / Nearest / Fallback / Heuristic
+// selected.distance is the log2 distance to the point that answered (0 on Exact)
 ```
 
-## Filling the tiers
-
-Every tier is **data**: widening what the table answers means adding rows, never
-writing another matcher.
-
-```
-lut/gfx1151.json    # source of truth, reviewed in PRs
-lut/gfx1151.fb      # what the runtime loads
-scripts/update_lut.py  # full pipeline: measure → build → compile
-```
+`hip_gqa_autotune_create()` builds the session policy (mode + CU count) and loads the
+embedded table once; `hip_gqa_autotune_destroy()` frees it.
 
 ## Updating the LUT
 
-The complete pipeline lives in `scripts/update_lut.py`. Build the sweep
-executable first, then run:
+The pipeline is `scripts/update_lut.py`. The full per-step commands, environment
+requirements, and acceptance checks are in
+[lut/README.md](lut/README.md); the short version:
 
 ```bash
-LUT=lib/Runtime/Kernels/hip/autotune/gqa
-SCRIPTS=$LUT/scripts
+SCRIPTS=lib/Runtime/Kernels/hip/autotune/gqa/scripts
 
-# Full pipeline: measure all geometries, rebuild JSON, compile to .fb
-python $SCRIPTS/update_lut.py all \
-    --sweep <build-dir>/lib/Runtime/Kernels/test/example/gqa/autotune/gqa_autotune_sweep.exe \
-    --flatc flatc
-
-# Or step by step:
-python $SCRIPTS/update_lut.py measure --sweep <path-to-sweep-exe>
-python $SCRIPTS/update_lut.py build
-python $SCRIPTS/update_lut.py compile --flatc flatc
+python $SCRIPTS/update_lut.py plan      # list shapes to measure -> lut/shapes_gfx1151.json (config=TBD)
+python $SCRIPTS/update_lut.py measure --sweep <sweep-exe>   # GPU sweep -> scripts/data/*_best.csv
+python $SCRIPTS/update_lut.py build     # *_best.csv -> lut/gfx1151.json (configs[]/points[])
+python $SCRIPTS/update_lut.py compile --flatc <flatc>       # -> lut/gfx1151.fb
 ```
 
-Measurement CSVs are written to `scripts/data/`. The JSON is written to
-`lut/gfx1151.json` and compiled to `lut/gfx1151.fb`.
+`build` reads `data/*_best.csv` (the sweep's per-shape winners, with decomposed
+`cfg_*` columns), de-duplicates configs, emits one point per measured shape (literal
+dims, no bucketing), then **prunes saturated points** — within each exact-geometry
+group it drops any point a nearest-neighbour lookup can reconstruct exactly (a run
+of lengths sharing a winner collapses to its endpoints), verified answer-preserving
+by replay. It finally writes the fixed per-`(phase, head_dim)` fallbacks. The
+weights default to 1.0 (a `--fit-weights` step is a future addition; prefill's
+`seq_kv` weight should end up near zero, since a prefill config is essentially
+independent of KV length — which is also why so many prefill points prune away).
 
-**With RdpCapture** (full pipeline — measurement store, outlier repair,
-prune-tolerance tuning, quality scoring):
+**Do not use `--rdpcapture`.** That path delegates to RdpCapture's `build_lut.py`,
+which still emits the old tier schema and would produce a table this loader rejects.
+The standalone (best-csv) path above is the supported one.
 
-```bash
-python $SCRIPTS/update_lut.py all \
-    --rdpcapture /path/to/RdpCapture \
-    --sweep <path-to-sweep-exe> \
-    --flatc flatc \
-    --prune-tolerance 1.02
-```
-
-Adding a new model geometry: add its `(H, G, d)` to the `GEOMETRIES` list in
-`scripts/update_lut.py` and re-run the pipeline. If the `(H, G)` pair should get
-exact matching (not just HpG fuzzy), add it to `HEAD_COUNT_CLASS` in the same
-file **and** add the enum entry to `GqaHeadCountClass` in `gqa_autotune.fbs`
-(bump `schema_version` and `kGqaLutSchemaVersion`).
+Adding a model geometry: add its `(H, G, d)` to `GEOMETRIES` in
+`scripts/update_lut.py` and re-run `plan` → `measure` → `build` → `compile`.
 
 ## Keeping it current
 
 **Read this before changing `../../gqa_kernel.hip`.** The table is a claim about
-kernels that stop existing the moment one is edited, and the expensive mistake is not
-rebuilding it — it is rebuilding it from readings the old kernel produced, which
-fails silently and ships a table that is confidently wrong.
+kernels — and about the compiler that built them. Two rules:
 
-Four steps:
-
-```bash
-# 1. Stamp the kernel change (same commit as the change).
-#    Bump the entry for the kernel you touched in
-#    gqa_autotune_sweep.cpp :: kKernelVersions.
-#    This invalidates old readings for that kernel only.
-
-# 2. Measure (only re-measures what changed).
-python scripts/update_lut.py measure \
-    --sweep <build-dir>/gqa_autotune_sweep.exe
-
-# 3. Rebuild JSON + compile FB.
-python scripts/update_lut.py build
-python scripts/update_lut.py compile --flatc flatc
-
-# 4. Gate the fuzzy-match half (no GPU needed, exits non-zero on regression).
-#    Requires RdpCapture:
-cd RdpCapture/ops_analyze/gqa
-python tools/check_fallback.py
-```
-
-Step 3 needs no separate work for the coarse tiers: `HeadGroup`, `Length` and
-`Fallback` rows are selected from the same measurements as `Geometry`, in the same
-pass, so they cannot lag behind it. What rebuilding cannot tell you is whether they
-still *transfer* — whether a geometry nobody measured still lands near its optimum
-through them — and that is a measurement, which is step 4. Step 4 also refits
-`kBlocksPerCu` in `gqa_autotune.cpp`: every other layer here is regenerated from
-data, that one is a constant fitted once, so it is the one that goes stale in silence.
-It is only reached when no table loads at all, so a drift there is not an outage — but
-finding out the fuse is the wrong size before you need it is worth the seconds.
-
-What invalidates what:
+- **Sweep with the compiler the model runs under** (currently HIP 7.14 / clang 23).
+  A different clang can reorder the winning configs (this cost 20-30x on prefill v7
+  once), so a table swept on the wrong toolchain is confidently wrong.
+- **Stamp kernel changes.** Bump the kernel's entry in
+  `gqa_autotune_sweep.cpp :: kKernelVersions` in the same commit as the kernel change
+  (this marks old readings stale), and re-measure. Bump `kGqaKernelAbi` (`gqa-v3`) in
+  `gqa_autotune.h` when a config's *meaning* changes, so a stale shipped `.fb` is
+  rejected rather than misread.
 
 | Change | Bump | Costs |
 |---|---|---|
 | A kernel's tiles, inner loop, or candidate set | its `kKernelVersions` entry | remeasure that kernel |
-| How the sweep times | `kDecodeHarnessVersion` / `kPrefillHarnessVersion` | remeasure that phase |
-| A `GqaTuneConfig` name's meaning | `kGqaKernelAbi` in `gqa_autotune.h` | shipped `.fb` is rejected, not misread |
-| A new arch or ROCm version | — | loader checks `gpu_arch` / `rocm_version` |
+| A config knob's meaning | `kGqaKernelAbi` (+ `kSchemaVersion` on a layout change) | shipped `.fb` is rejected, not misread |
+| A new arch / ROCm version | — | loader checks `gpu_arch`; ROCm mismatch only warns |
 
-Two cases need a hand beyond a bump:
+`test/runtime/test_gqa_autotune.cpp` links the real embedded `.fb` and drives this
+resolver GPU-free (arch from `HIPDNN_EP_GQA_ARCH`). It asserts the table loads with
+zero rejected rows, that measured shapes resolve from the table (not the heuristic),
+that an unmeasured length resolves as nearest, that the split clamp holds, and that
+fallbacks are runnable. It compiles the same `gqa_autotune.cpp` that ships in
+`custom_kernels_<arch>`.
 
-- **A new candidate config** needs its name in `GqaTuneConfig`, in
-  `prefillV5/V7/V8Candidates` or `flashDecodeCandidateSplits` (what the harnesses
-  enumerate), and in the runtime's knob decoder. Then remeasure the kernel: a new
-  candidate can win shapes an existing row already answers, and a row is only as good
-  as the candidate set it was chosen from.
-- **A new `(head_dim, heads-per-group)` pair becomes legal** — extend
-  `flash_decode_geometry_ok`, add the pair to `GEOMETRIES` in `gen_lut_grid.py`, and
-  measure that grid. Nothing already in the store is invalidated. Until it is
-  measured the pair is answered by the `Length` tier.
+## Runtime controls
 
-Readings are never deleted by a bump; they stay in the store labelled with the
-version they measured, so `measurement_store.py stats --any-kernel-ver` can show what
-a kernel change did to the numbers it changed.
-
-`test/runtime/test_gqa_autotune.cpp` covers the probe order, the quarter-octave
-labels, the split clamp, what the memo is allowed to remember, the parallelism tier,
-the config names and every rule `rowConsistent()` enforces. It is GPU-free and
-compiles the same `gqa_autotune.cpp` that goes into `runtime.bc`.
-
-## Packaging
-
-```text
-gqa_autotune_lut=/path/to/lib/Runtime/Kernels/hip/autotune/gqa/lut/gfx1151.fb
-```
-
-`HIPDNN_GQA_LUT_FILE` overrides the logical filename at runtime.
-
-Which of the two config sources a session uses is chosen in two places, because
-the two levers reach different situations. **Both paths are compiled into every
-build either way** — this only decides which one a session takes.
-
-| Lever | Scope | Use it when |
-|---|---|---|
-| `-DHIPDNN_EP_GQA_AUTOTUNE_ONLINE_DEFAULT=ON` (CMake) | the build's default | the harness gives you no way to set an environment variable: build a package with the default flipped and the whole run takes the online path |
-| `HIPDNN_GQA_AUTOTUNE_MODE=lookup\|online` | one process, overrides the build default | you are running a build you did not configure |
-
-The environment variable is read once per session, in `gqa_autotune_create()`, so
-set it before the session is created; changing it later does not move a session
-that already exists. It is matched case-insensitively with whitespace stripped,
-and an unrecognised value prints a message and falls back to the build default
-rather than silently running the path you did not ask for.
-
-`HIPDNN_EP_DEBUG=1` logs both the mode and where it came from — on a build whose
-default was flipped there is no variable to inspect, so this is the only way to
-tell a deliberate default from an override that did not take:
-
-```text
-[Runtime DEBUG] GQA autotune mode: online (GPU benchmark, table bypassed) (from the build default)
-```
-
-That line is printed once per session, which also makes it the cheapest way to
-find out whether a harness reuses one session or builds a new one per run.
-
-Deciding online is not free: the production tuner issues 12-96 launches for a
-decode shape and 526-1518 for a prefill one, up to 1769 s on the worst single
-shape. A table lookup is zero launches.
+| Control | Effect |
+|---|---|
+| `HIPDNN_GQA_AUTOTUNE_MODE=lookup\|online` | `lookup` (default) resolves from the table; `online` bypasses it and benchmarks on the GPU (the pre-table path, kept for A/B). Read once per session in `hip_gqa_autotune_create()`. Mirrors matmul_nbits' `HIPDNN_MATMUL_AUTOTUNE_MODE`. |
+| `HIPDNN_GQA_LUT_LOG=1` | logs the table load (`loaded N points ...`) and each shape's resolution — `exact`/`nearest` (with the distance), or `fallback`/`heuristic` — so a run's coverage is visible from this one switch. Each distinct line is printed once per process (resolve runs per token, so this dedup keeps a served model from flooding). Mirrors `HIPDNN_MATMUL_LUT_LOG`. Verification only — do not benchmark with it on. |
+| `HIPDNN_GQA_AUTOTUNE_LOG=1` | in `gqa_kernel.hip`, logs the config the kernel actually launched (in both `lookup` and `online` modes), so an `online` run can be diffed against the shipped table. Mirrors `HIPDNN_MATMUL_AUTOTUNE_LOG`: setting it alone prints **only** these autotune lines (not the rest of the debug firehose), while `HIPDNN_EP_DEBUG=1` also pulls them in as part of the full `[custom_kernels]` output. |
