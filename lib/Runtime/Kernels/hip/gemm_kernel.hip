@@ -681,7 +681,7 @@ __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
                                               int cDim0, int cDim1,
                                               int swizzle_n,
                                               float *__restrict__ sk_acc,
-                                              int ldb) {
+                                              int ldb, int n_base) {
   constexpr int WM_L = BM / (WT_M * 16);
   constexpr int WN_L = BN / (WT_N * 16);
   constexpr int THR = WM_L * WN_L * 32;
@@ -726,7 +726,11 @@ __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
   int by, bx;
   gemmSwizzleBlock(gridDim.x, gridDim.y, swizzle_n, by, bx);
   const int row0 = by * BM;
-  const int col0 = bx * BN;
+  /* n_base shifts this launch's column origin. The N-edge grid-split launches
+   * the aligned interior with n_base=0 (BC=false) and the ragged edge column
+   * tile with n_base=floor(N/BN)*BN (BC=true), so the interior keeps the fast
+   * path even when N%BN!=0. */
+  const int col0 = n_base + bx * BN;
 
   constexpr int B_COL_SHIFT = __builtin_ctz(B_TPR);
   const int b_col = tid >> B_COL_SHIFT;
@@ -1076,9 +1080,11 @@ __attribute__((amdgpu_waves_per_eu(2, 8)))
 void gemm_wmma_kernel(const T *__restrict__ A, const T *__restrict__ B,
                       const T *__restrict__ C, T *__restrict__ Y, int M, int N,
                       int K, float alpha, float beta, int cDim0, int cDim1,
-                      int swizzle_n, float *__restrict__ sk_acc, int ldb) {
+                      int swizzle_n, float *__restrict__ sk_acc, int ldb,
+                      int n_base) {
   GemmWmmaImpl<BM, BN, WT_M, WT_N, TransB, T, BK, BC, DB>(
-      A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1, swizzle_n, sk_acc, ldb);
+      A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1, swizzle_n, sk_acc, ldb,
+      n_base);
 }
 
 template <typename T>
@@ -1267,13 +1273,7 @@ static void launchWmma(int id, hipStream_t s, const T *A, const T *B,
     if (!skp)
       sk = 1;
   }
-  dim3 grid((N + c.bn - 1) / c.bn, (M + c.bm - 1) / c.bm, sk > 1 ? sk : 1);
   dim3 block(th);
-
-  /* Bounds-check elimination: when the tile fully tiles [M,N] and K%BK==0,
-   * launch the BC=false variant (no per-load / per-store bounds checks). */
-  const bool bc =
-      !(M % c.bm == 0 && N % c.bn == 0 && K % c.bk == 0) || sk > 1;
 
   /* Single-buffer (DB=false) when double-buffered LDS would exceed ~48 KB, so
    * two workgroups fit per CU and hide the K-loop barriers across each other.
@@ -1282,6 +1282,34 @@ static void launchWmma(int id, hipStream_t s, const T *A, const T *B,
   const int db_lds = 2 * (c.bm + c.bn) * (c.bk + 8) * 2;
   const bool db = db_lds <= 49152;
 
+  /* Sub-launches. Normally one launch covering the whole [M,N] grid with a
+   * single compile-time BC. When only N is ragged (M,K tile-aligned, no
+   * split-K), split into an aligned interior (BC=false, fast) and a one-tile
+   * ragged edge (BC=true) via n_base, so N%BN!=0 no longer taxes the interior
+   * (fixes vision N=4304 mlp-up). */
+  struct SubLaunch {
+    dim3 grid;
+    bool bc;
+    int nb;
+  };
+  SubLaunch subs[2];
+  int nsub;
+  const int my = (M + c.bm - 1) / c.bm;
+  const int nfull_n = N / c.bn;
+  const bool n_ragged = (N % c.bn) != 0;
+  if (sk == 1 && n_ragged && (M % c.bm == 0) && (K % c.bk == 0) &&
+      nfull_n >= 1) {
+    subs[0] = SubLaunch{dim3(nfull_n, my, 1), false, 0};
+    subs[1] = SubLaunch{dim3(1, my, 1), true, nfull_n * c.bn};
+    nsub = 2;
+  } else {
+    const bool bc =
+        !(M % c.bm == 0 && N % c.bn == 0 && K % c.bk == 0) || sk > 1;
+    subs[0] =
+        SubLaunch{dim3((N + c.bn - 1) / c.bn, my, sk > 1 ? sk : 1), bc, 0};
+    nsub = 1;
+  }
+
 #define GEMM_WMMA_ONE(BM, BN, WM, WN, BK)                                      \
   do {                                                                         \
     if (bc && db)                                                              \
@@ -1289,25 +1317,25 @@ static void launchWmma(int id, hipStream_t s, const T *A, const T *B,
           HIP_KERNEL_NAME(                                                     \
               gemm_wmma_kernel<BM, BN, WM, WN, TransB, T, BK, true, true>),    \
           grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1,   \
-          c.swizzle_n, skp, ldb);                                              \
+          c.swizzle_n, skp, ldb, nb);                                          \
     else if (bc && !db)                                                        \
       hipLaunchKernelGGL(                                                      \
           HIP_KERNEL_NAME(                                                     \
               gemm_wmma_kernel<BM, BN, WM, WN, TransB, T, BK, true, false>),   \
           grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1,   \
-          c.swizzle_n, skp, ldb);                                              \
+          c.swizzle_n, skp, ldb, nb);                                          \
     else if (!bc && db)                                                        \
       hipLaunchKernelGGL(                                                      \
           HIP_KERNEL_NAME(                                                     \
               gemm_wmma_kernel<BM, BN, WM, WN, TransB, T, BK, false, true>),   \
           grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1,   \
-          c.swizzle_n, skp, ldb);                                              \
+          c.swizzle_n, skp, ldb, nb);                                          \
     else                                                                       \
       hipLaunchKernelGGL(                                                      \
           HIP_KERNEL_NAME(                                                     \
               gemm_wmma_kernel<BM, BN, WM, WN, TransB, T, BK, false, false>),  \
           grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1,   \
-          c.swizzle_n, skp, ldb);                                              \
+          c.swizzle_n, skp, ldb, nb);                                          \
   } while (0)
 
 #define GEMM_WMMA_TRY(BM, BN, WM, WN, BK)                                      \
@@ -1315,6 +1343,11 @@ static void launchWmma(int id, hipStream_t s, const T *A, const T *B,
       c.bk == BK) {                                                            \
     GEMM_WMMA_ONE(BM, BN, WM, WN, BK);                                         \
   } else
+
+  for (int sidx = 0; sidx < nsub; ++sidx) {
+    const dim3 grid = subs[sidx].grid;
+    const bool bc = subs[sidx].bc;
+    const int nb = subs[sidx].nb;
 
   /* BK=64 tiles */
   GEMM_WMMA_TRY(64, 128, 2, 4, 64)
@@ -1349,6 +1382,7 @@ static void launchWmma(int id, hipStream_t s, const T *A, const T *B,
   {
     GEMM_WMMA_ONE(128, 128, 2, 2, 32);
   }
+  } /* sub-launch loop */
 #undef GEMM_WMMA_TRY
 #undef GEMM_WMMA_ONE
 
