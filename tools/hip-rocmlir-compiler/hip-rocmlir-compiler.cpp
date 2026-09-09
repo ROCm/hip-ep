@@ -30,7 +30,10 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/Passes.h"
 #include "mlir/IR/AsmState.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Pass/PassManager.h"
@@ -43,6 +46,7 @@
 
 #include "CrashHandler.h"
 
+#include <cstdint>
 #include <cstdlib>
 #include <dlfcn.h>
 #include <string>
@@ -149,6 +153,10 @@ struct Api {
   bool (*rockTuningSetFromStr)(MlirModule, MlirStringRef);
   void (*rockTuningParamDestroy)(MlirRockTuningParam);
   void (*rockTuningSpaceDestroy)(MlirRockTuningSpace);
+
+  // Compiled-artifact extraction (mlir-c/Dialect/MIGraphX.h).
+  void (*getKernelAttrs)(MlirModule, uint32_t *); // [block, grid, cluster]
+  bool (*getBinary)(MlirModule, size_t *, char *);
 };
 
 template <typename T>
@@ -212,6 +220,8 @@ static bool load(Api &api, const std::string &soPath) {
              "mlirRockTuningParamDestroy");
   ok &= bind(api.handle, api.rockTuningSpaceDestroy,
              "mlirRockTuningSpaceDestroy");
+  ok &= bind(api.handle, api.getKernelAttrs, "mlirGetKernelAttrs");
+  ok &= bind(api.handle, api.getBinary, "mlirGetBinary");
   return ok;
 }
 
@@ -267,10 +277,17 @@ static int64_t perfConfigField(llvm::StringRef perf, llvm::StringRef name,
 //   2. enumerate the perfConfig search space; take the first entry and affix it
 //      to the gemm op (as the `perf_config` string attribute)
 //   3. backend pipeline (rock -> LLVM / binary)
-// Prints the final module to stdout. `moduleText` is generic-form MLIR text.
+// On success, returns the compiled GPU binary in `binary` and the kernel launch
+// geometry in `gridSize`/`blockSize`. `moduleText` is generic-form MLIR text.
+struct CompiledKernel {
+  std::string binary;
+  int64_t gridSize = 0;
+  int64_t blockSize = 0;
+};
+
 static bool runRocmlirInSo(const std::string &moduleText,
-                           const std::string &soPath,
-                           const std::string &arch) {
+                           const std::string &soPath, const std::string &arch,
+                           CompiledKernel &out) {
   using namespace rockcapi;
   Api api;
   if (!load(api, soPath))
@@ -391,11 +408,20 @@ static bool runRocmlirInSo(const std::string &moduleText,
       return fail("rocMLIR backend pipeline failed");
   }
 
-  auto printCb = [](MlirStringRef s, void *) {
-    llvm::outs().write(s.data, s.length);
-  };
-  api.operationPrint(moduleOp, printCb, nullptr);
-  llvm::outs() << "\n";
+  // 4. Extract the compiled artifact: the gpu.binary blob plus launch geometry.
+  //    mlirGetKernelAttrs returns uint32_t[3] = {block_size, grid_size,
+  //    cluster_size}.
+  uint32_t attrs[3] = {0, 0, 0};
+  api.getKernelAttrs(module, attrs);
+  out.blockSize = attrs[0];
+  out.gridSize = attrs[1];
+
+  size_t binSize = 0;
+  if (!api.getBinary(module, &binSize, nullptr) || binSize == 0)
+    return fail("failed to query compiled binary size");
+  out.binary.resize(binSize);
+  if (!api.getBinary(module, nullptr, out.binary.data()))
+    return fail("failed to extract compiled binary");
 
   api.moduleDestroy(module);
   api.contextDestroy(ctx);
@@ -443,13 +469,12 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // Stage 1: ONNX->HIP head passes (before bufferization; NOT the full
-  // buildOnnxToHipPipeline). Mirrors the head of buildOnnxToHipPipeline:
-  // simplify-onnx, hip-add-context-arg, loop/if outline, infer-loop-body-shapes,
-  // convert-onnx-to-hip. Plain path: no hipdnn handle.
-  //
-  // Stage 2: rocmlir hip->tosa conversion (the front of buildRocMlirPipeline,
-  // WITHOUT its terminal hipEpAddHighLevelPipeline call -- that runs in the .so).
+  // Stage 1: ONNX->HIP head passes + fuse-rocmlir. Mirrors the head of
+  // buildOnnxToHipPipeline (simplify-onnx, hip-add-context-arg, loop/if outline,
+  // infer-loop-body-shapes, convert-onnx-to-hip; plain path, no hipdnn handle)
+  // followed by fuse-rocmlir + duplicate-function-elimination, which outline the
+  // fused GEMM into a `rock.kernel` func and create the `hip.rocmlir` dispatch.
+  // `module` is LEFT in this hip form: it is the artifact we mutate at the end.
   mlir::PassManager pm(module->getContext());
   pm.addPass(mlir::hip::createSimplifyOnnxPass());
   pm.addPass(mlir::hip::createHipAddContextArgPass());
@@ -459,42 +484,95 @@ int main(int argc, char **argv) {
   pm.addPass(mlir::hip::createConvertOnnxToHipPass());
   pm.addNestedPass<mlir::func::FuncOp>(mlir::hip::createFuseROCMlirPass());
   pm.addPass(mlir::func::createDuplicateFunctionEliminationPass());
-  pm.addNestedPass<mlir::func::FuncOp>(
-      mlir::hip::createConvertHipToTosaPass());
-  pm.addPass(mlir::createCanonicalizerPass());
 
   if (mlir::failed(pm.run(*module))) {
-    llvm::errs() << "error: ONNX->HIP->tosa passes failed\n";
+    llvm::errs() << "error: ONNX->HIP + fuse-rocmlir passes failed\n";
     return 1;
   }
 
-  // Serialize to generic-form text so the .so can reparse it with unregistered
-  // hip.* ops. Generic form is the portable interchange between the two
-  // independent MLIR copies.
-  //
+  // Stage 2: on a CLONE, run the hip->tosa conversion (front of
+  // buildRocMlirPipeline, minus its terminal hipEpAddHighLevelPipeline -- that
+  // runs in the .so), then serialize only the `rock.kernel` funcs and compile
+  // them through the rocMLIR pipeline in librockCompiler.so. The clone is
+  // discarded; we only want the compiled binary + launch geometry back.
+  mlir::OwningOpRef<mlir::ModuleOp> tosaModule = module->clone();
+  {
+    mlir::PassManager tpm(tosaModule->getContext());
+    tpm.addNestedPass<mlir::func::FuncOp>(
+        mlir::hip::createConvertHipToTosaPass());
+    tpm.addPass(mlir::createCanonicalizerPass());
+    if (mlir::failed(tpm.run(*tosaModule))) {
+      llvm::errs() << "error: hip->tosa conversion failed\n";
+      return 1;
+    }
+  }
+
   // The rocMLIR high-level pipeline errors on any non-kernel func (its
   // tosa->rock passes assert a `rock.kernel` attribute and walk ops assuming
-  // registered dialects). So hand it ONLY the `rock.kernel` functions: clone
-  // the module and drop everything else (e.g. `main_graph` and its hip.* ops).
-  mlir::OwningOpRef<mlir::ModuleOp> kernelModule = module->clone();
+  // registered dialects). So hand it ONLY the `rock.kernel` functions: drop
+  // everything else (e.g. `main_graph` and its hip.* ops). Generic-form text is
+  // the portable interchange between this executable's MLIR and the .so's.
   for (auto func :
-       llvm::make_early_inc_range(kernelModule->getOps<mlir::func::FuncOp>())) {
+       llvm::make_early_inc_range(tosaModule->getOps<mlir::func::FuncOp>())) {
     if (!func->hasAttr("rock.kernel"))
       func.erase();
   }
-
   std::string moduleText;
   {
     llvm::raw_string_ostream os(moduleText);
     mlir::OpPrintingFlags flags;
     flags.printGenericOpForm();
-    kernelModule->print(os, flags);
+    tosaModule->print(os, flags);
   }
 
-  // Stage 3: hand the tosa IR to the rocMLIR pipeline in the .so: high-level
-  // lowering, perfConfig search-space enumeration + affix, then backend.
-  if (!runRocmlirInSo(moduleText, resolveSoPath(), resolveArch()))
+  CompiledKernel compiled;
+  if (!runRocmlirInSo(moduleText, resolveSoPath(), resolveArch(), compiled))
     return 1;
 
+  // Stage 3: embed the compiled artifact back into `module`'s `hip.rocmlir`
+  // dispatch op (kernel_binary + grid_size + block_size), then delete the
+  // now-compiled `rock.kernel` funcs. This matches what hip-compiler consumes:
+  // a self-contained hip module carrying the GPU binary inline.
+  //
+  // The .so tuning/backend path is single-GEMM, so exactly one kernel binary is
+  // produced; stamp it onto every hip.rocmlir op whose callee is a compiled
+  // rock.kernel func.
+  mlir::Builder b(&context);
+  auto binaryAttr = mlir::StringAttr::get(
+      &context, llvm::StringRef(compiled.binary.data(), compiled.binary.size()));
+  auto i64 = mlir::IntegerType::get(&context, 64);
+
+  llvm::SmallVector<mlir::func::FuncOp> kernelFuncs;
+  for (auto func : module->getOps<mlir::func::FuncOp>())
+    if (func->hasAttr("rock.kernel"))
+      kernelFuncs.push_back(func);
+
+  unsigned stamped = 0;
+  module->walk([&](mlir::Operation *op) {
+    if (op->getName().getStringRef() != "hip.rocmlir")
+      return;
+    op->setAttr("kernel_binary", binaryAttr);
+    op->setAttr("grid_size", mlir::IntegerAttr::get(i64, compiled.gridSize));
+    op->setAttr("block_size", mlir::IntegerAttr::get(i64, compiled.blockSize));
+    ++stamped;
+  });
+  if (stamped == 0) {
+    llvm::errs() << "error: no hip.rocmlir op found to embed the binary into\n";
+    return 1;
+  }
+
+  // Delete the successfully compiled kernel funcs; their body now lives in the
+  // embedded binary and the symbol is no longer needed.
+  for (auto func : kernelFuncs)
+    func.erase();
+
+  llvm::errs() << "[hip-rocmlir-compiler] embedded " << compiled.binary.size()
+               << "-byte binary into " << stamped << " hip.rocmlir op(s); "
+               << "grid_size=" << compiled.gridSize
+               << " block_size=" << compiled.blockSize << "; deleted "
+               << kernelFuncs.size() << " kernel func(s)\n";
+
+  module->print(llvm::outs());
+  llvm::outs() << "\n";
   return 0;
 }
