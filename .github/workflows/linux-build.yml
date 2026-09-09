@@ -21,9 +21,10 @@ concurrency:
 
 env:
   # Pins (kept in lockstep with cmake/deps.txt).
-  # LLVM/MLIR/LLD are built from source at this upstream release tag; bumping it
-  # only invalidates the llvm-install cache.
-  LLVM_TAG: llvmorg-22.1.0
+  # LLVM/MLIR/LLD are built from the rocmlirTriton LLVM snapshot (upstream SHA
+  # plus llvm-patches). Bumping it only invalidates the llvm-install cache.
+  LLVM_TAG: 62b7cf9623fc310525f39ed69aaecc318a909731
+  LLVM_PATCHSET: rocmlirTriton-28a5a7a40cfd6aceab0047c7fc92cb5cf90b6540
   ONNXRUNTIME_VERSION: "1.27.0"
   # Space-separated microsoft/onnxruntime PR numbers `git apply`-ed on top of
   # the pinned tag during the from-source build (an empty list applies nothing;
@@ -130,10 +131,9 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.9
 
       # -----------------------------------------------------------------------
-      # LLVM/MLIR/LLD/Clang from source -> llvm-install (cached). Caching is a CI
-      # concern, so the prefix build lives here (not in build.py). Recipe
-      # matches cmake/deps.cmake's from-source fallback: clang;mlir;lld, X86 only,
-      # RTTI on, zlib/zstd off, INSTALL_UTILS on.
+      # LLVM/MLIR/LLD from the rocmlirTriton snapshot -> llvm-install (cached).
+      # Matches cmake/deps.cmake: mlir;lld, X86+AMDGPU, RTTI off, assertions on.
+      # Clang is not built in-tree; runtime bitcode uses the HIP SDK clang.
       # -----------------------------------------------------------------------
       - name: Cache LLVM install prefix
         id: cache-llvm
@@ -142,28 +142,35 @@ jobs:
           path: ${{ runner.workspace }}/llvm-install
           # Keyed only on the LLVM tag: a protobuf/ORT bump must not evict the
           # multi-hour LLVM cache.
-          key: linux-llvm-${{ env.LLVM_TAG }}
+          key: linux-llvm-${{ env.LLVM_TAG }}-${{ env.LLVM_PATCHSET }}
 
       - name: Build LLVM/MLIR/LLD from source
         if: steps.cache-llvm.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           SRC="${{ runner.workspace }}/llvm-project"
-          git clone --depth 1 --branch "${{ env.LLVM_TAG }}" \
-            https://github.com/llvm/llvm-project.git "$SRC"
+          git init "$SRC"
+          git -C "$SRC" remote add origin https://github.com/llvm/llvm-project.git
+          git -C "$SRC" fetch --depth 1 origin "${{ env.LLVM_TAG }}"
+          git -C "$SRC" checkout FETCH_HEAD
+          cmake -DLLVM_SOURCE_DIR="$SRC" \
+            -P cmake/apply_rocmlir_llvm_patches.cmake
           cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
             -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
-            -DLLVM_TARGETS_TO_BUILD=X86 \
+            -DLLVM_ENABLE_PROJECTS="mlir;lld" \
+            -DLLVM_TARGETS_TO_BUILD="X86;AMDGPU" \
             -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/llvm-install" \
-            -DLLVM_ENABLE_RTTI=ON \
+            -DLLVM_ENABLE_RTTI=OFF \
+            -DLLVM_ENABLE_ASSERTIONS=ON \
             -DLLVM_ENABLE_ZLIB=OFF \
             -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_ENABLE_TERMINFO=OFF \
             -DLLVM_INCLUDE_TESTS=OFF \
             -DLLVM_INCLUDE_EXAMPLES=OFF \
             -DLLVM_INCLUDE_BENCHMARKS=OFF \
             -DLLVM_BUILD_TOOLS=ON \
             -DLLVM_INSTALL_UTILS=ON \
+            -DLLVM_INSTALL_TOOLCHAIN_ONLY=ON \
             -DCMAKE_CXX_VISIBILITY_PRESET=hidden \
             -DCMAKE_C_VISIBILITY_PRESET=hidden \
             -DCMAKE_VISIBILITY_INLINES_HIDDEN=ON \

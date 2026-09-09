@@ -10,7 +10,7 @@ onnxruntime;https://github.com/microsoft/onnxruntime/releases/download;1.27.0
 ##
 ## Source-built deps (hash = git tag/commit). Resolved find_package-first;
 ## these are the from-source fallbacks when no prefix is found.
-llvm;https://github.com/llvm/llvm-project.git;llvmorg-22.1.0
+llvm;https://github.com/llvm/llvm-project.git;62b7cf9623fc310525f39ed69aaecc318a909731
 protobuf;https://github.com/protocolbuffers/protobuf.git;v34.0
 flatbuffers;https://github.com/google/flatbuffers.git;v25.12.19
 ##

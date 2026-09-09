@@ -6,16 +6,21 @@
 # ============================================================================
 # PDLL Pattern Compilation
 # ============================================================================
-# Locate mlir-pdll. LLVM_TOOLS_BINARY_DIR is exported by find_package(MLIR) and
-# covers both the prebuilt SDK and an installed LLVM; the _deps path covers an
-# LLVM built inside this project's FetchContent tree. Default search paths stay
-# enabled so a tool on PATH is still usable.
-find_program(MLIR_PDLL_EXE mlir-pdll
-    HINTS
-        "${CMAKE_BINARY_DIR}/_deps/llvm-project-build/bin"
-        "${LLVM_TOOLS_BINARY_DIR}"
-        "${LLVM_BINARY_DIR}/bin"
-)
+# Use the in-tree LLVM target when LLVM is provided through FetchContent. The
+# executable does not exist yet at configure time, and naming the target in a
+# custom command adds the required build dependency automatically. For an
+# installed toolchain, search the selected LLVM directories only.
+if(TARGET mlir-pdll)
+    set(MLIR_PDLL_EXE mlir-pdll)
+else()
+    find_program(MLIR_PDLL_EXE mlir-pdll
+        HINTS
+            "${CMAKE_BINARY_DIR}/_deps/llvm-project-build/bin"
+            "${LLVM_TOOLS_BINARY_DIR}"
+            "${LLVM_BINARY_DIR}/bin"
+        NO_DEFAULT_PATH
+    )
+endif()
 
 if(MLIR_PDLL_EXE)
     message(STATUS "OnnxToHip: mlir-pdll found: ${MLIR_PDLL_EXE}")
@@ -31,11 +36,15 @@ if(MLIR_PDLL_EXE)
     get_property(_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
     set(PDL_STAGED
         "${CMAKE_BINARY_DIR}/bin/$<$<BOOL:${_multi_config}>:$<CONFIG>/>HipFusionPatterns.pdl.mlir")
+    set(_pdll_depends ${PDL_SOURCES})
+    if(TARGET mlir-pdll)
+        list(APPEND _pdll_depends mlir-pdll)
+    endif()
     add_custom_command(OUTPUT "${PDL_OUTPUT}" "${PDL_STAGED}"
-        COMMAND "${MLIR_PDLL_EXE}" -x mlir "-I${PDL_SOURCE_DIR}"
+        COMMAND ${MLIR_PDLL_EXE} -x mlir "-I${PDL_SOURCE_DIR}"
                 "${PDL_SOURCE_DIR}/HipFusionPatterns.pdll" -o "${PDL_OUTPUT}"
         COMMAND "${CMAKE_COMMAND}" -E copy "${PDL_OUTPUT}" "${PDL_STAGED}"
-        DEPENDS ${PDL_SOURCES}
+        DEPENDS ${_pdll_depends}
         COMMENT "Compiling PDLL patterns -> HipFusionPatterns.pdl.mlir"
         VERBATIM)
     add_custom_target(HipPdllPatterns DEPENDS "${PDL_OUTPUT}" "${PDL_STAGED}")

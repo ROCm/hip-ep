@@ -29,21 +29,28 @@ endif()
 
 message(STATUS "Found Python: ${Python3_EXECUTABLE}")
 
-# Clang REQUIRED for bitcode generation.
-# When LLVM is built from source as a subproject the `clang` target exists but
-# its .exe is not present at configure time, so find_program cannot see it --
-# use the target directly (the bitcode custom commands below then gain a
-# build-time dependency on it). Fall back to find_program for the prebuilt /
-# installed-LLVM case.
-if(TARGET clang)
+# Clang is required for bitcode generation, but is deliberately not part of
+# the rocmlirTriton LLVM build (LLVM_ENABLE_PROJECTS=mlir;lld). Prefer the HIP
+# SDK compiler, matching rocmlirTriton's Windows host-toolchain split.
+set(HIPDNN_RUNTIME_CLANG "" CACHE FILEPATH
+    "Clang executable used to compile the embedded runtime bitcode")
+if(HIPDNN_RUNTIME_CLANG)
+    set(CLANG_EXECUTABLE "${HIPDNN_RUNTIME_CLANG}")
+elseif(TARGET clang)
     set(CLANG_EXECUTABLE clang)
     message(STATUS "Using in-tree clang target for bitcode generation")
 else()
-    find_program(CLANG_EXECUTABLE NAMES clang clang-cl
+    find_program(CLANG_EXECUTABLE NAMES clang clang.exe
         PATHS
+            ${THEROCK_DIST}/lib/llvm/bin
+            ${THEROCK_DIST}/bin
             ${LLVM_BINARY_DIR}/bin       # When LLVM built from source
             ${LLVM_TOOLS_BINARY_DIR}     # When LLVM installed via package
+        NO_DEFAULT_PATH
     )
+    if(NOT CLANG_EXECUTABLE)
+        find_program(CLANG_EXECUTABLE NAMES clang clang.exe)
+    endif()
 endif()
 
 if(NOT CLANG_EXECUTABLE)
@@ -56,10 +63,12 @@ if(NOT CLANG_EXECUTABLE)
         "  - MSVC and GCC cannot produce compatible LLVM bitcode\n"
         "\n"
         "To fix:\n"
-        "  - Install LLVM with Clang: https://releases.llvm.org/\n"
-        "  - Or build LLVM from source with -DLLVM_ENABLE_PROJECTS=clang\n"
+        "  - Set -DHIPDNN_RUNTIME_CLANG=<path-to-clang>\n"
+        "  - Or provide THEROCK_DIST containing the HIP SDK clang\n"
         "\n"
         "Searched in:\n"
+        "  - ${THEROCK_DIST}/lib/llvm/bin\n"
+        "  - ${THEROCK_DIST}/bin\n"
         "  - ${LLVM_BINARY_DIR}/bin\n"
         "  - ${LLVM_TOOLS_BINARY_DIR}\n"
         "  - System PATH\n")
@@ -77,6 +86,7 @@ else()
         PATHS
             ${LLVM_BINARY_DIR}/bin
             ${LLVM_TOOLS_BINARY_DIR}
+        NO_DEFAULT_PATH
     )
 endif()
 
