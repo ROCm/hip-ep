@@ -109,6 +109,18 @@ target_link_libraries(HipsrSchemePass
   util
 )
 
+# Copy Scheme scripts to build tree for testing
+configure_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/print-pass.scm
+  ${CMAKE_BINARY_DIR}/lib/scheme/print-pass.scm
+  COPYONLY
+)
+configure_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/scheme-mlir-bridge.scm
+  ${CMAKE_BINARY_DIR}/lib/scheme/scheme-mlir-bridge.scm
+  COPYONLY
+)
+
 # Install Scheme scripts to <prefix>/lib/scheme/
 install(FILES
   ${CMAKE_CURRENT_SOURCE_DIR}/print-pass.scm
