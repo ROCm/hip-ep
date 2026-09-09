@@ -280,8 +280,7 @@ int wrap_swish(RuntimeState *state, void *input, void *output,
                     (long long)num_elements, hipdnn_ep_datatype_name(data_type),
                     (long long)data_type, alpha);
 
-  int result =
-      hip_swish(stream, input, output, num_elements, hip_dtype, alpha);
+  int result = hip_swish(stream, input, output, num_elements, hip_dtype, alpha);
   if (result != 0) {
     fprintf(stderr, "[REAL] wrap_swish: kernel launch failed (%d)\n", result);
     return -1;

@@ -276,10 +276,9 @@ struct SwishOpLowering : public ConvertOpToLLVMPattern<SwishOp> {
     Value numElements = createI64Const(1);
     MemRefDescriptor outputDesc(adaptor.getOutput());
     for (auto dimIdx : llvm::seq<int64_t>(outputType.getRank())) {
-      Value dimSize =
-          outputType.isDynamicDim(dimIdx)
-              ? outputDesc.size(rewriter, loc, dimIdx)
-              : createI64Const(outputType.getDimSize(dimIdx));
+      Value dimSize = outputType.isDynamicDim(dimIdx)
+                          ? outputDesc.size(rewriter, loc, dimIdx)
+                          : createI64Const(outputType.getDimSize(dimIdx));
       numElements = LLVM::MulOp::create(rewriter, loc, numElements, dimSize);
     }
 
@@ -415,9 +414,9 @@ struct MiopenSoftmaxOpLowering
 
 void populateActivationLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns) {
-  patterns
-      .add<SoftplusOpLowering, GeluOpLowering, LeakyReluOpLowering,
-           SwishOpLowering, SiluOpLowering, MiopenSoftmaxOpLowering>(converter);
+  patterns.add<SoftplusOpLowering, GeluOpLowering, LeakyReluOpLowering,
+               SwishOpLowering, SiluOpLowering, MiopenSoftmaxOpLowering>(
+      converter);
 }
 
 } // namespace hip

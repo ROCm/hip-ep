@@ -65,8 +65,9 @@ getExplicitTransposePerm(mlir::Operation *transposeOp) {
       auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(elem);
       if (!intAttr)
         return std::nullopt;
-      // getValue(), not getSInt(): an ArrayAttr written as `perm = [0, 1, 3, 2]`
-      // holds signless i64 elements, and getSInt() asserts on a signless type.
+      // getValue(), not getSInt(): an ArrayAttr written as `perm = [0, 1, 3,
+      // 2]` holds signless i64 elements, and getSInt() asserts on a signless
+      // type.
       perm.push_back(intAttr.getValue().getSExtValue());
     }
     return perm;

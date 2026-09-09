@@ -24,9 +24,7 @@ CHUNK_OPT_HEADS = 16
 CHUNK_OPT_GATE_CH = 32
 
 
-def _make_unary_model(
-    op_type: str, dtype, shape: list[int], opset: int = 17, **attrs
-):
+def _make_unary_model(op_type: str, dtype, shape: list[int], opset: int = 17, **attrs):
     """Build a single-input unary ONNX model."""
     tp = np_to_onnx_type(dtype)
     X = helper.make_tensor_value_info("X", tp, shape)

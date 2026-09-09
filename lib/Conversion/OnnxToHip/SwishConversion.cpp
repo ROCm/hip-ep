@@ -57,11 +57,10 @@ struct SwishToHip : public mlir::RewritePattern {
       alpha = attr.getValueAsDouble();
 
     mlir::Location loc = op->getLoc();
-    mlir::Value init =
-        createEmptyTensor(rewriter, loc, resultType, input);
-    auto swish = mlir::hip::SwishOp::create(
-        rewriter, loc, resultType, *ctxOrFailure, input, init,
-        rewriter.getF64FloatAttr(alpha));
+    mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+    auto swish = mlir::hip::SwishOp::create(rewriter, loc, resultType,
+                                            *ctxOrFailure, input, init,
+                                            rewriter.getF64FloatAttr(alpha));
     rewriter.replaceOp(op, swish->getResult(0));
     return mlir::success();
   }
