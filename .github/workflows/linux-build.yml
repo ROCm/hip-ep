@@ -26,7 +26,7 @@ env:
   # invalidates the llvm-install cache, so keep LLVM_PATCHSET in step with the
   # patch content.
   LLVM_TAG: 62b7cf9623fc310525f39ed69aaecc318a909731
-  LLVM_PATCHSET: rocmlirTriton-28a5a7a40cfd6aceab0047c7fc92cb5cf90b6540-src1
+  LLVM_PATCHSET: rocmlirTriton-28a5a7a40cfd6aceab0047c7fc92cb5cf90b6540-src2
   ONNXRUNTIME_VERSION: "1.27.0"
   # Space-separated microsoft/onnxruntime PR numbers `git apply`-ed on top of
   # the pinned tag during the from-source build (an empty list applies nothing;

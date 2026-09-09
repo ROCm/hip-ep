@@ -24,7 +24,8 @@ Regenerate after a rocmlirTriton bump:
   #      git -C <rocmlirTriton> archive HEAD -- \
   #          $(sed -n 's|^--- a/|external/llvm-project/|p' <this file>) \
   #        | tar -x -C <llvm-project> --strip-components=2
-  # 3. git -C <llvm-project> diff > <this file>, then restore this header.
+  # 3. Run `git add -N .` so newly added files are included, then write
+  #    `git diff` to this file and restore this header.
 diff --git a/llvm/include/llvm/CodeGen/LiveInterval.h b/llvm/include/llvm/CodeGen/LiveInterval.h
 index 114978996..34f318a9d 100644
 --- a/llvm/include/llvm/CodeGen/LiveInterval.h
@@ -484,6 +485,44 @@ index d9b018e3c..ea4633936 100644
  
    IRBuilder<> B(&I);
  
+diff --git a/llvm/lib/Target/AMDGPU/AMDGPURewriteAGPRCopyMFMA.h b/llvm/lib/Target/AMDGPU/AMDGPURewriteAGPRCopyMFMA.h
+new file mode 100644
+index 000000000..624860f8c
+--- /dev/null
++++ b/llvm/lib/Target/AMDGPU/AMDGPURewriteAGPRCopyMFMA.h
+@@ -0,0 +1,32 @@
++//===- AMDGPURewriteAGPRCopyMFMA.h ------------------------------*- C++ -*-===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++
++#ifndef LLVM_LIB_TARGET_AMDGPU_AMDGPUREWRITEAGPRCOPYMFMA_H
++#define LLVM_LIB_TARGET_AMDGPU_AMDGPUREWRITEAGPRCOPYMFMA_H
++
++#include "llvm/ADT/SmallVector.h"
++
++namespace llvm {
++
++class MachineFunction;
++class MachineDominatorTree;
++class MachineInstr;
++
++namespace AMDGPU {
++
++/// Returns true if every reload in \p Loads is jointly dominated by at least
++/// one store in \p Stores to the same stack slot \p Slot.
++bool checkAGPRCopyMFMAJointDominance(
++    const MachineFunction &MF, const MachineDominatorTree &MDT,
++    const SmallVectorImpl<MachineInstr *> &Stores,
++    const SmallVectorImpl<MachineInstr *> &Loads, int Slot);
++
++} // end namespace AMDGPU
++} // end namespace llvm
++
++#endif // LLVM_LIB_TARGET_AMDGPU_AMDGPUREWRITEAGPRCOPYMFMA_H
 diff --git a/llvm/lib/Target/AMDGPU/AMDGPURewriteAGPRCopyMFMA.cpp b/llvm/lib/Target/AMDGPU/AMDGPURewriteAGPRCopyMFMA.cpp
 index 1d39b4f1b..2c255f861 100644
 --- a/llvm/lib/Target/AMDGPU/AMDGPURewriteAGPRCopyMFMA.cpp

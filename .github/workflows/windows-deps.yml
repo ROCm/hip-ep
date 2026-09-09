@@ -30,7 +30,7 @@ env:
   # Upstream SHA plus cmake/patches/rocmlir-llvm-source.patch. LLVM_PATCHSET
   # keys the llvm-install cache, so keep it in step with the patch content.
   LLVM_TAG: 62b7cf9623fc310525f39ed69aaecc318a909731
-  LLVM_PATCHSET: rocmlirTriton-28a5a7a40cfd6aceab0047c7fc92cb5cf90b6540-src1
+  LLVM_PATCHSET: rocmlirTriton-28a5a7a40cfd6aceab0047c7fc92cb5cf90b6540-src2
   ONNXRUNTIME_VERSION: "1.27.0"
   ONNXRUNTIME_PR_PATCHES: ""
   OGA_VERSION: "0.14.0"

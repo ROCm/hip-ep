@@ -27,15 +27,15 @@ endif()
 get_filename_component(_git_root "${_git_root}" REALPATH)
 get_filename_component(_llvm_source_real "${LLVM_SOURCE_DIR}" REALPATH)
 file(RELATIVE_PATH _llvm_source_relative "${_git_root}" "${_llvm_source_real}")
-set(_git_apply_directory_arg)
-if(NOT _llvm_source_relative STREQUAL ".")
+set(_git_apply_command git apply)
+if(_llvm_source_relative AND NOT _llvm_source_relative STREQUAL ".")
   # A local rocmlirTriton checkout is one Git repository with LLVM under
   # external/llvm-project. git apply anchors paths at the repository root.
-  set(_git_apply_directory_arg "--directory=${_llvm_source_relative}")
+  list(APPEND _git_apply_command "--directory=${_llvm_source_relative}")
 endif()
 
 execute_process(
-  COMMAND git apply ${_git_apply_directory_arg}
+  COMMAND ${_git_apply_command}
           --check --whitespace=nowarn "${_rocmlir_patch}"
   WORKING_DIRECTORY "${_git_root}"
   RESULT_VARIABLE _check_result
@@ -43,7 +43,7 @@ execute_process(
 
 if(_check_result EQUAL 0)
   execute_process(
-    COMMAND git apply ${_git_apply_directory_arg}
+    COMMAND ${_git_apply_command}
             --whitespace=nowarn "${_rocmlir_patch}"
     WORKING_DIRECTORY "${_git_root}"
     RESULT_VARIABLE _apply_result)
@@ -53,7 +53,7 @@ if(_check_result EQUAL 0)
   message(STATUS "Applied the rocmlirTriton LLVM patch")
 else()
   execute_process(
-    COMMAND git apply ${_git_apply_directory_arg}
+    COMMAND ${_git_apply_command}
             --reverse --check --whitespace=nowarn "${_rocmlir_patch}"
     WORKING_DIRECTORY "${_git_root}"
     RESULT_VARIABLE _reverse_result
