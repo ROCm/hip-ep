@@ -9,6 +9,7 @@ add_library(HipToLLVM STATIC
   ConvLowering.cpp
   ConvTransposeLowering.cpp
   MatmulLowering.cpp
+  RocMlirLowering.cpp
   ElementwiseLowering.cpp
   PowerLowering.cpp
   ActivationLowering.cpp
