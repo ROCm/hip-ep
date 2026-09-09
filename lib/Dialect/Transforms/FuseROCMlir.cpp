@@ -121,7 +121,9 @@ public:
                            LeakyReluOp, ReciprocalOp, SqrtOp, DivOp, EqualOp,
                            AndOp, OrOp, NotOp, CosOp, ErfOp, SinOp, CeilOp,
                            RoundOp, AtanOp, FloorOp, ExpOp, LogOp, AbsOp, NegOp,
-                           SubOp, CastOp, LessOp, SignOp, ModOp>(op);
+                           SubOp, CastOp, LessOp, SignOp, ModOp, WhereOp,
+                           MiopenSoftmaxOp, QuantizeLinearOp,
+                           DequantizeLinearOp>(op);
   }
 
 private:
