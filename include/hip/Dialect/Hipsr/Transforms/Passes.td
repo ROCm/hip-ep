@@ -280,6 +280,10 @@ def SchemeScriptPass : Pass<"scheme-script", "mlir::ModuleOp"> {
     the module operation and can query/transform IR using the Scheme FFI.
     This allows writing complete MLIR passes in pure Scheme without C++ code.
   }];
+  let options = [
+    Option<"verbose", "verbose", "bool", /*default=*/"false",
+           "Enable verbose Scheme runtime logging">
+  ];
 }
 
 #endif // HIPSR_TRANSFORMS_PASSES

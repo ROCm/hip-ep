@@ -40,14 +40,18 @@ static bool scheme_initialized = false;
 namespace mlir {
 namespace hipsr {
 
-bool initializeSchemeRuntime() {
+bool initializeSchemeRuntime(bool verbose) {
   if (scheme_initialized)
     return true;
 
+  if (verbose) {
+    llvm::errs() << "Initializing Chez Scheme runtime "
+                 << Skernel_version() << "\n";
+    llvm::errs() << "  Petite boot: " << petite_boot_size << " bytes\n";
+    llvm::errs() << "  Scheme boot: " << scheme_boot_size << " bytes\n";
+  }
   LLVM_DEBUG(llvm::dbgs() << "Initializing Chez Scheme runtime "
                           << Skernel_version() << "\n");
-  LLVM_DEBUG(llvm::dbgs() << "  Petite boot: " << petite_boot_size << " bytes\n");
-  LLVM_DEBUG(llvm::dbgs() << "  Scheme boot: " << scheme_boot_size << " bytes\n");
 
   Sscheme_init(nullptr);
   Sregister_boot_file_bytes("petite.boot", const_cast<void*>(static_cast<const void*>(petite_boot_data)), petite_boot_size);
@@ -75,6 +79,8 @@ bool initializeSchemeRuntime() {
     Scall1(eval_sym, expr);
   }
 
+  if (verbose)
+    llvm::errs() << "Scheme runtime initialized\n";
   LLVM_DEBUG(llvm::dbgs() << "Scheme runtime initialized\n");
 
   scheme_initialized = true;
