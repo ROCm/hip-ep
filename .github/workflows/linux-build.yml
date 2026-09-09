@@ -102,7 +102,15 @@ jobs:
       - name: Install build toolchain
         run: |
           set -euo pipefail
-          sudo apt-get update
+          # The runner image preconfigures Google's Chrome repository, which
+          # nothing here installs from. apt-get update exits non-zero when any
+          # configured index fails, so a bad Chrome index (it has served a
+          # stale Packages.gz, giving "Hash Sum mismatch") fails this step and
+          # the whole build. Drop the repository rather than tolerate a
+          # partially updated index.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/google-chrome.sources
+          sudo apt-get update -o Acquire::Retries=3
           sudo apt-get install -y --no-install-recommends \
             build-essential ninja-build git ca-certificates curl
           # backend-mlir-compiler needs cmake >= 3.29; pip cmake wins over apt's.
