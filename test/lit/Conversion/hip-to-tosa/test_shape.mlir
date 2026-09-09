@@ -30,6 +30,8 @@
 // - extract_slice maps to tosa.slice, with start and size as tosa.const_shape
 // - Strided, rank-reducing and dynamically shaped tensor ops are left in place
 //   for rocMLIR to consume directly, rather than failing the pass
+// - A real outlined kernel converts: its ub.poison context, tensor.empty outs
+//   buffers and fusion anchor all survive alongside the converted ops
 // - The pass is a no-op on functions without rock.kernel
 // - A dynamically shaped hip.transpose is rejected rather than lowered to
 //   invalid TOSA
@@ -169,6 +171,41 @@ func.func @not_a_kernel(%x: tensor<4x6xf32>) -> tensor<2x6xf32> {
   %s = tensor.extract_slice %x[1, 0] [2, 6] [1, 1]
       : tensor<4x6xf32> to tensor<2x6xf32>
   return %s : tensor<2x6xf32>
+}
+
+//===----------------------------------------------------------------------===//
+// The shape hip-fuse-rocmlir actually produces. Unit tests that hand-write a
+// kernel taking its DPS buffers as block arguments miss what an outlined
+// kernel really holds: a ub.poison standing in for the !hip.context, a
+// tensor.empty per outs buffer, and the fusion anchor the kernel was built
+// around. Those all have to survive, or the pass fails on IR it never meant to
+// convert.
+//===----------------------------------------------------------------------===//
+
+// CHECK-LABEL: func.func @rocMlir0
+// CHECK: ub.poison : !hip.context
+// CHECK: tensor.empty() : tensor<1x4x6x6xf32>
+// CHECK: hip.conv
+// CHECK: tosa.transpose %{{.*}} {perms = array<i32: 0, 2, 3, 1>} : (tensor<1x4x6x6xf32>) -> tensor<1x6x6x4xf32>
+// CHECK: tosa.reshape
+func.func @rocMlir0(%in: tensor<1x3x8x8xf32>, %w: tensor<4x3x3x3xf32>,
+                    %b: tensor<4xf32>) -> tensor<1x144xf32>
+    attributes {rock.arch = "gfx1151", rock.kernel} {
+  %ctx = ub.poison : !hip.context
+  %ci = tensor.empty() : tensor<1x4x6x6xf32>
+  %conv = hip.conv(%ctx) ins(%in, %w, %b : tensor<1x3x8x8xf32>,
+                                           tensor<4x3x3x3xf32>, tensor<4xf32>)
+                         outs(%ci : tensor<1x4x6x6xf32>)
+                         {dilations = [1, 1], group = 1 : i64,
+                          kernel_shape = [3, 3], pads = [0, 0, 0, 0],
+                          strides = [1, 1]} : tensor<1x4x6x6xf32>
+  %ti = tensor.empty() : tensor<1x6x6x4xf32>
+  %tr = hip.transpose(%ctx) ins(%conv : tensor<1x4x6x6xf32>)
+                            outs(%ti : tensor<1x6x6x4xf32>)
+                            {perm = [0, 2, 3, 1]} : tensor<1x6x6x4xf32>
+  %flat = tensor.collapse_shape %tr [[0], [1, 2, 3]]
+      : tensor<1x6x6x4xf32> into tensor<1x144xf32>
+  return %flat : tensor<1x144xf32>
 }
 
 // -----
