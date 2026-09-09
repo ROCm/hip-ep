@@ -6,6 +6,8 @@
 #include "SchemeBindings.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Value.h"
 #include "mlir/IR/Attributes.h"
@@ -79,6 +81,12 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
   Sregister_boot_file_bytes("scheme.boot", const_cast<void*>(static_cast<const void*>(scheme_boot_data)), scheme_boot_size);
   Sbuild_heap("hip-mlir-opt", nullptr);
 
+  // Get Scheme symbols we'll use
+  ptr eval_sym = Stop_level_value(Sstring_to_symbol("eval"));
+  ptr read_sym = Stop_level_value(Sstring_to_symbol("read"));
+  ptr open_string_input_port_sym = Stop_level_value(Sstring_to_symbol("open-string-input-port"));
+  ptr eof_object_p = Stop_level_value(Sstring_to_symbol("eof-object?"));
+
   // Set up library path to find rime libraries
   // Find rime relative to the library module path (same as PrintPass.scm)
   std::string modulePath = llvm::sys::fs::getMainExecutable(nullptr, (void*)&initializeSchemeRuntime);
@@ -90,10 +98,6 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
 
   // Add rime to library-directories using Scheme code
   std::string setup_code = "(library-directories (cons \"" + std::string(rimePath.c_str()) + "\" (library-directories)))";
-  ptr eval_sym = Stop_level_value(Sstring_to_symbol("eval"));
-  ptr read_sym = Stop_level_value(Sstring_to_symbol("read"));
-  ptr open_string_input_port_sym = Stop_level_value(Sstring_to_symbol("open-string-input-port"));
-
   ptr setup_port = Scall1(open_string_input_port_sym, Sstring(setup_code.c_str()));
   ptr setup_expr = Scall1(read_sym, setup_port);
   Scall1(eval_sym, setup_expr);
@@ -109,10 +113,6 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
   // Load the Scheme bindings library
   std::string scm_code(reinterpret_cast<const char*>(scheme_bindings_scm_data),
                        scheme_bindings_scm_size);
-  ptr eval_sym = Stop_level_value(Sstring_to_symbol("eval"));
-  ptr read_sym = Stop_level_value(Sstring_to_symbol("read"));
-  ptr open_string_input_port_sym = Stop_level_value(Sstring_to_symbol("open-string-input-port"));
-  ptr eof_object_p = Stop_level_value(Sstring_to_symbol("eof-object?"));
 
   ptr port = Scall1(open_string_input_port_sym, Sstring(scm_code.c_str()));
 
