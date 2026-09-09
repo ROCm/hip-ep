@@ -88,22 +88,23 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
   ptr eof_object_p = Stop_level_value(Sstring_to_symbol("eof-object?"));
 
   // Set up library path to find rime libraries
-  // Find rime relative to the library module path (same as PrintPass.scm)
+  // Find lib/scheme directory relative to the library module path
+  // Chez Scheme needs the parent directory of rime/ to resolve (rime) libraries
   std::string modulePath = llvm::sys::fs::getMainExecutable(nullptr, (void*)&initializeSchemeRuntime);
-  llvm::SmallString<256> rimePath(modulePath);
-  llvm::sys::path::remove_filename(rimePath);  // Remove binary name
-  if (llvm::sys::path::filename(rimePath) == "bin")
-    llvm::sys::path::remove_filename(rimePath);  // Remove bin/
-  llvm::sys::path::append(rimePath, "lib", "scheme", "rime");
+  llvm::SmallString<256> schemePath(modulePath);
+  llvm::sys::path::remove_filename(schemePath);  // Remove binary name
+  if (llvm::sys::path::filename(schemePath) == "bin")
+    llvm::sys::path::remove_filename(schemePath);  // Remove bin/
+  llvm::sys::path::append(schemePath, "lib", "scheme");
 
-  // Add rime to library-directories using Scheme code
-  std::string setup_code = "(library-directories (cons \"" + std::string(rimePath.c_str()) + "\" (library-directories)))";
+  // Add lib/scheme to library-directories so Chez can find (rime) as rime/*.sls
+  std::string setup_code = "(library-directories (cons \"" + std::string(schemePath.c_str()) + "\" (library-directories)))";
   ptr setup_port = Scall1(open_string_input_port_sym, Sstring(setup_code.c_str()));
   ptr setup_expr = Scall1(read_sym, setup_port);
   Scall1(eval_sym, setup_expr);
 
   if (logLevel <= SchemeLogLevel::Debug) {
-    llvm::errs() << "[debug] Added rime library path: " << rimePath.c_str() << "\n";
+    llvm::errs() << "[debug] Added Scheme library path: " << schemePath.c_str() << "\n";
   }
 
   // Register MLIR foreign functions AFTER Scheme is initialized
