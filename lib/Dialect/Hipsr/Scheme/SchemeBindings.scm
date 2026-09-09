@@ -23,6 +23,9 @@
   (foreign-procedure "mlir_operation_walk" (unsigned-64 scheme-object) void))
 
 ;; Logging functions
+(define mlir-log-trace
+  (foreign-procedure "mlir_log_trace" (string) void))
+
 (define mlir-log-debug
   (foreign-procedure "mlir_log_debug" (string) void))
 

@@ -282,7 +282,7 @@ def SchemeScriptPass : Pass<"scheme-script", "mlir::ModuleOp"> {
   }];
   let options = [
     Option<"logLevel", "log-level", "std::string", /*default=*/"\"warning\"",
-           "Logging level: debug, info, warning, error, fatal">
+           "Logging level: trace, debug, info, warning, error, fatal">
   ];
 }
 
