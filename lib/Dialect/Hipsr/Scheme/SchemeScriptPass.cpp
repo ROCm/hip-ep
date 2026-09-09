@@ -7,6 +7,8 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 #include "SchemeRuntime.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
 
 namespace mlir {
 namespace hipsr {
@@ -25,10 +27,24 @@ struct SchemeScriptPass : public impl::SchemeScriptPassBase<SchemeScriptPass> {
       return;
     }
 
-    // Load the pure Scheme pass implementation
-    // TODO: Make script path configurable via pass option
-    const char* scriptPath = SOURCE_DIR "/lib/Dialect/Hipsr/Scheme/print-pass.scm";
-    if (!loadSchemeScript(scriptPath)) {
+    // Find script relative to this library's location
+    // Pass address of a function in this compilation unit so getMainExecutable
+    // uses dladdr() (Unix) or GetModuleFileName() (Windows) to find the
+    // module (DLL/SO) containing this code, not just the main executable.
+    // This works whether we're statically linked or a dynamic plugin.
+    // Expected layout: <install>/bin/hip-mlir-opt (or <install>/lib/libHipsrSchemePass.so)
+    //                  <install>/lib/scheme/print-pass.scm
+    std::string modulePath = llvm::sys::fs::getMainExecutable(nullptr, (void*)&initializeSchemeRuntime);
+    llvm::SmallString<256> scriptPath(modulePath);
+    llvm::sys::path::remove_filename(scriptPath);  // Remove binary name
+
+    // If we're in bin/, go up one level; if already in lib/, stay
+    if (llvm::sys::path::filename(scriptPath) == "bin")
+      llvm::sys::path::remove_filename(scriptPath);  // Remove bin/
+
+    llvm::sys::path::append(scriptPath, "lib", "scheme", "print-pass.scm");
+
+    if (!loadSchemeScript(scriptPath.c_str())) {
       signalPassFailure();
       return;
     }

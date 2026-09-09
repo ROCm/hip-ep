@@ -92,10 +92,6 @@ target_include_directories(HipsrSchemePass PRIVATE
   ${ChezScheme_SOURCE_DIR}/boot/pb
 )
 
-target_compile_definitions(HipsrSchemePass PRIVATE
-  SOURCE_DIR="${CMAKE_SOURCE_DIR}"
-)
-
 add_dependencies(HipsrSchemePass ChezScheme ChezBootHeaders)
 
 target_link_libraries(HipsrSchemePass
@@ -111,4 +107,11 @@ target_link_libraries(HipsrSchemePass
   pthread
   ncurses
   util
+)
+
+# Install Scheme scripts to <prefix>/lib/scheme/
+install(FILES
+  ${CMAKE_CURRENT_SOURCE_DIR}/print-pass.scm
+  ${CMAKE_CURRENT_SOURCE_DIR}/scheme-mlir-bridge.scm
+  DESTINATION lib/scheme
 )
