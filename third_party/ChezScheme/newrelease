@@ -1,0 +1,105 @@
+#! /bin/csh -f
+
+# newrelease
+# Copyright 1984-2017 Cisco Systems, Inc.
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+# 
+# http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+if ($#argv != 1) then
+    echo "Usage: newrelease <release-number>"
+    exit 1
+endif
+
+# set R to release number
+set R = $1
+
+if ({(echo -n "$1" | grep '^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$' >& /dev/null)}) then
+  # set MR to major release number
+  set tmp = $R:r
+  set MR = $tmp:r
+
+  # set mR to minor release number
+  set mR = $tmp:e
+
+  # set bR to patch number
+  set bR = $R:e
+
+  # set ZR to release number w/o "."
+  set ZR = $MR$mR$bR
+else
+  echo "invalid release number $R"
+  exit 1
+endif
+
+sed -e "s/Chez Scheme Version [^ ]*/Chez Scheme Version $R/" \
+    -e "s/Copyright 1984-.... /Copyright 1984-`date +%Y` /" \
+    -I "" BUILDING
+
+sed -e "s/Chez Scheme Version [^ ]*/Chez Scheme Version $R/" \
+    -e "s/Copyright 1984-.... /Copyright 1984-`date +%Y` /" \
+    -I "" NOTICE
+
+sed -e "s/csug[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*/csug$R/g" \
+    -e "s/csv[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*/csv$R/g" \
+    -I "" configure
+
+sed -e "s/csv[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*/csv$R/g" \
+    -I "" maketarball
+
+sed -e "s/Chez Scheme Version [0-9][0-9]*\.[0-9][0-9]*\(\.[0-9][0-9]*\)* .* [0-9][0-9]*/Chez Scheme Version $R `date +'%B %Y'`/" \
+    -e "s/Copyright .* Cisco Systems, Inc./Copyright `date +%Y` Cisco Systems, Inc./" \
+    -I "" scheme.1.in
+
+set RCVERSION = "$MR,$mR,$bR,0"
+sed -e "s/FILEVERSION .*/FILEVERSION $RCVERSION/" \
+    -e "s/PRODUCTVERSION .*/PRODUCTVERSION $RCVERSION/" \
+    -e 's/"FileDescription", .*/"FileDescription", "Chez Scheme Version '$R'"/' \
+    -e 's/"FileVersion", .*/"FileVersion", "'$R'"/' \
+    -e 's/"ProductVersion", .*/"ProductVersion", "'$R'"/' \
+    -e "s/Copyright 1984-..../Copyright 1984-`date +%Y`/g" \
+    -I "" c/scheme.rc
+
+sed -e "s/nCopyright 1984-..../nCopyright 1984-`date +%Y`/g" \
+    -I "" s/7.ss
+
+set VNUM = `printf "%02x%02x%02x00" $MR $mR $bR`
+sed -e "s/scheme-version #x......../scheme-version #x$VNUM/" \
+    -I "" s/cmacros.ss
+
+sed -e "s/thisversion{Version [^ ]*}/thisversion{Version $R}/" \
+    -e "s/pubmonth{.*}/pubmonth{`date +%B`}/" \
+    -e "s/pubyear{.*}/pubyear{`date +%Y`}/" \
+    -I "" release_notes/release_notes.stex
+
+sed -e "s/Revised\(.*\)for Chez Scheme Version [^ ]*\./Revised\1for Chez Scheme Version $R./" \
+    -e "s/\\copyright~.* Cisco Systems, Inc./\\copyright~`date +%Y` Cisco Systems, Inc./" \
+    -I "" csug/copyright.stex
+sed -e "s/Copyright &copy; .* Cisco Systems, Inc./Copyright \&copy; `date +%Y` Cisco Systems, Inc./" \
+    -e "s/(define latest-release-date "'"'".*"'"'")/(define latest-release-date "'"'"`date +'%B %Y'`"'"'")/" \
+    -I "" csug/csug.stex
+
+sed -e "s/^version = .*/version = $R/" \
+    -I "" rpm/Makefile
+
+sed -e "s/^version = .*/version = $R/" \
+    -e "s/&copy; .* Cisco Systems/\&copy; `date +%Y` Cisco Systems/" \
+     -I "" pkg/Makefile
+
+sed -e "s/VERSION := .*/VERSION := $R/" \
+    -I "" wininstall/Makefile
+foreach fn (wininstall/{,t}{a6,i3}nt.wxs)
+  sed -e "s/csv[0-9][0-9][0-9]*/csv$ZR/" \
+      -I "" $fn
+end
+
+exit 0
