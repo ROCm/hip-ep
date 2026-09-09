@@ -26,6 +26,9 @@
 // (JIT dlopen, or native import). Pre-dual-format the kernels were linked into
 // model.dll, so no export was needed -- hence this is new. EXPORTS is defined
 // only when building that library (hip_utils.cmake); consumers leave it empty.
+// Guarded so this coexists with gqa_autotune.h, which defines the same macro
+// (identically) to stay independent of this header in the mock build.
+#ifndef HIP_KERNEL_API
 #if defined(_WIN32)
   #if defined(HIP_CUSTOM_KERNELS_EXPORTS)
     #define HIP_KERNEL_API __declspec(dllexport)
@@ -37,6 +40,7 @@
 #else
   #define HIP_KERNEL_API
 #endif
+#endif // HIP_KERNEL_API
 
 #ifdef __cplusplus
 extern "C" {
