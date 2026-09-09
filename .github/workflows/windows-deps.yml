@@ -921,6 +921,10 @@ jobs:
       # git only carries pointer files such as wkmi.lib.dvc, and hipamd links
       # against the real wkmi.lib. The remote allows anonymous access, so no
       # credentials are needed.
+      #
+      # The pull takes no target: every library is its own .dvc pointer, so a
+      # directory argument is resolved as a dvc.yaml stage name and this repo
+      # has no dvc.yaml.
       - name: Fetch DVC-tracked Windows interop libraries
         if: steps.cache-hip.outputs.cache-hit != 'true'
         shell: bash
@@ -928,8 +932,11 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install -q "dvc[s3]"
-          dvc pull shared/amdgpu-windows-interop
-          find shared/amdgpu-windows-interop -name '*.lib' -o -name '*.dll' | head -20
+          dvc pull
+          if [ ! -f shared/amdgpu-windows-interop/wkmi/win/lib/wkmi.lib ]; then
+            echo "ERROR: wkmi.lib still a DVC pointer after the pull"
+            exit 1
+          fi
 
       # shared/kpack does find_package(msgpack-cxx REQUIRED) and
       # find_package(zstd REQUIRED). Flags copied from AMD's build -- the
