@@ -6,7 +6,6 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
-#include <mlir/Dialect/Arith/IR/Arith.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/Tensor/IR/Tensor.h>
 #include <mlir/Dialect/Tosa/IR/TosaOps.h>
@@ -876,7 +875,7 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     // requires every remaining op to be legal -- the framework does not DCE
     // this pre-existing op on its own. Mark it legal so conversion succeeds;
     // the canonicalizer that follows this pass removes the dead empty.
-    conversion.addLegalOp<ub::PoisonOp, tensor::EmptyOp, arith::ConstantOp>();
+    conversion.addLegalOp<ub::PoisonOp, tensor::EmptyOp>();
 
     RewritePatternSet patterns(ctx);
     patterns.add<MatMulConverter, BinaryConverter<AddOp, tosa::AddOp>,
