@@ -157,8 +157,10 @@ LogicalResult verifyMaterializable(ArrayRef<PlaceholderOp> placeholders) {
           "shape region must be populated by -hipsr-populate-shape-region");
     }
     if (placeholder.getPlaceholderType() == PlaceholderType::Barrier &&
-        llvm::any_of(placeholder.getInputs(), [](Value input) {
-          return isa_and_nonnull<PlaceholderOp>(input.getDefiningOp());
+        llvm::any_of(placeholder.getInputs(), [&](Value input) {
+          Operation *definingOp = input.getDefiningOp();
+          return definingOp &&
+                 definingOp->getBlock() == placeholder->getBlock();
         })) {
       return placeholder.emitOpError(
           "barrier input must be allocated outside this pool domain");

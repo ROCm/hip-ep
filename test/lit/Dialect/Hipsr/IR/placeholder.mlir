@@ -256,3 +256,19 @@ func.func @input_missing_from_consumer(
       outs(%result_init : tensor<4x8xf32, #hipsr.mem<device>>) : tensor<4x8xf32, #hipsr.mem<device>>
   return %result : tensor<4x8xf32, #hipsr.mem<device>>
 }
+
+// -----
+// A barrier region reads its inputs by position, so the two lists must agree on
+// order as well as content.
+func.func @barrier_inputs_out_of_order(
+    %ctx: !hipsr.context, %lhs: tensor<4x8xf32, #hipsr.mem<device>>,
+    %rhs: tensor<4x8xf32, #hipsr.mem<device>>) -> tensor<4x8xf32, #hipsr.mem<device>> {
+  // expected-error @+1 {{inputs must match the operands of its consumer 'hipsr.add'}}
+  %sum_init = hipsr.placeholder(%ctx)
+      ins(%rhs, %lhs : tensor<4x8xf32, #hipsr.mem<device>>, tensor<4x8xf32, #hipsr.mem<device>>)
+      {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4x8xf32, #hipsr.mem<device>>
+  %sum = hipsr.add(%ctx)
+      ins(%lhs, %rhs : tensor<4x8xf32, #hipsr.mem<device>>, tensor<4x8xf32, #hipsr.mem<device>>)
+      outs(%sum_init : tensor<4x8xf32, #hipsr.mem<device>>) : tensor<4x8xf32, #hipsr.mem<device>>
+  return %sum : tensor<4x8xf32, #hipsr.mem<device>>
+}

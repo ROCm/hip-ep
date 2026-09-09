@@ -49,10 +49,11 @@ func.func @slice_constant_window(%ctx: !hipsr.context,
 // -----
 
 // A bound the graph computes, in the shape a shape computation leaves behind: a
-// hipsr.compute writes it into a host destination and the barrier holds that
-// destination. The region reads the bound off the operand the barrier hands
-// over and clamps it against the data's own size. The start is in an attribute,
-// so it needs no read, and folding drops the branch it cannot take.
+// hipsr.compute writes it into a host destination and the barrier names what
+// the compute wrote, because its region reads the bound rather than its shape.
+// The region reads that operand and clamps it against the data's own size. The
+// start is in an attribute, so it needs no read, and folding drops the branch
+// it cannot take.
 // CHECK-LABEL: func.func @slice_runtime_bound(
 // CHECK:      placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<?xf16, #hipsr.mem<device>> shape_region {
 // CHECK-NEXT: ^bb0(%{{.+}}: !hipsr.context, %[[DATA:.+]]: tensor<?xf16, #hipsr.mem<device>>, %[[ENDS:.+]]: tensor<1xi64, #hipsr.mem<host>>):
@@ -93,8 +94,8 @@ func.func @slice_runtime_bound(%ctx: !hipsr.context,
     hipsr.compute_yield %entries : tensor<1xi64, #hipsr.mem<host>>
   } : tensor<1xi64, #hipsr.mem<host>>
   %init = hipsr.placeholder(%ctx)
-      ins(%data, %ends_init : tensor<?xf16, #hipsr.mem<device>>,
-                              tensor<1xi64, #hipsr.mem<host>>)
+      ins(%data, %ends : tensor<?xf16, #hipsr.mem<device>>,
+                         tensor<1xi64, #hipsr.mem<host>>)
       {placeholder_type = #hipsr.placeholder_type<barrier>}
       : tensor<?xf16, #hipsr.mem<device>>
   %result = hipsr.slice(%ctx)
