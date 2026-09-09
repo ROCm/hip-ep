@@ -18,6 +18,10 @@
 (define mlir-operation-get-result
   (foreign-procedure "mlir_operation_get_result" (unsigned-64 iptr) unsigned-64))
 
+;; Walk operation tree - callback is (lambda (op) ...)
+(define mlir-operation-walk
+  (foreign-procedure "mlir_operation_walk" (unsigned-64 scheme-object) void))
+
 ;; High-level Scheme API
 
 ;; Process a single operation - gets called from C++ for each operation
