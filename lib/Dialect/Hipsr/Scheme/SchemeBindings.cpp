@@ -81,17 +81,11 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
   Sregister_boot_file_bytes("scheme.boot", const_cast<void*>(static_cast<const void*>(scheme_boot_data)), scheme_boot_size);
   Sbuild_heap("hip-mlir-opt", nullptr);
 
-  // Disable library compilation to avoid version compatibility issues
-  // Let Chez Scheme interpret libraries instead of compiling them
-  std::string disable_compile = "(compile-imported-libraries #f)";
+  // Get Scheme symbols we'll use
   ptr eval_sym = Stop_level_value(Sstring_to_symbol("eval"));
   ptr read_sym = Stop_level_value(Sstring_to_symbol("read"));
   ptr open_string_input_port_sym = Stop_level_value(Sstring_to_symbol("open-string-input-port"));
   ptr eof_object_p = Stop_level_value(Sstring_to_symbol("eof-object?"));
-
-  ptr disable_port = Scall1(open_string_input_port_sym, Sstring(disable_compile.c_str()));
-  ptr disable_expr = Scall1(read_sym, disable_port);
-  Scall1(eval_sym, disable_expr);
 
   // Set up library path to find rime libraries
   // Find lib/scheme directory relative to the library module path

@@ -3,27 +3,46 @@
 ;; Demonstrates the MLIR logging API with different verbosity levels
 ;; Extensively uses rime loop macro for functional iteration
 
-(import (chezscheme) (rime loop))
+(import (chezscheme))
+;; TODO: Re-enable rime loop when compatibility issues are resolved
+;; (import (rime loop))
 
-;; Helper: format operands list using rime loop
+;; Helper: build list 0..n-1
+(define (iota n)
+  (let loop ((i 0) (acc '()))
+    (if (>= i n)
+        (reverse acc)
+        (loop (+ i 1) (cons i acc)))))
+
+;; Helper: join strings
+(define (string-join strs sep)
+  (if (null? strs)
+      ""
+      (let loop ((rest (cdr strs)) (acc (car strs)))
+        (if (null? rest)
+            acc
+            (loop (cdr rest)
+                  (string-append acc sep (car rest)))))))
+
+;; Helper: format operands list
 (define (format-operands op num-operands)
   (if (zero? num-operands)
       ""
-      (format " | Operands[~a]: ~a"
-              num-operands
-              (loop :for i :from 0 :below num-operands
-                    :join-string (number->string (mlir-operation-get-operand op i))
-                    :seperator ", "))))
+      (let ((operands (map (lambda (i) (mlir-operation-get-operand op i))
+                           (iota num-operands))))
+        (format " | Operands[~a]: ~a"
+                num-operands
+                (string-join (map number->string operands) ", ")))))
 
-;; Helper: format results list using rime loop
+;; Helper: format results list
 (define (format-results op num-results)
   (if (zero? num-results)
       ""
-      (format " | Results[~a]: ~a"
-              num-results
-              (loop :for i :from 0 :below num-results
-                    :join-string (number->string (mlir-operation-get-result op i))
-                    :seperator ", "))))
+      (let ((results (map (lambda (i) (mlir-operation-get-result op i))
+                          (iota num-results))))
+        (format " | Results[~a]: ~a"
+                num-results
+                (string-join (map number->string results) ", ")))))
 
 ;; Helper: format operation details
 (define (format-operation op)
