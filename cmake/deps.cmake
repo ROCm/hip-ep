@@ -177,6 +177,13 @@ else()
   set(LLVM_ENABLE_RTTI ON CACHE BOOL "" FORCE)
   set(LLVM_ENABLE_ZLIB OFF CACHE BOOL "" FORCE)
   set(LLVM_ENABLE_ZSTD OFF CACHE BOOL "" FORCE)
+  # LLVM auto-enables DIA once it finds the DIA SDK, and DIASupport.h then pulls
+  # atlbase.h from the ATL headers. ATL reaches cl.exe differently per generator:
+  # MSBuild puts atlmfc/include on IncludePath itself, while Ninja takes it from
+  # INCLUDE in the invoking shell -- so the same machine builds from source under
+  # the Visual Studio generator and fails under Ninja. Nothing here reads PDBs,
+  # so drop the dependency rather than constrain how the build is launched.
+  set(LLVM_ENABLE_DIA_SDK OFF CACHE BOOL "" FORCE)
   set(LLVM_INCLUDE_TESTS OFF CACHE BOOL "" FORCE)
   set(LLVM_INCLUDE_EXAMPLES OFF CACHE BOOL "" FORCE)
   set(LLVM_INCLUDE_BENCHMARKS OFF CACHE BOOL "" FORCE)
