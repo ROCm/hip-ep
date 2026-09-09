@@ -28,6 +28,7 @@
 #include "hip/Dialect/Transforms/Pipelines.h"
 #include "hip/InitAllPasses.h"
 #include "hip/Support/DiskFileSystem.h"
+#include "hip/Target/LLVM/LLVMBackend.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/Passes.h"
@@ -39,9 +40,12 @@
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Pass/PassManager.h"
+#include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Transforms/Passes.h"
 
 #include "llvm/ADT/StringRef.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
@@ -435,15 +439,20 @@ int main(int argc, char **argv) {
   hip::install_crash_handlers("hip-rocmlir-compiler");
 
   std::string inputFilename;
+  std::string outputPath;
   for (int i = 1; i < argc; ++i) {
-    if (argv[i][0] != '-')
+    if (std::string(argv[i]) == "-o" && i + 1 < argc) {
+      outputPath = argv[++i];
+    } else if (argv[i][0] != '-') {
       inputFilename = argv[i];
+    }
   }
-  if (inputFilename.empty()) {
-    llvm::errs() << "Usage: " << argv[0] << " <input.onnx.mlir>\n"
-                 << "  Runs ONNX->HIP head passes + hip->tosa conversion, then\n"
-                 << "  the rocMLIR high-level pipeline (via librockCompiler.so)\n"
-                 << "  and prints the result to stdout.\n"
+  if (inputFilename.empty() || outputPath.empty()) {
+    llvm::errs() << "Usage: " << argv[0] << " <input.onnx.mlir> -o <output.bc>\n"
+                 << "  Runs ONNX->HIP head passes, compiles the fused GEMM via\n"
+                 << "  the rocMLIR pipeline (librockCompiler.so), embeds the GPU\n"
+                 << "  binary into hip.rocmlir, runs the ONNX->HIP tail +\n"
+                 << "  HIP->LLVM lowering, and emits LLVM bitcode to <output.bc>.\n"
                  << "  Set ROCK_COMPILER_SO to override the .so path "
                     "(default: build/librockCompiler.so).\n";
     return 1;
@@ -599,7 +608,43 @@ int main(int argc, char **argv) {
     }
   }
 
-  module->print(llvm::outs());
-  llvm::outs() << "\n";
+  // Without -o: stop at the bufferized HIP module and print it.
+  if (outputPath.empty()) {
+    module->print(llvm::outs());
+    llvm::outs() << "\n";
+    return 0;
+  }
+
+  // Stage 5: HIP->LLVM lowering + interface generation, then translate to LLVM
+  // IR, optimize, and emit OS-portable bitcode -- the same artifact hip-compiler
+  // produces in its default (LLVM_IR) mode.
+  mlir::registerLLVMDialectTranslation(context);
+  {
+    mlir::hip::HipToLLVMPipelineOptions llvmOpts;
+    mlir::PassManager llvmPm(module->getContext());
+    mlir::hip::buildHipToLLVMPipeline(llvmPm, llvmOpts);
+    if (mlir::failed(llvmPm.run(*module))) {
+      llvm::errs() << "error: HIP-to-LLVM lowering failed\n";
+      return 1;
+    }
+  }
+
+  hipdnn::LLVMBackend backend;
+  llvm::LLVMContext llvmContext;
+  std::unique_ptr<llvm::Module> llvmModule =
+      backend.translateMLIRtoLLVMIR(*module, llvmContext);
+  if (!llvmModule) {
+    llvm::errs() << "error: failed to translate MLIR to LLVM IR\n";
+    return 1;
+  }
+  backend.optimizeLLVMIR(llvmModule.get(), /*optLevel=*/3);
+  if (!backend.emitLlvmIr(llvmModule.get(), outputPath)) {
+    llvm::errs() << "error: failed to emit LLVM bitcode to '" << outputPath
+                 << "'\n";
+    return 1;
+  }
+
+  llvm::errs() << "[hip-rocmlir-compiler] wrote LLVM bitcode to " << outputPath
+               << "\n";
   return 0;
 }
