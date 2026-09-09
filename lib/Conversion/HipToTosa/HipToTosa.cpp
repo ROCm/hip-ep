@@ -13,8 +13,8 @@
 #include <mlir/Dialect/UB/IR/UBOps.h>
 #include <mlir/IR/BuiltinAttributes.h>
 #include <mlir/IR/BuiltinTypes.h>
-#include <mlir/IR/Matchers.h>
 #include <mlir/IR/MLIRContext.h>
+#include <mlir/IR/Matchers.h>
 #include <mlir/IR/PatternMatch.h>
 #include <mlir/Pass/Pass.h>
 #include <mlir/Transforms/DialectConversion.h>
@@ -38,7 +38,7 @@ namespace {
 // the result's rank, so hip's ONNX/NumPy rank-extending broadcast does not
 // always survive a 1-1 mapping.
 bool isTosaBroadcastableShape(RankedTensorType operandType,
-                               RankedTensorType resultType) {
+                              RankedTensorType resultType) {
   if (!operandType.hasStaticShape())
     return false;
   if (operandType.getRank() != resultType.getRank())
@@ -275,7 +275,7 @@ struct SqrtConverter final : public OpConversionPattern<SqrtOp> {
       return rewriter.notifyMatchFailure(op, "tosa op requires a float tensor");
 
     auto rsqrt = tosa::RsqrtOp::create(rewriter, op.getLoc(), resultType,
-                                        adaptor.getX());
+                                       adaptor.getX());
     rewriter.replaceOpWithNewOp<tosa::ReciprocalOp>(op, resultType, rsqrt);
     return success();
   }
@@ -371,7 +371,8 @@ bool extractConstantInts(Value v, SmallVectorImpl<int64_t> &out) {
 }
 
 // TOSA reduce ops take one i32 axis and always leave that dim as size 1.
-// hip.reduce_* carry ONNX axes as a tensor plus keepdims / noop_with_empty_axes.
+// hip.reduce_* carry ONNX axes as a tensor plus keepdims /
+// noop_with_empty_axes.
 FailureOr<int32_t> matchSingleReduceAxis(Value axes, int64_t rank,
                                          int64_t noopWithEmptyAxes,
                                          ConversionPatternRewriter &rewriter,
@@ -446,15 +447,15 @@ struct SoftmaxConverter final : public OpConversionPattern<MiopenSoftmaxOp> {
     auto rsum =
         tosa::ReduceSumOp::create(rewriter, loc, reducedTy, exp, axisAttr);
     auto rec = tosa::ReciprocalOp::create(rewriter, loc, reducedTy, rsum);
-    rewriter.replaceOpWithNewOp<tosa::MulOp>(
-        op, resultType, exp, rec, createZeroMulShift(rewriter, loc));
+    rewriter.replaceOpWithNewOp<tosa::MulOp>(op, resultType, exp, rec,
+                                             createZeroMulShift(rewriter, loc));
     return success();
   }
 };
 
 void replaceWithTosaReduce(Operation *op, Value reduced,
-                            RankedTensorType resultType, bool keepdims,
-                            ConversionPatternRewriter &rewriter) {
+                           RankedTensorType resultType, bool keepdims,
+                           ConversionPatternRewriter &rewriter) {
   if (keepdims) {
     rewriter.replaceOp(op, reduced);
     return;
@@ -465,11 +466,10 @@ void replaceWithTosaReduce(Operation *op, Value reduced,
 }
 
 LogicalResult matchHipReduce(Operation *op, Value data, Value axes,
-                               int64_t keepdims, int64_t noopWithEmptyAxes,
-                               ConversionPatternRewriter &rewriter,
-                               RankedTensorType &resultType, Value &dataOut,
-                               int32_t &axis, bool &keepdimsOut,
-                               bool &identity) {
+                             int64_t keepdims, int64_t noopWithEmptyAxes,
+                             ConversionPatternRewriter &rewriter,
+                             RankedTensorType &resultType, Value &dataOut,
+                             int32_t &axis, bool &keepdimsOut, bool &identity) {
   identity = false;
   if (op->getNumResults() != 1)
     return rewriter.notifyMatchFailure(op, "expected tensor mode");
@@ -534,9 +534,9 @@ struct ReduceSumConverter final : public OpConversionPattern<ReduceSumOp> {
     }
     auto reducedTy =
         keepdimsReduceType(cast<RankedTensorType>(data.getType()), axis);
-    auto reduced = tosa::ReduceSumOp::create(
-        rewriter, op.getLoc(), reducedTy, data,
-        rewriter.getI32IntegerAttr(axis));
+    auto reduced =
+        tosa::ReduceSumOp::create(rewriter, op.getLoc(), reducedTy, data,
+                                  rewriter.getI32IntegerAttr(axis));
     replaceWithTosaReduce(op, reduced, resultType, keepdims, rewriter);
     return success();
   }
@@ -583,10 +583,10 @@ struct ReduceMeanConverter final : public OpConversionPattern<ReduceMeanOp> {
     Value invShaped =
         tosa::ReshapeOp::create(rewriter, loc, invTy, inv, onesShape);
     Value scaled = tosa::MulOp::create(rewriter, loc, dataType, data, invShaped,
-                                        createZeroMulShift(rewriter, loc));
+                                       createZeroMulShift(rewriter, loc));
     auto reducedTy = keepdimsReduceType(dataType, axis);
-    auto reduced = tosa::ReduceSumOp::create(
-        rewriter, loc, reducedTy, scaled, rewriter.getI32IntegerAttr(axis));
+    auto reduced = tosa::ReduceSumOp::create(rewriter, loc, reducedTy, scaled,
+                                             rewriter.getI32IntegerAttr(axis));
     replaceWithTosaReduce(op, reduced, resultType, keepdims, rewriter);
     return success();
   }
@@ -599,7 +599,7 @@ constexpr StringLiteral kRockUnsignedCast = "unsigned_cast";
 constexpr StringLiteral kRockFpToIntCast = "fp_to_int_cast";
 
 Value emitTosaCast(ConversionPatternRewriter &rewriter, Location loc,
-                    Value input, Type resElemType) {
+                   Value input, Type resElemType) {
   auto inType = cast<RankedTensorType>(input.getType());
   Type inElem = inType.getElementType();
   auto outType = RankedTensorType::get(inType.getShape(), resElemType);
@@ -628,8 +628,8 @@ Value emitTosaMul(ConversionPatternRewriter &rewriter, Location loc, Value lhs,
 // like the data. TOSA only broadcasts size-1 dims at matching rank, so a
 // 1-D vector on `axis` has to be reshaped to [1, ..., C, ..., 1] first.
 LogicalResult reshapeQdqParam(ConversionPatternRewriter &rewriter, Location loc,
-                               Value &param, RankedTensorType dataType,
-                               int64_t axis, Operation *op) {
+                              Value &param, RankedTensorType dataType,
+                              int64_t axis, Operation *op) {
   auto paramType = dyn_cast<RankedTensorType>(param.getType());
   if (!paramType || !paramType.hasStaticShape())
     return rewriter.notifyMatchFailure(op, "qdq param must be a static tensor");
@@ -678,10 +678,10 @@ LogicalResult reshapeQdqParam(ConversionPatternRewriter &rewriter, Location loc,
 }
 
 LogicalResult matchQdqCommon(Operation *op, Value input, Value scale,
-                              Value zeroPoint, int64_t axis, int64_t blockSize,
-                              ConversionPatternRewriter &rewriter,
-                              RankedTensorType &resultType, Value &inputOut,
-                              Value &scaleOut, Value &zpOut) {
+                             Value zeroPoint, int64_t axis, int64_t blockSize,
+                             ConversionPatternRewriter &rewriter,
+                             RankedTensorType &resultType, Value &inputOut,
+                             Value &scaleOut, Value &zpOut) {
   if (op->getNumResults() != 1)
     return rewriter.notifyMatchFailure(op, "expected tensor mode");
   resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
@@ -772,7 +772,7 @@ struct DequantizeLinearConverter final
       shifted = tosa::SubOp::create(rewriter, loc, resultType, shifted, zpCast);
     }
     rewriter.replaceOp(op,
-                        emitTosaMul(rewriter, loc, shifted, scale, resultType));
+                       emitTosaMul(rewriter, loc, shifted, scale, resultType));
     return success();
   }
 };
@@ -786,8 +786,8 @@ struct QuantizeLinearConverter final
   matchAndRewrite(QuantizeLinearOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     if (op.getSaturate() == 0)
-      return rewriter.notifyMatchFailure(
-          op, "saturate=0 wrap is not a tosa.clamp");
+      return rewriter.notifyMatchFailure(op,
+                                         "saturate=0 wrap is not a tosa.clamp");
 
     RankedTensorType resultType;
     Value input, scale, zp;
@@ -823,18 +823,18 @@ struct QuantizeLinearConverter final
 
     unsigned width = outElem.getIntOrFloatBitWidth();
     APInt minI = outElem.isUnsignedInteger() ? APInt::getMinValue(width)
-                                           : APInt::getSignedMinValue(width);
+                                             : APInt::getSignedMinValue(width);
     APInt maxI = outElem.isUnsignedInteger() ? APInt::getMaxValue(width)
-                                           : APInt::getSignedMaxValue(width);
-    int64_t minValI = outElem.isUnsignedInteger() ? minI.getZExtValue()
-                                               : minI.getSExtValue();
-    int64_t maxValI = outElem.isUnsignedInteger() ? maxI.getZExtValue()
-                                               : maxI.getSExtValue();
+                                             : APInt::getSignedMaxValue(width);
+    int64_t minValI =
+        outElem.isUnsignedInteger() ? minI.getZExtValue() : minI.getSExtValue();
+    int64_t maxValI =
+        outElem.isUnsignedInteger() ? maxI.getZExtValue() : maxI.getSExtValue();
     Attribute minVal = rewriter.getIntegerAttr(biasElem, minValI);
     Attribute maxVal = rewriter.getIntegerAttr(biasElem, maxValI);
-    Value clamped = tosa::ClampOp::create(
-        rewriter, loc, i32Type, biased, minVal, maxVal,
-        tosa::NanPropagationMode::PROPAGATE);
+    Value clamped =
+        tosa::ClampOp::create(rewriter, loc, i32Type, biased, minVal, maxVal,
+                              tosa::NanPropagationMode::PROPAGATE);
     rewriter.replaceOp(op, emitTosaCast(rewriter, loc, clamped, outElem));
     return success();
   }
@@ -863,12 +863,12 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     // fails.
     ConversionTarget conversion(*ctx);
     conversion.addLegalDialect<tosa::TosaDialect, func::FuncDialect>();
-    conversion.addIllegalOp<MatmulOp, AddOp, SubOp, MinOp, MaxOp, MulOp, AbsOp,
-                            NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
-                            TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp,
-                            WhereOp, LeakyReluOp, MiopenSoftmaxOp, ReduceSumOp,
-                            ReduceMeanOp, CastOp, QuantizeLinearOp,
-                            DequantizeLinearOp>();
+    conversion
+        .addIllegalOp<MatmulOp, AddOp, SubOp, MinOp, MaxOp, MulOp, AbsOp, NegOp,
+                      CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp, TanhOp,
+                      ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, WhereOp,
+                      LeakyReluOp, MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp,
+                      CastOp, QuantizeLinearOp, DequantizeLinearOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
@@ -878,28 +878,27 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     conversion.addLegalOp<ub::PoisonOp, tensor::EmptyOp>();
 
     RewritePatternSet patterns(ctx);
-    patterns.add<MatMulConverter, BinaryConverter<AddOp, tosa::AddOp>,
-                 BinaryConverter<SubOp, tosa::SubOp>,
-                 BinaryConverter<MinOp, tosa::MinimumOp>,
-                 BinaryConverter<MaxOp, tosa::MaximumOp>,
-                 BinaryConverter<MulOp, tosa::MulOp>,
-                 UnaryConverter<AbsOp, tosa::AbsOp>,
-                 UnaryConverter<NegOp, tosa::NegateOp>,
-                 UnaryConverter<CeilOp, tosa::CeilOp, /*FloatOnly=*/true>,
-                 UnaryConverter<FloorOp, tosa::FloorOp, /*FloatOnly=*/true>,
-                 UnaryConverter<ExpOp, tosa::ExpOp, /*FloatOnly=*/true>,
-                 UnaryConverter<LogOp, tosa::LogOp, /*FloatOnly=*/true>,
-                 UnaryConverter<SinOp, tosa::SinOp, /*FloatOnly=*/true>,
-                 UnaryConverter<CosOp, tosa::CosOp, /*FloatOnly=*/true>,
-                 UnaryConverter<TanhOp, tosa::TanhOp, /*FloatOnly=*/true>,
-                 UnaryConverter<ErfOp, tosa::ErfOp, /*FloatOnly=*/true>,
-                 UnaryConverter<SigmoidOp, tosa::SigmoidOp, /*FloatOnly=*/true>,
-                 UnaryConverter<ReciprocalOp, tosa::ReciprocalOp,
-                                /*FloatOnly=*/true>,
-                 SqrtConverter, WhereConverter, LeakyReluConverter,
-                 SoftmaxConverter, ReduceSumConverter, ReduceMeanConverter,
-                 CastConverter, DequantizeLinearConverter,
-                 QuantizeLinearConverter>(ctx);
+    patterns.add<
+        MatMulConverter, BinaryConverter<AddOp, tosa::AddOp>,
+        BinaryConverter<SubOp, tosa::SubOp>,
+        BinaryConverter<MinOp, tosa::MinimumOp>,
+        BinaryConverter<MaxOp, tosa::MaximumOp>,
+        BinaryConverter<MulOp, tosa::MulOp>, UnaryConverter<AbsOp, tosa::AbsOp>,
+        UnaryConverter<NegOp, tosa::NegateOp>,
+        UnaryConverter<CeilOp, tosa::CeilOp, /*FloatOnly=*/true>,
+        UnaryConverter<FloorOp, tosa::FloorOp, /*FloatOnly=*/true>,
+        UnaryConverter<ExpOp, tosa::ExpOp, /*FloatOnly=*/true>,
+        UnaryConverter<LogOp, tosa::LogOp, /*FloatOnly=*/true>,
+        UnaryConverter<SinOp, tosa::SinOp, /*FloatOnly=*/true>,
+        UnaryConverter<CosOp, tosa::CosOp, /*FloatOnly=*/true>,
+        UnaryConverter<TanhOp, tosa::TanhOp, /*FloatOnly=*/true>,
+        UnaryConverter<ErfOp, tosa::ErfOp, /*FloatOnly=*/true>,
+        UnaryConverter<SigmoidOp, tosa::SigmoidOp, /*FloatOnly=*/true>,
+        UnaryConverter<ReciprocalOp, tosa::ReciprocalOp,
+                       /*FloatOnly=*/true>,
+        SqrtConverter, WhereConverter, LeakyReluConverter, SoftmaxConverter,
+        ReduceSumConverter, ReduceMeanConverter, CastConverter,
+        DequantizeLinearConverter, QuantizeLinearConverter>(ctx);
 
     if (failed(applyPartialConversion(funcOp, conversion, std::move(patterns))))
       signalPassFailure();
