@@ -879,6 +879,19 @@ __device__ __forceinline__ void ew_store(__half *p, uint32_t i, float v) {
   p[i] = __float2half(v);
 }
 
+__device__ __forceinline__ float ew_to_float(float v) { return v; }
+__device__ __forceinline__ float ew_to_float(__half v) {
+  return __half2float(v);
+}
+
+template <typename T> __device__ __forceinline__ T ew_cast(float v);
+template <> __device__ __forceinline__ float ew_cast<float>(float v) {
+  return v;
+}
+template <> __device__ __forceinline__ __half ew_cast<__half>(float v) {
+  return __float2half(v);
+}
+
 // op: 0=add, 1=mul, 2=min, 3=max
 __device__ __forceinline__ float ew_apply(int op, float a, float b) {
   switch (op) {
@@ -913,6 +926,199 @@ __global__ void ew_bcast4d_kernel(const T *__restrict__ lhs,
   float a = ew_load(lhs, li);
   float b = ew_load(rhs, ri);
   ew_store(output, tid, ew_apply(op, a, b));
+}
+
+// =====================================================================
+// Vectorised fast path
+//
+// Two things limit the kernel above on the attention bias/mask add, which is
+// where most of a windowed-attention model's elementwise time goes.
+//
+// `meta.out[d]` is a runtime value, so `rem % meta.out[d]` and
+// `rem /= meta.out[d]` are true integer divisions rather than shifts -- four
+// of each per element. And one thread per element means a 32-lane wave issues
+// 2-byte accesses, moving 64 bytes per memory instruction against a 128-byte
+// cache line.
+//
+// The fast path fixes both. Each thread owns V contiguous elements, chosen so
+// V elements are 16 bytes; since the innermost output extent is a multiple of
+// V, all V share the outer coordinates and one index computation serves the
+// whole group. And the index itself becomes shifts and masks, because the
+// host folds the decomposition into the fewest terms that reproduce it.
+//
+// The folding is what makes this cheap rather than merely cheaper. Axes an
+// operand is contiguous over collapse into a single masked term, so a bias of
+// shape [1,H,S,S] against [N,H,S,S] costs one AND, and a mask of shape
+// [N,1,S,S] costs one AND plus one shift -- not four divisions either way.
+// =====================================================================
+
+// At most one term per axis. Each contributes `((t >> shift) & mask) * stride`
+// to the operand index; `mask` is all-ones for a term that reaches the
+// outermost axis, where no wrap is possible.
+struct Bcast4DTerms {
+  uint32_t shift[4];
+  uint32_t mask[4];
+  uint32_t stride[4];
+  uint32_t count;
+  uint32_t contiguous; // 1 when the operand advances with the output
+};
+
+struct Bcast4DFastMeta {
+  Bcast4DTerms lhs;
+  Bcast4DTerms rhs;
+};
+
+__device__ __forceinline__ uint32_t ew_operand_index(uint32_t t,
+                                                     const Bcast4DTerms &tm) {
+  uint32_t idx = 0;
+  for (uint32_t i = 0; i < tm.count; ++i)
+    idx += ((t >> tm.shift[i]) & tm.mask[i]) * tm.stride[i];
+  return idx;
+}
+
+// V * sizeof(T) == 16, so one uint4 covers a thread's whole group.
+template <typename T, int V> union EwVec {
+  uint4 raw;
+  T e[V];
+};
+
+template <typename T, int V>
+__global__ void ew_bcast4d_fast_kernel(const T *__restrict__ lhs,
+                                        const T *__restrict__ rhs,
+                                        T *__restrict__ output,
+                                        uint32_t num_vectors, int op,
+                                        Bcast4DFastMeta meta) {
+  const uint32_t v = blockIdx.x * blockDim.x + threadIdx.x;
+  if (v >= num_vectors)
+    return;
+  const uint32_t t = v * (uint32_t)V;
+
+  EwVec<T, V> a, b, o;
+  const uint32_t li = ew_operand_index(t, meta.lhs);
+  if (meta.lhs.contiguous)
+    a.raw = *reinterpret_cast<const uint4 *>(lhs + li);
+  else
+#pragma unroll
+    for (int i = 0; i < V; ++i)
+      a.e[i] = lhs[li];
+
+  const uint32_t ri = ew_operand_index(t, meta.rhs);
+  if (meta.rhs.contiguous)
+    b.raw = *reinterpret_cast<const uint4 *>(rhs + ri);
+  else
+#pragma unroll
+    for (int i = 0; i < V; ++i)
+      b.e[i] = rhs[ri];
+
+#pragma unroll
+  for (int i = 0; i < V; ++i)
+    o.e[i] = ew_cast<T>(ew_apply(op, ew_to_float(a.e[i]), ew_to_float(b.e[i])));
+
+  *reinterpret_cast<uint4 *>(output + t) = o.raw;
+}
+
+} // namespace
+
+namespace {
+
+// log2 of a power of two, or -1 when the value is not one.
+int ew_exact_log2(uint64_t v) {
+  if (v == 0 || (v & (v - 1)) != 0)
+    return -1;
+  int s = 0;
+  while ((v >> s) != 1)
+    ++s;
+  return s;
+}
+
+// Fold the per-axis index decomposition into the fewest terms that reproduce
+// the operand's index, and report whether the result is usable at all.
+//
+// Axes are walked innermost first. A run of axes the operand is contiguous
+// over collapses into one term, because the sum over that run of
+// `coord_d * stride_d` is exactly `((t >> inner_shift) & (extent - 1)) *
+// run_stride`. An axis of extent 1 contributes nothing and cannot break a
+// run; an axis the operand broadcasts over contributes nothing and does.
+//
+// Fails when a shift or mask the folded form needs is not a power of two, or
+// when a stride would misalign a V-element vector. Every failure sends the
+// caller back to the general kernel.
+bool ew_build_terms(const uint32_t out[4], const uint32_t stride[4], int vec,
+                    Bcast4DTerms &tm) {
+  tm.count = 0;
+  // A contiguous operand is read with one vector load per thread and so has
+  // to land on a vector boundary. One that broadcasts over the innermost axis
+  // is read as a single scalar and splatted, which constrains nothing.
+  tm.contiguous = (stride[3] == 1) ? 1u : 0u;
+
+  uint64_t inner[4]; // product of out[d+1..3]
+  inner[3] = 1;
+  for (int d = 2; d >= 0; --d)
+    inner[d] = inner[d + 1] * out[d + 1];
+
+  for (int d = 3; d >= 0;) {
+    if (stride[d] == 0) {
+      --d;
+      continue;
+    }
+    const uint64_t run_stride = stride[d];
+    uint64_t extent = out[d];
+    int top = d;
+    while (top > 0) {
+      const int nxt = top - 1;
+      if (out[nxt] == 1) { // degenerate: no coordinate, no break
+        top = nxt;
+        continue;
+      }
+      if ((uint64_t)stride[nxt] != run_stride * extent)
+        break;
+      top = nxt;
+      extent *= out[top];
+    }
+
+    const int shift = ew_exact_log2(inner[d]);
+    if (shift < 0)
+      return false;
+    uint32_t mask;
+    if (top == 0) {
+      mask = 0xFFFFFFFFu; // outermost: t / inner[d] cannot wrap
+    } else {
+      if (ew_exact_log2(extent) < 0)
+        return false;
+      mask = (uint32_t)(extent - 1);
+    }
+    // A vector load needs every term to land on a V-element boundary. The
+    // innermost unit-stride run does so because its extent is a multiple of
+    // out[3]; any other term must have a stride that is.
+    const bool unit_innermost = (run_stride == 1 && shift == 0);
+    if (tm.contiguous && !unit_innermost && (run_stride % (uint64_t)vec) != 0)
+      return false;
+    if (tm.count == 4)
+      return false;
+    tm.shift[tm.count] = (uint32_t)shift;
+    tm.mask[tm.count] = mask;
+    tm.stride[tm.count] = (uint32_t)run_stride;
+    ++tm.count;
+    d = top - 1;
+  }
+  return true;
+}
+
+// Both operands must fold, the innermost extent must fill whole vectors, and
+// the buffers must be 16-byte aligned.
+bool ew_bcast4d_fast_meta(const uint32_t out[4], const Bcast4DMeta &meta,
+                          int vec, const void *lhs, const void *rhs,
+                          const void *output, uint32_t n,
+                          Bcast4DFastMeta &fast) {
+  if (out[3] % (uint32_t)vec != 0 || n % (uint32_t)vec != 0)
+    return false;
+  const uintptr_t bytes = 16;
+  if ((reinterpret_cast<uintptr_t>(lhs) % bytes) != 0 ||
+      (reinterpret_cast<uintptr_t>(rhs) % bytes) != 0 ||
+      (reinterpret_cast<uintptr_t>(output) % bytes) != 0)
+    return false;
+  return ew_build_terms(out, meta.lstride, vec, fast.lhs) &&
+         ew_build_terms(out, meta.rstride, vec, fast.rhs);
 }
 
 } // namespace
@@ -955,6 +1161,38 @@ extern "C" int hip_elementwise_binary_bcast(void *stream, const void *lhs,
   int grid_size = static_cast<int>((out_vol + kBlockSize - 1) / kBlockSize);
 
   (void)hipGetLastError();
+
+  // 16 bytes per thread: 8 halves or 4 floats.
+  Bcast4DFastMeta fast{};
+  const int vec = (hip_dtype == HIP_DTYPE_FLOAT16)   ? 8
+                  : (hip_dtype == HIP_DTYPE_FLOAT32) ? 4
+                                                     : 0;
+  if (vec && ew_bcast4d_fast_meta(meta.out, meta, vec, lhs, rhs, output, n,
+                                  fast)) {
+    const uint32_t num_vectors = n / (uint32_t)vec;
+    const int fast_grid =
+        static_cast<int>((num_vectors + kBlockSize - 1) / kBlockSize);
+    if (hip_dtype == HIP_DTYPE_FLOAT16)
+      hipLaunchKernelGGL(
+          (ew_bcast4d_fast_kernel<__half, 8>), dim3(fast_grid),
+          dim3(kBlockSize), 0, hip_stream, static_cast<const __half *>(lhs),
+          static_cast<const __half *>(rhs), static_cast<__half *>(output),
+          num_vectors, op, fast);
+    else
+      hipLaunchKernelGGL(
+          (ew_bcast4d_fast_kernel<float, 4>), dim3(fast_grid), dim3(kBlockSize),
+          0, hip_stream, static_cast<const float *>(lhs),
+          static_cast<const float *>(rhs), static_cast<float *>(output),
+          num_vectors, op, fast);
+    hipError_t ferr = hipGetLastError();
+    if (ferr != hipSuccess)
+      fprintf(stderr,
+              "[custom_kernels] hip_elementwise_binary_bcast fast path launch "
+              "failed: %s\n",
+              hipGetErrorString(ferr));
+    return static_cast<int>(ferr);
+  }
+
   switch (hip_dtype) {
   case HIP_DTYPE_FLOAT16:
     hipLaunchKernelGGL(ew_bcast4d_kernel<__half>, dim3(grid_size),

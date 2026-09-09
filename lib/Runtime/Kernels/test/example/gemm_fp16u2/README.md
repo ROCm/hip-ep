@@ -29,16 +29,16 @@ comparison.
      vectorized loads, many weights per transaction.
   3. **Naive fallback**: anything meeting neither gate above.
 
-## Zero-point handling (two conventions, both validated)
+## Zero-point handling (three conventions, all validated)
 
-ONNX packs `zero_points` at `bits` bits, so a real 2-bit model ships them
-**4-per-byte packed** (`[N, ceil(num_groups_k/4)]`), while the u2 kernels
+ONNX packs integer `zero_points` at `bits` bits, so a real 2-bit model ships
+them **4-per-byte packed** (`[N, ceil(num_groups_k/4)]`), while the u2 kernels
 index one byte per group. The runtime wrapper
 (`lib/Runtime/real/matmul_nbits.cpp`) closes that gap: for `bits=2` asym it
 unpacks the packed blob to one-byte-per-group via
 `hip_matmul_nbits_unpack_zp_u8_2bit()` (pointer-keyed cache, once per
 `zero_points`) and passes it back as `pre_unpacked_zp_u8`. This test exercises
-both layouts:
+all three layouts:
 
 1. **one-byte-per-group** (`*_zeros_u8`) passed directly as `zero_points`
    with `pre_unpacked_zp_u8 = null` — the plain direct-call convention used by
@@ -48,6 +48,16 @@ both layouts:
    path. A dedicated correctness check (`u2 packed-zp real-model path`, not
    benchmarked) confirms the unpack reproduces `*_zeros_u8` byte-for-byte and
    that the resulting GEMM matches the reference.
+3. **fractional FP16** (`*_zeros_fp16`, `zp_elem_size==2`) passed straight
+   through as `zero_points`. AMD Quark 2-bit models express the non-uniform
+   levels `[-1,-1/3,1/3,1]` as `(index - 1.5) * scale`, so they ship an FP16
+   zero-point that is **fractional** (1.5) and must never be rounded to an
+   integer. The u2 kernels are templated on the zero-point element type and
+   read fp16 directly; the `u2 fp16-zp path` check (values drawn per group from
+   `{0.5, 1.5, 2.5}` to exercise both fp16 reading and per-group indexing)
+   verifies the GEMM against a dedicated fractional reference. The uint8
+   integer path is unchanged and equally fast — the two are separate template
+   instantiations.
 
 See `gen_matmul_nbits_u2_data.py`'s module docstring for the exact file
 layout.
@@ -91,6 +101,9 @@ Each shape prints:
   --- u2 packed-zp real-model path ---     (only with zero points)
   Unpack check: N/N zero_points match one-byte-per-group   PASS
   GEMM (packed-zp): N/N OK, ...   PASS
+
+  --- u2 fp16-zp path (fractional zero-point, AMD Quark 1.5) ---  (only with zero points)
+  Median: X.XXXXXX ms, ...   Verify: N/N OK, ...   PASS
 ```
 
 Manual steps (equivalent to what `make test` does):
@@ -105,8 +118,9 @@ make direct
 
 - `gen_matmul_nbits_u2_data.py` — generates a shared FP16 `A` plus
   independently-quantized u2 and u4 copies of `B` (same shape), scales,
-  optional zero points (both one-byte-per-group and ONNX-packed for u2), and
-  NumPy references for both.
+  optional zero points (one-byte-per-group, ONNX-packed, and fractional FP16
+  for u2), and NumPy references (including a dedicated fractional-FP16-zp
+  reference for u2).
 - `gen_model_data_u2.py` — calls the above once per shape in a model config
   JSON (mirrors `../gemm_fp16u4/gen_model_data.py`); skips shapes where
   `K % 32 != 0`.

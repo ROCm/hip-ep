@@ -31,7 +31,10 @@ extern "C" {
 #define HIPDNN_EP_TENSOR_OP_MIN 2 // element-wise min
 #define HIPDNN_EP_TENSOR_OP_MAX 3 // element-wise max
 
+// Must match HipdnnQElementwiseKind in
+// lib/Conversion/HipToLLVM/HipToLLVMUtils.h
 #define HIPDNN_EP_QELEMENTWISE_ADD 0
+#define HIPDNN_EP_QELEMENTWISE_MUL 1
 
 static inline const char *hipdnn_ep_tensor_op_name(int64_t op) {
   switch (op) {
@@ -832,7 +835,15 @@ int wrap_group_query_attention(
     // Shape values (6)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
-    int64_t attn_bias_batch, int64_t attn_bias_num_heads);
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads,
+    // Layout of the key/value operands: 0 = rank-3 BSHD [B, S, G*d] (the
+    // onnx.Attention and GroupQueryAttention lowerings), 1 = rank-4 BNSD
+    // [B, G, S, d] (the MultiHeadAttention cross-attn lowering, which forwards
+    // the encoder KV untouched). Only consulted on the bidirectional no-past
+    // path, where key/value are the full Skv-length KV and must be staged into
+    // the BNSD present cache: BSHD and BNSD coincide only at G == 1, so the
+    // layout cannot be inferred from the shapes.
+    int64_t kv_bnsd);
 
 // MultiHeadAttention operation wrapper (com.microsoft.MultiHeadAttention v1).
 // Called by generated IR for onnx.Custom(MultiHeadAttention) lowering.
@@ -907,7 +918,11 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
 // up to `out_rank`, and dims of 1 broadcast against the output dim.
 //
 // lhs/rhs/output are quantized buffers of `data_type`.
-// M_a = s_a / s_out, M_b = s_b / s_out (folded by lowering).
+//
+// The coefficients are folded by lowering and their meaning depends on `kind`,
+// because a product of dequantized operands also multiplies their scales:
+//   ADD: M_a = s_a / s_out, M_b = s_b / s_out
+//   MUL: M_a = s_a * s_b / s_out, M_b unused (lowering passes 1.0f)
 int wrap_qelementwise(RuntimeState *state, void *lhs, void *rhs, void *output,
                       int64_t kind, const int64_t *lhs_shape, int64_t lhs_rank,
                       const int64_t *rhs_shape, int64_t rhs_rank,

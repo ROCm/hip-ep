@@ -49,6 +49,13 @@ if(NOT THEROCK_DIST)
     "THEROCK_DIST is empty; the wheel cannot bundle the ROCm runtime.")
 endif()
 
+if(NOT TARGET HipPdllPatterns OR NOT HIP_PDL_FUSION_PATTERNS)
+  message(FATAL_ERROR
+    "PDL fusion patterns are unavailable (mlir-pdll was not found); the wheel "
+    "would ship an EP that cannot compile any model.")
+endif()
+list(APPEND _wheel_deps HipPdllPatterns)
+
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
   set(_ck_target custom_kernels_${_arch})
   if(TARGET ${_ck_target})
@@ -70,11 +77,13 @@ add_custom_target(wheel ALL
           "${_pkg_src}/setup.py"
           "${_stage}/"
   # 2. Stage native artifacts (EP lib + per-arch custom-kernels runtime
-  #    DLLs/SOs + CRT import libs) into the onnxruntime_ep_amdgpu namespace
-  #    package dir so the wheel ships them at onnxruntime_ep_amdgpu/ (platlib).
+  #    DLLs/SOs + CRT import libs + the PDL fusion patterns) into the
+  #    onnxruntime_ep_amdgpu namespace package dir so the wheel ships them at
+  #    onnxruntime_ep_amdgpu/ (platlib).
   COMMAND ${CMAKE_COMMAND} -E rm -rf "${_libs_dir}"
   COMMAND ${Python3_EXECUTABLE} "${_pkg_src}/_pack_libs.py"
           ${_dll_args}
+          --data-file "${HIP_PDL_FUSION_PATTERNS}"
           --dest "${_libs_dir}"
           --rocm-dist "${THEROCK_DIST}"
           --rocm-arch "${MORPHIZEN_HIP_ARCH}"

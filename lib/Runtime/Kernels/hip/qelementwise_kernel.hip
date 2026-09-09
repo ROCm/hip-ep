@@ -14,6 +14,7 @@
 
 #define HIP_QELEMENTWISE_MAX_RANK 8
 #define HIP_QELEMENTWISE_ADD 0
+#define HIP_QELEMENTWISE_MUL 1
 
 struct QElemDimsND {
   int64_t v[HIP_QELEMENTWISE_MAX_RANK];
@@ -84,13 +85,15 @@ __global__ void qelementwise_nd_kernel(
     rhs_idx += coord * rhs_stride.v[k];
   }
 
-  float da = M_a * (static_cast<float>(lhs[lhs_idx]) -
-                    static_cast<float>(lhs_zp));
-  float db = M_b * (static_cast<float>(rhs[rhs_idx]) -
-                    static_cast<float>(rhs_zp));
+  float da = static_cast<float>(lhs[lhs_idx]) - static_cast<float>(lhs_zp);
+  float db = static_cast<float>(rhs[rhs_idx]) - static_cast<float>(rhs_zp);
   float acc = 0.f;
   if (kind == HIP_QELEMENTWISE_ADD)
-    acc = da + db;
+    acc = M_a * da + M_b * db;
+  else if (kind == HIP_QELEMENTWISE_MUL)
+    // M_b is unused here: the host folded s_a * s_b / s_out into M_a, so the
+    // product of the integer differences takes a single rescale.
+    acc = M_a * (da * db);
   output[idx] = q_saturate<T>(rintf(acc) + static_cast<float>(output_zp));
 }
 
@@ -149,7 +152,7 @@ extern "C" int hip_qelementwise(void *stream, const void *lhs, const void *rhs,
                                 const int64_t *out_shape, int64_t out_rank,
                                 int hip_dtype, float M_a, int64_t lhs_zp,
                                 float M_b, int64_t rhs_zp, int64_t output_zp) {
-  if (kind != HIP_QELEMENTWISE_ADD) {
+  if (kind != HIP_QELEMENTWISE_ADD && kind != HIP_QELEMENTWISE_MUL) {
     fprintf(stderr, "[custom_kernels] hip_qelementwise: unsupported kind=%lld\n",
             (long long)kind);
     return -1;

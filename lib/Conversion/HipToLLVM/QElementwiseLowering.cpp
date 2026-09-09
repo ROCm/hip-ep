@@ -10,11 +10,15 @@ namespace hip {
 namespace {
 
 // Shared lowering for quantized elementwise ops:
-//   hip.qadd / (future) qsub, qmul, qdiv
+//   hip.qadd, hip.qmul / (future) qsub, qdiv
 //     -> wrap_qelementwise(..., kind, ..., M_a, lhs_zp, M_b, rhs_zp, output_zp)
 //
-// M_a = s_a / s_out, M_b = s_b / s_out. Runtime uses
-//   OUT = round(M_a * (A - z_a) [OP] M_b * (B - z_b)) + z_out
+// The coefficient slots carry a kind-dependent folding of the scales:
+//
+//   add: M_a = s_a / s_out, M_b = s_b / s_out
+//        OUT = round(M_a * (A - z_a) + M_b * (B - z_b)) + z_out
+//   mul: M_a = s_a * s_b / s_out, M_b unused
+//        OUT = round(M_a * (A - z_a) * (B - z_b)) + z_out
 
 template <typename OpTy, HipdnnQElementwiseKind Kind>
 struct QElementwiseLowering : public ConvertOpToLLVMPattern<OpTy> {
@@ -88,8 +92,16 @@ struct QElementwiseLowering : public ConvertOpToLLVMPattern<OpTy> {
     float outputScale = op.getOutputScale().convertToFloat();
     if (outputScale == 0.0f)
       return rewriter.notifyMatchFailure(op, "output_scale must be non-zero");
-    float mA = op.getLhsScale().convertToFloat() / outputScale;
-    float mB = op.getRhsScale().convertToFloat() / outputScale;
+    float lhsScale = op.getLhsScale().convertToFloat();
+    float rhsScale = op.getRhsScale().convertToFloat();
+    float mA, mB;
+    if constexpr (Kind == HipdnnQElementwiseKind::kQElementwiseMul) {
+      mA = lhsScale * rhsScale / outputScale;
+      mB = 1.0f;
+    } else {
+      mA = lhsScale / outputScale;
+      mB = rhsScale / outputScale;
+    }
 
     SmallVector<Value, 17> args = {
         adaptor.getCtx(),
@@ -122,11 +134,17 @@ struct QAddOpLowering
   using QElementwiseLowering::QElementwiseLowering;
 };
 
+struct QMulOpLowering
+    : public QElementwiseLowering<QMulOp,
+                                  HipdnnQElementwiseKind::kQElementwiseMul> {
+  using QElementwiseLowering::QElementwiseLowering;
+};
+
 } // namespace
 
-void populateQAddLoweringPatterns(const LLVMTypeConverter &converter,
-                                  RewritePatternSet &patterns) {
-  patterns.add<QAddOpLowering>(converter);
+void populateQElementwiseLoweringPatterns(const LLVMTypeConverter &converter,
+                                          RewritePatternSet &patterns) {
+  patterns.add<QAddOpLowering, QMulOpLowering>(converter);
 }
 
 } // namespace hip

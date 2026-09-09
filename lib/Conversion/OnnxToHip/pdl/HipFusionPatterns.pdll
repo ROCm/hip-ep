@@ -11,9 +11,19 @@
 // included exactly once.
 //===----------------------------------------------------------------------===//
 
-// Native constraints (implemented in qdq_fusion_pass.hpp)
-Constraint GetContextArg(op: Op) -> Value;
-Constraint ExtractScaleValue(val: Value) -> Attr;
-Constraint ExtractZeropointValue(op: Op, index: Attr, defaultValue: Attr) -> Attr;
+// Native helpers (implemented in qdq_fusion_pass.hpp).
+//
+// Fusability is decided by result-free constraints and the values are produced
+// by rewrites. Returning a result from a constraint shared by two patterns
+// rooted at the same op makes the PDL module fail to lower ("operand does not
+// dominate this use"), so nothing below may move back into the match section.
+Constraint HasContextArg(op: Op);
+Constraint IsSplatConstantValue(val: Value);
+Constraint HasExtractableZeropoint(op: Op, index: Attr);
+
+Rewrite GetContextArg(op: Op) -> Value;
+Rewrite ExtractScaleValue(val: Value) -> Attr;
+Rewrite ExtractZeropointValue(op: Op, index: Attr, defaultValue: Attr) -> Attr;
 
 #include "QDQAddFusion.pdll"
+#include "QDQMulFusion.pdll"

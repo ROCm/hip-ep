@@ -143,10 +143,16 @@ HIP_KERNEL_API int hip_elementwise_where(
  * Operand shapes are left-padded with 1s to out_rank (NumPy broadcast).
  * Rank must be <= HIP_QELEMENTWISE_MAX_RANK (8).
  *
- * kind: 0 = add (HIPDNN_EP_QELEMENTWISE_ADD).
- * Scales are folded by lowering: M_a = s_a / s_out, M_b = s_b / s_out.
+ * kind: 0 = add (HIPDNN_EP_QELEMENTWISE_ADD),
+ *       1 = mul (HIPDNN_EP_QELEMENTWISE_MUL).
  *
- *   OUT = saturate(round(M_a * (A - z_a) [OP] M_b * (B - z_b)) + z_out)
+ * Scales are folded by lowering, and how they collapse depends on kind
+ * because multiplying the dequantized operands also multiplies their scales:
+ *
+ *   add: M_a = s_a / s_out, M_b = s_b / s_out
+ *        OUT = saturate(round(M_a * (A - z_a) + M_b * (B - z_b)) + z_out)
+ *   mul: M_a = s_a * s_b / s_out, M_b unused
+ *        OUT = saturate(round(M_a * (A - z_a) * (B - z_b)) + z_out)
  *
  * Supported hip_dtype: HIP_DTYPE_INT8, HIP_DTYPE_UINT8, HIP_DTYPE_INT16,
  * HIP_DTYPE_UINT16, HIP_DTYPE_INT32.
@@ -773,17 +779,23 @@ HIP_KERNEL_API int hip_gqa_softmax_inplace(
     int batch_stride, const void* head_sink, int num_heads,
     int use_smooth_softmax);
 
-/* Row-wise softmax over a flattened [rows, cols] row-major fp16 buffer.
- * One block per row, softmaxes the `cols` elements of each row in-place
- * (data is overwritten with normalized probabilities). Matches ONNX
- * Softmax semantics for axis = -1 on the flattened input. Used by the
- * standalone `hip_miopen_softmax` runtime entry point. */
-HIP_KERNEL_API int hip_softmax_row_2d_inplace(void* stream, void* data, int rows, int cols);
+/* Row-wise softmax over a flattened [rows, cols] row-major fp16 buffer,
+ * reading `input` and writing normalized probabilities to `output`. Matches
+ * ONNX Softmax semantics for axis = -1 on the flattened input. `input` may
+ * equal `output`. Used by the standalone `hip_miopen_softmax` runtime entry
+ * point, which is destination-passing and would otherwise have to copy its
+ * input over its output before running an in-place kernel. */
+HIP_KERNEL_API int hip_softmax_row_2d(void* stream, const void* input, void* output, int rows, int cols);
 
 /* fp32 variant of the above — for models where Softmax input is fp32.
  * Qwen VLM vision encoder attention scores are fp32; using the fp16 kernel
  * there misinterprets the data and produces completely wrong outputs.
  * Called by hip_miopen_softmax when elem_size_bytes == 4. */
+HIP_KERNEL_API int hip_softmax_row_2d_fp32(void* stream, const void* input, void* output, int rows, int cols);
+
+/* Single-buffer forms of the two above, for callers that softmax a buffer
+ * in place. Equivalent to passing `data` as both source and destination. */
+HIP_KERNEL_API int hip_softmax_row_2d_inplace(void* stream, void* data, int rows, int cols);
 HIP_KERNEL_API int hip_softmax_row_2d_inplace_fp32(void* stream, void* data, int rows, int cols);
 
 /* Column-wise softmax: fp32 input -> fp16 output.
@@ -804,6 +816,29 @@ HIP_KERNEL_API int hip_gqa_softmax_f32_to_f32(
     int total_head_queries, int rows, int cols,
     int input_batch_stride, int output_batch_stride,
     const void* head_sink, int num_heads, int use_smooth_softmax);
+
+/* Same as hip_gqa_softmax_f32_to_f32 / _f16, with the external additive mask
+ * folded into the score read so a preceding hip_gqa_add_attention_bias_f32 pass
+ * over the same buffer is not needed. output_fp32 picks the probability dtype
+ * (0 = fp16, feeding the fp16 Value GEMM; 1 = fp32) and
+ * bias_element_size_bytes the mask dtype (2 = fp16, 4 = fp32). The bias is
+ * added before the column max is taken.
+ *
+ * The bias is indexed on its own full extents, exactly as
+ * hip_gqa_add_attention_bias_f32 does, because the score buffer can be a
+ * sub-block of the logical [bias_sq, bias_total_seq] matrix: `cols` query rows
+ * starting at bias_row_offset, and `rows` key columns starting at
+ * bias_col_offset. Mind the axis names -- this kernel reduces along `rows`, so
+ * its `rows` is the key extent and its `cols` the query count, which is the
+ * transpose of the naming hip_gqa_add_attention_bias_f32 uses. */
+HIP_KERNEL_API int hip_gqa_softmax_f32_to_out_biased(
+    void* stream, const void* input_f32, void* output,
+    int total_head_queries, int rows, int cols,
+    int input_batch_stride, int output_batch_stride,
+    const void* head_sink, int num_heads, int use_smooth_softmax,
+    const void* bias, int bias_batch, int bias_heads,
+    int bias_element_size_bytes, int output_fp32,
+    int bias_sq, int bias_row_offset, int bias_total_seq, int bias_col_offset);
 
 /* Legacy fast-path decode kernel (folded into gqa_kernel.hip with a legacy_*
  * device kernel). The production decode path uses hip_gqa_flash_decode above
