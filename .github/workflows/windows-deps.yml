@@ -27,7 +27,7 @@ permissions:
   contents: read
 
 env:
-  LLVM_TAG: llvmorg-22.1.0
+  LLVM_TAG: llvmorg-23.1.0
   ONNXRUNTIME_VERSION: "1.27.0"
   ONNXRUNTIME_PR_PATCHES: ""
   OGA_VERSION: "0.14.0"

@@ -20,6 +20,7 @@
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
@@ -214,6 +215,10 @@ struct LowerConstSize : public OpConversionPattern<shape::ConstSizeOp> {
 
 struct ConvertShapeToExtentPass
     : impl::ConvertShapeToExtentPassBase<ConvertShapeToExtentPass> {
+  void getDependentDialects(DialectRegistry &registry) const override {
+    registry.insert<cf::ControlFlowDialect>();
+  }
+
   void runOnOperation() override {
     func::FuncOp function = getOperation();
     MLIRContext *context = &getContext();
@@ -229,6 +234,7 @@ struct ConvertShapeToExtentPass
     //
     // Folding off also leaves the hipsr.compute bodies alone.
     RewritePatternSet inliners(context);
+    cf::BranchOp::getCanonicalizationPatterns(inliners, context);
     scf::ExecuteRegionOp::getCanonicalizationPatterns(inliners, context);
     shape::AssumingOp::getCanonicalizationPatterns(inliners, context);
     if (failed(applyPatternsGreedily(
@@ -249,20 +255,57 @@ struct ConvertShapeToExtentPass
     target.markUnknownOpDynamicallyLegal([](Operation *) { return true; });
     target.addDynamicallyLegalDialect<shape::ShapeDialect>(isRetyped);
     target.addDynamicallyLegalOp<PreserveShapeOp>(isRetyped);
+    target.addLegalOp<shape::FromExtentTensorOp, shape::ToExtentTensorOp>();
     target.addIllegalOp<shape::ConcatOp, shape::ConstSizeOp,
                         shape::FromExtentsOp, shape::SizeToIndexOp>();
+
+    TypeConverter typeConverter;
+    typeConverter.addConversion([](Type type) { return type; });
+    typeConverter.addConversion([](shape::ShapeType type) -> Type {
+      return shape::getExtentTensorType(type.getContext());
+    });
+    typeConverter.addConversion([](shape::SizeType type) -> Type {
+      return IndexType::get(type.getContext());
+    });
+    typeConverter.addTargetMaterialization([](OpBuilder &builder,
+                                              Type resultType,
+                                              ValueRange inputs,
+                                              Location loc) -> Value {
+      if (inputs.size() != 1)
+        return {};
+      if (isa<shape::ShapeType>(inputs.front().getType()) &&
+          shape::isExtentTensorType(resultType))
+        return shape::ToExtentTensorOp::create(builder, loc, resultType,
+                                               inputs.front())
+            .getResult();
+      if (!tensor::CastOp::areCastCompatible(inputs.front().getType(),
+                                             resultType))
+        return {};
+      return tensor::CastOp::create(builder, loc, resultType, inputs.front())
+          .getResult();
+    });
+    typeConverter.addSourceMaterialization(
+        [](OpBuilder &builder, Type resultType, ValueRange inputs,
+           Location loc) -> Value {
+          if (inputs.size() != 1 || !isa<shape::ShapeType>(resultType) ||
+              !shape::isExtentTensorType(inputs.front().getType()))
+            return {};
+          return shape::FromExtentTensorOp::create(builder, loc, resultType,
+                                                   inputs.front())
+              .getResult();
+        });
 
     RewritePatternSet patterns(context);
     patterns
         .add<LowerConcat, LowerConstSize, LowerFromExtents, LowerSizeToIndex>(
-            context);
+            typeConverter, context);
     patterns.add<
         RetypeShapeOp<shape::BroadcastOp>, RetypeShapeOp<shape::ConstShapeOp>,
         RetypeShapeOp<shape::CstrBroadcastableOp>,
         RetypeShapeOp<shape::CstrEqOp>, RetypeShapeOp<shape::GetExtentOp>,
         RetypeShapeOp<shape::NumElementsOp>, RetypeShapeOp<shape::ShapeOfOp>,
         RetypeShapeOp<shape::SplitAtOp>, RetypeShapeOp<PreserveShapeOp>>(
-        context);
+        typeConverter, context);
 
     if (failed(applyPartialConversion(function, target, std::move(patterns)))) {
       signalPassFailure();

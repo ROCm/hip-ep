@@ -43,6 +43,7 @@ else()
         PATHS
             ${LLVM_BINARY_DIR}/bin       # When LLVM built from source
             ${LLVM_TOOLS_BINARY_DIR}     # When LLVM installed via package
+        NO_DEFAULT_PATH
     )
 endif()
 
@@ -77,6 +78,7 @@ else()
         PATHS
             ${LLVM_BINARY_DIR}/bin
             ${LLVM_TOOLS_BINARY_DIR}
+        NO_DEFAULT_PATH
     )
 endif()
 

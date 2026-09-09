@@ -21,14 +21,17 @@
 // CHECK-NEXT:        %[[CONSTANT_5:.*]] = arith.constant 2 : index
 // CHECK-NEXT:        %[[ALLOC_0:.*]] = memref.alloc() {alignment = 64 : i64} : memref<1xindex>
 // CHECK-NEXT:        memref.store %[[CONSTANT_5]], %[[ALLOC_0]]{{\[}}%[[CONSTANT_4]]] : memref<1xindex>
+// CHECK-NEXT:        %[[EXTENT_CAST_0:.*]] = memref.cast %[[ALLOC_0]] : memref<1xindex> to memref<?xindex>
 // CHECK-NEXT:        %[[ALLOC_1:.*]] = memref.alloc() {alignment = 64 : i64} : memref<2xindex>
 // CHECK-NEXT:        memref.store %[[CONSTANT_5]], %[[ALLOC_1]]{{\[}}%[[CONSTANT_4]]] : memref<2xindex>
 // CHECK-NEXT:        memref.store %[[CONSTANT_0]], %[[ALLOC_1]]{{\[}}%[[CONSTANT_3]]] : memref<2xindex>
+// CHECK-NEXT:        %[[EXTENT_CAST_1:.*]] = memref.cast %[[ALLOC_1]] : memref<2xindex> to memref<?xindex>
 // CHECK-NEXT:        %[[ALLOC_2:.*]] = memref.alloc() {alignment = 64 : i64} : memref<2xindex>
 // CHECK-NEXT:        memref.store %[[CONSTANT_0]], %[[ALLOC_2]]{{\[}}%[[CONSTANT_4]]] : memref<2xindex>
 // CHECK-NEXT:        memref.store %[[CONSTANT_3]], %[[ALLOC_2]]{{\[}}%[[CONSTANT_3]]] : memref<2xindex>
-// CHECK-NEXT:        %[[SUBVIEW_0:.*]] = memref.subview %[[ALLOC_1]]{{\[}}%[[CONSTANT_4]]] {{\[}}%[[CONSTANT_4]]] {{\[}}%[[CONSTANT_3]]] : memref<2xindex> to memref<?xindex, strided<[?], offset: ?>>
-// CHECK-NEXT:        %[[SUBVIEW_1:.*]] = memref.subview %[[ALLOC_2]]{{\[}}%[[CONSTANT_4]]] {{\[}}%[[CONSTANT_4]]] {{\[}}%[[CONSTANT_3]]] : memref<2xindex> to memref<?xindex, strided<[?], offset: ?>>
+// CHECK-NEXT:        %[[EXTENT_CAST_2:.*]] = memref.cast %[[ALLOC_2]] : memref<2xindex> to memref<?xindex>
+// CHECK-NEXT:        %[[SUBVIEW_0:.*]] = memref.subview %[[EXTENT_CAST_1]]{{\[}}%[[CONSTANT_4]]] {{\[}}%[[CONSTANT_4]]] {{\[}}%[[CONSTANT_3]]] : memref<?xindex> to memref<?xindex, strided<[?], offset: ?>>
+// CHECK-NEXT:        %[[SUBVIEW_1:.*]] = memref.subview %[[EXTENT_CAST_2]]{{\[}}%[[CONSTANT_4]]] {{\[}}%[[CONSTANT_4]]] {{\[}}%[[CONSTANT_3]]] : memref<?xindex> to memref<?xindex, strided<[?], offset: ?>>
 // CHECK-NEXT:        %[[ALLOC_3:.*]] = memref.alloc(%[[CONSTANT_4]]) {alignment = 64 : i64} : memref<?xindex>
 // CHECK-NEXT:        scf.for %[[VAL_3:.*]] = %[[CONSTANT_4]] to %[[CONSTANT_4]] step %[[CONSTANT_3]] {
 // CHECK-NEXT:          %[[CMPI_0:.*]] = arith.cmpi ult, %[[VAL_3]], %[[CONSTANT_4]] : index
@@ -49,14 +52,16 @@
 // CHECK-NEXT:          }
 // CHECK-NEXT:          memref.store %[[IF_1]], %[[ALLOC_3]]{{\[}}%[[VAL_3]]] : memref<?xindex>
 // CHECK-NEXT:        }
+// CHECK-NEXT:        %[[EXTENT_LOAD_0:.*]] = memref.load %[[ALLOC_1]]{{\[}}%[[CONSTANT_4]]] : memref<2xindex>
+// CHECK-NEXT:        %[[EXTENT_LOAD_1:.*]] = memref.load %[[ALLOC_2]]{{\[}}%[[CONSTANT_3]]] : memref<2xindex>
 // CHECK-NEXT:        %[[ALLOC_4:.*]] = memref.alloc() {alignment = 64 : i64} : memref<2xindex>
-// CHECK-NEXT:        memref.store %[[CONSTANT_5]], %[[ALLOC_4]]{{\[}}%[[CONSTANT_4]]] : memref<2xindex>
-// CHECK-NEXT:        memref.store %[[CONSTANT_3]], %[[ALLOC_4]]{{\[}}%[[CONSTANT_3]]] : memref<2xindex>
+// CHECK-NEXT:        memref.store %[[EXTENT_LOAD_0]], %[[ALLOC_4]]{{\[}}%[[CONSTANT_4]]] : memref<2xindex>
+// CHECK-NEXT:        memref.store %[[EXTENT_LOAD_1]], %[[ALLOC_4]]{{\[}}%[[CONSTANT_3]]] : memref<2xindex>
 // CHECK-NEXT:        %[[ALLOC_5:.*]] = memref.alloc(%[[CONSTANT_5]]) {alignment = 64 : i64} : memref<?xindex>
 // CHECK-NEXT:        %[[SUBVIEW_2:.*]] = memref.subview %[[ALLOC_5]][0] {{\[}}%[[CONSTANT_4]]] [1] : memref<?xindex> to memref<?xindex, strided<[1]>>
 // CHECK-NEXT:        memref.copy %[[ALLOC_3]], %[[SUBVIEW_2]] : memref<?xindex> to memref<?xindex, strided<[1]>>
-// CHECK-NEXT:        %[[SUBVIEW_3:.*]] = memref.subview %[[ALLOC_5]]{{\[}}%[[CONSTANT_4]]] [2] [1] : memref<?xindex> to memref<2xindex, strided<[1], offset: ?>>
-// CHECK-NEXT:        memref.copy %[[ALLOC_4]], %[[SUBVIEW_3]] : memref<2xindex> to memref<2xindex, strided<[1], offset: ?>>
+// CHECK-NEXT:        %[[SUBVIEW_3:.*]] = memref.subview %[[ALLOC_5]]{{\[}}%[[CONSTANT_4]]] {{\[}}%[[CONSTANT_5]]] [1] : memref<?xindex> to memref<?xindex, strided<[1], offset: ?>>
+// CHECK-NEXT:        memref.copy %[[ALLOC_4]], %[[SUBVIEW_3]] : memref<2xindex> to memref<?xindex, strided<[1], offset: ?>>
 // CHECK-NEXT:        %[[ALLOC_6:.*]] = memref.alloc() {alignment = 64 : i64} : memref<2x1xf16, #hipsr.mem<device>>
 // CHECK-NEXT:        %[[ALLOC_7:.*]] = memref.alloc() {alignment = 64 : i64} : memref<2x1xf32, #hipsr.mem<device>>
 // CHECK-NEXT:        %[[ALLOC_8:.*]] = memref.alloc() {alignment = 64 : i64} : memref<2xi64, #hipsr.mem<host>>
@@ -74,7 +79,7 @@
 // CHECK-NEXT:        } : memref<2xi64, #hipsr.mem<host>>
 // CHECK-NEXT:        hipsr.preserve_shape %[[ALLOC_5]], %[[ALLOC_6]] : memref<?xindex>, memref<2x1xf16, #hipsr.mem<device>>
 // CHECK-NEXT:        hipsr.preserve_shape %[[ALLOC_5]], %[[ALLOC_7]] : memref<?xindex>, memref<2x1xf32, #hipsr.mem<device>>
-// CHECK-NEXT:        hipsr.preserve_shape %[[ALLOC_0]], %[[COMPUTE_0]] : memref<1xindex>, memref<2xi64, #hipsr.mem<host>>
+// CHECK-NEXT:        hipsr.preserve_shape %[[EXTENT_CAST_0]], %[[COMPUTE_0]] : memref<?xindex>, memref<2xi64, #hipsr.mem<host>>
 // CHECK-NEXT:        hipsr.pool_domain_yield %[[ALLOC_7]], %[[ALLOC_7]], %[[ALLOC_8]], %[[COMPUTE_0]], %[[CONSTANT_1]] : memref<2x1xf32, #hipsr.mem<device>>, memref<2x1xf32, #hipsr.mem<device>>, memref<2xi64, #hipsr.mem<host>>, memref<2xi64, #hipsr.mem<host>>, memref<4x2xf32, #hipsr.mem<device>>
 // CHECK-NEXT:      } -> memref<2x1xf32, #hipsr.mem<device>>, memref<2x1xf32, #hipsr.mem<device>>, memref<2xi64, #hipsr.mem<host>>, memref<2xi64, #hipsr.mem<host>>, memref<4x2xf32, #hipsr.mem<device>> {domain_id = 0 : i64}
 // CHECK-NEXT:      %[[POOL_DOMAIN_1:.*]] = hipsr.pool_domain(%[[ARG0]], %[[VAL_7:.*]]#0, %[[VAL_7]]#2, %[[VAL_7]]#1, %[[VAL_7]]#3, %[[VAL_7]]#4 : !hipsr.context, memref<2x1xf32, #hipsr.mem<device>>, memref<2xi64, #hipsr.mem<host>>, memref<2x1xf32, #hipsr.mem<device>>, memref<2xi64, #hipsr.mem<host>>, memref<4x2xf32, #hipsr.mem<device>>) {
@@ -113,12 +118,12 @@
 // CHECK-NEXT:          }
 // CHECK-NEXT:          memref.store %[[IF_3]], %[[ALLOC_11]]{{\[}}%[[VAL_14]]] : memref<?xindex>
 // CHECK-NEXT:        }
-// CHECK-NEXT:        %[[CAST_0:.*]] = memref.cast %[[ALLOC_11]] : memref<?xindex> to memref<2xindex>
 // CHECK-NEXT:        %[[ALLOC_12:.*]] = memref.alloc() {alignment = 64 : i64} : memref<2xindex>
 // CHECK-NEXT:        memref.store %[[CONSTANT_10]], %[[ALLOC_12]]{{\[}}%[[CONSTANT_11]]] : memref<2xindex>
 // CHECK-NEXT:        memref.store %[[CONSTANT_13]], %[[ALLOC_12]]{{\[}}%[[CONSTANT_12]]] : memref<2xindex>
-// CHECK-NEXT:        %[[SUBVIEW_4:.*]] = memref.subview %[[CAST_0]]{{\[}}%[[CONSTANT_11]]] {{\[}}%[[CONSTANT_11]]] {{\[}}%[[CONSTANT_12]]] : memref<2xindex> to memref<?xindex, strided<[?], offset: ?>>
-// CHECK-NEXT:        %[[SUBVIEW_5:.*]] = memref.subview %[[ALLOC_12]]{{\[}}%[[CONSTANT_11]]] {{\[}}%[[CONSTANT_11]]] {{\[}}%[[CONSTANT_12]]] : memref<2xindex> to memref<?xindex, strided<[?], offset: ?>>
+// CHECK-NEXT:        %[[EXTENT_CAST_3:.*]] = memref.cast %[[ALLOC_12]] : memref<2xindex> to memref<?xindex>
+// CHECK-NEXT:        %[[SUBVIEW_4:.*]] = memref.subview %[[ALLOC_11]]{{\[}}%[[CONSTANT_11]]] {{\[}}%[[CONSTANT_11]]] {{\[}}%[[CONSTANT_12]]] : memref<?xindex> to memref<?xindex, strided<[?], offset: ?>>
+// CHECK-NEXT:        %[[SUBVIEW_5:.*]] = memref.subview %[[EXTENT_CAST_3]]{{\[}}%[[CONSTANT_11]]] {{\[}}%[[CONSTANT_11]]] {{\[}}%[[CONSTANT_12]]] : memref<?xindex> to memref<?xindex, strided<[?], offset: ?>>
 // CHECK-NEXT:        %[[ALLOC_13:.*]] = memref.alloc(%[[CONSTANT_11]]) {alignment = 64 : i64} : memref<?xindex>
 // CHECK-NEXT:        scf.for %[[VAL_15:.*]] = %[[CONSTANT_11]] to %[[CONSTANT_11]] step %[[CONSTANT_12]] {
 // CHECK-NEXT:          %[[CMPI_6:.*]] = arith.cmpi ult, %[[VAL_15]], %[[CONSTANT_11]] : index
@@ -140,19 +145,20 @@
 // CHECK-NEXT:          memref.store %[[IF_5]], %[[ALLOC_13]]{{\[}}%[[VAL_15]]] : memref<?xindex>
 // CHECK-NEXT:        }
 // CHECK-NEXT:        %[[LOAD_8:.*]] = memref.load %[[ALLOC_11]]{{\[}}%[[CONSTANT_11]]] : memref<?xindex>
+// CHECK-NEXT:        %[[EXTENT_LOAD_3:.*]] = memref.load %[[ALLOC_12]]{{\[}}%[[CONSTANT_12]]] : memref<2xindex>
 // CHECK-NEXT:        %[[ALLOC_14:.*]] = memref.alloc() {alignment = 64 : i64} : memref<2xindex>
 // CHECK-NEXT:        memref.store %[[LOAD_8]], %[[ALLOC_14]]{{\[}}%[[CONSTANT_11]]] : memref<2xindex>
-// CHECK-NEXT:        memref.store %[[CONSTANT_13]], %[[ALLOC_14]]{{\[}}%[[CONSTANT_12]]] : memref<2xindex>
+// CHECK-NEXT:        memref.store %[[EXTENT_LOAD_3]], %[[ALLOC_14]]{{\[}}%[[CONSTANT_12]]] : memref<2xindex>
 // CHECK-NEXT:        %[[ALLOC_15:.*]] = memref.alloc(%[[CONSTANT_13]]) {alignment = 64 : i64} : memref<?xindex>
 // CHECK-NEXT:        %[[SUBVIEW_6:.*]] = memref.subview %[[ALLOC_15]][0] {{\[}}%[[CONSTANT_11]]] [1] : memref<?xindex> to memref<?xindex, strided<[1]>>
 // CHECK-NEXT:        memref.copy %[[ALLOC_13]], %[[SUBVIEW_6]] : memref<?xindex> to memref<?xindex, strided<[1]>>
-// CHECK-NEXT:        %[[SUBVIEW_7:.*]] = memref.subview %[[ALLOC_15]]{{\[}}%[[CONSTANT_11]]] [2] [1] : memref<?xindex> to memref<2xindex, strided<[1], offset: ?>>
-// CHECK-NEXT:        memref.copy %[[ALLOC_14]], %[[SUBVIEW_7]] : memref<2xindex> to memref<2xindex, strided<[1], offset: ?>>
+// CHECK-NEXT:        %[[SUBVIEW_7:.*]] = memref.subview %[[ALLOC_15]]{{\[}}%[[CONSTANT_11]]] {{\[}}%[[CONSTANT_13]]] [1] : memref<?xindex> to memref<?xindex, strided<[1], offset: ?>>
+// CHECK-NEXT:        memref.copy %[[ALLOC_14]], %[[SUBVIEW_7]] : memref<2xindex> to memref<?xindex, strided<[1], offset: ?>>
 // CHECK-NEXT:        %[[ALLOC_16:.*]] = memref.alloc() {alignment = 64 : i64} : memref<2x4xf32, #hipsr.mem<device>>
 // CHECK-NEXT:        %[[ALLOC_OUTPUT_0:.*]] = hipsr.alloc_output(%[[VAL_8]]) {out_idx = 0 : i64} : memref<2x2xf32, #hipsr.mem<device>>
 // CHECK-NEXT:        hipsr.expand(%[[VAL_8]]) ins(%[[VAL_11]], %[[VAL_12]] : memref<2x1xf32, #hipsr.mem<device>>, memref<2xi64, #hipsr.mem<host>>) outs(%[[ALLOC_16]] : memref<2x4xf32, #hipsr.mem<device>>)
 // CHECK-NEXT:        hipsr.matmul(%[[VAL_8]]) ins(%[[ALLOC_16]], %[[VAL_13]] : memref<2x4xf32, #hipsr.mem<device>>, memref<4x2xf32, #hipsr.mem<device>>) outs(%[[ALLOC_OUTPUT_0]] : memref<2x2xf32, #hipsr.mem<device>>)
-// CHECK-NEXT:        hipsr.preserve_shape %[[CAST_0]], %[[ALLOC_16]] : memref<2xindex>, memref<2x4xf32, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.preserve_shape %[[ALLOC_11]], %[[ALLOC_16]] : memref<?xindex>, memref<2x4xf32, #hipsr.mem<device>>
 // CHECK-NEXT:        hipsr.preserve_shape %[[ALLOC_15]], %[[ALLOC_OUTPUT_0]] : memref<?xindex>, memref<2x2xf32, #hipsr.mem<device>>
 // CHECK-NEXT:        hipsr.pool_domain_yield %[[ALLOC_OUTPUT_0]] : memref<2x2xf32, #hipsr.mem<device>>
 // CHECK-NEXT:      } -> memref<2x2xf32, #hipsr.mem<device>> {domain_id = 1 : i64}

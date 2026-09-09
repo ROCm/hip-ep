@@ -118,7 +118,7 @@ struct ConstantBufferizableModel
                                           SmallVector<Value> &) const {
     auto tensorType = cast<TensorType>(value.getType());
     std::optional<Attribute> memorySpace =
-        options.defaultMemorySpaceFn(tensorType);
+        options.defaultMemorySpaceFn(cast<TensorLikeType>(tensorType));
     if (!memorySpace) {
       return op->emitError("could not infer memory space");
     }

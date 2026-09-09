@@ -150,6 +150,19 @@ set(BUILD_SHARED_LIBS ${_saved_bsl_cpptrace})
 #   in-tree-defined helper functions (mlir_tablegen, llvm_map_components_to_libnames,
 #   add_mlir_dialect, ...). See llvm/docs/CMake.rst + the FOSDEM MLIR-dialect talk.
 #
+# Only LLVM major from cmake/deps.txt is accepted (llvmorg-23.1.0 -> 23).
+# TheRock's ROCm LLVM, an LLVM 22 prefix, or any other major is ignored so
+# configure cannot silently mix ABI-incompatible toolchains.
+if(DEP_HASH_llvm MATCHES "llvmorg-([0-9]+)\\.([0-9]+)\\.([0-9]+)")
+  set(_HIPDNN_LLVM_REQUIRED_MAJOR "${CMAKE_MATCH_1}")
+  set(_HIPDNN_LLVM_PINNED_VERSION
+      "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}.${CMAKE_MATCH_3}")
+else()
+  message(FATAL_ERROR
+    "Unsupported LLVM pin '${DEP_HASH_llvm}'; expected llvmorg-<major>.<minor>.<patch>")
+endif()
+message(STATUS "hip-ep requires LLVM ${_HIPDNN_LLVM_REQUIRED_MAJOR} (${DEP_HASH_llvm})")
+#
 # The sticky HIPDNN_LLVM_EMBEDDED flag makes reconfigures of a from-source tree
 # safe: morphizen's deps.cmake caches MLIR_DIR/LLVM_DIR pointing at the build
 # tree, and a plain find_package(MLIR) on the next configure would then fail in
@@ -160,13 +173,29 @@ if(HIPDNN_LLVM_EMBEDDED)
   unset(LLVM_DIR CACHE)
 endif()
 
+set(_hipdnn_llvm_from_prefix FALSE)
 if(NOT HIPDNN_LLVM_EMBEDDED)
-  find_package(MLIR CONFIG QUIET)
+  # Give CMake the required major up front. This prevents an incompatible
+  # package from defining imported targets before we decide to use the
+  # pinned source fallback.
+  find_package(MLIR ${_HIPDNN_LLVM_REQUIRED_MAJOR} CONFIG QUIET)
+  if(MLIR_FOUND)
+    find_package(LLVM ${_HIPDNN_LLVM_REQUIRED_MAJOR} REQUIRED CONFIG)
+    if(LLVM_VERSION_MAJOR EQUAL _HIPDNN_LLVM_REQUIRED_MAJOR)
+      set(_hipdnn_llvm_from_prefix TRUE)
+      message(STATUS "Using LLVM ${LLVM_PACKAGE_VERSION} from ${LLVM_DIR}")
+    else()
+      message(STATUS
+        "Ignoring LLVM ${LLVM_PACKAGE_VERSION} at ${LLVM_DIR}; "
+        "hip-ep requires LLVM ${_HIPDNN_LLVM_REQUIRED_MAJOR} (${DEP_HASH_llvm})")
+      unset(MLIR_DIR CACHE)
+      unset(LLVM_DIR CACHE)
+      unset(MLIR_FOUND)
+    endif()
+  endif()
 endif()
 
-if(MLIR_FOUND AND NOT HIPDNN_LLVM_EMBEDDED)
-  find_package(LLVM REQUIRED CONFIG)
-else()
+if(NOT _hipdnn_llvm_from_prefix)
   message(STATUS "LLVM/MLIR not found; building from source (${DEP_HASH_llvm})")
   # clang is built in-tree so a from-source bootstrap is fully self-contained:
   # lib/Runtime gets a version-matched clang for runtime bitcode with no
@@ -255,6 +284,21 @@ else()
     "${llvm-project_BINARY_DIR}/tools/mlir/include"
     "${llvm-project_SOURCE_DIR}/lld/include"
     "${llvm-project_BINARY_DIR}/tools/lld/include")
+endif()
+
+# LLVM's version variables are directory-scoped when it is brought in with
+# FetchContent. Publish the exact pinned version for parent consumers and for
+# the guard below, including subsequent configures of the same build tree.
+if(HIPDNN_LLVM_EMBEDDED)
+  set(LLVM_VERSION_MAJOR "${_HIPDNN_LLVM_REQUIRED_MAJOR}")
+  set(LLVM_PACKAGE_VERSION "${_HIPDNN_LLVM_PINNED_VERSION}")
+endif()
+
+if(NOT LLVM_VERSION_MAJOR EQUAL _HIPDNN_LLVM_REQUIRED_MAJOR)
+  message(FATAL_ERROR
+    "hip-ep requires LLVM ${_HIPDNN_LLVM_REQUIRED_MAJOR} (pinned ${DEP_HASH_llvm}); "
+    "got LLVM_VERSION_MAJOR='${LLVM_VERSION_MAJOR}' "
+    "(LLVM_PACKAGE_VERSION=${LLVM_PACKAGE_VERSION}).")
 endif()
 
 # ===========================================================================

@@ -72,20 +72,37 @@ endif()
 # find_library for legacy trees that omit LLDConfig.cmake.
 set(lld_libs "")
 if(WIN32)
-    find_package(LLD CONFIG QUIET)
-    if(LLD_FOUND)
-        message(STATUS "Found LLD via CONFIG package: ${LLD_DIR}")
+    if(TARGET lldCommon AND TARGET lldCOFF)
+        message(STATUS "Using in-tree LLVM ${LLVM_PACKAGE_VERSION} LLD targets")
         set(lld_libs lldCommon lldCOFF)
     else()
-        message(STATUS "LLD CONFIG package not found; falling back to find_library")
-        find_library(LLD_COFF_LIB NAMES lldCOFF PATHS ${LLVM_LIBRARY_DIRS} REQUIRED)
-        find_library(LLD_COMMON_LIB NAMES lldCommon PATHS ${LLVM_LIBRARY_DIRS} REQUIRED)
+        # Only search beside the already-selected LLVM package. A broad search
+        # can pick TheRock's ABI-incompatible ROCm LLD.
+        get_filename_component(_llvm_cmake_parent "${LLVM_DIR}" DIRECTORY)
+        find_package(LLD ${_HIPDNN_LLVM_REQUIRED_MAJOR} CONFIG QUIET
+            PATHS "${_llvm_cmake_parent}/lld"
+            NO_DEFAULT_PATH)
+    endif()
+    if(LLD_FOUND AND NOT lld_libs)
+        message(STATUS "Found LLD via CONFIG package: ${LLD_DIR}")
+        set(lld_libs lldCommon lldCOFF)
+    elseif(NOT lld_libs)
+        message(STATUS "LLD CONFIG package not found; searching selected LLVM library directory")
+        find_library(LLD_COFF_LIB NAMES lldCOFF
+            PATHS ${LLVM_LIBRARY_DIRS} NO_DEFAULT_PATH REQUIRED)
+        find_library(LLD_COMMON_LIB NAMES lldCommon
+            PATHS ${LLVM_LIBRARY_DIRS} NO_DEFAULT_PATH REQUIRED)
         list(APPEND lld_libs ${LLD_COFF_LIB} ${LLD_COMMON_LIB})
     endif()
 endif()
 
 # LLVMDTLTO was split from LLVMLTO in LLVM 22.1; link it when present.
-find_library(LLVM_DTLTO_LIB NAMES LLVMDTLTO PATHS ${LLVM_LIBRARY_DIRS})
+if(TARGET LLVMDTLTO)
+    set(LLVM_DTLTO_LIB LLVMDTLTO)
+else()
+    find_library(LLVM_DTLTO_LIB NAMES LLVMDTLTO
+        PATHS ${LLVM_LIBRARY_DIRS} NO_DEFAULT_PATH)
+endif()
 
 # Link against required libraries
 target_link_libraries(HipTargetLLVM PUBLIC

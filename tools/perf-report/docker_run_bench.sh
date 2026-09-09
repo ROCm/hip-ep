@@ -43,7 +43,7 @@
 # Env knobs (override on the command line):
 #   WORKSPACE   parent dir bind-mounted into the container (default: auto-detected
 #               as parent of the repo root, matching docker/run.sh's convention)
-#   IMAGE       docker image tag (default: hipdnn-ep-build:llvm22-noble)
+#   IMAGE       docker image tag (default: hipdnn-ep-build:llvm23-noble)
 #   REL_BENCH   path of the bench script to exec inside the container, relative
 #               to the repo root (default: tools/perf-report/run_bench.sh).
 #               Override to invoke against a different bench entry point, e.g.
@@ -73,7 +73,7 @@ if [ "$SOURCE_DIR" = "/" ]; then
 fi
 
 : "${WORKSPACE:=$(cd "$SOURCE_DIR/.." && pwd)}"
-: "${IMAGE:=hipdnn-ep-build:llvm22-noble}"
+: "${IMAGE:=hipdnn-ep-build:llvm23-noble}"
 : "${REL_BENCH:=tools/perf-report/run_bench.sh}"   # path inside the repo to invoke
 
 # Fail fast if the bench script doesn't exist on disk. Without this check

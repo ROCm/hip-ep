@@ -29,15 +29,19 @@
 // CHECK-NEXT:    %[[C4:.+]] = arith.constant 4 : index
 // CHECK-NEXT:    %[[C0:.+]] = arith.constant 0 : index
 // CHECK-NEXT:    %[[SA:.+]] = shape.shape_of %[[A]] : tensor<?x4xf16> -> tensor<2xindex>
+// CHECK-NEXT:    %[[SA_CAST:.+]] = tensor.cast %[[SA]] : tensor<2xindex> to tensor<?xindex>
 // CHECK-NEXT:    %[[SB:.+]] = shape.shape_of %[[B]] : tensor<8x?x4xf16> -> tensor<3xindex>
-// CHECK-NEXT:    %[[BCAST:.+]] = shape.broadcast %[[SA]], %[[SB]] : tensor<2xindex>, tensor<3xindex> -> tensor<3xindex>
-// CHECK-NEXT:    %[[D0:.+]] = shape.get_extent %[[BCAST]], %[[C0]] : tensor<3xindex>, index -> index
+// CHECK-NEXT:    %[[SB_CAST:.+]] = tensor.cast %[[SB]] : tensor<3xindex> to tensor<?xindex>
+// CHECK-NEXT:    %[[BCAST:.+]] = shape.broadcast %[[SA_CAST]], %[[SB_CAST]] : tensor<?xindex>, tensor<?xindex> -> tensor<?xindex>
+// CHECK-NEXT:    %[[D0:.+]] = shape.get_extent %[[BCAST]], %[[C0]] : tensor<?xindex>, index -> index
 // CHECK-NEXT:    %[[SA2:.+]] = shape.shape_of %[[A]] : tensor<?x4xf16> -> tensor<2xindex>
-// CHECK-NEXT:    %[[CAT:.+]] = tensor.concat dim(0) %[[SA2]], %[[BCAST]] : (tensor<2xindex>, tensor<3xindex>) -> tensor<5xindex>
-// CHECK-NEXT:    %[[COUNT:.+]] = shape.num_elements %[[CAT]] : tensor<5xindex> -> index
+// CHECK-NEXT:    %[[SA2_CAST:.+]] = tensor.cast %[[SA2]] : tensor<2xindex> to tensor<?xindex>
+// CHECK-NEXT:    %[[CAT:.+]] = tensor.concat dim(0) %[[SA2_CAST]], %[[BCAST]] : (tensor<?xindex>, tensor<?xindex>) -> tensor<?xindex>
+// CHECK-NEXT:    %[[COUNT:.+]] = shape.num_elements %[[CAT]] : tensor<?xindex> -> index
 // CHECK-NEXT:    %[[SHAPE:.+]] = tensor.from_elements %[[D0]], %[[C4]] : tensor<2xindex>
+// CHECK-NEXT:    %[[SHAPE_CAST:.+]] = tensor.cast %[[SHAPE]] : tensor<2xindex> to tensor<?xindex>
 // CHECK-NEXT:    %[[INIT:.+]] = tensor.empty(%[[D0]]) : tensor<?x4xf16, #hipsr.mem<device>>
-// CHECK-NEXT:    hipsr.preserve_shape %[[SHAPE]], %[[INIT]] : tensor<2xindex>, tensor<?x4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:    hipsr.preserve_shape %[[SHAPE_CAST]], %[[INIT]] : tensor<?xindex>, tensor<?x4xf16, #hipsr.mem<device>>
 // CHECK-NEXT:    return %[[INIT]], %[[COUNT]] : tensor<?x4xf16, #hipsr.mem<device>>, index
 // CHECK-NEXT:  }
 func.func @convert_shape_ops(%a: tensor<?x4xf16>, %b: tensor<8x?x4xf16>)

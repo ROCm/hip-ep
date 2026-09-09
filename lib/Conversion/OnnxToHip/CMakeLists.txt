@@ -6,16 +6,20 @@
 # ============================================================================
 # PDLL Pattern Compilation
 # ============================================================================
-# Locate mlir-pdll. LLVM_TOOLS_BINARY_DIR is exported by find_package(MLIR) and
-# covers both the prebuilt SDK and an installed LLVM; the _deps path covers an
-# LLVM built inside this project's FetchContent tree. Default search paths stay
-# enabled so a tool on PATH is still usable.
-find_program(MLIR_PDLL_EXE mlir-pdll
-    HINTS
-        "${CMAKE_BINARY_DIR}/_deps/llvm-project-build/bin"
-        "${LLVM_TOOLS_BINARY_DIR}"
-        "${LLVM_BINARY_DIR}/bin"
-)
+# Use the in-tree LLVM target when LLVM is provided through FetchContent. The
+# executable does not exist yet at configure time, and naming the target in a
+# custom command adds the required build dependency automatically. For an
+# installed toolchain, search only the selected LLVM 23 directories.
+if(TARGET mlir-pdll)
+    set(MLIR_PDLL_EXE mlir-pdll)
+else()
+    find_program(MLIR_PDLL_EXE mlir-pdll
+        HINTS
+            "${LLVM_TOOLS_BINARY_DIR}"
+            "${LLVM_BINARY_DIR}/bin"
+        NO_DEFAULT_PATH
+    )
+endif()
 
 if(MLIR_PDLL_EXE)
     message(STATUS "OnnxToHip: mlir-pdll found: ${MLIR_PDLL_EXE}")
