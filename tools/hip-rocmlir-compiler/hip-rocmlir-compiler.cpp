@@ -54,6 +54,7 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <dlfcn.h>
 #include <string>
 
@@ -280,20 +281,25 @@ static int64_t perfConfigField(llvm::StringRef perf, llvm::StringRef name,
 
 // Drive the rocMLIR flow inside the .so on the serialized tosa module:
 //   1. high-level pipeline (tosa -> rock.gemm)
-//   2. enumerate the perfConfig search space; take the first entry and affix it
-//      to the gemm op (as the `perf_config` string attribute)
+//   2. affix a perfConfig to the gemm op (the `perf_config` string attribute):
+//      either the caller-supplied `userPerfConfig`, or -- when empty -- the
+//      first entry enumerated from the tuning search space.
 //   3. backend pipeline (rock -> LLVM / binary)
-// On success, returns the compiled GPU binary in `binary` and the kernel launch
-// geometry in `gridSize`/`blockSize`. `moduleText` is generic-form MLIR text.
+// When `stopAfterHighLevel` is set, stops after step 1 and returns the printed
+// rock MLIR in `out.highLevelMlir` (steps 2-3 are skipped). Otherwise returns
+// the compiled GPU binary in `binary` and the kernel launch geometry in
+// `gridSize`/`blockSize`. `moduleText` is generic-form MLIR text.
 struct CompiledKernel {
   std::string binary;
   int64_t gridSize = 0;
   int64_t blockSize = 0;
+  std::string highLevelMlir;
 };
 
 static bool runRocmlirInSo(const std::string &moduleText,
                            const std::string &soPath, const std::string &arch,
-                           CompiledKernel &out) {
+                           const std::string &userPerfConfig,
+                           bool stopAfterHighLevel, CompiledKernel &out) {
   using namespace rockcapi;
   Api api;
   if (!load(api, soPath))
@@ -337,11 +343,34 @@ static bool runRocmlirInSo(const std::string &moduleText,
       return fail("rocMLIR high-level pipeline failed");
   }
 
-  // 2. Enumerate the perfConfig search space and affix the first entry to the
-  //    gemm op. mlirRockTuningSpaceCreate reads the gemm problem out of the
-  //    module; mlirRockTuningSetFromStr stamps `perf_config` onto the gemm op.
+  // Stop after the high-level pipeline: capture the rock MLIR text and return.
+  if (stopAfterHighLevel) {
+    auto appendCb = [](MlirStringRef s, void *userData) {
+      static_cast<std::string *>(userData)->append(s.data, s.length);
+    };
+    api.operationPrint(moduleOp, appendCb, &out.highLevelMlir);
+    api.moduleDestroy(module);
+    api.contextDestroy(ctx);
+    api.dialectRegistryDestroy(registry);
+    return true;
+  }
+
+  // 2. Affix a perfConfig to the gemm op (as the `perf_config` string attr).
+  //    A caller-supplied config is used verbatim; otherwise take the first
+  //    entry enumerated from the tuning search space. mlirRockTuningSetFromStr
+  //    stamps `perf_config` onto the gemm op.
   char perfConfig[1024]; // ROCMLIR_TUNING_PARAM_STRING_BUFSZ
-  {
+  if (!userPerfConfig.empty()) {
+    if (userPerfConfig.size() >= sizeof(perfConfig))
+      return fail("supplied perfConfig string too long");
+    std::memcpy(perfConfig, userPerfConfig.data(), userPerfConfig.size());
+    perfConfig[userPerfConfig.size()] = '\0';
+    llvm::errs() << "[hip-rocmlir-compiler] affixing supplied perfConfig: "
+                 << perfConfig << "\n";
+    MlirStringRef perf{perfConfig, userPerfConfig.size()};
+    if (!api.rockTuningSetFromStr(module, perf))
+      return fail("failed to affix supplied perfConfig to the gemm op");
+  } else {
     MlirRockTuningSpace space =
         api.rockTuningSpaceCreate(module, RocmlirTuningParamSetKindFull);
     unsigned num = api.rockTuningGetNumParams(space);
@@ -440,21 +469,41 @@ int main(int argc, char **argv) {
 
   std::string inputFilename;
   std::string outputPath;
+  std::string userPerfConfig;
+  bool dumpHighLevel = false;
   for (int i = 1; i < argc; ++i) {
-    if (std::string(argv[i]) == "-o" && i + 1 < argc) {
+    std::string arg = argv[i];
+    if (arg == "-o" && i + 1 < argc) {
       outputPath = argv[++i];
+    } else if (arg == "--perf-config" && i + 1 < argc) {
+      userPerfConfig = argv[++i];
+    } else if (arg == "--dump-high-level") {
+      dumpHighLevel = true;
     } else if (argv[i][0] != '-') {
       inputFilename = argv[i];
     }
   }
   if (inputFilename.empty() || outputPath.empty()) {
-    llvm::errs() << "Usage: " << argv[0] << " <input.onnx.mlir> -o <output.bc>\n"
-                 << "  Runs ONNX->HIP head passes, compiles the fused GEMM via\n"
-                 << "  the rocMLIR pipeline (librockCompiler.so), embeds the GPU\n"
-                 << "  binary into hip.rocmlir, runs the ONNX->HIP tail +\n"
-                 << "  HIP->LLVM lowering, and emits LLVM bitcode to <output.bc>.\n"
-                 << "  Set ROCK_COMPILER_SO to override the .so path "
-                    "(default: build/librockCompiler.so).\n";
+    llvm::errs()
+        << "Usage: " << argv[0]
+        << " <input.onnx.mlir> -o <output> [options]\n"
+        << "  Runs ONNX->HIP head passes, compiles the fused GEMM via\n"
+        << "  the rocMLIR pipeline (librockCompiler.so), embeds the GPU\n"
+        << "  binary into hip.rocmlir, runs the ONNX->HIP tail +\n"
+        << "  HIP->LLVM lowering, and emits LLVM bitcode to <output>.\n"
+        << "\n"
+        << "Options:\n"
+        << "  --perf-config <str>  Affix this perfConfig to the gemm op "
+           "instead of\n"
+        << "                       enumerating the tuning space and taking "
+           "the first.\n"
+        << "  --dump-high-level    Stop after the rocMLIR high-level pipeline "
+           "and\n"
+        << "                       write the rock MLIR (text) to <output> "
+           "instead of\n"
+        << "                       the compiled bitcode.\n"
+        << "  Set ROCK_COMPILER_SO to override the .so path "
+           "(default: build/librockCompiler.so).\n";
     return 1;
   }
 
@@ -537,8 +586,24 @@ int main(int argc, char **argv) {
   }
 
   CompiledKernel compiled;
-  if (!runRocmlirInSo(moduleText, resolveSoPath(), resolveArch(), compiled))
+  if (!runRocmlirInSo(moduleText, resolveSoPath(), resolveArch(),
+                      userPerfConfig, dumpHighLevel, compiled))
     return 1;
+
+  // --dump-high-level: write the rock MLIR (text) to <output> and stop.
+  if (dumpHighLevel) {
+    std::error_code ec;
+    llvm::raw_fd_ostream os(outputPath, ec);
+    if (ec) {
+      llvm::errs() << "error: cannot open '" << outputPath
+                   << "': " << ec.message() << "\n";
+      return 1;
+    }
+    os << compiled.highLevelMlir << "\n";
+    llvm::errs() << "[hip-rocmlir-compiler] wrote rock high-level MLIR to "
+                 << outputPath << "\n";
+    return 0;
+  }
 
   // Stage 3: embed the compiled artifact back into `module`'s `hip.rocmlir`
   // dispatch op (kernel_binary + grid_size + block_size), then delete the
