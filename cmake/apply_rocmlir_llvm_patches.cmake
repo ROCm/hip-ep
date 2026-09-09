@@ -1,6 +1,6 @@
 ##
-## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
-## Licensed under the MIT License.
+# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
 ##
 
 if(NOT DEFINED LLVM_SOURCE_DIR OR NOT EXISTS "${LLVM_SOURCE_DIR}/llvm/CMakeLists.txt")

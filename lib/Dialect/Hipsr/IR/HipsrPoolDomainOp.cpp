@@ -21,7 +21,7 @@ PoolDomainOp::getEntrySuccessorOperands(RegionSuccessor successor) {
 
 ValueRange PoolDomainOp::getSuccessorInputs(RegionSuccessor successor) {
   return successor.isParent() ? ValueRange(getResults())
-                               : ValueRange(getBody().getArguments());
+                              : ValueRange(getBody().getArguments());
 }
 
 void PoolDomainOp::getSuccessorRegions(

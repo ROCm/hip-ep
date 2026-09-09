@@ -20,7 +20,7 @@ OperandRange ComputeOp::getEntrySuccessorOperands(RegionSuccessor successor) {
 
 ValueRange ComputeOp::getSuccessorInputs(RegionSuccessor successor) {
   return successor.isParent() ? ValueRange(getResults())
-                               : ValueRange(getBody().getArguments());
+                              : ValueRange(getBody().getArguments());
 }
 
 void ComputeOp::getSuccessorRegions(RegionBranchPoint point,

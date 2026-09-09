@@ -269,13 +269,14 @@ void testFileResourceBytesStreamed() {
   bool ok = false;
   std::string key = "file|" + path.generic_string() + "|0";
   std::vector<char> window(5);
-  auto module = h.run("func.func @f() -> tensor<5xi8, #hipsr.mem<device>> {\n"
-                      "  %0 = hipsr.constant {value = dense_resource<\"" +
-                          key +
-                          "\"> : tensor<5xi8>} : tensor<5xi8, #hipsr.mem<device>>\n"
-                          "  return %0 : tensor<5xi8, #hipsr.mem<device>>\n"
-                          "}\n",
-                      &fs, ok, {{key, window}});
+  auto module =
+      h.run("func.func @f() -> tensor<5xi8, #hipsr.mem<device>> {\n"
+            "  %0 = hipsr.constant {value = dense_resource<\"" +
+                key +
+                "\"> : tensor<5xi8>} : tensor<5xi8, #hipsr.mem<device>>\n"
+                "  return %0 : tensor<5xi8, #hipsr.mem<device>>\n"
+                "}\n",
+            &fs, ok, {{key, window}});
   check(ok, "file resource: pass succeeds");
 
   const std::vector<char> &blob = fs.files["constants.bin"];
