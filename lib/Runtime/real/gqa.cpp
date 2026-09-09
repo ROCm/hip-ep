@@ -349,6 +349,14 @@ static int gqa_forward_fused(
     const void *head_sink = nullptr, bool use_smooth_softmax = false,
     int local_window_size = -1) {
 
+  // The autotune policy is built during inference_init, before the EP forwards
+  // the session's provider options, so the mode is decided here instead --
+  // from the environment variable and the option together, ahead of the decode
+  // and prefill reads below. Settles once; later calls take the decided mode.
+  hipdnn_ep::gqa_autotune_resolve_mode(
+      state->gqa_autotune_policy,
+      hipdnn_ep_runtime_get_provider_option(state, "gqa_autotune_mode"));
+
   // Any non-fp16 cache reads/writes quantized bytes on the concat/append/decode
   // path; the specific scheme is carried by kv_format (extensible to INT4/FP8).
   const bool kv_quantized = (kv_format != KvCacheFormat::Fp16);

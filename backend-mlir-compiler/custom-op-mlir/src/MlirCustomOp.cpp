@@ -664,6 +664,13 @@ MlirCustomOp::MlirCustomOp(
   auto kind = determine_artifact_kind(metadata_.artifact_format());
   inference_state_ =
       customop::InferenceState::create(artifact_bytes, fs.get(), kind);
+
+  // Provider options are enumerable and session-scoped. Copy the complete
+  // effective map into RuntimeState once, after inference_init has created the
+  // state and before the first Compute. Runtime consumers ignore unknown keys,
+  // so adding another runtime option does not require changing this EP bridge.
+  for (const auto &[key, value] : context->get_all_provider_options())
+    inference_state_->set_provider_option(key.c_str(), value.c_str());
 }
 
 MlirCustomOp::~MlirCustomOp() {
