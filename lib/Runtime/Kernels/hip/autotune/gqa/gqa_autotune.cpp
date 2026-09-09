@@ -45,8 +45,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -85,6 +87,18 @@ bool logOn() {
 #endif
   }();
   return on;
+}
+
+// resolve() runs once per dispatch -- once per token per layer for decode -- so
+// logging every call floods a served model with tens of thousands of identical
+// lines. Emit each distinct line once per process instead: the diagnostic still
+// shows every shape's resolution (exact/nearest/fallback/heuristic) without the
+// per-token repetition.
+bool logLineFirstSeen(const char *line) {
+  static std::mutex m;
+  static std::unordered_set<std::string> seen;
+  std::lock_guard<std::mutex> lk(m);
+  return seen.insert(line).second;
 }
 
 // ---------------------------------------------------------------------------
@@ -665,13 +679,17 @@ void hip_gqa_autotune_resolve_decode(void *policy,
         out->config = cfg;
         out->source = exact ? GqaTuneSource::Exact : GqaTuneSource::Nearest;
         out->distance = std::sqrt(best_d2);
-        if (logOn())
-          fprintf(stderr,
-                  "[gqa-lut] decode %s H=%d G=%d d=%d skv=%d -> wmma=%d "
-                  "splits=%d bkv=%d d=%.3f\n",
-                  exact ? "exact" : "nearest", req->num_heads,
-                  req->kv_num_heads, req->head_dim, eff, cfg.use_wmma,
-                  cfg.splits, cfg.bkv, out->distance);
+        if (logOn()) {
+          char buf[192];
+          snprintf(buf, sizeof(buf),
+                   "[gqa-lut] decode %s H=%d G=%d d=%d skv=%d -> wmma=%d "
+                   "splits=%d bkv=%d d=%.3f",
+                   exact ? "exact" : "nearest", req->num_heads,
+                   req->kv_num_heads, req->head_dim, eff, cfg.use_wmma,
+                   cfg.splits, cfg.bkv, out->distance);
+          if (logLineFirstSeen(buf))
+            fprintf(stderr, "%s\n", buf);
+        }
         return;
       }
       t.rejected.fetch_add(1, std::memory_order_relaxed);
@@ -687,12 +705,16 @@ void hip_gqa_autotune_resolve_decode(void *policy,
           out->config = cfg;
           out->source = GqaTuneSource::Fallback;
           out->distance = 0.0f;
-          if (logOn())
-            fprintf(stderr,
-                    "[gqa-lut] decode fallback H=%d G=%d d=%d skv=%d -> wmma=%d "
-                    "splits=%d bkv=%d\n",
-                    req->num_heads, req->kv_num_heads, req->head_dim, eff,
-                    cfg.use_wmma, cfg.splits, cfg.bkv);
+          if (logOn()) {
+            char buf[192];
+            snprintf(buf, sizeof(buf),
+                     "[gqa-lut] decode fallback H=%d G=%d d=%d skv=%d -> "
+                     "wmma=%d splits=%d bkv=%d",
+                     req->num_heads, req->kv_num_heads, req->head_dim, eff,
+                     cfg.use_wmma, cfg.splits, cfg.bkv);
+            if (logLineFirstSeen(buf))
+              fprintf(stderr, "%s\n", buf);
+          }
           return;
         }
       }
@@ -702,13 +724,17 @@ void hip_gqa_autotune_resolve_decode(void *policy,
   out->config = decodeHeuristic(*req, cus > 0 ? cus : kAssumedCus);
   out->source = GqaTuneSource::Heuristic;
   out->distance = 0.0f;
-  if (logOn())
-    fprintf(stderr,
-            "[gqa-lut] decode heuristic H=%d G=%d d=%d skv=%d -> wmma=%d "
-            "splits=%d bkv=%d\n",
-            req->num_heads, req->kv_num_heads, req->head_dim,
-            decodeEffectiveLen(*req), out->config.use_wmma, out->config.splits,
-            out->config.bkv);
+  if (logOn()) {
+    char buf[192];
+    snprintf(buf, sizeof(buf),
+             "[gqa-lut] decode heuristic H=%d G=%d d=%d skv=%d -> wmma=%d "
+             "splits=%d bkv=%d",
+             req->num_heads, req->kv_num_heads, req->head_dim,
+             decodeEffectiveLen(*req), out->config.use_wmma, out->config.splits,
+             out->config.bkv);
+    if (logLineFirstSeen(buf))
+      fprintf(stderr, "%s\n", buf);
+  }
 }
 
 void hip_gqa_autotune_resolve_prefill(void *policy,
@@ -753,12 +779,16 @@ void hip_gqa_autotune_resolve_prefill(void *policy,
         out->config = t.pool[p.config].prefill;
         out->source = exact ? GqaTuneSource::Exact : GqaTuneSource::Nearest;
         out->distance = std::sqrt(best_d2);
-        if (logOn())
-          fprintf(stderr,
-                  "[gqa-lut] prefill %s H=%d G=%d d=%d sq=%d skv=%d d=%.3f\n",
-                  exact ? "exact" : "nearest", req->num_heads,
-                  req->kv_num_heads, req->head_dim, req->seq_q, req->seq_kv,
-                  out->distance);
+        if (logOn()) {
+          char buf[192];
+          snprintf(buf, sizeof(buf),
+                   "[gqa-lut] prefill %s H=%d G=%d d=%d sq=%d skv=%d d=%.3f",
+                   exact ? "exact" : "nearest", req->num_heads,
+                   req->kv_num_heads, req->head_dim, req->seq_q, req->seq_kv,
+                   out->distance);
+          if (logLineFirstSeen(buf))
+            fprintf(stderr, "%s\n", buf);
+        }
         return;
       }
     }
@@ -769,11 +799,15 @@ void hip_gqa_autotune_resolve_prefill(void *policy,
       out->config = t.pool[fit->second.first].prefill;
       out->source = GqaTuneSource::Fallback;
       out->distance = 0.0f;
-      if (logOn())
-        fprintf(stderr,
-                "[gqa-lut] prefill fallback H=%d G=%d d=%d sq=%d skv=%d\n",
-                req->num_heads, req->kv_num_heads, req->head_dim, req->seq_q,
-                req->seq_kv);
+      if (logOn()) {
+        char buf[192];
+        snprintf(buf, sizeof(buf),
+                 "[gqa-lut] prefill fallback H=%d G=%d d=%d sq=%d skv=%d",
+                 req->num_heads, req->kv_num_heads, req->head_dim, req->seq_q,
+                 req->seq_kv);
+        if (logLineFirstSeen(buf))
+          fprintf(stderr, "%s\n", buf);
+      }
       return;
     }
   }
@@ -781,11 +815,15 @@ void hip_gqa_autotune_resolve_prefill(void *policy,
   out->config = prefillHeuristic(*req);
   out->source = GqaTuneSource::Heuristic;
   out->distance = 0.0f;
-  if (logOn())
-    fprintf(stderr,
-            "[gqa-lut] prefill heuristic H=%d G=%d d=%d sq=%d skv=%d\n",
-            req->num_heads, req->kv_num_heads, req->head_dim, req->seq_q,
-            req->seq_kv);
+  if (logOn()) {
+    char buf[192];
+    snprintf(buf, sizeof(buf),
+             "[gqa-lut] prefill heuristic H=%d G=%d d=%d sq=%d skv=%d",
+             req->num_heads, req->kv_num_heads, req->head_dim, req->seq_q,
+             req->seq_kv);
+    if (logLineFirstSeen(buf))
+      fprintf(stderr, "%s\n", buf);
+  }
 }
 
 void hip_gqa_autotune_fallback_prefill(const hipdnn_ep::GqaPrefillRequest *req,
