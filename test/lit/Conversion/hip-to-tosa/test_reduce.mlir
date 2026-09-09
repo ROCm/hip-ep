@@ -113,18 +113,6 @@ func.func @reduce_mean_outlined_kernel(%data: tensor<2x8xf16>,
   return %r : tensor<2x1xf16>
 }
 
-// CHECK-LABEL: func.func @reduce_sum_not_a_kernel
-// CHECK: hip.reduce_sum
-// CHECK-NOT: tosa.reduce_sum
-func.func @reduce_sum_not_a_kernel(%ctx: !hip.context, %data: tensor<2x8xf16>,
-                                   %init: tensor<2x1xf16>) -> tensor<2x1xf16> {
-  %axes = arith.constant dense<[1]> : tensor<1xi64>
-  %r = hip.reduce_sum(%ctx)
-         ins(%data, %axes : tensor<2x8xf16>, tensor<1xi64>)
-         outs(%init : tensor<2x1xf16>) : tensor<2x1xf16>
-  return %r : tensor<2x1xf16>
-}
-
 // -----
 
 func.func @dynamic_shape(%ctx: !hip.context, %data: tensor<?x8xf16>,

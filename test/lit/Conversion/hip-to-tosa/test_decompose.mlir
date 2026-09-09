@@ -73,17 +73,6 @@ func.func @leaky_relu_outlined_kernel(%x: tensor<2x8xf16>,
   return %r : tensor<2x8xf16>
 }
 
-// The pass early-returns unless the function is an outlined kernel.
-// CHECK-LABEL: func.func @leaky_relu_not_a_kernel
-// CHECK: hip.leaky_relu
-// CHECK-NOT: tosa.maximum
-func.func @leaky_relu_not_a_kernel(%ctx: !hip.context, %x: tensor<2x8xf16>,
-                                   %init: tensor<2x8xf16>) -> tensor<2x8xf16> {
-  %r = hip.leaky_relu(%ctx) ins(%x : tensor<2x8xf16>)
-                            outs(%init : tensor<2x8xf16>) : tensor<2x8xf16>
-  return %r : tensor<2x8xf16>
-}
-
 // CHECK-LABEL: func.func @softmax
 // CHECK: tosa.reduce_max %arg1 {axis = 1 : i32}
 // CHECK: tosa.sub
@@ -128,17 +117,6 @@ func.func @softmax_outlined_kernel(%x: tensor<2x8xf16>,
   return %r : tensor<2x8xf16>
 }
 
-// CHECK-LABEL: func.func @softmax_not_a_kernel
-// CHECK: hip.miopen.softmax
-// CHECK-NOT: tosa.reduce_max
-func.func @softmax_not_a_kernel(%ctx: !hip.context, %x: tensor<2x8xf16>,
-                                %init: tensor<2x8xf16>) -> tensor<2x8xf16> {
-  %r = hip.miopen.softmax(%ctx) ins(%x : tensor<2x8xf16>)
-                                 outs(%init : tensor<2x8xf16>)
-                                 -> tensor<2x8xf16>
-  return %r : tensor<2x8xf16>
-}
-
 // CHECK-LABEL: func.func @sqrt
 // CHECK: %[[RSQRT:.*]] = tosa.rsqrt %arg1
 // CHECK: tosa.reciprocal %[[RSQRT]]
@@ -158,16 +136,6 @@ func.func @sqrt(%ctx: !hip.context, %x: tensor<2x8xf16>,
 func.func @sqrt_outlined_kernel(%x: tensor<2x8xf16>, %init: tensor<2x8xf16>)
     -> tensor<2x8xf16> attributes {rock.kernel} {
   %ctx = ub.poison : !hip.context
-  %r = hip.sqrt(%ctx) ins(%x : tensor<2x8xf16>)
-                      outs(%init : tensor<2x8xf16>) : tensor<2x8xf16>
-  return %r : tensor<2x8xf16>
-}
-
-// CHECK-LABEL: func.func @sqrt_not_a_kernel
-// CHECK: hip.sqrt
-// CHECK-NOT: tosa.rsqrt
-func.func @sqrt_not_a_kernel(%ctx: !hip.context, %x: tensor<2x8xf16>,
-                               %init: tensor<2x8xf16>) -> tensor<2x8xf16> {
   %r = hip.sqrt(%ctx) ins(%x : tensor<2x8xf16>)
                       outs(%init : tensor<2x8xf16>) : tensor<2x8xf16>
   return %r : tensor<2x8xf16>

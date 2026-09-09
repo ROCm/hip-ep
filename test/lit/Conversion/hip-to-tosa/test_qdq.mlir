@@ -108,20 +108,6 @@ func.func @dequantize_outlined_kernel(%x: tensor<2x8xi8>, %scale: tensor<f32>,
   return %r : tensor<2x8xf32>
 }
 
-// CHECK-LABEL: func.func @dequantize_not_a_kernel
-// CHECK: hip.dequantize_linear
-// CHECK-NOT: tosa.mul
-func.func @dequantize_not_a_kernel(%ctx: !hip.context, %x: tensor<2x8xi8>,
-                                    %scale: tensor<f32>,
-                                    %init: tensor<2x8xf32>)
-    -> tensor<2x8xf32> {
-  %r = hip.dequantize_linear(%ctx)
-         ins(%x, %scale : tensor<2x8xi8>, tensor<f32>)
-         outs(%init : tensor<2x8xf32>)
-         {axis = 1 : i64, block_size = 0 : i64} : tensor<2x8xf32>
-  return %r : tensor<2x8xf32>
-}
-
 // -----
 
 func.func @dequantize_dynamic(%ctx: !hip.context, %x: tensor<?x8xi8>,

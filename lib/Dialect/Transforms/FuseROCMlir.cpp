@@ -121,8 +121,7 @@ public:
         GeluOp, BiasGeluOp, FastGeluOp, LeakyReluOp, ReciprocalOp, SqrtOp,
         DivOp, EqualOp, AndOp, OrOp, NotOp, CosOp, ErfOp, SinOp, CeilOp,
         RoundOp, AtanOp, FloorOp, ExpOp, LogOp, AbsOp, NegOp, SubOp, CastOp,
-        LessOp, SignOp, ModOp, WhereOp, MiopenSoftmaxOp, QuantizeLinearOp,
-        DequantizeLinearOp>(op);
+        LessOp, SignOp, ModOp, WhereOp>(op);
   }
 
 private:

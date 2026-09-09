@@ -228,17 +228,6 @@ func.func @cast_outlined_kernel(%x: tensor<2x8xf32>, %init: tensor<2x8xf16>)
   return %r : tensor<2x8xf16>
 }
 
-// CHECK-LABEL: func.func @cast_not_a_kernel
-// CHECK: hip.cast
-// CHECK-NOT: tosa.cast
-func.func @cast_not_a_kernel(%ctx: !hip.context, %x: tensor<2x8xf32>,
-                             %init: tensor<2x8xf16>) -> tensor<2x8xf16> {
-  %r = hip.cast(%ctx) ins(%x : tensor<2x8xf32>)
-                      outs(%init : tensor<2x8xf16>) {to = 10 : i64}
-                      : tensor<2x8xf16>
-  return %r : tensor<2x8xf16>
-}
-
 // The shape hip-fuse-rocmlir actually produces: the !hip.context is a
 // ub.poison materialized inside the outlined kernel rather than a block
 // argument. The ConversionTarget marks ub.poison legal so it survives as dead

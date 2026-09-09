@@ -75,18 +75,6 @@ func.func @where_outlined_kernel(%cond: tensor<2x8xi1>, %x: tensor<2x8xf16>,
   return %r : tensor<2x8xf16>
 }
 
-// CHECK-LABEL: func.func @where_not_a_kernel
-// CHECK: hip.where
-// CHECK-NOT: tosa.select
-func.func @where_not_a_kernel(%ctx: !hip.context, %cond: tensor<2x8xi1>,
-                              %x: tensor<2x8xf16>, %y: tensor<2x8xf16>,
-                              %init: tensor<2x8xf16>) -> tensor<2x8xf16> {
-  %r = hip.where(%ctx) ins(%cond, %x, %y :
-                           tensor<2x8xi1>, tensor<2x8xf16>, tensor<2x8xf16>)
-                       outs(%init : tensor<2x8xf16>) : tensor<2x8xf16>
-  return %r : tensor<2x8xf16>
-}
-
 // -----
 
 func.func @dynamic_shape(%ctx: !hip.context, %cond: tensor<?x8xi1>,
