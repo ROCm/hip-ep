@@ -5,6 +5,7 @@
 
 #include "SchemeBindings.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/Debug.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Value.h"
 #include "mlir/IR/Attributes.h"
@@ -13,6 +14,8 @@
 #include <cstddef>
 #include <cstring>
 #include <fstream>
+
+#define DEBUG_TYPE "scheme-bindings"
 
 // Include Chez Scheme C API header - use the ta6le machine-specific version
 // where ptr is defined as void*, not the portable boot (pb) version
@@ -41,10 +44,10 @@ bool initializeSchemeRuntime() {
   if (scheme_initialized)
     return true;
 
-  llvm::errs() << "Initializing Chez Scheme runtime...\n";
-  llvm::errs() << "  Version: " << Skernel_version() << "\n";
-  llvm::errs() << "  Petite boot: " << petite_boot_size << " bytes\n";
-  llvm::errs() << "  Scheme boot: " << scheme_boot_size << " bytes\n";
+  LLVM_DEBUG(llvm::dbgs() << "Initializing Chez Scheme runtime "
+                          << Skernel_version() << "\n");
+  LLVM_DEBUG(llvm::dbgs() << "  Petite boot: " << petite_boot_size << " bytes\n");
+  LLVM_DEBUG(llvm::dbgs() << "  Scheme boot: " << scheme_boot_size << " bytes\n");
 
   Sscheme_init(nullptr);
   Sregister_boot_file_bytes("petite.boot", const_cast<void*>(static_cast<const void*>(petite_boot_data)), petite_boot_size);
@@ -55,12 +58,7 @@ bool initializeSchemeRuntime() {
   // but BEFORE loading user Scheme code
   registerMlirForeignFunctions();
 
-  ptr multiply = Stop_level_value(Sstring_to_symbol("*"));
-  ptr result = Scall2(multiply, Sinteger(6), Sinteger(7));
-  iptr answer = Sinteger_value(result);
-
-  llvm::errs() << "Scheme test: (* 6 7) = " << answer << "\n";
-
+  // Load the Scheme bindings library
   std::string scm_code(reinterpret_cast<const char*>(scheme_bindings_scm_data),
                        scheme_bindings_scm_size);
   ptr eval_sym = Stop_level_value(Sstring_to_symbol("eval"));
@@ -72,13 +70,12 @@ bool initializeSchemeRuntime() {
 
   while (true) {
     ptr expr = Scall1(read_sym, port);
-    // Check if we hit EOF using eof-object? predicate
     if (Scall1(eof_object_p, expr) != Sfalse)
       break;
     Scall1(eval_sym, expr);
   }
 
-  llvm::errs() << "Chez Scheme runtime initialized successfully!\n";
+  LLVM_DEBUG(llvm::dbgs() << "Scheme runtime initialized\n");
 
   scheme_initialized = true;
   return true;
@@ -151,10 +148,9 @@ bool loadSchemeScript(const char* scriptPath) {
   if (!scheme_initialized)
     return false;
 
-  // Read the file
   std::ifstream file(scriptPath);
   if (!file.is_open()) {
-    llvm::errs() << "Error: Cannot open Scheme script: " << scriptPath << "\n";
+    llvm::errs() << "error: cannot open Scheme script: " << scriptPath << "\n";
     return false;
   }
 
@@ -162,7 +158,7 @@ bool loadSchemeScript(const char* scriptPath) {
                        std::istreambuf_iterator<char>());
   file.close();
 
-  llvm::errs() << "Loading Scheme script: " << scriptPath << "\n";
+  LLVM_DEBUG(llvm::dbgs() << "Loading Scheme script: " << scriptPath << "\n");
 
   // Evaluate the script
   ptr eval_sym = Stop_level_value(Sstring_to_symbol("eval"));
@@ -179,7 +175,7 @@ bool loadSchemeScript(const char* scriptPath) {
     Scall1(eval_sym, expr);
   }
 
-  llvm::errs() << "Loaded Scheme script: " << scriptPath << "\n";
+  LLVM_DEBUG(llvm::dbgs() << "Loaded Scheme script: " << scriptPath << "\n");
   return true;
 }
 
@@ -266,7 +262,7 @@ void registerMlirForeignFunctions() {
   Sregister_symbol("mlir_operation_get_result", (void*)mlir_operation_get_result);
   Sregister_symbol("mlir_operation_walk", (void*)mlir_operation_walk);
 
-  llvm::errs() << "Registered MLIR foreign functions for Scheme\n";
+  LLVM_DEBUG(llvm::dbgs() << "Registered " << 6 << " MLIR FFI functions\n");
 }
 
 } // namespace hipsr
