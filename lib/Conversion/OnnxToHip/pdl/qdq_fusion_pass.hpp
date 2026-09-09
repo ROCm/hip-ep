@@ -221,8 +221,7 @@ extractZeropointValue(mlir::PatternRewriter &rewriter,
 // args[0] = op, args[1] = attribute name, args[2] = value to use when absent.
 // Return failure if the attribute is not an i64 integer attribute.
 inline mlir::LogicalResult
-extractAttrInt64(mlir::PatternRewriter &rewriter,
-                 mlir::PDLResultList &results,
+extractAttrInt64(mlir::PatternRewriter &rewriter, mlir::PDLResultList &results,
                  llvm::ArrayRef<mlir::PDLValue> args) {
   if (args.size() != 3)
     return mlir::failure();

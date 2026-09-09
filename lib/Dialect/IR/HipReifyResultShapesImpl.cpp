@@ -39,7 +39,6 @@ ArrayRef<int64_t> getShapeOf(Value v) {
   return {};
 }
 
-
 LogicalResult reifyMatmulLikeShape(Operation *op, OpBuilder &b, Value A,
                                    Value B, int64_t transA, int64_t transB,
                                    ReifiedRankedShapedTypeDims &reified) {

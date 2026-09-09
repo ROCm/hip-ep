@@ -53,7 +53,8 @@ struct QMatMulOpLowering : public ConvertOpToLLVMPattern<QMatMulOp> {
             op, "expected 8- or 16-bit A and Y element types");
     }
     if (!BType.getElementType().isInteger(8))
-      return rewriter.notifyMatchFailure(op, "expected an 8-bit B element type");
+      return rewriter.notifyMatchFailure(op,
+                                         "expected an 8-bit B element type");
     int64_t aDataType = getHipdnnDataType(AType.getElementType());
     int64_t bDataType = getHipdnnDataType(BType.getElementType());
     int64_t yDataType = getHipdnnDataType(YType.getElementType());
