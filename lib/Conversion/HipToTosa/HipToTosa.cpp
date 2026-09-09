@@ -171,8 +171,7 @@ Value createSplatFloat(ConversionPatternRewriter &rewriter, Location loc,
 // counterpart preserves the element type. Comparisons (hip.equal, hip.less) do
 // not belong here: they produce i1, which isTosaCompatibleOperand's
 // element-type check rejects. hip.div does not either, since TOSA has no
-// floating-point divide (tosa.intdiv is i32/i64 only, and floats decompose
-// into tosa.reciprocal plus tosa.mul).
+// single divide; DivConverter below spells one out per element type.
 //
 // tosa.maximum and tosa.minimum additionally carry a nan_mode attribute, but
 // ODS defaults it to PROPAGATE, which is what ONNX Max/Min do, so the
@@ -216,6 +215,74 @@ struct BinaryConverter final : public OpConversionPattern<HipOpTy> {
           op, resultType, lhs, rhs, createZeroMulShift(rewriter, op.getLoc()));
     else
       rewriter.replaceOpWithNewOp<TosaOpTy>(op, resultType, lhs, rhs);
+    return success();
+  }
+};
+
+// TOSA has no single divide, so hip.div splits on element type. Integers get
+// tosa.intdiv; floats get the reciprocal-then-multiply that tosa.intdiv's own
+// description prescribes ("Floating point divide should use RECIPROCAL and
+// MUL"). MIGraphXToTosa lowers migraphx.div the same two ways.
+//
+// The split is also why hip.div is the one hip op here whose legality turns on
+// the element type. tosa.intdiv takes Tosa_Int32Or64Tensor, which is signless
+// i32 and i64 only, whereas hip.div carries anything the runtime can name --
+// ui8, i8, ui16 and i16 among them -- because nothing upstream narrows it: the
+// operand constraint is AnyRankedTensor and OnnxToHip copies the ONNX element
+// type through verbatim. Those widths have no TOSA spelling and stay hip.div
+// rather than failing the pass.
+//
+// MIGraphXToTosa does cover unsigned, via a tosa.custom "unsigned_div" that
+// RockTosaToElementwise understands. It can do that because it runs under a
+// type converter that has already rewritten unsigned to signless, leaving the
+// custom op's name to carry the signedness; this pass has no type converter,
+// so the same call would hand rocMLIR operands still typed unsigned.
+static bool isTosaExpressibleDiv(hip::DivOp op) {
+  // Memref mode (post-bufferization) has no SSA result to replace.
+  if (op.getNumResults() != 1)
+    return false;
+  auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+  if (!resultType)
+    return false;
+
+  Type elementType = resultType.getElementType();
+  if (isa<FloatType>(elementType))
+    return true;
+  return elementType.isSignlessInteger(32) || elementType.isSignlessInteger(64);
+}
+
+struct DivConverter final : public OpConversionPattern<hip::DivOp> {
+  using OpConversionPattern<hip::DivOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(hip::DivOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!resultType || !resultType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
+
+    Value lhs = adaptor.getLhs();
+    Value rhs = adaptor.getRhs();
+    if (failed(tosa::EqualizeRanks(rewriter, op.getLoc(), lhs, rhs)))
+      return rewriter.notifyMatchFailure(op, "operand ranks not equalizable");
+    if (!isTosaCompatibleOperand(lhs, resultType) ||
+        !isTosaCompatibleOperand(rhs, resultType))
+      return rewriter.notifyMatchFailure(op, "operands not tosa-broadcastable");
+
+    if (isa<IntegerType>(resultType.getElementType())) {
+      rewriter.replaceOpWithNewOp<tosa::IntDivOp>(op, resultType, lhs, rhs);
+      return success();
+    }
+
+    // The reciprocal is taken at the divisor's own rank-equalized shape rather
+    // than the result's, so a divisor that broadcasts is reciprocated once per
+    // distinct element instead of once per result element; the multiply
+    // broadcasts it back up.
+    Value recip =
+        tosa::ReciprocalOp::create(rewriter, op.getLoc(), rhs.getType(), rhs)
+            .getResult();
+    rewriter.replaceOpWithNewOp<tosa::MulOp>(
+        op, resultType, lhs, recip, createZeroMulShift(rewriter, op.getLoc()));
     return success();
   }
 };
@@ -1055,12 +1122,20 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     conversion.addDynamicallyLegalOp<tensor::ExtractSliceOp>(
         [](tensor::ExtractSliceOp op) { return !isTosaExpressibleSlice(op); });
 
+    // hip.div is the one hip op here that is conditionally rather than
+    // unconditionally illegal: the element types it can carry are wider than
+    // the ones tosa.intdiv accepts, and an unsigned or narrow divide has no
+    // TOSA spelling at all. Only the shapes are left to the pattern, so a
+    // dynamically shaped divide still fails the way its hip.add sibling does.
+    conversion.addDynamicallyLegalOp<DivOp>(
+        [](DivOp op) { return !isTosaExpressibleDiv(op); });
+
     RewritePatternSet patterns(ctx);
     patterns.add<
         MatMulConverter, TransposeConverter, ExpandConverter,
         ReshapeConverter<tensor::CollapseShapeOp>,
         ReshapeConverter<tensor::ExpandShapeOp>, ExtractSliceConverter,
-        BinaryConverter<AddOp, tosa::AddOp>,
+        DivConverter, BinaryConverter<AddOp, tosa::AddOp>,
         BinaryConverter<SubOp, tosa::SubOp>,
         BinaryConverter<MinOp, tosa::MinimumOp>,
         BinaryConverter<MaxOp, tosa::MaximumOp>,
