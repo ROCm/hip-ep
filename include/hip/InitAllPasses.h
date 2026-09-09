@@ -30,10 +30,13 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/Linalg/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/MemRef/Transforms/AllocationOpInterfaceImpl.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/SCF/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Shape/Transforms/Passes.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Tensor/IR/TensorInferTypeOpInterfaceImpl.h"
@@ -71,6 +74,7 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
   registry.insert<mlir::arith::ArithDialect>();
   registry.insert<mlir::func::FuncDialect>();
   registry.insert<mlir::memref::MemRefDialect>();
+  registry.insert<mlir::scf::SCFDialect>();
   registry.insert<mlir::tensor::TensorDialect>();
   registry.insert<mlir::linalg::LinalgDialect>();
   registry.insert<mlir::bufferization::BufferizationDialect>();
@@ -87,6 +91,7 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
   mlir::tensor::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::tensor::registerInferTypeOpInterfaceExternalModels(registry);
   mlir::linalg::registerBufferizableOpInterfaceExternalModels(registry);
+  mlir::scf::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
       registry);
   mlir::memref::registerAllocationOpInterfaceExternalModels(registry);
@@ -186,8 +191,9 @@ inline void registerAllPasses() {
     mlir::registerSCFToControlFlowPass();
     mlir::registerReconcileUnrealizedCastsPass();
     mlir::memref::registerResolveShapedTypeResultDimsPass();
-    // Upstream passes that lower what hipsr-convert-shape-to-extent retypes.
+    mlir::registerConvertLinalgToLoopsPass();
     mlir::registerRemoveShapeConstraintsPass();
+    mlir::registerShapeToShapeLoweringPass();
     mlir::registerConvertShapeToStandardPass();
   });
 }

@@ -476,7 +476,10 @@ int wrap_group_query_attention(
     // Shape values (6)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
-    int64_t attn_bias_batch, int64_t attn_bias_num_heads) {
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads,
+    // key/value layout: 0 = rank-3 BSHD, 1 = rank-4 BNSD (mock stub ignores
+    // it).
+    int64_t kv_bnsd) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_group_query_attention\n");
     return -1;
@@ -500,6 +503,7 @@ int wrap_group_query_attention(
   (void)present_value;
   (void)attn_bias_batch;
   (void)attn_bias_num_heads;
+  (void)kv_bnsd;
 
   MOCK_PRINT("[MOCK] wrap_group_query_attention(\n");
   MOCK_PRINT("[MOCK]   num_heads=%lld, kv_num_heads=%lld,\n",
@@ -1127,6 +1131,20 @@ int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_swish(RuntimeState *state, void *input, void *output,
+               int64_t num_elements, int64_t data_type, double alpha) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_swish\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_swish(num_elements=%lld, data_type=%s(%lld), "
+             "alpha=%f)\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type, alpha);
+  return 0;
+}
+
 // Mock impl of the runtime symbol referenced by the hip.miopen.softmax
 // lowering. Signature must match lib/Runtime/real/activation.cpp.
 extern "C" int hip_miopen_softmax(RuntimeState *state, const void *input,
@@ -1561,6 +1579,34 @@ int wrap_or(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
              (long long)b_n, (long long)b_c, (long long)b_h, (long long)b_w,
              (long long)out_n, (long long)out_c, (long long)out_h,
              (long long)out_w, hipdnn_ep_datatype_name(data_type));
+  return 0;
+}
+
+int wrap_qelementwise(RuntimeState *state, void *lhs, void *rhs, void *output,
+                      int64_t kind, const int64_t *lhs_shape, int64_t lhs_rank,
+                      const int64_t *rhs_shape, int64_t rhs_rank,
+                      const int64_t *out_shape, int64_t out_rank,
+                      int64_t data_type, float M_a, int64_t lhs_zp, float M_b,
+                      int64_t rhs_zp, int64_t output_zp) {
+  (void)lhs;
+  (void)rhs;
+  (void)output;
+  (void)kind;
+  (void)lhs_shape;
+  (void)lhs_rank;
+  (void)rhs_shape;
+  (void)rhs_rank;
+  (void)out_shape;
+  (void)out_rank;
+  (void)data_type;
+  (void)M_a;
+  (void)lhs_zp;
+  (void)M_b;
+  (void)rhs_zp;
+  (void)output_zp;
+  if (!state)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_qelementwise,kind=%lld", (long long)kind);
   return 0;
 }
 

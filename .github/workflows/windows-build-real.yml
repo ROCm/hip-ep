@@ -157,6 +157,9 @@ jobs:
           cp "${{ runner.workspace }}/install/bin/"*.dll staging/bin/ 2>/dev/null || true
           cp "${{ runner.workspace }}/install/bin/"*.exe staging/bin/ 2>/dev/null || true
 
+          # cp fusion pattern file
+          cp "${{ runner.workspace }}/install/bin/HipFusionPatterns.pdl.mlir" staging/bin/
+
           cp "${{ runner.workspace }}/amdgpu-artifacts/bin/"* staging/bin/
 
           # Smoke: every per-arch kernel DLL must be present in staging/bin/

@@ -74,6 +74,7 @@ inline constexpr const char *kWrapBiasGelu = "wrap_bias_gelu"; // hip.bias_gelu
 inline constexpr const char *kWrapFastGelu = "wrap_fast_gelu"; // hip.fast_gelu
 inline constexpr const char *kWrapLeakyRelu =
     "wrap_leaky_relu";                                        // hip.leaky_relu
+inline constexpr const char *kWrapSwish = "wrap_swish";       // hip.swish
 inline constexpr const char *kWrapSoftplus = "wrap_softplus"; // hip.softplus
 inline constexpr const char *kWrapElementwiseSub = "wrap_elementwise_sub";
 inline constexpr const char *kWrapRotaryEmbedding = "wrap_rotary_embedding";
@@ -139,6 +140,7 @@ inline constexpr const char *kWrapSlice = "wrap_slice";
 inline constexpr const char *kWrapScatterND = "wrap_scatter_nd";
 inline constexpr const char *kWrapNonZero = "wrap_nonzero";
 inline constexpr const char *kWrapSize = "wrap_size";
+inline constexpr const char *kWrapQElementwise = "wrap_qelementwise";
 // Synchronize the stream and read a device i32 scalar back to the host
 // (used by hip.readback_dim to materialise a data-dependent dynamic dim).
 inline constexpr const char *kHipReadbackI32 = "hipdnn_ep_readback_i32";
@@ -383,6 +385,12 @@ inline SmallVector<Value, 4> extractShape4D(MemRefType type, Value descriptor,
   return dims;
 }
 
+// Must match HIPDNN_EP_QELEMENTWISE_* in lib/Runtime/hipdnn_ep_runtime.h
+enum HipdnnQElementwiseKind : int64_t {
+  kQElementwiseAdd = 0,
+  kQElementwiseMul = 1,
+};
+
 // Must match HIPDNN_EP_TENSOR_OP_* in lib/Runtime/hipdnn_ep_runtime.h
 enum HipdnnTensorOp : int64_t {
   kTensorOpMul = 0,
@@ -515,7 +523,8 @@ void populateGridSampleLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns);
 void populateGlobalPoolLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns);
-
+void populateQElementwiseLoweringPatterns(const LLVMTypeConverter &converter,
+                                          RewritePatternSet &patterns);
 } // namespace hip
 } // namespace mlir
 

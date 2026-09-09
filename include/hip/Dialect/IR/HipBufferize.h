@@ -142,6 +142,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     BiasGeluOp::attachInterface<HipDstBufferizableModel<BiasGeluOp>>(*ctx);
     FastGeluOp::attachInterface<HipDstBufferizableModel<FastGeluOp>>(*ctx);
     LeakyReluOp::attachInterface<HipDstBufferizableModel<LeakyReluOp>>(*ctx);
+    SwishOp::attachInterface<HipDstBufferizableModel<SwishOp>>(*ctx);
     ResizeOp::attachInterface<HipDstBufferizableModel<ResizeOp>>(*ctx);
     GridSampleOp::attachInterface<HipDstBufferizableModel<GridSampleOp>>(*ctx);
     GlobalPoolOp::attachInterface<HipDstBufferizableModel<GlobalPoolOp>>(*ctx);
@@ -209,6 +210,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     NonZeroOp::attachInterface<HipDstBufferizableModel<NonZeroOp>>(*ctx);
     SizeOp::attachInterface<HipDstBufferizableModel<SizeOp>>(*ctx);
     LoopOp::attachInterface<HipDstBufferizableModel<LoopOp>>(*ctx);
+    QAddOp::attachInterface<HipDstBufferizableModel<QAddOp>>(*ctx);
+    QMulOp::attachInterface<HipDstBufferizableModel<QMulOp>>(*ctx);
     // hip.if is a DPS control-flow op (getDpsInitsMutable, results alias
     // o_init) just like hip.loop. Without this model one-shot-bufferize aborts
     // with "op was not bufferized: hip.if" for any graph containing onnx.If,

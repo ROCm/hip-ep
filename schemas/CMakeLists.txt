@@ -28,6 +28,7 @@ set(FBS_SCHEMAS
     ${CMAKE_CURRENT_SOURCE_DIR}/compilation_options.fbs
     ${CMAKE_CURRENT_SOURCE_DIR}/model_metadata.fbs
     ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/gqa/gqa_autotune.fbs
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/matmul_nbits/matmul_nbits_autotune.fbs
 )
 
 set(GENERATED_HEADERS "")

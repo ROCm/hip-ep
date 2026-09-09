@@ -1,0 +1,29 @@
+//===- HipFusionPatterns.pdll ---------------------------------------------===//
+//
+// Aggregate entry point for the PDLL fusion patterns.
+//
+// mlir-pdll compiles one input file at a time, and collecting every pattern
+// into a single PDL module also puts them in one RewritePatternSet, so they
+// share a fixpoint and can trigger each other.
+//
+// PDLL has no include guards, so the native constraints are declared once here
+// and each pattern file - which carries only its Pattern definitions - is
+// included exactly once.
+//===----------------------------------------------------------------------===//
+
+// Native helpers (implemented in qdq_fusion_pass.hpp).
+//
+// Fusability is decided by result-free constraints and the values are produced
+// by rewrites. Returning a result from a constraint shared by two patterns
+// rooted at the same op makes the PDL module fail to lower ("operand does not
+// dominate this use"), so nothing below may move back into the match section.
+Constraint HasContextArg(op: Op);
+Constraint IsSplatConstantValue(val: Value);
+Constraint HasExtractableZeropoint(op: Op, index: Attr);
+
+Rewrite GetContextArg(op: Op) -> Value;
+Rewrite ExtractScaleValue(val: Value) -> Attr;
+Rewrite ExtractZeropointValue(op: Op, index: Attr, defaultValue: Attr) -> Attr;
+
+#include "QDQAddFusion.pdll"
+#include "QDQMulFusion.pdll"

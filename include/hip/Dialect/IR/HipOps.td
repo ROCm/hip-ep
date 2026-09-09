@@ -2307,6 +2307,36 @@ def Hip_LeakyReluOp : Hip_DpsOp<"leaky_relu"> {
   }];
 }
 
+def Hip_SwishOp : Hip_DpsOp<"swish"> {
+  let summary = "Swish activation: y = x * sigmoid(alpha * x)";
+  let description = [{
+    Applies the ONNX Swish activation element-wise.
+
+    Uses destination-passing style: the output buffer is provided as an
+    argument. The fused runtime kernel supports f16, f32, bf16, and f64.
+
+    Example:
+    ```mlir
+    hip.swish(%ctx) ins(%x : memref<3x4xf32, 1>)
+                    outs(%y : memref<3x4xf32, 1>)
+                    {alpha = 0.5 : f64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<F64Attr, "1.0">:$alpha
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_ReciprocalOp : Hip_DpsOp<"reciprocal", /*traits=*/[],
                                  /*outsAccessor=*/"Y",
                                  /*autoReify=*/1,
@@ -4852,6 +4882,70 @@ def Hip_DequantizeLinearOp : Hip_DpsOp<"dequantize_linear", /*traits=*/[],
     `(` $ctx `)` `ins` `(` $input `,` $scale `:`
         type($input) `,` type($scale) `)`
     (`zero_point` `(` $zero_point^ `:` type($zero_point) `)`)?
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_QAddOp : Hip_DpsOp_Broadcast<"qadd",
+                                     /*operandGetters=*/["Lhs", "Rhs"]> {
+  let summary = "Quantized elementwise add with integrated QDQ";
+  let description = [{
+    Quantized elementwise add. Performs element-wise binary
+    addition (with Numpy-style broadcasting support).
+    This operator supports multidirectional (i.e., Numpy-style) broadcasting
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$lhs,           // Left operand (quant)
+    Hip_TensorOrMemRef:$rhs,           // Right operand (quant)
+    Hip_TensorOrMemRef:$output,        // Output buffer (quant)
+    F32Attr:$lhs_scale,                // Quantization scale for LHS
+    I64Attr:$lhs_zp,                   // Quantization zeropoint for LHS
+    F32Attr:$rhs_scale,                // Quantization scale for RHS
+    I64Attr:$rhs_zp,                   // Quantization zeropoint for RHS
+    F32Attr:$output_scale,             // Dequantization scale for output
+    I64Attr:$output_zp                 // Quantization zeropoint for output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_QMulOp : Hip_DpsOp_Broadcast<"qmul",
+                                     /*operandGetters=*/["Lhs", "Rhs"]> {
+  let summary = "Quantized elementwise mul with integrated QDQ";
+  let description = [{
+    Quantized elementwise multiply. Performs element-wise binary
+    multiplication (with Numpy-style broadcasting support).
+    This operator supports multidirectional (i.e., Numpy-style) broadcasting
+
+    both operand scales collapse into a single coefficient:
+
+      OUT = saturate(round(M * (lhs - lhs_zp) * (rhs - rhs_zp)) + output_zp)
+      M   = lhs_scale * rhs_scale / output_scale
+
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$lhs,           // Left operand (quant)
+    Hip_TensorOrMemRef:$rhs,           // Right operand (quant)
+    Hip_TensorOrMemRef:$output,        // Output buffer (quant)
+    F32Attr:$lhs_scale,                // Quantization scale for LHS
+    I64Attr:$lhs_zp,                   // Quantization zeropoint for LHS
+    F32Attr:$rhs_scale,                // Quantization scale for RHS
+    I64Attr:$rhs_zp,                   // Quantization zeropoint for RHS
+    F32Attr:$output_scale,             // Dequantization scale for output
+    I64Attr:$output_zp                 // Quantization zeropoint for output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
