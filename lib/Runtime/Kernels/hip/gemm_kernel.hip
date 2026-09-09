@@ -1128,6 +1128,12 @@ static constexpr WmmaCfg kWmma[] = {
     {128, 128, 4, 4, 8, 1, 32},  {128, 128, 4, 2, 8, 1, 32},
     {128, 256, 4, 2, 8, 1, 32},  {256, 128, 4, 4, 8, 1, 32},
     {128, 128, 4, 4, 16, 1, 32},
+    /* BK=16 tiles for K%16==0 but K%32!=0 (e.g. vision K=4304): K is a multiple
+     * of BK=16, so the whole launch runs the aligned BC=false loop with no
+     * ragged K-tail. Costs 2x barriers vs BK=32, so used only when BK=32 would
+     * be ragged. */
+    {256, 128, 4, 2, 8, 1, 16},  {128, 128, 2, 4, 8, 1, 16},
+    {64, 128, 2, 4, 8, 1, 16},
 };
 static constexpr int kNumWmma =
     static_cast<int>(sizeof(kWmma) / sizeof(kWmma[0]));
@@ -1203,6 +1209,18 @@ static int pickWmmaHeuristic(int M, int N, int K) {
   auto wgs = [&](int bm, int bn, int sk) {
     return ((M + bm - 1) / bm) * ((N + bn - 1) / bn) * sk;
   };
+  /* K%32!=0 but K%16==0 (e.g. vision K=4304): a BK=32 tile has a ragged K-tail
+   * that forces the whole launch onto the slow bounds-checked path. A BK=16
+   * tile makes K%BK==0 so the launch stays on the fast BC=false loop -- measured
+   * ~+11% over the BK=32 bounds-checked path at 256x128. Costs 2x barriers, so
+   * used only for these K%32!=0 shapes. */
+  if ((K % 32 != 0) && (K % 16 == 0)) {
+    if (M >= 256 && wgs(256, 128, 1) >= 24)
+      return findWmmaCfg(256, 128, 4, 2, 8, 1, 16);
+    if (wgs(128, 128, 1) >= 16)
+      return findWmmaCfg(128, 128, 2, 4, 8, 1, 16);
+    return findWmmaCfg(64, 128, 2, 4, 8, 1, 16);
+  }
   if (N <= 32)
     return findWmmaCfg(64, 32, 2, 1, 8, 1);
   if (N <= 64)
@@ -1324,6 +1342,10 @@ static void launchWmma(int id, hipStream_t s, const T *A, const T *B,
   GEMM_WMMA_TRY(128, 256, 4, 2, 32)
   GEMM_WMMA_TRY(256, 128, 4, 4, 32)
   GEMM_WMMA_TRY(128, 128, 4, 4, 16)
+  /* BK=16 (K%16==0, K%32!=0) */
+  GEMM_WMMA_TRY(256, 128, 4, 2, 16)
+  GEMM_WMMA_TRY(128, 128, 2, 4, 16)
+  GEMM_WMMA_TRY(64, 128, 2, 4, 16)
   {
     GEMM_WMMA_ONE(128, 128, 2, 2, 32);
   }
