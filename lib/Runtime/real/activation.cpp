@@ -32,15 +32,13 @@ static int hipdnn_ep_to_hip_dtype_elementwise_unary(int64_t data_type) {
 // `ConvertHipToLLVM`'s `MiopenSoftmaxOpLowering` for `onnx.Softmax` paths
 // outside fused attention (vision encoder self-attention, primarily; text
 // decoders fuse softmax inside hip.gqa and don't reach this path).
-// Dispatches to `hip_softmax_row_2d_inplace` (custom HIP kernel) —
-// row-wise softmax over a contiguous row-major [rows, cols] fp16 buffer
-// with `cols` = the softmax axis size (ONNX Softmax axis = -1 over the
-// last dim of the flattened input).
+// Dispatches to `hip_softmax_row_2d` (custom HIP kernel) — row-wise softmax
+// over a contiguous row-major [rows, cols] buffer with `cols` = the softmax
+// axis size (ONNX Softmax axis = -1 over the last dim of the flattened input).
 //
-// fp16-only today. The buffer element type is taken on faith from the
-// MemRef the lowering hands us; the runtime does not validate the dtype.
-// If a future model needs fp32 softmax, plumb an `elem_size` (or dtype
-// enum) through the lowering and dispatch in the kernel launcher.
+// The buffer element type is taken on faith from `elem_size_bytes`, which the
+// lowering derives from the MemRef type; the runtime does not otherwise
+// validate the dtype.
 //
 // Symbol name is `hip_miopen_softmax` (not `hip_softmax`) to match the
 // lowering side's `kMiopenSoftmax` constant. The kernel-level dispatch
@@ -51,8 +49,8 @@ static int hipdnn_ep_to_hip_dtype_elementwise_unary(int64_t data_type) {
 // only spawns `total_head_queries` blocks, not `total_head_queries * cols`.
 // A standalone softmax wired to that path produces NaN downstream.
 // elem_size_bytes: 2 for fp16/bf16, 4 for fp32.  The lowering passes the
-// element size derived from the MemRef type so the runtime can copy and
-// dispatch with the correct dtype.
+// element size derived from the MemRef type so the runtime can dispatch with
+// the correct dtype.
 extern "C" int hip_miopen_softmax(void *state, const void *input, void *output,
                                   int64_t rows, int64_t cols,
                                   int64_t elem_size_bytes) {
@@ -86,29 +84,20 @@ extern "C" int hip_miopen_softmax(void *state, const void *input, void *output,
 
   void *stream = hipdnn_ep_state_get_stream(st);
 
-  // Copy input -> output with the correct element size.  Previously this
-  // hardcoded sizeof(uint16_t)=2, corrupting fp32 inputs (Qwen VLM attention
-  // scores) by copying only half the data.
-  hipError_t err =
-      hipMemcpyAsync(output, input,
-                     static_cast<size_t>(rows) * static_cast<size_t>(cols) *
-                         static_cast<size_t>(elem_size_bytes),
-                     hipMemcpyDeviceToDevice, static_cast<hipStream_t>(stream));
-  if (err != hipSuccess) {
-    fprintf(stderr, "[REAL] hip_miopen_softmax: hipMemcpyAsync failed: %s\n",
-            hipGetErrorString(err));
-    return -1;
-  }
-
   RUNTIME_DEBUG_LOG(
       "[REAL] hip_miopen_softmax: rows=%lld cols=%lld elem_size=%lld\n",
       (long long)rows, (long long)cols, (long long)elem_size_bytes);
 
+  // The kernel reads `input` and writes `output` directly, and tolerates the
+  // two being the same buffer, so no staging copy is needed either way. This
+  // op used to copy input over output and softmax the copy in place, which
+  // moved as many bytes again as the softmax itself and so cost the op double
+  // its compulsory traffic regardless of how fast the kernel was.
   if (elem_size_bytes == 4)
-    return hip_softmax_row_2d_inplace_fp32(
-        stream, output, static_cast<int>(rows), static_cast<int>(cols));
-  return hip_softmax_row_2d_inplace(stream, output, static_cast<int>(rows),
-                                    static_cast<int>(cols));
+    return hip_softmax_row_2d_fp32(
+        stream, input, output, static_cast<int>(rows), static_cast<int>(cols));
+  return hip_softmax_row_2d(stream, input, output, static_cast<int>(rows),
+                            static_cast<int>(cols));
 }
 
 //===----------------------------------------------------------------------===//
@@ -260,5 +249,43 @@ int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
   }
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_leaky_relu: completed successfully\n");
+  return 0;
+}
+
+int wrap_swish(RuntimeState *state, void *input, void *output,
+               int64_t num_elements, int64_t data_type, double alpha) {
+  OP_PROFILE(
+      "swish",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "n=%lld", (long long)num_elements);
+        return std::string(b);
+      },
+      state);
+  if (!state || !input || !output) {
+    fprintf(stderr, "[REAL] wrap_swish: null argument\n");
+    return -1;
+  }
+
+  int hip_dtype = hipdnn_ep_to_hip_dtype_elementwise_unary(data_type);
+  if (hip_dtype < 0) {
+    fprintf(stderr, "[REAL] wrap_swish: unsupported data_type %lld\n",
+            (long long)data_type);
+    return -1;
+  }
+
+  void *stream = hipdnn_ep_state_get_stream(state);
+  RUNTIME_DEBUG_LOG("[REAL] wrap_swish: num_elements=%lld, "
+                    "data_type=%s(%lld), alpha=%f\n",
+                    (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+                    (long long)data_type, alpha);
+
+  int result = hip_swish(stream, input, output, num_elements, hip_dtype, alpha);
+  if (result != 0) {
+    fprintf(stderr, "[REAL] wrap_swish: kernel launch failed (%d)\n", result);
+    return -1;
+  }
+
+  RUNTIME_DEBUG_LOG("[REAL] wrap_swish: completed successfully\n");
   return 0;
 }
