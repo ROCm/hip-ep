@@ -273,11 +273,12 @@ def HipsrUseOutputAllocatorPass
   ];
 }
 
-def SchemePrintPass : Pass<"scheme-print", "mlir::ModuleOp"> {
-  let summary = "Print MLIR operations in generic form using Scheme";
+def SchemeScriptPass : Pass<"scheme-script", "mlir::ModuleOp"> {
+  let summary = "Execute MLIR pass written in Scheme";
   let description = [{
-    Demonstration pass that initializes Chez Scheme runtime with embedded
-    boot file and prints all MLIR operations in generic form.
+    Generic pass that loads and executes a Scheme script. The script receives
+    the module operation and can query/transform IR using the Scheme FFI.
+    This allows writing complete MLIR passes in pure Scheme without C++ code.
   }];
 }
 

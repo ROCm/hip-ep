@@ -11,13 +11,13 @@
 namespace mlir {
 namespace hipsr {
 
-#define GEN_PASS_DEF_SCHEMEPRINTPASS
+#define GEN_PASS_DEF_SCHEMESCRIPTPASS
 #include "hip/Dialect/Hipsr/Transforms/Passes.h.inc"
 
 namespace {
 
-struct SchemePrintPass : public impl::SchemePrintPassBase<SchemePrintPass> {
-  using impl::SchemePrintPassBase<SchemePrintPass>::SchemePrintPassBase;
+struct SchemeScriptPass : public impl::SchemeScriptPassBase<SchemeScriptPass> {
+  using impl::SchemeScriptPassBase<SchemeScriptPass>::SchemeScriptPassBase;
 
   void runOnOperation() override {
     if (!initializeSchemeRuntime()) {
