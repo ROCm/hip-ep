@@ -282,7 +282,9 @@ def SchemeScriptPass : Pass<"scheme-script", "mlir::ModuleOp"> {
   }];
   let options = [
     Option<"logLevel", "log-level", "std::string", /*default=*/"\"warning\"",
-           "Logging level: trace, debug, info, warning, error, fatal">
+           "Logging level: trace, debug, info, warning, error, fatal">,
+    Option<"scriptName", "script", "std::string", /*default=*/"\"PrintPass.scm\"",
+           "Scheme script filename to load from lib/scheme/">
   ];
 }
 
