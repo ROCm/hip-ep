@@ -704,7 +704,6 @@ jobs:
           choco install --no-progress -y ccache
           choco install --no-progress -y ninja --version=1.12.1 --allow-downgrade
           choco install --no-progress -y strawberryperl
-          "C:\Strawberry\c\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Setup DVC
@@ -755,10 +754,16 @@ jobs:
         shell: pwsh
         run: Get-PSDrive -PSProvider FileSystem | Format-Table Name, Used, Free
 
+      # build.bat leaves the compiler to CMake, which probes cc/gcc ahead of cl and
+      # lands on the runner's Strawberry Perl gcc. TheRock's own Windows CI pins
+      # cl.exe through the windows-base CMake preset instead.
       - name: Build TheRock SDK
         if: steps.cache-therock.outputs.cache-hit != 'true'
         shell: cmd
         working-directory: source-therock
+        env:
+          CC: cl
+          CXX: cl
         run: chcp 65001 >nul && call build.bat
 
       - name: Verify and stage TheRock SDK
