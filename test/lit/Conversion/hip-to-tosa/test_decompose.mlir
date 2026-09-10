@@ -8,8 +8,9 @@
 // verify the forms the conversion rejects.
 //
 // hip.leaky_relu is not a BinaryConverter/UnaryConverter mapping: TOSA has no
-// leaky-relu op. The lowering is tosa.maximum(x, tosa.mul(x, splat(alpha)))
-// with nan_mode = IGNORE.
+// leaky-relu op. For alpha in [0, 1] the lowering is
+// tosa.maximum(x, tosa.mul(x, splat(alpha))) with nan_mode = IGNORE. Outside
+// that range it is tosa.select(tosa.greater(x, 0), x, scaled).
 //
 // hip.miopen.softmax is last-dim softmax. TOSA has no softmax op; the
 // lowering is reduce_max/sub/exp/reduce_sum/reciprocal/mul, which TosaToRock
@@ -71,6 +72,38 @@ func.func @leaky_relu_outlined_kernel(%x: tensor<2x8xf16>,
   %r = hip.leaky_relu(%ctx) ins(%x : tensor<2x8xf16>)
                             outs(%init : tensor<2x8xf16>) : tensor<2x8xf16>
   return %r : tensor<2x8xf16>
+}
+
+// alpha > 1 is not max(x, alpha*x); keep the ONNX select.
+// CHECK-LABEL: func.func @leaky_relu_alpha_gt1
+// CHECK: tosa.mul
+// CHECK: tosa.greater
+// CHECK: tosa.select
+// CHECK-NOT: tosa.maximum
+// CHECK-NOT: hip.leaky_relu
+func.func @leaky_relu_alpha_gt1(%ctx: !hip.context, %x: tensor<4xf32>,
+                                %init: tensor<4xf32>) -> tensor<4xf32>
+    attributes {rock.kernel} {
+  %r = hip.leaky_relu(%ctx) ins(%x : tensor<4xf32>)
+                            outs(%init : tensor<4xf32>)
+                            {alpha = 1.1 : f64} : tensor<4xf32>
+  return %r : tensor<4xf32>
+}
+
+// Negative alpha is the same select path, not maximum.
+// CHECK-LABEL: func.func @leaky_relu_alpha_neg
+// CHECK: tosa.mul
+// CHECK: tosa.greater
+// CHECK: tosa.select
+// CHECK-NOT: tosa.maximum
+// CHECK-NOT: hip.leaky_relu
+func.func @leaky_relu_alpha_neg(%ctx: !hip.context, %x: tensor<4xf32>,
+                                %init: tensor<4xf32>) -> tensor<4xf32>
+    attributes {rock.kernel} {
+  %r = hip.leaky_relu(%ctx) ins(%x : tensor<4xf32>)
+                            outs(%init : tensor<4xf32>)
+                            {alpha = -1.000000e-01 : f64} : tensor<4xf32>
+  return %r : tensor<4xf32>
 }
 
 // CHECK-LABEL: func.func @softmax

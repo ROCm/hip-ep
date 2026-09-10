@@ -322,8 +322,9 @@ struct WhereConverter final : public OpConversionPattern<WhereOp> {
 };
 
 // hip.leaky_relu is unary plus an `alpha` attribute; TOSA has no matching op.
-// For alpha in [0, 1] it lowers as:
+// y = x >= 0 ? x : alpha * x. For alpha in [0, 1] that is
 //   tosa.maximum(x, tosa.mul(x, splat(alpha))).
+// Otherwise emit tosa.select(tosa.greater(x, 0), x, scaled).
 struct LeakyReluConverter final : public OpConversionPattern<LeakyReluOp> {
   using OpConversionPattern<LeakyReluOp>::OpConversionPattern;
 
@@ -344,12 +345,22 @@ struct LeakyReluConverter final : public OpConversionPattern<LeakyReluOp> {
       return rewriter.notifyMatchFailure(op, "tosa op requires a float tensor");
 
     Location loc = op.getLoc();
-    Value alpha = createSplatFloat(rewriter, loc, resultType,
-                                   op.getAlpha().convertToDouble());
+    double alphaVal = op.getAlpha().convertToDouble();
+    Value alpha = createSplatFloat(rewriter, loc, resultType, alphaVal);
     Value scaled = tosa::MulOp::create(rewriter, loc, resultType, x, alpha,
                                        createZeroMulShift(rewriter, loc));
-    rewriter.replaceOpWithNewOp<tosa::MaximumOp>(
-        op, resultType, x, scaled, tosa::NanPropagationMode::IGNORE);
+    if (alphaVal >= 0.0 && alphaVal <= 1.0) {
+      rewriter.replaceOpWithNewOp<tosa::MaximumOp>(
+          op, resultType, x, scaled, tosa::NanPropagationMode::IGNORE);
+      return success();
+    }
+
+    Value zero = createSplatFloat(rewriter, loc, resultType, 0.0);
+    auto predType =
+        RankedTensorType::get(resultType.getShape(), rewriter.getI1Type());
+    Value pred = tosa::GreaterOp::create(rewriter, loc, predType, x, zero);
+    rewriter.replaceOpWithNewOp<tosa::SelectOp>(op, resultType, pred, x,
+                                                scaled);
     return success();
   }
 };
@@ -636,8 +647,16 @@ LogicalResult reshapeQdqParam(ConversionPatternRewriter &rewriter, Location loc,
 
   int64_t rank = dataType.getRank();
   if (rank == 0) {
-    if (paramType.getRank() != 0 &&
-        !(paramType.getRank() == 1 && paramType.getDimSize(0) == 1))
+    // TOSA elementwise ops need matching rank. ONNX per-tensor scale/ZP is
+    // sometimes tensor<1xT>; fold that to a rank-0 scalar.
+    if (paramType.getRank() == 1 && paramType.getDimSize(0) == 1) {
+      auto scalarType =
+          RankedTensorType::get({}, paramType.getElementType());
+      Value shape = tosa::getTosaConstShape(rewriter, loc, ArrayRef<int64_t>{});
+      param = tosa::ReshapeOp::create(rewriter, loc, scalarType, param, shape);
+      return success();
+    }
+    if (paramType.getRank() != 0)
       return rewriter.notifyMatchFailure(op, "rank-0 qdq expects a scalar");
     return success();
   }

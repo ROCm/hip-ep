@@ -108,6 +108,23 @@ func.func @dequantize_outlined_kernel(%x: tensor<2x8xi8>, %scale: tensor<f32>,
   return %r : tensor<2x8xf32>
 }
 
+// Rank-0 data with a length-1 vector scale: reshape the scale to a scalar
+// so tosa.mul has matching ranks.
+// CHECK-LABEL: func.func @dequantize_rank0_scale1
+// CHECK: tosa.reshape %arg2
+// CHECK: tosa.mul
+// CHECK-NOT: hip.dequantize_linear
+func.func @dequantize_rank0_scale1(%ctx: !hip.context, %x: tensor<i8>,
+                                     %scale: tensor<1xf32>,
+                                     %init: tensor<f32>) -> tensor<f32>
+    attributes {rock.kernel} {
+  %r = hip.dequantize_linear(%ctx)
+         ins(%x, %scale : tensor<i8>, tensor<1xf32>)
+         outs(%init : tensor<f32>)
+         {axis = 0 : i64, block_size = 0 : i64} : tensor<f32>
+  return %r : tensor<f32>
+}
+
 // -----
 
 func.func @dequantize_dynamic(%ctx: !hip.context, %x: tensor<?x8xi8>,
