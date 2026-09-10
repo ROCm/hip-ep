@@ -539,9 +539,15 @@ jobs:
           # clang resolves this as <bindir>/../lib/clang at runtime.
           [ -d "$ROCM_LLVM/lib/clang" ] && cp -a "$ROCM_LLVM/lib/clang" "$LIB/" || true
           # Copy non-system shared-lib deps. Unlike the static from-source LLVM,
-          # TheRock's clang links against a shared libLLVM, so this genuinely
-          # copies libraries rather than being a no-op.
-          for b in "$BIN"/clang "$BIN"/clang-[0-9]* "$BIN"/lld; do
+          # TheRock's clang links against a shared libclang-cpp/libLLVM, so this
+          # genuinely copies libraries rather than being a no-op. Resolve them
+          # from the ORIGINAL binaries: the copies in $BIN carry an RPATH of
+          # $ORIGIN/../lib, which now points at install/lib where these libraries
+          # do not exist yet, so ldd run there reports "not found" and the
+          # absolute-path filter below drops every one of them. ldd prints the
+          # full transitive closure, so one pass over the drivers is enough.
+          for b in "$ROCM_LLVM"/bin/clang "$ROCM_LLVM"/bin/clang-[0-9]* \
+                   "$LLVM"/bin/lld; do
             [ -f "$b" ] || continue
             ldd "$b" 2>/dev/null | awk '$3 ~ /^\// && $3 !~ /^\/(usr|lib|lib64)\// {print $3}'
           done | sort -u | while read -r src; do
@@ -549,7 +555,13 @@ jobs:
           done
           # Resolve against the bundled libs only, so this also proves the
           # copied driver is self-contained within install/.
-          LD_LIBRARY_PATH="$LIB" "$BIN/clang++" --version | head -1
+          if ! LD_LIBRARY_PATH="$LIB" "$BIN/clang++" --version > /tmp/clang-version.txt 2>&1; then
+            echo "ERROR: bundled clang++ is not self-contained"
+            cat /tmp/clang-version.txt
+            LD_LIBRARY_PATH="$LIB" ldd "$BIN/clang++" 2>&1 | grep 'not found' || true
+            exit 1
+          fi
+          head -1 /tmp/clang-version.txt
 
       # -----------------------------------------------------------------------
       # Stage the artifact from install/ (the bundling steps above made it
