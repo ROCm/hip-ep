@@ -1101,10 +1101,13 @@ jobs:
           repository: ROCm/rocm-libraries
           ref: ${{ env.ROCM_LIBRARIES_REF }}
           path: source-rocm-libraries
+          # cmake/ is here because shared/stinkytofu reaches the monorepo root
+          # for include(ClangTidy).
           sparse-checkout: |
             shared
             projects/hipblas-common
             projects/hipblaslt
+            cmake
           fetch-depth: 1
           show-progress: false
 
@@ -1180,6 +1183,11 @@ jobs:
           # build has both; this one has neither (the LLVM stage does not build
           # an OpenMP runtime). Both only serve host-side paths -- BLIS is the
           # CPU reference used by the clients that are already disabled here.
+          #
+          # HIPBLASLT_ENABLE_ROCROLLER defaults ON, but TheRock builds Windows
+          # without rocRoller, so the dist this replaces has no rocRoller kernels
+          # either. Leaving it on also drags in the FetchContent dependencies
+          # rocRoller needs (yaml-cpp, libdivide).
           cmake -S "$SRC/projects/hipblaslt" -B "${{ runner.workspace }}/build-hipblaslt" -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$PREFIX" \
@@ -1194,6 +1202,7 @@ jobs:
             -DHIPBLASLT_ENABLE_CLIENT=OFF \
             -DHIPBLASLT_ENABLE_BLIS=OFF \
             -DHIPBLASLT_ENABLE_OPENMP=OFF \
+            -DHIPBLASLT_ENABLE_ROCROLLER=OFF \
             "${LOGIC_ARGS[@]}"
           cmake --build "${{ runner.workspace }}/build-hipblaslt" --target install
 
