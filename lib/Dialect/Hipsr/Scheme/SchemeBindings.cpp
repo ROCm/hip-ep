@@ -213,7 +213,7 @@ bool loadSchemeScript(const char* scriptPath) {
                        std::istreambuf_iterator<char>());
   file.close();
 
-  if (logLevel <= SchemeLogLevel::Debug) {
+  if (current_log_level <= SchemeLogLevel::Debug) {
     llvm::errs() << "[debug] Loading " << scriptPath << " (" << scm_code.size() << " bytes)\n";
   }
   LLVM_DEBUG(llvm::dbgs() << "Loading Scheme script: " << scriptPath << "\n");
@@ -224,11 +224,11 @@ bool loadSchemeScript(const char* scriptPath) {
   ptr open_string_input_port_sym = Stop_level_value(Sstring_to_symbol("open-string-input-port"));
   ptr eof_object_p = Stop_level_value(Sstring_to_symbol("eof-object?"));
 
-  if (logLevel <= SchemeLogLevel::Debug) {
+  if (current_log_level <= SchemeLogLevel::Debug) {
     llvm::errs() << "[debug] Creating input port for script\n";
   }
   ptr port = Scall1(open_string_input_port_sym, Sstring(scm_code.c_str()));
-  if (logLevel <= SchemeLogLevel::Debug) {
+  if (current_log_level <= SchemeLogLevel::Debug) {
     llvm::errs() << "[debug] Starting read-eval loop\n";
   }
 
