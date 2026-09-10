@@ -108,6 +108,33 @@ MatMulNBitsToHip::matchAndRewrite(mlir::Operation *op,
   }
   auto zpElemSizeAttr = rewriter.getI64IntegerAttr(zpElemSize);
 
+  // Validate and detect the scales element type. ONNX MatMulNBits allows
+  // scales to match either fp16 or fp32 activation/output dtype (this
+  // model-dependent choice is independent of the packed-weight dtype). The
+  // runtime always dequantizes with fp16 scales internally; a fp32 scales
+  // buffer is cast-and-cached to fp16 on first use (see
+  // lib/Runtime/real/matmul_nbits.cpp). Without this detection, a fp32
+  // scales buffer's raw bytes would be silently misread as fp16, producing
+  // garbage (NaN/Inf) dequantized weights.
+  int64_t scaleElemSize = 2; // default: fp16
+  {
+    auto scalesTy = mlir::cast<mlir::ShapedType>(scales.getType());
+    mlir::Type scalesElemTy = scalesTy.getElementType();
+    if (scalesElemTy.isF16()) {
+      scaleElemSize = 2;
+    } else if (scalesElemTy.isF32()) {
+      scaleElemSize = 4;
+    } else {
+      std::string msg;
+      llvm::raw_string_ostream os(msg);
+      os << "MatMulNBits: unsupported scales element type: ";
+      scalesElemTy.print(os);
+      os << ". Expected f16 or f32";
+      return rewriter.notifyMatchFailure(op, msg);
+    }
+  }
+  auto scaleElemSizeAttr = rewriter.getI64IntegerAttr(scaleElemSize);
+
   auto rt = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   mlir::Value init = createEmptyTensor(rewriter, loc, rt, A);
 
@@ -115,7 +142,8 @@ MatMulNBitsToHip::matchAndRewrite(mlir::Operation *op,
   // result type == outs operand type.
   auto hipOp = mlir::hip::MatMulNBitsOp::create(
       rewriter, loc, context, A, B, scales, zeroPoints, gIdx, bias, init, KAttr,
-      NAttr, bitsAttr, blockSizeAttr, accuracyLevelAttr, zpElemSizeAttr);
+      NAttr, bitsAttr, blockSizeAttr, accuracyLevelAttr, zpElemSizeAttr,
+      scaleElemSizeAttr);
   rewriter.replaceOp(op, hipOp->getResults());
   return mlir::success();
 }

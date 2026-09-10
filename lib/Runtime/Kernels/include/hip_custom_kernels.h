@@ -2097,6 +2097,15 @@ HIP_KERNEL_API void hip_matmul_nbits_unpack_zp_u8_3bit(
 HIP_KERNEL_API void hip_matmul_nbits_convert_zp_fp16(
     void* stream, const void* zp_packed, void* dst_fp16, int N, int groups_k);
 
+/* Flat fp32 -> fp16 cast for a MatMulNBits `scales` buffer ([N, num_groups_k],
+ * n_elems = N * num_groups_k). Every dequant path reads `scales` as raw fp16;
+ * a fp32 scales buffer (ONNX MatMulNBits allows either dtype) must be
+ * converted once before use -- see lib/Runtime/real/matmul_nbits.cpp's
+ * lookup_or_convert_scale_fp16. */
+HIP_KERNEL_API void hip_matmul_nbits_convert_scale_fp32_to_fp16(
+    void* stream, const void* scale_fp32, void* scale_fp16_out,
+    int64_t n_elems);
+
 /* Dequantize a full packed int4 weight matrix into row-major fp16 [N, K].
  * Used by the CDNA/wave64 prefill fast path (no WMMA): dequantize B once
  * (weights are constant) then run a hipBLASLt fp16 GEMM. scales_fp16 and
