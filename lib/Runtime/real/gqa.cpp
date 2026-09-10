@@ -41,7 +41,9 @@
 //     fused path: new tokens are quantize-appended into the int8 cache; decode
 //     reads int8 directly (bandwidth win), prefill dequantizes the cache
 //     to fp16 once and reuses the tuned fp16 prefill (compute-bound ->
-//     ~parity).
+//     ~parity). fp32 activations (W4A32) reach that path through a per-call
+//     fp32->fp16 cast of QKV / RoPE tables and an fp16->fp32 cast of the
+//     output; fused kernels stay fp16-only.
 //   * Inputs NEITHER path supports (other KV quantization, position ids,
 //     qk_output) are rejected up front.
 //===----------------------------------------------------------------------===//
@@ -2586,6 +2588,146 @@ static bool classify_kv_cache(int64_t k_quant_type, int64_t v_quant_type,
 }
 
 //===----------------------------------------------------------------------===//
+// fp32-activation adapter onto the fp16 fused path (INT8 KV only).
+//
+// Fused kernels consume __half QKV / RoPE / output. A quantized KV cache
+// cannot fall through to the fp32-capable decomposed pipeline (it would
+// mis-read int8 bytes as fp16), so fp32 query is down-cast here every call.
+// RoPE tables are converted by the prefix the kernel will index
+// ([0, past_len+sq) x (d/2)); no ABI numel and no session cache yet.
+// Scratch lives on RuntimeState so ensure_workspace growth cannot free it.
+//===----------------------------------------------------------------------===//
+static int ensure_gqa_fp32_adapter_scratch(RuntimeState *state, size_t needed) {
+  if (!state)
+    return -1;
+  if (needed == 0)
+    return 0;
+  if (state->gqa_fp32_adapter_scratch_size >= needed)
+    return 0;
+
+  size_t alloc_size = needed;
+  if (state->gqa_fp32_adapter_scratch_size > 0) {
+    size_t grown = state->gqa_fp32_adapter_scratch_size +
+                   state->gqa_fp32_adapter_scratch_size / 2;
+    if (grown > alloc_size)
+      alloc_size = grown;
+  }
+
+  if (state->gqa_fp32_adapter_scratch) {
+    if (state->stream && hipStreamSynchronize(state->stream) != hipSuccess)
+      return -1;
+    if (hipFree(state->gqa_fp32_adapter_scratch) != hipSuccess)
+      return -1;
+    state->gqa_fp32_adapter_scratch = nullptr;
+    state->gqa_fp32_adapter_scratch_size = 0;
+  }
+
+  if (hipMalloc(&state->gqa_fp32_adapter_scratch, alloc_size) != hipSuccess) {
+    fprintf(stderr,
+            "wrap_group_query_attention: fp32 adapter scratch alloc failed "
+            "(%zu bytes)\n",
+            alloc_size);
+    return -1;
+  }
+  state->gqa_fp32_adapter_scratch_size = alloc_size;
+  return 0;
+}
+
+static int gqa_cast_f32_to_f16(hipStream_t stream, const void *src, void *dst,
+                               int64_t n) {
+  if (n <= 0)
+    return 0;
+  return hip_cast(stream, src, dst, n, HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16);
+}
+
+static int gqa_cast_f16_to_f32(hipStream_t stream, const void *src, void *dst,
+                               int64_t n) {
+  if (n <= 0)
+    return 0;
+  return hip_cast(stream, src, dst, n, HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT32);
+}
+
+static int gqa_forward_fused_from_fp32(
+    RuntimeState *state, hipStream_t stream, void *query, void *key,
+    void *value, void *past_key, void *past_value, void *seqlens_k,
+    void *cos_cache, void *sin_cache, void *output, void *present_key,
+    void *present_value, int64_t B, int64_t sq, int64_t skv,
+    int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
+    int64_t do_rotary, const void *k_scale, const void *v_scale,
+    KvCacheFormat kv_format, const void *head_sink, bool use_smooth_softmax,
+    int local_window_size) {
+  const bool packed_qkv = (!key && !value);
+  const bool need_rope = do_rotary && cos_cache && sin_cache;
+
+  int64_t past_len = 0;
+  const int32_t seqlens_k_pre =
+      read_seqlens_k_for_dispatch(stream, seqlens_k, B, state);
+  if (seqlens_k_pre == -1) {
+    past_len = 0;
+  } else if (seqlens_k_pre >= 0) {
+    past_len = static_cast<int64_t>(seqlens_k_pre) + 1 - sq;
+    if (past_len < 0)
+      past_len = 0;
+  } else if (skv > sq) {
+    past_len = skv - sq;
+  }
+
+  const int64_t q_elems =
+      packed_qkv ? (B * sq * (H + 2 * G) * d) : (B * sq * H * d);
+  const int64_t kv_elems = packed_qkv ? 0 : (B * sq * G * d);
+  const int64_t out_elems = B * sq * H * d;
+  const int64_t half_rot = d / 2;
+  const int64_t rope_elems = need_rope ? ((past_len + sq) * half_rot) : 0;
+
+  const size_t q_bytes = static_cast<size_t>(q_elems) * 2;
+  const size_t k_bytes =
+      (key && !packed_qkv) ? static_cast<size_t>(kv_elems) * 2 : 0;
+  const size_t v_bytes =
+      (value && !packed_qkv) ? static_cast<size_t>(kv_elems) * 2 : 0;
+  const size_t out_bytes = static_cast<size_t>(out_elems) * 2;
+  const size_t rope_bytes = static_cast<size_t>(rope_elems) * 2;
+
+  const size_t off_q = 0;
+  const size_t off_k = off_q + q_bytes;
+  const size_t off_v = off_k + k_bytes;
+  const size_t off_out = off_v + v_bytes;
+  const size_t off_cos = off_out + out_bytes;
+  const size_t off_sin = off_cos + rope_bytes;
+  const size_t total = off_sin + rope_bytes;
+
+  if (ensure_gqa_fp32_adapter_scratch(state, total) != 0)
+    return -1;
+  char *scratch = static_cast<char *>(state->gqa_fp32_adapter_scratch);
+  void *q16 = scratch + off_q;
+  void *k16 = k_bytes ? scratch + off_k : nullptr;
+  void *v16 = v_bytes ? scratch + off_v : nullptr;
+  void *out16 = scratch + off_out;
+  void *cos16 = rope_bytes ? scratch + off_cos : nullptr;
+  void *sin16 = rope_bytes ? scratch + off_sin : nullptr;
+
+  if (gqa_cast_f32_to_f16(stream, query, q16, q_elems) != 0)
+    return -1;
+  if (k16 && gqa_cast_f32_to_f16(stream, key, k16, kv_elems) != 0)
+    return -1;
+  if (v16 && gqa_cast_f32_to_f16(stream, value, v16, kv_elems) != 0)
+    return -1;
+  if (cos16 && gqa_cast_f32_to_f16(stream, cos_cache, cos16, rope_elems) != 0)
+    return -1;
+  if (sin16 && gqa_cast_f32_to_f16(stream, sin_cache, sin16, rope_elems) != 0)
+    return -1;
+
+  int rc = gqa_forward_fused(state, stream, q16, k16, v16, past_key, past_value,
+                             seqlens_k, cos16 ? cos16 : cos_cache,
+                             sin16 ? sin16 : sin_cache, out16, present_key,
+                             present_value, B, sq, skv, past_buf_seq, H, G, d,
+                             scale, do_rotary, k_scale, v_scale, kv_format,
+                             head_sink, use_smooth_softmax, local_window_size);
+  if (rc != 0)
+    return rc;
+  return gqa_cast_f16_to_f32(stream, out16, output, out_elems);
+}
+
+//===----------------------------------------------------------------------===//
 // Public wrapper called by generated IR. ABI MUST stay identical to the
 // HipToLLVM lowering (kWrapGQA = "wrap_group_query_attention", 42 params).
 //===----------------------------------------------------------------------===//
@@ -2725,10 +2867,18 @@ int wrap_group_query_attention(
   // trap on CDNA (wave64, e.g. MI350). Route wave64 to the decomposed hipBLASLt
   // pipeline below (MFMA GEMMs + wave-portable scalar kernels), which is
   // feature-complete and correct on both wave sizes. RDNA is unaffected.
-  const bool fused_supported =
-      element_size_bytes == 2 && no_causal == 0 && window_ok && sink_ok &&
-      head_dim_ok && decode_geometry_ok && attention_bias == nullptr &&
-      !hipdnn_device_is_wave64();
+  const bool fused_geometry = no_causal == 0 && window_ok && sink_ok &&
+                              head_dim_ok && decode_geometry_ok &&
+                              attention_bias == nullptr &&
+                              !hipdnn_device_is_wave64();
+  const bool fused_supported = fused_geometry && element_size_bytes == 2;
+  // fp32 query + INT8 KV cannot use the decomposed fallback (it reads the
+  // cache as fp16). Cast QKV/RoPE/output to fp16 and reuse fused. head_sink
+  // is a fused __half buffer; leave that combination rejected until a
+  // dedicated cast is added.
+  const bool fp32_int8_fused =
+      kv_quantized && fused_geometry && element_size_bytes == 4 &&
+      (head_dim == 64 || head_dim == 128) && head_sink == nullptr;
 
   // The quantized-cache kernels live exclusively on the fused path, which is
   // disabled above on wave64 because it is built on the RDNA-only WMMA
@@ -2749,15 +2899,39 @@ int wrap_group_query_attention(
   // fp16 prefill-over-dequant), for head_dim in {64,128}. The legacy decomposed
   // pipeline reads the cache as fp16 and would misinterpret quantized bytes, so
   // we must reject rather than silently fall through to it.
-  if (kv_quantized &&
+  if (kv_quantized && !fp32_int8_fused &&
       (!fused_supported || (head_dim != 64 && head_dim != 128))) {
     fprintf(stderr,
             "wrap_group_query_attention: quantized KV cache requires the fused "
-            "path (fp16, causal, no attention bias, any window/sink only where "
-            "the fused kernels implement it, head_dim 64 or 128); got "
-            "fused_supported=%d head_dim=%lld\n",
-            static_cast<int>(fused_supported), (long long)head_dim);
+            "path (fp16 or fp32-cast-to-fp16, causal, no attention bias, any "
+            "window/sink only where the fused kernels implement it, head_dim "
+            "64 or 128); got fused_supported=%d fp32_adapter=%d elem=%lld "
+            "head_dim=%lld\n",
+            static_cast<int>(fused_supported),
+            static_cast<int>(fp32_int8_fused), (long long)element_size_bytes,
+            (long long)head_dim);
     return -1;
+  }
+
+  if (fp32_int8_fused) {
+    RUNTIME_DEBUG_LOG(
+        "[REAL] wrap_group_query_attention: fp32->fp16 adapter onto fused "
+        "(elem=%lld d=%lld sq=%lld packed=%d)\n",
+        (long long)element_size_bytes, (long long)head_dim,
+        (long long)seq_len_q,
+        static_cast<int>(key == nullptr && value == nullptr));
+    int arc = gqa_forward_fused_from_fp32(
+        state, stream, query, key, value, past_key, past_value, seqlens_k,
+        cos_cache, sin_cache, output, present_key, present_value, batch_size,
+        seq_len_q, seq_len_kv, past_buf_seq, num_heads, kv_num_heads, head_dim,
+        scale, do_rotary, k_scale, v_scale, kv_format, head_sink,
+        has_smooth_softmax, static_cast<int>(local_window_size));
+    if (arc != 0)
+      fprintf(stderr,
+              "wrap_group_query_attention: fp32 adapter / gqa_forward_fused "
+              "failed (rc=%d)\n",
+              arc);
+    return arc;
   }
 
   if (!fused_supported) {
