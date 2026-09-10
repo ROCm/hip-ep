@@ -4,8 +4,8 @@
 ##
 name: Windows Deps
 
-# Prebuilds the two heavy from-source dependencies into cached install prefixes
-# and returns their cache keys. Callers restore those prefixes with
+# Prebuilds heavy from-source dependencies into cached install prefixes and
+# returns their cache keys. Callers restore those prefixes with
 # fail-on-cache-miss, so a green run here is what guarantees the caches exist.
 on:
   workflow_call:
@@ -24,7 +24,7 @@ on:
         value: ${{ jobs.oga.outputs.cache_key }}
       therock_cache_key:
         description: Cache key holding the self-built TheRock SDK distribution.
-        value: ${{ jobs.therock-libraries.outputs.cache_key }}
+        value: ${{ jobs.therock.outputs.cache_key }}
 
 permissions:
   contents: read
@@ -41,12 +41,7 @@ env:
   # of AMDGPU_EP_REF. 102: forward Hip custom-op domains; 105: forward unknown /
   # Hip-owned provider options under the shared ep.<amdgpu>.* prefix.
   AMDGPU_PR_PATCHES: "102 105"
-  ROCM_CMAKE_REF: "6a7c5b73b8882c74f8f7060e2633f230dabb7b63"
-  LLVM_PROJECT_REF: "2904a87d4ddd4d3dd3aaed86fc38c2278b284fd3"
-  ROCM_SYSTEMS_REF: "0658bf9fe1355f2ebdc26f4047966a6356e327bc"
-  ROCM_LIBRARIES_REF: "ce54e74413a2686ec79522ed3724cd171cbc2df2"
-  THEROCK_GPU_TARGETS: "gfx1151;gfx1152;gfx1150"
-  HIPBLASLT_LOGIC_FILTER: ""
+  THEROCK_REF: "gpuep-release/therock-7.14"
 
 jobs:
   llvm:
@@ -662,24 +657,34 @@ jobs:
           path: ${{ runner.workspace }}/sccache-dir
           key: sccache-windows-deps-oga-${{ env.SCCACHE_KEY_DATE }}
 
-  therock-llvm:
+  therock:
     runs-on: windows-2022
     timeout-minutes: 360
     concurrency:
-      group: deps-therock-llvm-${{ github.ref }}
+      group: deps-therock-${{ github.ref }}
       cancel-in-progress: false
 
     outputs:
       cache_key: ${{ steps.key.outputs.value }}
 
     steps:
+      - name: Checkout TheRock release fork
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: cliu1003/TheRock
+          ref: ${{ env.THEROCK_REF }}
+          path: source-therock
+          fetch-depth: 1
+          show-progress: false
+
       - name: Compute cache key
         id: key
         shell: bash
-        run: echo "value=therock-llvm-${LLVM_PROJECT_REF:0:12}-cmake${ROCM_CMAKE_REF:0:7}" >> "$GITHUB_OUTPUT"
+        working-directory: source-therock
+        run: echo "value=therock-fork-$(git rev-parse HEAD)-buildbat-v1" >> "$GITHUB_OUTPUT"
 
-      - name: Probe therock-llvm prefix
-        id: cache-llvm
+      - name: Probe self-built TheRock SDK
+        id: cache-therock
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/therock-prefix
@@ -687,560 +692,127 @@ jobs:
           lookup-only: true
 
       - name: Setup Python 3.12
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        if: steps.cache-therock.outputs.cache-hit != 'true'
         uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
         with:
           python-version: "3.12"
 
+      - name: Install Windows build tools
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          choco install --no-progress -y ccache
+          choco install --no-progress -y ninja --version=1.12.1 --allow-downgrade
+          choco install --no-progress -y strawberryperl
+          "C:\Strawberry\c\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Setup DVC
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        uses: iterative/setup-dvc@6c05772f52d19792ed73aedb6c2bf65ec92adebb # v3.0.0
+        with:
+          version: "3.62.0"
+
+      # Install MSVC last so cl.exe and the Windows SDK precede other toolchains.
       - name: Setup MSVC environment
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        if: steps.cache-therock.outputs.cache-hit != 'true'
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
-      - name: Prepare sccache local cache
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
-        shell: bash
+      - name: Initialize TheRock Python environment
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        shell: pwsh
+        working-directory: source-therock
         run: |
-          echo "SCCACHE_DIR=${{ runner.workspace }}/sccache-dir" >> $GITHUB_ENV
-          echo "SCCACHE_KEY_DATE=$(date -u +'%Y%m%d')" >> $GITHUB_ENV
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip install --upgrade pip
+          .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+          "${{ github.workspace }}\source-therock\.venv\Scripts" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: Restore sccache directory
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
-        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
-        with:
-          path: ${{ runner.workspace }}/sccache-dir
-          key: sccache-therock-llvm-${{ env.SCCACHE_KEY_DATE }}
-          restore-keys: |
-            sccache-therock-llvm-
-
-      - name: Setup sccache
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
-        uses: mozilla-actions/sccache-action@v0.0.9
-
-      - name: Checkout rocm-cmake
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          repository: ROCm/rocm-cmake
-          ref: ${{ env.ROCM_CMAKE_REF }}
-          path: source-rocm-cmake
-          fetch-depth: 1
-          show-progress: false
-
-      - name: Checkout llvm-project
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          repository: ROCm/llvm-project
-          ref: ${{ env.LLVM_PROJECT_REF }}
-          path: source-llvm-project
-          fetch-depth: 1
-          show-progress: false
-
-      - name: Report disk before build
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
-        shell: bash
-        run: df -h / /c 2>/dev/null || true
-
-      - name: Build rocm-cmake
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
-        shell: bash
+      - name: Configure git for TheRock sources
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        shell: pwsh
+        working-directory: source-therock
         run: |
-          set -euo pipefail
-          PREFIX="${{ runner.workspace }}/therock-prefix"
-          cmake -S source-rocm-cmake -B "${{ runner.workspace }}/build-rocm-cmake" -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="$PREFIX"
-          cmake --build "${{ runner.workspace }}/build-rocm-cmake" --target install
+          git config --global core.symlinks true
+          git config --global core.longpaths true
+          git config fetch.parallel 10
 
-      - name: Build LLVM (clang + lld, AMDGPU/X86/SPIRV)
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
-        shell: bash
+      - name: Fetch TheRock sources
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        timeout-minutes: 30
+        shell: pwsh
+        working-directory: source-therock
+        run: .\.venv\Scripts\python.exe .\build_tools\fetch_sources.py --jobs 12 --depth 1
+
+      - name: Setup ccache
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        shell: pwsh
+        working-directory: source-therock
+        run: .\.venv\Scripts\python.exe .\build_tools\setup_ccache.py --init
+
+      - name: Report disk before TheRock build
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table Name, Used, Free
+
+      - name: Build TheRock SDK
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        shell: cmd
+        working-directory: source-therock
+        run: chcp 65001 >nul && call build.bat
+
+      - name: Verify and stage TheRock SDK
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        shell: pwsh
+        working-directory: source-therock
         run: |
-          set -euo pipefail
-          PREFIX="${{ runner.workspace }}/therock-prefix"
-          # Project/target selection mirrors AMD's build: their configure log
-          # shows clang + clang-tools-extra + lld enabled, bolt/lldb/mlir/polly
-          # disabled, and "Targeting AMDGPU / X86 / SPIRV".
-          cmake -S source-llvm-project/llvm -B "${{ runner.workspace }}/build-llvm-amd" -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-            -DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra;lld" \
-            -DLLVM_TARGETS_TO_BUILD="AMDGPU;X86;SPIRV" \
-            -DLLVM_ENABLE_ASSERTIONS=OFF \
-            -DLLVM_INCLUDE_TESTS=OFF \
-            -DLLVM_INCLUDE_EXAMPLES=OFF \
-            -DLLVM_INCLUDE_BENCHMARKS=OFF \
-            -DLLVM_ENABLE_ZLIB=OFF \
-            -DLLVM_ENABLE_ZSTD=OFF \
-            -DLLVM_ENABLE_RTTI=ON \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-          cmake --build "${{ runner.workspace }}/build-llvm-amd" --target install
-
-      - name: Build AMDDeviceLibs + amd_comgr + hipcc
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          PREFIX="${{ runner.workspace }}/therock-prefix"
-          SRC="${{ github.workspace }}/source-llvm-project"
-          # These three live in the same repo as llvm/ and are built against the
-          # LLVM that was just installed.
-          for comp in device-libs comgr hipcc; do
-            cmake -S "$SRC/amd/$comp" -B "${{ runner.workspace }}/build-amd-$comp" -G Ninja \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-              -DCMAKE_PREFIX_PATH="$PREFIX" \
-              -DLLVM_DIR="$PREFIX/lib/cmake/llvm" \
-              -DClang_DIR="$PREFIX/lib/cmake/clang" \
-              -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-              -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-            cmake --build "${{ runner.workspace }}/build-amd-$comp" --target install
-          done
-
-      - name: Verify prefix has the pieces downstream stages need
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          PREFIX="${{ runner.workspace }}/therock-prefix"
-          for f in bin/clang.exe bin/lld.exe amdgcn/bitcode; do
-            if [ ! -e "$PREFIX/$f" ]; then
-              echo "ERROR: $PREFIX/$f missing after the LLVM stage"
-              ls -1 "$PREFIX/bin" | head -40 || true
-              exit 1
-            fi
-          done
-          du -sh "$PREFIX" || true
-
-      - name: Report disk after build
-        if: always() && steps.cache-llvm.outputs.cache-hit != 'true'
-        shell: bash
-        run: df -h / /c 2>/dev/null || true
-
-      - name: Save therock-llvm prefix
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
-        with:
-          path: ${{ runner.workspace }}/therock-prefix
-          key: ${{ steps.key.outputs.value }}
-
-      - name: Save sccache directory
-        if: always() && steps.cache-llvm.outputs.cache-hit != 'true' && github.ref_name == 'main'
-        continue-on-error: true
-        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
-        with:
-          path: ${{ runner.workspace }}/sccache-dir
-          key: sccache-therock-llvm-${{ env.SCCACHE_KEY_DATE }}
-
-  therock-hip-runtime:
-    needs: therock-llvm
-    runs-on: windows-2022
-    timeout-minutes: 240
-    concurrency:
-      group: deps-therock-hip-runtime-${{ github.ref }}
-      cancel-in-progress: false
-
-    outputs:
-      cache_key: ${{ steps.key.outputs.value }}
-
-    steps:
-      - name: Compute cache key
-        id: key
-        shell: bash
-        run: echo "value=therock-hipruntime-${ROCM_SYSTEMS_REF:0:12}-on-${{ needs.therock-llvm.outputs.cache_key }}" >> "$GITHUB_OUTPUT"
-
-      - name: Probe therock-hip-runtime prefix
-        id: cache-hip
-        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
-        with:
-          path: ${{ runner.workspace }}/therock-prefix
-          key: ${{ steps.key.outputs.value }}
-          lookup-only: true
-
-      - name: Restore therock-llvm prefix
-        if: steps.cache-hip.outputs.cache-hit != 'true'
-        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
-        with:
-          path: ${{ runner.workspace }}/therock-prefix
-          key: ${{ needs.therock-llvm.outputs.cache_key }}
-          fail-on-cache-miss: true
-
-      - name: Setup Python 3.12
-        if: steps.cache-hip.outputs.cache-hit != 'true'
-        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
-        with:
-          python-version: "3.12"
-
-      - name: Setup MSVC environment
-        if: steps.cache-hip.outputs.cache-hit != 'true'
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
-
-      - name: Prepare sccache local cache
-        if: steps.cache-hip.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          echo "SCCACHE_DIR=${{ runner.workspace }}/sccache-dir" >> $GITHUB_ENV
-          echo "SCCACHE_KEY_DATE=$(date -u +'%Y%m%d')" >> $GITHUB_ENV
-
-      - name: Restore sccache directory
-        if: steps.cache-hip.outputs.cache-hit != 'true'
-        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
-        with:
-          path: ${{ runner.workspace }}/sccache-dir
-          key: sccache-therock-hip-${{ env.SCCACHE_KEY_DATE }}
-          restore-keys: |
-            sccache-therock-hip-
-
-      - name: Setup sccache
-        if: steps.cache-hip.outputs.cache-hit != 'true'
-        uses: mozilla-actions/sccache-action@v0.0.9
-
-      - name: Checkout rocm-systems
-        if: steps.cache-hip.outputs.cache-hit != 'true'
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          repository: ROCm/rocm-systems
-          ref: ${{ env.ROCM_SYSTEMS_REF }}
-          path: source-rocm-systems
-          # ~7 GB monorepo. projects/hip is HIP_COMMON_DIR; projects/rocr-runtime
-          # is picked up by rocclr as a subdirectory build of hsa-runtime64
-          # (see the AMD_COMPUTE_WIN note in the build step). .dvc carries the
-          # remote config needed to fetch the prebuilt Windows libraries.
-          sparse-checkout: |
-            .dvc
-            shared
-            projects/clr
-            projects/hip
-            projects/rocr-runtime
-          fetch-depth: 1
-          show-progress: false
-
-      # shared/amdgpu-windows-interop ships its prebuilt libraries through DVC:
-      # git only carries pointer files such as wkmi.lib.dvc, and hipamd links
-      # against the real wkmi.lib. The remote allows anonymous access, so no
-      # credentials are needed.
-      #
-      # The pull takes no target: every library is its own .dvc pointer, so a
-      # directory argument is resolved as a dvc.yaml stage name and this repo
-      # has no dvc.yaml.
-      - name: Fetch DVC-tracked Windows interop libraries
-        if: steps.cache-hip.outputs.cache-hit != 'true'
-        shell: bash
-        working-directory: source-rocm-systems
-        run: |
-          set -euo pipefail
-          python -m pip install -q "dvc[s3]"
-          dvc pull
-          if [ ! -f shared/amdgpu-windows-interop/wkmi/win/lib/wkmi.lib ]; then
-            echo "ERROR: wkmi.lib still a DVC pointer after the pull"
+          $dist = (Resolve-Path .\build\dist\rocm).Path
+          $required = @(
+            "bin\clang.exe",
+            "bin\lld.exe",
+            "bin\hipcc.bat",
+            "bin\clang-offload-bundler.exe",
+            "bin\hipblaslt.dll",
+            "amdgcn\bitcode",
+            "lib\cmake\hip\hip-config.cmake",
+            "lib\cmake\hip-lang\hip-lang-config.cmake",
+            "lib\cmake\hipblaslt",
+            "lib\cmake\AMDDeviceLibs",
+            "lib\cmake\amd_comgr"
+          )
+          $missing = $required | Where-Object { -not (Test-Path (Join-Path $dist $_)) }
+          if (-not (Get-ChildItem "$dist\bin\amdhip64*.dll" -ErrorAction SilentlyContinue)) {
+            $missing += "bin\amdhip64*.dll"
+          }
+          if (-not (Get-ChildItem "$dist\bin\amd_comgr*.dll" -ErrorAction SilentlyContinue)) {
+            $missing += "bin\amd_comgr*.dll"
+          }
+          if (-not (Get-ChildItem "$dist\bin\hiprtc*.dll" -ErrorAction SilentlyContinue)) {
+            $missing += "bin\hiprtc*.dll"
+          }
+          if (-not (Get-ChildItem "$dist\bin\hipblaslt\library" -Directory -ErrorAction SilentlyContinue)) {
+            $missing += "bin\hipblaslt\library\<arch>"
+          }
+          if ($missing) {
+            $missing | ForEach-Object { Write-Error "MISSING: $_" }
             exit 1
-          fi
+          }
 
-      # shared/kpack does find_package(msgpack-cxx REQUIRED) and
-      # find_package(zstd REQUIRED). Flags copied from AMD's build -- the
-      # static-CRT and static-lib settings have to match the consumer.
-      - name: Install zstd and msgpack via cget
-        if: steps.cache-hip.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          # hipamd's configure imports CppHeaderParser to generate its API headers.
-          python -m pip install -q cget CppHeaderParser
-          DEPS="${{ runner.workspace }}/hipruntime-deps"
-          cget install facebook/zstd@v1.5.7 -X subdir -DCMAKE_DIR=build/cmake \
-            -DZSTD_USE_STATIC_RUNTIME=On -DBUILD_TESTING=Off -DZSTD_BUILD_TESTS=Off \
-            -DZSTD_BUILD_STATIC=On -DZSTD_BUILD_SHARED=Off -DBUILD_SHARED_LIBS=Off \
-            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 --build-type Release --insecure -G Ninja -p "$DEPS"
-          cget install msgpack/msgpack-c@cpp-7.0.0 \
-            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DMSGPACK_CXX17=ON \
-            -DMSGPACK_BUILD_TESTS=Off -DMSGPACK_BUILD_DOCS=OFF -DMSGPACK_USE_BOOST=OFF \
-            -DBUILD_SHARED_LIBS=OFF --build-type Release --insecure -G Ninja -p "$DEPS"
+          $prefix = "${{ runner.workspace }}\therock-prefix"
+          robocopy $dist $prefix /MIR /NFL /NDL /NJH /NJS /NP
+          if ($LASTEXITCODE -ge 8) {
+            exit $LASTEXITCODE
+          }
+          Get-ChildItem "$prefix\bin\hipblaslt\library" -Directory |
+            ForEach-Object { Write-Host "hipBLASLt logic: $($_.Name)" }
 
-      - name: Build rocm-kpack and hipRuntime
-        if: steps.cache-hip.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Forward slashes throughout: hipamd runs hip_embed_pch.sh via sh -c,
-          # and a backslash path like D:\a\hip-ep loses its separators to shell
-          # escaping ("\a" becomes a bell character) before clang ever sees it.
-          PREFIX=$(cygpath -m "${{ runner.workspace }}/therock-prefix")
-          DEPS=$(cygpath -m "${{ runner.workspace }}/hipruntime-deps")
-          SRC=$(cygpath -m "${{ github.workspace }}/source-rocm-systems")
-          export HIP_PATH="$PREFIX"
-          export ROCM_PATH="$PREFIX"
+      - name: Report disk after TheRock build
+        if: always() && steps.cache-therock.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table Name, Used, Free
 
-          # Same order AMD uses: kpack first, then the HIP runtime out of clr.
-          cmake -S "$SRC/shared/kpack" -B "${{ runner.workspace }}/build-kpack" -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-            -DCMAKE_PREFIX_PATH="$PREFIX;$DEPS" \
-            -DROCM_PATH="$PREFIX" \
-            -DBUILD_TESTING=OFF \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-          cmake --build "${{ runner.workspace }}/build-kpack" --target install
-
-          # clr builds nothing unless a runtime is selected, and it hard-fails
-          # without HIP_COMMON_DIR. HIP_PLATFORM is passed explicitly because
-          # the auto-detect path shells out to hipconfig.
-          #
-          # rocclr/cmake/ROCclrHSA.cmake takes one of two paths: when
-          # projects/rocr-runtime is present next to clr it builds hsa-runtime64
-          # as a subdirectory, otherwise it falls back to find_package and fails
-          # because nothing installs that package. AMD_COMPUTE_WIN supplies the
-          # Windows libelf and SC paths that build needs.
-          #
-          # __HIP_ENABLE_PCH defaults ON but AMD's own build never runs it (no
-          # trace of hip_embed_pch.sh in their logs), and on Windows it drives
-          # clang over the MSVC headers in GNU driver mode, which does not parse.
-          # It only precompiles headers for runtime compilation.
-          #
-          # USE_PROF_API defaults ON and its header generator preprocesses with
-          # "$CMAKE_C_COMPILER -E -o new_header.h.i", which cl.exe writes to
-          # stdout instead of the file, so the generator then aborts on a
-          # missing input. TheRock turns roctracer integration off on Windows.
-          cmake -S "$SRC/projects/clr" -B "${{ runner.workspace }}/build-clr" -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-            -DCMAKE_PREFIX_PATH="$PREFIX;$DEPS" \
-            -DROCM_PATH="$PREFIX" \
-            -DCLR_BUILD_HIP=ON \
-            -DCLR_BUILD_OCL=OFF \
-            -DHIP_COMMON_DIR="$SRC/projects/hip" \
-            -DHIP_PLATFORM=amd \
-            -D__HIP_ENABLE_PCH=OFF \
-            -DUSE_PROF_API=OFF \
-            -DAMD_COMPUTE_WIN="$SRC/shared/amdgpu-windows-interop" \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-          cmake --build "${{ runner.workspace }}/build-clr" --target install
-
-      - name: Verify HIP runtime landed in the prefix
-        if: steps.cache-hip.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          PREFIX="${{ runner.workspace }}/therock-prefix"
-          if ! ls "$PREFIX"/bin/amdhip64*.dll >/dev/null 2>&1; then
-            echo "ERROR: amdhip64*.dll missing after the hipRuntime stage"
-            ls -1 "$PREFIX/bin" | head -40 || true
-            exit 1
-          fi
-          du -sh "$PREFIX" || true
-
-      - name: Save therock-hip-runtime prefix
-        if: steps.cache-hip.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
-        with:
-          path: ${{ runner.workspace }}/therock-prefix
-          key: ${{ steps.key.outputs.value }}
-
-      - name: Save sccache directory
-        if: always() && steps.cache-hip.outputs.cache-hit != 'true' && github.ref_name == 'main'
-        continue-on-error: true
-        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
-        with:
-          path: ${{ runner.workspace }}/sccache-dir
-          key: sccache-therock-hip-${{ env.SCCACHE_KEY_DATE }}
-
-  therock-libraries:
-    needs: therock-hip-runtime
-    runs-on: windows-2022
-    timeout-minutes: 240
-    concurrency:
-      group: deps-therock-libraries-${{ github.ref }}
-      cancel-in-progress: false
-
-    outputs:
-      cache_key: ${{ steps.key.outputs.value }}
-
-    steps:
-      - name: Compute cache key
-        id: key
-        shell: bash
-        run: |
-          FILTER_TAG=$(printf '%s' "${{ env.HIPBLASLT_LOGIC_FILTER }}" | tr -c 'A-Za-z0-9' '-' | cut -c1-24)
-          [ -n "$FILTER_TAG" ] || FILTER_TAG=full
-          echo "value=therock-dist-${ROCM_LIBRARIES_REF:0:12}-logic${FILTER_TAG}-on-${{ needs.therock-hip-runtime.outputs.cache_key }}" >> "$GITHUB_OUTPUT"
-
-      - name: Probe therock-dist
-        id: cache-dist
-        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
-        with:
-          path: ${{ runner.workspace }}/therock-prefix
-          key: ${{ steps.key.outputs.value }}
-          lookup-only: true
-
-      - name: Restore therock-hip-runtime prefix
-        if: steps.cache-dist.outputs.cache-hit != 'true'
-        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
-        with:
-          path: ${{ runner.workspace }}/therock-prefix
-          key: ${{ needs.therock-hip-runtime.outputs.cache_key }}
-          fail-on-cache-miss: true
-
-      - name: Setup Python 3.12
-        if: steps.cache-dist.outputs.cache-hit != 'true'
-        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
-        with:
-          # TensileLite runs during the hipBLASLt build; AMD validates it on 3.12.
-          python-version: "3.12"
-
-      - name: Setup MSVC environment
-        if: steps.cache-dist.outputs.cache-hit != 'true'
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
-
-      - name: Checkout rocm-libraries
-        if: steps.cache-dist.outputs.cache-hit != 'true'
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          repository: ROCm/rocm-libraries
-          ref: ${{ env.ROCM_LIBRARIES_REF }}
-          path: source-rocm-libraries
-          # cmake/ is here because shared/stinkytofu reaches the monorepo root
-          # for include(ClangTidy).
-          sparse-checkout: |
-            shared
-            projects/hipblas-common
-            projects/hipblaslt
-            cmake
-          fetch-depth: 1
-          show-progress: false
-
-      - name: Drop Tensile logic for other architectures
-        if: steps.cache-dist.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          LOGIC="${{ github.workspace }}/source-rocm-libraries/projects/hipblaslt/library/src/amd_detail/rocblaslt/src/Tensile/Logic/asm_full"
-          if [ ! -d "$LOGIC" ]; then
-            echo "ERROR: Tensile logic directory not found at $LOGIC"
-            exit 1
-          fi
-          KEEP="${{ env.THEROCK_GPU_TARGETS }}"
-          echo "Keeping logic for: $KEEP"
-          for d in "$LOGIC"/*/; do
-            name=$(basename "$d")
-            case ";$KEEP;" in
-              *";$name;"*) echo "  keep $name" ;;
-              *) rm -rf "$d" ;;
-            esac
-          done
-          ls -1 "$LOGIC"
-          du -sh "${{ github.workspace }}/source-rocm-libraries/projects/hipblaslt" || true
-
-      - name: Install zlib and msgpack via cget
-        if: steps.cache-dist.outputs.cache-hit != 'true'
-        shell: bash
-        working-directory: source-rocm-libraries/projects/hipblaslt
-        run: |
-          set -euo pipefail
-          # TensileLite runs during the hipBLASLt build. Installed explicitly
-          # rather than from requirements.txt, which also pins cmake<4 and would
-          # shadow the runner's toolchain.
-          python -m pip install -q cget invoke PyYAML joblib packaging msgpack \
-            simplejson ujson orjson yappi numpy
-          DEPS="${{ runner.workspace }}/hipblaslt-deps"
-          # Versions and flags copied from AMD's build; the static-CRT setting
-          # has to match hipBLASLt itself or the link fails.
-          cget install madler/zlib@v1.3.1 \
-            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DZLIB_BUILD_EXAMPLES=Off \
-            --build-type Release --insecure -G Ninja -p "$DEPS"
-          cget install msgpack/msgpack-c@cpp-7.0.0 \
-            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DMSGPACK_CXX17=ON \
-            -DMSGPACK_BUILD_TESTS=Off -DMSGPACK_BUILD_DOCS=OFF -DMSGPACK_USE_BOOST=OFF \
-            -DBUILD_SHARED_LIBS=OFF --build-type Release --insecure -G Ninja -p "$DEPS"
-
-      - name: Build hipBLAS-Common and hipBLASLt
-        if: steps.cache-dist.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          PREFIX="${{ runner.workspace }}/therock-prefix"
-          DEPS="${{ runner.workspace }}/hipblaslt-deps"
-          SRC="${{ github.workspace }}/source-rocm-libraries"
-          # AMD's dist ships clang.exe but no clang++.exe; when self-building we
-          # have the full LLVM install, which does provide clang++.
-          CXX="$PREFIX/bin/clang++.exe"
-          [ -f "$CXX" ] || CXX="$PREFIX/bin/clang.exe"
-
-          cmake -S "$SRC/projects/hipblas-common" -B "${{ runner.workspace }}/build-hipblas-common" -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-            -DCMAKE_PREFIX_PATH="$PREFIX;$DEPS" \
-            -DROCM_PATH="$PREFIX"
-          cmake --build "${{ runner.workspace }}/build-hipblas-common" --target install
-
-          LOGIC_ARGS=()
-          if [ -n "${{ env.HIPBLASLT_LOGIC_FILTER }}" ]; then
-            LOGIC_ARGS+=("-DTENSILELITE_LOGIC_FILTER=${{ env.HIPBLASLT_LOGIC_FILTER }}")
-          fi
-          # BLIS and OpenMP default to ON and are REQUIRED once enabled. AMD's
-          # build has both; this one has neither (the LLVM stage does not build
-          # an OpenMP runtime). Both only serve host-side paths -- BLIS is the
-          # CPU reference used by the clients that are already disabled here.
-          #
-          # HIPBLASLT_ENABLE_ROCROLLER defaults ON, but TheRock builds Windows
-          # without rocRoller, so the dist this replaces has no rocRoller kernels
-          # either. Leaving it on also drags in the FetchContent dependencies
-          # rocRoller needs (yaml-cpp, libdivide).
-          cmake -S "$SRC/projects/hipblaslt" -B "${{ runner.workspace }}/build-hipblaslt" -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-            -DCMAKE_PREFIX_PATH="$PREFIX;$DEPS" \
-            -DCMAKE_C_COMPILER="$PREFIX/bin/clang.exe" \
-            -DCMAKE_CXX_COMPILER="$CXX" \
-            -DROCM_PATH="$PREFIX" \
-            -DHIP_PATH="$PREFIX" \
-            -DGPU_TARGETS="${{ env.THEROCK_GPU_TARGETS }}" \
-            -DTENSILELITE_BUILD_TESTING=OFF \
-            -DHIPBLASLT_BUILD_TESTING=OFF \
-            -DHIPBLASLT_ENABLE_CLIENT=OFF \
-            -DHIPBLASLT_ENABLE_BLIS=OFF \
-            -DHIPBLASLT_ENABLE_OPENMP=OFF \
-            -DHIPBLASLT_ENABLE_ROCROLLER=OFF \
-            "${LOGIC_ARGS[@]}"
-          cmake --build "${{ runner.workspace }}/build-hipblaslt" --target install
-
-      - name: Verify the assembled SDK
-        if: steps.cache-dist.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          PREFIX="${{ runner.workspace }}/therock-prefix"
-          # Everything windows-build-real.yml copies out of the SDK when it
-          # stages the GPU test package, plus what hip-ep's find_package calls
-          # need. hip-ep only looks for hip, hipblaslt and LLVM -- MIOpen,
-          # rocBLAS and composable_kernel ship in AMD's dist but go unused.
-          FAIL=0
-          for f in bin/clang.exe bin/lld.exe bin/hipcc.bat bin/clang-offload-bundler.exe \
-                   bin/hipblaslt.dll amdgcn/bitcode \
-                   lib/cmake/hip/hip-config.cmake \
-                   lib/cmake/hip-lang/hip-lang-config.cmake \
-                   lib/cmake/hipblaslt lib/cmake/AMDDeviceLibs lib/cmake/amd_comgr; do
-            [ -e "$PREFIX/$f" ] || { echo "MISSING: $f"; FAIL=1; }
-          done
-          ls "$PREFIX"/bin/amdhip64*.dll >/dev/null 2>&1 || { echo "MISSING: bin/amdhip64*.dll"; FAIL=1; }
-          ls "$PREFIX"/bin/amd_comgr*.dll >/dev/null 2>&1 || { echo "MISSING: bin/amd_comgr*.dll"; FAIL=1; }
-          ls "$PREFIX"/bin/hiprtc*.dll >/dev/null 2>&1 || { echo "MISSING: bin/hiprtc*.dll"; FAIL=1; }
-          for arch in $(echo "${{ env.THEROCK_GPU_TARGETS }}" | tr ';' ' '); do
-            d="$PREFIX/bin/hipblaslt/library/$arch"
-            if [ -d "$d" ]; then
-              echo "hipblaslt library/$arch: $(ls -1 "$d" | wc -l) files, $(du -sh "$d" | cut -f1)"
-            else
-              echo "MISSING: bin/hipblaslt/library/$arch"; FAIL=1
-            fi
-          done
-          du -sh "$PREFIX"
-          [ "$FAIL" -eq 0 ] || { echo "SDK is incomplete -- see MISSING lines above"; exit 1; }
-
-      - name: Save therock-dist
-        if: steps.cache-dist.outputs.cache-hit != 'true'
-        continue-on-error: true
+      - name: Save self-built TheRock SDK
+        if: steps.cache-therock.outputs.cache-hit != 'true'
         uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/therock-prefix
