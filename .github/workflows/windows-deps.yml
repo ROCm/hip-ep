@@ -829,11 +829,13 @@ jobs:
             -Dtherock-sqlite3_CMAKE_ARGS="-DROCM_SYSDEPS_USE_MSVC_STATIC_RUNTIME=ON" \
             -Dtherock-bzip2_CMAKE_ARGS="-DROCM_SYSDEPS_USE_MSVC_STATIC_RUNTIME=ON"
 
+      # `all` also configures therock-grpc (BoringSSL ASM_NASM). The cached
+      # prefix is dist/rocm, which does not depend on grpc.
       - name: Build TheRock SDK
         if: steps.cache-therock.outputs.cache-hit != 'true'
         shell: bash
         working-directory: source-therock
-        run: cmake --build build
+        run: cmake --build build --target dist
 
       - name: Verify and stage TheRock SDK
         if: steps.cache-therock.outputs.cache-hit != 'true'
