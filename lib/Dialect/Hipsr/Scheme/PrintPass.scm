@@ -2,8 +2,7 @@
 ;; This is a complete MLIR pass written entirely in Scheme
 ;; Demonstrates the MLIR logging API with different verbosity levels
 
-#!chezscheme
-;; No need to import - #!chezscheme directive provides all bindings
+;; No imports needed - format is available in the embedded Chez Scheme
 
 ;; TODO: Re-enable rime loop when compatibility issues are resolved
 ;; (import (rime loop))
