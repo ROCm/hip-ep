@@ -26,33 +26,36 @@
 // inputs enter the domain as block arguments, so an earlier domain filled those
 // buffers and the region reads them as they are. That is the only form the pass
 // accepts; an input this domain allocates is the error case in invalid.mlir.
-// CHECK-LABEL: func.func @barrier_domain(
-// CHECK-SAME:      %[[CTX:.+]]: !hipsr.context, %[[IN:.+]]: tensor<?x1xf32, #hipsr.mem<device>>, %[[EXTENTS:.+]]: tensor<2xi64, #hipsr.mem<host>>) -> tensor<?x?xf32, #hipsr.mem<device>> {
-// CHECK-NEXT:    %[[DOMAIN:.+]] = hipsr.pool_domain(%[[CTX]], %[[IN]], %[[EXTENTS]] : !hipsr.context, tensor<?x1xf32, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>) {
-// CHECK-NEXT:    ^bb0(%[[DCTX:.+]]: !hipsr.context, %[[DIN:.+]]: tensor<?x1xf32, #hipsr.mem<device>>, %[[DEXTENTS:.+]]: tensor<2xi64, #hipsr.mem<host>>):
-// CHECK-NEXT:      %[[SHAPE:.+]] = scf.execute_region -> !shape.shape {
-// CHECK-NEXT:        %[[IN_SHAPE:.+]] = shape.shape_of %[[DIN]] : tensor<?x1xf32, #hipsr.mem<device>> -> tensor<2xindex>
-// CHECK-NEXT:        %[[ROW_INDEX:.+]] = arith.constant 0 : index
-// CHECK-NEXT:        %[[ROWS:.+]] = tensor.extract %[[IN_SHAPE]]{{\[}}%[[ROW_INDEX]]] : tensor<2xindex>
-// CHECK-NEXT:        %[[COLUMN_INDEX:.+]] = arith.constant 1 : index
-// CHECK-NEXT:        %[[COLUMN:.+]] = tensor.extract %[[DEXTENTS]]{{\[}}%[[COLUMN_INDEX]]] : tensor<2xi64, #hipsr.mem<host>>
-// CHECK-NEXT:        %[[COLUMNS:.+]] = arith.index_cast %[[COLUMN]] : i64 to index
-// CHECK-NEXT:        %[[RESULT_SHAPE:.+]] = shape.from_extents %[[ROWS]], %[[COLUMNS]] : index, index
-// CHECK-NEXT:        scf.yield %[[RESULT_SHAPE]] : !shape.shape
-// CHECK-NEXT:      }
-// CHECK-NEXT:      %[[D0_INDEX:.+]] = shape.const_size 0
-// CHECK-NEXT:      %[[D0_EXTENT:.+]] = shape.get_extent %[[SHAPE]], %[[D0_INDEX]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:      %[[D0:.+]] = shape.size_to_index %[[D0_EXTENT]] : !shape.size
-// CHECK-NEXT:      %[[D1_INDEX:.+]] = shape.const_size 1
-// CHECK-NEXT:      %[[D1_EXTENT:.+]] = shape.get_extent %[[SHAPE]], %[[D1_INDEX]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:      %[[D1:.+]] = shape.size_to_index %[[D1_EXTENT]] : !shape.size
-// CHECK-NEXT:      %[[INIT:.+]] = tensor.empty(%[[D0]], %[[D1]]) : tensor<?x?xf32, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[EXPAND:.+]] = hipsr.expand(%[[DCTX]]) ins(%[[DIN]], %[[DEXTENTS]] : tensor<?x1xf32, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>) outs(%[[INIT]] : tensor<?x?xf32, #hipsr.mem<device>>) : tensor<?x?xf32, #hipsr.mem<device>>
-// CHECK-NEXT:      hipsr.preserve_shape %[[SHAPE]], %[[EXPAND]] : !shape.shape, tensor<?x?xf32, #hipsr.mem<device>>
-// CHECK-NEXT:      hipsr.pool_domain_yield %[[EXPAND]] : tensor<?x?xf32, #hipsr.mem<device>>
-// CHECK-NEXT:    } -> tensor<?x?xf32, #hipsr.mem<device>> {domain_id = 0 : i64}
-// CHECK-NEXT:    return %[[DOMAIN]] : tensor<?x?xf32, #hipsr.mem<device>>
-// CHECK-NEXT:  }
+// CHECK-LABEL:   func.func @barrier_domain(
+// CHECK-SAME:      %[[ARG0:.*]]: !hipsr.context,
+// CHECK-SAME:      %[[ARG1:.*]]: tensor<?x1xf32, #hipsr.mem<device>>,
+// CHECK-SAME:      %[[ARG2:.*]]: tensor<2xi64, #hipsr.mem<host>>) -> tensor<?x?xf32, #hipsr.mem<device>> {
+// CHECK-NEXT:      %[[POOL_DOMAIN_0:.*]] = hipsr.pool_domain(%[[ARG0]], %[[ARG1]], %[[ARG2]] : !hipsr.context, tensor<?x1xf32, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>) {
+// CHECK-NEXT:      ^bb0(%[[VAL_0:.*]]: !hipsr.context, %[[VAL_1:.*]]: tensor<?x1xf32, #hipsr.mem<device>>, %[[VAL_2:.*]]: tensor<2xi64, #hipsr.mem<host>>):
+// CHECK-NEXT:        %[[EXECUTE_REGION_0:.*]] = scf.execute_region -> !shape.shape {
+// CHECK-NEXT:          %[[SHAPE_OF_0:.*]] = shape.shape_of %[[VAL_1]] : tensor<?x1xf32, #hipsr.mem<device>> -> tensor<2xindex>
+// CHECK-NEXT:          %[[CONSTANT_0:.*]] = arith.constant 0 : index
+// CHECK-NEXT:          %[[EXTRACT_0:.*]] = tensor.extract %[[SHAPE_OF_0]]{{\[}}%[[CONSTANT_0]]] : tensor<2xindex>
+// CHECK-NEXT:          %[[CONSTANT_1:.*]] = arith.constant 1 : index
+// CHECK-NEXT:          %[[EXTRACT_1:.*]] = tensor.extract %[[VAL_2]]{{\[}}%[[CONSTANT_1]]] : tensor<2xi64, #hipsr.mem<host>>
+// CHECK-NEXT:          %[[INDEX_CAST_0:.*]] = arith.index_cast %[[EXTRACT_1]] : i64 to index
+// CHECK-NEXT:          %[[FROM_EXTENTS_0:.*]] = shape.from_extents %[[EXTRACT_0]], %[[INDEX_CAST_0]] : index, index
+// CHECK-NEXT:          scf.yield %[[FROM_EXTENTS_0]] : !shape.shape
+// CHECK-NEXT:        }
+// CHECK-NEXT:        %[[CONST_SIZE_0:.*]] = shape.const_size 0
+// CHECK-NEXT:        %[[GET_EXTENT_0:.*]] = shape.get_extent %[[EXECUTE_REGION_0]], %[[CONST_SIZE_0]] : !shape.shape, !shape.size -> !shape.size
+// CHECK-NEXT:        %[[SIZE_TO_INDEX_0:.*]] = shape.size_to_index %[[GET_EXTENT_0]] : !shape.size
+// CHECK-NEXT:        %[[CONST_SIZE_1:.*]] = shape.const_size 1
+// CHECK-NEXT:        %[[GET_EXTENT_1:.*]] = shape.get_extent %[[EXECUTE_REGION_0]], %[[CONST_SIZE_1]] : !shape.shape, !shape.size -> !shape.size
+// CHECK-NEXT:        %[[SIZE_TO_INDEX_1:.*]] = shape.size_to_index %[[GET_EXTENT_1]] : !shape.size
+// CHECK-NEXT:        %[[EMPTY_0:.*]] = tensor.empty(%[[SIZE_TO_INDEX_0]], %[[SIZE_TO_INDEX_1]]) : tensor<?x?xf32, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[EXPAND_0:.*]] = hipsr.expand(%[[VAL_0]]) ins(%[[VAL_1]], %[[VAL_2]] : tensor<?x1xf32, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>) outs(%[[EMPTY_0]] : tensor<?x?xf32, #hipsr.mem<device>>) : tensor<?x?xf32, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.preserve_shape %[[EXECUTE_REGION_0]], %[[EXPAND_0]] : !shape.shape, tensor<?x?xf32, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.pool_domain_yield %[[EXPAND_0]] : tensor<?x?xf32, #hipsr.mem<device>>
+// CHECK-NEXT:      } -> tensor<?x?xf32, #hipsr.mem<device>> {domain_id = 0 : i64}
+// CHECK-NEXT:      return %[[POOL_DOMAIN_0]] : tensor<?x?xf32, #hipsr.mem<device>>
+// CHECK-NEXT:    }
+
 func.func @barrier_domain(%ctx: !hipsr.context, %in: tensor<?x1xf32, #hipsr.mem<device>>,
                           %extents: tensor<2xi64, #hipsr.mem<host>>) -> tensor<?x?xf32, #hipsr.mem<device>> {
   %0 = hipsr.pool_domain(%ctx, %in, %extents
@@ -105,41 +108,45 @@ func.func @barrier_domain(%ctx: !hipsr.context, %in: tensor<?x1xf32, #hipsr.mem<
 // is what leaves the shape on the memref.alloc for -hip-use-output-allocator,
 // and naming the tensor.empty instead would keep it alive as an allocation of
 // its own for an op whose result is only a view of another buffer.
-// CHECK-LABEL: func.func @interleaved(
-// CHECK-SAME:      %[[CTX:.+]]: !hipsr.context, %[[A:.+]]: tensor<?x256xf16, #hipsr.mem<device>>, %[[B:.+]]: tensor<256x512xf16, #hipsr.mem<device>>, %[[C:.+]]: tensor<?x512xf16, #hipsr.mem<device>>) -> tensor<?x512xf16, #hipsr.mem<device>> {
-// CHECK-NEXT:    %[[DOMAIN:.+]] = hipsr.pool_domain(%[[CTX]], %[[A]], %[[B]], %[[C]] : !hipsr.context, tensor<?x256xf16, #hipsr.mem<device>>, tensor<256x512xf16, #hipsr.mem<device>>, tensor<?x512xf16, #hipsr.mem<device>>) {
-// CHECK-NEXT:    ^bb0(%[[DCTX:.+]]: !hipsr.context, %[[DA:.+]]: tensor<?x256xf16, #hipsr.mem<device>>, %[[DB:.+]]: tensor<256x512xf16, #hipsr.mem<device>>, %[[DC:.+]]: tensor<?x512xf16, #hipsr.mem<device>>):
-// CHECK-NEXT:      %[[MATMUL_SHAPE:.+]] = scf.execute_region -> !shape.shape {
-// CHECK-NEXT:        %[[A_SHAPE:.+]] = shape.shape_of %[[DA]] : tensor<?x256xf16, #hipsr.mem<device>> -> !shape.shape
-// CHECK-NEXT:        %[[B_SHAPE:.+]] = shape.shape_of %[[DB]] : tensor<256x512xf16, #hipsr.mem<device>> -> !shape.shape
-// CHECK-NEXT:        %[[M_INDEX:.+]] = shape.const_size 0
-// CHECK-NEXT:        %[[M:.+]] = shape.get_extent %[[A_SHAPE]], %[[M_INDEX]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:        %[[N_INDEX:.+]] = shape.const_size 1
-// CHECK-NEXT:        %[[N:.+]] = shape.get_extent %[[B_SHAPE]], %[[N_INDEX]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:        %[[FROM_EXTENTS:.+]] = shape.from_extents %[[M]], %[[N]] : !shape.size, !shape.size
-// CHECK-NEXT:        scf.yield %[[FROM_EXTENTS]] : !shape.shape
-// CHECK-NEXT:      }
-// CHECK-NEXT:      %[[ADD_SHAPE:.+]] = scf.execute_region -> !shape.shape {
-// CHECK-NEXT:        %[[C_SHAPE:.+]] = shape.shape_of %[[DC]] : tensor<?x512xf16, #hipsr.mem<device>> -> !shape.shape
-// CHECK-NEXT:        %[[BROADCAST:.+]] = shape.broadcast %[[MATMUL_SHAPE]], %[[C_SHAPE]] : !shape.shape, !shape.shape -> !shape.shape
-// CHECK-NEXT:        scf.yield %[[BROADCAST]] : !shape.shape
-// CHECK-NEXT:      }
-// CHECK-NEXT:      %[[MATMUL_D0_INDEX:.+]] = shape.const_size 0
-// CHECK-NEXT:      %[[MATMUL_D0_EXTENT:.+]] = shape.get_extent %[[MATMUL_SHAPE]], %[[MATMUL_D0_INDEX]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:      %[[MATMUL_D0:.+]] = shape.size_to_index %[[MATMUL_D0_EXTENT]] : !shape.size
-// CHECK-NEXT:      %[[MATMUL_INIT:.+]] = tensor.empty(%[[MATMUL_D0]]) : tensor<?x512xf16, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[ADD_D0_INDEX:.+]] = shape.const_size 0
-// CHECK-NEXT:      %[[ADD_D0_EXTENT:.+]] = shape.get_extent %[[ADD_SHAPE]], %[[ADD_D0_INDEX]] : !shape.shape, !shape.size -> !shape.size
-// CHECK-NEXT:      %[[ADD_D0:.+]] = shape.size_to_index %[[ADD_D0_EXTENT]] : !shape.size
-// CHECK-NEXT:      %[[ADD_INIT:.+]] = tensor.empty(%[[ADD_D0]]) : tensor<?x512xf16, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[MATMUL:.+]] = hipsr.matmul(%[[DCTX]]) ins(%[[DA]], %[[DB]] : tensor<?x256xf16, #hipsr.mem<device>>, tensor<256x512xf16, #hipsr.mem<device>>) outs(%[[MATMUL_INIT]] : tensor<?x512xf16, #hipsr.mem<device>>) : tensor<?x512xf16, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[ADD:.+]] = hipsr.add(%[[DCTX]]) ins(%[[MATMUL]], %[[DC]] : tensor<?x512xf16, #hipsr.mem<device>>, tensor<?x512xf16, #hipsr.mem<device>>) outs(%[[ADD_INIT]] : tensor<?x512xf16, #hipsr.mem<device>>) : tensor<?x512xf16, #hipsr.mem<device>>
-// CHECK-NEXT:      hipsr.preserve_shape %[[MATMUL_SHAPE]], %[[MATMUL]] : !shape.shape, tensor<?x512xf16, #hipsr.mem<device>>
-// CHECK-NEXT:      hipsr.preserve_shape %[[ADD_SHAPE]], %[[ADD]] : !shape.shape, tensor<?x512xf16, #hipsr.mem<device>>
-// CHECK-NEXT:      hipsr.pool_domain_yield %[[ADD]] : tensor<?x512xf16, #hipsr.mem<device>>
-// CHECK-NEXT:    } -> tensor<?x512xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
-// CHECK-NEXT:    return %[[DOMAIN]] : tensor<?x512xf16, #hipsr.mem<device>>
-// CHECK-NEXT:  }
+// CHECK-LABEL:   func.func @interleaved(
+// CHECK-SAME:      %[[ARG0:.*]]: !hipsr.context,
+// CHECK-SAME:      %[[ARG1:.*]]: tensor<?x256xf16, #hipsr.mem<device>>,
+// CHECK-SAME:      %[[ARG2:.*]]: tensor<256x512xf16, #hipsr.mem<device>>,
+// CHECK-SAME:      %[[ARG3:.*]]: tensor<?x512xf16, #hipsr.mem<device>>) -> tensor<?x512xf16, #hipsr.mem<device>> {
+// CHECK-NEXT:      %[[POOL_DOMAIN_0:.*]] = hipsr.pool_domain(%[[ARG0]], %[[ARG1]], %[[ARG2]], %[[ARG3]] : !hipsr.context, tensor<?x256xf16, #hipsr.mem<device>>, tensor<256x512xf16, #hipsr.mem<device>>, tensor<?x512xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT:      ^bb0(%[[VAL_0:.*]]: !hipsr.context, %[[VAL_1:.*]]: tensor<?x256xf16, #hipsr.mem<device>>, %[[VAL_2:.*]]: tensor<256x512xf16, #hipsr.mem<device>>, %[[VAL_3:.*]]: tensor<?x512xf16, #hipsr.mem<device>>):
+// CHECK-NEXT:        %[[EXECUTE_REGION_0:.*]] = scf.execute_region -> !shape.shape {
+// CHECK-NEXT:          %[[SHAPE_OF_0:.*]] = shape.shape_of %[[VAL_1]] : tensor<?x256xf16, #hipsr.mem<device>> -> !shape.shape
+// CHECK-NEXT:          %[[SHAPE_OF_1:.*]] = shape.shape_of %[[VAL_2]] : tensor<256x512xf16, #hipsr.mem<device>> -> !shape.shape
+// CHECK-NEXT:          %[[CONST_SIZE_0:.*]] = shape.const_size 0
+// CHECK-NEXT:          %[[GET_EXTENT_0:.*]] = shape.get_extent %[[SHAPE_OF_0]], %[[CONST_SIZE_0]] : !shape.shape, !shape.size -> !shape.size
+// CHECK-NEXT:          %[[CONST_SIZE_1:.*]] = shape.const_size 1
+// CHECK-NEXT:          %[[GET_EXTENT_1:.*]] = shape.get_extent %[[SHAPE_OF_1]], %[[CONST_SIZE_1]] : !shape.shape, !shape.size -> !shape.size
+// CHECK-NEXT:          %[[FROM_EXTENTS_0:.*]] = shape.from_extents %[[GET_EXTENT_0]], %[[GET_EXTENT_1]] : !shape.size, !shape.size
+// CHECK-NEXT:          scf.yield %[[FROM_EXTENTS_0]] : !shape.shape
+// CHECK-NEXT:        }
+// CHECK-NEXT:        %[[EXECUTE_REGION_1:.*]] = scf.execute_region -> !shape.shape {
+// CHECK-NEXT:          %[[SHAPE_OF_2:.*]] = shape.shape_of %[[VAL_3]] : tensor<?x512xf16, #hipsr.mem<device>> -> !shape.shape
+// CHECK-NEXT:          %[[BROADCAST_0:.*]] = shape.broadcast %[[EXECUTE_REGION_0]], %[[SHAPE_OF_2]] : !shape.shape, !shape.shape -> !shape.shape
+// CHECK-NEXT:          scf.yield %[[BROADCAST_0]] : !shape.shape
+// CHECK-NEXT:        }
+// CHECK-NEXT:        %[[CONST_SIZE_2:.*]] = shape.const_size 0
+// CHECK-NEXT:        %[[GET_EXTENT_2:.*]] = shape.get_extent %[[EXECUTE_REGION_0]], %[[CONST_SIZE_2]] : !shape.shape, !shape.size -> !shape.size
+// CHECK-NEXT:        %[[SIZE_TO_INDEX_0:.*]] = shape.size_to_index %[[GET_EXTENT_2]] : !shape.size
+// CHECK-NEXT:        %[[CONST_SIZE_3:.*]] = shape.const_size 0
+// CHECK-NEXT:        %[[GET_EXTENT_3:.*]] = shape.get_extent %[[EXECUTE_REGION_1]], %[[CONST_SIZE_3]] : !shape.shape, !shape.size -> !shape.size
+// CHECK-NEXT:        %[[SIZE_TO_INDEX_1:.*]] = shape.size_to_index %[[GET_EXTENT_3]] : !shape.size
+// CHECK-NEXT:        %[[EMPTY_0:.*]] = tensor.empty(%[[SIZE_TO_INDEX_0]]) : tensor<?x512xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[EMPTY_1:.*]] = tensor.empty(%[[SIZE_TO_INDEX_1]]) : tensor<?x512xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[MATMUL_0:.*]] = hipsr.matmul(%[[VAL_0]]) ins(%[[VAL_1]], %[[VAL_2]] : tensor<?x256xf16, #hipsr.mem<device>>, tensor<256x512xf16, #hipsr.mem<device>>) outs(%[[EMPTY_0]] : tensor<?x512xf16, #hipsr.mem<device>>) : tensor<?x512xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[ADD_0:.*]] = hipsr.add(%[[VAL_0]]) ins(%[[MATMUL_0]], %[[VAL_3]] : tensor<?x512xf16, #hipsr.mem<device>>, tensor<?x512xf16, #hipsr.mem<device>>) outs(%[[EMPTY_1]] : tensor<?x512xf16, #hipsr.mem<device>>) : tensor<?x512xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.preserve_shape %[[EXECUTE_REGION_0]], %[[MATMUL_0]] : !shape.shape, tensor<?x512xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.preserve_shape %[[EXECUTE_REGION_1]], %[[ADD_0]] : !shape.shape, tensor<?x512xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.pool_domain_yield %[[ADD_0]] : tensor<?x512xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      } -> tensor<?x512xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
+// CHECK-NEXT:      return %[[POOL_DOMAIN_0]] : tensor<?x512xf16, #hipsr.mem<device>>
+// CHECK-NEXT:    }
+
 func.func @interleaved(%ctx: !hipsr.context, %a: tensor<?x256xf16, #hipsr.mem<device>>,
                        %b: tensor<256x512xf16, #hipsr.mem<device>>, %c: tensor<?x512xf16, #hipsr.mem<device>>)
     -> tensor<?x512xf16, #hipsr.mem<device>> {
@@ -190,30 +197,32 @@ func.func @interleaved(%ctx: !hipsr.context, %a: tensor<?x256xf16, #hipsr.mem<de
 // was, it would no longer dominate the read. Both results are fully static, so
 // neither allocation reads an extent; the only reader of a computed shape here
 // is the add region, which broadcasts the cast's.
-// CHECK-LABEL: func.func @constant_between_placeholders(
-// CHECK-SAME:      %[[CTX:.+]]: !hipsr.context, %[[A:.+]]: tensor<2x2xf16, #hipsr.mem<device>>) -> tensor<2x2xf32, #hipsr.mem<device>> {
-// CHECK-NEXT:    %[[DOMAIN:.+]] = hipsr.pool_domain(%[[CTX]], %[[A]] : !hipsr.context, tensor<2x2xf16, #hipsr.mem<device>>) {
-// CHECK-NEXT:    ^bb0(%[[DCTX:.+]]: !hipsr.context, %[[DA:.+]]: tensor<2x2xf16, #hipsr.mem<device>>):
-// CHECK-NEXT:      %[[WEIGHT:.+]] = hipsr.constant {value = dense<{{.*}}> : tensor<2x2xf32>} : tensor<2x2xf32, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[CAST_SHAPE:.+]] = scf.execute_region -> !shape.shape {
-// CHECK-NEXT:        %[[A_SHAPE:.+]] = shape.shape_of %[[DA]] : tensor<2x2xf16, #hipsr.mem<device>> -> !shape.shape
-// CHECK-NEXT:        scf.yield %[[A_SHAPE]] : !shape.shape
-// CHECK-NEXT:      }
-// CHECK-NEXT:      %[[ADD_SHAPE:.+]] = scf.execute_region -> !shape.shape {
-// CHECK-NEXT:        %[[WEIGHT_SHAPE:.+]] = shape.shape_of %[[WEIGHT]] : tensor<2x2xf32, #hipsr.mem<device>> -> !shape.shape
-// CHECK-NEXT:        %[[BROADCAST:.+]] = shape.broadcast %[[CAST_SHAPE]], %[[WEIGHT_SHAPE]] : !shape.shape, !shape.shape -> !shape.shape
-// CHECK-NEXT:        scf.yield %[[BROADCAST]] : !shape.shape
-// CHECK-NEXT:      }
-// CHECK-NEXT:      %[[CAST_INIT:.+]] = tensor.empty() : tensor<2x2xf32, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[ADD_INIT:.+]] = tensor.empty() : tensor<2x2xf32, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[CAST:.+]] = hipsr.cast(%[[DCTX]]) ins(%[[DA]] : tensor<2x2xf16, #hipsr.mem<device>>) outs(%[[CAST_INIT]] : tensor<2x2xf32, #hipsr.mem<device>>) : tensor<2x2xf32, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[ADD:.+]] = hipsr.add(%[[DCTX]]) ins(%[[CAST]], %[[WEIGHT]] : tensor<2x2xf32, #hipsr.mem<device>>, tensor<2x2xf32, #hipsr.mem<device>>) outs(%[[ADD_INIT]] : tensor<2x2xf32, #hipsr.mem<device>>) : tensor<2x2xf32, #hipsr.mem<device>>
-// CHECK-NEXT:      hipsr.preserve_shape %[[CAST_SHAPE]], %[[CAST]] : !shape.shape, tensor<2x2xf32, #hipsr.mem<device>>
-// CHECK-NEXT:      hipsr.preserve_shape %[[ADD_SHAPE]], %[[ADD]] : !shape.shape, tensor<2x2xf32, #hipsr.mem<device>>
-// CHECK-NEXT:      hipsr.pool_domain_yield %[[ADD]] : tensor<2x2xf32, #hipsr.mem<device>>
-// CHECK-NEXT:    } -> tensor<2x2xf32, #hipsr.mem<device>> {domain_id = 0 : i64}
-// CHECK-NEXT:    return %[[DOMAIN]] : tensor<2x2xf32, #hipsr.mem<device>>
-// CHECK-NEXT:  }
+// CHECK-LABEL:   func.func @constant_between_placeholders(
+// CHECK-SAME:      %[[ARG0:.*]]: !hipsr.context,
+// CHECK-SAME:      %[[ARG1:.*]]: tensor<2x2xf16, #hipsr.mem<device>>) -> tensor<2x2xf32, #hipsr.mem<device>> {
+// CHECK-NEXT:      %[[POOL_DOMAIN_0:.*]] = hipsr.pool_domain(%[[ARG0]], %[[ARG1]] : !hipsr.context, tensor<2x2xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT:      ^bb0(%[[VAL_0:.*]]: !hipsr.context, %[[VAL_1:.*]]: tensor<2x2xf16, #hipsr.mem<device>>):
+// CHECK-NEXT:        %[[CONSTANT_0:.*]] = hipsr.constant {value = dense<{{\[\[}}1.000000e+00, 2.000000e+00], [3.000000e+00, 4.000000e+00]]> : tensor<2x2xf32>} : tensor<2x2xf32, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[EXECUTE_REGION_0:.*]] = scf.execute_region -> !shape.shape {
+// CHECK-NEXT:          %[[SHAPE_OF_0:.*]] = shape.shape_of %[[VAL_1]] : tensor<2x2xf16, #hipsr.mem<device>> -> !shape.shape
+// CHECK-NEXT:          scf.yield %[[SHAPE_OF_0]] : !shape.shape
+// CHECK-NEXT:        }
+// CHECK-NEXT:        %[[EXECUTE_REGION_1:.*]] = scf.execute_region -> !shape.shape {
+// CHECK-NEXT:          %[[SHAPE_OF_1:.*]] = shape.shape_of %[[CONSTANT_0]] : tensor<2x2xf32, #hipsr.mem<device>> -> !shape.shape
+// CHECK-NEXT:          %[[BROADCAST_0:.*]] = shape.broadcast %[[EXECUTE_REGION_0]], %[[SHAPE_OF_1]] : !shape.shape, !shape.shape -> !shape.shape
+// CHECK-NEXT:          scf.yield %[[BROADCAST_0]] : !shape.shape
+// CHECK-NEXT:        }
+// CHECK-NEXT:        %[[EMPTY_0:.*]] = tensor.empty() : tensor<2x2xf32, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[EMPTY_1:.*]] = tensor.empty() : tensor<2x2xf32, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CAST_0:.*]] = hipsr.cast(%[[VAL_0]]) ins(%[[VAL_1]] : tensor<2x2xf16, #hipsr.mem<device>>) outs(%[[EMPTY_0]] : tensor<2x2xf32, #hipsr.mem<device>>) : tensor<2x2xf32, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[ADD_0:.*]] = hipsr.add(%[[VAL_0]]) ins(%[[CAST_0]], %[[CONSTANT_0]] : tensor<2x2xf32, #hipsr.mem<device>>, tensor<2x2xf32, #hipsr.mem<device>>) outs(%[[EMPTY_1]] : tensor<2x2xf32, #hipsr.mem<device>>) : tensor<2x2xf32, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.preserve_shape %[[EXECUTE_REGION_0]], %[[CAST_0]] : !shape.shape, tensor<2x2xf32, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.preserve_shape %[[EXECUTE_REGION_1]], %[[ADD_0]] : !shape.shape, tensor<2x2xf32, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.pool_domain_yield %[[ADD_0]] : tensor<2x2xf32, #hipsr.mem<device>>
+// CHECK-NEXT:      } -> tensor<2x2xf32, #hipsr.mem<device>> {domain_id = 0 : i64}
+// CHECK-NEXT:      return %[[POOL_DOMAIN_0]] : tensor<2x2xf32, #hipsr.mem<device>>
+// CHECK-NEXT:    }
+
 func.func @constant_between_placeholders(%ctx: !hipsr.context,
                                          %a: tensor<2x2xf16, #hipsr.mem<device>>)
     -> tensor<2x2xf32, #hipsr.mem<device>> {
@@ -253,17 +262,18 @@ func.func @constant_between_placeholders(%ctx: !hipsr.context,
 
 // A domain without placeholders is left alone. The tensor.empty here is the one
 // the input already had, not one the pass built.
-// CHECK-LABEL: func.func @no_placeholder(
-// CHECK-SAME:      %[[IN:.+]]: tensor<3x4xf32>) -> tensor<2x?xi64> {
-// CHECK-NEXT:    %[[DOMAIN:.+]] = hipsr.pool_domain(%[[IN]] : tensor<3x4xf32>) {
-// CHECK-NEXT:    ^bb0(%[[DIN:.+]]: tensor<3x4xf32>):
-// CHECK-NEXT:      %[[C1:.+]] = arith.constant 1 : index
-// CHECK-NEXT:      %[[DIM:.+]] = tensor.dim %[[DIN]], %[[C1]] : tensor<3x4xf32>
-// CHECK-NEXT:      %[[BUFFER:.+]] = tensor.empty(%[[DIM]]) : tensor<2x?xi64>
-// CHECK-NEXT:      hipsr.pool_domain_yield %[[BUFFER]] : tensor<2x?xi64>
-// CHECK-NEXT:    } -> tensor<2x?xi64> {domain_id = 0 : i64}
-// CHECK-NEXT:    return %[[DOMAIN]] : tensor<2x?xi64>
-// CHECK-NEXT:  }
+// CHECK-LABEL:   func.func @no_placeholder(
+// CHECK-SAME:      %[[ARG0:.*]]: tensor<3x4xf32>) -> tensor<2x?xi64> {
+// CHECK-NEXT:      %[[POOL_DOMAIN_0:.*]] = hipsr.pool_domain(%[[ARG0]] : tensor<3x4xf32>) {
+// CHECK-NEXT:      ^bb0(%[[VAL_0:.*]]: tensor<3x4xf32>):
+// CHECK-NEXT:        %[[CONSTANT_0:.*]] = arith.constant 1 : index
+// CHECK-NEXT:        %[[DIM_0:.*]] = tensor.dim %[[VAL_0]], %[[CONSTANT_0]] : tensor<3x4xf32>
+// CHECK-NEXT:        %[[EMPTY_0:.*]] = tensor.empty(%[[DIM_0]]) : tensor<2x?xi64>
+// CHECK-NEXT:        hipsr.pool_domain_yield %[[EMPTY_0]] : tensor<2x?xi64>
+// CHECK-NEXT:      } -> tensor<2x?xi64> {domain_id = 0 : i64}
+// CHECK-NEXT:      return %[[POOL_DOMAIN_0]] : tensor<2x?xi64>
+// CHECK-NEXT:    }
+
 func.func @no_placeholder(%in: tensor<3x4xf32>) -> tensor<2x?xi64> {
   %0 = hipsr.pool_domain(%in : tensor<3x4xf32>) {
   ^bb0(%domain_in: tensor<3x4xf32>):

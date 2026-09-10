@@ -511,8 +511,8 @@ static int gqa_forward_fused(
       // scan and therefore the split count that wins.
       const int kv_dtype = kv_dtype_abi(kv_format);
       int drc;
-      if (hipdnn_ep::gqa_autotune_mode(state->gqa_autotune_policy) ==
-          hipdnn_ep::GqaAutotuneMode::Online) {
+      if (hip_gqa_autotune_mode(state->gqa_autotune_policy) ==
+          static_cast<int>(hipdnn_ep::GqaAutotuneMode::Online)) {
         drc = hip_gqa_flash_decode(
             stream, qSrc, present_key, present_value, output, partials,
             static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
@@ -525,7 +525,8 @@ static int gqa_forward_fused(
         // B==1 already paid (and caches) the seqlens_k read above, so the LUT
         // sees the length the kernel will actually scan without adding a sync.
         // For B>1 this is the host-known shape length, which is the upper
-        // bound; it rounds up to the same bucket or the next one.
+        // bound; the nearest-neighbour lookup answers it from the closest
+        // measured length either way.
         int effective_skv = static_cast<int>(skv);
         if (seqlens_k_pre != kSeqlensKNotRead && seqlens_k_pre >= 0)
           effective_skv = seqlens_k_pre + 1;
@@ -538,9 +539,9 @@ static int gqa_forward_fused(
             effective_skv,
             kFlashDecodeMaxSplits,
             static_cast<int>(local_window_size)};
-        const hipdnn_ep::GqaDecodeResult selected =
-            hipdnn_ep::gqa_autotune_resolve_decode(state->gqa_autotune_policy,
-                                                   request);
+        hipdnn_ep::GqaDecodeResult selected;
+        hip_gqa_autotune_resolve_decode(state->gqa_autotune_policy, &request,
+                                        &selected);
         drc = hip_gqa_flash_decode_configured(
             stream, qSrc, present_key, present_value, output, partials,
             static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
@@ -733,8 +734,8 @@ static int gqa_forward_fused(
   }
 
   int fp_rc;
-  if (hipdnn_ep::gqa_autotune_mode(state->gqa_autotune_policy) ==
-      hipdnn_ep::GqaAutotuneMode::Online) {
+  if (hip_gqa_autotune_mode(state->gqa_autotune_policy) ==
+      static_cast<int>(hipdnn_ep::GqaAutotuneMode::Online)) {
     fp_rc = hip_gqa_flash_prefill(
         stream, qSrc, kAttn, vAttn, output, static_cast<int>(B),
         static_cast<int>(H), static_cast<int>(G), static_cast<int>(sq),
@@ -754,9 +755,9 @@ static int gqa_forward_fused(
                                                static_cast<int>(sq),
                                                static_cast<int>(total_seq),
                                                local_window_size};
-    hipdnn_ep::GqaPrefillResult selected =
-        hipdnn_ep::gqa_autotune_resolve_prefill(state->gqa_autotune_policy,
-                                                request);
+    hipdnn_ep::GqaPrefillResult selected;
+    hip_gqa_autotune_resolve_prefill(state->gqa_autotune_policy, &request,
+                                     &selected);
     auto launch_configured = [&](const hipdnn_ep::GqaPrefillConfig &config) {
       return hip_gqa_flash_prefill_v3_configured(
           stream, qSrc, kAttn, vAttn, output, static_cast<int>(B),
@@ -768,13 +769,15 @@ static int gqa_forward_fused(
     };
     fp_rc = launch_configured(selected.config);
     if (fp_rc != 0 && selected.source != hipdnn_ep::GqaTuneSource::Heuristic) {
-      // Ask for tier 3 explicitly. Re-running resolve_* would walk the same
-      // tiers that just produced the rejected config.
+      // Ask for the compiled-in heuristic directly. Re-running resolve_* would
+      // just hand back the same neighbourhood's nearest point that was already
+      // rejected.
       RUNTIME_DEBUG_LOG(
           "[REAL] rejected GQA prefill config (source=%s); using heuristic\n",
           hipdnn_ep::gqa_tune_source_name(selected.source));
-      selected = {hipdnn_ep::gqa_autotune_fallback_prefill(request),
-                  hipdnn_ep::GqaTuneSource::Heuristic};
+      hipdnn_ep::GqaPrefillConfig heuristic;
+      hip_gqa_autotune_fallback_prefill(&request, &heuristic);
+      selected = {heuristic, hipdnn_ep::GqaTuneSource::Heuristic, 0.0f};
       fp_rc = launch_configured(selected.config);
     }
     RUNTIME_DEBUG_LOG("[REAL] GQA prefill config source=%s v%d "

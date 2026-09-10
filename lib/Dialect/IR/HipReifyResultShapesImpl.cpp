@@ -39,49 +39,27 @@ ArrayRef<int64_t> getShapeOf(Value v) {
   return {};
 }
 
-} // namespace
-
-//===----------------------------------------------------------------------===//
-// MatmulOp
-//
-// Reify recomputes the result shape via `inferMatmulShape`, then lifts
-// each dim to an OpFoldResult: static dims become `IndexAttr`; dynamic
-// dims become `tensor.dim` of whichever operand contributes the runtime
-// size — M from A[-2], N from B[-1], batch from the broadcast-canonical
-// side.
-//
-// Before:
-//   %m = hip.matmul ins(%a, %b : tensor<?x4096xf16>, tensor<4096x4096xf16>)
-//                   outs(%out : tensor<?x4096xf16>) -> tensor<?x4096xf16>
-// After (reified result shape):
-//   dim 0 (dynamic M) -> %d0 = tensor.dim %a, %c0
-//   dim 1 (static N)  -> 4096 : index
-//===----------------------------------------------------------------------===//
-
-LogicalResult
-MatmulOp::reifyResultShapes(OpBuilder &b,
-                            ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+LogicalResult reifyMatmulLikeShape(Operation *op, OpBuilder &b, Value A,
+                                   Value B, int64_t transA, int64_t transB,
+                                   ReifiedRankedShapedTypeDims &reified) {
   // memref-mode has no SSA results; reify is only called on tensor mode
   // per interface contract, but bail defensively if invoked anyway.
-  if (getNumResults() == 0)
+  if (op->getNumResults() == 0)
     return failure();
 
-  ArrayRef<int64_t> aShape = getShapeOf(getA());
-  ArrayRef<int64_t> bShape = getShapeOf(getB());
+  ArrayRef<int64_t> aShape = getShapeOf(A);
+  ArrayRef<int64_t> bShape = getShapeOf(B);
   if (aShape.empty() || bShape.empty())
     return failure();
 
   // Re-run the matmul-shape helper. verify() has already passed by reify
   // time, but bail on empty() in case a pre-verify call sneaks in.
   SmallVector<int64_t> outShape = mlir::hip::inferMatmulShape(
-      aShape, bShape, [&]() { return this->emitOpError(); }, getTransA(),
-      getTransB());
+      aShape, bShape, [&]() { return op->emitOpError(); }, transA, transB);
   if (outShape.empty())
     return failure();
 
-  Location loc = getLoc();
-  Value A = getA();
-  Value B = getB();
+  Location loc = op->getLoc();
   size_t outRank = outShape.size();
   size_t aRank = aShape.size();
   size_t bRank = bShape.size();
@@ -96,14 +74,14 @@ MatmulOp::reifyResultShapes(OpBuilder &b,
   for (size_t i : llvm::seq<size_t>(0, outRank)) {
     // M dim: A[-2], or A[-1] when transA.
     if (i + 2 == outRank) {
-      size_t aDim = getTransA() ? aRank - 1 : aRank - 2;
+      size_t aDim = transA ? aRank - 1 : aRank - 2;
       dims.push_back(
           mlir::hip::reifyDimOrConstant(b, loc, outShape[i], A, aDim));
       continue;
     }
     // N dim: B[-1], or B[-2] when transB.
     if (i + 1 == outRank) {
-      size_t bDim = getTransB() ? bRank - 2 : bRank - 1;
+      size_t bDim = transB ? bRank - 2 : bRank - 1;
       dims.push_back(
           mlir::hip::reifyDimOrConstant(b, loc, outShape[i], B, bDim));
       continue;
@@ -120,8 +98,33 @@ MatmulOp::reifyResultShapes(OpBuilder &b,
     dims.push_back(
         mlir::hip::reifyDimOrConstant(b, loc, outShape[i], src, srcDim));
   }
-  reifiedReturnShapes.assign({std::move(dims)});
+  reified.assign({std::move(dims)});
   return success();
+}
+
+} // namespace
+
+//===----------------------------------------------------------------------===//
+// MatmulOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult
+MatmulOp::reifyResultShapes(OpBuilder &b,
+                            ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  return reifyMatmulLikeShape(getOperation(), b, getA(), getB(), getTransA(),
+                              getTransB(), reifiedReturnShapes);
+}
+
+//===----------------------------------------------------------------------===//
+// QMatMulOp
+//
+//===----------------------------------------------------------------------===//
+
+LogicalResult
+QMatMulOp::reifyResultShapes(OpBuilder &b,
+                             ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  return reifyMatmulLikeShape(getOperation(), b, getA(), getB(), getTransA(),
+                              getTransB(), reifiedReturnShapes);
 }
 
 //===----------------------------------------------------------------------===//

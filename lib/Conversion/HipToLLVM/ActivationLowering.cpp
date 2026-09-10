@@ -245,6 +245,73 @@ struct LeakyReluOpLowering : public ConvertOpToLLVMPattern<LeakyReluOp> {
   }
 };
 
+// hip.swish(ctx, input, output)
+//   -> wrap_swish(state, input, output, num_elements, data_type, alpha)
+// Supports static and dynamic shapes and the complete ONNX Swish type set.
+struct SwishOpLowering : public ConvertOpToLLVMPattern<SwishOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(SwishOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+    Type f64Type = rewriter.getF64Type();
+
+    auto createI64Const = [&](int64_t value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+
+    Value statePtr = adaptor.getCtx();
+    Value inputPtr =
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
+
+    auto outputType = cast<MemRefType>(op.getOutput().getType());
+    Value numElements = createI64Const(1);
+    MemRefDescriptor outputDesc(adaptor.getOutput());
+    for (auto dimIdx : llvm::seq<int64_t>(outputType.getRank())) {
+      Value dimSize = outputType.isDynamicDim(dimIdx)
+                          ? outputDesc.size(rewriter, loc, dimIdx)
+                          : createI64Const(outputType.getDimSize(dimIdx));
+      numElements = LLVM::MulOp::create(rewriter, loc, numElements, dimSize);
+    }
+
+    Type elemType = outputType.getElementType();
+    int64_t dataType = getHipdnnDataType(elemType);
+    if (dataType < 0 || (dataType > 2 && dataType != 6)) {
+      std::string errorMsg;
+      llvm::raw_string_ostream os(errorMsg);
+      os << "unsupported element type '" << elemType
+         << "' for Swish. Only f32, f16, bf16, and f64 are supported";
+      return rewriter.notifyMatchFailure(op, os.str());
+    }
+
+    Value dataTypeVal = createI64Const(dataType);
+    Value alphaConst = LLVM::ConstantOp::create(
+        rewriter, loc, f64Type,
+        rewriter.getF64FloatAttr(op.getAlpha().convertToDouble()));
+
+    SmallVector<Type, 6> paramTypes = {ptrType, ptrType, ptrType,
+                                       i64Type, i64Type, f64Type};
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapSwish, paramTypes, i32Type);
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value, 6> args = {statePtr,    inputPtr,    outputPtr,
+                                  numElements, dataTypeVal, alphaConst};
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 // hip.silu(handle, input, output)
 struct SiluOpLowering : public ConvertOpToLLVMPattern<SiluOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -348,7 +415,8 @@ struct MiopenSoftmaxOpLowering
 void populateActivationLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns) {
   patterns.add<SoftplusOpLowering, GeluOpLowering, LeakyReluOpLowering,
-               SiluOpLowering, MiopenSoftmaxOpLowering>(converter);
+               SwishOpLowering, SiluOpLowering, MiopenSoftmaxOpLowering>(
+      converter);
 }
 
 } // namespace hip

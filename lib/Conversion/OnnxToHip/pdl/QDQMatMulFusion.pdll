@@ -1,0 +1,72 @@
+//===- QDQMatMulFusion.pdll -----------------------------------------------===//
+//
+// PDLL pattern for QDQ MatMul fusion - pure PDLL approach.
+//
+// Included by HipFusionPatterns.pdll, which declares the native constraints
+// used below. Not compilable on its own.
+//===----------------------------------------------------------------------===//
+
+Pattern QDQMatMul with benefit(10) {
+  // Match the QDQ chain:
+  //   DequantizeLinear, DequantizeLinear -> MatMul -> QuantizeLinear
+  //
+  // ONNX makes zero_point optional on both Q and DQ, so a trailing ValueRange
+  // absorbs the 2-operand and 3-operand forms with one pattern.
+  let dq_a = op<onnx.DequantizeLinear>(a: Value, a_scale: Value, a_tail: ValueRange);
+  let dq_b = op<onnx.DequantizeLinear>(b: Value, b_scale: Value, b_tail: ValueRange);
+
+  // Currently, we support A16W8 and A8W8. A16W16 requires a higher-bit-width
+  // accumulator and therefore an additional kernel implementation, so we will
+  // not add support for it for now.
+  IsEightOrSixteenBitQuantized(dq_a);
+  IsEightBitQuantized(dq_b);
+
+  let matmul = op<onnx.MatMul>(dq_a.0, dq_b.0);
+
+  let quant = op<onnx.QuantizeLinear>(matmul.0, y_scale: Value, y_tail: ValueRange) -> (y_type: Type);
+  IsEightOrSixteenBitQuantized(quant);
+
+  // The rewrite below builds its DPS init with a bare `tensor.empty`, which
+  // only verifies for a static result type.
+  HasStaticShapedResults(quant);
+
+  // Fusability only: every scale must be a per-tensor splat constant and every
+  // zero point must be readable (or absent, which means zero).
+  HasContextArg(quant);
+  IsSplatConstantValue(a_scale);
+  IsSplatConstantValue(b_scale);
+  IsSplatConstantValue(y_scale);
+  HasExtractableZeropoint(dq_a, attr<"2 : i64">);
+  HasExtractableZeropoint(dq_b, attr<"2 : i64">);
+  HasExtractableZeropoint(quant, attr<"2 : i64">);
+
+  // Root on the chain tail so the output type is available for tensor.empty.
+  rewrite quant with {
+    let ctx = GetContextArg(quant);
+    let a_scale_attr = ExtractScaleValue(a_scale);
+    let b_scale_attr = ExtractScaleValue(b_scale);
+    let y_scale_attr = ExtractScaleValue(y_scale);
+    let a_zeropoint_attr = ExtractZeropointValue(dq_a, attr<"2 : i64">, attr<"0 : i64">);
+    let b_zeropoint_attr = ExtractZeropointValue(dq_b, attr<"2 : i64">, attr<"0 : i64">);
+    let y_zeropoint_attr = ExtractZeropointValue(quant, attr<"2 : i64">, attr<"0 : i64">);
+
+    // TransposeMatMulFold stamps hipdnn.transA / hipdnn.transB onto
+    // onnx.MatMul, so hip.qmatmul carries them through even though nothing
+    // reaches this pattern with a non-zero stamp today.
+    let trans_a_attr = ExtractAttrInt64(matmul, attr<"\"hipdnn.transA\"">, attr<"0 : i64">);
+    let trans_b_attr = ExtractAttrInt64(matmul, attr<"\"hipdnn.transB\"">, attr<"0 : i64">);
+
+    let empty = op<tensor.empty> -> (y_type);
+    let qmatmul = op<hip.qmatmul>(ctx, a, b, empty.0) {
+      A_scale = a_scale_attr,
+      A_zero_point = a_zeropoint_attr,
+      B_scale = b_scale_attr,
+      B_zero_point = b_zeropoint_attr,
+      Y_scale = y_scale_attr,
+      Y_zero_point = y_zeropoint_attr,
+      transA = trans_a_attr,
+      transB = trans_b_attr
+    } -> (y_type);
+    replace quant with qmatmul;
+  };
+}
