@@ -150,6 +150,7 @@ replace it without changes to the EP.
 
 ```c
 int  inference_init(void** out_state, void* fs);
+int  inference_init_v2(void** out_state, void* fs, const void* config);
 int  inference_compute(void* state, span_t* inputs, span_t* outputs);
 int  inference_cleanup(void* state);
 void hipdnn_ep_runtime_begin_compute(void* state);   // optional, see below
@@ -159,6 +160,14 @@ void hipdnn_ep_runtime_begin_compute(void* state);   // optional, see below
 during compilation, giving `model.dll` access to the EP cache.
 `inference_compute` is called once per inference run. `inference_cleanup` is
 called at session destruction.
+
+`inference_init_v2` adds the session's provider options, so a runtime subsystem
+can be configured per session rather than only through an environment variable.
+It coexists with `inference_init`: `InferenceState::create()` probes for v2 and
+falls back, so older artifacts keep working. `config` is a
+`hipdnn_ep_init_config*` (`include/hip/init_config_abi.h`) — pure C, because it
+crosses into Clang-compiled JIT'd code — and is only borrowed for the call, so
+the runtime copies what it needs onto `RuntimeState`.
 
 `hipdnn_ep_runtime_begin_compute` is called by the EP at the top of every
 `Compute()` (before input marshaling) to invalidate per-`Compute()` runtime
