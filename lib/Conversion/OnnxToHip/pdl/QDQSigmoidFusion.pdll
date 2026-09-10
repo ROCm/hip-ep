@@ -1,0 +1,48 @@
+//===- QDQSigmoidFusion.pdll ----------------------------------------------===//
+//
+// PDLL pattern for QDQ Sigmoid fusion (UINT16).
+//
+// Included by HipFusionPatterns.pdll, which declares the native constraints
+// used below. Not compilable on its own.
+//
+// Sigmoid changes values, so matching Q/DQ parameters are not required and
+// cannot be skipped. Input and output scales stay separate attributes.
+//===----------------------------------------------------------------------===//
+
+Pattern QDQSigmoid with benefit(10) {
+  let dquant = op<onnx.DequantizeLinear>(input: Value, input_scale: Value,
+                                         input_tail: ValueRange);
+  let sigmoid = op<onnx.Sigmoid>(dquant.0);
+  let quant = op<onnx.QuantizeLinear>(sigmoid.0, output_scale: Value,
+                                      output_tail: ValueRange)
+                  -> (output_type: Type);
+
+  HasContextArg(quant);
+  IsUint16Quantized(dquant);
+  IsUint16Quantized(quant);
+  HasStaticShapedResults(quant);
+  IsFusableQSigmoid(sigmoid);
+  IsSplatConstantValue(input_scale);
+  IsSplatConstantValue(output_scale);
+  HasExtractableZeropoint(dquant, attr<"2 : i64">);
+  HasExtractableZeropoint(quant, attr<"2 : i64">);
+
+  rewrite quant with {
+    let ctx = GetContextArg(quant);
+    let input_scale_attr = ExtractScaleValue(input_scale);
+    let output_scale_attr = ExtractScaleValue(output_scale);
+    let input_zeropoint_attr =
+        ExtractZeropointValue(dquant, attr<"2 : i64">, attr<"0 : i64">);
+    let output_zeropoint_attr =
+        ExtractZeropointValue(quant, attr<"2 : i64">, attr<"0 : i64">);
+
+    let empty = op<tensor.empty> -> (output_type);
+    let qsig = op<hip.qsigmoid>(ctx, input, empty.0) {
+      input_scale = input_scale_attr,
+      input_zp = input_zeropoint_attr,
+      output_scale = output_scale_attr,
+      output_zp = output_zeropoint_attr
+    } -> (output_type);
+    replace quant with qsig;
+  };
+}
