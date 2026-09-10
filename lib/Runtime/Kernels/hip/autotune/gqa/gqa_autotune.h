@@ -151,10 +151,14 @@ inline const char *gqa_tune_source_name(GqaTuneSource source) {
 // ---------------------------------------------------------------------------
 extern "C" {
 
-// Session-scoped policy: it holds the lookup/online mode (env-selected) and the
-// device's CU count for the heuristic. The measured table itself is a
-// process-wide static in the DLL, loaded once, independent of the policy.
-HIP_KERNEL_API void *hip_gqa_autotune_create();
+// Session-scoped policy: it holds the lookup/online mode and the device's CU
+// count for the heuristic. The measured table itself is a process-wide static
+// in the DLL, loaded once, independent of the policy.
+//
+// provider_mode is the raw gqa_autotune_mode provider option, null when the
+// session supplied none; the mode then falls back to the env var and the build
+// default. Only read during this call.
+HIP_KERNEL_API void *hip_gqa_autotune_create(const char *provider_mode = nullptr);
 HIP_KERNEL_API void hip_gqa_autotune_destroy(void *policy);
 
 // Returns GqaAutotuneMode as an int (Lookup = 0, Online = 1).

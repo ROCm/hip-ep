@@ -206,6 +206,11 @@ struct RuntimeState {
   // ABI-facing struct opaque.
   void *gqa_autotune_policy;
 
+  // Session-scoped EP provider options, copied out of the init config so they
+  // outlive it (std::unordered_map<std::string, std::string>*). Read through
+  // hipdnn_ep_runtime_get_provider_option.
+  void *provider_options;
+
   // Device-side error flag used by kernels to report runtime-invalid inputs.
   // 0 = no error, non-zero = error code (currently -1).
   int *device_error_flag;

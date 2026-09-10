@@ -256,6 +256,14 @@ void *hipdnn_ep_alloc_output(RuntimeState *state, int64_t out_idx,
 int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
                                  const void *metadata_blob, size_t blob_size);
 
+// V2 session init: hipdnn_ep_state_init_with_fs plus session-init config, and
+// identical to it when config is null. Return codes are the same.
+// config is a hipdnn_ep_init_config* (hip/init_config_abi.h); kept
+// const void* here so ordinary runtime TUs do not pull that ABI in.
+int hipdnn_ep_state_init_v2(RuntimeState **out_state, void *fs,
+                            const void *metadata_blob, size_t blob_size,
+                            const void *config);
+
 // Cleanup runtime state (destroys handles, frees memory)
 // Best-effort cleanup - continues even if individual operations fail
 // Returns 0 always (best-effort)
@@ -606,6 +614,11 @@ int hipdnn_ep_stream_sync(RuntimeState *state);
 // Per-operator profiling state accessor (OpProfileState*, gated on
 // HIPDNN_EP_PERF)
 void *hipdnn_ep_state_get_op_profile(RuntimeState *state);
+
+// Session-scoped EP provider option, or null when the key was not supplied.
+// The value is owned by RuntimeState and stays valid until cleanup.
+const char *hipdnn_ep_runtime_get_provider_option(RuntimeState *state,
+                                                  const char *key);
 
 // NOTE: the GQA GEMM descriptor cache (GqaGemmCache) formerly lived in
 // RuntimeState::gqa_gemm_cache with a hipdnn_ep_gqa_gemm_cache_destroy teardown

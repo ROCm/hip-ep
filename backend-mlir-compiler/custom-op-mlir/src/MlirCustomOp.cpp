@@ -17,6 +17,7 @@
 // Component headers
 #include "InferenceState.h"
 #include "hip/env.h" // shared cross-platform env reader (single Win32 call)
+#include "hip/init_config_abi.h"
 
 // HIPDNN_EP_PERF instrumentation dependencies
 #ifdef HIPDNN_EP_LINK_HIP_HOST
@@ -659,11 +660,30 @@ MlirCustomOp::MlirCustomOp(
   // const_cast follows the established morphizen pattern (custom_op_imp.hpp).
   auto fs =
       const_cast<morphizen::PassContext *>(context.get())->get_file_system();
+  // The config borrows `options`, so it must outlive the create() call below.
+  using ProviderOptionMap = std::map<std::string, std::string>;
+  auto options = context->get_all_provider_options();
+  hipdnn_ep_init_config config{
+      &options,
+      [](void *self) -> size_t {
+        return static_cast<const ProviderOptionMap *>(self)->size();
+      },
+      [](void *self, size_t index, const char **key, const char **value) {
+        const auto &opts = *static_cast<const ProviderOptionMap *>(self);
+        if (index >= opts.size()) {
+          *key = nullptr;
+          *value = nullptr;
+          return;
+        }
+        auto it = std::next(opts.begin(), static_cast<ptrdiff_t>(index));
+        *key = it->first.c_str();
+        *value = it->second.c_str();
+      }};
   auto artifact_bytes =
       load_artifact_from_epcontext(context, metadata_.artifact_filename());
   auto kind = determine_artifact_kind(metadata_.artifact_format());
   inference_state_ =
-      customop::InferenceState::create(artifact_bytes, fs.get(), kind);
+      customop::InferenceState::create(artifact_bytes, fs.get(), &config, kind);
 }
 
 MlirCustomOp::~MlirCustomOp() {

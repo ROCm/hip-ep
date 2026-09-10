@@ -400,6 +400,7 @@ public:
     declareRuntimeFunctions(module);
 
     generateInferenceInit(module, blob.size());
+    generateInferenceInitV2(module, blob.size());
     auto inputShapes = module->getAttrOfType<ArrayAttr>("hipdnn.input_shapes");
     generateInferenceCompute(module, inputShapes);
     generateInferenceCleanup(module);
@@ -450,6 +451,7 @@ private:
         {"hipdnn_ep_tensor_buffer_get_rank", i64, {ptr}},
         {"hipdnn_ep_tensor_buffer_get_size_bytes", i64, {ptr}},
         {"hipdnn_ep_state_init_with_fs", i32, {ptr, ptr, ptr, i64}},
+        {"hipdnn_ep_state_init_v2", i32, {ptr, ptr, ptr, i64, ptr}},
         {"hipdnn_ep_stream_sync", i32, {ptr}},
         {"hipdnn_ep_state_reset_error_flag", i32, {ptr}},
         {"hipdnn_ep_state_read_and_clear_error_flag", i32, {ptr}},
@@ -565,6 +567,22 @@ private:
   ///     llvm.return %2 : i32
   ///   }
   void generateInferenceInit(ModuleOp module, size_t blobSize) {
+    generateInferenceInitImpl(module, blobSize, hipdnn::abi::kInferenceInit,
+                              "hipdnn_ep_state_init_with_fs",
+                              /*withConfig=*/false);
+  }
+
+  void generateInferenceInitV2(ModuleOp module, size_t blobSize) {
+    generateInferenceInitImpl(module, blobSize, hipdnn::abi::kInferenceInitV2,
+                              "hipdnn_ep_state_init_v2", /*withConfig=*/true);
+  }
+
+  // Shared implementation: withConfig appends a config ptr param after
+  // (out_state, fs) and forwards it to runtimeFuncName after the fixed
+  // (out_state, fs, blob, sz) args.
+  void generateInferenceInitImpl(ModuleOp module, size_t blobSize,
+                                 StringRef funcName, StringRef runtimeFuncName,
+                                 bool withConfig) {
     OpBuilder builder(module.getContext());
     Location loc = module.getLoc();
 
@@ -574,11 +592,10 @@ private:
     Type i32Type = builder.getI32Type();
     Type i64Type = builder.getI64Type();
 
-    SmallVector<Type> paramTypes = {ptrType, ptrType};
+    SmallVector<Type> paramTypes(withConfig ? 3 : 2, ptrType);
     auto funcType = LLVM::LLVMFunctionType::get(i32Type, paramTypes);
 
-    auto funcOp = LLVM::LLVMFuncOp::create(
-        builder, loc, hipdnn::abi::kInferenceInit, funcType);
+    auto funcOp = LLVM::LLVMFuncOp::create(builder, loc, funcName, funcType);
     funcOp->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
     funcOp->setAttr("sym_visibility", builder.getStringAttr("public"));
 
@@ -593,11 +610,13 @@ private:
     Value blobSizeVal = LLVM::ConstantOp::create(
         builder, loc, i64Type, builder.getI64IntegerAttr((int64_t)blobSize));
 
-    auto initFunc =
-        module.lookupSymbol<LLVM::LLVMFuncOp>("hipdnn_ep_state_init_with_fs");
-    LLVM::CallOp initCall = LLVM::CallOp::create(
-        builder, loc, initFunc,
-        ValueRange{outStatePtr, fsPtr, blobPtr, blobSizeVal});
+    SmallVector<Value> initArgs = {outStatePtr, fsPtr, blobPtr, blobSizeVal};
+    if (withConfig)
+      initArgs.push_back(entryBlock->getArgument(2));
+
+    auto initFunc = module.lookupSymbol<LLVM::LLVMFuncOp>(runtimeFuncName);
+    LLVM::CallOp initCall =
+        LLVM::CallOp::create(builder, loc, initFunc, ValueRange(initArgs));
 
     auto poolSizeAttr = module->getAttrOfType<IntegerAttr>("hipdnn.pool_size");
     auto bufferOffsetsAttr =
