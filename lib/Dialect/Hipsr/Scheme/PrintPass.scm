@@ -11,8 +11,8 @@
         :for i :from 0 :to (- num-operands 1)
         :with operand := (mlir-operation-get-operand op i)
         :join-string operand :seperator ", "
-        :finally (if (string=? :return-value "")
-                     ""
+        :finally (if (zero? num-operands)
+                     :return-value
                      (format " | Operands[~a]: ~a" num-operands :return-value))))
 
 ;; Helper: format results list using rime loop
@@ -21,8 +21,8 @@
         :for i :from 0 :to (- num-results 1)
         :with result := (mlir-operation-get-result op i)
         :join-string result :seperator ", "
-        :finally (if (string=? :return-value "")
-                     ""
+        :finally (if (zero? num-results)
+                     :return-value
                      (format " | Results[~a]: ~a" num-results :return-value))))
 
 ;; Helper: format operation details
