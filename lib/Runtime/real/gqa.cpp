@@ -61,13 +61,18 @@
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <map>
+#include <mutex>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -1006,7 +1011,17 @@ struct GqaGemmKeyHash {
   }
 };
 
-/// Cached hipBLASLt state for a single GEMM shape.
+/// Cached hipBLASLt state for one GEMM *family* -- every shape that shares the
+/// operand types, the transpose, the batch count and the fixed strides, and
+/// differs only in the extents that track the KV length.
+///
+/// Keying on the exact extents instead would never hit during generation: the
+/// score GEMM's m and the value GEMM's k are kv_span, which grows by one per
+/// decode step, so every step allocated a new descriptor set and nothing ever
+/// evicted. The layouts carry the exact extents regardless -- they are
+/// reprogrammed per call -- so only the algorithm is shared across a family,
+/// and it is refreshed when the shape leaves the bucket it was chosen for.
+///
 /// Ownership: descriptors are created in queryOrCreateGemmState() and live for
 /// the process lifetime (destroyed together when the owning op-state slot is
 /// torn down, in GqaGemmCache's destructor).
@@ -1015,6 +1030,11 @@ struct GqaGemmCacheEntry {
   hipblasLtMatrixLayout_t layA, layB, layC, layD; // matrix layouts
   hipblasLtMatmulAlgo_t algo; // heuristic-selected algorithm
   size_t workspace_size;      // workspace bytes required by algo
+  // Extents and strides currently programmed into the layouts above.
+  int64_t cur_m, cur_k, cur_strideA, cur_strideB, cur_strideC;
+  // Extent buckets the algorithm was selected for; leaving either one triggers
+  // a re-query.
+  int64_t algo_m_bucket, algo_k_bucket;
 };
 
 struct GqaGemmCache {
@@ -1042,6 +1062,253 @@ static GqaGemmCache *get_gemm_cache(RuntimeState *state, int op_state_slot) {
   return gs ? &gs->cache : nullptr;
 }
 
+// The cache key with every KV-length-dependent number removed. What remains --
+// n, batch, transA and the two element-type flags -- is exactly what the
+// descriptor and the layout data types are built from, so shapes in one family
+// differ only in values that get reprogrammed per call. transA in particular
+// stays in the key: it is baked into the descriptor, so the Score and Value
+// GEMMs can never share an entry.
+//
+// All three batch strides go, not just the two that carry kv_span directly:
+// strideA is present_seq * d and present_seq is skv, so it grows with the
+// context just as the extents do. Leaving it in the key kept the miss rate at
+// 100% even after the extents came out.
+static GqaGemmKey gemmFamilyKey(const GqaGemmKey &key) {
+  GqaGemmKey fam = key;
+  fam.m = 0;
+  fam.k = 0;
+  fam.strideA = 0;
+  fam.strideB = 0;
+  fam.strideC = 0;
+  return fam;
+}
+
+// Extents are bucketed for algorithm selection only. A GEMV-shaped decode does
+// not want a different algorithm for every KV length, and re-querying on each
+// token is what made the old cache useless; a coarse bucket keeps the choice
+// roughly current while querying about once per bucket width.
+static constexpr int64_t kGemmExtentBucket = 256;
+
+static int64_t gemmExtentBucket(int64_t extent) {
+  if (extent <= 0)
+    return 0;
+  return ((extent + kGemmExtentBucket - 1) / kGemmExtentBucket) *
+         kGemmExtentBucket;
+}
+
+static hipblasStatus_t setLayoutExtents(hipblasLtMatrixLayout_t layout,
+                                        uint64_t rows, uint64_t cols,
+                                        int64_t ld, int32_t batchCount,
+                                        int64_t stride) {
+  hipblasStatus_t status = hipblasLtMatrixLayoutSetAttribute(
+      layout, HIPBLASLT_MATRIX_LAYOUT_ROWS, &rows, sizeof(rows));
+  if (status != HIPBLAS_STATUS_SUCCESS)
+    return status;
+  status = hipblasLtMatrixLayoutSetAttribute(
+      layout, HIPBLASLT_MATRIX_LAYOUT_COLS, &cols, sizeof(cols));
+  if (status != HIPBLAS_STATUS_SUCCESS)
+    return status;
+  status = hipblasLtMatrixLayoutSetAttribute(layout, HIPBLASLT_MATRIX_LAYOUT_LD,
+                                             &ld, sizeof(ld));
+  if (status != HIPBLAS_STATUS_SUCCESS)
+    return status;
+  return setLayoutBatch(layout, batchCount, stride);
+}
+
+// Point a reused descriptor set at `key`'s exact extents. Mirrors the layout
+// arithmetic of the creation path below; the two must stay in step.
+static hipblasStatus_t programEntryLayouts(GqaGemmCacheEntry &entry,
+                                           const GqaGemmKey &key) {
+  const int64_t m = key.m, n = key.n, k = key.k;
+  const int32_t batch = static_cast<int32_t>(key.batch);
+  const int64_t strideA = key.strideA != 0 ? key.strideA : m * k;
+  const int64_t strideB = key.strideB != 0 ? key.strideB : n * k;
+  const int64_t strideC = key.strideC != 0 ? key.strideC : n * m;
+
+  const int64_t a_rows = key.transA ? k : m;
+  const int64_t a_cols = key.transA ? m : k;
+
+  hipblasStatus_t status =
+      setLayoutExtents(entry.layA, static_cast<uint64_t>(a_rows),
+                       static_cast<uint64_t>(a_cols), a_rows, batch, strideA);
+  if (status != HIPBLAS_STATUS_SUCCESS)
+    return status;
+  status = setLayoutExtents(entry.layB, static_cast<uint64_t>(k),
+                            static_cast<uint64_t>(n), k, batch, strideB);
+  if (status != HIPBLAS_STATUS_SUCCESS)
+    return status;
+  status = setLayoutExtents(entry.layC, static_cast<uint64_t>(m),
+                            static_cast<uint64_t>(n), m, batch, strideC);
+  if (status != HIPBLAS_STATUS_SUCCESS)
+    return status;
+  return setLayoutExtents(entry.layD, static_cast<uint64_t>(m),
+                          static_cast<uint64_t>(n), m, batch, strideC);
+}
+
+//===----------------------------------------------------------------------===//
+// GEMM descriptor cache instrumentation (HIPDNN_EP_GQA_GEMM_CACHE_STATS=1)
+//===----------------------------------------------------------------------===//
+// The cache is keyed on the GEMM extents and kv_span is one of them, so a
+// context that grows by a token per decode step produces a fresh key every
+// step. Each miss then pays a hipblasLtMatmulAlgoGetHeuristic and adds another
+// descriptor set that is never evicted. These counters attribute both costs
+// without a profiler; the per-family rows show whether m is sweeping a range
+// (the growing-context signature) or is genuinely a new shape.
+namespace {
+
+struct GemmFamilyStat {
+  uint64_t creates = 0;
+  int64_t min_m = 0, max_m = 0;
+  int64_t min_k = 0, max_k = 0;
+};
+
+struct GemmCacheStats {
+  std::atomic<uint64_t> reuses{0};    // family hit, algorithm still in bucket
+  std::atomic<uint64_t> refreshes{0}; // family hit, algorithm re-queried
+  std::atomic<uint64_t> creates{0};   // new descriptor set allocated
+  std::atomic<uint64_t> heuristic_ns{0};
+  std::atomic<uint64_t> create_ns{0};
+  std::mutex mu;
+  // Grouped by the cache's own family identity -- (n, batch, transA) -- so a
+  // healthy run prints a handful of rows. Rows whose m/k ranges are wide but
+  // whose create count stays low are families being reused across a growing
+  // context, which is the intent.
+  std::map<std::tuple<int64_t, int64_t, int>, GemmFamilyStat> families;
+
+  void report(const char *when) {
+    const uint64_t r = reuses.load(), f = refreshes.load(), c = creates.load();
+    const uint64_t total = r + f + c;
+    fprintf(stderr,
+            "[gqa-gemm-cache] %s: calls=%llu reuse=%llu (%.1f%%) "
+            "algo-refresh=%llu descriptor-sets-created=%llu | "
+            "heuristic=%.1f ms create=%.1f ms\n",
+            when, (unsigned long long)total, (unsigned long long)r,
+            total ? 100.0 * double(r) / double(total) : 0.0,
+            (unsigned long long)f, (unsigned long long)c,
+            double(heuristic_ns.load()) / 1e6, double(create_ns.load()) / 1e6);
+    std::lock_guard<std::mutex> lock(mu);
+    for (const auto &kv : families) {
+      const auto &f = kv.first;
+      fprintf(stderr,
+              "[gqa-gemm-cache]   n=%lld batch=%lld transA=%d: %llu created, "
+              "m %lld..%lld k %lld..%lld\n",
+              (long long)std::get<0>(f), (long long)std::get<1>(f),
+              std::get<2>(f), (unsigned long long)kv.second.creates,
+              (long long)kv.second.min_m, (long long)kv.second.max_m,
+              (long long)kv.second.min_k, (long long)kv.second.max_k);
+    }
+  }
+};
+
+static bool gemmCacheStatsEnabled() {
+  static const bool enabled = [] {
+    const char *v = std::getenv("HIPDNN_EP_GQA_GEMM_CACHE_STATS");
+    return v && std::strcmp(v, "0") != 0;
+  }();
+  return enabled;
+}
+
+// Reported periodically rather than from a destructor: this TU is also
+// compiled to the JIT-loaded runtime bitcode, where static teardown is not a
+// dependable place to print from.
+static GemmCacheStats &gemmCacheStats() {
+  static GemmCacheStats stats;
+  return stats;
+}
+
+// Periodic rather than final: a benchmark harness need not exit cleanly, and
+// the trend is what matters here.
+static void maybeReportGemmStats(GemmCacheStats &s) {
+  const uint64_t total =
+      s.reuses.load() + s.refreshes.load() + s.creates.load();
+  if (total % 500 == 0)
+    s.report("running");
+}
+
+static void recordGemmReuse() {
+  auto &s = gemmCacheStats();
+  s.reuses.fetch_add(1);
+  maybeReportGemmStats(s);
+}
+
+static void recordGemmRefresh(uint64_t heuristic_ns) {
+  auto &s = gemmCacheStats();
+  s.refreshes.fetch_add(1);
+  s.heuristic_ns.fetch_add(heuristic_ns);
+  maybeReportGemmStats(s);
+}
+
+static void recordGemmCreate(const GqaGemmKey &key, uint64_t heuristic_ns,
+                             uint64_t create_ns) {
+  auto &s = gemmCacheStats();
+  s.creates.fetch_add(1);
+  s.heuristic_ns.fetch_add(heuristic_ns);
+  s.create_ns.fetch_add(create_ns);
+  {
+    std::lock_guard<std::mutex> lock(s.mu);
+    auto &fam = s.families[{key.n, key.batch, key.transA ? 1 : 0}];
+    if (fam.creates == 0) {
+      fam.min_m = fam.max_m = key.m;
+      fam.min_k = fam.max_k = key.k;
+    }
+    fam.creates++;
+    fam.min_m = std::min(fam.min_m, key.m);
+    fam.max_m = std::max(fam.max_m, key.m);
+    fam.min_k = std::min(fam.min_k, key.k);
+    fam.max_k = std::max(fam.max_k, key.k);
+  }
+  maybeReportGemmStats(s);
+}
+
+} // namespace
+
+// Runs the heuristic against the layouts currently programmed into `entry` and
+// records the winning algorithm. Shared by the creation path and by the
+// refresh that happens when a reused descriptor set moves out of the bucket
+// its algorithm was chosen for.
+static hipblasStatus_t selectGemmAlgo(hipblasLtHandle_t handle,
+                                      GqaGemmCacheEntry &entry,
+                                      const GqaGemmKey &key, bool stats_on,
+                                      uint64_t *heuristic_ns) {
+  hipblasLtMatmulPreference_t pref = nullptr;
+  hipblasStatus_t st = hipblasLtMatmulPreferenceCreate(&pref);
+  if (st != HIPBLAS_STATUS_SUCCESS)
+    return st;
+
+  const size_t max_ws = kMaxWorkspaceBytes;
+  st = hipblasLtMatmulPreferenceSetAttribute(
+      pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &max_ws, sizeof(max_ws));
+  if (st == HIPBLAS_STATUS_SUCCESS) {
+    hipblasLtMatmulHeuristicResult_t heur;
+    int returned = 0;
+    const auto t0 = stats_on ? std::chrono::steady_clock::now()
+                             : std::chrono::steady_clock::time_point{};
+    st = hipblasLtMatmulAlgoGetHeuristic(handle, entry.desc, entry.layA,
+                                         entry.layB, entry.layC, entry.layD,
+                                         pref, 1, &heur, &returned);
+    if (stats_on && heuristic_ns)
+      *heuristic_ns += static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - t0)
+              .count());
+    if (st == HIPBLAS_STATUS_SUCCESS) {
+      if (returned == 0) {
+        fprintf(stderr,
+                "GQA: no algorithm found for GEMM m=%lld n=%lld k=%lld "
+                "batch=%lld\n",
+                (long long)key.m, (long long)key.n, (long long)key.k,
+                (long long)key.batch);
+        st = HIPBLAS_STATUS_NOT_SUPPORTED;
+      } else {
+        entry.algo = heur.algo;
+        entry.workspace_size = heur.workspaceSize;
+      }
+    }
+  }
+  hipblasLtMatmulPreferenceDestroy(pref);
+  return st;
+}
+
 static const GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
                                                        hipblasLtHandle_t handle,
                                                        const GqaGemmKey &key,
@@ -1053,16 +1320,62 @@ static const GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
             op_state_slot);
     return nullptr;
   }
-  auto it = cache->entries.find(key);
-  if (it != cache->entries.end())
-    return &it->second;
+
+  const bool stats_on = gemmCacheStatsEnabled();
+  const GqaGemmKey fam = gemmFamilyKey(key);
+
+  auto it = cache->entries.find(fam);
+  if (it != cache->entries.end()) {
+    GqaGemmCacheEntry &hit = it->second;
+    // The descriptor and the layout element types come from the family, so
+    // only the extents can have moved. Reprogram them before the algorithm is
+    // considered: the heuristic reads the layouts.
+    if (hit.cur_m != key.m || hit.cur_k != key.k ||
+        hit.cur_strideA != key.strideA || hit.cur_strideB != key.strideB ||
+        hit.cur_strideC != key.strideC) {
+      if (programEntryLayouts(hit, key) != HIPBLAS_STATUS_SUCCESS) {
+        fprintf(stderr,
+                "queryOrCreateGemmState: could not reprogram layouts for "
+                "m=%lld n=%lld k=%lld batch=%lld\n",
+                (long long)key.m, (long long)key.n, (long long)key.k,
+                (long long)key.batch);
+        return nullptr;
+      }
+      hit.cur_m = key.m;
+      hit.cur_k = key.k;
+      hit.cur_strideA = key.strideA;
+      hit.cur_strideB = key.strideB;
+      hit.cur_strideC = key.strideC;
+    }
+
+    const int64_t mb = gemmExtentBucket(key.m);
+    const int64_t kb = gemmExtentBucket(key.k);
+    if (mb != hit.algo_m_bucket || kb != hit.algo_k_bucket) {
+      uint64_t ns = 0;
+      if (selectGemmAlgo(handle, hit, key, stats_on, &ns) !=
+          HIPBLAS_STATUS_SUCCESS)
+        return nullptr;
+      hit.algo_m_bucket = mb;
+      hit.algo_k_bucket = kb;
+      if (stats_on)
+        recordGemmRefresh(ns);
+    } else if (stats_on) {
+      recordGemmReuse();
+    }
+    return &hit;
+  }
 
   int64_t m = key.m, n = key.n, k = key.k;
   int32_t batch = static_cast<int32_t>(key.batch);
 
+  // Declared before the first goto so all are live at the cache_done label.
+  const std::chrono::steady_clock::time_point create_t0 =
+      stats_on ? std::chrono::steady_clock::now()
+               : std::chrono::steady_clock::time_point{};
+  uint64_t heuristic_ns = 0;
+
   GqaGemmCacheEntry entry = {};
 
-  hipblasLtMatmulPreference_t pref = nullptr;
   hipblasStatus_t st;
 
 #define GQA_CACHE_CHECK(call)                                                  \
@@ -1107,41 +1420,12 @@ static const GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
     GQA_CACHE_CHECK(setLayoutBatch(entry.layD, batch, strideC));
   }
 
-  GQA_CACHE_CHECK(hipblasLtMatmulPreferenceCreate(&pref));
-  {
-    const size_t max_ws = kMaxWorkspaceBytes;
-    GQA_CACHE_CHECK(hipblasLtMatmulPreferenceSetAttribute(
-        pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &max_ws,
-        sizeof(max_ws)));
-  }
-
-  {
-    hipblasLtMatmulHeuristicResult_t heur;
-    int returned = 0;
-    GQA_CACHE_CHECK(hipblasLtMatmulAlgoGetHeuristic(
-        handle, entry.desc, entry.layA, entry.layB, entry.layC, entry.layD,
-        pref, 1, &heur, &returned));
-    hipblasLtMatmulPreferenceDestroy(pref);
-    pref = nullptr;
-
-    if (returned == 0) {
-      fprintf(stderr,
-              "GQA: no algorithm found for GEMM m=%lld n=%lld k=%lld "
-              "batch=%lld\n",
-              (long long)m, (long long)n, (long long)k, (long long)key.batch);
-      goto cache_fail;
-    }
-
-    entry.algo = heur.algo;
-    entry.workspace_size = heur.workspaceSize;
-  }
+  GQA_CACHE_CHECK(selectGemmAlgo(handle, entry, key, stats_on, &heuristic_ns));
 
 #undef GQA_CACHE_CHECK
   goto cache_done;
 
 cache_fail:
-  if (pref)
-    hipblasLtMatmulPreferenceDestroy(pref);
   if (entry.layD)
     hipblasLtMatrixLayoutDestroy(entry.layD);
   if (entry.layC)
@@ -1155,8 +1439,25 @@ cache_fail:
   return nullptr;
 
 cache_done:
-  auto [ins, _] = cache->entries.emplace(key, entry);
-  return &ins->second;
+  // The layouts were created with these extents; record them so the next call
+  // in this family knows whether it has to reprogram.
+  entry.cur_m = key.m;
+  entry.cur_k = key.k;
+  entry.cur_strideA = key.strideA;
+  entry.cur_strideB = key.strideB;
+  entry.cur_strideC = key.strideC;
+  entry.algo_m_bucket = gemmExtentBucket(key.m);
+  entry.algo_k_bucket = gemmExtentBucket(key.k);
+  if (stats_on)
+    recordGemmCreate(key, heuristic_ns,
+                     static_cast<uint64_t>(
+                         std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             std::chrono::steady_clock::now() - create_t0)
+                             .count()));
+  {
+    auto [ins, _] = cache->entries.emplace(fam, entry);
+    return &ins->second;
+  }
 }
 
 //===----------------------------------------------------------------------===//
