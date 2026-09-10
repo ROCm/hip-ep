@@ -15,6 +15,8 @@
 #include "mlir/Parser/Parser.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
+#include <cmath>
+#include <limits>
 #include <optional>
 
 namespace hip {
@@ -258,6 +260,51 @@ isUint16Quantized(mlir::PatternRewriter &, mlir::PDLResultList &,
                        intType.isUnsigned());
 }
 
+// DQ -> Transpose -> Q may operate directly on the quantized tensor when both
+// ends use identical UINT16 per-tensor quantization. Restrict scales to the
+// normal finite fp32 range so the eliminated Q(DQ(x)) round-trip is exact for
+// every UINT16 value supported by the runtime's fp32 arithmetic.
+inline mlir::LogicalResult
+hasMatchingTransposeQParams(mlir::PatternRewriter &, mlir::PDLResultList &,
+                            llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 2)
+    return mlir::failure();
+  auto *dq = args[0].dyn_cast<mlir::Operation *>();
+  auto *q = args[1].dyn_cast<mlir::Operation *>();
+  if (!dq || !q || dq->getNumOperands() < 2 || q->getNumOperands() < 2 ||
+      dq->getNumResults() != 1 || q->getNumResults() != 1)
+    return mlir::failure();
+
+  auto dqType = getQuantizedElementType(dq);
+  auto qType = getQuantizedElementType(q);
+  if (!dqType || !qType || dqType != qType || dqType.getWidth() != 16 ||
+      !dqType.isUnsigned())
+    return mlir::failure();
+
+  auto isScalarTensor = [](mlir::Value value) {
+    auto type = mlir::dyn_cast<mlir::ShapedType>(value.getType());
+    return type && type.hasStaticShape() && type.getNumElements() == 1;
+  };
+  if (!isScalarTensor(dq->getOperand(1)) || !isScalarTensor(q->getOperand(1)))
+    return mlir::failure();
+
+  std::optional<float> dqScale = trySplatScale(dq->getOperand(1));
+  std::optional<float> qScale = trySplatScale(q->getOperand(1));
+  if (!dqScale || !qScale || *dqScale != *qScale || !std::isfinite(*dqScale) ||
+      *dqScale < std::numeric_limits<float>::min() ||
+      *dqScale > std::numeric_limits<float>::max() / 65535.0f)
+    return mlir::failure();
+
+  // Scalar scale means axis is immaterial, but blocked quantization is not.
+  if (!onnxIntAttrEquals(dq, "block_size", 0, /*absentValue=*/0) ||
+      !onnxIntAttrEquals(q, "block_size", 0, /*absentValue=*/0))
+    return mlir::failure();
+
+  std::optional<int64_t> dqZp = trySplatZeropoint(dq, 2, 0);
+  std::optional<int64_t> qZp = trySplatZeropoint(q, 2, 0);
+  return mlir::success(dqZp && qZp && *dqZp == *qZp);
+}
+
 // onnx.Conv geometry that collapses to a plain per-position dot product down
 // the channel axis: a 1x1 kernel over two spatial dims, no grouping, unit
 // stride and dilation, no padding. That is the only form the fused kernel
@@ -411,6 +458,31 @@ extractAttrInt64(mlir::PatternRewriter &rewriter, mlir::PDLResultList &results,
   return mlir::success();
 }
 
+// Rebuild the Transpose with the quantized input and output type, copying its
+// permutation and diagnostic attributes verbatim. The old DQ/Transpose/Q chain
+// becomes dead and is removed by the greedy rewrite driver.
+inline mlir::LogicalResult
+createQuantizedTranspose(mlir::PatternRewriter &rewriter,
+                         mlir::PDLResultList &results,
+                         llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 3)
+    return mlir::failure();
+  auto *dq = args[0].dyn_cast<mlir::Operation *>();
+  auto *transpose = args[1].dyn_cast<mlir::Operation *>();
+  auto *q = args[2].dyn_cast<mlir::Operation *>();
+  if (!dq || !transpose || !q || dq->getNumOperands() == 0 ||
+      q->getNumResults() != 1)
+    return mlir::failure();
+
+  mlir::OperationState state(transpose->getLoc(), "onnx.Transpose");
+  state.addOperands(dq->getOperand(0));
+  state.addTypes(q->getResult(0).getType());
+  state.addAttributes(transpose->getAttrs());
+  mlir::Operation *newTranspose = rewriter.create(state);
+  results.push_back(newTranspose->getResult(0));
+  return mlir::success();
+}
+
 // Apply PDL patterns
 inline bool run(mlir::ModuleOp mlirModule, llvm::StringRef pdlBytecodeFile) {
   if (pdlBytecodeFile.empty())
@@ -447,6 +519,8 @@ inline bool run(mlir::ModuleOp mlirModule, llvm::StringRef pdlBytecodeFile) {
                                          hasStaticShapedResults);
   pdlPatterns.registerConstraintFunction("IsUint16Quantized",
                                          isUint16Quantized);
+  pdlPatterns.registerConstraintFunction("HasMatchingTransposeQParams",
+                                         hasMatchingTransposeQParams);
   pdlPatterns.registerConstraintFunction("IsFusableQConvGeometry",
                                          isFusableQConvGeometry);
   pdlPatterns.registerConstraintFunction("IsPackedInt4PerChannelWeight",
@@ -456,6 +530,8 @@ inline bool run(mlir::ModuleOp mlirModule, llvm::StringRef pdlBytecodeFile) {
   pdlPatterns.registerRewriteFunction("ExtractZeropointValue",
                                       extractZeropointValue);
   pdlPatterns.registerRewriteFunction("ExtractAttrInt64", extractAttrInt64);
+  pdlPatterns.registerRewriteFunction("CreateQuantizedTranspose",
+                                      createQuantizedTranspose);
 
   mlir::RewritePatternSet patterns(ctx);
   patterns.add(std::move(pdlPatterns));
