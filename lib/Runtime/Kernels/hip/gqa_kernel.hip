@@ -3439,9 +3439,6 @@ static inline void dispatchPrefillV5(
                 scale, ablate, head_sink, num_heads, smooth_softmax,            \
                 local_window_size)
 
-    // Only d == 64 gets windowed instantiations: hip_gqa_flash_prefill
-    // rejects a window at any other head dim, so d == 128 with a window would
-    // be dead code.
     if (d == 64) {
         if (local_window_size > 0) {
             if (m_tiles == 2 && bkv == 64)  LAUNCH_V5(2, 64, 64, true);
@@ -3455,10 +3452,17 @@ static inline void dispatchPrefillV5(
             else                            LAUNCH_V5(1, 32, 64, false);
         }
     } else {
-        if (m_tiles == 2 && bkv == 64)      LAUNCH_V5(2, 64, 128, false);
-        else if (m_tiles == 2)              LAUNCH_V5(2, 32, 128, false);
-        else if (bkv == 64)                 LAUNCH_V5(1, 64, 128, false);
-        else                                LAUNCH_V5(1, 32, 128, false);
+        if (local_window_size > 0) {
+            if (m_tiles == 2 && bkv == 64)  LAUNCH_V5(2, 64, 128, true);
+            else if (m_tiles == 2)          LAUNCH_V5(2, 32, 128, true);
+            else if (bkv == 64)             LAUNCH_V5(1, 64, 128, true);
+            else                            LAUNCH_V5(1, 32, 128, true);
+        } else {
+            if (m_tiles == 2 && bkv == 64)  LAUNCH_V5(2, 64, 128, false);
+            else if (m_tiles == 2)          LAUNCH_V5(2, 32, 128, false);
+            else if (bkv == 64)             LAUNCH_V5(1, 64, 128, false);
+            else                            LAUNCH_V5(1, 32, 128, false);
+        }
     }
     #undef LAUNCH_V5
 }
@@ -4539,12 +4543,11 @@ extern "C" void hip_gqa_flash_prefill_v8_set_ablate(int mask) {
 // on top of v2. v2 stays the narrow ABI so the standalone harnesses and shim
 // headers that redeclare it keep linking unchanged.
 //
-// Both features are implemented for d == 64 (the v5 kernel) only. For any other
-// d we return -1 rather than silently ignoring them, so the runtime keeps
-// routing those shapes to the decomposed path, which does implement both. A
-// request carrying neither is forwarded to v2 and keeps v2's head-dim coverage
-// and its v5/v7/v8 selection; d == 64 lands on v5 either way, so a sink or a
-// window never changes which kernel runs.
+// Attention sinks are implemented for d == 64. Sliding-window attention is
+// also implemented for d == 128 by v5. Unsupported feature/head
+// combinations return -1 rather than silently dropping the requested feature.
+// A request carrying neither is forwarded to v2 and keeps v2's head-dim
+// coverage and its v5/v7/v8 selection.
 extern "C" int hip_gqa_flash_prefill(
     void* stream_ptr,
     const void* Q, const void* Kcache, const void* Vcache, void* O,
@@ -4554,10 +4557,16 @@ extern "C" int hip_gqa_flash_prefill(
 {
     const bool wants_sink   = (head_sink != nullptr) || (smooth_softmax != 0);
     const bool wants_window = local_window_size > 0;
-    if ((wants_sink || wants_window) && d != 64) return -1;
+    if (wants_sink && d != 64) return -1;
+    if (wants_window && d != 64 && d != 128) return -1;
     if (!wants_sink && !wants_window) {
         return hip_gqa_flash_prefill_v2(stream_ptr, Q, Kcache, Vcache, O, B, Hq,
                                         G, sq, skv, d, max_seq, past_len, scale);
+    }
+    if (d == 128) {
+        return prefillV5Run(stream_ptr, Q, Kcache, Vcache, O, B, Hq, G, sq,
+                            skv, d, max_seq, past_len, scale, nullptr, Hq, 0,
+                            local_window_size);
     }
     return prefillV5Run(stream_ptr, Q, Kcache, Vcache, O, B, Hq, G, sq, skv, d,
                         max_seq, past_len, scale, head_sink, num_heads,
@@ -4618,7 +4627,8 @@ extern "C" int hip_gqa_flash_prefill_v3_configured(
 {
     const bool wants_sink = head_sink != nullptr || smooth_softmax != 0;
     const bool wants_window = local_window_size > 0;
-    if ((wants_sink || wants_window) && d != 64) return -1;
+    if (wants_sink && d != 64) return -1;
+    if (wants_window && d != 64 && d != 128) return -1;
 
     hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
     const _Float16* Q_ptr = static_cast<const _Float16*>(Q);
@@ -4641,6 +4651,13 @@ extern "C" int hip_gqa_flash_prefill_v3_configured(
         return 0;
     }
     if (d == 128) {
+        if (wants_window) {
+            if (bkv != 32 && bkv != 64) return -1;
+            dispatchPrefillV5(1, bkv, d, stream, Q_ptr, K_ptr, V_ptr, O_ptr,
+                              B, Hq, G, sq, skv, max_seq, past_len, scale,
+                              nullptr, Hq, 0, local_window_size);
+            return 0;
+        }
         PrefillV7Cfg candidates[12];
         const int count = prefillV7Candidates(d, candidates);
         bool valid = false;
