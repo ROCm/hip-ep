@@ -11,6 +11,7 @@
 #include <mlir/Dialect/Tosa/IR/TosaOps.h>
 #include <mlir/Dialect/Tosa/Utils/ConversionUtils.h>
 #include <mlir/Dialect/UB/IR/UBOps.h>
+#include <mlir/Dialect/Utils/StaticValueUtils.h>
 #include <mlir/IR/BuiltinAttributes.h>
 #include <mlir/IR/BuiltinTypes.h>
 #include <mlir/IR/MLIRContext.h>
@@ -61,14 +62,19 @@ bool isTosaCompatibleOperand(Value operand, RankedTensorType resultType) {
   return isTosaBroadcastableShape(operandType, resultType);
 }
 
+// TOSA carries reshape/slice shapes as !tosa.shape SSA operands.
+static Value createConstShape(ConversionPatternRewriter &rewriter, Location loc,
+                              ArrayRef<int64_t> extents) {
+  return tosa::ConstShapeOp::create(
+      rewriter, loc, tosa::shapeType::get(rewriter.getContext(), extents.size()),
+      rewriter.getIndexTensorAttr(extents));
+}
+
 // Reshape `input` to `shape` via tosa.reshape + tosa.const_shape.
 static Value reshapeTo(Value input, ArrayRef<int64_t> shape,
                        ConversionPatternRewriter &rewriter) {
   auto type = cast<RankedTensorType>(input.getType());
-  auto shapeConst = tosa::ConstShapeOp::create(
-      rewriter, rewriter.getUnknownLoc(),
-      tosa::shapeType::get(rewriter.getContext(), shape.size()),
-      rewriter.getIndexTensorAttr(shape));
+  auto shapeConst = createConstShape(rewriter, rewriter.getUnknownLoc(), shape);
   return tosa::ReshapeOp::create(rewriter, rewriter.getUnknownLoc(),
                                  type.clone(shape), input, shapeConst);
 }
@@ -250,6 +256,111 @@ struct UnaryConverter final : public OpConversionPattern<HipOpTy> {
     // tosa.negate takes zero-point operands, but its quant-info builder
     // materializes them from this same (result type, input) signature.
     rewriter.replaceOpWithNewOp<TosaOpTy>(op, resultType, adaptor.getX());
+    return success();
+  }
+};
+
+// hip.transpose and tosa.transpose share ONNX's permutation convention.
+struct TransposeConverter final : public OpConversionPattern<hip::TransposeOp> {
+  using OpConversionPattern<hip::TransposeOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(hip::TransposeOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    auto inputType = dyn_cast<RankedTensorType>(adaptor.getInput().getType());
+    if (!resultType || !resultType.hasStaticShape() || !inputType ||
+        !inputType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected static ranked tensors");
+    if (inputType.getRank() < 1)
+      return rewriter.notifyMatchFailure(op, "expected rank 1 or higher");
+
+    SmallVector<int32_t> perms;
+    perms.reserve(op.getPerm().size());
+    for (Attribute perm : op.getPerm())
+      perms.push_back(static_cast<int32_t>(cast<IntegerAttr>(perm).getInt()));
+
+    rewriter.replaceOpWithNewOp<tosa::TransposeOp>(
+        op, resultType, adaptor.getInput(),
+        rewriter.getDenseI32ArrayAttr(perms));
+    return success();
+  }
+};
+
+// Expand to a multiply-by-ones form that TosaToRock folds to layout transforms.
+static bool isTosaExpressibleExpand(hip::ExpandOp op) {
+  if (op.getNumResults() != 1)
+    return false;
+
+  auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+  auto inputType = dyn_cast<RankedTensorType>(op.getInput().getType());
+  if (!resultType || !resultType.hasStaticShape() || !inputType ||
+      !inputType.hasStaticShape())
+    return false;
+  if (resultType.getElementType() != inputType.getElementType())
+    return false;
+
+  int64_t offset = resultType.getRank() - inputType.getRank();
+  if (offset < 0)
+    return false;
+
+  ArrayRef<int64_t> shape = inputType.getShape();
+  ArrayRef<int64_t> resultShape = resultType.getShape();
+  for (int64_t i = 0, e = inputType.getRank(); i < e; ++i)
+    if (shape[i] != resultShape[i + offset] && shape[i] != 1)
+      return false;
+  return true;
+}
+
+struct ExpandConverter final : public OpConversionPattern<hip::ExpandOp> {
+  using OpConversionPattern<hip::ExpandOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(hip::ExpandOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isTosaExpressibleExpand(op))
+      return rewriter.notifyMatchFailure(op, "expected a static broadcast");
+
+    auto resultType = cast<RankedTensorType>(op.getResult(0).getType());
+    Value ones = tosa::ConstOp::create(
+        rewriter, op.getLoc(), resultType,
+        cast<ElementsAttr>(rewriter.getOneAttr(resultType)));
+
+    Value input = adaptor.getInput();
+    if (failed(tosa::EqualizeRanks(rewriter, op.getLoc(), input, ones)))
+      return rewriter.notifyMatchFailure(op, "operand ranks not equalizable");
+
+    rewriter.replaceOpWithNewOp<tosa::MulOp>(
+        op, resultType, input, ones, createZeroMulShift(rewriter, op.getLoc()));
+    return success();
+  }
+};
+
+template <typename TensorOpTy> static bool isStaticReshape(TensorOpTy op) {
+  auto srcType = dyn_cast<RankedTensorType>(op.getSrc().getType());
+  auto resultType = dyn_cast<RankedTensorType>(op.getResult().getType());
+  return srcType && srcType.hasStaticShape() && resultType &&
+         resultType.hasStaticShape();
+}
+
+template <typename TensorOpTy>
+struct ReshapeConverter final : public OpConversionPattern<TensorOpTy> {
+  using OpConversionPattern<TensorOpTy>::OpConversionPattern;
+  using OpAdaptor = typename OpConversionPattern<TensorOpTy>::OpAdaptor;
+
+  LogicalResult
+  matchAndRewrite(TensorOpTy op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isStaticReshape(op))
+      return rewriter.notifyMatchFailure(op, "expected static ranked tensors");
+
+    auto resultType = cast<RankedTensorType>(op.getResult().getType());
+    rewriter.replaceOpWithNewOp<tosa::ReshapeOp>(
+        op, resultType, adaptor.getSrc(),
+        createConstShape(rewriter, op.getLoc(), resultType.getShape()));
     return success();
   }
 };
@@ -859,6 +970,47 @@ struct QuantizeLinearConverter final
   }
 };
 
+static bool isTosaExpressibleSlice(tensor::ExtractSliceOp op) {
+  auto sourceType = dyn_cast<RankedTensorType>(op.getSource().getType());
+  auto resultType = dyn_cast<RankedTensorType>(op.getResult().getType());
+  if (!sourceType || !sourceType.hasStaticShape() || !resultType ||
+      !resultType.hasStaticShape())
+    return false;
+  if (resultType.getRank() != sourceType.getRank())
+    return false;
+  for (OpFoldResult stride : op.getMixedStrides())
+    if (getConstantIntValue(stride) != std::optional<int64_t>(1))
+      return false;
+  for (OpFoldResult offset : op.getMixedOffsets())
+    if (!getConstantIntValue(offset))
+      return false;
+  return true;
+}
+
+struct ExtractSliceConverter final
+    : public OpConversionPattern<tensor::ExtractSliceOp> {
+  using OpConversionPattern<tensor::ExtractSliceOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(tensor::ExtractSliceOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isTosaExpressibleSlice(op))
+      return rewriter.notifyMatchFailure(
+          op, "expected a static, unstrided, same-rank extract");
+
+    SmallVector<int64_t> starts;
+    for (OpFoldResult offset : op.getMixedOffsets())
+      starts.push_back(*getConstantIntValue(offset));
+
+    auto resultType = cast<RankedTensorType>(op.getResult().getType());
+    rewriter.replaceOpWithNewOp<tosa::SliceOp>(
+        op, resultType, adaptor.getSource(),
+        createConstShape(rewriter, op.getLoc(), starts),
+        createConstShape(rewriter, op.getLoc(), resultType.getShape()));
+    return success();
+  }
+};
+
 class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
   void runOnOperation() override {
     auto funcOp = getOperation();
@@ -883,9 +1035,9 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     ConversionTarget conversion(*ctx);
     conversion.addLegalDialect<tosa::TosaDialect, func::FuncDialect>();
     conversion
-        .addIllegalOp<MatmulOp, AddOp, SubOp, MinOp, MaxOp, MulOp, AbsOp, NegOp,
-                      CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp, TanhOp,
-                      ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, WhereOp,
+        .addIllegalOp<MatmulOp, TransposeOp, AddOp, SubOp, MinOp, MaxOp, MulOp,
+                      AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
+                      TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, WhereOp,
                       LeakyReluOp, MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp,
                       CastOp, QuantizeLinearOp, DequantizeLinearOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
@@ -895,10 +1047,21 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     // this pre-existing op on its own. Mark it legal so conversion succeeds;
     // the canonicalizer that follows this pass removes the dead empty.
     conversion.addLegalOp<ub::PoisonOp, tensor::EmptyOp>();
+    conversion.addDynamicallyLegalOp<ExpandOp>(
+        [](ExpandOp op) { return !isTosaExpressibleExpand(op); });
+    conversion.addDynamicallyLegalOp<tensor::CollapseShapeOp>(
+        [](tensor::CollapseShapeOp op) { return !isStaticReshape(op); });
+    conversion.addDynamicallyLegalOp<tensor::ExpandShapeOp>(
+        [](tensor::ExpandShapeOp op) { return !isStaticReshape(op); });
+    conversion.addDynamicallyLegalOp<tensor::ExtractSliceOp>(
+        [](tensor::ExtractSliceOp op) { return !isTosaExpressibleSlice(op); });
 
     RewritePatternSet patterns(ctx);
     patterns.add<
-        MatMulConverter, BinaryConverter<AddOp, tosa::AddOp>,
+        MatMulConverter, TransposeConverter, ExpandConverter,
+        ReshapeConverter<tensor::CollapseShapeOp>,
+        ReshapeConverter<tensor::ExpandShapeOp>, ExtractSliceConverter,
+        BinaryConverter<AddOp, tosa::AddOp>,
         BinaryConverter<SubOp, tosa::SubOp>,
         BinaryConverter<MinOp, tosa::MinimumOp>,
         BinaryConverter<MaxOp, tosa::MaximumOp>,

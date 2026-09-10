@@ -142,7 +142,8 @@ struct Api {
   void (*moduleDestroy)(MlirModule);
   MlirPassManager (*passManagerCreate)(MlirContext);
   MlirOpPassManager (*passManagerGetAsOpPassManager)(MlirPassManager);
-  int (*passManagerRunOnOp)(MlirPassManager, MlirOperation); // MlirLogicalResult
+  int (*passManagerRunOnOp)(MlirPassManager,
+                            MlirOperation); // MlirLogicalResult
   void (*passManagerDestroy)(MlirPassManager);
   void (*operationPrint)(MlirOperation, MlirStringCallback, void *);
 
@@ -155,7 +156,8 @@ struct Api {
                                                RocmlirTuningParamSetKind);
   unsigned (*rockTuningGetNumParams)(MlirRockTuningSpace);
   MlirRockTuningParam (*rockTuningParamCreate)();
-  bool (*rockTuningParamGet)(MlirRockTuningSpace, unsigned, MlirRockTuningParam);
+  bool (*rockTuningParamGet)(MlirRockTuningSpace, unsigned,
+                             MlirRockTuningParam);
   size_t (*rockTuningParamToString)(MlirRockTuningParam, char *, size_t);
   bool (*rockTuningSetFromStr)(MlirModule, MlirStringRef);
   void (*rockTuningParamDestroy)(MlirRockTuningParam);
@@ -166,8 +168,7 @@ struct Api {
   bool (*getBinary)(MlirModule, size_t *, char *);
 };
 
-template <typename T>
-static bool bind(void *handle, T &fn, const char *name) {
+template <typename T> static bool bind(void *handle, T &fn, const char *name) {
   fn = reinterpret_cast<T>(dlsym(handle, name));
   if (!fn) {
     llvm::errs() << "error: symbol '" << name
@@ -187,7 +188,8 @@ static bool load(Api &api, const std::string &soPath) {
     return false;
   }
   bool ok = true;
-  ok &= bind(api.handle, api.dialectRegistryCreate, "mlirDialectRegistryCreate");
+  ok &=
+      bind(api.handle, api.dialectRegistryCreate, "mlirDialectRegistryCreate");
   ok &= bind(api.handle, api.dialectRegistryDestroy,
              "mlirDialectRegistryDestroy");
   ok &= bind(api.handle, api.registerRocMLIRDialects,
@@ -210,19 +212,18 @@ static bool load(Api &api, const std::string &soPath) {
   ok &= bind(api.handle, api.operationPrint, "mlirOperationPrint");
   ok &= bind(api.handle, api.hipEpAddHighLevelPipeline,
              "hipEpAddHighLevelPipeline");
-  ok &= bind(api.handle, api.hipEpAddBackendPipeline,
-             "hipEpAddBackendPipeline");
-  ok &= bind(api.handle, api.rockTuningSpaceCreate,
-             "mlirRockTuningSpaceCreate");
+  ok &=
+      bind(api.handle, api.hipEpAddBackendPipeline, "hipEpAddBackendPipeline");
+  ok &=
+      bind(api.handle, api.rockTuningSpaceCreate, "mlirRockTuningSpaceCreate");
   ok &= bind(api.handle, api.rockTuningGetNumParams,
              "mlirRockTuningGetNumParams");
-  ok &= bind(api.handle, api.rockTuningParamCreate,
-             "mlirRockTuningParamCreate");
+  ok &=
+      bind(api.handle, api.rockTuningParamCreate, "mlirRockTuningParamCreate");
   ok &= bind(api.handle, api.rockTuningParamGet, "mlirRockTuningParamGet");
   ok &= bind(api.handle, api.rockTuningParamToString,
              "mlirRockTuningParamToString");
-  ok &= bind(api.handle, api.rockTuningSetFromStr,
-             "mlirRockTuningSetFromStr");
+  ok &= bind(api.handle, api.rockTuningSetFromStr, "mlirRockTuningSetFromStr");
   ok &= bind(api.handle, api.rockTuningParamDestroy,
              "mlirRockTuningParamDestroy");
   ok &= bind(api.handle, api.rockTuningSpaceDestroy,
@@ -309,8 +310,10 @@ static bool runRocmlirInSo(const std::string &moduleText,
   api.registerRocMLIRDialects(registry);
   // Disable threading: keeps diagnostics ordered and avoids the .so spinning up
   // its own thread pool for a single one-shot pipeline run.
-  MlirContext ctx = api.contextCreateWithRegistry(registry, /*threading=*/false);
-  // main_graph still carries unregistered hip.* ops; let them parse generically.
+  MlirContext ctx =
+      api.contextCreateWithRegistry(registry, /*threading=*/false);
+  // main_graph still carries unregistered hip.* ops; let them parse
+  // generically.
   api.contextSetAllowUnregisteredDialects(ctx, true);
   api.contextLoadAllAvailableDialects(ctx);
 
@@ -386,7 +389,8 @@ static bool runRocmlirInSo(const std::string &moduleText,
       return fail("failed to read the first perfConfig entry");
     }
 
-    size_t n = api.rockTuningParamToString(param, perfConfig, sizeof(perfConfig));
+    size_t n =
+        api.rockTuningParamToString(param, perfConfig, sizeof(perfConfig));
     if (n >= sizeof(perfConfig)) {
       api.rockTuningParamDestroy(param);
       api.rockTuningSpaceDestroy(space);
@@ -485,8 +489,7 @@ int main(int argc, char **argv) {
   }
   if (inputFilename.empty() || outputPath.empty()) {
     llvm::errs()
-        << "Usage: " << argv[0]
-        << " <input.onnx.mlir> -o <output> [options]\n"
+        << "Usage: " << argv[0] << " <input.onnx.mlir> -o <output> [options]\n"
         << "  Runs ONNX->HIP head passes, compiles the fused GEMM via\n"
         << "  the rocMLIR pipeline (librockCompiler.so), embeds the GPU\n"
         << "  binary into hip.rocmlir, runs the ONNX->HIP tail +\n"
@@ -530,11 +533,12 @@ int main(int argc, char **argv) {
   }
 
   // Stage 1: ONNX->HIP head passes + fuse-rocmlir. Mirrors the head of
-  // buildOnnxToHipPipeline (simplify-onnx, hip-add-context-arg, loop/if outline,
-  // infer-loop-body-shapes, convert-onnx-to-hip; plain path, no hipdnn handle)
-  // followed by fuse-rocmlir + duplicate-function-elimination, which outline the
-  // fused GEMM into a `rock.kernel` func and create the `hip.rocmlir` dispatch.
-  // `module` is LEFT in this hip form: it is the artifact we mutate at the end.
+  // buildOnnxToHipPipeline (simplify-onnx, hip-add-context-arg, loop/if
+  // outline, infer-loop-body-shapes, convert-onnx-to-hip; plain path, no hipdnn
+  // handle) followed by fuse-rocmlir + duplicate-function-elimination, which
+  // outline the fused GEMM into a `rock.kernel` func and create the
+  // `hip.rocmlir` dispatch. `module` is LEFT in this hip form: it is the
+  // artifact we mutate at the end.
   mlir::PassManager pm(module->getContext());
   pm.addPass(mlir::hip::createSimplifyOnnxPass());
   pm.addPass(mlir::hip::createHipAddContextArgPass());
@@ -614,8 +618,9 @@ int main(int argc, char **argv) {
   // produced; stamp it onto every hip.rocmlir op whose callee is a compiled
   // rock.kernel func.
   mlir::Builder b(&context);
-  auto binaryAttr = mlir::StringAttr::get(
-      &context, llvm::StringRef(compiled.binary.data(), compiled.binary.size()));
+  auto binaryAttr =
+      mlir::StringAttr::get(&context, llvm::StringRef(compiled.binary.data(),
+                                                      compiled.binary.size()));
   auto i64 = mlir::IntegerType::get(&context, 64);
 
   llvm::SmallVector<mlir::func::FuncOp> kernelFuncs;
@@ -681,8 +686,8 @@ int main(int argc, char **argv) {
   }
 
   // Stage 5: HIP->LLVM lowering + interface generation, then translate to LLVM
-  // IR, optimize, and emit OS-portable bitcode -- the same artifact hip-compiler
-  // produces in its default (LLVM_IR) mode.
+  // IR, optimize, and emit OS-portable bitcode -- the same artifact
+  // hip-compiler produces in its default (LLVM_IR) mode.
   mlir::registerLLVMDialectTranslation(context);
   {
     mlir::hip::HipToLLVMPipelineOptions llvmOpts;
