@@ -29,6 +29,7 @@
 //   --convert-linalg-to-loops
 //   --hipsr-use-output-allocator
 //   --hipsr-pool-alloc
+//   --hipsr-inline-regions
 void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
                                      const HipsrPipelineOptions & /*options*/) {
   pm.addPass(createAddContextArgPass());
@@ -60,6 +61,7 @@ void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
 
   pm.addNestedPass<func::FuncOp>(createHipsrUseOutputAllocatorPass());
   pm.addPass(createHipsrPoolAllocPass());
+  pm.addPass(createHipsrInlineRegionsPass());
 }
 
 void mlir::hipsr::registerHipsrPipelines() {
