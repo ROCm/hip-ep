@@ -116,12 +116,12 @@ public:
   }
 
   bool isaPointwiseOp(Operation *op) const {
-    return isa_and_present<
-        MulOp, AddOp, MinOp, MaxOp, SiluOp, SigmoidOp, TanhOp, SoftplusOp,
-        GeluOp, BiasGeluOp, FastGeluOp, LeakyReluOp, ReciprocalOp, SqrtOp,
-        DivOp, EqualOp, AndOp, OrOp, NotOp, CosOp, ErfOp, SinOp, CeilOp,
-        RoundOp, AtanOp, FloorOp, ExpOp, LogOp, AbsOp, NegOp, SubOp, CastOp,
-        LessOp, SignOp, ModOp, WhereOp>(op);
+    return isa_and_present<MulOp, AddOp, MinOp, MaxOp, SiluOp, SigmoidOp,
+                           TanhOp, SoftplusOp, GeluOp, BiasGeluOp, FastGeluOp,
+                           LeakyReluOp, ReciprocalOp, SqrtOp, DivOp, EqualOp,
+                           AndOp, OrOp, NotOp, CosOp, ErfOp, SinOp, CeilOp,
+                           RoundOp, AtanOp, FloorOp, ExpOp, LogOp, AbsOp, NegOp,
+                           SubOp, CastOp, LessOp, SignOp, ModOp, WhereOp>(op);
   }
 
 private:

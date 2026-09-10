@@ -66,7 +66,8 @@ bool isTosaCompatibleOperand(Value operand, RankedTensorType resultType) {
 static Value createConstShape(ConversionPatternRewriter &rewriter, Location loc,
                               ArrayRef<int64_t> extents) {
   return tosa::ConstShapeOp::create(
-      rewriter, loc, tosa::shapeType::get(rewriter.getContext(), extents.size()),
+      rewriter, loc,
+      tosa::shapeType::get(rewriter.getContext(), extents.size()),
       rewriter.getIndexTensorAttr(extents));
 }
 
@@ -133,8 +134,7 @@ struct MatMulConverter final : public OpConversionPattern<hip::MatmulOp> {
         tosa::MatMulOp::create(rewriter, op.getLoc(), matmulType, a, b)
             .getResult();
 
-    rewriter.replaceOp(
-        op, reshapeTo(matmul, resultType.getShape(), rewriter));
+    rewriter.replaceOp(op, reshapeTo(matmul, resultType.getShape(), rewriter));
     return success();
   }
 };
@@ -761,8 +761,7 @@ LogicalResult reshapeQdqParam(ConversionPatternRewriter &rewriter, Location loc,
     // TOSA elementwise ops need matching rank. ONNX per-tensor scale/ZP is
     // sometimes tensor<1xT>; fold that to a rank-0 scalar.
     if (paramType.getRank() == 1 && paramType.getDimSize(0) == 1) {
-      auto scalarType =
-          RankedTensorType::get({}, paramType.getElementType());
+      auto scalarType = RankedTensorType::get({}, paramType.getElementType());
       Value shape = tosa::getTosaConstShape(rewriter, loc, ArrayRef<int64_t>{});
       param = tosa::ReshapeOp::create(rewriter, loc, scalarType, param, shape);
       return success();
