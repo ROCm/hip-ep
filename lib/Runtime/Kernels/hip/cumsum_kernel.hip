@@ -14,6 +14,15 @@
  * but maximally parallel across slices, which is the right shape for the
  * way CumSum is used in vision models (large outer*inner, small axis).
  *
+ * `axis` is an ONNX input, so it lives on the device. Reading it back to
+ * pick the launch geometry would cost a full stream drain on every call, so
+ * instead per block thread 0 loads it and does the outer/axis_size/inner
+ * decomposition into shared memory. The launch is sized from an
+ * axis-independent upper bound on the slice count -- `total / min(shape)`,
+ * since `outer * inner == total / shape[axis]` for any axis -- and the
+ * kernel walks slices with a grid-stride loop, so an over-estimate costs
+ * nothing beyond the threads that exit immediately.
+ *
  * Attribute handling:
  *   exclusive=0 (default): y[k] = sum(x[0..k])
  *   exclusive=1          : y[k] = sum(x[0..k-1]), y[0] = 0
@@ -33,6 +42,13 @@
 #include <hip/hip_runtime.h>
 #include <cstdint>
 #include <cstdio>
+
+static constexpr int kCumsumMaxRank = 8;
+
+struct CumsumShape {
+  int64_t shape[kCumsumMaxRank];
+  int rank;
+};
 
 template <typename T, typename ACC>
 __device__ inline void cumsum_one_slice(const T *__restrict__ x_slice,
@@ -67,89 +83,152 @@ __device__ inline void cumsum_one_slice(const T *__restrict__ x_slice,
   }
 }
 
-// FP16 accumulates in float -- matches reduce_sum's fp16-precision handling
-// in the same file family and avoids loss for long axes.
-__global__ void hip_cumsum_kernel_f16(const __half *__restrict__ x,
-                                      __half *__restrict__ y, int64_t outer,
-                                      int64_t axis_size, int64_t inner,
-                                      bool exclusive, bool reverse) {
-  int64_t tid =
-      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  int64_t num_slices = outer * inner;
-  if (tid >= num_slices)
-    return;
-  int64_t o = tid / inner;
-  int64_t i = tid % inner;
-  int64_t base = o * axis_size * inner + i;
-  cumsum_one_slice<__half, float>(x + base, y + base, axis_size, inner,
-                                  exclusive, reverse);
+// Normalizes a negative axis and collapses the shape around it. Returns
+// false for an axis outside [-rank, rank), which used to abort in the host
+// wrapper back when it read the value; the caller reports it through the
+// shared device error flag instead.
+__device__ inline bool cumsum_decompose(const CumsumShape &s, int64_t axis,
+                                        int64_t &outer, int64_t &axis_size,
+                                        int64_t &inner) {
+  if (axis < 0)
+    axis += s.rank;
+  if (axis < 0 || axis >= s.rank)
+    return false;
+
+  outer = 1;
+  for (int d = 0; d < static_cast<int>(axis); ++d)
+    outer *= s.shape[d];
+  axis_size = s.shape[static_cast<int>(axis)];
+  inner = 1;
+  for (int d = static_cast<int>(axis) + 1; d < s.rank; ++d)
+    inner *= s.shape[d];
+  return true;
 }
 
-template <typename T>
+// ACC is the accumulator type: fp16 accumulates in float -- matching
+// reduce_sum's fp16-precision handling in the same file family -- to avoid
+// loss for long axes.
+template <typename T, typename ACC>
 __global__ void hip_cumsum_kernel(const T *__restrict__ x, T *__restrict__ y,
-                                  int64_t outer, int64_t axis_size,
-                                  int64_t inner, bool exclusive, bool reverse) {
-  int64_t tid =
-      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  int64_t num_slices = outer * inner;
-  if (tid >= num_slices)
-    return;
-  int64_t o = tid / inner;
-  int64_t i = tid % inner;
-  int64_t base = o * axis_size * inner + i;
-  cumsum_one_slice<T, T>(x + base, y + base, axis_size, inner, exclusive,
-                         reverse);
+                                  const void *__restrict__ axis_ptr,
+                                  int axis_is_int64, CumsumShape s,
+                                  bool exclusive, bool reverse,
+                                  int *device_error_flag) {
+  // Every thread must reach the barrier, so the decomposition happens before
+  // any thread can drop out of the grid-stride loop.
+  __shared__ int64_t s_outer;
+  __shared__ int64_t s_axis_size;
+  __shared__ int64_t s_inner;
+  if (threadIdx.x == 0) {
+    int64_t axis =
+        axis_is_int64
+            ? *static_cast<const int64_t *>(axis_ptr)
+            : static_cast<int64_t>(*static_cast<const int32_t *>(axis_ptr));
+    if (!cumsum_decompose(s, axis, s_outer, s_axis_size, s_inner)) {
+      if (device_error_flag)
+        *device_error_flag = -1;
+      s_outer = 0;
+      s_axis_size = 0;
+      s_inner = 0;
+    }
+  }
+  __syncthreads();
+
+  const int64_t num_slices = s_outer * s_inner;
+  const int64_t stride =
+      static_cast<int64_t>(gridDim.x) * blockDim.x;
+  for (int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x +
+                     threadIdx.x;
+       tid < num_slices; tid += stride) {
+    int64_t o = tid / s_inner;
+    int64_t i = tid % s_inner;
+    int64_t base = o * s_axis_size * s_inner + i;
+    cumsum_one_slice<T, ACC>(x + base, y + base, s_axis_size, s_inner,
+                             exclusive, reverse);
+  }
 }
 
 extern "C" int hip_cumsum(void *stream, const void *x, void *y,
-                          int64_t outer, int64_t axis_size, int64_t inner,
-                          int hip_dtype, int exclusive, int reverse) {
-  if (outer <= 0 || axis_size <= 0 || inner <= 0)
+                          const int64_t *data_shape_host, int rank,
+                          const void *axis_dev, int axis_is_int64,
+                          int hip_dtype, int exclusive, int reverse,
+                          void *device_error_flag) {
+  if (rank <= 0 || rank > kCumsumMaxRank) {
+    fprintf(stderr,
+            "[custom_kernels] hip_cumsum: rank=%d out of range [1, %d]\n", rank,
+            kCumsumMaxRank);
+    return -1;
+  }
+  if (!axis_dev) {
+    fprintf(stderr, "[custom_kernels] hip_cumsum: null axis\n");
+    return -1;
+  }
+
+  CumsumShape s{};
+  s.rank = rank;
+  int64_t total = 1;
+  int64_t min_dim = data_shape_host[0];
+  for (int d = 0; d < rank; ++d) {
+    s.shape[d] = data_shape_host[d];
+    total *= data_shape_host[d];
+    if (data_shape_host[d] < min_dim)
+      min_dim = data_shape_host[d];
+  }
+  if (total <= 0)
     return 0;
 
-  int64_t num_slices = outer * inner;
+  // outer * inner == total / shape[axis] for whichever axis the device
+  // scalar names, so the largest it can be is total / min(shape).
+  const int64_t max_slices = total / min_dim;
+
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
   constexpr int kBlockSize = 256;
-  int grid_size =
-      static_cast<int>((num_slices + kBlockSize - 1) / kBlockSize);
+  // Cap the grid and let the kernel stride: the bound above is loose when a
+  // size-1 dimension leads the shape, and launching millions of threads that
+  // would exit immediately is pure overhead.
+  constexpr int64_t kMaxBlocks = 4096;
+  int64_t blocks = (max_slices + kBlockSize - 1) / kBlockSize;
+  if (blocks > kMaxBlocks)
+    blocks = kMaxBlocks;
+  int grid_size = static_cast<int>(blocks);
 
   bool excl = exclusive != 0;
   bool rev = reverse != 0;
+  int *err_flag = static_cast<int *>(device_error_flag);
 
   CUSTOM_KERNELS_DEBUG_LOG(
-      "[custom_kernels] hip_cumsum: dtype=%d, outer=%lld, axis=%lld, "
-      "inner=%lld, exclusive=%d, reverse=%d\n",
-      hip_dtype, (long long)outer, (long long)axis_size, (long long)inner,
-      exclusive, reverse);
+      "[custom_kernels] hip_cumsum: dtype=%d, rank=%d, total=%lld, "
+      "max_slices=%lld, exclusive=%d, reverse=%d\n",
+      hip_dtype, rank, (long long)total, (long long)max_slices, exclusive,
+      reverse);
 
   switch (hip_dtype) {
   case HIP_DTYPE_FLOAT16:
-    hipLaunchKernelGGL(hip_cumsum_kernel_f16, dim3(grid_size),
-                       dim3(kBlockSize), 0, hip_stream,
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_cumsum_kernel<__half, float>),
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
                        static_cast<const __half *>(x),
-                       static_cast<__half *>(y), outer, axis_size, inner, excl,
-                       rev);
+                       static_cast<__half *>(y), axis_dev, axis_is_int64, s,
+                       excl, rev, err_flag);
     break;
   case HIP_DTYPE_FLOAT32:
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_cumsum_kernel<float>),
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_cumsum_kernel<float, float>),
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
-                       static_cast<const float *>(x),
-                       static_cast<float *>(y), outer, axis_size, inner, excl,
-                       rev);
+                       static_cast<const float *>(x), static_cast<float *>(y),
+                       axis_dev, axis_is_int64, s, excl, rev, err_flag);
     break;
   case HIP_DTYPE_INT32:
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_cumsum_kernel<int32_t>),
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_cumsum_kernel<int32_t, int32_t>),
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
                        static_cast<const int32_t *>(x),
-                       static_cast<int32_t *>(y), outer, axis_size, inner, excl,
-                       rev);
+                       static_cast<int32_t *>(y), axis_dev, axis_is_int64, s,
+                       excl, rev, err_flag);
     break;
   case HIP_DTYPE_INT64:
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_cumsum_kernel<int64_t>),
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_cumsum_kernel<int64_t, int64_t>),
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
                        static_cast<const int64_t *>(x),
-                       static_cast<int64_t *>(y), outer, axis_size, inner, excl,
-                       rev);
+                       static_cast<int64_t *>(y), axis_dev, axis_is_int64, s,
+                       excl, rev, err_flag);
     break;
   default:
     fprintf(stderr, "[custom_kernels] hip_cumsum: unsupported dtype=%d\n",
