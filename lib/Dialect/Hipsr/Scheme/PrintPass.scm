@@ -26,23 +26,41 @@
                      (format " | Results[~a]: ~a" num-results :return-value))))
 
 ;; Helper: format operation details
-(define (format-operation op)
+(define (format-operation op config)
   (let ((name (mlir-operation-name op))
         (num-operands (mlir-operation-num-operands op))
         (num-results (mlir-operation-num-results op)))
     (format "Operation: ~s~a~a"
             name
-            (format-operands op num-operands)
-            (format-results op num-results))))
+            (if (config 'show-operands)
+                (format-operands op num-operands)
+                "")
+            (if (config 'show-results)
+                (format-results op num-results)
+                ""))))
 
-;; Entry point called by C++ - receives the module operation
-(define (run-pass module-op)
-  (mlir-log-info "Starting Pure Scheme MLIR Pass")
-  (mlir-log-debug (format "Module: ~a" (mlir-operation-name module-op)))
+;; Default configuration
+(define (default-config)
+  (lambda (key)
+    (case key
+      [(show-operands) #t]
+      [(show-results) #t]
+      [(operation-filter) #f]  ; #f means no filter
+      [else #f])))
 
-  ;; Walk all operations and log with trace level
-  (mlir-operation-walk module-op
-    (lambda (op)
-      (mlir-log-trace (format-operation op))))
+;; Entry point called by C++ - receives the module operation and optional config
+(define (run-pass module-op . args)
+  (let ((config (if (null? args) (default-config) (car args))))
+    (mlir-log-info "Starting Pure Scheme MLIR Pass")
+    (mlir-log-debug (format "Module: ~a" (mlir-operation-name module-op)))
 
-  (mlir-log-info "Completed Pure Scheme MLIR Pass"))
+    ;; Walk all operations and log with trace level
+    (mlir-operation-walk module-op
+      (lambda (op)
+        (let ((op-name (mlir-operation-name op))
+              (filter (config 'operation-filter)))
+          ;; Apply filter if configured
+          (when (or (not filter) (member op-name filter))
+            (mlir-log-trace (format-operation op config))))))
+
+    (mlir-log-info "Completed Pure Scheme MLIR Pass")))
