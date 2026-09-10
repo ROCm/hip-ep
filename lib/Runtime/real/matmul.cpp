@@ -7,6 +7,7 @@
 #include "../op_profile.h"
 #include "../op_state.h"
 #include "cache_utils.h"
+#include "ck_gemm_select.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
@@ -90,6 +91,11 @@ struct MatmulCacheEntry {
   // Serialises the one-time autotune of this entry across all sessions sharing
   // it; pairs with the atomic `tuned` for a lock-free steady state.
   std::mutex tune_mu;
+  // >= 0: Composable Kernel serves this shape with that instance and none of
+  // the hipBLASLt state above is used. Needs its own one-time flag rather than
+  // `tuned`, which queryOrCreateMatmul may already have set.
+  int ck_instance = -1;
+  std::atomic<bool> ck_probed{false};
 };
 
 // One hipBLASLt algo table per device, shared across every session in the
@@ -509,6 +515,55 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
             "descriptors for M=%lld N=%lld K=%lld batch=%lld\n",
             (long long)M, (long long)N, (long long)K, (long long)batch_count);
     return -1;
+  }
+
+  // Composable Kernel path, taken before any workspace or hipBLASLt tuning so
+  // a served shape pays for neither. CK's f16 instances apply neither alpha
+  // nor a bias, which matches this call's fixed alpha=1 / beta=0 / no-C form,
+  // and they are instantiated only for untransposed operands; with transA and
+  // transB both N the column-major leading dimensions collapse to
+  // (lda, ldb, ldd) = (N, K, N).
+  //
+  // Every field this decision reads is part of MatmulCacheKey, so all callers
+  // sharing an entry agree on it -- which is what lets the steady state read
+  // ck_instance without the lock, once ck_probed has been observed set.
+  const bool ck_eligible = elem_size == 2 && transA == 0 && transB == 0;
+
+  if (ck_eligible && !cached->ck_probed.load(std::memory_order_acquire)) {
+    std::lock_guard<std::mutex> probeGuard(cached->tune_mu);
+    if (!cached->ck_probed.load(std::memory_order_relaxed)) {
+      cached->ck_instance = ckSelectGemmInstance(
+          stream, B, A, /*bias=*/nullptr, output, N, M, K, batch_count,
+          /*transA=*/0, /*transB=*/0, HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT16,
+          /*alpha=*/1.0f,
+          /*lda=*/N, /*ldb=*/K, /*ldd=*/N, /*strideA=*/b_batch_stride,
+          /*strideB=*/M * K, /*strideD=*/M * N);
+      cached->ck_probed.store(true, std::memory_order_release);
+      RUNTIME_DEBUG_LOG("[MATMUL] CK instance %d for M=%lld N=%lld K=%lld "
+                        "batch=%lld\n",
+                        cached->ck_instance, (long long)M, (long long)N,
+                        (long long)K, (long long)batch_count);
+    }
+  }
+
+  if (cached->ck_instance >= 0) {
+    if (hip_ck_gemm_run(stream, cached->ck_instance, B, A, /*bias=*/nullptr,
+                        output, N, M, K, batch_count, /*transA=*/0,
+                        /*transB=*/0, HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT16,
+                        /*alpha=*/1.0f,
+                        /*lda=*/N, /*ldb=*/K, /*ldd=*/N,
+                        /*strideA=*/b_batch_stride, /*strideB=*/M * K,
+                        /*strideD=*/M * N) != 0) {
+      // The instance was chosen by running this same geometry, so a refusal
+      // here means the ABI contract is broken rather than the shape changing.
+      fprintf(stderr,
+              "wrap_hipblasLtMatmul: CK instance %d refused M=%lld N=%lld "
+              "K=%lld batch=%lld\n",
+              cached->ck_instance, (long long)M, (long long)N, (long long)K,
+              (long long)batch_count);
+      return -1;
+    }
+    return 0;
   }
 
   // Ensure workspace is large enough for auto-tune candidates (if pending)
