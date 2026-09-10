@@ -188,6 +188,34 @@ jobs:
             cp $THEROCK_DIR/bin/$pat staging/bin/ 2>/dev/null || true
           done
           cp -r "$THEROCK_DIR/bin/hipblaslt" staging/bin/ 2>/dev/null || true
+          HIPBLASLT_LIBRARY_DIR="staging/bin/hipblaslt/library"
+          HIPBLASLT_ARCHS=(gfx1150 gfx1151 gfx1152 gfx1153)
+          for arch_dir in "$HIPBLASLT_LIBRARY_DIR"/gfx*; do
+            [ -d "$arch_dir" ] || continue
+            arch=$(basename "$arch_dir")
+            if [[ ! " ${HIPBLASLT_ARCHS[*]} " =~ " $arch " ]]; then
+              rm -rf "$arch_dir"
+            fi
+          done
+          for arch in "${HIPBLASLT_ARCHS[@]}"; do
+            arch_dir="$HIPBLASLT_LIBRARY_DIR/$arch"
+            if [ ! -d "$arch_dir" ]; then
+              echo "ERROR: hipBLASLt library directory missing: $arch_dir"
+              exit 1
+            fi
+            find "$arch_dir" -maxdepth 1 -type f -name '*.co' \
+              ! -name "TensileLibrary_HH_HH_HA_Bias_SAV_UA_Type_HH_HPA_Contraction_l_Ailk_Bljk_Cijk_Dijk_${arch}.co" \
+              ! -name "TensileLibrary_HH_HH_HA_Bias_SAV_UA_Type_HH_HPA_Contraction_l_Alik_Bljk_Cijk_Dijk_${arch}.co" \
+              ! -name "TensileLibrary_HH_SH_HA_Bias_SAV_UA_Type_HS_HPA_Contraction_l_Ailk_Bljk_Cijk_Dijk_${arch}.co" \
+              ! -name "TensileLibrary_HH_SH_HA_Bias_SAV_UA_Type_HS_HPA_Contraction_l_Alik_Bljk_Cijk_Dijk_${arch}.co" \
+              -delete
+            co_count=$(find "$arch_dir" -maxdepth 1 -type f -name '*.co' | wc -l)
+            if [ "$co_count" -ne 4 ]; then
+              echo "ERROR: expected 4 hipBLASLt code objects for $arch, found $co_count"
+              find "$arch_dir" -maxdepth 1 -type f -name '*.co' -print
+              exit 1
+            fi
+          done
           for pat in 'amdhip64*.lib' hipblaslt.lib libhipblaslt.dll.a; do
             cp $THEROCK_DIR/lib/$pat staging/lib/ 2>/dev/null || true
           done
