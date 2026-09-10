@@ -4,12 +4,14 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../op_profile.h"
 #include "runtime_types.h"
 
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 
 #include <hip/hip_runtime.h>
@@ -76,6 +78,17 @@ int wrap_rocmlir(RuntimeState *state, const char *kernel_binary,
     fprintf(stderr, "Invalid state in wrap_rocmlir\n");
     return -1;
   }
+
+  OP_PROFILE(
+      "rocmlir",
+      [&] {
+        char b[96];
+        snprintf(b, sizeof(b), "%s,grid=%lld,block=%lld",
+                 func_name ? func_name : "(null)", (long long)grid_size,
+                 (long long)block_size);
+        return std::string(b);
+      },
+      state);
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_rocmlir(func=%s, block_size=%lld, "
                     "grid_size=%lld, kernargs_size=%zu)\n",
