@@ -6193,9 +6193,13 @@ extern "C" void hip_matmul_nbits_dequant_b_fp16(
 }
 
 /* -----------------------------------------------------------------------
- * fp32 A / fp32 output cast patch (element_size_bytes==4, bits != 8):
+ * fp32 A / fp32 output cast patch (element_size_bytes==4, all bits incl. 8):
  * device-side, vectorized float<->fp16 conversion so the existing fp16
- * compute path (WMMA/GEMV/naive below) runs completely unchanged.
+ * compute path (WMMA/GEMV/naive below, and the bits=8 dispatch) runs
+ * completely unchanged. Trading a persistent (cached, grow-on-demand) fp16
+ * scratch pair for zero per-kernel code duplication -- fp32 is a cold input
+ * type, so this keeps the binary small instead of templating every hot
+ * int8/int4 kernel on the element type.
  * ----------------------------------------------------------------------- */
 
 __global__ void cast_fp32_to_fp16_kernel(
@@ -6322,7 +6326,11 @@ extern "C" int hip_matmul_nbits(
 
   if (M <= 0 || N <= 0 || K <= 0 || batch_count <= 0) return 0;
 
-  if (element_size_bytes == 4 && bits != 8) {
+  // All bits widths (2/3/4/8) route fp32 A/C through the shared fp16 cast
+  // scratch: cast A to fp16, run the unchanged fp16 compute path, cast the
+  // fp16 result back to fp32. bits=8 is included so the int8 dispatch below
+  // stays fp16-only (no element-type template, no code-size growth).
+  if (element_size_bytes == 4) {
     hipStream_t cast_stream = static_cast<hipStream_t>(stream);
     const int64_t a_elems = batch_count * M * K;
     const int64_t c_elems = batch_count * M * N;
@@ -6880,6 +6888,27 @@ extern "C" int hip_matmul_nbits(
   // Any cutoff is safe for partial tiles: need_bc in launchWmmaConfig selects
   // the bounds-checked variant whenever M is not a multiple of the tile.
   static constexpr int kWmmaMinM = 8;
+
+  // Defensive guard: the M>1 bits=4 asymmetric prefill paths below (WMMA, the
+  // WMMA K-pad variant for K%32!=0, and the col-major GEMV for 1<M<8) all read
+  // zero_points as FP16 via zp_for_fp16_paths. If the caller passed packed
+  // nibble zero_points (zp_elem_size==1) but no converted FP16 buffer, that
+  // pointer is the raw packed-uint8 bytes; reading it as FP16 silently yields
+  // garbage zero-points and catastrophically wrong output (this is exactly the
+  // K%32!=0 down_proj failure). Fail loudly so the caller converts first via
+  // hip_matmul_nbits_convert_zp_fp16. The 1<M<8 && K%32!=0 case is excluded: it
+  // uses the row-major uint8 GEMV and legitimately needs no FP16 zp.
+  if (bits == 4 && batch_count == 1 && zero_points && zp_elem_size == 1 &&
+      pre_unpacked_zp_fp16 == nullptr &&
+      (M >= kWmmaMinM || (M > 1 && (K % 32 == 0)))) {
+    fprintf(stderr,
+            "[custom_kernels] hip_matmul_nbits: bits=4 M>1 asymmetric prefill "
+            "(M=%lld N=%lld K=%lld) requires pre_unpacked_zp_fp16; packed-uint8 "
+            "zero_points cannot be reinterpreted as FP16. Caller must convert "
+            "via hip_matmul_nbits_convert_zp_fp16.\n",
+            (long long)M, (long long)N, (long long)K);
+    return -1;
+  }
 
   /* int4 prefill with K%32!=0 (e.g. a model whose intermediate_size is not a
    * multiple of 32, so down_proj has K=4304): the WMMA kernel requires K%32==0,

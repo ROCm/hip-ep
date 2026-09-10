@@ -360,8 +360,12 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
           result = -1;
           goto cleanup;
         }
-        bool wmma_data_format = (hidden_size % 32 == 0);
-        if (wmma_data_format && count > 1) {
+        // Provide the FP16 zp for every count>1 (not only hidden%32==0): the
+        // fc1 GEMM's WMMA K-pad path (hidden not a multiple of block_size)
+        // also consumes it, and gating on hidden%32==0 would let the kernel
+        // read packed-uint8 zp bytes as FP16 -> garbage. See the matching fix
+        // in wrap_matmul_nbits (matmul_nbits.cpp).
+        if (count > 1) {
           fc1_pre_zp_fp16 = hipdnn_ep_real::lookup_or_convert_zp_fp16(
               *zpc, stream, fc1_zp_e, static_cast<int>(fusion_inter), ngk);
           if (!fc1_pre_zp_fp16) {
@@ -413,8 +417,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
           result = -1;
           goto cleanup;
         }
-        bool wmma_data_format = (inter_size % 32 == 0);
-        if (wmma_data_format && count > 1) {
+        // Same fix as fc1 above: the fc2 GEMM's WMMA K-pad path (inter not a
+        // multiple of block_size) also needs the FP16 zp, so do not gate on
+        // inter_size%32==0.
+        if (count > 1) {
           fc2_pre_zp_fp16 = hipdnn_ep_real::lookup_or_convert_zp_fp16(
               *zpc, stream, fc2_zp_e, static_cast<int>(hidden_size), ngk);
           if (!fc2_pre_zp_fp16) {
