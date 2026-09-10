@@ -5030,4 +5030,66 @@ def Hip_QMatMulOp : Hip_DpsOp<"qmatmul", /*traits=*/[],
 
   let hasVerifier = 1;
 }
+
+def Hip_QConvOp : Hip_DpsOp<"qconv",
+                            /*traits=*/[],
+                            /*outsAccessor=*/"Output",
+                            /*autoReify=*/1,
+                            /*autoInfer=*/1,
+                            /*declareInfer=*/1> {
+  let summary = "Quantized 1x1 convolution with integrated QDQ";
+  let description = [{
+    Fuses the common weight-quantized convolution chain
+
+      DQ(input) + DQ(weights) -> Conv -> Q
+
+    without materializing the dequantized activation, dequantized weights, or
+    full-precision output. The initial supported form has UINT16 per-tensor
+    input/output quantization and 4-bit weights quantized per output channel
+    (`weight_axis` 0).
+
+    Input and output scales/zero-points are scalar attributes: the fusion only
+    fires on per-tensor activation quantization, so the three coefficients fold
+    into the instruction stream. Weight scales and zero-points stay operands
+    because they hold one value per output channel, and because they routinely
+    arrive as external constants whose values are not readable at fusion time.
+
+    `packed_int4` means BOTH `$weights` and `$weight_zero_points` carry two
+    4-bit values per backing byte, low nibble first over the flattened
+    row-major sequence, while their types keep the logical element count and an
+    8-bit element type -- the same convention as hip.dequantize_linear. The
+    element type's signedness selects INT4 (i8) or UINT4 (ui8); the two differ
+    in how a nibble is widened, so a consumer must not ignore it.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,              // UINT16 quantized activation
+    Hip_TensorOrMemRef:$weights,            // packed 4-bit weights, i8/ui8 typed
+    Hip_TensorOrMemRef:$weight_scales,      // f32 [Cout]
+    Hip_TensorOrMemRef:$weight_zero_points, // packed 4-bit [Cout], i8/ui8 typed
+    Optional<Hip_TensorOrMemRef>:$bias,
+    Hip_TensorOrMemRef:$output,             // UINT16 quantized output
+    F32Attr:$input_scale,
+    I64Attr:$input_zp,
+    F32Attr:$output_scale,
+    I64Attr:$output_zp,
+    I64Attr:$weight_axis,
+    I64ArrayAttr:$kernel_shape,
+    I64ArrayAttr:$strides,
+    I64ArrayAttr:$pads,
+    I64ArrayAttr:$dilations,
+    I64Attr:$group,
+    UnitAttr:$packed_int4
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $weights `,` $weight_scales `,`
+        $weight_zero_points (`,` $bias^)? `:`
+        type($input) `,` type($weights) `,` type($weight_scales) `,`
+        type($weight_zero_points) (`,` type($bias)^)? `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
 #endif // HIP_OPS

@@ -1635,6 +1635,34 @@ int wrap_qmatmul(RuntimeState *state, const void *A, const void *B, void *Y,
   return 0;
 }
 
+int wrap_qconv(RuntimeState *state, const void *input, const void *weights,
+               const void *weight_scales, const void *weight_zero_points,
+               const void *bias, void *output, int64_t batch,
+               int64_t in_channels, int64_t out_channels, int64_t spatial_size,
+               int64_t activation_dtype, int64_t weight_dtype,
+               int64_t weight_bits, int64_t bias_dtype, float input_scale,
+               int64_t input_zp, float output_scale, int64_t output_zp) {
+  (void)input;
+  (void)weights;
+  (void)weight_scales;
+  (void)weight_zero_points;
+  (void)bias;
+  (void)output;
+  (void)bias_dtype;
+  (void)input_scale;
+  (void)input_zp;
+  (void)output_scale;
+  (void)output_zp;
+  if (!state)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_qconv N=%lld K=%lld M=%lld P=%lld act=%s w=%s "
+             "w_bits=%lld\n",
+             (long long)batch, (long long)in_channels, (long long)out_channels,
+             (long long)spatial_size, hipdnn_ep_datatype_name(activation_dtype),
+             hipdnn_ep_datatype_name(weight_dtype), (long long)weight_bits);
+  return 0;
+}
+
 int wrap_and(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
              int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n, int64_t b_c,
              int64_t b_h, int64_t b_w, int64_t out_n, int64_t out_c,

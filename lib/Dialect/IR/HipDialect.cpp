@@ -669,6 +669,19 @@ void QMulOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// QConvOp: quantized ins(input, weights, scales, zero-points, [bias]),
+// outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QConvOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void QConvOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // HipblasltMatmulOp: ins(A, B), outs(C)
 //===----------------------------------------------------------------------===//
 

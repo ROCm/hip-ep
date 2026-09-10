@@ -1,0 +1,66 @@
+//===- QDQConvFusion.pdll -------------------------------------------------===//
+//
+// PDLL pattern for QDQ Conv fusion (W4A16).
+//
+// Included by HipFusionPatterns.pdll, which declares the native constraints
+// used below. Not compilable on its own.
+//
+// Unlike the Add and Mul patterns, the weight scale and zero point stay
+// OPERANDS rather than folding into attributes. They hold one value per output
+// channel, and they arrive as external constants whose bytes are not in the IR,
+// so there is nothing to fold -- the kernel has to index them by channel.
+//===----------------------------------------------------------------------===//
+
+Pattern QDQConv with benefit(10) {
+  // Match the QDQ chain: DequantizeLinear, DequantizeLinear -> Conv -> QuantizeLinear
+  let dequantInput = op<onnx.DequantizeLinear>(input: Value, input_scale: Value, input_tail: ValueRange);
+  let dequantWeights = op<onnx.DequantizeLinear>(weights: Value, weight_scales: Value, weight_zero_points: Value);
+
+  // Exactly two operands, so a Conv carrying a bias does not match: no kernel
+  // folds the bias into the requantization yet.
+  let conv = op<onnx.Conv>(dequantInput.0, dequantWeights.0);
+  let quant = op<onnx.QuantizeLinear>(conv.0, output_scale: Value, output_tail: ValueRange) -> (output_type: Type);
+
+  HasContextArg(quant);
+  // Geometry the hard-coded attributes in the rewrite below stand for.
+  IsFusableQConvGeometry(conv);
+  // Weights packed two 4-bit values per byte, per-output-channel scale/zp.
+  IsPackedInt4PerChannelWeight(dequantWeights);
+  // Activation and result width the fused kernel implements.
+  IsUint16Quantized(dequantInput);
+  IsUint16Quantized(quant);
+  // Activation quantization must be per-tensor for its scale to fold into a
+  // single coefficient; the weight side is deliberately exempt.
+  IsSplatConstantValue(input_scale);
+  IsSplatConstantValue(output_scale);
+  HasExtractableZeropoint(dequantInput, attr<"2 : i64">);
+  HasExtractableZeropoint(quant, attr<"2 : i64">);
+
+  // Replace with fused operation
+  rewrite quant with {
+    let ctx = GetContextArg(quant);
+    let input_scale_attr = ExtractScaleValue(input_scale);
+    let output_scale_attr = ExtractScaleValue(output_scale);
+    let input_zeropoint_attr = ExtractZeropointValue(dequantInput, attr<"2 : i64">, attr<"0 : i64">);
+    let output_zeropoint_attr = ExtractZeropointValue(quant, attr<"2 : i64">, attr<"0 : i64">);
+
+    let empty = op<tensor.empty> -> (output_type);
+    // Geometry is written out rather than copied from `conv`: every value here
+    // is one IsFusableQConvGeometry already established, and pads is the only
+    // one whose length (2 * spatial rank) differs from the others.
+    let qconv = op<hip.qconv>(ctx, input, weights, weight_scales, weight_zero_points, empty.0) {
+      input_scale = input_scale_attr,
+      input_zp = input_zeropoint_attr,
+      output_scale = output_scale_attr,
+      output_zp = output_zeropoint_attr,
+      weight_axis = attr<"0 : i64">,
+      kernel_shape = attr<"[1 : i64, 1 : i64]">,
+      strides = attr<"[1 : i64, 1 : i64]">,
+      pads = attr<"[0 : i64, 0 : i64, 0 : i64, 0 : i64]">,
+      dilations = attr<"[1 : i64, 1 : i64]">,
+      group = attr<"1 : i64">,
+      packed_int4 = attr<"unit">
+    } -> (output_type);
+    replace quant with qconv;
+  };
+}
