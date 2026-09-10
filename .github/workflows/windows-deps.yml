@@ -664,6 +664,9 @@ jobs:
       group: deps-therock-${{ github.ref }}
       cancel-in-progress: false
 
+    env:
+      CCACHE_CONFIGPATH: ${{ github.workspace }}\source-therock\.ccache\ccache.conf
+
     outputs:
       cache_key: ${{ steps.key.outputs.value }}
 
@@ -681,7 +684,7 @@ jobs:
         id: key
         shell: bash
         working-directory: source-therock
-        run: echo "value=therock-fork-$(git rev-parse HEAD)-buildbat-v1" >> "$GITHUB_OUTPUT"
+        run: echo "value=therock-fork-$(git rev-parse HEAD)-inline-v1" >> "$GITHUB_OUTPUT"
 
       - name: Probe self-built TheRock SDK
         id: cache-therock
@@ -754,17 +757,74 @@ jobs:
         shell: pwsh
         run: Get-PSDrive -PSProvider FileSystem | Format-Table Name, Used, Free
 
-      # build.bat leaves the compiler to CMake, which probes cc/gcc ahead of cl and
-      # lands on the runner's Strawberry Perl gcc. TheRock's own Windows CI pins
-      # cl.exe through the windows-base CMake preset instead.
+      # Inlined from the fork's build.bat with two additions it leaves out: cl.exe /
+      # link.exe, which build.bat expects from a Native Tools prompt and which CMake
+      # otherwise resolves to the runner's Strawberry Perl gcc, and the dist targets,
+      # which only fall back to THEROCK_AMDGPU_FAMILIES and so stay unset when the
+      # architectures are named through THEROCK_AMDGPU_TARGETS.
+      - name: Configure TheRock SDK
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        shell: bash
+        working-directory: source-therock
+        run: |
+          set -euo pipefail
+          cmake -B build -GNinja . \
+            -DCMAKE_C_COMPILER=cl.exe \
+            -DCMAKE_CXX_COMPILER=cl.exe \
+            -DCMAKE_LINKER=link.exe \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DBUILD_TESTING=OFF -DTHEROCK_BUILD_TESTING=OFF \
+            -DTHEROCK_AMDGPU_FAMILIES= \
+            -DTHEROCK_AMDGPU_TARGETS="gfx1151;gfx1152;gfx1150" \
+            -DTHEROCK_DIST_AMDGPU_TARGETS="gfx1151;gfx1152;gfx1150" \
+            -DTHEROCK_TEST_AMDGPU_FAMILIES= \
+            -DTHEROCK_AMDGPU_DIST_BUNDLE_NAME=gfx1150-gfx1151-gfx1152 \
+            -DTHEROCK_TEST_AMDGPU_TARGETS="gfx1151;gfx1152;gfx1150" \
+            -DTHEROCK_ENABLE_OCL_RUNTIME=OFF \
+            -DTHEROCK_ENABLE_COMM_LIBS=OFF \
+            -DTHEROCK_ENABLE_DC_TOOLS=OFF \
+            -DTHEROCK_ENABLE_DEBUG_TOOLS=OFF \
+            -DTHEROCK_ENABLE_STORAGE_LIBS=OFF \
+            -DTHEROCK_ENABLE_MEDIA_LIBS=OFF \
+            -DTHEROCK_ENABLE_EMULATION=OFF \
+            -DTHEROCK_ENABLE_ROCPROFSYS=OFF \
+            -DTHEROCK_ENABLE_HIPIFY=OFF \
+            -DTHEROCK_ENABLE_CORE_HIPINFO=OFF \
+            -DTHEROCK_ENABLE_CORE_HIPTESTS=OFF \
+            -DTHEROCK_ENABLE_MIOPEN=OFF \
+            -DTHEROCK_ENABLE_MIOPEN_PLUGIN=OFF \
+            -DTHEROCK_ENABLE_HIPDNN=OFF \
+            -DTHEROCK_ENABLE_HIPDNN_INTEGRATION_TESTS=OFF \
+            -DTHEROCK_ENABLE_MIOPENPROVIDER=OFF \
+            -DTHEROCK_ENABLE_HIPBLASLTPROVIDER=OFF \
+            -DTHEROCK_ENABLE_HIPDNN_SAMPLES=OFF \
+            -DTHEROCK_ENABLE_HIPKERNELPROVIDER=OFF \
+            -DTHEROCK_ENABLE_ROCWMMA=OFF \
+            -DTHEROCK_ENABLE_PRIM=OFF \
+            -DTHEROCK_ENABLE_LIBHIPCXX=OFF \
+            -DTHEROCK_ENABLE_ROCALUTION=OFF \
+            -DTHEROCK_ENABLE_FFT=OFF \
+            -DTHEROCK_ENABLE_SPARSE=OFF \
+            -DTHEROCK_ENABLE_SOLVER=OFF \
+            -DTHEROCK_ENABLE_FFTW3=OFF \
+            -Damd-llvm_CMAKE_ARGS="-DLLVM_PARALLEL_LINK_JOBS=2;-DLLVM_USE_BINSKIM_COMPLIANT_COMPILE_FLAGS=ON;-DLLVM_USE_MSVC_STATIC_RUNTIME=ON;-DROCM_DEVICE_LIBS_USE_BINSKIM_COMPLIANT_COMPILE_FLAGS=ON;-DROCM_DEVICE_LIBS_USE_MSVC_STATIC_RUNTIME=ON;-DZLIB_USE_STATIC_LIBS=ON" \
+            -Damd-comgr_CMAKE_ARGS="-DCOMGR_DLL_NAME=amd_comgr0714.dll;-DCOMGR_DISABLE_SPIRV=OFF;-DCOMGR_EMBED_LIBCXX_HEADERS=ON;-DCOMGR_USE_INCBIN=OFF;-DCOMGR_USE_BINSKIM_COMPLIANT_COMPILE_FLAGS=ON;-DCOMGR_USE_MSVC_STATIC_RUNTIME=ON;-DZLIB_USE_STATIC_LIBS=ON" \
+            -Dhip-clr_CMAKE_ARGS="-D__HIP_USE_BINSKIM_COMPLIANT_COMPILE_FLAGS=ON;-DZLIB_USE_STATIC_LIBS=ON;-DROCM_KPACK_ENABLED=OFF" \
+            -Drocm-kpack_CMAKE_ARGS="-DBUILD_SHARED_LIBS=OFF" \
+            -DrocRAND_CMAKE_ARGS="-DROCRAND_USE_BINSKIM_COMPLIANT_COMPILE_FLAGS=ON;-DROCRAND_USE_MSVC_STATIC_RUNTIME=ON" \
+            -DhipBLASLt_CMAKE_ARGS="-DCMAKE_POLICY_VERSION_MINIMUM=3.10;-DZLIB_USE_STATIC_LIBS=ON;-DHIPBLASLT_BUILD_TESTING=OFF;-DHIPBLASLT_ENABLE_CLIENT=OFF;-DHIPBLASLT_ENABLE_AMD_SMI=OFF;-DHIPBLASLT_ENABLE_FETCH=ON;-DTENSILELITE_BUILD_TESTING=OFF;-DHIPBLASLT_USE_BINSKIM_COMPLIANT_COMPILE_FLAGS=ON;-DHIPBLASLT_USE_MSVC_STATIC_RUNTIME=ON" \
+            -DrocBLAS_CMAKE_ARGS="-DROCBLAS_USE_BINSKIM_COMPLIANT_COMPILE_FLAGS=ON;-DROCBLAS_USE_MSVC_STATIC_RUNTIME=OFF" \
+            -DhipBLAS_CMAKE_ARGS="-DHIPBLAS_USE_BINSKIM_COMPLIANT_COMPILE_FLAGS=ON;-DHIPBLAS_USE_MSVC_STATIC_RUNTIME=ON" \
+            -Dcomposable_kernel_CMAKE_ARGS="-DCMAKE_POLICY_VERSION_MINIMUM=3.10;-DBUILD_CK_EXAMPLES=OFF;-DBUILD_CK_TUTORIALS=OFF;-DBUILD_DEV=OFF;-DCK_USE_BINSKIM_COMPLIANT_COMPILE_FLAGS=ON;-DCK_USE_MSVC_STATIC_RUNTIME=ON;-DENABLE_CLANG_CPP_CHECKS=OFF" \
+            -Dtherock-sqlite3_CMAKE_ARGS="-DROCM_SYSDEPS_USE_MSVC_STATIC_RUNTIME=ON" \
+            -Dtherock-bzip2_CMAKE_ARGS="-DROCM_SYSDEPS_USE_MSVC_STATIC_RUNTIME=ON"
+
       - name: Build TheRock SDK
         if: steps.cache-therock.outputs.cache-hit != 'true'
-        shell: cmd
+        shell: bash
         working-directory: source-therock
-        env:
-          CC: cl
-          CXX: cl
-        run: chcp 65001 >nul && call build.bat
+        run: cmake --build build
 
       - name: Verify and stage TheRock SDK
         if: steps.cache-therock.outputs.cache-hit != 'true'
