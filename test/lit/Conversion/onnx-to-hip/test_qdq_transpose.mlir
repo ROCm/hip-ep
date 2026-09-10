@@ -9,11 +9,10 @@
 
 module {
   // CHECK-LABEL: func.func @main_graph
-  // CHECK-SAME: %[[X:.*]]: tensor<1x2x3x4xui16>
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<1x2x3x4xui16>)
   // CHECK-NOT: hip.dequantize_linear
   // CHECK: %[[EMPTY:.*]] = tensor.empty() : tensor<1x3x4x2xui16>
-  // CHECK: %[[T:.*]] = hip.transpose
-  // CHECK-SAME: ins(%[[X]] : tensor<1x2x3x4xui16>)
+  // CHECK: %[[T:.*]] = hip.transpose(%[[CTX]]) ins(%[[X]] : tensor<1x2x3x4xui16>)
   // CHECK-SAME: outs(%[[EMPTY]] : tensor<1x3x4x2xui16>)
   // CHECK-SAME: perm = [0, 2, 3, 1]
   // CHECK-NOT: hip.quantize_linear
