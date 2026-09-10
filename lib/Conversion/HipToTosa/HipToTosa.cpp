@@ -229,23 +229,23 @@ struct BinaryConverter final : public OpConversionPattern<HipOpTy> {
 // i32 and i64 only, whereas hip.div carries anything the runtime can name --
 // ui8, i8, ui16 and i16 among them -- because nothing upstream narrows it: the
 // operand constraint is AnyRankedTensor and OnnxToHip copies the ONNX element
-// type through verbatim. Those widths have no TOSA spelling and stay hip.div
-// rather than failing the pass.
+// type through verbatim.
 //
-// MIGraphXToTosa does cover unsigned, via a tosa.custom "unsigned_div" that
-// RockTosaToElementwise understands. It can do that because it runs under a
-// type converter that has already rewritten unsigned to signless, leaving the
-// custom op's name to carry the signedness; this pass has no type converter,
-// so the same call would hand rocMLIR operands still typed unsigned.
-static bool isTosaExpressibleDiv(hip::DivOp op) {
-  // Memref mode (post-bufferization) has no SSA result to replace.
-  if (op.getNumResults() != 1)
-    return false;
-  auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
-  if (!resultType)
-    return false;
-
-  Type elementType = resultType.getElementType();
+// Those widths are rejected here rather than left alone. Passing one through
+// looks like the conservative choice but is not available: this pass only runs
+// inside a rock.kernel, and rocMLIR compiles that kernel to an ELF, so a
+// surviving hip op fails there instead -- later, and reported as an op from a
+// dialect it has never heard of rather than as the unsupported element type it
+// actually is. Failing here names the type.
+//
+// MIGraphXToTosa reaches unsigned, which this pass cannot: its type converter
+// rewrites unsigned to signless and a tosa.custom "unsigned_div" carries the
+// signedness in its name instead, which works because arith.divui takes the
+// signless type that arrives. Reproducing that needs a type converter over the
+// whole pass, not a change to this pattern. On sub-32-bit signed integers
+// MIGraphXToTosa does no better than rejecting them: it emits a tosa.intdiv
+// that fails the verifier.
+static bool isTosaExpressibleDivType(Type elementType) {
   if (isa<FloatType>(elementType))
     return true;
   return elementType.isSignlessInteger(32) || elementType.isSignlessInteger(64);
@@ -257,9 +257,18 @@ struct DivConverter final : public OpConversionPattern<hip::DivOp> {
   LogicalResult
   matchAndRewrite(hip::DivOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    // Memref mode (post-bufferization) has no SSA result to replace.
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
     auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
     if (!resultType || !resultType.hasStaticShape())
       return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
+
+    Type elementType = resultType.getElementType();
+    if (!isTosaExpressibleDivType(elementType))
+      return op->emitError("hip.div has no TOSA spelling for element type ")
+             << elementType << ": tosa.intdiv takes signless i32 and i64 only";
 
     Value lhs = adaptor.getLhs();
     Value rhs = adaptor.getRhs();
@@ -269,7 +278,7 @@ struct DivConverter final : public OpConversionPattern<hip::DivOp> {
         !isTosaCompatibleOperand(rhs, resultType))
       return rewriter.notifyMatchFailure(op, "operands not tosa-broadcastable");
 
-    if (isa<IntegerType>(resultType.getElementType())) {
+    if (isa<IntegerType>(elementType)) {
       rewriter.replaceOpWithNewOp<tosa::IntDivOp>(op, resultType, lhs, rhs);
       return success();
     }
@@ -1102,10 +1111,11 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     conversion.addLegalDialect<tosa::TosaDialect, func::FuncDialect>();
     conversion
         .addIllegalOp<MatmulOp, TransposeOp, AddOp, SubOp, MinOp, MaxOp, MulOp,
-                      AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
-                      TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, WhereOp,
-                      LeakyReluOp, MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp,
-                      CastOp, QuantizeLinearOp, DequantizeLinearOp>();
+                      DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp,
+                      CosOp, TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp,
+                      WhereOp, LeakyReluOp, MiopenSoftmaxOp, ReduceSumOp,
+                      ReduceMeanOp, CastOp, QuantizeLinearOp,
+                      DequantizeLinearOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
@@ -1121,14 +1131,6 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         [](tensor::ExpandShapeOp op) { return !isStaticReshape(op); });
     conversion.addDynamicallyLegalOp<tensor::ExtractSliceOp>(
         [](tensor::ExtractSliceOp op) { return !isTosaExpressibleSlice(op); });
-
-    // hip.div is the one hip op here that is conditionally rather than
-    // unconditionally illegal: the element types it can carry are wider than
-    // the ones tosa.intdiv accepts, and an unsigned or narrow divide has no
-    // TOSA spelling at all. Only the shapes are left to the pattern, so a
-    // dynamically shaped divide still fails the way its hip.add sibling does.
-    conversion.addDynamicallyLegalOp<DivOp>(
-        [](DivOp op) { return !isTosaExpressibleDiv(op); });
 
     RewritePatternSet patterns(ctx);
     patterns.add<

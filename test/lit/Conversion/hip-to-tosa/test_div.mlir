@@ -25,8 +25,10 @@
 //   broadcasts size-1 dimensions only once both operands carry the result rank
 // - A divide behind a matmul anchor converts alongside it
 // - Element types with no TOSA spelling -- unsigned, and integer widths
-//   narrower than 32 -- stay hip.div rather than failing the pass
-// - The pass is a no-op on functions without rock.kernel
+//   narrower than 32 -- are rejected with the type named, since a hip.div left
+//   inside a kernel is not something rocMLIR can compile either
+// - The pass is a no-op on functions without rock.kernel, so a host-graph
+//   divide keeps its runtime op whatever its element type
 // - Dynamic shapes are rejected, matching the hip.add sibling
 // ============================================================================
 
@@ -166,19 +168,20 @@ func.func @rocMlir0(%a: tensor<8x64x64xf32>, %w: tensor<64x64xf32>,
 // Element types with no TOSA spelling.
 //===----------------------------------------------------------------------===//
 
-// tosa.intdiv takes signless integers only, and nothing upstream narrows what
-// hip.div can carry: the operand constraint is AnyRankedTensor and OnnxToHip
-// copies the ONNX element type through verbatim, so an unsigned divide reaches
-// this pass intact. Unlike the unconditionally illegal binary ops it is left
-// alone rather than failing the pass. MIGraphXToTosa covers this case with a
-// tosa.custom "unsigned_div", but only because its type converter has already
-// rewritten unsigned to signless and the name carries what was lost.
-// CHECK-LABEL: func.func @div_unsigned
-// CHECK: hip.div
-// CHECK-NOT: tosa.intdiv
+// tosa.intdiv takes signless i32 and i64 only, and nothing upstream narrows
+// what hip.div can carry: the operand constraint is AnyRankedTensor and
+// OnnxToHip copies the ONNX element type through verbatim, so an unsigned
+// divide reaches this pass intact.
+//
+// Rejecting is the only option. This pass runs only inside a rock.kernel, and
+// rocMLIR compiles that kernel to an ELF, so a hip.div left behind fails there
+// anyway -- later, and reported as an op from an unknown dialect rather than as
+// the unsupported element type it is. The diagnostic here names the type.
 func.func @div_unsigned(%ctx: !hip.context, %x: tensor<4xui32>,
                         %y: tensor<4xui32>, %init: tensor<4xui32>)
     -> tensor<4xui32> attributes {rock.kernel} {
+  // expected-error @+2 {{hip.div has no TOSA spelling for element type 'ui32'}}
+  // expected-error @+1 {{failed to legalize operation 'hip.div'}}
   %r = hip.div(%ctx) ins(%x, %y : tensor<4xui32>, tensor<4xui32>)
                      outs(%init : tensor<4xui32>) : tensor<4xui32>
   return %r : tensor<4xui32>
@@ -187,13 +190,14 @@ func.func @div_unsigned(%ctx: !hip.context, %x: tensor<4xui32>,
 // -----
 
 // The same holds for the widths below 32 that the runtime can name but
-// tosa.intdiv cannot take.
-// CHECK-LABEL: func.func @div_narrow_int
-// CHECK: hip.div
-// CHECK-NOT: tosa.intdiv
+// tosa.intdiv cannot take. MIGraphXToTosa does no better here: on a sub-32-bit
+// signed divide it emits a tosa.intdiv that fails the verifier, rather than
+// rejecting it.
 func.func @div_narrow_int(%ctx: !hip.context, %x: tensor<4xi8>,
                           %y: tensor<4xi8>, %init: tensor<4xi8>)
     -> tensor<4xi8> attributes {rock.kernel} {
+  // expected-error @+2 {{hip.div has no TOSA spelling for element type 'i8'}}
+  // expected-error @+1 {{failed to legalize operation 'hip.div'}}
   %r = hip.div(%ctx) ins(%x, %y : tensor<4xi8>, tensor<4xi8>)
                      outs(%init : tensor<4xi8>) : tensor<4xi8>
   return %r : tensor<4xi8>
@@ -202,15 +206,18 @@ func.func @div_narrow_int(%ctx: !hip.context, %x: tensor<4xi8>,
 // -----
 
 // Only outlined kernels are rewritten; the host graph keeps its runtime ops.
+// The unsigned element type is the point: rejection above is a consequence of
+// being inside a kernel, not a judgement about the type, and the runtime names
+// ui32 perfectly well. Here the same divide is left alone.
 // CHECK-LABEL: func.func @not_a_kernel
 // CHECK: hip.div
 // CHECK-NOT: tosa.reciprocal
-func.func @not_a_kernel(%ctx: !hip.context, %x: tensor<2x8xf32>,
-                        %y: tensor<2x8xf32>, %init: tensor<2x8xf32>)
-    -> tensor<2x8xf32> {
-  %r = hip.div(%ctx) ins(%x, %y : tensor<2x8xf32>, tensor<2x8xf32>)
-                     outs(%init : tensor<2x8xf32>) : tensor<2x8xf32>
-  return %r : tensor<2x8xf32>
+func.func @not_a_kernel(%ctx: !hip.context, %x: tensor<4xui32>,
+                        %y: tensor<4xui32>, %init: tensor<4xui32>)
+    -> tensor<4xui32> {
+  %r = hip.div(%ctx) ins(%x, %y : tensor<4xui32>, tensor<4xui32>)
+                     outs(%init : tensor<4xui32>) : tensor<4xui32>
+  return %r : tensor<4xui32>
 }
 
 // -----
