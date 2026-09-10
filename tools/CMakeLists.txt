@@ -5,7 +5,14 @@
 
 add_subdirectory(hip-mlir-opt)
 add_subdirectory(hip-compiler)
-add_subdirectory(hip-rocmlir-compiler)
+
+# hip-rocmlir-compiler hands serialized IR to rocMLIR's high-level pipeline
+# inside librockCompiler.so, loaded with RTLD_LOCAL so the .so's own embedded
+# copy of LLVM/MLIR stays out of the global symbol namespace. Neither the
+# library nor that scoping exists on Windows, so the tool is Linux-only.
+if(NOT WIN32)
+  add_subdirectory(hip-rocmlir-compiler)
+endif()
 
 # hip-inspect parses the IR with `llvm::parseBitcodeFile` and reads
 # the `@__metadata_json` global directly -- no JIT, no GPU dependency.
