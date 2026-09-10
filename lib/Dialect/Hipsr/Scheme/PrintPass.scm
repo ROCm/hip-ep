@@ -14,11 +14,8 @@
               (loop :for i :from 0 :to (- num-operands 1)
                     :with operand := (mlir-operation-get-operand op i)
                     :with str := (number->string operand)
-                    :collect str
-                    :finally (loop :for s :in :return-value
-                                   :for is-first := #t :then #f
-                                   :append (if is-first (list s) (list ", " s))
-                                   :finally (apply string-append :return-value))))))
+                    :append (if (zero? i) (list str) (list ", " str))
+                    :finally (apply string-append :return-value)))))
 
 ;; Helper: format results list using rime loop
 (define (format-results op num-results)
@@ -29,11 +26,8 @@
               (loop :for i :from 0 :to (- num-results 1)
                     :with result := (mlir-operation-get-result op i)
                     :with str := (number->string result)
-                    :collect str
-                    :finally (loop :for s :in :return-value
-                                   :for is-first := #t :then #f
-                                   :append (if is-first (list s) (list ", " s))
-                                   :finally (apply string-append :return-value))))))
+                    :append (if (zero? i) (list str) (list ", " str))
+                    :finally (apply string-append :return-value)))))
 
 ;; Helper: format operation details
 (define (format-operation op)
