@@ -496,91 +496,6 @@ jobs:
           echo "[verify] install/ closure OK"
 
       # -----------------------------------------------------------------------
-      # Bundle clang/lld alongside the other tools in install/bin so per-model
-      # DLL linking at runtime has a driver. clang comes from TheRock: the
-      # rocmlirTriton LLVM snapshot is built with LLVM_ENABLE_PROJECTS=mlir;lld
-      # and so ships no clang, and the HIP SDK compiler is already what builds
-      # the embedded runtime bitcode (see lib/Runtime/CMakeLists.txt), so the
-      # shipped driver matches the bitcode it links. lld still comes from the
-      # from-source LLVM, which does build it. clang locates its resource dir
-      # relative to its own binary (bin/../lib/clang), so dropping the driver in
-      # bin/ and the resource dir in lib/clang gives a self-contained tree with a
-      # single bin/ on PATH -- no separate llvm/ path.
-      # -----------------------------------------------------------------------
-      - name: Bundle clang/lld toolchain
-        run: |
-          set -euo pipefail
-          LLVM="${{ runner.workspace }}/llvm-install"
-          # Same derivation as the closure step above: build.py builds into
-          # <workspace>/build/<checkout-dir-name>/, and cmake/deps.cmake extracts
-          # TheRock into _therock there.
-          THEROCK="${{ runner.workspace }}/build/$(basename "$PWD")/_therock"
-          ROCM_LLVM="$THEROCK/lib/llvm"
-          BIN="${{ runner.workspace }}/install/bin"
-          LIB="${{ runner.workspace }}/install/lib"
-          mkdir -p "$BIN" "$LIB"
-          shopt -s nullglob
-          # Fail loudly rather than shipping a package whose native-.so model
-          # path has no linker driver.
-          [ -x "$ROCM_LLVM/bin/clang" ] || {
-            echo "ERROR: no clang at $ROCM_LLVM/bin/clang"; exit 1; }
-          # Only the driver + ELF linker are used by the runtime per-model link
-          # (`clang++ -shared -fuse-ld=lld`, a pure host link). Skip the dev tools
-          # (clang-format/-repl/-tidy/-scan-deps/...), the offload helpers
-          # (clang-offload-*/-linker-wrapper -- we never compile device code via
-          # clang, comgr does), and the non-ELF linkers (lld-link/ld64.lld) to
-          # keep the package lean. cp -a keeps the clang++->clang->clang-NN and
-          # ld.lld->lld symlinks; the real binaries are copied by the globs.
-          for f in "$ROCM_LLVM"/bin/clang "$ROCM_LLVM"/bin/clang++ \
-                   "$ROCM_LLVM"/bin/clang-[0-9]* \
-                   "$LLVM"/bin/lld "$LLVM"/bin/ld.lld; do
-            cp -a "$f" "$BIN/"
-          done
-          # clang resource dir (builtins/crt the -shared link may reference).
-          # clang resolves this as <bindir>/../lib/clang at runtime.
-          [ -d "$ROCM_LLVM/lib/clang" ] && cp -a "$ROCM_LLVM/lib/clang" "$LIB/" || true
-          # Copy non-system shared-lib deps. Unlike the static from-source LLVM,
-          # TheRock's clang links against a shared libclang-cpp/libLLVM, so this
-          # genuinely copies libraries rather than being a no-op. Resolve them
-          # from the ORIGINAL binaries: the copies in $BIN carry an RPATH of
-          # $ORIGIN/../lib, which now points at install/lib where these libraries
-          # do not exist yet, so ldd run there reports "not found" and the
-          # absolute-path filter below drops every one of them. ldd prints the
-          # full transitive closure, so one pass over the drivers is enough.
-          for b in "$ROCM_LLVM"/bin/clang "$ROCM_LLVM"/bin/clang-[0-9]* \
-                   "$LLVM"/bin/lld; do
-            [ -f "$b" ] || continue
-            ldd "$b" 2>/dev/null | awk '$3 ~ /^\// && $3 !~ /^\/(usr|lib|lib64)\// {print $3}'
-          done | sort -u | while read -r src; do
-            [ -e "$LIB/$(basename "$src")" ] || cp -a "$src" "$LIB/"
-          done
-          # libclang-cpp pulls in TheRock's vendored zlib/zstd, which live outside
-          # the directories clang's RPATH searches. ldd therefore reports them
-          # "not found" and yields no path for the copy above, so resolve them by
-          # name under TheRock instead of assuming its internal layout. Repeat,
-          # since a copied library can introduce further names.
-          for _ in 1 2 3; do
-            missing=$(LD_LIBRARY_PATH="$LIB:$THEROCK/lib" ldd "$BIN/clang++" 2>/dev/null \
-                      | awk '/not found/ {print $1}' | sort -u)
-            [ -n "$missing" ] || break
-            for name in $missing; do
-              src=$(find "$THEROCK" -name "$name" -type f -print -quit 2>/dev/null)
-              [ -n "$src" ] || { echo "ERROR: $name not found under $THEROCK"; exit 1; }
-              cp -a "$src" "$LIB/"
-            done
-          done
-          # Same resolution contract as the closure check above: the package runs
-          # with LD_LIBRARY_PATH=install/lib:$THEROCK/lib on a host that installs
-          # ROCm separately.
-          if ! LD_LIBRARY_PATH="$LIB:$THEROCK/lib" "$BIN/clang++" --version > /tmp/clang-version.txt 2>&1; then
-            echo "ERROR: bundled clang++ does not resolve against install/lib + TheRock"
-            cat /tmp/clang-version.txt
-            LD_LIBRARY_PATH="$LIB:$THEROCK/lib" ldd "$BIN/clang++" 2>&1 | grep 'not found' || true
-            exit 1
-          fi
-          head -1 /tmp/clang-version.txt
-
-      # -----------------------------------------------------------------------
       # Stage the artifact from install/ (the bundling steps above made it
       # self-contained). Drop dev-only pieces. Does NOT bundle TheRock (deploy
       # host installs ROCm separately).
@@ -589,8 +504,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p staging/bin staging/lib staging/etc
-          # install/bin already carries the bundled clang/lld (step above) next to
-          # the other tools; install/lib/clang holds clang's resource dir.
+          # No clang/lld here: the per-model native-.so link shells out to
+          # `clang++ -shared -fuse-ld=lld`, and DLLLinker.cpp falls back to
+          # clang++ on PATH when the baked HIPDNN_CLANG_PATH is absent. The
+          # deploy host installs ROCm separately, so it already has a matched
+          # clang, and bundling TheRock's would drag libclang-cpp, libLLVM and
+          # its vendored zlib/zstd into a package that deliberately excludes
+          # ROCm. See docs/quick_start_linux.md.
           # No separate llvm/ path: a single staging/bin on PATH is self-contained.
           cp -a "${{ runner.workspace }}/install/bin/." staging/bin/
           cp -a "${{ runner.workspace }}/install/lib/." staging/lib/
