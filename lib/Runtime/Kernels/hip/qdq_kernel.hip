@@ -290,6 +290,28 @@ __global__ void dequantize_linear_kernel(
   output[tid] = FloatIO<OutT>::store(static_cast<float>(x - zp) * s);
 }
 
+// Materialize the device-side parameters consumed by the existing Q/DQ and
+// RMS kernels used by wrap_qlpnormalization. Keeping this stream-ordered avoids
+// synchronous hipMemcpy calls that would otherwise drain all preceding work
+// and incorrectly charge that GPU time to the wrapper's CPU profile.
+__global__ void qlpnormalization_prepare_params_kernel(
+    float *__restrict__ rms_scale, int64_t norm_num_elements,
+    float norm_scale, float *__restrict__ input_scale_device,
+    float input_scale, float *__restrict__ output_scale_device,
+    float output_scale, uint16_t *__restrict__ input_zp_device,
+    uint16_t input_zp, uint16_t *__restrict__ output_zp_device,
+    uint16_t output_zp) {
+  int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (tid < norm_num_elements)
+    rms_scale[tid] = norm_scale;
+  if (tid == 0) {
+    *input_scale_device = input_scale;
+    *output_scale_device = output_scale;
+    *input_zp_device = input_zp;
+    *output_zp_device = output_zp;
+  }
+}
+
 // ---- host-side plan ------------------------------------------------------
 
 // Returns 0 to launch, 1 when there is nothing to do (empty tensor), <0 on
@@ -601,6 +623,43 @@ int dispatch_dequantize_scale(hipStream_t stream, const void *input,
 }
 
 } // namespace
+
+extern "C" int hip_qlpnormalization_prepare_params(
+    void *stream, void *rms_scale, int64_t norm_num_elements, float norm_scale,
+    void *input_scale_device, float input_scale, void *output_scale_device,
+    float output_scale, void *input_zp_device, uint16_t input_zp,
+    void *output_zp_device, uint16_t output_zp) {
+  if (!rms_scale || !input_scale_device || !output_scale_device ||
+      !input_zp_device || !output_zp_device || norm_num_elements <= 0) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qlpnormalization_prepare_params: invalid "
+            "argument\n");
+    return -1;
+  }
+
+  constexpr int kBlockSize = 256;
+  int grid = 0;
+  if (qdq_grid_size("hip_qlpnormalization_prepare_params", norm_num_elements,
+                    kBlockSize, &grid) != 0)
+    return -1;
+
+  (void)hipGetLastError();
+  hipLaunchKernelGGL(
+      qlpnormalization_prepare_params_kernel, dim3(grid), dim3(kBlockSize), 0,
+      static_cast<hipStream_t>(stream), static_cast<float *>(rms_scale),
+      norm_num_elements, norm_scale, static_cast<float *>(input_scale_device),
+      input_scale, static_cast<float *>(output_scale_device), output_scale,
+      static_cast<uint16_t *>(input_zp_device), input_zp,
+      static_cast<uint16_t *>(output_zp_device), output_zp);
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qlpnormalization_prepare_params launch "
+            "failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
+}
 
 extern "C" int
 hip_quantize_linear(void *stream, const void *input, const void *scale,

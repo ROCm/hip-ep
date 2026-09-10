@@ -1,0 +1,46 @@
+//===- QDQLpNormalizationFusion.pdll --------------------------------------===//
+//
+// PDLL pattern for QDQ LpNormalization fusion (UINT16 L2 / RMS).
+//
+// Included by HipFusionPatterns.pdll, which declares the native constraints
+// used below. Not compilable on its own.
+//
+// Must run before convert-onnx-to-hip rewrites float LpNormalization into
+// SimplifiedLayerNormalization / hip.rms_norm. Input and output scales stay
+// separate attributes: LoRA/ORC almost never share them.
+//===----------------------------------------------------------------------===//
+
+Pattern QDQLpNormalization with benefit(10) {
+  let dquant = op<onnx.DequantizeLinear>(input: Value, input_scale: Value, input_tail: ValueRange);
+  let lpnorm = op<onnx.LpNormalization>(dquant.0);
+  let quant = op<onnx.QuantizeLinear>(lpnorm.0, output_scale: Value, output_tail: ValueRange) -> (output_type: Type);
+
+  HasContextArg(quant);
+  IsUint16Quantized(dquant);
+  IsUint16Quantized(quant);
+  HasStaticShapedResults(quant);
+  IsFusableQLpNormalization(lpnorm);
+  IsSplatConstantValue(input_scale);
+  IsSplatConstantValue(output_scale);
+  HasExtractableZeropoint(dquant, attr<"2 : i64">);
+  HasExtractableZeropoint(quant, attr<"2 : i64">);
+
+  rewrite quant with {
+    let ctx = GetContextArg(quant);
+    let input_scale_attr = ExtractScaleValue(input_scale);
+    let output_scale_attr = ExtractScaleValue(output_scale);
+    let input_zeropoint_attr = ExtractZeropointValue(dquant, attr<"2 : i64">, attr<"0 : i64">);
+    let output_zeropoint_attr = ExtractZeropointValue(quant, attr<"2 : i64">, attr<"0 : i64">);
+
+    let empty = op<tensor.empty> -> (output_type);
+    let qlp = op<hip.qlpnormalization>(ctx, input, empty.0) {
+      input_scale = input_scale_attr,
+      input_zp = input_zeropoint_attr,
+      output_scale = output_scale_attr,
+      output_zp = output_zeropoint_attr,
+      axis = attr<"-1 : i64">,
+      p = attr<"2 : i64">
+    } -> (output_type);
+    replace quant with qlp;
+  };
+}

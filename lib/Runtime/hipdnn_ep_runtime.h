@@ -368,6 +368,13 @@ void *hipdnn_ep_state_get_conv_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
                                         size_t needed_size);
 
+// Per-session scratch for wrap_qlpnormalization intermediate tensors and
+// scalar parameters. A single contiguous device allocation is shared by all
+// instances on the session stream, grows on demand, and never shrinks.
+void *hipdnn_ep_state_get_qlpnormalization_scratch(RuntimeState *state);
+int hipdnn_ep_state_ensure_qlpnormalization_scratch(RuntimeState *state,
+                                                    size_t needed_size);
+
 // Per-session scratch for the W4A8 dp4a matmul_nbits decode path
 // (hip_matmul_nbits_dp4a). One contiguous device buffer holding the quantized
 // activation row (int8) plus the per-group activation scales (float). Lazily
@@ -991,6 +998,14 @@ int wrap_qconv(RuntimeState *state, const void *input, const void *weights,
                int64_t activation_dtype, int64_t weight_dtype,
                int64_t weight_bits, int64_t bias_dtype, float input_scale,
                int64_t input_zp, float output_scale, int64_t output_zp);
+
+// Fused Q(LpNormalization(DQ(x))) for UINT16 per-tensor QDQ, p=2, last axis.
+// Inside: dequant -> RMS (scale = 1/sqrt(N), epsilon = 0) -> quant.
+int wrap_qlpnormalization(RuntimeState *state, const void *input, void *output,
+                          int64_t num_elements, int64_t norm_num_elements,
+                          int64_t data_type, float input_scale,
+                          int64_t input_zp, float output_scale,
+                          int64_t output_zp, int64_t axis, int64_t p);
 
 // Element-wise Where wrapper (NumPy-style multidirectional broadcasting,
 // arbitrary rank). Computes output[i] = condition[i] ? x[i] : y[i] with
