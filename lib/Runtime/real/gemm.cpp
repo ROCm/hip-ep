@@ -6,6 +6,7 @@
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
 #include "../op_state.h"
+#include "ck_gemm_select.h"
 #include "error_check_macros.h"
 #include "runtime_types.h"
 
@@ -14,6 +15,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <memory>
@@ -94,6 +96,9 @@ struct GemmCacheEntry {
   // M=128 N=128 K=2880 and lm_head M=128 N=201088 K=2880) but the default
   // internal kernel still works.
   bool use_default_algo = false;
+  // >= 0: Composable Kernel serves this problem with that instance and the
+  // hipBLASLt members above are unused.
+  int ck_instance = -1;
 };
 
 // One hipBLASLt algo table shared across every session in the process and
@@ -799,6 +804,55 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
     hblB_rows = M;
     hblB_cols = K;
     hblB_ld = M;
+  }
+
+  // Composable Kernel path, entered before any hipBLASLt object exists so a
+  // served problem creates none. CK's f16 instances write D fresh and apply no
+  // alpha, and the A-side transpose (hipBLASLt's TRANSA, i.e. ONNX transB) is
+  // only instantiated together with a bias; everything else stays on
+  // hipBLASLt. `!C || use_bias_epilogue` is also what keeps `output` free of a
+  // pre-seeded beta*C, which ckSelectGemmInstance relies on.
+  const bool ck_eligible = typeCode == kTypeFloat16 && alpha == 1.0f &&
+                           transA == 0 && (!C || use_bias_epilogue) &&
+                           (transB == 0 || use_bias_epilogue);
+  const void *ck_bias = use_bias_epilogue ? C : nullptr;
+
+  if (ck_eligible && !have_cached) {
+    GemmCacheEntry entry;
+    entry.ck_instance = ckSelectGemmInstance(
+        stream, B, A, ck_bias, output, N, M, K, /*batch=*/1,
+        static_cast<int>(transB), static_cast<int>(transA), HIP_DTYPE_FLOAT16,
+        HIP_DTYPE_FLOAT16, alpha, hblA_ld, hblB_ld, N, /*strideA=*/0,
+        /*strideB=*/0, /*strideD=*/0);
+    if (entry.ck_instance >= 0) {
+      {
+        std::lock_guard<std::mutex> lk(table.mu);
+        cached = table.map.try_emplace(key, entry).first->second;
+      }
+      have_cached = true;
+      RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: CK instance %d for M=%lld N=%lld "
+                        "K=%lld transB=%lld\n",
+                        cached.ck_instance, (long long)M, (long long)N,
+                        (long long)K, (long long)transB);
+    }
+  }
+
+  if (have_cached && cached.ck_instance >= 0) {
+    result = hip_ck_gemm_run(stream, cached.ck_instance, B, A, ck_bias, output,
+                             N, M, K, /*batch=*/1, static_cast<int>(transB),
+                             static_cast<int>(transA), HIP_DTYPE_FLOAT16,
+                             HIP_DTYPE_FLOAT16, alpha, hblA_ld, hblB_ld, N,
+                             /*strideA=*/0, /*strideB=*/0, /*strideD=*/0);
+    if (result != 0) {
+      // The instance was chosen by running this same geometry, so a refusal
+      // here means the ABI contract is broken rather than the shape changing.
+      fprintf(stderr,
+              "wrap_gemm: CK instance %d refused M=%lld N=%lld K=%lld "
+              "transA=%lld transB=%lld\n",
+              cached.ck_instance, (long long)M, (long long)N, (long long)K,
+              (long long)transA, (long long)transB);
+    }
+    goto cleanup;
   }
 
   HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&matA_layout, dataType, hblA_rows,

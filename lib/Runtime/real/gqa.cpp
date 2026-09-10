@@ -54,6 +54,7 @@
 #include "../op_state.h"
 #include "../runtime_state_internal.h"
 #include "cache_utils.h"
+#include "ck_gemm_select.h"
 #include "error_check_macros.h"
 #include "gqa_autotune.h"
 #include "hip_arch_compat.h"
@@ -74,7 +75,6 @@
 #include <vector>
 
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
-#define HIPBLAS_CHECK(cmd) HIPBLAS_CHECK_GOTO(cmd, cleanup)
 
 //===----------------------------------------------------------------------===//
 // Legacy fast-path decode kernel (folded into gqa_kernel.hip as a legacy_*
@@ -998,6 +998,14 @@ struct GqaGemmKeyHash {
   }
 };
 
+// Batch strides for a key, resolving 0 to the dense default.
+static void gqaGemmStrides(const GqaGemmKey &key, int64_t &strideA,
+                           int64_t &strideB, int64_t &strideC) {
+  strideA = key.strideA != 0 ? key.strideA : key.m * key.k;
+  strideB = key.strideB != 0 ? key.strideB : key.n * key.k;
+  strideC = key.strideC != 0 ? key.strideC : key.n * key.m;
+}
+
 /// Cached hipBLASLt state for a single GEMM shape.
 /// Ownership: descriptors are created in queryOrCreateGemmState() and live for
 /// the process lifetime (destroyed together when the owning op-state slot is
@@ -1007,6 +1015,13 @@ struct GqaGemmCacheEntry {
   hipblasLtMatrixLayout_t layA, layB, layC, layD; // matrix layouts
   hipblasLtMatmulAlgo_t algo; // heuristic-selected algorithm
   size_t workspace_size;      // workspace bytes required by algo
+  // The shape this entry was built for, so gqaRunGemm cannot be handed a key
+  // belonging to a different entry.
+  GqaGemmKey key;
+  // >= 0: Composable Kernel serves this shape with that instance and the
+  // hipBLASLt members above go unused.
+  int ck_instance = -1;
+  bool ck_probed = false;
 };
 
 struct GqaGemmCache {
@@ -1034,10 +1049,10 @@ static GqaGemmCache *get_gemm_cache(RuntimeState *state, int op_state_slot) {
   return gs ? &gs->cache : nullptr;
 }
 
-static const GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
-                                                       hipblasLtHandle_t handle,
-                                                       const GqaGemmKey &key,
-                                                       int op_state_slot) {
+static GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
+                                                 hipblasLtHandle_t handle,
+                                                 const GqaGemmKey &key,
+                                                 int op_state_slot) {
   assert(handle && "queryOrCreateGemmState: null handle");
   auto *cache = get_gemm_cache(state, op_state_slot);
   if (!cache) {
@@ -1053,6 +1068,7 @@ static const GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
   int32_t batch = static_cast<int32_t>(key.batch);
 
   GqaGemmCacheEntry entry = {};
+  entry.key = key;
 
   hipblasLtMatmulPreference_t pref = nullptr;
   hipblasStatus_t st;
@@ -1076,9 +1092,8 @@ static const GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
   }
 
   {
-    int64_t strideA = key.strideA != 0 ? key.strideA : m * k;
-    int64_t strideB = key.strideB != 0 ? key.strideB : n * k;
-    int64_t strideC = key.strideC != 0 ? key.strideC : n * m;
+    int64_t strideA, strideB, strideC;
+    gqaGemmStrides(key, strideA, strideB, strideC);
 
     // Input operand element type: HIP_R_16F (fp16 GQA) or HIP_R_32F (fp32
     // GQA, e.g. Whisper no_causal). Compute is HIPBLAS_COMPUTE_32F either way.
@@ -1149,6 +1164,69 @@ cache_fail:
 cache_done:
   auto [ins, _] = cache->entries.emplace(key, entry);
   return &ins->second;
+}
+
+// Runs one GQA GEMM: D[m, n] = alpha * op(A) * B, column-major, beta = 0.
+//
+// Composable Kernel serves the fp16 score and value shapes. A shape no CK
+// instance accepts, and every fp32-operand shape (Whisper no_causal), stays on
+// hipBLASLt. The CK probe needs live pointers, so it runs here on the shape's
+// first call rather than in queryOrCreateGemmState; timing iterations may
+// scribble on D because beta is 0 and the real launch below rewrites it.
+static int gqaRunGemm(GqaGemmCacheEntry *st, hipblasLtHandle_t ltHandle,
+                      hipStream_t stream, const void *A, const void *B, void *D,
+                      float alpha, void *ws, size_t ws_bytes) {
+  const GqaGemmKey &key = st->key;
+  int64_t strideA, strideB, strideC;
+  gqaGemmStrides(key, strideA, strideB, strideC);
+  const int64_t lda = key.transA ? key.k : key.m;
+
+  // CK applies alpha only on the fp32-output (score) combo; the fp16-output
+  // one would silently drop it.
+  const bool ck_eligible = !key.inputFp32 && (key.outputFp32 || alpha == 1.0f);
+
+  if (ck_eligible && !st->ck_probed) {
+    st->ck_probed = true;
+    st->ck_instance = ckSelectGemmInstance(
+        stream, A, B, /*bias=*/nullptr, D, key.m, key.n, key.k, key.batch,
+        key.transA ? 1 : 0, /*transB=*/0, HIP_DTYPE_FLOAT16,
+        key.outputFp32 ? HIP_DTYPE_FLOAT32 : HIP_DTYPE_FLOAT16, alpha, lda,
+        /*ldb=*/key.k, /*ldd=*/key.m, strideA, strideB, strideC);
+    RUNTIME_DEBUG_LOG("[GQA] CK instance %d for m=%lld n=%lld k=%lld "
+                      "batch=%lld transA=%d outFp32=%d\n",
+                      st->ck_instance, (long long)key.m, (long long)key.n,
+                      (long long)key.k, (long long)key.batch, (int)key.transA,
+                      (int)key.outputFp32);
+  }
+
+  if (st->ck_instance >= 0) {
+    if (hip_ck_gemm_run(
+            stream, st->ck_instance, A, B, /*bias=*/nullptr, D, key.m, key.n,
+            key.k, key.batch, key.transA ? 1 : 0,
+            /*transB=*/0, HIP_DTYPE_FLOAT16,
+            key.outputFp32 ? HIP_DTYPE_FLOAT32 : HIP_DTYPE_FLOAT16, alpha, lda,
+            /*ldb=*/key.k, /*ldd=*/key.m, strideA, strideB, strideC) != 0) {
+      // The instance was chosen by running this same geometry, so a refusal
+      // here means the ABI contract is broken rather than the shape changing.
+      fprintf(stderr,
+              "GQA: CK instance %d refused m=%lld n=%lld k=%lld batch=%lld\n",
+              st->ck_instance, (long long)key.m, (long long)key.n,
+              (long long)key.k, (long long)key.batch);
+      return -1;
+    }
+    return 0;
+  }
+
+  const float beta = 0.0f;
+  hipblasLtMatmulAlgo_t algo = st->algo;
+  if (hipblasLtMatmul(ltHandle, st->desc, &alpha, A, st->layA, B, st->layB,
+                      &beta, D, st->layC, D, st->layD, &algo, ws, ws_bytes,
+                      stream) != HIPBLAS_STATUS_SUCCESS) {
+    fprintf(stderr, "GQA: hipblasLtMatmul failed for m=%lld n=%lld k=%lld\n",
+            (long long)key.m, (long long)key.n, (long long)key.k);
+    return -1;
+  }
+  return 0;
 }
 
 //===----------------------------------------------------------------------===//
@@ -1952,8 +2030,8 @@ static int gqa_forward_hipblaslt(
     int64_t c;      // query rows in the chunk
     int64_t kv_off; // first key read, RELATIVE to kv_lo
     int64_t kv_ext; // key positions read
-    const GqaGemmCacheEntry *score;
-    const GqaGemmCacheEntry *value;
+    GqaGemmCacheEntry *score;
+    GqaGemmCacheEntry *value;
   };
   std::vector<GqaChunkPlan> chunks;
 
@@ -2036,11 +2114,11 @@ static int gqa_forward_hipblaslt(
                                  /*strideA=*/present_seq * d,
                                  /*strideB=*/HPG * sq * kv_span,
                                  /*strideC=*/HPG * sq * d};
-    const GqaGemmCacheEntry *sSt =
+    GqaGemmCacheEntry *sSt =
         queryOrCreateGemmState(state, ltHandle, scoreKey, op_state_slot);
     if (!sSt)
       return -1;
-    const GqaGemmCacheEntry *vSt =
+    GqaGemmCacheEntry *vSt =
         queryOrCreateGemmState(state, ltHandle, valueKey, op_state_slot);
     if (!vSt)
       return -1;
@@ -2054,11 +2132,11 @@ static int gqa_forward_hipblaslt(
 
       GqaGemmKey sKey, vKey;
       makeKeys(c, ext, &sKey, &vKey);
-      const GqaGemmCacheEntry *sSt =
+      GqaGemmCacheEntry *sSt =
           queryOrCreateGemmState(state, ltHandle, sKey, op_state_slot);
       if (!sSt)
         return -1;
-      const GqaGemmCacheEntry *vSt =
+      GqaGemmCacheEntry *vSt =
           queryOrCreateGemmState(state, ltHandle, vKey, op_state_slot);
       if (!vSt)
         return -1;
@@ -2325,7 +2403,6 @@ static int gqa_forward_hipblaslt(
                        : static_cast<const char *>(d_Vexp));
     void *valueCBase = need_transpose ? d_O : output;
     float scoreAlpha = scale;
-    float beta = 0.0f;
     float valAlpha = 1.0f;
 
     for (const GqaChunkPlan &cp : chunks) {
@@ -2337,8 +2414,8 @@ static int gqa_forward_hipblaslt(
       // indexes the K / V operands because the expand packed them from kv_lo.
       const int64_t kv_ext = cp.kv_ext;
       const int64_t chunk_kv_lo = kv_lo + cp.kv_off;
-      const GqaGemmCacheEntry *sSt = cp.score;
-      const GqaGemmCacheEntry *vSt = cp.value;
+      GqaGemmCacheEntry *sSt = cp.score;
+      GqaGemmCacheEntry *vSt = cp.value;
 
       // Q and O keep their full-sq batch strides (stated in the GEMM key), so
       // selecting a chunk is a plain offset into the query axis of each.
@@ -2362,11 +2439,10 @@ static int gqa_forward_hipblaslt(
       // A = K: no-expand reads present_key directly, expand reads d_Kexp.
       // B = Q: need_transpose reads d_Qtrans (BNSD), else qSrc
       // (BSHD==BNSD@sq=1).
-      hipblasLtMatmulAlgo_t sAlgo = sSt->algo;
-      HIPBLAS_CHECK(hipblasLtMatmul(
-          ltHandle, sSt->desc, &scoreAlpha, scoreAc, sSt->layA, scoreB,
-          sSt->layB, &beta, d_S_f32, sSt->layC, d_S_f32, sSt->layD, &sAlgo,
-          gemm_ws_ptr, gemm_ws_bytes, stream));
+      if (gqaRunGemm(sSt, ltHandle, stream, scoreAc, scoreB, d_S_f32, scoreAlpha,
+                     gemm_ws_ptr, gemm_ws_bytes) != 0) {
+        return -1;
+      }
 
       // ---- Step 8b: external attention bias (onnx.Attention attn_mask) ----
       // Folded into the softmax's own score read below rather than added by a
@@ -2454,11 +2530,10 @@ static int gqa_forward_hipblaslt(
       // A = V: no-expand reads present_value directly, expand reads d_Vexp.
       // C = O: need_transpose writes d_O (BNSD, transposed below); at sq==1 the
       //        GEMM writes straight to output (BSHD==BNSD).
-      hipblasLtMatmulAlgo_t vAlgo = vSt->algo;
-      HIPBLAS_CHECK(hipblasLtMatmul(
-          ltHandle, vSt->desc, &valAlpha, valueAc, vSt->layA, d_S_fp16,
-          vSt->layB, &beta, valueC, vSt->layC, valueC, vSt->layD, &vAlgo,
-          gemm_ws_ptr, gemm_ws_bytes, stream));
+      if (gqaRunGemm(vSt, ltHandle, stream, valueAc, d_S_fp16, valueC, valAlpha,
+                     gemm_ws_ptr, gemm_ws_bytes) != 0) {
+        return -1;
+      }
     }
 
     // ---- Step 11: O Transpose BNSD [B,H,sq,d] -> BSHD [B,sq,H,d] ----
