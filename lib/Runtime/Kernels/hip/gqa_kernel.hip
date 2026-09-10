@@ -432,7 +432,37 @@ __global__ void kv_cache_append_vec_kernel(
 // a caller that will not read it back (a sliding-window layer at decode). The
 // grid is sized to (total_seq - s_lo) so the skipped positions cost no threads,
 // which is the entire point -- the indices below stay absolute in s.
+//
+// seqlens_k mirrors kv_cache_append_kernel: when supplied, past_len is resolved
+// on device and the host never has to read it back. That readback was a full
+// stream drain in the caller, and concat was the last op on the fused decode
+// path still forcing one (RoPE, append and flash_decode already take the
+// pointer). The `past_len` argument is then ignored.
 // -------------------------------------------------------------------------
+
+// Shared prologue for the three concat kernels. Resolves past_len (ORT
+// convention: seqlens_k[b] = total_tokens - 1) and clamps s_lo, whose ceiling
+// is past_len and therefore is not a host value once seqlens_k is in play.
+//
+// The range check applies only to the device-resolved form, where it replaces
+// the caller's pre-launch validation: a batch that is malformed or would run
+// past either buffer writes nothing, the same skip-don't-corrupt policy the
+// append kernel uses. The host-past_len path is left exactly as it was, since
+// its callers still validate before launching and this is not the place to
+// start rejecting inputs they accept.
+static __device__ inline bool resolve_concat_span(
+    const int* __restrict__ seqlens_k, int batch_idx, int past_len, int sq,
+    int past_seq, int present_seq, int s_lo,
+    int* eff_past_len, int* eff_s_lo) {
+  int pl = past_len;
+  if (seqlens_k) {
+    pl = seqlens_k[batch_idx] + 1 - sq;
+    if (pl < 0 || pl > past_seq || pl + sq > present_seq) return false;
+  }
+  *eff_past_len = pl;
+  *eff_s_lo = s_lo < 0 ? 0 : (s_lo > pl ? pl : s_lo);
+  return true;
+}
 
 template <typename T>
 __global__ void kv_cache_concat_kernel(
@@ -440,25 +470,30 @@ __global__ void kv_cache_concat_kernel(
     const T* __restrict__ current,
     T* __restrict__ present,
     int past_len, int sq, int G, int d,
-    int past_seq, int present_seq, int s_lo) {
+    int past_seq, int present_seq, int s_lo,
+    const int* __restrict__ seqlens_k) {
   const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
+  int eff_past_len, eff_s_lo;
+  if (!resolve_concat_span(seqlens_k, batch_idx, past_len, sq, past_seq,
+                           present_seq, s_lo, &eff_past_len, &eff_s_lo))
+    return;
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  int total_seq = past_len + sq;
-  int total_per_batch = (total_seq - s_lo) * G * d;
+  int total_seq = eff_past_len + sq;
+  int total_per_batch = (total_seq - eff_s_lo) * G * d;
   if (idx >= total_per_batch) return;
 
   int di = idx % d;
   int remaining = idx / d;
   int g = remaining % G;
-  int s = s_lo + remaining / G;
+  int s = eff_s_lo + remaining / G;
 
   int dst_idx = ((batch_idx * G + g) * present_seq + s) * d + di;
 
-  if (s < past_len) {
+  if (s < eff_past_len) {
     int src_idx = ((batch_idx * G + g) * past_seq + s) * d + di;
     present[dst_idx] = past[src_idx];
   } else {
-    int cs = s - past_len;
+    int cs = s - eff_past_len;
     int src_idx = ((batch_idx * sq + cs) * G + g) * d + di;
     present[dst_idx] = current[src_idx];
   }
@@ -473,27 +508,32 @@ __global__ void kv_cache_concat_vec_kernel(
     const T* __restrict__ current,
     T* __restrict__ present,
     int past_len, int sq, int G, int d,
-    int past_seq, int present_seq, int s_lo) {
+    int past_seq, int present_seq, int s_lo,
+    const int* __restrict__ seqlens_k) {
   const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
+  int eff_past_len, eff_s_lo;
+  if (!resolve_concat_span(seqlens_k, batch_idx, past_len, sq, past_seq,
+                           present_seq, s_lo, &eff_past_len, &eff_s_lo))
+    return;
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   const int dv = d / VEC;
-  int total_seq = past_len + sq;
-  int total_per_batch = (total_seq - s_lo) * G * dv;
+  int total_seq = eff_past_len + sq;
+  int total_per_batch = (total_seq - eff_s_lo) * G * dv;
   if (idx >= total_per_batch) return;
 
   int dvi = idx % dv;
   int remaining = idx / dv;
   int g = remaining % G;
-  int s = s_lo + remaining / G;
+  int s = eff_s_lo + remaining / G;
 
   int dst_idx = ((batch_idx * G + g) * present_seq + s) * d + dvi * VEC;
 
-  if (s < past_len) {
+  if (s < eff_past_len) {
     int src_idx = ((batch_idx * G + g) * past_seq + s) * d + dvi * VEC;
     *reinterpret_cast<KvVec16*>(present + dst_idx) =
         *reinterpret_cast<const KvVec16*>(past + src_idx);
   } else {
-    int cs = s - past_len;
+    int cs = s - eff_past_len;
     int src_idx = ((batch_idx * sq + cs) * G + g) * d + dvi * VEC;
     *reinterpret_cast<KvVec16*>(present + dst_idx) =
         *reinterpret_cast<const KvVec16*>(current + src_idx);
@@ -544,20 +584,24 @@ __global__ void kv_cache_concat_quant_i8_kernel(
     int8_t* __restrict__ present,         // BNSD int8 [B, G, present_seq, d]
     const float* __restrict__ scale,      // [G, d]
     int past_len, int sq, int G, int d, int past_seq, int present_seq,
-    int s_lo) {
+    int s_lo, const int* __restrict__ seqlens_k) {
   const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
+  int eff_past_len, eff_s_lo;
+  if (!resolve_concat_span(seqlens_k, batch_idx, past_len, sq, past_seq,
+                           present_seq, s_lo, &eff_past_len, &eff_s_lo))
+    return;
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  int total_seq = past_len + sq;
-  if (idx >= (total_seq - s_lo) * G * d) return;
+  int total_seq = eff_past_len + sq;
+  if (idx >= (total_seq - eff_s_lo) * G * d) return;
   int di = idx % d;
   int r = idx / d;
   int g = r % G;
-  int s = s_lo + r / G;
+  int s = eff_s_lo + r / G;
   int dst_idx = ((batch_idx * G + g) * present_seq + s) * d + di;
-  if (s < past_len) {
+  if (s < eff_past_len) {
     present[dst_idx] = past[((batch_idx * G + g) * past_seq + s) * d + di];
   } else {
-    int cs = s - past_len;
+    int cs = s - eff_past_len;
     float inv = 1.0f / scale[g * d + di];
     float q = rintf((float)current[((batch_idx * sq + cs) * G + g) * d + di] * inv);
     q = fminf(fmaxf(q, -128.0f), 127.0f);
@@ -854,31 +898,47 @@ static void launch_kv_cache_append(
       sq, G, d, present_seq, past_len, static_cast<const int*>(seqlens_k));
 }
 
+// Present positions the grid must cover. With a host past_len that is exactly
+// total_seq - s_lo. With a device-resident one the host cannot know it, so the
+// grid covers the upper bound resolve_concat_span itself enforces: total_seq
+// never exceeds present_seq, and eff_s_lo is either s_lo or (when s_lo runs
+// past the real past_len) small enough to leave just the sq new tokens.
+// Threads beyond the true span exit on the bounds check. For the growing-cache
+// decode this exists for, present_seq already equals total_seq, so the bound is
+// exact and costs nothing.
+static inline int kv_concat_span_bound(
+    bool past_len_on_device, int past_len, int sq, int present_seq, int s_lo) {
+  if (!past_len_on_device) return past_len + sq - s_lo;
+  int from_s_lo = present_seq - s_lo;
+  return from_s_lo > sq ? from_s_lo : sq;
+}
+
 template <typename T>
 static void launch_kv_cache_concat(
     hipStream_t stream, const void* past, const void* current, void* present,
     int batch_size, int past_len, int sq, int G, int d,
-    int past_seq, int present_seq, int s_lo) {
-  int total_seq = past_len + sq;
+    int past_seq, int present_seq, int s_lo, const void* seqlens_k) {
+  int span = kv_concat_span_bound(seqlens_k != nullptr, past_len, sq,
+                                  present_seq, s_lo);
   constexpr int VEC = 16 / sizeof(T);
   if ((d % VEC) == 0 && kv_is_16b_aligned(past) && kv_is_16b_aligned(current) &&
       kv_is_16b_aligned(present)) {
-    int total = (total_seq - s_lo) * G * (d / VEC);
+    int total = span * G * (d / VEC);
     int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
     kv_cache_concat_vec_kernel<T, VEC><<<dim3(blocks, batch_size), GQA_THREADS,
                                          0, stream>>>(
         static_cast<const T*>(past), static_cast<const T*>(current),
         static_cast<T*>(present), past_len, sq, G, d, past_seq, present_seq,
-        s_lo);
+        s_lo, static_cast<const int*>(seqlens_k));
     return;
   }
-  int total = (total_seq - s_lo) * G * d;
+  int total = span * G * d;
   int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
   kv_cache_concat_kernel<T><<<dim3(blocks, batch_size), GQA_THREADS, 0,
                               stream>>>(
       static_cast<const T*>(past), static_cast<const T*>(current),
       static_cast<T*>(present), past_len, sq, G, d, past_seq, present_seq,
-      s_lo);
+      s_lo, static_cast<const int*>(seqlens_k));
 }
 
 template <typename T>
@@ -967,26 +1027,33 @@ extern "C" int hip_gqa_kv_cache_append(
 // Step 4-5: KV cache concat (separate-buffer). `kv_dtype` selects the format, as
 // in hip_gqa_kv_cache_append (FP16 -> plain copy, INT8 -> INT8 quant).
 //
-// s_lo skips the past prefix below it. It is clamped to [0, past_len] here, once
-// for all three kernels: past_len is the hard ceiling because [past_len,
-// total_seq) is the new tokens, which are the one thing this call must never
-// drop. A caller asking for more than that is asking for silent data loss, so
-// the boundary refuses rather than obeys.
+// s_lo skips the past prefix below it. It is clamped to [0, past_len], because
+// past_len is the hard ceiling: [past_len, total_seq) is the new tokens, which
+// are the one thing this call must never drop. A caller asking for more than
+// that is asking for silent data loss, so the boundary refuses rather than
+// obeys. The upper clamp happens here only on the host-past_len path; when
+// seqlens_k carries past_len the ceiling is not a host value and
+// resolve_concat_span applies it per batch instead.
+//
+// seqlens_k (optional): resolve past_len on device, as hip_gqa_kv_cache_append
+// already does, so a separate-buffer cache no longer forces the caller to drain
+// the stream for it. Pass null to keep using the `past_len` argument.
 extern "C" int hip_gqa_kv_cache_concat(
     void* stream_ptr, const void* past, const void* current, void* present,
     int batch_size, int past_len, int sq, int G, int d,
     int past_seq, int present_seq, int element_size_bytes,
-    int kv_dtype, const void* scale, int s_lo) {
+    int kv_dtype, const void* scale, int s_lo, const void* seqlens_k) {
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
   if (s_lo < 0) s_lo = 0;
-  if (s_lo > past_len) s_lo = past_len;
+  if (!seqlens_k && s_lo > past_len) s_lo = past_len;
   if (kv_dtype == HIP_KV_DTYPE_INT8) {
     if (scale == nullptr) {
       fprintf(stderr, "hip_gqa_kv_cache_concat: INT8 requires scale\n");
       return -1;
     }
-    int total_seq = past_len + sq;
-    int total = (total_seq - s_lo) * G * d;
+    int span = kv_concat_span_bound(seqlens_k != nullptr, past_len, sq,
+                                    present_seq, s_lo);
+    int total = span * G * d;
     int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
     (void)hipGetLastError();
     kv_cache_concat_quant_i8_kernel<<<dim3(blocks, batch_size), GQA_THREADS, 0,
@@ -994,7 +1061,7 @@ extern "C" int hip_gqa_kv_cache_concat(
         static_cast<const int8_t*>(past),
         static_cast<const _Float16*>(current), static_cast<int8_t*>(present),
         static_cast<const float*>(scale), past_len, sq, G, d, past_seq,
-        present_seq, s_lo);
+        present_seq, s_lo, static_cast<const int*>(seqlens_k));
     GQA_RETURN_LAUNCH_STATUS();
   }
   if (kv_dtype != HIP_KV_DTYPE_FP16) {
@@ -1004,7 +1071,7 @@ extern "C" int hip_gqa_kv_cache_concat(
   }
   GQA_DISPATCH_BY_ELEM_SIZE(element_size_bytes, launch_kv_cache_concat, stream,
                             past, current, present, batch_size, past_len, sq, G,
-                            d, past_seq, present_seq, s_lo);
+                            d, past_seq, present_seq, s_lo, seqlens_k);
   GQA_RETURN_LAUNCH_STATUS();
 }
 

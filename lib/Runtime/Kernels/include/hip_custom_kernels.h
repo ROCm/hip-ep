@@ -785,12 +785,19 @@ HIP_KERNEL_API int hip_gqa_kv_cache_append(
  * with s_lo, which is the point: a sliding-window layer at decode passes the
  * same lower bound it reads from, so the bytes it skips writing are exactly the
  * bytes it will not read. Clamped internally to [0, past_len] so the new tokens
- * at [past_len, past_len+sq) are always written. */
+ * at [past_len, past_len+sq) are always written.
+ * seqlens_k: optional device pointer to the per-batch ORT sequence lengths
+ * (seqlens_k[b] = total_tokens - 1). When non-null the kernel derives past_len
+ * from it exactly as hip_gqa_kv_cache_append does and the `past_len` argument
+ * is ignored, so a separate-buffer KV cache no longer forces the caller into a
+ * D2H + hipStreamSynchronize. The grid is then sized to the present_seq upper
+ * bound and out-of-span threads exit on their bounds check. Pass null to keep
+ * using the host `past_len`. */
 HIP_KERNEL_API int hip_gqa_kv_cache_concat(
     void* stream, const void* past, const void* current, void* present,
     int batch_size, int past_len, int sq, int G, int d,
     int past_seq, int present_seq, int element_size_bytes,
-    int kv_dtype, const void* scale, int s_lo);
+    int kv_dtype, const void* scale, int s_lo, const void* seqlens_k);
 
 /* INT8 KV cache (symmetric per-channel, kv_cache_bit_width=8) dequant.
  * dequant_kv_i8_to_fp16: rebuilds an fp16 BNSD view [B,G,dst_seq,d] of the first

@@ -165,6 +165,21 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
   return seqlens_k_val;
 }
 
+// Non-forcing read of the per-Compute cache: yields a value only when some
+// other call site in this forward pass already had to pay for it, and never
+// issues a D2H of its own. For consumers where the exact length is an
+// optimization input rather than a correctness input -- autotune bucket
+// selection -- so that picking a kernel config can never be the reason the
+// pipeline drains. Callers fall back to the host-known shape length, which is
+// the upper bound and therefore lands in the same bucket or the next one.
+static int32_t peek_cached_seqlens_k(const void *seqlens_k_ptr,
+                                     RuntimeState *state) {
+  if (gqa_cache_seqlens_enabled() && state && state->seqlens_k_cached_valid &&
+      state->seqlens_k_cached_ptr == seqlens_k_ptr)
+    return state->seqlens_k_cached_val;
+  return kSeqlensKNotRead;
+}
+
 // FA-2 split-K decode workspace capacity, in splits (matches gqa_kernel.hip).
 static constexpr int kFlashDecodeMaxSplits = 64;
 
@@ -248,7 +263,8 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
                            KvCacheFormat kv_format = KvCacheFormat::Fp16,
                            const void *k_scale = nullptr,
                            const void *v_scale = nullptr,
-                           bool kv_bnsd = false) {
+                           bool kv_bnsd = false,
+                           bool past_len_on_device = false) {
   // no_causal: bidirectional attention with no past KV (Whisper encoder /
   // cross-attn, and Gemma-3n-style KV-cache-sharing decoder layers). The KV to
   // attend over is the FULL `new_key`/`new_value` (Skv tokens), not `sq`
@@ -307,15 +323,29 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
   const bool quantized = (kv_format != KvCacheFormat::Fp16);
   const void *k_sc = quantized ? k_scale : nullptr;
   const void *v_sc = quantized ? v_scale : nullptr;
-  if (past_key && past_len > 0 && past_key != present_key) {
-    // Separate-buffer concat: needs host-side past_len for stride computation.
+  // Separate buffers need the concat: past has to be copied across the stride
+  // change. An in-place cache only needs the new tokens appended.
+  //
+  // past_len_on_device says the caller never resolved past_len on the host, so
+  // concat reads it from seqlens_k like append already does. The `past_len > 0`
+  // half of the test then cannot be evaluated here -- but it only ever existed
+  // to skip a copy of nothing, and a kernel that resolves an empty past simply
+  // produces no copy threads, so deferring it is free. Callers that DID resolve
+  // past_len on the host keep the original host-value path, which matters for
+  // the ORT prefill sentinel: the host maps seqlens_k == -1 to past_len 0,
+  // while the device convention would read it as a negative length.
+  const bool separate_buffers = past_key && past_key != present_key;
+  const void *concat_seqlens_k = past_len_on_device ? seqlens_k_ptr : nullptr;
+  if (separate_buffers && (concat_seqlens_k || past_len > 0)) {
     if (hip_gqa_kv_cache_concat(stream, past_key, new_key, present_key, B,
                                 past_len, sq, G, d, past_buf_seq, present_seq,
-                                elem_sz, kv_dtype, k_sc, copy_lo) != 0)
+                                elem_sz, kv_dtype, k_sc, copy_lo,
+                                concat_seqlens_k) != 0)
       return -1;
     if (hip_gqa_kv_cache_concat(stream, past_value, new_value, present_value, B,
                                 past_len, sq, G, d, past_buf_seq, present_seq,
-                                elem_sz, kv_dtype, v_sc, copy_lo) != 0)
+                                elem_sz, kv_dtype, v_sc, copy_lo,
+                                concat_seqlens_k) != 0)
       return -1;
   } else {
     // In-place append: kernel can read past_len from device via seqlens_k_ptr.
@@ -357,10 +387,6 @@ static int gqa_forward_fused(
   const bool need_rope = do_rotary && cos_cache && sin_cache;
   const bool packed_qkv = (!key && !value);
 
-  // B==1 pre-read (cached per Compute) feeds host past_len where needed.
-  const int32_t seqlens_k_pre =
-      read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state);
-
   const size_t Q_full_bytes = static_cast<size_t>(B) * sq * H * d * elem_sz;
   const size_t K_full_bytes = static_cast<size_t>(B) * sq * G * d * elem_sz;
 
@@ -372,43 +398,19 @@ static int gqa_forward_fused(
     const void *kSrc = key;
     const void *vSrc = value;
 
-    // past_len only needed host-side for the concat branch (separate buffers);
-    // in-place caches let the kernels read it from device.
-    int64_t past_len = 0;
-    const bool need_host_past_len =
-        seqlens_k_ptr && past_key && past_key != present_key;
-    if (need_host_past_len) {
-      int32_t seqlens_k_val = 0;
-      if (seqlens_k_pre != kSeqlensKNotRead) {
-        seqlens_k_val = seqlens_k_pre;
-      } else {
-        if (hipMemcpyAsync(&seqlens_k_val, seqlens_k_ptr, sizeof(int32_t),
-                           hipMemcpyDeviceToHost, stream) != hipSuccess)
-          return -1;
-        if (hipStreamSynchronize(stream) != hipSuccess)
-          return -1;
-      }
-      if (seqlens_k_val < 0) {
-        past_len = 0; // ORT prefill sentinel
-      } else {
-        int64_t total_seq = static_cast<int64_t>(seqlens_k_val) + 1;
-        int64_t past_len_check = total_seq - sq;
-        if (total_seq < 1 || past_len_check < 0 || total_seq > present_seq ||
-            past_len_check > past_buf_seq) {
-          fprintf(stderr,
-                  "gqa_forward_fused (decode): invalid seqlens_k[0]+1=%lld "
-                  "(sq=%lld, past_len=%lld, present_seq=%lld, "
-                  "past_buf_seq=%lld)\n",
-                  (long long)total_seq, (long long)sq,
-                  (long long)past_len_check, (long long)present_seq,
-                  (long long)past_buf_seq);
-          return -1;
-        }
-        past_len = past_len_check;
-      }
-    } else if (!seqlens_k_ptr) {
-      past_len = skv - sq;
-    }
+    // past_len stays a device value for the whole decode step. RoPE, the KV
+    // cache update and flash_decode all resolve it from seqlens_k themselves,
+    // so nothing here needs the host form -- and reading it would mean a D2H
+    // plus a full stream drain at the top of the first GQA layer of every
+    // forward pass, which is a pipeline bubble ahead of the KV cache update.
+    // Only a caller with no seqlens_k at all falls back to the shape length.
+    //
+    // The bounds check that used to guard this readback (total_seq within
+    // present_seq, past_len within past_buf_seq) moves into the kernels, which
+    // already had to validate the device-resolved form: a malformed batch is
+    // skipped rather than written, as on the append path.
+    const bool past_len_on_device = seqlens_k_ptr != nullptr;
+    int64_t past_len = past_len_on_device ? 0 : (skv - sq);
     if (past_len < 0)
       past_len = 0;
 
@@ -496,7 +498,8 @@ static int gqa_forward_fused(
             static_cast<int>(sq), static_cast<int>(G), static_cast<int>(d),
             static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
             seqlens_k_ptr, static_cast<int>(elem_sz), /*copy_lo=*/0,
-            /*no_causal=*/false, /*skv=*/-1, kv_format, k_scale, v_scale) != 0)
+            /*no_causal=*/false, /*skv=*/-1, kv_format, k_scale, v_scale,
+            /*kv_bnsd=*/false, past_len_on_device) != 0)
       return -1;
 
     {
@@ -522,14 +525,17 @@ static int gqa_forward_fused(
             use_smooth_softmax ? 1 : 0, kv_dtype,
             kv_quantized ? k_scale : nullptr, kv_quantized ? v_scale : nullptr);
       } else {
-        // B==1 already paid (and caches) the seqlens_k read above, so the LUT
-        // sees the length the kernel will actually scan without adding a sync.
-        // For B>1 this is the host-known shape length, which is the upper
-        // bound; the nearest-neighbour lookup answers it from the closest
-        // measured length either way.
+        // Bucket key only, so it peeks at the per-Compute cache rather than
+        // forcing a read: decode no longer reads seqlens_k for any other
+        // reason, and adding a sync to sharpen an autotune key would cost far
+        // more than the sharper key can win back. Without a cached value this
+        // is the host-known shape length, which is the upper bound; it rounds
+        // up to the same bucket or the next one.
         int effective_skv = static_cast<int>(skv);
-        if (seqlens_k_pre != kSeqlensKNotRead && seqlens_k_pre >= 0)
-          effective_skv = seqlens_k_pre + 1;
+        const int32_t seqlens_k_peek =
+            peek_cached_seqlens_k(seqlens_k_ptr, state);
+        if (seqlens_k_peek != kSeqlensKNotRead && seqlens_k_peek >= 0)
+          effective_skv = seqlens_k_peek + 1;
         const hipdnn_ep::GqaDecodeRequest request{
             kv_dtype,
             static_cast<int>(B),
@@ -578,6 +584,13 @@ static int gqa_forward_fused(
   int64_t total_seq = skv;
   int64_t past_len = skv - sq;
   if (seqlens_k_ptr) {
+    // Prefill genuinely needs the host value: it sizes workspace and the
+    // GEMM extents below, none of which a kernel can resolve for it. Read it
+    // here rather than at function entry so the decode path -- which resolves
+    // everything from the device pointer -- never pays for a value it will not
+    // look at. The read populates the per-Compute cache either way.
+    const int32_t seqlens_k_pre =
+        read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state);
     int32_t seqlens_k_val = 0;
     if (seqlens_k_pre != kSeqlensKNotRead) {
       seqlens_k_val = seqlens_k_pre;
