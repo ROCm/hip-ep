@@ -19,24 +19,24 @@
 (define (format-operands op num-operands)
   (if (zero? num-operands)
       ""
-      (let ((operands (loop ((for i (up-from 0 (to num-operands))))
-                         (listing (mlir-operation-get-operand op i)))))
+      (let ((operands (loop :for i :from 0 :to (- num-operands 1)
+                        :collect (mlir-operation-get-operand op i))))
         (format " | Operands[~a]: ~a"
                 num-operands
-                (string-join (loop ((for operand (in-list operands)))
-                               (listing (number->string operand)))
+                (string-join (loop :for operand :in operands
+                               :collect (number->string operand))
                              ", ")))))
 
 ;; Helper: format results list using rime loop
 (define (format-results op num-results)
   (if (zero? num-results)
       ""
-      (let ((results (loop ((for i (up-from 0 (to num-results))))
-                       (listing (mlir-operation-get-result op i)))))
+      (let ((results (loop :for i :from 0 :to (- num-results 1)
+                       :collect (mlir-operation-get-result op i))))
         (format " | Results[~a]: ~a"
                 num-results
-                (string-join (loop ((for result (in-list results)))
-                               (listing (number->string result)))
+                (string-join (loop :for result :in results
+                               :collect (number->string result))
                              ", ")))))
 
 ;; Helper: format operation details
