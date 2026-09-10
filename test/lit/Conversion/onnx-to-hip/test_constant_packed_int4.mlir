@@ -67,19 +67,15 @@ module {
 // CHECK: hip.constant
 // CHECK-SAME: size = 4 : i64
 
-// Its DequantizeLinear carries packed_int4; the real int8 one does not.
-// (DequantizeLinear is plugin-handled, so it survives convert-onnx-to-hip and
-// the marker rides on the surviving onnx.Custom op.)
-// CHECK: onnx.Custom
-// CHECK-SAME: onnx_node_name = "DQ_int4"
+// Its DequantizeLinear carries packed_int4; the real int8 one does not. Custom
+// Microsoft QDQ is canonicalized before ordinary ONNX-to-HIP lowering.
+// CHECK: hip.dequantize_linear
 // CHECK-SAME: packed_int4
 
-// CHECK: onnx.Custom
+// CHECK: hip.dequantize_linear
 // CHECK-NOT: packed_int4
-// CHECK-SAME: onnx_node_name = "DQ_int8"
 
 // The odd-count (7-element, size 4 = ceil(7/2)) packed weight is also accepted
 // and marked -- odd logical counts pack their last nibble into a padded byte.
-// CHECK: onnx.Custom
-// CHECK-SAME: onnx_node_name = "DQ_int4_odd"
+// CHECK: hip.dequantize_linear
 // CHECK-SAME: packed_int4

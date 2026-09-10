@@ -14,6 +14,44 @@ namespace mlir {
 namespace hip {
 namespace {
 
+/// MorphiZen imports com.microsoft QuantizeLinear / DequantizeLinear function
+/// ops as generic onnx.Custom operations. Canonicalize them to the native ONNX
+/// operation names before the PDLL fusion pass runs so existing QDQ fusion and
+/// lowering patterns work for both importer representations.
+struct CustomQdqToNativeOnnx : public mlir::RewritePattern {
+  CustomQdqToNativeOnnx(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    auto functionName = op->getAttrOfType<mlir::StringAttr>("function_name");
+    if (!functionName)
+      return mlir::failure();
+
+    llvm::StringRef nativeOpName;
+    if (functionName.getValue() == "QuantizeLinear")
+      nativeOpName = "onnx.QuantizeLinear";
+    else if (functionName.getValue() == "DequantizeLinear")
+      nativeOpName = "onnx.DequantizeLinear";
+    else
+      return mlir::failure();
+
+    mlir::OperationState state(op->getLoc(), nativeOpName);
+    state.addOperands(op->getOperands());
+    state.addTypes(op->getResultTypes());
+    for (mlir::NamedAttribute attr : op->getAttrs()) {
+      llvm::StringRef name = attr.getName().getValue();
+      if (name != "function_name" && name != "domain_name")
+        state.addAttribute(attr.getName(), attr.getValue());
+    }
+
+    mlir::Operation *nativeOp = rewriter.create(state);
+    rewriter.replaceOp(op, nativeOp->getResults());
+    return mlir::success();
+  }
+};
+
 mlir::Value getOptionalOperand(mlir::Operation *op, size_t idx) {
   if (idx >= op->getNumOperands())
     return nullptr;
@@ -39,8 +77,6 @@ struct QdqOperands {
   mlir::RankedTensorType resultType;
 };
 
-// The reason for bringing this up is that there might
-// be a future conversion from com.ms.qdq to hip.
 mlir::FailureOr<QdqOperands> matchQdqCommon(mlir::Operation *op,
                                             mlir::PatternRewriter &rewriter) {
   size_t numOperands = op->getNumOperands();
@@ -130,6 +166,11 @@ struct DequantizeLinearToHip : public mlir::RewritePattern {
 };
 
 } // namespace
+
+void populateCustomQdqCanonicalizationPatterns(RewritePatternSet &patterns,
+                                               MLIRContext *ctx) {
+  patterns.add<CustomQdqToNativeOnnx>(ctx);
+}
 
 void populateQdqConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx) {

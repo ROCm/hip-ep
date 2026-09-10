@@ -477,6 +477,18 @@ void ConvertOnnxToHipPass::runOnOperation() {
     return signalPassFailure();
   logSubpass("metadata");
 
+  // MorphiZen may import com.microsoft Q/DQ function ops as onnx.Custom.
+  // Normalize them before PDLL so the existing native-ONNX QDQ fusion patterns
+  // can match the graph.
+  {
+    mlir::RewritePatternSet customQdqPatterns(ctx);
+    populateCustomQdqCanonicalizationPatterns(customQdqPatterns, ctx);
+    if (mlir::failed(
+            mlir::applyPatternsGreedily(module, std::move(customQdqPatterns))))
+      return signalPassFailure();
+  }
+  logSubpass("custom QDQ canonicalization");
+
   const std::string pdlFusionFile =
       (std::filesystem::path(dll_path()).parent_path() /
        "HipFusionPatterns.pdl.mlir")
