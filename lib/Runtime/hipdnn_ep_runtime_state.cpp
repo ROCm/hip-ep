@@ -181,6 +181,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->matmul_dp4a_scratch_size = 0;
   state->la_scratch = nullptr;
   state->la_scratch_size = 0;
+  state->gqa_fp32_adapter_scratch = nullptr;
+  state->gqa_fp32_adapter_scratch_size = 0;
   state->zp_unpack_cache = nullptr;
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
   state->gqa_autotune_policy = nullptr;
@@ -734,6 +736,10 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   // The stream sync above has drained any in-flight prefill still reading it.
   if (state->la_scratch) {
     HIP_CLEANUP(hipFree(state->la_scratch));
+  }
+
+  if (state->gqa_fp32_adapter_scratch) {
+    HIP_CLEANUP(hipFree(state->gqa_fp32_adapter_scratch));
   }
 
   // Tear down per-op state slots. Each entry's deletor destroys its concrete
