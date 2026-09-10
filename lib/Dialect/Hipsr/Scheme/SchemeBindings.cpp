@@ -214,30 +214,13 @@ bool loadSchemeScript(const char* scriptPath) {
   file.close();
 
   if (current_log_level <= SchemeLogLevel::Debug) {
-    llvm::errs() << "[debug] Loading " << scriptPath << " (" << scm_code.size() << " bytes)\n";
+    llvm::errs() << "[debug] Loading " << scriptPath << "\n";
   }
   LLVM_DEBUG(llvm::dbgs() << "Loading Scheme script: " << scriptPath << "\n");
 
-  // Evaluate the script
-  ptr eval_sym = Stop_level_value(Sstring_to_symbol("eval"));
-  ptr read_sym = Stop_level_value(Sstring_to_symbol("read"));
-  ptr open_string_input_port_sym = Stop_level_value(Sstring_to_symbol("open-string-input-port"));
-  ptr eof_object_p = Stop_level_value(Sstring_to_symbol("eof-object?"));
-
-  if (current_log_level <= SchemeLogLevel::Debug) {
-    llvm::errs() << "[debug] Creating input port for script\n";
-  }
-  ptr port = Scall1(open_string_input_port_sym, Sstring(scm_code.c_str()));
-  if (current_log_level <= SchemeLogLevel::Debug) {
-    llvm::errs() << "[debug] Starting read-eval loop\n";
-  }
-
-  while (true) {
-    ptr expr = Scall1(read_sym, port);
-    if (Scall1(eof_object_p, expr) != Sfalse)
-      break;
-    Scall1(eval_sym, expr);
-  }
+  // Use Scheme's load function to load the script file
+  ptr load_sym = Stop_level_value(Sstring_to_symbol("load"));
+  Scall1(load_sym, Sstring(scriptPath));
 
   LLVM_DEBUG(llvm::dbgs() << "Loaded Scheme script: " << scriptPath << "\n");
   return true;
