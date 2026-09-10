@@ -187,6 +187,19 @@ function(_hip_get_arch_flags ARCH_LIST OUTPUT_VAR)
 endfunction()
 
 #------------------------------------------------------------------------------
+# Internal: FLAGS for one source, or empty when that source set
+# HIP_KEEP_HOST_DEVICE_CONSTEXPR (see _hip_compile_sources, Layer 1).
+#------------------------------------------------------------------------------
+function(_hip_get_hd_constexpr_flags SOURCE_ABS FLAGS OUTPUT_VAR)
+    get_source_file_property(keep ${SOURCE_ABS} HIP_KEEP_HOST_DEVICE_CONSTEXPR)
+    if(keep)
+        set(${OUTPUT_VAR} "" PARENT_SCOPE)
+    else()
+        set(${OUTPUT_VAR} ${FLAGS} PARENT_SCOPE)
+    endif()
+endfunction()
+
+#------------------------------------------------------------------------------
 # Internal: Compile HIP sources to object files (Windows only)
 # For multi-config generators, creates per-config object files.
 #------------------------------------------------------------------------------
@@ -210,6 +223,11 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
     # Harmless on static libs / executables -- nothing in this tree ships
     # the kernel symbols outside a SHARED `custom_kernels_<arch>` build.
     set(define_flags "-DHIP_CUSTOM_KERNELS_EXPORTS")
+
+    # clang's `-x hip` default is C++14, whereas the rest of the tree is C++17
+    # (top-level CMAKE_CXX_STANDARD, and -std=c++17 on the bitcode path).
+    # Composable Kernel's headers require C++17.
+    set(std_flags -std=c++17)
 
     # MSVC ABI compatibility flags
     set(abi_flags
@@ -250,7 +268,11 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
     # NOTE: this is a CC1 (frontend) flag in TheRock's clang build, not a
     # driver flag, so it must be passed via `-Xclang`.  Driver-form
     # `-fno-cuda-host-device-constexpr` errors with "unknown argument".
-    list(APPEND abi_flags -Xclang -fno-cuda-host-device-constexpr)
+    # A source built on unannotated constexpr host-device functions it does not
+    # own -- Composable Kernel's utility layer -- cannot take Layer 1, because
+    # every one of those would become host-only. Such a source opts out with
+    # the HIP_KEEP_HOST_DEVICE_CONSTEXPR source-file property.
+    set(hd_constexpr_flags -Xclang -fno-cuda-host-device-constexpr)
     #
     # Layer 2 -- belt-and-suspenders: force-include a header that pre-defines
     # the `_CLANG_BUILTIN1` / `_CLANG_BUILTIN2` macros as empty.  This
@@ -287,6 +309,8 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
             get_filename_component(source_name ${source} NAME_WE)
             get_filename_component(source_abs ${source} ABSOLUTE)
             set(output_obj "${obj_dir}/${source_name}.obj")
+            _hip_get_hd_constexpr_flags("${source_abs}" "${hd_constexpr_flags}"
+                src_hd_constexpr_flags)
 
             # Use generator expressions for config-specific flags
             add_custom_command(
@@ -297,6 +321,8 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
                     ${arch_flags}
                     ${include_flags}
                     ${define_flags}
+                    ${std_flags}
+                    ${src_hd_constexpr_flags}
                     ${abi_flags}
                     ${warning_flags}
                     $<$<CONFIG:Debug>:-D_DEBUG>
@@ -328,6 +354,8 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
             get_filename_component(source_name ${source} NAME_WE)
             get_filename_component(source_abs ${source} ABSOLUTE)
             set(output_obj "${obj_dir}/${source_name}.obj")
+            _hip_get_hd_constexpr_flags("${source_abs}" "${hd_constexpr_flags}"
+                src_hd_constexpr_flags)
 
             add_custom_command(
                 OUTPUT ${output_obj}
@@ -337,6 +365,8 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
                     ${arch_flags}
                     ${include_flags}
                     ${define_flags}
+                    ${std_flags}
+                    ${src_hd_constexpr_flags}
                     ${abi_flags}
                     ${warning_flags}
                     ${build_flags}
@@ -512,6 +542,13 @@ function(hip_add_library TARGET_NAME)
         # Linux: Use CMake HIP language support
         add_library(${TARGET_NAME} ${lib_type} ${sources})
         set_source_files_properties(${sources} PROPERTIES LANGUAGE HIP)
+
+        # CMAKE_HIP_STANDARD is unset, so the HIP language would otherwise take
+        # the compiler default (C++14). See std_flags above.
+        set_target_properties(${TARGET_NAME} PROPERTIES
+            HIP_STANDARD 17
+            HIP_STANDARD_REQUIRED ON
+        )
 
         # Set architectures (per-target OFFLOAD_ARCHS overrides the global list)
         if(ARG_OFFLOAD_ARCHS)

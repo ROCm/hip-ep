@@ -8,6 +8,7 @@
 #include "../op_profile.h"
 #include "../op_state.h"
 #include "cache_utils.h"
+#include "ck_gemm_select.h"
 #include "error_check_macros.h"
 #include "hip_arch_compat.h"
 #include "hip_custom_kernels.h"
@@ -22,7 +23,6 @@
 #include <unordered_map>
 
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
-#define HIPBLAS_CHECK(cmd) HIPBLAS_CHECK_GOTO(cmd, cleanup)
 
 //===----------------------------------------------------------------------===//
 // com.microsoft.MultiHeadAttention runtime
@@ -122,6 +122,13 @@ struct MhaGemmCacheEntry {
   hipblasLtMatrixLayout_t layD;
   hipblasLtMatmulAlgo_t algo;
   size_t workspace_size;
+  // The shape this entry was built for, so mhaRunGemm cannot be handed a key
+  // belonging to a different entry.
+  MhaGemmKey key;
+  // >= 0: Composable Kernel serves this shape with that instance and the
+  // hipBLASLt members above go unused.
+  int ck_instance = -1;
+  bool ck_probed = false;
 };
 
 struct MhaGemmCache {
@@ -170,10 +177,10 @@ hipblasStatus_t setLayoutBatch(hipblasLtMatrixLayout_t layout,
 // Build / look up a hipBLASLt GEMM descriptor for a particular shape
 //===----------------------------------------------------------------------===//
 
-const MhaGemmCacheEntry *queryOrCreateMhaGemm(RuntimeState *state,
-                                              hipblasLtHandle_t handle,
-                                              const MhaGemmKey &key,
-                                              int op_state_slot) {
+MhaGemmCacheEntry *queryOrCreateMhaGemm(RuntimeState *state,
+                                        hipblasLtHandle_t handle,
+                                        const MhaGemmKey &key,
+                                        int op_state_slot) {
   assert(handle && "queryOrCreateMhaGemm: null handle");
   auto *cache = get_mha_gemm_cache(state, op_state_slot);
   if (!cache) {
@@ -189,6 +196,7 @@ const MhaGemmCacheEntry *queryOrCreateMhaGemm(RuntimeState *state,
   int32_t batch = static_cast<int32_t>(key.batch);
 
   MhaGemmCacheEntry entry = {};
+  entry.key = key;
 
   hipblasLtMatmulPreference_t pref = nullptr;
   hipblasStatus_t st_status;
@@ -274,6 +282,66 @@ cache_fail:
 cache_done:
   auto [ins, _] = cache->entries.emplace(key, entry);
   return &ins->second;
+}
+
+// Runs one MHA GEMM: D[m, n] = alpha * op(A) * B, column-major, beta = 0.
+//
+// Composable Kernel serves these shapes -- the operands are always fp16 -- and
+// a shape no instance accepts stays on hipBLASLt. The CK probe needs live
+// pointers, so it runs here on the shape's first call rather than in
+// queryOrCreateMhaGemm; timing iterations may scribble on D because beta is 0
+// and the real launch below rewrites it.
+static int mhaRunGemm(MhaGemmCacheEntry *st, hipblasLtHandle_t ltHandle,
+                      hipStream_t stream, const void *A, const void *B, void *D,
+                      float alpha, void *ws, size_t ws_bytes) {
+  const MhaGemmKey &key = st->key;
+  const int64_t lda = key.transA ? key.k : key.m;
+
+  // CK applies alpha only on the fp32-output (score) combo; the fp16-output
+  // one would silently drop it.
+  if ((key.outputFp32 || alpha == 1.0f) && !st->ck_probed) {
+    st->ck_probed = true;
+    st->ck_instance = ckSelectGemmInstance(
+        stream, A, B, /*bias=*/nullptr, D, key.m, key.n, key.k, key.batch,
+        key.transA ? 1 : 0, /*transB=*/0, HIP_DTYPE_FLOAT16,
+        key.outputFp32 ? HIP_DTYPE_FLOAT32 : HIP_DTYPE_FLOAT16, alpha, lda,
+        /*ldb=*/key.k, /*ldd=*/key.m, key.strideA, key.strideB, key.strideC);
+    RUNTIME_DEBUG_LOG("[MHA] CK instance %d for m=%lld n=%lld k=%lld "
+                      "batch=%lld transA=%d outFp32=%d\n",
+                      st->ck_instance, (long long)key.m, (long long)key.n,
+                      (long long)key.k, (long long)key.batch, (int)key.transA,
+                      (int)key.outputFp32);
+  }
+
+  if (st->ck_instance >= 0) {
+    if (hip_ck_gemm_run(stream, st->ck_instance, A, B, /*bias=*/nullptr, D,
+                        key.m, key.n, key.k, key.batch, key.transA ? 1 : 0,
+                        /*transB=*/0, HIP_DTYPE_FLOAT16,
+                        key.outputFp32 ? HIP_DTYPE_FLOAT32 : HIP_DTYPE_FLOAT16,
+                        alpha, lda,
+                        /*ldb=*/key.k, /*ldd=*/key.m, key.strideA, key.strideB,
+                        key.strideC) != 0) {
+      // The instance was chosen by running this same geometry, so a refusal
+      // here means the ABI contract is broken rather than the shape changing.
+      fprintf(stderr,
+              "MHA: CK instance %d refused m=%lld n=%lld k=%lld batch=%lld\n",
+              st->ck_instance, (long long)key.m, (long long)key.n,
+              (long long)key.k, (long long)key.batch);
+      return -1;
+    }
+    return 0;
+  }
+
+  const float beta = 0.0f;
+  hipblasLtMatmulAlgo_t algo = st->algo;
+  if (hipblasLtMatmul(ltHandle, st->desc, &alpha, A, st->layA, B, st->layB,
+                      &beta, D, st->layC, D, st->layD, &algo, ws, ws_bytes,
+                      stream) != HIPBLAS_STATUS_SUCCESS) {
+    fprintf(stderr, "MHA: hipblasLtMatmul failed for m=%lld n=%lld k=%lld\n",
+            (long long)key.m, (long long)key.n, (long long)key.k);
+    return -1;
+  }
+  return 0;
 }
 
 MhaGemmCache::~MhaGemmCache() {
@@ -670,7 +738,7 @@ extern "C" int wrap_multi_head_attention(
     scoreKey.strideB = Sq * H;
     scoreKey.strideC = Skv * Sq;
 
-    const MhaGemmCacheEntry *scoreState =
+    MhaGemmCacheEntry *scoreState =
         queryOrCreateMhaGemm(state, ltHandle, scoreKey, op_state_slot);
     if (!scoreState) {
       fprintf(stderr,
@@ -681,13 +749,11 @@ extern "C" int wrap_multi_head_attention(
       goto cleanup;
     }
 
-    float scoreAlpha = scale;
-    float beta = 0.0f;
-    hipblasLtMatmulAlgo_t sAlgo = scoreState->algo;
-    HIPBLAS_CHECK(hipblasLtMatmul(
-        ltHandle, scoreState->desc, &scoreAlpha, d_Kbnsh, scoreState->layA,
-        d_Qbnsh, scoreState->layB, &beta, d_S_f32, scoreState->layC, d_S_f32,
-        scoreState->layD, &sAlgo, gemm_ws, gemm_ws_bytes, stream));
+    if (mhaRunGemm(scoreState, ltHandle, stream, d_Kbnsh, d_Qbnsh, d_S_f32,
+                   /*alpha=*/scale, gemm_ws, gemm_ws_bytes) != 0) {
+      result = -1;
+      goto cleanup;
+    }
   }
 
   // ---- Step 5: Optional causal mask (fp32) ------------------------------
@@ -726,7 +792,7 @@ extern "C" int wrap_multi_head_attention(
     valueKey.strideB = Sq * Skv;
     valueKey.strideC = Sq * H;
 
-    const MhaGemmCacheEntry *valueState =
+    MhaGemmCacheEntry *valueState =
         queryOrCreateMhaGemm(state, ltHandle, valueKey, op_state_slot);
     if (!valueState) {
       fprintf(stderr,
@@ -737,13 +803,11 @@ extern "C" int wrap_multi_head_attention(
       goto cleanup;
     }
 
-    float valAlpha = 1.0f;
-    float beta = 0.0f;
-    hipblasLtMatmulAlgo_t vAlgo = valueState->algo;
-    HIPBLAS_CHECK(hipblasLtMatmul(
-        ltHandle, valueState->desc, &valAlpha, d_Vbnsh, valueState->layA,
-        d_P_f16, valueState->layB, &beta, d_O_bnsh, valueState->layC, d_O_bnsh,
-        valueState->layD, &vAlgo, gemm_ws, gemm_ws_bytes, stream));
+    if (mhaRunGemm(valueState, ltHandle, stream, d_Vbnsh, d_P_f16, d_O_bnsh,
+                   /*alpha=*/1.0f, gemm_ws, gemm_ws_bytes) != 0) {
+      result = -1;
+      goto cleanup;
+    }
   }
 
   // ---- Step 8: Transpose O from BNSH [B,N,Sq,H] back to BSHD [B,Sq,N,H]
