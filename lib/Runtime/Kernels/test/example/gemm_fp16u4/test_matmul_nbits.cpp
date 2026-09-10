@@ -24,6 +24,17 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include "hip_custom_kernels.h"
+#include "matmul_nbits_autotune.h"
+
+// Example `make direct` has no CMake FlatBuffers LUT. Empty resolve()
+// lets the kernel link and fall back to its runtime sweep.
+namespace hipdnn_ep {
+namespace matmul_nbits_autotune {
+Result resolve(const Request&, WmmaValidator, GemvValidator, void*) { return {}; }
+Stats stats() { return {}; }
+}  // namespace matmul_nbits_autotune
+}  // namespace hipdnn_ep
+
 #include <iostream>
 #include <fstream>
 #include <vector>
@@ -571,6 +582,250 @@ bool test_matmul_nbits(int M, int N, int K, int group_size,
 }
 
 // ============================================================
+// FP32 A / FP32 output test: drives the phase-1 fp32 cast patch
+// (element_size_bytes==4, bits=4) in hip_matmul_nbits. A is upcast
+// host-side from the same on-disk fp16 A (exact fp16->fp32), so the
+// kernel's internal fp32->fp16 downcast reproduces that exact fp16 A --
+// the existing fp16 C_ref is therefore still the correct ground truth,
+// just compared through float containers.
+// ============================================================
+bool test_matmul_nbits_fp32(int M, int N, int K, int group_size,
+                            const std::string& data_dir, bool use_zeros,
+                            const TestFiles& tf = TestFiles{})
+{
+    int num_groups_k = (K + group_size - 1) / group_size;
+
+    std::cout << "\n=== Test MatMulNBits FP32 M=" << M << " N=" << N << " K=" << K
+              << " group_size=" << group_size
+              << (use_zeros ? "" : " (no zeros)") << " ===" << std::endl;
+
+    std::string fA = data_dir + "/" + tf.a;
+    std::string fB = data_dir + "/" + tf.b;
+    std::string fS = data_dir + "/" + tf.s;
+    std::string fZ = data_dir + "/" + tf.z;
+    std::string fC = data_dir + "/" + tf.c_ref;
+
+    std::vector<__half>  h_A_fp16;
+    std::vector<uint8_t> h_B_packed;
+    std::vector<__half>  h_scales;
+    std::vector<__half>  h_zeros;
+
+    size_t countA = static_cast<size_t>(M) * K;
+    size_t countB = static_cast<size_t>(N) * num_groups_k * (group_size / 2);
+    size_t countS = static_cast<size_t>(N) * num_groups_k;
+    size_t countZ = static_cast<size_t>(N) * num_groups_k;
+    size_t countC = static_cast<size_t>(M) * N;
+
+    bool data_ok = readBin(fA, h_A_fp16, countA) &&
+                   readBin(fB, h_B_packed, countB) &&
+                   readBin(fS, h_scales, countS);
+    if(use_zeros)
+        data_ok = data_ok && readBin(fZ, h_zeros, countZ);
+
+    if(!data_ok)
+    {
+        std::cerr << "  ERROR: Failed to read input data files from " << data_dir << "/" << std::endl;
+        return false;
+    }
+    std::cout << "  Loaded input data from " << data_dir << "/" << std::endl;
+
+    std::vector<float> h_A(countA);
+    for(size_t i = 0; i < countA; i++)
+        h_A[i] = half_to_float(h_A_fp16[i]);
+
+    std::vector<__half> h_C_ref;
+    bool has_ref = readBin(fC, h_C_ref, countC);
+    if(!has_ref)
+        std::cout << "  WARNING: No reference file (" << fC << "), skipping verification." << std::endl;
+
+    float*   d_A        = nullptr;
+    uint8_t* d_B_packed = nullptr;
+    __half*  d_scales   = nullptr;
+    __half*  d_zeros    = nullptr;
+    float*   d_C        = nullptr;
+
+    size_t size_A      = countA * sizeof(float);
+    size_t size_B      = countB;
+    size_t size_scales = countS * sizeof(__half);
+    size_t size_zeros  = countZ * sizeof(__half);
+    size_t size_C      = countC * sizeof(float);
+
+    HIP_CHECK(hipMalloc(&d_A, size_A));
+    HIP_CHECK(hipMalloc(&d_B_packed, size_B));
+    HIP_CHECK(hipMalloc(&d_scales, size_scales));
+    if(use_zeros)
+    {
+        HIP_CHECK(hipMalloc(&d_zeros, size_zeros));
+    }
+    HIP_CHECK(hipMalloc(&d_C, size_C));
+
+    HIP_CHECK(hipMemcpy(d_A, h_A.data(), size_A, hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_B_packed, h_B_packed.data(), size_B, hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_scales, h_scales.data(), size_scales, hipMemcpyHostToDevice));
+    if(use_zeros)
+    {
+        HIP_CHECK(hipMemcpy(d_zeros, h_zeros.data(), size_zeros, hipMemcpyHostToDevice));
+    }
+    HIP_CHECK(hipMemset(d_C, 0, size_C));
+
+    hipStream_t stream;
+    HIP_CHECK(hipStreamCreate(&stream));
+
+    auto launch_kernel = [&]() {
+        hip_matmul_nbits(
+            stream,
+            d_A,
+            d_B_packed,
+            d_scales,
+            use_zeros ? d_zeros : nullptr,
+            nullptr,   // no bias
+            d_C,
+            M, N, K,
+            1,         // batch_count
+            4,         // bits
+            group_size,// block_size
+            4,         // element_size_bytes (fp32)
+            2,         // zp_elem_size (fp16 zero_points, used as-is)
+            nullptr,   // pre_unpacked_zp_u8 (unused, zp_elem_size==2)
+            nullptr);  // pre_unpacked_zp_fp16 (unused, zero_points is already fp16)
+    };
+
+    constexpr int PRE_WARMUP = 2000;
+    std::cout << "  Pre-warmup (" << PRE_WARMUP << " iters)..." << std::flush;
+    auto pw0 = std::chrono::steady_clock::now();
+    for(int w = 0; w < PRE_WARMUP; w++)
+        launch_kernel();
+    HIP_CHECK(hipStreamSynchronize(stream));
+    double pw_ms = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - pw0).count() / 1000.0;
+    std::cout << " done (" << std::fixed << std::setprecision(0) << pw_ms << " ms, "
+              << std::setprecision(3) << pw_ms / PRE_WARMUP << " ms/iter)" << std::endl;
+
+    std::cout << "  Warmup..." << std::flush;
+    auto tw0 = std::chrono::steady_clock::now();
+    int status = 0;
+    for(int w = 0; w < 3; w++)
+    {
+        status = hip_matmul_nbits(
+            stream,
+            d_A,
+            d_B_packed,
+            d_scales,
+            use_zeros ? d_zeros : nullptr,
+            nullptr,
+            d_C,
+            M, N, K,
+            1, 4, group_size, 4, 2, nullptr, nullptr);
+        if(status != 0) break;
+    }
+    HIP_CHECK(hipStreamSynchronize(stream));
+    auto tw1 = std::chrono::steady_clock::now();
+    double warmup_ms =
+        std::chrono::duration_cast<std::chrono::microseconds>(tw1 - tw0).count() / 1000.0;
+
+    if(status != 0)
+    {
+        std::cout << " FAILED (status=" << status << ")" << std::endl;
+        hipFree(d_A);
+        hipFree(d_B_packed);
+        hipFree(d_scales);
+        if(d_zeros) hipFree(d_zeros);
+        hipFree(d_C);
+        hipStreamDestroy(stream);
+        return false;
+    }
+
+    int niters = calibrateIters(warmup_ms, 3);
+    std::cout << " OK (" << std::fixed << std::setprecision(2) << warmup_ms
+              << " ms), iters=" << niters << std::endl;
+
+    std::cout << "  Benchmarking (" << NROUNDS << " rounds x " << niters << " iters)..."
+              << std::flush;
+    auto mr = measureMedian(stream, niters, launch_kernel);
+
+    double avg_ms    = mr.median_ms / niters;
+    double gflops    = (2.0 * M * N * K) / (avg_ms * 1e6);
+    double mem_bytes = static_cast<double>(countA) * 4 + static_cast<double>(countB)
+                     + static_cast<double>(countS) * 2
+                     + (use_zeros ? static_cast<double>(countZ) * 2 : 0.0)
+                     + static_cast<double>(countC) * 4;
+    double bw_gbs    = mem_bytes * niters / (mr.median_ms * 1e6);
+    double range_pct = (mr.max_ms - mr.min_ms) / mr.median_ms * 100.0;
+
+    std::cout << " done" << std::endl;
+    std::cout << "\n  === Performance ===" << std::endl;
+    std::cout << std::fixed << std::setprecision(3);
+    std::cout << "  Median: "
+              << std::setprecision(6) << avg_ms << " ms, "
+              << gflops << " GFLOPS, "
+              << bw_gbs << " GB/s" << std::endl;
+    std::cout << "  Range:  " << mr.min_ms / niters << " ~ " << mr.max_ms / niters
+              << " ms  (jitter " << std::setprecision(1) << range_pct << "%)" << std::endl;
+
+    std::vector<float> h_C(countC);
+    HIP_CHECK(hipMemcpy(h_C.data(), d_C, size_C, hipMemcpyDeviceToHost));
+
+    bool pass = true;
+
+    if(has_ref)
+    {
+        int errors      = 0;
+        int total        = M * N;
+        float max_diff  = 0.0f;
+        float max_rdiff = 0.0f;
+
+        for(int i = 0; i < total; i++)
+        {
+            float gpu_val = h_C[i];
+            float ref_val = half_to_float(h_C_ref[i]);
+            float diff    = std::fabs(gpu_val - ref_val);
+            float rdiff   = (std::fabs(ref_val) > 1e-6f) ? diff / std::fabs(ref_val) : diff;
+
+            if(diff > max_diff) max_diff = diff;
+            if(rdiff > max_rdiff) max_rdiff = rdiff;
+
+            float tol = std::fabs(ref_val) * 0.05f + 0.1f;
+            if(diff > tol)
+                errors++;
+        }
+
+        std::cout << "\n  === GPU vs Python Reference ===" << std::endl;
+        std::cout << "  Verified " << total << " elements, " << errors << " errors" << std::endl;
+        std::cout << "  Max abs diff: " << max_diff << ", max rel diff: "
+                  << std::fixed << std::setprecision(4) << (max_rdiff * 100.0f) << "%" << std::endl;
+
+        std::cout << "  Sample C values (GPU vs Python):" << std::endl;
+        for(int i = 0; i < 5 && i < total; i++)
+        {
+            float gpu_val = h_C[i];
+            float ref_val = half_to_float(h_C_ref[i]);
+            std::cout << "    [" << i << "] GPU=" << std::setprecision(6) << gpu_val
+                      << "  Ref=" << ref_val
+                      << "  diff=" << std::fabs(gpu_val - ref_val) << std::endl;
+        }
+
+        pass = (errors == 0);
+        std::cout << "  Result: " << (pass ? "PASSED" : "FAILED") << std::endl;
+    }
+    else
+    {
+        std::cout << "  GPU output sample:" << std::endl;
+        int total = M * N;
+        for(int i = 0; i < 5 && i < total; i++)
+            std::cout << "    [" << i << "] = " << h_C[i] << std::endl;
+    }
+
+    hipFree(d_A);
+    hipFree(d_B_packed);
+    hipFree(d_scales);
+    if(d_zeros) hipFree(d_zeros);
+    hipFree(d_C);
+    hipStreamDestroy(stream);
+
+    return pass;
+}
+
+// ============================================================
 // Model sweep: pre-warmup once, then benchmark + verify all shapes
 // ============================================================
 
@@ -902,19 +1157,22 @@ int main(int argc, char* argv[])
     int M = 128, N = 128, K = 128, gs = 128;
     std::string data_dir = "data";
     bool use_zeros = true;
+    bool fp32_mode = false;
 
     for(int i = 1; i < argc; i++)
     {
         if(std::string(argv[i]) == "--no-zeros")
             use_zeros = false;
+        else if(std::string(argv[i]) == "--fp32")
+            fp32_mode = true;
     }
 
-    if(argc >= 2 && std::string(argv[1]) != "--no-zeros")
+    if(argc >= 2 && std::string(argv[1]) != "--no-zeros" && std::string(argv[1]) != "--fp32")
     {
         if(sscanf(argv[1], "%dx%dx%d", &M, &K, &N) != 3)
         {
             std::cerr << "Usage: " << argv[0]
-                      << " [MxKxN] [group_size] [data_dir] [--no-zeros]" << std::endl;
+                      << " [MxKxN] [group_size] [data_dir] [--no-zeros] [--fp32]" << std::endl;
             std::cerr << "       " << argv[0]
                       << " --true-data <folder>" << std::endl;
             std::cerr << "       " << argv[0]
@@ -922,15 +1180,19 @@ int main(int argc, char* argv[])
             return 1;
         }
     }
-    if(argc >= 3 && std::string(argv[2]) != "--no-zeros") gs = atoi(argv[2]);
-    if(argc >= 4 && std::string(argv[3]) != "--no-zeros") data_dir = argv[3];
+    if(argc >= 3 && std::string(argv[2]) != "--no-zeros" && std::string(argv[2]) != "--fp32") gs = atoi(argv[2]);
+    if(argc >= 4 && std::string(argv[3]) != "--no-zeros" && std::string(argv[3]) != "--fp32") data_dir = argv[3];
 
     std::cout << "Data dir: " << data_dir << std::endl;
     if(!use_zeros)
         std::cout << "Zero points: disabled (--no-zeros)" << std::endl;
+    if(fp32_mode)
+        std::cout << "Mode: FP32 A / FP32 output (element_size_bytes=4)" << std::endl;
 
     bool all_pass = true;
-    all_pass &= test_matmul_nbits(M, N, K, gs, data_dir, use_zeros);
+    all_pass &= fp32_mode
+        ? test_matmul_nbits_fp32(M, N, K, gs, data_dir, use_zeros)
+        : test_matmul_nbits(M, N, K, gs, data_dir, use_zeros);
 
     std::cout << "\n==========================================================================" << std::endl;
     std::cout << "Overall: " << (all_pass ? "ALL PASSED" : "SOME FAILED") << std::endl;

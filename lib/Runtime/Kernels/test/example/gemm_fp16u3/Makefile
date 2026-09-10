@@ -43,6 +43,7 @@ endif
 HIPCC       := $(HIP_SDK)/bin/hipcc.exe
 INCLUDE_DIR := ../../../include
 KERNEL_HIP  := ../../../hip/matmul_nbits_kernel.hip
+AUTOTUNE_DIR := ../../../hip/autotune/matmul_nbits
 
 TARGET_DIRECT := $(BUILD_DIR)/test_direct.exe
 
@@ -110,7 +111,7 @@ DIRECT_TEST_OBJ   := $(BUILD_DIR)/direct_test.obj
 DIRECT_KERNEL_OBJ := $(BUILD_DIR)/direct_kernel.obj
 
 direct: FORCE | $(BUILD_DIR)
-	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) $(INCLUDES) -x hip test_matmul_nbits_u3.cpp -o $(DIRECT_TEST_OBJ)
+	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) $(INCLUDES) -I$(AUTOTUNE_DIR) -x hip test_matmul_nbits_u3.cpp -o $(DIRECT_TEST_OBJ)
 	$(HIPCC) -c $(KERNEL_FLAGS) $(OFFLOAD) $(INCLUDES) $(KERNEL_HIP) -o $(DIRECT_KERNEL_OBJ)
 	$(HIPCC) $(OFFLOAD) $(DIRECT_TEST_OBJ) $(DIRECT_KERNEL_OBJ) -o $(TARGET_DIRECT)
 
@@ -129,6 +130,9 @@ run: direct
 
 test: gendata direct
 	$(call RUN_CMD,$(TARGET_DIRECT)) $(SIZE) $(GS) $(DATA_DIR) $(CXX_NZ_FLAG)
+
+test_fp32: gendata direct
+	$(call RUN_CMD,$(TARGET_DIRECT)) $(SIZE) $(GS) $(DATA_DIR) $(CXX_NZ_FLAG) --fp32
 
 run_custom: direct
 	$(call RUN_CMD,$(TARGET_DIRECT)) $(ARGS)
@@ -164,4 +168,4 @@ bench_decode:
 
 FORCE:
 
-.PHONY: all direct clean run run_custom gendata gendata_model test test_all test_model bench_decode asm FORCE
+.PHONY: all direct clean run run_custom gendata gendata_model test test_fp32 test_all test_model bench_decode asm FORCE
