@@ -17,5 +17,6 @@ add_dependencies(HipToTosa
 target_link_libraries(HipToTosa PUBLIC
 	HipDialectIR
 	MLIRPass
+	MLIRTensorDialect
 	MLIRTosaDialect
 )
