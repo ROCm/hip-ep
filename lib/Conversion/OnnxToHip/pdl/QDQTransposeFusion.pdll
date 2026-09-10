@@ -1,0 +1,28 @@
+//===- QDQTransposeFusion.pdll -------------------------------------------===//
+//
+// Eliminate a redundant UINT16 per-tensor QDQ round-trip around Transpose.
+//
+// When both ends use identical scale and zero point, Transpose commutes with
+// quantization because it only reorders elements:
+//
+//   Q(Transpose(DQ(x))) == Transpose(x)
+//
+// The rewrite emits another onnx.Transpose over the quantized input. The
+// ordinary Transpose conversion then lowers it to the existing hip.transpose;
+// no quantized-specific operation or kernel is needed.
+//===----------------------------------------------------------------------===//
+
+Pattern QDQTranspose with benefit(10) {
+  let dq = op<onnx.DequantizeLinear>(input: Value, input_scale: Value,
+                                     input_tail: ValueRange);
+  let transpose = op<onnx.Transpose>(dq.0);
+  let q = op<onnx.QuantizeLinear>(transpose.0, output_scale: Value,
+                                  output_tail: ValueRange);
+
+  HasMatchingTransposeQParams(dq, q);
+
+  rewrite q with {
+    let result = CreateQuantizedTranspose(dq, transpose, q);
+    replace q with result;
+  };
+}
