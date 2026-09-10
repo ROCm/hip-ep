@@ -733,6 +733,9 @@ static int gqa_forward_fused(
     attn_max_seq = static_cast<int>(total_seq);
   }
 
+  const bool d128_window_prefill = d == 128 && local_window_size > 0;
+  const int fused_prefill_version =
+      (d == 64 || d128_window_prefill) ? 5 : (d == 128 ? 7 : 8);
   int fp_rc;
   if (hip_gqa_autotune_mode(state->gqa_autotune_policy) ==
       static_cast<int>(hipdnn_ep::GqaAutotuneMode::Online)) {
@@ -780,12 +783,13 @@ static int gqa_forward_fused(
       selected = {heuristic, hipdnn_ep::GqaTuneSource::Heuristic, 0.0f};
       fp_rc = launch_configured(selected.config);
     }
-    RUNTIME_DEBUG_LOG("[REAL] GQA prefill config source=%s v%d "
-                      "m_tiles=%d bkv=%d nw=%d mt=%d nd=%d\n",
-                      hipdnn_ep::gqa_tune_source_name(selected.source),
-                      d == 64 ? 5 : (d == 128 ? 7 : 8), selected.config.m_tiles,
-                      selected.config.bkv, selected.config.nw,
-                      selected.config.mt, selected.config.nd);
+    RUNTIME_DEBUG_LOG(
+        "[REAL] GQA prefill config source=%s v%d "
+        "m_tiles=%d bkv=%d nw=%d mt=%d nd=%d\n",
+        hipdnn_ep::gqa_tune_source_name(selected.source), fused_prefill_version,
+        d128_window_prefill ? 1 : selected.config.m_tiles, selected.config.bkv,
+        d128_window_prefill ? 0 : selected.config.nw,
+        d128_window_prefill ? 0 : selected.config.mt, selected.config.nd);
   }
   // window is logged because it selects the HAS_WINDOW instantiation, so a
   // dispatch that looks identical here can be two different kernels.
@@ -793,10 +797,9 @@ static int gqa_forward_fused(
       "[REAL] GQA fused prefill (%s d=%lld -> v%d): B=%lld sq=%lld "
       "total_seq=%lld H=%lld G=%lld past_len=%lld sink=%d smooth=%d window=%d "
       "rc=%d\n",
-      kv_quantized ? "quant" : "fp16", (long long)d,
-      (d == 64 ? 5 : (d == 128 ? 7 : 8)), (long long)B, (long long)sq,
-      (long long)total_seq, (long long)H, (long long)G, (long long)past_len,
-      static_cast<int>(head_sink != nullptr),
+      kv_quantized ? "quant" : "fp16", (long long)d, fused_prefill_version,
+      (long long)B, (long long)sq, (long long)total_seq, (long long)H,
+      (long long)G, (long long)past_len, static_cast<int>(head_sink != nullptr),
       static_cast<int>(use_smooth_softmax), local_window_size, fp_rc);
   return fp_rc != 0 ? -1 : 0;
 }
@@ -2692,8 +2695,9 @@ int wrap_group_query_attention(
   // Path selection. The optimized fused/flash kernels are fp16 causal GQA with
   // head_dim in {64,128,256} and a templated decode geometry (HpG in
   // {1,2,3,4,5,8,16}). Decode supports sink/window for every templated
-  // geometry; prefill v3 supports them at head_dim == 64. Everything else uses
-  // the feature-complete decomposed hipBLASLt fallback.
+  // geometry; prefill v3 supports sinks at head_dim == 64 and windows at
+  // head_dim == 64 or 128. Everything else uses the feature-complete
+  // decomposed hipBLASLt fallback.
   //===------------------------------------------------------------------===//
   const bool is_decode = (seq_len_q == 1);
   const bool decode_geometry_ok =
@@ -2714,12 +2718,13 @@ int wrap_group_query_attention(
   // use_smooth_softmax_ || head_sink != nullptr).
   const bool has_smooth_softmax = (head_sink != nullptr || smooth_softmax == 1);
   // Sink/window are first-class decode features. Prefill v3 implements both at
-  // D64; D128/D256 prefill must fall back rather than silently drop them.
+  // D64, and v5 implements the window at D128. D128 sinks and all D256
+  // prefill features must fall back rather than silently drop them.
   const bool sink_ok = !has_smooth_softmax || is_decode || head_dim == 64;
   // Decode handles the window itself (kv_lo clamp), so it is allowed for any
-  // supported geometry; prefill only implements it at D64. This subsumes the
-  // narrower prefill-only form, so nothing prefill accepted before is widened.
-  const bool window_ok = is_decode || local_window_size <= 0 || head_dim == 64;
+  // supported geometry; prefill implements it at D64 and D128.
+  const bool window_ok =
+      is_decode || local_window_size <= 0 || head_dim == 64 || head_dim == 128;
   // The whole fused path (gqa_forward_fused, including the sink and windowed
   // prefill kernels above) is built on the RDNA-only WMMA intrinsics, which
   // trap on CDNA (wave64, e.g. MI350). Route wave64 to the decomposed hipBLASLt
