@@ -1,11 +1,45 @@
-;; Pure Scheme MLIR Pass - Print Operations
-;; This is a complete MLIR pass written entirely in Scheme
-;; Demonstrates the MLIR logging API with different verbosity levels
+;;===----------------------------------------------------------------------===;;
+;;
+;; Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+;; Licensed under the MIT License.
+;;
+;;===----------------------------------------------------------------------===;;
+;;
+;; PrintPass - Example MLIR pass written entirely in Scheme
+;;
+;; This pass demonstrates writing MLIR transformations in pure Scheme using
+;; the FFI bindings to MLIR operations. It walks all operations in a module
+;; and prints their structure with configurable detail levels.
+;;
+;;===----------------------------------------------------------------------===;;
 
-;; Import rime loop for functional iteration
+;;===----------------------------------------------------------------------===;;
+;; Imports
+;;===----------------------------------------------------------------------===;;
+
 (import (rime loop))
 
-;; Helper: format operands list using rime loop
+;;===----------------------------------------------------------------------===;;
+;; Configuration
+;;===----------------------------------------------------------------------===;;
+
+;; Default configuration for the pass.
+;; Returns a closure that looks up configuration keys.
+(define (default-config)
+  (lambda (key)
+    (case key
+      [(show-operands) #t]      ; Show operand details
+      [(show-results) #t]       ; Show result details
+      [(operation-filter) #f]   ; Filter operations (or #f for all)
+      [else #f])))
+
+;;===----------------------------------------------------------------------===;;
+;; Private Helper Functions
+;;===----------------------------------------------------------------------===;;
+
+;; Format operands list as comma-separated string.
+;; Returns empty string for operations with no operands, otherwise returns
+;; a formatted string like " | Operands[4]: 123, 456, 789, 012".
 (define (format-operands op num-operands)
   (loop :initially := ""
         :for i :from 0 :to (- num-operands 1)
@@ -15,7 +49,9 @@
                      :return-value
                      (format " | Operands[~a]: ~a" num-operands :return-value))))
 
-;; Helper: format results list using rime loop
+;; Format results list as comma-separated string.
+;; Returns empty string for operations with no results, otherwise returns
+;; a formatted string like " | Results[2]: 345, 678".
 (define (format-results op num-results)
   (loop :initially := ""
         :for i :from 0 :to (- num-results 1)
@@ -25,7 +61,8 @@
                      :return-value
                      (format " | Results[~a]: ~a" num-results :return-value))))
 
-;; Helper: format operation details
+;; Format complete operation details according to configuration.
+;; Returns a string like: Operation: "hip.add" | Operands[4]: ... | Results[1]: ...
 (define (format-operation op config)
   (let ((name (mlir-operation-name op))
         (num-operands (mlir-operation-num-operands op))
@@ -39,28 +76,33 @@
                 (format-results op num-results)
                 ""))))
 
-;; Default configuration
-(define (default-config)
-  (lambda (key)
-    (case key
-      [(show-operands) #t]
-      [(show-results) #t]
-      [(operation-filter) #f]  ; #f means no filter
-      [else #f])))
+;; Check if operation should be processed based on filter configuration.
+(define (should-process-operation? op-name config)
+  (let ((filter (config 'operation-filter)))
+    (or (not filter) (member op-name filter))))
 
-;; Entry point called by C++ - receives the module operation and optional config
+;;===----------------------------------------------------------------------===;;
+;; Public API
+;;===----------------------------------------------------------------------===;;
+
+;; Entry point called from C++.
+;;
+;; Parameters:
+;;   module-op - The MLIR module operation to process
+;;   args      - Optional configuration (closure accepting config keys)
+;;
+;; The pass walks all operations in the module and logs their structure
+;; at trace level. Configuration controls which details are shown.
 (define (run-pass module-op . args)
   (let ((config (if (null? args) (default-config) (car args))))
     (mlir-log-info "Starting Pure Scheme MLIR Pass")
     (mlir-log-debug (format "Module: ~a" (mlir-operation-name module-op)))
 
-    ;; Walk all operations and log with trace level
+    ;; Walk all operations in the module
     (mlir-operation-walk module-op
       (lambda (op)
-        (let ((op-name (mlir-operation-name op))
-              (filter (config 'operation-filter)))
-          ;; Apply filter if configured
-          (when (or (not filter) (member op-name filter))
+        (let ((op-name (mlir-operation-name op)))
+          (when (should-process-operation? op-name config)
             (mlir-log-trace (format-operation op config))))))
 
     (mlir-log-info "Completed Pure Scheme MLIR Pass")))
