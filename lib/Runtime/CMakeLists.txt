@@ -265,7 +265,6 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
                 -o ${CMAKE_CURRENT_BINARY_DIR}/${OUTPUT_BC}
         DEPENDS ${SOURCE_FILE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/hipdnn_ep_runtime.h
-                ${CMAKE_SOURCE_DIR}/include/hip/datatype_abi.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/runtime_state_internal.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/op_state.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/op_profile.h
@@ -345,6 +344,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/abs.cpp runtime_abs.bc)
     compile_to_bitcode(real/neg.cpp runtime_neg.bc)
     compile_to_bitcode(real/not.cpp runtime_not.bc)
+    compile_to_bitcode(real/isinf.cpp runtime_isinf.bc)
     compile_to_bitcode(real/cos.cpp runtime_cos.bc)
     compile_to_bitcode(real/erf.cpp runtime_erf.bc)
     compile_to_bitcode(real/sin.cpp runtime_sin.bc)
@@ -433,6 +433,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_abs.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_neg.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_not.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_isinf.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_cos.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_erf.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_sin.bc
