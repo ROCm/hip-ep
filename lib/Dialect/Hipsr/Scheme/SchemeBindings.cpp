@@ -81,10 +81,6 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
   Sregister_boot_file_bytes("scheme.boot", const_cast<void*>(static_cast<const void*>(scheme_boot_data)), scheme_boot_size);
   Sbuild_heap("hip-mlir-opt", nullptr);
 
-  // Disable library compilation IMMEDIATELY after heap is built
-  // This prevents Chez from trying to write .so files
-  Sset_top_level_value(Sstring_to_symbol("compile-imported-libraries"), Sfalse);
-
   // Get Scheme symbols we'll use
   ptr eval_sym = Stop_level_value(Sstring_to_symbol("eval"));
   ptr read_sym = Stop_level_value(Sstring_to_symbol("read"));
@@ -118,6 +114,10 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
   // Load the Scheme bindings library
   std::string scm_code(reinterpret_cast<const char*>(scheme_bindings_scm_data),
                        scheme_bindings_scm_size);
+
+  if (logLevel <= SchemeLogLevel::Debug) {
+    llvm::errs() << "[debug] Loading SchemeBindings.scm (" << scheme_bindings_scm_size << " bytes)\n";
+  }
 
   ptr port = Scall1(open_string_input_port_sym, Sstring(scm_code.c_str()));
 
@@ -213,6 +213,9 @@ bool loadSchemeScript(const char* scriptPath) {
                        std::istreambuf_iterator<char>());
   file.close();
 
+  if (logLevel <= SchemeLogLevel::Debug) {
+    llvm::errs() << "[debug] Loading " << scriptPath << " (" << scm_code.size() << " bytes)\n";
+  }
   LLVM_DEBUG(llvm::dbgs() << "Loading Scheme script: " << scriptPath << "\n");
 
   // Evaluate the script
@@ -221,7 +224,13 @@ bool loadSchemeScript(const char* scriptPath) {
   ptr open_string_input_port_sym = Stop_level_value(Sstring_to_symbol("open-string-input-port"));
   ptr eof_object_p = Stop_level_value(Sstring_to_symbol("eof-object?"));
 
+  if (logLevel <= SchemeLogLevel::Debug) {
+    llvm::errs() << "[debug] Creating input port for script\n";
+  }
   ptr port = Scall1(open_string_input_port_sym, Sstring(scm_code.c_str()));
+  if (logLevel <= SchemeLogLevel::Debug) {
+    llvm::errs() << "[debug] Starting read-eval loop\n";
+  }
 
   while (true) {
     ptr expr = Scall1(read_sym, port);
