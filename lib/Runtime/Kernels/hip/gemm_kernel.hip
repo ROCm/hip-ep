@@ -709,7 +709,15 @@ __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
    * behind compute); 1 = single-buffered, half the LDS so two workgroups fit
    * per CU and hide the K-loop barriers across each other -- a win for large
    * LDS-bound tiles (256x128) where double-buffer caps occupancy at 1 WG/CU. */
-  constexpr int NBUF = DB ? 2 : 1;
+  /* Double-buffer only when it actually fits in the 64 KB LDS. launchWmma picks
+   * db=false for any tile whose double-buffered LDS is too big, so it is always
+   * launched single-buffered -- but the dispatch macro still instantiates that
+   * tile's dead DB=true variant. Without this cap, a large tile (e.g. a 256-wide
+   * BK=64 tile at 108 KB double-buffered) fails the static_assert at compile
+   * time even though it is never launched double-buffered. Falling NBUF back to
+   * 1 keeps it compilable and never changes a launched tile (the runtime db flag
+   * matches this predicate). */
+  constexpr int NBUF = (DB && (BM + BN) * K_STR * 2 * 2 <= 65536) ? 2 : 1;
   static_assert(NBUF * (BM + BN) * K_STR * 2 <= 65536, "LDS 64KB");
 
   __shared__ __align__(16) T smA[NBUF][BM][K_STR];
@@ -1045,13 +1053,20 @@ __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
         const int cc = nbase + lane;
         const float v = acc[wm][wn][e];
         if constexpr (!BC) {
-          /* Tile fully covers [M,N]: unconditional store. */
-          if (sk_acc)
-            sk_acc[sk_off + static_cast<size_t>(rr) * N + cc] = v;
-          else if (fast)
-            Y[static_cast<size_t>(rr) * N + cc] = GemmElem<T>::fromf(v);
-          else
-            gemmStoreY(Y, C, rr, cc, N, cDim0, cDim1, v, alpha, beta);
+          /* Tile covers M and K (BC=false path requires M%BM==0, K%BK==0), but
+           * N may be padded up to a BN multiple by the caller (N-ragged fast
+           * path: launch full tiles, mask the column overhang here). The store
+           * is the epilogue -- one cheap `cc < N` compare per element, outside
+           * the K-loop -- so it does not touch the hot path. For aligned N it is
+           * a predicted-taken branch. */
+          if (cc < N) {
+            if (sk_acc)
+              sk_acc[sk_off + static_cast<size_t>(rr) * N + cc] = v;
+            else if (fast)
+              Y[static_cast<size_t>(rr) * N + cc] = GemmElem<T>::fromf(v);
+            else
+              gemmStoreY(Y, C, rr, cc, N, cDim0, cDim1, v, alpha, beta);
+          }
         } else {
           const bool full = (rr < M && cc < N);
           if (sk_acc) {
@@ -1231,6 +1246,16 @@ static int pickWmmaHeuristic(int M, int N, int K) {
     return findWmmaCfg(64, 32, 2, 1, 8, 1);
   if (N <= 64)
     return findWmmaCfg(64, 64, 2, 2, 8, 1);
+  /* Power-of-two K >= 8192: the NT row stride (K*sizeof(T) bytes) is a multiple
+   * of the 16 KB L1, so a wide 256x128 tile's tile-rows all map to the same few
+   * L1 sets and evict each other -- throughput collapses (~24k vs ~37k at the
+   * non-aliasing K=4096). A 128x64 BK=64 tile halves the aliasing tile-rows on
+   * both operands, and BK=64 halves the K-step/barrier count, recovering ~+30%
+   * (to ~32k, at hipBLASLt parity). Non-power-of-two large K (14336/17408) does
+   * not alias, so the big 256x128 tile still wins and is left to the block below.
+   * Small M<=256 uses padrow (physical row padding) for this case instead. */
+  if (M > 256 && K >= 8192 && (K & (K - 1)) == 0)
+    return findWmmaCfg(128, 64, 2, 2, 8, 1, 64);
   /* Tile size is chosen by M and grid fill (measured on gfx1151):
    *   - Large M reuses the B tile across many A-rows, so a 256-row tile
    *     (256x128 WT4x2) wins once the grid still covers the CUs -- measured
@@ -1280,13 +1305,26 @@ static void launchWmma(int id, hipStream_t s, const T *A, const T *B,
    * Below that the tile already reaches useful occupancy, so keep the
    * latency-hiding double buffer. */
   const int db_lds = 2 * (c.bm + c.bn) * (c.bk + 8) * 2;
-  const bool db = db_lds <= 49152;
+  /* Single-buffer (2 WG/CU) is the default: it hides the K-loop barrier across
+   * co-resident workgroups and wins when the B/A loads hit the 2 MB L2. But once
+   * the streaming footprint spills L2 (large pow2-K weight, e.g. the 128 MB B of
+   * 8192x8192), the now-exposed DRAM load latency dominates and the latency-
+   * hiding double buffer wins despite dropping to 1 WG/CU -- provided it still
+   * fits in 64 KB LDS. Only the 128x64 BK=64 tile (used for pow2 K>=8192) lands
+   * in the 49-57 KB double-buffer window; larger tiles stay single. */
+  const bool spills_l2 = static_cast<size_t>(N) * K * 2 > (96ull << 20);
+  const bool db =
+      db_lds <= 49152 || (c.bk == 64 && db_lds <= 57344 && spills_l2);
 
   /* Sub-launches. Normally one launch covering the whole [M,N] grid with a
    * single compile-time BC. When only N is ragged (M,K tile-aligned, no
-   * split-K), split into an aligned interior (BC=false, fast) and a one-tile
-   * ragged edge (BC=true) via n_base, so N%BN!=0 no longer taxes the interior
-   * (fixes vision N=4304 mlp-up). */
+   * split-K), launch ceil(N/BN) FULL tiles all on the fast BC=false path: the
+   * B-load is already N-safe (b_valid reads a dummy row for the column
+   * overhang) and the store masks cc>=N (a cheap epilogue compare). Measured on
+   * vision mlp-up N=4304 M=512: the old interior+ragged-edge split was 0.185 ms
+   * (a separate ragged-edge launch costs more than a full extra tile); one
+   * BC=false launch of 34 full tiles matches the aligned N=4352 (0.141 ms) --
+   * i.e. the N%BN!=0 tax disappears. */
   struct SubLaunch {
     dim3 grid;
     bool bc;
@@ -1295,13 +1333,10 @@ static void launchWmma(int id, hipStream_t s, const T *A, const T *B,
   SubLaunch subs[2];
   int nsub;
   const int my = (M + c.bm - 1) / c.bm;
-  const int nfull_n = N / c.bn;
   const bool n_ragged = (N % c.bn) != 0;
-  if (sk == 1 && n_ragged && (M % c.bm == 0) && (K % c.bk == 0) &&
-      nfull_n >= 1) {
-    subs[0] = SubLaunch{dim3(nfull_n, my, 1), false, 0};
-    subs[1] = SubLaunch{dim3(1, my, 1), true, nfull_n * c.bn};
-    nsub = 2;
+  if (sk == 1 && n_ragged && (M % c.bm == 0) && (K % c.bk == 0)) {
+    subs[0] = SubLaunch{dim3((N + c.bn - 1) / c.bn, my, 1), false, 0};
+    nsub = 1;
   } else {
     const bool bc =
         !(M % c.bm == 0 && N % c.bn == 0 && K % c.bk == 0) || sk > 1;
@@ -1730,17 +1765,30 @@ static bool gemmPadRowEnabled() {
  *   - Small M (<=256): padrow always wins, even for a 128 MB weight
  *     (M=128 N=8192 K=8192 is ~5x faster with padrow) -- the tile re-reads B
  *     with little compute to hide the conflict.
- *   - Large M (>256): the conflict is hidden by compute once the weight is
- *     large, and the padded footprint then costs more than it saves
- *     (M=512 N=8192 K=8192, 128 MB: -15%). But a mid-size weight at large M
- *     still wins (M=512 N=4096 K=4096, 32 MB: +39%).
- * So gate large M on weight size; small M is always eligible. The 64 MB bound
- * is empirical, to be refined by the offline LUT (padrow on/off per shape). */
+ *   - Large M (>256), mid-size weight (<=64 MB): still wins with the default
+ *     256x128 tile (M=512 N=4096 K=4096, 32 MB: +39%).
+ *   - Large M (>256), large weight (>64 MB) with a non-severe pow2 stride: the
+ *     conflict is hidden by compute and the padded footprint costs more than it
+ *     saves with the wide 256x128 tile, so it is gated off there.
+ *   - Severe stride K = pow2 >= 8192 (row stride is a multiple of the whole
+ *     16 KB L1): the aliasing collapses even large-M throughput (~-35%), and the
+ *     heuristic routes these to the small 128x64 tile whose 2 MB A-panel keeps
+ *     padrow a clear win regardless of weight size (M=512 8192x8192, 128 MB:
+ *     25k -> 32k, +27%). So padrow is always eligible for this case.
+ * The 64 MB bound is empirical, to be refined by the offline LUT. */
 static bool gemmPadRowEligible(int M, int N, int K, int transA, int transB,
                                int type_bytes) {
   const size_t weight_bytes =
       static_cast<size_t>(N) * K * static_cast<size_t>(type_bytes);
-  const bool bound_ok = (M <= 256) || (weight_bytes <= (64ull << 20));
+  static const bool force_bound = [] {
+    std::string s = gemmEnvStr("HIPDNN_EP_GEMM_PADROW_FORCE");
+    return !s.empty() && s[0] != '0';
+  }();
+  /* Row stride == a multiple of the 16 KB L1: the worst aliasing, and the tile
+   * we route it to (128x64) benefits from padrow at any weight size. */
+  const bool severe_alias = gemmIsPow2(K) && K >= 8192;
+  const bool bound_ok = force_bound || (M <= 256) ||
+                        (weight_bytes <= (64ull << 20)) || severe_alias;
   return gemmPadRowEnabled() && transB && !transA && type_bytes == 2 &&
          M >= 16 && N >= 64 && gemmIsPow2(K) && K >= 2048 && bound_ok;
 }

@@ -222,11 +222,17 @@ static int runCase(int M, int N, int K, int ta, int tb, int type, float alpha,
       printf("  hipBLASLt %.3f ms  %.1f GFLOP/s  (algo=nullptr, %d algos)\n",
              t / iters, flops / ((t / iters) * 1e6), (int)all.size());
     } else {
+      /* Reliable "hipBLAS best" selection: warm each candidate, then time it
+       * with enough reps that a single noisy run cannot mis-pick the algo. */
       for (int i = 0; i < (int)cands.size(); ++i) {
         if (run(i) != HIPBLAS_STATUS_SUCCESS)
           continue;
+        for (int w = 0; w < 2; ++w)
+          run(i);
+        if (hipStreamSynchronize(stream) != hipSuccess)
+          continue;
         hipEventRecord(e0, stream);
-        for (int r = 0; r < 3; ++r)
+        for (int r = 0; r < 8; ++r)
           run(i);
         hipEventRecord(e1, stream);
         if (hipEventSynchronize(e1) != hipSuccess)
@@ -239,15 +245,24 @@ static int runCase(int M, int N, int K, int ta, int tb, int type, float alpha,
         }
       }
       if (best >= 0) {
-        run(best);
-        hipStreamSynchronize(stream);
-        hipEventRecord(e0, stream);
-        for (int i = 0; i < iters; ++i)
+        /* Peak timing: best of several outer reps of the timed loop, so the
+         * reported number is hipBLAS's true peak (fair "best vs best"). */
+        for (int i = 0; i < 30; ++i)
           run(best);
-        hipEventRecord(e1, stream);
-        hipEventSynchronize(e1);
-        float t = 0.f;
-        hipEventElapsedTime(&t, e0, e1);
+        hipStreamSynchronize(stream);
+        float best_t = 1e30f;
+        for (int rep = 0; rep < 5; ++rep) {
+          hipEventRecord(e0, stream);
+          for (int i = 0; i < iters; ++i)
+            run(best);
+          hipEventRecord(e1, stream);
+          hipEventSynchronize(e1);
+          float t = 0.f;
+          hipEventElapsedTime(&t, e0, e1);
+          if (t < best_t)
+            best_t = t;
+        }
+        float t = best_t;
         printf("  hipBLASLt %.3f ms  %.1f GFLOP/s  (best of %d algos, ws=%zu)\n",
                t / iters, flops / ((t / iters) * 1e6), (int)cands.size(),
                cands[best].ws);
@@ -339,17 +354,24 @@ static int runCase(int M, int N, int K, int ta, int tb, int type, float alpha,
       printf("  hip_gemm  %.3f ms  %.1f GFLOP/s\n", ms, flops / (ms * 1e6));
 #ifdef HIPDNN_GEMM_BENCH_HIPBLASLT
       benchHipBlasLtF16(stream, dA, dB, dY, iters, flops);
-      for (int i = 0; i < 10; ++i)
+      for (int i = 0; i < 30; ++i)
         hip_gemm(stream, dA, dB, dC, dY, M, N, K, alpha, beta, ta, tb, 0, c0,
                  c1);
       HIP_CHECK(hipStreamSynchronize(stream));
-      hipEventRecord(e0, stream);
-      for (int i = 0; i < iters; ++i)
-        hip_gemm(stream, dA, dB, dC, dY, M, N, K, alpha, beta, ta, tb, 0, c0,
-                 c1);
-      hipEventRecord(e1, stream);
-      HIP_CHECK(hipEventSynchronize(e1));
-      hipEventElapsedTime(&t, e0, e1);
+      /* Peak timing: best of several outer reps (fair "best vs best"). */
+      float best_t = 1e30f;
+      for (int rep = 0; rep < 5; ++rep) {
+        hipEventRecord(e0, stream);
+        for (int i = 0; i < iters; ++i)
+          hip_gemm(stream, dA, dB, dC, dY, M, N, K, alpha, beta, ta, tb, 0, c0,
+                   c1);
+        hipEventRecord(e1, stream);
+        HIP_CHECK(hipEventSynchronize(e1));
+        hipEventElapsedTime(&t, e0, e1);
+        if (t < best_t)
+          best_t = t;
+      }
+      t = best_t;
       printf("  hip_gemm  %.3f ms  %.1f GFLOP/s  (after hipBLASLt warmup)\n",
              t / iters, flops / ((t / iters) * 1e6));
 #endif
