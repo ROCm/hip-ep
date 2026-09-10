@@ -7,23 +7,21 @@
 
 ;; Helper: format operands list using rime loop
 (define (format-operands op num-operands)
-  (if (zero? num-operands)
-      ""
-      (format " | Operands[~a]: ~a"
-              num-operands
-              (loop :for i :from 0 :to (- num-operands 1)
-                    :with operand := (mlir-operation-get-operand op i)
-                    :join-string operand :seperator ", "))))
+  (let ((operands-str (loop :for i :from 0 :to (- num-operands 1)
+                            :with operand := (mlir-operation-get-operand op i)
+                            :join-string operand :seperator ", ")))
+    (if (string=? operands-str "")
+        ""
+        (format " | Operands[~a]: ~a" num-operands operands-str))))
 
 ;; Helper: format results list using rime loop
 (define (format-results op num-results)
-  (if (zero? num-results)
-      ""
-      (format " | Results[~a]: ~a"
-              num-results
-              (loop :for i :from 0 :to (- num-results 1)
-                    :with result := (mlir-operation-get-result op i)
-                    :join-string result :seperator ", "))))
+  (let ((results-str (loop :for i :from 0 :to (- num-results 1)
+                           :with result := (mlir-operation-get-result op i)
+                           :join-string result :seperator ", ")))
+    (if (string=? results-str "")
+        ""
+        (format " | Results[~a]: ~a" num-results results-str))))
 
 ;; Helper: format operation details
 (define (format-operation op)
