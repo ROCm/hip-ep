@@ -615,6 +615,8 @@ int hipdnn_ep_stream_sync(RuntimeState *state);
 // HIPDNN_EP_PERF)
 void *hipdnn_ep_state_get_op_profile(RuntimeState *state);
 
+// Session-scoped copy from init config. nullptr if state/key is null or the
+// key is absent. Owned by RuntimeState; invalid after hipdnn_ep_state_cleanup.
 const char *hipdnn_ep_runtime_get_provider_option(RuntimeState *state,
                                                   const char *key);
 

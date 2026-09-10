@@ -34,8 +34,8 @@
 
 // --- inference_init_v2 forwards the C config pointer ---
 // CHECK-LABEL: llvm.func @inference_init_v2(
-// CHECK-SAME:  -> i32
-// CHECK:   llvm.call @hipdnn_ep_state_init_v2
+// CHECK-SAME:  %[[OUT:[^:]+]]: !llvm.ptr, %[[FS:[^:]+]]: !llvm.ptr, %[[CFG:[^:]+]]: !llvm.ptr) -> i32
+// CHECK:   llvm.call @hipdnn_ep_state_init_v2(%[[OUT]], %[[FS]], %{{.*}}, %{{.*}}, %[[CFG]])
 
 // --- inference_compute stages inputs and calls main_graph (2-arg ABI) ---
 // CHECK-LABEL: llvm.func @inference_compute

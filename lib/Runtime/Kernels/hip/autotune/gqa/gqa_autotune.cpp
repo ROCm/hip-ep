@@ -46,6 +46,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -527,27 +528,43 @@ struct Policy {
   int compute_units = 0;
 };
 
-// HIPDNN_GQA_AUTOTUNE_MODE outranks the gqa_autotune_mode provider option: an
-// environment variable that is set takes the session even if its value is not
-// a mode, rather than handing it to the option below it.
+std::optional<GqaAutotuneMode> parseMode(const char *value,
+                                         const char *source) {
+  if (!value || !*value)
+    return std::nullopt;
+
+  std::string mode;
+  for (char c : std::string(value)) {
+    if (c > ' ')
+      mode.push_back(c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c);
+  }
+
+  if (mode == "online")
+    return GqaAutotuneMode::Online;
+  if (mode == "lookup")
+    return GqaAutotuneMode::Lookup;
+
+  fprintf(stderr,
+          "[gqa-autotune] unrecognized %s=\"%s\"; expected lookup or online\n",
+          source, value);
+  return std::nullopt;
+}
+
+// HIPDNN_GQA_AUTOTUNE_MODE first, then the gqa_autotune_mode provider option,
+// then the build default. A lever only takes the session when it names a mode.
 GqaAutotuneMode chooseMode(const char *provider_mode) {
 #ifdef _WIN32
   char buf[16];
   DWORD n =
       GetEnvironmentVariableA("HIPDNN_GQA_AUTOTUNE_MODE", buf, sizeof(buf));
-  std::string raw = (n > 0 && n < sizeof(buf)) ? std::string(buf, n) : "";
+  const char *env = (n > 0 && n < sizeof(buf)) ? buf : nullptr;
 #else
-  const char *v = getenv("HIPDNN_GQA_AUTOTUNE_MODE");
-  std::string raw = v ? std::string(v) : "";
+  const char *env = getenv("HIPDNN_GQA_AUTOTUNE_MODE");
 #endif
-  if (raw.empty())
-    raw = provider_mode ? provider_mode : "";
-  std::string mode;
-  for (char c : raw)
-    if (c > ' ')
-      mode.push_back(c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c);
-  if (mode == "online")
-    return GqaAutotuneMode::Online;
+  if (auto mode = parseMode(env, "HIPDNN_GQA_AUTOTUNE_MODE"))
+    return *mode;
+  if (auto mode = parseMode(provider_mode, "gqa_autotune_mode"))
+    return *mode;
   return GqaAutotuneMode::Lookup;
 }
 

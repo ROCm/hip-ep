@@ -669,6 +669,8 @@ MlirCustomOp::MlirCustomOp(
         return static_cast<const ProviderOptionMap *>(self)->size();
       },
       [](void *self, size_t index, const char **key, const char **value) {
+        if (!key || !value)
+          return;
         const auto &opts = *static_cast<const ProviderOptionMap *>(self);
         if (index >= opts.size()) {
           *key = nullptr;

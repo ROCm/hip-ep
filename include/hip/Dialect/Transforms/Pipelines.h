@@ -105,8 +105,8 @@ void buildOnnxToHipPipeline(OpPassManager &pm,
 /// intermediate HIP memref IR via hip-mlir-opt.
 ///
 /// The pipeline lowers HIP dialect ops to LLVM IR and appends a
-/// GenerateInterface pass that creates four C-ABI wrapper functions
-/// (inference_init, inference_compute, inference_cleanup,
+/// GenerateInterface pass that creates five C-ABI wrapper functions
+/// (inference_init, inference_init_v2, inference_compute, inference_cleanup,
 /// inference_get_metadata_json).
 void buildHipToLLVMPipeline(OpPassManager &pm,
                             const HipToLLVMPipelineOptions &options);

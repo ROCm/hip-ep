@@ -46,8 +46,8 @@ createExternalizeConstantsPass(morphizen::FileSystem *fs,
 #include "hip/Dialect/Transforms/Passes.h.inc"
 
 /// Creates a pass that generates the C interface for the compiled module.
-/// Transforms @main_graph to produce four C-ABI wrapper functions:
-/// inference_init, inference_compute, inference_cleanup,
+/// Transforms @main_graph to produce five C-ABI wrapper functions:
+/// inference_init, inference_init_v2, inference_compute, inference_cleanup,
 /// inference_get_metadata_json. inference_compute has the 2-arg
 /// (state, inputs) ABI: graph outputs are allocated in-graph via
 /// hip.alloc_output (the hipdnn_ep_alloc_output runtime callback) rather than

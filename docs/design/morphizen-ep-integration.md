@@ -166,8 +166,9 @@ can be configured per session rather than only through an environment variable.
 It coexists with `inference_init`: `InferenceState::create()` probes for v2 and
 falls back, so older artifacts keep working. `config` is a
 `hipdnn_ep_init_config*` (`include/hip/init_config_abi.h`) — pure C, because it
-crosses into Clang-compiled JIT'd code — and is only borrowed for the call, so
-the runtime copies what it needs onto `RuntimeState`.
+crosses into Clang-compiled JIT'd code — and is only borrowed for the call.
+The runtime copies **every** entry onto `RuntimeState` so later lookups do not depend
+on the EP table remaining live.
 
 `hipdnn_ep_runtime_begin_compute` is called by the EP at the top of every
 `Compute()` (before input marshaling) to invalidate per-`Compute()` runtime

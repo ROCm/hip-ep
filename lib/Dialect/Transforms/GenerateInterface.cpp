@@ -6,9 +6,10 @@
 //===----------------------------------------------------------------------===//
 // Generate Interface Pass - Create C-compatible interface functions
 //===----------------------------------------------------------------------===//
-// This pass generates four C-ABI compatible functions that wrap the internal
+// This pass generates five C-ABI compatible functions that wrap the internal
 // @main_graph function:
 // - inference_init: Allocate context, create handles, upload constants
+// - inference_init_v2: Same as inference_init, plus a borrowed init-config ptr
 // - inference_compute: 2-arg (state, inputs) ABI -- stage inputs, call
 //   @main_graph (graph outputs are allocated in-graph via hip.alloc_output)
 // - inference_cleanup: Free resources
@@ -347,7 +348,7 @@ static void emitErrorCheckedCall(OpBuilder &builder, Location loc,
   builder.setInsertionPointToStart(continueBlock);
 }
 
-// Generates the four C-ABI interface functions (inference_init,
+// Generates the C-ABI interface functions (inference_init, inference_init_v2,
 // inference_compute, inference_cleanup, inference_get_metadata_json) for a
 // lowered module. inference_compute has the (state, inputs) -> i32 signature;
 // graph outputs are allocated in-graph via hip.alloc_output, not passed as
@@ -367,7 +368,8 @@ public:
   StringRef getArgument() const final { return "generate-interface"; }
   StringRef getDescription() const final {
     return "Generate C interface wrapper functions (inference_init, "
-           "inference_compute, inference_cleanup, inference_get_metadata_json)";
+           "inference_init_v2, inference_compute, inference_cleanup, "
+           "inference_get_metadata_json)";
   }
 
   void getDependentDialects(DialectRegistry &registry) const override {
@@ -409,7 +411,7 @@ public:
     generateMetadataGlobal(module, json);
     generateInferenceGetMetadataJson(module);
 
-    COMPILER_DEBUG_LOG("[GenerateInterface] Generated 4 interface functions\n");
+    COMPILER_DEBUG_LOG("[GenerateInterface] Generated 5 interface functions\n");
   }
 
 private:
@@ -569,6 +571,9 @@ private:
   ///
   void generateInferenceInit(ModuleOp module, size_t blobSize,
                              StringRef funcName) {
+    assert((funcName == hipdnn::abi::kInferenceInit ||
+            funcName == hipdnn::abi::kInferenceInitV2) &&
+           "unknown init entry point");
     const bool isV2 = funcName == hipdnn::abi::kInferenceInitV2;
     StringRef runtimeFuncName =
         isV2 ? "hipdnn_ep_state_init_v2" : "hipdnn_ep_state_init_with_fs";
