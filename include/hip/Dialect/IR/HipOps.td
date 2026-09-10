@@ -4951,6 +4951,45 @@ def Hip_QMulOp : Hip_DpsOp_Broadcast<"qmul",
   }];
 }
 
+def Hip_QSigmoidOp : Hip_DpsOp<"qsigmoid", /*traits=*/[],
+                                /*outsAccessor=*/"Y",
+                                /*autoReify=*/1,
+                                /*autoInfer=*/1,
+                                /*declareInfer=*/1> {
+  let summary = "Quantized sigmoid with integrated QDQ";
+  let description = [{
+    Fuses DequantizeLinear -> Sigmoid -> QuantizeLinear.
+
+    x = (X - x_zero_point) * x_scale
+    y = 1 / (1 + exp(-x))
+    Y = saturate(round(y / y_scale) + y_zero_point)
+
+    Example:
+    ```mlir
+    hip.qsigmoid(%ctx) ins(%x : memref<1x128x512xi8, 1>)
+                       outs(%y : memref<1x128x512xi8, 1>)
+                       {x_scale = 2.500000e-01 : f32, x_zero_point = -5 : i64,
+                        y_scale = 1.250000e-01 : f32, y_zero_point = 4 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y,              // Output buffer (quant), DPS init
+    F32Attr:$x_scale,                   // Dequantization scale for input
+    I64Attr:$x_zero_point,              // Quantization zero point for input
+    F32Attr:$y_scale,                   // Quantization scale for output
+    I64Attr:$y_zero_point               // Quantization zero point for output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_QMatMulOp : Hip_DpsOp<"qmatmul", /*traits=*/[],
                               /*outsAccessor=*/"Y",
                               /*autoReify=*/0,

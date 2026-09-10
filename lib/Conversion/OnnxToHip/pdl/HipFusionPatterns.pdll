@@ -36,3 +36,4 @@ Rewrite ExtractAttrInt64(op: Op, name: Attr, defaultValue: Attr) -> Attr;
 #include "QDQMulFusion.pdll"
 #include "QDQMatMulFusion.pdll"
 #include "QDQConvFusion.pdll"
+#include "QDQSigmoidFusion.pdll"

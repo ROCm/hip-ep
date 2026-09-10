@@ -36,6 +36,10 @@ extern "C" {
 #define HIPDNN_EP_QELEMENTWISE_ADD 0
 #define HIPDNN_EP_QELEMENTWISE_MUL 1
 
+// Must match HipdnnQActivationKind in
+// lib/Conversion/HipToLLVM/HipToLLVMUtils.h
+#define HIPDNN_EP_QACTIVATION_SIGMOID 0
+
 static inline const char *hipdnn_ep_tensor_op_name(int64_t op) {
   switch (op) {
   case HIPDNN_EP_TENSOR_OP_MUL:
@@ -59,6 +63,15 @@ static inline const char *hipdnn_ep_qelementwise_kind_name(int64_t kind) {
     return "qmul";
   default:
     return "qelementwise_unknown";
+  }
+}
+
+static inline const char *hipdnn_ep_qactivation_kind_name(int64_t kind) {
+  switch (kind) {
+  case HIPDNN_EP_QACTIVATION_SIGMOID:
+    return "qsigmoid";
+  default:
+    return "qactivation_unknown";
   }
 }
 
@@ -940,6 +953,23 @@ int wrap_qelementwise(RuntimeState *state, void *lhs, void *rhs, void *output,
                       const int64_t *out_shape, int64_t out_rank,
                       int64_t data_type, float M_a, int64_t lhs_zp, float M_b,
                       int64_t rhs_zp, int64_t output_zp);
+
+// Quantized unary activation wrapper. `kind` selects the activation function
+// (HIPDNN_EP_QACTIVATION_*). Unlike wrap_qelementwise, input/output always
+// share one flat shape -- unary activations never broadcast, so only a
+// total element count is needed.
+//
+// input/output are quantized buffers of `data_type`.
+//
+// out_recip_scale is folded by lowering as 1.0f / y_scale, so the kernel
+// never performs a runtime division:
+//   x = (X - x_zero_point) * x_scale
+//   y = activation(x)                 // kind picks the device function
+//   Y = saturate(round(y * out_recip_scale) + y_zero_point)
+int wrap_qactivation(RuntimeState *state, void *input, void *output,
+                     int64_t kind, int64_t num_elements, int64_t data_type,
+                     float x_scale, int64_t x_zero_point, float out_recip_scale,
+                     int64_t y_zero_point);
 
 // Quantized batched matmul wrapper: the integer-domain form of the fused
 // DequantizeLinear x2 -> MatMul -> QuantizeLinear chain.
