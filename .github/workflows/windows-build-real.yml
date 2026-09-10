@@ -42,9 +42,9 @@ jobs:
       # ilammy/msvc-dev-cmd and mozilla-actions/sccache-action have no
       # Node.js 24 releases yet; allow Node.js 20 until they are updated.
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
-      # gfx1151 first: TheRock tarball selection, NATIVE default import lib, and
+      # gfx1170: TheRock tarball selection, NATIVE default import lib, and
       # wheel rocm index hint all take the first list entry (see cmake/deps.cmake).
-      HIP_ARCHITECTURES: "gfx1151;gfx1152;gfx1150"
+      HIP_ARCHITECTURES: "gfx1170"
 
     steps:
       # MorphiZen is vendored in-tree as a git subtree under morphizen,
@@ -183,12 +183,14 @@ jobs:
           cp "${{ runner.workspace }}/install/lib/"*.lib staging/lib/ 2>/dev/null || true
 
           THEROCK_DIR="../build/$(basename "$PWD")/_therock"
-          for pat in amdhip64_7.dll 'amd_comgr*.dll' \
-                     hipblaslt.dll libhipblaslt.dll 'hiprtc*.dll'; do
+          for pat in amdhip64_7.dll rocm_kpack.dll MIOpen.dll rocblas.dll \
+                     'amd_comgr*.dll' hipblaslt.dll libhipblaslt.dll 'hiprtc*.dll'; do
             cp $THEROCK_DIR/bin/$pat staging/bin/ 2>/dev/null || true
           done
           cp -r "$THEROCK_DIR/bin/hipblaslt" staging/bin/ 2>/dev/null || true
-          for pat in 'amdhip64*.lib' hipblaslt.lib libhipblaslt.dll.a; do
+          cp -r "$THEROCK_DIR/bin/rocblas" staging/bin/ 2>/dev/null || true
+          for pat in 'amdhip64*.lib' hipblaslt.lib libhipblaslt.dll.a \
+                     rocm_kpack.lib rocblas.lib MIOpen.lib; do
             cp $THEROCK_DIR/lib/$pat staging/lib/ 2>/dev/null || true
           done
 
