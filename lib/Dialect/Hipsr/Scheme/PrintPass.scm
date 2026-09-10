@@ -1,9 +1,10 @@
 ;; Pure Scheme MLIR Pass - Print Operations
 ;; This is a complete MLIR pass written entirely in Scheme
 ;; Demonstrates the MLIR logging API with different verbosity levels
-;; Extensively uses rime loop macro for functional iteration
 
-(import (chezscheme))
+#!chezscheme
+;; No need to import - #!chezscheme directive provides all bindings
+
 ;; TODO: Re-enable rime loop when compatibility issues are resolved
 ;; (import (rime loop))
 
