@@ -61,22 +61,21 @@ struct RocMlirOpLowering : public ConvertOpToLLVMPattern<RocMlirOp> {
     // ELF carries embedded NULs, so keep the exact byte length (createGlobal
     // string stores the StringRef's full range, no NUL-termination scan).
     StringRef callee = op.getKernel();
-    Value kernelBinary = globalString(module, rewriter, loc,
-                                      (callee + "_binary").str(),
-                                      op.getKernelBinary());
+    Value kernelBinary =
+        globalString(module, rewriter, loc, (callee + "_binary").str(),
+                     op.getKernelBinary());
     // NUL-terminate the function name so a C `char*` consumer can read it.
     std::string funcNameStr = callee.str();
     funcNameStr.push_back('\0');
-    Value funcName =
-        globalString(module, rewriter, loc, (callee + "_name").str(),
-                     funcNameStr);
+    Value funcName = globalString(module, rewriter, loc,
+                                  (callee + "_name").str(), funcNameStr);
 
     // Operand data pointers, in kernel-arg order: inputs first, then output.
     SmallVector<Value> argPtrs;
     for (Value in : adaptor.getInputs())
       argPtrs.push_back(extractContiguousMemRefPtr(in, rewriter, loc));
-    argPtrs.push_back(extractContiguousMemRefPtr(adaptor.getOutput(), rewriter,
-                                                 loc));
+    argPtrs.push_back(
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc));
 
     // alloc(kernargs, size): stack buffer of N pointer slots.
     int64_t numArgs = static_cast<int64_t>(argPtrs.size());
@@ -88,8 +87,8 @@ struct RocMlirOpLowering : public ConvertOpToLLVMPattern<RocMlirOp> {
     for (int64_t i : llvm::seq<int64_t>(0, numArgs)) {
       Value idx = LLVM::ConstantOp::create(rewriter, loc, i32Type,
                                            rewriter.getI32IntegerAttr(i));
-      Value slot = LLVM::GEPOp::create(rewriter, loc, ptrType, ptrType,
-                                       kernargs, idx);
+      Value slot =
+          LLVM::GEPOp::create(rewriter, loc, ptrType, ptrType, kernargs, idx);
       LLVM::StoreOp::create(rewriter, loc, argPtrs[i], slot);
     }
 
