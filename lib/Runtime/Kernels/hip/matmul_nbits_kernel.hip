@@ -6252,6 +6252,22 @@ static void launchCastFp16ToFp32(hipStream_t stream, const _Float16* src,
                        src, dst, n, num_vec2);
 }
 
+// Flat fp32 -> fp16 cast for a MatMulNBits `scales` buffer ([N, num_groups_k],
+// n_elems = N * num_groups_k). ONNX MatMulNBits allows scales to carry either
+// fp16 or fp32 (independent of the packed-weight dtype); every fast/naive path
+// below reads `scales` as a raw `__half`/`_Float16` array, so a fp32 scales
+// buffer must be converted once up front (see
+// lib/Runtime/real/matmul_nbits.cpp's lookup_or_convert_scale_fp16, which
+// caches the converted buffer per weight pointer -- scales are model
+// constants, so this is a one-time cost per session).
+extern "C" void hip_matmul_nbits_convert_scale_fp32_to_fp16(
+    void* stream, const void* scale_fp32, void* scale_fp16_out, int64_t n_elems)
+{
+    launchCastFp32ToFp16(static_cast<hipStream_t>(stream),
+                         static_cast<const float*>(scale_fp32),
+                         static_cast<_Float16*>(scale_fp16_out), n_elems);
+}
+
 static _Float16* g_fp32cast_a_buf = nullptr;
 static size_t    g_fp32cast_a_elems = 0;
 static _Float16* ensureFp32CastABuffer(size_t elems) {
