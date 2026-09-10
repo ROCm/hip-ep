@@ -5,39 +5,35 @@
 ;; Import rime loop for functional iteration
 (import (rime loop))
 
-;; Helper: join strings
-(define (string-join strs sep)
-  (if (null? strs)
-      ""
-      (let loop-inner ((rest (cdr strs)) (acc (car strs)))
-        (if (null? rest)
-            acc
-            (loop-inner (cdr rest)
-                        (string-append acc sep (car rest)))))))
-
 ;; Helper: format operands list using rime loop
 (define (format-operands op num-operands)
   (if (zero? num-operands)
       ""
-      (let ((operands (loop :for i :from 0 :to (- num-operands 1)
-                        :collect (mlir-operation-get-operand op i))))
-        (format " | Operands[~a]: ~a"
-                num-operands
-                (string-join (loop :for operand :in operands
-                               :collect (number->string operand))
-                             ", ")))))
+      (format " | Operands[~a]: ~a"
+              num-operands
+              (loop :for i :from 0 :to (- num-operands 1)
+                    :with operand := (mlir-operation-get-operand op i)
+                    :with str := (number->string operand)
+                    :collect str
+                    :finally (loop :for s :in :return-value
+                                   :for is-first := #t :then #f
+                                   :append (if is-first (list s) (list ", " s))
+                                   :finally (apply string-append :return-value))))))
 
 ;; Helper: format results list using rime loop
 (define (format-results op num-results)
   (if (zero? num-results)
       ""
-      (let ((results (loop :for i :from 0 :to (- num-results 1)
-                       :collect (mlir-operation-get-result op i))))
-        (format " | Results[~a]: ~a"
-                num-results
-                (string-join (loop :for result :in results
-                               :collect (number->string result))
-                             ", ")))))
+      (format " | Results[~a]: ~a"
+              num-results
+              (loop :for i :from 0 :to (- num-results 1)
+                    :with result := (mlir-operation-get-result op i)
+                    :with str := (number->string result)
+                    :collect str
+                    :finally (loop :for s :in :return-value
+                                   :for is-first := #t :then #f
+                                   :append (if is-first (list s) (list ", " s))
+                                   :finally (apply string-append :return-value))))))
 
 ;; Helper: format operation details
 (define (format-operation op)
