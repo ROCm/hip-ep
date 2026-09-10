@@ -567,10 +567,6 @@ private:
   ///     llvm.return %2 : i32
   ///   }
   ///
-  /// funcName picks the entry point to emit; the runtime symbol it calls and
-  /// whether it carries a config ptr follow from it. kInferenceInitV2 takes a
-  /// third config ptr and forwards it to hipdnn_ep_state_init_v2. Both are
-  /// emitted, and everything after the init call is identical.
   void generateInferenceInit(ModuleOp module, size_t blobSize,
                              StringRef funcName) {
     const bool isV2 = funcName == hipdnn::abi::kInferenceInitV2;

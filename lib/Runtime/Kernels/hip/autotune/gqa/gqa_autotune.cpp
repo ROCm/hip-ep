@@ -527,25 +527,10 @@ struct Policy {
   int compute_units = 0;
 };
 
-const char *modeName(GqaAutotuneMode mode) {
-  return mode == GqaAutotuneMode::Online ? "online (GPU benchmark, table "
-                                           "bypassed)"
-                                         : "lookup (offline table)";
-}
-
-constexpr const char *kDefaultModeSource = "the default";
-
-struct ModeChoice {
-  GqaAutotuneMode mode = GqaAutotuneMode::Lookup;
-  const char *source = kDefaultModeSource;
-};
-
-// HIPDNN_GQA_AUTOTUNE_MODE outranks the gqa_autotune_mode provider option, which
-// outranks the default. An unrecognised value says so rather than quietly
-// handing the session to the lever below it: the point of the switch is to
-// compare the two paths, so silently running the other one is the failure worth
-// a message.
-ModeChoice chooseMode(const char *provider_mode) {
+// HIPDNN_GQA_AUTOTUNE_MODE outranks the gqa_autotune_mode provider option: an
+// environment variable that is set takes the session even if its value is not
+// a mode, rather than handing it to the option below it.
+GqaAutotuneMode chooseMode(const char *provider_mode) {
 #ifdef _WIN32
   char buf[16];
   DWORD n =
@@ -555,25 +540,15 @@ ModeChoice chooseMode(const char *provider_mode) {
   const char *v = getenv("HIPDNN_GQA_AUTOTUNE_MODE");
   std::string raw = v ? std::string(v) : "";
 #endif
-  const char *source = "HIPDNN_GQA_AUTOTUNE_MODE";
-  if (raw.empty()) {
+  if (raw.empty())
     raw = provider_mode ? provider_mode : "";
-    source = "gqa_autotune_mode (provider option)";
-  }
   std::string mode;
   for (char c : raw)
     if (c > ' ')
       mode.push_back(c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c);
-  if (mode == "lookup")
-    return {GqaAutotuneMode::Lookup, source};
   if (mode == "online")
-    return {GqaAutotuneMode::Online, source};
-  if (!mode.empty() && logOn())
-    fprintf(stderr,
-            "[gqa-lut] unrecognised %s=\"%s\" (expected \"lookup\" or "
-            "\"online\"); using the default, %s\n",
-            source, raw.c_str(), modeName(GqaAutotuneMode::Lookup));
-  return {GqaAutotuneMode::Lookup, kDefaultModeSource};
+    return GqaAutotuneMode::Online;
+  return GqaAutotuneMode::Lookup;
 }
 
 // The nearest point in the group, plus whether it was accepted by the decode
@@ -646,14 +621,8 @@ extern "C" {
 
 void *hip_gqa_autotune_create(const char *provider_mode) {
   auto *p = new hipdnn_ep::Policy();
-  const hipdnn_ep::ModeChoice choice = hipdnn_ep::chooseMode(provider_mode);
-  p->mode = choice.mode;
+  p->mode = hipdnn_ep::chooseMode(provider_mode);
   p->compute_units = hipdnn_ep::currentComputeUnits();
-  // Says which lever decided, not just what the mode is: an override that did
-  // not take otherwise looks identical to the default.
-  if (hipdnn_ep::logOn())
-    fprintf(stderr, "[gqa-lut] mode %s (from %s)\n",
-            hipdnn_ep::modeName(p->mode), choice.source);
   // Force the table to load now so HIPDNN_GQA_LUT_LOG reports at session start,
   // not on the first dispatch.
   (void)hipdnn_ep::table();

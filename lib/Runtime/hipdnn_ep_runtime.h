@@ -615,8 +615,6 @@ int hipdnn_ep_stream_sync(RuntimeState *state);
 // HIPDNN_EP_PERF)
 void *hipdnn_ep_state_get_op_profile(RuntimeState *state);
 
-// Session-scoped EP provider option, or null when the key was not supplied.
-// The value is owned by RuntimeState and stays valid until cleanup.
 const char *hipdnn_ep_runtime_get_provider_option(RuntimeState *state,
                                                   const char *key);
 

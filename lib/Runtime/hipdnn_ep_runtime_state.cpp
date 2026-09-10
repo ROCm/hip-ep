@@ -43,8 +43,6 @@ static int per_entry_load_constants(RuntimeState *state,
                                     morphizen::FileSystem *fs,
                                     const char *constants_filename);
 
-// Shared implementation for hipdnn_ep_state_init_with_fs and
-// hipdnn_ep_state_init_v2; both validate their arguments before calling in.
 static int init_common(RuntimeState **out_state,
                        morphizen::FileSystem *fileSystem,
                        const void *metadata_blob, size_t blob_size,
