@@ -380,6 +380,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/qmatmul.cpp runtime_qmatmul.bc)
     compile_to_bitcode(real/qconv.cpp runtime_qconv.bc)
     compile_to_bitcode(real/qlpnormalization.cpp runtime_qlpnormalization.bc)
+    compile_to_bitcode(real/qsigmoid.cpp runtime_qsigmoid.bc)
 
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
@@ -471,6 +472,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmatmul.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qconv.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qlpnormalization.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_qsigmoid.bc
     )
     # Vendor-symbol stubs (see the compile_to_bitcode above) join runtime.bc only
     # when the vendor BLAS/DNN backends are disabled.

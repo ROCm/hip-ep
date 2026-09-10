@@ -696,6 +696,20 @@ void QLpNormalizationOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// QSigmoidOp: quantized ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QSigmoidOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QSigmoidOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // HipblasltMatmulOp: ins(A, B), outs(C)
 //===----------------------------------------------------------------------===//
 
