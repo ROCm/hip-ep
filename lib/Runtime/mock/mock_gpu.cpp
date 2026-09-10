@@ -1663,6 +1663,26 @@ int wrap_qconv(RuntimeState *state, const void *input, const void *weights,
   return 0;
 }
 
+int wrap_qlpnormalization(RuntimeState *state, const void *input, void *output,
+                          int64_t num_elements, int64_t norm_num_elements,
+                          int64_t data_type, float input_scale,
+                          int64_t input_zp, float output_scale,
+                          int64_t output_zp, int64_t axis, int64_t p) {
+  (void)input;
+  (void)output;
+  (void)input_scale;
+  (void)input_zp;
+  (void)output_scale;
+  (void)output_zp;
+  if (!state)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_qlpnormalization numel=%lld N=%lld dtype=%s "
+             "axis=%lld p=%lld\n",
+             (long long)num_elements, (long long)norm_num_elements,
+             hipdnn_ep_datatype_name(data_type), (long long)axis, (long long)p);
+  return 0;
+}
+
 int wrap_and(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
              int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n, int64_t b_c,
              int64_t b_h, int64_t b_w, int64_t out_n, int64_t out_c,

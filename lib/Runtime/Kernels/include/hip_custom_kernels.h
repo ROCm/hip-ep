@@ -2235,6 +2235,20 @@ HIP_KERNEL_API int hip_gather_block_quantized(
  * integer target supported here is unconditional. It would have to be
  * forwarded again if float8 support is added.
  */
+HIP_KERNEL_API int hip_qlpnormalization_prepare_params(
+    void* stream,
+    void* rms_scale,
+    int64_t norm_num_elements,
+    float norm_scale,
+    void* input_scale_device,
+    float input_scale,
+    void* output_scale_device,
+    float output_scale,
+    void* input_zp_device,
+    uint16_t input_zp,
+    void* output_zp_device,
+    uint16_t output_zp);
+
 HIP_KERNEL_API int hip_quantize_linear(
     void* stream,
     const void* input,           // high precision
