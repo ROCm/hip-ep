@@ -336,6 +336,27 @@ isPackedInt4PerChannelWeight(mlir::PatternRewriter &, mlir::PDLResultList &,
   return mlir::success(isPackedInt4Constant(zeroPoints));
 }
 
+// onnx.Sigmoid in a UINT16 QDQ sandwich. Per-tensor scale/zp folding is
+// enforced by the splat/zp constraints on the surrounding Q/DQ ops.
+inline mlir::LogicalResult
+isFusableQSigmoid(mlir::PatternRewriter &, mlir::PDLResultList &,
+                  llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 1)
+    return mlir::failure();
+  mlir::Operation *op = args[0].dyn_cast<mlir::Operation *>();
+  if (!op || op->getNumOperands() != 1 || op->getNumResults() != 1)
+    return mlir::failure();
+  auto inputType =
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getOperand(0).getType());
+  auto outputType =
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!inputType || !outputType || !inputType.hasStaticShape() ||
+      !outputType.hasStaticShape() ||
+      inputType.getShape() != outputType.getShape())
+    return mlir::failure();
+  return mlir::success();
+}
+
 //===----------------------------------------------------------------------===//
 // Rewrite functions -- reached only after the constraints above accepted.
 //===----------------------------------------------------------------------===//
@@ -451,6 +472,8 @@ inline bool run(mlir::ModuleOp mlirModule, llvm::StringRef pdlBytecodeFile) {
                                          isFusableQConvGeometry);
   pdlPatterns.registerConstraintFunction("IsPackedInt4PerChannelWeight",
                                          isPackedInt4PerChannelWeight);
+  pdlPatterns.registerConstraintFunction("IsFusableQSigmoid",
+                                         isFusableQSigmoid);
   pdlPatterns.registerRewriteFunction("GetContextArg", getContextArg);
   pdlPatterns.registerRewriteFunction("ExtractScaleValue", extractScaleValue);
   pdlPatterns.registerRewriteFunction("ExtractZeropointValue",

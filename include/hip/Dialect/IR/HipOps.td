@@ -5092,4 +5092,39 @@ def Hip_QConvOp : Hip_DpsOp<"qconv",
     attr-dict (`:` type($result_tensors)^)?
   }];
 }
+
+def Hip_QSigmoidOp : Hip_DpsOp<"qsigmoid",
+                               /*traits=*/[],
+                               /*outsAccessor=*/"Output",
+                               /*autoReify=*/1,
+                               /*autoInfer=*/1,
+                               /*declareInfer=*/1> {
+  let summary = "Quantized Sigmoid with integrated QDQ";
+  let description = [{
+    Fuses DequantizeLinear -> Sigmoid -> QuantizeLinear.
+
+    The match is UINT16 per-tensor input/output quantization:
+
+      y = Q( sigmoid(DQ(x)) )
+
+    Input and output scales/zero-points stay separate attributes: LoRA/ORC
+    never share them, so requantization is part of the fused op.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    F32Attr:$input_scale,
+    I64Attr:$input_zp,
+    F32Attr:$output_scale,
+    I64Attr:$output_zp
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
 #endif // HIP_OPS

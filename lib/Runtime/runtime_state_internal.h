@@ -138,6 +138,13 @@ struct RuntimeState {
   void *conv_scratch;
   size_t conv_scratch_size;
 
+  // Per-session scratch for wrap_qsigmoid (f32 workspace + Q/DQ scalars).
+  // Same grow-on-demand / never-shrink policy as conv_scratch; lazily
+  // allocated on first call, freed in hipdnn_ep_state_cleanup. Single-buffer
+  // reuse is safe because the HIP stream is serialised.
+  void *qsigmoid_scratch;
+  size_t qsigmoid_scratch_size;
+
   // Per-session scratch for the W4A8 dp4a matmul_nbits decode path
   // (hip_matmul_nbits_dp4a). One contiguous device buffer holding the
   // per-token quantized activation (int8, K bytes, nibble-deinterleaved) plus
