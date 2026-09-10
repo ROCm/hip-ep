@@ -6192,6 +6192,94 @@ extern "C" void hip_matmul_nbits_dequant_b_fp16(
                        N, K, group_size, num_groups_k);
 }
 
+/* -----------------------------------------------------------------------
+ * fp32 A / fp32 output cast patch (element_size_bytes==4, bits != 8):
+ * device-side, vectorized float<->fp16 conversion so the existing fp16
+ * compute path (WMMA/GEMV/naive below) runs completely unchanged.
+ * ----------------------------------------------------------------------- */
+
+__global__ void cast_fp32_to_fp16_kernel(
+    const float* __restrict__ src, _Float16* __restrict__ dst,
+    int64_t n, int64_t num_vec2)
+{
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < num_vec2) {
+        float2 v = reinterpret_cast<const float2*>(src)[idx];
+        reinterpret_cast<__half2*>(dst)[idx] = __floats2half2_rn(v.x, v.y);
+    }
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        for (int64_t i = num_vec2 * 2; i < n; ++i)
+            dst[i] = static_cast<_Float16>(src[i]);
+    }
+}
+
+__global__ void cast_fp16_to_fp32_kernel(
+    const _Float16* __restrict__ src, float* __restrict__ dst,
+    int64_t n, int64_t num_vec2)
+{
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < num_vec2) {
+        __half2 v = reinterpret_cast<const __half2*>(src)[idx];
+        reinterpret_cast<float2*>(dst)[idx] = __half22float2(v);
+    }
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        for (int64_t i = num_vec2 * 2; i < n; ++i)
+            dst[i] = static_cast<float>(src[i]);
+    }
+}
+
+static void launchCastFp32ToFp16(hipStream_t stream, const float* src,
+                                 _Float16* dst, int64_t n)
+{
+    int64_t num_vec2 = n / 2;
+    constexpr int THR = 256;
+    int64_t blocks = (num_vec2 + THR - 1) / THR;
+    if (blocks < 1) blocks = 1;
+    hipLaunchKernelGGL(cast_fp32_to_fp16_kernel,
+                       dim3(static_cast<unsigned>(blocks)), dim3(THR), 0, stream,
+                       src, dst, n, num_vec2);
+}
+
+static void launchCastFp16ToFp32(hipStream_t stream, const _Float16* src,
+                                 float* dst, int64_t n)
+{
+    int64_t num_vec2 = n / 2;
+    constexpr int THR = 256;
+    int64_t blocks = (num_vec2 + THR - 1) / THR;
+    if (blocks < 1) blocks = 1;
+    hipLaunchKernelGGL(cast_fp16_to_fp32_kernel,
+                       dim3(static_cast<unsigned>(blocks)), dim3(THR), 0, stream,
+                       src, dst, n, num_vec2);
+}
+
+static _Float16* g_fp32cast_a_buf = nullptr;
+static size_t    g_fp32cast_a_elems = 0;
+static _Float16* ensureFp32CastABuffer(size_t elems) {
+    if (g_fp32cast_a_buf && g_fp32cast_a_elems >= elems) return g_fp32cast_a_buf;
+    if (g_fp32cast_a_buf) hipFree(g_fp32cast_a_buf);
+    g_fp32cast_a_buf = nullptr;
+    if (hipMalloc(&g_fp32cast_a_buf, elems * sizeof(_Float16)) != hipSuccess) {
+        g_fp32cast_a_elems = 0;
+        return nullptr;
+    }
+    g_fp32cast_a_elems = elems;
+    return g_fp32cast_a_buf;
+}
+
+static _Float16* g_fp32cast_c_buf = nullptr;
+static size_t    g_fp32cast_c_elems = 0;
+static _Float16* ensureFp32CastCBuffer(size_t elems) {
+    if (g_fp32cast_c_buf && g_fp32cast_c_elems >= elems) return g_fp32cast_c_buf;
+    if (g_fp32cast_c_buf) hipFree(g_fp32cast_c_buf);
+    g_fp32cast_c_buf = nullptr;
+    if (hipMalloc(&g_fp32cast_c_buf, elems * sizeof(_Float16)) != hipSuccess) {
+        g_fp32cast_c_elems = 0;
+        return nullptr;
+    }
+    g_fp32cast_c_elems = elems;
+    return g_fp32cast_c_buf;
+}
+
 extern "C" int hip_matmul_nbits(
     void* stream,
     const void* A,
@@ -6217,6 +6305,39 @@ extern "C" int hip_matmul_nbits(
   }
 
   if (M <= 0 || N <= 0 || K <= 0 || batch_count <= 0) return 0;
+
+  if (element_size_bytes == 4 && bits != 8) {
+    hipStream_t cast_stream = static_cast<hipStream_t>(stream);
+    const int64_t a_elems = batch_count * M * K;
+    const int64_t c_elems = batch_count * M * N;
+
+    _Float16* a_fp16 = ensureFp32CastABuffer(static_cast<size_t>(a_elems));
+    _Float16* c_fp16 = ensureFp32CastCBuffer(static_cast<size_t>(c_elems));
+    if (!a_fp16 || !c_fp16) {
+      fprintf(stderr,
+              "[custom_kernels] hip_matmul_nbits: fp32 cast scratch alloc failed\n");
+      return -1;
+    }
+
+    launchCastFp32ToFp16(cast_stream, static_cast<const float*>(A), a_fp16, a_elems);
+
+    int rc = hip_matmul_nbits(
+        stream, a_fp16, B, scales, zero_points, bias, c_fp16,
+        M, N, K, batch_count, bits, block_size,
+        /*element_size_bytes=*/2, zp_elem_size,
+        pre_unpacked_zp_u8, pre_unpacked_zp_fp16);
+    if (rc != 0) return rc;
+
+    launchCastFp16ToFp32(cast_stream, c_fp16, static_cast<float*>(output), c_elems);
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+      fprintf(stderr,
+              "[custom_kernels] hip_matmul_nbits: fp32 cast convert launch failed: %s\n",
+              hipGetErrorString(err));
+    }
+    return static_cast<int>(err);
+  }
 
   if (element_size_bytes != 2) {
     fprintf(stderr,
