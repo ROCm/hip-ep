@@ -1610,6 +1610,24 @@ int wrap_qelementwise(RuntimeState *state, void *lhs, void *rhs, void *output,
   return 0;
 }
 
+int wrap_qactivation(RuntimeState *state, void *input, void *output,
+                     int64_t kind, int64_t num_elements, int64_t data_type,
+                     float x_scale, int64_t x_zero_point, float out_recip_scale,
+                     int64_t y_zero_point) {
+  (void)input;
+  (void)output;
+  (void)num_elements;
+  (void)data_type;
+  (void)x_scale;
+  (void)x_zero_point;
+  (void)out_recip_scale;
+  (void)y_zero_point;
+  if (!state)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_qactivation,kind=%lld", (long long)kind);
+  return 0;
+}
+
 int wrap_qmatmul(RuntimeState *state, const void *A, const void *B, void *Y,
                  int64_t M, int64_t N, int64_t K, int64_t batch_count,
                  int64_t b_batch_stride, int64_t trans_a, int64_t trans_b,

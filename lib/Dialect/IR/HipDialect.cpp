@@ -669,6 +669,19 @@ void QMulOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// QSigmoidOp: ins(x), outs(y)
+// Quantized sigmoid with integrated QDQ scales and zero points
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QSigmoidOp::getDpsInitsMutable() { return getYMutable(); }
+
+void QSigmoidOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // QConvOp: quantized ins(input, weights, scales, zero-points, [bias]),
 // outs(output)
 //===----------------------------------------------------------------------===//

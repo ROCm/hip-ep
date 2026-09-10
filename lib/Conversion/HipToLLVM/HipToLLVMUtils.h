@@ -141,6 +141,7 @@ inline constexpr const char *kWrapScatterND = "wrap_scatter_nd";
 inline constexpr const char *kWrapNonZero = "wrap_nonzero";
 inline constexpr const char *kWrapSize = "wrap_size";
 inline constexpr const char *kWrapQElementwise = "wrap_qelementwise";
+inline constexpr const char *kWrapQActivation = "wrap_qactivation";
 inline constexpr const char *kWrapQMatMul = "wrap_qmatmul";
 inline constexpr const char *kWrapQConv = "wrap_qconv";
 // Synchronize the stream and read a device i32 scalar back to the host
@@ -393,6 +394,14 @@ enum HipdnnQElementwiseKind : int64_t {
   kQElementwiseMul = 1,
 };
 
+// Must match HIPDNN_EP_QACTIVATION_* in lib/Runtime/hipdnn_ep_runtime.h.
+// One shared runtime entry (wrap_qactivation) dispatches on this kind, so
+// future family members (qtanh, qsoftplus, qgelu, ...) add an enumerator
+// here without changing the ABI shape.
+enum HipdnnQActivationKind : int64_t {
+  kQActivationSigmoid = 0,
+};
+
 // Must match HIPDNN_EP_TENSOR_OP_* in lib/Runtime/hipdnn_ep_runtime.h
 enum HipdnnTensorOp : int64_t {
   kTensorOpMul = 0,
@@ -527,6 +536,8 @@ void populateGlobalPoolLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns);
 void populateQElementwiseLoweringPatterns(const LLVMTypeConverter &converter,
                                           RewritePatternSet &patterns);
+void populateQActivationLoweringPatterns(const LLVMTypeConverter &converter,
+                                         RewritePatternSet &patterns);
 void populateQMatMulLoweringPatterns(const LLVMTypeConverter &converter,
                                      RewritePatternSet &patterns);
 void populateQConvLoweringPatterns(const LLVMTypeConverter &converter,

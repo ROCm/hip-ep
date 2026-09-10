@@ -51,6 +51,7 @@ set(_kernel_sources
     hip/softplus_kernel.hip
     hip/elementwise_where_kernel.hip
     hip/qelementwise_kernel.hip
+    hip/qactivation_kernel.hip
     hip/qmatmul_kernel.hip
     hip/qconv_kernel.hip
     hip/elementwise_unary_kernel.hip

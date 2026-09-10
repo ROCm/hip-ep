@@ -289,6 +289,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateGridSampleLoweringPatterns(typeConverter, patterns);
   populateGlobalPoolLoweringPatterns(typeConverter, patterns);
   populateQElementwiseLoweringPatterns(typeConverter, patterns);
+  populateQActivationLoweringPatterns(typeConverter, patterns);
   populateQMatMulLoweringPatterns(typeConverter, patterns);
   populateQConvLoweringPatterns(typeConverter, patterns);
 

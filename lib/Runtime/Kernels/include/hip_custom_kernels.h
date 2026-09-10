@@ -176,6 +176,35 @@ HIP_KERNEL_API int hip_qelementwise(
     int64_t output_zp);
 
 /* =========================================================================
+ * Quantized unary activation (Q(activation(DQ(X)))), e.g. Sigmoid
+ * =========================================================================
+ *
+ * input/output are integer quantized buffers of the same hip_dtype, sharing
+ * one flat shape -- unary activations never broadcast.
+ *
+ * kind: 0 = sigmoid (HIPDNN_EP_QACTIVATION_SIGMOID).
+ *
+ * out_recip_scale is folded by the host wrapper as 1.0f / y_scale, so the
+ * kernel never performs a runtime division:
+ *
+ *   x = (X - x_zero_point) * x_scale
+ *   y = activation(x)
+ *   Y = saturate(round(y * out_recip_scale) + y_zero_point)
+ *
+ * Supported hip_dtype: HIP_DTYPE_INT8, HIP_DTYPE_UINT8, HIP_DTYPE_INT16,
+ * HIP_DTYPE_UINT16.
+ */
+HIP_KERNEL_API int hip_qactivation(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t kind,
+    int64_t num_elements,
+    int hip_dtype,
+    float x_scale, int64_t x_zero_point,
+    float out_recip_scale, int64_t y_zero_point);
+
+/* =========================================================================
  * Quantized batched matmul (Q(DQ(A) @ DQ(B)))
  * =========================================================================
  *

@@ -212,6 +212,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     LoopOp::attachInterface<HipDstBufferizableModel<LoopOp>>(*ctx);
     QAddOp::attachInterface<HipDstBufferizableModel<QAddOp>>(*ctx);
     QMulOp::attachInterface<HipDstBufferizableModel<QMulOp>>(*ctx);
+    QSigmoidOp::attachInterface<HipDstBufferizableModel<QSigmoidOp>>(*ctx);
     QMatMulOp::attachInterface<HipDstBufferizableModel<QMatMulOp>>(*ctx);
     QConvOp::attachInterface<HipDstBufferizableModel<QConvOp>>(*ctx);
     // hip.if is a DPS control-flow op (getDpsInitsMutable, results alias
