@@ -32,7 +32,7 @@
 // CHECK-NEXT: %[[OFF0:.+]] = arith.constant 0 : index
 // CHECK-NEXT: %[[OFF2:.+]] = arith.addi %[[G0]], %[[G1]] : index
 // CHECK-NEXT: %[[POOLSZ:.+]] = arith.addi %[[OFF2]], %[[G2]] : index
-// CHECK-NEXT: %[[POOL:.+]] = hipsr.get_pool(%{{.+}}, %[[POOLSZ]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
+// CHECK-NEXT: %[[POOL:.+]] = hipsr.get_pool(%{{.+}}, %[[POOLSZ]]) {bufferization.manual_deallocation, domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
 // CHECK-NEXT: %[[VA:.+]] = memref.view %[[POOL]][%[[OFF0]]][%[[DIM]]] : memref<?xi8, #hipsr.mem<device>> to memref<?x1024xf16, #hipsr.mem<device>>
 // CHECK-NEXT: %[[VD:.+]] = memref.view %[[POOL]][%[[OFF0]]][%[[DIM]]] : memref<?xi8, #hipsr.mem<device>> to memref<?x2048xf16, #hipsr.mem<device>>
 // CHECK-NEXT: %[[VB:.+]] = memref.view %[[POOL]][%[[G0]]][%[[DIM]]] : memref<?xi8, #hipsr.mem<device>> to memref<?x512xf16, #hipsr.mem<device>>

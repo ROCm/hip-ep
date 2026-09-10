@@ -28,6 +28,23 @@ OperandRange mlir::hipsr::getHipsrDestinationOperands(Operation *op) {
   return none;
 }
 
+void mlir::hipsr::getDpsMemoryEffects(
+    DestinationStyleOpInterface op,
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  for (OpOperand &operand : op->getOpOperands()) {
+    if (!isa<MemRefType>(operand.get().getType())) {
+      continue;
+    }
+    // A destination is fully overwritten, so it is written and not read.
+    if (op.isDpsInit(&operand)) {
+      effects.emplace_back(MemoryEffects::Write::get(), &operand);
+    } else {
+      effects.emplace_back(MemoryEffects::Read::get(), &operand);
+    }
+  }
+}
+
 // A hipsr op orders its operands as context, inputs, then destinations.
 OperandRange mlir::hipsr::getHipsrInputOperands(Operation *op) {
   OperandRange destinations = getHipsrDestinationOperands(op);

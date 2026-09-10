@@ -9,6 +9,7 @@
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
 
 #include "mlir/Conversion/ShapeToStandard/ShapeToStandard.h"
+#include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/Passes.h"
@@ -30,6 +31,8 @@
 //   --hipsr-use-output-allocator
 //   --hipsr-pool-alloc
 //   --hipsr-inline-regions
+//   --buffer-deallocation-pipeline
+//   --optimize-allocation-liveness
 void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
                                      const HipsrPipelineOptions & /*options*/) {
   pm.addPass(createAddContextArgPass());
@@ -62,6 +65,11 @@ void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
   pm.addNestedPass<func::FuncOp>(createHipsrUseOutputAllocatorPass());
   pm.addPass(createHipsrPoolAllocPass());
   pm.addPass(createHipsrInlineRegionsPass());
+
+  bufferization::BufferDeallocationPipelineOptions deallocOptions;
+  bufferization::buildBufferDeallocationPipeline(pm, deallocOptions);
+  pm.addNestedPass<func::FuncOp>(
+      bufferization::createOptimizeAllocationLivenessPass());
 }
 
 void mlir::hipsr::registerHipsrPipelines() {

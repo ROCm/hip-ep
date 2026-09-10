@@ -14,13 +14,14 @@ namespace hipsr {
 void AllocOutputOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  // Two reasons for not using Alloc:
-  // 1. The memory allocated by alloc_output is owned by the EP. If
-  // MemoryEffects::Alloc
-  //    is used, hip-pool-allocs treat it as a transient and pool it and
-  //    may incorrectly free it.
-  // 2. Marking it as Write prevents the operation from being removed by DCE.
-  effects.emplace_back(MemoryEffects::Write::get(),
+  // Allocate on the result so --buffer-deallocation-pipeline treats a returned
+  // alloc_output as owned and does not clone it:
+  //
+  //   %out = hipsr.alloc_output(%ctx) {out_idx = 0}
+  //   hipsr.cast(%ctx) ins(%in) outs(%out)
+  //   return %out
+  effects.emplace_back(MemoryEffects::Allocate::get(),
+                       getOperation()->getResult(0),
                        SideEffects::DefaultResource::get());
 }
 

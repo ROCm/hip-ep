@@ -10,6 +10,7 @@
 #include "hip/Dialect/Hipsr/IR/HipsrTypes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Bufferization/Transforms/BufferViewFlowAnalysis.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -446,7 +447,13 @@ Value emitPool(OpBuilder &builder, Location loc, Value ctx, Value poolSize,
       MemorySpaceAttr::get(builder.getContext(), MemorySpace::Device);
   auto poolType = MemRefType::get({ShapedType::kDynamic}, builder.getI8Type(),
                                   MemRefLayoutAttrInterface{}, deviceSpace);
-  return GetPoolOp::create(builder, loc, poolType, ctx, poolSize, domainId);
+  auto pool =
+      GetPoolOp::create(builder, loc, poolType, ctx, poolSize, domainId);
+
+  // Dealloc will not free a buffer that carries this attr.
+  pool->setAttr(bufferization::BufferizationDialect::kManualDeallocation,
+                builder.getUnitAttr());
+  return pool.getResult();
 }
 
 std::pair<llvm::SmallVector<Value>, Value>
