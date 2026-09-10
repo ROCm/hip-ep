@@ -5,31 +5,39 @@
 ;; Import rime loop for functional iteration
 (import (rime loop))
 
+;; Helper: join strings
+(define (string-join strs sep)
+  (if (null? strs)
+      ""
+      (let loop-inner ((rest (cdr strs)) (acc (car strs)))
+        (if (null? rest)
+            acc
+            (loop-inner (cdr rest)
+                        (string-append acc sep (car rest)))))))
+
 ;; Helper: format operands list using rime loop
 (define (format-operands op num-operands)
   (if (zero? num-operands)
       ""
-      (let ((operands (loop ((for i (up-from 0 (to num-operands)))
-                             (listing operand (mlir-operation-get-operand op i)))
-                        => operand)))
+      (let ((operands (loop ((for i (up-from 0 (to num-operands))))
+                         (listing (mlir-operation-get-operand op i)))))
         (format " | Operands[~a]: ~a"
                 num-operands
-                (loop ((for op (in-list operands))
-                       (listing str (number->string op)))
-                   => (string-join str ", "))))))
+                (string-join (loop ((for operand (in-list operands)))
+                               (listing (number->string operand)))
+                             ", ")))))
 
 ;; Helper: format results list using rime loop
 (define (format-results op num-results)
   (if (zero? num-results)
       ""
-      (let ((results (loop ((for i (up-from 0 (to num-results)))
-                            (listing result (mlir-operation-get-result op i)))
-                       => result)))
+      (let ((results (loop ((for i (up-from 0 (to num-results))))
+                       (listing (mlir-operation-get-result op i)))))
         (format " | Results[~a]: ~a"
                 num-results
-                (loop ((for res (in-list results))
-                       (listing str (number->string res)))
-                   => (string-join str ", "))))))
+                (string-join (loop ((for result (in-list results)))
+                               (listing (number->string result)))
+                             ", ")))))
 
 ;; Helper: format operation details
 (define (format-operation op)
