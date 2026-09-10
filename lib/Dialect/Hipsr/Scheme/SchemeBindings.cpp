@@ -81,6 +81,10 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
   Sregister_boot_file_bytes("scheme.boot", const_cast<void*>(static_cast<const void*>(scheme_boot_data)), scheme_boot_size);
   Sbuild_heap("hip-mlir-opt", nullptr);
 
+  // Disable library compilation IMMEDIATELY after heap is built
+  // This prevents Chez from trying to write .so files
+  Sset_top_level_value(Sstring_to_symbol("compile-imported-libraries"), Sfalse);
+
   // Get Scheme symbols we'll use
   ptr eval_sym = Stop_level_value(Sstring_to_symbol("eval"));
   ptr read_sym = Stop_level_value(Sstring_to_symbol("read"));
