@@ -6,7 +6,7 @@
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
-#include "SchemeBindings.h"
+#include "Runtime/SchemeBindings.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 
