@@ -805,8 +805,9 @@ int wrap_hipblasLtMatmul(
 // RocMLIR dispatch wrapper (hip.rocmlir). Launches a pre-compiled GPU kernel
 // embedded (as an ELF/HSACO blob) in `kernel_binary` at compile time. The
 // generated IR stages the operand data pointers (inputs first, then output)
-// into `kernargs` (a contiguous array of `size` bytes = num_args * sizeof(void*))
-// and passes the module's launch geometry from the compiled perfConfig.
+// into `kernargs` (a contiguous array of `size` bytes = num_args *
+// sizeof(void*)) and passes the module's launch geometry from the compiled
+// perfConfig.
 //   kernel_binary : embedded GPU binary blob (module image)
 //   func_name     : NUL-terminated kernel symbol to launch
 //   block_size    : threads per block
