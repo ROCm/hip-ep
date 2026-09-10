@@ -6193,9 +6193,13 @@ extern "C" void hip_matmul_nbits_dequant_b_fp16(
 }
 
 /* -----------------------------------------------------------------------
- * fp32 A / fp32 output cast patch (element_size_bytes==4, bits != 8):
+ * fp32 A / fp32 output cast patch (element_size_bytes==4, all bits incl. 8):
  * device-side, vectorized float<->fp16 conversion so the existing fp16
- * compute path (WMMA/GEMV/naive below) runs completely unchanged.
+ * compute path (WMMA/GEMV/naive below, and the bits=8 dispatch) runs
+ * completely unchanged. Trading a persistent (cached, grow-on-demand) fp16
+ * scratch pair for zero per-kernel code duplication -- fp32 is a cold input
+ * type, so this keeps the binary small instead of templating every hot
+ * int8/int4 kernel on the element type.
  * ----------------------------------------------------------------------- */
 
 __global__ void cast_fp32_to_fp16_kernel(
@@ -6306,7 +6310,11 @@ extern "C" int hip_matmul_nbits(
 
   if (M <= 0 || N <= 0 || K <= 0 || batch_count <= 0) return 0;
 
-  if (element_size_bytes == 4 && bits != 8) {
+  // All bits widths (2/3/4/8) route fp32 A/C through the shared fp16 cast
+  // scratch: cast A to fp16, run the unchanged fp16 compute path, cast the
+  // fp16 result back to fp32. bits=8 is included so the int8 dispatch below
+  // stays fp16-only (no element-type template, no code-size growth).
+  if (element_size_bytes == 4) {
     hipStream_t cast_stream = static_cast<hipStream_t>(stream);
     const int64_t a_elems = batch_count * M * K;
     const int64_t c_elems = batch_count * M * N;
