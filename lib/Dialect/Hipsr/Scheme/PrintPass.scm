@@ -13,9 +13,7 @@
               num-operands
               (loop :for i :from 0 :to (- num-operands 1)
                     :with operand := (mlir-operation-get-operand op i)
-                    :with str := (number->string operand)
-                    :append (if (zero? i) (list str) (list ", " str))
-                    :finally (apply string-append :return-value)))))
+                    :join-string operand :seperator ", "))))
 
 ;; Helper: format results list using rime loop
 (define (format-results op num-results)
@@ -25,9 +23,7 @@
               num-results
               (loop :for i :from 0 :to (- num-results 1)
                     :with result := (mlir-operation-get-result op i)
-                    :with str := (number->string result)
-                    :append (if (zero? i) (list str) (list ", " str))
-                    :finally (apply string-append :return-value)))))
+                    :join-string result :seperator ", "))))
 
 ;; Helper: format operation details
 (define (format-operation op)
