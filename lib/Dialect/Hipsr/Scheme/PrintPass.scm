@@ -2,47 +2,34 @@
 ;; This is a complete MLIR pass written entirely in Scheme
 ;; Demonstrates the MLIR logging API with different verbosity levels
 
-;; No imports needed - format is available in the embedded Chez Scheme
+;; Import rime loop for functional iteration
+(import (rime loop))
 
-;; TODO: Re-enable rime loop when compatibility issues are resolved
-;; (import (rime loop))
-
-;; Helper: build list 0..n-1
-(define (iota n)
-  (let loop ((i 0) (acc '()))
-    (if (>= i n)
-        (reverse acc)
-        (loop (+ i 1) (cons i acc)))))
-
-;; Helper: join strings
-(define (string-join strs sep)
-  (if (null? strs)
-      ""
-      (let loop ((rest (cdr strs)) (acc (car strs)))
-        (if (null? rest)
-            acc
-            (loop (cdr rest)
-                  (string-append acc sep (car rest)))))))
-
-;; Helper: format operands list
+;; Helper: format operands list using rime loop
 (define (format-operands op num-operands)
   (if (zero? num-operands)
       ""
-      (let ((operands (map (lambda (i) (mlir-operation-get-operand op i))
-                           (iota num-operands))))
+      (let ((operands (loop ((for i (up-from 0 (to num-operands)))
+                             (listing operand (mlir-operation-get-operand op i)))
+                        => operand)))
         (format " | Operands[~a]: ~a"
                 num-operands
-                (string-join (map number->string operands) ", ")))))
+                (loop ((for op (in-list operands))
+                       (listing str (number->string op)))
+                   => (string-join str ", "))))))
 
-;; Helper: format results list
+;; Helper: format results list using rime loop
 (define (format-results op num-results)
   (if (zero? num-results)
       ""
-      (let ((results (map (lambda (i) (mlir-operation-get-result op i))
-                          (iota num-results))))
+      (let ((results (loop ((for i (up-from 0 (to num-results)))
+                            (listing result (mlir-operation-get-result op i)))
+                       => result)))
         (format " | Results[~a]: ~a"
                 num-results
-                (string-join (map number->string results) ", ")))))
+                (loop ((for res (in-list results))
+                       (listing str (number->string res)))
+                   => (string-join str ", "))))))
 
 ;; Helper: format operation details
 (define (format-operation op)
