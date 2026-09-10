@@ -514,7 +514,8 @@ jobs:
           # Same derivation as the closure step above: build.py builds into
           # <workspace>/build/<checkout-dir-name>/, and cmake/deps.cmake extracts
           # TheRock into _therock there.
-          ROCM_LLVM="${{ runner.workspace }}/build/$(basename "$PWD")/_therock/lib/llvm"
+          THEROCK="${{ runner.workspace }}/build/$(basename "$PWD")/_therock"
+          ROCM_LLVM="$THEROCK/lib/llvm"
           BIN="${{ runner.workspace }}/install/bin"
           LIB="${{ runner.workspace }}/install/lib"
           mkdir -p "$BIN" "$LIB"
@@ -553,12 +554,28 @@ jobs:
           done | sort -u | while read -r src; do
             [ -e "$LIB/$(basename "$src")" ] || cp -a "$src" "$LIB/"
           done
-          # Resolve against the bundled libs only, so this also proves the
-          # copied driver is self-contained within install/.
-          if ! LD_LIBRARY_PATH="$LIB" "$BIN/clang++" --version > /tmp/clang-version.txt 2>&1; then
-            echo "ERROR: bundled clang++ is not self-contained"
+          # libclang-cpp pulls in TheRock's vendored zlib/zstd, which live outside
+          # the directories clang's RPATH searches. ldd therefore reports them
+          # "not found" and yields no path for the copy above, so resolve them by
+          # name under TheRock instead of assuming its internal layout. Repeat,
+          # since a copied library can introduce further names.
+          for _ in 1 2 3; do
+            missing=$(LD_LIBRARY_PATH="$LIB:$THEROCK/lib" ldd "$BIN/clang++" 2>/dev/null \
+                      | awk '/not found/ {print $1}' | sort -u)
+            [ -n "$missing" ] || break
+            for name in $missing; do
+              src=$(find "$THEROCK" -name "$name" -type f -print -quit 2>/dev/null)
+              [ -n "$src" ] || { echo "ERROR: $name not found under $THEROCK"; exit 1; }
+              cp -a "$src" "$LIB/"
+            done
+          done
+          # Same resolution contract as the closure check above: the package runs
+          # with LD_LIBRARY_PATH=install/lib:$THEROCK/lib on a host that installs
+          # ROCm separately.
+          if ! LD_LIBRARY_PATH="$LIB:$THEROCK/lib" "$BIN/clang++" --version > /tmp/clang-version.txt 2>&1; then
+            echo "ERROR: bundled clang++ does not resolve against install/lib + TheRock"
             cat /tmp/clang-version.txt
-            LD_LIBRARY_PATH="$LIB" ldd "$BIN/clang++" 2>&1 | grep 'not found' || true
+            LD_LIBRARY_PATH="$LIB:$THEROCK/lib" ldd "$BIN/clang++" 2>&1 | grep 'not found' || true
             exit 1
           fi
           head -1 /tmp/clang-version.txt
