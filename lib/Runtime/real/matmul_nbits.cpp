@@ -602,14 +602,22 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
                   mst->zp, stream, zero_points, static_cast<int>(N), ngk);
     if (!pre_zp_u8)
       return -1;
-    // The fp16 buffer is consumed only by the bits=4 WMMA (batch==1 &&
-    // K%32==0 && M>=16) and col-major GEMV M>1 fallback (same predicate on K,
-    // M>1). Build it eagerly when those preconditions are met — the cache
-    // makes the cost a one-time hit per zero_points pointer. The u2 WMMA path
-    // consumes uint8 zp directly, so bits=2 never needs the fp16 buffer (and
-    // the converter is nibble-specific anyway).
-    bool wmma_data_format = (batch_count == 1) && (K % 32 == 0);
-    if (bits == 4 && wmma_data_format && M > 1) {
+    // The fp16 buffer is consumed by the bits=4 WMMA prefill and by the
+    // col-major GEMV M>1 fallback. Build it eagerly when those preconditions
+    // are met — the cache makes the cost a one-time hit per zero_points
+    // pointer. The u2 WMMA path consumes uint8 zp directly, so bits=2 never
+    // needs the fp16 buffer (and the converter is nibble-specific anyway).
+    //
+    // Deliberately NOT gated on K%32==0. The WMMA prefill has two entries: the
+    // K%32==0 path and the K-padding path, which zero-pads K up to a multiple
+    // of 32 and runs the same kernel (see hip_matmul_nbits). Both read
+    // zp_for_fp16_paths. A K%32==0 gate here is the exact complement of the
+    // K-padding path's predicate, so every asym K%32!=0 prefill reached that
+    // path with zp_for_fp16_paths still pointing at the packed nibbles and
+    // silently computed against them reinterpreted as fp16 (gemma-4's SigLIP
+    // down_proj, K=4304). The kernel now also refuses that combination, but
+    // supplying the buffer is what keeps the shape on the fast path.
+    if (bits == 4 && batch_count == 1 && M > 1) {
       pre_zp_fp16 = hipdnn_ep_real::lookup_or_convert_zp_fp16(
           mst->zp, stream, zero_points, static_cast<int>(N), ngk);
       if (!pre_zp_fp16)

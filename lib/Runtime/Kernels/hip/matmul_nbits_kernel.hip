@@ -6754,9 +6754,18 @@ extern "C" int hip_matmul_nbits(
    * cropping, since only the contraction dim is padded. The weight rows are
    * already stored padded to full groups (num_groups_k*(group_size/2) bytes),
    * so B needs nothing. K%32==0 shapes never enter here and are byte-for-byte
-   * unaffected. Verified against the CPU reference for K=4304. */
+   * unaffected. Verified against the CPU reference for K=4304.
+   *
+   * fp16_zp_ready is load-bearing, not belt-and-braces: this branch reads
+   * zp_for_fp16_paths, which falls back to the packed-nibble zero_points when
+   * the wrapper did not pre-build an fp16 buffer. The wrapper's build gate used
+   * to be K%32==0 -- the exact complement of this predicate -- so every asym
+   * K%32!=0 prefill landed here and read nibbles as fp16, wrong values plus an
+   * over-read (packed is [N,(ngk+1)/2] bytes, this indexes [N,ngk] fp16). The
+   * wrapper now supplies the buffer; without it, fall through to the naive
+   * kernel's uint8 zp rather than compute silent garbage. */
   if ((batch_count == 1) && (K % 32 != 0) && M >= kWmmaMinM &&
-      !hipdnn_device_is_wave64()) {
+      fp16_zp_ready && !hipdnn_device_is_wave64()) {
     int iM = static_cast<int>(M);
     int iN = static_cast<int>(N);
     int iK = static_cast<int>(K);
@@ -6822,7 +6831,15 @@ extern "C" int hip_matmul_nbits(
   // M>=kWmmaMinM is instead served by the dequant-once + hipBLASLt path in
   // lib/Runtime/real/matmul_nbits.cpp, and any residual case falls through to
   // the correct GEMV/naive fallback below.
-  if (wmma_data_format && M >= kWmmaMinM && !hipdnn_device_is_wave64()) {
+  //
+  // fp16_zp_ready is redundant today -- the wrapper builds the fp16 zp for
+  // every batch==1, M>1 asym shape, which covers this predicate -- but it is
+  // stated rather than inferred: this branch reads zp_for_fp16_paths, and that
+  // pointer silently degrades to the packed nibbles when the buffer is absent.
+  // The K-padding branch above shipped that exact bug by leaning on a
+  // coincidence between the two gates.
+  if (wmma_data_format && M >= kWmmaMinM && fp16_zp_ready &&
+      !hipdnn_device_is_wave64()) {
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_matmul_nbits: WMMA fast path M=%lld N=%lld "
         "K=%lld bs=%lld zp=%s bias=%s\n",
