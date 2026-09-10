@@ -208,10 +208,12 @@ jobs:
               ! -name "TensileLibrary_HH_HH_HA_Bias_SAV_UA_Type_HH_HPA_Contraction_l_Alik_Bljk_Cijk_Dijk_${arch}.co" \
               ! -name "TensileLibrary_HH_SH_HA_Bias_SAV_UA_Type_HS_HPA_Contraction_l_Ailk_Bljk_Cijk_Dijk_${arch}.co" \
               ! -name "TensileLibrary_HH_SH_HA_Bias_SAV_UA_Type_HS_HPA_Contraction_l_Alik_Bljk_Cijk_Dijk_${arch}.co" \
+              ! -name "TensileLibrary_HH_SH_HA_Bias_Type_HS_HPA_Contraction_l_Alik_Bljk_Cijk_Dijk_${arch}.co" \
+              ! -name "TensileLibrary_SS_SS_HA_Bias_SAV_UA_Type_SS_Contraction_l_Ailk_Bljk_Cijk_Dijk_${arch}.co" \
               -delete
             co_count=$(find "$arch_dir" -maxdepth 1 -type f -name '*.co' | wc -l)
-            if [ "$co_count" -ne 4 ]; then
-              echo "ERROR: expected 4 hipBLASLt code objects for $arch, found $co_count"
+            if [ "$co_count" -ne 6 ]; then
+              echo "ERROR: expected 6 hipBLASLt code objects for $arch, found $co_count"
               find "$arch_dir" -maxdepth 1 -type f -name '*.co' -print
               exit 1
             fi
