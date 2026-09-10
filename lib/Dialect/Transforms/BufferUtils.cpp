@@ -17,11 +17,20 @@
 
 using namespace mlir;
 
-int64_t mlir::hip::getStaticByteSize(MemRefType type) {
+int64_t mlir::hip::getElementByteWidth(MemRefType type) {
+  return static_cast<int64_t>(
+      llvm::divideCeil(type.getElementTypeBitWidth(), 8));
+}
+
+FailureOr<int64_t> mlir::hip::getStaticByteSize(MemRefType type) {
   if (!type.hasStaticShape())
-    return 0;
-  int64_t totalBits = type.getNumElements() * type.getElementTypeBitWidth();
-  return static_cast<int64_t>(llvm::divideCeil(totalBits, 8));
+    return failure();
+
+  int64_t byteSize = getElementByteWidth(type);
+  for (int64_t dim : type.getShape())
+    if (llvm::MulOverflow(byteSize, dim, byteSize))
+      return failure();
+  return byteSize;
 }
 
 Value mlir::hip::emitAlignUp(OpBuilder &builder, Location loc, Value value,
