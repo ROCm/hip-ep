@@ -592,6 +592,19 @@ void populateProjectorOpsRewritePatterns(RewritePatternSet &patterns,
 void populateLpNormalizationConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 
+/// Pre-lowering pattern set: fold a decomposed unweighted RMS normalization
+/// (`Mul(x,x)` / ReduceMean / `Add(eps)` / Sqrt / Reciprocal / Mul, optionally
+/// bracketed by an fp32 Cast pair) back into a fused
+/// `SimplifiedLayerNormalization` with an all-ones scale, which NormConversion
+/// lowers to a single `hip.rms_norm`. Exports spell this form out because it
+/// carries no learned gamma; attention q/k normalization is the usual source,
+/// where the chain costs several launches per layer to normalize a few
+/// kilobytes. Must run BEFORE `lowerOnnxConstants` so the epsilon literal is
+/// still reachable through its generic `onnx.Constant` producer. See
+/// RmsNormFusion.cpp.
+void populateRmsNormFusionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
+
 } // namespace hip
 } // namespace mlir
 
