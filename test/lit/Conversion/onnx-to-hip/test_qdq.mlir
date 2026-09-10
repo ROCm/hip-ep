@@ -131,4 +131,30 @@ module {
     } : (tensor<128x64xf32>, tensor<f32>) -> tensor<128x64xui8>
     return %y : tensor<128x64xui8>
   }
+
+// ===== Test 5: com.microsoft Q/DQ imported as onnx.Custom =====
+// Canonicalization must remove the Custom container before ordinary QDQ
+// lowering. Attributes other than the Custom dispatch attrs are preserved.
+
+// CHECK-LABEL: func.func @test_custom_qdq
+// CHECK-SAME:  (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<4xf32>, %[[S:.*]]: tensor<f32>, %[[ZP:.*]]: tensor<ui16>)
+// CHECK-NEXT:  %[[QINIT:.*]] = tensor.empty() : tensor<4xui16>
+// CHECK-NEXT:  %[[Q:.*]] = hip.quantize_linear(%[[CTX]]) ins(%[[X]], %[[S]] : tensor<4xf32>, tensor<f32>) zero_point(%[[ZP]] : tensor<ui16>) outs(%[[QINIT]] : tensor<4xui16>) {axis = 0 : i64, block_size = 0 : i64, precision = 0 : i64, saturate = 1 : i64} : tensor<4xui16>
+// CHECK-NEXT:  %[[DQINIT:.*]] = tensor.empty() : tensor<4xf32>
+// CHECK-NEXT:  %[[DQ:.*]] = hip.dequantize_linear(%[[CTX]]) ins(%[[Q]], %[[S]] : tensor<4xui16>, tensor<f32>) zero_point(%[[ZP]] : tensor<ui16>) outs(%[[DQINIT]] : tensor<4xf32>) {axis = 0 : i64, block_size = 0 : i64} : tensor<4xf32>
+// CHECK-NEXT:  return %[[DQ]] : tensor<4xf32>
+  func.func @test_custom_qdq(%x: tensor<4xf32>, %scale: tensor<f32>,
+                             %zp: tensor<ui16>) -> tensor<4xf32> {
+    %q = "onnx.Custom"(%x, %scale, %zp) {
+      axis = 0 : si64,
+      domain_name = "com.microsoft",
+      function_name = "QuantizeLinear"
+    } : (tensor<4xf32>, tensor<f32>, tensor<ui16>) -> tensor<4xui16>
+    %dq = "onnx.Custom"(%q, %scale, %zp) {
+      axis = 0 : si64,
+      domain_name = "com.microsoft",
+      function_name = "DequantizeLinear"
+    } : (tensor<4xui16>, tensor<f32>, tensor<ui16>) -> tensor<4xf32>
+    return %dq : tensor<4xf32>
+  }
 }

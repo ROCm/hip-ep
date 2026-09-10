@@ -192,6 +192,9 @@ endfunction()
 #------------------------------------------------------------------------------
 function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS ARCH_LIST OUTPUT_OBJS)
     _hip_get_arch_flags("${ARCH_LIST}" arch_flags)
+    # Compress the embedded HIP fatbin (clang-offload-bundler -compress).
+    # Decompressed once by the HIP runtime at load; clang default is off.
+    list(APPEND arch_flags "--offload-compress")
 
     # Build include flags
     # NOTE: -I and path are separate list items to handle paths with spaces
@@ -422,8 +425,10 @@ function(hip_add_executable TARGET_NAME)
             )
         endif()
 
-        # Warning suppression flags
-        target_compile_options(${TARGET_NAME} PRIVATE $<$<COMPILE_LANGUAGE:HIP>:-Wno-ignored-attributes>)
+        target_compile_options(${TARGET_NAME} PRIVATE
+            $<$<COMPILE_LANGUAGE:HIP>:-Wno-ignored-attributes>
+            $<$<COMPILE_LANGUAGE:HIP>:--offload-compress>
+        )
     endif()
 
     # Link HIP runtime
@@ -519,8 +524,10 @@ function(hip_add_library TARGET_NAME)
             )
         endif()
 
-        # Warning suppression flags
-        target_compile_options(${TARGET_NAME} PRIVATE $<$<COMPILE_LANGUAGE:HIP>:-Wno-ignored-attributes>)
+        target_compile_options(${TARGET_NAME} PRIVATE
+            $<$<COMPILE_LANGUAGE:HIP>:-Wno-ignored-attributes>
+            $<$<COMPILE_LANGUAGE:HIP>:--offload-compress>
+        )
     endif()
 
     # Propagate HIP settings to dependents
