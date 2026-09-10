@@ -399,8 +399,8 @@ public:
 
     declareRuntimeFunctions(module);
 
-    generateInferenceInit(module, blob.size());
-    generateInferenceInitV2(module, blob.size());
+    generateInferenceInit(module, blob.size(), hipdnn::abi::kInferenceInit);
+    generateInferenceInit(module, blob.size(), hipdnn::abi::kInferenceInitV2);
     auto inputShapes = module->getAttrOfType<ArrayAttr>("hipdnn.input_shapes");
     generateInferenceCompute(module, inputShapes);
     generateInferenceCleanup(module);
@@ -566,23 +566,17 @@ private:
   ///   ^bb2:
   ///     llvm.return %2 : i32
   ///   }
-  void generateInferenceInit(ModuleOp module, size_t blobSize) {
-    generateInferenceInitImpl(module, blobSize, hipdnn::abi::kInferenceInit,
-                              "hipdnn_ep_state_init_with_fs",
-                              /*withConfig=*/false);
-  }
+  ///
+  /// funcName picks the entry point to emit; the runtime symbol it calls and
+  /// whether it carries a config ptr follow from it. kInferenceInitV2 takes a
+  /// third config ptr and forwards it to hipdnn_ep_state_init_v2. Both are
+  /// emitted, and everything after the init call is identical.
+  void generateInferenceInit(ModuleOp module, size_t blobSize,
+                             StringRef funcName) {
+    const bool isV2 = funcName == hipdnn::abi::kInferenceInitV2;
+    StringRef runtimeFuncName =
+        isV2 ? "hipdnn_ep_state_init_v2" : "hipdnn_ep_state_init_with_fs";
 
-  void generateInferenceInitV2(ModuleOp module, size_t blobSize) {
-    generateInferenceInitImpl(module, blobSize, hipdnn::abi::kInferenceInitV2,
-                              "hipdnn_ep_state_init_v2", /*withConfig=*/true);
-  }
-
-  // Shared implementation: withConfig appends a config ptr param after
-  // (out_state, fs) and forwards it to runtimeFuncName after the fixed
-  // (out_state, fs, blob, sz) args.
-  void generateInferenceInitImpl(ModuleOp module, size_t blobSize,
-                                 StringRef funcName, StringRef runtimeFuncName,
-                                 bool withConfig) {
     OpBuilder builder(module.getContext());
     Location loc = module.getLoc();
 
@@ -592,7 +586,7 @@ private:
     Type i32Type = builder.getI32Type();
     Type i64Type = builder.getI64Type();
 
-    SmallVector<Type> paramTypes(withConfig ? 3 : 2, ptrType);
+    SmallVector<Type> paramTypes(isV2 ? 3 : 2, ptrType);
     auto funcType = LLVM::LLVMFunctionType::get(i32Type, paramTypes);
 
     auto funcOp = LLVM::LLVMFuncOp::create(builder, loc, funcName, funcType);
@@ -611,7 +605,7 @@ private:
         builder, loc, i64Type, builder.getI64IntegerAttr((int64_t)blobSize));
 
     SmallVector<Value> initArgs = {outStatePtr, fsPtr, blobPtr, blobSizeVal};
-    if (withConfig)
+    if (isV2)
       initArgs.push_back(entryBlock->getArgument(2));
 
     auto initFunc = module.lookupSymbol<LLVM::LLVMFuncOp>(runtimeFuncName);
