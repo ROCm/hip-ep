@@ -120,6 +120,11 @@ configure_file(
   ${CMAKE_BINARY_DIR}/lib/scheme/SchemeBindings.scm
   COPYONLY
 )
+configure_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/Runtime/PatternDSL.scm
+  ${CMAKE_BINARY_DIR}/lib/scheme/PatternDSL.scm
+  COPYONLY
+)
 
 # Copy rime library to build tree for testing
 file(COPY ${CMAKE_SOURCE_DIR}/third_party/rime/rime
@@ -129,6 +134,7 @@ file(COPY ${CMAKE_SOURCE_DIR}/third_party/rime/rime
 install(FILES
   ${CMAKE_CURRENT_SOURCE_DIR}/Passes/PrintPass.scm
   ${CMAKE_CURRENT_SOURCE_DIR}/Runtime/SchemeBindings.scm
+  ${CMAKE_CURRENT_SOURCE_DIR}/Runtime/PatternDSL.scm
   DESTINATION lib/scheme
 )
 
