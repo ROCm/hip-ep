@@ -73,3 +73,24 @@ add_test(NAME MlirDtypeMappingUnit
 set_target_properties(test-dtype-mapping PROPERTIES
   FOLDER "mlir/Test/Dialect/Hipsr"
 )
+
+# GPU-free numeric reference for fused QDQ LpNormalization (L2 == RMS/sqrt(N)).
+add_executable(test-qlpnormalization-ref test_qlpnormalization_ref.cpp)
+
+target_compile_features(test-qlpnormalization-ref PRIVATE cxx_std_17)
+
+target_include_directories(test-qlpnormalization-ref PRIVATE
+  ${LLVM_INCLUDE_DIRS}
+)
+
+target_link_libraries(test-qlpnormalization-ref PRIVATE
+  LLVMSupport
+)
+
+add_test(NAME QLpNormalizationRefUnit
+  COMMAND test-qlpnormalization-ref
+)
+
+set_target_properties(test-qlpnormalization-ref PROPERTIES
+  FOLDER "mlir/Test/Dialect/Hipsr"
+)
