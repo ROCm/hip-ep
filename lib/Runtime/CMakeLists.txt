@@ -532,7 +532,7 @@ set(RUNTIME_BC_PATH ${CMAKE_CURRENT_BINARY_DIR}/runtime.bc PARENT_SCOPE)
 add_custom_target(RuntimeBitcode DEPENDS HipRuntime)
 
 # ============================================================================
-# STEP 6: Native current-stream accessor (NOT bitcode)
+# STEP 6: Native runtime shims (NOT bitcode)
 # ============================================================================
 # The per-thread session-stream slot is compiled natively here, deliberately
 # kept out of runtime.bc. A thread_local inside runtime.bc would force the JIT
@@ -541,15 +541,23 @@ add_custom_target(RuntimeBitcode DEPENDS HipRuntime)
 # external functions: the host (EP DLL / hip-test / hip-inspect) defines them
 # (see LlvmIrJit absolute-symbol registration), and native model DLLs link
 # their own copy of this lib (CompilerDriver::discoverLibraries).
-add_library(hipdnn-ep-tls STATIC tls_stream.cpp)
+#
+# The optional ROCTx bridge follows the same dual-path contract: runtime.bc
+# calls exported shim functions, while this native library dynamically resolves
+# ROCTx only when requested. Keeping both shims in one archive means the
+# existing JIT host and native-model link paths need no additional library.
+add_library(hipdnn-ep-tls STATIC tls_stream.cpp roctx_shim.cpp)
 set_target_properties(hipdnn-ep-tls PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_include_directories(hipdnn-ep-tls PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(hipdnn-ep-tls PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/include)
 
-# Install the import/static lib so NATIVE model DLLs can link it on a deploy
+# Install the static shim lib so NATIVE model DLLs can link it on a deploy
 # host that only has the packaged tree (no build dir). CompilerDriver bakes the
 # build-tree path into HIPDNN_EP_TLS_LIB_DIR, which does not exist on the GPU
 # test machine; staging hipdnn-ep-tls.lib into install/lib (then onto LIB) lets
-# lld-link resolve it there. Bitcode (default) does not need it.
+# lld-link resolve it there. The bitcode path resolves the same shim functions
+# from the JIT host through LlvmIrJit's absolute-symbol table.
 install(TARGETS hipdnn-ep-tls ARCHIVE DESTINATION lib)
 
 # ============================================================================

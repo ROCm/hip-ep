@@ -284,6 +284,14 @@ HIPDNN_EP_RT_EXPORT void *hipdnn_ep_get_current_stream(void);
 // tls_stream.cpp alongside the getter.
 HIPDNN_EP_RT_EXPORT void hipdnn_ep_set_current_stream(void *stream);
 
+// Optional host-native ROCTx bridge used by OP_PROFILE scopes. The bridge
+// dynamically resolves ROCTx only when HIPDNN_EP_ROCTX is enabled, so these
+// calls are safe no-ops when no ROCTx runtime is available. Kept outside
+// runtime.bc for the same JIT/native-model dual-path reason as tls_stream.cpp.
+// push returns the ROCTx nesting level, or a negative value when disabled.
+HIPDNN_EP_RT_EXPORT int hipdnn_ep_roctx_range_push(const char *name);
+HIPDNN_EP_RT_EXPORT void hipdnn_ep_roctx_range_pop(void);
+
 // Get hipBLASLt handle from state (for GEMM operations)
 // Returns: hipblasLtHandle_t cast to void* (NULL on error)
 // Ownership: Caller does NOT own handle (destroyed in cleanup)

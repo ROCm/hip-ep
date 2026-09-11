@@ -228,16 +228,17 @@ inline llvm::Error installPlatformSymbolShims(llvm::orc::LLJIT & /*jit*/) {
 
 #endif // _WIN32
 
-// The runtime's current-session-stream accessors are defined in host-native
-// code (lib/Runtime/tls_stream.cpp), not in runtime.bc, so the JIT'd runtime
-// references them as externals. Register them as absolute symbols pointing at
-// the host functions: this guarantees resolution (no reliance on export-table
-// / process-generator quirks) and the reference here forces tls_stream.o into
-// the host image (EP DLL / hip-test / hip-inspect) so the addresses are valid.
+// Runtime facilities that require host-native state or dynamic loading are
+// defined outside runtime.bc (lib/Runtime/tls_stream.cpp and roctx_shim.cpp).
+// Register them as absolute symbols: this guarantees resolution without
+// export-table/process-generator quirks, and the references force their archive
+// objects into the host image (EP DLL / hip-test / hip-inspect).
 extern "C" void *hipdnn_ep_get_current_stream(void);
 extern "C" void hipdnn_ep_set_current_stream(void *stream);
+extern "C" int hipdnn_ep_roctx_range_push(const char *name);
+extern "C" void hipdnn_ep_roctx_range_pop(void);
 
-llvm::Error installRuntimeStreamShims(llvm::orc::LLJIT &jit) {
+llvm::Error installRuntimeNativeShims(llvm::orc::LLJIT &jit) {
   llvm::orc::SymbolMap syms;
   auto add = [&](llvm::StringRef name, void *addr) {
     syms[jit.getExecutionSession().intern(name)] = llvm::orc::ExecutorSymbolDef(
@@ -248,6 +249,10 @@ llvm::Error installRuntimeStreamShims(llvm::orc::LLJIT &jit) {
       reinterpret_cast<void *>(&hipdnn_ep_get_current_stream));
   add("hipdnn_ep_set_current_stream",
       reinterpret_cast<void *>(&hipdnn_ep_set_current_stream));
+  add("hipdnn_ep_roctx_range_push",
+      reinterpret_cast<void *>(&hipdnn_ep_roctx_range_push));
+  add("hipdnn_ep_roctx_range_pop",
+      reinterpret_cast<void *>(&hipdnn_ep_roctx_range_pop));
   return jit.getMainJITDylib().define(
       llvm::orc::absoluteSymbols(std::move(syms)));
 }
@@ -623,8 +628,8 @@ LlvmIrJit::create(const std::vector<uint8_t> &bitcode,
   }
   installAtexitShims(*jit);
 
-  if (auto err = installRuntimeStreamShims(*jit)) {
-    LOG(ERROR) << "LlvmIrJit::create: runtime stream shims failed: "
+  if (auto err = installRuntimeNativeShims(*jit)) {
+    LOG(ERROR) << "LlvmIrJit::create: runtime native shims failed: "
                << llvm::toString(std::move(err));
     return nullptr;
   }
