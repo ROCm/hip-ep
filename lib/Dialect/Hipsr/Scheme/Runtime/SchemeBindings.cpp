@@ -242,7 +242,13 @@ void callSchemePassFunction(const char* functionName, mlir::Operation* op) {
   Scall1(func, schemeOp);
 }
 
-// C functions callable from Scheme via FFI
+} // namespace hipsr
+} // namespace mlir
+
+//===----------------------------------------------------------------------===//
+// C functions callable from Scheme via FFI (global scope, C linkage)
+//===----------------------------------------------------------------------===//
+
 extern "C" {
 
 // Get operation name - takes unsigned-64 (pointer as uint64_t)
@@ -461,6 +467,9 @@ void mlir_notify_match_failure(SchemeValue op, const char* reason) {
 }
 
 } // extern "C"
+
+namespace mlir {
+namespace hipsr {
 
 // Register all MLIR foreign functions in Scheme
 void registerMlirForeignFunctions() {
