@@ -450,7 +450,8 @@ Value emitPool(OpBuilder &builder, Location loc, Value ctx, Value poolSize,
   auto pool =
       GetPoolOp::create(builder, loc, poolType, ctx, poolSize, domainId);
 
-  // Dealloc will not free a buffer that carries this attr.
+  // --ownership-based-buffer-deallocation skips a buffer that carries this
+  // attr.
   pool->setAttr(bufferization::BufferizationDialect::kManualDeallocation,
                 builder.getUnitAttr());
   return pool.getResult();

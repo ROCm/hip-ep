@@ -36,7 +36,6 @@ void mlir::hipsr::getDpsMemoryEffects(
     if (!isa<MemRefType>(operand.get().getType())) {
       continue;
     }
-    // A destination is fully overwritten, so it is written and not read.
     if (op.isDpsInit(&operand)) {
       effects.emplace_back(MemoryEffects::Write::get(), &operand);
     } else {
