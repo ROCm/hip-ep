@@ -1272,6 +1272,15 @@ static int pickWmmaHeuristic(int M, int N, int K) {
     if (M > 256)
       return findWmmaCfg(128, 64, 2, 2, 8, 1, 64);
   }
+  /* Large-M large-N prefill GEMM (same wide-N mechanism as the pow2-K route,
+   * but for any large K): with many M-tile rows A is read N/BN times, so the
+   * wide 128x256 WT4x2 tile (N/256 A-reads) beats the narrower 256x128 cfg5
+   * (N/128). Faithful-autotune + fair bench: 4096^3 cfg32 3.36 ms vs cfg5
+   * 3.73 (+9.7%, beats hipBLASLt 3.76). Only for large M (>=2048): at M<=1024
+   * the mid squares (4608^2/6144^2) prefer cfg5 (the A-panel still fits/reuses
+   * and the extra BN just thins the grid). */
+  if (M >= 2048 && N >= 1024 && K >= 1024)
+    return findWmmaCfg(128, 256, 4, 2, 8, 1, 32);
   /* Tile size is chosen by M and grid fill (measured on gfx1151):
    *   - Large M reuses the B tile across many A-rows, so a 256-row tile
    *     (256x128 WT4x2) wins once the grid still covers the CUs -- measured
@@ -1533,8 +1542,13 @@ static int tuneWmma(hipStream_t s, const T *A, const T *B, const T *C, T *Y,
     for (int cid = 0; cid < kNumWmma; ++cid) {
       if (!wmmaApplies(kWmma[cid], M, N, K))
         continue;
-      launchWmma<T, TransB>(cid, s, A, B, C, out, M, N, K, alpha, beta, cDim0,
-                            cDim1, ldb);
+      /* Coarse pre-filter to pick the top-N finalists. A short per-candidate
+       * warmup (not just one launch) keeps the prune from dropping a good tile
+       * that was measured on the previous tile's hot clocks; the finalists are
+       * then measured faithfully below. */
+      for (int w = 0; w < 8; ++w)
+        launchWmma<T, TransB>(cid, s, A, B, C, out, M, N, K, alpha, beta, cDim0,
+                              cDim1, ldb);
       hipEventRecord(e0, s);
       for (int i = 0; i < 3; ++i)
         launchWmma<T, TransB>(cid, s, A, B, C, out, M, N, K, alpha, beta, cDim0,
@@ -1559,30 +1573,37 @@ static int tuneWmma(hipStream_t s, const T *A, const T *B, const T *C, T *Y,
               [&](int a, int b) { return times[a] < times[b]; });
     const int n2 = nc < 12 ? nc : 12;
 
-    /* Round-robin retune with per-config min over rounds.
+    /* Faithful per-candidate measurement -- mirror the production/hipBLAS fair
+     * bench so both sides' numbers are comparable.
      *
-     * The coarse sweep above is measured sequentially, so a config timed while
-     * the GPU is still cool looks faster than an equally-good config timed once
-     * the sweep has heated the part -- on long-running (large-K) shapes this
-     * order bias inverts the ranking (128x64 measured cool beats 128x128 WT2x4
-     * measured hot, though the latter is ~2x faster sustained). Rotating the
-     * measurement order across rounds gives every candidate a similar thermal
-     * exposure, and taking the min per config uses each one's least-throttled
-     * sample -- the value a real cool-start call sees -- so the comparison is
-     * order-independent. */
+     * The earlier round-robin approach gave each candidate only ONE warmup
+     * launch before timing, so a candidate inherited the PREVIOUS tile's
+     * thermal/clock state instead of reaching its own. On this APU compute-bound
+     * tiles throttle by ~2x, and the throttle correlates with tile size, so
+     * timing a tile on the wrong thermal state mis-ranked it (it "showed" cfg30
+     * beating cfg5 at 4608^2 and cfg33 beating cfg5 at the vision mlp-down,
+     * whereas the fair sustained bench has cfg5 tied-or-ahead on both).
+     *
+     * Fix: warm EACH candidate to its OWN sustained state (a per-candidate
+     * warmup burst re-equilibrates the part to that tile's power draw), then
+     * time the peak of several sustained reps (best-of-reps, like both the
+     * final hip_gemm number and the hipBLAS algo pick). Now the autotune's per
+     * config number is the same "peak sustained" quantity we compare against
+     * hipBLAS, so the ranking is trustworthy. */
+    constexpr int kWarm = 25;  /* launches to reach this tile's steady state */
+    constexpr int kReps = 3;   /* timed reps; take the peak (min ms) */
+    constexpr int kIters = 10; /* launches per timed rep */
     float best_min[64];
-    for (int i = 0; i < n2; ++i)
-      best_min[i] = 1e30f;
-    constexpr int kRounds = 4;
-    for (int round = 0; round < kRounds; ++round) {
-      for (int j = 0; j < n2; ++j) {
-        /* Rotate the start each round so no config is always measured last. */
-        const int r = (j + round) % n2;
-        const int cid = ids[order[r]];
+    for (int r = 0; r < n2; ++r) {
+      const int cid = ids[order[r]];
+      for (int w = 0; w < kWarm; ++w)
         launchWmma<T, TransB>(cid, s, A, B, C, out, M, N, K, alpha, beta, cDim0,
                               cDim1, ldb);
+      hipStreamSynchronize(s);
+      float cand_min = 1e30f;
+      for (int rep = 0; rep < kReps; ++rep) {
         hipEventRecord(e0, s);
-        for (int i = 0; i < 5; ++i)
+        for (int i = 0; i < kIters; ++i)
           launchWmma<T, TransB>(cid, s, A, B, C, out, M, N, K, alpha, beta,
                                 cDim0, cDim1, ldb);
         hipEventRecord(e1, s);
@@ -1590,15 +1611,16 @@ static int tuneWmma(hipStream_t s, const T *A, const T *B, const T *C, T *Y,
           continue;
         float ms = 0.f;
         hipEventElapsedTime(&ms, e0, e1);
-        ms /= 5.f;
-        if (ms < best_min[r])
-          best_min[r] = ms;
+        ms /= kIters;
+        if (ms < cand_min)
+          cand_min = ms;
       }
+      best_min[r] = cand_min;
     }
     float best_ms = 1e30f;
     for (int r = 0; r < n2; ++r) {
       const int cid = ids[order[r]];
-      CUSTOM_KERNELS_DEBUG_LOG("[gemm] wmma retune cfg[%d] : %.4f ms (min)\n",
+      CUSTOM_KERNELS_DEBUG_LOG("[gemm] wmma retune cfg[%d] : %.4f ms (peak)\n",
                                cid, best_min[r]);
       if (best_min[r] < best_ms) {
         best_ms = best_min[r];
