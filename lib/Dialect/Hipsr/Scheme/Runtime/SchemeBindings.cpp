@@ -339,21 +339,26 @@ static void mlir_log_fatal(const char* msg) {
 //===----------------------------------------------------------------------===//
 
 int mlir_type_is_ranked_tensor(SchemeValue type_ptr) {
-  mlir::Type type = unwrap(static_cast<MlirType>(type_ptr));
-  return type.isa<mlir::RankedTensorType>() ? 1 : 0;
+  if (!type_ptr) return 0;
+  // SchemeValue is void*, representing Type* from MLIR C API
+  // We stored it via wrap(Type).ptr, so retrieve it the same way
+  mlir::Type type = mlir::Type::getFromOpaquePointer(type_ptr);
+  return llvm::isa<mlir::RankedTensorType>(type) ? 1 : 0;
 }
 
 SchemeValue mlir_type_get_element_type(SchemeValue type_ptr) {
-  mlir::Type type = unwrap(static_cast<MlirType>(type_ptr));
-  if (auto tensorType = type.dyn_cast<mlir::RankedTensorType>()) {
-    return const_cast<void*>(wrap(tensorType.getElementType()).ptr);
+  if (!type_ptr) return nullptr;
+  mlir::Type type = mlir::Type::getFromOpaquePointer(type_ptr);
+  if (auto tensorType = llvm::dyn_cast<mlir::RankedTensorType>(type)) {
+    return const_cast<void*>(tensorType.getElementType().getAsOpaquePointer());
   }
   return nullptr;
 }
 
 SchemeValue mlir_type_get_shape(SchemeValue type_ptr) {
-  mlir::Type type = unwrap(static_cast<MlirType>(type_ptr));
-  if (auto tensorType = type.dyn_cast<mlir::RankedTensorType>()) {
+  if (!type_ptr) return Snil;
+  mlir::Type type = mlir::Type::getFromOpaquePointer(type_ptr);
+  if (auto tensorType = llvm::dyn_cast<mlir::RankedTensorType>(type)) {
     llvm::ArrayRef<int64_t> shape = tensorType.getShape();
     // Convert to Scheme list
     ptr list = Snil;
@@ -366,16 +371,18 @@ SchemeValue mlir_type_get_shape(SchemeValue type_ptr) {
 }
 
 int mlir_type_get_rank(SchemeValue type_ptr) {
-  mlir::Type type = unwrap(static_cast<MlirType>(type_ptr));
-  if (auto tensorType = type.dyn_cast<mlir::RankedTensorType>()) {
+  if (!type_ptr) return -1;
+  mlir::Type type = mlir::Type::getFromOpaquePointer(type_ptr);
+  if (auto tensorType = llvm::dyn_cast<mlir::RankedTensorType>(type)) {
     return tensorType.getRank();
   }
   return -1;
 }
 
 SchemeValue mlir_value_get_type(SchemeValue value_ptr) {
-  mlir::Value value = unwrap(static_cast<MlirValue>(value_ptr));
-  return const_cast<void*>(wrap(value.getType()).ptr);
+  if (!value_ptr) return nullptr;
+  mlir::Value value = mlir::Value::getFromOpaquePointer(value_ptr);
+  return const_cast<void*>(value.getType().getAsOpaquePointer());
 }
 
 //===----------------------------------------------------------------------===//
@@ -383,36 +390,39 @@ SchemeValue mlir_value_get_type(SchemeValue value_ptr) {
 //===----------------------------------------------------------------------===//
 
 SchemeValue mlir_operation_get_parent(SchemeValue op_ptr) {
-  mlir::Operation* op = unwrap(static_cast<MlirOperation>(op_ptr));
+  if (!op_ptr) return nullptr;
+  mlir::Operation* op = static_cast<mlir::Operation*>(op_ptr);
   mlir::Operation* parent = op->getParentOp();
-  if (!parent)
-    return nullptr;
-  return const_cast<void*>(wrap(parent).ptr);
+  return parent;
 }
 
 SchemeValue mlir_operation_get_operand_value(SchemeValue op_ptr, int index) {
-  mlir::Operation* op = unwrap(static_cast<MlirOperation>(op_ptr));
+  if (!op_ptr) return nullptr;
+  mlir::Operation* op = static_cast<mlir::Operation*>(op_ptr);
   if (index < 0 || index >= (int)op->getNumOperands())
     return nullptr;
   mlir::Value operand = op->getOperand(index);
-  return const_cast<void*>(wrap(operand).ptr);
+  return const_cast<void*>(operand.getAsOpaquePointer());
 }
 
 SchemeValue mlir_operation_get_result_value(SchemeValue op_ptr, int index) {
-  mlir::Operation* op = unwrap(static_cast<MlirOperation>(op_ptr));
+  if (!op_ptr) return nullptr;
+  mlir::Operation* op = static_cast<mlir::Operation*>(op_ptr);
   if (index < 0 || index >= (int)op->getNumResults())
     return nullptr;
   mlir::Value result = op->getResult(index);
-  return const_cast<void*>(wrap(result).ptr);
+  return const_cast<void*>(result.getAsOpaquePointer());
 }
 
 SchemeValue mlir_operation_get_loc(SchemeValue op_ptr) {
-  mlir::Operation* op = unwrap(static_cast<MlirOperation>(op_ptr));
-  return const_cast<void*>(wrap(op->getLoc()).ptr);
+  if (!op_ptr) return nullptr;
+  mlir::Operation* op = static_cast<mlir::Operation*>(op_ptr);
+  return const_cast<void*>(op->getLoc().getAsOpaquePointer());
 }
 
 SchemeValue mlir_operation_get_block_argument(SchemeValue op_ptr, int index) {
-  mlir::Operation* op = unwrap(static_cast<MlirOperation>(op_ptr));
+  if (!op_ptr) return nullptr;
+  mlir::Operation* op = static_cast<mlir::Operation*>(op_ptr);
   // Walk up to parent function
   while (op && !llvm::isa<mlir::func::FuncOp>(op)) {
     op = op->getParentOp();
@@ -425,7 +435,7 @@ SchemeValue mlir_operation_get_block_argument(SchemeValue op_ptr, int index) {
     return nullptr;
 
   mlir::Value arg = funcOp.getArgument(index);
-  return const_cast<void*>(wrap(arg).ptr);
+  return const_cast<void*>(arg.getAsOpaquePointer());
 }
 
 //===----------------------------------------------------------------------===//
