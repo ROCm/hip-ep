@@ -145,15 +145,26 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
   // NOTE: Foreign functions are registered in custom_init(), which was called
   // by Sbuild_heap before loading boot files
 
+  if (logLevel <= SchemeLogLevel::Debug) {
+    llvm::errs() << "[debug] About to load SchemeBindings.scm\n";
+    llvm::errs() << "[debug] open_string_input_port_sym = " << open_string_input_port_sym << "\n";
+    llvm::errs() << "[debug] read_sym = " << read_sym << "\n";
+  }
+
   // Load the Scheme bindings library
   std::string scm_code(reinterpret_cast<const char*>(scheme_bindings_scm_data),
                        scheme_bindings_scm_size);
 
   if (logLevel <= SchemeLogLevel::Debug) {
     llvm::errs() << "[debug] Loading SchemeBindings.scm (" << scheme_bindings_scm_size << " bytes)\n";
+    llvm::errs() << "[debug] First 50 chars: " << scm_code.substr(0, 50) << "\n";
   }
 
   ptr port = Scall1(open_string_input_port_sym, Sstring(scm_code.c_str()));
+
+  if (logLevel <= SchemeLogLevel::Debug) {
+    llvm::errs() << "[debug] Created port = " << port << "\n";
+  }
 
   while (true) {
     ptr expr = Scall1(read_sym, port);
