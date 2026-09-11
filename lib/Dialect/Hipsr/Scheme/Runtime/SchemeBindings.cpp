@@ -246,6 +246,7 @@ bool loadSchemeScript(const char* scriptPath) {
 
   if (current_log_level <= SchemeLogLevel::Debug) {
     llvm::errs() << "[debug] Loading " << scriptPath << " (" << scm_code.size() << " bytes)\n";
+    llvm::errs() << "[debug] First 100 chars: " << scm_code.substr(0, 100) << "\n";
   }
   LLVM_DEBUG(llvm::dbgs() << "Loading Scheme script: " << scriptPath << "\n");
 
