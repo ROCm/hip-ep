@@ -340,16 +340,46 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
   // where the layers past the sharing point re-read an earlier layer's full
   // present.* cache). Sizing present from the query there collapses the KV
   // buffer to the current token and silently drops the history. The valid past
-  // length is dim(past_key, 2) (rank-4 BNSH), or 0 with no past operand.
-  mlir::Value curSeqIdx =
-      mlir::tensor::DimOp::create(rewriter, loc, k3, 1).getResult();
-  mlir::Value pastSeqIdx =
-      pastKey
-          ? mlir::tensor::DimOp::create(rewriter, loc, pastKey, 2).getResult()
-          : mlir::arith::ConstantIndexOp::create(rewriter, loc, 0).getResult();
-  mlir::Value totalKvIdx =
-      mlir::arith::AddIOp::create(rewriter, loc, pastSeqIdx, curSeqIdx)
-          .getResult();
+  // length is dim(past_key, 2) (rank-4 BNSH); with no past operand K already
+  // carries the whole history and its extent is the total on its own.
+  mlir::Value pastSeqIdx;
+  if (pastKey)
+    pastSeqIdx =
+        mlir::tensor::DimOp::create(rewriter, loc, pastKey, 2).getResult();
+
+  // That past + current sum reads dim(past_key, 2) as the VALID past length,
+  // which holds only while past and present are distinct buffers and past is
+  // grown one step at a time. When the caller binds one buffer to both (ORT/OGA
+  // past_present_share_buffer) the same extent is the max_length CAPACITY, and
+  // the sum overshoots by the whole prompt -- it asked a 16512-capacity cache
+  // for a 32896-long present. The mask does not have that ambiguity: its KV
+  // extent is the total KV length (the contract at the top of this file) and it
+  // is sized from the actual history rather than from the cache buffer, so it
+  // reports the same total under either binding. Prefer it, and keep the sum
+  // for the maskless case, where the growing cache is the only thing on offer.
+  //
+  // Usable means the trailing extent really is the KV axis: a rank-2
+  // [B, S_kv] mask would have rank-1 select the query axis, and a static 1 is a
+  // broadcast extent rather than a length.
+  int64_t maskKvAxis = -1;
+  if (attnMask) {
+    auto maskTy = mlir::cast<mlir::RankedTensorType>(attnMask.getType());
+    if (maskTy.getRank() >= 3 && maskTy.getDimSize(maskTy.getRank() - 1) != 1)
+      maskKvAxis = maskTy.getRank() - 1;
+  }
+  mlir::Value totalKvIdx;
+  if (maskKvAxis >= 0) {
+    totalKvIdx =
+        mlir::tensor::DimOp::create(rewriter, loc, attnMask, maskKvAxis)
+            .getResult();
+  } else {
+    mlir::Value curSeqIdx =
+        mlir::tensor::DimOp::create(rewriter, loc, k3, 1).getResult();
+    totalKvIdx = pastSeqIdx ? mlir::arith::AddIOp::create(rewriter, loc,
+                                                          pastSeqIdx, curSeqIdx)
+                                  .getResult()
+                            : curSeqIdx;
+  }
 
   // seqlens_k[b] = total_seq - 1 (ORT GQA convention total_seq = seqlens_k + 1;
   // the runtime derives past_len = total_seq - sq). Ignored by the runtime on
@@ -436,9 +466,12 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
         op,
         "present_key/value head_dim must be static (architecture constant)");
 
-  // total_seq_len scalar = present KV buffer capacity. When the present seq dim
-  // is static (provided result type), emit a constant; otherwise emit the
-  // runtime past+current total.
+  // total_seq_len scalar = total KV length (ORT: past + new). When the present
+  // seq dim is static the two coincide -- a static present is a growing cache
+  // sized exactly to the total -- so emit a constant; otherwise emit the
+  // runtime total. The runtime ignores this operand and derives total_seq from
+  // seqlens_k, so it never sees the capacity/total split that the present
+  // sizing below has to resolve.
   mlir::Value totalSeqLen;
   auto totalSeqLenType = mlir::RankedTensorType::get({}, i32Ty);
   if (!presentKeyType.isDynamicDim(2)) {
@@ -453,9 +486,24 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
         rewriter, loc, totalSeqLenType, mlir::ValueRange{totalKvI32});
   }
 
-  // Build the present_key/present_value DPS init buffers with seq dim = total
-  // (past + current). present is rank-4 BNSH [batch, kv_heads, seq, head_dim];
-  // batch (dim 0) and seq (dim 2) are the only dynamic dims in practice.
+  // Build the present_key/present_value DPS init buffers. present is rank-4
+  // BNSH [batch, kv_heads, seq, head_dim]; batch (dim 0) and seq (dim 2) are
+  // the only dynamic dims in practice.
+  //
+  // The seq extent is the BUFFER the runtime writes into, which is not always
+  // the total: a shared past/present buffer is max_length throughout, and the
+  // output allocator hands back the caller's pre-bound buffer, so asking for
+  // anything else fails ORT's shape check. max() covers both bindings without
+  // having to know which one is in force -- a grown-one-step-at-a-time cache
+  // has dim(past_key, 2) < total so the total wins, and a shared buffer has
+  // capacity >= total so the capacity wins. With no past operand there is no
+  // buffer to be larger than the total, so the total stands on its own.
+  mlir::Value presentSeqIdx = totalKvIdx;
+  if (pastSeqIdx &&
+      (presentKeyType.isDynamicDim(2) || presentValueType.isDynamicDim(2)))
+    presentSeqIdx =
+        mlir::arith::MaxUIOp::create(rewriter, loc, pastSeqIdx, totalKvIdx)
+            .getResult();
   auto buildPresentInit =
       [&](mlir::RankedTensorType t) -> mlir::FailureOr<mlir::Value> {
     llvm::SmallVector<mlir::Value> dynSizes;
@@ -463,7 +511,7 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
       if (!t.isDynamicDim(dimIdx))
         continue;
       if (dimIdx == 2)
-        dynSizes.push_back(totalKvIdx);
+        dynSizes.push_back(presentSeqIdx);
       else if (dimIdx == 0)
         dynSizes.push_back(
             mlir::tensor::DimOp::create(rewriter, loc, query, 0).getResult());

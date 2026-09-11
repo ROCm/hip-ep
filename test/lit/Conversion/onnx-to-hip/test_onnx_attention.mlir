@@ -9,9 +9,12 @@
 //   - is_causal=1 WITH an external attn_mask -> no_causal=false AND the mask
 //     threaded as attention_bias (runtime adds the mask, then the built-in
 //     causal triangle applies on top -- both, mirroring the ONNX reference)
-//   - present KV seq extent = past_seq + current_seq (concat semantics),
-//     and seqlens_k = total_seq - 1 (ORT convention total_seq = seqlens_k + 1)
-//   - present_key/value DPS inits sized to the past+current total
+//   - total KV seq extent taken from the mask's KV extent where the mask has
+//     one, falling back to past_seq + current_seq, and seqlens_k = total_seq - 1
+//     (ORT convention total_seq = seqlens_k + 1)
+//   - present_key/value DPS inits sized to max(past buffer, total), which is
+//     the total for a cache grown a step at a time and the buffer when past and
+//     present are one shared max_length allocation
 //
 //   - a sliding window baked into the additive mask recovered from the mask's
 //     producing subgraph and stamped as local_window_size, since
@@ -23,7 +26,9 @@
 // zeroed attention output), the Gemma-4-E2B decoder self-attn (is_causal=1 +
 // fp16 mask + past KV + 3 outputs -- previously rejected), a single-output
 // causal case, a bidirectional no-mask case, a rank-4 BNSH case, a
-// KV-cache-sharing decoder layer (K/V seq longer than the query's), and the
+// KV-cache-sharing decoder layer (K/V seq longer than the query's), a shared
+// past/present buffer whose capacity exceeds the total, the two mask shapes
+// whose trailing extent is not a KV length (rank-2, and a broadcast 1), and the
 // window-recovery cases: windowed layer, global layer, unrecognized OR leg,
 // the segment leg stripped of its CumSum provenance, the window leg's indices
 // stripped of their shared position source, and the window leg's indices drawn
@@ -64,10 +69,12 @@ module {
         -> (tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
             tensor<1x8x128x128xf16>)
 
-    // present KV seq = past_seq (127) + current_seq (1); seqlens_k = total - 1.
-    // CHECK: tensor.dim %{{.*}}, %c2
-    // CHECK: arith.addi
-    // CHECK: arith.subi
+    // total KV seq comes from the mask's KV extent (128), not past + current,
+    // so it is the history length under either past/present buffer binding;
+    // seqlens_k = total - 1. present is static here, so no max() is needed.
+    // CHECK: %[[TOT:.*]] = tensor.dim %[[MASK:.*]], %c3
+    // CHECK-NOT: arith.addi
+    // CHECK: arith.subi %[[TOT]]
     // CHECK: tensor.from_elements %{{.*}} : tensor<1xi32>
     // CHECK: tensor.empty() : tensor<1x1x2048xf16>
     // CHECK: tensor.empty() : tensor<1x8x128x128xf16>
@@ -117,14 +124,17 @@ module {
         -> (tensor<?x?x4096xf16>, tensor<?x8x?x256xf16>,
             tensor<?x8x?x256xf16>)
 
-    // present seq extent = past + current, materialised as arith.addi and fed
-    // into the present tensor.empty (dynamic seq dim), NOT dim(past_key, 2).
-    // CHECK: %[[CUR:.*]] = tensor.dim %{{.*}}, %c1
+    // The total KV length comes from the mask's KV extent, so it tracks the
+    // history rather than the past buffer, and seqlens_k is derived from it.
+    // The present seq extent is max(past buffer, total): they are equal for a
+    // cache grown one step at a time, and the buffer wins when past and present
+    // are one shared max_length allocation.
     // CHECK: %[[PAST:.*]] = tensor.dim %{{.*}}, %c2
-    // CHECK: %[[TOT:.*]] = arith.addi %[[PAST]], %[[CUR]]
+    // CHECK: %[[TOT:.*]] = tensor.dim %{{.*}}, %c3
     // CHECK: arith.subi %[[TOT]], %{{.*}}
     // CHECK: tensor.from_elements %{{.*}} : tensor<1xi32>
-    // CHECK: tensor.empty(%{{.*}}, %[[TOT]]) : tensor<?x8x?x256xf16>
+    // CHECK: %[[PSEQ:.*]] = arith.maxui %[[PAST]], %[[TOT]]
+    // CHECK: tensor.empty(%{{.*}}, %[[PSEQ]]) : tensor<?x8x?x256xf16>
     // CHECK: hip.gqa(%[[CTX2]])
     // CHECK-SAME: no_causal = true
     // CHECK-NOT: onnx.Attention
@@ -170,13 +180,14 @@ module {
         -> (tensor<?x?x2048xf16>, tensor<?x1x?x256xf16>,
             tensor<?x1x?x256xf16>)
 
-    // present seq extent = past + current; mask threaded as attention_bias (8
-    // hip.gqa ins: q, k, v, past_k, past_v, seqlens_k, total_seq, mask).
-    // CHECK: %[[CURG:.*]] = tensor.dim %{{.*}}, %c1
+    // Total KV length from the mask's KV extent; present seq extent is
+    // max(past buffer, total). Mask threaded as attention_bias (8 hip.gqa ins:
+    // q, k, v, past_k, past_v, seqlens_k, total_seq, mask).
     // CHECK: %[[PASTG:.*]] = tensor.dim %{{.*}}, %c2
-    // CHECK: %[[TOTG:.*]] = arith.addi %[[PASTG]], %[[CURG]]
+    // CHECK: %[[TOTG:.*]] = tensor.dim %{{.*}}, %c3
     // CHECK: tensor.from_elements %{{.*}} : tensor<1xi32>
-    // CHECK: tensor.empty(%{{.*}}, %[[TOTG]]) : tensor<?x1x?x256xf16>
+    // CHECK: %[[PSEQG:.*]] = arith.maxui %[[PASTG]], %[[TOTG]]
+    // CHECK: tensor.empty(%{{.*}}, %[[PSEQG]]) : tensor<?x1x?x256xf16>
     // CHECK: hip.gqa(%[[CTXG]])
     // Mask is threaded as the final hip.gqa input (attention_bias).
     // CHECK-SAME: ins({{.*}}tensor<?x1x?x?xf16>) outs
@@ -336,11 +347,13 @@ module {
            tensor<1x1x1x?xf16>)
         -> tensor<1x1x2048xf16>
 
-    // The synthesized present buffers are sized from K's seq extent (dynamic),
-    // NOT the query's static 1. past is the 0 constant (no past operand), so
-    // the total is 0 + dim(K, 1) and seqlens_k = total - 1.
-    // CHECK: %[[KVLEN:.*]] = tensor.dim %{{.*}}, %c1 : tensor<1x?x256xf16>
-    // CHECK: %[[TOT:.*]] = arith.addi %c0, %[[KVLEN]]
+    // The synthesized present buffers are sized from the mask's KV extent
+    // (dynamic), NOT the query's static 1. The mask is preferred over K here
+    // for the same reason it is everywhere else: K is a buffer the sharing
+    // layer does not own, so its extent is the owner's capacity rather than the
+    // history. With no past operand there is nothing to take a max against.
+    // CHECK: %[[TOT:.*]] = tensor.dim %{{.*}}, %c3 : tensor<1x1x1x?xf16>
+    // CHECK-NOT: arith.addi
     // CHECK: arith.subi %[[TOT]], %c1
     // CHECK: tensor.from_elements %{{.*}} : tensor<1xi32>
     // CHECK: tensor.empty(%[[TOT]]) : tensor<1x1x?x256xf16>
@@ -971,5 +984,142 @@ module {
 
     return %out#0, %out#1, %out#2
         : tensor<?x?x4096xf16>, tensor<?x8x?x256xf16>, tensor<?x8x?x256xf16>
+  }
+}
+
+// -----
+
+// ===== Shared past/present buffer: capacity exceeds the total =====
+// Under ORT/OGA past_present_share_buffer the caller binds ONE max_length
+// buffer to both past_key_values.* and present.*, so dim(past_key, 2) is the
+// capacity (128 here), not the valid past length. past + current would ask the
+// output allocator for 129 and fail ORT's shape check against the 128-element
+// buffer it already holds. The mask carries the real total (17), and max()
+// picks the capacity for the buffer.
+module {
+  func.func @main_graph(
+      %query: tensor<1x1x2048xf16>,
+      %key: tensor<1x1x1024xf16>,
+      %value: tensor<1x1x1024xf16>,
+      %attn_mask: tensor<1x1x1x17xf16>,
+      %past_key: tensor<1x8x128x128xf16>,
+      %past_value: tensor<1x8x128x128xf16>)
+      -> (tensor<1x1x2048xf16>, tensor<1x8x?x128xf16>,
+          tensor<1x8x?x128xf16>) {
+
+    // CHECK-LABEL: func.func @main_graph
+    // CHECK-SAME: (%[[CTXSB:.*]]: !hip.context,
+
+    %out:3 = "onnx.Attention"(%query, %key, %value, %attn_mask, %past_key,
+                              %past_value)
+        {q_num_heads = 16 : si64,
+         kv_num_heads = 8 : si64,
+         is_causal = 0 : si64,
+         scale = 0.0883883461 : f32,
+         softcap = 0.000000e+00 : f32}
+        : (tensor<1x1x2048xf16>, tensor<1x1x1024xf16>, tensor<1x1x1024xf16>,
+           tensor<1x1x1x17xf16>, tensor<1x8x128x128xf16>,
+           tensor<1x8x128x128xf16>)
+        -> (tensor<1x1x2048xf16>, tensor<1x8x?x128xf16>,
+            tensor<1x8x?x128xf16>)
+
+    // seqlens_k comes from the mask total (17 - 1 = 16), so the runtime still
+    // scores only the valid history; the BUFFER is the 128-element capacity.
+    // CHECK: %[[PASTSB:.*]] = tensor.dim %{{.*}}, %c2
+    // CHECK: %[[TOTSB:.*]] = tensor.dim %{{.*}}, %c3
+    // CHECK: arith.subi %[[TOTSB]], %c1
+    // CHECK: %[[PSEQSB:.*]] = arith.maxui %[[PASTSB]], %[[TOTSB]]
+    // CHECK: tensor.empty(%[[PSEQSB]]) : tensor<1x8x?x128xf16>
+    // CHECK: hip.gqa(%[[CTXSB]])
+    // CHECK-NOT: onnx.Attention
+
+    return %out#0, %out#1, %out#2
+        : tensor<1x1x2048xf16>, tensor<1x8x?x128xf16>, tensor<1x8x?x128xf16>
+  }
+}
+
+// -----
+
+// ===== Rank-2 mask: trailing extent is NOT the KV axis =====
+// A [B, S_kv] mask has no query axis, so indexing its LAST dim would be
+// ambiguous with the rank-4 case this pass normally sees. The total falls back
+// to past + current rather than guessing.
+module {
+  func.func @main_graph(
+      %query: tensor<1x1x2048xf16>,
+      %key: tensor<1x1x1024xf16>,
+      %value: tensor<1x1x1024xf16>,
+      %attn_mask: tensor<1x128xf16>,
+      %past_key: tensor<1x8x127x128xf16>,
+      %past_value: tensor<1x8x127x128xf16>)
+      -> (tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
+          tensor<1x8x128x128xf16>) {
+
+    // CHECK-LABEL: func.func @main_graph
+    // CHECK-SAME: (%[[CTXR2:.*]]: !hip.context,
+
+    %out:3 = "onnx.Attention"(%query, %key, %value, %attn_mask, %past_key,
+                              %past_value)
+        {q_num_heads = 16 : si64,
+         kv_num_heads = 8 : si64,
+         is_causal = 0 : si64,
+         scale = 0.0883883461 : f32,
+         softcap = 0.000000e+00 : f32}
+        : (tensor<1x1x2048xf16>, tensor<1x1x1024xf16>, tensor<1x1x1024xf16>,
+           tensor<1x128xf16>, tensor<1x8x127x128xf16>,
+           tensor<1x8x127x128xf16>)
+        -> (tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
+            tensor<1x8x128x128xf16>)
+
+    // CHECK: arith.addi
+    // CHECK: hip.gqa(%[[CTXR2]])
+    // CHECK-NOT: onnx.Attention
+
+    return %out#0, %out#1, %out#2
+        : tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
+          tensor<1x8x128x128xf16>
+  }
+}
+
+// -----
+
+// ===== Broadcast mask: trailing extent is a static 1, not a length =====
+// A [B, 1, S_q, 1] mask broadcasts one value across every key. Its last extent
+// is a broadcast, so it says nothing about the history length and the total
+// falls back to past + current.
+module {
+  func.func @main_graph(
+      %query: tensor<1x1x2048xf16>,
+      %key: tensor<1x1x1024xf16>,
+      %value: tensor<1x1x1024xf16>,
+      %attn_mask: tensor<1x1x1x1xf16>,
+      %past_key: tensor<1x8x127x128xf16>,
+      %past_value: tensor<1x8x127x128xf16>)
+      -> (tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
+          tensor<1x8x128x128xf16>) {
+
+    // CHECK-LABEL: func.func @main_graph
+    // CHECK-SAME: (%[[CTXBC:.*]]: !hip.context,
+
+    %out:3 = "onnx.Attention"(%query, %key, %value, %attn_mask, %past_key,
+                              %past_value)
+        {q_num_heads = 16 : si64,
+         kv_num_heads = 8 : si64,
+         is_causal = 0 : si64,
+         scale = 0.0883883461 : f32,
+         softcap = 0.000000e+00 : f32}
+        : (tensor<1x1x2048xf16>, tensor<1x1x1024xf16>, tensor<1x1x1024xf16>,
+           tensor<1x1x1x1xf16>, tensor<1x8x127x128xf16>,
+           tensor<1x8x127x128xf16>)
+        -> (tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
+            tensor<1x8x128x128xf16>)
+
+    // CHECK: arith.addi
+    // CHECK: hip.gqa(%[[CTXBC]])
+    // CHECK-NOT: onnx.Attention
+
+    return %out#0, %out#1, %out#2
+        : tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
+          tensor<1x8x128x128xf16>
   }
 }
