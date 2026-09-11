@@ -894,11 +894,14 @@ jobs:
 
           $prefix = "${{ runner.workspace }}\therock-prefix"
           robocopy $dist $prefix /MIR /NFL /NDL /NJH /NJS /NP
+          # robocopy uses 0-7 for success (>=8 is a real failure); normalise so
+          # the copy's exit code does not fail the step.
           if ($LASTEXITCODE -ge 8) {
             exit $LASTEXITCODE
           }
           Get-ChildItem "$prefix\bin\hipblaslt\library" -Directory |
             ForEach-Object { Write-Host "hipBLASLt logic: $($_.Name)" }
+          exit 0
 
       - name: Report disk after TheRock build
         if: always() && steps.cache-therock.outputs.cache-hit != 'true'
