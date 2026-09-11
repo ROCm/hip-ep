@@ -222,8 +222,7 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
   fprintf(stderr, "[INIT] Wrote SchemeBindings.scm to %s\n", tmpfile);
   fflush(stderr);
 
-  // Use Scheme's load function
-  ptr load_sym = Stop_level_value(Sstring_to_symbol("load"));
+  // Use Scheme's load function (already cached above)
   fprintf(stderr, "[INIT] Calling load on %s\n", tmpfile);
   fflush(stderr);
   Scall1(load_sym, Sstring(tmpfile));
