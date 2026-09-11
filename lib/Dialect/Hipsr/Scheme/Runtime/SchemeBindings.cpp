@@ -43,9 +43,8 @@ static bool scheme_initialized = false;
 namespace mlir {
 namespace hipsr {
 
-namespace {
+// Current log level - used by FFI logging functions
 static SchemeLogLevel current_log_level = SchemeLogLevel::Warning;
-}
 
 SchemeLogLevel parseLogLevel(const std::string& level) {
   if (level == "trace") return SchemeLogLevel::Trace;
@@ -306,32 +305,32 @@ static void mlir_operation_walk(uint64_t op, ptr callback) {
 
 // Logging functions callable from Scheme
 static void mlir_log_trace(const char* msg) {
-  if (current_log_level <= SchemeLogLevel::Trace)
+  if (mlir::hipsr::current_log_level <= mlir::hipsr::SchemeLogLevel::Trace)
     llvm::errs() << "[trace] " << msg << "\n";
 }
 
 static void mlir_log_debug(const char* msg) {
-  if (current_log_level <= SchemeLogLevel::Debug)
+  if (mlir::hipsr::current_log_level <= mlir::hipsr::SchemeLogLevel::Debug)
     llvm::errs() << "[debug] " << msg << "\n";
 }
 
 static void mlir_log_info(const char* msg) {
-  if (current_log_level <= SchemeLogLevel::Info)
+  if (mlir::hipsr::current_log_level <= mlir::hipsr::SchemeLogLevel::Info)
     llvm::errs() << "[info] " << msg << "\n";
 }
 
 static void mlir_log_warning(const char* msg) {
-  if (current_log_level <= SchemeLogLevel::Warning)
+  if (mlir::hipsr::current_log_level <= mlir::hipsr::SchemeLogLevel::Warning)
     llvm::errs() << "[warning] " << msg << "\n";
 }
 
 static void mlir_log_error(const char* msg) {
-  if (current_log_level <= SchemeLogLevel::Error)
+  if (mlir::hipsr::current_log_level <= mlir::hipsr::SchemeLogLevel::Error)
     llvm::errs() << "[error] " << msg << "\n";
 }
 
 static void mlir_log_fatal(const char* msg) {
-  if (current_log_level <= SchemeLogLevel::Fatal)
+  if (mlir::hipsr::current_log_level <= mlir::hipsr::SchemeLogLevel::Fatal)
     llvm::errs() << "[fatal] " << msg << "\n";
 }
 
