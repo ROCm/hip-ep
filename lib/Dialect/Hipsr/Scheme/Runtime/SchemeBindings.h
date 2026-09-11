@@ -108,6 +108,25 @@ SchemeValue mlir_operation_get_loc(SchemeValue op_ptr);
 // Returns: Value as uptr
 SchemeValue mlir_operation_get_block_argument(SchemeValue op_ptr, int index);
 
+//===----------------------------------------------------------------------===//
+// Phase 3: IR Construction FFI (OpBuilder)
+//===----------------------------------------------------------------------===//
+
+// Note: These functions require a PatternRewriter context. For now, they are
+// placeholders that will be properly integrated when called from pattern passes.
+
+// Create hipsr.placeholder operation
+// Args: ctx (Value), ins (Value), result_type (Type), placeholder_type (int 0=Normal)
+// Returns: Value (placeholder result)
+SchemeValue mlir_create_placeholder_op(SchemeValue ctx_value, SchemeValue input_value,
+                                       SchemeValue result_type, int placeholder_type_int);
+
+// Create hipsr.cast operation
+// Args: ctx (Value), ins (Value), outs (Value), result_type (Type)
+// Returns: Value (cast result)
+SchemeValue mlir_create_cast_op(SchemeValue ctx_value, SchemeValue input_value,
+                                SchemeValue output_value, SchemeValue result_type);
+
 } // namespace hipsr
 } // namespace mlir
 

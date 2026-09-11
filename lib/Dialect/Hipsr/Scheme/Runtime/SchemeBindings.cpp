@@ -423,6 +423,25 @@ SchemeValue mlir_operation_get_block_argument(SchemeValue op_ptr, int index) {
   return const_cast<void*>(wrap(arg).ptr);
 }
 
+//===----------------------------------------------------------------------===//
+// Phase 3: IR Construction FFI (OpBuilder)
+//===----------------------------------------------------------------------===//
+
+// TODO: These require OpBuilder/PatternRewriter context integration
+// For now, stubs that log error
+
+SchemeValue mlir_create_placeholder_op(SchemeValue ctx_value, SchemeValue input_value,
+                                       SchemeValue result_type, int placeholder_type_int) {
+  mlir_log_error("mlir_create_placeholder_op: Not yet implemented - requires PatternRewriter context");
+  return nullptr;
+}
+
+SchemeValue mlir_create_cast_op(SchemeValue ctx_value, SchemeValue input_value,
+                                SchemeValue output_value, SchemeValue result_type) {
+  mlir_log_error("mlir_create_cast_op: Not yet implemented - requires PatternRewriter context");
+  return nullptr;
+}
+
 } // extern "C"
 
 // Register all MLIR foreign functions in Scheme
@@ -457,7 +476,11 @@ void registerMlirForeignFunctions() {
   Sregister_symbol("mlir_operation_get_loc", (void*)mlir_operation_get_loc);
   Sregister_symbol("mlir_operation_get_block_argument", (void*)mlir_operation_get_block_argument);
 
-  LLVM_DEBUG(llvm::dbgs() << "Registered " << 22 << " MLIR FFI functions\n");
+  // Phase 3: IR Construction FFI (OpBuilder) - TODO: needs PatternRewriter integration
+  Sregister_symbol("mlir_create_placeholder_op", (void*)mlir_create_placeholder_op);
+  Sregister_symbol("mlir_create_cast_op", (void*)mlir_create_cast_op);
+
+  LLVM_DEBUG(llvm::dbgs() << "Registered " << 24 << " MLIR FFI functions\n");
 }
 
 } // namespace hipsr
