@@ -365,6 +365,8 @@ baked path is invalid (e.g. the package deployed to a host where the
 build-time clang path no longer exists) **and** `clang++` is absent from
 PATH.
 
-Fix on the deploy host: put the bundled clang on PATH —
-`export PATH="$ROOT/bin:$PATH"` (the prebuilt package ships
-`clang++`/`ld.lld` in `$ROOT/bin`, alongside the other tools).
+Fix on the deploy host: put the ROCm toolchain on PATH — e.g.
+`export PATH="$THEROCK_DIST/lib/llvm/bin:$PATH"`. The package does not
+ship `clang++`/`ld.lld`: the rocmlirTriton LLVM snapshot builds no clang,
+and the deploy host installs ROCm separately, so its `clang++` (the same
+HIP SDK driver the project builds against) is used instead.
