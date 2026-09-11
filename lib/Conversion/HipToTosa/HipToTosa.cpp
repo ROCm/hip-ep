@@ -87,8 +87,9 @@ static Value transposeTo(Value input, ArrayRef<int64_t> shape,
                          ArrayRef<int32_t> permutation,
                          ConversionPatternRewriter &rewriter, Location loc) {
   auto type = cast<RankedTensorType>(input.getType());
-  return tosa::TransposeOp::create(rewriter, loc, type.clone(shape), input,
-                                   permutation);
+  return tosa::TransposeOp::create(
+      rewriter, loc, type.clone(shape), input,
+      rewriter.getDenseI32ArrayAttr(permutation));
 }
 
 // Crop `input` to `shape`, anchored at the origin, via tosa.slice.
