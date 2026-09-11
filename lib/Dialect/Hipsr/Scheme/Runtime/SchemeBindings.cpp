@@ -40,11 +40,22 @@ const size_t pattern_dsl_scm_size = sizeof(pattern_dsl_scm_data) - 1;
 
 namespace {
 static bool scheme_initialized = false;
+static SchemeLogLevel init_log_level = SchemeLogLevel::Warning;
 // Cached Scheme symbols for script loading
 static ptr cached_eval_sym = nullptr;
 static ptr cached_read_sym = nullptr;
 static ptr cached_open_string_input_port_sym = nullptr;
 static ptr cached_eof_object_p = nullptr;
+
+// Custom init called by Sbuild_heap before loading boot files
+static void custom_init() {
+  // Register all MLIR foreign functions
+  registerMlirForeignFunctions();
+
+  if (init_log_level <= SchemeLogLevel::Debug) {
+    llvm::errs() << "[debug] custom_init: Registered foreign functions\n";
+  }
+}
 }
 
 namespace mlir {
@@ -71,6 +82,7 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
     return true;
 
   current_log_level = logLevel;
+  init_log_level = logLevel;
 
   if (logLevel <= SchemeLogLevel::Info) {
     llvm::errs() << "[info] Initializing Chez Scheme runtime "
@@ -83,15 +95,25 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
   LLVM_DEBUG(llvm::dbgs() << "Initializing Chez Scheme runtime "
                           << Skernel_version() << "\n");
 
+  // Initialize Scheme system (must be called first)
   Sscheme_init(nullptr);
+
+  // Register embedded boot files
   Sregister_boot_file_bytes("petite.boot", const_cast<void*>(static_cast<const void*>(petite_boot_data)), petite_boot_size);
   Sregister_boot_file_bytes("scheme.boot", const_cast<void*>(static_cast<const void*>(scheme_boot_data)), scheme_boot_size);
-  Sbuild_heap("hip-mlir-opt", nullptr);
 
-  // Activate the current thread for Scheme execution
-  Sactivate_thread();
+  // Build heap and call custom_init (which registers foreign functions)
+  // custom_init is called BEFORE boot files are loaded
+  Sbuild_heap(nullptr, custom_init);
 
-  // Get and cache Scheme symbols we'll use
+  if (logLevel <= SchemeLogLevel::Debug) {
+    llvm::errs() << "[debug] Heap built, caching Scheme symbols\n";
+  }
+
+  // Cache Scheme symbols we'll use
+  #define CALL0(who) Scall0(Stop_level_value(Sstring_to_symbol(who)))
+  #define CALL1(who, arg) Scall1(Stop_level_value(Sstring_to_symbol(who)), arg)
+
   cached_eval_sym = Stop_level_value(Sstring_to_symbol("eval"));
   cached_read_sym = Stop_level_value(Sstring_to_symbol("read"));
   cached_open_string_input_port_sym = Stop_level_value(Sstring_to_symbol("open-string-input-port"));
@@ -122,9 +144,8 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
     llvm::errs() << "[debug] Added Scheme library path: " << schemePath.c_str() << "\n";
   }
 
-  // Register MLIR foreign functions AFTER Scheme is initialized
-  // but BEFORE loading user Scheme code
-  registerMlirForeignFunctions();
+  // NOTE: Foreign functions are registered in custom_init(), which was called
+  // by Sbuild_heap before loading boot files
 
   // Load the Scheme bindings library
   std::string scm_code(reinterpret_cast<const char*>(scheme_bindings_scm_data),
