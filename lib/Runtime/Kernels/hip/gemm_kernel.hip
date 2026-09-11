@@ -1770,11 +1770,14 @@ static bool gemmPadRowEnabled() {
  *   - Large M (>256), large weight (>64 MB) with a non-severe pow2 stride: the
  *     conflict is hidden by compute and the padded footprint costs more than it
  *     saves with the wide 256x128 tile, so it is gated off there.
- *   - Severe stride K = pow2 >= 8192 (row stride is a multiple of the whole
- *     16 KB L1): the aliasing collapses even large-M throughput (~-35%), and the
- *     heuristic routes these to the small 128x64 tile whose 2 MB A-panel keeps
- *     padrow a clear win regardless of weight size (M=512 8192x8192, 128 MB:
- *     25k -> 32k, +27%). So padrow is always eligible for this case.
+ *   - Bad K stride (K % 1024 == 0): the B/A row stride (K*2 bytes, a multiple of
+ *     2 KB) aliases few L1 sets and collapses cfg5 throughput. Measured (cfg5
+ *     M=1024, cooled): K=6144 27->41 TFLOP with padrow (-38% -> -4% vs hipBLASLt),
+ *     K=5120 37->44 (+1% lead), while K=7680 (%1024=512) is already 43 and padrow
+ *     is a no-op (+1%). This is a superset of the power-of-two case and catches
+ *     the non-pow2 dips (6144, 3072). Padrow never regresses (worst +1%), and the
+ *     hit-rate guard disables it for a dynamic (non-reused) B, so a bad-K weight
+ *     is always eligible regardless of size.
  * The 64 MB bound is empirical, to be refined by the offline LUT. */
 static bool gemmPadRowEligible(int M, int N, int K, int transA, int transB,
                                int type_bytes) {
@@ -1784,13 +1787,14 @@ static bool gemmPadRowEligible(int M, int N, int K, int transA, int transB,
     std::string s = gemmEnvStr("HIPDNN_EP_GEMM_PADROW_FORCE");
     return !s.empty() && s[0] != '0';
   }();
-  /* Row stride == a multiple of the 16 KB L1: the worst aliasing, and the tile
-   * we route it to (128x64) benefits from padrow at any weight size. */
-  const bool severe_alias = gemmIsPow2(K) && K >= 8192;
+  /* K*2 a multiple of 2 KB -> row stride lands on few L1 sets -> aliasing. This
+   * catches every K that collapses cfg5, and padrow recovers it at any weight
+   * size, so a bad-K weight bypasses the compute-bound size bound. */
+  const bool bad_stride = (K % 1024) == 0 && K >= 2048;
   const bool bound_ok = force_bound || (M <= 256) ||
-                        (weight_bytes <= (64ull << 20)) || severe_alias;
+                        (weight_bytes <= (64ull << 20)) || bad_stride;
   return gemmPadRowEnabled() && transB && !transA && type_bytes == 2 &&
-         M >= 16 && N >= 64 && gemmIsPow2(K) && K >= 2048 && bound_ok;
+         M >= 16 && N >= 64 && bad_stride && bound_ok;
 }
 
 template <typename T>
