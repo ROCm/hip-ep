@@ -84,6 +84,30 @@ int mlir_type_get_rank(SchemeValue type_ptr);
 // Returns: Type* as uptr
 SchemeValue mlir_value_get_type(SchemeValue value_ptr);
 
+//===----------------------------------------------------------------------===//
+// Phase 2: Operation/Value Navigation FFI
+//===----------------------------------------------------------------------===//
+
+// Get parent operation
+// Returns: Operation* as uptr (or nullptr)
+SchemeValue mlir_operation_get_parent(SchemeValue op_ptr);
+
+// Get operand Value from operation by index
+// Returns: Value as uptr
+SchemeValue mlir_operation_get_operand_value(SchemeValue op_ptr, int index);
+
+// Get result Value from operation by index
+// Returns: Value as uptr
+SchemeValue mlir_operation_get_result_value(SchemeValue op_ptr, int index);
+
+// Get location from operation
+// Returns: Location* as uptr
+SchemeValue mlir_operation_get_loc(SchemeValue op_ptr);
+
+// Get block argument from parent function
+// Returns: Value as uptr
+SchemeValue mlir_operation_get_block_argument(SchemeValue op_ptr, int index);
+
 } // namespace hipsr
 } // namespace mlir
 

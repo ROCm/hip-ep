@@ -13,6 +13,7 @@
 #include "mlir/IR/Attributes.h"
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Wrap.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include <cstddef>
 #include <cstring>
 #include <fstream>
@@ -372,6 +373,56 @@ SchemeValue mlir_value_get_type(SchemeValue value_ptr) {
   return const_cast<void*>(wrap(value.getType()).ptr);
 }
 
+//===----------------------------------------------------------------------===//
+// Phase 2: Operation/Value Navigation FFI
+//===----------------------------------------------------------------------===//
+
+SchemeValue mlir_operation_get_parent(SchemeValue op_ptr) {
+  mlir::Operation* op = unwrap(static_cast<MlirOperation>(op_ptr));
+  mlir::Operation* parent = op->getParentOp();
+  if (!parent)
+    return nullptr;
+  return const_cast<void*>(wrap(parent).ptr);
+}
+
+SchemeValue mlir_operation_get_operand_value(SchemeValue op_ptr, int index) {
+  mlir::Operation* op = unwrap(static_cast<MlirOperation>(op_ptr));
+  if (index < 0 || index >= (int)op->getNumOperands())
+    return nullptr;
+  mlir::Value operand = op->getOperand(index);
+  return const_cast<void*>(wrap(operand).ptr);
+}
+
+SchemeValue mlir_operation_get_result_value(SchemeValue op_ptr, int index) {
+  mlir::Operation* op = unwrap(static_cast<MlirOperation>(op_ptr));
+  if (index < 0 || index >= (int)op->getNumResults())
+    return nullptr;
+  mlir::Value result = op->getResult(index);
+  return const_cast<void*>(wrap(result).ptr);
+}
+
+SchemeValue mlir_operation_get_loc(SchemeValue op_ptr) {
+  mlir::Operation* op = unwrap(static_cast<MlirOperation>(op_ptr));
+  return const_cast<void*>(wrap(op->getLoc()).ptr);
+}
+
+SchemeValue mlir_operation_get_block_argument(SchemeValue op_ptr, int index) {
+  mlir::Operation* op = unwrap(static_cast<MlirOperation>(op_ptr));
+  // Walk up to parent function
+  while (op && !llvm::isa<mlir::func::FuncOp>(op)) {
+    op = op->getParentOp();
+  }
+  if (!op)
+    return nullptr;
+
+  auto funcOp = llvm::cast<mlir::func::FuncOp>(op);
+  if (index < 0 || index >= (int)funcOp.getNumArguments())
+    return nullptr;
+
+  mlir::Value arg = funcOp.getArgument(index);
+  return const_cast<void*>(wrap(arg).ptr);
+}
+
 } // extern "C"
 
 // Register all MLIR foreign functions in Scheme
@@ -399,7 +450,14 @@ void registerMlirForeignFunctions() {
   Sregister_symbol("mlir_type_get_rank", (void*)mlir_type_get_rank);
   Sregister_symbol("mlir_value_get_type", (void*)mlir_value_get_type);
 
-  LLVM_DEBUG(llvm::dbgs() << "Registered " << 17 << " MLIR FFI functions\n");
+  // Phase 2: Operation/Value Navigation FFI
+  Sregister_symbol("mlir_operation_get_parent", (void*)mlir_operation_get_parent);
+  Sregister_symbol("mlir_operation_get_operand_value", (void*)mlir_operation_get_operand_value);
+  Sregister_symbol("mlir_operation_get_result_value", (void*)mlir_operation_get_result_value);
+  Sregister_symbol("mlir_operation_get_loc", (void*)mlir_operation_get_loc);
+  Sregister_symbol("mlir_operation_get_block_argument", (void*)mlir_operation_get_block_argument);
+
+  LLVM_DEBUG(llvm::dbgs() << "Registered " << 22 << " MLIR FFI functions\n");
 }
 
 } // namespace hipsr
