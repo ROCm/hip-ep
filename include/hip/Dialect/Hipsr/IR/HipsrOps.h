@@ -38,6 +38,14 @@ namespace hipsr {
 // the destinations. return empty range if op is not a hipsr op.
 ::mlir::OperandRange getHipsrInputOperands(::mlir::Operation *op);
 
+// Adds a read for each memref input and a write for each memref destination.
+// Tensor operands add no memory effects.
+void getDpsMemoryEffects(
+    ::mlir::DestinationStyleOpInterface op,
+    ::llvm::SmallVectorImpl<
+        ::mlir::SideEffects::EffectInstance<::mlir::MemoryEffects::Effect>>
+        &effects);
+
 // return the shape-graph value holding value's shape: value itself when it is
 // already a legal placeholder input, otherwise the destination its producer
 // writes into. return value unchanged when no destination matches.
