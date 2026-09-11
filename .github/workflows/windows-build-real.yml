@@ -42,9 +42,6 @@ jobs:
       # ilammy/msvc-dev-cmd and mozilla-actions/sccache-action have no
       # Node.js 24 releases yet; allow Node.js 20 until they are updated.
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
-      # gfx11-generic covers gfx1100-1153; gfx1170 needs its own DLL since its
-      # gfx12-style WMMA encoding excludes it from that generic target. The
-      # pinned TheRock dist carries the per-ISA vendor data both need at runtime.
       HIP_ARCHITECTURES: "gfx11-generic;gfx1170"
 
     steps:
