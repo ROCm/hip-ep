@@ -66,6 +66,30 @@
   (foreign-procedure "mlir_value_get_type" (unsigned-64) unsigned-64))
 
 ;;===----------------------------------------------------------------------===;;
+;; Phase 2: Operation/Value Navigation FFI
+;;===----------------------------------------------------------------------===;;
+
+;; Get parent operation
+(define mlir-operation-get-parent
+  (foreign-procedure "mlir_operation_get_parent" (unsigned-64) unsigned-64))
+
+;; Get operand Value from operation by index
+(define mlir-operation-get-operand-value
+  (foreign-procedure "mlir_operation_get_operand_value" (unsigned-64 int) unsigned-64))
+
+;; Get result Value from operation by index
+(define mlir-operation-get-result-value
+  (foreign-procedure "mlir_operation_get_result_value" (unsigned-64 int) unsigned-64))
+
+;; Get location from operation
+(define mlir-operation-get-loc
+  (foreign-procedure "mlir_operation_get_loc" (unsigned-64) unsigned-64))
+
+;; Get block argument from parent function
+(define mlir-operation-get-block-argument
+  (foreign-procedure "mlir_operation_get_block_argument" (unsigned-64 int) unsigned-64))
+
+;;===----------------------------------------------------------------------===;;
 ;; High-level Scheme API
 ;;===----------------------------------------------------------------------===;;
 
