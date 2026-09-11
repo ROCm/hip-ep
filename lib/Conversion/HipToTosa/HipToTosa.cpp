@@ -166,8 +166,8 @@ struct ConvConverter final : public OpConversionPattern<hip::ConvOp> {
     if (op.getGroup() != 1)
       return rewriter.notifyMatchFailure(
           op, "grouped convolution has no TOSA conv2d spelling");
-    if (weightShape[1] != inputShape[1] || weightShape[0] != resultShape[1])
-      return rewriter.notifyMatchFailure(op, "incompatible channels");
+    if (inputShape[0] != resultShape[0] ||
+        weightShape[1] != inputShape[1] || weightShape[0] != resultShape[1])
 
     SmallVector<int64_t> kernelShape = getI64Values(op.getKernelShape());
     if (kernelShape.size() != 2 || kernelShape[0] != weightShape[2] ||
