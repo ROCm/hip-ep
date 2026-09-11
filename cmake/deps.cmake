@@ -141,33 +141,128 @@ set(BUILD_SHARED_LIBS ${_saved_bsl_cpptrace})
 #   in-tree-defined helper functions (mlir_tablegen, llvm_map_components_to_libnames,
 #   add_mlir_dialect, ...). See llvm/docs/CMake.rst + the FOSDEM MLIR-dialect talk.
 #
+# LLVM always comes from rocmlirTriton's external/llvm-project subtree, so the
+# two projects compile one identical tree. Nothing here reconstructs that tree
+# from upstream any more: rocmlirTriton vendors LLVM through git subtree and
+# commits its downstream changes onto the imported revision, and reproducing
+# that by patching an upstream checkout meant carrying a 69 KB source patch
+# that had to be regenerated on every bump. This is a post-22, pre-release
+# LLVM 23 snapshot, so LLVM_PACKAGE_VERSION alone is not a sufficient identity.
+set(_HIPDNN_ROCMLIRTRITON_REV
+    "28a5a7a40cfd6aceab0047c7fc92cb5cf90b6540")
+set(_HIPDNN_LLVM_REQUIRED_MAJOR 23)
+set(_HIPDNN_LLVM_PINNED_VERSION "23.0.0git")
+set(_HIPDNN_LLVM_PATCHSET_ID "rocmlirTriton-${_HIPDNN_ROCMLIRTRITON_REV}")
+if(NOT DEP_HASH_rocmlirTriton STREQUAL _HIPDNN_ROCMLIRTRITON_REV)
+  message(FATAL_ERROR
+    "cmake/deps.txt rocmlirTriton pin '${DEP_HASH_rocmlirTriton}' does not "
+    "match _HIPDNN_ROCMLIRTRITON_REV '${_HIPDNN_ROCMLIRTRITON_REV}'")
+endif()
+set(HIPDNN_ROCMLIRTRITON_SOURCE_DIR "" CACHE PATH
+    "rocmlirTriton checkout (external/llvm-project). Empty means auto-clone when HIPDNN_EP_FETCH_ROCMLIRTRITON=ON")
+if(NOT HIPDNN_ROCMLIRTRITON_SOURCE_DIR AND HIPDNN_EP_FETCH_ROCMLIRTRITON)
+  # Populate the git tree only. Do NOT add_subdirectory() the rocmlirTriton
+  # root: that CMakeLists.txt calls project(), builds a second LLVM/Triton,
+  # and requires clang-cl on Windows. SOURCE_SUBDIR .github has no
+  # CMakeLists.txt, so FetchContent_MakeAvailable skips add_subdirectory.
+  message(STATUS
+    "Cloning rocmlirTriton ${DEP_HASH_rocmlirTriton} from "
+    "${DEP_URL_rocmlirTriton}")
+  FetchContent_Declare(rocmlirtriton
+    GIT_REPOSITORY ${DEP_URL_rocmlirTriton}
+    GIT_TAG ${DEP_HASH_rocmlirTriton}
+    GIT_SHALLOW FALSE
+    GIT_PROGRESS TRUE
+    GIT_SUBMODULES ""
+    SOURCE_SUBDIR ".github"
+    EXCLUDE_FROM_ALL)
+  FetchContent_MakeAvailable(rocmlirtriton)
+  if(NOT EXISTS "${rocmlirtriton_SOURCE_DIR}/external/llvm-project/llvm/CMakeLists.txt")
+    message(FATAL_ERROR
+      "Fetched rocmlirTriton at '${rocmlirtriton_SOURCE_DIR}' is missing "
+      "external/llvm-project. Check the pin in cmake/deps.txt and that git "
+      "subtrees were cloned (not an empty submodule).")
+  endif()
+  set(HIPDNN_ROCMLIRTRITON_SOURCE_DIR "${rocmlirtriton_SOURCE_DIR}"
+      CACHE PATH
+      "rocmlirTriton checkout (external/llvm-project). Empty means auto-clone when HIPDNN_EP_FETCH_ROCMLIRTRITON=ON"
+      FORCE)
+  message(STATUS
+    "Using auto-cloned rocmlirTriton at ${HIPDNN_ROCMLIRTRITON_SOURCE_DIR}")
+elseif(HIPDNN_ROCMLIRTRITON_SOURCE_DIR)
+  message(STATUS
+    "Using rocmlirTriton at ${HIPDNN_ROCMLIRTRITON_SOURCE_DIR}")
+elseif(HIPDNN_EP_EMBED_LLVM)
+  message(FATAL_ERROR
+    "LLVM comes from rocmlirTriton's external/llvm-project, but "
+    "HIPDNN_EP_FETCH_ROCMLIRTRITON=OFF and HIPDNN_ROCMLIRTRITON_SOURCE_DIR is "
+    "unset. Point HIPDNN_ROCMLIRTRITON_SOURCE_DIR at a checkout, turn "
+    "fetching back on, or set HIPDNN_EP_EMBED_LLVM=OFF to consume a prebuilt "
+    "LLVM through LLVM_DIR/MLIR_DIR.")
+endif()
+message(STATUS
+  "hip-ep requires rocmlirTriton LLVM ${_HIPDNN_LLVM_PINNED_VERSION} "
+  "(${_HIPDNN_LLVM_PATCHSET_ID})")
+
 # The sticky HIPDNN_LLVM_EMBEDDED flag makes reconfigures of a from-source tree
 # safe: morphizen's deps.cmake caches MLIR_DIR/LLVM_DIR pointing at the build
 # tree, and a plain find_package(MLIR) on the next configure would then fail in
 # the build-tree LLVMConfig includes -- so once embedded we skip find_package
 # entirely and clear those stale cache entries.
+# Leaving embedded mode has to clear the sticky flag first, otherwise the block
+# below would discard the LLVM_DIR/MLIR_DIR that select the external package.
+if(NOT HIPDNN_EP_EMBED_LLVM)
+  set(HIPDNN_LLVM_EMBEDDED OFF CACHE BOOL
+      "LLVM provided via FetchContent subdirectory" FORCE)
+endif()
+
 if(HIPDNN_LLVM_EMBEDDED)
   unset(MLIR_DIR CACHE)
   unset(LLVM_DIR CACHE)
 endif()
 
 if(NOT HIPDNN_LLVM_EMBEDDED)
-  find_package(MLIR CONFIG QUIET)
+  find_package(MLIR ${_HIPDNN_LLVM_REQUIRED_MAJOR} CONFIG QUIET)
 endif()
 
 if(MLIR_FOUND AND NOT HIPDNN_LLVM_EMBEDDED)
-  find_package(LLVM REQUIRED CONFIG)
+  find_package(LLVM ${_HIPDNN_LLVM_REQUIRED_MAJOR} REQUIRED CONFIG)
+  if(NOT LLVM_VERSION_MAJOR EQUAL _HIPDNN_LLVM_REQUIRED_MAJOR)
+    message(FATAL_ERROR
+      "hip-ep requires LLVM major ${_HIPDNN_LLVM_REQUIRED_MAJOR}; "
+      "found ${LLVM_PACKAGE_VERSION} at ${LLVM_DIR}")
+  endif()
+  # DLLLinker.cpp includes lld/Common/Driver.h. An installed LLVM exposes the
+  # lld headers through its merged include prefix, but a build-tree package
+  # (what --shared_llvm consumes) keeps them in the lld source and generated
+  # dirs, which only LLDConfig.cmake knows about.
+  find_package(LLD CONFIG QUIET)
+  if(LLD_INCLUDE_DIRS)
+    include_directories(SYSTEM ${LLD_INCLUDE_DIRS})
+    message(STATUS "LLD headers: ${LLD_INCLUDE_DIRS}")
+  endif()
 else()
+  if(NOT HIPDNN_EP_EMBED_LLVM)
+    message(FATAL_ERROR
+      "HIPDNN_EP_EMBED_LLVM=OFF requires an external LLVM "
+      "${_HIPDNN_LLVM_REQUIRED_MAJOR} (${_HIPDNN_LLVM_PATCHSET_ID}) package, "
+      "but find_package(MLIR) did not find one. Pass LLVM_DIR/MLIR_DIR, or "
+      "use build.py --shared_llvm to point them at the LLVM that rocmlirTriton "
+      "builds.")
+  endif()
   message(STATUS "LLVM/MLIR not found; building from source (${DEP_HASH_llvm})")
-  # clang is built in-tree so a from-source bootstrap is fully self-contained:
-  # lib/Runtime gets a version-matched clang for runtime bitcode with no
-  # external dependency. Kept identical to the CI LLVM build so the prefix that
-  # CI caches (find_package path) and this fallback produce equivalent toolsets.
-  set(LLVM_ENABLE_PROJECTS "clang;mlir;lld" CACHE STRING "" FORCE)
-  set(LLVM_TARGETS_TO_BUILD "X86" CACHE STRING "" FORCE)
+  # Match rocmlirTriton's in-tree LLVM configuration. X86 is retained alongside
+  # AMDGPU because hip-ep's ORC JIT emits native host code.
+  set(LLVM_ENABLE_PROJECTS "mlir;lld" CACHE STRING "" FORCE)
+  set(LLVM_TARGETS_TO_BUILD "X86;AMDGPU" CACHE STRING "" FORCE)
+  # RTTI stays on, unlike rocmlirTriton: hip-ep's own libraries are compiled
+  # with RTTI on ELF, so their vtables reference typeinfo for the MLIR bases
+  # they derive from, which an -fno-rtti LLVM never emits.
   set(LLVM_ENABLE_RTTI ON CACHE BOOL "" FORCE)
   set(LLVM_ENABLE_ZLIB OFF CACHE BOOL "" FORCE)
   set(LLVM_ENABLE_ZSTD OFF CACHE BOOL "" FORCE)
+  set(LLVM_ENABLE_TERMINFO OFF CACHE BOOL "" FORCE)
+  set(LLVM_ENABLE_ASSERTIONS ON CACHE BOOL "" FORCE)
   # LLVM auto-enables DIA once it finds the DIA SDK, and DIASupport.h then pulls
   # atlbase.h from the ATL headers. ATL reaches cl.exe differently per generator:
   # MSBuild puts atlmfc/include on IncludePath itself, while Ninja takes it from
@@ -178,11 +273,24 @@ else()
   set(LLVM_INCLUDE_TESTS OFF CACHE BOOL "" FORCE)
   set(LLVM_INCLUDE_EXAMPLES OFF CACHE BOOL "" FORCE)
   set(LLVM_INCLUDE_BENCHMARKS OFF CACHE BOOL "" FORCE)
+  set(LLVM_INCLUDE_UTILS ON CACHE BOOL "" FORCE)
   set(LLVM_INSTALL_UTILS ON CACHE BOOL "" FORCE)  # FileCheck/not/count for LIT
+  # Match rocmlirTriton's install layout, but keep LIT utilities in the default
+  # build. FetchContent uses EXCLUDE_FROM_ALL, so FileCheck would otherwise
+  # never be produced for MorphizenMLIRLitTests.
+  set(LLVM_INSTALL_TOOLCHAIN_ONLY ON CACHE BOOL "" FORCE)
+  set(CMAKE_DISABLE_PRECOMPILE_HEADERS ON CACHE BOOL "" FORCE)
+
+  set(_hipdnn_rocmlir_llvm_source
+      "${HIPDNN_ROCMLIRTRITON_SOURCE_DIR}/external/llvm-project")
+  if(NOT EXISTS "${_hipdnn_rocmlir_llvm_source}/llvm/CMakeLists.txt")
+    message(FATAL_ERROR
+      "HIPDNN_ROCMLIRTRITON_SOURCE_DIR does not contain "
+      "external/llvm-project/llvm/CMakeLists.txt: "
+      "${HIPDNN_ROCMLIRTRITON_SOURCE_DIR}")
+  endif()
   FetchContent_Declare(llvm-project
-    GIT_REPOSITORY ${DEP_URL_llvm}
-    GIT_TAG ${DEP_HASH_llvm}
-    GIT_SHALLOW TRUE
+    SOURCE_DIR "${_hipdnn_rocmlir_llvm_source}"
     SOURCE_SUBDIR llvm
     EXCLUDE_FROM_ALL)
   # Build the in-tree LLVM/MLIR/clang with hidden ELF visibility (source
@@ -202,6 +310,11 @@ else()
   set(CMAKE_C_VISIBILITY_PRESET hidden)
   set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
   FetchContent_MakeAvailable(llvm-project)
+  foreach(_hipdnn_llvm_util FileCheck not count split-file mlir-pdll)
+    if(TARGET ${_hipdnn_llvm_util})
+      set_property(TARGET ${_hipdnn_llvm_util} PROPERTY EXCLUDE_FROM_ALL OFF)
+    endif()
+  endforeach()
   # Restore. unset() when the original was empty -- CMake rejects an empty
   # string as a *_VISIBILITY_PRESET value ("unsupported value \"\"").
   if(_hipdnn_saved_cxx_visibility STREQUAL "")
@@ -237,10 +350,9 @@ else()
     "${llvm-project_BINARY_DIR}/tools/mlir/include" CACHE PATH "" FORCE)
   set(LLVM_CMAKE_DIR "${llvm-project_SOURCE_DIR}/llvm/cmake/modules" CACHE PATH "" FORCE)
   set(MLIR_CMAKE_DIR "${llvm-project_SOURCE_DIR}/mlir/cmake/modules" CACHE PATH "" FORCE)
-  # Tool dirs so downstream find_program (e.g. lib/Runtime's llvm-link/opt
-  # lookup) resolves against the in-tree LLVM build. clang is always built
-  # in-tree (clang;mlir;lld), so lib/Runtime's runtime-bitcode step uses the
-  # version-matched in-tree clang target.
+  # Tool dirs so downstream find_program (e.g. lib/Runtime's llvm-link lookup)
+  # resolves against the in-tree LLVM build. Clang is intentionally not built
+  # here, matching rocmlirTriton; runtime bitcode uses the HIP SDK clang.
   set(LLVM_BINARY_DIR "${llvm-project_BINARY_DIR}" CACHE PATH "" FORCE)
   set(LLVM_TOOLS_BINARY_DIR "${llvm-project_BINARY_DIR}/bin" CACHE PATH "" FORCE)
   # LLD headers (lld/Common/Driver.h) live in a separate source tree; the
@@ -253,6 +365,18 @@ else()
     "${llvm-project_BINARY_DIR}/tools/mlir/include"
     "${llvm-project_SOURCE_DIR}/lld/include"
     "${llvm-project_BINARY_DIR}/tools/lld/include")
+endif()
+
+if(HIPDNN_LLVM_EMBEDDED)
+  set(LLVM_VERSION_MAJOR "${_HIPDNN_LLVM_REQUIRED_MAJOR}")
+  set(LLVM_PACKAGE_VERSION "${_HIPDNN_LLVM_PINNED_VERSION}")
+endif()
+
+if(NOT LLVM_VERSION_MAJOR EQUAL _HIPDNN_LLVM_REQUIRED_MAJOR)
+  message(FATAL_ERROR
+    "hip-ep requires LLVM ${_HIPDNN_LLVM_REQUIRED_MAJOR} "
+    "(${_HIPDNN_LLVM_PATCHSET_ID}); got LLVM_VERSION_MAJOR="
+    "'${LLVM_VERSION_MAJOR}' (LLVM_PACKAGE_VERSION=${LLVM_PACKAGE_VERSION})")
 endif()
 
 # ===========================================================================

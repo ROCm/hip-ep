@@ -90,7 +90,8 @@ void populateHipsrToLLVMPatterns(const LLVMTypeConverter &typeConverter,
 }
 
 struct HipsrConvertToLLVMInterface : public ConvertToLLVMPatternInterface {
-  using ConvertToLLVMPatternInterface::ConvertToLLVMPatternInterface;
+  explicit HipsrConvertToLLVMInterface(Dialect *dialect)
+      : ConvertToLLVMPatternInterface(dialect) {}
 
   void loadDependentDialects(MLIRContext *context) const final {
     context->loadDialect<LLVM::LLVMDialect>();

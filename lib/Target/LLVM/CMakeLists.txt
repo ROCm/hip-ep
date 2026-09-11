@@ -72,20 +72,38 @@ endif()
 # find_library for legacy trees that omit LLDConfig.cmake.
 set(lld_libs "")
 if(WIN32)
-    find_package(LLD CONFIG QUIET)
-    if(LLD_FOUND)
-        message(STATUS "Found LLD via CONFIG package: ${LLD_DIR}")
+    if(TARGET lldCommon AND TARGET lldCOFF)
+        message(STATUS "Using in-tree LLVM ${LLVM_PACKAGE_VERSION} LLD targets")
         set(lld_libs lldCommon lldCOFF)
     else()
-        message(STATUS "LLD CONFIG package not found; falling back to find_library")
-        find_library(LLD_COFF_LIB NAMES lldCOFF PATHS ${LLVM_LIBRARY_DIRS} REQUIRED)
-        find_library(LLD_COMMON_LIB NAMES lldCommon PATHS ${LLVM_LIBRARY_DIRS} REQUIRED)
+        get_filename_component(_llvm_cmake_parent "${LLVM_DIR}" DIRECTORY)
+        find_package(LLD ${_HIPDNN_LLVM_REQUIRED_MAJOR} CONFIG QUIET
+            PATHS "${_llvm_cmake_parent}/lld"
+            NO_DEFAULT_PATH)
+    endif()
+      if(NOT lld_libs AND TARGET lldCommon AND TARGET lldCOFF)
+          message(STATUS "Found LLD via CONFIG package: ${LLD_DIR}")
+          set(lld_libs lldCommon lldCOFF)
+      elseif(NOT lld_libs)
+          # A build-tree LLDConfig.cmake exports only the lld driver
+          # (LLD_EXPORTED_TARGETS is just "lld"), so finding the package does
+          # not make lldCommon/lldCOFF linkable by name. Locate them by path.
+          message(STATUS "LLD CONFIG package exports no library targets; searching selected LLVM library directory")
+        find_library(LLD_COFF_LIB NAMES lldCOFF
+            PATHS ${LLVM_LIBRARY_DIRS} NO_DEFAULT_PATH REQUIRED)
+        find_library(LLD_COMMON_LIB NAMES lldCommon
+            PATHS ${LLVM_LIBRARY_DIRS} NO_DEFAULT_PATH REQUIRED)
         list(APPEND lld_libs ${LLD_COFF_LIB} ${LLD_COMMON_LIB})
     endif()
 endif()
 
 # LLVMDTLTO was split from LLVMLTO in LLVM 22.1; link it when present.
-find_library(LLVM_DTLTO_LIB NAMES LLVMDTLTO PATHS ${LLVM_LIBRARY_DIRS})
+if(TARGET LLVMDTLTO)
+    set(LLVM_DTLTO_LIB LLVMDTLTO)
+else()
+    find_library(LLVM_DTLTO_LIB NAMES LLVMDTLTO
+        PATHS ${LLVM_LIBRARY_DIRS} NO_DEFAULT_PATH)
+endif()
 
 # Link against required libraries
 target_link_libraries(HipTargetLLVM PUBLIC
@@ -116,11 +134,12 @@ if(NOT WIN32)
         set(HIPDNN_CLANG_EXECUTABLE "${LLVM_TOOLS_BINARY_DIR}/clang++")
         message(STATUS "Using in-tree clang++ for runtime DLL linking: ${HIPDNN_CLANG_EXECUTABLE}")
     else()
-        # Prebuilt / installed LLVM (find_package path, incl. CI's llvm-install):
-        # the clang++ binary already exists, so resolve it now. HINTS scope the
-        # search to the LLVM tree we configure against.
+        # rocmlirTriton's LLVM does not build clang. Prefer the HIP SDK driver,
+        # which is also the compiler used by rocmlirTriton.
         find_program(HIPDNN_CLANG_EXECUTABLE NAMES clang++
             HINTS
+                ${THEROCK_DIST}/lib/llvm/bin
+                ${THEROCK_DIST}/bin
                 ${LLVM_BINARY_DIR}/bin
                 ${LLVM_TOOLS_BINARY_DIR}
         )
