@@ -75,10 +75,23 @@ add_custom_command(
   VERBATIM
 )
 
+add_custom_command(
+  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/PatternDSLScm.h
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_SOURCE_DIR}/cmake/xxd.py
+          --var pattern_dsl_scm_data
+          --output ${CMAKE_CURRENT_BINARY_DIR}/PatternDSLScm.h
+          ${CMAKE_CURRENT_SOURCE_DIR}/Runtime/PatternDSL.scm
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/Runtime/PatternDSL.scm
+  COMMENT "Embedding PatternDSL.scm"
+  VERBATIM
+)
+
 add_custom_target(ChezBootHeaders DEPENDS
   ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.h
   ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.h
   ${CMAKE_CURRENT_BINARY_DIR}/SchemeBindingsScm.h
+  ${CMAKE_CURRENT_BINARY_DIR}/PatternDSLScm.h
 )
 add_library(HipsrSchemePass
   Runtime/SchemeBindings.cpp

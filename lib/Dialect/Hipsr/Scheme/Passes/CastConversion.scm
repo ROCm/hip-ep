@@ -19,7 +19,7 @@
 ;;===----------------------------------------------------------------------===;;
 
 (import (rime loop))
-(load "lib/scheme/PatternDSL.scm")  ; Pattern DSL library
+;; PatternDSL is loaded during Scheme runtime initialization
 
 ;;===----------------------------------------------------------------------===;;
 ;; Pattern Definition

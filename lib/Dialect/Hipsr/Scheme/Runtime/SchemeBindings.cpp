@@ -29,11 +29,13 @@ extern "C" {
 #include "ChezBootPetite.h"
 #include "ChezBootScheme.h"
 #include "SchemeBindingsScm.h"
+#include "PatternDSLScm.h"
 
 namespace {
 const size_t petite_boot_size = sizeof(petite_boot_data) - 1;
 const size_t scheme_boot_size = sizeof(scheme_boot_data) - 1;
 const size_t scheme_bindings_scm_size = sizeof(scheme_bindings_scm_data) - 1;
+const size_t pattern_dsl_scm_size = sizeof(pattern_dsl_scm_data) - 1;
 }
 
 namespace {
@@ -123,6 +125,22 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
 
   while (true) {
     ptr expr = Scall1(read_sym, port);
+    if (Scall1(eof_object_p, expr) != Sfalse)
+      break;
+    Scall1(eval_sym, expr);
+  }
+
+  // Load PatternDSL.scm (embedded)
+  if (logLevel <= SchemeLogLevel::Debug) {
+    llvm::errs() << "[debug] Loading PatternDSL.scm (" << pattern_dsl_scm_size << " bytes)\n";
+  }
+
+  std::string pattern_dsl_code(reinterpret_cast<const char*>(pattern_dsl_scm_data),
+                               pattern_dsl_scm_size);
+  ptr pattern_dsl_port = Scall1(open_string_input_port_sym, Sstring(pattern_dsl_code.c_str()));
+
+  while (true) {
+    ptr expr = Scall1(read_sym, pattern_dsl_port);
     if (Scall1(eof_object_p, expr) != Sfalse)
       break;
     Scall1(eval_sym, expr);
