@@ -41,7 +41,33 @@
 (define mlir-log-fatal
   (foreign-procedure "mlir_log_fatal" (string) void))
 
+;;===----------------------------------------------------------------------===;;
+;; Phase 1: Type System FFI
+;;===----------------------------------------------------------------------===;;
+
+;; Check if a Type is a RankedTensorType
+(define mlir-type-is-ranked-tensor
+  (foreign-procedure "mlir_type_is_ranked_tensor" (unsigned-64) int))
+
+;; Get element type of a tensor type
+(define mlir-type-get-element-type
+  (foreign-procedure "mlir_type_get_element_type" (unsigned-64) unsigned-64))
+
+;; Get shape of a ranked tensor type (returns list of dimensions)
+(define mlir-type-get-shape
+  (foreign-procedure "mlir_type_get_shape" (unsigned-64) scheme-object))
+
+;; Get rank of a ranked tensor type
+(define mlir-type-get-rank
+  (foreign-procedure "mlir_type_get_rank" (unsigned-64) int))
+
+;; Get type from a Value
+(define mlir-value-get-type
+  (foreign-procedure "mlir_value_get_type" (unsigned-64) unsigned-64))
+
+;;===----------------------------------------------------------------------===;;
 ;; High-level Scheme API
+;;===----------------------------------------------------------------------===;;
 
 ;; Process a single operation - gets called from C++ for each operation
 (define (process-operation op)

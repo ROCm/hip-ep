@@ -328,6 +328,50 @@ static void mlir_log_fatal(const char* msg) {
     llvm::errs() << "[fatal] " << msg << "\n";
 }
 
+//===----------------------------------------------------------------------===//
+// Phase 1: Type System FFI
+//===----------------------------------------------------------------------===//
+
+int mlir_type_is_ranked_tensor(SchemeValue type_ptr) {
+  mlir::Type type = unwrap(static_cast<MlirType>(type_ptr));
+  return type.isa<mlir::RankedTensorType>() ? 1 : 0;
+}
+
+SchemeValue mlir_type_get_element_type(SchemeValue type_ptr) {
+  mlir::Type type = unwrap(static_cast<MlirType>(type_ptr));
+  if (auto tensorType = type.dyn_cast<mlir::RankedTensorType>()) {
+    return const_cast<void*>(wrap(tensorType.getElementType()).ptr);
+  }
+  return nullptr;
+}
+
+SchemeValue mlir_type_get_shape(SchemeValue type_ptr) {
+  mlir::Type type = unwrap(static_cast<MlirType>(type_ptr));
+  if (auto tensorType = type.dyn_cast<mlir::RankedTensorType>()) {
+    llvm::ArrayRef<int64_t> shape = tensorType.getShape();
+    // Convert to Scheme list
+    ptr list = Snil;
+    for (int i = shape.size() - 1; i >= 0; --i) {
+      list = Scons(Sinteger(shape[i]), list);
+    }
+    return list;
+  }
+  return Snil;
+}
+
+int mlir_type_get_rank(SchemeValue type_ptr) {
+  mlir::Type type = unwrap(static_cast<MlirType>(type_ptr));
+  if (auto tensorType = type.dyn_cast<mlir::RankedTensorType>()) {
+    return tensorType.getRank();
+  }
+  return -1;
+}
+
+SchemeValue mlir_value_get_type(SchemeValue value_ptr) {
+  mlir::Value value = unwrap(static_cast<MlirValue>(value_ptr));
+  return const_cast<void*>(wrap(value.getType()).ptr);
+}
+
 } // extern "C"
 
 // Register all MLIR foreign functions in Scheme
@@ -348,7 +392,14 @@ void registerMlirForeignFunctions() {
   Sregister_symbol("mlir_log_error", (void*)mlir_log_error);
   Sregister_symbol("mlir_log_fatal", (void*)mlir_log_fatal);
 
-  LLVM_DEBUG(llvm::dbgs() << "Registered " << 12 << " MLIR FFI functions\n");
+  // Phase 1: Type System FFI
+  Sregister_symbol("mlir_type_is_ranked_tensor", (void*)mlir_type_is_ranked_tensor);
+  Sregister_symbol("mlir_type_get_element_type", (void*)mlir_type_get_element_type);
+  Sregister_symbol("mlir_type_get_shape", (void*)mlir_type_get_shape);
+  Sregister_symbol("mlir_type_get_rank", (void*)mlir_type_get_rank);
+  Sregister_symbol("mlir_value_get_type", (void*)mlir_value_get_type);
+
+  LLVM_DEBUG(llvm::dbgs() << "Registered " << 17 << " MLIR FFI functions\n");
 }
 
 } // namespace hipsr
