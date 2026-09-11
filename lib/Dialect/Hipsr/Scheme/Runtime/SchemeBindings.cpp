@@ -144,10 +144,25 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
   #define CALL0(who) Scall0(Stop_level_value(Sstring_to_symbol(who)))
   #define CALL1(who, arg) Scall1(Stop_level_value(Sstring_to_symbol(who)), arg)
 
+  fprintf(stderr, "[INIT] Caching eval symbol\n");
+  fflush(stderr);
   cached_eval_sym = Stop_level_value(Sstring_to_symbol("eval"));
+  fprintf(stderr, "[INIT] cached_eval_sym = %p\n", cached_eval_sym);
+  fflush(stderr);
+
+  fprintf(stderr, "[INIT] Caching read symbol\n");
+  fflush(stderr);
   cached_read_sym = Stop_level_value(Sstring_to_symbol("read"));
+  fprintf(stderr, "[INIT] cached_read_sym = %p\n", cached_read_sym);
+  fflush(stderr);
+
   cached_open_string_input_port_sym = Stop_level_value(Sstring_to_symbol("open-string-input-port"));
+  fprintf(stderr, "[INIT] cached_open_string_input_port_sym = %p\n", cached_open_string_input_port_sym);
+  fflush(stderr);
+
   cached_eof_object_p = Stop_level_value(Sstring_to_symbol("eof-object?"));
+  fprintf(stderr, "[INIT] cached_eof_object_p = %p\n", cached_eof_object_p);
+  fflush(stderr);
 
   ptr eval_sym = cached_eval_sym;
   ptr read_sym = cached_read_sym;
@@ -176,6 +191,11 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
 
   // NOTE: Foreign functions are registered in custom_init(), which was called
   // by Sbuild_heap before loading boot files
+
+  fprintf(stderr, "[INIT] SKIPPING SchemeBindings.scm and PatternDSL.scm for testing\n");
+  fflush(stderr);
+  scheme_initialized = true;
+  return true;
 
   fprintf(stderr, "[INIT] About to cache Scheme symbols\n");
   fflush(stderr);
