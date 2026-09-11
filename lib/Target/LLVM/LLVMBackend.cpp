@@ -166,7 +166,7 @@ llvm::TargetMachine *LLVMBackend::createTargetMachine() {
   // Look up target
   std::string error_msg;
   const llvm::Target *target =
-      llvm::TargetRegistry::lookupTarget(target_triple.str(), error_msg);
+      llvm::TargetRegistry::lookupTarget(target_triple, error_msg);
   if (!target) {
     llvm::errs() << "Failed to lookup target: " << error_msg << "\n";
     return nullptr;
