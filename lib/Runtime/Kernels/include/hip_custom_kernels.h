@@ -785,12 +785,19 @@ HIP_KERNEL_API int hip_gqa_kv_cache_append(
  * with s_lo, which is the point: a sliding-window layer at decode passes the
  * same lower bound it reads from, so the bytes it skips writing are exactly the
  * bytes it will not read. Clamped internally to [0, past_len] so the new tokens
- * at [past_len, past_len+sq) are always written. */
+ * at [past_len, past_len+sq) are always written.
+ * seqlens_k: optional device pointer to the per-batch ORT sequence lengths
+ * (seqlens_k[b] = total_tokens - 1). When non-null the kernel derives past_len
+ * from it exactly as hip_gqa_kv_cache_append does and the `past_len` argument
+ * is ignored, so a separate-buffer KV cache no longer forces the caller into a
+ * D2H + hipStreamSynchronize. The grid is then sized to the present_seq upper
+ * bound and out-of-span threads exit on their bounds check. Pass null to keep
+ * using the host `past_len`. */
 HIP_KERNEL_API int hip_gqa_kv_cache_concat(
     void* stream, const void* past, const void* current, void* present,
     int batch_size, int past_len, int sq, int G, int d,
     int past_seq, int present_seq, int element_size_bytes,
-    int kv_dtype, const void* scale, int s_lo);
+    int kv_dtype, const void* scale, int s_lo, const void* seqlens_k);
 
 /* INT8 KV cache (symmetric per-channel, kv_cache_bit_width=8) dequant.
  * dequant_kv_i8_to_fp16: rebuilds an fp16 BNSD view [B,G,dst_seq,d] of the first
@@ -1631,17 +1638,28 @@ HIP_KERNEL_API int hip_gather_nd(
  * services slices whose `starts` / `ends` / `axes` / `steps` are NOT
  * graph-constant (or have negative steps).
  *
- * The host wrapper D2Hs the (typically tiny) index tensors and resolves
- * them into per-axis `(start, step)` pairs in INPUT-space, one entry per
- * data dimension. Axes not listed default to `(0, 1)`. The kernel runs
- * one thread per output element and computes:
+ * The index tensors stay on the device. Launch geometry depends only on
+ * the (static) output shape, so per block thread 0 resolves the ONNX-13+
+ * index rules -- negative indices, per-direction clamping, axes defaulting
+ * to [0..r-1], steps defaulting to 1 -- into a shared per-axis
+ * `(start, step, extent)` plan in INPUT-space. Axes not listed default to
+ * `(0, 1, data_dim)`. Every thread then handles one output element:
  *
  *     in_offset = sum_d ( start[d] + out_coord[d] * step[d] ) * input_stride[d]
  *     output[out_idx] = input[in_offset]
  *
- * `step[d]` may be negative; correctness relies on the host wrapper
- * having already resolved start / end to absolute positions per ONNX's
- * negative-index and clamping rules (see lib/Runtime/real/slice.cpp).
+ * Resolving on the device rather than in the host wrapper avoids a D2H of
+ * the index tensors and the full stream drain needed to observe it.
+ *
+ * `step[d]` may be negative. Where the derived per-axis extent is smaller
+ * than the physical output dim -- `SliceToHip` over-allocates when it cannot
+ * constant-fold the extent -- the over-allocated tail is filled with zero, so
+ * the host wrapper does not need to pre-memset the buffer.
+ *
+ * Malformed index metadata (axis out of range or repeated, zero step, or a
+ * derived extent wider than the allocated buffer) is clamped to something
+ * in-bounds and reported by setting `device_error_flag`, which the host
+ * checks at the end of the inference.
  *
  * Bounded to rank <= 8 (matches kPadMaxRank / kGatherNDMaxRank).
  *
@@ -1652,23 +1670,15 @@ HIP_KERNEL_API int hip_slice(
     const void* input,
     void* output,
     const int64_t* input_shape_host,
-    const int64_t* output_shape_host,     /* physical alloc shape       */
-    const int64_t* logical_extent_host,   /* per-axis actual slice extent;
-                                             may be NULL, in which case the
-                                             kernel treats it as identical to
-                                             output_shape_host (i.e. no
-                                             over-alloc; entire physical
-                                             buffer is filled by the slice).
-                                             When set and logical[d] <
-                                             output_shape[d] for some d,
-                                             positions in the over-allocated
-                                             tail are filled with zero — the
-                                             host wrapper does not need to
-                                             pre-memset the buffer.        */
-    const int64_t* starts_per_axis_host,  /* length = rank */
-    const int64_t* steps_per_axis_host,   /* length = rank */
+    const int64_t* output_shape_host,  /* physical alloc shape          */
+    const void* starts_dev,            /* GPU int64[num_index_entries]  */
+    const void* ends_dev,              /* GPU int64[num_index_entries]  */
+    const void* axes_dev,              /* GPU int64[...] or NULL        */
+    const void* steps_dev,             /* GPU int64[...] or NULL        */
+    int num_index_entries,
     int rank,
-    int hip_dtype);
+    int hip_dtype,
+    void* device_error_flag);          /* GPU int flag, nullable        */
 
 /* =========================================================================
  * ScatterND (ONNX-13+ with optional `reduction`)
@@ -1752,23 +1762,37 @@ HIP_KERNEL_API int hip_nonzero(
  * =========================================================================
  *
  * One thread per (outer, inner) slice; each thread sequentially scans
- * `axis_size` elements with stride `inner`. The host wrapper decomposes
+ * `axis_size` elements with stride `inner`, where
  *   outer = product(shape[:axis]); axis_size = shape[axis];
  *   inner = product(shape[axis+1:])
- * and synchronously D2H-reads the axis scalar.
+ *
+ * The `axis` scalar stays on the device: per block thread 0 loads it and
+ * does the decomposition, avoiding a D2H and the full stream drain needed
+ * to observe it. Because the geometry is therefore unknown at launch, the
+ * grid is sized from the axis-independent bound `total / min(shape)` and
+ * capped, with the kernel walking slices in a grid-stride loop.
+ *
+ * An axis outside [-rank, rank) produces no output and is reported by
+ * setting `device_error_flag`, which the host checks at the end of the
+ * inference.
+ *
+ * `axis_is_int64`: non-zero if the axis scalar is i64, zero for i32.
  *
  * FP16 accumulates in float to avoid precision loss for long axes.
+ * Bounded to rank <= 8.
  */
 HIP_KERNEL_API int hip_cumsum(
     void* stream,
     const void* x,
     void* y,
-    int64_t outer,
-    int64_t axis_size,
-    int64_t inner,
+    const int64_t* data_shape_host,
+    int rank,
+    const void* axis_dev,              /* GPU scalar, i32 or i64        */
+    int axis_is_int64,
     int hip_dtype,
     int exclusive,
-    int reverse);
+    int reverse,
+    void* device_error_flag);          /* GPU int flag, nullable        */
 
 /* =========================================================================
  * Pad (constant / reflect / edge / wrap)
@@ -1777,11 +1801,21 @@ HIP_KERNEL_API int hip_cumsum(
  * One thread per output element. For each output coord, walk the dims and
  * either copy input or fill from the pad_value depending on mode.
  *
- * `pad_mode`:    0 = Constant, 1 = Reflect, 2 = Edge, 3 = Wrap.
- * `lower_pads_host`: per-dim begin pad (length = rank), already filtered
- *                    by the `axes` attribute (defaults to 0 for unaffected
- *                    dims). Upper bound implied by output_shape.
- * `pad_value_host` : host pointer to a scalar of the data type (used only
+ * `pads`, `axes` and `constant_value` stay on the device: launch geometry
+ * depends only on the (static) output shape, so per block thread 0 scatters
+ * `pads` through `axes` into a shared per-dimension begin-pad array and
+ * loads the constant value. This avoids a D2H of the index tensors and the
+ * full stream drain needed to observe it. Only the begin half of `pads` is
+ * used; the end padding is implied by output_shape.
+ *
+ * An axis outside [-rank, rank) is skipped and reported by setting
+ * `device_error_flag`, which the host checks at the end of the inference.
+ *
+ * `pad_mode`:        0 = Constant, 1 = Reflect, 2 = Edge, 3 = Wrap.
+ * `pads_dev`:        GPU int64[num_pad_entries], ONNX-18 begin-major layout
+ *                    [begin_0..begin_K-1, end_0..end_K-1], keyed by axes.
+ * `axes_dev`:        GPU int64[num_pad_entries/2], or NULL for [0..rank-1].
+ * `pad_value_dev`:   GPU pointer to a scalar of the data type (used only
  *                    when pad_mode == Constant). May be null -> default 0.
  */
 HIP_KERNEL_API int hip_pad(
@@ -1790,11 +1824,14 @@ HIP_KERNEL_API int hip_pad(
     void* output,
     const int64_t* input_shape_host,
     const int64_t* output_shape_host,
-    const int64_t* lower_pads_host,
+    const void* pads_dev,
+    const void* axes_dev,
+    const void* pad_value_dev,
+    int num_pad_entries,
     int rank,
     int hip_dtype,
     int pad_mode,
-    const void* pad_value_host);
+    void* device_error_flag);          /* GPU int flag, nullable        */
 
 /* =========================================================================
  * LayerNormalization (ONNX-17)

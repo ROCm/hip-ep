@@ -542,16 +542,17 @@ struct SliceToHip : public mlir::RewritePattern {
     // Where the bounds do not resolve, the fallback keeps the upper bound and
     // therefore keeps the over-sized shape. It could be exact instead:
     // CompressConversion solves the same shrinking-extent problem by reading
-    // the true count back from the device with `hip.ReadbackDimOp`. That is not
-    // done here, but not because a readback is unaffordable on this op --
-    // `wrap_slice` already D2Hs its own bounds and syncs the stream every call,
-    // so the sync is paid regardless. It is that a readback would add a second
-    // sync point, in the shape computation ahead of the slice, to serve a case
-    // no model in scope reaches: on Gemma-4 every sliced axis resolves from its
-    // bounds, and host arithmetic is strictly better than a readback wherever
-    // it is available. If a model does land here, revisit it -- the cost is
-    // lower than it looks. Hence the debug line below: the fallback is a known
-    // performance cliff, and it should be findable without an RGP capture.
+    // the true count back from the device with `hip.ReadbackDimOp`. That is
+    // deliberately not done here: `wrap_slice` resolves its bounds on device,
+    // so nothing on this op drains the stream today, and a readback in the
+    // shape computation ahead of the slice would be the only sync point on the
+    // path -- reintroduced to serve a case no model in scope reaches. On
+    // Gemma-4 every sliced axis resolves from its bounds, and host arithmetic
+    // is strictly better than a readback wherever it is available. If a model
+    // does land here, weigh the exact extent against a full pipeline drain
+    // rather than assuming the sync is already paid. Hence the debug line
+    // below: the fallback is a known performance cliff, and it should be
+    // findable without an RGP capture.
     llvm::SmallVector<mlir::Value> dynSizes;
     for (int64_t i = 0; i < resultType.getRank(); ++i) {
       if (!resultType.isDynamicDim(i))
