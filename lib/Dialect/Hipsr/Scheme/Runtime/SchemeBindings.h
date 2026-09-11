@@ -108,42 +108,46 @@ SchemeValue mlir_operation_get_loc(SchemeValue op_ptr);
 // Returns: Value as uptr
 SchemeValue mlir_operation_get_block_argument(SchemeValue op_ptr, int index);
 
+} // namespace hipsr
+} // namespace mlir
+
 //===----------------------------------------------------------------------===//
-// Phase 3: IR Construction FFI (OpBuilder)
+// Phase 3-4: IR Construction and Pattern Rewriter FFI (extern "C")
 //===----------------------------------------------------------------------===//
 
+extern "C" {
+
+// Phase 3: IR Construction FFI (OpBuilder)
 // Note: These functions require a PatternRewriter context. For now, they are
 // placeholders that will be properly integrated when called from pattern passes.
 
 // Create hipsr.placeholder operation
-// Args: ctx (Value), ins (Value), result_type (Type), placeholder_type (int 0=Normal)
-// Returns: Value (placeholder result)
-SchemeValue mlir_create_placeholder_op(SchemeValue ctx_value, SchemeValue input_value,
-                                       SchemeValue result_type, int placeholder_type_int);
+mlir::hipsr::SchemeValue mlir_create_placeholder_op(mlir::hipsr::SchemeValue ctx_value,
+                                                     mlir::hipsr::SchemeValue input_value,
+                                                     mlir::hipsr::SchemeValue result_type,
+                                                     int placeholder_type_int);
 
 // Create hipsr.cast operation
-// Args: ctx (Value), ins (Value), outs (Value), result_type (Type)
-// Returns: Value (cast result)
-SchemeValue mlir_create_cast_op(SchemeValue ctx_value, SchemeValue input_value,
-                                SchemeValue output_value, SchemeValue result_type);
+mlir::hipsr::SchemeValue mlir_create_cast_op(mlir::hipsr::SchemeValue ctx_value,
+                                              mlir::hipsr::SchemeValue input_value,
+                                              mlir::hipsr::SchemeValue output_value,
+                                              mlir::hipsr::SchemeValue result_type);
 
-//===----------------------------------------------------------------------===//
 // Phase 4: Pattern Rewriter FFI
-//===----------------------------------------------------------------------===//
 
 // Replace operation with a value
-// Args: old_op (Operation), new_value (Value)
-// Returns: success (1) or failure (0)
-int mlir_replace_op(SchemeValue old_op, SchemeValue new_value);
+int mlir_replace_op(mlir::hipsr::SchemeValue old_op, mlir::hipsr::SchemeValue new_value);
 
 // Erase operation
-// Args: op (Operation)
-// Returns: success (1) or failure (0)
-int mlir_erase_op(SchemeValue op);
+int mlir_erase_op(mlir::hipsr::SchemeValue op);
 
 // Notify match failure
-// Args: op (Operation), reason (string)
-void mlir_notify_match_failure(SchemeValue op, const char* reason);
+void mlir_notify_match_failure(mlir::hipsr::SchemeValue op, const char* reason);
+
+} // extern "C"
+
+namespace mlir {
+namespace hipsr {
 
 } // namespace hipsr
 } // namespace mlir
