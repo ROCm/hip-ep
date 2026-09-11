@@ -51,6 +51,17 @@ static inline const char *hipdnn_ep_tensor_op_name(int64_t op) {
   }
 }
 
+static inline const char *hipdnn_ep_qelementwise_kind_name(int64_t kind) {
+  switch (kind) {
+  case HIPDNN_EP_QELEMENTWISE_ADD:
+    return "qadd";
+  case HIPDNN_EP_QELEMENTWISE_MUL:
+    return "qmul";
+  default:
+    return "qelementwise_unknown";
+  }
+}
+
 static inline int64_t hipdnn_ep_datatype_size(int64_t data_type) {
   switch (data_type) {
   case HIPDNN_EP_DATATYPE_FLOAT:
@@ -930,6 +941,57 @@ int wrap_qelementwise(RuntimeState *state, void *lhs, void *rhs, void *output,
                       int64_t data_type, float M_a, int64_t lhs_zp, float M_b,
                       int64_t rhs_zp, int64_t output_zp);
 
+// Quantized batched matmul wrapper: the integer-domain form of the fused
+// DequantizeLinear x2 -> MatMul -> QuantizeLinear chain.
+//
+//   A: [batch_count x M x K], B: [K x N] (broadcast when b_batch_stride == 0)
+//      or [batch_count x K x N], Y: [batch_count x M x N], all row-major.
+//
+// With acc[m,n] = sum_k A[m,k]*B[k,n], rowA[m] = sum_k A[m,k] and
+// colB[n] = sum_k B[k,n], all exact in int32:
+//
+//   Y = saturate(round(M_scale * (acc - B_zp*rowA - A_zp*colB + K*A_zp*B_zp))
+//                + Y_zp)
+int wrap_qmatmul(RuntimeState *state, const void *A, const void *B, void *Y,
+                 int64_t M, int64_t N, int64_t K, int64_t batch_count,
+                 int64_t b_batch_stride, int64_t trans_a, int64_t trans_b,
+                 int64_t a_data_type, int64_t b_data_type, int64_t y_data_type,
+                 float M_scale, int64_t A_zero_point, int64_t B_zero_point,
+                 int64_t Y_zero_point);
+
+// Fused quantized 1x1 convolution: Q(Conv(DQ(input), DQ(weights))) with the
+// weights never leaving their packed 4-bit form. See QConvLowering.cpp.
+//
+// The geometry is fixed by construction -- 1x1 kernel, unit stride, unit
+// dilation, no padding, no grouping -- which makes the convolution one dot
+// product per output position down the channel axis, i.e. a GEMM with
+// M = out_channels, K = in_channels, N = spatial_size. That is why no per-axis
+// extents appear here the way they do in wrap_conv: every one of them would be
+// a constant 1 or 0. `spatial_size` is the product of the output spatial dims,
+// and unit stride with no padding makes the input's identical.
+//
+// Activation quantization is per-tensor, so input_scale/zp and output_scale/zp
+// are scalars. Weight quantization is per OUTPUT CHANNEL, so weight_scales and
+// weight_zero_points are device arrays of one value each per output channel --
+// they cannot fold into scalars, and on a real model they arrive as external
+// constants whose values are not even known at compile time.
+//
+// weights and weight_zero_points carry their LOGICAL element counts with an
+// 8-bit element type; weight_bits == 4 means each byte holds two values, low
+// nibble first. weight_dtype's signedness decides how a nibble widens.
+//
+// activation_dtype: HIPDNN_EP_DATATYPE_UINT16 (input and output).
+// weight_dtype: HIPDNN_EP_DATATYPE_INT8 / UINT8 (storage of both weight
+// arrays). bias is nullable; bias_dtype is meaningful only when it is non-null
+// and is HIPDNN_EP_DATATYPE_UNSUPPORTED otherwise, meaning "no bias type".
+int wrap_qconv(RuntimeState *state, const void *input, const void *weights,
+               const void *weight_scales, const void *weight_zero_points,
+               const void *bias, void *output, int64_t batch,
+               int64_t in_channels, int64_t out_channels, int64_t spatial_size,
+               int64_t activation_dtype, int64_t weight_dtype,
+               int64_t weight_bits, int64_t bias_dtype, float input_scale,
+               int64_t input_zp, float output_scale, int64_t output_zp);
+
 // Element-wise Where wrapper (NumPy-style multidirectional broadcasting,
 // arbitrary rank). Computes output[i] = condition[i] ? x[i] : y[i] with
 // per-operand broadcasting.
@@ -1191,10 +1253,13 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           int64_t element_size_bytes, int64_t is_bnsh);
 
 // SimplifiedLayerNormalization / RMSNormalization operation wrapper
+// norm_num_elements is the reduction width the lowering derived from `axis`
+// (the product of the input dims from `axis` on). It is independent of
+// scale_num_elements, which may cover several rows for a grouped norm.
 int wrap_rms_norm(RuntimeState *state, void *input, void *scale, void *output,
                   int64_t input_num_elements, int64_t scale_num_elements,
-                  int64_t element_size_bytes, int64_t axis, float epsilon,
-                  int64_t stash_type);
+                  int64_t norm_num_elements, int64_t element_size_bytes,
+                  int64_t axis, float epsilon, int64_t stash_type);
 
 // LayerNormalization operation wrapper (standard ONNX opset 17+)
 // bias, mean, inv_std may be nullptr when optional inputs/outputs are absent
@@ -1245,7 +1310,8 @@ int wrap_matmul_nbits(
     int64_t bits,            // quantization bits (e.g. 4)
     int64_t block_size,      // quantization block size
     int64_t elem_size,       // element size in bytes
-    int64_t zp_elem_size);   // zero_points element size: 1=uint8 packed, 2=fp16
+    int64_t zp_elem_size,    // zero_points element size: 1=uint8 packed, 2=fp16
+    int64_t scale_elem_size); // scales element size in bytes: 2=fp16, 4=fp32
 
 // GatherBlockQuantized operation wrapper (com.microsoft).
 // Gather + block-wise dequantize: gather rows from `data` along

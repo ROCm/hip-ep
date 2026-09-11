@@ -289,6 +289,8 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateGridSampleLoweringPatterns(typeConverter, patterns);
   populateGlobalPoolLoweringPatterns(typeConverter, patterns);
   populateQElementwiseLoweringPatterns(typeConverter, patterns);
+  populateQMatMulLoweringPatterns(typeConverter, patterns);
+  populateQConvLoweringPatterns(typeConverter, patterns);
 
   // Standard dialect lowerings
   // Bundle func/memref/arith/cf lowering with HIP lowering to minimize

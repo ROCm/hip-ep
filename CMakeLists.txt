@@ -109,13 +109,6 @@ option(BUILD_PYTHON_WHEEL "Configure the 'wheel' target that packages the EP as 
 # TheRock, morphizen, ONNX Runtime, protobuf).
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
 
-# Which config source GQA sessions take by default. OFF is the offline LUT; ON
-# makes them benchmark on the GPU instead (the pre-LUT behaviour). Both paths are
-# always compiled in and HIPDNN_GQA_AUTOTUNE_MODE overrides per process -- this
-# only moves the default, for harnesses that cannot set an environment variable.
-option(HIPDNN_EP_GQA_AUTOTUNE_ONLINE_DEFAULT
-       "Default GQA sessions to online GPU autotuning instead of the offline LUT" OFF)
-
 option(HIPDNN_EP_LINK_HIP_HOST
        "Link hip::host into the EP DLL (enables HIP host APIs in EP code)" ON)
 option(HIPDNN_EP_LOAD_KERNEL_DLLS
@@ -132,11 +125,13 @@ if(HIPDNN_EP_LOAD_KERNEL_DLLS AND NOT HIPDNN_EP_LINK_HIP_HOST)
     "(LlvmIrJit::detectCustomKernelArch needs hipGetDeviceProperties).")
 endif()
 
-# FlatBuffers schemas. Added here rather than with the other subdirectories
-# below because lib/Runtime/Kernels (next) consumes one of them: the
-# MatMulNBits autotune table's generated header. schemas/ needs only the
-# flatbuffers that cmake/deps.cmake already resolved above -- no LLVM/MLIR --
-# so it is safe this early.
+# FlatBuffers schemas (HipSchemas). Added here rather than with the other
+# subdirectories below because lib/Runtime/Kernels (next) consumes it:
+# custom_kernels_<arch> compiles the matmul_nbits and gqa autotune resolvers,
+# which include the generated *_autotune_generated.h headers and depend on the
+# HipSchemas target. schemas/ needs only the flatbuffers/flatc that
+# cmake/deps.cmake already resolved above -- no LLVM/MLIR -- so it is safe this
+# early.
 add_subdirectory(schemas)
 
 # Add the GPU kernels subdirectory (lib/Runtime/Kernels) here -- driven from
@@ -194,7 +189,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/HipEpPlugins.cmake)
 llvm_map_components_to_libnames(llvm_libs Support Core)
 
 # (schemas is added earlier, before lib/Runtime/Kernels, which consumes the
-#  MatMulNBits autotune generated header.)
+#  matmul_nbits and GQA autotune generated headers.)
 
 # TableGen targets
 add_subdirectory(include/hip)

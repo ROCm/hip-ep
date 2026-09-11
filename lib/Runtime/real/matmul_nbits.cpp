@@ -225,8 +225,19 @@ struct MatmulNbitsState : OpStateT<MatmulNbitsState> {
   std::mutex algo_mu;
   std::unordered_map<uint64_t, PrefillAlgo> prefill_algos;
 
+  // fp32 -> fp16 cast of the `scales` buffer, keyed by the packed-scales
+  // device pointer (stable for the model's lifetime, like `b_fp16` above).
+  // ONNX MatMulNBits allows scales to be fp16 or fp32 independent of the
+  // packed-weight dtype; every dequant kernel below reads `scales` as raw
+  // fp16, so a fp32 scales buffer is converted once and reused for every
+  // subsequent call. See lookup_or_convert_scale_fp16.
+  std::mutex scale_mu;
+  std::unordered_map<const void *, std::pair<void *, size_t>> scale_fp16;
+
   ~MatmulNbitsState() {
     for (auto &[k, v] : b_fp16)
+      hipFree(v.first);
+    for (auto &[k, v] : scale_fp16)
       hipFree(v.first);
   }
 };
@@ -310,6 +321,40 @@ const void *get_or_dequant_b_fp16(MatmulNbitsState *mst, void *stream,
     it->second = {dst, bytes};
   } else {
     mst->b_fp16.emplace(B, std::make_pair(dst, bytes));
+  }
+  return dst;
+}
+
+// Returns a cached fp16 cast of `scales_fp32` ([N, num_groups_k] flat, fp32),
+// converting on first use for this weight's scales pointer. scales are model
+// constants, so the conversion cost is a one-time hit per session (mirrors
+// get_or_dequant_b_fp16 above). Returns nullptr on hipMalloc failure.
+const void *lookup_or_convert_scale_fp16(MatmulNbitsState *mst, void *stream,
+                                         const void *scales_fp32,
+                                         int64_t n_elems) {
+  const size_t bytes = static_cast<size_t>(n_elems) * sizeof(__fp16);
+
+  std::lock_guard<std::mutex> lock(mst->scale_mu);
+  auto it = mst->scale_fp16.find(scales_fp32);
+  if (it != mst->scale_fp16.end() && it->second.second >= bytes)
+    return it->second.first;
+
+  void *dst = nullptr;
+  if (hipMalloc(&dst, bytes) != hipSuccess) {
+    fprintf(stderr,
+            "matmul_nbits: hipMalloc(%zu) for fp32->fp16 scale cache "
+            "failed\n",
+            bytes);
+    return nullptr;
+  }
+  hip_matmul_nbits_convert_scale_fp32_to_fp16(stream, scales_fp32, dst,
+                                              n_elems);
+
+  if (it != mst->scale_fp16.end()) {
+    hipFree(it->second.first);
+    it->second = {dst, bytes};
+  } else {
+    mst->scale_fp16.emplace(scales_fp32, std::make_pair(dst, bytes));
   }
   return dst;
 }
@@ -531,7 +576,7 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
                       const void *bias, void *output, int64_t M, int64_t N,
                       int64_t K, int64_t batch_count, int64_t bits,
                       int64_t block_size, int64_t elem_size,
-                      int64_t zp_elem_size) {
+                      int64_t zp_elem_size, int64_t scale_elem_size) {
   OP_PROFILE(
       "matmul_nbits",
       [&] {
@@ -563,6 +608,41 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
 
   if (g_idx) {
     fprintf(stderr, "wrap_matmul_nbits: g_idx not supported\n");
+    return -1;
+  }
+
+  // ONNX MatMulNBits allows `scales` to be fp16 or fp32 independent of the
+  // packed-weight dtype (this lm_head-style model uses fp32 activations +
+  // fp32 scales with fp16-free block quantization). Every dequant kernel
+  // below (GEMV/naive/WMMA/dp4a/prefill) reads `scales` as a raw fp16 array;
+  // without this conversion a fp32 scales buffer's bytes would be
+  // misinterpreted as fp16, producing garbage (NaN/Inf) dequantized weights
+  // and logits. Convert once and cache per weight pointer -- scales are model
+  // constants, so this is a one-time cost per session.
+  if (scale_elem_size == 4) {
+    if (block_size <= 0) {
+      fprintf(stderr,
+              "wrap_matmul_nbits: fp32 scales require block_size > 0\n");
+      return -1;
+    }
+    MatmulNbitsState *mst =
+        MatmulNbitsState::get_op_state(state, op_state_slot);
+    if (!mst) {
+      fprintf(stderr, "wrap_matmul_nbits: no MatmulNbitsState at slot %d\n",
+              op_state_slot);
+      return -1;
+    }
+    const int64_t ngk = (K + block_size - 1) / block_size;
+    const void *scales_fp16 =
+        lookup_or_convert_scale_fp16(mst, stream, scales, N * ngk);
+    if (!scales_fp16)
+      return -1;
+    scales = scales_fp16;
+  } else if (scale_elem_size != 2) {
+    fprintf(stderr,
+            "wrap_matmul_nbits: unsupported scale_elem_size %lld (expected "
+            "2=fp16 or 4=fp32)\n",
+            (long long)scale_elem_size);
     return -1;
   }
 
@@ -602,14 +682,20 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
                   mst->zp, stream, zero_points, static_cast<int>(N), ngk);
     if (!pre_zp_u8)
       return -1;
-    // The fp16 buffer is consumed only by the bits=4 WMMA (batch==1 &&
-    // K%32==0 && M>=16) and col-major GEMV M>1 fallback (same predicate on K,
-    // M>1). Build it eagerly when those preconditions are met — the cache
-    // makes the cost a one-time hit per zero_points pointer. The u2 WMMA path
-    // consumes uint8 zp directly, so bits=2 never needs the fp16 buffer (and
-    // the converter is nibble-specific anyway).
-    bool wmma_data_format = (batch_count == 1) && (K % 32 == 0);
-    if (bits == 4 && wmma_data_format && M > 1) {
+    // Every M>1 bits=4 path consumes the FP16 zero_points, not the uint8 one:
+    //   - WMMA fast path   (batch==1, K%32==0, M>=8)
+    //   - WMMA K-pad path  (batch==1, K%32!=0, M>=8)  <-- also needs it
+    //   - col-major GEMV   (batch==1, K%32==0, 1<M<8)
+    // The gate must therefore NOT depend on K%32==0. The old K%32==0 gate
+    // starved the K-pad path (K not a multiple of block_size, e.g. the vision
+    // encoder's down_proj K=4304) of its FP16 zp; the kernel then reinterpreted
+    // the packed-uint8 zp bytes as FP16 and produced catastrophically wrong
+    // prefill output. Build it for every M>1: the pointer-keyed cache makes it
+    // a one-time cost per weight, and the 1<M<8 K%32!=0 case that ends up on
+    // the row-major GEMV (uint8 zp) simply never reads this buffer. bits=2 WMMA
+    // consumes uint8 zp directly and the converter is nibble-specific, so this
+    // stays scoped to bits=4.
+    if (bits == 4 && batch_count == 1 && M > 1) {
       pre_zp_fp16 = hipdnn_ep_real::lookup_or_convert_zp_fp16(
           mst->zp, stream, zero_points, static_cast<int>(N), ngk);
       if (!pre_zp_fp16)

@@ -35,6 +35,17 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include "hip_custom_kernels.h"
+#include "matmul_nbits_autotune.h"
+
+// Example `make direct` has no CMake FlatBuffers LUT. Empty resolve()
+// lets the kernel link and fall back to its runtime sweep.
+namespace hipdnn_ep {
+namespace matmul_nbits_autotune {
+Result resolve(const Request&, WmmaValidator, GemvValidator, void*) { return {}; }
+Stats stats() { return {}; }
+}  // namespace matmul_nbits_autotune
+}  // namespace hipdnn_ep
+
 #include <iostream>
 #include <fstream>
 #include <vector>
@@ -380,6 +391,226 @@ static bool benchmarkPackedZpPath(
 
     hipFree(d_Z_unpacked);
     return unpack_ok && st.launch_ok && (!has_ref || st.errors == 0);
+}
+
+// ============================================================
+// FP32 A / FP32 output benchmark + verify (bits=3 native kernel only)
+//
+// Mirrors benchmarkAndVerify above, but d_C is a float* buffer (the
+// phase-1 cast patch's fp32 output path) instead of __half*. The
+// reference stays the on-disk fp16 C_ref -- upcast per-element with
+// half_to_float() before comparing.
+// ============================================================
+static KernelStat benchmarkAndVerifyFp32(
+    const std::string& label,
+    hipStream_t stream,
+    const std::function<int()>& launch_checked,
+    const std::function<void()>& launch,
+    int M, int N, int K,
+    double mem_bytes,
+    float* d_C, size_t countC,
+    const std::vector<__half>& h_C_ref, bool has_ref)
+{
+    KernelStat st;
+    st.label   = label;
+    st.has_ref = has_ref;
+
+    std::cout << "\n  --- " << label << " ---" << std::endl;
+
+    constexpr int PRE_WARMUP = 500;
+    std::cout << "  Pre-warmup (" << PRE_WARMUP << " iters)..." << std::flush;
+    auto pw0 = std::chrono::steady_clock::now();
+    for(int w = 0; w < PRE_WARMUP; w++)
+        launch();
+    HIP_CHECK(hipStreamSynchronize(stream));
+    double pw_ms = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - pw0).count() / 1000.0;
+    std::cout << " done (" << std::fixed << std::setprecision(3)
+              << pw_ms / PRE_WARMUP << " ms/iter)" << std::endl;
+
+    std::cout << "  Warmup..." << std::flush;
+    auto tw0 = std::chrono::steady_clock::now();
+    int status = 0;
+    for(int w = 0; w < 3; w++)
+    {
+        status = launch_checked();
+        if(status != 0) break;
+    }
+    HIP_CHECK(hipStreamSynchronize(stream));
+    double warmup_ms = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - tw0).count() / 1000.0;
+
+    if(status != 0)
+    {
+        std::cout << " FAILED (status=" << status << ")" << std::endl;
+        return st;
+    }
+
+    int niters = calibrateIters(warmup_ms, 3);
+    std::cout << " OK (" << std::fixed << std::setprecision(2) << warmup_ms
+              << " ms), iters=" << niters << std::endl;
+
+    std::cout << "  Benchmarking (" << NROUNDS << " rounds x " << niters
+              << " iters)..." << std::flush;
+    auto mr = measureMedian(stream, niters, launch);
+    std::cout << " done" << std::endl;
+
+    st.launch_ok = true;
+    st.avg_ms    = mr.median_ms / niters;
+    st.min_ms    = mr.min_ms / niters;
+    st.max_ms    = mr.max_ms / niters;
+    st.gflops    = (2.0 * M * N * K) / (st.avg_ms * 1e6);
+    st.bw_gbs    = mem_bytes * niters / (mr.median_ms * 1e6);
+
+    std::cout << "  Median: " << std::setprecision(6) << st.avg_ms << " ms, "
+              << std::setprecision(2) << st.gflops << " GFLOPS, "
+              << st.bw_gbs << " GB/s   (range " << st.min_ms << " ~ "
+              << st.max_ms << " ms)" << std::endl;
+
+    if(has_ref)
+    {
+        std::vector<float> h_C(countC);
+        HIP_CHECK(hipMemcpy(h_C.data(), d_C, countC * sizeof(float),
+                            hipMemcpyDeviceToHost));
+        int errors = 0;
+        float max_diff = 0.0f, max_rdiff = 0.0f;
+        for(size_t i = 0; i < countC; i++)
+        {
+            float gpu_val = h_C[i];
+            float ref_val = half_to_float(h_C_ref[i]);
+            float diff    = std::fabs(gpu_val - ref_val);
+            float rdiff   = (std::fabs(ref_val) > 1e-6f) ? diff / std::fabs(ref_val) : diff;
+            if(diff > max_diff) max_diff = diff;
+            if(rdiff > max_rdiff) max_rdiff = rdiff;
+            float tol = std::fabs(ref_val) * 0.05f + 0.1f;
+            if(diff > tol) errors++;
+        }
+
+        st.errors    = errors;
+        st.total     = static_cast<int>(countC);
+        st.max_diff  = max_diff;
+        st.max_rdiff = max_rdiff;
+
+        std::cout << "  Verify: " << (st.total - errors) << "/" << st.total
+                  << " OK, max_abs_diff=" << std::setprecision(4) << max_diff
+                  << ", max_rel_diff=" << (max_rdiff * 100.0f) << "%   "
+                  << (errors == 0 ? "PASS" : "FAIL") << std::endl;
+    }
+
+    return st;
+}
+
+// ============================================================
+// FP32 A / FP32 output single-shape test (bits=3 native kernel only)
+//
+// Drives the phase-1 fp32 cast patch (element_size_bytes==4) for bits=3.
+// Reuses the same on-disk fp16 A/B/scales/zeros as the fp16 comparison
+// below -- A is upcast host-side (exact fp16->fp32), so the kernel's
+// internal fp32->fp16 downcast reproduces that exact fp16 A, making the
+// existing fp16 u3 C_ref the correct ground truth here too, just
+// compared through float containers.
+// ============================================================
+bool testFp32Shape(int M, int N, int K, int group_size,
+                   const std::string& data_dir, bool use_zeros)
+{
+    int num_groups_k = (K + group_size - 1) / group_size;
+
+    std::cout << "\n=== MatMulNBits u3 FP32  M=" << M << " N=" << N
+              << " K=" << K << " group_size=" << group_size
+              << (use_zeros ? "" : " (no zeros)") << " ===" << std::endl;
+
+    size_t countA     = static_cast<size_t>(M) * K;
+    size_t countC      = static_cast<size_t>(M) * N;
+    size_t rowBytesU3  = (static_cast<size_t>(K) * 3 + 7) / 8;
+    size_t countB_u3   = static_cast<size_t>(N) * rowBytesU3;
+    size_t countS      = static_cast<size_t>(N) * num_groups_k;
+
+    std::vector<__half> h_A_fp16;
+    if(!readBin(data_dir + "/matmul_nbits_A.bin", h_A_fp16, countA))
+    {
+        std::cerr << "  ERROR: cannot read " << data_dir << "/matmul_nbits_A.bin" << std::endl;
+        return false;
+    }
+    std::vector<float> h_A(countA);
+    for(size_t i = 0; i < countA; i++)
+        h_A[i] = half_to_float(h_A_fp16[i]);
+
+    std::vector<uint8_t> h_B_u3;
+    std::vector<__half>  h_S_u3;
+    std::vector<uint8_t> h_Z_u3;
+    std::vector<__half>  h_Cref_u3;
+    bool ok = readBin(data_dir + "/matmul_nbits_u3_B.bin", h_B_u3, countB_u3)
+           && readBin(data_dir + "/matmul_nbits_u3_scales.bin", h_S_u3, countS);
+    if(use_zeros)
+        ok = ok && readBin(data_dir + "/matmul_nbits_u3_zeros.bin", h_Z_u3, countS);
+    bool has_ref = readBin(data_dir + "/matmul_nbits_u3_C_ref.bin", h_Cref_u3, countC);
+
+    if(!ok)
+    {
+        std::cerr << "  ERROR: failed to read u3 input data from " << data_dir << "/" << std::endl;
+        return false;
+    }
+    std::cout << "  Loaded A (fp32-upcast) + u3 weights from " << data_dir << "/" << std::endl;
+
+    hipStream_t stream;
+    HIP_CHECK(hipStreamCreate(&stream));
+
+    float*   d_A    = nullptr;
+    float*   d_C    = nullptr;
+    uint8_t* d_B_u3 = nullptr;
+    __half*  d_S_u3 = nullptr;
+    uint8_t* d_Z_u3 = nullptr;
+
+    HIP_CHECK(hipMalloc(&d_A, countA * sizeof(float)));
+    HIP_CHECK(hipMalloc(&d_C, countC * sizeof(float)));
+    HIP_CHECK(hipMalloc(&d_B_u3, countB_u3));
+    HIP_CHECK(hipMalloc(&d_S_u3, countS * sizeof(__half)));
+    HIP_CHECK(hipMemcpy(d_A, h_A.data(), countA * sizeof(float), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemset(d_C, 0, countC * sizeof(float)));
+    HIP_CHECK(hipMemcpy(d_B_u3, h_B_u3.data(), countB_u3, hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_S_u3, h_S_u3.data(), countS * sizeof(__half), hipMemcpyHostToDevice));
+    if(use_zeros)
+    {
+        HIP_CHECK(hipMalloc(&d_Z_u3, countS));
+        HIP_CHECK(hipMemcpy(d_Z_u3, h_Z_u3.data(), countS, hipMemcpyHostToDevice));
+    }
+
+    auto launch_checked = [&]() -> int {
+        return hip_matmul_nbits(
+            stream, d_A, d_B_u3, d_S_u3,
+            use_zeros ? d_Z_u3 : nullptr,
+            nullptr,           // bias
+            d_C,
+            M, N, K,
+            1,                 // batch_count
+            3,                 // bits
+            group_size,        // block_size
+            4,                 // element_size_bytes (fp32)
+            1,                 // zp_elem_size (uint8, plain per-element)
+            nullptr,           // pre_unpacked_zp_u8 (unused for bits=3)
+            nullptr);          // pre_unpacked_zp_fp16 (unused for bits=3)
+    };
+    auto launch = [&]() { launch_checked(); };
+
+    double mem_bytes = static_cast<double>(countA) * 4 + static_cast<double>(countB_u3)
+                      + static_cast<double>(countS) * 2
+                      + (use_zeros ? static_cast<double>(countS) : 0.0)
+                      + static_cast<double>(countC) * 4;
+
+    KernelStat st = benchmarkAndVerifyFp32(
+        "u3(fp32)", stream, launch_checked, launch, M, N, K,
+        mem_bytes, d_C, countC, h_Cref_u3, has_ref);
+
+    bool pass = st.launch_ok && (!st.has_ref || st.errors == 0);
+
+    hipFree(d_A);
+    hipFree(d_C);
+    hipFree(d_B_u3);
+    hipFree(d_S_u3);
+    if(d_Z_u3) hipFree(d_Z_u3);
+    hipStreamDestroy(stream);
+
+    return pass;
 }
 
 // ============================================================
@@ -763,32 +994,39 @@ int main(int argc, char* argv[])
     int M = 128, N = 128, K = 128, gs = 128;
     std::string data_dir = "data";
     bool use_zeros = true;
+    bool fp32_mode = false;
 
     for(int i = 1; i < argc; i++)
     {
         if(std::string(argv[i]) == "--no-zeros")
             use_zeros = false;
+        else if(std::string(argv[i]) == "--fp32")
+            fp32_mode = true;
     }
 
-    if(argc >= 2 && std::string(argv[1]) != "--no-zeros")
+    if(argc >= 2 && std::string(argv[1]) != "--no-zeros" && std::string(argv[1]) != "--fp32")
     {
         if(sscanf(argv[1], "%dx%dx%d", &M, &K, &N) != 3)
         {
             std::cerr << "Usage: " << argv[0]
-                      << " [MxKxN] [group_size] [data_dir] [--no-zeros]" << std::endl;
+                      << " [MxKxN] [group_size] [data_dir] [--no-zeros] [--fp32]" << std::endl;
             std::cerr << "       " << argv[0]
                       << " --model <json> [--data-root DIR] [--group-size GS] [--no-zeros]" << std::endl;
             return 1;
         }
     }
-    if(argc >= 3 && std::string(argv[2]) != "--no-zeros") gs = atoi(argv[2]);
-    if(argc >= 4 && std::string(argv[3]) != "--no-zeros") data_dir = argv[3];
+    if(argc >= 3 && std::string(argv[2]) != "--no-zeros" && std::string(argv[2]) != "--fp32") gs = atoi(argv[2]);
+    if(argc >= 4 && std::string(argv[3]) != "--no-zeros" && std::string(argv[3]) != "--fp32") data_dir = argv[3];
 
     std::cout << "Data dir: " << data_dir << std::endl;
     if(!use_zeros)
         std::cout << "Zero points: disabled (--no-zeros)" << std::endl;
+    if(fp32_mode)
+        std::cout << "Mode: FP32 A / FP32 output (element_size_bytes=4, bits=3)" << std::endl;
 
-    bool all_pass = testCompareShape(M, N, K, gs, data_dir, use_zeros);
+    bool all_pass = fp32_mode
+        ? testFp32Shape(M, N, K, gs, data_dir, use_zeros)
+        : testCompareShape(M, N, K, gs, data_dir, use_zeros);
 
     std::cout << "\n==========================================================================" << std::endl;
     std::cout << "Overall: " << (all_pass ? "ALL PASSED" : "SOME FAILED") << std::endl;

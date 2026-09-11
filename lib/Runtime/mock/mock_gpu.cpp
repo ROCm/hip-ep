@@ -1187,19 +1187,19 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
 
 int wrap_rms_norm(RuntimeState *state, void *input, void *scale, void *output,
                   int64_t input_num_elements, int64_t scale_num_elements,
-                  int64_t element_size_bytes, int64_t axis, float epsilon,
-                  int64_t stash_type) {
+                  int64_t norm_num_elements, int64_t element_size_bytes,
+                  int64_t axis, float epsilon, int64_t stash_type) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_rms_norm\n");
     return -1;
   }
 
   MOCK_PRINT("[MOCK] wrap_rms_norm(input_num_elements=%lld, "
-             "scale_num_elements=%lld, element_size=%lld, axis=%lld, "
-             "epsilon=%f, stash_type=%lld)\n",
+             "scale_num_elements=%lld, norm_num_elements=%lld, "
+             "element_size=%lld, axis=%lld, epsilon=%f, stash_type=%lld)\n",
              (long long)input_num_elements, (long long)scale_num_elements,
-             (long long)element_size_bytes, (long long)axis, (double)epsilon,
-             (long long)stash_type);
+             (long long)norm_num_elements, (long long)element_size_bytes,
+             (long long)axis, (double)epsilon, (long long)stash_type);
 
   return 0;
 }
@@ -1231,8 +1231,9 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
                       const void *bias, void *output, int64_t M, int64_t N,
                       int64_t K, int64_t batch_count, int64_t bits,
                       int64_t block_size, int64_t elem_size,
-                      int64_t zp_elem_size) {
+                      int64_t zp_elem_size, int64_t scale_elem_size) {
   (void)op_state_slot;
+  (void)scale_elem_size;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_matmul_nbits\n");
     return -1;
@@ -1607,6 +1608,59 @@ int wrap_qelementwise(RuntimeState *state, void *lhs, void *rhs, void *output,
   if (!state)
     return -1;
   MOCK_PRINT("[MOCK] wrap_qelementwise,kind=%lld", (long long)kind);
+  return 0;
+}
+
+int wrap_qmatmul(RuntimeState *state, const void *A, const void *B, void *Y,
+                 int64_t M, int64_t N, int64_t K, int64_t batch_count,
+                 int64_t b_batch_stride, int64_t trans_a, int64_t trans_b,
+                 int64_t a_data_type, int64_t b_data_type, int64_t y_data_type,
+                 float M_scale, int64_t A_zero_point, int64_t B_zero_point,
+                 int64_t Y_zero_point) {
+  (void)A;
+  (void)B;
+  (void)Y;
+  (void)b_batch_stride;
+  (void)a_data_type;
+  (void)b_data_type;
+  (void)y_data_type;
+  (void)A_zero_point;
+  (void)B_zero_point;
+  (void)Y_zero_point;
+  if (!state)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_qmatmul(M=%lld, N=%lld, K=%lld, batch=%lld, "
+             "trans=(%lld,%lld), M_scale=%g)",
+             (long long)M, (long long)N, (long long)K, (long long)batch_count,
+             (long long)trans_a, (long long)trans_b, (double)M_scale);
+  return 0;
+}
+
+int wrap_qconv(RuntimeState *state, const void *input, const void *weights,
+               const void *weight_scales, const void *weight_zero_points,
+               const void *bias, void *output, int64_t batch,
+               int64_t in_channels, int64_t out_channels, int64_t spatial_size,
+               int64_t activation_dtype, int64_t weight_dtype,
+               int64_t weight_bits, int64_t bias_dtype, float input_scale,
+               int64_t input_zp, float output_scale, int64_t output_zp) {
+  (void)input;
+  (void)weights;
+  (void)weight_scales;
+  (void)weight_zero_points;
+  (void)bias;
+  (void)output;
+  (void)bias_dtype;
+  (void)input_scale;
+  (void)input_zp;
+  (void)output_scale;
+  (void)output_zp;
+  if (!state)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_qconv N=%lld K=%lld M=%lld P=%lld act=%s w=%s "
+             "w_bits=%lld\n",
+             (long long)batch, (long long)in_channels, (long long)out_channels,
+             (long long)spatial_size, hipdnn_ep_datatype_name(activation_dtype),
+             hipdnn_ep_datatype_name(weight_dtype), (long long)weight_bits);
   return 0;
 }
 

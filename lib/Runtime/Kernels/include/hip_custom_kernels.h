@@ -26,6 +26,9 @@
 // (JIT dlopen, or native import). Pre-dual-format the kernels were linked into
 // model.dll, so no export was needed -- hence this is new. EXPORTS is defined
 // only when building that library (hip_utils.cmake); consumers leave it empty.
+// Guarded so this coexists with gqa_autotune.h, which defines the same macro
+// (identically) to stay independent of this header in the mock build.
+#ifndef HIP_KERNEL_API
 #if defined(_WIN32)
   #if defined(HIP_CUSTOM_KERNELS_EXPORTS)
     #define HIP_KERNEL_API __declspec(dllexport)
@@ -37,6 +40,7 @@
 #else
   #define HIP_KERNEL_API
 #endif
+#endif // HIP_KERNEL_API
 
 #ifdef __cplusplus
 extern "C" {
@@ -170,6 +174,94 @@ HIP_KERNEL_API int hip_qelementwise(
     float M_a, int64_t lhs_zp,
     float M_b, int64_t rhs_zp,
     int64_t output_zp);
+
+/* =========================================================================
+ * Quantized batched matmul (Q(DQ(A) @ DQ(B)))
+ * =========================================================================
+ *
+ * A: [batch_count x M x K], B: [K x N] when b_batch_stride == 0 or
+ * [batch_count x K x N] when b_batch_stride == K*N, Y: [batch_count x M x N].
+ * All row-major and contiguous.
+ *
+ * trans_a / trans_b swap the trailing two extents of the corresponding operand
+ * in memory -- A stored as [batch_count x K x M], B as [N x K] -- while M, N, K
+ * stay the logical extents and b_batch_stride stays K*N. Only the load stride
+ * changes; Y is never transposed.
+ *
+ * Supported hip_dtype, independently per edge:
+ *   a: HIP_DTYPE_INT8, HIP_DTYPE_UINT8, HIP_DTYPE_INT16, HIP_DTYPE_UINT16
+ *   b: HIP_DTYPE_INT8, HIP_DTYPE_UINT8
+ *   y: HIP_DTYPE_INT8, HIP_DTYPE_UINT8, HIP_DTYPE_INT16, HIP_DTYPE_UINT16
+ *
+ */
+HIP_KERNEL_API int hip_qmatmul(
+    void* stream,
+    const void* A,
+    const void* B,
+    void* Y,
+    int64_t M, int64_t N, int64_t K,
+    int64_t batch_count,
+    int64_t b_batch_stride,
+    int trans_a, int trans_b,
+    int a_dtype, int b_dtype, int y_dtype,
+    float M_scale,
+    int64_t a_zp, int64_t b_zp, int64_t y_zp);
+
+/* =========================================================================
+ * Quantized 1x1 convolution, W4A16 (Q(Conv(DQ(x), DQ(w))))
+ * =========================================================================
+ *
+ * A 1x1 kernel with unit stride, unit dilation and no padding is one dot
+ * product per output position down the channel axis, so this is a GEMM:
+ *
+ *   out[n, co, p] = sum over ci of  x[n, ci, p] * w[co, ci]
+ *
+ * with M = out_channels, K = in_channels, N = spatial_size (output positions).
+ * There is no im2col gather and no per-axis geometry: the caller has already
+ * established the degenerate form.
+ *
+ * Both scales come out of the sum because neither depends on ci:
+ *
+ *   acc[co, p] = sum over ci of (x - z_x) * (w[co, ci] - z_w[co])
+ *   out        = saturate(round(M[co] * acc + bias[co] / s_out) + z_out)
+ *   M[co]      = act_out_scale_ratio * weight_scales[co]
+ *
+ * act_out_scale_ratio (= s_x / s_out) and inv_output_scale (= 1 / s_out) are
+ * folded by the caller so the kernel never divides. The per-channel factor
+ * cannot be folded: weight_scales is a device array of one f32 per output
+ * channel, indexed by co.
+ *
+ * `weights` and `weight_zero_points` keep an 8-bit element type and their
+ * LOGICAL element counts (out_channels * in_channels and out_channels), but
+ * when weight_bits == 4 each byte holds TWO values, low nibble first over the
+ * flattened row-major sequence, so only ceil(numel/2) bytes back them.
+ * weight_dtype decides how a nibble widens: HIP_DTYPE_INT8 sign-extends from
+ * 4 bits, HIP_DTYPE_UINT8 zero-extends. Getting that wrong is silent.
+ *
+ * Supported act_dtype: HIP_DTYPE_UINT16.
+ * Supported weight_dtype: HIP_DTYPE_INT8, HIP_DTYPE_UINT8 (storage), with
+ * weight_bits 4 (packed) or 8 (full width).
+ * `bias` is nullable and, when present, float32 with one value per output
+ * channel.
+ * Returns: 0 on success, non-zero on unsupported combination / launch failure.
+ */
+HIP_KERNEL_API int hip_qconv(
+    void* stream,
+    const void* input,
+    const void* weights,
+    const void* weight_scales,
+    const void* weight_zero_points,
+    const void* bias,
+    void* output,
+    int64_t batch,
+    int64_t in_channels,
+    int64_t out_channels,
+    int64_t spatial_size,
+    int act_dtype,
+    int weight_dtype,
+    int weight_bits,
+    float act_out_scale_ratio, int64_t input_zp,
+    float inv_output_scale, int64_t output_zp);
 
 /* =========================================================================
  * Elementwise Unary (Neg / Sign / Cos / Sin / Not)
@@ -779,6 +871,27 @@ HIP_KERNEL_API int hip_gqa_add_attention_bias_f32(
     int total_heads, int num_heads, int bias_batch, int bias_heads,
     int sq, int score_cols, int score_batch_stride, int bias_element_size_bytes,
     int bias_sq, int bias_row_offset, int bias_total_seq, int bias_col_offset);
+
+/* Highest key position each query chunk can attend, recovered from the additive
+ * mask. Writes one int per chunk to out_chunk_hi (device), as an ABSOLUTE key
+ * position, so the caller's per-chunk key range is [lo, out_chunk_hi[j] + 1).
+ *
+ * For a bidirectional op (onnx.Attention is_causal=0) the attributes carry no
+ * upper bound and every chunk otherwise scores every key. An entry whose bias
+ * is at or below -65504 -- the fp16 lower bound, the "not attended" sentinel --
+ * contributes exactly zero to the softmax, so excluding it is bit-exact.
+ * Anything less negative counts as attended, which only narrows less.
+ *
+ * Chunks are the caller's uniform tiling: chunk j covers query rows
+ * [j*sq_chunk, min((j+1)*sq_chunk, sq)). bias layout and the bias_batch /
+ * bias_heads broadcast follow hip_gqa_add_attention_bias_f32 above. past_len
+ * places query row 0 of the call at its absolute position. Only the region
+ * above each chunk's last row is read; the rest is kept regardless. */
+HIP_KERNEL_API int hip_gqa_bias_key_extent(
+    void* stream, const void* bias, void* out_chunk_hi,
+    int bias_batch, int bias_heads, int bias_sq, int bias_total_seq,
+    int sq, int sq_chunk, int past_len, int num_chunks,
+    int bias_element_size_bytes);
 
 /* Column-wise softmax in-place. One threadblock per (head, query).
  * Smooth softmax is activated when head_sink is non-null OR use_smooth_softmax
@@ -1741,8 +1854,14 @@ HIP_KERNEL_API int hip_instance_norm(
  * Per-row reduction with FP32 accumulators, regardless of I/O dtype. Unlike
  * LayerNormalization there is no mean subtraction and no bias term.
  *
- * `outer` / `norm_size`: input viewed as [outer, norm_size], where norm_size
- *                        equals the scale element count.
+ * `outer` / `norm_size`: input viewed as [outer, norm_size], where norm_size is
+ *                        the ONNX reduction width (product of the input dims
+ *                        from `axis` on) -- NOT the scale element count.
+ * `scale_rows`         : number of gain vectors packed in `scale`
+ *                        (scale_num_elements / norm_size). Row r uses group
+ *                        r % scale_rows; 1 is the ordinary shared-gain case,
+ *                        >1 is a grouped norm such as scale [G, D] applied to
+ *                        input [N, G, D] with axis = -1.
  * `hip_dtype`          : I/O type for input/scale/output -- FLOAT16 or FLOAT32.
  *
  * FLOAT16 automatically uses a packed __half2 body when norm_size is even and
@@ -1755,6 +1874,7 @@ HIP_KERNEL_API int hip_rms_norm(
     void* output,
     int64_t outer,
     int64_t norm_size,
+    int64_t scale_rows,
     float epsilon,
     int hip_dtype);
 
@@ -1997,6 +2117,15 @@ HIP_KERNEL_API void hip_matmul_nbits_unpack_zp_u8_3bit(
     void* stream, const void* zp_packed, void* dst_u8, int N, int groups_k);
 HIP_KERNEL_API void hip_matmul_nbits_convert_zp_fp16(
     void* stream, const void* zp_packed, void* dst_fp16, int N, int groups_k);
+
+/* Flat fp32 -> fp16 cast for a MatMulNBits `scales` buffer ([N, num_groups_k],
+ * n_elems = N * num_groups_k). Every dequant path reads `scales` as raw fp16;
+ * a fp32 scales buffer (ONNX MatMulNBits allows either dtype) must be
+ * converted once before use -- see lib/Runtime/real/matmul_nbits.cpp's
+ * lookup_or_convert_scale_fp16. */
+HIP_KERNEL_API void hip_matmul_nbits_convert_scale_fp32_to_fp16(
+    void* stream, const void* scale_fp32, void* scale_fp16_out,
+    int64_t n_elems);
 
 /* Dequantize a full packed int4 weight matrix into row-major fp16 [N, K].
  * Used by the CDNA/wave64 prefill fast path (no WMMA): dequantize B once

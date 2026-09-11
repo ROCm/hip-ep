@@ -6,48 +6,83 @@
 # ============================================================================
 # PDLL Pattern Compilation
 # ============================================================================
-# Locate mlir-pdll. LLVM_TOOLS_BINARY_DIR is exported by find_package(MLIR) and
-# covers both the prebuilt SDK and an installed LLVM; the _deps path covers an
-# LLVM built inside this project's FetchContent tree. Default search paths stay
-# enabled so a tool on PATH is still usable.
-find_program(MLIR_PDLL_EXE mlir-pdll
-    HINTS
-        "${CMAKE_BINARY_DIR}/_deps/llvm-project-build/bin"
-        "${LLVM_TOOLS_BINARY_DIR}"
-        "${LLVM_BINARY_DIR}/bin"
-)
+# Locate mlir-pdll. When LLVM/MLIR is built from source as a subproject the
+# `mlir-pdll` target exists but its .exe is not present at configure time, so
+# find_program cannot see it — use the target directly (the custom command
+# below then gains a build-time dependency on it). Fall back to find_program
+# for the prebuilt / installed-LLVM case: LLVM_TOOLS_BINARY_DIR is exported by
+# find_package(MLIR) and covers both the prebuilt SDK and an installed LLVM;
+# the _deps path covers a FetchContent tree that has already been built.
+# Default search paths stay enabled so a tool on PATH is still usable.
+if(TARGET mlir-pdll)
+    set(MLIR_PDLL_EXE mlir-pdll)
+    message(STATUS "OnnxToHip: using in-tree mlir-pdll target")
+else()
+    find_program(MLIR_PDLL_EXE NAMES mlir-pdll
+        HINTS
+            "${CMAKE_BINARY_DIR}/_deps/llvm-project-build/bin"
+            "${LLVM_TOOLS_BINARY_DIR}"
+            "${LLVM_BINARY_DIR}/bin"
+            "${MLIR_BINARY_DIR}/bin"
+    )
+endif()
 
 if(MLIR_PDLL_EXE)
-    message(STATUS "OnnxToHip: mlir-pdll found: ${MLIR_PDLL_EXE}")
+    if(NOT TARGET mlir-pdll)
+        message(STATUS "OnnxToHip: mlir-pdll found: ${MLIR_PDLL_EXE}")
+    endif()
     # HipFusionPatterns.pdll #includes every pattern file, so mlir-pdll runs
     # once and emits one PDL module. Every .pdll is still globbed as a
     # dependency, otherwise editing an included pattern would not rebuild it.
     set(PDL_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/pdl")
     set(PDL_ENTRY "${PDL_SOURCE_DIR}/HipFusionPatterns.pdll")
     file(GLOB PDL_SOURCES CONFIGURE_DEPENDS "${PDL_SOURCE_DIR}/*.pdll")
-    set(PDL_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/pdl")
-    file(MAKE_DIRECTORY "${PDL_BUILD_DIR}")
-    set(PDL_OUTPUT "${PDL_BUILD_DIR}/HipFusionPatterns.pdl.mlir")
-    set(PDL_RUNTIME_OUTPUT "${CMAKE_BINARY_DIR}/bin/HipFusionPatterns.pdl.mlir")
-    add_custom_command(OUTPUT "${PDL_OUTPUT}" "${PDL_RUNTIME_OUTPUT}"
-        COMMAND "${MLIR_PDLL_EXE}" -x mlir "-I${PDL_SOURCE_DIR}"
+    set(PDL_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/HipFusionPatterns.pdl.mlir")
+    # ConvertOnnxToHipPass loads the patterns from the EP library's own
+    # directory, which multi-config generators put under a per-config
+    # subdirectory of CMAKE_RUNTIME_OUTPUT_DIRECTORY.
+    get_property(_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+    set(PDL_STAGED
+        "${CMAKE_BINARY_DIR}/bin/$<$<BOOL:${_multi_config}>:$<CONFIG>/>HipFusionPatterns.pdl.mlir")
+    if(TARGET mlir-pdll)
+        set(MLIR_PDLL_COMMAND "$<TARGET_FILE:mlir-pdll>")
+        set(MLIR_PDLL_DEPENDS mlir-pdll)
+    else()
+        set(MLIR_PDLL_COMMAND "${MLIR_PDLL_EXE}")
+        set(MLIR_PDLL_DEPENDS "${MLIR_PDLL_EXE}")
+    endif()
+    add_custom_command(OUTPUT "${PDL_OUTPUT}" "${PDL_STAGED}"
+        COMMAND "${MLIR_PDLL_COMMAND}" -x mlir "-I${PDL_SOURCE_DIR}"
                 "${PDL_ENTRY}" -o "${PDL_OUTPUT}"
-        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/bin"
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                "${PDL_OUTPUT}" "${PDL_RUNTIME_OUTPUT}"
-        DEPENDS ${PDL_SOURCES}
-        COMMENT "Compiling PDLL patterns: HipFusionPatterns.pdll -> HipFusionPatterns.pdl.mlir (+ bin copy)"
+        COMMAND "${CMAKE_COMMAND}" -E copy "${PDL_OUTPUT}" "${PDL_STAGED}"
+        DEPENDS ${PDL_SOURCES} ${MLIR_PDLL_DEPENDS}
+        COMMENT "Compiling PDLL patterns -> HipFusionPatterns.pdl.mlir"
         VERBATIM)
-    add_custom_target(HipPdllPatterns DEPENDS "${PDL_OUTPUT}" "${PDL_RUNTIME_OUTPUT}")
+    add_custom_target(HipPdllPatterns DEPENDS "${PDL_OUTPUT}" "${PDL_STAGED}")
     install(FILES "${PDL_OUTPUT}" DESTINATION bin)
-    # ConvertOnnxToHipPass resolves the patterns next to the loaded EP module,
-    # so every packaging path (install tree, wheel, staged test package) has to
+    # Every packaging path (install tree, wheel, staged test package) has to
     # ship this file beside the EP library. Export it for those consumers.
     set(HIP_PDL_FUSION_PATTERNS "${PDL_OUTPUT}" CACHE INTERNAL
         "Compiled PDL fusion patterns that must ship beside the EP library")
     message(STATUS "OnnxToHip: PDLL fusion enabled — patterns: ${PDL_OUTPUT}")
 else()
-    message(WARNING "OnnxToHip: mlir-pdll not found — PDLL fusion disabled")
+    message(WARNING
+        "OnnxToHip: mlir-pdll not found. ConvertOnnxToHipPass requires the "
+        "compiled HipFusionPatterns.pdl.mlir next to the EP library.\n"
+        "\n"
+        "To fix:\n"
+        "  - From-source LLVM: ensure mlir is in LLVM_ENABLE_PROJECTS "
+        "(cmake/deps.cmake already does this) and reconfigure after LLVM is "
+        "in the build tree.\n"
+        "  - Prebuilt LLVM: install the MLIR tools (mlir-pdll) into the same "
+        "prefix as find_package(MLIR), or put mlir-pdll on PATH.\n"
+        "\n"
+        "Searched in:\n"
+        "  - ${CMAKE_BINARY_DIR}/_deps/llvm-project-build/bin\n"
+        "  - ${LLVM_TOOLS_BINARY_DIR}\n"
+        "  - ${LLVM_BINARY_DIR}/bin\n"
+        "  - ${MLIR_BINARY_DIR}/bin\n"
+        "  - System PATH")
 endif()
 
 # ============================================================================

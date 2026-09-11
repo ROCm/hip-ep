@@ -901,7 +901,8 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
     I64Attr:$bits,
     I64Attr:$block_size,
     I64Attr:$accuracy_level,
-    I64Attr:$zp_elem_size  // zero_points element size: 1=uint8 packed, 2=fp16
+    I64Attr:$zp_elem_size,  // zero_points element size: 1=uint8 packed, 2=fp16
+    DefaultValuedAttr<I64Attr, "2">:$scale_elem_size // scales element size in bytes: 2=fp16, 4=fp32
   );
 
   let assemblyFormat = [{
@@ -4946,6 +4947,148 @@ def Hip_QMulOp : Hip_DpsOp_Broadcast<"qmul",
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_QMatMulOp : Hip_DpsOp<"qmatmul", /*traits=*/[],
+                              /*outsAccessor=*/"Y",
+                              /*autoReify=*/0,
+                              /*autoInfer=*/1,
+                              /*declareInfer=*/1> {
+  let summary = "Quantized matrix multiplication with integrated QDQ";
+  let description = [{
+    Fuses DequantizeLinear x2 -> MatMul -> QuantizeLinear into a single
+    integer-domain batched GEMM.
+
+    ```
+    a = (A - A_zero_point) * A_scale
+    b = (B - B_zero_point) * B_scale
+    Y = saturate(round((a @ b) / Y_scale) + Y_zero_point)
+    ```
+
+    Expanded over the integer accumulator, with
+    `acc[m,n] = sum_k A[m,k]*B[k,n]`, `rowA[m] = sum_k A[m,k]` and
+    `colB[n] = sum_k B[k,n]`:
+
+    ```
+    Y[m,n] = saturate(round(M * (acc[m,n] - B_zero_point * rowA[m]
+                                          - A_zero_point * colB[n]
+                                          + K * A_zero_point * B_zero_point))
+                      + Y_zero_point)
+    M = A_scale * B_scale / Y_scale   (folded at lowering time)
+    ```
+
+    Shape contract matches `hip.matmul`:
+      A: [..., M, K], B: [..., K, N], Y: [broadcast(A.batch, B.batch), M, N].
+
+    Optional `transA` / `transB` (0/1) apply a last-dimension swap on the
+    corresponding operand before multiply, with the same meaning as on
+    `hip.matmul`: `transA` reads A as [..., K, M] and `transB` reads B as
+    [..., N, K]. They carry the compile-time fold of
+    `Transpose(perm=[..,r,r-2])` into MatMul, so a quantized attention
+    `Q @ K^T` still fuses. When unset they default to 0.
+
+    Quantization is per-tensor, so every scale and zero point is an attribute.
+    A, B and Y each carry their own quantized element type: real QDQ graphs
+    commonly pair a `ui8` asymmetric activation with an `i8` symmetric weight.
+    A and Y may be 8- or 16-bit, which is what makes A16W8 expressible; B is
+    8-bit only, because the lowering's kernel keeps a 16-bit A exact by
+    splitting it into two bytes and splits only A, leaving a wider B with no
+    path through it.
+
+    Example:
+    ```mlir
+    hip.qmatmul(%ctx) ins(%A, %B : memref<64x128xi8, 1>, memref<128x32xi8, 1>)
+                      outs(%Y : memref<64x32xi8, 1>)
+                      {A_scale = 2.500000e-01 : f32, A_zero_point = -5 : i64,
+                       B_scale = 1.250000e-01 : f32, B_zero_point = 3 : i64,
+                       Y_scale = 5.000000e-01 : f32, Y_zero_point = 7 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$A,             // Left operand (quantized)
+    Hip_TensorOrMemRef:$B,             // Right operand (quantized)
+    Hip_TensorOrMemRef:$Y,             // Output buffer (quantized), DPS init
+    F32Attr:$A_scale,
+    I64Attr:$A_zero_point,
+    F32Attr:$B_scale,
+    I64Attr:$B_zero_point,
+    F32Attr:$Y_scale,
+    I64Attr:$Y_zero_point,
+    DefaultValuedAttr<I64Attr, "0">:$transA,
+    DefaultValuedAttr<I64Attr, "0">:$transB
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $A `,` $B `:` type($A) `,` type($B) `)`
+    `outs` `(` $Y `:` type($Y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
+def Hip_QConvOp : Hip_DpsOp<"qconv",
+                            /*traits=*/[],
+                            /*outsAccessor=*/"Output",
+                            /*autoReify=*/1,
+                            /*autoInfer=*/1,
+                            /*declareInfer=*/1> {
+  let summary = "Quantized 1x1 convolution with integrated QDQ";
+  let description = [{
+    Fuses the common weight-quantized convolution chain
+
+      DQ(input) + DQ(weights) -> Conv -> Q
+
+    without materializing the dequantized activation, dequantized weights, or
+    full-precision output. The initial supported form has UINT16 per-tensor
+    input/output quantization and 4-bit weights quantized per output channel
+    (`weight_axis` 0).
+
+    Input and output scales/zero-points are scalar attributes: the fusion only
+    fires on per-tensor activation quantization, so the three coefficients fold
+    into the instruction stream. Weight scales and zero-points stay operands
+    because they hold one value per output channel, and because they routinely
+    arrive as external constants whose values are not readable at fusion time.
+
+    `packed_int4` means BOTH `$weights` and `$weight_zero_points` carry two
+    4-bit values per backing byte, low nibble first over the flattened
+    row-major sequence, while their types keep the logical element count and an
+    8-bit element type -- the same convention as hip.dequantize_linear. The
+    element type's signedness selects INT4 (i8) or UINT4 (ui8); the two differ
+    in how a nibble is widened, so a consumer must not ignore it.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,              // UINT16 quantized activation
+    Hip_TensorOrMemRef:$weights,            // packed 4-bit weights, i8/ui8 typed
+    Hip_TensorOrMemRef:$weight_scales,      // f32 [Cout]
+    Hip_TensorOrMemRef:$weight_zero_points, // packed 4-bit [Cout], i8/ui8 typed
+    Optional<Hip_TensorOrMemRef>:$bias,
+    Hip_TensorOrMemRef:$output,             // UINT16 quantized output
+    F32Attr:$input_scale,
+    I64Attr:$input_zp,
+    F32Attr:$output_scale,
+    I64Attr:$output_zp,
+    I64Attr:$weight_axis,
+    I64ArrayAttr:$kernel_shape,
+    I64ArrayAttr:$strides,
+    I64ArrayAttr:$pads,
+    I64ArrayAttr:$dilations,
+    I64Attr:$group,
+    UnitAttr:$packed_int4
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $weights `,` $weight_scales `,`
+        $weight_zero_points (`,` $bias^)? `:`
+        type($input) `,` type($weights) `,` type($weight_scales) `,`
+        type($weight_zero_points) (`,` type($bias)^)? `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
