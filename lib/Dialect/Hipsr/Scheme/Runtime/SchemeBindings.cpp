@@ -247,7 +247,21 @@ bool loadSchemeScript(const char* scriptPath) {
   LLVM_DEBUG(llvm::dbgs() << "Loading Scheme script: " << scriptPath << "\n");
 
   // Evaluate the script content using cached symbols from initialization
-  ptr port = Scall1(cached_open_string_input_port_sym, Sstring(scm_code.c_str()));
+  if (current_log_level <= SchemeLogLevel::Debug) {
+    llvm::errs() << "[debug] Creating string input port for " << scm_code.size() << " bytes\n";
+    llvm::errs() << "[debug] cached_open_string_input_port_sym: " << cached_open_string_input_port_sym << "\n";
+    llvm::errs() << "[debug] cached_read_sym: " << cached_read_sym << "\n";
+  }
+
+  ptr scheme_string = Sstring(scm_code.c_str());
+  if (current_log_level <= SchemeLogLevel::Debug) {
+    llvm::errs() << "[debug] Created Scheme string: " << scheme_string << "\n";
+  }
+
+  ptr port = Scall1(cached_open_string_input_port_sym, scheme_string);
+  if (current_log_level <= SchemeLogLevel::Debug) {
+    llvm::errs() << "[debug] Created port: " << port << "\n";
+  }
 
   while (true) {
     ptr expr = Scall1(cached_read_sym, port);
