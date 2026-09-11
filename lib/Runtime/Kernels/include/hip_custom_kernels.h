@@ -19,6 +19,7 @@
  * (custom_kernels_<arch>.{dll,so}); see HIP_KERNEL_API below.
  */
 
+#include <stddef.h>
 #include <stdint.h>
 
 // Exports each launcher from the per-arch kernel shared library
@@ -193,6 +194,13 @@ HIP_KERNEL_API int hip_qelementwise(
  *   b: HIP_DTYPE_INT8, HIP_DTYPE_UINT8
  *   y: HIP_DTYPE_INT8, HIP_DTYPE_UINT8, HIP_DTYPE_INT16, HIP_DTYPE_UINT16
  *
+ * workspace / workspace_bytes: optional split-K scratch. The tiled grid has no
+ * K dimension, so a shape with little output parallelism (a low-rank M=128,
+ * N=32 projection launches two blocks) leaves most of the device idle. Given
+ * scratch, such a shape is instead reduced in parallel k slices and requantized
+ * by a second pass. Pass NULL, or fewer bytes than hip_qmatmul_workspace_bytes
+ * asks for, to stay on the single-pass kernel; the result is identical either
+ * way, since the slices are combined with exact integer atomics.
  */
 HIP_KERNEL_API int hip_qmatmul(
     void* stream,
@@ -205,7 +213,15 @@ HIP_KERNEL_API int hip_qmatmul(
     int trans_a, int trans_b,
     int a_dtype, int b_dtype, int y_dtype,
     float M_scale,
-    int64_t a_zp, int64_t b_zp, int64_t y_zp);
+    int64_t a_zp, int64_t b_zp, int64_t y_zp,
+    void* workspace,
+    size_t workspace_bytes);
+
+/* Scratch hip_qmatmul wants for this shape, or 0 when the shape does not call
+ * for split-K. Depends on the device's compute-unit count, so query it rather
+ * than deriving it from the extents. */
+HIP_KERNEL_API size_t hip_qmatmul_workspace_bytes(
+    int64_t M, int64_t N, int64_t K, int64_t batch_count);
 
 /* =========================================================================
  * Quantized 1x1 convolution, W4A16 (Q(Conv(DQ(x), DQ(w))))

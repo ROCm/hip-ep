@@ -46,8 +46,17 @@
 // dot4 instructions per term instead of one rather than the 4x-plus slowdown a
 // scalar int64 inner loop would bring.
 //
-// The GEMV path (M == 1) is bandwidth-bound and does not use dot4, so it just
-// accumulates in int64 directly instead of splitting.
+// Kernel paths
+// ------------
+// All three share the identity above and differ only in how the reduction is
+// parallelized:
+//
+//   M == 1                       -> GEMV, one thread per output column
+//   M > 1                        -> tiled GEMM, one block per output tile
+//   M > 1, too few output tiles  -> split-K over the tiled inner loop
+//
+// The GEMV path is bandwidth-bound and does not use dot4, so it accumulates in
+// int64 directly instead of splitting A.
 
 #include "debug_log.h"
 #include "hip_arch_compat.h"
@@ -60,6 +69,10 @@
 #include <cstdio>
 
 namespace {
+
+//===----------------------------------------------------------------------===//
+// Element types, epilogue, and tile layout
+//===----------------------------------------------------------------------===//
 
 // All-ones byte vector: dot4(x, kOnes4) sums the four bytes of x, which is how
 // rowA / colB ride along on the same integer dot pipeline as the products.
@@ -116,10 +129,8 @@ qmatmul_epilogue(int64_t acc, int64_t row_a, int64_t col_b, int64_t k_zazb,
   return q_saturate<TY>(rintf(scaled) + static_cast<float>(y_zp));
 }
 
-//===----------------------------------------------------------------------===//
-// Tiled GEMM (M > 1)
-//===----------------------------------------------------------------------===//
-
+// Tile geometry shared by the tiled and split-K paths: one block owns a
+// [kTileM x kTileN] output tile, one thread a [kThreadM x kThreadN] micro-tile.
 constexpr int kTileM = 64;
 constexpr int kTileN = 64;
 constexpr int kTileK = 16;
@@ -150,11 +161,30 @@ __device__ inline int lds_pack4(const QMatMulByte *row, int k) {
   return *reinterpret_cast<const int *>(row + k);
 }
 
-// Y[b, m, n] = requantize(sum_k A[b, m, k] * B[b, k, n])
+template <int kPlanes> struct QMatMulMicroTile {
+  int32_t acc[kPlanes][kThreadM][kThreadN];
+  int32_t row_a[kPlanes][kThreadM];
+  int32_t col_b[kThreadN];
+};
+
+__device__ inline void qmatmul_micro_tile_origin(int tid, int &thread_m,
+                                                 int &thread_n) {
+  thread_m = (tid / (kTileN / kThreadN)) * kThreadM;
+  thread_n = (tid % (kTileN / kThreadN)) * kThreadN;
+}
+
+//===----------------------------------------------------------------------===//
+// Shared k-range accumulation (LDS staging + dot4)
+//===----------------------------------------------------------------------===//
+
+// Reduces A[m_base.., k_begin:k_end] x B[k_begin:k_end, n_base..] into this
+// thread's micro-tile. A and B are already offset to the block's batch; K is
+// still the full logical extent because it is also the operand stride.
 //
-// Grid: (ceil(N/kTileN), ceil(M/kTileM), batch_count). Each block stages a
-// [kTileM x kTileK] slab of A and a [kTileN x kTileK] transposed slab of B into
-// LDS, then each thread reduces a kThreadM x kThreadN micro-tile over K.
+// The range is a parameter rather than always [0, K) so split-K can hand each
+// block a slice. Staging zero-fills anything past k_end and zero is the
+// identity for all three sums, so a slice needs no separate tail handling; it
+// only has to start on a kTileK boundary to keep the staging maps coalesced.
 //
 // Both LDS tiles are k-major because dot4 needs four k-consecutive bytes in one
 // register. For a [K, N] B that means staging it transposed; for a [N, K] one
@@ -162,17 +192,15 @@ __device__ inline int lds_pack4(const QMatMulByte *row, int k) {
 //
 // trans_a / trans_b are runtime flags rather than template parameters: they
 // only pick a load stride during staging, which is block-uniform and off the
-// dot4 inner loop, and templating them would quadruple the 32 instantiations
-// the dtype triple already costs.
-//
-// A 16-bit A is staged as two byte planes and every dot4 runs twice, once per
-// plane; see the byte-split derivation in the file header.
-template <typename TA, typename TB, typename TY>
-__global__ __launch_bounds__(kTiledBlock) void qmatmul_tiled_kernel(
-    const TA *__restrict__ A, const TB *__restrict__ B, TY *__restrict__ Y,
-    int64_t M, int64_t N, int64_t K, int64_t b_batch_stride, float m_scale,
-    int32_t a_zp, int32_t b_zp, int32_t y_zp, int64_t k_zazb, bool need_row_a,
-    bool need_col_b, bool trans_a, bool trans_b) {
+// dot4 inner loop, and templating them would quadruple the instantiations the
+// dtype pair already costs.
+template <typename TA, typename TB>
+__device__ QMatMulMicroTile<QMatMulAPlanes<TA>::kCount>
+qmatmul_accumulate_k_range(const TA *__restrict__ A, const TB *__restrict__ B,
+                           int64_t M, int64_t N, int64_t K, int64_t m_base,
+                           int64_t n_base, int64_t k_begin, int64_t k_end,
+                           bool need_row_a, bool need_col_b, bool trans_a,
+                           bool trans_b) {
   constexpr bool kAWide = QMatMulAPlanes<TA>::kWide;
   constexpr int kAPlanes = QMatMulAPlanes<TA>::kCount;
   constexpr bool kASigned = QMatMulTraits<TA>::kSigned;
@@ -181,24 +209,13 @@ __global__ __launch_bounds__(kTiledBlock) void qmatmul_tiled_kernel(
   __shared__ __align__(16) QMatMulByte a_lds[kAPlanes][kTileM][kTileK];
   __shared__ __align__(16) QMatMulByte b_lds[kTileN][kTileK];
 
-  const int64_t batch = blockIdx.z;
-  A += batch * M * K;
-  B += batch * b_batch_stride;
-  Y += batch * M * N;
-
-  const int64_t m_base = static_cast<int64_t>(blockIdx.y) * kTileM;
-  const int64_t n_base = static_cast<int64_t>(blockIdx.x) * kTileN;
   const int tid = threadIdx.x;
-
-  // Micro-tile origin of this thread inside the block tile.
-  const int thread_m = (tid / (kTileN / kThreadN)) * kThreadM;
-  const int thread_n = (tid % (kTileN / kThreadN)) * kThreadN;
+  int thread_m, thread_n;
+  qmatmul_micro_tile_origin(tid, thread_m, thread_n);
 
   // Per-plane accumulators. |lo * B| <= 255*128 bounds the widest plane, so
   // int32 holds K up to 65792 -- past any shape the runtime admits.
-  int32_t acc[kAPlanes][kThreadM][kThreadN] = {};
-  int32_t row_a[kAPlanes][kThreadM] = {};
-  int32_t col_b[kThreadN] = {};
+  QMatMulMicroTile<kAPlanes> out = {};
 
   // Staging maps, each coalescing the reads of the layout it serves.
   //
@@ -214,14 +231,13 @@ __global__ __launch_bounds__(kTiledBlock) void qmatmul_tiled_kernel(
   const int b_n = tid % kTileN;
   const int b_k_base = tid / kTileN;
 
-  for (int64_t k0 = 0; k0 < K; k0 += kTileK) {
-    // Out-of-range elements are staged as 0. Zeros are the identity for all
-    // three sums (acc, rowA, colB), so no separate tail handling is needed.
+  for (int64_t k0 = k_begin; k0 < k_end; k0 += kTileK) {
+    // Out-of-range elements are staged as 0, the identity for all three sums.
     const int64_t a_row = m_base + row4_r;
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
       const int64_t k = k0 + row4_c + i;
-      const bool in_range = a_row < M && k < K;
+      const bool in_range = a_row < M && k < k_end;
       // A [K, M] costs a strided read here, unlike the contiguous [M, K] one.
       // Left as is: TransposeMatMulFold folds Transpose into whichever operand
       // the graph transposes, and attention's Q @ K^T only ever stamps transB.
@@ -246,8 +262,9 @@ __global__ __launch_bounds__(kTiledBlock) void qmatmul_tiled_kernel(
       for (int i = 0; i < 4; ++i) {
         const int64_t k = k0 + row4_c + i;
         b_lds[row4_r][row4_c + i] =
-            (b_row < N && k < K) ? static_cast<QMatMulByte>(B[b_row * K + k])
-                                 : QMatMulByte{0};
+            (b_row < N && k < k_end)
+                ? static_cast<QMatMulByte>(B[b_row * K + k])
+                : QMatMulByte{0};
       }
     } else {
       const int64_t b_col = n_base + b_n;
@@ -255,7 +272,7 @@ __global__ __launch_bounds__(kTiledBlock) void qmatmul_tiled_kernel(
       for (int rep = 0; rep < kTileK / kBStageRows; ++rep) {
         const int b_k = b_k_base + rep * kBStageRows;
         const int64_t k = k0 + b_k;
-        b_lds[b_n][b_k] = (b_col < N && k < K)
+        b_lds[b_n][b_k] = (b_col < N && k < k_end)
                               ? static_cast<QMatMulByte>(B[k * N + b_col])
                               : QMatMulByte{0};
       }
@@ -281,35 +298,71 @@ __global__ __launch_bounds__(kTiledBlock) void qmatmul_tiled_kernel(
       for (int i = 0; i < kThreadM; ++i) {
 #pragma unroll
         for (int j = 0; j < kThreadN; ++j) {
-          acc[kPlaneHi][i][j] = hipdnn_dot4<kASigned, kBSigned>(
-              a_frag[kPlaneHi][i], b_frag[j], acc[kPlaneHi][i][j]);
+          out.acc[kPlaneHi][i][j] = hipdnn_dot4<kASigned, kBSigned>(
+              a_frag[kPlaneHi][i], b_frag[j], out.acc[kPlaneHi][i][j]);
           if constexpr (kAWide)
-            acc[kPlaneLo][i][j] = hipdnn_dot4<false, kBSigned>(
-                a_frag[kPlaneLo][i], b_frag[j], acc[kPlaneLo][i][j]);
+            out.acc[kPlaneLo][i][j] = hipdnn_dot4<false, kBSigned>(
+                a_frag[kPlaneLo][i], b_frag[j], out.acc[kPlaneLo][i][j]);
         }
       }
 
-      // Block-uniform branches: the whole grid agrees on them, so the skipped
-      // dots cost nothing when the corresponding zero point is 0.
+      // Block-uniform branches, so the skipped dots cost nothing when the
+      // corresponding zero point is 0 -- or, under split-K, when this block
+      // was not the one elected to contribute that correction.
       if (need_row_a) {
 #pragma unroll
         for (int i = 0; i < kThreadM; ++i) {
-          row_a[kPlaneHi][i] = hipdnn_dot4<kASigned, false>(
-              a_frag[kPlaneHi][i], kOnes4, row_a[kPlaneHi][i]);
+          out.row_a[kPlaneHi][i] = hipdnn_dot4<kASigned, false>(
+              a_frag[kPlaneHi][i], kOnes4, out.row_a[kPlaneHi][i]);
           if constexpr (kAWide)
-            row_a[kPlaneLo][i] = hipdnn_dot4<false, false>(
-                a_frag[kPlaneLo][i], kOnes4, row_a[kPlaneLo][i]);
+            out.row_a[kPlaneLo][i] = hipdnn_dot4<false, false>(
+                a_frag[kPlaneLo][i], kOnes4, out.row_a[kPlaneLo][i]);
         }
       }
       if (need_col_b) {
 #pragma unroll
         for (int j = 0; j < kThreadN; ++j)
-          col_b[j] = hipdnn_dot4<kBSigned, false>(b_frag[j], kOnes4, col_b[j]);
+          out.col_b[j] =
+              hipdnn_dot4<kBSigned, false>(b_frag[j], kOnes4, out.col_b[j]);
       }
     }
 
     __syncthreads();
   }
+
+  return out;
+}
+
+//===----------------------------------------------------------------------===//
+// Tiled GEMM (M > 1)
+//===----------------------------------------------------------------------===//
+
+// Y[b, m, n] = requantize(sum_k A[b, m, k] * B[b, k, n])
+//
+// Grid: (ceil(N/kTileN), ceil(M/kTileM), batch_count). One block owns a whole
+// output tile and the whole reduction, so it can requantize in place.
+template <typename TA, typename TB, typename TY>
+__global__ __launch_bounds__(kTiledBlock) void qmatmul_tiled_kernel(
+    const TA *__restrict__ A, const TB *__restrict__ B, TY *__restrict__ Y,
+    int64_t M, int64_t N, int64_t K, int64_t b_batch_stride, float m_scale,
+    int32_t a_zp, int32_t b_zp, int32_t y_zp, int64_t k_zazb, bool need_row_a,
+    bool need_col_b, bool trans_a, bool trans_b) {
+  constexpr bool kAWide = QMatMulAPlanes<TA>::kWide;
+
+  const int64_t batch = blockIdx.z;
+  A += batch * M * K;
+  B += batch * b_batch_stride;
+  Y += batch * M * N;
+
+  const int64_t m_base = static_cast<int64_t>(blockIdx.y) * kTileM;
+  const int64_t n_base = static_cast<int64_t>(blockIdx.x) * kTileN;
+
+  const auto mt = qmatmul_accumulate_k_range<TA, TB>(
+      A, B, M, N, K, m_base, n_base, 0, K, need_row_a, need_col_b, trans_a,
+      trans_b);
+
+  int thread_m, thread_n;
+  qmatmul_micro_tile_origin(threadIdx.x, thread_m, thread_n);
 
 #pragma unroll
   for (int i = 0; i < kThreadM; ++i) {
@@ -318,9 +371,9 @@ __global__ __launch_bounds__(kTiledBlock) void qmatmul_tiled_kernel(
       continue;
     int64_t row_a64;
     if constexpr (kAWide)
-      row_a64 = int64_t{256} * row_a[kPlaneHi][i] + row_a[kPlaneLo][i];
+      row_a64 = int64_t{256} * mt.row_a[kPlaneHi][i] + mt.row_a[kPlaneLo][i];
     else
-      row_a64 = row_a[kPlaneHi][i];
+      row_a64 = mt.row_a[kPlaneHi][i];
 #pragma unroll
     for (int j = 0; j < kThreadN; ++j) {
       const int64_t n = n_base + thread_n + j;
@@ -328,13 +381,239 @@ __global__ __launch_bounds__(kTiledBlock) void qmatmul_tiled_kernel(
         continue;
       int64_t acc64;
       if constexpr (kAWide)
-        acc64 = int64_t{256} * acc[kPlaneHi][i][j] + acc[kPlaneLo][i][j];
+        acc64 = int64_t{256} * mt.acc[kPlaneHi][i][j] + mt.acc[kPlaneLo][i][j];
       else
-        acc64 = acc[kPlaneHi][i][j];
-      Y[m * N + n] = qmatmul_epilogue<TY>(acc64, row_a64, col_b[j], k_zazb,
+        acc64 = mt.acc[kPlaneHi][i][j];
+      Y[m * N + n] = qmatmul_epilogue<TY>(acc64, row_a64, mt.col_b[j], k_zazb,
                                           a_zp, b_zp, m_scale, y_zp);
     }
   }
+}
+
+//===----------------------------------------------------------------------===//
+// Split-K (low output-parallelism shapes)
+//===----------------------------------------------------------------------===//
+//
+// The tiled grid has no K dimension, so its parallelism is bounded by the
+// output alone: ceil(N/kTileN) * ceil(M/kTileM) * batch_count blocks. A
+// low-rank shape such as M=128, N=32 therefore launches two blocks, leaves the
+// rest of the device idle, and makes each block walk the entire reduction.
+//
+// Split-K restores the missing dimension: each block reduces a k slice into a
+// global int64 accumulator, and a second kernel requantizes once every slice
+// has landed. Integer addition is associative and exact, so the atomics make
+// the result bit-identical to the single-pass path regardless of the order the
+// slices complete in -- there is no reduction-order drift to reason about.
+
+__device__ inline void qmatmul_atomic_add_i64(int64_t *addr, int64_t v) {
+  atomicAdd(reinterpret_cast<unsigned long long *>(addr),
+            static_cast<unsigned long long>(v));
+}
+
+// Split-K partial pass: one block per (n-tile, m-tile, batch x split).
+template <typename TA, typename TB>
+__global__ __launch_bounds__(kTiledBlock) void qmatmul_splitk_partial_kernel(
+    const TA *__restrict__ A, const TB *__restrict__ B,
+    int64_t *__restrict__ acc_ws, int64_t *__restrict__ row_a_ws,
+    int64_t *__restrict__ col_b_ws, int64_t M, int64_t N, int64_t K,
+    int64_t b_batch_stride, int splits, int64_t k_chunk, bool need_row_a,
+    bool need_col_b, bool trans_a, bool trans_b) {
+  constexpr bool kAWide = QMatMulAPlanes<TA>::kWide;
+
+  const int64_t split = blockIdx.z % splits;
+  const int64_t batch = blockIdx.z / splits;
+
+  const int64_t k_begin = split * k_chunk;
+  if (k_begin >= K)
+    return;
+  const int64_t k_end = (k_begin + k_chunk < K) ? (k_begin + k_chunk) : K;
+
+  A += batch * M * K;
+  B += batch * b_batch_stride;
+  acc_ws += batch * M * N;
+  row_a_ws += batch * M;
+  col_b_ws += batch * N;
+
+  const int64_t m_base = static_cast<int64_t>(blockIdx.y) * kTileM;
+  const int64_t n_base = static_cast<int64_t>(blockIdx.x) * kTileN;
+
+  // rowA does not depend on n and colB does not depend on m, so every block
+  // column would otherwise add the same rowA slice again (and every block row
+  // the same colB slice). Elect one of each; the flags are block-uniform, so
+  // the non-electing blocks skip the corresponding dots entirely.
+  const bool add_row_a = need_row_a && blockIdx.x == 0;
+  const bool add_col_b = need_col_b && blockIdx.y == 0;
+
+  const auto mt = qmatmul_accumulate_k_range<TA, TB>(
+      A, B, M, N, K, m_base, n_base, k_begin, k_end, add_row_a, add_col_b,
+      trans_a, trans_b);
+
+  int thread_m, thread_n;
+  qmatmul_micro_tile_origin(threadIdx.x, thread_m, thread_n);
+
+#pragma unroll
+  for (int i = 0; i < kThreadM; ++i) {
+    const int64_t m = m_base + thread_m + i;
+    if (m >= M)
+      continue;
+    // Every thread sharing this m holds the same rowA slice, so within the
+    // elected block only the first micro-tile column commits it.
+    if (add_row_a && thread_n == 0) {
+      int64_t row_a64;
+      if constexpr (kAWide)
+        row_a64 = int64_t{256} * mt.row_a[kPlaneHi][i] + mt.row_a[kPlaneLo][i];
+      else
+        row_a64 = mt.row_a[kPlaneHi][i];
+      qmatmul_atomic_add_i64(&row_a_ws[m], row_a64);
+    }
+#pragma unroll
+    for (int j = 0; j < kThreadN; ++j) {
+      const int64_t n = n_base + thread_n + j;
+      if (n >= N)
+        continue;
+      int64_t acc64;
+      if constexpr (kAWide)
+        acc64 = int64_t{256} * mt.acc[kPlaneHi][i][j] + mt.acc[kPlaneLo][i][j];
+      else
+        acc64 = mt.acc[kPlaneHi][i][j];
+      qmatmul_atomic_add_i64(&acc_ws[m * N + n], acc64);
+    }
+  }
+
+  // Mirror of the rowA election: only the first micro-tile row commits colB.
+  if (add_col_b && thread_m == 0) {
+#pragma unroll
+    for (int j = 0; j < kThreadN; ++j) {
+      const int64_t n = n_base + thread_n + j;
+      if (n < N)
+        qmatmul_atomic_add_i64(&col_b_ws[n], mt.col_b[j]);
+    }
+  }
+}
+
+constexpr int kSplitKEpilogueBlock = 256;
+
+// Requantizes the completed split-K sums, one thread per output element.
+//
+// rowA / colB are read unconditionally. When their zero point is zero the
+// partial pass never wrote them, but the workspace was zeroed beforehand and
+// the epilogue multiplies them by that same zero point, so the branch would
+// buy nothing.
+template <typename TY>
+__global__ __launch_bounds__(kSplitKEpilogueBlock) void
+qmatmul_splitk_epilogue_kernel(const int64_t *__restrict__ acc_ws,
+                               const int64_t *__restrict__ row_a_ws,
+                               const int64_t *__restrict__ col_b_ws,
+                               TY *__restrict__ Y, int64_t M, int64_t N,
+                               int64_t total, float m_scale, int32_t a_zp,
+                               int32_t b_zp, int32_t y_zp, int64_t k_zazb) {
+  const int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * kSplitKEpilogueBlock + threadIdx.x;
+  if (idx >= total)
+    return;
+
+  // acc_ws and Y share the [batch, M, N] row-major order, so one flat index
+  // addresses both; only the two correction vectors need unpacking.
+  const int64_t mn = M * N;
+  const int64_t batch = idx / mn;
+  const int64_t rem = idx - batch * mn;
+  const int64_t m = rem / N;
+  const int64_t n = rem - m * N;
+
+  Y[idx] = qmatmul_epilogue<TY>(acc_ws[idx], row_a_ws[batch * M + m],
+                                col_b_ws[batch * N + n], k_zazb, a_zp, b_zp,
+                                m_scale, y_zp);
+}
+
+// Slice ceiling. Past it the per-slice staging prologue and the atomic traffic
+// grow faster than the added parallelism pays back.
+constexpr int kSplitKMaxSplits = 32;
+// A slice still has to cover enough k-tiles to amortize that prologue and the
+// atomic it ends with.
+constexpr int64_t kSplitKMinKPerSplit = 4 * kTileK;
+// Blocks per CU the plain grid must already reach for split-K to be pointless.
+constexpr int kSplitKTargetBlocksPerCU = 2;
+
+// Compute-unit count of the currently selected device, cached per device
+// ordinal for the same reason hipdnn_device_wave_size caches it: one host may
+// drive several GPUs of different widths. 0 means "could not probe", which
+// disables split-K rather than planning against a guessed width.
+int qmatmul_device_cu_count() {
+  constexpr int kMaxCachedDevices = 16;
+  // Zero-initialized (0 == not probed yet), so no thread-safe-statics guard is
+  // emitted; concurrent probes race only to write the same value.
+  static int cached[kMaxCachedDevices] = {};
+
+  auto probe = [](int d) {
+    hipDeviceProp_t p;
+    return (hipGetDeviceProperties(&p, d) == hipSuccess) ? p.multiProcessorCount
+                                                         : 0;
+  };
+
+  int dev = 0;
+  if (hipGetDevice(&dev) != hipSuccess || dev < 0)
+    return 0;
+  if (dev >= kMaxCachedDevices)
+    return probe(dev);
+
+  int c = cached[dev];
+  if (c == 0) {
+    c = probe(dev);
+    cached[dev] = c;
+  }
+  return c;
+}
+
+struct QMatMulSplitKPlan {
+  bool enabled;
+  int splits;
+  int64_t k_chunk;
+};
+
+QMatMulSplitKPlan qmatmul_plan_splitk(int64_t M, int64_t N, int64_t K,
+                                      int64_t batch_count) {
+  QMatMulSplitKPlan plan{false, 1, K};
+  // M == 1 takes the GEMV kernel, which already parallelizes over N.
+  if (M <= 1)
+    return plan;
+
+  const int cus = qmatmul_device_cu_count();
+  if (cus <= 0)
+    return plan;
+
+  const int64_t base_blocks = ((N + kTileN - 1) / kTileN) *
+                              ((M + kTileM - 1) / kTileM) * batch_count;
+  const int64_t target = static_cast<int64_t>(cus) * kSplitKTargetBlocksPerCU;
+  if (base_blocks >= target)
+    return plan;
+
+  int64_t want = (target + base_blocks - 1) / base_blocks;
+  if (want > kSplitKMaxSplits)
+    want = kSplitKMaxSplits;
+  const int64_t k_cap = K / kSplitKMinKPerSplit;
+  if (want > k_cap)
+    want = k_cap;
+  if (want < 2)
+    return plan;
+
+  // Round the slice up to a whole k-tile so each one starts on the boundary
+  // the staging maps assume, then recompute the count so the last slice is not
+  // empty.
+  int64_t chunk = (K + want - 1) / want;
+  chunk = (chunk + kTileK - 1) / kTileK * kTileK;
+  const int64_t splits = (K + chunk - 1) / chunk;
+  if (splits < 2)
+    return plan;
+
+  plan.enabled = true;
+  plan.splits = static_cast<int>(splits);
+  plan.k_chunk = chunk;
+  return plan;
+}
+
+size_t qmatmul_splitk_workspace_bytes(int64_t M, int64_t N,
+                                      int64_t batch_count) {
+  return static_cast<size_t>(batch_count) * (M * N + M + N) * sizeof(int64_t);
 }
 
 //===----------------------------------------------------------------------===//
@@ -352,10 +631,6 @@ constexpr int kGemvTileK = 256;
 //
 // A tiled GEMM degenerates badly at M == 1 (63 of 64 rows in each block tile
 // are padding), and this shape dominates LLM decode, so it gets its own path.
-//
-// The accumulators are int64 rather than the tiled path's split int32 planes:
-// this kernel is bandwidth-bound and does not use dot4, so the wider adds are
-// free here and the byte-split machinery would only add work.
 //
 // There is no trans_a flag: at M == 1 both layouts of A are the same K-element
 // vector, so the index is unchanged. trans_b costs the coalescing of the B
@@ -413,7 +688,7 @@ __global__ __launch_bounds__(kGemvBlock) void qmatmul_gemv_kernel(
 }
 
 //===----------------------------------------------------------------------===//
-// Dispatch
+// Host launch and dtype dispatch
 //===----------------------------------------------------------------------===//
 
 // Bundled so the three dispatch levels below stay readable: A has 4 element
@@ -435,8 +710,12 @@ struct QMatMulArgs {
   int32_t a_zp;
   int32_t b_zp;
   int32_t y_zp;
+  void *workspace;
+  size_t workspace_bytes;
 };
 
+// Picks between the three paths: GEMV at M == 1, then split-K when the plan
+// asks for it and the caller supplied enough scratch, otherwise tiled.
 template <typename TA, typename TB, typename TY>
 int launch_qmatmul(const QMatMulArgs &g) {
   const int64_t k_zazb = static_cast<int64_t>(g.K) * g.a_zp * g.b_zp;
@@ -455,16 +734,67 @@ int launch_qmatmul(const QMatMulArgs &g) {
                        dim3(kGemvBlock), 0, g.stream, a_ptr, b_ptr, y_ptr, g.N,
                        g.K, g.b_batch_stride, g.m_scale, g.a_zp, g.b_zp, g.y_zp,
                        k_zazb, need_row_a, need_col_b, g.trans_b);
-  } else {
+    return 0;
+  }
+
+  const QMatMulSplitKPlan plan =
+      qmatmul_plan_splitk(g.M, g.N, g.K, g.batch_count);
+  const size_t ws_needed =
+      plan.enabled ? qmatmul_splitk_workspace_bytes(g.M, g.N, g.batch_count)
+                   : 0;
+  bool use_splitk =
+      plan.enabled && g.workspace && g.workspace_bytes >= ws_needed;
+
+  if (use_splitk &&
+      hipMemsetAsync(g.workspace, 0, ws_needed, g.stream) != hipSuccess) {
+    // Half-zeroed accumulators would corrupt the result, so drop to the
+    // single-pass kernel, which needs no scratch. Clear the sticky error too,
+    // or the fallback's own clean launch would still be reported as a failure.
+    (void)hipGetLastError();
+    use_splitk = false;
+  }
+
+  if (use_splitk) {
+    auto *acc_ws = static_cast<int64_t *>(g.workspace);
+    auto *row_a_ws = acc_ws + g.batch_count * g.M * g.N;
+    auto *col_b_ws = row_a_ws + g.batch_count * g.M;
+
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_qmatmul: split-K M=%lld N=%lld K=%lld "
+        "splits=%d k_chunk=%lld scratch=%zu B\n",
+        (long long)g.M, (long long)g.N, (long long)g.K, plan.splits,
+        (long long)plan.k_chunk, ws_needed);
+
+    // grid.z stays small: split-K only engages when the plain grid is under
+    // kSplitKTargetBlocksPerCU blocks/CU, which bounds batch_count by that
+    // same figure, so batch_count * splits cannot approach the 65535 limit.
     dim3 grid(static_cast<unsigned>((g.N + kTileN - 1) / kTileN),
               static_cast<unsigned>((g.M + kTileM - 1) / kTileM),
-              static_cast<unsigned>(g.batch_count));
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(qmatmul_tiled_kernel<TA, TB, TY>), grid,
-                       dim3(kTiledBlock), 0, g.stream, a_ptr, b_ptr, y_ptr, g.M,
-                       g.N, g.K, g.b_batch_stride, g.m_scale, g.a_zp, g.b_zp,
-                       g.y_zp, k_zazb, need_row_a, need_col_b, g.trans_a,
-                       g.trans_b);
+              static_cast<unsigned>(g.batch_count * plan.splits));
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(qmatmul_splitk_partial_kernel<TA, TB>),
+                       grid, dim3(kTiledBlock), 0, g.stream, a_ptr, b_ptr,
+                       acc_ws, row_a_ws, col_b_ws, g.M, g.N, g.K,
+                       g.b_batch_stride, plan.splits, plan.k_chunk, need_row_a,
+                       need_col_b, g.trans_a, g.trans_b);
+
+    const int64_t total = g.batch_count * g.M * g.N;
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(qmatmul_splitk_epilogue_kernel<TY>),
+        dim3(static_cast<unsigned>((total + kSplitKEpilogueBlock - 1) /
+                                   kSplitKEpilogueBlock)),
+        dim3(kSplitKEpilogueBlock), 0, g.stream, acc_ws, row_a_ws, col_b_ws,
+        y_ptr, g.M, g.N, total, g.m_scale, g.a_zp, g.b_zp, g.y_zp, k_zazb);
+    return 0;
   }
+
+  dim3 grid(static_cast<unsigned>((g.N + kTileN - 1) / kTileN),
+            static_cast<unsigned>((g.M + kTileM - 1) / kTileM),
+            static_cast<unsigned>(g.batch_count));
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(qmatmul_tiled_kernel<TA, TB, TY>), grid,
+                     dim3(kTiledBlock), 0, g.stream, a_ptr, b_ptr, y_ptr, g.M,
+                     g.N, g.K, g.b_batch_stride, g.m_scale, g.a_zp, g.b_zp,
+                     g.y_zp, k_zazb, need_row_a, need_col_b, g.trans_a,
+                     g.trans_b);
   return 0;
 }
 
@@ -520,11 +850,24 @@ int dispatch_a(int a_dtype, int b_dtype, int y_dtype, const QMatMulArgs &args) {
 
 } // namespace
 
+//===----------------------------------------------------------------------===//
+// C API
+//===----------------------------------------------------------------------===//
+
+extern "C" size_t hip_qmatmul_workspace_bytes(int64_t M, int64_t N, int64_t K,
+                                              int64_t batch_count) {
+  if (M <= 0 || N <= 0 || K <= 0 || batch_count <= 0)
+    return 0;
+  const QMatMulSplitKPlan plan = qmatmul_plan_splitk(M, N, K, batch_count);
+  return plan.enabled ? qmatmul_splitk_workspace_bytes(M, N, batch_count) : 0;
+}
+
 extern "C" int hip_qmatmul(void *stream, const void *A, const void *B, void *Y,
                            int64_t M, int64_t N, int64_t K, int64_t batch_count,
                            int64_t b_batch_stride, int trans_a, int trans_b,
                            int a_dtype, int b_dtype, int y_dtype, float M_scale,
-                           int64_t a_zp, int64_t b_zp, int64_t y_zp) {
+                           int64_t a_zp, int64_t b_zp, int64_t y_zp,
+                           void *workspace, size_t workspace_bytes) {
   if (!A || !B || !Y) {
     fprintf(stderr, "[custom_kernels] hip_qmatmul: null tensor argument\n");
     return -1;
@@ -554,7 +897,9 @@ extern "C" int hip_qmatmul(void *stream, const void *A, const void *B, void *Y,
                          M_scale,
                          static_cast<int32_t>(a_zp),
                          static_cast<int32_t>(b_zp),
-                         static_cast<int32_t>(y_zp)};
+                         static_cast<int32_t>(y_zp),
+                         workspace,
+                         workspace_bytes};
   const int rc = dispatch_a(a_dtype, b_dtype, y_dtype, args);
 
   if (rc != 0) {
