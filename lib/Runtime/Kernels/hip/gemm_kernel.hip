@@ -1249,13 +1249,29 @@ static int pickWmmaHeuristic(int M, int N, int K) {
   /* Power-of-two K >= 8192: the NT row stride (K*sizeof(T) bytes) is a multiple
    * of the 16 KB L1, so a wide 256x128 tile's tile-rows all map to the same few
    * L1 sets and evict each other -- throughput collapses (~24k vs ~37k at the
-   * non-aliasing K=4096). A 128x64 BK=64 tile halves the aliasing tile-rows on
-   * both operands, and BK=64 halves the K-step/barrier count, recovering ~+30%
-   * (to ~32k, at hipBLASLt parity). Non-power-of-two large K (14336/17408) does
-   * not alias, so the big 256x128 tile still wins and is left to the block below.
-   * Small M<=256 uses padrow (physical row padding) for this case instead. */
-  if (M > 256 && K >= 8192 && (K & (K - 1)) == 0)
-    return findWmmaCfg(128, 64, 2, 2, 8, 1, 64);
+   * non-aliasing K=4096). Two regimes, split by the M-tile count:
+   *
+   *   - Large M (>= 1024, i.e. >= 8 row-tiles): DRAM traffic is dominated by
+   *     A re-reads (A is read N/BN times). The narrow BN=64 tile therefore
+   *     re-streams A ~N/64 times and hits a bandwidth wall -- measured 8192^2
+   *     M=4096 at 128x64 = 24.3 ms (-41% vs hipBLAS) and M=2048 = 12.0 ms
+   *     (-45%). A wide 128x256 WT4x2 tile cuts A traffic 4x (N/256 reads) and
+   *     wins outright: M=4096 -> 13.7 ms (+4% over hipBLAS), M=2048 -> 7.1 ms
+   *     (parity), M=1024 -> 4.07 ms (was 4.46). padrow still fixes the L1
+   *     aliasing on this tile (bad_stride forces it for pow2 K).
+   *   - Small M (257..512): too few row-tiles to amortise the wide tile; the
+   *     128x64 BK=64 tile (half the aliasing tile-rows on both operands, half
+   *     the K-step/barrier count) is the workhorse and beats the wide tile
+   *     (M=512 8192^2: 2.17 vs 2.29 ms). Small M<=256 uses padrow below.
+   *
+   * Non-power-of-two large K (14336/17408) does not alias, so the big square
+   * tiles in the block below still win. */
+  if (K >= 8192 && (K & (K - 1)) == 0) {
+    if (M >= 1024)
+      return findWmmaCfg(128, 256, 4, 2, 8, 1, 32);
+    if (M > 256)
+      return findWmmaCfg(128, 64, 2, 2, 8, 1, 64);
+  }
   /* Tile size is chosen by M and grid fill (measured on gfx1151):
    *   - Large M reuses the B tile across many A-rows, so a 256-row tile
    *     (256x128 WT4x2) wins once the grid still covers the CUs -- measured
