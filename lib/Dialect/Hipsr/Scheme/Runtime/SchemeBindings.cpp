@@ -40,6 +40,11 @@ const size_t pattern_dsl_scm_size = sizeof(pattern_dsl_scm_data) - 1;
 
 namespace {
 static bool scheme_initialized = false;
+// Cached Scheme symbols for script loading
+static ptr cached_eval_sym = nullptr;
+static ptr cached_read_sym = nullptr;
+static ptr cached_open_string_input_port_sym = nullptr;
+static ptr cached_eof_object_p = nullptr;
 }
 
 namespace mlir {
@@ -83,11 +88,16 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
   Sregister_boot_file_bytes("scheme.boot", const_cast<void*>(static_cast<const void*>(scheme_boot_data)), scheme_boot_size);
   Sbuild_heap("hip-mlir-opt", nullptr);
 
-  // Get Scheme symbols we'll use
-  ptr eval_sym = Stop_level_value(Sstring_to_symbol("eval"));
-  ptr read_sym = Stop_level_value(Sstring_to_symbol("read"));
-  ptr open_string_input_port_sym = Stop_level_value(Sstring_to_symbol("open-string-input-port"));
-  ptr eof_object_p = Stop_level_value(Sstring_to_symbol("eof-object?"));
+  // Get and cache Scheme symbols we'll use
+  cached_eval_sym = Stop_level_value(Sstring_to_symbol("eval"));
+  cached_read_sym = Stop_level_value(Sstring_to_symbol("read"));
+  cached_open_string_input_port_sym = Stop_level_value(Sstring_to_symbol("open-string-input-port"));
+  cached_eof_object_p = Stop_level_value(Sstring_to_symbol("eof-object?"));
+
+  ptr eval_sym = cached_eval_sym;
+  ptr read_sym = cached_read_sym;
+  ptr open_string_input_port_sym = cached_open_string_input_port_sym;
+  ptr eof_object_p = cached_eof_object_p;
 
   // Set up library path to find rime libraries
   // Find lib/scheme directory relative to the library module path
@@ -236,19 +246,14 @@ bool loadSchemeScript(const char* scriptPath) {
   }
   LLVM_DEBUG(llvm::dbgs() << "Loading Scheme script: " << scriptPath << "\n");
 
-  // Evaluate the script content using open-string-input-port (same as initialization)
-  ptr eval_sym = Stop_level_value(Sstring_to_symbol("eval"));
-  ptr read_sym = Stop_level_value(Sstring_to_symbol("read"));
-  ptr open_string_input_port_sym = Stop_level_value(Sstring_to_symbol("open-string-input-port"));
-  ptr eof_object_p = Stop_level_value(Sstring_to_symbol("eof-object?"));
-
-  ptr port = Scall1(open_string_input_port_sym, Sstring(scm_code.c_str()));
+  // Evaluate the script content using cached symbols from initialization
+  ptr port = Scall1(cached_open_string_input_port_sym, Sstring(scm_code.c_str()));
 
   while (true) {
-    ptr expr = Scall1(read_sym, port);
-    if (Scall1(eof_object_p, expr) != Sfalse)
+    ptr expr = Scall1(cached_read_sym, port);
+    if (Scall1(cached_eof_object_p, expr) != Sfalse)
       break;
-    Scall1(eval_sym, expr);
+    Scall1(cached_eval_sym, expr);
   }
 
   if (current_log_level <= SchemeLogLevel::Debug) {
