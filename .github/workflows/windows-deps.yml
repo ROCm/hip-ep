@@ -114,9 +114,18 @@ jobs:
         with:
           python-version: "3.14"
 
+      # Pin the SDK rather than taking the image default (10.0.26100.0).
+      # rocmlirTriton is compiled with TheRock's clang-cl, and 26100's
+      # corecrt_wstring.h implements wmemcmp with SSE2 intrinsics. clang-cl
+      # resolves _mm_loadu_si128 / _mm_cmpeq_epi16 / _mm_movemask_epi8 against
+      # MSVC's headers instead of its own, so they survive as extern calls and
+      # lld-link fails with "undefined symbol" while linking llvm-min-tblgen.
+      # 22621 has no such wmemcmp and is what the flow is validated against.
       - name: Setup MSVC environment
         if: steps.cache-rock.outputs.cache-hit != 'true'
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          sdk: "10.0.22621.0"
 
       - name: Prepare sccache local cache
         if: steps.cache-rock.outputs.cache-hit != 'true'
