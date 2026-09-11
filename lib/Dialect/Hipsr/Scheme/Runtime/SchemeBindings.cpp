@@ -201,44 +201,26 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
     llvm::errs() << "[debug] read_sym = " << read_sym << "\n";
   }
 
-  // Load the Scheme bindings library
-  fprintf(stderr, "[INIT] Loading SchemeBindings.scm\n");
+  // Try using load instead of reading expressions one by one
+  fprintf(stderr, "[INIT] Attempting to use Scheme load function\n");
   fflush(stderr);
+
+  // Write SchemeBindings.scm to a temp file
   std::string scm_code(reinterpret_cast<const char*>(scheme_bindings_scm_data),
                        scheme_bindings_scm_size);
-
-  if (logLevel <= SchemeLogLevel::Debug) {
-    llvm::errs() << "[debug] Loading SchemeBindings.scm (" << scheme_bindings_scm_size << " bytes)\n";
-    llvm::errs() << "[debug] First 50 chars: " << scm_code.substr(0, 50) << "\n";
-  }
-
-  fprintf(stderr, "[INIT] Creating string input port\n");
-  fflush(stderr);
-  ptr port = Scall1(open_string_input_port_sym, Sstring(scm_code.c_str()));
-  fprintf(stderr, "[INIT] Port created\n");
+  const char* tmpfile = "/tmp/scheme_bindings_temp.scm";
+  std::ofstream out(tmpfile);
+  out.write(scm_code.c_str(), scm_code.size());
+  out.close();
+  fprintf(stderr, "[INIT] Wrote SchemeBindings.scm to %s\n", tmpfile);
   fflush(stderr);
 
-  if (logLevel <= SchemeLogLevel::Debug) {
-    llvm::errs() << "[debug] Created port = " << port << "\n";
-  }
-
-  int expr_count = 0;
-  while (true) {
-    fprintf(stderr, "[INIT] Reading expression %d, port=%p, read_sym=%p\n", expr_count, port, read_sym);
-    fflush(stderr);
-    ptr expr = Scall1(read_sym, port);
-    fprintf(stderr, "[INIT] Read expression %d, expr=%p\n", expr_count, expr);
-    fflush(stderr);
-    if (Scall1(eof_object_p, expr) != Sfalse)
-      break;
-    fprintf(stderr, "[INIT] Evaluating expression %d\n", expr_count);
-    fflush(stderr);
-    Scall1(eval_sym, expr);
-    fprintf(stderr, "[INIT] Evaluated expression %d\n", expr_count);
-    fflush(stderr);
-    expr_count++;
-  }
-  fprintf(stderr, "[INIT] Loaded %d expressions from SchemeBindings.scm\n", expr_count);
+  // Use Scheme's load function
+  ptr load_sym = Stop_level_value(Sstring_to_symbol("load"));
+  fprintf(stderr, "[INIT] Calling load on %s\n", tmpfile);
+  fflush(stderr);
+  Scall1(load_sym, Sstring(tmpfile));
+  fprintf(stderr, "[INIT] Successfully loaded SchemeBindings.scm via load\n");
   fflush(stderr);
 
   // Load PatternDSL.scm (embedded)
