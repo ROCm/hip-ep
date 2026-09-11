@@ -104,6 +104,24 @@
   (foreign-procedure "mlir_create_cast_op" (unsigned-64 unsigned-64 unsigned-64 unsigned-64) unsigned-64))
 
 ;;===----------------------------------------------------------------------===;;
+;; Phase 4: Pattern Rewriter FFI
+;;===----------------------------------------------------------------------===;;
+
+;; Replace operation with a value
+;; TODO: Requires PatternRewriter context integration
+(define mlir-replace-op
+  (foreign-procedure "mlir_replace_op" (unsigned-64 unsigned-64) int))
+
+;; Erase operation
+;; TODO: Requires PatternRewriter context integration
+(define mlir-erase-op
+  (foreign-procedure "mlir_erase_op" (unsigned-64) int))
+
+;; Notify match failure
+(define mlir-notify-match-failure
+  (foreign-procedure "mlir_notify_match_failure" (unsigned-64 string) void))
+
+;;===----------------------------------------------------------------------===;;
 ;; High-level Scheme API
 ;;===----------------------------------------------------------------------===;;
 

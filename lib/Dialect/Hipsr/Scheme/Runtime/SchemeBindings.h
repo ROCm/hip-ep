@@ -127,6 +127,24 @@ SchemeValue mlir_create_placeholder_op(SchemeValue ctx_value, SchemeValue input_
 SchemeValue mlir_create_cast_op(SchemeValue ctx_value, SchemeValue input_value,
                                 SchemeValue output_value, SchemeValue result_type);
 
+//===----------------------------------------------------------------------===//
+// Phase 4: Pattern Rewriter FFI
+//===----------------------------------------------------------------------===//
+
+// Replace operation with a value
+// Args: old_op (Operation), new_value (Value)
+// Returns: success (1) or failure (0)
+int mlir_replace_op(SchemeValue old_op, SchemeValue new_value);
+
+// Erase operation
+// Args: op (Operation)
+// Returns: success (1) or failure (0)
+int mlir_erase_op(SchemeValue op);
+
+// Notify match failure
+// Args: op (Operation), reason (string)
+void mlir_notify_match_failure(SchemeValue op, const char* reason);
+
 } // namespace hipsr
 } // namespace mlir
 

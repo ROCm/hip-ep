@@ -442,6 +442,24 @@ SchemeValue mlir_create_cast_op(SchemeValue ctx_value, SchemeValue input_value,
   return nullptr;
 }
 
+//===----------------------------------------------------------------------===//
+// Phase 4: Pattern Rewriter FFI
+//===----------------------------------------------------------------------===//
+
+int mlir_replace_op(SchemeValue old_op, SchemeValue new_value) {
+  mlir_log_error("mlir_replace_op: Not yet implemented - requires PatternRewriter context");
+  return 0;
+}
+
+int mlir_erase_op(SchemeValue op) {
+  mlir_log_error("mlir_erase_op: Not yet implemented - requires PatternRewriter context");
+  return 0;
+}
+
+void mlir_notify_match_failure(SchemeValue op, const char* reason) {
+  mlir_log_debug((std::string("Pattern match failure: ") + reason).c_str());
+}
+
 } // extern "C"
 
 // Register all MLIR foreign functions in Scheme
@@ -480,7 +498,12 @@ void registerMlirForeignFunctions() {
   Sregister_symbol("mlir_create_placeholder_op", (void*)mlir_create_placeholder_op);
   Sregister_symbol("mlir_create_cast_op", (void*)mlir_create_cast_op);
 
-  LLVM_DEBUG(llvm::dbgs() << "Registered " << 24 << " MLIR FFI functions\n");
+  // Phase 4: Pattern Rewriter FFI - TODO: needs PatternRewriter integration
+  Sregister_symbol("mlir_replace_op", (void*)mlir_replace_op);
+  Sregister_symbol("mlir_erase_op", (void*)mlir_erase_op);
+  Sregister_symbol("mlir_notify_match_failure", (void*)mlir_notify_match_failure);
+
+  LLVM_DEBUG(llvm::dbgs() << "Registered " << 27 << " MLIR FFI functions\n");
 }
 
 } // namespace hipsr
