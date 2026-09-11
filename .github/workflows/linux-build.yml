@@ -30,11 +30,8 @@ env:
   # ORT is still built from source either way). Part of the ort-install cache
   # key. Remove a PR once its fix lands in the pinned ONNX Runtime release.
   ONNXRUNTIME_PR_PATCHES: ""
-  OGA_VERSION: "0.14.0"
-  # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
-  # pull/<n>.patch and `git apply` on top of v<OGA_VERSION>. Part of the OGA
-  # cache key. Remove a PR once it lands in the pinned OGA release.
-  OGA_PR_PATCHES: "2194"
+  OGA_VERSION: "0.15.2"
+  OGA_PR_PATCHES: "2165"
   # The GPU arch the artifact targets. CI runners have no GPU, so it is passed
   # explicitly (build.py auto-detects from /sys on a real GPU host).
   HIP_ARCHITECTURES: gfx1151
@@ -298,7 +295,7 @@ jobs:
         uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/oga-artifacts
-          key: linux-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-am-whl-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
+          key: linux-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
 
       # Checkout + build are skipped on an OGA cache hit (step-level gate); the
       # install-copy below always runs so the
@@ -314,13 +311,6 @@ jobs:
           fetch-depth: 1
           show-progress: false
 
-      # Fetch and apply microsoft/onnxruntime-genai PR patches listed in
-      # OGA_PR_PATCHES (env). pull/<n>.patch is a multi-commit mbox; `git am`
-      # replays each commit in order, so a PR that adds -> modifies -> renames
-      # the same path within its own series (e.g. #2194: morphizen_ep/* ->
-      # amdgpu/*) applies cleanly. `git apply` pre-checks every hunk against the
-      # base tree at once and self-conflicts on such a series. The OGA cache key
-      # includes the PR list, so editing it forces a rebuild.
       - name: Apply OGA PR patches
         if: steps.cache-oga.outputs.cache-hit != 'true'
         working-directory: onnxruntime-genai
@@ -333,10 +323,6 @@ jobs:
             echo "OGA_PR_PATCHES is empty; nothing to apply"
             exit 0
           fi
-          # pull/<n>.patch is a format-patch series; apply with `git am` so that
-          # intra-series file renames (morphizen_ep -> amdgpu) replay against the
-          # correct intermediate tree. `git apply` flattens the series and chokes
-          # on the rename whose pre-image only exists after an earlier commit.
           # git am needs a committer identity on a bare runner.
           git config user.email "ci@onnx-hipdnn-ep.local"
           git config user.name "onnx-hipdnn-ep CI"
@@ -369,11 +355,10 @@ jobs:
           fi
           cp -a "$ORT_PREFIX"/lib/libonnxruntime.so* "$ORT_HOME/lib/" 2>/dev/null || true
           cp -a "$ORT_PREFIX"/lib/libonnxruntime_providers_shared.so* "$ORT_HOME/lib/" 2>/dev/null || true
-          # Build the OGA python wheel too: it pairs with the ORT python wheel
-          # (built above with --build_wheel) so the pair is pip-installable.
           python3 onnxruntime-genai/build.py \
             --config Release \
             --cmake_generator Ninja \
+            --no_telemetry \
             --ort_home "$ORT_HOME" \
             --skip_tests --skip_examples \
             --parallel \
