@@ -958,7 +958,11 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe",
       fc1_experts_bias, fc2_experts_bias: bias vectors (optional)
       fc3_*: unfused SwiGLU second GEMM weights/scales/bias (optional)
       fc1/fc2/fc3_zero_points: per-block zero points (optional)
-      router_weights: alternative aggregation weights (optional, ONNX v1.25+, takes precedence over router_probs)
+      router_weights: aggregation weights (optional, ONNX v1.25+). When present,
+        router_probs drives top-k selection only, and the mixing weights are
+        gathered from router_weights at the selected expert indices instead of
+        being derived from a softmax over router_probs. Same shape as
+        router_probs.
 
     Uses destination-passing style: output buffer is provided as argument.
 
@@ -992,7 +996,7 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe",
     Optional<Hip_TensorOrMemRef>:$fc1_zero_points,        // fc1 dequant zero points
     Optional<Hip_TensorOrMemRef>:$fc2_zero_points,        // fc2 dequant zero points
     Optional<Hip_TensorOrMemRef>:$fc3_zero_points,        // fc3 dequant zero points
-    Optional<Hip_TensorOrMemRef>:$router_weights,         // [num_tokens, num_experts] alternative routing weights (ONNX v1.25+)
+    Optional<Hip_TensorOrMemRef>:$router_weights,         // [num_tokens, num_experts] aggregation weights gathered at the selected experts (ONNX v1.25+)
     Hip_TensorOrMemRef:$output,                 // DPS init [batch, seq, hidden]
     I64Attr:$expert_weight_bits,
     I64Attr:$k,
@@ -1027,6 +1031,8 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe",
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  let hasVerifier = 1;
 }
 
 def Hip_QMoEAmdOp : Hip_DpsOp<"qmoe_amd",

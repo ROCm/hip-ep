@@ -14,6 +14,7 @@
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/SymbolTable.h"
+#include "mlir/IR/TypeUtilities.h"
 
 #include "hip/Dialect/IR/HipShapeUtils.h"
 
@@ -1547,6 +1548,46 @@ void QMoEOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult QMoEOp::verify() {
+  // router_weights is indexed with the same [token, expert] coordinates as
+  // router_probs (selection reads one, aggregation gathers from the other), so
+  // a mismatch would silently read out of bounds at runtime. num_tokens is
+  // dynamic in real graphs, so only statically-known dims are compared.
+  Value routerWeights = getRouterWeights();
+  if (!routerWeights)
+    return success();
+
+  ArrayRef<int64_t> probsShape = getShapeOf(getRouterProbs());
+  ArrayRef<int64_t> weightsShape = getShapeOf(routerWeights);
+  if (probsShape.empty() || weightsShape.empty())
+    return success();
+
+  if (probsShape.size() != weightsShape.size())
+    return emitOpError("router_weights rank (")
+           << weightsShape.size() << ") must match router_probs rank ("
+           << probsShape.size() << ")";
+
+  for (int64_t dim : llvm::seq<int64_t>(0, probsShape.size())) {
+    int64_t probsDim = probsShape[dim];
+    int64_t weightsDim = weightsShape[dim];
+    if (ShapedType::isDynamic(probsDim) || ShapedType::isDynamic(weightsDim))
+      continue;
+    if (probsDim != weightsDim)
+      return emitOpError("router_weights dim ")
+             << dim << " (" << weightsDim << ") must match router_probs dim "
+             << dim << " (" << probsDim << ")";
+  }
+
+  Type weightsElemTy = getElementTypeOrSelf(routerWeights);
+  Type probsElemTy = getElementTypeOrSelf(getRouterProbs());
+  if (weightsElemTy != probsElemTy)
+    return emitOpError("router_weights element type (")
+           << weightsElemTy << ") must match router_probs element type ("
+           << probsElemTy << ")";
+
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
