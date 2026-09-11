@@ -96,13 +96,25 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
   // Initialize Scheme system (must be called first)
   Sscheme_init(nullptr);
 
+  if (logLevel <= SchemeLogLevel::Debug) {
+    llvm::errs() << "[debug] Sscheme_init completed\n";
+  }
+
   // Register embedded boot files
   Sregister_boot_file_bytes("petite.boot", const_cast<void*>(static_cast<const void*>(petite_boot_data)), petite_boot_size);
   Sregister_boot_file_bytes("scheme.boot", const_cast<void*>(static_cast<const void*>(scheme_boot_data)), scheme_boot_size);
 
+  if (logLevel <= SchemeLogLevel::Debug) {
+    llvm::errs() << "[debug] Boot files registered, calling Sbuild_heap\n";
+  }
+
   // Build heap and call custom_init (which registers foreign functions)
   // custom_init is called BEFORE boot files are loaded
   Sbuild_heap(nullptr, custom_init);
+
+  if (logLevel <= SchemeLogLevel::Debug) {
+    llvm::errs() << "[debug] Sbuild_heap completed\n";
+  }
 
   if (logLevel <= SchemeLogLevel::Debug) {
     llvm::errs() << "[debug] Heap built, caching Scheme symbols\n";
