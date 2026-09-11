@@ -192,11 +192,6 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
   // NOTE: Foreign functions are registered in custom_init(), which was called
   // by Sbuild_heap before loading boot files
 
-  fprintf(stderr, "[INIT] SKIPPING SchemeBindings.scm and PatternDSL.scm for testing\n");
-  fflush(stderr);
-  scheme_initialized = true;
-  return true;
-
   fprintf(stderr, "[INIT] About to cache Scheme symbols\n");
   fflush(stderr);
 
@@ -229,10 +224,10 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
 
   int expr_count = 0;
   while (true) {
-    fprintf(stderr, "[INIT] Reading expression %d\n", expr_count);
+    fprintf(stderr, "[INIT] Reading expression %d, port=%p, read_sym=%p\n", expr_count, port, read_sym);
     fflush(stderr);
     ptr expr = Scall1(read_sym, port);
-    fprintf(stderr, "[INIT] Read expression %d\n", expr_count);
+    fprintf(stderr, "[INIT] Read expression %d, expr=%p\n", expr_count, expr);
     fflush(stderr);
     if (Scall1(eof_object_p, expr) != Sfalse)
       break;
