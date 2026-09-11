@@ -60,6 +60,30 @@ bool loadSchemeScript(const char* scriptPath);
 // Used to invoke Scheme-defined pass entry points
 void callSchemePassFunction(const char* functionName, mlir::Operation* op);
 
+//===----------------------------------------------------------------------===//
+// Phase 1: Type System FFI
+//===----------------------------------------------------------------------===//
+
+// Check if a Type is a RankedTensorType
+// Returns: boolean (1 = true, 0 = false)
+int mlir_type_is_ranked_tensor(SchemeValue type_ptr);
+
+// Get element type of a tensor type
+// Returns: Type* as uptr
+SchemeValue mlir_type_get_element_type(SchemeValue type_ptr);
+
+// Get shape of a ranked tensor type
+// Returns: list of dimension sizes (int64_t*)
+SchemeValue mlir_type_get_shape(SchemeValue type_ptr);
+
+// Get rank of a ranked tensor type
+// Returns: int
+int mlir_type_get_rank(SchemeValue type_ptr);
+
+// Get type from a Value
+// Returns: Type* as uptr
+SchemeValue mlir_value_get_type(SchemeValue value_ptr);
+
 } // namespace hipsr
 } // namespace mlir
 
