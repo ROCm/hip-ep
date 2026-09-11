@@ -167,6 +167,123 @@ Value createSplatFloat(ConversionPatternRewriter &rewriter, Location loc,
       DenseElementsAttr::get(type, rewriter.getFloatAttr(elemType, ap)));
 }
 
+// Swap the two dimensions of a rank-2 tensor.
+static Value transpose2D(Value input, ConversionPatternRewriter &rewriter,
+                         Location loc) {
+  auto type = cast<RankedTensorType>(input.getType());
+  ArrayRef<int64_t> shape = type.getShape();
+  return tosa::TransposeOp::create(rewriter, loc,
+                                   type.clone({shape[1], shape[0]}), input,
+                                   rewriter.getDenseI32ArrayAttr({1, 0}));
+}
+
+// hip.gemm is ONNX Gemm: Y = alpha * A' * B' + beta * C, where A and B are
+// optionally transposed and C broadcasts to [M, N]. TOSA has no fused
+// equivalent, so this spells the whole thing out. MIGraphX's ONNX parser
+// desugars Gemm the same way -- into a dot plus a broadcast add -- and rocMLIR
+// fuses the resulting chain back into one kernel, so the expansion costs
+// nothing downstream.
+struct GemmConverter final : public OpConversionPattern<hip::GemmOp> {
+  using OpConversionPattern<hip::GemmOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(hip::GemmOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    auto aType = dyn_cast<RankedTensorType>(adaptor.getInputA().getType());
+    auto bType = dyn_cast<RankedTensorType>(adaptor.getInputB().getType());
+    if (!resultType || !resultType.hasStaticShape() || !aType ||
+        !aType.hasStaticShape() || !bType || !bType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected static ranked tensors");
+    if (aType.getRank() != 2 || bType.getRank() != 2 ||
+        resultType.getRank() != 2)
+      return rewriter.notifyMatchFailure(op, "ONNX Gemm is 2-D");
+
+    Type elementType = resultType.getElementType();
+    if (aType.getElementType() != elementType ||
+        bType.getElementType() != elementType)
+      return rewriter.notifyMatchFailure(
+          op, "A, B, and result element types must match");
+    // alpha and beta are f32 attributes folded in as elementwise multiplies in
+    // the result type, so an integer gemm would silently round them away.
+    if (!isa<FloatType>(elementType))
+      return rewriter.notifyMatchFailure(op, "only float gemm is supported");
+
+    Location loc = op.getLoc();
+    bool transA = op.getTransA() != 0;
+    bool transB = op.getTransB() != 0;
+
+    // Once the optional transposes are applied the operands are [M,K] x [K,N].
+    int64_t m = aType.getDimSize(transA ? 1 : 0);
+    int64_t ka = aType.getDimSize(transA ? 0 : 1);
+    int64_t kb = bType.getDimSize(transB ? 1 : 0);
+    int64_t n = bType.getDimSize(transB ? 0 : 1);
+    if (ka != kb)
+      return rewriter.notifyMatchFailure(op, "A and B disagree on K");
+    if (resultType.getDimSize(0) != m || resultType.getDimSize(1) != n)
+      return rewriter.notifyMatchFailure(
+          op, "result shape disagrees with A and B");
+
+    Value a = adaptor.getInputA();
+    if (transA)
+      a = transpose2D(a, rewriter, loc);
+    Value b = adaptor.getInputB();
+    if (transB)
+      b = transpose2D(b, rewriter, loc);
+
+    // tosa.matmul is batched, so carry a batch of one through and drop it.
+    a = reshapeTo(a, {1, m, ka}, rewriter);
+    b = reshapeTo(b, {1, kb, n}, rewriter);
+    Value matmul =
+        tosa::MatMulOp::create(rewriter, loc, resultType.clone({1, m, n}), a, b)
+            .getResult();
+    Value result = reshapeTo(matmul, {m, n}, rewriter);
+
+    if (op.getAlpha().convertToFloat() != 1.0f)
+      result = tosa::MulOp::create(
+          rewriter, loc, resultType, result,
+          createSplatFloat(rewriter, loc, resultType,
+                           op.getAlpha().convertToFloat()),
+          createZeroMulShift(rewriter, loc));
+
+    if (Value c = adaptor.getInputC()) {
+      auto cType = dyn_cast<RankedTensorType>(c.getType());
+      if (!cType || !cType.hasStaticShape() ||
+          cType.getElementType() != elementType)
+        return rewriter.notifyMatchFailure(op, "unsupported C tensor");
+      ArrayRef<int64_t> cShape = cType.getShape();
+      if (cType.getRank() > 2)
+        return rewriter.notifyMatchFailure(op, "C rank exceeds the result");
+      // ONNX broadcasts C to [M, N] unidirectionally. TOSA expands only size-1
+      // dimensions and needs matching rank, so left-pad C's shape with ones.
+      SmallVector<int64_t> padded(2, 1);
+      for (auto [idx, dim] : llvm::enumerate(cShape))
+        padded[2 - cShape.size() + idx] = dim;
+      if ((padded[0] != 1 && padded[0] != m) ||
+          (padded[1] != 1 && padded[1] != n))
+        return rewriter.notifyMatchFailure(op, "C is not broadcastable to Y");
+      if (cShape != ArrayRef<int64_t>(padded))
+        c = reshapeTo(c, padded, rewriter);
+
+      if (op.getBeta().convertToFloat() != 1.0f) {
+        auto betaType = cType.clone(padded);
+        c = tosa::MulOp::create(
+            rewriter, loc, betaType, c,
+            createSplatFloat(rewriter, loc, betaType,
+                             op.getBeta().convertToFloat()),
+            createZeroMulShift(rewriter, loc));
+      }
+      result = tosa::AddOp::create(rewriter, loc, resultType, result, c);
+    }
+
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
 // Covers the hip ops whose operands are (ctx, lhs, rhs, output) and whose TOSA
 // counterpart preserves the element type. Comparisons (hip.equal, hip.less) do
 // not belong here: they produce i1, which isTosaCompatibleOperand's
@@ -1110,11 +1227,11 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     ConversionTarget conversion(*ctx);
     conversion.addLegalDialect<tosa::TosaDialect, func::FuncDialect>();
     conversion
-        .addIllegalOp<MatmulOp, TransposeOp, AddOp, SubOp, MinOp, MaxOp, MulOp,
-                      DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp,
-                      CosOp, TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp,
-                      WhereOp, LeakyReluOp, MiopenSoftmaxOp, ReduceSumOp,
-                      ReduceMeanOp, CastOp, QuantizeLinearOp,
+        .addIllegalOp<MatmulOp, GemmOp, TransposeOp, AddOp, SubOp, MinOp, MaxOp,
+                      MulOp, DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp,
+                      SinOp, CosOp, TanhOp, ErfOp, SigmoidOp, ReciprocalOp,
+                      SqrtOp, WhereOp, LeakyReluOp, MiopenSoftmaxOp,
+                      ReduceSumOp, ReduceMeanOp, CastOp, QuantizeLinearOp,
                       DequantizeLinearOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
@@ -1134,7 +1251,7 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
 
     RewritePatternSet patterns(ctx);
     patterns.add<
-        MatMulConverter, TransposeConverter, ExpandConverter,
+        MatMulConverter, GemmConverter, TransposeConverter, ExpandConverter,
         ReshapeConverter<tensor::CollapseShapeOp>,
         ReshapeConverter<tensor::ExpandShapeOp>, ExtractSliceConverter,
         DivConverter, BinaryConverter<AddOp, tosa::AddOp>,
