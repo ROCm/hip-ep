@@ -184,28 +184,27 @@ func.func @not_a_kernel(%x: tensor<4x6xf32>) -> tensor<2x6xf32> {
 
 // CHECK-LABEL: func.func @rocMlir0
 // CHECK: ub.poison : !hip.context
-// CHECK: tensor.empty() : tensor<1x4x6x6xf32>
-// CHECK: hip.conv
-// CHECK: tosa.transpose %{{.*}} {perms = array<i32: 0, 2, 3, 1>} : (tensor<1x4x6x6xf32>) -> tensor<1x6x6x4xf32>
+// CHECK: tensor.empty() : tensor<1x3x6x6xf32>
+// CHECK: hip.pool
+// CHECK: tosa.transpose %{{.*}} {perms = array<i32: 0, 2, 3, 1>} : (tensor<1x3x6x6xf32>) -> tensor<1x6x6x3xf32>
 // CHECK: tosa.reshape
-func.func @rocMlir0(%in: tensor<1x3x8x8xf32>, %w: tensor<4x3x3x3xf32>,
-                    %b: tensor<4xf32>) -> tensor<1x144xf32>
+func.func @rocMlir0(%in: tensor<1x3x8x8xf32>) -> tensor<1x108xf32>
     attributes {rock.arch = "gfx1151", rock.kernel} {
   %ctx = ub.poison : !hip.context
-  %ci = tensor.empty() : tensor<1x4x6x6xf32>
-  %conv = hip.conv(%ctx) ins(%in, %w, %b : tensor<1x3x8x8xf32>,
-                                           tensor<4x3x3x3xf32>, tensor<4xf32>)
-                         outs(%ci : tensor<1x4x6x6xf32>)
-                         {dilations = [1, 1], group = 1 : i64,
+  %pi = tensor.empty() : tensor<1x3x6x6xf32>
+  %pool = hip.pool(%ctx) ins(%in : tensor<1x3x8x8xf32>)
+                         outs(%pi : tensor<1x3x6x6xf32>)
+                         {ceil_mode = 0 : i64, dilations = [1, 1],
                           kernel_shape = [3, 3], pads = [0, 0, 0, 0],
-                          strides = [1, 1]} : tensor<1x4x6x6xf32>
-  %ti = tensor.empty() : tensor<1x6x6x4xf32>
-  %tr = hip.transpose(%ctx) ins(%conv : tensor<1x4x6x6xf32>)
-                            outs(%ti : tensor<1x6x6x4xf32>)
-                            {perm = [0, 2, 3, 1]} : tensor<1x6x6x4xf32>
+                          pool_mode = 1 : i64, storage_order = 0 : i64,
+                          strides = [1, 1]} : tensor<1x3x6x6xf32>
+  %ti = tensor.empty() : tensor<1x6x6x3xf32>
+  %tr = hip.transpose(%ctx) ins(%pool : tensor<1x3x6x6xf32>)
+                            outs(%ti : tensor<1x6x6x3xf32>)
+                            {perm = [0, 2, 3, 1]} : tensor<1x6x6x3xf32>
   %flat = tensor.collapse_shape %tr [[0], [1, 2, 3]]
-      : tensor<1x6x6x4xf32> into tensor<1x144xf32>
-  return %flat : tensor<1x144xf32>
+      : tensor<1x6x6x3xf32> into tensor<1x108xf32>
+  return %flat : tensor<1x108xf32>
 }
 
 // -----

@@ -6,6 +6,8 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
+#include <llvm/ADT/Sequence.h>
+#include <llvm/ADT/SmallVector.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/Tensor/IR/Tensor.h>
 #include <mlir/Dialect/Tosa/IR/TosaOps.h>
@@ -26,6 +28,7 @@
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/ADT/StringRef.h>
 
+#include <algorithm>
 #include <type_traits>
 
 namespace mlir::hip {
@@ -79,6 +82,191 @@ static Value reshapeTo(Value input, ArrayRef<int64_t> shape,
   return tosa::ReshapeOp::create(rewriter, rewriter.getUnknownLoc(),
                                  type.clone(shape), input, shapeConst);
 }
+
+static Value transposeTo(Value input, ArrayRef<int64_t> shape,
+                         ArrayRef<int32_t> permutation,
+                         ConversionPatternRewriter &rewriter, Location loc) {
+  auto type = cast<RankedTensorType>(input.getType());
+  return tosa::TransposeOp::create(rewriter, loc, type.clone(shape), input,
+                                   rewriter.getDenseI32ArrayAttr(permutation));
+}
+
+// Crop `input` to `shape`, anchored at the origin, via tosa.slice.
+static Value sliceTo(Value input, ArrayRef<int64_t> shape,
+                     ConversionPatternRewriter &rewriter, Location loc) {
+  auto type = cast<RankedTensorType>(input.getType());
+  auto shapeType = tosa::shapeType::get(rewriter.getContext(), shape.size());
+  auto start = tosa::ConstShapeOp::create(
+      rewriter, loc, shapeType,
+      rewriter.getIndexTensorAttr(SmallVector<int64_t>(shape.size(), 0)));
+  auto size = tosa::ConstShapeOp::create(rewriter, loc, shapeType,
+                                         rewriter.getIndexTensorAttr(shape));
+  return tosa::SliceOp::create(rewriter, loc, type.clone(shape), input, start,
+                               size);
+}
+
+static SmallVector<int64_t> getI64Values(ArrayAttr attrs) {
+  SmallVector<int64_t> values;
+  values.reserve(attrs.size());
+  for (Attribute attr : attrs)
+    values.push_back(cast<IntegerAttr>(attr).getInt());
+  return values;
+}
+
+// hip.conv uses ONNX's NCHW input/output and OIHW weight layouts, while
+// tosa.conv2d is defined on NHWC and OHWI. Keep the TOSA op semantically valid
+// by transposing to its canonical layouts and transpose the result back:
+//
+//   input  [N,C,H,W] -> [N,H,W,C]
+//   weight [K,C,Y,X] -> [K,Y,X,C]
+//   output [N,H,W,K] -> [N,K,H,W]
+//
+// rocMLIR folds these transposes into the Rock convolution's layout metadata,
+// so they describe the original storage rather than becoming data movement.
+struct ConvConverter final : public OpConversionPattern<hip::ConvOp> {
+  using OpConversionPattern<hip::ConvOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(hip::ConvOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    auto inputType = dyn_cast<RankedTensorType>(adaptor.getInput().getType());
+    auto weightType =
+        dyn_cast<RankedTensorType>(adaptor.getWeights().getType());
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!inputType || !weightType || !resultType ||
+        !inputType.hasStaticShape() || !weightType.hasStaticShape() ||
+        !resultType.hasStaticShape())
+      return rewriter.notifyMatchFailure(
+          op, "expected static ranked input, weight, and result tensors");
+    if (inputType.getRank() != 4 || weightType.getRank() != 4 ||
+        resultType.getRank() != 4)
+      return rewriter.notifyMatchFailure(op, "expected 2D convolution");
+
+    Type elementType = resultType.getElementType();
+    if (inputType.getElementType() != elementType ||
+        weightType.getElementType() != elementType)
+      return rewriter.notifyMatchFailure(
+          op, "input, weight, and result element types must match");
+    Type accType;
+    if (elementType.isF16() || elementType.isBF16() || elementType.isF32())
+      accType = rewriter.getF32Type();
+    else
+      return rewriter.notifyMatchFailure(
+          op, "only f16, bf16, and f32 convolution are supported");
+
+    ArrayRef<int64_t> inputShape = inputType.getShape();
+    ArrayRef<int64_t> weightShape = weightType.getShape();
+    ArrayRef<int64_t> resultShape = resultType.getShape();
+    // tosa.conv2d has no grouped form (weight IC must equal input C). Depthwise
+    // is a separate op and is not handled here.
+    if (op.getGroup() != 1)
+      return rewriter.notifyMatchFailure(
+          op, "grouped convolution has no TOSA conv2d spelling");
+    if (inputShape[0] != resultShape[0] || weightShape[1] != inputShape[1] ||
+        weightShape[0] != resultShape[1])
+      return rewriter.notifyMatchFailure(op, "incompatible batch or channels");
+
+    SmallVector<int64_t> kernelShape = getI64Values(op.getKernelShape());
+    if (kernelShape.size() != 2 || kernelShape[0] != weightShape[2] ||
+        kernelShape[1] != weightShape[3])
+      return rewriter.notifyMatchFailure(
+          op, "kernel_shape disagrees with the weight tensor");
+
+    // TOSA CONV2D bias is T<out_t>, not acc_t. The MLIR verifier requires a
+    // float bias to match the result element type, even when acc_type is f32
+    // for an f16/bf16 convolution. Length 1 is a legal TOSA broadcast (BC==1).
+    Value bias = adaptor.getBias();
+    if (bias) {
+      auto biasType = dyn_cast<RankedTensorType>(bias.getType());
+      if (!biasType || !biasType.hasStaticShape() || biasType.getRank() != 1 ||
+          biasType.getElementType() != elementType ||
+          (biasType.getDimSize(0) != resultShape[1] &&
+           biasType.getDimSize(0) != 1))
+        return rewriter.notifyMatchFailure(op, "incompatible bias tensor");
+    } else {
+      auto biasType = RankedTensorType::get({resultShape[1]}, elementType);
+      bias = tosa::ConstOp::create(
+          rewriter, op.getLoc(), biasType,
+          DenseElementsAttr::get(biasType, rewriter.getZeroAttr(elementType)));
+    }
+
+    SmallVector<int64_t> strides = getI64Values(op.getStrides());
+    SmallVector<int64_t> dilations = getI64Values(op.getDilations());
+    SmallVector<int64_t> pads = getI64Values(op.getPads());
+    if (strides.size() != 2 || dilations.size() != 2 || pads.size() != 4)
+      return rewriter.notifyMatchFailure(
+          op, "expected 2D stride, dilation, and padding attributes");
+
+    // ONNX floors the output size, so a strided window that overruns the
+    // padded input just drops the trailing partial window. TOSA instead
+    // requires the window arithmetic to divide exactly:
+    //
+    //   O == (I - 1 + pad_before + pad_after - (K - 1) * dilation) / stride + 1
+    //
+    // Absorb that remainder by shrinking the trailing pad, and crop the input
+    // for whatever the pad cannot cover -- a stride-2 1x1 kernel has no
+    // padding to give back. Either way only elements the ONNX convolution
+    // never reads are removed, so the result is unchanged.
+    SmallVector<int64_t> padBefore(2), padAfter(2), crop(2, 0);
+    for (int64_t dim : llvm::seq<int64_t>(2)) {
+      if (strides[dim] < 1 || dilations[dim] < 1)
+        return rewriter.notifyMatchFailure(op, "expected positive stride and "
+                                               "dilation");
+      padBefore[dim] = pads[dim];
+      padAfter[dim] = pads[dim + 2];
+      if (padBefore[dim] < 0 || padAfter[dim] < 0)
+        return rewriter.notifyMatchFailure(op, "expected non-negative padding");
+
+      int64_t inputSize = inputShape[dim + 2];
+      int64_t span = inputSize - 1 + padBefore[dim] + padAfter[dim] -
+                     (weightShape[dim + 2] - 1) * dilations[dim];
+      if (span < 0)
+        return rewriter.notifyMatchFailure(op, "kernel larger than the padded "
+                                               "input");
+
+      int64_t remainder = span % strides[dim];
+      int64_t fromPad = std::min(padAfter[dim], remainder);
+      padAfter[dim] -= fromPad;
+      crop[dim] = remainder - fromPad;
+      if (crop[dim] >= inputSize)
+        return rewriter.notifyMatchFailure(op, "convolution reads no input");
+      if ((span - remainder) / strides[dim] + 1 != resultShape[dim + 2])
+        return rewriter.notifyMatchFailure(
+            op, "result shape disagrees with the convolution window");
+    }
+
+    Value input = transposeTo(
+        adaptor.getInput(),
+        {inputShape[0], inputShape[2], inputShape[3], inputShape[1]},
+        {0, 2, 3, 1}, rewriter, op.getLoc());
+    if (crop[0] != 0 || crop[1] != 0)
+      input = sliceTo(input,
+                      {inputShape[0], inputShape[2] - crop[0],
+                       inputShape[3] - crop[1], inputShape[1]},
+                      rewriter, op.getLoc());
+    Value weight = transposeTo(
+        adaptor.getWeights(),
+        {weightShape[0], weightShape[2], weightShape[3], weightShape[1]},
+        {0, 2, 3, 1}, rewriter, op.getLoc());
+    auto nhwkType = resultType.clone(
+        {resultShape[0], resultShape[2], resultShape[3], resultShape[1]});
+
+    // TOSA orders padding [top, bottom, left, right].
+    auto tosaPads = rewriter.getDenseI64ArrayAttr(
+        {padBefore[0], padAfter[0], padBefore[1], padAfter[1]});
+    auto conv = tosa::Conv2DOp::create(
+        rewriter, op.getLoc(), nhwkType, input, weight, bias, tosaPads,
+        rewriter.getDenseI64ArrayAttr(strides),
+        rewriter.getDenseI64ArrayAttr(dilations), TypeAttr::get(accType));
+
+    rewriter.replaceOp(op, transposeTo(conv.getResult(), resultShape,
+                                       {0, 3, 1, 2}, rewriter, op.getLoc()));
+    return success();
+  }
+};
 
 // The hip context and the DPS `outs` buffer are both dropped: the result type
 // already encodes the destination.
@@ -1098,10 +1286,9 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     // conversion so everything else in the kernel is left alone.
     //
     // A full conversion over an illegal hip dialect cannot work here. An
-    // outlined kernel keeps the fusion anchor it was built around -- hip.conv,
-    // hip.pool, hip.global_pool -- which rocMLIR consumes and this pass must
-    // not touch, and it carries the ops feeding the anchors' DPS operands:
-    // ub.poison for the !hip.context and tensor.empty for each outs buffer.
+    // outlined kernel can keep an unsupported fusion anchor such as hip.pool,
+    // and it carries the ops feeding the anchors' DPS operands: ub.poison for
+    // the !hip.context and tensor.empty for each outs buffer.
     // Full conversion legalizes every op in the region, so each of those has
     // to be enumerated as legal or the pass fails on IR it never meant to
     // convert. Listing the illegal ops instead keeps the useful half of the
@@ -1109,13 +1296,12 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     // fails.
     ConversionTarget conversion(*ctx);
     conversion.addLegalDialect<tosa::TosaDialect, func::FuncDialect>();
-    conversion
-        .addIllegalOp<MatmulOp, TransposeOp, AddOp, SubOp, MinOp, MaxOp, MulOp,
-                      DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp,
-                      CosOp, TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp,
-                      WhereOp, LeakyReluOp, MiopenSoftmaxOp, ReduceSumOp,
-                      ReduceMeanOp, CastOp, QuantizeLinearOp,
-                      DequantizeLinearOp>();
+    conversion.addIllegalOp<
+        ConvOp, MatmulOp, TransposeOp, AddOp, SubOp, MinOp, MaxOp, MulOp, DivOp,
+        AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp, TanhOp,
+        ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, WhereOp, LeakyReluOp,
+        MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp, QuantizeLinearOp,
+        DequantizeLinearOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
@@ -1134,7 +1320,7 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
 
     RewritePatternSet patterns(ctx);
     patterns.add<
-        MatMulConverter, TransposeConverter, ExpandConverter,
+        ConvConverter, MatMulConverter, TransposeConverter, ExpandConverter,
         ReshapeConverter<tensor::CollapseShapeOp>,
         ReshapeConverter<tensor::ExpandShapeOp>, ExtractSliceConverter,
         DivConverter, BinaryConverter<AddOp, tosa::AddOp>,
