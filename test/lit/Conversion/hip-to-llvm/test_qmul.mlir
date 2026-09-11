@@ -1,7 +1,7 @@
-// UNSUPPORTED: *
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
+// UNSUPPORTED: true
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
 
 // CHECK: llvm.func @wrap_qelementwise(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64, f32, i64, f32, i64, i64) -> i32
