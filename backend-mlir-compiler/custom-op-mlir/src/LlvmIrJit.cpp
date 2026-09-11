@@ -12,6 +12,7 @@
 
 #include <llvm/ADT/ArrayRef.h>
 #include <llvm/ADT/SmallString.h>
+#include <llvm/ADT/StringSwitch.h>
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/ExecutionEngine/JITLink/JITLinkMemoryManager.h>
 #include <llvm/ExecutionEngine/JITSymbol.h>
@@ -359,6 +360,22 @@ std::string detectCustomKernelArch() {
     arch.resize(colon); // "gfx1100:sramecc+:xnack-" -> "gfx1100"
   return arch;
 }
+
+std::string genericTargetFor(llvm::StringRef arch) {
+  return llvm::StringSwitch<std::string>(arch)
+      .Cases({"gfx900", "gfx902", "gfx904", "gfx906", "gfx909", "gfx90c"},
+             "gfx9-generic")
+      .Cases({"gfx942", "gfx950"}, "gfx9-4-generic")
+      .Cases({"gfx1010", "gfx1011", "gfx1012", "gfx1013"}, "gfx10-1-generic")
+      .Cases({"gfx1030", "gfx1031", "gfx1032", "gfx1033", "gfx1034", "gfx1035",
+              "gfx1036"},
+             "gfx10-3-generic")
+      .Cases({"gfx1100", "gfx1101", "gfx1102", "gfx1103", "gfx1150", "gfx1151",
+              "gfx1152", "gfx1153"},
+             "gfx11-generic")
+      .Cases({"gfx1200", "gfx1201"}, "gfx12-generic")
+      .Default("");
+}
 #endif // HIPDNN_EP_LINK_HIP_HOST
 
 // Resolve a plugin's addLibrary() argument to a file on disk. Accepts a path
@@ -462,30 +479,49 @@ bool installSearchGenerators(llvm::orc::LLJIT &jit) {
   }
 
 #ifdef HIPDNN_EP_LOAD_KERNEL_DLLS
-  // Per-arch GPU kernel DLL/SO, dlopen'd from the EP binary's own directory.
   {
     const std::string arch = detectCustomKernelArch();
-#ifdef _WIN32
-    const std::string basename = "custom_kernels_" + arch + ".dll";
-    const char sep = '\\';
-#else
-    const std::string basename = "libcustom_kernels_" + arch + ".so";
-    const char sep = '/';
-#endif
-    std::string kernel_lib = thisModuleDirectory();
-    if (!kernel_lib.empty())
-      kernel_lib.push_back(sep);
-    kernel_lib += basename;
+    std::vector<std::string> archs{arch};
+    if (std::string generic = genericTargetFor(arch); !generic.empty()) {
+      archs.push_back(std::move(generic));
+    }
 
-    auto gen = llvm::orc::DynamicLibrarySearchGenerator::Load(
-        kernel_lib.c_str(), global_prefix);
-    if (!gen) {
-      LOG(ERROR) << "LlvmIrJit: Load(" << kernel_lib << ") for arch=" << arch
-                 << " failed: " << llvm::toString(gen.takeError())
-                 << ". Install " << basename << " next to the EP DLL/SO.";
+    const std::string dir = thisModuleDirectory();
+    std::string tried;
+    bool loaded = false;
+    for (const std::string &candidate_arch : archs) {
+#ifdef _WIN32
+      const std::string basename = "custom_kernels_" + candidate_arch + ".dll";
+      const char sep = '\\';
+#else
+      const std::string basename =
+          "libcustom_kernels_" + candidate_arch + ".so";
+      const char sep = '/';
+#endif
+      std::string kernel_lib = dir;
+      if (!kernel_lib.empty()) {
+        kernel_lib.push_back(sep);
+      }
+      kernel_lib += basename;
+
+      auto gen = llvm::orc::DynamicLibrarySearchGenerator::Load(
+          kernel_lib.c_str(), global_prefix);
+      if (!gen) {
+        if (!tried.empty()) {
+          tried += ", ";
+        }
+        tried += basename + " (" + llvm::toString(gen.takeError()) + ")";
+        continue;
+      }
+      jd.addGenerator(std::move(*gen));
+      loaded = true;
+      break;
+    }
+    if (!loaded) {
+      LOG(ERROR) << "LlvmIrJit: no custom kernel library loadable for arch="
+                 << arch << " in " << dir << "; tried " << tried;
       return false;
     }
-    jd.addGenerator(std::move(*gen));
   }
 #endif // HIPDNN_EP_LOAD_KERNEL_DLLS
 
