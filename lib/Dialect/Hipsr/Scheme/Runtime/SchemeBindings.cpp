@@ -180,10 +180,17 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
   llvm::sys::path::append(schemePath, "lib", "scheme");
 
   // Add lib/scheme to library-directories so Chez can find (rime) as rime/*.sls
+  // Use eval-string to avoid the string port issue
   std::string setup_code = "(library-directories (cons \"" + std::string(schemePath.c_str()) + "\" (library-directories)))";
-  ptr setup_port = Scall1(open_string_input_port_sym, Sstring(setup_code.c_str()));
-  ptr setup_expr = Scall1(read_sym, setup_port);
-  Scall1(eval_sym, setup_expr);
+
+  // Write to temp file and load
+  const char* setup_tmpfile = "/tmp/setup_library_path.scm";
+  std::ofstream setup_out(setup_tmpfile);
+  setup_out << setup_code;
+  setup_out.close();
+
+  ptr load_sym = Stop_level_value(Sstring_to_symbol("load"));
+  Scall1(load_sym, Sstring(setup_tmpfile));
 
   if (logLevel <= SchemeLogLevel::Debug) {
     llvm::errs() << "[debug] Added Scheme library path: " << schemePath.c_str() << "\n";
@@ -223,21 +230,20 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
   fprintf(stderr, "[INIT] Successfully loaded SchemeBindings.scm via load\n");
   fflush(stderr);
 
-  // Load PatternDSL.scm (embedded)
-  if (logLevel <= SchemeLogLevel::Debug) {
-    llvm::errs() << "[debug] Loading PatternDSL.scm (" << pattern_dsl_scm_size << " bytes)\n";
-  }
+  // Load PatternDSL.scm (embedded) - also use file-based load
+  fprintf(stderr, "[INIT] Loading PatternDSL.scm via file\n");
+  fflush(stderr);
 
   std::string pattern_dsl_code(reinterpret_cast<const char*>(pattern_dsl_scm_data),
                                pattern_dsl_scm_size);
-  ptr pattern_dsl_port = Scall1(open_string_input_port_sym, Sstring(pattern_dsl_code.c_str()));
+  const char* pattern_tmpfile = "/tmp/pattern_dsl_temp.scm";
+  std::ofstream pattern_out(pattern_tmpfile);
+  pattern_out.write(pattern_dsl_code.c_str(), pattern_dsl_code.size());
+  pattern_out.close();
 
-  while (true) {
-    ptr expr = Scall1(read_sym, pattern_dsl_port);
-    if (Scall1(eof_object_p, expr) != Sfalse)
-      break;
-    Scall1(eval_sym, expr);
-  }
+  Scall1(load_sym, Sstring(pattern_tmpfile));
+  fprintf(stderr, "[INIT] Successfully loaded PatternDSL.scm via load\n");
+  fflush(stderr);
 
   if (logLevel <= SchemeLogLevel::Info)
     llvm::errs() << "[info] Scheme runtime initialized\n";
