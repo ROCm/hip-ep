@@ -9,24 +9,23 @@
 
 // CHECK-LABEL: func.func @conv
 // CHECK: %[[INPUT:.*]] = tosa.transpose %arg1 {perms = array<i32: 0, 2, 3, 1>} : (tensor<1x4x7x9xf16>) -> tensor<1x7x9x4xf16>
-// CHECK: %[[WEIGHT:.*]] = tosa.transpose %arg2 {perms = array<i32: 0, 2, 3, 1>} : (tensor<6x2x3x2xf16>) -> tensor<6x3x2x2xf16>
+// CHECK: %[[WEIGHT:.*]] = tosa.transpose %arg2 {perms = array<i32: 0, 2, 3, 1>} : (tensor<6x4x3x2xf16>) -> tensor<6x3x2x4xf16>
 // CHECK: %[[CONV:.*]] = tosa.conv2d %[[INPUT]], %[[WEIGHT]], %arg3
 // CHECK-SAME: acc_type = f32
 // CHECK-SAME: dilation = array<i64: 1, 1>
-// CHECK-SAME: group = 2 : i64
 // CHECK-SAME: pad = array<i64: 1, 1, 2, 1>
 // CHECK-SAME: stride = array<i64: 1, 2>
 // CHECK: tosa.transpose %[[CONV]] {perms = array<i32: 0, 3, 1, 2>} : (tensor<1x7x6x6xf16>) -> tensor<1x6x7x6xf16>
 // CHECK-NOT: hip.conv
 func.func @conv(%ctx: !hip.context, %input: tensor<1x4x7x9xf16>,
-                %weight: tensor<6x2x3x2xf16>, %bias: tensor<6xf16>,
+                %weight: tensor<6x4x3x2xf16>, %bias: tensor<6xf16>,
                 %init: tensor<1x6x7x6xf16>) -> tensor<1x6x7x6xf16>
     attributes {rock.kernel} {
   %result = hip.conv(%ctx) ins(
       %input, %weight, %bias :
-      tensor<1x4x7x9xf16>, tensor<6x2x3x2xf16>, tensor<6xf16>)
+      tensor<1x4x7x9xf16>, tensor<6x4x3x2xf16>, tensor<6xf16>)
       outs(%init : tensor<1x6x7x6xf16>)
-      {dilations = [1, 1], group = 2 : i64, kernel_shape = [3, 2],
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 2],
        pads = [1, 2, 1, 1], strides = [1, 2]} : tensor<1x6x7x6xf16>
   return %result : tensor<1x6x7x6xf16>
 }
@@ -108,4 +107,36 @@ func.func @dynamic_conv(
       {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
        pads = [0, 0, 0, 0], strides = [1, 1]} : tensor<1x4x?x3xf16>
   return %result : tensor<1x4x?x3xf16>
+}
+
+// -----
+
+func.func @grouped_conv(
+    %ctx: !hip.context, %input: tensor<1x4x7x9xf16>,
+    %weight: tensor<6x2x3x2xf16>, %bias: tensor<6xf16>,
+    %init: tensor<1x6x7x6xf16>) -> tensor<1x6x7x6xf16>
+    attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.conv'}}
+  %result = hip.conv(%ctx) ins(
+      %input, %weight, %bias :
+      tensor<1x4x7x9xf16>, tensor<6x2x3x2xf16>, tensor<6xf16>)
+      outs(%init : tensor<1x6x7x6xf16>)
+      {dilations = [1, 1], group = 2 : i64, kernel_shape = [3, 2],
+       pads = [1, 2, 1, 1], strides = [1, 2]} : tensor<1x6x7x6xf16>
+  return %result : tensor<1x6x7x6xf16>
+}
+
+// -----
+
+func.func @kernel_shape_mismatch(
+    %ctx: !hip.context, %input: tensor<1x3x5x5xf32>,
+    %weight: tensor<4x3x3x3xf32>, %init: tensor<1x4x3x3xf32>)
+    -> tensor<1x4x3x3xf32> attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.conv'}}
+  %result = hip.conv(%ctx) ins(
+      %input, %weight : tensor<1x3x5x5xf32>, tensor<4x3x3x3xf32>)
+      outs(%init : tensor<1x4x3x3xf32>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [1, 1],
+       pads = [0, 0, 0, 0], strides = [1, 1]} : tensor<1x4x3x3xf32>
+  return %result : tensor<1x4x3x3xf32>
 }
