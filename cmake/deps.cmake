@@ -155,6 +155,22 @@ set(BUILD_SHARED_LIBS ${_saved_bsl_cpptrace})
 # tree, and a plain find_package(MLIR) on the next configure would then fail in
 # the build-tree LLVMConfig includes -- so once embedded we skip find_package
 # entirely and clear those stale cache entries.
+# Opt-in: build the from-source LLVM as a full distribution and publish it to a
+# prefix downstream repos can find_package() against. Only adds targets -- the
+# cost is paid when `publish-llvm-toolchain` is built, not on a normal build.
+option(HIPDNN_PUBLISH_LLVM_TOOLCHAIN
+       "Publish the from-source LLVM/MLIR as a prefix for downstream repos" OFF)
+set(HIPDNN_TOOLCHAIN_PREFIX "${CMAKE_BINARY_DIR}/toolchain" CACHE PATH
+    "Where publish-llvm-toolchain installs LLVM/MLIR")
+# Everything hip-ir and CGC-IR-Converter need: MLIR + LLVM libs and headers,
+# the CMake package exports, and the LIT tooling (FileCheck/not/count/llvm-lit)
+# that CGC-IR-Converter currently keeps an llvm-project submodule for.
+set(HIPDNN_LLVM_DISTRIBUTION_COMPONENTS
+    cmake-exports llvm-headers llvm-libraries
+    mlir-cmake-exports mlir-headers mlir-libraries
+    llvm-tblgen mlir-tblgen FileCheck not count llvm-lit
+    CACHE STRING "Components published by publish-llvm-toolchain")
+
 if(HIPDNN_LLVM_EMBEDDED)
   unset(MLIR_DIR CACHE)
   unset(LLVM_DIR CACHE)
@@ -166,6 +182,11 @@ endif()
 
 if(MLIR_FOUND AND NOT HIPDNN_LLVM_EMBEDDED)
   find_package(LLVM REQUIRED CONFIG)
+  if(HIPDNN_PUBLISH_LLVM_TOOLCHAIN)
+    message(STATUS
+      "HIPDNN_PUBLISH_LLVM_TOOLCHAIN is ignored: LLVM/MLIR came from a prefix "
+      "(${LLVM_DIR}), so there is nothing to publish.")
+  endif()
 else()
   message(STATUS "LLVM/MLIR not found; building from source (${DEP_HASH_llvm})")
   # clang is built in-tree so a from-source bootstrap is fully self-contained:
@@ -188,6 +209,13 @@ else()
   set(LLVM_INCLUDE_EXAMPLES OFF CACHE BOOL "" FORCE)
   set(LLVM_INCLUDE_BENCHMARKS OFF CACHE BOOL "" FORCE)
   set(LLVM_INSTALL_UTILS ON CACHE BOOL "" FORCE)  # FileCheck/not/count for LIT
+  if(HIPDNN_PUBLISH_LLVM_TOOLCHAIN)
+    # Naming the components is what makes them buildable as a set. Without this
+    # only the pieces hip-ep links get built, and `cmake --install` then either
+    # fails on a missing artefact or installs nothing at all.
+    set(LLVM_DISTRIBUTION_COMPONENTS "${HIPDNN_LLVM_DISTRIBUTION_COMPONENTS}"
+        CACHE STRING "" FORCE)
+  endif()
   FetchContent_Declare(llvm-project
     GIT_REPOSITORY ${DEP_URL_llvm}
     GIT_TAG ${DEP_HASH_llvm}
@@ -238,6 +266,36 @@ else()
   # functions (mlir_tablegen, llvm_map_components_to_libnames, add_mlir_dialect,
   # ...) globally, so downstream just needs the consumer variables set by hand.
   set(HIPDNN_LLVM_EMBEDDED ON CACHE BOOL "LLVM provided via FetchContent subdirectory" FORCE)
+
+  # Publish the in-tree LLVM/MLIR as a consumable prefix for downstream repos
+  # (hip-ir, CGC-IR-Converter), so they take the find_package path above rather
+  # than each rebuilding LLVM against a different commit.
+  #
+  # EXCLUDE_FROM_ALL keeps this off the default build: the distribution targets
+  # are only built when the publish target is asked for.
+  if(HIPDNN_PUBLISH_LLVM_TOOLCHAIN)
+    set(_hipdnn_publish_cmds "")
+    foreach(_c IN LISTS HIPDNN_LLVM_DISTRIBUTION_COMPONENTS)
+      list(APPEND _hipdnn_publish_cmds
+        COMMAND "${CMAKE_COMMAND}" --install "${llvm-project_BINARY_DIR}"
+                --component "${_c}" --prefix "${HIPDNN_TOOLCHAIN_PREFIX}")
+    endforeach()
+    add_custom_target(publish-llvm-toolchain ${_hipdnn_publish_cmds}
+      COMMENT "Publishing LLVM/MLIR toolchain to ${HIPDNN_TOOLCHAIN_PREFIX}"
+      VERBATIM)
+    # LLVM defines `distribution` from LLVM_DISTRIBUTION_COMPONENTS; it builds
+    # the components, which EXCLUDE_FROM_ALL otherwise leaves unbuilt (and an
+    # unbuilt component installs nothing, silently).
+    if(TARGET distribution)
+      add_dependencies(publish-llvm-toolchain distribution)
+    else()
+      message(WARNING
+        "HIPDNN_PUBLISH_LLVM_TOOLCHAIN=ON but LLVM did not define a `distribution` "
+        "target; build the components yourself before publish-llvm-toolchain, or "
+        "the published prefix will be missing libraries.")
+    endif()
+    unset(_hipdnn_publish_cmds)
+  endif()
   set(LLVM_INCLUDE_DIRS
     "${llvm-project_SOURCE_DIR}/llvm/include"
     "${llvm-project_BINARY_DIR}/include" CACHE PATH "" FORCE)
