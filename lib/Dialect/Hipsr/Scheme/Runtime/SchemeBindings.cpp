@@ -499,27 +499,27 @@ void registerMlirForeignFunctions() {
   Sregister_symbol("mlir_log_fatal", (void*)mlir_log_fatal);
 
   // Phase 1: Type System FFI
-  Sregister_symbol("mlir_type_is_ranked_tensor", (void*)mlir_type_is_ranked_tensor);
-  Sregister_symbol("mlir_type_get_element_type", (void*)mlir_type_get_element_type);
-  Sregister_symbol("mlir_type_get_shape", (void*)mlir_type_get_shape);
-  Sregister_symbol("mlir_type_get_rank", (void*)mlir_type_get_rank);
-  Sregister_symbol("mlir_value_get_type", (void*)mlir_value_get_type);
+  Sregister_symbol("mlir_type_is_ranked_tensor", (void*)::mlir_type_is_ranked_tensor);
+  Sregister_symbol("mlir_type_get_element_type", (void*)::mlir_type_get_element_type);
+  Sregister_symbol("mlir_type_get_shape", (void*)::mlir_type_get_shape);
+  Sregister_symbol("mlir_type_get_rank", (void*)::mlir_type_get_rank);
+  Sregister_symbol("mlir_value_get_type", (void*)::mlir_value_get_type);
 
   // Phase 2: Operation/Value Navigation FFI
-  Sregister_symbol("mlir_operation_get_parent", (void*)mlir_operation_get_parent);
-  Sregister_symbol("mlir_operation_get_operand_value", (void*)mlir_operation_get_operand_value);
-  Sregister_symbol("mlir_operation_get_result_value", (void*)mlir_operation_get_result_value);
-  Sregister_symbol("mlir_operation_get_loc", (void*)mlir_operation_get_loc);
-  Sregister_symbol("mlir_operation_get_block_argument", (void*)mlir_operation_get_block_argument);
+  Sregister_symbol("mlir_operation_get_parent", (void*)::mlir_operation_get_parent);
+  Sregister_symbol("mlir_operation_get_operand_value", (void*)::mlir_operation_get_operand_value);
+  Sregister_symbol("mlir_operation_get_result_value", (void*)::mlir_operation_get_result_value);
+  Sregister_symbol("mlir_operation_get_loc", (void*)::mlir_operation_get_loc);
+  Sregister_symbol("mlir_operation_get_block_argument", (void*)::mlir_operation_get_block_argument);
 
   // Phase 3: IR Construction FFI (OpBuilder) - TODO: needs PatternRewriter integration
-  Sregister_symbol("mlir_create_placeholder_op", (void*)mlir_create_placeholder_op);
-  Sregister_symbol("mlir_create_cast_op", (void*)mlir_create_cast_op);
+  Sregister_symbol("mlir_create_placeholder_op", (void*)::mlir_create_placeholder_op);
+  Sregister_symbol("mlir_create_cast_op", (void*)::mlir_create_cast_op);
 
   // Phase 4: Pattern Rewriter FFI - TODO: needs PatternRewriter integration
-  Sregister_symbol("mlir_replace_op", (void*)mlir_replace_op);
-  Sregister_symbol("mlir_erase_op", (void*)mlir_erase_op);
-  Sregister_symbol("mlir_notify_match_failure", (void*)mlir_notify_match_failure);
+  Sregister_symbol("mlir_replace_op", (void*)::mlir_replace_op);
+  Sregister_symbol("mlir_erase_op", (void*)::mlir_erase_op);
+  Sregister_symbol("mlir_notify_match_failure", (void*)::mlir_notify_match_failure);
 
   LLVM_DEBUG(llvm::dbgs() << "Registered " << 27 << " MLIR FFI functions\n");
 }
