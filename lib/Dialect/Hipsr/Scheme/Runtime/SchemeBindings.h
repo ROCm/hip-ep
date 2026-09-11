@@ -146,10 +146,4 @@ void mlir_notify_match_failure(mlir::hipsr::SchemeValue op, const char* reason);
 
 } // extern "C"
 
-namespace mlir {
-namespace hipsr {
-
-} // namespace hipsr
-} // namespace mlir
-
 #endif
