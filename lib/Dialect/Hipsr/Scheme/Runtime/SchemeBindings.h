@@ -10,6 +10,9 @@
 #include <vector>
 #include <functional>
 
+// C type for Scheme FFI - must be at global scope for extern "C" functions
+typedef void* SchemeValue;
+
 namespace mlir {
 class Operation;
 class Value;
@@ -17,8 +20,6 @@ class Type;
 class Attribute;
 
 namespace hipsr {
-
-using SchemeValue = void*;
 
 // Log levels for Scheme logging
 enum class SchemeLogLevel {
@@ -122,27 +123,27 @@ extern "C" {
 // placeholders that will be properly integrated when called from pattern passes.
 
 // Create hipsr.placeholder operation
-mlir::hipsr::SchemeValue mlir_create_placeholder_op(mlir::hipsr::SchemeValue ctx_value,
-                                                     mlir::hipsr::SchemeValue input_value,
-                                                     mlir::hipsr::SchemeValue result_type,
-                                                     int placeholder_type_int);
+SchemeValue mlir_create_placeholder_op(SchemeValue ctx_value,
+                                       SchemeValue input_value,
+                                       SchemeValue result_type,
+                                       int placeholder_type_int);
 
 // Create hipsr.cast operation
-mlir::hipsr::SchemeValue mlir_create_cast_op(mlir::hipsr::SchemeValue ctx_value,
-                                              mlir::hipsr::SchemeValue input_value,
-                                              mlir::hipsr::SchemeValue output_value,
-                                              mlir::hipsr::SchemeValue result_type);
+SchemeValue mlir_create_cast_op(SchemeValue ctx_value,
+                                 SchemeValue input_value,
+                                 SchemeValue output_value,
+                                 SchemeValue result_type);
 
 // Phase 4: Pattern Rewriter FFI
 
 // Replace operation with a value
-int mlir_replace_op(mlir::hipsr::SchemeValue old_op, mlir::hipsr::SchemeValue new_value);
+int mlir_replace_op(SchemeValue old_op, SchemeValue new_value);
 
 // Erase operation
-int mlir_erase_op(mlir::hipsr::SchemeValue op);
+int mlir_erase_op(SchemeValue op);
 
 // Notify match failure
-void mlir_notify_match_failure(mlir::hipsr::SchemeValue op, const char* reason);
+void mlir_notify_match_failure(SchemeValue op, const char* reason);
 
 } // extern "C"
 
