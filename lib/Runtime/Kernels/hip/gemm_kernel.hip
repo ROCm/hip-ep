@@ -681,7 +681,7 @@ __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
                                               int cDim0, int cDim1,
                                               int swizzle_n,
                                               float *__restrict__ sk_acc,
-                                              int ldb, int n_base) {
+                                              int ldb, int n_base, int lda) {
   constexpr int WM_L = BM / (WT_M * 16);
   constexpr int WN_L = BN / (WT_N * 16);
   constexpr int THR = WM_L * WN_L * 32;
@@ -776,7 +776,7 @@ __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
     const int idx = tid + c * THR;
     a_row[c] = idx / A_ROW_SPLIT;
     a_koff[c] = (idx % A_ROW_SPLIT) * A_CH;
-    a_src[c] = A + static_cast<size_t>(row0 + a_row[c]) * K + k_begin +
+    a_src[c] = A + static_cast<size_t>(row0 + a_row[c]) * lda + k_begin +
                a_koff[c];
   }
 
@@ -830,7 +830,7 @@ __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
             for (int e = 0; e < A_CH; ++e) {
               const int kk = k + e;
               const T v =
-                  (kk < K) ? A[static_cast<size_t>(row) * K + kk] : (T)0;
+                  (kk < K) ? A[static_cast<size_t>(row) * lda + kk] : (T)0;
               reinterpret_cast<T *>(pf_a[c])[e] = v;
             }
           }
@@ -1096,10 +1096,10 @@ void gemm_wmma_kernel(const T *__restrict__ A, const T *__restrict__ B,
                       const T *__restrict__ C, T *__restrict__ Y, int M, int N,
                       int K, float alpha, float beta, int cDim0, int cDim1,
                       int swizzle_n, float *__restrict__ sk_acc, int ldb,
-                      int n_base) {
+                      int n_base, int lda) {
   GemmWmmaImpl<BM, BN, WT_M, WT_N, TransB, T, BK, BC, DB>(
       A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1, swizzle_n, sk_acc, ldb,
-      n_base);
+      n_base, lda);
 }
 
 template <typename T>
@@ -1286,8 +1286,12 @@ static int pickWmmaHeuristic(int M, int N, int K) {
 template <typename T, bool TransB>
 static void launchWmma(int id, hipStream_t s, const T *A, const T *B,
                        const T *C, T *Y, int M, int N, int K, float alpha,
-                       float beta, int cDim0, int cDim1, int ldb) {
+                       float beta, int cDim0, int cDim1, int ldb,
+                       int lda = -1) {
   const WmmaCfg c = kWmma[id];
+  /* A row stride: defaults to K. pad-K mode passes lda=K_real with K=K_pad so
+   * the loop/B use the BK-aligned padded K while A keeps its real stride. */
+  const int lda_eff = (lda < 0) ? K : lda;
   /* Adaptive threadblock rasterization width (L2 A-panel reuse). A wide tile's
    * A-panel is re-touched by every N-tile in its rasterization super-column, so
    * once the launch has MANY M-tile rows the default 8-wide super-column evicts
@@ -1374,25 +1378,25 @@ static void launchWmma(int id, hipStream_t s, const T *A, const T *B,
           HIP_KERNEL_NAME(                                                     \
               gemm_wmma_kernel<BM, BN, WM, WN, TransB, T, BK, true, true>),    \
           grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1,   \
-          sw_eff, skp, ldb, nb);                                               \
+          sw_eff, skp, ldb, nb, lda_eff);                                               \
     else if (bc && !db)                                                        \
       hipLaunchKernelGGL(                                                      \
           HIP_KERNEL_NAME(                                                     \
               gemm_wmma_kernel<BM, BN, WM, WN, TransB, T, BK, true, false>),   \
           grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1,   \
-          sw_eff, skp, ldb, nb);                                               \
+          sw_eff, skp, ldb, nb, lda_eff);                                               \
     else if (!bc && db)                                                        \
       hipLaunchKernelGGL(                                                      \
           HIP_KERNEL_NAME(                                                     \
               gemm_wmma_kernel<BM, BN, WM, WN, TransB, T, BK, false, true>),   \
           grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1,   \
-          sw_eff, skp, ldb, nb);                                               \
+          sw_eff, skp, ldb, nb, lda_eff);                                               \
     else                                                                       \
       hipLaunchKernelGGL(                                                      \
           HIP_KERNEL_NAME(                                                     \
               gemm_wmma_kernel<BM, BN, WM, WN, TransB, T, BK, false, false>),  \
           grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1,   \
-          sw_eff, skp, ldb, nb);                                               \
+          sw_eff, skp, ldb, nb, lda_eff);                                               \
   } while (0)
 
 #define GEMM_WMMA_TRY(BM, BN, WM, WN, BK)                                      \
@@ -1600,18 +1604,19 @@ static int tuneWmma(hipStream_t s, const T *A, const T *B, const T *C, T *Y,
 template <typename T>
 static int launchWmmaGemm(hipStream_t s, const T *A, const T *B, const T *C,
                            T *Y, int M, int N, int K, int transB, float alpha,
-                           float beta, int cDim0, int cDim1, int ldb) {
+                           float beta, int cDim0, int cDim1, int ldb,
+                           int lda = -1) {
   (void)hipGetLastError();
   if (transB) {
     int id = tuneWmma<T, true>(s, A, B, C, Y, M, N, K, alpha, beta, cDim0,
                                cDim1, ldb);
     launchWmma<T, true>(id, s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1,
-                        ldb);
+                        ldb, lda);
   } else {
     int id = tuneWmma<T, false>(s, A, B, C, Y, M, N, K, alpha, beta, cDim0,
                                 cDim1, ldb);
     launchWmma<T, false>(id, s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1,
-                         ldb);
+                         ldb, lda);
   }
   return hipGetLastError() == hipSuccess ? 0 : 1;
 }
@@ -1940,6 +1945,82 @@ static const T *gemmEnsurePaddedB(hipStream_t s, const T *B, int N, int K,
   return static_cast<const T *>(buf);
 }
 
+/* K-extend a reused NT weight B[N,K] to B'[N,K_pad] with K_pad a multiple of 32
+ * and the tail [K,K_pad) zero-filled, so a K%32!=0 shape (vision K=4304) can run
+ * the fast BK=32 BC=false path instead of the 2x-barrier BK=16 tile. A keeps its
+ * real stride (K): the A-load reads garbage in the [K,K_pad) tail, but B's zeros
+ * null it (sum_k A*0 = 0), so no A copy is needed. Cached like padrow (weight
+ * reuse); returns nullptr to fall back. Sets *out_kpad. The A over-read is <=
+ * (K_pad-K)*2 bytes past the last row -- within the pooled/aligned A slack. */
+template <typename T>
+static const T *gemmEnsureKPaddedB(hipStream_t s, const T *B, int N, int K,
+                                   int *out_kpad) {
+  const int kpad = ((K + 31) / 32) * 32;
+  if (kpad == K)
+    return nullptr; /* already aligned; caller uses the normal path */
+  const size_t bytes = static_cast<size_t>(N) * kpad * sizeof(T);
+  const size_t cap = gemmPadRowMaxBytes();
+  if (cap == 0 || bytes > cap)
+    return nullptr;
+
+  GemmPadKey key{static_cast<const void *>(B), N, K, -1 /* K-extend mode */};
+  std::lock_guard<std::mutex> lk(g_pad_mu);
+  if (g_pad_disabled)
+    return nullptr;
+  auto it = g_pad_map.find(key);
+  if (it != g_pad_map.end()) {
+    it->second.lru = ++g_pad_clock;
+    ++g_pad_hits;
+    *out_kpad = kpad;
+    return static_cast<const T *>(it->second.buf);
+  }
+  ++g_pad_misses;
+  const uint64_t total = g_pad_hits + g_pad_misses;
+  if (total >= 32 && g_pad_hits * 100 < total * 40) {
+    g_pad_disabled = true;
+    return nullptr;
+  }
+  while (g_pad_total + bytes > cap && !g_pad_map.empty()) {
+    auto victim = g_pad_map.begin();
+    for (auto i = g_pad_map.begin(); i != g_pad_map.end(); ++i)
+      if (i->second.lru < victim->second.lru)
+        victim = i;
+    hipFree(victim->second.buf);
+    g_pad_total -= victim->second.bytes;
+    g_pad_map.erase(victim);
+  }
+  void *buf = nullptr;
+  if (hipMalloc(&buf, bytes) != hipSuccess)
+    return nullptr;
+  if (hipMemsetAsync(buf, 0, bytes, s) != hipSuccess) {
+    hipFree(buf);
+    return nullptr;
+  }
+  dim3 grid((K + 255) / 256 < 1 ? 1 : (K + 255) / 256, N);
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(gemm_padrow_copy_kernel<T>), grid,
+                     dim3(256), 0, s, B, static_cast<T *>(buf), N, K, kpad);
+  if (hipGetLastError() != hipSuccess) {
+    hipFree(buf);
+    return nullptr;
+  }
+  g_pad_map[key] = GemmPadEntry{buf, bytes, ++g_pad_clock};
+  g_pad_total += bytes;
+  CUSTOM_KERNELS_DEBUG_LOG(
+      "[gemm] padK: cached B=%p N=%d K=%d -> kpad=%d (%zu MB total)\n",
+      (const void *)B, N, K, kpad, g_pad_total >> 20);
+  *out_kpad = kpad;
+  return static_cast<const T *>(buf);
+}
+
+/* Eligible: NT fp16/bf16, K a multiple of 16 but not 32 (vision 4304), M and N
+ * tile-aligned enough that the aligned BK=32 path is a clear win, and B a reused
+ * weight (guarded by the shared padrow hit-rate check). */
+static bool gemmPadKEligible(int M, int N, int K, int transA, int transB,
+                             int type_bytes) {
+  return gemmPadRowEnabled() && transB && !transA && type_bytes == 2 &&
+         (K % 16 == 0) && (K % 32 != 0) && K >= 64 && M >= 256 && N >= 128;
+}
+
 /* =========================================================================
  * Public entry
  * ========================================================================= */
@@ -2002,12 +2083,21 @@ extern "C" int hip_gemm(void *stream, const void *A, const void *B,
     if (wave64)
       return launchTiledFma<T>(s, a, b, c, y, M, N, K, transA, transB, alpha,
                                 beta, cDim0, cDim1);
-    int ldb = K;
-    if (gemmPadRowEligible(M, N, K, transA, transB, sizeof(T)))
+    int ldb = K, kk = K, lda = -1;
+    if (gemmPadKEligible(M, N, K, transA, transB, sizeof(T))) {
+      int kpad = K;
+      if (const T *bp = gemmEnsureKPaddedB<T>(s, b, N, K, &kpad)) {
+        b = bp;
+        kk = kpad; /* loop + B run the BK-aligned padded K (fast BK=32 path) */
+        ldb = kpad;
+        lda = K; /* A keeps its real stride; the tail is nulled by B's zeros */
+      }
+    } else if (gemmPadRowEligible(M, N, K, transA, transB, sizeof(T))) {
       if (const T *bp = gemmEnsurePaddedB<T>(s, b, N, K, &ldb))
         b = bp;
-    return launchWmmaGemm<T>(s, a, b, c, y, M, N, K, transB, alpha, beta,
-                             cDim0, cDim1, ldb);
+    }
+    return launchWmmaGemm<T>(s, a, b, c, y, M, N, kk, transB, alpha, beta,
+                             cDim0, cDim1, ldb, lda);
   };
 
   auto go_bf16 = [&]() -> int {
@@ -2022,12 +2112,21 @@ extern "C" int hip_gemm(void *stream, const void *A, const void *B,
     if (wave64)
       return launchTiledFma<T>(s, a, b, c, y, M, N, K, transA, transB, alpha,
                                 beta, cDim0, cDim1);
-    int ldb = K;
-    if (gemmPadRowEligible(M, N, K, transA, transB, sizeof(T)))
+    int ldb = K, kk = K, lda = -1;
+    if (gemmPadKEligible(M, N, K, transA, transB, sizeof(T))) {
+      int kpad = K;
+      if (const T *bp = gemmEnsureKPaddedB<T>(s, b, N, K, &kpad)) {
+        b = bp;
+        kk = kpad; /* loop + B run the BK-aligned padded K (fast BK=32 path) */
+        ldb = kpad;
+        lda = K; /* A keeps its real stride; the tail is nulled by B's zeros */
+      }
+    } else if (gemmPadRowEligible(M, N, K, transA, transB, sizeof(T))) {
       if (const T *bp = gemmEnsurePaddedB<T>(s, b, N, K, &ldb))
         b = bp;
-    return launchWmmaGemm<T>(s, a, b, c, y, M, N, K, transB, alpha, beta,
-                             cDim0, cDim1, ldb);
+    }
+    return launchWmmaGemm<T>(s, a, b, c, y, M, N, kk, transB, alpha, beta,
+                             cDim0, cDim1, ldb, lda);
   };
 
   if (type_code == kTypeFloat16)
