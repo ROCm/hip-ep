@@ -9,6 +9,7 @@ add_library(HipsrDialectTransforms STATIC
   ConvertShapeToExtentPass.cpp
   ExternalizeConstants.cpp
   HipsrPoolAllocPass.cpp
+  HipsrInlineRegionsPass.cpp
   MaterializeInitTensorsPass.cpp
   PartitionPoolDomains.cpp
   PopulateShapeRegionPass.cpp
