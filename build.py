@@ -562,6 +562,14 @@ def build_rocmlirtriton(args, build_dir, source_dir=None, rocm_path=None):
         "-DROCMLIR_DRIVER_E2E_TEST_ENABLED=OFF",
         "-DROCK_E2E_TEST_ENABLED=OFF",
         "-DTRITON_BUILD_BINARY=OFF",
+        # rocmlirTriton forces -Werror and -Wshadow; Rock headers shadow
+        # members. Relax that for GCC/Clang and clang-cl alike.
+        "-DCMAKE_PROJECT_TOP_LEVEL_INCLUDES="
+        + (
+            Path(__file__).resolve().parent
+            / "cmake"
+            / "rocmlir_relax_shadow_werror.cmake"
+        ).as_posix(),
     ]
     if args.shared_llvm and not IS_WINDOWS:
         # On ELF, hip-ep's libraries are compiled with RTTI and derive from MLIR
