@@ -1288,6 +1288,28 @@ static void launchWmma(int id, hipStream_t s, const T *A, const T *B,
                        const T *C, T *Y, int M, int N, int K, float alpha,
                        float beta, int cDim0, int cDim1, int ldb) {
   const WmmaCfg c = kWmma[id];
+  /* Adaptive threadblock rasterization width (L2 A-panel reuse). A wide tile's
+   * A-panel is re-touched by every N-tile in its rasterization super-column, so
+   * once the launch has MANY M-tile rows the default 8-wide super-column evicts
+   * the A-panels from the 2 MB L2 before they are reused, and throughput drops
+   * (N=K=4096 M=4096, 16 M-tiles: 28 TFLOP at sw=8 -> 36 at sw=32, = hipBLASLt).
+   * Widen the super-column when the M-tile count is high AND the weight B is
+   * small enough that its streaming does not already thrash the 2 MB L2. For a
+   * big weight (8192^2 = 128 MB, 6144^2 = 72 MB) the B stream evicts the reused
+   * A-panels regardless of scheduling, and sw=32 is a large regression there
+   * (8192^2 M=4096: -54%), so keep the default 8. Measured win: N=K=4096
+   * M=4096/8192 (16/32 M-tiles, 32 MB weight) 28 -> 37 TFLOP (= hipBLASLt).
+   * gemmSwizzleBlock clamps to n_tiles, so a wide value is safe on a small grid. */
+  const int my_tiles = (M + c.bm - 1) / c.bm;
+  int sw_eff = c.swizzle_n;
+  if (my_tiles >= 12 && c.split_k == 1 &&
+      static_cast<size_t>(N) * K * 2 <= (48ull << 20))
+    sw_eff = 32;
+  {
+    const int sw_env = gemmEnvInt("HIPDNN_EP_GEMM_SWIZZLE", 0);
+    if (sw_env > 0)
+      sw_eff = sw_env;
+  }
   const int th = (c.bm / (c.wt_m * 16)) * (c.bn / (c.wt_n * 16)) * 32;
   int sk = c.split_k;
   float *skp = nullptr;
@@ -1352,25 +1374,25 @@ static void launchWmma(int id, hipStream_t s, const T *A, const T *B,
           HIP_KERNEL_NAME(                                                     \
               gemm_wmma_kernel<BM, BN, WM, WN, TransB, T, BK, true, true>),    \
           grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1,   \
-          c.swizzle_n, skp, ldb, nb);                                          \
+          sw_eff, skp, ldb, nb);                                               \
     else if (bc && !db)                                                        \
       hipLaunchKernelGGL(                                                      \
           HIP_KERNEL_NAME(                                                     \
               gemm_wmma_kernel<BM, BN, WM, WN, TransB, T, BK, true, false>),   \
           grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1,   \
-          c.swizzle_n, skp, ldb, nb);                                          \
+          sw_eff, skp, ldb, nb);                                               \
     else if (!bc && db)                                                        \
       hipLaunchKernelGGL(                                                      \
           HIP_KERNEL_NAME(                                                     \
               gemm_wmma_kernel<BM, BN, WM, WN, TransB, T, BK, false, true>),   \
           grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1,   \
-          c.swizzle_n, skp, ldb, nb);                                          \
+          sw_eff, skp, ldb, nb);                                               \
     else                                                                       \
       hipLaunchKernelGGL(                                                      \
           HIP_KERNEL_NAME(                                                     \
               gemm_wmma_kernel<BM, BN, WM, WN, TransB, T, BK, false, false>),  \
           grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1,   \
-          c.swizzle_n, skp, ldb, nb);                                          \
+          sw_eff, skp, ldb, nb);                                               \
   } while (0)
 
 #define GEMM_WMMA_TRY(BM, BN, WM, WN, BK)                                      \
