@@ -859,13 +859,15 @@ jobs:
         working-directory: source-therock
         run: |
           $dist = (Resolve-Path .\build\dist\rocm).Path
+          # `--target dist` keeps the toolchain under lib\llvm; only the release
+          # tarball flattens it into bin.
           $required = @(
-            "bin\clang.exe",
-            "bin\lld.exe",
+            "lib\llvm\bin\clang.exe",
+            "lib\llvm\bin\lld.exe",
+            "lib\llvm\bin\clang-offload-bundler.exe",
+            "lib\llvm\amdgcn\bitcode",
             "bin\hipcc.bat",
-            "bin\clang-offload-bundler.exe",
             "bin\hipblaslt.dll",
-            "amdgcn\bitcode",
             "lib\cmake\hip\hip-config.cmake",
             "lib\cmake\hip-lang\hip-lang-config.cmake",
             "lib\cmake\hipblaslt",
@@ -886,7 +888,7 @@ jobs:
             $missing += "bin\hipblaslt\library\<arch>"
           }
           if ($missing) {
-            $missing | ForEach-Object { Write-Error "MISSING: $_" }
+            $missing | ForEach-Object { Write-Host "MISSING: $_" }
             exit 1
           }
 
