@@ -1664,6 +1664,23 @@ int wrap_qconv(RuntimeState *state, const void *input, const void *weights,
   return 0;
 }
 
+int wrap_qsigmoid(RuntimeState *state, const void *input, void *output,
+                  int64_t num_elements, int64_t data_type, float input_scale,
+                  int64_t input_zp, float output_scale, int64_t output_zp) {
+  (void)input;
+  (void)output;
+  (void)input_scale;
+  (void)input_zp;
+  (void)output_scale;
+  (void)output_zp;
+  if (!state)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_qsigmoid(num_elements=%lld, data_type=%s(%lld))\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  return 0;
+}
+
 int wrap_and(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
              int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n, int64_t b_c,
              int64_t b_h, int64_t b_w, int64_t out_n, int64_t out_c,

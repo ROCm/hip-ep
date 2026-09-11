@@ -602,6 +602,47 @@ int dispatch_dequantize_scale(hipStream_t stream, const void *input,
 
 } // namespace
 
+// Materialize the device-side scale/zp scalars consumed by the existing Q/DQ
+// kernels used by wrap_qsigmoid. Keeping this stream-ordered avoids
+// synchronous hipMemcpy that would drain preceding GPU work.
+__global__ void qsigmoid_prepare_params_kernel(
+    float *__restrict__ input_scale_device, float input_scale,
+    float *__restrict__ output_scale_device, float output_scale,
+    uint16_t *__restrict__ input_zp_device, uint16_t input_zp,
+    uint16_t *__restrict__ output_zp_device, uint16_t output_zp) {
+  *input_scale_device = input_scale;
+  *output_scale_device = output_scale;
+  *input_zp_device = input_zp;
+  *output_zp_device = output_zp;
+}
+
+extern "C" int hip_qsigmoid_prepare_params(
+    void *stream, void *input_scale_device, float input_scale,
+    void *output_scale_device, float output_scale, void *input_zp_device,
+    uint16_t input_zp, void *output_zp_device, uint16_t output_zp) {
+  if (!input_scale_device || !output_scale_device || !input_zp_device ||
+      !output_zp_device) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qsigmoid_prepare_params: invalid argument\n");
+    return -1;
+  }
+
+  (void)hipGetLastError();
+  hipLaunchKernelGGL(qsigmoid_prepare_params_kernel, dim3(1), dim3(1), 0,
+                     static_cast<hipStream_t>(stream),
+                     static_cast<float *>(input_scale_device), input_scale,
+                     static_cast<float *>(output_scale_device), output_scale,
+                     static_cast<uint16_t *>(input_zp_device), input_zp,
+                     static_cast<uint16_t *>(output_zp_device), output_zp);
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qsigmoid_prepare_params launch failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
+}
+
 extern "C" int
 hip_quantize_linear(void *stream, const void *input, const void *scale,
                     const void *zero_point, void *output,

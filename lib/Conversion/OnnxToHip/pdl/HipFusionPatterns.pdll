@@ -26,6 +26,7 @@ Constraint HasStaticShapedResults(op: Op);
 Constraint IsUint16Quantized(op: Op);
 Constraint IsFusableQConvGeometry(op: Op);
 Constraint IsPackedInt4PerChannelWeight(op: Op);
+Constraint IsFusableQSigmoid(op: Op);
 
 Rewrite GetContextArg(op: Op) -> Value;
 Rewrite ExtractScaleValue(val: Value) -> Attr;
@@ -36,3 +37,4 @@ Rewrite ExtractAttrInt64(op: Op, name: Attr, defaultValue: Attr) -> Attr;
 #include "QDQMulFusion.pdll"
 #include "QDQMatMulFusion.pdll"
 #include "QDQConvFusion.pdll"
+#include "QDQSigmoidFusion.pdll"

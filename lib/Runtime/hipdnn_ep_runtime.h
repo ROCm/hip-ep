@@ -368,6 +368,13 @@ void *hipdnn_ep_state_get_conv_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
                                         size_t needed_size);
 
+// Per-session scratch for wrap_qsigmoid: one f32 workspace plus device
+// scalars for the Q/DQ kernels. Same grow-on-demand, never-shrink policy
+// as conv_scratch; lazily allocated on first call, freed in cleanup.
+void *hipdnn_ep_state_get_qsigmoid_scratch(RuntimeState *state);
+int hipdnn_ep_state_ensure_qsigmoid_scratch(RuntimeState *state,
+                                            size_t needed_size);
+
 // Per-session scratch for the W4A8 dp4a matmul_nbits decode path
 // (hip_matmul_nbits_dp4a). One contiguous device buffer holding the quantized
 // activation row (int8) plus the per-group activation scales (float). Lazily
@@ -991,6 +998,13 @@ int wrap_qconv(RuntimeState *state, const void *input, const void *weights,
                int64_t activation_dtype, int64_t weight_dtype,
                int64_t weight_bits, int64_t bias_dtype, float input_scale,
                int64_t input_zp, float output_scale, int64_t output_zp);
+
+// Fused quantized sigmoid: Q(sigmoid(DQ(x))) for UINT16 per-tensor QDQ.
+// Input and output scales stay separate because the activation changes
+// values, so matching Q/DQ parameters never hold on LoRA/ORC sandwiches.
+int wrap_qsigmoid(RuntimeState *state, const void *input, void *output,
+                  int64_t num_elements, int64_t data_type, float input_scale,
+                  int64_t input_zp, float output_scale, int64_t output_zp);
 
 // Element-wise Where wrapper (NumPy-style multidirectional broadcasting,
 // arbitrary rank). Computes output[i] = condition[i] ? x[i] : y[i] with
