@@ -294,7 +294,8 @@ OrtStatus *ORT_API_CALL MorphiZenEpFactory::CreateAllocatorImpl(
 #if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
     MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
   if (memory_info != nullptr) {
-    *allocator = new HipGpuAllocator(memory_info, factory->ort_api);
+    *allocator = new HipGpuAllocator(memory_info, factory->ort_api,
+                                     factory->large_pool_budget_);
     return nullptr;
   }
 #endif

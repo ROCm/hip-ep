@@ -137,6 +137,11 @@ struct MorphiZenEpFactory : OrtEpFactory, ApiPtrs {
 
   // Single shared OrtDataTransferImpl returned from CreateDataTransferImpl.
   std::unique_ptr<HipDataTransferImpl> data_transfer_impl_;
+
+  // Pinned-host retention ceiling shared by every allocator this factory
+  // hands out. Owned here because the factory constructs and deletes those
+  // allocators, so it provably outlives them.
+  LargePoolBudget large_pool_budget_;
 #endif
 };
 } // namespace morphizen
