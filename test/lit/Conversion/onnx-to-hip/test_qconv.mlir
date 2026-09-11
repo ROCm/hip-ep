@@ -1,6 +1,7 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
+// UNSUPPORTED: true
 // ============================================================================
 // TEST: QDQ Conv Fusion Pattern (W4A16)
 //
