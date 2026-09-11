@@ -55,8 +55,17 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <dlfcn.h>
 #include <string>
+
+#ifdef _WIN32
+// Included after the LLVM/MLIR headers above, and with the two macro guards,
+// so windows.h's min/max and its wider macro surface cannot rewrite them.
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 
 // ---------------------------------------------------------------------------
 // Minimal mlir-c type/function declarations for the symbols we resolve out of
@@ -167,6 +176,43 @@ struct Api {
   void (*getKernelAttrs)(MlirModule, uint32_t *); // [block, grid, cluster]
   bool (*getBinary)(MlirModule, size_t *, char *);
 };
+
+#ifdef _WIN32
+// Win32 stand-ins for the three POSIX loader calls used below, so the loading
+// logic itself stays platform-independent.
+//
+// RTLD_LOCAL has no Win32 counterpart because it needs none: a DLL never
+// contributes its exports to a process-global namespace, so the symbol
+// isolation that RTLD_LOCAL buys on ELF -- keeping the library's MLIR from
+// interposing this executable's own copy -- is simply how the loader already
+// behaves. The mode argument is therefore ignored.
+static void *dlopen(const char *path, int /*mode*/) {
+  return reinterpret_cast<void *>(LoadLibraryA(path));
+}
+
+static void *dlsym(void *handle, const char *name) {
+  return reinterpret_cast<void *>(
+      GetProcAddress(reinterpret_cast<HMODULE>(handle), name));
+}
+
+static std::string dlerror() {
+  DWORD err = GetLastError();
+  char *text = nullptr;
+  DWORD n = FormatMessageA(
+      FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+          FORMAT_MESSAGE_IGNORE_INSERTS,
+      nullptr, err, 0, reinterpret_cast<char *>(&text), 0, nullptr);
+  std::string msg = n && text ? std::string(text, n) : std::string();
+  if (text)
+    LocalFree(text);
+  while (!msg.empty() && (msg.back() == '\n' || msg.back() == '\r'))
+    msg.pop_back();
+  return msg.empty() ? "error " + std::to_string(err) : msg;
+}
+
+#define RTLD_NOW 0
+#define RTLD_LOCAL 0
+#endif
 
 template <typename T> static bool bind(void *handle, T &fn, const char *name) {
   fn = reinterpret_cast<T>(dlsym(handle, name));
@@ -468,12 +514,32 @@ static bool runRocmlirInSo(const std::string &moduleText,
   return true;
 }
 
+// Write a module as MLIR text for --dump-hip / --dump-tosa. Those dumps are
+// diagnostics on the way to `-o`, so a failure to write one is reported but
+// does not fail the compile.
+static void dumpModule(mlir::ModuleOp mod, llvm::StringRef label,
+                       llvm::StringRef path) {
+  std::error_code ec;
+  llvm::raw_fd_ostream os(path, ec);
+  if (ec) {
+    llvm::errs() << "warning: cannot open '" << path << "' to dump " << label
+                 << " MLIR: " << ec.message() << "\n";
+    return;
+  }
+  mod->print(os);
+  os << "\n";
+  llvm::errs() << "[hip-rocmlir-compiler] wrote " << label << " MLIR to "
+               << path << "\n";
+}
+
 int main(int argc, char **argv) {
   hip::install_crash_handlers("hip-rocmlir-compiler");
 
   std::string inputFilename;
   std::string outputPath;
   std::string userPerfConfig;
+  std::string dumpHipPath;
+  std::string dumpTosaPath;
   bool dumpHighLevel = false;
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
@@ -481,6 +547,10 @@ int main(int argc, char **argv) {
       outputPath = argv[++i];
     } else if (arg == "--perf-config" && i + 1 < argc) {
       userPerfConfig = argv[++i];
+    } else if (arg == "--dump-hip" && i + 1 < argc) {
+      dumpHipPath = argv[++i];
+    } else if (arg == "--dump-tosa" && i + 1 < argc) {
+      dumpTosaPath = argv[++i];
     } else if (arg == "--dump-high-level") {
       dumpHighLevel = true;
     } else if (argv[i][0] != '-') {
@@ -500,6 +570,12 @@ int main(int argc, char **argv) {
            "instead of\n"
         << "                       enumerating the tuning space and taking "
            "the first.\n"
+        << "  --dump-hip <file>    Write the hip MLIR after the ONNX->HIP head "
+           "passes\n"
+        << "                       and fuse-rocmlir, then keep going.\n"
+        << "  --dump-tosa <file>   Write the TOSA MLIR handed to the rocMLIR "
+           "pipeline,\n"
+        << "                       then keep going.\n"
         << "  --dump-high-level    Stop after the rocMLIR high-level pipeline "
            "and\n"
         << "                       write the rock MLIR (text) to <output> "
@@ -554,6 +630,9 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  if (!dumpHipPath.empty())
+    dumpModule(*module, "hip", dumpHipPath);
+
   // Stage 2: on a CLONE, run the hip->tosa conversion (front of
   // buildRocMlirPipeline, minus its terminal hipEpAddHighLevelPipeline -- that
   // runs in the .so), then serialize only the `rock.kernel` funcs and compile
@@ -570,6 +649,12 @@ int main(int argc, char **argv) {
       return 1;
     }
   }
+
+  // Dumped before the non-kernel funcs are dropped below, so the dump shows the
+  // whole module (and matches what `hip-mlir-opt --convert-hip-to-tosa` prints)
+  // rather than just the kernels that cross into the .so.
+  if (!dumpTosaPath.empty())
+    dumpModule(*tosaModule, "tosa", dumpTosaPath);
 
   // The rocMLIR high-level pipeline errors on any non-kernel func (its
   // tosa->rock passes assert a `rock.kernel` attribute and walk ops assuming
