@@ -177,6 +177,9 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
   // NOTE: Foreign functions are registered in custom_init(), which was called
   // by Sbuild_heap before loading boot files
 
+  fprintf(stderr, "[INIT] About to cache Scheme symbols\n");
+  fflush(stderr);
+
   if (logLevel <= SchemeLogLevel::Debug) {
     llvm::errs() << "[debug] About to load SchemeBindings.scm\n";
     llvm::errs() << "[debug] open_string_input_port_sym = " << open_string_input_port_sym << "\n";
@@ -184,6 +187,8 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
   }
 
   // Load the Scheme bindings library
+  fprintf(stderr, "[INIT] Loading SchemeBindings.scm\n");
+  fflush(stderr);
   std::string scm_code(reinterpret_cast<const char*>(scheme_bindings_scm_data),
                        scheme_bindings_scm_size);
 
@@ -192,18 +197,34 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
     llvm::errs() << "[debug] First 50 chars: " << scm_code.substr(0, 50) << "\n";
   }
 
+  fprintf(stderr, "[INIT] Creating string input port\n");
+  fflush(stderr);
   ptr port = Scall1(open_string_input_port_sym, Sstring(scm_code.c_str()));
+  fprintf(stderr, "[INIT] Port created\n");
+  fflush(stderr);
 
   if (logLevel <= SchemeLogLevel::Debug) {
     llvm::errs() << "[debug] Created port = " << port << "\n";
   }
 
+  int expr_count = 0;
   while (true) {
+    fprintf(stderr, "[INIT] Reading expression %d\n", expr_count);
+    fflush(stderr);
     ptr expr = Scall1(read_sym, port);
+    fprintf(stderr, "[INIT] Read expression %d\n", expr_count);
+    fflush(stderr);
     if (Scall1(eof_object_p, expr) != Sfalse)
       break;
+    fprintf(stderr, "[INIT] Evaluating expression %d\n", expr_count);
+    fflush(stderr);
     Scall1(eval_sym, expr);
+    fprintf(stderr, "[INIT] Evaluated expression %d\n", expr_count);
+    fflush(stderr);
+    expr_count++;
   }
+  fprintf(stderr, "[INIT] Loaded %d expressions from SchemeBindings.scm\n", expr_count);
+  fflush(stderr);
 
   // Load PatternDSL.scm (embedded)
   if (logLevel <= SchemeLogLevel::Debug) {
