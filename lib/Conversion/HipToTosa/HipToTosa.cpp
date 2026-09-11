@@ -355,6 +355,24 @@ Value createSplatFloat(ConversionPatternRewriter &rewriter, Location loc,
       DenseElementsAttr::get(type, rewriter.getFloatAttr(elemType, ap)));
 }
 
+// Multiply by a scalar that ONNX carries as an f32 attribute. hipBLASLt scales
+// in f32 even when the data is f16 or bf16 (scaleType = HIP_R_32F while
+// dataType is HIP_R_16F), so for those types widen to f32 around the multiply
+// rather than rounding the scalar down to the data type and losing it there.
+static Value scaleByF32(Value value, float scale, RankedTensorType type,
+                        ConversionPatternRewriter &rewriter, Location loc) {
+  bool widen = !type.getElementType().isF32();
+  RankedTensorType mulType = widen ? type.clone(rewriter.getF32Type()) : type;
+  if (widen)
+    value = tosa::CastOp::create(rewriter, loc, mulType, value);
+  value = tosa::MulOp::create(rewriter, loc, mulType, value,
+                              createSplatFloat(rewriter, loc, mulType, scale),
+                              createZeroMulShift(rewriter, loc));
+  if (widen)
+    value = tosa::CastOp::create(rewriter, loc, type, value);
+  return value;
+}
+
 // hip.gemm is ONNX Gemm: Y = alpha * A' * B' + beta * C, where A and B are
 // optionally transposed and C broadcasts to [M, N]. TOSA has no fused
 // equivalent, so this spells the whole thing out. MIGraphX's ONNX parser
@@ -386,9 +404,12 @@ struct GemmConverter final : public OpConversionPattern<hip::GemmOp> {
       return rewriter.notifyMatchFailure(
           op, "A, B, and result element types must match");
     // alpha and beta are f32 attributes folded in as elementwise multiplies in
-    // the result type, so an integer gemm would silently round them away.
-    if (!isa<FloatType>(elementType))
-      return rewriter.notifyMatchFailure(op, "only float gemm is supported");
+    // the result type, so an integer gemm would silently round them away. f64
+    // is excluded separately: the hipBLASLt path accepts it, but TOSA has no
+    // f64 tensor type, and failing legalization beats emitting invalid TOSA.
+    if (!elementType.isF32() && !elementType.isF16() && !elementType.isBF16())
+      return rewriter.notifyMatchFailure(
+          op, "only f32, f16, and bf16 gemm are supported");
 
     Location loc = op.getLoc();
     bool transA = op.getTransA() != 0;
@@ -421,11 +442,8 @@ struct GemmConverter final : public OpConversionPattern<hip::GemmOp> {
     Value result = reshapeTo(matmul, {m, n}, rewriter);
 
     if (op.getAlpha().convertToFloat() != 1.0f)
-      result =
-          tosa::MulOp::create(rewriter, loc, resultType, result,
-                              createSplatFloat(rewriter, loc, resultType,
-                                               op.getAlpha().convertToFloat()),
-                              createZeroMulShift(rewriter, loc));
+      result = scaleByF32(result, op.getAlpha().convertToFloat(), resultType,
+                          rewriter, loc);
 
     if (Value c = adaptor.getInputC()) {
       auto cType = dyn_cast<RankedTensorType>(c.getType());
@@ -446,13 +464,10 @@ struct GemmConverter final : public OpConversionPattern<hip::GemmOp> {
       if (cShape != ArrayRef<int64_t>(padded))
         c = reshapeTo(c, padded, rewriter);
 
-      if (op.getBeta().convertToFloat() != 1.0f) {
-        auto betaType = cType.clone(padded);
-        c = tosa::MulOp::create(rewriter, loc, betaType, c,
-                                createSplatFloat(rewriter, loc, betaType,
-                                                 op.getBeta().convertToFloat()),
-                                createZeroMulShift(rewriter, loc));
-      }
+      if (op.getBeta().convertToFloat() != 1.0f)
+        c = scaleByF32(c, op.getBeta().convertToFloat(),
+                       cast<RankedTensorType>(cType.clone(padded)), rewriter,
+                       loc);
       result = tosa::AddOp::create(rewriter, loc, resultType, result, c);
     }
 

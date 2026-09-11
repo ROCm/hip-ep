@@ -218,7 +218,7 @@ template <typename T> static bool bind(void *handle, T &fn, const char *name) {
   fn = reinterpret_cast<T>(dlsym(handle, name));
   if (!fn) {
     llvm::errs() << "error: symbol '" << name
-                 << "' not found in librockCompiler.so\n";
+                 << "' not found in the rock compiler library\n";
     return false;
   }
   return true;
@@ -281,13 +281,23 @@ static bool load(Api &api, const std::string &soPath) {
 
 } // namespace rockcapi
 
-// Resolve the librockCompiler.so path: ROCK_COMPILER_SO wins, else the
+// Platform-specific because an MSVC shared-library build emits
+// rockCompiler.dll, not librockCompiler.so.
+static const char *defaultSoPath() {
+#ifdef _WIN32
+  return "build/rockCompiler.dll";
+#else
+  return "build/librockCompiler.so";
+#endif
+}
+
+// Resolve the rock compiler library path: ROCK_COMPILER_SO wins, else the
 // in-tree build location.
 static std::string resolveSoPath() {
   if (const char *env = std::getenv("ROCK_COMPILER_SO"))
     if (env[0] != '\0')
       return env;
-  return "build/librockCompiler.so";
+  return defaultSoPath();
 }
 
 // Run the rocMLIR high-level pipeline inside the .so on the serialized module,
@@ -528,6 +538,16 @@ static void dumpModule(mlir::ModuleOp mod, llvm::StringRef label,
   }
   mod->print(os);
   os << "\n";
+  // raw_fd_ostream defers write and flush failures (a full disk, say) rather
+  // than reporting them at open time, so check before claiming success --
+  // otherwise a truncated dump reads as a good one.
+  os.flush();
+  if (os.has_error()) {
+    llvm::errs() << "warning: failed writing " << label << " MLIR to " << path
+                 << ": " << os.error().message() << "\n";
+    os.clear_error();
+    return;
+  }
   llvm::errs() << "[hip-rocmlir-compiler] wrote " << label << " MLIR to "
                << path << "\n";
 }
@@ -581,8 +601,9 @@ int main(int argc, char **argv) {
         << "                       write the rock MLIR (text) to <output> "
            "instead of\n"
         << "                       the compiled bitcode.\n"
-        << "  Set ROCK_COMPILER_SO to override the .so path "
-           "(default: build/librockCompiler.so).\n";
+        << "  Set ROCK_COMPILER_SO to override the rock compiler library path "
+           "(default: "
+        << defaultSoPath() << ").\n";
     return 1;
   }
 
@@ -651,8 +672,10 @@ int main(int argc, char **argv) {
   }
 
   // Dumped before the non-kernel funcs are dropped below, so the dump shows the
-  // whole module (and matches what `hip-mlir-opt --convert-hip-to-tosa` prints)
-  // rather than just the kernels that cross into the .so.
+  // whole module rather than just the kernels that cross into the .so. Note
+  // this is the *canonicalized* TOSA: `tpm` ran the canonicalizer above, so
+  // dead ops that `hip-mlir-opt --convert-hip-to-tosa` alone would print (the
+  // orphaned `tensor.empty` feeding a dropped DPS `outs`, for one) are gone.
   if (!dumpTosaPath.empty())
     dumpModule(*tosaModule, "tosa", dumpTosaPath);
 

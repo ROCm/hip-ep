@@ -167,6 +167,38 @@ func.func @gemm_integer(%ctx: !hip.context, %a: tensor<4x8xi32>,
 
 // -----
 
+// hipBLASLt runs f64 gemm (HIP_R_64F), but TOSA has no f64 tensor type, so
+// legalization must fail here rather than emit an unrepresentable tosa.matmul.
+func.func @gemm_f64(%ctx: !hip.context, %a: tensor<4x8xf64>,
+                    %b: tensor<8x16xf64>, %init: tensor<4x16xf64>)
+    -> tensor<4x16xf64> attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.gemm'}}
+  %r = hip.gemm(%ctx) ins(%a, %b : tensor<4x8xf64>, tensor<8x16xf64>)
+      outs(%init : tensor<4x16xf64>) : tensor<4x16xf64>
+  return %r : tensor<4x16xf64>
+}
+
+// -----
+
+// hipBLASLt keeps scaleType f32 for f16 data, so a non-unit alpha is applied
+// in f32 instead of being rounded to f16 first.
+// CHECK-LABEL: func.func @gemm_f16_alpha
+// CHECK: %[[MM:.*]] = tosa.matmul
+// CHECK: %[[R:.*]] = tosa.reshape %[[MM]]
+// CHECK: %[[UP:.*]] = tosa.cast %[[R]] : (tensor<4x16xf16>) -> tensor<4x16xf32>
+// CHECK: %[[MUL:.*]] = tosa.mul %[[UP]]
+// CHECK: tosa.cast %[[MUL]] : (tensor<4x16xf32>) -> tensor<4x16xf16>
+func.func @gemm_f16_alpha(%ctx: !hip.context, %a: tensor<4x8xf16>,
+                          %b: tensor<8x16xf16>, %init: tensor<4x16xf16>)
+    -> tensor<4x16xf16> attributes {rock.kernel} {
+  %r = hip.gemm(%ctx) ins(%a, %b : tensor<4x8xf16>, tensor<8x16xf16>)
+      outs(%init : tensor<4x16xf16>)
+      {alpha = 2.000000e+00 : f32} : tensor<4x16xf16>
+  return %r : tensor<4x16xf16>
+}
+
+// -----
+
 // C must broadcast to [M, N]; a length that matches neither 1 nor N is a
 // mismatch ONNX would have rejected at shape inference.
 func.func @gemm_bad_c(%ctx: !hip.context, %a: tensor<4x8xf32>,
