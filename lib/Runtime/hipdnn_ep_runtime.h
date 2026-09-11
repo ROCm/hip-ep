@@ -252,17 +252,13 @@ void *hipdnn_ep_alloc_output(RuntimeState *state, int64_t out_idx,
 //   fs:            morphizen::FileSystem* (void* for C ABI) - must not be null
 //   metadata_blob: FlatBuffers binary blob (HipModelMetaInfo) baked into DLL
 //   blob_size:     Size of metadata_blob in bytes
+//   config:        hipdnn_ep_init_config* (hip/init_config_abi.h) carrying the
+//                  session's provider options, or null. Kept const void* here
+//                  so ordinary runtime TUs do not pull that ABI in.
 // Return codes: 0=success, 1=alloc/read error, 2-11=GPU/runtime init error
 int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
-                                 const void *metadata_blob, size_t blob_size);
-
-// V2 session init: hipdnn_ep_state_init_with_fs plus session-init config, and
-// identical to it when config is null. Return codes are the same.
-// config is a hipdnn_ep_init_config* (hip/init_config_abi.h); kept
-// const void* here so ordinary runtime TUs do not pull that ABI in.
-int hipdnn_ep_state_init_v2(RuntimeState **out_state, void *fs,
-                            const void *metadata_blob, size_t blob_size,
-                            const void *config);
+                                 const void *metadata_blob, size_t blob_size,
+                                 const void *config);
 
 // Cleanup runtime state (destroys handles, frees memory)
 // Best-effort cleanup - continues even if individual operations fail

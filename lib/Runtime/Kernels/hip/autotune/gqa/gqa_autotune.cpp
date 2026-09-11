@@ -46,7 +46,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
-#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -528,30 +527,32 @@ struct Policy {
   int compute_units = 0;
 };
 
-std::optional<GqaAutotuneMode> parseMode(const char *value,
-                                         const char *source) {
-  if (!value || !*value)
-    return std::nullopt;
-
+// Maps a mode name to its enum, ignoring case and whitespace. Returns false
+// when the value names neither mode, leaving `out` untouched.
+bool parseMode(const char *value, GqaAutotuneMode &out) {
   std::string mode;
   for (char c : std::string(value)) {
     if (c > ' ')
       mode.push_back(c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c);
   }
 
-  if (mode == "online")
-    return GqaAutotuneMode::Online;
-  if (mode == "lookup")
-    return GqaAutotuneMode::Lookup;
-
-  fprintf(stderr,
-          "[gqa-autotune] unrecognized %s=\"%s\"; expected lookup or online\n",
-          source, value);
-  return std::nullopt;
+  if (mode == "online") {
+    out = GqaAutotuneMode::Online;
+    return true;
+  }
+  if (mode == "lookup") {
+    out = GqaAutotuneMode::Lookup;
+    return true;
+  }
+  return false;
 }
 
-// HIPDNN_GQA_AUTOTUNE_MODE first, then the gqa_autotune_mode provider option,
-// then the build default. A lever only takes the session when it names a mode.
+// Precedence:
+//   1) environment variable: HIPDNN_GQA_AUTOTUNE_MODE
+//   2) provider option:      gqa_autotune_mode
+//   3) build default:        lookup
+// A lever that does not name a mode is skipped rather than honoured, so the
+// next one still gets its turn.
 GqaAutotuneMode chooseMode(const char *provider_mode) {
 #ifdef _WIN32
   char buf[16];
@@ -561,11 +562,21 @@ GqaAutotuneMode chooseMode(const char *provider_mode) {
 #else
   const char *env = getenv("HIPDNN_GQA_AUTOTUNE_MODE");
 #endif
-  if (auto mode = parseMode(env, "HIPDNN_GQA_AUTOTUNE_MODE"))
-    return *mode;
-  if (auto mode = parseMode(provider_mode, "gqa_autotune_mode"))
-    return *mode;
-  return GqaAutotuneMode::Lookup;
+  GqaAutotuneMode mode = GqaAutotuneMode::Lookup;
+  const bool from_env = env && parseMode(env, mode);
+  const bool from_option =
+      !from_env && provider_mode && parseMode(provider_mode, mode);
+
+  if (logOn())
+    fprintf(stderr,
+            "[gqa-autotune] mode=%s (from %s) HIPDNN_GQA_AUTOTUNE_MODE=[%s], "
+            "gqa_autotune_mode=[%s]\n",
+            mode == GqaAutotuneMode::Online ? "online" : "lookup",
+            from_env      ? "HIPDNN_GQA_AUTOTUNE_MODE"
+            : from_option ? "gqa_autotune_mode"
+                          : "the default",
+            env ? env : "unset", provider_mode ? provider_mode : "unset");
+  return mode;
 }
 
 // The nearest point in the group, plus whether it was accepted by the decode

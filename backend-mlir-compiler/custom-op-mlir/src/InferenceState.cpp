@@ -22,27 +22,18 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND, "0")
 namespace mlir_compilation::customop {
 
 namespace {
-// Resolve and call the init entry point, preferring inference_init_v2 and
-// falling back to inference_init on older artifacts, which do not receive
-// config. FATALs (like the rest of create()) on a missing symbol or non-zero
-// return.
+// Resolve inference_init from the loaded artifact, call it with the session's
+// init config, and return the opaque state. FATALs (like the rest of create())
+// on a missing symbol or non-zero return.
 void *runInit(const LoadedArtifact &artifact, morphizen::FileSystem *fs,
               const hipdnn_ep_init_config *config) {
-  if (auto init_v2 = artifact.get_method<int, void **, void *, const void *>(
-          hipdnn::abi::kInferenceInitV2)) {
-    void *state = nullptr;
-    int ret = init_v2(&state, static_cast<void *>(fs), config);
-    if (ret != 0)
-      LOG(FATAL) << "inference_init_v2() failed with code: " << ret;
-    return state;
-  }
-  auto init_fn =
-      artifact.get_method<int, void **, void *>(hipdnn::abi::kInferenceInit);
+  auto init_fn = artifact.get_method<int, void **, void *, const void *>(
+      hipdnn::abi::kInferenceInit);
   if (!init_fn) {
     LOG(FATAL) << "inference_init not found in artifact.";
   }
   void *state = nullptr;
-  int ret = init_fn(&state, static_cast<void *>(fs));
+  int ret = init_fn(&state, static_cast<void *>(fs), config);
   if (ret != 0) {
     LOG(FATAL) << "inference_init() failed with code: " << ret;
   }
@@ -140,8 +131,8 @@ InferenceState::create(const std::vector<uint8_t> &artifact_bytes,
              "Plugin load): %.3fs (%zu bytes)\n",
              record_elapsed(t_prev), artifact_bytes.size());
 
-  // The init lookup also triggers ORC's lazy codegen for the host wrappers
-  // (LLVM IR), so this also covers first-symbol materialization.
+  // The inference_init lookup also triggers ORC's lazy codegen for the host
+  // wrappers (LLVM IR), so this also covers first-symbol materialization.
   void *state = runInit(*artifact, fs, config);
 
   TIMING_LOG("[Session] inference_init (lookup + lazy codegen): %.3fs\n",

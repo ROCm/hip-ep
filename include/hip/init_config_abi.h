@@ -11,8 +11,8 @@
 extern "C" {
 #endif
 
-// Inference-init config passed through inference_init_v2 as void*, owned by the
-// EP for the duration of hipdnn_ep_state_init_v2.
+// Inference-init config passed through inference_init as void*, owned by the
+// EP for the duration of hipdnn_ep_state_init_with_fs.
 //
 // Enumeration only: init copies the entries into RuntimeState, which outlives
 // this and answers every later lookup.

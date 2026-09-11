@@ -43,26 +43,35 @@ static int per_entry_load_constants(RuntimeState *state,
                                     morphizen::FileSystem *fs,
                                     const char *constants_filename);
 
-static int init_common(RuntimeState **out_state,
-                       morphizen::FileSystem *fileSystem,
-                       const void *metadata_blob, size_t blob_size,
-                       const hipdnn_ep_init_config *config) {
+int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
+                                 const void *metadata_blob, size_t blob_size,
+                                 const void *config) {
   auto t0 = timing_now();
+
+  if (!out_state || !fs) {
+    fprintf(stderr, "Invalid arguments to hipdnn_ep_state_init_with_fs\n");
+    return 1;
+  }
+
   if (int rc = initialize_state_handles(out_state); rc != 0) {
     return rc;
   }
 
+  auto *fileSystem = static_cast<morphizen::FileSystem *>(fs);
+
   // config is borrowed and dies with this call, so copy the options out before
   // anything reads them. Unknown keys are kept for later runtime consumers.
-  if (config && config->provider_option_count && config->provider_option_at) {
-    const size_t n = config->provider_option_count(config->self);
+  const auto *init_config = static_cast<const hipdnn_ep_init_config *>(config);
+  if (init_config && init_config->provider_option_count &&
+      init_config->provider_option_at) {
+    const size_t n = init_config->provider_option_count(init_config->self);
     if (n > 0) {
       auto *options = new ProviderOptions();
       options->reserve(n);
       for (size_t i = 0; i < n; ++i) {
         const char *key = nullptr;
         const char *value = nullptr;
-        config->provider_option_at(config->self, i, &key, &value);
+        init_config->provider_option_at(init_config->self, i, &key, &value);
         if (key)
           (*options)[key] = value ? value : "";
       }
@@ -80,7 +89,8 @@ static int init_common(RuntimeState **out_state,
 #endif
 
   if (!metadata_blob || blob_size == 0) {
-    TIMING_LOG("[Session] state init total: %.3fs (no constants)\n",
+    TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs (no "
+               "constants)\n",
                elapsed_since(t0));
     return 0;
   }
@@ -89,7 +99,8 @@ static int init_common(RuntimeState **out_state,
   auto *constants = meta->constants();
   int64_t count = constants ? (int64_t)constants->size() : 0;
   if (count <= 0) {
-    TIMING_LOG("[Session] state init total: %.3fs (no constants)\n",
+    TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs (no "
+               "constants)\n",
                elapsed_since(t0));
     return 0;
   }
@@ -146,30 +157,9 @@ static int init_common(RuntimeState **out_state,
   RUNTIME_DEBUG_LOG("[CONSTANTS] Loaded constants blob: %zu bytes\n",
                     total_size);
 
-  TIMING_LOG("[Session] state init total: %.3fs\n", elapsed_since(t0));
+  TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs\n",
+             elapsed_since(t0));
   return 0;
-}
-
-int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
-                                 const void *metadata_blob, size_t blob_size) {
-  if (!out_state || !fs) {
-    fprintf(stderr, "Invalid arguments to hipdnn_ep_state_init_with_fs\n");
-    return 1;
-  }
-  return init_common(out_state, static_cast<morphizen::FileSystem *>(fs),
-                     metadata_blob, blob_size, nullptr);
-}
-
-int hipdnn_ep_state_init_v2(RuntimeState **out_state, void *fs,
-                            const void *metadata_blob, size_t blob_size,
-                            const void *config) {
-  if (!out_state || !fs) {
-    fprintf(stderr, "Invalid arguments to hipdnn_ep_state_init_v2\n");
-    return 1;
-  }
-  return init_common(out_state, static_cast<morphizen::FileSystem *>(fs),
-                     metadata_blob, blob_size,
-                     static_cast<const hipdnn_ep_init_config *>(config));
 }
 
 // Shared initialization that brings up HIP device, stream, and hipBLASLt

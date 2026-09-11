@@ -54,8 +54,8 @@ public:
   // `.dll`/`.so` (Native) blob; `kind` selects the loader. `fs` is the
   // morphizen FileSystem that resolves model constants and is forwarded
   // to `inference_init`. Logs FATAL and terminates on failure.
-  // config may be null; it reaches the runtime only on artifacts exporting
-  // inference_init_v2.
+  // `config` carries the session's provider options and may be null; it is
+  // borrowed for the duration of `inference_init`.
   static std::unique_ptr<InferenceState>
   create(const std::vector<uint8_t> &artifact_bytes, morphizen::FileSystem *fs,
          const hipdnn_ep_init_config *config,

@@ -423,8 +423,8 @@ int main(int argc, char **argv) {
       artifact->kind() == mlir_compilation::customop::ArtifactKind::NATIVE)
     std::cout << "Detected native artifact (loaded via morphizen::Plugin)\n";
 
-  auto init_func =
-      artifact->get_method<int, void **, void *>(hipdnn::abi::kInferenceInit);
+  auto init_func = artifact->get_method<int, void **, void *, const void *>(
+      hipdnn::abi::kInferenceInit);
   // Output-allocator ABI: 2-arg inference_compute(state, inputs). Graph outputs
   // are allocated in-graph via the callback installed through
   // hipdnn_ep_set_output_allocator -- there is no outputs span.
@@ -549,7 +549,7 @@ int main(int argc, char **argv) {
   // directory, which matches the WORKING_DIRECTORY set in the e2e CMakeLists.
   mlir::hip::DiskFileSystem fs(".");
   void *state = nullptr;
-  int ret = init_func(&state, &fs);
+  int ret = init_func(&state, &fs, /*config=*/nullptr);
   if (ret != 0) {
     std::cerr << "ERROR: inference_init failed with code " << ret << "\n";
     return 1;

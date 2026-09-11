@@ -13,13 +13,13 @@
 //   2. generate-interface (creates inference_init/compute/cleanup wrappers)
 //
 // Verifies:
-//   1. Wrapper functions are generated, including inference_init_v2.
-//   2. inference_init calls hipdnn_ep_state_init_with_fs.
-//   3. inference_init_v2 calls hipdnn_ep_state_init_v2.
-//   4. inference_compute stages inputs and calls main_graph (outputs
+//   1. Four wrapper functions are generated.
+//   2. inference_init forwards the borrowed config pointer to
+//      hipdnn_ep_state_init_with_fs.
+//   3. inference_compute stages inputs and calls main_graph (outputs
 //      allocated in-graph).
-//   5. inference_cleanup calls hipdnn_ep_state_cleanup.
-//   6. Metadata blob is embedded as a global constant.
+//   4. inference_cleanup calls hipdnn_ep_state_cleanup.
+//   5. Metadata blob is embedded as a global constant.
 // ============================================================================
 
 // RUN: hip-mlir-opt --hip-to-llvm-pipeline %s 2>&1 | FileCheck %s
@@ -27,15 +27,10 @@
 // --- Metadata blob embedded ---
 // CHECK: llvm.mlir.global internal constant @__metadata_blob
 
-// --- inference_init calls state init ---
+// --- inference_init calls state init, forwarding the C config pointer ---
 // CHECK-LABEL: llvm.func @inference_init(
-// CHECK-SAME:  -> i32
-// CHECK:   llvm.call @hipdnn_ep_state_init_with_fs
-
-// --- inference_init_v2 forwards the C config pointer ---
-// CHECK-LABEL: llvm.func @inference_init_v2(
 // CHECK-SAME:  %[[OUT:[^:]+]]: !llvm.ptr, %[[FS:[^:]+]]: !llvm.ptr, %[[CFG:[^:]+]]: !llvm.ptr) -> i32
-// CHECK:   llvm.call @hipdnn_ep_state_init_v2(%[[OUT]], %[[FS]], %{{.*}}, %{{.*}}, %[[CFG]])
+// CHECK:   llvm.call @hipdnn_ep_state_init_with_fs(%[[OUT]], %[[FS]], %{{.*}}, %{{.*}}, %[[CFG]])
 
 // --- inference_compute stages inputs and calls main_graph (2-arg ABI) ---
 // CHECK-LABEL: llvm.func @inference_compute

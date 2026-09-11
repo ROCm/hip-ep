@@ -18,8 +18,6 @@ namespace hipdnn::abi {
 
 // C-ABI entry points emitted by GenerateInterface and resolved by consumers.
 inline constexpr const char *kInferenceInit = "inference_init";
-// Probed like the optional hooks below; absent on older artifacts.
-inline constexpr const char *kInferenceInitV2 = "inference_init_v2";
 inline constexpr const char *kInferenceCompute = "inference_compute";
 inline constexpr const char *kInferenceCleanup = "inference_cleanup";
 inline constexpr const char *kInferenceGetMetadataJson =

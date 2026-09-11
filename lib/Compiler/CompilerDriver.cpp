@@ -179,7 +179,7 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
     logPhase("compileToObject");
 
     // Symbols exported from the generated DLL:
-    //   inference_init(_v2)/compute/cleanup  — runtime entry points
+    //   inference_init/compute/cleanup       — runtime entry points
     //   inference_get_metadata_json          — model metadata query
     //   test_hip_from_dll                    — diagnostic hook for hip-test
     //   hipdnn_ep_runtime_begin_compute      — per-Compute() cache invalidation
@@ -200,7 +200,6 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
     //                                          as test_hip_from_dll below).
     std::vector<std::string> export_symbols = {
         hipdnn::abi::kInferenceInit,
-        hipdnn::abi::kInferenceInitV2,
         hipdnn::abi::kInferenceCompute,
         hipdnn::abi::kInferenceCleanup,
         hipdnn::abi::kInferenceGetMetadataJson,
