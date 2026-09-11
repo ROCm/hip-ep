@@ -82,6 +82,12 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
 
   current_log_level = logLevel;
 
+  // Print immediately to stderr to ensure it appears even if Chez crashes
+  fprintf(stderr, "[INIT] Initializing Chez Scheme runtime %s\n", Skernel_version());
+  fprintf(stderr, "[INIT] Petite boot: %zu bytes\n", petite_boot_size);
+  fprintf(stderr, "[INIT] Scheme boot: %zu bytes\n", scheme_boot_size);
+  fflush(stderr);
+
   if (logLevel <= SchemeLogLevel::Info) {
     llvm::errs() << "[info] Initializing Chez Scheme runtime "
                  << Skernel_version() << "\n";
@@ -94,15 +100,25 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
                           << Skernel_version() << "\n");
 
   // Initialize Scheme system (must be called first)
+  fprintf(stderr, "[INIT] Calling Sscheme_init\n");
+  fflush(stderr);
   Sscheme_init(nullptr);
+  fprintf(stderr, "[INIT] Sscheme_init completed\n");
+  fflush(stderr);
 
   if (logLevel <= SchemeLogLevel::Debug) {
     llvm::errs() << "[debug] Sscheme_init completed\n";
   }
 
   // Register embedded boot files
+  fprintf(stderr, "[INIT] Registering boot files\n");
+  fflush(stderr);
   Sregister_boot_file_bytes("petite.boot", const_cast<void*>(static_cast<const void*>(petite_boot_data)), petite_boot_size);
+  fprintf(stderr, "[INIT] Registered petite.boot\n");
+  fflush(stderr);
   Sregister_boot_file_bytes("scheme.boot", const_cast<void*>(static_cast<const void*>(scheme_boot_data)), scheme_boot_size);
+  fprintf(stderr, "[INIT] Registered scheme.boot\n");
+  fflush(stderr);
 
   if (logLevel <= SchemeLogLevel::Debug) {
     llvm::errs() << "[debug] Boot files registered, calling Sbuild_heap\n";
@@ -110,7 +126,11 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
 
   // Build heap and call custom_init (which registers foreign functions)
   // custom_init is called BEFORE boot files are loaded
+  fprintf(stderr, "[INIT] Calling Sbuild_heap\n");
+  fflush(stderr);
   Sbuild_heap(nullptr, custom_init);
+  fprintf(stderr, "[INIT] Sbuild_heap completed\n");
+  fflush(stderr);
 
   if (logLevel <= SchemeLogLevel::Debug) {
     llvm::errs() << "[debug] Sbuild_heap completed\n";
