@@ -251,16 +251,10 @@ __global__ void qmoe_amd_route_kernel(
   }
 }
 
-// Decode routing specialization for Nemotron's [4096, 512] router.
-//
-// The one-block generic kernel and the first parallel split (8 blocks x 32
-// threads) both leave most CUs idle.  This is a dense GEMV: each block owns
-// eight consecutive experts (one uint4 of router_weight per hidden row) and
-// 128 threads reduce K.  64 blocks is enough to occupy gfx1151 without
-// turning the reduction into a large LDS tax.
-//
+// Parallel decode routing GEMV: each block owns eight consecutive experts
+// (one uint4 of router_weight per hidden row) and 128 threads reduce K.
 // A follow-up kernel does sigmoid, correction-bias top-k and normalization.
-// decode_logits_scratch aliases qmoe_amd's 512-int expert-count buffer.
+// decode_logits_scratch aliases the expert-count buffer.
 static constexpr int kAmdDecodeRouteTileN = kAmdRouteExpertsPerLane;
 static constexpr int kAmdDecodeRouteBlock = 128;
 
@@ -1204,12 +1198,9 @@ extern "C" int hip_qmoe_amd_decode_fused_supported(
 static constexpr int kAmdDecodeTileN = 8;
 #define QMOE_AMD_DECODE_BS_LIST(X) X(32) X(64) X(128) X(256)
 
-// Match the block size to the number of 8-element K chunks. The packed-nibble
-// loop used to consume K in 32-element uint4 tiles, which forced Nemotron's
-// FC1 (K=1024) onto a 32-thread, one-wave block and ~187 VGPRs. Eight-element
-// chunks keep the same dequant (scale is still per 32-wide quant block; the
-// (dot - 8*sum(a))*scale factor is linear in the chunk) and let FC1 use 128
-// threads / FC2 use 256.
+// Block size tracks the number of 8-element K chunks so small-K shapes can
+// still fill a 128- or 256-thread block. Scale stays per 32-wide quant
+// block; the (dot - 8*sum(a))*scale factor is linear in the chunk.
 static inline int amd_decode_block_size(int64_t k_dim) {
   const int64_t units = k_dim / 8;
   if (units >= 256) return 256;

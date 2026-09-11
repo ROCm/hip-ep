@@ -94,16 +94,9 @@ inline mlir::Value readbackShapeEntryToHost(mlir::OpBuilder &b,
     if (idx < dense.getNumElements())
       return materializeConstScalar(b, loc, dense, elemTy, idx);
 
-  // `ReshapeShapeFold` rewrites Reshape(data, Shape(src)) into a
-  // tensor.from_elements of host-side tensor.dim/index_cast values.  Those
-  // values are already available on the host; materialising the temporary
-  // shape tensor and reading each entry back through the device would add one
-  // D2H copy + stream synchronization per dimension.  This is particularly
-  // costly for Nemotron's Mamba norm reshape (three dimensions x 40 layers).
-  //
-  // Peel shape-refining tensor.cast ops, then forward the requested SSA value
-  // directly.  This preserves the exact dynamic extent while avoiding the
-  // otherwise redundant host -> device -> host round trip.
+  // ReshapeShapeFold may already have a host tensor.from_elements of
+  // tensor.dim values. Peel tensor.cast and forward that SSA so the extent
+  // is not copied to the device and read back.
   mlir::Value shapeSource = shape;
   while (auto castOp = shapeSource.getDefiningOp<mlir::tensor::CastOp>())
     shapeSource = castOp.getSource();

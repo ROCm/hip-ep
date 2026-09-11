@@ -2556,9 +2556,9 @@ HIP_KERNEL_API int hip_qmoe_amd_prefill_grouped_fused(
     int64_t block_size,
     int64_t element_size_bytes);
 
-/* Fully device-side expert-grouped QMoE prefill using a specialized ragged
- * WMMA batch (32x64 FC1, 64x64 FC2). packed_latent/packed_act use fixed
- * [num_experts, num_tokens, width] storage; pair maps are [num_tokens*k].
+/* Fully device-side expert-grouped QMoE prefill via ragged WMMA.
+ * packed_latent/packed_act hold expert slices back-to-back in routing order
+ * (valid_rows = sum of counts). pair maps are [num_tokens*k].
  * packed_latent is reused for the FC2 output.
  */
 HIP_KERNEL_API int hip_qmoe_amd_prefill_grouped_wmma(
@@ -2769,8 +2769,8 @@ HIP_KERNEL_API int hip_linear_attention_decode(
 // The gated and gated_delta rules with scalar log-decay
 // (decay_per_key_dim==0) are supported; other rules/layouts/oversized smem are
 // declined. beta may be null for gated and is required for gated_delta.
-// Gated keeps the chunk scan and output in fp32 (Nemotron-H LinearAttention
-// is fp32; the gated_delta WMMA path's fp16 S/Q/K round-trip is not used).
+// Gated keeps the chunk scan and output in fp32; gated_delta uses the WMMA
+// path and may round-trip S/Q/K through fp16.
 // scratch / scratch_bytes: caller-owned device scratch for the chunk-parallel
 // path (RuntimeState::la_scratch, grown on demand, freed on session cleanup).
 // Size it with hip_linear_attention_prefill_scratch_bytes() below. When null or

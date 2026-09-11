@@ -181,9 +181,9 @@ int wrap_qmoe_amd(
   // full hipStreamSynchronize plus a 5-launch chain per active expert on every
   // decode step, which at this op's k is ~110 launches per layer.
   //
-  // Prefill has two fast paths: slot-parallel decode-style fused (opt-in only;
-  // repeats expert weights per token and regresses TTFT) and expert-grouped
-  // fused (default), which buckets on the GPU and GEMVs each expert once.
+  // Prefill has two fast paths: slot-parallel decode-style fused (opt-in;
+  // repeats expert weights per token) and expert-grouped fused (default),
+  // which buckets on the GPU and GEMVs each expert once.
   //
   // Declared here rather than at the branch below because every `goto cleanup`
   // in between would otherwise jump into its scope.
@@ -201,9 +201,7 @@ int wrap_qmoe_amd(
   }();
   // Expert-grouped prefill can use hip_matmul_nbits per active expert (bulk
   // gather, one D2H/sync per layer) instead of the serial GEMV tiles in
-  // qmoe_amd_prefill_fc{1,2}_kernel. ktrace shows the GEMV kernels at ~894 ms
-  // dominate prefill; matmul_nbits matches the legacy expert dispatch compute
-  // path without per-expert gather.
+  // qmoe_amd_prefill_fc{1,2}_kernel.
   static const bool prefill_grouped_matmul = []() {
     const char *value =
         std::getenv("HIPDNN_EP_QMOE_AMD_PREFILL_GROUPED_MATMUL");

@@ -913,10 +913,8 @@ __global__ void la_pf_pass1_local(
     __syncthreads();
 
     // --- Solve 2: W = (I-trilT)^{-1}(diag(beta.*A) K) ---
-    // Pure gated recurrence has no state-dependent delta correction, hence
-    // W does not exist and the fp32 gated scan/pass3 never reads W_g. Do not
-    // clear/store it through Buf: Buf is sized C*dv, which may be smaller than
-    // C*dk (Nemotron has dv=64, dk=128) and would overwrite Asm/clog/bsm/rlast.
+    // Gated has no W. Buf is C*dv; writing a C*dk W tile through it would
+    // clobber Asm/clog/bsm/rlast when dk > dv.
     if constexpr (!GATED_ONLY) {
         for (int idx = tid; idx < Ceff * dk; idx += nthreads) {
             int t = idx / dk, i = idx % dk;
@@ -1259,10 +1257,9 @@ __global__ void __launch_bounds__(256) la_pf_pass3_wmma(
     }
 }
 
-// Gated (not gated_delta) fp32 scan/output. Nemotron-H keeps LinearAttention
-// in fp32; the WMMA path above downcasts S/Q/K to fp16 every chunk and that
-// is enough to derail generation. Gated has W=0 and U=V, so these kernels
-// keep the affine recurrence in fp32 and skip the W GEMMs.
+// Gated (not gated_delta) fp32 scan/output. The WMMA path downcasts S/Q/K
+// to fp16 each chunk; gated keeps the affine recurrence in fp32 and skips
+// the W GEMMs.
 template <typename T>
 __global__ void la_pf_scan_f32(
     const T* __restrict__ key,
@@ -1470,8 +1467,8 @@ static inline LaScratchLayout la_scratch_layout(int B, int seq_len, int Hkv,
     const size_t sz_W     = (size_t)ncb * LA_CHUNK * dk * sizeof(float);
     const size_t sz_rlast = (size_t)ncb * LA_CHUNK * sizeof(float);
     const size_t sz_alast = (size_t)ncb * sizeof(float);
-    // Sized for the fp32 gated scan (Nemotron-H). The gated_delta WMMA path
-    // only fills the leading half of each tile and ignores the rest.
+    // Full dk*dv tile: the fp32 gated scan writes every element. gated_delta
+    // WMMA only fills the leading half and ignores the rest.
     const size_t sz_S0    = (size_t)ncb * dk * dv * sizeof(float);
     // Cross-window carry of the recurrent state, one tile per (batch, kv head).
     // A single-window prefill hands off through `state` directly and never
@@ -1519,10 +1516,8 @@ static int la_launch_parallel(
     float*  carry_f = (float*)(sp + L.oC);
 
     const int block = LA_PAR_THREADS;
-    // Pass 1 LDS: Tm + Buf(=C*dv) + 4 vecs (float), plus the K tile (half) that
-    // only the delta rules read. At dk=128 that tile is 43% of the budget and
-    // is what holds the gated instantiation to 6 blocks/CU, so gated does not
-    // reserve it.
+    // Pass 1 LDS: Tm + Buf(=C*dv) + 4 vecs (float). The K tile (half) is only
+    // for delta rules; gated does not reserve it.
     const size_t s1 = (size_t)(LA_CHUNK * LA_CHUNK + LA_CHUNK * dv +
                                4 * LA_CHUNK) * sizeof(float) +
                       (GATED_ONLY ? 0

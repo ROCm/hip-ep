@@ -38,9 +38,8 @@ __global__ void strided_copy_kernel(T *__restrict__ dst,
                                     StridedCopyParams p) {
   const int64_t total = p.outerTotal * p.rowElems;
   const int64_t gstride = (int64_t)gridDim.x * blockDim.x;
-  // A rank-0 invocation is one contiguous row. Keep this path free of the
-  // 64-bit divide/modulo used to decompose strided outer indices; LA uses it
-  // to seed recurrent state on the compute stream without a copy-engine D2D.
+  // Rank 0 is one contiguous row: copy without the 64-bit div/mod used to
+  // decompose strided outer indices.
   if (p.outerRank == 0) {
     for (int64_t t = (int64_t)blockIdx.x * blockDim.x + threadIdx.x; t < total;
          t += gstride)

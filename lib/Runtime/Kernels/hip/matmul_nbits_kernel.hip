@@ -3155,13 +3155,10 @@ void MatMulNBitsWMMA_ZP(
 // expert whose A/C rows begin at expert_row_offsets[e], while expert_counts
 // supplies the number of valid rows.
 //
-// GemmFp16U4Impl requires A_VL = 2*BM/BN >= 1, so BN cannot exceed 2*BM. The
-// wide-N / short-K case (FC1: N=2688, K=1024) therefore stays at 32x64, which
-// ktrace measured at ~100 GB/s. The long-K case (FC2: N=1024, K=2688) was the
-// remaining 303 ms of TTFT at only ~66 GB/s: 32x64 issues 256 threads through
-// 84 K-steps. 64x64 is the next legal tile: 512 threads and BK_T=64, which
-// halves those round trips. BM=64 still early-exits every y-tile past count,
-// so the extra rows are only intra-block padding against ~5.5 valid tokens.
+// GemmFp16U4Impl requires A_VL = 2*BM/BN >= 1, so BN cannot exceed 2*BM.
+// Wide-N / short-K therefore stays at 32x64. Long-K uses 64x64 (next legal
+// tile: more threads, BK_T=64, fewer K-steps). BM=64 still early-exits every
+// y-tile past count; extra rows are intra-block padding.
 template <int BM_T, int BN_T>
 __global__
 __attribute__((amdgpu_flat_work_group_size(
@@ -3182,12 +3179,10 @@ void MatMulNBitsWMMA_Grouped_NoZP(
     const int count = expert_counts[expert];
     if (static_cast<int>(blockIdx.y) * BM_T >= count) return;
 
-    // Rows are packed back-to-back across experts, so an expert's slice starts
-    // at its routing prefix sum. A fixed max_m stride would instead reserve
-    // num_experts*max_m rows, which at 512 experts and a 2k prompt is ~13x the
-    // rows actually routed. max_m only bounds grid.y now; BOUNDS_CHECK clamps
-    // every A read and C write to `count`, so no tile-aligned padding is
-    // needed between slices.
+    // Rows are packed back-to-back across experts; a slice starts at its
+    // routing prefix sum. max_m only bounds grid.y; BOUNDS_CHECK clamps every
+    // A read and C write to `count`, so no tile-aligned padding is needed
+    // between slices.
     const size_t row0 = static_cast<size_t>(expert_row_offsets[expert]);
     const size_t b_stride = static_cast<size_t>(N) * (K >> 1);
     const size_t s_stride = static_cast<size_t>(N) * num_groups_k;
@@ -3226,9 +3221,8 @@ static bool grouped_wmma_device_is_gfx1151() {
   return cached[device] > 0;
 }
 
-// Keep shape policy separate from the template launches so new architectures
-// and candidate tiles can be added without encoding model or layer names in
-// the dispatcher. Unknown wave32 devices use the conservative 32x64 geometry.
+// Unknown wave32 devices use 32x64. 64x64 when the average expert slice
+// exceeds BM=32, or when K is long relative to N.
 static GroupedWmmaGeometry select_grouped_wmma_geometry(
     int64_t valid_rows, int64_t num_experts, int64_t N, int64_t K) {
   if (!grouped_wmma_device_is_gfx1151())
@@ -3236,9 +3230,6 @@ static GroupedWmmaGeometry select_grouped_wmma_geometry(
 
   const int64_t avg_rows =
       num_experts > 0 ? (valid_rows + num_experts - 1) / num_experts : 0;
-  // gfx1151 measurements show that 64x64's lower synchronization count wins
-  // for long-K projections despite its larger LDS footprint. It is also the
-  // natural candidate once an average expert slice no longer fits 32 rows.
   if (avg_rows > 32 || (K >= 2048 && K >= 2 * N))
     return GroupedWmmaGeometry::k64x64;
   return GroupedWmmaGeometry::k32x64;
