@@ -42,9 +42,10 @@ jobs:
       # ilammy/msvc-dev-cmd and mozilla-actions/sccache-action have no
       # Node.js 24 releases yet; allow Node.js 20 until they are updated.
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
-      # One generic target covering the whole gfx11 family; the pinned TheRock
-      # dist carries the per-ISA vendor data every member needs at runtime.
-      HIP_ARCHITECTURES: "gfx11-generic"
+      # gfx11-generic covers gfx1100-1153; gfx1170 needs its own DLL since its
+      # gfx12-style WMMA encoding excludes it from that generic target. The
+      # pinned TheRock dist carries the per-ISA vendor data both need at runtime.
+      HIP_ARCHITECTURES: "gfx11-generic;gfx1170"
 
     steps:
       # MorphiZen is vendored in-tree as a git subtree under morphizen,
