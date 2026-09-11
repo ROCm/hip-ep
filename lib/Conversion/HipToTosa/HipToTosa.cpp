@@ -87,9 +87,8 @@ static Value transposeTo(Value input, ArrayRef<int64_t> shape,
                          ArrayRef<int32_t> permutation,
                          ConversionPatternRewriter &rewriter, Location loc) {
   auto type = cast<RankedTensorType>(input.getType());
-  return tosa::TransposeOp::create(
-      rewriter, loc, type.clone(shape), input,
-      rewriter.getDenseI32ArrayAttr(permutation));
+  return tosa::TransposeOp::create(rewriter, loc, type.clone(shape), input,
+                                   rewriter.getDenseI32ArrayAttr(permutation));
 }
 
 // Crop `input` to `shape`, anchored at the origin, via tosa.slice.
@@ -166,8 +165,9 @@ struct ConvConverter final : public OpConversionPattern<hip::ConvOp> {
     if (op.getGroup() != 1)
       return rewriter.notifyMatchFailure(
           op, "grouped convolution has no TOSA conv2d spelling");
-    if (inputShape[0] != resultShape[0] ||
-        weightShape[1] != inputShape[1] || weightShape[0] != resultShape[1])
+    if (inputShape[0] != resultShape[0] || weightShape[1] != inputShape[1] ||
+        weightShape[0] != resultShape[1])
+      return rewriter.notifyMatchFailure(op, "incompatible batch or channels");
 
     SmallVector<int64_t> kernelShape = getI64Values(op.getKernelShape());
     if (kernelShape.size() != 2 || kernelShape[0] != weightShape[2] ||
