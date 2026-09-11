@@ -132,7 +132,7 @@ void Dx12Runner::ensure_initialized()
                   << desc_str
                   << " DeviceId=0x" << std::hex << desc.DeviceId
                   << " LUID=0x" << std::setw(16) << std::setfill('0') << luid_val << std::dec
-                  << (is_rdna3_plus ? " [gfx1100+]" : " [pre-gfx1100, not supported]")
+                  << (is_rdna3_plus ? " [gfx1100+]" : " [below DeviceId heuristic]")
                   << "\n"; std::cerr.flush();
 
         // Check whether this adapter matches the selector.
@@ -140,7 +140,7 @@ void Dx12Runner::ensure_initialized()
         switch(sel_mode)
         {
         case SelMode::Auto:
-            matches = is_rdna3_plus || assume_gfx1151_;
+            matches = true; // capability decided later by CheckExtFeatureSupport
             break;
         case SelMode::Index:
             matches = (amd_index == sel_index);
@@ -163,11 +163,12 @@ void Dx12Runner::ensure_initialized()
 
         if(!is_rdna3_plus && !assume_gfx1151_)
         {
-            std::cerr << "[dx12_runner] adapter rejected: DeviceId=0x" << std::hex << desc.DeviceId
-                      << " is below RDNA3 minimum (0x" << RDNA3_MIN_DEVICE_ID << std::dec
-                      << "). See dx12_devices.json for the capability table.\n";
-            adapter.Reset();
-            continue;
+            // DeviceId ordering does not track GPU generation - APUs sit far below the
+            // discrete range - so this is advisory; CheckExtFeatureSupport is the real gate.
+            std::cerr << "[dx12_runner] note: DeviceId=0x" << std::hex << desc.DeviceId
+                      << " is below the RDNA3 discrete-range heuristic (0x"
+                      << RDNA3_MIN_DEVICE_ID << std::dec
+                      << "); relying on CheckExtFeatureSupport instead.\n";
         }
 
         if(SUCCEEDED(D3D12CreateDevice(adapter.Get(),

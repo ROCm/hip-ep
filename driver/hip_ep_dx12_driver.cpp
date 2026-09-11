@@ -47,6 +47,8 @@
  */
 
 #include "dx12/dx12_runner.hpp"
+#include "dx12/hsa_metadata.hpp"
+#include "dx12/elf_single_kernel.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -63,12 +65,15 @@ namespace {
 struct Options
 {
     std::string kernel_path;
-    std::string entry_point   = "hip_ep_add_f32";
-    std::string elf_format    = "hsa_dyn";
+    std::string entry_point   = ""; // empty = use the ELF single kernel
+    std::string elf_format    = "hsa_rel"; // ET_DYN removes the device under PAL
     std::string adapter       = "";
     uint64_t    num_elements  = 16; // matches sample_hip_add_compiler.hip.mlir (1x4x4xf32)
     uint32_t    group_size    = 256;
     unsigned    seed          = 42;
+    std::string verify        = "none"; // none | add | sqrt
+    std::vector<std::int64_t> scalars;  // by_value overrides, in ABI order
+    bool        dump_abi      = false;
     bool        verbose       = false;
     bool        assume_gfx1151 = false;
 };
@@ -83,12 +88,15 @@ void print_usage(const char* argv0)
         "\n"
         "Options:\n"
         "  --kernel <path>     Path to the compiled kernel ELF (required)\n"
-        "  --entry <name>      Kernel entry point symbol (default: hip_ep_add_f32)\n"
-        "  --format <fmt>      hsa_rel | hsa_dyn | pal_rel | pal_dyn (default: hsa_dyn)\n"
+        "  --entry <name>      Kernel symbol (default: the ELF single kernel)\n"
+        "  --format <fmt>      hsa_rel | hsa_dyn | pal_rel | pal_dyn (default: hsa_rel)\n"
         "  --elements <n>      Number of float32 elements (default: 16)\n"
         "  --group-size <n>    Threads per group (default: 256)\n"
         "  --adapter <sel>     Dx12Runner adapter selector (default: auto)\n"
         "  --assume-gfx1151    Accept the selected AMD adapter as gfx1151\n"
+        "  --verify <mode>     none | add | sqrt CPU reference (default: none)\n"
+        "  --scalars a,b       by_value arg values in ABI order (default: --elements)\n"
+        "  --dump-abi          Print kernel ABI from ELF metadata and exit\n"
         "  --seed <n>          RNG seed for random inputs (default: 42)\n"
         "  --verbose           Verbose Dx12Runner logging\n";
 }
@@ -116,6 +124,22 @@ bool parse_args(int argc, char** argv, Options& opts)
             opts.group_size = static_cast<uint32_t>(std::stoul(next("--group-size")));
         else if(arg == "--adapter")
             opts.adapter = next("--adapter");
+        else if(arg == "--dump-abi")
+            opts.dump_abi = true;
+        else if(arg == "--verify")
+            opts.verify = next("--verify");
+        else if(arg == "--scalars")
+        {
+            const std::string s = next("--scalars");
+            for(std::size_t p = 0; p <= s.size(); )
+            {
+                const std::size_t comma = s.find(44, p);
+                const std::string tok = s.substr(p, comma == std::string::npos ? comma : comma - p);
+                if(!tok.empty()) opts.scalars.push_back(std::stoll(tok));
+                if(comma == std::string::npos) break;
+                p = comma + 1;
+            }
+        }
         else if(arg == "--seed")
             opts.seed = static_cast<unsigned>(std::stoul(next("--seed")));
         else if(arg == "--assume-gfx1151")
@@ -178,61 +202,173 @@ int main(int argc, char** argv)
             return 1;
         }
 
-        // Build the add(lhs, rhs) -> output kernel descriptor. Matches the
-        // "add-f32" ABI of driver/dx12/kernels/hip_ep_add_f32.hip:
-        //   (const float* lhs, const float* rhs, float* output, int64_t n)
-        hip_ep::dx12::KernelDescriptor kd;
-        kd.entry_point           = opts.entry_point;
-        kd.hsaco_data            = read_file_bytes(opts.kernel_path);
-        kd.elf_format            = parse_elf_format(opts.elf_format);
-        kd.group_size_x          = opts.group_size;
-        kd.dispatch_x            = static_cast<uint32_t>(
-            (opts.num_elements + opts.group_size - 1) / opts.group_size);
-        kd.output_arg_index      = 2; // lhs=0, rhs=1, output=2
-        kd.output_element_bytes  = sizeof(float);
-        kd.arg_sizes             = {
-            opts.num_elements * sizeof(float), // lhs
-            opts.num_elements * sizeof(float), // rhs
-            opts.num_elements * sizeof(float), // output
-        };
-        kd.scalar_slots.push_back(hip_ep::dx12::ScalarSlot{
-            /*arg_index=*/3,
-            /*value_bytes=*/std::vector<char>(sizeof(int64_t))});
-        std::memcpy(kd.scalar_slots.back().value_bytes.data(), &opts.num_elements,
-                    sizeof(int64_t));
-
-        std::mt19937 rng(opts.seed);
-        std::uniform_real_distribution<float> dist(-4.0f, 4.0f);
-        std::vector<float> lhs(opts.num_elements), rhs(opts.num_elements);
-        for(uint64_t i = 0; i < opts.num_elements; ++i)
+        if(opts.dump_abi)
         {
-            lhs[i] = dist(rng);
-            rhs[i] = dist(rng);
+            auto elf  = read_file_bytes(opts.kernel_path);
+            auto abis = hip_ep::dx12::hsa_md::parse(elf);
+            std::cout << "kernels: " << abis.size() << "\n";
+            for(const auto& a : abis)
+            {
+                std::cout << "\n  " << a.name
+                          << "\n    kernarg_segment_size=" << a.kernarg_segment_size
+                          << " max_flat_workgroup_size=" << a.max_flat_workgroup_size
+                          << " group_segment=" << a.group_segment_fixed_size
+                          << "\n    args (" << a.explicit_arg_count() << " explicit / "
+                          << a.args.size() << " total):\n";
+                for(const auto& g : a.args)
+                {
+                    using AA = hip_ep::dx12::hsa_md::ArgAccess;
+                    const char* acc = g.access == AA::ReadOnly  ? "read_only"
+                                    : g.access == AA::WriteOnly ? "write_only"
+                                    : g.access == AA::ReadWrite ? "read_write" : "-";
+                    std::cout << "      off=" << g.offset << " size=" << g.size
+                              << " kind=" << g.value_kind << " access=" << acc
+                              << (g.name.empty() ? std::string() : (" name=" + g.name)) << "\n";
+                }
+            }
+            return 0;
         }
 
+        // The code object is self-describing: recover the kernel ABI from its
+        // AMDHSA note rather than hard-coding one shape per kernel.
+        auto elf  = read_file_bytes(opts.kernel_path);
+        auto abis = hip_ep::dx12::hsa_md::parse(elf);
+        if(abis.empty())
+            throw std::runtime_error("no AMDHSA kernel metadata in " + opts.kernel_path);
+
+        const hip_ep::dx12::hsa_md::KernelAbi* abi = nullptr;
+        if(opts.entry_point.empty())
+        {
+            if(abis.size() != 1)
+                throw std::runtime_error("ELF holds " + std::to_string(abis.size()) +
+                                         " kernels; select one with --entry");
+            abi = &abis.front();
+        }
+        else
+        {
+            for(const auto& a : abis)
+                if(a.name == opts.entry_point) { abi = &a; break; }
+            if(abi == nullptr)
+                throw std::runtime_error("entry not found in ELF: " + opts.entry_point);
+        }
+
+        // PAL resolves one kernel via its .kd symbol; a multi-kernel object removes the device.
+        if(abis.size() > 1)
+        {
+            auto single = hip_ep::dx12::elf_split::build_single_kernel(elf, abi->name);
+            if(single.empty())
+                throw std::runtime_error("failed to extract single kernel: " + abi->name);
+            std::cout << "extracted single-kernel ELF: " << elf.size() << " -> "
+                      << single.size() << " bytes\n";
+            elf = std::move(single);
+        }
+
+        using AK = hip_ep::dx12::hsa_md::ArgKind;
+        using AA = hip_ep::dx12::hsa_md::ArgAccess;
+
+        hip_ep::dx12::KernelDescriptor kd;
+        kd.entry_point          = abi->name;
+        kd.hsaco_data           = elf;
+        kd.elf_format           = parse_elf_format(opts.elf_format);
+        kd.group_size_x         = opts.group_size;
+        kd.dispatch_x           = static_cast<uint32_t>(
+            (opts.num_elements + opts.group_size - 1) / opts.group_size);
+        kd.output_element_bytes = sizeof(float);
+
+        std::size_t arg_index = 0; // position among explicit (non-hidden) args
+        std::size_t n_scalars = 0;
+        bool        have_out  = false;
+        for(const auto& a : abi->args)
+        {
+            if(a.kind == AK::Hidden)
+                continue;
+            if(a.kind == AK::GlobalBuffer)
+            {
+                kd.arg_sizes.push_back(opts.num_elements * sizeof(float));
+                if(a.access == AA::WriteOnly || a.access == AA::ReadWrite)
+                {
+                    kd.output_arg_index = kd.arg_sizes.size() - 1;
+                    have_out            = true;
+                }
+            }
+            else if(a.kind == AK::ByValue)
+            {
+                // by_value args default to the element count; --scalars overrides in order.
+                std::int64_t v = (n_scalars < opts.scalars.size())
+                                     ? opts.scalars[n_scalars]
+                                     : static_cast<std::int64_t>(opts.num_elements);
+                std::vector<char> bytes(a.size, 0);
+                std::memcpy(bytes.data(), &v, (std::min)(a.size, sizeof(std::int64_t)));
+                kd.scalar_slots.push_back(
+                    hip_ep::dx12::ScalarSlot{arg_index, std::move(bytes)});
+                ++n_scalars;
+            }
+            else
+            {
+                throw std::runtime_error("unsupported arg kind: " + a.value_kind);
+            }
+            ++arg_index;
+        }
+        if(!have_out)
+            throw std::runtime_error("kernel ABI has no write_only buffer");
+        if(kd.arg_sizes.empty())
+            throw std::runtime_error("kernel ABI has no buffer arguments");
+
+        const std::size_t n_inputs = kd.arg_sizes.size() - 1;
+        if(opts.verify == "add" && n_inputs < 2)
+            throw std::runtime_error("--verify add needs at least two input buffers");
+
+        std::mt19937 rng(opts.seed);
+        std::uniform_real_distribution<float> dist(
+            opts.verify == "sqrt" ? 0.25f : -4.0f, 4.0f);
+        std::vector<std::vector<float>> host_in(
+            n_inputs, std::vector<float>(opts.num_elements));
+        for(auto& buf : host_in)
+            for(auto& x : buf) x = dist(rng);
+
         std::vector<std::vector<char>> inputs;
-        inputs.push_back(to_char_buf(lhs));
-        inputs.push_back(to_char_buf(rhs));
+        for(const auto& buf : host_in)
+            inputs.push_back(to_char_buf(buf));
 
         std::cout << "Loading kernel ELF: " << opts.kernel_path
-                   << " (entry=" << opts.entry_point << ", format=" << opts.elf_format
-                   << ", elements=" << opts.num_elements << ")\n";
+                  << " (entry=" << kd.entry_point
+                  << ", format=" << opts.elf_format
+                  << ", buffers=" << kd.arg_sizes.size()
+                  << ", scalars=" << kd.scalar_slots.size()
+                  << ", out_index=" << kd.output_arg_index
+                  << ", elements=" << opts.num_elements << ")\n";
 
         hip_ep::dx12::Dx12Runner runner(opts.adapter, opts.verbose, opts.assume_gfx1151);
         std::vector<float> output = runner.execute(kd, inputs);
 
+        if(opts.verify == "none")
+        {
+            double lo = output.empty() ? 0.0 : output[0];
+            double hi = lo;
+            for(float v : output)
+            {
+                lo = (std::min)(lo, static_cast<double>(v));
+                hi = (std::max)(hi, static_cast<double>(v));
+            }
+            std::cout << "dispatched; output range [" << lo << ", " << hi << "]\nPASS\n";
+            return 0;
+        }
+
         double max_abs_diff = 0.0;
         for(uint64_t i = 0; i < opts.num_elements; ++i)
         {
-            float expected = lhs[i] + rhs[i];
+            float expected = (opts.verify == "sqrt")
+                                 ? std::sqrt(host_in[0][i])
+                                 : (host_in[0][i] + host_in[1][i]);
             max_abs_diff   = (std::max)(max_abs_diff,
                                       static_cast<double>(std::fabs(output[i] - expected)));
         }
-
-        std::cout << "max |output - (lhs+rhs)| = " << max_abs_diff << "\n";
+        std::cout << "max |output - "
+                  << (opts.verify == "sqrt" ? "sqrt(input)" : "(lhs+rhs)")
+                  << "| = " << max_abs_diff << "\n";
         if(max_abs_diff > 1e-4)
         {
-            std::cerr << "FAIL: output does not match CPU-computed lhs+rhs\n";
+            std::cerr << "FAIL: output does not match CPU reference\n";
             return 1;
         }
         std::cout << "PASS\n";
