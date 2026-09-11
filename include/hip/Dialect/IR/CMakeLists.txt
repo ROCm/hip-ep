@@ -37,3 +37,14 @@ set(LLVM_TARGET_DEFINITIONS HipOps.td)
 mlir_tablegen(HipOps.h.inc -gen-op-decls)
 mlir_tablegen(HipOps.cpp.inc -gen-op-defs)
 add_public_tablegen_target(HipOpsIncGen)
+
+# The public header HipDialect.h includes the generated files as
+# "hip/Dialect/IR/*.inc", so consumers need the root three levels above this
+# binary dir on their include path. Embedders remap that dir -- hip-ep uses
+# <build>/include, CGC-IR-Converter uses <build>/hip-generated -- so derive it
+# here rather than assuming a layout.
+get_filename_component(_hip_ir_generated_root
+  "${CMAKE_CURRENT_BINARY_DIR}/../../.." ABSOLUTE)
+set(HIP_IR_GENERATED_INCLUDE_ROOT "${_hip_ir_generated_root}" CACHE INTERNAL
+    "Include root for the TableGen-generated HIP dialect headers")
+unset(_hip_ir_generated_root)
