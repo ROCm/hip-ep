@@ -738,10 +738,10 @@ jobs:
 
       - name: Fetch TheRock sources
         if: steps.cache-therock.outputs.cache-hit != 'true'
-        timeout-minutes: 30
+        timeout-minutes: 45
         shell: pwsh
         working-directory: source-therock
-        run: .\.venv\Scripts\python.exe .\build_tools\fetch_sources.py --jobs 12 --depth 1
+        run: .\.venv\Scripts\python.exe .\build_tools\fetch_sources.py --jobs 4 --depth 1
 
       - name: Prepare sccache local cache
         if: steps.cache-therock.outputs.cache-hit != 'true'
