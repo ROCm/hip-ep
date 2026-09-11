@@ -88,6 +88,9 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
   Sregister_boot_file_bytes("scheme.boot", const_cast<void*>(static_cast<const void*>(scheme_boot_data)), scheme_boot_size);
   Sbuild_heap("hip-mlir-opt", nullptr);
 
+  // Activate the current thread for Scheme execution
+  Sactivate_thread();
+
   // Get and cache Scheme symbols we'll use
   cached_eval_sym = Stop_level_value(Sstring_to_symbol("eval"));
   cached_read_sym = Stop_level_value(Sstring_to_symbol("read"));
