@@ -7,8 +7,10 @@ name: Windows Build (Real)
 on:
   workflow_call:
     inputs:
-      llvm_cache_key:
-        description: Cache key of the prebuilt LLVM/MLIR/LLD install prefix.
+      rocmlirtriton_cache_key:
+        description: >-
+          Cache key of the prebuilt rocmlirTriton tree: the shared LLVM/MLIR/LLD
+          build-tree packages plus the rocMLIR::rockCompiler install prefix.
         required: true
         type: string
       ort_cache_key:
@@ -56,14 +58,34 @@ jobs:
           fetch-depth: 1
           show-progress: false
 
-      # LLVM and ORT are prebuilt by the deps workflow. fail-on-cache-miss
-      # makes the contract explicit: a green deps run means these entries
-      # exist, so a miss is a wiring bug, not a cue to rebuild.
-      - name: Restore llvm-install
+      # build.py derives its build dir from the checkout directory name, and the
+      # restored rocmlirTriton tree has to land inside it: hip-ep resolves the
+      # shared LLVM through build-tree CMake packages that carry absolute paths.
+      - name: Resolve build paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_ROOT="${{ runner.workspace }}/build/$(basename "$PWD")"
+          ROCK_BUILD="$BUILD_ROOT/_rocmlirtriton/build"
+          {
+            echo "ROCK_ROOT=$BUILD_ROOT/_rocmlirtriton"
+            echo "ROCK_SRC=$BUILD_ROOT/_deps/rocmlirtriton-src"
+            echo "ROCK_INSTALL=$BUILD_ROOT/_rocmlirtriton/install"
+            echo "SHARED_LLVM_DIR=$ROCK_BUILD/external/llvm-project/llvm/lib/cmake/llvm"
+            echo "SHARED_MLIR_DIR=$ROCK_BUILD/lib/cmake/mlir"
+            echo "SHARED_LLD_DIR=$ROCK_BUILD/lib/cmake/lld"
+          } >> "$GITHUB_ENV"
+
+      # rocmlirTriton and ORT are prebuilt by the deps workflow.
+      # fail-on-cache-miss makes the contract explicit: a green deps run means
+      # these entries exist, so a miss is a wiring bug, not a cue to rebuild.
+      - name: Restore rocmlirTriton tree
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
-          path: ${{ runner.workspace }}/llvm-install
-          key: ${{ inputs.llvm_cache_key }}
+          path: |
+            ${{ env.ROCK_ROOT }}
+            ${{ env.ROCK_SRC }}
+          key: ${{ inputs.rocmlirtriton_cache_key }}
           fail-on-cache-miss: true
 
       - name: Restore ort-install
@@ -116,6 +138,11 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
+      # The deps job already compiled rocmlirTriton, so this deliberately does
+      # not use build.py --shared_llvm: that would re-run the rocmlirTriton
+      # build, and the cached tree has its object files stripped. Point hip-ep
+      # at the restored build-tree packages directly instead, and link
+      # rocMLIR::rockCompiler out of the restored install prefix.
       - name: Build hip-ep
         shell: bash
         run: |
@@ -123,8 +150,15 @@ jobs:
             --config Release \
             --cmake_generator Ninja \
             --hip_arch "${{ env.HIP_ARCHITECTURES }}" \
-            --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
-            --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON
+            --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ env.ROCK_INSTALL }}" \
+            --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON \
+            --cmake_extra_defines HIPDNN_EP_ENABLE_ROCMLIRTRITON=ON \
+            --cmake_extra_defines HIPDNN_EP_EMBED_LLVM=OFF \
+            --cmake_extra_defines HIPDNN_EP_FETCH_ROCMLIRTRITON=OFF \
+            --cmake_extra_defines "HIPDNN_ROCMLIRTRITON_SOURCE_DIR=${{ env.ROCK_SRC }}" \
+            --cmake_extra_defines "LLVM_DIR=${{ env.SHARED_LLVM_DIR }}" \
+            --cmake_extra_defines "MLIR_DIR=${{ env.SHARED_MLIR_DIR }}" \
+            --cmake_extra_defines "LLD_DIR=${{ env.SHARED_LLD_DIR }}"
 
       # -----------------------------------------------------------------------
       # Stage GPU test package:

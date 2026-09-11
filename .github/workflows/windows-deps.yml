@@ -10,9 +10,11 @@ name: Windows Deps
 on:
   workflow_call:
     outputs:
-      llvm_cache_key:
-        description: Cache key holding the LLVM/MLIR/LLD install prefix.
-        value: ${{ jobs.llvm.outputs.cache_key }}
+      rocmlirtriton_cache_key:
+        description: >-
+          Cache key holding rocmlirTriton's build tree (the shared LLVM/MLIR/LLD
+          that hip-ep compiles against) and its rockCompiler install prefix.
+        value: ${{ jobs.rocmlirtriton.outputs.cache_key }}
       ort_cache_key:
         description: Cache key holding the ONNX Runtime install prefix.
         value: ${{ jobs.ort.outputs.cache_key }}
@@ -27,7 +29,9 @@ permissions:
   contents: read
 
 env:
-  LLVM_TAG: llvmorg-22.1.0
+  # LLVM is no longer built from an upstream tag: it comes from the
+  # external/llvm-project subtree of the rocmlirTriton revision pinned in
+  # cmake/deps.txt, so hip-ep and rocMLIR::rockCompiler share one compiled tree.
   ONNXRUNTIME_VERSION: "1.27.0"
   ONNXRUNTIME_PR_PATCHES: ""
   OGA_VERSION: "0.14.0"
@@ -40,101 +44,164 @@ env:
   AMDGPU_PR_PATCHES: "102 105"
 
 jobs:
-  llvm:
+  # ---------------------------------------------------------------------------
+  # rocmlirTriton builds the pinned LLVM/MLIR/LLD once, and hip-ep compiles
+  # against that same build tree instead of a second copy. The cached entry
+  # therefore carries three things the build jobs cannot reconstruct:
+  #   _deps/rocmlirtriton-src  - the checkout whose external/llvm-project holds
+  #                              the LLVM/MLIR headers the build tree refers to
+  #   _rocmlirtriton/build     - the build-tree LLVM/MLIR/LLD CMake packages
+  #   _rocmlirtriton/install   - the rocMLIR::rockCompiler fat static package
+  # A build-tree package is not relocatable in content but is in location, and
+  # every consumer restores it to the same runner path, so this is safe.
+  # ---------------------------------------------------------------------------
+  rocmlirtriton:
     runs-on: windows-2022
     concurrency:
-      group: deps-llvm-${{ github.ref }}
+      group: deps-rocmlirtriton-${{ github.ref }}
       cancel-in-progress: false
 
     outputs:
       cache_key: ${{ steps.key.outputs.value }}
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: false
+          fetch-depth: 1
+          show-progress: false
+
+      # build.py derives its build dir from the checkout directory name, so
+      # resolve it the same way rather than hardcoding it (the repo has been
+      # renamed once already: onnx-hipdnn-ep -> hip-ep).
+      - name: Resolve build paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_ROOT="${{ runner.workspace }}/build/$(basename "$PWD")"
+          {
+            echo "ROCK_ROOT=$BUILD_ROOT/_rocmlirtriton"
+            echo "ROCK_SRC=$BUILD_ROOT/_deps/rocmlirtriton-src"
+            echo "THEROCK_DIST=${{ runner.workspace }}/therock"
+          } >> "$GITHUB_ENV"
+
       - name: Compute cache key
         id: key
         shell: bash
-        run: echo "value=dep-llvm-${{ env.LLVM_TAG }}" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          REV=$(awk -F';' '$1 == "rocmlirTriton" { print $3 }' cmake/deps.txt)
+          if [ -z "$REV" ]; then
+            echo "ERROR: rocmlirTriton is not pinned in cmake/deps.txt"
+            exit 1
+          fi
+          echo "value=dep-rocmlirtriton-${REV:0:12}" >> "$GITHUB_OUTPUT"
 
-      - name: Probe llvm-install
-        id: cache-llvm
+      - name: Probe rocmlirTriton tree
+        id: cache-rock
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
-          path: ${{ runner.workspace }}/llvm-install
+          path: |
+            ${{ env.ROCK_ROOT }}
+            ${{ env.ROCK_SRC }}
           key: ${{ steps.key.outputs.value }}
           lookup-only: true
 
       - name: Setup Python 3.14
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        if: steps.cache-rock.outputs.cache-hit != 'true'
         uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
         with:
           python-version: "3.14"
 
       - name: Setup MSVC environment
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        if: steps.cache-rock.outputs.cache-hit != 'true'
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
       - name: Prepare sccache local cache
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        if: steps.cache-rock.outputs.cache-hit != 'true'
         shell: bash
         run: |
           echo "SCCACHE_DIR=${{ runner.workspace }}/sccache-dir" >> $GITHUB_ENV
           echo "SCCACHE_KEY_DATE=$(date -u +'%Y%m%d')" >> $GITHUB_ENV
 
       - name: Restore sccache directory
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        if: steps.cache-rock.outputs.cache-hit != 'true'
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/sccache-dir
-          key: sccache-windows-deps-llvm-${{ env.SCCACHE_KEY_DATE }}
+          key: sccache-windows-deps-rocmlirtriton-${{ env.SCCACHE_KEY_DATE }}
           restore-keys: |
-            sccache-windows-deps-llvm-
+            sccache-windows-deps-rocmlirtriton-
 
       - name: Setup sccache
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        if: steps.cache-rock.outputs.cache-hit != 'true'
         uses: mozilla-actions/sccache-action@v0.0.9
 
-      - name: Build LLVM/MLIR/LLD from source
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
+      # rocmlirTriton compiles with TheRock's clang-cl and links with its
+      # lld-link, so the SDK has to be on disk before build.py runs. hip-ep's
+      # own configure normally auto-downloads it, but that happens too late
+      # here: --shared_llvm builds rocmlirTriton first.
+      - name: Fetch TheRock SDK
+        if: steps.cache-rock.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          SRC="${{ runner.workspace }}/llvm-project"
-          git init "$SRC"
-          git -C "$SRC" remote add origin https://github.com/llvm/llvm-project.git
-          git -C "$SRC" fetch --depth 1 origin "${{ env.LLVM_TAG }}"
-          git -C "$SRC" checkout FETCH_HEAD
-          cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
-            -DLLVM_TARGETS_TO_BUILD=X86 \
-            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
-            -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/llvm-install" \
-            -DLLVM_ENABLE_RTTI=ON \
-            -DLLVM_ENABLE_ZLIB=OFF \
-            -DLLVM_ENABLE_ZSTD=OFF \
-            -DLLVM_INCLUDE_TESTS=OFF \
-            -DLLVM_INCLUDE_EXAMPLES=OFF \
-            -DLLVM_INCLUDE_BENCHMARKS=OFF \
-            -DLLVM_BUILD_TOOLS=ON \
-            -DLLVM_INSTALL_UTILS=ON \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-          cmake --build "${{ runner.workspace }}/build-llvm" --target install
+          set -euo pipefail
+          TMP=$(cygpath -u "$RUNNER_TEMP")
+          DEST=$(cygpath -u "${{ env.THEROCK_DIST }}")
+          line=$(grep -E '^therock_windows;' cmake/deps.txt)
+          url=$(echo "$line" | cut -d';' -f2)
+          base=$(echo "$line" | cut -d';' -f3)
+          echo "[therock] $url/$base.tar.gz"
+          curl -sSL --fail -o "$TMP/$base.tar.gz" "$url/$base.tar.gz"
+          mkdir -p "$DEST"
+          ( cd "$TMP" && tar -xzf "$base.tar.gz" -C "$DEST" --strip-components=1 )
+          test -f "$DEST/lib/cmake/hip/hip-config.cmake"
 
-      - name: Save llvm-install
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
+      # --rocmlirtriton_only stops after rockCompiler is installed, so this job
+      # needs no ONNX Runtime prefix (the ort job runs in parallel with it).
+      - name: Build rocmlirTriton (shared LLVM + rockCompiler)
+        if: steps.cache-rock.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          python build.py \
+            --config Release \
+            --cmake_generator Ninja \
+            --hip_arch gfx11-generic \
+            --therock_dist "${{ env.THEROCK_DIST }}" \
+            --rocmlirtriton_only
+
+      # Consumers read this tree only through find_package: they never re-run
+      # ninja in it and never re-resolve the checkout through git. Dropping the
+      # objects and the clone history keeps the entry near 4 GB rather than
+      # 5.2 GB, which matters against the 10 GB per-repo cache budget shared
+      # with the ort / oga / amdgpu / sccache entries.
+      - name: Trim the tree before caching
+        if: steps.cache-rock.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "${{ env.ROCK_SRC }}/.git"
+          find "${{ env.ROCK_ROOT }}/build" -name '*.obj' -delete
+          du -sh "${{ env.ROCK_ROOT }}" "${{ env.ROCK_SRC }}"
+
+      - name: Save rocmlirTriton tree
+        if: steps.cache-rock.outputs.cache-hit != 'true'
         continue-on-error: true
         uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
-          path: ${{ runner.workspace }}/llvm-install
+          path: |
+            ${{ env.ROCK_ROOT }}
+            ${{ env.ROCK_SRC }}
           key: ${{ steps.key.outputs.value }}
 
       - name: Save sccache directory
-        if: always() && steps.cache-llvm.outputs.cache-hit != 'true' && github.ref_name == 'main'
+        if: always() && steps.cache-rock.outputs.cache-hit != 'true' && github.ref_name == 'main'
         continue-on-error: true
         uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/sccache-dir
-          key: sccache-windows-deps-llvm-${{ env.SCCACHE_KEY_DATE }}
+          key: sccache-windows-deps-rocmlirtriton-${{ env.SCCACHE_KEY_DATE }}
 
   ort:
     runs-on: windows-2022

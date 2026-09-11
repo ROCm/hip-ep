@@ -7,8 +7,10 @@ name: Windows Build (Mock)
 on:
   workflow_call:
     inputs:
-      llvm_cache_key:
-        description: Cache key of the prebuilt LLVM/MLIR/LLD install prefix.
+      rocmlirtriton_cache_key:
+        description: >-
+          Cache key of the prebuilt rocmlirTriton tree. The mock build links no
+          rockCompiler, but hip-ep's sources need that tree's MLIR 23 headers.
         required: true
         type: string
       ort_cache_key:
@@ -40,11 +42,30 @@ jobs:
           fetch-depth: 0
           show-progress: false
 
-      - name: Restore llvm-install
+      # The cached rocmlirTriton tree must land on the same paths the deps job
+      # built it on: hip-ep consumes the shared LLVM through build-tree CMake
+      # packages, which embed absolute paths.
+      - name: Resolve build paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_ROOT="${{ runner.workspace }}/build/$(basename "$PWD")"
+          ROCK_BUILD="$BUILD_ROOT/_rocmlirtriton/build"
+          {
+            echo "ROCK_ROOT=$BUILD_ROOT/_rocmlirtriton"
+            echo "ROCK_SRC=$BUILD_ROOT/_deps/rocmlirtriton-src"
+            echo "SHARED_LLVM_DIR=$ROCK_BUILD/external/llvm-project/llvm/lib/cmake/llvm"
+            echo "SHARED_MLIR_DIR=$ROCK_BUILD/lib/cmake/mlir"
+            echo "SHARED_LLD_DIR=$ROCK_BUILD/lib/cmake/lld"
+          } >> "$GITHUB_ENV"
+
+      - name: Restore rocmlirTriton tree
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
-          path: ${{ runner.workspace }}/llvm-install
-          key: ${{ inputs.llvm_cache_key }}
+          path: |
+            ${{ env.ROCK_ROOT }}
+            ${{ env.ROCK_SRC }}
+          key: ${{ inputs.rocmlirtriton_cache_key }}
           fail-on-cache-miss: true
 
       - name: Restore ort-install
@@ -87,6 +108,10 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
+      # rockCompiler needs a real runtime and TheRock, so the mock build cannot
+      # link it. It still compiles the same MLIR 23 sources, so it consumes the
+      # shared LLVM build tree that rocmlirTriton produced -- with fetching off,
+      # so this job never clones rocmlirTriton itself.
       - name: Build hip-ep (mock)
         shell: bash
         run: |
@@ -95,7 +120,13 @@ jobs:
             --config Release \
             --cmake_generator Ninja \
             --build_dir "${{ runner.workspace }}/build/mock" \
-            --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install"
+            --cmake_prefix_path "${{ runner.workspace }}/ort-install" \
+            --cmake_extra_defines HIPDNN_EP_EMBED_LLVM=OFF \
+            --cmake_extra_defines HIPDNN_EP_FETCH_ROCMLIRTRITON=OFF \
+            --cmake_extra_defines "HIPDNN_ROCMLIRTRITON_SOURCE_DIR=${{ env.ROCK_SRC }}" \
+            --cmake_extra_defines "LLVM_DIR=${{ env.SHARED_LLVM_DIR }}" \
+            --cmake_extra_defines "MLIR_DIR=${{ env.SHARED_MLIR_DIR }}" \
+            --cmake_extra_defines "LLD_DIR=${{ env.SHARED_LLD_DIR }}"
 
       # -----------------------------------------------------------------------
       # Exercise the sample plugin's registrar unit test in ISOLATION. This is a

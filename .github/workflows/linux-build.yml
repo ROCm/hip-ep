@@ -21,9 +21,9 @@ concurrency:
 
 env:
   # Pins (kept in lockstep with cmake/deps.txt).
-  # LLVM/MLIR/LLD are built from source at this upstream release tag; bumping it
-  # only invalidates the llvm-install cache.
-  LLVM_TAG: llvmorg-22.1.0
+  # LLVM/MLIR/LLD are no longer built from an upstream tag: they come from the
+  # external/llvm-project subtree of the rocmlirTriton revision pinned in
+  # cmake/deps.txt, so hip-ep and rocMLIR::rockCompiler share one compiled tree.
   ONNXRUNTIME_VERSION: "1.27.0"
   # Space-separated microsoft/onnxruntime PR numbers `git apply`-ed on top of
   # the pinned tag during the from-source build (an empty list applies nothing;
@@ -47,10 +47,10 @@ jobs:
       # MorphiZen is vendored in-tree as a git subtree under morphizen,
       # so no deploy key or submodule initialization is needed.
       #
-      # Checkout at the workspace root. build/, install/, llvm-install/,
-      # ort-install/ live under ${{ runner.workspace }}
-      # (the repo's parent), which is the WORKSPACE build.py derives.
-      # TheRock is auto-downloaded into the build tree by cmake/deps.cmake.
+      # Checkout at the workspace root. build/, install/, ort-install/ and
+      # therock/ live under ${{ runner.workspace }} (the repo's parent), which
+      # is the WORKSPACE build.py derives. The shared LLVM is not a prefix of
+      # its own: it lives inside the build tree, under _rocmlirtriton/.
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -130,47 +130,95 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.9
 
       # -----------------------------------------------------------------------
-      # LLVM/MLIR/LLD/Clang from source -> llvm-install (cached). Caching is a CI
-      # concern, so the prefix build lives here (not in build.py). Recipe
-      # matches cmake/deps.cmake's from-source fallback: clang;mlir;lld, X86 only,
-      # RTTI on, zlib/zstd off, INSTALL_UTILS on.
+      # rocmlirTriton builds the pinned LLVM/MLIR/LLD once, and hip-ep compiles
+      # against that same build tree rather than a second copy. Nothing is built
+      # from an upstream LLVM checkout any more: hip-ep's sources need the MLIR
+      # 23 API that only rocmlirTriton's external/llvm-project subtree provides.
+      #
+      # The cached entry carries what the build cannot reconstruct: the checkout
+      # (whose external/llvm-project holds the headers), the build-tree CMake
+      # packages, and the rocMLIR::rockCompiler install prefix.
       # -----------------------------------------------------------------------
-      - name: Cache LLVM install prefix
-        id: cache-llvm
-        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
-        with:
-          path: ${{ runner.workspace }}/llvm-install
-          # Keyed only on the LLVM tag: a protobuf/ORT bump must not evict the
-          # multi-hour LLVM cache.
-          key: linux-llvm-${{ env.LLVM_TAG }}
-
-      - name: Build LLVM/MLIR/LLD from source
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
+      - name: Resolve build paths
         run: |
           set -euo pipefail
-          SRC="${{ runner.workspace }}/llvm-project"
-          git clone --depth 1 --branch "${{ env.LLVM_TAG }}" \
-            https://github.com/llvm/llvm-project.git "$SRC"
-          cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
-            -DLLVM_TARGETS_TO_BUILD=X86 \
-            -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/llvm-install" \
-            -DLLVM_ENABLE_RTTI=ON \
-            -DLLVM_ENABLE_ZLIB=OFF \
-            -DLLVM_ENABLE_ZSTD=OFF \
-            -DLLVM_INCLUDE_TESTS=OFF \
-            -DLLVM_INCLUDE_EXAMPLES=OFF \
-            -DLLVM_INCLUDE_BENCHMARKS=OFF \
-            -DLLVM_BUILD_TOOLS=ON \
-            -DLLVM_INSTALL_UTILS=ON \
-            -DCMAKE_CXX_VISIBILITY_PRESET=hidden \
-            -DCMAKE_C_VISIBILITY_PRESET=hidden \
-            -DCMAKE_VISIBILITY_INLINES_HIDDEN=ON \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-          cmake --build "${{ runner.workspace }}/build-llvm" --target install
-          rm -rf "$SRC" "${{ runner.workspace }}/build-llvm"
+          # build.py derives its build dir from the checkout directory name, and
+          # the rocmlirTriton tree must sit inside it: hip-ep resolves the shared
+          # LLVM through build-tree CMake packages that embed absolute paths.
+          BUILD_ROOT="${{ runner.workspace }}/build/$(basename "$PWD")"
+          ROCK_BUILD="$BUILD_ROOT/_rocmlirtriton/build"
+          {
+            echo "ROCK_ROOT=$BUILD_ROOT/_rocmlirtriton"
+            echo "ROCK_SRC=$BUILD_ROOT/_deps/rocmlirtriton-src"
+            echo "ROCK_INSTALL=$BUILD_ROOT/_rocmlirtriton/install"
+            echo "SHARED_LLVM_DIR=$ROCK_BUILD/external/llvm-project/llvm/lib/cmake/llvm"
+            echo "SHARED_MLIR_DIR=$ROCK_BUILD/lib/cmake/mlir"
+            echo "SHARED_LLD_DIR=$ROCK_BUILD/lib/cmake/lld"
+            echo "THEROCK_DIST=${{ runner.workspace }}/therock"
+          } >> "$GITHUB_ENV"
+
+      # rocmlirTriton compiles with TheRock's clang and links with its lld, so
+      # the SDK has to be on disk before build.py runs. hip-ep's own configure
+      # normally auto-downloads it, but that is too late here: the shared-LLVM
+      # flow builds rocmlirTriton before hip-ep is ever configured.
+      - name: Fetch TheRock SDK
+        run: |
+          set -euo pipefail
+          line=$(grep -E '^therock_linux;' cmake/deps.txt)
+          url=$(echo "$line" | cut -d';' -f2)
+          base=$(echo "$line" | cut -d';' -f3)
+          echo "[therock] $url/$base.tar.gz"
+          curl -sSL --fail -o "$RUNNER_TEMP/$base.tar.gz" "$url/$base.tar.gz"
+          mkdir -p "${{ env.THEROCK_DIST }}"
+          tar -xzf "$RUNNER_TEMP/$base.tar.gz" \
+            -C "${{ env.THEROCK_DIST }}" --strip-components=1
+          test -f "${{ env.THEROCK_DIST }}/lib/cmake/hip/hip-config.cmake"
+
+      - name: Restore rocmlirTriton tree
+        id: cache-rock
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: |
+            ${{ env.ROCK_ROOT }}
+            ${{ env.ROCK_SRC }}
+          # Keyed only on the rocmlirTriton pin: a protobuf/ORT bump must not
+          # evict the multi-hour LLVM build.
+          key: linux-rocmlirtriton-${{ hashFiles('cmake/deps.txt') }}
+
+      # --rocmlirtriton_only stops once rockCompiler is installed, so the shared
+      # LLVM is cached before hip-ep is configured and a later hip-ep failure
+      # does not throw the LLVM build away.
+      - name: Build rocmlirTriton (shared LLVM + rockCompiler)
+        if: steps.cache-rock.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          python3 build.py \
+            --config Release \
+            --hip_arch "${{ env.HIP_ARCHITECTURES }}" \
+            --therock_dist "${{ env.THEROCK_DIST }}" \
+            --rocmlirtriton_only
+
+      # hip-ep reads this tree only through find_package: it never re-runs ninja
+      # in it and never re-resolves the checkout through git. Dropping the
+      # objects and the clone history roughly halves the entry, which matters
+      # against the 10 GB per-repo cache budget shared with ort / oga / sccache.
+      - name: Trim the tree before caching
+        if: steps.cache-rock.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          rm -rf "${{ env.ROCK_SRC }}/.git"
+          find "${{ env.ROCK_ROOT }}/build" -name '*.o' -delete
+          du -sh "${{ env.ROCK_ROOT }}" "${{ env.ROCK_SRC }}"
+
+      - name: Save rocmlirTriton tree
+        if: steps.cache-rock.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: |
+            ${{ env.ROCK_ROOT }}
+            ${{ env.ROCK_SRC }}
+          key: linux-rocmlirtriton-${{ hashFiles('cmake/deps.txt') }}
 
       # -----------------------------------------------------------------------
       # ONNX Runtime built from source into ort-install (cached): checkout ->
@@ -274,9 +322,12 @@ jobs:
       # (not cached).
 
       # -----------------------------------------------------------------------
-      # Build this project natively via the plain build.py. Deps are
-      # injected as prefixes (llvm-install + ort-install); protobuf/flatbuffers
-      # are resolved from source and TheRock auto-downloaded by cmake/deps.cmake.
+      # Build this project natively via the plain build.py. ORT and
+      # rocMLIR::rockCompiler are injected as prefixes; protobuf/flatbuffers are
+      # resolved from source. This deliberately does not pass --shared_llvm:
+      # rocmlirTriton is already built above, and that flag would re-run its
+      # build against a tree whose object files have been stripped. hip-ep is
+      # pointed at the build-tree packages directly instead.
       # Runtime .so bundling + closure happen in a later step (not in build.py).
       # -----------------------------------------------------------------------
       - name: Build onnx-hipdnn-ep
@@ -285,7 +336,15 @@ jobs:
           python3 build.py \
             --config Release \
             --hip_arch "${{ env.HIP_ARCHITECTURES }}" \
-            --cmake_prefix_path "${{ runner.workspace }}/llvm-install;${{ runner.workspace }}/ort-install"
+            --therock_dist "${{ env.THEROCK_DIST }}" \
+            --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ env.ROCK_INSTALL }}" \
+            --cmake_extra_defines HIPDNN_EP_ENABLE_ROCMLIRTRITON=ON \
+            --cmake_extra_defines HIPDNN_EP_EMBED_LLVM=OFF \
+            --cmake_extra_defines HIPDNN_EP_FETCH_ROCMLIRTRITON=OFF \
+            --cmake_extra_defines "HIPDNN_ROCMLIRTRITON_SOURCE_DIR=${{ env.ROCK_SRC }}" \
+            --cmake_extra_defines "LLVM_DIR=${{ env.SHARED_LLVM_DIR }}" \
+            --cmake_extra_defines "MLIR_DIR=${{ env.SHARED_MLIR_DIR }}" \
+            --cmake_extra_defines "LLD_DIR=${{ env.SHARED_LLD_DIR }}"
 
       # -----------------------------------------------------------------------
       # OGA (onnxruntime-genai) for model_benchmark: a dedicated step using the
@@ -414,14 +473,10 @@ jobs:
           set -euo pipefail
           INSTALL="${{ runner.workspace }}/install"
           ORT="${{ runner.workspace }}/ort-install"
-          # build.py builds into <workspace>/build/<checkout-dir-name>/ (REPO.parent
-          # / build / REPO.name), so derive _therock from the checkout dir name
-          # instead of hardcoding it -- otherwise a repo rename (onnx-hipdnn-ep ->
-          # hip-ep) silently points this at an empty dir and the closure check below
-          # fails with "libamdhip64.so.7 => not found". This step runs in the default
-          # cwd (github.workspace = the checkout), matching windows-build.yml's
-          # `$(basename "$PWD")` idiom.
-          THEROCK="${{ runner.workspace }}/build/$(basename "$PWD")/_therock"
+          # TheRock is fetched explicitly above (the shared-LLVM flow needs it
+          # before hip-ep is configured) and passed through --therock_dist, so
+          # cmake/deps.cmake no longer auto-downloads it into the build tree.
+          THEROCK="${{ env.THEROCK_DIST }}"
           # The renamed AMDGPU OGA integration dlopen's libamdgpu-ep.so; the
           # project still builds the EP as libhipgpu.so. Ship the expected
           # filename so the genai auto-loader resolves it (deps + closure below
@@ -468,19 +523,24 @@ jobs:
           echo "[verify] install/ closure OK"
 
       # -----------------------------------------------------------------------
-      # Bundle our from-source clang/lld alongside the other tools in install/bin
-      # so per-model DLL linking at runtime uses the same LLVM the EP was built
-      # against (not TheRock's ROCm clang). clang locates its resource dir
-      # relative to its own binary (bin/../lib/clang), so dropping the driver in
-      # bin/ and the resource dir in lib/clang gives a self-contained tree with a
-      # single bin/ on PATH -- no separate llvm/ path. LLVM is built static (no
-      # LLVM_LINK_LLVM_DYLIB), so the drivers depend only on system libs; ldd-grab
-      # any stray non-system dep (normally none).
+      # Bundle clang/lld alongside the other tools in install/bin so per-model
+      # DLL linking works at runtime. clang locates its resource dir relative to
+      # its own binary (bin/../lib/clang), so dropping the driver in bin/ and the
+      # resource dir in lib/clang gives a self-contained tree with a single bin/
+      # on PATH -- no separate llvm/ path.
+      #
+      # These now come from TheRock rather than a hip-ep-built LLVM: the shared
+      # LLVM is rocmlirTriton's external/llvm-project, which enables mlir and lld
+      # but not clang, so there is no in-tree driver to ship. That matches how
+      # lib/Runtime already sources clang for its bitcode step. The runtime link
+      # is a plain host `clang++ -shared -fuse-ld=lld`, so the driver does not
+      # have to match the LLVM the EP itself was compiled with.
       # -----------------------------------------------------------------------
       - name: Bundle clang/lld toolchain
         run: |
           set -euo pipefail
-          LLVM="${{ runner.workspace }}/llvm-install"
+          LLVM="${{ env.THEROCK_DIST }}/lib/llvm"
+          [ -d "$LLVM/bin" ] || LLVM="${{ env.THEROCK_DIST }}"
           BIN="${{ runner.workspace }}/install/bin"
           LIB="${{ runner.workspace }}/install/lib"
           mkdir -p "$BIN" "$LIB"
