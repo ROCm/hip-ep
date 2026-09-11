@@ -46,10 +46,6 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
         return std::string(b);
       },
       state);
-  if (router_weights) {
-    fprintf(stderr, "wrap_qmoe: router_weights is not supported yet\n");
-    return -1;
-  }
   if (!state || !input || !router_probs || !output) {
     fprintf(stderr, "wrap_qmoe: null argument\n");
     return -1;
@@ -188,12 +184,13 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   void *d_a_scale_mid = scratch_base + off_a_scale_mid;
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: topk_routing(tokens=%lld, experts=%lld, "
-                    "k=%lld, normalize=%lld)\n",
+                    "k=%lld, normalize=%lld, router_weights=%s)\n",
                     (long long)num_tokens, (long long)num_experts, (long long)k,
-                    (long long)normalize_routing_weights);
-  HIP_CHECK(hip_qmoe_topk_routing(stream, router_probs, d_expert_indices,
-                                  d_expert_weights, num_tokens, num_experts, k,
-                                  normalize_routing_weights, elem_size));
+                    (long long)normalize_routing_weights,
+                    router_weights ? "yes" : "no");
+  HIP_CHECK(hip_qmoe_topk_routing(
+      stream, router_probs, router_weights, d_expert_indices, d_expert_weights,
+      num_tokens, num_experts, k, normalize_routing_weights, elem_size));
 
   // Fused decode fast path: single-token MoE collapses to three back-to-back
   // kernel launches (FC1+SwiGLU, FC2, weighted reduce) with zero D2H,

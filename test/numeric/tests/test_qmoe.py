@@ -22,7 +22,11 @@ Weight statistics (from real model, layer 0):
 
 Input context:
   hidden input:   post-layernorm, approximately normalised (range [-1, 1])
-  router weights: raw logits from router projection (range [-5, 5], std ~ 1.2)
+  router probs:   raw logits from router projection (range [-5, 5], std ~ 1.2)
+
+The optional router_weights input (index 14) decouples selection from
+aggregation: router_probs still picks the top-k experts, but the mixing
+weights are gathered from router_weights at those indices.
 """
 
 import numpy as np
@@ -54,6 +58,8 @@ def _make_qmoe_model(
     down_scale_range: tuple[float, float] = (0.001, 0.02),
     down_bias_range: tuple[float, float] = (-0.5, 0.5),
     seed: int = 42,
+    with_router_weights: bool = False,
+    normalize_routing_weights: int = 1,
 ):
     """Build a QMoE ONNX model with random quantized expert weights.
 
@@ -76,6 +82,11 @@ def _make_qmoe_model(
         [batch, seq_len, hidden],
     )
     router = helper.make_tensor_value_info(
+        "router_probs",
+        TensorProto.FLOAT16,
+        [seq_len, num_experts],
+    )
+    router_weights = helper.make_tensor_value_info(
         "router_weights",
         TensorProto.FLOAT16,
         [seq_len, num_experts],
@@ -131,21 +142,32 @@ def _make_qmoe_model(
         numpy_helper.from_array(down_bias, name="down_bias"),
     ]
 
+    node_inputs = [
+        "input",
+        "router_probs",
+        "gate_up_qweight",
+        "gate_up_scales",
+        "gate_up_bias",
+        "down_qweight",
+        "down_scales",
+        "down_bias",
+        "",  # 8: fc3_experts_weights
+        "",  # 9: fc3_scales
+        "",  # 10: fc3_experts_bias
+    ]
+    graph_inputs = [x, router]
+    if with_router_weights:
+        node_inputs += [
+            "",  # 11: fc1_zero_points
+            "",  # 12: fc2_zero_points
+            "",  # 13: fc3_zero_points
+            "router_weights",  # 14
+        ]
+        graph_inputs.append(router_weights)
+
     node = helper.make_node(
         "QMoE",
-        [
-            "input",
-            "router_weights",
-            "gate_up_qweight",
-            "gate_up_scales",
-            "gate_up_bias",
-            "down_qweight",
-            "down_scales",
-            "down_bias",
-            "",
-            "",
-            "",
-        ],
+        node_inputs,
         ["output"],
         domain="com.microsoft",
         activation_type="swiglu",
@@ -153,7 +175,7 @@ def _make_qmoe_model(
         activation_beta=1.0,
         expert_weight_bits=4,
         k=top_k,
-        normalize_routing_weights=1,
+        normalize_routing_weights=normalize_routing_weights,
         swiglu_fusion=1,
         use_sparse_mixer=0,
         block_size=block_size,
@@ -163,7 +185,7 @@ def _make_qmoe_model(
     ms_opset = helper.make_opsetid("com.microsoft", 1)
     return make_model_from_nodes(
         [node],
-        [x, router],
+        graph_inputs,
         [output],
         initializers=initializers,
         opset=21,
@@ -236,3 +258,41 @@ class TestQMoE:
 
         actual, expected = model_runner.run_sample(model, [x, router])
         compare_outputs(actual, expected, atol=1e-1, rtol=1e-2, cos_threshold=0.99)
+
+    @pytest.mark.parametrize("normalize", [0, 1])
+    @pytest.mark.parametrize("seq_len", [1, 8])
+    def test_qmoe_router_weights(self, model_runner, seq_len, normalize):
+        """QMoE with the optional router_weights input (index 14).
+
+        router_probs and router_weights are drawn independently, so a build
+        that ignored the gather and kept using softmax(router_probs) would
+        produce different mixing weights and fail the comparison.
+
+        router_weights stays strictly positive: ORT's CPU kernel drops routes
+        whose gathered weight falls to <= 1e-8, which this runtime does not
+        replicate, and that divergence is out of scope here.
+        """
+        hidden, intermediate, num_experts, top_k = 64, 128, 4, 2
+        model = _make_qmoe_model(
+            1,
+            seq_len,
+            hidden,
+            intermediate,
+            num_experts,
+            top_k,
+            with_router_weights=True,
+            normalize_routing_weights=normalize,
+        )
+
+        rng = np.random.default_rng(99)
+        x = rng.uniform(-1, 1, [1, seq_len, hidden]).astype(np.float16)
+        router_probs = rng.standard_normal([seq_len, num_experts]).astype(np.float16)
+        router_weights = rng.uniform(0.05, 1.0, [seq_len, num_experts]).astype(
+            np.float16,
+        )
+
+        actual, expected = model_runner.run_sample(
+            model,
+            [x, router_probs, router_weights],
+        )
+        compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
