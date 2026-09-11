@@ -40,22 +40,11 @@ const size_t pattern_dsl_scm_size = sizeof(pattern_dsl_scm_data) - 1;
 
 namespace {
 static bool scheme_initialized = false;
-static SchemeLogLevel init_log_level = SchemeLogLevel::Warning;
 // Cached Scheme symbols for script loading
 static ptr cached_eval_sym = nullptr;
 static ptr cached_read_sym = nullptr;
 static ptr cached_open_string_input_port_sym = nullptr;
 static ptr cached_eof_object_p = nullptr;
-
-// Custom init called by Sbuild_heap before loading boot files
-static void custom_init() {
-  // Register all MLIR foreign functions
-  registerMlirForeignFunctions();
-
-  if (init_log_level <= SchemeLogLevel::Debug) {
-    llvm::errs() << "[debug] custom_init: Registered foreign functions\n";
-  }
-}
 }
 
 namespace mlir {
@@ -63,6 +52,16 @@ namespace hipsr {
 
 // Current log level - used by FFI logging functions
 static SchemeLogLevel current_log_level = SchemeLogLevel::Warning;
+
+// Custom init called by Sbuild_heap before loading boot files
+static void custom_init() {
+  // Register all MLIR foreign functions
+  registerMlirForeignFunctions();
+
+  if (current_log_level <= SchemeLogLevel::Debug) {
+    llvm::errs() << "[debug] custom_init: Registered foreign functions\n";
+  }
+}
 
 SchemeLogLevel parseLogLevel(const std::string& level) {
   if (level == "trace") return SchemeLogLevel::Trace;
@@ -82,7 +81,6 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
     return true;
 
   current_log_level = logLevel;
-  init_log_level = logLevel;
 
   if (logLevel <= SchemeLogLevel::Info) {
     llvm::errs() << "[info] Initializing Chez Scheme runtime "
