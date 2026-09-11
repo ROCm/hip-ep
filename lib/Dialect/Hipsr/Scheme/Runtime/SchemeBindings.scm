@@ -90,6 +90,20 @@
   (foreign-procedure "mlir_operation_get_block_argument" (unsigned-64 int) unsigned-64))
 
 ;;===----------------------------------------------------------------------===;;
+;; Phase 3: IR Construction FFI (OpBuilder)
+;;===----------------------------------------------------------------------===;;
+
+;; Create hipsr.placeholder operation
+;; TODO: Requires PatternRewriter context integration
+(define mlir-create-placeholder-op
+  (foreign-procedure "mlir_create_placeholder_op" (unsigned-64 unsigned-64 unsigned-64 int) unsigned-64))
+
+;; Create hipsr.cast operation
+;; TODO: Requires PatternRewriter context integration
+(define mlir-create-cast-op
+  (foreign-procedure "mlir_create_cast_op" (unsigned-64 unsigned-64 unsigned-64 unsigned-64) unsigned-64))
+
+;;===----------------------------------------------------------------------===;;
 ;; High-level Scheme API
 ;;===----------------------------------------------------------------------===;;
 
