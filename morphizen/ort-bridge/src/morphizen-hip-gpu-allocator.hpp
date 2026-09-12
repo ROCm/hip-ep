@@ -15,6 +15,8 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
+#include <map>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -24,9 +26,8 @@ namespace morphizen {
 // Fixed size-class boundaries (bytes). A request of N bytes is served from the
 // first class whose capacity is >= N, and the buffer is allocated at the full
 // class capacity so any later request mapping to the same class can reuse it.
-// Requests larger than the last class (> 16 MB) are NOT pooled: they are
-// allocated at their exact size and released straight back to the driver in
-// FreeImpl, so a one-off huge transient can never pin memory in a free list.
+// Requests larger than the last class (> 16 MB) do not use this table; they go
+// through the capacity-keyed large pool described on HipGpuAllocator.
 //
 // The class boundaries are generated at compile time in four tiers, with the
 // tier edges de-duplicated where they meet:
@@ -120,6 +121,12 @@ private:
   static const OrtMemoryInfo *ORT_API_CALL InfoImpl(const OrtAllocator *this_);
   static void *ORT_API_CALL ReserveImpl(OrtAllocator *this_, size_t size);
 
+  // All three expect pool_mutex_ held and append buffers the caller must hand
+  // to the driver after releasing it.
+  void DropOutgrown(size_t size, std::vector<void *> &out);
+  bool EvictLruLarge(size_t keep, std::vector<void *> &out);
+  void DrainLarge(std::vector<void *> &out);
+
   // Fixed size-class caching allocator. hipHostMalloc is a heavyweight
   // (page-pinning) call: ORT re-allocates the per-Run input device-copy
   // buffers and (allocator mode) the graph-output buffers on EVERY inference,
@@ -136,13 +143,18 @@ private:
   // project's per-session "grow-on-demand, never shrink, free at cleanup"
   // memory contract.
   //
-  // Requests larger than the largest size class (> 16 MB) are NOT pooled: they
-  // are allocated at their exact size and released straight back to the driver
-  // in FreeImpl. A model's largest transients are few and shape-specific, so
-  // pooling them buys little reuse while risking an unbounded pinned working
-  // set when a model grows its largest transient a little each Run. Treating
-  // them as one-shot allocations keeps peak memory bounded with no eviction
-  // bookkeeping.
+  // Requests above 16 MB are pooled separately, keyed by the buffer's capacity
+  // rather than by a class, because the allocation that matters there is a KV
+  // tensor that grows by one token's worth every decode step when a model runs
+  // with past_present_share_buffer=false. No two steps ask for the same size,
+  // so an exact-size pool never hits and every step page-pins a fresh buffer.
+  //
+  // A request is served by the smallest retained buffer that is big enough for
+  // it, which is what lets one buffer cover a whole run of growing requests. A
+  // buffer only gets growth headroom once a request has actually exceeded the
+  // largest size seen in its octave; until then it is allocated at exactly the
+  // requested size, so a model whose tensors never change size pays no waste
+  // and still reuses its buffers across generators.
   //
   // Reuse needs no per-handout stream sync: ORT only calls Free after Run
   // returns, and allocator-mode inference_compute ends with a full
@@ -158,6 +170,31 @@ private:
   // destructor can release them; a large buffer is erased from this map in
   // FreeImpl when it is freed back to the driver.
   std::unordered_map<void *, size_t> ptr_to_size_;
+
+  // Large pool. Ordered so a request can find the smallest capacity that fits
+  // it with one lower_bound; empty buckets are erased.
+  struct LargeBucket {
+    std::vector<void *> free;
+    uint64_t last_used = 0;
+  };
+  std::map<size_t, LargeBucket> large_free_;
+  // Per octave of the request size. `growing` latches the first time a request
+  // exceeds the largest already seen there, which a fixed-size tensor never
+  // does. It has to latch rather than be re-tested per request because every
+  // layer asks for the same size within one decode step, so only the first of
+  // them would see an increase.
+  struct OctaveState {
+    size_t high_water = 0;
+    bool growing = false;
+  };
+  std::array<OctaveState, 64> octaves_{};
+  uint64_t large_ops_ = 0;
+  size_t large_live_bytes_ = 0;
+  // Retention ceiling: the pool never holds more idle bytes than the most this
+  // model has had checked out at once, so it scales with the context the model
+  // is run at instead of with a fixed share of RAM.
+  size_t large_peak_live_bytes_ = 0;
+  size_t large_retained_bytes_ = 0;
 
   const OrtMemoryInfo *memory_info_;
   // Cached at construction time. -1 means "couldn't read it from memory_info"
