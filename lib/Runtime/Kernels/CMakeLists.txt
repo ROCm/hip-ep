@@ -41,6 +41,7 @@ set(_kernel_sources
     hip/multi_head_attention_kernel.hip
     hip/gemm_wmma_kernel.hip
     hip/ck_gemm.hip
+    hip/ref_gemm.hip
     hip/elementwise_sub_kernel.hip
     hip/elementwise_reciprocal_kernel.hip
     hip/elementwise_sqrt_kernel.hip
@@ -95,7 +96,9 @@ set(_kernel_sources
     hip/strided_copy_kernel.hip
 )
 
-set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/hip/ck_gemm.hip
+set_source_files_properties(
+    ${CMAKE_CURRENT_SOURCE_DIR}/hip/ck_gemm.hip
+    ${CMAKE_CURRENT_SOURCE_DIR}/hip/ref_gemm.hip
     PROPERTIES HIP_KEEP_HOST_DEVICE_CONSTEXPR ON)
 
 # MatMulNBits offline autotune table.

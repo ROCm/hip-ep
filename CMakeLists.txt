@@ -89,12 +89,6 @@ option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
 # Build the REAL runtime without the vendor BLAS backend (hipBLASLt).
 # The hipBLASLt-backed op wrappers compile to error-returning stubs that
 # preserve their ABI, and the model link + package discovery drop that library.
-# For targets whose ROCm distribution lacks a usable hipBLASLt (e.g. a
-# pre-silicon functional model, or a stripped SDK): the compiler still links and
-# runs; only gemm/hipBLASLt ops are unavailable (they fail at runtime with a
-# clear message unless a plugin supplies replacements).
-option(HIPDNN_EP_DISABLE_VENDOR_BLAS
-  "Build the real runtime without hipBLASLt (stub the vendor op wrappers)" OFF)
 option(BUILD_HIP_UNIT_TESTS "Build and register LIT and E2E tests with CTest" ON)
 option(BUILD_PYTHON_WHEEL "Configure the 'wheel' target that packages the EP as a Python wheel" OFF)
 

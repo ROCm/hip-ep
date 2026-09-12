@@ -774,21 +774,6 @@ int wrap_conv_transpose(
     int64_t group,            // Number of groups
     int64_t data_type);       // HIPDNN_EP_DATATYPE_* element type
 
-//===----------------------------------------------------------------------===//
-// Library Operations (hipBLAS)
-//===----------------------------------------------------------------------===//
-
-// hipBLASLt GEMM operation wrapper
-// Called by generated IR for matrix multiplication operations
-int wrap_hipblasLtGemm(void *handle, // hipBLASLt handle
-                       void *stream, // HIP stream
-                       int64_t m, int64_t n, int64_t k,
-                       const void *alpha, // Scalar alpha
-                       const void *A,     // Matrix A GPU pointer
-                       const void *B,     // Matrix B GPU pointer
-                       const void *beta,  // Scalar beta
-                       void *C);          // Matrix C GPU pointer (in/out)
-
 // MatMul operation wrapper (batched matrix multiplication)
 // Called by generated IR for onnx.MatMul lowering
 // Computes output = A @ B for each batch

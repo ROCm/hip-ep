@@ -14,13 +14,6 @@ add_library(LibHipCompiler STATIC
   # cmake/HipEpPlugins.cmake); empty => dispatch is a no-op.
   StaticPlugins.cpp
 )
-
-# When hipBLASLt is disabled, the model link must not add -lhipblaslt
-# (CompilerDriver gates that behind this define).
-if(HIPDNN_EP_DISABLE_VENDOR_BLAS)
-  target_compile_definitions(LibHipCompiler PRIVATE HIPDNN_EP_DISABLE_VENDOR_BLAS)
-endif()
-
 # Link against required libraries
 target_link_libraries(LibHipCompiler PUBLIC
   HipConversion

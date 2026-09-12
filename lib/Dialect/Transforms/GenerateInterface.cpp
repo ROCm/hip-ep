@@ -431,8 +431,6 @@ private:
         {"hipStreamCreate", i32, {ptr}},
         {"hipStreamDestroy", i32, {ptr}},
         {"hipStreamSynchronize", i32, {ptr}},
-        {"hipblasLtCreate", i32, {ptr}},
-        {"hipblasLtDestroy", i32, {ptr}},
         {"hipdnn_ep_state_cleanup", i32, {ptr}},
         {"wrap_hipMalloc", i32, {ptr, i64}},
         {"wrap_hipFree", i32, {ptr}},

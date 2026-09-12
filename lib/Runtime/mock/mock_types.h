@@ -14,9 +14,10 @@
 // Mock type definitions for testing without GPU
 typedef void *hipStream_t;
 typedef void *hipEvent_t;
+// Vestigial: RuntimeState still carries a (never-created) handle field of this
+// type for the out-of-tree GQA dispatch_bench harness; no GEMM uses it.
 typedef void *hipblasLtHandle_t;
 typedef int hipError_t;
-typedef int hipblasStatus_t;
 
 struct hipDeviceProp_t {
   char name[256];
@@ -25,7 +26,6 @@ struct hipDeviceProp_t {
 };
 
 #define hipSuccess 0
-#define HIPBLAS_STATUS_SUCCESS 0
 #define hipMemcpyHostToDevice 0
 #define hipMemcpyDeviceToHost 1
 #define hipHostMallocDefault 0
@@ -66,7 +66,5 @@ extern "C" hipError_t hipEventElapsedTime(float *ms, hipEvent_t start,
 extern "C" hipError_t hipHostGetDevicePointer(void **devPtr, void *hstPtr,
                                               unsigned int flags);
 extern "C" const char *hipGetErrorString(hipError_t error);
-extern "C" hipblasStatus_t hipblasLtCreate(hipblasLtHandle_t *handle);
-extern "C" hipblasStatus_t hipblasLtDestroy(hipblasLtHandle_t handle);
 
 #endif // HIPDNN_EP_RUNTIME_MOCK_TYPES_H

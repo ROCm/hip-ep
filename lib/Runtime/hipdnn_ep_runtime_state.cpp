@@ -148,6 +148,9 @@ static int initialize_state_handles(RuntimeState **out_state) {
   }
 
   state->stream = nullptr;
+  // Vestigial: the product no longer creates a vendor BLAS handle (all GEMMs
+  // route through Composable Kernel / the reference kernel). The field and its
+  // getter remain only for the out-of-tree gqa dispatch_bench A/B harness.
   state->hipblas_handle = nullptr;
   state->gpu_constants_blob = nullptr;
   state->gpu_constants = nullptr;
@@ -226,29 +229,11 @@ static int initialize_state_handles(RuntimeState **out_state) {
 
   TIMING_LOG("[Session] hipStreamCreate: %.3fs\n", record_elapsed(t_prev));
 
-  // Skip vendor-handle creation when hipBLASLt is disabled: the stubbed
-  // hipblasLtCreate would fail and abort session creation even for a model
-  // that never dispatches a vendor GEMM. Handle stays null; cleanup is
-  // already null-guarded.
-#ifndef HIPDNN_EP_DISABLE_VENDOR_BLAS
-  if (hipblasLtCreate(&state->hipblas_handle) != HIPBLAS_STATUS_SUCCESS) {
-    fprintf(stderr, "Failed to create hipBLASLt handle\n");
-    if (state->stream)
-      HIP_CLEANUP(hipStreamDestroy(state->stream));
-    free(state);
-    return 9;
-  }
-#endif // HIPDNN_EP_DISABLE_VENDOR_BLAS
-
-  TIMING_LOG("[Session] hipBLASLt init: %.3fs\n", record_elapsed(t_prev));
-
   // Allocate device-side error flag used by kernels for runtime error
   // propagation (e.g., Range delta==0).
   if (hipMalloc((void **)&state->device_error_flag, sizeof(int)) !=
       hipSuccess) {
     fprintf(stderr, "Failed to allocate device error flag\n");
-    if (state->hipblas_handle)
-      hipblasLtDestroy(state->hipblas_handle);
     if (state->stream)
       HIP_CLEANUP(hipStreamDestroy(state->stream));
     free(state);
@@ -259,8 +244,6 @@ static int initialize_state_handles(RuntimeState **out_state) {
     fprintf(stderr, "Failed to initialize device error flag\n");
     HIP_CLEANUP(hipFree(state->device_error_flag));
     state->device_error_flag = nullptr;
-    if (state->hipblas_handle)
-      hipblasLtDestroy(state->hipblas_handle);
     if (state->stream)
       HIP_CLEANUP(hipStreamDestroy(state->stream));
     free(state);
@@ -840,11 +823,6 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   if (state->op_profile) {
     op_profile_destroy(static_cast<OpProfileState *>(state->op_profile));
     state->op_profile = nullptr;
-  }
-
-  // Destroy hipBLASLt handle
-  if (state->hipblas_handle) {
-    hipblasLtDestroy(state->hipblas_handle);
   }
 
   // Destroy HIP stream
