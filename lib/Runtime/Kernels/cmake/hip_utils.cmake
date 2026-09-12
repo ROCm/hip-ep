@@ -213,6 +213,11 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
     # NOTE: -I and path are separate list items to handle paths with spaces
     # (e.g., "C:/Program Files/..."). Clang supports "-I" "<path>" as two args.
     set(include_flags "")
+    # Must precede the HIP dist include: the dist also carries include/ck, and
+    # the CK kernels must resolve "ck/..." from the pinned source instead.
+    foreach(dir ${HIP_CK_INCLUDE_DIRS})
+        list(APPEND include_flags "-I" "${dir}")
+    endforeach()
     list(APPEND include_flags "-I" "${HIP_INCLUDE_DIR}")
     foreach(dir ${INCLUDE_DIRS})
         list(APPEND include_flags "-I" "${dir}")
