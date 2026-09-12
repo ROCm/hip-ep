@@ -689,7 +689,7 @@ jobs:
         id: key
         shell: bash
         working-directory: source-therock
-        run: echo "value=windows-therock-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+        run: echo "value=windows-therock-$(git rev-parse --short HEAD)-r2" >> "$GITHUB_OUTPUT"
 
       - name: Probe self-built TheRock SDK
         id: cache-therock
@@ -954,6 +954,8 @@ jobs:
           Remove-Item "$dist\lib\llvm\include" -Recurse -Force -ErrorAction SilentlyContinue
           Get-ChildItem "$dist\lib\llvm\lib" -File -Filter *.lib -ErrorAction SilentlyContinue | Remove-Item -Force
           Remove-Item "$dist\.info", "$dist\.kpack", "$dist\libexec" -Recurse -Force -ErrorAction SilentlyContinue
+          # rocBLAS Tensile data dir the EP never touches (it links hipBLASLt).
+          Remove-Item "$dist\bin\rocblas" -Recurse -Force -ErrorAction SilentlyContinue
           $after = [math]::Round((Get-ChildItem $dist -Recurse -File | Measure-Object Length -Sum).Sum / 1GB, 2)
           Write-Host "dist trimmed: ${before} GB -> ${after} GB"
 
