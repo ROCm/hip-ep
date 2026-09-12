@@ -620,6 +620,9 @@ SchemeValue mlir_create_placeholder_op(SchemeValue ctx_value, SchemeValue input_
   mlir::hipsr::PlaceholderType placeholderType =
       static_cast<mlir::hipsr::PlaceholderType>(placeholder_type_int);
 
+  // Set insertion point before the operation being replaced
+  g_current_rewriter->setInsertionPoint(g_current_operation);
+
   auto placeholderOp = g_current_rewriter->create<mlir::hipsr::PlaceholderOp>(
       loc, mlir::TypeRange{resType}, ctx, mlir::ValueRange{input}, placeholderType);
 
