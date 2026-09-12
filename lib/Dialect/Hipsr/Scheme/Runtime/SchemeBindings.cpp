@@ -214,33 +214,8 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
   // NOTE: Foreign functions are registered in custom_init(), which was called
   // by Sbuild_heap before loading boot files
 
-  // Load SchemeBindings.scm from real file location
-  llvm::SmallString<256> schemeBindingsPath(schemePath);
-  llvm::sys::path::append(schemeBindingsPath, "SchemeBindings.scm");
-
-  if (logLevel <= SchemeLogLevel::Info) {
-    llvm::errs() << "[info] Loading " << schemeBindingsPath.c_str() << "\n";
-  }
-
-  Scall1(load_sym, Sstring(schemeBindingsPath.c_str()));
-
-  if (logLevel <= SchemeLogLevel::Info) {
-    llvm::errs() << "[info] Successfully loaded SchemeBindings.scm\n";
-  }
-
-  // Load PatternDSL.scm from real file location
-  llvm::SmallString<256> patternDSLPath(schemePath);
-  llvm::sys::path::append(patternDSLPath, "PatternDSL.scm");
-
-  if (logLevel <= SchemeLogLevel::Info) {
-    llvm::errs() << "[info] Loading " << patternDSLPath.c_str() << "\n";
-  }
-
-  Scall1(load_sym, Sstring(patternDSLPath.c_str()));
-
-  if (logLevel <= SchemeLogLevel::Info) {
-    llvm::errs() << "[info] Successfully loaded PatternDSL.scm\n";
-  }
+  // R6RS libraries are loaded on-demand by (import ...) in the entry point scripts
+  // We don't load any .scm files here - everything is R6RS modules
 
   if (logLevel <= SchemeLogLevel::Info)
     llvm::errs() << "[info] Scheme runtime initialized\n";

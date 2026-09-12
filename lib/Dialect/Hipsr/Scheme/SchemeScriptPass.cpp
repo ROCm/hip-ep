@@ -38,7 +38,7 @@ struct SchemeScriptPass : public impl::SchemeScriptPassBase<SchemeScriptPass> {
       return;
     }
 
-    // Find script relative to this library's location
+    // Find R6RS entry point script relative to this library's location
     std::string modulePath = llvm::sys::fs::getMainExecutable(nullptr, (void*)&initializeSchemeRuntime);
     llvm::SmallString<256> scriptPath(modulePath);
     llvm::sys::path::remove_filename(scriptPath);
@@ -46,6 +46,8 @@ struct SchemeScriptPass : public impl::SchemeScriptPassBase<SchemeScriptPass> {
     if (llvm::sys::path::filename(scriptPath) == "bin")
       llvm::sys::path::remove_filename(scriptPath);
 
+    // R6RS entry point: scriptName should be like "CastConversion-r6rs.scm"
+    // which imports (mlir ffi), (mlir pattern-dsl), (mlir conversion cast)
     llvm::sys::path::append(scriptPath, "lib", "scheme", scriptName);
 
     if (!loadSchemeScript(scriptPath.c_str())) {
