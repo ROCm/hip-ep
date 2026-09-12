@@ -134,10 +134,6 @@ add_custom_command(
   VERBATIM
 )
 
-# Copy rime library (for loop macro)
-file(COPY ${CMAKE_SOURCE_DIR}/third_party/rime/rime
-     DESTINATION ${SCHEME_LIB_DIR})
-
 # Target for all compiled Scheme libraries
 add_custom_target(SchemeLibraries ALL
   DEPENDS
@@ -146,10 +142,6 @@ add_custom_target(SchemeLibraries ALL
     ${SCHEME_LIB_DIR}/mlir/conversion/cast.so
     ${SCHEME_LIB_DIR}/onnx-to-hipsr.so
 )
-
-# Also copy source .sls files for development (useful for debugging)
-file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/Runtime/mlir
-     DESTINATION ${SCHEME_LIB_DIR})
 
 # Copy simple pass modules (these are just thin wrappers, not compiled)
 configure_file(
@@ -175,13 +167,9 @@ install(FILES
   ${SCHEME_LIB_DIR}/mlir/ffi.so
   ${SCHEME_LIB_DIR}/mlir/pattern-dsl.so
   ${SCHEME_LIB_DIR}/mlir/conversion/cast.so
+  ${SCHEME_LIB_DIR}/onnx-to-hipsr.so
   DESTINATION lib/scheme/mlir
 )
-
-# Install source .sls files (for debugging)
-install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/Runtime/mlir
-        DESTINATION lib/scheme
-        FILES_MATCHING PATTERN "*.sls")
 
 # Install rime library (dependency)
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/third_party/rime/rime
