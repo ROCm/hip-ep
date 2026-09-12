@@ -20,24 +20,26 @@ message(STATUS "Chez Scheme machine type: ${CHEZ_MACHINE}")
 
 ExternalProject_Add(ChezScheme
   SOURCE_DIR ${CMAKE_SOURCE_DIR}/third_party/ChezScheme
-  CONFIGURE_COMMAND ${CMAKE_SOURCE_DIR}/third_party/ChezScheme/configure
+  BINARY_DIR ${CMAKE_BINARY_DIR}/ChezScheme-build
+  CONFIGURE_COMMAND ${CMAKE_COMMAND} -E chdir <BINARY_DIR>
+    ${CMAKE_SOURCE_DIR}/third_party/ChezScheme/configure
     --threads
     --disable-x11
-    --installprefix=<INSTALL_DIR>
-  BUILD_COMMAND make -j8
+    --machine=${CHEZ_MACHINE}
+  BUILD_COMMAND ${CMAKE_COMMAND} -E chdir <BINARY_DIR> make -j8
   INSTALL_COMMAND ""
-  BUILD_IN_SOURCE 1
   BUILD_BYPRODUCTS
-    <SOURCE_DIR>/${CHEZ_MACHINE}/bin/${CHEZ_MACHINE}/scheme
-    <SOURCE_DIR>/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/petite.boot
-    <SOURCE_DIR>/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/scheme.boot
-    <SOURCE_DIR>/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/libkernel.a
-    <SOURCE_DIR>/${CHEZ_MACHINE}/lz4/lib/liblz4.a
-    <SOURCE_DIR>/${CHEZ_MACHINE}/zlib/libz.a
+    <BINARY_DIR>/${CHEZ_MACHINE}/bin/${CHEZ_MACHINE}/scheme
+    <BINARY_DIR>/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/petite.boot
+    <BINARY_DIR>/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/scheme.boot
+    <BINARY_DIR>/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/libkernel.a
+    <BINARY_DIR>/${CHEZ_MACHINE}/lz4/lib/liblz4.a
+    <BINARY_DIR>/${CHEZ_MACHINE}/zlib/libz.a
 )
 
-ExternalProject_Get_Property(ChezScheme SOURCE_DIR)
+ExternalProject_Get_Property(ChezScheme SOURCE_DIR BINARY_DIR)
 set(ChezScheme_SOURCE_DIR "${SOURCE_DIR}")
+set(ChezScheme_BINARY_DIR "${BINARY_DIR}")
 
 add_custom_command(
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.h
@@ -45,7 +47,7 @@ add_custom_command(
           ${CMAKE_SOURCE_DIR}/cmake/xxd.py
           --var petite_boot_data
           --output ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.h
-          ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/petite.boot
+          ${ChezScheme_BINARY_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/petite.boot
   DEPENDS ChezScheme
   COMMENT "Embedding petite.boot"
   VERBATIM
@@ -57,7 +59,7 @@ add_custom_command(
           ${CMAKE_SOURCE_DIR}/cmake/xxd.py
           --var scheme_boot_data
           --output ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.h
-          ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/scheme.boot
+          ${ChezScheme_BINARY_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/scheme.boot
   DEPENDS ChezScheme
   COMMENT "Embedding scheme.boot"
   VERBATIM
@@ -76,16 +78,16 @@ add_library(HipsrSchemePass
 target_include_directories(HipsrSchemePass PRIVATE
   ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_CURRENT_BINARY_DIR}
-  ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}
+  ${ChezScheme_BINARY_DIR}/${CHEZ_MACHINE}
   ${ChezScheme_SOURCE_DIR}/boot/pb
 )
 
 add_dependencies(HipsrSchemePass ChezScheme ChezBootHeaders)
 
 target_link_libraries(HipsrSchemePass
-  ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/libkernel.a
-  ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/lz4/lib/liblz4.a
-  ${ChezScheme_SOURCE_DIR}/${CHEZ_MACHINE}/zlib/libz.a
+  ${ChezScheme_BINARY_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/libkernel.a
+  ${ChezScheme_BINARY_DIR}/${CHEZ_MACHINE}/lz4/lib/liblz4.a
+  ${ChezScheme_BINARY_DIR}/${CHEZ_MACHINE}/zlib/libz.a
   MLIRPass
   MLIRSupport
   MLIRIR
