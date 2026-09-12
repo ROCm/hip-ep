@@ -19,6 +19,7 @@
 #include "mlir/Conversion/IndexToLLVM/IndexToLLVM.h"
 #include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
 #include "mlir/Conversion/Passes.h"
+#include "mlir/Conversion/UBToLLVM/UBToLLVM.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Transforms/BufferDeallocationOpInterfaceImpl.h"
@@ -92,6 +93,12 @@ int main(int argc, char **argv) {
   mlir::arith::registerConvertArithToLLVMInterface(registry);
   mlir::cf::registerConvertControlFlowToLLVMInterface(registry);
   mlir::index::registerConvertIndexToLLVMInterface(registry);
+  // --convert-to-llvm dyn_casts every *loaded* dialect to
+  // ConvertToLLVMPatternInterface. `ub` declares that interface as promised, so
+  // if it is loaded without this extension the cast aborts the process
+  // ("promised by dialect 'ub' but never implemented") instead of just finding
+  // no patterns. Registering is a no-op when `ub` never gets loaded.
+  mlir::ub::registerConvertUBToLLVMInterface(registry);
   // `onnx` is claimed further down, once --onnx-dialect is parsed.
 
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
