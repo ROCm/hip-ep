@@ -54,6 +54,11 @@
 (define mlir-type-set-memory-space
   (foreign-procedure "mlir_type_set_memory_space" (unsigned-64 int) unsigned-64))
 
+;; Create unrealized_conversion_cast to convert value to target type
+;; Returns the cast result value
+(define mlir-create-unrealized-conversion-cast
+  (foreign-procedure "mlir_create_unrealized_conversion_cast" (unsigned-64 unsigned-64) unsigned-64))
+
 ;; Check if a Type is a RankedTensorType
 (define mlir-type-is-ranked-tensor
   (foreign-procedure "mlir_type_is_ranked_tensor" (unsigned-64) int))

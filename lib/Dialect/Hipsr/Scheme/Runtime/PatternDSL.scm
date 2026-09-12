@@ -69,20 +69,24 @@
 (define (rewrite-with-placeholder-and-cast op)
   (let* ((ctx (get-hipsr-context op))
          (input (mlir-operation-get-operand-value op 0))
+         (input-type (mlir-value-get-type input))
          (result-value (mlir-operation-get-result-value op 0))
          (result-type (mlir-value-get-type result-value))
-         ;; Set memory space to Device (1)
-         (device-type (mlir-type-set-memory-space result-type 1)))
+         ;; Set memory space to Device (1) for both input and result types
+         (device-input-type (mlir-type-set-memory-space input-type 1))
+         (device-result-type (mlir-type-set-memory-space result-type 1)))
 
     (mlir-log-debug "Pattern matched successfully")
-    (mlir-log-info (format "Creating: hipsr.placeholder(ctx, input)"))
-    (mlir-log-info (format "Creating: hipsr.cast(ctx, input, placeholder)"))
+    (mlir-log-info (format "Converting input to device memory space"))
+    (mlir-log-info (format "Creating: hipsr.placeholder(ctx, device-input) with device type"))
+    (mlir-log-info (format "Creating: hipsr.cast(ctx, device-input, placeholder) with device type"))
     (mlir-log-info (format "Replacing: ~a with cast result"
                            (mlir-operation-name op)))
 
-    ;; Create placeholder and cast operations with device memory space
-    (let* ((placeholder (mlir-create-placeholder-op ctx input device-type 0))
-           (cast (mlir-create-cast-op ctx input placeholder device-type)))
+    ;; Convert input to device memory space using unrealized_conversion_cast
+    (let* ((device-input (mlir-create-unrealized-conversion-cast input device-input-type))
+           (placeholder (mlir-create-placeholder-op ctx device-input device-result-type 0))
+           (cast (mlir-create-cast-op ctx device-input placeholder device-result-type)))
       (mlir-replace-op op cast))
 
     #t))

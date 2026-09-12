@@ -637,11 +637,23 @@ SchemeValue mlir_create_placeholder_op(SchemeValue ctx_value, SchemeValue input_
   mlir::hipsr::PlaceholderType placeholderType =
       static_cast<mlir::hipsr::PlaceholderType>(placeholder_type_int);
 
+  // Debug: log the type being used
+  std::string typeStr;
+  llvm::raw_string_ostream os(typeStr);
+  resType.print(os);
+  mlir_log_info(("mlir_create_placeholder_op: creating with result type: " + os.str()).c_str());
+
   // Set insertion point before the operation being replaced
   g_current_rewriter->setInsertionPoint(g_current_operation);
 
   auto placeholderOp = g_current_rewriter->create<mlir::hipsr::PlaceholderOp>(
       loc, mlir::TypeRange{resType}, ctx, mlir::ValueRange{input}, placeholderType);
+
+  // Debug: log the actual result type
+  std::string resultTypeStr;
+  llvm::raw_string_ostream resultOs(resultTypeStr);
+  placeholderOp.getResult(0).getType().print(resultOs);
+  mlir_log_info(("mlir_create_placeholder_op: placeholder result type: " + resultOs.str()).c_str());
 
   return const_cast<void*>(placeholderOp.getResult(0).getAsOpaquePointer());
 }
@@ -669,6 +681,24 @@ SchemeValue mlir_create_cast_op(SchemeValue ctx_value, SchemeValue input_value,
 //===----------------------------------------------------------------------===//
 // Phase 4: Pattern Rewriter FFI
 //===----------------------------------------------------------------------===//
+
+SchemeValue mlir_create_unrealized_conversion_cast(SchemeValue input_value, SchemeValue target_type) {
+  if (!g_current_rewriter || !g_current_operation) {
+    mlir_log_error("mlir_create_unrealized_conversion_cast: No active PatternRewriter context");
+    return nullptr;
+  }
+
+  mlir::Value input = mlir::Value::getFromOpaquePointer(input_value);
+  mlir::Type targetType = mlir::Type::getFromOpaquePointer(target_type);
+  mlir::Location loc = g_current_operation->getLoc();
+
+  g_current_rewriter->setInsertionPoint(g_current_operation);
+
+  auto castOp = g_current_rewriter->create<mlir::UnrealizedConversionCastOp>(
+      loc, mlir::TypeRange{targetType}, mlir::ValueRange{input});
+
+  return const_cast<void*>(castOp.getResult(0).getAsOpaquePointer());
+}
 
 int mlir_replace_op(SchemeValue old_op, SchemeValue new_value) {
   if (!g_current_rewriter) {
@@ -742,6 +772,7 @@ void registerMlirForeignFunctions() {
   Sregister_symbol("mlir_create_cast_op", (void*)::mlir_create_cast_op);
 
   // Phase 4: Pattern Rewriter FFI - TODO: needs PatternRewriter integration
+  Sregister_symbol("mlir_create_unrealized_conversion_cast", (void*)::mlir_create_unrealized_conversion_cast);
   Sregister_symbol("mlir_replace_op", (void*)::mlir_replace_op);
   Sregister_symbol("mlir_erase_op", (void*)::mlir_erase_op);
   Sregister_symbol("mlir_notify_match_failure", (void*)::mlir_notify_match_failure);
