@@ -501,6 +501,23 @@ static void mlir_log_fatal(const char* msg) {
 // Phase 1: Type System FFI
 //===----------------------------------------------------------------------===//
 
+// Set memory space on a RankedTensorType
+// Returns: new Type* with memory space set
+SchemeValue mlir_type_set_memory_space(SchemeValue type_ptr, int space_int) {
+  mlir::Type type = mlir::Type::getFromOpaquePointer(type_ptr);
+  auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(type);
+  if (!tensorType) {
+    mlir_log_error("mlir_type_set_memory_space: Type is not a RankedTensorType");
+    return type_ptr;
+  }
+
+  mlir::hipsr::MemorySpace space = static_cast<mlir::hipsr::MemorySpace>(space_int);
+  auto newType = tensorType.cloneWithEncoding(
+      mlir::hipsr::MemorySpaceAttr::get(tensorType.getContext(), space));
+
+  return const_cast<void*>(newType.getAsOpaquePointer());
+}
+
 int mlir_type_is_ranked_tensor(SchemeValue type_ptr) {
   if (!type_ptr) return 0;
   // SchemeValue is void*, representing Type* from MLIR C API
@@ -706,6 +723,7 @@ void registerMlirForeignFunctions() {
   Sregister_symbol("mlir_log_fatal", (void*)mlir_log_fatal);
 
   // Phase 1: Type System FFI
+  Sregister_symbol("mlir_type_set_memory_space", (void*)::mlir_type_set_memory_space);
   Sregister_symbol("mlir_type_is_ranked_tensor", (void*)::mlir_type_is_ranked_tensor);
   Sregister_symbol("mlir_type_get_element_type", (void*)::mlir_type_get_element_type);
   Sregister_symbol("mlir_type_get_shape", (void*)::mlir_type_get_shape);
