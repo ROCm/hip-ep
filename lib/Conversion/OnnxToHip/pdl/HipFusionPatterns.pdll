@@ -33,8 +33,8 @@ Rewrite ExtractScaleValue(val: Value) -> Attr;
 Rewrite ExtractZeropointValue(op: Op, index: Attr, defaultValue: Attr) -> Attr;
 Rewrite ExtractAttrInt64(op: Op, name: Attr, defaultValue: Attr) -> Attr;
 
-#include "QDQAddFusion.pdll"
-#include "QDQMulFusion.pdll"
+// #include "QDQAddFusion.pdll"
+// #include "QDQMulFusion.pdll"
 #include "QDQMatMulFusion.pdll"
 #include "QDQConvFusion.pdll"
 #include "QDQLpNormalizationFusion.pdll"
