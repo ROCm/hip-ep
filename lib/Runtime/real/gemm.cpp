@@ -7,10 +7,7 @@
 #include "../op_profile.h"
 #include "../op_state.h"
 #include "ck_gemm_select.h"
-#include "error_check_macros.h"
 #include "runtime_types.h"
-
-#include <hipblaslt/hipblaslt-ext.hpp>
 
 #include <algorithm>
 #include <cstdint>
@@ -23,40 +20,24 @@
 #include <unordered_map>
 #include <vector>
 
-#define HIPBLAS_CHECK(cmd) HIPBLAS_CHECK_GOTO(cmd, cleanup)
-
 // Type codes — must match the lowering in HipToLLVM.cpp GemmOpLowering
 static constexpr int64_t kTypeFloat16 = 0;
 static constexpr int64_t kTypeFloat32 = 1;
 static constexpr int64_t kTypeFloat64 = 2;
 static constexpr int64_t kTypeBFloat16 = 3;
 
-static bool resolveGemmTypes(int64_t typeCode, hipDataType &dataType,
-                             hipblasComputeType_t &computeType,
-                             hipDataType &scaleType) {
+static int ckDtypeForTypeCode(int64_t typeCode) {
   switch (typeCode) {
   case kTypeFloat16:
-    dataType = HIP_R_16F;
-    computeType = HIPBLAS_COMPUTE_32F;
-    scaleType = HIP_R_32F;
-    return true;
+    return HIP_DTYPE_FLOAT16;
   case kTypeFloat32:
-    dataType = HIP_R_32F;
-    computeType = HIPBLAS_COMPUTE_32F;
-    scaleType = HIP_R_32F;
-    return true;
+    return HIP_DTYPE_FLOAT32;
   case kTypeFloat64:
-    dataType = HIP_R_64F;
-    computeType = HIPBLAS_COMPUTE_64F;
-    scaleType = HIP_R_64F;
-    return true;
+    return HIP_DTYPE_FLOAT64;
   case kTypeBFloat16:
-    dataType = HIP_R_16BF;
-    computeType = HIPBLAS_COMPUTE_32F;
-    scaleType = HIP_R_32F;
-    return true;
+    return HIP_DTYPE_BFLOAT16;
   default:
-    return false;
+    return -1;
   }
 }
 
@@ -88,33 +69,23 @@ struct GemmCacheKeyHash {
 };
 
 struct GemmCacheEntry {
-  hipblasLtMatmulAlgo_t algo;
-  size_t workspace_size;
-  // True if no heuristic algorithm could be found and we should fall back to
-  // hipblasLtMatmul(..., algo=nullptr, ws=nullptr, ws_size=0). This unblocks
-  // outlier shapes where gfx1151's Tensile library has no tile (e.g. router
-  // M=128 N=128 K=2880 and lm_head M=128 N=201088 K=2880) but the default
-  // internal kernel still works.
-  bool use_default_algo = false;
-  // >= 0: Composable Kernel serves this problem with that instance and the
-  // hipBLASLt members above are unused.
+  // >= 0: Composable Kernel serves this problem with that instance. -1: the CK
+  // instances do not serve it, so the reference GEMM fallback is used. Resolved
+  // once per shape and cached, so the instance sweep runs only on a cold miss.
   int ck_instance = -1;
 };
 
-// One hipBLASLt algo table shared across every session in the process and
-// freed when the last session holding it is destroyed. Entries are POD (a
-// selected hipblasLtMatmulAlgo_t value + workspace size); the per-call
-// descriptors/layouts are created and destroyed in wrap_gemm, so the table
-// owns no GPU resources and the destructor is implicit. The mutex serialises
-// find/insert; concurrent cold-misses may each benchmark and the last writer
-// wins -- wasteful but correct.
+// One instance-selection table shared across every session in the process and
+// freed when the last session holding it is destroyed. Entries are POD (the
+// resolved CK instance index). The mutex serialises find/insert; concurrent
+// cold-misses may each sweep and the last writer wins -- wasteful but correct.
 struct GemmAlgoTable {
   std::mutex mu;
   std::unordered_map<GemmCacheKey, GemmCacheEntry, GemmCacheKeyHash> map;
 };
 
 // Per-instance op state for hip.gemm: the slot holds a shared_ptr to the one
-// shared algo table, reached through a global WeakStore keyed by device (see
+// shared table, reached through a global WeakStore keyed by device (see
 // op_state.h). The store is weak_ptr-backed, so the table lives only while some
 // session's GemmState holds a shared_ptr to it.
 struct GemmState : OpStateT<GemmState> {
@@ -134,12 +105,11 @@ extern "C" int8_t hipdnn_ep_op_state_construct_gemm(RuntimeState *state,
 }
 
 // =============================================================================
-// Broadcast helper: write beta * broadcast(C) into output[M, N]
+// Broadcast helper: write beta * broadcast(C) into dst[M, N]
 // =============================================================================
 // C is [cDim0, cDim1] and must be unidirectional-broadcastable to [M, N]:
-// each cDim is 1 or equals the corresponding output extent. After this,
-// hipblasLtMatmul accumulates with effective_beta=1.0:
-//   output = alpha * A * B + 1.0 * output  (= alpha*A*B + beta*C_broadcast)
+// each cDim is 1 or equals the corresponding output extent. The reference
+// fallback then adds this into the GEMM output elementwise.
 //
 // Device copies double a filled prefix (rows or columns) so a scalar, a
 // row, or a column becomes a full [M, N] buffer without a library op.
@@ -425,210 +395,7 @@ static int writeBroadcastC(RuntimeState *state, const void *C, void *output,
 }
 
 // =============================================================================
-// Cold-path algorithm selection (factored out of wrap_gemm)
-// =============================================================================
-
-// Fill `heurs` with up to `maxCandidates` supported algorithm candidates for
-// this problem, fast-first. Primary source is full solution enumeration via
-// the ext API (getAllAlgos), ordered by estimated time: it exposes the fast
-// (~4 ms) solution hipblaslt-bench uses, whereas
-// hipblasLtMatmulAlgoGetHeuristic alone returns only a curated subset and can
-// put a ~104 ms algo at [0] for the small-N vision/proj shapes (e.g. M=7296
-// N=1152 K=4304). We copy the first supported candidates (filling workspaceSize
-// via matmulIsAlgoSupported) and the benchmark below picks the measured
-// fastest.
-//
-// Falls back to hipblasLtMatmulAlgoGetHeuristic with an escalating
-// (workspace_limit, request_count) ladder when enumeration is unavailable or
-// empty -- outlier shapes such as the gpt-oss-120b MoE router (M=128 N=128
-// K=2880) and lm_head (M=128 N=201088 K=2880) get HIPBLAS_STATUS_INVALID_VALUE
-// from the default (256MB, 1) on gfx1151's Tensile library because no tiled
-// algorithm satisfies the leading-dimension / small-N constraints:
-//   1. (2GB,   16)   broad candidate sweep, large workspace
-//   2. (256MB, 16)   original workspace, broad sweep
-//   3. (0,     16)   force non-workspace algo (often unblocks narrow N / huge
-//   ld)
-//   4. (256MB, 1)    original behaviour
-//   5. (0,     1)    non-workspace, single candidate
-// Returns the candidate count (0 if none found).
-static int enumerateGemmAlgos(
-    hipblasLtHandle_t handle, hipblasLtMatmulDesc_t matmul_desc,
-    hipblasLtMatrixLayout_t matA_layout, hipblasLtMatrixLayout_t matB_layout,
-    hipblasLtMatrixLayout_t matC_layout, float alpha, int64_t transA,
-    int64_t transB, hipDataType dataType, hipblasComputeType_t computeType,
-    hipblasLtMatmulHeuristicResult_t *heurs, int maxCandidates) {
-  int returned = 0;
-
-  auto try_heuristic = [&](size_t ws_bytes, int req_count) -> bool {
-    hipblasLtMatmulPreference_t local_pref = nullptr;
-    if (hipblasLtMatmulPreferenceCreate(&local_pref) != HIPBLAS_STATUS_SUCCESS)
-      return false;
-    hipblasLtMatmulPreferenceSetAttribute(
-        local_pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &ws_bytes,
-        sizeof(ws_bytes));
-    returned = 0;
-    hipblasStatus_t st = hipblasLtMatmulAlgoGetHeuristic(
-        handle, matmul_desc, matA_layout, matB_layout, matC_layout, matC_layout,
-        local_pref, req_count, heurs, &returned);
-    hipblasLtMatmulPreferenceDestroy(local_pref);
-    return st == HIPBLAS_STATUS_SUCCESS && returned > 0;
-  };
-
-  {
-    std::vector<hipblasLtMatmulHeuristicResult_t> all_algos;
-    hipblasOperation_t ga_opA = transB ? HIPBLAS_OP_T : HIPBLAS_OP_N;
-    hipblasOperation_t ga_opB = transA ? HIPBLAS_OP_T : HIPBLAS_OP_N;
-    float zero_chk = 0.0f;
-    if (hipblaslt_ext::getAllAlgos(
-            handle, hipblaslt_ext::GemmType::HIPBLASLT_GEMM, ga_opA, ga_opB,
-            dataType, dataType, dataType, dataType, computeType,
-            all_algos) == HIPBLAS_STATUS_SUCCESS) {
-      for (auto &r : all_algos) {
-        if (returned >= maxCandidates)
-          break;
-        size_t need = 0;
-        if (hipblaslt_ext::matmulIsAlgoSupported(
-                handle, matmul_desc, &alpha, matA_layout, matB_layout,
-                &zero_chk, matC_layout, matC_layout, r.algo,
-                need) != HIPBLAS_STATUS_SUCCESS)
-          continue;
-        heurs[returned] = r;
-        heurs[returned].workspaceSize = need;
-        returned++;
-      }
-    }
-  }
-
-  bool ok = returned > 0;
-  // Fallback to the heuristic API if enumeration is unavailable/empty.
-  if (!ok) {
-    ok = try_heuristic(2ULL << 30, maxCandidates) ||
-         try_heuristic(256ULL << 20, maxCandidates) ||
-         try_heuristic(0, maxCandidates) || try_heuristic(256ULL << 20, 1) ||
-         try_heuristic(0, 1);
-  }
-
-  return ok ? returned : 0;
-}
-
-// Benchmark `returned` candidates in `heurs` and return the index of the
-// measured fastest (defaults to 0 if timing setup fails). Times into a
-// throwaway scratch buffer with beta=0 so the caller's real output is never
-// disturbed (on the broadcast path it already holds beta*C and would otherwise
-// accumulate across timing iterations).
-static int benchmarkGemmAlgos(
-    RuntimeState *state, hipblasLtHandle_t handle,
-    hipblasLtMatmulDesc_t matmul_desc, hipblasLtMatrixLayout_t matA_layout,
-    hipblasLtMatrixLayout_t matB_layout, hipblasLtMatrixLayout_t matC_layout,
-    const void *A, const void *B, float alpha, int64_t M, int64_t N,
-    hipDataType dataType, hipStream_t stream,
-    hipblasLtMatmulHeuristicResult_t *heurs, int returned) {
-  int best_idx = 0;
-  size_t elemSize = (dataType == HIP_R_64F)   ? 8
-                    : (dataType == HIP_R_32F) ? 4
-                                              : 2;
-  size_t bench_bytes = static_cast<size_t>(M) * N * elemSize;
-  void *bench_out = nullptr;
-  size_t maxws = 0;
-  for (int i = 0; i < returned; ++i)
-    if (heurs[i].workspaceSize > maxws)
-      maxws = heurs[i].workspaceSize;
-  void *bench_ws = nullptr;
-  size_t bench_ws_size = 0;
-  if (maxws > 0 && hipdnn_ep_state_ensure_workspace(state, maxws) == 0) {
-    bench_ws = hipdnn_ep_state_get_workspace(state);
-    bench_ws_size = hipdnn_ep_state_get_workspace_size(state);
-  }
-  hipEvent_t bs = nullptr, be = nullptr;
-  if (bench_bytes > 0 && hipMalloc(&bench_out, bench_bytes) == hipSuccess &&
-      hipEventCreate(&bs) == hipSuccess && hipEventCreate(&be) == hipSuccess) {
-    float zero = 0.0f;
-    auto run_cand = [&](int i) -> hipblasStatus_t {
-      size_t wss = heurs[i].workspaceSize;
-      void *wsp = (wss > 0) ? bench_ws : nullptr;
-      return hipblasLtMatmul(handle, matmul_desc, &alpha, B, matA_layout, A,
-                             matB_layout, &zero, bench_out, matC_layout,
-                             bench_out, matC_layout, &heurs[i].algo, wsp, wss,
-                             stream);
-    };
-    double best_ms = 1e30;
-    for (int i = 0; i < returned; ++i) {
-      // Skip candidates that need more workspace than we allocated --
-      // running them with a smaller/null workspace just errors out.
-      if (heurs[i].workspaceSize > bench_ws_size)
-        continue;
-      if (run_cand(i) != HIPBLAS_STATUS_SUCCESS) // warmup
-        continue;
-      if (hipEventRecord(bs, stream) != hipSuccess)
-        continue;
-      for (int r = 0; r < 3; ++r)
-        run_cand(i);
-      if (hipEventRecord(be, stream) != hipSuccess)
-        continue;
-      if (hipEventSynchronize(be) != hipSuccess)
-        continue;
-      float ms = 0.0f;
-      if (hipEventElapsedTime(&ms, bs, be) != hipSuccess)
-        continue;
-      if (ms < best_ms) {
-        best_ms = ms;
-        best_idx = i;
-      }
-    }
-  }
-  if (bs)
-    hipEventDestroy(bs);
-  if (be)
-    hipEventDestroy(be);
-  if (bench_out)
-    hipFree(bench_out);
-  return best_idx;
-}
-
-// Cold-path selection for a unique problem shape: enumerate candidates,
-// benchmark them (when more than one), and build the cache entry. Falls back to
-// hipBLASLt's internal default kernel (use_default_algo, algo=nullptr at call
-// time) when no heuristic algorithm can be found.
-static GemmCacheEntry selectGemmAlgo(
-    RuntimeState *state, hipblasLtHandle_t handle,
-    hipblasLtMatmulDesc_t matmul_desc, hipblasLtMatrixLayout_t matA_layout,
-    hipblasLtMatrixLayout_t matB_layout, hipblasLtMatrixLayout_t matC_layout,
-    const void *A, const void *B, float alpha, int64_t M, int64_t N, int64_t K,
-    int64_t transA, int64_t transB, int64_t typeCode, hipDataType dataType,
-    hipblasComputeType_t computeType, hipStream_t stream) {
-  constexpr int kMaxCandidates = 16;
-  hipblasLtMatmulHeuristicResult_t heurs[kMaxCandidates];
-
-  int returned = enumerateGemmAlgos(
-      handle, matmul_desc, matA_layout, matB_layout, matC_layout, alpha, transA,
-      transB, dataType, computeType, heurs, kMaxCandidates);
-
-  GemmCacheEntry entry;
-  if (returned > 0) {
-    int best_idx =
-        (returned > 1)
-            ? benchmarkGemmAlgos(state, handle, matmul_desc, matA_layout,
-                                 matB_layout, matC_layout, A, B, alpha, M, N,
-                                 dataType, stream, heurs, returned)
-            : 0;
-    entry.algo = heurs[best_idx].algo;
-    entry.workspace_size = heurs[best_idx].workspaceSize;
-    entry.use_default_algo = false;
-  } else {
-    fprintf(stderr,
-            "wrap_gemm: no algorithm from heuristic for M=%lld N=%lld "
-            "K=%lld transA=%lld transB=%lld typeCode=%lld; falling back "
-            "to default algo (algo=nullptr, ws=0)\n",
-            (long long)M, (long long)N, (long long)K, (long long)transA,
-            (long long)transB, (long long)typeCode);
-    entry.workspace_size = 0;
-    entry.use_default_algo = true;
-  }
-  return entry;
-}
-
-// =============================================================================
-// ONNX Gemm via hipBLASLt
+// ONNX Gemm via Composable Kernel (tuned instances + reference fallback)
 // =============================================================================
 //
 // ONNX Gemm semantics (row-major):
@@ -645,12 +412,13 @@ static GemmCacheEntry selectGemmAlgo(
 //   [M, 1]  → col vector   → cDim0=M, cDim1=1
 //   [M, N]  → no broadcast  → cDim0=M, cDim1=N
 //
-// hipBLASLt uses column-major. Using the transpose identity:
+// The CK/reference kernels take the column-major convention. Using the
+// transpose identity:
 //   Y^T = alpha * op(B)^T * op(A)^T + beta * C^T
 //
-// So we swap A↔B in the hipBLASLt call with m=N, n=M, k=K:
-//   hipBLASLt "A" = B buffer, TRANSA = transB ? OP_T : OP_N
-//   hipBLASLt "B" = A buffer, TRANSB = transA ? OP_T : OP_N
+// So we swap A↔B with m=N, n=M, k=K:
+//   "A" = B buffer, TRANSA = transB ? OP_T : OP_N
+//   "B" = A buffer, TRANSB = transA ? OP_T : OP_N
 //
 // Matrix layouts (col-major view of row-major data):
 //   transB=0: B_rm[K,N] → col-major [N,K] ld=N
@@ -678,13 +446,10 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
     return -1;
   }
 
-  hipblasLtHandle_t handle =
-      static_cast<hipblasLtHandle_t>(hipdnn_ep_state_get_hipblas_handle(state));
   hipStream_t stream =
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
-
-  if (!handle || !stream) {
-    fprintf(stderr, "wrap_gemm: null handle or stream\n");
+  if (!stream) {
+    fprintf(stderr, "wrap_gemm: null stream\n");
     return -1;
   }
 
@@ -695,84 +460,36 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
   }
   GemmAlgoTable &table = *gs->table;
 
-  hipDataType dataType;
-  hipblasComputeType_t computeType;
-  hipDataType scaleType;
-  if (!resolveGemmTypes(typeCode, dataType, computeType, scaleType)) {
+  const int abDtype = ckDtypeForTypeCode(typeCode);
+  if (abDtype < 0) {
     fprintf(stderr, "wrap_gemm: unsupported typeCode %lld\n",
             (long long)typeCode);
     return -1;
   }
 
-  // Fused-bias epilogue eligibility: a per-output-feature [N] / [1,N] bias
-  // (cDim0==1, cDim1==N) with beta==1 maps exactly to hipBLASLt's
-  // HIPBLASLT_EPILOGUE_BIAS, whose bias length must equal the rows of D.
-  // hipBLASLt's D = C^T = [N, M], so the ONNX [N] bias is a per-row-of-D
-  // vector -> direct match. Using the epilogue lets us run with beta=0 (D
-  // written fresh, no C==output in-place read), which keeps the fast split-K
-  // algorithms eligible -- the in-place beta=1 path was selecting a ~14x
-  // slower kernel for the vision GEMM shapes. (bench: m=1152 n=7296 k=4304 TN
-  // is ~3.9 ms with this config vs ~56 ms for broadcast+beta=1 C==output.)
-  bool use_bias_epilogue =
+  // A per-output-feature [N] / [1,N] bias with beta==1 is the fused-bias
+  // problem CK serves through its Add epilogue; every other C shape routes
+  // through the post-add below the reference fallback.
+  const bool use_bias_epilogue =
       C && beta == 1.0f && cDim0 == 1 && cDim1 == N &&
       (typeCode == kTypeFloat16 || typeCode == kTypeFloat32 ||
        typeCode == kTypeBFloat16);
 
-  // Determine if C needs broadcasting.
-  // When C is [M, N], hipblasLtMatmul handles it directly (single-pass).
-  // Otherwise, write beta*C into output first, then let hipblasLtMatmul
-  // accumulate with effective_beta=1.0 on top of it.
-  bool needsBroadcast = C && !(cDim0 == M && cDim1 == N) && !use_bias_epilogue;
-
   RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: M=%lld, N=%lld, K=%lld, transA=%lld, "
                     "transB=%lld, alpha=%f, beta=%f, typeCode=%lld, C=%p, "
-                    "cDim0=%lld, cDim1=%lld, needsBroadcast=%d\n",
+                    "cDim0=%lld, cDim1=%lld\n",
                     (long long)M, (long long)N, (long long)K, (long long)transA,
                     (long long)transB, alpha, beta, (long long)typeCode, C,
-                    (long long)cDim0, (long long)cDim1, (int)needsBroadcast);
+                    (long long)cDim0, (long long)cDim1);
 
-  // Pre-broadcast: write beta * C_broadcast into output before matmul.
-  if (needsBroadcast) {
-    int bc_result =
-        writeBroadcastC(state, C, output, M, N, cDim0, cDim1, beta, typeCode);
-    if (bc_result != 0)
-      return bc_result;
-  }
-
-  // Select effective beta and C pointer for hipblasLtMatmul.
-  //   C absent:     beta=0, C_ptr=output (placeholder, content irrelevant)
-  //   C is [M,N]:   beta=beta, C_ptr=C  (direct single-pass, no broadcast)
-  //   C broadcast:  beta=1.0, C_ptr=output (already holds beta*C_broadcast)
-  float effective_beta;
-  const void *effective_C;
-  if (use_bias_epilogue) {
-    // Bias applied in the matmul epilogue; D written fresh (no C read).
-    effective_beta = 0.0f;
-    effective_C = output;
-  } else if (!C) {
-    effective_beta = 0.0f;
-    effective_C = output;
-  } else if (!needsBroadcast) {
-    effective_beta = beta;
-    effective_C = C;
-  } else {
-    effective_beta = 1.0f;
-    effective_C = output;
-  }
-
-  hipblasLtMatrixLayout_t matA_layout = nullptr;
-  hipblasLtMatrixLayout_t matB_layout = nullptr;
-  hipblasLtMatrixLayout_t matC_layout = nullptr;
-  hipblasLtMatmulDesc_t matmul_desc = nullptr;
-  int result = 0;
-
-  // Cached algo for this problem, copied out by value so no map iterator is
-  // held across the (long, unlocked) cold path -- a concurrent insert could
-  // otherwise rehash and invalidate it.
-  GemmCacheEntry cached{};
-  bool have_cached = false;
+  // Column-major leading dimensions of the swapped call (see banner): the CK
+  // and reference kernels take these as lda/ldb ("A" = B buffer, "B" = A).
+  const int64_t hblA_ld = transB ? K : N;
+  const int64_t hblB_ld = transA ? M : K;
 
   GemmCacheKey key{M, N, K, transA, transB, typeCode, use_bias_epilogue};
+  GemmCacheEntry cached{};
+  bool have_cached = false;
   {
     std::lock_guard<std::mutex> lk(table.mu);
     auto it = table.map.find(key);
@@ -782,67 +499,44 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
     }
   }
 
-  // hipBLASLt "A" = B buffer
-  int64_t hblA_rows, hblA_cols, hblA_ld;
-  if (!transB) {
-    hblA_rows = N;
-    hblA_cols = K;
-    hblA_ld = N;
-  } else {
-    hblA_rows = K;
-    hblA_cols = N;
-    hblA_ld = K;
-  }
-
-  // hipBLASLt "B" = A buffer
-  int64_t hblB_rows, hblB_cols, hblB_ld;
-  if (!transA) {
-    hblB_rows = K;
-    hblB_cols = M;
-    hblB_ld = K;
-  } else {
-    hblB_rows = M;
-    hblB_cols = K;
-    hblB_ld = M;
-  }
-
-  // Composable Kernel path, entered before any hipBLASLt object exists so a
-  // served problem creates none. CK's f16 instances write D fresh and apply no
-  // alpha, and the A-side transpose (hipBLASLt's TRANSA, i.e. ONNX transB) is
-  // only instantiated together with a bias; everything else stays on
-  // hipBLASLt. `!C || use_bias_epilogue` is also what keeps `output` free of a
-  // pre-seeded beta*C, which ckSelectGemmInstance relies on.
+  // CK eligibility mirrors the tuned f16 instances: no alpha, ONNX transA==0,
+  // and the A-side transpose (ONNX transB) only together with a bias. `!C ||
+  // use_bias_epilogue` also keeps `output` free of a pre-seeded beta*C, which
+  // ckSelectGemmInstance relies on when it times into `output`.
   const bool ck_eligible = typeCode == kTypeFloat16 && alpha == 1.0f &&
                            transA == 0 && (!C || use_bias_epilogue) &&
                            (transB == 0 || use_bias_epilogue);
   const void *ck_bias = use_bias_epilogue ? C : nullptr;
 
-  if (ck_eligible && !have_cached) {
+  // Resolve once per shape: try the CK instances when eligible, else mark the
+  // entry for the reference fallback (ck_instance == -1). Cached either way so
+  // the instance sweep runs only on a cold miss.
+  if (!have_cached) {
     GemmCacheEntry entry;
-    entry.ck_instance = ckSelectGemmInstance(
-        stream, B, A, ck_bias, output, N, M, K, /*batch=*/1,
-        static_cast<int>(transB), static_cast<int>(transA), HIP_DTYPE_FLOAT16,
-        HIP_DTYPE_FLOAT16, alpha, hblA_ld, hblB_ld, N, /*strideA=*/0,
-        /*strideB=*/0, /*strideD=*/0);
-    if (entry.ck_instance >= 0) {
-      {
-        std::lock_guard<std::mutex> lk(table.mu);
-        cached = table.map.try_emplace(key, entry).first->second;
-      }
-      have_cached = true;
-      RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: CK instance %d for M=%lld N=%lld "
-                        "K=%lld transB=%lld\n",
-                        cached.ck_instance, (long long)M, (long long)N,
-                        (long long)K, (long long)transB);
+    if (ck_eligible) {
+      entry.ck_instance = ckSelectGemmInstance(
+          stream, B, A, ck_bias, output, N, M, K, /*batch=*/1,
+          static_cast<int>(transB), static_cast<int>(transA), HIP_DTYPE_FLOAT16,
+          HIP_DTYPE_FLOAT16, alpha, hblA_ld, hblB_ld, N,
+          /*strideA=*/0, /*strideB=*/0, /*strideD=*/0);
     }
+    {
+      std::lock_guard<std::mutex> lk(table.mu);
+      cached = table.map.try_emplace(key, entry).first->second;
+    }
+    have_cached = true;
+    RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: resolved M=%lld N=%lld K=%lld "
+                      "transA=%lld transB=%lld -> ck_instance=%d\n",
+                      (long long)M, (long long)N, (long long)K,
+                      (long long)transA, (long long)transB, cached.ck_instance);
   }
 
-  if (have_cached && cached.ck_instance >= 0) {
-    result = hip_ck_gemm_run(stream, cached.ck_instance, B, A, ck_bias, output,
-                             N, M, K, /*batch=*/1, static_cast<int>(transB),
-                             static_cast<int>(transA), HIP_DTYPE_FLOAT16,
-                             HIP_DTYPE_FLOAT16, alpha, hblA_ld, hblB_ld, N,
-                             /*strideA=*/0, /*strideB=*/0, /*strideD=*/0);
+  if (cached.ck_instance >= 0) {
+    int result = hip_ck_gemm_run(
+        stream, cached.ck_instance, B, A, ck_bias, output, N, M, K,
+        /*batch=*/1, static_cast<int>(transB), static_cast<int>(transA),
+        HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT16, alpha, hblA_ld, hblB_ld, N,
+        /*strideA=*/0, /*strideB=*/0, /*strideD=*/0);
     if (result != 0) {
       // The instance was chosen by running this same geometry, so a refusal
       // here means the ABI contract is broken rather than the shape changing.
@@ -852,115 +546,52 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
               cached.ck_instance, (long long)M, (long long)N, (long long)K,
               (long long)transA, (long long)transB);
     }
-    goto cleanup;
+    return result;
   }
 
-  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&matA_layout, dataType, hblA_rows,
-                                            hblA_cols, hblA_ld));
-  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&matB_layout, dataType, hblB_rows,
-                                            hblB_cols, hblB_ld));
-  // C and output: [M,N] row-major → col-major [N,M] ld=N
-  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&matC_layout, dataType, N, M, N));
-
-  HIPBLAS_CHECK(
-      hipblasLtMatmulDescCreate(&matmul_desc, computeType, scaleType));
-
-  {
-    hipblasOperation_t opA = transB ? HIPBLAS_OP_T : HIPBLAS_OP_N;
-    hipblasOperation_t opB = transA ? HIPBLAS_OP_T : HIPBLAS_OP_N;
-    HIPBLAS_CHECK(hipblasLtMatmulDescSetAttribute(
-        matmul_desc, HIPBLASLT_MATMUL_DESC_TRANSA, &opA, sizeof(opA)));
-    HIPBLAS_CHECK(hipblasLtMatmulDescSetAttribute(
-        matmul_desc, HIPBLASLT_MATMUL_DESC_TRANSB, &opB, sizeof(opB)));
+  // Reference fallback: alpha * op(A) op(B) into output, then + beta*C.
+  int rc = hip_ref_gemm_run(stream, B, A, output, N, M, K, /*batch=*/1,
+                            static_cast<int>(transB), static_cast<int>(transA),
+                            abDtype, abDtype, alpha, hblA_ld, hblB_ld, N,
+                            /*strideA=*/0, /*strideB=*/0, /*strideD=*/0);
+  if (rc != 0) {
+    fprintf(stderr,
+            "wrap_gemm: reference GEMM unsupported for typeCode=%lld M=%lld "
+            "N=%lld K=%lld\n",
+            (long long)typeCode, (long long)M, (long long)N, (long long)K);
+    return -1;
   }
 
-  // Fused-bias epilogue: add the [N] bias (= per-row-of-D vector) in the
-  // matmul epilogue with beta=0, instead of a separate broadcast + beta=1
-  // in-place accumulate. Set BEFORE algo selection so matmulIsAlgoSupported
-  // and the benchmark below evaluate the actual (epilogue) problem.
-  if (use_bias_epilogue) {
-    hipblasLtEpilogue_t epi = HIPBLASLT_EPILOGUE_BIAS;
-    const void *bias_ptr = C;
-    hipDataType bias_dtype = dataType;
-    HIPBLAS_CHECK(hipblasLtMatmulDescSetAttribute(
-        matmul_desc, HIPBLASLT_MATMUL_DESC_EPILOGUE, &epi, sizeof(epi)));
-    HIPBLAS_CHECK(hipblasLtMatmulDescSetAttribute(
-        matmul_desc, HIPBLASLT_MATMUL_DESC_BIAS_POINTER, &bias_ptr,
-        sizeof(bias_ptr)));
-    HIPBLAS_CHECK(hipblasLtMatmulDescSetAttribute(
-        matmul_desc, HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &bias_dtype,
-        sizeof(bias_dtype)));
-  }
-
-  // Algorithm selection with caching. On a cold miss, select (enumerate +
-  // benchmark) the algo for this problem shape, then publish it to the
-  // process-wide cache. selectGemmAlgo never throws and always yields a usable
-  // entry (a concrete algo, or use_default_algo for shapes with no heuristic).
-  if (!have_cached) {
-    GemmCacheEntry entry =
-        selectGemmAlgo(state, handle, matmul_desc, matA_layout, matB_layout,
-                       matC_layout, A, B, alpha, M, N, K, transA, transB,
-                       typeCode, dataType, computeType, stream);
-    {
-      std::lock_guard<std::mutex> lk(table.mu);
-      // Another thread may have inserted this key meanwhile; try_emplace keeps
-      // the existing entry in that case. Either way `cached` ends up holding a
-      // valid algo for this problem.
-      cached = table.map.try_emplace(key, entry).first->second;
+  if (C) {
+    // output += beta * C_broadcast. hip_elementwise_add serves f16/f32; a C
+    // term with fp64 or bf16 appears in no supported model and errors.
+    if (abDtype != HIP_DTYPE_FLOAT16 && abDtype != HIP_DTYPE_FLOAT32) {
+      fprintf(stderr, "wrap_gemm: C/bias add unsupported for typeCode=%lld\n",
+              (long long)typeCode);
+      return -1;
     }
-    have_cached = true;
-
-    RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: cached algo for M=%lld N=%lld K=%lld "
-                      "transA=%lld transB=%lld (ws=%zu)\n",
-                      (long long)M, (long long)N, (long long)K,
-                      (long long)transA, (long long)transB,
-                      cached.workspace_size);
-  }
-
-  {
-    if (cached.workspace_size > 0) {
-      if (hipdnn_ep_state_ensure_workspace(state, cached.workspace_size) != 0) {
-        result = -1;
-        goto cleanup;
-      }
+    const size_t elemSize = gemmElemSize(typeCode);
+    const size_t outBytes =
+        static_cast<size_t>(M) * static_cast<size_t>(N) * elemSize;
+    void *scratch = nullptr;
+    if (hipMalloc(&scratch, outBytes) != hipSuccess) {
+      fprintf(stderr, "wrap_gemm: C-add scratch alloc failed\n");
+      return -1;
     }
-
-    void *ws_ptr = cached.use_default_algo
-                       ? nullptr
-                       : hipdnn_ep_state_get_workspace(state);
-    size_t ws_size =
-        cached.use_default_algo ? 0 : hipdnn_ep_state_get_workspace_size(state);
-    hipblasLtMatmulAlgo_t *algo_ptr =
-        cached.use_default_algo
-            ? nullptr
-            : const_cast<hipblasLtMatmulAlgo_t *>(&cached.algo);
-
-    if (typeCode == kTypeFloat64) {
-      double alpha_d = static_cast<double>(alpha);
-      double beta_d = static_cast<double>(effective_beta);
-      HIPBLAS_CHECK(hipblasLtMatmul(
-          handle, matmul_desc, &alpha_d, B, matA_layout, A, matB_layout,
-          &beta_d, effective_C, matC_layout, output, matC_layout, algo_ptr,
-          ws_ptr, ws_size, stream));
-    } else {
-      HIPBLAS_CHECK(hipblasLtMatmul(
-          handle, matmul_desc, &alpha, B, matA_layout, A, matB_layout,
-          &effective_beta, effective_C, matC_layout, output, matC_layout,
-          algo_ptr, ws_ptr, ws_size, stream));
+    int bc =
+        writeBroadcastC(state, C, scratch, M, N, cDim0, cDim1, beta, typeCode);
+    if (bc == 0) {
+      bc = hip_elementwise_add(stream, output, scratch, output,
+                               static_cast<int64_t>(M) * N, abDtype);
+    }
+    hipStreamSynchronize(stream);
+    hipFree(scratch);
+    if (bc != 0) {
+      fprintf(stderr, "wrap_gemm: C/bias add failed (%d)\n", bc);
+      return -1;
     }
   }
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: completed successfully\n");
-
-cleanup:
-  if (matA_layout)
-    hipblasLtMatrixLayoutDestroy(matA_layout);
-  if (matB_layout)
-    hipblasLtMatrixLayoutDestroy(matB_layout);
-  if (matC_layout)
-    hipblasLtMatrixLayoutDestroy(matC_layout);
-  if (matmul_desc)
-    hipblasLtMatmulDescDestroy(matmul_desc);
-
-  return result;
+  return 0;
 }

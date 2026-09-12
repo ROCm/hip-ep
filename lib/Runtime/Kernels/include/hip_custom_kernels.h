@@ -3094,6 +3094,25 @@ HIP_KERNEL_API int hip_ck_gemm_run(void* stream, int instance, const void* A,
                        float alpha, int64_t lda, int64_t ldb, int64_t ldd,
                        int64_t strideA, int64_t strideB, int64_t strideD);
 
+/* =========================================================================
+ * Composable Kernel reference (naive) GEMM
+ * =========================================================================
+ *
+ * D = alpha * op(A) op(B), the universal fallback for shapes and dtypes the
+ * tuned hip_ck_gemm_run instances do not serve. Same column-major convention
+ * as hip_ck_gemm_run, but no bias and no instance selection. Covers
+ * fp16/fp16, fp16/fp32, bf16/bf16, bf16/fp32, fp32/fp32 and fp64/fp64.
+ *
+ * ck::ReferenceGemm assumes packed operands, so lda/ldb/ldd are unused and the
+ * caller must pass packed buffers; strideA/B/D are batch strides. Returns
+ * non-zero only for transB != 0 or a dtype pair with no instance.
+ */
+HIP_KERNEL_API int hip_ref_gemm_run(void* stream, const void* A, const void* B,
+                       void* D, int64_t m, int64_t n, int64_t k, int64_t batch,
+                       int transA, int transB, int abDtype, int dDtype,
+                       float alpha, int64_t lda, int64_t ldb, int64_t ldd,
+                       int64_t strideA, int64_t strideB, int64_t strideD);
+
 #ifdef __cplusplus
 }
 #endif

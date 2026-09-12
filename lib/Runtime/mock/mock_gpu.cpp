@@ -187,95 +187,8 @@ extern "C" hipError_t hipMemsetAsync(void *dst, int value, size_t size,
   return hipSuccess;
 }
 
-// Mock hipBLASLt types and constants
-typedef void *hipblasLtMatrixLayout_t;
-typedef void *hipblasLtMatmulDesc_t;
-typedef enum { HIPBLAS_R_32F = 0 } hipblasDatatype_t;
-typedef enum { HIPBLAS_COMPUTE_32F = 0 } hipblasComputeType_t;
-
-// Mock hipBLASLt handle functions (non-static so test can link against them)
-extern "C" hipblasStatus_t hipblasLtCreate(hipblasLtHandle_t *handle) {
-  *handle = malloc(sizeof(void *)); // Fake handle
-  MOCK_PRINT("[MOCK] hipblasLtCreate() -> %p\n", *handle);
-  return HIPBLAS_STATUS_SUCCESS;
-}
-
-extern "C" hipblasStatus_t hipblasLtDestroy(hipblasLtHandle_t handle) {
-  MOCK_PRINT("[MOCK] hipblasLtDestroy(%p)\n", handle);
-  free(handle);
-  return HIPBLAS_STATUS_SUCCESS;
-}
-
-// Mock hipBLASLt matrix layout functions
-static hipblasStatus_t
-hipblasLtMatrixLayoutCreate(hipblasLtMatrixLayout_t *layout,
-                            hipblasDatatype_t type, uint64_t rows,
-                            uint64_t cols, int64_t ld) {
-  (void)type;
-  (void)ld;
-  *layout = malloc(sizeof(void *)); // Fake layout
-  MOCK_PRINT("[MOCK]   Matrix layout: [%llu x %llu]\n",
-             (unsigned long long)rows, (unsigned long long)cols);
-  return HIPBLAS_STATUS_SUCCESS;
-}
-
-static hipblasStatus_t
-hipblasLtMatrixLayoutDestroy(hipblasLtMatrixLayout_t layout) {
-  free(layout);
-  return HIPBLAS_STATUS_SUCCESS;
-}
-
-// Mock hipBLASLt matmul descriptor functions
-static hipblasStatus_t
-hipblasLtMatmulDescCreate(hipblasLtMatmulDesc_t *desc,
-                          hipblasComputeType_t computeType,
-                          hipblasDatatype_t dataType) {
-  (void)computeType;
-  (void)dataType;
-  *desc = malloc(sizeof(void *)); // Fake descriptor
-  return HIPBLAS_STATUS_SUCCESS;
-}
-
-static hipblasStatus_t hipblasLtMatmulDescDestroy(hipblasLtMatmulDesc_t desc) {
-  free(desc);
-  return HIPBLAS_STATUS_SUCCESS;
-}
-
-// Mock hipBLASLt matmul function
-static hipblasStatus_t
-hipblasLtMatmul(hipblasLtHandle_t handle, hipblasLtMatmulDesc_t matmul_desc,
-                const void *alpha, const void *A, hipblasLtMatrixLayout_t matA,
-                const void *B, hipblasLtMatrixLayout_t matB, const void *beta,
-                const void *C, hipblasLtMatrixLayout_t matC, void *D,
-                hipblasLtMatrixLayout_t matD, const void *algo, void *workspace,
-                size_t workspaceSize, hipStream_t stream) {
-  (void)handle;
-  (void)matmul_desc;
-  (void)alpha;
-  (void)A;
-  (void)matA;
-  (void)B;
-  (void)matB;
-  (void)beta;
-  (void)C;
-  (void)matC;
-  (void)D;
-  (void)matD;
-  (void)algo;
-  (void)workspace;
-  (void)workspaceSize;
-  (void)stream;
-
-  MOCK_PRINT("[MOCK]   Executing GEMM operation\n");
-  return HIPBLAS_STATUS_SUCCESS;
-}
-
 // Mock error checking macros
 #define HIP_CHECK(cmd)                                                         \
-  do {                                                                         \
-    (void)(cmd);                                                               \
-  } while (0)
-#define HIPBLAS_CHECK(cmd)                                                     \
   do {                                                                         \
     (void)(cmd);                                                               \
   } while (0)
@@ -387,48 +300,6 @@ int wrap_causal_conv_with_state(
              channels_last ? "channels_last(B,L,C)" : "channels_first(B,C,L)");
   MOCK_PRINT("[MOCK]   bias=%s, past_state=%s)\n", bias ? "yes" : "null",
              past_state ? "yes" : "null");
-
-  return 0;
-}
-
-int wrap_hipblasLtGemm(void *handle, void *stream, int64_t m, int64_t n,
-                       int64_t k, const void *alpha, const void *A,
-                       const void *B, const void *beta, void *C) {
-  if (!handle || !stream || !alpha || !A || !B || !beta || !C) {
-    fprintf(stderr, "Invalid arguments to wrap_hipblasLtGemm\n");
-    return -1;
-  }
-
-  MOCK_PRINT("[MOCK] wrap_hipblasLtGemm(M=%lld, N=%lld, K=%lld)\n",
-             (long long)m, (long long)n, (long long)k);
-
-  hipblasLtHandle_t hipblas_handle = static_cast<hipblasLtHandle_t>(handle);
-  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
-
-  // Create matrix descriptors (assuming float32, column-major)
-  hipblasLtMatrixLayout_t matA, matB, matC;
-  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&matA, HIPBLAS_R_32F, m, k, m));
-  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&matB, HIPBLAS_R_32F, k, n, k));
-  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&matC, HIPBLAS_R_32F, m, n, m));
-
-  // Create operation descriptor
-  hipblasLtMatmulDesc_t matmul_desc;
-  HIPBLAS_CHECK(hipblasLtMatmulDescCreate(&matmul_desc, HIPBLAS_COMPUTE_32F,
-                                          HIPBLAS_R_32F));
-
-  // Perform GEMM
-  HIPBLAS_CHECK(hipblasLtMatmul(hipblas_handle, matmul_desc, alpha, A, matA, B,
-                                matB, beta, C, matC, C, matC,
-                                nullptr, // algo
-                                nullptr, // workspace
-                                0,       // workspaceSize
-                                hip_stream));
-
-  // Cleanup
-  hipblasLtMatrixLayoutDestroy(matA);
-  hipblasLtMatrixLayoutDestroy(matB);
-  hipblasLtMatrixLayoutDestroy(matC);
-  hipblasLtMatmulDescDestroy(matmul_desc);
 
   return 0;
 }
