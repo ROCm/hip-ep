@@ -118,7 +118,7 @@ set(MLIR_CAST_SLS ${CMAKE_CURRENT_SOURCE_DIR}/Runtime/mlir/conversion/cast.sls)
 # Helper script for compiling libraries
 set(COMPILE_LIBRARY_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/compile-library.sh)
 
-# Compile R6RS libraries to .so files
+# Compile R6RS libraries to .so files (output to build directory)
 add_custom_command(
   OUTPUT ${SCHEME_LIB_DIR}/mlir/ffi.so
   COMMAND bash "${COMPILE_LIBRARY_SCRIPT}"
@@ -126,6 +126,7 @@ add_custom_command(
           "mlir ffi"
           "${CMAKE_CURRENT_SOURCE_DIR}/Runtime"
           "${CMAKE_CURRENT_SOURCE_DIR}/Runtime"
+          "${CMAKE_CURRENT_BINARY_DIR}"
           "${SCHEME_LIB_DIR}/mlir/ffi.so"
   DEPENDS ChezScheme ${MLIR_FFI_SLS} ${COMPILE_LIBRARY_SCRIPT}
   COMMENT "Compiling (mlir ffi) library"
@@ -139,6 +140,7 @@ add_custom_command(
           "mlir pattern-dsl"
           "${CMAKE_CURRENT_SOURCE_DIR}/Runtime:${CMAKE_SOURCE_DIR}/third_party/rime"
           "${CMAKE_CURRENT_SOURCE_DIR}/Runtime"
+          "${CMAKE_CURRENT_BINARY_DIR}"
           "${SCHEME_LIB_DIR}/mlir/pattern-dsl.so"
   DEPENDS ChezScheme ${SCHEME_LIB_DIR}/mlir/ffi.so ${MLIR_PATTERN_DSL_SLS} ${COMPILE_LIBRARY_SCRIPT}
   COMMENT "Compiling (mlir pattern-dsl) library"
@@ -152,6 +154,7 @@ add_custom_command(
           "mlir conversion cast"
           "${CMAKE_CURRENT_SOURCE_DIR}/Runtime:${CMAKE_SOURCE_DIR}/third_party/rime"
           "${CMAKE_CURRENT_SOURCE_DIR}/Runtime"
+          "${CMAKE_CURRENT_BINARY_DIR}"
           "${SCHEME_LIB_DIR}/mlir/conversion/cast.so"
   DEPENDS ChezScheme ${SCHEME_LIB_DIR}/mlir/pattern-dsl.so ${MLIR_CAST_SLS} ${COMPILE_LIBRARY_SCRIPT}
   COMMENT "Compiling (mlir conversion cast) library"

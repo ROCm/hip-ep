@@ -92,26 +92,27 @@
 
   ;; Pattern rewrite action: creates placeholder and cast operations
   ;; This implements the ONNX Cast -> HipSR conversion with device memory space
+  ;;
+  ;; NOTE: Function signatures are already converted to have device memory space
+  ;; by SchemeScriptPass, so input already has the correct type. We only need to
+  ;; add device memory space to the result type.
   (define (rewrite-with-placeholder-and-cast op)
     (let* ((ctx (get-hipsr-context op))
            (input (mlir-operation-get-operand-value op 0))
-           (input-type (mlir-value-get-type input))
            (result-value (mlir-operation-get-result-value op 0))
            (result-type (mlir-value-get-type result-value))
-           ;; Set memory space to Device (1) for both input and result types
-           (device-input-type (mlir-type-set-memory-space input-type 1))
+           ;; Set memory space to Device (1) for result type
            (device-result-type (mlir-type-set-memory-space result-type 1)))
 
       (mlir-log-debug "Pattern matched successfully")
-      (mlir-log-info (string-append "Converting input to device memory space"))
-      (mlir-log-info (string-append "Creating: hipsr.placeholder(ctx, device-input) with device type"))
-      (mlir-log-info (string-append "Creating: hipsr.cast(ctx, device-input, placeholder) with device type"))
+      (mlir-log-info (string-append "Creating: hipsr.placeholder(ctx, input) with device result type"))
+      (mlir-log-info (string-append "Creating: hipsr.cast(ctx, input, placeholder) with device result type"))
       (mlir-log-info (string-append "Replacing: " (mlir-operation-name op) " with cast result"))
 
-      ;; Convert input to device memory space using unrealized_conversion_cast
-      (let* ((device-input (mlir-create-unrealized-conversion-cast input device-input-type))
-             (placeholder (mlir-create-placeholder-op ctx device-input device-result-type 0))
-             (cast (mlir-create-cast-op ctx device-input placeholder device-result-type)))
+      ;; Create placeholder and cast operations
+      ;; Input already has device memory space from function signature conversion
+      (let* ((placeholder (mlir-create-placeholder-op ctx input device-result-type 0))
+             (cast (mlir-create-cast-op ctx input placeholder device-result-type)))
         (mlir-replace-op op cast))
 
       #t))
