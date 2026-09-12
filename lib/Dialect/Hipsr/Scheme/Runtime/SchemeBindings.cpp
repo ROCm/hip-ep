@@ -45,8 +45,8 @@ static ptr cached_read_sym = nullptr;
 static ptr cached_open_string_input_port_sym = nullptr;
 static ptr cached_eof_object_p = nullptr;
 
-// Thread-local PatternRewriter context for FFI functions
-static thread_local mlir::PatternRewriter* g_current_rewriter = nullptr;
+// Thread-local RewriterBase context for FFI functions
+static thread_local mlir::RewriterBase* g_current_rewriter = nullptr;
 static thread_local mlir::Operation* g_current_operation = nullptr;
 }
 
@@ -57,7 +57,7 @@ namespace hipsr {
 static SchemeLogLevel current_log_level = SchemeLogLevel::Warning;
 
 // Set/get the current rewriter for FFI operations
-void setCurrentRewriter(mlir::PatternRewriter* rewriter, mlir::Operation* op) {
+void setCurrentRewriter(mlir::RewriterBase* rewriter, mlir::Operation* op) {
   g_current_rewriter = rewriter;
   g_current_operation = op;
 }
