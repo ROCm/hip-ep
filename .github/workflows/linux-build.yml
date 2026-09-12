@@ -559,14 +559,29 @@ jobs:
           # clang resource dir (builtins/crt the -shared link may reference).
           # clang resolves this as <bindir>/../lib/clang at runtime.
           [ -d "$LLVM/lib/clang" ] && cp -a "$LLVM/lib/clang" "$LIB/" || true
-          # Copy only non-system shared-lib deps (static LLVM => normally none).
-          for b in "$BIN"/clang "$BIN"/clang-[0-9]* "$BIN"/lld; do
+          # Copy the drivers' non-system shared-lib deps. TheRock's clang links
+          # libclang-cpp/libLLVM dynamically; the from-source LLVM this replaced
+          # was static, so this loop used to find nothing. Resolve against the
+          # originals, not the copies: ldd on a copy reports the SONAMEs as "not
+          # found" (they are not in install/lib yet) and awk then drops them,
+          # which is how an unrunnable clang++ got packaged. -L dereferences the
+          # SONAME symlink so install/lib holds a real file under that name;
+          # clang finds it via its own RUNPATH ($ORIGIN/../lib).
+          for b in "$LLVM"/bin/clang "$LLVM"/bin/clang-[0-9]* "$LLVM"/bin/lld; do
             [ -f "$b" ] || continue
-            ldd "$b" 2>/dev/null | awk '$3 ~ /^\// && $3 !~ /^\/(usr|lib|lib64)\// {print $3}'
+            LD_LIBRARY_PATH="$LLVM/lib" ldd "$b" 2>/dev/null |
+              awk '$3 ~ /^\// && $3 !~ /^\/(usr|lib|lib64)\// {print $3}'
           done | sort -u | while read -r src; do
-            [ -e "$LIB/$(basename "$src")" ] || cp -a "$src" "$LIB/"
+            [ -e "$LIB/$(basename "$src")" ] || cp -aL "$src" "$LIB/"
           done
-          "$BIN/clang++" --version | head -1
+          # The EP spawns clang++ with no LD_LIBRARY_PATH, so it has to be
+          # runnable from the package as-is. Report what is missing when it is
+          # not; a bare exit 127 says nothing.
+          if ! "$BIN/clang++" --version | head -1; then
+            echo "ERROR: bundled clang++ is not runnable. Dependencies:"
+            ldd "$BIN/clang++" || true
+            exit 1
+          fi
 
       # -----------------------------------------------------------------------
       # Stage the artifact from install/ (the bundling steps above made it
