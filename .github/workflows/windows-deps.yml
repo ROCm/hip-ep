@@ -689,7 +689,7 @@ jobs:
         id: key
         shell: bash
         working-directory: source-therock
-        run: echo "value=therock-fork-$(git rev-parse HEAD)-gfx115x-trim-v2" >> "$GITHUB_OUTPUT"
+        run: echo "value=windows-therock-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Probe self-built TheRock SDK
         id: cache-therock
@@ -916,6 +916,47 @@ jobs:
             exit 1
           }
 
+          # Trim the raw dist to the set hip-ep consumes (find_package(hip) +
+          # find_package(hipblaslt) + the hipcc/clang++ that builds custom_kernels).
+          # Drops the LLVM dev toolchain, static archives and the rocBLAS/hipBLAS/
+          # rand/fftw/OpenCL stack the EP never links. Keep-set mirrors the raw
+          # layout whitelist in task-therock-windows-source-build.mdc.
+          $before = [math]::Round((Get-ChildItem $dist -Recurse -File | Measure-Object Length -Sum).Sum / 1GB, 2)
+          $keepExe = @(
+            "clang.exe", "clang++.exe", "lld.exe", "lld-link.exe",
+            "llvm-objcopy.exe", "clang-offload-bundler.exe", "amdgpu-arch.exe"
+          )
+          Get-ChildItem "$dist\lib\llvm\bin" -File |
+            Where-Object { $keepExe -notcontains $_.Name } | Remove-Item -Force
+          $keepBinDll = @(
+            "amd_comgr0714.dll", "amdhip64_7.dll", "hipblaslt.dll",
+            "hiprtc0714.dll", "hiprtc-builtins0714.dll"
+          )
+          Get-ChildItem "$dist\bin" -Filter *.dll |
+            Where-Object { $keepBinDll -notcontains $_.Name } | Remove-Item -Force
+          Get-ChildItem "$dist\lib" -Filter *.lib -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notmatch '^(amd_comgr|amdhip64|hipblaslt|hiprtc)' } |
+            Remove-Item -Force
+          $dropCmake = @(
+            "rocblas", "rocrand", "rocm-core", "rocm-kpack", "hipblas",
+            "hiprand", "fftw3", "fftw3f", "flatbuffers", "mxDataGenerator",
+            "composable_kernel"
+          )
+          foreach ($c in $dropCmake) { Remove-Item "$dist\lib\cmake\$c" -Recurse -Force -ErrorAction SilentlyContinue }
+          $dropInc = @(
+            "ck", "ck_tile", "half", "rapidjson", "nlohmann", "flatbuffers",
+            "rocblas", "rocrand", "rocm-core", "rocm_kpack", "hipblas",
+            "hiprand", "mxDataGenerator", "hsakmt"
+          )
+          foreach ($i in $dropInc) { Remove-Item "$dist\include\$i" -Recurse -Force -ErrorAction SilentlyContinue }
+          # Keep lib\llvm\lib\clang (the clang resource dir hipcc needs); drop only
+          # the LLVM/clang static archives next to it.
+          Remove-Item "$dist\lib\llvm\include" -Recurse -Force -ErrorAction SilentlyContinue
+          Get-ChildItem "$dist\lib\llvm\lib" -File -Filter *.lib -ErrorAction SilentlyContinue | Remove-Item -Force
+          Remove-Item "$dist\.info", "$dist\.kpack", "$dist\libexec" -Recurse -Force -ErrorAction SilentlyContinue
+          $after = [math]::Round((Get-ChildItem $dist -Recurse -File | Measure-Object Length -Sum).Sum / 1GB, 2)
+          Write-Host "dist trimmed: ${before} GB -> ${after} GB"
+
           $prefix = "${{ runner.workspace }}\therock-prefix"
           robocopy $dist $prefix /MIR /NFL /NDL /NJH /NJS /NP
           # robocopy uses 0-7 for success (>=8 is a real failure); normalise so
@@ -952,3 +993,13 @@ jobs:
         with:
           path: ${{ runner.workspace }}/therock-prefix
           key: ${{ steps.key.outputs.value }}
+
+      # Also publish the trimmed SDK as a downloadable artifact (the cache is
+      # only reachable from other jobs in the same repo/run family).
+      - name: Upload TheRock SDK
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.key.outputs.value }}
+          path: ${{ runner.workspace }}/therock-prefix
+          retention-days: 7
