@@ -23,4 +23,4 @@ include = ["onnxruntime_ep_hip", "onnxruntime_ep_amdgpu"]
 namespaces = true
 
 [tool.setuptools.package-data]
-"onnxruntime_ep_amdgpu" = ["*.dll", "*.lib", "*.dll.a", "*.so", "HipFusionPatterns.pdl.mlir", "hipblaslt/library/*/*"]
+"onnxruntime_ep_amdgpu" = ["*.dll", "*.lib", "*.dll.a", "*.so", "HipFusionPatterns.pdl.mlir"]
