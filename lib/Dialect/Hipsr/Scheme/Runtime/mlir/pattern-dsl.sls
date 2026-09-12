@@ -93,29 +93,41 @@
   ;; Pattern rewrite action: creates placeholder and cast operations
   ;; This implements the ONNX Cast -> HipSR conversion with device memory space
   ;;
-  ;; NOTE: Function signatures are already converted to have device memory space
-  ;; by SchemeScriptPass, so input already has the correct type. We only need to
-  ;; add device memory space to the result type.
+  ;; Mirrors CastConversion.cpp:
+  ;; 1. Get HipSR context from function arg 0
+  ;; 2. Get input and result type
+  ;; 3. Add device memory space to result type
+  ;; 4. Create placeholder(ctx, input, device_result_type)
+  ;; 5. Create cast(ctx, input, placeholder, device_result_type)
+  ;; 6. Replace onnx.Cast with cast result
   (define (rewrite-with-placeholder-and-cast op)
-    (let* ((ctx (get-hipsr-context op))
-           (input (mlir-operation-get-operand-value op 0))
-           (result-value (mlir-operation-get-result-value op 0))
-           (result-type (mlir-value-get-type result-value))
-           ;; Set memory space to Device (1) for result type
-           (device-result-type (mlir-type-set-memory-space result-type 1)))
+    ;; Get HipSR context argument (first function argument)
+    (let ((ctx (mlir-get-hipsr-context-arg op)))
+      (if (= ctx 0)
+          ;; No context found - fail
+          (begin
+            (mlir-notify-match-failure op "Could not get HipSR context argument")
+            #f)
+          ;; Context found - proceed with rewrite
+          (let* ((input (mlir-operation-get-operand-value op 0))
+                 (result-value (mlir-operation-get-result-value op 0))
+                 (result-type (mlir-value-get-type result-value)))
 
-      (mlir-log-debug "Pattern matched successfully")
-      (mlir-log-info (string-append "Creating: hipsr.placeholder(ctx, input) with device result type"))
-      (mlir-log-info (string-append "Creating: hipsr.cast(ctx, input, placeholder) with device result type"))
-      (mlir-log-info (string-append "Replacing: " (mlir-operation-name op) " with cast result"))
+            ;; Check result is ranked tensor
+            (if (not (= (mlir-type-is-ranked-tensor result-type) 1))
+                (begin
+                  (mlir-notify-match-failure op "Result is not a ranked tensor")
+                  #f)
+                ;; Add device memory space to result type
+                (let ((device-result-type (mlir-tensor-type-in-device-space result-type)))
+                  (mlir-log-debug "CastConversion: pattern matched")
 
-      ;; Create placeholder and cast operations
-      ;; Input already has device memory space from function signature conversion
-      (let* ((placeholder (mlir-create-placeholder-op ctx input device-result-type 0))
-             (cast (mlir-create-cast-op ctx input placeholder device-result-type)))
-        (mlir-replace-op op cast))
+                  ;; Create placeholder and cast operations
+                  (let* ((placeholder (mlir-create-placeholder-op ctx input device-result-type 0))
+                         (cast (mlir-create-cast-op ctx input placeholder device-result-type)))
+                    (mlir-replace-op op cast))
 
-      #t))
+                  #t))))))
 
   ;;===--------------------------------------------------------------------===;;
   ;; High-Level Pattern Definition

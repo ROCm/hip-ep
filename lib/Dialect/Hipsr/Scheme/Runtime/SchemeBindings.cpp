@@ -518,23 +518,7 @@ SchemeValue mlir_type_set_memory_space(SchemeValue type_ptr, int space_int) {
   return const_cast<void*>(newType.getAsOpaquePointer());
 }
 
-int mlir_type_is_ranked_tensor(SchemeValue type_ptr) {
-  if (!type_ptr) return 0;
-  // SchemeValue is void*, representing Type* from MLIR C API
-  // We stored it via wrap(Type).ptr, so retrieve it the same way
-  mlir::Type type = mlir::Type::getFromOpaquePointer(type_ptr);
-  return llvm::isa<mlir::RankedTensorType>(type) ? 1 : 0;
-}
-
-SchemeValue mlir_type_get_element_type(SchemeValue type_ptr) {
-  if (!type_ptr) return nullptr;
-  mlir::Type type = mlir::Type::getFromOpaquePointer(type_ptr);
-  if (auto tensorType = llvm::dyn_cast<mlir::RankedTensorType>(type)) {
-    return const_cast<void*>(tensorType.getElementType().getAsOpaquePointer());
-  }
-  return nullptr;
-}
-
+// Type shape query - returns Scheme list
 SchemeValue mlir_type_get_shape(SchemeValue type_ptr) {
   if (!type_ptr) return Snil;
   mlir::Type type = mlir::Type::getFromOpaquePointer(type_ptr);
@@ -550,15 +534,7 @@ SchemeValue mlir_type_get_shape(SchemeValue type_ptr) {
   return Snil;
 }
 
-int mlir_type_get_rank(SchemeValue type_ptr) {
-  if (!type_ptr) return -1;
-  mlir::Type type = mlir::Type::getFromOpaquePointer(type_ptr);
-  if (auto tensorType = llvm::dyn_cast<mlir::RankedTensorType>(type)) {
-    return tensorType.getRank();
-  }
-  return -1;
-}
-
+// Get type from value
 SchemeValue mlir_value_get_type(SchemeValue value_ptr) {
   if (!value_ptr) return nullptr;
   mlir::Value value = mlir::Value::getFromOpaquePointer(value_ptr);
@@ -728,6 +704,82 @@ void mlir_notify_match_failure(SchemeValue op, const char* reason) {
   mlir_log_debug((std::string("Pattern match failure: ") + reason).c_str());
 }
 
+//===----------------------------------------------------------------------===//
+// Additional utility FFI functions
+//===----------------------------------------------------------------------===//
+
+// Get HipSR context argument (first function argument)
+// Returns Value* as unsigned-64, or 0 if not found
+static uint64_t mlir_get_hipsr_context_arg(uint64_t op_ptr) {
+  if (!op_ptr) return 0;
+
+  mlir::Operation* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  auto funcOp = op->getParentOfType<mlir::func::FuncOp>();
+
+  if (!funcOp || funcOp.getBody().empty()) {
+    mlir_log_debug("mlir_get_hipsr_context_arg: not inside a function body");
+    return 0;
+  }
+
+  mlir::Block &entry = funcOp.getBody().front();
+  if (entry.getNumArguments() == 0) {
+    mlir_log_debug("mlir_get_hipsr_context_arg: function has no arguments");
+    return 0;
+  }
+
+  mlir::Value ctx = entry.getArgument(0);
+  if (!mlir::isa<mlir::hipsr::ContextType>(ctx.getType())) {
+    mlir_log_debug("mlir_get_hipsr_context_arg: arg 0 is not !hipsr.context");
+    return 0;
+  }
+
+  MlirValue cVal = wrap(ctx);
+  return reinterpret_cast<uint64_t>(const_cast<void*>(cVal.ptr));
+}
+
+// Check if a type is RankedTensorType
+// Returns 1 if true, 0 if false
+static int mlir_type_is_ranked_tensor(uint64_t type_ptr) {
+  if (!type_ptr) return 0;
+  mlir::Type type = mlir::Type::getFromOpaquePointer(reinterpret_cast<void*>(type_ptr));
+  return mlir::isa<mlir::RankedTensorType>(type) ? 1 : 0;
+}
+
+// Get rank of RankedTensorType
+// Returns rank, or -1 if not a ranked tensor
+static int64_t mlir_type_get_rank(uint64_t type_ptr) {
+  if (!type_ptr) return -1;
+  mlir::Type type = mlir::Type::getFromOpaquePointer(reinterpret_cast<void*>(type_ptr));
+  auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(type);
+  if (!tensorType) return -1;
+  return tensorType.getRank();
+}
+
+// Get element type of tensor type
+// Returns Type* as unsigned-64, or 0 if not a tensor
+static uint64_t mlir_type_get_element_type(uint64_t type_ptr) {
+  if (!type_ptr) return 0;
+  mlir::Type type = mlir::Type::getFromOpaquePointer(reinterpret_cast<void*>(type_ptr));
+  auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(type);
+  if (!tensorType) return 0;
+  return reinterpret_cast<uint64_t>(const_cast<void*>(tensorType.getElementType().getAsOpaquePointer()));
+}
+
+// Clone tensor type with device memory space
+// Returns new Type* as unsigned-64, or original if not a ranked tensor
+static uint64_t mlir_tensor_type_in_device_space(uint64_t type_ptr) {
+  if (!type_ptr) return 0;
+  mlir::Type type = mlir::Type::getFromOpaquePointer(reinterpret_cast<void*>(type_ptr));
+  auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(type);
+  if (!tensorType) return type_ptr; // Return original if not a tensor
+
+  // Use tensorTypeInSpace from OnnxToHipsrUtils
+  auto newType = tensorType.cloneWithEncoding(
+      mlir::hipsr::MemorySpaceAttr::get(tensorType.getContext(), mlir::hipsr::MemorySpace::Device));
+
+  return reinterpret_cast<uint64_t>(const_cast<void*>(newType.getAsOpaquePointer()));
+}
+
 } // extern "C"
 
 namespace mlir {
@@ -744,6 +796,13 @@ void registerMlirForeignFunctions() {
   Sregister_symbol("mlir_operation_walk", (void*)mlir_operation_walk);
   Sregister_symbol("mlir_operation_walk_rewrite", (void*)mlir_operation_walk_rewrite);
 
+  // Register utility functions (extern "C" - use :: prefix for global namespace)
+  Sregister_symbol("mlir_get_hipsr_context_arg", (void*)::mlir_get_hipsr_context_arg);
+  Sregister_symbol("mlir_type_is_ranked_tensor", (void*)::mlir_type_is_ranked_tensor);
+  Sregister_symbol("mlir_type_get_rank", (void*)::mlir_type_get_rank);
+  Sregister_symbol("mlir_type_get_element_type", (void*)::mlir_type_get_element_type);
+  Sregister_symbol("mlir_tensor_type_in_device_space", (void*)::mlir_tensor_type_in_device_space);
+
   // Register logging functions
   Sregister_symbol("mlir_log_trace", (void*)mlir_log_trace);
   Sregister_symbol("mlir_log_debug", (void*)mlir_log_debug);
@@ -754,10 +813,7 @@ void registerMlirForeignFunctions() {
 
   // Phase 1: Type System FFI
   Sregister_symbol("mlir_type_set_memory_space", (void*)::mlir_type_set_memory_space);
-  Sregister_symbol("mlir_type_is_ranked_tensor", (void*)::mlir_type_is_ranked_tensor);
-  Sregister_symbol("mlir_type_get_element_type", (void*)::mlir_type_get_element_type);
   Sregister_symbol("mlir_type_get_shape", (void*)::mlir_type_get_shape);
-  Sregister_symbol("mlir_type_get_rank", (void*)::mlir_type_get_rank);
   Sregister_symbol("mlir_value_get_type", (void*)::mlir_value_get_type);
 
   // Phase 2: Operation/Value Navigation FFI
