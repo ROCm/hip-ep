@@ -8,7 +8,8 @@
 //===----------------------------------------------------------------------===//
 // This pass generates four C-ABI compatible functions that wrap the internal
 // @main_graph function:
-// - inference_init: Allocate context, create handles, upload constants
+// - inference_init: Allocate context, create handles, upload constants; takes
+//   a borrowed init-config pointer carrying the session's provider options
 // - inference_compute: 2-arg (state, inputs) ABI -- stage inputs, call
 //   @main_graph (graph outputs are allocated in-graph via hip.alloc_output)
 // - inference_cleanup: Free resources
@@ -449,7 +450,7 @@ private:
         {"hipdnn_ep_tensor_buffer_get_shape_ptr", ptr, {ptr}},
         {"hipdnn_ep_tensor_buffer_get_rank", i64, {ptr}},
         {"hipdnn_ep_tensor_buffer_get_size_bytes", i64, {ptr}},
-        {"hipdnn_ep_state_init_with_fs", i32, {ptr, ptr, ptr, i64}},
+        {"hipdnn_ep_state_init_with_fs", i32, {ptr, ptr, ptr, i64, ptr}},
         {"hipdnn_ep_stream_sync", i32, {ptr}},
         {"hipdnn_ep_state_reset_error_flag", i32, {ptr}},
         {"hipdnn_ep_state_read_and_clear_error_flag", i32, {ptr}},
@@ -533,22 +534,26 @@ private:
   /// and upload to GPU.
   ///
   /// Generated IR (no pool — from test_basic_interface.mlir):
-  ///   llvm.func @inference_init(%arg0: !llvm.ptr, %arg1: !llvm.ptr) -> i32
+  ///   llvm.func @inference_init(%arg0: !llvm.ptr, %arg1: !llvm.ptr,
+  ///                             %arg2: !llvm.ptr) -> i32
   ///       attributes {llvm.emit_c_interface, sym_visibility = "public"} {
   ///     %0 = llvm.mlir.addressof @__metadata_blob : !llvm.ptr
   ///     %1 = llvm.mlir.constant(168 : i64) : i64
-  ///     %2 = llvm.call @hipdnn_ep_state_init_with_fs(%arg0, %arg1, %0, %1)
-  ///              : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> i32
+  ///     %2 = llvm.call @hipdnn_ep_state_init_with_fs(%arg0, %arg1, %0, %1,
+  ///                                                  %arg2)
+  ///              : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr) -> i32
   ///     llvm.return %2 : i32
   ///   }
   ///
   /// Generated IR (with pool, 2 buffers at offsets 0/4096, pool 8192):
-  ///   llvm.func @inference_init(%arg0: !llvm.ptr, %arg1: !llvm.ptr) -> i32
+  ///   llvm.func @inference_init(%arg0: !llvm.ptr, %arg1: !llvm.ptr,
+  ///                             %arg2: !llvm.ptr) -> i32
   ///       attributes {llvm.emit_c_interface, sym_visibility = "public"} {
   ///     %0 = llvm.mlir.addressof @__metadata_blob : !llvm.ptr
   ///     %1 = llvm.mlir.constant(168 : i64) : i64
-  ///     %2 = llvm.call @hipdnn_ep_state_init_with_fs(%arg0, %arg1, %0, %1)
-  ///              : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> i32
+  ///     %2 = llvm.call @hipdnn_ep_state_init_with_fs(%arg0, %arg1, %0, %1,
+  ///                                                  %arg2)
+  ///              : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr) -> i32
   ///     %3 = llvm.mlir.constant(0 : i32) : i32
   ///     %4 = llvm.icmp "ne" %2, %3 : i32
   ///     llvm.cond_br %4, ^bb2, ^bb1
@@ -574,7 +579,7 @@ private:
     Type i32Type = builder.getI32Type();
     Type i64Type = builder.getI64Type();
 
-    SmallVector<Type> paramTypes = {ptrType, ptrType};
+    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType};
     auto funcType = LLVM::LLVMFunctionType::get(i32Type, paramTypes);
 
     auto funcOp = LLVM::LLVMFuncOp::create(
@@ -587,6 +592,8 @@ private:
 
     Value outStatePtr = entryBlock->getArgument(0);
     Value fsPtr = entryBlock->getArgument(1);
+    // Borrowed for the call; may be null.
+    Value configPtr = entryBlock->getArgument(2);
 
     Value blobPtr = LLVM::AddressOfOp::create(builder, loc, ptrType,
                                               hipdnn::abi::kMetadataBlobGlobal);
@@ -597,7 +604,7 @@ private:
         module.lookupSymbol<LLVM::LLVMFuncOp>("hipdnn_ep_state_init_with_fs");
     LLVM::CallOp initCall = LLVM::CallOp::create(
         builder, loc, initFunc,
-        ValueRange{outStatePtr, fsPtr, blobPtr, blobSizeVal});
+        ValueRange{outStatePtr, fsPtr, blobPtr, blobSizeVal, configPtr});
 
     auto poolSizeAttr = module->getAttrOfType<IntegerAttr>("hipdnn.pool_size");
     auto bufferOffsetsAttr =

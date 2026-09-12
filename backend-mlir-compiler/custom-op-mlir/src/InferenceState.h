@@ -11,6 +11,8 @@
 #include <string>
 #include <vector>
 
+struct hipdnn_ep_init_config;
+
 // Forward declare to avoid include order issues
 namespace morphizen {
 class FileSystem;
@@ -52,8 +54,11 @@ public:
   // `.dll`/`.so` (Native) blob; `kind` selects the loader. `fs` is the
   // morphizen FileSystem that resolves model constants and is forwarded
   // to `inference_init`. Logs FATAL and terminates on failure.
+  // `config` carries the session's provider options and may be null; it is
+  // borrowed for the duration of `inference_init`.
   static std::unique_ptr<InferenceState>
   create(const std::vector<uint8_t> &artifact_bytes, morphizen::FileSystem *fs,
+         const hipdnn_ep_init_config *config,
          ArtifactKind kind = ArtifactKind::LLVM_IR);
 
   ~InferenceState();

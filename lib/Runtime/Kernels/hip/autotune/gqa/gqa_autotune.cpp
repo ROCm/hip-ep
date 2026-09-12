@@ -527,23 +527,56 @@ struct Policy {
   int compute_units = 0;
 };
 
-GqaAutotuneMode chooseMode() {
+// Maps a mode name to its enum, ignoring case and whitespace. Returns false
+// when the value names neither mode, leaving `out` untouched.
+bool parseMode(const char *value, GqaAutotuneMode &out) {
+  std::string mode;
+  for (char c : std::string(value)) {
+    if (c > ' ')
+      mode.push_back(c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c);
+  }
+
+  if (mode == "online") {
+    out = GqaAutotuneMode::Online;
+    return true;
+  }
+  if (mode == "lookup") {
+    out = GqaAutotuneMode::Lookup;
+    return true;
+  }
+  return false;
+}
+
+// Precedence:
+//   1) environment variable: HIPDNN_GQA_AUTOTUNE_MODE
+//   2) provider option:      gqa_autotune_mode
+//   3) build default:        lookup
+// A lever that does not name a mode is skipped rather than honoured, so the
+// next one still gets its turn.
+GqaAutotuneMode chooseMode(const char *provider_mode) {
 #ifdef _WIN32
   char buf[16];
   DWORD n =
       GetEnvironmentVariableA("HIPDNN_GQA_AUTOTUNE_MODE", buf, sizeof(buf));
-  const std::string raw = (n > 0 && n < sizeof(buf)) ? std::string(buf, n) : "";
+  const char *env = (n > 0 && n < sizeof(buf)) ? buf : nullptr;
 #else
-  const char *v = getenv("HIPDNN_GQA_AUTOTUNE_MODE");
-  const std::string raw = v ? std::string(v) : "";
+  const char *env = getenv("HIPDNN_GQA_AUTOTUNE_MODE");
 #endif
-  std::string mode;
-  for (char c : raw)
-    if (c > ' ')
-      mode.push_back(c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c);
-  if (mode == "online")
-    return GqaAutotuneMode::Online;
-  return GqaAutotuneMode::Lookup;
+  GqaAutotuneMode mode = GqaAutotuneMode::Lookup;
+  const bool from_env = env && parseMode(env, mode);
+  const bool from_option =
+      !from_env && provider_mode && parseMode(provider_mode, mode);
+
+  if (logOn())
+    fprintf(stderr,
+            "[gqa-autotune] mode=%s (from %s) HIPDNN_GQA_AUTOTUNE_MODE=[%s], "
+            "gqa_autotune_mode=[%s]\n",
+            mode == GqaAutotuneMode::Online ? "online" : "lookup",
+            from_env      ? "HIPDNN_GQA_AUTOTUNE_MODE"
+            : from_option ? "gqa_autotune_mode"
+                          : "the default",
+            env ? env : "unset", provider_mode ? provider_mode : "unset");
+  return mode;
 }
 
 // The nearest point in the group, plus whether it was accepted by the decode
@@ -614,9 +647,9 @@ bool nearestUsable(const std::vector<Point> &pts, float qnh, float qkh,
 
 extern "C" {
 
-void *hip_gqa_autotune_create() {
+void *hip_gqa_autotune_create(const char *provider_mode) {
   auto *p = new hipdnn_ep::Policy();
-  p->mode = hipdnn_ep::chooseMode();
+  p->mode = hipdnn_ep::chooseMode(provider_mode);
   p->compute_units = hipdnn_ep::currentComputeUnits();
   // Force the table to load now so HIPDNN_GQA_LUT_LOG reports at session start,
   // not on the first dispatch.
