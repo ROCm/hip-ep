@@ -181,13 +181,13 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
   }
 
   // Add lib/scheme to library-directories so Chez can find (rime) as rime/*.sls
+  // Use read + eval to execute the setup code
   std::string setup_code = "(library-directories (cons \"" + schemePathStr + "\" (library-directories)))";
+  ptr setup_port = Scall1(open_string_input_port_sym, Sstring(setup_code.c_str()));
+  ptr setup_expr = Scall1(read_sym, setup_port);
+  Scall1(eval_sym, setup_expr);
 
   ptr load_sym = Stop_level_value(Sstring_to_symbol("load"));
-  ptr eval_string_sym = Stop_level_value(Sstring_to_symbol("eval-string"));
-
-  // Use eval-string to set up library path
-  Scall1(eval_string_sym, Sstring(setup_code.c_str()));
 
   if (logLevel <= SchemeLogLevel::Debug) {
     llvm::errs() << "[debug] Added Scheme library path: " << schemePathStr << "\n";
