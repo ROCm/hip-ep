@@ -45,11 +45,12 @@
   (mlir-log-debug (format "Module: ~a" (mlir-operation-name module-op)))
 
   (let ((match-count 0))
-    ;; Walk all operations and apply pattern
-    (mlir-operation-walk module-op
+    ;; Walk all operations and apply pattern with rewriting enabled
+    (mlir-operation-walk-rewrite module-op
       (lambda (op)
         (when (apply-pattern onnx-cast-pattern op)
-          (set! match-count (+ match-count 1)))))
+          (set! match-count (+ match-count 1)))
+        #f)) ; Return #f because apply-pattern handles the rewrite
 
     (mlir-log-info (format "CastConversion: ~a patterns matched" match-count))
     (mlir-log-info "Completed CastConversion Pass (Scheme)")))

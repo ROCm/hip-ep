@@ -4,6 +4,7 @@
  */
 
 #include "SchemeBindings.h"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/FileSystem.h"
@@ -11,6 +12,8 @@
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Value.h"
 #include "mlir/IR/Attributes.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/Transforms/DialectConversion.h"
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Wrap.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -41,6 +44,10 @@ static ptr cached_eval_sym = nullptr;
 static ptr cached_read_sym = nullptr;
 static ptr cached_open_string_input_port_sym = nullptr;
 static ptr cached_eof_object_p = nullptr;
+
+// Thread-local PatternRewriter context for FFI functions
+static thread_local mlir::PatternRewriter* g_current_rewriter = nullptr;
+static thread_local mlir::Operation* g_current_operation = nullptr;
 }
 
 namespace mlir {
@@ -48,6 +55,17 @@ namespace hipsr {
 
 // Current log level - used by FFI logging functions
 static SchemeLogLevel current_log_level = SchemeLogLevel::Warning;
+
+// Set/get the current rewriter for FFI operations
+void setCurrentRewriter(mlir::PatternRewriter* rewriter, mlir::Operation* op) {
+  g_current_rewriter = rewriter;
+  g_current_operation = op;
+}
+
+void clearCurrentRewriter() {
+  g_current_rewriter = nullptr;
+  g_current_operation = nullptr;
+}
 
 // Custom init called by Sbuild_heap before loading boot files
 static void custom_init() {
@@ -423,6 +441,31 @@ static void mlir_operation_walk(uint64_t op, ptr callback) {
   });
 }
 
+// Walk operation tree with pattern rewriting support
+// callback: Scheme procedure (lambda (op) ...) that returns #t if it rewrote the op
+static void mlir_operation_walk_rewrite(uint64_t op, ptr callback) {
+  if (!op) return;
+  mlir::Operation* cppOp = reinterpret_cast<mlir::Operation*>(op);
+
+  // Use IRRewriter for greedy pattern application
+  mlir::IRRewriter rewriter(cppOp->getContext());
+
+  cppOp->walk([callback, &rewriter](mlir::Operation* walkOp) {
+    // Set rewriter context for this operation
+    mlir::hipsr::setCurrentRewriter(&rewriter, walkOp);
+
+    ptr schemeOp = Sunsigned64(reinterpret_cast<uint64_t>(walkOp));
+    ptr result = Scall1(callback, schemeOp);
+
+    // Clear rewriter context
+    mlir::hipsr::clearCurrentRewriter();
+
+    // result is #t if Scheme code rewrote the operation, #f otherwise
+    // We don't need to do anything special here - the Scheme code
+    // already called mlir_replace_op if it wanted to rewrite
+  });
+}
+
 // Logging functions callable from Scheme
 static void mlir_log_trace(const char* msg) {
   if (mlir::hipsr::current_log_level <= mlir::hipsr::SchemeLogLevel::Trace)
@@ -562,19 +605,45 @@ SchemeValue mlir_operation_get_block_argument(SchemeValue op_ptr, int index) {
 // Phase 3: IR Construction FFI (OpBuilder)
 //===----------------------------------------------------------------------===//
 
-// TODO: These require OpBuilder/PatternRewriter context integration
-// For now, stubs that log error
-
 SchemeValue mlir_create_placeholder_op(SchemeValue ctx_value, SchemeValue input_value,
                                        SchemeValue result_type, int placeholder_type_int) {
-  mlir_log_error("mlir_create_placeholder_op: Not yet implemented - requires PatternRewriter context");
-  return nullptr;
+  if (!g_current_rewriter || !g_current_operation) {
+    mlir_log_error("mlir_create_placeholder_op: No active PatternRewriter context");
+    return nullptr;
+  }
+
+  mlir::Value ctx = mlir::Value::getFromOpaquePointer(ctx_value);
+  mlir::Value input = mlir::Value::getFromOpaquePointer(input_value);
+  mlir::Type resType = mlir::Type::getFromOpaquePointer(result_type);
+
+  mlir::Location loc = g_current_operation->getLoc();
+  mlir::hipsr::PlaceholderType placeholderType =
+      static_cast<mlir::hipsr::PlaceholderType>(placeholder_type_int);
+
+  auto placeholderOp = g_current_rewriter->create<mlir::hipsr::PlaceholderOp>(
+      loc, mlir::TypeRange{resType}, ctx, mlir::ValueRange{input}, placeholderType);
+
+  return const_cast<void*>(placeholderOp.getResult(0).getAsOpaquePointer());
 }
 
 SchemeValue mlir_create_cast_op(SchemeValue ctx_value, SchemeValue input_value,
                                 SchemeValue output_value, SchemeValue result_type) {
-  mlir_log_error("mlir_create_cast_op: Not yet implemented - requires PatternRewriter context");
-  return nullptr;
+  if (!g_current_rewriter || !g_current_operation) {
+    mlir_log_error("mlir_create_cast_op: No active PatternRewriter context");
+    return nullptr;
+  }
+
+  mlir::Value ctx = mlir::Value::getFromOpaquePointer(ctx_value);
+  mlir::Value input = mlir::Value::getFromOpaquePointer(input_value);
+  mlir::Value output = mlir::Value::getFromOpaquePointer(output_value);
+  mlir::Type resType = mlir::Type::getFromOpaquePointer(result_type);
+
+  mlir::Location loc = g_current_operation->getLoc();
+
+  auto castOp = g_current_rewriter->create<mlir::hipsr::CastOp>(
+      loc, mlir::TypeRange{resType}, ctx, input, output);
+
+  return const_cast<void*>(castOp.getResult(0).getAsOpaquePointer());
 }
 
 //===----------------------------------------------------------------------===//
@@ -582,13 +651,27 @@ SchemeValue mlir_create_cast_op(SchemeValue ctx_value, SchemeValue input_value,
 //===----------------------------------------------------------------------===//
 
 int mlir_replace_op(SchemeValue old_op, SchemeValue new_value) {
-  mlir_log_error("mlir_replace_op: Not yet implemented - requires PatternRewriter context");
-  return 0;
+  if (!g_current_rewriter) {
+    mlir_log_error("mlir_replace_op: No active PatternRewriter context");
+    return 0;
+  }
+
+  mlir::Operation* op = static_cast<mlir::Operation*>(old_op);
+  mlir::Value newVal = mlir::Value::getFromOpaquePointer(new_value);
+
+  g_current_rewriter->replaceOp(op, newVal);
+  return 1;
 }
 
 int mlir_erase_op(SchemeValue op) {
-  mlir_log_error("mlir_erase_op: Not yet implemented - requires PatternRewriter context");
-  return 0;
+  if (!g_current_rewriter) {
+    mlir_log_error("mlir_erase_op: No active PatternRewriter context");
+    return 0;
+  }
+
+  mlir::Operation* operation = static_cast<mlir::Operation*>(op);
+  g_current_rewriter->eraseOp(operation);
+  return 1;
 }
 
 void mlir_notify_match_failure(SchemeValue op, const char* reason) {
@@ -609,6 +692,7 @@ void registerMlirForeignFunctions() {
   Sregister_symbol("mlir_operation_get_operand", (void*)mlir_operation_get_operand);
   Sregister_symbol("mlir_operation_get_result", (void*)mlir_operation_get_result);
   Sregister_symbol("mlir_operation_walk", (void*)mlir_operation_walk);
+  Sregister_symbol("mlir_operation_walk_rewrite", (void*)mlir_operation_walk_rewrite);
 
   // Register logging functions
   Sregister_symbol("mlir_log_trace", (void*)mlir_log_trace);

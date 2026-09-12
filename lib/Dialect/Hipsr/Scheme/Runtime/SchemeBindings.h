@@ -109,6 +109,11 @@ SchemeValue mlir_operation_get_loc(SchemeValue op_ptr);
 // Returns: Value as uptr
 SchemeValue mlir_operation_get_block_argument(SchemeValue op_ptr, int index);
 
+// Set/clear the current PatternRewriter context for FFI operations
+// Must be called before/after IR construction FFI functions
+void setCurrentRewriter(mlir::PatternRewriter* rewriter, mlir::Operation* op);
+void clearCurrentRewriter();
+
 } // namespace hipsr
 } // namespace mlir
 

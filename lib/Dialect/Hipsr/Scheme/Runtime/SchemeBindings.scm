@@ -22,6 +22,10 @@
 (define mlir-operation-walk
   (foreign-procedure "mlir_operation_walk" (unsigned-64 scheme-object) void))
 
+;; Walk operation tree with rewriting support - callback is (lambda (op) ...) that returns #t if it rewrote
+(define mlir-operation-walk-rewrite
+  (foreign-procedure "mlir_operation_walk_rewrite" (unsigned-64 scheme-object) void))
+
 ;; Logging functions
 (define mlir-log-trace
   (foreign-procedure "mlir_log_trace" (string) void))
