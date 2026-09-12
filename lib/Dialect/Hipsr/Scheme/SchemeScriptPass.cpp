@@ -66,10 +66,9 @@ struct SchemeScriptPass : public impl::SchemeScriptPassBase<SchemeScriptPass> {
       return tensorTypeInSpace(type, MemorySpace::Device);
     });
 
-    // Set up ConversionTarget - make ONNX illegal, HipSR legal
+    // Set up ConversionTarget for function signature conversion
     ConversionTarget target(getContext());
-    target.addIllegalDialect<onnx::OnnxDialect>();
-    target.addLegalOp<onnx::NoValueOp>();  // Cleaned up later
+    target.addLegalDialect<onnx::OnnxDialect>();  // ONNX still legal for now
     target.addLegalDialect<HipsrDialect>();
     target.addLegalOp<ModuleOp>();
     target.addDynamicallyLegalOp<func::FuncOp>([&](func::FuncOp op) {
@@ -78,15 +77,21 @@ struct SchemeScriptPass : public impl::SchemeScriptPassBase<SchemeScriptPass> {
     target.addDynamicallyLegalOp<func::ReturnOp>(
         [&](func::ReturnOp op) { return converter.isLegal(op); });
 
-    // Collect patterns by calling Scheme
-    RewritePatternSet patterns(&getContext());
+    // First pass: Convert function signatures to use device memory space
+    RewritePatternSet signaturePatterns(&getContext());
+    populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(
+        signaturePatterns, converter);
 
-    // Call the Scheme pass to populate patterns
-    // This is a simplified approach - just run the rewrite for now
+    if (failed(applyPartialConversion(module, target, std::move(signaturePatterns)))) {
+      module.emitError("Failed to convert function signatures");
+      signalPassFailure();
+      return;
+    }
+
+    // Second pass: Call Scheme patterns to transform ONNX -> HipSR
+    // Function signatures now have device memory space, so Scheme patterns
+    // can use function arguments directly without needing unrealized_conversion_cast
     callSchemePassFunction("run-pass", module);
-
-    // For now, don't run conversion - we need to refactor how Scheme patterns work
-    // TODO: Make Scheme patterns return ConversionPattern instances
   }
 };
 
