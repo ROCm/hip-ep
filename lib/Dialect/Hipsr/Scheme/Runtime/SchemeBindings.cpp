@@ -339,6 +339,31 @@ bool loadSchemeScript(const char* scriptPath) {
   return true;
 }
 
+// Evaluate Scheme code string (for (import ...) etc.)
+bool evaluateSchemeCode(const char* code) {
+  if (!scheme_initialized)
+    return false;
+
+  if (current_log_level <= SchemeLogLevel::Debug) {
+    llvm::errs() << "[debug] Evaluating Scheme code: " << code << "\n";
+  }
+
+  // Top-level evaluation: read and eval in top-level environment
+  // This works for (import ...) and other top-level forms
+  ptr scheme_string = Sstring(code);
+  ptr port = Scall1(cached_open_string_input_port_sym, scheme_string);
+  ptr expr = Scall1(cached_read_sym, port);
+
+  // Eval in top-level environment (not a special environment)
+  Scall1(cached_eval_sym, expr);
+
+  if (current_log_level <= SchemeLogLevel::Debug) {
+    llvm::errs() << "[debug] Evaluated successfully\n";
+  }
+
+  return true;
+}
+
 // Call a Scheme function with a single MLIR operation argument
 void callSchemePassFunction(const char* functionName, mlir::Operation* op) {
   if (!scheme_initialized)

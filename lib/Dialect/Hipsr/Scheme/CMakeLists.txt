@@ -177,22 +177,24 @@ add_custom_target(SchemeLibraries ALL
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/Runtime/mlir
      DESTINATION ${SCHEME_LIB_DIR})
 
-# R6RS entry point scripts (not compiled, loaded at runtime via load)
+# Copy pass modules (.sls files from Passes/ directory)
+# These are R6RS libraries imported by C++ via (import (module-name))
+# Filename must match library name: (library (printpass) ...) → printpass.sls
 configure_file(
-  ${CMAKE_CURRENT_SOURCE_DIR}/Passes/CastConversion-r6rs.scm
-  ${SCHEME_LIB_DIR}/CastConversion-r6rs.scm
+  ${CMAKE_CURRENT_SOURCE_DIR}/Passes/printpass.sls
+  ${SCHEME_LIB_DIR}/printpass.sls
   COPYONLY
 )
 configure_file(
-  ${CMAKE_CURRENT_SOURCE_DIR}/Passes/PrintPass.scm
-  ${SCHEME_LIB_DIR}/PrintPass.scm
+  ${CMAKE_CURRENT_SOURCE_DIR}/Passes/cast-conversion.sls
+  ${SCHEME_LIB_DIR}/cast-conversion.sls
   COPYONLY
 )
 
-# Install R6RS entry points and compiled libraries to <prefix>/lib/scheme/
+# Install R6RS pass modules to <prefix>/lib/scheme/
 install(FILES
-  ${CMAKE_CURRENT_SOURCE_DIR}/Passes/PrintPass.scm
-  ${CMAKE_CURRENT_SOURCE_DIR}/Passes/CastConversion-r6rs.scm
+  ${CMAKE_CURRENT_SOURCE_DIR}/Passes/printpass.sls
+  ${CMAKE_CURRENT_SOURCE_DIR}/Passes/cast-conversion.sls
   DESTINATION lib/scheme
 )
 

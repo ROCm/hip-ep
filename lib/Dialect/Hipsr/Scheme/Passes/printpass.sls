@@ -1,3 +1,4 @@
+#!r6rs
 ;;===----------------------------------------------------------------------===;;
 ;;
 ;; Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
@@ -13,13 +14,12 @@
 ;;
 ;;===----------------------------------------------------------------------===;;
 
-;;===----------------------------------------------------------------------===;;
-;; Imports
-;;===----------------------------------------------------------------------===;;
-
-(import (rnrs (6)))
-(import (mlir ffi))
-(import (rime loop))
+(library (printpass)
+  (export run-pass)
+  (import (rnrs (6))
+          (only (chezscheme) format)  ; format is Chez-specific
+          (mlir ffi)
+          (rime loop))
 
 ;;===----------------------------------------------------------------------===;;
 ;; Configuration
@@ -108,3 +108,5 @@
             (mlir-log-trace (format-operation op config))))))
 
     (mlir-log-info "Completed Pure Scheme MLIR Pass")))
+
+) ;; end library (printpass)

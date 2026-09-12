@@ -29,26 +29,20 @@ struct SchemeScriptPass : public impl::SchemeScriptPassBase<SchemeScriptPass> {
       return;
     }
 
-    // Find R6RS entry point script relative to this library's location
-    std::string modulePath = llvm::sys::fs::getMainExecutable(nullptr, (void*)&initializeSchemeRuntime);
-    llvm::SmallString<256> scriptPath(modulePath);
-    llvm::sys::path::remove_filename(scriptPath);
+    // Import the R6RS module
+    // initializeSchemeRuntime already set (library-directories) relative to executable
+    // Now we just need to (import (module-name))
+    std::string importCode = "(import (" + moduleName + "))";
 
-    if (llvm::sys::path::filename(scriptPath) == "bin")
-      llvm::sys::path::remove_filename(scriptPath);
-
-    // R6RS entry point: scriptName should be like "PrintPass.scm"
-    // which imports R6RS libraries via (import (mlir ffi)) etc.
-    llvm::sys::path::append(scriptPath, "lib", "scheme", scriptName);
-
-    if (!loadSchemeScript(scriptPath.c_str())) {
+    if (!evaluateSchemeCode(importCode.c_str())) {
+      getOperation().emitError("Failed to import R6RS module: ") << moduleName;
       signalPassFailure();
       return;
     }
 
     ModuleOp module = getOperation();
 
-    // Call Scheme entry point function
+    // Call run-pass function exported by the module
     // This is a read-only analysis pass - Scheme code can query IR
     // but should not modify it (no rewriter access)
     callSchemePassFunction("run-pass", module);
