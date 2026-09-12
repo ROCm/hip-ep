@@ -455,6 +455,29 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
   return 0;
 }
 
+// RocMLIR dispatch (hip.rocmlir). Empty for now: the generated IR builds the
+// kernargs buffer and passes the embedded GPU binary + launch geometry, but
+// this wrapper does not yet load the module or launch the kernel.
+int wrap_rocmlir(RuntimeState *state, const char *kernel_binary,
+                 char *func_name, int64_t block_size, int64_t grid_size,
+                 void *kernargs, size_t size) {
+  (void)kernel_binary;
+  (void)func_name;
+  (void)block_size;
+  (void)grid_size;
+  (void)kernargs;
+  (void)size;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_rocmlir\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_rocmlir(func=%s, block_size=%lld, grid_size=%lld, "
+             "kernargs_size=%zu)\n",
+             func_name ? func_name : "(null)", (long long)block_size,
+             (long long)grid_size, size);
+  return 0;
+}
+
 int wrap_group_query_attention(
     RuntimeState *state, int op_state_slot,
     // Inputs 1-7 (core GQA)

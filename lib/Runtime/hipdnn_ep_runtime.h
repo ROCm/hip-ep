@@ -832,6 +832,22 @@ int wrap_hipblasLtMatmul(
     int64_t transA,         // 1 = swap A's last two dims before multiply
     int64_t transB);        // 1 = swap B's last two dims before multiply
 
+// RocMLIR dispatch wrapper (hip.rocmlir). Launches a pre-compiled GPU kernel
+// embedded (as an ELF/HSACO blob) in `kernel_binary` at compile time. The
+// generated IR stages the operand data pointers (inputs first, then output)
+// into `kernargs` (a contiguous array of `size` bytes = num_args *
+// sizeof(void*)) and passes the module's launch geometry from the compiled
+// perfConfig.
+//   kernel_binary : embedded GPU binary blob (module image)
+//   func_name     : NUL-terminated kernel symbol to launch
+//   block_size    : threads per block
+//   grid_size     : blocks per grid
+//   kernargs      : packed array of kernel-argument pointers
+//   size          : byte size of kernargs
+int wrap_rocmlir(RuntimeState *state, const char *kernel_binary,
+                 char *func_name, int64_t block_size, int64_t grid_size,
+                 void *kernargs, size_t size);
+
 // GroupQueryAttention operation wrapper (Full MS spec)
 // Called by generated IR for onnx.Custom(GroupQueryAttention) lowering
 // GQA runtime wrapper following the complete Microsoft ONNX Runtime

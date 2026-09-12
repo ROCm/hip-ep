@@ -621,6 +621,26 @@ def Hip_HipblasltGraphOp : Hip_Op<"hipblaslt.graph", [SingleBlock, NoTerminator]
   let assemblyFormat = "$body attr-dict";
 }
 
+def Hip_RocMlirOp : Hip_DpsOp<"rocmlir"> {
+  let summary = "RocMlir backend dispatch";
+  let arguments = (ins
+    FlatSymbolRefAttr:$kernel,
+    Hip_ContextType:$ctx,
+    Variadic<Hip_TensorOrMemRef>:$inputs,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<StrAttr, "\"\"">:$kernel_binary,
+    DefaultValuedAttr<I64Attr, "0">:$grid_size,
+    DefaultValuedAttr<I64Attr, "0">:$block_size
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` $kernel `ins` `(` $inputs `:`
+    type($inputs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^ )?
+  }];
+}
+
 // ===== MIOpen DNN Operations =================================================
 
 def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[OpStateOpInterface], /*outsAccessor=*/"Output",

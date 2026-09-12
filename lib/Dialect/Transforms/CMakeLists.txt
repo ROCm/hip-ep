@@ -9,6 +9,7 @@ add_library(HipDialectTransforms STATIC
   BufferUtils.cpp
   ExternalizeConstants.cpp
   FixLoopAccumulatorOffset.cpp
+  FuseROCMlir.cpp
   GenerateInterface.cpp
   GenerateOpStateInit.cpp
   HoistAllocSizeArith.cpp
@@ -41,6 +42,7 @@ target_link_libraries(HipDialectTransforms PUBLIC
   HipDialectIR
   HipConstantsIO
   HipToLLVM
+  HipToTosa
   OnnxToHip
   OnnxToHipDNN
   HipSchemasLib

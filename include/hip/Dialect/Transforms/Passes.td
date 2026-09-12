@@ -177,6 +177,18 @@ def OptimizeMemRefsPass : Pass<"hip-optimize-memrefs", "mlir::func::FuncOp"> {
   ];
 }
 
+def FuseROCMlirPass : Pass<"hip-fuse-rocmlir", "mlir::func::FuncOp"> {
+  let dependentDialects = [
+    "mlir::ub::UBDialect"
+  ];
+}
+
+def ConvertHipToTosaPass : Pass<"convert-hip-to-tosa", "mlir::func::FuncOp"> {
+  let dependentDialects = [
+    "mlir::tosa::TosaDialect"
+  ];
+}
+
 def PromoteStridedHipOperandsPass
     : Pass<"hip-promote-strided-operands", "mlir::func::FuncOp"> {
   let summary = "Materialize identity-layout temporaries for DPS-input memrefs "
