@@ -70,6 +70,7 @@ add_custom_target(ChezBootHeaders DEPENDS
 add_library(HipsrSchemePass
   Runtime/SchemeBindings.cpp
   SchemeScriptPass.cpp
+  SchemeConversionPass.cpp
 )
 
 target_include_directories(HipsrSchemePass PRIVATE

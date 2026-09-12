@@ -65,8 +65,7 @@
 ;; Pattern Rewrite Helpers
 ;;===----------------------------------------------------------------------===;;
 
-;; Pattern rewrite action: logs what would be created
-;; TODO: When PatternRewriter integration is complete, this will actually create ops
+;; Pattern rewrite action: creates placeholder and cast operations
 (define (rewrite-with-placeholder-and-cast op)
   (let* ((ctx (get-hipsr-context op))
          (input (mlir-operation-get-operand-value op 0))
@@ -74,15 +73,15 @@
          (result-type (mlir-value-get-type result-value)))
 
     (mlir-log-debug "Pattern matched successfully")
-    (mlir-log-info (format "Would create: hipsr.placeholder(ctx, input)"))
-    (mlir-log-info (format "Would create: hipsr.cast(ctx, input, placeholder)"))
-    (mlir-log-info (format "Would replace: ~a with cast result"
+    (mlir-log-info (format "Creating: hipsr.placeholder(ctx, input)"))
+    (mlir-log-info (format "Creating: hipsr.cast(ctx, input, placeholder)"))
+    (mlir-log-info (format "Replacing: ~a with cast result"
                            (mlir-operation-name op)))
 
-    ;; TODO: When rewriter integration complete:
-    ;; (let* ((placeholder (mlir-create-placeholder-op ctx input result-type 0))
-    ;;        (cast (mlir-create-cast-op ctx input placeholder result-type)))
-    ;;   (mlir-replace-op op cast))
+    ;; Create placeholder and cast operations, then replace the original op
+    (let* ((placeholder (mlir-create-placeholder-op ctx input result-type 0))
+           (cast (mlir-create-cast-op ctx input placeholder result-type)))
+      (mlir-replace-op op cast))
 
     #t))
 

@@ -288,4 +288,23 @@ def SchemeScriptPass : Pass<"scheme-script", "mlir::ModuleOp"> {
   ];
 }
 
+def SchemeConversionPass : Pass<"scheme-conversion", "mlir::ModuleOp"> {
+  let summary = "ONNX to HipSR conversion using Scheme-based patterns";
+  let description = [{
+    Dialect conversion pass that uses Scheme-defined patterns for rewriting.
+    Unlike scheme-script which only queries IR, this pass provides full
+    PatternRewriter access so Scheme code can create and replace operations.
+  }];
+  let options = [
+    Option<"logLevel", "log-level", "std::string", /*default=*/"\"warning\"",
+           "Logging level: trace, debug, info, warning, error, fatal">,
+    Option<"scriptName", "script", "std::string", /*default=*/"\"CastConversion.scm\"",
+           "Scheme script filename to load from lib/scheme/">
+  ];
+  let dependentDialects = [
+    "::mlir::hipsr::HipsrDialect",
+    "::mlir::onnx::OnnxDialect"
+  ];
+}
+
 #endif // HIPSR_TRANSFORMS_PASSES
