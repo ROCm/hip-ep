@@ -28,14 +28,10 @@ extern "C" {
 
 #include "ChezBootPetite.h"
 #include "ChezBootScheme.h"
-#include "SchemeBindingsScm.h"
-#include "PatternDSLScm.h"
 
 namespace {
 const size_t petite_boot_size = sizeof(petite_boot_data) - 1;
 const size_t scheme_boot_size = sizeof(scheme_boot_data) - 1;
-const size_t scheme_bindings_scm_size = sizeof(scheme_bindings_scm_data) - 1;
-const size_t pattern_dsl_scm_size = sizeof(pattern_dsl_scm_data) - 1;
 }
 
 namespace {
@@ -169,9 +165,8 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
   ptr open_string_input_port_sym = cached_open_string_input_port_sym;
   ptr eof_object_p = cached_eof_object_p;
 
-  // Set up library path to find rime libraries
-  // Find lib/scheme directory relative to the library module path
-  // Chez Scheme needs the parent directory of rime/ to resolve (rime) libraries
+  // Set up library path to find rime libraries and Scheme source files
+  // Find lib/scheme directory relative to the executable
   std::string modulePath = llvm::sys::fs::getMainExecutable(nullptr, (void*)&initializeSchemeRuntime);
   llvm::SmallString<256> schemePath(modulePath);
   llvm::sys::path::remove_filename(schemePath);  // Remove binary name
@@ -179,70 +174,55 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
     llvm::sys::path::remove_filename(schemePath);  // Remove bin/
   llvm::sys::path::append(schemePath, "lib", "scheme");
 
-  // Add lib/scheme to library-directories so Chez can find (rime) as rime/*.sls
-  // Use eval-string to avoid the string port issue
-  std::string setup_code = "(library-directories (cons \"" + std::string(schemePath.c_str()) + "\" (library-directories)))";
+  std::string schemePathStr(schemePath.c_str());
 
-  // Write to temp file and load
-  const char* setup_tmpfile = "/tmp/setup_library_path.scm";
-  std::ofstream setup_out(setup_tmpfile);
-  setup_out << setup_code;
-  setup_out.close();
+  if (logLevel <= SchemeLogLevel::Info) {
+    llvm::errs() << "[info] Scheme library path: " << schemePathStr << "\n";
+  }
+
+  // Add lib/scheme to library-directories so Chez can find (rime) as rime/*.sls
+  std::string setup_code = "(library-directories (cons \"" + schemePathStr + "\" (library-directories)))";
 
   ptr load_sym = Stop_level_value(Sstring_to_symbol("load"));
-  Scall1(load_sym, Sstring(setup_tmpfile));
+  ptr eval_string_sym = Stop_level_value(Sstring_to_symbol("eval-string"));
+
+  // Use eval-string to set up library path
+  Scall1(eval_string_sym, Sstring(setup_code.c_str()));
 
   if (logLevel <= SchemeLogLevel::Debug) {
-    llvm::errs() << "[debug] Added Scheme library path: " << schemePath.c_str() << "\n";
+    llvm::errs() << "[debug] Added Scheme library path: " << schemePathStr << "\n";
   }
 
   // NOTE: Foreign functions are registered in custom_init(), which was called
   // by Sbuild_heap before loading boot files
 
-  fprintf(stderr, "[INIT] About to cache Scheme symbols\n");
-  fflush(stderr);
+  // Load SchemeBindings.scm from real file location
+  llvm::SmallString<256> schemeBindingsPath(schemePath);
+  llvm::sys::path::append(schemeBindingsPath, "SchemeBindings.scm");
 
-  if (logLevel <= SchemeLogLevel::Debug) {
-    llvm::errs() << "[debug] About to load SchemeBindings.scm\n";
-    llvm::errs() << "[debug] open_string_input_port_sym = " << open_string_input_port_sym << "\n";
-    llvm::errs() << "[debug] read_sym = " << read_sym << "\n";
+  if (logLevel <= SchemeLogLevel::Info) {
+    llvm::errs() << "[info] Loading " << schemeBindingsPath.c_str() << "\n";
   }
 
-  // Try using load instead of reading expressions one by one
-  fprintf(stderr, "[INIT] Attempting to use Scheme load function\n");
-  fflush(stderr);
+  Scall1(load_sym, Sstring(schemeBindingsPath.c_str()));
 
-  // Write SchemeBindings.scm to a temp file
-  std::string scm_code(reinterpret_cast<const char*>(scheme_bindings_scm_data),
-                       scheme_bindings_scm_size);
-  const char* tmpfile = "/tmp/scheme_bindings_temp.scm";
-  std::ofstream out(tmpfile);
-  out.write(scm_code.c_str(), scm_code.size());
-  out.close();
-  fprintf(stderr, "[INIT] Wrote SchemeBindings.scm to %s\n", tmpfile);
-  fflush(stderr);
+  if (logLevel <= SchemeLogLevel::Info) {
+    llvm::errs() << "[info] Successfully loaded SchemeBindings.scm\n";
+  }
 
-  // Use Scheme's load function (already cached above)
-  fprintf(stderr, "[INIT] Calling load on %s\n", tmpfile);
-  fflush(stderr);
-  Scall1(load_sym, Sstring(tmpfile));
-  fprintf(stderr, "[INIT] Successfully loaded SchemeBindings.scm via load\n");
-  fflush(stderr);
+  // Load PatternDSL.scm from real file location
+  llvm::SmallString<256> patternDSLPath(schemePath);
+  llvm::sys::path::append(patternDSLPath, "PatternDSL.scm");
 
-  // Load PatternDSL.scm (embedded) - also use file-based load
-  fprintf(stderr, "[INIT] Loading PatternDSL.scm via file\n");
-  fflush(stderr);
+  if (logLevel <= SchemeLogLevel::Info) {
+    llvm::errs() << "[info] Loading " << patternDSLPath.c_str() << "\n";
+  }
 
-  std::string pattern_dsl_code(reinterpret_cast<const char*>(pattern_dsl_scm_data),
-                               pattern_dsl_scm_size);
-  const char* pattern_tmpfile = "/tmp/pattern_dsl_temp.scm";
-  std::ofstream pattern_out(pattern_tmpfile);
-  pattern_out.write(pattern_dsl_code.c_str(), pattern_dsl_code.size());
-  pattern_out.close();
+  Scall1(load_sym, Sstring(patternDSLPath.c_str()));
 
-  Scall1(load_sym, Sstring(pattern_tmpfile));
-  fprintf(stderr, "[INIT] Successfully loaded PatternDSL.scm via load\n");
-  fflush(stderr);
+  if (logLevel <= SchemeLogLevel::Info) {
+    llvm::errs() << "[info] Successfully loaded PatternDSL.scm\n";
+  }
 
   if (logLevel <= SchemeLogLevel::Info)
     llvm::errs() << "[info] Scheme runtime initialized\n";
