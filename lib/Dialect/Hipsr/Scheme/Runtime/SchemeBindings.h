@@ -58,6 +58,9 @@ void registerMlirForeignFunctions();
 // Load and evaluate a Scheme script file
 bool loadSchemeScript(const char* scriptPath);
 
+// Evaluate Scheme code string (for (import ...) etc.)
+bool evaluateSchemeCode(const char* code);
+
 // Call a Scheme function with a single MLIR operation argument
 // Used to invoke Scheme-defined pass entry points
 void callSchemePassFunction(const char* functionName, mlir::Operation* op);
