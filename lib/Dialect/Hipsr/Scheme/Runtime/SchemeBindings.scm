@@ -49,6 +49,11 @@
 ;; Phase 1: Type System FFI
 ;;===----------------------------------------------------------------------===;;
 
+;; Set memory space on a RankedTensorType (0 = Host, 1 = Device)
+;; Returns new type with memory space set
+(define mlir-type-set-memory-space
+  (foreign-procedure "mlir_type_set_memory_space" (unsigned-64 int) unsigned-64))
+
 ;; Check if a Type is a RankedTensorType
 (define mlir-type-is-ranked-tensor
   (foreign-procedure "mlir_type_is_ranked_tensor" (unsigned-64) int))
