@@ -173,11 +173,11 @@ add_custom_target(SchemeLibraries ALL
     ${SCHEME_LIB_DIR}/mlir/conversion/cast.so
 )
 
-# Also copy source .sls files for development
+# Also copy source .sls files for development (useful for debugging)
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/Runtime/mlir
      DESTINATION ${SCHEME_LIB_DIR})
 
-# Entry point scripts (not compiled, loaded at runtime)
+# R6RS entry point scripts (not compiled, loaded at runtime via load)
 configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/Passes/CastConversion-r6rs.scm
   ${SCHEME_LIB_DIR}/CastConversion-r6rs.scm
@@ -189,33 +189,27 @@ configure_file(
   COPYONLY
 )
 
-# Backward compatibility: legacy .scm files
-configure_file(
-  ${CMAKE_CURRENT_SOURCE_DIR}/Runtime/SchemeBindings.scm
-  ${SCHEME_LIB_DIR}/SchemeBindings.scm
-  COPYONLY
-)
-configure_file(
-  ${CMAKE_CURRENT_SOURCE_DIR}/Runtime/PatternDSL.scm
-  ${SCHEME_LIB_DIR}/PatternDSL.scm
-  COPYONLY
-)
-configure_file(
-  ${CMAKE_CURRENT_SOURCE_DIR}/Passes/CastConversion.scm
-  ${SCHEME_LIB_DIR}/CastConversion.scm
-  COPYONLY
-)
-
-# Install Scheme scripts and rime library to <prefix>/lib/scheme/
+# Install R6RS entry points and compiled libraries to <prefix>/lib/scheme/
 install(FILES
   ${CMAKE_CURRENT_SOURCE_DIR}/Passes/PrintPass.scm
-  ${CMAKE_CURRENT_SOURCE_DIR}/Passes/CastConversion.scm
-  ${CMAKE_CURRENT_SOURCE_DIR}/Runtime/SchemeBindings.scm
-  ${CMAKE_CURRENT_SOURCE_DIR}/Runtime/PatternDSL.scm
+  ${CMAKE_CURRENT_SOURCE_DIR}/Passes/CastConversion-r6rs.scm
   DESTINATION lib/scheme
 )
 
-# Install rime library
+# Install compiled R6RS libraries (.so bytecode)
+install(FILES
+  ${SCHEME_LIB_DIR}/mlir/ffi.so
+  ${SCHEME_LIB_DIR}/mlir/pattern-dsl.so
+  ${SCHEME_LIB_DIR}/mlir/conversion/cast.so
+  DESTINATION lib/scheme/mlir
+)
+
+# Install source .sls files (for debugging)
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/Runtime/mlir
+        DESTINATION lib/scheme
+        FILES_MATCHING PATTERN "*.sls")
+
+# Install rime library (dependency)
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/third_party/rime/rime
         DESTINATION lib/scheme
         FILES_MATCHING PATTERN "*.sls" PATTERN "*.scm")
