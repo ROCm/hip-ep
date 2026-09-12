@@ -37,7 +37,7 @@ env:
   OGA_PR_PATCHES: "2194"
   # The GPU arch the artifact targets. CI runners have no GPU, so it is passed
   # explicitly (build.py auto-detects from /sys on a real GPU host).
-  HIP_ARCHITECTURES: gfx1151
+  HIP_ARCHITECTURES: gfx11-generic
 
 jobs:
   build-linux:
@@ -535,9 +535,9 @@ jobs:
 
           # Smoke: per-arch kernel SO must sit next to libhipgpu.so (the EP, named
           # via morphizen_OUTPUT_NAME); the EP anchors dlopen via dladdr() + RPATH=$ORIGIN.
-          KERNEL_SO="staging/lib/libcustom_kernels_gfx1151.so"
+          KERNEL_SO="staging/lib/libcustom_kernels_${{ env.HIP_ARCHITECTURES }}.so"
           if [ ! -f "$KERNEL_SO" ]; then
-            echo "ERROR: $KERNEL_SO missing from install (HIP_ARCHITECTURES=gfx1151)"
+            echo "ERROR: $KERNEL_SO missing from install (HIP_ARCHITECTURES=${{ env.HIP_ARCHITECTURES }})"
             ls -1 staging/lib/ | head -40
             exit 1
           fi

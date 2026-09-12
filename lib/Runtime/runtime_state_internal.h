@@ -138,6 +138,14 @@ struct RuntimeState {
   void *conv_scratch;
   size_t conv_scratch_size;
 
+  // Per-session scratch for wrap_qlpnormalization. One contiguous device
+  // buffer holds the dequantized input, RMS output, normalization scale, and
+  // Q/DQ scalar parameters. Shared by all qlpnormalization instances because
+  // they execute on the same serial stream. Grows on demand, never shrinks,
+  // and is released at session teardown.
+  void *qlpnormalization_scratch;
+  size_t qlpnormalization_scratch_size;
+
   // Per-session scratch for the W4A8 dp4a matmul_nbits decode path
   // (hip_matmul_nbits_dp4a). One contiguous device buffer holding the
   // per-token quantized activation (int8, K bytes, nibble-deinterleaved) plus
