@@ -110,54 +110,27 @@ set(SCHEME_COMPILER ${ChezScheme_BINARY_DIR}/${CHEZ_MACHINE}/bin/${CHEZ_MACHINE}
 file(MAKE_DIRECTORY ${SCHEME_LIB_DIR}/mlir)
 file(MAKE_DIRECTORY ${SCHEME_LIB_DIR}/mlir/conversion)
 
-# List of R6RS library files to compile
-set(MLIR_FFI_SLS ${CMAKE_CURRENT_SOURCE_DIR}/Runtime/mlir/ffi.sls)
-set(MLIR_PATTERN_DSL_SLS ${CMAKE_CURRENT_SOURCE_DIR}/Runtime/mlir/pattern-dsl.sls)
-set(MLIR_CAST_SLS ${CMAKE_CURRENT_SOURCE_DIR}/Runtime/mlir/conversion/cast.sls)
-
-# Helper script for compiling libraries
-set(COMPILE_LIBRARY_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/compile-library.sh)
-
-# Compile R6RS libraries to .so files (output to build directory)
-add_custom_command(
-  OUTPUT ${SCHEME_LIB_DIR}/mlir/ffi.so
-  COMMAND bash "${COMPILE_LIBRARY_SCRIPT}"
-          "${SCHEME_COMPILER}"
-          "mlir ffi"
-          "${CMAKE_CURRENT_SOURCE_DIR}/Runtime"
-          "${CMAKE_CURRENT_SOURCE_DIR}/Runtime"
-          "${CMAKE_CURRENT_BINARY_DIR}"
-          "${SCHEME_LIB_DIR}/mlir/ffi.so"
-  DEPENDS ChezScheme ${MLIR_FFI_SLS} ${COMPILE_LIBRARY_SCRIPT}
-  COMMENT "Compiling (mlir ffi) library"
-  VERBATIM
+# Compile all Scheme libraries in one shot - super fast!
+set(COMPILE_ALL_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/compile-all-libraries.sh)
+set(ALL_SCHEME_SOURCES
+  ${CMAKE_CURRENT_SOURCE_DIR}/Runtime/mlir/ffi.sls
+  ${CMAKE_CURRENT_SOURCE_DIR}/Runtime/mlir/pattern-dsl.sls
+  ${CMAKE_CURRENT_SOURCE_DIR}/Runtime/mlir/conversion/cast.sls
+  ${CMAKE_CURRENT_SOURCE_DIR}/Passes/onnx-to-hipsr.sls
 )
 
 add_custom_command(
-  OUTPUT ${SCHEME_LIB_DIR}/mlir/pattern-dsl.so
-  COMMAND bash "${COMPILE_LIBRARY_SCRIPT}"
+  OUTPUT
+    ${SCHEME_LIB_DIR}/mlir/ffi.so
+    ${SCHEME_LIB_DIR}/mlir/pattern-dsl.so
+    ${SCHEME_LIB_DIR}/mlir/conversion/cast.so
+    ${SCHEME_LIB_DIR}/onnx-to-hipsr.so
+  COMMAND bash "${COMPILE_ALL_SCRIPT}"
           "${SCHEME_COMPILER}"
-          "mlir pattern-dsl"
-          "${CMAKE_CURRENT_SOURCE_DIR}/Runtime:${CMAKE_SOURCE_DIR}/third_party/rime"
-          "${CMAKE_CURRENT_SOURCE_DIR}/Runtime"
-          "${CMAKE_CURRENT_BINARY_DIR}"
-          "${SCHEME_LIB_DIR}/mlir/pattern-dsl.so"
-  DEPENDS ChezScheme ${SCHEME_LIB_DIR}/mlir/ffi.so ${MLIR_PATTERN_DSL_SLS} ${COMPILE_LIBRARY_SCRIPT}
-  COMMENT "Compiling (mlir pattern-dsl) library"
-  VERBATIM
-)
-
-add_custom_command(
-  OUTPUT ${SCHEME_LIB_DIR}/mlir/conversion/cast.so
-  COMMAND bash "${COMPILE_LIBRARY_SCRIPT}"
-          "${SCHEME_COMPILER}"
-          "mlir conversion cast"
-          "${CMAKE_CURRENT_SOURCE_DIR}/Runtime:${CMAKE_SOURCE_DIR}/third_party/rime"
-          "${CMAKE_CURRENT_SOURCE_DIR}/Runtime"
-          "${CMAKE_CURRENT_BINARY_DIR}"
-          "${SCHEME_LIB_DIR}/mlir/conversion/cast.so"
-  DEPENDS ChezScheme ${SCHEME_LIB_DIR}/mlir/pattern-dsl.so ${MLIR_CAST_SLS} ${COMPILE_LIBRARY_SCRIPT}
-  COMMENT "Compiling (mlir conversion cast) library"
+          "${CMAKE_CURRENT_SOURCE_DIR}"
+          "${SCHEME_LIB_DIR}"
+  DEPENDS ChezScheme ${ALL_SCHEME_SOURCES} ${COMPILE_ALL_SCRIPT}
+  COMMENT "Compiling all Scheme libraries to bytecode"
   VERBATIM
 )
 
@@ -171,15 +144,14 @@ add_custom_target(SchemeLibraries ALL
     ${SCHEME_LIB_DIR}/mlir/ffi.so
     ${SCHEME_LIB_DIR}/mlir/pattern-dsl.so
     ${SCHEME_LIB_DIR}/mlir/conversion/cast.so
+    ${SCHEME_LIB_DIR}/onnx-to-hipsr.so
 )
 
 # Also copy source .sls files for development (useful for debugging)
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/Runtime/mlir
      DESTINATION ${SCHEME_LIB_DIR})
 
-# Copy pass modules (.sls files from Passes/ directory)
-# These are R6RS libraries imported by C++ via (import (module-name))
-# Filename must match library name: (library (printpass) ...) → printpass.sls
+# Copy simple pass modules (these are just thin wrappers, not compiled)
 configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/Passes/printpass.sls
   ${SCHEME_LIB_DIR}/printpass.sls
