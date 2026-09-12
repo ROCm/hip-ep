@@ -110,7 +110,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "${{ inputs.therock_cache_key }}" ]; then
-            DIST="${{ runner.workspace }}/therock-prefix"
+            # cygpath -m keeps a CMake-consumable path while dropping the
+            # backslashes that would break glob expansion in the staging step.
+            DIST="$(cygpath -m '${{ runner.workspace }}')/therock-prefix"
             if [ ! -d "$DIST/bin" ]; then
               echo "ERROR: restored TheRock cache has no bin/ at $DIST"
               exit 1
@@ -245,10 +247,12 @@ jobs:
           # custom_kernels_<arch>.dll statically imports hiprtc, so a missing
           # hiprtc DLL fails at library load rather than at first RTC use.
           ls staging/bin/hiprtc*.dll >/dev/null 2>&1 || { echo "ERROR: staging/bin/hiprtc*.dll missing"; ROCM_FAIL=1; }
-          for arch in "${HIP_ARCHS[@]}"; do
-            [ -d "staging/bin/hipblaslt/library/$arch" ] || {
-              echo "ERROR: staging/bin/hipblaslt/library/$arch missing"; ROCM_FAIL=1; }
-          done
+          # hipBLASLt resolves Tensile data per device ISA (gfx1151, ...), so a
+          # generic compile target has no matching dir; require at least one.
+          if ! ls -d staging/bin/hipblaslt/library/gfx* >/dev/null 2>&1; then
+            echo "ERROR: staging/bin/hipblaslt/library has no device ISA dir"
+            ROCM_FAIL=1
+          fi
           if [ "$ROCM_FAIL" -ne 0 ]; then
             echo "--- $THEROCK_DIR/bin ---"; ls -1 "$THEROCK_DIR/bin" | head -30
             exit 1
