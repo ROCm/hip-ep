@@ -46,7 +46,11 @@
     mlir-type-get-shape
     mlir-type-get-rank
     mlir-type-set-memory-space
+    mlir-tensor-type-in-device-space
     mlir-value-get-type
+
+    ;; Utility
+    mlir-get-hipsr-context-arg
 
     ;; IR construction
     mlir-create-placeholder-op
@@ -146,8 +150,18 @@
   (define mlir-type-set-memory-space
     (foreign-procedure "mlir_type_set_memory_space" (unsigned-64 int) unsigned-64))
 
+  (define mlir-tensor-type-in-device-space
+    (foreign-procedure "mlir_tensor_type_in_device_space" (unsigned-64) unsigned-64))
+
   (define mlir-value-get-type
     (foreign-procedure "mlir_value_get_type" (unsigned-64) unsigned-64))
+
+  ;;===--------------------------------------------------------------------===;;
+  ;; Utility Functions
+  ;;===--------------------------------------------------------------------===;;
+
+  (define mlir-get-hipsr-context-arg
+    (foreign-procedure "mlir_get_hipsr_context_arg" (unsigned-64) unsigned-64))
 
   ;;===--------------------------------------------------------------------===;;
   ;; IR Construction
