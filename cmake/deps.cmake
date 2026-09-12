@@ -129,6 +129,41 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(cpptrace)
 set(BUILD_SHARED_LIBS ${_saved_bsl_cpptrace})
 
+# Composable Kernel headers for ck_gemm.hip / ref_gemm.hip. SOURCE_SUBDIR names
+# a nonexistent dir so MakeAvailable populates the source without running CK's
+# own CMake. No GIT_SHALLOW: a shallow fetch of a raw commit SHA is unreliable.
+FetchContent_Declare(composablekernel
+  GIT_REPOSITORY ${DEP_URL_composablekernel}
+  GIT_TAG        ${DEP_HASH_composablekernel}
+  SOURCE_SUBDIR  __ck_no_build__
+  EXCLUDE_FROM_ALL)
+FetchContent_MakeAvailable(composablekernel)
+if(NOT composablekernel_SOURCE_DIR)
+  FetchContent_Populate(composablekernel)
+endif()
+
+# ck/config.h for gfx11. CK_USE_WMMA is load-bearing: without it CK's gfx11
+# host_utility/flush_cache.hpp does not compile.
+set(CK_USE_WMMA ON)
+set(CK_USE_XDL OFF)
+set(CK_ENABLE_FP16 ON)
+set(CK_ENABLE_BF16 ON)
+set(CK_ENABLE_FP32 ON)
+set(CK_ENABLE_FP64 ON)
+set(CK_ENABLE_INT8 ON)
+set(CK_ENABLE_DL_KERNELS ON)
+configure_file(
+  ${composablekernel_SOURCE_DIR}/include/ck/config.h.in
+  ${CMAKE_BINARY_DIR}/ck_generated/ck/config.h @ONLY)
+
+# Prepended before the HIP dist include in _hip_compile_sources so the pinned
+# CK source shadows the dist's include/ck; the generated config.h dir comes first.
+set(HIP_CK_INCLUDE_DIRS
+  "${CMAKE_BINARY_DIR}/ck_generated"
+  "${composablekernel_SOURCE_DIR}/include"
+  "${composablekernel_SOURCE_DIR}/library/include"
+  CACHE INTERNAL "Composable Kernel include dirs for the CK GEMM kernels")
+
 # LLVM/MLIR/LLD resolution.
 #
 # Tier 1 (preferred): find_package against an installed prefix (a prebuilt
