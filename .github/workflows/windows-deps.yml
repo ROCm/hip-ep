@@ -4,8 +4,8 @@
 ##
 name: Windows Deps
 
-# Prebuilds the two heavy from-source dependencies into cached install prefixes
-# and returns their cache keys. Callers restore those prefixes with
+# Prebuilds heavy from-source dependencies into cached install prefixes and
+# returns their cache keys. Callers restore those prefixes with
 # fail-on-cache-miss, so a green run here is what guarantees the caches exist.
 on:
   workflow_call:
@@ -22,6 +22,9 @@ on:
       oga_cache_key:
         description: Cache key holding the OGA artifact set.
         value: ${{ jobs.oga.outputs.cache_key }}
+      therock_cache_key:
+        description: Cache key holding the self-built TheRock SDK distribution.
+        value: ${{ jobs.therock.outputs.cache_key }}
 
 permissions:
   contents: read
@@ -38,6 +41,7 @@ env:
   # of AMDGPU_EP_REF. 102: forward Hip custom-op domains; 105: forward unknown /
   # Hip-owned provider options under the shared ep.<amdgpu>.* prefix.
   AMDGPU_PR_PATCHES: "102 105"
+  THEROCK_REF: "gpuep-release/therock-7.14"
 
 jobs:
   llvm:
@@ -652,3 +656,352 @@ jobs:
         with:
           path: ${{ runner.workspace }}/sccache-dir
           key: sccache-windows-deps-oga-${{ env.SCCACHE_KEY_DATE }}
+
+  therock:
+    runs-on: windows-2022
+    timeout-minutes: 360
+    concurrency:
+      group: deps-therock-${{ github.ref }}
+      cancel-in-progress: false
+
+    outputs:
+      cache_key: ${{ steps.key.outputs.value }}
+
+    steps:
+      # TheRock's submodules carry symlinks and paths past MAX_PATH, so this has
+      # to land before the checkout that clones them.
+      - name: Configure git for TheRock sources
+        shell: pwsh
+        run: |
+          git config --global core.symlinks true
+          git config --global core.longpaths true
+
+      - name: Checkout TheRock release fork
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: cliu1003/TheRock
+          ref: ${{ env.THEROCK_REF }}
+          path: source-therock
+          fetch-depth: 1
+          show-progress: false
+
+      - name: Compute cache key
+        id: key
+        shell: bash
+        working-directory: source-therock
+        run: echo "value=windows-therock-$(git rev-parse --short HEAD)-r2" >> "$GITHUB_OUTPUT"
+
+      - name: Probe self-built TheRock SDK
+        id: cache-therock
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/therock-prefix
+          key: ${{ steps.key.outputs.value }}
+          lookup-only: true
+
+      # Superproject checkout is submodule-free so cache hits skip llvm.
+      - name: Checkout TheRock submodules
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: cliu1003/TheRock
+          ref: ${{ env.THEROCK_REF }}
+          path: source-therock
+          fetch-depth: 1
+          submodules: true
+          show-progress: false
+
+      - name: Setup Python 3.12
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install Windows build tools
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          choco install --no-progress -y ninja --version=1.12.1 --allow-downgrade
+          choco install --no-progress -y strawberryperl
+          "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "C:\Strawberry\c\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Setup DVC
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        uses: iterative/setup-dvc@6c05772f52d19792ed73aedb6c2bf65ec92adebb # v3.0.0
+        with:
+          version: "3.62.0"
+
+      # Install MSVC last so cl.exe and the Windows SDK precede other toolchains.
+      - name: Setup MSVC environment
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+
+      - name: Initialize TheRock Python environment
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        shell: pwsh
+        working-directory: source-therock
+        run: |
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip install --upgrade pip
+          .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+          "${{ github.workspace }}\source-therock\.venv\Scripts" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # Windows DVC is the PAL/wkmi interop libs. MIOpen/hipDNN kdb is unused.
+      - name: Prepare TheRock sources
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        timeout-minutes: 30
+        shell: pwsh
+        working-directory: source-therock
+        run: .\.venv\Scripts\python.exe .\build_tools\fetch_sources.py --no-update-submodules --dvc-projects rocm-systems
+
+      - name: Prepare sccache local cache
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        shell: bash
+        run: echo "SCCACHE_DIR=${{ runner.workspace }}/sccache-dir" >> $GITHUB_ENV
+
+      - name: Restore sccache directory
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/sccache-dir
+          key: sccache-windows-deps-therock-${{ github.run_id }}
+          restore-keys: |
+            sccache-windows-deps-therock-
+
+      - name: Setup sccache
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Report disk before TheRock build
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table Name, Used, Free
+
+      # Inlined from the fork's build.bat with two additions it leaves out: cl.exe /
+      # link.exe, which build.bat expects from a Native Tools prompt and which CMake
+      # otherwise resolves to the runner's Strawberry Perl gcc, and the dist targets,
+      # which only fall back to THEROCK_AMDGPU_FAMILIES and so stay unset when the
+      # architectures are named through THEROCK_AMDGPU_TARGETS.
+      - name: Configure TheRock SDK
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        shell: bash
+        working-directory: source-therock
+        run: |
+          set -euo pipefail
+          # hipBLASLt find_package(Python) is system, not the superproject venv.
+          py="$(cygpath -m "$PWD")/.venv/Scripts/python.exe"
+
+          # hipBLASLt Tensile logic keep-set: stage only the kept-stem YAMLs and
+          # point hipBLASLt's first configure at them so Tensile is trimmed here
+          # (copying alone still builds the full set -- the filter does the trim).
+          hbsrc="rocm-libraries/projects/hipblaslt/library/src/amd_detail/rocblaslt/src/Tensile/Logic/asm_full"
+          hbkeep="build/logic-keep/library/src/amd_detail/rocblaslt/src/Tensile/Logic/asm_full"
+          rm -rf build/logic-keep
+          stems="Cijk_Ailk_Bljk_HHS_BH_Bias_HAS_SAV_UserArgs \
+                 Cijk_Alik_Bljk_HHS_BH_Bias_HAS_SAV_UserArgs \
+                 Cijk_Ailk_Bljk_HSS_BH_Bias_HAS_SAV_UserArgs \
+                 Cijk_Alik_Bljk_HSS_BH_Bias_HAS_SAV_UserArgs \
+                 Cijk_Alik_Bljk_HSS_BH_Bias_HAH \
+                 Cijk_Ailk_Bljk_S_B_Bias_HAS_SAV_UserArgs"
+          for arch in gfx1150 gfx1151 gfx1152 gfx1153; do
+            mkdir -p "$hbkeep/$arch/GridBased"
+            for s in $stems; do
+              f="$hbsrc/$arch/GridBased/${arch}_${s}.yaml"
+              if [ -f "$f" ]; then
+                cp "$f" "$hbkeep/$arch/GridBased/"
+              fi
+            done
+          done
+          hblogic="$(cygpath -m "$PWD")/build/logic-keep/library"
+
+          cmake -B build -GNinja . \
+            -DCMAKE_C_COMPILER=cl.exe \
+            -DCMAKE_CXX_COMPILER=cl.exe \
+            -DCMAKE_LINKER=link.exe \
+            -DPython3_EXECUTABLE="$py" \
+            -DPython_EXECUTABLE="$py" \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
+            -DBUILD_TESTING=OFF -DTHEROCK_BUILD_TESTING=OFF \
+            -DTHEROCK_AMDGPU_FAMILIES= \
+            -DTHEROCK_AMDGPU_TARGETS="gfx1151;gfx1152;gfx1150;gfx1153" \
+            -DTHEROCK_DIST_AMDGPU_TARGETS="gfx1151;gfx1152;gfx1150;gfx1153" \
+            -DTHEROCK_TEST_AMDGPU_FAMILIES= \
+            -DTHEROCK_AMDGPU_DIST_BUNDLE_NAME=gfx1150-gfx1151-gfx1152-gfx1153 \
+            -DTHEROCK_TEST_AMDGPU_TARGETS="gfx1151;gfx1152;gfx1150;gfx1153" \
+            -DTHEROCK_ENABLE_OCL_RUNTIME=OFF \
+            -DTHEROCK_ENABLE_COMM_LIBS=OFF \
+            -DTHEROCK_ENABLE_DC_TOOLS=OFF \
+            -DTHEROCK_ENABLE_DEBUG_TOOLS=OFF \
+            -DTHEROCK_ENABLE_STORAGE_LIBS=OFF \
+            -DTHEROCK_ENABLE_MEDIA_LIBS=OFF \
+            -DTHEROCK_ENABLE_EMULATION=OFF \
+            -DTHEROCK_ENABLE_ROCPROFSYS=OFF \
+            -DTHEROCK_ENABLE_HIPIFY=OFF \
+            -DTHEROCK_ENABLE_CORE_HIPINFO=OFF \
+            -DTHEROCK_ENABLE_CORE_HIPTESTS=OFF \
+            -DTHEROCK_ENABLE_MIOPEN=OFF \
+            -DTHEROCK_ENABLE_MIOPEN_PLUGIN=OFF \
+            -DTHEROCK_ENABLE_HIPDNN=OFF \
+            -DTHEROCK_ENABLE_HIPDNN_INTEGRATION_TESTS=OFF \
+            -DTHEROCK_ENABLE_MIOPENPROVIDER=OFF \
+            -DTHEROCK_ENABLE_HIPBLASLTPROVIDER=OFF \
+            -DTHEROCK_ENABLE_HIPDNN_SAMPLES=OFF \
+            -DTHEROCK_ENABLE_HIPKERNELPROVIDER=OFF \
+            -DTHEROCK_ENABLE_COMPOSABLE_KERNEL=OFF \
+            -DTHEROCK_ENABLE_ROCWMMA=OFF \
+            -DTHEROCK_ENABLE_PRIM=OFF \
+            -DTHEROCK_ENABLE_LIBHIPCXX=OFF \
+            -DTHEROCK_ENABLE_ROCALUTION=OFF \
+            -DTHEROCK_ENABLE_FFT=OFF \
+            -DTHEROCK_ENABLE_SPARSE=OFF \
+            -DTHEROCK_ENABLE_SOLVER=OFF \
+            -DTHEROCK_ENABLE_FFTW3=OFF \
+            -Damd-llvm_CMAKE_ARGS="-DLLVM_PARALLEL_LINK_JOBS=2;-DLLVM_USE_BINSKIM_COMPLIANT_COMPILE_FLAGS=ON;-DLLVM_USE_MSVC_STATIC_RUNTIME=ON;-DROCM_DEVICE_LIBS_USE_BINSKIM_COMPLIANT_COMPILE_FLAGS=ON;-DROCM_DEVICE_LIBS_USE_MSVC_STATIC_RUNTIME=ON;-DZLIB_USE_STATIC_LIBS=ON" \
+            -Damd-comgr_CMAKE_ARGS="-DCOMGR_DLL_NAME=amd_comgr0714.dll;-DCOMGR_DISABLE_SPIRV=OFF;-DCOMGR_EMBED_LIBCXX_HEADERS=ON;-DCOMGR_USE_INCBIN=OFF;-DCOMGR_USE_BINSKIM_COMPLIANT_COMPILE_FLAGS=ON;-DCOMGR_USE_MSVC_STATIC_RUNTIME=ON;-DZLIB_USE_STATIC_LIBS=ON" \
+            -Dhip-clr_CMAKE_ARGS="-D__HIP_USE_BINSKIM_COMPLIANT_COMPILE_FLAGS=ON;-DZLIB_USE_STATIC_LIBS=ON;-DROCM_KPACK_ENABLED=OFF" \
+            -Drocm-kpack_CMAKE_ARGS="-DBUILD_SHARED_LIBS=OFF" \
+            -DrocRAND_CMAKE_ARGS="-DROCRAND_USE_BINSKIM_COMPLIANT_COMPILE_FLAGS=ON;-DROCRAND_USE_MSVC_STATIC_RUNTIME=ON" \
+            -DhipBLASLt_CMAKE_ARGS="-DCMAKE_POLICY_VERSION_MINIMUM=3.10;-DZLIB_USE_STATIC_LIBS=ON;-DHIPBLASLT_BUILD_TESTING=OFF;-DHIPBLASLT_ENABLE_CLIENT=OFF;-DHIPBLASLT_ENABLE_AMD_SMI=OFF;-DHIPBLASLT_ENABLE_FETCH=ON;-DTENSILELITE_BUILD_TESTING=OFF;-DHIPBLASLT_USE_BINSKIM_COMPLIANT_COMPILE_FLAGS=ON;-DHIPBLASLT_USE_MSVC_STATIC_RUNTIME=ON;-DPython3_EXECUTABLE=$py;-DPython_EXECUTABLE=$py;-DHIPBLASLT_LIBLOGIC_PATH=$hblogic;-DTENSILELITE_LOGIC_FILTER=*" \
+            -DrocBLAS_CMAKE_ARGS="-DROCBLAS_USE_BINSKIM_COMPLIANT_COMPILE_FLAGS=ON;-DROCBLAS_USE_MSVC_STATIC_RUNTIME=OFF" \
+            -DhipBLAS_CMAKE_ARGS="-DHIPBLAS_USE_BINSKIM_COMPLIANT_COMPILE_FLAGS=ON;-DHIPBLAS_USE_MSVC_STATIC_RUNTIME=ON" \
+            -Dtherock-sqlite3_CMAKE_ARGS="-DROCM_SYSDEPS_USE_MSVC_STATIC_RUNTIME=ON" \
+            -Dtherock-bzip2_CMAKE_ARGS="-DROCM_SYSDEPS_USE_MSVC_STATIC_RUNTIME=ON"
+
+      # `all` also configures therock-grpc (BoringSSL ASM_NASM). The cached
+      # prefix is dist/rocm, which does not depend on grpc.
+      - name: Build TheRock SDK
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        shell: bash
+        working-directory: source-therock
+        run: cmake --build build --target dist
+
+      - name: Verify and stage TheRock SDK
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        shell: pwsh
+        working-directory: source-therock
+        run: |
+          $dist = (Resolve-Path .\build\dist\rocm).Path
+          # `--target dist` keeps the toolchain under lib\llvm; only the release
+          # tarball flattens it into bin.
+          $required = @(
+            "lib\llvm\bin\clang.exe",
+            "lib\llvm\bin\lld.exe",
+            "lib\llvm\bin\clang-offload-bundler.exe",
+            "lib\llvm\amdgcn\bitcode",
+            "bin\hipcc.bat",
+            "bin\hipblaslt.dll",
+            "lib\cmake\hip\hip-config.cmake",
+            "lib\cmake\hip-lang\hip-lang-config.cmake",
+            "lib\cmake\hipblaslt",
+            "lib\cmake\AMDDeviceLibs",
+            "lib\cmake\amd_comgr"
+          )
+          $missing = $required | Where-Object { -not (Test-Path (Join-Path $dist $_)) }
+          if (-not (Get-ChildItem "$dist\bin\amdhip64*.dll" -ErrorAction SilentlyContinue)) {
+            $missing += "bin\amdhip64*.dll"
+          }
+          if (-not (Get-ChildItem "$dist\bin\amd_comgr*.dll" -ErrorAction SilentlyContinue)) {
+            $missing += "bin\amd_comgr*.dll"
+          }
+          if (-not (Get-ChildItem "$dist\bin\hiprtc*.dll" -ErrorAction SilentlyContinue)) {
+            $missing += "bin\hiprtc*.dll"
+          }
+          if (-not (Get-ChildItem "$dist\bin\hipblaslt\library" -Directory -ErrorAction SilentlyContinue)) {
+            $missing += "bin\hipblaslt\library\<arch>"
+          }
+          if ($missing) {
+            $missing | ForEach-Object { Write-Host "MISSING: $_" }
+            exit 1
+          }
+
+          # Trim the raw dist to the set hip-ep consumes (find_package(hip) +
+          # find_package(hipblaslt) + the hipcc/clang++ that builds custom_kernels).
+          # Drops the LLVM dev toolchain, static archives and the rocBLAS/hipBLAS/
+          # rand/fftw/OpenCL stack the EP never links. Keep-set mirrors the raw
+          # layout whitelist in task-therock-windows-source-build.mdc.
+          $before = [math]::Round((Get-ChildItem $dist -Recurse -File | Measure-Object Length -Sum).Sum / 1GB, 2)
+          $keepExe = @(
+            "clang.exe", "clang++.exe", "lld.exe", "lld-link.exe",
+            "llvm-objcopy.exe", "clang-offload-bundler.exe", "amdgpu-arch.exe"
+          )
+          Get-ChildItem "$dist\lib\llvm\bin" -File |
+            Where-Object { $keepExe -notcontains $_.Name } | Remove-Item -Force
+          $keepBinDll = @(
+            "amd_comgr0714.dll", "amdhip64_7.dll", "hipblaslt.dll",
+            "hiprtc0714.dll", "hiprtc-builtins0714.dll"
+          )
+          Get-ChildItem "$dist\bin" -Filter *.dll |
+            Where-Object { $keepBinDll -notcontains $_.Name } | Remove-Item -Force
+          Get-ChildItem "$dist\lib" -Filter *.lib -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notmatch '^(amd_comgr|amdhip64|hipblaslt|hiprtc)' } |
+            Remove-Item -Force
+          $dropCmake = @(
+            "rocblas", "rocrand", "rocm-core", "rocm-kpack", "hipblas",
+            "hiprand", "fftw3", "fftw3f", "flatbuffers", "mxDataGenerator",
+            "composable_kernel"
+          )
+          foreach ($c in $dropCmake) { Remove-Item "$dist\lib\cmake\$c" -Recurse -Force -ErrorAction SilentlyContinue }
+          $dropInc = @(
+            "ck", "ck_tile", "half", "rapidjson", "nlohmann", "flatbuffers",
+            "rocblas", "rocrand", "rocm-core", "rocm_kpack", "hipblas",
+            "hiprand", "mxDataGenerator", "hsakmt"
+          )
+          foreach ($i in $dropInc) { Remove-Item "$dist\include\$i" -Recurse -Force -ErrorAction SilentlyContinue }
+          # Keep lib\llvm\lib\clang (the clang resource dir hipcc needs); drop only
+          # the LLVM/clang static archives next to it.
+          Remove-Item "$dist\lib\llvm\include" -Recurse -Force -ErrorAction SilentlyContinue
+          Get-ChildItem "$dist\lib\llvm\lib" -File -Filter *.lib -ErrorAction SilentlyContinue | Remove-Item -Force
+          Remove-Item "$dist\.info", "$dist\.kpack", "$dist\libexec" -Recurse -Force -ErrorAction SilentlyContinue
+          # rocBLAS Tensile data dir the EP never touches (it links hipBLASLt).
+          Remove-Item "$dist\bin\rocblas" -Recurse -Force -ErrorAction SilentlyContinue
+          $after = [math]::Round((Get-ChildItem $dist -Recurse -File | Measure-Object Length -Sum).Sum / 1GB, 2)
+          Write-Host "dist trimmed: ${before} GB -> ${after} GB"
+
+          $prefix = "${{ runner.workspace }}\therock-prefix"
+          robocopy $dist $prefix /MIR /NFL /NDL /NJH /NJS /NP
+          # robocopy uses 0-7 for success (>=8 is a real failure); normalise so
+          # the copy's exit code does not fail the step.
+          if ($LASTEXITCODE -ge 8) {
+            exit $LASTEXITCODE
+          }
+          Get-ChildItem "$prefix\bin\hipblaslt\library" -Directory |
+            ForEach-Object { Write-Host "hipBLASLt logic: $($_.Name)" }
+          exit 0
+
+      - name: Report disk after TheRock build
+        if: always() && steps.cache-therock.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table Name, Used, Free
+
+      - name: Stop sccache
+        if: always() && steps.cache-therock.outputs.cache-hit != 'true'
+        continue-on-error: true
+        shell: bash
+        run: sccache --show-stats; sccache --stop-server
+
+      - name: Save sccache directory
+        if: always() && steps.cache-therock.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/sccache-dir
+          key: sccache-windows-deps-therock-${{ github.run_id }}
+
+      - name: Save self-built TheRock SDK
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/therock-prefix
+          key: ${{ steps.key.outputs.value }}
+
+      # Also publish the trimmed SDK as a downloadable artifact (the cache is
+      # only reachable from other jobs in the same repo/run family).
+      - name: Upload TheRock SDK
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.key.outputs.value }}
+          path: ${{ runner.workspace }}/therock-prefix
+          retention-days: 7
