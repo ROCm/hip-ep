@@ -52,22 +52,25 @@
   (define (run-pass module-op . args)
     (mlir-log-info "Starting ONNX to HipSR Conversion (Scheme)")
 
-    ;; Statistics
+    ;; Step 1: Convert function signatures
+    ;;(mlir-operation-walk module-op
+    ;;  (lambda (op)
+    ;;    (when (string=? (mlir-operation-name op) "func.func")
+    ;;      (mlir-func-convert-signature op))))
+
+    ;; Step 2: Apply conversion patterns
     (let ((total-ops 0)
           (converted-ops 0))
 
-      ;; Walk all operations with rewriting enabled
       (mlir-operation-walk-rewrite module-op
         (lambda (op)
           (set! total-ops (+ total-ops 1))
 
-          ;; Try to apply any conversion pattern
           (when (apply-patterns onnx-to-hipsr-patterns op)
             (set! converted-ops (+ converted-ops 1)))
 
-          #f))  ; Pattern already did the rewrite
+          #f))
 
-      ;; Report statistics
       (mlir-log-info (format "ONNX to HipSR Conversion (Scheme): ~a/~a operations converted"
                              converted-ops total-ops)))
 

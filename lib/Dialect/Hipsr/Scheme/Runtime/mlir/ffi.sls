@@ -51,6 +51,7 @@
 
     ;; Utility
     mlir-get-hipsr-context-arg
+    ;;mlir-func-convert-signature  ;; DISABLED - causes crash
 
     ;; IR construction
     mlir-create-placeholder-op
@@ -162,6 +163,9 @@
 
   (define mlir-get-hipsr-context-arg
     (foreign-procedure "mlir_get_hipsr_context_arg" (unsigned-64) unsigned-64))
+
+  ;;(define mlir-func-convert-signature
+  ;;  (foreign-procedure "mlir_func_convert_signature" (unsigned-64) void))
 
   ;;===--------------------------------------------------------------------===;;
   ;; IR Construction
