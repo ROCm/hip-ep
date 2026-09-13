@@ -5,6 +5,8 @@
 
 #include "SchemeBindings.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
+#include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
+#include "hip/Dialect/Onnx/IR/OnnxOps.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/FileSystem.h"
@@ -17,6 +19,7 @@
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Wrap.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include <cstddef>
 #include <cstring>
 #include <fstream>
@@ -780,49 +783,87 @@ static uint64_t mlir_tensor_type_in_device_space(uint64_t type_ptr) {
   return reinterpret_cast<uint64_t>(const_cast<void*>(newType.getAsOpaquePointer()));
 }
 
-static void mlir_func_convert_signature(uint64_t func_ptr) {
-  if (!func_ptr) return;
-  auto funcOp = mlir::dyn_cast<mlir::func::FuncOp>(reinterpret_cast<mlir::Operation*>(func_ptr));
-  if (!funcOp || funcOp.getBody().empty()) return;
+// Apply dialect conversion with TypeConverter
+// This is the proper way to convert ONNX to HipSR, matching the C++ pass
+static int mlir_apply_onnx_to_hipsr_conversion(uint64_t module_ptr) {
+  auto module = mlir::dyn_cast<mlir::ModuleOp>(reinterpret_cast<mlir::Operation*>(module_ptr));
+  if (!module) return 0;
 
-  llvm::SmallVector<mlir::Type> newArgTypes;
-  for (mlir::Type argType : funcOp.getArgumentTypes()) {
-    if (auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(argType)) {
-      if (auto encoding = mlir::dyn_cast_if_present<mlir::hipsr::MemorySpaceAttr>(tensorType.getEncoding())) {
-        if (encoding.getValue() == mlir::hipsr::MemorySpace::Device) {
-          newArgTypes.push_back(argType);
-          continue;
-        }
-      }
-      newArgTypes.push_back(tensorType.cloneWithEncoding(
-          mlir::hipsr::MemorySpaceAttr::get(argType.getContext(), mlir::hipsr::MemorySpace::Device)));
-    } else {
-      newArgTypes.push_back(argType);
+  mlir::MLIRContext* ctx = module.getContext();
+
+  // Verify all required dialects are loaded
+  if (!ctx->getLoadedDialect<mlir::hipsr::HipsrDialect>()) {
+    llvm::errs() << "ERROR: HipsrDialect not loaded!\n";
+    return 0;
+  }
+  if (!ctx->getLoadedDialect<mlir::onnx::OnnxDialect>()) {
+    llvm::errs() << "ERROR: OnnxDialect not loaded!\n";
+    return 0;
+  }
+
+  // TypeConverter - adds device memory space to tensors
+  mlir::TypeConverter converter;
+  converter.addConversion([](mlir::Type type) { return type; });
+  converter.addConversion([](mlir::RankedTensorType type) -> mlir::Type {
+    if (type.getRank() == 0 || type.getEncoding()) {
+      return type;
     }
+    // Add device memory space to tensor
+    auto encoding = mlir::hipsr::MemorySpaceAttr::get(type.getContext(),
+                                                      mlir::hipsr::MemorySpace::Device);
+    return mlir::RankedTensorType::get(type.getShape(), type.getElementType(), encoding);
+  });
+
+  // ConversionTarget - mark ONNX illegal, HipSR legal
+  mlir::ConversionTarget target(*ctx);
+  target.addIllegalDialect<mlir::onnx::OnnxDialect>();
+  target.addLegalOp<mlir::onnx::NoValueOp>();
+  target.addLegalDialect<mlir::hipsr::HipsrDialect>();
+  target.addLegalOp<mlir::ModuleOp>();
+  target.addLegalOp<mlir::arith::ConstantOp>();
+  target.addDynamicallyLegalOp<mlir::func::FuncOp>([&](mlir::func::FuncOp op) {
+    return converter.isSignatureLegal(op.getFunctionType());
+  });
+  target.addDynamicallyLegalOp<mlir::func::ReturnOp>(
+      [&](mlir::func::ReturnOp op) { return converter.isLegal(op); });
+  target.markUnknownOpDynamicallyLegal([](mlir::Operation *op) {
+    return op->getParentOfType<mlir::hipsr::ComputeOp>() != nullptr ||
+           op->getParentOfType<mlir::hipsr::PlaceholderOp>() != nullptr;
+  });
+
+  // Patterns
+  mlir::RewritePatternSet patterns(ctx);
+  mlir::hipsr::populateCastConversionPatterns(converter, patterns, ctx);
+  mlir::hipsr::populateReturnConversionPatterns(converter, patterns, ctx);
+  mlir::populateFunctionOpInterfaceTypeConversionPattern<mlir::func::FuncOp>(patterns, converter);
+
+  // Apply conversion
+  if (mlir::failed(mlir::applyFullConversion(module, target, std::move(patterns)))) {
+    return 0; // Failure
   }
 
-  llvm::SmallVector<mlir::Type> newResultTypes;
-  for (mlir::Type resultType : funcOp.getResultTypes()) {
-    if (auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(resultType)) {
-      if (auto encoding = mlir::dyn_cast_if_present<mlir::hipsr::MemorySpaceAttr>(tensorType.getEncoding())) {
-        if (encoding.getValue() == mlir::hipsr::MemorySpace::Device) {
-          newResultTypes.push_back(resultType);
-          continue;
-        }
-      }
-      newResultTypes.push_back(tensorType.cloneWithEncoding(
-          mlir::hipsr::MemorySpaceAttr::get(resultType.getContext(), mlir::hipsr::MemorySpace::Device)));
-    } else {
-      newResultTypes.push_back(resultType);
+  // Post-processing: erase dead onnx.NoValue ops
+  llvm::SmallVector<mlir::onnx::NoValueOp> dead;
+  module.walk([&](mlir::onnx::NoValueOp op) {
+    if (op->use_empty()) {
+      dead.push_back(op);
     }
+  });
+  for (auto op : dead) {
+    op.erase();
   }
 
-  funcOp.setFunctionType(mlir::FunctionType::get(funcOp.getContext(), newArgTypes, newResultTypes));
+  // Post-processing: rewire placeholder inputs
+  // Placeholder inputs form the shape graph, not the data graph.
+  module.walk([](mlir::hipsr::PlaceholderOp placeholder) {
+    llvm::SmallVector<mlir::Value> resolvedInputs;
+    for (mlir::Value input : placeholder.getInputs()) {
+      resolvedInputs.push_back(mlir::hipsr::getShapeGraphCounterpart(input));
+    }
+    placeholder.getInputsMutable().assign(resolvedInputs);
+  });
 
-  mlir::Block& entryBlock = funcOp.getBody().front();
-  for (auto [idx, argType] : llvm::enumerate(newArgTypes)) {
-    entryBlock.getArgument(idx).setType(argType);
-  }
+  return 1; // Success
 }
 
 } // extern "C"
@@ -847,7 +888,7 @@ void registerMlirForeignFunctions() {
   Sregister_symbol("mlir_type_get_rank", (void*)::mlir_type_get_rank);
   Sregister_symbol("mlir_type_get_element_type", (void*)::mlir_type_get_element_type);
   Sregister_symbol("mlir_tensor_type_in_device_space", (void*)::mlir_tensor_type_in_device_space);
-  Sregister_symbol("mlir_func_convert_signature", (void*)mlir_func_convert_signature);
+  Sregister_symbol("mlir_apply_onnx_to_hipsr_conversion", (void*)mlir_apply_onnx_to_hipsr_conversion);
 
   // Register logging functions
   Sregister_symbol("mlir_log_trace", (void*)mlir_log_trace);

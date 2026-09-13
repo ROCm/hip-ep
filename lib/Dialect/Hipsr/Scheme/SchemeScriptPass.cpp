@@ -5,8 +5,11 @@
 
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
+#include "hip/Dialect/Onnx/IR/OnnxOps.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "Runtime/SchemeBindings.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"

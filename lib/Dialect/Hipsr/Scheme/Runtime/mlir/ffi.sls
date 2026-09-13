@@ -51,7 +51,7 @@
 
     ;; Utility
     mlir-get-hipsr-context-arg
-    mlir-func-convert-signature
+    mlir-apply-onnx-to-hipsr-conversion
 
     ;; IR construction
     mlir-create-placeholder-op
@@ -164,8 +164,8 @@
   (define mlir-get-hipsr-context-arg
     (foreign-procedure "mlir_get_hipsr_context_arg" (unsigned-64) unsigned-64))
 
-  (define mlir-func-convert-signature
-    (foreign-procedure "mlir_func_convert_signature" (unsigned-64) void))
+  (define mlir-apply-onnx-to-hipsr-conversion
+    (foreign-procedure "mlir_apply_onnx_to_hipsr_conversion" (unsigned-64) int))
 
   ;;===--------------------------------------------------------------------===;;
   ;; IR Construction
