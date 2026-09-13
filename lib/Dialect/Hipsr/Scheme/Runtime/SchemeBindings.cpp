@@ -780,9 +780,7 @@ static uint64_t mlir_tensor_type_in_device_space(uint64_t type_ptr) {
   return reinterpret_cast<uint64_t>(const_cast<void*>(newType.getAsOpaquePointer()));
 }
 
-} // extern "C"
-
-extern "C" void mlir_func_convert_signature(uint64_t func_ptr) {
+static void mlir_func_convert_signature(uint64_t func_ptr) {
   if (!func_ptr) return;
   auto funcOp = mlir::dyn_cast<mlir::func::FuncOp>(reinterpret_cast<mlir::Operation*>(func_ptr));
   if (!funcOp || funcOp.getBody().empty()) return;
@@ -827,6 +825,8 @@ extern "C" void mlir_func_convert_signature(uint64_t func_ptr) {
   }
 }
 
+} // extern "C"
+
 namespace mlir {
 namespace hipsr {
 
@@ -847,7 +847,7 @@ void registerMlirForeignFunctions() {
   Sregister_symbol("mlir_type_get_rank", (void*)::mlir_type_get_rank);
   Sregister_symbol("mlir_type_get_element_type", (void*)::mlir_type_get_element_type);
   Sregister_symbol("mlir_tensor_type_in_device_space", (void*)::mlir_tensor_type_in_device_space);
-  Sregister_symbol("mlir_func_convert_signature", (void*)::mlir_func_convert_signature);
+  Sregister_symbol("mlir_func_convert_signature", (void*)mlir_func_convert_signature);
 
   // Register logging functions
   Sregister_symbol("mlir_log_trace", (void*)mlir_log_trace);
