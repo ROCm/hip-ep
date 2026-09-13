@@ -10,8 +10,9 @@
 ;;
 ;; Equivalent to lib/Conversion/OnnxToHipsr/OnnxToHipsr.cpp
 ;;
-;; Uses the dialect conversion framework with TypeConverter, matching the
-;; C++ implementation exactly.
+;; Orchestrates the dialect conversion using MLIR framework primitives.
+;; The C++ FFI layer provides primitives and reusable helpers, while this
+;; Scheme code implements the high-level conversion logic.
 ;;===----------------------------------------------------------------------===;;
 
 (library (onnx-to-hipsr)
@@ -25,23 +26,53 @@
   ;;===--------------------------------------------------------------------===;;
 
   ;; Main conversion pass
-  ;; Delegates to C++ implementation that uses applyFullConversion with TypeConverter
+  ;; Orchestrates dialect conversion using MLIR primitives
   (define (run-pass module-op . args)
     (mlir-log-info "Starting ONNX to HipSR Conversion (Scheme)")
 
-    ;; Apply dialect conversion using C++ helper
-    ;; This does:
-    ;; 1. Ensures HipsrDialect is loaded
-    ;; 2. Creates TypeConverter (adds device memory space to tensors)
-    ;; 3. Creates ConversionTarget (marks ONNX illegal, HipSR legal)
-    ;; 4. Populates conversion patterns (Cast pattern)
-    ;; 5. Calls applyFullConversion
-    ;; 6. Post-processes (erases dead NoValue, rewires placeholders)
-    (let ((success (mlir-apply-onnx-to-hipsr-conversion module-op)))
+    ;; Step 1: Verify required dialects are loaded
+    (let ((ctx (mlir-operation-get-context module-op)))
+      (mlir-log-debug "Checking required dialects...")
+
+      (unless (= 1 (mlir-context-is-dialect-loaded ctx "hipsr"))
+        (mlir-log-error "HipsrDialect not loaded!")
+        (error 'run-pass "HipsrDialect not loaded"))
+
+      (unless (= 1 (mlir-context-is-dialect-loaded ctx "onnx"))
+        (mlir-log-error "OnnxDialect not loaded!")
+        (error 'run-pass "OnnxDialect not loaded"))
+
+      (mlir-log-debug "All required dialects loaded"))
+
+    ;; Step 2: Apply dialect conversion
+    ;; NOTE: TypeConverter, ConversionTarget, and applyFullConversion
+    ;; are complex C++ framework objects that cannot be easily exposed via FFI.
+    ;; They are handled by C++ helpers that follow the standard MLIR patterns.
+    ;;
+    ;; Future work: If we need Scheme to customize TypeConverter or
+    ;; ConversionTarget, we would need to add FFI for those specific
+    ;; customization points (e.g., callback registration).
+    (mlir-log-debug "Applying dialect conversion...")
+
+    ;; This helper creates TypeConverter, ConversionTarget, patterns,
+    ;; and calls applyFullConversion - standard MLIR dialect conversion
+    ;; The helper is in C++ because these framework objects are not
+    ;; easily manipulated through FFI
+    (let ((success (mlir-apply-dialect-conversion-onnx-to-hipsr module-op)))
       (if (= success 1)
-          (mlir-log-info "ONNX to HipSR Conversion (Scheme): Success")
+          (begin
+            (mlir-log-debug "Dialect conversion successful")
+
+            ;; Step 3: Post-processing using primitives
+            (mlir-log-debug "Erasing dead NoValue ops...")
+            (mlir-erase-dead-novalue-ops module-op)
+
+            (mlir-log-debug "Rewiring placeholder inputs...")
+            (mlir-rewire-placeholder-inputs module-op)
+
+            (mlir-log-info "ONNX to HipSR Conversion (Scheme): Success"))
           (begin
             (mlir-log-error "ONNX to HipSR Conversion (Scheme): FAILED")
-            (error 'run-pass "Conversion failed")))))
+            (error 'run-pass "Dialect conversion failed")))))
 
 ) ;; end library (onnx-to-hipsr)
