@@ -782,6 +782,51 @@ static uint64_t mlir_tensor_type_in_device_space(uint64_t type_ptr) {
 
 } // extern "C"
 
+extern "C" void mlir_func_convert_signature(uint64_t func_ptr) {
+  if (!func_ptr) return;
+  auto funcOp = mlir::dyn_cast<mlir::func::FuncOp>(reinterpret_cast<mlir::Operation*>(func_ptr));
+  if (!funcOp || funcOp.getBody().empty()) return;
+
+  llvm::SmallVector<mlir::Type> newArgTypes;
+  for (mlir::Type argType : funcOp.getArgumentTypes()) {
+    if (auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(argType)) {
+      if (auto encoding = mlir::dyn_cast_if_present<mlir::hipsr::MemorySpaceAttr>(tensorType.getEncoding())) {
+        if (encoding.getValue() == mlir::hipsr::MemorySpace::Device) {
+          newArgTypes.push_back(argType);
+          continue;
+        }
+      }
+      newArgTypes.push_back(tensorType.cloneWithEncoding(
+          mlir::hipsr::MemorySpaceAttr::get(argType.getContext(), mlir::hipsr::MemorySpace::Device)));
+    } else {
+      newArgTypes.push_back(argType);
+    }
+  }
+
+  llvm::SmallVector<mlir::Type> newResultTypes;
+  for (mlir::Type resultType : funcOp.getResultTypes()) {
+    if (auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(resultType)) {
+      if (auto encoding = mlir::dyn_cast_if_present<mlir::hipsr::MemorySpaceAttr>(tensorType.getEncoding())) {
+        if (encoding.getValue() == mlir::hipsr::MemorySpace::Device) {
+          newResultTypes.push_back(resultType);
+          continue;
+        }
+      }
+      newResultTypes.push_back(tensorType.cloneWithEncoding(
+          mlir::hipsr::MemorySpaceAttr::get(resultType.getContext(), mlir::hipsr::MemorySpace::Device)));
+    } else {
+      newResultTypes.push_back(resultType);
+    }
+  }
+
+  funcOp.setFunctionType(mlir::FunctionType::get(funcOp.getContext(), newArgTypes, newResultTypes));
+
+  mlir::Block& entryBlock = funcOp.getBody().front();
+  for (auto [idx, argType] : llvm::enumerate(newArgTypes)) {
+    entryBlock.getArgument(idx).setType(argType);
+  }
+}
+
 namespace mlir {
 namespace hipsr {
 
@@ -802,6 +847,7 @@ void registerMlirForeignFunctions() {
   Sregister_symbol("mlir_type_get_rank", (void*)::mlir_type_get_rank);
   Sregister_symbol("mlir_type_get_element_type", (void*)::mlir_type_get_element_type);
   Sregister_symbol("mlir_tensor_type_in_device_space", (void*)::mlir_tensor_type_in_device_space);
+  Sregister_symbol("mlir_func_convert_signature", (void*)::mlir_func_convert_signature);
 
   // Register logging functions
   Sregister_symbol("mlir_log_trace", (void*)mlir_log_trace);
