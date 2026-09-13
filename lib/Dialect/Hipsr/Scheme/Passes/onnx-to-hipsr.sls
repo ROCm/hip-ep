@@ -53,10 +53,10 @@
     (mlir-log-info "Starting ONNX to HipSR Conversion (Scheme)")
 
     ;; Step 1: Convert function signatures
-    ;;(mlir-operation-walk module-op
-    ;;  (lambda (op)
-    ;;    (when (string=? (mlir-operation-name op) "func.func")
-    ;;      (mlir-func-convert-signature op))))
+    (mlir-operation-walk module-op
+      (lambda (op)
+        (when (string=? (mlir-operation-name op) "func.func")
+          (mlir-func-convert-signature op))))
 
     ;; Step 2: Apply conversion patterns
     (let ((total-ops 0)
