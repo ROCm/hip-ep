@@ -858,24 +858,33 @@ static void mlir_rewire_placeholder_inputs(uint64_t module_ptr) {
   });
 }
 
-// Apply ONNX→HipSR dialect conversion
-// This is a composite helper that creates TypeConverter, ConversionTarget,
-// patterns, and calls applyFullConversion.
-//
-// Kept as a C++ helper because TypeConverter and ConversionTarget are
-// complex framework objects that don't map well to FFI.
-//
-// Returns 1 on success, 0 on failure
-static int mlir_apply_dialect_conversion_onnx_to_hipsr(uint64_t module_ptr) {
-  auto module = mlir::dyn_cast<mlir::ModuleOp>(reinterpret_cast<mlir::Operation*>(module_ptr));
-  if (!module) return 0;
+//===----------------------------------------------------------------------===//
+// MLIR Dialect Conversion Framework Primitives
+//===----------------------------------------------------------------------===//
 
-  mlir::MLIRContext* ctx = module.getContext();
+// Create a TypeConverter object
+// Returns TypeConverter* as uint64_t (opaque handle for Scheme)
+static uint64_t mlir_create_type_converter() {
+  return reinterpret_cast<uint64_t>(new mlir::TypeConverter());
+}
 
-  // TypeConverter - adds device memory space to tensors
-  mlir::TypeConverter converter;
-  converter.addConversion([](mlir::Type type) { return type; });
-  converter.addConversion([](mlir::RankedTensorType type) -> mlir::Type {
+// Destroy a TypeConverter object
+static void mlir_destroy_type_converter(uint64_t converter_ptr) {
+  if (!converter_ptr) return;
+  delete reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
+}
+
+// Add standard type conversions to TypeConverter
+// This adds: identity conversion + ranked tensor device memory space conversion
+static void mlir_type_converter_add_device_memory_conversions(uint64_t converter_ptr) {
+  if (!converter_ptr) return;
+  auto* converter = reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
+
+  // Identity conversion for all types
+  converter->addConversion([](mlir::Type type) { return type; });
+
+  // Ranked tensor conversion: add device memory space attribute
+  converter->addConversion([](mlir::RankedTensorType type) -> mlir::Type {
     if (type.getRank() == 0 || type.getEncoding()) {
       return type;
     }
@@ -883,36 +892,107 @@ static int mlir_apply_dialect_conversion_onnx_to_hipsr(uint64_t module_ptr) {
                                                       mlir::hipsr::MemorySpace::Device);
     return mlir::RankedTensorType::get(type.getShape(), type.getElementType(), encoding);
   });
+}
 
-  // ConversionTarget - mark ONNX illegal, HipSR legal
-  mlir::ConversionTarget target(*ctx);
-  target.addIllegalDialect<mlir::onnx::OnnxDialect>();
-  target.addLegalOp<mlir::onnx::NoValueOp>();
-  target.addLegalDialect<mlir::hipsr::HipsrDialect>();
-  target.addLegalOp<mlir::ModuleOp>();
-  target.addLegalOp<mlir::arith::ConstantOp>();
-  target.addDynamicallyLegalOp<mlir::func::FuncOp>([&](mlir::func::FuncOp op) {
-    return converter.isSignatureLegal(op.getFunctionType());
+// Create a ConversionTarget object
+// Returns ConversionTarget* as uint64_t (opaque handle for Scheme)
+static uint64_t mlir_create_conversion_target(uint64_t ctx_ptr) {
+  if (!ctx_ptr) return 0;
+  auto* ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
+  return reinterpret_cast<uint64_t>(new mlir::ConversionTarget(*ctx));
+}
+
+// Destroy a ConversionTarget object
+static void mlir_destroy_conversion_target(uint64_t target_ptr) {
+  if (!target_ptr) return;
+  delete reinterpret_cast<mlir::ConversionTarget*>(target_ptr);
+}
+
+// Mark ONNX dialect illegal (except NoValueOp)
+static void mlir_conversion_target_add_illegal_onnx(uint64_t target_ptr) {
+  if (!target_ptr) return;
+  auto* target = reinterpret_cast<mlir::ConversionTarget*>(target_ptr);
+  target->addIllegalDialect<mlir::onnx::OnnxDialect>();
+  target->addLegalOp<mlir::onnx::NoValueOp>();
+}
+
+// Mark HipSR dialect legal
+static void mlir_conversion_target_add_legal_hipsr(uint64_t target_ptr) {
+  if (!target_ptr) return;
+  auto* target = reinterpret_cast<mlir::ConversionTarget*>(target_ptr);
+  target->addLegalDialect<mlir::hipsr::HipsrDialect>();
+}
+
+// Mark common operations legal (ModuleOp, arith.constant)
+static void mlir_conversion_target_add_legal_common_ops(uint64_t target_ptr) {
+  if (!target_ptr) return;
+  auto* target = reinterpret_cast<mlir::ConversionTarget*>(target_ptr);
+  target->addLegalOp<mlir::ModuleOp>();
+  target->addLegalOp<mlir::arith::ConstantOp>();
+}
+
+// Mark func.func and func.return dynamically legal based on TypeConverter
+static void mlir_conversion_target_add_dynamically_legal_func(
+    uint64_t target_ptr, uint64_t converter_ptr) {
+  if (!target_ptr || !converter_ptr) return;
+  auto* target = reinterpret_cast<mlir::ConversionTarget*>(target_ptr);
+  auto* converter = reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
+
+  target->addDynamicallyLegalOp<mlir::func::FuncOp>([converter](mlir::func::FuncOp op) {
+    return converter->isSignatureLegal(op.getFunctionType());
   });
-  target.addDynamicallyLegalOp<mlir::func::ReturnOp>(
-      [&](mlir::func::ReturnOp op) { return converter.isLegal(op); });
-  target.markUnknownOpDynamicallyLegal([](mlir::Operation *op) {
+  target->addDynamicallyLegalOp<mlir::func::ReturnOp>(
+      [converter](mlir::func::ReturnOp op) { return converter->isLegal(op); });
+}
+
+// Mark unknown ops legal if nested inside ComputeOp or PlaceholderOp
+static void mlir_conversion_target_mark_unknown_ops_nested_legal(uint64_t target_ptr) {
+  if (!target_ptr) return;
+  auto* target = reinterpret_cast<mlir::ConversionTarget*>(target_ptr);
+  target->markUnknownOpDynamicallyLegal([](mlir::Operation *op) {
     return op->getParentOfType<mlir::hipsr::ComputeOp>() != nullptr ||
            op->getParentOfType<mlir::hipsr::PlaceholderOp>() != nullptr;
   });
+}
 
-  // Patterns
-  mlir::RewritePatternSet patterns(ctx);
-  mlir::hipsr::populateCastConversionPatterns(converter, patterns, ctx);
-  mlir::hipsr::populateReturnConversionPatterns(converter, patterns, ctx);
-  mlir::populateFunctionOpInterfaceTypeConversionPattern<mlir::func::FuncOp>(patterns, converter);
+// Create a RewritePatternSet
+// Returns RewritePatternSet* as uint64_t (opaque handle for Scheme)
+static uint64_t mlir_create_rewrite_pattern_set(uint64_t ctx_ptr) {
+  if (!ctx_ptr) return 0;
+  auto* ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
+  return reinterpret_cast<uint64_t>(new mlir::RewritePatternSet(ctx));
+}
 
-  // Apply conversion
-  if (mlir::failed(mlir::applyFullConversion(module, target, std::move(patterns)))) {
+// Destroy a RewritePatternSet object
+static void mlir_destroy_rewrite_pattern_set(uint64_t patterns_ptr) {
+  if (!patterns_ptr) return;
+  delete reinterpret_cast<mlir::RewritePatternSet*>(patterns_ptr);
+}
+
+// Apply full conversion
+// Returns 1 on success, 0 on failure
+// NOTE: This takes ownership of the patterns (moves them)
+static int mlir_apply_full_conversion(uint64_t module_ptr, uint64_t target_ptr, uint64_t patterns_ptr) {
+  if (!module_ptr || !target_ptr || !patterns_ptr) return 0;
+
+  auto module = mlir::dyn_cast<mlir::ModuleOp>(reinterpret_cast<mlir::Operation*>(module_ptr));
+  if (!module) return 0;
+
+  auto* target = reinterpret_cast<mlir::ConversionTarget*>(target_ptr);
+  auto* patterns = reinterpret_cast<mlir::RewritePatternSet*>(patterns_ptr);
+
+  if (mlir::failed(mlir::applyFullConversion(module, *target, std::move(*patterns)))) {
     return 0;
   }
 
   return 1;
+}
+
+// Get MLIRContext from operation
+static uint64_t mlir_operation_get_context(uint64_t op_ptr) {
+  if (!op_ptr) return 0;
+  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  return reinterpret_cast<uint64_t>(op->getContext());
 }
 
 } // extern "C"
@@ -938,15 +1018,28 @@ void registerMlirForeignFunctions() {
   Sregister_symbol("mlir_type_get_element_type", (void*)::mlir_type_get_element_type);
   Sregister_symbol("mlir_tensor_type_in_device_space", (void*)::mlir_tensor_type_in_device_space);
 
+  // Dialect conversion framework primitives
+  Sregister_symbol("mlir_operation_get_context", (void*)mlir_operation_get_context);
+  Sregister_symbol("mlir_create_type_converter", (void*)mlir_create_type_converter);
+  Sregister_symbol("mlir_destroy_type_converter", (void*)mlir_destroy_type_converter);
+  Sregister_symbol("mlir_type_converter_add_device_memory_conversions", (void*)mlir_type_converter_add_device_memory_conversions);
+  Sregister_symbol("mlir_create_conversion_target", (void*)mlir_create_conversion_target);
+  Sregister_symbol("mlir_destroy_conversion_target", (void*)mlir_destroy_conversion_target);
+  Sregister_symbol("mlir_conversion_target_add_illegal_onnx", (void*)mlir_conversion_target_add_illegal_onnx);
+  Sregister_symbol("mlir_conversion_target_add_legal_hipsr", (void*)mlir_conversion_target_add_legal_hipsr);
+  Sregister_symbol("mlir_conversion_target_add_legal_common_ops", (void*)mlir_conversion_target_add_legal_common_ops);
+  Sregister_symbol("mlir_conversion_target_add_dynamically_legal_func", (void*)mlir_conversion_target_add_dynamically_legal_func);
+  Sregister_symbol("mlir_conversion_target_mark_unknown_ops_nested_legal", (void*)mlir_conversion_target_mark_unknown_ops_nested_legal);
+  Sregister_symbol("mlir_create_rewrite_pattern_set", (void*)mlir_create_rewrite_pattern_set);
+  Sregister_symbol("mlir_destroy_rewrite_pattern_set", (void*)mlir_destroy_rewrite_pattern_set);
+  Sregister_symbol("mlir_apply_full_conversion", (void*)mlir_apply_full_conversion);
+
   // Dialect conversion helpers (reusable pattern populations)
   Sregister_symbol("mlir_populate_cast_conversion_patterns", (void*)mlir_populate_cast_conversion_patterns);
   Sregister_symbol("mlir_populate_return_conversion_patterns", (void*)mlir_populate_return_conversion_patterns);
   Sregister_symbol("mlir_populate_func_type_conversion_pattern", (void*)mlir_populate_func_type_conversion_pattern);
   Sregister_symbol("mlir_erase_dead_novalue_ops", (void*)mlir_erase_dead_novalue_ops);
   Sregister_symbol("mlir_rewire_placeholder_inputs", (void*)mlir_rewire_placeholder_inputs);
-
-  // Composite dialect conversion helper (orchestrates TypeConverter + ConversionTarget + applyFullConversion)
-  Sregister_symbol("mlir_apply_dialect_conversion_onnx_to_hipsr", (void*)mlir_apply_dialect_conversion_onnx_to_hipsr);
 
   // Register logging functions
   Sregister_symbol("mlir_log_trace", (void*)mlir_log_trace);
