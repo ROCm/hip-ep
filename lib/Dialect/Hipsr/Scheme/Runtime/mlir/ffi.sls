@@ -51,6 +51,22 @@
 
     ;; Utility
     mlir-get-hipsr-context-arg
+    mlir-operation-get-context
+
+    ;; Dialect conversion framework primitives
+    mlir-create-type-converter
+    mlir-destroy-type-converter
+    mlir-type-converter-add-device-memory-conversions
+    mlir-create-conversion-target
+    mlir-destroy-conversion-target
+    mlir-conversion-target-add-illegal-onnx
+    mlir-conversion-target-add-legal-hipsr
+    mlir-conversion-target-add-legal-common-ops
+    mlir-conversion-target-add-dynamically-legal-func
+    mlir-conversion-target-mark-unknown-ops-nested-legal
+    mlir-create-rewrite-pattern-set
+    mlir-destroy-rewrite-pattern-set
+    mlir-apply-full-conversion
 
     ;; Dialect conversion helpers
     mlir-populate-cast-conversion-patterns
@@ -58,7 +74,6 @@
     mlir-populate-func-type-conversion-pattern
     mlir-erase-dead-novalue-ops
     mlir-rewire-placeholder-inputs
-    mlir-apply-dialect-conversion-onnx-to-hipsr
 
     ;; IR construction
     mlir-create-placeholder-op
@@ -171,6 +186,54 @@
   (define mlir-get-hipsr-context-arg
     (foreign-procedure "mlir_get_hipsr_context_arg" (unsigned-64) unsigned-64))
 
+  (define mlir-operation-get-context
+    (foreign-procedure "mlir_operation_get_context" (unsigned-64) unsigned-64))
+
+  ;;===--------------------------------------------------------------------===;;
+  ;; Dialect Conversion Framework Primitives
+  ;;===--------------------------------------------------------------------===;;
+
+  (define mlir-create-type-converter
+    (foreign-procedure "mlir_create_type_converter" () unsigned-64))
+
+  (define mlir-destroy-type-converter
+    (foreign-procedure "mlir_destroy_type_converter" (unsigned-64) void))
+
+  (define mlir-type-converter-add-device-memory-conversions
+    (foreign-procedure "mlir_type_converter_add_device_memory_conversions" (unsigned-64) void))
+
+  (define mlir-create-conversion-target
+    (foreign-procedure "mlir_create_conversion_target" (unsigned-64) unsigned-64))
+
+  (define mlir-destroy-conversion-target
+    (foreign-procedure "mlir_destroy_conversion_target" (unsigned-64) void))
+
+  (define mlir-conversion-target-add-illegal-onnx
+    (foreign-procedure "mlir_conversion_target_add_illegal_onnx" (unsigned-64) void))
+
+  (define mlir-conversion-target-add-legal-hipsr
+    (foreign-procedure "mlir_conversion_target_add_legal_hipsr" (unsigned-64) void))
+
+  (define mlir-conversion-target-add-legal-common-ops
+    (foreign-procedure "mlir_conversion_target_add_legal_common_ops" (unsigned-64) void))
+
+  (define mlir-conversion-target-add-dynamically-legal-func
+    (foreign-procedure "mlir_conversion_target_add_dynamically_legal_func"
+                       (unsigned-64 unsigned-64) void))
+
+  (define mlir-conversion-target-mark-unknown-ops-nested-legal
+    (foreign-procedure "mlir_conversion_target_mark_unknown_ops_nested_legal" (unsigned-64) void))
+
+  (define mlir-create-rewrite-pattern-set
+    (foreign-procedure "mlir_create_rewrite_pattern_set" (unsigned-64) unsigned-64))
+
+  (define mlir-destroy-rewrite-pattern-set
+    (foreign-procedure "mlir_destroy_rewrite_pattern_set" (unsigned-64) void))
+
+  (define mlir-apply-full-conversion
+    (foreign-procedure "mlir_apply_full_conversion"
+                       (unsigned-64 unsigned-64 unsigned-64) int))
+
   ;;===--------------------------------------------------------------------===;;
   ;; Dialect Conversion Helpers
   ;;===--------------------------------------------------------------------===;;
@@ -192,9 +255,6 @@
 
   (define mlir-rewire-placeholder-inputs
     (foreign-procedure "mlir_rewire_placeholder_inputs" (unsigned-64) void))
-
-  (define mlir-apply-dialect-conversion-onnx-to-hipsr
-    (foreign-procedure "mlir_apply_dialect_conversion_onnx_to_hipsr" (unsigned-64) int))
 
   ;;===--------------------------------------------------------------------===;;
   ;; IR Construction
