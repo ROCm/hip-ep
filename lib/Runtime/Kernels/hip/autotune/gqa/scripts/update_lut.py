@@ -197,9 +197,10 @@ def run_measure(args):
 #             never a power of two -- the nearest-neighbour metric then answers
 #             any length between two measured ones), batch 1, window folded into
 #             the scanned length so no separate windowed rows are needed.
-#   prefill : every model geometry x chunk size (seq_q) x a short and a long KV.
-#             The config is largely seq_kv-independent above the short end, so
-#             two KV points per (geometry, seq_q) bracket it.
+#   prefill : every model geometry x chunk size (seq_q) x a KV ladder. Two KV
+#             points do not bracket the winner: BKV trades LDS, hence occupancy,
+#             against a per-tile amortization only long KV pays back, so the
+#             crossover sits strictly between a short and a long probe.
 # ---------------------------------------------------------------------------
 SHAPE_FIELDS = ['id', 'group', 'phase', 'B', 'H', 'G', 'd', 'sq', 'skv',
                 'max_seq', 'window', 'sink', 'grid_role', 'note']
@@ -207,7 +208,7 @@ SHAPE_FIELDS = ['id', 'group', 'phase', 'B', 'H', 'G', 'd', 'sq', 'skv',
 DECODE_BOUNDARIES = [128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
 INTERIOR_FRACTIONS = [1.03, 1.25, 1.5, 1.75]
 PREFILL_SQ = [128, 256, 512, 1024, 2048, 4096]
-PREFILL_SKV = [128, 65536]
+PREFILL_SKV = [128, 1024, 4096, 16384, 65536]
 
 VARIANT_OF_HEAD_DIM = {64: 'PrefillV5', 128: 'PrefillV7', 256: 'PrefillV8'}
 
@@ -247,6 +248,11 @@ def _grid_shapes():
         for sq in PREFILL_SQ:
             for skv in PREFILL_SKV:
                 if skv < sq:
+                    continue
+                # Chunked prefill fixes seq_q at the chunk size and single-shot
+                # prefill has seq_q == seq_kv, so no model issues a large chunk
+                # against a far larger cache. Also the slowest region to sweep.
+                if sq >= 2048 and skv > 4 * sq:
                     continue
                 pi += 1
                 shapes.append(dict(
@@ -494,7 +500,7 @@ def _prune_saturated(points):
     return kept, removed
 
 
-def _build_from_csvs(data_dir, out_json, arch):
+def _build_from_csvs(data_dir, out_json, arch, only_phase=None):
     """Build gfx<arch>.json (new nearest-neighbour layout) from *_best.csv.
 
     One point per measured shape, literal dims (no bucketing), configs
@@ -514,6 +520,27 @@ def _build_from_csvs(data_dir, out_json, arch):
             configs.append(cfg)
         return cfg_index[k]
 
+    # `only_phase` re-measures one phase and carries the rest over from the table
+    # being replaced. data/ is gitignored, so a checkout holds the shipped table
+    # but not the readings behind it, and rebuilding from the CSVs of one phase
+    # alone would emit a table missing every other phase. Carrying the config
+    # list too keeps the surviving rows on their existing indices: points store
+    # a config by index, so a reordered list rewrites every row in the file.
+    carried = {}
+    n_seed = 0
+    if only_phase and Path(out_json).exists():
+        with open(out_json, encoding='utf-8') as f:
+            doc = json.load(f)
+        for cfg in doc.get('configs', []):
+            cfg_index[_cfg_key(cfg)] = len(configs)
+            configs.append(cfg)
+        n_seed = len(configs)
+        for p in doc.get('points', []):
+            if (p['phase'] == 'Decode') != (only_phase == 'decode'):
+                carried[(p['phase'], p['head_dim'], p['num_heads'],
+                         p['kv_num_heads'], p['batch'], p['seq_q'],
+                         p['seq_kv'])] = p
+
     points = {}           # point-key -> point dict (dedup, last wins)
     n_rows = 0
     for csv_path in sorted(Path(data_dir).glob('*_best.csv')):
@@ -531,6 +558,8 @@ def _build_from_csvs(data_dir, out_json, arch):
                 phase = PHASE_OF_KERNEL.get(row.get('kernel', ''))
                 if phase is None or H <= 0 or G <= 0:
                     continue
+                if only_phase and (phase == 'Decode') != (only_phase == 'decode'):
+                    continue
                 if phase == 'Decode':
                     # The window folds into the scanned length: a windowed decode
                     # does the work of its effective length, which is what the
@@ -540,7 +569,7 @@ def _build_from_csvs(data_dir, out_json, arch):
                 else:
                     seq_q, seq_kv = sq, skv
                 cfg_id = intern(cfg)
-                key = (phase, d, H, G, B, seq_q, seq_kv)
+                key = (phase, HEAD_DIM_CLASS[d], H, G, B, seq_q, seq_kv)
                 points[key] = {
                     'phase': phase, 'head_dim': HEAD_DIM_CLASS[d],
                     'kv_dtype': 'Fp16', 'config': cfg_id, 'splits': splits,
@@ -582,17 +611,29 @@ def _build_from_csvs(data_dir, out_json, arch):
     # runs), then garbage-collect configs that no surviving point/fallback uses
     # and renumber the indices so `configs` stays tight.
     n_before = len(points)
-    kept, n_removed = _prune_saturated(list(points.values()))
+    # Pruning is answer-preserving only over the coordinates it is handed, so it
+    # still moves answers at lengths between two survivors -- 25 production
+    # geometries when applied to the prefill sweep below. That is the failure
+    # this table is fixing, so a re-measured phase keeps what it measured.
+    if only_phase:
+        kept, n_removed = list(points.values()), 0
+    else:
+        kept, n_removed = _prune_saturated(list(points.values()))
+    kept += [p for k, p in carried.items() if k not in points]
+    # Seeded configs are retained even when unused: dropping one shifts every
+    # index above it, which is the churn the carry-over exists to avoid.
     used = sorted({p['config'] for p in kept}
-                  | {r['config'] for r in fallbacks})
+                  | {r['config'] for r in fallbacks}
+                  | set(range(n_seed)))
     remap = {old: new for new, old in enumerate(used)}
     configs = [configs[old] for old in used]
     for p in kept:
         p['config'] = remap[p['config']]
     for r in fallbacks:
         r['config'] = remap[r['config']]
-    print('[build] pruned {} saturated points ({} -> {}), {} configs'.format(
-        n_removed, n_before, len(kept), len(configs)))
+    print('[build] pruned {} saturated points ({} -> {}), carried {}, '
+          '{} configs'.format(n_removed, n_before, len(kept) - len(carried),
+                              len(carried), len(configs)))
 
     point_rows = sorted(kept, key=lambda p: (
         p['phase'], p['head_dim'], p['num_heads'], p['kv_num_heads'],
@@ -629,7 +670,9 @@ def run_build(args):
         print('[build] ' + ' '.join(cmd))
         subprocess.run(cmd, check=True, cwd=str(tools.parent))
     else:
-        _build_from_csvs(Path(args.data), lut_json, args.arch)
+        _build_from_csvs(Path(args.data), lut_json, args.arch,
+                         only_phase=None if args.phase == 'both'
+                         else args.phase)
     print('[build] wrote ' + str(lut_json))
 
 
