@@ -23,7 +23,7 @@
   (import (rnrs (6))
           (mlir ffi)
           (mlir pattern-dsl)
-          (rime loop))
+          (for (rime loop) expand))  ; Import only at compile time (expand phase)
 
   ;;===--------------------------------------------------------------------===;;
   ;; Pattern Definition
