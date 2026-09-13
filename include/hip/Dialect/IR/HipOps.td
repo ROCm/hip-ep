@@ -148,7 +148,7 @@ class Hip_DpsOp<string mnemonic,
           ::std::optional<::mlir::Location>,
           ::mlir::ValueRange operands,
           ::mlir::DictionaryAttr attrs,
-          ::mlir::OpaqueProperties props,
+          ::mlir::PropertyRef props,
           ::mlir::RegionRange regions,
           ::llvm::SmallVectorImpl<::mlir::Type> &results) {
         $cppClass::Adaptor adaptor(operands, attrs, props, regions);
