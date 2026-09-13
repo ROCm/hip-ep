@@ -72,7 +72,6 @@ add_custom_target(ChezBootHeaders DEPENDS
 add_library(HipsrSchemePass
   Runtime/SchemeBindings.cpp
   SchemeScriptPass.cpp
-  SchemeConversionPass.cpp
 )
 
 target_include_directories(HipsrSchemePass PRIVATE
@@ -149,16 +148,10 @@ configure_file(
   ${SCHEME_LIB_DIR}/printpass.sls
   COPYONLY
 )
-configure_file(
-  ${CMAKE_CURRENT_SOURCE_DIR}/Passes/cast-conversion.sls
-  ${SCHEME_LIB_DIR}/cast-conversion.sls
-  COPYONLY
-)
 
 # Install R6RS pass modules to <prefix>/lib/scheme/
 install(FILES
   ${CMAKE_CURRENT_SOURCE_DIR}/Passes/printpass.sls
-  ${CMAKE_CURRENT_SOURCE_DIR}/Passes/cast-conversion.sls
   DESTINATION lib/scheme
 )
 
