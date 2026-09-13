@@ -288,6 +288,12 @@ def SchemeScriptPass : Pass<"scheme-script", "mlir::ModuleOp"> {
 
     Example: --scheme-script="module=printpass" imports (printpass)
   }];
+  let dependentDialects = [
+    "::mlir::hipsr::HipsrDialect",
+    "::mlir::onnx::OnnxDialect",
+    "::mlir::func::FuncDialect",
+    "::mlir::arith::ArithDialect"
+  ];
   let options = [
     Option<"logLevel", "log-level", "std::string", /*default=*/"\"warning\"",
            "Logging level: trace, debug, info, warning, error, fatal">,
