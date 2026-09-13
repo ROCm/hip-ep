@@ -297,4 +297,34 @@ def HipsrUseOutputAllocatorPass
     "::mlir::memref::MemRefDialect"
   ];
 }
+
+def SchemeScriptPass : Pass<"scheme-script", "mlir::ModuleOp"> {
+  let summary = "Execute MLIR pass written in Scheme";
+  let description = [{
+    Generic pass that imports an R6RS Scheme module and executes its run-pass
+    function. The module receives the module operation and can query/transform
+    IR using the Scheme FFI. This allows writing complete MLIR passes in pure
+    Scheme without C++ code.
+
+    The pass:
+    1. Sets (library-directories) to lib/scheme/ relative to executable
+    2. Imports the specified R6RS module via (import (module-name))
+    3. Calls the exported run-pass function with the module operation
+
+    Example: --scheme-script="module=printpass" imports (printpass)
+  }];
+  let dependentDialects = [
+    "::mlir::hipsr::HipsrDialect",
+    "::mlir::onnx::OnnxDialect",
+    "::mlir::func::FuncDialect",
+    "::mlir::arith::ArithDialect"
+  ];
+  let options = [
+    Option<"logLevel", "log-level", "std::string", /*default=*/"\"warning\"",
+           "Logging level: trace, debug, info, warning, error, fatal">,
+    Option<"moduleName", "module", "std::string", /*default=*/"\"printpass\"",
+           "R6RS module name to import (without parentheses)">
+  ];
+}
+
 #endif // HIPSR_TRANSFORMS_PASSES
