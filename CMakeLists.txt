@@ -147,6 +147,10 @@ endif()
 
 add_subdirectory(tools/hip-onnx-runner)
 
+# Standalone DX12 kernel-execution smoke-test driver (Windows only; no-ops
+# via early return() on other platforms). Independent of the ONNX Runtime EP.
+add_subdirectory(driver)
+
 # ==============================================================================
 # HIP MLIR compiler + EP
 # ==============================================================================
