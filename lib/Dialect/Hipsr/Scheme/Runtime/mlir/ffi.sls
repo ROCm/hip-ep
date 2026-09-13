@@ -51,8 +51,6 @@
 
     ;; Utility
     mlir-get-hipsr-context-arg
-    mlir-operation-get-context
-    mlir-context-is-dialect-loaded
 
     ;; Dialect conversion helpers
     mlir-populate-cast-conversion-patterns
@@ -172,12 +170,6 @@
 
   (define mlir-get-hipsr-context-arg
     (foreign-procedure "mlir_get_hipsr_context_arg" (unsigned-64) unsigned-64))
-
-  (define mlir-operation-get-context
-    (foreign-procedure "mlir_operation_get_context" (unsigned-64) unsigned-64))
-
-  (define mlir-context-is-dialect-loaded
-    (foreign-procedure "mlir_context_is_dialect_loaded" (unsigned-64 string) int))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Dialect Conversion Helpers

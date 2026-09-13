@@ -27,24 +27,14 @@
 
   ;; Main conversion pass
   ;; Orchestrates dialect conversion using MLIR primitives
+  ;;
+  ;; NOTE: Required dialects (HipsrDialect, OnnxDialect, FuncDialect) are
+  ;; loaded automatically by MLIR's pass infrastructure via the dependentDialects
+  ;; declaration in Passes.td. No need to check them here.
   (define (run-pass module-op . args)
     (mlir-log-info "Starting ONNX to HipSR Conversion (Scheme)")
 
-    ;; Step 1: Verify required dialects are loaded
-    (let ((ctx (mlir-operation-get-context module-op)))
-      (mlir-log-debug "Checking required dialects...")
-
-      (unless (= 1 (mlir-context-is-dialect-loaded ctx "hipsr"))
-        (mlir-log-error "HipsrDialect not loaded!")
-        (error 'run-pass "HipsrDialect not loaded"))
-
-      (unless (= 1 (mlir-context-is-dialect-loaded ctx "onnx"))
-        (mlir-log-error "OnnxDialect not loaded!")
-        (error 'run-pass "OnnxDialect not loaded"))
-
-      (mlir-log-debug "All required dialects loaded"))
-
-    ;; Step 2: Apply dialect conversion
+    ;; Step 1: Apply dialect conversion
     ;; NOTE: TypeConverter, ConversionTarget, and applyFullConversion
     ;; are complex C++ framework objects that cannot be easily exposed via FFI.
     ;; They are handled by C++ helpers that follow the standard MLIR patterns.
@@ -63,7 +53,7 @@
           (begin
             (mlir-log-debug "Dialect conversion successful")
 
-            ;; Step 3: Post-processing using primitives
+            ;; Step 2: Post-processing using primitives
             (mlir-log-debug "Erasing dead NoValue ops...")
             (mlir-erase-dead-novalue-ops module-op)
 

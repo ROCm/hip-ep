@@ -787,34 +787,6 @@ static uint64_t mlir_tensor_type_in_device_space(uint64_t type_ptr) {
 // MLIR Dialect Conversion Primitives
 //===----------------------------------------------------------------------===//
 
-// Check if a dialect is loaded by name
-// Returns 1 if loaded, 0 if not
-static int mlir_context_is_dialect_loaded(uint64_t ctx_ptr, const char* dialect_namespace) {
-  if (!ctx_ptr || !dialect_namespace) return 0;
-  auto* ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
-
-  // Check common dialects by namespace
-  if (std::string(dialect_namespace) == "hipsr") {
-    return ctx->getLoadedDialect<mlir::hipsr::HipsrDialect>() != nullptr ? 1 : 0;
-  } else if (std::string(dialect_namespace) == "onnx") {
-    return ctx->getLoadedDialect<mlir::onnx::OnnxDialect>() != nullptr ? 1 : 0;
-  } else if (std::string(dialect_namespace) == "func") {
-    return ctx->getLoadedDialect<mlir::func::FuncDialect>() != nullptr ? 1 : 0;
-  } else if (std::string(dialect_namespace) == "arith") {
-    return ctx->getLoadedDialect<mlir::arith::ArithDialect>() != nullptr ? 1 : 0;
-  }
-
-  return 0;
-}
-
-// Get MLIRContext from operation
-// Returns MLIRContext* as uint64_t
-static uint64_t mlir_operation_get_context(uint64_t op_ptr) {
-  if (!op_ptr) return 0;
-  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
-  return reinterpret_cast<uint64_t>(op->getContext());
-}
-
 // Helper: Populate Cast conversion patterns
 // This is kept as a helper since it's a reusable component
 static void mlir_populate_cast_conversion_patterns(
@@ -965,10 +937,6 @@ void registerMlirForeignFunctions() {
   Sregister_symbol("mlir_type_get_rank", (void*)::mlir_type_get_rank);
   Sregister_symbol("mlir_type_get_element_type", (void*)::mlir_type_get_element_type);
   Sregister_symbol("mlir_tensor_type_in_device_space", (void*)::mlir_tensor_type_in_device_space);
-
-  // Dialect conversion framework primitives
-  Sregister_symbol("mlir_context_is_dialect_loaded", (void*)mlir_context_is_dialect_loaded);
-  Sregister_symbol("mlir_operation_get_context", (void*)mlir_operation_get_context);
 
   // Dialect conversion helpers (reusable pattern populations)
   Sregister_symbol("mlir_populate_cast_conversion_patterns", (void*)mlir_populate_cast_conversion_patterns);
