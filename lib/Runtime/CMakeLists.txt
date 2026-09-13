@@ -266,6 +266,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
         DEPENDS ${SOURCE_FILE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/hipdnn_ep_runtime.h
                 ${CMAKE_SOURCE_DIR}/include/hip/datatype_abi.h
+                ${CMAKE_SOURCE_DIR}/include/hip/init_config_abi.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/runtime_state_internal.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/op_state.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/op_profile.h
@@ -379,6 +380,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/qelementwise.cpp runtime_qelementwise.bc)
     compile_to_bitcode(real/qmatmul.cpp runtime_qmatmul.bc)
     compile_to_bitcode(real/qconv.cpp runtime_qconv.bc)
+    compile_to_bitcode(real/qlpnormalization.cpp runtime_qlpnormalization.bc)
 
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
@@ -469,6 +471,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qelementwise.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmatmul.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qconv.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_qlpnormalization.bc
     )
     # Vendor-symbol stubs (see the compile_to_bitcode above) join runtime.bc only
     # when the vendor BLAS/DNN backends are disabled.

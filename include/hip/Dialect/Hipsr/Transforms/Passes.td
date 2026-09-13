@@ -244,6 +244,31 @@ def HipsrPoolAllocPass : Pass<"hipsr-pool-alloc", "mlir::ModuleOp"> {
   ];
 }
 
+def HipsrInlineRegionsPass : Pass<"hipsr-inline-regions", "mlir::ModuleOp"> {
+  let summary = "Inline hipsr.pool_domain and hipsr.compute into their parents";
+  let description = [{
+    Flattens `hipsr.pool_domain` and `hipsr.compute` regions. Nested regions
+    are flattened from the inside out.
+
+    Before:
+    ```mlir
+    %r = hipsr.compute(%ctx) ins(%in) outs(%out) {
+    ^bb0(%c: !hipsr.context, %i: memref<4xf32>, %o: memref<4xf32>):
+      memref.copy %i, %o : memref<4xf32> to memref<4xf32>
+      hipsr.compute_yield %o : memref<4xf32>
+    } : memref<4xf32>
+    ```
+
+    After:
+    ```mlir
+    memref.copy %in, %out : memref<4xf32> to memref<4xf32>
+    ```
+  }];
+  let dependentDialects = [
+    "::mlir::hipsr::HipsrDialect"
+  ];
+}
+
 def HipsrUseOutputAllocatorPass
     : Pass<"hipsr-use-output-allocator", "mlir::func::FuncOp"> {
   let summary =

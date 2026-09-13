@@ -126,6 +126,20 @@ int wrap_qmatmul(RuntimeState *state, const void *A, const void *B, void *Y,
 
   void *stream = hipdnn_ep_state_get_stream(state);
 
+  // Split-K scratch. The kernel owns the decision -- it depends on the
+  // device's compute-unit count, not just the extents -- and reports 0 for
+  // shapes that already fill the GPU, so the common case reserves nothing. A
+  // reservation that fails is not fatal either: hip_qmatmul falls back to the
+  // single-pass kernel when it is handed no workspace.
+  void *workspace = nullptr;
+  size_t workspace_bytes = 0;
+  const size_t splitk_bytes = hip_qmatmul_workspace_bytes(M, N, K, batch_count);
+  if (splitk_bytes > 0 &&
+      hipdnn_ep_state_ensure_workspace(state, splitk_bytes) == 0) {
+    workspace = hipdnn_ep_state_get_workspace(state);
+    workspace_bytes = hipdnn_ep_state_get_workspace_size(state);
+  }
+
   if (hipdnn_ep_debug_enabled()) {
     fprintf(stderr,
             "[REAL] wrap_qmatmul: M=%lld N=%lld K=%lld batch=%lld "
@@ -142,5 +156,6 @@ int wrap_qmatmul(RuntimeState *state, const void *A, const void *B, void *Y,
 
   return hip_qmatmul(stream, A, B, Y, M, N, K, batch_count, b_batch_stride,
                      trans_a != 0, trans_b != 0, a_dtype, b_dtype, y_dtype,
-                     M_scale, A_zero_point, B_zero_point, Y_zero_point);
+                     M_scale, A_zero_point, B_zero_point, Y_zero_point,
+                     workspace, workspace_bytes);
 }

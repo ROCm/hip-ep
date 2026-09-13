@@ -336,6 +336,34 @@ isPackedInt4PerChannelWeight(mlir::PatternRewriter &, mlir::PDLResultList &,
   return mlir::success(isPackedInt4Constant(zeroPoints));
 }
 
+// onnx.LpNormalization that matches the fused RMS path: p=2 over a static
+// trailing axis. Other cases keep the unfused DQ + float LpNorm + Q chain.
+inline mlir::LogicalResult
+isFusableQLpNormalization(mlir::PatternRewriter &, mlir::PDLResultList &,
+                          llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 1)
+    return mlir::failure();
+  mlir::Operation *op = args[0].dyn_cast<mlir::Operation *>();
+  if (!op || op->getNumOperands() != 1)
+    return mlir::failure();
+  if (!onnxIntAttrEquals(op, "p", 2, /*absentValue=*/2))
+    return mlir::failure();
+
+  auto inputType =
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getOperand(0).getType());
+  if (!inputType || inputType.getRank() == 0)
+    return mlir::failure();
+  int64_t rank = inputType.getRank();
+  int64_t last = inputType.getDimSize(rank - 1);
+  if (last == mlir::ShapedType::kDynamic || last <= 0)
+    return mlir::failure();
+
+  auto axisAttr = op->getAttrOfType<mlir::IntegerAttr>("axis");
+  int64_t axis = axisAttr ? axisAttr.getValue().getSExtValue() : -1;
+  int64_t normAxis = axis < 0 ? axis + rank : axis;
+  return mlir::success(normAxis == rank - 1);
+}
+
 //===----------------------------------------------------------------------===//
 // Rewrite functions -- reached only after the constraints above accepted.
 //===----------------------------------------------------------------------===//
@@ -451,6 +479,8 @@ inline bool run(mlir::ModuleOp mlirModule, llvm::StringRef pdlBytecodeFile) {
                                          isFusableQConvGeometry);
   pdlPatterns.registerConstraintFunction("IsPackedInt4PerChannelWeight",
                                          isPackedInt4PerChannelWeight);
+  pdlPatterns.registerConstraintFunction("IsFusableQLpNormalization",
+                                         isFusableQLpNormalization);
   pdlPatterns.registerRewriteFunction("GetContextArg", getContextArg);
   pdlPatterns.registerRewriteFunction("ExtractScaleValue", extractScaleValue);
   pdlPatterns.registerRewriteFunction("ExtractZeropointValue",

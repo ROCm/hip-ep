@@ -5093,4 +5093,43 @@ def Hip_QConvOp : Hip_DpsOp<"qconv",
     attr-dict (`:` type($result_tensors)^)?
   }];
 }
+
+def Hip_QLpNormalizationOp : Hip_DpsOp<"qlpnormalization",
+                                       /*traits=*/[],
+                                       /*outsAccessor=*/"Output",
+                                       /*autoReify=*/1,
+                                       /*autoInfer=*/1,
+                                       /*declareInfer=*/1> {
+  let summary = "Quantized LpNormalization (L2) with integrated QDQ";
+  let description = [{
+    Fuses DequantizeLinear -> LpNormalization -> QuantizeLinear.
+
+    The match is UINT16 per-tensor input/output quantization, `p = 2`, and
+    normalization over the trailing axis. That is the same math as RMS norm
+    with `scale = 1/sqrt(N)` and `epsilon = 0`:
+
+      y = Q( L2(DQ(x)) )
+
+    Input and output scales/zero-points stay separate attributes: the models
+    almost never share them, so requantization is part of the fused op.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    F32Attr:$input_scale,
+    I64Attr:$input_zp,
+    F32Attr:$output_scale,
+    I64Attr:$output_zp,
+    I64Attr:$axis,
+    I64Attr:$p
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
 #endif // HIP_OPS

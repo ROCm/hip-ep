@@ -76,7 +76,7 @@ int main() {
   setenv("HIPDNN_EP_GQA_ARCH", "gfx1151", 1);
 #endif
 
-  void *policy = hip_gqa_autotune_create();
+  void *policy = hip_gqa_autotune_create(/*provider_mode=*/nullptr);
   CHECK(policy != nullptr, "create returned null");
   CHECK(hip_gqa_autotune_mode(policy) ==
             static_cast<int>(GqaAutotuneMode::Lookup),

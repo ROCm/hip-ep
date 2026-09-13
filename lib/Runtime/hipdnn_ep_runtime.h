@@ -252,9 +252,13 @@ void *hipdnn_ep_alloc_output(RuntimeState *state, int64_t out_idx,
 //   fs:            morphizen::FileSystem* (void* for C ABI) - must not be null
 //   metadata_blob: FlatBuffers binary blob (HipModelMetaInfo) baked into DLL
 //   blob_size:     Size of metadata_blob in bytes
+//   config:        hipdnn_ep_init_config* (hip/init_config_abi.h) carrying the
+//                  session's provider options, or null. Kept const void* here
+//                  so ordinary runtime TUs do not pull that ABI in.
 // Return codes: 0=success, 1=alloc/read error, 2-11=GPU/runtime init error
 int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
-                                 const void *metadata_blob, size_t blob_size);
+                                 const void *metadata_blob, size_t blob_size,
+                                 const void *config);
 
 // Cleanup runtime state (destroys handles, frees memory)
 // Best-effort cleanup - continues even if individual operations fail
@@ -367,6 +371,13 @@ int hipdnn_ep_state_ensure_qmoe_amd_host_scratch(RuntimeState *state,
 void *hipdnn_ep_state_get_conv_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
                                         size_t needed_size);
+
+// Per-session scratch for wrap_qlpnormalization intermediate tensors and
+// scalar parameters. A single contiguous device allocation is shared by all
+// instances on the session stream, grows on demand, and never shrinks.
+void *hipdnn_ep_state_get_qlpnormalization_scratch(RuntimeState *state);
+int hipdnn_ep_state_ensure_qlpnormalization_scratch(RuntimeState *state,
+                                                    size_t needed_size);
 
 // Per-session scratch for the W4A8 dp4a matmul_nbits decode path
 // (hip_matmul_nbits_dp4a). One contiguous device buffer holding the quantized
@@ -606,6 +617,11 @@ int hipdnn_ep_stream_sync(RuntimeState *state);
 // Per-operator profiling state accessor (OpProfileState*, gated on
 // HIPDNN_EP_PERF)
 void *hipdnn_ep_state_get_op_profile(RuntimeState *state);
+
+// Session-scoped copy from init config. nullptr if state/key is null or the
+// key is absent. Owned by RuntimeState; invalid after hipdnn_ep_state_cleanup.
+const char *hipdnn_ep_runtime_get_provider_option(RuntimeState *state,
+                                                  const char *key);
 
 // NOTE: the GQA GEMM descriptor cache (GqaGemmCache) formerly lived in
 // RuntimeState::gqa_gemm_cache with a hipdnn_ep_gqa_gemm_cache_destroy teardown
@@ -991,6 +1007,14 @@ int wrap_qconv(RuntimeState *state, const void *input, const void *weights,
                int64_t activation_dtype, int64_t weight_dtype,
                int64_t weight_bits, int64_t bias_dtype, float input_scale,
                int64_t input_zp, float output_scale, int64_t output_zp);
+
+// Fused Q(LpNormalization(DQ(x))) for UINT16 per-tensor QDQ, p=2, last axis.
+// Inside: dequant -> RMS (scale = 1/sqrt(N), epsilon = 0) -> quant.
+int wrap_qlpnormalization(RuntimeState *state, const void *input, void *output,
+                          int64_t num_elements, int64_t norm_num_elements,
+                          int64_t data_type, float input_scale,
+                          int64_t input_zp, float output_scale,
+                          int64_t output_zp, int64_t axis, int64_t p);
 
 // Element-wise Where wrapper (NumPy-style multidirectional broadcasting,
 // arbitrary rank). Computes output[i] = condition[i] ? x[i] : y[i] with
