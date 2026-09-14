@@ -26,6 +26,20 @@ else
   echo "Warning: rime not found at $RIME_SOURCE, skipping..."
 fi
 
+# Pre-compile rime libraries to avoid "different compilation instance" errors
+# When each library compilation auto-compiles rime on demand, they get different instances
+echo "Pre-compiling rime libraries..."
+cd "$BUILD_DIR/rime"
+for sls_file in *.sls */*.sls; do
+  if [ -f "$sls_file" ]; then
+    so_file="${sls_file%.sls}.so"
+    echo "  Compiling $sls_file..."
+    $SCHEME_COMPILER --libdirs "$BUILD_DIR" <<EOF
+(compile-library "$sls_file" "$so_file")
+EOF
+  fi
+done
+
 # Compile libraries using compile-library
 echo "Compiling (mlir ffi)..."
 cd "$SOURCE_DIR/Runtime"
@@ -50,9 +64,5 @@ cd "$SOURCE_DIR/Passes"
 $SCHEME_COMPILER --libdirs "$BUILD_DIR:$SOURCE_DIR/patterns" <<EOF
 (compile-library "onnx-to-hipsr.sls" "$BUILD_DIR/onnx-to-hipsr.so")
 EOF
-
-# Clean up rime .sls source files, keep only .so bytecode
-echo "Cleaning up rime source files (keeping bytecode only)..."
-find "$BUILD_DIR/rime" -name "*.sls" -type f -delete 2>/dev/null || true
 
 echo "Done! All libraries compiled to bytecode."
