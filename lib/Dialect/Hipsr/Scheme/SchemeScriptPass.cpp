@@ -4,6 +4,7 @@
  */
 
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
+#include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 #include "hip/Dialect/Onnx/IR/OnnxOps.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -11,6 +12,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "Runtime/SchemeBindings.h"
+#include "Runtime/ChezSchemeInterpreter.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 
@@ -26,18 +28,25 @@ struct SchemeScriptPass : public impl::SchemeScriptPassBase<SchemeScriptPass> {
   using impl::SchemeScriptPassBase<SchemeScriptPass>::SchemeScriptPassBase;
 
   void runOnOperation() override {
-    SchemeLogLevel level = parseLogLevel(logLevel);
-    if (!initializeSchemeRuntime(level)) {
+    // Get Scheme interpreter from HipsrDialect
+    auto* hipsrDialect = getContext().getLoadedDialect<HipsrDialect>();
+    if (!hipsrDialect) {
+      getOperation().emitError("HipsrDialect not loaded");
+      signalPassFailure();
+      return;
+    }
+
+    ChezSchemeInterpreter* interpreter = hipsrDialect->getSchemeInterpreter();
+    if (!interpreter || !interpreter->isInitialized()) {
+      getOperation().emitError("Scheme interpreter not initialized");
       signalPassFailure();
       return;
     }
 
     // Import the R6RS module
-    // initializeSchemeRuntime already set (library-directories) relative to executable
-    // Now we just need to (import (module-name))
     std::string importCode = "(import (" + moduleName + "))";
 
-    if (!evaluateSchemeCode(importCode.c_str())) {
+    if (!interpreter->evaluateCode(importCode.c_str())) {
       getOperation().emitError("Failed to import R6RS module: ") << moduleName;
       signalPassFailure();
       return;
