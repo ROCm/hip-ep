@@ -115,13 +115,13 @@ graph_add_initialized_tensor(Graph &graph, const TensorProto &tensor) {
 MORPHIZEN_DLL_SPEC void graph_set_inputs(Graph &graph,
                                          const std::vector<NodeArg *> &inputs) {
   MORPHIZEN_ORT_API(graph_set_inputs)(graph,
-                                       gsl::span<const NodeArg *const>(inputs));
+                                       gsl::make_span(inputs));
 }
 
 MORPHIZEN_DLL_SPEC void
 graph_set_outputs(Graph &graph, const std::vector<NodeArg *> &outputs) {
   MORPHIZEN_ORT_API(graph_set_outputs)(graph,
-                                        gsl::span<const NodeArg *const>(outputs));
+                                        gsl::make_span(outputs));
 }
 
 MORPHIZEN_DLL_SPEC void graph_save(Graph &graph, const std::string &model_path,
