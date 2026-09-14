@@ -63,4 +63,22 @@
            [op (mlir-create-generic-op "hipsr.mul" operands types)])
       (mlir-operation-get-result-value-from-op op 0)))
 
+  ;;===--------------------------------------------------------------------===;;
+  ;; Unary Operations (transpose, shape, etc.)
+  ;;===--------------------------------------------------------------------===;;
+
+  ;; Note: Transpose needs perm attribute - requires attribute FFI
+  ;; For now, create without attributes (will add later)
+  (define (create-hipsr-transpose ctx input init result-type)
+    (let* ([operands (list ctx input init)]
+           [types (list result-type)]
+           [op (mlir-create-generic-op "hipsr.transpose" operands types)])
+      (mlir-operation-get-result-value-from-op op 0)))
+
+  (define (create-hipsr-shape ctx input init result-type)
+    (let* ([operands (list ctx input init)]
+           [types (list result-type)]
+           [op (mlir-create-generic-op "hipsr.shape" operands types)])
+      (mlir-operation-get-result-value-from-op op 0)))
+
 ) ;; end library (hipsr-builders)
