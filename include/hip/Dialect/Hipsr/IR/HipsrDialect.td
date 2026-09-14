@@ -38,10 +38,14 @@ def Hipsr_Dialect : Dialect {
     void setFileSystem(::morphizen::FileSystem *fs) { fileSystem = fs; }
     ::morphizen::FileSystem *getFileSystem() { return fileSystem; }
 
+    /// Get the Chez Scheme interpreter (lazily initialized)
+    ::mlir::hipsr::ChezSchemeInterpreter* getSchemeInterpreter();
+
   private:
     ::llvm::StringMap<std::unique_ptr<::llvm::MemoryBuffer>> fileMaps;
     std::mutex fileMapsMutex;
     ::morphizen::FileSystem *fileSystem = nullptr;
+    std::unique_ptr<::mlir::hipsr::ChezSchemeInterpreter> schemeInterpreter;
   }];
 }
 
