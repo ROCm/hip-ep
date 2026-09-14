@@ -183,12 +183,10 @@ jobs:
           cp "${{ runner.workspace }}/install/lib/"*.lib staging/lib/ 2>/dev/null || true
 
           THEROCK_DIR="../build/$(basename "$PWD")/_therock"
-          for pat in amdhip64_7.dll 'amd_comgr*.dll' \
-                     hipblaslt.dll libhipblaslt.dll 'hiprtc*.dll'; do
+          for pat in amdhip64_7.dll 'amd_comgr*.dll' 'hiprtc*.dll'; do
             cp $THEROCK_DIR/bin/$pat staging/bin/ 2>/dev/null || true
           done
-          cp -r "$THEROCK_DIR/bin/hipblaslt" staging/bin/ 2>/dev/null || true
-          for pat in 'amdhip64*.lib' hipblaslt.lib libhipblaslt.dll.a; do
+          for pat in 'amdhip64*.lib'; do
             cp $THEROCK_DIR/lib/$pat staging/lib/ 2>/dev/null || true
           done
 

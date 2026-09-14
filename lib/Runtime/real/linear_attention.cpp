@@ -121,14 +121,6 @@ extern "C" int wrap_linear_attention(
     return -1;
   }
 
-  hipblasLtHandle_t blaslt_handle =
-      (hipblasLtHandle_t)hipdnn_ep_state_get_hipblas_handle(state);
-  if (!blaslt_handle) {
-    fprintf(stderr,
-            "[linear_attention] ERROR: failed to get hipBLASLt handle\n");
-    return -1;
-  }
-
   // When 0.0 (default), derives d_k = query.shape[-1] / q_num_heads and uses
   // 1/sqrt(d_k). Set explicitly to override.
   if (scale == 0.0f && dk > 0)
