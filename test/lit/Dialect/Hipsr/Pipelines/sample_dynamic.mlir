@@ -7,6 +7,12 @@
 
 // RUN: hip-mlir-opt %s --onnx-dialect=modeled --hipsr-pipeline | FileCheck %s
 
+// generate-interface reads these constant-layout module attributes.
+// CHECK-LABEL: module attributes {
+// CHECK-SAME: hip.constants_file = "constants.bin"
+// CHECK-SAME: hipdnn.constant_offsets = array<i64: 0, 64>
+// CHECK-SAME: hipdnn.constant_sizes = array<i64: 32, 6>} {
+
 // The checks cover every output line, so a new alloc or copy fails the test.
 // CHECK-LABEL:   func.func @main_graph(
 // CHECK-SAME:      %[[ARG0:[^:,]*]]: !hipsr.context,
@@ -17,8 +23,8 @@
 // CHECK-NEXT:      %[[CONSTANT_2:.*]] = arith.constant 4 : index
 // CHECK-NEXT:      %[[CONSTANT_3:.*]] = arith.constant 255 : index
 // CHECK-NEXT:      %[[CONSTANT_4:.*]] = arith.constant 256 : index
-// CHECK-NEXT:      %[[CONSTANT_5:.*]] = hipsr.constant {value = dense<{{\[}}{{\[}}1.000000e+00, 2.000000e+00], {{\[}}3.000000e+00, 4.000000e+00], {{\[}}5.000000e+00, 6.000000e+00], {{\[}}7.000000e+00, 8.000000e+00]]> : tensor<4x2xf32>} : memref<4x2xf32, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[CONSTANT_6:.*]] = hipsr.constant {value = dense<{{\[}}{{\[}}1.000000e+00], {{\[}}2.000000e+00], {{\[}}3.000000e+00]]> : tensor<3x1xf16>} : memref<3x1xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      %[[CONSTANT_5:.*]] = hipsr.constant {index = 0 : i64, offset = 0 : i64, size = 32 : i64, value = dense<{{\[}}{{\[}}1.000000e+00, 2.000000e+00], {{\[}}3.000000e+00, 4.000000e+00], {{\[}}5.000000e+00, 6.000000e+00], {{\[}}7.000000e+00, 8.000000e+00]]> : tensor<4x2xf32>} : memref<4x2xf32, #hipsr.mem<device>>
+// CHECK-NEXT:      %[[CONSTANT_6:.*]] = hipsr.constant {index = 1 : i64, offset = 64 : i64, size = 6 : i64, value = dense<{{\[}}{{\[}}1.000000e+00], {{\[}}2.000000e+00], {{\[}}3.000000e+00]]> : tensor<3x1xf16>} : memref<3x1xf16, #hipsr.mem<device>>
 // CHECK-NEXT:      %[[CONSTANT_7:.*]] = arith.constant 1 : index
 // CHECK-NEXT:      %[[CONSTANT_8:.*]] = arith.constant 0 : index
 // CHECK-NEXT:      %[[CONSTANT_9:.*]] = arith.constant 2 : index

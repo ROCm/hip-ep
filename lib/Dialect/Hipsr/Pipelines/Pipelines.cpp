@@ -33,6 +33,7 @@
 //   --hipsr-inline-regions
 //   --buffer-deallocation-pipeline
 //   --optimize-allocation-liveness
+//   --hipsr-externalize-constants
 void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
                                      const HipsrPipelineOptions & /*options*/) {
   pm.addPass(createAddContextArgPass());
@@ -70,6 +71,8 @@ void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
   bufferization::buildBufferDeallocationPipeline(pm, deallocOptions);
   pm.addNestedPass<func::FuncOp>(
       bufferization::createOptimizeAllocationLivenessPass());
+
+  pm.addPass(createHipsrExternalizeConstantsPass());
 }
 
 void mlir::hipsr::registerHipsrPipelines() {
