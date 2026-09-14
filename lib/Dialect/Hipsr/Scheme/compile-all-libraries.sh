@@ -48,7 +48,7 @@ EOF
 
 echo "Compiling (onnx-to-hipsr)..."
 cd "$SOURCE_DIR/Passes"
-$SCHEME_COMPILER --libdirs "$BUILD_DIR:$SOURCE_DIR/Patterns" <<EOF
+$SCHEME_COMPILER --libdirs "$BUILD_DIR:$SOURCE_DIR/patterns" <<EOF
 (compile-library "onnx-to-hipsr.sls" "$BUILD_DIR/onnx-to-hipsr.so")
 EOF
 
