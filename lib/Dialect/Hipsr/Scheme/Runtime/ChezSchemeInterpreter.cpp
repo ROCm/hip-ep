@@ -44,28 +44,27 @@ ChezSchemeInterpreter::ChezSchemeInterpreter(SchemeLogLevel logLevel)
     llvm::errs() << "[debug] ChezSchemeInterpreter: Initializing Chez Scheme runtime\n";
   }
 
-  // Set scheme_c_argv before Sscheme_init
-  const char *fake_argv[] = {"hip-mlir-opt", nullptr};
-  scheme_c_argv = const_cast<char**>(fake_argv);
-  scheme_c_argc = 1;
-
   // Initialize Scheme runtime
   Sscheme_init(nullptr);
+
+  if (logLevel <= SchemeLogLevel::Debug) {
+    llvm::errs() << "[debug] ChezSchemeInterpreter: Registering embedded boot files\n";
+  }
+
+  // Register embedded boot files
+  Sregister_boot_file_bytes("petite.boot",
+      const_cast<void*>(static_cast<const void*>(petite_boot_data)),
+      petite_boot_size);
+  Sregister_boot_file_bytes("scheme.boot",
+      const_cast<void*>(static_cast<const void*>(scheme_boot_data)),
+      scheme_boot_size);
 
   if (logLevel <= SchemeLogLevel::Debug) {
     llvm::errs() << "[debug] ChezSchemeInterpreter: Building heap from embedded boot files\n";
   }
 
-  // Build heap from embedded boot files
-  Sbuild_heap(
-      const_cast<char*>("/embedded/petite.boot"),
-      const_cast<void*>(static_cast<const void*>(petite_boot_data)),
-      petite_boot_size,
-      const_cast<char*>("/embedded/scheme.boot"),
-      const_cast<void*>(static_cast<const void*>(scheme_boot_data)),
-      scheme_boot_size,
-      custom_init
-  );
+  // Build heap and call custom_init (which registers foreign functions)
+  Sbuild_heap(nullptr, custom_init);
 
   if (logLevel <= SchemeLogLevel::Debug) {
     llvm::errs() << "[debug] ChezSchemeInterpreter: Caching Scheme symbols\n";
