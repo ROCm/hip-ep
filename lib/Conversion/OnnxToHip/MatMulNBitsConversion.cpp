@@ -9,6 +9,49 @@ namespace mlir {
 namespace hip {
 namespace {
 
+// Scheme-1 online prune-logits is deliberately limited to a MatMulNBits whose
+// result is the graph's `logits` output. The runtime keeps the original output
+// allocation/shape contract and only computes its last sequence row, so this
+// must never be enabled for an intermediate MatMulNBits whose other rows may be
+// consumed downstream.
+static bool isDirectLogitsGraphOutput(mlir::Operation *op) {
+  if (op->getNumResults() != 1)
+    return false;
+
+  mlir::Value result = op->getResult(0);
+  for (mlir::Operation *user : result.getUsers()) {
+    auto returnOp = mlir::dyn_cast<mlir::func::ReturnOp>(user);
+    if (!returnOp)
+      continue;
+
+    auto func = op->getParentOfType<mlir::func::FuncOp>();
+    if (!func)
+      return false;
+    for (auto [index, operand] : llvm::enumerate(returnOp.getOperands())) {
+      if (operand != result)
+        continue;
+      auto name = mlir::dyn_cast_or_null<mlir::StringAttr>(
+          func.getResultAttr(index, "onnx.name"));
+      if (name && name.getValue() == "logits")
+        return true;
+    }
+  }
+
+  // Some imported graphs do not preserve function-result attributes, but do
+  // preserve ONNX value names on the producer.
+  if (auto outputs = op->getAttrOfType<mlir::ArrayAttr>("node.outputs")) {
+    for (mlir::Attribute attr : outputs) {
+      auto name = mlir::dyn_cast<mlir::StringAttr>(attr);
+      if (name && name.getValue() == "logits") {
+        return llvm::any_of(result.getUsers(), [](mlir::Operation *user) {
+          return mlir::isa<mlir::func::ReturnOp>(user);
+        });
+      }
+    }
+  }
+  return false;
+}
+
 //===----------------------------------------------------------------------===//
 // ONNX MatMulNBits -> HIP MatMulNBits (com.microsoft custom op)
 //===----------------------------------------------------------------------===//
@@ -144,6 +187,8 @@ MatMulNBitsToHip::matchAndRewrite(mlir::Operation *op,
       rewriter, loc, context, A, B, scales, zeroPoints, gIdx, bias, init, KAttr,
       NAttr, bitsAttr, blockSizeAttr, accuracyLevelAttr, zpElemSizeAttr,
       scaleElemSizeAttr);
+  if (isDirectLogitsGraphOutput(op))
+    hipOp->setAttr("prune_logits_candidate", rewriter.getBoolAttr(true));
   rewriter.replaceOp(op, hipOp->getResults());
   return mlir::success();
 }
