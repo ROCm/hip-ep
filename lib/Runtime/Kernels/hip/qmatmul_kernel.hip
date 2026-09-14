@@ -112,21 +112,53 @@ template <typename T> __device__ inline T q_saturate(float v) {
       fminf(QMatMulTraits<T>::highest(), fmaxf(QMatMulTraits<T>::lowest(), v)));
 }
 
-// Requantize one accumulated output element.
-//
-// Everything is combined in int64: with a 16-bit A the four terms reach ~1e12
-// between them, and even at 8 bits their sum outgrows int32 for large K. The
-// narrowing to float afterwards is safe because m_scale immediately brings the
-// value back into the output's quantized range, so float's ~6e-8 relative
-// error stays two orders of magnitude below one LSB of a 16-bit output.
+__device__ inline int qmatmul_read_quant(const uint8_t *__restrict__ data,
+                                        int64_t index, int bits,
+                                        bool is_signed) {
+  if (bits == 4) {
+    const uint8_t packed = data[index >> 1];
+    const uint8_t nibble = (index & 1) ? packed >> 4 : packed & 0xF;
+    return is_signed
+               ? static_cast<int>(static_cast<int8_t>(nibble << 4)) >> 4
+               : static_cast<int>(nibble);
+  }
+  return is_signed ? static_cast<int>(static_cast<int8_t>(data[index]))
+                   : static_cast<int>(data[index]);
+}
+
+struct QMatMulRequant {
+  float m_scale;
+  float ay_ratio;
+  const float *b_scales;
+  const uint8_t *b_zero_points;
+  int32_t a_zp;
+  int32_t b_zp;
+  int32_t y_zp;
+  int32_t b_bits;
+  bool b_signed;
+  int64_t K;
+  int64_t k_zazb;
+};
+
 template <typename TY>
 __device__ inline TY
-qmatmul_epilogue(int64_t acc, int64_t row_a, int64_t col_b, int64_t k_zazb,
-                 int32_t a_zp, int32_t b_zp, float m_scale, int32_t y_zp) {
-  const int64_t corrected = acc - static_cast<int64_t>(b_zp) * row_a -
-                            static_cast<int64_t>(a_zp) * col_b + k_zazb;
-  const float scaled = m_scale * static_cast<float>(corrected);
-  return q_saturate<TY>(rintf(scaled) + static_cast<float>(y_zp));
+qmatmul_epilogue(int64_t acc, int64_t row_a, int64_t col_b, int64_t n,
+                 QMatMulRequant requant) {
+  const float scale = requant.b_scales
+                          ? requant.ay_ratio * requant.b_scales[n]
+                          : requant.m_scale;
+  int32_t b_zp = requant.b_zp;
+  int64_t k_zazb = requant.k_zazb;
+  if (requant.b_scales && requant.b_bits == 8) {
+    b_zp = qmatmul_read_quant(requant.b_zero_points, n, 8,
+                              requant.b_signed);
+    k_zazb = requant.K * static_cast<int64_t>(requant.a_zp) * b_zp;
+  }
+  const int64_t corrected =
+      acc - static_cast<int64_t>(b_zp) * row_a -
+      static_cast<int64_t>(requant.a_zp) * col_b + k_zazb;
+  return q_saturate<TY>(rintf(scale * static_cast<float>(corrected)) +
+                        static_cast<float>(requant.y_zp));
 }
 
 // Tile geometry shared by the tiled and split-K paths: one block owns a
@@ -200,7 +232,8 @@ qmatmul_accumulate_k_range(const TA *__restrict__ A, const TB *__restrict__ B,
                            int64_t M, int64_t N, int64_t K, int64_t m_base,
                            int64_t n_base, int64_t k_begin, int64_t k_end,
                            bool need_row_a, bool need_col_b, bool trans_a,
-                           bool trans_b) {
+                           bool trans_b, int b_bits, bool b_signed,
+                           const uint8_t *__restrict__ b_zero_points) {
   constexpr bool kAWide = QMatMulAPlanes<TA>::kWide;
   constexpr int kAPlanes = QMatMulAPlanes<TA>::kCount;
   constexpr bool kASigned = QMatMulTraits<TA>::kSigned;
@@ -230,6 +263,16 @@ qmatmul_accumulate_k_range(const TA *__restrict__ A, const TB *__restrict__ B,
   const int row4_c = (tid * 4) % kTileK;
   const int b_n = tid % kTileN;
   const int b_k_base = tid / kTileN;
+  const int64_t row4_n = n_base + row4_r;
+  const int64_t col_n = n_base + b_n;
+  const int row4_zp =
+      b_bits == 4 && row4_n < N
+          ? qmatmul_read_quant(b_zero_points, row4_n, 4, b_signed)
+          : 0;
+  const int col_zp =
+      b_bits == 4 && col_n < N
+          ? qmatmul_read_quant(b_zero_points, col_n, 4, b_signed)
+          : 0;
 
   for (int64_t k0 = k_begin; k0 < k_end; k0 += kTileK) {
     // Out-of-range elements are staged as 0, the identity for all three sums.
@@ -261,10 +304,17 @@ qmatmul_accumulate_k_range(const TA *__restrict__ A, const TB *__restrict__ B,
 #pragma unroll
       for (int i = 0; i < 4; ++i) {
         const int64_t k = k0 + row4_c + i;
+        int b_value = 0;
+        if (b_row < N && k < k_end) {
+          b_value = b_bits == 4
+                        ? qmatmul_read_quant(
+                              reinterpret_cast<const uint8_t *>(B),
+                              b_row * K + k, 4, b_signed) -
+                              row4_zp
+                        : static_cast<int>(B[b_row * K + k]);
+        }
         b_lds[row4_r][row4_c + i] =
-            (b_row < N && k < k_end)
-                ? static_cast<QMatMulByte>(B[b_row * K + k])
-                : QMatMulByte{0};
+            static_cast<QMatMulByte>(b_value);
       }
     } else {
       const int64_t b_col = n_base + b_n;
@@ -272,9 +322,16 @@ qmatmul_accumulate_k_range(const TA *__restrict__ A, const TB *__restrict__ B,
       for (int rep = 0; rep < kTileK / kBStageRows; ++rep) {
         const int b_k = b_k_base + rep * kBStageRows;
         const int64_t k = k0 + b_k;
-        b_lds[b_n][b_k] = (b_col < N && k < k_end)
-                              ? static_cast<QMatMulByte>(B[k * N + b_col])
-                              : QMatMulByte{0};
+        int b_value = 0;
+        if (b_col < N && k < k_end) {
+          b_value = b_bits == 4
+                        ? qmatmul_read_quant(
+                              reinterpret_cast<const uint8_t *>(B),
+                              k * N + b_col, 4, b_signed) -
+                              col_zp
+                        : static_cast<int>(B[k * N + b_col]);
+        }
+        b_lds[b_n][b_k] = static_cast<QMatMulByte>(b_value);
       }
     }
 
@@ -344,9 +401,9 @@ qmatmul_accumulate_k_range(const TA *__restrict__ A, const TB *__restrict__ B,
 template <typename TA, typename TB, typename TY>
 __global__ __launch_bounds__(kTiledBlock) void qmatmul_tiled_kernel(
     const TA *__restrict__ A, const TB *__restrict__ B, TY *__restrict__ Y,
-    int64_t M, int64_t N, int64_t K, int64_t b_batch_stride, float m_scale,
-    int32_t a_zp, int32_t b_zp, int32_t y_zp, int64_t k_zazb, bool need_row_a,
-    bool need_col_b, bool trans_a, bool trans_b) {
+    const uint8_t *__restrict__ b_zero_points, int64_t M, int64_t N, int64_t K,
+    int64_t b_batch_stride, QMatMulRequant requant, int b_bits, bool b_signed,
+    bool need_row_a, bool need_col_b, bool trans_a, bool trans_b) {
   constexpr bool kAWide = QMatMulAPlanes<TA>::kWide;
 
   const int64_t batch = blockIdx.z;
@@ -359,7 +416,7 @@ __global__ __launch_bounds__(kTiledBlock) void qmatmul_tiled_kernel(
 
   const auto mt = qmatmul_accumulate_k_range<TA, TB>(
       A, B, M, N, K, m_base, n_base, 0, K, need_row_a, need_col_b, trans_a,
-      trans_b);
+      trans_b, b_bits, b_signed, b_zero_points);
 
   int thread_m, thread_n;
   qmatmul_micro_tile_origin(threadIdx.x, thread_m, thread_n);
@@ -384,8 +441,8 @@ __global__ __launch_bounds__(kTiledBlock) void qmatmul_tiled_kernel(
         acc64 = int64_t{256} * mt.acc[kPlaneHi][i][j] + mt.acc[kPlaneLo][i][j];
       else
         acc64 = mt.acc[kPlaneHi][i][j];
-      Y[m * N + n] = qmatmul_epilogue<TY>(acc64, row_a64, mt.col_b[j], k_zazb,
-                                          a_zp, b_zp, m_scale, y_zp);
+      Y[m * N + n] =
+          qmatmul_epilogue<TY>(acc64, row_a64, mt.col_b[j], n, requant);
     }
   }
 }
@@ -414,10 +471,11 @@ __device__ inline void qmatmul_atomic_add_i64(int64_t *addr, int64_t v) {
 template <typename TA, typename TB>
 __global__ __launch_bounds__(kTiledBlock) void qmatmul_splitk_partial_kernel(
     const TA *__restrict__ A, const TB *__restrict__ B,
+    const uint8_t *__restrict__ b_zero_points,
     int64_t *__restrict__ acc_ws, int64_t *__restrict__ row_a_ws,
     int64_t *__restrict__ col_b_ws, int64_t M, int64_t N, int64_t K,
     int64_t b_batch_stride, int splits, int64_t k_chunk, bool need_row_a,
-    bool need_col_b, bool trans_a, bool trans_b) {
+    bool need_col_b, bool trans_a, bool trans_b, int b_bits, bool b_signed) {
   constexpr bool kAWide = QMatMulAPlanes<TA>::kWide;
 
   const int64_t split = blockIdx.z % splits;
@@ -446,7 +504,7 @@ __global__ __launch_bounds__(kTiledBlock) void qmatmul_splitk_partial_kernel(
 
   const auto mt = qmatmul_accumulate_k_range<TA, TB>(
       A, B, M, N, K, m_base, n_base, k_begin, k_end, add_row_a, add_col_b,
-      trans_a, trans_b);
+      trans_a, trans_b, b_bits, b_signed, b_zero_points);
 
   int thread_m, thread_n;
   qmatmul_micro_tile_origin(threadIdx.x, thread_m, thread_n);
@@ -505,8 +563,7 @@ qmatmul_splitk_epilogue_kernel(const int64_t *__restrict__ acc_ws,
                                const int64_t *__restrict__ row_a_ws,
                                const int64_t *__restrict__ col_b_ws,
                                TY *__restrict__ Y, int64_t M, int64_t N,
-                               int64_t total, float m_scale, int32_t a_zp,
-                               int32_t b_zp, int32_t y_zp, int64_t k_zazb) {
+                               int64_t total, QMatMulRequant requant) {
   const int64_t idx =
       static_cast<int64_t>(blockIdx.x) * kSplitKEpilogueBlock + threadIdx.x;
   if (idx >= total)
@@ -520,9 +577,9 @@ qmatmul_splitk_epilogue_kernel(const int64_t *__restrict__ acc_ws,
   const int64_t m = rem / N;
   const int64_t n = rem - m * N;
 
-  Y[idx] = qmatmul_epilogue<TY>(acc_ws[idx], row_a_ws[batch * M + m],
-                                col_b_ws[batch * N + n], k_zazb, a_zp, b_zp,
-                                m_scale, y_zp);
+  Y[idx] =
+      qmatmul_epilogue<TY>(acc_ws[idx], row_a_ws[batch * M + m],
+                           col_b_ws[batch * N + n], n, requant);
 }
 
 // Slice ceiling. Past it the per-slice staging prologue and the atomic traffic
@@ -638,9 +695,9 @@ constexpr int kGemvTileK = 256;
 template <typename TA, typename TB, typename TY>
 __global__ __launch_bounds__(kGemvBlock) void qmatmul_gemv_kernel(
     const TA *__restrict__ A, const TB *__restrict__ B, TY *__restrict__ Y,
-    int64_t N, int64_t K, int64_t b_batch_stride, float m_scale, int32_t a_zp,
-    int32_t b_zp, int32_t y_zp, int64_t k_zazb, bool need_row_a,
-    bool need_col_b, bool trans_b) {
+    const uint8_t *__restrict__ b_zero_points, int64_t N, int64_t K,
+    int64_t b_batch_stride, QMatMulRequant requant, int b_bits, bool b_signed,
+    bool need_row_a, bool need_col_b, bool trans_b) {
   __shared__ int32_t a_lds[kGemvTileK];
 
   const int64_t batch = blockIdx.y;
@@ -650,6 +707,10 @@ __global__ __launch_bounds__(kGemvBlock) void qmatmul_gemv_kernel(
 
   const int64_t n = static_cast<int64_t>(blockIdx.x) * kGemvBlock + threadIdx.x;
   const bool active = n < N;
+  const int column_zp =
+      active && b_bits == 4
+          ? qmatmul_read_quant(b_zero_points, n, 4, b_signed)
+          : 0;
 
   int64_t acc = 0;
   int64_t row_a = 0;
@@ -666,8 +727,14 @@ __global__ __launch_bounds__(kGemvBlock) void qmatmul_gemv_kernel(
     if (active) {
       for (int t = 0; t < tile; ++t) {
         const int64_t k = k0 + t;
+        const int64_t b_index = trans_b ? n * K + k : k * N + n;
         const int32_t b_val =
-            static_cast<int32_t>(trans_b ? B[n * K + k] : B[k * N + n]);
+            b_bits == 4
+                ? qmatmul_read_quant(
+                      reinterpret_cast<const uint8_t *>(B), b_index,
+                      4, b_signed) -
+                      column_zp
+                : static_cast<int32_t>(B[b_index]);
         acc += a_lds[t] * b_val;
         if (need_col_b)
           col_b += b_val;
@@ -683,8 +750,7 @@ __global__ __launch_bounds__(kGemvBlock) void qmatmul_gemv_kernel(
   }
 
   if (active)
-    Y[n] = qmatmul_epilogue<TY>(acc, row_a, col_b, k_zazb, a_zp, b_zp, m_scale,
-                                y_zp);
+    Y[n] = qmatmul_epilogue<TY>(acc, row_a, col_b, n, requant);
 }
 
 //===----------------------------------------------------------------------===//
@@ -699,6 +765,8 @@ struct QMatMulArgs {
   const void *A;
   const void *B;
   void *Y;
+  const float *b_scales;
+  const uint8_t *b_zero_points;
   int64_t M;
   int64_t N;
   int64_t K;
@@ -706,7 +774,10 @@ struct QMatMulArgs {
   int64_t b_batch_stride;
   bool trans_a;
   bool trans_b;
+  int b_bits;
+  bool b_signed;
   float m_scale;
+  float ay_ratio;
   int32_t a_zp;
   int32_t b_zp;
   int32_t y_zp;
@@ -718,23 +789,35 @@ struct QMatMulArgs {
 // asks for it and the caller supplied enough scratch, otherwise tiled.
 template <typename TA, typename TB, typename TY>
 int launch_qmatmul(const QMatMulArgs &g) {
-  const int64_t k_zazb = static_cast<int64_t>(g.K) * g.a_zp * g.b_zp;
-  const bool need_row_a = g.b_zp != 0;
+  const bool per_column = g.b_scales != nullptr;
+  const QMatMulRequant requant{
+      g.m_scale,
+      g.ay_ratio,
+      g.b_scales,
+      g.b_zero_points,
+      g.a_zp,
+      per_column ? 0 : g.b_zp,
+      g.y_zp,
+      g.b_bits,
+      g.b_signed,
+      g.K,
+      per_column ? 0 : static_cast<int64_t>(g.K) * g.a_zp * g.b_zp};
+  const bool need_row_a = per_column ? g.b_bits == 8 : g.b_zp != 0;
   const bool need_col_b = g.a_zp != 0;
 
   const auto *a_ptr = static_cast<const TA *>(g.A);
   const auto *b_ptr = static_cast<const TB *>(g.B);
   auto *y_ptr = static_cast<TY *>(g.Y);
 
-  (void)hipGetLastError();
   if (g.M == 1) {
     dim3 grid(static_cast<unsigned>((g.N + kGemvBlock - 1) / kGemvBlock),
               static_cast<unsigned>(g.batch_count));
+    (void)hipGetLastError();
     hipLaunchKernelGGL(HIP_KERNEL_NAME(qmatmul_gemv_kernel<TA, TB, TY>), grid,
-                       dim3(kGemvBlock), 0, g.stream, a_ptr, b_ptr, y_ptr, g.N,
-                       g.K, g.b_batch_stride, g.m_scale, g.a_zp, g.b_zp, g.y_zp,
-                       k_zazb, need_row_a, need_col_b, g.trans_b);
-    return 0;
+                       dim3(kGemvBlock), 0, g.stream, a_ptr, b_ptr, y_ptr,
+                       g.b_zero_points, g.N, g.K, g.b_batch_stride, requant,
+                       g.b_bits, g.b_signed, need_row_a, need_col_b, g.trans_b);
+    return static_cast<int>(hipGetLastError());
   }
 
   const QMatMulSplitKPlan plan =
@@ -771,31 +854,38 @@ int launch_qmatmul(const QMatMulArgs &g) {
     dim3 grid(static_cast<unsigned>((g.N + kTileN - 1) / kTileN),
               static_cast<unsigned>((g.M + kTileM - 1) / kTileM),
               static_cast<unsigned>(g.batch_count * plan.splits));
+    (void)hipGetLastError();
     hipLaunchKernelGGL(HIP_KERNEL_NAME(qmatmul_splitk_partial_kernel<TA, TB>),
                        grid, dim3(kTiledBlock), 0, g.stream, a_ptr, b_ptr,
-                       acc_ws, row_a_ws, col_b_ws, g.M, g.N, g.K,
-                       g.b_batch_stride, plan.splits, plan.k_chunk, need_row_a,
-                       need_col_b, g.trans_a, g.trans_b);
+                       g.b_zero_points, acc_ws, row_a_ws, col_b_ws, g.M, g.N,
+                       g.K, g.b_batch_stride, plan.splits, plan.k_chunk,
+                       need_row_a, need_col_b, g.trans_a, g.trans_b, g.b_bits,
+                       g.b_signed);
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess)
+      return static_cast<int>(err);
 
     const int64_t total = g.batch_count * g.M * g.N;
+    (void)hipGetLastError();
     hipLaunchKernelGGL(
         HIP_KERNEL_NAME(qmatmul_splitk_epilogue_kernel<TY>),
         dim3(static_cast<unsigned>((total + kSplitKEpilogueBlock - 1) /
                                    kSplitKEpilogueBlock)),
         dim3(kSplitKEpilogueBlock), 0, g.stream, acc_ws, row_a_ws, col_b_ws,
-        y_ptr, g.M, g.N, total, g.m_scale, g.a_zp, g.b_zp, g.y_zp, k_zazb);
-    return 0;
+        y_ptr, g.M, g.N, total, requant);
+    return static_cast<int>(hipGetLastError());
   }
 
   dim3 grid(static_cast<unsigned>((g.N + kTileN - 1) / kTileN),
             static_cast<unsigned>((g.M + kTileM - 1) / kTileM),
             static_cast<unsigned>(g.batch_count));
+  (void)hipGetLastError();
   hipLaunchKernelGGL(HIP_KERNEL_NAME(qmatmul_tiled_kernel<TA, TB, TY>), grid,
-                     dim3(kTiledBlock), 0, g.stream, a_ptr, b_ptr, y_ptr, g.M,
-                     g.N, g.K, g.b_batch_stride, g.m_scale, g.a_zp, g.b_zp,
-                     g.y_zp, k_zazb, need_row_a, need_col_b, g.trans_a,
+                     dim3(kTiledBlock), 0, g.stream, a_ptr, b_ptr, y_ptr,
+                     g.b_zero_points, g.M, g.N, g.K, g.b_batch_stride, requant,
+                     g.b_bits, g.b_signed, need_row_a, need_col_b, g.trans_a,
                      g.trans_b);
-  return 0;
+  return static_cast<int>(hipGetLastError());
 }
 
 // Y is 8- or 16-bit: a 16-bit activation is usually requantized back to 16-bit
@@ -823,6 +913,9 @@ int dispatch_y(int y_dtype, const QMatMulArgs &args) {
 // bandwidth over fp16, which has hardware matrix instructions.
 template <typename TA>
 int dispatch_b(int b_dtype, int y_dtype, const QMatMulArgs &args) {
+  if (args.b_bits == 4)
+    return dispatch_y<TA, int8_t>(y_dtype, args);
+
   switch (b_dtype) {
   case HIP_DTYPE_INT8:
     return dispatch_y<TA, int8_t>(y_dtype, args);
@@ -863,30 +956,55 @@ extern "C" size_t hip_qmatmul_workspace_bytes(int64_t M, int64_t N, int64_t K,
 }
 
 extern "C" int hip_qmatmul(void *stream, const void *A, const void *B, void *Y,
+                           const void *B_scales, const void *B_zero_points,
                            int64_t M, int64_t N, int64_t K, int64_t batch_count,
                            int64_t b_batch_stride, int trans_a, int trans_b,
-                           int a_dtype, int b_dtype, int y_dtype, float M_scale,
-                           int64_t a_zp, int64_t b_zp, int64_t y_zp,
-                           void *workspace, size_t workspace_bytes) {
+                           int a_dtype, int b_dtype, int y_dtype, int b_bits,
+                           float M_scale, float AY_ratio, int64_t a_zp,
+                           int64_t b_zp, int64_t y_zp, void *workspace,
+                           size_t workspace_bytes) {
   if (!A || !B || !Y) {
     fprintf(stderr, "[custom_kernels] hip_qmatmul: null tensor argument\n");
     return -1;
   }
   if (M <= 0 || N <= 0 || K <= 0 || batch_count <= 0)
     return 0;
+  const bool per_column = B_scales != nullptr;
+  if (per_column != (B_zero_points != nullptr)) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qmatmul: B scales and zero points must both "
+            "be present\n");
+    return -1;
+  }
+  if ((per_column && b_bits != 4 && b_bits != 8) ||
+      (!per_column && b_bits != 8)) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qmatmul: unsupported B quantization "
+            "(per_column=%d, b_bits=%d)\n",
+            per_column, b_bits);
+    return -1;
+  }
+  if (b_bits == 4 && b_batch_stride != 0) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qmatmul: batched packed B is unsupported\n");
+    return -1;
+  }
 
   CUSTOM_KERNELS_DEBUG_LOG(
       "[custom_kernels] hip_qmatmul: M=%lld N=%lld K=%lld batch=%lld "
-      "b_batch_stride=%lld trans=(%d,%d) dtypes=(%d,%d,%d) M_scale=%g "
-      "zp=(%lld,%lld,%lld)\n",
+      "b_batch_stride=%lld trans=(%d,%d) dtypes=(%d,%d,%d) b_bits=%d "
+      "per_column=%d M_scale=%g AY_ratio=%g zp=(%lld,%lld,%lld)\n",
       (long long)M, (long long)N, (long long)K, (long long)batch_count,
       (long long)b_batch_stride, trans_a, trans_b, a_dtype, b_dtype, y_dtype,
-      (double)M_scale, (long long)a_zp, (long long)b_zp, (long long)y_zp);
+      b_bits, per_column, (double)M_scale, (double)AY_ratio, (long long)a_zp,
+      (long long)b_zp, (long long)y_zp);
 
   const QMatMulArgs args{static_cast<hipStream_t>(stream),
                          A,
                          B,
                          Y,
+                         static_cast<const float *>(B_scales),
+                         static_cast<const uint8_t *>(B_zero_points),
                          M,
                          N,
                          K,
@@ -894,7 +1012,10 @@ extern "C" int hip_qmatmul(void *stream, const void *A, const void *B, void *Y,
                          b_batch_stride,
                          trans_a != 0,
                          trans_b != 0,
+                         b_bits,
+                         b_dtype == HIP_DTYPE_INT8,
                          M_scale,
+                         AY_ratio,
                          static_cast<int32_t>(a_zp),
                          static_cast<int32_t>(b_zp),
                          static_cast<int32_t>(y_zp),
@@ -902,18 +1023,16 @@ extern "C" int hip_qmatmul(void *stream, const void *A, const void *B, void *Y,
                          workspace_bytes};
   const int rc = dispatch_a(a_dtype, b_dtype, y_dtype, args);
 
-  if (rc != 0) {
+  if (rc == -1) {
     fprintf(stderr,
             "[custom_kernels] hip_qmatmul: unsupported dtype triple "
             "(a=%d, b=%d, y=%d)\n",
             a_dtype, b_dtype, y_dtype);
     return rc;
   }
-
-  hipError_t err = hipGetLastError();
-  if (err != hipSuccess) {
+  if (rc != hipSuccess) {
     fprintf(stderr, "[custom_kernels] hip_qmatmul launch failed: %s\n",
-            hipGetErrorString(err));
+            hipGetErrorString(static_cast<hipError_t>(rc)));
   }
-  return static_cast<int>(err);
+  return rc;
 }

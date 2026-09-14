@@ -24,6 +24,15 @@
 // A may be 16-bit (A16W8) while B stays 8-bit. The kernel keeps that exact by
 // splitting A into two bytes, A = hi*256 + lo, and running one 8-bit dot per
 // byte; see lib/Runtime/Kernels/hip/qmatmul_kernel.hip for the derivation.
+//
+// Per-column B uses Mn[n] = (s_a / s_y) * s_b[n]. For W4, subtracting z_b
+// while widening the nibble keeps the dot4 operand in int8:
+//
+//   Bc[k,n] = B[k,n] - z_b[n]
+//   Y[m,n] = saturate(round(Mn[n] *
+//                 (sum_k A[m,k]*Bc[k,n] - z_a*sum_k Bc[k,n])) + z_y)
+//
+// W8 keeps raw B in dot4 and applies its per-column zero point in the epilogue.
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -58,17 +67,20 @@ static int hipdnn_to_hip_dtype_qmatmul(int64_t hipdnn_type) {
 // (uint16) and never sets the limit. The GEMV path (M == 1) accumulates in
 // int64 and is not bound by this at all, but the limit is applied uniformly so
 // that a shape's validity does not depend on its batch size.
-static int64_t max_safe_k(int a_dtype, int b_dtype) {
+static int64_t max_safe_k(int a_dtype, int b_dtype, int64_t b_bits) {
   const int64_t a_mag = (a_dtype == HIP_DTYPE_INT8) ? 128 : 255;
-  const int64_t b_mag = (b_dtype == HIP_DTYPE_UINT8) ? 255 : 128;
+  const int64_t b_mag =
+      b_bits == 4 ? 15 : (b_dtype == HIP_DTYPE_UINT8 ? 255 : 128);
   return INT32_MAX / (a_mag * b_mag);
 }
 
 int wrap_qmatmul(RuntimeState *state, const void *A, const void *B, void *Y,
-                 int64_t M, int64_t N, int64_t K, int64_t batch_count,
+                 const void *B_scales, const void *B_zero_points, int64_t M,
+                 int64_t N, int64_t K, int64_t batch_count,
                  int64_t b_batch_stride, int64_t trans_a, int64_t trans_b,
                  int64_t a_data_type, int64_t b_data_type, int64_t y_data_type,
-                 float M_scale, int64_t A_zero_point, int64_t B_zero_point,
+                 int64_t b_bits, float M_scale, float AY_ratio,
+                 int64_t A_zero_point, int64_t B_zero_point,
                  int64_t Y_zero_point) {
   OP_PROFILE(
       "qmatmul",
@@ -93,6 +105,25 @@ int wrap_qmatmul(RuntimeState *state, const void *A, const void *B, void *Y,
             (long long)M, (long long)N, (long long)K, (long long)batch_count);
     return -1;
   }
+  if ((B_scales == nullptr) != (B_zero_points == nullptr)) {
+    fprintf(stderr, "wrap_qmatmul: B_scales and B_zero_points select the "
+                    "per-column form together\n");
+    return -1;
+  }
+  const bool perColumn = B_scales != nullptr;
+  if ((perColumn && b_bits != 4 && b_bits != 8) ||
+      (!perColumn && b_bits != 8)) {
+    fprintf(stderr,
+            "[REAL] wrap_qmatmul: unsupported B quantization "
+            "(per_column=%d, b_bits=%lld)\n",
+            perColumn, (long long)b_bits);
+    return -1;
+  }
+  if (b_bits == 4 && b_batch_stride != 0) {
+    fprintf(stderr,
+            "[REAL] wrap_qmatmul: batched packed B is unsupported\n");
+    return -1;
+  }
 
   const int a_dtype = hipdnn_to_hip_dtype_qmatmul(a_data_type);
   const int b_dtype = hipdnn_to_hip_dtype_qmatmul(b_data_type);
@@ -111,7 +142,7 @@ int wrap_qmatmul(RuntimeState *state, const void *A, const void *B, void *Y,
     return -1;
   }
 
-  const int64_t k_limit = max_safe_k(a_dtype, b_dtype);
+  const int64_t k_limit = max_safe_k(a_dtype, b_dtype, b_bits);
   // Splitting a 16-bit A into two bytes is what keeps it on the 8-bit dot4
   // pipeline, and the price is an int32 accumulator, which is what bounds K.
   // Even the tightest dtype pairing still allows K = 33025, far past the
@@ -144,18 +175,21 @@ int wrap_qmatmul(RuntimeState *state, const void *A, const void *B, void *Y,
     fprintf(stderr,
             "[REAL] wrap_qmatmul: M=%lld N=%lld K=%lld batch=%lld "
             "b_batch_stride=%lld trans=(%lld,%lld) dtypes=(%s,%s,%s) "
-            "M_scale=%g zp=(%lld,%lld,%lld)\n",
+            "b_bits=%lld per_column=%d M_scale=%g AY_ratio=%g "
+            "zp=(%lld,%lld,%lld)\n",
             (long long)M, (long long)N, (long long)K, (long long)batch_count,
             (long long)b_batch_stride, (long long)trans_a, (long long)trans_b,
             hipdnn_ep_datatype_name(a_data_type),
             hipdnn_ep_datatype_name(b_data_type),
-            hipdnn_ep_datatype_name(y_data_type), (double)M_scale,
+            hipdnn_ep_datatype_name(y_data_type), (long long)b_bits,
+            perColumn, (double)M_scale, (double)AY_ratio,
             (long long)A_zero_point, (long long)B_zero_point,
             (long long)Y_zero_point);
   }
 
-  return hip_qmatmul(stream, A, B, Y, M, N, K, batch_count, b_batch_stride,
-                     trans_a != 0, trans_b != 0, a_dtype, b_dtype, y_dtype,
-                     M_scale, A_zero_point, B_zero_point, Y_zero_point,
-                     workspace, workspace_bytes);
+  return hip_qmatmul(stream, A, B, Y, B_scales, B_zero_points, M, N, K,
+                     batch_count, b_batch_stride, trans_a != 0, trans_b != 0,
+                     a_dtype, b_dtype, y_dtype, static_cast<int>(b_bits),
+                     M_scale, AY_ratio, A_zero_point, B_zero_point,
+                     Y_zero_point, workspace, workspace_bytes);
 }
