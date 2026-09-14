@@ -252,9 +252,13 @@ void *hipdnn_ep_alloc_output(RuntimeState *state, int64_t out_idx,
 //   fs:            morphizen::FileSystem* (void* for C ABI) - must not be null
 //   metadata_blob: FlatBuffers binary blob (HipModelMetaInfo) baked into DLL
 //   blob_size:     Size of metadata_blob in bytes
+//   config:        hipdnn_ep_init_config* (hip/init_config_abi.h) carrying the
+//                  session's provider options, or null. Kept const void* here
+//                  so ordinary runtime TUs do not pull that ABI in.
 // Return codes: 0=success, 1=alloc/read error, 2-11=GPU/runtime init error
 int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
-                                 const void *metadata_blob, size_t blob_size);
+                                 const void *metadata_blob, size_t blob_size,
+                                 const void *config);
 
 // Cleanup runtime state (destroys handles, frees memory)
 // Best-effort cleanup - continues even if individual operations fail
@@ -613,6 +617,11 @@ int hipdnn_ep_stream_sync(RuntimeState *state);
 // Per-operator profiling state accessor (OpProfileState*, gated on
 // HIPDNN_EP_PERF)
 void *hipdnn_ep_state_get_op_profile(RuntimeState *state);
+
+// Session-scoped copy from init config. nullptr if state/key is null or the
+// key is absent. Owned by RuntimeState; invalid after hipdnn_ep_state_cleanup.
+const char *hipdnn_ep_runtime_get_provider_option(RuntimeState *state,
+                                                  const char *key);
 
 // NOTE: the GQA GEMM descriptor cache (GqaGemmCache) formerly lived in
 // RuntimeState::gqa_gemm_cache with a hipdnn_ep_gqa_gemm_cache_destroy teardown

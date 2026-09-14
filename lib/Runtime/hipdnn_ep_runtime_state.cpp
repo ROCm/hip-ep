@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "debug_log.h"
+#include "hip/init_config_abi.h"
 #include "hip/timing.h"
 #include "hip_cleanup.h"
 #include "hipdnn_ep_runtime.h"
@@ -19,6 +20,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <unordered_map>
+
+namespace {
+using ProviderOptions = std::unordered_map<std::string, std::string>;
+}
 
 // Forward decl of static helpers defined later in this file.
 static int initialize_state_handles(RuntimeState **out_state);
@@ -37,7 +44,8 @@ static int per_entry_load_constants(RuntimeState *state,
                                     const char *constants_filename);
 
 int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
-                                 const void *metadata_blob, size_t blob_size) {
+                                 const void *metadata_blob, size_t blob_size,
+                                 const void *config) {
   auto t0 = timing_now();
 
   if (!out_state || !fs) {
@@ -50,12 +58,34 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   }
 
   auto *fileSystem = static_cast<morphizen::FileSystem *>(fs);
+
+  // config is borrowed and dies with this call, so copy the options out before
+  // anything reads them. Unknown keys are kept for later runtime consumers.
+  const auto *init_config = static_cast<const hipdnn_ep_init_config *>(config);
+  if (init_config && init_config->provider_option_count &&
+      init_config->provider_option_at) {
+    const size_t n = init_config->provider_option_count(init_config->self);
+    if (n > 0) {
+      auto *options = new ProviderOptions();
+      options->reserve(n);
+      for (size_t i = 0; i < n; ++i) {
+        const char *key = nullptr;
+        const char *value = nullptr;
+        init_config->provider_option_at(init_config->self, i, &key, &value);
+        if (key)
+          (*options)[key] = value ? value : "";
+      }
+      (*out_state)->provider_options = options;
+    }
+  }
+
 #if defined(HIPDNN_EP_REAL_RUNTIME)
   // The GQA autotune table is embedded in custom_kernels_<arch> now, so the
   // policy is created by an exported DLL shim and no longer needs a FileSystem.
   // Kept before the metadata early returns so constant-free models still get
   // lookup-only GQA.
-  (*out_state)->gqa_autotune_policy = hip_gqa_autotune_create();
+  (*out_state)->gqa_autotune_policy = hip_gqa_autotune_create(
+      hipdnn_ep_runtime_get_provider_option(*out_state, "gqa_autotune_mode"));
 #endif
 
   if (!metadata_blob || blob_size == 0) {
@@ -188,6 +218,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->zp_unpack_cache = nullptr;
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
   state->gqa_autotune_policy = nullptr;
+  state->provider_options = nullptr;
   state->device_error_flag = nullptr;
   state->hipdnn_handle = nullptr;
   state->hipdnn_graph_registry = nullptr;
@@ -842,6 +873,9 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     state->op_profile = nullptr;
   }
 
+  delete static_cast<ProviderOptions *>(state->provider_options);
+  state->provider_options = nullptr;
+
   // Destroy hipBLASLt handle
   if (state->hipblas_handle) {
     hipblasLtDestroy(state->hipblas_handle);
@@ -884,6 +918,16 @@ void *hipdnn_ep_state_get_hipblas_handle(RuntimeState *state) {
 
 void *hipdnn_ep_state_get_op_profile(RuntimeState *state) {
   return state ? state->op_profile : nullptr;
+}
+
+const char *hipdnn_ep_runtime_get_provider_option(RuntimeState *state,
+                                                  const char *key) {
+  if (!state || !key || !state->provider_options)
+    return nullptr;
+  const auto *options =
+      static_cast<const ProviderOptions *>(state->provider_options);
+  const auto it = options->find(key);
+  return it == options->end() ? nullptr : it->second.c_str();
 }
 
 // Per-Compute() cache invalidation hook. Today this only resets the GQA

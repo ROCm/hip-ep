@@ -22,17 +22,18 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND, "0")
 namespace mlir_compilation::customop {
 
 namespace {
-// Resolve inference_init from the loaded artifact, call it, and return the
-// opaque state. FATALs (like the rest of create()) on a missing symbol or
-// non-zero return.
-void *runInit(const LoadedArtifact &artifact, morphizen::FileSystem *fs) {
-  auto init_fn =
-      artifact.get_method<int, void **, void *>(hipdnn::abi::kInferenceInit);
+// Resolve inference_init from the loaded artifact, call it with the session's
+// init config, and return the opaque state. FATALs (like the rest of create())
+// on a missing symbol or non-zero return.
+void *runInit(const LoadedArtifact &artifact, morphizen::FileSystem *fs,
+              const hipdnn_ep_init_config *config) {
+  auto init_fn = artifact.get_method<int, void **, void *, const void *>(
+      hipdnn::abi::kInferenceInit);
   if (!init_fn) {
     LOG(FATAL) << "inference_init not found in artifact.";
   }
   void *state = nullptr;
-  int ret = init_fn(&state, static_cast<void *>(fs));
+  int ret = init_fn(&state, static_cast<void *>(fs), config);
   if (ret != 0) {
     LOG(FATAL) << "inference_init() failed with code: " << ret;
   }
@@ -103,7 +104,8 @@ InferenceState::InferenceState(PrivateTag, void *state,
 
 std::unique_ptr<InferenceState>
 InferenceState::create(const std::vector<uint8_t> &artifact_bytes,
-                       morphizen::FileSystem *fs, ArtifactKind kind) {
+                       morphizen::FileSystem *fs,
+                       const hipdnn_ep_init_config *config, ArtifactKind kind) {
   auto t0 = timing_now();
   auto t_prev = t0;
 
@@ -131,7 +133,7 @@ InferenceState::create(const std::vector<uint8_t> &artifact_bytes,
 
   // The inference_init lookup also triggers ORC's lazy codegen for the host
   // wrappers (LLVM IR), so this also covers first-symbol materialization.
-  void *state = runInit(*artifact, fs);
+  void *state = runInit(*artifact, fs, config);
 
   TIMING_LOG("[Session] inference_init (lookup + lazy codegen): %.3fs\n",
              record_elapsed(t_prev));
