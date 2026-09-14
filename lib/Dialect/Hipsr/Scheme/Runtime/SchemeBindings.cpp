@@ -787,11 +787,6 @@ void mlir_notify_match_failure(SchemeValue op, const char* reason) {
 // Pattern Registration - Scheme-defined patterns
 //===----------------------------------------------------------------------===//
 
-// Include Chez Scheme C API header for Scheme callbacks
-extern "C" {
-#include "boot/ta6le/scheme.h"
-}
-
 namespace {
 // Wrapper class that implements ConversionPattern by calling a Scheme callback
 class SchemeConversionPattern : public mlir::ConversionPattern {
@@ -822,8 +817,8 @@ public:
 
     // Call Scheme callback: (callback op rewriter)
     // Callback should return #t on successful match, #f on failure
-    ptr opPtr = Sunsigned_64(reinterpret_cast<uint64_t>(op));
-    ptr rewriterPtr = Sunsigned_64(reinterpret_cast<uint64_t>(&rewriter));
+    ptr opPtr = Sunsigned64(reinterpret_cast<uint64_t>(op));
+    ptr rewriterPtr = Sunsigned64(reinterpret_cast<uint64_t>(&rewriter));
 
     ptr result = Scall2(callback, opPtr, rewriterPtr);
 
