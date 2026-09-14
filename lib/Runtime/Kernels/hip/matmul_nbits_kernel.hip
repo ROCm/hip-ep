@@ -1222,37 +1222,72 @@ namespace matmul_lut = hipdnn_ep::matmul_nbits_autotune;
  *                      autotune sweep only on a miss.
  *   online           - bypass the LUT and always run the in-kernel sweep (the
  *                      behaviour that predates the table), for A/B comparison.
- * Both paths are compiled in; this only picks which one a process takes. Read
- * once and latched: the tuners sit on the dispatch path, and getenv per call
- * would serialize decode through the CRT environment lock. */
-static bool matmulNbitsLutLookupEnabled() {
-    static const bool lookup = [] {
-        std::string raw;   // cross-platform env read (_dupenv_s / getenv)
+ * Both paths are compiled in; this only picks which one a process takes.
+ *
+ * Precedence, as in gqa_autotune.cpp's chooseMode():
+ *   HIPDNN_MATMUL_AUTOTUNE_MODE > matmul_autotune_mode provider option > lookup
+ * A lever naming neither mode is dropped, so a typo in the environment variable
+ * does not hide the provider option.
+ *
+ * Process-wide and latched on the first read, where GQA keeps a per-session
+ * policy: the caches this gates (gemv_cache, dp4a_cache, wmma_cache) are
+ * process-wide, so a second session choosing the other mode would read the
+ * winners the first one measured anyway. Latching also keeps the environment
+ * read off the dispatch path, where it would serialize decode through the CRT
+ * environment lock. */
+
+// Honours one lever, reporting a value that names neither mode.
+static bool matmulNbitsModeLever(const char* value, const char* origin,
+                                 bool& lookup) {
+    std::string mode;
+    for (const char* p = value ? value : ""; *p; p++)
+        if (*p > ' ')
+            mode.push_back(*p >= 'A' && *p <= 'Z' ? char(*p - 'A' + 'a') : *p);
+    if (mode == "online") { lookup = false; return true; }
+    if (mode == "lookup") { lookup = true;  return true; }
+    if (!mode.empty())
+        fprintf(stderr,
+                "[custom_kernels] unrecognised %s=\"%s\" (expected \"lookup\" "
+                "or \"online\"); ignored\n",
+                origin, value);
+    return false;
+}
+
+static bool matmulNbitsChooseMode(const char* provider_mode) {
 #ifdef _WIN32
-        char* v = nullptr;
-        size_t len = 0;
-        if (_dupenv_s(&v, &len, "HIPDNN_MATMUL_AUTOTUNE_MODE") == 0 && v) {
-            raw = v;
-            free(v);
-        }
+    // Win32 rather than the CRT: a static-CRT (/MT) build of this library has
+    // its own environment copy, blind to what the host process set.
+    char buf[32];
+    const unsigned long n = GetEnvironmentVariableA(
+        "HIPDNN_MATMUL_AUTOTUNE_MODE", buf, sizeof(buf));
+    const char* env = (n > 0 && n < sizeof(buf)) ? buf : nullptr;
 #else
-        if (const char* v = getenv("HIPDNN_MATMUL_AUTOTUNE_MODE")) raw = v;
+    const char* env = getenv("HIPDNN_MATMUL_AUTOTUNE_MODE");
 #endif
-        std::string s;
-        for (char c : raw) {
-            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') continue;
-            s.push_back(c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c);
-        }
-        if (s == "online") return false;
-        if (!s.empty() && s != "lookup")
-            fprintf(stderr,
-                    "[custom_kernels] unrecognised HIPDNN_MATMUL_AUTOTUNE_MODE="
-                    "\"%s\" (expected \"lookup\" or \"online\"); using lookup\n",
-                    raw.c_str());
-        return true;   // default, and explicit "lookup"
-    }();
+    bool lookup = true;   // build default
+    if (!matmulNbitsModeLever(env, "HIPDNN_MATMUL_AUTOTUNE_MODE", lookup))
+        matmulNbitsModeLever(provider_mode, "matmul_autotune_mode", lookup);
     return lookup;
 }
+
+static int g_matmul_autotune_lookup = -1;   // -1 until the first read latches it
+static std::mutex g_matmul_autotune_mutex;
+
+// `provider_mode` is consulted only by the call that latches; null means there
+// is no session behind it (hip-test, the sweep driver, a direct library user).
+static bool matmulNbitsMode(const char* provider_mode) {
+    std::lock_guard<std::mutex> lock(g_matmul_autotune_mutex);
+    if (g_matmul_autotune_lookup < 0)
+        g_matmul_autotune_lookup = matmulNbitsChooseMode(provider_mode) ? 1 : 0;
+    return g_matmul_autotune_lookup == 1;
+}
+
+// Session-init hook; see hip_custom_kernels.h.
+extern "C" void hip_matmul_nbits_autotune_set_mode(const char* provider_mode) {
+    (void)matmulNbitsMode(provider_mode);
+}
+
+static bool matmulNbitsLutLookupEnabled() { return matmulNbitsMode(nullptr); }
 
 static int gemvConfigFromGeometry(const matmul_lut::GemvAnswer& g) {
     for (int cid = 0; cid < kNumGemvConfigs; cid++)

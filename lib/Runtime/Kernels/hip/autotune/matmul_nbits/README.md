@@ -133,7 +133,10 @@ build break.
 
 `HIPDNN_MATMUL_LUT_LOG=1` logs load status, per-lookup tier hits, and misses.
 `HIPDNN_MATMUL_AUTOTUNE_MODE=online` bypasses the table and runs the in-kernel
-autotune sweep instead (default `lookup` uses the table).
+autotune sweep instead (default `lookup` uses the table); the
+`matmul_autotune_mode` provider option selects the same thing at lower
+precedence, and the mode is latched process-wide by whichever session resolves
+it first.
 `HIPDNN_MATMUL_AUTOTUNE_LOG=1` logs the in-kernel tuner's decisions — every
 candidate's timing, the winning config's full geometry, LUT hits, and the
 cached selection — to stderr. Unlike `HIPDNN_MATMUL_LUT_LOG` (which only covers
