@@ -156,8 +156,9 @@ configure_file(
   ${composablekernel_SOURCE_DIR}/include/ck/config.h.in
   ${CMAKE_BINARY_DIR}/ck_generated/ck/config.h @ONLY)
 
-# Prepended before the HIP dist include in _hip_compile_sources so the pinned
-# CK source shadows the dist's include/ck; the generated config.h dir comes first.
+# Prepended before the HIP dist include (Windows: _hip_compile_sources;
+# Linux: hip_add_library BEFORE PRIVATE) so the pinned CK source shadows the
+# dist's include/ck. The generated config.h dir comes first.
 set(HIP_CK_INCLUDE_DIRS
   "${CMAKE_BINARY_DIR}/ck_generated"
   "${composablekernel_SOURCE_DIR}/include"
