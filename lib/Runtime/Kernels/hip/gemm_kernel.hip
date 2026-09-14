@@ -1334,6 +1334,17 @@ static void launchWmma(int id, hipStream_t s, const T *A, const T *B,
   if (my_tiles >= 12 && c.split_k == 1 &&
       static_cast<size_t>(N) * K * 2 <= (48ull << 20))
     sw_eff = 32;
+  /* Big-weight wide-N tile with FEW M-tile rows (e.g. 1024x8192^2 on cfg32:
+   * 128 MB B, 8 M-tiles): a narrow super-column raster (sw=4) keeps the reused
+   * A block-row hotter in L2 across the N-sweep and raises the L2 hit rate on
+   * the DRAM-bound stream. Measured 1024x8192^2 4.19 -> 3.82 ms (+9%, -17% ->
+   * -11% vs hipBLASLt). Only helps when the grid has few M-tiles: at 16/32
+   * M-tiles (M=2048/4096) it is neutral-to-slightly-worse, so keep the default
+   * sw there. Gated to the wide tile (bn>=256) so the narrow pow2-K cfg27 path
+   * is untouched. */
+  if (c.split_k == 1 && c.bn >= 256 && my_tiles <= 8 &&
+      static_cast<size_t>(N) * K * 2 > (96ull << 20))
+    sw_eff = 4;
   {
     const int sw_env = gemmEnvInt("HIPDNN_EP_GEMM_SWIZZLE", 0);
     if (sw_env > 0)
