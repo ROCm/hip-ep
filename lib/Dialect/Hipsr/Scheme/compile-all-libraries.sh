@@ -1,5 +1,6 @@
 #!/bin/bash
-# Compile all Scheme libraries to bytecode
+# Compile all Scheme libraries to bytecode in ONE Scheme session
+# This avoids "different compilation instance" errors for shared dependencies
 
 set -e
 
@@ -26,43 +27,30 @@ else
   echo "Warning: rime not found at $RIME_SOURCE, skipping..."
 fi
 
-# Pre-compile rime libraries to avoid "different compilation instance" errors
-# When each library compilation auto-compiles rime on demand, they get different instances
-echo "Pre-compiling rime libraries..."
-cd "$BUILD_DIR/rime"
-for sls_file in *.sls */*.sls; do
-  if [ -f "$sls_file" ]; then
-    so_file="${sls_file%.sls}.so"
-    echo "  Compiling $sls_file..."
-    $SCHEME_COMPILER --libdirs "$BUILD_DIR" <<EOF
-(compile-library "$sls_file" "$so_file")
-EOF
-  fi
-done
-
-# Compile libraries using compile-library
-echo "Compiling (mlir ffi)..."
+# Compile all libraries in ONE Scheme session to share compilation instances
+echo "Compiling all libraries in single Scheme session..."
 cd "$SOURCE_DIR/Runtime"
-$SCHEME_COMPILER --libdirs "$BUILD_DIR" <<EOF
-(compile-library "mlir/ffi.sls" "$BUILD_DIR/mlir/ffi.so")
-EOF
-
-echo "Compiling (mlir pattern-dsl)..."
-cd "$SOURCE_DIR/Runtime"
-$SCHEME_COMPILER --libdirs "$BUILD_DIR" <<EOF
-(compile-library "mlir/pattern-dsl.sls" "$BUILD_DIR/mlir/pattern-dsl.so")
-EOF
-
-echo "Compiling (mlir conversion cast)..."
-cd "$SOURCE_DIR/Runtime"
-$SCHEME_COMPILER --libdirs "$BUILD_DIR" <<EOF
-(compile-library "mlir/conversion/cast.sls" "$BUILD_DIR/mlir/conversion/cast.so")
-EOF
-
-echo "Compiling (onnx-to-hipsr)..."
-cd "$SOURCE_DIR/Passes"
+BUILD_DIR_ESCAPED="${BUILD_DIR//\//\\/}"  # Escape slashes for scheme strings
 $SCHEME_COMPILER --libdirs "$BUILD_DIR:$SOURCE_DIR/patterns" <<EOF
-(compile-library "onnx-to-hipsr.sls" "$BUILD_DIR/onnx-to-hipsr.so")
+;; Compile rime libraries first (expand-time dependencies)
+(for-each
+  (lambda (file)
+    (let ((in-path (string-append "$BUILD_DIR/rime/" file ".sls"))
+          (out-path (string-append "$BUILD_DIR/rime/" file ".so")))
+      (when (file-exists? in-path)
+        (printf "  Compiling ~a...\n" in-path)
+        (compile-library in-path out-path))))
+  '("loop" "control" "match" "meta" "io" "unit-test/__define-test"))
+
+;; Compile main libraries (in dependency order)
+(compile-library "mlir/ffi.sls" "$BUILD_DIR/mlir/ffi.so")
+(compile-library "mlir/pattern-dsl.sls" "$BUILD_DIR/mlir/pattern-dsl.so")
+(compile-library "mlir/conversion/cast.sls" "$BUILD_DIR/mlir/conversion/cast.so")
+
+;; onnx-to-hipsr needs patterns/ in libdirs (already set above)
+(compile-library "../Passes/onnx-to-hipsr.sls" "$BUILD_DIR/onnx-to-hipsr.so")
+
+(printf "Done! All libraries compiled.\\\\n")
 EOF
 
-echo "Done! All libraries compiled to bytecode."
+echo "Scheme compilation complete."
