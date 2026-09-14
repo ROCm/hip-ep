@@ -1452,6 +1452,151 @@ static int tuneDp4aConfig(
     return best_id;
 }
 
+/* -----------------------------------------------------------------------
+ * Wide-K TILE_N promotion (HIPDNN_EP_MATMUL_NBITS_WIDE_K)
+ *
+ * matmul_nbits_gemv_dp4a_kernel spends 8 sudot4 per 32-element chunk computing
+ * a_sum_q, the activation sum the asymmetric correction needs. That term does
+ * not depend on the column, so it is hoisted above the TILE_N loop and shared
+ * -- but it is still paid once per *block*, and a block covers TILE_N columns.
+ * Per column the integer-dot cost is therefore 8 + 8/TILE_N sudot4 against 8 of
+ * actual work: 2.0x at TILE_N=1, 1.5x at 2, 1.25x at 4, 1.125x at 8.
+ *
+ * This is why o-projection (N=2048, K=4096) runs 1.60x slower than
+ * q-projection (N=4096, K=2048) on the same 4 MB of weights: the LUT resolves o
+ * to Gemv(32,1) and q to Gemv(256,4), and 16/10 = 1.6.
+ *
+ * The picks are not wrong so much as mis-measured. tuneDp4aConfig times five
+ * back-to-back iterations with the activation hot in L2, where the redundant
+ * re-reads are free and TILE_N=1's higher block count wins on occupancy; in a
+ * real decode step the 4 MB weight stream makes the same kernel issue-bound and
+ * the ranking inverts. Gemv(32,1) is the most common answer in the offline
+ * table (49 of 139 dp4a points) and its fallback, so the mis-ranking is
+ * systemic rather than specific to this shape.
+ *
+ * Promotion applies only where all four hold, which is what keeps it off the
+ * shapes that are already fine:
+ *   - the pick pays a >= 1.5x overhead ratio (tile_n <= 2),
+ *   - K is long enough for that overhead to dominate the launch (K >= 2048),
+ *   - the shape is tall-K/narrow-N (K > N),
+ *   - and the wider tile still leaves enough blocks to fill the device.
+ * On Qwen3-30B that promotes o and leaves q (tile_n 4) and k/v (only 128 blocks
+ * after widening) exactly as they were.
+ *
+ * The K > N term is a scope limit, not a performance one. Replaying this rule
+ * over the offline table (tools/perf-harness/analysis/wide_k_blast_radius.py)
+ * promotes 70 of 139 dp4a points without it and 24 with it: the overhead is
+ * real at every shape, but widening it to all of them is a change to every
+ * model's dispatch, which is a separate item with its own measurement. Keep
+ * this one to the shape class it was justified on.
+ * ----------------------------------------------------------------------- */
+
+// Read once and latched: this sits behind the per-shape cache, but the CRT
+// environment lock is not something to take on a dispatch path at all.
+// GetEnvironmentVariableA, not _dupenv_s: custom_kernels links the static CRT
+// (/MT), which keeps its own environment block and cannot see variables the
+// host process set. debug_log.h documents the same constraint.
+static bool matmulNbitsWideKEnabled() {
+    static const bool enabled = [] {
+#ifdef _WIN32
+        char buf[8];
+        unsigned long n = GetEnvironmentVariableA(
+            "HIPDNN_EP_MATMUL_NBITS_WIDE_K", buf, sizeof(buf));
+        return n > 0 && buf[0] >= '1';
+#else
+        const char* v = getenv("HIPDNN_EP_MATMUL_NBITS_WIDE_K");
+        return v && v[0] >= '1';
+#endif
+    }();
+    return enabled;
+}
+
+// Exploration hook: forces every promoted shape to one kGemvConfigs index, so
+// the target TILE_N can be picked on the wall clock instead of from the
+// instruction count above. -1 (unset) uses the built-in rule. Mirrors
+// HIPDNN_MATMUL_NBITS_WMMA_CFG and HIPDNN_GQA_DECODE_SPLITS.
+static int matmulNbitsWideKConfigOverride() {
+    static const int cfg = [] {
+        char buf[16] = {0};
+#ifdef _WIN32
+        if (GetEnvironmentVariableA("HIPDNN_EP_MATMUL_NBITS_WIDE_K_CFG",
+                                    buf, sizeof(buf)) == 0)
+            return -1;
+#else
+        const char* v = getenv("HIPDNN_EP_MATMUL_NBITS_WIDE_K_CFG");
+        if (!v) return -1;
+        snprintf(buf, sizeof(buf), "%s", v);
+#endif
+        const int id = atoi(buf);
+        if (id < 0 || id >= kNumGemvConfigs) {
+            fprintf(stderr,
+                    "[custom_kernels] HIPDNN_EP_MATMUL_NBITS_WIDE_K_CFG=%s out "
+                    "of range [0,%d); ignoring\n", buf, kNumGemvConfigs);
+            return -1;
+        }
+        return id;
+    }();
+    return cfg;
+}
+
+// Smallest device fill the promotion is allowed to leave behind. gfx1151 is 40
+// CUs; 256 blocks keeps every CU holding several, which is the regime where the
+// issue-rate saving actually shows up rather than being masked by a tail.
+static constexpr int kWideKMinBlocks = 256;
+
+static int wideKPromoteDp4aConfig(int cid, int64_t N, int64_t K) {
+    if (!matmulNbitsWideKEnabled()) return cid;
+    if (cid < 0 || cid >= kNumGemvConfigs) return cid;
+
+    const GemvConfig& cur = kGemvConfigs[cid];
+    if (cur.tile_n > 2) return cid;          // already amortized
+    if (K < 2048) return cid;                // launch-dominated, leave alone
+    if (K <= N) return cid;                  // not a tall-K shape
+
+    // Widest tile the shape can afford while still filling the device.
+    static const int kTargets[] = {8, 4};
+    int target_tn = 0;
+    for (int i = 0; i < 2; i++) {
+        const int tn = kTargets[i];
+        if (N / tn >= kWideKMinBlocks && tn > cur.tile_n) { target_tn = tn; break; }
+    }
+    if (target_tn == 0) return cid;
+
+    // Exploration override applies only to shapes the rule already selected, so
+    // sweeping it cannot drag in a shape the rule would have left alone.
+    const int forced = matmulNbitsWideKConfigOverride();
+    if (forced >= 0) {
+        MATMUL_NBITS_AUTOTUNE_LOG(
+            "[custom_kernels] wide-K forced N=%lld K=%lld : config[%d] (%d,%d) -> "
+            "config[%d] (%d,%d)\n",
+            static_cast<long long>(N), static_cast<long long>(K),
+            cid, cur.threads, cur.tile_n,
+            forced, kGemvConfigs[forced].threads, kGemvConfigs[forced].tile_n);
+        return forced;
+    }
+
+    // One K-chunk (32 elements) per thread is the point where the block covers
+    // K in a single pass; past that the extra threads sit idle in the strided
+    // loop, so cap there and clamp into the table's range.
+    const int64_t chunks = K / 32;
+    int threads = 32;
+    while (threads < 256 && threads * 2 <= chunks) threads *= 2;
+
+    int best = -1;
+    for (int i = 0; i < kNumGemvConfigs; i++)
+        if (kGemvConfigs[i].threads == threads && kGemvConfigs[i].tile_n == target_tn)
+            best = i;
+    if (best < 0) return cid;
+
+    MATMUL_NBITS_AUTOTUNE_LOG(
+        "[custom_kernels] wide-K promote N=%lld K=%lld : config[%d] (%d,%d) -> "
+        "config[%d] (%d,%d)\n",
+        static_cast<long long>(N), static_cast<long long>(K),
+        cid, cur.threads, cur.tile_n,
+        best, kGemvConfigs[best].threads, kGemvConfigs[best].tile_n);
+    return best;
+}
+
 static std::unordered_map<std::string, int> dp4a_cache;
 static std::mutex dp4a_tune_mutex;
 
@@ -1476,12 +1621,17 @@ static int getOrTuneDp4aConfig(
                                     static_cast<int>(N), static_cast<int>(K),
                                     static_cast<int>(bs), zp != nullptr);
     if (lut >= 0) {
-        dp4a_cache[key] = lut;
-        return lut;
+        const int cid = wideKPromoteDp4aConfig(lut, N, K);
+        dp4a_cache[key] = cid;
+        return cid;
     }
 
+    // Promotion applies to the sweep's answer too: the hot-cache ranking that
+    // biases the table toward TILE_N=1 is the sweep, so a LUT miss lands on the
+    // same pick for the same reason.
     int best = tuneDp4aConfig(stream, a_qb, a_scale, B, sc, zp, bi, out,
                               N, K, bs);
+    best = wideKPromoteDp4aConfig(best, N, K);
     dp4a_cache[key] = best;
     return best;
 }
