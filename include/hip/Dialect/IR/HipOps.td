@@ -4952,7 +4952,7 @@ def Hip_QMulOp : Hip_DpsOp_Broadcast<"qmul",
   }];
 }
 
-def Hip_QMatMulOp : Hip_DpsOp<"qmatmul", /*traits=*/[],
+def Hip_QMatMulOp : Hip_DpsOp<"qmatmul", /*traits=*/[SameVariadicOperandSize],
                               /*outsAccessor=*/"Y",
                               /*autoReify=*/0,
                               /*autoInfer=*/1,
@@ -4964,11 +4964,11 @@ def Hip_QMatMulOp : Hip_DpsOp<"qmatmul", /*traits=*/[],
 
     ```
     a = (A - A_zero_point) * A_scale
-    b = (B - B_zero_point) * B_scale
+    b = (B - z_b) * s_b            // z_b / s_b per tensor or per column
     Y = saturate(round((a @ b) / Y_scale) + Y_zero_point)
     ```
 
-    Expanded over the integer accumulator, with
+    Per-tensor B, via the `B_scale` / `B_zero_point` attributes. With
     `acc[m,n] = sum_k A[m,k]*B[k,n]`, `rowA[m] = sum_k A[m,k]` and
     `colB[n] = sum_k B[k,n]`:
 
@@ -4980,51 +4980,79 @@ def Hip_QMatMulOp : Hip_DpsOp<"qmatmul", /*traits=*/[],
     M = A_scale * B_scale / Y_scale   (folded at lowering time)
     ```
 
-    Shape contract matches `hip.matmul`:
-      A: [..., M, K], B: [..., K, N], Y: [broadcast(A.batch, B.batch), M, N].
+    Per-output-column B, via the `B_scales` / `B_zero_points` operands, one
+    value each per column of the [K, N] weight, with `B_quant_axis` naming that
+    column axis. Only `A_scale / Y_scale` folds; the per-column factor is a
+    device array the kernel indexes by column. Subtracting the column's zero
+    point from the weight instead of correcting for it afterwards makes `rowA`
+    and the `K * A_zero_point * B_zero_point` term vanish:
 
-    Optional `transA` / `transB` (0/1) apply a last-dimension swap on the
-    corresponding operand before multiply, with the same meaning as on
-    `hip.matmul`: `transA` reads A as [..., K, M] and `transB` reads B as
-    [..., N, K]. They carry the compile-time fold of
-    `Transpose(perm=[..,r,r-2])` into MatMul, so a quantized attention
-    `Q @ K^T` still fuses. When unset they default to 0.
+    ```
+    Bc[k,n]    = B[k,n] - B_zero_points[n]
+    accc[m,n]  = sum_k A[m,k] * Bc[k,n]
+    colBc[n]   = sum_k Bc[k,n]
 
-    Quantization is per-tensor, so every scale and zero point is an attribute.
-    A, B and Y each carry their own quantized element type: real QDQ graphs
-    commonly pair a `ui8` asymmetric activation with an `i8` symmetric weight.
-    A and Y may be 8- or 16-bit, which is what makes A16W8 expressible; B is
-    8-bit only, because the lowering's kernel keeps a 16-bit A exact by
-    splitting it into two bytes and splits only A, leaving a wider B with no
-    path through it.
+    Y[m,n] = saturate(round(Mn[n] * (accc[m,n] - A_zero_point * colBc[n]))
+                      + Y_zero_point)
+    Mn[n]  = (A_scale / Y_scale) * B_scales[n]
+    ```
 
-    Example:
+    That rearrangement needs `B - B_zero_points[n]` to stay within the staged
+    operand's width, which holds at 4 bits (|Bc| <= 15) and not at 8.
+
+    The scales and zero points stay operands in this form because they hold one
+    value per column and because they routinely arrive as external constants
+    whose values are not readable at fusion time.
+
+    `packed_int4` means BOTH `$B` and `$B_zero_points` carry two 4-bit values
+    per backing byte, low nibble first over the flattened row-major sequence,
+    while their types keep the logical element count and an 8-bit element type
+    -- the same convention as hip.qconv and hip.dequantize_linear. The element
+    type's signedness selects INT4 (i8) or UINT4 (ui8); the two differ in how a
+    nibble is widened, so a consumer must not ignore it.
+
+    Examples:
     ```mlir
     hip.qmatmul(%ctx) ins(%A, %B : memref<64x128xi8, 1>, memref<128x32xi8, 1>)
                       outs(%Y : memref<64x32xi8, 1>)
                       {A_scale = 2.500000e-01 : f32, A_zero_point = -5 : i64,
                        B_scale = 1.250000e-01 : f32, B_zero_point = 3 : i64,
                        Y_scale = 5.000000e-01 : f32, Y_zero_point = 7 : i64}
+
+    hip.qmatmul(%ctx) ins(%A, %B, %Bs, %Bz : memref<128x2048xui16, 1>,
+                                             memref<2048x3072xi8, 1>,
+                                             memref<3072xf32, 1>,
+                                             memref<3072xi8, 1>)
+                      outs(%Y : memref<128x3072xui16, 1>)
+                      {A_scale = 1.000000e-03 : f32, A_zero_point = 32768 : i64,
+                       Y_scale = 2.000000e-03 : f32, Y_zero_point = 32768 : i64,
+                       B_quant_axis = 1 : i64, packed_int4}
     ```
   }];
 
   let arguments = (ins
     Hip_ContextType:$ctx,
-    Hip_TensorOrMemRef:$A,             // Left operand (quantized)
-    Hip_TensorOrMemRef:$B,             // Right operand (quantized)
-    Hip_TensorOrMemRef:$Y,             // Output buffer (quantized), DPS init
+    Hip_TensorOrMemRef:$A,                      // Left operand (quantized)
+    Hip_TensorOrMemRef:$B,                      // Right operand (quantized)
+    Optional<Hip_TensorOrMemRef>:$B_scales,     // f32 [N], per-column form
+    Optional<Hip_TensorOrMemRef>:$B_zero_points,// [N] in B's storage type
+    Hip_TensorOrMemRef:$Y,                      // Output buffer, DPS init
     F32Attr:$A_scale,
     I64Attr:$A_zero_point,
-    F32Attr:$B_scale,
-    I64Attr:$B_zero_point,
+    OptionalAttr<F32Attr>:$B_scale,
+    OptionalAttr<I64Attr>:$B_zero_point,
     F32Attr:$Y_scale,
     I64Attr:$Y_zero_point,
     DefaultValuedAttr<I64Attr, "0">:$transA,
-    DefaultValuedAttr<I64Attr, "0">:$transB
+    DefaultValuedAttr<I64Attr, "0">:$transB,
+    OptionalAttr<I64Attr>:$B_quant_axis,
+    UnitAttr:$packed_int4
   );
 
   let assemblyFormat = [{
-    `(` $ctx `)` `ins` `(` $A `,` $B `:` type($A) `,` type($B) `)`
+    `(` $ctx `)` `ins` `(` $A `,` $B (`,` $B_scales^ `,` $B_zero_points)? `:`
+        type($A) `,` type($B)
+        (`,` type($B_scales)^ `,` type($B_zero_points))? `)`
     `outs` `(` $Y `:` type($Y) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
