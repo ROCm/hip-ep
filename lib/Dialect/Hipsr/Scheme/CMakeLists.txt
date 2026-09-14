@@ -70,6 +70,7 @@ add_custom_target(ChezBootHeaders DEPENDS
   ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.h
 )
 add_library(HipsrSchemePass
+  Runtime/ChezSchemeInterpreter.cpp
   Runtime/SchemeBindings.cpp
   SchemeScriptPass.cpp
 )
