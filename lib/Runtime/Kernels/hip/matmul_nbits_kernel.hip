@@ -3202,32 +3202,10 @@ enum class GroupedWmmaGeometry {
   k64x64,
 };
 
-static bool grouped_wmma_device_is_gfx1151() {
-  constexpr int kMaxCachedDevices = 16;
-  static int cached[kMaxCachedDevices] = {};
-  int device = 0;
-  if (hipGetDevice(&device) != hipSuccess || device < 0)
-    return false;
-
-  auto probe = [](int d) {
-    hipDeviceProp_t prop{};
-    return hipGetDeviceProperties(&prop, d) == hipSuccess &&
-           std::strncmp(prop.gcnArchName, "gfx1151", 7) == 0;
-  };
-  if (device >= kMaxCachedDevices)
-    return probe(device);
-  if (cached[device] == 0)
-    cached[device] = probe(device) ? 1 : -1;
-  return cached[device] > 0;
-}
-
-// Unknown wave32 devices use 32x64. 64x64 when the average expert slice
-// exceeds BM=32, or when K is long relative to N.
+// 32x64 unless the average expert slice exceeds BM=32, or K is long relative
+// to N (64x64: more threads, fewer K-steps).
 static GroupedWmmaGeometry select_grouped_wmma_geometry(
     int64_t valid_rows, int64_t num_experts, int64_t N, int64_t K) {
-  if (!grouped_wmma_device_is_gfx1151())
-    return GroupedWmmaGeometry::k32x64;
-
   const int64_t avg_rows =
       num_experts > 0 ? (valid_rows + num_experts - 1) / num_experts : 0;
   if (avg_rows > 32 || (K >= 2048 && K >= 2 * N))
