@@ -66,23 +66,33 @@ endif
 
 TEST_OBJ   := $(BUILD_DIR)/test_gemm.obj
 KERNEL_OBJ := $(BUILD_DIR)/gemm_kernel.obj
+# gemm_kernel.hip now calls hipdnn_ep::gemm_autotune::resolve. The real resolver
+# (gemm_autotune.cpp) needs flatc-generated headers, which this standalone build
+# has no flatc for, so link the flatbuffers-free stub (returns a miss -> shapes
+# use the heuristic, which is what the harness wants). The production DLL links
+# the real resolver instead.
+AUTOTUNE_STUB := ../../../hip/autotune/gemm/tools/gemm_autotune_stub.cpp
+STUB_OBJ      := $(BUILD_DIR)/gemm_autotune_stub.obj
 
 $(TARGET): FORCE | $(BUILD_DIR)
 	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) $(INCLUDES) -x hip test_gemm.cpp -o $(TEST_OBJ)
 	$(HIPCC) -c $(KERNEL_FLAGS) $(OFFLOAD) $(INCLUDES) $(KERNEL_HIP) -o $(KERNEL_OBJ)
-	$(HIPCC) $(OFFLOAD) $(TEST_OBJ) $(KERNEL_OBJ) -o $(TARGET)
+	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) $(INCLUDES) $(AUTOTUNE_STUB) -o $(STUB_OBJ)
+	$(HIPCC) $(OFFLOAD) $(TEST_OBJ) $(KERNEL_OBJ) $(STUB_OBJ) -o $(TARGET)
 
 bench_hipblaslt: FORCE | $(BUILD_DIR)
 	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) $(INCLUDES) -DHIPDNN_GEMM_BENCH_HIPBLASLT -x hip test_gemm.cpp -o $(TEST_OBJ)
 	$(HIPCC) -c $(KERNEL_FLAGS) $(OFFLOAD) $(INCLUDES) $(KERNEL_HIP) -o $(KERNEL_OBJ)
-	$(HIPCC) $(OFFLOAD) $(TEST_OBJ) $(KERNEL_OBJ) -lhipblaslt -o $(TARGET)
+	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) $(INCLUDES) $(AUTOTUNE_STUB) -o $(STUB_OBJ)
+	$(HIPCC) $(OFFLOAD) $(TEST_OBJ) $(KERNEL_OBJ) $(STUB_OBJ) -lhipblaslt -o $(TARGET)
 	$(call RUN_CMD,$(TARGET)) $(M) $(N) $(K) $(TA) $(TB) $(TYPE)
 
 # Decode NT, prefill NT, prefill NN, square-ish NT — vs wrap_gemm algos.
 bench_suite: FORCE | $(BUILD_DIR)
 	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) $(INCLUDES) -DHIPDNN_GEMM_BENCH_HIPBLASLT -x hip test_gemm.cpp -o $(TEST_OBJ)
 	$(HIPCC) -c $(KERNEL_FLAGS) $(OFFLOAD) $(INCLUDES) $(KERNEL_HIP) -o $(KERNEL_OBJ)
-	$(HIPCC) $(OFFLOAD) $(TEST_OBJ) $(KERNEL_OBJ) -lhipblaslt -o $(TARGET)
+	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) $(INCLUDES) $(AUTOTUNE_STUB) -o $(STUB_OBJ)
+	$(HIPCC) $(OFFLOAD) $(TEST_OBJ) $(KERNEL_OBJ) $(STUB_OBJ) -lhipblaslt -o $(TARGET)
 	$(call RUN_CMD,$(TARGET)) 1 4096 2880 0 1 0
 	$(call RUN_CMD,$(TARGET)) 128 4096 2880 0 1 0
 	$(call RUN_CMD,$(TARGET)) 128 4096 2880 0 0 0

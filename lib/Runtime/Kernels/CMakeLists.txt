@@ -200,6 +200,47 @@ function(_gqa_lut_data_source arch out_var)
     set(${out_var} ${_gen} PARENT_SCOPE)
 endfunction()
 
+# Gemm offline autotune table -- same per-arch embedding as MatMulNBits above.
+# Only the checked-in lut/<arch>.fb ships; the linkable kGemmLutData[] symbol is
+# generated from it below with pure CMake (file(READ ... HEX)), so the hip-ep
+# build needs no Python and no generated .cpp is committed. An arch with no
+# measured table still builds via tools/empty_lut_data.cpp: the loader finds no
+# table and every shape falls through to the heuristic / runtime sweep.
+set(_gemm_autotune_dir ${CMAKE_CURRENT_SOURCE_DIR}/hip/autotune/gemm)
+
+function(_gemm_lut_data_source arch out_var)
+    set(_lut_arch ${arch})
+    if(arch STREQUAL "gfx11-generic")
+        set(_lut_arch gfx1151)
+    endif()
+    set(_fb ${_gemm_autotune_dir}/lut/${_lut_arch}.fb)
+    if(EXISTS ${_fb})
+        # Re-run CMake configure if the table changes, so the generated source
+        # below stays in sync with the checked-in .fb.
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_fb})
+        file(READ ${_fb} _hex HEX)
+        string(LENGTH "${_hex}" _len)
+        math(EXPR _n "${_len} / 2")
+        # Each byte "nn" -> "0xnn,". The trailing comma before '}' is valid C++;
+        # one long line is fine (compiled by hipcc/clang, no line-length limit).
+        string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," _body "${_hex}")
+        set(_gen ${CMAKE_CURRENT_BINARY_DIR}/gemm_lut_data_${arch}.cpp)
+        file(WRITE ${_gen}
+"// Auto-generated from ${_lut_arch}.fb by lib/Runtime/Kernels/CMakeLists.txt; do not edit, do not commit.\n"
+"#include <cstddef>\n"
+"extern \"C\" const unsigned char kGemmLutData[] = {${_body}};\n"
+"extern \"C\" const size_t kGemmLutData_size = ${_n};\n")
+        set(${out_var} ${_gen} PARENT_SCOPE)
+    else()
+        message(STATUS
+            "[custom_kernels] no Gemm LUT for ${arch}; "
+            "shapes will fall back to the heuristic / runtime autotune")
+        set(${out_var}
+            ${_gemm_autotune_dir}/tools/empty_lut_data.cpp
+            PARENT_SCOPE)
+    endif()
+endfunction()
+
 # One SHARED target per arch. Each builds a fatbin with that single slice;
 # OFFLOAD_ARCHS narrows the global list to one element so the resulting
 # DLL/SO is not bloated with code for archs the consumer won't load.
@@ -207,11 +248,14 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
     set(_target custom_kernels_${_arch})
     _matmul_nbits_lut_data_source(${_arch} _matmul_lut_src)
     _gqa_lut_data_source(${_arch} _gqa_lut_src)
+    _gemm_lut_data_source(${_arch} _gemm_lut_src)
     hip_add_library(${_target} SHARED ${_kernel_sources}
             ${_matmul_nbits_autotune_dir}/matmul_nbits_autotune.cpp
             ${_matmul_lut_src}
             ${_gqa_autotune_dir}/gqa_autotune.cpp
             ${_gqa_lut_src}
+            ${_gemm_autotune_dir}/gemm_autotune.cpp
+            ${_gemm_lut_src}
         INCLUDE_DIRECTORIES
             ${CMAKE_CURRENT_SOURCE_DIR}/include
             # matmul_nbits_autotune_generated.h and gqa_autotune_generated.h;

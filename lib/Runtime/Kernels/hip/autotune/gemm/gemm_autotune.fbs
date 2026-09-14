@@ -1,0 +1,111 @@
+// Gemm offline autotune lookup table.
+//
+// Same design as matmul_nbits_autotune.fbs (read that file's header for the
+// rationale): a set of measured points plus a per-phase fallback; a lookup
+// matches the categorical fields exactly then takes the nearest measured point
+// in log space over (M, N, K). Nearest-neighbour in log space is what Tensile
+// does for the same problem and it degrades smoothly.
+//
+// Gemm has no quantization, so the categorical key is just the dispatch kind,
+// the element size, and the transpose mode -- the exact fields gemm_kernel.hip
+// keys its runtime tune caches on.
+
+namespace hipdnn_ep.gemm_autotune.fbs;
+
+// Any = 0 so a memset field reads as "unclassified" and is rejected at load.
+
+// Which kernel serves the shape: the WMMA prefill tiles (kWmma) or the N-major
+// GEMV decode path (kGemvNt). They rank their config tables differently and
+// keep separate runtime tune caches, so they are separate groups here.
+enum GemmPhase : ubyte {
+  Any = 0,
+  Wmma = 1,
+  GemvNt = 2
+}
+
+// Element size in bytes: 2 = f16/bf16, 4 = f32, 8 = f64. f16 and bf16 share a
+// size because they share the WMMA tile geometry (only the intrinsic differs),
+// which is what the tile choice keys on.
+enum GemmTypeBytes : ubyte {
+  Any = 0,
+  B2 = 1,
+  B4 = 2,
+  B8 = 3
+}
+
+// ONNX Gemm transB. NN = plain, NT = B transposed (the common weight layout).
+enum GemmTransB : ubyte {
+  Any = 0,
+  NN = 1,
+  NT = 2
+}
+
+// Which config table the payload refers to; a kind that does not match the
+// phase being resolved is rejected at load.
+enum GemmConfigKind : ubyte {
+  None = 0,
+  Wmma = 1,   // bm/bn/swizzle/wt_m/wt_n/bk/split_k
+  Gemv = 2    // threads/tile_n
+}
+
+// De-duplicated answer geometry, referenced by index from the points. Stored as
+// geometry rather than a kWmma/kGemvNt index because those indices shift when
+// the tables are edited and a stale index silently launches the wrong kernel;
+// geometry is checked against the live table at load.
+struct GemmTuneConfig {
+  kind: GemmConfigKind;
+
+  // Wmma payload. bm/bn are stored divided by 16 to fit a ubyte (bm,bn <= 256).
+  bm16: ubyte;
+  bn16: ubyte;
+  swizzle: ubyte;
+  wt_m: ubyte;
+  wt_n: ubyte;
+  bk: ubyte;
+  split_k: ubyte;
+
+  // Gemv payload. Zero on Wmma configs.
+  threads: uint16;
+  tile_n: ubyte;
+}
+
+// One measured winner for a (categorical key, M, N, K). M/N/K are literal dims.
+// K reaches 28672 and N reaches the vocab projection (262208) so N is uint32;
+// M and K fit uint16.
+struct GemmTunePoint {
+  phase: GemmPhase;
+  type_bytes: GemmTypeBytes;
+  trans_b: GemmTransB;
+  config: ubyte;   // index into GemmAutotuneLut.configs
+  m: uint16;
+  n: uint32;
+  k: uint16;
+}
+
+// Last resort for a (phase, type) group with no usable measured point.
+struct GemmFallback {
+  phase: GemmPhase;
+  type_bytes: GemmTypeBytes;
+  config: ubyte;
+}
+
+table GemmAutotuneLut {
+  schema_version: uint32 = 1;
+  gpu_arch: string;         // must equal the running device, e.g. "gfx1151"
+  rocm_version: int32;      // advisory
+  kernel_abi: string;       // "gemm-wmma-v1"
+  model_key: string;        // provenance label for logging
+
+  // Per-dimension weights of the log-space distance:
+  //   d = sqrt((wm*log2(M/Mp))^2 + (wn*log2(N/Np))^2 + (wk*log2(K/Kp))^2)
+  weight_m: float = 1.0;
+  weight_n: float = 1.0;
+  weight_k: float = 1.0;
+
+  configs: [GemmTuneConfig];   // at most 256 (point index is a ubyte)
+  points: [GemmTunePoint];
+  fallbacks: [GemmFallback];
+}
+
+root_type GemmAutotuneLut;
+file_identifier "GEML";

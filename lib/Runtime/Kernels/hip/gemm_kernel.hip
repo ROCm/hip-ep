@@ -23,6 +23,7 @@
 #include "hip_custom_kernels.h"
 #include "hip_arch_compat.h"
 #include "debug_log.h"
+#include "autotune/gemm/gemm_autotune.h"
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
@@ -460,59 +461,20 @@ static bool gemmLutLookupEnabled() {
   return lookup;
 }
 
-/* ---- Offline LUT bridge (scaffold) ------------------------------------
+/* ---- Offline LUT bridge --------------------------------------------------
  *
  * The autotune winner for a shape is durable knowledge that belongs in an
  * offline table, exactly like matmul_nbits' hipdnn_ep::matmul_nbits_autotune.
- * The table stores tile *geometry* (not a config index), and a validator maps
- * the geometry back onto the live config table at load: a geometry the table
- * no longer contains is skipped so a stale LUT is never worse than no LUT.
+ * `gemm_autotune::resolve` (autotune/gemm/gemm_autotune.cpp, embedded per-arch
+ * into custom_kernels_<arch>) does the nearest-neighbour lookup; the table
+ * stores tile *geometry* (not a config index) and the validator maps it back
+ * onto the live kWmma/kGemvNt table, so a stale LUT is never worse than no LUT.
+ * With no table embedded (the size-0 stub) resolve() reports a miss and the
+ * caller sweeps / uses the heuristic exactly as before.
  *
- * The lookup is wired into the dispatch path now (map -> LUT -> sweep) so the
- * table can be dropped in later without touching call sites. Until a table is
- * generated and embedded (see lib/Runtime/Kernels/hip/autotune/), resolve()
- * reports a miss and the sweep runs, i.e. "lookup" behaves like "online". */
-namespace gemm_lut {
-
-enum class Kind : uint8_t { Wmma = 1, GemvNt = 2 };
-
-struct Request {
-  Kind kind = Kind::Wmma;
-  int type_bytes = 2; /* sizeof(T): 2=f16/bf16, 4=f32, 8=f64 */
-  int trans_b = 1;
-  int m = 0, n = 0, k = 0;
-};
-
-/* WMMA tile geometry, matching WmmaCfg fields the dispatch keys on. */
-struct WmmaAnswer {
-  int bm = 0, bn = 0, wt_m = 0, wt_n = 0, swizzle_n = 0, split_k = 1, bk = 32;
-};
-
-/* (threads, tile_n) for the GEMV NT decode path. */
-struct GemvAnswer {
-  int threads = 0, tile_n = 0;
-};
-
-enum class Source : uint8_t { None = 0, Exact = 1, Nearest = 2 };
-
-struct Result {
-  Source source = Source::None;
-  WmmaAnswer wmma;
-  GemvAnswer gemv;
-  float distance = 0.0f;
-};
-
-using WmmaValidator = bool (*)(void *ctx, const WmmaAnswer &);
-using GemvValidator = bool (*)(void *ctx, const GemvAnswer &);
-
-/* Stub: no table embedded yet. Returns a miss so the caller sweeps. When the
- * offline table lands, this forwards to the embedded resolver and the shape of
- * this call does not change. */
-static Result resolve(const Request &, WmmaValidator, GemvValidator, void *) {
-  return Result{};
-}
-
-} // namespace gemm_lut
+ * gemm_lut is an alias so the existing call sites (map -> LUT -> sweep) and the
+ * validator/geometry helpers are unchanged. */
+namespace gemm_lut = hipdnn_ep::gemm_autotune;
 
 static std::mutex g_tune_mu;
 static std::unordered_map<std::string, int> g_gemv_nt_cache;
