@@ -686,7 +686,7 @@ SchemeValue mlir_create_generic_op(const char* op_name,
     }
     ptr operand_ptr = Scar(current);
     mlir::Value operand = mlir::Value::getFromOpaquePointer(
-        reinterpret_cast<void*>(Sinteger_64_value(operand_ptr)));
+        reinterpret_cast<void*>(Sinteger64_value(operand_ptr)));
     operands.push_back(operand);
     current = Scdr(current);
   }
@@ -700,7 +700,7 @@ SchemeValue mlir_create_generic_op(const char* op_name,
     }
     ptr type_ptr = Scar(current);
     mlir::Type type = mlir::Type::getFromOpaquePointer(
-        reinterpret_cast<void*>(Sinteger_64_value(type_ptr)));
+        reinterpret_cast<void*>(Sinteger64_value(type_ptr)));
     resultTypes.push_back(type);
     current = Scdr(current);
   }
