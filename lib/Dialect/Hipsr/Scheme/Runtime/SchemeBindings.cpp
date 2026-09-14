@@ -657,6 +657,82 @@ SchemeValue mlir_create_cast_op(SchemeValue ctx_value, SchemeValue input_value,
   return const_cast<void*>(castOp.getResult(0).getAsOpaquePointer());
 }
 
+// Generic operation builder
+// op_name: operation name string (e.g., "hipsr.min")
+// operands_list: Scheme list of operand Values
+// result_types_list: Scheme list of result Types
+// Returns: Operation* as SchemeValue
+SchemeValue mlir_create_generic_op(const char* op_name,
+                                   SchemeValue operands_list,
+                                   SchemeValue result_types_list) {
+  if (!g_current_rewriter || !g_current_operation) {
+    mlir_log_error("mlir_create_generic_op: No active PatternRewriter context");
+    return nullptr;
+  }
+
+  mlir::Location loc = g_current_operation->getLoc();
+  g_current_rewriter->setInsertionPoint(g_current_operation);
+
+  // Convert Scheme list to C++ vectors
+  llvm::SmallVector<mlir::Value> operands;
+  llvm::SmallVector<mlir::Type> resultTypes;
+
+  // Parse operands list
+  ptr current = static_cast<ptr>(operands_list);
+  while (current != Snil) {
+    if (!Spairp(current)) {
+      mlir_log_error("mlir_create_generic_op: operands must be a proper list");
+      return nullptr;
+    }
+    ptr operand_ptr = Scar(current);
+    mlir::Value operand = mlir::Value::getFromOpaquePointer(
+        reinterpret_cast<void*>(Sinteger_64_value(operand_ptr)));
+    operands.push_back(operand);
+    current = Scdr(current);
+  }
+
+  // Parse result types list
+  current = static_cast<ptr>(result_types_list);
+  while (current != Snil) {
+    if (!Spairp(current)) {
+      mlir_log_error("mlir_create_generic_op: result types must be a proper list");
+      return nullptr;
+    }
+    ptr type_ptr = Scar(current);
+    mlir::Type type = mlir::Type::getFromOpaquePointer(
+        reinterpret_cast<void*>(Sinteger_64_value(type_ptr)));
+    resultTypes.push_back(type);
+    current = Scdr(current);
+  }
+
+  // Create operation using OpBuilder
+  mlir::OperationState state(loc, op_name);
+  state.addOperands(operands);
+  state.addTypes(resultTypes);
+
+  mlir::Operation* op = g_current_rewriter->create(state);
+  return reinterpret_cast<SchemeValue>(op);
+}
+
+// Get result value from operation
+// op: Operation* as SchemeValue
+// index: result index
+// Returns: Value as SchemeValue
+SchemeValue mlir_operation_get_result_value_from_op(SchemeValue op_ptr, int index) {
+  mlir::Operation* op = static_cast<mlir::Operation*>(op_ptr);
+  if (!op) {
+    mlir_log_error("mlir_operation_get_result_value_from_op: null operation");
+    return nullptr;
+  }
+
+  if (index < 0 || index >= static_cast<int>(op->getNumResults())) {
+    mlir_log_error("mlir_operation_get_result_value_from_op: index out of range");
+    return nullptr;
+  }
+
+  return const_cast<void*>(op->getResult(index).getAsOpaquePointer());
+}
+
 //===----------------------------------------------------------------------===//
 // Phase 4: Pattern Rewriter FFI
 //===----------------------------------------------------------------------===//
@@ -1138,6 +1214,8 @@ void registerMlirForeignFunctions() {
   // Phase 3: IR Construction FFI (OpBuilder) - TODO: needs PatternRewriter integration
   Sregister_symbol("mlir_create_placeholder_op", (void*)::mlir_create_placeholder_op);
   Sregister_symbol("mlir_create_cast_op", (void*)::mlir_create_cast_op);
+  Sregister_symbol("mlir_create_generic_op", (void*)::mlir_create_generic_op);
+  Sregister_symbol("mlir_operation_get_result_value_from_op", (void*)::mlir_operation_get_result_value_from_op);
 
   // Phase 4: Pattern Rewriter FFI - TODO: needs PatternRewriter integration
   Sregister_symbol("mlir_create_unrealized_conversion_cast", (void*)::mlir_create_unrealized_conversion_cast);

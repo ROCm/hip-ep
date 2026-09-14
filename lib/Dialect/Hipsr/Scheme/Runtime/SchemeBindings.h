@@ -143,6 +143,17 @@ SchemeValue mlir_create_cast_op(SchemeValue ctx_value,
                                  SchemeValue output_value,
                                  SchemeValue result_type);
 
+// Create generic operation
+// op_name: operation name (e.g., "hipsr.min")
+// operands_list: Scheme list of operand Values (as unsigned-64)
+// result_types_list: Scheme list of result Types (as unsigned-64)
+SchemeValue mlir_create_generic_op(const char* op_name,
+                                   SchemeValue operands_list,
+                                   SchemeValue result_types_list);
+
+// Get result value from operation
+SchemeValue mlir_operation_get_result_value_from_op(SchemeValue op_ptr, int index);
+
 // Phase 4: Pattern Rewriter FFI
 
 // Replace operation with a value
