@@ -846,9 +846,8 @@ LogicalResult QMatMulOp::verify() {
       if (ShapedType::isDynamic(columns) || ShapedType::isDynamic(length) ||
           length == columns)
         return success();
-      return emitOpError(name)
-             << " must hold one value per B column (" << columns << "), got "
-             << length;
+      return emitOpError(name) << " must hold one value per B column ("
+                               << columns << "), got " << length;
     };
     if (failed(verifyLength("B_scales", scalesType)) ||
         failed(verifyLength("B_zero_points", zeroPointsType)))

@@ -120,8 +120,7 @@ int wrap_qmatmul(RuntimeState *state, const void *A, const void *B, void *Y,
     return -1;
   }
   if (b_bits == 4 && b_batch_stride != 0) {
-    fprintf(stderr,
-            "[REAL] wrap_qmatmul: batched packed B is unsupported\n");
+    fprintf(stderr, "[REAL] wrap_qmatmul: batched packed B is unsupported\n");
     return -1;
   }
 
@@ -181,10 +180,9 @@ int wrap_qmatmul(RuntimeState *state, const void *A, const void *B, void *Y,
             (long long)b_batch_stride, (long long)trans_a, (long long)trans_b,
             hipdnn_ep_datatype_name(a_data_type),
             hipdnn_ep_datatype_name(b_data_type),
-            hipdnn_ep_datatype_name(y_data_type), (long long)b_bits,
-            perColumn, (double)M_scale, (double)AY_ratio,
-            (long long)A_zero_point, (long long)B_zero_point,
-            (long long)Y_zero_point);
+            hipdnn_ep_datatype_name(y_data_type), (long long)b_bits, perColumn,
+            (double)M_scale, (double)AY_ratio, (long long)A_zero_point,
+            (long long)B_zero_point, (long long)Y_zero_point);
   }
 
   return hip_qmatmul(stream, A, B, Y, B_scales, B_zero_points, M, N, K,

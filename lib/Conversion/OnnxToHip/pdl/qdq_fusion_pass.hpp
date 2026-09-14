@@ -5,7 +5,7 @@
 
 // qdq_fusion_pass.hpp — PDL fusion pass for QDQ patterns
 // Contains common functions required for fusion patterns.
-// Note: Design the functions so that they can be reused by 
+// Note: Design the functions so that they can be reused by
 // other patterns whenever possible.
 #pragma once
 
@@ -162,7 +162,7 @@ inline bool onnxListAttrAllEqual(mlir::Operation *op, llvm::StringRef name,
 }
 
 inline int64_t onnxIntAttrWithDefault(mlir::Operation *op, llvm::StringRef name,
-                             int64_t absentValue) {
+                                      int64_t absentValue) {
   auto intAttr = op->getAttrOfType<mlir::IntegerAttr>(name);
   return intAttr ? intAttr.getValue().getSExtValue() : absentValue;
 }
@@ -268,9 +268,8 @@ hasAttrInt64Equal(mlir::PatternRewriter &, mlir::PDLResultList &,
       args[3].dyn_cast<mlir::Attribute>());
   if (!op || !nameAttr || !expected || !absentValue)
     return mlir::failure();
-  return mlir::success(onnxIntAttrEquals(op, nameAttr.getValue(),
-                                         expected.getInt(),
-                                         absentValue.getInt()));
+  return mlir::success(onnxIntAttrEquals(
+      op, nameAttr.getValue(), expected.getInt(), absentValue.getInt()));
 }
 
 inline mlir::LogicalResult
