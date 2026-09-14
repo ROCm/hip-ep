@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-#include "ChezSchemeInterpreter.h"
+#include "hip/Dialect/Hipsr/Scheme/Runtime/ChezSchemeInterpreter.h"
 #include "SchemeBindings.h"
 
 #include "llvm/Support/raw_ostream.h"
