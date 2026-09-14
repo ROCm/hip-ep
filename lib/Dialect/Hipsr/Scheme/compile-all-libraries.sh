@@ -1,6 +1,5 @@
 #!/bin/bash
 # Compile all Scheme libraries to bytecode
-# Super simple - just compile everything from scratch
 
 set -e
 
@@ -18,8 +17,6 @@ mkdir -p "$BUILD_DIR/mlir"
 mkdir -p "$BUILD_DIR/mlir/conversion"
 
 # Copy rime library
-# Note: SOURCE_DIR is lib/Dialect/Hipsr/Scheme
-# We need to go up to workspace root: ../../../../
 RIME_SOURCE="$SOURCE_DIR/../../../../third_party/rime/rime"
 if [ ! -d "$BUILD_DIR/rime" ]; then
   echo "Copying rime library..."
@@ -30,41 +27,32 @@ if [ ! -d "$BUILD_DIR/rime" ]; then
   fi
 fi
 
-# Library search path
-# Important: BUILD_DIR first so compiled .so files are found before recompiling
-LIBDIRS="$BUILD_DIR:$SOURCE_DIR/Runtime:$SOURCE_DIR/Passes:$SOURCE_DIR/Patterns"
-
-# Compile libraries in dependency order
-# Once a library is compiled, later compilations find it in BUILD_DIR
-
+# Compile libraries using compile-library
 echo "Compiling (mlir ffi)..."
 cd "$SOURCE_DIR/Runtime"
-$SCHEME_COMPILER --compile-imported-libraries --libdirs "$LIBDIRS" --program <(echo "(import (mlir ffi))")
-mv mlir/ffi.so "$BUILD_DIR/mlir/"
+$SCHEME_COMPILER --libdirs "$BUILD_DIR" <<EOF
+(compile-library "mlir/ffi.sls" "$BUILD_DIR/mlir/ffi.so")
+EOF
 
 echo "Compiling (mlir pattern-dsl)..."
 cd "$SOURCE_DIR/Runtime"
-# This will find (mlir ffi) in BUILD_DIR, not recompile it
-$SCHEME_COMPILER --compile-imported-libraries --libdirs "$LIBDIRS" --program <(echo "(import (mlir pattern-dsl))")
-mv mlir/pattern-dsl.so "$BUILD_DIR/mlir/"
+$SCHEME_COMPILER --libdirs "$BUILD_DIR" <<EOF
+(compile-library "mlir/pattern-dsl.sls" "$BUILD_DIR/mlir/pattern-dsl.so")
+EOF
 
 echo "Compiling (mlir conversion cast)..."
 cd "$SOURCE_DIR/Runtime"
-# This will find (mlir ffi) and (mlir pattern-dsl) in BUILD_DIR
-$SCHEME_COMPILER --compile-imported-libraries --libdirs "$LIBDIRS" --program <(echo "(import (mlir conversion cast))")
-mv mlir/conversion/cast.so "$BUILD_DIR/mlir/conversion/"
+$SCHEME_COMPILER --libdirs "$BUILD_DIR" <<EOF
+(compile-library "mlir/conversion/cast.sls" "$BUILD_DIR/mlir/conversion/cast.so")
+EOF
 
 echo "Compiling (onnx-to-hipsr)..."
 cd "$SOURCE_DIR/Passes"
-# This will find all dependencies in BUILD_DIR
-$SCHEME_COMPILER --compile-imported-libraries --libdirs "$LIBDIRS" --program <(echo "(import (onnx-to-hipsr))")
-mv onnx-to-hipsr.so "$BUILD_DIR/"
-
-# Clean up any .so files in source tree
-find "$SOURCE_DIR" -name "*.so" -type f -delete
+$SCHEME_COMPILER --libdirs "$BUILD_DIR:$SOURCE_DIR/Patterns" <<EOF
+(compile-library "onnx-to-hipsr.sls" "$BUILD_DIR/onnx-to-hipsr.so")
+EOF
 
 # Clean up rime .sls source files, keep only .so bytecode
-# This avoids "different compilation instance" errors
 echo "Cleaning up rime source files (keeping bytecode only)..."
 find "$BUILD_DIR/rime" -name "*.sls" -type f -delete 2>/dev/null || true
 
