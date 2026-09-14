@@ -43,6 +43,20 @@ inline bool hipdnn_ep_gqa_fuse_append_enabled() {
   return enabled;
 }
 
+// Purpose-built narrow-N fp16 GEMV for decode, in place of hipBLASLt, on the
+// shape the MoE router has (M == 1, large K, N <= 256). A tiled GEMM library
+// has nothing to tile there: it retiles between context lengths and the same
+// work measures 0.43-0.87 ms per decode step.
+//
+// DEFAULT-OFF while it is proven per model family. The geometry guard in
+// real/matmul.cpp is deliberately narrow on top of this, so even enabled it
+// cannot capture a shape it was not built for.
+inline bool hipdnn_ep_router_gemv_enabled() {
+  static const bool enabled =
+      hipdnn_ep::env_enabled("HIPDNN_EP_QMOE_ROUTER_GEMV");
+  return enabled;
+}
+
 inline bool hipdnn_ep_perf_enabled() {
   // PERF intentionally does NOT inherit from HIPDNN_EP_DEBUG: enabling PERF
   // forces a hipStreamSynchronize on every inference (so hipEventElapsedTime

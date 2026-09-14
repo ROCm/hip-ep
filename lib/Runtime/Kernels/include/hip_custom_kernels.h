@@ -3077,6 +3077,33 @@ HIP_KERNEL_API int hip_conv_transpose(
 HIP_KERNEL_API int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
                        void* C, int M, int K, int N);
 
+/* Narrow-N fp16 GEMV for decode (M == 1): C[N] = A[K] * B[K,N], B row-major,
+ * no transpose. Built for the MoE router (K=2048, N=128), where a tiled GEMM
+ * library has neither M nor enough N to tile and retiles between context
+ * lengths for identical work.
+ *
+ * ONE dispatch. K is split across blocks for occupancy and the partials are
+ * reduced in-kernel by the last block to finish, so this replaces a GEMM that
+ * is frequently two dispatches (tiled kernel plus a GSU reduce).
+ *
+ * scratch must be at least hip_gemv_fp16_narrow_n_scratch_bytes(N, K) and
+ * ZEROED ONCE before first use -- the kernel leaves its completion counter at
+ * zero on exit, so later calls need no memset, but the first call would
+ * otherwise read whatever hipMalloc returned. N is capped at 256 (the
+ * cross-split reduction runs one thread per n in a single block); larger N
+ * returns -1 and the caller should use the general GEMM.
+ *
+ * The scratch may be reused by consecutive calls on the SAME stream without
+ * synchronisation -- each launch fully overwrites the partials it reads. */
+HIP_KERNEL_API int hip_gemv_fp16_narrow_n(void* stream, const void* A,
+                       const void* B, void* C, int N, int K,
+                       void* scratch, size_t scratch_bytes);
+
+/* Scratch size and split count hip_gemv_fp16_narrow_n will use for this shape.
+ * Exposed so the host can size its per-session buffer without guessing. */
+HIP_KERNEL_API size_t hip_gemv_fp16_narrow_n_scratch_bytes(int N, int K);
+HIP_KERNEL_API int hip_gemv_fp16_narrow_n_splits(int N, int K);
+
 #ifdef __cplusplus
 }
 #endif

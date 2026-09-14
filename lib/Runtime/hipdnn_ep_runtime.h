@@ -390,6 +390,16 @@ void *hipdnn_ep_state_get_matmul_dp4a_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
                                                size_t needed_size);
 
+// Per-session scratch for the narrow-N fp16 decode GEMV
+// (hip_gemv_fp16_narrow_n): per-split fp32 partials plus the completion counter
+// its in-kernel reduction uses. Same grow-on-demand / never-shrink policy as
+// conv_scratch, except the buffer is ZEROED on allocation -- the counter must
+// start at 0, after which the kernel maintains that invariant itself, so no
+// per-call memset is needed. Freed in hipdnn_ep_state_cleanup.
+void *hipdnn_ep_state_get_matmul_gemv_scratch(RuntimeState *state);
+int hipdnn_ep_state_ensure_matmul_gemv_scratch(RuntimeState *state,
+                                               size_t needed_size);
+
 // Per-session scratch for the linear-attention chunk-parallel gated_delta
 // prefill (hip_linear_attention_prefill_chunked). Lazily grown via
 // hipdnn_ep_state_ensure_la_scratch (same policy as conv_scratch: never

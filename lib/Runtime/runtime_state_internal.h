@@ -157,6 +157,17 @@ struct RuntimeState {
   void *matmul_dp4a_scratch;
   size_t matmul_dp4a_scratch_size;
 
+  // Per-session scratch for the narrow-N fp16 decode GEMV
+  // (hip_gemv_fp16_narrow_n): the per-split fp32 partials plus the one-word
+  // completion counter its in-kernel reduction hands off on. Same
+  // grow-on-demand / never-shrink policy as conv_scratch. Unlike the others
+  // this buffer is ZEROED on allocation, because the counter must start at 0
+  // and the kernel then maintains that invariant itself -- it resets the
+  // counter on exit so no per-call memset is needed. Single-buffer reuse across
+  // layers is safe because the stream is serialised.
+  void *matmul_gemv_scratch;
+  size_t matmul_gemv_scratch_size;
+
   // Per-session scratch for the linear-attention chunk-parallel gated_delta
   // prefill (hip_linear_attention_prefill_chunked). One contiguous device
   // buffer holding the per-(head,chunk) Uloc/W/rlast/alast tiles and the
