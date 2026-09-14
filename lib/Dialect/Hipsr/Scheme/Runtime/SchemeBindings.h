@@ -10,12 +10,8 @@
 #include <vector>
 #include <functional>
 
-// Forward declare from ChezSchemeInterpreter.h (avoid duplicate definition)
-namespace mlir {
-namespace hipsr {
-enum class SchemeLogLevel;
-}
-}
+// Include ChezSchemeInterpreter.h for SchemeLogLevel definition
+#include "hip/Dialect/Hipsr/Scheme/Runtime/ChezSchemeInterpreter.h"
 
 // C type for Scheme FFI - must be at global scope for extern "C" functions
 typedef void* SchemeValue;
