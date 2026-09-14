@@ -11,10 +11,13 @@
 // CHECK-LABEL: module attributes {
 // CHECK-SAME: hip.constants_file = "constants.bin"
 // CHECK-SAME: hipdnn.constant_offsets = array<i64: 0, 64>
-// CHECK-SAME: hipdnn.constant_sizes = array<i64: 32, 6>} {
+// CHECK-SAME: hipdnn.constant_sizes = array<i64: 32, 6>
+// CHECK-SAME: hipdnn.num_op_state_slots = 2 : i32} {
 
 // The checks cover every output line, so a new alloc or copy fails the test.
-// CHECK-LABEL:   func.func @main_graph(
+// CHECK-NEXT:      llvm.func @hipdnn_ep_op_state_construct_matmul(!llvm.ptr, i32) -> i8
+// CHECK-NEXT:      llvm.func @hipdnn_ep_op_states_alloc(!llvm.ptr, i64) -> i8
+// CHECK-NEXT:      func.func @main_graph(
 // CHECK-SAME:      %[[ARG0:[^:,]*]]: !hipsr.context,
 // CHECK-SAME:      %[[ARG1:[^:,]*]]: memref<?x3xf16, #hipsr.mem<device>> {onnx.name = "a"},
 // CHECK-SAME:      %[[ARG2:[^:,]*]]: memref<?x4xf32, #hipsr.mem<device>> {onnx.name = "b"}) -> (memref<?x2xf32, #hipsr.mem<device>> {onnx.name = "y"}) attributes {onnx.graph.name = "main_graph"} {
@@ -52,7 +55,7 @@
 // CHECK-NEXT:      %[[VIEW_0:.*]] = memref.view %[[GET_POOL_0]]{{\[}}%[[CONSTANT_8]]]{{\[}}%[[LOAD_0]]] : memref<?xi8, #hipsr.mem<device>> to memref<?x1xf16, #hipsr.mem<device>>
 // CHECK-NEXT:      %[[VIEW_1:.*]] = memref.view %[[GET_POOL_0]]{{\[}}%[[MULI_1]]]{{\[}}%[[LOAD_0]]] : memref<?xi8, #hipsr.mem<device>> to memref<?x1xf32, #hipsr.mem<device>>
 // CHECK-NEXT:      %[[ALLOC_3:.*]] = memref.alloc() {alignment = 64 : i64} : memref<2xi64, #hipsr.mem<host>>
-// CHECK-NEXT:      hipsr.matmul(%[[ARG0]]) ins(%[[ARG1]], %[[CONSTANT_6]] : memref<?x3xf16, #hipsr.mem<device>>, memref<3x1xf16, #hipsr.mem<device>>) outs(%[[VIEW_0]] : memref<?x1xf16, #hipsr.mem<device>>)
+// CHECK-NEXT:      hipsr.matmul(%[[ARG0]]) ins(%[[ARG1]], %[[CONSTANT_6]] : memref<?x3xf16, #hipsr.mem<device>>, memref<3x1xf16, #hipsr.mem<device>>) outs(%[[VIEW_0]] : memref<?x1xf16, #hipsr.mem<device>>) {hip.op_state_slot = 0 : i32}
 // CHECK-NEXT:      hipsr.cast(%[[ARG0]]) ins(%[[VIEW_0]] : memref<?x1xf16, #hipsr.mem<device>>) outs(%[[VIEW_1]] : memref<?x1xf32, #hipsr.mem<device>>)
 // CHECK-NEXT:      %[[MEMREF_DIM_1:.*]] = memref.dim %[[ARG2]], %[[CONSTANT_8]] : memref<?x4xf32, #hipsr.mem<device>>
 // CHECK-NEXT:      %[[INDEX_CAST_0:.*]] = arith.index_cast %[[MEMREF_DIM_1]] : index to i64
@@ -108,13 +111,31 @@
 // CHECK-NEXT:      %[[ALLOC_OUTPUT_0:.*]] = hipsr.alloc_output(%[[ARG0]], %[[LOAD_7]]) {out_idx = 0 : i64} : memref<?x2xf32, #hipsr.mem<device>>
 // CHECK-NEXT:      hipsr.expand(%[[ARG0]]) ins(%[[VIEW_1]], %[[ALLOC_3]] : memref<?x1xf32, #hipsr.mem<device>>, memref<2xi64, #hipsr.mem<host>>) outs(%[[VIEW_2]] : memref<?x4xf32, #hipsr.mem<device>>)
 // CHECK-NEXT:      memref.dealloc %[[ALLOC_3]] : memref<2xi64, #hipsr.mem<host>>
-// CHECK-NEXT:      hipsr.matmul(%[[ARG0]]) ins(%[[VIEW_2]], %[[CONSTANT_5]] : memref<?x4xf32, #hipsr.mem<device>>, memref<4x2xf32, #hipsr.mem<device>>) outs(%[[ALLOC_OUTPUT_0]] : memref<?x2xf32, #hipsr.mem<device>>)
+// CHECK-NEXT:      hipsr.matmul(%[[ARG0]]) ins(%[[VIEW_2]], %[[CONSTANT_5]] : memref<?x4xf32, #hipsr.mem<device>>, memref<4x2xf32, #hipsr.mem<device>>) outs(%[[ALLOC_OUTPUT_0]] : memref<?x2xf32, #hipsr.mem<device>>) {hip.op_state_slot = 1 : i32}
 // CHECK-NEXT:      hipsr.preserve_shape %[[ALLOC_6]], %[[VIEW_2]] : memref<2xindex>, memref<?x4xf32, #hipsr.mem<device>>
 // CHECK-NEXT:      memref.dealloc %[[ALLOC_6]] : memref<2xindex>
 // CHECK-NEXT:      hipsr.preserve_shape %[[CAST_1]], %[[ALLOC_OUTPUT_0]] : memref<?xindex>, memref<?x2xf32, #hipsr.mem<device>>
 // CHECK-NEXT:      memref.dealloc %[[ALLOC_8]] : memref<2xindex>
 // CHECK-NEXT:      return %[[ALLOC_OUTPUT_0]] : memref<?x2xf32, #hipsr.mem<device>>
 // CHECK-NEXT:      }
+// CHECK-NEXT:      llvm.func @hipdnn_ep_op_states_init_fn(%[[STATE:.*]]: !llvm.ptr) -> i32 {
+// CHECK-NEXT:        %[[N:.*]] = llvm.mlir.constant(2 : i64) : i64
+// CHECK-NEXT:        %[[OK:.*]] = llvm.call @hipdnn_ep_op_states_alloc(%[[STATE]], %[[N]]) : (!llvm.ptr, i64) -> i8
+// CHECK-NEXT:        %[[ZERO_I8:.*]] = llvm.mlir.constant(0 : i8) : i8
+// CHECK-NEXT:        %[[FAILED:.*]] = llvm.icmp "eq" %[[OK]], %[[ZERO_I8]] : i8
+// CHECK-NEXT:        %[[SUCCESS:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK-NEXT:        %[[FAILURE:.*]] = llvm.mlir.constant(1 : i32) : i32
+// CHECK-NEXT:        llvm.cond_br %[[FAILED]], ^[[FAIL:bb2]], ^[[CONSTRUCT:bb1]]
+// CHECK-NEXT:      ^[[CONSTRUCT]]:
+// CHECK-NEXT:        %[[SLOT0:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK-NEXT:        llvm.call @hipdnn_ep_op_state_construct_matmul(%[[STATE]], %[[SLOT0]]) : (!llvm.ptr, i32) -> i8
+// CHECK-NEXT:        %[[SLOT1:.*]] = llvm.mlir.constant(1 : i32) : i32
+// CHECK-NEXT:        llvm.call @hipdnn_ep_op_state_construct_matmul(%[[STATE]], %[[SLOT1]]) : (!llvm.ptr, i32) -> i8
+// CHECK-NEXT:        llvm.return %[[SUCCESS]] : i32
+// CHECK-NEXT:      ^[[FAIL]]:
+// CHECK-NEXT:        llvm.return %[[FAILURE]] : i32
+// CHECK-NEXT:      }
+// CHECK-NEXT:    }
 
 func.func @main_graph(%a: tensor<?x3xf16> {onnx.name = "a"},
                       %b: tensor<?x4xf32> {onnx.name = "b"})
