@@ -471,7 +471,7 @@ IRConverterImp::convert_value_info_proto(const Ort::ConstValueInfo &value_info,
   }
 
   return nullptr;
-};
+}
 OrtStatus *
 IRConverterImp::convert_type_proto(const Ort::ConstTypeInfo &type_info,
                                    int *element_type,
