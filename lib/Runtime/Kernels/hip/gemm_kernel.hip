@@ -1267,8 +1267,16 @@ static int pickWmmaHeuristic(int M, int N, int K) {
    * Non-power-of-two large K (14336/17408) does not alias, so the big square
    * tiles in the block below still win. */
   if (K >= 8192 && (K & (K - 1)) == 0) {
-    if (M >= 1024)
-      return findWmmaCfg(128, 256, 4, 2, 8, 1, 32);
+    if (M >= 1024) {
+      /* Same BN choice as the A-panel rule below: wide BN=256 (cfg32) only when
+       * there are enough N-tiles (N>=4096) or the shape is very K-heavy (K>=3N);
+       * a small/mid N (e.g. 2816/3840 at K=8192) has too few 256-wide columns and
+       * the 128x128 tile wins (2816x8192 cfg12 1.37 vs cfg32 2.0). The 8192^2
+       * squares (N>=4096) keep cfg32 + the sw=4 raster fix. */
+      if (N >= 4096 || static_cast<size_t>(K) >= static_cast<size_t>(N) * 3)
+        return findWmmaCfg(128, 256, 4, 2, 8, 1, 32);
+      return findWmmaCfg(128, 128, 2, 2, 4, 1, 32);
+    }
     if (M > 256)
       return findWmmaCfg(128, 64, 2, 2, 8, 1, 64);
   }
@@ -1285,8 +1293,23 @@ static int pickWmmaHeuristic(int M, int N, int K) {
    * extra BN just thins the grid), and narrow N (<2048) has too few 256-wide
    * column tiles. */
   if (M >= 1024 && N >= 2048 &&
+      static_cast<size_t>(M) * K * 2 >= (16ull << 20)) {
+    /* Large A-panel -> BM=128 (fits/reuses L2; BM=256 spills at large K). Pick
+     * BN by how K-heavy the shape is: wide BN=256 (cfg32) only pays off when
+     * there are enough N-tiles (N>=4096) OR the shape is very K-heavy (K>=3N,
+     * where cutting A-reads dominates, e.g. 2560x10240 cfg32 1.89). Otherwise
+     * the mid-N shape has too few 256-wide columns and the 128x128 tile wins
+     * (2816x8192 cfg12 1.37 vs cfg32 2.0; 3840x8192 cfg12 1.89 vs 2.11). */
+    if (N >= 4096 || static_cast<size_t>(K) >= static_cast<size_t>(N) * 3)
+      return findWmmaCfg(128, 256, 4, 2, 8, 1, 32);
+    return findWmmaCfg(128, 128, 2, 2, 4, 1, 32);
+  }
+  /* Small N (<2048) with a large A-panel and large K: BM=256 (cfg5) spills the
+   * L2 A-panel, and BN=256 has far too few column tiles, so the 128x128 tile
+   * wins (2048x1536x6144 cfg12 1.31 vs cfg5 1.95). */
+  if (M >= 1024 && N < 2048 && K >= 6144 &&
       static_cast<size_t>(M) * K * 2 >= (16ull << 20))
-    return findWmmaCfg(128, 256, 4, 2, 8, 1, 32);
+    return findWmmaCfg(128, 128, 2, 2, 4, 1, 32);
   /* K-heavy at mid M (512..1023): the wide-N tile needs BM=128 (too few M-tiles
    * here), so instead the 256x128 WT4x4 tile (cfg33) -- higher Matrix-Core:LDS
    * ratio for the long compute-bound K-loop -- wins. Fair bench 512x4096x14336:
