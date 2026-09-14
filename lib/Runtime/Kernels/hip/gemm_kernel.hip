@@ -1565,7 +1565,9 @@ static int tuneWmma(hipStream_t s, const T *A, const T *B, const T *C, T *Y,
     /* Warm the clocks to a sustained state before timing: compute-bound tiles
      * on gfx1151 boost for the first few launches, so a short sweep would rank
      * configs on boost clocks that do not hold under a real inference loop. */
-    for (int w = 0; w < 40; ++w)
+    const int kInitWarm = gemmEnvInt("HIPDNN_GEMM_TUNE_INITWARM", 40);
+    const int kCoarseWarm = gemmEnvInt("HIPDNN_GEMM_TUNE_CWARM", 8);
+    for (int w = 0; w < kInitWarm; ++w)
       launchWmma<T, TransB>(best, s, A, B, C, out, M, N, K, alpha, beta, cDim0,
                             cDim1, ldb);
     hipStreamSynchronize(s);
@@ -1580,7 +1582,7 @@ static int tuneWmma(hipStream_t s, const T *A, const T *B, const T *C, T *Y,
        * warmup (not just one launch) keeps the prune from dropping a good tile
        * that was measured on the previous tile's hot clocks; the finalists are
        * then measured faithfully below. */
-      for (int w = 0; w < 8; ++w)
+      for (int w = 0; w < kCoarseWarm; ++w)
         launchWmma<T, TransB>(cid, s, A, B, C, out, M, N, K, alpha, beta, cDim0,
                               cDim1, ldb);
       hipEventRecord(e0, s);
@@ -1624,9 +1626,14 @@ static int tuneWmma(hipStream_t s, const T *A, const T *B, const T *C, T *Y,
      * final hip_gemm number and the hipBLAS algo pick). Now the autotune's per
      * config number is the same "peak sustained" quantity we compare against
      * hipBLAS, so the ranking is trustworthy. */
-    constexpr int kWarm = 25;  /* launches to reach this tile's steady state */
-    constexpr int kReps = 3;   /* timed reps; take the peak (min ms) */
-    constexpr int kIters = 10; /* launches per timed rep */
+    /* Env-tunable so bulk offline LUT generation can trade a little ranking
+     * robustness for throughput (hundreds of shapes). Defaults keep the full
+     * faithful measurement. Lighter values (e.g. WARM=12 REPS=2 ITERS=8) still
+     * reach steady state on this APU -- validate the winner is unchanged before
+     * trusting a lighter setting on a new shape class. */
+    const int kWarm = gemmEnvInt("HIPDNN_GEMM_TUNE_WARM", 25);
+    const int kReps = gemmEnvInt("HIPDNN_GEMM_TUNE_REPS", 3);
+    const int kIters = gemmEnvInt("HIPDNN_GEMM_TUNE_ITERS", 10);
     float best_min[64];
     for (int r = 0; r < n2; ++r) {
       const int cid = ids[order[r]];
