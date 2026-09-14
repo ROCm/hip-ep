@@ -464,6 +464,10 @@ function(hip_add_executable TARGET_NAME)
             $<$<COMPILE_LANGUAGE:HIP>:-Wno-ignored-attributes>
             $<$<COMPILE_LANGUAGE:HIP>:--offload-compress>
         )
+        if(HIP_CK_INCLUDE_DIRS)
+            target_include_directories(${TARGET_NAME} BEFORE PRIVATE
+                ${HIP_CK_INCLUDE_DIRS})
+        endif()
     endif()
 
     # Link HIP runtime
@@ -570,6 +574,11 @@ function(hip_add_library TARGET_NAME)
             $<$<COMPILE_LANGUAGE:HIP>:-Wno-ignored-attributes>
             $<$<COMPILE_LANGUAGE:HIP>:--offload-compress>
         )
+        # hip::host's INTERFACE includes the dist include/ck; prepend the pin.
+        if(HIP_CK_INCLUDE_DIRS)
+            target_include_directories(${TARGET_NAME} BEFORE PRIVATE
+                ${HIP_CK_INCLUDE_DIRS})
+        endif()
     endif()
 
     # Propagate HIP settings to dependents
