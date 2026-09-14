@@ -262,7 +262,11 @@ extern "C" int8_t hipdnn_ep_op_state_construct_matmul_nbits(RuntimeState *state,
 namespace {
 
 static bool pruneLogitsEnabled() {
-  static const bool enabled = hipdnn_ep::env_enabled("HIPDNN_EP_PRUNE_LOGITS");
+  // Default-on so CI and packaged consumers benefit without environment
+  // configuration. Set HIPDNN_EP_PRUNE_LOGITS=0 for callers that consume the
+  // complete prompt logits rather than only the final sequence row.
+  static const bool enabled =
+      hipdnn_ep::env_enabled_default_on("HIPDNN_EP_PRUNE_LOGITS");
   return enabled;
 }
 
