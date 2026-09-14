@@ -154,6 +154,14 @@ int mlir_erase_op(SchemeValue op);
 // Notify match failure
 void mlir_notify_match_failure(SchemeValue op, const char* reason);
 
+// Register a Scheme-defined conversion pattern
+// patterns: RewritePatternSet* as uptr
+// op_name: MLIR operation name string (e.g., "onnx.Cast")
+// callback: Scheme procedure that takes (op rewriter) and returns #t/#f
+void mlir_register_conversion_pattern(SchemeValue patterns,
+                                      const char* op_name,
+                                      SchemeValue callback);
+
 } // extern "C"
 
 #endif
