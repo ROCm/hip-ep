@@ -968,11 +968,24 @@ int wrap_qelementwise(RuntimeState *state, void *lhs, void *rhs, void *output,
 //
 //   Y = saturate(round(M_scale * (acc - B_zp*rowA - A_zp*colB + K*A_zp*B_zp))
 //                + Y_zp)
+//
+// Per-column B at 4 bits admits a cheaper evaluation: subtracting the column's
+// zero point while the nibble is widened costs nothing and drops the rowA and
+// K*A_zp*B_zp terms, leaving
+//
+//   Bc[k,n] = B[k,n] - B_zero_points[n]
+//   Y[m,n]  = saturate(round(AY_ratio * B_scales[n]
+//                            * (sum_k A[m,k]*Bc[k,n]
+//                               - A_zp * sum_k Bc[k,n])) + Y_zp)
+//
+
 int wrap_qmatmul(RuntimeState *state, const void *A, const void *B, void *Y,
-                 int64_t M, int64_t N, int64_t K, int64_t batch_count,
+                 const void *B_scales, const void *B_zero_points, int64_t M,
+                 int64_t N, int64_t K, int64_t batch_count,
                  int64_t b_batch_stride, int64_t trans_a, int64_t trans_b,
                  int64_t a_data_type, int64_t b_data_type, int64_t y_data_type,
-                 float M_scale, int64_t A_zero_point, int64_t B_zero_point,
+                 int64_t b_bits, float M_scale, float AY_ratio,
+                 int64_t A_zero_point, int64_t B_zero_point,
                  int64_t Y_zero_point);
 
 // Fused quantized 1x1 convolution: Q(Conv(DQ(input), DQ(weights))) with the
