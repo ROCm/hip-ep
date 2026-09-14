@@ -76,44 +76,50 @@ Pop-Location
 function Get-Block {
   param([string[]]$Lines, [string]$Header)
   for ($i = 0; $i -lt $Lines.Count; $i++) {
-    if ($Lines[$i] -match $Header) {
-      $o = [ordered]@{}
-      foreach ($j in ($i + 1)..([Math]::Min($i + 7, $Lines.Count - 1))) {
-        if ($Lines[$j] -match 'avg \(us\):\s+([\d.eE+\-]+)')        { $o.avg_us    = [double]$matches[1] }
-        if ($Lines[$j] -match 'avg \(tokens/s\):\s+([\d.eE+\-]+)')  { $o.tps       = [double]$matches[1] }
-        if ($Lines[$j] -match 'p50 \(us\):\s+([\d.eE+\-]+)')        { $o.p50_us    = [double]$matches[1] }
-        if ($Lines[$j] -match 'stddev \(us\):\s+([\d.eE+\-]+)')     { $o.stddev_us = [double]$matches[1] }
-        if ($Lines[$j] -match 'n:\s+(\d+)')                         { $o.n         = [int]$matches[1] }
-      }
-      return [PSCustomObject]$o
+    if ($Lines[$i] -notmatch $Header) { continue }
+    $o = [ordered]@{}
+    # Stop at the next header rather than reading a fixed number of lines. The
+    # three blocks are adjacent and share field names, so a window wide enough
+    # for one of them reaches into the next and the later "avg (us)" -- the
+    # sampler's 14 us -- silently overwrites token generation's 16,600.
+    for ($j = $i + 1; $j -lt $Lines.Count; $j++) {
+      if ($Lines[$j] -notmatch '^\s') { break }
+      if ($Lines[$j] -match 'avg \(us\):\s+([\d.eE+\-]+)')        { $o.avg_us    = [double]$matches[1] }
+      if ($Lines[$j] -match 'avg \(tokens/s\):\s+([\d.eE+\-]+)')  { $o.tps       = [double]$matches[1] }
+      if ($Lines[$j] -match 'p50 \(us\):\s+([\d.eE+\-]+)')        { $o.p50_us    = [double]$matches[1] }
+      if ($Lines[$j] -match 'stddev \(us\):\s+([\d.eE+\-]+)')     { $o.stddev_us = [double]$matches[1] }
+      if ($Lines[$j] -match 'n:\s+(\d+)')                         { $o.n         = [int]$matches[1] }
     }
+    return [PSCustomObject]$o
   }
   return $null
 }
 
-$lines = Get-Content $log
-$gen  = Get-Block -Lines $lines -Header 'Token generation'
-$pre  = Get-Block -Lines $lines -Header 'Prompt processing \(time to first token\)'
+# Not $gen: PowerShell variable names are case-insensitive, so $gen IS the
+# [int]$Gen parameter, and assigning a parsed object to it fails the cast.
+$lines   = Get-Content $log
+$genBlk  = Get-Block -Lines $lines -Header 'Token generation'
+$preBlk  = Get-Block -Lines $lines -Header 'Prompt processing \(time to first token\)'
 $prompt = if ($lines -match 'prompt tokens: (\d+)') {
   [int]([regex]::Match(($lines -match 'prompt tokens: \d+')[0], 'prompt tokens: (\d+)').Groups[1].Value)
 } else { $SeqLen }
 
-if ($gen -and $gen.tps) {
+if ($genBlk -and $genBlk.tps) {
   Write-Host ("`n=== TPS [$Tag] = {0:N2} tok/s   ({1:N2} ms/token, p50 {2:N2}, stddev {3:N2})   n={4} (exit={5})" -f `
-              $gen.tps, ($gen.avg_us / 1000), ($gen.p50_us / 1000), ($gen.stddev_us / 1000), $gen.n, $rc)
-  if ($pre) {
+              $genBlk.tps, ($genBlk.avg_us / 1000), ($genBlk.p50_us / 1000), ($genBlk.stddev_us / 1000), $genBlk.n, $rc)
+  if ($preBlk) {
     Write-Host ("    TTFT {0:N0} ms ({1:N1} tok/s prefill, {2} prompt tokens)" -f `
-                ($pre.avg_us / 1000), $pre.tps, $prompt)
+                ($preBlk.avg_us / 1000), $preBlk.tps, $prompt)
   }
   [PSCustomObject]@{
     tag = $Tag
     prompt_tokens = $prompt
-    tps = [Math]::Round($gen.tps, 2)
-    ms_per_token = [Math]::Round($gen.avg_us / 1000, 3)
-    p50_ms = [Math]::Round($gen.p50_us / 1000, 3)
-    stddev_ms = [Math]::Round($gen.stddev_us / 1000, 3)
-    ttft_ms = if ($pre) { [Math]::Round($pre.avg_us / 1000, 1) } else { $null }
-    gen = $Gen; reps = $Reps; n = $gen.n
+    tps = [Math]::Round($genBlk.tps, 2)
+    ms_per_token = [Math]::Round($genBlk.avg_us / 1000, 3)
+    p50_ms = [Math]::Round($genBlk.p50_us / 1000, 3)
+    stddev_ms = [Math]::Round($genBlk.stddev_us / 1000, 3)
+    ttft_ms = if ($preBlk) { [Math]::Round($preBlk.avg_us / 1000, 1) } else { $null }
+    gen = $Gen; reps = $Reps; n = $genBlk.n
     when = (Get-Date -Format s)
   } | Export-Csv -Path $csv -NoTypeInformation -Append
   Write-Host "    appended -> $csv"

@@ -119,7 +119,9 @@ def from_trace(
     return dict(out), len(sel), "chrome trace (EP op names; timing inflated by the profiler)"
 
 
-def from_dispatches(path: str, spec: ModelSpec) -> tuple[dict[str, float], int, str]:
+def from_dispatches(
+    path: str, spec: ModelSpec, extra: dict | None = None
+) -> tuple[dict[str, float], int, str]:
     """Per-component microseconds for ONE decode step, from an RGP dispatch CSV.
 
     A capture window rarely lands on exactly one step -- the fence arms at the
@@ -136,18 +138,58 @@ def from_dispatches(path: str, spec: ModelSpec) -> tuple[dict[str, float], int, 
             "steps this window holds"
         )
     steps = routing / spec.layers
+    # Classify per (family, threads) group rather than per row, so the rule can
+    # use how often a group runs. Within one step that is the only thing
+    # separating the lm_head from a projection: both are one matmul kernel over
+    # int4 or fp16 weights, but the lm_head runs once and a projection runs once
+    # per layer. See classify_kernel for why the thread count cannot do it.
+    per_group: dict[tuple[str, int], int] = collections.Counter()
+    for r in rows:
+        per_group[(r.get("family", ""), int(r.get("threads") or 0))] += 1
     out: dict[str, float] = collections.defaultdict(float)
     for r in rows:
         fam = r.get("family", "")
-        dur = float(r["dur_us"])
         threads = int(r.get("threads") or 0)
-        out[classify_kernel(fam, threads, spec)] += dur
+        per_step = per_group[(fam, threads)] / steps
+        out[classify_kernel(fam, threads, spec, per_step)] += float(r["dur_us"])
     out = {k: v / steps for k, v in out.items()}
+    if extra is not None:
+        extra.update(dispatch_stats(rows, steps))
     return (
         out,
         len(rows),
         f"RGP dispatch CSV (SQTT timing; window held {steps:.2f} decode steps)",
     )
+
+
+# The fence drains the GPU and idles before arming, and RGP's own setup runs in
+# that window, so the first gap of a capture is milliseconds of measurement
+# rather than workload. Anything this large is not a launch gap.
+_ARTIFACT_GAP_US = 500.0
+
+
+def dispatch_stats(rows: list[dict], steps: float) -> dict:
+    """Per-step busy/gap split and the SPM bound-class mix.
+
+    The gap column is what makes a decode capture worth taking: ~400 expert
+    blocks per token means the time between kernels is a real line item, not
+    rounding.
+    """
+    busy = sum(float(r["dur_us"]) for r in rows)
+    gaps = [float(r.get("gap_before_us") or 0) for r in rows]
+    art = sum(g for g in gaps if g >= _ARTIFACT_GAP_US)
+    gap = sum(g for g in gaps if g < _ARTIFACT_GAP_US)
+    bound: dict[str, float] = collections.defaultdict(float)
+    for r in rows:
+        bound[r.get("bound_class") or "(unclassified)"] += float(r["dur_us"])
+    return {
+        "steps": steps,
+        "busy_ms": busy / steps / 1000.0,
+        "gap_ms": gap / steps / 1000.0,
+        "artifact_ms": art / steps / 1000.0,
+        "n_dispatch": len(rows) / steps,
+        "bound": {k: v / busy for k, v in bound.items()},
+    }
 
 
 def _shape_fields(shape: str) -> dict[str, int]:
@@ -188,12 +230,27 @@ def shape_bytes(op: str, shape: str, calls: float, spec: ModelSpec) -> float:
     return 0.0
 
 
-def classify_kernel(family: str, threads: int, spec: ModelSpec) -> str:
-    """Map one dispatch to a component.
+def classify_kernel(
+    family: str, threads: int, spec: ModelSpec, per_step: float = 1e9
+) -> str:
+    """Map one dispatch to a component, given how often its group runs per step.
 
-    Within the GEMM/GEMV families the discriminator is the thread count, not the
-    name: one `gemm` kernel serves both the fp16 router (N=128) and the fp16
-    lm_head (N=151936), and only the output width tells them apart.
+    Among the matmul families, `per_step` is the discriminator: the lm_head runs
+    ONCE per decode step and every projection and router runs once per layer, so
+    a group appearing far fewer than `layers` times is the lm_head and the rest
+    are per-layer work. The remaining split is by weight dtype -- the quantised
+    path (`matmul_nbits_*`) is the projections, the fp16 Tensile path (`gemm`)
+    is whatever the export left unquantised.
+
+    Thread count is deliberately NOT the discriminator, in either direction:
+
+      - Tensile's count reflects the tile it chose, so the same router GEMM
+        reports 256 threads at one context length and 2048 at another.
+      - The hand-written GEMV launches many threads per output element, so a
+        q-projection reports 262144 against a vocabulary of 151936.
+
+    Both mistakes were made and both silently refiled work into the wrong
+    component while leaving the totals intact.
     """
     f = family.lower()
     # Checked before the MoE families: top-k selection belongs with the router
@@ -205,11 +262,11 @@ def classify_kernel(family: str, threads: int, spec: ModelSpec) -> str:
     if "gqa" in f or "flash" in f or "kv_cache" in f or "rope" in f:
         return "kv_cache"
     if "matmul" in f or "gemv" in f or "gemm" in f or "dequant" in f:
-        if threads >= spec.vocab // 2:
+        if per_step < spec.layers / 2:
             return "lm_head"
-        if threads and threads <= spec.experts * 4:
-            return "router"
-        return "attn_proj"
+        if "nbits" in f or "quant" in f:
+            return "attn_proj"
+        return "router"
     return "norm_other"
 
 
@@ -245,12 +302,13 @@ def main() -> None:
     spec, dev = specs_from_args(args)
 
     detail: dict = {} if args.detail else None
+    stats: dict = {}
     if args.trace:
         times, n, provenance = from_trace(args.source, spec, args.skip_runs, detail)
         unit = f"mean of {n} steady-state decode Runs"
     else:
-        times, n, provenance = from_dispatches(args.source, spec)
-        unit = f"{n} dispatches in one captured step"
+        times, n, provenance = from_dispatches(args.source, spec, stats)
+        unit = f"{stats['n_dispatch']:.0f} dispatches per step ({n} captured)"
 
     byts = spec.decode_bytes(args.kv_len)
     byts["norm_other"] = 0.0  # activations only; not a weight-traffic component
@@ -258,16 +316,19 @@ def main() -> None:
     measured_total = sum(times.values()) / 1000.0
     floor_total = sum(byts.values()) / dev.bw_bytes_s * 1000.0
 
-    # The profiler's per-inference stream sync means a trace's kernel times sum
-    # to more than the step really takes -- here 21.4 ms against a measured
-    # 14.6. Comparing those directly would invent 6.8 ms of "negative overhead".
-    # A trace is trustworthy for how the step divides up, not for how long it
-    # is, so rescale the shares onto the measured total and say so. Without
-    # -measured-ms there is nothing to rescale onto, and the absolute ms stay
-    # inflated.
+    # Both sources over-report, for different reasons: the trace carries the
+    # profiler's per-inference stream sync, and a capture pays SQTT plus SPM
+    # counter collection on every dispatch. Either way the kernel times sum to
+    # more than the step really takes, and comparing that sum against the
+    # measured ms/token would invent negative overhead. Both are trustworthy
+    # for how the step divides up and neither for how long it is, so rescale
+    # the shares onto the measurement and say so. Without --measured-ms there
+    # is nothing to rescale onto and the absolute ms stay inflated.
     rescaled = False
-    if args.trace and args.measured_ms and measured_total > 0:
+    factor = 1.0
+    if args.measured_ms and measured_total > 0:
         factor = args.measured_ms / measured_total
+        raw_total = measured_total
         times = {k: v * factor for k, v in times.items()}
         measured_total = args.measured_ms
         rescaled = True
@@ -278,10 +339,10 @@ def main() -> None:
     print(f"model      : {args.preset}  kv_len={args.kv_len}")
     print(f"roofline   : {dev.bw_bytes_s/1e9:.0f} GB/s")
     if rescaled:
+        src = "trace" if args.trace else "capture"
         print(
-            f"rescaled   : trace shares x{factor:.3f} onto the measured "
-            f"{args.measured_ms:.2f} ms/token (trace total was "
-            f"{sum(v for v in times.values())/factor/1000:.2f} ms)"
+            f"rescaled   : {src} shares x{factor:.3f} onto the measured "
+            f"{args.measured_ms:.2f} ms/token ({src} total was {raw_total:.2f} ms)"
         )
     print()
 
@@ -309,14 +370,6 @@ def main() -> None:
     )
 
     if args.measured_ms:
-        overhead = args.measured_ms - measured_total
-        if not rescaled:
-            print(
-                f"\nmeasured ms/token (bench_tps) : {args.measured_ms:.2f}"
-                f"\nsum of kernel time            : {measured_total:.2f}"
-                f"\nunattributed (gaps, launch)   : {overhead:.2f}"
-                f"  ({100*overhead/args.measured_ms:.0f}% of the step)"
-            )
         print(
             f"floor at {dev.bw_bytes_s/1e9:.0f} GB/s          : {floor_total:.2f} ms"
             f"  -> {1000/floor_total:.0f} tok/s ceiling vs"
@@ -350,6 +403,36 @@ def main() -> None:
                     f"  {comp:<12}{op:<14}{shape:<26}{calls:>6.0f}{mb:>8.1f}"
                     f"{ms:>8.2f}{gbs:>8.0f}{pct:>7.0f}%"
                 )
+
+    if stats:
+        # SQTT plus SPM counter collection costs real time per dispatch, so a
+        # capture's wall clock runs well above the step it is measuring. It is
+        # authoritative for composition and for the bound classes -- which is
+        # what it is here for -- and not for absolute ms.
+        print(
+            f"\ncapture wall clock: {stats['busy_ms']:.2f} ms kernels"
+            f" + {stats['gap_ms']:.2f} ms between them"
+            f" = {stats['busy_ms'] + stats['gap_ms']:.2f} ms/step"
+        )
+        if args.measured_ms:
+            infl = (stats["busy_ms"] + stats["gap_ms"]) / args.measured_ms
+            print(
+                f"  vs {args.measured_ms:.2f} ms/token measured without the"
+                f" profiler: x{infl:.2f} instrumentation cost"
+            )
+        print(
+            f"  inter-kernel gap is {100*stats['gap_ms']/(stats['busy_ms']+stats['gap_ms']):.0f}%"
+            f" of the captured step over ~{stats['n_dispatch']:.0f} dispatches"
+            f" ({1000*stats['gap_ms']/stats['n_dispatch']:.1f} us each)"
+        )
+        if stats["artifact_ms"] > 0.01:
+            print(
+                f"  ({stats['artifact_ms']:.2f} ms of fence/capture-setup idle"
+                " excluded as measurement, not workload)"
+            )
+        print("\n  SPM bound class, by share of kernel time:")
+        for k, v in sorted(stats["bound"].items(), key=lambda kv: -kv[1]):
+            print(f"    {k or '(unclassified)':<34}{100*v:>6.1f}%")
 
     print("\nranked by recoverable ms/token:")
     for comp, _mb, fl, ms, pct, _share, rec in sorted(rows, key=lambda r: -r[6]):
