@@ -1295,6 +1295,15 @@ static int pickWmmaHeuristic(int M, int N, int K) {
   if (M >= 512 && M < 1024 && N >= 2048 && K >= 8192 &&
       static_cast<size_t>(M) * K * 2 >= (8ull << 20))
     return findWmmaCfg(256, 128, 4, 4, 8, 1, 32);
+  /* Small square-ish GEMM at large M (N,K <= 4096): the 256x128 cfg5 tile
+   * under-fills the grid (few M-tiles) and its extra per-tile traffic buys
+   * nothing at small K, so the smaller 128x128 WT2x4 tile wins on occupancy.
+   * Fair bench 1024x4096x4096: 0.90 vs cfg5 0.95 (-4% -> parity). Gated N,K<=4096
+   * only: at K>=5120 the bigger tile's lower DRAM traffic wins (1024x5120^2 cfg6
+   * is -12%), and wide N stays on the N-heavy 256x128 path below. Large-A shapes
+   * already took the cfg32 wide-N route above. */
+  if (M >= 1024 && N <= 4096 && K <= 4096)
+    return findWmmaCfg(128, 128, 2, 4, 8, 1, 32);
   /* Tile size is chosen by M and grid fill (measured on gfx1151):
    *   - Large M reuses the B tile across many A-rows, so a 256-row tile
    *     (256x128 WT4x2) wins once the grid still covers the CUs -- measured
