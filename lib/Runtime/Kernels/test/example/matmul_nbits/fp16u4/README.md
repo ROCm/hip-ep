@@ -184,7 +184,7 @@ Each test prints:
 ## Directory Structure
 
 ```
-gemm_fp16u4/
+matmul_nbits/fp16u4/
 ├── Makefile                      # Build and test automation
 ├── README.md                     # This file
 ├── test_matmul_nbits.cpp         # C++ test driver

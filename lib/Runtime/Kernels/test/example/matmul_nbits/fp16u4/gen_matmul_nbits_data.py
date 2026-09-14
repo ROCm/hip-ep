@@ -92,8 +92,8 @@ def main():
         # FP16 buffer this test passes to hip_matmul_nbits (zp_elem_size==2)
         # is a pre-converted cast of those integers, not an independently
         # continuous value. Matches the integer convention already used by
-        # ../gemm_fp16u3/gen_matmul_nbits_u3_data.py and
-        # ../gemm_fp16u2/gen_matmul_nbits_u2_data.py's zero_points.
+        # ../fp16u3/gen_matmul_nbits_u3_data.py and
+        # ../fp16u2/gen_matmul_nbits_u2_data.py's zero_points.
         zeros = np.random.randint(7, 10, (N, num_groups_k)).astype(np.uint8) \
                     .astype(np.float16)
 

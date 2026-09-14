@@ -1,16 +1,16 @@
 # ============================================================
-# custom_kernels MatMulNBits bits=8 (uint8, unpacked) Test
+# custom_kernels MatMulNBits bits=2 (uint2) vs bits=4 (uint4) Test
 #
 # Works in both WSL and Windows CMD/PowerShell.
 #
-# Benchmarks and verifies hip_matmul_nbits(bits=8) -- B is one byte per
-# weight (NOT bit-packed, unlike bits=2/3/4).
+# Benchmarks and verifies hip_matmul_nbits(bits=2) and hip_matmul_nbits(bits=4)
+# back-to-back on the same shape, reporting speed ratio and weight-size ratio.
 #
 # Usage:
 #   make test SIZE=128x2880x5120 GS=128            # single shape (with zeros)
-#   make test SIZE=1x4096x2880   GS=128 NO_ZEROS=1  # decode shape (no zeros)
-#   make test_fp32 SIZE=128x2880x5120 GS=128        # fp32 A/output
-#   make test_all                                    # preset shapes
+#   make test SIZE=1x4096x2880   GS=128 NO_ZEROS=1 # decode shape (no zeros)
+#   make test_all                                   # preset shapes
+#   make test_model [MODEL_JSON=../../models/gpt_oss_20b.json] [GS=128] [NO_ZEROS=1]
 # ============================================================
 
 # ---- OS detection ----
@@ -40,9 +40,9 @@ endif
 # ---- Paths ----
 
 HIPCC        := $(HIP_SDK)/bin/hipcc.exe
-INCLUDE_DIR  := ../../../include
-KERNEL_HIP   := ../../../hip/matmul_nbits_kernel.hip
-AUTOTUNE_DIR := ../../../hip/autotune/matmul_nbits
+INCLUDE_DIR  := ../../../../include
+KERNEL_HIP   := ../../../../hip/matmul_nbits_kernel.hip
+AUTOTUNE_DIR := ../../../../hip/autotune/matmul_nbits
 # No-LUT autotune resolver stub: the kernel references
 # hipdnn_ep::matmul_nbits_autotune::resolve(), whose real definition pulls in
 # flatbuffers + a CMake-generated header. This HIP-SDK-only build links the stub
@@ -80,12 +80,13 @@ ifeq ($(DETECTED_OS),Windows)
     define DO_CLEAN
 	if exist $(BUILD_DIR) rmdir /s /q $(BUILD_DIR)
 	if exist $(DATA_DIR) rmdir /s /q $(DATA_DIR)
+	if exist $(MODEL_DATA_DIR) rmdir /s /q $(MODEL_DATA_DIR)
     endef
 else
     HIP_SDK_WIN := $(shell wslpath -w "$(HIP_SDK)")
     RUN_CMD     = cmd.exe /c "set PATH=$(HIP_SDK_WIN)\bin;%PATH% && %CD%\$(1)"
     define DO_CLEAN
-	rm -rf $(BUILD_DIR) $(DATA_DIR)
+	rm -rf $(BUILD_DIR) $(DATA_DIR) $(MODEL_DATA_DIR)
     endef
 endif
 
@@ -115,7 +116,7 @@ DIRECT_KERNEL_OBJ := $(BUILD_DIR)/direct_kernel.obj
 DIRECT_STUB_OBJ   := $(BUILD_DIR)/direct_autotune_stub.obj
 
 direct: FORCE | $(BUILD_DIR)
-	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) $(INCLUDES) -x hip test_matmul_nbits_i8.cpp -o $(DIRECT_TEST_OBJ)
+	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) $(INCLUDES) -x hip test_matmul_nbits_u2.cpp -o $(DIRECT_TEST_OBJ)
 	$(HIPCC) -c $(KERNEL_FLAGS) $(OFFLOAD) $(INCLUDES) $(KERNEL_HIP) -o $(DIRECT_KERNEL_OBJ)
 	$(HIPCC) -c $(CXXFLAGS) -I$(AUTOTUNE_DIR) $(AUTOTUNE_STUB) -o $(DIRECT_STUB_OBJ)
 	$(HIPCC) $(OFFLOAD) $(DIRECT_TEST_OBJ) $(DIRECT_KERNEL_OBJ) $(DIRECT_STUB_OBJ) -o $(TARGET_DIRECT)
@@ -128,7 +129,7 @@ clean:
 	$(DO_CLEAN)
 
 gendata:
-	$(PYTHON) gen_matmul_nbits_i8_data.py $(SIZE) --group-size $(GS) --dir $(DATA_DIR) $(PY_NZ_FLAG)
+	$(PYTHON) gen_matmul_nbits_u2_data.py $(SIZE) --group-size $(GS) --dir $(DATA_DIR) $(PY_NZ_FLAG)
 
 run: direct
 	$(call RUN_CMD,$(TARGET_DIRECT)) $(SIZE) $(GS) $(DATA_DIR) $(CXX_NZ_FLAG)
@@ -152,6 +153,17 @@ test_all:
 	$(MAKE) test SIZE=1x4096x2880   GS=128
 	$(MAKE) test SIZE=128x4096x2880 GS=128
 
+# ---- Model sweep mode (iterate all shapes from model config JSON) ----
+
+MODEL_JSON     ?= ../../models/gpt_oss_20b.json
+MODEL_DATA_DIR ?= data_model
+
+gendata_model:
+	$(PYTHON) ../../utils/gen_data.py $(MODEL_JSON) --bits 2 --group-size $(GS) --out-dir $(MODEL_DATA_DIR) $(PY_NZ_FLAG)
+
+test_model: gendata_model direct
+	$(call RUN_CMD,$(TARGET_DIRECT)) --model $(MODEL_JSON) --data-root $(MODEL_DATA_DIR) --group-size $(GS) $(CXX_NZ_FLAG)
+
 bench_decode:
 	$(MAKE) test SIZE=1x2880x2880   GS=128 NO_ZEROS=1
 	$(MAKE) test SIZE=1x2880x5120   GS=128 NO_ZEROS=1
@@ -160,4 +172,4 @@ bench_decode:
 
 FORCE:
 
-.PHONY: all direct clean run run_custom gendata test test_fp32 test_all bench_decode asm FORCE
+.PHONY: all direct clean run run_custom gendata gendata_model test test_fp32 test_all test_model bench_decode asm FORCE
