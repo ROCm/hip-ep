@@ -10,6 +10,13 @@
 #include <vector>
 #include <functional>
 
+// Forward declare from ChezSchemeInterpreter.h (avoid duplicate definition)
+namespace mlir {
+namespace hipsr {
+enum class SchemeLogLevel;
+}
+}
+
 // C type for Scheme FFI - must be at global scope for extern "C" functions
 typedef void* SchemeValue;
 
@@ -22,18 +29,8 @@ class RewriterBase;
 
 namespace hipsr {
 
-// Log levels for Scheme logging
-enum class SchemeLogLevel {
-  Trace = 0,
-  Debug = 1,
-  Info = 2,
-  Warning = 3,
-  Error = 4,
-  Fatal = 5
-};
-
 // Parse log level from string
-SchemeLogLevel parseLogLevel(const std::string& level);
+mlir::hipsr::SchemeLogLevel parseLogLevel(const std::string& level);
 
 // Initialize Scheme runtime and register MLIR FFI bindings
 bool initializeSchemeRuntime(SchemeLogLevel logLevel = SchemeLogLevel::Warning);

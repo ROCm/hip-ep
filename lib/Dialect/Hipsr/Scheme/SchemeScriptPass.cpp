@@ -12,7 +12,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "Runtime/SchemeBindings.h"
-#include "Runtime/ChezSchemeInterpreter.h"
+#include "hip/Dialect/Hipsr/Scheme/Runtime/ChezSchemeInterpreter.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 
