@@ -11,6 +11,7 @@
 #include <cassert>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 #include <unordered_map>
 #include <vector>
 
@@ -111,28 +112,27 @@ static void perf_resolve_spans(float *h2d_ms, float *compute_ms,
             "%s\n",
             hipGetErrorString(pending));
 
-  constexpr size_t kNumSpans = 3;
   struct Span {
     const char *name;
     hipEvent_t start;
     hipEvent_t end;
     float *out;
-  } spans[kNumSpans] = {
-      {"H2D", g_perf.h2d_start, g_perf.h2d_end, h2d_ms},
-      {"Compute", g_perf.h2d_end, g_perf.d2h_start, compute_ms},
-      {"D2H", g_perf.d2h_start, g_perf.d2h_end, d2h_ms},
+    bool *warned; // warn once per span: a broken span fails every inference
   };
 
-  static bool warned[kNumSpans] = {false, false, false};
-  for (size_t i = 0; i < kNumSpans; ++i) {
-    const Span &span = spans[i];
+  static bool warnedH2D = false, warnedCompute = false, warnedD2H = false;
+  for (const Span &span :
+       {Span{"H2D", g_perf.h2d_start, g_perf.h2d_end, h2d_ms, &warnedH2D},
+        Span{"Compute", g_perf.h2d_end, g_perf.d2h_start, compute_ms,
+             &warnedCompute},
+        Span{"D2H", g_perf.d2h_start, g_perf.d2h_end, d2h_ms, &warnedD2H}}) {
     // hipEventElapsedTime leaves the output untouched on failure.
     *span.out = 0.0f;
     hipError_t err = hipEventElapsedTime(span.out, span.start, span.end);
     if (err == hipSuccess)
       continue;
-    if (!warned[i]) {
-      warned[i] = true;
+    if (!*span.warned) {
+      *span.warned = true;
       fprintf(stderr,
               "[PERF] WARNING: %s span unavailable (%s); it will read "
               "0.00 ms\n",
