@@ -459,25 +459,49 @@ static int gqa_forward_fused(
       vSrc = d_Vsplit;
     }
 
+    const int half_rot = static_cast<int>(d / 2);
+
+    // Fuse the K RoPE with both cache appends into one launch. Three dispatches
+    // per layer become one, and the roped K stops making a round trip through
+    // scratch. Conditions, all of which the unfused path handles and this one
+    // deliberately does not:
+    //   - the rotation must be full (half_rot*2 == d), because the destination
+    //     is the cache and a partial rotation would leave its tail stale;
+    //   - the cache must be fp16/fp32, since a quantized one writes through
+    //     kv_cache_append_quant_i8_kernel;
+    //   - the append must be the in-place kind. update_kv_cache takes the
+    //     separate-buffer concat when past and present differ and there is a
+    //     prefix to carry, and that path copies history this kernel never
+    //     touches. The predicate below mirrors its branch exactly.
+    // The workspace request is left alone: flag-on would need less of it, but
+    // varying the allocation between arms puts allocator behaviour inside the
+    // A/B, and the buffer is reused across layers anyway.
+    const bool fuse_rope_append =
+        hipdnn_ep_gqa_fuse_append_enabled() && need_rope &&
+        kv_format == KvCacheFormat::Fp16 && half_rot * 2 == static_cast<int>(d) &&
+        present_key != nullptr && present_value != nullptr &&
+        !(past_key && past_len > 0 && past_key != present_key);
+
     if (need_rope) {
       char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
       void *d_Qroped = ws + off_rope;
       void *d_Kroped = ws + off_rope + Q_full_bytes;
-      int half_rot = static_cast<int>(d / 2);
       if (hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
                        static_cast<int>(B), static_cast<int>(sq),
                        static_cast<int>(H), static_cast<int>(d), half_rot,
                        static_cast<int>(past_len), seqlens_k_ptr,
                        static_cast<int>(elem_sz)) != 0)
         return -1;
-      if (hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
-                       static_cast<int>(B), static_cast<int>(sq),
-                       static_cast<int>(G), static_cast<int>(d), half_rot,
-                       static_cast<int>(past_len), seqlens_k_ptr,
-                       static_cast<int>(elem_sz)) != 0)
-        return -1;
+      if (!fuse_rope_append) {
+        if (hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
+                         static_cast<int>(B), static_cast<int>(sq),
+                         static_cast<int>(G), static_cast<int>(d), half_rot,
+                         static_cast<int>(past_len), seqlens_k_ptr,
+                         static_cast<int>(elem_sz)) != 0)
+          return -1;
+        kSrc = d_Kroped; // V is never RoPE'd.
+      }
       qSrc = d_Qroped;
-      kSrc = d_Kroped; // V is never RoPE'd.
     }
 
     // Append the new token to the KV cache. Quantized cache:
@@ -492,14 +516,27 @@ static int gqa_forward_fused(
     // then rejects the call before it can reach the concat. When the cache is
     // instead in-place there is no prefix to copy and update_kv_cache appends.
     // So a bound here would be unreachable, and therefore untestable, code.
-    if (update_kv_cache(
-            stream, past_key, past_value, kSrc, vSrc, present_key,
-            present_value, static_cast<int>(B), static_cast<int>(past_len),
-            static_cast<int>(sq), static_cast<int>(G), static_cast<int>(d),
-            static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
-            seqlens_k_ptr, static_cast<int>(elem_sz), /*copy_lo=*/0,
-            /*no_causal=*/false, /*skv=*/-1, kv_format, k_scale, v_scale) != 0)
+    if (fuse_rope_append) {
+      // kSrc is deliberately still the UNroped K: the fused kernel rotates on
+      // the way in, which is the whole point of it.
+      if (hip_gqa_rope_append_kv(
+              stream, kSrc, vSrc, present_key, present_value, cos_cache,
+              sin_cache, static_cast<int>(B), static_cast<int>(sq),
+              static_cast<int>(G), static_cast<int>(d), half_rot,
+              static_cast<int>(present_seq), static_cast<int>(past_len),
+              seqlens_k_ptr, static_cast<int>(elem_sz)) != 0)
+        return -1;
+    } else if (update_kv_cache(
+                   stream, past_key, past_value, kSrc, vSrc, present_key,
+                   present_value, static_cast<int>(B),
+                   static_cast<int>(past_len), static_cast<int>(sq),
+                   static_cast<int>(G), static_cast<int>(d),
+                   static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
+                   seqlens_k_ptr, static_cast<int>(elem_sz), /*copy_lo=*/0,
+                   /*no_causal=*/false, /*skv=*/-1, kv_format, k_scale,
+                   v_scale) != 0) {
       return -1;
+    }
 
     {
       char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));

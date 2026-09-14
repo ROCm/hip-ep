@@ -831,6 +831,28 @@ HIP_KERNEL_API int hip_gqa_rope(
     int head_dim, int half_rot, int past_len,
     const void* seqlens_k, int element_size_bytes);
 
+/* RoPE the new K directly into the KV cache, and copy V alongside it, in ONE
+ * launch -- replacing hip_gqa_rope(K) + hip_gqa_kv_cache_append(K) +
+ * hip_gqa_kv_cache_append(V). Q is not covered: it is not cached, so it still
+ * takes hip_gqa_rope.
+ *
+ * k_src / v_src: BSHD [B, sq, G, d] new tokens.
+ * k_cache / v_cache: BNSD [B, G, present_seq, d], written at
+ *   [past_len .. past_len+sq) exactly as hip_gqa_kv_cache_append does.
+ * seqlens_k: as hip_gqa_rope / hip_gqa_kv_cache_append -- when non-null,
+ *   past_len is derived per batch from seqlens_k[b]+1-sq.
+ * element_size_bytes: 2 = fp16, 4 = fp32.
+ *
+ * Requires half_rot * 2 == d and returns -1 otherwise: the destination is the
+ * cache, so a partial rotation would leave [2*half_rot, d) holding whatever the
+ * cache had before rather than the unrotated tail. FP16/FP32 cache only; a
+ * quantized cache still goes through hip_gqa_kv_cache_append. */
+HIP_KERNEL_API int hip_gqa_rope_append_kv(
+    void* stream, const void* k_src, const void* v_src,
+    void* k_cache, void* v_cache, const void* cos_cache, const void* sin_cache,
+    int batch_size, int sq, int G, int d, int half_rot, int present_seq,
+    int past_len, const void* seqlens_k, int element_size_bytes);
+
 /* Transpose middle two dims of 4D tensor:
  * [B, dim1, dim2, D] -> [B, dim2, dim1, D]
  * element_size_bytes: 2 = fp16, 4 = fp32. */

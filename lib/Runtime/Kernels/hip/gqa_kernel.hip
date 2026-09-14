@@ -412,6 +412,91 @@ __global__ void kv_cache_append_vec_kernel(
 }
 
 // -------------------------------------------------------------------------
+// Steps 2 + 4-5 fused: RoPE the new K straight into the cache, and copy V
+// alongside it
+// -------------------------------------------------------------------------
+// Replaces three launches (rope K, append K, append V) with one. The saving is
+// two dispatches per attention layer, which at decode is the dominant term:
+// sq == 1 makes each of these kernels a few microseconds of work behind a
+// launch that costs more than it.
+//
+// It also halves the K traffic. Unfused, the roped K makes a round trip through
+// a scratch buffer -- rope reads K and writes scratch, append reads scratch and
+// writes the cache, so 4d elements move per head. Writing the rotated value
+// directly at its cache position moves 2d.
+//
+// The two halves of the launch have different natural vector widths, so rather
+// than padding one grid to the other they share a single flat index space:
+// [0, k_elems) rotates K, [k_elems, k_elems + v_elems) copies V. V is pure
+// relocation and moves as KvVec16 when alignment allows (VEC = 16/sizeof(T));
+// K is scalar because the rotation pairs element r with r + half_rot, which no
+// contiguous vector load spans.
+//
+// REQUIRES half_rot * 2 == d (full rotation). rope_kernel leaves [2*half_rot,d)
+// untouched because its caller owns a scratch buffer that already holds those
+// elements; here the destination is the cache itself, where nothing wrote them
+// first, so a partial rotation would leave that tail stale. The host gate
+// enforces this rather than the kernel copying the tail, since every decode
+// call site passes half_rot = d/2.
+//
+// The out-of-range guard matches kv_cache_append_kernel: a malformed batch
+// writes nothing, exactly as it appended nothing before.
+template <typename T, int VEC>
+__global__ void rope_append_kv_kernel(
+    const T* __restrict__ k_src,
+    const T* __restrict__ v_src,
+    T* __restrict__ k_cache,
+    T* __restrict__ v_cache,
+    const T* __restrict__ cos_cache,
+    const T* __restrict__ sin_cache,
+    int sq, int G, int d, int half_rot, int present_seq, int past_len,
+    const int* __restrict__ seqlens_k,
+    int k_elems, int v_elems) {
+  const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
+  int eff_past_len = seqlens_k ? (seqlens_k[batch_idx] + 1 - sq) : past_len;
+  if (eff_past_len < 0 || eff_past_len + sq > present_seq) return;
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= k_elems + v_elems) return;
+
+  if (idx < k_elems) {
+    int r = idx % half_rot;
+    int remaining = idx / half_rot;
+    int g = remaining % G;
+    int s = remaining / G;
+    int pos = eff_past_len + s;
+
+    int src_base = ((batch_idx * sq + s) * G + g) * d;
+    int dst_base = ((batch_idx * G + g) * present_seq + pos) * d;
+
+    float x1 = gqa_to_float<T>(k_src[src_base + r]);
+    float x2 = gqa_to_float<T>(k_src[src_base + r + half_rot]);
+    float c  = gqa_to_float<T>(cos_cache[pos * half_rot + r]);
+    float sn = gqa_to_float<T>(sin_cache[pos * half_rot + r]);
+
+    k_cache[dst_base + r]            = gqa_from_float<T>(x1 * c - x2 * sn);
+    k_cache[dst_base + r + half_rot] = gqa_from_float<T>(x2 * c + x1 * sn);
+    return;
+  }
+
+  int j = idx - k_elems;
+  const int dv = d / VEC;
+  int dvi = j % dv;
+  int remaining = j / dv;
+  int g = remaining % G;
+  int s = remaining / G;
+
+  int src_idx = ((batch_idx * sq + s) * G + g) * d + dvi * VEC;
+  int dst_idx =
+      ((batch_idx * G + g) * present_seq + (eff_past_len + s)) * d + dvi * VEC;
+  if (VEC == 1) {
+    v_cache[dst_idx] = v_src[src_idx];
+  } else {
+    *reinterpret_cast<KvVec16*>(v_cache + dst_idx) =
+        *reinterpret_cast<const KvVec16*>(v_src + src_idx);
+  }
+}
+
+// -------------------------------------------------------------------------
 // Step 4-5 (separate-buffer variant): KV Cache Concat
 // -------------------------------------------------------------------------
 // Concatenates past KV data and new tokens into a fresh present buffer.
@@ -855,6 +940,38 @@ static void launch_kv_cache_append(
 }
 
 template <typename T>
+static void launch_rope_append_kv(
+    hipStream_t stream, const void* k_src, const void* v_src,
+    void* k_cache, void* v_cache, const void* cos_cache, const void* sin_cache,
+    int batch_size, int sq, int G, int d, int half_rot, int present_seq,
+    int past_len, const void* seqlens_k) {
+  constexpr int VEC = 16 / sizeof(T);
+  const int k_elems = sq * G * half_rot;
+  // V is the only half that vectorises; K's rotation pairs r with r + half_rot.
+  const bool v_vec = (d % VEC) == 0 && kv_is_16b_aligned(v_src) &&
+                     kv_is_16b_aligned(v_cache);
+  const int v_elems = v_vec ? sq * G * (d / VEC) : sq * G * d;
+  int blocks = (k_elems + v_elems + GQA_THREADS - 1) / GQA_THREADS;
+  if (v_vec) {
+    rope_append_kv_kernel<T, VEC><<<dim3(blocks, batch_size), GQA_THREADS, 0,
+                                    stream>>>(
+        static_cast<const T*>(k_src), static_cast<const T*>(v_src),
+        static_cast<T*>(k_cache), static_cast<T*>(v_cache),
+        static_cast<const T*>(cos_cache), static_cast<const T*>(sin_cache),
+        sq, G, d, half_rot, present_seq, past_len,
+        static_cast<const int*>(seqlens_k), k_elems, v_elems);
+    return;
+  }
+  rope_append_kv_kernel<T, 1><<<dim3(blocks, batch_size), GQA_THREADS, 0,
+                                stream>>>(
+      static_cast<const T*>(k_src), static_cast<const T*>(v_src),
+      static_cast<T*>(k_cache), static_cast<T*>(v_cache),
+      static_cast<const T*>(cos_cache), static_cast<const T*>(sin_cache),
+      sq, G, d, half_rot, present_seq, past_len,
+      static_cast<const int*>(seqlens_k), k_elems, v_elems);
+}
+
+template <typename T>
 static void launch_kv_cache_concat(
     hipStream_t stream, const void* past, const void* current, void* present,
     int batch_size, int past_len, int sq, int G, int d,
@@ -914,6 +1031,29 @@ extern "C" int hip_gqa_rope(
   GQA_DISPATCH_BY_ELEM_SIZE(element_size_bytes, launch_rope, stream, input,
                             output, cos_cache, sin_cache, batch_size, seq_len,
                             num_heads, head_dim, half_rot, past_len, seqlens_k);
+  GQA_RETURN_LAUNCH_STATUS();
+}
+
+// Steps 2 + 4-5 fused: RoPE K into the cache and copy V, in one launch.
+// FP16/FP32 cache only -- a quantized cache writes through
+// kv_cache_append_quant_i8_kernel, which this does not replace. The caller must
+// have checked half_rot * 2 == d; see the kernel comment.
+extern "C" int hip_gqa_rope_append_kv(
+    void* stream_ptr, const void* k_src, const void* v_src,
+    void* k_cache, void* v_cache, const void* cos_cache, const void* sin_cache,
+    int batch_size, int sq, int G, int d, int half_rot, int present_seq,
+    int past_len, const void* seqlens_k, int element_size_bytes) {
+  if (half_rot * 2 != d) {
+    fprintf(stderr,
+            "hip_gqa_rope_append_kv: needs a full rotation (half_rot=%d d=%d)\n",
+            half_rot, d);
+    return -1;
+  }
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  GQA_DISPATCH_BY_ELEM_SIZE(element_size_bytes, launch_rope_append_kv, stream,
+                            k_src, v_src, k_cache, v_cache, cos_cache,
+                            sin_cache, batch_size, sq, G, d, half_rot,
+                            present_seq, past_len, seqlens_k);
   GQA_RETURN_LAUNCH_STATUS();
 }
 

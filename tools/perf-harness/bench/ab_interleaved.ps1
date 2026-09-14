@@ -2,7 +2,8 @@
 ## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 ## Licensed under the MIT License.
 ##
-## Interleaved, order-reversed A/B (or A/B/C/...) of DLL variants by TTFT.
+## Interleaved, order-reversed A/B (or A/B/C/...) of build variants, by TTFT
+## (-Metric ttft, the default) or by decode throughput (-Metric tps).
 ##
 ## Why not just run arm A a few times, then arm B a few times:
 ##
@@ -20,17 +21,38 @@
 ## on-disk WMMA cache holds a single build timestamp and is discarded when it
 ## does not match, so a shared TEMP would make every DLL swap a cold-tune run.
 ##
-## Arms are defined in a JSON manifest:
+## Arms are defined in a JSON manifest. An arm may swap a DLL, set environment
+## variables, or both:
 ##
 ##   { "base":  { "dll": "D:\\builds\\base\\custom_kernels_gfx1151.dll" },
 ##     "cand":  { "dll": "D:\\builds\\cand\\custom_kernels_gfx1151.dll" } }
 ##
+##   { "off":   { "env": { "HIPDNN_EP_GQA_FUSE_APPEND": "0" } },
+##     "on":    { "env": { "HIPDNN_EP_GQA_FUSE_APPEND": "1" } } }
+##
 ## The named DLL is copied over the same filename in $env:HIPEP_BIN before each
 ## run, so every arm is measured through one identical harness.
+##
+## The env form exists because every optimisation here lands behind a default-off
+## flag, and A/B-ing a flag on ONE binary removes the last way a DLL-swap A/B can
+## lie: the two DLLs cannot differ in anything but the change, because there is
+## only one of them. Arms still get their own TEMP even in that form -- a flag
+## can change which autotune config wins, so a shared cache would carry the
+## other arm's answer.
+##
+## Env keys are unioned across all arms and every key is written for every arm
+## (absent ones removed), because Env: is process-wide: without that, arm A's
+## variables survive into arm B and quietly make it a second copy of arm A.
 
 param(
   [Parameter(Mandatory = $true)][string]$Manifest,
   [string[]]$Arms,                    # subset + order; default: every arm in the manifest
+  # ttft -> bench_ttft.ps1, summarised on ttft_ms.
+  # tps  -> bench_tps.ps1,  summarised on ms_per_token.
+  [ValidateSet('ttft', 'tps')]
+  [string]$Metric  = 'ttft',
+  [int]$SeqLen     = 128,             # prompt length; decode cost is seqlen-dependent via the KV read
+  [int]$Gen        = 128,             # tps only: tokens generated per rep
   [int]$Rounds     = 3,
   [int]$Reps       = 4,
   [int]$StartRound = 1,
@@ -45,25 +67,53 @@ $ErrorActionPreference = 'Stop'
 $armDefs = Get-Content $Manifest -Raw | ConvertFrom-Json
 $allArms = $armDefs.PSObject.Properties.Name
 if (-not $Arms) { $Arms = $allArms }
-foreach ($a in $Arms) {
-  if ($a -notin $allArms) { throw "Arm '$a' is not in $Manifest (have: $($allArms -join ', '))" }
-  if (-not (Test-Path $armDefs.$a.dll)) { throw "Arm '$a': DLL not found: $($armDefs.$a.dll)" }
+
+function Get-ArmField {
+  param($Arm, [string]$Field)
+  $p = $Arm.PSObject.Properties[$Field]
+  if ($p) { return $p.Value }
+  return $null
 }
 
-if (-not $OutDir) { $OutDir = Join-Path $HarnessEnv.OutRoot 'ttft' }
+# Union of every key any arm sets, so each arm can clear the ones it does not.
+$envKeys = @()
+foreach ($a in $Arms) {
+  if ($a -notin $allArms) { throw "Arm '$a' is not in $Manifest (have: $($allArms -join ', '))" }
+  $dll = Get-ArmField $armDefs.$a 'dll'
+  $armEnv = Get-ArmField $armDefs.$a 'env'
+  if (-not $dll -and -not $armEnv) { throw "Arm '$a' defines neither 'dll' nor 'env'." }
+  if ($dll -and -not (Test-Path $dll)) { throw "Arm '$a': DLL not found: $dll" }
+  if ($armEnv) { $envKeys += $armEnv.PSObject.Properties.Name }
+}
+$envKeys = $envKeys | Sort-Object -Unique
+
+$metricDir = if ($Metric -eq 'tps') { 'tps' } else { 'ttft' }
+if (-not $OutDir) { $OutDir = Join-Path $HarnessEnv.OutRoot $metricDir }
 $cacheRoot = Join-Path $HarnessEnv.OutRoot 'tunecache'
-$benchTtft = Join-Path $PSScriptRoot 'bench_ttft.ps1'
+$benchScript = Join-Path $PSScriptRoot "bench_$Metric.ps1"
+$echoRe      = if ($Metric -eq 'tps') { '=== TPS \[' } else { 'TTFT \[' }
 
 function Invoke-Arm {
   param([string]$Name, [string]$Tag, [int]$RunReps)
-  $dll  = $armDefs.$Name.dll
-  $dest = Join-Path $HarnessEnv.Bin (Split-Path -Leaf $dll)
-  Copy-Item $dll $dest -Force
+  $dll = Get-ArmField $armDefs.$Name 'dll'
+  if ($dll) {
+    Copy-Item $dll (Join-Path $HarnessEnv.Bin (Split-Path -Leaf $dll)) -Force
+  }
+  $armEnv = Get-ArmField $armDefs.$Name 'env'
+  $setEnv = @()
+  foreach ($k in $envKeys) {
+    $v = if ($armEnv) { Get-ArmField $armEnv $k } else { $null }
+    if ($null -ne $v) { $setEnv += "$k=$v" }
+    else { Remove-Item "Env:$k" -EA SilentlyContinue }
+  }
   $temp = Join-Path $cacheRoot $Name
   New-Item -ItemType Directory -Force -Path $temp | Out-Null
   $env:TEMP = $temp; $env:TMP = $temp
-  & $benchTtft -Tag $Tag -Reps $RunReps -Warmup 1 -OutDir $OutDir 2>&1 |
-    Where-Object { $_ -match 'TTFT \[' }
+
+  $common = @{ Tag = $Tag; Reps = $RunReps; Warmup = 1; SeqLen = $SeqLen
+               SetEnv = $setEnv; OutDir = $OutDir }
+  if ($Metric -eq 'tps') { $common.Gen = $Gen }
+  & $benchScript @common 2>&1 | Where-Object { $_ -match $echoRe }
 }
 
 if (-not $SkipPrime) {
@@ -82,4 +132,8 @@ foreach ($r in $StartRound..($StartRound + $Rounds - 1)) {
 }
 
 Write-Host "`nSummarise with:"
-Write-Host "  $($HarnessEnv.Python) $(Join-Path $PSScriptRoot 'ab_summary.py') $(Join-Path $OutDir 'ttft_summary.csv') --baseline $($Arms[0])"
+Write-Host ("  {0} {1} {2} --metric {3} --baseline {4}" -f
+            $HarnessEnv.Python,
+            (Join-Path $PSScriptRoot 'ab_summary.py'),
+            (Join-Path $OutDir "${metricDir}_summary.csv"),
+            $Metric, $Arms[0])

@@ -113,6 +113,23 @@ The three earlier scripts print the exact arguments the next one wants.
 python .\bench\ab_summary.py $env:TEMP\hipep-perf\ttft\ttft_summary.csv --baseline base
 ```
 
+`-Metric tps` runs the same design on decode instead, through `bench_tps.ps1`
+and the `ms_per_token` column. Arms can also be environment variables rather
+than DLLs, which is what a change landed behind a default-off flag wants — one
+binary, so the arms cannot differ in anything but the flag:
+
+```powershell
+'{ "off": { "env": { "HIPDNN_EP_GQA_FUSE_APPEND": "0" } },
+   "on":  { "env": { "HIPDNN_EP_GQA_FUSE_APPEND": "1" } } }' | Set-Content arms.json
+
+.\bench\ab_interleaved.ps1 -Manifest arms.json -Metric tps -SeqLen 2048 -Rounds 6 -Reps 3
+python .\bench\ab_summary.py $env:HIPEP_OUT\tps\tps_summary.csv --metric tps --baseline off
+```
+
+Env keys are unioned across arms and every key is written for every arm, absent
+ones removed: `Env:` is process-wide, so without that arm A's variables survive
+into arm B and silently make it a second copy of arm A.
+
 ## Decode (TPS)
 
 Decode is a memory-traffic budget, not a compute problem. At M=1 every GEMM is a

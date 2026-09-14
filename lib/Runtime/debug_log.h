@@ -30,6 +30,19 @@ inline bool hipdnn_ep_matmul_dp4a_enabled() {
   return enabled;
 }
 
+// Fuse the decode-path K RoPE and the K/V cache appends into one launch
+// (hip_gqa_rope_append_kv), replacing three dispatches per attention layer with
+// one and removing the roped K's round trip through scratch.
+//
+// DEFAULT-OFF while it is proven per model family. Off must be indistinguishable
+// from the unfused path, so the gate in real/gqa.cpp is the only thing that
+// reads this; nothing downstream branches on it.
+inline bool hipdnn_ep_gqa_fuse_append_enabled() {
+  static const bool enabled =
+      hipdnn_ep::env_enabled("HIPDNN_EP_GQA_FUSE_APPEND");
+  return enabled;
+}
+
 inline bool hipdnn_ep_perf_enabled() {
   // PERF intentionally does NOT inherit from HIPDNN_EP_DEBUG: enabling PERF
   // forces a hipStreamSynchronize on every inference (so hipEventElapsedTime
