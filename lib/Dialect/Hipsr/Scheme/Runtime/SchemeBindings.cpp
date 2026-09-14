@@ -793,11 +793,11 @@ extern "C" {
 }
 
 namespace {
-// Wrapper class that implements OpConversionPattern by calling a Scheme callback
-class SchemeConversionPattern : public mlir::OpConversionPattern<mlir::Operation> {
+// Wrapper class that implements ConversionPattern by calling a Scheme callback
+class SchemeConversionPattern : public mlir::ConversionPattern {
 public:
   SchemeConversionPattern(mlir::MLIRContext *ctx, ptr schemeCallback, llvm::StringRef opName)
-      : OpConversionPattern(ctx, 1 /*benefit*/),
+      : ConversionPattern(mlir::Pattern::MatchAnyOpTypeTag(), 1 /*benefit*/, ctx),
         callback(schemeCallback),
         targetOpName(opName.str()) {
     // Lock the Scheme callback so it doesn't get GC'd
