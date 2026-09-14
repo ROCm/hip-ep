@@ -32,7 +32,7 @@ fi
 
 # Library search path
 # Important: BUILD_DIR first so compiled .so files are found before recompiling
-LIBDIRS="$BUILD_DIR:$SOURCE_DIR/Runtime:$SOURCE_DIR/Passes"
+LIBDIRS="$BUILD_DIR:$SOURCE_DIR/Runtime:$SOURCE_DIR/Passes:$SOURCE_DIR/Patterns"
 
 # Compile libraries in dependency order
 # Once a library is compiled, later compilations find it in BUILD_DIR
