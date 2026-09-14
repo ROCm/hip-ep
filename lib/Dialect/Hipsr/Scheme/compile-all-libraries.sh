@@ -31,7 +31,9 @@ fi
 echo "Compiling all libraries in single Scheme session..."
 cd "$SOURCE_DIR/Runtime"
 BUILD_DIR_ESCAPED="${BUILD_DIR//\//\\/}"  # Escape slashes for scheme strings
-$SCHEME_COMPILER --libdirs "$BUILD_DIR:$SOURCE_DIR/patterns" <<EOF
+# Note: libdirs should include parent of patterns/, not patterns/ itself
+# Library (patterns cast-manual) maps to patterns/cast-manual.sls
+$SCHEME_COMPILER --libdirs "$BUILD_DIR:$SOURCE_DIR" <<EOF
 ;; Compile rime libraries first (expand-time dependencies)
 (for-each
   (lambda (file)
