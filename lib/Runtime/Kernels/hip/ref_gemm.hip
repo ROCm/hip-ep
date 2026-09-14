@@ -26,8 +26,9 @@
 
 #include "ck/ck.hpp"
 #include "ck/stream_config.hpp"
-#include "ck/library/reference_tensor_operation/gpu/reference_gemm.hpp"
+// reference_gemm.hpp uses RowMajor without including this
 #include "ck/tensor_operation/gpu/device/tensor_layout.hpp"
+#include "ck/library/reference_tensor_operation/gpu/reference_gemm.hpp"
 #include "ck/tensor_operation/gpu/element/element_wise_operation.hpp"
 
 namespace {
