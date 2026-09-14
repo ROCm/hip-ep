@@ -130,6 +130,10 @@ extern "C" const char *hipGetErrorString(hipError_t error) {
   return "mock_error";
 }
 
+// No mock call ever fails, so the last-error slot is always clear. Runtime
+// code still reads it to keep launch-status attribution honest on real HIP.
+extern "C" hipError_t hipGetLastError() { return hipSuccess; }
+
 // Mock HIP memory functions (non-static for cross-module linking)
 extern "C" hipError_t hipMalloc(void **ptr, size_t size) {
   *ptr = malloc(size);
