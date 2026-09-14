@@ -1272,15 +1272,29 @@ static int pickWmmaHeuristic(int M, int N, int K) {
     if (M > 256)
       return findWmmaCfg(128, 64, 2, 2, 8, 1, 64);
   }
-  /* Large-M large-N prefill GEMM (same wide-N mechanism as the pow2-K route,
-   * but for any large K): with many M-tile rows A is read N/BN times, so the
-   * wide 128x256 WT4x2 tile (N/256 A-reads) beats the narrower 256x128 cfg5
-   * (N/128). Faithful-autotune + fair bench: 4096^3 cfg32 3.36 ms vs cfg5
-   * 3.73 (+9.7%, beats hipBLASLt 3.76). Only for large M (>=2048): at M<=1024
-   * the mid squares (4608^2/6144^2) prefer cfg5 (the A-panel still fits/reuses
-   * and the extra BN just thins the grid). */
-  if (M >= 2048 && N >= 1024 && K >= 1024)
+  /* Wide-N tile when the A-panel (M*K) is large: A is read N/BN times, so the
+   * wide 128x256 WT4x2 tile (N/256 A-reads) halves A DRAM traffic vs the 256x128
+   * cfg5 (N/128). The win scales with the A-panel size M*K*2 bytes, NOT with M
+   * alone -- so it fires both for large-M squares AND for mid-M K-heavy shapes
+   * (MLP down-projection, large K). Faithful-autotune + fair ours-vs-ours:
+   *   - 4096^3           cfg32 3.36 vs cfg5 3.73  (+9.7%, beats hipBLASLt)
+   *   - 2048x4096x4096   +3% ; 2048/4096 x 8192^2 win/parity
+   *   - 1024x4096x14336  cfg32 3.68 vs cfg5 5.69  (+35%!, -28% -> +16% vs hb)
+   * Threshold A>=16 MB with N>=2048: at A<16 MB the mid squares (4608^2/5120^2/
+   * 6144^2 at M=1024, ~9-13 MB) still prefer cfg5 (A-panel reuses in L2, and the
+   * extra BN just thins the grid), and narrow N (<2048) has too few 256-wide
+   * column tiles. */
+  if (M >= 1024 && N >= 2048 &&
+      static_cast<size_t>(M) * K * 2 >= (16ull << 20))
     return findWmmaCfg(128, 256, 4, 2, 8, 1, 32);
+  /* K-heavy at mid M (512..1023): the wide-N tile needs BM=128 (too few M-tiles
+   * here), so instead the 256x128 WT4x4 tile (cfg33) -- higher Matrix-Core:LDS
+   * ratio for the long compute-bound K-loop -- wins. Fair bench 512x4096x14336:
+   * cfg33 2.02 vs cfg5 2.20 (-9% -> parity vs hipBLASLt). Gated K>=8192 so only
+   * genuinely K-heavy shapes qualify (pow2 K>=8192 is already handled above). */
+  if (M >= 512 && M < 1024 && N >= 2048 && K >= 8192 &&
+      static_cast<size_t>(M) * K * 2 >= (8ull << 20))
+    return findWmmaCfg(256, 128, 4, 4, 8, 1, 32);
   /* Tile size is chosen by M and grid fill (measured on gfx1151):
    *   - Large M reuses the B tile across many A-rows, so a 256-row tile
    *     (256x128 WT4x2) wins once the grid still covers the CUs -- measured
