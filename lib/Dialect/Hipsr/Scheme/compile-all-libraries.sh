@@ -16,15 +16,14 @@ echo "Output: $BUILD_DIR"
 mkdir -p "$BUILD_DIR/mlir"
 mkdir -p "$BUILD_DIR/mlir/conversion"
 
-# Copy rime library
+# Copy rime library (always refresh to avoid version mismatches)
 RIME_SOURCE="$SOURCE_DIR/../../../../third_party/rime/rime"
-if [ ! -d "$BUILD_DIR/rime" ]; then
-  echo "Copying rime library..."
-  if [ -d "$RIME_SOURCE" ]; then
-    cp -r "$RIME_SOURCE" "$BUILD_DIR/"
-  else
-    echo "Warning: rime not found at $RIME_SOURCE, skipping..."
-  fi
+echo "Refreshing rime library..."
+rm -rf "$BUILD_DIR/rime"
+if [ -d "$RIME_SOURCE" ]; then
+  cp -r "$RIME_SOURCE" "$BUILD_DIR/"
+else
+  echo "Warning: rime not found at $RIME_SOURCE, skipping..."
 fi
 
 # Compile libraries using compile-library
