@@ -358,7 +358,7 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   // (TENSOR_MEMORY_GPU), so we alias the buffer instead of pool_alloc + H2D.
   // This is the path that eliminates the per-decode 2 GB KV-cache H2D copy
   // when OGA's MorphiZenEP device interface allocated KV cache via our
-  // hipHostMalloc(Mapped|Coherent) allocator (path A). The caller still owns
+  // hipHostMalloc(Mapped|NonCoherent) allocator (path A). The caller still owns
   // the buffer; finalize_output / free_input must skip pool_release in
   // this case (gated by TensorBuffer.is_aliased).
   //
