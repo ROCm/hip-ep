@@ -78,6 +78,8 @@
     ;; IR construction
     mlir-create-placeholder-op
     mlir-create-cast-op
+    mlir-create-generic-op
+    mlir-operation-get-result-value-from-op
     mlir-create-unrealized-conversion-cast
 
     ;; Pattern rewriting
@@ -270,6 +272,14 @@
   (define mlir-create-cast-op
     (foreign-procedure "mlir_create_cast_op"
                        (unsigned-64 unsigned-64 unsigned-64 unsigned-64) unsigned-64))
+
+  (define mlir-create-generic-op
+    (foreign-procedure "mlir_create_generic_op"
+                       (string scheme-object scheme-object) unsigned-64))
+
+  (define mlir-operation-get-result-value-from-op
+    (foreign-procedure "mlir_operation_get_result_value_from_op"
+                       (unsigned-64 int) unsigned-64))
 
   (define mlir-create-unrealized-conversion-cast
     (foreign-procedure "mlir_create_unrealized_conversion_cast"
