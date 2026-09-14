@@ -84,6 +84,9 @@
     mlir-replace-op
     mlir-erase-op
     mlir-notify-match-failure
+
+    ;; Pattern registration (for Scheme-defined patterns)
+    mlir-register-conversion-pattern
     )
 
   (import (chezscheme))
@@ -284,5 +287,13 @@
 
   (define mlir-notify-match-failure
     (foreign-procedure "mlir_notify_match_failure" (unsigned-64 string) void))
+
+  ;;===--------------------------------------------------------------------===;;
+  ;; Pattern Registration
+  ;;===--------------------------------------------------------------------===;;
+
+  (define mlir-register-conversion-pattern
+    (foreign-procedure "mlir_register_conversion_pattern"
+                       (unsigned-64 string scheme-object) void))
 
 ) ;; end library (mlir ffi)

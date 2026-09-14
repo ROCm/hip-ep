@@ -708,6 +708,80 @@ void mlir_notify_match_failure(SchemeValue op, const char* reason) {
 }
 
 //===----------------------------------------------------------------------===//
+// Pattern Registration - Scheme-defined patterns
+//===----------------------------------------------------------------------===//
+
+// Include Chez Scheme C API header for Scheme callbacks
+extern "C" {
+#include "boot/ta6le/scheme.h"
+}
+
+namespace {
+// Wrapper class that implements OpConversionPattern by calling a Scheme callback
+class SchemeConversionPattern : public mlir::OpConversionPattern<mlir::Operation> {
+public:
+  SchemeConversionPattern(mlir::MLIRContext *ctx, ptr schemeCallback, llvm::StringRef opName)
+      : OpConversionPattern(ctx, 1 /*benefit*/),
+        callback(schemeCallback),
+        targetOpName(opName.str()) {
+    // Lock the Scheme callback so it doesn't get GC'd
+    Slock_object(callback);
+  }
+
+  ~SchemeConversionPattern() override {
+    // Unlock the callback
+    Sunlock_object(callback);
+  }
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op, mlir::ArrayRef<mlir::Value> operands,
+                  mlir::ConversionPatternRewriter &rewriter) const override {
+    // Check if this is the target operation
+    if (op->getName().getStringRef() != targetOpName) {
+      return mlir::failure();
+    }
+
+    // Set rewriter context for FFI functions
+    mlir::hipsr::setCurrentRewriter(&rewriter, op);
+
+    // Call Scheme callback: (callback op rewriter)
+    // Callback should return #t on successful match, #f on failure
+    ptr opPtr = Sunsigned_64(reinterpret_cast<uint64_t>(op));
+    ptr rewriterPtr = Sunsigned_64(reinterpret_cast<uint64_t>(&rewriter));
+
+    ptr result = Scall2(callback, opPtr, rewriterPtr);
+
+    // Clear rewriter context
+    mlir::hipsr::clearCurrentRewriter();
+
+    // Check result: #t = success, #f = failure
+    if (result == Strue) {
+      return mlir::success();
+    } else {
+      return mlir::failure();
+    }
+  }
+
+private:
+  ptr callback;           // Scheme procedure
+  std::string targetOpName;  // Target operation name
+};
+} // anonymous namespace
+
+void mlir_register_conversion_pattern(SchemeValue patterns_ptr,
+                                      const char* op_name,
+                                      SchemeValue callback) {
+  auto *patterns = reinterpret_cast<mlir::RewritePatternSet*>(patterns_ptr);
+  ptr schemeCallback = static_cast<ptr>(callback);
+
+  mlir_log_debug((std::string("Registering Scheme pattern for ") + op_name).c_str());
+
+  // Add pattern to the pattern set
+  patterns->add<SchemeConversionPattern>(
+      patterns->getContext(), schemeCallback, llvm::StringRef(op_name));
+}
+
+//===----------------------------------------------------------------------===//
 // Additional utility FFI functions
 //===----------------------------------------------------------------------===//
 
@@ -1071,7 +1145,10 @@ void registerMlirForeignFunctions() {
   Sregister_symbol("mlir_erase_op", (void*)::mlir_erase_op);
   Sregister_symbol("mlir_notify_match_failure", (void*)::mlir_notify_match_failure);
 
-  LLVM_DEBUG(llvm::dbgs() << "Registered " << 27 << " MLIR FFI functions\n");
+  // Pattern registration for Scheme-defined patterns
+  Sregister_symbol("mlir_register_conversion_pattern", (void*)::mlir_register_conversion_pattern);
+
+  LLVM_DEBUG(llvm::dbgs() << "Registered " << 28 << " MLIR FFI functions\n");
 }
 
 } // namespace hipsr

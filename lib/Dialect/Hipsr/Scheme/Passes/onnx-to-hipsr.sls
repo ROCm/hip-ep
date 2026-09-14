@@ -19,7 +19,8 @@
   (export run-pass)
   (import (rnrs (6))
           (only (chezscheme) format)
-          (mlir ffi))
+          (mlir ffi)
+          (patterns cast-manual))) ; Import manual Cast pattern
 
   ;;===--------------------------------------------------------------------===;;
   ;; Pass Entry Point
@@ -58,7 +59,8 @@
           ;; Step 3: Create RewritePatternSet and populate patterns
           (mlir-log-debug "Populating conversion patterns...")
           (let ((patterns (mlir-create-rewrite-pattern-set ctx)))
-            (mlir-populate-cast-conversion-patterns converter patterns ctx)
+            ;; Use Scheme-defined Cast pattern instead of C++
+            (populate-cast-patterns converter patterns ctx)
             (mlir-populate-return-conversion-patterns converter patterns ctx)
             (mlir-populate-func-type-conversion-pattern patterns converter)
 
