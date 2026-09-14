@@ -4960,56 +4960,32 @@ def Hip_QMatMulOp : Hip_DpsOp<"qmatmul", /*traits=*/[SameVariadicOperandSize],
   let summary = "Quantized matrix multiplication with integrated QDQ";
   let description = [{
     Fuses DequantizeLinear x2 -> MatMul -> QuantizeLinear into a single
-    integer-domain batched GEMM.
+    integer-domain batched GEMM. With `acc[m,n] = sum_k A[m,k]*B[k,n]`,
+    `rowA[m] = sum_k A[m,k]` and `colB[n] = sum_k B[k,n]`:
 
     ```
-    a = (A - A_zero_point) * A_scale
-    b = (B - z_b) * s_b            // z_b / s_b per tensor or per column
-    Y = saturate(round((a @ b) / Y_scale) + Y_zero_point)
-    ```
-
-    Per-tensor B, via the `B_scale` / `B_zero_point` attributes. With
-    `acc[m,n] = sum_k A[m,k]*B[k,n]`, `rowA[m] = sum_k A[m,k]` and
-    `colB[n] = sum_k B[k,n]`:
-
-    ```
-    Y[m,n] = saturate(round(M * (acc[m,n] - B_zero_point * rowA[m]
+    Y[m,n] = saturate(round(M * (acc[m,n] - z_b * rowA[m]
                                           - A_zero_point * colB[n]
-                                          + K * A_zero_point * B_zero_point))
+                                          + K * A_zero_point * z_b))
                       + Y_zero_point)
-    M = A_scale * B_scale / Y_scale   (folded at lowering time)
     ```
 
-    Per-output-column B, via the `B_scales` / `B_zero_points` operands, one
-    value each per column of the [K, N] weight, with `B_quant_axis` naming that
-    column axis. Only `A_scale / Y_scale` folds; the per-column factor is a
-    device array the kernel indexes by column. Subtracting the column's zero
-    point from the weight instead of correcting for it afterwards makes `rowA`
-    and the `K * A_zero_point * B_zero_point` term vanish:
+    B's quantization form decides where `M` and `z_b` come from:
 
-    ```
-    Bc[k,n]    = B[k,n] - B_zero_points[n]
-    accc[m,n]  = sum_k A[m,k] * Bc[k,n]
-    colBc[n]   = sum_k Bc[k,n]
-
-    Y[m,n] = saturate(round(Mn[n] * (accc[m,n] - A_zero_point * colBc[n]))
-                      + Y_zero_point)
-    Mn[n]  = (A_scale / Y_scale) * B_scales[n]
-    ```
-
-    That rearrangement needs `B - B_zero_points[n]` to stay within the staged
-    operand's width, which holds at 4 bits (|Bc| <= 15) and not at 8.
-
-    The scales and zero points stay operands in this form because they hold one
-    value per column and because they routinely arrive as external constants
-    whose values are not readable at fusion time.
+    * Per-tensor, via the `B_scale` / `B_zero_point` attributes. Both are
+      scalar, so `M = A_scale * B_scale / Y_scale` folds at lowering time.
+    * Per-output-column, via the `B_scales` / `B_zero_points` operands, one
+      value each per column of the [K, N] weight, with `B_quant_axis` naming
+      that column axis. `z_b = B_zero_points[n]` and
+      `M = (A_scale / Y_scale) * B_scales[n]`, so only `A_scale / Y_scale`
+      folds and the kernel indexes the rest by column.
 
     `packed_int4` means BOTH `$B` and `$B_zero_points` carry two 4-bit values
     per backing byte, low nibble first over the flattened row-major sequence,
     while their types keep the logical element count and an 8-bit element type
-    -- the same convention as hip.qconv and hip.dequantize_linear. The element
-    type's signedness selects INT4 (i8) or UINT4 (ui8); the two differ in how a
-    nibble is widened, so a consumer must not ignore it.
+    -- the same convention as hip.qconv and hip.dequantize_linear. Absent, both
+    are full-width 8-bit. The element type's signedness decides how a value is
+    widened, so a consumer must not ignore it.
 
     Examples:
     ```mlir
