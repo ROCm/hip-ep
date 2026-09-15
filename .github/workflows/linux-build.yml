@@ -151,6 +151,7 @@ jobs:
             echo "ROCK_ROOT=$BUILD_ROOT/_rocmlirtriton"
             echo "ROCK_SRC=$BUILD_ROOT/_deps/rocmlirtriton-src"
             echo "ROCK_INSTALL=$BUILD_ROOT/_rocmlirtriton/install"
+            echo "ROCK_BUILD=$ROCK_BUILD"
             echo "SHARED_LLVM_DIR=$ROCK_BUILD/external/llvm-project/llvm/lib/cmake/llvm"
             echo "SHARED_MLIR_DIR=$ROCK_BUILD/lib/cmake/mlir"
             echo "SHARED_LLD_DIR=$ROCK_BUILD/lib/cmake/lld"
@@ -529,18 +530,21 @@ jobs:
       # resource dir in lib/clang gives a self-contained tree with a single bin/
       # on PATH -- no separate llvm/ path.
       #
-      # These now come from TheRock rather than a hip-ep-built LLVM: the shared
-      # LLVM is rocmlirTriton's external/llvm-project, which enables mlir and lld
-      # but not clang, so there is no in-tree driver to ship. That matches how
-      # lib/Runtime already sources clang for its bitcode step. The runtime link
-      # is a plain host `clang++ -shared -fuse-ld=lld`, so the driver does not
-      # have to match the LLVM the EP itself was compiled with.
-      # -----------------------------------------------------------------------
+      # Prefer the shared LLVM 23 clang (same tree as runtime.bc). Fall back to
+      # TheRock if that driver is missing (warm cache from before clang was
+      # enabled in LLVM_ENABLE_PROJECTS). In-tree clang is typically static;
+      # TheRock's is dynamically linked, so the ldd copy loop still matters on
+      # the fallback path.
       - name: Bundle clang/lld toolchain
         run: |
           set -euo pipefail
-          LLVM="${{ env.THEROCK_DIST }}/lib/llvm"
-          [ -d "$LLVM/bin" ] || LLVM="${{ env.THEROCK_DIST }}"
+          if [ -x "${{ env.ROCK_BUILD }}/bin/clang++" ] || [ -x "${{ env.ROCK_BUILD }}/bin/clang" ]; then
+            LLVM="${{ env.ROCK_BUILD }}"
+          else
+            LLVM="${{ env.THEROCK_DIST }}/lib/llvm"
+            [ -d "$LLVM/bin" ] || LLVM="${{ env.THEROCK_DIST }}"
+          fi
+          echo "Bundling clang/lld from $LLVM"
           BIN="${{ runner.workspace }}/install/bin"
           LIB="${{ runner.workspace }}/install/lib"
           mkdir -p "$BIN" "$LIB"

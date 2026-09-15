@@ -251,9 +251,10 @@ else()
       "builds.")
   endif()
   message(STATUS "LLVM/MLIR not found; building from source (${DEP_HASH_llvm})")
-  # Match rocmlirTriton's in-tree LLVM configuration. X86 is retained alongside
-  # AMDGPU because hip-ep's ORC JIT emits native host code.
-  set(LLVM_ENABLE_PROJECTS "mlir;lld" CACHE STRING "" FORCE)
+  # Match rocmlirTriton's in-tree LLVM, plus clang so runtime.bc is compiled
+  # with the same LLVM 23 as hipgpu. X86 is retained alongside AMDGPU because
+  # hip-ep's ORC JIT emits native host code.
+  set(LLVM_ENABLE_PROJECTS "clang;mlir;lld" CACHE STRING "" FORCE)
   set(LLVM_TARGETS_TO_BUILD "X86;AMDGPU" CACHE STRING "" FORCE)
   # RTTI stays on, unlike rocmlirTriton: hip-ep's own libraries are compiled
   # with RTTI on ELF, so their vtables reference typeinfo for the MLIR bases

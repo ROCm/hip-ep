@@ -529,6 +529,9 @@ def build_rocmlirtriton(args, build_dir, source_dir=None, rocm_path=None):
                 "rocmlirTriton requires clang.exe/clang-cl.exe from "
                 f"TheRock; checked {compiler_dir}"
             )
+        # argv[0] selects clang-cl mode. The binary must still resolve
+        # <bindir>/../lib/clang -- a bare copy without that tree picks up
+        # MSVC's emmintrin.h and clangLex then fails to link (_mm_set1_epi8).
         toolchain_dir = rock_root / "toolchain"
         toolchain_dir.mkdir(parents=True, exist_ok=True)
         clang_cl = toolchain_dir / "clang-cl.exe"
@@ -537,6 +540,14 @@ def build_rocmlirtriton(args, build_dir, source_dir=None, rocm_path=None):
                 os.link(clang, clang_cl)
             except OSError:
                 shutil.copy2(clang, clang_cl)
+        resource_src = rocm_path / "lib" / "clang"
+        resource_dst = rock_root / "lib" / "clang"
+        if resource_src.is_dir() and not resource_dst.exists():
+            resource_dst.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.symlink(resource_src, resource_dst, target_is_directory=True)
+            except OSError:
+                shutil.copytree(resource_src, resource_dst)
     if IS_WINDOWS and not lld_link.exists():
         raise BuildError(f"rocmlirTriton requires lld-link.exe; checked {compiler_dir}")
 
@@ -562,6 +573,14 @@ def build_rocmlirtriton(args, build_dir, source_dir=None, rocm_path=None):
         "-DROCMLIR_DRIVER_E2E_TEST_ENABLED=OFF",
         "-DROCK_E2E_TEST_ENABLED=OFF",
         "-DTRITON_BUILD_BINARY=OFF",
+        # rocmlirTriton defaults to mlir;lld. hip-ep still compiles runtime.bc
+        # with clang, so enable the driver in this isolated LLVM. TheRock clang
+        # remains the host compiler for rocmlirTriton itself.
+        "-DLLVM_ENABLE_PROJECTS=clang;mlir;lld",
+        # Empty default triple makes this clang reject runtime.bc with
+        # "unknown target triple 'unknown'".
+        "-DLLVM_DEFAULT_TARGET_TRIPLE="
+        + ("x86_64-pc-windows-msvc" if IS_WINDOWS else "x86_64-unknown-linux-gnu"),
         # rocmlirTriton forces -Werror plus warnings that GCC reports
         # differently than the Clang upstream validates with. Demote them.
         "-DCMAKE_PROJECT_TOP_LEVEL_INCLUDES="
@@ -614,6 +633,9 @@ def build_rocmlirtriton(args, build_dir, source_dir=None, rocm_path=None):
         # into runtime.bc, and the tablegen/LIT utilities drive hip-ep's own
         # dialects and tests.
         extras = [
+            # clang is not in librockCompiler's graph; runtime.bc and the Linux
+            # clang++ -shared link need the driver from this same LLVM 23 tree.
+            "clang",
             "lldCOFF",
             "lldCommon",
             "llvm-link",
@@ -654,6 +676,10 @@ def build_rocmlirtriton(args, build_dir, source_dir=None, rocm_path=None):
                 if known.intersection({target, f"{target}.lib", f"{target}.exe"})
             ]
         if extras:
+            # clang's C++ frontend plus 32-way lld-link exhausts Windows
+            # runners and local boxes (ninja then exits 0xFFFFFFFF). Cap
+            # this graph independently of librockCompiler's job count.
+            extra_jobs = min(args.parallel, 8) if IS_WINDOWS else args.parallel
             step("Build shared-LLVM tools and libraries for hip-ep")
             run_subprocess(
                 [
@@ -663,7 +689,7 @@ def build_rocmlirtriton(args, build_dir, source_dir=None, rocm_path=None):
                     "--config",
                     args.config,
                     "--parallel",
-                    str(args.parallel),
+                    str(extra_jobs),
                     "--target",
                     *extras,
                 ],

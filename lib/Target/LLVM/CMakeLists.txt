@@ -148,15 +148,39 @@ if(NOT WIN32)
         set(HIPDNN_CLANG_EXECUTABLE "${LLVM_TOOLS_BINARY_DIR}/clang++")
         message(STATUS "Using in-tree clang++ for runtime DLL linking: ${HIPDNN_CLANG_EXECUTABLE}")
     else()
-        # rocmlirTriton's LLVM does not build clang. Prefer the HIP SDK driver,
-        # which is also the compiler used by rocmlirTriton.
-        find_program(HIPDNN_CLANG_EXECUTABLE NAMES clang++
-            HINTS
-                ${THEROCK_DIST}/lib/llvm/bin
-                ${THEROCK_DIST}/bin
-                ${LLVM_BINARY_DIR}/bin
-                ${LLVM_TOOLS_BINARY_DIR}
-        )
+        # Shared-LLVM hip-ep has no in-tree clang CMake target (find_package
+        # only). Prefer that tree's clang++ when the driver was built; else
+        # TheRock.
+        set(HIPDNN_CLANG_EXECUTABLE "")
+        set(_hipdnn_llvm_clangxx_dirs "")
+        if(LLVM_DIR)
+            get_filename_component(_hipdnn_llvm_cmake "${LLVM_DIR}" ABSOLUTE)
+            list(APPEND _hipdnn_llvm_clangxx_dirs "${_hipdnn_llvm_cmake}/../../../bin")
+        endif()
+        list(APPEND _hipdnn_llvm_clangxx_dirs
+            "${LLVM_BINARY_DIR}/bin"
+            "${LLVM_TOOLS_BINARY_DIR}")
+        foreach(_hipdnn_clangxx_dir ${_hipdnn_llvm_clangxx_dirs})
+            get_filename_component(_hipdnn_clangxx_dir "${_hipdnn_clangxx_dir}" ABSOLUTE)
+            foreach(_hipdnn_clangxx_name clang++.exe clang++)
+                if(EXISTS "${_hipdnn_clangxx_dir}/${_hipdnn_clangxx_name}")
+                    set(HIPDNN_CLANG_EXECUTABLE
+                        "${_hipdnn_clangxx_dir}/${_hipdnn_clangxx_name}")
+                    break()
+                endif()
+            endforeach()
+            if(HIPDNN_CLANG_EXECUTABLE)
+                break()
+            endif()
+        endforeach()
+        if(NOT HIPDNN_CLANG_EXECUTABLE)
+            unset(HIPDNN_CLANG_EXECUTABLE CACHE)
+            find_program(HIPDNN_CLANG_EXECUTABLE NAMES clang++
+                HINTS
+                    ${THEROCK_DIST}/lib/llvm/bin
+                    ${THEROCK_DIST}/bin
+            )
+        endif()
         if(HIPDNN_CLANG_EXECUTABLE)
             message(STATUS "Found clang++ for runtime DLL linking: ${HIPDNN_CLANG_EXECUTABLE}")
         endif()

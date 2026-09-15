@@ -29,9 +29,10 @@ endif()
 
 message(STATUS "Found Python: ${Python3_EXECUTABLE}")
 
-# Clang is required for bitcode generation, but is deliberately not part of
-# the rocmlirTriton LLVM build (LLVM_ENABLE_PROJECTS=mlir;lld). Prefer the HIP
-# SDK compiler, matching rocmlirTriton's Windows host-toolchain split.
+# Clang is required for bitcode generation. Prefer the clang from the LLVM that
+# hip-ep links (shared rocmlirTriton tree, or an in-tree target) so runtime.bc
+# matches LLVM 23. Fall back to the HIP SDK / PATH if that driver is absent
+# (warm CI cache from before clang was enabled).
 set(HIPDNN_RUNTIME_CLANG "" CACHE FILEPATH
     "Clang executable used to compile the embedded runtime bitcode")
 if(HIPDNN_RUNTIME_CLANG)
@@ -40,14 +41,39 @@ elseif(TARGET clang)
     set(CLANG_EXECUTABLE clang)
     message(STATUS "Using in-tree clang target for bitcode generation")
 else()
-    find_program(CLANG_EXECUTABLE NAMES clang clang.exe
-        PATHS
-            ${THEROCK_DIST}/lib/llvm/bin
-            ${THEROCK_DIST}/bin
-            ${LLVM_BINARY_DIR}/bin       # When LLVM built from source
-            ${LLVM_TOOLS_BINARY_DIR}     # When LLVM installed via package
-        NO_DEFAULT_PATH
-    )
+    # find_package(LLVM) can leave a stale LLVM_BINARY_DIR from an older
+    # in-tree LLVM while LLVM_DIR already points at the shared rocmlir tree.
+    # Walk LLVM_DIR first. find_program also caches TheRock from prior runs.
+    set(CLANG_EXECUTABLE "")
+    set(_hipdnn_llvm_clang_dirs "")
+    if(LLVM_DIR)
+        get_filename_component(_hipdnn_llvm_cmake "${LLVM_DIR}" ABSOLUTE)
+        list(APPEND _hipdnn_llvm_clang_dirs "${_hipdnn_llvm_cmake}/../../../bin")
+    endif()
+    list(APPEND _hipdnn_llvm_clang_dirs
+        "${LLVM_BINARY_DIR}/bin"
+        "${LLVM_TOOLS_BINARY_DIR}")
+    foreach(_hipdnn_clang_dir ${_hipdnn_llvm_clang_dirs})
+        get_filename_component(_hipdnn_clang_dir "${_hipdnn_clang_dir}" ABSOLUTE)
+        foreach(_hipdnn_clang_name clang.exe clang)
+            if(EXISTS "${_hipdnn_clang_dir}/${_hipdnn_clang_name}")
+                set(CLANG_EXECUTABLE "${_hipdnn_clang_dir}/${_hipdnn_clang_name}")
+                break()
+            endif()
+        endforeach()
+        if(CLANG_EXECUTABLE)
+            break()
+        endif()
+    endforeach()
+    if(NOT CLANG_EXECUTABLE)
+        unset(CLANG_EXECUTABLE CACHE)
+        find_program(CLANG_EXECUTABLE NAMES clang clang.exe
+            PATHS
+                ${THEROCK_DIST}/lib/llvm/bin
+                ${THEROCK_DIST}/bin
+            NO_DEFAULT_PATH
+        )
+    endif()
     if(NOT CLANG_EXECUTABLE)
         find_program(CLANG_EXECUTABLE NAMES clang clang.exe)
     endif()
@@ -64,17 +90,30 @@ if(NOT CLANG_EXECUTABLE)
         "\n"
         "To fix:\n"
         "  - Set -DHIPDNN_RUNTIME_CLANG=<path-to-clang>\n"
+        "  - Or build the shared LLVM with clang enabled (build.py)\n"
         "  - Or provide THEROCK_DIST containing the HIP SDK clang\n"
         "\n"
         "Searched in:\n"
-        "  - ${THEROCK_DIST}/lib/llvm/bin\n"
-        "  - ${THEROCK_DIST}/bin\n"
         "  - ${LLVM_BINARY_DIR}/bin\n"
         "  - ${LLVM_TOOLS_BINARY_DIR}\n"
+        "  - ${THEROCK_DIST}/lib/llvm/bin\n"
+        "  - ${THEROCK_DIST}/bin\n"
         "  - System PATH\n")
 endif()
 
 message(STATUS "Found Clang for bitcode generation: ${CLANG_EXECUTABLE}")
+
+# rocmlirTriton's LLVM is often configured with an empty
+# LLVM_DEFAULT_TARGET_TRIPLE. clang then errors on `unknown target triple
+# 'unknown'` when compiling runtime.bc. Pin the host triple LLVM already
+# detected (or a platform default).
+if(NOT LLVM_HOST_TRIPLE)
+    if(WIN32)
+        set(LLVM_HOST_TRIPLE "x86_64-pc-windows-msvc")
+    else()
+        set(LLVM_HOST_TRIPLE "x86_64-unknown-linux-gnu")
+    endif()
+endif()
 
 # llvm-link REQUIRED for combining bitcode files. Same in-tree-target-first
 # logic as clang above (llvm-link is a standard LLVM tool target).
@@ -256,6 +295,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
     add_custom_command(
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${OUTPUT_BC}
         COMMAND ${CLANG_EXECUTABLE}
+                --target=${LLVM_HOST_TRIPLE}
                 -c -emit-llvm -std=c++17
                 -D_CRT_SECURE_NO_WARNINGS
                 # Trim MSVC-CRT symbols the JIT can't resolve: _Init_thread_*

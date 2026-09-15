@@ -15,6 +15,7 @@ llvm;https://github.com/llvm/llvm-project.git;62b7cf9623fc310525f39ed69aaecc318a
 ## (HIPDNN_EP_FETCH_ROCMLIRTRITON, default ON) and uses external/llvm-project
 ## instead of a second llvm-project checkout. Hash must match
 ## _HIPDNN_ROCMLIRTRITON_REV in cmake/deps.cmake.
+## Shared LLVM projects: clang;mlir;lld (clang compiles runtime.bc).
 rocmlirTriton;https://github.com/ROCm/rocmlirTriton.git;28a5a7a40cfd6aceab0047c7fc92cb5cf90b6540
 protobuf;https://github.com/protocolbuffers/protobuf.git;v34.0
 flatbuffers;https://github.com/google/flatbuffers.git;v25.12.19
