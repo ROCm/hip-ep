@@ -681,6 +681,34 @@ private:
 
   void commitInline(ConstantPlan &plan) {
     OpBuilder builder(plan.op);
+    if (auto intType = dyn_cast<IntegerType>(plan.type.getElementType());
+        intType && !intType.isSignless()) {
+      // LLVM 23's arith.constant verifier accepts only signless integer
+      // results. Keep ONNX signed/unsigned storage identity by materializing
+      // such constants as inline globals instead of changing their type.
+      MemRefType memrefType =
+          MemRefType::get(plan.type.getShape(), plan.type.getElementType());
+      std::string symbolName;
+      do {
+        symbolName =
+            "hip_inline_constant_" + std::to_string(inlineGlobalCount++);
+      } while (SymbolTable::lookupSymbolIn(module, symbolName));
+      OpBuilder moduleBuilder(module.getBody(), module.getBody()->begin());
+      memref::GlobalOp::create(
+          moduleBuilder, plan.op.getLoc(), symbolName,
+          moduleBuilder.getStringAttr("private"), memrefType, plan.value,
+          /*constant=*/true,
+          moduleBuilder.getI64IntegerAttr(kConstantAlignment));
+      auto getGlobal = memref::GetGlobalOp::create(builder, plan.op.getLoc(),
+                                                   memrefType, symbolName);
+      auto tensor = bufferization::ToTensorOp::create(
+          builder, plan.op.getLoc(), plan.type, getGlobal,
+          /*restrict=*/builder.getUnitAttr(), /*writable=*/nullptr);
+      plan.op.getResult().replaceAllUsesWith(tensor.getResult());
+      plan.op.erase();
+      return;
+    }
+
     auto constant =
         arith::ConstantOp::create(builder, plan.op.getLoc(), plan.value);
     plan.op.getResult().replaceAllUsesWith(constant.getResult());
@@ -722,6 +750,7 @@ private:
   bool skipData;
   bool allowMemorySources;
   std::string binFileName;
+  size_t inlineGlobalCount = 0;
   size_t externalizedCount = 0;
   int64_t totalBlobSize = 0;
   int64_t partialBlobSize = 0;

@@ -24,6 +24,7 @@
 
 #include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Diagnostics.h"
@@ -349,6 +350,14 @@ int main() {
   if (inlineMemoryModule)
     inlineMemoryModule->walk([&](mlir::arith::ConstantOp op) {
       if (auto value = mlir::dyn_cast<mlir::DenseElementsAttr>(op.getValue())) {
+        auto raw = value.getRawData();
+        materializedBytes.assign(raw.begin(), raw.end());
+      }
+    });
+  if (inlineMemoryModule)
+    inlineMemoryModule->walk([&](mlir::memref::GlobalOp op) {
+      if (auto value = mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
+              op.getInitialValueAttr())) {
         auto raw = value.getRawData();
         materializedBytes.assign(raw.begin(), raw.end());
       }

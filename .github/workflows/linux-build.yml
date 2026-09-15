@@ -21,9 +21,12 @@ concurrency:
 
 env:
   # Pins (kept in lockstep with cmake/deps.txt).
-  # LLVM/MLIR/LLD are built from source at this upstream release tag; bumping it
-  # only invalidates the llvm-install cache.
-  LLVM_TAG: llvmorg-22.1.0
+  # LLVM/MLIR/LLD are built from the rocmlirTriton LLVM snapshot: the upstream
+  # SHA below plus cmake/patches/rocmlir-llvm-source.patch. LLVM_PATCHSET keys
+  # the llvm-install cache, so bump it whenever the patch content or the LLVM
+  # build flags below change.
+  LLVM_TAG: 62b7cf9623fc310525f39ed69aaecc318a909731
+  LLVM_PATCHSET: rocmlirTriton-28a5a7a40cfd6aceab0047c7fc92cb5cf90b6540-src3
   ONNXRUNTIME_VERSION: "1.27.0"
   # Space-separated microsoft/onnxruntime PR numbers `git apply`-ed on top of
   # the pinned tag during the from-source build (an empty list applies nothing;
@@ -99,7 +102,15 @@ jobs:
       - name: Install build toolchain
         run: |
           set -euo pipefail
-          sudo apt-get update
+          # The runner image preconfigures Google's Chrome repository, which
+          # nothing here installs from. apt-get update exits non-zero when any
+          # configured index fails, so a bad Chrome index (it has served a
+          # stale Packages.gz, giving "Hash Sum mismatch") fails this step and
+          # the whole build. Drop the repository rather than tolerate a
+          # partially updated index.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/google-chrome.sources
+          sudo apt-get update -o Acquire::Retries=3
           sudo apt-get install -y --no-install-recommends \
             build-essential ninja-build git ca-certificates curl
           # backend-mlir-compiler needs cmake >= 3.29; pip cmake wins over apt's.
@@ -130,40 +141,49 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.9
 
       # -----------------------------------------------------------------------
-      # LLVM/MLIR/LLD/Clang from source -> llvm-install (cached). Caching is a CI
-      # concern, so the prefix build lives here (not in build.py). Recipe
-      # matches cmake/deps.cmake's from-source fallback: clang;mlir;lld, X86 only,
-      # RTTI on, zlib/zstd off, INSTALL_UTILS on.
+      # LLVM/MLIR/LLD from the rocmlirTriton snapshot -> llvm-install (cached).
+      # Matches cmake/deps.cmake: mlir;lld, X86+AMDGPU, RTTI on, assertions on.
+      # Clang is not built in-tree; runtime bitcode uses the HIP SDK clang.
       # -----------------------------------------------------------------------
-      - name: Cache LLVM install prefix
+      # restore/save rather than actions/cache: that saves in a post step, which
+      # is skipped when the job fails, so any later failure would discard a
+      # multi-hour LLVM build. Saving right after the build keeps it.
+      - name: Restore LLVM install prefix
         id: cache-llvm
-        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
           # Keyed only on the LLVM tag: a protobuf/ORT bump must not evict the
           # multi-hour LLVM cache.
-          key: linux-llvm-${{ env.LLVM_TAG }}
+          key: linux-llvm-${{ env.LLVM_TAG }}-${{ env.LLVM_PATCHSET }}
 
       - name: Build LLVM/MLIR/LLD from source
         if: steps.cache-llvm.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           SRC="${{ runner.workspace }}/llvm-project"
-          git clone --depth 1 --branch "${{ env.LLVM_TAG }}" \
-            https://github.com/llvm/llvm-project.git "$SRC"
+          git init "$SRC"
+          git -C "$SRC" remote add origin https://github.com/llvm/llvm-project.git
+          git -C "$SRC" fetch --depth 1 origin "${{ env.LLVM_TAG }}"
+          git -C "$SRC" checkout FETCH_HEAD
+          cmake -DLLVM_SOURCE_DIR="$SRC" \
+            -P cmake/apply_rocmlir_llvm_patches.cmake
           cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
             -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
-            -DLLVM_TARGETS_TO_BUILD=X86 \
+            -DLLVM_ENABLE_PROJECTS="mlir;lld" \
+            -DLLVM_TARGETS_TO_BUILD="X86;AMDGPU" \
             -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/llvm-install" \
             -DLLVM_ENABLE_RTTI=ON \
+            -DLLVM_ENABLE_ASSERTIONS=ON \
             -DLLVM_ENABLE_ZLIB=OFF \
             -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_ENABLE_TERMINFO=OFF \
             -DLLVM_INCLUDE_TESTS=OFF \
             -DLLVM_INCLUDE_EXAMPLES=OFF \
             -DLLVM_INCLUDE_BENCHMARKS=OFF \
             -DLLVM_BUILD_TOOLS=ON \
             -DLLVM_INSTALL_UTILS=ON \
+            -DLLVM_INSTALL_TOOLCHAIN_ONLY=ON \
             -DCMAKE_CXX_VISIBILITY_PRESET=hidden \
             -DCMAKE_C_VISIBILITY_PRESET=hidden \
             -DCMAKE_VISIBILITY_INLINES_HIDDEN=ON \
@@ -171,6 +191,14 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
           cmake --build "${{ runner.workspace }}/build-llvm" --target install
           rm -rf "$SRC" "${{ runner.workspace }}/build-llvm"
+
+      - name: Save LLVM install prefix
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/llvm-install
+          key: linux-llvm-${{ env.LLVM_TAG }}-${{ env.LLVM_PATCHSET }}
 
       # -----------------------------------------------------------------------
       # ONNX Runtime built from source into ort-install (cached): checkout ->
@@ -468,47 +496,6 @@ jobs:
           echo "[verify] install/ closure OK"
 
       # -----------------------------------------------------------------------
-      # Bundle our from-source clang/lld alongside the other tools in install/bin
-      # so per-model DLL linking at runtime uses the same LLVM the EP was built
-      # against (not TheRock's ROCm clang). clang locates its resource dir
-      # relative to its own binary (bin/../lib/clang), so dropping the driver in
-      # bin/ and the resource dir in lib/clang gives a self-contained tree with a
-      # single bin/ on PATH -- no separate llvm/ path. LLVM is built static (no
-      # LLVM_LINK_LLVM_DYLIB), so the drivers depend only on system libs; ldd-grab
-      # any stray non-system dep (normally none).
-      # -----------------------------------------------------------------------
-      - name: Bundle clang/lld toolchain
-        run: |
-          set -euo pipefail
-          LLVM="${{ runner.workspace }}/llvm-install"
-          BIN="${{ runner.workspace }}/install/bin"
-          LIB="${{ runner.workspace }}/install/lib"
-          mkdir -p "$BIN" "$LIB"
-          shopt -s nullglob
-          # Only the driver + ELF linker are used by the runtime per-model link
-          # (`clang++ -shared -fuse-ld=lld`, a pure host link). Skip the dev tools
-          # (clang-format/-repl/-tidy/-scan-deps/...), the offload helpers
-          # (clang-offload-*/-linker-wrapper -- we never compile device code via
-          # clang, comgr does), and the non-ELF linkers (lld-link/ld64.lld) to
-          # keep the package lean. cp -a keeps the clang++->clang->clang-NN and
-          # ld.lld->lld symlinks; the real binaries are copied by the globs.
-          for f in "$LLVM"/bin/clang "$LLVM"/bin/clang++ "$LLVM"/bin/clang-[0-9]* \
-                   "$LLVM"/bin/lld "$LLVM"/bin/ld.lld; do
-            cp -a "$f" "$BIN/"
-          done
-          # clang resource dir (builtins/crt the -shared link may reference).
-          # clang resolves this as <bindir>/../lib/clang at runtime.
-          [ -d "$LLVM/lib/clang" ] && cp -a "$LLVM/lib/clang" "$LIB/" || true
-          # Copy only non-system shared-lib deps (static LLVM => normally none).
-          for b in "$BIN"/clang "$BIN"/clang-[0-9]* "$BIN"/lld; do
-            [ -f "$b" ] || continue
-            ldd "$b" 2>/dev/null | awk '$3 ~ /^\// && $3 !~ /^\/(usr|lib|lib64)\// {print $3}'
-          done | sort -u | while read -r src; do
-            [ -e "$LIB/$(basename "$src")" ] || cp -a "$src" "$LIB/"
-          done
-          "$BIN/clang++" --version | head -1
-
-      # -----------------------------------------------------------------------
       # Stage the artifact from install/ (the bundling steps above made it
       # self-contained). Drop dev-only pieces. Does NOT bundle TheRock (deploy
       # host installs ROCm separately).
@@ -517,8 +504,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p staging/bin staging/lib staging/etc
-          # install/bin already carries our from-source clang/lld (bundled above)
-          # next to the other tools; install/lib/clang holds clang's resource dir.
+          # No clang/lld here: the per-model native-.so link shells out to
+          # `clang++ -shared -fuse-ld=lld`, and DLLLinker.cpp falls back to
+          # clang++ on PATH when the baked HIPDNN_CLANG_PATH is absent. The
+          # deploy host installs ROCm separately, so it already has a matched
+          # clang, and bundling TheRock's would drag libclang-cpp, libLLVM and
+          # its vendored zlib/zstd into a package that deliberately excludes
+          # ROCm. See docs/quick_start_linux.md.
           # No separate llvm/ path: a single staging/bin on PATH is self-contained.
           cp -a "${{ runner.workspace }}/install/bin/." staging/bin/
           cp -a "${{ runner.workspace }}/install/lib/." staging/lib/

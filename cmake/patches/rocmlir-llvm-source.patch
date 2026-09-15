@@ -1,0 +1,1552 @@
+rocmlirTriton LLVM source patch
+===============================
+
+Upstream base : llvm/llvm-project 62b7cf9623fc310525f39ed69aaecc318a909731
+Vendored tree : ROCm/rocmlirTriton 28a5a7a40cfd6aceab0047c7fc92cb5cf90b6540
+                (external/llvm-project)
+
+rocmlirTriton vendors LLVM with git subtree and commits its downstream changes
+directly onto the imported upstream revision. The records under its
+llvm-patches/ directory are provenance for the next upstream bump, not build
+inputs, and they cannot be replayed onto clean upstream: patch208280 reverts a
+downstream-only fix (#207473) whose own record was dropped, so its pre-image
+does not exist in any reachable tree.
+
+This patch is generated from the vendored tree itself, so every file below is
+byte-identical to rocmlirTriton's. It carries only sources hip-ep compiles; the
+LLVM/MLIR lit-test expectations that the records also update are omitted,
+because hip-ep builds LLVM as libraries and never runs check-llvm.
+
+Regenerate after a rocmlirTriton bump:
+
+  # 1. Check out llvm-project at the new upstream base.
+  # 2. Overlay the vendored sources for the files this patch touches:
+  #      git -C <rocmlirTriton> archive HEAD -- \
+  #          $(sed -n 's|^--- a/|external/llvm-project/|p' <this file>) \
+  #        | tar -x -C <llvm-project> --strip-components=2
+  # 3. Run `git add -N .` so newly added files are included, then write
+  #    `git diff` to this file and restore this header.
+diff --git a/llvm/include/llvm/CodeGen/LiveInterval.h b/llvm/include/llvm/CodeGen/LiveInterval.h
+index 114978996..34f318a9d 100644
+--- a/llvm/include/llvm/CodeGen/LiveInterval.h
++++ b/llvm/include/llvm/CodeGen/LiveInterval.h
+@@ -490,6 +490,13 @@ namespace llvm {
+     /// may have grown since it was inserted).
+     LLVM_ABI iterator addSegment(Segment S);
+ 
++    /// Merge the segment pointed to by @p I with its immediate neighbors when
++    /// they use the same value number and touch it. @p I must be a valid
++    /// iterator into this live range. Returns an iterator to the merged
++    /// segment, which may be @p I or the previous segment if @p I was merged
++    /// into it.
++    LLVM_ABI iterator mergeAdjacentSegments(iterator I);
++
+     /// Attempt to extend a value defined after @p StartIdx to include @p Use.
+     /// Both @p StartIdx and @p Use should be in the same basic block. In case
+     /// of subranges, an extension could be prevented by an explicit "undef"
+diff --git a/llvm/include/llvm/CodeGen/ScheduleDAGInstrs.h b/llvm/include/llvm/CodeGen/ScheduleDAGInstrs.h
+index 8b3907629..85613c072 100644
+--- a/llvm/include/llvm/CodeGen/ScheduleDAGInstrs.h
++++ b/llvm/include/llvm/CodeGen/ScheduleDAGInstrs.h
+@@ -159,6 +159,8 @@ namespace llvm {
+     /// scheduling region is mapped to an SUnit.
+     DenseMap<MachineInstr*, SUnit*> MISUnitMap;
+ 
++    unsigned MemOpsProcessed = 0;
++
+     // State internal to DAG building.
+     // -------------------------------
+ 
+@@ -217,13 +219,6 @@ namespace llvm {
+       return nullptr;
+     }
+ 
+-    /// Reduces maps in FIFO order, by N SUs. This is better than turning
+-    /// every Nth memory SU into BarrierChain in buildSchedGraph(), since
+-    /// it avoids unnecessary edges between seen SUs above the new BarrierChain,
+-    /// and those below it.
+-    void reduceHugeMemNodeMaps(Value2SUsMap &stores,
+-                               Value2SUsMap &loads, unsigned N);
+-
+     /// Adds a chain edge between SUa and SUb, but only if both
+     /// AAResults and Target fail to deny the dependency.
+     void addChainDependency(SUnit *SUa, SUnit *SUb,
+@@ -249,12 +244,6 @@ namespace llvm {
+     /// before calling this.
+     void addBarrierChain(Value2SUsMap &map);
+ 
+-    /// Inserts a barrier chain in a huge region, far below current SU.
+-    /// Adds barrier chain edges from all SUs in map with higher NodeNums than
+-    /// this new BarrierChain, and remove them from map. It is assumed
+-    /// BarrierChain has been set before calling this.
+-    void insertBarrierChain(Value2SUsMap &map);
+-
+     /// For an unanalyzable memory access, this Value is used in maps.
+     UndefValue *UnknownValue;
+ 
+diff --git a/llvm/lib/CodeGen/InlineSpiller.cpp b/llvm/lib/CodeGen/InlineSpiller.cpp
+index da202c4bf..5ed3b3628 100644
+--- a/llvm/lib/CodeGen/InlineSpiller.cpp
++++ b/llvm/lib/CodeGen/InlineSpiller.cpp
+@@ -454,6 +454,34 @@ bool InlineSpiller::hoistSpillInsideBB(LiveInterval &SpillLI,
+   if (DefMBB != CopyMI.getParent() || !SrcQ.isKill())
+     return false;
+ 
++  MachineBasicBlock *MBB = DefMBB;
++  MachineBasicBlock::iterator MII;
++  if (SrcVNI->isPHIDef())
++    MII = MBB->SkipPHIsLabelsAndDebug(MBB->begin(), SrcReg);
++  else {
++    MachineInstr *DefMI = LIS.getInstructionFromIndex(SrcVNI->def);
++    assert(DefMI && "Defining instruction disappeared");
++    MII = DefMI;
++    ++MII;
++  }
++
++  // When the def is a PHI, the store may be inserted after the prologue
++  // instructions. In that case, the segment may need to be extended to the
++  // store (see below). Do not hoist if there is an interference between the end
++  // of the segment and the insertion point.
++  if (SrcVNI->isPHIDef() && Matrix && VRM.hasPhys(SrcReg)) {
++    // Here, MII points to the instruction before which the store will be
++    // inserted. Using that instruction's base index is a safe upper bound for
++    // the interference check.
++    SlotIndex InsertIdx = MII == MBB->end()
++                              ? LIS.getMBBEndIdx(MBB)
++                              : LIS.getInstructionIndex(*MII).getBaseIndex();
++    if (SrcQ.endPoint() < InsertIdx &&
++        Matrix->checkInterference(SrcQ.endPoint(), InsertIdx,
++                                  VRM.getPhys(SrcReg)))
++      return false;
++  }
++
+   // Conservatively extend the stack slot range to the range of the original
+   // value. We may be able to do better with stack slot coloring by being more
+   // careful here.
+@@ -468,16 +496,6 @@ bool InlineSpiller::hoistSpillInsideBB(LiveInterval &SpillLI,
+   // any later spills of the same value.
+   eliminateRedundantSpills(SrcLI, SrcVNI);
+ 
+-  MachineBasicBlock *MBB = LIS.getMBBFromIndex(SrcVNI->def);
+-  MachineBasicBlock::iterator MII;
+-  if (SrcVNI->isPHIDef())
+-    MII = MBB->SkipPHIsLabelsAndDebug(MBB->begin(), SrcReg);
+-  else {
+-    MachineInstr *DefMI = LIS.getInstructionFromIndex(SrcVNI->def);
+-    assert(DefMI && "Defining instruction disappeared");
+-    MII = DefMI;
+-    ++MII;
+-  }
+   MachineInstrSpan MIS(MII, MBB);
+   // Insert spill without kill flag immediately after def.
+   TII.storeRegToStackSlot(*MBB, MII, SrcReg, false, StackSlot,
+diff --git a/llvm/lib/CodeGen/LiveInterval.cpp b/llvm/lib/CodeGen/LiveInterval.cpp
+index 299db8523..ed048c411 100644
+--- a/llvm/lib/CodeGen/LiveInterval.cpp
++++ b/llvm/lib/CodeGen/LiveInterval.cpp
+@@ -540,6 +540,28 @@ LiveRange::iterator LiveRange::addSegment(Segment S) {
+   return CalcLiveRangeUtilVector(this).addSegment(S);
+ }
+ 
++LiveRange::iterator LiveRange::mergeAdjacentSegments(iterator I) {
++  assert(segmentSet == nullptr && "Cannot merge with active segment set");
++  assert(I != end() && "Cannot merge end iterator");
++
++  if (I != begin()) {
++    iterator Prev = std::prev(I);
++    if (Prev->valno == I->valno && Prev->end == I->start) {
++      Prev->end = I->end;
++      segments.erase(I);
++      I = Prev;
++    }
++  }
++
++  iterator Next = std::next(I);
++  if (Next != end() && I->valno == Next->valno && I->end == Next->start) {
++    I->end = Next->end;
++    segments.erase(Next);
++  }
++
++  return I;
++}
++
+ void LiveRange::append(const Segment S) {
+   // Check that the segment belongs to the back of the list.
+   assert(segments.empty() || segments.back().end <= S.start);
+@@ -754,34 +776,10 @@ VNInfo *LiveRange::MergeValueNumberInto(VNInfo *V1, VNInfo *V2) {
+     iterator S = I++;
+     if (S->valno != V1) continue;  // Not a V1 Segment.
+ 
+-    // Okay, we found a V1 live range.  If it had a previous, touching, V2 live
+-    // range, extend it.
+-    if (S != begin()) {
+-      iterator Prev = S-1;
+-      if (Prev->valno == V2 && Prev->end == S->start) {
+-        Prev->end = S->end;
+-
+-        // Erase this live-range.
+-        segments.erase(S);
+-        I = Prev+1;
+-        S = Prev;
+-      }
+-    }
+-
+-    // Okay, now we have a V1 or V2 live range that is maximally merged forward.
+-    // Ensure that it is a V2 live-range.
++    // After changing this segment to V2, it may touch an adjacent V2 segment.
++    // Merge with either neighbor before continuing.
+     S->valno = V2;
+-
+-    // If we can merge it into later V2 segments, do so now.  We ignore any
+-    // following V1 segments, as they will be merged in subsequent iterations
+-    // of the loop.
+-    if (I != end()) {
+-      if (I->start == S->end && I->valno == V2) {
+-        S->end = I->end;
+-        segments.erase(I);
+-        I = S+1;
+-      }
+-    }
++    I = std::next(mergeAdjacentSegments(S));
+   }
+ 
+   // Now that V1 is dead, remove it.
+diff --git a/llvm/lib/CodeGen/LiveIntervals.cpp b/llvm/lib/CodeGen/LiveIntervals.cpp
+index 6ed379418..3da53566a 100644
+--- a/llvm/lib/CodeGen/LiveIntervals.cpp
++++ b/llvm/lib/CodeGen/LiveIntervals.cpp
+@@ -1461,9 +1461,17 @@ private:
+         *(NewIdxOut + 1) = LiveRange::Segment(
+             NewIdxDef.getRegSlot(), (NewIdxOut + 1)->end, OldIdxVNI);
+         OldIdxVNI->def = NewIdxDef;
+-        // Modify subsequent segments to be defined by the moved def OldIdxVNI.
+-        for (auto *Idx = NewIdxOut + 2; Idx <= OldIdxOut; ++Idx)
++        // Retag the segments that were shifted down from [NewIdxOut + 2,
++        // OldIdxOut]. Retagging can make a segment touch another segment with
++        // the same value number, so merge as we go. Stop at the original end
++        // slot instead of using a segment count because merging may erase
++        // segments.
++        const SlotIndex RetagEnd = OldIdxOut->end;
++        for (LiveRange::iterator Idx = NewIdxOut + 2;
++             Idx != LR.end() && Idx->start < RetagEnd;) {
+           Idx->valno = OldIdxVNI;
++          Idx = std::next(LR.mergeAdjacentSegments(Idx));
++        }
+         // Aggressively remove all dead flags from the former dead definition.
+         // Kill/dead flags shouldn't be used while live intervals exist; they
+         // will be reinserted by VirtRegRewriter.
+diff --git a/llvm/lib/CodeGen/RegAllocGreedy.cpp b/llvm/lib/CodeGen/RegAllocGreedy.cpp
+index 6b8a9b819..799816191 100644
+--- a/llvm/lib/CodeGen/RegAllocGreedy.cpp
++++ b/llvm/lib/CodeGen/RegAllocGreedy.cpp
+@@ -843,8 +843,15 @@ bool RAGreedy::addThroughConstraints(InterferenceCache::Cursor Intf,
+         SlotIndex::isEarlierInstr(LIS->getInstructionIndex(*FirstNonDebugInstr),
+                                   SA->getFirstSplitPoint(Number)))
+       return false;
++
+     // Interference for the live-in value.
+-    if (Intf.first() <= Indexes->getMBBStartIdx(Number))
++    Register Reg = SA->getParent().reg();
++    auto InsertPt = MBB->SkipPHIsLabelsAndDebug(MBB->begin(), Reg);
++    SlotIndex InsertIdx = InsertPt == MBB->end()
++                              ? Indexes->getMBBEndIdx(Number)
++                              : LIS->getInstructionIndex(*InsertPt);
++    if (Intf.first() <= Indexes->getMBBStartIdx(Number) ||
++        SlotIndex::isEarlierInstr(Intf.first(), InsertIdx))
+       BCS[B].Entry = SpillPlacement::MustSpill;
+     else
+       BCS[B].Entry = SpillPlacement::PrefSpill;
+diff --git a/llvm/lib/CodeGen/ScheduleDAGInstrs.cpp b/llvm/lib/CodeGen/ScheduleDAGInstrs.cpp
+index 343920044..6f42de464 100644
+--- a/llvm/lib/CodeGen/ScheduleDAGInstrs.cpp
++++ b/llvm/lib/CodeGen/ScheduleDAGInstrs.cpp
+@@ -83,15 +83,11 @@ static cl::opt<bool>
+ 
+ // When Stores and Loads maps (or NonAliasStores and NonAliasLoads)
+ // together hold this many SUs, a reduction of maps will be done.
+-static cl::opt<unsigned> HugeRegion("dag-maps-huge-region", cl::Hidden,
+-    cl::init(1000), cl::desc("The limit to use while constructing the DAG "
+-                             "prior to scheduling, at which point a trade-off "
+-                             "is made to avoid excessive compile time."));
+-
+-static cl::opt<unsigned> ReductionSize(
+-    "dag-maps-reduction-size", cl::Hidden,
+-    cl::desc("A huge scheduling region will have maps reduced by this many "
+-             "nodes at a time. Defaults to HugeRegion / 2."));
++static cl::opt<unsigned>
++    HugeRegion("dag-maps-huge-region", cl::Hidden, cl::init(500),
++               cl::desc("The limit to use while constructing the DAG "
++                        "prior to scheduling, at which point a trade-off "
++                        "is made to avoid excessive compile time."));
+ 
+ #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
+ static cl::opt<bool> SchedPrintCycles(
+@@ -99,14 +95,6 @@ static cl::opt<bool> SchedPrintCycles(
+     cl::desc("Report top/bottom cycles when dumping SUnit instances"));
+ #endif
+ 
+-static unsigned getReductionSize() {
+-  // Always reduce a huge region with half of the elements, except
+-  // when user sets this number explicitly.
+-  if (ReductionSize.getNumOccurrences() == 0)
+-    return HugeRegion / 2;
+-  return ReductionSize;
+-}
+-
+ static void dumpSUList(const ScheduleDAGInstrs::SUList &L) {
+ #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
+   dbgs() << "{ ";
+@@ -719,39 +707,6 @@ void ScheduleDAGInstrs::addBarrierChain(Value2SUsMap &map) {
+   map.clear();
+ }
+ 
+-void ScheduleDAGInstrs::insertBarrierChain(Value2SUsMap &map) {
+-  assert(BarrierChain != nullptr);
+-
+-  // Go through all lists of SUs.
+-  for (Value2SUsMap::iterator I = map.begin(), EE = map.end(); I != EE;) {
+-    Value2SUsMap::iterator CurrItr = I++;
+-    SUList &sus = CurrItr->second;
+-    SUList::iterator SUItr = sus.begin(), SUEE = sus.end();
+-    for (; SUItr != SUEE; ++SUItr) {
+-      // Stop on BarrierChain or any instruction above it.
+-      if ((*SUItr)->NodeNum <= BarrierChain->NodeNum)
+-        break;
+-
+-      (*SUItr)->addPredBarrier(BarrierChain);
+-    }
+-
+-    // Remove also the BarrierChain from list if present.
+-    if (SUItr != SUEE && *SUItr == BarrierChain)
+-      SUItr++;
+-
+-    // Remove all SUs that are now successors of BarrierChain.
+-    if (SUItr != sus.begin())
+-      sus.erase(sus.begin(), SUItr);
+-  }
+-
+-  // Remove all entries with empty su lists.
+-  map.remove_if([&](std::pair<ValueType, SUList> &mapEntry) {
+-      return (mapEntry.second.empty()); });
+-
+-  // Recompute the size of the map (NumNodes).
+-  map.reComputeSize();
+-}
+-
+ void ScheduleDAGInstrs::buildSchedGraph(AAResults *AA,
+                                         RegPressureTracker *RPTracker,
+                                         PressureDiffs *PDiffs,
+@@ -764,6 +719,7 @@ void ScheduleDAGInstrs::buildSchedGraph(AAResults *AA,
+     AAForDep.emplace(*AA);
+ 
+   BarrierChain = nullptr;
++  MemOpsProcessed = 0;
+ 
+   this->TrackLaneMasks = TrackLaneMasks;
+   MISUnitMap.clear();
+@@ -943,12 +899,14 @@ void ScheduleDAGInstrs::buildSchedGraph(AAResults *AA,
+       if (BarrierChain)
+         BarrierChain->addPredBarrier(SU);
+ 
+-      FPExceptions.insert(SU, UnknownValue);
+-
+-      if (FPExceptions.size() >= HugeRegion) {
+-        LLVM_DEBUG(dbgs() << "Reducing FPExceptions map.\n");
+-        Value2SUsMap empty;
+-        reduceHugeMemNodeMaps(FPExceptions, empty, getReductionSize());
++      if (FPExceptions.size() + 1 >= HugeRegion) {
++        LLVM_DEBUG(
++            dbgs()
++            << "Creating barrier chain and clearing FPExceptions map.\n");
++        BarrierChain = SU;
++        addBarrierChain(FPExceptions);
++      } else {
++        FPExceptions.insert(SU, UnknownValue);
+       }
+     }
+ 
+@@ -957,10 +915,27 @@ void ScheduleDAGInstrs::buildSchedGraph(AAResults *AA,
+         !(MI.mayLoad() && !MI.isDereferenceableInvariantLoad()))
+       continue;
+ 
++    MemOpsProcessed++;
++
+     // Always add dependecy edge to BarrierChain if present.
+-    if (BarrierChain)
++    if (BarrierChain && BarrierChain != SU)
+       BarrierChain->addPredBarrier(SU);
+ 
++    // Reduce maps if they grow huge.
++    if (MemOpsProcessed >= HugeRegion) {
++      LLVM_DEBUG(dbgs() << "Creating barrier chain and clearing maps.\n");
++
++      BarrierChain = SU;
++
++      addBarrierChain(Stores);
++      addBarrierChain(Loads);
++      addBarrierChain(NonAliasStores);
++      addBarrierChain(NonAliasLoads);
++
++      MemOpsProcessed = 0;
++      continue;
++    }
++
+     // Find the underlying objects for MI. The Objs vector is either
+     // empty, or filled with the Values of memory locations which this
+     // SU depends on.
+@@ -1026,16 +1001,6 @@ void ScheduleDAGInstrs::buildSchedGraph(AAResults *AA,
+         addChainDependencies(SU, Stores, UnknownValue);
+       }
+     }
+-
+-    // Reduce maps if they grow huge.
+-    if (Stores.size() + Loads.size() >= HugeRegion) {
+-      LLVM_DEBUG(dbgs() << "Reducing Stores and Loads maps.\n");
+-      reduceHugeMemNodeMaps(Stores, Loads, getReductionSize());
+-    }
+-    if (NonAliasStores.size() + NonAliasLoads.size() >= HugeRegion) {
+-      LLVM_DEBUG(dbgs() << "Reducing NonAliasStores and NonAliasLoads maps.\n");
+-      reduceHugeMemNodeMaps(NonAliasStores, NonAliasLoads, getReductionSize());
+-    }
+   }
+ 
+   if (DbgMI)
+@@ -1072,56 +1037,6 @@ void ScheduleDAGInstrs::Value2SUsMap::dump() {
+   }
+ }
+ 
+-void ScheduleDAGInstrs::reduceHugeMemNodeMaps(Value2SUsMap &stores,
+-                                              Value2SUsMap &loads, unsigned N) {
+-  LLVM_DEBUG(dbgs() << "Before reduction:\nStoring SUnits:\n"; stores.dump();
+-             dbgs() << "Loading SUnits:\n"; loads.dump());
+-
+-  // Insert all SU's NodeNums into a vector and sort it.
+-  std::vector<unsigned> NodeNums;
+-  NodeNums.reserve(stores.size() + loads.size());
+-  for (const auto &[V, SUs] : stores) {
+-    (void)V;
+-    for (const auto *SU : SUs)
+-      NodeNums.push_back(SU->NodeNum);
+-  }
+-  for (const auto &[V, SUs] : loads) {
+-    (void)V;
+-    for (const auto *SU : SUs)
+-      NodeNums.push_back(SU->NodeNum);
+-  }
+-  llvm::sort(NodeNums);
+-
+-  // The N last elements in NodeNums will be removed, and the SU with
+-  // the lowest NodeNum of them will become the new BarrierChain to
+-  // let the not yet seen SUs have a dependency to the removed SUs.
+-  assert(N <= NodeNums.size());
+-  SUnit *newBarrierChain = &SUnits[*(NodeNums.end() - N)];
+-  if (BarrierChain) {
+-    // The aliasing and non-aliasing maps reduce independently of each
+-    // other, but share a common BarrierChain. Check if the
+-    // newBarrierChain is above the former one. If it is not, it may
+-    // introduce a loop to use newBarrierChain, so keep the old one.
+-    if (newBarrierChain->NodeNum < BarrierChain->NodeNum) {
+-      BarrierChain->addPredBarrier(newBarrierChain);
+-      BarrierChain = newBarrierChain;
+-      LLVM_DEBUG(dbgs() << "Inserting new barrier chain: SU("
+-                        << BarrierChain->NodeNum << ").\n");
+-    }
+-    else
+-      LLVM_DEBUG(dbgs() << "Keeping old barrier chain: SU("
+-                        << BarrierChain->NodeNum << ").\n");
+-  }
+-  else
+-    BarrierChain = newBarrierChain;
+-
+-  insertBarrierChain(stores);
+-  insertBarrierChain(loads);
+-
+-  LLVM_DEBUG(dbgs() << "After reduction:\nStoring SUnits:\n"; stores.dump();
+-             dbgs() << "Loading SUnits:\n"; loads.dump());
+-}
+-
+ static void toggleKills(const MachineRegisterInfo &MRI, LiveRegUnits &LiveRegs,
+                         MachineInstr &MI, bool addToLiveRegs) {
+   for (MachineOperand &MO : MI.operands()) {
+diff --git a/llvm/lib/Target/AMDGPU/AMDGPULowerIntrinsics.cpp b/llvm/lib/Target/AMDGPU/AMDGPULowerIntrinsics.cpp
+index d9b018e3c..ea4633936 100644
+--- a/llvm/lib/Target/AMDGPU/AMDGPULowerIntrinsics.cpp
++++ b/llvm/lib/Target/AMDGPU/AMDGPULowerIntrinsics.cpp
+@@ -94,8 +94,10 @@ bool AMDGPULowerIntrinsicsImpl::visitBarrier(IntrinsicInst &I) {
+   const GCNSubtarget &ST = TM.getSubtarget<GCNSubtarget>(*I.getFunction());
+   bool IsSingleWaveWG = false;
+ 
+-  if (TM.getOptLevel() > CodeGenOptLevel::None)
+-    IsSingleWaveWG = ST.isSingleWavefrontWorkgroup(*I.getFunction());
++  if (TM.getOptLevel() > CodeGenOptLevel::None) {
++    unsigned WGMaxSize = ST.getFlatWorkGroupSizes(*I.getFunction()).second;
++    IsSingleWaveWG = WGMaxSize <= ST.getWavefrontSize();
++  }
+ 
+   IRBuilder<> B(&I);
+ 
+diff --git a/llvm/lib/Target/AMDGPU/AMDGPURewriteAGPRCopyMFMA.h b/llvm/lib/Target/AMDGPU/AMDGPURewriteAGPRCopyMFMA.h
+new file mode 100644
+index 000000000..624860f8c
+--- /dev/null
++++ b/llvm/lib/Target/AMDGPU/AMDGPURewriteAGPRCopyMFMA.h
+@@ -0,0 +1,32 @@
++//===- AMDGPURewriteAGPRCopyMFMA.h ------------------------------*- C++ -*-===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++
++#ifndef LLVM_LIB_TARGET_AMDGPU_AMDGPUREWRITEAGPRCOPYMFMA_H
++#define LLVM_LIB_TARGET_AMDGPU_AMDGPUREWRITEAGPRCOPYMFMA_H
++
++#include "llvm/ADT/SmallVector.h"
++
++namespace llvm {
++
++class MachineFunction;
++class MachineDominatorTree;
++class MachineInstr;
++
++namespace AMDGPU {
++
++/// Returns true if every reload in \p Loads is jointly dominated by at least
++/// one store in \p Stores to the same stack slot \p Slot.
++bool checkAGPRCopyMFMAJointDominance(
++    const MachineFunction &MF, const MachineDominatorTree &MDT,
++    const SmallVectorImpl<MachineInstr *> &Stores,
++    const SmallVectorImpl<MachineInstr *> &Loads, int Slot);
++
++} // end namespace AMDGPU
++} // end namespace llvm
++
++#endif // LLVM_LIB_TARGET_AMDGPU_AMDGPUREWRITEAGPRCOPYMFMA_H
+diff --git a/llvm/lib/Target/AMDGPU/AMDGPURewriteAGPRCopyMFMA.cpp b/llvm/lib/Target/AMDGPU/AMDGPURewriteAGPRCopyMFMA.cpp
+index 1d39b4f1b..2c255f861 100644
+--- a/llvm/lib/Target/AMDGPU/AMDGPURewriteAGPRCopyMFMA.cpp
++++ b/llvm/lib/Target/AMDGPU/AMDGPURewriteAGPRCopyMFMA.cpp
+@@ -22,6 +22,7 @@
+ ///
+ //===----------------------------------------------------------------------===//
+ 
++#include "AMDGPURewriteAGPRCopyMFMA.h"
+ #include "AMDGPU.h"
+ #include "GCNSubtarget.h"
+ #include "SIMachineFunctionInfo.h"
+@@ -30,6 +31,7 @@
+ #include "llvm/CodeGen/LiveIntervals.h"
+ #include "llvm/CodeGen/LiveRegMatrix.h"
+ #include "llvm/CodeGen/LiveStacks.h"
++#include "llvm/CodeGen/MachineDominators.h"
+ #include "llvm/CodeGen/MachineFrameInfo.h"
+ #include "llvm/CodeGen/MachineFunctionPass.h"
+ #include "llvm/CodeGen/SlotIndexes.h"
+@@ -44,6 +46,72 @@ using namespace llvm;
+ DEBUG_COUNTER(RewriteAGPRCopyMFMACounter, DEBUG_TYPE,
+               "Controls which MFMA chains are rewritten to AGPR form");
+ 
++namespace llvm {
++namespace AMDGPU {
++bool checkAGPRCopyMFMAJointDominance(
++    const MachineFunction &MF, const MachineDominatorTree &MDT,
++    const SmallVectorImpl<MachineInstr *> &Stores,
++    const SmallVectorImpl<MachineInstr *> &Loads, int Slot) {
++  SmallPtrSet<MachineBasicBlock *, 4> StoreBlocks;
++  for (MachineInstr *S : Stores)
++    if (MDT.isReachableFromEntry(S->getParent()))
++      StoreBlocks.insert(S->getParent());
++
++  if (StoreBlocks.empty())
++    return false;
++
++  // Compute blocks reachable from entry without passing through a store
++  // block.
++  SmallPtrSet<MachineBasicBlock *, 16> StoreFreeReachable;
++  SmallVector<MachineBasicBlock *, 16> Worklist;
++
++  MachineBasicBlock &EntryMBB = const_cast<MachineBasicBlock &>(MF.front());
++  Worklist.push_back(&EntryMBB);
++  StoreFreeReachable.insert(&EntryMBB);
++
++  while (!Worklist.empty()) {
++    MachineBasicBlock *MBB = Worklist.pop_back_val();
++    if (StoreBlocks.contains(MBB))
++      continue;
++
++    for (MachineBasicBlock *Succ : MBB->successors()) {
++      if (StoreFreeReachable.insert(Succ).second)
++        Worklist.push_back(Succ);
++    }
++  }
++
++  auto IsLoadJointlyDominatedByStores = [&](MachineInstr *LoadMI) -> bool {
++    MachineBasicBlock *LoadMBB = LoadMI->getParent();
++    if (!MDT.isReachableFromEntry(LoadMBB))
++      return true;
++
++    // Check if every path passed through a store block.
++    if (!StoreFreeReachable.contains(LoadMBB))
++      return true;
++
++    // Otherwise, there exists a path to this block that has not seen any
++    // store yet. We must ensure that within this block there is a store to
++    // this slot before the load.
++    for (MachineInstr &MI : *LoadMBB) {
++      if (&MI == LoadMI)
++        break;
++      if (MI.mayStore()) {
++        for (MachineOperand &MO : MI.operands()) {
++          if (MO.isFI() && MO.getIndex() == Slot)
++            return true;
++        }
++      }
++    }
++
++    return false;
++  };
++
++  return llvm::all_of(Loads, IsLoadJointlyDominatedByStores);
++}
++
++} // namespace AMDGPU
++} // namespace llvm
++
+ namespace {
+ 
+ STATISTIC(NumMFMAsRewrittenToAGPR,
+@@ -63,6 +131,7 @@ class AMDGPURewriteAGPRCopyMFMAImpl {
+   LiveIntervals &LIS;
+   LiveStacks &LSS;
+   const RegisterClassInfo &RegClassInfo;
++  MachineDominatorTree &MDT;
+ 
+   bool attemptReassignmentsToAGPR(SmallSetVector<Register, 4> &InterferingRegs,
+                                   MCPhysReg PrefPhysReg) const;
+@@ -71,10 +140,11 @@ public:
+   AMDGPURewriteAGPRCopyMFMAImpl(MachineFunction &MF, VirtRegMap &VRM,
+                                 LiveRegMatrix &LRM, LiveIntervals &LIS,
+                                 LiveStacks &LSS,
+-                                const RegisterClassInfo &RegClassInfo)
++                                const RegisterClassInfo &RegClassInfo,
++                                MachineDominatorTree &MDT)
+       : MF(MF), ST(MF.getSubtarget<GCNSubtarget>()), TII(*ST.getInstrInfo()),
+         TRI(*ST.getRegisterInfo()), MRI(MF.getRegInfo()), VRM(VRM), LRM(LRM),
+-        LIS(LIS), LSS(LSS), RegClassInfo(RegClassInfo) {}
++        LIS(LIS), LSS(LSS), RegClassInfo(RegClassInfo), MDT(MDT) {}
+ 
+   bool isRewriteCandidate(const MachineInstr &MI) const {
+     return TII.isMAI(MI) && AMDGPU::getMFMASrcCVDstAGPROp(MI.getOpcode()) != -1;
+@@ -529,6 +599,37 @@ void AMDGPURewriteAGPRCopyMFMAImpl::eliminateSpillsOfReassignedVGPRs() const {
+     if (SpillReferences == SpillSlotReferences.end())
+       continue;
+ 
++    // For each spill reload, every path from entry to the reload must pass
++    // through at least one spill store to the same stack slot.
++    SmallVector<MachineInstr *, 4> Stores, Loads;
++    Stores.reserve(SpillReferences->second.size());
++    Loads.reserve(SpillReferences->second.size());
++    for (MachineInstr *MI : SpillReferences->second) {
++      if (MI->mayStore())
++        Stores.push_back(MI);
++      else if (MI->mayLoad())
++        Loads.push_back(MI);
++    }
++
++    SmallPtrSet<MachineBasicBlock *, 4> StoreBlocks;
++    for (MachineInstr *S : Stores)
++      if (MDT.isReachableFromEntry(S->getParent()))
++        StoreBlocks.insert(S->getParent());
++
++    if (StoreBlocks.empty()) {
++      LLVM_DEBUG(dbgs() << "Skipping " << printReg(Slot, &TRI)
++                        << ": no reachable stores\n");
++      continue;
++    }
++
++    if (!AMDGPU::checkAGPRCopyMFMAJointDominance(MF, MDT, Stores, Loads,
++                                                 Slot)) {
++      LLVM_DEBUG(
++          dbgs() << "Skipping " << printReg(Slot, &TRI)
++                 << ": some reachable load not jointly dominated by stores\n");
++      continue;
++    }
++
+     const TargetRegisterClass *RC = LSS.getIntervalRegClass(Slot);
+ 
+     LLVM_DEBUG(dbgs() << "Trying to eliminate " << printReg(Slot, &TRI)
+@@ -633,11 +734,13 @@ public:
+     AU.addRequired<VirtRegMapWrapperLegacy>();
+     AU.addRequired<LiveRegMatrixWrapperLegacy>();
+     AU.addRequired<LiveStacksWrapperLegacy>();
++    AU.addRequired<MachineDominatorTreeWrapperPass>();
+ 
+     AU.addPreserved<LiveIntervalsWrapperPass>();
+     AU.addPreserved<VirtRegMapWrapperLegacy>();
+     AU.addPreserved<LiveRegMatrixWrapperLegacy>();
+     AU.addPreserved<LiveStacksWrapperLegacy>();
++    AU.addPreserved<MachineDominatorTreeWrapperPass>();
+ 
+     AU.setPreservesAll();
+     MachineFunctionPass::getAnalysisUsage(AU);
+@@ -652,6 +755,7 @@ INITIALIZE_PASS_DEPENDENCY(LiveIntervalsWrapperPass)
+ INITIALIZE_PASS_DEPENDENCY(VirtRegMapWrapperLegacy)
+ INITIALIZE_PASS_DEPENDENCY(LiveRegMatrixWrapperLegacy)
+ INITIALIZE_PASS_DEPENDENCY(LiveStacksWrapperLegacy)
++INITIALIZE_PASS_DEPENDENCY(MachineDominatorTreeWrapperPass)
+ INITIALIZE_PASS_END(AMDGPURewriteAGPRCopyMFMALegacy, DEBUG_TYPE,
+                     "AMDGPU Rewrite AGPR-Copy-MFMA", false, false)
+ 
+@@ -671,7 +775,8 @@ bool AMDGPURewriteAGPRCopyMFMALegacy::runOnMachineFunction(
+   auto &LRM = getAnalysis<LiveRegMatrixWrapperLegacy>().getLRM();
+   auto &LIS = getAnalysis<LiveIntervalsWrapperPass>().getLIS();
+   auto &LSS = getAnalysis<LiveStacksWrapperLegacy>().getLS();
+-  AMDGPURewriteAGPRCopyMFMAImpl Impl(MF, VRM, LRM, LIS, LSS, RegClassInfo);
++  auto &MDT = getAnalysis<MachineDominatorTreeWrapperPass>().getDomTree();
++  AMDGPURewriteAGPRCopyMFMAImpl Impl(MF, VRM, LRM, LIS, LSS, RegClassInfo, MDT);
+   return Impl.run(MF);
+ }
+ 
+@@ -682,10 +787,11 @@ AMDGPURewriteAGPRCopyMFMAPass::run(MachineFunction &MF,
+   LiveRegMatrix &LRM = MFAM.getResult<LiveRegMatrixAnalysis>(MF);
+   LiveIntervals &LIS = MFAM.getResult<LiveIntervalsAnalysis>(MF);
+   LiveStacks &LSS = MFAM.getResult<LiveStacksAnalysis>(MF);
++  MachineDominatorTree &MDT = MFAM.getResult<MachineDominatorTreeAnalysis>(MF);
+   RegisterClassInfo RegClassInfo;
+   RegClassInfo.runOnMachineFunction(MF);
+ 
+-  AMDGPURewriteAGPRCopyMFMAImpl Impl(MF, VRM, LRM, LIS, LSS, RegClassInfo);
++  AMDGPURewriteAGPRCopyMFMAImpl Impl(MF, VRM, LRM, LIS, LSS, RegClassInfo, MDT);
+   if (!Impl.run(MF))
+     return PreservedAnalyses::all();
+   auto PA = getMachineFunctionPassPreservedAnalyses();
+diff --git a/llvm/lib/Target/AMDGPU/AMDGPUSubtarget.cpp b/llvm/lib/Target/AMDGPU/AMDGPUSubtarget.cpp
+index fb4728609..d0a854c01 100644
+--- a/llvm/lib/Target/AMDGPU/AMDGPUSubtarget.cpp
++++ b/llvm/lib/Target/AMDGPU/AMDGPUSubtarget.cpp
+@@ -52,7 +52,10 @@ AMDGPUSubtarget::getMaxLocalMemSizeWithWaveCount(unsigned NWaves,
+ std::pair<unsigned, unsigned> AMDGPUSubtarget::getOccupancyWithWorkGroupSizes(
+     uint32_t LDSBytes, std::pair<unsigned, unsigned> FlatWorkGroupSizes) const {
+ 
+-  // FIXME: We should take into account the LDS allocation granularity.
++  // LDS granularity accounted for by aligning the queried LDS size to the
++  // allocation block size.
++  const unsigned Granularity = std::max(LDSAllocationGranularity, 1u);
++  LDSBytes = alignTo(LDSBytes, Granularity);
+   const unsigned MaxWGsLDS = getLocalMemorySize() / std::max(LDSBytes, 1u);
+ 
+   // Queried LDS size may be larger than available on a CU, in which case we
+@@ -173,10 +176,6 @@ std::pair<unsigned, unsigned> AMDGPUSubtarget::getFlatWorkGroupSizes(
+   return Requested;
+ }
+ 
+-bool AMDGPUSubtarget::isSingleWavefrontWorkgroup(const Function &F) const {
+-  return getFlatWorkGroupSizes(F).second <= getWavefrontSize();
+-}
+-
+ std::pair<unsigned, unsigned> AMDGPUSubtarget::getEffectiveWavesPerEU(
+     std::pair<unsigned, unsigned> RequestedWavesPerEU,
+     std::pair<unsigned, unsigned> FlatWorkGroupSizes, unsigned LDSBytes) const {
+diff --git a/llvm/lib/Target/AMDGPU/AMDGPUSubtarget.h b/llvm/lib/Target/AMDGPU/AMDGPUSubtarget.h
+index 07746c087..deee93b22 100644
+--- a/llvm/lib/Target/AMDGPU/AMDGPUSubtarget.h
++++ b/llvm/lib/Target/AMDGPU/AMDGPUSubtarget.h
+@@ -58,6 +58,7 @@ protected:
+   unsigned MaxWavesPerEU = 10;
+   unsigned LocalMemorySize = 0;
+   unsigned AddressableLocalMemorySize = 0;
++  unsigned LDSAllocationGranularity = 0;
+   char WavefrontSizeLog2 = 0;
+   unsigned FlatOffsetBitWidth = 0;
+ 
+@@ -80,10 +81,6 @@ public:
+   /// be converted to integer, or violate subtarget's specifications.
+   std::pair<unsigned, unsigned> getFlatWorkGroupSizes(const Function &F) const;
+ 
+-  /// \returns true if the maximum flat work-group size for \p F is at most the
+-  /// wavefront size, so a work-group may fit in a single wavefront.
+-  bool isSingleWavefrontWorkgroup(const Function &F) const;
+-
+   /// \returns The required size of workgroups that will be used to execute \p F
+   /// in the \p Dim dimension, if it is known (from `!reqd_work_group_size`
+   /// metadata. Otherwise, returns std::nullopt.
+diff --git a/llvm/lib/Target/AMDGPU/GCNHazardRecognizer.cpp b/llvm/lib/Target/AMDGPU/GCNHazardRecognizer.cpp
+index aba0f7ff9..fe8dd7a15 100644
+--- a/llvm/lib/Target/AMDGPU/GCNHazardRecognizer.cpp
++++ b/llvm/lib/Target/AMDGPU/GCNHazardRecognizer.cpp
+@@ -914,11 +914,11 @@ int GCNHazardRecognizer::createsVALUHazard(const MachineInstr &MI) const {
+     if (VDataIdx == -1)
+       return -1;
+     if (AMDGPU::getRegBitWidth(VDataRCID) > 64) {
+-      // On gfx940-family the BUFFER_STORE source-vgpr WAR hazard exists for
+-      // every SOFFSET shape; the wait-state count differs by SOFFSET, and is
+-      // computed in checkVALUHazardsHelper. Pre-gfx940 the hazard only exists
+-      // if soffset is not an SGPR.
+-      if (ST.hasGFX940Insts())
++      // When SOFFSET-dependent wide-store windows apply, the BUFFER_STORE
++      // source-vgpr WAR hazard exists for every SOFFSET shape; the wait-state
++      // count differs by SOFFSET and is computed in checkVALUHazardsHelper.
++      // Otherwise the hazard only exists if soffset is not an SGPR.
++      if (ST.hasVDecCoExecHazard())
+         return VDataIdx;
+       const MachineOperand *SOffset =
+           TII->getNamedOperand(MI, AMDGPU::OpName::soffset);
+@@ -950,65 +950,75 @@ int GCNHazardRecognizer::createsVALUHazard(const MachineInstr &MI) const {
+   return -1;
+ }
+ 
+-int GCNHazardRecognizer::checkVALUHazardsHelper(
+-    const MachineOperand &Def, const MachineRegisterInfo &MRI) const {
+-  // Helper to check for the hazard where VMEM instructions that store more
+-  // than 8 bytes can have their store data overwritten by the next
+-  // instruction. On gfx940-family the window depends on the producer's
+-  // SOFFSET shape:
++int GCNHazardRecognizer::checkUniformWindowVALUHazardsHelper(
++    Register Reg) const {
++  // Wide stores need a single wait-state bubble before a VALU that overwrites
++  // store data. createsVALUHazard already excludes MUBUF/MTBUF stores with an
++  // SGPR SOFFSET.
++  const SIRegisterInfo *TRI = ST.getRegisterInfo();
++
++  auto IsHazard = [&](const MachineInstr &MI) {
++    int DataIdx = createsVALUHazard(MI);
++    return DataIdx >= 0 &&
++           TRI->regsOverlap(MI.getOperand(DataIdx).getReg(), Reg);
++  };
++
++  return std::max(0, 1 - getWaitStatesSince(IsHazard, /*Limit=*/1));
++}
++
++int GCNHazardRecognizer::checkSOFFSETWindowVALUHazardsHelper(
++    Register Reg) const {
++  // The required wait-state window depends on the producer's SOFFSET shape:
+   //   - MUBUF/MTBUF wide store with sgpr SOFFSET: 1 wait state.
+   //   - MUBUF/MTBUF wide store with literal/absent SOFFSET, and FLAT wide
+   //     store: 2 wait states.
+-  // Pre-gfx940 keeps a single 1-wait-state window. The 1-cycle sgpr-SOFFSET
+-  // window was measured on gfx950 (MI350X); the same gate is applied to the
+-  // rest of the gfx940 family to match the existing rule's granularity.
++  // The 1-cycle sgpr-SOFFSET window was measured on gfx950.
+   const SIRegisterInfo *TRI = ST.getRegisterInfo();
+   const SIInstrInfo *TII = ST.getInstrInfo();
+ 
+   int WaitStatesNeeded = 0;
+-  if (!TRI->isVectorRegister(MRI, Def.getReg()))
+-    return WaitStatesNeeded;
+-  const Register Reg = Def.getReg();
+ 
+-  const int MaxWaitStates = ST.hasGFX940Insts() ? 2 : 1;
++  // Scan each wait-state window separately and take the max padding needed.
++  // getWaitStatesSince supplies the minimum distance to a producer over paths.
++  for (int Window = 1; Window <= 2; ++Window) {
++    auto IsHazard = [&](const MachineInstr &MI) {
++      int DataIdx = createsVALUHazard(MI);
++      if (DataIdx < 0 ||
++          !TRI->regsOverlap(MI.getOperand(DataIdx).getReg(), Reg))
++        return false;
++
++      // Window 1 matches every hazard producer. Window 2 excludes BUF stores
++      // with an SGPR SOFFSET, which only require a single wait state.
++      if (Window == 1 || !TII->isBUF(MI))
++        return true;
+ 
+-  // Per-producer required wait-state window. On pre-gfx940 every producer
+-  // uses 1; on gfx940-family MUBUF/MTBUF stores with an SGPR SOFFSET use 1
+-  // and everything else (literal/absent SOFFSET, FLAT) uses 2.
+-  auto WindowFor = [this, TII](const MachineInstr &MI) -> int {
+-    if (!ST.hasGFX940Insts())
+-      return 1;
+-    if (TII->isBUF(MI)) {
+       const MachineOperand *SOffset =
+           TII->getNamedOperand(MI, AMDGPU::OpName::soffset);
+-      if (SOffset && SOffset->isReg())
+-        return 1;
+-    }
+-    return 2;
+-  };
+-
+-  // For each hazard producer reached, accumulate the wait states still
+-  // needed using that producer's own window. The predicate always returns
+-  // false so the walk runs to MaxWaitStates.
+-  int Distance = 0;
+-  auto Counter = [&](const MachineInstr &MI) {
+-    int DataIdx = createsVALUHazard(MI);
+-    if (DataIdx >= 0 &&
+-        TRI->regsOverlap(MI.getOperand(DataIdx).getReg(), Reg)) {
+-      int Need = WindowFor(MI) - Distance;
+-      WaitStatesNeeded = std::max(WaitStatesNeeded, Need);
+-    }
+-    // Mirror getWaitStatesSince's accounting, which does not count inline asm
+-    // towards the wait-state distance.
+-    if (!MI.isInlineAsm())
+-      Distance += SIInstrInfo::getNumWaitStates(MI);
+-    return false;
+-  };
+-  getWaitStatesSince(Counter, MaxWaitStates);
++      return !SOffset || !SOffset->isReg();
++    };
++    WaitStatesNeeded = std::max(WaitStatesNeeded,
++                                Window - getWaitStatesSince(IsHazard, Window));
++  }
+ 
+   return WaitStatesNeeded;
+ }
+ 
++int GCNHazardRecognizer::checkVALUHazardsHelper(
++    const MachineOperand &Def, const MachineRegisterInfo &MRI) const {
++  // Helper to check for the hazard where VMEM instructions that store more
++  // than 8 bytes can have their store data overwritten by the next
++  // instruction.
++  const SIRegisterInfo *TRI = ST.getRegisterInfo();
++
++  if (!TRI->isVectorRegister(MRI, Def.getReg()))
++    return 0;
++
++  if (ST.hasVDecCoExecHazard())
++    return checkSOFFSETWindowVALUHazardsHelper(Def.getReg());
++
++  return checkUniformWindowVALUHazardsHelper(Def.getReg());
++}
++
+ /// Dest sel forwarding issue occurs if additional logic is needed to swizzle /
+ /// pack the computed value into correct bit position of the dest register. This
+ /// occurs if we have SDWA with dst_sel != DWORD or if we have op_sel with
+diff --git a/llvm/lib/Target/AMDGPU/GCNHazardRecognizer.h b/llvm/lib/Target/AMDGPU/GCNHazardRecognizer.h
+index 920939a81..aceede0cd 100644
+--- a/llvm/lib/Target/AMDGPU/GCNHazardRecognizer.h
++++ b/llvm/lib/Target/AMDGPU/GCNHazardRecognizer.h
+@@ -99,6 +99,8 @@ private:
+   int checkVALUHazards(MachineInstr *VALU) const;
+   int checkVALUHazardsHelper(const MachineOperand &Def,
+                              const MachineRegisterInfo &MRI) const;
++  int checkUniformWindowVALUHazardsHelper(Register Reg) const;
++  int checkSOFFSETWindowVALUHazardsHelper(Register Reg) const;
+   int checkRWLaneHazards(MachineInstr *RWLane) const;
+   int checkRFEHazards(MachineInstr *RFE) const;
+   int checkInlineAsmHazards(MachineInstr *IA) const;
+diff --git a/llvm/lib/Target/AMDGPU/GCNSubtarget.cpp b/llvm/lib/Target/AMDGPU/GCNSubtarget.cpp
+index c952d5191..cd11dd00e 100644
+--- a/llvm/lib/Target/AMDGPU/GCNSubtarget.cpp
++++ b/llvm/lib/Target/AMDGPU/GCNSubtarget.cpp
+@@ -144,6 +144,9 @@ GCNSubtarget &GCNSubtarget::initializeSubtargetDependencies(const Triple &TT,
+     FlatOffsetBitWidth = 13;
+ 
+   LocalMemorySize = AMDGPU::IsaInfo::getLocalMemorySize(*this);
++  // LDS Allocation Granularity calculated in bytes from dwords
++  LDSAllocationGranularity =
++      AMDGPU::getLdsDwGranularity(*this) * sizeof(uint32_t);
+ 
+   HasFminFmaxLegacy = getGeneration() < AMDGPUSubtarget::VOLCANIC_ISLANDS;
+   HasSMulHi = getGeneration() >= AMDGPUSubtarget::GFX9;
+diff --git a/llvm/lib/Target/AMDGPU/SIInstrInfo.cpp b/llvm/lib/Target/AMDGPU/SIInstrInfo.cpp
+index 2333d2906..a0a84db58 100644
+--- a/llvm/lib/Target/AMDGPU/SIInstrInfo.cpp
++++ b/llvm/lib/Target/AMDGPU/SIInstrInfo.cpp
+@@ -4931,6 +4931,12 @@ bool SIInstrInfo::isLiteralOperandLegal(const MCInstrDesc &InstDesc,
+ 
+ bool SIInstrInfo::isImmOperandLegal(const MCInstrDesc &InstDesc, unsigned OpNo,
+                                     int64_t ImmVal) const {
++  const unsigned Opc = InstDesc.getOpcode();
++  int Src1Idx = AMDGPU::getNamedOperandIdx(Opc, AMDGPU::OpName::src1);
++  if (Src1Idx != -1 && isDPP(Opc) && !ST.hasDPPSrc1SGPR() &&
++      OpNo == static_cast<unsigned>(Src1Idx))
++    return false;
++
+   const MCOperandInfo &OpInfo = InstDesc.operands()[OpNo];
+   if (isInlineConstant(ImmVal, OpInfo.OperandType)) {
+     if (isMAI(InstDesc) && ST.hasMFMAInlineLiteralBug() &&
+@@ -5543,6 +5549,10 @@ bool SIInstrInfo::verifyInstruction(const MachineInstr &MI,
+       ErrInfo = "DPP src1 cannot be SGPR on this subtarget";
+       return false;
+     }
++    if (Src1MO.isImm()) {
++      ErrInfo = "DPP src1 cannot be an immediate on this subtarget";
++      return false;
++    }
+   }
+ 
+   // Verify MIMG / VIMAGE / VSAMPLE
+diff --git a/llvm/lib/Target/AMDGPU/SIInstructions.td b/llvm/lib/Target/AMDGPU/SIInstructions.td
+index 148f15014..67cbf8efb 100644
+--- a/llvm/lib/Target/AMDGPU/SIInstructions.td
++++ b/llvm/lib/Target/AMDGPU/SIInstructions.td
+@@ -3428,17 +3428,19 @@ def : GCNPat <
+ let True16Predicate = UseRealTrue16Insts in {
+ def : GCNPat<
+   (i32 (DivergentUnaryFrag<zext> i16:$src)),
+-  (REG_SEQUENCE VGPR_32, VGPR_16:$src, lo16, (V_MOV_B16_t16_e64 0, (i16 0), 0), hi16)
++  (i32 (V_CVT_U32_U16_t16_e64 SRCMODS.NONE, $src))
+ >;
+ 
+ def : GCNPat<
+   (i64 (DivergentUnaryFrag<zext> i16:$src)),
+-  (REG_SEQUENCE VReg_64, $src, lo16, (V_MOV_B16_t16_e64 0, (i16 0), 0), hi16, (V_MOV_B32_e32 (i32 0)), sub1)
++  (REG_SEQUENCE VReg_64,
++    (V_CVT_U32_U16_t16_e64 SRCMODS.NONE, $src), sub0,
++    (S_MOV_B32 (i32 0)), sub1)
+ >;
+ 
+ def : GCNPat<
+   (i32 (zext (i16 (bitconvert fp16_zeros_high_16bits:$src)))),
+-  (REG_SEQUENCE VGPR_32, VGPR_16:$src, lo16, (V_MOV_B16_t16_e64 0, (i16 0), 0), hi16)
++  (i32 (V_CVT_U32_U16_t16_e64 SRCMODS.NONE, $src))
+ >;
+ 
+ def : GCNPat <
+diff --git a/llvm/lib/Target/AMDGPU/SIMemoryLegalizer.cpp b/llvm/lib/Target/AMDGPU/SIMemoryLegalizer.cpp
+index 3149ebc2f..cf23fdd9f 100644
+--- a/llvm/lib/Target/AMDGPU/SIMemoryLegalizer.cpp
++++ b/llvm/lib/Target/AMDGPU/SIMemoryLegalizer.cpp
+@@ -159,8 +159,7 @@ private:
+       bool IsCrossAddressSpaceOrdering = true,
+       AtomicOrdering FailureOrdering = AtomicOrdering::SequentiallyConsistent,
+       bool IsVolatile = false, bool IsNonTemporal = false,
+-      bool IsLastUse = false, bool IsCooperative = false,
+-      bool CanDemoteWorkgroupToWavefront = false)
++      bool IsLastUse = false, bool IsCooperative = false)
+       : Ordering(Ordering), FailureOrdering(FailureOrdering), Scope(Scope),
+         OrderingAddrSpace(OrderingAddrSpace), InstrAddrSpace(InstrAddrSpace),
+         IsCrossAddressSpaceOrdering(IsCrossAddressSpaceOrdering),
+@@ -208,17 +207,6 @@ private:
+     // AGENT scope as a conservatively correct alternative.
+     if (this->Scope == SIAtomicScope::CLUSTER && !ST.hasClusters())
+       this->Scope = SIAtomicScope::AGENT;
+-
+-    // When max flat work-group size is at most the wavefront size, the
+-    // work-group fits in a single wave, so LLVM workgroup scope matches
+-    // wavefront scope. Demote workgroup → wavefront here for fences and for
+-    // atomics with ordering stronger than monotonic.
+-    if (CanDemoteWorkgroupToWavefront &&
+-        this->Scope == SIAtomicScope::WORKGROUP &&
+-        (llvm::isStrongerThan(this->Ordering, AtomicOrdering::Monotonic) ||
+-         llvm::isStrongerThan(this->FailureOrdering,
+-                              AtomicOrdering::Monotonic)))
+-      this->Scope = SIAtomicScope::WAVEFRONT;
+   }
+ 
+ public:
+@@ -289,7 +277,6 @@ class SIMemOpAccess final {
+ private:
+   const AMDGPUMachineModuleInfo *MMI = nullptr;
+   const GCNSubtarget &ST;
+-  const bool CanDemoteWorkgroupToWavefront;
+ 
+   /// Reports unsupported message \p Msg for \p MI to LLVM context.
+   void reportUnsupported(const MachineBasicBlock::iterator &MI,
+@@ -312,9 +299,8 @@ private:
+ 
+ public:
+   /// Construct class to support accessing the machine memory operands
+-  /// of instructions in the machine function \p MF.
+-  SIMemOpAccess(const AMDGPUMachineModuleInfo &MMI, const GCNSubtarget &ST,
+-                const Function &F);
++  /// of instructions.
++  SIMemOpAccess(const AMDGPUMachineModuleInfo &MMI, const GCNSubtarget &ST);
+ 
+   /// \returns Load info if \p MI is a load operation, "std::nullopt" otherwise.
+   std::optional<SIMemOpInfo>
+@@ -798,13 +784,9 @@ SIAtomicAddrSpace SIMemOpAccess::toSIAtomicAddrSpace(unsigned AS) const {
+   return SIAtomicAddrSpace::OTHER;
+ }
+ 
+-// TODO: Consider moving single-wave workgroup->wavefront scope relaxation to an
+-// IR pass (and extending it to other scoped operations), so middle-end
+-// optimizations see wavefront scope earlier.
+ SIMemOpAccess::SIMemOpAccess(const AMDGPUMachineModuleInfo &MMI_,
+-                             const GCNSubtarget &ST, const Function &F)
+-    : MMI(&MMI_), ST(ST),
+-      CanDemoteWorkgroupToWavefront(ST.isSingleWavefrontWorkgroup(F)) {}
++                             const GCNSubtarget &ST)
++    : MMI(&MMI_), ST(ST) {}
+ 
+ std::optional<SIMemOpInfo> SIMemOpAccess::constructFromMIWithMMO(
+     const MachineBasicBlock::iterator &MI) const {
+@@ -874,8 +856,7 @@ std::optional<SIMemOpInfo> SIMemOpAccess::constructFromMIWithMMO(
+   }
+   return SIMemOpInfo(ST, Ordering, Scope, OrderingAddrSpace, InstrAddrSpace,
+                      IsCrossAddressSpaceOrdering, FailureOrdering, IsVolatile,
+-                     IsNonTemporal, IsLastUse, IsCooperative,
+-                     CanDemoteWorkgroupToWavefront);
++                     IsNonTemporal, IsLastUse, IsCooperative);
+ }
+ 
+ std::optional<SIMemOpInfo>
+@@ -944,8 +925,7 @@ SIMemOpAccess::getAtomicFenceInfo(const MachineBasicBlock::iterator &MI) const {
+ 
+   return SIMemOpInfo(ST, Ordering, Scope, OrderingAddrSpace,
+                      SIAtomicAddrSpace::ATOMIC, IsCrossAddressSpaceOrdering,
+-                     AtomicOrdering::NotAtomic, false, false, false, false,
+-                     CanDemoteWorkgroupToWavefront);
++                     AtomicOrdering::NotAtomic, false, false, false, false);
+ }
+ 
+ std::optional<SIMemOpInfo> SIMemOpAccess::getAtomicCmpxchgOrRmwInfo(
+@@ -2539,8 +2519,7 @@ bool SIMemoryLegalizer::run(MachineFunction &MF) {
+   bool Changed = false;
+ 
+   const GCNSubtarget &ST = MF.getSubtarget<GCNSubtarget>();
+-  SIMemOpAccess MOA(MMI.getObjFileInfo<AMDGPUMachineModuleInfo>(), ST,
+-                    MF.getFunction());
++  SIMemOpAccess MOA(MMI.getObjFileInfo<AMDGPUMachineModuleInfo>(), ST);
+   CC = SICacheControl::create(ST);
+ 
+   for (auto &MBB : MF) {
+diff --git a/mlir/include/mlir/Dialect/AMDGPU/Utils/Chipset.h b/mlir/include/mlir/Dialect/AMDGPU/Utils/Chipset.h
+index 256065537..f51b22b2d 100644
+--- a/mlir/include/mlir/Dialect/AMDGPU/Utils/Chipset.h
++++ b/mlir/include/mlir/Dialect/AMDGPU/Utils/Chipset.h
+@@ -51,6 +51,7 @@ struct Chipset {
+ 
+ inline bool hasOcpFp8(const Chipset &chipset) {
+   return (chipset.majorVersion == 9 && chipset.minorVersion >= 5) ||
++         (chipset.majorVersion == 11 && chipset.minorVersion == 7) ||
+          chipset.majorVersion >= 12;
+ }
+ 
+diff --git a/mlir/include/mlir/Dialect/Arith/Transforms/Passes.h b/mlir/include/mlir/Dialect/Arith/Transforms/Passes.h
+index 5a07a01d0..938c77c9d 100644
+--- a/mlir/include/mlir/Dialect/Arith/Transforms/Passes.h
++++ b/mlir/include/mlir/Dialect/Arith/Transforms/Passes.h
+@@ -68,6 +68,20 @@ void populateExpandF8E8M0Patterns(RewritePatternSet &patterns);
+ /// Add patterns to expand scaling ExtF/TruncF ops to equivalent arith ops
+ void populateExpandScalingExtTruncPatterns(RewritePatternSet &patterns);
+ 
++/// Add patterns to expand the floating-point min/max ops (`arith.maximumf`/
++/// `minimumf`/`maxnumf`/`minnumf`) into `cmpf` + `select` sequences.
++void populateExpandMinMaxFPatterns(RewritePatternSet &patterns);
++
++/// Add patterns to expand the signed/unsigned integer min/max ops
++/// (`arith.maxsi`/`maxui`/`minsi`/`minui`) into `cmpi` + `select` sequences.
++void populateExpandMinMaxIPatterns(RewritePatternSet &patterns);
++
++/// Add patterns to expand both the floating-point and integer min/max ops into
++/// `cmpf`/`cmpi` + `select` sequences. These ops also have a direct
++/// arith-to-llvm lowering, so pipelines that run arith-to-llvm may prefer to
++/// skip this expansion.
++void populateExpandMinMaxPatterns(RewritePatternSet &patterns);
++
+ /// Add patterns to expand `arith.flush_denormals` into integer arithmetic
+ /// (bitcast + bit masks + compare + select). Only matches IEEE-like
+ /// floating-point types.
+diff --git a/mlir/include/mlir/Dialect/Arith/Transforms/Passes.td b/mlir/include/mlir/Dialect/Arith/Transforms/Passes.td
+index 27e9146ec..34c28db9c 100644
+--- a/mlir/include/mlir/Dialect/Arith/Transforms/Passes.td
++++ b/mlir/include/mlir/Dialect/Arith/Transforms/Passes.td
+@@ -25,6 +25,21 @@ def ArithExpandOpsPass : Pass<"arith-expand"> {
+               /*default=*/"false",
+               "Enable expansion of `arith.flush_denormals` on IEEE-like "
+               "floating-point types">,
++       Option<"includeMinMaxF", "include-min-max-f", "bool", /*default=*/"false",
++              "Enable expansion of the floating-point min/max ops "
++              "(maximumf/minimumf/maxnumf/minnumf). These ops also have a "
++              "direct arith-to-llvm lowering to the "
++              "`llvm.intr.maximum/minimum/maxnum/minnum` intrinsics; disable "
++              "this so pipelines that run arith-to-llvm can use those "
++              "single-instruction lowerings instead of the cmpf/select "
++              "expansion">,
++       Option<"includeMinMaxI", "include-min-max-i", "bool", /*default=*/"false",
++              "Enable expansion of the signed/unsigned integer min/max ops "
++              "(maxsi/maxui/minsi/minui). These ops also have a direct "
++              "arith-to-llvm lowering to the `llvm.intr.smax/umax/smin/umin` "
++              "intrinsics; disable this so pipelines that run arith-to-llvm "
++              "can use those single-instruction lowerings instead of the "
++              "cmpi/select expansion">,
+   ];
+ }
+ 
+diff --git a/mlir/lib/Dialect/Arith/Transforms/ExpandOps.cpp b/mlir/lib/Dialect/Arith/Transforms/ExpandOps.cpp
+index c9217c57a..02ed6ccd8 100644
+--- a/mlir/lib/Dialect/Arith/Transforms/ExpandOps.cpp
++++ b/mlir/lib/Dialect/Arith/Transforms/ExpandOps.cpp
+@@ -823,7 +823,8 @@ struct ArithExpandOpsPass
+     RewritePatternSet patterns(&getContext());
+     ConversionTarget target(getContext());
+ 
+-    arith::populateArithExpandOpsPatterns(patterns);
++    arith::populateCeilFloorDivExpandOpsPatterns(patterns);
++    arith::populateExpandScalingExtTruncPatterns(patterns);
+ 
+     target.addLegalDialect<arith::ArithDialect>();
+     target.addLegalDialect<vector::VectorDialect>();
+@@ -833,17 +834,39 @@ struct ArithExpandOpsPass
+       arith::CeilDivSIOp,
+       arith::CeilDivUIOp,
+       arith::FloorDivSIOp,
+-      arith::MaxSIOp,
+-      arith::MaxUIOp,
+-      arith::MinSIOp,
+-      arith::MinUIOp,
+-      arith::MaximumFOp,
+-      arith::MinimumFOp,
+-      arith::MaxNumFOp,
+-      arith::MinNumFOp,
+       arith::ScalingExtFOp,
+       arith::ScalingTruncFOp
+     >();
++    // clang-format on
++
++    // The min/max ops also have a direct arith-to-llvm lowering to the
++    // `llvm.intr.maximum`/`minimum`/... (and smax/umax/...) intrinsics, which
++    // are a single hardware instruction on many targets. Only expand them into
++    // cmpf/cmpi + select when requested, so pipelines that run arith-to-llvm
++    // can keep the intrinsic lowering. The float and integer ops are gated
++    // separately.
++    if (includeMinMaxF) {
++      arith::populateExpandMinMaxFPatterns(patterns);
++      // clang-format off
++      target.addIllegalOp<
++        arith::MaximumFOp,
++        arith::MinimumFOp,
++        arith::MaxNumFOp,
++        arith::MinNumFOp
++      >();
++      // clang-format on
++    }
++    if (includeMinMaxI) {
++      arith::populateExpandMinMaxIPatterns(patterns);
++      // clang-format off
++      target.addIllegalOp<
++        arith::MaxSIOp,
++        arith::MaxUIOp,
++        arith::MinSIOp,
++        arith::MinUIOp
++      >();
++      // clang-format on
++    }
+ 
+     if (includeBf16)
+       arith::populateExpandBFloat16Patterns(patterns);
+@@ -936,15 +959,9 @@ void mlir::arith::populateExpandFlushDenormalsPatterns(
+   patterns.add<FlushDenormalsOpConverter>(patterns.getContext());
+ }
+ 
+-void mlir::arith::populateArithExpandOpsPatterns(RewritePatternSet &patterns) {
+-  populateCeilFloorDivExpandOpsPatterns(patterns);
+-  populateExpandScalingExtTruncPatterns(patterns);
++void mlir::arith::populateExpandMinMaxFPatterns(RewritePatternSet &patterns) {
+   // clang-format off
+   patterns.add<
+-    MaxMinIOpConverter<MaxSIOp, arith::CmpIPredicate::sgt>,
+-    MaxMinIOpConverter<MaxUIOp, arith::CmpIPredicate::ugt>,
+-    MaxMinIOpConverter<MinSIOp, arith::CmpIPredicate::slt>,
+-    MaxMinIOpConverter<MinUIOp, arith::CmpIPredicate::ult>,
+     MaximumMinimumFOpConverter<MaximumFOp, arith::CmpFPredicate::UGT>,
+     MaximumMinimumFOpConverter<MinimumFOp, arith::CmpFPredicate::ULT>,
+     MaxNumMinNumFOpConverter<MaxNumFOp, arith::CmpFPredicate::UGT>,
+@@ -952,3 +969,25 @@ void mlir::arith::populateArithExpandOpsPatterns(RewritePatternSet &patterns) {
+    >(patterns.getContext());
+   // clang-format on
+ }
++
++void mlir::arith::populateExpandMinMaxIPatterns(RewritePatternSet &patterns) {
++  // clang-format off
++  patterns.add<
++    MaxMinIOpConverter<MaxSIOp, arith::CmpIPredicate::sgt>,
++    MaxMinIOpConverter<MaxUIOp, arith::CmpIPredicate::ugt>,
++    MaxMinIOpConverter<MinSIOp, arith::CmpIPredicate::slt>,
++    MaxMinIOpConverter<MinUIOp, arith::CmpIPredicate::ult>
++   >(patterns.getContext());
++  // clang-format on
++}
++
++void mlir::arith::populateExpandMinMaxPatterns(RewritePatternSet &patterns) {
++  populateExpandMinMaxFPatterns(patterns);
++  populateExpandMinMaxIPatterns(patterns);
++}
++
++void mlir::arith::populateArithExpandOpsPatterns(RewritePatternSet &patterns) {
++  populateCeilFloorDivExpandOpsPatterns(patterns);
++  populateExpandScalingExtTruncPatterns(patterns);
++  populateExpandMinMaxPatterns(patterns);
++}
+diff --git a/mlir/lib/ExecutionEngine/CMakeLists.txt b/mlir/lib/ExecutionEngine/CMakeLists.txt
+index 2176ccaa6..868092104 100644
+--- a/mlir/lib/ExecutionEngine/CMakeLists.txt
++++ b/mlir/lib/ExecutionEngine/CMakeLists.txt
+@@ -403,12 +403,13 @@ if(LLVM_ENABLE_PIC)
+ 
+       EXCLUDE_FROM_LIBMLIR
+ 
+-      # TODO: this is merely a workaround. If this library depends on LLVMSupport,
+-      # it should suppress symbols, or if it doesn't, it shouldn't link against
+-      # it. This workaround prevents the library from defining the symbol
+-      # llvm::EnableABIBreakingChecks, which would cause ODR-violations when
+-      # dlopen-ed.
+-      DISABLE_PCH_REUSE
++      # This library is dlopen-ed (e.g. by mlir-runner via --shared-libs),
++      # frequently into a process that already hosts another LLVM (ROCm's own
++      # libLLVM.so is reachable through the libamdhip64 -> libamd_comgr
++      # DT_NEEDED chain). Linking LLVMSupport here would duplicate LLVM's
++      # cl::opt / pass-registry / ManagedStatic singletons and abort during
++      # dynamic init. The wrappers don't need LLVMSupport, so build STANDALONE.
++      STANDALONE
+     )
+ 
+     # Supress compiler warnings from HIP headers
+diff --git a/mlir/lib/ExecutionEngine/RocmRuntimeWrappers.cpp b/mlir/lib/ExecutionEngine/RocmRuntimeWrappers.cpp
+index 251245106..ef576daa3 100644
+--- a/mlir/lib/ExecutionEngine/RocmRuntimeWrappers.cpp
++++ b/mlir/lib/ExecutionEngine/RocmRuntimeWrappers.cpp
+@@ -13,13 +13,24 @@
+ //===----------------------------------------------------------------------===//
+ 
+ #include <cassert>
+-#include <numeric>
++#include <cstdint>
++#include <cstdio>
+ 
+ #include "mlir/ExecutionEngine/CRunnerUtils.h"
+-#include "llvm/ADT/ArrayRef.h"
+ 
+ #include "hip/hip_runtime.h"
+ 
++// MSVC-style linkers (clang-cl / lld-link) hide every symbol by default, so the
++// ORC JIT that loads this runtime as a shared library cannot resolve the mgpu*
++// entry points unless they are explicitly exported. Mirror the SYCL runtime
++// wrapper's approach (see SyclRuntimeWrappers.cpp). No effect on Linux, where
++// default visibility already exports them.
++#if defined(_WIN32)
++#define MLIR_ROCM_RUNTIME_EXPORT __declspec(dllexport)
++#else
++#define MLIR_ROCM_RUNTIME_EXPORT
++#endif
++
+ #define HIP_REPORT_IF_ERROR(expr)                                              \
+   [](hipError_t result) {                                                      \
+     if (!result)                                                               \
+@@ -32,24 +43,25 @@
+ 
+ thread_local static int32_t defaultDevice = 0;
+ 
+-extern "C" hipModule_t mgpuModuleLoad(void *data, size_t /*gpuBlobSize*/) {
++extern "C" MLIR_ROCM_RUNTIME_EXPORT hipModule_t
++mgpuModuleLoad(void *data, size_t /*gpuBlobSize*/) {
+   hipModule_t module = nullptr;
+   HIP_REPORT_IF_ERROR(hipModuleLoadData(&module, data));
+   return module;
+ }
+ 
+-extern "C" hipModule_t mgpuModuleLoadJIT(void *data, int optLevel,
+-                                         size_t /*assmeblySize*/) {
++extern "C" MLIR_ROCM_RUNTIME_EXPORT hipModule_t
++mgpuModuleLoadJIT(void *data, int optLevel, size_t /*assmeblySize*/) {
+   assert(false && "This function is not available in HIP.");
+   return nullptr;
+ }
+ 
+-extern "C" void mgpuModuleUnload(hipModule_t module) {
++extern "C" MLIR_ROCM_RUNTIME_EXPORT void mgpuModuleUnload(hipModule_t module) {
+   HIP_REPORT_IF_ERROR(hipModuleUnload(module));
+ }
+ 
+-extern "C" hipFunction_t mgpuModuleGetFunction(hipModule_t module,
+-                                               const char *name) {
++extern "C" MLIR_ROCM_RUNTIME_EXPORT hipFunction_t
++mgpuModuleGetFunction(hipModule_t module, const char *name) {
+   hipFunction_t function = nullptr;
+   HIP_REPORT_IF_ERROR(hipModuleGetFunction(&function, module, name));
+   return function;
+@@ -58,12 +70,11 @@ extern "C" hipFunction_t mgpuModuleGetFunction(hipModule_t module,
+ // The wrapper uses intptr_t instead of ROCM's unsigned int to match
+ // the type of MLIR's index type. This avoids the need for casts in the
+ // generated MLIR code.
+-extern "C" void mgpuLaunchKernel(hipFunction_t function, intptr_t gridX,
+-                                 intptr_t gridY, intptr_t gridZ,
+-                                 intptr_t blockX, intptr_t blockY,
+-                                 intptr_t blockZ, int32_t smem,
+-                                 hipStream_t stream, void **params,
+-                                 void **extra, size_t /*paramsCount*/) {
++extern "C" MLIR_ROCM_RUNTIME_EXPORT void
++mgpuLaunchKernel(hipFunction_t function, intptr_t gridX, intptr_t gridY,
++                 intptr_t gridZ, intptr_t blockX, intptr_t blockY,
++                 intptr_t blockZ, int32_t smem, hipStream_t stream,
++                 void **params, void **extra, size_t /*paramsCount*/) {
+   HIP_REPORT_IF_ERROR(hipModuleLaunchKernel(function, gridX, gridY, gridZ,
+                                             blockX, blockY, blockZ, smem,
+                                             stream, params, extra));
+@@ -72,7 +83,7 @@ extern "C" void mgpuLaunchKernel(hipFunction_t function, intptr_t gridX,
+ // Cooperative launch entry point. The cluster dimensions are accepted to
+ // match the CUDA wrapper signature, but HIP does not support thread block
+ // clusters; passing nonzero cluster dimensions is a usage error.
+-extern "C" void mgpuLaunchKernelCooperative(
++extern "C" MLIR_ROCM_RUNTIME_EXPORT void mgpuLaunchKernelCooperative(
+     hipFunction_t function, intptr_t gridX, intptr_t gridY, intptr_t gridZ,
+     intptr_t clusterX, intptr_t clusterY, intptr_t clusterZ, intptr_t blockX,
+     intptr_t blockY, intptr_t blockZ, int32_t smem, hipStream_t stream,
+@@ -89,67 +100,73 @@ extern "C" void mgpuLaunchKernelCooperative(
+                                        blockY, blockZ, smem, stream, params));
+ }
+ 
+-extern "C" hipStream_t mgpuStreamCreate() {
++extern "C" MLIR_ROCM_RUNTIME_EXPORT hipStream_t mgpuStreamCreate() {
+   hipStream_t stream = nullptr;
+   HIP_REPORT_IF_ERROR(hipStreamCreate(&stream));
+   return stream;
+ }
+ 
+-extern "C" void mgpuStreamDestroy(hipStream_t stream) {
++extern "C" MLIR_ROCM_RUNTIME_EXPORT void mgpuStreamDestroy(hipStream_t stream) {
+   HIP_REPORT_IF_ERROR(hipStreamDestroy(stream));
+ }
+ 
+-extern "C" void mgpuStreamSynchronize(hipStream_t stream) {
++extern "C" MLIR_ROCM_RUNTIME_EXPORT void
++mgpuStreamSynchronize(hipStream_t stream) {
+   return HIP_REPORT_IF_ERROR(hipStreamSynchronize(stream));
+ }
+ 
+-extern "C" void mgpuStreamWaitEvent(hipStream_t stream, hipEvent_t event) {
++extern "C" MLIR_ROCM_RUNTIME_EXPORT void mgpuStreamWaitEvent(hipStream_t stream,
++                                                             hipEvent_t event) {
+   HIP_REPORT_IF_ERROR(hipStreamWaitEvent(stream, event, /*flags=*/0));
+ }
+ 
+-extern "C" hipEvent_t mgpuEventCreate() {
++extern "C" MLIR_ROCM_RUNTIME_EXPORT hipEvent_t mgpuEventCreate() {
+   hipEvent_t event = nullptr;
+   HIP_REPORT_IF_ERROR(hipEventCreateWithFlags(&event, hipEventDisableTiming));
+   return event;
+ }
+ 
+-extern "C" void mgpuEventDestroy(hipEvent_t event) {
++extern "C" MLIR_ROCM_RUNTIME_EXPORT void mgpuEventDestroy(hipEvent_t event) {
+   HIP_REPORT_IF_ERROR(hipEventDestroy(event));
+ }
+ 
+-extern "C" void mgpuEventSynchronize(hipEvent_t event) {
++extern "C" MLIR_ROCM_RUNTIME_EXPORT void
++mgpuEventSynchronize(hipEvent_t event) {
+   HIP_REPORT_IF_ERROR(hipEventSynchronize(event));
+ }
+ 
+-extern "C" void mgpuEventRecord(hipEvent_t event, hipStream_t stream) {
++extern "C" MLIR_ROCM_RUNTIME_EXPORT void mgpuEventRecord(hipEvent_t event,
++                                                         hipStream_t stream) {
+   HIP_REPORT_IF_ERROR(hipEventRecord(event, stream));
+ }
+ 
+-extern "C" void *mgpuMemAlloc(uint64_t sizeBytes, hipStream_t /*stream*/,
+-                              bool /*isHostShared*/) {
++extern "C" MLIR_ROCM_RUNTIME_EXPORT void *mgpuMemAlloc(uint64_t sizeBytes,
++                                                       hipStream_t /*stream*/,
++                                                       bool /*isHostShared*/) {
+   void *ptr;
+   HIP_REPORT_IF_ERROR(hipMalloc(&ptr, sizeBytes));
+   return ptr;
+ }
+ 
+-extern "C" void mgpuMemFree(void *ptr, hipStream_t /*stream*/) {
++extern "C" MLIR_ROCM_RUNTIME_EXPORT void mgpuMemFree(void *ptr,
++                                                     hipStream_t /*stream*/) {
+   HIP_REPORT_IF_ERROR(hipFree(ptr));
+ }
+ 
+-extern "C" void mgpuMemcpy(void *dst, void *src, size_t sizeBytes,
+-                           hipStream_t stream) {
++extern "C" MLIR_ROCM_RUNTIME_EXPORT void
++mgpuMemcpy(void *dst, void *src, size_t sizeBytes, hipStream_t stream) {
+   HIP_REPORT_IF_ERROR(
+       hipMemcpyAsync(dst, src, sizeBytes, hipMemcpyDefault, stream));
+ }
+ 
+-extern "C" void mgpuMemset32(void *dst, int value, size_t count,
+-                             hipStream_t stream) {
++extern "C" MLIR_ROCM_RUNTIME_EXPORT void
++mgpuMemset32(void *dst, int value, size_t count, hipStream_t stream) {
+   HIP_REPORT_IF_ERROR(hipMemsetD32Async(reinterpret_cast<hipDeviceptr_t>(dst),
+                                         value, count, stream));
+ }
+ 
+-extern "C" void mgpuMemset16(void *dst, int short value, size_t count,
+-                             hipStream_t stream) {
++extern "C" MLIR_ROCM_RUNTIME_EXPORT void
++mgpuMemset16(void *dst, int short value, size_t count, hipStream_t stream) {
+   HIP_REPORT_IF_ERROR(hipMemsetD16Async(reinterpret_cast<hipDeviceptr_t>(dst),
+                                         value, count, stream));
+ }
+@@ -158,43 +175,40 @@ extern "C" void mgpuMemset16(void *dst, int short value, size_t count,
+ 
+ // Allows to register byte array with the ROCM runtime. Helpful until we have
+ // transfer functions implemented.
+-extern "C" void mgpuMemHostRegister(void *ptr, uint64_t sizeBytes) {
++extern "C" MLIR_ROCM_RUNTIME_EXPORT void
++mgpuMemHostRegister(void *ptr, uint64_t sizeBytes) {
+   HIP_REPORT_IF_ERROR(hipHostRegister(ptr, sizeBytes, /*flags=*/0));
+ }
+ 
+ // Allows to register a MemRef with the ROCm runtime. Helpful until we have
+ // transfer functions implemented.
+-extern "C" void
++extern "C" MLIR_ROCM_RUNTIME_EXPORT void
+ mgpuMemHostRegisterMemRef(int64_t rank, StridedMemRefType<char, 1> *descriptor,
+                           int64_t elementSizeBytes) {
+-
+-  llvm::SmallVector<int64_t, 4> denseStrides(rank);
+-  llvm::ArrayRef<int64_t> sizes(descriptor->sizes, rank);
+-  llvm::ArrayRef<int64_t> strides(sizes.end(), rank);
+-
+-  std::partial_sum(sizes.rbegin(), sizes.rend(), denseStrides.rbegin(),
+-                   std::multiplies<int64_t>());
+-  auto sizeBytes = denseStrides.front() * elementSizeBytes;
++  int64_t *sizes = descriptor->sizes;
++  int64_t *strides = &sizes[rank];
++  int64_t runningStride = 1;
+ 
+   // Only densely packed tensors are currently supported.
+-  std::rotate(denseStrides.begin(), denseStrides.begin() + 1,
+-              denseStrides.end());
+-  denseStrides.back() = 1;
+-  assert(strides == llvm::ArrayRef(denseStrides));
++  for (int64_t i = rank - 1; i >= 0; --i) {
++    assert(strides[i] == runningStride && "Mismatch in computed dense strides");
++    runningStride *= sizes[i];
++  }
++  uint64_t sizeBytes = runningStride * elementSizeBytes;
+ 
+-  auto ptr = descriptor->data + descriptor->offset * elementSizeBytes;
++  auto *ptr = descriptor->data + descriptor->offset * elementSizeBytes;
+   mgpuMemHostRegister(ptr, sizeBytes);
+ }
+ 
+ // Allows to unregister byte array with the ROCM runtime. Helpful until we have
+ // transfer functions implemented.
+-extern "C" void mgpuMemHostUnregister(void *ptr) {
++extern "C" MLIR_ROCM_RUNTIME_EXPORT void mgpuMemHostUnregister(void *ptr) {
+   HIP_REPORT_IF_ERROR(hipHostUnregister(ptr));
+ }
+ 
+ // Allows to unregister a MemRef with the ROCm runtime. Helpful until we have
+ // transfer functions implemented.
+-extern "C" void
++extern "C" MLIR_ROCM_RUNTIME_EXPORT void
+ mgpuMemHostUnregisterMemRef(int64_t rank,
+                             StridedMemRefType<char, 1> *descriptor,
+                             int64_t elementSizeBytes) {
+@@ -209,7 +223,7 @@ void mgpuMemGetDevicePointer(T *hostPtr, T **devicePtr) {
+       hipHostGetDevicePointer((void **)devicePtr, hostPtr, /*flags=*/0));
+ }
+ 
+-extern "C" StridedMemRefType<float, 1>
++extern "C" MLIR_ROCM_RUNTIME_EXPORT StridedMemRefType<float, 1>
+ mgpuMemGetDeviceMemRef1dFloat(float *allocated, float *aligned, int64_t offset,
+                               int64_t size, int64_t stride) {
+   float *devicePtr = nullptr;
+@@ -217,7 +231,7 @@ mgpuMemGetDeviceMemRef1dFloat(float *allocated, float *aligned, int64_t offset,
+   return {devicePtr, devicePtr, offset, {size}, {stride}};
+ }
+ 
+-extern "C" StridedMemRefType<int32_t, 1>
++extern "C" MLIR_ROCM_RUNTIME_EXPORT StridedMemRefType<int32_t, 1>
+ mgpuMemGetDeviceMemRef1dInt32(int32_t *allocated, int32_t *aligned,
+                               int64_t offset, int64_t size, int64_t stride) {
+   int32_t *devicePtr = nullptr;
+@@ -225,7 +239,7 @@ mgpuMemGetDeviceMemRef1dInt32(int32_t *allocated, int32_t *aligned,
+   return {devicePtr, devicePtr, offset, {size}, {stride}};
+ }
+ 
+-extern "C" void mgpuSetDefaultDevice(int32_t device) {
++extern "C" MLIR_ROCM_RUNTIME_EXPORT void mgpuSetDefaultDevice(int32_t device) {
+   defaultDevice = device;
+   HIP_REPORT_IF_ERROR(hipSetDevice(device));
+ }

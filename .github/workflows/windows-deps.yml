@@ -27,7 +27,11 @@ permissions:
   contents: read
 
 env:
-  LLVM_TAG: llvmorg-22.1.0
+  # Upstream SHA plus cmake/patches/rocmlir-llvm-source.patch. LLVM_PATCHSET
+  # keys the llvm-install cache, so bump it whenever the patch content or the
+  # LLVM build flags change.
+  LLVM_TAG: 62b7cf9623fc310525f39ed69aaecc318a909731
+  LLVM_PATCHSET: rocmlirTriton-28a5a7a40cfd6aceab0047c7fc92cb5cf90b6540-src3
   ONNXRUNTIME_VERSION: "1.27.0"
   ONNXRUNTIME_PR_PATCHES: ""
   OGA_VERSION: "0.14.0"
@@ -53,7 +57,7 @@ jobs:
       - name: Compute cache key
         id: key
         shell: bash
-        run: echo "value=dep-llvm-${{ env.LLVM_TAG }}" >> "$GITHUB_OUTPUT"
+        run: echo "value=dep-llvm-${{ env.LLVM_TAG }}-${{ env.LLVM_PATCHSET }}" >> "$GITHUB_OUTPUT"
 
       - name: Probe llvm-install
         id: cache-llvm
@@ -62,6 +66,15 @@ jobs:
           path: ${{ runner.workspace }}/llvm-install
           key: ${{ steps.key.outputs.value }}
           lookup-only: true
+
+      - name: Checkout hip-ep (LLVM patch applicator)
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: source-hip-ep
+          sparse-checkout: cmake
+          fetch-depth: 1
+          show-progress: false
 
       - name: Setup Python 3.14
         if: steps.cache-llvm.outputs.cache-hit != 'true'
@@ -102,20 +115,25 @@ jobs:
           git -C "$SRC" remote add origin https://github.com/llvm/llvm-project.git
           git -C "$SRC" fetch --depth 1 origin "${{ env.LLVM_TAG }}"
           git -C "$SRC" checkout FETCH_HEAD
+          cmake -DLLVM_SOURCE_DIR="$SRC" \
+            -P "${{ github.workspace }}/source-hip-ep/cmake/apply_rocmlir_llvm_patches.cmake"
           cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
             -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
-            -DLLVM_TARGETS_TO_BUILD=X86 \
+            -DLLVM_ENABLE_PROJECTS="mlir;lld" \
+            -DLLVM_TARGETS_TO_BUILD="X86;AMDGPU" \
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
             -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/llvm-install" \
             -DLLVM_ENABLE_RTTI=ON \
+            -DLLVM_ENABLE_ASSERTIONS=ON \
             -DLLVM_ENABLE_ZLIB=OFF \
             -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_ENABLE_TERMINFO=OFF \
             -DLLVM_INCLUDE_TESTS=OFF \
             -DLLVM_INCLUDE_EXAMPLES=OFF \
             -DLLVM_INCLUDE_BENCHMARKS=OFF \
             -DLLVM_BUILD_TOOLS=ON \
             -DLLVM_INSTALL_UTILS=ON \
+            -DLLVM_INSTALL_TOOLCHAIN_ONLY=ON \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
           cmake --build "${{ runner.workspace }}/build-llvm" --target install

@@ -19,10 +19,15 @@ PoolDomainOp::getEntrySuccessorOperands(RegionSuccessor successor) {
   return getOperands();
 }
 
+ValueRange PoolDomainOp::getSuccessorInputs(RegionSuccessor successor) {
+  return successor.isParent() ? ValueRange(getResults())
+                              : ValueRange(getBody().getArguments());
+}
+
 void PoolDomainOp::getSuccessorRegions(
     RegionBranchPoint point, SmallVectorImpl<RegionSuccessor> &regions) {
   if (point.isParent()) {
-    regions.emplace_back(&getBody(), getBody().getArguments());
+    regions.emplace_back(&getBody());
     return;
   }
 
@@ -31,5 +36,5 @@ void PoolDomainOp::getSuccessorRegions(
     llvm::report_fatal_error(
         "hipsr.pool_domain received an unexpected branch point");
   }
-  regions.emplace_back(getOperation(), getResults());
+  regions.push_back(RegionSuccessor::parent());
 }
