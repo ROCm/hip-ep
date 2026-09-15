@@ -27,7 +27,7 @@ target_link_libraries(LibHipCompiler PUBLIC
   HipDialectIR
   HipsrDialectIR
   HipsrDialectTransforms
-  HipsrSchemePass
+  HipsrSchemeRuntime
   HipsrDialectPipelines
   HipDialectTransforms
   HipTargetLLVM

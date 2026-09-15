@@ -18,74 +18,46 @@
 (library (onnx-to-hipsr)
   (export run-pass)
   (import (rnrs (6))
-          (only (chezscheme) format)
           (mlir ffi)
-          (patterns cast-manual))) ; Import manual Cast pattern
+          (patterns cast-manual))
 
-  ;;===--------------------------------------------------------------------===;;
-  ;; Pass Entry Point
-  ;;===--------------------------------------------------------------------===;;
+  ;; Helper: Apply conversion and post-process
+  (define (do-conversion module-op ctx converter target patterns)
+    (mlir-log-debug "Applying full conversion...")
+    (let ((success (mlir-apply-full-conversion module-op target patterns)))
+      (mlir-destroy-rewrite-pattern-set patterns)
+      (mlir-destroy-conversion-target target)
+      (mlir-destroy-type-converter converter)
+      (if (= success 1)
+          (begin
+            (mlir-log-debug "Dialect conversion successful")
+            (mlir-log-debug "Erasing dead NoValue ops...")
+            (mlir-erase-dead-novalue-ops module-op)
+            (mlir-log-debug "Rewiring placeholder inputs...")
+            (mlir-rewire-placeholder-inputs module-op)
+            (mlir-log-info "ONNX to HipSR Conversion (Scheme): Success"))
+          (begin
+            (mlir-log-error "ONNX to HipSR Conversion (Scheme): FAILED")
+            (error (quote run-pass) "Dialect conversion failed")))))
 
-  ;; Main conversion pass
-  ;; Orchestrates dialect conversion using MLIR framework primitives
-  ;;
-  ;; NOTE: Required dialects (HipsrDialect, OnnxDialect, FuncDialect) are
-  ;; loaded automatically by MLIR's pass infrastructure via the dependentDialects
-  ;; declaration in Passes.td.
   (define (run-pass module-op . args)
     (mlir-log-info "Starting ONNX to HipSR Conversion (Scheme)")
-
     (let ((ctx (mlir-operation-get-context module-op)))
-      ;; Step 1: Create TypeConverter
       (mlir-log-debug "Creating TypeConverter...")
       (let ((converter (mlir-create-type-converter)))
-        ;; Add device memory space conversions (identity + ranked tensor)
         (mlir-type-converter-add-device-memory-conversions converter)
-
-        ;; Step 2: Create ConversionTarget
         (mlir-log-debug "Creating ConversionTarget...")
         (let ((target (mlir-create-conversion-target ctx)))
-          ;; Mark ONNX illegal (except NoValueOp)
           (mlir-conversion-target-add-illegal-onnx target)
-          ;; Mark HipSR legal
           (mlir-conversion-target-add-legal-hipsr target)
-          ;; Mark common ops legal (ModuleOp, arith.constant)
           (mlir-conversion-target-add-legal-common-ops target)
-          ;; Mark func ops dynamically legal based on TypeConverter
           (mlir-conversion-target-add-dynamically-legal-func target converter)
-          ;; Mark unknown ops nested in ComputeOp/PlaceholderOp legal
           (mlir-conversion-target-mark-unknown-ops-nested-legal target)
-
-          ;; Step 3: Create RewritePatternSet and populate patterns
           (mlir-log-debug "Populating conversion patterns...")
           (let ((patterns (mlir-create-rewrite-pattern-set ctx)))
-            ;; Use Scheme-defined Cast pattern instead of C++
             (populate-cast-patterns converter patterns ctx)
             (mlir-populate-return-conversion-patterns converter patterns ctx)
             (mlir-populate-func-type-conversion-pattern patterns converter)
-
-            ;; Step 4: Apply full conversion
-            (mlir-log-debug "Applying full conversion...")
-            (let ((success (mlir-apply-full-conversion module-op target patterns)))
-              ;; Clean up objects (patterns ownership transferred to applyFullConversion)
-              (mlir-destroy-rewrite-pattern-set patterns)
-              (mlir-destroy-conversion-target target)
-              (mlir-destroy-type-converter converter)
-
-              (if (= success 1)
-                  (begin
-                    (mlir-log-debug "Dialect conversion successful")
-
-                    ;; Step 5: Post-processing
-                    (mlir-log-debug "Erasing dead NoValue ops...")
-                    (mlir-erase-dead-novalue-ops module-op)
-
-                    (mlir-log-debug "Rewiring placeholder inputs...")
-                    (mlir-rewire-placeholder-inputs module-op)
-
-                    (mlir-log-info "ONNX to HipSR Conversion (Scheme): Success"))
-                  (begin
-                    (mlir-log-error "ONNX to HipSR Conversion (Scheme): FAILED")
-                    (error 'run-pass "Dialect conversion failed"))))))))
+            (do-conversion module-op ctx converter target patterns))))))
 
 ) ;; end library (onnx-to-hipsr)

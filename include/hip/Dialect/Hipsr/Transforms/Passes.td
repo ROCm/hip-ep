@@ -273,32 +273,24 @@ def HipsrUseOutputAllocatorPass
   ];
 }
 
-def SchemeScriptPass : Pass<"scheme-script", "mlir::ModuleOp"> {
-  let summary = "Execute MLIR pass written in Scheme";
+def ConversionInSchemePass : Pass<"conversion-in-scheme", "mlir::ModuleOp"> {
+  let summary = "General dialect conversion using Scheme-defined patterns";
   let description = [{
-    Generic pass that imports an R6RS Scheme module and executes its run-pass
-    function. The module receives the module operation and can query/transform
-    IR using the Scheme FFI. This allows writing complete MLIR passes in pure
-    Scheme without C++ code.
+    Configurable conversion pass using patterns defined in Scheme.
+    The Scheme module to load is specified via the 'module' option.
 
-    The pass:
-    1. Sets (library-directories) to lib/scheme/ relative to executable
-    2. Imports the specified R6RS module via (import (module-name))
-    3. Calls the exported run-pass function with the module operation
+    Examples:
+      --conversion-in-scheme="module=onnx-to-hipsr"  - ONNX to HipSR
+      --conversion-in-scheme="module=hipsr-to-linalg" - HipSR to Linalg
+      --conversion-in-scheme="module=onnx-to-hipsr,log-level=debug" - with debug logging
 
-    Example: --scheme-script="module=printpass" imports (printpass)
+    Enables writing conversion patterns in Scheme without C++ recompilation.
   }];
-  let dependentDialects = [
-    "::mlir::hipsr::HipsrDialect",
-    "::mlir::onnx::OnnxDialect",
-    "::mlir::func::FuncDialect",
-    "::mlir::arith::ArithDialect"
-  ];
   let options = [
+    Option<"moduleName", "module", "std::string", /*default=*/"\"\"",
+           "Scheme module name to load (e.g., 'onnx-to-hipsr')">,
     Option<"logLevel", "log-level", "std::string", /*default=*/"\"warning\"",
-           "Logging level: trace, debug, info, warning, error, fatal">,
-    Option<"moduleName", "module", "std::string", /*default=*/"\"printpass\"",
-           "R6RS module name to import (without parentheses)">
+           "Logging level: trace, debug, info, warning, error, fatal">
   ];
 }
 

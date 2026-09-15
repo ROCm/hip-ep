@@ -6,6 +6,7 @@
 add_library(OnnxToHipsr STATIC
   ConstantConversion.cpp
   OnnxToHipsr.cpp
+  ConversionInScheme.cpp
   CastConversion.cpp
   MatMulConversion.cpp
   ExpandConversion.cpp
@@ -30,6 +31,7 @@ add_dependencies(OnnxToHipsr
 
 target_link_libraries(OnnxToHipsr PUBLIC
   HipsrDialectIR
+  HipsrSchemeRuntime
   OnnxDialectIR
   MLIRPass
   MLIRTransforms
