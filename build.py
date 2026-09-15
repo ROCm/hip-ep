@@ -547,15 +547,11 @@ def build_rocmlirtriton(args, build_dir, source_dir=None, rocm_path=None):
             compiler_dir.parent / "lib" / "clang",
             rocm_path / "lib" / "clang",
         ]
-        resource_src = next(
-            (p for p in resource_candidates if p.is_dir()), None
-        )
+        resource_src = next((p for p in resource_candidates if p.is_dir()), None)
         if resource_src is None:
             # Bundles move this tree around, so locate the builtin headers
             # rather than guess a third fixed path.
-            probe = next(
-                rocm_path.glob("**/lib/clang/*/include/emmintrin.h"), None
-            )
+            probe = next(rocm_path.glob("**/lib/clang/*/include/emmintrin.h"), None)
             if probe is not None:
                 resource_src = probe.parents[2]
         if resource_src is None:
