@@ -14,7 +14,7 @@ the SAME (M, K, N, group_size) shape:
     see matmul_nbits_kernel.hip Section 1c/1d -- NOT an ONNX MatMulNBits
     convention)
   - uint4, nibble-packed (the existing ONNX MatMulNBits convention, same
-    format gen_matmul_nbits_data.py in ../gemm_fp16u4 produces)
+    format gen_matmul_nbits_data.py in ../fp16u4 produces)
 
 so the C++ test binary can benchmark hip_matmul_nbits(bits=3) and
 hip_matmul_nbits(bits=4) back-to-back on identical shapes and report a fair
@@ -178,7 +178,7 @@ def main():
 
     # ONNX MatMulNBits pads each row's blob to num_groups_k * (group_size/2)
     # bytes -- the last group is padded to a full group_size even when K is
-    # not a multiple of group_size (mirrors ../gemm_fp16u4/gen_matmul_nbits_data.py).
+    # not a multiple of group_size (mirrors ../fp16u4/gen_matmul_nbits_data.py).
     u4_row_bytes = num_groups_k * (group_size // 2)
     B_u4_packed = np.zeros((N, u4_row_bytes), dtype=np.uint8)
     B_u4_packed[:, :B_u4_packed_real.shape[1]] = B_u4_packed_real

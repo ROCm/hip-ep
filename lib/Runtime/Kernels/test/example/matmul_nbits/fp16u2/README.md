@@ -5,7 +5,7 @@ kernel in `matmul_nbits_kernel.hip`, and compares it head-to-head against the
 existing `bits=4` (uint4, nibble-packed) kernel on **identical**
 (M, K, N, group_size) shapes. Both are ONNX `MatMulNBits` conventions.
 
-This is a sibling of `../gemm_fp16u4` and `../gemm_fp16u3` — same build style,
+This is a sibling of `../fp16u4` and `../fp16u3` — same build style,
 same Makefile conventions — but a single test binary loads both a
 u2-quantized and a u4-quantized copy of the same-shaped weight matrix (sharing
 the same `A`) and runs both kernels back-to-back, printing a side-by-side
@@ -122,13 +122,13 @@ make direct
   for u2), and NumPy references (including a dedicated fractional-FP16-zp
   reference for u2).
 - `gen_model_data_u2.py` — calls the above once per shape in a model config
-  JSON (mirrors `../gemm_fp16u4/gen_model_data.py`); skips shapes where
+  JSON (mirrors `../fp16u4/gen_model_data.py`); skips shapes where
   `K % 32 != 0`.
 - `test_matmul_nbits_u2.cpp` — loads both quantized copies, benchmarks +
   verifies each via `hip_matmul_nbits()`, prints the comparison table, and
   validates the packed-zp real-model path. Supports single-shape (default)
   and `--model <json>` sweep modes.
-- `Makefile` — same direct-compile-and-link style as `../gemm_fp16u4`
+- `Makefile` — same direct-compile-and-link style as `../fp16u4`
   (compiles `matmul_nbits_kernel.hip` and the test driver as two TUs, links
   them — no prebuilt `.lib` needed). Defaults to `--offload-arch=gfx1150`
   and `HIP_SDK=C:\AMD\Rocm\7.1`; override on the command line, e.g.

@@ -41,9 +41,9 @@ endif
 # ---- Paths ----
 
 HIPCC       := $(HIP_SDK)/bin/hipcc.exe
-INCLUDE_DIR := ../../../include
-KERNEL_HIP  := ../../../hip/matmul_nbits_kernel.hip
-AUTOTUNE_DIR := ../../../hip/autotune/matmul_nbits
+INCLUDE_DIR := ../../../../include
+KERNEL_HIP  := ../../../../hip/matmul_nbits_kernel.hip
+AUTOTUNE_DIR := ../../../../hip/autotune/matmul_nbits
 
 TARGET_DIRECT := $(BUILD_DIR)/test_direct.exe
 

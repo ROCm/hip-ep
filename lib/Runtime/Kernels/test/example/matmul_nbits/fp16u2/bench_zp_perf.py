@@ -6,18 +6,18 @@
 #
 
 """
-Sweep a matrix of shapes through the built gemm_fp16u3 test binary WITH
-zero_points, and summarize the "u3 packed-zp real-model path vs u4 with zp"
+Sweep a matrix of shapes through the built fp16u2 test binary WITH
+zero_points, and summarize the "u2 packed-zp real-model path vs u4 with zp"
 performance into zp_perf_compare.md (this folder).
 
 For each shape this:
-  1. generates with-zeros data via gen_matmul_nbits_u3_data.py,
+  1. generates with-zeros data via gen_matmul_nbits_u2_data.py,
   2. runs build/test_direct.exe on that shape,
   3. parses the steady-state packed-zp benchmark line
-        u3(pkd-zp) vs u4(zp) speed: R x (...)  [u3 G GFLOPS / B GB/s  vs  u4 ...]
+        u2(pkd-zp) vs u4(zp) speed: R x (...)  [u2 G GFLOPS / B GB/s  vs  u4 ...]
      plus the unpack-check and Overall pass/fail.
 
-The u3(pkd-zp) number is the real runtime path: the ONNX 3-bit packed
+The u2(pkd-zp) number is the real runtime path: the ONNX 2-bit packed
 zero_points are unpacked to one-byte-per-group once (excluded from timing, as
 the wrapper caches per pointer), then the GEMM is timed with pre_unpacked_zp_u8.
 
@@ -33,7 +33,7 @@ import sys
 import shutil
 import subprocess
 
-BITS = 3
+BITS = 2
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROCM_BIN = r"C:\Users\a1_iputest\Documents\Workspace\ROCm\7.1\bin"
 GPU = "AMD Radeon 8060S (gfx1151)"

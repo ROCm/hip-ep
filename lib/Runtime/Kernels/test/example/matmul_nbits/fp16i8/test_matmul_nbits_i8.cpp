@@ -487,7 +487,7 @@ bool testShape(int M, int N, int K, int group_size,
 // A is upcast host-side (exact fp16->fp32), so the kernel's internal
 // fp32->fp16 downcast reproduces that exact fp16 A, making the existing
 // fp16 i8 C_ref the correct ground truth here too, just compared through
-// float containers (mirrors gemm_fp16u2's testFp32Shape()).
+// float containers (mirrors fp16u2's testFp32Shape()).
 // ============================================================
 bool testFp32Shape(int M, int N, int K, int group_size,
                    const std::string& data_dir, bool use_zeros)

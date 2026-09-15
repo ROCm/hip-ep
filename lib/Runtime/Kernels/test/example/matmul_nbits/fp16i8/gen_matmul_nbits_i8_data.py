@@ -21,7 +21,7 @@ or sub-byte packing at all. This generates:
                                                used as ground truth for BOTH
                                                the fp16 and fp32 element_size
                                                instantiations; see README /
-                                               gemm_fp16u2's testFp32Shape for
+                                               fp16u2's testFp32Shape for
                                                why the same fp16 ref is valid
                                                ground truth for the fp32 path)
 
