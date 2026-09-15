@@ -34,21 +34,21 @@
          ;; Match: Check result count
          (= (mlir-operation-num-results op) 1)
 
-         ;; Extract operands
+         ;; Extract operands and types
          (let* ([%input (mlir-operation-get-operand-value op 0)]
                 [%output (mlir-operation-get-result-value op 0)]
 
                 ;; Get context
                 [ctx (mlir-get-hipsr-context-arg op)]
-                [loc (mlir-operation-get-loc op)]
 
                 ;; Get types
                 [input-type (mlir-value-get-type %input)]
                 [output-type (mlir-value-get-type %output)])
 
            ;; Rewrite: Create replacement operations
-           (let* ([%placeholder (mlir-create-placeholder-op ctx %input loc 0)]
-                  [%cast (mlir-create-cast-op ctx %input %placeholder loc)])
+           ;; mlir-create-placeholder-op: (ctx input result-type placeholder-type-int)
+           (let* ([%placeholder (mlir-create-placeholder-op ctx %input output-type 0)]
+                  [%cast (mlir-create-cast-op ctx %input %placeholder output-type)])
 
              ;; Replace original op with new op
              (mlir-replace-op op %cast)
