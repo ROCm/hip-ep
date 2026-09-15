@@ -49,10 +49,12 @@
 // links this empty resolve() instead of the real FlatBuffers-LUT resolver.
 // matmul_nbits_kernel.hip then falls back to its runtime autotune sweep.
 namespace hipdnn_ep {
+#ifndef HIPDNN_LUT_LINKED_EXTERNALLY
 namespace matmul_nbits_autotune {
 Result resolve(const Request&, WmmaValidator, GemvValidator, void*) { return {}; }
 Stats stats() { return {}; }
 }  // namespace matmul_nbits_autotune
+#endif  // HIPDNN_LUT_LINKED_EXTERNALLY
 }  // namespace hipdnn_ep
 
 #include <iostream>

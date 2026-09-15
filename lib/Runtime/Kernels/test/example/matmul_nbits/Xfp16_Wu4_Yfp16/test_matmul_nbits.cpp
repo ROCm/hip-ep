@@ -25,15 +25,20 @@
 #include <hip/hip_fp16.h>
 #include "hip_custom_kernels.h"
 #include "matmul_nbits_autotune.h"
+#include "../../common/csv_writer.h"
 
-// Example `make direct` has no CMake FlatBuffers LUT. Empty resolve()
-// lets the kernel link and fall back to its runtime sweep.
+#ifndef HIPDNN_LUT_LINKED_EXTERNALLY
+// MODE=autotune (default): no real FlatBuffers LUT is linked. Empty resolve()
+// lets the kernel link and fall back to its runtime sweep. MODE=lut links the
+// real matmul_nbits_autotune.cpp resolver instead (see Makefile), which
+// defines these symbols, so this stub must not also define them.
 namespace hipdnn_ep {
 namespace matmul_nbits_autotune {
 Result resolve(const Request&, WmmaValidator, GemvValidator, void*) { return {}; }
 Stats stats() { return {}; }
 }  // namespace matmul_nbits_autotune
 }  // namespace hipdnn_ep
+#endif  // HIPDNN_LUT_LINKED_EXTERNALLY
 
 #include <iostream>
 #include <fstream>
@@ -446,6 +451,18 @@ bool test_matmul_nbits(int M, int N, int K, int group_size,
             nullptr);  // pre_unpacked_zp_fp16 (unused, zero_points is already fp16)
     };
 
+    // First call triggers the tuner search / LUT resolve (cached for every
+    // call after); capture its [custom_kernels] log lines for out/results.csv
+    // without changing the measured warmup/benchmark calls below.
+#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
+    const char* kCaptureEnv = "HIPDNN_MATMUL_LUT_LOG";
+#else
+    const char* kCaptureEnv = "HIPDNN_MATMUL_AUTOTUNE_LOG";
+#endif
+    std::vector<std::string> capture_lines = hipdnn_ep_test::captureLogLines(
+        kCaptureEnv, "out/_autotune_capture.tmp", launch_kernel);
+    HIP_CHECK(hipStreamSynchronize(stream));
+
     constexpr int PRE_WARMUP = 2000;
     std::cout << "  Pre-warmup (" << PRE_WARMUP << " iters)..." << std::flush;
     auto pw0 = std::chrono::steady_clock::now();
@@ -522,6 +539,7 @@ bool test_matmul_nbits(int M, int N, int K, int group_size,
     HIP_CHECK(hipMemcpy(h_C.data(), d_C, size_C, hipMemcpyDeviceToHost));
 
     bool pass = true;
+    double rel_l2 = 0.0;
 
     if(has_ref)
     {
@@ -529,6 +547,7 @@ bool test_matmul_nbits(int M, int N, int K, int group_size,
         int total        = M * N;
         float max_diff  = 0.0f;
         float max_rdiff = 0.0f;
+        double sum_sq_diff = 0.0, sum_sq_ref = 0.0;
 
         for(int i = 0; i < total; i++)
         {
@@ -539,11 +558,14 @@ bool test_matmul_nbits(int M, int N, int K, int group_size,
 
             if(diff > max_diff) max_diff = diff;
             if(rdiff > max_rdiff) max_rdiff = rdiff;
+            sum_sq_diff += double(diff) * double(diff);
+            sum_sq_ref  += double(ref_val) * double(ref_val);
 
             float tol = std::fabs(ref_val) * 0.05f + 0.1f;
             if(diff > tol)
                 errors++;
         }
+        rel_l2 = (sum_sq_ref > 0.0) ? std::sqrt(sum_sq_diff / sum_sq_ref) : std::sqrt(sum_sq_diff);
 
         std::cout << "\n  === GPU vs Python Reference ===" << std::endl;
         std::cout << "  Verified " << total << " elements, " << errors << " errors" << std::endl;
@@ -569,6 +591,52 @@ bool test_matmul_nbits(int M, int N, int K, int group_size,
         int total = M * N;
         for(int i = 0; i < 5 && i < total; i++)
             std::cout << "    [" << i << "] = " << half_to_float(h_C[i]) << std::endl;
+    }
+
+    {
+        using namespace hipdnn_ep_test;
+        CsvWriter csv;
+        char shape_buf[64];
+        std::snprintf(shape_buf, sizeof(shape_buf), "%dx%dx%d_gs%d", M, N, K, group_size);
+#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
+        std::string lut_source;
+        for (const std::string& line : capture_lines) {
+            if (line.find("[matmul-lut]") == std::string::npos) continue;
+            if (line.find("exact") != std::string::npos) lut_source = "exact";
+            else if (line.find("nearest") != std::string::npos) lut_source = "nearest";
+            else if (line.find("fallback") != std::string::npos) lut_source = "fallback";
+            if (!lut_source.empty()) break;
+        }
+        CsvRow row;
+        row.shape = shape_buf;
+        row.config = lut_source.empty() ? "lut:none" : ("lut:" + lut_source);
+        row.time_ms = avg_ms;
+        row.gflops = gflops;
+        row.gbps = bw_gbs;
+        row.is_best = 1;
+        row.lut_source = lut_source;
+        row.rel_l2 = rel_l2;
+        row.has_verdict = true;
+        row.verdict = pass ? "PASS" : "FAIL";
+        csv.write(row);
+#else
+        std::vector<CsvRow> candidates = parseCandidateLines(capture_lines);
+        for (CsvRow& c : candidates) {
+            c.shape = shape_buf;
+            csv.write(c);
+        }
+        CsvRow row;
+        row.shape = shape_buf;
+        row.config = "final";
+        row.time_ms = avg_ms;
+        row.gflops = gflops;
+        row.gbps = bw_gbs;
+        row.is_best = 0;
+        row.rel_l2 = rel_l2;
+        row.has_verdict = true;
+        row.verdict = pass ? "PASS" : "FAIL";
+        csv.write(row);
+#endif
     }
 
     hipFree(d_A);

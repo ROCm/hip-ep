@@ -21,12 +21,20 @@ make clean
 | `test_custom` | One shape from `B=`, `H=`, `G=`, `D=`, `SQ=`, `PAST=`, `WINDOW=`; also `gendata`+`--data-dir`. |
 | `clean` | Removes `out/` and `data/`. |
 
-`MODE=autotune` (default): the prefill launchers self-tune their launch
-configuration per shape, independent of the `MODE` knob.
-`MODE=lut`: if `hip/autotune/gqa/lut/<arch>.fb` exists for the arch in
-`OFFLOAD`, this build prints a one-line notice and falls back to
-`MODE=autotune` -- the prefill kernel does not call the FlatBuffers LUT
-resolver at all today, and wiring that up needs a flatc-generated header this
-build intentionally does without. It never fails because of this.
+`MODE=auto` (default): `lut` if `hip/autotune/gqa/lut/<arch>.fb` exists for
+the arch in `OFFLOAD`, else `autotune`. `MODE=lut` forces it (warns + falls
+back to `autotune` if the `.fb` is missing). `MODE=lut` needs `flatc` + its
+`include/` (a build tool, not part of this repo):
+`FLATC=<path to flatc(.exe)> FLATBUFFERS_INC=<its include dir>` -- see
+`example/README.md`.
+
+The prefill kernel never calls the autotune resolver itself (only production
+`real/gqa.cpp` does); `MODE=autotune` (the fallback, and the only path when no
+`.fb` exists) has the launchers self-tune their configuration per shape,
+independent of `MODE`. `MODE=lut` instead has *this test* call
+`hip_gqa_autotune_resolve_prefill()` (the same resolver `real/gqa.cpp` calls in
+production) and dispatch the resolved config through
+`hip_gqa_flash_prefill_v3_configured()`. Both modes append to
+`out/results.csv`.
 
 CI passes `OFFLOAD`/`HIP_SDK` explicitly; there is no personal default.

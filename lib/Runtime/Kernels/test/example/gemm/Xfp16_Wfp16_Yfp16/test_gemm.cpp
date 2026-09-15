@@ -13,15 +13,18 @@
 #include "hip_custom_kernels.h"
 #include "gemm_autotune.h"
 
-// This example builds with only the HIP SDK (no CMake, no flatbuffers), so it
-// links this empty resolve() instead of the real FlatBuffers-LUT resolver.
-// gemm_kernel.hip then falls back to its runtime autotune sweep.
+#ifndef HIPDNN_LUT_LINKED_EXTERNALLY
+// MODE=autotune (default): no real FlatBuffers LUT is linked. Empty resolve()
+// lets the kernel link and fall back to its runtime sweep. MODE=lut links the
+// real gemm_autotune.cpp resolver instead (see Makefile), which defines these
+// symbols, so this stub must not also define them.
 namespace hipdnn_ep {
 namespace gemm_autotune {
 Result resolve(const Request&, WmmaValidator, GemvValidator, void*) { return {}; }
 Stats stats() { return {}; }
 }  // namespace gemm_autotune
 }  // namespace hipdnn_ep
+#endif  // HIPDNN_LUT_LINKED_EXTERNALLY
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>

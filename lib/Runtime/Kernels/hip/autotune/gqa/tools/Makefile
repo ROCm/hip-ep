@@ -20,6 +20,8 @@
 
 ifeq ($(OS),Windows_NT)
     DETECTED_OS := Windows
+    SHELL := cmd.exe
+    .SHELLFLAGS := /c
 else
     DETECTED_OS := WSL
 endif

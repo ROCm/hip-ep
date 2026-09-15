@@ -19,13 +19,13 @@ make clean
 | `test_custom` | One shape from `SIZE=MxKxN`, `GS=`, `NO_ZEROS=1`. |
 | `clean` | Removes `out/`, `data/`, `data_model/`. |
 
-`MODE=autotune` (default) links an empty `resolve()` stub so the kernel runs
-its own runtime autotune sweep. `MODE=lut`: if
-`hip/autotune/matmul_nbits/lut/<arch>.fb` exists for the arch in `OFFLOAD`,
-this build prints a one-line notice and falls back to `MODE=autotune` -- the
-real FlatBuffers LUT resolver needs a flatc-generated header that only the
-CMake build produces, and this test intentionally builds without CMake/flatc.
-It never fails because of this.
+`MODE=auto` (default): `lut` if `hip/autotune/matmul_nbits/lut/<arch>.fb`
+exists for the arch in `OFFLOAD`, else `autotune`. `MODE=lut` forces it
+(warns + falls back to `autotune` if the `.fb` is missing); `MODE=autotune`
+always links an empty `resolve()` stub so the kernel runs its own runtime
+sweep. `MODE=lut` needs `flatc` + its `include/` (a build tool, not part of
+this repo): `FLATC=<path to flatc(.exe)> FLATBUFFERS_INC=<its include dir>`
+— see `example/README.md`. Both modes append to `out/results.csv`.
 
 `gen_data.py` is the single data generator and covers all three modes itself:
 

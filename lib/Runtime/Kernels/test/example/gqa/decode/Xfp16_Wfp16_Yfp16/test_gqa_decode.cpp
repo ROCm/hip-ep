@@ -47,6 +47,12 @@
 #include <vector>
 #include <string>
 
+#include "../../../common/csv_writer.h"
+
+#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
+#include "gqa_autotune.h"
+#endif
+
 // Launcher under test (implemented in hip/gqa_kernel.hip).
 // KV-cache dtype ABI (mirrors hip_kv_dtype_t in hip_custom_kernels.h).
 enum { HIP_KV_DTYPE_FP16 = 0, HIP_KV_DTYPE_INT8 = 1 };
@@ -63,6 +69,24 @@ extern "C" int hip_gqa_flash_decode(
     const void* head_sink,
     int use_smooth_softmax,
     int kv_dtype, const void* k_scale, const void* v_scale);
+
+#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
+// Lookup-only sibling: dispatches an explicit config instead of autotuning.
+// Same ABI as hip_gqa_flash_decode plus the three resolved knobs at the end.
+extern "C" int hip_gqa_flash_decode_configured(
+    void* stream,
+    const void* Q, const void* Kcache, const void* Vcache,
+    void* O,
+    void* partials_workspace,
+    int B, int H, int G, int d, int skv, int max_seq, int max_splits,
+    float scale,
+    const void* seqlens_k,
+    int local_window_size,
+    const void* head_sink,
+    int use_smooth_softmax,
+    int kv_dtype, const void* k_scale, const void* v_scale,
+    int use_wmma, int splits, int bkv);
+#endif
 
 // Legacy one-block-per-head fused decode (the ORIGINAL baseline that the
 // OPTIMIZATION.md 10-20x figure was measured against). No window/sink/split-K.
@@ -264,6 +288,74 @@ static double run_kernel(DecodeMode mode, const Case& c, float scale,
   return ms / iters;
 }
 
+#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
+// MODE=lut path: resolve a config from the real embedded LUT (the same
+// hip_gqa_autotune_resolve_decode() real/gqa.cpp calls in production), then
+// dispatch it through the lookup-only entry point instead of autotuning.
+static double run_kernel_lut(const Case& c, float scale,
+                             const __half* dQ, const __half* dK, const __half* dV,
+                             __half* dO, float* dPart, const int* dSeq,
+                             const __half* dSink, int iters,
+                             std::vector<float>& host_O,
+                             hipdnn_ep::GqaTuneSource& out_source) {
+  const int B = c.B, H = c.H, G = c.G, D = c.D, max_seq = c.max_seq;
+  const void* sinkp = c.sink ? (const void*)dSink : nullptr;
+  const int eff_skv = (c.window > 0 && c.total > c.window) ? c.window : c.total;
+
+  hipdnn_ep::GqaDecodeRequest req{};
+  req.kv_dtype = HIP_KV_DTYPE_FP16;
+  req.batch = B;
+  req.num_heads = H;
+  req.kv_num_heads = G;
+  req.head_dim = D;
+  req.effective_skv = eff_skv;
+  req.max_splits = MAX_SPLITS;
+  req.local_window = c.window;
+
+  void* policy = hip_gqa_autotune_create(nullptr);
+  hipdnn_ep::GqaDecodeResult res{};
+  hip_gqa_autotune_resolve_decode(policy, &req, &res);
+  hip_gqa_autotune_destroy(policy);
+  out_source = res.source;
+
+  const int use_wmma = res.config.use_wmma ? 1 : 0;
+  const int splits = res.config.splits;
+  const int bkv = res.config.bkv;
+
+  HIP_CHECK((hipError_t)hip_gqa_flash_decode_configured(
+      nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, c.total, max_seq, MAX_SPLITS,
+      scale, dSeq, c.window, sinkp, c.smooth, HIP_KV_DTYPE_FP16, nullptr,
+      nullptr, use_wmma, splits, bkv));
+  HIP_CHECK(hipDeviceSynchronize());
+  host_O.resize((size_t)B * H * D);
+  {
+    std::vector<__half> tmp((size_t)B * H * D);
+    HIP_CHECK(hipMemcpy(tmp.data(), dO, tmp.size() * sizeof(__half),
+                        hipMemcpyDeviceToHost));
+    for (size_t i = 0; i < tmp.size(); ++i) host_O[i] = __half2float(tmp[i]);
+  }
+
+  hipEvent_t a, b;
+  HIP_CHECK(hipEventCreate(&a));
+  HIP_CHECK(hipEventCreate(&b));
+  HIP_CHECK(hipEventRecord(a));
+  for (int it = 0; it < iters; ++it) {
+    hip_gqa_flash_decode_configured(nullptr, dQ, dK, dV, dO, dPart, B, H, G, D,
+                                    c.total, max_seq, MAX_SPLITS, scale, dSeq,
+                                    c.window, sinkp, c.smooth,
+                                    HIP_KV_DTYPE_FP16, nullptr, nullptr,
+                                    use_wmma, splits, bkv);
+  }
+  HIP_CHECK(hipEventRecord(b));
+  HIP_CHECK(hipEventSynchronize(b));
+  float ms = 0.0f;
+  HIP_CHECK(hipEventElapsedTime(&ms, a, b));
+  HIP_CHECK(hipEventDestroy(a));
+  HIP_CHECK(hipEventDestroy(b));
+  return ms / iters;
+}
+#endif  // HIPDNN_LUT_LINKED_EXTERNALLY
+
 // Legacy fused decode (original baseline). Only valid without window/sink.
 static double run_fused(const Case& c, float scale,
                         const __half* dQ, const __half* dK, const __half* dV,
@@ -372,7 +464,19 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose,
   // --prod-only drops all three: when comparing two builds, the extra configs
   // would run between the timed ones and move the clock state under them.
   std::vector<float> O_auto, O_base, O_wmma, O_scalar;
-  double ms_auto   = run_kernel(MODE_AUTO,     c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink, iters, O_auto);
+  double ms_auto = 0.0;
+#ifndef HIPDNN_LUT_LINKED_EXTERNALLY
+  // First call for this (B,H,G,D,skv) key runs + logs the tuner's timed
+  // candidates (cached after); capture them here for out/results.csv without
+  // perturbing this measured call.
+  std::vector<std::string> autotune_capture_lines = hipdnn_ep_test::captureLogLines(
+      "HIPDNN_EP_DEBUG", "out/_autotune_capture.tmp",
+      [&]() {
+        ms_auto = run_kernel(MODE_AUTO, c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink, iters, O_auto);
+      });
+#else
+  ms_auto = run_kernel(MODE_AUTO, c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink, iters, O_auto);
+#endif
   double ms_base = 0.0, ms_wmma = 0.0, ms_scalar = 0.0;
   double l2_base = 0.0, l2_wmma = 0.0, l2_scalar = 0.0, l2_ab = 0.0;
   if (!g_prod_only) {
@@ -405,6 +509,69 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose,
   bool ok = (l2_auto < tol) && (!fused_ran || l2_fused < tol);
   if (!g_prod_only)
     ok = ok && (l2_base < tol) && (l2_wmma < tol) && (l2_scalar < tol);
+
+  char csv_shape[96];
+  std::snprintf(csv_shape, sizeof(csv_shape), "%s_H%d_G%d_D%d_len%d_win%d",
+                c.name, H, G, D, c.total, c.window);
+#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
+  {
+    using namespace hipdnn_ep_test;
+    std::vector<float> O_lut;
+    double ms_lut = 0.0;
+    hipdnn_ep::GqaTuneSource src{};
+    std::string lut_source, lut_config;
+    std::vector<std::string> lut_lines = captureLogLines(
+        "HIPDNN_GQA_LUT_LOG", "out/_lut_capture.tmp", [&]() {
+          ms_lut = run_kernel_lut(c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink,
+                                  iters, O_lut, src);
+        });
+    for (const std::string& line : lut_lines) {
+      if (line.find("[gqa-lut] decode ") == std::string::npos) continue;
+      if (line.find(" exact ") != std::string::npos) lut_source = "exact";
+      else if (line.find(" nearest ") != std::string::npos) lut_source = "nearest";
+      else if (line.find(" fallback") != std::string::npos) lut_source = "fallback";
+      else if (line.find(" heuristic") != std::string::npos) lut_source = "heuristic";
+      const size_t arrow = line.find("-> ");
+      if (arrow != std::string::npos) lut_config = line.substr(arrow + 3);
+    }
+    const double l2_lut = rel_l2(O_lut, ref);
+    const bool lut_ok = l2_lut < tol;
+    ok = ok && lut_ok;
+    printf("   [lut] source=%-7s %s relL2=%.2e  %.4f ms  %s\n",
+           lut_source.empty() ? "none" : lut_source.c_str(),
+           lut_config.c_str(), l2_lut, ms_lut, lut_ok ? "PASS" : "*** FAIL ***");
+
+    CsvWriter csv;
+    CsvRow row;
+    row.shape = csv_shape;
+    row.config = lut_config.empty() ? "lut:none" : lut_config;
+    row.time_ms = ms_lut;
+    row.is_best = 1;
+    row.lut_source = lut_source;
+    row.rel_l2 = l2_lut;
+    row.has_verdict = true;
+    row.verdict = lut_ok ? "PASS" : "FAIL";
+    csv.write(row);
+  }
+#else
+  {
+    using namespace hipdnn_ep_test;
+    CsvWriter csv;
+    std::vector<CsvRow> candidates = parseCandidateLines(autotune_capture_lines);
+    for (CsvRow& cr : candidates) {
+      cr.shape = csv_shape;
+      csv.write(cr);
+    }
+    CsvRow row;
+    row.shape = csv_shape;
+    row.config = "final";
+    row.time_ms = ms_auto;
+    row.rel_l2 = l2_auto;
+    row.has_verdict = true;
+    row.verdict = ok ? "PASS" : "FAIL";
+    csv.write(row);
+  }
+#endif
 
   // Three columns: fixed-config vs autotune on the SAME kernel, so they measure
   // the value of per-shape tuning, not the difference between two versions:

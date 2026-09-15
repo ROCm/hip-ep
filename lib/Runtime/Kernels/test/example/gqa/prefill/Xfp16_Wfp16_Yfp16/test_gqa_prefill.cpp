@@ -32,6 +32,21 @@
 #include <vector>
 #include <string>
 
+#include "../../../common/csv_writer.h"
+
+#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
+#include "gqa_autotune.h"
+
+// Lookup-only prefill entry: same ABI as hip_gqa_flash_prefill plus the
+// resolved v5/v7/v8 knobs (see gqa_kernel.hip).
+extern "C" int hip_gqa_flash_prefill_v3_configured(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
+    int past_len, float scale, int local_window_size, const void* head_sink,
+    int num_heads, int smooth_softmax,
+    int m_tiles, int bkv, int nw, int mt, int nd);
+#endif
+
 extern "C" int hip_gqa_flash_prefill_v5(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
@@ -239,13 +254,66 @@ static bool run_case(const Case& c, int iters, const std::string& data_dir = std
                        : (c.sink_mode == kSinkSmooth)  ? "smooth"
                        : (c.sink_mode == kSinkBoth)    ? "both"
                                                        : "-";
+#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
+  // MODE=lut: resolve a config from the real embedded LUT (the same
+  // hip_gqa_autotune_resolve_prefill() real/gqa.cpp calls in production), then
+  // dispatch it through the lookup-only entry instead of autotuning.
+  hipdnn_ep::GqaPrefillRequest lut_req{};
+  lut_req.variant = (D == 64)    ? hipdnn_ep::GqaPrefillVariant::V5
+                    : (D == 128) ? hipdnn_ep::GqaPrefillVariant::V7
+                                 : hipdnn_ep::GqaPrefillVariant::V8;
+  lut_req.batch = B;
+  lut_req.num_heads = H;
+  lut_req.kv_num_heads = G;
+  lut_req.head_dim = D;
+  lut_req.seq_q = sq;
+  lut_req.seq_kv = skv;
+  lut_req.local_window = (c.window > 0) ? c.window : 0;
+  // hip_gqa_autotune_create()/resolve_prefill() both run INSIDE the capture
+  // window: logOn() caches HIPDNN_GQA_LUT_LOG on its first read anywhere in
+  // the process, so create() must not run before the env var is set.
+  hipdnn_ep::GqaPrefillResult lut_res{};
+  std::vector<std::string> lut_lines = hipdnn_ep_test::captureLogLines(
+      "HIPDNN_GQA_LUT_LOG", "out/_lut_capture.tmp",
+      [&]() {
+        void* lut_policy = hip_gqa_autotune_create(nullptr);
+        hip_gqa_autotune_resolve_prefill(lut_policy, &lut_req, &lut_res);
+        hip_gqa_autotune_destroy(lut_policy);
+      });
+  std::string lut_source;
+  for (const std::string& line : lut_lines) {
+    if (line.find("[gqa-lut] prefill ") == std::string::npos) continue;
+    if (line.find(" exact ") != std::string::npos) lut_source = "exact";
+    else if (line.find(" nearest ") != std::string::npos) lut_source = "nearest";
+    else if (line.find(" fallback ") != std::string::npos) lut_source = "fallback";
+    else if (line.find(" heuristic ") != std::string::npos) lut_source = "heuristic";
+  }
+  auto launch = [&]() {
+    return hip_gqa_flash_prefill_v3_configured(
+        nullptr, dQ, dK, dV, dO, B, H, G, sq, skv, D, max_seq, past_len, scale,
+        window_arg, sink_arg, H, smooth_arg, lut_res.config.m_tiles,
+        lut_res.config.bkv, lut_res.config.nw, lut_res.config.mt,
+        lut_res.config.nd);
+  };
+#else
   auto launch = [&]() {
     return hip_gqa_flash_prefill(nullptr, dQ, dK, dV, dO, B, H, G, sq, skv, D,
                                     max_seq, past_len, scale, window_arg,
                                     sink_arg, H, smooth_arg);
   };
+#endif
 
-  int rc = launch();  // first call self-tunes
+  int rc;
+#ifndef HIPDNN_LUT_LINKED_EXTERNALLY
+  // First call for this shape runs + logs the tuner's timed candidates
+  // (cached after); capture them here for out/results.csv without
+  // perturbing this measured call.
+  std::vector<std::string> autotune_capture_lines = hipdnn_ep_test::captureLogLines(
+      "HIPDNN_PREFILL_TUNE_DEBUG", "out/_autotune_capture.tmp",
+      [&]() { rc = launch(); });
+#else
+  rc = launch();  // first call self-tunes
+#endif
   HIP_CHECK(hipDeviceSynchronize());
   if (c.expect_reject) {
     const bool ok = (rc != 0);
@@ -280,6 +348,45 @@ static bool run_case(const Case& c, int iters, const std::string& data_dir = std
   printf("%-16s B%d H%d G%d(hpg%d) D%-3d sq=%-5d past=%-5d %-6s w=%-5d | relL2=%.2e  latency=%.4f ms  %s (v%d)\n",
          c.name, B, H, G, H / G, D, sq, past_len, sink_tag, c.window, err, ms,
          pass ? "PASS" : "FAIL", D == 64 ? 5 : (D == 256 ? 8 : 7));
+
+  {
+    using namespace hipdnn_ep_test;
+    char shape_buf[96];
+    std::snprintf(shape_buf, sizeof(shape_buf), "%s_H%d_G%d_D%d_sq%d_past%d",
+                  c.name, H, G, D, sq, past_len);
+    CsvWriter csv;
+#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
+    char config_buf[96];
+    std::snprintf(config_buf, sizeof(config_buf),
+                  "m_tiles=%d bkv=%d nw=%d mt=%d nd=%d", lut_res.config.m_tiles,
+                  lut_res.config.bkv, lut_res.config.nw, lut_res.config.mt,
+                  lut_res.config.nd);
+    CsvRow row;
+    row.shape = shape_buf;
+    row.config = config_buf;
+    row.time_ms = ms;
+    row.is_best = 1;
+    row.lut_source = lut_source;
+    row.rel_l2 = err;
+    row.has_verdict = true;
+    row.verdict = pass ? "PASS" : "FAIL";
+    csv.write(row);
+#else
+    std::vector<CsvRow> candidates = parseCandidateLines(autotune_capture_lines);
+    for (CsvRow& cr : candidates) {
+      cr.shape = shape_buf;
+      csv.write(cr);
+    }
+    CsvRow row;
+    row.shape = shape_buf;
+    row.config = "final";
+    row.time_ms = ms;
+    row.rel_l2 = err;
+    row.has_verdict = true;
+    row.verdict = pass ? "PASS" : "FAIL";
+    csv.write(row);
+#endif
+  }
 
   hipEventDestroy(e0); hipEventDestroy(e1);
   hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO); hipFree(dSink);
