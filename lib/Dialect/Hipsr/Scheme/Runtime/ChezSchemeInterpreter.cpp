@@ -7,6 +7,7 @@
 #include "SchemeBindings.h"
 
 #include "llvm/Support/raw_ostream.h"
+#include "mlir/IR/Operation.h"
 
 // Include Chez Scheme C API header
 extern "C" {
@@ -20,8 +21,6 @@ namespace {
 const size_t petite_boot_size = sizeof(petite_boot_data) - 1;
 const size_t scheme_boot_size = sizeof(scheme_boot_data) - 1;
 
-// Cached Scheme symbols for script loading
-
 // Custom init called by Sbuild_heap before loading boot files
 static void custom_init() {
   // Register all MLIR foreign functions
@@ -33,8 +32,32 @@ static void custom_init() {
 namespace mlir {
 namespace hipsr {
 
+// Global log level
+static SchemeLogLevel current_log_level = SchemeLogLevel::Warning;
+
+// Parse log level from string
+SchemeLogLevel parseLogLevel(const std::string& level) {
+  if (level == "trace") return SchemeLogLevel::Trace;
+  if (level == "debug") return SchemeLogLevel::Debug;
+  if (level == "info") return SchemeLogLevel::Info;
+  if (level == "warning") return SchemeLogLevel::Warning;
+  if (level == "error") return SchemeLogLevel::Error;
+  if (level == "fatal") return SchemeLogLevel::Fatal;
+
+  llvm::errs() << "Warning: unknown log level '" << level
+               << "', defaulting to 'warning'\n";
+  return SchemeLogLevel::Warning;
+}
+
+// Set global log level
+void setSchemeLogLevel(SchemeLogLevel level) {
+  current_log_level = level;
+}
+
 ChezSchemeInterpreter::ChezSchemeInterpreter(SchemeLogLevel logLevel)
     : logLevel(logLevel) {
+
+  current_log_level = logLevel;
 
   if (logLevel <= SchemeLogLevel::Debug) {
     llvm::errs() << "[debug] ChezSchemeInterpreter: Initializing Chez Scheme runtime\n";
@@ -61,10 +84,9 @@ ChezSchemeInterpreter::ChezSchemeInterpreter(SchemeLogLevel logLevel)
 
   // Build heap and call custom_init (which registers foreign functions)
   Sbuild_heap(nullptr, custom_init);
-  initialized = true;  if (logLevel <= SchemeLogLevel::Info) {    llvm::errs() << "[info] ChezSchemeInterpreter: Initialization complete\n";  }
+  initialized = true;
 
-  if (logLevel <= SchemeLogLevel::Debug) {
-    llvm::errs() << "[debug] ChezSchemeInterpreter: Caching Scheme symbols\n";
+  if (logLevel <= SchemeLogLevel::Info) {
     llvm::errs() << "[info] ChezSchemeInterpreter: Initialization complete\n";
   }
 }
@@ -79,8 +101,6 @@ ChezSchemeInterpreter::~ChezSchemeInterpreter() {
   }
 
   // Chez Scheme doesn't require explicit cleanup
-  // The runtime will clean up on process exit
-
   initialized = false;
 }
 
@@ -90,7 +110,11 @@ bool ChezSchemeInterpreter::load(const char* scriptPath) {
     return false;
   }
 
-  return loadSchemeScript(scriptPath);
+  // R5RS load: (load scriptPath)
+  ptr load_sym = Stop_level_value(Sstring_to_symbol("load"));
+  ptr path_str = Sstring(scriptPath);
+  Scall1(load_sym, path_str);
+  return true;
 }
 
 bool ChezSchemeInterpreter::eval(const char* code) {
@@ -99,7 +123,7 @@ bool ChezSchemeInterpreter::eval(const char* code) {
     return false;
   }
 
-  // Direct R5RS eval: (eval (read (open-string-input-port code)))
+  // R5RS eval: (eval (read (open-string-input-port code)))
   ptr eval_sym = Stop_level_value(Sstring_to_symbol("eval"));
   ptr read_sym = Stop_level_value(Sstring_to_symbol("read"));
   ptr open_port_sym = Stop_level_value(Sstring_to_symbol("open-string-input-port"));
@@ -109,6 +133,62 @@ bool ChezSchemeInterpreter::eval(const char* code) {
   Scall1(eval_sym, expr);
   
   return true;
+}
+
+// Create Scheme values from C++ primitives
+SchemeValue ChezSchemeInterpreter::makeString(const char* str) {
+  return Sstring(str);
+}
+
+SchemeValue ChezSchemeInterpreter::makeInteger(long value) {
+  return Sinteger(value);
+}
+
+// Call a Scheme function with primitive arguments
+std::string ChezSchemeInterpreter::callFunction(const char* functionName,
+                                                const std::vector<SchemeValue>& args) {
+  if (!initialized)
+    return "";
+
+  ptr func = Stop_level_value(Sstring_to_symbol(functionName));
+  if (func == Sfalse)
+    return "";
+
+  ptr args_list = Snil;
+  for (auto it = args.rbegin(); it != args.rend(); ++it) {
+    args_list = Scons(*it, args_list);
+  }
+
+  ptr apply_proc = Stop_level_value(Sstring_to_symbol("apply"));
+  ptr result = Scall2(apply_proc, func, args_list);
+
+  ptr string_p = Stop_level_value(Sstring_to_symbol("string?"));
+  if (Scall1(string_p, result) != Sfalse) {
+    iptr len = Sstring_length(result);
+    std::string str;
+    str.reserve(len);
+    for (iptr i = 0; i < len; i++) {
+      str.push_back(static_cast<char>(Sstring_ref(result, i)));
+    }
+    return str;
+  }
+
+  return "";
+}
+
+// Call a Scheme function with a single MLIR operation argument
+void ChezSchemeInterpreter::callPassFunction(const char* functionName, mlir::Operation* op) {
+  if (!initialized)
+    return;
+
+  ptr func = Stop_level_value(Sstring_to_symbol(functionName));
+  if (func == Sfalse) {
+    llvm::errs() << "Warning: Scheme function '" << functionName << "' not found\n";
+    return;
+  }
+
+  ptr schemeOp = makeSchemeOperation(op);
+  Scall1(func, schemeOp);
 }
 
 } // namespace hipsr
