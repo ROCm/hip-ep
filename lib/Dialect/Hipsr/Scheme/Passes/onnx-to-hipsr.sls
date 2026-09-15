@@ -86,6 +86,6 @@
                     (mlir-log-info "ONNX to HipSR Conversion (Scheme): Success"))
                   (begin
                     (mlir-log-error "ONNX to HipSR Conversion (Scheme): FAILED")
-                    (error 'run-pass "Dialect conversion failed")))))))))
+                    (error 'run-pass "Dialect conversion failed"))))))))
 
 ) ;; end library (onnx-to-hipsr)
