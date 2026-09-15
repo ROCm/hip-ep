@@ -247,7 +247,7 @@ hipdnn_ep_finalize_static_plugins()
 # init (see hipdnn_ep_harden_comgr_safe() in cmake/HipEpPlugins.cmake). Applied
 # unconditionally, not just when a plugin is selected: the tools link LLVM/MLIR
 # statically regardless, so the interposition hazard is latent in every build.
-foreach(_host_exe hip-test hip-compiler hip-mlir-opt hip-onnx-runner hip-inspect)
+foreach(_host_exe hip-test hip-compiler hip-mlir-opt hip-onnx-runner hip-inspect hip-rocmlir-compiler)
   if(TARGET ${_host_exe})
     hipdnn_ep_harden_comgr_safe(${_host_exe})
   endif()

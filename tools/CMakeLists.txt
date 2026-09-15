@@ -5,6 +5,7 @@
 
 add_subdirectory(hip-mlir-opt)
 add_subdirectory(hip-compiler)
+add_subdirectory(hip-rocmlir-compiler)
 
 # hip-inspect parses the IR with `llvm::parseBitcodeFile` and reads
 # the `@__metadata_json` global directly -- no JIT, no GPU dependency.

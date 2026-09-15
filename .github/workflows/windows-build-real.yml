@@ -45,6 +45,7 @@ jobs:
       # One generic target covering the whole gfx11 family; the pinned TheRock
       # dist carries the per-ISA vendor data every member needs at runtime.
       HIP_ARCHITECTURES: "gfx11-generic"
+      SCCACHE_CACHE_SIZE: "200M"
 
     steps:
       # MorphiZen is vendored in-tree as a git subtree under morphizen,
