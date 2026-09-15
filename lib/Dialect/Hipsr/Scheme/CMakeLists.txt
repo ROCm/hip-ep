@@ -69,22 +69,21 @@ add_custom_target(ChezBootHeaders DEPENDS
   ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.h
   ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.h
 )
-add_library(HipsrSchemePass
+add_library(HipsrSchemeRuntime
   Runtime/ChezSchemeInterpreter.cpp
   Runtime/SchemeBindings.cpp
-  SchemeScriptPass.cpp
 )
 
-target_include_directories(HipsrSchemePass PRIVATE
+target_include_directories(HipsrSchemeRuntime PRIVATE
   ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_CURRENT_BINARY_DIR}
   ${ChezScheme_BINARY_DIR}/${CHEZ_MACHINE}
   ${ChezScheme_SOURCE_DIR}/boot/pb
 )
 
-add_dependencies(HipsrSchemePass ChezScheme ChezBootHeaders SchemeLibraries)
+add_dependencies(HipsrSchemeRuntime ChezScheme ChezBootHeaders SchemeLibraries)
 
-target_link_libraries(HipsrSchemePass
+target_link_libraries(HipsrSchemeRuntime
   ${ChezScheme_BINARY_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/libkernel.a
   ${ChezScheme_BINARY_DIR}/${CHEZ_MACHINE}/lz4/lib/liblz4.a
   ${ChezScheme_BINARY_DIR}/${CHEZ_MACHINE}/zlib/libz.a
