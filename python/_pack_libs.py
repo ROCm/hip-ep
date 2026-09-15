@@ -28,6 +28,50 @@ ROCM_DLL_GROUPS = [
 
 HIPBLASLT_DATA = ("hipblaslt", "library")
 
+# AMDGPU Generic Processors table from LLVM AMDGPUUsage; must stay in sync with
+# genericTargetFor in LlvmIrJit.cpp.
+_GENERIC_MEMBERS = {
+    "gfx9-generic": ("gfx900", "gfx902", "gfx904", "gfx906", "gfx909", "gfx90c"),
+    "gfx9-4-generic": ("gfx942", "gfx950"),
+    "gfx10-1-generic": ("gfx1010", "gfx1011", "gfx1012", "gfx1013"),
+    "gfx10-3-generic": (
+        "gfx1030",
+        "gfx1031",
+        "gfx1032",
+        "gfx1033",
+        "gfx1034",
+        "gfx1035",
+        "gfx1036",
+    ),
+    "gfx11-generic": (
+        "gfx1100",
+        "gfx1101",
+        "gfx1102",
+        "gfx1103",
+        "gfx1150",
+        "gfx1151",
+        "gfx1152",
+        "gfx1153",
+    ),
+    "gfx12-generic": ("gfx1200", "gfx1201"),
+}
+
+
+def _resolve_tensile_arch(library, requested):
+    if (library / requested).is_dir():
+        return requested
+    members = _GENERIC_MEMBERS.get(requested)
+    if not members:
+        return None
+    present = [a for a in members if (library / a).is_dir()]
+    if not present:
+        return None
+    # gfx1151 is what the pinned dist and the CI GPU are; a dist carrying the
+    # whole family would otherwise resolve to the lowest member.
+    if "gfx1151" in present:
+        return "gfx1151"
+    return present[0]
+
 
 def _find_in_lib_env(name: str):
     for d in os.environ.get("LIB", "").split(os.pathsep):
@@ -77,18 +121,31 @@ def _copy_rocm_runtime(dist: Path, arch: str, dest: Path) -> int:
             shutil.copy2(src, dest / src.name)
             print(f"  packaged ROCm dll: {src.name} <- {src}")
 
-    src_data = bin_dir.joinpath(*HIPBLASLT_DATA, arch)
-    if not src_data.is_dir():
+    library = bin_dir.joinpath(*HIPBLASLT_DATA)
+    tensile_arch = _resolve_tensile_arch(library, arch)
+    if tensile_arch is None:
+        available = []
+        if library.is_dir():
+            available = sorted(p.name for p in library.iterdir() if p.is_dir())
+        hint = f" (available: {', '.join(available)})" if available else ""
         print(
-            f"ERROR: hipBLASLt Tensile data for {arch} not found: {src_data}",
+            f"ERROR: hipBLASLt Tensile data for {arch} not found: "
+            f"{library / arch}{hint}",
             file=sys.stderr,
         )
         return 1
-    dst_data = dest.joinpath(*HIPBLASLT_DATA, arch)
+    src_data = library / tensile_arch
+    if tensile_arch != arch:
+        print(
+            f"  hipBLASLt Tensile arch {arch} -> {tensile_arch} "
+            f"(device ISA present in dist)"
+        )
+    dst_data = dest.joinpath(*HIPBLASLT_DATA, tensile_arch)
     shutil.copytree(src_data, dst_data)
     count = sum(1 for p in dst_data.rglob("*") if p.is_file())
     print(
-        f"  packaged hipBLASLt Tensile data: {'/'.join(HIPBLASLT_DATA)}/{arch} "
+        f"  packaged hipBLASLt Tensile data: "
+        f"{'/'.join(HIPBLASLT_DATA)}/{tensile_arch} "
         f"({count} files) <- {src_data}"
     )
     return 0
@@ -120,8 +177,10 @@ def main():
         "--rocm-arch",
         required=True,
         metavar="GFX",
-        help="GPU arch whose hipBLASLt Tensile data to bundle, e.g. gfx1151. A "
-        "multi-arch distribution carries every arch; the wheel ships one.",
+        help="Device ISA whose hipBLASLt Tensile data to bundle, e.g. gfx1151. "
+        "A generic compile target (gfx11-generic) is mapped to a concrete "
+        "ISA present in the dist. A multi-arch distribution carries every "
+        "arch; the wheel ships one.",
     )
     ap.add_argument(
         "--data-file",

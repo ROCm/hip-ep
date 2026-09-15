@@ -75,6 +75,60 @@ int SizeClassIndex(size_t size) noexcept {
   return -1;
 }
 
+constexpr size_t kPageSize = 4096;
+
+// Capacity for a large request that is known to be growing. The 1/64 headroom
+// is the reuse span: a Gemma-4 KV tensor is 64 MiB at a 16 K context and grows
+// 4096 bytes per token, so one capacity covers the next 256 tokens.
+//
+// Continuing the size-class table's geometry, whose steps go 1/2, 1/4, 1/16,
+// 1/32 as buffers grow, because the waste is proportional to the size.
+constexpr size_t LargeCapacity(size_t size) noexcept {
+  const size_t want = size + size / 64;
+  return (want + kPageSize - 1) / kPageSize * kPageSize;
+}
+
+// Checked at compile time because no unit-test target covers this file and
+// returning less than the request would overflow the buffer.
+constexpr bool LargeCapacityHolds() {
+  for (size_t n = 16ull << 20; n <= 16ull << 30; n += n / 8) {
+    const size_t c = LargeCapacity(n);
+    if (c < n + n / 64 || c > n + n / 64 + kPageSize) {
+      return false;
+    }
+  }
+  return true;
+}
+static_assert(LargeCapacityHolds(),
+              "LargeCapacity must cover the request with its growth headroom "
+              "and waste at most one page beyond it");
+static_assert(LargeCapacity(64ull << 20) - (64ull << 20) >= 128 * 4096,
+              "one capacity must span more than a 128-token generation at a "
+              "16 K context");
+
+int OctaveOf(size_t size) noexcept {
+  int octave = 0;
+  while (size > 1) {
+    size >>= 1;
+    ++octave;
+  }
+  return octave;
+}
+
+// Hand a batch of buffers back to the driver with pool_mutex_ released:
+// hipHostFree unpins pages and is as heavyweight as the hipHostMalloc that
+// pinned them, so holding the lock would serialize every other allocation
+// behind it.
+void ReleaseToDriver(const std::vector<void *> &buffers, int device_id) {
+  if (buffers.empty()) {
+    return;
+  }
+  ScopedDevice _(device_id);
+  for (void *p : buffers) {
+    (void)hipHostFree(p);
+  }
+}
+
 int TryGetDeviceId(const OrtMemoryInfo *memory_info) noexcept {
   if (memory_info == nullptr) {
     return -1;
@@ -107,6 +161,62 @@ HipGpuAllocator::HipGpuAllocator(const OrtMemoryInfo *memory_info,
   GetStats = nullptr;
 }
 
+// A capacity the model has just grown past cannot serve this request or any
+// later one, so its idle buffers are dead weight. Bounded to the immediate
+// neighbourhood below `size` so an unrelated, much smaller tensor pooled in
+// the same octave is left alone.
+void HipGpuAllocator::DropOutgrown(size_t size, std::vector<void *> &out) {
+  auto it = large_free_.lower_bound(size - size / 16);
+  while (it != large_free_.end() && it->first < size) {
+    for (void *ptr : it->second.free) {
+      ptr_to_size_.erase(ptr);
+      large_retained_bytes_ -= it->first;
+      out.push_back(ptr);
+    }
+    it = large_free_.erase(it);
+  }
+}
+
+// One buffer from the least-recently-used capacity, skipping `keep` because
+// evicting there would free a buffer of exactly the size being made room for.
+// Buffers nothing can ask for again are never touched, so they are always the
+// oldest and go first.
+bool HipGpuAllocator::EvictLruLarge(size_t keep, std::vector<void *> &out) {
+  auto victim = large_free_.end();
+  for (auto it = large_free_.begin(); it != large_free_.end(); ++it) {
+    if (it->first == keep) {
+      continue;
+    }
+    if (victim == large_free_.end() ||
+        it->second.last_used < victim->second.last_used) {
+      victim = it;
+    }
+  }
+  if (victim == large_free_.end()) {
+    return false;
+  }
+  void *ptr = victim->second.free.back();
+  victim->second.free.pop_back();
+  ptr_to_size_.erase(ptr);
+  large_retained_bytes_ -= victim->first;
+  out.push_back(ptr);
+  if (victim->second.free.empty()) {
+    large_free_.erase(victim);
+  }
+  return true;
+}
+
+void HipGpuAllocator::DrainLarge(std::vector<void *> &out) {
+  for (auto &entry : large_free_) {
+    for (void *ptr : entry.second.free) {
+      ptr_to_size_.erase(ptr);
+      out.push_back(ptr);
+    }
+  }
+  large_free_.clear();
+  large_retained_bytes_ = 0;
+}
+
 void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
                                               size_t size) {
   if (size == 0) {
@@ -115,28 +225,59 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
   auto *self = static_cast<HipGpuAllocator *>(this_);
 
   const int cls = SizeClassIndex(size);
+  // Bytes to allocate on a miss: the class capacity for a pooled request, and
+  // for a large one either the exact size or a grown capacity depending on
+  // whether its octave has been seen to move.
+  size_t alloc_size = (cls >= 0) ? kSizeClasses[cls] : size;
+  std::vector<void *> stale;
 
-  // Fast path: reuse a pooled buffer with no driver call. Only requests that
-  // map to a size class (<= 16 MB) are pooled; any buffer in that class fits
-  // (they are all the class capacity). Large requests (cls < 0, > 16 MB) are
-  // never pooled — they are allocated at exact size and released straight back
-  // to the driver in FreeImpl, so a one-off huge transient can't pin memory.
-  if (cls >= 0) {
+  // Fast path: reuse a buffer with no driver call. A size class holds buffers
+  // all at the class capacity, so any of them fits. A large request takes the
+  // smallest retained capacity that covers it, close enough that it cannot
+  // consume a buffer a much larger request will need.
+  {
     std::lock_guard<std::mutex> lk(self->pool_mutex_);
-    auto &fl = self->free_lists_[cls];
-    if (!fl.empty()) {
-      void *ptr = fl.back();
-      fl.pop_back();
-      return ptr;
+    if (cls >= 0) {
+      auto &fl = self->free_lists_[cls];
+      if (!fl.empty()) {
+        void *ptr = fl.back();
+        fl.pop_back();
+        return ptr;
+      }
+    } else {
+      ++self->large_ops_;
+      auto &octave = self->octaves_[OctaveOf(size)];
+      if (octave.high_water != 0 && size > octave.high_water) {
+        octave.growing = true;
+      }
+      if (size > octave.high_water) {
+        octave.high_water = size;
+      }
+
+      auto it = self->large_free_.lower_bound(size);
+      if (it != self->large_free_.end() && it->first <= size + size / 32) {
+        void *ptr = it->second.free.back();
+        it->second.free.pop_back();
+        it->second.last_used = self->large_ops_;
+        self->large_retained_bytes_ -= it->first;
+        self->large_live_bytes_ += it->first;
+        if (self->large_live_bytes_ > self->large_peak_live_bytes_) {
+          self->large_peak_live_bytes_ = self->large_live_bytes_;
+        }
+        if (it->second.free.empty()) {
+          self->large_free_.erase(it);
+        }
+        return ptr;
+      }
+      if (octave.growing) {
+        alloc_size = LargeCapacity(size);
+        self->DropOutgrown(size, stale);
+      }
     }
   }
+  ReleaseToDriver(stale, self->device_id_);
 
   ScopedDevice _(self->device_id_);
-
-  // Cold miss: allocate. Pooled requests are rounded up to the full class
-  // capacity so the buffer is reusable by any later request in the same class;
-  // large requests are allocated at their exact size.
-  const size_t alloc_size = (cls >= 0) ? kSizeClasses[cls] : size;
 
   // On AMD APU iGPU (the only hardware MorphiZen EP currently targets) the
   // GPU shares physical memory with the CPU, so we use hipHostMalloc(Mapped)
@@ -157,6 +298,21 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
   hipError_t err = hipHostMalloc(&ptr, alloc_size,
                                  hipHostMallocMapped | hipHostMallocCoherent);
   if (err != hipSuccess) {
+    // The large pool may be sitting on pinned pages this allocation could use,
+    // and failing while holding reclaimable memory would be worse than not
+    // pooling at all.
+    std::vector<void *> drained;
+    {
+      std::lock_guard<std::mutex> lk(self->pool_mutex_);
+      self->DrainLarge(drained);
+    }
+    if (!drained.empty()) {
+      ReleaseToDriver(drained, self->device_id_);
+      err = hipHostMalloc(&ptr, alloc_size,
+                          hipHostMallocMapped | hipHostMallocCoherent);
+    }
+  }
+  if (err != hipSuccess) {
     LOG(ERROR) << "[MorphiZen HIP] hipHostMalloc(Mapped|Coherent) failed for "
                << alloc_size << " bytes (device " << self->device_id_
                << "): " << hipGetErrorString(err);
@@ -165,6 +321,12 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
   {
     std::lock_guard<std::mutex> lk(self->pool_mutex_);
     self->ptr_to_size_[ptr] = alloc_size;
+    if (cls < 0) {
+      self->large_live_bytes_ += alloc_size;
+      if (self->large_live_bytes_ > self->large_peak_live_bytes_) {
+        self->large_peak_live_bytes_ = self->large_live_bytes_;
+      }
+    }
   }
   return ptr;
 }
@@ -174,30 +336,49 @@ void ORT_API_CALL HipGpuAllocator::FreeImpl(OrtAllocator *this_, void *p) {
     return;
   }
   auto *self = static_cast<HipGpuAllocator *>(this_);
+  // p itself when it cannot be retained, plus whatever eviction dropped to
+  // make room for it.
+  std::vector<void *> to_release;
   {
     std::lock_guard<std::mutex> lk(self->pool_mutex_);
     auto it = self->ptr_to_size_.find(p);
-    if (it != self->ptr_to_size_.end()) {
-      // The stored size is the class capacity for pooled buffers (so
-      // SizeClassIndex recovers the class) and the exact size for large ones.
-      const int cls = SizeClassIndex(it->second);
-      if (cls >= 0) {
-        // Pooled small/medium buffer (<= 16 MB): return to its free list for
-        // reuse; do NOT release to the driver here. Stays tracked in
-        // ptr_to_size_ so the destructor can release it. Safe to reuse without
-        // a stream sync: see the pool comment in the header.
-        self->free_lists_[cls].push_back(p);
+    if (it == self->ptr_to_size_.end()) {
+      // Defensive: a pointer we never handed out. Release rather than leak.
+      to_release.push_back(p);
+    } else if (const int cls = SizeClassIndex(it->second); cls >= 0) {
+      // Pooled small/medium buffer (<= 16 MB): return to its free list for
+      // reuse; do NOT release to the driver here. Stays tracked in
+      // ptr_to_size_ so the destructor can release it. Safe to reuse without
+      // a stream sync: see the pool comment in the header.
+      self->free_lists_[cls].push_back(p);
+      return;
+    } else {
+      const size_t capacity = it->second;
+      ++self->large_ops_;
+      self->large_live_bytes_ -= (self->large_live_bytes_ < capacity)
+                                     ? self->large_live_bytes_
+                                     : capacity;
+      // Retaining this would put the pool over a ceiling that tracks the most
+      // this model has had checked out at once, so evict the capacities that
+      // have gone longest without being asked for before giving up on it.
+      bool room = self->large_retained_bytes_ + capacity <=
+                  self->large_peak_live_bytes_;
+      while (!room && self->EvictLruLarge(capacity, to_release)) {
+        room = self->large_retained_bytes_ + capacity <=
+               self->large_peak_live_bytes_;
+      }
+      if (room) {
+        auto &bucket = self->large_free_[capacity];
+        bucket.free.push_back(p);
+        bucket.last_used = self->large_ops_;
+        self->large_retained_bytes_ += capacity;
         return;
       }
-      // Large buffer (> 16 MB): never pooled. Stop tracking it and release it
-      // to the driver below (outside the lock — hipHostFree is heavyweight).
       self->ptr_to_size_.erase(it);
+      to_release.push_back(p);
     }
-    // Fall through for a large buffer, or for a pointer we never handed out
-    // (defensive): in both cases release directly so we don't leak.
   }
-  ScopedDevice _(self->device_id_);
-  (void)hipHostFree(p);
+  ReleaseToDriver(to_release, self->device_id_);
 }
 
 HipGpuAllocator::~HipGpuAllocator() {
@@ -217,6 +398,9 @@ HipGpuAllocator::~HipGpuAllocator() {
   for (auto &fl : free_lists_) {
     fl.clear();
   }
+  large_free_.clear();
+  large_retained_bytes_ = 0;
+  large_live_bytes_ = 0;
   ptr_to_size_.clear();
 }
 

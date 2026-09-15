@@ -682,14 +682,20 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
                   mst->zp, stream, zero_points, static_cast<int>(N), ngk);
     if (!pre_zp_u8)
       return -1;
-    // The fp16 buffer is consumed only by the bits=4 WMMA (batch==1 &&
-    // K%32==0 && M>=16) and col-major GEMV M>1 fallback (same predicate on K,
-    // M>1). Build it eagerly when those preconditions are met — the cache
-    // makes the cost a one-time hit per zero_points pointer. The u2 WMMA path
-    // consumes uint8 zp directly, so bits=2 never needs the fp16 buffer (and
-    // the converter is nibble-specific anyway).
-    bool wmma_data_format = (batch_count == 1) && (K % 32 == 0);
-    if (bits == 4 && wmma_data_format && M > 1) {
+    // Every M>1 bits=4 path consumes the FP16 zero_points, not the uint8 one:
+    //   - WMMA fast path   (batch==1, K%32==0, M>=8)
+    //   - WMMA K-pad path  (batch==1, K%32!=0, M>=8)  <-- also needs it
+    //   - col-major GEMV   (batch==1, K%32==0, 1<M<8)
+    // The gate must therefore NOT depend on K%32==0. The old K%32==0 gate
+    // starved the K-pad path (K not a multiple of block_size, e.g. the vision
+    // encoder's down_proj K=4304) of its FP16 zp; the kernel then reinterpreted
+    // the packed-uint8 zp bytes as FP16 and produced catastrophically wrong
+    // prefill output. Build it for every M>1: the pointer-keyed cache makes it
+    // a one-time cost per weight, and the 1<M<8 K%32!=0 case that ends up on
+    // the row-major GEMV (uint8 zp) simply never reads this buffer. bits=2 WMMA
+    // consumes uint8 zp directly and the converter is nibble-specific, so this
+    // stays scoped to bits=4.
+    if (bits == 4 && batch_count == 1 && M > 1) {
       pre_zp_fp16 = hipdnn_ep_real::lookup_or_convert_zp_fp16(
           mst->zp, stream, zero_points, static_cast<int>(N), ngk);
       if (!pre_zp_fp16)

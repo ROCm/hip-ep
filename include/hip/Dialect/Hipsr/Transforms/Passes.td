@@ -213,8 +213,11 @@ def HipsrExternalizeConstantsPass
     : Pass<"hipsr-externalize-constants", "mlir::ModuleOp"> {
   let summary = "Externalize hipsr.constant: stamp offset/size/index, write constants file";
   let description = [{
-    Externalizes each `hipsr.constant`: stamps `offset`/`size`/`index`.
-    With a FileSystem injected, also writes the constants file.
+    Gives each `hipsr.constant` an `index`, `offset`, and `size`.
+    When the module has constants, it sets `hip.constants_file`,
+    `hipdnn.constant_sizes`, and `hipdnn.constant_offsets`.
+    `--generate-interface` reads those attributes.
+    When a FileSystem is present, it writes the constants file.
   }];
   let options = [
     Option<"constantsFile", "constants-file", "std::string",
@@ -241,6 +244,31 @@ def HipsrPoolAllocPass : Pass<"hipsr-pool-alloc", "mlir::ModuleOp"> {
     "::mlir::hipsr::HipsrDialect",
     "::mlir::memref::MemRefDialect",
     "::mlir::arith::ArithDialect"
+  ];
+}
+
+def HipsrInlineRegionsPass : Pass<"hipsr-inline-regions", "mlir::ModuleOp"> {
+  let summary = "Inline hipsr.pool_domain and hipsr.compute into their parents";
+  let description = [{
+    Flattens `hipsr.pool_domain` and `hipsr.compute` regions. Nested regions
+    are flattened from the inside out.
+
+    Before:
+    ```mlir
+    %r = hipsr.compute(%ctx) ins(%in) outs(%out) {
+    ^bb0(%c: !hipsr.context, %i: memref<4xf32>, %o: memref<4xf32>):
+      memref.copy %i, %o : memref<4xf32> to memref<4xf32>
+      hipsr.compute_yield %o : memref<4xf32>
+    } : memref<4xf32>
+    ```
+
+    After:
+    ```mlir
+    memref.copy %in, %out : memref<4xf32> to memref<4xf32>
+    ```
+  }];
+  let dependentDialects = [
+    "::mlir::hipsr::HipsrDialect"
   ];
 }
 

@@ -20,7 +20,7 @@
 // CHECK-NEXT:             %[[DIVUI_0:.*]] = arith.divui %[[ADDI_0]], %[[CONSTANT_1]] : index
 // CHECK-NEXT:             %[[MULI_0:.*]] = arith.muli %[[DIVUI_0]], %[[CONSTANT_1]] : index
 // CHECK-NEXT:             %[[CONSTANT_3:.*]] = arith.constant 0 : index
-// CHECK-NEXT:             %[[GET_POOL_0:.*]] = hipsr.get_pool(%[[VAL_0]], %[[MULI_0]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
+// CHECK-NEXT:             %[[GET_POOL_0:.*]] = hipsr.get_pool(%[[VAL_0]], %[[MULI_0]]) {bufferization.manual_deallocation, domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
 // CHECK-NEXT:             %[[VIEW_0:.*]] = memref.view %[[GET_POOL_0]]{{\[}}%[[CONSTANT_3]]][] : memref<?xi8, #hipsr.mem<device>> to memref<3xf16, #hipsr.mem<device>>
 // CHECK-NEXT:             hipsr.add(%[[VAL_0]]) ins(%[[VAL_1]], %[[VAL_1]] : memref<3xf16, #hipsr.mem<device>>, memref<3xf16, #hipsr.mem<device>>) outs(%[[VIEW_0]] : memref<3xf16, #hipsr.mem<device>>)
 // CHECK-NEXT:           } {domain_id = 0 : i64}
@@ -54,7 +54,7 @@ func.func @align_up_rounding(%ctx: !hipsr.context,
 // CHECK-NEXT:             %[[DIVUI_0:.*]] = arith.divui %[[ADDI_0]], %[[CONSTANT_1]] : index
 // CHECK-NEXT:             %[[MULI_0:.*]] = arith.muli %[[DIVUI_0]], %[[CONSTANT_1]] : index
 // CHECK-NEXT:             %[[CONSTANT_3:.*]] = arith.constant 0 : index
-// CHECK-NEXT:             %[[GET_POOL_0:.*]] = hipsr.get_pool(%[[VAL_0]], %[[MULI_0]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
+// CHECK-NEXT:             %[[GET_POOL_0:.*]] = hipsr.get_pool(%[[VAL_0]], %[[MULI_0]]) {bufferization.manual_deallocation, domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
 // CHECK-NEXT:             %[[VIEW_0:.*]] = memref.view %[[GET_POOL_0]]{{\[}}%[[CONSTANT_3]]][] : memref<?xi8, #hipsr.mem<device>> to memref<4x256xi1, #hipsr.mem<device>>
 // CHECK-NEXT:             hipsr.equal(%[[VAL_0]]) ins(%[[VAL_1]], %[[VAL_1]] : memref<4x256xf16, #hipsr.mem<device>>, memref<4x256xf16, #hipsr.mem<device>>) outs(%[[VIEW_0]] : memref<4x256xi1, #hipsr.mem<device>>)
 // CHECK-NEXT:           } {domain_id = 0 : i64}
@@ -94,7 +94,7 @@ func.func @sub_byte_element(%ctx: !hipsr.context,
 // CHECK-NEXT:             %[[DIVUI_0:.*]] = arith.divui %[[ADDI_0]], %[[CONSTANT_3]] : index
 // CHECK-NEXT:             %[[MULI_1:.*]] = arith.muli %[[DIVUI_0]], %[[CONSTANT_3]] : index
 // CHECK-NEXT:             %[[CONSTANT_5:.*]] = arith.constant 0 : index
-// CHECK-NEXT:             %[[GET_POOL_0:.*]] = hipsr.get_pool(%[[VAL_0]], %[[MULI_1]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
+// CHECK-NEXT:             %[[GET_POOL_0:.*]] = hipsr.get_pool(%[[VAL_0]], %[[MULI_1]]) {bufferization.manual_deallocation, domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
 // CHECK-NEXT:             %[[VIEW_0:.*]] = memref.view %[[GET_POOL_0]]{{\[}}%[[CONSTANT_5]]][] : memref<?xi8, #hipsr.mem<device>> to memref<4x256xf32, #hipsr.mem<device>>
 // CHECK-NEXT:             %[[VIEW_1:.*]] = memref.view %[[GET_POOL_0]]{{\[}}%[[CONSTANT_5]]]{{\[}}%[[DIM_0]]] : memref<?xi8, #hipsr.mem<device>> to memref<?x512xf16, #hipsr.mem<device>>
 // CHECK-NEXT:             hipsr.add(%[[VAL_0]]) ins(%[[VAL_1]], %[[VAL_1]] : memref<4x256xf32, #hipsr.mem<device>>, memref<4x256xf32, #hipsr.mem<device>>) outs(%[[VIEW_0]] : memref<4x256xf32, #hipsr.mem<device>>)
@@ -149,7 +149,7 @@ func.func @mixed_dtypes(%ctx: !hipsr.context,
 // CHECK-NEXT:             %[[DIVUI_0:.*]] = arith.divui %[[ADDI_0]], %[[CONSTANT_3]] : index
 // CHECK-NEXT:             %[[MULI_2:.*]] = arith.muli %[[DIVUI_0]], %[[CONSTANT_3]] : index
 // CHECK-NEXT:             %[[CONSTANT_5:.*]] = arith.constant 0 : index
-// CHECK-NEXT:             %[[GET_POOL_0:.*]] = hipsr.get_pool(%[[VAL_0]], %[[MULI_2]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
+// CHECK-NEXT:             %[[GET_POOL_0:.*]] = hipsr.get_pool(%[[VAL_0]], %[[MULI_2]]) {bufferization.manual_deallocation, domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
 // CHECK-NEXT:             %[[VIEW_0:.*]] = memref.view %[[GET_POOL_0]]{{\[}}%[[CONSTANT_5]]]{{\[}}%[[DIM_0]]] : memref<?xi8, #hipsr.mem<device>> to memref<?x512xf16, #hipsr.mem<device>>
 // CHECK-NEXT:             %[[VIEW_1:.*]] = memref.view %[[GET_POOL_0]]{{\[}}%[[CONSTANT_5]]]{{\[}}%[[DIM_1]]] : memref<?xi8, #hipsr.mem<device>> to memref<?x256xf16, #hipsr.mem<device>>
 // CHECK-NEXT:             hipsr.add(%[[VAL_0]]) ins(%[[VAL_1]], %[[VAL_1]] : memref<?x512xf16, #hipsr.mem<device>>, memref<?x512xf16, #hipsr.mem<device>>) outs(%[[VIEW_0]] : memref<?x512xf16, #hipsr.mem<device>>)
@@ -199,7 +199,7 @@ func.func @mixed_dynamic_dims(%ctx: !hipsr.context,
 // CHECK-NEXT:             %[[DIVUI_0:.*]] = arith.divui %[[ADDI_0]], %[[CONSTANT_1]] : index
 // CHECK-NEXT:             %[[MULI_0:.*]] = arith.muli %[[DIVUI_0]], %[[CONSTANT_1]] : index
 // CHECK-NEXT:             %[[CONSTANT_3:.*]] = arith.constant 0 : index
-// CHECK-NEXT:             %[[GET_POOL_0:.*]] = hipsr.get_pool(%[[VAL_0]], %[[MULI_0]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
+// CHECK-NEXT:             %[[GET_POOL_0:.*]] = hipsr.get_pool(%[[VAL_0]], %[[MULI_0]]) {bufferization.manual_deallocation, domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
 // CHECK-NEXT:             %[[VIEW_0:.*]] = memref.view %[[GET_POOL_0]]{{\[}}%[[CONSTANT_3]]][] : memref<?xi8, #hipsr.mem<device>> to memref<4x1024xf16, #hipsr.mem<device>>
 // CHECK-NEXT:             hipsr.add(%[[VAL_0]]) ins(%[[VAL_1]], %[[VAL_1]] : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%[[VIEW_0]] : memref<4x1024xf16, #hipsr.mem<device>>)
 // CHECK-NEXT:           } {domain_id = 0 : i64}
@@ -212,7 +212,7 @@ func.func @mixed_dynamic_dims(%ctx: !hipsr.context,
 // CHECK-NEXT:             %[[DIVUI_1:.*]] = arith.divui %[[ADDI_1]], %[[CONSTANT_5]] : index
 // CHECK-NEXT:             %[[MULI_1:.*]] = arith.muli %[[DIVUI_1]], %[[CONSTANT_5]] : index
 // CHECK-NEXT:             %[[CONSTANT_7:.*]] = arith.constant 0 : index
-// CHECK-NEXT:             %[[GET_POOL_1:.*]] = hipsr.get_pool(%[[VAL_2]], %[[MULI_1]]) {domain_id = 7 : i64} : memref<?xi8, #hipsr.mem<device>>
+// CHECK-NEXT:             %[[GET_POOL_1:.*]] = hipsr.get_pool(%[[VAL_2]], %[[MULI_1]]) {bufferization.manual_deallocation, domain_id = 7 : i64} : memref<?xi8, #hipsr.mem<device>>
 // CHECK-NEXT:             %[[VIEW_1:.*]] = memref.view %[[GET_POOL_1]]{{\[}}%[[CONSTANT_7]]][] : memref<?xi8, #hipsr.mem<device>> to memref<4x1024xf16, #hipsr.mem<device>>
 // CHECK-NEXT:             hipsr.add(%[[VAL_2]]) ins(%[[VAL_3]], %[[VAL_3]] : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%[[VIEW_1]] : memref<4x1024xf16, #hipsr.mem<device>>)
 // CHECK-NEXT:           } {domain_id = 7 : i64}
@@ -253,7 +253,7 @@ func.func @two_domains(%ctx: !hipsr.context, %in: memref<4x1024xf16, #hipsr.mem<
 // CHECK-NEXT:             %[[DIVUI_0:.*]] = arith.divui %[[ADDI_0]], %[[CONSTANT_1]] : index
 // CHECK-NEXT:             %[[MULI_0:.*]] = arith.muli %[[DIVUI_0]], %[[CONSTANT_1]] : index
 // CHECK-NEXT:             %[[CONSTANT_3:.*]] = arith.constant 0 : index
-// CHECK-NEXT:             %[[GET_POOL_0:.*]] = hipsr.get_pool(%[[VAL_0]], %[[MULI_0]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
+// CHECK-NEXT:             %[[GET_POOL_0:.*]] = hipsr.get_pool(%[[VAL_0]], %[[MULI_0]]) {bufferization.manual_deallocation, domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
 // CHECK-NEXT:             %[[VIEW_0:.*]] = memref.view %[[GET_POOL_0]]{{\[}}%[[CONSTANT_3]]][] : memref<?xi8, #hipsr.mem<device>> to memref<4xf16, #hipsr.mem<device>>
 // CHECK-NEXT:             hipsr.add(%[[VAL_0]]) ins(%[[VAL_1]], %[[VAL_1]] : memref<4xf16, #hipsr.mem<device>>, memref<4xf16, #hipsr.mem<device>>) outs(%[[VIEW_0]] : memref<4xf16, #hipsr.mem<device>>)
 // CHECK-NEXT:             hipsr.pool_domain_yield %[[VIEW_0]] : memref<4xf16, #hipsr.mem<device>>
