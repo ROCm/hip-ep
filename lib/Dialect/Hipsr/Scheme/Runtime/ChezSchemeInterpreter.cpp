@@ -21,10 +21,6 @@ const size_t petite_boot_size = sizeof(petite_boot_data) - 1;
 const size_t scheme_boot_size = sizeof(scheme_boot_data) - 1;
 
 // Cached Scheme symbols for script loading
-static ptr cached_eval_sym = nullptr;
-static ptr cached_read_sym = nullptr;
-static ptr cached_open_string_input_port_sym = nullptr;
-static ptr cached_eof_object_p = nullptr;
 
 // Custom init called by Sbuild_heap before loading boot files
 static void custom_init() {
@@ -65,21 +61,10 @@ ChezSchemeInterpreter::ChezSchemeInterpreter(SchemeLogLevel logLevel)
 
   // Build heap and call custom_init (which registers foreign functions)
   Sbuild_heap(nullptr, custom_init);
+  initialized = true;  if (logLevel <= SchemeLogLevel::Info) {    llvm::errs() << "[info] ChezSchemeInterpreter: Initialization complete\n";  }
 
   if (logLevel <= SchemeLogLevel::Debug) {
     llvm::errs() << "[debug] ChezSchemeInterpreter: Caching Scheme symbols\n";
-  }
-
-  // Cache commonly-used symbols
-  cached_eval_sym = Stop_level_value(Sstring_to_symbol("eval"));
-  cached_read_sym = Stop_level_value(Sstring_to_symbol("read"));
-  cached_open_string_input_port_sym = Stop_level_value(
-      Sstring_to_symbol("open-string-input-port"));
-  cached_eof_object_p = Stop_level_value(Sstring_to_symbol("eof-object?"));
-
-  initialized = true;
-
-  if (logLevel <= SchemeLogLevel::Info) {
     llvm::errs() << "[info] ChezSchemeInterpreter: Initialization complete\n";
   }
 }
@@ -114,7 +99,16 @@ bool ChezSchemeInterpreter::evaluateCode(const char* code) {
     return false;
   }
 
-  return evaluateSchemeCode(code);
+  // Direct R5RS eval: (eval (read (open-string-input-port code)))
+  ptr eval_sym = Stop_level_value(Sstring_to_symbol("eval"));
+  ptr read_sym = Stop_level_value(Sstring_to_symbol("read"));
+  ptr open_port_sym = Stop_level_value(Sstring_to_symbol("open-string-input-port"));
+  
+  ptr port = Scall1(open_port_sym, Sstring(code));
+  ptr expr = Scall1(read_sym, port);
+  Scall1(eval_sym, expr);
+  
+  return true;
 }
 
 } // namespace hipsr

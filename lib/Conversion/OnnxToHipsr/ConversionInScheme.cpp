@@ -60,6 +60,12 @@ struct ConversionInSchemePass
 
     // Import the specified Scheme module
     std::string importCode = "(import (" + moduleName + "))";
+    // Set library-directories before importing
+    std::string libdirCode = "(library-directories (cons \"/home/build/hip-ep-chez/lib/scheme\" (library-directories)))";
+    if (!interpreter->evaluateCode(libdirCode.c_str())) {
+      emitWarning(getOperation().getLoc(), "Failed to set library-directories");
+    }
+
     if (!interpreter->evaluateCode(importCode.c_str())) {
       emitError(getOperation().getLoc(), "Failed to import (")
         << moduleName << ") module";
