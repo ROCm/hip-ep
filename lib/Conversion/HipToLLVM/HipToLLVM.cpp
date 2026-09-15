@@ -290,6 +290,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateGlobalPoolLoweringPatterns(typeConverter, patterns);
   populateQElementwiseLoweringPatterns(typeConverter, patterns);
   populateQMatMulLoweringPatterns(typeConverter, patterns);
+  populateQGemmLoweringPatterns(typeConverter, patterns);
   populateQConvLoweringPatterns(typeConverter, patterns);
   populateQLpNormalizationLoweringPatterns(typeConverter, patterns);
 
