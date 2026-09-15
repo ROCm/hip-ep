@@ -621,6 +621,26 @@ def Hip_HipblasltGraphOp : Hip_Op<"hipblaslt.graph", [SingleBlock, NoTerminator]
   let assemblyFormat = "$body attr-dict";
 }
 
+def Hip_RocMlirOp : Hip_DpsOp<"rocmlir"> {
+  let summary = "RocMlir backend dispatch";
+  let arguments = (ins
+    FlatSymbolRefAttr:$kernel,
+    Hip_ContextType:$ctx,
+    Variadic<Hip_TensorOrMemRef>:$inputs,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<StrAttr, "\"\"">:$kernel_binary,
+    DefaultValuedAttr<I64Attr, "0">:$grid_size,
+    DefaultValuedAttr<I64Attr, "0">:$block_size
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` $kernel `ins` `(` $inputs `:`
+    type($inputs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^ )?
+  }];
+}
+
 // ===== MIOpen DNN Operations =================================================
 
 def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[OpStateOpInterface], /*outsAccessor=*/"Output",
@@ -5089,6 +5109,45 @@ def Hip_QConvOp : Hip_DpsOp<"qconv",
         $weight_zero_points (`,` $bias^)? `:`
         type($input) `,` type($weights) `,` type($weight_scales) `,`
         type($weight_zero_points) (`,` type($bias)^)? `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_QLpNormalizationOp : Hip_DpsOp<"qlpnormalization",
+                                       /*traits=*/[],
+                                       /*outsAccessor=*/"Output",
+                                       /*autoReify=*/1,
+                                       /*autoInfer=*/1,
+                                       /*declareInfer=*/1> {
+  let summary = "Quantized LpNormalization (L2) with integrated QDQ";
+  let description = [{
+    Fuses DequantizeLinear -> LpNormalization -> QuantizeLinear.
+
+    The match is UINT16 per-tensor input/output quantization, `p = 2`, and
+    normalization over the trailing axis. That is the same math as RMS norm
+    with `scale = 1/sqrt(N)` and `epsilon = 0`:
+
+      y = Q( L2(DQ(x)) )
+
+    Input and output scales/zero-points stay separate attributes: the models
+    almost never share them, so requantization is part of the fused op.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    F32Attr:$input_scale,
+    I64Attr:$input_zp,
+    F32Attr:$output_scale,
+    I64Attr:$output_zp,
+    I64Attr:$axis,
+    I64Attr:$p
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];

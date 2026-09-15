@@ -455,6 +455,29 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
   return 0;
 }
 
+// RocMLIR dispatch (hip.rocmlir). Empty for now: the generated IR builds the
+// kernargs buffer and passes the embedded GPU binary + launch geometry, but
+// this wrapper does not yet load the module or launch the kernel.
+int wrap_rocmlir(RuntimeState *state, const char *kernel_binary,
+                 char *func_name, int64_t block_size, int64_t grid_size,
+                 void *kernargs, size_t size) {
+  (void)kernel_binary;
+  (void)func_name;
+  (void)block_size;
+  (void)grid_size;
+  (void)kernargs;
+  (void)size;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_rocmlir\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_rocmlir(func=%s, block_size=%lld, grid_size=%lld, "
+             "kernargs_size=%zu)\n",
+             func_name ? func_name : "(null)", (long long)block_size,
+             (long long)grid_size, size);
+  return 0;
+}
+
 int wrap_group_query_attention(
     RuntimeState *state, int op_state_slot,
     // Inputs 1-7 (core GQA)
@@ -1661,6 +1684,26 @@ int wrap_qconv(RuntimeState *state, const void *input, const void *weights,
              (long long)batch, (long long)in_channels, (long long)out_channels,
              (long long)spatial_size, hipdnn_ep_datatype_name(activation_dtype),
              hipdnn_ep_datatype_name(weight_dtype), (long long)weight_bits);
+  return 0;
+}
+
+int wrap_qlpnormalization(RuntimeState *state, const void *input, void *output,
+                          int64_t num_elements, int64_t norm_num_elements,
+                          int64_t data_type, float input_scale,
+                          int64_t input_zp, float output_scale,
+                          int64_t output_zp, int64_t axis, int64_t p) {
+  (void)input;
+  (void)output;
+  (void)input_scale;
+  (void)input_zp;
+  (void)output_scale;
+  (void)output_zp;
+  if (!state)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_qlpnormalization numel=%lld N=%lld dtype=%s "
+             "axis=%lld p=%lld\n",
+             (long long)num_elements, (long long)norm_num_elements,
+             hipdnn_ep_datatype_name(data_type), (long long)axis, (long long)p);
   return 0;
 }
 

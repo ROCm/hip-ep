@@ -33,6 +33,7 @@ jobs:
 
     env:
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
+      SCCACHE_CACHE_SIZE: "200M"
 
     steps:
       - name: Checkout

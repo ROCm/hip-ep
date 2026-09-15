@@ -7,12 +7,18 @@
 
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
+#include "hip/Dialect/Transforms/Passes.h"
 
+#include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
+#include "mlir/Conversion/ConvertToLLVM/ToLLVMPass.h"
+#include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
+#include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
 #include "mlir/Conversion/ShapeToStandard/ShapeToStandard.h"
 #include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/Passes.h"
+#include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Dialect/Shape/Transforms/Passes.h"
 #include "mlir/Pass/PassRegistry.h"
 
@@ -33,6 +39,14 @@
 //   --hipsr-inline-regions
 //   --buffer-deallocation-pipeline
 //   --optimize-allocation-liveness
+//   --hipsr-externalize-constants
+//   --assign-op-state-slots
+//   --generate-op-state-init
+//   --expand-strided-metadata
+//   --lower-affine
+//   --convert-scf-to-cf
+//   --reconcile-unrealized-casts
+//   --convert-to-llvm
 void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
                                      const HipsrPipelineOptions & /*options*/) {
   pm.addPass(createAddContextArgPass());
@@ -70,6 +84,21 @@ void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
   bufferization::buildBufferDeallocationPipeline(pm, deallocOptions);
   pm.addNestedPass<func::FuncOp>(
       bufferization::createOptimizeAllocationLivenessPass());
+
+  pm.addPass(createHipsrExternalizeConstantsPass());
+
+  pm.addPass(hip::createAssignOpStateSlotsPass());
+  pm.addPass(hip::createGenerateOpStateInitPass());
+
+  // collapse_shape / expand_shape have no LLVM pattern.
+  pm.addPass(memref::createExpandStridedMetadataPass());
+  // expand-strided-metadata emits affine.apply for stride products.
+  pm.addPass(createLowerAffinePass());
+  // convert-linalg-to-loops leaves scf.for / scf.if.
+  pm.addPass(createSCFToControlFlowPass());
+  // Drop leftover unrealized_conversion_cast from earlier conversions.
+  pm.addPass(createReconcileUnrealizedCastsPass());
+  pm.addPass(createConvertToLLVMPass());
 }
 
 void mlir::hipsr::registerHipsrPipelines() {

@@ -42,6 +42,7 @@ env:
   # of AMDGPU_EP_REF. 102: forward Hip custom-op domains; 105: forward unknown /
   # Hip-owned provider options under the shared ep.<amdgpu>.* prefix.
   AMDGPU_PR_PATCHES: "102 105"
+  SCCACHE_CACHE_SIZE: "200M"
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -402,9 +403,9 @@ jobs:
           echo "SCCACHE_DIR=${{ runner.workspace }}/sccache-dir" >> $GITHUB_ENV
           echo "SCCACHE_KEY_DATE=$(date -u +'%Y%m%d')" >> $GITHUB_ENV
 
-      - name: Cache sccache directory
+      - name: Restore sccache directory
         if: steps.cache-amdgpu.outputs.cache-hit != 'true'
-        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/sccache-dir
           key: sccache-windows-deps-amdgpu-${{ env.SCCACHE_KEY_DATE }}
@@ -534,6 +535,14 @@ jobs:
         with:
           path: ${{ runner.workspace }}/amdgpu-artifacts
           key: ${{ steps.key.outputs.value }}
+
+      - name: Save sccache directory
+        if: always() && steps.cache-amdgpu.outputs.cache-hit != 'true' && github.ref_name == 'main'
+        continue-on-error: true
+        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/sccache-dir
+          key: sccache-windows-deps-amdgpu-${{ env.SCCACHE_KEY_DATE }}
 
   oga:
     needs: ort

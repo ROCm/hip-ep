@@ -5,8 +5,8 @@
 //===- MaterializeInitTensorsPass.cpp - Materialize placeholder inits -----===//
 //
 // Replaces every hipsr.placeholder in a pool domain with a shape computation
-// and a tensor.empty. Runs last in --hipsr-pipeline, so domains are cut and
-// shape regions are filled.
+// and a tensor.empty. Must follow hipsr-populate-shape-region and
+// hipsr-partition-pool-domains.
 //
 // Before:
 //   %init = hipsr.placeholder(%ctx) ins(%a) : tensor<?x4xf32> shape_region {
