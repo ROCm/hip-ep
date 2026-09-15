@@ -687,18 +687,19 @@ size_t qmatmul_splitk_workspace_bytes(int64_t M, int64_t N,
 // registers before any multiply. Reading one byte per step made the loop wait on
 // every load, which cost a full memory round trip per k.
 //
-// kSplits slices of the reduction then run side by side in one block and merge
-// through LDS. The output alone bounds this shape's parallelism -- a narrow N
-// reaches only a handful of CUs however the columns are divided -- so k is the
-// only dimension left that can raise the requests in flight.
+// kSplits slices of the reduction run side by side in one block and merge
+// through LDS atomics. Atomics rather than per-slice buffers because they keep
+// the merge footprint independent of kSplits, which is what lets the slice
+// count grow.
 //
-// kBlock * kCols is the block's column window and therefore sets the grid:
-// widening a thread's register work without widening that window would shrink
-// the grid and idle CUs on a narrow N.
+// Concurrent k slices are what this shape is short of, and they are the only
+// lever: the column window cancels out of the throughput, since a narrower one
+// yields proportionally more windows. kSplits is capped by K / kTile, so kTile
+// is tunable and wants to be small -- it only sizes the staging tile for A, not
+// anything the reduction requires.
 //
-// The four are template parameters because their balance is a per-shape
+// All five are template parameters because their balance is a per-shape
 // property; qmatmul_gemv_config measures it on the device.
-constexpr int kGemvTileK = 256;
 
 template <int kCols> struct QMatMulGemvSums {
   int64_t acc[kCols];
@@ -715,13 +716,13 @@ struct QMatMulGemvSlice {
   int64_t tiles;
 };
 
-template <int kSplits>
+template <int kSplits, int kTile>
 __device__ inline QMatMulGemvSlice qmatmul_gemv_slice(int64_t K, int slice) {
   int64_t chunk = (K + kSplits - 1) / kSplits;
-  chunk = (chunk + kGemvTileK - 1) / kGemvTileK * kGemvTileK;
+  chunk = (chunk + kTile - 1) / kTile * kTile;
   const int64_t begin = static_cast<int64_t>(slice) * chunk;
   const int64_t capped = (begin + chunk < K) ? begin + chunk : K;
-  return {begin, capped < begin ? begin : capped, chunk / kGemvTileK};
+  return {begin, capped < begin ? begin : capped, chunk / kTile};
 }
 
 template <typename TB>
@@ -755,11 +756,12 @@ qmatmul_gemv_step(int32_t a_val, const QMatMulGemvPack<kCols / 4> &packed,
   }
 }
 
+template <int kTile>
 __device__ inline int qmatmul_gemv_tile(int64_t k_end, int64_t k0) {
   if (k0 >= k_end)
     return 0;
   const int64_t remaining = k_end - k0;
-  return static_cast<int>(remaining < kGemvTileK ? remaining : kGemvTileK);
+  return static_cast<int>(remaining < kTile ? remaining : kTile);
 }
 
 template <int kBlock, typename TA>
@@ -770,7 +772,8 @@ __device__ inline void qmatmul_gemv_stage_a(const TA *__restrict__ A,
     a_lds[t] = static_cast<int32_t>(A[k0 + t]);
 }
 
-template <int kBlock, int kCols, int kUnroll, typename TA, typename TB>
+template <int kBlock, int kCols, int kUnroll, int kTile, typename TA,
+          typename TB>
 __device__ void qmatmul_gemv_vector_loop(const TA *__restrict__ A,
                                          const TB *__restrict__ B, int64_t N,
                                          const QMatMulGemvSlice &slice,
@@ -781,8 +784,8 @@ __device__ void qmatmul_gemv_vector_loop(const TA *__restrict__ A,
   const uint8_t *b_col = reinterpret_cast<const uint8_t *>(B) + n_base;
 
   for (int64_t ti = 0; ti < slice.tiles; ++ti) {
-    const int64_t k0 = slice.k_begin + ti * kGemvTileK;
-    const int tile = qmatmul_gemv_tile(slice.k_end, k0);
+    const int64_t k0 = slice.k_begin + ti * kTile;
+    const int tile = qmatmul_gemv_tile<kTile>(slice.k_end, k0);
     qmatmul_gemv_stage_a<kBlock>(A, k0, tile, a_lds);
     __syncthreads();
 
@@ -820,8 +823,8 @@ __device__ void qmatmul_gemv_vector_loop(const TA *__restrict__ A,
 
 // Fallback for the layouts the dword load cannot serve: a [N, K] B, packed W4,
 // and a last block that runs off the end of N.
-template <int kBBits, bool kTransB, int kBlock, int kCols, typename TA,
-          typename TB>
+template <int kBBits, bool kTransB, int kBlock, int kCols, int kTile,
+          typename TA, typename TB>
 __device__ void
 qmatmul_gemv_scalar_loop(const TA *__restrict__ A, const TB *__restrict__ B,
                          const uint8_t *__restrict__ b_zero_points, int64_t N,
@@ -840,8 +843,8 @@ qmatmul_gemv_scalar_loop(const TA *__restrict__ A, const TB *__restrict__ B,
   }
 
   for (int64_t ti = 0; ti < slice.tiles; ++ti) {
-    const int64_t k0 = slice.k_begin + ti * kGemvTileK;
-    const int tile = qmatmul_gemv_tile(slice.k_end, k0);
+    const int64_t k0 = slice.k_begin + ti * kTile;
+    const int tile = qmatmul_gemv_tile<kTile>(slice.k_end, k0);
     qmatmul_gemv_stage_a<kBlock>(A, k0, tile, a_lds);
     __syncthreads();
 
@@ -885,7 +888,7 @@ qmatmul_gemv_scalar_loop(const TA *__restrict__ A, const TB *__restrict__ B,
 // There is no trans_a flag: at M == 1 both layouts of A are the same K-element
 // vector, so the index is unchanged.
 template <typename TA, typename TB, typename TY, int kBlock, int kCols,
-          int kUnroll, int kSplits>
+          int kUnroll, int kSplits, int kTile>
 __global__ __launch_bounds__(kBlock *kSplits) void qmatmul_gemv_kernel(
     const TA *__restrict__ A, const TB *__restrict__ B, TY *__restrict__ Y,
     const uint8_t *__restrict__ b_zero_points, int64_t N, int64_t K,
@@ -893,21 +896,28 @@ __global__ __launch_bounds__(kBlock *kSplits) void qmatmul_gemv_kernel(
     bool need_row_a, bool need_col_b, bool trans_b) {
   constexpr int kWindow = kBlock * kCols;
   static_assert(kCols % 4 == 0, "the vector path stages whole dwords");
-  static_assert(kGemvTileK % kBlock == 0, "A staging map assumes even split");
+  static_assert(kUnroll <= kTile, "the unrolled body must fit inside a tile");
   static_assert(kBlock * kSplits <= 1024, "block exceeds the HIP thread limit");
-  static_assert(kSplits * kGemvTileK * sizeof(int32_t) +
-                        2 * kSplits * kWindow * sizeof(int64_t) +
-                        kSplits * sizeof(int64_t) <=
+  static_assert(kSplits * kTile * sizeof(int32_t) +
+                        2 * kWindow * sizeof(int64_t) + sizeof(int64_t) <=
                     64 * 1024,
                 "geometry exceeds the per-block LDS budget");
 
-  __shared__ int32_t a_lds[kSplits][kGemvTileK];
-  __shared__ int64_t red_acc[kSplits][kWindow];
-  __shared__ int64_t red_col_b[kSplits][kWindow];
-  __shared__ int64_t red_row_a[kSplits];
+  __shared__ int32_t a_lds[kSplits][kTile];
+  __shared__ int64_t red_acc[kWindow];
+  __shared__ int64_t red_col_b[kWindow];
+  __shared__ int64_t red_row_a;
 
   const int lane = threadIdx.x;
   const int slice_id = threadIdx.y;
+  const int tid = slice_id * kBlock + lane;
+
+  for (int i = tid; i < kWindow; i += kBlock * kSplits) {
+    red_acc[i] = 0;
+    red_col_b[i] = 0;
+  }
+  if (tid == 0)
+    red_row_a = 0;
 
   const int64_t batch = blockIdx.y;
   A += batch * K;
@@ -917,7 +927,8 @@ __global__ __launch_bounds__(kBlock *kSplits) void qmatmul_gemv_kernel(
   const int64_t block_base = static_cast<int64_t>(blockIdx.x) * kWindow;
   const int64_t n_base = block_base + static_cast<int64_t>(lane) * kCols;
 
-  const QMatMulGemvSlice slice = qmatmul_gemv_slice<kSplits>(K, slice_id);
+  const QMatMulGemvSlice slice =
+      qmatmul_gemv_slice<kSplits, kTile>(K, slice_id);
   QMatMulGemvSums<kCols> sums = {};
 
   // Block-uniform by construction: the loops below carry __syncthreads(), so a
@@ -928,60 +939,54 @@ __global__ __launch_bounds__(kBlock *kSplits) void qmatmul_gemv_kernel(
                          (N % kCols) == 0 &&
                          (reinterpret_cast<uintptr_t>(B) % kCols) == 0;
 
+  // Also publishes the zeroed merge buffers to the whole block.
+  __syncthreads();
+
   if (vector_ok)
-    qmatmul_gemv_vector_loop<kBlock, kCols, kUnroll, TA, TB>(
+    qmatmul_gemv_vector_loop<kBlock, kCols, kUnroll, kTile, TA, TB>(
         A, B, N, slice, n_base, need_row_a, need_col_b, a_lds[slice_id], sums);
   else if (b_bits == 4 && trans_b)
-    qmatmul_gemv_scalar_loop<4, true, kBlock, kCols>(
+    qmatmul_gemv_scalar_loop<4, true, kBlock, kCols, kTile>(
         A, B, b_zero_points, N, K, slice, n_base, need_row_a, need_col_b,
         b_signed, a_lds[slice_id], sums);
   else if (b_bits == 4)
-    qmatmul_gemv_scalar_loop<4, false, kBlock, kCols>(
+    qmatmul_gemv_scalar_loop<4, false, kBlock, kCols, kTile>(
         A, B, b_zero_points, N, K, slice, n_base, need_row_a, need_col_b,
         b_signed, a_lds[slice_id], sums);
   else if (trans_b)
-    qmatmul_gemv_scalar_loop<8, true, kBlock, kCols>(
+    qmatmul_gemv_scalar_loop<8, true, kBlock, kCols, kTile>(
         A, B, b_zero_points, N, K, slice, n_base, need_row_a, need_col_b,
         b_signed, a_lds[slice_id], sums);
   else
-    qmatmul_gemv_scalar_loop<8, false, kBlock, kCols>(
+    qmatmul_gemv_scalar_loop<8, false, kBlock, kCols, kTile>(
         A, B, b_zero_points, N, K, slice, n_base, need_row_a, need_col_b,
         b_signed, a_lds[slice_id], sums);
 
-  // Column-major so the lanes of a wave land on consecutive int64 slots.
+  // Column-major so the lanes of a wave land on consecutive int64 slots; the
+  // only contention is between slices, which the LDS unit serializes anyway.
 #pragma unroll
   for (int c = 0; c < kCols; ++c) {
     const int slot = c * kBlock + lane;
-    red_acc[slice_id][slot] = sums.acc[c];
-    red_col_b[slice_id][slot] = sums.col_b[c];
+    qmatmul_atomic_add_i64(&red_acc[slot], sums.acc[c]);
+    qmatmul_atomic_add_i64(&red_col_b[slot], sums.col_b[c]);
   }
   // rowA does not depend on n, so every lane of a slice holds the same value.
   if (lane == 0)
-    red_row_a[slice_id] = sums.row_a;
+    qmatmul_atomic_add_i64(&red_row_a, sums.row_a);
   __syncthreads();
 
   if (slice_id != 0)
     return;
 
-  int64_t row_a = 0;
-#pragma unroll
-  for (int s = 0; s < kSplits; ++s)
-    row_a += red_row_a[s];
-
+  const int64_t row_a = red_row_a;
 #pragma unroll
   for (int c = 0; c < kCols; ++c) {
     const int64_t n = n_base + c;
     if (n >= N)
       continue;
     const int slot = c * kBlock + lane;
-    int64_t acc = 0;
-    int64_t col_b = 0;
-#pragma unroll
-    for (int s = 0; s < kSplits; ++s) {
-      acc += red_acc[s][slot];
-      col_b += red_col_b[s][slot];
-    }
-    Y[n] = qmatmul_epilogue<TY>(acc, row_a, col_b, n, requant);
+    Y[n] = qmatmul_epilogue<TY>(red_acc[slot], row_a, red_col_b[slot], n,
+                                requant);
   }
 }
 
@@ -1024,6 +1029,11 @@ struct QMatMulArgs {
 // Entries must stay in lockstep with the switch in
 // qmatmul_gemv_launch_config; a config's id is its index here.
 //
+// The table is ordered by descending splits / tile ratio, because concurrent k
+// slices are what this shape is short of and splits is capped by K / tile.
+// A small block raises that cap further (splits is capped by 1024 / block too),
+// but never below 32, or a wave would run with idle lanes.
+//
 // cols stops at 8 on the evidence recorded beside kGemvConfigs in
 // matmul_nbits_kernel.hip: over ~50 tunes there, a wider per-thread column tile
 // spilled registers and never won.
@@ -1032,34 +1042,40 @@ struct QMatMulGemvConfig {
   int cols;
   int unroll;
   int splits;
+  int tile;
 };
 
 constexpr QMatMulGemvConfig kQMatMulGemvConfigs[] = {
-    {64, 4, 8, 4},  {64, 4, 8, 1},  {64, 4, 8, 2},   {64, 4, 8, 8},
-    {64, 4, 16, 4}, {64, 4, 4, 4},  {64, 8, 8, 2},   {64, 8, 8, 4},
-    {32, 4, 8, 4},  {32, 4, 8, 8},  {32, 4, 16, 8},  {128, 4, 8, 2},
+    {32, 4, 8, 32, 64},  {32, 4, 8, 32, 32}, {64, 4, 8, 16, 64},
+    {32, 4, 16, 32, 64}, {32, 4, 4, 32, 64}, {32, 4, 8, 16, 64},
+    {64, 4, 8, 16, 128}, {64, 4, 8, 8, 64},  {64, 8, 8, 8, 64},
+    {128, 4, 8, 8, 64},  {64, 4, 8, 4, 256}, {64, 4, 8, 1, 256},
 };
 constexpr int kNumQMatMulGemvConfigs = static_cast<int>(
     sizeof(kQMatMulGemvConfigs) / sizeof(kQMatMulGemvConfigs[0]));
 
 // The answer whenever autotune is off or no config in the table would launch.
 constexpr int kQMatMulGemvDefaultConfig = 0;
+// Narrowest entry: one k slice, 64 threads, the smallest LDS footprint in the
+// table. The launch fallback needs a geometry no device can refuse.
+constexpr int kQMatMulGemvSafeConfig = 11;
 
 template <typename TA, typename TB, typename TY, int kBlock, int kCols,
-          int kUnroll, int kSplits>
+          int kUnroll, int kSplits, int kTile>
 int qmatmul_gemv_launch(const QMatMulArgs &g, const QMatMulRequant &requant,
                         bool need_row_a, bool need_col_b) {
   constexpr int kWindow = kBlock * kCols;
   dim3 grid(static_cast<unsigned>((g.N + kWindow - 1) / kWindow),
             static_cast<unsigned>(g.batch_count));
   (void)hipGetLastError();
-  hipLaunchKernelGGL(
-      HIP_KERNEL_NAME(
-          qmatmul_gemv_kernel<TA, TB, TY, kBlock, kCols, kUnroll, kSplits>),
-      grid, dim3(kBlock, kSplits), 0, g.stream, static_cast<const TA *>(g.A),
-      static_cast<const TB *>(g.B), static_cast<TY *>(g.Y), g.b_zero_points,
-      g.N, g.K, g.b_batch_stride, requant, g.b_bits, g.b_signed, need_row_a,
-      need_col_b, g.trans_b);
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(qmatmul_gemv_kernel<TA, TB, TY, kBlock,
+                                                         kCols, kUnroll,
+                                                         kSplits, kTile>),
+                     grid, dim3(kBlock, kSplits), 0, g.stream,
+                     static_cast<const TA *>(g.A),
+                     static_cast<const TB *>(g.B), static_cast<TY *>(g.Y),
+                     g.b_zero_points, g.N, g.K, g.b_batch_stride, requant,
+                     g.b_bits, g.b_signed, need_row_a, need_col_b, g.trans_b);
   return static_cast<int>(hipGetLastError());
 }
 
@@ -1067,27 +1083,27 @@ template <typename TA, typename TB, typename TY>
 int qmatmul_gemv_launch_config(int config_id, const QMatMulArgs &g,
                                const QMatMulRequant &requant, bool need_row_a,
                                bool need_col_b) {
-#define QMATMUL_GEMV_CASE(ID, BLOCK, COLS, UNROLL, SPLITS)                     \
+#define QMATMUL_GEMV_CASE(ID, BLOCK, COLS, UNROLL, SPLITS, TILE)               \
   case ID:                                                                     \
-    return qmatmul_gemv_launch<TA, TB, TY, BLOCK, COLS, UNROLL, SPLITS>(       \
+    return qmatmul_gemv_launch<TA, TB, TY, BLOCK, COLS, UNROLL, SPLITS, TILE>( \
         g, requant, need_row_a, need_col_b)
 
   switch (config_id) {
-    QMATMUL_GEMV_CASE(0, 64, 4, 8, 4);
-    QMATMUL_GEMV_CASE(1, 64, 4, 8, 1);
-    QMATMUL_GEMV_CASE(2, 64, 4, 8, 2);
-    QMATMUL_GEMV_CASE(3, 64, 4, 8, 8);
-    QMATMUL_GEMV_CASE(4, 64, 4, 16, 4);
-    QMATMUL_GEMV_CASE(5, 64, 4, 4, 4);
-    QMATMUL_GEMV_CASE(6, 64, 8, 8, 2);
-    QMATMUL_GEMV_CASE(7, 64, 8, 8, 4);
-    QMATMUL_GEMV_CASE(8, 32, 4, 8, 4);
-    QMATMUL_GEMV_CASE(9, 32, 4, 8, 8);
-    QMATMUL_GEMV_CASE(10, 32, 4, 16, 8);
-    QMATMUL_GEMV_CASE(11, 128, 4, 8, 2);
+    QMATMUL_GEMV_CASE(0, 32, 4, 8, 32, 64);
+    QMATMUL_GEMV_CASE(1, 32, 4, 8, 32, 32);
+    QMATMUL_GEMV_CASE(2, 64, 4, 8, 16, 64);
+    QMATMUL_GEMV_CASE(3, 32, 4, 16, 32, 64);
+    QMATMUL_GEMV_CASE(4, 32, 4, 4, 32, 64);
+    QMATMUL_GEMV_CASE(5, 32, 4, 8, 16, 64);
+    QMATMUL_GEMV_CASE(6, 64, 4, 8, 16, 128);
+    QMATMUL_GEMV_CASE(7, 64, 4, 8, 8, 64);
+    QMATMUL_GEMV_CASE(8, 64, 8, 8, 8, 64);
+    QMATMUL_GEMV_CASE(9, 128, 4, 8, 8, 64);
+    QMATMUL_GEMV_CASE(10, 64, 4, 8, 4, 256);
+    QMATMUL_GEMV_CASE(11, 64, 4, 8, 1, 256);
   default:
-    return qmatmul_gemv_launch<TA, TB, TY, 64, 4, 8, 4>(g, requant, need_row_a,
-                                                        need_col_b);
+    return qmatmul_gemv_launch<TA, TB, TY, 32, 4, 8, 32, 64>(
+        g, requant, need_row_a, need_col_b);
   }
 #undef QMATMUL_GEMV_CASE
 }
@@ -1180,10 +1196,10 @@ int qmatmul_gemv_tune(const QMatMulArgs &g, const QMatMulRequant &requant,
 
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] qmatmul gemv config[%2d] block=%3d cols=%d "
-        "unroll=%2d splits=%d : %.4f ms\n",
+        "unroll=%2d splits=%2d tile=%3d : %.4f ms\n",
         cid, kQMatMulGemvConfigs[cid].block, kQMatMulGemvConfigs[cid].cols,
         kQMatMulGemvConfigs[cid].unroll, kQMatMulGemvConfigs[cid].splits,
-        ms / kIters);
+        kQMatMulGemvConfigs[cid].tile, ms / kIters);
 
     if (!have_best || ms < best_ms) {
       best_ms = ms;
@@ -1254,8 +1270,16 @@ int launch_qmatmul(const QMatMulArgs &g) {
   if (g.M == 1) {
     const int config =
         qmatmul_gemv_config<TA, TB, TY>(g, requant, need_row_a, need_col_b);
-    return qmatmul_gemv_launch_config<TA, TB, TY>(config, g, requant,
-                                                  need_row_a, need_col_b);
+    const int err = qmatmul_gemv_launch_config<TA, TB, TY>(
+        config, g, requant, need_row_a, need_col_b);
+    if (err == hipSuccess || config == kQMatMulGemvSafeConfig)
+      return err;
+    // The table's widest geometries ask for 1024 threads, which a device may
+    // refuse for resources. Retry narrow rather than failing the op, and clear
+    // the sticky error or the clean retry would still report it.
+    (void)hipGetLastError();
+    return qmatmul_gemv_launch_config<TA, TB, TY>(
+        kQMatMulGemvSafeConfig, g, requant, need_row_a, need_col_b);
   }
 
   const QMatMulSplitKPlan plan =
