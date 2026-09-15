@@ -103,9 +103,9 @@ struct AllocOutputLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
     if (failed(allocFunc)) {
       return failure();
     }
-    FailureOr<Value> rawPtr = allocFunc->call(
-        adaptor.getCtx(), static_cast<int64_t>(op.getOutIdx()), shapeArray,
-        rank, elemSizeBytes);
+    FailureOr<Value> rawPtr =
+        allocFunc->call(adaptor.getCtx(), static_cast<int64_t>(op.getOutIdx()),
+                        shapeArray, rank, elemSizeBytes);
     if (failed(rawPtr)) {
       return failure();
     }
