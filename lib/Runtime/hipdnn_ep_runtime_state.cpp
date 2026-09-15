@@ -12,6 +12,7 @@
 
 #if defined(HIPDNN_EP_REAL_RUNTIME)
 #include "gqa_autotune.h"
+#include "hip_custom_kernels.h"
 #endif
 
 #include "model_metadata_generated.h"
@@ -86,6 +87,10 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   // lookup-only GQA.
   (*out_state)->gqa_autotune_policy = hip_gqa_autotune_create(
       hipdnn_ep_runtime_get_provider_option(*out_state, "gqa_autotune_mode"));
+
+  // No policy object to hold: MatMulNBits latches its mode process-wide.
+  hip_matmul_nbits_autotune_set_mode(hipdnn_ep_runtime_get_provider_option(
+      *out_state, "matmul_autotune_mode"));
 #endif
 
   if (!metadata_blob || blob_size == 0) {
