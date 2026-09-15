@@ -27,6 +27,7 @@ namespace hipsr {
 
 // Parse log level from string
 mlir::hipsr::SchemeLogLevel parseLogLevel(const std::string& level);
+void setSchemeLogLevel(mlir::hipsr::SchemeLogLevel level);
 
 // Initialize Scheme runtime and register MLIR FFI bindings
 bool initializeSchemeRuntime(SchemeLogLevel logLevel = SchemeLogLevel::Warning);
