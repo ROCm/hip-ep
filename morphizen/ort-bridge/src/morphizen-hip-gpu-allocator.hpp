@@ -97,9 +97,9 @@ inline constexpr SizeClassTable kSizeClassTable = BuildSizeClasses();
 inline constexpr const size_t *kSizeClasses = detail::kSizeClassTable.data;
 inline constexpr size_t kNumSizeClasses = detail::kSizeClassTable.count;
 
-// hipHostMalloc(Mapped|Coherent) backed OrtAllocator. One instance is created
-// per OrtMemoryInfo registered with OrtEpDevice (typically one DEFAULT GPU
-// info and one HOST_ACCESSIBLE info — both currently route to the same
+// hipHostMalloc(Mapped|NonCoherent) backed OrtAllocator. One instance is
+// created per OrtMemoryInfo registered with OrtEpDevice (typically one DEFAULT
+// GPU info and one HOST_ACCESSIBLE info — both currently route to the same
 // mapped pinned allocator, since AMD APU iGPU shares physical memory with
 // the host). ORT keeps the allocator alive for the matching session.
 struct HipGpuAllocator : OrtAllocator {
