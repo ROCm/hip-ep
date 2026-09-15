@@ -9,7 +9,6 @@
 #include "mlir/Conversion/LLVMCommon/MemRefBuilder.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
-#include "mlir/Dialect/LLVMIR/FunctionCallUtils.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -77,8 +76,6 @@ struct AllocOutputLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
     // output occupies a byte per element, not an eighth of one.
     int64_t elemSizeBytes = (elemType.getIntOrFloatBitWidth() + 7) / 8;
 
-    Type ptrType = getPtrType();
-    Type i64Type = rewriter.getI64Type();
     int64_t rank = memRefType.getRank();
 
     // Interleaves the static extents from the type with the dynamic-size
@@ -96,28 +93,22 @@ struct AllocOutputLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
     // runtime sees is the memref's own.
     Value shapeArray = emitHostI64Array(sizes, rewriter, loc);
 
-    Value outIdx = LLVM::ConstantOp::create(
-        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(op.getOutIdx()));
-    Value rankVal = LLVM::ConstantOp::create(rewriter, loc, i64Type,
-                                             rewriter.getI64IntegerAttr(rank));
-    Value elemSize = LLVM::ConstantOp::create(
-        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(elemSizeBytes));
-
     // void *hipdnn_ep_alloc_output(void *state, int64_t out_idx,
     //                              const int64_t *shape, int64_t rank,
     //                              int64_t elem_size)
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kAllocOutput,
-        {ptrType, i64Type, ptrType, i64Type, i64Type}, ptrType);
-    if (failed(funcOp)) {
+    using AllocOutputCall =
+        RuntimeFunc<hostPtr, hostPtr, i64, hostPtr, i64, i64>;
+    auto allocFunc =
+        AllocOutputCall::lookupOrCreateFn(rewriter, loc, module, kAllocOutput);
+    if (failed(allocFunc)) {
       return failure();
     }
-
-    Value rawPtr =
-        LLVM::CallOp::create(
-            rewriter, loc, *funcOp,
-            ValueRange{adaptor.getCtx(), outIdx, shapeArray, rankVal, elemSize})
-            .getResult();
+    FailureOr<Value> rawPtr = allocFunc->call(
+        adaptor.getCtx(), static_cast<int64_t>(op.getOutIdx()), shapeArray,
+        rank, elemSizeBytes);
+    if (failed(rawPtr)) {
+      return failure();
+    }
 
     // The callback returns a generic (address space 0) pointer, so cast it
     // into the memref's space when they differ.
@@ -127,13 +118,13 @@ struct AllocOutputLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
       return failure();
     }
 
-    Value dataPtr = rawPtr;
-    if (cast<LLVM::LLVMPointerType>(rawPtr.getType()).getAddressSpace() !=
+    Value dataPtr = *rawPtr;
+    if (cast<LLVM::LLVMPointerType>(dataPtr.getType()).getAddressSpace() !=
         *addrSpace)
       dataPtr = LLVM::AddrSpaceCastOp::create(
           rewriter, loc,
           LLVM::LLVMPointerType::get(rewriter.getContext(), *addrSpace),
-          rawPtr);
+          dataPtr);
 
     MemRefDescriptor desc = createMemRefDescriptor(
         loc, memRefType, dataPtr, dataPtr, sizes, strides, rewriter);
