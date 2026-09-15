@@ -37,7 +37,8 @@ env:
   # Space-separated onnxruntime/onnxruntime-ep-amdgpu PR numbers applied on top
   # of AMDGPU_EP_REF. 102: forward Hip custom-op domains; 105: forward unknown /
   # Hip-owned provider options under the shared ep.<amdgpu>.* prefix.
-  AMDGPU_PR_PATCHES: "102 105"
+  # 122 (draft): hip as the only backend (no MIGraphX).
+  AMDGPU_PR_PATCHES: "102 105 122"
   SCCACHE_CACHE_SIZE: "200M"
 
 jobs:
@@ -449,7 +450,7 @@ jobs:
             cp "$f" "$ARTIFACTS/bin/"
           done
           test -f "$ARTIFACTS/bin/amdgpu-ep.dll"
-          test -f "$ARTIFACTS/bin/problem_cache.json"
+          test -f "$ARTIFACTS/bin/hip-backend.dll"
           echo "Cached $(ls -1 "$ARTIFACTS/bin" | wc -l) files into bin/"
 
       - name: Save amdgpu-artifacts
