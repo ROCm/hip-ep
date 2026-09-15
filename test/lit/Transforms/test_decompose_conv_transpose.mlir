@@ -19,12 +19,14 @@
 // 10. many_residues - stride^2 past the kernel-count cap, op survives
 // 11. result_rank_mismatch - rank-3 result, op survives
 // 12. batch_mismatch       - result batch != input batch, op survives
+// 13. out_pad_no_slack     - output_padding with no slack -> grid is grown
+// 14. result_too_large     - result past the output_padding bound, op survives
 //
 // Cases 1-5 use a splat filter and so only pin structure. Cases 6 and 7 use
 // distinct per-tap values, which is what actually catches a wrong tap phase,
-// a missing reversal, or a transposed channel mapping. Cases 11 and 12 cover
-// operand/result shape disagreements that no verifier rejects, so the pattern
-// has to reject them itself rather than build invalid IR.
+// a missing reversal, or a transposed channel mapping. Cases 11, 12 and 14
+// cover operand/result shape disagreements that no verifier rejects, so the
+// pattern has to reject them itself rather than build invalid IR.
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --hip-decompose-conv-transpose --canonicalize | FileCheck %s
@@ -321,5 +323,65 @@ module {
   }
 
   // CHECK-LABEL: func.func @batch_mismatch
+  // CHECK: hip.conv_transpose
+
+  // --------------------------------------------------------------------------
+  // 13. The stride divides the kernel, so the residue grid has no trailing
+  //     slack for output_padding to land in: 4 residues of 4 -> a 8x8 grid,
+  //     against a 9x9 result. Each residue's trailing pad grows by one to
+  //     stretch the grid to 10x10, and the extra positions convolve only
+  //     past-the-end input, so they come out zero as ONNX requires.
+  // --------------------------------------------------------------------------
+  func.func @out_pad_no_slack(%ctx: !hip.context, %x: tensor<1x1x4x4xf32>)
+      -> tensor<1x1x9x9xf32> {
+    %w = hip.constant {value = dense<1.000000e-02> : tensor<1x1x2x2xf32>}
+        : tensor<1x1x2x2xf32>
+    %init = tensor.empty() : tensor<1x1x9x9xf32>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w : tensor<1x1x4x4xf32>,
+                                               tensor<1x1x2x2xf32>)
+        outs(%init : tensor<1x1x9x9xf32>)
+        {kernel_shape = [2, 2], strides = [2, 2], pads = [0, 0, 0, 0],
+         dilations = [1, 1], output_padding = [1, 1], group = 1 : i64}
+        : tensor<1x1x9x9xf32>
+    return %y : tensor<1x1x9x9xf32>
+  }
+
+  // CHECK-LABEL: func.func @out_pad_no_slack
+  // The grid is 10x10 rather than the natural 8x8, which is what makes room
+  // for the output_padding the 8x8 grid could not have held.
+  // CHECK: tensor.empty() : tensor<1x1x10x10xf32>
+  // Each residue keeps a single tap and pads 0 in front, 1 behind, so its
+  // output is 5x5 and the trailing row/column is convolved from past-the-end
+  // input only.
+  // CHECK: hip.conv
+  // CHECK-SAME: pads = [0, 0, 1, 1]
+  // CHECK: tensor.insert_slice {{.*}}[0, 0, 0, 0] [1, 1, 5, 5] [1, 1, 2, 2]
+  // CHECK: tensor.insert_slice {{.*}}[0, 0, 0, 1] [1, 1, 5, 5] [1, 1, 2, 2]
+  // CHECK: tensor.insert_slice {{.*}}[0, 0, 1, 0] [1, 1, 5, 5] [1, 1, 2, 2]
+  // CHECK: tensor.insert_slice {{.*}}[0, 0, 1, 1] [1, 1, 5, 5] [1, 1, 2, 2]
+  // CHECK: tensor.extract_slice {{.*}}[0, 0, 0, 0] [1, 1, 9, 9] [1, 1, 1, 1]
+  // CHECK-NOT: hip.conv_transpose
+
+  // --------------------------------------------------------------------------
+  // 14. Growing the grid is bounded by ONNX requiring output_padding < stride,
+  //     which is at most one extra position per axis. A result larger than
+  //     that disagrees with the attributes, so the grid must not be sized off
+  //     it -- here a 20x20 result against a 4x4 input at stride 2.
+  // --------------------------------------------------------------------------
+  func.func @result_too_large(%ctx: !hip.context, %x: tensor<1x1x4x4xf32>)
+      -> tensor<1x1x20x20xf32> {
+    %w = hip.constant {value = dense<1.000000e-02> : tensor<1x1x3x3xf32>}
+        : tensor<1x1x3x3xf32>
+    %init = tensor.empty() : tensor<1x1x20x20xf32>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w : tensor<1x1x4x4xf32>,
+                                               tensor<1x1x3x3xf32>)
+        outs(%init : tensor<1x1x20x20xf32>)
+        {kernel_shape = [3, 3], strides = [2, 2], pads = [0, 0, 0, 0],
+         dilations = [1, 1], output_padding = [0, 0], group = 1 : i64}
+        : tensor<1x1x20x20xf32>
+    return %y : tensor<1x1x20x20xf32>
+  }
+
+  // CHECK-LABEL: func.func @result_too_large
   // CHECK: hip.conv_transpose
 }
