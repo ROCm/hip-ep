@@ -273,4 +273,26 @@ module {
 
   // CHECK-LABEL: func.func @many_residues
   // CHECK: hip.conv_transpose
+
+  // --------------------------------------------------------------------------
+  // 11. Nothing verifies the result rank against the operands -- it comes from
+  //     the `outs` operand, which is only constrained to be a tensor or memref.
+  //     A rank-3 result must bail out rather than index dim 3 of a 3-D type.
+  // --------------------------------------------------------------------------
+  func.func @result_rank_mismatch(%ctx: !hip.context, %x: tensor<1x1x4x4xf32>)
+      -> tensor<1x8x8xf32> {
+    %w = hip.constant {value = dense<1.000000e-02> : tensor<1x1x2x2xf32>}
+        : tensor<1x1x2x2xf32>
+    %init = tensor.empty() : tensor<1x8x8xf32>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w : tensor<1x1x4x4xf32>,
+                                               tensor<1x1x2x2xf32>)
+        outs(%init : tensor<1x8x8xf32>)
+        {kernel_shape = [2, 2], strides = [2, 2], pads = [0, 0, 0, 0],
+         dilations = [1, 1], output_padding = [0, 0], group = 1 : i64}
+        : tensor<1x8x8xf32>
+    return %y : tensor<1x8x8xf32>
+  }
+
+  // CHECK-LABEL: func.func @result_rank_mismatch
+  // CHECK: hip.conv_transpose
 }
