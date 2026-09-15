@@ -13,7 +13,7 @@
 ;;
 ;;===----------------------------------------------------------------------===;;
 
-(library (patterns cast-manual)
+(library (patterns cast)
   (export populate-cast-patterns
           onnx-cast->hipsr-manual)
   (import (rnrs (6))
@@ -61,4 +61,4 @@
   (define (populate-cast-patterns converter patterns ctx)
     (mlir-register-conversion-pattern patterns "onnx.Cast" onnx-cast->hipsr-manual))
 
-) ;; end library (patterns cast-manual)
+) ;; end library (patterns cast)

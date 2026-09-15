@@ -16,22 +16,23 @@ echo "Output: $BUILD_DIR"
 
 # Create output directories
 mkdir -p "$BUILD_DIR/mlir"
-mkdir -p "$BUILD_DIR/mlir/conversion"
 mkdir -p "$BUILD_DIR/patterns"
+mkdir -p "$BUILD_DIR/passes"
 
-cd "$SOURCE_DIR/Runtime"
+LIBRARY_DIR="$SOURCE_DIR/libraries"
 
 echo "Step 1: Compile mlir/ffi.sls (separate session - uses chezscheme)..."
 $SCHEME_COMPILER --libdirs "$BUILD_DIR:$SOURCE_DIR/../../../../third_party/rime" <<EOF
-(compile-library "mlir/ffi.sls" "$BUILD_DIR/mlir/ffi.so")
+(library-directories "$LIBRARY_DIR")
+(compile-library "$LIBRARY_DIR/mlir/ffi.sls" "$BUILD_DIR/mlir/ffi.so")
 EOF
 
 echo "Step 2: Compile all other libraries in ONE session (avoid rime instance conflicts)..."
-$SCHEME_COMPILER --libdirs "$BUILD_DIR:$SOURCE_DIR/../../../../third_party/rime:$SOURCE_DIR" <<EOF
-(compile-library "mlir/pattern-dsl.sls" "$BUILD_DIR/mlir/pattern-dsl.so")
-(compile-library "mlir/conversion/cast.sls" "$BUILD_DIR/mlir/conversion/cast.so")
-(compile-library "../patterns/cast-manual.sls" "$BUILD_DIR/patterns/cast-manual.so")
-(compile-library "../Passes/onnx-to-hipsr.sls" "$BUILD_DIR/onnx-to-hipsr.so")
+$SCHEME_COMPILER --libdirs "$BUILD_DIR:$SOURCE_DIR/../../../../third_party/rime" <<EOF
+(library-directories "$LIBRARY_DIR" "$BUILD_DIR")
+(compile-library "$LIBRARY_DIR/mlir/pattern-dsl.sls" "$BUILD_DIR/mlir/pattern-dsl.so")
+(compile-library "$LIBRARY_DIR/patterns/cast.sls" "$BUILD_DIR/patterns/cast.so")
+(compile-library "$LIBRARY_DIR/passes/onnx-to-hipsr.sls" "$BUILD_DIR/passes/onnx-to-hipsr.so")
 EOF
 
 echo "Scheme compilation complete."
