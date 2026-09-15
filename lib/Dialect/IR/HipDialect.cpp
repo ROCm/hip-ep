@@ -766,7 +766,7 @@ LogicalResult MatmulOp::verify() {
 // that file and `docs/design/hip-shape-inference.md` for the rationale.
 
 //===----------------------------------------------------------------------===//
-// QMatMulOp: ins(A, B), outs(Y)
+// QMatMulOp: ins(A, B, [B_scales, B_zero_points]), outs(Y)
 // Quantized matrix multiplication with integrated QDQ scales and zero points
 //===----------------------------------------------------------------------===//
 
@@ -779,9 +779,94 @@ void QMatMulOp::getEffects(
 }
 
 LogicalResult QMatMulOp::verify() {
-  if (failed(verifyDpsComputeOp(*this, {getA(), getB(), getY()},
-                                /*numInits=*/1)))
+  // SameVariadicOperandSize splits the two optional operands by operand count
+  // alone and ODS emits no check for it, so an odd count would silently make
+  // getY() read B_scales. 4 operands is the per-tensor form, 6 the per-column
+  // one; nothing in between is meaningful.
+  unsigned numOperands = getNumOperands();
+  if (numOperands != 4 && numOperands != 6)
+    return emitOpError("expected 4 operands for per-tensor B or 6 for "
+                       "per-column B, got ")
+           << numOperands;
+
+  // The optional B_scales / B_zero_points join the tensor-vs-memref mode check
+  // (that is all `dataOperands` drives); they are not DPS inits.
+  SmallVector<Value, 5> dataOperands{getA(), getB()};
+  if (getBScales())
+    dataOperands.push_back(getBScales());
+  if (getBZeroPoints())
+    dataOperands.push_back(getBZeroPoints());
+  dataOperands.push_back(getY());
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
     return failure();
+
+  // Per-tensor and per-column B are alternatives, not layers: the lowering
+  // folds one coefficient in the first case and passes a device array in the
+  // second, so a mixture has no meaning.
+  if (getBScales()) {
+    if (getBScaleAttr() || getBZeroPointAttr())
+      return emitOpError("per-column B quantization must not also carry the "
+                         "B_scale / B_zero_point attributes");
+    if (!getBQuantAxis())
+      return emitOpError("per-column B quantization requires B_quant_axis");
+  } else {
+    if (!getBScaleAttr() || !getBZeroPointAttr())
+      return emitOpError("per-tensor B quantization requires both the B_scale "
+                         "and B_zero_point attributes");
+    if (getBQuantAxis())
+      return emitOpError("B_quant_axis only describes the B_scales / "
+                         "B_zero_points operands");
+  }
+
+  auto bType = dyn_cast<ShapedType>(getB().getType());
+  if (!bType || !bType.hasRank())
+    return emitOpError("B must be ranked");
+  Type bElemType = bType.getElementType();
+
+  // A packed operand keeps its logical element count and an 8-bit element
+  // type, so the packing is only expressible as this flag over 8-bit storage.
+  if (getPackedInt4() && !bElemType.isInteger(8))
+    return emitOpError("packed_int4 requires 8-bit B storage, got ")
+           << bElemType;
+
+  if (getBScales()) {
+    // transB swaps B's trailing two extents, so the column axis moves with it.
+    int64_t rank = bType.getRank();
+    if (rank < 2)
+      return emitOpError("per-column B quantization requires a rank-2 or "
+                         "higher B");
+    int64_t columnAxis = getTransB() ? rank - 2 : rank - 1;
+    if (*getBQuantAxis() != columnAxis)
+      return emitOpError("B_quant_axis must name B's column axis ")
+             << columnAxis << ", got " << *getBQuantAxis();
+
+    auto scalesType = cast<ShapedType>(getBScales().getType());
+    auto zeroPointsType = cast<ShapedType>(getBZeroPoints().getType());
+    if (!scalesType.hasRank() || scalesType.getRank() != 1 ||
+        !zeroPointsType.hasRank() || zeroPointsType.getRank() != 1)
+      return emitOpError("B_scales and B_zero_points must be rank 1");
+    if (!scalesType.getElementType().isF32())
+      return emitOpError("B_scales must be f32, got ")
+             << scalesType.getElementType();
+    // ONNX guarantees zero_point.dtype == x.dtype, so one storage type
+    // describes both weight buffers and one packed_int4 flag covers both.
+    if (zeroPointsType.getElementType() != bElemType)
+      return emitOpError("B_zero_points element type must match B's, got ")
+             << zeroPointsType.getElementType() << " and " << bElemType;
+
+    int64_t columns = bType.getDimSize(columnAxis);
+    auto verifyLength = [&](StringRef name, ShapedType type) -> LogicalResult {
+      int64_t length = type.getDimSize(0);
+      if (ShapedType::isDynamic(columns) || ShapedType::isDynamic(length) ||
+          length == columns)
+        return success();
+      return emitOpError(name) << " must hold one value per B column ("
+                               << columns << "), got " << length;
+    };
+    if (failed(verifyLength("B_scales", scalesType)) ||
+        failed(verifyLength("B_zero_points", zeroPointsType)))
+      return failure();
+  }
 
   return mlir::hip::verifyHipOpShape(
       *this, [&]() -> SmallVector<SmallVector<int64_t>> {
