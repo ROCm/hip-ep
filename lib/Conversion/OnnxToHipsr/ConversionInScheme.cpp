@@ -14,6 +14,7 @@
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 #include "hip/Dialect/Hipsr/Scheme/Runtime/ChezSchemeInterpreter.h"
 #include "hip/Dialect/Hipsr/Scheme/Runtime/SchemeBindings.h"
+#include "hip/Dialect/Hipsr/Transforms/Passes.h"
 #include "hip/Dialect/Onnx/IR/OnnxOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
