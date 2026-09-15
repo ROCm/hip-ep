@@ -15,6 +15,8 @@
 #include "mlir/Parser/Parser.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
+#include <cmath>
+#include <limits>
 #include <optional>
 
 namespace hip {
@@ -364,6 +366,51 @@ isFusableQLpNormalization(mlir::PatternRewriter &, mlir::PDLResultList &,
   return mlir::success(normAxis == rank - 1);
 }
 
+// UINT16 per-tensor Q/DQ with identical scale and zero point. Unsqueeze,
+// Squeeze, and Reshape only re-rank or regroup dimensions while preserving
+// element order, so Q(layout(DQ(x))) is layout(x), and the round-trip can drop.
+// Only scalar scales are accepted, and blocked quantization is rejected. A
+// non-finite scale, or one that can overflow fp32 dequantization, is rejected.
+inline mlir::LogicalResult
+hasMatchingLayoutQParams(mlir::PatternRewriter &, mlir::PDLResultList &,
+                         llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 2)
+    return mlir::failure();
+  auto *dq = args[0].dyn_cast<mlir::Operation *>();
+  auto *q = args[1].dyn_cast<mlir::Operation *>();
+  if (!dq || !q || dq->getNumOperands() < 2 || q->getNumOperands() < 2 ||
+      dq->getNumResults() != 1 || q->getNumResults() != 1)
+    return mlir::failure();
+
+  auto dqType = getQuantizedElementType(dq);
+  auto qType = getQuantizedElementType(q);
+  if (!dqType || !qType || dqType != qType || dqType.getWidth() != 16 ||
+      !dqType.isUnsigned())
+    return mlir::failure();
+
+  auto isScalarTensor = [](mlir::Value value) {
+    auto type = mlir::dyn_cast<mlir::ShapedType>(value.getType());
+    return type && type.hasStaticShape() && type.getNumElements() == 1;
+  };
+  if (!isScalarTensor(dq->getOperand(1)) || !isScalarTensor(q->getOperand(1)))
+    return mlir::failure();
+
+  std::optional<float> dqScale = trySplatScale(dq->getOperand(1));
+  std::optional<float> qScale = trySplatScale(q->getOperand(1));
+  if (!dqScale || !qScale || *dqScale != *qScale || !std::isfinite(*dqScale) ||
+      *dqScale < std::numeric_limits<float>::min() ||
+      *dqScale > std::numeric_limits<float>::max() / 65535.0f)
+    return mlir::failure();
+
+  if (!onnxIntAttrEquals(dq, "block_size", 0, /*absentValue=*/0) ||
+      !onnxIntAttrEquals(q, "block_size", 0, /*absentValue=*/0))
+    return mlir::failure();
+
+  std::optional<int64_t> dqZp = trySplatZeropoint(dq, 2, 0);
+  std::optional<int64_t> qZp = trySplatZeropoint(q, 2, 0);
+  return mlir::success(dqZp && qZp && *dqZp == *qZp);
+}
+
 //===----------------------------------------------------------------------===//
 // Rewrite functions -- reached only after the constraints above accepted.
 //===----------------------------------------------------------------------===//
@@ -439,6 +486,32 @@ extractAttrInt64(mlir::PatternRewriter &rewriter, mlir::PDLResultList &results,
   return mlir::success();
 }
 
+// Rebuild the layout op over the quantized input and Q's result type, copying
+// extra operands (axes / shape) and attributes. The DQ / float-layout / Q
+// chain becomes dead and is removed by the greedy rewrite driver.
+inline mlir::LogicalResult
+createQuantizedLayoutOp(mlir::PatternRewriter &rewriter,
+                        mlir::PDLResultList &results,
+                        llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 3)
+    return mlir::failure();
+  auto *dq = args[0].dyn_cast<mlir::Operation *>();
+  auto *layout = args[1].dyn_cast<mlir::Operation *>();
+  auto *q = args[2].dyn_cast<mlir::Operation *>();
+  if (!dq || !layout || !q || dq->getNumOperands() == 0 ||
+      layout->getNumOperands() == 0 || q->getNumResults() != 1)
+    return mlir::failure();
+
+  mlir::OperationState state(layout->getLoc(), layout->getName());
+  state.addOperands(dq->getOperand(0));
+  state.addOperands(layout->getOperands().drop_front());
+  state.addTypes(q->getResult(0).getType());
+  state.addAttributes(layout->getAttrs());
+  mlir::Operation *newLayout = rewriter.create(state);
+  results.push_back(newLayout->getResult(0));
+  return mlir::success();
+}
+
 // Apply PDL patterns
 inline bool run(mlir::ModuleOp mlirModule, llvm::StringRef pdlBytecodeFile) {
   if (pdlBytecodeFile.empty())
@@ -481,11 +554,15 @@ inline bool run(mlir::ModuleOp mlirModule, llvm::StringRef pdlBytecodeFile) {
                                          isPackedInt4PerChannelWeight);
   pdlPatterns.registerConstraintFunction("IsFusableQLpNormalization",
                                          isFusableQLpNormalization);
+  pdlPatterns.registerConstraintFunction("HasMatchingLayoutQParams",
+                                         hasMatchingLayoutQParams);
   pdlPatterns.registerRewriteFunction("GetContextArg", getContextArg);
   pdlPatterns.registerRewriteFunction("ExtractScaleValue", extractScaleValue);
   pdlPatterns.registerRewriteFunction("ExtractZeropointValue",
                                       extractZeropointValue);
   pdlPatterns.registerRewriteFunction("ExtractAttrInt64", extractAttrInt64);
+  pdlPatterns.registerRewriteFunction("CreateQuantizedLayoutOp",
+                                      createQuantizedLayoutOp);
 
   mlir::RewritePatternSet patterns(ctx);
   patterns.add(std::move(pdlPatterns));

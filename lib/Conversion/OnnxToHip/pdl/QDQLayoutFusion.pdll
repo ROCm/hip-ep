@@ -1,0 +1,63 @@
+//===- QDQLayoutFusion.pdll -----------------------------------------------===//
+//
+// Drop a redundant UINT16 per-tensor QDQ round-trip around a layout op.
+//
+// Included by HipFusionPatterns.pdll, which declares the native constraints
+// used below. Not compilable on its own.
+//
+// When both ends use identical scale and zero point, Unsqueeze, Squeeze, and
+// Reshape commute with quantization because they only re-rank or regroup
+// dimensions while preserving element order:
+//
+//   Q(layout(DQ(x))) == layout(x)
+//
+// The rewrite emits the same ONNX layout op over the quantized input. Ordinary
+// Unsqueeze, Squeeze, and Reshape conversion then lowers it to
+// tensor.expand_shape, tensor.collapse_shape, or tensor.reshape. No
+// quantized-specific operation or kernel is needed.
+//===----------------------------------------------------------------------===//
+
+Pattern QDQUnsqueeze with benefit(10) {
+  let dq = op<onnx.DequantizeLinear>(input: Value, input_scale: Value,
+                                     input_tail: ValueRange);
+  let layout = op<onnx.Unsqueeze>(dq.0, extra: ValueRange);
+  let q = op<onnx.QuantizeLinear>(layout.0, output_scale: Value,
+                                 output_tail: ValueRange);
+
+  HasMatchingLayoutQParams(dq, q);
+
+  rewrite q with {
+    let result = CreateQuantizedLayoutOp(dq, layout, q);
+    replace q with result;
+  };
+}
+
+Pattern QDQSqueeze with benefit(10) {
+  let dq = op<onnx.DequantizeLinear>(input: Value, input_scale: Value,
+                                     input_tail: ValueRange);
+  let layout = op<onnx.Squeeze>(dq.0, extra: ValueRange);
+  let q = op<onnx.QuantizeLinear>(layout.0, output_scale: Value,
+                                 output_tail: ValueRange);
+
+  HasMatchingLayoutQParams(dq, q);
+
+  rewrite q with {
+    let result = CreateQuantizedLayoutOp(dq, layout, q);
+    replace q with result;
+  };
+}
+
+Pattern QDQReshape with benefit(10) {
+  let dq = op<onnx.DequantizeLinear>(input: Value, input_scale: Value,
+                                     input_tail: ValueRange);
+  let layout = op<onnx.Reshape>(dq.0, extra: ValueRange);
+  let q = op<onnx.QuantizeLinear>(layout.0, output_scale: Value,
+                                 output_tail: ValueRange);
+
+  HasMatchingLayoutQParams(dq, q);
+
+  rewrite q with {
+    let result = CreateQuantizedLayoutOp(dq, layout, q);
+    replace q with result;
+  };
+}
