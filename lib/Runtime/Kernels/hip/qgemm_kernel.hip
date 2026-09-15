@@ -19,13 +19,11 @@
 //   M_c      = beta * s_c / s_y           (folded by the caller)
 //
 // acc is an exact integer, so the only rounding is the multiply by the
-// coefficient and the final round -- strictly less error than the unfused path,
-// which accumulates K products in float.
+// coefficient and the final round.
 //
 // A per-output-channel B is what M_ab cannot absorb: s_b and z_b are then
 // device arrays indexed by n, and the per-tensor B_scale contributes its 1.0
-// identity to M_ab instead. Both cases are one coefficient per column, read
-// once in the epilogue.
+// identity to M_ab instead.
 //
 // Zero points as correction terms
 // -------------------------------
@@ -37,17 +35,25 @@
 //   acc[n] = accRaw[n] - z_b[n]*rowA - z_a*colB[n] + K*z_a*z_b[n]
 //   accRaw[n] = sum_k A[k]*B[k,n],  rowA = sum_k A[k],  colB[n] = sum_k B[k,n]
 //
-// Each correction term is only accumulated when its zero point can be non-zero,
-// so the symmetric weights that dominate real QDQ graphs cost nothing extra.
+// Each correction term is only accumulated when its zero point can be non-zero.
 //
 // Accumulator width
 // -----------------
-// |A - z_a| reaches 65535 for a 16-bit activation and |B - z_b| reaches 255
-// even for a 4-bit weight whose zero point sits at the far end of the storage
-// range, which bounds one term at 1.7e7 -- past int32 after two terms. Every
-// accumulator is therefore int64, which nothing here makes expensive.
+// One subtracted term reaches 1.7e7 -- |A - z_a| up to 65535 for a 16-bit
+// activation, |B - z_b| up to 255 even for a 4-bit weight -- so it outgrows
+// int32 after two terms. Accumulating raw operands instead lets the tiled path
+// split a 16-bit A into two byte planes that each fit an int32 dot-product
+// accumulator and combine them in int64 once per output. The GEMV path is
+// bandwidth-bound and accumulates in int64 directly.
+//
+// Kernel paths
+// ------------
+//   M == 1                      -> GEMV, k split inside the block and the grid
+//   M > 1                       -> tiled GEMM on 8-bit integer dot products
+//   M > 1, too few output tiles -> the same tile, with k split across the grid
 
 #include "debug_log.h"
+#include "hip_arch_compat.h"
 #include "hip_custom_kernels.h"
 
 #include <hip/hip_runtime.h>
@@ -100,11 +106,9 @@ template <typename T> __device__ inline T q_saturate(float v) {
       fminf(QGemmTraits<T>::highest(), fmaxf(QGemmTraits<T>::lowest(), v)));
 }
 
-// Widen one element of an 8-, 16- or 32-bit quantized buffer.
-//
-// The dtype is a runtime argument rather than a template parameter because C
-// is read once per output: templating it would multiply the instantiation count
-// by five to save a branch that costs nothing outside a reduction.
+// Widen one element of an 8-, 16- or 32-bit quantized buffer. The dtype is a
+// runtime argument rather than a template parameter because C is read once per
+// output, off every reduction.
 __device__ inline int32_t qgemm_load(const void *__restrict__ buf, int64_t idx,
                                      int dtype) {
   switch (dtype) {
@@ -121,14 +125,11 @@ __device__ inline int32_t qgemm_load(const void *__restrict__ buf, int64_t idx,
   }
 }
 
-// Read one LOGICAL element of B or B_zero_points.
-//
-// `bits` is 4 or 8. At 4, two values share a byte, low nibble first over the
-// flattened row-major sequence -- the ONNX INT4/UINT4 convention. `lin` counts
-// logical elements, never bytes.
-//
-// `is_signed` decides how a nibble widens, and the two disagree on every value
-// above 7, so it must track B's element type rather than being assumed.
+// Read one LOGICAL element of B or B_zero_points: `lin` counts logical
+// elements, never bytes. At bits == 4 two values share a byte, low nibble first
+// over the flattened row-major sequence -- the ONNX INT4/UINT4 convention --
+// and `is_signed` must track B's element type, since the two interpretations
+// disagree on every nibble above 7.
 __device__ inline int32_t qgemm_read_quant(const uint8_t *__restrict__ buf,
                                            int64_t lin, int bits,
                                            bool is_signed) {
@@ -146,118 +147,12 @@ __device__ inline int32_t qgemm_read_quant(const uint8_t *__restrict__ buf,
   return static_cast<int32_t>(buf[lin]);
 }
 
-__device__ inline void qgemm_store(void *__restrict__ buf, int64_t idx,
-                                   int dtype, float v) {
-  switch (dtype) {
-  case HIP_DTYPE_INT8:
-    static_cast<int8_t *>(buf)[idx] = q_saturate<int8_t>(v);
-    break;
-  case HIP_DTYPE_UINT8:
-    static_cast<uint8_t *>(buf)[idx] = q_saturate<uint8_t>(v);
-    break;
-  case HIP_DTYPE_INT16:
-    static_cast<int16_t *>(buf)[idx] = q_saturate<int16_t>(v);
-    break;
-  default: // HIP_DTYPE_UINT16
-    static_cast<uint16_t *>(buf)[idx] = q_saturate<uint16_t>(v);
-    break;
-  }
-}
-
 //===----------------------------------------------------------------------===//
-// Reference kernel (M > 1)
+// Requantization epilogue
 //===----------------------------------------------------------------------===//
 //
-// One thread per output element, no tiling and no reuse: every thread re-reads
-// a full row of A and a full column of B from global memory, so the same A
-// element is fetched N times and the same B element M times. That is the
-// arithmetic spelled out literally, which is what makes it the baseline the
-// GEMV path below is checked against.
-
-// threadIdx.x indexes n so that consecutive threads write consecutive Y
-// elements; n is the contiguous axis of the output.
-constexpr int kBlockN = 16;
-constexpr int kBlockM = 16;
-
-__global__ __launch_bounds__(kBlockN *kBlockM) void qgemm_naive_kernel(
-    const void *__restrict__ A, const uint8_t *__restrict__ B,
-    const void *__restrict__ C, const float *__restrict__ B_scales,
-    const uint8_t *__restrict__ B_zero_points, void *__restrict__ Y, int64_t M,
-    int64_t N, int64_t K, bool trans_a, bool trans_b, int a_dtype, int b_dtype,
-    int c_dtype, int y_dtype, int b_bits, bool b_signed, int64_t c_dim0,
-    int64_t c_dim1, float M_ab, float M_c, int32_t a_zp, int32_t b_zp,
-    int32_t c_zp, int32_t y_zp) {
-  (void)b_dtype; // carried as b_signed, which is what the nibble read needs
-  const int64_t n = static_cast<int64_t>(blockIdx.x) * kBlockN + threadIdx.x;
-  const int64_t m = static_cast<int64_t>(blockIdx.y) * kBlockM + threadIdx.y;
-  if (m >= M || n >= N)
-    return;
-
-  // Both halves of a per-channel B index by n alone, so they are read once per
-  // thread rather than once per k.
-  const int32_t bzp = B_zero_points
-                          ? qgemm_read_quant(B_zero_points, n, b_bits, b_signed)
-                          : b_zp;
-  const float coeff = B_scales ? M_ab * B_scales[n] : M_ab;
-
-  int64_t acc = 0;
-  for (int64_t k = 0; k < K; ++k) {
-    // trans_a stores A as [K, M] and trans_b stores B as [N, K]; only the
-    // stride changes, the logical extents do not.
-    const int32_t a =
-        qgemm_load(A, trans_a ? k * M + m : m * K + k, a_dtype) - a_zp;
-    const int32_t b =
-        qgemm_read_quant(B, trans_b ? n * K + k : k * N + n, b_bits, b_signed) -
-        bzp;
-    acc += static_cast<int64_t>(a) * b;
-  }
-
-  float scaled = coeff * static_cast<float>(acc);
-  if (C) {
-    // Unidirectional broadcast to [M, N]: an extent of 1 repeats along its
-    // axis, which is the whole of ONNX Gemm's bias rule once the caller has
-    // normalized C to rank 2.
-    const int64_t cm = (c_dim0 == 1) ? 0 : m;
-    const int64_t cn = (c_dim1 == 1) ? 0 : n;
-    scaled += M_c * static_cast<float>(
-                        qgemm_load(C, cm * c_dim1 + cn, c_dtype) - c_zp);
-  }
-  qgemm_store(Y, m * N + n, y_dtype, rintf(scaled) + static_cast<float>(y_zp));
-}
-
-//===----------------------------------------------------------------------===//
-// GEMV (M == 1, the LLM decode shape)
-//===----------------------------------------------------------------------===//
-//
-// The reference kernel collapses at M == 1: the grid is N/16 blocks of 16 live
-// threads, each walking all of K one byte at a time, so a 4096-column decode
-// leaves most of the device idle and every A element is re-read per column.
-//
-// This path fixes both. A thread owns kCols consecutive columns, which turns
-// the per-k read of B into whole dwords instead of a single byte, and A is
-// staged once per k-tile in LDS rather than re-read per column.
-//
-// Concurrent k slices are what the shape is short of, and K is the only
-// dimension left to spread: the column window cancels out of the throughput,
-// since a narrower one yields proportionally more windows. K is therefore split
-// twice.
-//
-//   * kSplits slices run side by side inside one block and merge through LDS
-//     atomics. Atomics rather than per-slice buffers because they keep the
-//     merge footprint independent of kSplits, which is what lets the slice
-//     count grow. kSplits is capped by K / kTile, so kTile is tunable and wants
-//     to be small -- it only sizes the staging tile for A.
-//   * A narrow N still leaves too few blocks to fill the device even then
-//     (N = 32 is one block however the window is chosen), so the grid splits K
-//     again across blockIdx.y, accumulating into a scratch buffer that a second
-//     pass requantizes. That pass costs two extra launches and a memset, so it
-//     is only used when the column windows alone cannot fill the device.
-//
-// The geometry parameters are templated because their balance is a per-shape
-// property; qgemm_gemv_config measures it on the device.
-//
-// There is no trans_a flag here: at M == 1 both layouts of A are the same
-// K-element vector, so the index is unchanged.
+// Shared by every path: each one only has to deliver the three sums of the
+// identity above for one output element, and this turns them into Y.
 
 // Everything the epilogue needs that does not come out of the reduction. Passed
 // by value, so it must stay trivially copyable.
@@ -268,6 +163,7 @@ struct QGemmRequant {
   float m_ab;
   float m_c;
   int64_t K;
+  int64_t c_dim0;
   int64_t c_dim1;
   int32_t a_zp;
   int32_t b_zp;
@@ -279,9 +175,9 @@ struct QGemmRequant {
 };
 
 template <typename TY>
-__device__ inline TY qgemm_gemv_epilogue(int64_t acc, int64_t row_a,
-                                         int64_t col_b, int64_t n,
-                                         const QGemmRequant &r) {
+__device__ inline TY qgemm_requant(int64_t acc, int64_t row_a, int64_t col_b,
+                                   int64_t m, int64_t n,
+                                   const QGemmRequant &r) {
   const int32_t b_zp =
       r.b_zero_points
           ? qgemm_read_quant(r.b_zero_points, n, r.b_bits, r.b_signed)
@@ -293,13 +189,53 @@ __device__ inline TY qgemm_gemv_epilogue(int64_t acc, int64_t row_a,
   const float coeff = r.b_scales ? r.m_ab * r.b_scales[n] : r.m_ab;
   float scaled = coeff * static_cast<float>(corrected);
   if (r.C) {
-    // M == 1 collapses the row index, so only C's column extent can broadcast.
+    // Unidirectional broadcast to [M, N]: an extent of 1 repeats along its
+    // axis, which is the whole of ONNX Gemm's bias rule once the caller has
+    // normalized C to rank 2.
+    const int64_t cm = (r.c_dim0 == 1) ? 0 : m;
     const int64_t cn = (r.c_dim1 == 1) ? 0 : n;
-    scaled +=
-        r.m_c * static_cast<float>(qgemm_load(r.C, cn, r.c_dtype) - r.c_zp);
+    scaled += r.m_c * static_cast<float>(
+                          qgemm_load(r.C, cm * r.c_dim1 + cn, r.c_dtype) -
+                          r.c_zp);
   }
   return q_saturate<TY>(rintf(scaled) + static_cast<float>(r.y_zp));
 }
+
+__device__ inline void qgemm_atomic_add_i64(int64_t *addr, int64_t v) {
+  atomicAdd(reinterpret_cast<unsigned long long *>(addr),
+            static_cast<unsigned long long>(v));
+}
+
+//===----------------------------------------------------------------------===//
+// GEMV (M == 1)
+//===----------------------------------------------------------------------===//
+//
+// A tile has no reuse left to schedule at M == 1 -- one A element is consumed
+// once per column and never again -- so what remains is a bandwidth problem. A
+// thread owns kCols consecutive columns, which turns the per-k read of B into
+// whole dwords instead of a single byte, and A is staged once per k-tile in LDS
+// rather than re-read per column.
+//
+// Concurrent k slices are what the shape is short of, and K is the only
+// dimension left to spread: the column window cancels out of the throughput,
+// since a narrower one yields proportionally more windows. K is therefore split
+// twice.
+//
+//   * kSplits slices run side by side inside one block and merge through LDS
+//     atomics, which keeps the merge footprint independent of kSplits. kSplits
+//     is capped by K / kTile, so kTile wants to be small -- it only sizes the
+//     staging tile for A.
+//   * A narrow N still leaves too few blocks to fill the device even then, so
+//     the grid splits K again across blockIdx.y, accumulating into a scratch
+//     buffer that a second pass requantizes. That pass costs two extra launches
+//     and a memset, so it is only used when the column windows alone cannot
+//     fill the device.
+//
+// The geometry parameters are templated because their balance is a per-shape
+// property; qgemm_gemv_config measures it on the device.
+//
+// There is no trans_a flag here: at M == 1 both layouts of A are the same
+// K-element vector, so the index is unchanged.
 
 template <int kCols> struct QGemmGemvSums {
   int64_t acc[kCols];
@@ -325,11 +261,6 @@ __device__ inline QGemmGemvSlice qgemm_gemv_slice(int64_t k_begin,
   const int64_t begin = k_begin + static_cast<int64_t>(slice) * chunk;
   const int64_t capped = (begin + chunk < k_end) ? begin + chunk : k_end;
   return {begin, capped < begin ? begin : capped, chunk / kTile};
-}
-
-__device__ inline void qgemm_atomic_add_i64(int64_t *addr, int64_t v) {
-  atomicAdd(reinterpret_cast<unsigned long long *>(addr),
-            static_cast<unsigned long long>(v));
 }
 
 // One logical B element out of a dword holding 32 / kBits of them.
@@ -444,15 +375,13 @@ __device__ void qgemm_gemv_vector_kn(const TA *__restrict__ A,
   }
 }
 
-// B stored [N, K], which is what ONNX Gemm's transB = 1 produces and the layout
-// every fully-connected weight arrives in. Here k is the contiguous axis, so a
+// B stored [N, K], the transB = 1 layout. Here k is the contiguous axis, so a
 // dword carries 32 / kBits steps of ONE column instead of one step of several.
 // The wave's lanes then sit K bytes apart, but each walks its own cache line to
 // the end before moving on, so the line is fully consumed either way.
 //
 // kUnroll has no role in this layout: successive iterations read the next
-// dwords of the same lines, which already keeps several requests in flight, and
-// staging them would only cost registers.
+// dwords of the same lines, which already keeps several requests in flight.
 template <int kBits, int kBlock, int kCols, int kTile, typename TA,
           typename TB>
 __device__ void qgemm_gemv_vector_nk(const TA *__restrict__ A,
@@ -664,8 +593,10 @@ __global__ __launch_bounds__(kBlock *kSplits) void qgemm_gemv_kernel(
       if (n >= N)
         continue;
       const int slot = c * kBlock + lane;
-      Y[n] = qgemm_gemv_epilogue<TY>(red_acc[slot], row_a, red_col_b[slot], n,
-                                     requant);
+      // M == 1 collapses the row index, and C's row extent is then 1 too, so
+      // the epilogue's broadcast leaves the bias index at the column alone.
+      Y[n] = qgemm_requant<TY>(red_acc[slot], row_a, red_col_b[slot], 0, n,
+                               requant);
     }
     return;
   }
@@ -695,17 +626,414 @@ __global__ __launch_bounds__(kGemvReduceBlock) void qgemm_gemv_reduce_kernel(
                     threadIdx.x;
   if (n >= N)
     return;
-  Y[n] = qgemm_gemv_epilogue<TY>(partial[n], partial[2 * N], partial[N + n], n,
-                                 requant);
+  Y[n] = qgemm_requant<TY>(partial[n], partial[2 * N], partial[N + n], 0, n,
+                           requant);
+}
+
+//===----------------------------------------------------------------------===//
+// Tiled GEMM (M > 1)
+//===----------------------------------------------------------------------===//
+//
+// Two-level tiling -- a block stages a slab of A and a slab of B in LDS, a
+// thread owns a [kThreadM x kThreadN] micro-tile of the output -- plus the two
+// things the quantized operands ask for:
+//
+//   * The products run on hipdnn_dot4 (v_dot4_i32_iu8), four 8-bit multiplies
+//     per instruction into one int32 accumulator. A 16-bit A does not fit that
+//     operand, so it is split into its two bytes. With A = hi*256 + lo,
+//
+//       acc  = 256 * sum_k hi[k]*B[k] + sum_k lo[k]*B[k]
+//       rowA = 256 * sum_k hi[k]      + sum_k lo[k]
+//
+//     each half runs on its own int32 accumulator -- |lo*B| <= 255*128 keeps K
+//     under 65792 -- and the two are combined in int64 in the epilogue, so the
+//     result stays exact. hi carries A's signedness (an arithmetic shift for
+//     int16, a logical one for uint16) and lo is always an unsigned byte.
+//   * A 4-bit B is unpacked to whole bytes while staging, so the inner loop is
+//     the same instruction sequence at either width. The unpack is paid once
+//     per slab and reused kTileM / kThreadM times.
+//
+// The zero points stay out of the reduction as the rowA / colB corrections of
+// the identity at the top of this file, which is what leaves dot4 its raw 8-bit
+// operands; both ride the same dot pipeline against an all-ones vector.
+
+// dot4(x, kOnes4) sums the four bytes of x.
+constexpr int kOnes4 = 0x01010101;
+
+// One block owns a [kTileM x kTileN] output tile, one thread a
+// [kThreadM x kThreadN] micro-tile of it.
+constexpr int kTileM = 64;
+constexpr int kTileN = 64;
+constexpr int kTileK = 16;
+constexpr int kThreadM = 4;
+constexpr int kThreadN = 4;
+constexpr int kTiledBlock = (kTileM / kThreadM) * (kTileN / kThreadN); // 256
+// k values per dot4 operand, and so per LDS dword.
+constexpr int kDotK = 4;
+constexpr int kTileQuads = kTileK / kDotK;
+// Rows of a [K, N] B slab that one pass over the block can stage.
+constexpr int kBStageRows = kTiledBlock / kTileN; // 4
+
+// A 16-bit A is accumulated as two byte planes (hi, lo); an 8-bit one needs a
+// single plane holding the value itself. Indices into the plane dimension:
+constexpr int kPlaneHi = 0;
+constexpr int kPlaneLo = 1;
+
+template <typename TA> struct QGemmAPlanes {
+  static constexpr bool kWide = sizeof(TA) == 2;
+  static constexpr int kCount = kWide ? 2 : 1;
+};
+
+// The LDS slabs are k-quad-major dwords: logical element (k, row) lives in byte
+// k % kDotK of dword [k / kDotK][row]. That is the layout dot4 wants -- four
+// k-consecutive bytes in one register -- and it also puts a micro-tile's four
+// rows in four CONSECUTIVE dwords, so one fragment is a single 16-byte LDS
+// read.
+using QGemmSlab = int32_t;
+using QGemmByte = uint8_t;
+
+// The slabs hold raw bytes: hipdnn_dot4's template flags decide how each
+// operand's bytes are interpreted, so staging never has to know the signedness.
+template <int kCount>
+__device__ inline int32_t qgemm_pack_bytes(const int32_t (&v)[kCount]) {
+  uint32_t packed = 0;
+#pragma unroll
+  for (int i = 0; i < kCount; ++i)
+    packed |= (static_cast<uint32_t>(v[i]) & 0xFFu) << (i * 8);
+  return static_cast<int32_t>(packed);
+}
+
+// kThreadM / kThreadN being kDotK and the slabs being 16-byte aligned make a
+// fragment one aligned dwordx4 read.
+template <int kCount>
+__device__ inline void qgemm_read_frag(const QGemmSlab *slab,
+                                       int32_t (&out)[kCount]) {
+  static_assert(kCount == 4, "a fragment is one 16-byte LDS read");
+  const int4 v = *reinterpret_cast<const int4 *>(slab);
+  out[0] = v.x;
+  out[1] = v.y;
+  out[2] = v.z;
+  out[3] = v.w;
+}
+
+template <int kPlanes> struct QGemmMicroTile {
+  int32_t acc[kThreadM][kThreadN][kPlanes];
+  int32_t row_a[kThreadM][kPlanes];
+  int32_t col_b[kThreadN];
+};
+
+// A split 16-bit A recombines as hi*256 + lo; a single plane is the value.
+template <int kPlanes>
+__device__ inline int64_t qgemm_combine(const int32_t (&planes)[kPlanes]) {
+  if constexpr (kPlanes == 2)
+    return int64_t{256} * planes[kPlaneHi] + planes[kPlaneLo];
+  else
+    return planes[kPlaneHi];
+}
+
+__device__ inline void qgemm_micro_tile_origin(int tid, int &thread_m,
+                                               int &thread_n) {
+  thread_m = (tid / (kTileN / kThreadN)) * kThreadM;
+  thread_n = (tid % (kTileN / kThreadN)) * kThreadN;
+}
+
+// Reduces A[m_base.., k_begin:k_end] x B[k_begin:k_end, n_base..] into this
+// thread's micro-tile, leaving the zero points to the epilogue. K is still the
+// full logical extent because it is also the operand stride.
+//
+// The k range is a parameter so split-K can hand each block a slice. Staging
+// zero-fills anything past an edge and zero is the identity for all three sums,
+// so a slice needs no tail handling; it only has to start on a kTileK boundary
+// to keep the staging maps aligned.
+//
+// trans_a / trans_b and b_bits stay runtime flags: they only pick an index
+// during staging, which is block-uniform and off the dot4 inner loop.
+template <typename TA, typename TB>
+__device__ QGemmMicroTile<QGemmAPlanes<TA>::kCount> qgemm_accumulate_k_range(
+    const TA *__restrict__ A, const uint8_t *__restrict__ B, int64_t M,
+    int64_t N, int64_t K, int64_t m_base, int64_t n_base, int64_t k_begin,
+    int64_t k_end, int b_bits, bool need_row_a, bool need_col_b, bool trans_a,
+    bool trans_b) {
+  constexpr bool kAWide = QGemmAPlanes<TA>::kWide;
+  constexpr int kAPlanes = QGemmAPlanes<TA>::kCount;
+  constexpr bool kASigned = QGemmTraits<TA>::kSigned;
+  constexpr bool kBSigned = QGemmTraits<TB>::kSigned;
+
+  static_assert(kThreadM == kDotK && kThreadN == kDotK,
+                "a micro-tile row and column are each one fragment");
+  static_assert(kTileM * kTileK == kTiledBlock * kDotK,
+                "the quad staging map covers a slab exactly once");
+  static_assert(kTileK % kBStageRows == 0,
+                "the [K, N] staging map covers every byte lane exactly once");
+
+  __shared__ __align__(16) QGemmSlab a_lds[kAPlanes][kTileQuads][kTileM];
+  __shared__ __align__(16) QGemmSlab b_lds[kTileQuads][kTileN];
+
+  const int tid = threadIdx.x;
+  int thread_m, thread_n;
+  qgemm_micro_tile_origin(tid, thread_m, thread_n);
+
+  QGemmMicroTile<kAPlanes> out = {};
+
+  // Staging maps, each coalescing the reads of the layout it serves.
+  //
+  // `quad_*` hands a thread the kDotK k-consecutive elements of one row, which
+  // is exactly one LDS dword. That is what A wants, and also what a [N, K] B
+  // wants since its k runs are contiguous; kTileM == kTileN, so the one map
+  // covers both slabs.
+  //
+  // `b_*` walks a [K, N] B, where the k stride is N: one element per thread per
+  // k, so the kTileN threads sharing a k cover a contiguous run of columns.
+  static_assert(kTileM == kTileN, "the quad staging map is shared by A and B");
+  const int quad_row = tid / kTileQuads;
+  const int quad_idx = tid % kTileQuads;
+  const int b_n = tid % kTileN;
+  const int b_k_base = tid / kTileN;
+
+  for (int64_t k0 = k_begin; k0 < k_end; k0 += kTileK) {
+    const int64_t quad_k = k0 + quad_idx * kDotK;
+    {
+      const int64_t a_row = m_base + quad_row;
+      int32_t planes[kAPlanes][kDotK];
+#pragma unroll
+      for (int i = 0; i < kDotK; ++i) {
+        const int64_t k = quad_k + i;
+        const int64_t idx = trans_a ? k * M + a_row : a_row * K + k;
+        const int v = (a_row < M && k < k_end) ? static_cast<int>(A[idx]) : 0;
+        if constexpr (kAWide) {
+          // Promoting to int first makes `>> 8` arithmetic for int16 and
+          // logical for uint16, so hi inherits A's signedness while lo stays
+          // an unsigned byte -- exactly the split A = hi*256 + lo needs.
+          planes[kPlaneHi][i] = v >> 8;
+          planes[kPlaneLo][i] = v & 0xFF;
+        } else {
+          planes[kPlaneHi][i] = v;
+        }
+      }
+#pragma unroll
+      for (int p = 0; p < kAPlanes; ++p)
+        a_lds[p][quad_idx][quad_row] = qgemm_pack_bytes(planes[p]);
+    }
+
+    if (trans_b) {
+      const int64_t b_row = n_base + quad_row;
+      int32_t v[kDotK];
+#pragma unroll
+      for (int i = 0; i < kDotK; ++i) {
+        const int64_t k = quad_k + i;
+        v[i] = (b_row < N && k < k_end)
+                   ? qgemm_read_quant(B, b_row * K + k, b_bits, kBSigned)
+                   : 0;
+      }
+      b_lds[quad_idx][quad_row] = qgemm_pack_bytes(v);
+    } else {
+      // k is the strided axis of a [K, N] B, so a thread's elements land one
+      // byte each in that many different dwords; the kDotK byte lanes of a
+      // dword come from as many distinct threads.
+      const int64_t b_col = n_base + b_n;
+#pragma unroll
+      for (int rep = 0; rep < kTileK / kBStageRows; ++rep) {
+        const int b_k = b_k_base + rep * kBStageRows;
+        const int64_t k = k0 + b_k;
+        const int32_t v =
+            (b_col < N && k < k_end)
+                ? qgemm_read_quant(B, k * N + b_col, b_bits, kBSigned)
+                : 0;
+        reinterpret_cast<QGemmByte *>(&b_lds[b_k / kDotK][b_n])[b_k % kDotK] =
+            static_cast<QGemmByte>(v);
+      }
+    }
+
+    __syncthreads();
+
+#pragma unroll
+    for (int q = 0; q < kTileQuads; ++q) {
+      int32_t a_frag[kAPlanes][kThreadM];
+      int32_t b_frag[kThreadN];
+#pragma unroll
+      for (int p = 0; p < kAPlanes; ++p)
+        qgemm_read_frag(&a_lds[p][q][thread_m], a_frag[p]);
+      qgemm_read_frag(&b_lds[q][thread_n], b_frag);
+
+#pragma unroll
+      for (int i = 0; i < kThreadM; ++i) {
+#pragma unroll
+        for (int j = 0; j < kThreadN; ++j) {
+          out.acc[i][j][kPlaneHi] = hipdnn_dot4<kASigned, kBSigned>(
+              a_frag[kPlaneHi][i], b_frag[j], out.acc[i][j][kPlaneHi]);
+          if constexpr (kAWide)
+            out.acc[i][j][kPlaneLo] = hipdnn_dot4<false, kBSigned>(
+                a_frag[kPlaneLo][i], b_frag[j], out.acc[i][j][kPlaneLo]);
+        }
+      }
+
+      // Block-uniform branches, so the skipped dots cost nothing when the
+      // corresponding zero point is 0 -- or, under split-K, when this block
+      // was not the one elected to contribute that correction.
+      if (need_row_a) {
+#pragma unroll
+        for (int i = 0; i < kThreadM; ++i) {
+          out.row_a[i][kPlaneHi] = hipdnn_dot4<kASigned, false>(
+              a_frag[kPlaneHi][i], kOnes4, out.row_a[i][kPlaneHi]);
+          if constexpr (kAWide)
+            out.row_a[i][kPlaneLo] = hipdnn_dot4<false, false>(
+                a_frag[kPlaneLo][i], kOnes4, out.row_a[i][kPlaneLo]);
+        }
+      }
+      if (need_col_b) {
+#pragma unroll
+        for (int j = 0; j < kThreadN; ++j)
+          out.col_b[j] =
+              hipdnn_dot4<kBSigned, false>(b_frag[j], kOnes4, out.col_b[j]);
+      }
+    }
+
+    __syncthreads();
+  }
+
+  return out;
+}
+
+// Y[m, n] = requantize(sum_k A[m, k] * B[k, n])
+//
+// Grid: (ceil(N/kTileN), ceil(M/kTileM)). One block owns a whole output tile
+// and the whole reduction, so it can requantize in place.
+template <typename TA, typename TB, typename TY>
+__global__ __launch_bounds__(kTiledBlock) void qgemm_tiled_kernel(
+    const TA *__restrict__ A, const uint8_t *__restrict__ B,
+    TY *__restrict__ Y, int64_t M, int64_t N, int64_t K, QGemmRequant requant,
+    int b_bits, bool need_row_a, bool need_col_b, bool trans_a, bool trans_b) {
+  const int64_t m_base = static_cast<int64_t>(blockIdx.y) * kTileM;
+  const int64_t n_base = static_cast<int64_t>(blockIdx.x) * kTileN;
+
+  const auto mt = qgemm_accumulate_k_range<TA, TB>(
+      A, B, M, N, K, m_base, n_base, 0, K, b_bits, need_row_a, need_col_b,
+      trans_a, trans_b);
+
+  int thread_m, thread_n;
+  qgemm_micro_tile_origin(threadIdx.x, thread_m, thread_n);
+
+#pragma unroll
+  for (int i = 0; i < kThreadM; ++i) {
+    const int64_t m = m_base + thread_m + i;
+    if (m >= M)
+      continue;
+    const int64_t row_a = qgemm_combine(mt.row_a[i]);
+#pragma unroll
+    for (int j = 0; j < kThreadN; ++j) {
+      const int64_t n = n_base + thread_n + j;
+      if (n >= N)
+        continue;
+      Y[m * N + n] = qgemm_requant<TY>(qgemm_combine(mt.acc[i][j]), row_a,
+                                       mt.col_b[j], m, n, requant);
+    }
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// Split-K (low output parallelism)
+//===----------------------------------------------------------------------===//
+//
+// The tiled grid has no k dimension, so its parallelism is bounded by the
+// output alone: ceil(N/kTileN) * ceil(M/kTileM) blocks. A narrow output leaves
+// most of the device idle with each block walking the entire reduction.
+//
+// Split-K restores the missing dimension: each block reduces a k slice into a
+// global int64 accumulator, and a second kernel requantizes once every slice
+// has landed. Integer addition is associative and exact, so the atomics make
+// the result bit-identical to the single-pass path however the slices
+// interleave.
+
+// One block per (n-tile, m-tile, k slice).
+template <typename TA, typename TB>
+__global__ __launch_bounds__(kTiledBlock) void qgemm_splitk_partial_kernel(
+    const TA *__restrict__ A, const uint8_t *__restrict__ B,
+    int64_t *__restrict__ acc_ws, int64_t *__restrict__ row_a_ws,
+    int64_t *__restrict__ col_b_ws, int64_t M, int64_t N, int64_t K,
+    int64_t k_chunk, int b_bits, bool need_row_a, bool need_col_b,
+    bool trans_a, bool trans_b) {
+  const int64_t k_begin = static_cast<int64_t>(blockIdx.z) * k_chunk;
+  if (k_begin >= K)
+    return;
+  const int64_t k_end = (k_begin + k_chunk < K) ? k_begin + k_chunk : K;
+
+  const int64_t m_base = static_cast<int64_t>(blockIdx.y) * kTileM;
+  const int64_t n_base = static_cast<int64_t>(blockIdx.x) * kTileN;
+
+  // rowA does not depend on n and colB does not depend on m, so every block
+  // column would otherwise add the same rowA slice again (and every block row
+  // the same colB slice). Elect one of each; the flags are block-uniform, so
+  // the blocks not elected skip the corresponding dots entirely.
+  const bool add_row_a = need_row_a && blockIdx.x == 0;
+  const bool add_col_b = need_col_b && blockIdx.y == 0;
+
+  const auto mt = qgemm_accumulate_k_range<TA, TB>(
+      A, B, M, N, K, m_base, n_base, k_begin, k_end, b_bits, add_row_a,
+      add_col_b, trans_a, trans_b);
+
+  int thread_m, thread_n;
+  qgemm_micro_tile_origin(threadIdx.x, thread_m, thread_n);
+
+#pragma unroll
+  for (int i = 0; i < kThreadM; ++i) {
+    const int64_t m = m_base + thread_m + i;
+    if (m >= M)
+      continue;
+    // Every thread sharing this m holds the same rowA slice, so within the
+    // elected block only the first micro-tile column commits it.
+    if (add_row_a && thread_n == 0)
+      qgemm_atomic_add_i64(&row_a_ws[m], qgemm_combine(mt.row_a[i]));
+#pragma unroll
+    for (int j = 0; j < kThreadN; ++j) {
+      const int64_t n = n_base + thread_n + j;
+      if (n < N)
+        qgemm_atomic_add_i64(&acc_ws[m * N + n], qgemm_combine(mt.acc[i][j]));
+    }
+  }
+
+  // Mirror of the rowA election: only the first micro-tile row commits colB.
+  if (add_col_b && thread_m == 0) {
+#pragma unroll
+    for (int j = 0; j < kThreadN; ++j) {
+      const int64_t n = n_base + thread_n + j;
+      if (n < N)
+        qgemm_atomic_add_i64(&col_b_ws[n], mt.col_b[j]);
+    }
+  }
+}
+
+constexpr int kSplitKEpilogueBlock = 256;
+
+// Requantizes the completed split-K sums, one thread per output element. rowA /
+// colB are read unconditionally: when their zero point is zero the partial pass
+// never wrote them, but the workspace was zeroed beforehand and the epilogue
+// multiplies them by that same zero point.
+template <typename TY>
+__global__ __launch_bounds__(kSplitKEpilogueBlock) void
+qgemm_splitk_epilogue_kernel(const int64_t *__restrict__ acc_ws,
+                             const int64_t *__restrict__ row_a_ws,
+                             const int64_t *__restrict__ col_b_ws,
+                             TY *__restrict__ Y, int64_t N, int64_t total,
+                             QGemmRequant requant) {
+  const int64_t idx = static_cast<int64_t>(blockIdx.x) * kSplitKEpilogueBlock +
+                      threadIdx.x;
+  if (idx >= total)
+    return;
+
+  // acc_ws and Y share the [M, N] row-major order, so one flat index addresses
+  // both; only the two correction vectors need unpacking.
+  const int64_t m = idx / N;
+  const int64_t n = idx - m * N;
+  Y[idx] = qgemm_requant<TY>(acc_ws[idx], row_a_ws[m], col_b_ws[n], m, n,
+                             requant);
 }
 
 //===----------------------------------------------------------------------===//
 // Host launch and dtype dispatch
 //===----------------------------------------------------------------------===//
 
-// Bundled so the dispatch levels below stay readable: A has 4 element types, B
-// has 2 and Y has 4, and threading two dozen scalars through 32 switch arms by
-// hand buries the one thing each arm actually says.
+// Bundled so the dispatch levels below stay readable: the dtype triple alone
+// costs 32 switch arms.
 struct QGemmArgs {
   hipStream_t stream;
   const void *A;
@@ -746,16 +1074,11 @@ struct QGemmArgs {
 //
 // Ordered by descending splits / tile ratio, because concurrent k slices are
 // what this shape is short of and splits is capped by K / tile. A small block
-// raises that cap further (splits is capped by 1024 / block too), but never
-// below 32, or a wave would run with idle lanes.
-//
-// cols reaches 8 only where it has to: a 4-bit B needs 8 logical values to fill
-// a dword, so the [K, N] vector path is unavailable to the cols == 4 entries.
-// Nothing wider is in the table: a column costs its thread two int64
-// accumulators, so a 16-wide tile spends 64 registers before it loads anything.
-//
-// The low-splits entries at the end are not only launch fallbacks: they leave
-// the largest grid-level k split available, which is what a narrow N needs.
+// raises that cap further, but never below 32, or a wave would run with idle
+// lanes. cols reaches 8 only where it has to: a 4-bit B needs 8 logical values
+// to fill a dword, so the [K, N] vector path is unavailable to the cols == 4
+// entries. The low-splits entries at the end double as launch fallbacks and as
+// the geometries that leave the largest grid-level k split available.
 struct QGemmGemvConfig {
   int block;
   int cols;
@@ -903,8 +1226,8 @@ int qgemm_gemv_launch_config(int config_id, const QGemmArgs &g,
 #undef QGEMM_GEMV_CASE
 }
 
-// Read once and latched: the tuner sits on the decode dispatch path, where a
-// getenv per call would serialize every token through the CRT environment lock.
+// Read once and latched: a getenv per call would serialize every dispatch
+// through the CRT environment lock.
 bool qgemm_gemv_autotune_enabled() {
   static const bool enabled = [] {
     std::string raw;
@@ -1037,26 +1360,8 @@ int qgemm_gemv_config(const QGemmArgs &g, const QGemmRequant &requant,
 }
 
 template <typename TA, typename TB, typename TY>
-int qgemm_launch_gemv(const QGemmArgs &g) {
-  const QGemmRequant requant{g.b_scales,
-                             g.b_zero_points,
-                             g.C,
-                             g.m_ab,
-                             g.m_c,
-                             g.K,
-                             g.c_dim1,
-                             g.a_zp,
-                             g.b_zp,
-                             g.c_zp,
-                             g.y_zp,
-                             g.b_bits,
-                             g.c_dtype,
-                             g.b_signed};
-  // A per-channel zero point is read in the epilogue, so its correction term
-  // must be carried whether or not any single entry happens to be zero.
-  const bool need_row_a = g.b_zero_points != nullptr || g.b_zp != 0;
-  const bool need_col_b = g.a_zp != 0;
-
+int qgemm_launch_gemv(const QGemmArgs &g, const QGemmRequant &requant,
+                      bool need_row_a, bool need_col_b) {
   const int config =
       qgemm_gemv_config<TA, TB, TY>(g, requant, need_row_a, need_col_b);
   const int err = qgemm_gemv_launch_config<TA, TB, TY>(config, g, requant,
@@ -1071,17 +1376,167 @@ int qgemm_launch_gemv(const QGemmArgs &g) {
                                               need_row_a, need_col_b);
 }
 
+//===----------------------------------------------------------------------===//
+// Tiled launch and split-K planning
+//===----------------------------------------------------------------------===//
+
+// Slice ceiling. Past it the per-slice staging prologue and the atomic traffic
+// grow faster than the added parallelism pays back.
+constexpr int kSplitKMaxSplits = 32;
+// A slice still has to cover enough k-tiles to amortize that prologue and the
+// atomics it ends with.
+constexpr int64_t kSplitKMinKPerSplit = 4 * kTileK;
+// Blocks per CU the plain grid must already reach for split-K to be pointless.
+constexpr int kSplitKTargetBlocksPerCU = 2;
+
+struct QGemmSplitKPlan {
+  bool enabled;
+  int splits;
+  int64_t k_chunk;
+};
+
+QGemmSplitKPlan qgemm_plan_splitk(int64_t M, int64_t N, int64_t K) {
+  QGemmSplitKPlan plan{false, 1, K};
+  // M == 1 takes the GEMV path, which splits k on its own.
+  if (M <= 1)
+    return plan;
+
+  const int64_t base_blocks =
+      ((N + kTileN - 1) / kTileN) * ((M + kTileM - 1) / kTileM);
+  const int64_t target =
+      static_cast<int64_t>(qgemm_device_cu_count()) * kSplitKTargetBlocksPerCU;
+  if (base_blocks >= target)
+    return plan;
+
+  int64_t want = (target + base_blocks - 1) / base_blocks;
+  if (want > kSplitKMaxSplits)
+    want = kSplitKMaxSplits;
+  const int64_t cap = K / kSplitKMinKPerSplit;
+  if (want > cap)
+    want = cap;
+  if (want < 2)
+    return plan;
+
+  // Round the slice up to a whole k-tile so each one starts on the boundary the
+  // staging maps assume, then recount so the last slice is not empty.
+  int64_t chunk = (K + want - 1) / want;
+  chunk = (chunk + kTileK - 1) / kTileK * kTileK;
+  const int64_t splits = (K + chunk - 1) / chunk;
+  if (splits < 2)
+    return plan;
+
+  plan.enabled = true;
+  plan.splits = static_cast<int>(splits);
+  plan.k_chunk = chunk;
+  return plan;
+}
+
+// One int64 accumulator per output plus the two correction vectors. Split-K
+// only engages below kSplitKTargetBlocksPerCU tiles per CU, which bounds M * N
+// at that many tiles.
+size_t qgemm_splitk_scratch_bytes(int64_t M, int64_t N) {
+  return static_cast<size_t>(M * N + M + N) * sizeof(int64_t);
+}
+
+template <typename TA, typename TB, typename TY>
+int qgemm_launch_tiled(const QGemmArgs &g, const QGemmRequant &requant,
+                       bool need_row_a, bool need_col_b) {
+  const auto *a_ptr = static_cast<const TA *>(g.A);
+  auto *y_ptr = static_cast<TY *>(g.Y);
+  const dim3 grid_xy(static_cast<unsigned>((g.N + kTileN - 1) / kTileN),
+                     static_cast<unsigned>((g.M + kTileM - 1) / kTileM));
+
+  const QGemmSplitKPlan plan = qgemm_plan_splitk(g.M, g.N, g.K);
+  const size_t scratch =
+      plan.enabled ? qgemm_splitk_scratch_bytes(g.M, g.N) : 0;
+  bool use_splitk = plan.enabled && g.workspace && g.workspace_bytes >= scratch;
+
+  (void)hipGetLastError();
+  if (use_splitk &&
+      hipMemsetAsync(g.workspace, 0, scratch, g.stream) != hipSuccess) {
+    // Half-zeroed accumulators would corrupt the result, so drop to the
+    // single-pass kernel, which needs no scratch. Clear the sticky error too,
+    // or the fallback's own clean launch would still be reported as a failure.
+    (void)hipGetLastError();
+    use_splitk = false;
+  }
+
+  if (use_splitk) {
+    auto *acc_ws = static_cast<int64_t *>(g.workspace);
+    auto *row_a_ws = acc_ws + g.M * g.N;
+    auto *col_b_ws = row_a_ws + g.M;
+
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] qgemm tiled: split-K M=%lld N=%lld K=%lld splits=%d "
+        "k_chunk=%lld scratch=%zu B\n",
+        (long long)g.M, (long long)g.N, (long long)g.K, plan.splits,
+        (long long)plan.k_chunk, scratch);
+
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(qgemm_splitk_partial_kernel<TA, TB>),
+        dim3(grid_xy.x, grid_xy.y, static_cast<unsigned>(plan.splits)),
+        dim3(kTiledBlock), 0, g.stream, a_ptr, g.B, acc_ws, row_a_ws, col_b_ws,
+        g.M, g.N, g.K, plan.k_chunk, g.b_bits, need_row_a, need_col_b,
+        g.trans_a, g.trans_b);
+    const hipError_t launched = hipGetLastError();
+    if (launched != hipSuccess)
+      return static_cast<int>(launched);
+
+    const int64_t total = g.M * g.N;
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(qgemm_splitk_epilogue_kernel<TY>),
+        dim3(static_cast<unsigned>((total + kSplitKEpilogueBlock - 1) /
+                                   kSplitKEpilogueBlock)),
+        dim3(kSplitKEpilogueBlock), 0, g.stream, acc_ws, row_a_ws, col_b_ws,
+        y_ptr, g.N, total, requant);
+    return static_cast<int>(hipGetLastError());
+  }
+
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(qgemm_tiled_kernel<TA, TB, TY>), grid_xy,
+                     dim3(kTiledBlock), 0, g.stream, a_ptr, g.B, y_ptr, g.M,
+                     g.N, g.K, requant, g.b_bits, need_row_a, need_col_b,
+                     g.trans_a, g.trans_b);
+  return static_cast<int>(hipGetLastError());
+}
+
+template <typename TA, typename TB, typename TY>
+int qgemm_launch(const QGemmArgs &g) {
+  const QGemmRequant requant{g.b_scales,
+                             g.b_zero_points,
+                             g.C,
+                             g.m_ab,
+                             g.m_c,
+                             g.K,
+                             g.c_dim0,
+                             g.c_dim1,
+                             g.a_zp,
+                             g.b_zp,
+                             g.c_zp,
+                             g.y_zp,
+                             g.b_bits,
+                             g.c_dtype,
+                             g.b_signed};
+  // A per-channel zero point is read in the epilogue, so its correction term
+  // must be carried whether or not any single entry happens to be zero.
+  const bool need_row_a = g.b_zero_points != nullptr || g.b_zp != 0;
+  const bool need_col_b = g.a_zp != 0;
+
+  if (g.M == 1)
+    return qgemm_launch_gemv<TA, TB, TY>(g, requant, need_row_a, need_col_b);
+  return qgemm_launch_tiled<TA, TB, TY>(g, requant, need_row_a, need_col_b);
+}
+
 template <typename TA, typename TB>
 int qgemm_dispatch_y(const QGemmArgs &g) {
   switch (g.y_dtype) {
   case HIP_DTYPE_INT8:
-    return qgemm_launch_gemv<TA, TB, int8_t>(g);
+    return qgemm_launch<TA, TB, int8_t>(g);
   case HIP_DTYPE_UINT8:
-    return qgemm_launch_gemv<TA, TB, uint8_t>(g);
+    return qgemm_launch<TA, TB, uint8_t>(g);
   case HIP_DTYPE_INT16:
-    return qgemm_launch_gemv<TA, TB, int16_t>(g);
+    return qgemm_launch<TA, TB, int16_t>(g);
   default: // HIP_DTYPE_UINT16
-    return qgemm_launch_gemv<TA, TB, uint16_t>(g);
+    return qgemm_launch<TA, TB, uint16_t>(g);
   }
 }
 
@@ -1104,20 +1559,6 @@ int qgemm_dispatch_a(const QGemmArgs &g) {
   }
 }
 
-int qgemm_launch_naive(const QGemmArgs &g) {
-  const dim3 block(kBlockN, kBlockM);
-  const dim3 grid(static_cast<unsigned>((g.N + kBlockN - 1) / kBlockN),
-                  static_cast<unsigned>((g.M + kBlockM - 1) / kBlockM));
-
-  (void)hipGetLastError();
-  hipLaunchKernelGGL(qgemm_naive_kernel, grid, block, 0, g.stream, g.A, g.B,
-                     g.C, g.b_scales, g.b_zero_points, g.Y, g.M, g.N, g.K,
-                     g.trans_a, g.trans_b, g.a_dtype, g.b_dtype, g.c_dtype,
-                     g.y_dtype, g.b_bits, g.b_signed, g.c_dim0, g.c_dim1,
-                     g.m_ab, g.m_c, g.a_zp, g.b_zp, g.c_zp, g.y_zp);
-  return static_cast<int>(hipGetLastError());
-}
-
 bool is_quantized_8_or_16(int dtype) {
   return dtype == HIP_DTYPE_INT8 || dtype == HIP_DTYPE_UINT8 ||
          dtype == HIP_DTYPE_INT16 || dtype == HIP_DTYPE_UINT16;
@@ -1126,12 +1567,16 @@ bool is_quantized_8_or_16(int dtype) {
 } // namespace
 
 extern "C" size_t hip_qgemm_workspace_bytes(int64_t M, int64_t N, int64_t K) {
-  (void)K;
-  // Only the GEMV path splits k across the grid, and its scratch is one
-  // accumulator plus one colB per column plus a single rowA.
-  if (M != 1 || N <= 0)
+  if (M <= 0 || N <= 0 || K <= 0)
     return 0;
-  return qgemm_gemv_scratch_bytes(N);
+  // Either path only needs scratch where it splits k across the grid. The GEMV
+  // one decides that per launch, from a geometry this function does not know,
+  // so it always reserves: one accumulator plus one colB per column plus a
+  // single rowA. The tiled one asks the same planner the launch will.
+  if (M == 1)
+    return qgemm_gemv_scratch_bytes(N);
+  const QGemmSplitKPlan plan = qgemm_plan_splitk(M, N, K);
+  return plan.enabled ? qgemm_splitk_scratch_bytes(M, N) : 0;
 }
 
 extern "C" int hip_qgemm(void *stream, const void *A, const void *B,
@@ -1239,7 +1684,7 @@ extern "C" int hip_qgemm(void *stream, const void *A, const void *B,
                        workspace,
                        workspace_bytes};
 
-  const int err = (M == 1) ? qgemm_dispatch_a(args) : qgemm_launch_naive(args);
+  const int err = qgemm_dispatch_a(args);
   if (err != hipSuccess) {
     fprintf(stderr, "[custom_kernels] hip_qgemm launch failed: %s\n",
             hipGetErrorString(static_cast<hipError_t>(err)));
