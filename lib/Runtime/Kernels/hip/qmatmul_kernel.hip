@@ -51,12 +51,13 @@
 // All three share the identity above and differ only in how the reduction is
 // parallelized:
 //
-//   M == 1                       -> GEMV, one thread per output column
+//   M == 1                       -> GEMV, one thread per column group
 //   M > 1                        -> tiled GEMM, one block per output tile
 //   M > 1, too few output tiles  -> split-K over the tiled inner loop
 //
-// The GEMV path is bandwidth-bound and does not use dot4, so it accumulates in
-// int64 directly instead of splitting A.
+// The GEMV path walks B along n rather than k, so dot4 has no four k-consecutive
+// bytes to work with and it accumulates in int64 directly instead of splitting
+// A.
 
 #include "debug_log.h"
 #include "hip_arch_compat.h"
@@ -677,21 +678,166 @@ size_t qmatmul_splitk_workspace_bytes(int64_t M, int64_t N,
 // GEMV (M == 1, the LLM decode shape)
 //===----------------------------------------------------------------------===//
 
-constexpr int kGemvBlock = 256;
+// A thread owns kGemvCols consecutive columns, so a [K, N] 8-bit B hands it one
+// dword per k step instead of a single byte, and kGemvUnroll steps are staged in
+// registers before any multiply. Reading one byte per step made the loop wait on
+// every load, which cost a full memory round trip per k: runtime tracked K alone
+// and ignored how much data the shape actually moved.
+//
+// kGemvBlock * kGemvCols keeps the block as wide as the old one-column-per-
+// thread layout, so the grid -- and the number of CUs a narrow N reaches --
+// does not shrink.
+constexpr int kGemvBlock = 64;
+constexpr int kGemvCols = 4;
+constexpr int kGemvColsPerBlock = kGemvBlock * kGemvCols;
 constexpr int kGemvTileK = 256;
+constexpr int kGemvUnroll = 8;
+
+static_assert(kGemvTileK % kGemvBlock == 0, "A staging map assumes even split");
+
+struct QMatMulGemvSums {
+  int64_t acc[kGemvCols];
+  int64_t col_b[kGemvCols];
+  int64_t row_a;
+};
+
+template <typename TB>
+__device__ inline int32_t qmatmul_gemv_byte(uint32_t packed, int lane) {
+  const uint32_t raw = (packed >> (lane * 8)) & 0xFFu;
+  if constexpr (QMatMulTraits<TB>::kSigned)
+    return static_cast<int32_t>(static_cast<int8_t>(raw));
+  else
+    return static_cast<int32_t>(raw);
+}
+
+template <typename TB>
+__device__ inline void qmatmul_gemv_step(int32_t a_val, uint32_t packed,
+                                         bool need_row_a, bool need_col_b,
+                                         QMatMulGemvSums &sums) {
+  if (need_row_a)
+    sums.row_a += a_val;
+#pragma unroll
+  for (int c = 0; c < kGemvCols; ++c) {
+    const int32_t b_val = qmatmul_gemv_byte<TB>(packed, c);
+    sums.acc[c] += a_val * b_val;
+    if (need_col_b)
+      sums.col_b[c] += b_val;
+  }
+}
+
+__device__ inline int qmatmul_gemv_tile(int64_t K, int64_t k0) {
+  const int64_t remaining = K - k0;
+  return static_cast<int>(remaining < kGemvTileK ? remaining : kGemvTileK);
+}
+
+template <typename TA>
+__device__ inline void qmatmul_gemv_stage_a(const TA *__restrict__ A,
+                                            int64_t k0, int tile,
+                                            int32_t *a_lds) {
+  for (int t = threadIdx.x; t < tile; t += kGemvBlock)
+    a_lds[t] = static_cast<int32_t>(A[k0 + t]);
+}
+
+template <typename TA, typename TB>
+__device__ void qmatmul_gemv_vector_loop(const TA *__restrict__ A,
+                                         const TB *__restrict__ B, int64_t N,
+                                         int64_t K, int64_t n_base,
+                                         bool need_row_a, bool need_col_b,
+                                         int32_t *a_lds,
+                                         QMatMulGemvSums &sums) {
+  const uint8_t *b_col = reinterpret_cast<const uint8_t *>(B) + n_base;
+
+  for (int64_t k0 = 0; k0 < K; k0 += kGemvTileK) {
+    const int tile = qmatmul_gemv_tile(K, k0);
+    qmatmul_gemv_stage_a(A, k0, tile, a_lds);
+    __syncthreads();
+
+    const uint8_t *b_row = b_col + k0 * N;
+    int t = 0;
+    for (; t + kGemvUnroll <= tile; t += kGemvUnroll) {
+      uint32_t staged[kGemvUnroll];
+#pragma unroll
+      for (int u = 0; u < kGemvUnroll; ++u) {
+        staged[u] = *reinterpret_cast<const uint32_t *>(b_row);
+        b_row += N;
+      }
+#pragma unroll
+      for (int u = 0; u < kGemvUnroll; ++u)
+        qmatmul_gemv_step<TB>(a_lds[t + u], staged[u], need_row_a, need_col_b,
+                              sums);
+    }
+    for (; t < tile; ++t) {
+      const uint32_t packed = *reinterpret_cast<const uint32_t *>(b_row);
+      b_row += N;
+      qmatmul_gemv_step<TB>(a_lds[t], packed, need_row_a, need_col_b, sums);
+    }
+
+    __syncthreads();
+  }
+}
+
+// Fallback for the layouts the dword load cannot serve: a [N, K] B, packed W4,
+// and a last block that runs off the end of N.
+template <int kBBits, bool kTransB, typename TA, typename TB>
+__device__ void
+qmatmul_gemv_scalar_loop(const TA *__restrict__ A, const TB *__restrict__ B,
+                         const uint8_t *__restrict__ b_zero_points, int64_t N,
+                         int64_t K, int64_t n_base, bool need_row_a,
+                         bool need_col_b, bool b_signed, int32_t *a_lds,
+                         QMatMulGemvSums &sums) {
+  int column_zp[kGemvCols] = {};
+  if constexpr (kBBits == 4) {
+#pragma unroll
+    for (int c = 0; c < kGemvCols; ++c) {
+      const int64_t n = n_base + c;
+      if (n < N)
+        column_zp[c] = qmatmul_read_quant(b_zero_points, n, kBBits, b_signed);
+    }
+  }
+
+  for (int64_t k0 = 0; k0 < K; k0 += kGemvTileK) {
+    const int tile = qmatmul_gemv_tile(K, k0);
+    qmatmul_gemv_stage_a(A, k0, tile, a_lds);
+    __syncthreads();
+
+    for (int t = 0; t < tile; ++t) {
+      const int32_t a_val = a_lds[t];
+      const int64_t k = k0 + t;
+      if (need_row_a)
+        sums.row_a += a_val;
+#pragma unroll
+      for (int c = 0; c < kGemvCols; ++c) {
+        const int64_t n = n_base + c;
+        if (n >= N)
+          continue;
+        const int64_t index = kTransB ? n * K + k : k * N + n;
+        int32_t b_val;
+        if constexpr (kBBits == 4)
+          b_val = qmatmul_read_quant(reinterpret_cast<const uint8_t *>(B),
+                                     index, kBBits, b_signed) -
+                  column_zp[c];
+        else
+          b_val = static_cast<int32_t>(B[index]);
+        sums.acc[c] += a_val * b_val;
+        if (need_col_b)
+          sums.col_b[c] += b_val;
+      }
+    }
+
+    __syncthreads();
+  }
+}
 
 // Y[b, 0, n] = requantize(sum_k A[b, 0, k] * B[b, k, n])
 //
-// One thread per output column so that, for a fixed k, the block's global reads
-// of B are contiguous. A is identical across threads, so it is staged in LDS
-// once per k-tile instead of being re-read per column.
+// A is identical across threads, so it is staged in LDS once per k-tile instead
+// of being re-read per column.
 //
 // A tiled GEMM degenerates badly at M == 1 (63 of 64 rows in each block tile
 // are padding), and this shape dominates LLM decode, so it gets its own path.
 //
 // There is no trans_a flag: at M == 1 both layouts of A are the same K-element
-// vector, so the index is unchanged. trans_b costs the coalescing of the B
-// reads, since a [N, K] B puts each thread's column on its own row.
+// vector, so the index is unchanged.
 template <typename TA, typename TB, typename TY>
 __global__ __launch_bounds__(kGemvBlock) void qmatmul_gemv_kernel(
     const TA *__restrict__ A, const TB *__restrict__ B, TY *__restrict__ Y,
@@ -705,52 +851,49 @@ __global__ __launch_bounds__(kGemvBlock) void qmatmul_gemv_kernel(
   B += batch * b_batch_stride;
   Y += batch * N;
 
-  const int64_t n = static_cast<int64_t>(blockIdx.x) * kGemvBlock + threadIdx.x;
-  const bool active = n < N;
-  const int column_zp =
-      active && b_bits == 4
-          ? qmatmul_read_quant(b_zero_points, n, 4, b_signed)
-          : 0;
+  const int64_t block_base =
+      static_cast<int64_t>(blockIdx.x) * kGemvColsPerBlock;
+  const int64_t n_base =
+      block_base + static_cast<int64_t>(threadIdx.x) * kGemvCols;
 
-  int64_t acc = 0;
-  int64_t row_a = 0;
-  int64_t col_b = 0;
+  QMatMulGemvSums sums = {};
 
-  for (int64_t k0 = 0; k0 < K; k0 += kGemvTileK) {
-    const int64_t remaining = K - k0;
-    const int tile =
-        static_cast<int>(remaining < kGemvTileK ? remaining : kGemvTileK);
-    for (int t = threadIdx.x; t < tile; t += kGemvBlock)
-      a_lds[t] = static_cast<int32_t>(A[k0 + t]);
-    __syncthreads();
+  // Block-uniform by construction: the loops below carry __syncthreads(), so a
+  // per-thread choice here would hang the block. A dword load also needs every
+  // lane in range and every B row 4-byte aligned, or it would straddle the end
+  // of a row.
+  const bool vector_ok = !trans_b && b_bits == 8 &&
+                         block_base + kGemvColsPerBlock <= N &&
+                         (N % kGemvCols) == 0 &&
+                         (reinterpret_cast<uintptr_t>(B) % kGemvCols) == 0;
 
-    if (active) {
-      for (int t = 0; t < tile; ++t) {
-        const int64_t k = k0 + t;
-        const int64_t b_index = trans_b ? n * K + k : k * N + n;
-        const int32_t b_val =
-            b_bits == 4
-                ? qmatmul_read_quant(
-                      reinterpret_cast<const uint8_t *>(B), b_index,
-                      4, b_signed) -
-                      column_zp
-                : static_cast<int32_t>(B[b_index]);
-        acc += a_lds[t] * b_val;
-        if (need_col_b)
-          col_b += b_val;
-      }
-      // rowA does not depend on n; every thread recomputes it from LDS rather
-      // than paying a second reduction and broadcast.
-      if (need_row_a) {
-        for (int t = 0; t < tile; ++t)
-          row_a += a_lds[t];
-      }
-    }
-    __syncthreads();
+  if (vector_ok)
+    qmatmul_gemv_vector_loop<TA, TB>(A, B, N, K, n_base, need_row_a,
+                                     need_col_b, a_lds, sums);
+  else if (b_bits == 4 && trans_b)
+    qmatmul_gemv_scalar_loop<4, true>(A, B, b_zero_points, N, K, n_base,
+                                      need_row_a, need_col_b, b_signed, a_lds,
+                                      sums);
+  else if (b_bits == 4)
+    qmatmul_gemv_scalar_loop<4, false>(A, B, b_zero_points, N, K, n_base,
+                                       need_row_a, need_col_b, b_signed, a_lds,
+                                       sums);
+  else if (trans_b)
+    qmatmul_gemv_scalar_loop<8, true>(A, B, b_zero_points, N, K, n_base,
+                                      need_row_a, need_col_b, b_signed, a_lds,
+                                      sums);
+  else
+    qmatmul_gemv_scalar_loop<8, false>(A, B, b_zero_points, N, K, n_base,
+                                       need_row_a, need_col_b, b_signed, a_lds,
+                                       sums);
+
+#pragma unroll
+  for (int c = 0; c < kGemvCols; ++c) {
+    const int64_t n = n_base + c;
+    if (n < N)
+      Y[n] = qmatmul_epilogue<TY>(sums.acc[c], sums.row_a, sums.col_b[c], n,
+                                  requant);
   }
-
-  if (active)
-    Y[n] = qmatmul_epilogue<TY>(acc, row_a, col_b, n, requant);
 }
 
 //===----------------------------------------------------------------------===//
@@ -810,7 +953,8 @@ int launch_qmatmul(const QMatMulArgs &g) {
   auto *y_ptr = static_cast<TY *>(g.Y);
 
   if (g.M == 1) {
-    dim3 grid(static_cast<unsigned>((g.N + kGemvBlock - 1) / kGemvBlock),
+    dim3 grid(static_cast<unsigned>((g.N + kGemvColsPerBlock - 1) /
+                                    kGemvColsPerBlock),
               static_cast<unsigned>(g.batch_count));
     (void)hipGetLastError();
     hipLaunchKernelGGL(HIP_KERNEL_NAME(qmatmul_gemv_kernel<TA, TB, TY>), grid,
