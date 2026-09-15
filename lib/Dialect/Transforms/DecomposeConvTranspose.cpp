@@ -29,12 +29,12 @@ namespace {
 /// gcd(stride, dilation) arithmetic to ytilda == stride and dd == 1.
 struct DimInfo {
   int64_t stride;
-  int64_t kernel;  // filter length Y
-  int64_t ydot;    // ceil(Y / stride) -> max taps per residue
-  int64_t htilda;  // per-residue conv output length
-  int64_t full;    // reassembled length, htilda * stride
-  int64_t padLo;   // leading pad of the transposed conv
-  int64_t out;     // final output length
+  int64_t kernel; // filter length Y
+  int64_t ydot;   // ceil(Y / stride) -> max taps per residue
+  int64_t htilda; // per-residue conv output length
+  int64_t full;   // reassembled length, htilda * stride
+  int64_t padLo;  // leading pad of the transposed conv
+  int64_t out;    // final output length
 };
 
 /// A transposed convolution scatters each input element across `stride`
@@ -83,9 +83,8 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
   auto inputType = dyn_cast<RankedTensorType>(op.getInput().getType());
   auto weightType = dyn_cast<RankedTensorType>(op.getWeights().getType());
   auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
-  if (!inputType || !weightType || !resultType ||
-      !inputType.hasStaticShape() || !weightType.hasStaticShape() ||
-      !resultType.hasStaticShape())
+  if (!inputType || !weightType || !resultType || !inputType.hasStaticShape() ||
+      !weightType.hasStaticShape() || !resultType.hasStaticShape())
     return rewriter.notifyMatchFailure(op, "expected static ranked tensors");
   if (inputType.getRank() != 4 || weightType.getRank() != 4)
     return rewriter.notifyMatchFailure(op, "expected 2D transposed conv");
@@ -182,14 +181,14 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
   SmallVector<APFloat> weightValues(weightAttr.getValues<APFloat>().begin(),
                                     weightAttr.getValues<APFloat>().end());
 
-  auto fullType = resultType.clone(
-      {numBatch, outChannels, dims[0].full, dims[1].full});
+  auto fullType =
+      resultType.clone({numBatch, outChannels, dims[0].full, dims[1].full});
   Value scattered =
       tensor::EmptyOp::create(rewriter, loc, fullType.getShape(), elementType)
           .getResult();
 
-  const APFloat zero = APFloat::getZero(
-      cast<FloatType>(elementType).getFloatSemantics());
+  const APFloat zero =
+      APFloat::getZero(cast<FloatType>(elementType).getFloatSemantics());
 
   for (int64_t it0 : llvm::seq<int64_t>(dims[0].stride)) {
     for (int64_t it1 : llvm::seq<int64_t>(dims[1].stride)) {
@@ -221,28 +220,27 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
 
       auto partialType = resultType.clone(
           {numBatch, outChannels, dims[0].htilda, dims[1].htilda});
-      Value partialInit = tensor::EmptyOp::create(
-                              rewriter, loc, partialType.getShape(),
-                              elementType)
-                              .getResult();
+      Value partialInit =
+          tensor::EmptyOp::create(rewriter, loc, partialType.getShape(),
+                                  elementType)
+              .getResult();
       Value partial =
-          ConvOp::create(rewriter, loc, TypeRange{partialType},
-                         ValueRange{ctx, op.getInput(), subWeight, partialInit},
-                         ArrayRef<NamedAttribute>{
-                             rewriter.getNamedAttr(
-                                 "kernel_shape",
-                                 rewriter.getI64ArrayAttr({taps0, taps1})),
-                             rewriter.getNamedAttr(
-                                 "strides", rewriter.getI64ArrayAttr({1, 1})),
-                             rewriter.getNamedAttr(
-                                 "pads", rewriter.getI64ArrayAttr(
-                                             {taps0 - 1, taps1 - 1,
-                                              dims[0].ydot - 1,
-                                              dims[1].ydot - 1})),
-                             rewriter.getNamedAttr(
-                                 "dilations", rewriter.getI64ArrayAttr({1, 1})),
-                             rewriter.getNamedAttr(
-                                 "group", rewriter.getI64IntegerAttr(1))})
+          ConvOp::create(
+              rewriter, loc, TypeRange{partialType},
+              ValueRange{ctx, op.getInput(), subWeight, partialInit},
+              ArrayRef<NamedAttribute>{
+                  rewriter.getNamedAttr(
+                      "kernel_shape", rewriter.getI64ArrayAttr({taps0, taps1})),
+                  rewriter.getNamedAttr("strides",
+                                        rewriter.getI64ArrayAttr({1, 1})),
+                  rewriter.getNamedAttr(
+                      "pads", rewriter.getI64ArrayAttr({taps0 - 1, taps1 - 1,
+                                                        dims[0].ydot - 1,
+                                                        dims[1].ydot - 1})),
+                  rewriter.getNamedAttr("dilations",
+                                        rewriter.getI64ArrayAttr({1, 1})),
+                  rewriter.getNamedAttr("group",
+                                        rewriter.getI64IntegerAttr(1))})
               .getResult(0);
 
       // Residue itilda lands on output positions {itilda + k * stride}.
@@ -257,10 +255,10 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
           rewriter.getIndexAttr(1), rewriter.getIndexAttr(1),
           rewriter.getIndexAttr(dims[0].stride),
           rewriter.getIndexAttr(dims[1].stride)};
-      scattered = tensor::InsertSliceOp::create(rewriter, loc, partial,
-                                                scattered, offsets, sizes,
-                                                insertStrides)
-                      .getResult();
+      scattered =
+          tensor::InsertSliceOp::create(rewriter, loc, partial, scattered,
+                                        offsets, sizes, insertStrides)
+              .getResult();
     }
   }
 
@@ -269,15 +267,14 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
                                         rewriter.getIndexAttr(0),
                                         rewriter.getIndexAttr(dims[0].padLo),
                                         rewriter.getIndexAttr(dims[1].padLo)};
-  SmallVector<OpFoldResult> cropSizes{rewriter.getIndexAttr(numBatch),
-                                      rewriter.getIndexAttr(outChannels),
-                                      rewriter.getIndexAttr(dims[0].out),
-                                      rewriter.getIndexAttr(dims[1].out)};
+  SmallVector<OpFoldResult> cropSizes{
+      rewriter.getIndexAttr(numBatch), rewriter.getIndexAttr(outChannels),
+      rewriter.getIndexAttr(dims[0].out), rewriter.getIndexAttr(dims[1].out)};
   SmallVector<OpFoldResult> cropStrides(4, rewriter.getIndexAttr(1));
-  Value result = tensor::ExtractSliceOp::create(rewriter, loc, resultType,
-                                                scattered, cropOffsets,
-                                                cropSizes, cropStrides)
-                     .getResult();
+  Value result =
+      tensor::ExtractSliceOp::create(rewriter, loc, resultType, scattered,
+                                     cropOffsets, cropSizes, cropStrides)
+          .getResult();
 
   // One broadcast add on the final shape. The residues tile the grid, so each
   // output element belongs to exactly one of them and passing the bias to every
@@ -287,16 +284,14 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
   if (bias) {
     auto biasType = cast<RankedTensorType>(bias.getType());
     // Broadcast against [N, M, H, W] rather than the trailing axis.
-    auto shapedBiasType = RankedTensorType::get(
-        {1, biasType.getDimSize(0), 1, 1}, elementType);
-    Value shapedBias =
-        tensor::ExpandShapeOp::create(
-            rewriter, loc, shapedBiasType, bias,
-            SmallVector<ReassociationIndices>{{0, 1, 2, 3}})
-            .getResult();
+    auto shapedBiasType =
+        RankedTensorType::get({1, biasType.getDimSize(0), 1, 1}, elementType);
+    Value shapedBias = tensor::ExpandShapeOp::create(
+                           rewriter, loc, shapedBiasType, bias,
+                           SmallVector<ReassociationIndices>{{0, 1, 2, 3}})
+                           .getResult();
     Value biasInit = tensor::EmptyOp::create(rewriter, loc,
-                                             resultType.getShape(),
-                                             elementType)
+                                             resultType.getShape(), elementType)
                          .getResult();
     result = AddOp::create(rewriter, loc, resultType, ctx, result, shapedBias,
                            biasInit)
