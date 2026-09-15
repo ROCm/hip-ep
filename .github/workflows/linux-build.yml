@@ -24,7 +24,7 @@ env:
   # LLVM/MLIR/LLD are built from source at this upstream release tag; bumping it
   # only invalidates the llvm-install cache.
   LLVM_TAG: llvmorg-22.1.0
-  ONNXRUNTIME_VERSION: "1.29.0"
+  ONNXRUNTIME_VERSION: "1.27.0"
   # Space-separated microsoft/onnxruntime PR numbers `git apply`-ed on top of
   # the pinned tag during the from-source build (an empty list applies nothing;
   # ORT is still built from source either way). Part of the ort-install cache
