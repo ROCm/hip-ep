@@ -202,9 +202,9 @@ void testInlineValueBytesWritten() {
   CapturingFileSystem fs;
   bool ok = false;
   auto module = h.run(R"mlir(
-    func.func @f() -> tensor<4xi8> {
-      %0 = hipsr.constant {value = dense<[10, 20, 30, 40]> : tensor<4xi8>} : tensor<4xi8>
-      return %0 : tensor<4xi8>
+    func.func @f() -> tensor<4xi8, #hipsr.mem<device>> {
+      %0 = hipsr.constant {value = dense<[10, 20, 30, 40]> : tensor<4xi8>} : tensor<4xi8, #hipsr.mem<device>>
+      return %0 : tensor<4xi8, #hipsr.mem<device>>
     }
   )mlir",
                       &fs, ok);
@@ -237,9 +237,9 @@ void testMemResourceBytesWritten() {
   CapturingFileSystem fs;
   bool ok = false;
   auto module = h.run(R"mlir(
-    func.func @f() -> tensor<3xi8> {
-      %0 = hipsr.constant {value = dense_resource<"mem|0x1"> : tensor<3xi8>} : tensor<3xi8>
-      return %0 : tensor<3xi8>
+    func.func @f() -> tensor<3xi8, #hipsr.mem<device>> {
+      %0 = hipsr.constant {value = dense_resource<"mem|0x1"> : tensor<3xi8>} : tensor<3xi8, #hipsr.mem<device>>
+      return %0 : tensor<3xi8, #hipsr.mem<device>>
     }
   )mlir",
                       &fs, ok, {{"mem|0x1", host}});
@@ -269,13 +269,14 @@ void testFileResourceBytesStreamed() {
   bool ok = false;
   std::string key = "file|" + path.generic_string() + "|0";
   std::vector<char> window(5);
-  auto module = h.run("func.func @f() -> tensor<5xi8> {\n"
-                      "  %0 = hipsr.constant {value = dense_resource<\"" +
-                          key +
-                          "\"> : tensor<5xi8>} : tensor<5xi8>\n"
-                          "  return %0 : tensor<5xi8>\n"
-                          "}\n",
-                      &fs, ok, {{key, window}});
+  auto module =
+      h.run("func.func @f() -> tensor<5xi8, #hipsr.mem<device>> {\n"
+            "  %0 = hipsr.constant {value = dense_resource<\"" +
+                key +
+                "\"> : tensor<5xi8>} : tensor<5xi8, #hipsr.mem<device>>\n"
+                "  return %0 : tensor<5xi8, #hipsr.mem<device>>\n"
+                "}\n",
+            &fs, ok, {{key, window}});
   check(ok, "file resource: pass succeeds");
 
   const std::vector<char> &blob = fs.files["constants.bin"];
@@ -295,10 +296,10 @@ void testCumulativeAlignmentAndPadding() {
   CapturingFileSystem fs;
   bool ok = false;
   auto module = h.run(R"mlir(
-    func.func @f() -> (tensor<4xi8>, tensor<8xi8>) {
-      %0 = hipsr.constant {value = dense<[1, 2, 3, 4]> : tensor<4xi8>} : tensor<4xi8>
-      %1 = hipsr.constant {value = dense<[5, 6, 7, 8, 9, 10, 11, 12]> : tensor<8xi8>} : tensor<8xi8>
-      return %0, %1 : tensor<4xi8>, tensor<8xi8>
+    func.func @f() -> (tensor<4xi8, #hipsr.mem<device>>, tensor<8xi8, #hipsr.mem<device>>) {
+      %0 = hipsr.constant {value = dense<[1, 2, 3, 4]> : tensor<4xi8>} : tensor<4xi8, #hipsr.mem<device>>
+      %1 = hipsr.constant {value = dense<[5, 6, 7, 8, 9, 10, 11, 12]> : tensor<8xi8>} : tensor<8xi8, #hipsr.mem<device>>
+      return %0, %1 : tensor<4xi8, #hipsr.mem<device>>, tensor<8xi8, #hipsr.mem<device>>
     }
   )mlir",
                       &fs, ok);
@@ -317,9 +318,23 @@ void testCumulativeAlignmentAndPadding() {
       {1, 2, 3, 4},
       {5, 6, 7, 8, 9, 10, 11, 12},
   };
-  // Offset-driven: verifies the data sits at the stamped offset (0 then aligned
-  // 64), gap/trailing zeros, and total length alignTo(72, 64) = 128.
   verifyLayout(fs.files["constants.bin"], ops, expected, "cumulative");
+
+  auto fileAttr = module->getOperation()->getAttrOfType<mlir::StringAttr>(
+      "hip.constants_file");
+  auto sizesAttr =
+      module->getOperation()->getAttrOfType<mlir::DenseI64ArrayAttr>(
+          "hipdnn.constant_sizes");
+  auto offsetsAttr =
+      module->getOperation()->getAttrOfType<mlir::DenseI64ArrayAttr>(
+          "hipdnn.constant_offsets");
+  check(fileAttr && fileAttr.getValue() == "constants.bin",
+        "cumulative: hip.constants_file names the written file");
+  check(sizesAttr && sizesAttr.asArrayRef() == llvm::ArrayRef<int64_t>{4, 8},
+        "cumulative: hipdnn.constant_sizes matches the stamped sizes");
+  check(offsetsAttr &&
+            offsetsAttr.asArrayRef() == llvm::ArrayRef<int64_t>{0, 64},
+        "cumulative: hipdnn.constant_offsets matches the stamped offsets");
 }
 
 // Multiple functions in one module share a single cumulative offset and a
@@ -331,13 +346,13 @@ void testMultiFunctionSharesOneConstantsFile() {
   CapturingFileSystem fs;
   bool ok = false;
   auto module = h.run(R"mlir(
-    func.func @a() -> tensor<4xi8> {
-      %0 = hipsr.constant {value = dense<[1, 2, 3, 4]> : tensor<4xi8>} : tensor<4xi8>
-      return %0 : tensor<4xi8>
+    func.func @a() -> tensor<4xi8, #hipsr.mem<device>> {
+      %0 = hipsr.constant {value = dense<[1, 2, 3, 4]> : tensor<4xi8>} : tensor<4xi8, #hipsr.mem<device>>
+      return %0 : tensor<4xi8, #hipsr.mem<device>>
     }
-    func.func @b() -> tensor<8xi8> {
-      %0 = hipsr.constant {value = dense<[5, 6, 7, 8, 9, 10, 11, 12]> : tensor<8xi8>} : tensor<8xi8>
-      return %0 : tensor<8xi8>
+    func.func @b() -> tensor<8xi8, #hipsr.mem<device>> {
+      %0 = hipsr.constant {value = dense<[5, 6, 7, 8, 9, 10, 11, 12]> : tensor<8xi8>} : tensor<8xi8, #hipsr.mem<device>>
+      return %0 : tensor<8xi8, #hipsr.mem<device>>
     }
   )mlir",
                       &fs, ok);
@@ -358,6 +373,18 @@ void testMultiFunctionSharesOneConstantsFile() {
   };
   // Offset-driven: @a's constant at 0, @b's at aligned 64 in the shared blob.
   verifyLayout(fs.files["constants.bin"], ops, expected, "multi-func");
+
+  auto sizesAttr =
+      module->getOperation()->getAttrOfType<mlir::DenseI64ArrayAttr>(
+          "hipdnn.constant_sizes");
+  auto offsetsAttr =
+      module->getOperation()->getAttrOfType<mlir::DenseI64ArrayAttr>(
+          "hipdnn.constant_offsets");
+  check(sizesAttr && sizesAttr.asArrayRef() == llvm::ArrayRef<int64_t>{4, 8},
+        "multi-func: hipdnn.constant_sizes spans both functions");
+  check(offsetsAttr &&
+            offsetsAttr.asArrayRef() == llvm::ArrayRef<int64_t>{0, 64},
+        "multi-func: hipdnn.constant_offsets spans both functions");
 }
 
 // The core round-trip: several constants of mixed kinds / dtypes / sizes chosen
@@ -404,19 +431,21 @@ void testOffsetDrivenReadBack() {
 
   // c0's i32 values whose little-endian bytes are {1..4} and {5..8}.
   std::string ir =
-      "func.func @f() -> (tensor<2xi32>, tensor<100xi8>, tensor<3xi8>, "
-      "tensor<7xi8>) {\n"
+      "func.func @f() -> (tensor<2xi32, #hipsr.mem<device>>, "
+      "tensor<100xi8, #hipsr.mem<device>>, tensor<3xi8, #hipsr.mem<device>>, "
+      "tensor<7xi8, #hipsr.mem<device>>) {\n"
       "  %0 = hipsr.constant {value = dense<[67305985, 134678021]> : "
-      "tensor<2xi32>} : tensor<2xi32>\n"
+      "tensor<2xi32>} : tensor<2xi32, #hipsr.mem<device>>\n"
       "  %1 = hipsr.constant {value = dense_resource<\"" +
       fileKey +
-      "\"> : tensor<100xi8>} : tensor<100xi8>\n"
+      "\"> : tensor<100xi8>} : tensor<100xi8, #hipsr.mem<device>>\n"
       "  %2 = hipsr.constant {value = dense<[91, 92, 93]> : tensor<3xi8>} : "
-      "tensor<3xi8>\n"
+      "tensor<3xi8, #hipsr.mem<device>>\n"
       "  %3 = hipsr.constant {value = dense_resource<\"mem|0x1\"> : "
-      "tensor<7xi8>} : tensor<7xi8>\n"
-      "  return %0, %1, %2, %3 : tensor<2xi32>, tensor<100xi8>, tensor<3xi8>, "
-      "tensor<7xi8>\n"
+      "tensor<7xi8>} : tensor<7xi8, #hipsr.mem<device>>\n"
+      "  return %0, %1, %2, %3 : tensor<2xi32, #hipsr.mem<device>>, "
+      "tensor<100xi8, #hipsr.mem<device>>, tensor<3xi8, #hipsr.mem<device>>, "
+      "tensor<7xi8, #hipsr.mem<device>>\n"
       "}\n";
 
   Harness h;
@@ -492,9 +521,9 @@ void testWriteFailureFailsPass() {
   FailingFileSystem fs;
   bool ok = true;
   h.run(R"mlir(
-    func.func @f() -> tensor<4xi8> {
-      %0 = hipsr.constant {value = dense<[1, 2, 3, 4]> : tensor<4xi8>} : tensor<4xi8>
-      return %0 : tensor<4xi8>
+    func.func @f() -> tensor<4xi8, #hipsr.mem<device>> {
+      %0 = hipsr.constant {value = dense<[1, 2, 3, 4]> : tensor<4xi8>} : tensor<4xi8, #hipsr.mem<device>>
+      return %0 : tensor<4xi8, #hipsr.mem<device>>
     }
   )mlir",
         &fs, ok);

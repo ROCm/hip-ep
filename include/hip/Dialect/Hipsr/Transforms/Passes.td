@@ -213,8 +213,11 @@ def HipsrExternalizeConstantsPass
     : Pass<"hipsr-externalize-constants", "mlir::ModuleOp"> {
   let summary = "Externalize hipsr.constant: stamp offset/size/index, write constants file";
   let description = [{
-    Externalizes each `hipsr.constant`: stamps `offset`/`size`/`index`.
-    With a FileSystem injected, also writes the constants file.
+    Gives each `hipsr.constant` an `index`, `offset`, and `size`.
+    When the module has constants, it sets `hip.constants_file`,
+    `hipdnn.constant_sizes`, and `hipdnn.constant_offsets`.
+    `--generate-interface` reads those attributes.
+    When a FileSystem is present, it writes the constants file.
   }];
   let options = [
     Option<"constantsFile", "constants-file", "std::string",

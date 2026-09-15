@@ -7,6 +7,7 @@
 
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
+#include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Conversion/ShapeToStandard/ShapeToStandard.h"
 #include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
@@ -33,6 +34,9 @@
 //   --hipsr-inline-regions
 //   --buffer-deallocation-pipeline
 //   --optimize-allocation-liveness
+//   --hipsr-externalize-constants
+//   --assign-op-state-slots
+//   --generate-op-state-init
 void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
                                      const HipsrPipelineOptions & /*options*/) {
   pm.addPass(createAddContextArgPass());
@@ -70,6 +74,11 @@ void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
   bufferization::buildBufferDeallocationPipeline(pm, deallocOptions);
   pm.addNestedPass<func::FuncOp>(
       bufferization::createOptimizeAllocationLivenessPass());
+
+  pm.addPass(createHipsrExternalizeConstantsPass());
+
+  pm.addPass(hip::createAssignOpStateSlotsPass());
+  pm.addPass(hip::createGenerateOpStateInitPass());
 }
 
 void mlir::hipsr::registerHipsrPipelines() {

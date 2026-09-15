@@ -49,8 +49,15 @@
 
 // RUN: %python %S/../../../Inputs/make_external_data.py %t/embedding.onnx.data 2034237440 && cd %t && hip-mlir-opt --onnx-dialect=modeled --hipsr-pipeline --mlir-elide-resource-strings-if-larger=32 %s | FileCheck %s
 
+// generate-interface reads these constant-layout module attributes.
+// This graph has no matmul, so the pipeline assigns no op-state slots.
+// CHECK-LABEL: module attributes {
+// CHECK-SAME: hip.constants_file = "constants.bin"
+// CHECK-SAME: hipdnn.constant_offsets = array<i64: 0, 64>
+// CHECK-SAME: hipdnn.constant_sizes = array<i64: 8, 2034237440>} {
+
 // The checks cover every output line, so a new alloc or copy fails the test.
-// CHECK-LABEL:   func.func @main_graph(
+// CHECK-NEXT:      func.func @main_graph(
 // CHECK-SAME:      %[[ARG0:[^:,]*]]: !hipsr.context,
 // CHECK-SAME:      %[[ARG1:[^:,]*]]: memref<?x?xi64, #hipsr.mem<device>> {onnx.name = "input_ids"},
 // CHECK-SAME:      %[[ARG2:[^:,]*]]: memref<?x4096xf16, #hipsr.mem<device>> {onnx.name = "image_features"}) -> (memref<?x?x4096xf16, #hipsr.mem<device>> {onnx.name = "inputs_embeds"}) attributes {onnx.graph.name = "main_graph"} {
@@ -63,8 +70,8 @@
 // CHECK-NEXT:      %[[CONSTANT_6:.*]] = arith.constant 248320 : index
 // CHECK-NEXT:      %[[CONSTANT_7:.*]] = arith.constant 2 : index
 // CHECK-NEXT:      %[[CONSTANT_8:.*]] = arith.constant 4096 : index
-// CHECK-NEXT:      %[[CONSTANT_9:.*]] = hipsr.constant {value = dense<248056> : tensor<i64>} : memref<i64, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[CONSTANT_10:.*]] = hipsr.constant {value = dense_resource<"file|embedding.onnx.data|0"> : tensor<248320x4096xf16, #hipsr.mem<device>>} : memref<248320x4096xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      %[[CONSTANT_9:.*]] = hipsr.constant {index = 0 : i64, offset = 0 : i64, size = 8 : i64, value = dense<248056> : tensor<i64>} : memref<i64, #hipsr.mem<device>>
+// CHECK-NEXT:      %[[CONSTANT_10:.*]] = hipsr.constant {index = 1 : i64, offset = 64 : i64, size = 2034237440 : i64, value = dense_resource<"file|embedding.onnx.data|0"> : tensor<248320x4096xf16, #hipsr.mem<device>>} : memref<248320x4096xf16, #hipsr.mem<device>>
 // CHECK-NEXT:      %[[CONSTANT_11:.*]] = arith.constant 1 : index
 // CHECK-NEXT:      %[[CONSTANT_12:.*]] = arith.constant 0 : index
 // CHECK-NEXT:      %[[CONSTANT_13:.*]] = arith.constant 3 : index
@@ -371,6 +378,7 @@
 // CHECK-NEXT:      memref.dealloc %[[ALLOC_29]] : memref<3xindex>
 // CHECK-NEXT:      return %[[ALLOC_OUTPUT_0]] : memref<?x?x4096xf16, #hipsr.mem<device>>
 // CHECK-NEXT:      }
+// CHECK-NEXT:    }
 
 module {
   func.func @main_graph(%arg0: tensor<?x?xi64> {onnx.name = "input_ids"}, %arg1: tensor<?x4096xf16> {onnx.name = "image_features"}) -> (tensor<?x?x4096xf16> {onnx.name = "inputs_embeds"}) attributes {onnx.graph.name = "main_graph"} {
