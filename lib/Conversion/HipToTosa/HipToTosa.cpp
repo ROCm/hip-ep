@@ -1568,9 +1568,10 @@ struct MatMulNBitsConverter final
     unpacked = sliceLastDimTo(unpacked, k, rewriter, loc);
 
     Type computeElem = resultType.getElementType();
-    Value scales = emitTosaCast(rewriter, loc, adaptor.getScales(), computeElem);
-    scales = broadcastBlocksAlongK(scales, n, k, kBlocks, blockSize, rewriter,
-                                   loc);
+    Value scales =
+        emitTosaCast(rewriter, loc, adaptor.getScales(), computeElem);
+    scales =
+        broadcastBlocksAlongK(scales, n, k, kBlocks, blockSize, rewriter, loc);
 
     Value shifted = emitTosaCast(rewriter, loc, unpacked, computeElem);
     auto nkFloat = RankedTensorType::get({n, k}, computeElem);
@@ -1602,8 +1603,7 @@ struct MatMulNBitsConverter final
           zp = sliceLastDimTo(zp, kBlocks, rewriter, loc);
         } else {
           if (zpTy.getNumElements() != n * kBlocks)
-            return rewriter.notifyMatchFailure(op,
-                                               "zp must have N * k_blocks");
+            return rewriter.notifyMatchFailure(op, "zp must have N * k_blocks");
           zp = reshapeTo(zp, {n, kBlocks}, rewriter);
         }
         zp = broadcastBlocksAlongK(zp, n, k, kBlocks, blockSize, rewriter, loc);
