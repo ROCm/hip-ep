@@ -797,8 +797,7 @@ int main(int argc, char **argv) {
     }
     const CompiledKernel &kernel = it->second;
     op.setKernelBinaryAttr(mlir::StringAttr::get(
-        &context,
-        llvm::StringRef(kernel.binary.data(), kernel.binary.size())));
+        &context, llvm::StringRef(kernel.binary.data(), kernel.binary.size())));
     op.setGridSizeAttr(mlir::IntegerAttr::get(i64, kernel.gridSize));
     op.setBlockSizeAttr(mlir::IntegerAttr::get(i64, kernel.blockSize));
     ++stamped;
