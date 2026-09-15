@@ -86,7 +86,12 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
   if (!inputType || !weightType || !resultType || !inputType.hasStaticShape() ||
       !weightType.hasStaticShape() || !resultType.hasStaticShape())
     return rewriter.notifyMatchFailure(op, "expected static ranked tensors");
-  if (inputType.getRank() != 4 || weightType.getRank() != 4)
+  // The result rank is checked alongside the operands because nothing verifies
+  // that it agrees with them: the type comes from the `outs` operand, which is
+  // only constrained to be a tensor or memref. A rank<4 result would otherwise
+  // reach getDimSize(2 + d) below and assert instead of bailing out here.
+  if (inputType.getRank() != 4 || weightType.getRank() != 4 ||
+      resultType.getRank() != 4)
     return rewriter.notifyMatchFailure(op, "expected 2D transposed conv");
 
   // hip.conv lowers to tosa.conv2d, which has no grouped form.

@@ -92,6 +92,7 @@ see [below](#passes-that-are-not-individually-nameable)). Prefer, in order:
 | `onnx-to-hip-pipeline` | `externalize-output-dir`, `externalize-min-num-elements`, `skip-constant-data` | ONNX dialect → fully bufferized, pooled HIP memref IR with resolved extern constants. |
 | `hip-to-llvm-pipeline` | `constants-file` | HIP memref IR → LLVM dialect + the C-ABI interface (`inference_init/compute/cleanup`, metadata). |
 | `hipdnn-pipeline` | `constants-file`, `constants-dir`, `externalize-min-num-elements` | The full ONNX→HIP→LLVM→interface flow (chains the two above). |
+| `rocmlir-pipeline` | — | Prepare HIP tensor IR for rocMLIR kernel offload: split `hip.conv_transpose` into plain convolutions, outline the rocMLIR-eligible ops into `rock.kernel` funcs, then lower those bodies to TOSA. Not part of the default compile — `hip-rocmlir-compiler` runs it. |
 
 Options use MLIR's pipeline-option syntax:
 `onnx-to-hip-pipeline{skip-constant-data=true}`.
@@ -135,6 +136,38 @@ Options use MLIR's pipeline-option syntax:
 | `assign-op-state-slots` | module | Assign one op-state slot per stateful op instance (op-state-slots design). No-op without stateful ops. |
 | `generate-op-state-init` | module | Emit `@hipdnn_ep_op_states_init_fn` from each stateful op's `generateOpStateInit`. No-op without stateful ops. |
 | `convert-hip-to-llvm` | module | Lower HIP ops to runtime C-API calls / LLVM dialect. |
+
+### rocMLIR offload passes
+
+Anchored on `func.func`, so the textual form needs `func.func(...)`. These run
+against HIP **tensor** IR (before bufferization) and are reached through
+`rocmlir-pipeline`, not the default ONNX→HIP→LLVM flow.
+
+| Name | Anchor | One-liner |
+|---|---|---|
+| `hip-decompose-conv-transpose` | func.func | Rewrite `hip.conv_transpose` into one stride-1 `hip.conv` per stride residue (MIOpen backward-data v4r1), reassembled with `tensor.insert_slice`. Leaves unsupported cases (grouped, dilated, dynamic, non-constant or non-f16/bf16/f32 weights, stride > kernel, > 64 residues) for the MIOpen path. |
+| `hip-fuse-rocmlir` | func.func | Outline rocMLIR-eligible op groups into `rock.kernel` funcs around a gemm/convolution/attention anchor. |
+| `convert-hip-to-tosa` | func.func | Lower the outlined kernel bodies from HIP ops to TOSA. |
+
+Order matters: `hip-decompose-conv-transpose` must run **before**
+`hip-fuse-rocmlir`, because rocMLIR has no transposed-convolution anchor and
+would otherwise refuse to outline the op at all. The registered pipeline runs
+
+```
+func.func(hip-decompose-conv-transpose)
+canonicalize
+func.func(hip-fuse-rocmlir)
+duplicate-function-elimination
+func.func(convert-hip-to-tosa)
+canonicalize
+```
+
+The canonicalize after decomposition is load-bearing rather than cosmetic: it
+folds the per-residue weight constants and the insert_slice chain that the
+rewrite leaves behind, which is what lets the fuse pass see a clean anchor.
+
+> The `hipsr-*` family and `convert-onnx-to-hipsr` are registered but not yet
+> tabulated here.
 
 ### Standard MLIR passes and sub-pipelines
 

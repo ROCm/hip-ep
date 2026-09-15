@@ -43,6 +43,7 @@
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Transforms/Passes.h"
 
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/LLVMContext.h"
@@ -710,6 +711,21 @@ int main(int argc, char **argv) {
       kernelNames.push_back(func.getSymName().str());
   if (kernelNames.empty()) {
     llvm::errs() << "error: no rock.kernel func to compile\n";
+    return 1;
+  }
+
+  // A keyed --perf-config naming a kernel that does not exist would otherwise
+  // be dropped on the floor and that kernel compiled with the default config,
+  // so a typo or a stale name reads as a successful run of a configuration
+  // that was never applied. Tuning decisions get made off those numbers, so
+  // refuse the run instead.
+  for (const auto &entry : perfConfigByKernel) {
+    if (llvm::is_contained(kernelNames, entry.getKey()))
+      continue;
+    llvm::errs() << "error: --perf-config names unknown kernel '"
+                 << entry.getKey() << "'; this module has:\n";
+    for (const std::string &name : kernelNames)
+      llvm::errs() << "  " << name << "\n";
     return 1;
   }
 
