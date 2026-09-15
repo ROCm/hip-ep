@@ -540,9 +540,33 @@ def build_rocmlirtriton(args, build_dir, source_dir=None, rocm_path=None):
                 os.link(clang, clang_cl)
             except OSError:
                 shutil.copy2(clang, clang_cl)
-        resource_src = rocm_path / "lib" / "clang"
+        # The resource dir sits next to the driver, so it moves with the
+        # bundle layout: <root>/lib/clang when clang.exe is in <root>/bin,
+        # <root>/lib/llvm/lib/clang when it is in <root>/lib/llvm/bin.
+        resource_candidates = [
+            compiler_dir.parent / "lib" / "clang",
+            rocm_path / "lib" / "clang",
+        ]
+        resource_src = next(
+            (p for p in resource_candidates if p.is_dir()), None
+        )
+        if resource_src is None:
+            # Bundles move this tree around, so locate the builtin headers
+            # rather than guess a third fixed path.
+            probe = next(
+                rocm_path.glob("**/lib/clang/*/include/emmintrin.h"), None
+            )
+            if probe is not None:
+                resource_src = probe.parents[2]
+        if resource_src is None:
+            raise BuildError(
+                "TheRock ships no clang resource directory; checked "
+                + ", ".join(str(p) for p in resource_candidates)
+                + ". Without it the clang-cl alias resolves MSVC's "
+                "emmintrin.h and the clang link fails on _mm_* symbols."
+            )
         resource_dst = rock_root / "lib" / "clang"
-        if resource_src.is_dir() and not resource_dst.exists():
+        if not resource_dst.exists():
             resource_dst.parent.mkdir(parents=True, exist_ok=True)
             try:
                 os.symlink(resource_src, resource_dst, target_is_directory=True)
