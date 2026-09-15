@@ -94,11 +94,15 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
   if (op.getGroup() != 1)
     return rewriter.notifyMatchFailure(op, "grouped transposed conv");
 
+  // The residues become hip.conv, which lowers to tosa.conv2d only for these
+  // three types. Anything else (f64 in particular) would decompose here and
+  // then fail to legalize, so leave it on the MIOpen path instead.
   Type elementType = resultType.getElementType();
-  if (!isa<FloatType>(elementType) ||
-      inputType.getElementType() != elementType ||
+  if (!elementType.isF16() && !elementType.isBF16() && !elementType.isF32())
+    return rewriter.notifyMatchFailure(op, "expected f16, bf16, or f32");
+  if (inputType.getElementType() != elementType ||
       weightType.getElementType() != elementType)
-    return rewriter.notifyMatchFailure(op, "expected matching float types");
+    return rewriter.notifyMatchFailure(op, "expected matching element types");
 
   // The tap selection and flip are folded into new constants, so the filter
   // has to be available at compile time.
@@ -127,6 +131,18 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
       resultType.getDimSize(1) != outChannels)
     return rewriter.notifyMatchFailure(op, "incompatible channel counts");
 
+  // Checked up front rather than at the point of use: a pattern must leave the
+  // IR untouched when it fails, and by then the residues have been emitted.
+  Value bias = op.getBias();
+  if (bias) {
+    auto biasType = dyn_cast<RankedTensorType>(bias.getType());
+    if (!biasType || !biasType.hasStaticShape() || biasType.getRank() != 1 ||
+        biasType.getDimSize(0) != outChannels ||
+        biasType.getElementType() != elementType)
+      return rewriter.notifyMatchFailure(
+          op, "expected a static 1-D bias of matching type and length M");
+  }
+
   SmallVector<DimInfo, 2> dims;
   for (int64_t d : llvm::seq<int64_t>(2)) {
     DimInfo di;
@@ -150,6 +166,16 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
       return rewriter.notifyMatchFailure(op, "output exceeds the residue grid");
     dims.push_back(di);
   }
+
+  // One convolution -- and so one serial rocMLIR compilation, with its own
+  // tuning-space enumeration -- is emitted per residue, and the count is the
+  // product of the strides. Large strides are legal but would expand into
+  // hundreds of kernels and dominate compile time, so they stay on the MIOpen
+  // path. Covers the strides transposed convolutions actually use (2 and 4 for
+  // upsampling, up to 8x8 here) without opening that hole.
+  constexpr int64_t kMaxResidues = 64;
+  if (dims[0].stride * dims[1].stride > kMaxResidues)
+    return rewriter.notifyMatchFailure(op, "too many residues to be worth it");
 
   Location loc = op.getLoc();
   Value ctx = op.getCtx();
@@ -253,12 +279,13 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
                                                 cropSizes, cropStrides)
                      .getResult();
 
-  // Bias is added once, after reassembly: folding it into the residues would
-  // add it `stride` times and also stamp it onto positions the crop keeps.
-  if (Value bias = op.getBias()) {
-    auto biasType = dyn_cast<RankedTensorType>(bias.getType());
-    if (!biasType || !biasType.hasStaticShape() || biasType.getRank() != 1)
-      return rewriter.notifyMatchFailure(op, "expected a 1-D static bias");
+  // One broadcast add on the final shape. The residues tile the grid, so each
+  // output element belongs to exactly one of them and passing the bias to every
+  // residue convolution would be equally correct -- and would fuse into the
+  // convolution epilogue instead of costing a separate dispatch. Kept separate
+  // here so the bias does not depend on the residue tiling.
+  if (bias) {
+    auto biasType = cast<RankedTensorType>(bias.getType());
     // Broadcast against [N, M, H, W] rather than the trailing axis.
     auto shapedBiasType = RankedTensorType::get(
         {1, biasType.getDimSize(0), 1, 1}, elementType);
