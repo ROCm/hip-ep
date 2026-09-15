@@ -114,12 +114,18 @@ graph_add_initialized_tensor(Graph &graph, const TensorProto &tensor) {
 
 MORPHIZEN_DLL_SPEC void graph_set_inputs(Graph &graph,
                                          const std::vector<NodeArg *> &inputs) {
-  MORPHIZEN_ORT_API(graph_set_inputs)(graph, inputs);
+  MORPHIZEN_ORT_API(graph_set_inputs)(
+      graph, gsl::span<const NodeArg *const>(
+                 reinterpret_cast<const NodeArg *const *>(inputs.data()),
+                 inputs.size()));
 }
 
 MORPHIZEN_DLL_SPEC void
 graph_set_outputs(Graph &graph, const std::vector<NodeArg *> &outputs) {
-  MORPHIZEN_ORT_API(graph_set_outputs)(graph, outputs);
+  MORPHIZEN_ORT_API(graph_set_outputs)(
+      graph, gsl::span<const NodeArg *const>(
+                 reinterpret_cast<const NodeArg *const *>(outputs.data()),
+                 outputs.size()));
 }
 
 MORPHIZEN_DLL_SPEC void graph_save(Graph &graph, const std::string &model_path,
