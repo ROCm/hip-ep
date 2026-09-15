@@ -369,8 +369,11 @@ isFusableQLpNormalization(mlir::PatternRewriter &, mlir::PDLResultList &,
 // UINT16 per-tensor Q/DQ with identical scale and zero point. Unsqueeze,
 // Squeeze, and Reshape only re-rank or regroup dimensions while preserving
 // element order, so Q(layout(DQ(x))) is layout(x), and the round-trip can drop.
-// Only scalar scales are accepted, and blocked quantization is rejected. A
-// non-finite scale, or one that can overflow fp32 dequantization, is rejected.
+// The floating-point activation and scales must be fp32: fp16 cannot represent
+// every UINT16 code exactly, so its Q/DQ round-trip is not generally an
+// identity. Only scalar scales are accepted, and blocked quantization is
+// rejected. A non-finite scale, or one that can overflow fp32 dequantization,
+// is rejected.
 inline mlir::LogicalResult
 hasMatchingLayoutQParams(mlir::PatternRewriter &, mlir::PDLResultList &,
                          llvm::ArrayRef<mlir::PDLValue> args) {
@@ -386,6 +389,20 @@ hasMatchingLayoutQParams(mlir::PatternRewriter &, mlir::PDLResultList &,
   auto qType = getQuantizedElementType(q);
   if (!dqType || !qType || dqType != qType || dqType.getWidth() != 16 ||
       !dqType.isUnsigned())
+    return mlir::failure();
+
+  auto isF32Tensor = [](mlir::Value value) {
+    auto type = mlir::dyn_cast<mlir::ShapedType>(value.getType());
+    return type && type.getElementType().isF32();
+  };
+  if (!isF32Tensor(dq->getResult(0)) || !isF32Tensor(q->getOperand(0)) ||
+      !isF32Tensor(dq->getOperand(1)) || !isF32Tensor(q->getOperand(1)))
+    return mlir::failure();
+
+  // TensorProto FLOAT (1) is the only explicit precision equivalent to the
+  // required fp32 computation; an absent/zero attribute follows the fp32 scale.
+  if (!onnxIntAttrEquals(q, "precision", 0, /*absentValue=*/0) &&
+      !onnxIntAttrEquals(q, "precision", 1, /*absentValue=*/0))
     return mlir::failure();
 
   auto isScalarTensor = [](mlir::Value value) {

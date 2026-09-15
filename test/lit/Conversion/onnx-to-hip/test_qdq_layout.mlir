@@ -24,6 +24,7 @@ module {
 // CHECK-NOT:   hip.quantize_linear
 // CHECK:       tensor.expand_shape
 // CHECK-SAME:  tensor<128x2048xui16> into tensor<128x1x2048xui16>
+// CHECK-NOT:   hip.quantize_linear
   func.func @qdq_unsqueeze(%x: tensor<128x2048xui16>) -> tensor<128x1x2048xui16> {
     %scale = "onnx.Constant"() {value = dense<0.1> : tensor<f32>} : () -> tensor<f32>
     %zp = "onnx.Constant"() {value = dense<5> : tensor<ui16>} : () -> tensor<ui16>
@@ -42,6 +43,7 @@ module {
 // CHECK-NOT:   hip.quantize_linear
 // CHECK:       tensor.collapse_shape
 // CHECK-SAME:  tensor<128x1x2048xui16> into tensor<128x2048xui16>
+// CHECK-NOT:   hip.quantize_linear
   func.func @qdq_squeeze(%x: tensor<128x1x2048xui16>) -> tensor<128x2048xui16> {
     %scale = "onnx.Constant"() {value = dense<0.1> : tensor<f32>} : () -> tensor<f32>
     %zp = "onnx.Constant"() {value = dense<5> : tensor<ui16>} : () -> tensor<ui16>
@@ -60,6 +62,7 @@ module {
 // CHECK-NOT:   hip.quantize_linear
 // CHECK:       tensor.expand_shape
 // CHECK-SAME:  tensor<128x2048xui16> into tensor<128x16x128xui16>
+// CHECK-NOT:   hip.quantize_linear
   func.func @qdq_reshape(%x: tensor<128x2048xui16>) -> tensor<128x16x128xui16> {
     %scale = "onnx.Constant"() {value = dense<0.1> : tensor<f32>} : () -> tensor<f32>
     %zp = "onnx.Constant"() {value = dense<5> : tensor<ui16>} : () -> tensor<ui16>
@@ -78,6 +81,7 @@ module {
 // CHECK-NOT:   hip.dequantize_linear
 // CHECK-NOT:   hip.quantize_linear
 // CHECK:       tensor.expand_shape
+// CHECK-NOT:   hip.quantize_linear
   func.func @custom_qdq_unsqueeze(%x: tensor<4xui16>) -> tensor<1x4xui16> {
     %scale = "onnx.Constant"() {value = dense<0.1> : tensor<f32>} : () -> tensor<f32>
     %zp = "onnx.Constant"() {value = dense<5> : tensor<ui16>} : () -> tensor<ui16>
@@ -109,6 +113,25 @@ module {
         : (tensor<8x16xf32>, tensor<1xi64>) -> tensor<8x1x16xf32>
     %q = "onnx.QuantizeLinear"(%u, %out_s, %zp)
         : (tensor<8x1x16xf32>, tensor<f32>, tensor<ui16>) -> tensor<8x1x16xui16>
+    return %q : tensor<8x1x16xui16>
+  }
+
+// FP16 cannot represent every UINT16 code exactly, so its QDQ round-trip is
+// not an identity and must not be removed.
+// CHECK-LABEL: func.func @qdq_unsqueeze_fp16
+// CHECK:       hip.dequantize_linear
+// CHECK:       tensor.expand_shape
+// CHECK:       hip.quantize_linear
+  func.func @qdq_unsqueeze_fp16(%x: tensor<8x16xui16>) -> tensor<8x1x16xui16> {
+    %scale = "onnx.Constant"() {value = dense<1.0> : tensor<f16>} : () -> tensor<f16>
+    %zp = "onnx.Constant"() {value = dense<0> : tensor<ui16>} : () -> tensor<ui16>
+    %axes = "onnx.Constant"() {value = dense<[1]> : tensor<1xi64>} : () -> tensor<1xi64>
+    %dq = "onnx.DequantizeLinear"(%x, %scale, %zp)
+        : (tensor<8x16xui16>, tensor<f16>, tensor<ui16>) -> tensor<8x16xf16>
+    %u = "onnx.Unsqueeze"(%dq, %axes)
+        : (tensor<8x16xf16>, tensor<1xi64>) -> tensor<8x1x16xf16>
+    %q = "onnx.QuantizeLinear"(%u, %scale, %zp)
+        : (tensor<8x1x16xf16>, tensor<f16>, tensor<ui16>) -> tensor<8x1x16xui16>
     return %q : tensor<8x1x16xui16>
   }
 }
