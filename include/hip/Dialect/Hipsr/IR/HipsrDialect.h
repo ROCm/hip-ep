@@ -25,12 +25,6 @@ namespace morphizen {
 class FileSystem;
 } // namespace morphizen
 
-namespace mlir {
-namespace hipsr {
-class ChezSchemeInterpreter;
-} // namespace hipsr
-} // namespace mlir
-
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h.inc"
 
 // Enum header first: MemorySpaceAttr uses MemorySpace.

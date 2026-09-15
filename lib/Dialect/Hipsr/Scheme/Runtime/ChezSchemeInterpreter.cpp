@@ -27,16 +27,20 @@ static void custom_init() {
   mlir::hipsr::registerMlirForeignFunctions();
 }
 
+// Global log level
+static mlir::hipsr::SchemeLogLevel current_log_level = mlir::hipsr::SchemeLogLevel::Warning;
+
 } // anonymous namespace
 
 namespace mlir {
 namespace hipsr {
 
-// Global log level
-static SchemeLogLevel current_log_level = SchemeLogLevel::Warning;
+// Static member initialization
+bool ChezSchemeInterpreter::initialized = false;
+SchemeLogLevel ChezSchemeInterpreter::logLevel = SchemeLogLevel::Warning;
 
 // Parse log level from string
-SchemeLogLevel parseLogLevel(const std::string& level) {
+SchemeLogLevel ChezSchemeInterpreter::parseLogLevel(const std::string& level) {
   if (level == "trace") return SchemeLogLevel::Trace;
   if (level == "debug") return SchemeLogLevel::Debug;
   if (level == "info") return SchemeLogLevel::Info;
@@ -50,14 +54,18 @@ SchemeLogLevel parseLogLevel(const std::string& level) {
 }
 
 // Set global log level
-void setSchemeLogLevel(SchemeLogLevel level) {
+void ChezSchemeInterpreter::setLogLevel(SchemeLogLevel level) {
   current_log_level = level;
+  logLevel = level;
 }
 
-ChezSchemeInterpreter::ChezSchemeInterpreter(SchemeLogLevel logLevel)
-    : logLevel(logLevel) {
+void ChezSchemeInterpreter::initialize(SchemeLogLevel level) {
+  if (initialized) {
+    return;  // Already initialized
+  }
 
-  current_log_level = logLevel;
+  logLevel = level;
+  current_log_level = level;
 
   if (logLevel <= SchemeLogLevel::Debug) {
     llvm::errs() << "[debug] ChezSchemeInterpreter: Initializing Chez Scheme runtime\n";
@@ -91,7 +99,7 @@ ChezSchemeInterpreter::ChezSchemeInterpreter(SchemeLogLevel logLevel)
   }
 }
 
-ChezSchemeInterpreter::~ChezSchemeInterpreter() {
+void ChezSchemeInterpreter::shutdown() {
   if (!initialized) {
     return;
   }
@@ -127,11 +135,11 @@ bool ChezSchemeInterpreter::eval(const char* code) {
   ptr eval_sym = Stop_level_value(Sstring_to_symbol("eval"));
   ptr read_sym = Stop_level_value(Sstring_to_symbol("read"));
   ptr open_port_sym = Stop_level_value(Sstring_to_symbol("open-string-input-port"));
-  
+
   ptr port = Scall1(open_port_sym, Sstring(code));
   ptr expr = Scall1(read_sym, port);
   Scall1(eval_sym, expr);
-  
+
   return true;
 }
 
