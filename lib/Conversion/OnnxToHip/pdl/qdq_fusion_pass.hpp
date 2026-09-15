@@ -224,6 +224,23 @@ isEightOrSixteenBitQuantized(mlir::PatternRewriter &, mlir::PDLResultList &,
   return mlir::success(width == 8 || width == 16);
 }
 
+// Restrict a Q/DQ op to an 8-, 16- or 32-bit quantized side. 
+inline mlir::LogicalResult
+isEightSixteenOrThirtyTwoBitQuantized(mlir::PatternRewriter &,
+                                      mlir::PDLResultList &,
+                                      llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 1)
+    return mlir::failure();
+  auto *op = args[0].dyn_cast<mlir::Operation *>();
+  if (!op)
+    return mlir::failure();
+  auto quantType = getQuantizedElementType(op);
+  if (!quantType)
+    return mlir::failure();
+  unsigned width = quantType.getWidth();
+  return mlir::success(width == 8 || width == 16 || width == 32);
+}
+
 // Require every result of `op` to have a static shape.
 inline mlir::LogicalResult
 hasStaticShapedResults(mlir::PatternRewriter &, mlir::PDLResultList &,
@@ -439,6 +456,29 @@ extractAttrInt64(mlir::PatternRewriter &rewriter, mlir::PDLResultList &results,
   return mlir::success();
 }
 
+// args[0] = op, args[1] = attribute name, args[2] = value to use when absent.
+// The result is always f32-typed, because it feeds hip op attributes declared
+// as F32Attr while ONNX stores the attribute at the importer's float width.
+inline mlir::LogicalResult
+extractAttrF32(mlir::PatternRewriter &rewriter, mlir::PDLResultList &results,
+               llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 3)
+    return mlir::failure();
+
+  auto *op = args[0].dyn_cast<mlir::Operation *>();
+  auto nameAttr = mlir::dyn_cast_or_null<mlir::StringAttr>(
+      args[1].dyn_cast<mlir::Attribute>());
+  auto defaultValue = mlir::dyn_cast_or_null<mlir::FloatAttr>(
+      args[2].dyn_cast<mlir::Attribute>());
+  if (!op || !nameAttr || !defaultValue)
+    return mlir::failure();
+
+  auto attr = op->getAttrOfType<mlir::FloatAttr>(nameAttr.getValue());
+  results.push_back(rewriter.getF32FloatAttr(
+      attr ? attr.getValueAsDouble() : defaultValue.getValueAsDouble()));
+  return mlir::success();
+}
+
 // Apply PDL patterns
 inline bool run(mlir::ModuleOp mlirModule, llvm::StringRef pdlBytecodeFile) {
   if (pdlBytecodeFile.empty())
@@ -471,6 +511,9 @@ inline bool run(mlir::ModuleOp mlirModule, llvm::StringRef pdlBytecodeFile) {
                                          isEightBitQuantized);
   pdlPatterns.registerConstraintFunction("IsEightOrSixteenBitQuantized",
                                          isEightOrSixteenBitQuantized);
+  pdlPatterns.registerConstraintFunction(
+      "IsEightSixteenOrThirtyTwoBitQuantized",
+      isEightSixteenOrThirtyTwoBitQuantized);
   pdlPatterns.registerConstraintFunction("HasStaticShapedResults",
                                          hasStaticShapedResults);
   pdlPatterns.registerConstraintFunction("IsUint16Quantized",
@@ -486,6 +529,7 @@ inline bool run(mlir::ModuleOp mlirModule, llvm::StringRef pdlBytecodeFile) {
   pdlPatterns.registerRewriteFunction("ExtractZeropointValue",
                                       extractZeropointValue);
   pdlPatterns.registerRewriteFunction("ExtractAttrInt64", extractAttrInt64);
+  pdlPatterns.registerRewriteFunction("ExtractAttrF32", extractAttrF32);
 
   mlir::RewritePatternSet patterns(ctx);
   patterns.add(std::move(pdlPatterns));

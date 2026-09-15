@@ -1,0 +1,136 @@
+//===- QDQGemmFusion.pdll -------------------------------------------------===//
+//
+// PDLL patterns for QDQ Gemm fusion - pure PDLL approach.
+//
+// Included by HipFusionPatterns.pdll, which declares the native constraints
+// used below. Not compilable on its own.
+//
+// ONNX makes Gemm's C optional, and a PDLL operand list matches an exact
+// arity, so the bias and bias-free forms need one pattern each. Both build the
+// same hip.qgemm; the bias-free one just omits the operand, which is what
+// makes `beta` and the C quantization attributes irrelevant there.
+//===----------------------------------------------------------------------===//
+
+Pattern QDQGemm with benefit(10) {
+  // DequantizeLinear x3 -> Gemm -> QuantizeLinear.
+  //
+  // ONNX makes zero_point optional on both Q and DQ, so a trailing ValueRange
+  // absorbs the 2-operand and 3-operand forms with one pattern.
+  let dq_a = op<onnx.DequantizeLinear>(a: Value, a_scale: Value, a_tail: ValueRange);
+  let dq_b = op<onnx.DequantizeLinear>(b: Value, b_scale: Value, b_tail: ValueRange);
+  let dq_c = op<onnx.DequantizeLinear>(c: Value, c_scale: Value, c_tail: ValueRange);
+
+  // A16W8 and A8W8, same bound as QDQMatMul: the shared kernel splits only A
+  // into byte planes, so a 16-bit B has no path through it. The bias is read
+  // straight out of memory and may additionally be the int32 an ONNX
+  // quantizer emits at c_scale = a_scale * b_scale.
+  IsEightOrSixteenBitQuantized(dq_a);
+  IsEightBitQuantized(dq_b);
+  IsEightSixteenOrThirtyTwoBitQuantized(dq_c);
+
+  let gemm = op<onnx.Gemm>(dq_a.0, dq_b.0, dq_c.0);
+
+  let quant = op<onnx.QuantizeLinear>(gemm.0, y_scale: Value, y_tail: ValueRange) -> (y_type: Type);
+  IsEightOrSixteenBitQuantized(quant);
+
+  // The rewrite below builds its DPS init with a bare `tensor.empty`, which
+  // only verifies for a static result type.
+  HasStaticShapedResults(quant);
+
+  // Fusability only: every scale must be a per-tensor splat constant and every
+  // zero point must be readable (or absent, which means zero).
+  HasContextArg(quant);
+  IsSplatConstantValue(a_scale);
+  IsSplatConstantValue(b_scale);
+  IsSplatConstantValue(c_scale);
+  IsSplatConstantValue(y_scale);
+  HasExtractableZeropoint(dq_a, attr<"2 : i64">);
+  HasExtractableZeropoint(dq_b, attr<"2 : i64">);
+  HasExtractableZeropoint(dq_c, attr<"2 : i64">);
+  HasExtractableZeropoint(quant, attr<"2 : i64">);
+
+  // Root on the chain tail so the output type is available for tensor.empty.
+  rewrite quant with {
+    let ctx = GetContextArg(quant);
+    let a_scale_attr = ExtractScaleValue(a_scale);
+    let b_scale_attr = ExtractScaleValue(b_scale);
+    let c_scale_attr = ExtractScaleValue(c_scale);
+    let y_scale_attr = ExtractScaleValue(y_scale);
+    let a_zeropoint_attr = ExtractZeropointValue(dq_a, attr<"2 : i64">, attr<"0 : i64">);
+    let b_zeropoint_attr = ExtractZeropointValue(dq_b, attr<"2 : i64">, attr<"0 : i64">);
+    let c_zeropoint_attr = ExtractZeropointValue(dq_c, attr<"2 : i64">, attr<"0 : i64">);
+    let y_zeropoint_attr = ExtractZeropointValue(quant, attr<"2 : i64">, attr<"0 : i64">);
+
+    let alpha_attr = ExtractAttrF32(gemm, attr<"\"alpha\"">, attr<"1.0 : f32">);
+    let beta_attr = ExtractAttrF32(gemm, attr<"\"beta\"">, attr<"1.0 : f32">);
+    let trans_a_attr = ExtractAttrInt64(gemm, attr<"\"transA\"">, attr<"0 : i64">);
+    let trans_b_attr = ExtractAttrInt64(gemm, attr<"\"transB\"">, attr<"0 : i64">);
+
+    let empty = op<tensor.empty> -> (y_type);
+    let qgemm = op<hip.qgemm>(ctx, a, b, c, empty.0) {
+      A_scale = a_scale_attr,
+      A_zero_point = a_zeropoint_attr,
+      B_scale = b_scale_attr,
+      B_zero_point = b_zeropoint_attr,
+      C_scale = c_scale_attr,
+      C_zero_point = c_zeropoint_attr,
+      Y_scale = y_scale_attr,
+      Y_zero_point = y_zeropoint_attr,
+      alpha = alpha_attr,
+      beta = beta_attr,
+      transA = trans_a_attr,
+      transB = trans_b_attr
+    } -> (y_type);
+    replace quant with qgemm;
+  };
+}
+
+Pattern QDQGemmNoBias with benefit(10) {
+  let dq_a = op<onnx.DequantizeLinear>(a: Value, a_scale: Value, a_tail: ValueRange);
+  let dq_b = op<onnx.DequantizeLinear>(b: Value, b_scale: Value, b_tail: ValueRange);
+
+  IsEightOrSixteenBitQuantized(dq_a);
+  IsEightBitQuantized(dq_b);
+
+  let gemm = op<onnx.Gemm>(dq_a.0, dq_b.0);
+
+  let quant = op<onnx.QuantizeLinear>(gemm.0, y_scale: Value, y_tail: ValueRange) -> (y_type: Type);
+  IsEightOrSixteenBitQuantized(quant);
+  HasStaticShapedResults(quant);
+
+  HasContextArg(quant);
+  IsSplatConstantValue(a_scale);
+  IsSplatConstantValue(b_scale);
+  IsSplatConstantValue(y_scale);
+  HasExtractableZeropoint(dq_a, attr<"2 : i64">);
+  HasExtractableZeropoint(dq_b, attr<"2 : i64">);
+  HasExtractableZeropoint(quant, attr<"2 : i64">);
+
+  rewrite quant with {
+    let ctx = GetContextArg(quant);
+    let a_scale_attr = ExtractScaleValue(a_scale);
+    let b_scale_attr = ExtractScaleValue(b_scale);
+    let y_scale_attr = ExtractScaleValue(y_scale);
+    let a_zeropoint_attr = ExtractZeropointValue(dq_a, attr<"2 : i64">, attr<"0 : i64">);
+    let b_zeropoint_attr = ExtractZeropointValue(dq_b, attr<"2 : i64">, attr<"0 : i64">);
+    let y_zeropoint_attr = ExtractZeropointValue(quant, attr<"2 : i64">, attr<"0 : i64">);
+
+    let alpha_attr = ExtractAttrF32(gemm, attr<"\"alpha\"">, attr<"1.0 : f32">);
+    let trans_a_attr = ExtractAttrInt64(gemm, attr<"\"transA\"">, attr<"0 : i64">);
+    let trans_b_attr = ExtractAttrInt64(gemm, attr<"\"transB\"">, attr<"0 : i64">);
+
+    let empty = op<tensor.empty> -> (y_type);
+    let qgemm = op<hip.qgemm>(ctx, a, b, empty.0) {
+      A_scale = a_scale_attr,
+      A_zero_point = a_zeropoint_attr,
+      B_scale = b_scale_attr,
+      B_zero_point = b_zeropoint_attr,
+      Y_scale = y_scale_attr,
+      Y_zero_point = y_zeropoint_attr,
+      alpha = alpha_attr,
+      transA = trans_a_attr,
+      transB = trans_b_attr
+    } -> (y_type);
+    replace quant with qgemm;
+  };
+}
