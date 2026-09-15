@@ -162,8 +162,8 @@ FailureOr<DenseElementsAttr> readConstant(ConstantOp constant,
   if (!buffer || (*buffer)->getBufferSize() != static_cast<uint64_t>(size))
     return failure();
   DenseElementsAttr value = DenseElementsAttr::getFromRawBuffer(
-      type, ArrayRef<char>((*buffer)->getBufferStart(),
-                           static_cast<size_t>(size)));
+      type,
+      ArrayRef<char>((*buffer)->getBufferStart(), static_cast<size_t>(size)));
   if (!value)
     return failure();
   return value;
@@ -348,10 +348,9 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
                   rewriter.getNamedAttr("strides",
                                         rewriter.getI64ArrayAttr({1, 1})),
                   rewriter.getNamedAttr(
-                      "pads",
-                      rewriter.getI64ArrayAttr({taps0 - 1, taps1 - 1,
-                                                dims[0].trailingPad(),
-                                                dims[1].trailingPad()})),
+                      "pads", rewriter.getI64ArrayAttr(
+                                  {taps0 - 1, taps1 - 1, dims[0].trailingPad(),
+                                   dims[1].trailingPad()})),
                   rewriter.getNamedAttr("dilations",
                                         rewriter.getI64ArrayAttr({1, 1})),
                   rewriter.getNamedAttr("group",
