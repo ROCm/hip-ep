@@ -87,6 +87,9 @@ void populateHipsrToLLVMPatterns(const LLVMTypeConverter &typeConverter,
   populateHipsrCopyD2HLoweringPatterns(typeConverter, patterns);
   populateHipsrMatMulLoweringPatterns(typeConverter, patterns);
   populateHipsrExpandLoweringPatterns(typeConverter, patterns);
+  populateHipsrNonZeroLoweringPatterns(typeConverter, patterns);
+  populateHipsrAllocOutputLoweringPatterns(typeConverter, patterns);
+  populateHipsrPreserveShapeLoweringPatterns(typeConverter, patterns);
 }
 
 struct HipsrConvertToLLVMInterface : public ConvertToLLVMPatternInterface {
