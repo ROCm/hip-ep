@@ -13,6 +13,7 @@
 #include <mlir/Support/LLVM.h>
 #include <mlir/Transforms/GreedyPatternRewriteDriver.h>
 
+#include <algorithm>
 #include <numeric>
 
 namespace mlir::hip {
@@ -30,11 +31,17 @@ namespace {
 struct DimInfo {
   int64_t stride;
   int64_t kernel; // filter length Y
+  int64_t inLen;  // input length
   int64_t ydot;   // ceil(Y / stride) -> max taps per residue
   int64_t htilda; // per-residue conv output length
   int64_t full;   // reassembled length, htilda * stride
   int64_t padLo;  // leading pad of the transposed conv
   int64_t out;    // final output length
+
+  // Each residue pads its input by `taps - 1` in front, so its output length
+  // is `inLen + trailingPad` whatever its tap count. That makes the trailing
+  // pad the single knob for sizing the grid, uniformly across residues.
+  int64_t trailingPad() const { return htilda - inLen; }
 };
 
 /// A transposed convolution scatters each input element across `stride`
@@ -74,9 +81,11 @@ struct DimInfo {
 /// (here 10 against 9) when the filter is not a multiple of the stride. Those
 /// trailing positions are still written by a residue, but the value is zero:
 /// they draw only on input elements past the end, which the residue
-/// convolution's own zero padding supplies. That is also what makes
-/// `output_padding` fall out for free, since ONNX likewise defines those
-/// positions as zero.
+/// convolution's own zero padding supplies. ONNX defines the `output_padding`
+/// region as zero too, so it lands in the same slack -- and when there is not
+/// enough of it (the stride divides the filter, leaving none) each residue's
+/// trailing pad is extended to grow the grid, which adds more of exactly these
+/// zero-valued positions.
 class DecomposeConvTranspose : public OpRewritePattern<ConvTransposeOp> {
 public:
   using OpRewritePattern<ConvTransposeOp>::OpRewritePattern;
@@ -193,13 +202,19 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
     if (di.stride > di.kernel)
       return rewriter.notifyMatchFailure(op, "stride exceeds kernel");
     di.ydot = (di.kernel + di.stride - 1) / di.stride;
-    di.htilda = inputType.getDimSize(2 + d) + di.ydot - 1;
+    di.inLen = inputType.getDimSize(2 + d);
+    // The natural extent covers the scatter itself. `output_padding` can ask
+    // for more, and when the stride divides the kernel there is no slack to
+    // absorb it, so grow the grid to fit and let the extra positions be
+    // written as zero (see the note above the pattern).
+    int64_t natural = di.inLen + di.ydot - 1;
+    int64_t needed = (di.padLo + di.out + di.stride - 1) / di.stride;
+    di.htilda = std::max(natural, needed);
     di.full = di.htilda * di.stride;
-    // Cropping off the leading pad must leave enough for the result. This is
-    // also what covers output_padding: the grid's trailing slack is written by
-    // a residue but computes zero (see the note above the pattern), which is
-    // exactly what ONNX puts in the output_padding region.
-    if (di.padLo + di.out > di.full)
+    // ONNX requires output_padding < stride, which bounds the growth above at
+    // one position per axis. Anything beyond that means the result shape does
+    // not agree with the attributes, so decline rather than size off it.
+    if (di.htilda > natural + 1)
       return rewriter.notifyMatchFailure(op, "output exceeds the residue grid");
     dims.push_back(di);
   }
@@ -272,9 +287,10 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
                   rewriter.getNamedAttr("strides",
                                         rewriter.getI64ArrayAttr({1, 1})),
                   rewriter.getNamedAttr(
-                      "pads", rewriter.getI64ArrayAttr({taps0 - 1, taps1 - 1,
-                                                        dims[0].ydot - 1,
-                                                        dims[1].ydot - 1})),
+                      "pads",
+                      rewriter.getI64ArrayAttr({taps0 - 1, taps1 - 1,
+                                                dims[0].trailingPad(),
+                                                dims[1].trailingPad()})),
                   rewriter.getNamedAttr("dilations",
                                         rewriter.getI64ArrayAttr({1, 1})),
                   rewriter.getNamedAttr("group",
