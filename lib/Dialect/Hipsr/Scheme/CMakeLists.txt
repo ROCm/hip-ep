@@ -107,23 +107,25 @@ set(SCHEME_COMPILER ${ChezScheme_BINARY_DIR}/${CHEZ_MACHINE}/bin/${CHEZ_MACHINE}
 
 # Mirror source directory structure in build tree
 file(MAKE_DIRECTORY ${SCHEME_LIB_DIR}/mlir)
-file(MAKE_DIRECTORY ${SCHEME_LIB_DIR}/mlir/conversion)
+file(MAKE_DIRECTORY ${SCHEME_LIB_DIR}/mlir)
+file(MAKE_DIRECTORY ${SCHEME_LIB_DIR}/patterns)
+file(MAKE_DIRECTORY ${SCHEME_LIB_DIR}/passes)
 
 # Compile all Scheme libraries in one shot - super fast!
 set(COMPILE_ALL_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/compile-all-libraries.sh)
 set(ALL_SCHEME_SOURCES
-  ${CMAKE_CURRENT_SOURCE_DIR}/Runtime/mlir/ffi.sls
-  ${CMAKE_CURRENT_SOURCE_DIR}/Runtime/mlir/pattern-dsl.sls
-  ${CMAKE_CURRENT_SOURCE_DIR}/Runtime/mlir/conversion/cast.sls
-  ${CMAKE_CURRENT_SOURCE_DIR}/Passes/onnx-to-hipsr.sls
+  ${CMAKE_CURRENT_SOURCE_DIR}/libraries/mlir/ffi.sls
+  ${CMAKE_CURRENT_SOURCE_DIR}/libraries/mlir/pattern-dsl.sls
+  ${CMAKE_CURRENT_SOURCE_DIR}/libraries/patterns/cast.sls
+  ${CMAKE_CURRENT_SOURCE_DIR}/libraries/passes/onnx-to-hipsr.sls
 )
 
 add_custom_command(
   OUTPUT
     ${SCHEME_LIB_DIR}/mlir/ffi.so
     ${SCHEME_LIB_DIR}/mlir/pattern-dsl.so
-    ${SCHEME_LIB_DIR}/mlir/conversion/cast.so
-    ${SCHEME_LIB_DIR}/onnx-to-hipsr.so
+    ${SCHEME_LIB_DIR}/patterns/cast.so
+    ${SCHEME_LIB_DIR}/passes/onnx-to-hipsr.so
   COMMAND bash "${COMPILE_ALL_SCRIPT}"
           "${SCHEME_COMPILER}"
           "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -138,8 +140,8 @@ add_custom_target(SchemeLibraries ALL
   DEPENDS
     ${SCHEME_LIB_DIR}/mlir/ffi.so
     ${SCHEME_LIB_DIR}/mlir/pattern-dsl.so
-    ${SCHEME_LIB_DIR}/mlir/conversion/cast.so
-    ${SCHEME_LIB_DIR}/onnx-to-hipsr.so
+    ${SCHEME_LIB_DIR}/patterns/cast.so
+    ${SCHEME_LIB_DIR}/passes/onnx-to-hipsr.so
 )
 
 # Copy simple pass modules (these are just thin wrappers, not compiled)

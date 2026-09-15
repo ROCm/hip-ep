@@ -15,11 +15,11 @@
 ;; Scheme code implements the high-level conversion logic.
 ;;===----------------------------------------------------------------------===;;
 
-(library (onnx-to-hipsr)
+(library (passes onnx-to-hipsr)
   (export run-pass)
   (import (rnrs (6))
           (mlir ffi)
-          (patterns cast-manual))
+          (patterns cast))
 
   ;; Helper: Apply conversion and post-process
   (define (do-conversion module-op ctx converter target patterns)
@@ -60,4 +60,4 @@
             (mlir-populate-func-type-conversion-pattern patterns converter)
             (do-conversion module-op ctx converter target patterns))))))
 
-) ;; end library (onnx-to-hipsr)
+) ;; end library (passes onnx-to-hipsr)
