@@ -13,7 +13,11 @@
 #include <mlir/Support/LLVM.h>
 #include <mlir/Transforms/GreedyPatternRewriteDriver.h>
 
+#include <llvm/Support/FileSystem.h>
+#include <llvm/Support/MemoryBuffer.h>
+
 #include <algorithm>
+#include <memory>
 #include <numeric>
 
 namespace mlir::hip {
@@ -109,6 +113,62 @@ int64_t flatIndex(ArrayRef<int64_t> shape, int64_t a, int64_t b, int64_t c,
   return ((a * shape[1] + b) * shape[2] + c) * shape[3] + d;
 }
 
+/// Read a filter carrier's payload, whatever source it holds.
+///
+/// "Compile-time constant" is not the same as "inline `value`": the importer
+/// externalizes initializers past a small byte threshold, so an ordinary
+/// ConvTranspose filter reaches this pass as a file-backed byte range rather
+/// than a `DenseElementsAttr`. Requiring an inline value would therefore
+/// decline nearly every real filter, and a ConvTranspose-only module would
+/// then reach the compiler with no rocMLIR kernel in it at all.
+///
+/// Memory-address carriers are deliberately not resolved. That address is
+/// process-local and valid only while the producer that recorded it is live,
+/// which this pattern cannot establish -- it is equally reachable from textual
+/// pass invocation, where the address would be dereferenced blind.
+FailureOr<DenseElementsAttr> readConstant(ConstantOp constant,
+                                          RankedTensorType type) {
+  switch (constant.getSourceKind()) {
+  case ConstantOp::SourceKind::Inline: {
+    // The verifier ties an inline value to the carrier's result type, but a
+    // failed match has to be cheaper than an assertion if it ever does not.
+    auto value = dyn_cast<DenseElementsAttr>(constant.getValueAttr());
+    if (!value || value.getType() != type)
+      return failure();
+    return value;
+  }
+  case ConstantOp::SourceKind::Memory:
+    return failure();
+  case ConstantOp::SourceKind::File:
+    break;
+  }
+
+  StringRef path = constant.getLocationAttr().getValue();
+  const int64_t offset = constant.getOffsetAttr().getInt();
+  const int64_t size = constant.getSizeAttr().getInt();
+  const int64_t elementBytes = (type.getElementTypeBitWidth() + 7) / 8;
+  if (size != type.getNumElements() * elementBytes)
+    return failure();
+  // The range is validated against the file before mapping: a slice running
+  // past the end can otherwise be mapped and fault on access rather than
+  // failing here.
+  uint64_t fileSize = 0;
+  if (llvm::sys::fs::file_size(path, fileSize) ||
+      static_cast<uint64_t>(offset) + static_cast<uint64_t>(size) > fileSize)
+    return failure();
+  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> buffer =
+      llvm::MemoryBuffer::getFileSlice(path, static_cast<uint64_t>(size),
+                                       offset);
+  if (!buffer || (*buffer)->getBufferSize() != static_cast<uint64_t>(size))
+    return failure();
+  DenseElementsAttr value = DenseElementsAttr::getFromRawBuffer(
+      type, ArrayRef<char>((*buffer)->getBufferStart(),
+                           static_cast<size_t>(size)));
+  if (!value)
+    return failure();
+  return value;
+}
+
 LogicalResult
 DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
                                         PatternRewriter &rewriter) const {
@@ -144,14 +204,15 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
     return rewriter.notifyMatchFailure(op, "expected matching element types");
 
   // The tap selection and flip are folded into new constants, so the filter
-  // has to be available at compile time.
+  // has to be readable at compile time.
   auto weightConst = op.getWeights().getDefiningOp<ConstantOp>();
   if (!weightConst)
     return rewriter.notifyMatchFailure(op, "weights are not a hip.constant");
-  auto weightAttr =
-      dyn_cast_if_present<DenseElementsAttr>(weightConst.getValueAttr());
-  if (!weightAttr)
-    return rewriter.notifyMatchFailure(op, "weights have no inline value");
+  FailureOr<DenseElementsAttr> weightData =
+      readConstant(weightConst, weightType);
+  if (failed(weightData))
+    return rewriter.notifyMatchFailure(op, "weights are not readable here");
+  DenseElementsAttr weightAttr = *weightData;
 
   SmallVector<int64_t> strides = getI64Values(op.getStridesAttr());
   SmallVector<int64_t> pads = getI64Values(op.getPadsAttr());
