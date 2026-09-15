@@ -7,7 +7,6 @@
 
 #include "hip/Conversion/HipsrToLLVM/HipsrToLLVM.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
-#include "hip/Dialect/Hipsr/Scheme/Runtime/ChezSchemeInterpreter.h"
 
 #include "llvm/ADT/TypeSwitch.h"
 
@@ -68,15 +67,6 @@ llvm::MemoryBuffer *HipsrDialect::getOrLoadFileMap(llvm::StringRef path) {
   llvm::MemoryBuffer *raw = bufOr->get();
   fileMaps[path] = std::move(*bufOr);
   return raw;
-}
-
-ChezSchemeInterpreter* HipsrDialect::getSchemeInterpreter() {
-  // Lazy initialization - create interpreter on first use
-  if (!schemeInterpreter) {
-    schemeInterpreter = std::make_unique<ChezSchemeInterpreter>(
-        SchemeLogLevel::Warning);
-  }
-  return schemeInterpreter.get();
 }
 
 namespace {

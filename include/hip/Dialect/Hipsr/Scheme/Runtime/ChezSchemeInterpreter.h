@@ -24,55 +24,60 @@ enum class SchemeLogLevel {
   Fatal = 5
 };
 
-// Parse log level from string
-SchemeLogLevel parseLogLevel(const std::string& level);
-
-// Set global log level
-void setSchemeLogLevel(SchemeLogLevel level);
-
 // C type for Scheme FFI
 typedef void* SchemeValue;
 
-/// Encapsulates Chez Scheme runtime lifecycle.
-/// Owned by HipsrDialect - one instance per dialect instance.
+/// Singleton Chez Scheme runtime.
+/// All methods are static. Runtime is initialized once globally.
 class ChezSchemeInterpreter {
-public:
-  explicit ChezSchemeInterpreter(SchemeLogLevel logLevel = SchemeLogLevel::Warning);
-  ~ChezSchemeInterpreter();
-
-  // Non-copyable, non-movable
-  ChezSchemeInterpreter(const ChezSchemeInterpreter&) = delete;
-  ChezSchemeInterpreter& operator=(const ChezSchemeInterpreter&) = delete;
-
-  /// R5RS load: Load and evaluate a Scheme script file
-  bool load(const char* scriptPath);
-
-  /// R5RS eval: Evaluate Scheme code string
-  bool eval(const char* code);
+ public:
+  // Initialize the Scheme runtime (called once)
+  static void initialize(SchemeLogLevel logLevel = SchemeLogLevel::Warning);
 
   /// Check if runtime is initialized
-  bool isInitialized() const { return initialized; }
+  static bool isInitialized() { return initialized; }
 
-  /// Get current log level
-  SchemeLogLevel getLogLevel() const { return logLevel; }
+  /// Shutdown the Scheme runtime
+  static void shutdown();
+
+  // Parse log level from string
+  static SchemeLogLevel parseLogLevel(const std::string& level);
+
+  // Set global log level
+  static void setLogLevel(SchemeLogLevel level);
+
+  // Get current log level
+  static SchemeLogLevel getLogLevel() { return logLevel; }
+
+  /// R5RS load: Load and evaluate a Scheme script file
+  static bool load(const char* scriptPath);
+
+  /// R5RS eval: Evaluate Scheme code string
+  static bool eval(const char* code);
 
   // Create Scheme values from C++ primitives
   static SchemeValue makeString(const char* str);
   static SchemeValue makeInteger(long value);
 
   // Call a Scheme function with primitive arguments
-  std::string callFunction(const char* functionName,
-                          const std::vector<SchemeValue>& args);
+  static std::string callFunction(const char* functionName,
+                                  const std::vector<SchemeValue>& args);
 
   // Call a Scheme function with a single MLIR operation argument
-  void callPassFunction(const char* functionName, mlir::Operation* op);
+  static void callPassFunction(const char* functionName, mlir::Operation* op);
 
-private:
-  bool initialized = false;
-  SchemeLogLevel logLevel;
+ private:
+  // Singleton - deleted constructors
+  ChezSchemeInterpreter() = delete;
+  ~ChezSchemeInterpreter() = delete;
+  ChezSchemeInterpreter(const ChezSchemeInterpreter&) = delete;
+  ChezSchemeInterpreter& operator=(const ChezSchemeInterpreter&) = delete;
+
+  static bool initialized;
+  static SchemeLogLevel logLevel;
 };
 
-} // namespace hipsr
-} // namespace mlir
+}  // namespace hipsr
+}  // namespace mlir
 
 #endif

@@ -40,33 +40,25 @@ struct ConversionInSchemePass
       return;
     }
 
-    auto* hipsrDialect = getContext().getLoadedDialect<HipsrDialect>();
-    if (!hipsrDialect) {
-      emitError(getOperation().getLoc(), "HipsrDialect not loaded");
-      signalPassFailure();
-      return;
-    }
-
-    ChezSchemeInterpreter* interpreter = hipsrDialect->getSchemeInterpreter();
-    if (!interpreter || !interpreter->isInitialized()) {
-      emitError(getOperation().getLoc(), "Scheme interpreter not initialized");
-      signalPassFailure();
-      return;
+    // Initialize Scheme runtime if needed
+    if (!ChezSchemeInterpreter::isInitialized()) {
+      SchemeLogLevel level = ChezSchemeInterpreter::parseLogLevel(logLevel);
+      ChezSchemeInterpreter::initialize(level);
     }
 
     // Set log level
-    SchemeLogLevel level = parseLogLevel(logLevel);
-    setSchemeLogLevel(level);
+    SchemeLogLevel level = ChezSchemeInterpreter::parseLogLevel(logLevel);
+    ChezSchemeInterpreter::setLogLevel(level);
 
     // Import the specified Scheme module
     std::string importCode = "(import (" + moduleName + "))";
     // Set library-directories before importing
     std::string libdirCode = "(library-directories (cons \"/home/build/hip-ep-chez/lib/scheme\" (library-directories)))";
-    if (!interpreter->eval(libdirCode.c_str())) {
+    if (!ChezSchemeInterpreter::eval(libdirCode.c_str())) {
       emitWarning(getOperation().getLoc(), "Failed to set library-directories");
     }
 
-    if (!interpreter->eval(importCode.c_str())) {
+    if (!ChezSchemeInterpreter::eval(importCode.c_str())) {
       emitError(getOperation().getLoc(), "Failed to import (")
         << moduleName << ") module";
       signalPassFailure();
@@ -75,7 +67,7 @@ struct ConversionInSchemePass
 
     // Call the Scheme run-pass function
     ModuleOp module = getOperation();
-    interpreter->callPassFunction("run-pass", module);
+    ChezSchemeInterpreter::callPassFunction("run-pass", module);
   }
 };
 
