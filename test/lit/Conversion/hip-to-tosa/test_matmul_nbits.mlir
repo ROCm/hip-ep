@@ -37,13 +37,16 @@ func.func @matmul_nbits_basic(%ctx: !hip.context, %a: tensor<2x16xf16>,
   return %r : tensor<2x2xf16>
 }
 
-// Per-block uint8 zero_points [N, k_blocks]: no nibble unpack of zp.
-// CHECK-LABEL: func.func @matmul_nbits_per_block_zp
+// zp_elem_size=1 with k_blocks=1 is packed [N,1]: unpack the low nibble,
+// do not treat the raw byte as the zero-point.
+// CHECK-LABEL: func.func @matmul_nbits_packed_zp_kblocks1
 // CHECK: tosa.bitwise_and
+// CHECK: tosa.logical_right_shift
+// CHECK: tosa.concat
 // CHECK: tosa.sub
 // CHECK: tosa.matmul
 // CHECK-NOT: hip.matmul_nbits
-func.func @matmul_nbits_per_block_zp(%ctx: !hip.context, %a: tensor<2x16xf16>,
+func.func @matmul_nbits_packed_zp_kblocks1(%ctx: !hip.context, %a: tensor<2x16xf16>,
                                      %b: tensor<2x1x8xui8>,
                                      %scales: tensor<2x1xf16>,
                                      %zp: tensor<2x1xui8>,
@@ -108,6 +111,27 @@ func.func @matmul_nbits_poison_ctx(%a: tensor<2x16xf16>, %b: tensor<2x1x8xui8>,
         outs(%init : tensor<2x2xf16>)
         {K = 16 : i64, N = 2 : i64, bits = 4 : i64, block_size = 16 : i64,
          accuracy_level = 0 : i64, zp_elem_size = 0 : i64} : tensor<2x2xf16>
+  return %r : tensor<2x2xf16>
+}
+
+// ONNX MatMulNBits allows f32 scales with f16 activations; cast scales before
+// dequant rather than requiring the element types to already match.
+// CHECK-LABEL: func.func @matmul_nbits_f32_scales
+// CHECK: tosa.cast
+// CHECK: tosa.mul
+// CHECK: tosa.matmul
+// CHECK-NOT: hip.matmul_nbits
+func.func @matmul_nbits_f32_scales(%ctx: !hip.context, %a: tensor<2x16xf16>,
+                                   %b: tensor<2x1x8xui8>,
+                                   %scales: tensor<2x1xf32>,
+                                   %init: tensor<2x2xf16>) -> tensor<2x2xf16>
+    attributes {rock.kernel} {
+  %r = hip.matmul_nbits(%ctx) ins(%a, %b, %scales :
+        tensor<2x16xf16>, tensor<2x1x8xui8>, tensor<2x1xf32>)
+        outs(%init : tensor<2x2xf16>)
+        {K = 16 : i64, N = 2 : i64, bits = 4 : i64, block_size = 16 : i64,
+         accuracy_level = 0 : i64, zp_elem_size = 0 : i64,
+         scale_elem_size = 4 : i64} : tensor<2x2xf16>
   return %r : tensor<2x2xf16>
 }
 

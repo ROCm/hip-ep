@@ -191,6 +191,29 @@ func.func @scale_zero(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
   return %r#0, %r#1, %r#2 : tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
 }
 
+// ORT prefill sentinel seqlens_k=-1 must not mask every key (kIdx > -1).
+// CHECK-LABEL: func.func @seqlens_prefill_sentinel
+// CHECK: tosa.greater
+// CHECK: tosa.select
+// CHECK: tosa.reduce_max
+// CHECK: tosa.matmul
+// CHECK-NOT: hip.gqa
+func.func @seqlens_prefill_sentinel(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
+                                   %k: tensor<1x4x16xf16>, %v: tensor<1x4x16xf16>,
+                                   %total: tensor<i32>,
+                                   %o: tensor<1x4x16xf16>,
+                                   %pk: tensor<1x2x4x8xf16>,
+                                   %pv: tensor<1x2x4x8xf16>)
+    -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
+    attributes {rock.kernel} {
+  %seqlens = arith.constant dense<-1> : tensor<1xi32>
+  %r:3 = "hip.gqa"(%ctx, %q, %k, %v, %seqlens, %total, %o, %pk, %pv) {
+      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0>,
+      num_heads = 2 : i64, kv_num_heads = 2 : i64, no_causal = true
+    } : (!hip.context, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1xi32>, tensor<i32>, tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>) -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
+  return %r#0, %r#1, %r#2 : tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
+}
+
 // CHECK-LABEL: func.func @rope_prefill
 // CHECK: tosa.negate
 // CHECK: tosa.matmul
@@ -250,13 +273,14 @@ func.func @head_sink(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
 }
 
 // CHECK-LABEL: func.func @int8_kv
+// CHECK: tosa.cast
 // CHECK: tosa.matmul
 // CHECK-NOT: hip.gqa
 func.func @int8_kv(%ctx: !hip.context, %q: tensor<1x1x16xf16>,
                    %k: tensor<1x1x16xf16>, %v: tensor<1x1x16xf16>,
                    %past_k: tensor<1x2x3x8xi8>, %past_v: tensor<1x2x3x8xi8>,
                    %seqlens: tensor<1xi32>, %total: tensor<i32>,
-                   %k_scale: tensor<1x2x1x8xf16>, %v_scale: tensor<1x2x1x8xf16>,
+                   %k_scale: tensor<1x2x1x8xf32>, %v_scale: tensor<1x2x1x8xf32>,
                    %o: tensor<1x1x16xf16>, %pk: tensor<1x2x4x8xi8>,
                    %pv: tensor<1x2x4x8xi8>)
     -> (tensor<1x1x16xf16>, tensor<1x2x4x8xi8>, tensor<1x2x4x8xi8>)
@@ -264,7 +288,7 @@ func.func @int8_kv(%ctx: !hip.context, %q: tensor<1x1x16xf16>,
   %r:3 = "hip.gqa"(%ctx, %q, %k, %v, %past_k, %past_v, %seqlens, %total, %k_scale, %v_scale, %o, %pk, %pv) {
       operandSegmentSizes = array<i32: 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0>,
       num_heads = 2 : i64, kv_num_heads = 2 : i64, k_quant_type = "PER_CHANNEL", v_quant_type = "PER_CHANNEL", kv_cache_bit_width = 8 : i64
-    } : (!hip.context, tensor<1x1x16xf16>, tensor<1x1x16xf16>, tensor<1x1x16xf16>, tensor<1x2x3x8xi8>, tensor<1x2x3x8xi8>, tensor<1xi32>, tensor<i32>, tensor<1x2x1x8xf16>, tensor<1x2x1x8xf16>, tensor<1x1x16xf16>, tensor<1x2x4x8xi8>, tensor<1x2x4x8xi8>) -> (tensor<1x1x16xf16>, tensor<1x2x4x8xi8>, tensor<1x2x4x8xi8>)
+    } : (!hip.context, tensor<1x1x16xf16>, tensor<1x1x16xf16>, tensor<1x1x16xf16>, tensor<1x2x3x8xi8>, tensor<1x2x3x8xi8>, tensor<1xi32>, tensor<i32>, tensor<1x2x1x8xf32>, tensor<1x2x1x8xf32>, tensor<1x1x16xf16>, tensor<1x2x4x8xi8>, tensor<1x2x4x8xi8>) -> (tensor<1x1x16xf16>, tensor<1x2x4x8xi8>, tensor<1x2x4x8xi8>)
   return %r#0, %r#1, %r#2 : tensor<1x1x16xf16>, tensor<1x2x4x8xi8>, tensor<1x2x4x8xi8>
 }
 

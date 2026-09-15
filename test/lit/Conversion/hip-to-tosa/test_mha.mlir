@@ -92,6 +92,8 @@ func.func @mha_qkv_bias(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
 }
 
 // CHECK-LABEL: func.func @mha_attn_bias
+// CHECK: tosa.matmul
+// CHECK: tosa.mul
 // CHECK: tosa.add
 // CHECK: tosa.matmul
 // CHECK-NOT: hip.multi_head_attention
@@ -105,6 +107,23 @@ func.func @mha_attn_bias(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
       num_heads = 2 : i64
     } : (!hip.context, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1x2x4x4xf16>, tensor<1x4x16xf16>) -> tensor<1x4x16xf16>
   return %r : tensor<1x4x16xf16>
+}
+
+// Rank-4 bias [1, H, Sq, Skv] must tile batch before flattening to [B*H, ...].
+// CHECK-LABEL: func.func @mha_attn_bias_broadcast_batch
+// CHECK: tosa.tile
+// CHECK: tosa.add
+// CHECK: tosa.matmul
+// CHECK-NOT: hip.multi_head_attention
+func.func @mha_attn_bias_broadcast_batch(%ctx: !hip.context,
+    %q: tensor<2x4x16xf16>, %k: tensor<2x4x16xf16>, %v: tensor<2x4x16xf16>,
+    %ab: tensor<1x2x4x4xf16>, %o: tensor<2x4x16xf16>) -> tensor<2x4x16xf16>
+    attributes {rock.kernel} {
+  %r = "hip.multi_head_attention"(%ctx, %q, %k, %v, %ab, %o) {
+      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0>,
+      num_heads = 2 : i64
+    } : (!hip.context, tensor<2x4x16xf16>, tensor<2x4x16xf16>, tensor<2x4x16xf16>, tensor<1x2x4x4xf16>, tensor<2x4x16xf16>) -> tensor<2x4x16xf16>
+  return %r : tensor<2x4x16xf16>
 }
 
 // CHECK-LABEL: func.func @mha_unidirectional

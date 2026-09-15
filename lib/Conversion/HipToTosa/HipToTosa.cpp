@@ -1550,8 +1550,8 @@ struct MatMulNBitsConverter final
       return rewriter.notifyMatchFailure(op, "A trailing dim must be K");
     if (resultType.getShape().back() != n)
       return rewriter.notifyMatchFailure(op, "result trailing dim must be N");
-    if (scaleType.getElementType() != resultType.getElementType())
-      return rewriter.notifyMatchFailure(op, "scale type must match result");
+    if (!isa<FloatType>(scaleType.getElementType()))
+      return rewriter.notifyMatchFailure(op, "scales must be float");
 
     int64_t kBlocks = (k + blockSize - 1) / blockSize;
     int64_t blobSize = blockSize * op.getBits() / 8;
@@ -1567,44 +1567,47 @@ struct MatMulNBitsConverter final
     Value unpacked = unpackInt4LastDim(packed, rewriter, loc);
     unpacked = sliceLastDimTo(unpacked, k, rewriter, loc);
 
-    Value scales = broadcastBlocksAlongK(adaptor.getScales(), n, k, kBlocks,
-                                         blockSize, rewriter, loc);
+    Type computeElem = resultType.getElementType();
+    Value scales = emitTosaCast(rewriter, loc, adaptor.getScales(), computeElem);
+    scales = broadcastBlocksAlongK(scales, n, k, kBlocks, blockSize, rewriter,
+                                   loc);
 
-    Value shifted =
-        emitTosaCast(rewriter, loc, unpacked, resultType.getElementType());
-    auto nkFloat = RankedTensorType::get({n, k}, resultType.getElementType());
+    Value shifted = emitTosaCast(rewriter, loc, unpacked, computeElem);
+    auto nkFloat = RankedTensorType::get({n, k}, computeElem);
 
     Value zp = adaptor.getZeroPoints();
     if (!zp) {
-      auto zpTy = RankedTensorType::get({1, 1}, resultType.getElementType());
+      auto zpTy = RankedTensorType::get({1, 1}, computeElem);
       zp = createSplatFloat(rewriter, loc, zpTy, 8.0);
     } else {
       auto zpTy = dyn_cast<RankedTensorType>(zp.getType());
       if (!zpTy || !zpTy.hasStaticShape())
         return rewriter.notifyMatchFailure(op, "zero_points not static ranked");
       if (isa<FloatType>(zpTy.getElementType())) {
-        if (zpTy.getElementType() != resultType.getElementType())
-          return rewriter.notifyMatchFailure(op,
-                                             "fp zp type must match result");
         if (zpTy.getNumElements() != n * kBlocks)
           return rewriter.notifyMatchFailure(op,
                                              "fp zp must have N * k_blocks");
+        zp = emitTosaCast(rewriter, loc, zp, computeElem);
         zp = broadcastBlocksAlongK(zp, n, k, kBlocks, blockSize, rewriter, loc);
       } else if (isa<IntegerType>(zpTy.getElementType())) {
-        // Per-block uint8 [N, k_blocks] stores one zp per block. Packed
-        // uint4 (MIGraphX) has N * ceil(k_blocks * bits / 8) bytes.
-        if (zpTy.getNumElements() == n * kBlocks) {
-          zp = reshapeTo(zp, {n, kBlocks}, rewriter);
-        } else {
+        // zp_elem_size=1 is ONNX's packed nibble stream
+        // [N, ceil(k_blocks/2)], not "one raw zp per block". Element count
+        // cannot tell those apart when k_blocks==1 (both are [N,1]).
+        if (op.getZpElemSize() == 1) {
           if (n == 0 || zpTy.getNumElements() % n != 0)
             return rewriter.notifyMatchFailure(op,
                                                "packed zp shape is invalid");
           zp = reshapeTo(zp, {n, zpTy.getNumElements() / n}, rewriter);
           zp = unpackInt4LastDim(zp, rewriter, loc);
           zp = sliceLastDimTo(zp, kBlocks, rewriter, loc);
+        } else {
+          if (zpTy.getNumElements() != n * kBlocks)
+            return rewriter.notifyMatchFailure(op,
+                                               "zp must have N * k_blocks");
+          zp = reshapeTo(zp, {n, kBlocks}, rewriter);
         }
         zp = broadcastBlocksAlongK(zp, n, k, kBlocks, blockSize, rewriter, loc);
-        zp = emitTosaCast(rewriter, loc, zp, resultType.getElementType());
+        zp = emitTosaCast(rewriter, loc, zp, computeElem);
       } else {
         return rewriter.notifyMatchFailure(op, "unsupported zero_points type");
       }
@@ -1620,8 +1623,9 @@ struct MatMulNBitsConverter final
       auto biasTy = dyn_cast<RankedTensorType>(bias.getType());
       if (!biasTy || !biasTy.hasStaticShape())
         return rewriter.notifyMatchFailure(op, "bias not static ranked");
-      if (biasTy.getElementType() != resultType.getElementType())
-        return rewriter.notifyMatchFailure(op, "bias type must match result");
+      if (!isa<FloatType>(biasTy.getElementType()))
+        return rewriter.notifyMatchFailure(op, "bias must be float");
+      bias = emitTosaCast(rewriter, loc, bias, computeElem);
       SmallVector<int64_t> biasShape(resultType.getRank(), 1);
       biasShape.back() = n;
       if (biasTy.getNumElements() != n)
@@ -1749,6 +1753,7 @@ Value packBnshToOutput(Value y4, RankedTensorType yType,
 }
 
 LogicalResult addAttentionBias(Value &scores, Value bias, RankedTensorType qkTy,
+                               int64_t batch, int64_t numHeads,
                                ConversionPatternRewriter &rewriter,
                                Location loc, Operation *op) {
   auto biasTy = dyn_cast<RankedTensorType>(bias.getType());
@@ -1757,8 +1762,20 @@ LogicalResult addAttentionBias(Value &scores, Value bias, RankedTensorType qkTy,
   if (biasTy.getRank() == 4) {
     int64_t b0 = biasTy.getDimSize(0);
     int64_t h0 = biasTy.getDimSize(1);
-    bias = reshapeTo(
-        bias, {b0 * h0, biasTy.getDimSize(2), biasTy.getDimSize(3)}, rewriter);
+    int64_t sq = biasTy.getDimSize(2);
+    int64_t skv = biasTy.getDimSize(3);
+    // Keep singleton batch/head axes until they have been tiled. Flattening
+    // [1, H, ...] or [B, 1, ...] first would drop the broadcast dim and
+    // fail EqualizeRanks against scores [B*H, ...].
+    if ((b0 != 1 && b0 != batch) || (h0 != 1 && h0 != numHeads))
+      return rewriter.notifyMatchFailure(
+          op, "attention_bias batch/head dims do not broadcast");
+    int64_t tileB = batch / b0;
+    int64_t tileH = numHeads / h0;
+    if (tileB != 1 || tileH != 1)
+      bias = tileMultiples(bias, {tileB, tileH, 1, 1},
+                           {batch, numHeads, sq, skv}, rewriter, loc);
+    bias = reshapeTo(bias, {batch * numHeads, sq, skv}, rewriter);
   }
   if (failed(tosa::EqualizeRanks(rewriter, loc, scores, bias)))
     return rewriter.notifyMatchFailure(op, "attention_bias not broadcastable");
@@ -1927,11 +1944,16 @@ LogicalResult quantIfNeeded(Value &cache, Value scale, RankedTensorType outTy,
   if (!scale)
     return rewriter.notifyMatchFailure(op, "quantized present missing scale");
   Value s = scale;
+  auto sTy = dyn_cast<RankedTensorType>(s.getType());
+  if (!sTy || !sTy.hasStaticShape())
+    return rewriter.notifyMatchFailure(op, "scale must be a static tensor");
+  auto cacheTy = cast<RankedTensorType>(cache.getType());
+  if (sTy.getElementType() != cacheTy.getElementType())
+    s = emitTosaCast(rewriter, loc, s, cacheTy.getElementType());
   if (failed(tosa::EqualizeRanks(rewriter, loc, cache, s)))
     return rewriter.notifyMatchFailure(op, "scale not broadcastable");
   auto recTy = cast<RankedTensorType>(s.getType());
   Value inv = tosa::ReciprocalOp::create(rewriter, loc, recTy, s);
-  auto cacheTy = cast<RankedTensorType>(cache.getType());
   Value scaled = emitTosaMul(rewriter, loc, cache, inv, cacheTy);
   cache = emitTosaCast(rewriter, loc, scaled, outTy.getElementType());
   return success();
@@ -2103,8 +2125,8 @@ struct GqaConverter final : public OpConversionPattern<GqaOp> {
     }
 
     if (adaptor.getAttentionBias() &&
-        failed(addAttentionBias(scores, adaptor.getAttentionBias(), qkTy,
-                                rewriter, loc, op)))
+        failed(addAttentionBias(scores, adaptor.getAttentionBias(), qkTy, batch,
+                                numHeads, rewriter, loc, op)))
       return failure();
 
     Value kIdx = createArangeI32(rewriter, loc, seqKv);
@@ -2150,6 +2172,22 @@ struct GqaConverter final : public OpConversionPattern<GqaOp> {
       seqlens = reshapeTo(seqlens, {bh, 1, 1}, rewriter);
     } else {
       seqlens = reshapeTo(seqlens, {1, 1, 1}, rewriter);
+    }
+    // ORT prefill sentinel seqlens_k=-1 means no past and total_seq=seqQ.
+    // Comparing kIdx > -1 would mask every key and softmax would see an
+    // all--inf row. Map the sentinel to the last current-key index first.
+    {
+      auto slTy = cast<RankedTensorType>(seqlens.getType());
+      Value zero = createSplatI32(rewriter, loc, slTy.getShape(), 0);
+      int32_t lastCurrent = seqQ > 0 ? static_cast<int32_t>(seqQ - 1) : 0;
+      Value lastCur =
+          createSplatI32(rewriter, loc, slTy.getShape(), lastCurrent);
+      auto sentPredTy =
+          RankedTensorType::get(slTy.getShape(), rewriter.getI1Type());
+      Value isSentinel =
+          tosa::GreaterOp::create(rewriter, loc, sentPredTy, zero, seqlens);
+      seqlens = tosa::SelectOp::create(rewriter, loc, slTy, isSentinel, lastCur,
+                                       seqlens);
     }
     auto padPredTy = RankedTensorType::get(
         {cast<RankedTensorType>(seqlens.getType()).getDimSize(0), 1, seqKv},
@@ -2486,9 +2524,15 @@ struct MhaConverter final : public OpConversionPattern<MultiHeadAttentionOp> {
     Value scores =
         tosa::MatMulOp::create(rewriter, loc, qkTy, q3, k3).getResult();
 
+    double scale = op.getScale().convertToFloat();
+    if (scale == 0.0)
+      scale = 1.0 / std::sqrt(static_cast<double>(headDim));
+    Value scaleSplat = createSplatFloat(rewriter, loc, qkTy, scale);
+    scores = emitTosaMul(rewriter, loc, scores, scaleSplat, qkTy);
+
     if (adaptor.getAttentionBias() &&
-        failed(addAttentionBias(scores, adaptor.getAttentionBias(), qkTy,
-                                rewriter, loc, op)))
+        failed(addAttentionBias(scores, adaptor.getAttentionBias(), qkTy, batch,
+                                numHeads, rewriter, loc, op)))
       return failure();
     if (adaptor.getKeyPaddingMask() &&
         failed(addKeyPadding(scores, adaptor.getKeyPaddingMask(), qkTy, batch,
@@ -2496,12 +2540,6 @@ struct MhaConverter final : public OpConversionPattern<MultiHeadAttentionOp> {
                              op.getMaskFilterValue().convertToFloat(), rewriter,
                              loc, op)))
       return failure();
-
-    double scale = op.getScale().convertToFloat();
-    if (scale == 0.0)
-      scale = 1.0 / std::sqrt(static_cast<double>(headDim));
-    Value scaleSplat = createSplatFloat(rewriter, loc, qkTy, scale);
-    scores = emitTosaMul(rewriter, loc, scores, scaleSplat, qkTy);
 
     Value kIdx = createArangeI32(rewriter, loc, seqKv);
     kIdx = reshapeTo(kIdx, {1, 1, seqKv}, rewriter);
