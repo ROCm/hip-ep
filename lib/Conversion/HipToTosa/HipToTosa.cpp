@@ -1956,7 +1956,8 @@ LogicalResult gatherRopeCacheRows(Value cache, Value positionIds, int64_t batch,
       emitTosaCast(rewriter, loc, positionIds, rewriter.getI32Type());
   indices = reshapeTo(indices, {batch, seqLen}, rewriter);
 
-  auto indicesTy = RankedTensorType::get({batch, seqLen}, rewriter.getI32Type());
+  auto indicesTy =
+      RankedTensorType::get({batch, seqLen}, rewriter.getI32Type());
   Value zero = createSplatInt(rewriter, loc, indicesTy, 0);
   Value last = createSplatInt(rewriter, loc, indicesTy, maxPos - 1);
   indices = tosa::MaximumOp::create(rewriter, loc, indicesTy, indices, zero);
