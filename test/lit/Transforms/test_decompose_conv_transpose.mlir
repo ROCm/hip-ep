@@ -1,0 +1,137 @@
+// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+
+// ============================================================================
+// TEST PURPOSE:
+// Verify hip.conv_transpose is split into stride-1 hip.conv residues that
+// rocMLIR can anchor on, and that unsupported cases are left for MIOpen.
+//
+// Test cases:
+// 1. stride2      - 2x upsample, 3x3 kernel -> 4 residues (2x2, 2x1, 1x2, 1x1)
+// 2. stride1      - no upsampling -> a single conv, no reassembly
+// 3. dilated      - dilation > 1 is out of scope, op survives
+// 4. stride_gt_k  - an empty residue would leave holes, op survives
+// 5. grouped      - tosa.conv2d has no grouped form, op survives
+// ============================================================================
+
+// RUN: hip-mlir-opt %s --hip-decompose-conv-transpose --canonicalize | FileCheck %s
+
+module {
+  // --------------------------------------------------------------------------
+  // 1. Stride 2: residue (i, j) keeps taps {i, i+2} x {j, j+2}, so the filter
+  //    splits 3x3 into 2x2 / 2x1 / 1x2 / 1x1 sub-filters with the channels
+  //    swapped from [C, M, ...] to [M, C, ...].
+  // --------------------------------------------------------------------------
+  func.func @stride2(%ctx: !hip.context, %x: tensor<1x8x16x16xf32>)
+      -> tensor<1x16x32x32xf32> {
+    %w = hip.constant {value = dense<1.000000e-02> : tensor<8x16x3x3xf32>}
+        : tensor<8x16x3x3xf32>
+    %init = tensor.empty() : tensor<1x16x32x32xf32>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w : tensor<1x8x16x16xf32>,
+                                               tensor<8x16x3x3xf32>)
+        outs(%init : tensor<1x16x32x32xf32>)
+        {kernel_shape = [3, 3], strides = [2, 2], pads = [1, 1, 1, 1],
+         dilations = [1, 1], output_padding = [1, 1], group = 1 : i64}
+        : tensor<1x16x32x32xf32>
+    return %y : tensor<1x16x32x32xf32>
+  }
+
+  // CHECK-LABEL: func.func @stride2
+  // CHECK-NOT: hip.conv_transpose
+  // Every residue is a dense stride-1 convolution over the full input.
+  // CHECK-DAG: hip.conv({{.*}} tensor<16x8x2x2xf32>){{.*}} {dilations = [1, 1], group = 1 : i64, kernel_shape = [2, 2], pads = [1, 1, 1, 1], strides = [1, 1]}
+  // CHECK-DAG: hip.conv({{.*}} tensor<16x8x2x1xf32>){{.*}} kernel_shape = [2, 1]
+  // CHECK-DAG: hip.conv({{.*}} tensor<16x8x1x2xf32>){{.*}} kernel_shape = [1, 2]
+  // CHECK-DAG: hip.conv({{.*}} tensor<16x8x1x1xf32>){{.*}} kernel_shape = [1, 1]
+  // Residue (i, j) lands on output positions {i + 2k} x {j + 2k}...
+  // CHECK-DAG: tensor.insert_slice {{.*}}[0, 0, 0, 0] [1, 16, 17, 17] [1, 1, 2, 2]
+  // CHECK-DAG: tensor.insert_slice {{.*}}[0, 0, 1, 1] [1, 16, 17, 17] [1, 1, 2, 2]
+  // ...and the leading pad is cropped back off.
+  // CHECK: tensor.extract_slice {{.*}}[0, 0, 1, 1] [1, 16, 32, 32] [1, 1, 1, 1]
+
+  // --------------------------------------------------------------------------
+  // 2. Stride 1: one residue keeping every tap, so the decomposition is just a
+  //    spatial flip plus the channel swap. No scatter, no crop beyond the pad.
+  // --------------------------------------------------------------------------
+  func.func @stride1(%ctx: !hip.context, %x: tensor<1x8x16x16xf32>)
+      -> tensor<1x16x16x16xf32> {
+    %w = hip.constant {value = dense<1.000000e-02> : tensor<8x16x3x3xf32>}
+        : tensor<8x16x3x3xf32>
+    %init = tensor.empty() : tensor<1x16x16x16xf32>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w : tensor<1x8x16x16xf32>,
+                                               tensor<8x16x3x3xf32>)
+        outs(%init : tensor<1x16x16x16xf32>)
+        {kernel_shape = [3, 3], strides = [1, 1], pads = [1, 1, 1, 1],
+         dilations = [1, 1], output_padding = [0, 0], group = 1 : i64}
+        : tensor<1x16x16x16xf32>
+    return %y : tensor<1x16x16x16xf32>
+  }
+
+  // CHECK-LABEL: func.func @stride1
+  // CHECK-NOT: hip.conv_transpose
+  // CHECK: hip.conv({{.*}} tensor<16x8x3x3xf32>){{.*}} kernel_shape = [3, 3]
+  // CHECK-NOT: hip.conv(
+
+  // --------------------------------------------------------------------------
+  // 3. Dilation > 1 needs the general zero-stuff reassembly, not the strided
+  //    insert used here.
+  // --------------------------------------------------------------------------
+  func.func @dilated(%ctx: !hip.context, %x: tensor<1x8x16x16xf32>)
+      -> tensor<1x16x35x35xf32> {
+    %w = hip.constant {value = dense<1.000000e-02> : tensor<8x16x3x3xf32>}
+        : tensor<8x16x3x3xf32>
+    %init = tensor.empty() : tensor<1x16x35x35xf32>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w : tensor<1x8x16x16xf32>,
+                                               tensor<8x16x3x3xf32>)
+        outs(%init : tensor<1x16x35x35xf32>)
+        {kernel_shape = [3, 3], strides = [2, 2], pads = [0, 0, 0, 0],
+         dilations = [2, 2], output_padding = [0, 0], group = 1 : i64}
+        : tensor<1x16x35x35xf32>
+    return %y : tensor<1x16x35x35xf32>
+  }
+
+  // CHECK-LABEL: func.func @dilated
+  // CHECK: hip.conv_transpose
+
+  // --------------------------------------------------------------------------
+  // 4. stride > kernel leaves residues with no taps, so the strided inserts
+  //    would not cover the destination.
+  // --------------------------------------------------------------------------
+  func.func @stride_gt_k(%ctx: !hip.context, %x: tensor<1x8x16x16xf32>)
+      -> tensor<1x16x63x63xf32> {
+    %w = hip.constant {value = dense<1.000000e-02> : tensor<8x16x3x3xf32>}
+        : tensor<8x16x3x3xf32>
+    %init = tensor.empty() : tensor<1x16x63x63xf32>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w : tensor<1x8x16x16xf32>,
+                                               tensor<8x16x3x3xf32>)
+        outs(%init : tensor<1x16x63x63xf32>)
+        {kernel_shape = [3, 3], strides = [4, 4], pads = [0, 0, 0, 0],
+         dilations = [1, 1], output_padding = [0, 0], group = 1 : i64}
+        : tensor<1x16x63x63xf32>
+    return %y : tensor<1x16x63x63xf32>
+  }
+
+  // CHECK-LABEL: func.func @stride_gt_k
+  // CHECK: hip.conv_transpose
+
+  // --------------------------------------------------------------------------
+  // 5. tosa.conv2d has no grouped form, so hip.conv could not consume the
+  //    residues even though the split itself is well defined.
+  // --------------------------------------------------------------------------
+  func.func @grouped(%ctx: !hip.context, %x: tensor<1x8x16x16xf32>)
+      -> tensor<1x16x18x18xf32> {
+    %w = hip.constant {value = dense<1.000000e-02> : tensor<8x8x3x3xf32>}
+        : tensor<8x8x3x3xf32>
+    %init = tensor.empty() : tensor<1x16x18x18xf32>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w : tensor<1x8x16x16xf32>,
+                                               tensor<8x8x3x3xf32>)
+        outs(%init : tensor<1x16x18x18xf32>)
+        {kernel_shape = [3, 3], strides = [1, 1], pads = [0, 0, 0, 0],
+         dilations = [1, 1], output_padding = [0, 0], group = 2 : i64}
+        : tensor<1x16x18x18xf32>
+    return %y : tensor<1x16x18x18xf32>
+  }
+
+  // CHECK-LABEL: func.func @grouped
+  // CHECK: hip.conv_transpose
+}
