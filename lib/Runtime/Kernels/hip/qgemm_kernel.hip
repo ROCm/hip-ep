@@ -44,11 +44,17 @@
 // -----------------
 // |A - z_a| reaches 65535 for a 16-bit activation and |B - z_b| reaches 255
 // even for a 4-bit weight whose zero point sits at the far end of the storage
-// range, which bounds one term at 1.7e7 -- past int32 after two terms. Every
-// accumulator is therefore int64, which nothing here makes expensive.
+// range, which bounds one term at 1.7e7 -- past int32 after two terms.
+//
+// The GEMV path therefore accumulates in int64, which nothing on that
+// bandwidth-bound shape makes expensive. The tiled path cannot: int64 would
+// also shut it out of the integer dot pipeline it exists to use. It splits a
+// 16-bit A into two byte planes instead, which keeps each plane's accumulator
+// inside int32 and exact; quant_tile.inc.hip carries that derivation.
 
 #include "debug_log.h"
 #include "hip_custom_kernels.h"
+#include "quant_tile.inc.hip"
 
 #include <hip/hip_runtime.h>
 
@@ -146,83 +152,115 @@ __device__ inline int32_t qgemm_read_quant(const uint8_t *__restrict__ buf,
   return static_cast<int32_t>(buf[lin]);
 }
 
-__device__ inline void qgemm_store(void *__restrict__ buf, int64_t idx,
-                                   int dtype, float v) {
-  switch (dtype) {
-  case HIP_DTYPE_INT8:
-    static_cast<int8_t *>(buf)[idx] = q_saturate<int8_t>(v);
-    break;
-  case HIP_DTYPE_UINT8:
-    static_cast<uint8_t *>(buf)[idx] = q_saturate<uint8_t>(v);
-    break;
-  case HIP_DTYPE_INT16:
-    static_cast<int16_t *>(buf)[idx] = q_saturate<int16_t>(v);
-    break;
-  default: // HIP_DTYPE_UINT16
-    static_cast<uint16_t *>(buf)[idx] = q_saturate<uint16_t>(v);
-    break;
-  }
-}
-
 //===----------------------------------------------------------------------===//
-// Reference kernel (M > 1)
+// Requantization epilogue
 //===----------------------------------------------------------------------===//
-//
-// One thread per output element, no tiling and no reuse: every thread re-reads
-// a full row of A and a full column of B from global memory, so the same A
-// element is fetched N times and the same B element M times. That is the
-// arithmetic spelled out literally, which is what makes it the baseline the
-// GEMV path below is checked against.
 
-// threadIdx.x indexes n so that consecutive threads write consecutive Y
-// elements; n is the contiguous axis of the output.
-constexpr int kBlockN = 16;
-constexpr int kBlockM = 16;
+// Everything the epilogue needs that does not come out of the reduction. Passed
+// by value, so it must stay trivially copyable.
+struct QGemmRequant {
+  const float *b_scales;
+  const uint8_t *b_zero_points;
+  const void *C;
+  float m_ab;
+  float m_c;
+  int64_t K;
+  int64_t c_dim0;
+  int64_t c_dim1;
+  int32_t a_zp;
+  int32_t b_zp;
+  int32_t c_zp;
+  int32_t y_zp;
+  int32_t b_bits;
+  int32_t c_dtype;
+  bool b_signed;
+};
 
-__global__ __launch_bounds__(kBlockN *kBlockM) void qgemm_naive_kernel(
-    const void *__restrict__ A, const uint8_t *__restrict__ B,
-    const void *__restrict__ C, const float *__restrict__ B_scales,
-    const uint8_t *__restrict__ B_zero_points, void *__restrict__ Y, int64_t M,
-    int64_t N, int64_t K, bool trans_a, bool trans_b, int a_dtype, int b_dtype,
-    int c_dtype, int y_dtype, int b_bits, bool b_signed, int64_t c_dim0,
-    int64_t c_dim1, float M_ab, float M_c, int32_t a_zp, int32_t b_zp,
-    int32_t c_zp, int32_t y_zp) {
-  (void)b_dtype; // carried as b_signed, which is what the nibble read needs
-  const int64_t n = static_cast<int64_t>(blockIdx.x) * kBlockN + threadIdx.x;
-  const int64_t m = static_cast<int64_t>(blockIdx.y) * kBlockM + threadIdx.y;
-  if (m >= M || n >= N)
-    return;
+// Requantizes one output element from the three sums. Shared by both paths:
+// the GEMV one passes m = 0, the only row a single-row output has.
+template <typename TY>
+__device__ inline TY qgemm_epilogue(int64_t acc, int64_t row_a, int64_t col_b,
+                                    int64_t m, int64_t n,
+                                    const QGemmRequant &r) {
+  const int32_t b_zp =
+      r.b_zero_points
+          ? qgemm_read_quant(r.b_zero_points, n, r.b_bits, r.b_signed)
+          : r.b_zp;
+  const int64_t corrected = acc - static_cast<int64_t>(b_zp) * row_a -
+                            static_cast<int64_t>(r.a_zp) * col_b +
+                            r.K * static_cast<int64_t>(r.a_zp) * b_zp;
 
-  // Both halves of a per-channel B index by n alone, so they are read once per
-  // thread rather than once per k.
-  const int32_t bzp = B_zero_points
-                          ? qgemm_read_quant(B_zero_points, n, b_bits, b_signed)
-                          : b_zp;
-  const float coeff = B_scales ? M_ab * B_scales[n] : M_ab;
-
-  int64_t acc = 0;
-  for (int64_t k = 0; k < K; ++k) {
-    // trans_a stores A as [K, M] and trans_b stores B as [N, K]; only the
-    // stride changes, the logical extents do not.
-    const int32_t a =
-        qgemm_load(A, trans_a ? k * M + m : m * K + k, a_dtype) - a_zp;
-    const int32_t b =
-        qgemm_read_quant(B, trans_b ? n * K + k : k * N + n, b_bits, b_signed) -
-        bzp;
-    acc += static_cast<int64_t>(a) * b;
-  }
-
-  float scaled = coeff * static_cast<float>(acc);
-  if (C) {
+  const float coeff = r.b_scales ? r.m_ab * r.b_scales[n] : r.m_ab;
+  float scaled = coeff * static_cast<float>(corrected);
+  if (r.C) {
     // Unidirectional broadcast to [M, N]: an extent of 1 repeats along its
     // axis, which is the whole of ONNX Gemm's bias rule once the caller has
     // normalized C to rank 2.
-    const int64_t cm = (c_dim0 == 1) ? 0 : m;
-    const int64_t cn = (c_dim1 == 1) ? 0 : n;
-    scaled += M_c * static_cast<float>(
-                        qgemm_load(C, cm * c_dim1 + cn, c_dtype) - c_zp);
+    const int64_t cm = (r.c_dim0 == 1) ? 0 : m;
+    const int64_t cn = (r.c_dim1 == 1) ? 0 : n;
+    scaled += r.m_c * static_cast<float>(
+                          qgemm_load(r.C, cm * r.c_dim1 + cn, r.c_dtype) -
+                          r.c_zp);
   }
-  qgemm_store(Y, m * N + n, y_dtype, rintf(scaled) + static_cast<float>(y_zp));
+  return q_saturate<TY>(rintf(scaled) + static_cast<float>(r.y_zp));
+}
+
+//===----------------------------------------------------------------------===//
+// Tiled GEMM (M > 1)
+//===----------------------------------------------------------------------===//
+//
+// One block owns a whole [kTileM x kTileN] output tile and the whole
+// reduction, so it requantizes in place. Both operands are staged in LDS and
+// reduced through dot4 on byte planes; that reduction is shared with qmatmul
+// and the reasoning behind it lives in quant_tile.inc.hip.
+
+template <typename TA, typename TB, typename TY>
+__global__ __launch_bounds__(quant_tile::kTiledBlock) void qgemm_tiled_kernel(
+    const TA *__restrict__ A, const uint8_t *__restrict__ B,
+    TY *__restrict__ Y, int64_t M, int64_t N, int64_t K, QGemmRequant requant,
+    int b_bits, bool need_row_a, bool need_col_b, bool trans_a, bool trans_b) {
+  constexpr bool kAWide = quant_tile::APlanes<TA>::kWide;
+
+  const int64_t m_base =
+      static_cast<int64_t>(blockIdx.y) * quant_tile::kTileM;
+  const int64_t n_base =
+      static_cast<int64_t>(blockIdx.x) * quant_tile::kTileN;
+
+  const auto mt =
+      quant_tile::accumulate_k_range<TA, QGemmTraits<TA>::kSigned,
+                                     QGemmTraits<TB>::kSigned>(
+          A, B, M, N, K, m_base, n_base, 0, K, b_bits, need_row_a, need_col_b,
+          trans_a, trans_b);
+
+  int thread_m, thread_n;
+  quant_tile::micro_tile_origin(threadIdx.x, thread_m, thread_n);
+
+#pragma unroll
+  for (int i = 0; i < quant_tile::kThreadM; ++i) {
+    const int64_t m = m_base + thread_m + i;
+    if (m >= M)
+      continue;
+    int64_t row_a64;
+    if constexpr (kAWide)
+      row_a64 = int64_t{256} * mt.row_a[quant_tile::kPlaneHi][i] +
+                mt.row_a[quant_tile::kPlaneLo][i];
+    else
+      row_a64 = mt.row_a[quant_tile::kPlaneHi][i];
+#pragma unroll
+    for (int j = 0; j < quant_tile::kThreadN; ++j) {
+      const int64_t n = n_base + thread_n + j;
+      if (n >= N)
+        continue;
+      int64_t acc64;
+      if constexpr (kAWide)
+        acc64 = int64_t{256} * mt.acc[quant_tile::kPlaneHi][i][j] +
+                mt.acc[quant_tile::kPlaneLo][i][j];
+      else
+        acc64 = mt.acc[quant_tile::kPlaneHi][i][j];
+      Y[m * N + n] =
+          qgemm_epilogue<TY>(acc64, row_a64, mt.col_b[j], m, n, requant);
+    }
+  }
 }
 
 //===----------------------------------------------------------------------===//
@@ -259,47 +297,6 @@ __global__ __launch_bounds__(kBlockN *kBlockM) void qgemm_naive_kernel(
 // There is no trans_a flag here: at M == 1 both layouts of A are the same
 // K-element vector, so the index is unchanged.
 
-// Everything the epilogue needs that does not come out of the reduction. Passed
-// by value, so it must stay trivially copyable.
-struct QGemmRequant {
-  const float *b_scales;
-  const uint8_t *b_zero_points;
-  const void *C;
-  float m_ab;
-  float m_c;
-  int64_t K;
-  int64_t c_dim1;
-  int32_t a_zp;
-  int32_t b_zp;
-  int32_t c_zp;
-  int32_t y_zp;
-  int32_t b_bits;
-  int32_t c_dtype;
-  bool b_signed;
-};
-
-template <typename TY>
-__device__ inline TY qgemm_gemv_epilogue(int64_t acc, int64_t row_a,
-                                         int64_t col_b, int64_t n,
-                                         const QGemmRequant &r) {
-  const int32_t b_zp =
-      r.b_zero_points
-          ? qgemm_read_quant(r.b_zero_points, n, r.b_bits, r.b_signed)
-          : r.b_zp;
-  const int64_t corrected = acc - static_cast<int64_t>(b_zp) * row_a -
-                            static_cast<int64_t>(r.a_zp) * col_b +
-                            r.K * static_cast<int64_t>(r.a_zp) * b_zp;
-
-  const float coeff = r.b_scales ? r.m_ab * r.b_scales[n] : r.m_ab;
-  float scaled = coeff * static_cast<float>(corrected);
-  if (r.C) {
-    // M == 1 collapses the row index, so only C's column extent can broadcast.
-    const int64_t cn = (r.c_dim1 == 1) ? 0 : n;
-    scaled +=
-        r.m_c * static_cast<float>(qgemm_load(r.C, cn, r.c_dtype) - r.c_zp);
-  }
-  return q_saturate<TY>(rintf(scaled) + static_cast<float>(r.y_zp));
-}
 
 template <int kCols> struct QGemmGemvSums {
   int64_t acc[kCols];
@@ -664,8 +661,8 @@ __global__ __launch_bounds__(kBlock *kSplits) void qgemm_gemv_kernel(
       if (n >= N)
         continue;
       const int slot = c * kBlock + lane;
-      Y[n] = qgemm_gemv_epilogue<TY>(red_acc[slot], row_a, red_col_b[slot], n,
-                                     requant);
+      Y[n] = qgemm_epilogue<TY>(red_acc[slot], row_a, red_col_b[slot], 0, n,
+                                requant);
     }
     return;
   }
@@ -695,8 +692,8 @@ __global__ __launch_bounds__(kGemvReduceBlock) void qgemm_gemv_reduce_kernel(
                     threadIdx.x;
   if (n >= N)
     return;
-  Y[n] = qgemm_gemv_epilogue<TY>(partial[n], partial[2 * N], partial[N + n], n,
-                                 requant);
+  Y[n] = qgemm_epilogue<TY>(partial[n], partial[2 * N], partial[N + n], 0, n,
+                            requant);
 }
 
 //===----------------------------------------------------------------------===//
@@ -1037,26 +1034,8 @@ int qgemm_gemv_config(const QGemmArgs &g, const QGemmRequant &requant,
 }
 
 template <typename TA, typename TB, typename TY>
-int qgemm_launch_gemv(const QGemmArgs &g) {
-  const QGemmRequant requant{g.b_scales,
-                             g.b_zero_points,
-                             g.C,
-                             g.m_ab,
-                             g.m_c,
-                             g.K,
-                             g.c_dim1,
-                             g.a_zp,
-                             g.b_zp,
-                             g.c_zp,
-                             g.y_zp,
-                             g.b_bits,
-                             g.c_dtype,
-                             g.b_signed};
-  // A per-channel zero point is read in the epilogue, so its correction term
-  // must be carried whether or not any single entry happens to be zero.
-  const bool need_row_a = g.b_zero_points != nullptr || g.b_zp != 0;
-  const bool need_col_b = g.a_zp != 0;
-
+int qgemm_launch_gemv(const QGemmArgs &g, const QGemmRequant &requant,
+                      bool need_row_a, bool need_col_b) {
   const int config =
       qgemm_gemv_config<TA, TB, TY>(g, requant, need_row_a, need_col_b);
   const int err = qgemm_gemv_launch_config<TA, TB, TY>(config, g, requant,
@@ -1071,17 +1050,64 @@ int qgemm_launch_gemv(const QGemmArgs &g) {
                                               need_row_a, need_col_b);
 }
 
+// One block per output tile, sized by the shared tile geometry.
+template <typename TA, typename TB, typename TY>
+int qgemm_launch_tiled(const QGemmArgs &g, const QGemmRequant &requant,
+                       bool need_row_a, bool need_col_b) {
+  const dim3 grid(
+      static_cast<unsigned>((g.N + quant_tile::kTileN - 1) / quant_tile::kTileN),
+      static_cast<unsigned>((g.M + quant_tile::kTileM - 1) /
+                            quant_tile::kTileM));
+
+  (void)hipGetLastError();
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(qgemm_tiled_kernel<TA, TB, TY>), grid,
+                     dim3(quant_tile::kTiledBlock), 0, g.stream,
+                     static_cast<const TA *>(g.A), g.B,
+                     static_cast<TY *>(g.Y), g.M, g.N, g.K, requant, g.b_bits,
+                     need_row_a, need_col_b, g.trans_a, g.trans_b);
+  return static_cast<int>(hipGetLastError());
+}
+
+// M == 1 is the decode shape, where the output offers no second axis to tile
+// and the reduction has to be split along k instead.
+template <typename TA, typename TB, typename TY>
+int qgemm_launch(const QGemmArgs &g) {
+  const QGemmRequant requant{g.b_scales,
+                             g.b_zero_points,
+                             g.C,
+                             g.m_ab,
+                             g.m_c,
+                             g.K,
+                             g.c_dim0,
+                             g.c_dim1,
+                             g.a_zp,
+                             g.b_zp,
+                             g.c_zp,
+                             g.y_zp,
+                             g.b_bits,
+                             g.c_dtype,
+                             g.b_signed};
+  // A per-channel zero point is read in the epilogue, so its correction term
+  // must be carried whether or not any single entry happens to be zero.
+  const bool need_row_a = g.b_zero_points != nullptr || g.b_zp != 0;
+  const bool need_col_b = g.a_zp != 0;
+
+  if (g.M == 1)
+    return qgemm_launch_gemv<TA, TB, TY>(g, requant, need_row_a, need_col_b);
+  return qgemm_launch_tiled<TA, TB, TY>(g, requant, need_row_a, need_col_b);
+}
+
 template <typename TA, typename TB>
 int qgemm_dispatch_y(const QGemmArgs &g) {
   switch (g.y_dtype) {
   case HIP_DTYPE_INT8:
-    return qgemm_launch_gemv<TA, TB, int8_t>(g);
+    return qgemm_launch<TA, TB, int8_t>(g);
   case HIP_DTYPE_UINT8:
-    return qgemm_launch_gemv<TA, TB, uint8_t>(g);
+    return qgemm_launch<TA, TB, uint8_t>(g);
   case HIP_DTYPE_INT16:
-    return qgemm_launch_gemv<TA, TB, int16_t>(g);
+    return qgemm_launch<TA, TB, int16_t>(g);
   default: // HIP_DTYPE_UINT16
-    return qgemm_launch_gemv<TA, TB, uint16_t>(g);
+    return qgemm_launch<TA, TB, uint16_t>(g);
   }
 }
 
@@ -1102,20 +1128,6 @@ int qgemm_dispatch_a(const QGemmArgs &g) {
   default: // HIP_DTYPE_UINT16
     return qgemm_dispatch_b<uint16_t>(g);
   }
-}
-
-int qgemm_launch_naive(const QGemmArgs &g) {
-  const dim3 block(kBlockN, kBlockM);
-  const dim3 grid(static_cast<unsigned>((g.N + kBlockN - 1) / kBlockN),
-                  static_cast<unsigned>((g.M + kBlockM - 1) / kBlockM));
-
-  (void)hipGetLastError();
-  hipLaunchKernelGGL(qgemm_naive_kernel, grid, block, 0, g.stream, g.A, g.B,
-                     g.C, g.b_scales, g.b_zero_points, g.Y, g.M, g.N, g.K,
-                     g.trans_a, g.trans_b, g.a_dtype, g.b_dtype, g.c_dtype,
-                     g.y_dtype, g.b_bits, g.b_signed, g.c_dim0, g.c_dim1,
-                     g.m_ab, g.m_c, g.a_zp, g.b_zp, g.c_zp, g.y_zp);
-  return static_cast<int>(hipGetLastError());
 }
 
 bool is_quantized_8_or_16(int dtype) {
@@ -1239,7 +1251,7 @@ extern "C" int hip_qgemm(void *stream, const void *A, const void *B,
                        workspace,
                        workspace_bytes};
 
-  const int err = (M == 1) ? qgemm_dispatch_a(args) : qgemm_launch_naive(args);
+  const int err = qgemm_dispatch_a(args);
   if (err != hipSuccess) {
     fprintf(stderr, "[custom_kernels] hip_qgemm launch failed: %s\n",
             hipGetErrorString(static_cast<hipError_t>(err)));
