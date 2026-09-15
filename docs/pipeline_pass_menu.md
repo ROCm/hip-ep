@@ -155,16 +155,15 @@ would otherwise refuse to outline the op at all. The registered pipeline runs
 
 ```
 func.func(hip-decompose-conv-transpose)
-canonicalize
 func.func(hip-fuse-rocmlir)
 duplicate-function-elimination
 func.func(convert-hip-to-tosa)
 canonicalize
 ```
 
-The canonicalize after decomposition is load-bearing rather than cosmetic: it
-folds the per-residue weight constants and the insert_slice chain that the
-rewrite leaves behind, which is what lets the fuse pass see a clean anchor.
+The decomposition emits its residues already folded — the sub-filters are
+computed at pass time — so it needs no canonicalize of its own before the fuse
+pass, and none runs there.
 
 > The `hipsr-*` family and `convert-onnx-to-hipsr` are registered but not yet
 > tabulated here.

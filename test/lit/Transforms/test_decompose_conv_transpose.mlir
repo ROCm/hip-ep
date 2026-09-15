@@ -17,10 +17,14 @@
 // 8. with_bias    - bias is one broadcast add on the reassembled result
 // 9. f64          - hip.conv has no f64 lowering, op survives
 // 10. many_residues - stride^2 past the kernel-count cap, op survives
+// 11. result_rank_mismatch - rank-3 result, op survives
+// 12. batch_mismatch       - result batch != input batch, op survives
 //
 // Cases 1-5 use a splat filter and so only pin structure. Cases 6 and 7 use
 // distinct per-tap values, which is what actually catches a wrong tap phase,
-// a missing reversal, or a transposed channel mapping.
+// a missing reversal, or a transposed channel mapping. Cases 11 and 12 cover
+// operand/result shape disagreements that no verifier rejects, so the pattern
+// has to reject them itself rather than build invalid IR.
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --hip-decompose-conv-transpose --canonicalize | FileCheck %s
@@ -294,5 +298,28 @@ module {
   }
 
   // CHECK-LABEL: func.func @result_rank_mismatch
+  // CHECK: hip.conv_transpose
+
+  // --------------------------------------------------------------------------
+  // 12. The batch is read off the input and used for the residue convs, the
+  //     reassembly grid and the crop sizes, while the crop's result type comes
+  //     from the op. Nothing verifies the two agree, so a mismatch has to be
+  //     rejected here or the crop would contradict its own result type.
+  // --------------------------------------------------------------------------
+  func.func @batch_mismatch(%ctx: !hip.context, %x: tensor<1x1x4x4xf32>)
+      -> tensor<2x1x8x8xf32> {
+    %w = hip.constant {value = dense<1.000000e-02> : tensor<1x1x2x2xf32>}
+        : tensor<1x1x2x2xf32>
+    %init = tensor.empty() : tensor<2x1x8x8xf32>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w : tensor<1x1x4x4xf32>,
+                                               tensor<1x1x2x2xf32>)
+        outs(%init : tensor<2x1x8x8xf32>)
+        {kernel_shape = [2, 2], strides = [2, 2], pads = [0, 0, 0, 0],
+         dilations = [1, 1], output_padding = [0, 0], group = 1 : i64}
+        : tensor<2x1x8x8xf32>
+    return %y : tensor<2x1x8x8xf32>
+  }
+
+  // CHECK-LABEL: func.func @batch_mismatch
   // CHECK: hip.conv_transpose
 }
