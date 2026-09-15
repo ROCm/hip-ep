@@ -26,6 +26,9 @@ class RewriterBase;
 namespace hipsr {
 
 // Parse log level from string
+extern bool scheme_initialized;
+void initCachedSymbols();
+
 mlir::hipsr::SchemeLogLevel parseLogLevel(const std::string& level);
 void setSchemeLogLevel(mlir::hipsr::SchemeLogLevel level);
 

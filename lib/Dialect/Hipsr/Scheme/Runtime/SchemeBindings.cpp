@@ -1226,7 +1226,8 @@ void registerMlirForeignFunctions() {
 
 } // namespace hipsr
 } // namespace mlir
-
-void setSchemeLogLevel(mlir::hipsr::SchemeLogLevel level) {
-  mlir::hipsr::current_log_level = level;
+namespace mlir { namespace hipsr { void setSchemeLogLevel(SchemeLogLevel level) {
+  current_log_level = level;
 }
+} }
+

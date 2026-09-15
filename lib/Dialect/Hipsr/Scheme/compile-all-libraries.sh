@@ -32,7 +32,7 @@ $SCHEME_COMPILER --libdirs "$BUILD_DIR:$SOURCE_DIR/../../../../third_party/rime"
 (library-directories "$LIBRARY_DIR" "$BUILD_DIR")
 (compile-library "$LIBRARY_DIR/mlir/pattern-dsl.sls" "$BUILD_DIR/mlir/pattern-dsl.so")
 (compile-library "$LIBRARY_DIR/patterns/cast.sls" "$BUILD_DIR/patterns/cast.so")
-(compile-library "$LIBRARY_DIR/passes/onnx-to-hipsr.sls" "$BUILD_DIR/passes/onnx-to-hipsr.so")
+(compile-library "$LIBRARY_DIR/passes-onnx-to-hipsr.sls" "$BUILD_DIR/passes-onnx-to-hipsr.so")
 EOF
 
 echo "Scheme compilation complete."

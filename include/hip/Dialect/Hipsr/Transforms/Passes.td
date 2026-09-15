@@ -280,15 +280,15 @@ def ConversionInSchemePass : Pass<"conversion-in-scheme", "mlir::ModuleOp"> {
     The Scheme module to load is specified via the 'module' option.
 
     Examples:
-      --conversion-in-scheme="module=passes onnx-to-hipsr"  - ONNX to HipSR
-      --conversion-in-scheme="module=passes hipsr-to-linalg" - HipSR to Linalg
-      --conversion-in-scheme="module=passes onnx-to-hipsr,log-level=debug" - with debug logging
+      --conversion-in-scheme="module=passes-onnx-to-hipsr"  - ONNX to HipSR
+      --conversion-in-scheme="module=passes-hipsr-to-linalg" - HipSR to Linalg
+      --conversion-in-scheme="module=passes-onnx-to-hipsr,log-level=debug" - with debug logging
 
     Enables writing conversion patterns in Scheme without C++ recompilation.
   }];
   let options = [
     Option<"moduleName", "module", "std::string", /*default=*/"\"\"",
-           "Scheme module name to load (e.g., 'passes onnx-to-hipsr')">,
+           "Scheme module name to load (e.g., 'passes-onnx-to-hipsr')">,
     Option<"logLevel", "log-level", "std::string", /*default=*/"\"warning\"",
            "Logging level: trace, debug, info, warning, error, fatal">
   ];
