@@ -1636,9 +1636,9 @@ int wrap_qmatmul(RuntimeState *state, const void *A, const void *B, void *Y,
   return 0;
 }
 
-int wrap_qgemm(RuntimeState *state, const void *A, const void *B,
-               const void *C, const void *B_scales, const void *B_zero_points,
-               void *Y, int64_t M, int64_t N, int64_t K, int64_t trans_a,
+int wrap_qgemm(RuntimeState *state, const void *A, const void *B, const void *C,
+               const void *B_scales, const void *B_zero_points, void *Y,
+               int64_t M, int64_t N, int64_t K, int64_t trans_a,
                int64_t trans_b, int64_t a_data_type, int64_t b_data_type,
                int64_t c_data_type, int64_t y_data_type, int64_t b_bits,
                int64_t c_dim0, int64_t c_dim1, float M_ab, float M_c,

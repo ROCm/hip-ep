@@ -83,7 +83,8 @@ struct QGemmOpLowering : public ConvertOpToLLVMPattern<QGemmOp> {
             op, "expected 8- or 16-bit A and Y element types");
     }
     if (!BType.getElementType().isInteger(8))
-      return rewriter.notifyMatchFailure(op, "expected an 8-bit B element type");
+      return rewriter.notifyMatchFailure(op,
+                                         "expected an 8-bit B element type");
     int64_t bBits = op.getBBits();
     if (bBits != 4 && bBits != 8)
       return rewriter.notifyMatchFailure(op, "expected B_bits of 4 or 8");
@@ -188,9 +189,8 @@ struct QGemmOpLowering : public ConvertOpToLLVMPattern<QGemmOp> {
         i64Type  // Y_zero_point
     };
 
-    FailureOr<LLVM::LLVMFuncOp> funcOp =
-        LLVM::lookupOrCreateFn(rewriter, module, kWrapQGemm, paramTypes,
-                               i32Type);
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapQGemm, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 

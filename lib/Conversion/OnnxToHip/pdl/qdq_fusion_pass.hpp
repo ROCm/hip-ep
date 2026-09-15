@@ -224,7 +224,7 @@ isEightOrSixteenBitQuantized(mlir::PatternRewriter &, mlir::PDLResultList &,
   return mlir::success(width == 8 || width == 16);
 }
 
-// Restrict a Q/DQ op to an 8-, 16- or 32-bit quantized side. 
+// Restrict a Q/DQ op to an 8-, 16- or 32-bit quantized side.
 inline mlir::LogicalResult
 isEightSixteenOrThirtyTwoBitQuantized(mlir::PatternRewriter &,
                                       mlir::PDLResultList &,
@@ -315,15 +315,15 @@ inline bool hasPerChannelQuantParams(mlir::Operation *dequant,
                                      mlir::RankedTensorType inputType,
                                      int64_t channelAxis) {
   int64_t channels = inputType.getDimSize(channelAxis);
-  auto scaleType = mlir::dyn_cast<mlir::RankedTensorType>(
-      dequant->getOperand(1).getType());
+  auto scaleType =
+      mlir::dyn_cast<mlir::RankedTensorType>(dequant->getOperand(1).getType());
   if (!scaleType || scaleType.getRank() != 1 ||
       scaleType.getDimSize(0) != channels)
     return false;
   // ONNX guarantees zero_point.dtype == x.dtype, which is also what lets a
   // single width describe both buffers downstream.
-  auto zpType = mlir::dyn_cast<mlir::RankedTensorType>(
-      dequant->getOperand(2).getType());
+  auto zpType =
+      mlir::dyn_cast<mlir::RankedTensorType>(dequant->getOperand(2).getType());
   return zpType && zpType.getRank() == 1 && zpType.getDimSize(0) == channels &&
          zpType.getElementType() == inputType.getElementType();
 }
@@ -495,9 +495,9 @@ extractQuantBits(mlir::PatternRewriter &rewriter, mlir::PDLResultList &results,
     return mlir::success();
   }
   auto shaped = mlir::dyn_cast<mlir::ShapedType>(value.getType());
-  auto intType = shaped ? mlir::dyn_cast<mlir::IntegerType>(
-                              shaped.getElementType())
-                        : mlir::IntegerType();
+  auto intType =
+      shaped ? mlir::dyn_cast<mlir::IntegerType>(shaped.getElementType())
+             : mlir::IntegerType();
   if (!intType)
     return mlir::failure();
   results.push_back(rewriter.getI64IntegerAttr(intType.getWidth()));
@@ -536,9 +536,9 @@ extractAttrInt64(mlir::PatternRewriter &rewriter, mlir::PDLResultList &results,
 // args[0] = op, args[1] = attribute name, args[2] = value to use when absent.
 // The result is always f32-typed, because it feeds hip op attributes declared
 // as F32Attr while ONNX stores the attribute at the importer's float width.
-inline mlir::LogicalResult
-extractAttrF32(mlir::PatternRewriter &rewriter, mlir::PDLResultList &results,
-               llvm::ArrayRef<mlir::PDLValue> args) {
+inline mlir::LogicalResult extractAttrF32(mlir::PatternRewriter &rewriter,
+                                          mlir::PDLResultList &results,
+                                          llvm::ArrayRef<mlir::PDLValue> args) {
   if (args.size() != 3)
     return mlir::failure();
 

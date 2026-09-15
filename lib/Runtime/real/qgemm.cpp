@@ -46,9 +46,9 @@ static bool is_8_or_16_bit(int hip_dtype) {
          hip_dtype == HIP_DTYPE_INT16 || hip_dtype == HIP_DTYPE_UINT16;
 }
 
-int wrap_qgemm(RuntimeState *state, const void *A, const void *B,
-               const void *C, const void *B_scales, const void *B_zero_points,
-               void *Y, int64_t M, int64_t N, int64_t K, int64_t trans_a,
+int wrap_qgemm(RuntimeState *state, const void *A, const void *B, const void *C,
+               const void *B_scales, const void *B_zero_points, void *Y,
+               int64_t M, int64_t N, int64_t K, int64_t trans_a,
                int64_t trans_b, int64_t a_data_type, int64_t b_data_type,
                int64_t c_data_type, int64_t y_data_type, int64_t b_bits,
                int64_t c_dim0, int64_t c_dim1, float M_ab, float M_c,
@@ -153,9 +153,9 @@ int wrap_qgemm(RuntimeState *state, const void *A, const void *B,
       hipdnn_ep_datatype_name(c_data_type),
       hipdnn_ep_datatype_name(y_data_type), (long long)b_bits,
       B_scales ? "yes" : "no", (double)M_ab, (double)M_c,
-      (long long)A_zero_point, (long long)B_zero_point,
-      (long long)C_zero_point, (long long)Y_zero_point, C ? "yes" : "null",
-      (long long)c_dim0, (long long)c_dim1);
+      (long long)A_zero_point, (long long)B_zero_point, (long long)C_zero_point,
+      (long long)Y_zero_point, C ? "yes" : "null", (long long)c_dim0,
+      (long long)c_dim1);
 
   int rc = hip_qgemm(stream, A, B, C, B_scales, B_zero_points, Y, M, N, K,
                      trans_a != 0, trans_b != 0, a_dtype, b_dtype, c_dtype,
