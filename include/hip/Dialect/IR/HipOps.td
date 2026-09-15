@@ -5032,19 +5032,16 @@ def Hip_QMatMulOp : Hip_DpsOp<"qmatmul", /*traits=*/[],
   let hasVerifier = 1;
 }
 
-def Hip_QGemmOp : Hip_DpsOp<"qgemm", /*traits=*/[],
+def Hip_QGemmOp : Hip_DpsOp<"qgemm", /*traits=*/[AttrSizedOperandSegments],
                             /*outsAccessor=*/"Y",
                             /*autoReify=*/0,
                             /*autoInfer=*/1,
                             /*declareInfer=*/1> {
   let summary = "Quantized general matrix multiplication with integrated QDQ";
   let description = [{
-    Fuses DequantizeLinear x2 (or x3) -> Gemm -> QuantizeLinear into a single
-    integer-domain GEMM whose epilogue also applies the bias.
-
-    ONNX Gemm is `Y = alpha * A' * B' + beta * C` with `A' = transpose(A)` when
-    `transA`, `B' = transpose(B)` when `transB`, A' shaped [M, K], B' shaped
-    [K, N] and C unidirectionally broadcast to [M, N]:
+    Fuses DequantizeLinear on A, B and the optional bias C, an ONNX Gemm, and a
+    QuantizeLinear on its result into one integer-domain GEMM, without
+    materializing any dequantized value.
 
     ```
     a = (A - A_zero_point) * A_scale
@@ -5053,28 +5050,40 @@ def Hip_QGemmOp : Hip_DpsOp<"qgemm", /*traits=*/[],
     Y = saturate(round((alpha * a' @ b' + beta * c) / Y_scale) + Y_zero_point)
     ```
 
-    Expanded over the integer accumulator, with
-    `acc[m,n] = sum_k A[m,k]*B[k,n]`, `rowA[m] = sum_k A[m,k]` and
-    `colB[n] = sum_k B[k,n]`:
+    `a'` is `a` transposed when `transA` is 1 and `b'` is `b` transposed when
+    `transB` is 1, so that `a'` is [M, K], `b'` is [K, N] and Y is [M, N]; `c`
+    is unidirectionally broadcast to [M, N].
 
-    ```
-    Y[m,n] = saturate(round(M_ab * (acc[m,n] - B_zero_point * rowA[m]
-                                             - A_zero_point * colB[n]
-                                             + K * A_zero_point * B_zero_point)
-                            + M_c * (C[m,n] - C_zero_point))
-                      + Y_zero_point)
-    M_ab = alpha * A_scale * B_scale / Y_scale   (folded at lowering time)
-    M_c  = beta * C_scale / Y_scale              (folded at lowering time)
-    ```
+    Operands:
+    * `$ctx` -- HIP execution context.
+    * `$A` -- rank-2 quantized left operand, 8- or 16-bit integer element type.
+    * `$B` -- rank-2 quantized right operand, always 8-bit integer storage,
+      which at `B_bits` 4 holds two values per byte.
+    * `$B_scales`, `$B_zero_points` -- optional per-N quantization of B, both
+      rank-1 with N elements, typed f32 and B's element type. Both are present
+      or neither is, and they replace the `B_scale` / `B_zero_point` attributes
+      so that `b[k, n]` uses `B_scales[n]` and `B_zero_points[n]`. N is B's
+      dimension 1, or dimension 0 under `transB`.
+    * `$C` -- optional bias of rank 2 or less, 8-, 16- or 32-bit integer element
+      type. When it is absent the `beta * c` term is dropped and `beta` is
+      ignored.
+    * `$Y` -- quantized output buffer and DPS init, [M, N], 8- or 16-bit integer
+      element type.
 
-    Quantization is per-tensor, so every scale and zero point is an attribute.
-    A and Y may be 8- or 16-bit and B is 8-bit only, for the same reason as
-    `hip.qmatmul`: the shared kernel keeps a 16-bit A exact by splitting it into
-    two bytes and splits only A. C may additionally be 32-bit, because an ONNX
-    quantizer emits a Gemm bias as int32 at `C_scale = A_scale * B_scale`.
-
-    `$C` is optional; when it is absent the `beta * c` term is zero and `beta`
-    is ignored.
+    Attributes, with defaults in parentheses. Every scale is f32 and every zero
+    point an i64 applying to a whole tensor:
+    * `A_scale`, `A_zero_point`, `Y_scale`, `Y_zero_point` -- required.
+    * `B_scale` (1.0), `B_zero_point` (0) -- left at these identity values when
+      the per-N operands are used.
+    * `C_scale` (1.0), `C_zero_point` (0) -- ignored when `$C` is absent.
+    * `B_bits` (8) -- storage width of `$B`, and of `$B_zero_points` when that
+      operand is present; 4 or 8. At 4 both keep their logical shape and 8-bit
+      element type while each backing byte holds TWO values, low nibble first
+      over the flattened row-major sequence. The element type's signedness
+      still selects how a nibble is widened, signed for `i8` and unsigned for
+      `ui8`.
+    * `alpha` (1.0), `beta` (1.0) -- the ONNX Gemm scalars used above.
+    * `transA` (0), `transB` (0) -- the transpose flags used above.
 
     Example:
     ```mlir
@@ -5085,6 +5094,14 @@ def Hip_QGemmOp : Hip_DpsOp<"qgemm", /*traits=*/[],
                      B_scale = 1.250000e-01 : f32, B_zero_point = 3 : i64,
                      C_scale = 3.125000e-02 : f32, C_zero_point = 0 : i64,
                      Y_scale = 5.000000e-01 : f32, Y_zero_point = 7 : i64}
+
+    hip.qgemm(%ctx) ins(%A, %B : memref<64x128xui16, 1>, memref<32x128xi8, 1>)
+                    b_per_channel(%Bs, %Bzp : memref<32xf32, 1>,
+                                              memref<32xi8, 1>)
+                    outs(%Y : memref<64x32xui16, 1>)
+                    {A_scale = 2.500000e-01 : f32, A_zero_point = 5 : i64,
+                     B_bits = 4 : i64, transB = 1 : i64,
+                     Y_scale = 5.000000e-01 : f32, Y_zero_point = 7 : i64}
     ```
   }];
 
@@ -5092,12 +5109,15 @@ def Hip_QGemmOp : Hip_DpsOp<"qgemm", /*traits=*/[],
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$A,             // Left operand (quantized)
     Hip_TensorOrMemRef:$B,             // Right operand (quantized)
+    Optional<Hip_TensorOrMemRef>:$B_scales,      // f32 [N], per-N-channel
+    Optional<Hip_TensorOrMemRef>:$B_zero_points, // [N], B's storage type
     Optional<Hip_TensorOrMemRef>:$C,   // Bias (quantized), broadcast to [M, N]
     Hip_TensorOrMemRef:$Y,             // Output buffer (quantized), DPS init
     F32Attr:$A_scale,
     I64Attr:$A_zero_point,
-    F32Attr:$B_scale,
-    I64Attr:$B_zero_point,
+    DefaultValuedAttr<F32Attr, "1.0">:$B_scale,
+    DefaultValuedAttr<I64Attr, "0">:$B_zero_point,
+    DefaultValuedAttr<I64Attr, "8">:$B_bits,
     DefaultValuedAttr<F32Attr, "1.0">:$C_scale,
     DefaultValuedAttr<I64Attr, "0">:$C_zero_point,
     F32Attr:$Y_scale,
@@ -5113,6 +5133,8 @@ def Hip_QGemmOp : Hip_DpsOp<"qgemm", /*traits=*/[],
         $A `,` $B (`,` $C^)?
         `:` type($A) `,` type($B) (`,` type($C)^)?
     `)`
+    (`b_per_channel` `(` $B_scales^ `,` $B_zero_points `:`
+        type($B_scales) `,` type($B_zero_points) `)`)?
     `outs` `(` $Y `:` type($Y) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];

@@ -5,10 +5,24 @@
 // Included by HipFusionPatterns.pdll, which declares the native constraints
 // used below. Not compilable on its own.
 //
-// ONNX makes Gemm's C optional, and a PDLL operand list matches an exact
-// arity, so the bias and bias-free forms need one pattern each. Both build the
-// same hip.qgemm; the bias-free one just omits the operand, which is what
-// makes `beta` and the C quantization attributes irrelevant there.
+// Two independent choices each need their own pattern, because a PDLL operand
+// list matches an exact arity and a rewrite cannot branch:
+//
+//   * ONNX makes Gemm's C optional. The bias-free forms just omit the operand,
+//     which is what makes `beta` and the C quantization attributes irrelevant
+//     there.
+//   * B may be quantized per tensor or per output feature. Per tensor folds
+//     into the B_scale / B_zero_point attributes; per channel stays in the
+//     B_scales / B_zero_points operands, one value per N.
+//
+// The per-channel patterns carry a LOWER benefit so that a per-axis weight
+// whose scales happen to be splat still takes the per-tensor path, where the
+// coefficient folds to a scalar instead of costing a load per output.
+//
+// hip.qgemm has more than one optional operand group, so it needs
+// AttrSizedOperandSegments, and PDL does not synthesize the segment sizes the
+// way an ODS builder would. Each rewrite writes them out; the entries follow
+// the operand declaration order ctx, A, B, B_scales, B_zero_points, C, Y.
 //===----------------------------------------------------------------------===//
 
 Pattern QDQGemm with benefit(10) {
@@ -20,10 +34,13 @@ Pattern QDQGemm with benefit(10) {
   let dq_b = op<onnx.DequantizeLinear>(b: Value, b_scale: Value, b_tail: ValueRange);
   let dq_c = op<onnx.DequantizeLinear>(c: Value, c_scale: Value, c_tail: ValueRange);
 
-  // A16W8 and A8W8, same bound as QDQMatMul: the shared kernel splits only A
-  // into byte planes, so a 16-bit B has no path through it. The bias is read
-  // straight out of memory and may additionally be the int32 an ONNX
-  // quantizer emits at c_scale = a_scale * b_scale.
+  // A16W8, A8W8 and their 4-bit-weight variants. The bound on A is the same as
+  // QDQMatMul's: the shared kernel splits only A into byte planes, so a 16-bit
+  // A stays exact while a 16-bit B would have no path through it. A 4-bit B is
+  // 8-bit STORAGE holding two nibbles per byte, so it passes the same check and
+  // is told apart by ExtractQuantBits below. The bias is read straight out of
+  // memory and may additionally be the int32 an ONNX quantizer emits at
+  // c_scale = a_scale * b_scale.
   IsEightOrSixteenBitQuantized(dq_a);
   IsEightBitQuantized(dq_b);
   IsEightSixteenOrThirtyTwoBitQuantized(dq_c);
@@ -60,6 +77,7 @@ Pattern QDQGemm with benefit(10) {
     let b_zeropoint_attr = ExtractZeropointValue(dq_b, attr<"2 : i64">, attr<"0 : i64">);
     let c_zeropoint_attr = ExtractZeropointValue(dq_c, attr<"2 : i64">, attr<"0 : i64">);
     let y_zeropoint_attr = ExtractZeropointValue(quant, attr<"2 : i64">, attr<"0 : i64">);
+    let b_bits_attr = ExtractQuantBits(b);
 
     let alpha_attr = ExtractAttrF32(gemm, attr<"\"alpha\"">, attr<"1.0 : f32">);
     let beta_attr = ExtractAttrF32(gemm, attr<"\"beta\"">, attr<"1.0 : f32">);
@@ -68,10 +86,12 @@ Pattern QDQGemm with benefit(10) {
 
     let empty = op<tensor.empty> -> (y_type);
     let qgemm = op<hip.qgemm>(ctx, a, b, c, empty.0) {
+      operandSegmentSizes = attr<"array<i32: 1, 1, 1, 0, 0, 1, 1>">,
       A_scale = a_scale_attr,
       A_zero_point = a_zeropoint_attr,
       B_scale = b_scale_attr,
       B_zero_point = b_zeropoint_attr,
+      B_bits = b_bits_attr,
       C_scale = c_scale_attr,
       C_zero_point = c_zeropoint_attr,
       Y_scale = y_scale_attr,
@@ -114,6 +134,7 @@ Pattern QDQGemmNoBias with benefit(10) {
     let a_zeropoint_attr = ExtractZeropointValue(dq_a, attr<"2 : i64">, attr<"0 : i64">);
     let b_zeropoint_attr = ExtractZeropointValue(dq_b, attr<"2 : i64">, attr<"0 : i64">);
     let y_zeropoint_attr = ExtractZeropointValue(quant, attr<"2 : i64">, attr<"0 : i64">);
+    let b_bits_attr = ExtractQuantBits(b);
 
     let alpha_attr = ExtractAttrF32(gemm, attr<"\"alpha\"">, attr<"1.0 : f32">);
     let trans_a_attr = ExtractAttrInt64(gemm, attr<"\"transA\"">, attr<"0 : i64">);
@@ -121,10 +142,126 @@ Pattern QDQGemmNoBias with benefit(10) {
 
     let empty = op<tensor.empty> -> (y_type);
     let qgemm = op<hip.qgemm>(ctx, a, b, empty.0) {
+      operandSegmentSizes = attr<"array<i32: 1, 1, 1, 0, 0, 0, 1>">,
       A_scale = a_scale_attr,
       A_zero_point = a_zeropoint_attr,
       B_scale = b_scale_attr,
       B_zero_point = b_zeropoint_attr,
+      B_bits = b_bits_attr,
+      Y_scale = y_scale_attr,
+      Y_zero_point = y_zeropoint_attr,
+      alpha = alpha_attr,
+      transA = trans_a_attr,
+      transB = trans_b_attr
+    } -> (y_type);
+    replace quant with qgemm;
+  };
+}
+
+Pattern QDQGemmPerChannelWeight with benefit(9) {
+  // Same chain, but B's scale and zero point hold one value per output feature
+  // and so pass through as operands. IsPerChannelWeight needs the exact
+  // three-operand DequantizeLinear: a per-channel form with no zero point is
+  // not expressible on hip.qgemm. It also reads transB off the Gemm, which is
+  // what decides whether the output feature is B's last axis or the one
+  // before it.
+  let dq_a = op<onnx.DequantizeLinear>(a: Value, a_scale: Value, a_tail: ValueRange);
+  let dq_b = op<onnx.DequantizeLinear>(b: Value, b_scale: Value, b_zero_point: Value);
+  let dq_c = op<onnx.DequantizeLinear>(c: Value, c_scale: Value, c_tail: ValueRange);
+
+  IsEightOrSixteenBitQuantized(dq_a);
+  IsEightBitQuantized(dq_b);
+  IsEightSixteenOrThirtyTwoBitQuantized(dq_c);
+
+  let gemm = op<onnx.Gemm>(dq_a.0, dq_b.0, dq_c.0);
+  IsPerChannelWeight(dq_b, gemm);
+
+  let quant = op<onnx.QuantizeLinear>(gemm.0, y_scale: Value, y_tail: ValueRange) -> (y_type: Type);
+  IsEightOrSixteenBitQuantized(quant);
+  HasStaticShapedResults(quant);
+
+  HasContextArg(quant);
+  IsSplatConstantValue(a_scale);
+  IsSplatConstantValue(c_scale);
+  IsSplatConstantValue(y_scale);
+  HasExtractableZeropoint(dq_a, attr<"2 : i64">);
+  HasExtractableZeropoint(dq_c, attr<"2 : i64">);
+  HasExtractableZeropoint(quant, attr<"2 : i64">);
+
+  rewrite quant with {
+    let ctx = GetContextArg(quant);
+    let a_scale_attr = ExtractScaleValue(a_scale);
+    let c_scale_attr = ExtractScaleValue(c_scale);
+    let y_scale_attr = ExtractScaleValue(y_scale);
+    let a_zeropoint_attr = ExtractZeropointValue(dq_a, attr<"2 : i64">, attr<"0 : i64">);
+    let c_zeropoint_attr = ExtractZeropointValue(dq_c, attr<"2 : i64">, attr<"0 : i64">);
+    let y_zeropoint_attr = ExtractZeropointValue(quant, attr<"2 : i64">, attr<"0 : i64">);
+    let b_bits_attr = ExtractQuantBits(b);
+
+    let alpha_attr = ExtractAttrF32(gemm, attr<"\"alpha\"">, attr<"1.0 : f32">);
+    let beta_attr = ExtractAttrF32(gemm, attr<"\"beta\"">, attr<"1.0 : f32">);
+    let trans_a_attr = ExtractAttrInt64(gemm, attr<"\"transA\"">, attr<"0 : i64">);
+    let trans_b_attr = ExtractAttrInt64(gemm, attr<"\"transB\"">, attr<"0 : i64">);
+
+    let empty = op<tensor.empty> -> (y_type);
+    // B_scale / B_zero_point stay unset: the operands replace them, and their
+    // identity defaults are what make M_ab collapse to alpha * A_scale / Y_scale.
+    let qgemm = op<hip.qgemm>(ctx, a, b, b_scale, b_zero_point, c, empty.0) {
+      operandSegmentSizes = attr<"array<i32: 1, 1, 1, 1, 1, 1, 1>">,
+      A_scale = a_scale_attr,
+      A_zero_point = a_zeropoint_attr,
+      B_bits = b_bits_attr,
+      C_scale = c_scale_attr,
+      C_zero_point = c_zeropoint_attr,
+      Y_scale = y_scale_attr,
+      Y_zero_point = y_zeropoint_attr,
+      alpha = alpha_attr,
+      beta = beta_attr,
+      transA = trans_a_attr,
+      transB = trans_b_attr
+    } -> (y_type);
+    replace quant with qgemm;
+  };
+}
+
+Pattern QDQGemmNoBiasPerChannelWeight with benefit(9) {
+  let dq_a = op<onnx.DequantizeLinear>(a: Value, a_scale: Value, a_tail: ValueRange);
+  let dq_b = op<onnx.DequantizeLinear>(b: Value, b_scale: Value, b_zero_point: Value);
+
+  IsEightOrSixteenBitQuantized(dq_a);
+  IsEightBitQuantized(dq_b);
+
+  let gemm = op<onnx.Gemm>(dq_a.0, dq_b.0);
+  IsPerChannelWeight(dq_b, gemm);
+
+  let quant = op<onnx.QuantizeLinear>(gemm.0, y_scale: Value, y_tail: ValueRange) -> (y_type: Type);
+  IsEightOrSixteenBitQuantized(quant);
+  HasStaticShapedResults(quant);
+
+  HasContextArg(quant);
+  IsSplatConstantValue(a_scale);
+  IsSplatConstantValue(y_scale);
+  HasExtractableZeropoint(dq_a, attr<"2 : i64">);
+  HasExtractableZeropoint(quant, attr<"2 : i64">);
+
+  rewrite quant with {
+    let ctx = GetContextArg(quant);
+    let a_scale_attr = ExtractScaleValue(a_scale);
+    let y_scale_attr = ExtractScaleValue(y_scale);
+    let a_zeropoint_attr = ExtractZeropointValue(dq_a, attr<"2 : i64">, attr<"0 : i64">);
+    let y_zeropoint_attr = ExtractZeropointValue(quant, attr<"2 : i64">, attr<"0 : i64">);
+    let b_bits_attr = ExtractQuantBits(b);
+
+    let alpha_attr = ExtractAttrF32(gemm, attr<"\"alpha\"">, attr<"1.0 : f32">);
+    let trans_a_attr = ExtractAttrInt64(gemm, attr<"\"transA\"">, attr<"0 : i64">);
+    let trans_b_attr = ExtractAttrInt64(gemm, attr<"\"transB\"">, attr<"0 : i64">);
+
+    let empty = op<tensor.empty> -> (y_type);
+    let qgemm = op<hip.qgemm>(ctx, a, b, b_scale, b_zero_point, empty.0) {
+      operandSegmentSizes = attr<"array<i32: 1, 1, 1, 1, 1, 0, 1>">,
+      A_scale = a_scale_attr,
+      A_zero_point = a_zeropoint_attr,
+      B_bits = b_bits_attr,
       Y_scale = y_scale_attr,
       Y_zero_point = y_zeropoint_attr,
       alpha = alpha_attr,

@@ -784,7 +784,7 @@ LogicalResult QMatMulOp::verify() {
 // `lib/Dialect/IR/HipReifyResultShapesImpl.cpp`.
 
 //===----------------------------------------------------------------------===//
-// QGemmOp: ins(A, B, [C]), outs(Y)
+// QGemmOp: ins(A, B, [B_scales, B_zero_points], [C]), outs(Y)
 // Quantized ONNX Gemm with integrated QDQ scales, zero points and bias
 //===----------------------------------------------------------------------===//
 
@@ -798,6 +798,10 @@ void QGemmOp::getEffects(
 
 LogicalResult QGemmOp::verify() {
   SmallVector<Value> dataOperands{getA(), getB()};
+  if (Value bScales = getBScales())
+    dataOperands.push_back(bScales);
+  if (Value bZeroPoints = getBZeroPoints())
+    dataOperands.push_back(bZeroPoints);
   if (Value c = getC())
     dataOperands.push_back(c);
   dataOperands.push_back(getY());
@@ -811,6 +815,45 @@ LogicalResult QGemmOp::verify() {
   if (Value c = getC()) {
     if (getShapeOf(c).size() > 2)
       return emitOpError("expected C to be broadcastable to [M, N]");
+  }
+
+  // A 4-bit B keeps an 8-bit element type and its logical shape; the packing is
+  // defined against the storage width, so that width is what gets checked.
+  Type bElemType = cast<ShapedType>(getB().getType()).getElementType();
+  if (!bElemType.isInteger(8))
+    return emitOpError("expected 8-bit integer storage for B, got ")
+           << bElemType;
+  if (getBBits() != 4 && getBBits() != 8)
+    return emitOpError("B_bits must be 4 or 8, got ") << getBBits();
+
+  // Per-channel quantization needs both halves: the kernel indexes a scale and
+  // a zero point by the same N, and neither has a meaningful stand-in.
+  if (static_cast<bool>(getBScales()) != static_cast<bool>(getBZeroPoints()))
+    return emitOpError(
+        "B_scales and B_zero_points must be given together or not at all");
+
+  if (Value bScales = getBScales()) {
+    Value bZeroPoints = getBZeroPoints();
+    ArrayRef<int64_t> scaleShape = getShapeOf(bScales);
+    ArrayRef<int64_t> zpShape = getShapeOf(bZeroPoints);
+    if (scaleShape.size() != 1 || zpShape.size() != 1)
+      return emitOpError("expected rank-1 B_scales and B_zero_points");
+    if (!cast<ShapedType>(bScales.getType()).getElementType().isF32())
+      return emitOpError("expected f32 B_scales");
+    // ONNX guarantees zero_point.dtype == x.dtype, which is also what lets one
+    // B_bits describe both buffers.
+    if (cast<ShapedType>(bZeroPoints.getType()).getElementType() != bElemType)
+      return emitOpError("B_zero_points element type must match B's");
+
+    int64_t n = bShape[getTransB() ? 0 : 1];
+    if (!ShapedType::isDynamic(n)) {
+      if (!ShapedType::isDynamic(scaleShape[0]) && scaleShape[0] != n)
+        return emitOpError("B_scales must hold one value per N (")
+               << n << "), got " << scaleShape[0];
+      if (!ShapedType::isDynamic(zpShape[0]) && zpShape[0] != n)
+        return emitOpError("B_zero_points must hold one value per N (")
+               << n << "), got " << zpShape[0];
+    }
   }
 
   return mlir::hip::verifyHipOpShape(

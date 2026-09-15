@@ -303,14 +303,34 @@ isFusableQConvGeometry(mlir::PatternRewriter &, mlir::PDLResultList &,
                        onnxListAttrAllEqual(op, "pads", 0));
 }
 
+// One scale and one zero point per index along `channelAxis` of `inputType`.
+//
+// Both are checked for shape only, never for value: a per-channel array
+// routinely arrives as an external constant with no bytes in the IR, so unlike
+// a per-tensor scale it cannot be folded into an attribute and must reach the
+// kernel as an operand to be indexed by channel.
+//
+// `dequant` must already be known to carry a zero point operand.
+inline bool hasPerChannelQuantParams(mlir::Operation *dequant,
+                                     mlir::RankedTensorType inputType,
+                                     int64_t channelAxis) {
+  int64_t channels = inputType.getDimSize(channelAxis);
+  auto scaleType = mlir::dyn_cast<mlir::RankedTensorType>(
+      dequant->getOperand(1).getType());
+  if (!scaleType || scaleType.getRank() != 1 ||
+      scaleType.getDimSize(0) != channels)
+    return false;
+  // ONNX guarantees zero_point.dtype == x.dtype, which is also what lets a
+  // single width describe both buffers downstream.
+  auto zpType = mlir::dyn_cast<mlir::RankedTensorType>(
+      dequant->getOperand(2).getType());
+  return zpType && zpType.getRank() == 1 && zpType.getDimSize(0) == channels &&
+         zpType.getElementType() == inputType.getElementType();
+}
+
 // The weight-side DequantizeLinear carries packed 4-bit weights quantized per
 // output channel, which is the whole point of the fusion: those bytes stay
 // packed until they are inside the kernel.
-//
-// The scale and zero point are checked for shape only, never for value. They
-// routinely arrive as external constants with no bytes in the IR, so unlike the
-// activation scale they cannot be folded into attributes and must be passed
-// through as operands for the kernel to index by output channel.
 inline mlir::LogicalResult
 isPackedInt4PerChannelWeight(mlir::PatternRewriter &, mlir::PDLResultList &,
                              llvm::ArrayRef<mlir::PDLValue> args) {
@@ -334,23 +354,55 @@ isPackedInt4PerChannelWeight(mlir::PatternRewriter &, mlir::PDLResultList &,
     return mlir::failure();
   auto weightType = mlir::cast<mlir::RankedTensorType>(weights.getType());
   // A Conv filter is [Cout, Cin/group, k...], so axis 0 is the output channel.
-  int64_t outChannels = weightType.getDimSize(0);
+  if (!hasPerChannelQuantParams(op, weightType, /*channelAxis=*/0))
+    return mlir::failure();
+  // A 4-bit weight implies a 4-bit zero point. Requiring it to be packed too is
+  // what lets one `packed_int4` flag describe both operands.
+  return mlir::success(isPackedInt4Constant(op->getOperand(2)));
+}
 
-  auto scaleType =
-      mlir::dyn_cast<mlir::RankedTensorType>(op->getOperand(1).getType());
-  if (!scaleType || scaleType.getRank() != 1 ||
-      scaleType.getDimSize(0) != outChannels)
+inline mlir::LogicalResult
+isPerChannelWeight(mlir::PatternRewriter &, mlir::PDLResultList &,
+                   llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 2)
+    return mlir::failure();
+  mlir::Operation *dequant = args[0].dyn_cast<mlir::Operation *>();
+  mlir::Operation *consumer = args[1].dyn_cast<mlir::Operation *>();
+  // A zero point is required: the fused per-channel form has no way to spell
+  // its absence.
+  if (!dequant || !consumer || dequant->getNumOperands() != 3)
+    return mlir::failure();
+  // block_size > 0 is a second, finer granularity within each channel that a
+  // per-channel lookup does not model.
+  if (!onnxIntAttrEquals(dequant, "block_size", 0, /*absentValue=*/0))
     return mlir::failure();
 
-  // ONNX guarantees zero_point.dtype == x.dtype, so a 4-bit weight implies a
-  // 4-bit zero point. Requiring it to be packed too is what lets one
-  // `packed_int4` flag describe both operands, as hip.dequantize_linear does.
-  mlir::Value zeroPoints = op->getOperand(2);
-  auto zpType = mlir::dyn_cast<mlir::RankedTensorType>(zeroPoints.getType());
-  if (!zpType || zpType.getRank() != 1 || zpType.getDimSize(0) != outChannels ||
-      zpType.getElementType() != weightType.getElementType())
+  mlir::Value weights = dequant->getOperand(0);
+  auto weightType = mlir::dyn_cast<mlir::RankedTensorType>(weights.getType());
+  if (!weightType || weightType.getRank() < 2 || !weightType.hasStaticShape())
     return mlir::failure();
-  return mlir::success(isPackedInt4Constant(zeroPoints));
+  int64_t rank = weightType.getRank();
+  bool transB = onnxIntAttrEquals(consumer, "transB", 1, /*absentValue=*/0);
+  int64_t channelAxis = transB ? rank - 2 : rank - 1;
+  if (weightType.getDimSize(channelAxis) < 2)
+    return mlir::failure();
+
+  // ONNX defaults `axis` to 1 and allows it negative, so normalize before
+  // comparing against the axis the layout puts N on.
+  auto axisAttr = dequant->getAttrOfType<mlir::IntegerAttr>("axis");
+  int64_t axis = axisAttr ? axisAttr.getValue().getSExtValue() : 1;
+  if (axis < 0)
+    axis += rank;
+  if (axis != channelAxis)
+    return mlir::failure();
+
+  if (!hasPerChannelQuantParams(dequant, weightType, channelAxis))
+    return mlir::failure();
+  // A single width attribute describes both buffers, so their packing has to
+  // agree: reading a full-width zero point as nibbles (or the reverse) is
+  // silent corruption.
+  return mlir::success(isPackedInt4Constant(weights) ==
+                       isPackedInt4Constant(dequant->getOperand(2)));
 }
 
 // onnx.LpNormalization that matches the fused RMS path: p=2 over a static
@@ -427,6 +479,28 @@ extractZeropointValue(mlir::PatternRewriter &rewriter,
   if (!zeropoint)
     return mlir::failure();
   results.push_back(rewriter.getI64IntegerAttr(*zeropoint));
+  return mlir::success();
+}
+
+inline mlir::LogicalResult
+extractQuantBits(mlir::PatternRewriter &rewriter, mlir::PDLResultList &results,
+                 llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 1)
+    return mlir::failure();
+  mlir::Value value = args[0].dyn_cast<mlir::Value>();
+  if (!value)
+    return mlir::failure();
+  if (isPackedInt4Constant(value)) {
+    results.push_back(rewriter.getI64IntegerAttr(4));
+    return mlir::success();
+  }
+  auto shaped = mlir::dyn_cast<mlir::ShapedType>(value.getType());
+  auto intType = shaped ? mlir::dyn_cast<mlir::IntegerType>(
+                              shaped.getElementType())
+                        : mlir::IntegerType();
+  if (!intType)
+    return mlir::failure();
+  results.push_back(rewriter.getI64IntegerAttr(intType.getWidth()));
   return mlir::success();
 }
 
@@ -522,12 +596,15 @@ inline bool run(mlir::ModuleOp mlirModule, llvm::StringRef pdlBytecodeFile) {
                                          isFusableQConvGeometry);
   pdlPatterns.registerConstraintFunction("IsPackedInt4PerChannelWeight",
                                          isPackedInt4PerChannelWeight);
+  pdlPatterns.registerConstraintFunction("IsPerChannelWeight",
+                                         isPerChannelWeight);
   pdlPatterns.registerConstraintFunction("IsFusableQLpNormalization",
                                          isFusableQLpNormalization);
   pdlPatterns.registerRewriteFunction("GetContextArg", getContextArg);
   pdlPatterns.registerRewriteFunction("ExtractScaleValue", extractScaleValue);
   pdlPatterns.registerRewriteFunction("ExtractZeropointValue",
                                       extractZeropointValue);
+  pdlPatterns.registerRewriteFunction("ExtractQuantBits", extractQuantBits);
   pdlPatterns.registerRewriteFunction("ExtractAttrInt64", extractAttrInt64);
   pdlPatterns.registerRewriteFunction("ExtractAttrF32", extractAttrF32);
 
