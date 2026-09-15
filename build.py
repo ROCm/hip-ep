@@ -681,6 +681,7 @@ def build_rocmlirtriton(args, build_dir, source_dir=None, rocm_path=None):
             "MLIRComplexToLLVM",
             "MLIRDebug",
             "MLIRIRDL",
+            "MLIRMathToLLVM",
             "MLIRObservers",
             "MLIROptLib",
             "MLIRPluginsLib",
@@ -688,6 +689,7 @@ def build_rocmlirtriton(args, build_dir, source_dir=None, rocm_path=None):
             "MLIRShapeDialect",
             "MLIRShapeOpsTransforms",
             "MLIRShapeToStandard",
+            "MLIRVectorToLLVM",
         ]
         known = _ninja_target_names(rock_build)
         if known:
