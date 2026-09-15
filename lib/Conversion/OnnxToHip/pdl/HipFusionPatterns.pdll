@@ -27,14 +27,17 @@ Constraint IsUint16Quantized(op: Op);
 Constraint IsFusableQConvGeometry(op: Op);
 Constraint IsPackedInt4PerChannelWeight(op: Op);
 Constraint IsFusableQLpNormalization(op: Op);
+Constraint HasMatchingLayoutQParams(dq: Op, q: Op);
 
 Rewrite GetContextArg(op: Op) -> Value;
 Rewrite ExtractScaleValue(val: Value) -> Attr;
 Rewrite ExtractZeropointValue(op: Op, index: Attr, defaultValue: Attr) -> Attr;
 Rewrite ExtractAttrInt64(op: Op, name: Attr, defaultValue: Attr) -> Attr;
+Rewrite CreateQuantizedLayoutOp(dq: Op, layout: Op, q: Op) -> Value;
 
 #include "QDQAddFusion.pdll"
 #include "QDQMulFusion.pdll"
 #include "QDQMatMulFusion.pdll"
 #include "QDQConvFusion.pdll"
 #include "QDQLpNormalizationFusion.pdll"
+#include "QDQLayoutFusion.pdll"
