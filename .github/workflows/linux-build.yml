@@ -41,6 +41,7 @@ env:
   # The GPU arch the artifact targets. CI runners have no GPU, so it is passed
   # explicitly (build.py auto-detects from /sys on a real GPU host).
   HIP_ARCHITECTURES: gfx11-generic
+  SCCACHE_CACHE_SIZE: "200M"
 
 jobs:
   build-linux:

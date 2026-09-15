@@ -32,6 +32,12 @@ struct MatMulPlaceholderShapeArgs : PlaceholderShapeRegionArgs {
 
 MutableOperandRange MatMulOp::getDpsInitsMutable() { return getInitMutable(); }
 
+Value MatMulOp::generateOpStateInit(OpBuilder &builder, Location loc,
+                                    Value statePtr, int32_t slot) {
+  return hip::emitOpStateConstruct(builder, loc, statePtr, slot,
+                                   "hipdnn_ep_op_state_construct_matmul", {});
+}
+
 // A and B must be at least 1-D because matmul needs a contraction dimension.
 LogicalResult MatMulOp::verify() {
   if (cast<ShapedType>(getA().getType()).getRank() < 1) {

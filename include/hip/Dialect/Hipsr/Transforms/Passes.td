@@ -284,7 +284,7 @@ def HipsrUseOutputAllocatorPass
     deallocated or pooled.
 
     Runs after bufferization, since a shape it reads must be an index memref,
-    and before `hipsr-pool-alloc` and `hipsr-remove-preserve-shape`.
+    and before `hipsr-pool-alloc`.
 
     An allocation counts as a graph output when `func.return` returns it either
     directly or through view-like aliases. The view operations are left in

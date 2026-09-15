@@ -27,7 +27,7 @@
 //                   v
 //   domain 2   expand(mask3d, extents)               -> mask3d'
 //              nonzero(mask3d')                      -> coords 3x?, count
-//              copy_d2h(count)                       -> count    host 1xi64
+//              copy_d2h(count)                       -> count    host 1xi32
 //                   |
 //                   |  count: how many coordinates the search actually found
 //                   v
@@ -50,13 +50,14 @@
 // RUN: %python %S/../../../Inputs/make_external_data.py %t/embedding.onnx.data 2034237440 && cd %t && hip-mlir-opt --onnx-dialect=modeled --hipsr-pipeline --mlir-elide-resource-strings-if-larger=32 %s | FileCheck %s
 
 // generate-interface reads these constant-layout module attributes.
+// This graph has no matmul, so the pipeline assigns no op-state slots.
 // CHECK-LABEL: module attributes {
 // CHECK-SAME: hip.constants_file = "constants.bin"
 // CHECK-SAME: hipdnn.constant_offsets = array<i64: 0, 64>
 // CHECK-SAME: hipdnn.constant_sizes = array<i64: 8, 2034237440>} {
 
 // The checks cover every output line, so a new alloc or copy fails the test.
-// CHECK-LABEL:   func.func @main_graph(
+// CHECK-NEXT:      func.func @main_graph(
 // CHECK-SAME:      %[[ARG0:[^:,]*]]: !hipsr.context,
 // CHECK-SAME:      %[[ARG1:[^:,]*]]: memref<?x?xi64, #hipsr.mem<device>> {onnx.name = "input_ids"},
 // CHECK-SAME:      %[[ARG2:[^:,]*]]: memref<?x4096xf16, #hipsr.mem<device>> {onnx.name = "image_features"}) -> (memref<?x?x4096xf16, #hipsr.mem<device>> {onnx.name = "inputs_embeds"}) attributes {onnx.graph.name = "main_graph"} {
@@ -281,27 +282,27 @@
 // CHECK-NEXT:      %[[GET_POOL_2:.*]] = hipsr.get_pool(%[[ARG0]], %[[ADDI_7]]) {bufferization.manual_deallocation, domain_id = 2 : i64} : memref<?xi8, #hipsr.mem<device>>
 // CHECK-NEXT:      %[[VIEW_3:.*]] = memref.view %[[GET_POOL_2]]{{\[}}%[[CONSTANT_12]]]{{\[}}%[[LOAD_18]], %[[LOAD_19]], %[[LOAD_20]]] : memref<?xi8, #hipsr.mem<device>> to memref<?x?x?xi1, #hipsr.mem<device>>
 // CHECK-NEXT:      %[[VIEW_4:.*]] = memref.view %[[GET_POOL_2]]{{\[}}%[[MULI_11]]]{{\[}}%[[LOAD_21]]] : memref<?xi8, #hipsr.mem<device>> to memref<3x?xi64, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[VIEW_5:.*]] = memref.view %[[GET_POOL_2]]{{\[}}%[[ADDI_6]]]{{\[}}] : memref<?xi8, #hipsr.mem<device>> to memref<1xi64, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[ALLOC_20:.*]] = memref.alloc() {alignment = 64 : i64} : memref<1xi64, #hipsr.mem<host>>
+// CHECK-NEXT:      %[[VIEW_5:.*]] = memref.view %[[GET_POOL_2]]{{\[}}%[[ADDI_6]]]{{\[}}] : memref<?xi8, #hipsr.mem<device>> to memref<1xi32, #hipsr.mem<device>>
+// CHECK-NEXT:      %[[ALLOC_20:.*]] = memref.alloc() {alignment = 64 : i64} : memref<1xi32, #hipsr.mem<host>>
 // CHECK-NEXT:      hipsr.expand(%[[ARG0]]) ins(%[[VIEW_2]], %[[ALLOC_11]] : memref<?x?x?xi1, #hipsr.mem<device>>, memref<3xi64, #hipsr.mem<host>>) outs(%[[VIEW_3]] : memref<?x?x?xi1, #hipsr.mem<device>>)
 // CHECK-NEXT:      memref.dealloc %[[ALLOC_11]] : memref<3xi64, #hipsr.mem<host>>
-// CHECK-NEXT:      hipsr.nonzero(%[[ARG0]]) ins(%[[VIEW_3]] : memref<?x?x?xi1, #hipsr.mem<device>>) outs(%[[VIEW_4]], %[[VIEW_5]] : memref<3x?xi64, #hipsr.mem<device>>, memref<1xi64, #hipsr.mem<device>>)
-// CHECK-NEXT:      hipsr.copy_d2h(%[[ARG0]]) ins(%[[VIEW_5]] : memref<1xi64, #hipsr.mem<device>>) outs(%[[ALLOC_20]] : memref<1xi64, #hipsr.mem<host>>)
+// CHECK-NEXT:      hipsr.nonzero(%[[ARG0]]) ins(%[[VIEW_3]] : memref<?x?x?xi1, #hipsr.mem<device>>) outs(%[[VIEW_4]], %[[VIEW_5]] : memref<3x?xi64, #hipsr.mem<device>>, memref<1xi32, #hipsr.mem<device>>)
+// CHECK-NEXT:      hipsr.copy_d2h(%[[ARG0]]) ins(%[[VIEW_5]] : memref<1xi32, #hipsr.mem<device>>) outs(%[[ALLOC_20]] : memref<1xi32, #hipsr.mem<host>>)
 // CHECK-NEXT:      hipsr.preserve_shape %[[ALLOC_18]], %[[VIEW_3]] : memref<3xindex>, memref<?x?x?xi1, #hipsr.mem<device>>
 // CHECK-NEXT:      memref.dealloc %[[ALLOC_18]] : memref<3xindex>
 // CHECK-NEXT:      hipsr.preserve_shape %[[ALLOC_19]], %[[VIEW_4]] : memref<2xindex>, memref<3x?xi64, #hipsr.mem<device>>
 // CHECK-NEXT:      memref.dealloc %[[ALLOC_19]] : memref<2xindex>
-// CHECK-NEXT:      hipsr.preserve_shape %[[ALLOC_15]], %[[VIEW_5]] : memref<1xindex>, memref<1xi64, #hipsr.mem<device>>
-// CHECK-NEXT:      hipsr.preserve_shape %[[ALLOC_15]], %[[ALLOC_20]] : memref<1xindex>, memref<1xi64, #hipsr.mem<host>>
+// CHECK-NEXT:      hipsr.preserve_shape %[[ALLOC_15]], %[[VIEW_5]] : memref<1xindex>, memref<1xi32, #hipsr.mem<device>>
+// CHECK-NEXT:      hipsr.preserve_shape %[[ALLOC_15]], %[[ALLOC_20]] : memref<1xindex>, memref<1xi32, #hipsr.mem<host>>
 // CHECK-NEXT:      memref.dealloc %[[ALLOC_15]] : memref<1xindex>
 // CHECK-NEXT:      %[[ALLOC_21:.*]] = memref.alloc() {alignment = 64 : i64} : memref<1xindex>
 // CHECK-NEXT:      memref.store %[[CONSTANT_11]], %[[ALLOC_21]]{{\[}}%[[CONSTANT_12]]] : memref<1xindex>
 // CHECK-NEXT:      %[[ALLOC_22:.*]] = memref.alloc() {alignment = 64 : i64} : memref<1xindex>
 // CHECK-NEXT:      memref.store %[[CONSTANT_7]], %[[ALLOC_22]]{{\[}}%[[CONSTANT_12]]] : memref<1xindex>
 // CHECK-NEXT:      %[[ALLOC_23:.*]] = memref.alloc() {alignment = 64 : i64} : memref<0xindex>
-// CHECK-NEXT:      %[[LOAD_22:.*]] = memref.load %[[ALLOC_20]]{{\[}}%[[CONSTANT_12]]] : memref<1xi64, #hipsr.mem<host>>
-// CHECK-NEXT:      memref.dealloc %[[ALLOC_20]] : memref<1xi64, #hipsr.mem<host>>
-// CHECK-NEXT:      %[[INDEX_CAST_8:.*]] = arith.index_cast %[[LOAD_22]] : i64 to index
+// CHECK-NEXT:      %[[LOAD_22:.*]] = memref.load %[[ALLOC_20]]{{\[}}%[[CONSTANT_12]]] : memref<1xi32, #hipsr.mem<host>>
+// CHECK-NEXT:      memref.dealloc %[[ALLOC_20]] : memref<1xi32, #hipsr.mem<host>>
+// CHECK-NEXT:      %[[INDEX_CAST_8:.*]] = arith.index_cast %[[LOAD_22]] : i32 to index
 // CHECK-NEXT:      %[[ALLOC_24:.*]] = memref.alloc() {alignment = 64 : i64} : memref<2xindex>
 // CHECK-NEXT:      memref.store %[[CONSTANT_13]], %[[ALLOC_24]]{{\[}}%[[CONSTANT_12]]] : memref<2xindex>
 // CHECK-NEXT:      memref.store %[[INDEX_CAST_8]], %[[ALLOC_24]]{{\[}}%[[CONSTANT_11]]] : memref<2xindex>
@@ -377,6 +378,7 @@
 // CHECK-NEXT:      memref.dealloc %[[ALLOC_29]] : memref<3xindex>
 // CHECK-NEXT:      return %[[ALLOC_OUTPUT_0]] : memref<?x?x4096xf16, #hipsr.mem<device>>
 // CHECK-NEXT:      }
+// CHECK-NEXT:    }
 
 module {
   func.func @main_graph(%arg0: tensor<?x?xi64> {onnx.name = "input_ids"}, %arg1: tensor<?x4096xf16> {onnx.name = "image_features"}) -> (tensor<?x?x4096xf16> {onnx.name = "inputs_embeds"}) attributes {onnx.graph.name = "main_graph"} {
