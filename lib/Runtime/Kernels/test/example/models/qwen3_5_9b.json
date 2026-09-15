@@ -1,0 +1,25 @@
+{
+    "_note": "Qwen3.5-9B: hidden=4096 heads=32 kv_heads=8 head_dim=128 intermediate=11008 vocab=152064",
+    "M_array": [1, 128, 512, 1024, 2048, 16384],
+    "KN_pairs": {
+        "K": [4096,   4096,  4096,  4096,   4096,  11008],
+        "N": [152064,  4096,  1024,  4096,  11008,   4096]
+    },
+    "_KN_pairs_note": {
+        "lm_head": "K=4096  N=152064",
+        "q_proj":  "K=4096  N=4096  (32h x 128d)",
+        "kv_proj": "K=4096  N=1024  (2 x 8kv_h x 128d, packed)",
+        "o_proj":  "K=4096  N=4096",
+        "gate_up": "K=4096  N=11008",
+        "down":    "K=11008 N=4096"
+    },
+    "gqa_decode": [
+        {"name": "qwen3.5-9b B1 seq4k", "B": 1, "H": 32, "G": 8, "D": 128, "max_seq": 8192},
+        {"name": "qwen3.5-9b B4 seq4k", "B": 4, "H": 32, "G": 8, "D": 128, "max_seq": 8192}
+    ],
+    "gqa_prefill": [
+        {"name": "qwen3.5-9b sq128 ", "B": 1, "H": 32, "G": 8, "D": 128, "sq": 128,   "max_seq": 8192},
+        {"name": "qwen3.5-9b sq2k  ", "B": 1, "H": 32, "G": 8, "D": 128, "sq": 2048,  "max_seq": 8192},
+        {"name": "qwen3.5-9b sq16k ", "B": 1, "H": 32, "G": 8, "D": 128, "sq": 16384, "max_seq": 32768}
+    ]
+}

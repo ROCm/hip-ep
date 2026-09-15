@@ -5,6 +5,7 @@ CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
 Makefile
+!lib/Runtime/Kernels/test/**/Makefile
 *.dll
 *.lib
 *.exe
@@ -154,7 +155,14 @@ install/
 
 # ONNX model files (large, downloaded on demand)
 models/
+!lib/Runtime/Kernels/test/example/models/
+!lib/Runtime/Kernels/test/example/models/**
 _local/
+
+# Kernel unit test artefacts (lib/Runtime/Kernels/test/example)
+lib/Runtime/Kernels/test/example/**/out/
+lib/Runtime/Kernels/test/example/**/data/
+lib/Runtime/Kernels/test/example/**/data_model/
 
 # Whisper test audio (auto-downloaded at test setup, cached locally; README kept)
 test/python/data/whisper/*.wav
