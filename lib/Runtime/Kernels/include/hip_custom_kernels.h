@@ -224,6 +224,63 @@ HIP_KERNEL_API size_t hip_qmatmul_workspace_bytes(
     int64_t M, int64_t N, int64_t K, int64_t batch_count);
 
 /* =========================================================================
+ * Quantized Gemm (Q(alpha * DQ(A)' @ DQ(B)' + beta * DQ(C)))
+ * =========================================================================
+ *
+ * op(A): [M, K], op(B): [K, N], Y: [M, N], all row-major and contiguous.
+ * trans_a / trans_b swap the stored extents of the corresponding operand --
+ * A stored as [K, M], B as [N, K] -- while M, N and K stay the logical ones.
+ * Only the load stride changes; Y is never transposed.
+ *
+ *   acc[m, n] = sum over k of (A[m, k] - a_zp) * (B[k, n] - b_zp[n])
+ *   Y[m, n]   = saturate(round(M_ab * b_scale[n] * acc[m, n]
+ *                              + M_c * (C[m, n] - c_zp))
+ *                        + y_zp)
+ *
+ * M_ab and M_c are folded by the caller, so the kernel never divides. A
+ * per-output-channel B is the one factor that cannot fold: B_scales and
+ * B_zero_points are then device arrays of one value per N, supplied together.
+ * When both are NULL, b_zp applies to every column and b_scale is already
+ * inside M_ab.
+ *
+ * `B` and `B_zero_points` keep an 8-bit element type and their LOGICAL element
+ * counts, but at b_bits == 4 each byte holds TWO values, low nibble first over
+ * the flattened row-major sequence -- the ONNX INT4/UINT4 convention shared
+ * with hip_qconv. b_dtype decides how a nibble widens.
+ *
+ * `C` is nullable and, when present, is unidirectionally broadcast to [M, N]
+ * from [c_dim0, c_dim1]: an extent of 1 repeats along that axis.
+ *
+ * Supported hip_dtype, independently per edge:
+ *   a: HIP_DTYPE_INT8, HIP_DTYPE_UINT8, HIP_DTYPE_INT16, HIP_DTYPE_UINT16
+ *   b: HIP_DTYPE_INT8, HIP_DTYPE_UINT8 (storage, b_bits 4 or 8)
+ *   c: the `a` set plus HIP_DTYPE_INT32
+ *   y: HIP_DTYPE_INT8, HIP_DTYPE_UINT8, HIP_DTYPE_INT16, HIP_DTYPE_UINT16
+ */
+HIP_KERNEL_API int hip_qgemm(
+    void* stream,
+    const void* A,
+    const void* B,
+    const void* C,
+    const void* B_scales,
+    const void* B_zero_points,
+    void* Y,
+    int64_t M, int64_t N, int64_t K,
+    int trans_a, int trans_b,
+    int a_dtype, int b_dtype, int c_dtype, int y_dtype,
+    int b_bits,
+    int64_t c_dim0, int64_t c_dim1,
+    float M_ab, float M_c,
+    int64_t a_zp, int64_t b_zp, int64_t c_zp, int64_t y_zp,
+    void* workspace,
+    size_t workspace_bytes);
+
+/* Scratch hip_qgemm wants for this shape, or 0 when the shape does not call
+ * for a grid-level k split. */
+HIP_KERNEL_API size_t hip_qgemm_workspace_bytes(
+    int64_t M, int64_t N, int64_t K);
+
+/* =========================================================================
  * Quantized 1x1 convolution, W4A16 (Q(Conv(DQ(x), DQ(w))))
  * =========================================================================
  *

@@ -61,6 +61,7 @@
 #include "debug_log.h"
 #include "hip_arch_compat.h"
 #include "hip_custom_kernels.h"
+#include "quant_tile.inc.hip"
 
 #include <hip/hip_runtime.h>
 
@@ -70,13 +71,31 @@
 
 namespace {
 
-//===----------------------------------------------------------------------===//
-// Element types, epilogue, and tile layout
-//===----------------------------------------------------------------------===//
+// Tile geometry, byte planes and the dot4 reduction are shared with qgemm,
+// which forms the same three integer sums and differs only in its epilogue.
+using quant_tile::accumulate_k_range;
+using quant_tile::APlanes;
+using quant_tile::Byte;
+using quant_tile::kOnes4;
+using quant_tile::kPlaneHi;
+using quant_tile::kPlaneLo;
+using quant_tile::kThreadM;
+using quant_tile::kThreadN;
+using quant_tile::kTiledBlock;
+using quant_tile::kTileK;
+using quant_tile::kTileM;
+using quant_tile::kTileN;
+using quant_tile::lds_pack4;
+using quant_tile::micro_tile_origin;
+using quant_tile::MicroTile;
 
-// All-ones byte vector: dot4(x, kOnes4) sums the four bytes of x, which is how
-// rowA / colB ride along on the same integer dot pipeline as the products.
-constexpr int kOnes4 = 0x01010101;
+// This op's B is one element per byte. The shared reduction also unpacks a
+// 4-bit weight, which qmatmul's ABI does not admit.
+constexpr int kBBits = 8;
+
+//===----------------------------------------------------------------------===//
+// Element types and epilogue
+//===----------------------------------------------------------------------===//
 
 template <typename T> struct QMatMulTraits;
 
@@ -129,209 +148,6 @@ qmatmul_epilogue(int64_t acc, int64_t row_a, int64_t col_b, int64_t k_zazb,
   return q_saturate<TY>(rintf(scaled) + static_cast<float>(y_zp));
 }
 
-// Tile geometry shared by the tiled and split-K paths: one block owns a
-// [kTileM x kTileN] output tile, one thread a [kThreadM x kThreadN] micro-tile.
-constexpr int kTileM = 64;
-constexpr int kTileN = 64;
-constexpr int kTileK = 16;
-constexpr int kThreadM = 4;
-constexpr int kThreadN = 4;
-constexpr int kTiledBlock = (kTileM / kThreadM) * (kTileN / kThreadN); // 256
-// Rows of the transposed B tile that one pass over the block can stage.
-constexpr int kBStageRows = kTiledBlock / kTileN; // 4
-
-// The LDS tiles hold raw bytes: hipdnn_dot4's template flags decide how each
-// operand's bytes are interpreted, so staging never has to know the signedness.
-using QMatMulByte = uint8_t;
-
-// A 16-bit A is staged as two byte planes (hi, lo); an 8-bit one needs a single
-// plane holding the value itself. Indices into the plane dimension:
-constexpr int kPlaneHi = 0;
-constexpr int kPlaneLo = 1;
-
-template <typename TA> struct QMatMulAPlanes {
-  static constexpr bool kWide = sizeof(TA) == 2;
-  static constexpr int kCount = kWide ? 2 : 1;
-};
-
-// Reads 4 k-consecutive bytes of an LDS tile row as one dot4 operand. The tile
-// rows are kTileK bytes wide and the array is 16-byte aligned, so every
-// multiple-of-4 offset is a legal aligned int load.
-__device__ inline int lds_pack4(const QMatMulByte *row, int k) {
-  return *reinterpret_cast<const int *>(row + k);
-}
-
-template <int kPlanes> struct QMatMulMicroTile {
-  int32_t acc[kPlanes][kThreadM][kThreadN];
-  int32_t row_a[kPlanes][kThreadM];
-  int32_t col_b[kThreadN];
-};
-
-__device__ inline void qmatmul_micro_tile_origin(int tid, int &thread_m,
-                                                 int &thread_n) {
-  thread_m = (tid / (kTileN / kThreadN)) * kThreadM;
-  thread_n = (tid % (kTileN / kThreadN)) * kThreadN;
-}
-
-//===----------------------------------------------------------------------===//
-// Shared k-range accumulation (LDS staging + dot4)
-//===----------------------------------------------------------------------===//
-
-// Reduces A[m_base.., k_begin:k_end] x B[k_begin:k_end, n_base..] into this
-// thread's micro-tile. A and B are already offset to the block's batch; K is
-// still the full logical extent because it is also the operand stride.
-//
-// The range is a parameter rather than always [0, K) so split-K can hand each
-// block a slice. Staging zero-fills anything past k_end and zero is the
-// identity for all three sums, so a slice needs no separate tail handling; it
-// only has to start on a kTileK boundary to keep the staging maps coalesced.
-//
-// Both LDS tiles are k-major because dot4 needs four k-consecutive bytes in one
-// register. For a [K, N] B that means staging it transposed; for a [N, K] one
-// (trans_b) the tile is already in that order and staging is a straight copy.
-//
-// trans_a / trans_b are runtime flags rather than template parameters: they
-// only pick a load stride during staging, which is block-uniform and off the
-// dot4 inner loop, and templating them would quadruple the instantiations the
-// dtype pair already costs.
-template <typename TA, typename TB>
-__device__ QMatMulMicroTile<QMatMulAPlanes<TA>::kCount>
-qmatmul_accumulate_k_range(const TA *__restrict__ A, const TB *__restrict__ B,
-                           int64_t M, int64_t N, int64_t K, int64_t m_base,
-                           int64_t n_base, int64_t k_begin, int64_t k_end,
-                           bool need_row_a, bool need_col_b, bool trans_a,
-                           bool trans_b) {
-  constexpr bool kAWide = QMatMulAPlanes<TA>::kWide;
-  constexpr int kAPlanes = QMatMulAPlanes<TA>::kCount;
-  constexpr bool kASigned = QMatMulTraits<TA>::kSigned;
-  constexpr bool kBSigned = QMatMulTraits<TB>::kSigned;
-
-  __shared__ __align__(16) QMatMulByte a_lds[kAPlanes][kTileM][kTileK];
-  __shared__ __align__(16) QMatMulByte b_lds[kTileN][kTileK];
-
-  const int tid = threadIdx.x;
-  int thread_m, thread_n;
-  qmatmul_micro_tile_origin(tid, thread_m, thread_n);
-
-  // Per-plane accumulators. |lo * B| <= 255*128 bounds the widest plane, so
-  // int32 holds K up to 65792 -- past any shape the runtime admits.
-  QMatMulMicroTile<kAPlanes> out = {};
-
-  // Staging maps, each coalescing the reads of the layout it serves.
-  //
-  // `row4_*` walks a tile row-major, one 4-byte run per thread, which is what
-  // A wants and also what a [N, K] B wants since its k-runs are contiguous.
-  // kTileM == kTileN, so the one map covers both tiles.
-  //
-  // `b_*` walks a [K, N] B, where the k stride is N: one byte per thread per
-  // k, so the 64 threads sharing a k cover a contiguous 64-byte run.
-  static_assert(kTileM == kTileN, "row4 staging map is shared by A and B");
-  const int row4_r = (tid * 4) / kTileK;
-  const int row4_c = (tid * 4) % kTileK;
-  const int b_n = tid % kTileN;
-  const int b_k_base = tid / kTileN;
-
-  for (int64_t k0 = k_begin; k0 < k_end; k0 += kTileK) {
-    // Out-of-range elements are staged as 0, the identity for all three sums.
-    const int64_t a_row = m_base + row4_r;
-#pragma unroll
-    for (int i = 0; i < 4; ++i) {
-      const int64_t k = k0 + row4_c + i;
-      const bool in_range = a_row < M && k < k_end;
-      // A [K, M] costs a strided read here, unlike the contiguous [M, K] one.
-      // Left as is: TransposeMatMulFold folds Transpose into whichever operand
-      // the graph transposes, and attention's Q @ K^T only ever stamps transB.
-      const int64_t a_idx = trans_a ? k * M + a_row : a_row * K + k;
-      if constexpr (kAWide) {
-        // Promoting to int first makes `>> 8` arithmetic for int16 and logical
-        // for uint16, so hi inherits A's signedness while lo stays an unsigned
-        // byte -- exactly the split A = hi*256 + lo needs.
-        const int v = in_range ? static_cast<int>(A[a_idx]) : 0;
-        a_lds[kPlaneHi][row4_r][row4_c + i] = static_cast<QMatMulByte>(v >> 8);
-        a_lds[kPlaneLo][row4_r][row4_c + i] =
-            static_cast<QMatMulByte>(v & 0xFF);
-      } else {
-        a_lds[kPlaneHi][row4_r][row4_c + i] =
-            in_range ? static_cast<QMatMulByte>(A[a_idx]) : QMatMulByte{0};
-      }
-    }
-
-    if (trans_b) {
-      const int64_t b_row = n_base + row4_r;
-#pragma unroll
-      for (int i = 0; i < 4; ++i) {
-        const int64_t k = k0 + row4_c + i;
-        b_lds[row4_r][row4_c + i] =
-            (b_row < N && k < k_end)
-                ? static_cast<QMatMulByte>(B[b_row * K + k])
-                : QMatMulByte{0};
-      }
-    } else {
-      const int64_t b_col = n_base + b_n;
-#pragma unroll
-      for (int rep = 0; rep < kTileK / kBStageRows; ++rep) {
-        const int b_k = b_k_base + rep * kBStageRows;
-        const int64_t k = k0 + b_k;
-        b_lds[b_n][b_k] = (b_col < N && k < k_end)
-                              ? static_cast<QMatMulByte>(B[k * N + b_col])
-                              : QMatMulByte{0};
-      }
-    }
-
-    __syncthreads();
-
-#pragma unroll
-    for (int kk = 0; kk < kTileK; kk += 4) {
-      int a_frag[kAPlanes][kThreadM];
-      int b_frag[kThreadN];
-#pragma unroll
-      for (int p = 0; p < kAPlanes; ++p) {
-#pragma unroll
-        for (int i = 0; i < kThreadM; ++i)
-          a_frag[p][i] = lds_pack4(a_lds[p][thread_m + i], kk);
-      }
-#pragma unroll
-      for (int j = 0; j < kThreadN; ++j)
-        b_frag[j] = lds_pack4(b_lds[thread_n + j], kk);
-
-#pragma unroll
-      for (int i = 0; i < kThreadM; ++i) {
-#pragma unroll
-        for (int j = 0; j < kThreadN; ++j) {
-          out.acc[kPlaneHi][i][j] = hipdnn_dot4<kASigned, kBSigned>(
-              a_frag[kPlaneHi][i], b_frag[j], out.acc[kPlaneHi][i][j]);
-          if constexpr (kAWide)
-            out.acc[kPlaneLo][i][j] = hipdnn_dot4<false, kBSigned>(
-                a_frag[kPlaneLo][i], b_frag[j], out.acc[kPlaneLo][i][j]);
-        }
-      }
-
-      // Block-uniform branches, so the skipped dots cost nothing when the
-      // corresponding zero point is 0 -- or, under split-K, when this block
-      // was not the one elected to contribute that correction.
-      if (need_row_a) {
-#pragma unroll
-        for (int i = 0; i < kThreadM; ++i) {
-          out.row_a[kPlaneHi][i] = hipdnn_dot4<kASigned, false>(
-              a_frag[kPlaneHi][i], kOnes4, out.row_a[kPlaneHi][i]);
-          if constexpr (kAWide)
-            out.row_a[kPlaneLo][i] = hipdnn_dot4<false, false>(
-                a_frag[kPlaneLo][i], kOnes4, out.row_a[kPlaneLo][i]);
-        }
-      }
-      if (need_col_b) {
-#pragma unroll
-        for (int j = 0; j < kThreadN; ++j)
-          out.col_b[j] =
-              hipdnn_dot4<kBSigned, false>(b_frag[j], kOnes4, out.col_b[j]);
-      }
-    }
-
-    __syncthreads();
-  }
-
-  return out;
-}
 
 //===----------------------------------------------------------------------===//
 // Tiled GEMM (M > 1)
@@ -347,7 +163,7 @@ __global__ __launch_bounds__(kTiledBlock) void qmatmul_tiled_kernel(
     int64_t M, int64_t N, int64_t K, int64_t b_batch_stride, float m_scale,
     int32_t a_zp, int32_t b_zp, int32_t y_zp, int64_t k_zazb, bool need_row_a,
     bool need_col_b, bool trans_a, bool trans_b) {
-  constexpr bool kAWide = QMatMulAPlanes<TA>::kWide;
+  constexpr bool kAWide = APlanes<TA>::kWide;
 
   const int64_t batch = blockIdx.z;
   A += batch * M * K;
@@ -357,12 +173,14 @@ __global__ __launch_bounds__(kTiledBlock) void qmatmul_tiled_kernel(
   const int64_t m_base = static_cast<int64_t>(blockIdx.y) * kTileM;
   const int64_t n_base = static_cast<int64_t>(blockIdx.x) * kTileN;
 
-  const auto mt = qmatmul_accumulate_k_range<TA, TB>(
-      A, B, M, N, K, m_base, n_base, 0, K, need_row_a, need_col_b, trans_a,
-      trans_b);
+  const auto mt =
+      accumulate_k_range<TA, QMatMulTraits<TA>::kSigned,
+                         QMatMulTraits<TB>::kSigned>(
+          A, reinterpret_cast<const uint8_t *>(B), M, N, K, m_base, n_base, 0,
+          K, kBBits, need_row_a, need_col_b, trans_a, trans_b);
 
   int thread_m, thread_n;
-  qmatmul_micro_tile_origin(threadIdx.x, thread_m, thread_n);
+  micro_tile_origin(threadIdx.x, thread_m, thread_n);
 
 #pragma unroll
   for (int i = 0; i < kThreadM; ++i) {
@@ -418,7 +236,7 @@ __global__ __launch_bounds__(kTiledBlock) void qmatmul_splitk_partial_kernel(
     int64_t *__restrict__ col_b_ws, int64_t M, int64_t N, int64_t K,
     int64_t b_batch_stride, int splits, int64_t k_chunk, bool need_row_a,
     bool need_col_b, bool trans_a, bool trans_b) {
-  constexpr bool kAWide = QMatMulAPlanes<TA>::kWide;
+  constexpr bool kAWide = APlanes<TA>::kWide;
 
   const int64_t split = blockIdx.z % splits;
   const int64_t batch = blockIdx.z / splits;
@@ -444,12 +262,14 @@ __global__ __launch_bounds__(kTiledBlock) void qmatmul_splitk_partial_kernel(
   const bool add_row_a = need_row_a && blockIdx.x == 0;
   const bool add_col_b = need_col_b && blockIdx.y == 0;
 
-  const auto mt = qmatmul_accumulate_k_range<TA, TB>(
-      A, B, M, N, K, m_base, n_base, k_begin, k_end, add_row_a, add_col_b,
-      trans_a, trans_b);
+  const auto mt =
+      accumulate_k_range<TA, QMatMulTraits<TA>::kSigned,
+                         QMatMulTraits<TB>::kSigned>(
+          A, reinterpret_cast<const uint8_t *>(B), M, N, K, m_base, n_base,
+          k_begin, k_end, kBBits, add_row_a, add_col_b, trans_a, trans_b);
 
   int thread_m, thread_n;
-  qmatmul_micro_tile_origin(threadIdx.x, thread_m, thread_n);
+  micro_tile_origin(threadIdx.x, thread_m, thread_n);
 
 #pragma unroll
   for (int i = 0; i < kThreadM; ++i) {

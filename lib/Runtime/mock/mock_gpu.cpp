@@ -1659,6 +1659,38 @@ int wrap_qmatmul(RuntimeState *state, const void *A, const void *B, void *Y,
   return 0;
 }
 
+int wrap_qgemm(RuntimeState *state, const void *A, const void *B, const void *C,
+               const void *B_scales, const void *B_zero_points, void *Y,
+               int64_t M, int64_t N, int64_t K, int64_t trans_a,
+               int64_t trans_b, int64_t a_data_type, int64_t b_data_type,
+               int64_t c_data_type, int64_t y_data_type, int64_t b_bits,
+               int64_t c_dim0, int64_t c_dim1, float M_ab, float M_c,
+               int64_t A_zero_point, int64_t B_zero_point, int64_t C_zero_point,
+               int64_t Y_zero_point) {
+  (void)A;
+  (void)B;
+  (void)B_zero_points;
+  (void)Y;
+  (void)c_data_type;
+  (void)c_dim0;
+  (void)c_dim1;
+  (void)M_c;
+  (void)A_zero_point;
+  (void)B_zero_point;
+  (void)C_zero_point;
+  (void)Y_zero_point;
+  if (!state)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_qgemm(M=%lld, N=%lld, K=%lld, trans=(%lld,%lld), "
+             "%s/%s->%s, b_bits=%lld, per_channel=%s, bias=%s, M_ab=%g)",
+             (long long)M, (long long)N, (long long)K, (long long)trans_a,
+             (long long)trans_b, hipdnn_ep_datatype_name(a_data_type),
+             hipdnn_ep_datatype_name(b_data_type),
+             hipdnn_ep_datatype_name(y_data_type), (long long)b_bits,
+             B_scales ? "yes" : "no", C ? "yes" : "null", (double)M_ab);
+  return 0;
+}
+
 int wrap_qconv(RuntimeState *state, const void *input, const void *weights,
                const void *weight_scales, const void *weight_zero_points,
                const void *bias, void *output, int64_t batch,
