@@ -1,6 +1,7 @@
 #!/bin/bash
-# Compile all Scheme libraries to bytecode in ONE Scheme session
-# This avoids "different compilation instance" errors for shared dependencies
+# Compile all Scheme libraries to bytecode
+# Each library compiled in SEPARATE process to work around ChezScheme 10.4.1 bug
+# where libraries using (chezscheme) break subsequent compilations in same session
 
 set -e
 
@@ -27,32 +28,42 @@ else
   echo "Warning: rime not found at $RIME_SOURCE, skipping..."
 fi
 
-# Compile all libraries in ONE Scheme session to share compilation instances
-echo "Compiling all libraries in single Scheme session..."
+# Compile rime libraries first (each in separate process)
+echo "Compiling rime libraries..."
+for file in loop unit-test/__define-test; do
+  IN_PATH="$BUILD_DIR/rime/$file.sls"
+  OUT_PATH="$BUILD_DIR/rime/$file.so"
+  if [ -f "$IN_PATH" ]; then
+    echo "  $file..."
+    $SCHEME_COMPILER --libdirs "$BUILD_DIR" <<EOF
+(compile-library "$IN_PATH" "$OUT_PATH")
+EOF
+  fi
+done
+
+# Compile main libraries (each in SEPARATE Scheme process)
+# This works around ChezScheme bug where libraries using (chezscheme)
+# corrupt the compilation environment for subsequent libraries
 cd "$SOURCE_DIR/Runtime"
-BUILD_DIR_ESCAPED="${BUILD_DIR//\//\\/}"  # Escape slashes for scheme strings
-# Note: libdirs should include parent of patterns/, not patterns/ itself
-# Library (patterns cast-manual) maps to patterns/cast-manual.sls
-$SCHEME_COMPILER --libdirs "$BUILD_DIR:$SOURCE_DIR" <<EOF
-;; Compile rime libraries first (expand-time dependencies)
-(for-each
-  (lambda (file)
-    (let ((in-path (string-append "$BUILD_DIR/rime/" file ".sls"))
-          (out-path (string-append "$BUILD_DIR/rime/" file ".so")))
-      (when (file-exists? in-path)
-        (printf "  Compiling ~a...\n" in-path)
-        (compile-library in-path out-path))))
-  '("loop" "control" "match" "meta" "io" "unit-test/__define-test"))
 
-;; Compile main libraries (in dependency order)
+echo "Compiling mlir/ffi..."
+$SCHEME_COMPILER <<EOF
 (compile-library "mlir/ffi.sls" "$BUILD_DIR/mlir/ffi.so")
+EOF
+
+echo "Compiling mlir/pattern-dsl..."
+$SCHEME_COMPILER --libdirs "$BUILD_DIR" <<EOF
 (compile-library "mlir/pattern-dsl.sls" "$BUILD_DIR/mlir/pattern-dsl.so")
+EOF
+
+echo "Compiling mlir/conversion/cast..."
+$SCHEME_COMPILER --libdirs "$BUILD_DIR" <<EOF
 (compile-library "mlir/conversion/cast.sls" "$BUILD_DIR/mlir/conversion/cast.so")
+EOF
 
-;; onnx-to-hipsr needs patterns/ in libdirs (already set above)
+echo "Compiling onnx-to-hipsr..."
+$SCHEME_COMPILER --libdirs "$BUILD_DIR:$SOURCE_DIR" <<EOF
 (compile-library "../Passes/onnx-to-hipsr.sls" "$BUILD_DIR/onnx-to-hipsr.so")
-
-(printf "Done! All libraries compiled.\\\\n")
 EOF
 
 echo "Scheme compilation complete."
