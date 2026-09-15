@@ -53,6 +53,20 @@ param(
   [string]$Metric  = 'ttft',
   [int]$SeqLen     = 128,             # prompt length; decode cost is seqlen-dependent via the KV read
   [int]$Gen        = 128,             # tps only: tokens generated per rep
+  # Forwarded verbatim to the bench script. A multimodal export cannot be driven
+  # by model_benchmark, so without -Driver vlm an A/B on one of those models
+  # measures a text-only prefill or does not run at all -- and the vision encoder
+  # it leaves out is part of the number being compared.
+  #
+  # -PromptFile reaches both metrics. The rest are ttft only and are rejected
+  # under -Metric tps below rather than dropped, because dropping them would
+  # quietly measure a different workload than the one asked for.
+  [ValidateSet('model_benchmark', 'vlm')]
+  [string]$Driver,
+  [string]$PromptFile,
+  [int]$MaxTokens,
+  [int]$MaxLength,
+  [string]$ExecutionProvider,
   [int]$Rounds     = 3,
   [int]$Reps       = 4,
   [int]$StartRound = 1,
@@ -63,6 +77,20 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path (Split-Path -Parent $PSScriptRoot) 'common.ps1')
+
+# Only the keys actually passed, so an unsupplied one leaves the bench script's
+# own default in place instead of overwriting it with this script's.
+$passThru = @{}
+foreach ($k in 'Driver', 'PromptFile', 'MaxTokens', 'MaxLength', 'ExecutionProvider') {
+  if ($PSBoundParameters.ContainsKey($k)) { $passThru[$k] = $PSBoundParameters[$k] }
+}
+if ($Metric -eq 'tps') {
+  $ttftOnly = @($passThru.Keys | Where-Object { $_ -ne 'PromptFile' } | Sort-Object)
+  if ($ttftOnly) {
+    $verb = if ($ttftOnly.Count -gt 1) { 'apply' } else { 'applies' }
+    throw "-$($ttftOnly -join ', -') $verb to -Metric ttft only."
+  }
+}
 
 $armDefs = Get-Content $Manifest -Raw | ConvertFrom-Json
 $allArms = $armDefs.PSObject.Properties.Name
@@ -111,7 +139,7 @@ function Invoke-Arm {
   $env:TEMP = $temp; $env:TMP = $temp
 
   $common = @{ Tag = $Tag; Reps = $RunReps; Warmup = 1; SeqLen = $SeqLen
-               SetEnv = $setEnv; OutDir = $OutDir }
+               SetEnv = $setEnv; OutDir = $OutDir } + $passThru
   if ($Metric -eq 'tps') { $common.Gen = $Gen }
   & $benchScript @common 2>&1 | Where-Object { $_ -match $echoRe }
 }
