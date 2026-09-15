@@ -43,7 +43,7 @@ module {
             : (tensor<32xi8>, tensor<f32>, tensor<i8>) -> tensor<32xf32>
 
     %y = "onnx.Gemm"(%a_dq, %b_dq, %c_dq)
-         {alpha = 2.000000e+00 : f32, beta = 5.000000e-01 : f32, transB = 1 : i64}
+         {alpha = 2.000000e+00 : f32, beta = 5.000000e-01 : f32, transB = 1 : si64}
          : (tensor<64x128xf32>, tensor<32x128xf32>, tensor<32xf32>) -> tensor<64x32xf32>
 
     %result = "onnx.QuantizeLinear"(%y, %y_scale, %y_zp)
@@ -129,7 +129,7 @@ module {
     %c_dq = "onnx.DequantizeLinear"(%C, %c_scale, %c_zp)
             : (tensor<16xi32>, tensor<f32>, tensor<i32>) -> tensor<16xf32>
 
-    %y = "onnx.Gemm"(%a_dq, %b_dq, %c_dq) {transB = 1 : i64}
+    %y = "onnx.Gemm"(%a_dq, %b_dq, %c_dq) {transB = 1 : si64}
          : (tensor<8x32xf32>, tensor<16x32xf32>, tensor<16xf32>) -> tensor<8x16xf32>
 
     %result = "onnx.QuantizeLinear"(%y, %y_scale, %y_zp)
