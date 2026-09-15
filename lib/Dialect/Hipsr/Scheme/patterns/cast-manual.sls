@@ -17,7 +17,6 @@
   (export populate-cast-patterns
           onnx-cast->hipsr-manual)
   (import (rnrs (6))
-          (only (chezscheme) format)
           (mlir ffi))
 
   ;;===--------------------------------------------------------------------===;;

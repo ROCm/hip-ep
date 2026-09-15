@@ -40,4 +40,19 @@ def ConvertOnnxToHipsrPass : Pass<"convert-onnx-to-hipsr", "mlir::ModuleOp"> {
   ];
 }
 
+def ConvertOnnxToHipsrSchemePass : Pass<"convert-onnx-to-hipsr-scheme", "mlir::ModuleOp"> {
+  let summary = "Convert ONNX dialect to HipSR using Scheme-defined patterns";
+  let description = [{
+    Same as convert-onnx-to-hipsr but uses patterns written in Scheme instead
+    of C++. Demonstrates writing MLIR conversion patterns in Scheme without
+    recompiling C++.
+  }];
+  let dependentDialects = [
+    "::mlir::hipsr::HipsrDialect",
+    "::mlir::onnx::OnnxDialect",
+    "::mlir::func::FuncDialect",
+    "::mlir::arith::ArithDialect"
+  ];
+}
+
 #endif // HIP_CONVERSION_PASSES
