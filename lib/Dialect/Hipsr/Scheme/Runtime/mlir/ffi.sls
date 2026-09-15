@@ -91,7 +91,7 @@
     mlir-register-conversion-pattern
     )
 
-  (import (chezscheme))
+  (import (only (chezscheme) foreign-procedure))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Operation Inspection
