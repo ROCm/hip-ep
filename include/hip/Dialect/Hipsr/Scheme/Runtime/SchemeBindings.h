@@ -26,14 +26,11 @@ class RewriterBase;
 namespace hipsr {
 
 // Parse log level from string
-extern bool scheme_initialized;
-void initCachedSymbols();
 
 mlir::hipsr::SchemeLogLevel parseLogLevel(const std::string& level);
 void setSchemeLogLevel(mlir::hipsr::SchemeLogLevel level);
 
 // Initialize Scheme runtime and register MLIR FFI bindings
-bool initializeSchemeRuntime(SchemeLogLevel logLevel = SchemeLogLevel::Warning);
 
 // Call a Scheme function with primitive arguments (legacy API)
 std::string callSchemeFunction(const char* functionName,
@@ -50,13 +47,10 @@ SchemeValue makeSchemeType(mlir::Type type);
 SchemeValue makeSchemeAttribute(mlir::Attribute attr);
 
 // Register MLIR foreign functions accessible from Scheme
-void registerMlirForeignFunctions();
 
 // Load and evaluate a Scheme script file
-bool loadSchemeScript(const char* scriptPath);
 
 // Evaluate Scheme code string (for (import ...) etc.)
-bool evaluateSchemeCode(const char* code);
 
 // Call a Scheme function with a single MLIR operation argument
 // Used to invoke Scheme-defined pass entry points
