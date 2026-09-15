@@ -38,8 +38,9 @@ struct DimInfo {
 };
 
 /// A transposed convolution scatters each input element across `stride`
-/// output positions, so it splits into `stride` dense stride-1 convolutions
-/// ("residues"), one per output phase, whose results interleave.
+/// output positions, so it splits into one dense stride-1 convolution per
+/// output phase ("residue"), whose results interleave. In 2-D the phases are
+/// independent per axis, so the count is `strideH * strideW`.
 ///
 /// Residue `itilda` uses filter taps {itilda, itilda+stride, ...} reversed,
 /// with the weight's input/output channels swapped. The taps and the flip
@@ -49,8 +50,33 @@ struct DimInfo {
 ///
 /// Reassembly is a strided `tensor.insert_slice` per residue, which
 /// bufferizes to a `memref.subview` + `memref.copy`. When every residue is
-/// non-empty (stride <= kernel) the residues tile the output exactly, so the
+/// non-empty (stride <= kernel) the residues tile the grid exactly, so the
 /// destination needs no zero-fill.
+///
+/// Taking a 1-D slice of the 2x2-stride case, with a 3-tap filter [w0 w1 w2]
+/// over a 4-long input, before:
+///
+///   hip.conv_transpose ins(%x : tensor<1x1x4xf32>, %w : tensor<1x1x3xf32>)
+///                      {strides = [2], pads = [1, 1], output_padding = [1]}
+///                      -> tensor<1x1x8xf32>
+///
+/// after -- residue 0 keeps taps {0, 2} reversed to [w2 w0], residue 1 keeps
+/// tap {1}, each convolved at stride 1 and scattered onto alternating
+/// positions of a length-10 grid, which is then cropped by the leading pad:
+///
+///   %r0 = hip.conv ins(%x, [w2 w0]) {strides = [1]} -> tensor<1x1x5xf32>
+///   %r1 = hip.conv ins(%x, [w1])    {strides = [1]} -> tensor<1x1x5xf32>
+///   %g0 = tensor.insert_slice %r0 into %empty[0][5][2]  // grid[0,2,4,6,8]
+///   %g1 = tensor.insert_slice %r1 into %g0   [1][5][2]  // grid[1,3,5,7,9]
+///   %y  = tensor.extract_slice %g1[1][8][1]             // drop the pad
+///
+/// The grid can be longer than the transposed convolution's natural extent
+/// (here 10 against 9) when the filter is not a multiple of the stride. Those
+/// trailing positions are still written by a residue, but the value is zero:
+/// they draw only on input elements past the end, which the residue
+/// convolution's own zero padding supplies. That is also what makes
+/// `output_padding` fall out for free, since ONNX likewise defines those
+/// positions as zero.
 class DecomposeConvTranspose : public OpRewritePattern<ConvTransposeOp> {
 public:
   using OpRewritePattern<ConvTransposeOp>::OpRewritePattern;
@@ -131,9 +157,15 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
   const int64_t numBatch = inputType.getDimSize(0);
   const int64_t inChannels = weightShape[0];
   const int64_t outChannels = weightShape[1];
-  if (inputType.getDimSize(1) != inChannels ||
+  // The batch is taken from the input and used for the residue convolutions,
+  // the reassembly grid and the crop sizes, while the crop's result type comes
+  // from the op. Nothing verifies those agree, so a mismatch would build a
+  // `tensor.extract_slice` whose sizes contradict its result type -- invalid
+  // IR, and a hard pass failure rather than a fallback.
+  if (inputType.getDimSize(0) != resultType.getDimSize(0) ||
+      inputType.getDimSize(1) != inChannels ||
       resultType.getDimSize(1) != outChannels)
-    return rewriter.notifyMatchFailure(op, "incompatible channel counts");
+    return rewriter.notifyMatchFailure(op, "incompatible batch or channels");
 
   // Checked up front rather than at the point of use: a pattern must leave the
   // IR untouched when it fails, and by then the residues have been emitted.
@@ -155,7 +187,7 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
     di.padLo = pads[d];
     di.out = resultType.getDimSize(2 + d);
     if (di.stride < 1 || di.padLo < 0)
-      return rewriter.notifyMatchFailure(op, "expected positive stride");
+      return rewriter.notifyMatchFailure(op, "expected stride >= 1, pad >= 0");
     // A residue whose first tap falls outside the filter is empty, which
     // would leave holes in the destination that nothing writes.
     if (di.stride > di.kernel)
@@ -163,9 +195,10 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
     di.ydot = (di.kernel + di.stride - 1) / di.stride;
     di.htilda = inputType.getDimSize(2 + d) + di.ydot - 1;
     di.full = di.htilda * di.stride;
-    // Cropping off the leading pad must leave enough for the result, which
-    // also covers output_padding: the slack positions are never written by
-    // any residue and the transposed conv would produce zeros there too.
+    // Cropping off the leading pad must leave enough for the result. This is
+    // also what covers output_padding: the grid's trailing slack is written by
+    // a residue but computes zero (see the note above the pattern), which is
+    // exactly what ONNX puts in the output_padding region.
     if (di.padLo + di.out > di.full)
       return rewriter.notifyMatchFailure(op, "output exceeds the residue grid");
     dims.push_back(di);
