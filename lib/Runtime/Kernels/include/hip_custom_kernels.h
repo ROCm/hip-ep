@@ -256,10 +256,6 @@ HIP_KERNEL_API size_t hip_qmatmul_workspace_bytes(
  *   b: HIP_DTYPE_INT8, HIP_DTYPE_UINT8 (storage, b_bits 4 or 8)
  *   c: the `a` set plus HIP_DTYPE_INT32
  *   y: HIP_DTYPE_INT8, HIP_DTYPE_UINT8, HIP_DTYPE_INT16, HIP_DTYPE_UINT16
- *
- * This is a reference implementation: one thread per output element, no
- * tiling and no reuse. It is correct for every accepted combination and is
- * the baseline a tuned kernel is checked against.
  */
 HIP_KERNEL_API int hip_qgemm(
     void* stream,
@@ -275,7 +271,14 @@ HIP_KERNEL_API int hip_qgemm(
     int b_bits,
     int64_t c_dim0, int64_t c_dim1,
     float M_ab, float M_c,
-    int64_t a_zp, int64_t b_zp, int64_t c_zp, int64_t y_zp);
+    int64_t a_zp, int64_t b_zp, int64_t c_zp, int64_t y_zp,
+    void* workspace,
+    size_t workspace_bytes);
+
+/* Scratch hip_qgemm wants for this shape, or 0 when the shape does not call
+ * for a grid-level k split. */
+HIP_KERNEL_API size_t hip_qgemm_workspace_bytes(
+    int64_t M, int64_t N, int64_t K);
 
 /* =========================================================================
  * Quantized 1x1 convolution, W4A16 (Q(Conv(DQ(x), DQ(w))))

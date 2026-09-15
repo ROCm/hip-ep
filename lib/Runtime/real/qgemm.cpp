@@ -133,6 +133,16 @@ int wrap_qgemm(RuntimeState *state, const void *A, const void *B,
 
   void *stream = hipdnn_ep_state_get_stream(state);
 
+  // split k need workspace to store the intermediate result
+  void *workspace = nullptr;
+  size_t workspace_bytes = 0;
+  const size_t split_bytes = hip_qgemm_workspace_bytes(M, N, K);
+  if (split_bytes > 0 &&
+      hipdnn_ep_state_ensure_workspace(state, split_bytes) == 0) {
+    workspace = hipdnn_ep_state_get_workspace(state);
+    workspace_bytes = hipdnn_ep_state_get_workspace_size(state);
+  }
+
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_qgemm: M=%lld N=%lld K=%lld trans=(%lld,%lld) "
       "dtypes=(%s,%s,%s,%s) b_bits=%lld per_channel=%s M_ab=%g M_c=%g "
@@ -151,7 +161,7 @@ int wrap_qgemm(RuntimeState *state, const void *A, const void *B,
                      trans_a != 0, trans_b != 0, a_dtype, b_dtype, c_dtype,
                      y_dtype, static_cast<int>(b_bits), c_dim0, c_dim1, M_ab,
                      M_c, A_zero_point, B_zero_point, C_zero_point,
-                     Y_zero_point);
+                     Y_zero_point, workspace, workspace_bytes);
   if (rc != 0) {
     fprintf(stderr, "[REAL] wrap_qgemm: kernel launch failed (%d)\n", rc);
     return -1;
