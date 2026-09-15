@@ -24,6 +24,7 @@
 #include <hip/hip_fp16.h>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 
 static constexpr int kBlock = 256;
 static constexpr int kAmdRoutingBlock = 256;
@@ -250,6 +251,130 @@ __global__ void qmoe_amd_route_kernel(
   }
 }
 
+// Parallel decode routing GEMV: each block owns eight consecutive experts
+// (one uint4 of router_weight per hidden row) and 128 threads reduce K.
+// A follow-up kernel does sigmoid, correction-bias top-k and normalization.
+// decode_logits_scratch aliases the expert-count buffer.
+static constexpr int kAmdDecodeRouteTileN = kAmdRouteExpertsPerLane;
+static constexpr int kAmdDecodeRouteBlock = 128;
+
+__global__ void qmoe_amd_route_logits_decode_kernel(
+    const __half* __restrict__ hidden_states,
+    const __half* __restrict__ router_weight,
+    float* __restrict__ logits,
+    int hidden_size,
+    int num_experts) {
+  const int tid = static_cast<int>(threadIdx.x);
+  const int expert_base =
+      static_cast<int>(blockIdx.x) * kAmdDecodeRouteTileN;
+
+  float acc[kAmdDecodeRouteTileN];
+#pragma unroll
+  for (int j = 0; j < kAmdDecodeRouteTileN; j++) acc[j] = 0.0f;
+
+  for (int h = tid; h < hidden_size; h += kAmdDecodeRouteBlock) {
+    const float xv = static_cast<float>(hidden_states[h]);
+    const __half* wrow =
+        router_weight + static_cast<int64_t>(h) * num_experts + expert_base;
+    union {
+      uint4 packed;
+      __half lane[kAmdDecodeRouteTileN];
+    } w;
+    w.packed = *reinterpret_cast<const uint4*>(wrow);
+#pragma unroll
+    for (int j = 0; j < kAmdDecodeRouteTileN; j++)
+      acc[j] = __fmaf_rn(xv, static_cast<float>(w.lane[j]), acc[j]);
+  }
+
+  __shared__ float s_part[kAmdDecodeRouteBlock][kAmdDecodeRouteTileN];
+#pragma unroll
+  for (int j = 0; j < kAmdDecodeRouteTileN; j++) s_part[tid][j] = acc[j];
+  __syncthreads();
+  for (int offset = kAmdDecodeRouteBlock / 2; offset > 0; offset >>= 1) {
+    if (tid < offset) {
+#pragma unroll
+      for (int j = 0; j < kAmdDecodeRouteTileN; j++)
+        s_part[tid][j] += s_part[tid + offset][j];
+    }
+    __syncthreads();
+  }
+  if (tid < kAmdDecodeRouteTileN)
+    logits[expert_base + tid] = s_part[0][tid];
+}
+
+__global__ void qmoe_amd_route_topk_decode_kernel(
+    const float* __restrict__ logits,
+    const __half* __restrict__ correction_bias,
+    int32_t* __restrict__ expert_indices,
+    __half* __restrict__ expert_weights,
+    int num_experts,
+    int k,
+    int normalize,
+    int use_correction_bias,
+    float routed_scaling_factor) {
+  const int tid = static_cast<int>(threadIdx.x);
+  __shared__ float s_prob[512];
+  __shared__ float s_biased[512];
+  __shared__ float s_red[kAmdRoutingBlock];
+  __shared__ int s_idx[kAmdRoutingBlock];
+
+  for (int e = tid; e < num_experts; e += kAmdRoutingBlock) {
+    const float prob = 1.0f / (1.0f + expf(-logits[e]));
+    s_prob[e] = prob;
+    s_biased[e] =
+        prob + ((use_correction_bias && correction_bias)
+                    ? static_cast<float>(correction_bias[e])
+                    : 0.0f);
+  }
+  __syncthreads();
+
+  for (int i = 0; i < k; i++) {
+    float best_value = -1e30f;
+    int best_index = num_experts;
+    for (int e = tid; e < num_experts; e += kAmdRoutingBlock) {
+      const float value = s_biased[e];
+      if (value > best_value) {
+        best_value = value;
+        best_index = e;
+      }
+    }
+    s_red[tid] = best_value;
+    s_idx[tid] = best_index;
+    __syncthreads();
+    for (int offset = kAmdRoutingBlock / 2; offset > 0; offset >>= 1) {
+      if (tid < offset &&
+          (s_red[tid + offset] > s_red[tid] ||
+           (s_red[tid + offset] == s_red[tid] &&
+            s_idx[tid + offset] < s_idx[tid]))) {
+        s_red[tid] = s_red[tid + offset];
+        s_idx[tid] = s_idx[tid + offset];
+      }
+      __syncthreads();
+    }
+    if (tid == 0) {
+      const int winner = s_idx[0];
+      expert_indices[i] = winner;
+      expert_weights[i] = static_cast<__half>(s_prob[winner]);
+      s_biased[winner] = -1e30f;
+    }
+    __syncthreads();
+  }
+
+  if (tid == 0) {
+    float sum = 0.0f;
+    if (normalize) {
+      for (int i = 0; i < k; i++)
+        sum += static_cast<float>(expert_weights[i]);
+    }
+    const float scale =
+        normalize ? routed_scaling_factor / (sum + kRoutingEps)
+                  : routed_scaling_factor;
+    for (int i = 0; i < k; i++)
+      expert_weights[i] =
+          static_cast<__half>(static_cast<float>(expert_weights[i]) * scale);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // relu2 activation (fp16 only): out = relu(x)^2, elementwise. Callers activate
 // in place (input == output), so neither pointer is __restrict__.
@@ -364,6 +489,97 @@ __global__ void qmoe_amd_bucket_scatter_kernel(
   }
 }
 
+// Build compact-pair -> packed-row and original routing-slot maps.
+// Bucketing already sorts pairs by expert, so expert_offsets[e] is the packed
+// base row of slice e and the pair index is itself the packed row. The grouped
+// WMMA launch addresses every expert through those same offsets.
+__global__ void qmoe_amd_grouped_map_kernel(
+    const int32_t* __restrict__ expert_indices,
+    const int32_t* __restrict__ expert_counts,
+    const int32_t* __restrict__ expert_offsets,
+    const int32_t* __restrict__ sorted_token_ids,
+    int32_t* __restrict__ pair_to_padded,
+    int32_t* __restrict__ pair_to_slot,
+    int k_top) {
+  const int e = static_cast<int>(blockIdx.x);
+  const int count = expert_counts[e];
+  const int off = expert_offsets[e];
+  for (int row = static_cast<int>(threadIdx.x); row < count;
+       row += static_cast<int>(blockDim.x)) {
+    const int pair = off + row;
+    const int token = sorted_token_ids[pair];
+    const int token_base = token * k_top;
+    int slot = token_base;
+    for (int s = 0; s < k_top; s++) {
+      if (expert_indices[token_base + s] == e) {
+        slot = token_base + s;
+        break;
+      }
+    }
+    pair_to_padded[pair] = pair;
+    pair_to_slot[pair] = slot;
+  }
+}
+
+__global__ void qmoe_amd_grouped_pack_kernel(
+    const __half* __restrict__ latent,
+    const int32_t* __restrict__ sorted_token_ids,
+    const int32_t* __restrict__ pair_to_padded,
+    __half* __restrict__ packed,
+    int width,
+    int total_pairs) {
+  const int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t total = static_cast<int64_t>(total_pairs) * width;
+  if (idx >= total) return;
+  const int pair = static_cast<int>(idx / width);
+  const int col = static_cast<int>(idx - static_cast<int64_t>(pair) * width);
+  const int token = sorted_token_ids[pair];
+  const int padded = pair_to_padded[pair];
+  packed[static_cast<int64_t>(padded) * width + col] =
+      latent[static_cast<int64_t>(token) * width + col];
+}
+
+__global__ void qmoe_amd_grouped_relu2_kernel(
+    __half* data,
+    const int32_t* __restrict__ pair_to_padded,
+    int width,
+    int total_pairs) {
+  const int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t total = static_cast<int64_t>(total_pairs) * width;
+  if (idx >= total) return;
+  const int pair = static_cast<int>(idx / width);
+  const int col = static_cast<int>(idx - static_cast<int64_t>(pair) * width);
+  const int64_t out =
+      static_cast<int64_t>(pair_to_padded[pair]) * width + col;
+  const float v = fmaxf(0.0f, static_cast<float>(data[out]));
+  data[out] = static_cast<__half>(v * v);
+}
+
+__global__ void qmoe_amd_grouped_unpack_kernel(
+    const __half* __restrict__ packed,
+    const __half* __restrict__ sorted_weights,
+    const int32_t* __restrict__ pair_to_padded,
+    const int32_t* __restrict__ pair_to_slot,
+    __half* __restrict__ slot_out,
+    int width,
+    int total_pairs) {
+  const int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t total = static_cast<int64_t>(total_pairs) * width;
+  if (idx >= total) return;
+  const int pair = static_cast<int>(idx / width);
+  const int col = static_cast<int>(idx - static_cast<int64_t>(pair) * width);
+  const int padded = pair_to_padded[pair];
+  const int slot = pair_to_slot[pair];
+  const float value =
+      static_cast<float>(packed[static_cast<int64_t>(padded) * width + col]);
+  const float weight = static_cast<float>(sorted_weights[pair]);
+  slot_out[static_cast<int64_t>(slot) * width + col] =
+      static_cast<__half>(value * weight);
+}
+
 // ---------------------------------------------------------------------------
 // Fused routed branch for decode (num_tokens == 1).
 //
@@ -428,6 +644,10 @@ __device__ static inline bool amd_decode_tile_reduce(int tid,
 // rows. Symmetric int4 with MatMulNBits' default zero point of 8, so the
 // dequantized dot factors to (sum(a * b_q) - 8 * sum(a)) * scale; this op's
 // schema has no zero_points input, so that factoring is unconditional.
+//
+// K is consumed in 8-element chunks (one uint32 of packed nibbles per output
+// row). That cuts the per-thread `a_vals` footprint versus a 32-wide uint4
+// tile and lets small-K shapes fill a 128- or 256-thread block.
 template <int BLOCK_SIZE, int TILE_N>
 __device__ static inline void amd_decode_gemv_tile(
     const __half* __restrict__ a,
@@ -437,25 +657,25 @@ __device__ static inline void amd_decode_gemv_tile(
     int bs_shift,
     int tid,
     float (&partial)[TILE_N]) {
-  const int num_u128 = k_dim / 32;
-  for (int idx = tid; idx < num_u128; idx += BLOCK_SIZE) {
-    const int k32 = idx * 32;
+  const int num_chunks = k_dim / 8;
+  for (int idx = tid; idx < num_chunks; idx += BLOCK_SIZE) {
+    const int k8 = idx * 8;
 
-    float a_vals[32];
+    float a_vals[8];
     float a_sum = 0.0f;
 #pragma unroll
-    for (int i = 0; i < 32; i++) {
-      a_vals[i] = static_cast<float>(a[k32 + i]);
+    for (int i = 0; i < 8; i++) {
+      a_vals[i] = static_cast<float>(a[k8 + i]);
       a_sum += a_vals[i];
     }
-    const int grp = k32 >> bs_shift;
+    const int grp = k8 >> bs_shift;
     const float a_sum_x_zp = a_sum * 8.0f;
 
-    uint4 b_pk[TILE_N];
+    unsigned b_pk[TILE_N];
     float sv[TILE_N];
 #pragma unroll
     for (int t = 0; t < TILE_N; t++) {
-      b_pk[t] = *reinterpret_cast<const uint4*>(&w_rows[t][idx * 16]);
+      b_pk[t] = *reinterpret_cast<const unsigned*>(&w_rows[t][idx * 4]);
       sv[t] = static_cast<float>(s_rows[t][grp]);
     }
 
@@ -465,39 +685,30 @@ __device__ static inline void amd_decode_gemv_tile(
 #pragma unroll
       for (int i = 0; i < 8; i++)
         dot = __fmaf_rn(a_vals[i],
-                        static_cast<float>((b_pk[t].x >> (i * 4)) & 0xF), dot);
-#pragma unroll
-      for (int i = 0; i < 8; i++)
-        dot = __fmaf_rn(a_vals[8 + i],
-                        static_cast<float>((b_pk[t].y >> (i * 4)) & 0xF), dot);
-#pragma unroll
-      for (int i = 0; i < 8; i++)
-        dot = __fmaf_rn(a_vals[16 + i],
-                        static_cast<float>((b_pk[t].z >> (i * 4)) & 0xF), dot);
-#pragma unroll
-      for (int i = 0; i < 8; i++)
-        dot = __fmaf_rn(a_vals[24 + i],
-                        static_cast<float>((b_pk[t].w >> (i * 4)) & 0xF), dot);
+                        static_cast<float>((b_pk[t] >> (i * 4)) & 0xF), dot);
       partial[t] += (dot - a_sum_x_zp) * sv[t];
     }
   }
 }
 
-// FC1 + relu2: latent [latent_size] -> act_out [k, moe_inter].
+// FC1 + relu2: latent [num_tokens, latent_size] -> act_out [num_slots, moe_inter].
+// slot = token * k_top + routed_slot. Decode is the num_tokens==1 case.
 template <int BLOCK_SIZE, int TILE_N>
 __global__ void qmoe_amd_decode_fc1_kernel(
-    const __half* __restrict__ latent,           // [latent_size]
-    const int32_t* __restrict__ expert_indices,  // [k]
+    const __half* __restrict__ latent,           // [num_tokens, latent_size]
+    const int32_t* __restrict__ expert_indices,  // [num_slots]
     const uint8_t* __restrict__ fc1_w,           // [E, moe_inter, latent/2]
     const __half* __restrict__ fc1_s,            // [E, moe_inter, n_blk_in]
-    __half* __restrict__ act_out,                // [k, moe_inter]
+    __half* __restrict__ act_out,                // [num_slots, moe_inter]
     int latent_size,
     int moe_inter,
     int n_blk_in,
-    int block_size) {
+    int block_size,
+    int k_top) {
   const int n_base = static_cast<int>(blockIdx.x) * TILE_N;
   const int slot = static_cast<int>(blockIdx.y);
   const int tid = static_cast<int>(threadIdx.x);
+  const int token = slot / k_top;
   const int e = expert_indices[slot];
 
   const size_t w_row_bytes = static_cast<size_t>(latent_size) / 2;
@@ -517,8 +728,9 @@ __global__ void qmoe_amd_decode_fc1_kernel(
   }
 
   amd_decode_gemv_tile<BLOCK_SIZE, TILE_N>(
-      latent, w_rows, s_rows, latent_size,
-      __builtin_ctz(static_cast<unsigned>(block_size)), tid, partial);
+      latent + static_cast<size_t>(token) * latent_size, w_rows, s_rows,
+      latent_size, __builtin_ctz(static_cast<unsigned>(block_size)), tid,
+      partial);
 
   if (amd_decode_tile_reduce<BLOCK_SIZE, TILE_N>(tid, partial)) {
 #pragma unroll
@@ -585,22 +797,172 @@ __global__ void qmoe_amd_decode_fc2_kernel(
   }
 }
 
-// Reduce: acc[n] = sum over slots of slot_buf[slot, n]. All k slots accumulate
-// in fp32 before the single fp16 store; the general path's scatter_add instead
+// ---------------------------------------------------------------------------
+// Expert-grouped prefill routed branch (num_tokens > 1).
+//
+// After GPU bucketing, each expert block loads its weight rows once and
+// serially GEMVs every token routed to that expert. FC2 writes back into the
+// original [num_tokens * k, latent] pair layout so the existing reduce kernel
+// can sum per-token without a race-prone scatter.
+// ---------------------------------------------------------------------------
+
+__device__ static inline int amd_find_pair_slot(const int32_t* expert_indices,
+                                                int token_id, int expert_e,
+                                                int k_top) {
+  const int base = token_id * k_top;
+  for (int s = 0; s < k_top; s++) {
+    if (expert_indices[base + s] == expert_e) return base + s;
+  }
+  return base;
+}
+
+template <int BLOCK_SIZE, int TILE_N>
+__global__ void qmoe_amd_prefill_fc1_kernel(
+    const __half* __restrict__ latent,
+    const int32_t* __restrict__ expert_counts,
+    const int32_t* __restrict__ expert_offsets,
+    const int32_t* __restrict__ sorted_token_ids,
+    const uint8_t* __restrict__ fc1_w,
+    const __half* __restrict__ fc1_s,
+    __half* __restrict__ act_out,
+    int latent_size,
+    int moe_inter,
+    int n_blk_in,
+    int block_size) {
+  const int e = static_cast<int>(blockIdx.y);
+  const int count = expert_counts[e];
+  if (count == 0) return;
+  const int off = expert_offsets[e];
+  const int n_base = static_cast<int>(blockIdx.x) * TILE_N;
+  const int tid = static_cast<int>(threadIdx.x);
+
+  const size_t w_row_bytes = static_cast<size_t>(latent_size) / 2;
+  const uint8_t* w = fc1_w + static_cast<size_t>(e) * moe_inter * w_row_bytes;
+  const __half* s = fc1_s + static_cast<size_t>(e) * moe_inter * n_blk_in;
+
+  const uint8_t* w_rows[TILE_N];
+  const __half* s_rows[TILE_N];
+#pragma unroll
+  for (int t = 0; t < TILE_N; t++) {
+    const int n = n_base + t;
+    const int sn = (n < moe_inter) ? n : 0;
+    w_rows[t] = w + static_cast<size_t>(sn) * w_row_bytes;
+    s_rows[t] = s + static_cast<size_t>(sn) * n_blk_in;
+  }
+
+  const int bs_shift = __builtin_ctz(static_cast<unsigned>(block_size));
+  for (int idx = 0; idx < count; idx++) {
+    const int token_id = sorted_token_ids[off + idx];
+    const __half* a = latent + static_cast<size_t>(token_id) * latent_size;
+    float partial[TILE_N];
+#pragma unroll
+    for (int t = 0; t < TILE_N; t++) partial[t] = 0.0f;
+
+    amd_decode_gemv_tile<BLOCK_SIZE, TILE_N>(a, w_rows, s_rows, latent_size,
+                                             bs_shift, tid, partial);
+
+    if (amd_decode_tile_reduce<BLOCK_SIZE, TILE_N>(tid, partial)) {
+#pragma unroll
+      for (int t = 0; t < TILE_N; t++) {
+        const int n = n_base + t;
+        if (n < moe_inter) {
+          const float v = fmaxf(0.0f, partial[t]);
+          act_out[static_cast<size_t>(off + idx) * moe_inter + n] =
+              static_cast<__half>(v * v);
+        }
+      }
+    }
+    __syncthreads();
+  }
+}
+
+template <int BLOCK_SIZE, int TILE_N>
+__global__ void qmoe_amd_prefill_fc2_kernel(
+    const __half* __restrict__ act_out,
+    const int32_t* __restrict__ expert_indices,
+    const int32_t* __restrict__ expert_counts,
+    const int32_t* __restrict__ expert_offsets,
+    const int32_t* __restrict__ sorted_token_ids,
+    const __half* __restrict__ sorted_weights,
+    const uint8_t* __restrict__ fc2_w,
+    const __half* __restrict__ fc2_s,
+    __half* __restrict__ slot_buf,
+    int moe_inter,
+    int latent_size,
+    int n_blk_mid,
+    int block_size,
+    int k_top) {
+  const int e = static_cast<int>(blockIdx.y);
+  const int count = expert_counts[e];
+  if (count == 0) return;
+  const int off = expert_offsets[e];
+  const int n_base = static_cast<int>(blockIdx.x) * TILE_N;
+  const int tid = static_cast<int>(threadIdx.x);
+
+  const size_t w_row_bytes = static_cast<size_t>(moe_inter) / 2;
+  const uint8_t* w = fc2_w + static_cast<size_t>(e) * latent_size * w_row_bytes;
+  const __half* s = fc2_s + static_cast<size_t>(e) * latent_size * n_blk_mid;
+
+  const uint8_t* w_rows[TILE_N];
+  const __half* s_rows[TILE_N];
+#pragma unroll
+  for (int t = 0; t < TILE_N; t++) {
+    const int n = n_base + t;
+    const int sn = (n < latent_size) ? n : 0;
+    w_rows[t] = w + static_cast<size_t>(sn) * w_row_bytes;
+    s_rows[t] = s + static_cast<size_t>(sn) * n_blk_mid;
+  }
+
+  const int bs_shift = __builtin_ctz(static_cast<unsigned>(block_size));
+  for (int idx = 0; idx < count; idx++) {
+    const int pair_w = off + idx;
+    const int token_id = sorted_token_ids[pair_w];
+    const float wt = static_cast<float>(sorted_weights[pair_w]);
+    const int slot =
+        amd_find_pair_slot(expert_indices, token_id, e, k_top);
+
+    float partial[TILE_N];
+#pragma unroll
+    for (int t = 0; t < TILE_N; t++) partial[t] = 0.0f;
+
+    amd_decode_gemv_tile<BLOCK_SIZE, TILE_N>(
+        act_out + static_cast<size_t>(pair_w) * moe_inter, w_rows, s_rows,
+        moe_inter, bs_shift, tid, partial);
+
+    if (amd_decode_tile_reduce<BLOCK_SIZE, TILE_N>(tid, partial)) {
+#pragma unroll
+      for (int t = 0; t < TILE_N; t++) {
+        const int n = n_base + t;
+        if (n < latent_size) {
+          slot_buf[static_cast<size_t>(slot) * latent_size + n] =
+              static_cast<__half>(wt * partial[t]);
+        }
+      }
+    }
+    __syncthreads();
+  }
+}
+
+// Reduce: acc[token, n] = sum over the token's k routing slots. Accumulate in
+// fp32 before the single fp16 store; the general path's scatter_add instead
 // rounds to fp16 after every expert.
 __global__ void qmoe_amd_decode_reduce_kernel(
-    const __half* __restrict__ slot_buf,  // [k, latent_size]
-    __half* __restrict__ acc,             // [latent_size]
+    const __half* __restrict__ slot_buf,  // [num_tokens * k, latent_size]
+    __half* __restrict__ acc,             // [num_tokens, latent_size]
     int latent_size,
     int k) {
   const int n = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int token = static_cast<int>(blockIdx.y);
   if (n >= latent_size) return;
   float sum = 0.0f;
+  const size_t token_base =
+      (static_cast<size_t>(token) * static_cast<size_t>(k)) * latent_size;
 #pragma unroll 4
   for (int slot = 0; slot < k; slot++) {
-    sum += static_cast<float>(slot_buf[static_cast<size_t>(slot) * latent_size + n]);
+    sum += static_cast<float>(
+        slot_buf[token_base + static_cast<size_t>(slot) * latent_size + n]);
   }
-  acc[n] = static_cast<__half>(sum);
+  acc[static_cast<size_t>(token) * latent_size + n] = static_cast<__half>(sum);
 }
 
 // ===== Host launchers (extern "C") — pure kernel launches, no alloc/sync ====
@@ -612,6 +974,7 @@ extern "C" int hip_qmoe_amd_route(
     const void* correction_bias,
     void* expert_indices,
     void* expert_weights,
+    void* decode_logits_scratch,
     int64_t num_tokens,
     int64_t hidden_size,
     int64_t num_experts,
@@ -669,15 +1032,43 @@ extern "C" int hip_qmoe_amd_route(
   // return -- without this clear, an error left sticky by an earlier op's
   // unchecked launch fails QMoE with a bogus diagnostic.
   (void)hipGetLastError();
-  hipLaunchKernelGGL(
-      qmoe_amd_route_kernel, dim3(static_cast<unsigned>(num_tokens)),
-      dim3(kAmdRoutingBlock), shmem, s,
-      static_cast<const __half*>(hidden_states),
-      static_cast<const __half*>(router_weight),
-      static_cast<const __half*>(correction_bias),
-      static_cast<int32_t*>(expert_indices),
-      static_cast<__half*>(expert_weights), num_tokens, hidden_size,
-      num_experts, k, normalize, use_correction_bias, routed_scaling_factor);
+  static const bool parallel_decode_route = [] {
+    const char* value = std::getenv("HIPDNN_EP_QMOE_AMD_ROUTE_PARALLEL");
+    return !value || std::atoi(value) != 0;
+  }();
+  const bool use_parallel_decode =
+      parallel_decode_route && num_tokens == 1 && hidden_size == 4096 &&
+      num_experts == 512 && decode_logits_scratch != nullptr;
+  if (use_parallel_decode) {
+    const unsigned logit_blocks = static_cast<unsigned>(
+        num_experts / kAmdDecodeRouteTileN);
+    hipLaunchKernelGGL(
+        qmoe_amd_route_logits_decode_kernel, dim3(logit_blocks),
+        dim3(kAmdDecodeRouteBlock), 0, s,
+        static_cast<const __half*>(hidden_states),
+        static_cast<const __half*>(router_weight),
+        static_cast<float*>(decode_logits_scratch),
+        static_cast<int>(hidden_size), static_cast<int>(num_experts));
+    hipLaunchKernelGGL(
+        qmoe_amd_route_topk_decode_kernel, dim3(1), dim3(kAmdRoutingBlock), 0,
+        s, static_cast<const float*>(decode_logits_scratch),
+        static_cast<const __half*>(correction_bias),
+        static_cast<int32_t*>(expert_indices),
+        static_cast<__half*>(expert_weights), static_cast<int>(num_experts),
+        static_cast<int>(k), static_cast<int>(normalize),
+        static_cast<int>(use_correction_bias), routed_scaling_factor);
+  } else {
+    hipLaunchKernelGGL(
+        qmoe_amd_route_kernel, dim3(static_cast<unsigned>(num_tokens)),
+        dim3(kAmdRoutingBlock), shmem, s,
+        static_cast<const __half*>(hidden_states),
+        static_cast<const __half*>(router_weight),
+        static_cast<const __half*>(correction_bias),
+        static_cast<int32_t*>(expert_indices),
+        static_cast<__half*>(expert_weights), num_tokens, hidden_size,
+        num_experts, k, normalize, use_correction_bias,
+        routed_scaling_factor);
+  }
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess)
@@ -792,11 +1183,10 @@ extern "C" int hip_qmoe_amd_decode_fused_supported(
     int64_t element_size_bytes) {
   if (element_size_bytes != 2 || expert_weight_bits != 4) return 0;
   if (latent_size <= 0 || moe_intermediate_size <= 0) return 0;
-  // The packed-nibble main loop consumes K in 32-element tiles and derives the
-  // quant-block index by shifting the tile offset, so the quant block must be
-  // a power of two no smaller than a tile. K % block_size == 0 additionally
-  // makes the per-expert row stride exactly K/2 bytes (and implies K % 32 == 0,
-  // which the uint4 loads need).
+  // The packed-nibble loop consumes K in 8-element chunks and derives the
+  // quant-block index by shifting the chunk offset, so the quant block must be
+  // a power of two no smaller than 32 (the original MatMulNBits group).
+  // K % block_size == 0 also makes the per-expert row stride exactly K/2 bytes.
   if (block_size < 32 || (block_size & (block_size - 1)) != 0) return 0;
   if ((latent_size % block_size) != 0) return 0;
   if ((moe_intermediate_size % block_size) != 0) return 0;
@@ -808,10 +1198,11 @@ extern "C" int hip_qmoe_amd_decode_fused_supported(
 static constexpr int kAmdDecodeTileN = 8;
 #define QMOE_AMD_DECODE_BS_LIST(X) X(32) X(64) X(128) X(256)
 
-// Match the block size to the number of 32-element K tiles: threads beyond the
-// tile count never enter the main loop but still pay the reduction.
+// Block size tracks the number of 8-element K chunks so small-K shapes can
+// still fill a 128- or 256-thread block. Scale stays per 32-wide quant
+// block; the (dot - 8*sum(a))*scale factor is linear in the chunk.
 static inline int amd_decode_block_size(int64_t k_dim) {
-  const int64_t units = k_dim / 32;
+  const int64_t units = k_dim / 8;
   if (units >= 256) return 256;
   if (units >= 128) return 128;
   if (units >= 64) return 64;
@@ -822,17 +1213,17 @@ template <int BS>
 static hipError_t launch_amd_decode_fc1(
     hipStream_t s, const void* latent, const void* expert_indices,
     const void* fc1_w, const void* fc1_s, void* act_out, int latent_size,
-    int moe_inter, int n_blk_in, int block_size, int k) {
+    int moe_inter, int n_blk_in, int block_size, int num_slots, int k_top) {
   dim3 grid(static_cast<unsigned>((moe_inter + kAmdDecodeTileN - 1) /
                                   kAmdDecodeTileN),
-            static_cast<unsigned>(k));
+            static_cast<unsigned>(num_slots));
   hipLaunchKernelGGL(
       HIP_KERNEL_NAME(qmoe_amd_decode_fc1_kernel<BS, kAmdDecodeTileN>), grid,
       dim3(BS), 0, s, static_cast<const __half*>(latent),
       static_cast<const int32_t*>(expert_indices),
       static_cast<const uint8_t*>(fc1_w), static_cast<const __half*>(fc1_s),
       static_cast<__half*>(act_out), latent_size, moe_inter, n_blk_in,
-      block_size);
+      block_size, k_top);
   return hipGetLastError();
 }
 
@@ -841,10 +1232,10 @@ static hipError_t launch_amd_decode_fc2(
     hipStream_t s, const void* act_out, const void* expert_indices,
     const void* expert_weights, const void* fc2_w, const void* fc2_s,
     void* slot_buf, int moe_inter, int latent_size, int n_blk_mid,
-    int block_size, int k) {
+    int block_size, int num_slots) {
   dim3 grid(static_cast<unsigned>((latent_size + kAmdDecodeTileN - 1) /
                                   kAmdDecodeTileN),
-            static_cast<unsigned>(k));
+            static_cast<unsigned>(num_slots));
   hipLaunchKernelGGL(
       HIP_KERNEL_NAME(qmoe_amd_decode_fc2_kernel<BS, kAmdDecodeTileN>), grid,
       dim3(BS), 0, s, static_cast<const __half*>(act_out),
@@ -868,13 +1259,14 @@ extern "C" int hip_qmoe_amd_decode_fused(
     void* act_scratch,
     void* slot_scratch,
     void* acc,
+    int64_t num_tokens,
     int64_t latent_size,
     int64_t moe_intermediate_size,
     int64_t k,
     int64_t expert_weight_bits,
     int64_t block_size,
     int64_t element_size_bytes) {
-  if (k <= 0) return 0;
+  if (k <= 0 || num_tokens <= 0) return 0;
   if (!hip_qmoe_amd_decode_fused_supported(latent_size, moe_intermediate_size,
                                            block_size, expert_weight_bits,
                                            element_size_bytes)) {
@@ -888,10 +1280,12 @@ extern "C" int hip_qmoe_amd_decode_fused(
   }
 
   hipStream_t s = static_cast<hipStream_t>(stream);
+  const int i_tokens = static_cast<int>(num_tokens);
   const int i_latent = static_cast<int>(latent_size);
   const int i_moe_inter = static_cast<int>(moe_intermediate_size);
   const int i_block = static_cast<int>(block_size);
-  const int i_k = static_cast<int>(k);
+  const int i_k_top = static_cast<int>(k);
+  const int i_num_slots = i_tokens * i_k_top;
   const int n_blk_in = i_latent / i_block;
   const int n_blk_mid = i_moe_inter / i_block;
 
@@ -903,7 +1297,8 @@ extern "C" int hip_qmoe_amd_decode_fused(
   if (bs1 == (B))                                                              \
     err = launch_amd_decode_fc1<B>(s, latent, expert_indices, fc1_weights,     \
                                    fc1_scales, act_scratch, i_latent,          \
-                                   i_moe_inter, n_blk_in, i_block, i_k);
+                                   i_moe_inter, n_blk_in, i_block,             \
+                                   i_num_slots, i_k_top);
   QMOE_AMD_DECODE_BS_LIST(X)
 #undef X
   if (err != hipSuccess) {
@@ -920,7 +1315,7 @@ extern "C" int hip_qmoe_amd_decode_fused(
     err = launch_amd_decode_fc2<B>(                                            \
         s, act_scratch, expert_indices, expert_weights, fc2_weights,           \
         fc2_scales, slot_scratch, i_moe_inter, i_latent, n_blk_mid, i_block,   \
-        i_k);
+        i_num_slots);
   QMOE_AMD_DECODE_BS_LIST(X)
 #undef X
   if (err != hipSuccess) {
@@ -931,15 +1326,284 @@ extern "C" int hip_qmoe_amd_decode_fused(
   }
 
   const int reduce_grid = (i_latent + kBlock - 1) / kBlock;
-  hipLaunchKernelGGL(qmoe_amd_decode_reduce_kernel, dim3(reduce_grid),
-                     dim3(kBlock), 0, s,
-                     static_cast<const __half*>(slot_scratch),
-                     static_cast<__half*>(acc), i_latent, i_k);
+  hipLaunchKernelGGL(qmoe_amd_decode_reduce_kernel,
+                     dim3(reduce_grid, static_cast<unsigned>(i_tokens)), dim3(kBlock),
+                     0, s, static_cast<const __half*>(slot_scratch),
+                     static_cast<__half*>(acc), i_latent, i_k_top);
 
   err = hipGetLastError();
   if (err != hipSuccess)
     fprintf(stderr,
             "[custom_kernels] hip_qmoe_amd_decode_fused reduce failed: %s\n",
+            hipGetErrorString(err));
+  return static_cast<int>(err);
+}
+
+template <int BS>
+static hipError_t launch_amd_prefill_fc1(
+    hipStream_t s, const void* latent, const void* expert_counts,
+    const void* expert_offsets, const void* sorted_token_ids,
+    const void* fc1_w, const void* fc1_s, void* act_out, int latent_size,
+    int moe_inter, int n_blk_in, int block_size, int num_experts) {
+  dim3 grid(static_cast<unsigned>((moe_inter + kAmdDecodeTileN - 1) /
+                                  kAmdDecodeTileN),
+            static_cast<unsigned>(num_experts));
+  hipLaunchKernelGGL(
+      HIP_KERNEL_NAME(qmoe_amd_prefill_fc1_kernel<BS, kAmdDecodeTileN>), grid,
+      dim3(BS), 0, s, static_cast<const __half*>(latent),
+      static_cast<const int32_t*>(expert_counts),
+      static_cast<const int32_t*>(expert_offsets),
+      static_cast<const int32_t*>(sorted_token_ids),
+      static_cast<const uint8_t*>(fc1_w), static_cast<const __half*>(fc1_s),
+      static_cast<__half*>(act_out), latent_size, moe_inter, n_blk_in,
+      block_size);
+  return hipGetLastError();
+}
+
+template <int BS>
+static hipError_t launch_amd_prefill_fc2(
+    hipStream_t s, const void* act_out, const void* expert_indices,
+    const void* expert_counts, const void* expert_offsets,
+    const void* sorted_token_ids, const void* sorted_weights,
+    const void* fc2_w, const void* fc2_s, void* slot_buf, int moe_inter,
+    int latent_size, int n_blk_mid, int block_size, int num_experts,
+    int k_top) {
+  dim3 grid(static_cast<unsigned>((latent_size + kAmdDecodeTileN - 1) /
+                                  kAmdDecodeTileN),
+            static_cast<unsigned>(num_experts));
+  hipLaunchKernelGGL(
+      HIP_KERNEL_NAME(qmoe_amd_prefill_fc2_kernel<BS, kAmdDecodeTileN>), grid,
+      dim3(BS), 0, s, static_cast<const __half*>(act_out),
+      static_cast<const int32_t*>(expert_indices),
+      static_cast<const int32_t*>(expert_counts),
+      static_cast<const int32_t*>(expert_offsets),
+      static_cast<const int32_t*>(sorted_token_ids),
+      static_cast<const __half*>(sorted_weights),
+      static_cast<const uint8_t*>(fc2_w), static_cast<const __half*>(fc2_s),
+      static_cast<__half*>(slot_buf), moe_inter, latent_size, n_blk_mid,
+      block_size, k_top);
+  return hipGetLastError();
+}
+
+extern "C" int hip_qmoe_amd_prefill_grouped_fused(
+    void* stream,
+    const void* latent,
+    const void* expert_indices,
+    const void* expert_weights,
+    const void* fc1_weights,
+    const void* fc1_scales,
+    const void* fc2_weights,
+    const void* fc2_scales,
+    void* expert_counts,
+    void* expert_offsets,
+    void* sorted_token_ids,
+    void* sorted_weights,
+    void* act_scratch,
+    void* slot_scratch,
+    void* acc,
+    int64_t num_tokens,
+    int64_t num_experts,
+    int64_t latent_size,
+    int64_t moe_intermediate_size,
+    int64_t k,
+    int64_t expert_weight_bits,
+    int64_t block_size,
+    int64_t element_size_bytes) {
+  if (k <= 0 || num_tokens <= 1 || num_experts <= 0) return 0;
+  if (!hip_qmoe_amd_decode_fused_supported(latent_size, moe_intermediate_size,
+                                           block_size, expert_weight_bits,
+                                           element_size_bytes)) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_amd_prefill_grouped_fused: unsupported "
+            "geometry (latent=%lld moe_inter=%lld block=%lld bits=%lld "
+            "elem=%lld)\n",
+            (long long)latent_size, (long long)moe_intermediate_size,
+            (long long)block_size, (long long)expert_weight_bits,
+            (long long)element_size_bytes);
+    return -1;
+  }
+
+  hipStream_t s = static_cast<hipStream_t>(stream);
+  const int i_tokens = static_cast<int>(num_tokens);
+  const int i_experts = static_cast<int>(num_experts);
+  const int i_latent = static_cast<int>(latent_size);
+  const int i_moe_inter = static_cast<int>(moe_intermediate_size);
+  const int i_block = static_cast<int>(block_size);
+  const int i_k_top = static_cast<int>(k);
+  const int n_blk_in = i_latent / i_block;
+  const int n_blk_mid = i_moe_inter / i_block;
+
+  int bucket_rc = hip_qmoe_amd_bucket_tokens(
+      stream, expert_indices, expert_weights, expert_counts, expert_offsets,
+      sorted_token_ids, sorted_weights, num_tokens, num_experts, k,
+      element_size_bytes);
+  if (bucket_rc != 0) return bucket_rc;
+
+  (void)hipGetLastError();
+
+  const int bs1 = amd_decode_block_size(latent_size);
+  hipError_t err = hipErrorInvalidValue;
+#define X(B)                                                                   \
+  if (bs1 == (B))                                                              \
+    err = launch_amd_prefill_fc1<B>(                                           \
+        s, latent, expert_counts, expert_offsets, sorted_token_ids,            \
+        fc1_weights, fc1_scales, act_scratch, i_latent, i_moe_inter, n_blk_in, \
+        i_block, i_experts);
+  QMOE_AMD_DECODE_BS_LIST(X)
+#undef X
+  if (err != hipSuccess) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_amd_prefill_grouped_fused fc1 failed: "
+            "%s\n",
+            hipGetErrorString(err));
+    return static_cast<int>(err);
+  }
+
+  const int bs2 = amd_decode_block_size(moe_intermediate_size);
+  err = hipErrorInvalidValue;
+#define X(B)                                                                   \
+  if (bs2 == (B))                                                              \
+    err = launch_amd_prefill_fc2<B>(                                           \
+        s, act_scratch, expert_indices, expert_counts, expert_offsets,           \
+        sorted_token_ids, sorted_weights, fc2_weights, fc2_scales,             \
+        slot_scratch, i_moe_inter, i_latent, n_blk_mid, i_block, i_experts,    \
+        i_k_top);
+  QMOE_AMD_DECODE_BS_LIST(X)
+#undef X
+  if (err != hipSuccess) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_amd_prefill_grouped_fused fc2 failed: "
+            "%s\n",
+            hipGetErrorString(err));
+    return static_cast<int>(err);
+  }
+
+  const int reduce_grid = (i_latent + kBlock - 1) / kBlock;
+  hipLaunchKernelGGL(qmoe_amd_decode_reduce_kernel,
+                     dim3(reduce_grid, static_cast<unsigned>(i_tokens)),
+                     dim3(kBlock), 0, s,
+                     static_cast<const __half*>(slot_scratch),
+                     static_cast<__half*>(acc), i_latent, i_k_top);
+
+  err = hipGetLastError();
+  if (err != hipSuccess)
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_amd_prefill_grouped_fused reduce "
+            "failed: %s\n",
+            hipGetErrorString(err));
+  return static_cast<int>(err);
+}
+
+extern "C" int hip_qmoe_amd_prefill_grouped_wmma(
+    void* stream,
+    const void* latent,
+    const void* expert_indices,
+    const void* expert_weights,
+    const void* fc1_weights,
+    const void* fc1_scales,
+    const void* fc2_weights,
+    const void* fc2_scales,
+    void* expert_counts,
+    void* expert_offsets,
+    void* sorted_token_ids,
+    void* sorted_weights,
+    void* pair_to_padded,
+    void* pair_to_slot,
+    void* packed_latent,
+    void* packed_act,
+    void* slot_scratch,
+    void* acc,
+    int64_t num_tokens,
+    int64_t num_experts,
+    int64_t latent_size,
+    int64_t moe_intermediate_size,
+    int64_t k,
+    int64_t expert_weight_bits,
+    int64_t block_size,
+    int64_t element_size_bytes) {
+  if (num_tokens <= 1 || num_experts <= 0 || k <= 0) return 0;
+  if (!hip_qmoe_amd_decode_fused_supported(
+          latent_size, moe_intermediate_size, block_size, expert_weight_bits,
+          element_size_bytes)) {
+    return -1;
+  }
+
+  hipStream_t s = static_cast<hipStream_t>(stream);
+  const int tokens = static_cast<int>(num_tokens);
+  const int experts = static_cast<int>(num_experts);
+  const int latent_n = static_cast<int>(latent_size);
+  const int moe_n = static_cast<int>(moe_intermediate_size);
+  const int k_top = static_cast<int>(k);
+  const int total_pairs = tokens * k_top;
+
+  int rc = hip_qmoe_amd_bucket_tokens(
+      stream, expert_indices, expert_weights, expert_counts, expert_offsets,
+      sorted_token_ids, sorted_weights, num_tokens, num_experts, k,
+      element_size_bytes);
+  if (rc != 0) return rc;
+
+  hipLaunchKernelGGL(
+      qmoe_amd_grouped_map_kernel, dim3(experts), dim3(128), 0, s,
+      static_cast<const int32_t*>(expert_indices),
+      static_cast<const int32_t*>(expert_counts),
+      static_cast<const int32_t*>(expert_offsets),
+      static_cast<const int32_t*>(sorted_token_ids),
+      static_cast<int32_t*>(pair_to_padded),
+      static_cast<int32_t*>(pair_to_slot), k_top);
+
+  const int64_t pack_total = static_cast<int64_t>(total_pairs) * latent_n;
+  hipLaunchKernelGGL(
+      qmoe_amd_grouped_pack_kernel,
+      dim3(static_cast<unsigned>((pack_total + kBlock - 1) / kBlock)),
+      dim3(kBlock), 0, s, static_cast<const __half*>(latent),
+      static_cast<const int32_t*>(sorted_token_ids),
+      static_cast<const int32_t*>(pair_to_padded),
+      static_cast<__half*>(packed_latent), latent_n, total_pairs);
+
+  rc = hip_matmul_nbits_grouped_wmma(
+      stream, packed_latent, fc1_weights, fc1_scales, expert_counts,
+      expert_offsets, packed_act, num_tokens, total_pairs, num_experts,
+      moe_intermediate_size, latent_size, expert_weight_bits, block_size,
+      element_size_bytes);
+  if (rc != 0) return rc;
+
+  const int64_t act_total = static_cast<int64_t>(total_pairs) * moe_n;
+  hipLaunchKernelGGL(
+      qmoe_amd_grouped_relu2_kernel,
+      dim3(static_cast<unsigned>((act_total + kBlock - 1) / kBlock)),
+      dim3(kBlock), 0, s, static_cast<__half*>(packed_act),
+      static_cast<const int32_t*>(pair_to_padded), moe_n, total_pairs);
+
+  // FC2 output reuses packed_latent: FC1 no longer consumes it after the
+  // first grouped WMMA completes, and both tensors have latent_size columns.
+  rc = hip_matmul_nbits_grouped_wmma(
+      stream, packed_act, fc2_weights, fc2_scales, expert_counts,
+      expert_offsets, packed_latent, num_tokens, total_pairs, num_experts,
+      latent_size, moe_intermediate_size, expert_weight_bits, block_size,
+      element_size_bytes);
+  if (rc != 0) return rc;
+
+  const int64_t unpack_total = static_cast<int64_t>(total_pairs) * latent_n;
+  hipLaunchKernelGGL(
+      qmoe_amd_grouped_unpack_kernel,
+      dim3(static_cast<unsigned>((unpack_total + kBlock - 1) / kBlock)),
+      dim3(kBlock), 0, s, static_cast<const __half*>(packed_latent),
+      static_cast<const __half*>(sorted_weights),
+      static_cast<const int32_t*>(pair_to_padded),
+      static_cast<const int32_t*>(pair_to_slot),
+      static_cast<__half*>(slot_scratch), latent_n, total_pairs);
+
+  const int reduce_grid = (latent_n + kBlock - 1) / kBlock;
+  hipLaunchKernelGGL(
+      qmoe_amd_decode_reduce_kernel,
+      dim3(reduce_grid, static_cast<unsigned>(tokens)), dim3(kBlock), 0, s,
+      static_cast<const __half*>(slot_scratch), static_cast<__half*>(acc),
+      latent_n, k_top);
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess)
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_amd_prefill_grouped_wmma failed: %s\n",
             hipGetErrorString(err));
   return static_cast<int>(err);
 }

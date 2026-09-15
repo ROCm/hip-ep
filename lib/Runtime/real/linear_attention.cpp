@@ -14,6 +14,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
@@ -166,39 +167,49 @@ extern "C" int wrap_linear_attention(
   const int64_t beta_token_bytes = (beta_per_head ? Hkv : 1) * elem_size;
 
   int result = 0;
+  static const bool gated_prefill_chunked = []() {
+    const char *value = std::getenv("HIPDNN_EP_LA_GATED_PREFILL_CHUNKED");
+    return !value || std::atoi(value) != 0;
+  }();
 
-  // Initialize present_state from past_state (or zeros).
+  // Initialize present_state from past_state (or zeros) before dispatching any
+  // update rule or execution path. Use a compute-stream kernel rather than
+  // hipMemcpyAsync(D2D): LA state may live in host-mapped memory, where the
+  // copy-engine path degenerates into a synchronous host-staged transfer and
+  // drains the compute queue. outer_rank=0 expresses one contiguous row, so
+  // this single launch covers the entire state for decode, per-token prefill,
+  // chunked prefill, and the chunked-path fallback.
   //
-  // Skip the copy when the two buffers alias (past_state == present_state).
-  // Under a shared-buffer binding (OGA past_present_share_buffer / EP GPU
-  // aliasing) the recurrent state is one buffer used for both past input and
-  // present output, so present already holds past's data and the decode/prefill
-  // kernel updates it in place -- the copy is a semantic no-op. It is NOT free
-  // to issue, though: the buffer comes from the EP's host-mapped allocator
-  // (hipHostMallocMapped), and on that memory hipMemcpyAsync D2D degenerates to
-  // a synchronous host-staged copy, costing host (CPU) time per call. At
-  // decode this dominates the op (profiled ~54.6 ms CPU vs ~5.6 ms GPU across
-  // 30 single-token LA calls; ~1.8 ms CPU per layer per token), so skipping the
-  // self-copy removes the per-token recurrent-state staging overhead.
+  // Skip initialization when the buffers alias. Under a shared-buffer binding
+  // the recurrent state is already in present_state and all paths update it in
+  // place, so copying it to itself would be a semantic no-op.
   if (past_state) {
     if (past_state != present_state) {
-      HIP_CHECK(hipMemcpyAsync(present_state, past_state, total_state_bytes,
-                               hipMemcpyDeviceToDevice,
-                               (hipStream_t)hip_stream));
+      const int copy_result = hip_strided_copy(
+          hip_stream, present_state, past_state, elem_size,
+          /*outer_rank=*/0, /*outer_sizes=*/nullptr,
+          /*src_outer_strides=*/nullptr, /*dst_outer_strides=*/nullptr,
+          /*row_elems=*/B * Hkv * dk * dv, /*outer_total=*/1);
+      if (copy_result != 0) {
+        fprintf(stderr,
+                "[linear_attention] ERROR: state copy kernel failed (%d)\n",
+                copy_result);
+        result = -1;
+        goto cleanup;
+      }
     }
-    // else: aliased shared buffer -> present already == past, copy is a no-op.
   } else {
     HIP_CHECK(hipMemsetAsync(present_state, 0, total_state_bytes,
                              (hipStream_t)hip_stream));
   }
 
-  // Fast path: prefill (seq_len > 1) of the gated_delta rule is handled by a
-  // single chunked-parallel launch that processes the whole sequence (keeps
-  // the recurrent state fp32 across each chunk -> more accurate than the
-  // per-token kernel, and replaces ~seq_len launches with one). The launcher
-  // returns 1 when it declines an unsupported config; we then fall back to the
-  // per-token loop below.
-  if (update_rule == kUpdateRuleGatedDelta && seq_len > 1) {
+  // Fast path: prefill (seq_len > 1) of the gated and gated_delta rules is
+  // handled by a chunked-parallel affine scan. This replaces ~seq_len
+  // per-token launches per layer. The launcher returns 1 when it declines an
+  // unsupported config; we then fall back to the per-token loop below.
+  if (((update_rule == kUpdateRuleGated && gated_prefill_chunked) ||
+       update_rule == kUpdateRuleGatedDelta) &&
+      seq_len > 1) {
     // The chunk-parallel path needs a device scratch arena sized to this shape.
     // It lives in the per-session RuntimeState::la_scratch pool
     // (grow-on-demand, freed in hipdnn_ep_state_cleanup) -- same policy as

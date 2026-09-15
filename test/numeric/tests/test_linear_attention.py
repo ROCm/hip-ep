@@ -76,8 +76,9 @@ def _make_linear_attention_model(
     state_dv: int,
     scale: float = 1.0,
     update_rule: str = "gated_delta",
+    include_past_state: bool = True,
 ):
-    """Build a LinearAttention ONNX model with all six runtime inputs.
+    """Build a LinearAttention ONNX model with up to six runtime inputs.
 
     The output ``Y`` has shape [B, T, H_q * d_v_out].  When the model
     follows the 'aligned' contract, that equals [B, T, V dim].  In the
@@ -124,9 +125,15 @@ def _make_linear_attention_model(
         [batch, kv_num_heads, state_dk, state_dv],
     )
 
+    node_inputs = ["query", "key", "value", "past_state", "decay", "beta"]
+    graph_inputs = [Q, K, V, State, Decay, Beta]
+    if not include_past_state:
+        node_inputs[3] = ""
+        graph_inputs = [Q, K, V, Decay, Beta]
+
     node = helper.make_node(
         "LinearAttention",
-        ["query", "key", "value", "past_state", "decay", "beta"],
+        node_inputs,
         ["output", "present_state"],
         domain="com.microsoft",
         kv_num_heads=kv_num_heads,
@@ -138,7 +145,7 @@ def _make_linear_attention_model(
     ms_opset = helper.make_opsetid("com.microsoft", 1)
     return make_model_from_nodes(
         [node],
-        [Q, K, V, State, Decay, Beta],
+        graph_inputs,
         [Y, Present],
         opset=17,
         extra_opsets=[ms_opset],
@@ -184,6 +191,87 @@ class TestLinearAttention:
     the gated_delta math; the chunk_opt cases then verify the asymmetric
     layout the actual model uses."""
 
+    @pytest.mark.parametrize("seq_len", [1, 4])
+    @pytest.mark.parametrize("update_rule", ["linear", "gated", "delta", "gated_delta"])
+    def test_la_state_initialization_all_update_rules(
+        self,
+        model_runner,
+        seq_len,
+        update_rule,
+    ):
+        """Non-zero past state reaches every update rule in decode and prefill.
+
+        This guards the common runtime state-initialization path used before
+        the per-token kernel loop and the gated-delta chunked prefill path.
+        """
+        batch, qh, kvh, d_k, d_v = 1, 2, 2, 8, 8
+        q_dim = qh * d_k
+        k_dim = kvh * d_k
+        v_dim = kvh * d_v
+        model = _make_linear_attention_model(
+            batch,
+            seq_len,
+            qh,
+            kvh,
+            q_dim,
+            k_dim,
+            v_dim,
+            d_k,
+            d_v,
+            scale=1.0,
+            update_rule=update_rule,
+        )
+
+        inputs = _make_inputs(
+            np.random.default_rng(29),
+            batch,
+            seq_len,
+            kvh,
+            q_dim,
+            k_dim,
+            v_dim,
+            d_k,
+            d_v,
+        )
+        actual, expected = model_runner.run_sample(model, inputs)
+        compare_outputs(actual, expected, atol=1e-2, rtol=1e-2)
+
+    @pytest.mark.parametrize("seq_len", [1, 4])
+    def test_la_zero_initializes_missing_past_state(self, model_runner, seq_len):
+        """A missing optional past state initializes present state to zero."""
+        batch, qh, kvh, d_k, d_v = 1, 2, 2, 8, 8
+        q_dim = qh * d_k
+        k_dim = kvh * d_k
+        v_dim = kvh * d_v
+        model = _make_linear_attention_model(
+            batch,
+            seq_len,
+            qh,
+            kvh,
+            q_dim,
+            k_dim,
+            v_dim,
+            d_k,
+            d_v,
+            update_rule="linear",
+            include_past_state=False,
+        )
+
+        inputs_with_state = _make_inputs(
+            np.random.default_rng(30),
+            batch,
+            seq_len,
+            kvh,
+            q_dim,
+            k_dim,
+            v_dim,
+            d_k,
+            d_v,
+        )
+        inputs = inputs_with_state[:3] + inputs_with_state[4:]
+        actual, expected = model_runner.run_sample(model, inputs)
+        compare_outputs(actual, expected, atol=1e-2, rtol=1e-2)
+
     @pytest.mark.parametrize(
         "batch,seq_len,qh,kvh,d_k,d_v",
         [
@@ -191,7 +279,8 @@ class TestLinearAttention:
             (1, 1, 4, 4, 16, 16),
         ],
     )
-    def test_la_tiny_gated_delta(
+    @pytest.mark.parametrize("update_rule", ["gated", "gated_delta"])
+    def test_la_tiny_chunked_rules(
         self,
         model_runner,
         batch,
@@ -200,8 +289,9 @@ class TestLinearAttention:
         kvh,
         d_k,
         d_v,
+        update_rule,
     ):
-        """Small-shape sanity coverage of the gated_delta recurrence.
+        """Small-shape coverage of gated/gated_delta decode and chunked prefill.
 
         Restricted to ``q_num_heads == kv_num_heads`` (no GQA-style head
         sharing) so the output-dim convention is unambiguous.  Asymmetric
@@ -222,7 +312,7 @@ class TestLinearAttention:
             d_k,
             d_v,
             scale=1.0,
-            update_rule="gated_delta",
+            update_rule=update_rule,
         )
 
         rng = np.random.default_rng(31)
@@ -239,9 +329,8 @@ class TestLinearAttention:
         )
 
         actual, expected = model_runner.run_sample(model, inputs)
-        # gated_delta accumulates an outer-product update over T tokens
-        # in fp32 internally; fp16 round-trip on the I/O still leaves a
-        # tight tolerance.
+        # Both rules accumulate outer-product updates over T tokens in fp32
+        # internally; fp16 round-trip on the I/O still leaves a tight tolerance.
         compare_outputs(actual, expected, atol=5e-3, rtol=1e-2)
 
     @pytest.mark.parametrize("seq_len", SEQ_LENS)
