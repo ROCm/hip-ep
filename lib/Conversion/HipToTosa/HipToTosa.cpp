@@ -2147,7 +2147,7 @@ struct GqaConverter final : public OpConversionPattern<GqaOp> {
       }
       qIdx = reshapeTo(qIdx, {1, seqQ, 1}, rewriter);
       Value win = createSplatI32(rewriter, loc, {1, seqQ, 1},
-                                 static_cast<int32_t>(window));
+static_cast<int32_t>(window - 1)
       auto i32Ty = RankedTensorType::get({1, seqQ, 1}, rewriter.getI32Type());
       Value qMinus = tosa::SubOp::create(rewriter, loc, i32Ty, qIdx, win);
       auto predTy =
