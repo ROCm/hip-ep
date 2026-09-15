@@ -80,19 +80,6 @@ void custom_init() {
   }
 }
 
-SchemeLogLevel parseLogLevel(const std::string& level) {
-  if (level == "trace") return SchemeLogLevel::Trace;
-  if (level == "debug") return SchemeLogLevel::Debug;
-  if (level == "info") return SchemeLogLevel::Info;
-  if (level == "warning") return SchemeLogLevel::Warning;
-  if (level == "error") return SchemeLogLevel::Error;
-  if (level == "fatal") return SchemeLogLevel::Fatal;
-
-  llvm::errs() << "Warning: unknown log level '" << level
-               << "', defaulting to 'warning'\n";
-  return SchemeLogLevel::Warning;
-}
-
 bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
   if (scheme_initialized)
     return true;
@@ -1226,8 +1213,3 @@ void registerMlirForeignFunctions() {
 
 } // namespace hipsr
 } // namespace mlir
-namespace mlir { namespace hipsr { void setSchemeLogLevel(SchemeLogLevel level) {
-  current_log_level = level;
-}
-} }
-

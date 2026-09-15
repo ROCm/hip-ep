@@ -7,8 +7,11 @@
 #define LIB_DIALECT_HIPSR_SCHEME_CHEZSCHEMEINTERPRETER_H
 
 #include <string>
+#include <vector>
 
 namespace mlir {
+class Operation;
+
 namespace hipsr {
 
 // Log levels for Scheme logging
@@ -21,28 +24,30 @@ enum class SchemeLogLevel {
   Fatal = 5
 };
 
+// Parse log level from string
+SchemeLogLevel parseLogLevel(const std::string& level);
+
+// Set global log level
+void setSchemeLogLevel(SchemeLogLevel level);
+
+// C type for Scheme FFI
+typedef void* SchemeValue;
+
 /// Encapsulates Chez Scheme runtime lifecycle.
 /// Owned by HipsrDialect - one instance per dialect instance.
-/// Handles initialization, script loading, and cleanup.
 class ChezSchemeInterpreter {
 public:
-  /// Initialize Scheme runtime with specified log level.
-  /// Returns true on success, false on failure.
   explicit ChezSchemeInterpreter(SchemeLogLevel logLevel = SchemeLogLevel::Warning);
-
-  /// Cleanup: shutdown Scheme runtime
   ~ChezSchemeInterpreter();
 
   // Non-copyable, non-movable
   ChezSchemeInterpreter(const ChezSchemeInterpreter&) = delete;
   ChezSchemeInterpreter& operator=(const ChezSchemeInterpreter&) = delete;
 
-  /// Load and evaluate a Scheme script file
-  /// Returns true on success, false on failure
+  /// R5RS load: Load and evaluate a Scheme script file
   bool load(const char* scriptPath);
 
-  /// Evaluate Scheme code string
-  /// Returns true on success, false on failure
+  /// R5RS eval: Evaluate Scheme code string
   bool eval(const char* code);
 
   /// Check if runtime is initialized
@@ -50,6 +55,17 @@ public:
 
   /// Get current log level
   SchemeLogLevel getLogLevel() const { return logLevel; }
+
+  // Create Scheme values from C++ primitives
+  static SchemeValue makeString(const char* str);
+  static SchemeValue makeInteger(long value);
+
+  // Call a Scheme function with primitive arguments
+  std::string callFunction(const char* functionName,
+                          const std::vector<SchemeValue>& args);
+
+  // Call a Scheme function with a single MLIR operation argument
+  void callPassFunction(const char* functionName, mlir::Operation* op);
 
 private:
   bool initialized = false;
@@ -59,4 +75,4 @@ private:
 } // namespace hipsr
 } // namespace mlir
 
-#endif // LIB_DIALECT_HIPSR_SCHEME_CHEZSCHEMEINTERPRETER_H
+#endif

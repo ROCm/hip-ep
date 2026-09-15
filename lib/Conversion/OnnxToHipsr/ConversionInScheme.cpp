@@ -75,7 +75,7 @@ struct ConversionInSchemePass
 
     // Call the Scheme run-pass function
     ModuleOp module = getOperation();
-    callSchemePassFunction("run-pass", module);
+    interpreter->callPassFunction("run-pass", module);
   }
 };
 

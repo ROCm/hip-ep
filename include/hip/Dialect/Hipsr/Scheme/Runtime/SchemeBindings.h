@@ -6,39 +6,15 @@
 #ifndef LIB_DIALECT_HIPSR_SCHEME_SCHEMERUNTIME_H
 #define LIB_DIALECT_HIPSR_SCHEME_SCHEMERUNTIME_H
 
-#include <string>
-#include <vector>
-#include <functional>
-
-// Include ChezSchemeInterpreter.h for SchemeLogLevel definition
 #include "hip/Dialect/Hipsr/Scheme/Runtime/ChezSchemeInterpreter.h"
-
-// C type for Scheme FFI - must be at global scope for extern "C" functions
-typedef void* SchemeValue;
 
 namespace mlir {
 class Operation;
 class Value;
 class Type;
 class Attribute;
-class RewriterBase;
 
 namespace hipsr {
-
-// Parse log level from string
-
-mlir::hipsr::SchemeLogLevel parseLogLevel(const std::string& level);
-void setSchemeLogLevel(mlir::hipsr::SchemeLogLevel level);
-
-// Initialize Scheme runtime and register MLIR FFI bindings
-
-// Call a Scheme function with primitive arguments (legacy API)
-std::string callSchemeFunction(const char* functionName,
-                                const std::vector<SchemeValue>& args);
-
-// Create Scheme values from C++ primitives
-SchemeValue makeSchemeString(const char* str);
-SchemeValue makeSchemeInteger(long value);
 
 // MLIR C++ to Scheme conversions - wrap MLIR objects as foreign pointers
 SchemeValue makeSchemeOperation(mlir::Operation* op);
@@ -46,124 +22,10 @@ SchemeValue makeSchemeValue(mlir::Value val);
 SchemeValue makeSchemeType(mlir::Type type);
 SchemeValue makeSchemeAttribute(mlir::Attribute attr);
 
-// Register MLIR foreign functions accessible from Scheme
-
-// Load and evaluate a Scheme script file
-
-// Evaluate Scheme code string (for (import ...) etc.)
-
-// Call a Scheme function with a single MLIR operation argument
-// Used to invoke Scheme-defined pass entry points
-void callSchemePassFunction(const char* functionName, mlir::Operation* op);
-
-//===----------------------------------------------------------------------===//
-// Phase 1: Type System FFI
-//===----------------------------------------------------------------------===//
-
-// Check if a Type is a RankedTensorType
-// Returns: boolean (1 = true, 0 = false)
-int mlir_type_is_ranked_tensor(SchemeValue type_ptr);
-
-// Get element type of a tensor type
-// Returns: Type* as uptr
-SchemeValue mlir_type_get_element_type(SchemeValue type_ptr);
-
-// Get shape of a ranked tensor type
-// Returns: list of dimension sizes (int64_t*)
-SchemeValue mlir_type_get_shape(SchemeValue type_ptr);
-
-// Get rank of a ranked tensor type
-// Returns: int
-int mlir_type_get_rank(SchemeValue type_ptr);
-
-// Get type from a Value
-// Returns: Type* as uptr
-SchemeValue mlir_value_get_type(SchemeValue value_ptr);
-
-//===----------------------------------------------------------------------===//
-// Phase 2: Operation/Value Navigation FFI
-//===----------------------------------------------------------------------===//
-
-// Get parent operation
-// Returns: Operation* as uptr (or nullptr)
-SchemeValue mlir_operation_get_parent(SchemeValue op_ptr);
-
-// Get operand Value from operation by index
-// Returns: Value as uptr
-SchemeValue mlir_operation_get_operand_value(SchemeValue op_ptr, int index);
-
-// Get result Value from operation by index
-// Returns: Value as uptr
-SchemeValue mlir_operation_get_result_value(SchemeValue op_ptr, int index);
-
-// Get location from operation
-// Returns: Location* as uptr
-SchemeValue mlir_operation_get_loc(SchemeValue op_ptr);
-
-// Get block argument from parent function
-// Returns: Value as uptr
-SchemeValue mlir_operation_get_block_argument(SchemeValue op_ptr, int index);
-
-// Set/clear the current RewriterBase context for FFI operations
-// Must be called before/after IR construction FFI functions
-void setCurrentRewriter(mlir::RewriterBase* rewriter, mlir::Operation* op);
-void clearCurrentRewriter();
+// Register all MLIR foreign functions accessible from Scheme
+void registerMlirForeignFunctions();
 
 } // namespace hipsr
 } // namespace mlir
-
-//===----------------------------------------------------------------------===//
-// Phase 3-4: IR Construction and Pattern Rewriter FFI (extern "C")
-//===----------------------------------------------------------------------===//
-
-extern "C" {
-
-// Phase 3: IR Construction FFI (OpBuilder)
-// Note: These functions require a PatternRewriter context. For now, they are
-// placeholders that will be properly integrated when called from pattern passes.
-
-// Create hipsr.placeholder operation
-SchemeValue mlir_create_placeholder_op(SchemeValue ctx_value,
-                                       SchemeValue input_value,
-                                       SchemeValue result_type,
-                                       int placeholder_type_int);
-
-// Create hipsr.cast operation
-SchemeValue mlir_create_cast_op(SchemeValue ctx_value,
-                                 SchemeValue input_value,
-                                 SchemeValue output_value,
-                                 SchemeValue result_type);
-
-// Create generic operation
-// op_name: operation name (e.g., "hipsr.min")
-// operands_list: Scheme list of operand Values (as unsigned-64)
-// result_types_list: Scheme list of result Types (as unsigned-64)
-SchemeValue mlir_create_generic_op(const char* op_name,
-                                   SchemeValue operands_list,
-                                   SchemeValue result_types_list);
-
-// Get result value from operation
-SchemeValue mlir_operation_get_result_value_from_op(SchemeValue op_ptr, int index);
-
-// Phase 4: Pattern Rewriter FFI
-
-// Replace operation with a value
-int mlir_replace_op(SchemeValue old_op, SchemeValue new_value);
-
-// Erase operation
-int mlir_erase_op(SchemeValue op);
-
-// Notify match failure
-void mlir_notify_match_failure(SchemeValue op, const char* reason);
-
-// Register a Scheme-defined conversion pattern
-// patterns: RewritePatternSet* as uptr
-// op_name: MLIR operation name string (e.g., "onnx.Cast")
-// callback: Scheme procedure that takes (op rewriter) and returns #t/#f
-void mlir_register_conversion_pattern(SchemeValue patterns,
-                                      const char* op_name,
-                                      SchemeValue callback);
-
-} // extern "C"
 
 #endif
