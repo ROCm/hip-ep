@@ -2455,6 +2455,9 @@ struct MhaConverter final : public OpConversionPattern<MultiHeadAttentionOp> {
           seqKv = kTy.getDimSize(1);
           if (kTy.getDimSize(2) != numHeads * headDim)
             return rewriter.notifyMatchFailure(op, "key hidden mismatch");
+          if (vTy.getRank() != 3)
+            return rewriter.notifyMatchFailure(
+                op, "value must be rank 3 for rank-3 key");
           if (vTy.getDimSize(2) % numHeads != 0)
             return rewriter.notifyMatchFailure(
                 op, "value hidden is not heads * dim");
