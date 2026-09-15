@@ -41,29 +41,24 @@ EOF
   fi
 done
 
-# Compile main libraries (each in SEPARATE Scheme process)
-# This works around ChezScheme bug where libraries using (chezscheme)
-# corrupt the compilation environment for subsequent libraries
+# Compile main libraries
+# Strategy: mlir/ffi in separate session (it uses chezscheme and corrupts environment)
+# All others in ONE session (to share rime compilation instances)
 cd "$SOURCE_DIR/Runtime"
 
-echo "Compiling mlir/ffi..."
+echo "Compiling mlir/ffi (separate session due to ChezScheme bug)..."
 $SCHEME_COMPILER <<EOF
 (compile-library "mlir/ffi.sls" "$BUILD_DIR/mlir/ffi.so")
 EOF
 
-echo "Compiling mlir/pattern-dsl..."
-$SCHEME_COMPILER --libdirs "$BUILD_DIR" <<EOF
-(compile-library "mlir/pattern-dsl.sls" "$BUILD_DIR/mlir/pattern-dsl.so")
-EOF
-
-echo "Compiling mlir/conversion/cast..."
-$SCHEME_COMPILER --libdirs "$BUILD_DIR" <<EOF
-(compile-library "mlir/conversion/cast.sls" "$BUILD_DIR/mlir/conversion/cast.so")
-EOF
-
-echo "Compiling onnx-to-hipsr..."
+echo "Compiling remaining libraries (single session to share rime instances)..."
 $SCHEME_COMPILER --libdirs "$BUILD_DIR:$SOURCE_DIR" <<EOF
+;; Compile all libraries that depend on rime in ONE session
+;; This ensures they share the same compilation instance of rime
+(compile-library "mlir/pattern-dsl.sls" "$BUILD_DIR/mlir/pattern-dsl.so")
+(compile-library "mlir/conversion/cast.sls" "$BUILD_DIR/mlir/conversion/cast.so")
 (compile-library "../Passes/onnx-to-hipsr.sls" "$BUILD_DIR/onnx-to-hipsr.so")
+(display "All libraries compiled successfully!\n")
 EOF
 
 echo "Scheme compilation complete."
