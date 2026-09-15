@@ -39,11 +39,11 @@ public:
 
   /// Load and evaluate a Scheme script file
   /// Returns true on success, false on failure
-  bool loadScript(const char* scriptPath);
+  bool load(const char* scriptPath);
 
   /// Evaluate Scheme code string
   /// Returns true on success, false on failure
-  bool evaluateCode(const char* code);
+  bool eval(const char* code);
 
   /// Check if runtime is initialized
   bool isInitialized() const { return initialized; }

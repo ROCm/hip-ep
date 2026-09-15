@@ -84,7 +84,7 @@ ChezSchemeInterpreter::~ChezSchemeInterpreter() {
   initialized = false;
 }
 
-bool ChezSchemeInterpreter::loadScript(const char* scriptPath) {
+bool ChezSchemeInterpreter::load(const char* scriptPath) {
   if (!initialized) {
     llvm::errs() << "[error] ChezSchemeInterpreter: Cannot load script - runtime not initialized\n";
     return false;
@@ -93,7 +93,7 @@ bool ChezSchemeInterpreter::loadScript(const char* scriptPath) {
   return loadSchemeScript(scriptPath);
 }
 
-bool ChezSchemeInterpreter::evaluateCode(const char* code) {
+bool ChezSchemeInterpreter::eval(const char* code) {
   if (!initialized) {
     llvm::errs() << "[error] ChezSchemeInterpreter: Cannot evaluate code - runtime not initialized\n";
     return false;
