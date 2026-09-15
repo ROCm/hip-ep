@@ -10,7 +10,7 @@
 // CHECK-LABEL: func.func @nonzero_mask(
 // CHECK-SAME: %[[CTX:.+]]: !hipsr.context,
 // CHECK-SAME: %[[MASK:.+]]: tensor<?x?xi8, #hipsr.mem<device>>) {
-// CHECK-NEXT: %[[INITS:.+]]:2 = hipsr.placeholder(%[[CTX]]) ins(%[[MASK]] : tensor<?x?xi8, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<2x?xi64, #hipsr.mem<device>>, tensor<1xi64, #hipsr.mem<device>> shape_region {
+// CHECK-NEXT: %[[INITS:.+]]:2 = hipsr.placeholder(%[[CTX]]) ins(%[[MASK]] : tensor<?x?xi8, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<2x?xi64, #hipsr.mem<device>>, tensor<1xi32, #hipsr.mem<device>> shape_region {
 // CHECK-NEXT: ^bb0(%[[MASK_SHAPE:.+]]: !shape.shape):
 // CHECK-NEXT: %[[ROWS:.+]] = shape.const_size 2
 // CHECK-NEXT: %[[CAPACITY:.+]] = shape.num_elements %[[MASK_SHAPE]] : !shape.shape -> !shape.size
@@ -18,7 +18,7 @@
 // CHECK-NEXT: %[[COUNT_SHAPE:.+]] = shape.const_shape [1] : !shape.shape
 // CHECK-NEXT: hipsr.shape_yield %[[INDICES_SHAPE]], %[[COUNT_SHAPE]] : !shape.shape, !shape.shape
 // CHECK-NEXT: }
-// CHECK-NEXT: hipsr.nonzero(%[[CTX]]) ins(%[[MASK]] : tensor<?x?xi8, #hipsr.mem<device>>) outs(%[[INITS]]#0, %[[INITS]]#1 : tensor<2x?xi64, #hipsr.mem<device>>, tensor<1xi64, #hipsr.mem<device>>) : tensor<2x?xi64, #hipsr.mem<device>>, tensor<1xi64, #hipsr.mem<device>>
+// CHECK-NEXT: hipsr.nonzero(%[[CTX]]) ins(%[[MASK]] : tensor<?x?xi8, #hipsr.mem<device>>) outs(%[[INITS]]#0, %[[INITS]]#1 : tensor<2x?xi64, #hipsr.mem<device>>, tensor<1xi32, #hipsr.mem<device>>) : tensor<2x?xi64, #hipsr.mem<device>>, tensor<1xi32, #hipsr.mem<device>>
 // CHECK-NEXT: return
 // CHECK-NEXT: }
 func.func @nonzero_mask(%ctx: !hipsr.context,
@@ -27,12 +27,12 @@ func.func @nonzero_mask(%ctx: !hipsr.context,
       ins(%mask : tensor<?x?xi8, #hipsr.mem<device>>)
       {placeholder_type = #hipsr.placeholder_type<normal>}
       : tensor<2x?xi64, #hipsr.mem<device>>,
-        tensor<1xi64, #hipsr.mem<device>>
+        tensor<1xi32, #hipsr.mem<device>>
   %indices, %count = hipsr.nonzero(%ctx)
       ins(%mask : tensor<?x?xi8, #hipsr.mem<device>>)
       outs(%indices_init, %count_init
            : tensor<2x?xi64, #hipsr.mem<device>>,
-             tensor<1xi64, #hipsr.mem<device>>)
-      : tensor<2x?xi64, #hipsr.mem<device>>, tensor<1xi64, #hipsr.mem<device>>
+             tensor<1xi32, #hipsr.mem<device>>)
+      : tensor<2x?xi64, #hipsr.mem<device>>, tensor<1xi32, #hipsr.mem<device>>
   return
 }

@@ -27,47 +27,47 @@
 //       ins(%mask : tensor<?x?xi8, #hipsr.mem<device>>)
 //       {placeholder_type = #hipsr.placeholder_type<normal>}
 //       : tensor<2x?xi64, #hipsr.mem<device>>,
-//         tensor<1xi64, #hipsr.mem<device>>
+//         tensor<1xi32, #hipsr.mem<device>>
 //   %cap, %count = hipsr.nonzero(%ctx)
 //       ins(%mask : tensor<?x?xi8, #hipsr.mem<device>>)
 //       outs(%cap_init, %count_init
 //            : tensor<2x?xi64, #hipsr.mem<device>>,
-//              tensor<1xi64, #hipsr.mem<device>>)
+//              tensor<1xi32, #hipsr.mem<device>>)
 //       : tensor<2x?xi64, #hipsr.mem<device>>,
-//         tensor<1xi64, #hipsr.mem<device>>
+//         tensor<1xi32, #hipsr.mem<device>>
 //   %host_init = hipsr.placeholder(%ctx)
-//       ins(%count_init : tensor<1xi64, #hipsr.mem<device>>)
+//       ins(%count_init : tensor<1xi32, #hipsr.mem<device>>)
 //       {placeholder_type = #hipsr.placeholder_type<normal>}
-//       : tensor<1xi64, #hipsr.mem<host>> shape_region {
+//       : tensor<1xi32, #hipsr.mem<host>> shape_region {
 //   ^bb0(%count_shape: !shape.shape):
 //     hipsr.shape_yield %count_shape : !shape.shape
 //   }
 //   %host_count = hipsr.copy_d2h(%ctx)
-//       ins(%count : tensor<1xi64, #hipsr.mem<device>>)
-//       outs(%host_init : tensor<1xi64, #hipsr.mem<host>>)
-//       : tensor<1xi64, #hipsr.mem<host>>
+//       ins(%count : tensor<1xi32, #hipsr.mem<device>>)
+//       outs(%host_init : tensor<1xi32, #hipsr.mem<host>>)
+//       : tensor<1xi32, #hipsr.mem<host>>
 //   %init = hipsr.placeholder(%ctx)
 //       ins(%host_init, %cap_init
-//           : tensor<1xi64, #hipsr.mem<host>>,
+//           : tensor<1xi32, #hipsr.mem<host>>,
 //             tensor<2x?xi64, #hipsr.mem<device>>)
 //       {placeholder_type = #hipsr.placeholder_type<barrier>}
 //       : tensor<2x?xi64, #hipsr.mem<device>> shape_region {
-//   ^bb0(%shape_ctx: !hipsr.context, %host: tensor<1xi64, #hipsr.mem<host>>,
+//   ^bb0(%shape_ctx: !hipsr.context, %host: tensor<1xi32, #hipsr.mem<host>>,
 //        %positions: tensor<2x?xi64, #hipsr.mem<device>>):
 //     %c0 = arith.constant 0 : index
-//     %found = tensor.extract %host[%c0] : tensor<1xi64, #hipsr.mem<host>>
-//     %columns = arith.index_cast %found : i64 to index
+//     %found = tensor.extract %host[%c0] : tensor<1xi32, #hipsr.mem<host>>
+//     %columns = arith.index_cast %found : i32 to index
 //     %c2 = arith.constant 2 : index
 //     %shape = shape.from_extents %c2, %columns : index, index
 //     hipsr.shape_yield %shape : !shape.shape
 //   }
 //   %p = hipsr.compute(%ctx)
 //       ins(%host_count, %cap
-//           : tensor<1xi64, #hipsr.mem<host>>,
+//           : tensor<1xi32, #hipsr.mem<host>>,
 //             tensor<2x?xi64, #hipsr.mem<device>>)
 //       outs(%init : tensor<2x?xi64, #hipsr.mem<device>>) {
 //   ^bb0(%body_ctx: !hipsr.context,
-//        %count: tensor<1xi64, #hipsr.mem<host>>,
+//        %count: tensor<1xi32, #hipsr.mem<host>>,
 //        %in: tensor<2x?xi64, #hipsr.mem<device>>,
 //        %dest: tensor<2x?xi64, #hipsr.mem<device>>):
 //     %c1 = arith.constant 1 : index
@@ -223,7 +223,7 @@ struct NonZeroToHipsr : public OpConversionPattern<onnx::NonZeroOp> {
     // beside the positions.
     SmallVector<Type, 2> searchTypes = {
         capacityType(inputType, i64),
-        tensorTypeInSpace(RankedTensorType::get({1}, i64),
+        tensorTypeInSpace(RankedTensorType::get({1}, rewriter.getI32Type()),
                           MemorySpace::Device)};
 
     auto searchInits =

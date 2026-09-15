@@ -27,7 +27,7 @@
 //                   v
 //   domain 2   expand(mask3d, extents)               -> mask3d'
 //              nonzero(mask3d')                      -> coords 3x?, count
-//              copy_d2h(count)                       -> count    host 1xi64
+//              copy_d2h(count)                       -> count    host 1xi32
 //                   |
 //                   |  count: how many coordinates the search actually found
 //                   v
@@ -282,27 +282,27 @@
 // CHECK-NEXT:      %[[GET_POOL_2:.*]] = hipsr.get_pool(%[[ARG0]], %[[ADDI_7]]) {bufferization.manual_deallocation, domain_id = 2 : i64} : memref<?xi8, #hipsr.mem<device>>
 // CHECK-NEXT:      %[[VIEW_3:.*]] = memref.view %[[GET_POOL_2]]{{\[}}%[[CONSTANT_12]]]{{\[}}%[[LOAD_18]], %[[LOAD_19]], %[[LOAD_20]]] : memref<?xi8, #hipsr.mem<device>> to memref<?x?x?xi1, #hipsr.mem<device>>
 // CHECK-NEXT:      %[[VIEW_4:.*]] = memref.view %[[GET_POOL_2]]{{\[}}%[[MULI_11]]]{{\[}}%[[LOAD_21]]] : memref<?xi8, #hipsr.mem<device>> to memref<3x?xi64, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[VIEW_5:.*]] = memref.view %[[GET_POOL_2]]{{\[}}%[[ADDI_6]]]{{\[}}] : memref<?xi8, #hipsr.mem<device>> to memref<1xi64, #hipsr.mem<device>>
-// CHECK-NEXT:      %[[ALLOC_20:.*]] = memref.alloc() {alignment = 64 : i64} : memref<1xi64, #hipsr.mem<host>>
+// CHECK-NEXT:      %[[VIEW_5:.*]] = memref.view %[[GET_POOL_2]]{{\[}}%[[ADDI_6]]]{{\[}}] : memref<?xi8, #hipsr.mem<device>> to memref<1xi32, #hipsr.mem<device>>
+// CHECK-NEXT:      %[[ALLOC_20:.*]] = memref.alloc() {alignment = 64 : i64} : memref<1xi32, #hipsr.mem<host>>
 // CHECK-NEXT:      hipsr.expand(%[[ARG0]]) ins(%[[VIEW_2]], %[[ALLOC_11]] : memref<?x?x?xi1, #hipsr.mem<device>>, memref<3xi64, #hipsr.mem<host>>) outs(%[[VIEW_3]] : memref<?x?x?xi1, #hipsr.mem<device>>)
 // CHECK-NEXT:      memref.dealloc %[[ALLOC_11]] : memref<3xi64, #hipsr.mem<host>>
-// CHECK-NEXT:      hipsr.nonzero(%[[ARG0]]) ins(%[[VIEW_3]] : memref<?x?x?xi1, #hipsr.mem<device>>) outs(%[[VIEW_4]], %[[VIEW_5]] : memref<3x?xi64, #hipsr.mem<device>>, memref<1xi64, #hipsr.mem<device>>)
-// CHECK-NEXT:      hipsr.copy_d2h(%[[ARG0]]) ins(%[[VIEW_5]] : memref<1xi64, #hipsr.mem<device>>) outs(%[[ALLOC_20]] : memref<1xi64, #hipsr.mem<host>>)
+// CHECK-NEXT:      hipsr.nonzero(%[[ARG0]]) ins(%[[VIEW_3]] : memref<?x?x?xi1, #hipsr.mem<device>>) outs(%[[VIEW_4]], %[[VIEW_5]] : memref<3x?xi64, #hipsr.mem<device>>, memref<1xi32, #hipsr.mem<device>>)
+// CHECK-NEXT:      hipsr.copy_d2h(%[[ARG0]]) ins(%[[VIEW_5]] : memref<1xi32, #hipsr.mem<device>>) outs(%[[ALLOC_20]] : memref<1xi32, #hipsr.mem<host>>)
 // CHECK-NEXT:      hipsr.preserve_shape %[[ALLOC_18]], %[[VIEW_3]] : memref<3xindex>, memref<?x?x?xi1, #hipsr.mem<device>>
 // CHECK-NEXT:      memref.dealloc %[[ALLOC_18]] : memref<3xindex>
 // CHECK-NEXT:      hipsr.preserve_shape %[[ALLOC_19]], %[[VIEW_4]] : memref<2xindex>, memref<3x?xi64, #hipsr.mem<device>>
 // CHECK-NEXT:      memref.dealloc %[[ALLOC_19]] : memref<2xindex>
-// CHECK-NEXT:      hipsr.preserve_shape %[[ALLOC_15]], %[[VIEW_5]] : memref<1xindex>, memref<1xi64, #hipsr.mem<device>>
-// CHECK-NEXT:      hipsr.preserve_shape %[[ALLOC_15]], %[[ALLOC_20]] : memref<1xindex>, memref<1xi64, #hipsr.mem<host>>
+// CHECK-NEXT:      hipsr.preserve_shape %[[ALLOC_15]], %[[VIEW_5]] : memref<1xindex>, memref<1xi32, #hipsr.mem<device>>
+// CHECK-NEXT:      hipsr.preserve_shape %[[ALLOC_15]], %[[ALLOC_20]] : memref<1xindex>, memref<1xi32, #hipsr.mem<host>>
 // CHECK-NEXT:      memref.dealloc %[[ALLOC_15]] : memref<1xindex>
 // CHECK-NEXT:      %[[ALLOC_21:.*]] = memref.alloc() {alignment = 64 : i64} : memref<1xindex>
 // CHECK-NEXT:      memref.store %[[CONSTANT_11]], %[[ALLOC_21]]{{\[}}%[[CONSTANT_12]]] : memref<1xindex>
 // CHECK-NEXT:      %[[ALLOC_22:.*]] = memref.alloc() {alignment = 64 : i64} : memref<1xindex>
 // CHECK-NEXT:      memref.store %[[CONSTANT_7]], %[[ALLOC_22]]{{\[}}%[[CONSTANT_12]]] : memref<1xindex>
 // CHECK-NEXT:      %[[ALLOC_23:.*]] = memref.alloc() {alignment = 64 : i64} : memref<0xindex>
-// CHECK-NEXT:      %[[LOAD_22:.*]] = memref.load %[[ALLOC_20]]{{\[}}%[[CONSTANT_12]]] : memref<1xi64, #hipsr.mem<host>>
-// CHECK-NEXT:      memref.dealloc %[[ALLOC_20]] : memref<1xi64, #hipsr.mem<host>>
-// CHECK-NEXT:      %[[INDEX_CAST_8:.*]] = arith.index_cast %[[LOAD_22]] : i64 to index
+// CHECK-NEXT:      %[[LOAD_22:.*]] = memref.load %[[ALLOC_20]]{{\[}}%[[CONSTANT_12]]] : memref<1xi32, #hipsr.mem<host>>
+// CHECK-NEXT:      memref.dealloc %[[ALLOC_20]] : memref<1xi32, #hipsr.mem<host>>
+// CHECK-NEXT:      %[[INDEX_CAST_8:.*]] = arith.index_cast %[[LOAD_22]] : i32 to index
 // CHECK-NEXT:      %[[ALLOC_24:.*]] = memref.alloc() {alignment = 64 : i64} : memref<2xindex>
 // CHECK-NEXT:      memref.store %[[CONSTANT_13]], %[[ALLOC_24]]{{\[}}%[[CONSTANT_12]]] : memref<2xindex>
 // CHECK-NEXT:      memref.store %[[INDEX_CAST_8]], %[[ALLOC_24]]{{\[}}%[[CONSTANT_11]]] : memref<2xindex>
