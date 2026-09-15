@@ -784,6 +784,45 @@ LogicalResult QMatMulOp::verify() {
 // `lib/Dialect/IR/HipReifyResultShapesImpl.cpp`.
 
 //===----------------------------------------------------------------------===//
+// QGemmOp: ins(A, B, [C]), outs(Y)
+// Quantized ONNX Gemm with integrated QDQ scales, zero points and bias
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QGemmOp::getDpsInitsMutable() { return getYMutable(); }
+
+void QGemmOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult QGemmOp::verify() {
+  SmallVector<Value> dataOperands{getA(), getB()};
+  if (Value c = getC())
+    dataOperands.push_back(c);
+  dataOperands.push_back(getY());
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  ArrayRef<int64_t> aShape = getShapeOf(getA());
+  ArrayRef<int64_t> bShape = getShapeOf(getB());
+  if (aShape.size() != 2 || bShape.size() != 2)
+    return emitOpError("expected rank-2 A and B operands");
+  if (Value c = getC()) {
+    if (getShapeOf(c).size() > 2)
+      return emitOpError("expected C to be broadcastable to [M, N]");
+  }
+
+  return mlir::hip::verifyHipOpShape(
+      *this, [&]() -> SmallVector<SmallVector<int64_t>> {
+        return {{aShape[getTransA() ? 1 : 0], bShape[getTransB() ? 0 : 1]}};
+      });
+}
+
+// `QGemmOp::reifyResultShapes` lives in
+// `lib/Dialect/IR/HipReifyResultShapesImpl.cpp`.
+
+//===----------------------------------------------------------------------===//
 // RmsNormOp: ins(input, scale), outs(output)
 //===----------------------------------------------------------------------===//
 

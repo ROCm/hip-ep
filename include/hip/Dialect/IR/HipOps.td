@@ -5032,6 +5032,94 @@ def Hip_QMatMulOp : Hip_DpsOp<"qmatmul", /*traits=*/[],
   let hasVerifier = 1;
 }
 
+def Hip_QGemmOp : Hip_DpsOp<"qgemm", /*traits=*/[],
+                            /*outsAccessor=*/"Y",
+                            /*autoReify=*/0,
+                            /*autoInfer=*/1,
+                            /*declareInfer=*/1> {
+  let summary = "Quantized general matrix multiplication with integrated QDQ";
+  let description = [{
+    Fuses DequantizeLinear x2 (or x3) -> Gemm -> QuantizeLinear into a single
+    integer-domain GEMM whose epilogue also applies the bias.
+
+    ONNX Gemm is `Y = alpha * A' * B' + beta * C` with `A' = transpose(A)` when
+    `transA`, `B' = transpose(B)` when `transB`, A' shaped [M, K], B' shaped
+    [K, N] and C unidirectionally broadcast to [M, N]:
+
+    ```
+    a = (A - A_zero_point) * A_scale
+    b = (B - B_zero_point) * B_scale
+    c = (C - C_zero_point) * C_scale
+    Y = saturate(round((alpha * a' @ b' + beta * c) / Y_scale) + Y_zero_point)
+    ```
+
+    Expanded over the integer accumulator, with
+    `acc[m,n] = sum_k A[m,k]*B[k,n]`, `rowA[m] = sum_k A[m,k]` and
+    `colB[n] = sum_k B[k,n]`:
+
+    ```
+    Y[m,n] = saturate(round(M_ab * (acc[m,n] - B_zero_point * rowA[m]
+                                             - A_zero_point * colB[n]
+                                             + K * A_zero_point * B_zero_point)
+                            + M_c * (C[m,n] - C_zero_point))
+                      + Y_zero_point)
+    M_ab = alpha * A_scale * B_scale / Y_scale   (folded at lowering time)
+    M_c  = beta * C_scale / Y_scale              (folded at lowering time)
+    ```
+
+    Quantization is per-tensor, so every scale and zero point is an attribute.
+    A and Y may be 8- or 16-bit and B is 8-bit only, for the same reason as
+    `hip.qmatmul`: the shared kernel keeps a 16-bit A exact by splitting it into
+    two bytes and splits only A. C may additionally be 32-bit, because an ONNX
+    quantizer emits a Gemm bias as int32 at `C_scale = A_scale * B_scale`.
+
+    `$C` is optional; when it is absent the `beta * c` term is zero and `beta`
+    is ignored.
+
+    Example:
+    ```mlir
+    hip.qgemm(%ctx) ins(%A, %B, %C : memref<64x128xi8, 1>,
+                                     memref<128x32xi8, 1>, memref<32xi32, 1>)
+                    outs(%Y : memref<64x32xi8, 1>)
+                    {A_scale = 2.500000e-01 : f32, A_zero_point = -5 : i64,
+                     B_scale = 1.250000e-01 : f32, B_zero_point = 3 : i64,
+                     C_scale = 3.125000e-02 : f32, C_zero_point = 0 : i64,
+                     Y_scale = 5.000000e-01 : f32, Y_zero_point = 7 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$A,             // Left operand (quantized)
+    Hip_TensorOrMemRef:$B,             // Right operand (quantized)
+    Optional<Hip_TensorOrMemRef>:$C,   // Bias (quantized), broadcast to [M, N]
+    Hip_TensorOrMemRef:$Y,             // Output buffer (quantized), DPS init
+    F32Attr:$A_scale,
+    I64Attr:$A_zero_point,
+    F32Attr:$B_scale,
+    I64Attr:$B_zero_point,
+    DefaultValuedAttr<F32Attr, "1.0">:$C_scale,
+    DefaultValuedAttr<I64Attr, "0">:$C_zero_point,
+    F32Attr:$Y_scale,
+    I64Attr:$Y_zero_point,
+    DefaultValuedAttr<F32Attr, "1.0">:$alpha,
+    DefaultValuedAttr<F32Attr, "1.0">:$beta,
+    DefaultValuedAttr<I64Attr, "0">:$transA,
+    DefaultValuedAttr<I64Attr, "0">:$transB
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $A `,` $B (`,` $C^)?
+        `:` type($A) `,` type($B) (`,` type($C)^)?
+    `)`
+    `outs` `(` $Y `:` type($Y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
 def Hip_QConvOp : Hip_DpsOp<"qconv",
                             /*traits=*/[],
                             /*outsAccessor=*/"Output",
