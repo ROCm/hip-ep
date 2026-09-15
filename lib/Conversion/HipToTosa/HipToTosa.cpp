@@ -25,10 +25,14 @@
 
 #include <llvm/ADT/APFloat.h>
 #include <llvm/ADT/APInt.h>
+#include <llvm/ADT/STLExtras.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/ADT/StringRef.h>
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
+#include <optional>
 #include <type_traits>
 
 namespace mlir::hip {
@@ -1395,6 +1399,1140 @@ struct ExtractSliceConverter final
   }
 };
 
+Value transposePerm(Value input, ArrayRef<int32_t> perm,
+                    ConversionPatternRewriter &rewriter, Location loc) {
+  auto inTy = cast<RankedTensorType>(input.getType());
+  SmallVector<int64_t> outShape;
+  outShape.reserve(perm.size());
+  for (int32_t p : perm)
+    outShape.push_back(inTy.getDimSize(p));
+  auto outTy = RankedTensorType::get(outShape, inTy.getElementType());
+  return tosa::TransposeOp::create(rewriter, loc, outTy, input,
+                                   rewriter.getDenseI32ArrayAttr(perm))
+      .getResult();
+}
+
+Value sliceOffsetSize(Value input, ArrayRef<int64_t> starts,
+                      ArrayRef<int64_t> sizes,
+                      ConversionPatternRewriter &rewriter, Location loc) {
+  auto outTy =
+      RankedTensorType::get(sizes, cast<RankedTensorType>(input.getType())
+                                       .getElementType());
+  return tosa::SliceOp::create(rewriter, loc, outTy, input,
+                               createConstShape(rewriter, loc, starts),
+                               createConstShape(rewriter, loc, sizes))
+      .getResult();
+}
+
+Value tileMultiples(Value input, ArrayRef<int64_t> multiples,
+                    ArrayRef<int64_t> outShape,
+                    ConversionPatternRewriter &rewriter, Location loc) {
+  auto outTy = RankedTensorType::get(
+      outShape, cast<RankedTensorType>(input.getType()).getElementType());
+  return tosa::TileOp::create(rewriter, loc, outTy, input,
+                              createConstShape(rewriter, loc, multiples))
+      .getResult();
+}
+
+Value createSplatInt(ConversionPatternRewriter &rewriter, Location loc,
+                     RankedTensorType type, int64_t value) {
+  auto elemType = cast<IntegerType>(type.getElementType());
+  return tosa::ConstOp::create(
+      rewriter, loc, type,
+      DenseElementsAttr::get(type, rewriter.getIntegerAttr(elemType, value)));
+}
+
+// Packed uint8 int4: low nibble is the first value, high nibble the second.
+// Cast to i32 so nibble extract is an unsigned bit pattern, then interleave.
+Value unpackInt4LastDim(Value packed, ConversionPatternRewriter &rewriter,
+                        Location loc) {
+  Type i32 = rewriter.getI32Type();
+  Value asI32 = emitTosaCast(rewriter, loc, packed, i32);
+  auto i32Ty = cast<RankedTensorType>(asI32.getType());
+  Value mask = createSplatInt(rewriter, loc, i32Ty, 0x0F);
+  Value shift = createSplatInt(rewriter, loc, i32Ty, 4);
+  Value lo = tosa::BitwiseAndOp::create(rewriter, loc, i32Ty, asI32, mask);
+  Value hi =
+      tosa::LogicalRightShiftOp::create(rewriter, loc, i32Ty, asI32, shift);
+
+  SmallVector<int64_t> unsqueeze(i32Ty.getShape().begin(),
+                                 i32Ty.getShape().end());
+  unsqueeze.push_back(1);
+  Value loU = reshapeTo(lo, unsqueeze, rewriter);
+  Value hiU = reshapeTo(hi, unsqueeze, rewriter);
+
+  SmallVector<int64_t> catShape = unsqueeze;
+  catShape.back() = 2;
+  auto catTy = RankedTensorType::get(catShape, i32);
+  int32_t axis = static_cast<int32_t>(catShape.size() - 1);
+  Value cat = tosa::ConcatOp::create(rewriter, loc, catTy, ValueRange{loU, hiU},
+                                     rewriter.getI32IntegerAttr(axis));
+
+  SmallVector<int64_t> flat(i32Ty.getShape().begin(), i32Ty.getShape().end());
+  flat.back() *= 2;
+  return reshapeTo(cat, flat, rewriter);
+}
+
+Value sliceLastDimTo(Value input, int64_t extent,
+                     ConversionPatternRewriter &rewriter, Location loc) {
+  auto ty = cast<RankedTensorType>(input.getType());
+  if (ty.getShape().back() == extent)
+    return input;
+  SmallVector<int64_t> starts(ty.getRank(), 0);
+  SmallVector<int64_t> sizes(ty.getShape().begin(), ty.getShape().end());
+  sizes.back() = extent;
+  return sliceOffsetSize(input, starts, sizes, rewriter, loc);
+}
+
+// Per-block [N, k_blocks] -> [N, K] by repeating each block along K.
+Value broadcastBlocksAlongK(Value perBlock, int64_t n, int64_t k,
+                            int64_t kBlocks, int64_t blockSize,
+                            ConversionPatternRewriter &rewriter, Location loc) {
+  Value x = reshapeTo(perBlock, {n, kBlocks, 1}, rewriter);
+  x = tileMultiples(x, {1, 1, blockSize}, {n, kBlocks, blockSize}, rewriter,
+                    loc);
+  x = reshapeTo(x, {n, kBlocks * blockSize}, rewriter);
+  return sliceLastDimTo(x, k, rewriter, loc);
+}
+
+Value emitUnbatchedMatmul(Value a, Value b, RankedTensorType resultType,
+                          ConversionPatternRewriter &rewriter, Location loc) {
+  auto aType = cast<RankedTensorType>(a.getType());
+  auto bType = cast<RankedTensorType>(b.getType());
+  int64_t k = aType.getShape().back();
+  int64_t collapsedM = 1;
+  for (int64_t d : aType.getShape().drop_back())
+    collapsedM *= d;
+  int64_t n = bType.getShape().back();
+  Value a3 = reshapeTo(a, {1, collapsedM, k}, rewriter);
+  Value b3 = reshapeTo(b, {1, k, n}, rewriter);
+  auto matmulType = resultType.clone({1, collapsedM, n});
+  Value matmul =
+      tosa::MatMulOp::create(rewriter, loc, matmulType, a3, b3).getResult();
+  return reshapeTo(matmul, resultType.getShape(), rewriter);
+}
+
+// hip.matmul_nbits -> unpack int4 B, block-dequant, transpose, tosa.matmul.
+
+struct MatMulNBitsConverter final
+    : public OpConversionPattern<hip::MatMulNBitsOp> {
+  using OpConversionPattern<hip::MatMulNBitsOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(hip::MatMulNBitsOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+    if (adaptor.getGIdx())
+      return rewriter.notifyMatchFailure(op, "g_idx is not supported");
+    if (op.getBits() != 4)
+      return rewriter.notifyMatchFailure(op, "only bits=4 is supported");
+
+    int64_t k = op.getK();
+    int64_t n = op.getN();
+    int64_t blockSize = op.getBlockSize();
+    if (blockSize < 16 || (blockSize & (blockSize - 1)) != 0)
+      return rewriter.notifyMatchFailure(
+          op, "block_size must be a power of 2 and >= 16");
+
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!resultType || !resultType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
+    if (!isa<FloatType>(resultType.getElementType()))
+      return rewriter.notifyMatchFailure(op, "result must be float");
+
+    auto aType = dyn_cast<RankedTensorType>(adaptor.getA().getType());
+    auto bType = dyn_cast<RankedTensorType>(adaptor.getB().getType());
+    auto scaleType = dyn_cast<RankedTensorType>(adaptor.getScales().getType());
+    if (!aType || !aType.hasStaticShape() || !bType || !bType.hasStaticShape() ||
+        !scaleType || !scaleType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "operands not static ranked");
+    if (aType.getRank() < 1 || aType.getShape().back() != k)
+      return rewriter.notifyMatchFailure(op, "A trailing dim must be K");
+    if (resultType.getShape().back() != n)
+      return rewriter.notifyMatchFailure(op, "result trailing dim must be N");
+    if (scaleType.getElementType() != resultType.getElementType())
+      return rewriter.notifyMatchFailure(op, "scale type must match result");
+
+    int64_t kBlocks = (k + blockSize - 1) / blockSize;
+    int64_t blobSize = blockSize * op.getBits() / 8;
+    if (bType.getRank() != 3 || bType.getDimSize(0) != n ||
+        bType.getDimSize(1) != kBlocks || bType.getDimSize(2) != blobSize)
+      return rewriter.notifyMatchFailure(
+          op, "B must be packed [N, k_blocks, blob_size]");
+    if (scaleType.getNumElements() != n * kBlocks)
+      return rewriter.notifyMatchFailure(op, "scales must have N * k_blocks");
+
+    Location loc = op.getLoc();
+    Value packed = reshapeTo(adaptor.getB(), {n, kBlocks * blobSize}, rewriter);
+    Value unpacked = unpackInt4LastDim(packed, rewriter, loc);
+    unpacked = sliceLastDimTo(unpacked, k, rewriter, loc);
+
+    Value scales = broadcastBlocksAlongK(adaptor.getScales(), n, k, kBlocks,
+                                         blockSize, rewriter, loc);
+
+    Value shifted =
+        emitTosaCast(rewriter, loc, unpacked, resultType.getElementType());
+    auto nkFloat = RankedTensorType::get({n, k}, resultType.getElementType());
+
+    Value zp = adaptor.getZeroPoints();
+    if (!zp) {
+      auto zpTy = RankedTensorType::get({1, 1}, resultType.getElementType());
+      zp = createSplatFloat(rewriter, loc, zpTy, 8.0);
+    } else {
+      auto zpTy = dyn_cast<RankedTensorType>(zp.getType());
+      if (!zpTy || !zpTy.hasStaticShape())
+        return rewriter.notifyMatchFailure(op, "zero_points not static ranked");
+      if (isa<FloatType>(zpTy.getElementType())) {
+        if (zpTy.getElementType() != resultType.getElementType())
+          return rewriter.notifyMatchFailure(op, "fp zp type must match result");
+        if (zpTy.getNumElements() != n * kBlocks)
+          return rewriter.notifyMatchFailure(op, "fp zp must have N * k_blocks");
+        zp = broadcastBlocksAlongK(zp, n, k, kBlocks, blockSize, rewriter, loc);
+      } else if (isa<IntegerType>(zpTy.getElementType())) {
+        // Per-block uint8 [N, k_blocks] stores one zp per block. Packed
+        // uint4 (MIGraphX) has N * ceil(k_blocks * bits / 8) bytes.
+        if (zpTy.getNumElements() == n * kBlocks) {
+          zp = reshapeTo(zp, {n, kBlocks}, rewriter);
+        } else {
+          if (n == 0 || zpTy.getNumElements() % n != 0)
+            return rewriter.notifyMatchFailure(op, "packed zp shape is invalid");
+          zp = reshapeTo(zp, {n, zpTy.getNumElements() / n}, rewriter);
+          zp = unpackInt4LastDim(zp, rewriter, loc);
+          zp = sliceLastDimTo(zp, kBlocks, rewriter, loc);
+        }
+        zp = broadcastBlocksAlongK(zp, n, k, kBlocks, blockSize, rewriter, loc);
+        zp = emitTosaCast(rewriter, loc, zp, resultType.getElementType());
+      } else {
+        return rewriter.notifyMatchFailure(op, "unsupported zero_points type");
+      }
+    }
+
+    shifted = tosa::SubOp::create(rewriter, loc, nkFloat, shifted, zp);
+    Value weight = emitTosaMul(rewriter, loc, shifted, scales, nkFloat);
+    Value weightT = transposePerm(weight, {1, 0}, rewriter, loc);
+
+    Value y = emitUnbatchedMatmul(adaptor.getA(), weightT, resultType, rewriter,
+                                  loc);
+    if (Value bias = adaptor.getBias()) {
+      auto biasTy = dyn_cast<RankedTensorType>(bias.getType());
+      if (!biasTy || !biasTy.hasStaticShape())
+        return rewriter.notifyMatchFailure(op, "bias not static ranked");
+      if (biasTy.getElementType() != resultType.getElementType())
+        return rewriter.notifyMatchFailure(op, "bias type must match result");
+      SmallVector<int64_t> biasShape(resultType.getRank(), 1);
+      biasShape.back() = n;
+      if (biasTy.getNumElements() != n)
+        return rewriter.notifyMatchFailure(op, "bias must have N elements");
+      bias = reshapeTo(bias, biasShape, rewriter);
+      y = tosa::AddOp::create(rewriter, loc, resultType, y, bias);
+    }
+
+    rewriter.replaceOp(op, y);
+    return success();
+  }
+};
+
+Value createI32Dense(ConversionPatternRewriter &rewriter, Location loc,
+                     ArrayRef<int64_t> shape, ArrayRef<int32_t> values) {
+  auto ty = RankedTensorType::get(shape, rewriter.getI32Type());
+  return tosa::ConstOp::create(rewriter, loc, ty,
+                               DenseElementsAttr::get(ty, values));
+}
+
+Value createArangeI32(ConversionPatternRewriter &rewriter, Location loc,
+                      int64_t n) {
+  SmallVector<int32_t> vals;
+  vals.reserve(n);
+  for (int64_t i : llvm::seq<int64_t>(0, n))
+    vals.push_back(static_cast<int32_t>(i));
+  return createI32Dense(rewriter, loc, {n}, vals);
+}
+
+Value createSplatI32(ConversionPatternRewriter &rewriter, Location loc,
+                     ArrayRef<int64_t> shape, int32_t value) {
+  auto ty = RankedTensorType::get(shape, rewriter.getI32Type());
+  return tosa::ConstOp::create(
+      rewriter, loc, ty,
+      DenseElementsAttr::get(ty, rewriter.getI32IntegerAttr(value)));
+}
+
+LogicalResult unpackToBnsh(Value input, int64_t numHeads, int64_t headDim,
+                           ConversionPatternRewriter &rewriter, Location loc,
+                           Operation *op, Value &out) {
+  auto ty = dyn_cast<RankedTensorType>(input.getType());
+  if (!ty || !ty.hasStaticShape())
+    return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
+  if (ty.getRank() == 4) {
+    if (ty.getDimSize(1) != numHeads || ty.getDimSize(3) != headDim)
+      return rewriter.notifyMatchFailure(op, "rank-4 layout is not BNSH");
+    out = input;
+    return success();
+  }
+  if (ty.getRank() != 3)
+    return rewriter.notifyMatchFailure(op, "Q/K/V must be rank 3 or 4");
+  int64_t b = ty.getDimSize(0);
+  int64_t s = ty.getDimSize(1);
+  if (ty.getDimSize(2) != numHeads * headDim)
+    return rewriter.notifyMatchFailure(op, "hidden size is not heads * dim");
+  Value r = reshapeTo(input, {b, s, numHeads, headDim}, rewriter);
+  out = transposePerm(r, {0, 2, 1, 3}, rewriter, loc);
+  return success();
+}
+
+LogicalResult broadcastKvHeads(Value kv, int64_t numHeads, int64_t kvHeads,
+                               ConversionPatternRewriter &rewriter,
+                               Location loc, Operation *op, Value &out) {
+  if (numHeads == kvHeads) {
+    out = kv;
+    return success();
+  }
+  if (numHeads % kvHeads != 0)
+    return rewriter.notifyMatchFailure(
+        op, "num_heads must be divisible by kv_num_heads");
+  auto ty = cast<RankedTensorType>(kv.getType());
+  int64_t b = ty.getDimSize(0);
+  int64_t s = ty.getDimSize(2);
+  int64_t d = ty.getDimSize(3);
+  int64_t repeat = numHeads / kvHeads;
+  Value r = reshapeTo(kv, {b, kvHeads, 1, s, d}, rewriter);
+  Value t =
+      tileMultiples(r, {1, 1, repeat, 1, 1}, {b, kvHeads, repeat, s, d},
+                    rewriter, loc);
+  out = reshapeTo(t, {b, numHeads, s, d}, rewriter);
+  return success();
+}
+
+Value applySelectNegInf(Value scores, Value pred,
+                        ConversionPatternRewriter &rewriter, Location loc) {
+  auto scoresTy = cast<RankedTensorType>(scores.getType());
+  Value negInf = createSplatFloat(rewriter, loc, scoresTy,
+                                  -std::numeric_limits<double>::infinity());
+  Value p = pred;
+  Value s = scores;
+  if (failed(tosa::EqualizeRanks(rewriter, loc, p, s)))
+    return scores;
+  return tosa::SelectOp::create(rewriter, loc, scoresTy, p, negInf, s)
+      .getResult();
+}
+
+Value softmaxLastDim(Value input, Value extraDenom,
+                     ConversionPatternRewriter &rewriter, Location loc) {
+  auto resultType = cast<RankedTensorType>(input.getType());
+  int32_t axis = static_cast<int32_t>(resultType.getRank() - 1);
+  auto reducedTy = keepdimsReduceType(resultType, axis);
+  IntegerAttr axisAttr = rewriter.getI32IntegerAttr(axis);
+  auto rmax =
+      tosa::ReduceMaxOp::create(rewriter, loc, reducedTy, input, axisAttr);
+  auto sub = tosa::SubOp::create(rewriter, loc, resultType, input, rmax);
+  auto exp = tosa::ExpOp::create(rewriter, loc, resultType, sub);
+  Value rsum =
+      tosa::ReduceSumOp::create(rewriter, loc, reducedTy, exp, axisAttr)
+          .getResult();
+  if (extraDenom) {
+    Value denom = extraDenom;
+    if (succeeded(tosa::EqualizeRanks(rewriter, loc, rsum, denom)))
+      rsum = tosa::AddOp::create(rewriter, loc, reducedTy, rsum, denom)
+                 .getResult();
+  }
+  auto rec = tosa::ReciprocalOp::create(rewriter, loc, reducedTy, rsum);
+  return emitTosaMul(rewriter, loc, exp, rec, resultType);
+}
+
+Value packBnshToOutput(Value y4, RankedTensorType yType,
+                       ConversionPatternRewriter &rewriter, Location loc) {
+  if (yType.getRank() == 4)
+    return y4;
+  Value yT = transposePerm(y4, {0, 2, 1, 3}, rewriter, loc);
+  return reshapeTo(yT, yType.getShape(), rewriter);
+}
+
+LogicalResult addAttentionBias(Value &scores, Value bias, RankedTensorType qkTy,
+                               ConversionPatternRewriter &rewriter,
+                               Location loc, Operation *op) {
+  auto biasTy = dyn_cast<RankedTensorType>(bias.getType());
+  if (!biasTy || !biasTy.hasStaticShape())
+    return rewriter.notifyMatchFailure(op, "attention_bias must be static");
+  if (biasTy.getRank() == 4) {
+    int64_t b0 = biasTy.getDimSize(0);
+    int64_t h0 = biasTy.getDimSize(1);
+    bias = reshapeTo(bias,
+                     {b0 * h0, biasTy.getDimSize(2), biasTy.getDimSize(3)},
+                     rewriter);
+  }
+  if (failed(tosa::EqualizeRanks(rewriter, loc, scores, bias)))
+    return rewriter.notifyMatchFailure(op, "attention_bias not broadcastable");
+  scores = tosa::AddOp::create(rewriter, loc, qkTy, scores, bias);
+  return success();
+}
+
+Value applyCausalPrefill(Value scores, Value kIdx, bool enable, int64_t seqQ,
+                         int64_t seqKv, ConversionPatternRewriter &rewriter,
+                         Location loc) {
+  if (!enable || seqQ <= 1)
+    return scores;
+  int64_t pastLen = seqKv - seqQ;
+  Value qIdx = createArangeI32(rewriter, loc, seqQ);
+  if (pastLen != 0) {
+    Value off =
+        createSplatI32(rewriter, loc, {seqQ}, static_cast<int32_t>(pastLen));
+    qIdx = tosa::AddOp::create(
+        rewriter, loc, RankedTensorType::get({seqQ}, rewriter.getI32Type()),
+        qIdx, off);
+  }
+  qIdx = reshapeTo(qIdx, {1, seqQ, 1}, rewriter);
+  auto predTy = RankedTensorType::get({1, seqQ, seqKv}, rewriter.getI1Type());
+  Value pred = tosa::GreaterOp::create(rewriter, loc, predTy, kIdx, qIdx);
+  return applySelectNegInf(scores, pred, rewriter, loc);
+}
+
+LogicalResult concatGrowingPast(Value kCur, Value vCur, Value pastK, Value pastV,
+                                int64_t batch, int64_t kvHeads, int64_t kDim,
+                                int64_t vDim,
+                                std::optional<int64_t> presentSeqDim,
+                                ConversionPatternRewriter &rewriter,
+                                Location loc, Operation *op, Value &presentK,
+                                Value &presentV, int64_t &seqKv) {
+  presentK = kCur;
+  presentV = vCur;
+  seqKv = cast<RankedTensorType>(kCur.getType()).getDimSize(2);
+  if (!pastK && !pastV)
+    return success();
+  if (!pastK || !pastV)
+    return rewriter.notifyMatchFailure(op, "past K/V must be paired");
+  auto pastKTy = dyn_cast<RankedTensorType>(pastK.getType());
+  if (!pastKTy || !pastKTy.hasStaticShape() || pastKTy.getRank() != 4)
+    return rewriter.notifyMatchFailure(op, "past_key must be static BNSH");
+  int64_t pastLen = pastKTy.getDimSize(2);
+  int64_t curLen = seqKv;
+  if (presentSeqDim && pastLen == *presentSeqDim && curLen > 0)
+    return rewriter.notifyMatchFailure(
+        op, "share-buffer present==past is unsupported");
+  if (pastLen == 0)
+    return success();
+  seqKv = pastLen + curLen;
+  auto catKTy = RankedTensorType::get(
+      {batch, kvHeads, seqKv, kDim},
+      cast<RankedTensorType>(kCur.getType()).getElementType());
+  auto catVTy = RankedTensorType::get(
+      {batch, kvHeads, seqKv, vDim},
+      cast<RankedTensorType>(vCur.getType()).getElementType());
+  presentK = tosa::ConcatOp::create(rewriter, loc, catKTy,
+                                    ValueRange{pastK, kCur},
+                                    rewriter.getI32IntegerAttr(2));
+  presentV = tosa::ConcatOp::create(rewriter, loc, catVTy,
+                                    ValueRange{pastV, vCur},
+                                    rewriter.getI32IntegerAttr(2));
+  return success();
+}
+
+LogicalResult applyRope(Value &tensor, Value cos, Value sin, int64_t seqLen,
+                        bool interleaved, ConversionPatternRewriter &rewriter,
+                        Location loc, Operation *op) {
+  auto ty = cast<RankedTensorType>(tensor.getType());
+  int64_t b = ty.getDimSize(0);
+  int64_t h = ty.getDimSize(1);
+  int64_t d = ty.getDimSize(3);
+  if (d % 2 != 0)
+    return rewriter.notifyMatchFailure(op, "RoPE head dim must be even");
+  int64_t half = d / 2;
+  auto cosTy = dyn_cast<RankedTensorType>(cos.getType());
+  auto sinTy = dyn_cast<RankedTensorType>(sin.getType());
+  if (!cosTy || !cosTy.hasStaticShape() || !sinTy || !sinTy.hasStaticShape())
+    return rewriter.notifyMatchFailure(op, "RoPE caches must be static");
+  if (cosTy.getRank() != 2 || sinTy.getRank() != 2)
+    return rewriter.notifyMatchFailure(op, "RoPE caches must be rank 2");
+  if (cosTy.getDimSize(0) < seqLen || sinTy.getDimSize(0) < seqLen)
+    return rewriter.notifyMatchFailure(op, "RoPE cache shorter than seq");
+  Value c = sliceOffsetSize(cos, {0, 0}, {seqLen, half}, rewriter, loc);
+  Value s = sliceOffsetSize(sin, {0, 0}, {seqLen, half}, rewriter, loc);
+  c = reshapeTo(c, {1, 1, seqLen, half}, rewriter);
+  s = reshapeTo(s, {1, 1, seqLen, half}, rewriter);
+  c = tileMultiples(c, {b, h, 1, 1}, {b, h, seqLen, half}, rewriter, loc);
+  s = tileMultiples(s, {b, h, 1, 1}, {b, h, seqLen, half}, rewriter, loc);
+
+  Value x1, x2;
+  if (!interleaved) {
+    x1 = sliceOffsetSize(tensor, {0, 0, 0, 0}, {b, h, seqLen, half}, rewriter,
+                         loc);
+    x2 = sliceOffsetSize(tensor, {0, 0, 0, half}, {b, h, seqLen, half},
+                         rewriter, loc);
+  } else {
+    Value r = reshapeTo(tensor, {b, h, seqLen, half, 2}, rewriter);
+    x1 = sliceOffsetSize(r, {0, 0, 0, 0, 0}, {b, h, seqLen, half, 1}, rewriter,
+                         loc);
+    x2 = sliceOffsetSize(r, {0, 0, 0, 0, 1}, {b, h, seqLen, half, 1}, rewriter,
+                         loc);
+    x1 = reshapeTo(x1, {b, h, seqLen, half}, rewriter);
+    x2 = reshapeTo(x2, {b, h, seqLen, half}, rewriter);
+  }
+
+  auto halfTy = cast<RankedTensorType>(x1.getType());
+  Value nx2 = tosa::NegateOp::create(rewriter, loc, halfTy, x2);
+  Value x1c = emitTosaMul(rewriter, loc, x1, c, halfTy);
+  Value x2s = emitTosaMul(rewriter, loc, nx2, s, halfTy);
+  Value left = tosa::AddOp::create(rewriter, loc, halfTy, x1c, x2s);
+  Value x2c = emitTosaMul(rewriter, loc, x2, c, halfTy);
+  Value x1s = emitTosaMul(rewriter, loc, x1, s, halfTy);
+  Value right = tosa::AddOp::create(rewriter, loc, halfTy, x2c, x1s);
+
+  if (!interleaved) {
+    auto catTy = RankedTensorType::get({b, h, seqLen, d}, ty.getElementType());
+    tensor = tosa::ConcatOp::create(rewriter, loc, catTy, ValueRange{left, right},
+                                    rewriter.getI32IntegerAttr(3));
+  } else {
+    Value le = reshapeTo(left, {b, h, seqLen, half, 1}, rewriter);
+    Value ri = reshapeTo(right, {b, h, seqLen, half, 1}, rewriter);
+    auto catTy =
+        RankedTensorType::get({b, h, seqLen, half, 2}, ty.getElementType());
+    Value cat = tosa::ConcatOp::create(rewriter, loc, catTy, ValueRange{le, ri},
+                                       rewriter.getI32IntegerAttr(4));
+    tensor = reshapeTo(cat, {b, h, seqLen, d}, rewriter);
+  }
+  return success();
+}
+
+LogicalResult dequantIfNeeded(Value &cache, Value scale, Type attnElem,
+                              StringRef quantType,
+                              ConversionPatternRewriter &rewriter,
+                              Location loc, Operation *op) {
+  if (quantType == "NONE")
+    return success();
+  auto ty = cast<RankedTensorType>(cache.getType());
+  if (isa<FloatType>(ty.getElementType()))
+    return success();
+  if (!scale)
+    return rewriter.notifyMatchFailure(op, "quantized cache missing scale");
+  cache = emitTosaCast(rewriter, loc, cache, attnElem);
+  Value s = scale;
+  auto sTy = dyn_cast<RankedTensorType>(s.getType());
+  if (!sTy || !sTy.hasStaticShape())
+    return rewriter.notifyMatchFailure(op, "scale must be a static tensor");
+  if (sTy.getElementType() != attnElem)
+    s = emitTosaCast(rewriter, loc, s, attnElem);
+  if (failed(tosa::EqualizeRanks(rewriter, loc, cache, s)))
+    return rewriter.notifyMatchFailure(op, "scale not broadcastable");
+  auto outTy = cast<RankedTensorType>(cache.getType());
+  cache = emitTosaMul(rewriter, loc, cache, s, outTy);
+  return success();
+}
+
+LogicalResult quantIfNeeded(Value &cache, Value scale, RankedTensorType outTy,
+                            StringRef quantType,
+                            ConversionPatternRewriter &rewriter, Location loc,
+                            Operation *op) {
+  if (quantType == "NONE" ||
+      isa<FloatType>(outTy.getElementType()))
+    return success();
+  if (!scale)
+    return rewriter.notifyMatchFailure(op, "quantized present missing scale");
+  Value s = scale;
+  if (failed(tosa::EqualizeRanks(rewriter, loc, cache, s)))
+    return rewriter.notifyMatchFailure(op, "scale not broadcastable");
+  auto recTy = cast<RankedTensorType>(s.getType());
+  Value inv = tosa::ReciprocalOp::create(rewriter, loc, recTy, s);
+  auto cacheTy = cast<RankedTensorType>(cache.getType());
+  Value scaled = emitTosaMul(rewriter, loc, cache, inv, cacheTy);
+  cache = emitTosaCast(rewriter, loc, scaled, outTy.getElementType());
+  return success();
+}
+
+// hip.gqa -> TOSA SDPA (unpack, optional RoPE, present concat, GQA broadcast,
+// QK/PV matmul, mask/softmax, pack Y). Ctx and DPS inits are dropped.
+struct GqaConverter final : public OpConversionPattern<GqaOp> {
+  using OpConversionPattern<GqaOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(GqaOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() < 3)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    auto yType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    auto pkType = dyn_cast<RankedTensorType>(op.getResult(1).getType());
+    auto pvType = dyn_cast<RankedTensorType>(op.getResult(2).getType());
+    if (!yType || !yType.hasStaticShape() || !pkType ||
+        !pkType.hasStaticShape() || !pvType || !pvType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected static ranked tensors");
+
+    // Dialect verify already restricts bit width to 4 or 8. INT4 is legal on
+    // hip.gqa; this expansion only implements the INT8 / float cache path.
+    if (op.getKvCacheBitWidth() != 8)
+      return rewriter.notifyMatchFailure(op, "INT4 KV cache is unsupported");
+
+    auto isFp8 = [](Type t) {
+      return isa<FloatType>(t) && t.getIntOrFloatBitWidth() == 8;
+    };
+    if (isFp8(yType.getElementType()) || isFp8(pkType.getElementType()) ||
+        isFp8(pvType.getElementType()))
+      return rewriter.notifyMatchFailure(op, "FP8 GQA is unsupported");
+
+    StringRef kQuant = op.getKQuantType();
+    StringRef vQuant = op.getVQuantType();
+
+    Location loc = op.getLoc();
+    int64_t numHeads = op.getNumHeads();
+    int64_t kvHeads = op.getKvNumHeads();
+    if (numHeads <= 0 || kvHeads <= 0)
+      return rewriter.notifyMatchFailure(op, "head counts must be positive");
+
+    Value query = adaptor.getQuery();
+    auto qInTy = dyn_cast<RankedTensorType>(query.getType());
+    if (!qInTy || !qInTy.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "query must be a static tensor");
+    if (!isa<FloatType>(qInTy.getElementType()) ||
+        isFp8(qInTy.getElementType()))
+      return rewriter.notifyMatchFailure(op, "query must be f16/f32");
+
+    bool packed = !adaptor.getKey() || !adaptor.getValue();
+    int64_t batch = qInTy.getDimSize(0);
+    int64_t seqQ = qInTy.getRank() == 4 ? qInTy.getDimSize(2) : qInTy.getDimSize(1);
+    int64_t headDim = 0;
+    Value qBnsh, kCur, vCur;
+
+    if (packed) {
+      if (qInTy.getRank() != 3)
+        return rewriter.notifyMatchFailure(op, "packed QKV must be rank 3");
+      int64_t packedHidden = qInTy.getDimSize(2);
+      int64_t packedHeads = numHeads + 2 * kvHeads;
+      if (packedHeads == 0 || packedHidden % packedHeads != 0)
+        return rewriter.notifyMatchFailure(op, "packed QKV hidden size mismatch");
+      headDim = packedHidden / packedHeads;
+      Value qSlice = sliceOffsetSize(
+          query, {0, 0, 0}, {batch, seqQ, numHeads * headDim}, rewriter, loc);
+      Value kSlice =
+          sliceOffsetSize(query, {0, 0, numHeads * headDim},
+                          {batch, seqQ, kvHeads * headDim}, rewriter, loc);
+      Value vSlice = sliceOffsetSize(
+          query, {0, 0, (numHeads + kvHeads) * headDim},
+          {batch, seqQ, kvHeads * headDim}, rewriter, loc);
+      if (failed(unpackToBnsh(qSlice, numHeads, headDim, rewriter, loc, op,
+                              qBnsh)) ||
+          failed(unpackToBnsh(kSlice, kvHeads, headDim, rewriter, loc, op,
+                              kCur)) ||
+          failed(unpackToBnsh(vSlice, kvHeads, headDim, rewriter, loc, op,
+                              vCur)))
+        return failure();
+    } else {
+      if (qInTy.getRank() == 4)
+        headDim = qInTy.getDimSize(3);
+      else if (qInTy.getDimSize(2) % numHeads != 0)
+        return rewriter.notifyMatchFailure(op, "query hidden is not heads * dim");
+      else
+        headDim = qInTy.getDimSize(2) / numHeads;
+      if (failed(unpackToBnsh(query, numHeads, headDim, rewriter, loc, op,
+                              qBnsh)) ||
+          failed(unpackToBnsh(adaptor.getKey(), kvHeads, headDim, rewriter, loc,
+                              op, kCur)) ||
+          failed(unpackToBnsh(adaptor.getValue(), kvHeads, headDim, rewriter,
+                              loc, op, vCur)))
+        return failure();
+    }
+
+    if (op.getDoRotary() != 0) {
+      if (!adaptor.getCosCache() || !adaptor.getSinCache())
+        return rewriter.notifyMatchFailure(
+            op, "do_rotary requires cos_cache and sin_cache");
+      if (adaptor.getPastKey())
+        return rewriter.notifyMatchFailure(op, "decode RoPE is unsupported");
+      bool interleaved = op.getRotaryInterleaved() != 0;
+      if (failed(applyRope(qBnsh, adaptor.getCosCache(), adaptor.getSinCache(),
+                           seqQ, interleaved, rewriter, loc, op)) ||
+          failed(applyRope(kCur, adaptor.getCosCache(), adaptor.getSinCache(),
+                           seqQ, interleaved, rewriter, loc, op)))
+        return failure();
+    }
+
+    Type attnElem = qInTy.getElementType();
+    if (failed(dequantIfNeeded(kCur, adaptor.getKScale(), attnElem, kQuant,
+                               rewriter, loc, op)) ||
+        failed(dequantIfNeeded(vCur, adaptor.getVScale(), attnElem, vQuant,
+                               rewriter, loc, op)))
+      return failure();
+
+    Value presentK = kCur;
+    Value presentV = vCur;
+    int64_t seqKv = seqQ;
+    Value pastK = adaptor.getPastKey();
+    Value pastV = adaptor.getPastValue();
+    if (pastK && pastV) {
+      if (failed(dequantIfNeeded(pastK, adaptor.getKScale(), attnElem, kQuant,
+                                 rewriter, loc, op)) ||
+          failed(dequantIfNeeded(pastV, adaptor.getVScale(), attnElem, vQuant,
+                                 rewriter, loc, op)))
+        return failure();
+    }
+    if (failed(concatGrowingPast(kCur, vCur, pastK, pastV, batch, kvHeads,
+                                 headDim, headDim, pkType.getDimSize(2),
+                                 rewriter, loc, op, presentK, presentV, seqKv)))
+      return failure();
+
+    Value kSdpa, vSdpa;
+    if (failed(broadcastKvHeads(presentK, numHeads, kvHeads, rewriter, loc, op,
+                                kSdpa)) ||
+        failed(broadcastKvHeads(presentV, numHeads, kvHeads, rewriter, loc, op,
+                                vSdpa)))
+      return failure();
+
+    int64_t bh = batch * numHeads;
+    Value q3 = reshapeTo(qBnsh, {bh, seqQ, headDim}, rewriter);
+    Value kT = transposePerm(kSdpa, {0, 1, 3, 2}, rewriter, loc);
+    Value k3 = reshapeTo(kT, {bh, headDim, seqKv}, rewriter);
+    Value v3 = reshapeTo(vSdpa, {bh, seqKv, headDim}, rewriter);
+
+    auto qkTy = RankedTensorType::get({bh, seqQ, seqKv}, attnElem);
+    Value scores = tosa::MatMulOp::create(rewriter, loc, qkTy, q3, k3).getResult();
+
+    double scale = op.getScale().convertToFloat();
+    if (scale == 0.0)
+      scale = 1.0 / std::sqrt(static_cast<double>(headDim));
+    Value scaleSplat = createSplatFloat(rewriter, loc, qkTy, scale);
+    scores = emitTosaMul(rewriter, loc, scores, scaleSplat, qkTy);
+
+    double softcap = op.getSoftcap().convertToFloat();
+    if (softcap != 0.0) {
+      Value cap = createSplatFloat(rewriter, loc, qkTy, softcap);
+      Value invCap = tosa::ReciprocalOp::create(rewriter, loc, qkTy, cap);
+      Value scaled = emitTosaMul(rewriter, loc, scores, invCap, qkTy);
+      Value th = tosa::TanhOp::create(rewriter, loc, qkTy, scaled);
+      scores = emitTosaMul(rewriter, loc, th, cap, qkTy);
+    }
+
+    if (adaptor.getAttentionBias() &&
+        failed(addAttentionBias(scores, adaptor.getAttentionBias(), qkTy,
+                                rewriter, loc, op)))
+      return failure();
+
+    Value kIdx = createArangeI32(rewriter, loc, seqKv);
+    kIdx = reshapeTo(kIdx, {1, 1, seqKv}, rewriter);
+    scores = applyCausalPrefill(scores, kIdx, !op.getNoCausal(), seqQ, seqKv,
+                                rewriter, loc);
+
+    int64_t window = op.getLocalWindowSize();
+    if (window > 0) {
+      Value qIdx = createArangeI32(rewriter, loc, seqQ);
+      int64_t pastLen = seqKv - seqQ;
+      if (pastLen != 0) {
+        Value off = createSplatI32(rewriter, loc, {seqQ},
+                                   static_cast<int32_t>(pastLen));
+        qIdx = tosa::AddOp::create(rewriter, loc,
+                                   RankedTensorType::get({seqQ}, rewriter.getI32Type()),
+                                   qIdx, off);
+      }
+      qIdx = reshapeTo(qIdx, {1, seqQ, 1}, rewriter);
+      Value win = createSplatI32(rewriter, loc, {1, seqQ, 1},
+                                 static_cast<int32_t>(window));
+      auto i32Ty = RankedTensorType::get({1, seqQ, 1}, rewriter.getI32Type());
+      Value qMinus = tosa::SubOp::create(rewriter, loc, i32Ty, qIdx, win);
+      auto predTy =
+          RankedTensorType::get({1, seqQ, seqKv}, rewriter.getI1Type());
+      Value pred = tosa::GreaterOp::create(rewriter, loc, predTy, qMinus, kIdx);
+      scores = applySelectNegInf(scores, pred, rewriter, loc);
+    }
+
+    Value seqlens = adaptor.getSeqlensK();
+    auto seqTy = dyn_cast<RankedTensorType>(seqlens.getType());
+    if (!seqTy || !seqTy.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "seqlens_k must be static");
+    if (seqTy.getElementType() != rewriter.getI32Type())
+      seqlens = emitTosaCast(rewriter, loc, seqlens, rewriter.getI32Type());
+    seqTy = cast<RankedTensorType>(seqlens.getType());
+    int64_t seqElems = seqTy.getNumElements();
+    seqlens = reshapeTo(seqlens, {seqElems}, rewriter);
+    if (seqElems == batch && batch > 1) {
+      seqlens = reshapeTo(seqlens, {batch, 1, 1}, rewriter);
+      seqlens = tileMultiples(seqlens, {1, numHeads, 1},
+                              {batch, numHeads, 1}, rewriter, loc);
+      seqlens = reshapeTo(seqlens, {bh, 1, 1}, rewriter);
+    } else {
+      seqlens = reshapeTo(seqlens, {1, 1, 1}, rewriter);
+    }
+    auto padPredTy = RankedTensorType::get(
+        {cast<RankedTensorType>(seqlens.getType()).getDimSize(0), 1, seqKv},
+        rewriter.getI1Type());
+    Value padPred =
+        tosa::GreaterOp::create(rewriter, loc, padPredTy, kIdx, seqlens);
+    scores = applySelectNegInf(scores, padPred, rewriter, loc);
+
+    Value qkBeforeSoftmax = scores;
+    Value extraDenom;
+    if (adaptor.getHeadSink()) {
+      Value sink = adaptor.getHeadSink();
+      auto sinkTy = dyn_cast<RankedTensorType>(sink.getType());
+      if (!sinkTy || !sinkTy.hasStaticShape())
+        return rewriter.notifyMatchFailure(op, "head_sink must be static");
+      if (sinkTy.getElementType() != attnElem)
+        sink = emitTosaCast(rewriter, loc, sink, attnElem);
+      sink = reshapeTo(sink, {1, numHeads, 1, 1}, rewriter);
+      sink = tileMultiples(sink, {batch, 1, 1, 1}, {batch, numHeads, 1, 1},
+                           rewriter, loc);
+      sink = reshapeTo(sink, {bh, 1, 1}, rewriter);
+      extraDenom = tosa::ExpOp::create(rewriter, loc,
+                                       cast<RankedTensorType>(sink.getType()),
+                                       sink);
+    } else if (op.getSmoothSoftmax() != 0) {
+      extraDenom = createSplatFloat(
+          rewriter, loc, RankedTensorType::get({bh, 1, 1}, attnElem), 1.0);
+    }
+
+    Value probs = softmaxLastDim(scores, extraDenom, rewriter, loc);
+    Value qkAfterSoftmax = probs;
+
+    auto avTy = RankedTensorType::get({bh, seqQ, headDim}, attnElem);
+    Value av = tosa::MatMulOp::create(rewriter, loc, avTy, probs, v3).getResult();
+    Value y4 = reshapeTo(av, {batch, numHeads, seqQ, headDim}, rewriter);
+    Value y = packBnshToOutput(y4, yType, rewriter, loc);
+
+    if (failed(quantIfNeeded(presentK, adaptor.getKScale(), pkType, kQuant,
+                             rewriter, loc, op)) ||
+        failed(quantIfNeeded(presentV, adaptor.getVScale(), pvType, vQuant,
+                             rewriter, loc, op)))
+      return failure();
+
+    if (cast<RankedTensorType>(presentK.getType()).getShape() !=
+        pkType.getShape()) {
+      if (cast<RankedTensorType>(presentK.getType()).getElementType() ==
+          pkType.getElementType())
+        presentK = reshapeTo(presentK, pkType.getShape(), rewriter);
+    }
+    if (cast<RankedTensorType>(presentV.getType()).getShape() !=
+        pvType.getShape()) {
+      if (cast<RankedTensorType>(presentV.getType()).getElementType() ==
+          pvType.getElementType())
+        presentV = reshapeTo(presentV, pvType.getShape(), rewriter);
+    }
+
+    int64_t qkOutput = op.getQkOutput();
+    SmallVector<Value> results = {y, presentK, presentV};
+    if (qkOutput != 0) {
+      auto qkOutTy = dyn_cast<RankedTensorType>(op.getResult(3).getType());
+      if (!qkOutTy || !qkOutTy.hasStaticShape())
+        return rewriter.notifyMatchFailure(op, "output_qk must be static");
+      Value qk = qkOutput == 1 ? qkBeforeSoftmax : qkAfterSoftmax;
+      if (cast<RankedTensorType>(qk.getType()) != qkOutTy)
+        qk = reshapeTo(qk, qkOutTy.getShape(), rewriter);
+      results.push_back(qk);
+    }
+    rewriter.replaceOp(op, results);
+    return success();
+  }
+};
+
+// hip.multi_head_attention -> TOSA SDPA, matching MIGraphX's ONNX parse:
+// unpack (packed QKV / packed KV / separate / BNSH cross), optional 1-D QKV
+// projection bias, BNSH transpose, growing past concat, QK dot, attention
+// bias + key-padding add, scale, softmax, PV dot. Ctx and DPS inits dropped.
+struct MhaConverter final : public OpConversionPattern<MultiHeadAttentionOp> {
+  using OpConversionPattern<MultiHeadAttentionOp>::OpConversionPattern;
+
+  static LogicalResult
+  slicePacked5D(Value packed, int64_t index, ConversionPatternRewriter &rewriter,
+                Location loc, Value &bshd) {
+    auto ty = cast<RankedTensorType>(packed.getType());
+    int64_t b = ty.getDimSize(0);
+    int64_t s = ty.getDimSize(1);
+    int64_t h = ty.getDimSize(2);
+    int64_t d = ty.getDimSize(4);
+    Value sl = sliceOffsetSize(packed, {0, 0, 0, index, 0}, {b, s, h, 1, d},
+                               rewriter, loc);
+    bshd = reshapeTo(sl, {b, s, h, d}, rewriter);
+    return success();
+  }
+
+  static LogicalResult addHiddenBias(Value &tensor, Value bias, int64_t start,
+                                     int64_t len,
+                                     ConversionPatternRewriter &rewriter,
+                                     Location loc, Operation *op) {
+    auto ty = cast<RankedTensorType>(tensor.getType());
+    int64_t b = ty.getDimSize(0);
+    int64_t s = ty.getDimSize(1);
+    Value bsh = tensor;
+    if (ty.getRank() == 4)
+      bsh = reshapeTo(tensor, {b, s, ty.getDimSize(2) * ty.getDimSize(3)},
+                      rewriter);
+    auto bshTy = cast<RankedTensorType>(bsh.getType());
+    if (bshTy.getDimSize(2) != len)
+      return rewriter.notifyMatchFailure(op, "QKV bias hidden size mismatch");
+    Value sl = sliceOffsetSize(bias, {start}, {len}, rewriter, loc);
+    sl = reshapeTo(sl, {1, 1, len}, rewriter);
+    if (failed(tosa::EqualizeRanks(rewriter, loc, bsh, sl)))
+      return rewriter.notifyMatchFailure(op, "QKV bias not broadcastable");
+    bsh = tosa::AddOp::create(rewriter, loc, bshTy, bsh, sl);
+    if (ty.getRank() == 4)
+      tensor = reshapeTo(bsh, ty.getShape(), rewriter);
+    else
+      tensor = bsh;
+    return success();
+  }
+
+  static LogicalResult
+  addKeyPadding(Value &scores, Value mask, RankedTensorType qkTy, int64_t batch,
+                int64_t numHeads, int64_t seqQ, int64_t seqKv, Type attnElem,
+                double filter, ConversionPatternRewriter &rewriter,
+                Location loc, Operation *op) {
+    auto maskTy = dyn_cast<RankedTensorType>(mask.getType());
+    if (!maskTy || !maskTy.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "key_padding_mask must be static");
+    int64_t bh = batch * numHeads;
+    if (maskTy.getRank() == 1 &&
+        maskTy.getNumElements() == 3 * batch + 2)
+      return rewriter.notifyMatchFailure(op, "left-pad key mask is unsupported");
+
+    Value additive;
+    if (maskTy.getRank() == 1 && maskTy.getNumElements() == batch) {
+      Value seqlens = mask;
+      if (maskTy.getElementType() != rewriter.getI32Type())
+        seqlens = emitTosaCast(rewriter, loc, seqlens, rewriter.getI32Type());
+      seqlens = reshapeTo(seqlens, {batch, 1, 1}, rewriter);
+      seqlens = tileMultiples(seqlens, {1, numHeads, 1}, {batch, numHeads, 1},
+                              rewriter, loc);
+      seqlens = reshapeTo(seqlens, {bh, 1, 1}, rewriter);
+      Value kIdx = createArangeI32(rewriter, loc, seqKv);
+      kIdx = reshapeTo(kIdx, {1, 1, seqKv}, rewriter);
+      auto predTy = RankedTensorType::get(
+          {bh, 1, seqKv}, rewriter.getI1Type());
+      // 1-D mask is exclusive valid length: keep k < seqlens_k.
+      Value keep =
+          tosa::GreaterOp::create(rewriter, loc, predTy, seqlens, kIdx);
+      Value filt = createSplatFloat(rewriter, loc, qkTy, filter);
+      Value zero = createSplatFloat(rewriter, loc, qkTy, 0.0);
+      if (failed(tosa::EqualizeRanks(rewriter, loc, keep, scores)))
+        return rewriter.notifyMatchFailure(op, "key mask not broadcastable");
+      additive = tosa::SelectOp::create(rewriter, loc, qkTy, keep, zero, filt);
+    } else if (maskTy.getRank() == 2 || maskTy.getRank() == 3) {
+      Value m = mask;
+      if (maskTy.getElementType() != rewriter.getI32Type())
+        m = emitTosaCast(rewriter, loc, m, rewriter.getI32Type());
+      Value zeros = createSplatI32(rewriter, loc, cast<RankedTensorType>(m.getType()).getShape(), 0);
+      auto eqTy = RankedTensorType::get(
+          cast<RankedTensorType>(m.getType()).getShape(), rewriter.getI1Type());
+      Value isPad = tosa::EqualOp::create(rewriter, loc, eqTy, m, zeros);
+      if (maskTy.getRank() == 2)
+        isPad = reshapeTo(isPad, {batch, 1, seqKv}, rewriter);
+      else
+        isPad = reshapeTo(isPad, {batch, 1, seqQ, seqKv}, rewriter);
+      if (maskTy.getRank() == 2)
+        isPad = tileMultiples(isPad, {1, numHeads, 1}, {batch, numHeads, seqKv},
+                              rewriter, loc);
+      else
+        isPad = tileMultiples(isPad, {1, numHeads, 1, 1},
+                              {batch, numHeads, seqQ, seqKv}, rewriter, loc);
+      if (maskTy.getRank() == 2)
+        isPad = reshapeTo(isPad, {bh, 1, seqKv}, rewriter);
+      else
+        isPad = reshapeTo(isPad, {bh, seqQ, seqKv}, rewriter);
+      Value filt = createSplatFloat(rewriter, loc, qkTy, filter);
+      Value zero = createSplatFloat(rewriter, loc, qkTy, 0.0);
+      if (failed(tosa::EqualizeRanks(rewriter, loc, isPad, filt)))
+        return rewriter.notifyMatchFailure(op, "key mask not broadcastable");
+      additive = tosa::SelectOp::create(rewriter, loc, qkTy, isPad, filt, zero);
+    } else {
+      return rewriter.notifyMatchFailure(op, "unsupported key_padding_mask rank");
+    }
+    if (failed(tosa::EqualizeRanks(rewriter, loc, scores, additive)))
+      return rewriter.notifyMatchFailure(op, "key mask not broadcastable");
+    scores = tosa::AddOp::create(rewriter, loc, qkTy, scores, additive);
+    return success();
+  }
+
+  LogicalResult
+  matchAndRewrite(MultiHeadAttentionOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() < 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+    auto yType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!yType || !yType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
+    if (adaptor.getCacheIndirection())
+      return rewriter.notifyMatchFailure(op, "cache_indirection is unsupported");
+    if (adaptor.getPastSequenceLength())
+      return rewriter.notifyMatchFailure(
+          op, "past_sequence_length share-buffer is unsupported");
+
+    Location loc = op.getLoc();
+    int64_t numHeads = op.getNumHeads();
+    if (numHeads <= 0)
+      return rewriter.notifyMatchFailure(op, "num_heads must be positive");
+
+    Value query = adaptor.getQuery();
+    auto qInTy = dyn_cast<RankedTensorType>(query.getType());
+    if (!qInTy || !qInTy.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "query must be a static tensor");
+    if (!isa<FloatType>(qInTy.getElementType()))
+      return rewriter.notifyMatchFailure(op, "query must be float");
+
+    int64_t batch = qInTy.getDimSize(0);
+    int64_t seqQ = qInTy.getDimSize(1);
+    int64_t headDim = 0;
+    int64_t headDimV = 0;
+    int64_t seqKv = seqQ;
+    Value qBshd, kBshd, vBshd;
+
+    if (qInTy.getRank() == 5) {
+      if (qInTy.getDimSize(2) != numHeads || qInTy.getDimSize(3) != 3)
+        return rewriter.notifyMatchFailure(op, "packed QKV must be [B,S,H,3,D]");
+      headDim = qInTy.getDimSize(4);
+      headDimV = headDim;
+      if (failed(slicePacked5D(query, 0, rewriter, loc, qBshd)) ||
+          failed(slicePacked5D(query, 1, rewriter, loc, kBshd)) ||
+          failed(slicePacked5D(query, 2, rewriter, loc, vBshd)))
+        return failure();
+    } else if (qInTy.getRank() == 3) {
+      if (qInTy.getDimSize(2) % numHeads != 0)
+        return rewriter.notifyMatchFailure(op, "query hidden is not heads * dim");
+      headDim = qInTy.getDimSize(2) / numHeads;
+      qBshd = reshapeTo(query, {batch, seqQ, numHeads, headDim}, rewriter);
+      if (!adaptor.getKey())
+        return rewriter.notifyMatchFailure(op, "key is required unless QKV is packed");
+      auto kTy = dyn_cast<RankedTensorType>(adaptor.getKey().getType());
+      if (!kTy || !kTy.hasStaticShape())
+        return rewriter.notifyMatchFailure(op, "key must be a static tensor");
+      if (kTy.getRank() == 5) {
+        if (kTy.getDimSize(2) != numHeads || kTy.getDimSize(3) != 2 ||
+            kTy.getDimSize(4) != headDim)
+          return rewriter.notifyMatchFailure(op, "packed KV must be [B,S,H,2,D]");
+        seqKv = kTy.getDimSize(1);
+        headDimV = headDim;
+        if (failed(slicePacked5D(adaptor.getKey(), 0, rewriter, loc, kBshd)) ||
+            failed(slicePacked5D(adaptor.getKey(), 1, rewriter, loc, vBshd)))
+          return failure();
+      } else {
+        if (!adaptor.getValue())
+          return rewriter.notifyMatchFailure(op, "value is required");
+        auto vTy = dyn_cast<RankedTensorType>(adaptor.getValue().getType());
+        if (!vTy || !vTy.hasStaticShape())
+          return rewriter.notifyMatchFailure(op, "value must be a static tensor");
+        if (kTy.getRank() == 3) {
+          seqKv = kTy.getDimSize(1);
+          if (kTy.getDimSize(2) != numHeads * headDim)
+            return rewriter.notifyMatchFailure(op, "key hidden mismatch");
+          if (vTy.getDimSize(2) % numHeads != 0)
+            return rewriter.notifyMatchFailure(op, "value hidden is not heads * dim");
+          headDimV = vTy.getDimSize(2) / numHeads;
+          kBshd = reshapeTo(adaptor.getKey(),
+                            {batch, seqKv, numHeads, headDim}, rewriter);
+          vBshd = reshapeTo(adaptor.getValue(),
+                            {batch, seqKv, numHeads, headDimV}, rewriter);
+        } else if (kTy.getRank() == 4) {
+          seqKv = kTy.getDimSize(2);
+          headDimV = vTy.getDimSize(3);
+          kBshd = transposePerm(adaptor.getKey(), {0, 2, 1, 3}, rewriter, loc);
+          vBshd = transposePerm(adaptor.getValue(), {0, 2, 1, 3}, rewriter, loc);
+        } else {
+          return rewriter.notifyMatchFailure(op, "unsupported key rank");
+        }
+      }
+    } else {
+      return rewriter.notifyMatchFailure(op, "query must be rank 3 or 5");
+    }
+
+    if (adaptor.getBias()) {
+      auto bTy = dyn_cast<RankedTensorType>(adaptor.getBias().getType());
+      if (!bTy || !bTy.hasStaticShape() || bTy.getRank() != 1)
+        return rewriter.notifyMatchFailure(op, "QKV bias must be a static 1-D tensor");
+      int64_t hidden = numHeads * headDim;
+      int64_t hiddenV = numHeads * headDimV;
+      if (bTy.getDimSize(0) != hidden + hidden + hiddenV)
+        return rewriter.notifyMatchFailure(op, "QKV bias length mismatch");
+      if (failed(addHiddenBias(qBshd, adaptor.getBias(), 0, hidden, rewriter,
+                               loc, op)) ||
+          failed(addHiddenBias(kBshd, adaptor.getBias(), hidden, hidden,
+                               rewriter, loc, op)) ||
+          failed(addHiddenBias(vBshd, adaptor.getBias(), 2 * hidden, hiddenV,
+                               rewriter, loc, op)))
+        return failure();
+    }
+
+    Value qBnsh = transposePerm(qBshd, {0, 2, 1, 3}, rewriter, loc);
+    Value kCur = transposePerm(kBshd, {0, 2, 1, 3}, rewriter, loc);
+    Value vCur = transposePerm(vBshd, {0, 2, 1, 3}, rewriter, loc);
+
+    std::optional<int64_t> presentSeq;
+    if (op.getNumResults() >= 3) {
+      auto pkType = dyn_cast<RankedTensorType>(op.getResult(1).getType());
+      if (pkType && pkType.hasStaticShape() && pkType.getRank() == 4)
+        presentSeq = pkType.getDimSize(2);
+    }
+    Value presentK, presentV;
+    int64_t attnSeqKv = seqKv;
+    if (failed(concatGrowingPast(kCur, vCur, adaptor.getPastKey(),
+                                 adaptor.getPastValue(), batch, numHeads,
+                                 headDim, headDimV, presentSeq, rewriter, loc,
+                                 op, presentK, presentV, attnSeqKv)))
+      return failure();
+    seqKv = attnSeqKv;
+
+    Type attnElem = qInTy.getElementType();
+    int64_t bh = batch * numHeads;
+    Value q3 = reshapeTo(qBnsh, {bh, seqQ, headDim}, rewriter);
+    Value kT = transposePerm(presentK, {0, 1, 3, 2}, rewriter, loc);
+    Value k3 = reshapeTo(kT, {bh, headDim, seqKv}, rewriter);
+    Value v3 = reshapeTo(presentV, {bh, seqKv, headDimV}, rewriter);
+    auto qkTy = RankedTensorType::get({bh, seqQ, seqKv}, attnElem);
+    Value scores =
+        tosa::MatMulOp::create(rewriter, loc, qkTy, q3, k3).getResult();
+
+    if (adaptor.getAttentionBias() &&
+        failed(addAttentionBias(scores, adaptor.getAttentionBias(), qkTy,
+                                rewriter, loc, op)))
+      return failure();
+    if (adaptor.getKeyPaddingMask() &&
+        failed(addKeyPadding(scores, adaptor.getKeyPaddingMask(), qkTy, batch,
+                             numHeads, seqQ, seqKv, attnElem,
+                             op.getMaskFilterValue().convertToFloat(), rewriter,
+                             loc, op)))
+      return failure();
+
+    double scale = op.getScale().convertToFloat();
+    if (scale == 0.0)
+      scale = 1.0 / std::sqrt(static_cast<double>(headDim));
+    Value scaleSplat = createSplatFloat(rewriter, loc, qkTy, scale);
+    scores = emitTosaMul(rewriter, loc, scores, scaleSplat, qkTy);
+
+    Value kIdx = createArangeI32(rewriter, loc, seqKv);
+    kIdx = reshapeTo(kIdx, {1, 1, seqKv}, rewriter);
+    scores = applyCausalPrefill(scores, kIdx, op.getUnidirectional() != 0, seqQ,
+                                seqKv, rewriter, loc);
+
+    Value probs = softmaxLastDim(scores, Value(), rewriter, loc);
+    auto avTy = RankedTensorType::get({bh, seqQ, headDimV}, attnElem);
+    Value av = tosa::MatMulOp::create(rewriter, loc, avTy, probs, v3).getResult();
+    Value y4 = reshapeTo(av, {batch, numHeads, seqQ, headDimV}, rewriter);
+    Value y = packBnshToOutput(y4, yType, rewriter, loc);
+
+    SmallVector<Value> results = {y};
+    if (op.getNumResults() >= 3) {
+      auto pkType = cast<RankedTensorType>(op.getResult(1).getType());
+      auto pvType = cast<RankedTensorType>(op.getResult(2).getType());
+      if (cast<RankedTensorType>(presentK.getType()).getShape() !=
+              pkType.getShape() &&
+          cast<RankedTensorType>(presentK.getType()).getElementType() ==
+              pkType.getElementType())
+        presentK = reshapeTo(presentK, pkType.getShape(), rewriter);
+      if (cast<RankedTensorType>(presentV.getType()).getShape() !=
+              pvType.getShape() &&
+          cast<RankedTensorType>(presentV.getType()).getElementType() ==
+              pvType.getElementType())
+        presentV = reshapeTo(presentV, pvType.getShape(), rewriter);
+      results.push_back(presentK);
+      results.push_back(presentV);
+    }
+    if (op.getNumResults() == 4) {
+      auto qkOutTy = dyn_cast<RankedTensorType>(op.getResult(3).getType());
+      if (!qkOutTy || !qkOutTy.hasStaticShape())
+        return rewriter.notifyMatchFailure(op, "qk must be a static tensor");
+      Value qk = probs;
+      if (cast<RankedTensorType>(qk.getType()) != qkOutTy)
+        qk = reshapeTo(qk, qkOutTy.getShape(), rewriter);
+      results.push_back(qk);
+    } else if (op.getNumResults() == 2) {
+      return rewriter.notifyMatchFailure(op, "expected 1, 3, or 4 results");
+    }
+    rewriter.replaceOp(op, results);
+    return success();
+  }
+};
+
 class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
   void runOnOperation() override {
     auto funcOp = getOperation();
@@ -1422,7 +2560,7 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         MulOp, DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
         TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, WhereOp, LeakyReluOp,
         MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp, QuantizeLinearOp,
-        DequantizeLinearOp>();
+        DequantizeLinearOp, MatMulNBitsOp, GqaOp, MultiHeadAttentionOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
@@ -1463,7 +2601,8 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
                        /*FloatOnly=*/true>,
         SqrtConverter, WhereConverter, LeakyReluConverter, SoftmaxConverter,
         ReduceSumConverter, ReduceMeanConverter, CastConverter,
-        DequantizeLinearConverter, QuantizeLinearConverter>(ctx);
+        DequantizeLinearConverter, QuantizeLinearConverter,
+        MatMulNBitsConverter, GqaConverter, MhaConverter>(ctx);
 
     if (failed(applyPartialConversion(funcOp, conversion, std::move(patterns))))
       signalPassFailure();
