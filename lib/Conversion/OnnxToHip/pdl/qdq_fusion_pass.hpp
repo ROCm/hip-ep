@@ -505,7 +505,9 @@ extractQuantBits(mlir::PatternRewriter &rewriter, mlir::PDLResultList &results,
 }
 
 // args[0] = op, args[1] = attribute name, args[2] = value to use when absent.
-// Return failure if the attribute is not an i64 integer attribute.
+// Return failure if the attribute is not a 64-bit integer attribute.
+// The result is always signless, because it feeds hip op attributes declared
+// as I64Attr while ONNX stores its integer attributes as si64.
 inline mlir::LogicalResult
 extractAttrInt64(mlir::PatternRewriter &rewriter, mlir::PDLResultList &results,
                  llvm::ArrayRef<mlir::PDLValue> args) {
@@ -526,7 +528,8 @@ extractAttrInt64(mlir::PatternRewriter &rewriter, mlir::PDLResultList &results,
   if (attr && !attr.getType().isInteger(64))
     return mlir::failure();
 
-  results.push_back(attr ? attr : defaultValue);
+  results.push_back(rewriter.getI64IntegerAttr(
+      (attr ? attr : defaultValue).getValue().getSExtValue()));
   return mlir::success();
 }
 
