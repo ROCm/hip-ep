@@ -1441,6 +1441,87 @@ Value createSplatInt(ConversionPatternRewriter &rewriter, Location loc,
       DenseElementsAttr::get(type, rewriter.getIntegerAttr(elemType, value)));
 }
 
+// ONNX Gather indexes one axis with an indices tensor of arbitrary rank. TOSA
+// gather has the canonical batched form [N,K,C] x [N,W] -> [N,W,C]. Flatten
+// the dimensions around the gathered axis into N/C, replicate the common ONNX
+// indices across N, gather, then restore the ONNX result shape.
+struct GatherConverter final : public OpConversionPattern<GatherOp> {
+  using OpConversionPattern<GatherOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(GatherOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    auto dataTy = dyn_cast<RankedTensorType>(adaptor.getData().getType());
+    auto indicesTy = dyn_cast<RankedTensorType>(adaptor.getIndices().getType());
+    auto resultTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!dataTy || !indicesTy || !resultTy || !dataTy.hasStaticShape() ||
+        !indicesTy.hasStaticShape() || !resultTy.hasStaticShape())
+      return rewriter.notifyMatchFailure(
+          op, "expected static ranked data, indices, and result tensors");
+
+    int64_t rank = dataTy.getRank();
+    int64_t axis = op.getAxis();
+    if (axis < 0)
+      axis += rank;
+    if (axis < 0 || axis >= rank)
+      return rewriter.notifyMatchFailure(op, "axis out of range");
+    if (!isa<IntegerType>(indicesTy.getElementType()))
+      return rewriter.notifyMatchFailure(op, "indices must be integers");
+
+    int64_t n = 1;
+    int64_t c = 1;
+    for (int64_t i = 0; i < axis; ++i)
+      n *= dataTy.getDimSize(i);
+    for (int64_t i = axis + 1; i < rank; ++i)
+      c *= dataTy.getDimSize(i);
+    int64_t k = dataTy.getDimSize(axis);
+    int64_t w = indicesTy.getNumElements();
+    if (k <= 0)
+      return rewriter.notifyMatchFailure(op, "gathered axis must be non-empty");
+
+    SmallVector<int64_t> expectedShape;
+    expectedShape.append(dataTy.getShape().begin(),
+                         dataTy.getShape().begin() + axis);
+    expectedShape.append(indicesTy.getShape().begin(),
+                         indicesTy.getShape().end());
+    expectedShape.append(dataTy.getShape().begin() + axis + 1,
+                         dataTy.getShape().end());
+    if (resultTy.getShape() != ArrayRef<int64_t>(expectedShape))
+      return rewriter.notifyMatchFailure(op, "result shape is not ONNX Gather");
+
+    Location loc = op.getLoc();
+    Value values = reshapeTo(adaptor.getData(), {n, k, c}, rewriter);
+    Value indices = emitTosaCast(rewriter, loc, adaptor.getIndices(),
+                                 rewriter.getI32Type());
+    indices = reshapeTo(indices, {1, w}, rewriter);
+    if (n != 1)
+      indices = tileMultiples(indices, {n, 1}, {n, w}, rewriter, loc);
+
+    // ONNX permits indices in [-K, K-1]. TOSA requires non-negative in-range
+    // indices, so normalize the negative half before gathering.
+    auto canonicalIndicesTy =
+        RankedTensorType::get({n, w}, rewriter.getI32Type());
+    Value zero = createSplatInt(rewriter, loc, canonicalIndicesTy, 0);
+    Value extent = createSplatInt(rewriter, loc, canonicalIndicesTy, k);
+    Value isNegative = tosa::GreaterOp::create(
+        rewriter, loc, RankedTensorType::get({n, w}, rewriter.getI1Type()),
+        zero, indices);
+    Value wrapped =
+        tosa::AddOp::create(rewriter, loc, canonicalIndicesTy, indices, extent);
+    indices = tosa::SelectOp::create(rewriter, loc, canonicalIndicesTy,
+                                     isNegative, wrapped, indices);
+
+    auto gatheredTy = RankedTensorType::get({n, w, c}, dataTy.getElementType());
+    Value gathered =
+        tosa::GatherOp::create(rewriter, loc, gatheredTy, values, indices);
+    rewriter.replaceOp(op, reshapeTo(gathered, resultTy.getShape(), rewriter));
+    return success();
+  }
+};
+
 // Packed uint8 int4: low nibble is the first value, high nibble the second.
 // Cast to i32 so nibble extract is an unsigned bit pattern, then interleave.
 Value unpackInt4LastDim(Value packed, ConversionPatternRewriter &rewriter,
@@ -1843,9 +1924,128 @@ LogicalResult concatGrowingPast(Value kCur, Value vCur, Value pastK,
   return success();
 }
 
-LogicalResult applyRope(Value &tensor, Value cos, Value sin, int64_t seqLen,
-                        bool interleaved, ConversionPatternRewriter &rewriter,
-                        Location loc, Operation *op) {
+// Look up [max_pos, half] cos/sin rows with integer position_ids [B, S].
+// TOSA gather is [N,K,C] x [N,W] -> [N,W,C]; out-of-range ids are clamped
+// the way the HIP RoPE kernel does.
+LogicalResult gatherRopeCacheRows(Value cache, Value positionIds, int64_t batch,
+                                  int64_t seqLen, int64_t half,
+                                  ConversionPatternRewriter &rewriter,
+                                  Location loc, Operation *op,
+                                  Value &gathered) {
+  auto cacheTy = dyn_cast<RankedTensorType>(cache.getType());
+  auto posTy = dyn_cast<RankedTensorType>(positionIds.getType());
+  if (!cacheTy || !cacheTy.hasStaticShape() || cacheTy.getRank() != 2 ||
+      cacheTy.getDimSize(1) != half)
+    return rewriter.notifyMatchFailure(
+        op, "indexed RoPE caches must match [max_position, rotary_dim/2]");
+  if (!posTy || !posTy.hasStaticShape() || posTy.getRank() != 2 ||
+      posTy.getDimSize(0) != batch || posTy.getDimSize(1) != seqLen ||
+      !isa<IntegerType>(posTy.getElementType()))
+    return rewriter.notifyMatchFailure(
+        op, "position_ids must have integer shape [batch, seq]");
+
+  int64_t maxPos = cacheTy.getDimSize(0);
+  if (maxPos <= 0)
+    return rewriter.notifyMatchFailure(op, "RoPE cache must have a row");
+
+  Value values = reshapeTo(cache, {1, maxPos, half}, rewriter);
+  if (batch != 1)
+    values = tileMultiples(values, {batch, 1, 1}, {batch, maxPos, half},
+                           rewriter, loc);
+  Value indices =
+      emitTosaCast(rewriter, loc, positionIds, rewriter.getI32Type());
+  indices = reshapeTo(indices, {batch, seqLen}, rewriter);
+
+  auto indicesTy = RankedTensorType::get({batch, seqLen}, rewriter.getI32Type());
+  Value zero = createSplatInt(rewriter, loc, indicesTy, 0);
+  Value last = createSplatInt(rewriter, loc, indicesTy, maxPos - 1);
+  indices = tosa::MaximumOp::create(rewriter, loc, indicesTy, indices, zero);
+  indices = tosa::MinimumOp::create(rewriter, loc, indicesTy, indices, last);
+
+  auto gatheredTy =
+      RankedTensorType::get({batch, seqLen, half}, cacheTy.getElementType());
+  gathered = tosa::GatherOp::create(rewriter, loc, gatheredTy, values, indices);
+  return success();
+}
+
+LogicalResult applyRopeExpanded(Value &tensor, Value cos, Value sin,
+                                int64_t rotaryDim, bool interleaved,
+                                ConversionPatternRewriter &rewriter,
+                                Location loc, Operation *op) {
+  auto ty = cast<RankedTensorType>(tensor.getType());
+  int64_t b = ty.getDimSize(0);
+  int64_t h = ty.getDimSize(1);
+  int64_t seqLen = ty.getDimSize(2);
+  int64_t d = ty.getDimSize(3);
+  if (rotaryDim <= 0 || rotaryDim > d || rotaryDim % 2 != 0)
+    return rewriter.notifyMatchFailure(
+        op, "RoPE rotary dim must be positive, even, and <= head dim");
+  int64_t half = rotaryDim / 2;
+
+  Value rotary = tensor;
+  Value tail;
+  if (rotaryDim != d) {
+    rotary = sliceOffsetSize(tensor, {0, 0, 0, 0}, {b, h, seqLen, rotaryDim},
+                             rewriter, loc);
+    tail = sliceOffsetSize(tensor, {0, 0, 0, rotaryDim},
+                           {b, h, seqLen, d - rotaryDim}, rewriter, loc);
+  }
+
+  Value x1, x2;
+  if (!interleaved) {
+    x1 = sliceOffsetSize(rotary, {0, 0, 0, 0}, {b, h, seqLen, half}, rewriter,
+                         loc);
+    x2 = sliceOffsetSize(rotary, {0, 0, 0, half}, {b, h, seqLen, half},
+                         rewriter, loc);
+  } else {
+    Value r = reshapeTo(rotary, {b, h, seqLen, half, 2}, rewriter);
+    x1 = sliceOffsetSize(r, {0, 0, 0, 0, 0}, {b, h, seqLen, half, 1}, rewriter,
+                         loc);
+    x2 = sliceOffsetSize(r, {0, 0, 0, 0, 1}, {b, h, seqLen, half, 1}, rewriter,
+                         loc);
+    x1 = reshapeTo(x1, {b, h, seqLen, half}, rewriter);
+    x2 = reshapeTo(x2, {b, h, seqLen, half}, rewriter);
+  }
+
+  auto halfTy = cast<RankedTensorType>(x1.getType());
+  Value nx2 = tosa::NegateOp::create(rewriter, loc, halfTy, x2);
+  Value x1c = emitTosaMul(rewriter, loc, x1, cos, halfTy);
+  Value x2s = emitTosaMul(rewriter, loc, nx2, sin, halfTy);
+  Value left = tosa::AddOp::create(rewriter, loc, halfTy, x1c, x2s);
+  Value x2c = emitTosaMul(rewriter, loc, x2, cos, halfTy);
+  Value x1s = emitTosaMul(rewriter, loc, x1, sin, halfTy);
+  Value right = tosa::AddOp::create(rewriter, loc, halfTy, x2c, x1s);
+
+  Value rotated;
+  if (!interleaved) {
+    auto catTy =
+        RankedTensorType::get({b, h, seqLen, rotaryDim}, ty.getElementType());
+    rotated =
+        tosa::ConcatOp::create(rewriter, loc, catTy, ValueRange{left, right},
+                               rewriter.getI32IntegerAttr(3));
+  } else {
+    Value le = reshapeTo(left, {b, h, seqLen, half, 1}, rewriter);
+    Value ri = reshapeTo(right, {b, h, seqLen, half, 1}, rewriter);
+    auto catTy =
+        RankedTensorType::get({b, h, seqLen, half, 2}, ty.getElementType());
+    Value cat = tosa::ConcatOp::create(rewriter, loc, catTy, ValueRange{le, ri},
+                                       rewriter.getI32IntegerAttr(4));
+    rotated = reshapeTo(cat, {b, h, seqLen, rotaryDim}, rewriter);
+  }
+  if (tail) {
+    tensor =
+        tosa::ConcatOp::create(rewriter, loc, ty, ValueRange{rotated, tail},
+                               rewriter.getI32IntegerAttr(3));
+  } else {
+    tensor = rotated;
+  }
+  return success();
+}
+
+LogicalResult applyRope(Value &tensor, Value cos, Value sin, Value positionIds,
+                        int64_t seqLen, bool interleaved,
+                        ConversionPatternRewriter &rewriter, Location loc,
+                        Operation *op) {
   auto ty = cast<RankedTensorType>(tensor.getType());
   int64_t b = ty.getDimSize(0);
   int64_t h = ty.getDimSize(1);
@@ -1859,56 +2059,128 @@ LogicalResult applyRope(Value &tensor, Value cos, Value sin, int64_t seqLen,
     return rewriter.notifyMatchFailure(op, "RoPE caches must be static");
   if (cosTy.getRank() != 2 || sinTy.getRank() != 2)
     return rewriter.notifyMatchFailure(op, "RoPE caches must be rank 2");
-  if (cosTy.getDimSize(0) < seqLen || sinTy.getDimSize(0) < seqLen)
-    return rewriter.notifyMatchFailure(op, "RoPE cache shorter than seq");
-  Value c = sliceOffsetSize(cos, {0, 0}, {seqLen, half}, rewriter, loc);
-  Value s = sliceOffsetSize(sin, {0, 0}, {seqLen, half}, rewriter, loc);
-  c = reshapeTo(c, {1, 1, seqLen, half}, rewriter);
-  s = reshapeTo(s, {1, 1, seqLen, half}, rewriter);
-  c = tileMultiples(c, {b, h, 1, 1}, {b, h, seqLen, half}, rewriter, loc);
-  s = tileMultiples(s, {b, h, 1, 1}, {b, h, seqLen, half}, rewriter, loc);
+  if (sinTy.getShape() != cosTy.getShape() || cosTy.getDimSize(1) != half)
+    return rewriter.notifyMatchFailure(
+        op, "RoPE caches must match [max_position, head_dim/2]");
 
-  Value x1, x2;
-  if (!interleaved) {
-    x1 = sliceOffsetSize(tensor, {0, 0, 0, 0}, {b, h, seqLen, half}, rewriter,
-                         loc);
-    x2 = sliceOffsetSize(tensor, {0, 0, 0, half}, {b, h, seqLen, half},
-                         rewriter, loc);
+  Value c, s;
+  if (positionIds) {
+    if (failed(gatherRopeCacheRows(cos, positionIds, b, seqLen, half, rewriter,
+                                   loc, op, c)) ||
+        failed(gatherRopeCacheRows(sin, positionIds, b, seqLen, half, rewriter,
+                                   loc, op, s)))
+      return failure();
+    c = reshapeTo(c, {b, 1, seqLen, half}, rewriter);
+    s = reshapeTo(s, {b, 1, seqLen, half}, rewriter);
+    c = tileMultiples(c, {1, h, 1, 1}, {b, h, seqLen, half}, rewriter, loc);
+    s = tileMultiples(s, {1, h, 1, 1}, {b, h, seqLen, half}, rewriter, loc);
   } else {
-    Value r = reshapeTo(tensor, {b, h, seqLen, half, 2}, rewriter);
-    x1 = sliceOffsetSize(r, {0, 0, 0, 0, 0}, {b, h, seqLen, half, 1}, rewriter,
-                         loc);
-    x2 = sliceOffsetSize(r, {0, 0, 0, 0, 1}, {b, h, seqLen, half, 1}, rewriter,
-                         loc);
-    x1 = reshapeTo(x1, {b, h, seqLen, half}, rewriter);
-    x2 = reshapeTo(x2, {b, h, seqLen, half}, rewriter);
+    if (cosTy.getDimSize(0) < seqLen)
+      return rewriter.notifyMatchFailure(op, "RoPE cache shorter than seq");
+    c = sliceOffsetSize(cos, {0, 0}, {seqLen, half}, rewriter, loc);
+    s = sliceOffsetSize(sin, {0, 0}, {seqLen, half}, rewriter, loc);
+    c = reshapeTo(c, {1, 1, seqLen, half}, rewriter);
+    s = reshapeTo(s, {1, 1, seqLen, half}, rewriter);
+    c = tileMultiples(c, {b, h, 1, 1}, {b, h, seqLen, half}, rewriter, loc);
+    s = tileMultiples(s, {b, h, 1, 1}, {b, h, seqLen, half}, rewriter, loc);
   }
-
-  auto halfTy = cast<RankedTensorType>(x1.getType());
-  Value nx2 = tosa::NegateOp::create(rewriter, loc, halfTy, x2);
-  Value x1c = emitTosaMul(rewriter, loc, x1, c, halfTy);
-  Value x2s = emitTosaMul(rewriter, loc, nx2, s, halfTy);
-  Value left = tosa::AddOp::create(rewriter, loc, halfTy, x1c, x2s);
-  Value x2c = emitTosaMul(rewriter, loc, x2, c, halfTy);
-  Value x1s = emitTosaMul(rewriter, loc, x1, s, halfTy);
-  Value right = tosa::AddOp::create(rewriter, loc, halfTy, x2c, x1s);
-
-  if (!interleaved) {
-    auto catTy = RankedTensorType::get({b, h, seqLen, d}, ty.getElementType());
-    tensor =
-        tosa::ConcatOp::create(rewriter, loc, catTy, ValueRange{left, right},
-                               rewriter.getI32IntegerAttr(3));
-  } else {
-    Value le = reshapeTo(left, {b, h, seqLen, half, 1}, rewriter);
-    Value ri = reshapeTo(right, {b, h, seqLen, half, 1}, rewriter);
-    auto catTy =
-        RankedTensorType::get({b, h, seqLen, half, 2}, ty.getElementType());
-    Value cat = tosa::ConcatOp::create(rewriter, loc, catTy, ValueRange{le, ri},
-                                       rewriter.getI32IntegerAttr(4));
-    tensor = reshapeTo(cat, {b, h, seqLen, d}, rewriter);
-  }
-  return success();
+  return applyRopeExpanded(tensor, c, s, d, interleaved, rewriter, loc, op);
 }
+
+struct RopeConverter final : public OpConversionPattern<RopeOp> {
+  using OpConversionPattern<RopeOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(RopeOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    auto inputTy = dyn_cast<RankedTensorType>(adaptor.getInput().getType());
+    auto resultTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    auto cosTy = dyn_cast<RankedTensorType>(adaptor.getCosCache().getType());
+    auto sinTy = dyn_cast<RankedTensorType>(adaptor.getSinCache().getType());
+    if (!inputTy || !resultTy || !cosTy || !sinTy ||
+        !inputTy.hasStaticShape() || !resultTy.hasStaticShape() ||
+        !cosTy.hasStaticShape() || !sinTy.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected static ranked tensors");
+    if (inputTy != resultTy)
+      return rewriter.notifyMatchFailure(op,
+                                         "RoPE input/result types must match");
+    if (!isa<FloatType>(inputTy.getElementType()))
+      return rewriter.notifyMatchFailure(op, "RoPE input must be floating");
+    if (cosTy.getElementType() != inputTy.getElementType() ||
+        sinTy.getElementType() != inputTy.getElementType())
+      return rewriter.notifyMatchFailure(op,
+                                         "RoPE cache types must match input");
+    if (inputTy.getRank() != 3 && inputTy.getRank() != 4)
+      return rewriter.notifyMatchFailure(op, "RoPE input must be BSH or BNSH");
+
+    int64_t b = inputTy.getDimSize(0);
+    int64_t seqLen = inputTy.getDimSize(inputTy.getRank() == 3 ? 1 : 2);
+    int64_t numHeads = op.getNumHeads();
+    int64_t headDim;
+    if (inputTy.getRank() == 3) {
+      if (numHeads <= 0 || inputTy.getDimSize(2) % numHeads != 0)
+        return rewriter.notifyMatchFailure(
+            op, "BSH hidden size must be divisible by num_heads");
+      headDim = inputTy.getDimSize(2) / numHeads;
+    } else {
+      if (numHeads <= 0)
+        numHeads = inputTy.getDimSize(1);
+      if (numHeads != inputTy.getDimSize(1))
+        return rewriter.notifyMatchFailure(
+            op, "num_heads disagrees with BNSH input");
+      headDim = inputTy.getDimSize(3);
+    }
+
+    int64_t rotaryDim = op.getRotaryEmbeddingDim();
+    if (rotaryDim == 0)
+      rotaryDim = headDim;
+    if (rotaryDim <= 0 || rotaryDim > headDim || rotaryDim % 2 != 0)
+      return rewriter.notifyMatchFailure(
+          op, "rotary dim must be positive, even, and <= head dim");
+    int64_t half = rotaryDim / 2;
+    if (op.getInterleaved() != 0 && op.getInterleaved() != 1)
+      return rewriter.notifyMatchFailure(op, "interleaved must be 0 or 1");
+
+    Location loc = op.getLoc();
+    Value input = adaptor.getInput();
+    if (inputTy.getRank() == 3) {
+      input = reshapeTo(input, {b, seqLen, numHeads, headDim}, rewriter);
+      input = transposePerm(input, {0, 2, 1, 3}, rewriter, loc);
+    }
+
+    Value cos = adaptor.getCosCache();
+    Value sin = adaptor.getSinCache();
+    if (Value positionIds = adaptor.getPositionIds()) {
+      if (failed(gatherRopeCacheRows(cos, positionIds, b, seqLen, half,
+                                     rewriter, loc, op, cos)) ||
+          failed(gatherRopeCacheRows(sin, positionIds, b, seqLen, half,
+                                     rewriter, loc, op, sin)))
+        return failure();
+    } else {
+      if (cosTy.getRank() != 3 || sinTy.getRank() != 3 ||
+          cosTy.getDimSize(0) != b || cosTy.getDimSize(1) != seqLen ||
+          cosTy.getDimSize(2) != half || sinTy.getShape() != cosTy.getShape())
+        return rewriter.notifyMatchFailure(
+            op, "expanded RoPE caches must match [batch, seq, rotary_dim/2]");
+    }
+    cos = reshapeTo(cos, {b, 1, seqLen, half}, rewriter);
+    sin = reshapeTo(sin, {b, 1, seqLen, half}, rewriter);
+
+    if (failed(applyRopeExpanded(input, cos, sin, rotaryDim,
+                                 op.getInterleaved() != 0, rewriter, loc, op)))
+      return failure();
+
+    if (inputTy.getRank() == 3) {
+      input = transposePerm(input, {0, 2, 1, 3}, rewriter, loc);
+      input = reshapeTo(input, inputTy.getShape(), rewriter);
+    }
+    rewriter.replaceOp(op, input);
+    return success();
+  }
+};
 
 LogicalResult dequantIfNeeded(Value &cache, Value scale, Type attnElem,
                               StringRef quantType,
@@ -2058,13 +2330,17 @@ struct GqaConverter final : public OpConversionPattern<GqaOp> {
       if (!adaptor.getCosCache() || !adaptor.getSinCache())
         return rewriter.notifyMatchFailure(
             op, "do_rotary requires cos_cache and sin_cache");
-      if (adaptor.getPastKey())
+      // Prefill without position_ids slices cache rows [0, seqQ). Decode with
+      // past needs gather by position_ids (past KV is already rotated).
+      if (adaptor.getPastKey() && !adaptor.getPositionIds())
         return rewriter.notifyMatchFailure(op, "decode RoPE is unsupported");
       bool interleaved = op.getRotaryInterleaved() != 0;
       if (failed(applyRope(qBnsh, adaptor.getCosCache(), adaptor.getSinCache(),
-                           seqQ, interleaved, rewriter, loc, op)) ||
+                           adaptor.getPositionIds(), seqQ, interleaved,
+                           rewriter, loc, op)) ||
           failed(applyRope(kCur, adaptor.getCosCache(), adaptor.getSinCache(),
-                           seqQ, interleaved, rewriter, loc, op)))
+                           adaptor.getPositionIds(), seqQ, interleaved,
+                           rewriter, loc, op)))
         return failure();
     }
 
@@ -2616,7 +2892,8 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         MulOp, DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
         TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, WhereOp, LeakyReluOp,
         MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp, QuantizeLinearOp,
-        DequantizeLinearOp, MatMulNBitsOp, GqaOp, MultiHeadAttentionOp>();
+        DequantizeLinearOp, MatMulNBitsOp, GatherOp, RopeOp, GqaOp,
+        MultiHeadAttentionOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
@@ -2658,7 +2935,8 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         SqrtConverter, WhereConverter, LeakyReluConverter, SoftmaxConverter,
         ReduceSumConverter, ReduceMeanConverter, CastConverter,
         DequantizeLinearConverter, QuantizeLinearConverter,
-        MatMulNBitsConverter, GqaConverter, MhaConverter>(ctx);
+        MatMulNBitsConverter, GatherConverter, RopeConverter, GqaConverter,
+        MhaConverter>(ctx);
 
     if (failed(applyPartialConversion(funcOp, conversion, std::move(patterns))))
       signalPassFailure();

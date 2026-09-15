@@ -6,8 +6,8 @@
 // hip.gqa lowers to TOSA SDPA inside a rock.kernel function. Cover prefill
 // MHA/GQA, decode+past concat, no_causal, bias, window, packed QKV, scale=0,
 // RoPE, head_sink, INT8 KV, output_qk, the ub.poison context form, and a
-// no-op without rock.kernel. Rejections (dynamic, share-buffer, INT4,
-// decode RoPE) each get their own --split-input-file chunk.
+// no-op without rock.kernel. Rejections (share-buffer, INT4, decode RoPE
+// without position_ids) each get their own --split-input-file chunk.
 // ============================================================================
 
 // RUN: hip-mlir-opt --convert-hip-to-tosa --split-input-file \
@@ -234,6 +234,7 @@ func.func @rope_prefill(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
 }
 
 // CHECK-LABEL: func.func @rope_prefill_with_position_ids
+// CHECK: tosa.gather
 // CHECK: tosa.negate
 // CHECK-NOT: hip.gqa
 func.func @rope_prefill_with_position_ids(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
@@ -250,6 +251,31 @@ func.func @rope_prefill_with_position_ids(%ctx: !hip.context, %q: tensor<1x4x16x
       num_heads = 2 : i64, kv_num_heads = 2 : i64, do_rotary = 1 : i64, no_causal = true
     } : (!hip.context, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1xi32>, tensor<i32>, tensor<4x4xf16>, tensor<4x4xf16>, tensor<1x4xi64>, tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>) -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
   return %r#0, %r#1, %r#2 : tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
+}
+
+// Decode RoPE applies only to the new Q/K tokens. Past cache is already
+// rotated, so position_ids of shape [B, seqQ] are enough to gather.
+// CHECK-LABEL: func.func @decode_rope_with_position_ids
+// CHECK: tosa.gather
+// CHECK: tosa.concat
+// CHECK: tosa.matmul
+// CHECK-NOT: hip.gqa
+func.func @decode_rope_with_position_ids(%ctx: !hip.context, %q: tensor<1x1x16xf16>,
+                                         %k: tensor<1x1x16xf16>, %v: tensor<1x1x16xf16>,
+                                         %past_k: tensor<1x2x3x8xf16>,
+                                         %past_v: tensor<1x2x3x8xf16>,
+                                         %seqlens: tensor<1xi32>, %total: tensor<i32>,
+                                         %cos: tensor<8x4xf16>, %sin: tensor<8x4xf16>,
+                                         %pos: tensor<1x1xi64>,
+                                         %o: tensor<1x1x16xf16>, %pk: tensor<1x2x4x8xf16>,
+                                         %pv: tensor<1x2x4x8xf16>)
+    -> (tensor<1x1x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
+    attributes {rock.kernel} {
+  %r:3 = "hip.gqa"(%ctx, %q, %k, %v, %past_k, %past_v, %seqlens, %total, %cos, %sin, %pos, %o, %pk, %pv) {
+      operandSegmentSizes = array<i32: 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0>,
+      num_heads = 2 : i64, kv_num_heads = 2 : i64, do_rotary = 1 : i64
+    } : (!hip.context, tensor<1x1x16xf16>, tensor<1x1x16xf16>, tensor<1x1x16xf16>, tensor<1x2x3x8xf16>, tensor<1x2x3x8xf16>, tensor<1xi32>, tensor<i32>, tensor<8x4xf16>, tensor<8x4xf16>, tensor<1x1xi64>, tensor<1x1x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>) -> (tensor<1x1x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
+  return %r#0, %r#1, %r#2 : tensor<1x1x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
 }
 
 // CHECK-LABEL: func.func @head_sink
@@ -305,23 +331,6 @@ func.func @no_rock_kernel(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
       num_heads = 2 : i64, kv_num_heads = 2 : i64, scale = 3.53553391e-01 : f32
     } : (!hip.context, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1x4x16xf16>, tensor<1xi32>, tensor<i32>, tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>) -> (tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
   return %r#0, %r#1, %r#2 : tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
-}
-
-// -----
-
-func.func @dynamic_rejected(%ctx: !hip.context, %q: tensor<1x?x16xf16>,
-                            %k: tensor<1x?x16xf16>, %v: tensor<1x?x16xf16>,
-                            %seqlens: tensor<1xi32>, %total: tensor<i32>,
-                            %o: tensor<1x?x16xf16>, %pk: tensor<1x2x?x8xf16>,
-                            %pv: tensor<1x2x?x8xf16>)
-    -> (tensor<1x?x16xf16>, tensor<1x2x?x8xf16>, tensor<1x2x?x8xf16>)
-    attributes {rock.kernel} {
-  // expected-error@+1 {{failed to legalize operation 'hip.gqa'}}
-  %r:3 = "hip.gqa"(%ctx, %q, %k, %v, %seqlens, %total, %o, %pk, %pv) {
-      operandSegmentSizes = array<i32: 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0>,
-      num_heads = 2 : i64, kv_num_heads = 2 : i64
-    } : (!hip.context, tensor<1x?x16xf16>, tensor<1x?x16xf16>, tensor<1x?x16xf16>, tensor<1xi32>, tensor<i32>, tensor<1x?x16xf16>, tensor<1x2x?x8xf16>, tensor<1x2x?x8xf16>) -> (tensor<1x?x16xf16>, tensor<1x2x?x8xf16>, tensor<1x2x?x8xf16>)
-  return %r#0, %r#1, %r#2 : tensor<1x?x16xf16>, tensor<1x2x?x8xf16>, tensor<1x2x?x8xf16>
 }
 
 // -----

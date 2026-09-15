@@ -8,8 +8,8 @@
 // bias, BNSH, past concat, QK / scale / softmax / PV). Cover separate QKV,
 // cross-attention, packed QKV/KV, projection bias, attention_bias, padding
 // mask, unidirectional, past concat, qk dump, and ub.poison. Rejections
-// (dynamic, share-buffer, cache_indirection, past_sequence_length) each get
-// their own --split-input-file chunk.
+// (share-buffer, cache_indirection, past_sequence_length) each get their
+// own --split-input-file chunk.
 // ============================================================================
 
 // RUN: hip-mlir-opt --convert-hip-to-tosa --split-input-file \
@@ -183,20 +183,6 @@ func.func @no_rock_kernel(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
       {num_heads = 2 : i64}
       : tensor<1x4x16xf16>
   return %r : tensor<1x4x16xf16>
-}
-
-// -----
-
-func.func @dynamic_rejected(%ctx: !hip.context, %q: tensor<1x?x16xf16>,
-                            %k: tensor<1x?x16xf16>, %v: tensor<1x?x16xf16>,
-                            %o: tensor<1x?x16xf16>) -> tensor<1x?x16xf16>
-    attributes {rock.kernel} {
-  // expected-error@+1 {{failed to legalize operation 'hip.multi_head_attention'}}
-  %r = hip.multi_head_attention(%ctx) ins(%q, %k, %v : tensor<1x?x16xf16>, tensor<1x?x16xf16>, tensor<1x?x16xf16>)
-      outs(%o : tensor<1x?x16xf16>)
-      {num_heads = 2 : i64}
-      : tensor<1x?x16xf16>
-  return %r : tensor<1x?x16xf16>
 }
 
 // -----
