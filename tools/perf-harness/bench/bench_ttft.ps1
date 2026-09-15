@@ -25,6 +25,13 @@ param(
   [string]$Driver = 'model_benchmark',
   [int]$MaxTokens = 4,              # vlm only: keep decode short, TTFT is the target
   [int]$MaxLength,                  # vlm only: KV cache size; defaults to prompt + headroom
+  # vlm only. -SeqLen cannot set the prompt length on this path: the prompt is
+  # whatever the file holds, and the real token count is only known after the
+  # processor has run. Overriding the file per invocation is therefore the only
+  # way to sweep length, and passing it as a parameter keeps the two points of a
+  # sweep in one command each rather than in an environment variable edited
+  # between them -- which is the same class of mistake as a stale DLL.
+  [string]$PromptFile,
   # vlm only. 'follow_config' leaves the model's own genai_config provider list
   # alone; naming a provider overrides it, which is what an export pinned to
   # another EP (a -dml directory, say) needs to run here.
@@ -62,9 +69,13 @@ $ttft = $null; $p50 = $null; $sd = $null
 $tokens = ''
 
 if ($Driver -eq 'vlm') {
-  foreach ($n in 'VlmBench', 'Image', 'PromptFile') {
+  foreach ($n in 'VlmBench', 'Image') {
     if (-not $HarnessEnv.$n) { throw "Driver 'vlm' needs `$env:HIPEP_$($n.ToUpper()); see common.ps1." }
   }
+  if (-not $PromptFile) { $PromptFile = $HarnessEnv.PromptFile }
+  if (-not $PromptFile) { throw "Driver 'vlm' needs -PromptFile or `$env:HIPEP_PROMPT_FILE; see common.ps1." }
+  if (-not (Test-Path $PromptFile)) { throw "Prompt file not found: $PromptFile" }
+  $PromptFile = (Resolve-Path $PromptFile).Path
   # vlm_benchmark's own --output_json is the parse target: scraping the pretty
   # printed block would break on every formatting change.
   $json = Join-Path $OutDir "ttft_$Tag.json"
@@ -72,7 +83,7 @@ if ($Driver -eq 'vlm') {
   if (-not $MaxLength) { $MaxLength = $SeqLen + 128 }
 
   & $HarnessEnv.Python '-u' $HarnessEnv.VlmBench `
-    '-m' $HarnessEnv.Model '-i' $HarnessEnv.Image '--prompt_file' $HarnessEnv.PromptFile `
+    '-m' $HarnessEnv.Model '-i' $HarnessEnv.Image '--prompt_file' $PromptFile `
     '--max_tokens' "$MaxTokens" '--max_length' "$MaxLength" `
     '-e' $ExecutionProvider `
     '-n' "$Reps" '-w' "$Warmup" '-o' $json *>&1 |

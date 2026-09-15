@@ -116,9 +116,15 @@ $panelLog = Join-Path $OutDir "panel_$Tag.log"
 
 $isVlm = ($Driver -eq 'vlm')
 if ($isVlm) {
-  foreach ($n in 'VlmBench', 'Image', 'PromptFile') {
+  foreach ($n in 'VlmBench', 'Image') {
     if (-not $HarnessEnv.$n) { throw "Driver 'vlm' needs `$env:HIPEP_$($n.ToUpper()); see common.ps1." }
   }
+  # -PromptFile is the parameter that varies across a length sweep, so it has to
+  # satisfy this on its own rather than only $env:HIPEP_PROMPT_FILE.
+  if (-not $PromptFile) { $PromptFile = $HarnessEnv.PromptFile }
+  if (-not $PromptFile) { throw "Driver 'vlm' needs -PromptFile or `$env:HIPEP_PROMPT_FILE; see common.ps1." }
+  if (-not (Test-Path $PromptFile)) { throw "Prompt file not found: $PromptFile" }
+  $PromptFile = (Resolve-Path $PromptFile).Path
 }
 
 Stop-HarnessProcesses -IncludePython:$isVlm
@@ -165,7 +171,6 @@ if ($PSCmdlet.ParameterSetName -eq 'Fence') {
 }
 
 if ($isVlm) {
-  if (-not $PromptFile) { $PromptFile = $HarnessEnv.PromptFile }
   if (-not $MaxLength)  { $MaxLength  = $SeqLen + 128 }
   $exe   = $HarnessEnv.Python
   $margs = @('-u', $HarnessEnv.VlmBench, '-m', $HarnessEnv.Model, '-i', $HarnessEnv.Image,
