@@ -15,8 +15,8 @@ recovered from the stream itself, with no instrumentation in the build:
   expert M    the gather_tokens opening each expert block launches
               ceil(M*hidden/256)*256 threads, so M = round(threads/hidden).
   lm_head     the only MatMulNBits dispatch with a vocab-sized thread count.
-  layers      one topk_routing per layer, so a partial capture window can be
-              scaled to a whole layer stack.
+  layers      one LAYER_MARKERS dispatch per layer, so a partial capture window
+              can be scaled to a whole layer stack.
 
 That matters because the alternative -- HIPDNN_EP_PERF -- costs about 4% and is
 forbidden for throughput work.
@@ -25,6 +25,7 @@ forbidden for throughput work.
 from __future__ import annotations
 
 import argparse
+import collections
 import csv
 from dataclasses import dataclass, field
 
@@ -179,9 +180,16 @@ DENSE_MARKERS = frozenset(
 )
 
 # The int4 matmul stack: the GEMMs plus the ancillary kernels they drag along.
+# Both WMMA variants belong here. The kernel splits on whether the quantisation
+# carries a zero point, which is an export-time property, not a different kind of
+# work: the qmoe 26B export is symmetric and emits _NoZP, the dense 12B export is
+# asymmetric and emits _ZP for every projection it has. Listing only _NoZP drops
+# 84% of a 12B prefill window out of the int4 rollup and out of the --dense-ms
+# that headroom.py ranks on.
 INT4_FAMILIES = frozenset(
     {
         "MatMulNBitsWMMA_NoZP",
+        "MatMulNBitsWMMA_ZP",
         "MatMulNBitsFp16GEMM",
         "matmul_nbits_gemv",
         "dequant_u4_to_fp16",
@@ -190,7 +198,27 @@ INT4_FAMILIES = frozenset(
     }
 )
 
-GEMM_FAMILIES = ("MatMulNBitsWMMA_NoZP", "MatMulNBitsFp16GEMM", "matmul_nbits_gemv")
+GEMM_FAMILIES = (
+    "MatMulNBitsWMMA_NoZP",
+    "MatMulNBitsWMMA_ZP",
+    "MatMulNBitsFp16GEMM",
+    "matmul_nbits_gemv",
+)
+
+# Families that run exactly once per layer, tried in order. This is what turns a
+# partial capture window into a whole layer stack, so being wrong here scales
+# every number in every report.
+#
+# topk_routing is first because on an MoE model it is unambiguous: it opens the
+# expert region and nothing else emits it. A dense model has no router at all,
+# and gemma-4-12b has no `gqa` family either -- its attention is decomposed into
+# gemm/softmax/rope/kv_cache_append, so there is no single attention dispatch to
+# count. skip_rms_norm is the residual norm every transformer layer runs once,
+# and it holds across both phases: on gemma-4-12b it counts 5 in a prefill
+# window and 28 in a decode window, matching softmax_f32_to_out and
+# elementwise_gelu_f16 in each. softmax is kept as a second fallback for models
+# whose norm is fused away.
+LAYER_MARKERS = ("topk_routing", "skip_rms_norm", "softmax_f32_to_out")
 
 # Buckets chosen to straddle the dispatch thresholds in matmul_nbits_kernel.hip
 # (row-major GEMV, col-major GEMV, WMMA), so a routing change shows up as a
@@ -221,9 +249,11 @@ class Capture:
         self.spec = spec
         self.rows = list(csv.DictReader(open(path)))
         self.total_us = sum(float(r["dur_us"]) for r in self.rows)
-        self.layers_in_window = sum(
-            1 for r in self.rows if r["family"] == "topk_routing"
+        counts = collections.Counter(r["family"] for r in self.rows)
+        self.layer_marker = next(
+            (f for f in LAYER_MARKERS if counts.get(f)), LAYER_MARKERS[0]
         )
+        self.layers_in_window = counts.get(self.layer_marker, 0)
         # lm_head: the only MatMulNBits with a vocab-sized thread count.
         self.lm_head_idx = [
             i
@@ -239,7 +269,7 @@ class Capture:
         """Multiplier taking the captured window to one full layer stack."""
         if not self.layers_in_window:
             raise ValueError(
-                f"{self.path}: no topk_routing dispatches; "
+                f"{self.path}: none of {', '.join(LAYER_MARKERS)} appear; "
                 "cannot infer layer count from this window"
             )
         return self.spec.layers / self.layers_in_window
@@ -305,6 +335,48 @@ PRESETS: dict[str, dict] = {
         full_kv_heads=2,
         full_head_dim=512,
         dense_inter=2112,
+    ),
+    # google/gemma-4-12b-it, rtn int4 block-32. Dense, not MoE:
+    # enable_moe_block is false in model_config.json and the decoder trace has no
+    # qmoe or router GEMM at all. The FFN is carried by the expert term with
+    # topk=1, which is the same arithmetic one layer's FFN already does -- one
+    # gate and one up of hidden x inter, one down of inter x hidden -- so the
+    # byte counts come out right and no separate dense-MLP term is needed.
+    #
+    # 48 layers: 40 sliding (kv8 x 256, window 1024) and 8 global. The global
+    # layers project K and V once and share the result (attention_k_eq_v), so
+    # they carry kv1 x 512 rather than two separate heads. Per prefill Run the
+    # trace runs, all on matmul_nbits:
+    #   n=4096,k=3840 x40 (q)   n=2048,k=3840 x80 (k,v)  n=3840,k=4096 x40 (o)
+    #   n=8192,k=3840 x8  (q)   n=512,k=3840   x8 (kv)   n=3840,k=8192 x8  (o)
+    #   n=15360,k=3840 x96 (gate,up)                     n=3840,k=15360 x48 (down)
+    # and one n=262144,k=3840 at m=1, so the lm_head is int4 and is already
+    # pruned to the last row in prefill -- do not pass --lm-head-ms for it.
+    #
+    # qkv_n and o_proj_k are the per-layer averages over those two geometries
+    # ((40*8192 + 8*8704)/48 and (40*4096 + 8*8192)/48) rather than the sliding
+    # values. int4w() is linear in the element count, so the average reproduces
+    # the exact total weight bytes across all 48 layers; taking the sliding
+    # numbers for every layer would understate the o_proj term by 17%.
+    "gemma4-12b": dict(
+        hidden=3840,
+        inter=15360,
+        vocab=262144,
+        layers=48,
+        qkv_n=8277,
+        o_proj_k=4779,
+        router_n=0,
+        experts=0,
+        topk=1,
+        group_size=32,
+        heads=16,
+        kv_heads=8,
+        head_dim=256,
+        sliding_window=1024,
+        full_attn_layers=8,
+        full_kv_heads=1,
+        full_head_dim=512,
+        dense_inter=0,
     ),
     # Qwen/Qwen3-30B-A3B, rtn int4 g128 + fp16, lm_head pruned but NOT
     # quantised. 48 identical layers, no sliding window, no dense MLP alongside

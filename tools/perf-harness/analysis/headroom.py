@@ -212,18 +212,35 @@ def main() -> None:
     print(
         f"ceilings: {dev.peak_flops / 1e12:.1f} TFLOP/s fp16, {dev.bw_bytes_s / 1e9:.0f} GB/s"
     )
-    print(
-        f"one expert: {spec.expert_weight_bytes / 1e6:.1f} MB of weights "
-        f"-> {spec.expert_weight_bytes / dev.bw_bytes_s * 1e6:.1f} us\n"
-    )
-
-    print("=== MoE expert blocks: measured vs the floor its own work implies ===")
-    print(
-        f"{'M':>10} {'blk/chunk':>9} {'meas ms':>8} {'floor ms':>9} {'binding':>10} "
-        f"{'util':>6} {'headroom s':>11}"
-    )
+    # A dense model has no expert loop, so the whole MoE half of this report is
+    # not merely empty but undefined: spec.expert_weight_bytes is computed from
+    # hidden/inter and would print a confident MB figure for a thing that does
+    # not exist, and the `all` row divides by a measured time of zero.
+    moe = any(cap.blocks for cap in caps)
     m_all = f_all = small_m = small_f = 0.0
-    for lo, hi in M_BUCKETS:
+    if moe:
+        print(
+            f"one expert: {spec.expert_weight_bytes / 1e6:.1f} MB of weights "
+            f"-> {spec.expert_weight_bytes / dev.bw_bytes_s * 1e6:.1f} us\n"
+        )
+        print("=== MoE expert blocks: measured vs the floor its own work implies ===")
+        print(
+            f"{'M':>10} {'blk/chunk':>9} {'meas ms':>8} {'floor ms':>9} {'binding':>10} "
+            f"{'util':>6} {'headroom s':>11}"
+        )
+    elif not spec.experts:
+        print(f"dense model ({args.preset}, experts=0): MoE section skipped\n")
+    else:
+        # An MoE preset with no blocks is a different situation from a dense
+        # model and must not be labelled as one: it means the window holds no
+        # gather_tokens-delimited expert block, which on an MoE model usually
+        # means the capture is a decode step or is positioned outside the
+        # expert loop -- i.e. the capture is wrong for this report, not the model.
+        print(
+            f"{args.preset} is MoE but no expert block appears in this window "
+            "-- wrong capture position, or a decode capture; MoE section skipped\n"
+        )
+    for lo, hi in M_BUCKETS if moe else []:
         meas = fl = nb = 0.0
         bind: dict[str, int] = defaultdict(int)
         for cap in caps:
@@ -251,20 +268,33 @@ def main() -> None:
             f"{bucket_label(lo, hi):>10} {nb:9.0f} {meas / 1000:8.1f} {fl / 1000:9.1f} "
             f"{b:>10} {100 * fl / meas:5.0f}% {(meas - fl) * spec.chunks / 1e6:11.2f}"
         )
-    print(
-        f"{'all':>10} {'':>9} {m_all / 1000:8.1f} {f_all / 1000:9.1f} {'':>10} "
-        f"{100 * f_all / m_all:5.0f}% {(m_all - f_all) * spec.chunks / 1e6:11.2f}"
-    )
+    if m_all:
+        print(
+            f"{'all':>10} {'':>9} {m_all / 1000:8.1f} {f_all / 1000:9.1f} {'':>10} "
+            f"{100 * f_all / m_all:5.0f}% {(m_all - f_all) * spec.chunks / 1e6:11.2f}"
+        )
 
     # --- the rest of the chunk -------------------------------------------
     print("\n=== the rest, per chunk ===")
     c = spec.chunk_tokens
+    # Any FFN that is NOT inside the expert loop has to be in this floor, because
+    # its kernels are in the dense region and so are already inside --dense-ms.
+    # On an MoE model that is the shared MLP running alongside the experts
+    # (dense_inter). On a dense model it is the entire FFN -- gate, up and down
+    # for every layer -- which is the bulk of the model. Leaving it out compares
+    # a measured time that includes the FFN against a floor that does not, and
+    # reports a utilisation several times lower than the truth.
+    ffn_inter = spec.dense_inter or (spec.inter if not spec.experts else 0)
     dense_b = spec.layers * (
         spec.int4w(spec.hidden * spec.qkv_n)
         + spec.int4w(spec.o_proj_k * spec.hidden)
         + spec.int4w(spec.hidden * spec.router_n)
         + spec.fp16(c * spec.qkv_n)
         + spec.fp16(c * spec.hidden) * 4
+        + spec.int4w(spec.hidden * 2 * ffn_inter)
+        + spec.int4w(ffn_inter * spec.hidden)
+        + spec.fp16(c * spec.hidden) * 2
+        + spec.fp16(c * ffn_inter) * 6
     )
     dense_f = (
         spec.layers
@@ -274,6 +304,8 @@ def main() -> None:
             spec.hidden * spec.qkv_n
             + spec.o_proj_k * spec.hidden
             + spec.hidden * spec.router_n
+            + spec.hidden * 2 * ffn_inter
+            + ffn_inter * spec.hidden
         )
     )
     lm_b = spec.int4w(spec.vocab * spec.hidden) + spec.fp16(c * spec.vocab)
@@ -283,9 +315,10 @@ def main() -> None:
         f"{'component':42} {'meas ms':>8} {'floor ms':>9} {'binding':>10} {'util':>6} "
         f"{'headroom s':>11}"
     )
-    rest = [
-        ("dense projections (QKV, o_proj, router)", args.dense_ms, dense_b, dense_f)
-    ]
+    dense_label = "dense projections (QKV, o_proj, router" + (
+        f", FFN x{ffn_inter})" if ffn_inter else ")"
+    )
+    rest = [(dense_label, args.dense_ms, dense_b, dense_f)]
     if args.lm_head_ms is not None:
         rest.append(("lm_head (as executed, all rows)", args.lm_head_ms, lm_b, lm_f))
     for name, meas, byts, flop in rest:
@@ -352,6 +385,8 @@ def main() -> None:
             (small_m - small_f) * spec.chunks / 1e6,
             "new kernel",
         ),
+    ] if moe else []
+    items += [
         (
             "dense projections",
             (args.dense_ms - dense_fl_s) * spec.chunks / 1e3,

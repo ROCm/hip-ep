@@ -46,9 +46,9 @@ def main() -> None:
         cap = Capture(path, spec)
         print(f"\n######## {path}")
         print(f"{len(cap.rows)} dispatches, {cap.total_us/1000:.1f} ms, "
-              f"{cap.layers_in_window} topk_routing (layer groups)")
+              f"{cap.layers_in_window} {cap.layer_marker} (layer groups)")
 
-        tk = [i for i, r in enumerate(cap.rows) if r["family"] == "topk_routing"]
+        tk = [i for i, r in enumerate(cap.rows) if r["family"] == cap.layer_marker]
         if len(tk) > 1:
             strides = [b - a for a, b in zip(tk, tk[1:])]
             print(f"layer starts at {tk[:8]}{' ...' if len(tk) > 8 else ''}  "
