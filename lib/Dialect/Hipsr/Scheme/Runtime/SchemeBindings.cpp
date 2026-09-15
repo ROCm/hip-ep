@@ -603,23 +603,11 @@ SchemeValue mlir_create_placeholder_op(SchemeValue ctx_value, SchemeValue input_
   mlir::hipsr::PlaceholderType placeholderType =
       static_cast<mlir::hipsr::PlaceholderType>(placeholder_type_int);
 
-  // Debug: log the type being used
-  std::string typeStr;
-  llvm::raw_string_ostream os(typeStr);
-  resType.print(os);
-  mlir_log_info(("mlir_create_placeholder_op: creating with result type: " + os.str()).c_str());
-
   // Set insertion point before the operation being replaced
   g_current_rewriter->setInsertionPoint(g_current_operation);
 
   auto placeholderOp = g_current_rewriter->create<mlir::hipsr::PlaceholderOp>(
       loc, mlir::TypeRange{resType}, ctx, mlir::ValueRange{input}, placeholderType);
-
-  // Debug: log the actual result type
-  std::string resultTypeStr;
-  llvm::raw_string_ostream resultOs(resultTypeStr);
-  placeholderOp.getResult(0).getType().print(resultOs);
-  mlir_log_info(("mlir_create_placeholder_op: placeholder result type: " + resultOs.str()).c_str());
 
   return const_cast<void*>(placeholderOp.getResult(0).getAsOpaquePointer());
 }
