@@ -682,6 +682,7 @@ def build_rocmlirtriton(args, build_dir, source_dir=None, rocm_path=None):
             "LLVMRuntimeDyld",
             "MLIRBufferizationPipelines",
             "MLIRBufferizationToMemRef",
+            "MLIRComplexToLLVM",
             "MLIRDebug",
             "MLIRIRDL",
             "MLIRObservers",
