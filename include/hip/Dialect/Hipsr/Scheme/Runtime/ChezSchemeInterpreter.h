@@ -9,6 +9,11 @@
 #include <string>
 #include <vector>
 
+// Include Chez Scheme types (ptr, iptr, uptr)
+extern "C" {
+#include "boot/ta6le/scheme.h"
+}
+
 namespace mlir {
 class Operation;
 
@@ -23,9 +28,6 @@ enum class SchemeLogLevel {
   Error = 4,
   Fatal = 5
 };
-
-// C type for Scheme FFI
-typedef void* SchemeValue;
 
 /// Singleton Chez Scheme runtime.
 /// All methods are static. Runtime is initialized once globally.
@@ -56,12 +58,12 @@ class ChezSchemeInterpreter {
   static bool eval(const char* code);
 
   // Create Scheme values from C++ primitives
-  static SchemeValue makeString(const char* str);
-  static SchemeValue makeInteger(long value);
+  static ptr makeString(const char* str);
+  static ptr makeInteger(long value);
 
   // Call a Scheme function with primitive arguments
   static std::string callFunction(const char* functionName,
-                                  const std::vector<SchemeValue>& args);
+                                  const std::vector<ptr>& args);
 
   // Call a Scheme function with a single MLIR operation argument
   static void callPassFunction(const char* functionName, mlir::Operation* op);
