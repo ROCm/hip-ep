@@ -144,17 +144,17 @@ bool ChezSchemeInterpreter::eval(const char* code) {
 }
 
 // Create Scheme values from C++ primitives
-SchemeValue ChezSchemeInterpreter::makeString(const char* str) {
+ptr ChezSchemeInterpreter::makeString(const char* str) {
   return Sstring(str);
 }
 
-SchemeValue ChezSchemeInterpreter::makeInteger(long value) {
+ptr ChezSchemeInterpreter::makeInteger(long value) {
   return Sinteger(value);
 }
 
 // Call a Scheme function with primitive arguments
 std::string ChezSchemeInterpreter::callFunction(const char* functionName,
-                                                const std::vector<SchemeValue>& args) {
+                                                const std::vector<ptr>& args) {
   if (!initialized)
     return "";
 

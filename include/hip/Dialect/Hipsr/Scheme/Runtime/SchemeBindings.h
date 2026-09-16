@@ -17,10 +17,10 @@ class Attribute;
 namespace hipsr {
 
 // MLIR C++ to Scheme conversions - wrap MLIR objects as foreign pointers
-SchemeValue makeSchemeOperation(mlir::Operation* op);
-SchemeValue makeSchemeValue(mlir::Value val);
-SchemeValue makeSchemeType(mlir::Type type);
-SchemeValue makeSchemeAttribute(mlir::Attribute attr);
+ptr makeSchemeOperation(mlir::Operation* op);
+ptr makeSchemeValue(mlir::Value val);
+ptr makeSchemeType(mlir::Type type);
+ptr makeSchemeAttribute(mlir::Attribute attr);
 
 // Register all MLIR foreign functions accessible from Scheme
 void registerMlirForeignFunctions();

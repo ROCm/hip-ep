@@ -256,23 +256,23 @@ void* makeSchemeInteger(long value) {
 }
 
 // MLIR C++ to Scheme conversions - wrap as foreign pointers
-SchemeValue makeSchemeOperation(mlir::Operation* op) {
+ptr makeSchemeOperation(mlir::Operation* op) {
   // Convert pointer to Scheme unsigned-64
   return Sunsigned64(reinterpret_cast<uint64_t>(op));
 }
 
-SchemeValue makeSchemeValue(mlir::Value val) {
+ptr makeSchemeValue(mlir::Value val) {
   MlirValue cVal = wrap(val);
   // Cast away const - Scheme needs non-const pointer
   return const_cast<void*>(cVal.ptr);
 }
 
-SchemeValue makeSchemeType(mlir::Type type) {
+ptr makeSchemeType(mlir::Type type) {
   MlirType cType = wrap(type);
   return const_cast<void*>(cType.ptr);
 }
 
-SchemeValue makeSchemeAttribute(mlir::Attribute attr) {
+ptr makeSchemeAttribute(mlir::Attribute attr) {
   MlirAttribute cAttr = wrap(attr);
   return const_cast<void*>(cAttr.ptr);
 }
@@ -493,7 +493,7 @@ void mlir_log_fatal(const char* msg) {
 
 // Set memory space on a RankedTensorType
 // Returns: new Type* with memory space set
-SchemeValue mlir_type_set_memory_space(SchemeValue type_ptr, int space_int) {
+ptr mlir_type_set_memory_space(ptr type_ptr, int space_int) {
   mlir::Type type = mlir::Type::getFromOpaquePointer(type_ptr);
   auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(type);
   if (!tensorType) {
@@ -509,7 +509,7 @@ SchemeValue mlir_type_set_memory_space(SchemeValue type_ptr, int space_int) {
 }
 
 // Type shape query - returns Scheme list
-SchemeValue mlir_type_get_shape(SchemeValue type_ptr) {
+ptr mlir_type_get_shape(ptr type_ptr) {
   if (!type_ptr) return Snil;
   mlir::Type type = mlir::Type::getFromOpaquePointer(type_ptr);
   if (auto tensorType = llvm::dyn_cast<mlir::RankedTensorType>(type)) {
@@ -525,7 +525,7 @@ SchemeValue mlir_type_get_shape(SchemeValue type_ptr) {
 }
 
 // Get type from value
-SchemeValue mlir_value_get_type(SchemeValue value_ptr) {
+ptr mlir_value_get_type(ptr value_ptr) {
   if (!value_ptr) return nullptr;
   mlir::Value value = mlir::Value::getFromOpaquePointer(value_ptr);
   return const_cast<void*>(value.getType().getAsOpaquePointer());
@@ -535,14 +535,14 @@ SchemeValue mlir_value_get_type(SchemeValue value_ptr) {
 // Phase 2: Operation/Value Navigation FFI
 //===----------------------------------------------------------------------===//
 
-SchemeValue mlir_operation_get_parent(SchemeValue op_ptr) {
+ptr mlir_operation_get_parent(ptr op_ptr) {
   if (!op_ptr) return nullptr;
   mlir::Operation* op = static_cast<mlir::Operation*>(op_ptr);
   mlir::Operation* parent = op->getParentOp();
   return parent;
 }
 
-SchemeValue mlir_operation_get_operand_value(SchemeValue op_ptr, int index) {
+ptr mlir_operation_get_operand_value(ptr op_ptr, int index) {
   if (!op_ptr) return nullptr;
   mlir::Operation* op = static_cast<mlir::Operation*>(op_ptr);
   if (index < 0 || index >= (int)op->getNumOperands())
@@ -551,7 +551,7 @@ SchemeValue mlir_operation_get_operand_value(SchemeValue op_ptr, int index) {
   return const_cast<void*>(operand.getAsOpaquePointer());
 }
 
-SchemeValue mlir_operation_get_result_value(SchemeValue op_ptr, int index) {
+ptr mlir_operation_get_result_value(ptr op_ptr, int index) {
   if (!op_ptr) return nullptr;
   mlir::Operation* op = static_cast<mlir::Operation*>(op_ptr);
   if (index < 0 || index >= (int)op->getNumResults())
@@ -560,13 +560,13 @@ SchemeValue mlir_operation_get_result_value(SchemeValue op_ptr, int index) {
   return const_cast<void*>(result.getAsOpaquePointer());
 }
 
-SchemeValue mlir_operation_get_loc(SchemeValue op_ptr) {
+ptr mlir_operation_get_loc(ptr op_ptr) {
   if (!op_ptr) return nullptr;
   mlir::Operation* op = static_cast<mlir::Operation*>(op_ptr);
   return const_cast<void*>(op->getLoc().getAsOpaquePointer());
 }
 
-SchemeValue mlir_operation_get_block_argument(SchemeValue op_ptr, int index) {
+ptr mlir_operation_get_block_argument(ptr op_ptr, int index) {
   if (!op_ptr) return nullptr;
   mlir::Operation* op = static_cast<mlir::Operation*>(op_ptr);
   // Walk up to parent function
@@ -588,8 +588,8 @@ SchemeValue mlir_operation_get_block_argument(SchemeValue op_ptr, int index) {
 // Phase 3: IR Construction FFI (OpBuilder)
 //===----------------------------------------------------------------------===//
 
-SchemeValue mlir_create_placeholder_op(SchemeValue ctx_value, SchemeValue input_value,
-                                       SchemeValue result_type, int placeholder_type_int) {
+ptr mlir_create_placeholder_op(ptr ctx_value, ptr input_value,
+                                       ptr result_type, int placeholder_type_int) {
   if (!g_current_rewriter || !g_current_operation) {
     mlir_log_error("mlir_create_placeholder_op: No active PatternRewriter context");
     return nullptr;
@@ -612,8 +612,8 @@ SchemeValue mlir_create_placeholder_op(SchemeValue ctx_value, SchemeValue input_
   return const_cast<void*>(placeholderOp.getResult(0).getAsOpaquePointer());
 }
 
-SchemeValue mlir_create_cast_op(SchemeValue ctx_value, SchemeValue input_value,
-                                SchemeValue output_value, SchemeValue result_type) {
+ptr mlir_create_cast_op(ptr ctx_value, ptr input_value,
+                                ptr output_value, ptr result_type) {
   if (!g_current_rewriter || !g_current_operation) {
     mlir_log_error("mlir_create_cast_op: No active PatternRewriter context");
     return nullptr;
@@ -636,10 +636,10 @@ SchemeValue mlir_create_cast_op(SchemeValue ctx_value, SchemeValue input_value,
 // op_name: operation name string (e.g., "hipsr.min")
 // operands_list: Scheme list of operand Values
 // result_types_list: Scheme list of result Types
-// Returns: Operation* as SchemeValue
-SchemeValue mlir_create_generic_op(const char* op_name,
-                                   SchemeValue operands_list,
-                                   SchemeValue result_types_list) {
+// Returns: Operation* as ptr
+ptr mlir_create_generic_op(const char* op_name,
+                                   ptr operands_list,
+                                   ptr result_types_list) {
   if (!g_current_rewriter || !g_current_operation) {
     mlir_log_error("mlir_create_generic_op: No active PatternRewriter context");
     return nullptr;
@@ -686,14 +686,14 @@ SchemeValue mlir_create_generic_op(const char* op_name,
   state.addTypes(resultTypes);
 
   mlir::Operation* op = g_current_rewriter->create(state);
-  return reinterpret_cast<SchemeValue>(op);
+  return reinterpret_cast<ptr>(op);
 }
 
 // Get result value from operation
-// op: Operation* as SchemeValue
+// op: Operation* as ptr
 // index: result index
-// Returns: Value as SchemeValue
-SchemeValue mlir_operation_get_result_value_from_op(SchemeValue op_ptr, int index) {
+// Returns: Value as ptr
+ptr mlir_operation_get_result_value_from_op(ptr op_ptr, int index) {
   mlir::Operation* op = static_cast<mlir::Operation*>(op_ptr);
   if (!op) {
     mlir_log_error("mlir_operation_get_result_value_from_op: null operation");
@@ -712,7 +712,7 @@ SchemeValue mlir_operation_get_result_value_from_op(SchemeValue op_ptr, int inde
 // Phase 4: Pattern Rewriter FFI
 //===----------------------------------------------------------------------===//
 
-SchemeValue mlir_create_unrealized_conversion_cast(SchemeValue input_value, SchemeValue target_type) {
+ptr mlir_create_unrealized_conversion_cast(ptr input_value, ptr target_type) {
   if (!g_current_rewriter || !g_current_operation) {
     mlir_log_error("mlir_create_unrealized_conversion_cast: No active PatternRewriter context");
     return nullptr;
@@ -730,7 +730,7 @@ SchemeValue mlir_create_unrealized_conversion_cast(SchemeValue input_value, Sche
   return const_cast<void*>(castOp.getResult(0).getAsOpaquePointer());
 }
 
-int mlir_replace_op(SchemeValue old_op, SchemeValue new_value) {
+int mlir_replace_op(ptr old_op, ptr new_value) {
   if (!g_current_rewriter) {
     mlir_log_error("mlir_replace_op: No active PatternRewriter context");
     return 0;
@@ -743,7 +743,7 @@ int mlir_replace_op(SchemeValue old_op, SchemeValue new_value) {
   return 1;
 }
 
-int mlir_erase_op(SchemeValue op) {
+int mlir_erase_op(ptr op) {
   if (!g_current_rewriter) {
     mlir_log_error("mlir_erase_op: No active PatternRewriter context");
     return 0;
@@ -754,7 +754,7 @@ int mlir_erase_op(SchemeValue op) {
   return 1;
 }
 
-void mlir_notify_match_failure(SchemeValue op, const char* reason) {
+void mlir_notify_match_failure(ptr op, const char* reason) {
   mlir_log_debug((std::string("Pattern match failure: ") + reason).c_str());
 }
 
@@ -814,9 +814,9 @@ private:
 };
 } // anonymous namespace
 
-void mlir_register_conversion_pattern(SchemeValue patterns_ptr,
+void mlir_register_conversion_pattern(ptr patterns_ptr,
                                       const char* op_name,
-                                      SchemeValue callback) {
+                                      ptr callback) {
   auto *patterns = reinterpret_cast<mlir::RewritePatternSet*>(patterns_ptr);
   ptr schemeCallback = static_cast<ptr>(callback);
 
