@@ -4,6 +4,7 @@
  */
 
 #include "SchemeBindings.h"
+#include "LockedSchemeObject.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
 #include "hip/Dialect/Onnx/IR/OnnxOps.h"
@@ -768,16 +769,10 @@ class SchemeConversionPattern : public mlir::ConversionPattern {
 public:
   SchemeConversionPattern(mlir::MLIRContext *ctx, ptr schemeCallback, llvm::StringRef opName)
       : ConversionPattern(mlir::Pattern::MatchAnyOpTypeTag(), 1 /*benefit*/, ctx),
-        callback(schemeCallback),
-        targetOpName(opName.str()) {
-    // Lock the Scheme callback so it doesn't get GC'd
-    Slock_object(callback);
-  }
+        callback_(schemeCallback),  // RAII lock
+        targetOpName(opName.str()) {}
 
-  ~SchemeConversionPattern() override {
-    // Unlock the callback
-    Sunlock_object(callback);
-  }
+  // Destructor automatically unlocks via LockedSchemeObject
 
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op, mlir::ArrayRef<mlir::Value> operands,
@@ -795,7 +790,7 @@ public:
     ptr opPtr = Sunsigned64(reinterpret_cast<uint64_t>(op));
     ptr rewriterPtr = Sunsigned64(reinterpret_cast<uint64_t>(&rewriter));
 
-    ptr result = Scall2(callback, opPtr, rewriterPtr);
+    ptr result = Scall2(callback_.get(), opPtr, rewriterPtr);
 
     // Clear rewriter context
     mlir::hipsr::clearCurrentRewriter();
@@ -809,9 +804,10 @@ public:
   }
 
 private:
-  ptr callback;           // Scheme procedure
-  std::string targetOpName;  // Target operation name
+  LockedSchemeObject callback_;  // RAII-locked Scheme procedure
+  std::string targetOpName;      // Target operation name
 };
+
 } // anonymous namespace
 
 void mlir_register_conversion_pattern(ptr patterns_ptr,
