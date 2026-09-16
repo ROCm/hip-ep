@@ -31,6 +31,11 @@
 // autotuned config, so the fixed-config runs cannot disturb the clock state
 // around it) and --only <model> (one model per process, for the same reason).
 //
+// LUT (`make lut`, -DHIPDNN_LUT_LINKED_EXTERNALLY=1): MODE_AUTO uses
+// hip_gqa_autotune_resolve_decode + hip_gqa_flash_decode_configured — the
+// same host resolve + configured-kernel path as production real/gqa.cpp.
+// Default `make test` is unchanged (in-launcher online autotune).
+//
 // Self-contained: random inputs generated in-process, no data files.
 // ============================================================
 
@@ -61,6 +66,33 @@ extern "C" int hip_gqa_flash_decode(
     const void* head_sink,
     int use_smooth_softmax,
     int kv_dtype, const void* k_scale, const void* v_scale);
+
+#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
+#include "gqa_autotune.h"
+
+extern "C" int hip_gqa_flash_decode_configured(
+    void* stream_ptr,
+    const void* Q, const void* Kcache, const void* Vcache,
+    void* O,
+    void* partials_workspace,
+    int B, int H, int G, int d, int skv, int max_seq, int max_splits,
+    float scale,
+    const void* seqlens_k,
+    int local_window_size,
+    const void* head_sink,
+    int use_smooth_softmax,
+    int kv_dtype,
+    const void* k_scale,
+    const void* v_scale,
+    int use_wmma,
+    int splits,
+    int bkv);
+
+static void* gqa_policy() {
+  static void* p = hip_gqa_autotune_create();
+  return p;
+}
+#endif
 
 // Legacy one-block-per-head fused decode (the ORIGINAL baseline that the
 // OPTIMIZATION.md 10-20x figure was measured against). No window/sink/split-K.
@@ -223,18 +255,60 @@ static double run_kernel(DecodeMode mode, const Case& c, float scale,
                          const __half* dQ, const __half* dK, const __half* dV,
                          __half* dO, float* dPart, const int* dSeq,
                          const __half* dSink, int iters,
-                         std::vector<float>& host_O) {
+                         std::vector<float>& host_O, bool* lut_hit = nullptr) {
   set_mode_env(mode);
 
   const int B = c.B, H = c.H, G = c.G, D = c.D, max_seq = c.max_seq;
   const void* sinkp = c.sink ? (const void*)dSink : nullptr;
 
-  // Warmup + correctness fetch. For AUTO this first call also runs the autotune
-  // pass (timed candidates) and caches the winner; subsequent calls reuse it.
-  HIP_CHECK((hipError_t)hip_gqa_flash_decode(
-      nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, c.total, max_seq, MAX_SPLITS,
-      scale, dSeq, c.window, sinkp, c.smooth, HIP_KV_DTYPE_FP16, nullptr,
-      nullptr));
+  auto launch = [&]() -> int {
+#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
+    if (mode == MODE_AUTO) {
+      using namespace hipdnn_ep;
+      GqaDecodeRequest req{};
+      req.kv_dtype = HIP_KV_DTYPE_FP16;
+      req.batch = B;
+      req.num_heads = H;
+      req.kv_num_heads = G;
+      req.head_dim = D;
+      req.effective_skv = c.total;
+      req.max_splits = MAX_SPLITS;
+      req.local_window = c.window > 0 ? c.window : 0;
+      GqaDecodeResult res{};
+      hip_gqa_autotune_resolve_decode(gqa_policy(), &req, &res);
+      if (!hip_gqa_autotune_table_loaded()) {
+        fprintf(stderr, "[gqa-lut] table not loaded\n");
+        if (lut_hit) *lut_hit = false;
+        return 1;
+      }
+      const bool hit = res.source == GqaTuneSource::Exact ||
+                       res.source == GqaTuneSource::Nearest;
+      if (hit) {
+        return hip_gqa_flash_decode_configured(
+            nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, c.total, max_seq,
+            MAX_SPLITS, scale, dSeq, c.window, sinkp, c.smooth, HIP_KV_DTYPE_FP16,
+            nullptr, nullptr, (int)res.config.use_wmma, res.config.splits,
+            res.config.bkv);
+      }
+      // Table miss: keep the in-launcher online autotune path.
+    }
+#endif
+    (void)lut_hit;
+    return hip_gqa_flash_decode(
+        nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, c.total, max_seq, MAX_SPLITS,
+        scale, dSeq, c.window, sinkp, c.smooth, HIP_KV_DTYPE_FP16, nullptr,
+        nullptr);
+  };
+
+  // Warmup + correctness fetch. For AUTO without LUT this first call also runs
+  // the online autotune pass; with LUT it resolves the table then dispatches
+  // the configured kernel (production path).
+  int rc = launch();
+  if (rc != 0) {
+    if (lut_hit) *lut_hit = false;
+    host_O.assign((size_t)B * H * D, 0.0f);
+    return 0.0;
+  }
   HIP_CHECK(hipDeviceSynchronize());
   host_O.resize((size_t)B * H * D);
   {
@@ -248,11 +322,7 @@ static double run_kernel(DecodeMode mode, const Case& c, float scale,
   HIP_CHECK(hipEventCreate(&a));
   HIP_CHECK(hipEventCreate(&b));
   HIP_CHECK(hipEventRecord(a));
-  for (int it = 0; it < iters; ++it) {
-    hip_gqa_flash_decode(nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, c.total,
-                            max_seq, MAX_SPLITS, scale, dSeq, c.window, sinkp,
-                            c.smooth, HIP_KV_DTYPE_FP16, nullptr, nullptr);
-  }
+  for (int it = 0; it < iters; ++it) launch();
   HIP_CHECK(hipEventRecord(b));
   HIP_CHECK(hipEventSynchronize(b));
   float ms = 0.0f;
@@ -344,7 +414,8 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose) {
   // --prod-only drops all three: when comparing two builds, the extra configs
   // would run between the timed ones and move the clock state under them.
   std::vector<float> O_auto, O_base, O_wmma, O_scalar;
-  double ms_auto   = run_kernel(MODE_AUTO,     c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink, iters, O_auto);
+  bool lut_hit = true;
+  double ms_auto   = run_kernel(MODE_AUTO,     c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink, iters, O_auto, &lut_hit);
   double ms_base = 0.0, ms_wmma = 0.0, ms_scalar = 0.0;
   double l2_base = 0.0, l2_wmma = 0.0, l2_scalar = 0.0, l2_ab = 0.0;
   if (!g_prod_only) {
@@ -374,7 +445,7 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose) {
   }
 
   const double tol = 2e-2;  // fp16 accumulation tolerance
-  bool ok = (l2_auto < tol) && (!fused_ran || l2_fused < tol);
+  bool ok = lut_hit && (l2_auto < tol) && (!fused_ran || l2_fused < tol);
   if (!g_prod_only)
     ok = ok && (l2_base < tol) && (l2_wmma < tol) && (l2_scalar < tol);
 

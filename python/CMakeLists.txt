@@ -19,10 +19,10 @@ set(_dist_dir "${CMAKE_CURRENT_BINARY_DIR}/dist")
 
 # hipBLASLt resolves Tensile data as library/<device-isa>/, so this tracks the
 # ISA the pinned dist ships, not HIP_ARCHITECTURES (a generic compile target
-# like gfx11-generic has no such directory). A dist named for a whole family
-# (gfx11-all) carries every member and matches nothing here, which is what
-# sends it down the generic branch for _pack_libs.py to resolve.
-if(DEP_HASH_therock_windows MATCHES "(gfx[0-9][0-9][0-9][0-9])")
+# like gfx11-generic has no such directory). Match only the token after
+# "windows-": family tags (gfx11-all, gfx115x-gfx1170) and variant suffixes
+# (hipblaslt-gfx1170-trimmed) must not match here.
+if(DEP_HASH_therock_windows MATCHES "windows-(gfx[0-9][0-9][0-9][0-9])[-.]")
   set(MORPHIZEN_HIP_ARCH "${CMAKE_MATCH_1}")
 else()
   set(MORPHIZEN_HIP_ARCH "${HIP_ARCHITECTURES}")
@@ -58,7 +58,7 @@ if(NOT THEROCK_DIST)
     "THEROCK_DIST is empty; the wheel cannot bundle the ROCm runtime.")
 endif()
 
-if(NOT TARGET HipPdllPatterns OR NOT HIP_PDL_FUSION_PATTERNS)
+if(NOT TARGET HipPdllPatterns)
   message(FATAL_ERROR
     "PDL fusion patterns are unavailable (mlir-pdll was not found); the wheel "
     "would ship an EP that cannot compile any model.")
@@ -86,13 +86,12 @@ add_custom_target(wheel ALL
           "${_pkg_src}/setup.py"
           "${_stage}/"
   # 2. Stage native artifacts (EP lib + per-arch custom-kernels runtime
-  #    DLLs/SOs + CRT import libs + the PDL fusion patterns) into the
-  #    onnxruntime_ep_amdgpu namespace package dir so the wheel ships them at
-  #    onnxruntime_ep_amdgpu/ (platlib).
+  #    DLLs/SOs + CRT import libs) into the onnxruntime_ep_amdgpu namespace
+  #    package dir so the wheel ships them at onnxruntime_ep_amdgpu/ (platlib).
+  #    The PDL fusion patterns need no staging: they are compiled into the EP.
   COMMAND ${CMAKE_COMMAND} -E rm -rf "${_libs_dir}"
   COMMAND ${Python3_EXECUTABLE} "${_pkg_src}/_pack_libs.py"
           ${_dll_args}
-          --data-file "${HIP_PDL_FUSION_PATTERNS}"
           --dest "${_libs_dir}"
           --rocm-dist "${THEROCK_DIST}"
           --rocm-arch "${MORPHIZEN_HIP_ARCH}"

@@ -379,6 +379,13 @@ void *hipdnn_ep_state_get_qlpnormalization_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_qlpnormalization_scratch(RuntimeState *state,
                                                     size_t needed_size);
 
+// Per-session scratch for wrap_qsigmoid: one f32 workspace plus device
+// scalars for the Q/DQ kernels. Same grow-on-demand, never-shrink policy
+// as conv_scratch; lazily allocated on first call, freed in cleanup.
+void *hipdnn_ep_state_get_qsigmoid_scratch(RuntimeState *state);
+int hipdnn_ep_state_ensure_qsigmoid_scratch(RuntimeState *state,
+                                            size_t needed_size);
+
 // Per-session scratch for the W4A8 dp4a matmul_nbits decode path
 // (hip_matmul_nbits_dp4a). One contiguous device buffer holding the quantized
 // activation row (int8) plus the per-group activation scales (float). Lazily
@@ -984,12 +991,63 @@ int wrap_qelementwise(RuntimeState *state, void *lhs, void *rhs, void *output,
 //
 //   Y = saturate(round(M_scale * (acc - B_zp*rowA - A_zp*colB + K*A_zp*B_zp))
 //                + Y_zp)
+//
+// Per-column B at 4 bits admits a cheaper evaluation: subtracting the column's
+// zero point while the nibble is widened costs nothing and drops the rowA and
+// K*A_zp*B_zp terms, leaving
+//
+//   Bc[k,n] = B[k,n] - B_zero_points[n]
+//   Y[m,n]  = saturate(round(AY_ratio * B_scales[n]
+//                            * (sum_k A[m,k]*Bc[k,n]
+//                               - A_zp * sum_k Bc[k,n])) + Y_zp)
+//
+
 int wrap_qmatmul(RuntimeState *state, const void *A, const void *B, void *Y,
-                 int64_t M, int64_t N, int64_t K, int64_t batch_count,
+                 const void *B_scales, const void *B_zero_points, int64_t M,
+                 int64_t N, int64_t K, int64_t batch_count,
                  int64_t b_batch_stride, int64_t trans_a, int64_t trans_b,
                  int64_t a_data_type, int64_t b_data_type, int64_t y_data_type,
-                 float M_scale, int64_t A_zero_point, int64_t B_zero_point,
+                 int64_t b_bits, float M_scale, float AY_ratio,
+                 int64_t A_zero_point, int64_t B_zero_point,
                  int64_t Y_zero_point);
+
+// Quantized Gemm wrapper: the integer-domain form of the fused
+// DequantizeLinear x2 (or x3) -> Gemm -> QuantizeLinear chain. See
+// QGemmLowering.cpp.
+//
+//   op(A): [M, K], op(B): [K, N], Y: [M, N], all row-major. trans_a / trans_b
+//   swap the stored extents of the corresponding operand; M, N and K stay the
+//   logical ones and Y is never transposed.
+//
+// With acc[m,n] = sum_k (A[m,k] - A_zp) * (B[k,n] - B_zp[n]):
+//
+//   Y = saturate(round(M_ab * B_scales[n] * acc + M_c * (C - C_zp)) + Y_zp)
+//
+// M_ab (= alpha*s_a*s_b/s_y) and M_c (= beta*s_c/s_y) are folded by lowering,
+// so no scale is divided here. What cannot fold is a per-output-channel B:
+// B_scales / B_zero_points are then device arrays of one value per N, and
+// B_scale contributes its 1.0 identity to M_ab instead. The two are given
+// together or not at all; when both are null the per-tensor B_zero_point and
+// the already-folded B_scale apply.
+//
+// B and B_zero_points carry their LOGICAL element counts with an 8-bit element
+// type; b_bits == 4 means each byte holds two values, low nibble first, and
+// b_data_type's signedness decides how a nibble widens.
+//
+// a_data_type / y_data_type are 8- or 16-bit, for the same reason as
+// wrap_qmatmul. C is nullable; when present it is 8-, 16- or 32-bit (an ONNX
+// quantizer emits a Gemm bias as int32 at s_c = s_a * s_b) and is
+// unidirectionally broadcast to [M, N] from [c_dim0, c_dim1], the shape
+// normalized by lowering the same way wrap_gemm's is. c_data_type and the
+// c_dim pair are meaningful only when C is non-null.
+int wrap_qgemm(RuntimeState *state, const void *A, const void *B, const void *C,
+               const void *B_scales, const void *B_zero_points, void *Y,
+               int64_t M, int64_t N, int64_t K, int64_t trans_a,
+               int64_t trans_b, int64_t a_data_type, int64_t b_data_type,
+               int64_t c_data_type, int64_t y_data_type, int64_t b_bits,
+               int64_t c_dim0, int64_t c_dim1, float M_ab, float M_c,
+               int64_t A_zero_point, int64_t B_zero_point, int64_t C_zero_point,
+               int64_t Y_zero_point);
 
 // Fused quantized 1x1 convolution: Q(Conv(DQ(input), DQ(weights))) with the
 // weights never leaving their packed 4-bit form. See QConvLowering.cpp.
@@ -1031,6 +1089,13 @@ int wrap_qlpnormalization(RuntimeState *state, const void *input, void *output,
                           int64_t data_type, float input_scale,
                           int64_t input_zp, float output_scale,
                           int64_t output_zp, int64_t axis, int64_t p);
+
+// Fused quantized sigmoid: Q(sigmoid(DQ(x))) for UINT16 per-tensor QDQ.
+// Input and output scales stay separate because the activation changes
+// values, so matching Q/DQ parameters never hold on LoRA/ORC sandwiches.
+int wrap_qsigmoid(RuntimeState *state, const void *input, void *output,
+                  int64_t num_elements, int64_t data_type, float input_scale,
+                  int64_t input_zp, float output_scale, int64_t output_zp);
 
 // Element-wise Where wrapper (NumPy-style multidirectional broadcasting,
 // arbitrary rank). Computes output[i] = condition[i] ? x[i] : y[i] with

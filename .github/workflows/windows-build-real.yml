@@ -44,9 +44,7 @@ jobs:
       # ilammy/msvc-dev-cmd and mozilla-actions/sccache-action have no
       # Node.js 24 releases yet; allow Node.js 20 until they are updated.
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
-      # One generic target covering the whole gfx11 family; the pinned TheRock
-      # dist carries the per-ISA vendor data every member needs at runtime.
-      HIP_ARCHITECTURES: "gfx11-generic"
+      HIP_ARCHITECTURES: "gfx11-generic;gfx1170"
       SCCACHE_CACHE_SIZE: "200M"
 
     steps:
@@ -191,9 +189,6 @@ jobs:
           # LlvmIrJit's GetModuleFileName-anchored Load finds it).
           cp "${{ runner.workspace }}/install/bin/"*.dll staging/bin/ 2>/dev/null || true
           cp "${{ runner.workspace }}/install/bin/"*.exe staging/bin/ 2>/dev/null || true
-
-          # cp fusion pattern file
-          cp "${{ runner.workspace }}/install/bin/HipFusionPatterns.pdl.mlir" staging/bin/
 
           cp "${{ runner.workspace }}/amdgpu-artifacts/bin/"* staging/bin/
 

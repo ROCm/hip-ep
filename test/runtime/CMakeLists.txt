@@ -41,7 +41,7 @@ set_target_properties(test-output-allocator PROPERTIES FOLDER "runtime-tests")
 # (lut/gfx1151.fb) and drive the same resolver that ships in
 # custom_kernels_<arch>, through the exported extern "C" shims. The resolver's
 # GPU-free build reads the arch from HIPDNN_EP_GQA_ARCH (set on the test), so no
-# device is needed. The linkable kGqaLutData[] is generated from the .fb with
+# device is needed. The linkable kGqaLutBlobs[] registry is generated from the .fb with
 # pure CMake (file(READ ... HEX)), mirroring how custom_kernels embeds it -- no
 # Python, no committed generated source.
 set(_gqa_test_lut_fb
@@ -55,8 +55,10 @@ string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," _gqa_test_body "${_gqa_test_h
 file(WRITE ${_gqa_test_lut_cpp}
 "// Auto-generated from gfx1151.fb by test/runtime/CMakeLists.txt; do not edit, do not commit.\n"
 "#include <cstddef>\n"
-"extern \"C\" const unsigned char kGqaLutData[] = {${_gqa_test_body}};\n"
-"extern \"C\" const size_t kGqaLutData_size = ${_gqa_test_n};\n")
+"static const unsigned char _blob[] = {${_gqa_test_body}};\n"
+"extern \"C\" const unsigned char* const kGqaLutBlobs[] = { _blob };\n"
+"extern \"C\" const size_t kGqaLutBlobSizes[] = { ${_gqa_test_n} };\n"
+"extern \"C\" const size_t kGqaLutBlobCount = 1;\n")
 
 add_executable(test-gqa-autotune
     test_gqa_autotune.cpp
