@@ -51,11 +51,9 @@ llvm_map_components_to_libnames(llvm_libs
 
   # Every target the LLVM we link against was built with. lld's driver calls
   # the InitializeAllTargets* macros, which expand from that LLVM's
-  # LLVM_TARGETS_TO_BUILD; naming X86 alone was only correct while hip-ep built
-  # its own X86-only LLVM. Sharing rocmlirTriton's LLVM (X86;AMDGPU) left
-  # lldCOFF's LLVMInitializeAMDGPU* references unresolved in builds that do not
-  # otherwise pull AMDGPU in (rockCompiler supplies it when the rocmlirTriton
-  # backend is on, which is why only the mock build broke). These
+  # LLVM_TARGETS_TO_BUILD. Naming X86 alone is correct for a host-only LLVM;
+  # a shared rocmlirTriton tree that still enables AMDGPU must list it here or
+  # lldCOFF's LLVMInitializeAMDGPU* references stay unresolved. These
   # pseudo-components expand from the same list, so they stay correct whatever
   # target set the LLVM ships.
   AllTargetsCodeGens

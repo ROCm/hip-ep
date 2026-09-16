@@ -587,9 +587,10 @@ def build_rocmlirtriton(args, build_dir, source_dir=None, rocm_path=None):
         "-DLLVM_INCLUDE_TESTS=OFF",
         "-DMLIR_INCLUDE_TESTS=OFF",
         "-DMLIR_ENABLE_ROCM_RUNNER=OFF",
-        # Fat-package install still ships LLVMX86*.lib even when the ROCm
-        # runner is off; rocmlirTriton otherwise builds AMDGPU only.
-        "-DLLVM_TARGETS_TO_BUILD=X86;AMDGPU",
+        # hip-ep's ORC/host codegen is X86 only. AMDGPU is rocmlirTriton's
+        # device target; leaving it out of this LLVM drops ~20 MiB from
+        # hipgpu.dll (lld's InitializeAllTargets otherwise pulls it in).
+        "-DLLVM_TARGETS_TO_BUILD=X86",
         "-DROCMLIR_DRIVER_E2E_TEST_ENABLED=OFF",
         "-DROCK_E2E_TEST_ENABLED=OFF",
         "-DTRITON_BUILD_BINARY=OFF",

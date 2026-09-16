@@ -97,7 +97,7 @@ jobs:
             echo "ERROR: rocmlirTriton is not pinned in cmake/deps.txt"
             exit 1
           fi
-          echo "value=dep-rocmlirtriton-${REV:0:12}-clang" >> "$GITHUB_OUTPUT"
+          echo "value=dep-rocmlirtriton-${REV:0:12}-clang-x86" >> "$GITHUB_OUTPUT"
 
       - name: Probe rocmlirTriton tree
         id: cache-rock
