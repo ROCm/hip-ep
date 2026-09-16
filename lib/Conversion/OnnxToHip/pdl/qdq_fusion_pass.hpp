@@ -19,6 +19,7 @@
 #include "llvm/Support/MemoryBufferRef.h"
 
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <optional>
 
@@ -365,25 +366,31 @@ isUint16Quantized(mlir::PatternRewriter &, mlir::PDLResultList &,
                        intType.isUnsigned());
 }
 
-// DQ -> Transpose -> Q may operate directly on the quantized tensor when both
-// ends use identical UINT16 per-tensor quantization. Restrict scales to the
-// normal finite fp32 range so the eliminated Q(DQ(x)) round-trip is exact for
-// every UINT16 value supported by the runtime's fp32 arithmetic.
+// DQ -> SISO -> Q may operate directly on the quantized tensor when the middle
+// op is single-in/single-out (one data tensor, one result; extra operands such
+// as Squeeze axes are metadata) and both ends use identical per-tensor
+// scale/zero-point. Storage type is not restricted: layout-only ops commute
+// with that QDQ round-trip for any integer quantized type as long as DQ and Q
+// agree. Reject non-finite or subnormal scales; a scale that overflows fp32
+// across the full code range would make the skipped round-trip inexact.
 inline mlir::LogicalResult
-hasMatchingTransposeQParams(mlir::PatternRewriter &, mlir::PDLResultList &,
-                            llvm::ArrayRef<mlir::PDLValue> args) {
-  if (args.size() != 2)
+hasMatchingSisoQParams(mlir::PatternRewriter &, mlir::PDLResultList &,
+                       llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 3)
     return mlir::failure();
   auto *dq = args[0].dyn_cast<mlir::Operation *>();
-  auto *q = args[1].dyn_cast<mlir::Operation *>();
-  if (!dq || !q || dq->getNumOperands() < 2 || q->getNumOperands() < 2 ||
-      dq->getNumResults() != 1 || q->getNumResults() != 1)
+  auto *siso = args[1].dyn_cast<mlir::Operation *>();
+  auto *q = args[2].dyn_cast<mlir::Operation *>();
+  if (!dq || !siso || !q || dq->getNumOperands() < 2 ||
+      q->getNumOperands() < 2 || dq->getNumResults() != 1 ||
+      q->getNumResults() != 1 || siso->getNumResults() != 1 ||
+      siso->getNumOperands() == 0 || siso->getOperand(0) != dq->getResult(0) ||
+      q->getOperand(0) != siso->getResult(0))
     return mlir::failure();
 
   auto dqType = getQuantizedElementType(dq);
   auto qType = getQuantizedElementType(q);
-  if (!dqType || !qType || dqType != qType || dqType.getWidth() != 16 ||
-      !dqType.isUnsigned())
+  if (!dqType || !qType || dqType != qType)
     return mlir::failure();
 
   auto isScalarTensor = [](mlir::Value value) {
@@ -395,9 +402,13 @@ hasMatchingTransposeQParams(mlir::PatternRewriter &, mlir::PDLResultList &,
 
   std::optional<float> dqScale = trySplatScale(dq->getOperand(1));
   std::optional<float> qScale = trySplatScale(q->getOperand(1));
+  unsigned width = dqType.getWidth();
+  float maxCode =
+      width >= 32 ? static_cast<float>(std::numeric_limits<uint32_t>::max())
+                  : static_cast<float>((1u << width) - 1);
   if (!dqScale || !qScale || *dqScale != *qScale || !std::isfinite(*dqScale) ||
       *dqScale < std::numeric_limits<float>::min() ||
-      *dqScale > std::numeric_limits<float>::max() / 65535.0f)
+      *dqScale > std::numeric_limits<float>::max() / maxCode)
     return mlir::failure();
 
   // Scalar scale means axis is immaterial, but blocked quantization is not.
@@ -712,28 +723,30 @@ inline mlir::LogicalResult extractAttrF32(mlir::PatternRewriter &rewriter,
   return mlir::success();
 }
 
-// Rebuild the Transpose with the quantized input and output type, copying its
-// permutation and diagnostic attributes verbatim. The old DQ/Transpose/Q chain
+// Rebuild the SISO op with the quantized input and output type. The first
+// operand is the data tensor; remaining operands (Squeeze axes, Unsqueeze
+// axes, ...) and attributes are copied verbatim. The old DQ/SISO/Q chain
 // becomes dead and is removed by the greedy rewrite driver.
 inline mlir::LogicalResult
-createQuantizedTranspose(mlir::PatternRewriter &rewriter,
-                         mlir::PDLResultList &results,
-                         llvm::ArrayRef<mlir::PDLValue> args) {
+createQuantizedSiso(mlir::PatternRewriter &rewriter, mlir::PDLResultList &results,
+                    llvm::ArrayRef<mlir::PDLValue> args) {
   if (args.size() != 3)
     return mlir::failure();
   auto *dq = args[0].dyn_cast<mlir::Operation *>();
-  auto *transpose = args[1].dyn_cast<mlir::Operation *>();
+  auto *siso = args[1].dyn_cast<mlir::Operation *>();
   auto *q = args[2].dyn_cast<mlir::Operation *>();
-  if (!dq || !transpose || !q || dq->getNumOperands() == 0 ||
+  if (!dq || !siso || !q || dq->getNumOperands() == 0 ||
+      siso->getNumOperands() == 0 || siso->getNumResults() != 1 ||
       q->getNumResults() != 1)
     return mlir::failure();
 
-  mlir::OperationState state(transpose->getLoc(), "onnx.Transpose");
+  mlir::OperationState state(siso->getLoc(), siso->getName());
   state.addOperands(dq->getOperand(0));
+  state.addOperands(siso->getOperands().drop_front());
   state.addTypes(q->getResult(0).getType());
-  state.addAttributes(transpose->getAttrs());
-  mlir::Operation *newTranspose = rewriter.create(state);
-  results.push_back(newTranspose->getResult(0));
+  state.addAttributes(siso->getAttrs());
+  mlir::Operation *newSiso = rewriter.create(state);
+  results.push_back(newSiso->getResult(0));
   return mlir::success();
 }
 
@@ -785,8 +798,8 @@ inline bool run(mlir::ModuleOp mlirModule, llvm::MemoryBufferRef pdlBuffer) {
                                          isPerAxisQuantizedWeight);
   pdlPatterns.registerConstraintFunction("IsUint16Quantized",
                                          isUint16Quantized);
-  pdlPatterns.registerConstraintFunction("HasMatchingTransposeQParams",
-                                         hasMatchingTransposeQParams);
+  pdlPatterns.registerConstraintFunction("HasMatchingSisoQParams",
+                                         hasMatchingSisoQParams);
   pdlPatterns.registerConstraintFunction("IsFusableQConvGeometry",
                                          isFusableQConvGeometry);
   pdlPatterns.registerConstraintFunction("IsPackedInt4PerChannelWeight",
@@ -804,8 +817,7 @@ inline bool run(mlir::ModuleOp mlirModule, llvm::MemoryBufferRef pdlBuffer) {
   pdlPatterns.registerRewriteFunction("ExtractQuantBits", extractQuantBits);
   pdlPatterns.registerRewriteFunction("ExtractAttrInt64", extractAttrInt64);
   pdlPatterns.registerRewriteFunction("ExtractAttrF32", extractAttrF32);
-  pdlPatterns.registerRewriteFunction("CreateQuantizedTranspose",
-                                      createQuantizedTranspose);
+  pdlPatterns.registerRewriteFunction("CreateQuantizedSiso", createQuantizedSiso);
 
   mlir::RewritePatternSet patterns(ctx);
   patterns.add(std::move(pdlPatterns));
