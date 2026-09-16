@@ -380,6 +380,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/global_pool.cpp runtime_global_pool.bc)
     compile_to_bitcode(real/qelementwise.cpp runtime_qelementwise.bc)
     compile_to_bitcode(real/qmatmul.cpp runtime_qmatmul.bc)
+    compile_to_bitcode(real/qgemm.cpp runtime_qgemm.bc)
     compile_to_bitcode(real/qconv.cpp runtime_qconv.bc)
     compile_to_bitcode(real/qlpnormalization.cpp runtime_qlpnormalization.bc)
 
@@ -472,6 +473,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qdq.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qelementwise.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmatmul.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_qgemm.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qconv.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qlpnormalization.bc
     )

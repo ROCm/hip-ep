@@ -991,6 +991,44 @@ int wrap_qmatmul(RuntimeState *state, const void *A, const void *B, void *Y,
                  float M_scale, int64_t A_zero_point, int64_t B_zero_point,
                  int64_t Y_zero_point);
 
+// Quantized Gemm wrapper: the integer-domain form of the fused
+// DequantizeLinear x2 (or x3) -> Gemm -> QuantizeLinear chain. See
+// QGemmLowering.cpp.
+//
+//   op(A): [M, K], op(B): [K, N], Y: [M, N], all row-major. trans_a / trans_b
+//   swap the stored extents of the corresponding operand; M, N and K stay the
+//   logical ones and Y is never transposed.
+//
+// With acc[m,n] = sum_k (A[m,k] - A_zp) * (B[k,n] - B_zp[n]):
+//
+//   Y = saturate(round(M_ab * B_scales[n] * acc + M_c * (C - C_zp)) + Y_zp)
+//
+// M_ab (= alpha*s_a*s_b/s_y) and M_c (= beta*s_c/s_y) are folded by lowering,
+// so no scale is divided here. What cannot fold is a per-output-channel B:
+// B_scales / B_zero_points are then device arrays of one value per N, and
+// B_scale contributes its 1.0 identity to M_ab instead. The two are given
+// together or not at all; when both are null the per-tensor B_zero_point and
+// the already-folded B_scale apply.
+//
+// B and B_zero_points carry their LOGICAL element counts with an 8-bit element
+// type; b_bits == 4 means each byte holds two values, low nibble first, and
+// b_data_type's signedness decides how a nibble widens.
+//
+// a_data_type / y_data_type are 8- or 16-bit, for the same reason as
+// wrap_qmatmul. C is nullable; when present it is 8-, 16- or 32-bit (an ONNX
+// quantizer emits a Gemm bias as int32 at s_c = s_a * s_b) and is
+// unidirectionally broadcast to [M, N] from [c_dim0, c_dim1], the shape
+// normalized by lowering the same way wrap_gemm's is. c_data_type and the
+// c_dim pair are meaningful only when C is non-null.
+int wrap_qgemm(RuntimeState *state, const void *A, const void *B, const void *C,
+               const void *B_scales, const void *B_zero_points, void *Y,
+               int64_t M, int64_t N, int64_t K, int64_t trans_a,
+               int64_t trans_b, int64_t a_data_type, int64_t b_data_type,
+               int64_t c_data_type, int64_t y_data_type, int64_t b_bits,
+               int64_t c_dim0, int64_t c_dim1, float M_ab, float M_c,
+               int64_t A_zero_point, int64_t B_zero_point, int64_t C_zero_point,
+               int64_t Y_zero_point);
+
 // Fused quantized 1x1 convolution: Q(Conv(DQ(input), DQ(weights))) with the
 // weights never leaving their packed 4-bit form. See QConvLowering.cpp.
 //
