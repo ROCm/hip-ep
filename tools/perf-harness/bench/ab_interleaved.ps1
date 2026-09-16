@@ -16,10 +16,23 @@
 ##  - Discard rounds taken while the box is shedding heat from a build or a test
 ##    suite. They report a different answer -- in one measured case the opposite
 ##    sign -- and they are recognisable by sitting well above the known baseline.
+##  - Do NOT compare absolute numbers across invocations, and never add two
+##    deltas measured in different ones. The baseline drifts DOWNWARD over a
+##    session as the OS page cache and the driver's shader cache warm: one
+##    measured case walked 2112 -> 1937 -> 1745 ms on the same model, prompt and
+##    settings, 21% with nothing changed. That is larger than most effects worth
+##    shipping, and because it moves downward the "sits well above the baseline"
+##    test above does not catch it. An A/A run (two identically configured arms
+##    under different names) came out at -0.29% with the interval spanning zero,
+##    so the interleaving does cancel it -- which is exactly why a delta has to
+##    come from one invocation, and why stacking two of them has to be measured
+##    as its own arm rather than inferred.
 ##
-## Each arm gets its OWN TEMP, and therefore its own autotune cache file: the
-## on-disk WMMA cache holds a single build timestamp and is discarded when it
-## does not match, so a shared TEMP would make every DLL swap a cold-tune run.
+## Each arm gets its OWN TEMP. This no longer isolates an autotune cache -- the
+## tuners memoize in-process only and the %TEMP% cache file is gone (see the
+## header of matmul_nbits_kernel.hip; the offline LUT is the durable source
+## now). What it still isolates is HIP's JIT/code-object cache, which is worth
+## keeping separate across a DLL swap.
 ##
 ## Arms are defined in a JSON manifest. An arm may swap a DLL, set environment
 ## variables, or both:
