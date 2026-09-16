@@ -38,6 +38,13 @@ public:
   static const char *ORT_API_CALL GetCompiledModelCompatibilityInfoImpl(
       OrtEp *this_ptr, const OrtGraph *graph) noexcept;
 
+  static OrtStatus *ORT_API_CALL
+  OnRunStartImpl(OrtEp *this_ptr, const OrtRunOptions *run_options) noexcept;
+
+  static OrtStatus *ORT_API_CALL OnRunEndImpl(OrtEp *this_ptr,
+                                              const OrtRunOptions *run_options,
+                                              bool sync_stream) noexcept;
+
 private:
   OrtStatus *GetCapability(OrtGraphWrapper &graph_wrapper,
                            OrtEpGraphSupportInfo &graph_support_info);
