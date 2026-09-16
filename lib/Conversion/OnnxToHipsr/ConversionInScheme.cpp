@@ -13,7 +13,7 @@
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 #include "hip/Dialect/Hipsr/Scheme/Runtime/ChezSchemeInterpreter.h"
-#include "hip/Dialect/Hipsr/Scheme/Runtime/SchemeBindings.h"
+#include "hip/Dialect/Hipsr/Scheme/Runtime/SchemeMlirBindings.h"
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
 #include "hip/Dialect/Onnx/IR/OnnxOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"

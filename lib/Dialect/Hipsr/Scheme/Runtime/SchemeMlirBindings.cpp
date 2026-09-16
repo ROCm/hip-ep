@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-#include "SchemeBindings.h"
+#include "hip/Dialect/Hipsr/Scheme/Runtime/SchemeMlirBindings.h"
 #include "hip/Dialect/Hipsr/Scheme/Runtime/LockedSchemeObject.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
@@ -27,7 +27,7 @@
 
 #define DEBUG_TYPE "scheme-bindings"
 
-// Note: scheme.h already included via SchemeBindings.h → ChezSchemeInterpreter.h
+// Note: scheme.h already included via SchemeMlirBindings.h → ChezSchemeInterpreter.h
 // Do NOT include it again here to avoid redefinition errors
 
 #include "ChezBootPetite.h"
