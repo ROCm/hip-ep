@@ -1396,23 +1396,14 @@ FailureOr<Value> emitReduceMeanFromAxis(Value input, int64_t firstAxis,
   return reduced;
 }
 
-// Reshape γ/β so TOSA can broadcast against X. ONNX/HIP scale is a suffix of
-// X from `firstAxis`, a flattened suffix vector, a scalar, or already ranked
-// like X. InstanceNorm channel scale is not a suffix; that path keeps
-// reshapeQdqParam.
-//
-// Before (X : tensor<2x3x4xf32>, axis = 1):
-//   %s : tensor<3x4xf32>     or  tensor<12xf32>
-// After:
-//   %s = tosa.reshape ... -> tensor<1x3x4xf32>
 LogicalResult matchSuffixNormParam(Value &param, RankedTensorType dataTy,
                                    int64_t firstAxis,
                                    ConversionPatternRewriter &rewriter,
                                    Location loc, Operation *op) {
   auto paramType = dyn_cast<RankedTensorType>(param.getType());
   if (!paramType || !paramType.hasStaticShape())
-    return rewriter.notifyMatchFailure(
-        op, "norm param must be a static tensor");
+    return rewriter.notifyMatchFailure(op,
+                                       "norm param must be a static tensor");
   int64_t rank = dataTy.getRank();
   if (firstAxis < 0 || firstAxis >= rank)
     return rewriter.notifyMatchFailure(op, "norm axis out of range");
