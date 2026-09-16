@@ -7,7 +7,7 @@
 // to the C++ implementation (test/lit/Conversion/onnx-to-hipsr/cast.mlir).
 //===----------------------------------------------------------------------===//
 
-// RUN: hip-mlir-opt %s --onnx-dialect=modeled -allow-unregistered-dialect --conversion-in-scheme="module=passes-onnx-to-hipsr" | FileCheck %s
+// RUN: hip-mlir-opt %s --onnx-dialect=modeled -allow-unregistered-dialect --conversion-in-scheme="module=passes/onnx-to-hipsr" | FileCheck %s
 
 // The second placeholder follows the shape graph through the first
 // placeholder, while the second cast follows the data graph.
