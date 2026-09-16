@@ -74,7 +74,7 @@ PRESETS: dict[str, dict] = {
             "blr2_sharegpt": "models/qwen3.5-9b-eagle3-onnx-blr2_sharegpt-int4-all",
         },
         "arms": "none,mtp:1:mp2,eagle3@blr2_plain:1:cap2,"
-                "eagle3@incumbent:1:cap2,eagle3@blr2_sharegpt:1:cap2",
+        "eagle3@incumbent:1:cap2,eagle3@blr2_sharegpt:1:cap2",
         "per_task": 20,
         "max_new": 128,
         "max_context": 1664,
@@ -131,12 +131,17 @@ class Ctx:
         self.ep = args.ep
         self.iobinding = args.iobinding
         self.arms = args.arms or self.preset["arms"]
-        self.per_task = args.per_task if args.per_task is not None \
-            else self.preset["per_task"]
-        self.max_new = args.max_new if args.max_new is not None \
-            else self.preset["max_new"]
-        self.questions = Path(args.questions).resolve() if args.questions else \
-            self.models / "data" / "spec_bench" / "question.jsonl"
+        self.per_task = (
+            args.per_task if args.per_task is not None else self.preset["per_task"]
+        )
+        self.max_new = (
+            args.max_new if args.max_new is not None else self.preset["max_new"]
+        )
+        self.questions = (
+            Path(args.questions).resolve()
+            if args.questions
+            else self.models / "data" / "spec_bench" / "question.jsonl"
+        )
         self.json = Path(args.json).resolve() if args.json else None
         self.extra = args.extra or []
 
@@ -147,24 +152,39 @@ class Ctx:
     def bench_script(self) -> Path:
         return self.harness / "qwen36_spec_bench.py"
 
-    def bench_cmd(self, per_task: int, max_new: int,
-                  json_path: Path | None) -> list[str]:
+    def bench_cmd(
+        self, per_task: int, max_new: int, json_path: Path | None
+    ) -> list[str]:
         """The one command both `sanity` and `bench` run, at different sizes."""
         p = self.preset
         head_dirs = ",".join(f"{tag}={self.m(d)}" for tag, d in p["heads"].items())
         cmd = [
-            self.python, str(self.bench_script),
-            "--target-dir", str(self.m(p["target_dir"])),
-            "--target", p["target"],
-            "--mtp", p["mtp"],
-            "--embed", str(self.m(p["embed"])),
-            "--tokenizer-dir", str(self.m(p["tokenizer_dir"])),
-            "--questions", str(self.questions),
-            "--arms", self.arms,
-            "--per-task", str(per_task),
-            "-n", str(max_new),
-            "--max-context", str(p["max_context"]),
-            "--ep", self.ep,
+            self.python,
+            str(self.bench_script),
+            "--target-dir",
+            str(self.m(p["target_dir"])),
+            "--target",
+            p["target"],
+            "--head-dirs",
+            head_dirs,
+            "--mtp",
+            p["mtp"],
+            "--embed",
+            str(self.m(p["embed"])),
+            "--tokenizer-dir",
+            str(self.m(p["tokenizer_dir"])),
+            "--questions",
+            str(self.questions),
+            "--arms",
+            self.arms,
+            "--per-task",
+            str(per_task),
+            "-n",
+            str(max_new),
+            "--max-context",
+            str(p["max_context"]),
+            "--ep",
+            self.ep,
         ]
         if p["mtp_dir"]:
             cmd += ["--mtp-dir", str(self.m(p["mtp_dir"]))]
@@ -246,12 +266,20 @@ def stage_export(ctx: Ctx) -> bool:
     if not script.exists() and not ctx.dry_run:
         print(f"  missing exporter: {script}")
         return False
-    return run(ctx, [
-        ctx.python, str(script),
-        "--target-dir", str(ctx.m(p["target_dir"])),
-        "--target", p["target"],
-        "--out", p["mtp"],
-    ], "export")
+    return run(
+        ctx,
+        [
+            ctx.python,
+            str(script),
+            "--target-dir",
+            str(ctx.m(p["target_dir"])),
+            "--target",
+            p["target"],
+            "--out",
+            p["mtp"],
+        ],
+        "export",
+    )
 
 
 def stage_sanity(ctx: Ctx) -> bool:
@@ -262,8 +290,7 @@ def stage_sanity(ctx: Ctx) -> bool:
     and it costs minutes rather than hours. The numbers it prints are not worth
     reading -- too few tokens, and every prompt pays its own autotune.
     """
-    return run(ctx, ctx.bench_cmd(per_task=1, max_new=16, json_path=None),
-               "sanity")
+    return run(ctx, ctx.bench_cmd(per_task=1, max_new=16, json_path=None), "sanity")
 
 
 def stage_bench(ctx: Ctx) -> bool:
@@ -287,8 +314,17 @@ def stage_summarize(ctx: Ctx) -> bool:
     if not ctx.json.exists() and not ctx.dry_run:
         print(f"  no results at {ctx.json}")
         return False
-    return run(ctx, [ctx.python, str(ctx.bench_script),
-                     "--summarize-only", "--json", str(ctx.json)], "summarize")
+    return run(
+        ctx,
+        [
+            ctx.python,
+            str(ctx.bench_script),
+            "--summarize-only",
+            "--json",
+            str(ctx.json),
+        ],
+        "summarize",
+    )
 
 
 HANDLERS = {
@@ -303,31 +339,51 @@ HANDLERS = {
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__.split("\n")[0],
-        formatter_class=argparse.RawDescriptionHelpFormatter)
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     ap.add_argument("--preset", choices=sorted(PRESETS), required=True)
-    ap.add_argument("--harness", default=os.environ.get("SPEC_HARNESS", "tools/eagle3"),
-                    help="directory holding qwen36_spec_bench.py; "
-                         "defaults to $SPEC_HARNESS")
-    ap.add_argument("--models-root", default=os.environ.get("SPEC_MODELS_ROOT", "."),
-                    help="root the preset's models/... paths resolve against; "
-                         "defaults to $SPEC_MODELS_ROOT")
-    ap.add_argument("--stages", default=",".join(DEFAULT_STAGES),
-                    help=f"comma-separated subset of {','.join(STAGES)}")
+    ap.add_argument(
+        "--harness",
+        default=os.environ.get("SPEC_HARNESS", "tools/eagle3"),
+        help="directory holding qwen36_spec_bench.py; defaults to $SPEC_HARNESS",
+    )
+    ap.add_argument(
+        "--models-root",
+        default=os.environ.get("SPEC_MODELS_ROOT", "."),
+        help="root the preset's models/... paths resolve against; "
+        "defaults to $SPEC_MODELS_ROOT",
+    )
+    ap.add_argument(
+        "--stages",
+        default=",".join(DEFAULT_STAGES),
+        help=f"comma-separated subset of {','.join(STAGES)}",
+    )
     ap.add_argument("--json", default=None, help="results file for bench/summarize")
     ap.add_argument("--arms", default=None, help="override the preset's arms")
-    ap.add_argument("--per-task", type=int, default=None,
-                    help="instances per subtask (six subtasks, 80 available each)")
+    ap.add_argument(
+        "--per-task",
+        type=int,
+        default=None,
+        help="instances per subtask (six subtasks, 80 available each)",
+    )
     ap.add_argument("--max-new", type=int, default=None)
     ap.add_argument("--questions", default=None)
     ap.add_argument("--ep", default="hipgpu", choices=["cpu", "hipgpu", "amdgpu"])
     ap.add_argument("--no-iobinding", dest="iobinding", action="store_false")
-    ap.add_argument("--python", default=None,
-                    help="interpreter for the harness; defaults to this one")
-    ap.add_argument("--dry-run", action="store_true",
-                    help="print the commands each stage would run and exit 0")
+    ap.add_argument(
+        "--python",
+        default=None,
+        help="interpreter for the harness; defaults to this one",
+    )
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the commands each stage would run and exit 0",
+    )
     ap.add_argument("--list-presets", action="store_true")
-    ap.add_argument("extra", nargs="*",
-                    help="extra flags passed through to qwen36_spec_bench.py")
+    ap.add_argument(
+        "extra", nargs="*", help="extra flags passed through to qwen36_spec_bench.py"
+    )
     args = ap.parse_args()
 
     if args.list_presets:
@@ -348,8 +404,7 @@ def main() -> int:
     print(f"models      {ctx.models}")
     print(f"arms        {ctx.arms}")
     print(f"ep          {ctx.ep}{' +iobinding' if ctx.iobinding else ''}")
-    print(f"stages      {','.join(stages)}"
-          f"{'   (dry run)' if ctx.dry_run else ''}")
+    print(f"stages      {','.join(stages)}{'   (dry run)' if ctx.dry_run else ''}")
 
     results: list[tuple[str, bool]] = []
     for name in stages:
