@@ -4,14 +4,14 @@ Licensed under the MIT License.
 -->
 # ROCm hip-ep
 
-**hip-ep** is an ONNX Runtime Execution Provider for AMD GPUs. It compiles ONNX graphs through an MLIR pipeline—from ONNX dialect operations to a custom HIP dialect and LLVM IR—and executes them with hipDNN, MIOpen, hipBLASLt, and custom HIP kernels.
+**hip-ep** is an ONNX Runtime Execution Provider for AMD GPUs. It compiles ONNX graphs through an MLIR pipeline—from ONNX dialect operations to a custom HIP dialect and LLVM IR—and executes them with hipDNN, hipBLASLt, and custom HIP kernels.
 
 The provider integrates with ONNX Runtime through the MorphiZen pass framework. By default, compiled models are emitted as OS-portable LLVM bitcode and JIT-loaded in-process when a session is created. Native per-model libraries remain available as an opt-in artifact format.
 
 ## Highlights
 
 - **MLIR compiler pipeline** — lowers ONNX graphs to HIP and LLVM IR.
-- **ROCm execution backends** — dispatches to hipDNN, MIOpen, hipBLASLt, and custom HIP kernels.
+- **ROCm execution backends** — dispatches to hipDNN, hipBLASLt, and custom HIP kernels.
 - **Dynamic shapes** — supports runtime batch/sequence dimensions, shape refinement, and runtime-sized outputs.
 - **GPU memory planning** — packs transient allocations into one or more grow-on-demand pool domains and keeps host-written shape scalars in separate host-mapped scratch.
 - **In-graph output allocation** — allocates graph outputs through the Execution Provider callback once their runtime shapes are known.
@@ -53,7 +53,7 @@ Per-model artifact + constants file
     └── native .dll/.so (opt-in) ─► OS dynamic loader
     │
     ▼
-hipDNN / MIOpen / hipBLASLt / custom HIP kernels
+hipDNN / hipBLASLt / custom HIP kernels
     │
     ▼
 AMD GPU

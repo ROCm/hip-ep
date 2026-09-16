@@ -18,7 +18,7 @@
 // CHECK-NEXT: %[[G1:.+]] = arith.muli %[[D1]], %[[C256B]] : index
 // CHECK-NEXT: %[[OFF0:.+]] = arith.constant 0 : index
 // CHECK-NEXT: %[[POOLSZ:.+]] = arith.addi %[[G0]], %[[G1]] : index
-// CHECK-NEXT: %[[POOL:.+]] = hipsr.get_pool(%{{.+}}, %[[POOLSZ]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
+// CHECK-NEXT: %[[POOL:.+]] = hipsr.get_pool(%{{.+}}, %[[POOLSZ]]) {bufferization.manual_deallocation, domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
 // CHECK-NEXT: %[[V0:.+]] = memref.view %[[POOL]][%[[OFF0]]][] : memref<?xi8, #hipsr.mem<device>> to memref<4x1024xf16, #hipsr.mem<device>>
 // CHECK-NEXT: %[[V1:.+]] = memref.view %[[POOL]][%[[G0]]][] : memref<?xi8, #hipsr.mem<device>> to memref<4x1024xf16, #hipsr.mem<device>>
 // CHECK-NEXT: %[[SUB:.+]] = memref.subview %[[V0]]
@@ -52,7 +52,7 @@ func.func @subview_extends_lifetime(%ctx: !hipsr.context,
 // CHECK: %[[G1:.+]] = arith.muli %{{.+}}, %{{.+}} : index
 // CHECK-NEXT: %[[OFF0:.+]] = arith.constant 0 : index
 // CHECK-NEXT: %[[POOLSZ:.+]] = arith.addi %[[G0]], %[[G1]] : index
-// CHECK-NEXT: %[[POOL:.+]] = hipsr.get_pool(%{{.+}}, %[[POOLSZ]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
+// CHECK-NEXT: %[[POOL:.+]] = hipsr.get_pool(%{{.+}}, %[[POOLSZ]]) {bufferization.manual_deallocation, domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
 // CHECK-NEXT: %[[V0:.+]] = memref.view %[[POOL]][%[[OFF0]]][] : memref<?xi8, #hipsr.mem<device>> to memref<4x1024xf16, #hipsr.mem<device>>
 // CHECK-NEXT: %[[V1:.+]] = memref.view %[[POOL]][%[[G0]]][] : memref<?xi8, #hipsr.mem<device>> to memref<4x1024xf16, #hipsr.mem<device>>
 // CHECK-NEXT: %[[CAST:.+]] = memref.cast %[[V0]]
@@ -84,7 +84,7 @@ func.func @cast_extends_lifetime(%ctx: !hipsr.context,
 // CHECK: %[[G1:.+]] = arith.muli %{{.+}}, %{{.+}} : index
 // CHECK-NEXT: %[[OFF0:.+]] = arith.constant 0 : index
 // CHECK-NEXT: %[[POOLSZ:.+]] = arith.addi %[[G0]], %[[G1]] : index
-// CHECK-NEXT: %[[POOL:.+]] = hipsr.get_pool(%{{.+}}, %[[POOLSZ]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
+// CHECK-NEXT: %[[POOL:.+]] = hipsr.get_pool(%{{.+}}, %[[POOLSZ]]) {bufferization.manual_deallocation, domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
 // CHECK-NEXT: %[[V0:.+]] = memref.view %[[POOL]][%[[OFF0]]][] : memref<?xi8, #hipsr.mem<device>> to memref<4x1024xf16, #hipsr.mem<device>>
 // CHECK-NEXT: %[[V1:.+]] = memref.view %[[POOL]][%[[G0]]][] : memref<?xi8, #hipsr.mem<device>> to memref<4x1024xf16, #hipsr.mem<device>>
 // CHECK-NEXT: %[[FLAT:.+]] = memref.collapse_shape %[[V0]]

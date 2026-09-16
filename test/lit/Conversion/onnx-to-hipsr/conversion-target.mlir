@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// RUN: hip-mlir-opt --convert-onnx-to-hipsr %s | FileCheck %s
+// RUN: hip-mlir-opt --onnx-dialect=modeled --convert-onnx-to-hipsr %s | FileCheck %s
 
 // Scalar constants are legal at top level, and other helper operations remain
 // legal at any nesting depth inside hipsr.compute.

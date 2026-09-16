@@ -48,4 +48,18 @@ module {
   // CHECK-LABEL: func.func @div_broadcast_i64
   // CHECK: tensor.empty() : tensor<32xi64>
   // CHECK: hip.div(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<1xi64>, tensor<32xi64>) outs({{.*}} : tensor<32xi64>)
+
+  func.func @div_5d_broadcast(
+      %a: tensor<2x3x4x5x6xi32>, %b: tensor<2x1x4x5x6xi32>)
+      -> tensor<2x3x4x5x6xi32> {
+    // CHECK-LABEL: func.func @div_5d_broadcast
+    // CHECK: tensor.collapse_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4]] : tensor<2x3x4x5x6xi32> into tensor<2x3x4x30xi32>
+    // CHECK: tensor.collapse_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4]] : tensor<2x1x4x5x6xi32> into tensor<2x1x4x30xi32>
+    // CHECK: hip.div({{.*}}) ins({{.*}}, {{.*}} : tensor<2x3x4x30xi32>, tensor<2x1x4x30xi32>) outs({{.*}} : tensor<2x3x4x30xi32>)
+    // CHECK: tensor.expand_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4]] output_shape [2, 3, 4, 5, 6] : tensor<2x3x4x30xi32> into tensor<2x3x4x5x6xi32>
+    %result = "onnx.Div"(%a, %b) :
+        (tensor<2x3x4x5x6xi32>, tensor<2x1x4x5x6xi32>)
+        -> tensor<2x3x4x5x6xi32>
+    return %result : tensor<2x3x4x5x6xi32>
+  }
 }

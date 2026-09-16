@@ -16,7 +16,7 @@ This file gives coding agents the repository-wide rules and entry points needed 
 
 ## Project overview
 
-hip-ep is an ONNX Runtime Execution Provider for AMD GPUs. The compiler lowers ONNX operations through a custom MLIR HIP dialect to LLVM IR. Generated code dispatches to hipDNN, MIOpen, hipBLASLt, and custom HIP kernels.
+hip-ep is an ONNX Runtime Execution Provider for AMD GPUs. The compiler lowers ONNX operations through a custom MLIR HIP dialect to LLVM IR. Generated code dispatches to hipDNN, hipBLASLt, and custom HIP kernels.
 
 The default per-model artifact is OS-portable LLVM bitcode. The Execution Provider JIT-loads it in-process together with embedded runtime bitcode. Native `.dll`/`.so` model artifacts are an opt-in mode.
 

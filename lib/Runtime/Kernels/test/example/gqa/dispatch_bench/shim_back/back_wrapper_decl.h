@@ -1,3 +1,8 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
 // Bench-only shim, force-included (clang `-include`) when the dispatch bench
 // compiles the ARCHIVED lib/Runtime/real/gqa_back.cpp into gqa_back.dll.
 //

@@ -31,7 +31,6 @@
 // This struct is opaque to generated code (passed as void*)
 struct RuntimeState {
   hipStream_t stream;
-  miopenHandle_t miopen_handle;
   hipblasLtHandle_t hipblas_handle;
 
   // Single allocation holding all constants as one blob.
@@ -117,21 +116,35 @@ struct RuntimeState {
   void *qmoe_host_scratch; // pinned host mirror for D2H of expert idx/weights
   size_t qmoe_host_scratch_size;
 
-  // Per-session scratch buffer for the MIOpen convolution workspace
-  // (wrap_miopenConvolutionForward, both 2D and the H=1 1D conv path).
-  //
-  // The MIOpen forward-convolution Find API selects an algorithm whose
-  // workspace requirement is shape-dependent (winograd/gemm/etc). Whisper's
-  // encoder front-end runs the same two Conv shapes every inference
-  // (Cin=128/Cout=1280 K=3 s=1, Cin=1280/Cout=1280 K=3 s=2), so a per-call
-  // hipMalloc/hipFree of the workspace would be wasted work after the
-  // first call. Same grow-on-demand policy as qmoe_scratch above: lazily
-  // allocated on first use, never shrinks, freed in
-  // hipdnn_ep_state_cleanup. Single-buffer reuse is safe because the HIP
-  // stream is serialised -- the next conv launches only after the previous
-  // miopenConvolutionForward + bias add have consumed the workspace.
+  // Per-session scratch for wrap_qmoe_amd (com.amd QMoE / LatentMoE)
+  // transient buffers. Deliberately a SEPARATE field from
+  // qmoe_scratch above -- the two ops are independent pipelines (see
+  // lib/Runtime/real/qmoe_amd.cpp) and must not share a buffer, so growing
+  // one never invalidates offsets computed for the other. Same grow-on-
+  // demand, never-shrink policy as qmoe_scratch; freed in
+  // hipdnn_ep_state_cleanup.
+  void *qmoe_amd_scratch;
+  size_t qmoe_amd_scratch_size;
+  void *qmoe_amd_host_scratch; // pinned host mirror for D2H of expert counts
+  size_t qmoe_amd_host_scratch_size;
+
+  // Per-session convolution workspace. Currently allocated by nobody: both
+  // convolution directions now run on in-tree kernels (hip_conv,
+  // hip_conv_transpose) that need no workspace at all. Kept only because the
+  // accessors are
+  // part of the runtime's exported surface. Same grow-on-demand policy as
+  // qmoe_scratch above if it is ever wired up again: lazily allocated on first
+  // use, never shrinks, freed in hipdnn_ep_state_cleanup.
   void *conv_scratch;
   size_t conv_scratch_size;
+
+  // Per-session scratch for wrap_qlpnormalization. One contiguous device
+  // buffer holds the dequantized input, RMS output, normalization scale, and
+  // Q/DQ scalar parameters. Shared by all qlpnormalization instances because
+  // they execute on the same serial stream. Grows on demand, never shrinks,
+  // and is released at session teardown.
+  void *qlpnormalization_scratch;
+  size_t qlpnormalization_scratch_size;
 
   // Per-session scratch for the W4A8 dp4a matmul_nbits decode path
   // (hip_matmul_nbits_dp4a). One contiguous device buffer holding the
@@ -170,12 +183,11 @@ struct RuntimeState {
   // multi_head_attention instance owns one in its MhaState op-state slot (see
   // op_states below and docs/design/op-state-slots-design.md).
 
-  // NOTE: the CausalConvWithState MIOpen descriptor + algorithm cache
-  // (CausalConvCache) formerly lived here as causal_conv_cache. It is now
-  // per-op-instance: each causal_conv_with_state instance owns one in its
-  // CausalConvState op-state slot (see op_states below and
-  // docs/design/op-state-slots-design.md), so concurrent instances no longer
-  // share one descriptor cache.
+  // NOTE: the CausalConvWithState descriptor + algorithm cache
+  // (CausalConvCache) formerly lived here as causal_conv_cache, then moved to
+  // a per-op-instance CausalConvState op-state slot. It no longer exists at
+  // all: the op runs entirely on custom kernels. See
+  // docs/design/op-state-slots-design.md.
 
   // Asym zero_points unpack cache (ZpUnpackCache*) used by wrap_qmoe.
   //
@@ -195,6 +207,17 @@ struct RuntimeState {
   // Per-operator profiling state (OpProfileState*, gated on HIPDNN_EP_PERF).
   // Allocated in state_init, freed in state_cleanup.
   void *op_profile;
+
+  // Session-owned GQA offline performance policy (GqaAutotunePolicy*).
+  // Loaded once from gqa_autotune.fb through the EP FileSystem. The concrete
+  // type lives in Kernels/hip/autotune/gqa/gqa_autotune.cpp to keep this
+  // ABI-facing struct opaque.
+  void *gqa_autotune_policy;
+
+  // Session-scoped EP provider options, copied out of the init config so they
+  // outlive it (std::unordered_map<std::string, std::string>*). Read through
+  // hipdnn_ep_runtime_get_provider_option.
+  void *provider_options;
 
   // Device-side error flag used by kernels to report runtime-invalid inputs.
   // 0 = no error, non-zero = error code (currently -1).
@@ -291,6 +314,16 @@ struct RuntimeState {
   // by hipdnn_ep_op_states_alloc / _set / _get in op_state.cpp.
   OpState **op_states;
   int num_op_states;
+
+  // Per-session scratch for the fp32-activation + INT8-KV GQA adapter.
+  // Appended to preserve every pre-existing RuntimeState field offset.
+  // Fused GQA kernels are fp16-only; a W4A32 export therefore casts packed
+  // QKV, RoPE tables, and the fused output through this buffer every call
+  // (no table cache yet). Grow-on-demand, never shrinks, freed in cleanup.
+  // GQA layers share the allocation safely because one HIP stream serialises
+  // their casts and fused kernels.
+  void *gqa_fp32_adapter_scratch;
+  size_t gqa_fp32_adapter_scratch_size;
 };
 
 #endif // HIPDNN_EP_RUNTIME_STATE_INTERNAL_H

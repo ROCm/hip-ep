@@ -182,6 +182,20 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
                                        adaptor.getPastKey(), rewriter, loc);
     }
 
+    // kv_bnsd: which layout the key/value operands are in. hip.gqa accepts both
+    // rank-3 BSHD [B, S, G*d] (the onnx.Attention and GroupQueryAttention
+    // lowerings) and rank-4 BNSD [B, G, S, d] (the MultiHeadAttention
+    // cross-attn lowering, which forwards the encoder KV untouched). The
+    // runtime needs this on the bidirectional no-past path, where key/value are
+    // the whole KV and get staged into the BNSD present cache: the two layouts
+    // coincide only at G == 1, so the shapes alone cannot distinguish them.
+    // Absent key means packed QKV, which is always BSHD.
+    Value kvBnsdVal = createI64Const(0);
+    if (op.getKey()) {
+      auto keyMemRefType = cast<MemRefType>(op.getKey().getType());
+      kvBnsdVal = createI64Const(keyMemRefType.getRank() == 4 ? 1 : 0);
+    }
+
     Value elemSizeVal = createI64Const(elementSizeBytes);
 
     // attention_bias broadcast extents: ONNX masks are often [B,1,S,T].
@@ -198,7 +212,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     }
 
     // Function signature matches wrap_group_query_attention() in gqa.cpp
-    SmallVector<Type, 41> paramTypes = {
+    SmallVector<Type, 42> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
         // Inputs (14 pointers - some may be nullptr)
@@ -243,7 +257,8 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type, // head_dim
         i64Type, // element_size_bytes
         i64Type, // attn_bias_batch
-        i64Type  // attn_bias_num_heads
+        i64Type, // attn_bias_num_heads
+        i64Type  // kv_bnsd
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp =
@@ -251,7 +266,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 41> args = {
+    SmallVector<Value, 42> args = {
         statePtr,
         // Per-instance op-state slot (threaded by --assign-op-state-slots)
         getOpStateSlotValue(op, rewriter, loc),
@@ -265,9 +280,9 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         numHeads, kvNumHeads, scale, doRotary, rotaryInterleaved, softcap,
         localWindowSize, smoothSoftmax, qkOutput, kQuantType, vQuantType,
         kvCacheBitWidth, noCausal,
-        // Shape info (8 values)
+        // Shape info (9 values)
         batchSizeVal, seqLenQVal, seqLenKVVal, pastBufSeqVal, headDimVal,
-        elemSizeVal, attnBiasBatchVal, attnBiasNumHeadsVal};
+        elemSizeVal, attnBiasBatchVal, attnBiasNumHeadsVal, kvBnsdVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 

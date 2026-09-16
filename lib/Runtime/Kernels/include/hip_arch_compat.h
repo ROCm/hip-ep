@@ -13,13 +13,42 @@
  *   HIPDNN_WAVE_SIZE  compile-time wavefront size in the *device* pass
  *                     (64 on CDNA/gfx9xx, 32 on RDNA/gfx10xx+). Used to make
  *                     warp-shuffle reductions span the whole wave correctly.
- *   HIPDNN_HAS_WMMA   1 only in a device pass for an arch that has the WMMA
- *                     intrinsics (RDNA3/RDNA4). 0 on CDNA and in the host pass,
- *                     so WMMA code paths compile away (and are never launched --
- *                     the host dispatch checks the device warpSize at runtime).
+ *   HIPDNN_HAS_WMMA   1 only in a device pass for an arch that has one of the
+ *                     WMMA f16 16x16x16 builtins below (RDNA3/RDNA3.5/RDNA4).
+ *                     0 on CDNA and in the host pass, so WMMA code paths
+ *                     compile away (and are never launched -- the host
+ *                     dispatch checks the device warpSize at runtime).
+ *   HIPDNN_WMMA_GFX12 1 when only the newer, gfx12-style WMMA encoding is
+ *                     available (see below). Selects the fragment layout the
+ *                     kernels must use.
  *
  * ROCm 7.x no longer defines __AMDGCN_WAVEFRONT_SIZE[_], so we key off the
- * clang-provided GPU-family macros (__GFX8__, __GFX9__, __GFX11__, __GFX12__).
+ * clang-provided GPU-family macros (__GFX8__, __GFX9__, __GFX11__, __GFX12__)
+ * for the wave size. WMMA support/layout, however, is NOT reliably keyed off
+ * those family macros: gfx1170 ("RDNA 4m") is numbered under the gfx11 family
+ * (__GFX11__ is defined, __GFX12__ is not) but its hardware does not implement
+ * the original gfx11 WMMA encoding (WMMA256bInsts) at all -- only the newer,
+ * unified encoding introduced for gfx12 (WMMA128bInsts). Concretely, on this
+ * target __has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_f16_w32) is false
+ * and __has_builtin(..._w32_gfx12) is true, even though __GFX11__ is set.
+ * Verified by compiling a probe for each target with AMD clang 23.0.0git:
+ *   gfx1100/1102/1150/1151/gfx11-generic -> old builtin only, __GFX11__
+ *   gfx1170                              -> new (_gfx12) builtin only, __GFX11__
+ *   gfx1200/1201/gfx12-generic           -> new (_gfx12) builtin only, __GFX12__
+ * So WMMA capability/layout must be probed via __has_builtin against the
+ * *builtin names*, not the family macros -- that automatically resolves per
+ * the actual -offload-arch of each object in a multi-arch build, which is
+ * exactly the "pick the right code per machine" behavior HIP's fat-binary
+ * loader then dispatches at load time.
+ *
+ * The two encodings differ in exactly three ways (see gemm_wmma_kernel.hip /
+ * gqa_kernel.hip for the empirically-verified per-lane formulas):
+ *   - fragment width: 16 elements/lane (gfx11, K replicated across lane/16)
+ *     vs 8 elements/lane (gfx12-style, K split by lane/16, no replication)
+ *   - the builtin itself (plain vs "_gfx12" suffix)
+ *   - accumulator row mapping: e*2+pair (gfx11, interleaved) vs pair*8+e
+ *     (gfx12-style, blocked). The M/N<->lane mapping (row=lane%16 for A,
+ *     col=lane%16 for B/output) is identical between the two encodings.
  */
 #ifndef HIP_ARCH_COMPAT_H
 #define HIP_ARCH_COMPAT_H
@@ -36,11 +65,62 @@
 #  define HIPDNN_WAVE_SIZE 32
 #endif
 
-#if defined(__HIP_DEVICE_COMPILE__) && (defined(__GFX11__) || defined(__GFX12__))
+#if defined(__HIP_DEVICE_COMPILE__) &&                                        \
+    __has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_f16_w32)
 #  define HIPDNN_HAS_WMMA 1
+#  define HIPDNN_WMMA_GFX12 0
+#elif defined(__HIP_DEVICE_COMPILE__) &&                                      \
+    __has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12)
+#  define HIPDNN_HAS_WMMA 1
+#  define HIPDNN_WMMA_GFX12 1
 #else
 #  define HIPDNN_HAS_WMMA 0
+#  define HIPDNN_WMMA_GFX12 0
 #endif
+
+/* Fragment element count for one A/B operand of the f16 16x16x16 WMMA op:
+ * the whole K=16 (replicated across the wave's two lane-halves) on gfx11, or
+ * half of K=16 (no replication, split by lane/16) on the gfx12-style
+ * encoding. The accumulator is always 8 elements/lane in both encodings. */
+#define HIPDNN_WMMA_FRAG_ELEMS (HIPDNN_WMMA_GFX12 ? 8 : 16)
+
+#if HIPDNN_WMMA_GFX12
+#  define HIPDNN_WMMA_F32_16X16X16_F16(a, b, c)                               \
+     __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12((a), (b), (c))
+#else
+#  define HIPDNN_WMMA_F32_16X16X16_F16(a, b, c)                               \
+     __builtin_amdgcn_wmma_f32_16x16x16_f16_w32((a), (b), (c))
+#endif
+
+#if defined(__HIPCC__)
+/* __device__/__forceinline__ come from hip_runtime.h; some callers (e.g.
+ * matmul_nbits_kernel.hip) include this header before it, so pull it in here
+ * too rather than depending on include order. */
+#include <hip/hip_runtime.h>
+/* K-axis base offset (within a 16-wide K tile) that a fragment load must add
+ * for this lane's pair-half (pair = lane/16). Zero on gfx11 (each lane loads
+ * the whole 16-wide K range); pair*8 on the gfx12-style encoding (each lane
+ * loads only its half). */
+__device__ __forceinline__ int hipdnn_wmma_k_off(int pair) {
+#if HIPDNN_WMMA_GFX12
+  return pair * 8;
+#else
+  (void)pair;
+  return 0;
+#endif
+}
+
+/* Row contributed by accumulator element `e` (0..7) for this lane's pair-half
+ * (pair = lane/16): interleaved (e*2+pair) on gfx11, blocked (pair*8+e) on
+ * the gfx12-style encoding. col is lane%16 in both encodings (unchanged). */
+__device__ __forceinline__ int hipdnn_wmma_acc_row(int pair, int e) {
+#if HIPDNN_WMMA_GFX12
+  return pair * 8 + e;
+#else
+  return e * 2 + pair;
+#endif
+}
+#endif  /* __HIPCC__ */
 
 /* Portable 4x8-bit integer dot-product with i32 accumulate (a signed, b treated
  * as small non-negative bytes -- e.g. unpacked 4-bit weight nibbles 0..15, or
@@ -66,6 +146,50 @@ __device__ static inline int hipdnn_sudot4(int a, int b, int acc) {
   for (int i = 0; i < 4; ++i) {
     const int av = static_cast<int>(static_cast<signed char>((a >> (i * 8)) & 0xFF));
     const int bv = static_cast<int>(static_cast<unsigned char>((b >> (i * 8)) & 0xFF));
+    r += av * bv;
+  }
+  return r;
+#endif
+}
+#endif  /* __HIPCC__ */
+
+/* Portable 4x8-bit integer dot-product with i32 accumulate where BOTH operand
+ * signednesses are chosen by the caller. hipdnn_sudot4 above hard-codes
+ * "signed a, non-negative b", which does not cover an i8 x i8 or ui8 x ui8
+ * quantized GEMM.
+ *
+ * The intrinsic's sign flags must be compile-time constants, hence template
+ * parameters rather than runtime bools.
+ *
+ * RDNA3/RDNA4 (gfx11xx/gfx12xx) take both flags directly on the mixed-sign
+ * v_dot4_i32_iu8. CDNA (gfx9xx) has only the uniformly-signed v_dot4_i32_i8 and
+ * uniformly-unsigned v_dot4_i32_u8, so a mixed-sign pair there falls through to
+ * the scalar branch. The scalar branch also keeps the host pass (and any arch
+ * without dot instructions) compilable. Only defined in a HIP translation
+ * unit. */
+#if defined(__HIPCC__)
+template <bool ASigned, bool BSigned>
+__device__ static inline int hipdnn_dot4(int a, int b, int acc) {
+#if defined(__HIP_DEVICE_COMPILE__) && (defined(__GFX11__) || defined(__GFX12__))
+  return __builtin_amdgcn_sudot4(ASigned, a, BSigned, b, acc, false);
+#else
+#if defined(__HIP_DEVICE_COMPILE__) && defined(__GFX9__)
+  if constexpr (ASigned && BSigned)
+    return __builtin_amdgcn_sdot4(a, b, acc, false);
+  else if constexpr (!ASigned && !BSigned)
+    return static_cast<int>(__builtin_amdgcn_udot4(
+        static_cast<unsigned>(a), static_cast<unsigned>(b),
+        static_cast<unsigned>(acc), false));
+#endif
+  int r = acc;
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    const int a_byte = (a >> (i * 8)) & 0xFF;
+    const int b_byte = (b >> (i * 8)) & 0xFF;
+    const int av =
+        ASigned ? static_cast<int>(static_cast<signed char>(a_byte)) : a_byte;
+    const int bv =
+        BSigned ? static_cast<int>(static_cast<signed char>(b_byte)) : b_byte;
     r += av * bv;
   }
   return r;

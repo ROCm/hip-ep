@@ -14,12 +14,14 @@ from onnx import TensorProto, helper, numpy_helper
 
 from .step2_fp16_cleanup import optimize_fp16_activations
 from .step3_lm_head import rewrite_lm_head_gather_unsqueeze
+from .lora_weight_pack import retarget_weight_quantized_graph_input
 
 FP32__dup4 = TensorProto.FLOAT
 FP64 = TensorProto.DOUBLE
 FP16__dup4 = TensorProto.FLOAT16
 INT4 = TensorProto.INT4
 DECODER_EXTERNAL_DATA = "BUNDLE.data"
+DECODER_WORK_EXTERNAL_DATA = "model.data"
 HEAD_QWEIGHT_DATA = "BUNDLE_head_qweight.data"
 HEAD_SCALE_DATA = "BUNDLE_head_scale.data"
 DEFAULT_BATCH = 1
@@ -372,14 +374,15 @@ def convert_matmul_graph_input_int8_dq(
 ) -> int:
     """Fuse graph-input int8 ``weight_quantized -> DQ -> MatMul`` into MatMulNBits.
 
-    Keeps each ``weight_quantized`` port as a graph input (shape ``[K, N]``).
-    Inserts ``Transpose + Reshape`` so MatMulNBits receives ``[N, K/block, block]``.
+    Keep ``weight_quantized`` ports as uint8 ``[N,K]`` graph inputs and
+    wire MatMulNBits directly.
     """
     graph_inputs = {vi.name: vi for vi in graph.input}
     dq_by_out = {d.output[0]: d for d in graph.node if d.op_type == "DequantizeLinear"}
     scale_cache: dict[tuple[str, str, int, int], str] = {}
     insert_before: dict[str, list[onnx.NodeProto]] = {}
     remove_nodes: set[str] = set()
+    retargeted_ports: set[str] = set()
     converted = 0
     for mm in graph.node:
         if mm.op_type != "MatMul" or len(mm.input) < 2:
@@ -401,54 +404,11 @@ def convert_matmul_graph_input_int8_dq(
         k, n = dims
         block_size = _matmul_nbits_block_size(k)
         n_blocks = k // block_size
-        packed_shape_name = f"{mm.name}_mnbits_pack_shape"
-        new_inits[packed_shape_name] = numpy_helper.from_array(
-            np.array([n, n_blocks, block_size], dtype=np.int64), name=packed_shape_name
-        )
-        offset_name = f"{mm.name}_mnbits_signed_offset"
-        new_inits[offset_name] = numpy_helper.from_array(
-            np.array(128, dtype=np.int16), name=offset_name
-        )
-        trans_out = f"{mm.name}_mnbits_w_t"
-        trans_i16 = f"{mm.name}_mnbits_w_t_i16"
-        shifted_i16 = f"{mm.name}_mnbits_w_shifted_i16"
-        trans_u8 = f"{mm.name}_mnbits_w_t_u8"
-        packed_u8 = f"{mm.name}_mnbits_w_uint8"
-        pack_nodes = [
-            helper.make_node(
-                "Transpose",
-                [w_name],
-                [trans_out],
-                name=f"{mm.name}_mnbits_transpose",
-                perm=[1, 0],
-            ),
-            helper.make_node(
-                "Cast",
-                [trans_out],
-                [trans_i16],
-                name=f"{mm.name}_mnbits_cast_i16",
-                to=TensorProto.INT16,
-            ),
-            helper.make_node(
-                "Add",
-                [trans_i16, offset_name],
-                [shifted_i16],
-                name=f"{mm.name}_mnbits_add_offset",
-            ),
-            helper.make_node(
-                "Cast",
-                [shifted_i16],
-                [trans_u8],
-                name=f"{mm.name}_mnbits_cast_u8",
-                to=TensorProto.UINT8,
-            ),
-            helper.make_node(
-                "Reshape",
-                [trans_u8, packed_shape_name],
-                [packed_u8],
-                name=f"{mm.name}_mnbits_pack",
-            ),
-        ]
+
+        if w_name not in retargeted_ports:
+            retarget_weight_quantized_graph_input(graph, w_name, k, n)
+            retargeted_ports.add(w_name)
+
         scale_key = (dq.input[1], dq.input[2], n, n_blocks)
         if scale_key not in scale_cache:
             scale_blocks, zp_blocks = _expand_scale_zp_blocks_signed_int8(
@@ -465,7 +425,7 @@ def convert_matmul_graph_input_int8_dq(
             scale_cache[dq.input[1], dq.input[2], n, n_blocks, "zp"] = z_name
         s_name = scale_cache[scale_key]
         z_name = scale_cache[dq.input[1], dq.input[2], n, n_blocks, "zp"]
-        mnbits_inputs = [mm.input[0], packed_u8, s_name, z_name]
+        mnbits_inputs = [mm.input[0], w_name, s_name, z_name]
         mnbits = helper.make_node(
             "MatMulNBits",
             mnbits_inputs,
@@ -478,7 +438,7 @@ def convert_matmul_graph_input_int8_dq(
             block_size=block_size,
             accuracy_level=MATMUL_NBITS_ACCURACY_LEVEL,
         )
-        insert_before[mm.name] = [*pack_nodes, mnbits]
+        insert_before[mm.name] = [mnbits]
         remove_nodes.update({mm.name, dq.name})
         converted += 1
     if not converted:
@@ -1002,11 +962,75 @@ def rewrite_gqa_past_seq_len_to_seqlens_k(model: onnx.ModelProto) -> int:
     return len(gqa_nodes)
 
 
+def _external_data_kv(init: onnx.TensorProto, key: str) -> str | None:
+    for kv in init.external_data:
+        if kv.key == key:
+            return kv.value
+    return None
+
+
+def _promote_initializer_to_shared_external_data(
+    init: onnx.TensorProto,
+    ref_init: onnx.TensorProto,
+    *,
+    location: str,
+) -> None:
+    if ref_init.data_location != TensorProto.EXTERNAL:
+        raise RuntimeError(
+            f"Reference initializer {ref_init.name!r} is not external; "
+            f"cannot reuse {location}"
+        )
+    offset_raw = _external_data_kv(ref_init, "offset")
+    length_raw = _external_data_kv(ref_init, "length")
+    if offset_raw is None or length_raw is None:
+        raise RuntimeError(
+            f"Reference initializer {ref_init.name!r} is missing external offset/length"
+        )
+    name = init.name
+    data_type = init.data_type
+    dims = list(init.dims)
+    init.Clear()
+    init.name = name
+    init.data_type = data_type
+    init.dims.extend(dims)
+    init.data_location = TensorProto.EXTERNAL
+    for kv in ref_init.external_data:
+        entry = init.external_data.add()
+        entry.key = kv.key
+        entry.value = location if kv.key == "location" else kv.value
+
+
+def _save_decoder_graph_reusing_external_data(
+    model: onnx.ModelProto,
+    dst: Path,
+    *,
+    external_data_ref: Path,
+    external_data_name: str,
+) -> None:
+    from .step2_fp16_cleanup import _save_model_graph_only
+
+    ref_model = onnx.load(str(external_data_ref), load_external_data=False)
+    ref_inits = {init.name: init for init in ref_model.graph.initializer}
+    for init in model.graph.initializer:
+        ref_init = ref_inits.get(init.name)
+        if ref_init is None:
+            raise RuntimeError(
+                f"Initializer {init.name!r} missing from reference {external_data_ref.name}"
+            )
+        if ref_init.data_location == TensorProto.EXTERNAL:
+            _promote_initializer_to_shared_external_data(
+                init, ref_init, location=external_data_name
+            )
+    _save_model_graph_only(model, dst)
+
+
 def save_decoder_model(
     model: onnx.ModelProto,
     dst: Path,
     *,
     external_data_name: str = DECODER_EXTERNAL_DATA,
+    reuse_external_data: bool = False,
+    external_data_ref: Path | None = None,
 ) -> None:
     if not model.graph.name:
         model.graph.name = f"{dst.stem}_graph"
@@ -1014,6 +1038,22 @@ def save_decoder_model(
     data_path = dst.parent / external_data_name
     if dst.exists():
         dst.unlink()
+    if reuse_external_data:
+        if external_data_ref is None:
+            raise ValueError(
+                "external_data_ref is required when reuse_external_data=True"
+            )
+        if not data_path.is_file():
+            raise RuntimeError(
+                f"Expected shared external weights at {data_path} before reusing them"
+            )
+        _save_decoder_graph_reusing_external_data(
+            model,
+            dst,
+            external_data_ref=external_data_ref,
+            external_data_name=external_data_name,
+        )
+        return
     if data_path.exists():
         data_path.unlink()
     onnx.save_model(
@@ -1098,6 +1138,8 @@ def convert_decoder_model(
     shape_fix: ShapeFixConfig,
     bundle_root: Path,
     external_data_name: str | None = None,
+    reuse_external_data: bool = False,
+    external_data_ref: Path | None = None,
     lpnorm_fp32: bool = False,
     gqa_seqlens_rewrite: bool = True,
     pure_gemm: bool = False,
@@ -1152,8 +1194,14 @@ def convert_decoder_model(
     stats["gqa_seqlens_rewrite"] = (
         rewrite_gqa_past_seq_len_to_seqlens_k(model) if gqa_seqlens_rewrite else 0
     )
-    ext_name = external_data_name or infer_decoder_external_data_name(src, bundle_root)
-    save_decoder_model(model, dst, external_data_name=ext_name)
+    ext_name = external_data_name or DECODER_WORK_EXTERNAL_DATA
+    save_decoder_model(
+        model,
+        dst,
+        external_data_name=ext_name,
+        reuse_external_data=reuse_external_data,
+        external_data_ref=external_data_ref,
+    )
     return stats
 
 

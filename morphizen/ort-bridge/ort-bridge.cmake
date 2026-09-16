@@ -4,6 +4,8 @@
 ##
 set(_ORT_BRIDGE_SOURCES
   src/ort-bridge.cpp
+  src/ort-api-version.hpp
+  src/ort-api-version.cpp
   src/api-ptrs.hpp
   src/api-ptrs.cpp
   src/ort-status-exception.hpp
@@ -75,4 +77,17 @@ endif()
 
 if(TARGET ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET})
   target_link_libraries(${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET} PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,ort-bridge>)
+  if(MSVC AND morphizen_ENABLE_HIP_GPU_ALLOCATOR)
+    get_target_property(_amdhip64_dll hip::amdhip64 IMPORTED_LOCATION_RELEASE)
+    if(NOT _amdhip64_dll)
+      get_target_property(_amdhip64_dll hip::amdhip64 IMPORTED_LOCATION)
+    endif()
+    if(NOT _amdhip64_dll)
+      message(FATAL_ERROR "hip::amdhip64 has no IMPORTED_LOCATION; cannot set /DELAYLOAD")
+    endif()
+    cmake_path(GET _amdhip64_dll FILENAME _amdhip64_name)
+    target_link_libraries(${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET} PRIVATE delayimp)
+    target_link_options(${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET} PRIVATE
+      "/DELAYLOAD:${_amdhip64_name}")
+  endif()
 endif(TARGET ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET})

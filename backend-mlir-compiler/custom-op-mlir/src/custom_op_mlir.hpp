@@ -122,7 +122,7 @@ static_assert(offsetof(output_allocator_t, self) == 0,
 // arguments (see InferenceState.cpp).
 // ============================================================================
 
-// One-time initialisation: creates GPU stream, MIOpen/hipBLAS handles, and
+// One-time initialisation: creates GPU stream, hipBLASLt handle, and
 // uploads compiled model weights to device memory through the supplied
 // FileSystem (which resolves the constants.bin entry inside the EPContext tar).
 //
@@ -136,7 +136,7 @@ static_assert(offsetof(output_allocator_t, self) == 0,
 // Return values:
 //   0  Success
 //   1  Context allocation failed (malloc)
-//   2  GPU handle creation failed (stream, MIOpen, or hipBLAS)
+//   2  GPU handle creation failed (stream or hipBLAS)
 //   3  Constant upload to GPU failed
 typedef int (*init_fn)(void **out_state, void *fs);
 
@@ -170,7 +170,6 @@ typedef int (*compute_fn)(void *state, span_t *inputs, span_t *outputs);
 // Return values:
 //   0   Success
 //   10  Stream destruction failed
-//   11  MIOpen handle destruction failed
 //   12  hipBLAS handle destruction failed
 //   13  GPU constant memory release failed (potential GPU memory leak)
 //   14  Stream synchronisation failed

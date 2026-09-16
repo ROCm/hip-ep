@@ -44,18 +44,24 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     auto BType = cast<MemRefType>(op.getB().getType());
     int64_t ARank = AType.getRank();
     int64_t BRank = BType.getRank();
+    int64_t transA = op.getTransA();
+    int64_t transB = op.getTransB();
 
     // === DYNAMIC SHAPE SUPPORT ===
     // For dynamic shapes, we compute dimensions at runtime
     MemRefDescriptor ADesc(adaptor.getA());
     MemRefDescriptor BDesc(adaptor.getB());
 
-    // Compute M, K, N from runtime dimensions
-    // A: [..., M, K], B: [..., K, N] or B: [K, N]
-    Value M =
-        (ARank >= 2) ? ADesc.size(rewriter, loc, ARank - 2) : createI64Const(1);
-    Value K = ADesc.size(rewriter, loc, ARank - 1);
-    Value N = BDesc.size(rewriter, loc, BRank - 1);
+    // Compute logical M, K, N from runtime dimensions.
+    // A: [..., M, K] or [..., K, M] when transA; B: [..., K, N] or [..., N, K]
+    // when transB.
+    Value M = (ARank >= 2) ? (transA ? ADesc.size(rewriter, loc, ARank - 1)
+                                     : ADesc.size(rewriter, loc, ARank - 2))
+                           : createI64Const(1);
+    Value K = transA ? ADesc.size(rewriter, loc, ARank - 2)
+                     : ADesc.size(rewriter, loc, ARank - 1);
+    Value N = transB ? BDesc.size(rewriter, loc, BRank - 2)
+                     : BDesc.size(rewriter, loc, BRank - 1);
 
     // Compute batch count from leading dimensions of A
     Value batchCount;
@@ -139,8 +145,9 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     //                          const void* A, const void* B, void* output,
     //                          int64_t M, int64_t N, int64_t K,
     //                          int64_t batch_count, int64_t elem_size,
-    //                          int64_t b_batch_stride, int op_state_slot)
-    SmallVector<Type, 11> paramTypes = {
+    //                          int64_t b_batch_stride, int64_t transA,
+    //                          int64_t transB, int op_state_slot)
+    SmallVector<Type, 13> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
         ptrType, // A
@@ -151,7 +158,9 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
         i64Type, // K
         i64Type, // batch_count
         i64Type, // elem_size
-        i64Type  // b_batch_stride
+        i64Type, // b_batch_stride
+        i64Type, // transA
+        i64Type  // transB
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -159,13 +168,19 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 11> args = {
-        statePtr,    getOpStateSlotValue(op, rewriter, loc),
-        APtr,        BPtr,
-        outputPtr,   M,
-        N,           K,
-        batchCount,  elemSize,
-        bBatchStride};
+    SmallVector<Value, 13> args = {statePtr,
+                                   getOpStateSlotValue(op, rewriter, loc),
+                                   APtr,
+                                   BPtr,
+                                   outputPtr,
+                                   M,
+                                   N,
+                                   K,
+                                   batchCount,
+                                   elemSize,
+                                   bBatchStride,
+                                   createI64Const(transA),
+                                   createI64Const(transB)};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

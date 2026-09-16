@@ -1,0 +1,184 @@
+// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+
+// GQA offline autotune lookup table.
+//
+// The table is a set of measured points plus a per-(phase, head_dim) last
+// resort. A lookup matches the categorical fields exactly, then takes the
+// nearest measured point in log space over the numeric dims:
+//
+//   Nearest   the closest measured point in the same categorical group.
+//             Distance 0 -- every dim equal -- is an exact hit, so "exact" is
+//             not a separate tier, it is the degenerate case of this one.
+//   Fallback  phase + head_dim only; guarantees a hit so the caller never has
+//             to fall back to a runtime sweep for lack of a row.
+//
+// This replaces an earlier tier design that bucketed every length to a
+// quarter-octave label and wildcarded geometry one field at a time. Bucketing
+// discards how far a query actually sits from a measured point, so a shape
+// between two labels was answered by whichever config a whole interval voted
+// for rather than by its nearest measurement -- and a length nobody swept fell
+// through every tier at once to the last resort. Nearest-neighbour in log space
+// is what Tensile (AMD's own GEMM library) does for the same problem, and it
+// degrades smoothly: the answer is always the closest thing actually measured.
+//
+// Categorical fields are matched exactly rather than by distance because they
+// are not distances. head_dim is a hard kernel-template split (64/128/256 are
+// three different instantiations), phase is a different kernel entirely, and the
+// KV dtype changes what decode reads per step. Interpolating across them would
+// be meaningless. The numeric dims (head counts, batch, sequence lengths) do
+// vary continuously and are where the distance metric earns its keep.
+//
+// Only Fp16 KV is populated today. The enum reserves Int8 so the W4A8 decode
+// path is a table regeneration, not a schema break.
+
+namespace hipdnn_ep.gqa_autotune.fbs;
+
+// ---------------------------------------------------------------------------
+// Request classification (categorical -- exact match)
+// ---------------------------------------------------------------------------
+
+// Any = 0 throughout, so a memset field reads as "unclassified" and is rejected
+// at load rather than silently matching something.
+
+// Which kernel serves the shape. Decode (sq == 1, the generation loop) is the
+// split-K flash-decode kernel. The three prefill variants are chosen purely by
+// head_dim in real/gqa.cpp -- d64 -> V5, d128 -> V7, d256 -> V8 -- so for
+// prefill this field and head_dim move together; decode carries head_dim
+// independently.
+enum GqaPhase : ubyte {
+  Any = 0,
+  Decode = 1,
+  PrefillV5 = 2,
+  PrefillV7 = 3,
+  PrefillV8 = 4
+}
+
+// The head_dim values the fused kernels are instantiated for.
+enum GqaHeadDim : ubyte {
+  Any = 0,
+  D64 = 1,
+  D128 = 2,
+  D256 = 3
+}
+
+// Fp16 reads the cache directly; Int8 is the quantized W4A8 decode path. Prefill
+// dequantizes an Int8 cache to fp16 scratch before it dispatches, so prefill
+// points are always Fp16; only decode ever carries Int8.
+enum GqaKvDtype : ubyte {
+  Any = 0,
+  Fp16 = 1,
+  Int8 = 2
+}
+
+// ---------------------------------------------------------------------------
+// Answer payload
+// ---------------------------------------------------------------------------
+
+// Which launcher the config's knobs are for. A config whose kind does not match
+// the phase being resolved is rejected at load.
+enum GqaConfigKind : ubyte {
+  None = 0,
+  Decode = 1,     // use_wmma + bkv (+ the point's per-shape split count)
+  Prefill = 2     // the v5/v7/v8 knob tuple
+}
+
+// A launch config, de-duplicated into `configs` and referenced by a 1-byte index
+// from each point, because thousands of points share a few dozen distinct
+// configs and inlining the payload in every one of them wastes most of the
+// table.
+//
+// The knobs are stored rather than a named enum so the offline builder and the
+// runtime agree on one representation; the dispatcher in gqa_kernel.hip maps a
+// knob tuple back to a launch the same way it always has. An illegal tuple is
+// rejected by the runtime validator (e.g. WMMA is only templated for some
+// (head_dim, heads-per-group) pairs), so the search moves to the next-nearest
+// point instead of launching something unusable.
+struct GqaTuneConfig {
+  kind: GqaConfigKind;
+
+  // Decode payload (zero on prefill configs).
+  use_wmma: ubyte;   // 0 = scalar, 1 = WMMA
+  bkv: ubyte;        // decode KV tile height: 16 or 32
+
+  // Prefill payload (zero on decode configs). These are the GqaPrefillConfig
+  // knobs: m_tiles is v5's, nw is v7's warp count, mt is v7/v8's, nd is v8's
+  // D-split. bkv above is shared (the prefill BKV knob: 16/32/64).
+  m_tiles: ubyte;
+  nw: ubyte;
+  mt: ubyte;
+  nd: ubyte;
+}
+
+// ---------------------------------------------------------------------------
+// Measured point
+// ---------------------------------------------------------------------------
+
+// One winner, as read off the sweep for one (categorical key, geometry, lengths).
+// The numeric dims are literal values, not buckets: the whole point of the
+// nearest-neighbour metric is that it can use how far away a point actually is.
+struct GqaTunePoint {
+  // Exact-match key.
+  phase: GqaPhase;
+  head_dim: GqaHeadDim;
+  kv_dtype: GqaKvDtype;
+
+  // Index into GqaAutotuneLut.configs. Out of range means the point is dropped
+  // at load, same as an unusable config.
+  config: ubyte;
+
+  // Decode split count for this point, 1..64. The runtime clamps it to
+  // ceil(effective_len/16) per request, so the stored value is what the top of
+  // the shape's neighbourhood wants and stays right lower down. Zero on prefill.
+  splits: ubyte;
+
+  // Distance key, sized to the measured ranges so the struct packs tight (16
+  // bytes). Head counts and batch fit a ubyte (<= 128 in practice); seq_q is the
+  // prefill chunk (<= 16384) so uint16; seq_kv reaches the model context length
+  // so uint32. seq_q is 1 on decode.
+  num_heads: ubyte;
+  kv_num_heads: ubyte;
+  batch: ubyte;
+  seq_q: uint16;
+  seq_kv: uint32;
+}
+
+// Last resort for a (phase, head_dim), used when its group has no usable point.
+struct GqaTuneFallback {
+  phase: GqaPhase;
+  head_dim: GqaHeadDim;
+  config: ubyte;
+  splits: ubyte;
+}
+
+table GqaAutotuneLut {
+  schema_version: uint32 = 9;
+  gpu_arch: string;         // must equal the running device, e.g. "gfx1151"
+  rocm_version: int32;      // advisory; mismatch warns but still loads
+  // Bumped whenever the config knobs or kernel semantics change in a way that
+  // invalidates measured winners. Rejects stale tables loudly instead of
+  // letting them pick a config that no longer means the same thing.
+  kernel_abi: string;       // "gqa-v3"
+  model_key: string;        // provenance label for logging
+
+  // Per-dimension weights of the log-space distance:
+  //
+  //   d = sqrt( Σ (w_dim * log2(query_dim / point_dim))^2 )
+  //
+  // They live in the table rather than in the lookup code so the offline fit and
+  // the runtime metric cannot drift apart: refitting is a table regeneration,
+  // not a code change that has to land in lockstep.
+  weight_num_heads: float = 1.0;
+  weight_kv_num_heads: float = 1.0;
+  weight_batch: float = 1.0;
+  weight_seq_q: float = 1.0;
+  weight_seq_kv: float = 1.0;
+
+  // De-duplicated answers. At most 256 (the point's index is a ubyte).
+  configs: [GqaTuneConfig];
+  points: [GqaTunePoint];
+  fallbacks: [GqaTuneFallback];
+}
+
+root_type GqaAutotuneLut;
+file_identifier "GQAL";

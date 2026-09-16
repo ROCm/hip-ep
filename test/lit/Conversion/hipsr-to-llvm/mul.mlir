@@ -23,7 +23,7 @@
 // CHECK-NEXT:  %[[OUT_PTR:.*]] = llvm.extractvalue {{.*}}[1] : !llvm.struct<(ptr<1>,
 // CHECK-NEXT:  %[[DATA_TYPE:.*]] = llvm.mlir.constant(1 : i64) : i64
 // CHECK-NEXT:  %[[TENSOR_OP:.*]] = llvm.mlir.constant(0 : i64) : i64
-// CHECK-NEXT:  llvm.call @wrap_miopenOpTensor(%[[CTX]], %[[SLOT]], %[[LHS_PTR]], %[[RHS_PTR]], %[[OUT_PTR]], %[[LHS_N]], %[[LHS_C]], %[[LHS_H]], %[[LHS_W]], %[[RHS_N]], %[[RHS_C]], %[[RHS_H]], %[[RHS_W]], %[[OUT_N]], %[[OUT_C]], %[[OUT_H]], %[[OUT_W]], %[[DATA_TYPE]], %[[TENSOR_OP]]) : (!llvm.ptr, i32, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK-NEXT:  llvm.call @wrap_elementwise(%[[CTX]], %[[SLOT]], %[[LHS_PTR]], %[[RHS_PTR]], %[[OUT_PTR]], %[[LHS_N]], %[[LHS_C]], %[[LHS_H]], %[[LHS_W]], %[[RHS_N]], %[[RHS_C]], %[[RHS_H]], %[[RHS_W]], %[[OUT_N]], %[[OUT_C]], %[[OUT_H]], %[[OUT_W]], %[[DATA_TYPE]], %[[TENSOR_OP]]) : (!llvm.ptr, i32, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 // CHECK-NEXT:  llvm.return
 func.func @mul(%ctx: !hipsr.context,
                %lhs: memref<4x1024xf16, #hipsr.mem<device>>,

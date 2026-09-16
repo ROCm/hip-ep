@@ -39,12 +39,26 @@ LogicalResult populateAddShapeRegion(OpBuilder &builder, Block &block,
                                      AddOp op);
 LogicalResult populateMulShapeRegion(OpBuilder &builder, Block &block,
                                      MulOp op);
+LogicalResult populateMinShapeRegion(OpBuilder &builder, Block &block,
+                                     MinOp op);
+LogicalResult populateEqualShapeRegion(OpBuilder &builder, Block &block,
+                                       EqualOp op);
 LogicalResult populateCastShapeRegion(OpBuilder &builder, Block &block,
                                       CastOp op);
 LogicalResult populateExpandShapeRegion(OpBuilder &builder, Block &block,
                                         ExpandOp op);
 LogicalResult populateMatMulShapeRegion(OpBuilder &builder, Block &block,
                                         MatMulOp op);
+LogicalResult populateTransposeShapeRegion(OpBuilder &builder, Block &block,
+                                           TransposeOp op);
+LogicalResult populateGatherShapeRegion(OpBuilder &builder, Block &block,
+                                        GatherOp op);
+LogicalResult populateSliceShapeRegion(OpBuilder &builder, Block &block,
+                                       SliceOp op);
+LogicalResult populateScatterNDShapeRegion(OpBuilder &builder, Block &block,
+                                           ScatterNDOp op);
+LogicalResult populateNonZeroShapeRegion(OpBuilder &builder, Block &block,
+                                         NonZeroOp op);
 
 #define GEN_PASS_DEF_POPULATESHAPEREGIONPASS
 #include "hip/Dialect/Hipsr/Transforms/Passes.h.inc"
@@ -64,12 +78,26 @@ LogicalResult populatePlaceholderShapeRegion(OpBuilder &builder,
     return populateAddShapeRegion(builder, block, addOp);
   } else if (auto mulOp = dyn_cast<MulOp>(consumer)) {
     return populateMulShapeRegion(builder, block, mulOp);
+  } else if (auto minOp = dyn_cast<MinOp>(consumer)) {
+    return populateMinShapeRegion(builder, block, minOp);
+  } else if (auto equalOp = dyn_cast<EqualOp>(consumer)) {
+    return populateEqualShapeRegion(builder, block, equalOp);
   } else if (auto castOp = dyn_cast<CastOp>(consumer)) {
     return populateCastShapeRegion(builder, block, castOp);
   } else if (auto expandOp = dyn_cast<ExpandOp>(consumer)) {
     return populateExpandShapeRegion(builder, block, expandOp);
   } else if (auto matMulOp = dyn_cast<MatMulOp>(consumer)) {
     return populateMatMulShapeRegion(builder, block, matMulOp);
+  } else if (auto transposeOp = dyn_cast<TransposeOp>(consumer)) {
+    return populateTransposeShapeRegion(builder, block, transposeOp);
+  } else if (auto gatherOp = dyn_cast<GatherOp>(consumer)) {
+    return populateGatherShapeRegion(builder, block, gatherOp);
+  } else if (auto sliceOp = dyn_cast<SliceOp>(consumer)) {
+    return populateSliceShapeRegion(builder, block, sliceOp);
+  } else if (auto scatterNDOp = dyn_cast<ScatterNDOp>(consumer)) {
+    return populateScatterNDShapeRegion(builder, block, scatterNDOp);
+  } else if (auto nonZeroOp = dyn_cast<NonZeroOp>(consumer)) {
+    return populateNonZeroShapeRegion(builder, block, nonZeroOp);
   }
 
   return placeholder.emitOpError(

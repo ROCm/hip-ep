@@ -92,7 +92,9 @@ def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
     "mlir::tensor::TensorDialect",
     "mlir::linalg::LinalgDialect",
     "mlir::memref::MemRefDialect",
-    "mlir::bufferization::BufferizationDialect"
+    "mlir::bufferization::BufferizationDialect",
+    "mlir::pdl::PDLDialect",
+    "mlir::pdl_interp::PDLInterpDialect"
   ];
 }
 
@@ -172,6 +174,18 @@ def OptimizeMemRefsPass : Pass<"hip-optimize-memrefs", "mlir::func::FuncOp"> {
   }];
   let dependentDialects = [
     "mlir::memref::MemRefDialect"
+  ];
+}
+
+def FuseROCMlirPass : Pass<"hip-fuse-rocmlir", "mlir::func::FuncOp"> {
+  let dependentDialects = [
+    "mlir::ub::UBDialect"
+  ];
+}
+
+def ConvertHipToTosaPass : Pass<"convert-hip-to-tosa", "mlir::func::FuncOp"> {
+  let dependentDialects = [
+    "mlir::tosa::TosaDialect"
   ];
 }
 

@@ -6,17 +6,13 @@
 
 #include "morphizen/morphizen.hpp"
 #include "onnxruntime_api.hpp"
-#include <cstdint>
 #include <string>
-#include <unordered_map>
 namespace morphizen {
 /**
  * MorphiZen EP configuration reader.
  *
- * Loads configuration from provider options, with "config_file" option
- * taking precedence over embedded defaults.
+ * Loads ConfigProto-shaped JSON from the "config_file" provider option, or
+ * from the embedded/plugin default when that option is absent.
  */
 std::string get_config_json_str(const onnxruntime::ProviderOptions &options);
-Ort::SessionOptions *
-get_session_option(const onnxruntime::ProviderOptions &options);
 } // namespace morphizen

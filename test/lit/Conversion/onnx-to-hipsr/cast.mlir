@@ -6,7 +6,7 @@
 // pass populates it).
 //===----------------------------------------------------------------------===//
 
-// RUN: hip-mlir-opt %s -allow-unregistered-dialect -convert-onnx-to-hipsr | FileCheck %s
+// RUN: hip-mlir-opt %s --onnx-dialect=modeled -allow-unregistered-dialect -convert-onnx-to-hipsr | FileCheck %s
 
 // The second placeholder follows the shape graph through the first
 // placeholder, while the second cast follows the data graph.
@@ -20,7 +20,7 @@
 // CHECK-NOT: shape_region
 func.func @cast_chain(
     %ctx: !hipsr.context, %input: tensor<?x8xf32>) -> tensor<?x8xf32> {
-  %0 = "onnx.Cast"(%input) : (tensor<?x8xf32>) -> tensor<?x8xf16>
-  %1 = "onnx.Cast"(%0) : (tensor<?x8xf16>) -> tensor<?x8xf32>
-  return %1 : tensor<?x8xf32>
+  %0 = "onnx.Cast"(%input) {to = f16} : (tensor<?x8xf32>) -> tensor<?x8xf16>
+  %1 = "onnx.Cast"(%0) {to = f32} : (tensor<?x8xf16>) -> tensor<?x8xf32>
+  "onnx.Return"(%1) : (tensor<?x8xf32>) -> ()
 }

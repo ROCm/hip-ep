@@ -62,4 +62,18 @@ module {
   // CHECK-LABEL: func.func @sub_broadcast_i64
   // CHECK: tensor.empty() : tensor<32xi64>
   // CHECK: hip.sub(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<1xi64>, tensor<32xi64>) outs({{.*}} : tensor<32xi64>)
+
+  // rank-6 Sub with a broadcast axis. hip.sub only has a 4-D lowering, so the
+  // axes are grouped such that each operand is either fully broadcast or fully
+  // present within every group.
+  func.func @sub_6d_broadcast(%lhs: tensor<2x3x4x5x6x7xf32>, %rhs: tensor<2x1x4x5x6x7xf32>) -> tensor<2x3x4x5x6x7xf32> {
+    %output = "onnx.Sub"(%lhs, %rhs) : (tensor<2x3x4x5x6x7xf32>, tensor<2x1x4x5x6x7xf32>) -> tensor<2x3x4x5x6x7xf32>
+    return %output : tensor<2x3x4x5x6x7xf32>
+  }
+
+  // CHECK-LABEL: func.func @sub_6d_broadcast
+  // CHECK: tensor.collapse_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4, 5]] : tensor<2x3x4x5x6x7xf32> into tensor<2x3x4x210xf32>
+  // CHECK: tensor.collapse_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4, 5]] : tensor<2x1x4x5x6x7xf32> into tensor<2x1x4x210xf32>
+  // CHECK: hip.sub({{.*}}) ins({{.*}}, {{.*}} : tensor<2x3x4x210xf32>, tensor<2x1x4x210xf32>) outs({{.*}} : tensor<2x3x4x210xf32>)
+  // CHECK: tensor.expand_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4, 5]] output_shape [2, 3, 4, 5, 6, 7] : tensor<2x3x4x210xf32> into tensor<2x3x4x5x6x7xf32>
 }

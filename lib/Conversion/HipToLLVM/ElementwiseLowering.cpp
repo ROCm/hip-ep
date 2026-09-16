@@ -71,21 +71,18 @@ struct MiopenBinaryOpLowering : public ConvertOpToLLVMPattern<OpTy> {
   }
 };
 
-// Unified lowering for elementwise binary ops (hip.mul, hip.add, ...)
-//   -> wrap_miopenOpTensor(state, lhs_ptr, rhs_ptr, out_ptr,
+// Unified lowering for elementwise binary ops (hip.mul, hip.add, hip.min,
+// hip.max)
+//   -> wrap_elementwise(state, lhs_ptr, rhs_ptr, out_ptr,
 //       lhs_n, lhs_c, lhs_h, lhs_w,
 //       rhs_n, rhs_c, rhs_h, rhs_w,
 //       out_n, out_c, out_h, out_w,
 //       data_type, tensor_op)
 //
-// Full 4D shapes are passed to enable MIOpen-native broadcasting.
+// Full 4D shapes are passed so the runtime can broadcast per-axis.
 // E.g. Add(memref<1x128x32xf16>, memref<32xf16>) passes:
 //   lhs=[1,1,128,32], rhs=[1,1,1,32], out=[1,1,128,32]
-// MIOpen broadcasts rhs dims that are 1 against lhs automatically.
-//
-// NOTE: The 4D shape passing is a workaround for MIOpen's
-// miopenSetNdTensorDescriptorWithLayout API. Will be replaced when hipdnn
-// elementwise support is available.
+// dims of 1 broadcast against the corresponding larger dim.
 template <typename OpTy, HipdnnTensorOp tensorOpEnum>
 struct ElementwiseOpLowering : public ConvertOpToLLVMPattern<OpTy> {
   using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
@@ -106,7 +103,7 @@ struct ElementwiseOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     if (lhsType.getRank() > 4 || rhsType.getRank() > 4 ||
         outputType.getRank() > 4)
       return rewriter.notifyMatchFailure(
-          op, "rank > 4 unsupported by MIOpen 4D descriptor API");
+          op, "rank > 4 unsupported by the 4D shape-passing ABI");
 
     auto lhsDims =
         extractShape4D(lhsType, adaptor.getLhs(), rewriter, loc, i64Type);
@@ -131,7 +128,7 @@ struct ElementwiseOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     paramTypes.append(14, i64Type);
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapMiopenOpTensor, paramTypes, i32Type);
+        rewriter, module, kWrapElementwise, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 

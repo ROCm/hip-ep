@@ -11,8 +11,7 @@ front-end shapes:
 
 Both layers carry per-channel bias. The MorphiZen path lowers rank-3
 onnx.Conv to the shared 2D hip.conv via a unit-H reshape (NCL -> NC1L ->
-hip.conv -> NCL'), dispatching to MIOpen's 4D convolution
-(wrap_miopenConvolutionForward, now dtype + bias + scratch-pool aware).
+hip.conv -> NCL'), dispatching to the in-tree hip_conv kernel via wrap_conv.
 """
 
 import numpy as np

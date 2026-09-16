@@ -15,6 +15,7 @@
 #include <fstream>
 #include <glog/logging.h>
 #include <limits>
+#include <string>
 #include <vector>
 
 // Protobuf
@@ -181,6 +182,12 @@ static std::string build_metadata_json(const CompilationArtifact &artifact,
   }
 
   for (const auto &output : graphRef.outputs()) {
+    // Skip producerless (constant) outputs, mirroring fuse_graph(): excluding
+    // them here keeps the artifact metadata outputs consistent with the
+    // meta_def outputs (see build_output_index_map).
+    if (!output.find_producer().has_value()) {
+      continue;
+    }
     auto *output_proto = metadata.add_outputs();
     output_proto->set_name(output.name());
     output_proto->set_elem_type(output.element_type());
@@ -226,9 +233,18 @@ static bool fuse_graph(IPass &self, Graph &graph, const std::string &metadata,
   }
   MY_LOG(1) << "Graph inputs: " << input_names.size();
 
-  // Extract graph output names
+  // Skip graph outputs with no producer node -- a constant initializer surfaced
+  // directly as a graph output (e.g. an Identity(constant) that ORT constant
+  // folding collapses to a bare initializer). It has no value inside the fused
+  // region, so claiming it would build an invalid fused-function return; ORT
+  // serves such initializer-backed outputs directly.
   std::vector<std::string> output_names;
   for (const auto &output : graphRef.outputs()) {
+    if (!output.find_producer().has_value()) {
+      MY_LOG(1) << "Skipping producerless (constant) graph output: "
+                << output.name();
+      continue;
+    }
     output_names.push_back(output.name());
   }
   MY_LOG(1) << "Graph outputs: " << output_names.size();

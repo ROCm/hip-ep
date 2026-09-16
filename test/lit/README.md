@@ -183,7 +183,7 @@ module {
     %out = "onnx.Relu"(%in) : (memref<10xf32>) -> memref<10xf32>
 
     // Should see LLVM runtime call after full pipeline
-    // CHECK: llvm.call @miopenActivationForward
+    // CHECK: llvm.call @wrap_elementwise
 
     return
   }
@@ -233,7 +233,7 @@ Test complete compilation pipelines with multiple passes.
 | Pass Name | Purpose | Example |
 |-----------|---------|---------|
 | `--convert-onnx-to-hip` | Lower ONNX ops to HIP dialect | `onnx.Conv` → `hip.conv` |
-| `--convert-hip-to-llvm` | Lower HIP ops to LLVM calls | `hip.conv` → `llvm.call @miopenConv...` |
+| `--convert-hip-to-llvm` | Lower HIP ops to LLVM calls | `hip.conv` → `llvm.call @wrap_conv` |
 | `--bufferization-buffer-deallocation` | Insert automatic buffer cleanup | `hip.alloc` → `hip.alloc` + `hip.free` |
 | `--generate-interface` | Generate C-ABI wrappers | `func.func @f` → `llvm.func @f_cabi` |
 

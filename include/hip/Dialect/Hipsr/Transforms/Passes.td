@@ -165,12 +165,59 @@ def MaterializeInitTensorsPass
   ];
 }
 
+def ConvertShapeToExtentPass
+    : Pass<"hipsr-convert-shape-to-extent", "mlir::func::FuncOp"> {
+  let summary =
+      "Retype !shape.shape as extent tensors and !shape.size as index";
+  let description = [{
+    Retypes shape values so the upstream shape passes can lower them.
+    `!shape.shape` becomes `tensor<Nxindex>`, and `!shape.size` becomes
+    `index`.
+
+    - `--convert-shape-to-std` only matches those new types, so it does
+      nothing until this pass runs.
+    - The pass first inlines the `scf.execute_region` and `shape.assuming`
+      regions, so the conversion sees straight-line code.
+    - Run `--remove-shape-constraints` first. It makes the passing witness
+      that lets `shape.assuming` inline.
+    - Upstream has no pattern for `shape.from_extents`, `shape.concat`,
+      `shape.size_to_index`, or `shape.const_size`, so this pass lowers them.
+
+    Before:
+    ```mlir
+    %s = scf.execute_region -> !shape.shape {
+      %0 = shape.shape_of %a : tensor<?x4xf16> -> !shape.shape
+      scf.yield %0 : !shape.shape
+    }
+    %c0 = shape.const_size 0
+    %d = shape.get_extent %s, %c0 : !shape.shape, !shape.size -> !shape.size
+    ```
+
+    After:
+    ```mlir
+    %s = shape.shape_of %a : tensor<?x4xf16> -> tensor<2xindex>
+    %c0 = arith.constant 0 : index
+    %d = shape.get_extent %s, %c0 : tensor<2xindex>, index -> index
+    ```
+  }];
+  let dependentDialects = [
+    "::mlir::hipsr::HipsrDialect",
+    "::mlir::arith::ArithDialect",
+    "::mlir::scf::SCFDialect",
+    "::mlir::shape::ShapeDialect",
+    "::mlir::tensor::TensorDialect"
+  ];
+}
+
 def HipsrExternalizeConstantsPass
     : Pass<"hipsr-externalize-constants", "mlir::ModuleOp"> {
   let summary = "Externalize hipsr.constant: stamp offset/size/index, write constants file";
   let description = [{
-    Externalizes each `hipsr.constant`: stamps `offset`/`size`/`index`.
-    With a FileSystem injected, also writes the constants file.
+    Gives each `hipsr.constant` an `index`, `offset`, and `size`.
+    When the module has constants, it sets `hip.constants_file`,
+    `hipdnn.constant_sizes`, and `hipdnn.constant_offsets`.
+    `--generate-interface` reads those attributes.
+    When a FileSystem is present, it writes the constants file.
   }];
   let options = [
     Option<"constantsFile", "constants-file", "std::string",
@@ -200,4 +247,57 @@ def HipsrPoolAllocPass : Pass<"hipsr-pool-alloc", "mlir::ModuleOp"> {
   ];
 }
 
+def HipsrInlineRegionsPass : Pass<"hipsr-inline-regions", "mlir::ModuleOp"> {
+  let summary = "Inline hipsr.pool_domain and hipsr.compute into their parents";
+  let description = [{
+    Flattens `hipsr.pool_domain` and `hipsr.compute` regions. Nested regions
+    are flattened from the inside out.
+
+    Before:
+    ```mlir
+    %r = hipsr.compute(%ctx) ins(%in) outs(%out) {
+    ^bb0(%c: !hipsr.context, %i: memref<4xf32>, %o: memref<4xf32>):
+      memref.copy %i, %o : memref<4xf32> to memref<4xf32>
+      hipsr.compute_yield %o : memref<4xf32>
+    } : memref<4xf32>
+    ```
+
+    After:
+    ```mlir
+    memref.copy %in, %out : memref<4xf32> to memref<4xf32>
+    ```
+  }];
+  let dependentDialects = [
+    "::mlir::hipsr::HipsrDialect"
+  ];
+}
+
+def HipsrUseOutputAllocatorPass
+    : Pass<"hipsr-use-output-allocator", "mlir::func::FuncOp"> {
+  let summary =
+      "Rewrite returned memref.alloc outputs to hipsr.alloc_output";
+  let description = [{
+    Replaces each graph-output `memref.alloc` with `hipsr.alloc_output`, taking
+    dynamic sizes from the allocation's `hipsr.preserve_shape` and setting
+    `out_idx` to its position in `func.return`. Output buffers then come from
+    the EP output allocator and are owned by the EP/runtime instead of being
+    deallocated or pooled.
+
+    Runs after bufferization, since a shape it reads must be an index memref,
+    and before `hipsr-pool-alloc`.
+
+    An allocation counts as a graph output when `func.return` returns it either
+    directly or through view-like aliases. The view operations are left in
+    place.
+
+    Only public graph-entry functions whose argument 0 is `!hipsr.context` are
+    rewritten. Private helper functions and functions without a HIPSR context
+    are skipped. The function signature and `func.return` are left unchanged.
+  }];
+  let dependentDialects = [
+    "::mlir::arith::ArithDialect",
+    "::mlir::hipsr::HipsrDialect",
+    "::mlir::memref::MemRefDialect"
+  ];
+}
 #endif // HIPSR_TRANSFORMS_PASSES

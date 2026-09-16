@@ -32,9 +32,20 @@ Value extractContiguousMemRefPtr(Value memrefDesc,
                                  ConversionPatternRewriter &rewriter,
                                  Location loc);
 
+// One value per dimension, a constant where the type has one.
+llvm::SmallVector<Value> extractShape(MemRefType type, Value descriptor,
+                                      ConversionPatternRewriter &rewriter,
+                                      Location loc, Type i64Type);
+
+// The same, left-padded with ones for a runtime call that takes 4 dimensions.
 llvm::SmallVector<Value, 4> extractShape4D(MemRefType type, Value descriptor,
                                            ConversionPatternRewriter &rewriter,
                                            Location loc, Type i64Type);
+
+// Stores `values` in a stack array, for a runtime call that reads the array on
+// the host.
+Value emitHostI64Array(ValueRange values, ConversionPatternRewriter &rewriter,
+                       Location loc);
 
 } // namespace hipsr
 } // namespace mlir

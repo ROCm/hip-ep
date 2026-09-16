@@ -47,7 +47,7 @@ LogicalResult populateAddShapeRegion(OpBuilder &builder, Block &shapeBlock,
 
 namespace {
 
-constexpr const char *kWrapMiopenOpTensor = "wrap_miopenOpTensor";
+constexpr const char *kWrapElementwise = "wrap_elementwise";
 
 struct AddLowering : public ConvertOpToLLVMPattern<AddOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -70,7 +70,7 @@ struct AddLowering : public ConvertOpToLLVMPattern<AddOp> {
     if (lhsType.getRank() > 4 || rhsType.getRank() > 4 ||
         outType.getRank() > 4) {
       return rewriter.notifyMatchFailure(
-          op, "rank > 4 unsupported by MIOpen 4D descriptor API");
+          op, "rank > 4 unsupported by the 4D shape-passing ABI");
     }
 
     auto lhsDims =
@@ -89,7 +89,7 @@ struct AddLowering : public ConvertOpToLLVMPattern<AddOp> {
                                 devicePtr, i64, i64, i64, i64, i64, i64, i64,
                                 i64, i64, i64, i64, i64, i64, i64>;
     auto addFunc =
-        AddCall::lookupOrCreateFn(rewriter, loc, module, kWrapMiopenOpTensor);
+        AddCall::lookupOrCreateFn(rewriter, loc, module, kWrapElementwise);
     if (failed(addFunc)) {
       return failure();
     }

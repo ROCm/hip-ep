@@ -10,7 +10,8 @@
 // Hipsr_MatMulOp
 //===----------------------------------------------------------------------===//
 
-def Hipsr_MatMulOp : Hipsr_DpsOp<"matmul"> {
+def Hipsr_MatMulOp : Hipsr_DpsOp<"matmul",
+    /*traits=*/[DeclareOpInterfaceMethods<OpStateOpInterface>]> {
   let summary = "Matrix multiply (batched N-D x N-D), destination-passing style";
   let description = [{
     Matrix multiplication with ONNX/NumPy `matmul` semantics. For operands that

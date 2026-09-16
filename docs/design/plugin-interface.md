@@ -448,7 +448,6 @@ its id; `HIPDNN_EP_COMPILER_PLUGINS` then selects which registered ids to link:
 
 ```
 cmake -S hip-ep -B build \
-  -DBUILD_HIP_TOOLS=ON \
   -DHIPDNN_EP_COMPILER_PLUGIN_PATHS=<your plugin repo> \
   -DHIPDNN_EP_COMPILER_PLUGINS=myvendor ...
 cmake --build build

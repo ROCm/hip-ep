@@ -69,10 +69,10 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
   LOG(INFO) << "Compiling MLIR bytecode using hip-compiler plugin";
   LOG(INFO) << "Bytecode size: " << mlir_bytecode.size() << " bytes";
 
-  // Load plugin via MorphiZen Plugin API
+  // Load plugin via MorphiZen Plugin API by static.
   auto plugin = morphizen::Plugin::get("hip-compiler");
   if (!plugin) {
-    LOG(ERROR) << "Failed to load hip-compiler plugin";
+    LOG(ERROR) << "Failed to resolve hip-compiler plugin";
     return std::nullopt;
   }
 
@@ -91,7 +91,8 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
 
   // Check if symbol exists
   if (!plugin->has_method("hip_compile_with_fs")) {
-    LOG(ERROR) << "Symbol 'hip_compile_with_fs' NOT found in DLL";
+    LOG(ERROR)
+        << "Symbol 'hip_compile_with_fs' NOT found in hip-compiler plugin";
     return std::nullopt;
   }
 

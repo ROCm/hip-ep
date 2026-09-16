@@ -15,10 +15,18 @@ add_library(HipsrDialectIR STATIC
   HipsrConstantOp.cpp
   HipsrPlaceholderOp.cpp
   HipsrCastOp.cpp
+  HipsrCopyD2HOp.cpp
   HipsrMatMulOp.cpp
   HipsrExpandOp.cpp
   HipsrAddOp.cpp
   HipsrMulOp.cpp
+  HipsrMinOp.cpp
+  HipsrEqualOp.cpp
+  HipsrTransposeOp.cpp
+  HipsrGatherOp.cpp
+  HipsrSliceOp.cpp
+  HipsrScatterNDOp.cpp
+  HipsrNonZeroOp.cpp
   HipsrGetPoolOp.cpp
   HipsrPreserveShapeOp.cpp
   HipsrLLVMLoweringUtils.cpp
@@ -30,6 +38,7 @@ add_dependencies(HipsrDialectIR
   HipsrEnumsIncGen
   HipsrAttrsIncGen
   HipsrTypesIncGen
+  HipOpStateInterfaceIncGen
 )
 
 target_link_libraries(HipsrDialectIR PUBLIC
@@ -46,4 +55,5 @@ target_link_libraries(HipsrDialectIR PUBLIC
   MLIRConvertToLLVMInterface
   MLIRTransforms
   MLIRTensorDialect
+  HipDialectIR
 )

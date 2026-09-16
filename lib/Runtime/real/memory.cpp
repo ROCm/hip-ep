@@ -248,3 +248,29 @@ void hipdnn_ep_readback_scalar(RuntimeState *state, void *host_dst,
             hipGetErrorString(err));
   }
 }
+
+int wrap_copy_d2h(RuntimeState *state, void *dst_ptr, const void *src_ptr,
+                  int64_t size_bytes) {
+  OP_PROFILE_CPU("copy_d2h", state);
+  if (!state || !dst_ptr || !src_ptr || size_bytes < 0) {
+    fprintf(stderr, "wrap_copy_d2h: invalid argument\n");
+    return -1;
+  }
+  if (size_bytes == 0) {
+    return 0;
+  }
+  hipStream_t stream =
+      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  // hipMemcpyDefault, not DeviceToHost: the source can be host-accessible
+  // memory such as host-mapped scratch or a UMA pool, which DeviceToHost
+  // rejects with `invalid argument`.
+  hipError_t err =
+      hipMemcpyAsync(dst_ptr, src_ptr, static_cast<size_t>(size_bytes),
+                     hipMemcpyDefault, stream);
+  if (err != hipSuccess) {
+    fprintf(stderr, "wrap_copy_d2h: D2H copy failed (%lld bytes): %s\n",
+            static_cast<long long>(size_bytes), hipGetErrorString(err));
+    return -1;
+  }
+  return 0;
+}

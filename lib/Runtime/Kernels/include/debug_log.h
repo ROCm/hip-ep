@@ -30,3 +30,52 @@ inline bool custom_kernels_debug_enabled() {
 
 #define CUSTOM_KERNELS_DEBUG_LOG(fmt, ...) \
     do { if (custom_kernels_debug_enabled()) fprintf(stderr, fmt, ##__VA_ARGS__); } while (0)
+
+// GQA autotune logging, gated on its own HIPDNN_GQA_AUTOTUNE_LOG so the
+// launched-config diagnostics (in both lookup and online modes) can be captured
+// on their own, without the full HIPDNN_EP_DEBUG [custom_kernels] firehose.
+// Mirrors matmul_nbits' HIPDNN_MATMUL_AUTOTUNE_LOG. Read through the Win32 API
+// on Windows because a static-CRT (/MT) DLL's getenv cannot see env vars set by
+// the host process. Callers OR this with custom_kernels_debug_enabled() so
+// HIPDNN_EP_DEBUG=1 still pulls these lines in as part of the full debug output.
+inline bool gqa_autotune_log_enabled() {
+    static const bool enabled = [] {
+#ifdef _WIN32
+        char buf[8];
+        unsigned long n =
+            GetEnvironmentVariableA("HIPDNN_GQA_AUTOTUNE_LOG", buf, sizeof(buf));
+        return n > 0 && buf[0] >= '1';
+#else
+        const char* v = getenv("HIPDNN_GQA_AUTOTUNE_LOG");
+        return v && v[0] >= '1';
+#endif
+    }();
+    return enabled;
+}
+
+// MatMulNBits autotune logging, gated on its own HIPDNN_MATMUL_AUTOTUNE_LOG so
+// the per-shape tuner candidate timings, the winning config, LUT hits and the
+// cached selections can be captured on their own -- HIPDNN_MATMUL_LUT_LOG only
+// covers the offline-table lookup (which AUTOTUNE_MODE=online bypasses), and
+// HIPDNN_EP_DEBUG pulls in the full [custom_kernels] firehose. The full-debug
+// switch still enables these lines for backward compatibility.
+inline bool matmul_nbits_autotune_log_enabled() {
+    static const bool enabled = [] {
+#ifdef _WIN32
+        char buf[8];
+        unsigned long n =
+            GetEnvironmentVariableA("HIPDNN_MATMUL_AUTOTUNE_LOG", buf, sizeof(buf));
+        return n > 0 && buf[0] >= '1';
+#else
+        const char* v = getenv("HIPDNN_MATMUL_AUTOTUNE_LOG");
+        return v && v[0] >= '1';
+#endif
+    }();
+    return enabled;
+}
+
+#define MATMUL_NBITS_AUTOTUNE_LOG(fmt, ...)                                     \
+    do {                                                                       \
+        if (matmul_nbits_autotune_log_enabled() || custom_kernels_debug_enabled()) \
+            fprintf(stderr, fmt, ##__VA_ARGS__);                              \
+    } while (0)

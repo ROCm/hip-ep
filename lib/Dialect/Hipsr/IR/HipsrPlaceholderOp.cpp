@@ -16,7 +16,11 @@ using namespace mlir::hipsr;
 namespace {
 
 // Keep the shape graph apart from the data graph: no data results as inputs.
+// A barrier is exempt, because its region reads the values themselves.
 LogicalResult verifyShapeGraphInputs(PlaceholderOp op) {
+  if (op.getPlaceholderType() == PlaceholderType::Barrier) {
+    return success();
+  }
   for (auto [index, input] : llvm::enumerate(op.getInputs())) {
     if (!PlaceholderOp::isAllowedShapeGraphInput(input)) {
       return op.emitOpError("input ")
@@ -53,6 +57,55 @@ LogicalResult verifyResultUses(PlaceholderOp op) {
   if (!llvm::all_equal(consumers)) {
     return op.emitOpError(
         "requires all results to initialize the same hipsr operation");
+  }
+  return success();
+}
+
+// A placeholder and its consumer share one destination buffer, so both must
+// land in the same pool domain. That holds when the two read the same values,
+// the placeholder on the shape-graph side and the consumer on the data side.
+//
+// Only a value another placeholder holds is checked. A block argument or a
+// constant cannot reach a later domain, and inside a pool domain a data value
+// and its counterpart are two block arguments that no longer name each other.
+LogicalResult verifyConsumerTopology(PlaceholderOp op) {
+  Operation *consumer = op.getConsumer();
+  if (!consumer) {
+    return success();
+  }
+
+  // A barrier reads the data values themselves, so it names exactly what its
+  // consumer names.
+  if (op.getPlaceholderType() == PlaceholderType::Barrier) {
+    if (!llvm::equal(op.getInputs(), getHipsrInputOperands(consumer))) {
+      return op.emitOpError("inputs must match the operands of its consumer '")
+             << consumer->getName() << "'";
+    }
+    return success();
+  }
+
+  SmallVector<Value> counterparts = llvm::map_to_vector(
+      getHipsrInputOperands(consumer), getShapeGraphCounterpart);
+
+  for (auto [index, counterpart] : llvm::enumerate(counterparts)) {
+    if (!counterpart.getDefiningOp<PlaceholderOp>()) {
+      continue;
+    }
+    if (!llvm::is_contained(op.getInputs(), counterpart)) {
+      return op.emitOpError("must read the shape-graph value of input ")
+             << index << " of its consumer '" << consumer->getName() << "'";
+    }
+  }
+
+  for (auto [index, input] : llvm::enumerate(op.getInputs())) {
+    if (!input.getDefiningOp<PlaceholderOp>()) {
+      continue;
+    }
+    if (!llvm::is_contained(counterparts, input)) {
+      return op.emitOpError("input ")
+             << index << " has no matching operand in its consumer '"
+             << consumer->getName() << "'";
+    }
   }
   return success();
 }
@@ -126,6 +179,9 @@ LogicalResult PlaceholderOp::verify() {
     return failure();
   }
   if (failed(verifyResultUses(*this))) {
+    return failure();
+  }
+  if (failed(verifyConsumerTopology(*this))) {
     return failure();
   }
   if (failed(verifyShapeRegionSignature(*this))) {

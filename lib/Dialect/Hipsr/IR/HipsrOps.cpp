@@ -28,6 +28,46 @@ OperandRange mlir::hipsr::getHipsrDestinationOperands(Operation *op) {
   return none;
 }
 
+void mlir::hipsr::getDpsMemoryEffects(
+    DestinationStyleOpInterface op,
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  for (OpOperand &operand : op->getOpOperands()) {
+    if (!isa<MemRefType>(operand.get().getType())) {
+      continue;
+    }
+    if (op.isDpsInit(&operand)) {
+      effects.emplace_back(MemoryEffects::Write::get(), &operand);
+    } else {
+      effects.emplace_back(MemoryEffects::Read::get(), &operand);
+    }
+  }
+}
+
+// A hipsr op orders its operands as context, inputs, then destinations.
+OperandRange mlir::hipsr::getHipsrInputOperands(Operation *op) {
+  OperandRange destinations = getHipsrDestinationOperands(op);
+  if (destinations.empty()) {
+    return OperandRange(nullptr, 0);
+  }
+  unsigned contextAndInputs = destinations.getBeginOperandIndex();
+  return op->getOperands().slice(1, contextAndInputs - 1);
+}
+
+Value mlir::hipsr::getShapeGraphCounterpart(Value value) {
+  if (PlaceholderOp::isAllowedShapeGraphInput(value)) {
+    return value;
+  }
+
+  // Block arguments are allowed, so anything left is a result.
+  auto result = cast<OpResult>(value);
+  OperandRange destinations = getHipsrDestinationOperands(result.getOwner());
+  if (result.getResultNumber() >= destinations.size()) {
+    return value;
+  }
+  return destinations[result.getResultNumber()];
+}
+
 bool mlir::hipsr::isHipsrDestinationOperand(OpOperand &use) {
   OperandRange destinations = getHipsrDestinationOperands(use.getOwner());
   if (destinations.empty())
@@ -35,4 +75,17 @@ bool mlir::hipsr::isHipsrDestinationOperand(OpOperand &use) {
   unsigned index = use.getOperandNumber();
   unsigned begin = destinations.getBeginOperandIndex();
   return index >= begin && index < begin + destinations.size();
+}
+
+OpResult mlir::hipsr::getResultForDestination(OpOperand &use) {
+  if (!isHipsrDestinationOperand(use)) {
+    return {};
+  }
+  Operation *op = use.getOwner();
+  unsigned slot = use.getOperandNumber() -
+                  getHipsrDestinationOperands(op).getBeginOperandIndex();
+  if (slot >= op->getNumResults()) {
+    return {};
+  }
+  return op->getResult(slot);
 }

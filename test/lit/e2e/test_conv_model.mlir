@@ -12,13 +12,17 @@
 // Verifies the complete hipdnn-pipeline:
 // 1. convert-onnx-to-hip: onnx.Conv -> hip.conv
 // 2. bufferize / canonicalize
-// 3. convert-hip-to-llvm: hip.conv -> wrap_miopenConvolutionForward
+// 3. convert-hip-to-llvm: hip.conv -> wrap_conv
 // 4. generate-interface: Create inference_init/compute/cleanup/metadata
+//
+// Forward Conv no longer reaches MIOpen at all, so the absence of
+// wrap_miopenConvolutionForward is part of the contract, not an accident.
 
 // CHECK: module attributes {
 // CHECK-SAME: hipdnn.input_count = 1
 // CHECK-SAME: hipdnn.output_count = 1
-// CHECK: llvm.func @wrap_miopenConvolutionForward
+// CHECK: llvm.func @wrap_conv
+// CHECK-NOT: llvm.func @wrap_miopenConvolutionForward
 // CHECK: llvm.func @inference_init
 // CHECK: llvm.func @inference_compute
 // CHECK: llvm.func @inference_cleanup

@@ -46,9 +46,11 @@ BlockArgument getEntryArgument(OpTy op, unsigned operandIndex) {
 //===----------------------------------------------------------------------===//
 
 // hipsr.preserve_shape only records that `$shape` describes `$data`. It has no
-// results and no init operand, so it is not DPS and cannot reuse
-// DstBufferizableOpInterfaceExternalModel. It touches no memory, so nothing
-// needs copying and a later DPS op can write the buffer in place.
+// result and no init operand, so it is not DPS and cannot reuse
+// DstBufferizableOpInterfaceExternalModel.
+//
+// It reads and writes neither operand, so nothing needs copying and a later
+// DPS op can write either buffer in place.
 struct PreserveShapeBufferizableModel
     : public BufferizableOpInterface::ExternalModel<
           PreserveShapeBufferizableModel, PreserveShapeOp> {
@@ -76,8 +78,70 @@ struct PreserveShapeBufferizableModel
     if (failed(dataBuf)) {
       return failure();
     }
-    replaceOpWithNewBufferizedOp<PreserveShapeOp>(
-        rewriter, op, preserveOp.getShape(), *dataBuf);
+
+    // After -hipsr-convert-shape-to-extent `$shape` is a tensor, so it needs a
+    // buffer of its own.
+    Value shape = preserveOp.getShape();
+    if (isa<TensorType>(shape.getType())) {
+      FailureOr<Value> shapeBuf = getBuffer(rewriter, shape, options, state);
+      if (failed(shapeBuf)) {
+        return failure();
+      }
+      shape = *shapeBuf;
+    }
+
+    replaceOpWithNewBufferizedOp<PreserveShapeOp>(rewriter, op, shape,
+                                                  *dataBuf);
+    return success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// ConstantOp
+//===----------------------------------------------------------------------===//
+
+// hipsr.constant points into the constants blob, which the runtime owns. It
+// bufferizes like upstream arith.constant.
+//
+// Before: %0 = hipsr.constant {...} : tensor<4x2xf32, #hipsr.mem<device>>
+// After:  %0 = hipsr.constant {...} : memref<4x2xf32, #hipsr.mem<device>>
+struct ConstantBufferizableModel
+    : public BufferizableOpInterface::ExternalModel<ConstantBufferizableModel,
+                                                    ConstantOp> {
+  bool isWritable(Operation *, Value, const AnalysisState &) const {
+    return false;
+  }
+
+  FailureOr<BufferLikeType> getBufferType(Operation *op, Value value,
+                                          const BufferizationOptions &options,
+                                          const BufferizationState &,
+                                          SmallVector<Value> &) const {
+    auto tensorType = cast<TensorType>(value.getType());
+    std::optional<Attribute> memorySpace =
+        options.defaultMemorySpaceFn(tensorType);
+    if (!memorySpace) {
+      return op->emitError("could not infer memory space");
+    }
+    // A constant is contiguous, so use the identity layout. The default from
+    // unknownTypeConverterFn has a fully dynamic layout.
+    return cast<BufferLikeType>(
+        getMemRefTypeWithStaticIdentityLayout(tensorType, *memorySpace));
+  }
+
+  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
+                          const BufferizationOptions &options,
+                          BufferizationState &state) const {
+    auto constantOp = cast<ConstantOp>(op);
+    FailureOr<BufferLikeType> bufferType =
+        bufferization::getBufferType(constantOp.getResult(), options, state);
+    if (failed(bufferType)) {
+      return failure();
+    }
+
+    replaceOpWithNewBufferizedOp<ConstantOp>(
+        rewriter, op, *bufferType, constantOp.getValue(),
+        constantOp.getIndexAttr(), constantOp.getOffsetAttr(),
+        constantOp.getSizeAttr());
     return success();
   }
 };
@@ -88,19 +152,6 @@ struct PreserveShapeBufferizableModel
 
 ComputeYieldOp getYieldOp(ComputeOp computeOp) {
   return cast<ComputeYieldOp>(computeOp.getBody().front().getTerminator());
-}
-
-// get result by output operand
-OpResult getResultHeldIn(ComputeOp computeOp, OpOperand &opOperand) {
-  OperandRange outputs = computeOp.getOutputs();
-  if (outputs.empty())
-    return {};
-
-  unsigned begin = outputs.getBeginOperandIndex();
-  unsigned number = opOperand.getOperandNumber();
-  if (number < begin || number - begin >= computeOp->getNumResults())
-    return {};
-  return computeOp->getResult(number - begin);
 }
 
 // get output operand by result index
@@ -121,10 +172,12 @@ bool isValueWritten(Value value, const AnalysisState &state) {
 
   while (!worklist.empty()) {
     OpOperand *use = worklist.pop_back_val();
-    if (!visited.insert(use).second)
+    if (!visited.insert(use).second) {
       continue;
-    if (state.bufferizesToMemoryWrite(*use))
+    }
+    if (state.bufferizesToMemoryWrite(*use)) {
       return true;
+    }
     if (state.bufferizesToAliasOnly(*use)) {
       for (const AliasingValue &alias : state.getAliasingValues(*use)) {
         for (OpOperand &aliasUse : alias.value.getUses())
@@ -146,17 +199,35 @@ struct ComputeOpBufferization
 
   bool bufferizesToMemoryWrite(Operation *op, OpOperand &opOperand,
                                const AnalysisState &state) const {
-    if (!isHipsrDestinationOperand(opOperand))
+    auto computeOp = cast<ComputeOp>(op);
+    if (!isHipsrDestinationOperand(opOperand)) {
       return false;
-    return isValueWritten(
-        getEntryArgument(cast<ComputeOp>(op), opOperand.getOperandNumber()),
-        state);
+    }
+    BlockArgument blockArg =
+        getEntryArgument(computeOp, opOperand.getOperandNumber());
+    // Check each use directly, without tracing through aliases
+    for (OpOperand &use : blockArg.getUses()) {
+      if (state.bufferizesToMemoryWrite(use)) {
+        return true;
+      }
+    }
+    return false;
   }
 
-  bool isWritable(Operation *op, Value value, const AnalysisState &) const {
-    if (auto blockArg = dyn_cast<BlockArgument>(value))
+  // isWritable is asked about every buffer an argument aliases, so marking an
+  // input read-only also forbids writing whatever produced it. With the input
+  // %a read-only, the buffer it names cannot be written, so %data got copied:
+  //   %a = memref.alloc(%dim) : memref<3x?xi64, #hipsr.mem<device>>
+  //   memref.copy %data, %a
+  //   hipsr.compute(%ctx) ins(%a) outs(%dest) { ... }
+  // An input that the body does write stays read-only.
+  bool isWritable(Operation *op, Value value,
+                  const AnalysisState &state) const {
+    if (auto blockArg = dyn_cast<BlockArgument>(value)) {
       return isHipsrDestinationOperand(
-          op->getOpOperand(blockArg.getArgNumber()));
+                 op->getOpOperand(blockArg.getArgNumber())) ||
+             !isValueWritten(blockArg, state);
+    }
     return true;
   }
 
@@ -168,8 +239,9 @@ struct ComputeOpBufferization
     aliases.addAlias({getEntryArgument(computeOp, opOperand.getOperandNumber()),
                       BufferRelation::Equivalent});
 
-    if (OpResult result = getResultHeldIn(computeOp, opOperand))
+    if (OpResult result = getResultForDestination(opOperand)) {
       aliases.addAlias({result, BufferRelation::Equivalent});
+    }
     return aliases;
   }
 
@@ -177,9 +249,10 @@ struct ComputeOpBufferization
                                               const AnalysisState &) const {
     // block argument <-> input operand
     auto computeOp = cast<ComputeOp>(op);
-    if (auto blockArg = dyn_cast<BlockArgument>(value))
+    if (auto blockArg = dyn_cast<BlockArgument>(value)) {
       return {{&op->getOpOperand(blockArg.getArgNumber()),
                BufferRelation::Equivalent}};
+    }
 
     // op result <-> yield op result
     unsigned resultIndex = cast<OpResult>(value).getResultNumber();
@@ -188,9 +261,53 @@ struct ComputeOpBufferization
                       BufferRelation::Equivalent});
 
     // op result <-> output operand
-    if (OpOperand *destination = getDestinationOf(computeOp, resultIndex))
+    if (OpOperand *destination = getDestinationOf(computeOp, resultIndex)) {
       aliases.addAlias({destination, BufferRelation::Equivalent});
+    }
     return aliases;
+  }
+
+  LogicalResult resolveConflicts(Operation *op, RewriterBase &rewriter,
+                                 const AnalysisState &analysisState,
+                                 const BufferizationState &) const {
+    auto computeOp = cast<ComputeOp>(op);
+
+    // Check each output operand to see if it aliases any input operand.
+    // If so, save the mapping as an attribute for use during bufferization.
+    // We use aliasing (not equivalence) because out-of-place decisions break
+    // equivalence but preserve aliasing relationships.
+    SmallVector<int32_t> aliasingMap;
+    for (auto [outIdx, output] : llvm::enumerate(computeOp.getOutputs())) {
+      int32_t aliasedInputIdx = -1; // -1 means no aliasing
+
+      // Reusing the input buffer also changes the type of the matching entry
+      // argument, so only do this when the body never reads that argument.
+      BlockArgument destination = getEntryArgument(
+          computeOp, computeOp.getOutputs().getBeginOperandIndex() + outIdx);
+      if (isa<TensorType>(output.getType()) && destination.use_empty()) {
+        // Find which input (if any) this output aliases
+        for (auto [inIdx, input] : llvm::enumerate(computeOp.getInputs())) {
+          if (!isa<TensorType>(input.getType())) {
+            continue;
+          }
+
+          if (analysisState.areAliasingBufferizedValues(output, input)) {
+            aliasedInputIdx = static_cast<int32_t>(inIdx);
+            break;
+          }
+        }
+      }
+
+      aliasingMap.push_back(aliasedInputIdx);
+    }
+
+    // Save the mapping as an array attribute
+    if (!aliasingMap.empty()) {
+      auto arrayAttr = rewriter.getI32ArrayAttr(aliasingMap);
+      op->setAttr("__output_alias_to_input", arrayAttr);
+    }
+
+    return success();
   }
 
   FailureOr<BufferLikeType>
@@ -198,10 +315,11 @@ struct ComputeOpBufferization
                 const BufferizationState &state,
                 SmallVector<Value> &invocationStack) const {
     // A block argument's buffer is the operand's buffer.
-    if (auto blockArg = dyn_cast<BlockArgument>(value))
+    if (auto blockArg = dyn_cast<BlockArgument>(value)) {
       return bufferization::getBufferType(
           op->getOperand(blockArg.getArgNumber()), options, state,
           invocationStack);
+    }
 
     // The outs operand supplies the memory a result is held in, the yield the
     // type that memory is viewed through, so the type comes from the yield. The
@@ -232,13 +350,33 @@ struct ComputeOpBufferization
       }
     }
 
+    // Get the aliasing mapping saved by resolveConflicts
+    ArrayAttr aliasingAttr =
+        op->getAttrOfType<ArrayAttr>("__output_alias_to_input");
+
     SmallVector<Value> bufferizedOutputs;
-    for (Value output : computeOp.getOutputs()) {
+    for (auto [idx, output] : llvm::enumerate(computeOp.getOutputs())) {
       if (isa<TensorType>(output.getType())) {
-        FailureOr<Value> buffer = getBuffer(rewriter, output, options, state);
-        if (failed(buffer))
-          return failure();
-        bufferizedOutputs.push_back(*buffer);
+        // Check if this output aliases an input
+        int32_t aliasedInputIdx = -1;
+        if (aliasingAttr && idx < aliasingAttr.size()) {
+          if (auto intAttr = dyn_cast<IntegerAttr>(aliasingAttr[idx])) {
+            aliasedInputIdx = intAttr.getInt();
+          }
+        }
+
+        if (aliasedInputIdx >= 0 &&
+            static_cast<size_t>(aliasedInputIdx) < bufferizedInputs.size()) {
+          // This output aliases an input - reuse that input's buffer
+          bufferizedOutputs.push_back(bufferizedInputs[aliasedInputIdx]);
+        } else {
+          // No aliasing or invalid index - get normal buffer
+          FailureOr<Value> buffer = getBuffer(rewriter, output, options, state);
+          if (failed(buffer)) {
+            return failure();
+          }
+          bufferizedOutputs.push_back(*buffer);
+        }
       } else {
         bufferizedOutputs.push_back(output);
       }
@@ -356,8 +494,10 @@ struct PoolDomainOpBufferization
     return false;
   }
 
-  bool isWritable(Operation *, Value value, const AnalysisState &) const {
-    return !isa<BlockArgument>(value);
+  // An entry argument names its operand's buffer, so it is writable whenever
+  // that buffer is.
+  bool isWritable(Operation *, Value, const AnalysisState &) const {
+    return true;
   }
 
   AliasingValueList getAliasingValues(Operation *op, OpOperand &opOperand,
@@ -581,7 +721,19 @@ void mlir::hipsr::registerBufferizableOpInterfaceExternalModels(
     ComputeYieldOp::attachInterface<ComputeYieldOpBufferization>(*ctx);
     PoolDomainOp::attachInterface<PoolDomainOpBufferization>(*ctx);
     PoolDomainYieldOp::attachInterface<PoolDomainYieldOpBufferization>(*ctx);
+    MatMulOp::attachInterface<DpsBufferizableModel<MatMulOp>>(*ctx);
+    ExpandOp::attachInterface<DpsBufferizableModel<ExpandOp>>(*ctx);
     CastOp::attachInterface<DpsBufferizableModel<CastOp>>(*ctx);
+    CopyD2HOp::attachInterface<DpsBufferizableModel<CopyD2HOp>>(*ctx);
+    AddOp::attachInterface<DpsBufferizableModel<AddOp>>(*ctx);
     MulOp::attachInterface<DpsBufferizableModel<MulOp>>(*ctx);
+    MinOp::attachInterface<DpsBufferizableModel<MinOp>>(*ctx);
+    EqualOp::attachInterface<DpsBufferizableModel<EqualOp>>(*ctx);
+    TransposeOp::attachInterface<DpsBufferizableModel<TransposeOp>>(*ctx);
+    GatherOp::attachInterface<DpsBufferizableModel<GatherOp>>(*ctx);
+    SliceOp::attachInterface<DpsBufferizableModel<SliceOp>>(*ctx);
+    ScatterNDOp::attachInterface<DpsBufferizableModel<ScatterNDOp>>(*ctx);
+    NonZeroOp::attachInterface<DpsBufferizableModel<NonZeroOp>>(*ctx);
+    ConstantOp::attachInterface<ConstantBufferizableModel>(*ctx);
   });
 }

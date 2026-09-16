@@ -536,14 +536,17 @@ void CompilerDriver::discoverInTreeLibraries(
   COMPILER_DEBUG_LOG("THEROCK_DIST detected: " << dist << "\n");
   COMPILER_DEBUG_LOG("  Adding library path: " << lib_dir << "\n");
 
-  libraries.push_back("amdhip64");
+  if (!llvm::sys::fs::exists(lib_dir + "/amdhip64.lib") &&
+      llvm::sys::fs::exists(lib_dir + "/amdhip64_7.lib")) {
+    libraries.push_back("amdhip64_7");
+  } else {
+    libraries.push_back("amdhip64");
+  }
 
-  // Skip -lMIOpen/-lhipblaslt when the vendor BLAS/DNN backends are disabled;
-  // the runtime's vendor wrappers are then error-returning stubs that reference
-  // no MIOpen/hipBLASLt symbols, so a model links without these libraries.
+  // Skip -lhipblaslt when the vendor BLAS backend is disabled; the runtime's
+  // vendor wrappers are then error-returning stubs that reference no hipBLASLt
+  // symbols, so a model links without this library.
 #ifndef HIPDNN_EP_DISABLE_VENDOR_BLAS
-  libraries.push_back("MIOpen");
-
   // hipblaslt ships as .lib (Windows), .dll.a (cross-compiled), or
   // .so (native Linux). Bare name "hipblaslt" lets the linker resolve via
   // -L<lib_dir> to libhipblaslt.so on Linux.

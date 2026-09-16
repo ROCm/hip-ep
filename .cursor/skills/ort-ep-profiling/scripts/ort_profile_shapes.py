@@ -58,23 +58,37 @@ def default_shape(node_args: dict) -> str:
 
 
 def conv_shape(node_args: dict) -> str:
-    """Conv: NxCxHxW,k=KxKhxKw,dt (matches wrap_miopenConvolutionForward)."""
+    """Conv: NxCinx[d0,d1,d2],k=Coutx[k0,k1,k2],g=G,dt (matches wrap_conv).
+
+    The runtime carries three per-axis slots whatever the spatial rank, with
+    unused trailing slots set to 1, so the label has to be padded the same way
+    to correlate. Rank-3 Conv is reshaped to NC1L before it reaches the
+    runtime, which is why a 1 goes in front of the length rather than after it.
+    """
     dtype, x = _tensor(node_args["input_type_shape"], 0)
     _, w = _tensor(node_args["input_type_shape"], 1)
     dt = _short_dtype(dtype)
-    if len(w) == 4:
-        out_c, kh, kw = w[0], w[2], w[3]
-    elif len(w) == 3:
-        out_c, kh, kw = w[0], w[1], w[2]
-    else:
+    if len(x) < 3 or len(w) != len(x):
         return default_shape(node_args)
-    if len(x) == 4:
-        n, c, h, wi = x
-    elif len(x) == 3:
-        n, c, h, wi = 1, x[0], x[1], x[2]
-    else:
+
+    n, c = x[0], x[1]
+    out_c = w[0]
+    spatial, kernel = list(x[2:]), list(w[2:])
+    if len(spatial) == 1:
+        spatial.insert(0, 1)
+        kernel.insert(0, 1)
+    if len(spatial) > 3:
         return default_shape(node_args)
-    return f"{n}x{c}x{h}x{wi},k={out_c}x{kh}x{kw},{dt}"
+    spatial += [1] * (3 - len(spatial))
+    kernel += [1] * (3 - len(kernel))
+
+    # Weight is [Cout, Cin/group, ...], so the group count is recoverable from
+    # the shapes alone -- the attribute is not in the profiler JSON.
+    group = c // w[1] if w[1] else 1
+
+    dims = ",".join(str(d) for d in spatial)
+    ks = ",".join(str(k) for k in kernel)
+    return f"{n}x{c}x[{dims}],k={out_c}x[{ks}],g={group},{dt}"
 
 
 def conv_transpose_shape(node_args: dict) -> str:

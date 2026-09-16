@@ -235,6 +235,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateConvLoweringPatterns(typeConverter, patterns);
   populateConvTransposeLoweringPatterns(typeConverter, patterns);
   populateMatmulLoweringPatterns(typeConverter, patterns);
+  populateRocMlirLoweringPatterns(typeConverter, patterns);
   populateElementwiseLoweringPatterns(typeConverter, patterns);
   populatePowerLoweringPatterns(typeConverter, patterns);
   populateActivationLoweringPatterns(typeConverter, patterns);
@@ -256,7 +257,9 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateMultiHeadAttentionLoweringPatterns(typeConverter, patterns);
   populateMatMulNBitsLoweringPatterns(typeConverter, patterns);
   populateQMoELoweringPatterns(typeConverter, patterns);
+  populateQMoEAmdLoweringPatterns(typeConverter, patterns);
   populateGatherBlockQuantizedLoweringPatterns(typeConverter, patterns);
+  populateQdqLoweringPatterns(typeConverter, patterns);
   populateGemmLoweringPatterns(typeConverter, patterns);
   populateLinearAttentionLoweringPatterns(typeConverter, patterns);
   populateGraphLoweringPatterns(typeConverter, patterns);
@@ -284,7 +287,13 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateSizeLoweringPatterns(typeConverter, patterns);
   populatePoolLoweringPatterns(typeConverter, patterns);
   populateResizeLoweringPatterns(typeConverter, patterns);
+  populateGridSampleLoweringPatterns(typeConverter, patterns);
   populateGlobalPoolLoweringPatterns(typeConverter, patterns);
+  populateQElementwiseLoweringPatterns(typeConverter, patterns);
+  populateQMatMulLoweringPatterns(typeConverter, patterns);
+  populateQGemmLoweringPatterns(typeConverter, patterns);
+  populateQConvLoweringPatterns(typeConverter, patterns);
+  populateQLpNormalizationLoweringPatterns(typeConverter, patterns);
 
   // Standard dialect lowerings
   // Bundle func/memref/arith/cf lowering with HIP lowering to minimize

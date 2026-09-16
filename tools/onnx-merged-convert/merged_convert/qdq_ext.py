@@ -1126,7 +1126,11 @@ def save_decoder_model_q(
     *,
     external_data_name: str = DECODER_EXT_DATA,
     keep_inline: set[str] | None = None,
+    reuse_external_data: bool = False,
+    external_data_ref: Path | None = None,
 ) -> None:
+    from .step1_qdq_fp16 import _save_decoder_graph_reusing_external_data
+
     if not model.graph.name:
         model.graph.name = f"{dst.stem}_graph"
     if keep_inline:
@@ -1135,6 +1139,22 @@ def save_decoder_model_q(
     data_path = dst.parent / external_data_name
     if dst.exists():
         dst.unlink()
+    if reuse_external_data:
+        if external_data_ref is None:
+            raise ValueError(
+                "external_data_ref is required when reuse_external_data=True"
+            )
+        if not data_path.is_file():
+            raise RuntimeError(
+                f"Expected shared external weights at {data_path} before reusing them"
+            )
+        _save_decoder_graph_reusing_external_data(
+            model,
+            dst,
+            external_data_ref=external_data_ref,
+            external_data_name=external_data_name,
+        )
+        return
     if data_path.exists():
         data_path.unlink()
     onnx.save_model(
@@ -1327,6 +1347,8 @@ def convert_decoder_model_q(
     shape_fix: ShapeFixConfig_q,
     bundle_root: Path,
     external_data_name: str | None = None,
+    reuse_external_data: bool = False,
+    external_data_ref: Path | None = None,
     runtime_ep: bool = DEFAULT_RUNTIME_EP,
     profile: ConvertProfile = CONVERT_PROFILE_FULL,
 ) -> dict[str, int]:
@@ -1414,14 +1436,16 @@ def convert_decoder_model_q(
     )
     if profile.strip_qdq:
         assert_qdq_removed(graph, context=dst.name)
-    ext_name = external_data_name or infer_decoder_external_data_name_q(
-        src, bundle_root
-    )
+    from .step1_qdq_fp16 import DECODER_WORK_EXTERNAL_DATA
+
+    ext_name = external_data_name or DECODER_WORK_EXTERNAL_DATA
     save_decoder_model_q(
         model,
         dst,
-        external_data_name=ext_name or DECODER_EXTERNAL_DATA_q,
+        external_data_name=ext_name,
         keep_inline=inline_at_load,
+        reuse_external_data=reuse_external_data,
+        external_data_ref=external_data_ref,
     )
     return stats
 
@@ -1446,6 +1470,9 @@ def process_one_onnx_q(
     bundle_root: Path,
     head_data_dir: Path,
     rewrite_head_data: bool,
+    external_data_name: str | None = None,
+    reuse_external_data: bool = False,
+    external_data_ref: Path | None = None,
     runtime_ep: bool = DEFAULT_RUNTIME_EP,
     gather_unsqueeze: bool = False,
     profile: ConvertProfile = CONVERT_PROFILE_FULL,
@@ -1477,6 +1504,9 @@ def process_one_onnx_q(
         dst,
         shape_fix=shape_fix,
         bundle_root=bundle_root,
+        external_data_name=external_data_name,
+        reuse_external_data=reuse_external_data,
+        external_data_ref=external_data_ref,
         runtime_ep=runtime_ep,
         profile=profile,
     )

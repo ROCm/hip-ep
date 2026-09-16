@@ -621,9 +621,29 @@ def Hip_HipblasltGraphOp : Hip_Op<"hipblaslt.graph", [SingleBlock, NoTerminator]
   let assemblyFormat = "$body attr-dict";
 }
 
+def Hip_RocMlirOp : Hip_DpsOp<"rocmlir"> {
+  let summary = "RocMlir backend dispatch";
+  let arguments = (ins
+    FlatSymbolRefAttr:$kernel,
+    Hip_ContextType:$ctx,
+    Variadic<Hip_TensorOrMemRef>:$inputs,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<StrAttr, "\"\"">:$kernel_binary,
+    DefaultValuedAttr<I64Attr, "0">:$grid_size,
+    DefaultValuedAttr<I64Attr, "0">:$block_size
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` $kernel `ins` `(` $inputs `:`
+    type($inputs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^ )?
+  }];
+}
+
 // ===== MIOpen DNN Operations =================================================
 
-def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[], /*outsAccessor=*/"Output",
+def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[OpStateOpInterface], /*outsAccessor=*/"Output",
                            /*autoReify=*/1,
                            /*autoInfer=*/1, /*declareInfer=*/1> {
   let summary = "2D convolution operation using MIOpen (in-place)";
@@ -671,9 +691,19 @@ def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[], /*outsAccessor=*/"Output",
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^ )?
   }];
+
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_conv",
+          {});
+    }
+  }];
 }
 
-def Hip_ConvTransposeOp : Hip_DpsOp<"conv_transpose"> {
+def Hip_ConvTransposeOp : Hip_DpsOp<"conv_transpose", /*traits=*/[OpStateOpInterface]> {
   let summary = "2D transposed convolution / deconvolution using MIOpen "
                 "(in-place)";
   let description = [{
@@ -732,6 +762,16 @@ def Hip_ConvTransposeOp : Hip_DpsOp<"conv_transpose"> {
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^ )?
   }];
+
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_conv",
+          {});
+    }
+  }];
 }
 
 // ===== hipBLASLt ops =========================================================
@@ -771,8 +811,11 @@ def Hip_MatmulOp : Hip_DpsOp<"matmul", /*traits=*/[OpStateOpInterface],
     [docs/design/hip-shape-inference.md](docs/design/hip-shape-inference.md)
     for the dim-source contract and the consuming pipeline.
 
-    Unlike hip.gemm, this has no alpha/beta/transA/transB/bias — it maps
-    directly to onnx.MatMul semantics.
+    Optional `transA` / `transB` (0/1) apply a last-dimension swap on the
+    corresponding operand before multiply — the compile-time fusion of
+    `Transpose(perm=[..,r,r-2])` into MatMul for attention Q @ K^T. When
+    unset they default to 0 (standard onnx.MatMul layout: A [...,M,K],
+    B [...,K,N]).
 
     Example (2D):
     ```mlir
@@ -793,7 +836,9 @@ def Hip_MatmulOp : Hip_DpsOp<"matmul", /*traits=*/[OpStateOpInterface],
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$A,
     Hip_TensorOrMemRef:$B,
-    Hip_TensorOrMemRef:$output
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "0">:$transA,
+    DefaultValuedAttr<I64Attr, "0">:$transB
   );
 
   let assemblyFormat = [{
@@ -876,7 +921,8 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
     I64Attr:$bits,
     I64Attr:$block_size,
     I64Attr:$accuracy_level,
-    I64Attr:$zp_elem_size  // zero_points element size: 1=uint8 packed, 2=fp16
+    I64Attr:$zp_elem_size,  // zero_points element size: 1=uint8 packed, 2=fp16
+    DefaultValuedAttr<I64Attr, "2">:$scale_elem_size // scales element size in bytes: 2=fp16, 4=fp32
   );
 
   let assemblyFormat = [{
@@ -1003,6 +1049,128 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe",
   }];
 }
 
+def Hip_QMoEAmdOp : Hip_DpsOp<"qmoe_amd",
+                              /*traits=*/[],
+                              /*outsAccessor=*/"Output",
+                              /*autoReify=*/0,
+                              /*autoInfer=*/1,
+                              /*declareInfer=*/1> {
+    let summary = "Latent Mixture-of-Experts (com.amd QMoE)";
+  let description = [{
+    Implements the com.amd QMoE operator: a latent-space Mixture-of-Experts
+    block with sigmoid + correction-bias routing, a shared expert, and
+    squared-ReLU ("relu2") activation. Distinct from the com.microsoft QMoE
+    operator (`hip.qmoe`): different routing, activation, and a mandatory
+    latent projection + shared-expert branch.
+
+    Routing (per token, over `num_experts` derived from
+    `fc1_experts_weights`'s leading dim):
+      logits = hidden_states @ router_weight        (dense fp16, unquantized)
+      probs  = sigmoid(logits)
+      sel    = top_k(probs + correction_bias, k)     // select on biased score
+      w      = probs[sel]                            // weight on raw prob
+      w      = w / (sum(w) + eps)                    // if normalize_routing_weights
+      w      = w * routed_scaling_factor
+
+    Latent + expert computation (per token, `h` in the `latent_size`-dim
+    compressed space):
+      h   = dequant(fc1_latent_weights) @ hidden_states       // hidden -> latent
+      acc = sum_{j,e in sel} w[j] * (
+              dequant(fc2_experts_weights[e]) @ relu2(
+                dequant(fc1_experts_weights[e]) @ h))          // latent -> latent
+      y   = dequant(fc2_latent_weights) @ acc                  // latent -> hidden
+
+    Shared expert (runs for every token, independent of routing):
+      s = dequant(shared_fc2_weights) @ relu2(
+            dequant(shared_fc1_weights) @ hidden_states)        // hidden -> hidden
+
+    Output: moe_out = y + s. The caller adds the block's residual separately.
+
+    Weight packing follows MatMulNBits convention (same as `hip.qmoe`):
+    uint8 packed int4, dequantized = (quantized - 8) * scale, no zero_points
+    input (always symmetric zero-point 8 for this op).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.qmoe_amd(%handle) ins(
+        %hidden_states,
+        %fc1_experts_weights, %fc1_experts_scales,
+        %fc2_experts_weights, %fc2_experts_scales,
+        %fc1_latent_weights, %fc1_latent_scales,
+        %fc2_latent_weights, %fc2_latent_scales,
+        %shared_fc1_weights, %shared_fc1_scales,
+        %shared_fc2_weights, %shared_fc2_scales,
+        %router_weight, %correction_bias :
+        memref<1x128x4096xf16, 1>,
+        memref<512x2688x16x16xui8, 1>, memref<512x2688x16xf16, 1>,
+        memref<512x1024x84x16xui8, 1>, memref<512x1024x84xf16, 1>,
+        memref<1024x128x16xui8, 1>, memref<1024x128xf16, 1>,
+        memref<4096x32x16xui8, 1>, memref<4096x32xf16, 1>,
+        memref<5376x128x16xui8, 1>, memref<5376x128xf16, 1>,
+        memref<4096x168x16xui8, 1>, memref<4096x168xf16, 1>,
+        memref<4096x512xf16, 1>, memref<512xf16, 1>)
+        outs(%output : memref<1x128x4096xf16, 1>)
+        {k = 22, expert_weight_bits = 4, block_size = 32,
+         normalize_routing_weights = 1, use_correction_bias = 1,
+         routed_scaling_factor = 5.0, activation_type = "relu2",
+         routing_type = "sigmoid"}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$handle,
+    Hip_TensorOrMemRef:$hidden_states,          // [batch, seq, hidden]
+    Hip_TensorOrMemRef:$fc1_experts_weights,    // [num_experts, moe_inter, latent/pack]
+    Hip_TensorOrMemRef:$fc1_experts_scales,     // [num_experts, moe_inter, latent/bs]
+    Hip_TensorOrMemRef:$fc2_experts_weights,    // [num_experts, latent, moe_inter/pack]
+    Hip_TensorOrMemRef:$fc2_experts_scales,     // [num_experts, latent, moe_inter/bs]
+    Hip_TensorOrMemRef:$fc1_latent_weights,     // [latent, hidden/pack]
+    Hip_TensorOrMemRef:$fc1_latent_scales,      // [latent, hidden/bs] (or flattened)
+    Hip_TensorOrMemRef:$fc2_latent_weights,     // [hidden, latent/pack]
+    Hip_TensorOrMemRef:$fc2_latent_scales,      // [hidden, latent/bs] (or flattened)
+    Hip_TensorOrMemRef:$shared_fc1_weights,     // [shared_inter, hidden/pack]
+    Hip_TensorOrMemRef:$shared_fc1_scales,      // [shared_inter, hidden/bs] (or flattened)
+    Hip_TensorOrMemRef:$shared_fc2_weights,     // [hidden, shared_inter/pack]
+    Hip_TensorOrMemRef:$shared_fc2_scales,      // [hidden, shared_inter/bs] (or flattened)
+    Hip_TensorOrMemRef:$router_weight,          // [hidden, num_experts], not quantized
+    Hip_TensorOrMemRef:$correction_bias,        // [num_experts]
+    Hip_TensorOrMemRef:$output,                 // DPS init [batch, seq, hidden]
+    I64Attr:$k,
+    I64Attr:$expert_weight_bits,
+    I64Attr:$block_size,
+    I64Attr:$normalize_routing_weights,
+    I64Attr:$use_correction_bias,
+    F32Attr:$routed_scaling_factor,
+    StrAttr:$activation_type,
+    StrAttr:$routing_type
+  );
+
+  let assemblyFormat = [{
+    `(` $handle `)` `ins` `(`
+        $hidden_states `,`
+        $fc1_experts_weights `,` $fc1_experts_scales `,`
+        $fc2_experts_weights `,` $fc2_experts_scales `,`
+        $fc1_latent_weights `,` $fc1_latent_scales `,`
+        $fc2_latent_weights `,` $fc2_latent_scales `,`
+        $shared_fc1_weights `,` $shared_fc1_scales `,`
+        $shared_fc2_weights `,` $shared_fc2_scales `,`
+        $router_weight `,` $correction_bias `:`
+        type($hidden_states) `,`
+        type($fc1_experts_weights) `,` type($fc1_experts_scales) `,`
+        type($fc2_experts_weights) `,` type($fc2_experts_scales) `,`
+        type($fc1_latent_weights) `,` type($fc1_latent_scales) `,`
+        type($fc2_latent_weights) `,` type($fc2_latent_scales) `,`
+        type($shared_fc1_weights) `,` type($shared_fc1_scales) `,`
+        type($shared_fc2_weights) `,` type($shared_fc2_scales) `,`
+        type($router_weight) `,` type($correction_bias)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_GatherBlockQuantizedOp : Hip_DpsOp<"gather_block_quantized"> {
   let summary = "Gather + block-wise dequantize "
                 "(com.microsoft GatherBlockQuantized)";
@@ -1073,12 +1241,12 @@ def Hip_GatherBlockQuantizedOp : Hip_DpsOp<"gather_block_quantized"> {
 
 // ===== MIOpen ops ============================================================
 
-def Hip_RmsNormOp : Hip_DpsOp<"rms_norm", /*traits=*/[OpStateOpInterface],
+def Hip_RmsNormOp : Hip_DpsOp<"rms_norm", /*traits=*/[],
                               /*outsAccessor=*/"Output",
                               /*autoReify=*/0,
                               /*autoInfer=*/1,
                               /*declareInfer=*/1> {
-  let summary = "RMS normalization via miopenT5LayerNormForward";
+  let summary = "RMS normalization";
   let description = [{
     Applies simplified (RMS) layer normalization.
 
@@ -1118,19 +1286,6 @@ def Hip_RmsNormOp : Hip_DpsOp<"rms_norm", /*traits=*/[OpStateOpInterface],
     `(` $ctx `)` `ins` `(` $input `,` $scale `:` type($input) `,` type($scale) `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
-  }];
-
-  // OpStateOpInterface: construct this instance's per-session state
-  // (T5NormState), which holds a shared_ptr to the device-wide MIOpen
-  // descriptor table shared across sessions via WeakStore.
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_t5norm",
-          {});
-    }
   }];
 
   let hasVerifier = 1;
@@ -1228,8 +1383,54 @@ def Hip_LayerNormOp : Hip_DpsOp<"layer_norm",
   let hasVerifier = 1;
 }
 
+def Hip_InstanceNormOp : Hip_DpsOp<"instance_norm", /*traits=*/[],
+                                   /*outsAccessor=*/"Output",
+                                   /*autoReify=*/1,
+                                   /*autoInfer=*/1,
+                                   /*declareInfer=*/1> {
+  let summary = "ONNX InstanceNormalization (per-instance per-channel mean/var)";
+  let description = [{
+    Carries out instance normalization as described in
+    https://arxiv.org/abs/1607.08022 / ONNX InstanceNormalization:
+
+      y = scale * (x - mean) / sqrt(variance + epsilon) + B
+
+    Mean and variance are computed over the spatial axes of each (N, C)
+    slice. Input rank is at least 3: (N, C, D1, ..., Dn). Scale and B are
+    1-D tensors of length C.
+
+    Example:
+    ```mlir
+    hip.instance_norm(%ctx)
+        ins(%input, %scale, %bias :
+            memref<2x3x8x8xf32, 1>, memref<3xf32, 1>, memref<3xf32, 1>)
+        outs(%output : memref<2x3x8x8xf32, 1>)
+        {epsilon = 1.000000e-05 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$scale,
+    Hip_TensorOrMemRef:$bias,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<F32Attr, "1.000000e-05">:$epsilon
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $scale `,` $bias `:`
+        type($input) `,` type($scale) `,` type($bias)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
 def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
-    [AttrSizedOperandSegments, OpStateOpInterface]> {
+    [AttrSizedOperandSegments]> {
   let summary = "Fused skip + RMS normalization (com.microsoft.SkipSimplifiedLayerNormalization)";
   let description = [{
     Full alignment with Microsoft ONNX Runtime SkipSimplifiedLayerNormalization
@@ -1302,19 +1503,6 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
     `)`
     `outs` `(` $outputs `:` type($outputs) `)`
     attr-dict (`:` type($result_tensors)^)?
-  }];
-
-  // OpStateOpInterface: construct this instance's per-session state
-  // (SkipT5NormState), which holds a shared_ptr to the device-wide MIOpen
-  // descriptor table shared across sessions via WeakStore.
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot,
-          "hipdnn_ep_op_state_construct_skip_t5norm", {});
-    }
   }];
 
   let hasVerifier = 1;
@@ -1408,9 +1596,9 @@ def Hip_MulOp : Hip_DpsOp_Broadcast<"mul", /*operandGetters=*/["Lhs", "Rhs"],
                                     /*traits=*/[OpStateOpInterface]> {
   let summary = "Elementwise multiplication";
 
-  // OpStateOpInterface: hip.mul/add/min/max all lower to wrap_miopenOpTensor,
-  // which owns the shared MIOpen OpTensor descriptor table (OpTensorState);
-  // each instance's slot holds a shared_ptr to the device-wide table.
+  // OpStateOpInterface: hip.mul/add/min/max all lower to wrap_elementwise.
+  // The op-state slot itself is unused (OpTensorState is an empty struct);
+  // it exists only because every OpStateOpInterface op must construct one.
   let extraClassDeclaration = [{
     ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
                                       ::mlir::Location loc,
@@ -1503,8 +1691,8 @@ def Hip_MinOp : Hip_DpsOp_Broadcast<"min", /*operandGetters=*/["Lhs", "Rhs"],
   let description = [{
     Performs elementwise minimum: output = min(lhs, rhs)
 
-    Supports multidirectional (NumPy-style) broadcasting via MIOpen's
-    miopenOpTensor with miopenTensorOpMin.
+    Supports multidirectional (NumPy-style) broadcasting via the runtime's
+    wrap_elementwise dispatch.
 
     Uses destination-passing style: output buffer is provided as argument.
 
@@ -1546,8 +1734,8 @@ def Hip_MaxOp : Hip_DpsOp<"max", /*traits=*/[OpStateOpInterface]> {
   let description = [{
     Performs elementwise maximum: output = max(lhs, rhs)
 
-    Supports multidirectional (NumPy-style) broadcasting via MIOpen's
-    miopenOpTensor with miopenTensorOpMax.
+    Supports multidirectional (NumPy-style) broadcasting via the runtime's
+    wrap_elementwise dispatch.
 
     Uses destination-passing style: output buffer is provided as argument.
 
@@ -1899,28 +2087,16 @@ def Hip_SiluOp : Hip_DpsOp<"silu", /*traits=*/[],
   let hasVerifier = 1;
 }
 
-def Hip_SigmoidOp : Hip_DpsOp<"sigmoid", /*traits=*/[OpStateOpInterface],
+def Hip_SigmoidOp : Hip_DpsOp<"sigmoid", /*traits=*/[],
                               /*outsAccessor=*/"Y",
                               /*autoReify=*/1,
                               /*autoInfer=*/1,
                               /*declareInfer=*/1> {
   let summary = "Sigmoid activation";
-
-  // OpStateOpInterface: construct this instance's per-session ActivationState,
-  // which holds a shared_ptr to the device-wide MIOpen descriptor table shared
-  // across sessions via WeakStore. All three MIOpen activations (sigmoid, tanh,
-  // softplus) share the same construct + table.
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot,
-          "hipdnn_ep_op_state_construct_activation", {});
-    }
-  }];
   let description = [{
     Applies sigmoid activation: y = 1 / (1 + exp(-x))
+
+    Lowered via the unified unary elementwise path (wrap_sigmoid).
 
     Uses destination-passing style: output buffer is provided as argument.
 
@@ -1944,25 +2120,16 @@ def Hip_SigmoidOp : Hip_DpsOp<"sigmoid", /*traits=*/[OpStateOpInterface],
   }];
 }
 
-def Hip_TanhOp : Hip_DpsOp<"tanh", /*traits=*/[OpStateOpInterface],
+def Hip_TanhOp : Hip_DpsOp<"tanh", /*traits=*/[],
                            /*outsAccessor=*/"Y",
                            /*autoReify=*/1,
                            /*autoInfer=*/1,
                            /*declareInfer=*/1> {
   let summary = "Tanh activation";
-
-  // OpStateOpInterface: shared ActivationState (see hip.sigmoid).
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot,
-          "hipdnn_ep_op_state_construct_activation", {});
-    }
-  }];
   let description = [{
     Applies hyperbolic-tangent activation: y = tanh(x)
+
+    Lowered via the unified unary elementwise path (wrap_tanh).
 
     Uses destination-passing style: output buffer is provided as argument.
 
@@ -1986,23 +2153,13 @@ def Hip_TanhOp : Hip_DpsOp<"tanh", /*traits=*/[OpStateOpInterface],
   }];
 }
 
-def Hip_SoftplusOp : Hip_DpsOp<"softplus", /*traits=*/[OpStateOpInterface],
+def Hip_SoftplusOp : Hip_DpsOp<"softplus", /*traits=*/[],
                                /*outsAccessor=*/"Y",
                                /*autoReify=*/1,
                                /*autoInfer=*/1,
                                /*declareInfer=*/1> {
   let summary = "Softplus activation: y = ln(exp(x) + 1)";
 
-  // OpStateOpInterface: shared ActivationState (see hip.sigmoid).
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot,
-          "hipdnn_ep_op_state_construct_activation", {});
-    }
-  }];
   let description = [{
     Applies the softplus activation function element-wise.
     Implements the standard ONNX Softplus operator.
@@ -2162,6 +2319,36 @@ def Hip_LeakyReluOp : Hip_DpsOp<"leaky_relu"> {
     Hip_TensorOrMemRef:$input,
     Hip_TensorOrMemRef:$output,
     DefaultValuedAttr<F64Attr, "0.01">:$alpha
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_SwishOp : Hip_DpsOp<"swish"> {
+  let summary = "Swish activation: y = x * sigmoid(alpha * x)";
+  let description = [{
+    Applies the ONNX Swish activation element-wise.
+
+    Uses destination-passing style: the output buffer is provided as an
+    argument. The fused runtime kernel supports f16, f32, bf16, and f64.
+
+    Example:
+    ```mlir
+    hip.swish(%ctx) ins(%x : memref<3x4xf32, 1>)
+                    outs(%y : memref<3x4xf32, 1>)
+                    {alpha = 0.5 : f64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<F64Attr, "1.0">:$alpha
   );
 
   let assemblyFormat = [{
@@ -2434,6 +2621,40 @@ def Hip_CosOp : Hip_DpsOp<"cos", /*traits=*/[],
   }];
 }
 
+def Hip_ErfOp : Hip_DpsOp<"erf", /*traits=*/[],
+                          /*outsAccessor=*/"Y",
+                          /*autoReify=*/1,
+                          /*autoInfer=*/1,
+                          /*declareInfer=*/1> {
+  let summary = "Element-wise error function: y = erf(x)";
+  let description = [{
+    Computes the Gauss error function of each element.
+    Implements the standard ONNX Erf operator.
+
+    Formula: Y = erf(X)
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.erf(%ctx) ins(%x : memref<1x128x200x200xf32, 1>)
+                  outs(%y : memref<1x128x200x200xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_SinOp : Hip_DpsOp<"sin", /*traits=*/[],
                           /*outsAccessor=*/"Y",
                           /*autoReify=*/1,
@@ -2488,6 +2709,114 @@ def Hip_CeilOp : Hip_DpsOp<"ceil", /*traits=*/[],
     ```mlir
     hip.ceil(%ctx) ins(%x : memref<3x4xf32, 1>)
                    outs(%y : memref<3x4xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_RoundOp : Hip_DpsOp<"round", /*traits=*/[],
+                            /*outsAccessor=*/"Y",
+                            /*autoReify=*/1,
+                            /*autoInfer=*/1,
+                            /*declareInfer=*/1> {
+  let summary = "Element-wise round-ties-to-even: y = round(x)";
+  let description = [{
+    Rounds each element to the nearest integer; halfway cases go to the
+    nearest even integer (ONNX Round).
+
+    Formula: Y = round_ties_to_even(X)
+
+    Lowered via the unified unary elementwise path (wrap_round).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.round(%ctx) ins(%x : memref<3x4xf32, 1>)
+                    outs(%y : memref<3x4xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_AtanOp : Hip_DpsOp<"atan", /*traits=*/[],
+                           /*outsAccessor=*/"Y",
+                           /*autoReify=*/1,
+                           /*autoInfer=*/1,
+                           /*declareInfer=*/1> {
+  let summary = "Element-wise arctangent: y = atan(x)";
+  let description = [{
+    Computes the arctangent of each element.
+    Implements the standard ONNX Atan operator.
+
+    Formula: Y = atan(X)
+
+    Lowered via the unified unary elementwise path (wrap_atan).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.atan(%ctx) ins(%x : memref<3x4xf32, 1>)
+                   outs(%y : memref<3x4xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_FloorOp : Hip_DpsOp<"floor", /*traits=*/[],
+                            /*outsAccessor=*/"Y",
+                            /*autoReify=*/1,
+                            /*autoInfer=*/1,
+                            /*declareInfer=*/1> {
+  let summary = "Element-wise floor: y = floor(x)";
+  let description = [{
+    Rounds each element downward to the nearest integer.
+    Implements the standard ONNX Floor operator.
+
+    Formula: Y = floor(X)
+
+    Lowered via the unified unary elementwise path (wrap_floor).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.floor(%ctx) ins(%x : memref<3x4xf32, 1>)
+                    outs(%y : memref<3x4xf32, 1>)
     ```
   }];
 
@@ -2949,10 +3278,19 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
     the last spatial dimension) and depthwise (each channel is convolved
     independently with its own kernel).
 
-    Input layout is channels-first: (batch_size, channels, ...).
-    Weight layout: (channels, 1, k_1, ...) for depthwise convolution.
-    The carry state stores the last (k-1) positions along the causal axis
-    for incremental decode.
+    Input layout is channels-first, (batch_size, channels, ...), unless
+    `channels_last` is set, in which case 1D input is (batch_size, seq_len,
+    channels). Weight layout: (channels, 1, k_1, ...) for depthwise
+    convolution. The carry state stores the last (k-1) positions along the
+    causal axis for incremental decode, and is (batch, channels, k-1) in both
+    layouts -- only input and output are permuted, so a layout change never
+    invalidates a carried state.
+
+    `channels_last` exists because the surrounding graph is channels-last: a
+    channels-first convolution has to be bracketed by a Transpose pair, and at
+    the Qwen3.6 footprint that pair costs more than the convolution it serves.
+    The canonicalizer sets the attribute while absorbing both Transposes.
+    Only ndim=1 is supported channels-last.
 
     Example (1D):
     ```mlir
@@ -2983,7 +3321,8 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
 
     // Attributes
     DefaultValuedAttr<StrAttr, "\"none\"">:$activation,  // "none", "silu", "swish"
-    DefaultValuedAttr<I64Attr, "1">:$ndim                // 1, 2, or 3
+    DefaultValuedAttr<I64Attr, "1">:$ndim,               // 1, 2, or 3
+    DefaultValuedAttr<BoolAttr, "false">:$channels_last  // input/output (B, L, C)
   );
 
   let assemblyFormat = [{
@@ -3003,6 +3342,10 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
     `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  // Absorbs a surrounding [0,2,1] Transpose pair into `channels_last`.
+  // See lib/Dialect/IR/HipCausalConvCanonicalize.cpp.
+  let hasCanonicalizer = 1;
 
   // OpStateOpInterface: construct this instance's per-session MIOpen
   // descriptor/algo cache (CausalConvState). No compile-time params — the
@@ -4334,6 +4677,54 @@ def Hip_ResizeOp : Hip_DpsOp<"resize"> {
   }];
 }
 
+def Hip_GridSampleOp : Hip_DpsOp<"grid_sample", /*traits=*/[],
+                                 /*outsAccessor=*/"Output",
+                                 /*autoReify=*/1,
+                                 /*autoInfer=*/1,
+                                 /*declareInfer=*/1> {
+  let summary = "ONNX GridSample (4D NCHW bilinear / nearest)";
+  let description = [{
+    Samples a 4-D input `X` of shape (N, C, H_in, W_in) at normalized
+    locations from `grid` of shape (N, H_out, W_out, 2).  The last grid
+    axis is (x, y) in [-1, 1].  Output Y has shape (N, C, H_out, W_out).
+
+    Attribute encoding (decoded at ONNX->HIP conversion):
+      * mode: 0 = nearest, 1 = bilinear (ONNX "bilinear" / "linear")
+      * padding_mode: 0 = zeros, 1 = border, 2 = reflection
+      * align_corners: 0 or 1 (ONNX default 0)
+
+    Cubic / bicubic interpolation and 5-D (volumetric) sampling are
+    rejected at conversion.
+
+    Example:
+    ```mlir
+    hip.grid_sample(%ctx)
+        ins(%x, %grid : memref<1x3x8x8xf32, 1>, memref<1x4x4x2xf32, 1>)
+        outs(%y : memref<1x3x4x4xf32, 1>)
+        {mode = 1, padding_mode = 0, align_corners = 0}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$grid,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$mode,
+    I64Attr:$padding_mode,
+    I64Attr:$align_corners
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $grid `:` type($input) `,` type($grid)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
 // hip.readback_dim : materialize a kernel-computed runtime extent as a host
 // `index`. It synchronizes the stream so the producing kernel has finished,
 // then reads back a single device-resident integer `scalar`.
@@ -4422,6 +4813,457 @@ def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
 
   let assemblyFormat = [{
     `(` $ctx `,` $scalar `:` type($scalar) `)` attr-dict `->` type($value)
+  }];
+}
+
+def Hip_QuantizeLinearOp : Hip_DpsOp<"quantize_linear", /*traits=*/[],
+                                     /*outsAccessor=*/"Output",
+                                     /*autoReify=*/1,
+                                     /*autoInfer=*/1,
+                                     /*declareInfer=*/1> {
+  let summary = "ONNX QuantizeLinear";
+  let description = [{
+    The linear quantization operator consumes a high-precision tensor, a scale,
+    and a zero point to compute the low-precision/quantized tensor.
+    The scale factor and zero point must have the same shape, determining
+    the quantization granularity. The quantization formula is
+    y = saturate((x / y_scale) + y_zero_point).
+
+    `packed_int4` marks an ONNX INT4 / UINT4 target. `$output` and
+    `$zero_point` keep their i8 / ui8 element type and logical shape, but only
+    the first ceil(numel/2) bytes of `$output` are written: two values per
+    byte, low nibble first, over the flattened row-major sequence. The buffer
+    is still allocated at the logical element count, so its upper half is left
+    untouched, and only a `packed_int4` consumer reads the result correctly.
+    Nothing sets this today -- unlike a packed constant, a 4-bit target leaves
+    no trace in the IR to detect -- and whatever does must first establish that
+    every consumer can be marked as well.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$scale,
+    Optional<Hip_TensorOrMemRef>:$zero_point,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$axis,
+    I64Attr:$block_size,
+    I64Attr:$precision,
+    I64Attr:$saturate,
+    UnitAttr:$packed_int4
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $scale `:`
+        type($input) `,` type($scale) `)`
+    (`zero_point` `(` $zero_point^ `:` type($zero_point) `)`)?
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_DequantizeLinearOp : Hip_DpsOp<"dequantize_linear", /*traits=*/[],
+                                       /*outsAccessor=*/"Output",
+                                       /*autoReify=*/1,
+                                       /*autoInfer=*/1,
+                                       /*declareInfer=*/1> {
+  let summary = "ONNX DequantizeLinear";
+  let description = [{
+    The linear dequantization operator. It consumes a quantized tensor,
+    a scale, and a zero point to compute the full-precision tensor
+    The dequantization formula is y = (x - x_zero_point) * x_scale.
+    x_scale and x_zero_point must have the same shape, determining the
+    quantization's granularity: a scalar for per-tensor/per-layer
+    quantization, a 1-D tensor for per-axis quantization,
+    or have a rank identical to the input for blocked quantization.
+    See QuantizeLinear for details on quantization granularity.
+
+    `packed_int4` marks an ONNX INT4 / UINT4 source. Those import as i8 / ui8
+    at the LOGICAL element count while `$input` and `$zero_point` only hold
+    ceil(numel/2) bytes, two values per byte, low nibble first, over the
+    flattened row-major sequence. The element type keeps the signedness but
+    cannot express the width, so without this flag a consumer reads twice the
+    buffer. `$output` and every shape stay logical, so nothing else changes.
+    Set by convert-onnx-to-hip from the marker that constant lowering stamps
+    on the ONNX op once it sees the halved backing size.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$scale,
+    Optional<Hip_TensorOrMemRef>:$zero_point,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$axis,
+    I64Attr:$block_size,
+    UnitAttr:$packed_int4
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $scale `:`
+        type($input) `,` type($scale) `)`
+    (`zero_point` `(` $zero_point^ `:` type($zero_point) `)`)?
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_QAddOp : Hip_DpsOp_Broadcast<"qadd",
+                                     /*operandGetters=*/["Lhs", "Rhs"]> {
+  let summary = "Quantized elementwise add with integrated QDQ";
+  let description = [{
+    Quantized elementwise add. Performs element-wise binary
+    addition (with Numpy-style broadcasting support).
+    This operator supports multidirectional (i.e., Numpy-style) broadcasting
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$lhs,           // Left operand (quant)
+    Hip_TensorOrMemRef:$rhs,           // Right operand (quant)
+    Hip_TensorOrMemRef:$output,        // Output buffer (quant)
+    F32Attr:$lhs_scale,                // Quantization scale for LHS
+    I64Attr:$lhs_zp,                   // Quantization zeropoint for LHS
+    F32Attr:$rhs_scale,                // Quantization scale for RHS
+    I64Attr:$rhs_zp,                   // Quantization zeropoint for RHS
+    F32Attr:$output_scale,             // Dequantization scale for output
+    I64Attr:$output_zp                 // Quantization zeropoint for output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_QMulOp : Hip_DpsOp_Broadcast<"qmul",
+                                     /*operandGetters=*/["Lhs", "Rhs"]> {
+  let summary = "Quantized elementwise mul with integrated QDQ";
+  let description = [{
+    Quantized elementwise multiply. Performs element-wise binary
+    multiplication (with Numpy-style broadcasting support).
+    This operator supports multidirectional (i.e., Numpy-style) broadcasting
+
+    both operand scales collapse into a single coefficient:
+
+      OUT = saturate(round(M * (lhs - lhs_zp) * (rhs - rhs_zp)) + output_zp)
+      M   = lhs_scale * rhs_scale / output_scale
+
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$lhs,           // Left operand (quant)
+    Hip_TensorOrMemRef:$rhs,           // Right operand (quant)
+    Hip_TensorOrMemRef:$output,        // Output buffer (quant)
+    F32Attr:$lhs_scale,                // Quantization scale for LHS
+    I64Attr:$lhs_zp,                   // Quantization zeropoint for LHS
+    F32Attr:$rhs_scale,                // Quantization scale for RHS
+    I64Attr:$rhs_zp,                   // Quantization zeropoint for RHS
+    F32Attr:$output_scale,             // Dequantization scale for output
+    I64Attr:$output_zp                 // Quantization zeropoint for output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_QMatMulOp : Hip_DpsOp<"qmatmul", /*traits=*/[SameVariadicOperandSize],
+                              /*outsAccessor=*/"Y",
+                              /*autoReify=*/0,
+                              /*autoInfer=*/1,
+                              /*declareInfer=*/1> {
+  let summary = "Quantized matrix multiplication with integrated QDQ";
+  let description = [{
+    Fuses DequantizeLinear x2 -> MatMul -> QuantizeLinear into a single
+    integer-domain batched GEMM. With `acc[m,n] = sum_k A[m,k]*B[k,n]`,
+    `rowA[m] = sum_k A[m,k]` and `colB[n] = sum_k B[k,n]`:
+
+    ```
+    Y[m,n] = saturate(round(M * (acc[m,n] - z_b * rowA[m]
+                                          - A_zero_point * colB[n]
+                                          + K * A_zero_point * z_b))
+                      + Y_zero_point)
+    ```
+
+    B's quantization form decides where `M` and `z_b` come from:
+
+    * Per-tensor, via the `B_scale` / `B_zero_point` attributes. Both are
+      scalar, so `M = A_scale * B_scale / Y_scale` folds at lowering time.
+    * Per-output-column, via the `B_scales` / `B_zero_points` operands, one
+      value each per column of the [K, N] weight, with `B_quant_axis` naming
+      that column axis. `z_b = B_zero_points[n]` and
+      `M = (A_scale / Y_scale) * B_scales[n]`, so only `A_scale / Y_scale`
+      folds and the kernel indexes the rest by column.
+
+    `packed_int4` means BOTH `$B` and `$B_zero_points` carry two 4-bit values
+    per backing byte, low nibble first over the flattened row-major sequence,
+    while their types keep the logical element count and an 8-bit element type
+    -- the same convention as hip.qconv and hip.dequantize_linear. Absent, both
+    are full-width 8-bit. The element type's signedness decides how a value is
+    widened, so a consumer must not ignore it.
+
+    Examples:
+    ```mlir
+    hip.qmatmul(%ctx) ins(%A, %B : memref<64x128xi8, 1>, memref<128x32xi8, 1>)
+                      outs(%Y : memref<64x32xi8, 1>)
+                      {A_scale = 2.500000e-01 : f32, A_zero_point = -5 : i64,
+                       B_scale = 1.250000e-01 : f32, B_zero_point = 3 : i64,
+                       Y_scale = 5.000000e-01 : f32, Y_zero_point = 7 : i64}
+
+    hip.qmatmul(%ctx) ins(%A, %B, %Bs, %Bz : memref<128x2048xui16, 1>,
+                                             memref<2048x3072xi8, 1>,
+                                             memref<3072xf32, 1>,
+                                             memref<3072xi8, 1>)
+                      outs(%Y : memref<128x3072xui16, 1>)
+                      {A_scale = 1.000000e-03 : f32, A_zero_point = 32768 : i64,
+                       Y_scale = 2.000000e-03 : f32, Y_zero_point = 32768 : i64,
+                       B_quant_axis = 1 : i64, packed_int4}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$A,                      // Left operand (quantized)
+    Hip_TensorOrMemRef:$B,                      // Right operand (quantized)
+    Optional<Hip_TensorOrMemRef>:$B_scales,     // f32 [N], per-column form
+    Optional<Hip_TensorOrMemRef>:$B_zero_points,// [N] in B's storage type
+    Hip_TensorOrMemRef:$Y,                      // Output buffer, DPS init
+    F32Attr:$A_scale,
+    I64Attr:$A_zero_point,
+    OptionalAttr<F32Attr>:$B_scale,
+    OptionalAttr<I64Attr>:$B_zero_point,
+    F32Attr:$Y_scale,
+    I64Attr:$Y_zero_point,
+    DefaultValuedAttr<I64Attr, "0">:$transA,
+    DefaultValuedAttr<I64Attr, "0">:$transB,
+    OptionalAttr<I64Attr>:$B_quant_axis,
+    UnitAttr:$packed_int4
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $A `,` $B (`,` $B_scales^ `,` $B_zero_points)? `:`
+        type($A) `,` type($B)
+        (`,` type($B_scales)^ `,` type($B_zero_points))? `)`
+    `outs` `(` $Y `:` type($Y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
+def Hip_QGemmOp : Hip_DpsOp<"qgemm", /*traits=*/[AttrSizedOperandSegments],
+                            /*outsAccessor=*/"Y",
+                            /*autoReify=*/0,
+                            /*autoInfer=*/1,
+                            /*declareInfer=*/1> {
+  let summary = "Quantized general matrix multiplication with integrated QDQ";
+  let description = [{
+    Fuses DequantizeLinear on A, B and the optional bias C, an ONNX Gemm, and a
+    QuantizeLinear on its result into one integer-domain GEMM, without
+    materializing any dequantized value.
+
+    ```
+    a = (A - A_zero_point) * A_scale
+    b = (B - B_zero_point) * B_scale
+    c = (C - C_zero_point) * C_scale
+    Y = saturate(round((alpha * a' @ b' + beta * c) / Y_scale) + Y_zero_point)
+    ```
+
+    `a'` is `a` transposed when `transA` is 1 and `b'` is `b` transposed when
+    `transB` is 1, so that `a'` is [M, K], `b'` is [K, N] and Y is [M, N]; `c`
+    is unidirectionally broadcast to [M, N].
+
+    Operands:
+    * `$ctx` -- HIP execution context.
+    * `$A` -- rank-2 quantized left operand, 8- or 16-bit integer element type.
+    * `$B` -- rank-2 quantized right operand, always 8-bit integer storage,
+      which at `B_bits` 4 holds two values per byte.
+    * `$B_scales`, `$B_zero_points` -- optional per-N quantization of B, both
+      rank-1 with N elements, typed f32 and B's element type. Both are present
+      or neither is, and they replace the `B_scale` / `B_zero_point` attributes
+      so that `b[k, n]` uses `B_scales[n]` and `B_zero_points[n]`. N is B's
+      dimension 1, or dimension 0 under `transB`.
+    * `$C` -- optional bias of rank 2 or less, 8-, 16- or 32-bit integer element
+      type. When it is absent the `beta * c` term is dropped and `beta` is
+      ignored.
+    * `$Y` -- quantized output buffer and DPS init, [M, N], 8- or 16-bit integer
+      element type.
+
+    Attributes, with defaults in parentheses. Every scale is f32 and every zero
+    point an i64 applying to a whole tensor:
+    * `A_scale`, `A_zero_point`, `Y_scale`, `Y_zero_point` -- required.
+    * `B_scale` (1.0), `B_zero_point` (0) -- left at these identity values when
+      the per-N operands are used.
+    * `C_scale` (1.0), `C_zero_point` (0) -- ignored when `$C` is absent.
+    * `B_bits` (8) -- storage width of `$B`, and of `$B_zero_points` when that
+      operand is present; 4 or 8. At 4 both keep their logical shape and 8-bit
+      element type while each backing byte holds TWO values, low nibble first
+      over the flattened row-major sequence. The element type's signedness
+      still selects how a nibble is widened, signed for `i8` and unsigned for
+      `ui8`.
+    * `alpha` (1.0), `beta` (1.0) -- the ONNX Gemm scalars used above.
+    * `transA` (0), `transB` (0) -- the transpose flags used above.
+
+    Example:
+    ```mlir
+    hip.qgemm(%ctx) ins(%A, %B, %C : memref<64x128xi8, 1>,
+                                     memref<128x32xi8, 1>, memref<32xi32, 1>)
+                    outs(%Y : memref<64x32xi8, 1>)
+                    {A_scale = 2.500000e-01 : f32, A_zero_point = -5 : i64,
+                     B_scale = 1.250000e-01 : f32, B_zero_point = 3 : i64,
+                     C_scale = 3.125000e-02 : f32, C_zero_point = 0 : i64,
+                     Y_scale = 5.000000e-01 : f32, Y_zero_point = 7 : i64}
+
+    hip.qgemm(%ctx) ins(%A, %B : memref<64x128xui16, 1>, memref<32x128xi8, 1>)
+                    b_per_channel(%Bs, %Bzp : memref<32xf32, 1>,
+                                              memref<32xi8, 1>)
+                    outs(%Y : memref<64x32xui16, 1>)
+                    {A_scale = 2.500000e-01 : f32, A_zero_point = 5 : i64,
+                     B_bits = 4 : i64, transB = 1 : i64,
+                     Y_scale = 5.000000e-01 : f32, Y_zero_point = 7 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$A,             // Left operand (quantized)
+    Hip_TensorOrMemRef:$B,             // Right operand (quantized)
+    Optional<Hip_TensorOrMemRef>:$B_scales,      // f32 [N], per-N-channel
+    Optional<Hip_TensorOrMemRef>:$B_zero_points, // [N], B's storage type
+    Optional<Hip_TensorOrMemRef>:$C,   // Bias (quantized), broadcast to [M, N]
+    Hip_TensorOrMemRef:$Y,             // Output buffer (quantized), DPS init
+    F32Attr:$A_scale,
+    I64Attr:$A_zero_point,
+    DefaultValuedAttr<F32Attr, "1.0">:$B_scale,
+    DefaultValuedAttr<I64Attr, "0">:$B_zero_point,
+    DefaultValuedAttr<I64Attr, "8">:$B_bits,
+    DefaultValuedAttr<F32Attr, "1.0">:$C_scale,
+    DefaultValuedAttr<I64Attr, "0">:$C_zero_point,
+    F32Attr:$Y_scale,
+    I64Attr:$Y_zero_point,
+    DefaultValuedAttr<F32Attr, "1.0">:$alpha,
+    DefaultValuedAttr<F32Attr, "1.0">:$beta,
+    DefaultValuedAttr<I64Attr, "0">:$transA,
+    DefaultValuedAttr<I64Attr, "0">:$transB
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $A `,` $B (`,` $C^)?
+        `:` type($A) `,` type($B) (`,` type($C)^)?
+    `)`
+    (`b_per_channel` `(` $B_scales^ `,` $B_zero_points `:`
+        type($B_scales) `,` type($B_zero_points) `)`)?
+    `outs` `(` $Y `:` type($Y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
+def Hip_QConvOp : Hip_DpsOp<"qconv",
+                            /*traits=*/[],
+                            /*outsAccessor=*/"Output",
+                            /*autoReify=*/1,
+                            /*autoInfer=*/1,
+                            /*declareInfer=*/1> {
+  let summary = "Quantized 1x1 convolution with integrated QDQ";
+  let description = [{
+    Fuses the common weight-quantized convolution chain
+
+      DQ(input) + DQ(weights) -> Conv -> Q
+
+    without materializing the dequantized activation, dequantized weights, or
+    full-precision output. The initial supported form has UINT16 per-tensor
+    input/output quantization and 4-bit weights quantized per output channel
+    (`weight_axis` 0).
+
+    Input and output scales/zero-points are scalar attributes: the fusion only
+    fires on per-tensor activation quantization, so the three coefficients fold
+    into the instruction stream. Weight scales and zero-points stay operands
+    because they hold one value per output channel, and because they routinely
+    arrive as external constants whose values are not readable at fusion time.
+
+    `packed_int4` means BOTH `$weights` and `$weight_zero_points` carry two
+    4-bit values per backing byte, low nibble first over the flattened
+    row-major sequence, while their types keep the logical element count and an
+    8-bit element type -- the same convention as hip.dequantize_linear. The
+    element type's signedness selects INT4 (i8) or UINT4 (ui8); the two differ
+    in how a nibble is widened, so a consumer must not ignore it.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,              // UINT16 quantized activation
+    Hip_TensorOrMemRef:$weights,            // packed 4-bit weights, i8/ui8 typed
+    Hip_TensorOrMemRef:$weight_scales,      // f32 [Cout]
+    Hip_TensorOrMemRef:$weight_zero_points, // packed 4-bit [Cout], i8/ui8 typed
+    Optional<Hip_TensorOrMemRef>:$bias,
+    Hip_TensorOrMemRef:$output,             // UINT16 quantized output
+    F32Attr:$input_scale,
+    I64Attr:$input_zp,
+    F32Attr:$output_scale,
+    I64Attr:$output_zp,
+    I64Attr:$weight_axis,
+    I64ArrayAttr:$kernel_shape,
+    I64ArrayAttr:$strides,
+    I64ArrayAttr:$pads,
+    I64ArrayAttr:$dilations,
+    I64Attr:$group,
+    UnitAttr:$packed_int4
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $weights `,` $weight_scales `,`
+        $weight_zero_points (`,` $bias^)? `:`
+        type($input) `,` type($weights) `,` type($weight_scales) `,`
+        type($weight_zero_points) (`,` type($bias)^)? `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_QLpNormalizationOp : Hip_DpsOp<"qlpnormalization",
+                                       /*traits=*/[],
+                                       /*outsAccessor=*/"Output",
+                                       /*autoReify=*/1,
+                                       /*autoInfer=*/1,
+                                       /*declareInfer=*/1> {
+  let summary = "Quantized LpNormalization (L2) with integrated QDQ";
+  let description = [{
+    Fuses DequantizeLinear -> LpNormalization -> QuantizeLinear.
+
+    The match is UINT16 per-tensor input/output quantization, `p = 2`, and
+    normalization over the trailing axis. That is the same math as RMS norm
+    with `scale = 1/sqrt(N)` and `epsilon = 0`:
+
+      y = Q( L2(DQ(x)) )
+
+    Input and output scales/zero-points stay separate attributes: the models
+    almost never share them, so requantization is part of the fused op.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    F32Attr:$input_scale,
+    I64Attr:$input_zp,
+    F32Attr:$output_scale,
+    I64Attr:$output_zp,
+    I64Attr:$axis,
+    I64Attr:$p
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
   }];
 }
 #endif // HIP_OPS

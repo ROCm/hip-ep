@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
+
 """
 Sweep a matrix of shapes through the built gemm_fp16u2 test binary WITH
 zero_points, and summarize the "u2 packed-zp real-model path vs u4 with zp"

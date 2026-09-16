@@ -39,4 +39,21 @@ module {
   // CHECK: tensor.dim
   // CHECK: hip.less({{.*}}) ins({{.*}}, {{.*}} : tensor<?x?xf32>, tensor<?x?xf32>) outs({{.*}} : tensor<?x?xi1>)
   // CHECK-NOT: onnx.Greater
+
+  // A rank-6 Greater against a scalar threshold must be packed to rank four,
+  // because hip.less only has a 4-D lowering. The scalar operand already
+  // broadcasts through that lowering and stays rank zero.
+  func.func @greater_6d_scalar(
+      %a: tensor<1x6x128x200x8x200xf32>, %b: tensor<f32>)
+      -> tensor<1x6x128x200x8x200xui8> {
+    // CHECK-LABEL: func.func @greater_6d_scalar
+    // CHECK: tensor.collapse_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4, 5]] : tensor<1x6x128x200x8x200xf32> into tensor<1x6x128x320000xf32>
+    // CHECK: hip.less({{.*}}) ins({{.*}}, {{.*}} : tensor<f32>, tensor<1x6x128x320000xf32>) outs({{.*}} : tensor<1x6x128x320000xui8>)
+    // CHECK: tensor.expand_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4, 5]] output_shape [1, 6, 128, 200, 8, 200] : tensor<1x6x128x320000xui8> into tensor<1x6x128x200x8x200xui8>
+    // CHECK-NOT: onnx.Greater
+    %r = "onnx.Greater"(%a, %b) :
+        (tensor<1x6x128x200x8x200xf32>, tensor<f32>)
+        -> tensor<1x6x128x200x8x200xui8>
+    return %r : tensor<1x6x128x200x8x200xui8>
+  }
 }

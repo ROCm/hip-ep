@@ -1,3 +1,8 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
 // ============================================================
 // GQA dispatch A/B harness: NEW (production gqa.cpp) vs BACK (archived gqa_back.cpp).
 //

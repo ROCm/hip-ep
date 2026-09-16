@@ -9,6 +9,7 @@ add_library(HipToLLVM STATIC
   ConvLowering.cpp
   ConvTransposeLowering.cpp
   MatmulLowering.cpp
+  RocMlirLowering.cpp
   ElementwiseLowering.cpp
   PowerLowering.cpp
   ActivationLowering.cpp
@@ -30,7 +31,9 @@ add_library(HipToLLVM STATIC
   MultiHeadAttentionLowering.cpp
   MatMulNBitsLowering.cpp
   QMoELowering.cpp
+  QMoEAmdLowering.cpp
   GatherBlockQuantizedLowering.cpp
+  QdqLowering.cpp
   GraphLowering.cpp
   CausalConvWithStateLowering.cpp
   GemmLowering.cpp
@@ -58,7 +61,13 @@ add_library(HipToLLVM STATIC
   IfLowering.cpp
   PoolLowering.cpp
   ResizeLowering.cpp
+  GridSampleLowering.cpp
   GlobalPoolLowering.cpp
+  QElementwiseLowering.cpp
+  QMatMulLowering.cpp
+  QGemmLowering.cpp
+  QConvLowering.cpp
+  QLpNormalizationLowering.cpp
 )
 
 add_dependencies(HipToLLVM
@@ -76,6 +85,14 @@ target_link_libraries(HipToLLVM PUBLIC
   MLIRMemRefDialect
   MLIRTransforms
   MLIRArithTransforms
+  # convert-hip-to-llvm populates the standard dialect->LLVM lowering patterns
+  # (func/memref/arith/cf) directly in HipToLLVM.cpp. Link them here so every
+  # consumer inherits them transitively in the correct order instead of each
+  # executable re-listing them (and getting the link order right by luck).
+  MLIRFuncToLLVM
+  MLIRMemRefToLLVM
+  MLIRArithToLLVM
+  MLIRControlFlowToLLVM
   # ConvertToLLVMPatternInterface: convert-hip-to-llvm walks the module and
   # collects HIP->LLVM lowerings from out-of-tree (plugin) dialects that
   # implement this interface. See the guarded walk in HipToLLVM.cpp.

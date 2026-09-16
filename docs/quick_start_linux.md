@@ -82,7 +82,7 @@ python3 build.py
 The result tree under `<workspace>/install/`:
 
 - `bin/hip-onnx-runner`, `bin/hip-compiler`, `bin/hip-mlir-opt`, `bin/hip-test`
-- `lib/libhip-compiler.so`, `lib/libhipgpu.so`
+- `lib/libhipgpu.so`
 
 A locally-built `install/` is **not** fully self-contained: `libonnxruntime.so`
 lives in the ONNX Runtime prefix and the ROCm libs in TheRock, so run with

@@ -29,32 +29,34 @@
 //            v
 //   data4 [N, D2]
 //
-// CHECK-LABEL: func.func @mixed_chain(
-// CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<4xf32, #hipsr.mem<device>>) -> tensor<4xf16, #hipsr.mem<device>> {
-// CHECK-NEXT: %[[DOMAIN0:.*]]:2 = hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<4xf32, #hipsr.mem<device>>) {
-// CHECK-NEXT: ^bb0(%[[CTX0:.*]]: !hipsr.context, %[[INPUT0:.*]]: tensor<4xf32, #hipsr.mem<device>>):
-// CHECK-NEXT: %[[INIT0:.*]] = hipsr.placeholder(%[[CTX0]]) ins(%[[INPUT0]] : tensor<4xf32, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[DATA0:.*]] = hipsr.cast(%[[CTX0]]) ins(%[[INPUT0]] : tensor<4xf32, #hipsr.mem<device>>) outs(%[[INIT0]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: hipsr.pool_domain_yield %[[INIT0]], %[[DATA0]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: } -> tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
-// CHECK-NEXT: %[[DOMAIN1:.*]]:2 = hipsr.pool_domain(%[[CTX]], %[[DOMAIN0]]#0, %[[DOMAIN0]]#1 : !hipsr.context, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {
-// CHECK-NEXT: ^bb0(%[[CTX1:.*]]: !hipsr.context, %[[SHAPE_INPUT1:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[DATA_INPUT1:.*]]: tensor<4xf16, #hipsr.mem<device>>):
-// CHECK-NEXT: %[[INIT1:.*]] = hipsr.placeholder(%[[CTX1]]) ins(%[[SHAPE_INPUT1]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf32, #hipsr.mem<device>>
-// CHECK-NEXT: %[[DATA1:.*]] = hipsr.cast(%[[CTX1]]) ins(%[[DATA_INPUT1]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[INIT1]] : tensor<4xf32, #hipsr.mem<device>>) : tensor<4xf32, #hipsr.mem<device>>
-// CHECK-NEXT: %[[INIT2:.*]] = hipsr.placeholder(%[[CTX1]]) ins(%[[INIT1]] : tensor<4xf32, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[DATA2:.*]] = hipsr.cast(%[[CTX1]]) ins(%[[DATA1]] : tensor<4xf32, #hipsr.mem<device>>) outs(%[[INIT2]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: hipsr.pool_domain_yield %[[INIT2]], %[[DATA2]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: } -> tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>> {domain_id = 1 : i64}
-// CHECK-NEXT: %[[DOMAIN2:.*]] = hipsr.pool_domain(%[[CTX]], %[[DOMAIN1]]#0, %[[DOMAIN1]]#1 : !hipsr.context, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {
-// CHECK-NEXT: ^bb0(%[[CTX2:.*]]: !hipsr.context, %[[SHAPE_INPUT2:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[DATA_INPUT2:.*]]: tensor<4xf16, #hipsr.mem<device>>):
-// CHECK-NEXT: %[[INIT3:.*]] = hipsr.placeholder(%[[CTX2]]) ins(%[[SHAPE_INPUT2]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf32, #hipsr.mem<device>>
-// CHECK-NEXT: %[[DATA3:.*]] = hipsr.cast(%[[CTX2]]) ins(%[[DATA_INPUT2]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[INIT3]] : tensor<4xf32, #hipsr.mem<device>>) : tensor<4xf32, #hipsr.mem<device>>
-// CHECK-NEXT: %[[INIT4:.*]] = hipsr.placeholder(%[[CTX2]]) ins(%[[INIT3]] : tensor<4xf32, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[DATA4:.*]] = hipsr.cast(%[[CTX2]]) ins(%[[DATA3]] : tensor<4xf32, #hipsr.mem<device>>) outs(%[[INIT4]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: hipsr.pool_domain_yield %[[DATA4]] : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: } -> tensor<4xf16, #hipsr.mem<device>> {domain_id = 2 : i64}
-// CHECK-NEXT: return %[[DOMAIN2]] : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: }
+// CHECK-LABEL:   func.func @mixed_chain(
+// CHECK-SAME:      %[[ARG0:.*]]: !hipsr.context,
+// CHECK-SAME:      %[[ARG1:.*]]: tensor<4xf32, #hipsr.mem<device>>) -> tensor<4xf16, #hipsr.mem<device>> {
+// CHECK-NEXT:      %[[POOL_DOMAIN_0:.*]] = hipsr.pool_domain(%[[ARG0]], %[[ARG1]] : !hipsr.context, tensor<4xf32, #hipsr.mem<device>>) {
+// CHECK-NEXT:      ^bb0(%[[VAL_0:.*]]: !hipsr.context, %[[VAL_1:.*]]: tensor<4xf32, #hipsr.mem<device>>):
+// CHECK-NEXT:        %[[PLACEHOLDER_0:.*]] = hipsr.placeholder(%[[VAL_0]]) ins(%[[VAL_1]] : tensor<4xf32, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CAST_0:.*]] = hipsr.cast(%[[VAL_0]]) ins(%[[VAL_1]] : tensor<4xf32, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_0]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.pool_domain_yield %[[CAST_0]] : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      } -> tensor<4xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
+// CHECK-NEXT:      %[[POOL_DOMAIN_1:.*]] = hipsr.pool_domain(%[[ARG0]], %[[POOL_DOMAIN_0]] : !hipsr.context, tensor<4xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT:      ^bb0(%[[VAL_2:.*]]: !hipsr.context, %[[VAL_3:.*]]: tensor<4xf16, #hipsr.mem<device>>):
+// CHECK-NEXT:        %[[PLACEHOLDER_1:.*]] = hipsr.placeholder(%[[VAL_2]]) ins(%[[VAL_3]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf32, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CAST_1:.*]] = hipsr.cast(%[[VAL_2]]) ins(%[[VAL_3]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_1]] : tensor<4xf32, #hipsr.mem<device>>) : tensor<4xf32, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[PLACEHOLDER_2:.*]] = hipsr.placeholder(%[[VAL_2]]) ins(%[[PLACEHOLDER_1]] : tensor<4xf32, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CAST_2:.*]] = hipsr.cast(%[[VAL_2]]) ins(%[[CAST_1]] : tensor<4xf32, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_2]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.pool_domain_yield %[[CAST_2]] : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      } -> tensor<4xf16, #hipsr.mem<device>> {domain_id = 1 : i64}
+// CHECK-NEXT:      %[[POOL_DOMAIN_2:.*]] = hipsr.pool_domain(%[[ARG0]], %[[POOL_DOMAIN_1]] : !hipsr.context, tensor<4xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT:      ^bb0(%[[VAL_4:.*]]: !hipsr.context, %[[VAL_5:.*]]: tensor<4xf16, #hipsr.mem<device>>):
+// CHECK-NEXT:        %[[PLACEHOLDER_3:.*]] = hipsr.placeholder(%[[VAL_4]]) ins(%[[VAL_5]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf32, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CAST_3:.*]] = hipsr.cast(%[[VAL_4]]) ins(%[[VAL_5]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_3]] : tensor<4xf32, #hipsr.mem<device>>) : tensor<4xf32, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[PLACEHOLDER_4:.*]] = hipsr.placeholder(%[[VAL_4]]) ins(%[[PLACEHOLDER_3]] : tensor<4xf32, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CAST_4:.*]] = hipsr.cast(%[[VAL_4]]) ins(%[[CAST_3]] : tensor<4xf32, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_4]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.pool_domain_yield %[[CAST_4]] : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      } -> tensor<4xf16, #hipsr.mem<device>> {domain_id = 2 : i64}
+// CHECK-NEXT:      return %[[POOL_DOMAIN_2]] : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:    }
+
 func.func @mixed_chain(
     %ctx: !hipsr.context, %input: tensor<4xf32, #hipsr.mem<device>>) -> tensor<4xf16, #hipsr.mem<device>> {
   %init0 = hipsr.placeholder(%ctx)
@@ -63,7 +65,7 @@ func.func @mixed_chain(
   %data0 = hipsr.cast(%ctx) ins(%input : tensor<4xf32, #hipsr.mem<device>>)
       outs(%init0 : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
   %init1 = hipsr.placeholder(%ctx)
-      ins(%init0 : tensor<4xf16, #hipsr.mem<device>>)
+      ins(%data0 : tensor<4xf16, #hipsr.mem<device>>)
       {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf32, #hipsr.mem<device>>
   %data1 = hipsr.cast(%ctx) ins(%data0 : tensor<4xf16, #hipsr.mem<device>>)
       outs(%init1 : tensor<4xf32, #hipsr.mem<device>>) : tensor<4xf32, #hipsr.mem<device>>
@@ -73,7 +75,7 @@ func.func @mixed_chain(
   %data2 = hipsr.cast(%ctx) ins(%data1 : tensor<4xf32, #hipsr.mem<device>>)
       outs(%init2 : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
   %init3 = hipsr.placeholder(%ctx)
-      ins(%init2 : tensor<4xf16, #hipsr.mem<device>>)
+      ins(%data2 : tensor<4xf16, #hipsr.mem<device>>)
       {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf32, #hipsr.mem<device>>
   %data3 = hipsr.cast(%ctx) ins(%data2 : tensor<4xf16, #hipsr.mem<device>>)
       outs(%init3 : tensor<4xf32, #hipsr.mem<device>>) : tensor<4xf32, #hipsr.mem<device>>
@@ -125,46 +127,48 @@ func.func @mixed_chain(
 //                               v
 //                       result [B, D3]
 //
-// CHECK-LABEL: func.func @multi_branch(
-// CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<4xf32, #hipsr.mem<device>>) -> tensor<4xf16, #hipsr.mem<device>> {
-// CHECK-NEXT: %[[DOMAIN0:.*]]:4 = hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<4xf32, #hipsr.mem<device>>) {
-// CHECK-NEXT: ^bb0(%[[CTX0:.*]]: !hipsr.context, %[[INPUT0:.*]]: tensor<4xf32, #hipsr.mem<device>>):
-// CHECK-NEXT: %[[ROOT_INIT:.*]] = hipsr.placeholder(%[[CTX0]]) ins(%[[INPUT0]] : tensor<4xf32, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[ROOT:.*]] = hipsr.cast(%[[CTX0]]) ins(%[[INPUT0]] : tensor<4xf32, #hipsr.mem<device>>) outs(%[[ROOT_INIT]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[INDEPENDENT_INIT:.*]] = hipsr.placeholder(%[[CTX0]]) ins(%[[INPUT0]] : tensor<4xf32, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[INDEPENDENT:.*]] = hipsr.cast(%[[CTX0]]) ins(%[[INPUT0]] : tensor<4xf32, #hipsr.mem<device>>) outs(%[[INDEPENDENT_INIT]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: hipsr.pool_domain_yield %[[ROOT_INIT]], %[[ROOT]], %[[INDEPENDENT_INIT]], %[[INDEPENDENT]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: } -> tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
-// CHECK-NEXT: %[[DOMAIN1:.*]]:4 = hipsr.pool_domain(%[[CTX]], %[[DOMAIN0]]#0, %[[DOMAIN0]]#1 : !hipsr.context, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {
-// CHECK-NEXT: ^bb0(%[[CTX1:.*]]: !hipsr.context, %[[ROOT_SHAPE1:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[ROOT_DATA1:.*]]: tensor<4xf16, #hipsr.mem<device>>):
-// CHECK-NEXT: %[[LHS_INIT:.*]] = hipsr.placeholder(%[[CTX1]]) ins(%[[ROOT_SHAPE1]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[LHS:.*]] = hipsr.cast(%[[CTX1]]) ins(%[[ROOT_DATA1]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[LHS_INIT]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[LHS_NORMAL_INIT:.*]] = hipsr.placeholder(%[[CTX1]]) ins(%[[LHS_INIT]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[LHS_NORMAL:.*]] = hipsr.cast(%[[CTX1]]) ins(%[[LHS]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[LHS_NORMAL_INIT]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[RHS_INIT:.*]] = hipsr.placeholder(%[[CTX1]]) ins(%[[ROOT_SHAPE1]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[RHS:.*]] = hipsr.cast(%[[CTX1]]) ins(%[[ROOT_DATA1]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[RHS_INIT]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[RHS_NORMAL_INIT:.*]] = hipsr.placeholder(%[[CTX1]]) ins(%[[RHS_INIT]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[RHS_NORMAL:.*]] = hipsr.cast(%[[CTX1]]) ins(%[[RHS]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[RHS_NORMAL_INIT]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: hipsr.pool_domain_yield %[[LHS_NORMAL_INIT]], %[[LHS_NORMAL]], %[[RHS_NORMAL_INIT]], %[[RHS_NORMAL]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: } -> tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>> {domain_id = 1 : i64}
-// CHECK-NEXT: %[[DOMAIN2:.*]]:2 = hipsr.pool_domain(%[[CTX]], %[[DOMAIN1]]#0, %[[DOMAIN1]]#1, %[[DOMAIN1]]#2, %[[DOMAIN1]]#3, %[[DOMAIN0]]#2, %[[DOMAIN0]]#3 : !hipsr.context, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {
-// CHECK-NEXT: ^bb0(%[[CTX2:.*]]: !hipsr.context, %[[LHS_SHAPE2:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[LHS_DATA2:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[RHS_SHAPE2:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[RHS_DATA2:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[INDEPENDENT_SHAPE2:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[INDEPENDENT_DATA2:.*]]: tensor<4xf16, #hipsr.mem<device>>):
-// CHECK-NEXT: %[[LHS_DEEP_INIT:.*]] = hipsr.placeholder(%[[CTX2]]) ins(%[[LHS_SHAPE2]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[LHS_DEEP:.*]] = hipsr.cast(%[[CTX2]]) ins(%[[LHS_DATA2]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[LHS_DEEP_INIT]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[DEEP_JOIN_INIT:.*]] = hipsr.placeholder(%[[CTX2]]) ins(%[[LHS_DEEP_INIT]], %[[RHS_SHAPE2]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[DEEP_JOIN:.*]] = hipsr.add(%[[CTX2]]) ins(%[[LHS_DEEP]], %[[RHS_DATA2]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) outs(%[[DEEP_JOIN_INIT]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[JOIN_INIT:.*]] = hipsr.placeholder(%[[CTX2]]) ins(%[[DEEP_JOIN_INIT]], %[[INDEPENDENT_SHAPE2]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[JOIN:.*]] = hipsr.add(%[[CTX2]]) ins(%[[DEEP_JOIN]], %[[INDEPENDENT_DATA2]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) outs(%[[JOIN_INIT]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: hipsr.pool_domain_yield %[[JOIN_INIT]], %[[JOIN]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: } -> tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>> {domain_id = 2 : i64}
-// CHECK-NEXT: %[[DOMAIN3:.*]] = hipsr.pool_domain(%[[CTX]], %[[DOMAIN2]]#0, %[[DOMAIN2]]#1 : !hipsr.context, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {
-// CHECK-NEXT: ^bb0(%[[CTX3:.*]]: !hipsr.context, %[[SHAPE_INPUT3:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[DATA_INPUT3:.*]]: tensor<4xf16, #hipsr.mem<device>>):
-// CHECK-NEXT: %[[RESULT_INIT:.*]] = hipsr.placeholder(%[[CTX3]]) ins(%[[SHAPE_INPUT3]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[RESULT:.*]] = hipsr.cast(%[[CTX3]]) ins(%[[DATA_INPUT3]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[RESULT_INIT]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: hipsr.pool_domain_yield %[[RESULT]] : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: } -> tensor<4xf16, #hipsr.mem<device>> {domain_id = 3 : i64}
-// CHECK-NEXT: return %[[DOMAIN3]] : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: }
+// CHECK-LABEL:   func.func @multi_branch(
+// CHECK-SAME:      %[[ARG0:.*]]: !hipsr.context,
+// CHECK-SAME:      %[[ARG1:.*]]: tensor<4xf32, #hipsr.mem<device>>) -> tensor<4xf16, #hipsr.mem<device>> {
+// CHECK-NEXT:      %[[POOL_DOMAIN_0:.*]]:3 = hipsr.pool_domain(%[[ARG0]], %[[ARG1]] : !hipsr.context, tensor<4xf32, #hipsr.mem<device>>) {
+// CHECK-NEXT:      ^bb0(%[[VAL_0:.*]]: !hipsr.context, %[[VAL_1:.*]]: tensor<4xf32, #hipsr.mem<device>>):
+// CHECK-NEXT:        %[[PLACEHOLDER_0:.*]] = hipsr.placeholder(%[[VAL_0]]) ins(%[[VAL_1]] : tensor<4xf32, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CAST_0:.*]] = hipsr.cast(%[[VAL_0]]) ins(%[[VAL_1]] : tensor<4xf32, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_0]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[PLACEHOLDER_1:.*]] = hipsr.placeholder(%[[VAL_0]]) ins(%[[VAL_1]] : tensor<4xf32, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CAST_1:.*]] = hipsr.cast(%[[VAL_0]]) ins(%[[VAL_1]] : tensor<4xf32, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_1]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.pool_domain_yield %[[CAST_0]], %[[PLACEHOLDER_1]], %[[CAST_1]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      } -> tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
+// CHECK-NEXT:      %[[POOL_DOMAIN_1:.*]]:3 = hipsr.pool_domain(%[[ARG0]], %[[VAL_2:.*]]#0 : !hipsr.context, tensor<4xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT:      ^bb0(%[[VAL_3:.*]]: !hipsr.context, %[[VAL_4:.*]]: tensor<4xf16, #hipsr.mem<device>>):
+// CHECK-NEXT:        %[[PLACEHOLDER_2:.*]] = hipsr.placeholder(%[[VAL_3]]) ins(%[[VAL_4]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CAST_2:.*]] = hipsr.cast(%[[VAL_3]]) ins(%[[VAL_4]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_2]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[PLACEHOLDER_3:.*]] = hipsr.placeholder(%[[VAL_3]]) ins(%[[PLACEHOLDER_2]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CAST_3:.*]] = hipsr.cast(%[[VAL_3]]) ins(%[[CAST_2]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_3]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[PLACEHOLDER_4:.*]] = hipsr.placeholder(%[[VAL_3]]) ins(%[[VAL_4]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CAST_4:.*]] = hipsr.cast(%[[VAL_3]]) ins(%[[VAL_4]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_4]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[PLACEHOLDER_5:.*]] = hipsr.placeholder(%[[VAL_3]]) ins(%[[PLACEHOLDER_4]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CAST_5:.*]] = hipsr.cast(%[[VAL_3]]) ins(%[[CAST_4]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_5]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.pool_domain_yield %[[CAST_3]], %[[PLACEHOLDER_5]], %[[CAST_5]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      } -> tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>> {domain_id = 1 : i64}
+// CHECK-NEXT:      %[[POOL_DOMAIN_2:.*]] = hipsr.pool_domain(%[[ARG0]], %[[VAL_5:.*]]#0, %[[VAL_5]]#1, %[[VAL_5]]#2, %[[VAL_6:.*]]#1, %[[VAL_6]]#2 : !hipsr.context, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT:      ^bb0(%[[VAL_7:.*]]: !hipsr.context, %[[VAL_8:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[VAL_9:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[VAL_10:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[VAL_11:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[VAL_12:.*]]: tensor<4xf16, #hipsr.mem<device>>):
+// CHECK-NEXT:        %[[PLACEHOLDER_6:.*]] = hipsr.placeholder(%[[VAL_7]]) ins(%[[VAL_8]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CAST_6:.*]] = hipsr.cast(%[[VAL_7]]) ins(%[[VAL_8]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_6]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[PLACEHOLDER_7:.*]] = hipsr.placeholder(%[[VAL_7]]) ins(%[[PLACEHOLDER_6]], %[[VAL_9]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[ADD_0:.*]] = hipsr.add(%[[VAL_7]]) ins(%[[CAST_6]], %[[VAL_10]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_7]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[PLACEHOLDER_8:.*]] = hipsr.placeholder(%[[VAL_7]]) ins(%[[PLACEHOLDER_7]], %[[VAL_11]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[ADD_1:.*]] = hipsr.add(%[[VAL_7]]) ins(%[[ADD_0]], %[[VAL_12]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_8]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.pool_domain_yield %[[ADD_1]] : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      } -> tensor<4xf16, #hipsr.mem<device>> {domain_id = 2 : i64}
+// CHECK-NEXT:      %[[POOL_DOMAIN_3:.*]] = hipsr.pool_domain(%[[ARG0]], %[[POOL_DOMAIN_2]] : !hipsr.context, tensor<4xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT:      ^bb0(%[[VAL_13:.*]]: !hipsr.context, %[[VAL_14:.*]]: tensor<4xf16, #hipsr.mem<device>>):
+// CHECK-NEXT:        %[[PLACEHOLDER_9:.*]] = hipsr.placeholder(%[[VAL_13]]) ins(%[[VAL_14]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CAST_7:.*]] = hipsr.cast(%[[VAL_13]]) ins(%[[VAL_14]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_9]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.pool_domain_yield %[[CAST_7]] : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      } -> tensor<4xf16, #hipsr.mem<device>> {domain_id = 3 : i64}
+// CHECK-NEXT:      return %[[POOL_DOMAIN_3]] : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:    }
+
 func.func @multi_branch(
     %ctx: !hipsr.context, %input: tensor<4xf32, #hipsr.mem<device>>) -> tensor<4xf16, #hipsr.mem<device>> {
   %root_init = hipsr.placeholder(%ctx)
@@ -173,7 +177,7 @@ func.func @multi_branch(
   %root = hipsr.cast(%ctx) ins(%input : tensor<4xf32, #hipsr.mem<device>>)
       outs(%root_init : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
   %lhs_init = hipsr.placeholder(%ctx)
-      ins(%root_init : tensor<4xf16, #hipsr.mem<device>>)
+      ins(%root : tensor<4xf16, #hipsr.mem<device>>)
       {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
   %lhs = hipsr.cast(%ctx) ins(%root : tensor<4xf16, #hipsr.mem<device>>)
       outs(%lhs_init : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
@@ -183,12 +187,12 @@ func.func @multi_branch(
   %lhs_normal = hipsr.cast(%ctx) ins(%lhs : tensor<4xf16, #hipsr.mem<device>>)
       outs(%lhs_normal_init : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
   %lhs_deep_init = hipsr.placeholder(%ctx)
-      ins(%lhs_normal_init : tensor<4xf16, #hipsr.mem<device>>)
+      ins(%lhs_normal : tensor<4xf16, #hipsr.mem<device>>)
       {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
   %lhs_deep = hipsr.cast(%ctx) ins(%lhs_normal : tensor<4xf16, #hipsr.mem<device>>)
       outs(%lhs_deep_init : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
   %rhs_init = hipsr.placeholder(%ctx)
-      ins(%root_init : tensor<4xf16, #hipsr.mem<device>>)
+      ins(%root : tensor<4xf16, #hipsr.mem<device>>)
       {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
   %rhs = hipsr.cast(%ctx) ins(%root : tensor<4xf16, #hipsr.mem<device>>)
       outs(%rhs_init : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
@@ -216,7 +220,7 @@ func.func @multi_branch(
       ins(%deep_join, %independent : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>)
       outs(%join_init : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
   %result_init = hipsr.placeholder(%ctx)
-      ins(%join_init : tensor<4xf16, #hipsr.mem<device>>)
+      ins(%join : tensor<4xf16, #hipsr.mem<device>>)
       {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
   %result = hipsr.cast(%ctx) ins(%join : tensor<4xf16, #hipsr.mem<device>>)
       outs(%result_init : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
@@ -240,30 +244,32 @@ func.func @multi_branch(
 //                       v
 //                join [B, D2]
 //
-// CHECK-LABEL: func.func @diamond(
-// CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<4xf32, #hipsr.mem<device>>) -> tensor<4xf16, #hipsr.mem<device>> {
-// CHECK-NEXT: %[[DOMAIN0:.*]]:2 = hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<4xf32, #hipsr.mem<device>>) {
-// CHECK-NEXT: ^bb0(%[[CTX0:.*]]: !hipsr.context, %[[INPUT0:.*]]: tensor<4xf32, #hipsr.mem<device>>):
-// CHECK-NEXT: %[[ROOT_INIT:.*]] = hipsr.placeholder(%[[CTX0]]) ins(%[[INPUT0]] : tensor<4xf32, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[ROOT:.*]] = hipsr.cast(%[[CTX0]]) ins(%[[INPUT0]] : tensor<4xf32, #hipsr.mem<device>>) outs(%[[ROOT_INIT]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: hipsr.pool_domain_yield %[[ROOT_INIT]], %[[ROOT]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: } -> tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
-// CHECK-NEXT: %[[DOMAIN1:.*]]:4 = hipsr.pool_domain(%[[CTX]], %[[DOMAIN0]]#0, %[[DOMAIN0]]#1 : !hipsr.context, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {
-// CHECK-NEXT: ^bb0(%[[CTX1:.*]]: !hipsr.context, %[[ROOT_SHAPE:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[ROOT_DATA:.*]]: tensor<4xf16, #hipsr.mem<device>>):
-// CHECK-NEXT: %[[LHS_INIT:.*]] = hipsr.placeholder(%[[CTX1]]) ins(%[[ROOT_SHAPE]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[LHS:.*]] = hipsr.cast(%[[CTX1]]) ins(%[[ROOT_DATA]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[LHS_INIT]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[RHS_INIT:.*]] = hipsr.placeholder(%[[CTX1]]) ins(%[[ROOT_SHAPE]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[RHS:.*]] = hipsr.cast(%[[CTX1]]) ins(%[[ROOT_DATA]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[RHS_INIT]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: hipsr.pool_domain_yield %[[LHS_INIT]], %[[LHS]], %[[RHS_INIT]], %[[RHS]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: } -> tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>> {domain_id = 1 : i64}
-// CHECK-NEXT: %[[DOMAIN2:.*]] = hipsr.pool_domain(%[[CTX]], %[[DOMAIN1]]#0, %[[DOMAIN1]]#2, %[[DOMAIN1]]#1, %[[DOMAIN1]]#3 : !hipsr.context, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {
-// CHECK-NEXT: ^bb0(%[[CTX2:.*]]: !hipsr.context, %[[LHS_SHAPE:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[RHS_SHAPE:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[LHS_DATA:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[RHS_DATA:.*]]: tensor<4xf16, #hipsr.mem<device>>):
-// CHECK-NEXT: %[[JOIN_INIT:.*]] = hipsr.placeholder(%[[CTX2]]) ins(%[[LHS_SHAPE]], %[[RHS_SHAPE]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[JOIN:.*]] = hipsr.add(%[[CTX2]]) ins(%[[LHS_DATA]], %[[RHS_DATA]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) outs(%[[JOIN_INIT]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: hipsr.pool_domain_yield %[[JOIN]] : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: } -> tensor<4xf16, #hipsr.mem<device>> {domain_id = 2 : i64}
-// CHECK-NEXT: return %[[DOMAIN2]] : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: }
+// CHECK-LABEL:   func.func @diamond(
+// CHECK-SAME:      %[[ARG0:.*]]: !hipsr.context,
+// CHECK-SAME:      %[[ARG1:.*]]: tensor<4xf32, #hipsr.mem<device>>) -> tensor<4xf16, #hipsr.mem<device>> {
+// CHECK-NEXT:      %[[POOL_DOMAIN_0:.*]] = hipsr.pool_domain(%[[ARG0]], %[[ARG1]] : !hipsr.context, tensor<4xf32, #hipsr.mem<device>>) {
+// CHECK-NEXT:      ^bb0(%[[VAL_0:.*]]: !hipsr.context, %[[VAL_1:.*]]: tensor<4xf32, #hipsr.mem<device>>):
+// CHECK-NEXT:        %[[PLACEHOLDER_0:.*]] = hipsr.placeholder(%[[VAL_0]]) ins(%[[VAL_1]] : tensor<4xf32, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CAST_0:.*]] = hipsr.cast(%[[VAL_0]]) ins(%[[VAL_1]] : tensor<4xf32, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_0]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.pool_domain_yield %[[CAST_0]] : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      } -> tensor<4xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
+// CHECK-NEXT:      %[[POOL_DOMAIN_1:.*]]:2 = hipsr.pool_domain(%[[ARG0]], %[[POOL_DOMAIN_0]] : !hipsr.context, tensor<4xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT:      ^bb0(%[[VAL_2:.*]]: !hipsr.context, %[[VAL_3:.*]]: tensor<4xf16, #hipsr.mem<device>>):
+// CHECK-NEXT:        %[[PLACEHOLDER_1:.*]] = hipsr.placeholder(%[[VAL_2]]) ins(%[[VAL_3]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CAST_1:.*]] = hipsr.cast(%[[VAL_2]]) ins(%[[VAL_3]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_1]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[PLACEHOLDER_2:.*]] = hipsr.placeholder(%[[VAL_2]]) ins(%[[VAL_3]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CAST_2:.*]] = hipsr.cast(%[[VAL_2]]) ins(%[[VAL_3]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_2]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.pool_domain_yield %[[CAST_1]], %[[CAST_2]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      } -> tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>> {domain_id = 1 : i64}
+// CHECK-NEXT:      %[[POOL_DOMAIN_2:.*]] = hipsr.pool_domain(%[[ARG0]], %[[VAL_4:.*]]#0, %[[VAL_4]]#1 : !hipsr.context, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT:      ^bb0(%[[VAL_5:.*]]: !hipsr.context, %[[VAL_6:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[VAL_7:.*]]: tensor<4xf16, #hipsr.mem<device>>):
+// CHECK-NEXT:        %[[PLACEHOLDER_3:.*]] = hipsr.placeholder(%[[VAL_5]]) ins(%[[VAL_6]], %[[VAL_7]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[ADD_0:.*]] = hipsr.add(%[[VAL_5]]) ins(%[[VAL_6]], %[[VAL_7]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_3]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.pool_domain_yield %[[ADD_0]] : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      } -> tensor<4xf16, #hipsr.mem<device>> {domain_id = 2 : i64}
+// CHECK-NEXT:      return %[[POOL_DOMAIN_2]] : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:    }
+
 func.func @diamond(
     %ctx: !hipsr.context, %input: tensor<4xf32, #hipsr.mem<device>>) -> tensor<4xf16, #hipsr.mem<device>> {
   %root_init = hipsr.placeholder(%ctx)
@@ -273,19 +279,19 @@ func.func @diamond(
       outs(%root_init : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
 
   %lhs_init = hipsr.placeholder(%ctx)
-      ins(%root_init : tensor<4xf16, #hipsr.mem<device>>)
+      ins(%root : tensor<4xf16, #hipsr.mem<device>>)
       {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
   %lhs = hipsr.cast(%ctx) ins(%root : tensor<4xf16, #hipsr.mem<device>>)
       outs(%lhs_init : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
 
   %rhs_init = hipsr.placeholder(%ctx)
-      ins(%root_init : tensor<4xf16, #hipsr.mem<device>>)
+      ins(%root : tensor<4xf16, #hipsr.mem<device>>)
       {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
   %rhs = hipsr.cast(%ctx) ins(%root : tensor<4xf16, #hipsr.mem<device>>)
       outs(%rhs_init : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
 
   %join_init = hipsr.placeholder(%ctx)
-      ins(%lhs_init, %rhs_init : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>)
+      ins(%lhs, %rhs : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>)
       {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
   %join = hipsr.add(%ctx)
       ins(%lhs, %rhs : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>)
@@ -320,36 +326,38 @@ func.func @diamond(
 //                               v
 //                    lower_join [N, D2]
 //
-// CHECK-LABEL: func.func @cascaded_diamonds(
-// CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<4xf32, #hipsr.mem<device>>) -> tensor<4xf16, #hipsr.mem<device>> {
-// CHECK-NEXT: %[[DOMAIN0:.*]]:2 = hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<4xf32, #hipsr.mem<device>>) {
-// CHECK-NEXT: ^bb0(%[[CTX0:.*]]: !hipsr.context, %[[INPUT0:.*]]: tensor<4xf32, #hipsr.mem<device>>):
-// CHECK-NEXT: %[[ROOT_INIT:.*]] = hipsr.placeholder(%[[CTX0]]) ins(%[[INPUT0]] : tensor<4xf32, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[ROOT:.*]] = hipsr.cast(%[[CTX0]]) ins(%[[INPUT0]] : tensor<4xf32, #hipsr.mem<device>>) outs(%[[ROOT_INIT]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: hipsr.pool_domain_yield %[[ROOT_INIT]], %[[ROOT]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: } -> tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
-// CHECK-NEXT: %[[DOMAIN1:.*]]:2 = hipsr.pool_domain(%[[CTX]], %[[DOMAIN0]]#0, %[[DOMAIN0]]#1 : !hipsr.context, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {
-// CHECK-NEXT: ^bb0(%[[CTX1:.*]]: !hipsr.context, %[[ROOT_SHAPE:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[ROOT_DATA:.*]]: tensor<4xf16, #hipsr.mem<device>>):
-// CHECK-NEXT: %[[UPPER_LHS_INIT:.*]] = hipsr.placeholder(%[[CTX1]]) ins(%[[ROOT_SHAPE]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[UPPER_LHS:.*]] = hipsr.cast(%[[CTX1]]) ins(%[[ROOT_DATA]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[UPPER_LHS_INIT]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[UPPER_RHS_INIT:.*]] = hipsr.placeholder(%[[CTX1]]) ins(%[[ROOT_SHAPE]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[UPPER_RHS:.*]] = hipsr.cast(%[[CTX1]]) ins(%[[ROOT_DATA]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[UPPER_RHS_INIT]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[UPPER_JOIN_INIT:.*]] = hipsr.placeholder(%[[CTX1]]) ins(%[[UPPER_LHS_INIT]], %[[UPPER_RHS_INIT]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[UPPER_JOIN:.*]] = hipsr.add(%[[CTX1]]) ins(%[[UPPER_LHS]], %[[UPPER_RHS]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) outs(%[[UPPER_JOIN_INIT]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: hipsr.pool_domain_yield %[[UPPER_JOIN_INIT]], %[[UPPER_JOIN]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: } -> tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>> {domain_id = 1 : i64}
-// CHECK-NEXT: %[[DOMAIN2:.*]] = hipsr.pool_domain(%[[CTX]], %[[DOMAIN1]]#0, %[[DOMAIN1]]#1 : !hipsr.context, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {
-// CHECK-NEXT: ^bb0(%[[CTX2:.*]]: !hipsr.context, %[[UPPER_SHAPE:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[UPPER_DATA:.*]]: tensor<4xf16, #hipsr.mem<device>>):
-// CHECK-NEXT: %[[LOWER_LHS_INIT:.*]] = hipsr.placeholder(%[[CTX2]]) ins(%[[UPPER_SHAPE]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[LOWER_LHS:.*]] = hipsr.cast(%[[CTX2]]) ins(%[[UPPER_DATA]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[LOWER_LHS_INIT]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[LOWER_RHS_INIT:.*]] = hipsr.placeholder(%[[CTX2]]) ins(%[[UPPER_SHAPE]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[LOWER_RHS:.*]] = hipsr.cast(%[[CTX2]]) ins(%[[UPPER_DATA]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[LOWER_RHS_INIT]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[LOWER_JOIN_INIT:.*]] = hipsr.placeholder(%[[CTX2]]) ins(%[[LOWER_LHS_INIT]], %[[LOWER_RHS_INIT]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[LOWER_JOIN:.*]] = hipsr.add(%[[CTX2]]) ins(%[[LOWER_LHS]], %[[LOWER_RHS]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) outs(%[[LOWER_JOIN_INIT]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: hipsr.pool_domain_yield %[[LOWER_JOIN]] : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: } -> tensor<4xf16, #hipsr.mem<device>> {domain_id = 2 : i64}
-// CHECK-NEXT: return %[[DOMAIN2]] : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: }
+// CHECK-LABEL:   func.func @cascaded_diamonds(
+// CHECK-SAME:      %[[ARG0:.*]]: !hipsr.context,
+// CHECK-SAME:      %[[ARG1:.*]]: tensor<4xf32, #hipsr.mem<device>>) -> tensor<4xf16, #hipsr.mem<device>> {
+// CHECK-NEXT:      %[[POOL_DOMAIN_0:.*]] = hipsr.pool_domain(%[[ARG0]], %[[ARG1]] : !hipsr.context, tensor<4xf32, #hipsr.mem<device>>) {
+// CHECK-NEXT:      ^bb0(%[[VAL_0:.*]]: !hipsr.context, %[[VAL_1:.*]]: tensor<4xf32, #hipsr.mem<device>>):
+// CHECK-NEXT:        %[[PLACEHOLDER_0:.*]] = hipsr.placeholder(%[[VAL_0]]) ins(%[[VAL_1]] : tensor<4xf32, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CAST_0:.*]] = hipsr.cast(%[[VAL_0]]) ins(%[[VAL_1]] : tensor<4xf32, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_0]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.pool_domain_yield %[[CAST_0]] : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      } -> tensor<4xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
+// CHECK-NEXT:      %[[POOL_DOMAIN_1:.*]] = hipsr.pool_domain(%[[ARG0]], %[[POOL_DOMAIN_0]] : !hipsr.context, tensor<4xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT:      ^bb0(%[[VAL_2:.*]]: !hipsr.context, %[[VAL_3:.*]]: tensor<4xf16, #hipsr.mem<device>>):
+// CHECK-NEXT:        %[[PLACEHOLDER_1:.*]] = hipsr.placeholder(%[[VAL_2]]) ins(%[[VAL_3]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CAST_1:.*]] = hipsr.cast(%[[VAL_2]]) ins(%[[VAL_3]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_1]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[PLACEHOLDER_2:.*]] = hipsr.placeholder(%[[VAL_2]]) ins(%[[VAL_3]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CAST_2:.*]] = hipsr.cast(%[[VAL_2]]) ins(%[[VAL_3]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_2]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[PLACEHOLDER_3:.*]] = hipsr.placeholder(%[[VAL_2]]) ins(%[[PLACEHOLDER_1]], %[[PLACEHOLDER_2]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[ADD_0:.*]] = hipsr.add(%[[VAL_2]]) ins(%[[CAST_1]], %[[CAST_2]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_3]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.pool_domain_yield %[[ADD_0]] : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      } -> tensor<4xf16, #hipsr.mem<device>> {domain_id = 1 : i64}
+// CHECK-NEXT:      %[[POOL_DOMAIN_2:.*]] = hipsr.pool_domain(%[[ARG0]], %[[POOL_DOMAIN_1]] : !hipsr.context, tensor<4xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT:      ^bb0(%[[VAL_4:.*]]: !hipsr.context, %[[VAL_5:.*]]: tensor<4xf16, #hipsr.mem<device>>):
+// CHECK-NEXT:        %[[PLACEHOLDER_4:.*]] = hipsr.placeholder(%[[VAL_4]]) ins(%[[VAL_5]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CAST_3:.*]] = hipsr.cast(%[[VAL_4]]) ins(%[[VAL_5]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_4]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[PLACEHOLDER_5:.*]] = hipsr.placeholder(%[[VAL_4]]) ins(%[[VAL_5]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CAST_4:.*]] = hipsr.cast(%[[VAL_4]]) ins(%[[VAL_5]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_5]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[PLACEHOLDER_6:.*]] = hipsr.placeholder(%[[VAL_4]]) ins(%[[PLACEHOLDER_4]], %[[PLACEHOLDER_5]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[ADD_1:.*]] = hipsr.add(%[[VAL_4]]) ins(%[[CAST_3]], %[[CAST_4]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_6]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.pool_domain_yield %[[ADD_1]] : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      } -> tensor<4xf16, #hipsr.mem<device>> {domain_id = 2 : i64}
+// CHECK-NEXT:      return %[[POOL_DOMAIN_2]] : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:    }
+
 func.func @cascaded_diamonds(
     %ctx: !hipsr.context, %input: tensor<4xf32, #hipsr.mem<device>>) -> tensor<4xf16, #hipsr.mem<device>> {
   %root_init = hipsr.placeholder(%ctx)
@@ -359,13 +367,13 @@ func.func @cascaded_diamonds(
       outs(%root_init : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
 
   %upper_lhs_init = hipsr.placeholder(%ctx)
-      ins(%root_init : tensor<4xf16, #hipsr.mem<device>>)
+      ins(%root : tensor<4xf16, #hipsr.mem<device>>)
       {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
   %upper_lhs = hipsr.cast(%ctx) ins(%root : tensor<4xf16, #hipsr.mem<device>>)
       outs(%upper_lhs_init : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
 
   %upper_rhs_init = hipsr.placeholder(%ctx)
-      ins(%root_init : tensor<4xf16, #hipsr.mem<device>>)
+      ins(%root : tensor<4xf16, #hipsr.mem<device>>)
       {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
   %upper_rhs = hipsr.cast(%ctx) ins(%root : tensor<4xf16, #hipsr.mem<device>>)
       outs(%upper_rhs_init : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
@@ -378,13 +386,13 @@ func.func @cascaded_diamonds(
       outs(%upper_join_init : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
 
   %lower_lhs_init = hipsr.placeholder(%ctx)
-      ins(%upper_join_init : tensor<4xf16, #hipsr.mem<device>>)
+      ins(%upper_join : tensor<4xf16, #hipsr.mem<device>>)
       {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
   %lower_lhs = hipsr.cast(%ctx) ins(%upper_join : tensor<4xf16, #hipsr.mem<device>>)
       outs(%lower_lhs_init : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
 
   %lower_rhs_init = hipsr.placeholder(%ctx)
-      ins(%upper_join_init : tensor<4xf16, #hipsr.mem<device>>)
+      ins(%upper_join : tensor<4xf16, #hipsr.mem<device>>)
       {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
   %lower_rhs = hipsr.cast(%ctx) ins(%upper_join : tensor<4xf16, #hipsr.mem<device>>)
       outs(%lower_rhs_init : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
@@ -419,28 +427,29 @@ func.func @cascaded_diamonds(
 //                             v
 //                     return (lhs, rhs)
 //
-// CHECK-LABEL: func.func @multi_result_boundaries(
-// CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<4xf16, #hipsr.mem<device>>)
-// CHECK-SAME: -> (tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {
-// CHECK-NEXT: %[[DOMAIN0:.*]]:4 = hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<4xf16, #hipsr.mem<device>>) {
-// CHECK-NEXT: ^bb0(%[[CTX0:.*]]: !hipsr.context, %[[INPUT0:.*]]: tensor<4xf16, #hipsr.mem<device>>):
-// CHECK-NEXT: %[[ROOT_INITS:.*]]:2 = hipsr.placeholder(%[[CTX0]]) ins(%[[INPUT0]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[ROOT:.*]]:2 = hipsr.compute(%[[CTX0]]) ins(%[[INPUT0]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[ROOT_INITS]]#0, %[[ROOT_INITS]]#1 : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {
-// CHECK-NEXT: ^bb0(%[[BODY_CTX:.*]]: !hipsr.context, %[[BODY_INPUT:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[LHS_DEST:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[RHS_DEST:.*]]: tensor<4xf16, #hipsr.mem<device>>):
-// CHECK-NEXT: hipsr.compute_yield %[[LHS_DEST]], %[[RHS_DEST]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: } : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: hipsr.pool_domain_yield %[[ROOT_INITS]]#0, %[[ROOT_INITS]]#1, %[[ROOT]]#0, %[[ROOT]]#1 : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: } -> tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
-// CHECK-NEXT: %[[DOMAIN1:.*]]:2 = hipsr.pool_domain(%[[CTX]], %[[DOMAIN0]]#0, %[[DOMAIN0]]#2, %[[DOMAIN0]]#1, %[[DOMAIN0]]#3 : !hipsr.context, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {
-// CHECK-NEXT: ^bb0(%[[CTX1:.*]]: !hipsr.context, %[[LHS_SHAPE:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[LHS_INPUT:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[RHS_SHAPE:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[RHS_INPUT:.*]]: tensor<4xf16, #hipsr.mem<device>>):
-// CHECK-NEXT: %[[LHS_INIT:.*]] = hipsr.placeholder(%[[CTX1]]) ins(%[[LHS_SHAPE]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[LHS:.*]] = hipsr.cast(%[[CTX1]]) ins(%[[LHS_INPUT]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[LHS_INIT]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[RHS_INIT:.*]] = hipsr.placeholder(%[[CTX1]]) ins(%[[RHS_SHAPE]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[RHS:.*]] = hipsr.cast(%[[CTX1]]) ins(%[[RHS_INPUT]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[RHS_INIT]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: hipsr.pool_domain_yield %[[LHS]], %[[RHS]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: } -> tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>> {domain_id = 1 : i64}
-// CHECK-NEXT: return %[[DOMAIN1]]#0, %[[DOMAIN1]]#1 : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: }
+// CHECK-LABEL:   func.func @multi_result_boundaries(
+// CHECK-SAME:      %[[ARG0:.*]]: !hipsr.context,
+// CHECK-SAME:      %[[ARG1:.*]]: tensor<4xf16, #hipsr.mem<device>>) -> (tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT:      %[[POOL_DOMAIN_0:.*]]:2 = hipsr.pool_domain(%[[ARG0]], %[[ARG1]] : !hipsr.context, tensor<4xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT:      ^bb0(%[[VAL_0:.*]]: !hipsr.context, %[[VAL_1:.*]]: tensor<4xf16, #hipsr.mem<device>>):
+// CHECK-NEXT:        %[[PLACEHOLDER_0:.*]]:2 = hipsr.placeholder(%[[VAL_0]]) ins(%[[VAL_1]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[COMPUTE_0:.*]]:2 = hipsr.compute(%[[VAL_0]]) ins(%[[VAL_1]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_0]]#0, %[[PLACEHOLDER_0]]#1 : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT:        ^bb0(%[[VAL_2:.*]]: !hipsr.context, %[[VAL_3:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[VAL_4:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[VAL_5:.*]]: tensor<4xf16, #hipsr.mem<device>>):
+// CHECK-NEXT:          hipsr.compute_yield %[[VAL_4]], %[[VAL_5]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        } : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.pool_domain_yield %[[VAL_6:.*]]#0, %[[VAL_6]]#1 : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      } -> tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>> {domain_id = 0 : i64}
+// CHECK-NEXT:      %[[POOL_DOMAIN_1:.*]]:2 = hipsr.pool_domain(%[[ARG0]], %[[VAL_7:.*]]#0, %[[VAL_7]]#1 : !hipsr.context, tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT:      ^bb0(%[[VAL_8:.*]]: !hipsr.context, %[[VAL_9:.*]]: tensor<4xf16, #hipsr.mem<device>>, %[[VAL_10:.*]]: tensor<4xf16, #hipsr.mem<device>>):
+// CHECK-NEXT:        %[[PLACEHOLDER_1:.*]] = hipsr.placeholder(%[[VAL_8]]) ins(%[[VAL_9]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CAST_0:.*]] = hipsr.cast(%[[VAL_8]]) ins(%[[VAL_9]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_1]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[PLACEHOLDER_2:.*]] = hipsr.placeholder(%[[VAL_8]]) ins(%[[VAL_10]] : tensor<4xf16, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CAST_1:.*]] = hipsr.cast(%[[VAL_8]]) ins(%[[VAL_10]] : tensor<4xf16, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_2]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        hipsr.pool_domain_yield %[[CAST_0]], %[[CAST_1]] : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      } -> tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>> {domain_id = 1 : i64}
+// CHECK-NEXT:      return %[[VAL_11:.*]]#0, %[[VAL_11]]#1 : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:    }
+
 func.func @multi_result_boundaries(
     %ctx: !hipsr.context, %input: tensor<4xf16, #hipsr.mem<device>>)
     -> (tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>) {
@@ -457,12 +466,12 @@ func.func @multi_result_boundaries(
         : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>
   } : tensor<4xf16, #hipsr.mem<device>>, tensor<4xf16, #hipsr.mem<device>>
   %lhs_init = hipsr.placeholder(%ctx)
-      ins(%root_inits#0 : tensor<4xf16, #hipsr.mem<device>>)
+      ins(%root#0 : tensor<4xf16, #hipsr.mem<device>>)
       {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
   %lhs = hipsr.cast(%ctx) ins(%root#0 : tensor<4xf16, #hipsr.mem<device>>)
       outs(%lhs_init : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
   %rhs_init = hipsr.placeholder(%ctx)
-      ins(%root_inits#1 : tensor<4xf16, #hipsr.mem<device>>)
+      ins(%root#1 : tensor<4xf16, #hipsr.mem<device>>)
       {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16, #hipsr.mem<device>>
   %rhs = hipsr.cast(%ctx) ins(%root#1 : tensor<4xf16, #hipsr.mem<device>>)
       outs(%rhs_init : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
@@ -483,16 +492,17 @@ func.func @multi_result_boundaries(
 //
 //   return (no operands)
 //
-// CHECK-LABEL: func.func @no_result_domain(
-// CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<4xf32, #hipsr.mem<device>>) {
-// CHECK-NEXT: hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<4xf32, #hipsr.mem<device>>) {
-// CHECK-NEXT: ^bb0(%[[DOMAIN_CTX:.*]]: !hipsr.context, %[[DOMAIN_INPUT:.*]]: tensor<4xf32, #hipsr.mem<device>>):
-// CHECK-NEXT: %[[INIT:.*]] = hipsr.placeholder(%[[DOMAIN_CTX]]) ins(%[[DOMAIN_INPUT]] : tensor<4xf32, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NEXT: %[[UNUSED:.*]] = hipsr.cast(%[[DOMAIN_CTX]]) ins(%[[DOMAIN_INPUT]] : tensor<4xf32, #hipsr.mem<device>>) outs(%[[INIT]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
-// CHECK-NOT: hipsr.pool_domain_yield
-// CHECK-NEXT: } {domain_id = 0 : i64}
-// CHECK-NEXT: return
-// CHECK-NEXT: }
+// CHECK-LABEL:   func.func @no_result_domain(
+// CHECK-SAME:      %[[ARG0:.*]]: !hipsr.context,
+// CHECK-SAME:      %[[ARG1:.*]]: tensor<4xf32, #hipsr.mem<device>>) {
+// CHECK-NEXT:      hipsr.pool_domain(%[[ARG0]], %[[ARG1]] : !hipsr.context, tensor<4xf32, #hipsr.mem<device>>) {
+// CHECK-NEXT:      ^bb0(%[[VAL_0:.*]]: !hipsr.context, %[[VAL_1:.*]]: tensor<4xf32, #hipsr.mem<device>>):
+// CHECK-NEXT:        %[[PLACEHOLDER_0:.*]] = hipsr.placeholder(%[[VAL_0]]) ins(%[[VAL_1]] : tensor<4xf32, #hipsr.mem<device>>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:        %[[CAST_0:.*]] = hipsr.cast(%[[VAL_0]]) ins(%[[VAL_1]] : tensor<4xf32, #hipsr.mem<device>>) outs(%[[PLACEHOLDER_0]] : tensor<4xf16, #hipsr.mem<device>>) : tensor<4xf16, #hipsr.mem<device>>
+// CHECK-NEXT:      } {domain_id = 0 : i64}
+// CHECK-NEXT:      return
+// CHECK-NEXT:    }
+
 func.func @no_result_domain(
     %ctx: !hipsr.context, %input: tensor<4xf32, #hipsr.mem<device>>) {
   %init = hipsr.placeholder(%ctx)
@@ -513,9 +523,11 @@ func.func @no_result_domain(
 //             return
 //   pool domains: none
 //
-// CHECK-LABEL: func.func @empty(%{{.*}}: !hipsr.context) {
-// CHECK-NEXT: return
-// CHECK-NEXT: }
+// CHECK-LABEL:   func.func @empty(
+// CHECK-SAME:                     %[[ARG0:.*]]: !hipsr.context) {
+// CHECK-NEXT:      return
+// CHECK-NEXT:    }
+
 func.func @empty(%ctx: !hipsr.context) {
   return
 }
@@ -533,5 +545,6 @@ func.func @empty(%ctx: !hipsr.context) {
 //         i32 result
 //   pool domains: none
 //
-// CHECK-LABEL: func.func private @declaration(i32) -> i32
+// CHECK-LABEL:   func.func private @declaration(i32) -> i32
+
 func.func private @declaration(i32) -> i32

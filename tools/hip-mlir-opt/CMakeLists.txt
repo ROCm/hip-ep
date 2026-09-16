@@ -8,18 +8,23 @@ add_executable(hip-mlir-opt hip-mlir-opt.cpp)
 add_dependencies(hip-mlir-opt
   HipDialectIncGen
   HipsrDialectIncGen
+  OnnxDialectIncGen
   HipsrConversionPassIncGen
   HipsrTransformsPassIncGen
   HipTypesIncGen
   HipOpsIncGen
   HipPassesIncGen
 )
+if(TARGET HipPdllPatterns)
+  add_dependencies(hip-mlir-opt HipPdllPatterns)
+endif()
 
 target_link_libraries(hip-mlir-opt PRIVATE
   HipSupport
   LibHipCompiler
   HipDialectIR
   HipsrDialectIR
+  OnnxDialectIR
   HipsrDialectTransforms
   HipsrDialectPipelines
   HipDialectTransforms

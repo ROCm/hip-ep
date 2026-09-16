@@ -64,24 +64,9 @@ TEST(ConfigTest, SessionConfigs) {
       {"ep.context.enable", "1"},
       {"ep.shared_context", "1"},
   };
-  // dirty hack for testing
-  auto api = const_cast<morphizen::OrtApiForMorphizen *>(morphizen::api());
-  auto old_session_option_configuration = api->session_option_configuration;
-  api->session_option_configuration =
-      [](void *mmap, void *session_option,
-         void (*push)(void *mmap, const char *name, const char *value)) {
-        auto self = reinterpret_cast<std::map<std::string, std::string> *>(
-            session_option);
-        for (auto &[key, value] : *self) {
-          push(mmap, key.c_str(), value.c_str());
-        }
-      };
-
   auto options = onnxruntime::ProviderOptions{
       {"log_level", "info"},
       {"dump_dir", "hello1"},
-      {"session_options",
-       std::to_string((uintptr_t)(static_cast<void *>(&session_configs)))},
   };
   auto pass_context =
       morphizen::PassContextImp::create_pass_context(options, session_configs);
@@ -90,12 +75,11 @@ TEST(ConfigTest, SessionConfigs) {
   auto dump_dir = pass_context->get_dump_directory();
   EXPECT_EQ("hello1", dump_dir.string());
   LOG(INFO) << "config: " << config_proto.DebugString();
-  // Session configs now passed separately and accessed via get_session_config()
+  // Session configs are passed separately and accessed via get_session_config()
   for (auto &[key, value] : session_configs) {
     LOG(INFO) << "session_configs: " << key << " = " << value;
     auto sc_value = pass_context->get_session_config(key);
     ASSERT_TRUE(sc_value.has_value());
     EXPECT_EQ(value, sc_value.value());
   }
-  api->session_option_configuration = old_session_option_configuration;
 }

@@ -1054,7 +1054,7 @@ void PassContextImp::print_version_info(const char *prefix) {
     }
   }
   for (auto &kv : session_configs_) {
-    LOG_VERBOSE(3) << "session_config: " << kv.first << " = " << kv.second;
+    LOG_VERBOSE(1) << "session_config: " << kv.first << " = " << kv.second;
   }
   auto all_po = get_all_provider_options();
   for (auto &kv : all_po) {

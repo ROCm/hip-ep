@@ -113,6 +113,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     ConvTransposeOp::attachInterface<HipDstBufferizableModel<ConvTransposeOp>>(
         *ctx);
     MatmulOp::attachInterface<HipDstBufferizableModel<MatmulOp>>(*ctx);
+    RocMlirOp::attachInterface<HipDstBufferizableModel<RocMlirOp>>(*ctx);
     RmsNormOp::attachInterface<HipDstBufferizableModel<RmsNormOp>>(*ctx);
     SkipRmsNormOp::attachInterface<HipDstBufferizableModel<SkipRmsNormOp>>(
         *ctx);
@@ -142,7 +143,9 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     BiasGeluOp::attachInterface<HipDstBufferizableModel<BiasGeluOp>>(*ctx);
     FastGeluOp::attachInterface<HipDstBufferizableModel<FastGeluOp>>(*ctx);
     LeakyReluOp::attachInterface<HipDstBufferizableModel<LeakyReluOp>>(*ctx);
+    SwishOp::attachInterface<HipDstBufferizableModel<SwishOp>>(*ctx);
     ResizeOp::attachInterface<HipDstBufferizableModel<ResizeOp>>(*ctx);
+    GridSampleOp::attachInterface<HipDstBufferizableModel<GridSampleOp>>(*ctx);
     GlobalPoolOp::attachInterface<HipDstBufferizableModel<GlobalPoolOp>>(*ctx);
     ReciprocalOp::attachInterface<HipDstBufferizableModel<ReciprocalOp>>(*ctx);
     SqrtOp::attachInterface<HipDstBufferizableModel<SqrtOp>>(*ctx);
@@ -156,8 +159,13 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     MatMulNBitsOp::attachInterface<HipDstBufferizableModel<MatMulNBitsOp>>(
         *ctx);
     QMoEOp::attachInterface<HipDstBufferizableModel<QMoEOp>>(*ctx);
+    QMoEAmdOp::attachInterface<HipDstBufferizableModel<QMoEAmdOp>>(*ctx);
     GatherBlockQuantizedOp::attachInterface<
         HipDstBufferizableModel<GatherBlockQuantizedOp>>(*ctx);
+    QuantizeLinearOp::attachInterface<
+        HipDstBufferizableModel<QuantizeLinearOp>>(*ctx);
+    DequantizeLinearOp::attachInterface<
+        HipDstBufferizableModel<DequantizeLinearOp>>(*ctx);
     CausalConvWithStateOp::attachInterface<
         HipDstBufferizableModel<CausalConvWithStateOp>>(*ctx);
     HipDNNGraphOp::attachInterface<HipDstBufferizableModel<HipDNNGraphOp>>(
@@ -167,6 +175,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     LinearAttentionOp::attachInterface<
         HipDstBufferizableModel<LinearAttentionOp>>(*ctx);
     LayerNormOp::attachInterface<HipDstBufferizableModel<LayerNormOp>>(*ctx);
+    InstanceNormOp::attachInterface<HipDstBufferizableModel<InstanceNormOp>>(
+        *ctx);
     MinOp::attachInterface<HipDstBufferizableModel<MinOp>>(*ctx);
     MaxOp::attachInterface<HipDstBufferizableModel<MaxOp>>(*ctx);
     AbsOp::attachInterface<HipDstBufferizableModel<AbsOp>>(*ctx);
@@ -177,8 +187,12 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     OrOp::attachInterface<HipDstBufferizableModel<OrOp>>(*ctx);
     AndOp::attachInterface<HipDstBufferizableModel<AndOp>>(*ctx);
     CosOp::attachInterface<HipDstBufferizableModel<CosOp>>(*ctx);
+    ErfOp::attachInterface<HipDstBufferizableModel<ErfOp>>(*ctx);
     SinOp::attachInterface<HipDstBufferizableModel<SinOp>>(*ctx);
     CeilOp::attachInterface<HipDstBufferizableModel<CeilOp>>(*ctx);
+    RoundOp::attachInterface<HipDstBufferizableModel<RoundOp>>(*ctx);
+    AtanOp::attachInterface<HipDstBufferizableModel<AtanOp>>(*ctx);
+    FloorOp::attachInterface<HipDstBufferizableModel<FloorOp>>(*ctx);
     ExpOp::attachInterface<HipDstBufferizableModel<ExpOp>>(*ctx);
     LogOp::attachInterface<HipDstBufferizableModel<LogOp>>(*ctx);
     CumSumOp::attachInterface<HipDstBufferizableModel<CumSumOp>>(*ctx);
@@ -197,6 +211,13 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     NonZeroOp::attachInterface<HipDstBufferizableModel<NonZeroOp>>(*ctx);
     SizeOp::attachInterface<HipDstBufferizableModel<SizeOp>>(*ctx);
     LoopOp::attachInterface<HipDstBufferizableModel<LoopOp>>(*ctx);
+    QAddOp::attachInterface<HipDstBufferizableModel<QAddOp>>(*ctx);
+    QMulOp::attachInterface<HipDstBufferizableModel<QMulOp>>(*ctx);
+    QMatMulOp::attachInterface<HipDstBufferizableModel<QMatMulOp>>(*ctx);
+    QGemmOp::attachInterface<HipDstBufferizableModel<QGemmOp>>(*ctx);
+    QConvOp::attachInterface<HipDstBufferizableModel<QConvOp>>(*ctx);
+    QLpNormalizationOp::attachInterface<
+        HipDstBufferizableModel<QLpNormalizationOp>>(*ctx);
     // hip.if is a DPS control-flow op (getDpsInitsMutable, results alias
     // o_init) just like hip.loop. Without this model one-shot-bufferize aborts
     // with "op was not bufferized: hip.if" for any graph containing onnx.If,

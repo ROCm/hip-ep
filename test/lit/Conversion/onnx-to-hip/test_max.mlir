@@ -65,4 +65,32 @@ module {
   // CHECK: %[[DIM1:.*]] = tensor.dim %[[A]], %[[C1]] : tensor<?x?xf32>
   // CHECK: %[[INIT:.*]] = tensor.empty(%[[DIM0]], %[[DIM1]]) : tensor<?x?xf32>
   // CHECK: hip.max(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<?x?xf32>, tensor<?x?xf32>) outs(%[[INIT]] : tensor<?x?xf32>)
+
+  // --- Case 5: rank-5 against a rank-0 scalar, packed to the 4-D path ---
+  func.func @max_5d_scalar(%a: tensor<4x1x6x8x1xf32>, %b: tensor<f32>)
+      -> tensor<4x1x6x8x1xf32> {
+    // CHECK-LABEL: func.func @max_5d_scalar
+    // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<4x1x6x8x1xf32>, %[[B:.*]]: tensor<f32>)
+    // CHECK-NOT: onnx.Max
+    // CHECK: tensor.collapse_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4]] : tensor<4x1x6x8x1xf32> into tensor<4x1x6x8xf32>
+    // CHECK: hip.max(%[[CTX]]) ins({{.*}}, {{.*}} : tensor<4x1x6x8xf32>, tensor<f32>) outs({{.*}} : tensor<4x1x6x8xf32>)
+    // CHECK: tensor.expand_shape {{.*}} {{\[\[}}0], [1], [2], [3, 4]] output_shape [4, 1, 6, 8, 1] : tensor<4x1x6x8xf32> into tensor<4x1x6x8x1xf32>
+    %r = "onnx.Max"(%a, %b) : (tensor<4x1x6x8x1xf32>, tensor<f32>) -> tensor<4x1x6x8x1xf32>
+    return %r : tensor<4x1x6x8x1xf32>
+  }
+
+  // --- Case 6: only the two-operand form is packed. A variadic rank-5 max is
+  // left at full rank even when every extra input is a scalar. ---
+  func.func @max_5d_variadic(%a: tensor<4x1x6x8x1xf32>, %b: tensor<f32>, %c: tensor<f32>)
+      -> tensor<4x1x6x8x1xf32> {
+    // Both chained maxes are checked so that dropping the third input during
+    // lowering fails here rather than silently changing results.
+    // CHECK-LABEL: func.func @max_5d_variadic
+    // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<4x1x6x8x1xf32>, %[[B:.*]]: tensor<f32>, %[[C:.*]]: tensor<f32>)
+    // CHECK-NOT: tensor.collapse_shape
+    // CHECK: %[[M1:.*]] = hip.max(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<4x1x6x8x1xf32>, tensor<f32>) outs({{.*}} : tensor<4x1x6x8x1xf32>)
+    // CHECK: hip.max(%[[CTX]]) ins(%[[M1]], %[[C]] : tensor<4x1x6x8x1xf32>, tensor<f32>) outs({{.*}} : tensor<4x1x6x8x1xf32>)
+    %r = "onnx.Max"(%a, %b, %c) : (tensor<4x1x6x8x1xf32>, tensor<f32>, tensor<f32>) -> tensor<4x1x6x8x1xf32>
+    return %r : tensor<4x1x6x8x1xf32>
+  }
 }

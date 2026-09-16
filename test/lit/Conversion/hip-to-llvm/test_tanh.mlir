@@ -4,18 +4,18 @@
 // ============================================================================
 // TEST PURPOSE:
 // Verify HIP tanh operation is correctly lowered to LLVM call
-// to wrap_miopenActivationForward runtime function with both static and
+// to wrap_tanh runtime function with both static and
 // dynamic shapes.
 //
 // This test validates:
-// - hip.tanh → llvm.call @wrap_miopenActivationForward
+// - hip.tanh → llvm.call @wrap_tanh
 // - Type conversion: !hip.context → !llvm.ptr
 // - Static shapes: num_elements computed at compile time
 // - Dynamic shapes: num_elements computed at runtime via extractvalue
 // - Proper function signature for runtime API
 //
-// Expected: wrap_miopenActivationForward(state, input_ptr, output_ptr,
-//                                         num_elements, data_type, activation_mode)
+// Expected: wrap_tanh(state, input_ptr, output_ptr,
+//                     num_elements, data_type)
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
@@ -31,7 +31,7 @@ module {
     hip.tanh(%ctx) ins(%input : memref<1x128x512xf32, 1>)
                    outs(%output : memref<1x128x512xf32, 1>)
 
-    // CHECK: llvm.call @wrap_miopenActivationForward({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_tanh({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
 
     return
   }
@@ -46,7 +46,7 @@ module {
     hip.tanh(%ctx) ins(%input : memref<256x512xf32, 1>)
                    outs(%output : memref<256x512xf32, 1>)
 
-    // CHECK: llvm.call @wrap_miopenActivationForward({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_tanh({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
 
     return
   }
@@ -67,7 +67,7 @@ module {
     // CHECK-DAG: llvm.extractvalue %{{.*}}[3, 1]
     // CHECK-DAG: llvm.mlir.constant(512 : i64) : i64
     // CHECK-DAG: llvm.mlir.constant(0 : i64) : i64
-    // CHECK: llvm.call @wrap_miopenActivationForward({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_tanh({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
 
     return
   }

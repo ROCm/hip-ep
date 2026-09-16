@@ -24,7 +24,6 @@ from .qdq_ext import (
     convert_matmul_int8_weight_dq,
     fold_weight_dq_q,
     fuse_conv_transpose_to_matmul_nbits_q,
-    infer_decoder_external_data_name_q,
     prune_initializers_q,
     promote_model_to_fp16_q,
     rewrite_gqa_past_seq_len_to_seqlens_k_q,
@@ -206,7 +205,14 @@ def ensure_gqa_rope_weights_fp16(model: onnx.ModelProto) -> dict[str, int]:
 
 
 def convert_decoder_int8kv(
-    src: Path, dst: Path, *, bundle_root: Path, gqa_seqlens_rewrite: bool = True
+    src: Path,
+    dst: Path,
+    *,
+    bundle_root: Path,
+    external_data_name: str | None = None,
+    reuse_external_data: bool = False,
+    external_data_ref: Path | None = None,
+    gqa_seqlens_rewrite: bool = True,
 ) -> dict[str, int]:
     """Q/DQ strip + Conv/MNB + fp16 activations; preserve int8 KV GQA."""
     profile = CONVERT_PROFILE_LITE
@@ -256,9 +262,16 @@ def convert_decoder_int8kv(
     assert_qdq_removed(graph, context=dst.name)
     assert_int8_kv_io(model, context=dst.name)
     assert_gqa_int8_quant(model, context=dst.name)
-    ext_name = infer_decoder_external_data_name_q(src, bundle_root)
+    from .step1_qdq_fp16 import DECODER_WORK_EXTERNAL_DATA
+
+    ext_name = external_data_name or DECODER_WORK_EXTERNAL_DATA
     save_decoder_model_q(
-        model, dst, external_data_name=ext_name, keep_inline=inline_at_load
+        model,
+        dst,
+        external_data_name=ext_name,
+        keep_inline=inline_at_load,
+        reuse_external_data=reuse_external_data,
+        external_data_ref=external_data_ref,
     )
     return stats
 

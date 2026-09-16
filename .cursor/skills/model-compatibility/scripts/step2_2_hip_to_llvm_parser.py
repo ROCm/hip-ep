@@ -227,14 +227,14 @@ class HipToLLVMParser:
                             op_type = args[0]
                             hip_op = self._hip_op_from_pattern_op_class(op_type)
 
-                            if "kWrapMiopenOpTensor" in self.constants:
-                                runtime_func = self.constants["kWrapMiopenOpTensor"]
+                            if "kWrapElementwise" in self.constants:
+                                runtime_func = self.constants["kWrapElementwise"]
                                 mapping = {
                                     "hip_op": hip_op,
                                     "runtime_func": runtime_func,
                                     "file_name": file_name,
                                     "type": "patterns_add",
-                                    "const_name": "kWrapMiopenOpTensor",
+                                    "const_name": "kWrapElementwise",
                                 }
                                 if mapping not in mappings:
                                     mappings.append(mapping)

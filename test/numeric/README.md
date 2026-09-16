@@ -240,7 +240,7 @@ pytest --backend ort_ep \
 What each piece does:
 
 - **`THEROCK_DIST` + `PATH`** -- the EP's compiled-model DLLs link
-  against ROCm runtime libs (`amdhip64_7.dll`, `MIOpen.dll`, ...) at
+  against ROCm runtime libs (`amdhip64_7.dll`, `libhipblaslt.dll`, ...) at
   session-create time; the Windows loader needs `%THEROCK_DIST%\bin`
   on `PATH` to find them. This is the *only* env var the EP requires
   at runtime; everything else is a CLI flag or optional toggle.
@@ -252,8 +252,8 @@ What each piece does:
   against the onnxruntime *package* directory, not cwd -- so the
   relative recipe above would otherwise need to live inside the ORT
   install) and auto-prepends the resolved parent directory to `PATH`
-  so co-located dependencies (`hip-compiler.dll`) are found at
-  registration time.
+  so the EP DLL's co-located dependencies are found at registration
+  time.
 - **`--ep-option config_file=...`** -- forwards the key/value into
   ORT's `provider_options` dict for this EP. **`config_file` is
   MorphiZen's own convention** (the EP's

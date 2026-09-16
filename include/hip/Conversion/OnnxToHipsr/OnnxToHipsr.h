@@ -23,9 +23,9 @@ namespace hipsr {
 #define GEN_PASS_DECL_CONVERTONNXTOHIPSRPASS
 #include "hip/Conversion/Passes.h.inc"
 
-// These patterns keep the converter out of ConversionPattern: a carried
-// converter forces every operand through convertType, which overwrites the
-// memory space its producer chose.
+// These patterns take the converter but must not hand it to their
+// OpConversionPattern base: a carried converter forces every operand through
+// convertType, which overwrites the memory space its producer chose.
 void populateOnnxToHipsrConstantPatterns(
     const ::mlir::TypeConverter &typeConverter,
     ::mlir::RewritePatternSet &patterns);
@@ -42,12 +42,49 @@ void populateExpandConversionPatterns(
     const ::mlir::TypeConverter &typeConverter,
     ::mlir::RewritePatternSet &patterns, ::mlir::MLIRContext *ctx);
 
+void populateMinConversionPatterns(const ::mlir::TypeConverter &typeConverter,
+                                   ::mlir::RewritePatternSet &patterns,
+                                   ::mlir::MLIRContext *ctx);
+
 void populateShapeConversionPatterns(const ::mlir::TypeConverter &typeConverter,
                                      ::mlir::RewritePatternSet &patterns,
                                      ::mlir::MLIRContext *ctx);
 
-void populateReturnConversionPatterns(::mlir::RewritePatternSet &patterns,
-                                      ::mlir::MLIRContext *ctx);
+void populateReshapeConversionPatterns(
+    const ::mlir::TypeConverter &typeConverter,
+    ::mlir::RewritePatternSet &patterns, ::mlir::MLIRContext *ctx);
+
+void populateUnsqueezeConversionPatterns(
+    const ::mlir::TypeConverter &typeConverter,
+    ::mlir::RewritePatternSet &patterns, ::mlir::MLIRContext *ctx);
+
+void populateEqualConversionPatterns(const ::mlir::TypeConverter &typeConverter,
+                                     ::mlir::RewritePatternSet &patterns,
+                                     ::mlir::MLIRContext *ctx);
+
+void populateTransposeConversionPatterns(
+    const ::mlir::TypeConverter &typeConverter,
+    ::mlir::RewritePatternSet &patterns, ::mlir::MLIRContext *ctx);
+
+void populateGatherConversionPatterns(
+    const ::mlir::TypeConverter &typeConverter,
+    ::mlir::RewritePatternSet &patterns, ::mlir::MLIRContext *ctx);
+
+void populateSliceConversionPatterns(const ::mlir::TypeConverter &typeConverter,
+                                     ::mlir::RewritePatternSet &patterns,
+                                     ::mlir::MLIRContext *ctx);
+
+void populateScatterNDConversionPatterns(
+    const ::mlir::TypeConverter &typeConverter,
+    ::mlir::RewritePatternSet &patterns, ::mlir::MLIRContext *ctx);
+
+void populateNonZeroConversionPatterns(
+    const ::mlir::TypeConverter &typeConverter,
+    ::mlir::RewritePatternSet &patterns, ::mlir::MLIRContext *ctx);
+
+void populateReturnConversionPatterns(
+    const ::mlir::TypeConverter &typeConverter,
+    ::mlir::RewritePatternSet &patterns, ::mlir::MLIRContext *ctx);
 
 } // namespace hipsr
 } // namespace mlir

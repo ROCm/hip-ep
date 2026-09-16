@@ -1,3 +1,8 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
 // ============================================================
 // custom_kernels GQA flash *prefill* (TTFT) test + benchmark.
 //
@@ -5,6 +10,7 @@
 // fused-prefill fast path:
 //   hip_gqa_flash_prefill_v5  (d == 64, gpt-oss / llama-3.2 geometry)
 //   hip_gqa_flash_prefill_v7  (d == 128, llama-3.1 geometry)
+//   hip_gqa_flash_prefill_v8  (d == 256, Qwen3.6 geometry)
 // against a CPU fp32 causal-attention reference (correctness) and reports the
 // per-prefill latency (the quantity that bounds TTFT).
 //
@@ -37,7 +43,7 @@ extern "C" int hip_gqa_flash_prefill_v2(
 
 // Wide entry: same as v2 plus attention sinks / smooth softmax and a sliding
 // window.
-extern "C" int hip_gqa_flash_prefill_v3(
+extern "C" int hip_gqa_flash_prefill(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale, int local_window_size, const void* head_sink,
@@ -208,7 +214,7 @@ static bool run_case(const Case& c, int iters) {
                        : (c.sink_mode == kSinkBoth)    ? "both"
                                                        : "-";
   auto launch = [&]() {
-    return hip_gqa_flash_prefill_v3(nullptr, dQ, dK, dV, dO, B, H, G, sq, skv, D,
+    return hip_gqa_flash_prefill(nullptr, dQ, dK, dV, dO, B, H, G, sq, skv, D,
                                     max_seq, past_len, scale, window_arg,
                                     sink_arg, H, smooth_arg);
   };
@@ -247,7 +253,7 @@ static bool run_case(const Case& c, int iters) {
   const bool pass = err < 2e-3;
   printf("%-16s B%d H%d G%d(hpg%d) D%-3d sq=%-5d past=%-5d %-6s w=%-5d | relL2=%.2e  latency=%.4f ms  %s (v%d)\n",
          c.name, B, H, G, H / G, D, sq, past_len, sink_tag, c.window, err, ms,
-         pass ? "PASS" : "FAIL", D == 64 ? 5 : 7);
+         pass ? "PASS" : "FAIL", D == 64 ? 5 : (D == 256 ? 8 : 7));
 
   hipEventDestroy(e0); hipEventDestroy(e1);
   hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO); hipFree(dSink);
@@ -260,6 +266,13 @@ int main(int argc, char** argv) {
     if (!std::strcmp(argv[i], "--iters") && i + 1 < argc) iters = std::atoi(argv[++i]);
 
   const Case cases[] = {
+      // Qwen3.6-35B-A3B text decoder: d=256 routes to the v8 kernel, which no
+      // other case covered. sq=1000 is deliberately not a multiple of the 16-row
+      // Q tile or the 16-key KV tile, so it exercises the partial tiles that 512
+      // and 2048 both skip.
+      {"qwen3.6-d256", 1, 16, 2, 256, 512,  0,    kSinkNone,    false, 0},
+      {"qwen3.6-d256", 1, 16, 2, 256, 1000, 0,    kSinkNone,    false, 0},
+      {"qwen3.6-d256", 1, 16, 2, 256, 2048, 0,    kSinkNone,    false, 0},
       // No-sink regression set (must stay as accurate as before).
       {"gpt_oss-20b",  1, 64, 8,  64, 512,  0,    kSinkNone,    false, 0},
       {"gpt_oss-20b",  1, 64, 8,  64, 2048, 0,    kSinkNone,    false, 0},

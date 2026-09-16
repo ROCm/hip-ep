@@ -3,8 +3,8 @@
 # Licensed under the MIT License.
 #
 
-"""Tests for activation / unary operations: Sigmoid, Sqrt, Reciprocal,
-Softplus."""
+"""Tests for activation / unary operations: Sigmoid, Tanh, Sqrt, Reciprocal,
+Softplus, Swish."""
 
 import numpy as np
 import pytest
@@ -24,13 +24,13 @@ CHUNK_OPT_HEADS = 16
 CHUNK_OPT_GATE_CH = 32
 
 
-def _make_unary_model(op_type: str, dtype, shape: list[int], **attrs):
+def _make_unary_model(op_type: str, dtype, shape: list[int], opset: int = 17, **attrs):
     """Build a single-input unary ONNX model."""
     tp = np_to_onnx_type(dtype)
     X = helper.make_tensor_value_info("X", tp, shape)
     Y = helper.make_tensor_value_info("Y", tp, shape)
     node = helper.make_node(op_type, ["X"], ["Y"], **attrs)
-    return make_model_from_nodes([node], [X], [Y])
+    return make_model_from_nodes([node], [X], [Y], opset=opset)
 
 
 class TestSigmoid:
@@ -58,6 +58,24 @@ class TestSigmoid:
 
         rng = np.random.default_rng(42)
         x = rng.uniform(-5, 5, shape).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-3)
+
+
+class TestTanh:
+    @pytest.mark.parametrize(
+        "dtype,shape",
+        [
+            (np.float16, [1, 10]),
+            (np.float16, [4, 256]),
+        ],
+    )
+    def test_tanh(self, model_runner, dtype, shape):
+        model = _make_unary_model("Tanh", dtype, shape)
+
+        rng = np.random.default_rng(42)
+        x = rng.uniform(-5, 5, shape).astype(dtype)
 
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-3)
@@ -154,6 +172,8 @@ class TestSoftplus:
         [
             (np.float32, [1, 10]),
             (np.float32, [4, 256]),
+            (np.float16, [1, 10]),
+            (np.float16, [4, 256]),
         ],
     )
     def test_softplus(self, model_runner, dtype, shape):
@@ -163,7 +183,8 @@ class TestSoftplus:
         x = rng.uniform(-5, 5, shape).astype(dtype)
 
         actual, expected = model_runner.run_sample(model, [x])
-        compare_outputs(actual, expected, atol=1e-4)
+        atol = 1e-3 if dtype == np.float16 else 1e-4
+        compare_outputs(actual, expected, atol=atol)
 
     @pytest.mark.parametrize("seq_len", CHUNK_OPT_SEQ_LENS)
     def test_softplus_chunk_opt_gate_shape(self, model_runner, seq_len):
@@ -179,3 +200,26 @@ class TestSoftplus:
 
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-4)
+
+
+class TestSwish:
+    """Swish(x) = x * sigmoid(alpha * x), introduced in ONNX opset 24."""
+
+    @pytest.mark.parametrize(
+        "dtype,alpha,atol,rtol",
+        [
+            (np.float16, None, 2e-3, 2e-3),
+            (np.float16, 0.5, 2e-3, 2e-3),
+            (np.float32, -0.25, 1e-5, 1e-5),
+            (np.float64, 2.0, 1e-12, 1e-12),
+        ],
+    )
+    def test_swish(self, model_runner, dtype, alpha, atol, rtol):
+        attrs = {} if alpha is None else {"alpha": alpha}
+        model = _make_unary_model("Swish", dtype, [4, 17], opset=24, **attrs)
+
+        rng = np.random.default_rng(29)
+        x = rng.uniform(-8, 8, [4, 17]).astype(dtype)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=atol, rtol=rtol)

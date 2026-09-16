@@ -17,7 +17,7 @@ namespace {
 //                                 output, present_state,
 //                                 batch_size, channels, seq_len,
 //                                 kernel_size, ndim, activation,
-//                                 element_size_bytes)
+//                                 element_size_bytes, channels_last)
 struct CausalConvWithStateOpLowering
     : public ConvertOpToLLVMPattern<CausalConvWithStateOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -59,25 +59,28 @@ struct CausalConvWithStateOpLowering
 
     // Extract shape info from input memref: (batch, channels, L) for ndim=1
     auto inputType = cast<MemRefType>(op.getInput().getType());
-    auto inputShape = inputType.getShape();
     int64_t rank = inputType.getRank();
+    bool channelsLast = op.getChannelsLast();
 
     // Input layout: (batch, channels, spatial_dims...)
     // For ndim=1: rank=3, shape = [batch, channels, L]
     // For ndim=2: rank=4, shape = [batch, channels, H, W]
     // For ndim=3: rank=5, shape = [batch, channels, D, H, W]
+    // Channels-last is 1D only: rank=3, shape = [batch, L, channels].
     if (rank < 3)
       return op.emitError("input must be at least rank-3");
+    if (channelsLast && rank != 3)
+      return op.emitError("channels_last requires a rank-3 input (ndim=1)");
 
     Value batchSize =
         getMemRefDimSize(inputType, 0, adaptor.getInput(), rewriter, loc);
-    Value channels =
-        getMemRefDimSize(inputType, 1, adaptor.getInput(), rewriter, loc);
+    Value channels = getMemRefDimSize(inputType, channelsLast ? 2 : 1,
+                                      adaptor.getInput(), rewriter, loc);
 
     // seq_len = product of spatial dimensions (last ndim dims)
-    // For ndim=1: just the last dim
-    Value seqLen =
-        getMemRefDimSize(inputType, 2, adaptor.getInput(), rewriter, loc);
+    // For ndim=1: just the last dim, or dim 1 when channels moved to the end
+    Value seqLen = getMemRefDimSize(inputType, channelsLast ? 1 : 2,
+                                    adaptor.getInput(), rewriter, loc);
     for (int64_t i = 3; i < rank; ++i) {
       Value dim =
           getMemRefDimSize(inputType, i, adaptor.getInput(), rewriter, loc);
@@ -113,8 +116,10 @@ struct CausalConvWithStateOpLowering
         inputType.getElementType().getIntOrFloatBitWidth() / 8;
     Value elemSizeVal = createI64Const(elemSizeBytes);
 
+    Value channelsLastVal = createI64Const(channelsLast ? 1 : 0);
+
     // Build function signature
-    SmallVector<Type, 15> paramTypes = {
+    SmallVector<Type, 16> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
         ptrType, // input
@@ -129,7 +134,8 @@ struct CausalConvWithStateOpLowering
         i64Type, // kernel_size
         i64Type, // ndim
         i64Type, // activation
-        i64Type  // element_size_bytes
+        i64Type, // element_size_bytes
+        i64Type  // channels_last
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -137,15 +143,15 @@ struct CausalConvWithStateOpLowering
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 15> args = {
-        statePtr,   getOpStateSlotValue(op, rewriter, loc),
-        inputPtr,   weightPtr,
-        biasPtr,    pastStatePtr,
-        outputPtr,  presentStatePtr,
-        batchSize,  channels,
-        seqLen,     kernelSizeVal,
-        ndimVal,    activationVal,
-        elemSizeVal};
+    SmallVector<Value, 16> args = {
+        statePtr,    getOpStateSlotValue(op, rewriter, loc),
+        inputPtr,    weightPtr,
+        biasPtr,     pastStatePtr,
+        outputPtr,   presentStatePtr,
+        batchSize,   channels,
+        seqLen,      kernelSizeVal,
+        ndimVal,     activationVal,
+        elemSizeVal, channelsLastVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 

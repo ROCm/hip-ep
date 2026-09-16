@@ -62,14 +62,14 @@ __declspec(dllexport)
   }
 
   fprintf(stderr, "[Model DLL Manual] Device: %s\n", prop.name);
-  fprintf(stderr, "[Model DLL Manual] gcnArchName (BEFORE MIOpen): '%s'\n",
+  fprintf(stderr, "[Model DLL Manual] gcnArchName (BEFORE hipBLASLt): '%s'\n",
           prop.gcnArchName);
   fprintf(stderr, "[Model DLL Manual] gcnArchName length: %zu\n",
           strlen(prop.gcnArchName));
 
   if (prop.gcnArchName[0] == '\0') {
     fprintf(stderr, "[Model DLL Manual] WARNING: gcnArchName is EMPTY before "
-                    "MIOpen init\n");
+                    "hipBLASLt init\n");
     return 1;
   }
 
@@ -81,52 +81,33 @@ __declspec(dllexport)
     return 6;
   }
 
-  // Step 4: MIOpen initialization
-  fprintf(stderr, "[Model DLL Manual] Step 4: MIOpen initialization\n");
-  miopenHandle_t miopen_handle = nullptr;
-  if (miopenCreate(&miopen_handle) != miopenStatusSuccess) {
-    fprintf(stderr,
-            "[Model DLL Manual] ERROR: Failed to create MIOpen handle\n");
-    HIP_CLEANUP(hipStreamDestroy(stream));
-    return 7;
-  }
-
-  if (miopenSetStream(miopen_handle, stream) != miopenStatusSuccess) {
-    fprintf(stderr, "[Model DLL Manual] ERROR: Failed to set MIOpen stream\n");
-    miopenDestroy(miopen_handle);
-    HIP_CLEANUP(hipStreamDestroy(stream));
-    return 8;
-  }
-
-  // Step 5: Re-check gcnArchName AFTER MIOpen initialization (CRITICAL)
-  fprintf(stderr, "[Model DLL Manual] Step 5: Re-checking device properties "
-                  "AFTER MIOpen\n");
-  hipDeviceProp_t prop_after_miopen;
-  if (hipGetDeviceProperties(&prop_after_miopen, 0) == hipSuccess) {
-    fprintf(stderr, "[Model DLL Manual] gcnArchName (AFTER MIOpen): '%s'\n",
-            prop_after_miopen.gcnArchName);
-    fprintf(stderr, "[Model DLL Manual] gcnArchName length: %zu\n",
-            strlen(prop_after_miopen.gcnArchName));
-
-    if (prop_after_miopen.gcnArchName[0] == '\0') {
-      fprintf(
-          stderr,
-          "[Model DLL Manual] ERROR: gcnArchName became EMPTY after MIOpen!\n");
-      miopenDestroy(miopen_handle);
-      HIP_CLEANUP(hipStreamDestroy(stream));
-      return 1;
-    }
-  }
-
-  // Step 6: hipBLASLt initialization (may crash if gcnArchName is empty)
-  fprintf(stderr, "[Model DLL Manual] Step 6: hipBLASLt initialization\n");
+  // Step 4: hipBLASLt initialization (may crash if gcnArchName is empty)
+  fprintf(stderr, "[Model DLL Manual] Step 4: hipBLASLt initialization\n");
   hipblasLtHandle_t hipblas_handle = nullptr;
   if (hipblasLtCreate(&hipblas_handle) != HIPBLAS_STATUS_SUCCESS) {
     fprintf(stderr,
             "[Model DLL Manual] ERROR: Failed to create hipBLASLt handle\n");
-    miopenDestroy(miopen_handle);
     HIP_CLEANUP(hipStreamDestroy(stream));
     return 9;
+  }
+
+  // Step 5: Re-check gcnArchName AFTER hipBLASLt initialization
+  fprintf(stderr, "[Model DLL Manual] Step 5: Re-checking device properties "
+                  "AFTER hipBLASLt\n");
+  hipDeviceProp_t prop_after;
+  if (hipGetDeviceProperties(&prop_after, 0) == hipSuccess) {
+    fprintf(stderr, "[Model DLL Manual] gcnArchName (AFTER hipBLASLt): '%s'\n",
+            prop_after.gcnArchName);
+    fprintf(stderr, "[Model DLL Manual] gcnArchName length: %zu\n",
+            strlen(prop_after.gcnArchName));
+
+    if (prop_after.gcnArchName[0] == '\0') {
+      fprintf(stderr, "[Model DLL Manual] ERROR: gcnArchName became EMPTY "
+                      "after hipBLASLt!\n");
+      hipblasLtDestroy(hipblas_handle);
+      HIP_CLEANUP(hipStreamDestroy(stream));
+      return 1;
+    }
   }
 
   // Success - cleanup
@@ -134,7 +115,6 @@ __declspec(dllexport)
       stderr,
       "[Model DLL Manual] All initialization steps completed successfully!\n");
   hipblasLtDestroy(hipblas_handle);
-  miopenDestroy(miopen_handle);
   (void)hipStreamDestroy(stream);
 
   return 0; // Success

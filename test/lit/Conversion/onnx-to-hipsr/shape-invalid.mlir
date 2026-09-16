@@ -5,7 +5,7 @@
 // onnx.Shape forms the conversion rejects.
 //===----------------------------------------------------------------------===//
 
-// RUN: hip-mlir-opt --convert-onnx-to-hipsr --split-input-file --verify-diagnostics %s
+// RUN: hip-mlir-opt --onnx-dialect=modeled --convert-onnx-to-hipsr --split-input-file --verify-diagnostics %s
 
 // The number of extents to read comes from the input's rank.
 func.func @unranked_input(%ctx: !hipsr.context, %input: tensor<*xf16>)
@@ -13,18 +13,6 @@ func.func @unranked_input(%ctx: !hipsr.context, %input: tensor<*xf16>)
   // expected-error @+1 {{failed to legalize operation 'onnx.Shape'}}
   %0 = "onnx.Shape"(%input) : (tensor<*xf16>) -> tensor<3xi64, #hipsr.mem<host>>
   return %0 : tensor<3xi64, #hipsr.mem<host>>
-}
-
-// -----
-
-// ONNX Shape returns extents as i64.
-func.func @result_element_type(%ctx: !hipsr.context,
-                               %input: tensor<2x3xf16>)
-    -> tensor<2xi32, #hipsr.mem<host>> {
-  // expected-error @+1 {{failed to legalize operation 'onnx.Shape'}}
-  %0 = "onnx.Shape"(%input)
-      : (tensor<2x3xf16>) -> tensor<2xi32, #hipsr.mem<host>>
-  return %0 : tensor<2xi32, #hipsr.mem<host>>
 }
 
 // -----

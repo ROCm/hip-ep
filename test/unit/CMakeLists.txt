@@ -41,3 +41,56 @@ add_test(NAME HipsrExternalizeConstantsUnit
 set_target_properties(test-hipsr-externalize-constants PROPERTIES
   FOLDER "mlir/Test/Dialect/Hipsr"
 )
+
+#=============================================================================
+# ONNX-dtype -> MLIR-type mapping unit test (GPU-free).
+#=============================================================================
+# Covers onnxElementTypeToMlirDenseElementType (morphizen/mlir-imp), which LIT
+# cannot reach: hip-mlir-opt has no ONNX front end and only consumes textual
+# MLIR. Regression guard for the QDQ UINT16 sign-flip (inline UINT16 dense
+# constants must stay ui16, not signless i16). Plain main() (no GTest).
+
+add_executable(test-dtype-mapping test_dtype_mapping.cpp)
+
+target_compile_features(test-dtype-mapping PRIVATE cxx_std_17)
+
+target_include_directories(test-dtype-mapping PRIVATE
+  ${MLIR_INCLUDE_DIRS}
+  ${LLVM_INCLUDE_DIRS}
+  ${CMAKE_SOURCE_DIR}/morphizen/mlir-imp/src  # mlir-constants.hpp
+)
+
+target_link_libraries(test-dtype-mapping PRIVATE
+  mlir-imp
+  MLIRIR
+  MLIRSupport
+)
+
+add_test(NAME MlirDtypeMappingUnit
+  COMMAND test-dtype-mapping
+)
+
+set_target_properties(test-dtype-mapping PROPERTIES
+  FOLDER "mlir/Test/Dialect/Hipsr"
+)
+
+# GPU-free numeric reference for fused QDQ LpNormalization (L2 == RMS/sqrt(N)).
+add_executable(test-qlpnormalization-ref test_qlpnormalization_ref.cpp)
+
+target_compile_features(test-qlpnormalization-ref PRIVATE cxx_std_17)
+
+target_include_directories(test-qlpnormalization-ref PRIVATE
+  ${LLVM_INCLUDE_DIRS}
+)
+
+target_link_libraries(test-qlpnormalization-ref PRIVATE
+  LLVMSupport
+)
+
+add_test(NAME QLpNormalizationRefUnit
+  COMMAND test-qlpnormalization-ref
+)
+
+set_target_properties(test-qlpnormalization-ref PROPERTIES
+  FOLDER "mlir/Test/Dialect/Hipsr"
+)

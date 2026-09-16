@@ -86,12 +86,16 @@ node_arg_names_to_nodes(const Graph &graph,
       bool node_arg_is_node_output =
           (!node_arg_is_graph_input(graph, onnx_node_arg_name)) &&
           (!node_arg_is_initializer(graph, onnx_node_arg_name));
+      // A producerless graph-input or constant-initializer output is legal (ORT
+      // const folding can leave a constant as a graph output). Only a genuine
+      // node-output with no producer is a fusion error, so record and FATAL
+      // only in that case; otherwise the fuse is given up gracefully.
       if (node_arg_is_node_output) {
         ss << onnx_node_arg_name << ",";
-      }
-      if (!allow_node_not_found) {
-        LOG(FATAL) << "cannot find producer. onnx_node_arg_name="
-                   << onnx_node_arg_name;
+        if (!allow_node_not_found) {
+          LOG(FATAL) << "cannot find producer. onnx_node_arg_name="
+                     << onnx_node_arg_name;
+        }
       }
     } else {
       auto found = std::find(ret.begin(), ret.end(), deq) != ret.end();
