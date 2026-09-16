@@ -19,6 +19,8 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
 
+#include <algorithm>
+
 namespace mlir {
 namespace hipsr {
 
@@ -32,6 +34,11 @@ struct ConversionInSchemePass
   using impl::ConversionInSchemePassBase<ConversionInSchemePass>::ConversionInSchemePassBase;
 
   void runOnOperation() override {
+    // Ensure required dialects are loaded
+    getContext().loadDialect<mlir::hipsr::HipsrDialect>();
+    getContext().loadDialect<mlir::onnx::OnnxDialect>();
+    getContext().loadDialect<mlir::func::FuncDialect>();
+
     // Check if module name is specified
     if (moduleName.empty()) {
       emitError(getOperation().getLoc(),
@@ -51,7 +58,11 @@ struct ConversionInSchemePass
     ChezSchemeInterpreter::setLogLevel(level);
 
     // Import the specified Scheme module
-    std::string importCode = "(import (" + moduleName + "))";
+    // Convert slash notation to space notation for R6RS library names
+    // e.g., "passes/onnx-to-hipsr" -> "passes onnx-to-hipsr"
+    std::string libraryName = moduleName;
+    std::replace(libraryName.begin(), libraryName.end(), '/', ' ');
+    std::string importCode = "(import (" + libraryName + "))";
     // Set library-directories before importing
     std::string libdirCode = "(library-directories (cons \"/home/build/hip-ep-chez/lib/scheme\" (library-directories)))";
     if (!ChezSchemeInterpreter::eval(libdirCode.c_str())) {

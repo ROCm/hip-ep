@@ -28,7 +28,7 @@ struct ReturnToFunc
     : public ::mlir::OpConversionPattern<::mlir::onnx::ReturnOp> {
   ReturnToFunc(const ::mlir::TypeConverter &typeConverter,
                ::mlir::MLIRContext *ctx)
-      : OpConversionPattern(ctx) {}
+      : OpConversionPattern(typeConverter, ctx) {}
 
   ::mlir::LogicalResult
   matchAndRewrite(::mlir::onnx::ReturnOp op, OpAdaptor adaptor,

@@ -26,6 +26,7 @@
   ;; Pattern function: takes (op operands-ref rewriter type-converter) and returns #t on successful match+rewrite
   ;; New signature mirrors C++ OpConversionPattern::matchAndRewrite
   (define (onnx-cast->hipsr-manual op operands-ref rewriter type-converter)
+    (mlir-log-debug "Cast pattern: checking match")
     ;; Match: Check operation name
     (and (string=? (mlir-operation-name op) "onnx.Cast")
 
@@ -40,20 +41,23 @@
          (let* ([%input (value-array-ref-at operands-ref 0)]  ; Get first operand from array
                 [%output (mlir-operation-get-result-value op 0)]
 
-                ;; Get context from operation
-                [ctx (mlir-operation-get-context op)]
+                ;; Get context VALUE from function argument (not MLIRContext*)
+                [%ctx (mlir-get-hipsr-context-arg op)]
 
                 ;; Get types
                 [input-type (mlir-value-get-type %input)]
                 [output-type (mlir-value-get-type %output)])
 
+           (mlir-log-debug "Cast pattern: matched, rewriting")
            ;; Rewrite: Create replacement operations
-           ;; mlir-create-placeholder-op: (ctx input result-type placeholder-type-int)
-           (let* ([%placeholder (mlir-create-placeholder-op ctx %input output-type 0)]
-                  [%cast (mlir-create-cast-op ctx %input %placeholder output-type)])
+           ;; mlir-create-placeholder-op: (ctx-value input result-type placeholder-type-int)
+           (let* ([%placeholder (mlir-create-placeholder-op %ctx %input output-type 0)]
+                  [%cast (mlir-create-cast-op %ctx %input %placeholder output-type)])
 
+             (mlir-log-debug "Cast pattern: replacing op")
              ;; Replace original op with new op
              (mlir-replace-op op %cast)
+             (mlir-log-debug "Cast pattern: success")
              #t))))
 
   ;;===--------------------------------------------------------------------===;;
