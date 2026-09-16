@@ -141,6 +141,27 @@ function Invoke-Arm {
     Copy-Item $dll (Join-Path $HarnessEnv.Bin (Split-Path -Leaf $dll)) -Force
   }
   $armEnv = Get-ArmField $armDefs.$Name 'env'
+
+  # Clear the whole HIPDNN_ namespace, not just the keys this manifest names.
+  #
+  # The union below makes an arm hermetic against the OTHER ARMS of the same
+  # manifest. It cannot make it hermetic against the shell, because Env: is
+  # process-wide and survives between invocations of this script: a variable
+  # left by an earlier sweep -- a score budget, a pinned config, a logging
+  # switch -- is not in this manifest's union, so nothing removes it and it is
+  # applied to every arm equally. That does not look like a failure. It looks
+  # like a clean A/B of the wrong thing, and it reads as "no difference"
+  # whenever the leaked variable dominates what the arms were varying.
+  #
+  # Measured: a leaked HIPDNN_EP_GQA_SCORE_BUDGET_MB=224 forced both arms of a
+  # DLL swap to the same chunking and reported a real -4.5% win as +0.05%
+  # (interval spanning zero). A later leaked HIPDNN_EP_GQA_NO_EXPAND_PREFILL=1
+  # disabled the feature under test outright and made four different builds
+  # measure identical. DLL-only arms are the exposed case, since they declare
+  # no env keys at all and the union is then empty.
+  Get-ChildItem Env: | Where-Object { $_.Name -like 'HIPDNN_*' } |
+    ForEach-Object { Remove-Item "Env:$($_.Name)" -EA SilentlyContinue }
+
   $setEnv = @()
   foreach ($k in $envKeys) {
     $v = if ($armEnv) { Get-ArmField $armEnv $k } else { $null }
