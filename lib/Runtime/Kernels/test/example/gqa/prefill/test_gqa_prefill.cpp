@@ -14,6 +14,11 @@
 // against a CPU fp32 causal-attention reference (correctness) and reports the
 // per-prefill latency (the quantity that bounds TTFT).
 //
+// LUT (`make lut`, -DHIPDNN_LUT_LINKED_EXTERNALLY=1): each case resolves the
+// offline table then dispatches hip_gqa_flash_prefill_v3_configured — the
+// same host resolve + configured-kernel path as production real/gqa.cpp.
+// Default `make test` is unchanged (unified hip_gqa_flash_prefill, online tune).
+//
 // Layout matches the EP fused-prefill call site (gqa.cpp): Q is BSHD
 // [B,sq,Hq,d]; K/V cache is BNSD [B,G,max_seq,d]; O is BSHD [B,sq,Hq,d].
 // Pure prefill: past_len = 0, total_seq = sq. Self-contained random inputs.
@@ -53,6 +58,29 @@ extern "C" int hip_gqa_flash_prefill_v7(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale);
+
+#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
+#include "gqa_autotune.h"
+
+extern "C" int hip_gqa_flash_prefill_v3_configured(
+    void* stream_ptr,
+    const void* Q, const void* Kcache, const void* Vcache, void* O,
+    int B, int Hq, int G, int sq, int skv, int d, int max_seq, int past_len,
+    float scale, int local_window_size, const void* head_sink,
+    int num_heads, int smooth_softmax,
+    int m_tiles, int bkv, int nw, int mt, int nd);
+
+static void* gqa_policy() {
+  static void* p = hip_gqa_autotune_create(nullptr);
+  return p;
+}
+
+static hipdnn_ep::GqaPrefillVariant prefill_variant(int d) {
+  if (d == 64) return hipdnn_ep::GqaPrefillVariant::V5;
+  if (d == 256) return hipdnn_ep::GqaPrefillVariant::V8;
+  return hipdnn_ep::GqaPrefillVariant::V7;
+}
+#endif
 
 #define HIP_CHECK(expr)                                                        \
   do {                                                                         \
@@ -214,6 +242,34 @@ static bool run_case(const Case& c, int iters) {
                        : (c.sink_mode == kSinkBoth)    ? "both"
                                                        : "-";
   auto launch = [&]() {
+#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
+    if (!c.expect_reject) {
+      using namespace hipdnn_ep;
+      GqaPrefillRequest req{};
+      req.variant = prefill_variant(D);
+      req.batch = B;
+      req.num_heads = H;
+      req.kv_num_heads = G;
+      req.head_dim = D;
+      req.seq_q = sq;
+      req.seq_kv = skv;
+      req.local_window = c.window > 0 ? c.window : 0;
+      GqaPrefillResult res{};
+      hip_gqa_autotune_resolve_prefill(gqa_policy(), &req, &res);
+      if (!hip_gqa_autotune_table_loaded()) {
+        fprintf(stderr, "[gqa-lut] table not loaded\n");
+        return 1;
+      }
+      const bool hit = res.source == GqaTuneSource::Exact ||
+                       res.source == GqaTuneSource::Nearest;
+      if (hit) {
+        return hip_gqa_flash_prefill_v3_configured(
+            nullptr, dQ, dK, dV, dO, B, H, G, sq, skv, D, max_seq, past_len,
+            scale, window_arg, sink_arg, H, smooth_arg, res.config.m_tiles,
+            res.config.bkv, res.config.nw, res.config.mt, res.config.nd);
+      }
+    }
+#endif
     return hip_gqa_flash_prefill(nullptr, dQ, dK, dV, dO, B, H, G, sq, skv, D,
                                     max_seq, past_len, scale, window_arg,
                                     sink_arg, H, smooth_arg);
