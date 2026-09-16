@@ -9,10 +9,8 @@
 #include "llvm/Support/raw_ostream.h"
 #include "mlir/IR/Operation.h"
 
-// Include Chez Scheme C API header
-extern "C" {
-#include "boot/ta6le/scheme.h"
-}
+// Note: scheme.h already included via ChezSchemeInterpreter.h
+// Do NOT include it again here to avoid redefinition errors with static inline functions
 
 #include "ChezBootPetite.h"
 #include "ChezBootScheme.h"
