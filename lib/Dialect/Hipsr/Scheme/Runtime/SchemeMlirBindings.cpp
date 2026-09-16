@@ -172,15 +172,39 @@ bool initializeSchemeRuntime(SchemeLogLevel logLevel) {
   ptr eof_object_p = cached_eof_object_p;
 
   // Set up library path to find rime libraries and Scheme source files
-  // Find lib/scheme directory relative to the executable
-  std::string modulePath = llvm::sys::fs::getMainExecutable(nullptr, (void*)&initializeSchemeRuntime);
-  llvm::SmallString<256> schemePath(modulePath);
-  llvm::sys::path::remove_filename(schemePath);  // Remove binary name
-  if (llvm::sys::path::filename(schemePath) == "bin")
-    llvm::sys::path::remove_filename(schemePath);  // Remove bin/
-  llvm::sys::path::append(schemePath, "lib", "scheme");
+  // Get the path to the current shared library/executable using the address of a function
+  // in this compilation unit as a hint
+  auto getLibraryPath = []() -> std::string {
+    std::string execPath = llvm::sys::fs::getMainExecutable(nullptr, (void*)&initializeSchemeRuntime);
+    llvm::SmallString<256> basePath(execPath);
+    llvm::sys::path::remove_filename(basePath);  // Remove binary/library name
 
-  std::string schemePathStr(schemePath.c_str());
+    // Try to find lib/scheme relative to the executable/library location
+    // Common layouts:
+    //   build/bin/hip-mlir-opt -> build/lib/scheme
+    //   install/bin/hip-mlir-opt -> install/lib/scheme
+    //   build/lib/libHipsrSchemeRuntime.a -> build/lib/scheme
+    if (llvm::sys::path::filename(basePath) == "bin") {
+      llvm::sys::path::remove_filename(basePath);  // Go up to build/install root
+    }
+    // basePath now points to build root or install root
+
+    llvm::SmallString<256> schemePath = basePath;
+    llvm::sys::path::append(schemePath, "lib", "scheme");
+
+    // Make the path absolute
+    if (std::error_code ec = llvm::sys::fs::make_absolute(schemePath)) {
+      llvm::errs() << "[warning] Failed to make scheme path absolute: " << ec.message() << "\n";
+      return std::string(schemePath.c_str());
+    }
+
+    // Normalize the path (resolve .., remove redundant separators)
+    llvm::sys::path::remove_dots(schemePath, /*remove_dot_dot=*/true);
+
+    return std::string(schemePath.c_str());
+  };
+
+  std::string schemePathStr = getLibraryPath();
 
   if (logLevel <= SchemeLogLevel::Info) {
     llvm::errs() << "[info] Scheme library path: " << schemePathStr << "\n";
