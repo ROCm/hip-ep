@@ -14,7 +14,7 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
-
+#include "llvm/Support/MemoryBufferRef.h"
 #include <optional>
 
 namespace hip {
@@ -440,15 +440,20 @@ extractAttrInt64(mlir::PatternRewriter &rewriter, mlir::PDLResultList &results,
 }
 
 // Apply PDL patterns
-inline bool run(mlir::ModuleOp mlirModule, llvm::StringRef pdlBytecodeFile) {
-  if (pdlBytecodeFile.empty())
+inline bool run(mlir::ModuleOp mlirModule, llvm::MemoryBufferRef pdlBuffer) {
+  if (pdlBuffer.getBufferSize() == 0)
     return true;
 
   mlir::MLIRContext *ctx = mlirModule.getContext();
 
   mlir::ParserConfig parseConfig(ctx);
+  // parseSourceString, not parseSourceFile: the latter's StringRef overload
+  // takes a path, so it would try to open the pattern text itself as a file.
+  // Both dispatch on the magic bytes, so textual IR and bytecode work either
+  // way.
   mlir::OwningOpRef<mlir::ModuleOp> pdlModule =
-      mlir::parseSourceFile<mlir::ModuleOp>(pdlBytecodeFile, parseConfig);
+      mlir::parseSourceString<mlir::ModuleOp>(
+          pdlBuffer.getBuffer(), parseConfig, pdlBuffer.getBufferIdentifier());
   if (!pdlModule)
     return false;
 
