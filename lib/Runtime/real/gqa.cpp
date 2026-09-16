@@ -1822,10 +1822,18 @@ static int gqa_forward_hipblaslt(
   //
   // The softmax here reduces along total_seq, so each query row is independent
   // of every other. A block of rows can therefore be scored, biased, masked,
-  // softmaxed and multiplied by V to completion before the next block starts,
-  // and the result is identical -- this is a tiling of the same arithmetic, not
-  // an approximation, and it needs no running maximum or rescaling because
-  // every row sees its full key range within one chunk.
+  // softmaxed and multiplied by V to completion before the next block starts --
+  // this is a tiling of the same arithmetic, not an approximation, and it needs
+  // no running maximum or rescaling because every row sees its full key range
+  // within one chunk.
+  //
+  // Mathematically equivalent is not bitwise identical, though, and it is worth
+  // being precise about which one this is. Chunking changes the score GEMM's n
+  // from sq to sq_chunk, so hipBLASLt's heuristic can select a different kernel
+  // and a different tile accumulates in a different order. Measured on
+  // gemma-4-12b at 2283 tokens: the same build run twice is byte-identical, and
+  // chunked against unchunked agrees for ~45 greedy tokens before a near-tie
+  // flips. Treat a change here as a kernel retune, not as a no-op.
   //
   // Only the two score buffers shrink. Q, K, V and O are linear in sq and stay
   // whole, so Q is read and O is written through a per-chunk offset while their
