@@ -9,10 +9,8 @@
 #include <string>
 #include <vector>
 
-// Include Chez Scheme types (ptr, iptr, uptr)
-extern "C" {
-#include "boot/ta6le/scheme.h"
-}
+// Include Chez Scheme types (ptr, iptr, uptr) via wrapper
+#include "hip/Dialect/Hipsr/Scheme/Runtime/SchemeWrapper.h"
 
 namespace mlir {
 class Operation;

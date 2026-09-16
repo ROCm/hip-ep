@@ -4,7 +4,7 @@
  */
 
 #include "SchemeBindings.h"
-#include "LockedSchemeObject.h"
+#include "hip/Dialect/Hipsr/Scheme/Runtime/LockedSchemeObject.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
 #include "hip/Dialect/Onnx/IR/OnnxOps.h"
@@ -27,11 +27,8 @@
 
 #define DEBUG_TYPE "scheme-bindings"
 
-// Include Chez Scheme C API header - use the ta6le machine-specific version
-// where ptr is defined as void*, not the portable boot (pb) version
-extern "C" {
-#include "boot/ta6le/scheme.h"
-}
+// Note: scheme.h already included via SchemeBindings.h → ChezSchemeInterpreter.h
+// Do NOT include it again here to avoid redefinition errors
 
 #include "ChezBootPetite.h"
 #include "ChezBootScheme.h"
