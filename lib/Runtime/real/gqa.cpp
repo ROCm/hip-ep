@@ -929,6 +929,24 @@ static size_t gqa_score_budget_bytes() {
 // pass.
 static constexpr int64_t kScoreChunkAlign = 128;
 
+// Chunk height for a windowed prefill, where chunking is worth doing for the
+// key narrowing rather than to fit a byte budget (see the window clause in
+// gqa_forward_hipblaslt).
+//
+// Measured, not assumed: gemma-4-12b at 2283 tokens with a 1024 window, TTFT
+// against an unchunked baseline of 2748 ms --
+//
+//   1024 rows  2663 ms   -3.1%
+//    512 rows  2516 ms   -8.4%
+//    256 rows  2441 ms  -11.2%   <-- here
+//    128 rows  2457 ms  -10.6%
+//
+// It is a peak rather than a plateau, and it sits either side of the trade:
+// a shorter chunk scores fewer keys per row but issues more passes and gives
+// the GEMMs a smaller n, so the two effects cross over around 2 x the align
+// quantum.
+static constexpr int64_t kWindowChunkRows = 2 * kScoreChunkAlign;
+
 // Env-var gate to force decode through the decomposed hipBLASLt pipeline
 // instead of the fused custom kernel hip_gqa_fused_decode. Default off
 // (fused path is preferred). Set HIPDNN_EP_GQA_DISABLE_FUSED_DECODE=1 to
@@ -1844,6 +1862,23 @@ static int gqa_forward_hipblaslt(
       sq_chunk = rows;
     }
   }
+
+  // A windowed op benefits from chunking for a reason the byte budget cannot
+  // see. The per-chunk key bound below is keyed off q0, so it narrows nothing
+  // on a single chunk: an unchunked windowed prefill scores the whole key
+  // range and throws the window away. At 2283 tokens the score pair is ~500 MB,
+  // far under the 1 GiB budget, so that is exactly what happens today.
+  //
+  // Chunk on the window instead, independently of size. The gate is the same
+  // one the narrowing itself needs (chunk_narrow_ok), plus a check that there
+  // is more to drop than the chunk already covers -- below that the extra
+  // passes cost more than the keys they save.
+  if (sq > 1 && !use_no_expand && local_window_size > 0 && chunk_narrow_ok &&
+      total_seq > local_window_size + kWindowChunkRows &&
+      sq_chunk > kWindowChunkRows) {
+    sq_chunk = kWindowChunkRows;
+  }
+
   const bool chunked = (sq_chunk < sq);
 
   //===--------------------------------------------------------------------===//
