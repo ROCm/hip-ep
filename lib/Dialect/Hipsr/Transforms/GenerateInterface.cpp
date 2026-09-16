@@ -157,7 +157,8 @@ static LogicalResult serializeMetadata(ModuleOp module,
 
 } // namespace metadata
 
-// LLVM dialect ops written into the module: globals, public functions, wrappers.
+// LLVM dialect ops written into the module: globals, public functions,
+// wrappers.
 namespace llvm_ir {
 
 /// Fills the entry block of a new function and hands back the result values.
@@ -396,8 +397,8 @@ static LogicalResult wrapMainGraph(ModuleOp module, LLVM::LLVMFuncOp graph,
   for (auto [inputIndex, rank] : llvm::enumerate(inputRanks)) {
     auto inputPointer =
         cast<LLVM::LLVMPointerType>(graphType.getParamType(parameter));
-    MemRefType memref = dummyMemRef(graph.getContext(), rank,
-                                                inputPointer.getAddressSpace());
+    MemRefType memref =
+        dummyMemRef(graph.getContext(), rank, inputPointer.getAddressSpace());
     parameter += MemRefDescriptor::getNumUnpackedValues(memref);
 
     Type descriptorType = converter.convertType(memref);
@@ -445,16 +446,17 @@ static LogicalResult generateInferenceInit(ModuleOp module,
       arguments, [&](OpBuilder &builder, Block &entry) {
         Location loc = module.getLoc();
         llvm_ir::constantBytes(module, hipdnn::abi::kMetadataBlobGlobal,
-                            info.metadataBlob);
-        Value blob =
-            llvm_ir::addressOf(builder, module, hipdnn::abi::kMetadataBlobGlobal);
+                               info.metadataBlob);
+        Value blob = llvm_ir::addressOf(builder, module,
+                                        hipdnn::abi::kMetadataBlobGlobal);
         Value size = LLVM::ConstantOp::create(
             builder, loc, builder.getI64Type(),
             builder.getI64IntegerAttr(
                 static_cast<int64_t>(info.metadataBlob.size())));
         Value opStatesInit =
             info.hasOpStates
-                ? llvm_ir::addressOf(builder, module, hipdnn::abi::kOpStatesInitFn)
+                ? llvm_ir::addressOf(builder, module,
+                                     hipdnn::abi::kOpStatesInitFn)
                 : LLVM::ZeroOp::create(builder, loc, pointer).getResult();
         return SmallVector<Value>{
             entry.getArgument(0), entry.getArgument(1), blob, size,
@@ -520,9 +522,9 @@ static void generateMetadataAccessor(ModuleOp module,
       module, hipdnn::abi::kInferenceGetMetadataJson, pointer, {},
       [&](OpBuilder &builder, Block &) {
         llvm_ir::constantBytes(module, hipdnn::abi::kMetadataJsonGlobal,
-                            metadataJson + '\0');
-        return SmallVector<Value>{
-            llvm_ir::addressOf(builder, module, hipdnn::abi::kMetadataJsonGlobal)};
+                               metadataJson + '\0');
+        return SmallVector<Value>{llvm_ir::addressOf(
+            builder, module, hipdnn::abi::kMetadataJsonGlobal)};
       });
 }
 
