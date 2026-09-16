@@ -91,7 +91,7 @@ The resolver **and** its table ride inside the per-arch `custom_kernels_<arch>`
 shared library, next to `gqa_kernel.hip`:
 
 - `lut/<arch>.fb` is embedded by `lib/Runtime/Kernels/CMakeLists.txt` with pure
-  CMake (`file(READ ... HEX)` → a `kGqaLutData[]` C array), so the hip-ep build needs
+  CMake (`file(READ ... HEX)` → a `kGqaLutBlobs[]` C array), so the hip-ep build needs
   no Python and no generated `.cpp` is committed. An arch with no `.fb` gets a size-0
   stub and falls to the heuristic.
 - `gqa_autotune.cpp` reads that array as an **in-DLL data symbol**. It is *not*

@@ -225,6 +225,12 @@ void populateHipsrMatMulLoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns);
 void populateHipsrExpandLoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns);
+void populateHipsrNonZeroLoweringPatterns(const LLVMTypeConverter &converter,
+                                          RewritePatternSet &patterns);
+void populateHipsrAllocOutputLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
+void populateHipsrPreserveShapeLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 
 } // namespace hipsr
 } // namespace mlir

@@ -24,8 +24,12 @@ Pattern QDQConv with benefit(10) {
   HasContextArg(quant);
   // Geometry the hard-coded attributes in the rewrite below stand for.
   IsFusableQConvGeometry(conv);
-  // Weights packed two 4-bit values per byte, per-output-channel scale/zp.
-  IsPackedInt4PerChannelWeight(dequantWeights);
+  // Weights packed two 4-bit values per byte, with one scale / zero point per
+  // output channel. A Conv filter is [Cout, Cin/group, kH, kW], so the rank
+  // that IsFusableQConvGeometry's 2-entry kernel_shape implies is 4 and the
+  // output channel is axis 0 -- which is what the hard-coded weight_axis in
+  // the rewrite stands for.
+  IsPerAxisQuantizedWeight(dequantWeights, attr<"4 : i64">, attr<"0 : i64">, attr<"4 : i64">);
   // Activation and result width the fused kernel implements.
   IsUint16Quantized(dequantInput);
   IsUint16Quantized(quant);
