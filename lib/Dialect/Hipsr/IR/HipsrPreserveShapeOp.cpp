@@ -3,10 +3,13 @@
  * Licensed under the MIT License.
  */
 
+#include "hip/Conversion/HipsrToLLVM/HipsrToLLVM.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
+#include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/PatternMatch.h"
 
 using namespace mlir;
 using namespace mlir::hipsr;
@@ -34,4 +37,24 @@ LogicalResult PreserveShapeOp::verify() {
                          << " does not match data rank " << dataType.getRank();
   }
   return success();
+}
+
+namespace {
+
+// Erase the op.
+struct PreserveShapeLowering : OpRewritePattern<PreserveShapeOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(PreserveShapeOp op,
+                                PatternRewriter &rewriter) const override {
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+} // namespace
+
+void mlir::hipsr::populateHipsrPreserveShapeLoweringPatterns(
+    const LLVMTypeConverter &, RewritePatternSet &patterns) {
+  patterns.add<PreserveShapeLowering>(patterns.getContext());
 }
