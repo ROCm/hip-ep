@@ -771,6 +771,13 @@ void mlir_notify_match_failure(ptr op, const char* reason) {
 //===----------------------------------------------------------------------===//
 
 namespace {
+
+// Scheme ValueArrayRef struct layout (mirrors Scheme define-ftype)
+struct ValueArrayRef {
+  void* data;      // Value* array pointer
+  uint64_t size;   // Number of elements
+};
+
 // Wrapper class that implements ConversionPattern by calling a Scheme callback
 class SchemeConversionPattern : public mlir::ConversionPattern {
 public:
@@ -793,20 +800,19 @@ public:
     // Set rewriter context for FFI functions
     mlir::hipsr::setCurrentRewriter(&rewriter, op);
 
-    // Convert operands ArrayRef to Scheme list
-    ptr operandsList = Snil;
-    for (auto it = operands.rbegin(); it != operands.rend(); ++it) {
-      ptr valuePtr = Sunsigned64(reinterpret_cast<uint64_t>(*it));
-      operandsList = Scons(valuePtr, operandsList);
-    }
+    // Create ValueArrayRef struct on stack
+    ValueArrayRef operandsRef;
+    operandsRef.data = const_cast<mlir::Value*>(operands.data());
+    operandsRef.size = operands.size();
 
-    // Call Scheme callback: (callback op operands rewriter type-converter)
+    // Call Scheme callback: (callback op operands-ref rewriter type-converter)
     // Callback should return #t on successful match, #f on failure
     ptr opPtr = Sunsigned64(reinterpret_cast<uint64_t>(op));
+    ptr operandsRefPtr = Sunsigned64(reinterpret_cast<uint64_t>(&operandsRef));
     ptr rewriterPtr = Sunsigned64(reinterpret_cast<uint64_t>(&rewriter));
     ptr typeConverterPtr = Sunsigned64(reinterpret_cast<uint64_t>(getTypeConverter()));
 
-    ptr result = Scall4(callback_.get(), opPtr, operandsList, rewriterPtr, typeConverterPtr);
+    ptr result = Scall4(callback_.get(), opPtr, operandsRefPtr, rewriterPtr, typeConverterPtr);
 
     // Clear rewriter context
     mlir::hipsr::clearCurrentRewriter();
