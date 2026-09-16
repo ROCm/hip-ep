@@ -33,6 +33,12 @@ Options:
  vars before EP load; see --mlir-dump-dir) (flag)
 --mlir-dump-dir           Directory for morphizen MLIR dumps (default with
  --dump-compiler-mlir: $WORKSPACE/temp/mlir-dumps/<model_stem>)
+--provider-options        Extra EP provider options 'key=value' (repeatable or
+ comma-separated), e.g. --provider-options config_file=only_init.json
+--no-run                  Create the session (EP init + dumps) and exit without
+ running inference (flag)
+--allow-cpu-fallback      Do not set session.disable_cpu_ep_fallback; needed
+ for EP configs that intentionally claim no node (flag)
 */
 //===----------------------------------------------------------------------===//
 
@@ -880,6 +886,21 @@ int main(int argc, char *argv[]) {
                 "MorphiZen dump_dir provider option (used with "
                 "--dump-compiler-mlir or manual env)",
                 "");
+  mo.add_option("", "provider-options",
+                "Extra EP provider option 'key=value' (repeatable or "
+                "comma-separated), e.g. --provider-options "
+                "config_file=only_init.json. Overrides the environment "
+                "defaults; --mlir-dump-dir still wins for dump_dir.",
+                "");
+  mo.add_option("", "no-run",
+                "Create the session (EP initialization, compilation and dumps) "
+                "and exit without running inference",
+                "false", true);
+  mo.add_option("", "allow-cpu-fallback",
+                "Do not set session.disable_cpu_ep_fallback. Required for EP "
+                "configurations that intentionally claim no node (such as an "
+                "init-only dump config); otherwise session creation fails",
+                "false", true);
 
   try {
     mo.parse(argc, argv);
@@ -906,6 +927,8 @@ int main(int argc, char *argv[]) {
   const bool dump_compiler_mlir = mo.get<bool>("dump-compiler-mlir");
   std::string mlir_dump_dir_str =
       trim_string(mo.get<std::string>("mlir-dump-dir"));
+  const bool no_run = mo.get<bool>("no-run");
+  const bool allow_cpu_fallback = mo.get<bool>("allow-cpu-fallback");
 
   if ((l2norm_arg.size() == 2) && !l2norm_arg[0].empty() &&
       !l2norm_arg[1].empty()) {
@@ -963,6 +986,22 @@ int main(int argc, char *argv[]) {
                  "hip-mlir-opt to decode bytecode)\n";
     std::cout.flush();
   }
+
+  // Parse --provider-options before the EP library is loaded so a malformed
+  // entry fails fast instead of after session creation started compiling.
+  std::unordered_map<std::string, std::string> extra_ep_opts;
+  for (const std::string &kv : mo.get_vector<std::string>("provider-options")) {
+    const auto eq = kv.find('=');
+    if (eq == std::string::npos || eq == 0 || eq + 1 >= kv.size()) {
+      std::cerr << "Error: --provider-options expects 'key=value', got: " << kv
+                << "\n";
+      return 1;
+    }
+    extra_ep_opts[trim_string(kv.substr(0, eq))] =
+        trim_string(kv.substr(eq + 1));
+  }
+  if (!extra_ep_opts.empty() && no_ep)
+    std::cerr << "Warning: --provider-options has no effect with --no-ep.\n";
 
   // ORT environment
   Ort::Env env(ORT_LOGGING_LEVEL_ERROR, "hip-onnx-runner");
@@ -1047,12 +1086,30 @@ int main(int argc, char *argv[]) {
     std::unordered_map<std::string, std::string> ep_opts;
     if (const char *af = std::getenv("HIPDNN_EP_ARTIFACT_FORMAT"))
       ep_opts["artifact_format"] = af;
+    // --provider-options is explicit, so it beats the environment defaults
+    // above; the dedicated --mlir-dump-dir flag still owns dump_dir because it
+    // is what created the directory.
+    for (const auto &[key, value] : extra_ep_opts)
+      ep_opts[key] = value;
     if (!mlir_dump_dir.empty()) {
       const std::string dump_dir_u8 = mlir_dump_dir.u8string();
+      const auto it = ep_opts.find("dump_dir");
+      if (it != ep_opts.end() && it->second != dump_dir_u8)
+        std::cerr << "Warning: --mlir-dump-dir overrides --provider-options "
+                     "dump_dir="
+                  << it->second << "\n";
       ep_opts["dump_dir"] = dump_dir_u8;
     }
+    for (const auto &[key, value] : ep_opts)
+      std::cout << "EP option: " << key << "=" << value << "\n";
     session_opts.AppendExecutionProvider_V2(env, devices, ep_opts);
-    session_opts.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
+    // Disabled by default so a graph the EP failed to claim surfaces as a
+    // session error instead of silently running on CPU.
+    if (allow_cpu_fallback)
+      std::cout << "CPU EP fallback allowed; nodes the EP does not claim run "
+                   "on CPU\n";
+    else
+      session_opts.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
   }
 
   // Free-dimension values for symbolic input dims. Each entry is "name:value".
@@ -1154,6 +1211,20 @@ int main(int argc, char *argv[]) {
 
   std::cout << "Inputs: " << input_count << "  Outputs: " << output_count
             << "\n";
+
+  if (no_run) {
+    // Session creation is what drives EP initialization, compilation and the
+    // MorphiZen dumps, so dump-only flows already have everything they need.
+    if (dump_level != 0)
+      std::cerr << "Warning: --dump-level is ignored with --no-run.\n";
+    std::cout << "--no-run: session created; skipping inference.\n";
+    // Same teardown order as the normal path: drop the session before the EP
+    // library is unloaded.
+    session.reset();
+    if (!no_ep)
+      Ort::GetApi().UnregisterExecutionProviderLibrary(env, kEpName.c_str());
+    return 0;
+  }
 
   std::filesystem::path input_dir_path;
   if (use_input_files) {

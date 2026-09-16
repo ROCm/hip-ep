@@ -68,6 +68,7 @@ add_library(HipToLLVM STATIC
   QGemmLowering.cpp
   QConvLowering.cpp
   QLpNormalizationLowering.cpp
+  QSigmoidLowering.cpp
 )
 
 add_dependencies(HipToLLVM

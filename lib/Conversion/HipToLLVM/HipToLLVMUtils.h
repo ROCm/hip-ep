@@ -146,6 +146,7 @@ inline constexpr const char *kWrapQMatMul = "wrap_qmatmul";
 inline constexpr const char *kWrapQGemm = "wrap_qgemm";
 inline constexpr const char *kWrapQConv = "wrap_qconv";
 inline constexpr const char *kWrapQLpNormalization = "wrap_qlpnormalization";
+inline constexpr const char *kWrapQSigmoid = "wrap_qsigmoid";
 // Synchronize the stream and read a device i32 scalar back to the host
 // (used by hip.readback_dim to materialise a data-dependent dynamic dim).
 inline constexpr const char *kHipReadbackI32 = "hipdnn_ep_readback_i32";
@@ -540,6 +541,8 @@ void populateQConvLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateQLpNormalizationLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
+void populateQSigmoidLoweringPatterns(const LLVMTypeConverter &converter,
+                                      RewritePatternSet &patterns);
 } // namespace hip
 } // namespace mlir
 
