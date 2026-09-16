@@ -37,7 +37,24 @@
 ;;===----------------------------------------------------------------------===;;
 
 (library (mlir ffi)
+
+  ;;===--------------------------------------------------------------------===;;
+  ;; Foreign Type Definitions
+  ;;===--------------------------------------------------------------------===;;
+
+  ;; ArrayRef-like type for passing arrays across FFI boundary
+  ;; Mirrors C++ ArrayRef<mlir::Value>: pointer + length
+  (define-ftype ValueArrayRef
+    (struct
+      [data (* void)]   ; Value* pointer (stored as void* since we can't import C++ types)
+      [size unsigned-64]))  ; Number of elements
+
   (export
+    ;; Foreign types
+    ValueArrayRef
+    ;; ValueArrayRef accessors
+    value-array-ref-size
+    value-array-ref-at
     ;; Operation inspection
     mlir-operation-name
     mlir-operation-get-context
@@ -519,9 +536,9 @@
   ;;; @param op-name Operation name to match (e.g., "onnx.Cast")
   ;;; @param callback Scheme procedure for pattern rewriting
   ;;; @param type-converter-ptr TypeConverter* as unsigned-64
-  ;;; @note Callback signature: (lambda (op operands rewriter type-converter) ...)
+  ;;; @note Callback signature: (lambda (op operands-ref rewriter type-converter) ...)
   ;;;       - op: Operation* being converted (unsigned-64)
-  ;;;       - operands: Converted operands as Scheme list of Value* (scheme-object)
+  ;;;       - operands-ref: ValueArrayRef* pointer (unsigned-64)
   ;;;       - rewriter: ConversionPatternRewriter* (unsigned-64)
   ;;;       - type-converter: TypeConverter* (unsigned-64)
   ;;;       Returns: #t on successful rewrite, #f on match failure
@@ -530,5 +547,25 @@
   (define mlir-register-conversion-pattern
     (foreign-procedure "mlir_register_conversion_pattern"
                        (unsigned-64 string scheme-object unsigned-64) void))
+
+  ;;===--------------------------------------------------------------------===;;
+  ;; ValueArrayRef Accessors
+  ;;===--------------------------------------------------------------------===;;
+
+  ;;; @brief Get the size of a ValueArrayRef
+  ;;; @param ref-ptr ValueArrayRef* as unsigned-64
+  ;;; @return Number of elements
+  (define (value-array-ref-size ref-ptr)
+    (ftype-ref ValueArrayRef (size) ref-ptr))
+
+  ;;; @brief Get Value* at index from ValueArrayRef
+  ;;; @param ref-ptr ValueArrayRef* as unsigned-64
+  ;;; @param index Zero-based index
+  ;;; @return Value* as unsigned-64
+  (define (value-array-ref-at ref-ptr index)
+    (let* ([data-ptr (ftype-ref ValueArrayRef (data) ref-ptr)]
+           [offset (* index 8)])  ; Assuming 64-bit pointers
+      ;; Read pointer at offset
+      (foreign-ref 'unsigned-64 data-ptr offset)))
 
 ) ;; end library (mlir ffi)

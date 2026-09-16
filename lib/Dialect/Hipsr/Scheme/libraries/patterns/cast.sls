@@ -23,9 +23,9 @@
   ;; Cast Pattern - Hand-written
   ;;===--------------------------------------------------------------------===;;
 
-  ;; Pattern function: takes (op operands rewriter type-converter) and returns #t on successful match+rewrite
+  ;; Pattern function: takes (op operands-ref rewriter type-converter) and returns #t on successful match+rewrite
   ;; New signature mirrors C++ OpConversionPattern::matchAndRewrite
-  (define (onnx-cast->hipsr-manual op operands rewriter type-converter)
+  (define (onnx-cast->hipsr-manual op operands-ref rewriter type-converter)
     ;; Match: Check operation name
     (and (string=? (mlir-operation-name op) "onnx.Cast")
 
@@ -36,8 +36,8 @@
          (= (mlir-operation-num-results op) 1)
 
          ;; Extract operands and types
-         ;; operands is a Scheme list of converted Value* (from OpAdaptor)
-         (let* ([%input (car operands)]  ; Get first operand from list
+         ;; operands-ref is a ValueArrayRef* (pointer to struct with data + size)
+         (let* ([%input (value-array-ref-at operands-ref 0)]  ; Get first operand from array
                 [%output (mlir-operation-get-result-value op 0)]
 
                 ;; Get context from operation
