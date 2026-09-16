@@ -113,8 +113,10 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
   list(APPEND MORPHIZEN_COMPILER_OPTIONS /Qspectre)
 else()
   # clang-cl accepts most MSVC-style options but does not implement /Qspectre;
-  # with /WX it diagnoses the unused option as an error.
-  list(REMOVE_ITEM MORPHIZEN_COMPILER_OPTIONS /Qspectre)
+  # MorphiZen's Windows sources also rely on behavior accepted by cl.exe that
+  # clang diagnoses. Keep those diagnostics visible, but do not promote them to
+  # errors in this compatibility configuration.
+  list(REMOVE_ITEM MORPHIZEN_COMPILER_OPTIONS /Qspectre /WX)
 endif()
 
 # /WX is now enabled for all platforms in MORPHIZEN_COMPILER_OPTIONS above
