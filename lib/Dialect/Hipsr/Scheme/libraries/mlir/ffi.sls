@@ -511,13 +511,12 @@
   ;;; @param patterns-ptr RewritePatternSet* as unsigned-64
   ;;; @param op-name Operation name to match (e.g., "onnx.Cast")
   ;;; @param callback Scheme procedure for pattern rewriting
-  ;;; @note Callback signature: (lambda (op-ptr ctx-ptr input-value output-type) ...)
-  ;;;       - op-ptr: Operation* being converted (unsigned-64)
-  ;;;       - ctx-ptr: MLIRContext* (unsigned-64)
-  ;;;       - input-value: Input Value* (unsigned-64)
-  ;;;       - output-type: Result Type* (unsigned-64)
-  ;;;       Returns: New Operation* or 0 on failure (unsigned-64)
+  ;;; @note Callback signature: (lambda (op rewriter) ...)
+  ;;;       - op: Operation* being converted (unsigned-64)
+  ;;;       - rewriter: ConversionPatternRewriter* (unsigned-64)
+  ;;;       Returns: #t on successful rewrite, #f on match failure
   ;;; @note Callback is passed as scheme-object (GC-tracked) and locked with Slock_object
+  ;;; @note Mirrors C++ OpConversionPattern::matchAndRewrite signature
   (define mlir-register-conversion-pattern
     (foreign-procedure "mlir_register_conversion_pattern"
                        (unsigned-64 string scheme-object) void))

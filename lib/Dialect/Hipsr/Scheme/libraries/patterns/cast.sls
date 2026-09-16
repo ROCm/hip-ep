@@ -58,7 +58,13 @@
   ;; Pattern Population
   ;;===--------------------------------------------------------------------===;;
 
-  (define (populate-cast-patterns converter patterns ctx)
+  ;; Register Cast pattern with the conversion framework
+  ;;
+  ;; Parameters:
+  ;;   type-converter - MLIR TypeConverter (unused for Cast, but kept for API consistency)
+  ;;   patterns       - RewritePatternSet to add patterns to
+  ;;   ctx            - MLIR Context
+  (define (populate-cast-patterns type-converter patterns ctx)
     (mlir-register-conversion-pattern patterns "onnx.Cast" onnx-cast->hipsr-manual))
 
 ) ;; end library (patterns cast)
