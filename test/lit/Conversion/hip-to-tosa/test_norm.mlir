@@ -107,3 +107,53 @@ func.func @skip_rms_norm(%ctx: !hip.context, %x: tensor<2x4xf16>,
       : tensor<2x4xf16>
   return %r : tensor<2x4xf16>
 }
+
+// CHECK-LABEL: func.func @rms_norm_suffix_scale
+// CHECK: tosa.reshape
+// CHECK: tosa.rsqrt
+// CHECK-NOT: hip.rms_norm
+func.func @rms_norm_suffix_scale(%ctx: !hip.context, %x: tensor<2x3x4xf32>,
+                                 %scale: tensor<3x4xf32>,
+                                 %init: tensor<2x3x4xf32>) -> tensor<2x3x4xf32>
+    attributes {rock.kernel} {
+  %r = hip.rms_norm(%ctx)
+      ins(%x, %scale : tensor<2x3x4xf32>, tensor<3x4xf32>)
+      outs(%init : tensor<2x3x4xf32>)
+      {axis = -2 : i64, epsilon = 1.000000e-05 : f32, stash_type = 0 : i64}
+      : tensor<2x3x4xf32>
+  return %r : tensor<2x3x4xf32>
+}
+
+// CHECK-LABEL: func.func @rms_norm_flat_suffix_scale
+// CHECK: tosa.reshape
+// CHECK: tosa.rsqrt
+// CHECK-NOT: hip.rms_norm
+func.func @rms_norm_flat_suffix_scale(%ctx: !hip.context, %x: tensor<2x3x4xf32>,
+                                      %scale: tensor<12xf32>,
+                                      %init: tensor<2x3x4xf32>)
+    -> tensor<2x3x4xf32> attributes {rock.kernel} {
+  %r = hip.rms_norm(%ctx)
+      ins(%x, %scale : tensor<2x3x4xf32>, tensor<12xf32>)
+      outs(%init : tensor<2x3x4xf32>)
+      {axis = -2 : i64, epsilon = 1.000000e-05 : f32, stash_type = 0 : i64}
+      : tensor<2x3x4xf32>
+  return %r : tensor<2x3x4xf32>
+}
+
+// CHECK-LABEL: func.func @layer_norm_suffix_scale
+// CHECK: tosa.reshape
+// CHECK: tosa.add
+// CHECK-NOT: hip.layer_norm
+func.func @layer_norm_suffix_scale(%ctx: !hip.context, %x: tensor<2x3x4xf32>,
+                                   %scale: tensor<3x4xf32>,
+                                   %bias: tensor<3x4xf32>,
+                                   %init: tensor<2x3x4xf32>)
+    -> tensor<2x3x4xf32> attributes {rock.kernel} {
+  %r = hip.layer_norm(%ctx)
+      ins(%x, %scale, %bias : tensor<2x3x4xf32>, tensor<3x4xf32>,
+                              tensor<3x4xf32>)
+      outs(%init : tensor<2x3x4xf32>)
+      {axis = -2 : i64, epsilon = 1.000000e-05 : f32, stash_type = 1 : i64}
+      : tensor<2x3x4xf32>
+  return %r : tensor<2x3x4xf32>
+}

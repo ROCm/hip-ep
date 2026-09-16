@@ -1396,19 +1396,76 @@ FailureOr<Value> emitReduceMeanFromAxis(Value input, int64_t firstAxis,
   return reduced;
 }
 
-LogicalResult matchNormParam(Value &param, RankedTensorType dataTy,
-                             int64_t paramAxis,
-                             ConversionPatternRewriter &rewriter, Location loc,
-                             Operation *op) {
-  return reshapeQdqParam(rewriter, loc, param, dataTy, paramAxis, op);
+// Reshape γ/β so TOSA can broadcast against X. ONNX/HIP scale is a suffix of
+// X from `firstAxis`, a flattened suffix vector, a scalar, or already ranked
+// like X. InstanceNorm channel scale is not a suffix; that path keeps
+// reshapeQdqParam.
+//
+// Before (X : tensor<2x3x4xf32>, axis = 1):
+//   %s : tensor<3x4xf32>     or  tensor<12xf32>
+// After:
+//   %s = tosa.reshape ... -> tensor<1x3x4xf32>
+LogicalResult matchSuffixNormParam(Value &param, RankedTensorType dataTy,
+                                   int64_t firstAxis,
+                                   ConversionPatternRewriter &rewriter,
+                                   Location loc, Operation *op) {
+  auto paramType = dyn_cast<RankedTensorType>(param.getType());
+  if (!paramType || !paramType.hasStaticShape())
+    return rewriter.notifyMatchFailure(
+        op, "norm param must be a static tensor");
+  int64_t rank = dataTy.getRank();
+  if (firstAxis < 0 || firstAxis >= rank)
+    return rewriter.notifyMatchFailure(op, "norm axis out of range");
+
+  if (paramType.getRank() == rank) {
+    auto asDataRank =
+        RankedTensorType::get(dataTy.getShape(), paramType.getElementType());
+    if (!isTosaBroadcastableShape(paramType, asDataRank))
+      return rewriter.notifyMatchFailure(op, "norm param not broadcastable");
+    return success();
+  }
+
+  ArrayRef<int64_t> suffix = dataTy.getShape().drop_front(firstAxis);
+  int64_t suffixNumel = 1;
+  for (int64_t d : suffix)
+    suffixNumel *= d;
+
+  SmallVector<int64_t> targetShape(rank, 1);
+  if (paramType.getRank() == 0 ||
+      (paramType.getRank() == 1 && paramType.getDimSize(0) == 1)) {
+    // scalar / size-1 vector: all-ones of the data rank
+  } else if (paramType.getRank() == static_cast<int64_t>(suffix.size()) &&
+             paramType.getShape() == suffix) {
+    for (int64_t i : llvm::seq<int64_t>(0, suffix.size()))
+      targetShape[firstAxis + i] = suffix[i];
+  } else if (paramType.getRank() == 1 &&
+             paramType.getDimSize(0) == suffixNumel) {
+    for (int64_t i : llvm::seq<int64_t>(0, suffix.size()))
+      targetShape[firstAxis + i] = suffix[i];
+  } else {
+    return rewriter.notifyMatchFailure(
+        op, "norm param must match the normalized suffix (or flatten it)");
+  }
+
+  auto newType = RankedTensorType::get(targetShape, paramType.getElementType());
+  if (paramType == newType)
+    return success();
+  Value shape = tosa::getTosaConstShape(rewriter, loc, targetShape);
+  param = tosa::ReshapeOp::create(rewriter, loc, newType, param, shape);
+  return success();
 }
 
 FailureOr<Value> emitAffineScaleBias(Value normalized, Value scale, Value bias,
-                                     RankedTensorType outTy, int64_t paramAxis,
+                                     RankedTensorType outTy, int64_t axis,
                                      ConversionPatternRewriter &rewriter,
-                                     Location loc, Operation *op) {
+                                     Location loc, Operation *op,
+                                     bool perAxis = false) {
+  auto matchParam = [&](Value &p) {
+    return perAxis ? reshapeQdqParam(rewriter, loc, p, outTy, axis, op)
+                   : matchSuffixNormParam(p, outTy, axis, rewriter, loc, op);
+  };
   Value s = scale;
-  if (failed(matchNormParam(s, outTy, paramAxis, rewriter, loc, op)))
+  if (failed(matchParam(s)))
     return failure();
   if (failed(tosa::EqualizeRanks(rewriter, loc, normalized, s)))
     return rewriter.notifyMatchFailure(op, "norm scale not broadcastable");
@@ -1416,7 +1473,7 @@ FailureOr<Value> emitAffineScaleBias(Value normalized, Value scale, Value bias,
   if (!bias)
     return y;
   Value b = bias;
-  if (failed(matchNormParam(b, outTy, paramAxis, rewriter, loc, op)))
+  if (failed(matchParam(b)))
     return failure();
   if (failed(tosa::EqualizeRanks(rewriter, loc, y, b)))
     return rewriter.notifyMatchFailure(op, "norm bias not broadcastable");
@@ -1455,8 +1512,7 @@ FailureOr<Value> emitRmsNorm(Value input, Value scale, int64_t axis,
   Value rrms = tosa::RsqrtOp::create(rewriter, loc, meanTy, varEps);
   Value n = emitTosaMul(rewriter, loc, x, rrms, xTy);
   n = emitTosaCast(rewriter, loc, n, origElem);
-  return emitAffineScaleBias(n, scale, Value(), inTy, inTy.getRank() - 1,
-                             rewriter, loc, op);
+  return emitAffineScaleBias(n, scale, Value(), inTy, axis, rewriter, loc, op);
 }
 
 // (x - mean) * rsqrt(var + eps) over [firstAxis, rank). Optional stash.
@@ -1540,7 +1596,7 @@ struct LayerNormConverter final : public OpConversionPattern<LayerNormOp> {
       return failure();
     FailureOr<Value> y =
         emitAffineScaleBias(*n, adaptor.getScale(), adaptor.getBias(), yTy,
-                            inTy.getRank() - 1, rewriter, op.getLoc(), op);
+                            axis, rewriter, op.getLoc(), op);
     if (failed(y))
       return failure();
     SmallVector<Value> results = {*y};
@@ -1593,7 +1649,8 @@ struct InstanceNormConverter final
       return failure();
     FailureOr<Value> y =
         emitAffineScaleBias(*n, adaptor.getScale(), adaptor.getBias(), yTy,
-                            /*paramAxis=*/1, rewriter, op.getLoc(), op);
+                            /*axis=*/1, rewriter, op.getLoc(), op,
+                            /*perAxis=*/true);
     if (failed(y))
       return failure();
     rewriter.replaceOp(op, *y);
@@ -1623,7 +1680,8 @@ struct SkipRmsNormConverter final : public OpConversionPattern<SkipRmsNormOp> {
     Value sum = tosa::AddOp::create(rewriter, loc, yTy, x, skip);
     if (Value bias = adaptor.getBias()) {
       Value b = bias;
-      if (failed(matchNormParam(b, yTy, yTy.getRank() - 1, rewriter, loc, op)))
+      if (failed(matchSuffixNormParam(b, yTy, yTy.getRank() - 1, rewriter, loc,
+                                      op)))
         return failure();
       if (failed(tosa::EqualizeRanks(rewriter, loc, sum, b)))
         return rewriter.notifyMatchFailure(op, "skip bias not broadcastable");
