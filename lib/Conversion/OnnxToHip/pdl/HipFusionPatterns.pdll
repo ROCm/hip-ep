@@ -32,6 +32,7 @@ Constraint IsPackedInt4PerChannelWeight(op: Op);
 Constraint HasMatchingTransposeQParams(dq: Op, q: Op);
 Constraint IsPerChannelWeight(dequant: Op, consumer: Op);
 Constraint IsFusableQLpNormalization(op: Op);
+Constraint IsFusableQSigmoid(op: Op);
 
 Rewrite GetContextArg(op: Op) -> Value;
 Rewrite ExtractScaleValue(val: Value) -> Attr;
@@ -48,3 +49,4 @@ Rewrite CreateQuantizedTranspose(dq: Op, transpose: Op, q: Op) -> Value;
 #include "QDQConvFusion.pdll"
 #include "QDQTransposeFusion.pdll"
 #include "QDQLpNormalizationFusion.pdll"
+#include "QDQSigmoidFusion.pdll"
