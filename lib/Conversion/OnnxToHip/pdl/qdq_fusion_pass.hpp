@@ -437,7 +437,7 @@ isPackedInt4PerChannelWeight(mlir::PatternRewriter &, mlir::PDLResultList &,
     return mlir::failure();
 
   mlir::Value weights = op->getOperand(0);
-  if (!isPackedInt4Constant(weights))
+  if (!hasQuantStorageBits(weights, /*bits=*/4))
     return mlir::failure();
   auto weightType = mlir::cast<mlir::RankedTensorType>(weights.getType());
   // A Conv filter is [Cout, Cin/group, k...], so axis 0 is the output channel.
@@ -445,7 +445,7 @@ isPackedInt4PerChannelWeight(mlir::PatternRewriter &, mlir::PDLResultList &,
     return mlir::failure();
   // A 4-bit weight implies a 4-bit zero point. Requiring it to be packed too is
   // what lets one `packed_int4` flag describe both operands.
-  return mlir::success(isPackedInt4Constant(op->getOperand(2)));
+  return mlir::success(hasQuantStorageBits(op->getOperand(2), /*bits=*/4));
 }
 
 inline mlir::LogicalResult
@@ -488,8 +488,8 @@ isPerChannelWeight(mlir::PatternRewriter &, mlir::PDLResultList &,
   // A single width attribute describes both buffers, so their packing has to
   // agree: reading a full-width zero point as nibbles (or the reverse) is
   // silent corruption.
-  return mlir::success(isPackedInt4Constant(weights) ==
-                       isPackedInt4Constant(dequant->getOperand(2)));
+  return mlir::success(hasQuantStorageBits(weights, /*bits=*/4) ==
+                       hasQuantStorageBits(dequant->getOperand(2), /*bits=*/4));
 }
 
 // onnx.LpNormalization that matches the fused RMS path: p=2 over a static
@@ -577,7 +577,7 @@ extractQuantBits(mlir::PatternRewriter &rewriter, mlir::PDLResultList &results,
   mlir::Value value = args[0].dyn_cast<mlir::Value>();
   if (!value)
     return mlir::failure();
-  if (isPackedInt4Constant(value)) {
+  if (hasQuantStorageBits(value, /*bits=*/4)) {
     results.push_back(rewriter.getI64IntegerAttr(4));
     return mlir::success();
   }
