@@ -38,17 +38,6 @@
 
 (library (mlir ffi)
 
-  ;;===--------------------------------------------------------------------===;;
-  ;; Foreign Type Definitions
-  ;;===--------------------------------------------------------------------===;;
-
-  ;; ArrayRef-like type for passing arrays across FFI boundary
-  ;; Mirrors C++ ArrayRef<mlir::Value>: pointer + length
-  (define-ftype ValueArrayRef
-    (struct
-      [data (* void)]   ; Value* pointer (stored as void* since we can't import C++ types)
-      [size unsigned-64]))  ; Number of elements
-
   (export
     ;; ValueArrayRef accessors (ftype itself is not exported, only accessors)
     value-array-ref-size
@@ -130,6 +119,17 @@
     )
 
   (import (chezscheme))
+
+  ;;===--------------------------------------------------------------------===;;
+  ;; Foreign Type Definitions
+  ;;===--------------------------------------------------------------------===;;
+
+  ;; ArrayRef-like type for passing arrays across FFI boundary
+  ;; Mirrors C++ ArrayRef<mlir::Value>: pointer + length
+  (define-ftype ValueArrayRef
+    (struct
+      [data uptr]   ; Value* pointer (stored as uptr since we can't import C++ types)
+      [size unsigned-64]))  ; Number of elements
 
   ;;===--------------------------------------------------------------------===;;
   ;; Operation Inspection
@@ -316,12 +316,6 @@
   ;;; @return BlockArgument (Value*) representing the context argument as unsigned-64
   (define mlir-get-hipsr-context-arg
     (foreign-procedure "mlir_get_hipsr_context_arg" (unsigned-64) unsigned-64))
-
-  ;;; @brief Get the MLIRContext from an operation
-  ;;; @param op-ptr Operation* as unsigned-64
-  ;;; @return MLIRContext* as unsigned-64
-  (define mlir-operation-get-context
-    (foreign-procedure "mlir_operation_get_context" (unsigned-64) unsigned-64))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Dialect Conversion Framework Primitives
@@ -554,14 +548,16 @@
   ;;; @param ref-ptr ValueArrayRef* as unsigned-64
   ;;; @return Number of elements
   (define (value-array-ref-size ref-ptr)
-    (ftype-ref ValueArrayRef (size) ref-ptr))
+    (let ([ptr (make-ftype-pointer ValueArrayRef ref-ptr)])
+      (ftype-ref ValueArrayRef (size) ptr)))
 
   ;;; @brief Get Value* at index from ValueArrayRef
   ;;; @param ref-ptr ValueArrayRef* as unsigned-64
   ;;; @param index Zero-based index
   ;;; @return Value* as unsigned-64
   (define (value-array-ref-at ref-ptr index)
-    (let* ([data-ptr (ftype-ref ValueArrayRef (data) ref-ptr)]
+    (let* ([ptr (make-ftype-pointer ValueArrayRef ref-ptr)]
+           [data-ptr (ftype-ref ValueArrayRef (data) ptr)]
            [offset (* index 8)])  ; Assuming 64-bit pointers
       ;; Read pointer at offset
       (foreign-ref 'unsigned-64 data-ptr offset)))

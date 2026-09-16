@@ -74,11 +74,13 @@ add_library(HipsrSchemeRuntime
   Runtime/SchemeBindings.cpp
 )
 
-target_include_directories(HipsrSchemeRuntime PRIVATE
-  ${CMAKE_SOURCE_DIR}/include
-  ${CMAKE_CURRENT_BINARY_DIR}
-  ${ChezScheme_BINARY_DIR}/${CHEZ_MACHINE}
-  ${ChezScheme_SOURCE_DIR}/boot/pb
+target_include_directories(HipsrSchemeRuntime
+  PUBLIC
+    ${ChezScheme_BINARY_DIR}/${CHEZ_MACHINE}
+  PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_BINARY_DIR}
+    ${ChezScheme_SOURCE_DIR}/boot/pb
 )
 
 add_dependencies(HipsrSchemeRuntime ChezScheme ChezBootHeaders SchemeLibraries)

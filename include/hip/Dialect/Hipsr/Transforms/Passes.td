@@ -386,6 +386,9 @@ def ConversionInSchemePass : Pass<"conversion-in-scheme", "mlir::ModuleOp"> {
     Option<"logLevel", "log-level", "std::string", /*default=*/"\"warning\"",
            "Logging level: trace, debug, info, warning, error, fatal">
   ];
+  let dependentDialects = [
+    "::mlir::hipsr::HipsrDialect"
+  ];
 }
 
 #endif // HIPSR_TRANSFORMS_PASSES

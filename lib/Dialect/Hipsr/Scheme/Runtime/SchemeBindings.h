@@ -150,21 +150,23 @@ SchemeValue mlir_operation_get_result_value_from_op(SchemeValue op_ptr, int inde
 // Phase 4: Pattern Rewriter FFI
 
 // Replace operation with a value
-int mlir_replace_op(SchemeValue old_op, SchemeValue new_value);
+int mlir_replace_op(uint64_t old_op_ptr, uint64_t new_value_ptr);
 
 // Erase operation
-int mlir_erase_op(SchemeValue op);
+int mlir_erase_op(uint64_t op_ptr);
 
 // Notify match failure
-void mlir_notify_match_failure(SchemeValue op, const char* reason);
+void mlir_notify_match_failure(uint64_t op_ptr, const char* reason);
 
 // Register a Scheme-defined conversion pattern
 // patterns: RewritePatternSet* as uptr
 // op_name: MLIR operation name string (e.g., "onnx.Cast")
-// callback: Scheme procedure that takes (op rewriter) and returns #t/#f
+// callback: Scheme procedure that takes (op operands rewriter type-converter) and returns #t/#f
+// type_converter: TypeConverter* pointer
 void mlir_register_conversion_pattern(SchemeValue patterns,
                                       const char* op_name,
-                                      SchemeValue callback);
+                                      SchemeValue callback,
+                                      SchemeValue type_converter);
 
 } // extern "C"
 

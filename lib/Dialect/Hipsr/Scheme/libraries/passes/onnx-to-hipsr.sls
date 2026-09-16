@@ -56,8 +56,12 @@
           (mlir-log-debug "Populating conversion patterns...")
           (let ((patterns (mlir-create-rewrite-pattern-set ctx)))
             (populate-cast-patterns type-converter patterns ctx)
-            (mlir-populate-return-conversion-patterns type-converter patterns ctx)
             (mlir-populate-func-type-conversion-pattern patterns type-converter)
+            (mlir-populate-return-conversion-patterns type-converter patterns ctx)
+;;SWAP             ;; Register Return patterns first, then Cast
+;;SWAP             (mlir-populate-return-conversion-patterns type-converter patterns ctx)
+;;SWAP             (mlir-populate-func-type-conversion-pattern patterns type-converter)
+;;SWAP                         (populate-cast-patterns type-converter patterns ctx)
             (do-conversion module-op ctx type-converter target patterns))))))
 
 ) ;; end library (passes onnx-to-hipsr)
