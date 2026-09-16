@@ -4,7 +4,7 @@
  */
 
 #include "hip/Dialect/Hipsr/Scheme/Runtime/ChezSchemeInterpreter.h"
-#include "SchemeBindings.h"
+#include "hip/Dialect/Hipsr/Scheme/Runtime/SchemeMlirBindings.h"
 
 #include "llvm/Support/raw_ostream.h"
 #include "mlir/IR/Operation.h"

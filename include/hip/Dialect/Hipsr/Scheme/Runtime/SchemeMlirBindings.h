@@ -3,8 +3,8 @@
  * Licensed under the MIT License.
  */
 
-#ifndef LIB_DIALECT_HIPSR_SCHEME_SCHEMERUNTIME_H
-#define LIB_DIALECT_HIPSR_SCHEME_SCHEMERUNTIME_H
+#ifndef LIB_DIALECT_HIPSR_SCHEME_SCHEMEMLIR_BINDINGS_H
+#define LIB_DIALECT_HIPSR_SCHEME_SCHEMEMLIR_BINDINGS_H
 
 #include "hip/Dialect/Hipsr/Scheme/Runtime/ChezSchemeInterpreter.h"
 

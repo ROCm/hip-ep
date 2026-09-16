@@ -71,7 +71,7 @@ add_custom_target(ChezBootHeaders DEPENDS
 )
 add_library(HipsrSchemeRuntime
   Runtime/ChezSchemeInterpreter.cpp
-  Runtime/SchemeBindings.cpp
+  Runtime/SchemeMlirBindings.cpp
 )
 
 target_include_directories(HipsrSchemeRuntime
