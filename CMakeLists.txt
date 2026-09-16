@@ -97,6 +97,25 @@ option(HIPDNN_EP_DISABLE_VENDOR_BLAS
   "Build the real runtime without hipBLASLt (stub the vendor op wrappers)" OFF)
 option(BUILD_HIP_UNIT_TESTS "Build and register LIT and E2E tests with CTest" ON)
 option(BUILD_PYTHON_WHEEL "Configure the 'wheel' target that packages the EP as a Python wheel" OFF)
+# Clone https://github.com/ROCm/rocmlirTriton during configure when
+# HIPDNN_ROCMLIRTRITON_SOURCE_DIR is unset. The checkout is not added as a
+# CMake subproject (its CMakeLists.txt would rebuild LLVM/Triton and require
+# clang-cl on Windows); hip-ep uses it as SOURCE_DIR for the pinned LLVM and
+# as the future kernel-compiler source.
+option(HIPDNN_EP_FETCH_ROCMLIRTRITON
+  "Clone rocmlirTriton during CMake configure when HIPDNN_ROCMLIRTRITON_SOURCE_DIR is unset"
+  ON)
+option(HIPDNN_EP_ENABLE_ROCMLIRTRITON
+  "Enable the post-OnnxToHip rocmlirTriton compiler backend"
+  OFF)
+
+# hip-ep and rocmlirTriton pin the same LLVM tree, but each builds its own copy
+# by default. Switch this OFF to consume an LLVM supplied through LLVM_DIR /
+# MLIR_DIR instead; build.py --shared_llvm points those at the LLVM that
+# rocmlirTriton already builds, so the tree is compiled once rather than twice.
+option(HIPDNN_EP_EMBED_LLVM
+  "Build the pinned LLVM/MLIR in-tree instead of consuming LLVM_DIR/MLIR_DIR"
+  ON)
 
 # Compiler plugins are linked STATICALLY into the host at configure time (see
 # cmake/HipEpPlugins.cmake and docs/design/plugin-interface.md). Select which
@@ -175,6 +194,20 @@ list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
 include(TableGen)
 include(AddLLVM)
 include(AddMLIR)
+
+if(HIPDNN_EP_ENABLE_ROCMLIRTRITON)
+  # rocmlirTriton's BUILD_FAT_LIBROCKCOMPILER package exports the static
+  # compiler as rocMLIR::rockCompiler. The package must be built and installed
+  # before this configure; build.py will orchestrate that bootstrap.
+  find_package(rocMLIR 1.0.0 CONFIG REQUIRED)
+  if(NOT TARGET rocMLIR::rockCompiler)
+    message(FATAL_ERROR
+      "rocMLIR was found, but it does not export rocMLIR::rockCompiler. "
+      "Build rocmlirTriton with -DBUILD_FAT_LIBROCKCOMPILER=ON.")
+  endif()
+  message(STATUS
+    "rocmlirTriton backend enabled: rocMLIR::rockCompiler ${rocMLIR_VERSION}")
+endif()
 
 # Static compiler-plugin machinery: HIPDNN_EP_COMPILER_PLUGINS cache var +
 # hipdnn_ep_compiler_plugin_register() + hipdnn_ep_finalize_static_plugins().

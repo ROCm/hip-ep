@@ -694,9 +694,9 @@
 // CHECK-NEXT:    %[[V574:.*]] = llvm.insertvalue %[[V572]], %[[V573]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
 // CHECK-NEXT:    %[[V575:.*]] = llvm.mlir.constant(0 : index) : i64
 // CHECK-NEXT:    %[[V576:.*]] = llvm.insertvalue %[[V575]], %[[V574]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
-// CHECK-NEXT:    %[[V577:.*]] = llvm.insertvalue %[[V566]], %[[V576]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
+// CHECK-NEXT:    %[[V577:.*]] = llvm.insertvalue %[[V433]], %[[V576]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
 // CHECK-NEXT:    %[[V578:.*]] = llvm.insertvalue %[[V568]], %[[V577]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
-// CHECK-NEXT:    %[[V579:.*]] = llvm.insertvalue %[[V567]], %[[V578]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
+// CHECK-NEXT:    %[[V579:.*]] = llvm.insertvalue %[[V436]], %[[V578]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
 // CHECK-NEXT:    %[[V580:.*]] = llvm.mlir.constant(1 : index) : i64
 // CHECK-NEXT:    %[[V581:.*]] = llvm.insertvalue %[[V580]], %[[V579]][4, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
 // CHECK-NEXT:    %[[V582:.*]] = llvm.mlir.constant(1 : index) : i64
