@@ -403,9 +403,9 @@ hasMatchingSisoQParams(mlir::PatternRewriter &, mlir::PDLResultList &,
   std::optional<float> dqScale = trySplatScale(dq->getOperand(1));
   std::optional<float> qScale = trySplatScale(q->getOperand(1));
   unsigned width = dqType.getWidth();
-  float maxCode =
-      width >= 32 ? static_cast<float>(std::numeric_limits<uint32_t>::max())
-                  : static_cast<float>((1u << width) - 1);
+  float maxCode = width >= 32
+                      ? static_cast<float>(std::numeric_limits<uint32_t>::max())
+                      : static_cast<float>((1u << width) - 1);
   if (!dqScale || !qScale || *dqScale != *qScale || !std::isfinite(*dqScale) ||
       *dqScale < std::numeric_limits<float>::min() ||
       *dqScale > std::numeric_limits<float>::max() / maxCode)
@@ -728,7 +728,8 @@ inline mlir::LogicalResult extractAttrF32(mlir::PatternRewriter &rewriter,
 // axes, ...) and attributes are copied verbatim. The old DQ/SISO/Q chain
 // becomes dead and is removed by the greedy rewrite driver.
 inline mlir::LogicalResult
-createQuantizedSiso(mlir::PatternRewriter &rewriter, mlir::PDLResultList &results,
+createQuantizedSiso(mlir::PatternRewriter &rewriter,
+                    mlir::PDLResultList &results,
                     llvm::ArrayRef<mlir::PDLValue> args) {
   if (args.size() != 3)
     return mlir::failure();
@@ -817,7 +818,8 @@ inline bool run(mlir::ModuleOp mlirModule, llvm::MemoryBufferRef pdlBuffer) {
   pdlPatterns.registerRewriteFunction("ExtractQuantBits", extractQuantBits);
   pdlPatterns.registerRewriteFunction("ExtractAttrInt64", extractAttrInt64);
   pdlPatterns.registerRewriteFunction("ExtractAttrF32", extractAttrF32);
-  pdlPatterns.registerRewriteFunction("CreateQuantizedSiso", createQuantizedSiso);
+  pdlPatterns.registerRewriteFunction("CreateQuantizedSiso",
+                                      createQuantizedSiso);
 
   mlir::RewritePatternSet patterns(ctx);
   patterns.add(std::move(pdlPatterns));
