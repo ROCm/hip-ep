@@ -66,7 +66,7 @@ func.func @skip_layer_norm(%ctx: !hip.context, %x: tensor<1x4x8xf16>,
                            %init: tensor<1x4x8xf16>) -> tensor<1x4x8xf16>
     attributes {rock.kernel} {
   %sum = hip.add(%ctx) ins(%x, %skip : tensor<1x4x8xf16>, tensor<1x4x8xf16>)
-                       outs(%sum_init : tensor<1x4x8xf16>) : tensor<1x4x8xf16>
+                       outs(%sum_init : tensor<1x4x8xf16>) -> tensor<1x4x8xf16>
   %r = hip.layer_norm(%ctx)
       ins(%sum, %gamma, %beta : tensor<1x4x8xf16>, tensor<8xf16>, tensor<8xf16>)
       outs(%init : tensor<1x4x8xf16>)
