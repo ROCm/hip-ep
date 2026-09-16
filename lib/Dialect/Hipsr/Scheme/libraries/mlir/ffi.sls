@@ -40,6 +40,7 @@
   (export
     ;; Operation inspection
     mlir-operation-name
+    mlir-operation-get-context
     mlir-operation-num-operands
     mlir-operation-num-results
     mlir-operation-get-operand
@@ -124,6 +125,12 @@
   ;;; @return String containing operation name
   (define mlir-operation-name
     (foreign-procedure "mlir_operation_get_name" (unsigned-64) string))
+
+  ;;; @brief Get the MLIRContext from an operation
+  ;;; @param op-ptr Operation* as unsigned-64
+  ;;; @return MLIRContext* as unsigned-64
+  (define mlir-operation-get-context
+    (foreign-procedure "mlir_operation_get_context" (unsigned-64) unsigned-64))
 
   ;;; @brief Get the number of operands for an operation
   ;;; @param op-ptr Operation* as unsigned-64
@@ -511,14 +518,17 @@
   ;;; @param patterns-ptr RewritePatternSet* as unsigned-64
   ;;; @param op-name Operation name to match (e.g., "onnx.Cast")
   ;;; @param callback Scheme procedure for pattern rewriting
-  ;;; @note Callback signature: (lambda (op rewriter) ...)
+  ;;; @param type-converter-ptr TypeConverter* as unsigned-64
+  ;;; @note Callback signature: (lambda (op operands rewriter type-converter) ...)
   ;;;       - op: Operation* being converted (unsigned-64)
+  ;;;       - operands: Converted operands as Scheme list of Value* (scheme-object)
   ;;;       - rewriter: ConversionPatternRewriter* (unsigned-64)
+  ;;;       - type-converter: TypeConverter* (unsigned-64)
   ;;;       Returns: #t on successful rewrite, #f on match failure
   ;;; @note Callback is passed as scheme-object (GC-tracked) and locked with Slock_object
   ;;; @note Mirrors C++ OpConversionPattern::matchAndRewrite signature
   (define mlir-register-conversion-pattern
     (foreign-procedure "mlir_register_conversion_pattern"
-                       (unsigned-64 string scheme-object) void))
+                       (unsigned-64 string scheme-object unsigned-64) void))
 
 ) ;; end library (mlir ffi)

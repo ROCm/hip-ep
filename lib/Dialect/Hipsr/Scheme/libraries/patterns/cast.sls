@@ -23,8 +23,9 @@
   ;; Cast Pattern - Hand-written
   ;;===--------------------------------------------------------------------===;;
 
-  ;; Pattern function: takes (op rewriter) and returns #t on successful match+rewrite
-  (define (onnx-cast->hipsr-manual op rewriter)
+  ;; Pattern function: takes (op operands rewriter type-converter) and returns #t on successful match+rewrite
+  ;; New signature mirrors C++ OpConversionPattern::matchAndRewrite
+  (define (onnx-cast->hipsr-manual op operands rewriter type-converter)
     ;; Match: Check operation name
     (and (string=? (mlir-operation-name op) "onnx.Cast")
 
@@ -35,11 +36,12 @@
          (= (mlir-operation-num-results op) 1)
 
          ;; Extract operands and types
-         (let* ([%input (mlir-operation-get-operand-value op 0)]
+         ;; operands is a Scheme list of converted Value* (from OpAdaptor)
+         (let* ([%input (car operands)]  ; Get first operand from list
                 [%output (mlir-operation-get-result-value op 0)]
 
-                ;; Get context
-                [ctx (mlir-get-hipsr-context-arg op)]
+                ;; Get context from operation
+                [ctx (mlir-operation-get-context op)]
 
                 ;; Get types
                 [input-type (mlir-value-get-type %input)]
@@ -61,10 +63,10 @@
   ;; Register Cast pattern with the conversion framework
   ;;
   ;; Parameters:
-  ;;   type-converter - MLIR TypeConverter (unused for Cast, but kept for API consistency)
+  ;;   type-converter - MLIR TypeConverter (passed to pattern callback)
   ;;   patterns       - RewritePatternSet to add patterns to
-  ;;   ctx            - MLIR Context
+  ;;   ctx            - MLIR Context (unused here, kept for API consistency)
   (define (populate-cast-patterns type-converter patterns ctx)
-    (mlir-register-conversion-pattern patterns "onnx.Cast" onnx-cast->hipsr-manual))
+    (mlir-register-conversion-pattern patterns "onnx.Cast" onnx-cast->hipsr-manual type-converter))
 
 ) ;; end library (patterns cast)

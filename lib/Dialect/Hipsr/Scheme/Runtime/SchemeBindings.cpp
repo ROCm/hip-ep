@@ -386,6 +386,13 @@ const char* mlir_operation_get_name(uint64_t op) {
   return cppOp->getName().getStringRef().data();
 }
 
+// Get MLIRContext from operation
+uint64_t mlir_operation_get_context(uint64_t op) {
+  if (!op) return 0;
+  mlir::Operation* cppOp = reinterpret_cast<mlir::Operation*>(op);
+  return reinterpret_cast<uint64_t>(cppOp->getContext());
+}
+
 // Get number of operands
 int64_t mlir_operation_num_operands(uint64_t op) {
   if (!op) return 0;
@@ -767,8 +774,9 @@ namespace {
 // Wrapper class that implements ConversionPattern by calling a Scheme callback
 class SchemeConversionPattern : public mlir::ConversionPattern {
 public:
-  SchemeConversionPattern(mlir::MLIRContext *ctx, ptr schemeCallback, llvm::StringRef opName)
-      : ConversionPattern(mlir::Pattern::MatchAnyOpTypeTag(), 1 /*benefit*/, ctx),
+  SchemeConversionPattern(mlir::TypeConverter *typeConverter, mlir::MLIRContext *ctx,
+                          ptr schemeCallback, llvm::StringRef opName)
+      : ConversionPattern(typeConverter, mlir::Pattern::MatchAnyOpTypeTag(), 1 /*benefit*/, ctx),
         callback_(schemeCallback),  // RAII lock
         targetOpName(opName.str()) {}
 
@@ -785,12 +793,20 @@ public:
     // Set rewriter context for FFI functions
     mlir::hipsr::setCurrentRewriter(&rewriter, op);
 
-    // Call Scheme callback: (callback op rewriter)
+    // Convert operands ArrayRef to Scheme list
+    ptr operandsList = Snil;
+    for (auto it = operands.rbegin(); it != operands.rend(); ++it) {
+      ptr valuePtr = Sunsigned64(reinterpret_cast<uint64_t>(*it));
+      operandsList = Scons(valuePtr, operandsList);
+    }
+
+    // Call Scheme callback: (callback op operands rewriter type-converter)
     // Callback should return #t on successful match, #f on failure
     ptr opPtr = Sunsigned64(reinterpret_cast<uint64_t>(op));
     ptr rewriterPtr = Sunsigned64(reinterpret_cast<uint64_t>(&rewriter));
+    ptr typeConverterPtr = Sunsigned64(reinterpret_cast<uint64_t>(getTypeConverter()));
 
-    ptr result = Scall2(callback_.get(), opPtr, rewriterPtr);
+    ptr result = Scall4(callback_.get(), opPtr, operandsList, rewriterPtr, typeConverterPtr);
 
     // Clear rewriter context
     mlir::hipsr::clearCurrentRewriter();
@@ -812,15 +828,17 @@ private:
 
 void mlir_register_conversion_pattern(ptr patterns_ptr,
                                       const char* op_name,
-                                      ptr callback) {
+                                      ptr callback,
+                                      ptr type_converter_ptr) {
   auto *patterns = reinterpret_cast<mlir::RewritePatternSet*>(patterns_ptr);
+  auto *typeConverter = reinterpret_cast<mlir::TypeConverter*>(type_converter_ptr);
   ptr schemeCallback = static_cast<ptr>(callback);
 
   mlir_log_debug((std::string("Registering Scheme pattern for ") + op_name).c_str());
 
   // Add pattern to the pattern set
   patterns->add<SchemeConversionPattern>(
-      patterns->getContext(), schemeCallback, llvm::StringRef(op_name));
+      typeConverter, patterns->getContext(), schemeCallback, llvm::StringRef(op_name));
 }
 
 //===----------------------------------------------------------------------===//
@@ -1120,6 +1138,7 @@ namespace hipsr {
 void registerMlirForeignFunctions() {
   // Register C functions so Scheme can call them via foreign-procedure
   Sregister_symbol("mlir_operation_get_name", (void*)mlir_operation_get_name);
+  Sregister_symbol("mlir_operation_get_context", (void*)mlir_operation_get_context);
   Sregister_symbol("mlir_operation_num_operands", (void*)mlir_operation_num_operands);
   Sregister_symbol("mlir_operation_num_results", (void*)mlir_operation_num_results);
   Sregister_symbol("mlir_operation_get_operand", (void*)mlir_operation_get_operand);
