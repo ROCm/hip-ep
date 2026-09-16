@@ -51,10 +51,11 @@ module {
   // CHECK-LABEL: llvm.func @test_qmoe_with_bias
   // CHECK: llvm.call @wrap_qmoe({{.*}}) :
   // CHECK-SAME: (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
-  // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
+  // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
   // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, f32, i64, i64) -> i32
-  // Verify 30 parameters:
-  // - 16 pointers: state, input, router, fc1_w, fc1_s, fc1_b, fc2_w, fc2_s, fc2_b,
+  // Verify 31 parameters:
+  // - 17 pointers: state, input, router_probs, router_weights(null), fc1_w, fc1_s, fc1_b,
+  //                fc2_w, fc2_s, fc2_b,
   //                fc3_w(null), fc3_s(null), fc3_b(null), fc1_zp(null), fc2_zp(null), fc3_zp(null), output
   // - 11 i64 + 3 f32: num_tokens, hidden_size, inter_size, num_experts, k,
   //                    expert_weight_bits, block_size, swiglu_fusion, activation_type,
@@ -90,7 +91,7 @@ module {
   // CHECK-LABEL: llvm.func @test_qmoe_no_bias
   // CHECK: llvm.call @wrap_qmoe({{.*}}) :
   // CHECK-SAME: (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
-  // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
+  // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
   // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, f32, i64, i64) -> i32
-  // Optional pointers (fc1_b, fc2_b, fc3_*, zero_points) should be null
+  // Optional pointers (router_weights, fc1_b, fc2_b, fc3_*, zero_points) should be null
 }

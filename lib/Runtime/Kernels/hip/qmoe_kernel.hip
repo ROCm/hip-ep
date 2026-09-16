@@ -28,9 +28,15 @@ static constexpr int kRoutingBlock = 256;
 // ---------------------------------------------------------------------------
 // Top-k routing (fp16 only): for each token, find top-k experts by
 // probability. Uses insertion sort — k is small (typically 2-8).
+//
+// router_weights is nullable. When non-null it decouples selection from
+// aggregation: router_probs still drives the top-k choice, but the mixing
+// weight is gathered from router_weights[token, selected_expert] instead of
+// the softmax of router_probs. Both are [num_tokens, num_experts].
 // ---------------------------------------------------------------------------
 __global__ void topk_routing_kernel(
     const __half* __restrict__ router_probs,
+    const __half* __restrict__ router_weights,
     int32_t* __restrict__ expert_indices,
     __half* __restrict__ expert_weights,
     int64_t num_tokens,
@@ -46,6 +52,9 @@ __global__ void topk_routing_kernel(
 
   const __half* logits =
       router_probs + static_cast<int64_t>(token) * num_experts;
+  const __half* weights_row =
+      router_weights ? router_weights + static_cast<int64_t>(token) * num_experts
+                     : nullptr;
   const int tid = static_cast<int>(threadIdx.x);
   const int nthreads = static_cast<int>(blockDim.x);
   const int ik = static_cast<int>(k < kMaxK ? k : kMaxK);
@@ -118,7 +127,11 @@ __global__ void topk_routing_kernel(
     if (tid == 0) {
       const int win = s_idx[0];
       expert_indices[token * k + i] = win;
-      expert_weights[token * k + i] = static_cast<__half>(s_red[0] / exp_sum);
+      // router_probs selected the expert; router_weights, when supplied,
+      // provides the mixing weight at that index instead of the softmax prob.
+      expert_weights[token * k + i] =
+          weights_row ? weights_row[win]
+                      : static_cast<__half>(s_red[0] / exp_sum);
       s_exp[win] = -1e30f;
     }
     __syncthreads();
@@ -314,6 +327,7 @@ __global__ void bucket_tokens_kernel(
 extern "C" int hip_qmoe_topk_routing(
     void* stream,
     const void* router_probs,
+    const void* router_weights,
     void* expert_indices,
     void* expert_weights,
     int64_t num_tokens,
@@ -343,6 +357,7 @@ extern "C" int hip_qmoe_topk_routing(
                      dim3(static_cast<unsigned>(num_tokens)),
                      dim3(kRoutingBlock), shmem, s,
                      static_cast<const __half*>(router_probs),
+                     static_cast<const __half*>(router_weights),
                      static_cast<int32_t*>(expert_indices),
                      static_cast<__half*>(expert_weights), num_tokens,
                      num_experts, k, normalize);
