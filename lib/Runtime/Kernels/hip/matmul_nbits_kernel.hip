@@ -1132,6 +1132,59 @@ static void launchGemvConfig(
 #undef GEMV_CASE
 }
 
+// Drive `launch()` until per-iter latency plateaus at the sustained clock
+// (>=60 ms total so the still-boosted first samples are not accepted, then 3
+// consecutive iters within 2% of each other). Shared by all GEMV/decode
+// tuners below: this APU boosts cold and throttles under sustained load, so
+// every candidate must be measured at the same steady-state clock or the
+// ranking is biased by table position instead of true speed.
+template <typename LaunchFn>
+static void settleClock(hipEvent_t ev0, hipEvent_t ev1, hipStream_t stream,
+                        LaunchFn&& launch) {
+    float prev = 1e30f, cur = 0.0f, total = 0.0f;
+    int stable = 0;
+    for (int i = 0; i < 200 && stable < 3 && total < 200.0f; i++) {
+        hipEventRecord(ev0, stream);
+        launch();
+        hipEventRecord(ev1, stream);
+        hipEventSynchronize(ev1);
+        hipEventElapsedTime(&cur, ev0, ev1);
+        if (total >= 60.0f && cur <= prev * 1.02f) stable++;
+        else                                       stable = 0;
+        prev = cur;
+        total += cur;
+    }
+}
+
+// Time one config: `warmup` untimed launches, then the min (peak) of `iters`
+// timed launches -- a config is judged by its least-throttled sample, not an
+// average that folds in throttled ones. Sub-`floor_ms` configs get extra
+// iterations up to `floor_iters`: hipEventElapsedTime's own timer noise is
+// comparable to the signal at that scale, so a small-iters min alone is not
+// trustworthy there. A reading <= 0 is not a real duration (Windows HIP event
+// timer noise at sub-0.1ms scale can yield this); it must never win the min.
+template <typename LaunchFn>
+static float timeConfigPeak(hipEvent_t ev0, hipEvent_t ev1, hipStream_t stream,
+                            int warmup, int iters, int floor_iters, float floor_ms,
+                            LaunchFn&& launch) {
+    for (int w = 0; w < warmup; w++) launch();
+
+    float best = 1e30f;
+    int iter_count = 0;
+    while (iter_count < iters ||
+           (best < floor_ms && iter_count < floor_iters)) {
+        hipEventRecord(ev0, stream);
+        launch();
+        hipEventRecord(ev1, stream);
+        hipEventSynchronize(ev1);
+        float ms = 0.0f;
+        hipEventElapsedTime(&ms, ev0, ev1);
+        if (ms > 0.0f && ms < best) best = ms;
+        iter_count++;
+    }
+    return best;
+}
+
 static int tuneGemvConfig(
     hipStream_t stream,
     const __half* A, const uint8_t* B,
@@ -1147,31 +1200,29 @@ static int tuneGemvConfig(
 
     float best_ms = 1e30f;
     int   best_id = 8;
-    constexpr int WARMUP = 1;
+    constexpr int WARMUP = 3;
     constexpr int ITERS  = 5;
+    constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
+
+    settleClock(ev0, ev1, stream, [&]{
+        launchGemvConfig(best_id, stream, A, B, sc, zp, bi, out,
+                         M, N, K, batch, bs, col_major);
+    });
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
-        for (int w = 0; w < WARMUP; w++)
+        float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
+                                            kFloorIters, 0.1f, [&]{
             launchGemvConfig(cid, stream, A, B, sc, zp, bi, out,
                              M, N, K, batch, bs, col_major);
-
-        hipEventRecord(ev0, stream);
-        for (int i = 0; i < ITERS; i++)
-            launchGemvConfig(cid, stream, A, B, sc, zp, bi, out,
-                             M, N, K, batch, bs, col_major);
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-
-        float ms = 0.0f;
-        hipEventElapsedTime(&ms, ev0, ev1);
+        });
 
         MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   config[%2d] threads=%3d tile_n=%d : %.4f ms\n",
             cid, kGemvConfigs[cid].threads, kGemvConfigs[cid].tile_n,
-            ms / ITERS);
+            cfg_best_ms);
 
-        if (ms < best_ms) {
-            best_ms = ms;
+        if (cfg_best_ms < best_ms) {
+            best_ms = cfg_best_ms;
             best_id = cid;
         }
     }
@@ -1184,7 +1235,7 @@ static int tuneGemvConfig(
         "best config[%d] threads=%d tile_n=%d (%.4f ms/iter)\n",
         (long long)M, (long long)N, (long long)K, (long long)bs, col_major,
         best_id, kGemvConfigs[best_id].threads,
-        kGemvConfigs[best_id].tile_n, best_ms / ITERS);
+        kGemvConfigs[best_id].tile_n, best_ms);
 
     return best_id;
 }
@@ -1414,30 +1465,28 @@ static int tuneDp4aConfig(
     hipEventCreate(&ev1);
     float best_ms = 1e30f;
     int   best_id = 9;  // 128x1 default
-    constexpr int WARMUP = 1;
+    constexpr int WARMUP = 3;
     constexpr int ITERS  = 5;
+    constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
+
+    settleClock(ev0, ev1, stream, [&]{
+        launchDp4aConfig(best_id, stream, a_qb, a_scale, B, sc, zp, bi, out,
+                         N, K, bs);
+    });
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
-        for (int w = 0; w < WARMUP; w++)
+        float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
+                                            kFloorIters, 0.1f, [&]{
             launchDp4aConfig(cid, stream, a_qb, a_scale, B, sc, zp, bi, out,
                              N, K, bs);
-
-        hipEventRecord(ev0, stream);
-        for (int i = 0; i < ITERS; i++)
-            launchDp4aConfig(cid, stream, a_qb, a_scale, B, sc, zp, bi, out,
-                             N, K, bs);
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-
-        float ms = 0.0f;
-        hipEventElapsedTime(&ms, ev0, ev1);
+        });
 
         MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   dp4a config[%2d] threads=%3d tile_n=%d : %.4f ms\n",
             cid, kGemvConfigs[cid].threads, kGemvConfigs[cid].tile_n,
-            ms / ITERS);
+            cfg_best_ms);
 
-        if (ms < best_ms) { best_ms = ms; best_id = cid; }
+        if (cfg_best_ms < best_ms) { best_ms = cfg_best_ms; best_id = cid; }
     }
     hipEventDestroy(ev0);
     hipEventDestroy(ev1);
@@ -1447,7 +1496,7 @@ static int tuneDp4aConfig(
         "best config[%d] threads=%d tile_n=%d (%.4f ms/iter)\n",
         (long long)N, (long long)K, (long long)bs, zp ? "yes" : "no",
         best_id, kGemvConfigs[best_id].threads,
-        kGemvConfigs[best_id].tile_n, best_ms / ITERS);
+        kGemvConfigs[best_id].tile_n, best_ms);
 
     return best_id;
 }
@@ -1613,31 +1662,29 @@ static int tuneGemvConfigI8(
 
     float best_ms = 1e30f;
     int   best_id = 8; // 128 threads, TILE_N=8 -- safe default for typical N
-    constexpr int WARMUP = 1;
+    constexpr int WARMUP = 3;
     constexpr int ITERS  = 5;
+    constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
+
+    settleClock(ev0, ev1, stream, [&]{
+        launchGemvConfigI8(best_id, stream, A, B, sc, zp, bi, out,
+                           M, N, K, batch, bs);
+    });
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
-        for (int w = 0; w < WARMUP; w++)
+        float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
+                                            kFloorIters, 0.1f, [&]{
             launchGemvConfigI8(cid, stream, A, B, sc, zp, bi, out,
                                M, N, K, batch, bs);
-
-        hipEventRecord(ev0, stream);
-        for (int i = 0; i < ITERS; i++)
-            launchGemvConfigI8(cid, stream, A, B, sc, zp, bi, out,
-                               M, N, K, batch, bs);
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-
-        float ms = 0.0f;
-        hipEventElapsedTime(&ms, ev0, ev1);
+        });
 
         MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   i8 config[%2d] threads=%3d tile_n=%d : %.4f ms\n",
             cid, kGemvConfigs[cid].threads, kGemvConfigs[cid].tile_n,
-            ms / ITERS);
+            cfg_best_ms);
 
-        if (ms < best_ms) {
-            best_ms = ms;
+        if (cfg_best_ms < best_ms) {
+            best_ms = cfg_best_ms;
             best_id = cid;
         }
     }
@@ -1650,7 +1697,7 @@ static int tuneGemvConfigI8(
         "best config[%d] threads=%d tile_n=%d (%.4f ms/iter)\n",
         (long long)M, (long long)N, (long long)K, (long long)bs,
         best_id, kGemvConfigs[best_id].threads,
-        kGemvConfigs[best_id].tile_n, best_ms / ITERS);
+        kGemvConfigs[best_id].tile_n, best_ms);
 
     return best_id;
 }
@@ -2041,31 +2088,29 @@ static int tuneGemvConfigU3(
 
     float best_ms = 1e30f;
     int   best_id = 8;
-    constexpr int WARMUP = 1;
+    constexpr int WARMUP = 3;
     constexpr int ITERS  = 5;
+    constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
+
+    settleClock(ev0, ev1, stream, [&]{
+        launchGemvConfigU3(best_id, stream, A, B, sc, zp, bi, out,
+                           M, N, K, batch, bs);
+    });
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
-        for (int w = 0; w < WARMUP; w++)
+        float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
+                                            kFloorIters, 0.1f, [&]{
             launchGemvConfigU3(cid, stream, A, B, sc, zp, bi, out,
                                M, N, K, batch, bs);
-
-        hipEventRecord(ev0, stream);
-        for (int i = 0; i < ITERS; i++)
-            launchGemvConfigU3(cid, stream, A, B, sc, zp, bi, out,
-                               M, N, K, batch, bs);
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-
-        float ms = 0.0f;
-        hipEventElapsedTime(&ms, ev0, ev1);
+        });
 
         MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   u3 config[%2d] threads=%3d tile_n=%d : %.4f ms\n",
             cid, kGemvConfigs[cid].threads, kGemvConfigs[cid].tile_n,
-            ms / ITERS);
+            cfg_best_ms);
 
-        if (ms < best_ms) {
-            best_ms = ms;
+        if (cfg_best_ms < best_ms) {
+            best_ms = cfg_best_ms;
             best_id = cid;
         }
     }
@@ -2078,7 +2123,7 @@ static int tuneGemvConfigU3(
         "best config[%d] threads=%d tile_n=%d (%.4f ms/iter)\n",
         (long long)M, (long long)N, (long long)K, (long long)bs,
         best_id, kGemvConfigs[best_id].threads,
-        kGemvConfigs[best_id].tile_n, best_ms / ITERS);
+        kGemvConfigs[best_id].tile_n, best_ms);
 
     return best_id;
 }
@@ -2446,31 +2491,29 @@ static int tuneGemvConfigU2(
 
     float best_ms = 1e30f;
     int   best_id = 8;
-    constexpr int WARMUP = 1;
+    constexpr int WARMUP = 3;
     constexpr int ITERS  = 5;
+    constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
+
+    settleClock(ev0, ev1, stream, [&]{
+        launchGemvConfigU2(best_id, stream, A, B, sc, zp, bi, out,
+                           M, N, K, batch, bs);
+    });
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
-        for (int w = 0; w < WARMUP; w++)
+        float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
+                                            kFloorIters, 0.1f, [&]{
             launchGemvConfigU2(cid, stream, A, B, sc, zp, bi, out,
                                M, N, K, batch, bs);
-
-        hipEventRecord(ev0, stream);
-        for (int i = 0; i < ITERS; i++)
-            launchGemvConfigU2(cid, stream, A, B, sc, zp, bi, out,
-                               M, N, K, batch, bs);
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-
-        float ms = 0.0f;
-        hipEventElapsedTime(&ms, ev0, ev1);
+        });
 
         MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   u2 config[%2d] threads=%3d tile_n=%d : %.4f ms\n",
             cid, kGemvConfigs[cid].threads, kGemvConfigs[cid].tile_n,
-            ms / ITERS);
+            cfg_best_ms);
 
-        if (ms < best_ms) {
-            best_ms = ms;
+        if (cfg_best_ms < best_ms) {
+            best_ms = cfg_best_ms;
             best_id = cid;
         }
     }
@@ -2483,7 +2526,7 @@ static int tuneGemvConfigU2(
         "best config[%d] threads=%d tile_n=%d (%.4f ms/iter)\n",
         (long long)M, (long long)N, (long long)K, (long long)bs,
         best_id, kGemvConfigs[best_id].threads,
-        kGemvConfigs[best_id].tile_n, best_ms / ITERS);
+        kGemvConfigs[best_id].tile_n, best_ms);
 
     return best_id;
 }

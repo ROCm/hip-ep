@@ -1,0 +1,105 @@
+//===- QDQSisoFusion.pdll -------------------------------------------------===//
+//
+// Eliminate a redundant per-tensor QDQ round-trip around a SISO op that
+// only reorders or reshapes elements.
+//
+// When both ends use identical scale and zero point, such an op commutes with
+// quantization:
+//
+//   Q(SISO(DQ(x))) == SISO(x)
+//
+// The rewrite emits the same onnx op over the quantized input. Ordinary
+// conversion then lowers it; no quantized-specific operation or kernel is
+// needed. Only ops whose existing lowering/runtime already handles 8- and
+// 16-bit integer storage are listed here.
+//===----------------------------------------------------------------------===//
+
+Pattern QDQTranspose with benefit(10) {
+  let dq = op<onnx.DequantizeLinear>(input: Value, input_scale: Value,
+                                     input_tail: ValueRange);
+  let siso = op<onnx.Transpose>(dq.0);
+  let q = op<onnx.QuantizeLinear>(siso.0, output_scale: Value,
+                                  output_tail: ValueRange);
+
+  HasMatchingSisoQParams(dq, siso, q);
+
+  rewrite q with {
+    let result = CreateQuantizedSiso(dq, siso, q);
+    replace q with result;
+  };
+}
+
+Pattern QDQSqueeze with benefit(10) {
+  let dq = op<onnx.DequantizeLinear>(input: Value, input_scale: Value,
+                                     input_tail: ValueRange);
+  let siso = op<onnx.Squeeze>(dq.0, extra: ValueRange);
+  let q = op<onnx.QuantizeLinear>(siso.0, output_scale: Value,
+                                  output_tail: ValueRange);
+
+  HasMatchingSisoQParams(dq, siso, q);
+
+  rewrite q with {
+    let result = CreateQuantizedSiso(dq, siso, q);
+    replace q with result;
+  };
+}
+
+Pattern QDQUnsqueeze with benefit(10) {
+  let dq = op<onnx.DequantizeLinear>(input: Value, input_scale: Value,
+                                     input_tail: ValueRange);
+  let siso = op<onnx.Unsqueeze>(dq.0, extra: ValueRange);
+  let q = op<onnx.QuantizeLinear>(siso.0, output_scale: Value,
+                                  output_tail: ValueRange);
+
+  HasMatchingSisoQParams(dq, siso, q);
+
+  rewrite q with {
+    let result = CreateQuantizedSiso(dq, siso, q);
+    replace q with result;
+  };
+}
+
+Pattern QDQReshape with benefit(10) {
+  let dq = op<onnx.DequantizeLinear>(input: Value, input_scale: Value,
+                                     input_tail: ValueRange);
+  let siso = op<onnx.Reshape>(dq.0, extra: ValueRange);
+  let q = op<onnx.QuantizeLinear>(siso.0, output_scale: Value,
+                                  output_tail: ValueRange);
+
+  HasMatchingSisoQParams(dq, siso, q);
+
+  rewrite q with {
+    let result = CreateQuantizedSiso(dq, siso, q);
+    replace q with result;
+  };
+}
+
+Pattern QDQFlatten with benefit(10) {
+  let dq = op<onnx.DequantizeLinear>(input: Value, input_scale: Value,
+                                     input_tail: ValueRange);
+  let siso = op<onnx.Flatten>(dq.0);
+  let q = op<onnx.QuantizeLinear>(siso.0, output_scale: Value,
+                                  output_tail: ValueRange);
+
+  HasMatchingSisoQParams(dq, siso, q);
+
+  rewrite q with {
+    let result = CreateQuantizedSiso(dq, siso, q);
+    replace q with result;
+  };
+}
+
+Pattern QDQIdentity with benefit(10) {
+  let dq = op<onnx.DequantizeLinear>(input: Value, input_scale: Value,
+                                     input_tail: ValueRange);
+  let siso = op<onnx.Identity>(dq.0);
+  let q = op<onnx.QuantizeLinear>(siso.0, output_scale: Value,
+                                  output_tail: ValueRange);
+
+  HasMatchingSisoQParams(dq, siso, q);
+
+  rewrite q with {
+    let result = CreateQuantizedSiso(dq, siso, q);
+    replace q with result;
+  };
+}
