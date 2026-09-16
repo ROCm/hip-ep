@@ -6,10 +6,8 @@
 #ifndef LIB_DIALECT_HIPSR_SCHEME_LOCKED_SCHEME_OBJECT_H
 #define LIB_DIALECT_HIPSR_SCHEME_LOCKED_SCHEME_OBJECT_H
 
-// Include Chez Scheme types
-extern "C" {
-#include "boot/ta6le/scheme.h"
-}
+// Include Chez Scheme types via wrapper
+#include "hip/Dialect/Hipsr/Scheme/Runtime/SchemeWrapper.h"
 
 namespace mlir {
 namespace hipsr {

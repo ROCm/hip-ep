@@ -50,9 +50,7 @@
       [size unsigned-64]))  ; Number of elements
 
   (export
-    ;; Foreign types
-    ValueArrayRef
-    ;; ValueArrayRef accessors
+    ;; ValueArrayRef accessors (ftype itself is not exported, only accessors)
     value-array-ref-size
     value-array-ref-at
     ;; Operation inspection
