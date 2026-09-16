@@ -11,6 +11,7 @@
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 #include "hip/Support/ConstantsIO.h"
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/DialectResourceBlobManager.h"
@@ -34,6 +35,35 @@ namespace {
 constexpr int64_t kConstantAlignment = 64;
 
 constexpr llvm::StringLiteral kFileKeyPrefix = "file|";
+
+/// Writes `hipdnn.input_ranks` from `@main_graph` argument ranks, skipping
+/// `!hipsr.context`. Does nothing when the module has no `@main_graph`.
+///
+/// Example:
+///   func.func @main_graph(%ctx: !hipsr.context, %a: memref<?xf32>,
+///                         %b: memref<?x?xf32>)
+///   module attributes {hipdnn.input_ranks = array<i64: 1, 2>}
+static LogicalResult setInputRanksAttr(ModuleOp module, Builder &builder) {
+  auto graph = module.lookupSymbol<func::FuncOp>("main_graph");
+  if (!graph) {
+    return success();
+  }
+
+  SmallVector<int64_t> ranks;
+  for (Type type : graph.getArgumentTypes()) {
+    if (isa<ContextType>(type)) {
+      continue;
+    }
+    auto shaped = dyn_cast<ShapedType>(type);
+    if (!shaped || !shaped.hasRank()) {
+      return graph.emitError(
+          "main_graph inputs must be ranked tensors or memrefs");
+    }
+    ranks.push_back(shaped.getRank());
+  }
+  module->setAttr("hipdnn.input_ranks", builder.getDenseI64ArrayAttr(ranks));
+  return success();
+}
 
 struct HipsrExternalizeConstantsPass
     : impl::HipsrExternalizeConstantsPassBase<HipsrExternalizeConstantsPass> {
@@ -87,7 +117,10 @@ struct HipsrExternalizeConstantsPass
       entries.push_back(std::move(entry));
     });
 
-    // Phase 2: `--generate-interface` reads these attributes.
+    // Phase 2: `--hipsr-generate-interface` reads these attributes.
+    if (failed(setInputRanksAttr(module, builder))) {
+      return signalPassFailure();
+    }
     if (!entries.empty()) {
       auto sizes = llvm::map_to_vector(
           entries, [](const hip::ConstantEntry &entry) { return entry.size; });

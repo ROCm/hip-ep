@@ -159,16 +159,28 @@ template <> struct ArgConverter<I64Tag, int64_t> {
 
 template <typename Ret, typename... Params> class RuntimeFunc {
 public:
+  /// Returns the matching runtime declaration, creating it when absent.
+  ///
+  /// Example:
+  ///   using Cleanup = RuntimeFunc<i32, hostPtr>;
+  ///   FailureOr<LLVM::LLVMFuncOp> fn =
+  ///       Cleanup::lookupOrCreateDeclaration(builder, module, "cleanup");
+  static FailureOr<LLVM::LLVMFuncOp>
+  lookupOrCreateDeclaration(OpBuilder &builder, ModuleOp module,
+                            llvm::StringRef name) {
+    MLIRContext *ctx = builder.getContext();
+    llvm::SmallVector<Type, sizeof...(Params)> paramTypes{
+        detail::materializeType<Params>(ctx, builder)...};
+    Type resultType = detail::materializeType<Ret>(ctx, builder);
+    return LLVM::lookupOrCreateFn(builder, module, name, paramTypes,
+                                  resultType);
+  }
+
   static FailureOr<RuntimeFunc>
   lookupOrCreateFn(ConversionPatternRewriter &rewriter, Location loc,
                    ModuleOp module, llvm::StringRef name) {
-    MLIRContext *ctx = rewriter.getContext();
-    llvm::SmallVector<Type, sizeof...(Params)> paramTypes{
-        detail::materializeType<Params>(ctx, rewriter)...};
-    Type resultType = detail::materializeType<Ret>(ctx, rewriter);
-
     FailureOr<LLVM::LLVMFuncOp> funcOp =
-        LLVM::lookupOrCreateFn(rewriter, module, name, paramTypes, resultType);
+        lookupOrCreateDeclaration(rewriter, module, name);
     if (failed(funcOp)) {
       return failure();
     }

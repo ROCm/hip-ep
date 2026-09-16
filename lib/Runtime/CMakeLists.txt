@@ -285,6 +285,7 @@ compile_to_bitcode(hipdnn_ep_runtime_state.cpp runtime_state.bc)
 compile_to_bitcode(hipdnn_ep_runtime_tensor.cpp runtime_tensor.bc)
 compile_to_bitcode(hipdnn_ep_runtime_loop.cpp runtime_loop.bc)
 compile_to_bitcode(hipdnn_ep_runtime_if.cpp runtime_if.bc)
+compile_to_bitcode(hipdnn_ep_runtime_inference.cpp runtime_inference.bc)
 compile_to_bitcode(op_profile.cpp runtime_op_profile.bc)
 compile_to_bitcode(chrome_trace.cpp runtime_chrome_trace.bc)
 compile_to_bitcode(output_allocator.cpp runtime_output_allocator.bc)
@@ -390,6 +391,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_loop.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_if.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_inference.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_profile.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_chrome_trace.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_output_allocator.bc
@@ -498,6 +500,7 @@ else()
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_loop.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_if.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_inference.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_profile.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_chrome_trace.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_output_allocator.bc

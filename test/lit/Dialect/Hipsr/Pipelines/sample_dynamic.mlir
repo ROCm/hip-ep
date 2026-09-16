@@ -1,592 +1,638 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// The same graph as sample_static.mlir, but with a dynamic leading extent. It
-// enters the shape graph as a memref.dim. The checks cover the full LLVM IR
-// after --hipsr-pipeline.
+// The same graph as sample_static.mlir, but with a dynamic leading extent.
 
 // RUN: hip-mlir-opt %s --onnx-dialect=modeled --hipsr-pipeline | FileCheck %s
 
-// CHECK-LABEL: module attributes {
-// CHECK-SAME: hip.constants_file = "constants.bin"
-// CHECK-SAME: hipdnn.constant_offsets = array<i64: 0, 64>
-// CHECK-SAME: hipdnn.constant_sizes = array<i64: 32, 6>
-// CHECK-SAME: hipdnn.num_op_state_slots = 2 : i32
-// CHECK-NEXT:  llvm.func @wrap_expand(!llvm.ptr, !llvm.ptr<1>, !llvm.ptr, !llvm.ptr<1>, !llvm.ptr, i64, !llvm.ptr, i64, i64) -> i32
-// CHECK-NEXT:  llvm.func @hipdnn_ep_alloc_output(!llvm.ptr, i64, !llvm.ptr, i64, i64) -> !llvm.ptr
-// CHECK-NEXT:  llvm.func @wrap_cast(!llvm.ptr, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64) -> i32
-// CHECK-NEXT:  llvm.func @wrap_hipblasLtMatmul(!llvm.ptr, i32, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
-// CHECK-NEXT:  llvm.func @hipdnn_ep_get_pool_base(!llvm.ptr, i32, i64) -> !llvm.ptr<1>
-// CHECK-NEXT:  llvm.func @free(!llvm.ptr)
-// CHECK-NEXT:  llvm.func @malloc(i64) -> !llvm.ptr
-// CHECK-NEXT:  llvm.func @hipdnn_ep_constant_get(!llvm.ptr, i64) -> !llvm.ptr<1>
-// CHECK-NEXT:  llvm.func @hipdnn_ep_op_state_construct_matmul(!llvm.ptr, i32) -> i8
-// CHECK-NEXT:  llvm.func @hipdnn_ep_op_states_alloc(!llvm.ptr, i64) -> i8
-// CHECK-LABEL: llvm.func @main_graph(
-// CHECK-SAME:    %[[ARG0:[^,]*]]: !llvm.ptr, %[[ARG1:[^,]*]]: !llvm.ptr<1>, %[[ARG2:[^,]*]]: !llvm.ptr<1>, %[[ARG3:[^,]*]]: i64, %[[ARG4:[^,]*]]: i64, %[[ARG5:[^,]*]]: i64, %[[ARG6:[^,]*]]: i64, %[[ARG7:[^,]*]]: i64, %[[ARG8:[^,]*]]: !llvm.ptr<1>, %[[ARG9:[^,]*]]: !llvm.ptr<1>, %[[ARG10:[^,]*]]: i64, %[[ARG11:[^,]*]]: i64, %[[ARG12:[^,]*]]: i64, %[[ARG13:[^,]*]]: i64, %[[ARG14:[^,]*]]: i64) -> (!llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)> {onnx.name = "y"}) attributes {onnx.graph.name = "main_graph"} {
-// CHECK-NEXT:    %[[V0:.*]] = llvm.mlir.poison : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V1:.*]] = llvm.insertvalue %[[ARG8]], %[[V0]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V2:.*]] = llvm.insertvalue %[[ARG9]], %[[V1]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V3:.*]] = llvm.insertvalue %[[ARG10]], %[[V2]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V4:.*]] = llvm.insertvalue %[[ARG11]], %[[V3]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V5:.*]] = llvm.insertvalue %[[ARG13]], %[[V4]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V6:.*]] = llvm.insertvalue %[[ARG12]], %[[V5]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V7:.*]] = llvm.insertvalue %[[ARG14]], %[[V6]][4, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V8:.*]] = llvm.mlir.poison : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V9:.*]] = llvm.insertvalue %[[ARG1]], %[[V8]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V10:.*]] = llvm.insertvalue %[[ARG2]], %[[V9]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V11:.*]] = llvm.insertvalue %[[ARG3]], %[[V10]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V12:.*]] = llvm.insertvalue %[[ARG4]], %[[V11]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V13:.*]] = llvm.insertvalue %[[ARG6]], %[[V12]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V14:.*]] = llvm.insertvalue %[[ARG5]], %[[V13]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V15:.*]] = llvm.insertvalue %[[ARG7]], %[[V14]][4, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V16:.*]] = llvm.mlir.constant(16 : index) : i64
-// CHECK-NEXT:    %[[V17:.*]] = llvm.mlir.constant(4 : i64) : i64
-// CHECK-NEXT:    %[[V18:.*]] = llvm.mlir.constant(4 : index) : i64
-// CHECK-NEXT:    %[[V19:.*]] = llvm.mlir.constant(255 : index) : i64
-// CHECK-NEXT:    %[[V20:.*]] = llvm.mlir.constant(256 : index) : i64
-// CHECK-NEXT:    %[[V21:.*]] = llvm.mlir.constant(0 : i64) : i64
-// CHECK-NEXT:    %[[V22:.*]] = llvm.call @hipdnn_ep_constant_get(%[[ARG0]], %[[V21]]) : (!llvm.ptr, i64) -> !llvm.ptr<1>
-// CHECK-NEXT:    %[[V23:.*]] = llvm.mlir.constant(4 : i64) : i64
-// CHECK-NEXT:    %[[V24:.*]] = llvm.mlir.constant(2 : i64) : i64
-// CHECK-NEXT:    %[[V25:.*]] = llvm.mlir.constant(1 : i64) : i64
-// CHECK-NEXT:    %[[V26:.*]] = llvm.mlir.constant(2 : i64) : i64
-// CHECK-NEXT:    %[[V27:.*]] = llvm.mlir.poison : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V28:.*]] = llvm.insertvalue %[[V22]], %[[V27]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V29:.*]] = llvm.insertvalue %[[V22]], %[[V28]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V30:.*]] = llvm.mlir.constant(0 : index) : i64
-// CHECK-NEXT:    %[[V31:.*]] = llvm.insertvalue %[[V30]], %[[V29]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V32:.*]] = llvm.insertvalue %[[V23]], %[[V31]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V33:.*]] = llvm.insertvalue %[[V24]], %[[V32]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V34:.*]] = llvm.insertvalue %[[V26]], %[[V33]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V35:.*]] = llvm.insertvalue %[[V25]], %[[V34]][4, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V36:.*]] = llvm.mlir.constant(1 : i64) : i64
-// CHECK-NEXT:    %[[V37:.*]] = llvm.call @hipdnn_ep_constant_get(%[[ARG0]], %[[V36]]) : (!llvm.ptr, i64) -> !llvm.ptr<1>
-// CHECK-NEXT:    %[[V38:.*]] = llvm.mlir.constant(3 : i64) : i64
-// CHECK-NEXT:    %[[V39:.*]] = llvm.mlir.constant(1 : i64) : i64
-// CHECK-NEXT:    %[[V40:.*]] = llvm.mlir.constant(1 : i64) : i64
-// CHECK-NEXT:    %[[V41:.*]] = llvm.mlir.constant(1 : i64) : i64
-// CHECK-NEXT:    %[[V42:.*]] = llvm.mlir.poison : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V43:.*]] = llvm.insertvalue %[[V37]], %[[V42]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V44:.*]] = llvm.insertvalue %[[V37]], %[[V43]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V45:.*]] = llvm.mlir.constant(0 : index) : i64
-// CHECK-NEXT:    %[[V46:.*]] = llvm.insertvalue %[[V45]], %[[V44]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V47:.*]] = llvm.insertvalue %[[V38]], %[[V46]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V48:.*]] = llvm.insertvalue %[[V39]], %[[V47]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V49:.*]] = llvm.insertvalue %[[V41]], %[[V48]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V50:.*]] = llvm.insertvalue %[[V40]], %[[V49]][4, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V51:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V52:.*]] = llvm.mlir.constant(0 : index) : i64
-// CHECK-NEXT:    %[[V53:.*]] = llvm.mlir.constant(2 : index) : i64
-// CHECK-NEXT:    %[[V54:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V55:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V56:.*]] = llvm.mlir.zero : !llvm.ptr
-// CHECK-NEXT:    %[[V57:.*]] = llvm.getelementptr %[[V56]][%[[V54]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    %[[V58:.*]] = llvm.ptrtoint %[[V57]] : !llvm.ptr to i64
-// CHECK-NEXT:    %[[V59:.*]] = llvm.mlir.constant(64 : index) : i64
-// CHECK-NEXT:    %[[V60:.*]] = llvm.add %[[V58]], %[[V59]] : i64
-// CHECK-NEXT:    %[[V61:.*]] = llvm.call @malloc(%[[V60]]) : (i64) -> !llvm.ptr
-// CHECK-NEXT:    %[[V62:.*]] = llvm.ptrtoint %[[V61]] : !llvm.ptr to i64
-// CHECK-NEXT:    %[[V63:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V64:.*]] = llvm.sub %[[V59]], %[[V63]] : i64
-// CHECK-NEXT:    %[[V65:.*]] = llvm.add %[[V62]], %[[V64]] : i64
-// CHECK-NEXT:    %[[V66:.*]] = llvm.urem %[[V65]], %[[V59]] : i64
-// CHECK-NEXT:    %[[V67:.*]] = llvm.sub %[[V65]], %[[V66]] : i64
-// CHECK-NEXT:    %[[V68:.*]] = llvm.inttoptr %[[V67]] : i64 to !llvm.ptr
-// CHECK-NEXT:    %[[V69:.*]] = llvm.mlir.poison : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V70:.*]] = llvm.insertvalue %[[V61]], %[[V69]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V71:.*]] = llvm.insertvalue %[[V68]], %[[V70]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V72:.*]] = llvm.mlir.constant(0 : index) : i64
-// CHECK-NEXT:    %[[V73:.*]] = llvm.insertvalue %[[V72]], %[[V71]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V74:.*]] = llvm.insertvalue %[[V54]], %[[V73]][3, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V75:.*]] = llvm.insertvalue %[[V55]], %[[V74]][4, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V76:.*]] = llvm.extractvalue %[[V75]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V77:.*]] = llvm.getelementptr inbounds|nuw %[[V76]][%[[V52]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    llvm.store %[[V53]], %[[V77]] : i64, !llvm.ptr
-// CHECK-NEXT:    %[[V78:.*]] = llvm.extractvalue %[[V15]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V79:.*]] = llvm.mlir.constant(2 : index) : i64
-// CHECK-NEXT:    %[[V80:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V81:.*]] = llvm.mlir.zero : !llvm.ptr
-// CHECK-NEXT:    %[[V82:.*]] = llvm.getelementptr %[[V81]][%[[V79]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    %[[V83:.*]] = llvm.ptrtoint %[[V82]] : !llvm.ptr to i64
-// CHECK-NEXT:    %[[V84:.*]] = llvm.mlir.constant(64 : index) : i64
-// CHECK-NEXT:    %[[V85:.*]] = llvm.add %[[V83]], %[[V84]] : i64
-// CHECK-NEXT:    %[[V86:.*]] = llvm.call @malloc(%[[V85]]) : (i64) -> !llvm.ptr
-// CHECK-NEXT:    %[[V87:.*]] = llvm.ptrtoint %[[V86]] : !llvm.ptr to i64
-// CHECK-NEXT:    %[[V88:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V89:.*]] = llvm.sub %[[V84]], %[[V88]] : i64
-// CHECK-NEXT:    %[[V90:.*]] = llvm.add %[[V87]], %[[V89]] : i64
-// CHECK-NEXT:    %[[V91:.*]] = llvm.urem %[[V90]], %[[V84]] : i64
-// CHECK-NEXT:    %[[V92:.*]] = llvm.sub %[[V90]], %[[V91]] : i64
-// CHECK-NEXT:    %[[V93:.*]] = llvm.inttoptr %[[V92]] : i64 to !llvm.ptr
-// CHECK-NEXT:    %[[V94:.*]] = llvm.mlir.poison : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V95:.*]] = llvm.insertvalue %[[V86]], %[[V94]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V96:.*]] = llvm.insertvalue %[[V93]], %[[V95]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V97:.*]] = llvm.mlir.constant(0 : index) : i64
-// CHECK-NEXT:    %[[V98:.*]] = llvm.insertvalue %[[V97]], %[[V96]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V99:.*]] = llvm.insertvalue %[[V79]], %[[V98]][3, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V100:.*]] = llvm.insertvalue %[[V80]], %[[V99]][4, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V101:.*]] = llvm.extractvalue %[[V100]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V102:.*]] = llvm.getelementptr inbounds|nuw %[[V101]][%[[V52]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    llvm.store %[[V78]], %[[V102]] : i64, !llvm.ptr
-// CHECK-NEXT:    %[[V103:.*]] = llvm.extractvalue %[[V100]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V104:.*]] = llvm.getelementptr inbounds|nuw %[[V103]][%[[V51]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    llvm.store %[[V51]], %[[V104]] : i64, !llvm.ptr
-// CHECK-NEXT:    %[[V105:.*]] = llvm.mlir.constant(2 : index) : i64
-// CHECK-NEXT:    %[[V106:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V107:.*]] = llvm.mlir.zero : !llvm.ptr
-// CHECK-NEXT:    %[[V108:.*]] = llvm.getelementptr %[[V107]][%[[V105]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    %[[V109:.*]] = llvm.ptrtoint %[[V108]] : !llvm.ptr to i64
-// CHECK-NEXT:    %[[V110:.*]] = llvm.mlir.constant(64 : index) : i64
-// CHECK-NEXT:    %[[V111:.*]] = llvm.add %[[V109]], %[[V110]] : i64
-// CHECK-NEXT:    %[[V112:.*]] = llvm.call @malloc(%[[V111]]) : (i64) -> !llvm.ptr
-// CHECK-NEXT:    %[[V113:.*]] = llvm.ptrtoint %[[V112]] : !llvm.ptr to i64
-// CHECK-NEXT:    %[[V114:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V115:.*]] = llvm.sub %[[V110]], %[[V114]] : i64
-// CHECK-NEXT:    %[[V116:.*]] = llvm.add %[[V113]], %[[V115]] : i64
-// CHECK-NEXT:    %[[V117:.*]] = llvm.urem %[[V116]], %[[V110]] : i64
-// CHECK-NEXT:    %[[V118:.*]] = llvm.sub %[[V116]], %[[V117]] : i64
-// CHECK-NEXT:    %[[V119:.*]] = llvm.inttoptr %[[V118]] : i64 to !llvm.ptr
-// CHECK-NEXT:    %[[V120:.*]] = llvm.mlir.poison : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V121:.*]] = llvm.insertvalue %[[V112]], %[[V120]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V122:.*]] = llvm.insertvalue %[[V119]], %[[V121]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V123:.*]] = llvm.mlir.constant(0 : index) : i64
-// CHECK-NEXT:    %[[V124:.*]] = llvm.insertvalue %[[V123]], %[[V122]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V125:.*]] = llvm.insertvalue %[[V105]], %[[V124]][3, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V126:.*]] = llvm.insertvalue %[[V106]], %[[V125]][4, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V127:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V128:.*]] = llvm.extractvalue %[[V100]][3, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V129:.*]] = llvm.mul %[[V127]], %[[V128]] : i64
-// CHECK-NEXT:    %[[V130:.*]] = llvm.mlir.zero : !llvm.ptr
-// CHECK-NEXT:    %[[V131:.*]] = llvm.getelementptr %[[V130]][1] : (!llvm.ptr) -> !llvm.ptr, i64
-// CHECK-NEXT:    %[[V132:.*]] = llvm.ptrtoint %[[V131]] : !llvm.ptr to i64
-// CHECK-NEXT:    %[[V133:.*]] = llvm.mul %[[V129]], %[[V132]] : i64
-// CHECK-NEXT:    %[[V134:.*]] = llvm.extractvalue %[[V100]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V135:.*]] = llvm.extractvalue %[[V100]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V136:.*]] = llvm.getelementptr %[[V134]][%[[V135]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    %[[V137:.*]] = llvm.extractvalue %[[V126]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V138:.*]] = llvm.extractvalue %[[V126]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V139:.*]] = llvm.getelementptr %[[V137]][%[[V138]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    "llvm.intr.memcpy"(%[[V139]], %[[V136]], %[[V133]]) <{isVolatile = false}> : (!llvm.ptr, !llvm.ptr, i64) -> ()
-// CHECK-NEXT:    %[[V140:.*]] = llvm.extractvalue %[[V100]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    llvm.call @free(%[[V140]]) : (!llvm.ptr) -> ()
-// CHECK-NEXT:    %[[V141:.*]] = llvm.extractvalue %[[V126]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V142:.*]] = llvm.getelementptr inbounds|nuw %[[V141]][%[[V52]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    %[[V143:.*]] = llvm.load %[[V142]] : !llvm.ptr -> i64
-// CHECK-NEXT:    %[[V144:.*]] = llvm.mul %[[V143]], %[[V53]] : i64
-// CHECK-NEXT:    %[[V145:.*]] = llvm.add %[[V144]], %[[V19]] : i64
-// CHECK-NEXT:    %[[V146:.*]] = llvm.udiv %[[V145]], %[[V20]] : i64
-// CHECK-NEXT:    %[[V147:.*]] = llvm.mul %[[V146]], %[[V20]] : i64
-// CHECK-NEXT:    %[[V148:.*]] = llvm.mul %[[V143]], %[[V18]] : i64
-// CHECK-NEXT:    %[[V149:.*]] = llvm.add %[[V148]], %[[V19]] : i64
-// CHECK-NEXT:    %[[V150:.*]] = llvm.udiv %[[V149]], %[[V20]] : i64
-// CHECK-NEXT:    %[[V151:.*]] = llvm.mul %[[V150]], %[[V20]] : i64
-// CHECK-NEXT:    %[[V152:.*]] = llvm.add %[[V147]], %[[V151]] : i64
-// CHECK-NEXT:    %[[V153:.*]] = llvm.mlir.constant(0 : i32) : i32
-// CHECK-NEXT:    %[[V154:.*]] = llvm.call @hipdnn_ep_get_pool_base(%[[ARG0]], %[[V153]], %[[V152]]) : (!llvm.ptr, i32, i64) -> !llvm.ptr<1>
-// CHECK-NEXT:    %[[V155:.*]] = llvm.mlir.constant(1 : i64) : i64
-// CHECK-NEXT:    %[[V156:.*]] = llvm.mlir.poison : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V157:.*]] = llvm.insertvalue %[[V154]], %[[V156]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V158:.*]] = llvm.insertvalue %[[V154]], %[[V157]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V159:.*]] = llvm.mlir.constant(0 : index) : i64
-// CHECK-NEXT:    %[[V160:.*]] = llvm.insertvalue %[[V159]], %[[V158]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V161:.*]] = llvm.insertvalue %[[V152]], %[[V160]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V162:.*]] = llvm.insertvalue %[[V155]], %[[V161]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V163:.*]] = llvm.mlir.poison : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V164:.*]] = llvm.extractvalue %[[V162]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V165:.*]] = llvm.insertvalue %[[V164]], %[[V163]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V166:.*]] = llvm.extractvalue %[[V162]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V167:.*]] = llvm.getelementptr %[[V166]][%[[V52]]] : (!llvm.ptr<1>, i64) -> !llvm.ptr<1>, i8
-// CHECK-NEXT:    %[[V168:.*]] = llvm.insertvalue %[[V167]], %[[V165]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V169:.*]] = llvm.mlir.constant(0 : index) : i64
-// CHECK-NEXT:    %[[V170:.*]] = llvm.insertvalue %[[V169]], %[[V168]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V171:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V172:.*]] = llvm.insertvalue %[[V171]], %[[V170]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V173:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V174:.*]] = llvm.insertvalue %[[V173]], %[[V172]][4, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V175:.*]] = llvm.insertvalue %[[V143]], %[[V174]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V176:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V177:.*]] = llvm.insertvalue %[[V176]], %[[V175]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V178:.*]] = llvm.mlir.poison : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V179:.*]] = llvm.extractvalue %[[V162]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V180:.*]] = llvm.insertvalue %[[V179]], %[[V178]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V181:.*]] = llvm.extractvalue %[[V162]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V182:.*]] = llvm.getelementptr %[[V181]][%[[V147]]] : (!llvm.ptr<1>, i64) -> !llvm.ptr<1>, i8
-// CHECK-NEXT:    %[[V183:.*]] = llvm.insertvalue %[[V182]], %[[V180]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V184:.*]] = llvm.mlir.constant(0 : index) : i64
-// CHECK-NEXT:    %[[V185:.*]] = llvm.insertvalue %[[V184]], %[[V183]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V186:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V187:.*]] = llvm.insertvalue %[[V186]], %[[V185]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V188:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V189:.*]] = llvm.insertvalue %[[V188]], %[[V187]][4, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V190:.*]] = llvm.insertvalue %[[V143]], %[[V189]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V191:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V192:.*]] = llvm.insertvalue %[[V191]], %[[V190]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V193:.*]] = llvm.mlir.constant(2 : index) : i64
-// CHECK-NEXT:    %[[V194:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V195:.*]] = llvm.mlir.zero : !llvm.ptr
-// CHECK-NEXT:    %[[V196:.*]] = llvm.getelementptr %[[V195]][%[[V193]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    %[[V197:.*]] = llvm.ptrtoint %[[V196]] : !llvm.ptr to i64
-// CHECK-NEXT:    %[[V198:.*]] = llvm.mlir.constant(64 : index) : i64
-// CHECK-NEXT:    %[[V199:.*]] = llvm.add %[[V197]], %[[V198]] : i64
-// CHECK-NEXT:    %[[V200:.*]] = llvm.call @malloc(%[[V199]]) : (i64) -> !llvm.ptr
-// CHECK-NEXT:    %[[V201:.*]] = llvm.ptrtoint %[[V200]] : !llvm.ptr to i64
-// CHECK-NEXT:    %[[V202:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V203:.*]] = llvm.sub %[[V198]], %[[V202]] : i64
-// CHECK-NEXT:    %[[V204:.*]] = llvm.add %[[V201]], %[[V203]] : i64
-// CHECK-NEXT:    %[[V205:.*]] = llvm.urem %[[V204]], %[[V198]] : i64
-// CHECK-NEXT:    %[[V206:.*]] = llvm.sub %[[V204]], %[[V205]] : i64
-// CHECK-NEXT:    %[[V207:.*]] = llvm.inttoptr %[[V206]] : i64 to !llvm.ptr
-// CHECK-NEXT:    %[[V208:.*]] = llvm.mlir.poison : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V209:.*]] = llvm.insertvalue %[[V200]], %[[V208]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V210:.*]] = llvm.insertvalue %[[V207]], %[[V209]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V211:.*]] = llvm.mlir.constant(0 : index) : i64
-// CHECK-NEXT:    %[[V212:.*]] = llvm.insertvalue %[[V211]], %[[V210]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V213:.*]] = llvm.insertvalue %[[V193]], %[[V212]][3, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V214:.*]] = llvm.insertvalue %[[V194]], %[[V213]][4, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V215:.*]] = llvm.extractvalue %[[V15]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V216:.*]] = llvm.extractvalue %[[V15]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V217:.*]] = llvm.extractvalue %[[V50]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V218:.*]] = llvm.mlir.constant(1 : i64) : i64
-// CHECK-NEXT:    %[[V219:.*]] = llvm.mlir.constant(0 : i64) : i64
-// CHECK-NEXT:    %[[V220:.*]] = llvm.mlir.constant(0 : i32) : i32
-// CHECK-NEXT:    %[[V221:.*]] = llvm.extractvalue %[[V15]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V222:.*]] = llvm.extractvalue %[[V50]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V223:.*]] = llvm.extractvalue %[[V177]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V224:.*]] = llvm.mlir.constant(2 : i64) : i64
-// CHECK-NEXT:    %[[V225:.*]] = llvm.mlir.constant(0 : i64) : i64
-// CHECK-NEXT:    %[[V226:.*]] = llvm.mlir.constant(0 : i64) : i64
-// CHECK-NEXT:    %[[V227:.*]] = llvm.call @wrap_hipblasLtMatmul(%[[ARG0]], %[[V220]], %[[V221]], %[[V222]], %[[V223]], %[[V215]], %[[V217]], %[[V216]], %[[V218]], %[[V224]], %[[V219]], %[[V225]], %[[V226]]) : (!llvm.ptr, i32, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
-// CHECK-NEXT:    %[[V228:.*]] = llvm.mlir.constant(1 : i64) : i64
-// CHECK-NEXT:    %[[V229:.*]] = llvm.extractvalue %[[V192]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V230:.*]] = llvm.mul %[[V228]], %[[V229]] : i64
-// CHECK-NEXT:    %[[V231:.*]] = llvm.mlir.constant(1 : i64) : i64
-// CHECK-NEXT:    %[[V232:.*]] = llvm.mul %[[V230]], %[[V231]] : i64
-// CHECK-NEXT:    %[[V233:.*]] = llvm.extractvalue %[[V177]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V234:.*]] = llvm.extractvalue %[[V192]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V235:.*]] = llvm.mlir.constant(1 : i64) : i64
-// CHECK-NEXT:    %[[V236:.*]] = llvm.mlir.constant(0 : i64) : i64
-// CHECK-NEXT:    %[[V237:.*]] = llvm.call @wrap_cast(%[[ARG0]], %[[V233]], %[[V234]], %[[V232]], %[[V235]], %[[V236]]) : (!llvm.ptr, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64) -> i32
-// CHECK-NEXT:    %[[V238:.*]] = llvm.extractvalue %[[V7]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V239:.*]] = llvm.extractvalue %[[V214]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V240:.*]] = llvm.getelementptr inbounds|nuw %[[V239]][%[[V52]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    llvm.store %[[V238]], %[[V240]] : i64, !llvm.ptr
-// CHECK-NEXT:    %[[V241:.*]] = llvm.extractvalue %[[V214]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V242:.*]] = llvm.getelementptr inbounds|nuw %[[V241]][%[[V51]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    llvm.store %[[V17]], %[[V242]] : i64, !llvm.ptr
-// CHECK-NEXT:    %[[V243:.*]] = llvm.extractvalue %[[V126]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    llvm.call @free(%[[V243]]) : (!llvm.ptr) -> ()
-// CHECK-NEXT:    %[[V244:.*]] = llvm.extractvalue %[[V75]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    llvm.call @free(%[[V244]]) : (!llvm.ptr) -> ()
-// CHECK-NEXT:    %[[V245:.*]] = llvm.mlir.constant(2 : index) : i64
-// CHECK-NEXT:    %[[V246:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V247:.*]] = llvm.mlir.zero : !llvm.ptr
-// CHECK-NEXT:    %[[V248:.*]] = llvm.getelementptr %[[V247]][%[[V245]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    %[[V249:.*]] = llvm.ptrtoint %[[V248]] : !llvm.ptr to i64
-// CHECK-NEXT:    %[[V250:.*]] = llvm.mlir.constant(64 : index) : i64
-// CHECK-NEXT:    %[[V251:.*]] = llvm.add %[[V249]], %[[V250]] : i64
-// CHECK-NEXT:    %[[V252:.*]] = llvm.call @malloc(%[[V251]]) : (i64) -> !llvm.ptr
-// CHECK-NEXT:    %[[V253:.*]] = llvm.ptrtoint %[[V252]] : !llvm.ptr to i64
-// CHECK-NEXT:    %[[V254:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V255:.*]] = llvm.sub %[[V250]], %[[V254]] : i64
-// CHECK-NEXT:    %[[V256:.*]] = llvm.add %[[V253]], %[[V255]] : i64
-// CHECK-NEXT:    %[[V257:.*]] = llvm.urem %[[V256]], %[[V250]] : i64
-// CHECK-NEXT:    %[[V258:.*]] = llvm.sub %[[V256]], %[[V257]] : i64
-// CHECK-NEXT:    %[[V259:.*]] = llvm.inttoptr %[[V258]] : i64 to !llvm.ptr
-// CHECK-NEXT:    %[[V260:.*]] = llvm.mlir.poison : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V261:.*]] = llvm.insertvalue %[[V252]], %[[V260]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V262:.*]] = llvm.insertvalue %[[V259]], %[[V261]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V263:.*]] = llvm.mlir.constant(0 : index) : i64
-// CHECK-NEXT:    %[[V264:.*]] = llvm.insertvalue %[[V263]], %[[V262]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V265:.*]] = llvm.insertvalue %[[V245]], %[[V264]][3, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V266:.*]] = llvm.insertvalue %[[V246]], %[[V265]][4, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V267:.*]] = llvm.extractvalue %[[V266]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V268:.*]] = llvm.getelementptr inbounds|nuw %[[V267]][%[[V52]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    llvm.store %[[V143]], %[[V268]] : i64, !llvm.ptr
-// CHECK-NEXT:    %[[V269:.*]] = llvm.extractvalue %[[V266]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V270:.*]] = llvm.getelementptr inbounds|nuw %[[V269]][%[[V51]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    llvm.store %[[V51]], %[[V270]] : i64, !llvm.ptr
-// CHECK-NEXT:    %[[V271:.*]] = llvm.extractvalue %[[V214]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V272:.*]] = llvm.getelementptr inbounds|nuw %[[V271]][%[[V52]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    %[[V273:.*]] = llvm.load %[[V272]] : !llvm.ptr -> i64
-// CHECK-NEXT:    %[[V274:.*]] = llvm.extractvalue %[[V214]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V275:.*]] = llvm.getelementptr inbounds|nuw %[[V274]][%[[V51]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    %[[V276:.*]] = llvm.load %[[V275]] : !llvm.ptr -> i64
-// CHECK-NEXT:    %[[V277:.*]] = llvm.mlir.constant(2 : index) : i64
-// CHECK-NEXT:    %[[V278:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V279:.*]] = llvm.mlir.zero : !llvm.ptr
-// CHECK-NEXT:    %[[V280:.*]] = llvm.getelementptr %[[V279]][%[[V277]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    %[[V281:.*]] = llvm.ptrtoint %[[V280]] : !llvm.ptr to i64
-// CHECK-NEXT:    %[[V282:.*]] = llvm.mlir.constant(64 : index) : i64
-// CHECK-NEXT:    %[[V283:.*]] = llvm.add %[[V281]], %[[V282]] : i64
-// CHECK-NEXT:    %[[V284:.*]] = llvm.call @malloc(%[[V283]]) : (i64) -> !llvm.ptr
-// CHECK-NEXT:    %[[V285:.*]] = llvm.ptrtoint %[[V284]] : !llvm.ptr to i64
-// CHECK-NEXT:    %[[V286:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V287:.*]] = llvm.sub %[[V282]], %[[V286]] : i64
-// CHECK-NEXT:    %[[V288:.*]] = llvm.add %[[V285]], %[[V287]] : i64
-// CHECK-NEXT:    %[[V289:.*]] = llvm.urem %[[V288]], %[[V282]] : i64
-// CHECK-NEXT:    %[[V290:.*]] = llvm.sub %[[V288]], %[[V289]] : i64
-// CHECK-NEXT:    %[[V291:.*]] = llvm.inttoptr %[[V290]] : i64 to !llvm.ptr
-// CHECK-NEXT:    %[[V292:.*]] = llvm.mlir.poison : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V293:.*]] = llvm.insertvalue %[[V284]], %[[V292]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V294:.*]] = llvm.insertvalue %[[V291]], %[[V293]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V295:.*]] = llvm.mlir.constant(0 : index) : i64
-// CHECK-NEXT:    %[[V296:.*]] = llvm.insertvalue %[[V295]], %[[V294]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V297:.*]] = llvm.insertvalue %[[V277]], %[[V296]][3, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V298:.*]] = llvm.insertvalue %[[V278]], %[[V297]][4, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V299:.*]] = llvm.extractvalue %[[V298]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V300:.*]] = llvm.getelementptr inbounds|nuw %[[V299]][%[[V52]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    llvm.store %[[V273]], %[[V300]] : i64, !llvm.ptr
-// CHECK-NEXT:    %[[V301:.*]] = llvm.extractvalue %[[V298]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V302:.*]] = llvm.getelementptr inbounds|nuw %[[V301]][%[[V51]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    llvm.store %[[V276]], %[[V302]] : i64, !llvm.ptr
-// CHECK-NEXT:    %[[V303:.*]] = llvm.mlir.constant(2 : index) : i64
-// CHECK-NEXT:    %[[V304:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V305:.*]] = llvm.mlir.zero : !llvm.ptr
-// CHECK-NEXT:    %[[V306:.*]] = llvm.getelementptr %[[V305]][%[[V303]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    %[[V307:.*]] = llvm.ptrtoint %[[V306]] : !llvm.ptr to i64
-// CHECK-NEXT:    %[[V308:.*]] = llvm.mlir.constant(64 : index) : i64
-// CHECK-NEXT:    %[[V309:.*]] = llvm.add %[[V307]], %[[V308]] : i64
-// CHECK-NEXT:    %[[V310:.*]] = llvm.call @malloc(%[[V309]]) : (i64) -> !llvm.ptr
-// CHECK-NEXT:    %[[V311:.*]] = llvm.ptrtoint %[[V310]] : !llvm.ptr to i64
-// CHECK-NEXT:    %[[V312:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V313:.*]] = llvm.sub %[[V308]], %[[V312]] : i64
-// CHECK-NEXT:    %[[V314:.*]] = llvm.add %[[V311]], %[[V313]] : i64
-// CHECK-NEXT:    %[[V315:.*]] = llvm.urem %[[V314]], %[[V308]] : i64
-// CHECK-NEXT:    %[[V316:.*]] = llvm.sub %[[V314]], %[[V315]] : i64
-// CHECK-NEXT:    %[[V317:.*]] = llvm.inttoptr %[[V316]] : i64 to !llvm.ptr
-// CHECK-NEXT:    %[[V318:.*]] = llvm.mlir.poison : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V319:.*]] = llvm.insertvalue %[[V310]], %[[V318]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V320:.*]] = llvm.insertvalue %[[V317]], %[[V319]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V321:.*]] = llvm.mlir.constant(0 : index) : i64
-// CHECK-NEXT:    %[[V322:.*]] = llvm.insertvalue %[[V321]], %[[V320]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V323:.*]] = llvm.insertvalue %[[V303]], %[[V322]][3, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V324:.*]] = llvm.insertvalue %[[V304]], %[[V323]][4, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    llvm.br ^bb1(%[[V52]] : i64)
-// CHECK-NEXT:    ^bb1(%[[V325:.*]]: i64):  // 2 preds: ^bb0, ^bb6
-// CHECK-NEXT:    %[[V326:.*]] = llvm.icmp "slt" %[[V325]], %[[V53]] : i64
-// CHECK-NEXT:    llvm.cond_br %[[V326]], ^bb2, ^bb7
-// CHECK-NEXT:    ^bb2:  // pred: ^bb1
-// CHECK-NEXT:    %[[V327:.*]] = llvm.icmp "ult" %[[V325]], %[[V52]] : i64
-// CHECK-NEXT:    llvm.cond_br %[[V327]], ^bb3, ^bb4
-// CHECK-NEXT:    ^bb3:  // pred: ^bb2
-// CHECK-NEXT:    llvm.br ^bb5(%[[V51]] : i64)
-// CHECK-NEXT:    ^bb4:  // pred: ^bb2
-// CHECK-NEXT:    %[[V328:.*]] = llvm.extractvalue %[[V266]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V329:.*]] = llvm.getelementptr inbounds|nuw %[[V328]][%[[V325]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    %[[V330:.*]] = llvm.load %[[V329]] : !llvm.ptr -> i64
-// CHECK-NEXT:    %[[V331:.*]] = llvm.extractvalue %[[V298]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V332:.*]] = llvm.getelementptr inbounds|nuw %[[V331]][%[[V325]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    %[[V333:.*]] = llvm.load %[[V332]] : !llvm.ptr -> i64
-// CHECK-NEXT:    %[[V334:.*]] = llvm.icmp "eq" %[[V333]], %[[V51]] : i64
-// CHECK-NEXT:    %[[V335:.*]] = llvm.select %[[V334]], %[[V330]], %[[V333]] : i1, i64
-// CHECK-NEXT:    llvm.br ^bb5(%[[V335]] : i64)
-// CHECK-NEXT:    ^bb5(%[[V336:.*]]: i64):  // 2 preds: ^bb3, ^bb4
-// CHECK-NEXT:    llvm.br ^bb6
-// CHECK-NEXT:    ^bb6:  // pred: ^bb5
-// CHECK-NEXT:    %[[V337:.*]] = llvm.extractvalue %[[V324]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V338:.*]] = llvm.getelementptr inbounds|nuw %[[V337]][%[[V325]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    llvm.store %[[V336]], %[[V338]] : i64, !llvm.ptr
-// CHECK-NEXT:    %[[V339:.*]] = llvm.add %[[V325]], %[[V51]] : i64
-// CHECK-NEXT:    llvm.br ^bb1(%[[V339]] : i64)
-// CHECK-NEXT:    ^bb7:  // pred: ^bb1
-// CHECK-NEXT:    %[[V340:.*]] = llvm.extractvalue %[[V298]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    llvm.call @free(%[[V340]]) : (!llvm.ptr) -> ()
-// CHECK-NEXT:    %[[V341:.*]] = llvm.extractvalue %[[V266]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    llvm.call @free(%[[V341]]) : (!llvm.ptr) -> ()
-// CHECK-NEXT:    %[[V342:.*]] = llvm.extractvalue %[[V324]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V343:.*]] = llvm.getelementptr inbounds|nuw %[[V342]][%[[V52]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    %[[V344:.*]] = llvm.load %[[V343]] : !llvm.ptr -> i64
-// CHECK-NEXT:    %[[V345:.*]] = llvm.mlir.constant(2 : index) : i64
-// CHECK-NEXT:    %[[V346:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V347:.*]] = llvm.mlir.zero : !llvm.ptr
-// CHECK-NEXT:    %[[V348:.*]] = llvm.getelementptr %[[V347]][%[[V345]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    %[[V349:.*]] = llvm.ptrtoint %[[V348]] : !llvm.ptr to i64
-// CHECK-NEXT:    %[[V350:.*]] = llvm.mlir.constant(64 : index) : i64
-// CHECK-NEXT:    %[[V351:.*]] = llvm.add %[[V349]], %[[V350]] : i64
-// CHECK-NEXT:    %[[V352:.*]] = llvm.call @malloc(%[[V351]]) : (i64) -> !llvm.ptr
-// CHECK-NEXT:    %[[V353:.*]] = llvm.ptrtoint %[[V352]] : !llvm.ptr to i64
-// CHECK-NEXT:    %[[V354:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V355:.*]] = llvm.sub %[[V350]], %[[V354]] : i64
-// CHECK-NEXT:    %[[V356:.*]] = llvm.add %[[V353]], %[[V355]] : i64
-// CHECK-NEXT:    %[[V357:.*]] = llvm.urem %[[V356]], %[[V350]] : i64
-// CHECK-NEXT:    %[[V358:.*]] = llvm.sub %[[V356]], %[[V357]] : i64
-// CHECK-NEXT:    %[[V359:.*]] = llvm.inttoptr %[[V358]] : i64 to !llvm.ptr
-// CHECK-NEXT:    %[[V360:.*]] = llvm.mlir.poison : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V361:.*]] = llvm.insertvalue %[[V352]], %[[V360]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V362:.*]] = llvm.insertvalue %[[V359]], %[[V361]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V363:.*]] = llvm.mlir.constant(0 : index) : i64
-// CHECK-NEXT:    %[[V364:.*]] = llvm.insertvalue %[[V363]], %[[V362]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V365:.*]] = llvm.insertvalue %[[V345]], %[[V364]][3, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V366:.*]] = llvm.insertvalue %[[V346]], %[[V365]][4, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V367:.*]] = llvm.extractvalue %[[V366]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V368:.*]] = llvm.getelementptr inbounds|nuw %[[V367]][%[[V52]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    llvm.store %[[V344]], %[[V368]] : i64, !llvm.ptr
-// CHECK-NEXT:    %[[V369:.*]] = llvm.extractvalue %[[V366]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V370:.*]] = llvm.getelementptr inbounds|nuw %[[V369]][%[[V51]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    llvm.store %[[V53]], %[[V370]] : i64, !llvm.ptr
-// CHECK-NEXT:    %[[V371:.*]] = llvm.mlir.constant(2 : index) : i64
-// CHECK-NEXT:    %[[V372:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V373:.*]] = llvm.mlir.zero : !llvm.ptr
-// CHECK-NEXT:    %[[V374:.*]] = llvm.getelementptr %[[V373]][%[[V371]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    %[[V375:.*]] = llvm.ptrtoint %[[V374]] : !llvm.ptr to i64
-// CHECK-NEXT:    %[[V376:.*]] = llvm.mlir.constant(64 : index) : i64
-// CHECK-NEXT:    %[[V377:.*]] = llvm.add %[[V375]], %[[V376]] : i64
-// CHECK-NEXT:    %[[V378:.*]] = llvm.call @malloc(%[[V377]]) : (i64) -> !llvm.ptr
-// CHECK-NEXT:    %[[V379:.*]] = llvm.ptrtoint %[[V378]] : !llvm.ptr to i64
-// CHECK-NEXT:    %[[V380:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V381:.*]] = llvm.sub %[[V376]], %[[V380]] : i64
-// CHECK-NEXT:    %[[V382:.*]] = llvm.add %[[V379]], %[[V381]] : i64
-// CHECK-NEXT:    %[[V383:.*]] = llvm.urem %[[V382]], %[[V376]] : i64
-// CHECK-NEXT:    %[[V384:.*]] = llvm.sub %[[V382]], %[[V383]] : i64
-// CHECK-NEXT:    %[[V385:.*]] = llvm.inttoptr %[[V384]] : i64 to !llvm.ptr
-// CHECK-NEXT:    %[[V386:.*]] = llvm.mlir.poison : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V387:.*]] = llvm.insertvalue %[[V378]], %[[V386]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V388:.*]] = llvm.insertvalue %[[V385]], %[[V387]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V389:.*]] = llvm.mlir.constant(0 : index) : i64
-// CHECK-NEXT:    %[[V390:.*]] = llvm.insertvalue %[[V389]], %[[V388]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V391:.*]] = llvm.insertvalue %[[V371]], %[[V390]][3, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V392:.*]] = llvm.insertvalue %[[V372]], %[[V391]][4, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V393:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V394:.*]] = llvm.extractvalue %[[V366]][3, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V395:.*]] = llvm.mul %[[V393]], %[[V394]] : i64
-// CHECK-NEXT:    %[[V396:.*]] = llvm.mlir.zero : !llvm.ptr
-// CHECK-NEXT:    %[[V397:.*]] = llvm.getelementptr %[[V396]][1] : (!llvm.ptr) -> !llvm.ptr, i64
-// CHECK-NEXT:    %[[V398:.*]] = llvm.ptrtoint %[[V397]] : !llvm.ptr to i64
-// CHECK-NEXT:    %[[V399:.*]] = llvm.mul %[[V395]], %[[V398]] : i64
-// CHECK-NEXT:    %[[V400:.*]] = llvm.extractvalue %[[V366]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V401:.*]] = llvm.extractvalue %[[V366]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V402:.*]] = llvm.getelementptr %[[V400]][%[[V401]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    %[[V403:.*]] = llvm.extractvalue %[[V392]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V404:.*]] = llvm.extractvalue %[[V392]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V405:.*]] = llvm.getelementptr %[[V403]][%[[V404]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    "llvm.intr.memcpy"(%[[V405]], %[[V402]], %[[V399]]) <{isVolatile = false}> : (!llvm.ptr, !llvm.ptr, i64) -> ()
-// CHECK-NEXT:    %[[V406:.*]] = llvm.extractvalue %[[V366]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    llvm.call @free(%[[V406]]) : (!llvm.ptr) -> ()
-// CHECK-NEXT:    %[[V407:.*]] = llvm.extractvalue %[[V324]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V408:.*]] = llvm.getelementptr inbounds|nuw %[[V407]][%[[V52]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    %[[V409:.*]] = llvm.load %[[V408]] : !llvm.ptr -> i64
-// CHECK-NEXT:    %[[V410:.*]] = llvm.mul %[[V409]], %[[V16]] : i64
-// CHECK-NEXT:    %[[V411:.*]] = llvm.add %[[V410]], %[[V19]] : i64
-// CHECK-NEXT:    %[[V412:.*]] = llvm.udiv %[[V411]], %[[V20]] : i64
-// CHECK-NEXT:    %[[V413:.*]] = llvm.mul %[[V412]], %[[V20]] : i64
-// CHECK-NEXT:    %[[V414:.*]] = llvm.mlir.constant(1 : i32) : i32
-// CHECK-NEXT:    %[[V415:.*]] = llvm.call @hipdnn_ep_get_pool_base(%[[ARG0]], %[[V414]], %[[V413]]) : (!llvm.ptr, i32, i64) -> !llvm.ptr<1>
-// CHECK-NEXT:    %[[V416:.*]] = llvm.mlir.constant(1 : i64) : i64
-// CHECK-NEXT:    %[[V417:.*]] = llvm.mlir.poison : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V418:.*]] = llvm.insertvalue %[[V415]], %[[V417]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V419:.*]] = llvm.insertvalue %[[V415]], %[[V418]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V420:.*]] = llvm.mlir.constant(0 : index) : i64
-// CHECK-NEXT:    %[[V421:.*]] = llvm.insertvalue %[[V420]], %[[V419]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V422:.*]] = llvm.insertvalue %[[V413]], %[[V421]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V423:.*]] = llvm.insertvalue %[[V416]], %[[V422]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V424:.*]] = llvm.mlir.poison : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V425:.*]] = llvm.extractvalue %[[V423]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V426:.*]] = llvm.insertvalue %[[V425]], %[[V424]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V427:.*]] = llvm.extractvalue %[[V423]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V428:.*]] = llvm.getelementptr %[[V427]][%[[V52]]] : (!llvm.ptr<1>, i64) -> !llvm.ptr<1>, i8
-// CHECK-NEXT:    %[[V429:.*]] = llvm.insertvalue %[[V428]], %[[V426]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V430:.*]] = llvm.mlir.constant(0 : index) : i64
-// CHECK-NEXT:    %[[V431:.*]] = llvm.insertvalue %[[V430]], %[[V429]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V432:.*]] = llvm.mlir.constant(4 : index) : i64
-// CHECK-NEXT:    %[[V433:.*]] = llvm.insertvalue %[[V432]], %[[V431]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V434:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V435:.*]] = llvm.insertvalue %[[V434]], %[[V433]][4, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V436:.*]] = llvm.insertvalue %[[V409]], %[[V435]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V437:.*]] = llvm.mlir.constant(4 : index) : i64
-// CHECK-NEXT:    %[[V438:.*]] = llvm.insertvalue %[[V437]], %[[V436]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V439:.*]] = llvm.extractvalue %[[V392]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V440:.*]] = llvm.getelementptr inbounds|nuw %[[V439]][%[[V52]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
-// CHECK-NEXT:    %[[V441:.*]] = llvm.load %[[V440]] : !llvm.ptr -> i64
-// CHECK-NEXT:    %[[V442:.*]] = llvm.mlir.constant(2 : index) : i64
-// CHECK-NEXT:    %[[V443:.*]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[V444:.*]] = llvm.mul %[[V442]], %[[V441]] : i64
-// CHECK-NEXT:    %[[V445:.*]] = llvm.mlir.zero : !llvm.ptr
-// CHECK-NEXT:    %[[V446:.*]] = llvm.getelementptr %[[V445]][%[[V444]]] : (!llvm.ptr, i64) -> !llvm.ptr, f32
-// CHECK-NEXT:    %[[V447:.*]] = llvm.ptrtoint %[[V446]] : !llvm.ptr to i64
-// CHECK-NEXT:    %[[V448:.*]] = llvm.mlir.constant(1 : i64) : i64
-// CHECK-NEXT:    %[[V449:.*]] = llvm.alloca %[[V448]] x !llvm.array<2 x i64> {alignment = 8 : i64} : (i64) -> !llvm.ptr
-// CHECK-NEXT:    %[[V450:.*]] = llvm.getelementptr %[[V449]][0] : (!llvm.ptr) -> !llvm.ptr, i64
-// CHECK-NEXT:    llvm.store %[[V441]], %[[V450]] : i64, !llvm.ptr
-// CHECK-NEXT:    %[[V451:.*]] = llvm.getelementptr %[[V449]][1] : (!llvm.ptr) -> !llvm.ptr, i64
-// CHECK-NEXT:    llvm.store %[[V442]], %[[V451]] : i64, !llvm.ptr
-// CHECK-NEXT:    %[[V452:.*]] = llvm.mlir.constant(0 : i64) : i64
-// CHECK-NEXT:    %[[V453:.*]] = llvm.mlir.constant(2 : i64) : i64
-// CHECK-NEXT:    %[[V454:.*]] = llvm.mlir.constant(4 : i64) : i64
-// CHECK-NEXT:    %[[V455:.*]] = llvm.call @hipdnn_ep_alloc_output(%[[ARG0]], %[[V452]], %[[V449]], %[[V453]], %[[V454]]) : (!llvm.ptr, i64, !llvm.ptr, i64, i64) -> !llvm.ptr
-// CHECK-NEXT:    %[[V456:.*]] = llvm.addrspacecast %[[V455]] : !llvm.ptr to !llvm.ptr<1>
-// CHECK-NEXT:    %[[V457:.*]] = llvm.mlir.poison : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V458:.*]] = llvm.insertvalue %[[V456]], %[[V457]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V459:.*]] = llvm.insertvalue %[[V456]], %[[V458]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V460:.*]] = llvm.mlir.constant(0 : index) : i64
-// CHECK-NEXT:    %[[V461:.*]] = llvm.insertvalue %[[V460]], %[[V459]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V462:.*]] = llvm.insertvalue %[[V441]], %[[V461]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V463:.*]] = llvm.insertvalue %[[V442]], %[[V462]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V464:.*]] = llvm.insertvalue %[[V442]], %[[V463]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V465:.*]] = llvm.insertvalue %[[V443]], %[[V464]][4, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V466:.*]] = llvm.mlir.constant(1 : i64) : i64
-// CHECK-NEXT:    %[[V467:.*]] = llvm.extractvalue %[[V214]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[V468:.*]] = llvm.alloca %[[V466]] x !llvm.array<2 x i64> {alignment = 8 : i64} : (i64) -> !llvm.ptr
-// CHECK-NEXT:    %[[V469:.*]] = llvm.extractvalue %[[V192]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V470:.*]] = llvm.mlir.constant(0 : i32) : i32
-// CHECK-NEXT:    %[[V471:.*]] = llvm.getelementptr %[[V468]][%[[V470]]] : (!llvm.ptr, i32) -> !llvm.ptr, i64
-// CHECK-NEXT:    llvm.store %[[V469]], %[[V471]] : i64, !llvm.ptr
-// CHECK-NEXT:    %[[V472:.*]] = llvm.mlir.constant(1 : i64) : i64
-// CHECK-NEXT:    %[[V473:.*]] = llvm.mlir.constant(1 : i32) : i32
-// CHECK-NEXT:    %[[V474:.*]] = llvm.getelementptr %[[V468]][%[[V473]]] : (!llvm.ptr, i32) -> !llvm.ptr, i64
-// CHECK-NEXT:    llvm.store %[[V472]], %[[V474]] : i64, !llvm.ptr
-// CHECK-NEXT:    %[[V475:.*]] = llvm.alloca %[[V466]] x !llvm.array<2 x i64> {alignment = 8 : i64} : (i64) -> !llvm.ptr
-// CHECK-NEXT:    %[[V476:.*]] = llvm.extractvalue %[[V438]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V477:.*]] = llvm.mlir.constant(0 : i32) : i32
-// CHECK-NEXT:    %[[V478:.*]] = llvm.getelementptr %[[V475]][%[[V477]]] : (!llvm.ptr, i32) -> !llvm.ptr, i64
-// CHECK-NEXT:    llvm.store %[[V476]], %[[V478]] : i64, !llvm.ptr
-// CHECK-NEXT:    %[[V479:.*]] = llvm.mlir.constant(4 : i64) : i64
-// CHECK-NEXT:    %[[V480:.*]] = llvm.mlir.constant(1 : i32) : i32
-// CHECK-NEXT:    %[[V481:.*]] = llvm.getelementptr %[[V475]][%[[V480]]] : (!llvm.ptr, i32) -> !llvm.ptr, i64
-// CHECK-NEXT:    llvm.store %[[V479]], %[[V481]] : i64, !llvm.ptr
-// CHECK-NEXT:    %[[V482:.*]] = llvm.extractvalue %[[V192]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V483:.*]] = llvm.extractvalue %[[V438]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V484:.*]] = llvm.mlir.constant(2 : i64) : i64
-// CHECK-NEXT:    %[[V485:.*]] = llvm.mlir.constant(2 : i64) : i64
-// CHECK-NEXT:    %[[V486:.*]] = llvm.mlir.constant(0 : i64) : i64
-// CHECK-NEXT:    %[[V487:.*]] = llvm.call @wrap_expand(%[[ARG0]], %[[V482]], %[[V467]], %[[V483]], %[[V468]], %[[V484]], %[[V475]], %[[V485]], %[[V486]]) : (!llvm.ptr, !llvm.ptr<1>, !llvm.ptr, !llvm.ptr<1>, !llvm.ptr, i64, !llvm.ptr, i64, i64) -> i32
-// CHECK-NEXT:    %[[V488:.*]] = llvm.extractvalue %[[V214]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    llvm.call @free(%[[V488]]) : (!llvm.ptr) -> ()
-// CHECK-NEXT:    %[[V489:.*]] = llvm.extractvalue %[[V438]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V490:.*]] = llvm.extractvalue %[[V438]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V491:.*]] = llvm.extractvalue %[[V35]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V492:.*]] = llvm.mlir.constant(1 : i64) : i64
-// CHECK-NEXT:    %[[V493:.*]] = llvm.mlir.constant(0 : i64) : i64
-// CHECK-NEXT:    %[[V494:.*]] = llvm.mlir.constant(1 : i32) : i32
-// CHECK-NEXT:    %[[V495:.*]] = llvm.extractvalue %[[V438]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V496:.*]] = llvm.extractvalue %[[V35]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V497:.*]] = llvm.extractvalue %[[V465]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[V498:.*]] = llvm.mlir.constant(4 : i64) : i64
-// CHECK-NEXT:    %[[V499:.*]] = llvm.mlir.constant(0 : i64) : i64
-// CHECK-NEXT:    %[[V500:.*]] = llvm.mlir.constant(0 : i64) : i64
-// CHECK-NEXT:    %[[V501:.*]] = llvm.call @wrap_hipblasLtMatmul(%[[ARG0]], %[[V494]], %[[V495]], %[[V496]], %[[V497]], %[[V489]], %[[V491]], %[[V490]], %[[V492]], %[[V498]], %[[V493]], %[[V499]], %[[V500]]) : (!llvm.ptr, i32, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
-// CHECK-NEXT:    %[[V502:.*]] = llvm.extractvalue %[[V324]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    llvm.call @free(%[[V502]]) : (!llvm.ptr) -> ()
-// CHECK-NEXT:    %[[V503:.*]] = llvm.extractvalue %[[V392]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    llvm.call @free(%[[V503]]) : (!llvm.ptr) -> ()
-// CHECK-NEXT:    llvm.return %[[V465]] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:  }
-// CHECK-LABEL: llvm.func @hipdnn_ep_op_states_init_fn(
-// CHECK-SAME:    %[[ARG0:[^,]*]]: !llvm.ptr) -> i32 {
-// CHECK-NEXT:    %[[V0:.*]] = llvm.mlir.constant(1 : i32) : i32
-// CHECK-NEXT:    %[[V1:.*]] = llvm.mlir.constant(0 : i32) : i32
-// CHECK-NEXT:    %[[V2:.*]] = llvm.mlir.constant(0 : i8) : i8
-// CHECK-NEXT:    %[[V3:.*]] = llvm.mlir.constant(2 : i64) : i64
-// CHECK-NEXT:    %[[V4:.*]] = llvm.call @hipdnn_ep_op_states_alloc(%[[ARG0]], %[[V3]]) : (!llvm.ptr, i64) -> i8
-// CHECK-NEXT:    %[[V5:.*]] = llvm.icmp "eq" %[[V4]], %[[V2]] : i8
-// CHECK-NEXT:    llvm.cond_br %[[V5]], ^bb2, ^bb1
-// CHECK-NEXT:    ^bb1:  // pred: ^bb0
-// CHECK-NEXT:    %[[V6:.*]] = llvm.call @hipdnn_ep_op_state_construct_matmul(%[[ARG0]], %[[V1]]) : (!llvm.ptr, i32) -> i8
-// CHECK-NEXT:    %[[V7:.*]] = llvm.call @hipdnn_ep_op_state_construct_matmul(%[[ARG0]], %[[V0]]) : (!llvm.ptr, i32) -> i8
-// CHECK-NEXT:    llvm.return %[[V1]] : i32
-// CHECK-NEXT:    ^bb2:  // pred: ^bb0
-// CHECK-NEXT:    llvm.return %[[V0]] : i32
-// CHECK-NEXT:  }
+// CHECK-LABEL: module attributes {hip.constants_file = "constants.bin", hipdnn.constant_offsets = array<i64: 0, 64>, hipdnn.constant_sizes = array<i64: 32, 6>, hipdnn.input_ranks = array<i64: 2, 2>, hipdnn.num_op_state_slots = 2 : i32} {
+// CHECK-NEXT: llvm.mlir.global internal constant @__metadata_json(
+// CHECK-NEXT: llvm.func @hipdnn_ep_state_cleanup(!llvm.ptr) -> i32
+// CHECK-NEXT: llvm.mlir.global internal constant @__hipsr_input_ranks(dense<2> : tensor<2xi64>) {addr_space = 0 : i32} : !llvm.array<2 x i64>
+// CHECK-NEXT: llvm.func @hipdnn_ep_inference_compute(!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr) -> i32
+// CHECK-NEXT: llvm.mlir.global internal constant @__metadata_blob(
+// CHECK-NEXT: llvm.func @hipdnn_ep_inference_init(!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr) -> i32
+// CHECK-NEXT: llvm.func @wrap_expand(!llvm.ptr, !llvm.ptr<1>, !llvm.ptr, !llvm.ptr<1>, !llvm.ptr, i64, !llvm.ptr, i64, i64) -> i32
+// CHECK-NEXT: llvm.func @hipdnn_ep_alloc_output(!llvm.ptr, i64, !llvm.ptr, i64, i64) -> !llvm.ptr
+// CHECK-NEXT: llvm.func @wrap_cast(!llvm.ptr, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64) -> i32
+// CHECK-NEXT: llvm.func @wrap_hipblasLtMatmul(!llvm.ptr, i32, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK-NEXT: llvm.func @hipdnn_ep_get_pool_base(!llvm.ptr, i32, i64) -> !llvm.ptr<1>
+// CHECK-NEXT: llvm.func @free(!llvm.ptr)
+// CHECK-NEXT: llvm.func @malloc(i64) -> !llvm.ptr
+// CHECK-NEXT: llvm.func @hipdnn_ep_constant_get(!llvm.ptr, i64) -> !llvm.ptr<1>
+// CHECK-NEXT: llvm.func @hipdnn_ep_op_state_construct_matmul(!llvm.ptr, i32) -> i8
+// CHECK-NEXT: llvm.func @hipdnn_ep_op_states_alloc(!llvm.ptr, i64) -> i8
+// CHECK-NEXT: llvm.func private @main_graph(%arg0: !llvm.ptr, %arg1: !llvm.ptr) -> i32 attributes {passthrough = ["noinline"]} {
+// CHECK-NEXT: %[[VAL_0:.*]] = llvm.getelementptr %arg1[0] : (!llvm.ptr) -> !llvm.ptr, !llvm.ptr
+// CHECK-NEXT: %[[VAL_1:.*]] = llvm.load %[[VAL_0]] : !llvm.ptr -> !llvm.ptr
+// CHECK-NEXT: %[[VAL_2:.*]] = llvm.load %[[VAL_1]] : !llvm.ptr -> !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_3:.*]] = llvm.extractvalue %[[VAL_2]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_4:.*]] = llvm.extractvalue %[[VAL_2]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_5:.*]] = llvm.extractvalue %[[VAL_2]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_6:.*]] = llvm.extractvalue %[[VAL_2]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_7:.*]] = llvm.extractvalue %[[VAL_2]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_8:.*]] = llvm.extractvalue %[[VAL_2]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_9:.*]] = llvm.extractvalue %[[VAL_2]][4, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_10:.*]] = llvm.getelementptr %arg1[1] : (!llvm.ptr) -> !llvm.ptr, !llvm.ptr
+// CHECK-NEXT: %[[VAL_11:.*]] = llvm.load %[[VAL_10]] : !llvm.ptr -> !llvm.ptr
+// CHECK-NEXT: %[[VAL_12:.*]] = llvm.load %[[VAL_11]] : !llvm.ptr -> !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_13:.*]] = llvm.extractvalue %[[VAL_12]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_14:.*]] = llvm.extractvalue %[[VAL_12]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_15:.*]] = llvm.extractvalue %[[VAL_12]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_16:.*]] = llvm.extractvalue %[[VAL_12]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_17:.*]] = llvm.extractvalue %[[VAL_12]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_18:.*]] = llvm.extractvalue %[[VAL_12]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_19:.*]] = llvm.extractvalue %[[VAL_12]][4, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_20:.*]] = llvm.call @main_graph_internal(%arg0, %[[VAL_3]], %[[VAL_4]], %[[VAL_5]], %[[VAL_6]], %[[VAL_7]], %[[VAL_8]], %[[VAL_9]], %[[VAL_13]], %[[VAL_14]], %[[VAL_15]], %[[VAL_16]], %[[VAL_17]], %[[VAL_18]], %[[VAL_19]]) : (!llvm.ptr, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64) -> !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_21:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK-NEXT: llvm.return %[[VAL_21]] : i32
+// CHECK-NEXT: }
+// CHECK-NEXT: llvm.func private @main_graph_internal(%arg0: !llvm.ptr, %arg1: !llvm.ptr<1>, %arg2: !llvm.ptr<1>, %arg3: i64, %arg4: i64, %arg5: i64, %arg6: i64, %arg7: i64, %arg8: !llvm.ptr<1>, %arg9: !llvm.ptr<1>, %arg10: i64, %arg11: i64, %arg12: i64, %arg13: i64, %arg14: i64) -> (!llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)> {onnx.name = "y"}) attributes {onnx.graph.name = "main_graph"} {
+// CHECK-NEXT: %[[VAL_0:.*]] = llvm.mlir.poison : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_1:.*]] = llvm.insertvalue %arg8, %[[VAL_0]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_2:.*]] = llvm.insertvalue %arg9, %[[VAL_1]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_3:.*]] = llvm.insertvalue %arg10, %[[VAL_2]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_4:.*]] = llvm.insertvalue %arg11, %[[VAL_3]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_5:.*]] = llvm.insertvalue %arg13, %[[VAL_4]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_6:.*]] = llvm.insertvalue %arg12, %[[VAL_5]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_7:.*]] = llvm.insertvalue %arg14, %[[VAL_6]][4, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_8:.*]] = llvm.mlir.poison : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_9:.*]] = llvm.insertvalue %arg1, %[[VAL_8]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_10:.*]] = llvm.insertvalue %arg2, %[[VAL_9]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_11:.*]] = llvm.insertvalue %arg3, %[[VAL_10]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_12:.*]] = llvm.insertvalue %arg4, %[[VAL_11]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_13:.*]] = llvm.insertvalue %arg6, %[[VAL_12]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_14:.*]] = llvm.insertvalue %arg5, %[[VAL_13]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_15:.*]] = llvm.insertvalue %arg7, %[[VAL_14]][4, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_16:.*]] = llvm.mlir.constant(16 : index) : i64
+// CHECK-NEXT: %[[VAL_17:.*]] = llvm.mlir.constant(4 : i64) : i64
+// CHECK-NEXT: %[[VAL_18:.*]] = llvm.mlir.constant(4 : index) : i64
+// CHECK-NEXT: %[[VAL_19:.*]] = llvm.mlir.constant(255 : index) : i64
+// CHECK-NEXT: %[[VAL_20:.*]] = llvm.mlir.constant(256 : index) : i64
+// CHECK-NEXT: %[[VAL_21:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK-NEXT: %[[VAL_22:.*]] = llvm.call @hipdnn_ep_constant_get(%arg0, %[[VAL_21]]) : (!llvm.ptr, i64) -> !llvm.ptr<1>
+// CHECK-NEXT: %[[VAL_23:.*]] = llvm.mlir.constant(4 : i64) : i64
+// CHECK-NEXT: %[[VAL_24:.*]] = llvm.mlir.constant(2 : i64) : i64
+// CHECK-NEXT: %[[VAL_25:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT: %[[VAL_26:.*]] = llvm.mlir.constant(2 : i64) : i64
+// CHECK-NEXT: %[[VAL_27:.*]] = llvm.mlir.poison : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_28:.*]] = llvm.insertvalue %[[VAL_22]], %[[VAL_27]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_29:.*]] = llvm.insertvalue %[[VAL_22]], %[[VAL_28]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_30:.*]] = llvm.mlir.constant(0 : index) : i64
+// CHECK-NEXT: %[[VAL_31:.*]] = llvm.insertvalue %[[VAL_30]], %[[VAL_29]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_32:.*]] = llvm.insertvalue %[[VAL_23]], %[[VAL_31]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_33:.*]] = llvm.insertvalue %[[VAL_24]], %[[VAL_32]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_34:.*]] = llvm.insertvalue %[[VAL_26]], %[[VAL_33]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_35:.*]] = llvm.insertvalue %[[VAL_25]], %[[VAL_34]][4, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_36:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT: %[[VAL_37:.*]] = llvm.call @hipdnn_ep_constant_get(%arg0, %[[VAL_36]]) : (!llvm.ptr, i64) -> !llvm.ptr<1>
+// CHECK-NEXT: %[[VAL_38:.*]] = llvm.mlir.constant(3 : i64) : i64
+// CHECK-NEXT: %[[VAL_39:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT: %[[VAL_40:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT: %[[VAL_41:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT: %[[VAL_42:.*]] = llvm.mlir.poison : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_43:.*]] = llvm.insertvalue %[[VAL_37]], %[[VAL_42]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_44:.*]] = llvm.insertvalue %[[VAL_37]], %[[VAL_43]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_45:.*]] = llvm.mlir.constant(0 : index) : i64
+// CHECK-NEXT: %[[VAL_46:.*]] = llvm.insertvalue %[[VAL_45]], %[[VAL_44]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_47:.*]] = llvm.insertvalue %[[VAL_38]], %[[VAL_46]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_48:.*]] = llvm.insertvalue %[[VAL_39]], %[[VAL_47]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_49:.*]] = llvm.insertvalue %[[VAL_41]], %[[VAL_48]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_50:.*]] = llvm.insertvalue %[[VAL_40]], %[[VAL_49]][4, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_51:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_52:.*]] = llvm.mlir.constant(0 : index) : i64
+// CHECK-NEXT: %[[VAL_53:.*]] = llvm.mlir.constant(2 : index) : i64
+// CHECK-NEXT: %[[VAL_54:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_55:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_56:.*]] = llvm.mlir.zero : !llvm.ptr
+// CHECK-NEXT: %[[VAL_57:.*]] = llvm.getelementptr %[[VAL_56]][%[[VAL_54]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: %[[VAL_58:.*]] = llvm.ptrtoint %[[VAL_57]] : !llvm.ptr to i64
+// CHECK-NEXT: %[[VAL_59:.*]] = llvm.mlir.constant(64 : index) : i64
+// CHECK-NEXT: %[[VAL_60:.*]] = llvm.add %[[VAL_58]], %[[VAL_59]] : i64
+// CHECK-NEXT: %[[VAL_61:.*]] = llvm.call @malloc(%[[VAL_60]]) : (i64) -> !llvm.ptr
+// CHECK-NEXT: %[[VAL_62:.*]] = llvm.ptrtoint %[[VAL_61]] : !llvm.ptr to i64
+// CHECK-NEXT: %[[VAL_63:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_64:.*]] = llvm.sub %[[VAL_59]], %[[VAL_63]] : i64
+// CHECK-NEXT: %[[VAL_65:.*]] = llvm.add %[[VAL_62]], %[[VAL_64]] : i64
+// CHECK-NEXT: %[[VAL_66:.*]] = llvm.urem %[[VAL_65]], %[[VAL_59]] : i64
+// CHECK-NEXT: %[[VAL_67:.*]] = llvm.sub %[[VAL_65]], %[[VAL_66]] : i64
+// CHECK-NEXT: %[[VAL_68:.*]] = llvm.inttoptr %[[VAL_67]] : i64 to !llvm.ptr
+// CHECK-NEXT: %[[VAL_69:.*]] = llvm.mlir.poison : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_70:.*]] = llvm.insertvalue %[[VAL_61]], %[[VAL_69]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_71:.*]] = llvm.insertvalue %[[VAL_68]], %[[VAL_70]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_72:.*]] = llvm.mlir.constant(0 : index) : i64
+// CHECK-NEXT: %[[VAL_73:.*]] = llvm.insertvalue %[[VAL_72]], %[[VAL_71]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_74:.*]] = llvm.insertvalue %[[VAL_54]], %[[VAL_73]][3, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_75:.*]] = llvm.insertvalue %[[VAL_55]], %[[VAL_74]][4, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_76:.*]] = llvm.extractvalue %[[VAL_75]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_77:.*]] = llvm.getelementptr inbounds|nuw %[[VAL_76]][%[[VAL_52]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: llvm.store %[[VAL_53]], %[[VAL_77]] : i64, !llvm.ptr
+// CHECK-NEXT: %[[VAL_78:.*]] = llvm.extractvalue %[[VAL_15]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_79:.*]] = llvm.mlir.constant(2 : index) : i64
+// CHECK-NEXT: %[[VAL_80:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_81:.*]] = llvm.mlir.zero : !llvm.ptr
+// CHECK-NEXT: %[[VAL_82:.*]] = llvm.getelementptr %[[VAL_81]][%[[VAL_79]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: %[[VAL_83:.*]] = llvm.ptrtoint %[[VAL_82]] : !llvm.ptr to i64
+// CHECK-NEXT: %[[VAL_84:.*]] = llvm.mlir.constant(64 : index) : i64
+// CHECK-NEXT: %[[VAL_85:.*]] = llvm.add %[[VAL_83]], %[[VAL_84]] : i64
+// CHECK-NEXT: %[[VAL_86:.*]] = llvm.call @malloc(%[[VAL_85]]) : (i64) -> !llvm.ptr
+// CHECK-NEXT: %[[VAL_87:.*]] = llvm.ptrtoint %[[VAL_86]] : !llvm.ptr to i64
+// CHECK-NEXT: %[[VAL_88:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_89:.*]] = llvm.sub %[[VAL_84]], %[[VAL_88]] : i64
+// CHECK-NEXT: %[[VAL_90:.*]] = llvm.add %[[VAL_87]], %[[VAL_89]] : i64
+// CHECK-NEXT: %[[VAL_91:.*]] = llvm.urem %[[VAL_90]], %[[VAL_84]] : i64
+// CHECK-NEXT: %[[VAL_92:.*]] = llvm.sub %[[VAL_90]], %[[VAL_91]] : i64
+// CHECK-NEXT: %[[VAL_93:.*]] = llvm.inttoptr %[[VAL_92]] : i64 to !llvm.ptr
+// CHECK-NEXT: %[[VAL_94:.*]] = llvm.mlir.poison : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_95:.*]] = llvm.insertvalue %[[VAL_86]], %[[VAL_94]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_96:.*]] = llvm.insertvalue %[[VAL_93]], %[[VAL_95]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_97:.*]] = llvm.mlir.constant(0 : index) : i64
+// CHECK-NEXT: %[[VAL_98:.*]] = llvm.insertvalue %[[VAL_97]], %[[VAL_96]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_99:.*]] = llvm.insertvalue %[[VAL_79]], %[[VAL_98]][3, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_100:.*]] = llvm.insertvalue %[[VAL_80]], %[[VAL_99]][4, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_101:.*]] = llvm.extractvalue %[[VAL_100]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_102:.*]] = llvm.getelementptr inbounds|nuw %[[VAL_101]][%[[VAL_52]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: llvm.store %[[VAL_78]], %[[VAL_102]] : i64, !llvm.ptr
+// CHECK-NEXT: %[[VAL_103:.*]] = llvm.extractvalue %[[VAL_100]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_104:.*]] = llvm.getelementptr inbounds|nuw %[[VAL_103]][%[[VAL_51]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: llvm.store %[[VAL_51]], %[[VAL_104]] : i64, !llvm.ptr
+// CHECK-NEXT: %[[VAL_105:.*]] = llvm.mlir.constant(2 : index) : i64
+// CHECK-NEXT: %[[VAL_106:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_107:.*]] = llvm.mlir.zero : !llvm.ptr
+// CHECK-NEXT: %[[VAL_108:.*]] = llvm.getelementptr %[[VAL_107]][%[[VAL_105]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: %[[VAL_109:.*]] = llvm.ptrtoint %[[VAL_108]] : !llvm.ptr to i64
+// CHECK-NEXT: %[[VAL_110:.*]] = llvm.mlir.constant(64 : index) : i64
+// CHECK-NEXT: %[[VAL_111:.*]] = llvm.add %[[VAL_109]], %[[VAL_110]] : i64
+// CHECK-NEXT: %[[VAL_112:.*]] = llvm.call @malloc(%[[VAL_111]]) : (i64) -> !llvm.ptr
+// CHECK-NEXT: %[[VAL_113:.*]] = llvm.ptrtoint %[[VAL_112]] : !llvm.ptr to i64
+// CHECK-NEXT: %[[VAL_114:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_115:.*]] = llvm.sub %[[VAL_110]], %[[VAL_114]] : i64
+// CHECK-NEXT: %[[VAL_116:.*]] = llvm.add %[[VAL_113]], %[[VAL_115]] : i64
+// CHECK-NEXT: %[[VAL_117:.*]] = llvm.urem %[[VAL_116]], %[[VAL_110]] : i64
+// CHECK-NEXT: %[[VAL_118:.*]] = llvm.sub %[[VAL_116]], %[[VAL_117]] : i64
+// CHECK-NEXT: %[[VAL_119:.*]] = llvm.inttoptr %[[VAL_118]] : i64 to !llvm.ptr
+// CHECK-NEXT: %[[VAL_120:.*]] = llvm.mlir.poison : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_121:.*]] = llvm.insertvalue %[[VAL_112]], %[[VAL_120]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_122:.*]] = llvm.insertvalue %[[VAL_119]], %[[VAL_121]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_123:.*]] = llvm.mlir.constant(0 : index) : i64
+// CHECK-NEXT: %[[VAL_124:.*]] = llvm.insertvalue %[[VAL_123]], %[[VAL_122]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_125:.*]] = llvm.insertvalue %[[VAL_105]], %[[VAL_124]][3, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_126:.*]] = llvm.insertvalue %[[VAL_106]], %[[VAL_125]][4, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_127:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_128:.*]] = llvm.extractvalue %[[VAL_100]][3, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_129:.*]] = llvm.mul %[[VAL_127]], %[[VAL_128]] : i64
+// CHECK-NEXT: %[[VAL_130:.*]] = llvm.mlir.zero : !llvm.ptr
+// CHECK-NEXT: %[[VAL_131:.*]] = llvm.getelementptr %[[VAL_130]][1] : (!llvm.ptr) -> !llvm.ptr, i64
+// CHECK-NEXT: %[[VAL_132:.*]] = llvm.ptrtoint %[[VAL_131]] : !llvm.ptr to i64
+// CHECK-NEXT: %[[VAL_133:.*]] = llvm.mul %[[VAL_129]], %[[VAL_132]] : i64
+// CHECK-NEXT: %[[VAL_134:.*]] = llvm.extractvalue %[[VAL_100]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_135:.*]] = llvm.extractvalue %[[VAL_100]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_136:.*]] = llvm.getelementptr %[[VAL_134]][%[[VAL_135]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: %[[VAL_137:.*]] = llvm.extractvalue %[[VAL_126]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_138:.*]] = llvm.extractvalue %[[VAL_126]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_139:.*]] = llvm.getelementptr %[[VAL_137]][%[[VAL_138]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: "llvm.intr.memcpy"(%[[VAL_139]], %[[VAL_136]], %[[VAL_133]]) <{isVolatile = false}> : (!llvm.ptr, !llvm.ptr, i64) -> ()
+// CHECK-NEXT: %[[VAL_140:.*]] = llvm.extractvalue %[[VAL_100]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: llvm.call @free(%[[VAL_140]]) : (!llvm.ptr) -> ()
+// CHECK-NEXT: %[[VAL_141:.*]] = llvm.extractvalue %[[VAL_126]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_142:.*]] = llvm.getelementptr inbounds|nuw %[[VAL_141]][%[[VAL_52]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: %[[VAL_143:.*]] = llvm.load %[[VAL_142]] : !llvm.ptr -> i64
+// CHECK-NEXT: %[[VAL_144:.*]] = llvm.mul %[[VAL_143]], %[[VAL_53]] : i64
+// CHECK-NEXT: %[[VAL_145:.*]] = llvm.add %[[VAL_144]], %[[VAL_19]] : i64
+// CHECK-NEXT: %[[VAL_146:.*]] = llvm.udiv %[[VAL_145]], %[[VAL_20]] : i64
+// CHECK-NEXT: %[[VAL_147:.*]] = llvm.mul %[[VAL_146]], %[[VAL_20]] : i64
+// CHECK-NEXT: %[[VAL_148:.*]] = llvm.mul %[[VAL_143]], %[[VAL_18]] : i64
+// CHECK-NEXT: %[[VAL_149:.*]] = llvm.add %[[VAL_148]], %[[VAL_19]] : i64
+// CHECK-NEXT: %[[VAL_150:.*]] = llvm.udiv %[[VAL_149]], %[[VAL_20]] : i64
+// CHECK-NEXT: %[[VAL_151:.*]] = llvm.mul %[[VAL_150]], %[[VAL_20]] : i64
+// CHECK-NEXT: %[[VAL_152:.*]] = llvm.add %[[VAL_147]], %[[VAL_151]] : i64
+// CHECK-NEXT: %[[VAL_153:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK-NEXT: %[[VAL_154:.*]] = llvm.call @hipdnn_ep_get_pool_base(%arg0, %[[VAL_153]], %[[VAL_152]]) : (!llvm.ptr, i32, i64) -> !llvm.ptr<1>
+// CHECK-NEXT: %[[VAL_155:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT: %[[VAL_156:.*]] = llvm.mlir.poison : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_157:.*]] = llvm.insertvalue %[[VAL_154]], %[[VAL_156]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_158:.*]] = llvm.insertvalue %[[VAL_154]], %[[VAL_157]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_159:.*]] = llvm.mlir.constant(0 : index) : i64
+// CHECK-NEXT: %[[VAL_160:.*]] = llvm.insertvalue %[[VAL_159]], %[[VAL_158]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_161:.*]] = llvm.insertvalue %[[VAL_152]], %[[VAL_160]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_162:.*]] = llvm.insertvalue %[[VAL_155]], %[[VAL_161]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_163:.*]] = llvm.mlir.poison : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_164:.*]] = llvm.extractvalue %[[VAL_162]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_165:.*]] = llvm.insertvalue %[[VAL_164]], %[[VAL_163]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_166:.*]] = llvm.extractvalue %[[VAL_162]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_167:.*]] = llvm.getelementptr %[[VAL_166]][%[[VAL_52]]] : (!llvm.ptr<1>, i64) -> !llvm.ptr<1>, i8
+// CHECK-NEXT: %[[VAL_168:.*]] = llvm.insertvalue %[[VAL_167]], %[[VAL_165]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_169:.*]] = llvm.mlir.constant(0 : index) : i64
+// CHECK-NEXT: %[[VAL_170:.*]] = llvm.insertvalue %[[VAL_169]], %[[VAL_168]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_171:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_172:.*]] = llvm.insertvalue %[[VAL_171]], %[[VAL_170]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_173:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_174:.*]] = llvm.insertvalue %[[VAL_173]], %[[VAL_172]][4, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_175:.*]] = llvm.insertvalue %[[VAL_143]], %[[VAL_174]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_176:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_177:.*]] = llvm.insertvalue %[[VAL_176]], %[[VAL_175]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_178:.*]] = llvm.mlir.poison : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_179:.*]] = llvm.extractvalue %[[VAL_162]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_180:.*]] = llvm.insertvalue %[[VAL_179]], %[[VAL_178]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_181:.*]] = llvm.extractvalue %[[VAL_162]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_182:.*]] = llvm.getelementptr %[[VAL_181]][%[[VAL_147]]] : (!llvm.ptr<1>, i64) -> !llvm.ptr<1>, i8
+// CHECK-NEXT: %[[VAL_183:.*]] = llvm.insertvalue %[[VAL_182]], %[[VAL_180]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_184:.*]] = llvm.mlir.constant(0 : index) : i64
+// CHECK-NEXT: %[[VAL_185:.*]] = llvm.insertvalue %[[VAL_184]], %[[VAL_183]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_186:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_187:.*]] = llvm.insertvalue %[[VAL_186]], %[[VAL_185]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_188:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_189:.*]] = llvm.insertvalue %[[VAL_188]], %[[VAL_187]][4, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_190:.*]] = llvm.insertvalue %[[VAL_143]], %[[VAL_189]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_191:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_192:.*]] = llvm.insertvalue %[[VAL_191]], %[[VAL_190]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_193:.*]] = llvm.mlir.constant(2 : index) : i64
+// CHECK-NEXT: %[[VAL_194:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_195:.*]] = llvm.mlir.zero : !llvm.ptr
+// CHECK-NEXT: %[[VAL_196:.*]] = llvm.getelementptr %[[VAL_195]][%[[VAL_193]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: %[[VAL_197:.*]] = llvm.ptrtoint %[[VAL_196]] : !llvm.ptr to i64
+// CHECK-NEXT: %[[VAL_198:.*]] = llvm.mlir.constant(64 : index) : i64
+// CHECK-NEXT: %[[VAL_199:.*]] = llvm.add %[[VAL_197]], %[[VAL_198]] : i64
+// CHECK-NEXT: %[[VAL_200:.*]] = llvm.call @malloc(%[[VAL_199]]) : (i64) -> !llvm.ptr
+// CHECK-NEXT: %[[VAL_201:.*]] = llvm.ptrtoint %[[VAL_200]] : !llvm.ptr to i64
+// CHECK-NEXT: %[[VAL_202:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_203:.*]] = llvm.sub %[[VAL_198]], %[[VAL_202]] : i64
+// CHECK-NEXT: %[[VAL_204:.*]] = llvm.add %[[VAL_201]], %[[VAL_203]] : i64
+// CHECK-NEXT: %[[VAL_205:.*]] = llvm.urem %[[VAL_204]], %[[VAL_198]] : i64
+// CHECK-NEXT: %[[VAL_206:.*]] = llvm.sub %[[VAL_204]], %[[VAL_205]] : i64
+// CHECK-NEXT: %[[VAL_207:.*]] = llvm.inttoptr %[[VAL_206]] : i64 to !llvm.ptr
+// CHECK-NEXT: %[[VAL_208:.*]] = llvm.mlir.poison : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_209:.*]] = llvm.insertvalue %[[VAL_200]], %[[VAL_208]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_210:.*]] = llvm.insertvalue %[[VAL_207]], %[[VAL_209]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_211:.*]] = llvm.mlir.constant(0 : index) : i64
+// CHECK-NEXT: %[[VAL_212:.*]] = llvm.insertvalue %[[VAL_211]], %[[VAL_210]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_213:.*]] = llvm.insertvalue %[[VAL_193]], %[[VAL_212]][3, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_214:.*]] = llvm.insertvalue %[[VAL_194]], %[[VAL_213]][4, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_215:.*]] = llvm.extractvalue %[[VAL_15]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_216:.*]] = llvm.extractvalue %[[VAL_15]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_217:.*]] = llvm.extractvalue %[[VAL_50]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_218:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT: %[[VAL_219:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK-NEXT: %[[VAL_220:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK-NEXT: %[[VAL_221:.*]] = llvm.extractvalue %[[VAL_15]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_222:.*]] = llvm.extractvalue %[[VAL_50]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_223:.*]] = llvm.extractvalue %[[VAL_177]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_224:.*]] = llvm.mlir.constant(2 : i64) : i64
+// CHECK-NEXT: %[[VAL_225:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK-NEXT: %[[VAL_226:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK-NEXT: %[[VAL_227:.*]] = llvm.call @wrap_hipblasLtMatmul(%arg0, %[[VAL_220]], %[[VAL_221]], %[[VAL_222]], %[[VAL_223]], %[[VAL_215]], %[[VAL_217]], %[[VAL_216]], %[[VAL_218]], %[[VAL_224]], %[[VAL_219]], %[[VAL_225]], %[[VAL_226]]) : (!llvm.ptr, i32, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK-NEXT: %[[VAL_228:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT: %[[VAL_229:.*]] = llvm.extractvalue %[[VAL_192]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_230:.*]] = llvm.mul %[[VAL_228]], %[[VAL_229]] : i64
+// CHECK-NEXT: %[[VAL_231:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT: %[[VAL_232:.*]] = llvm.mul %[[VAL_230]], %[[VAL_231]] : i64
+// CHECK-NEXT: %[[VAL_233:.*]] = llvm.extractvalue %[[VAL_177]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_234:.*]] = llvm.extractvalue %[[VAL_192]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_235:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT: %[[VAL_236:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK-NEXT: %[[VAL_237:.*]] = llvm.call @wrap_cast(%arg0, %[[VAL_233]], %[[VAL_234]], %[[VAL_232]], %[[VAL_235]], %[[VAL_236]]) : (!llvm.ptr, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64) -> i32
+// CHECK-NEXT: %[[VAL_238:.*]] = llvm.extractvalue %[[VAL_7]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_239:.*]] = llvm.extractvalue %[[VAL_214]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_240:.*]] = llvm.getelementptr inbounds|nuw %[[VAL_239]][%[[VAL_52]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: llvm.store %[[VAL_238]], %[[VAL_240]] : i64, !llvm.ptr
+// CHECK-NEXT: %[[VAL_241:.*]] = llvm.extractvalue %[[VAL_214]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_242:.*]] = llvm.getelementptr inbounds|nuw %[[VAL_241]][%[[VAL_51]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: llvm.store %[[VAL_17]], %[[VAL_242]] : i64, !llvm.ptr
+// CHECK-NEXT: %[[VAL_243:.*]] = llvm.extractvalue %[[VAL_126]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: llvm.call @free(%[[VAL_243]]) : (!llvm.ptr) -> ()
+// CHECK-NEXT: %[[VAL_244:.*]] = llvm.extractvalue %[[VAL_75]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: llvm.call @free(%[[VAL_244]]) : (!llvm.ptr) -> ()
+// CHECK-NEXT: %[[VAL_245:.*]] = llvm.mlir.constant(2 : index) : i64
+// CHECK-NEXT: %[[VAL_246:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_247:.*]] = llvm.mlir.zero : !llvm.ptr
+// CHECK-NEXT: %[[VAL_248:.*]] = llvm.getelementptr %[[VAL_247]][%[[VAL_245]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: %[[VAL_249:.*]] = llvm.ptrtoint %[[VAL_248]] : !llvm.ptr to i64
+// CHECK-NEXT: %[[VAL_250:.*]] = llvm.mlir.constant(64 : index) : i64
+// CHECK-NEXT: %[[VAL_251:.*]] = llvm.add %[[VAL_249]], %[[VAL_250]] : i64
+// CHECK-NEXT: %[[VAL_252:.*]] = llvm.call @malloc(%[[VAL_251]]) : (i64) -> !llvm.ptr
+// CHECK-NEXT: %[[VAL_253:.*]] = llvm.ptrtoint %[[VAL_252]] : !llvm.ptr to i64
+// CHECK-NEXT: %[[VAL_254:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_255:.*]] = llvm.sub %[[VAL_250]], %[[VAL_254]] : i64
+// CHECK-NEXT: %[[VAL_256:.*]] = llvm.add %[[VAL_253]], %[[VAL_255]] : i64
+// CHECK-NEXT: %[[VAL_257:.*]] = llvm.urem %[[VAL_256]], %[[VAL_250]] : i64
+// CHECK-NEXT: %[[VAL_258:.*]] = llvm.sub %[[VAL_256]], %[[VAL_257]] : i64
+// CHECK-NEXT: %[[VAL_259:.*]] = llvm.inttoptr %[[VAL_258]] : i64 to !llvm.ptr
+// CHECK-NEXT: %[[VAL_260:.*]] = llvm.mlir.poison : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_261:.*]] = llvm.insertvalue %[[VAL_252]], %[[VAL_260]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_262:.*]] = llvm.insertvalue %[[VAL_259]], %[[VAL_261]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_263:.*]] = llvm.mlir.constant(0 : index) : i64
+// CHECK-NEXT: %[[VAL_264:.*]] = llvm.insertvalue %[[VAL_263]], %[[VAL_262]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_265:.*]] = llvm.insertvalue %[[VAL_245]], %[[VAL_264]][3, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_266:.*]] = llvm.insertvalue %[[VAL_246]], %[[VAL_265]][4, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_267:.*]] = llvm.extractvalue %[[VAL_266]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_268:.*]] = llvm.getelementptr inbounds|nuw %[[VAL_267]][%[[VAL_52]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: llvm.store %[[VAL_143]], %[[VAL_268]] : i64, !llvm.ptr
+// CHECK-NEXT: %[[VAL_269:.*]] = llvm.extractvalue %[[VAL_266]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_270:.*]] = llvm.getelementptr inbounds|nuw %[[VAL_269]][%[[VAL_51]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: llvm.store %[[VAL_51]], %[[VAL_270]] : i64, !llvm.ptr
+// CHECK-NEXT: %[[VAL_271:.*]] = llvm.extractvalue %[[VAL_214]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_272:.*]] = llvm.getelementptr inbounds|nuw %[[VAL_271]][%[[VAL_52]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: %[[VAL_273:.*]] = llvm.load %[[VAL_272]] : !llvm.ptr -> i64
+// CHECK-NEXT: %[[VAL_274:.*]] = llvm.extractvalue %[[VAL_214]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_275:.*]] = llvm.getelementptr inbounds|nuw %[[VAL_274]][%[[VAL_51]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: %[[VAL_276:.*]] = llvm.load %[[VAL_275]] : !llvm.ptr -> i64
+// CHECK-NEXT: %[[VAL_277:.*]] = llvm.mlir.constant(2 : index) : i64
+// CHECK-NEXT: %[[VAL_278:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_279:.*]] = llvm.mlir.zero : !llvm.ptr
+// CHECK-NEXT: %[[VAL_280:.*]] = llvm.getelementptr %[[VAL_279]][%[[VAL_277]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: %[[VAL_281:.*]] = llvm.ptrtoint %[[VAL_280]] : !llvm.ptr to i64
+// CHECK-NEXT: %[[VAL_282:.*]] = llvm.mlir.constant(64 : index) : i64
+// CHECK-NEXT: %[[VAL_283:.*]] = llvm.add %[[VAL_281]], %[[VAL_282]] : i64
+// CHECK-NEXT: %[[VAL_284:.*]] = llvm.call @malloc(%[[VAL_283]]) : (i64) -> !llvm.ptr
+// CHECK-NEXT: %[[VAL_285:.*]] = llvm.ptrtoint %[[VAL_284]] : !llvm.ptr to i64
+// CHECK-NEXT: %[[VAL_286:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_287:.*]] = llvm.sub %[[VAL_282]], %[[VAL_286]] : i64
+// CHECK-NEXT: %[[VAL_288:.*]] = llvm.add %[[VAL_285]], %[[VAL_287]] : i64
+// CHECK-NEXT: %[[VAL_289:.*]] = llvm.urem %[[VAL_288]], %[[VAL_282]] : i64
+// CHECK-NEXT: %[[VAL_290:.*]] = llvm.sub %[[VAL_288]], %[[VAL_289]] : i64
+// CHECK-NEXT: %[[VAL_291:.*]] = llvm.inttoptr %[[VAL_290]] : i64 to !llvm.ptr
+// CHECK-NEXT: %[[VAL_292:.*]] = llvm.mlir.poison : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_293:.*]] = llvm.insertvalue %[[VAL_284]], %[[VAL_292]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_294:.*]] = llvm.insertvalue %[[VAL_291]], %[[VAL_293]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_295:.*]] = llvm.mlir.constant(0 : index) : i64
+// CHECK-NEXT: %[[VAL_296:.*]] = llvm.insertvalue %[[VAL_295]], %[[VAL_294]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_297:.*]] = llvm.insertvalue %[[VAL_277]], %[[VAL_296]][3, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_298:.*]] = llvm.insertvalue %[[VAL_278]], %[[VAL_297]][4, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_299:.*]] = llvm.extractvalue %[[VAL_298]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_300:.*]] = llvm.getelementptr inbounds|nuw %[[VAL_299]][%[[VAL_52]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: llvm.store %[[VAL_273]], %[[VAL_300]] : i64, !llvm.ptr
+// CHECK-NEXT: %[[VAL_301:.*]] = llvm.extractvalue %[[VAL_298]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_302:.*]] = llvm.getelementptr inbounds|nuw %[[VAL_301]][%[[VAL_51]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: llvm.store %[[VAL_276]], %[[VAL_302]] : i64, !llvm.ptr
+// CHECK-NEXT: %[[VAL_303:.*]] = llvm.mlir.constant(2 : index) : i64
+// CHECK-NEXT: %[[VAL_304:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_305:.*]] = llvm.mlir.zero : !llvm.ptr
+// CHECK-NEXT: %[[VAL_306:.*]] = llvm.getelementptr %[[VAL_305]][%[[VAL_303]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: %[[VAL_307:.*]] = llvm.ptrtoint %[[VAL_306]] : !llvm.ptr to i64
+// CHECK-NEXT: %[[VAL_308:.*]] = llvm.mlir.constant(64 : index) : i64
+// CHECK-NEXT: %[[VAL_309:.*]] = llvm.add %[[VAL_307]], %[[VAL_308]] : i64
+// CHECK-NEXT: %[[VAL_310:.*]] = llvm.call @malloc(%[[VAL_309]]) : (i64) -> !llvm.ptr
+// CHECK-NEXT: %[[VAL_311:.*]] = llvm.ptrtoint %[[VAL_310]] : !llvm.ptr to i64
+// CHECK-NEXT: %[[VAL_312:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_313:.*]] = llvm.sub %[[VAL_308]], %[[VAL_312]] : i64
+// CHECK-NEXT: %[[VAL_314:.*]] = llvm.add %[[VAL_311]], %[[VAL_313]] : i64
+// CHECK-NEXT: %[[VAL_315:.*]] = llvm.urem %[[VAL_314]], %[[VAL_308]] : i64
+// CHECK-NEXT: %[[VAL_316:.*]] = llvm.sub %[[VAL_314]], %[[VAL_315]] : i64
+// CHECK-NEXT: %[[VAL_317:.*]] = llvm.inttoptr %[[VAL_316]] : i64 to !llvm.ptr
+// CHECK-NEXT: %[[VAL_318:.*]] = llvm.mlir.poison : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_319:.*]] = llvm.insertvalue %[[VAL_310]], %[[VAL_318]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_320:.*]] = llvm.insertvalue %[[VAL_317]], %[[VAL_319]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_321:.*]] = llvm.mlir.constant(0 : index) : i64
+// CHECK-NEXT: %[[VAL_322:.*]] = llvm.insertvalue %[[VAL_321]], %[[VAL_320]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_323:.*]] = llvm.insertvalue %[[VAL_303]], %[[VAL_322]][3, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_324:.*]] = llvm.insertvalue %[[VAL_304]], %[[VAL_323]][4, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: llvm.br ^bb1(%[[VAL_52]] : i64)
+// CHECK-NEXT: ^bb1(%[[VAL_325:.*]]: i64):  // 2 preds: ^bb0, ^bb6
+// CHECK-NEXT: %[[VAL_326:.*]] = llvm.icmp "slt" %[[VAL_325]], %[[VAL_53]] : i64
+// CHECK-NEXT: llvm.cond_br %[[VAL_326]], ^bb2, ^bb7
+// CHECK-NEXT: ^bb2:  // pred: ^bb1
+// CHECK-NEXT: %[[VAL_327:.*]] = llvm.icmp "ult" %[[VAL_325]], %[[VAL_52]] : i64
+// CHECK-NEXT: llvm.cond_br %[[VAL_327]], ^bb3, ^bb4
+// CHECK-NEXT: ^bb3:  // pred: ^bb2
+// CHECK-NEXT: llvm.br ^bb5(%[[VAL_51]] : i64)
+// CHECK-NEXT: ^bb4:  // pred: ^bb2
+// CHECK-NEXT: %[[VAL_328:.*]] = llvm.extractvalue %[[VAL_266]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_329:.*]] = llvm.getelementptr inbounds|nuw %[[VAL_328]][%[[VAL_325]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: %[[VAL_330:.*]] = llvm.load %[[VAL_329]] : !llvm.ptr -> i64
+// CHECK-NEXT: %[[VAL_331:.*]] = llvm.extractvalue %[[VAL_298]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_332:.*]] = llvm.getelementptr inbounds|nuw %[[VAL_331]][%[[VAL_325]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: %[[VAL_333:.*]] = llvm.load %[[VAL_332]] : !llvm.ptr -> i64
+// CHECK-NEXT: %[[VAL_334:.*]] = llvm.icmp "eq" %[[VAL_333]], %[[VAL_51]] : i64
+// CHECK-NEXT: %[[VAL_335:.*]] = llvm.select %[[VAL_334]], %[[VAL_330]], %[[VAL_333]] : i1, i64
+// CHECK-NEXT: llvm.br ^bb5(%[[VAL_335]] : i64)
+// CHECK-NEXT: ^bb5(%[[VAL_336:.*]]: i64):  // 2 preds: ^bb3, ^bb4
+// CHECK-NEXT: llvm.br ^bb6
+// CHECK-NEXT: ^bb6:  // pred: ^bb5
+// CHECK-NEXT: %[[VAL_337:.*]] = llvm.extractvalue %[[VAL_324]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_338:.*]] = llvm.getelementptr inbounds|nuw %[[VAL_337]][%[[VAL_325]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: llvm.store %[[VAL_336]], %[[VAL_338]] : i64, !llvm.ptr
+// CHECK-NEXT: %[[VAL_339:.*]] = llvm.add %[[VAL_325]], %[[VAL_51]] : i64
+// CHECK-NEXT: llvm.br ^bb1(%[[VAL_339]] : i64)
+// CHECK-NEXT: ^bb7:  // pred: ^bb1
+// CHECK-NEXT: %[[VAL_340:.*]] = llvm.extractvalue %[[VAL_298]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: llvm.call @free(%[[VAL_340]]) : (!llvm.ptr) -> ()
+// CHECK-NEXT: %[[VAL_341:.*]] = llvm.extractvalue %[[VAL_266]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: llvm.call @free(%[[VAL_341]]) : (!llvm.ptr) -> ()
+// CHECK-NEXT: %[[VAL_342:.*]] = llvm.extractvalue %[[VAL_324]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_343:.*]] = llvm.getelementptr inbounds|nuw %[[VAL_342]][%[[VAL_52]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: %[[VAL_344:.*]] = llvm.load %[[VAL_343]] : !llvm.ptr -> i64
+// CHECK-NEXT: %[[VAL_345:.*]] = llvm.mlir.constant(2 : index) : i64
+// CHECK-NEXT: %[[VAL_346:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_347:.*]] = llvm.mlir.zero : !llvm.ptr
+// CHECK-NEXT: %[[VAL_348:.*]] = llvm.getelementptr %[[VAL_347]][%[[VAL_345]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: %[[VAL_349:.*]] = llvm.ptrtoint %[[VAL_348]] : !llvm.ptr to i64
+// CHECK-NEXT: %[[VAL_350:.*]] = llvm.mlir.constant(64 : index) : i64
+// CHECK-NEXT: %[[VAL_351:.*]] = llvm.add %[[VAL_349]], %[[VAL_350]] : i64
+// CHECK-NEXT: %[[VAL_352:.*]] = llvm.call @malloc(%[[VAL_351]]) : (i64) -> !llvm.ptr
+// CHECK-NEXT: %[[VAL_353:.*]] = llvm.ptrtoint %[[VAL_352]] : !llvm.ptr to i64
+// CHECK-NEXT: %[[VAL_354:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_355:.*]] = llvm.sub %[[VAL_350]], %[[VAL_354]] : i64
+// CHECK-NEXT: %[[VAL_356:.*]] = llvm.add %[[VAL_353]], %[[VAL_355]] : i64
+// CHECK-NEXT: %[[VAL_357:.*]] = llvm.urem %[[VAL_356]], %[[VAL_350]] : i64
+// CHECK-NEXT: %[[VAL_358:.*]] = llvm.sub %[[VAL_356]], %[[VAL_357]] : i64
+// CHECK-NEXT: %[[VAL_359:.*]] = llvm.inttoptr %[[VAL_358]] : i64 to !llvm.ptr
+// CHECK-NEXT: %[[VAL_360:.*]] = llvm.mlir.poison : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_361:.*]] = llvm.insertvalue %[[VAL_352]], %[[VAL_360]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_362:.*]] = llvm.insertvalue %[[VAL_359]], %[[VAL_361]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_363:.*]] = llvm.mlir.constant(0 : index) : i64
+// CHECK-NEXT: %[[VAL_364:.*]] = llvm.insertvalue %[[VAL_363]], %[[VAL_362]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_365:.*]] = llvm.insertvalue %[[VAL_345]], %[[VAL_364]][3, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_366:.*]] = llvm.insertvalue %[[VAL_346]], %[[VAL_365]][4, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_367:.*]] = llvm.extractvalue %[[VAL_366]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_368:.*]] = llvm.getelementptr inbounds|nuw %[[VAL_367]][%[[VAL_52]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: llvm.store %[[VAL_344]], %[[VAL_368]] : i64, !llvm.ptr
+// CHECK-NEXT: %[[VAL_369:.*]] = llvm.extractvalue %[[VAL_366]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_370:.*]] = llvm.getelementptr inbounds|nuw %[[VAL_369]][%[[VAL_51]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: llvm.store %[[VAL_53]], %[[VAL_370]] : i64, !llvm.ptr
+// CHECK-NEXT: %[[VAL_371:.*]] = llvm.mlir.constant(2 : index) : i64
+// CHECK-NEXT: %[[VAL_372:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_373:.*]] = llvm.mlir.zero : !llvm.ptr
+// CHECK-NEXT: %[[VAL_374:.*]] = llvm.getelementptr %[[VAL_373]][%[[VAL_371]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: %[[VAL_375:.*]] = llvm.ptrtoint %[[VAL_374]] : !llvm.ptr to i64
+// CHECK-NEXT: %[[VAL_376:.*]] = llvm.mlir.constant(64 : index) : i64
+// CHECK-NEXT: %[[VAL_377:.*]] = llvm.add %[[VAL_375]], %[[VAL_376]] : i64
+// CHECK-NEXT: %[[VAL_378:.*]] = llvm.call @malloc(%[[VAL_377]]) : (i64) -> !llvm.ptr
+// CHECK-NEXT: %[[VAL_379:.*]] = llvm.ptrtoint %[[VAL_378]] : !llvm.ptr to i64
+// CHECK-NEXT: %[[VAL_380:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_381:.*]] = llvm.sub %[[VAL_376]], %[[VAL_380]] : i64
+// CHECK-NEXT: %[[VAL_382:.*]] = llvm.add %[[VAL_379]], %[[VAL_381]] : i64
+// CHECK-NEXT: %[[VAL_383:.*]] = llvm.urem %[[VAL_382]], %[[VAL_376]] : i64
+// CHECK-NEXT: %[[VAL_384:.*]] = llvm.sub %[[VAL_382]], %[[VAL_383]] : i64
+// CHECK-NEXT: %[[VAL_385:.*]] = llvm.inttoptr %[[VAL_384]] : i64 to !llvm.ptr
+// CHECK-NEXT: %[[VAL_386:.*]] = llvm.mlir.poison : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_387:.*]] = llvm.insertvalue %[[VAL_378]], %[[VAL_386]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_388:.*]] = llvm.insertvalue %[[VAL_385]], %[[VAL_387]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_389:.*]] = llvm.mlir.constant(0 : index) : i64
+// CHECK-NEXT: %[[VAL_390:.*]] = llvm.insertvalue %[[VAL_389]], %[[VAL_388]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_391:.*]] = llvm.insertvalue %[[VAL_371]], %[[VAL_390]][3, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_392:.*]] = llvm.insertvalue %[[VAL_372]], %[[VAL_391]][4, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_393:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_394:.*]] = llvm.extractvalue %[[VAL_366]][3, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_395:.*]] = llvm.mul %[[VAL_393]], %[[VAL_394]] : i64
+// CHECK-NEXT: %[[VAL_396:.*]] = llvm.mlir.zero : !llvm.ptr
+// CHECK-NEXT: %[[VAL_397:.*]] = llvm.getelementptr %[[VAL_396]][1] : (!llvm.ptr) -> !llvm.ptr, i64
+// CHECK-NEXT: %[[VAL_398:.*]] = llvm.ptrtoint %[[VAL_397]] : !llvm.ptr to i64
+// CHECK-NEXT: %[[VAL_399:.*]] = llvm.mul %[[VAL_395]], %[[VAL_398]] : i64
+// CHECK-NEXT: %[[VAL_400:.*]] = llvm.extractvalue %[[VAL_366]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_401:.*]] = llvm.extractvalue %[[VAL_366]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_402:.*]] = llvm.getelementptr %[[VAL_400]][%[[VAL_401]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: %[[VAL_403:.*]] = llvm.extractvalue %[[VAL_392]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_404:.*]] = llvm.extractvalue %[[VAL_392]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_405:.*]] = llvm.getelementptr %[[VAL_403]][%[[VAL_404]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: "llvm.intr.memcpy"(%[[VAL_405]], %[[VAL_402]], %[[VAL_399]]) <{isVolatile = false}> : (!llvm.ptr, !llvm.ptr, i64) -> ()
+// CHECK-NEXT: %[[VAL_406:.*]] = llvm.extractvalue %[[VAL_366]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: llvm.call @free(%[[VAL_406]]) : (!llvm.ptr) -> ()
+// CHECK-NEXT: %[[VAL_407:.*]] = llvm.extractvalue %[[VAL_324]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_408:.*]] = llvm.getelementptr inbounds|nuw %[[VAL_407]][%[[VAL_52]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: %[[VAL_409:.*]] = llvm.load %[[VAL_408]] : !llvm.ptr -> i64
+// CHECK-NEXT: %[[VAL_410:.*]] = llvm.mul %[[VAL_409]], %[[VAL_16]] : i64
+// CHECK-NEXT: %[[VAL_411:.*]] = llvm.add %[[VAL_410]], %[[VAL_19]] : i64
+// CHECK-NEXT: %[[VAL_412:.*]] = llvm.udiv %[[VAL_411]], %[[VAL_20]] : i64
+// CHECK-NEXT: %[[VAL_413:.*]] = llvm.mul %[[VAL_412]], %[[VAL_20]] : i64
+// CHECK-NEXT: %[[VAL_414:.*]] = llvm.mlir.constant(1 : i32) : i32
+// CHECK-NEXT: %[[VAL_415:.*]] = llvm.call @hipdnn_ep_get_pool_base(%arg0, %[[VAL_414]], %[[VAL_413]]) : (!llvm.ptr, i32, i64) -> !llvm.ptr<1>
+// CHECK-NEXT: %[[VAL_416:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT: %[[VAL_417:.*]] = llvm.mlir.poison : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_418:.*]] = llvm.insertvalue %[[VAL_415]], %[[VAL_417]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_419:.*]] = llvm.insertvalue %[[VAL_415]], %[[VAL_418]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_420:.*]] = llvm.mlir.constant(0 : index) : i64
+// CHECK-NEXT: %[[VAL_421:.*]] = llvm.insertvalue %[[VAL_420]], %[[VAL_419]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_422:.*]] = llvm.insertvalue %[[VAL_413]], %[[VAL_421]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_423:.*]] = llvm.insertvalue %[[VAL_416]], %[[VAL_422]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_424:.*]] = llvm.mlir.poison : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_425:.*]] = llvm.extractvalue %[[VAL_423]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_426:.*]] = llvm.insertvalue %[[VAL_425]], %[[VAL_424]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_427:.*]] = llvm.extractvalue %[[VAL_423]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_428:.*]] = llvm.getelementptr %[[VAL_427]][%[[VAL_52]]] : (!llvm.ptr<1>, i64) -> !llvm.ptr<1>, i8
+// CHECK-NEXT: %[[VAL_429:.*]] = llvm.insertvalue %[[VAL_428]], %[[VAL_426]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_430:.*]] = llvm.mlir.constant(0 : index) : i64
+// CHECK-NEXT: %[[VAL_431:.*]] = llvm.insertvalue %[[VAL_430]], %[[VAL_429]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_432:.*]] = llvm.mlir.constant(4 : index) : i64
+// CHECK-NEXT: %[[VAL_433:.*]] = llvm.insertvalue %[[VAL_432]], %[[VAL_431]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_434:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_435:.*]] = llvm.insertvalue %[[VAL_434]], %[[VAL_433]][4, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_436:.*]] = llvm.insertvalue %[[VAL_409]], %[[VAL_435]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_437:.*]] = llvm.mlir.constant(4 : index) : i64
+// CHECK-NEXT: %[[VAL_438:.*]] = llvm.insertvalue %[[VAL_437]], %[[VAL_436]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_439:.*]] = llvm.extractvalue %[[VAL_392]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_440:.*]] = llvm.getelementptr inbounds|nuw %[[VAL_439]][%[[VAL_52]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
+// CHECK-NEXT: %[[VAL_441:.*]] = llvm.load %[[VAL_440]] : !llvm.ptr -> i64
+// CHECK-NEXT: %[[VAL_442:.*]] = llvm.mlir.constant(2 : index) : i64
+// CHECK-NEXT: %[[VAL_443:.*]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT: %[[VAL_444:.*]] = llvm.mul %[[VAL_442]], %[[VAL_441]] : i64
+// CHECK-NEXT: %[[VAL_445:.*]] = llvm.mlir.zero : !llvm.ptr
+// CHECK-NEXT: %[[VAL_446:.*]] = llvm.getelementptr %[[VAL_445]][%[[VAL_444]]] : (!llvm.ptr, i64) -> !llvm.ptr, f32
+// CHECK-NEXT: %[[VAL_447:.*]] = llvm.ptrtoint %[[VAL_446]] : !llvm.ptr to i64
+// CHECK-NEXT: %[[VAL_448:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT: %[[VAL_449:.*]] = llvm.alloca %[[VAL_448]] x !llvm.array<2 x i64> {alignment = 8 : i64} : (i64) -> !llvm.ptr
+// CHECK-NEXT: %[[VAL_450:.*]] = llvm.getelementptr %[[VAL_449]][0] : (!llvm.ptr) -> !llvm.ptr, i64
+// CHECK-NEXT: llvm.store %[[VAL_441]], %[[VAL_450]] : i64, !llvm.ptr
+// CHECK-NEXT: %[[VAL_451:.*]] = llvm.getelementptr %[[VAL_449]][1] : (!llvm.ptr) -> !llvm.ptr, i64
+// CHECK-NEXT: llvm.store %[[VAL_442]], %[[VAL_451]] : i64, !llvm.ptr
+// CHECK-NEXT: %[[VAL_452:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK-NEXT: %[[VAL_453:.*]] = llvm.mlir.constant(2 : i64) : i64
+// CHECK-NEXT: %[[VAL_454:.*]] = llvm.mlir.constant(4 : i64) : i64
+// CHECK-NEXT: %[[VAL_455:.*]] = llvm.call @hipdnn_ep_alloc_output(%arg0, %[[VAL_452]], %[[VAL_449]], %[[VAL_453]], %[[VAL_454]]) : (!llvm.ptr, i64, !llvm.ptr, i64, i64) -> !llvm.ptr
+// CHECK-NEXT: %[[VAL_456:.*]] = llvm.addrspacecast %[[VAL_455]] : !llvm.ptr to !llvm.ptr<1>
+// CHECK-NEXT: %[[VAL_457:.*]] = llvm.mlir.poison : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_458:.*]] = llvm.insertvalue %[[VAL_456]], %[[VAL_457]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_459:.*]] = llvm.insertvalue %[[VAL_456]], %[[VAL_458]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_460:.*]] = llvm.mlir.constant(0 : index) : i64
+// CHECK-NEXT: %[[VAL_461:.*]] = llvm.insertvalue %[[VAL_460]], %[[VAL_459]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_462:.*]] = llvm.insertvalue %[[VAL_441]], %[[VAL_461]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_463:.*]] = llvm.insertvalue %[[VAL_442]], %[[VAL_462]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_464:.*]] = llvm.insertvalue %[[VAL_442]], %[[VAL_463]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_465:.*]] = llvm.insertvalue %[[VAL_443]], %[[VAL_464]][4, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_466:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT: %[[VAL_467:.*]] = llvm.extractvalue %[[VAL_214]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: %[[VAL_468:.*]] = llvm.alloca %[[VAL_466]] x !llvm.array<2 x i64> {alignment = 8 : i64} : (i64) -> !llvm.ptr
+// CHECK-NEXT: %[[VAL_469:.*]] = llvm.extractvalue %[[VAL_192]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_470:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK-NEXT: %[[VAL_471:.*]] = llvm.getelementptr %[[VAL_468]][%[[VAL_470]]] : (!llvm.ptr, i32) -> !llvm.ptr, i64
+// CHECK-NEXT: llvm.store %[[VAL_469]], %[[VAL_471]] : i64, !llvm.ptr
+// CHECK-NEXT: %[[VAL_472:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT: %[[VAL_473:.*]] = llvm.mlir.constant(1 : i32) : i32
+// CHECK-NEXT: %[[VAL_474:.*]] = llvm.getelementptr %[[VAL_468]][%[[VAL_473]]] : (!llvm.ptr, i32) -> !llvm.ptr, i64
+// CHECK-NEXT: llvm.store %[[VAL_472]], %[[VAL_474]] : i64, !llvm.ptr
+// CHECK-NEXT: %[[VAL_475:.*]] = llvm.alloca %[[VAL_466]] x !llvm.array<2 x i64> {alignment = 8 : i64} : (i64) -> !llvm.ptr
+// CHECK-NEXT: %[[VAL_476:.*]] = llvm.extractvalue %[[VAL_438]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_477:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK-NEXT: %[[VAL_478:.*]] = llvm.getelementptr %[[VAL_475]][%[[VAL_477]]] : (!llvm.ptr, i32) -> !llvm.ptr, i64
+// CHECK-NEXT: llvm.store %[[VAL_476]], %[[VAL_478]] : i64, !llvm.ptr
+// CHECK-NEXT: %[[VAL_479:.*]] = llvm.mlir.constant(4 : i64) : i64
+// CHECK-NEXT: %[[VAL_480:.*]] = llvm.mlir.constant(1 : i32) : i32
+// CHECK-NEXT: %[[VAL_481:.*]] = llvm.getelementptr %[[VAL_475]][%[[VAL_480]]] : (!llvm.ptr, i32) -> !llvm.ptr, i64
+// CHECK-NEXT: llvm.store %[[VAL_479]], %[[VAL_481]] : i64, !llvm.ptr
+// CHECK-NEXT: %[[VAL_482:.*]] = llvm.extractvalue %[[VAL_192]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_483:.*]] = llvm.extractvalue %[[VAL_438]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_484:.*]] = llvm.mlir.constant(2 : i64) : i64
+// CHECK-NEXT: %[[VAL_485:.*]] = llvm.mlir.constant(2 : i64) : i64
+// CHECK-NEXT: %[[VAL_486:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK-NEXT: %[[VAL_487:.*]] = llvm.call @wrap_expand(%arg0, %[[VAL_482]], %[[VAL_467]], %[[VAL_483]], %[[VAL_468]], %[[VAL_484]], %[[VAL_475]], %[[VAL_485]], %[[VAL_486]]) : (!llvm.ptr, !llvm.ptr<1>, !llvm.ptr, !llvm.ptr<1>, !llvm.ptr, i64, !llvm.ptr, i64, i64) -> i32
+// CHECK-NEXT: %[[VAL_488:.*]] = llvm.extractvalue %[[VAL_214]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: llvm.call @free(%[[VAL_488]]) : (!llvm.ptr) -> ()
+// CHECK-NEXT: %[[VAL_489:.*]] = llvm.extractvalue %[[VAL_438]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_490:.*]] = llvm.extractvalue %[[VAL_438]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_491:.*]] = llvm.extractvalue %[[VAL_35]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_492:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT: %[[VAL_493:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK-NEXT: %[[VAL_494:.*]] = llvm.mlir.constant(1 : i32) : i32
+// CHECK-NEXT: %[[VAL_495:.*]] = llvm.extractvalue %[[VAL_438]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_496:.*]] = llvm.extractvalue %[[VAL_35]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_497:.*]] = llvm.extractvalue %[[VAL_465]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: %[[VAL_498:.*]] = llvm.mlir.constant(4 : i64) : i64
+// CHECK-NEXT: %[[VAL_499:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK-NEXT: %[[VAL_500:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK-NEXT: %[[VAL_501:.*]] = llvm.call @wrap_hipblasLtMatmul(%arg0, %[[VAL_494]], %[[VAL_495]], %[[VAL_496]], %[[VAL_497]], %[[VAL_489]], %[[VAL_491]], %[[VAL_490]], %[[VAL_492]], %[[VAL_498]], %[[VAL_493]], %[[VAL_499]], %[[VAL_500]]) : (!llvm.ptr, i32, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK-NEXT: %[[VAL_502:.*]] = llvm.extractvalue %[[VAL_324]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: llvm.call @free(%[[VAL_502]]) : (!llvm.ptr) -> ()
+// CHECK-NEXT: %[[VAL_503:.*]] = llvm.extractvalue %[[VAL_392]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+// CHECK-NEXT: llvm.call @free(%[[VAL_503]]) : (!llvm.ptr) -> ()
+// CHECK-NEXT: llvm.return %[[VAL_465]] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT: }
+// CHECK-NEXT: llvm.func @hipdnn_ep_op_states_init_fn(%arg0: !llvm.ptr) -> i32 {
+// CHECK-NEXT: %[[VAL_0:.*]] = llvm.mlir.constant(1 : i32) : i32
+// CHECK-NEXT: %[[VAL_1:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK-NEXT: %[[VAL_2:.*]] = llvm.mlir.constant(0 : i8) : i8
+// CHECK-NEXT: %[[VAL_3:.*]] = llvm.mlir.constant(2 : i64) : i64
+// CHECK-NEXT: %[[VAL_4:.*]] = llvm.call @hipdnn_ep_op_states_alloc(%arg0, %[[VAL_3]]) : (!llvm.ptr, i64) -> i8
+// CHECK-NEXT: %[[VAL_5:.*]] = llvm.icmp "eq" %[[VAL_4]], %[[VAL_2]] : i8
+// CHECK-NEXT: llvm.cond_br %[[VAL_5]], ^bb2, ^bb1
+// CHECK-NEXT: ^bb1:  // pred: ^bb0
+// CHECK-NEXT: %[[VAL_6:.*]] = llvm.call @hipdnn_ep_op_state_construct_matmul(%arg0, %[[VAL_1]]) : (!llvm.ptr, i32) -> i8
+// CHECK-NEXT: %[[VAL_7:.*]] = llvm.call @hipdnn_ep_op_state_construct_matmul(%arg0, %[[VAL_0]]) : (!llvm.ptr, i32) -> i8
+// CHECK-NEXT: llvm.return %[[VAL_1]] : i32
+// CHECK-NEXT: ^bb2:  // pred: ^bb0
+// CHECK-NEXT: llvm.return %[[VAL_0]] : i32
+// CHECK-NEXT: }
+// CHECK-NEXT: llvm.func @inference_init(%arg0: !llvm.ptr, %arg1: !llvm.ptr, %arg2: !llvm.ptr) -> i32 attributes {llvm.emit_c_interface, sym_visibility = "public"} {
+// CHECK-NEXT: %[[VAL_0:.*]] = llvm.mlir.addressof @__metadata_blob : !llvm.ptr
+// CHECK-NEXT: %[[VAL_1:.*]] = llvm.mlir.constant(216 : i64) : i64
+// CHECK-NEXT: %[[VAL_2:.*]] = llvm.mlir.addressof @hipdnn_ep_op_states_init_fn : !llvm.ptr
+// CHECK-NEXT: %[[VAL_3:.*]] = llvm.call @hipdnn_ep_inference_init(%arg0, %arg1, %[[VAL_0]], %[[VAL_1]], %arg2, %[[VAL_2]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr) -> i32
+// CHECK-NEXT: llvm.return %[[VAL_3]] : i32
+// CHECK-NEXT: }
+// CHECK-NEXT: llvm.func @inference_compute(%arg0: !llvm.ptr, %arg1: !llvm.ptr) -> i32 attributes {llvm.emit_c_interface, sym_visibility = "public"} {
+// CHECK-NEXT: %[[VAL_0:.*]] = llvm.mlir.addressof @__hipsr_input_ranks : !llvm.ptr
+// CHECK-NEXT: %[[VAL_1:.*]] = llvm.mlir.constant(2 : i64) : i64
+// CHECK-NEXT: %[[VAL_2:.*]] = llvm.mlir.addressof @main_graph : !llvm.ptr
+// CHECK-NEXT: %[[VAL_3:.*]] = llvm.call @hipdnn_ep_inference_compute(%arg0, %arg1, %[[VAL_0]], %[[VAL_1]], %[[VAL_2]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr) -> i32
+// CHECK-NEXT: llvm.return %[[VAL_3]] : i32
+// CHECK-NEXT: }
+// CHECK-NEXT: llvm.func @inference_cleanup(%arg0: !llvm.ptr) -> i32 attributes {llvm.emit_c_interface, sym_visibility = "public"} {
+// CHECK-NEXT: %[[VAL_0:.*]] = llvm.call @hipdnn_ep_state_cleanup(%arg0) : (!llvm.ptr) -> i32
+// CHECK-NEXT: llvm.return %[[VAL_0]] : i32
+// CHECK-NEXT: }
+// CHECK-NEXT: llvm.func @inference_get_metadata_json() -> !llvm.ptr attributes {llvm.emit_c_interface, sym_visibility = "public"} {
+// CHECK-NEXT: %[[VAL_0:.*]] = llvm.mlir.addressof @__metadata_json : !llvm.ptr
+// CHECK-NEXT: llvm.return %[[VAL_0]] : !llvm.ptr
+// CHECK-NEXT: }
+// CHECK-NEXT: }
 
 func.func @main_graph(%a: tensor<?x3xf16> {onnx.name = "a"},
                       %b: tensor<?x4xf32> {onnx.name = "b"})

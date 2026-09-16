@@ -47,8 +47,9 @@
 //   --convert-scf-to-cf
 //   --reconcile-unrealized-casts
 //   --convert-to-llvm
+//   --hipsr-generate-interface
 void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
-                                     const HipsrPipelineOptions & /*options*/) {
+                                     const HipsrPipelineOptions &options) {
   pm.addPass(createAddContextArgPass());
   pm.addPass(createConvertOnnxToHipsrPass());
   pm.addNestedPass<func::FuncOp>(createPopulateShapeRegionPass());
@@ -85,7 +86,9 @@ void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
   pm.addNestedPass<func::FuncOp>(
       bufferization::createOptimizeAllocationLivenessPass());
 
-  pm.addPass(createHipsrExternalizeConstantsPass());
+  HipsrExternalizeConstantsPassOptions constantsOptions;
+  constantsOptions.constantsFile = options.constantsFile;
+  pm.addPass(createHipsrExternalizeConstantsPass(constantsOptions));
 
   pm.addPass(hip::createAssignOpStateSlotsPass());
   pm.addPass(hip::createGenerateOpStateInitPass());
@@ -99,6 +102,8 @@ void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
   // Drop leftover unrealized_conversion_cast from earlier conversions.
   pm.addPass(createReconcileUnrealizedCastsPass());
   pm.addPass(createConvertToLLVMPass());
+
+  pm.addPass(createHipsrGenerateInterfacePass());
 }
 
 void mlir::hipsr::registerHipsrPipelines() {

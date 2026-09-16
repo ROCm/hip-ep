@@ -216,7 +216,9 @@ def HipsrExternalizeConstantsPass
     Gives each `hipsr.constant` an `index`, `offset`, and `size`.
     When the module has constants, it sets `hip.constants_file`,
     `hipdnn.constant_sizes`, and `hipdnn.constant_offsets`.
-    `--generate-interface` reads those attributes.
+    When `@main_graph` is present, it also sets `hipdnn.input_ranks` from
+    each ranked tensor or memref argument, skipping `!hipsr.context`.
+    `--hipsr-generate-interface` reads those attributes.
     When a FileSystem is present, it writes the constants file.
   }];
   let options = [
@@ -269,6 +271,38 @@ def HipsrInlineRegionsPass : Pass<"hipsr-inline-regions", "mlir::ModuleOp"> {
   }];
   let dependentDialects = [
     "::mlir::hipsr::HipsrDialect"
+  ];
+}
+
+def HipsrGenerateInterfacePass
+    : Pass<"hipsr-generate-interface", "mlir::ModuleOp"> {
+  let summary = "Generate the HIPSR runtime interface";
+  let description = [{
+    Wraps `@main_graph` as `(state, inputs) -> i32` and emits the inference
+    trampolines. Reads `hipdnn.input_ranks` and constant metadata from
+    `hipsr-externalize-constants`. Extents in metadata are `-1`.
+
+    Before:
+    ```mlir
+    llvm.func @main_graph(%state: !llvm.ptr, %allocated: !llvm.ptr<1>,
+        %aligned: !llvm.ptr<1>, %offset: i64, %size: i64, %stride: i64)
+        -> !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
+    ```
+
+    After:
+    ```mlir
+    llvm.func private @main_graph(%state: !llvm.ptr, %inputs: !llvm.ptr) -> i32
+    llvm.func private @main_graph_internal(%state: !llvm.ptr, ...)
+    llvm.func @inference_init(...) {
+      llvm.call @hipdnn_ep_inference_init(...)
+    }
+    llvm.func @inference_compute(...) {
+      llvm.call @hipdnn_ep_inference_compute(...)
+    }
+    ```
+  }];
+  let dependentDialects = [
+    "::mlir::LLVM::LLVMDialect"
   ];
 }
 

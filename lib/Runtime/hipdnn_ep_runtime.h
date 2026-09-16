@@ -1976,6 +1976,30 @@ int hipdnn_ep_run_if(RuntimeState *state, bool cond, HipdnnEpIfBranchFn then_fn,
                      int32_t num_captures, void **output_descs,
                      void **capture_descs);
 
+// HIPSR session wrappers. Generated trampolines pass model-local function
+// pointers so sibling JIT modules and native linked artifacts both work.
+typedef int (*HipdnnEpOpStatesInitFn)(RuntimeState *state);
+typedef int (*HipdnnEpMainGraphFn)(RuntimeState *state, void **descriptors);
+
+/// Returns 0 after initializing `*out_state` from the metadata blob.
+/// Calls `op_states_init` when it is not nullptr, and cleans up on failure.
+///
+/// Example:
+///   int s = hipdnn_ep_inference_init(&state, fs, blob, n, cfg, init_fn);
+int hipdnn_ep_inference_init(RuntimeState **out_state, void *fs,
+                             const void *metadata_blob, size_t blob_size,
+                             const void *config,
+                             HipdnnEpOpStatesInitFn op_states_init);
+
+/// Returns 0 after preparing inputs, calling `main_graph_fn`, and freeing them.
+/// `ranks` is an array of `input_count` compile-time memref ranks.
+///
+/// Example:
+///   int s = hipdnn_ep_inference_compute(state, inputs, ranks, n, graph);
+int hipdnn_ep_inference_compute(RuntimeState *state, span_t *inputs,
+                                const int64_t *ranks, size_t input_count,
+                                HipdnnEpMainGraphFn main_graph_fn);
+
 //===----------------------------------------------------------------------===//
 // Low-Level HIP Wrappers
 //===----------------------------------------------------------------------===//
