@@ -9,7 +9,7 @@ namespace mlir {
 namespace hip {
 namespace {
 
-// hip.qmatmul -> wrap_qmatmul(..., M_scale, A_zp, B_zp, Y_zp)
+// hip.qmatmul -> wrap_qmatmul(..., b_bits, M_scale, AY_ratio, A_zp, B_zp, Y_zp)
 //
 // The fused chain is DQ(A) @ DQ(B) -> Q, which over the integer accumulator
 // `acc[m,n] = sum_k A[m,k]*B[k,n]` is
@@ -20,6 +20,14 @@ namespace {
 // here is what keeps the kernel down to one float multiply and one round per
 // output element instead of three dequant/requant divisions. The zero-point
 // correction terms depend on the operand data, so they stay in the kernel.
+//
+// A per-column weight splits that fold: s_b becomes one f32 per column of B,
+// held in a device array, so only `AY_ratio = s_a / s_y` is foldable and the
+// kernel finishes the coefficient with `AY_ratio * B_scales[n]`. The two
+// coefficients are separate parameters rather than one reinterpreted slot
+// because the runtime selects on `B_scales != null`, and a slot whose meaning
+// depended on another argument would be the kind of thing that silently keeps
+// working with the wrong value.
 struct QMatMulOpLowering : public ConvertOpToLLVMPattern<QMatMulOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -52,9 +60,13 @@ struct QMatMulOpLowering : public ConvertOpToLLVMPattern<QMatMulOp> {
         return rewriter.notifyMatchFailure(
             op, "expected 8- or 16-bit A and Y element types");
     }
+    // 8-bit is the STORAGE width. A packed 4-bit B keeps an 8-bit element type
+    // and its logical element count, so the value width cannot be read off the
+    // type and travels as `b_bits` instead -- the same split as weight_bits on
+    // hip.qconv and resolveQuantBits in QdqLowering.cpp.
     if (!BType.getElementType().isInteger(8))
-      return rewriter.notifyMatchFailure(op,
-                                         "expected an 8-bit B element type");
+      return rewriter.notifyMatchFailure(op, "expected 8-bit B storage");
+    int64_t bBits = op.getPackedInt4() ? 4 : 8;
     int64_t aDataType = getHipdnnDataType(AType.getElementType());
     int64_t bDataType = getHipdnnDataType(BType.getElementType());
     int64_t yDataType = getHipdnnDataType(YType.getElementType());
@@ -62,14 +74,25 @@ struct QMatMulOpLowering : public ConvertOpToLLVMPattern<QMatMulOp> {
     float yScale = op.getYScale().convertToFloat();
     if (yScale == 0.0f)
       return rewriter.notifyMatchFailure(op, "Y_scale must be non-zero");
-    // Accumulate the product in double so the single narrowing to f32 is the
-    // only rounding the folded coefficient carries.
-    double mScale = (static_cast<double>(op.getAScale().convertToFloat()) *
-                     static_cast<double>(op.getBScale().convertToFloat())) /
-                    static_cast<double>(yScale);
+
+    double aScale = static_cast<double>(op.getAScale().convertToFloat());
+    float mScale = 0.0f;
+    float ayRatio = 0.0f;
+    if (op.getBScales()) {
+      // per channel B scale
+      ayRatio = static_cast<float>(aScale / static_cast<double>(yScale));
+    } else {
+      if (!op.getBScale())
+        return rewriter.notifyMatchFailure(
+            op, "per-tensor B requires the B_scale attribute");
+      mScale = static_cast<float>(
+          (aScale * static_cast<double>(op.getBScale()->convertToFloat())) /
+          static_cast<double>(yScale));
+    }
     Value mScaleValue = LLVM::ConstantOp::create(
-        rewriter, loc, f32Type,
-        rewriter.getF32FloatAttr(static_cast<float>(mScale)));
+        rewriter, loc, f32Type, rewriter.getF32FloatAttr(mScale));
+    Value ayRatioValue = LLVM::ConstantOp::create(
+        rewriter, loc, f32Type, rewriter.getF32FloatAttr(ayRatio));
 
     int64_t ARank = AType.getRank();
     int64_t BRank = BType.getRank();
@@ -148,18 +171,22 @@ struct QMatMulOpLowering : public ConvertOpToLLVMPattern<QMatMulOp> {
     // Runtime signature:
     // int wrap_qmatmul(RuntimeState* state,
     //                  const void* A, const void* B, void* Y,
+    //                  const void* B_scales, const void* B_zero_points,
     //                  int64_t M, int64_t N, int64_t K,
     //                  int64_t batch_count, int64_t b_batch_stride,
     //                  int64_t trans_a, int64_t trans_b,
     //                  int64_t a_data_type, int64_t b_data_type,
-    //                  int64_t y_data_type, float M_scale,
+    //                  int64_t y_data_type, int64_t b_bits,
+    //                  float M_scale, float AY_ratio,
     //                  int64_t A_zero_point, int64_t B_zero_point,
     //                  int64_t Y_zero_point)
-    SmallVector<Type, 18> paramTypes = {
+    SmallVector<Type, 22> paramTypes = {
         ptrType, // state
         ptrType, // A
         ptrType, // B
         ptrType, // Y
+        ptrType, // B_scales (null selects the per-tensor form)
+        ptrType, // B_zero_points
         i64Type, // M
         i64Type, // N
         i64Type, // K
@@ -170,7 +197,9 @@ struct QMatMulOpLowering : public ConvertOpToLLVMPattern<QMatMulOp> {
         i64Type, // a_data_type
         i64Type, // b_data_type
         i64Type, // y_data_type
+        i64Type, // b_bits
         f32Type, // M_scale
+        f32Type, // AY_ratio
         i64Type, // A_zero_point
         i64Type, // B_zero_point
         i64Type  // Y_zero_point
@@ -181,24 +210,21 @@ struct QMatMulOpLowering : public ConvertOpToLLVMPattern<QMatMulOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 18> args = {
+    SmallVector<Value, 22> args = {
         adaptor.getCtx(),
         extractContiguousMemRefPtr(adaptor.getA(), rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getB(), rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getY(), rewriter, loc),
-        M,
-        N,
-        K,
-        batchCount,
-        bBatchStride,
-        createI64Const(transA),
-        createI64Const(transB),
-        createI64Const(aDataType),
-        createI64Const(bDataType),
-        createI64Const(yDataType),
-        mScaleValue,
+        extractOptionalMemRefPtr(adaptor.getBScales(), rewriter, loc),
+        extractOptionalMemRefPtr(adaptor.getBZeroPoints(), rewriter, loc), M, N,
+        K, batchCount, bBatchStride, createI64Const(transA),
+        createI64Const(transB), createI64Const(aDataType),
+        createI64Const(bDataType), createI64Const(yDataType),
+        createI64Const(bBits), mScaleValue, ayRatioValue,
         createI64Const(op.getAZeroPoint()),
-        createI64Const(op.getBZeroPoint()),
+        // Unused in the per-column form, where the zero points are the
+        // B_zero_points array the kernel indexes by column.
+        createI64Const(op.getBZeroPoint().value_or(0)),
         createI64Const(op.getYZeroPoint())};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
