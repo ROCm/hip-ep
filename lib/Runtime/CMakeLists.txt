@@ -306,6 +306,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/elementwise.cpp runtime_elementwise.bc)
     compile_to_bitcode(real/power.cpp runtime_power.bc)
     compile_to_bitcode(real/matmul.cpp runtime_matmul.bc)
+    compile_to_bitcode(real/rocmlir.cpp runtime_rocmlir.bc)
     compile_to_bitcode(real/activation.cpp runtime_activation.bc)
     compile_to_bitcode(real/bias_gelu.cpp runtime_bias_gelu.bc)
     compile_to_bitcode(real/fast_gelu.cpp runtime_fast_gelu.bc)
@@ -379,6 +380,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/global_pool.cpp runtime_global_pool.bc)
     compile_to_bitcode(real/qelementwise.cpp runtime_qelementwise.bc)
     compile_to_bitcode(real/qmatmul.cpp runtime_qmatmul.bc)
+    compile_to_bitcode(real/qgemm.cpp runtime_qgemm.bc)
     compile_to_bitcode(real/qconv.cpp runtime_qconv.bc)
     compile_to_bitcode(real/qlpnormalization.cpp runtime_qlpnormalization.bc)
 
@@ -397,6 +399,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_elementwise.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_power.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_matmul.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_rocmlir.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_activation.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_bias_gelu.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_fast_gelu.bc
@@ -470,6 +473,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qdq.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qelementwise.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmatmul.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_qgemm.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qconv.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qlpnormalization.bc
     )

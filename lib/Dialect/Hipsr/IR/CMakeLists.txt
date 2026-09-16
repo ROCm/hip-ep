@@ -38,6 +38,7 @@ add_dependencies(HipsrDialectIR
   HipsrEnumsIncGen
   HipsrAttrsIncGen
   HipsrTypesIncGen
+  HipOpStateInterfaceIncGen
 )
 
 target_link_libraries(HipsrDialectIR PUBLIC
@@ -54,4 +55,5 @@ target_link_libraries(HipsrDialectIR PUBLIC
   MLIRConvertToLLVMInterface
   MLIRTransforms
   MLIRTensorDialect
+  HipDialectIR
 )

@@ -113,6 +113,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     ConvTransposeOp::attachInterface<HipDstBufferizableModel<ConvTransposeOp>>(
         *ctx);
     MatmulOp::attachInterface<HipDstBufferizableModel<MatmulOp>>(*ctx);
+    RocMlirOp::attachInterface<HipDstBufferizableModel<RocMlirOp>>(*ctx);
     RmsNormOp::attachInterface<HipDstBufferizableModel<RmsNormOp>>(*ctx);
     SkipRmsNormOp::attachInterface<HipDstBufferizableModel<SkipRmsNormOp>>(
         *ctx);
@@ -213,6 +214,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     QAddOp::attachInterface<HipDstBufferizableModel<QAddOp>>(*ctx);
     QMulOp::attachInterface<HipDstBufferizableModel<QMulOp>>(*ctx);
     QMatMulOp::attachInterface<HipDstBufferizableModel<QMatMulOp>>(*ctx);
+    QGemmOp::attachInterface<HipDstBufferizableModel<QGemmOp>>(*ctx);
     QConvOp::attachInterface<HipDstBufferizableModel<QConvOp>>(*ctx);
     QLpNormalizationOp::attachInterface<
         HipDstBufferizableModel<QLpNormalizationOp>>(*ctx);

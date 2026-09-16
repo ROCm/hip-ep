@@ -235,6 +235,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateConvLoweringPatterns(typeConverter, patterns);
   populateConvTransposeLoweringPatterns(typeConverter, patterns);
   populateMatmulLoweringPatterns(typeConverter, patterns);
+  populateRocMlirLoweringPatterns(typeConverter, patterns);
   populateElementwiseLoweringPatterns(typeConverter, patterns);
   populatePowerLoweringPatterns(typeConverter, patterns);
   populateActivationLoweringPatterns(typeConverter, patterns);
@@ -290,6 +291,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateGlobalPoolLoweringPatterns(typeConverter, patterns);
   populateQElementwiseLoweringPatterns(typeConverter, patterns);
   populateQMatMulLoweringPatterns(typeConverter, patterns);
+  populateQGemmLoweringPatterns(typeConverter, patterns);
   populateQConvLoweringPatterns(typeConverter, patterns);
   populateQLpNormalizationLoweringPatterns(typeConverter, patterns);
 

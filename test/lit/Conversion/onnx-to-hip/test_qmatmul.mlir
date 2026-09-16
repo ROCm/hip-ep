@@ -16,7 +16,8 @@
 //
 // PDL fusion runs before lowerOnnxConstants and folds scale/zp into hip.qmatmul
 // attributes, so the onnx.Constant carriers are dead and get DCE'd — no
-// hip.constant survivors in the output IR.
+// hip.constant survivors. Only the per-column form keeps its scale and zero
+// point as operands, so only there do the carriers survive.
 //
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
 // ============================================================================
@@ -31,7 +32,7 @@ module {
   // CHECK-NEXT: }
 
   // Nothing of the fused chain survives: no onnx QDQ ops and no hip.constant
-  // scale/zp carriers anywhere in the output.
+  // scale/zp carriers in this function.
   // CHECK-NOT: onnx.DequantizeLinear
   // CHECK-NOT: onnx.MatMul
   // CHECK-NOT: onnx.QuantizeLinear
@@ -58,4 +59,90 @@ module {
 
     return %result : tensor<64x32xi8>
   }
+
+  // ===== Fused: A16 activation, packed INT4 weights, per output column =====
+  // 48 weights in 24 bytes and 6 zero points in 3 bytes: packed INT4.
+  // CHECK-LABEL: func.func @qmatmul_w4_per_column
+  // CHECK-DAG:   %[[W:.*]] = hip.constant {{.*}}tensor<8x6xi8>
+  // CHECK-DAG:   %[[WSCALE:.*]] = hip.constant {{.*}}tensor<6xf32>
+  // CHECK-DAG:   %[[WZP:.*]] = hip.constant {{.*}}tensor<6xi8>
+  // CHECK-DAG:   %[[EMPTY:.*]] = tensor.empty() : tensor<4x6xui16>
+  // CHECK:       hip.qmatmul
+  // CHECK-SAME:  ins(%{{.*}}, %[[W]], %[[WSCALE]], %[[WZP]] :
+  // CHECK-SAME:  outs(%[[EMPTY]] : tensor<4x6xui16>)
+  // CHECK-SAME:  A_scale = 1.638800e-04 : f32
+  // CHECK-SAME:  A_zero_point = 35275 : i64
+  // CHECK-SAME:  B_quant_axis = 1 : i64
+  // CHECK-SAME:  Y_scale = 3.687020e-04 : f32
+  // CHECK-SAME:  Y_zero_point = 36322 : i64
+  // CHECK-SAME:  packed_int4
+  // CHECK-NOT:   B_scale =
+  // CHECK-NOT:   B_zero_point =
+  func.func @qmatmul_w4_per_column(%A: tensor<4x8xui16>) -> tensor<4x6xui16> {
+    %w = "onnx.Constant"() {location = "w.bin", offset = 0 : i64, size = 24 : i64}
+         : () -> tensor<8x6xi8>
+    %w_zp = "onnx.Constant"() {location = "w.bin", offset = 24 : i64, size = 3 : i64}
+            : () -> tensor<6xi8>
+    %w_scale = "onnx.Constant"() {location = "w.bin", offset = 32 : i64, size = 24 : i64}
+               : () -> tensor<6xf32>
+    %a_scale = "onnx.Constant"() {value = dense<1.638800e-04> : tensor<f32>} : () -> tensor<f32>
+    %a_zp = "onnx.Constant"() {value = dense<35275> : tensor<ui16>} : () -> tensor<ui16>
+    %y_scale = "onnx.Constant"() {value = dense<3.687020e-04> : tensor<f32>} : () -> tensor<f32>
+    %y_zp = "onnx.Constant"() {value = dense<36322> : tensor<ui16>} : () -> tensor<ui16>
+
+    %a_dq = "onnx.DequantizeLinear"(%A, %a_scale, %a_zp)
+            : (tensor<4x8xui16>, tensor<f32>, tensor<ui16>) -> tensor<4x8xf32>
+    %w_dq = "onnx.DequantizeLinear"(%w, %w_scale, %w_zp) {block_size = 0 : si64}
+            : (tensor<8x6xi8>, tensor<6xf32>, tensor<6xi8>) -> tensor<8x6xf32>
+    %prod = "onnx.MatMul"(%a_dq, %w_dq)
+            : (tensor<4x8xf32>, tensor<8x6xf32>) -> tensor<4x6xf32>
+    %y = "onnx.QuantizeLinear"(%prod, %y_scale, %y_zp)
+         : (tensor<4x6xf32>, tensor<f32>, tensor<ui16>) -> tensor<4x6xui16>
+    return %y : tensor<4x6xui16>
+  }
+
+  // ===== Fused: A16 activation, full-width INT8 weights, per output column =====
+  // Same shapes as above with 48 weights in 48 bytes and 6 zero points in 6
+  // bytes: plain int8. Nothing about the i8 element type separates the two
+  // forms -- only the byte count does -- and the only difference the fusion
+  // makes is the absent packed_int4 marker.
+  // CHECK-LABEL: func.func @qmatmul_w8_per_column
+  // CHECK-DAG:   %[[W:.*]] = hip.constant {{.*}}tensor<8x6xi8>
+  // CHECK-DAG:   %[[WSCALE:.*]] = hip.constant {{.*}}tensor<6xf32>
+  // CHECK-DAG:   %[[WZP:.*]] = hip.constant {{.*}}tensor<6xi8>
+  // CHECK-DAG:   %[[EMPTY:.*]] = tensor.empty() : tensor<4x6xui16>
+  // CHECK:       hip.qmatmul
+  // CHECK-SAME:  ins(%{{.*}}, %[[W]], %[[WSCALE]], %[[WZP]] :
+  // CHECK-SAME:  outs(%[[EMPTY]] : tensor<4x6xui16>)
+  // CHECK-SAME:  A_scale = 1.638800e-04 : f32
+  // CHECK-SAME:  A_zero_point = 35275 : i64
+  // CHECK-SAME:  B_quant_axis = 1 : i64
+  // CHECK-SAME:  Y_scale = 3.687020e-04 : f32
+  // CHECK-SAME:  Y_zero_point = 36322 : i64
+  // CHECK-NOT:   packed_int4
+  // CHECK-NOT:   B_scale =
+  // CHECK-NOT:   B_zero_point =
+  func.func @qmatmul_w8_per_column(%A: tensor<4x8xui16>) -> tensor<4x6xui16> {
+    %w = "onnx.Constant"() {location = "w.bin", offset = 0 : i64, size = 48 : i64}
+         : () -> tensor<8x6xi8>
+    %w_zp = "onnx.Constant"() {location = "w.bin", offset = 48 : i64, size = 6 : i64}
+            : () -> tensor<6xi8>
+    %w_scale = "onnx.Constant"() {location = "w.bin", offset = 56 : i64, size = 24 : i64}
+               : () -> tensor<6xf32>
+    %a_scale = "onnx.Constant"() {value = dense<1.638800e-04> : tensor<f32>} : () -> tensor<f32>
+    %a_zp = "onnx.Constant"() {value = dense<35275> : tensor<ui16>} : () -> tensor<ui16>
+    %y_scale = "onnx.Constant"() {value = dense<3.687020e-04> : tensor<f32>} : () -> tensor<f32>
+    %y_zp = "onnx.Constant"() {value = dense<36322> : tensor<ui16>} : () -> tensor<ui16>
+
+    %a_dq = "onnx.DequantizeLinear"(%A, %a_scale, %a_zp)
+            : (tensor<4x8xui16>, tensor<f32>, tensor<ui16>) -> tensor<4x8xf32>
+    %w_dq = "onnx.DequantizeLinear"(%w, %w_scale, %w_zp) {block_size = 0 : si64}
+            : (tensor<8x6xi8>, tensor<6xf32>, tensor<6xi8>) -> tensor<8x6xf32>
+    %prod = "onnx.MatMul"(%a_dq, %w_dq)
+            : (tensor<4x8xf32>, tensor<8x6xf32>) -> tensor<4x6xf32>
+    %y = "onnx.QuantizeLinear"(%prod, %y_scale, %y_zp)
+         : (tensor<4x6xf32>, tensor<f32>, tensor<ui16>) -> tensor<4x6xui16>
+    return %y : tensor<4x6xui16>
+  }
+
 }
