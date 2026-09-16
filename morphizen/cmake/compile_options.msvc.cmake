@@ -73,7 +73,6 @@
 set(MORPHIZEN_COMPILER_OPTIONS
   /Zc:__cplusplus #
   # /Zi # REMOVED: Use RelWithDebInfo build type instead of hardcoding debug symbols
-  /Qspectre # enable Spectre mitigations, required by MS
   # /ZH:SHA_256 # REMOVED: Only useful with /Zi flag
   /guard:cf # Control Flow Guard
   /sdl # Security Development Lifecycle
@@ -109,6 +108,14 @@ set(MORPHIZEN_COMPILER_OPTIONS
   /utf-8
   CACHE STRING "Compiler options for Morphizen"
 )
+
+if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+  list(APPEND MORPHIZEN_COMPILER_OPTIONS /Qspectre)
+else()
+  # clang-cl accepts most MSVC-style options but does not implement /Qspectre;
+  # with /WX it diagnoses the unused option as an error.
+  list(REMOVE_ITEM MORPHIZEN_COMPILER_OPTIONS /Qspectre)
+endif()
 
 # /WX is now enabled for all platforms in MORPHIZEN_COMPILER_OPTIONS above
 
