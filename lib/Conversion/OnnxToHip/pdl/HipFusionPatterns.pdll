@@ -24,6 +24,8 @@ Constraint IsEightBitQuantized(op: Op);
 Constraint IsEightOrSixteenBitQuantized(op: Op);
 Constraint IsEightSixteenOrThirtyTwoBitQuantized(op: Op);
 Constraint HasStaticShapedResults(op: Op);
+Constraint HasAttrInt64Equal(op: Op, name: Attr, expected: Attr, absentValue: Attr);
+Constraint IsPerAxisQuantizedWeight(op: Op, rank: Attr, axis: Attr, bits: Attr);
 Constraint IsUint16Quantized(op: Op);
 Constraint IsFusableQConvGeometry(op: Op);
 Constraint IsPackedInt4PerChannelWeight(op: Op);

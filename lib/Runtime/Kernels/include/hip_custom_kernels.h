@@ -180,39 +180,34 @@ HIP_KERNEL_API int hip_qelementwise(
  * Quantized batched matmul (Q(DQ(A) @ DQ(B)))
  * =========================================================================
  *
- * A: [batch_count x M x K], B: [K x N] when b_batch_stride == 0 or
- * [batch_count x K x N] when b_batch_stride == K*N, Y: [batch_count x M x N].
- * All row-major and contiguous.
+ * A: [batch x M x K], B: [K x N] (or batched when b_batch_stride == K*N),
+ * Y: [batch x M x N]. trans_a / trans_b swap the trailing two extents in
+ * memory; M, N, K stay logical. Y is never transposed.
  *
- * trans_a / trans_b swap the trailing two extents of the corresponding operand
- * in memory -- A stored as [batch_count x K x M], B as [N x K] -- while M, N, K
- * stay the logical extents and b_batch_stride stays K*N. Only the load stride
- * changes; Y is never transposed.
+ * A/Y: 8- or 16-bit. B: INT8/UINT8 storage. b_bits is 8, or 4 when two values
+ * share a byte (low nibble first over flattened row-major).
  *
- * Supported hip_dtype, independently per edge:
- *   a: HIP_DTYPE_INT8, HIP_DTYPE_UINT8, HIP_DTYPE_INT16, HIP_DTYPE_UINT16
- *   b: HIP_DTYPE_INT8, HIP_DTYPE_UINT8
- *   y: HIP_DTYPE_INT8, HIP_DTYPE_UINT8, HIP_DTYPE_INT16, HIP_DTYPE_UINT16
+ * B_scales NULL: per tensor; M_scale = s_a*s_b/s_y and scalar b_zp.
+ * B_scales set: per column, f32[N] + B_zero_points[N]; use
+ * AY_ratio * B_scales[n] with AY_ratio = s_a/s_y.
  *
- * workspace / workspace_bytes: optional split-K scratch. The tiled grid has no
- * K dimension, so a shape with little output parallelism (a low-rank M=128,
- * N=32 projection launches two blocks) leaves most of the device idle. Given
- * scratch, such a shape is instead reduced in parallel k slices and requantized
- * by a second pass. Pass NULL, or fewer bytes than hip_qmatmul_workspace_bytes
- * asks for, to stay on the single-pass kernel; the result is identical either
- * way, since the slices are combined with exact integer atomics.
+ * workspace: optional split-K scratch. NULL or undersized stays single-pass;
+ * query size with hip_qmatmul_workspace_bytes. Results match either way.
  */
 HIP_KERNEL_API int hip_qmatmul(
     void* stream,
     const void* A,
     const void* B,
     void* Y,
+    const void* B_scales,
+    const void* B_zero_points,
     int64_t M, int64_t N, int64_t K,
     int64_t batch_count,
     int64_t b_batch_stride,
     int trans_a, int trans_b,
     int a_dtype, int b_dtype, int y_dtype,
-    float M_scale,
+    int b_bits,
+    float M_scale, float AY_ratio,
     int64_t a_zp, int64_t b_zp, int64_t y_zp,
     void* workspace,
     size_t workspace_bytes);

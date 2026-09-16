@@ -4,7 +4,9 @@
  */
 
 // qdq_fusion_pass.hpp — PDL fusion pass for QDQ patterns
-
+// Contains common functions required for fusion patterns.
+// Note: Design the functions so that they can be reused by
+// other patterns whenever possible.
 #pragma once
 
 #include "mlir/Dialect/PDL/IR/PDL.h"
@@ -91,10 +93,10 @@ trySplatZeropoint(mlir::Operation *op, uint64_t index, int64_t absentValue) {
 // inline dense value, or the external location/offset/size triple that every
 // multi-megabyte weight arrives as (its bytes are not in the IR at all).
 //
-// This is the only place 4-bit packing is observable. ONNX INT4/UINT4 imports
-// as i8/ui8 at the LOGICAL element count, so the element type cannot show the
-// width, and this pass runs BEFORE lowerOnnxConstants stamps `packed_int4` --
-// the marker does not exist yet and cannot be consulted.
+// This is the only place the stored value width is observable. ONNX INT4/UINT4
+// imports as i8/ui8 at the LOGICAL element count, so the element type cannot
+// show the width, and this pass runs BEFORE lowerOnnxConstants stamps
+// `packed_int4` -- the marker does not exist yet and cannot be consulted.
 inline std::optional<int64_t> tryConstantBackingBytes(mlir::Value value) {
   if (!value)
     return std::nullopt;
@@ -112,11 +114,13 @@ inline std::optional<int64_t> tryConstantBackingBytes(mlir::Value value) {
   return static_cast<int64_t>(denseAttr.getRawData().size());
 }
 
-// True when an 8-bit-typed constant really holds ceil(numel/2) packed nibbles,
-// which is the same relation hip.constant's verifier accepts. Full-width
-// storage is plain int8 and must not be claimed. A single element occupies a
-// whole byte either way, so it is indistinguishable from int8 and is rejected.
-inline bool isPackedInt4Constant(mlir::Value value) {
+// True when an 8-bit-typed constant carries `bits`-wide values: ceil(numel/2)
+// bytes for 4-bit nibble pairs (the same relation hip.constant's verifier
+// accepts), numel bytes for full-width 8-bit. The byte count is the whole test
+// and it is also what keeps the two widths mutually exclusive. The one overlap
+// is a single element, which occupies a whole byte either way and is left to
+// the 8-bit reading rather than claimed as packed.
+inline bool hasQuantStorageBits(mlir::Value value, int64_t bits) {
   if (!value)
     return false;
   auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(value.getType());
@@ -127,10 +131,18 @@ inline bool isPackedInt4Constant(mlir::Value value) {
   if (!elemType || elemType.getWidth() != 8)
     return false;
   int64_t numel = tensorType.getNumElements();
-  if (numel < 2)
+  int64_t expectedBytes;
+  if (bits == 4) {
+    if (numel < 2)
+      return false;
+    expectedBytes = (numel + 1) / 2;
+  } else if (bits == 8) {
+    expectedBytes = numel;
+  } else {
     return false;
+  }
   std::optional<int64_t> bytes = tryConstantBackingBytes(value);
-  return bytes && *bytes == (numel + 1) / 2;
+  return bytes && *bytes == expectedBytes;
 }
 
 // An absent ONNX list attribute means its per-axis default, and every caller
@@ -149,14 +161,15 @@ inline bool onnxListAttrAllEqual(mlir::Operation *op, llvm::StringRef name,
   return true;
 }
 
-// Scalar ONNX attribute equal to `expected`, treating absent as the default
-// the caller passes in `absentValue`.
+inline int64_t onnxIntAttrWithDefault(mlir::Operation *op, llvm::StringRef name,
+                                      int64_t absentValue) {
+  auto intAttr = op->getAttrOfType<mlir::IntegerAttr>(name);
+  return intAttr ? intAttr.getValue().getSExtValue() : absentValue;
+}
+
 inline bool onnxIntAttrEquals(mlir::Operation *op, llvm::StringRef name,
                               int64_t expected, int64_t absentValue) {
-  auto intAttr = op->getAttrOfType<mlir::IntegerAttr>(name);
-  if (!intAttr)
-    return absentValue == expected;
-  return intAttr.getValue().getSExtValue() == expected;
+  return onnxIntAttrWithDefault(op, name, absentValue) == expected;
 }
 
 //===----------------------------------------------------------------------===//
@@ -256,6 +269,80 @@ hasStaticShapedResults(mlir::PatternRewriter &, mlir::PDLResultList &,
       return mlir::failure();
   }
   return mlir::success();
+}
+
+inline mlir::LogicalResult
+hasAttrInt64Equal(mlir::PatternRewriter &, mlir::PDLResultList &,
+                  llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 4)
+    return mlir::failure();
+  auto *op = args[0].dyn_cast<mlir::Operation *>();
+  auto nameAttr = mlir::dyn_cast_or_null<mlir::StringAttr>(
+      args[1].dyn_cast<mlir::Attribute>());
+  auto expected = mlir::dyn_cast_or_null<mlir::IntegerAttr>(
+      args[2].dyn_cast<mlir::Attribute>());
+  auto absentValue = mlir::dyn_cast_or_null<mlir::IntegerAttr>(
+      args[3].dyn_cast<mlir::Attribute>());
+  if (!op || !nameAttr || !expected || !absentValue)
+    return mlir::failure();
+  return mlir::success(onnxIntAttrEquals(
+      op, nameAttr.getValue(), expected.getInt(), absentValue.getInt()));
+}
+
+inline mlir::LogicalResult
+isPerAxisQuantizedWeight(mlir::PatternRewriter &, mlir::PDLResultList &,
+                         llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 4)
+    return mlir::failure();
+  mlir::Operation *op = args[0].dyn_cast<mlir::Operation *>();
+  auto rankAttr = mlir::dyn_cast_or_null<mlir::IntegerAttr>(
+      args[1].dyn_cast<mlir::Attribute>());
+  auto axisAttr = mlir::dyn_cast_or_null<mlir::IntegerAttr>(
+      args[2].dyn_cast<mlir::Attribute>());
+  auto bitsAttr = mlir::dyn_cast_or_null<mlir::IntegerAttr>(
+      args[3].dyn_cast<mlir::Attribute>());
+  // A zero point is required: the fused ops have no way to express its
+  // absence.
+  if (!op || !rankAttr || !axisAttr || !bitsAttr || op->getNumOperands() != 3)
+    return mlir::failure();
+  int64_t rank = rankAttr.getInt();
+  int64_t quantAxis = axisAttr.getInt();
+  int64_t bits = bitsAttr.getInt();
+
+  // block_size > 0 subdivides each slice, a second and finer granularity that
+  // one scale per slice cannot represent.
+  if (!onnxIntAttrEquals(op, "block_size", 0, /*absentValue=*/0))
+    return mlir::failure();
+
+  mlir::Value weights = op->getOperand(0);
+  if (!hasQuantStorageBits(weights, bits))
+    return mlir::failure();
+  auto weightType = mlir::cast<mlir::RankedTensorType>(weights.getType());
+  if (weightType.getRank() != rank)
+    return mlir::failure();
+
+  int64_t axis = onnxIntAttrWithDefault(op, "axis", /*absentValue=*/1);
+  if (axis < 0)
+    axis += rank;
+  if (axis != quantAxis)
+    return mlir::failure();
+  int64_t slices = weightType.getDimSize(quantAxis);
+
+  auto scaleType =
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getOperand(1).getType());
+  if (!scaleType || scaleType.getRank() != 1 ||
+      scaleType.getDimSize(0) != slices || !scaleType.getElementType().isF32())
+    return mlir::failure();
+
+  // ONNX guarantees zero_point.dtype == x.dtype, so the zero point has both
+  // the weight's element type and its value width. That is what lets one
+  // `packed_int4` flag describe both operands, as hip.dequantize_linear does.
+  mlir::Value zeroPoints = op->getOperand(2);
+  auto zpType = mlir::dyn_cast<mlir::RankedTensorType>(zeroPoints.getType());
+  if (!zpType || zpType.getRank() != 1 || zpType.getDimSize(0) != slices ||
+      zpType.getElementType() != weightType.getElementType())
+    return mlir::failure();
+  return mlir::success(hasQuantStorageBits(zeroPoints, bits));
 }
 
 // The quantized side of a Q/DQ op is UINT16. Pins the qconv fusion to the one
@@ -593,6 +680,10 @@ inline bool run(mlir::ModuleOp mlirModule, llvm::StringRef pdlBytecodeFile) {
       isEightSixteenOrThirtyTwoBitQuantized);
   pdlPatterns.registerConstraintFunction("HasStaticShapedResults",
                                          hasStaticShapedResults);
+  pdlPatterns.registerConstraintFunction("HasAttrInt64Equal",
+                                         hasAttrInt64Equal);
+  pdlPatterns.registerConstraintFunction("IsPerAxisQuantizedWeight",
+                                         isPerAxisQuantizedWeight);
   pdlPatterns.registerConstraintFunction("IsUint16Quantized",
                                          isUint16Quantized);
   pdlPatterns.registerConstraintFunction("IsFusableQConvGeometry",

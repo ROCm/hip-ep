@@ -1635,27 +1635,32 @@ int wrap_qelementwise(RuntimeState *state, void *lhs, void *rhs, void *output,
 }
 
 int wrap_qmatmul(RuntimeState *state, const void *A, const void *B, void *Y,
-                 int64_t M, int64_t N, int64_t K, int64_t batch_count,
+                 const void *B_scales, const void *B_zero_points, int64_t M,
+                 int64_t N, int64_t K, int64_t batch_count,
                  int64_t b_batch_stride, int64_t trans_a, int64_t trans_b,
                  int64_t a_data_type, int64_t b_data_type, int64_t y_data_type,
-                 float M_scale, int64_t A_zero_point, int64_t B_zero_point,
+                 int64_t b_bits, float M_scale, float AY_ratio,
+                 int64_t A_zero_point, int64_t B_zero_point,
                  int64_t Y_zero_point) {
   (void)A;
   (void)B;
   (void)Y;
+  (void)B_zero_points;
   (void)b_batch_stride;
   (void)a_data_type;
   (void)b_data_type;
   (void)y_data_type;
+  (void)AY_ratio;
   (void)A_zero_point;
   (void)B_zero_point;
   (void)Y_zero_point;
   if (!state)
     return -1;
   MOCK_PRINT("[MOCK] wrap_qmatmul(M=%lld, N=%lld, K=%lld, batch=%lld, "
-             "trans=(%lld,%lld), M_scale=%g)",
+             "trans=(%lld,%lld), b_bits=%lld, per_column=%d, M_scale=%g)",
              (long long)M, (long long)N, (long long)K, (long long)batch_count,
-             (long long)trans_a, (long long)trans_b, (double)M_scale);
+             (long long)trans_a, (long long)trans_b, (long long)b_bits,
+             B_scales != nullptr, (double)M_scale);
   return 0;
 }
 
