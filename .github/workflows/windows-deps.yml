@@ -94,11 +94,14 @@ jobs:
         run: |
           set -euo pipefail
           REV=$(awk -F';' '$1 == "rocmlirTriton" { print $3 }' cmake/deps.txt)
-          if [ -z "$REV" ]; then
-            echo "ERROR: rocmlirTriton is not pinned in cmake/deps.txt"
+          TOOLS_REV=$(awk -F';' '$1 == "rocm-cmake-build-tools" { print $3 }' cmake/deps.txt)
+          SDK=$(awk -F';' '$1 == "therock_windows" { print $3 }' cmake/deps.txt)
+          if [ -z "$REV" ] || [ -z "$TOOLS_REV" ] || [ -z "$SDK" ]; then
+            echo "ERROR: rocmlirTriton, rocm-cmake-build-tools, or therock_windows is not pinned in cmake/deps.txt"
             exit 1
           fi
-          echo "value=dep-rocmlirtriton-${REV:0:12}-clang" >> "$GITHUB_OUTPUT"
+          SDK_HASH=$(printf '%s' "$SDK" | sha256sum | cut -c1-12)
+          echo "value=dep-rocmlirtriton-${REV:0:12}-clang-${TOOLS_REV}-${SDK_HASH}" >> "$GITHUB_OUTPUT"
 
       - name: Probe rocmlirTriton tree
         id: cache-rock

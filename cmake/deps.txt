@@ -17,6 +17,9 @@ llvm;https://github.com/llvm/llvm-project.git;62b7cf9623fc310525f39ed69aaecc318a
 ## _HIPDNN_ROCMLIRTRITON_REV in cmake/deps.cmake.
 ## Shared LLVM projects: clang;mlir;lld (clang compiles runtime.bc).
 rocmlirTriton;https://github.com/ROCm/rocmlirTriton.git;28a5a7a40cfd6aceab0047c7fc92cb5cf90b6540
+## CMake packaging helpers required by rocmlirTriton's librockCompiler target.
+## Trimmed TheRock bundles do not consistently include this package.
+rocm-cmake-build-tools;https://github.com/ROCm/rocm-cmake-build-tools.git;therock-7.12
 protobuf;https://github.com/protocolbuffers/protobuf.git;v34.0
 flatbuffers;https://github.com/google/flatbuffers.git;v25.12.19
 ##

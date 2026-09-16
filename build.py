@@ -485,6 +485,51 @@ def _ninja_target_names(build_dir):
     return names
 
 
+def ensure_rocm_cmake_build_tools(build_dir, rocm_path, build_env):
+    """Return a ROCmCMakeBuildTools package dir, bootstrapping when absent."""
+    package_rel = Path("share") / "rocmcmakebuildtools" / "cmake"
+    candidates = [Path(rocm_path) / package_rel]
+    if not IS_WINDOWS:
+        candidates.append(Path("/opt/rocm") / package_rel)
+    for package_dir in candidates:
+        if (package_dir / "ROCmCMakeBuildToolsConfig.cmake").exists():
+            return package_dir
+
+    url, revision = _dep_entry("rocm-cmake-build-tools")
+    root = Path(build_dir) / "_rocm-cmake-build-tools"
+    source_dir = root / "src"
+    cmake_build_dir = root / "build"
+    install_dir = root / "install"
+    package_dir = install_dir / package_rel
+
+    if not (source_dir / ".git").exists():
+        step(f"Clone ROCmCMakeBuildTools {revision}")
+        source_dir.parent.mkdir(parents=True, exist_ok=True)
+        run_subprocess(
+            ["git", "clone", "--depth", "1", "--branch", revision, url, str(source_dir)]
+        )
+    if not (package_dir / "ROCmCMakeBuildToolsConfig.cmake").exists():
+        step("Install ROCmCMakeBuildTools")
+        run_subprocess(
+            [
+                "cmake",
+                "-S",
+                str(source_dir),
+                "-B",
+                str(cmake_build_dir),
+                f"-DCMAKE_INSTALL_PREFIX={install_dir}",
+            ],
+            env=build_env,
+        )
+        run_subprocess(["cmake", "--install", str(cmake_build_dir)], env=build_env)
+    if not (package_dir / "ROCmCMakeBuildToolsConfig.cmake").exists():
+        raise BuildError(
+            "ROCmCMakeBuildTools install did not produce a package config at "
+            f"{package_dir}"
+        )
+    return package_dir
+
+
 def build_rocmlirtriton(args, build_dir, source_dir=None, rocm_path=None):
     """Build and install rocMLIR::rockCompiler for the hip-ep link.
 
@@ -513,6 +558,9 @@ def build_rocmlirtriton(args, build_dir, source_dir=None, rocm_path=None):
     rock_build = rock_root / "build"
     rock_install = rock_root / "install"
     build_env = _msvc_build_environment()
+    rocm_cmake_build_tools_dir = ensure_rocm_cmake_build_tools(
+        build_dir, rocm_path, build_env
+    )
     compiler_dir = rocm_path / "lib" / "llvm" / "bin"
     if not compiler_dir.exists():
         compiler_dir = rocm_path / "bin"
@@ -583,6 +631,7 @@ def build_rocmlirtriton(args, build_dir, source_dir=None, rocm_path=None):
         f"-DCMAKE_BUILD_TYPE={args.config}",
         f"-DCMAKE_INSTALL_PREFIX={rock_install}",
         f"-DROCM_PATH={rocm_path}",
+        f"-DROCmCMakeBuildTools_DIR={rocm_cmake_build_tools_dir}",
         "-DBUILD_FAT_LIBROCKCOMPILER=ON",
         "-DLLVM_INCLUDE_TESTS=OFF",
         "-DMLIR_INCLUDE_TESTS=OFF",
