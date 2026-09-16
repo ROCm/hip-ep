@@ -14,7 +14,7 @@
 ;;
 ;;===----------------------------------------------------------------------===;;
 
-(library (printpass)
+(library (passes print)
   (export run-pass)
   (import (rnrs (6))
           (only (chezscheme) format)  ; format is Chez-specific
