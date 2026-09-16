@@ -148,14 +148,14 @@ add_custom_target(SchemeLibraries ALL
 
 # Copy simple pass modules (these are just thin wrappers, not compiled)
 configure_file(
-  ${CMAKE_CURRENT_SOURCE_DIR}/libraries/passes/printpass.sls
-  ${SCHEME_LIB_DIR}/passes/printpass.sls
+  ${CMAKE_CURRENT_SOURCE_DIR}/libraries/passes/print.sls
+  ${SCHEME_LIB_DIR}/passes/print.sls
   COPYONLY
 )
 
 # Install R6RS pass modules to <prefix>/lib/scheme/
 install(FILES
-  ${CMAKE_CURRENT_SOURCE_DIR}/libraries/passes/printpass.sls
+  ${CMAKE_CURRENT_SOURCE_DIR}/libraries/passes/print.sls
   DESTINATION lib/scheme/passes
 )
 
