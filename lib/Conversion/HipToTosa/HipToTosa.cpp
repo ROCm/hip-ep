@@ -491,12 +491,18 @@ struct GemmConverter final : public OpConversionPattern<hip::GemmOp> {
 // ODS defaults it to PROPAGATE, which is what ONNX Max/Min do, so the
 // two-operand builder below is correct for them unchanged.
 //
-// BoolOnly marks the logical ops (hip.and, hip.or), whose TOSA counterparts
-// take Tosa_I1Tensor. Their hip operands are declared Hip_TensorOrMemRef, so
-// nothing upstream narrows the element type; a wider integer would be replaced
-// with a tosa.logical_and that then fails the TOSA verifier, reported against
-// an op this pass synthesized rather than the hip op that carried the type.
-// Rejecting here names it.
+// BoolOnly marks the logical ops (hip.and, hip.or). They are spelled
+// tosa.bitwise_and / tosa.bitwise_or rather than the tosa.logical_* that would
+// be the obvious mapping, because rocMLIR's RockTosaToElementwise has no
+// pattern for the logical forms and its conversion target marks every
+// surviving tosa op illegal -- the kernel would convert cleanly here and then
+// fail to lower. The bitwise forms do have patterns (arith.andi / arith.ori),
+// and on i1 they compute exactly the logical operation.
+//
+// The gate is what keeps that true: bitwise and logical only coincide on i1,
+// so a wider integer has to be rejected rather than silently given bitwise
+// semantics. hip.and's operands are declared Hip_TensorOrMemRef and nothing
+// upstream narrows them, so the check cannot be left to the type system.
 template <typename HipOpTy, typename TosaOpTy, bool BoolOnly = false>
 struct BinaryConverter final : public OpConversionPattern<HipOpTy> {
   using OpConversionPattern<HipOpTy>::OpConversionPattern;
@@ -542,6 +548,16 @@ struct BinaryConverter final : public OpConversionPattern<HipOpTy> {
   }
 };
 
+// TOSA's Tosa_FloatTensor is AnyFloat, so an f64 tensor satisfies the op
+// verifiers, but nothing downstream can lower one: rocMLIR has no f64 path and
+// the TOSA profiles do not carry the type. GemmConverter above excludes f64
+// for the same reason. Naming it in the patterns that would otherwise accept
+// any float keeps a double-precision model from being replaced with TOSA that
+// only fails later.
+static bool isTosaExpressibleFloat(Type elementType) {
+  return isa<FloatType>(elementType) && !elementType.isF64();
+}
+
 // Covers hip.equal and hip.less, whose result is i1 while their operands carry
 // the type being compared. That mismatch is why they cannot use
 // BinaryConverter: isTosaCompatibleOperand checks an operand's element type
@@ -583,6 +599,13 @@ struct ComparisonConverter final : public OpConversionPattern<HipOpTy> {
     if (!lhsType || !rhsType ||
         lhsType.getElementType() != rhsType.getElementType())
       return rewriter.notifyMatchFailure(op, "operand element types differ");
+    // Matching operand types alone do not make a TOSA comparison lowerable;
+    // the compared type still has to be one TOSA can carry.
+    Type operandElemType = lhsType.getElementType();
+    if (!isTosaExpressibleFloat(operandElemType) &&
+        !isa<IntegerType>(operandElemType))
+      return rewriter.notifyMatchFailure(
+          op, "comparison operand type has no tosa spelling");
 
     // Both TOSA comparisons carry SameOperandsElementType, and each operand
     // still has to broadcast up to the result's shape. Checking against a
@@ -690,12 +713,7 @@ struct DivConverter final : public OpConversionPattern<hip::DivOp> {
 // profile, so an integer would verify and then have no lowering. Both are
 // unreachable from a valid ONNX model, where all ten are float-only, so the
 // gate documents the constraint rather than rejecting real inputs.
-//
-// BoolOnly is the mirror of it for hip.not, whose tosa.logical_not takes
-// Tosa_I1Tensor. ONNX Not is bool-only as well, so it documents that
-// constraint the same way.
-template <typename HipOpTy, typename TosaOpTy, bool FloatOnly = false,
-          bool BoolOnly = false>
+template <typename HipOpTy, typename TosaOpTy, bool FloatOnly = false>
 struct UnaryConverter final : public OpConversionPattern<HipOpTy> {
   using OpConversionPattern<HipOpTy>::OpConversionPattern;
   using OpAdaptor = typename OpConversionPattern<HipOpTy>::OpAdaptor;
@@ -714,8 +732,6 @@ struct UnaryConverter final : public OpConversionPattern<HipOpTy> {
           op, "operand and result types must match exactly");
     if (FloatOnly && !isa<FloatType>(resultType.getElementType()))
       return rewriter.notifyMatchFailure(op, "tosa op requires a float tensor");
-    if (BoolOnly && !resultType.getElementType().isInteger(1))
-      return rewriter.notifyMatchFailure(op, "tosa op requires an i1 tensor");
 
     // tosa.negate takes zero-point operands, but its quant-info builder
     // materializes them from this same (result type, input) signature.
@@ -856,6 +872,43 @@ struct SqrtConverter final : public OpConversionPattern<SqrtOp> {
   }
 };
 
+// hip.not is logical negation on i1. It becomes tosa.bitwise_xor against an
+// all-ones constant rather than the tosa.logical_not that would map 1-1,
+// because RockTosaToElementwise has a pattern for neither tosa.logical_not nor
+// tosa.bitwise_not, while tosa.bitwise_xor lowers to arith.xori. On i1,
+// `x ^ true` is exactly `!x`.
+//
+// That is also why this cannot be a UnaryConverter: the xor needs a second
+// operand. The i1 requirement is the same one hip.and and hip.or carry, and
+// for the same reason -- bitwise and logical coincide only on i1.
+struct LogicalNotConverter final : public OpConversionPattern<NotOp> {
+  using OpConversionPattern<NotOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(NotOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!resultType || !resultType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
+    if (adaptor.getX().getType() != resultType)
+      return rewriter.notifyMatchFailure(
+          op, "operand and result types must match exactly");
+    if (!resultType.getElementType().isInteger(1))
+      return rewriter.notifyMatchFailure(op, "hip.not requires an i1 tensor");
+
+    Location loc = op.getLoc();
+    Value ones = tosa::ConstOp::create(
+        rewriter, loc, resultType,
+        DenseElementsAttr::get(resultType, rewriter.getBoolAttr(true)));
+    rewriter.replaceOpWithNewOp<tosa::BitwiseXorOp>(op, resultType,
+                                                    adaptor.getX(), ones);
+    return success();
+  }
+};
+
 // hip.sign is ONNX Sign: +1 where x > 0, -1 where x < 0, and 0 elsewhere.
 // TOSA has no sign op, so this expands to the nested select that the
 // definition spells out directly:
@@ -889,10 +942,10 @@ struct SignConverter final : public OpConversionPattern<SignOp> {
     // tosa.greater / tosa.select pair below takes either. i1 is excluded
     // because -1 is not representable in it.
     Type elementType = resultType.getElementType();
-    bool isFloat = isa<FloatType>(elementType);
+    bool isFloat = isTosaExpressibleFloat(elementType);
     if (!isFloat && !elementType.isSignlessInteger())
       return rewriter.notifyMatchFailure(
-          op, "expected a float or signless integer tensor");
+          op, "expected a tosa-expressible float or signless integer tensor");
     if (elementType.isInteger(1))
       return rewriter.notifyMatchFailure(op, "i1 cannot represent -1");
 
@@ -3065,8 +3118,10 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         BinaryConverter<MinOp, tosa::MinimumOp>,
         BinaryConverter<MaxOp, tosa::MaximumOp>,
         BinaryConverter<MulOp, tosa::MulOp>,
-        BinaryConverter<AndOp, tosa::LogicalAndOp, /*BoolOnly=*/true>,
-        BinaryConverter<OrOp, tosa::LogicalOrOp, /*BoolOnly=*/true>,
+        // Bitwise rather than logical: only the bitwise forms have a rocMLIR
+        // lowering, and on i1 the two coincide.
+        BinaryConverter<AndOp, tosa::BitwiseAndOp, /*BoolOnly=*/true>,
+        BinaryConverter<OrOp, tosa::BitwiseOrOp, /*BoolOnly=*/true>,
         ComparisonConverter<EqualOp, tosa::EqualOp>,
         // TOSA has no `less`, so the operands are swapped into a greater.
         ComparisonConverter<LessOp, tosa::GreaterOp, /*SwapOperands=*/true>,
@@ -3083,13 +3138,11 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         UnaryConverter<SigmoidOp, tosa::SigmoidOp, /*FloatOnly=*/true>,
         UnaryConverter<ReciprocalOp, tosa::ReciprocalOp,
                        /*FloatOnly=*/true>,
-        UnaryConverter<NotOp, tosa::LogicalNotOp, /*FloatOnly=*/false,
-                       /*BoolOnly=*/true>,
-        SqrtConverter, SignConverter, WhereConverter, LeakyReluConverter,
-        SoftmaxConverter, ReduceSumConverter, ReduceMeanConverter,
-        CastConverter, DequantizeLinearConverter, QuantizeLinearConverter,
-        MatMulNBitsConverter, GatherConverter, RopeConverter, GqaConverter,
-        MhaConverter>(ctx);
+        LogicalNotConverter, SqrtConverter, SignConverter, WhereConverter,
+        LeakyReluConverter, SoftmaxConverter, ReduceSumConverter,
+        ReduceMeanConverter, CastConverter, DequantizeLinearConverter,
+        QuantizeLinearConverter, MatMulNBitsConverter, GatherConverter,
+        RopeConverter, GqaConverter, MhaConverter>(ctx);
 
     if (failed(applyPartialConversion(funcOp, conversion, std::move(patterns))))
       signalPassFailure();

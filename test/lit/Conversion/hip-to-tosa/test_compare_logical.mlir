@@ -31,7 +31,8 @@
 // This test validates:
 // - hip.equal maps to tosa.equal with its operands in order
 // - hip.less maps to tosa.greater with its operands swapped
-// - hip.and / hip.or / hip.not map to the tosa.logical_* ops
+// - hip.and / hip.or / hip.not use the tosa.bitwise_* ops, which are the forms
+//   rocMLIR can lower, and which agree with the logical ones on i1
 // - hip.sign expands to select(x > 0, 1, select(0 > x, -1, 0))
 // - The i1 result of a comparison does not block broadcasting of its operands
 // - The hip context and the DPS outs operand are both dropped
@@ -83,7 +84,7 @@ func.func @less_i32(%ctx: !hip.context, %x: tensor<4xi32>, %y: tensor<4xi32>,
 }
 
 // CHECK-LABEL: func.func @and
-// CHECK: tosa.logical_and %arg1, %arg2 : (tensor<2x8xi1>, tensor<2x8xi1>) -> tensor<2x8xi1>
+// CHECK: tosa.bitwise_and %arg1, %arg2 : (tensor<2x8xi1>, tensor<2x8xi1>) -> tensor<2x8xi1>
 // CHECK-NOT: hip.and
 func.func @and(%ctx: !hip.context, %x: tensor<2x8xi1>, %y: tensor<2x8xi1>,
                %init: tensor<2x8xi1>) -> tensor<2x8xi1>
@@ -94,7 +95,7 @@ func.func @and(%ctx: !hip.context, %x: tensor<2x8xi1>, %y: tensor<2x8xi1>,
 }
 
 // CHECK-LABEL: func.func @or
-// CHECK: tosa.logical_or %arg1, %arg2 : (tensor<2x8xi1>, tensor<2x8xi1>) -> tensor<2x8xi1>
+// CHECK: tosa.bitwise_or %arg1, %arg2 : (tensor<2x8xi1>, tensor<2x8xi1>) -> tensor<2x8xi1>
 // CHECK-NOT: hip.or
 func.func @or(%ctx: !hip.context, %x: tensor<2x8xi1>, %y: tensor<2x8xi1>,
               %init: tensor<2x8xi1>) -> tensor<2x8xi1>
@@ -104,9 +105,13 @@ func.func @or(%ctx: !hip.context, %x: tensor<2x8xi1>, %y: tensor<2x8xi1>,
   return %r : tensor<2x8xi1>
 }
 
+// `!x` is `x ^ true`, because neither tosa.logical_not nor tosa.bitwise_not
+// has a rocMLIR lowering while tosa.bitwise_xor does.
 // CHECK-LABEL: func.func @not
-// CHECK: tosa.logical_not %arg1 : (tensor<2x8xi1>) -> tensor<2x8xi1>
+// CHECK: %[[ONES:.*]] = "tosa.const"() <{values = dense<true> : tensor<2x8xi1>}>
+// CHECK: tosa.bitwise_xor %arg1, %[[ONES]] : (tensor<2x8xi1>, tensor<2x8xi1>) -> tensor<2x8xi1>
 // CHECK-NOT: hip.not
+// CHECK-NOT: tosa.logical_not
 func.func @not(%ctx: !hip.context, %x: tensor<2x8xi1>,
                %init: tensor<2x8xi1>) -> tensor<2x8xi1>
     attributes {rock.kernel} {
@@ -268,8 +273,8 @@ func.func @equal_non_i1_result(%ctx: !hip.context, %x: tensor<2x8xf32>,
 
 // -----
 
-// tosa.logical_and takes Tosa_I1Tensor, so a wider integer is rejected by the
-// BoolOnly gate instead of being replaced with an op that fails verification.
+// Bitwise and logical only agree on i1, so a wider integer is rejected by the
+// BoolOnly gate rather than silently given bitwise semantics.
 func.func @and_non_i1(%ctx: !hip.context, %x: tensor<2x8xi8>,
                       %y: tensor<2x8xi8>, %init: tensor<2x8xi8>)
     -> tensor<2x8xi8> attributes {rock.kernel} {
@@ -281,7 +286,7 @@ func.func @and_non_i1(%ctx: !hip.context, %x: tensor<2x8xi8>,
 
 // -----
 
-// The same gate on the unary side, for tosa.logical_not.
+// The same gate for hip.not: `x ^ true` is only logical negation on i1.
 func.func @not_non_i1(%ctx: !hip.context, %x: tensor<2x8xi8>,
                       %init: tensor<2x8xi8>) -> tensor<2x8xi8>
     attributes {rock.kernel} {
@@ -289,6 +294,32 @@ func.func @not_non_i1(%ctx: !hip.context, %x: tensor<2x8xi8>,
   %r = hip.not(%ctx) ins(%x : tensor<2x8xi8>)
                      outs(%init : tensor<2x8xi8>) : tensor<2x8xi8>
   return %r : tensor<2x8xi8>
+}
+
+// -----
+
+// TOSA's float tensor constraint is AnyFloat, so an f64 comparison would pass
+// the verifier and then have no lowering; it is named here instead.
+func.func @less_f64(%ctx: !hip.context, %x: tensor<2x8xf64>,
+                    %y: tensor<2x8xf64>, %init: tensor<2x8xi1>)
+    -> tensor<2x8xi1> attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.less'}}
+  %r = hip.less(%ctx) ins(%x, %y : tensor<2x8xf64>, tensor<2x8xf64>)
+                      outs(%init : tensor<2x8xi1>) : tensor<2x8xi1>
+  return %r : tensor<2x8xi1>
+}
+
+// -----
+
+// The same for the sign expansion, whose greater/select would otherwise be
+// built at f64.
+func.func @sign_f64(%ctx: !hip.context, %x: tensor<2x8xf64>,
+                    %init: tensor<2x8xf64>) -> tensor<2x8xf64>
+    attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.sign'}}
+  %r = hip.sign(%ctx) ins(%x : tensor<2x8xf64>)
+                      outs(%init : tensor<2x8xf64>) : tensor<2x8xf64>
+  return %r : tensor<2x8xf64>
 }
 
 // -----
