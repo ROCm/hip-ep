@@ -19,6 +19,10 @@
 // hip.sqrt has no TOSA sqrt; the lowering is tosa.reciprocal(tosa.rsqrt(x)).
 // rocMLIR folds that pair back to math.sqrt.
 //
+// hip.gelu has no TOSA op. Exact (approximate="none") expands to
+// 0.5 * x * (1 + erf(x / sqrt(2))); approximate="tanh" uses the
+// 0.044715 cubic / tanh form. Both match hip_elementwise_gelu.
+//
 // FILE LAYOUT:
 // Everything that converts lives in the first --split-input-file chunk, so
 // it is one module and therefore also covers several ops converting in a
@@ -174,6 +178,45 @@ func.func @sqrt_outlined_kernel(%x: tensor<2x8xf16>, %init: tensor<2x8xf16>)
   return %r : tensor<2x8xf16>
 }
 
+// CHECK-LABEL: func.func @gelu
+// CHECK: tosa.mul
+// CHECK: tosa.erf
+// CHECK: tosa.add
+// CHECK: tosa.mul
+// CHECK-NOT: hip.gelu
+func.func @gelu(%ctx: !hip.context, %x: tensor<2x8xf16>,
+                %init: tensor<2x8xf16>) -> tensor<2x8xf16>
+    attributes {rock.kernel} {
+  %r = hip.gelu(%ctx) ins(%x : tensor<2x8xf16>)
+                      outs(%init : tensor<2x8xf16>) : tensor<2x8xf16>
+  return %r : tensor<2x8xf16>
+}
+
+// CHECK-LABEL: func.func @gelu_tanh
+// CHECK: tosa.mul
+// CHECK: tosa.tanh
+// CHECK-NOT: tosa.erf
+// CHECK-NOT: hip.gelu
+func.func @gelu_tanh(%ctx: !hip.context, %x: tensor<4xf32>,
+                     %init: tensor<4xf32>) -> tensor<4xf32>
+    attributes {rock.kernel} {
+  %r = hip.gelu(%ctx) ins(%x : tensor<4xf32>)
+                      outs(%init : tensor<4xf32>)
+                      {approximate = "tanh"} : tensor<4xf32>
+  return %r : tensor<4xf32>
+}
+
+// CHECK-LABEL: func.func @gelu_outlined_kernel
+// CHECK: tosa.erf
+// CHECK-NOT: hip.gelu
+func.func @gelu_outlined_kernel(%x: tensor<2x8xf16>, %init: tensor<2x8xf16>)
+    -> tensor<2x8xf16> attributes {rock.kernel} {
+  %ctx = ub.poison : !hip.context
+  %r = hip.gelu(%ctx) ins(%x : tensor<2x8xf16>)
+                      outs(%init : tensor<2x8xf16>) : tensor<2x8xf16>
+  return %r : tensor<2x8xf16>
+}
+
 // -----
 
 // Dynamic shapes give the pattern no static shape to reason about.
@@ -252,6 +295,28 @@ func.func @sqrt_integer_operand(%ctx: !hip.context, %x: tensor<4xi32>,
     attributes {rock.kernel} {
   // expected-error @+1 {{failed to legalize operation 'hip.sqrt'}}
   %r = hip.sqrt(%ctx) ins(%x : tensor<4xi32>)
+                      outs(%init : tensor<4xi32>) : tensor<4xi32>
+  return %r : tensor<4xi32>
+}
+
+// -----
+
+func.func @gelu_dynamic_shape(%ctx: !hip.context, %x: tensor<?x8xf16>,
+                              %init: tensor<?x8xf16>) -> tensor<?x8xf16>
+    attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.gelu'}}
+  %r = hip.gelu(%ctx) ins(%x : tensor<?x8xf16>)
+                      outs(%init : tensor<?x8xf16>) : tensor<?x8xf16>
+  return %r : tensor<?x8xf16>
+}
+
+// -----
+
+func.func @gelu_integer_operand(%ctx: !hip.context, %x: tensor<4xi32>,
+                                %init: tensor<4xi32>) -> tensor<4xi32>
+    attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.gelu'}}
+  %r = hip.gelu(%ctx) ins(%x : tensor<4xi32>)
                       outs(%init : tensor<4xi32>) : tensor<4xi32>
   return %r : tensor<4xi32>
 }

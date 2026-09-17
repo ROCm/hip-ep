@@ -781,6 +781,82 @@ struct SqrtConverter final : public OpConversionPattern<SqrtOp> {
   }
 };
 
+// TOSA has no gelu. Expand to the formula hip.gelu's own description
+// spells out, matching wrap_gelu / hip_elementwise_gelu:
+//
+//   approximate = "none" (default):
+//     y = 0.5 * x * (1 + erf(x * 1/sqrt(2)))
+//   approximate = "tanh":
+//     y = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+//
+// Cubing uses tosa.mul rather than tosa.pow so it holds for every float
+// type TOSA accepts. Dividing by sqrt(2) is a multiply by the reciprocal
+// constant, because TOSA has no float divide.
+//
+// Before:
+//   %r = hip.gelu(%ctx) ins(%x : tensor<2x8xf16>)
+//                       outs(%init : tensor<2x8xf16>) : tensor<2x8xf16>
+// After (exact):
+//   %c = tosa.const dense<0.7071...>
+//   %s = tosa.mul %x, %c
+//   %e = tosa.erf %s
+//   %t = tosa.add %one, %e
+//   %r = tosa.mul (tosa.mul %x, %half), %t
+struct GeluConverter final : public OpConversionPattern<GeluOp> {
+  using OpConversionPattern<GeluOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(GeluOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!resultType || !resultType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
+    if (adaptor.getInput().getType() != resultType)
+      return rewriter.notifyMatchFailure(
+          op, "operand and result types must match exactly");
+    if (!isa<FloatType>(resultType.getElementType()))
+      return rewriter.notifyMatchFailure(op, "tosa op requires a float tensor");
+
+    StringRef approximate = op.getApproximate();
+    if (approximate != "none" && approximate != "tanh")
+      return rewriter.notifyMatchFailure(
+          op, "approximate must be \"none\" or \"tanh\"");
+
+    Location loc = op.getLoc();
+    Value x = adaptor.getInput();
+    Value shift = createZeroMulShift(rewriter, loc);
+    auto mul = [&](Value lhs, Value rhs) {
+      return tosa::MulOp::create(rewriter, loc, resultType, lhs, rhs, shift);
+    };
+    auto add = [&](Value lhs, Value rhs) {
+      return tosa::AddOp::create(rewriter, loc, resultType, lhs, rhs);
+    };
+
+    Value half = createSplatFloat(rewriter, loc, resultType, 0.5);
+    Value one = createSplatFloat(rewriter, loc, resultType, 1.0);
+    Value inner;
+    if (approximate == "tanh") {
+      Value x2 = mul(x, x);
+      Value x3 = mul(x2, x);
+      Value coeff = createSplatFloat(rewriter, loc, resultType, 0.044715);
+      Value k = createSplatFloat(rewriter, loc, resultType, 0.7978845608028654);
+      Value tanhArg = mul(k, add(x, mul(coeff, x3)));
+      inner =
+          add(one, tosa::TanhOp::create(rewriter, loc, resultType, tanhArg));
+    } else {
+      Value invSqrt2 =
+          createSplatFloat(rewriter, loc, resultType, 0.7071067811865476);
+      inner = add(one, tosa::ErfOp::create(rewriter, loc, resultType,
+                                           mul(x, invSqrt2)));
+    }
+    rewriter.replaceOp(op, Value(mul(mul(x, half), inner)));
+    return success();
+  }
+};
+
 // hip.where is ternary (cond, x, y). tosa.select is the 1-1 mapping; it cannot
 // use BinaryConverter because the predicate is i1 while the result is not.
 // EqualizeRanks is pairwise, so the three operands are equalized the same way
@@ -2891,10 +2967,10 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     conversion.addIllegalOp<
         ConvOp, MatmulOp, GemmOp, TransposeOp, AddOp, SubOp, MinOp, MaxOp,
         MulOp, DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
-        TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, WhereOp, LeakyReluOp,
-        MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp, QuantizeLinearOp,
-        DequantizeLinearOp, MatMulNBitsOp, GatherOp, RopeOp, GqaOp,
-        MultiHeadAttentionOp>();
+        TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, GeluOp, WhereOp,
+        LeakyReluOp, MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp,
+        QuantizeLinearOp, DequantizeLinearOp, MatMulNBitsOp, GatherOp, RopeOp,
+        GqaOp, MultiHeadAttentionOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
@@ -2933,9 +3009,9 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         UnaryConverter<SigmoidOp, tosa::SigmoidOp, /*FloatOnly=*/true>,
         UnaryConverter<ReciprocalOp, tosa::ReciprocalOp,
                        /*FloatOnly=*/true>,
-        SqrtConverter, WhereConverter, LeakyReluConverter, SoftmaxConverter,
-        ReduceSumConverter, ReduceMeanConverter, CastConverter,
-        DequantizeLinearConverter, QuantizeLinearConverter,
+        SqrtConverter, GeluConverter, WhereConverter, LeakyReluConverter,
+        SoftmaxConverter, ReduceSumConverter, ReduceMeanConverter,
+        CastConverter, DequantizeLinearConverter, QuantizeLinearConverter,
         MatMulNBitsConverter, GatherConverter, RopeConverter, GqaConverter,
         MhaConverter>(ctx);
 
