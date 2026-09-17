@@ -7,12 +7,19 @@
 // rock.kernel function, so rocMLIR can absorb them into a fused kernel, and
 // verify the forms the conversion leaves alone or rejects.
 //
-// These ops are claimed by element type rather than outright, because ONNX has
-// no signless integers and ORT imports bool as ui8. An op carrying a type with
-// no faithful TOSA spelling therefore stays a hip op for the runtime lowering
+// These ops are claimed by element type and shape rather than outright,
+// because ONNX has no signless integers and ORT imports bool as ui8. An op
+// this pass cannot express therefore stays a hip op for the runtime lowering
 // instead of failing the pass -- see the "Forms this pass does not claim"
-// section, which is the bulk of the negative coverage here. Only forms the
-// pass does claim but cannot rewrite produce a diagnostic.
+// section, which is the whole of the negative coverage here.
+//
+// There are deliberately no expected-error cases: every legality predicate
+// checks exactly what its pattern accepts, down to operand element types and
+// broadcastability, so no form reaches a pattern that then refuses it. That
+// matters because an op marked illegal and not rewritten aborts the whole
+// function's conversion, taking the fusible ops around it down too. A new
+// diagnostic appearing in this file means a predicate and its pattern have
+// drifted apart.
 //
 // These are the hip ops whose operand and result element types differ, or
 // whose TOSA spelling is not a single op:
@@ -30,10 +37,8 @@
 // FILE LAYOUT:
 // Everything that converts lives in the first --split-input-file chunk, so it
 // is one module and therefore also covers several ops converting in a single
-// pass run. Each rejected form then gets its own chunk: a rejection aborts the
-// run for the whole module, so sharing a chunk would let one rejection mask
-// the cases after it. A failing chunk contributes no output, while the chunks
-// that convert still print for FileCheck.
+// pass run. Each declined form then gets its own chunk, so that a regression
+// turning one into a pass failure cannot mask the cases after it.
 //
 // This test validates:
 // - hip.equal maps to tosa.equal with its operands in order
@@ -45,7 +50,9 @@
 // - The hip context and the DPS outs operand are both dropped
 // - The pass is a no-op on functions without rock.kernel
 // - Dynamic shapes, un-broadcastable operands, mismatched operand element
-//   types and non-i1 operands to the logical ops are all rejected
+//   types, non-i1 operands to the logical ops, ui8 booleans, unsigned
+//   comparison operands, and the float and integer widths outside the TOSA
+//   allow-lists (f64, f8, i4) all stay hip ops without failing the pass
 // ============================================================================
 
 // RUN: hip-mlir-opt --convert-hip-to-tosa --split-input-file \
@@ -368,20 +375,95 @@ func.func @sign_i1(%ctx: !hip.context, %x: tensor<2x8xi1>,
 
 // -----
 
-//===----------------------------------------------------------------------===//
-// Hard rejections. Unlike the cases above, these are shapes and types the pass
-// does claim, so a pattern that then cannot rewrite them fails legalization.
-//===----------------------------------------------------------------------===//
-
 // Rank equalization prepends 1s, so tensor<4xf32> becomes 1x4. The trailing 4
-// still cannot broadcast to 8, which the post-equalization check catches
-// rather than emitting invalid TOSA.
+// still cannot broadcast to 8. The legality predicate runs the same broadcast
+// check the pattern does, so this is declined up front rather than claimed and
+// then failed.
+// CHECK-LABEL: func.func @less_incompatible_broadcast
+// CHECK: hip.less
+// CHECK-NOT: tosa.greater
 func.func @less_incompatible_broadcast(%ctx: !hip.context,
                                        %x: tensor<2x8xf32>, %y: tensor<4xf32>,
                                        %init: tensor<2x8xi1>)
     -> tensor<2x8xi1> attributes {rock.kernel} {
-  // expected-error @+1 {{failed to legalize operation 'hip.less'}}
   %r = hip.less(%ctx) ins(%x, %y : tensor<2x8xf32>, tensor<4xf32>)
                       outs(%init : tensor<2x8xi1>) : tensor<2x8xi1>
   return %r : tensor<2x8xi1>
+}
+
+// -----
+
+// Same check on the logical ops, whose operands the predicate has to inspect
+// separately: the result here is a perfectly good static i1 tensor, and only
+// the operand is un-broadcastable.
+// CHECK-LABEL: func.func @and_unbroadcastable_operand
+// CHECK: hip.and
+// CHECK-NOT: tosa.bitwise_and
+func.func @and_unbroadcastable_operand(%ctx: !hip.context, %x: tensor<2x8xi1>,
+                                       %y: tensor<4xi1>, %init: tensor<2x8xi1>)
+    -> tensor<2x8xi1> attributes {rock.kernel} {
+  %r = hip.and(%ctx) ins(%x, %y : tensor<2x8xi1>, tensor<4xi1>)
+                     outs(%init : tensor<2x8xi1>) : tensor<2x8xi1>
+  return %r : tensor<2x8xi1>
+}
+
+// -----
+
+// A static i1 result does not imply a static operand, so the predicate checks
+// the operand too.
+// CHECK-LABEL: func.func @not_dynamic_operand
+// CHECK: hip.not
+// CHECK-NOT: tosa.bitwise_xor
+func.func @not_dynamic_operand(%ctx: !hip.context, %x: tensor<?x8xi1>,
+                               %init: tensor<2x8xi1>) -> tensor<2x8xi1>
+    attributes {rock.kernel} {
+  %r = hip.not(%ctx) ins(%x : tensor<?x8xi1>)
+                     outs(%init : tensor<2x8xi1>) : tensor<2x8xi1>
+  return %r : tensor<2x8xi1>
+}
+
+// -----
+
+// SignConverter builds every constant and comparison at the result type, so it
+// needs the input to match exactly; a static result with a dynamic input is
+// not enough.
+// CHECK-LABEL: func.func @sign_mismatched_input
+// CHECK: hip.sign
+// CHECK-NOT: tosa.select
+func.func @sign_mismatched_input(%ctx: !hip.context, %x: tensor<?x8xf32>,
+                                 %init: tensor<2x8xf32>) -> tensor<2x8xf32>
+    attributes {rock.kernel} {
+  %r = hip.sign(%ctx) ins(%x : tensor<?x8xf32>)
+                      outs(%init : tensor<2x8xf32>) : tensor<2x8xf32>
+  return %r : tensor<2x8xf32>
+}
+
+// -----
+
+// The float gate is an allow-list of f16/bf16/f32, not "any float but f64":
+// Tosa_FloatTensor is AnyFloat, so an f8 tensor would satisfy the verifiers
+// while nothing downstream can lower it.
+// CHECK-LABEL: func.func @less_f8
+// CHECK: hip.less
+// CHECK-NOT: tosa.greater
+func.func @less_f8(%ctx: !hip.context, %x: tensor<2x8xf8E4M3FN>,
+                   %y: tensor<2x8xf8E4M3FN>, %init: tensor<2x8xi1>)
+    -> tensor<2x8xi1> attributes {rock.kernel} {
+  %r = hip.less(%ctx) ins(%x, %y : tensor<2x8xf8E4M3FN>, tensor<2x8xf8E4M3FN>)
+                      outs(%init : tensor<2x8xi1>) : tensor<2x8xi1>
+  return %r : tensor<2x8xi1>
+}
+
+// -----
+
+// Likewise the integer gate names the widths ONNX produces rather than taking
+// any signless integer, since Tosa_Int would also admit i4 and i128.
+// CHECK-LABEL: func.func @sign_i4
+// CHECK: hip.sign
+// CHECK-NOT: tosa.select
+func.func @sign_i4(%ctx: !hip.context, %x: tensor<4xi4>, %init: tensor<4xi4>)
+    -> tensor<4xi4> attributes {rock.kernel} {
+  %r = hip.sign(%ctx) ins(%x : tensor<4xi4>)
+                      outs(%init : tensor<4xi4>) : tensor<4xi4>
+  return %r : tensor<4xi4>
 }

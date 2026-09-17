@@ -548,14 +548,25 @@ struct BinaryConverter final : public OpConversionPattern<HipOpTy> {
   }
 };
 
-// TOSA's Tosa_FloatTensor is AnyFloat, so an f64 tensor satisfies the op
-// verifiers, but nothing downstream can lower one: rocMLIR has no f64 path and
-// the TOSA profiles do not carry the type. GemmConverter above excludes f64
-// for the same reason. Naming it in the patterns that would otherwise accept
-// any float keeps a double-precision model from being replaced with TOSA that
-// only fails later.
+// The element types this pass can actually put through TOSA.
+//
+// Both predicates are deliberately allow-lists rather than "everything except
+// the one type we know is broken". Tosa_FloatTensor is AnyFloat and Tosa_Int
+// is any signless or unsigned integer, so f64, f80, f128, the float8 variants,
+// i4 and i128 all satisfy the op verifiers while nothing downstream can lower
+// them -- rocMLIR has no path for any of them and the TOSA profiles do not
+// carry them. Excluding only f64 would still hand a float8 or i4 model to TOSA
+// that then fails later. The float set is the one ConvConverter and
+// GemmConverter above already use; the integer set is the widths ONNX actually
+// produces.
 static bool isTosaExpressibleFloat(Type elementType) {
-  return isa<FloatType>(elementType) && !elementType.isF64();
+  return elementType.isF16() || elementType.isBF16() || elementType.isF32();
+}
+
+static bool isTosaExpressibleInt(Type elementType) {
+  return elementType.isSignlessInteger(1) || elementType.isSignlessInteger(8) ||
+         elementType.isSignlessInteger(16) ||
+         elementType.isSignlessInteger(32) || elementType.isSignlessInteger(64);
 }
 
 // ONNX has no signless integers, and ORT imports ONNX bool as ui8 rather than
@@ -568,21 +579,64 @@ static bool isTosaExpressibleFloat(Type elementType) {
 // inside a converter. The distinction matters: an op this pass marks illegal
 // but cannot rewrite aborts the whole function's conversion, taking the
 // fusible ops around it down with it, whereas an op left legal stays a hip op
-// and reaches the runtime lowering that already handles it. Only shapes and
-// element types this pass can actually express are claimed.
+// and reaches the runtime lowering that already handles it.
+//
+// That only holds while each predicate claims exactly what its converter
+// accepts. A predicate that is looser anywhere -- a type, a rank, a static
+// shape, an operand it never looks at -- reintroduces the same abort it exists
+// to prevent, so each one below mirrors its pattern's preconditions rather
+// than approximating them.
 static bool isTosaExpressibleCompareOperand(Type elementType) {
-  return isTosaExpressibleFloat(elementType) || elementType.isSignlessInteger();
+  return isTosaExpressibleFloat(elementType) ||
+         isTosaExpressibleInt(elementType);
+}
+
+// Shared operand precondition for the elementwise patterns: a static ranked
+// tensor of the given element type that broadcasts up to the result shape.
+//
+// This mirrors what the patterns themselves do. tosa::EqualizeRanks prepends
+// 1s until the operand carries the result's rank, and isTosaBroadcastableShape
+// then requires every dimension to equal the result's or be 1. Approximating
+// it with a rank comparison is not enough: tensor<4xi1> into a 2x8 result has
+// the smaller rank but still cannot broadcast, because the prepended 1 leaves
+// 4 against 8.
+static bool isBroadcastableOperandOf(Value operand, Type elementType,
+                                     RankedTensorType resultType) {
+  auto type = dyn_cast<RankedTensorType>(operand.getType());
+  if (!type || !type.hasStaticShape() || type.getElementType() != elementType)
+    return false;
+  int64_t rank = type.getRank();
+  int64_t resultRank = resultType.getRank();
+  if (rank > resultRank)
+    return false;
+  ArrayRef<int64_t> shape = type.getShape();
+  ArrayRef<int64_t> resultShape = resultType.getShape();
+  for (int64_t i = 0; i < rank; ++i) {
+    int64_t dim = shape[i];
+    int64_t resultDim = resultShape[resultRank - rank + i];
+    if (dim != resultDim && dim != 1)
+      return false;
+  }
+  return true;
 }
 
 // hip.and, hip.or and hip.not are spelled with the tosa.bitwise_* ops, which
 // coincide with the logical operation only on i1, so i1 is the whole of what
-// this pass can claim for them.
-static bool isI1Result(Operation *op) {
+// this pass can claim for them. Every tensor operand has to be i1 and static
+// as well: BinaryConverter rejects a dynamic or un-broadcastable operand even
+// when the result looks fine, and claiming those would abort the conversion.
+static bool isTosaExpressibleLogical(Operation *op, ValueRange operands) {
   if (op->getNumResults() != 1)
     return false;
   auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
-  return resultType && resultType.hasStaticShape() &&
-         resultType.getElementType().isInteger(1);
+  if (!resultType || !resultType.hasStaticShape() ||
+      !resultType.getElementType().isInteger(1))
+    return false;
+  Type i1 = resultType.getElementType();
+  for (Value operand : operands)
+    if (!isBroadcastableOperandOf(operand, i1, resultType))
+      return false;
+  return true;
 }
 
 // A comparison is expressible when its result is i1 and the compared type is
@@ -591,29 +645,43 @@ static bool isI1Result(Operation *op) {
 // alone rather than reject.
 template <typename CompareOpTy>
 static bool isTosaExpressibleCompare(CompareOpTy op) {
-  if (!isI1Result(op))
+  if (op->getNumResults() != 1)
     return false;
+  auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+  if (!resultType || !resultType.hasStaticShape() ||
+      !resultType.getElementType().isInteger(1))
+    return false;
+
   auto lhsType = dyn_cast<RankedTensorType>(op.getLhs().getType());
-  auto rhsType = dyn_cast<RankedTensorType>(op.getRhs().getType());
-  if (!lhsType || !rhsType)
+  if (!lhsType)
     return false;
-  if (lhsType.getElementType() != rhsType.getElementType())
+  Type operandElemType = lhsType.getElementType();
+  if (!isTosaExpressibleCompareOperand(operandElemType))
     return false;
-  return isTosaExpressibleCompareOperand(lhsType.getElementType());
+  for (Value operand : {op.getLhs(), op.getRhs()})
+    if (!isBroadcastableOperandOf(operand, operandElemType, resultType))
+      return false;
+  return true;
 }
 
 // ONNX Sign covers floats and signed integers. i1 is excluded because -1 is
 // not representable in it, and unsigned is excluded for want of an ordering.
+// SignConverter additionally requires the input type to equal the result type
+// exactly -- it builds every constant and comparison at the result type -- so
+// the predicate checks that rather than the result alone.
 static bool isTosaExpressibleSign(SignOp op) {
   if (op->getNumResults() != 1)
     return false;
   auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
   if (!resultType || !resultType.hasStaticShape())
     return false;
+  if (op.getX().getType() != resultType)
+    return false;
   Type elementType = resultType.getElementType();
   if (elementType.isInteger(1))
     return false;
-  return isTosaExpressibleFloat(elementType) || elementType.isSignlessInteger();
+  return isTosaExpressibleFloat(elementType) ||
+         isTosaExpressibleInt(elementType);
 }
 
 // Covers hip.equal and hip.less, whose result is i1 while their operands carry
@@ -977,11 +1045,30 @@ struct LogicalNotConverter final : public OpConversionPattern<NotOp> {
 // negative test reads `0 > x` rather than a `less`. Signed zero lands on 0 as
 // ONNX requires, both comparisons being false for it.
 //
-// NaN also lands on 0, since neither comparison holds. ONNX leaves Sign(NaN)
-// unspecified and onnxruntime's CPU kernel propagates NaN instead, so a float
-// model that can produce NaN would differ here -- the same caveat the
-// OnnxToHip decompositions of onnx.LessOrEqual and onnx.GreaterOrEqual
-// already carry.
+// Both comparisons are also false for NaN, which would put it on the same 0.
+// ONNX defines sign(NaN) = NaN, and lib/Runtime/real/sign.cpp propagates it as
+// a deliberate delta from ORT (whose _Signum returns 0), so the float case is
+// wrapped in an ordered self-compare: `x == x` is false for exactly NaN, and
+// forwarding x there keeps a fused model agreeing with the unfused one.
+// Integers have no NaN, so they skip the guard.
+//
+// Before:
+//   %r = hip.sign(%ctx) ins(%x : tensor<4xf32>)
+//                       outs(%init : tensor<4xf32>) : tensor<4xf32>
+//
+// After:
+//   %zero   = "tosa.const"() <{values = dense<0.0> : tensor<4xf32>}>
+//   %pos    = tosa.greater %x, %zero  : (tensor<4xf32>, tensor<4xf32>)
+//                                        -> tensor<4xi1>
+//   %isneg  = tosa.greater %zero, %x  : ... -> tensor<4xi1>
+//   %neg1   = "tosa.const"() <{values = dense<-1.0> : tensor<4xf32>}>
+//   %inner  = tosa.select %isneg, %neg1, %zero  : ... -> tensor<4xf32>
+//   %one    = "tosa.const"() <{values = dense<1.0> : tensor<4xf32>}>
+//   %signum = tosa.select %pos, %one, %inner    : ... -> tensor<4xf32>
+//   %ord    = tosa.equal %x, %x       : ... -> tensor<4xi1>
+//   %r      = tosa.select %ord, %signum, %x     : ... -> tensor<4xf32>
+//
+// The integer case is the same without the %ord guard and its select.
 struct SignConverter final : public OpConversionPattern<SignOp> {
   using OpConversionPattern<SignOp>::OpConversionPattern;
 
@@ -3186,12 +3273,15 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         [](EqualOp op) { return !isTosaExpressibleCompare(op); });
     conversion.addDynamicallyLegalOp<LessOp>(
         [](LessOp op) { return !isTosaExpressibleCompare(op); });
-    conversion.addDynamicallyLegalOp<AndOp>(
-        [](AndOp op) { return !isI1Result(op); });
-    conversion.addDynamicallyLegalOp<OrOp>(
-        [](OrOp op) { return !isI1Result(op); });
-    conversion.addDynamicallyLegalOp<NotOp>(
-        [](NotOp op) { return !isI1Result(op); });
+    conversion.addDynamicallyLegalOp<AndOp>([](AndOp op) {
+      return !isTosaExpressibleLogical(op, {op.getLhs(), op.getRhs()});
+    });
+    conversion.addDynamicallyLegalOp<OrOp>([](OrOp op) {
+      return !isTosaExpressibleLogical(op, {op.getLhs(), op.getRhs()});
+    });
+    conversion.addDynamicallyLegalOp<NotOp>([](NotOp op) {
+      return !isTosaExpressibleLogical(op, {op.getX()});
+    });
     conversion.addDynamicallyLegalOp<SignOp>(
         [](SignOp op) { return !isTosaExpressibleSign(op); });
     conversion.addDynamicallyLegalOp<tensor::CollapseShapeOp>(
