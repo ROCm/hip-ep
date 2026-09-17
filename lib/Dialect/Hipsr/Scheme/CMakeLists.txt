@@ -117,7 +117,6 @@ file(MAKE_DIRECTORY ${SCHEME_LIB_DIR}/passes)
 set(COMPILE_ALL_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/compile-all-libraries.sh)
 set(ALL_SCHEME_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/libraries/mlir/ffi.sls
-  ${CMAKE_CURRENT_SOURCE_DIR}/libraries/mlir/pattern-dsl.sls
   ${CMAKE_CURRENT_SOURCE_DIR}/libraries/patterns/cast.sls
   ${CMAKE_CURRENT_SOURCE_DIR}/libraries/passes/onnx-to-hipsr.sls
 )
@@ -125,7 +124,6 @@ set(ALL_SCHEME_SOURCES
 add_custom_command(
   OUTPUT
     ${SCHEME_LIB_DIR}/mlir/ffi.so
-    ${SCHEME_LIB_DIR}/mlir/pattern-dsl.so
     ${SCHEME_LIB_DIR}/patterns/cast.so
     ${SCHEME_LIB_DIR}/passes/onnx-to-hipsr.so
   COMMAND bash "${COMPILE_ALL_SCRIPT}"
@@ -141,7 +139,6 @@ add_custom_command(
 add_custom_target(SchemeLibraries ALL
   DEPENDS
     ${SCHEME_LIB_DIR}/mlir/ffi.so
-    ${SCHEME_LIB_DIR}/mlir/pattern-dsl.so
     ${SCHEME_LIB_DIR}/patterns/cast.so
     ${SCHEME_LIB_DIR}/passes/onnx-to-hipsr.so
 )
@@ -162,7 +159,6 @@ install(FILES
 # Install compiled R6RS libraries (.so bytecode)
 install(FILES
   ${SCHEME_LIB_DIR}/mlir/ffi.so
-  ${SCHEME_LIB_DIR}/mlir/pattern-dsl.so
   ${SCHEME_LIB_DIR}/mlir/conversion/cast.so
   ${SCHEME_LIB_DIR}/onnx-to-hipsr.so
   DESTINATION lib/scheme/mlir
