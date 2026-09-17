@@ -482,4 +482,3 @@ func.func @integer_mean(%ctx: !hip.context, %data: tensor<2x8xi32>,
          outs(%init : tensor<2x1xi32>) : tensor<2x1xi32>
   return %r : tensor<2x1xi32>
 }
-
