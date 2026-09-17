@@ -43,6 +43,9 @@
           "additionalProperties": {
             "type": "string"
           }
+        },
+        "failure": {
+          "type": "object"
         }
       }
     },
@@ -131,7 +134,8 @@
         "COMPILE_TIME_TENSOR_OP",
         "EXTRA_ONNX_ATTR_NOT_IN_HIP",
         "PARTIAL_INSTANCE_CONVERSION",
-        "CONVERSION_NOT_PROBED"
+        "CONVERSION_NOT_PROBED",
+        "PIPELINE_FAILED"
       ]
     },
     "operatorKey": {

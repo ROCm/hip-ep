@@ -20,6 +20,7 @@ report then carries the badge the orchestrator adds.
 """
 
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +32,18 @@ FALLBACK_OP_DESCRIPTIONS = {
     "GroupQueryAttention": "Group Query Attention mechanism",
     "QMoE": "Mixture-of-Experts routing and fused expert computation",
 }
+
+# What the log says when a stage failed. An MLIR pass reports the op it choked
+# on; a crash reports a frame, and the first one inside the repository names
+# the code that has the bug.
+_MLIR_ERROR_RE = re.compile(r"^.*?:\d+:\d+: error: (?P<message>.+)$", re.M)
+_CRASH_CODE_RE = re.compile(r"Exception Code: (0x[0-9A-Fa-f]+)")
+_CRASH_FRAME_RE = re.compile(
+    r"#\d+\s+0x[0-9a-f]+\s+(?P<symbol>[^\n]*?)\s+"
+    r"(?P<file>[A-Za-z]:\\[^\s]*?(?:Conversion|Dialect|Runtime)[^\s]*?):(?P<line>\d+)"
+)
+_EXIT_CODE_RE = re.compile(r"exit code (-?\d+)")
+_ORT_ERROR_RE = re.compile(r"Error in ORT API: \d+, message: (?P<message>.+)")
 
 REASON_CATALOG = [
     ("NO_HIP_DIALECT_IMPL", "No Hip Dialect implementation available."),
@@ -45,6 +58,7 @@ REASON_CATALOG = [
         "Some instances converted and others did not.",
     ),
     ("CONVERSION_NOT_PROBED", "Conversion was not run; support is unknown."),
+    ("PIPELINE_FAILED", "A pipeline stage failed; the model does not compile."),
 ]
 
 # Anything outside the hip dialect is a compile-time fold rather than a
@@ -74,7 +88,9 @@ def onnx_op_description(op: str, domain: str) -> str:
 
 
 def read_json(path: Path):
-    return json.loads(path.read_text(encoding="utf-8"))
+    # utf-8-sig: PowerShell writes a BOM, and pipeline_failure.json comes from
+    # the orchestrator.
+    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def validate_against_schema(report_input: dict) -> None:
@@ -95,6 +111,72 @@ def validate_against_schema(report_input: dict) -> None:
 
 def load_optional(path: Path):
     return read_json(path) if path.is_file() else None
+
+
+def describe_failure(failure: dict) -> dict:
+    """Turn a failed stage into the sentence a reader needs.
+
+    Which step and why: an MLIR diagnostic names the operator it could not
+    handle, a crash names the source line that faulted, and an importer error
+    names the construct it does not implement. Everything is quoted from the
+    log rather than summarized, because this is the finding.
+    """
+    log_path = Path(failure.get("log") or "")
+    text = ""
+    if log_path.is_file():
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+
+    details = []
+    headline = failure.get("message") or ""
+
+    ort_error = _ORT_ERROR_RE.search(text)
+    if ort_error:
+        headline = ort_error.group("message").strip()
+        details.append(headline)
+
+    errors = [m.group("message").strip() for m in _MLIR_ERROR_RE.finditer(text)]
+    if errors:
+        headline = errors[0]
+        details.extend(errors[:3])
+
+    crash = _CRASH_CODE_RE.search(text)
+    if crash:
+        # The faulting frame is often a shared helper, so keep the few frames
+        # below it too: the conversion pattern that called the helper is the
+        # code to fix.
+        frames = [
+            f"{m.group('symbol').strip()} ({Path(m.group('file')).name}:{m.group('line')})"
+            for m in _CRASH_FRAME_RE.finditer(text)
+        ][:3]
+        pattern = next(
+            (
+                m
+                for m in _CRASH_FRAME_RE.finditer(text)
+                if "Conversion.cpp" in m.group("file")
+            ),
+            None,
+        )
+        site = pattern or _CRASH_FRAME_RE.search(text)
+        where = ""
+        if site:
+            where = f" in {Path(site.group('file')).name}:{site.group('line')}"
+        details.extend(frames)
+        headline = f"the compiler crashed{where} (exception {crash.group(1)})"
+
+    exit_code = failure.get("exit_code")
+    reported = _EXIT_CODE_RE.search(failure.get("message") or "")
+    if reported:
+        exit_code = int(reported.group(1))
+
+    stage = failure.get("stage", "pipeline")
+    return {
+        "stage": stage,
+        "command": failure.get("command", ""),
+        "exit_code": exit_code,
+        "headline": (headline or f"{stage} failed").rstrip("."),
+        "details": details,
+        "log": str(log_path) if log_path else "",
+    }
 
 
 def index_by_key(entries, key_fields=("op_type", "domain")):
@@ -135,8 +217,17 @@ def leftover_reason(reason_row):
     return "CONVERSION_REJECTED_INSTANCES", [text]
 
 
-def classify(op, domain, count, leftover, attr_row, reason_row, probed):
+def classify(op, domain, count, leftover, attr_row, reason_row, probed, failure):
     """Status, reason codes and texts for one operator type."""
+    if failure:
+        return (
+            "partial",
+            ["PIPELINE_FAILED"],
+            [
+                f"The {failure['stage']} step failed, so no operator was "
+                f"verified: {failure['headline']}."
+            ],
+        )
     if not probed:
         return (
             "partial",
@@ -221,6 +312,8 @@ def main():
     runtime_map = (load_optional(analysis_dir / "hip_runtime_map.json") or {}).get(
         "ops"
     )
+    failure_record = load_optional(analysis_dir / "pipeline_failure.json")
+    failure = describe_failure(failure_record) if failure_record else None
     probed = leftovers is not None
 
     leftover_by_key = index_by_key((leftovers or {}).get("unconverted"))
@@ -248,12 +341,19 @@ def main():
         attr_row = attr_by_key.get(key)
 
         status, reason_codes, reason_texts = classify(
-            op, domain, count, leftover, attr_row, reason_by_key.get(key), probed
+            op,
+            domain,
+            count,
+            leftover,
+            attr_row,
+            reason_by_key.get(key),
+            probed,
+            failure,
         )
         leftover_count = int((leftover or {}).get("count", 0))
 
         total_instances += count
-        if probed:
+        if probed and not failure:
             unsupported_instances += leftover_count
             supported_instances += count - leftover_count
         # Without the probe nothing is known, so no instance is counted as
@@ -321,8 +421,9 @@ def main():
             "repo_root": str(repo_root),
             "tool_versions": {
                 "pipeline": "convert-onnx-to-hip oracle",
-                "conversion_probed": str(probed).lower(),
+                "conversion_probed": str(bool(probed) and not failure).lower(),
             },
+            **({"failure": failure} if failure else {}),
         },
         "summary": {
             "total_node_instances": total_instances,

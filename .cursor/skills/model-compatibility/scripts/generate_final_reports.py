@@ -334,12 +334,40 @@ def main():
     # Main report
     lines = []
     lines.append("# Model compatibility report\n")
+
+    # A failed stage is the finding, so it goes before anything a reader could
+    # mistake for a verdict.
+    failure = meta.get("failure")
+    if failure:
+        lines.append(
+            f"\n> **The {failure['stage']} step failed: {failure['headline']}.** "
+            "No operator support was verified; the counts below describe the "
+            "graph, not what hip-ep can run.\n\n"
+        )
+
     lines.append(f"- **Analyzed graph:** `{meta['model_path']}`\n")
     if op_dist_comparison:
         orig_path = (op_dist_comparison.get("meta") or {}).get("original_model", "")
         if orig_path:
             lines.append(f"- **Original model:** `{orig_path}`\n")
     lines.append(f"- Generated UTC: `{meta['generated_at_utc']}`\n\n")
+
+    if failure:
+        lines.append("## Where it failed\n\n")
+        lines.append(f"- **Step:** {failure['stage']}\n")
+        if failure.get("command"):
+            lines.append(f"- **Command:** `{failure['command']}`\n")
+        if failure.get("exit_code") is not None:
+            lines.append(f"- **Exit code:** {failure['exit_code']}\n")
+        lines.append(f"- **Reason:** {failure['headline']}\n")
+        if failure.get("log"):
+            lines.append(f"- **Log:** `{failure['log']}`\n")
+        if failure.get("details"):
+            lines.append("\nFrom the log:\n\n")
+            for detail in failure["details"]:
+                lines.append(f"- `{detail}`\n")
+        lines.append("\n")
+
     lines.append("## Summary\n\n")
     lines.append(f"- Total node instances: {summary['total_node_instances']}\n")
     lines.append(

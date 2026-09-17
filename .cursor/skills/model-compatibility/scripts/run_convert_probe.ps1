@@ -134,15 +134,22 @@ finally {
 
 $haveConvertLog = Test-Path -LiteralPath $ConvertLog
 
-if (-not (Test-Path -LiteralPath $Converted)) {
+# A conversion that fails is itself a compatibility finding, and a more serious
+# one than an unsupported operator: this model does not compile as it stands.
+# Record it and let the caller report it, rather than ending the run with an
+# exception and no report at all. A pass can also fail after writing partial
+# output, which would otherwise describe a graph the compiler never accepted.
+if ($exit -ne 0 -or -not (Test-Path -LiteralPath $Converted)) {
     if ($haveConvertLog) { Get-Content -LiteralPath $ConvertLog -Tail 30 | Write-Host }
-    throw "convert-onnx-to-hip produced no output (exit $exit)"
-}
-if ($exit -ne 0) {
-    # A pass can fail after writing partial output; the report would then
-    # describe a graph the compiler never accepted.
-    if ($haveConvertLog) { Get-Content -LiteralPath $ConvertLog -Tail 30 | Write-Host }
-    throw "convert-onnx-to-hip failed with exit code $exit"
+    Remove-Item -LiteralPath $Converted -ErrorAction SilentlyContinue
+    [ordered]@{
+        stage     = "conversion probe"
+        command   = "convert-onnx-to-hip"
+        exit_code = $exit
+        log       = if ($haveConvertLog) { $ConvertLog } else { "" }
+    } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDir "pipeline_failure.json") -Encoding UTF8
+    Write-Host "convert-onnx-to-hip failed (exit $exit); recorded for the report" -ForegroundColor Red
+    exit 2
 }
 
 if ($haveConvertLog -and (Select-String -LiteralPath $ConvertLog -Pattern 'unconverted onnx op type' -Quiet)) {

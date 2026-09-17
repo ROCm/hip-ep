@@ -78,6 +78,7 @@ The three markdown files sit at the top of `<OutputDir>`; everything the pipelin
 | 1 dump | `dump_ep_input.ps1` | `ep_input.mlir`, `dump_meta.json` | file is text MLIR starting with `module` and contains `onnx.` ops |
 | 2 count | `op_distribution.py` | `step1_original_onnx_ops.json`, `step1_ep_input_ops.json`, `op_distribution_comparison.json` | `_analysis_meta.excluded_carrier_ops` lists the `onnx.Constant` carriers, not compute ops; deltas explain themselves (ORT fusions, `Swish` to `Sigmoid`+`Mul`) |
 | 3 convert | `run_convert_probe.ps1` | `converted.mlir`, `convert_log.txt` | probe exited 0; the log's unconverted list matches step 4 |
+| — failure | orchestrator, or step 3 | `pipeline_failure.json` | written only when step 1 or 3 failed; step 4 is then skipped |
 | 4 analyze | `analyze_conversion.py` | `leftover_onnx.json`, `leftover_reasons.json`, `attr_transfer.json`, `hip_runtime_map.json` | every leftover also appears in the EP-input counts and says whether a converter exists; `unpaired_instances` is small and explainable; every observed `hip.*` op resolves to a runtime function |
 | 5 report | `build_report_input.py`, `generate_final_reports.py` | `report_input.json`, and the three markdown files above it | `report_input.json` is validated against its schema as it is written; summary numbers match it |
 
@@ -90,6 +91,8 @@ The whole run is seconds, not minutes; nothing here compiles a kernel or touches
 For each `unsupported` or `partial` operator, follow [diagnose.md](diagnose.md). The conversion result is trustworthy, but it only says *that* an operator did not convert, not *why*. The playbook finds the bail-out in `lib/Conversion/OnnxToHip/` so the report can state the actual constraint (a dtype the converter rejects, a missing pattern, an attribute it cannot honour).
 
 Report the finding; do not silently promote a leftover to supported. If the diagnose pass shows the pipeline itself is wrong (a pairing miss, a bad default), fix the script and re-run rather than editing the generated markdown.
+
+When the dump or the conversion probe fails, the run still produces a report, and its `## Where it failed` section is the result: the step, the reason quoted from the log, and the source line for a crash. Lead your summary with it. Nothing was verified, so the 0% headline is the absence of a measurement rather than a measurement — say that, and treat the failing step as the model's blocking issue.
 
 ### 5. Batch
 

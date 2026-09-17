@@ -72,9 +72,17 @@ COMPILE_TIME_TENSOR_OP
 EXTRA_ONNX_ATTR_NOT_IN_HIP
 PARTIAL_INSTANCE_CONVERSION
 CONVERSION_NOT_PROBED
+PIPELINE_FAILED
 ```
 
 `CONVERSION_NOT_PROBED` only appears in `-SkipDump` runs, where nothing was verified.
+
+`PIPELINE_FAILED` means a stage failed, so no operator was verified. This is a
+stronger finding than any unsupported operator: the model does not compile as
+it stands. `meta.failure` in `report_input.json` and the `## Where it failed`
+section of the report carry the step, the command, the exit code, the reason
+quoted from the log, and the log path. The pipeline records it instead of
+aborting, because which step broke and why is the answer the run was asked for.
 
 ## Recommended ROCm implementation (report-layer inference)
 

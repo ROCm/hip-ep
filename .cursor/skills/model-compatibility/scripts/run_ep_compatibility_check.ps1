@@ -164,6 +164,11 @@ $EpInput = if ($EpInputMlir) {
 $dumpFailed = $false
 $dumpError = ""
 
+# Re-runs reuse the output directory, so a failure recorded by an earlier run
+# would be reported against this one.
+$failureRecord = Join-Path $CompatDir "pipeline_failure.json"
+Remove-Item -LiteralPath $failureRecord -ErrorAction SilentlyContinue
+
 if (-not $SkipDump -and (Test-Path -LiteralPath $EpInput)) {
     Write-Host "(1/5) Skip dump: EP input already exists at $EpInput" -ForegroundColor DarkGray
     $SkipDump = $true
@@ -186,9 +191,19 @@ if (-not $SkipDump) {
             throw "EP-input MLIR missing: $EpInput"
         }
     } catch {
+        # Why the dump failed is a compatibility finding in its own right: an
+        # importer that rejects the graph means the model never reaches the
+        # compiler. Record it so the report can say so.
         $dumpFailed = $true
         $dumpError = $_.Exception.Message
         Write-Host "WARN: dump failed: $dumpError" -ForegroundColor Red
+        [ordered]@{
+            stage     = "dump"
+            command   = "hip-onnx-runner --no-run"
+            exit_code = $null
+            message   = $dumpError
+            log       = Join-Path $CompatDir "dump_stderr.txt"
+        } | ConvertTo-Json | Set-Content -LiteralPath $failureRecord -Encoding UTF8
         if (-not $ContinueOnDumpFailure) {
             throw
         }
@@ -219,22 +234,27 @@ foreach ($stale in @('leftover_onnx.json', 'leftover_reasons.json',
     Remove-Item -LiteralPath (Join-Path $CompatDir $stale) -ErrorAction SilentlyContinue
 }
 
+$converted = Join-Path $CompatDir "converted.mlir"
 if ($haveEpInput) {
     Write-Host '(3/5) Conversion probe (convert-onnx-to-hip)...' -ForegroundColor Yellow
     & (Join-Path $ToolsDir "run_convert_probe.ps1") `
         -InputMlir $EpInput -OutputDir $CompatDir -HipEpPackageRoot $HipEpPackageRoot
+}
 
+if (Test-Path -LiteralPath $converted) {
     $locatedInput = Join-Path $CompatDir "ep_input_loc.mlir"
     Invoke-PythonStep -Label '(4/5) Analyzing the conversion...' -PyArgv @(
         (Join-Path $ToolsDir "analyze_conversion.py"),
         $locatedInput,
-        (Join-Path $CompatDir "converted.mlir"),
+        $converted,
         $CompatDir,
         $RepoRoot
     )
     # It only existed to join the two sides by location, and it is a copy of
     # ep_input.mlir that the probe can recreate.
     Remove-Item -LiteralPath $locatedInput -ErrorAction SilentlyContinue
+} elseif ($haveEpInput) {
+    Write-Host '(4/5) Conversion failed; the report will name the step and the reason' -ForegroundColor Red
 } else {
     Write-Host '(3/5) Skip conversion probe (no EP input); support will be reported as unverified' -ForegroundColor Yellow
 }
@@ -278,8 +298,9 @@ $statusLines | Set-Content -LiteralPath $statusPath -Encoding UTF8
 
 # Without the conversion probe the report describes operator counts only.
 # Badge it right after the H1 so the limitation cannot be missed when the
-# agent reads the report back.
-if (-not $haveEpInput) {
+# agent reads the report back. A recorded failure already carries a banner
+# that says the same thing and names the cause, so do not repeat it.
+if (-not $haveEpInput -and -not (Test-Path -LiteralPath $failureRecord)) {
     $badge = "> **Source:** original ONNX, conversion probe skipped. No hip-ep package was configured or the dump failed, so operator support was NOT verified against the compiler."
     foreach ($mdTarget in @(
         (Join-Path $OutputDir "model_compatibility_report.md"),
@@ -300,11 +321,18 @@ Write-Host "=== Done ===" -ForegroundColor Green
 Write-Host "Pipeline status:       $statusPath"
 if ($haveEpInput) {
     Write-Host "EP input:              $EpInput"
-    Write-Host "Converted MLIR:        $(Join-Path $CompatDir 'converted.mlir')"
-    Write-Host "Converted ops:         $(Join-Path $CompatDir 'attr_transfer.json')"
 } else {
     Write-Host "EP input:              (not produced)"
 }
+if (Test-Path -LiteralPath $converted) {
+    Write-Host "Converted MLIR:        $converted"
+    Write-Host "Converted ops:         $(Join-Path $CompatDir 'attr_transfer.json')"
+}
 Write-Host "Compatibility report:  $(Join-Path $OutputDir 'model_compatibility_report.md')"
 Write-Host "Full artifacts:        $CompatDir"
-if (-not $haveEpInput) { Write-Host $compatNote -ForegroundColor Yellow }
+if (Test-Path -LiteralPath $failureRecord) {
+    Write-Host ("WARNING: a pipeline step failed; nothing was verified. " +
+        "See the 'Where it failed' section of the report.") -ForegroundColor Yellow
+} elseif (-not $haveEpInput) {
+    Write-Host $compatNote -ForegroundColor Yellow
+}
