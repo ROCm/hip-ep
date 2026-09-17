@@ -56,7 +56,7 @@ Exact order, do not reorder:
    - `#### Partially Compatible Operators (<count>):`
    - `#### Unsupported Operators (<count>):`
 8. `Unsupported operator recommendation buckets` (one bucket per recommended path)
-9. `## ONNX to Hip mapping (observed in the conversion)` — rendered from `mapping_chain`; columns `ONNX Op | Domain | Hip Op | Instances | Status`
+9. `## ONNX to Hip to runtime mapping` — rendered from `mapping_chain`; columns `ONNX Op | Domain | Hip Op | Runtime Func | Backend | Instances | Status`
 10. Final pointer line: `Detailed compatibility diagnostics are in model_compatibility_details.md`
 
 ## model_compatibility_details.md — section order

@@ -99,7 +99,7 @@ def analyze(mlir_path: Path, max_instances_per_op: int) -> dict:
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("mlir_path", help="compiler_input.mlir")
-    ap.add_argument("output_dir", help="Directory for step1_onnx_ops.json")
+    ap.add_argument("output_dir", help="Directory for step1_compiler_input_ops.json")
     ap.add_argument(
         "--max-instances-per-op",
         type=int,
@@ -114,7 +114,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     result = analyze(mlir_path, args.max_instances_per_op)
-    out_path = output_dir / "step1_onnx_ops.json"
+    out_path = output_dir / "step1_compiler_input_ops.json"
     out_path.write_text(
         json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"
     )

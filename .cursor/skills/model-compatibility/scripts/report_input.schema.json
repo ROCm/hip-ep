@@ -189,6 +189,18 @@
             "null"
           ]
         },
+        "runtime_func": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "backend": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "op_description": {
           "type": "string"
         }
@@ -213,6 +225,18 @@
         },
         "hip_op": {
           "type": "string"
+        },
+        "runtime_func": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "backend": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "instances": {
           "type": "integer",

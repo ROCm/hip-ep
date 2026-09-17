@@ -76,11 +76,16 @@ CONVERSION_NOT_PROBED
 
 ### For `full` / `supported` / `partial`
 
-The conversion already chose the implementation, so the column reports what it produced. In order, first match wins:
+The conversion already chose the implementation, so the column reports what it produced rather than what a rule table would suggest. In order, first match wins:
 
 1. `hip_op` is outside the `hip.` dialect -> `Compile Time Optimization`
-2. `hip_op` is a `hip.*` op -> ``Hip Dialect (`<hip_op>`)``
-3. no `hip_op` (the instance had no location match) -> `Unknown`
+2. `hip_op` resolves to a runtime function -> `` <backend> (`<runtime_func>`) ``
+3. `hip_op` with no runtime entry -> ``Hip Dialect (`<hip_op>`)``
+4. no `hip_op` (the instance had no location match) -> `Unknown`
+
+[scripts/hip_runtime_map.py](scripts/hip_runtime_map.py) builds that mapping from the HIP-to-LLVM lowering, which names one symbol constant per op, and reads the backend off the wrapper's own implementation: a file calling `hipblasLt*` is hipBLASLt, one calling `hipdnn*` is hipDNN, one launching custom kernels is a custom kernel. A wrapper can be several at once (`hipBLASLt + Custom Hip Kernel` for GQA and MatMulNBits, which drive hipBLASLt for their matmuls and custom kernels around them), and one that touches no library and no kernel is a `Runtime helper`.
+
+This is source reading, but it answers a different question from support: the key is a `hip.*` op the conversion actually produced, and a wrong lookup shows up as an unresolved op rather than as a false "supported".
 
 ### For `unsupported`
 

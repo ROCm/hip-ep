@@ -17,7 +17,10 @@ The classification never comes from reading conversion source code. It comes fro
 - an operator that converted but lost an ONNX attribute carrying a non-default value is **partial**;
 - everything else is **supported**.
 
-Source is read for one purpose only: explaining a leftover. "Unsupported" covers two very different findings, and the report must say which one applies — no converter exists, or a converter exists and refused this model's instances (a dtype guard, an operand count). The second is the common case on real models and points at a much smaller fix.
+Source is read for two things, neither of which decides support:
+
+- **Explaining a leftover.** "Unsupported" covers two very different findings, and the report must say which one applies — no converter exists, or a converter exists and refused this model's instances (a dtype guard, an operand count). The second is the common case on real models and points at a much smaller fix.
+- **Naming the runtime path.** Which runtime function executes a `hip.*` op is written down once in its HIP-to-LLVM lowering, so it is a lookup keyed on an op the conversion actually produced, not an inference about support.
 
 ## Gather inputs
 
@@ -71,12 +74,12 @@ Re-runs reuse the directory, and an existing `ep_input\compiler_input.mlir` is r
 | Step | Produces | Check before continuing |
 |---|---|---|
 | S0 dump | `ep_input\compiler_input.mlir`, `ep_input\dump_meta.json` | file is text MLIR starting with `module` and contains `onnx.` ops |
-| S1a original | `step1_original\step1_onnx_ops.json` | node total matches the model |
-| S1b compiler input | `step1_ep\step1_onnx_ops.json` | `_analysis_meta.excluded_carrier_ops` lists the `onnx.Constant` carriers, not compute ops |
+| S1a original | `step1_original\step1_original_onnx_ops.json` | node total matches the model |
+| S1b compiler input | `step1_ep\step1_compiler_input_ops.json` | `_analysis_meta.excluded_carrier_ops` lists the `onnx.Constant` carriers, not compute ops |
 | S1c compare | `op_distribution_comparison.{json,md}` | deltas explain themselves (ORT fusions, `Swish` to `Sigmoid`+`Mul`, initializers) |
 | S2 convert | `ep_input\converted.mlir`, `compiler_input_loc.mlir`, `convert_log.txt` | probe exited 0; the log's unconverted list matches S3 |
 | S3 leftovers | `compatibility\leftover_onnx.json`, `compatibility\leftover_reasons.json` | every leftover key also appears in S1b; each leftover says whether a converter exists |
-| S4 attributes | `compatibility\attr_transfer.json` | `unpaired_instances` is small and explainable |
+| S4 attributes | `compatibility\attr_transfer.json`, `compatibility\hip_runtime_map.json` | `unpaired_instances` is small and explainable; every observed `hip.*` op resolves to a runtime function |
 | S5 normalize | `compatibility\report_input.json` | supported + unsupported instances equal the total |
 | S6 render | `model_compatibility_report.md`, `model_compatibility_details.md`, `pipeline_status.md`, `compatibility\unsupported_reco_runtime.json` | summary numbers equal `report_input.json` |
 

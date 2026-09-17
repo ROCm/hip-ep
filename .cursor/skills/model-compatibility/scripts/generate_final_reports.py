@@ -184,6 +184,8 @@ def infer_unsupported_reco(op_name: str, op_description: str, rules):
 def recommended_impl_with_trace(op_row, compat_row, reco_rules):
     status = op_row.get("status")
     hip_op = op_row.get("hip_op")
+    backend = op_row.get("backend")
+    runtime = op_row.get("runtime_func")
     if status in {"full", "partial"}:
         # The conversion already picked the implementation, so report what it
         # produced instead of guessing from the rule table.
@@ -193,6 +195,13 @@ def recommended_impl_with_trace(op_row, compat_row, reco_rules):
                 "source": "supported_compile_time_fold",
                 "matched_rule": hip_op,
                 "rationale": "Converted to a compile-time op, not a runtime kernel.",
+            }
+        if hip_op and backend and runtime:
+            return {
+                "recommended": f"{backend} (`{runtime}`)",
+                "source": "supported_backend_runtime",
+                "matched_rule": hip_op,
+                "rationale": "",
             }
         if hip_op:
             return {
@@ -425,12 +434,19 @@ def main():
         lines.append(f"- {k}: " + ", ".join(f"`{x}`" for x in ops) + "\n")
     lines.append("\n")
 
-    lines.append("## ONNX to Hip mapping (observed in the conversion)\n\n")
-    lines.append("| ONNX Op | Domain | Hip Op | Instances | Status |\n")
-    lines.append("|---|---|---|---:|---|\n")
+    lines.append("## ONNX to Hip to runtime mapping\n\n")
+    lines.append(
+        "_Hip op observed in the conversion; runtime function and backend read "
+        "from its HIP-to-LLVM lowering and runtime implementation._\n\n"
+    )
+    lines.append(
+        "| ONNX Op | Domain | Hip Op | Runtime Func | Backend | Instances | Status |\n"
+    )
+    lines.append("|---|---|---|---|---|---:|---|\n")
     for m in mapping_chain:
         lines.append(
             f"| {m.get('onnx_op', '')} | {m.get('domain', '')} | {m.get('hip_op', '')} "
+            f"| {m.get('runtime_func') or '—'} | {m.get('backend') or '—'} "
             f"| {m.get('instances', 0)} | {status_display(m.get('status', ''))} |\n"
         )
     lines.append(

@@ -163,6 +163,12 @@ def classify(op, domain, count, leftover, attr_row, reason_row, probed):
     return "full", [], []
 
 
+def runtime_entry(hip_op, runtime_map):
+    """Runtime function and backend for a converted op, when known."""
+    row = (runtime_map or {}).get(hip_op or "") or {}
+    return row.get("runtime_func"), row.get("backend")
+
+
 def primary_hip_op(attr_row):
     hip_ops = (attr_row or {}).get("hip_ops") or []
     for hip_op in hip_ops:
@@ -172,18 +178,23 @@ def primary_hip_op(attr_row):
 
 
 def main():
-    if len(sys.argv) != 4:
+    if len(sys.argv) != 5:
         raise SystemExit(
-            "Usage: build_report_input.py <analyzed_graph> <analysis_dir> <repo_root>"
+            "Usage: build_report_input.py <analyzed_graph> <step1_json> "
+            "<analysis_dir> <repo_root>"
         )
     analyzed_graph = Path(sys.argv[1])
-    analysis_dir = Path(sys.argv[2])
-    repo_root = Path(sys.argv[3])
+    step1_json = Path(sys.argv[2])
+    analysis_dir = Path(sys.argv[3])
+    repo_root = Path(sys.argv[4])
 
-    step1 = read_json(analysis_dir / "step1_onnx_ops.json")
+    step1 = read_json(step1_json)
     leftovers = load_optional(analysis_dir / "leftover_onnx.json")
     attrs = load_optional(analysis_dir / "attr_transfer.json")
     reasons = load_optional(analysis_dir / "leftover_reasons.json")
+    runtime_map = (load_optional(analysis_dir / "hip_runtime_map.json") or {}).get(
+        "ops"
+    )
     probed = leftovers is not None
 
     leftover_by_key = index_by_key((leftovers or {}).get("unconverted"))
@@ -231,6 +242,7 @@ def main():
             unsupported_types += 1
 
         hip_op = primary_hip_op(attr_row)
+        runtime_func, backend = runtime_entry(hip_op, runtime_map)
         op_dist.append(
             {
                 "onnx_op": op,
@@ -239,6 +251,8 @@ def main():
                 "data_types": [str(x) for x in (info.get("data_types") or []) if x],
                 "status": status,
                 "hip_op": hip_op,
+                "runtime_func": runtime_func,
+                "backend": backend,
                 "op_description": onnx_op_description(op, domain),
             }
         )
@@ -265,6 +279,8 @@ def main():
                 "onnx_op": op,
                 "domain": domain,
                 "hip_op": hip_op or "—",
+                "runtime_func": runtime_func,
+                "backend": backend,
                 "instances": count,
                 "status": status,
             }

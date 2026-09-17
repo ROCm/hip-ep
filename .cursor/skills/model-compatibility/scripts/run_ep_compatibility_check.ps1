@@ -211,7 +211,7 @@ if (-not $SkipDump) {
 $haveCompilerInput = (Test-Path -LiteralPath $CompilerInput)
 
 # --- S1: operator distributions ---------------------------------------------
-$step1OrigJson = Join-Path $Step1OriginalDir "step1_onnx_ops.json"
+$step1OrigJson = Join-Path $Step1OriginalDir "step1_original_onnx_ops.json"
 if (OutputUpToDate -SourcePath $ModelPath -ProducedPath $step1OrigJson) {
     Write-Host '(2/5) step1 original: up-to-date, skip' -ForegroundColor DarkGray
 } else {
@@ -223,7 +223,7 @@ if (OutputUpToDate -SourcePath $ModelPath -ProducedPath $step1OrigJson) {
 }
 
 if ($haveCompilerInput) {
-    $step1EpJson = Join-Path $Step1EpDir "step1_onnx_ops.json"
+    $step1EpJson = Join-Path $Step1EpDir "step1_compiler_input_ops.json"
     if (OutputUpToDate -SourcePath $CompilerInput -ProducedPath $step1EpJson) {
         Write-Host '(2/5) step1 compiler input: up-to-date, skip' -ForegroundColor DarkGray
     } else {
@@ -250,6 +250,7 @@ if ($haveCompilerInput) {
 Remove-Item -LiteralPath (Join-Path $CompatDir "leftover_onnx.json") -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path $CompatDir "attr_transfer.json") -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path $CompatDir "leftover_reasons.json") -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $CompatDir "hip_runtime_map.json") -ErrorAction SilentlyContinue
 
 if ($haveCompilerInput) {
     Write-Host '(4/5) Conversion probe (convert-onnx-to-hip)...' -ForegroundColor Yellow
@@ -272,23 +273,24 @@ if ($haveCompilerInput) {
         $RepoRoot,
         $CompatDir
     )
+
+    # Which runtime function executes each converted op. Keyed on the hip ops
+    # the conversion produced, so this is a lookup rather than a guess.
+    Invoke-PythonStep -Label '  hip op to runtime map' -PyArgv @(
+        (Join-Path $ToolsDir "hip_runtime_map.py"), $RepoRoot, $CompatDir
+    )
 } else {
     Write-Host '(4/5) Skip conversion probe (no compiler input); support will be reported as unverified' -ForegroundColor Yellow
 }
 
 # --- S5, S6: normalize and render -------------------------------------------
 $analyzedGraph = if ($haveCompilerInput) { $CompilerInput } else { $ModelPath }
-$step1ForCompat = if ($haveCompilerInput) {
-    Join-Path $Step1EpDir "step1_onnx_ops.json"
-} else {
-    Join-Path $Step1OriginalDir "step1_onnx_ops.json"
-}
-Copy-Item -LiteralPath $step1ForCompat -Destination (Join-Path $CompatDir "step1_onnx_ops.json") -Force
+$step1ForCompat = if ($haveCompilerInput) { $step1EpJson } else { $step1OrigJson }
 
 Write-Host '(5/5) Reports...' -ForegroundColor Yellow
 Invoke-PythonStep -Label '  build_report_input' -PyArgv @(
     (Join-Path $ToolsDir "build_report_input.py"),
-    $analyzedGraph, $CompatDir, $RepoRoot
+    $analyzedGraph, $step1ForCompat, $CompatDir, $RepoRoot
 )
 Invoke-PythonStep -Label '  generate_final_reports' -PyArgv @(
     (Join-Path $ToolsDir "generate_final_reports.py"), $CompatDir

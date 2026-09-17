@@ -502,13 +502,13 @@ def main():
     markdown_report = generate_markdown_report(ops_info, model_name, analyzer)
 
     # Save the Markdown report.
-    md_path = Path(output_dir) / "step1_onnx_analysis.md"
+    md_path = Path(output_dir) / "step1_original_onnx_analysis.md"
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(markdown_report)
     print(f"[OK] Markdown report saved: {md_path}")
 
     # Save the JSON data.
-    json_path = Path(output_dir) / "step1_onnx_ops.json"
+    json_path = Path(output_dir) / "step1_original_onnx_ops.json"
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(ops_info, f, indent=2, ensure_ascii=False)
     print(f"[OK] JSON data saved: {json_path}")
