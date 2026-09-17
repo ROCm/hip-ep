@@ -34,7 +34,7 @@ env:
   # the fork is updated. Branch: sliding_window_support_amdgpu (AMDGPU
   # MorphiZen integration + sliding_window).
   OGA_REPO: "cliu1003/onnxruntime-genai"
-  OGA_REF: "519b16da6a38aacb15d209ff19a26d9cb760adc6"
+  OGA_REF: "767f3f8c8820558519e681c46ee0abca57f078a5"
   # Optional space-separated microsoft/onnxruntime-genai PR numbers applied
   # on top of the fork checkout via pull/<n>.patch + git am. Empty when the
   # fork branch already carries the needed integration.
