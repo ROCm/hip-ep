@@ -5,7 +5,14 @@
 // TEST PURPOSE:
 // Verify the comparison, logical and sign hip ops lower to TOSA inside a
 // rock.kernel function, so rocMLIR can absorb them into a fused kernel, and
-// verify the forms the conversion rejects.
+// verify the forms the conversion leaves alone or rejects.
+//
+// These ops are claimed by element type rather than outright, because ONNX has
+// no signless integers and ORT imports bool as ui8. An op carrying a type with
+// no faithful TOSA spelling therefore stays a hip op for the runtime lowering
+// instead of failing the pass -- see the "Forms this pass does not claim"
+// section, which is the bulk of the negative coverage here. Only forms the
+// pass does claim but cannot rewrite produce a diagnostic.
 //
 // These are the hip ops whose operand and result element types differ, or
 // whose TOSA spelling is not a single op:
@@ -166,7 +173,13 @@ func.func @equal_broadcast_rank(%ctx: !hip.context, %x: tensor<2x8xf32>,
 // CHECK: %[[NEG:.*]] = "tosa.const"() <{values = dense<-1.000000e+00> : tensor<2x8xf32>}>
 // CHECK: %[[INNER:.*]] = tosa.select %[[ISNEG]], %[[NEG]], %[[ZERO]]
 // CHECK: %[[ONE:.*]] = "tosa.const"() <{values = dense<1.000000e+00> : tensor<2x8xf32>}>
-// CHECK: tosa.select %[[POS]], %[[ONE]], %[[INNER]]
+// CHECK: %[[SIGNUM:.*]] = tosa.select %[[POS]], %[[ONE]], %[[INNER]]
+// Both comparisons above are false for NaN, so the selects alone would return
+// zero. ONNX defines sign(NaN) = NaN and lib/Runtime/real/sign.cpp propagates
+// it, so an ordered self-compare forwards the input in that one case and keeps
+// a fused model agreeing with the unfused one.
+// CHECK: %[[ORDERED:.*]] = tosa.equal %arg1, %arg1
+// CHECK: tosa.select %[[ORDERED]], %[[SIGNUM]], %arg1
 // CHECK-NOT: hip.sign
 func.func @sign(%ctx: !hip.context, %x: tensor<2x8xf32>,
                 %init: tensor<2x8xf32>) -> tensor<2x8xf32>
@@ -177,7 +190,8 @@ func.func @sign(%ctx: !hip.context, %x: tensor<2x8xf32>,
 }
 
 // ONNX Sign is defined over signed integers too, where the constants are
-// integer rather than float splats.
+// integer rather than float splats. Integers have no NaN, so the self-compare
+// guard is float-only and must not appear here.
 // CHECK-LABEL: func.func @sign_i32
 // CHECK: %[[ZERO:.*]] = "tosa.const"() <{values = dense<0> : tensor<4xi32>}>
 // CHECK: %[[POS:.*]] = tosa.greater %arg1, %[[ZERO]]
@@ -186,6 +200,7 @@ func.func @sign(%ctx: !hip.context, %x: tensor<2x8xf32>,
 // CHECK: %[[INNER:.*]] = tosa.select %[[ISNEG]], %[[NEG]], %[[ZERO]]
 // CHECK: %[[ONE:.*]] = "tosa.const"() <{values = dense<1> : tensor<4xi32>}>
 // CHECK: tosa.select %[[POS]], %[[ONE]], %[[INNER]]
+// CHECK-NOT: tosa.equal
 func.func @sign_i32(%ctx: !hip.context, %x: tensor<4xi32>,
                     %init: tensor<4xi32>) -> tensor<4xi32>
     attributes {rock.kernel} {
@@ -213,21 +228,150 @@ func.func @less_not_a_kernel(%ctx: !hip.context, %x: tensor<2x8xf32>,
 // -----
 
 //===----------------------------------------------------------------------===//
-// Rejected forms, one per chunk. The pass marks each of these ops illegal, so
-// a rejection fails legalization rather than leaving the hip op in place.
+// Forms this pass does not claim. These ops are legal by element type rather
+// than outright, so an unsupported one is left as a hip op and reaches the
+// runtime lowering that handles it; the pass still succeeds. That is the point
+// of the gates -- failing here would take the fusible ops in the same function
+// down with it.
+//
+// These all share one chunk since none of them produce a diagnostic.
 //===----------------------------------------------------------------------===//
 
+// ORT imports ONNX bool as ui8, not i1 (see the ui8 cases in
+// test/lit/Conversion/hip-to-llvm/test_and.mlir). TOSA has no unsigned
+// integers, so the whole ui8 boolean family stays on the runtime path.
+// CHECK-LABEL: func.func @and_ui8_bool
+// CHECK: hip.and
+// CHECK-NOT: tosa.bitwise_and
+func.func @and_ui8_bool(%ctx: !hip.context, %x: tensor<2x8xui8>,
+                        %y: tensor<2x8xui8>, %init: tensor<2x8xui8>)
+    -> tensor<2x8xui8> attributes {rock.kernel} {
+  %r = hip.and(%ctx) ins(%x, %y : tensor<2x8xui8>, tensor<2x8xui8>)
+                     outs(%init : tensor<2x8xui8>) : tensor<2x8xui8>
+  return %r : tensor<2x8xui8>
+}
+
+// CHECK-LABEL: func.func @not_ui8_bool
+// CHECK: hip.not
+// CHECK-NOT: tosa.bitwise_xor
+func.func @not_ui8_bool(%ctx: !hip.context, %x: tensor<2x8xui8>,
+                        %init: tensor<2x8xui8>) -> tensor<2x8xui8>
+    attributes {rock.kernel} {
+  %r = hip.not(%ctx) ins(%x : tensor<2x8xui8>)
+                     outs(%init : tensor<2x8xui8>) : tensor<2x8xui8>
+  return %r : tensor<2x8xui8>
+}
+
+// OnnxToHip preserves the ONNX result type, so a lowered onnx.Greater can
+// arrive as a hip.less returning ui8 -- exactly the shape of
+// test/lit/Conversion/onnx-to-hip/test_greater.mlir's greater_6d_scalar.
+// CHECK-LABEL: func.func @less_ui8_result
+// CHECK: hip.less
+// CHECK-NOT: tosa.greater
+func.func @less_ui8_result(%ctx: !hip.context, %x: tensor<2x8xf32>,
+                           %y: tensor<2x8xf32>, %init: tensor<2x8xui8>)
+    -> tensor<2x8xui8> attributes {rock.kernel} {
+  %r = hip.less(%ctx) ins(%x, %y : tensor<2x8xf32>, tensor<2x8xf32>)
+                      outs(%init : tensor<2x8xui8>) : tensor<2x8xui8>
+  return %r : tensor<2x8xui8>
+}
+
+// ONNX Equal/Less also accept unsigned operands. TOSA integers are signless,
+// so comparing them as TOSA would read a ui8 255 as -1.
+// CHECK-LABEL: func.func @equal_unsigned_operands
+// CHECK: hip.equal
+// CHECK-NOT: tosa.equal
+func.func @equal_unsigned_operands(%ctx: !hip.context, %x: tensor<2x8xui8>,
+                                   %y: tensor<2x8xui8>, %init: tensor<2x8xi1>)
+    -> tensor<2x8xi1> attributes {rock.kernel} {
+  %r = hip.equal(%ctx) ins(%x, %y : tensor<2x8xui8>, tensor<2x8xui8>)
+                       outs(%init : tensor<2x8xi1>) : tensor<2x8xi1>
+  return %r : tensor<2x8xi1>
+}
+
+// Bitwise and logical agree only on i1, so a wider integer keeps its hip op
+// rather than being given bitwise semantics it does not ask for.
+// CHECK-LABEL: func.func @and_non_i1
+// CHECK: hip.and
+// CHECK-NOT: tosa.bitwise_and
+func.func @and_non_i1(%ctx: !hip.context, %x: tensor<2x8xi8>,
+                      %y: tensor<2x8xi8>, %init: tensor<2x8xi8>)
+    -> tensor<2x8xi8> attributes {rock.kernel} {
+  %r = hip.and(%ctx) ins(%x, %y : tensor<2x8xi8>, tensor<2x8xi8>)
+                     outs(%init : tensor<2x8xi8>) : tensor<2x8xi8>
+  return %r : tensor<2x8xi8>
+}
+
 // Dynamic shapes give the pattern no static shape to reason about.
+// CHECK-LABEL: func.func @less_dynamic_shape
+// CHECK: hip.less
+// CHECK-NOT: tosa.greater
 func.func @less_dynamic_shape(%ctx: !hip.context, %x: tensor<?x8xf32>,
                               %y: tensor<?x8xf32>, %init: tensor<?x8xi1>)
     -> tensor<?x8xi1> attributes {rock.kernel} {
-  // expected-error @+1 {{failed to legalize operation 'hip.less'}}
   %r = hip.less(%ctx) ins(%x, %y : tensor<?x8xf32>, tensor<?x8xf32>)
                       outs(%init : tensor<?x8xi1>) : tensor<?x8xi1>
   return %r : tensor<?x8xi1>
 }
 
+// Both TOSA comparisons carry SameOperandsElementType, so mismatched operands
+// have no spelling even though the result is i1 either way.
+// CHECK-LABEL: func.func @equal_element_type_mismatch
+// CHECK: hip.equal
+// CHECK-NOT: tosa.equal
+func.func @equal_element_type_mismatch(%ctx: !hip.context,
+                                       %x: tensor<2x8xf32>,
+                                       %y: tensor<2x8xf16>,
+                                       %init: tensor<2x8xi1>)
+    -> tensor<2x8xi1> attributes {rock.kernel} {
+  %r = hip.equal(%ctx) ins(%x, %y : tensor<2x8xf32>, tensor<2x8xf16>)
+                       outs(%init : tensor<2x8xi1>) : tensor<2x8xi1>
+  return %r : tensor<2x8xi1>
+}
+
+// TOSA's float tensor constraint is AnyFloat, so f64 would pass the verifier
+// and then have no lowering.
+// CHECK-LABEL: func.func @less_f64
+// CHECK: hip.less
+// CHECK-NOT: tosa.greater
+func.func @less_f64(%ctx: !hip.context, %x: tensor<2x8xf64>,
+                    %y: tensor<2x8xf64>, %init: tensor<2x8xi1>)
+    -> tensor<2x8xi1> attributes {rock.kernel} {
+  %r = hip.less(%ctx) ins(%x, %y : tensor<2x8xf64>, tensor<2x8xf64>)
+                      outs(%init : tensor<2x8xi1>) : tensor<2x8xi1>
+  return %r : tensor<2x8xi1>
+}
+
+// The same for the sign expansion, whose greater/select would be built at f64.
+// CHECK-LABEL: func.func @sign_f64
+// CHECK: hip.sign
+// CHECK-NOT: tosa.select
+func.func @sign_f64(%ctx: !hip.context, %x: tensor<2x8xf64>,
+                    %init: tensor<2x8xf64>) -> tensor<2x8xf64>
+    attributes {rock.kernel} {
+  %r = hip.sign(%ctx) ins(%x : tensor<2x8xf64>)
+                      outs(%init : tensor<2x8xf64>) : tensor<2x8xf64>
+  return %r : tensor<2x8xf64>
+}
+
+// i1 cannot represent the -1 that Sign needs for negative inputs.
+// CHECK-LABEL: func.func @sign_i1
+// CHECK: hip.sign
+// CHECK-NOT: tosa.select
+func.func @sign_i1(%ctx: !hip.context, %x: tensor<2x8xi1>,
+                   %init: tensor<2x8xi1>) -> tensor<2x8xi1>
+    attributes {rock.kernel} {
+  %r = hip.sign(%ctx) ins(%x : tensor<2x8xi1>)
+                      outs(%init : tensor<2x8xi1>) : tensor<2x8xi1>
+  return %r : tensor<2x8xi1>
+}
+
 // -----
+
+//===----------------------------------------------------------------------===//
+// Hard rejections. Unlike the cases above, these are shapes and types the pass
+// does claim, so a pattern that then cannot rewrite them fails legalization.
+//===----------------------------------------------------------------------===//
 
 // Rank equalization prepends 1s, so tensor<4xf32> becomes 1x4. The trailing 4
 // still cannot broadcast to 8, which the post-equalization check catches
@@ -238,98 +382,6 @@ func.func @less_incompatible_broadcast(%ctx: !hip.context,
     -> tensor<2x8xi1> attributes {rock.kernel} {
   // expected-error @+1 {{failed to legalize operation 'hip.less'}}
   %r = hip.less(%ctx) ins(%x, %y : tensor<2x8xf32>, tensor<4xf32>)
-                      outs(%init : tensor<2x8xi1>) : tensor<2x8xi1>
-  return %r : tensor<2x8xi1>
-}
-
-// -----
-
-// Both TOSA comparisons carry SameOperandsElementType, so operands of
-// different types have no valid spelling even though the result is i1 either
-// way.
-func.func @equal_element_type_mismatch(%ctx: !hip.context,
-                                       %x: tensor<2x8xf32>,
-                                       %y: tensor<2x8xf16>,
-                                       %init: tensor<2x8xi1>)
-    -> tensor<2x8xi1> attributes {rock.kernel} {
-  // expected-error @+1 {{failed to legalize operation 'hip.equal'}}
-  %r = hip.equal(%ctx) ins(%x, %y : tensor<2x8xf32>, tensor<2x8xf16>)
-                       outs(%init : tensor<2x8xi1>) : tensor<2x8xi1>
-  return %r : tensor<2x8xi1>
-}
-
-// -----
-
-// A comparison whose result is not i1 is malformed; naming it here is clearer
-// than letting the TOSA verifier reject the op this pass synthesized.
-func.func @equal_non_i1_result(%ctx: !hip.context, %x: tensor<2x8xf32>,
-                               %y: tensor<2x8xf32>, %init: tensor<2x8xi8>)
-    -> tensor<2x8xi8> attributes {rock.kernel} {
-  // expected-error @+1 {{failed to legalize operation 'hip.equal'}}
-  %r = hip.equal(%ctx) ins(%x, %y : tensor<2x8xf32>, tensor<2x8xf32>)
-                       outs(%init : tensor<2x8xi8>) : tensor<2x8xi8>
-  return %r : tensor<2x8xi8>
-}
-
-// -----
-
-// Bitwise and logical only agree on i1, so a wider integer is rejected by the
-// BoolOnly gate rather than silently given bitwise semantics.
-func.func @and_non_i1(%ctx: !hip.context, %x: tensor<2x8xi8>,
-                      %y: tensor<2x8xi8>, %init: tensor<2x8xi8>)
-    -> tensor<2x8xi8> attributes {rock.kernel} {
-  // expected-error @+1 {{failed to legalize operation 'hip.and'}}
-  %r = hip.and(%ctx) ins(%x, %y : tensor<2x8xi8>, tensor<2x8xi8>)
-                     outs(%init : tensor<2x8xi8>) : tensor<2x8xi8>
-  return %r : tensor<2x8xi8>
-}
-
-// -----
-
-// The same gate for hip.not: `x ^ true` is only logical negation on i1.
-func.func @not_non_i1(%ctx: !hip.context, %x: tensor<2x8xi8>,
-                      %init: tensor<2x8xi8>) -> tensor<2x8xi8>
-    attributes {rock.kernel} {
-  // expected-error @+1 {{failed to legalize operation 'hip.not'}}
-  %r = hip.not(%ctx) ins(%x : tensor<2x8xi8>)
-                     outs(%init : tensor<2x8xi8>) : tensor<2x8xi8>
-  return %r : tensor<2x8xi8>
-}
-
-// -----
-
-// TOSA's float tensor constraint is AnyFloat, so an f64 comparison would pass
-// the verifier and then have no lowering; it is named here instead.
-func.func @less_f64(%ctx: !hip.context, %x: tensor<2x8xf64>,
-                    %y: tensor<2x8xf64>, %init: tensor<2x8xi1>)
-    -> tensor<2x8xi1> attributes {rock.kernel} {
-  // expected-error @+1 {{failed to legalize operation 'hip.less'}}
-  %r = hip.less(%ctx) ins(%x, %y : tensor<2x8xf64>, tensor<2x8xf64>)
-                      outs(%init : tensor<2x8xi1>) : tensor<2x8xi1>
-  return %r : tensor<2x8xi1>
-}
-
-// -----
-
-// The same for the sign expansion, whose greater/select would otherwise be
-// built at f64.
-func.func @sign_f64(%ctx: !hip.context, %x: tensor<2x8xf64>,
-                    %init: tensor<2x8xf64>) -> tensor<2x8xf64>
-    attributes {rock.kernel} {
-  // expected-error @+1 {{failed to legalize operation 'hip.sign'}}
-  %r = hip.sign(%ctx) ins(%x : tensor<2x8xf64>)
-                      outs(%init : tensor<2x8xf64>) : tensor<2x8xf64>
-  return %r : tensor<2x8xf64>
-}
-
-// -----
-
-// i1 cannot represent the -1 that Sign needs for negative inputs.
-func.func @sign_i1(%ctx: !hip.context, %x: tensor<2x8xi1>,
-                   %init: tensor<2x8xi1>) -> tensor<2x8xi1>
-    attributes {rock.kernel} {
-  // expected-error @+1 {{failed to legalize operation 'hip.sign'}}
-  %r = hip.sign(%ctx) ins(%x : tensor<2x8xi1>)
                       outs(%init : tensor<2x8xi1>) : tensor<2x8xi1>
   return %r : tensor<2x8xi1>
 }
