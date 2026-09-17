@@ -4,23 +4,32 @@
 # Licensed under the MIT License.
 #
 """
-Compatibility oracle: what convert-onnx-to-hip actually did (steps 3 and 4).
+Compatibility oracle: what convert-onnx-to-hip actually did (steps 2 to 4).
 
-Compares the EP-input MLIR with the same module after the conversion
-pipeline and writes two files:
+Compares the EP-input MLIR with the same module after the conversion pipeline
+and writes what the report is built from:
 
-  leftover_onnx.json   onnx ops the conversion did not replace. The pass DCEs
-                       unused onnx ops before it finishes, so anything left is
-                       live: the operator is unsupported, or its pattern bailed
-                       out on this instance.
+  leftover_onnx.json     onnx ops the conversion did not replace. The pass DCEs
+                         unused onnx ops before it finishes, so anything left
+                         is live: the operator is unsupported, or its pattern
+                         bailed out on these instances.
 
-  attr_transfer.json   For converted ops, the ONNX attributes that did not
-                       reach the HIP op. Pairing uses the location both dumps
-                       carry (see mlir_text). An attribute whose value equals
-                       its schema default is recorded separately, because
-                       dropping a default changes no behaviour; defaults come
-                       from the ONNX schema, or from ONNX Runtime's contrib
-                       operator registry for the com.microsoft domain.
+  leftover_reasons.json  for each of those, whether a converter exists at all
+                         and which of its refusals the observed types
+                         contradict. Read from the source through hip_source,
+                         because a release build compiles the refusal messages
+                         out.
+
+  attr_transfer.json     for converted ops, the ONNX attributes that did not
+                         reach the HIP op, and which hip op each became.
+
+  hip_runtime_map.json   the runtime function and backend behind each hip op
+                         that appeared, so the report can name what executes
+                         the operator.
+
+An attribute equal to its schema default is recorded separately, because
+dropping a default changes no behaviour; defaults come from the ONNX schema,
+or from ONNX Runtime's contrib operator registry for com.microsoft.
 
 Both dumps must be produced with --mlir-print-debuginfo so the locations line
 up; the input dump is re-printed from the same file the conversion read.
@@ -33,6 +42,7 @@ from collections import defaultdict
 from functools import lru_cache
 from pathlib import Path
 
+from hip_source import HipSource
 from mlir_text import parse_mlir_file, strip_quotes
 
 # Anything that is no longer an onnx op is a conversion result: hip.* is the
@@ -331,31 +341,67 @@ def build_attr_transfer(
     return rows, dict(sorted(unpaired.items()))
 
 
+def observed_element_types(entry):
+    """Element types on the leftover instances' operands and results."""
+    found = []
+    for sample in entry.get("samples") or []:
+        for body in re.findall(r"tensor<([^<>]*)>", sample.get("type_signature", "")):
+            elem = body.rsplit("x", 1)[-1].strip() if "x" in body else body.strip()
+            if elem and elem not in found:
+                found.append(elem)
+    return found
+
+
+def explain_leftovers(source, leftovers, max_refusals):
+    """Why each leftover did not convert: no converter, or a refused one."""
+    rows = []
+    for entry in leftovers:
+        observed = observed_element_types(entry)
+        explanation = source.explain_leftover(
+            entry.get("op_type", ""), observed, max_refusals
+        )
+        rows.append(
+            {
+                "key": entry.get("key"),
+                "op_type": entry.get("op_type", ""),
+                "domain": entry.get("domain", ""),
+                "observed_element_types": observed,
+                **explanation,
+            }
+        )
+    return rows
+
+
+def write(path: Path, payload: dict) -> None:
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"[OK] {path}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("input_mlir", help="EP-input MLIR printed with locations")
     ap.add_argument(
         "converted_mlir", help="post-conversion MLIR printed with locations"
     )
-    ap.add_argument("output_dir", help="Directory for the two JSON files")
+    ap.add_argument("output_dir", help="Directory for the analysis JSON files")
     ap.add_argument(
-        "--repo-root",
-        default="",
-        help="hip-ep repository root; lets the attribute check see which "
-        "attributes a hip op declares, so a value equal to the op's own "
-        "default is not read as a dropped attribute",
+        "repo_root",
+        help="hip-ep repository root: which attributes a hip op declares, what "
+        "runs it, and what its converter can refuse all come from there",
+    )
+    ap.add_argument(
+        "--max-refusals",
+        type=int,
+        default=6,
+        help="Candidate constraints to keep per leftover operator (default 6)",
     )
     args = ap.parse_args()
 
-    hip_op_attributes = {}
-    if args.repo_root:
-        from hip_op_defs import hip_ops_td_path, load_hip_ops
-
-        td_path = hip_ops_td_path(Path(args.repo_root))
-        if td_path.is_file():
-            hip_op_attributes = {
-                name: info["attributes"] for name, info in load_hip_ops(td_path).items()
-            }
+    source = HipSource(args.repo_root)
+    missing = source.missing_paths()
+    if missing:
+        raise SystemExit("Not found in the repository: " + ", ".join(missing))
+    hip_op_attributes = source.op_attributes()
 
     pre_module = parse_mlir_file(Path(args.input_mlir))
     post_module = parse_mlir_file(Path(args.converted_mlir))
@@ -376,39 +422,45 @@ def main():
         hip_op_attributes=hip_op_attributes,
     )
 
-    leftover_path = output_dir / "leftover_onnx.json"
-    leftover_path.write_text(
-        json.dumps(
-            {
-                "input_mlir": str(args.input_mlir),
-                "converted_mlir": str(args.converted_mlir),
-                "unconverted": leftovers,
-                "unconverted_instances": sum(e["count"] for e in leftovers),
-            },
-            indent=2,
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
+    reasons = explain_leftovers(source, leftovers, args.max_refusals)
+    observed_hip_ops = {op for row in attr_rows for op in row["hip_ops"]}
+    # The dialect is ~90 ops and a model uses a dozen; the rest would be noise
+    # for whoever opens the file.
+    runtime_map = source.runtime_map(keep_ops=observed_hip_ops)
 
-    attr_path = output_dir / "attr_transfer.json"
-    attr_path.write_text(
-        json.dumps(
-            {
-                "rows": attr_rows,
-                "unpaired_instances": unpaired,
-                "orphan_hip_ops": orphans,
-            },
-            indent=2,
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+    write(
+        output_dir / "leftover_onnx.json",
+        {
+            "input_mlir": str(args.input_mlir),
+            "converted_mlir": str(args.converted_mlir),
+            "unconverted": leftovers,
+            "unconverted_instances": sum(e["count"] for e in leftovers),
+        },
     )
+    write(
+        output_dir / "leftover_reasons.json",
+        {"conversion_dir": str(source.conversion_dir), "rows": reasons},
+    )
+    write(
+        output_dir / "attr_transfer.json",
+        {
+            "rows": attr_rows,
+            "unpaired_instances": unpaired,
+            "orphan_hip_ops": orphans,
+        },
+    )
+    write(output_dir / "hip_runtime_map.json", {"ops": runtime_map})
 
-    print(f"[OK] {leftover_path}")
     for entry in leftovers:
         print(f"  unconverted {entry['key']} x{entry['count']}")
-    print(f"[OK] {attr_path}")
+    for row in reasons:
+        if not row["converter_found"]:
+            print(f"  {row['key']}: no converter in {source.conversion_dir.name}")
+            continue
+        likely = [r for r in row["refusals"] if r.get("likely")] or row["refusals"]
+        head = likely[0] if likely else None
+        detail = f"{head['message']} ({head['location']})" if head else "unknown"
+        print(f"  {row['key']}: converter exists, rejected all; likely: {detail}")
     for row in attr_rows:
         if row["status"] == "partial":
             print(f"  partial {row['key']} dropped {list(row['dropped_attrs'])}")
@@ -418,6 +470,7 @@ def main():
         print(f"  hip ops with no pre-conversion match: {orphans}")
     if unpaired:
         print(f"  unpaired (no location match): {unpaired}")
+    print(f"  {len(runtime_map)} hip op(s) mapped to a runtime function")
 
 
 if __name__ == "__main__":

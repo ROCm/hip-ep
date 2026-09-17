@@ -73,17 +73,13 @@ Re-runs reuse the directory, and an existing `compatibility\ep_input.mlir` is re
 
 The three markdown files sit at the top of `<OutputDir>`; everything the pipeline produced on the way to them is in `<OutputDir>\compatibility`, named below without that prefix.
 
-| Step | Produces | Check before continuing |
-|---|---|---|
-| S0 dump | `ep_input.mlir`, `dump_meta.json` | file is text MLIR starting with `module` and contains `onnx.` ops |
-| S1a original | `step1_original_onnx_ops.json` | node total matches the model |
-| S1b EP input | `step1_ep_input_ops.json` | `_analysis_meta.excluded_carrier_ops` lists the `onnx.Constant` carriers, not compute ops |
-| S1c compare | `op_distribution_comparison.json` | deltas explain themselves (ORT fusions, `Swish` to `Sigmoid`+`Mul`, initializers) |
-| S2 convert | `converted.mlir`, `convert_log.txt` | probe exited 0; the log's unconverted list matches S3 |
-| S3 leftovers | `leftover_onnx.json`, `leftover_reasons.json` | every leftover key also appears in S1b; each leftover says whether a converter exists |
-| S4 attributes | `attr_transfer.json`, `hip_runtime_map.json` | `unpaired_instances` is small and explainable; every observed `hip.*` op resolves to a runtime function |
-| S5 normalize | `report_input.json` | validated against `report_input.schema.json` as it is written; supported + unsupported instances equal the total |
-| S6 render | `..\model_compatibility_report.md`, `..\model_compatibility_details.md`, `..\pipeline_status.md` | summary numbers equal `report_input.json` |
+| Step | Script | Produces | Check before continuing |
+|---|---|---|---|
+| 1 dump | `dump_ep_input.ps1` | `ep_input.mlir`, `dump_meta.json` | file is text MLIR starting with `module` and contains `onnx.` ops |
+| 2 count | `op_distribution.py` | `step1_original_onnx_ops.json`, `step1_ep_input_ops.json`, `op_distribution_comparison.json` | `_analysis_meta.excluded_carrier_ops` lists the `onnx.Constant` carriers, not compute ops; deltas explain themselves (ORT fusions, `Swish` to `Sigmoid`+`Mul`) |
+| 3 convert | `run_convert_probe.ps1` | `converted.mlir`, `convert_log.txt` | probe exited 0; the log's unconverted list matches step 4 |
+| 4 analyze | `analyze_conversion.py` | `leftover_onnx.json`, `leftover_reasons.json`, `attr_transfer.json`, `hip_runtime_map.json` | every leftover also appears in the EP-input counts and says whether a converter exists; `unpaired_instances` is small and explainable; every observed `hip.*` op resolves to a runtime function |
+| 5 report | `build_report_input.py`, `generate_final_reports.py` | `report_input.json`, and the three markdown files above it | `report_input.json` is validated against its schema as it is written; summary numbers match it |
 
 Each fact is written once. The comparison and the operator distribution are rendered only in the report, and the evidence behind non-supported rows only in the details file; `op_distribution_comparison.json` is the report's input, not a second copy for the reader. `ep_input_loc.mlir` is a location-carrying copy the probe recreates on demand, so it is removed after the analysis reads it.
 
@@ -117,7 +113,7 @@ Lead with what the model would do on hip-ep: the unsupported instance count is t
 
 ### 7. Validate before responding
 
-- [ ] Checkpoints in the S0-S6 table are green
+- [ ] Checkpoints in the step table are green
 - [ ] Diagnose ran for every `unsupported` / `partial` row
 - [ ] Chat numbers equal `model_compatibility_report.md`
 - [ ] Every operator in the compatibility summary appears in the distribution

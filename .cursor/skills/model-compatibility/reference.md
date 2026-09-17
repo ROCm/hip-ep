@@ -41,7 +41,7 @@ Instances are paired pre- and post-conversion by their MLIR location, then each 
 Two cases are excluded from the check, because in both "the attribute is not on the converted op" carries no information:
 
 - **The operator produced no `hip.*` op.** Its attributes were consumed into structure: `Split`'s `axis` becomes `tensor.extract_slice` offsets, and `Concat` refuses to convert without one. There is no attribute dictionary left to compare against.
-- **The HIP op declares the attribute.** MLIR omits an attribute equal to its ODS default when printing, so `hip.gqa` with `softcap=0.0` prints no `softcap` even though the conversion set it. [scripts/hip_op_defs.py](scripts/hip_op_defs.py) reads the declarations out of `HipOps.td` for exactly this, and an op it cannot parse falls back to reporting the drop.
+- **The HIP op declares the attribute.** MLIR omits an attribute equal to its ODS default when printing, so `hip.gqa` with `softcap=0.0` prints no `softcap` even though the conversion set it. [scripts/hip_source.py](scripts/hip_source.py) reads the declarations out of `HipOps.td` for exactly this, and an op it cannot parse falls back to reporting the drop.
 - An attribute that did not land with a non-default value gives reason code `EXTRA_ONNX_ATTR_NOT_IN_HIP` and status `partial`.
 
 Bookkeeping attributes (`onnx_node_name`, `node.outputs`, and the `function_name` / `domain_name` selectors on `onnx.Custom`) are never treated as operator attributes.
@@ -57,7 +57,7 @@ Every instance of `(onnx_op, domain)` is still `onnx.*` after conversion, so sta
 | No converter matches the operator name | `NO_HIP_DIALECT_IMPL` | **exactly** `No Hip Dialect implementation available.` |
 | A converter matches but refused every instance | `CONVERSION_REJECTED_INSTANCES` | names the converter file, the operand element types in this model, and the candidate constraints with file and line |
 
-[scripts/explain_leftovers.py](scripts/explain_leftovers.py) makes that distinction. It finds converters by the quoted operator name they match on (`"MatMulNBits"`, `"onnx.Cast"`), then lists the messages that converter can pass to `notifyMatchFailure`, ordered so constraints the observed element types contradict come first.
+[scripts/hip_source.py](scripts/hip_source.py) makes that distinction. It finds converters by the quoted operator name they match on (`"MatMulNBits"`, `"onnx.Cast"`), then lists the messages that converter can pass to `notifyMatchFailure`, ordered so constraints the observed element types contradict come first.
 
 Those candidates are a hint, not a verdict: `notifyMatchFailure` messages are compiled out of a release build, so no reason reaches the log at runtime and the ranking is inferred from types. Confirm the real constraint with [diagnose.md](diagnose.md) before telling the user.
 
@@ -89,7 +89,7 @@ The conversion already chose the implementation, so the column reports what it p
 3. `hip_op` with no runtime entry -> ``Hip Dialect (`<hip_op>`)``
 4. no `hip_op` (the instance had no location match) -> `Unknown`
 
-[scripts/hip_runtime_map.py](scripts/hip_runtime_map.py) builds that mapping from the HIP-to-LLVM lowering, which names one symbol constant per op, and reads the backend off the wrapper's own implementation: a file calling `hipblasLt*` is hipBLASLt, one calling `hipdnn*` is hipDNN, one launching custom kernels is a custom kernel. A wrapper can be several at once (`hipBLASLt + Custom Hip Kernel` for GQA and MatMulNBits, which drive hipBLASLt for their matmuls and custom kernels around them), and one that touches no library and no kernel is a `Runtime helper`.
+[scripts/hip_source.py](scripts/hip_source.py) builds that mapping from the HIP-to-LLVM lowering, which names one symbol constant per op, and reads the backend off the wrapper's own implementation: a file calling `hipblasLt*` is hipBLASLt, one calling `hipdnn*` is hipDNN, one launching custom kernels is a custom kernel. A wrapper can be several at once (`hipBLASLt + Custom Hip Kernel` for GQA and MatMulNBits, which drive hipBLASLt for their matmuls and custom kernels around them), and one that touches no library and no kernel is a `Runtime helper`.
 
 This is source reading, but it answers a different question from support: the key is a `hip.*` op the conversion actually produced, and a wrong lookup shows up as an unresolved op rather than as a false "supported".
 
@@ -126,7 +126,7 @@ Only one situation reaches these rules: an operator with **no converter at all**
 
 ### Known runtime capabilities (capability inventory examples)
 
-Run `python scripts/hip_runtime_map.py <repo-root> <out-dir>` for the current list; it derives every `hip.*` op's runtime function and backend from the lowering and the wrapper's implementation. A few worth knowing:
+`hip_runtime_map.json` in any run lists the ops that model used; [scripts/hip_source.py](scripts/hip_source.py) derives every `hip.*` op's runtime function and backend from the lowering and the wrapper's implementation. A few worth knowing:
 
 - `wrap_elementwise` — elementwise add / mul / min / max, with per-axis broadcast
 - `wrap_gelu` / `wrap_softplus` / `wrap_leaky_relu` — activation-family elementwise ops

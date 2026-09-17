@@ -5,13 +5,12 @@
 
 # ONNX -> HIP compatibility pipeline, driven by what the compiler does.
 #
-#   S0  dump the EP-input MLIR through hip-ep (init pass only)
-#   S1  operator distribution of the original ONNX and of that MLIR, compared
-#   S2  run the conversion up to convert-onnx-to-hip
-#   S3  scan the result: onnx ops still present are unsupported
-#   S4  pair pre/post ops by location: dropped ONNX attributes are partial
-#   S5  normalize into report_input.json
-#   S6  render the markdown reports
+#   1  dump the EP-input MLIR through hip-ep (init pass only)
+#   2  count operators in the original ONNX and in that MLIR, and diff them
+#   3  run the conversion up to convert-onnx-to-hip
+#   4  analyze what it produced: leftovers, why they were refused, attribute
+#      transfer, and the runtime function behind each hip op
+#   5  normalize into report_input.json and render the markdown
 #
 # Usage:
 #   .\run_ep_compatibility_check.ps1 -ModelPath <model.onnx>
@@ -149,12 +148,6 @@ function Invoke-PythonStep {
     Write-Host ("  done in {0:N1}s" -f $sw.Elapsed.TotalSeconds) -ForegroundColor DarkGray
 }
 
-function OutputUpToDate {
-    param([string]$SourcePath, [string]$ProducedPath)
-    if (-not (Test-Path -LiteralPath $ProducedPath)) { return $false }
-    return (Get-Item -LiteralPath $ProducedPath).LastWriteTimeUtc -ge (Get-Item -LiteralPath $SourcePath).LastWriteTimeUtc
-}
-
 Write-Host "=== hip-ep compatibility check ===" -ForegroundColor Cyan
 Write-Host "Original model:  $ModelPath"
 Write-Host "Output dir:      $OutputDir"
@@ -210,84 +203,43 @@ if (-not $SkipDump) {
 
 $haveEpInput = (Test-Path -LiteralPath $EpInput)
 
-# --- S1: operator distributions ---------------------------------------------
+# --- Step 2: operator distributions and their difference --------------------
 $step1OrigJson = Join-Path $CompatDir "step1_original_onnx_ops.json"
-if (OutputUpToDate -SourcePath $ModelPath -ProducedPath $step1OrigJson) {
-    Write-Host '(2/5) step1 original: up-to-date, skip' -ForegroundColor DarkGray
-} else {
-    Invoke-PythonStep -Label '(2/5) step1 - original ONNX...' -PyArgv @(
-        (Join-Path $ToolsDir "step1_onnx_parser.py"),
-        $ModelPath, $CompatDir
-    )
+$step1EpJson = Join-Path $CompatDir "step1_ep_input_ops.json"
+
+$distributionArgs = @((Join-Path $ToolsDir "op_distribution.py"), $ModelPath, $CompatDir)
+if ($haveEpInput) {
+    $distributionArgs += @("--ep-input", $EpInput)
+}
+Invoke-PythonStep -Label '(2/5) Operator distributions...' -PyArgv $distributionArgs
+
+# --- Step 3 and 4: conversion probe, then what it produced ------------------
+foreach ($stale in @('leftover_onnx.json', 'leftover_reasons.json',
+        'attr_transfer.json', 'hip_runtime_map.json')) {
+    Remove-Item -LiteralPath (Join-Path $CompatDir $stale) -ErrorAction SilentlyContinue
 }
 
 if ($haveEpInput) {
-    $step1EpJson = Join-Path $CompatDir "step1_ep_input_ops.json"
-    if (OutputUpToDate -SourcePath $EpInput -ProducedPath $step1EpJson) {
-        Write-Host '(2/5) step1 EP input: up-to-date, skip' -ForegroundColor DarkGray
-    } else {
-        Invoke-PythonStep -Label '(2/5) step1 - EP input (MLIR)...' -PyArgv @(
-            (Join-Path $ToolsDir "step1_mlir_parser.py"),
-            $EpInput, $CompatDir
-        )
-    }
-
-    Invoke-PythonStep -Label '(3/5) Op distribution comparison...' -PyArgv @(
-        (Join-Path $ToolsDir "compare_op_distribution.py"),
-        $step1OrigJson,
-        $step1EpJson,
-        $CompatDir,
-        "--original-model", $ModelPath,
-        "--ep-model", $EpInput
-    )
-} else {
-    Write-Host '(2/5) Skip EP-input distribution and comparison' -ForegroundColor Yellow
-}
-
-# --- S2..S4: conversion probe, leftovers, attribute transfer ----------------
-Remove-Item -LiteralPath (Join-Path $CompatDir "leftover_onnx.json") -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath (Join-Path $CompatDir "attr_transfer.json") -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath (Join-Path $CompatDir "leftover_reasons.json") -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath (Join-Path $CompatDir "hip_runtime_map.json") -ErrorAction SilentlyContinue
-
-if ($haveEpInput) {
-    Write-Host '(4/5) Conversion probe (convert-onnx-to-hip)...' -ForegroundColor Yellow
+    Write-Host '(3/5) Conversion probe (convert-onnx-to-hip)...' -ForegroundColor Yellow
     & (Join-Path $ToolsDir "run_convert_probe.ps1") `
         -InputMlir $EpInput -OutputDir $CompatDir -HipEpPackageRoot $HipEpPackageRoot
 
     $locatedInput = Join-Path $CompatDir "ep_input_loc.mlir"
-    Invoke-PythonStep -Label '  leftover + attribute analysis' -PyArgv @(
+    Invoke-PythonStep -Label '(4/5) Analyzing the conversion...' -PyArgv @(
         (Join-Path $ToolsDir "analyze_conversion.py"),
         $locatedInput,
         (Join-Path $CompatDir "converted.mlir"),
         $CompatDir,
-        "--repo-root", $RepoRoot
+        $RepoRoot
     )
     # It only existed to join the two sides by location, and it is a copy of
     # ep_input.mlir that the probe can recreate.
     Remove-Item -LiteralPath $locatedInput -ErrorAction SilentlyContinue
-
-    # Why each leftover did not convert. The conversion cannot report its own
-    # refusal reason in a release build, so this reads the constraints out of
-    # the converter that matches the operator.
-    Invoke-PythonStep -Label '  leftover explanations' -PyArgv @(
-        (Join-Path $ToolsDir "explain_leftovers.py"),
-        (Join-Path $CompatDir "leftover_onnx.json"),
-        $RepoRoot,
-        $CompatDir
-    )
-
-    # Which runtime function executes each converted op. Keyed on the hip ops
-    # the conversion produced, so this is a lookup rather than a guess.
-    Invoke-PythonStep -Label '  hip op to runtime map' -PyArgv @(
-        (Join-Path $ToolsDir "hip_runtime_map.py"), $RepoRoot, $CompatDir,
-        "--attr-transfer", (Join-Path $CompatDir "attr_transfer.json")
-    )
 } else {
-    Write-Host '(4/5) Skip conversion probe (no EP input); support will be reported as unverified' -ForegroundColor Yellow
+    Write-Host '(3/5) Skip conversion probe (no EP input); support will be reported as unverified' -ForegroundColor Yellow
 }
 
-# --- S5, S6: normalize and render -------------------------------------------
+# --- Step 5: normalize and render -------------------------------------------
 $analyzedGraph = if ($haveEpInput) { $EpInput } else { $ModelPath }
 $step1ForCompat = if ($haveEpInput) { $step1EpJson } else { $step1OrigJson }
 
