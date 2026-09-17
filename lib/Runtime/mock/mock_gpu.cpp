@@ -130,6 +130,10 @@ extern "C" const char *hipGetErrorString(hipError_t error) {
   return "mock_error";
 }
 
+// No mock call ever fails, so the last-error slot is always clear. Runtime
+// code still reads it to keep launch-status attribution honest on real HIP.
+extern "C" hipError_t hipGetLastError() { return hipSuccess; }
+
 // Mock HIP memory functions (non-static for cross-module linking)
 extern "C" hipError_t hipMalloc(void **ptr, size_t size) {
   *ptr = malloc(size);
@@ -452,6 +456,29 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
              (long long)M, (long long)N, (long long)K, (long long)batch_count,
              (long long)elem_size, (long long)transA, (long long)transB);
 
+  return 0;
+}
+
+// RocMLIR dispatch (hip.rocmlir). Empty for now: the generated IR builds the
+// kernargs buffer and passes the embedded GPU binary + launch geometry, but
+// this wrapper does not yet load the module or launch the kernel.
+int wrap_rocmlir(RuntimeState *state, const char *kernel_binary,
+                 char *func_name, int64_t block_size, int64_t grid_size,
+                 void *kernargs, size_t size) {
+  (void)kernel_binary;
+  (void)func_name;
+  (void)block_size;
+  (void)grid_size;
+  (void)kernargs;
+  (void)size;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_rocmlir\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_rocmlir(func=%s, block_size=%lld, grid_size=%lld, "
+             "kernargs_size=%zu)\n",
+             func_name ? func_name : "(null)", (long long)block_size,
+             (long long)grid_size, size);
   return 0;
 }
 
@@ -1612,27 +1639,64 @@ int wrap_qelementwise(RuntimeState *state, void *lhs, void *rhs, void *output,
 }
 
 int wrap_qmatmul(RuntimeState *state, const void *A, const void *B, void *Y,
-                 int64_t M, int64_t N, int64_t K, int64_t batch_count,
+                 const void *B_scales, const void *B_zero_points, int64_t M,
+                 int64_t N, int64_t K, int64_t batch_count,
                  int64_t b_batch_stride, int64_t trans_a, int64_t trans_b,
                  int64_t a_data_type, int64_t b_data_type, int64_t y_data_type,
-                 float M_scale, int64_t A_zero_point, int64_t B_zero_point,
+                 int64_t b_bits, float M_scale, float AY_ratio,
+                 int64_t A_zero_point, int64_t B_zero_point,
                  int64_t Y_zero_point) {
   (void)A;
   (void)B;
   (void)Y;
+  (void)B_zero_points;
   (void)b_batch_stride;
   (void)a_data_type;
   (void)b_data_type;
   (void)y_data_type;
+  (void)AY_ratio;
   (void)A_zero_point;
   (void)B_zero_point;
   (void)Y_zero_point;
   if (!state)
     return -1;
   MOCK_PRINT("[MOCK] wrap_qmatmul(M=%lld, N=%lld, K=%lld, batch=%lld, "
-             "trans=(%lld,%lld), M_scale=%g)",
+             "trans=(%lld,%lld), b_bits=%lld, per_column=%d, M_scale=%g)",
              (long long)M, (long long)N, (long long)K, (long long)batch_count,
-             (long long)trans_a, (long long)trans_b, (double)M_scale);
+             (long long)trans_a, (long long)trans_b, (long long)b_bits,
+             B_scales != nullptr, (double)M_scale);
+  return 0;
+}
+
+int wrap_qgemm(RuntimeState *state, const void *A, const void *B, const void *C,
+               const void *B_scales, const void *B_zero_points, void *Y,
+               int64_t M, int64_t N, int64_t K, int64_t trans_a,
+               int64_t trans_b, int64_t a_data_type, int64_t b_data_type,
+               int64_t c_data_type, int64_t y_data_type, int64_t b_bits,
+               int64_t c_dim0, int64_t c_dim1, float M_ab, float M_c,
+               int64_t A_zero_point, int64_t B_zero_point, int64_t C_zero_point,
+               int64_t Y_zero_point) {
+  (void)A;
+  (void)B;
+  (void)B_zero_points;
+  (void)Y;
+  (void)c_data_type;
+  (void)c_dim0;
+  (void)c_dim1;
+  (void)M_c;
+  (void)A_zero_point;
+  (void)B_zero_point;
+  (void)C_zero_point;
+  (void)Y_zero_point;
+  if (!state)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_qgemm(M=%lld, N=%lld, K=%lld, trans=(%lld,%lld), "
+             "%s/%s->%s, b_bits=%lld, per_channel=%s, bias=%s, M_ab=%g)",
+             (long long)M, (long long)N, (long long)K, (long long)trans_a,
+             (long long)trans_b, hipdnn_ep_datatype_name(a_data_type),
+             hipdnn_ep_datatype_name(b_data_type),
+             hipdnn_ep_datatype_name(y_data_type), (long long)b_bits,
+             B_scales ? "yes" : "no", C ? "yes" : "null", (double)M_ab);
   return 0;
 }
 
@@ -1681,6 +1745,23 @@ int wrap_qlpnormalization(RuntimeState *state, const void *input, void *output,
              "axis=%lld p=%lld\n",
              (long long)num_elements, (long long)norm_num_elements,
              hipdnn_ep_datatype_name(data_type), (long long)axis, (long long)p);
+  return 0;
+}
+
+int wrap_qsigmoid(RuntimeState *state, const void *input, void *output,
+                  int64_t num_elements, int64_t data_type, float input_scale,
+                  int64_t input_zp, float output_scale, int64_t output_zp) {
+  (void)input;
+  (void)output;
+  (void)input_scale;
+  (void)input_zp;
+  (void)output_scale;
+  (void)output_zp;
+  if (!state)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_qsigmoid(num_elements=%lld, data_type=%s(%lld))\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
   return 0;
 }
 
