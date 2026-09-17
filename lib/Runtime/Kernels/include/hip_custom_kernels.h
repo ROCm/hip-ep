@@ -3141,7 +3141,7 @@ HIP_KERNEL_API int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B
  * hip_ck_gemm_run returns non-zero when the named instance cannot serve the
  * shape -- an alignment, layout or dtype combination it was not instantiated
  * for. That is a routing answer, not a failure: the caller is expected to try
- * another instance or fall back to hipBLASLt.
+ * another instance or fall back to hip_ref_gemm_run.
  *
  * Parameters:
  *   stream     - hipStream_t cast to void*
@@ -3174,8 +3174,8 @@ HIP_KERNEL_API int hip_ck_gemm_run(void* stream, int instance, const void* A,
  * fp16/fp16, fp16/fp32, bf16/bf16, bf16/fp32, fp32/fp32 and fp64/fp64.
  *
  * ck::ReferenceGemm assumes packed operands, so lda/ldb/ldd are unused and the
- * caller must pass packed buffers; strideA/B/D are batch strides. Returns
- * non-zero only for transB != 0 or a dtype pair with no instance.
+ * caller must pass packed buffers; strideA/B/D are batch strides and are
+ * honoured. Returns non-zero only for a dtype pair it does not cover.
  */
 HIP_KERNEL_API int hip_ref_gemm_run(void* stream, const void* A, const void* B,
                        void* D, int64_t m, int64_t n, int64_t k, int64_t batch,

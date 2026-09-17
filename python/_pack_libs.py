@@ -52,13 +52,6 @@ def _copy_crt_libs(dest: Path) -> int:
     return len(missing)
 
 
-def _copy_rocm_runtime(dist: Path, arch: str, dest: Path) -> int:
-    # GEMMs route through the Composable Kernel / reference kernels compiled
-    # into custom_kernels, so no vendor BLAS runtime library or Tensile data is
-    # bundled. amdhip64 is loaded from the ROCm dist at runtime.
-    return 0
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -73,22 +66,6 @@ def main():
         "--dest",
         required=True,
         help="Destination dir (the wheel's onnxruntime_ep_amdgpu).",
-    )
-    ap.add_argument(
-        "--rocm-dist",
-        required=True,
-        metavar="PATH",
-        help="TheRock ROCm SDK the EP was built against (THEROCK_DIST). Its "
-        "runtime libraries are bundled so the wheel needs no ROCm install.",
-    )
-    ap.add_argument(
-        "--rocm-arch",
-        required=True,
-        metavar="GFX",
-        help="Device ISA whose hipBLASLt Tensile data to bundle, e.g. gfx1151. "
-        "A generic compile target (gfx11-generic) is mapped to a concrete "
-        "ISA present in the dist. A multi-arch distribution carries every "
-        "arch; the wheel ships one.",
     )
     ap.add_argument(
         "--extra-lib",
@@ -123,10 +100,6 @@ def main():
             print(f"  packaged import lib: {lib.name} <- {lib}")
         else:
             print(f"  WARNING: extra import lib not found: {lib}")
-
-    rc = _copy_rocm_runtime(Path(args.rocm_dist), args.rocm_arch, dest)
-    if rc:
-        return rc
 
     if args.with_crt:
         _copy_crt_libs(dest)

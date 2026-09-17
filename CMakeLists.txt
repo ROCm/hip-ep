@@ -86,9 +86,6 @@ if(MSVC)
 endif()
 
 option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
-# Build the REAL runtime without the vendor BLAS backend (hipBLASLt).
-# The hipBLASLt-backed op wrappers compile to error-returning stubs that
-# preserve their ABI, and the model link + package discovery drop that library.
 option(BUILD_HIP_UNIT_TESTS "Build and register LIT and E2E tests with CTest" ON)
 option(BUILD_PYTHON_WHEEL "Configure the 'wheel' target that packages the EP as a Python wheel" OFF)
 
