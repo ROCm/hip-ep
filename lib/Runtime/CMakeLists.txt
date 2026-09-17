@@ -4,7 +4,7 @@
 ##
 
 # HipDnnEpRuntime - Runtime library for ONNX HIP DNN Execution Provider
-# Provides HIP/hipBLASLt wrappers called by generated LLVM IR
+# Provides HIP wrappers called by generated LLVM IR
 #
 # This implements a two-stage compilation:
 # Stage 1 (Build Time): runtime.cpp → bitcode → embedded in library
@@ -124,18 +124,14 @@ if(NOT BUILD_MOCK_RUNTIME)
     endif()
 
     find_package(hip QUIET)
-    # hipBLASLt is no longer linked (every GEMM routes through Composable
-    # Kernel); the package is still probed so runtime_types.h can include its
-    # header for the vestigial RuntimeState handle field.
-    find_package(hipblaslt QUIET)
 
     if(DEFINED THEROCK_DIST)
         set(CMAKE_PREFIX_PATH "${ORIGINAL_CMAKE_PREFIX_PATH}")
     endif()
 
-    if(NOT hip_FOUND OR NOT hipblaslt_FOUND)
+    if(NOT hip_FOUND)
         message(WARNING "ROCm components not found. Building mock runtime library for testing.")
-        message(WARNING "  hip_FOUND=${hip_FOUND}, hipblaslt_FOUND=${hipblaslt_FOUND}")
+        message(WARNING "  hip_FOUND=${hip_FOUND}")
         message(WARNING "  Set THEROCK_DIST environment variable to ROCm SDK path")
         set(BUILD_MOCK_RUNTIME TRUE)
     else()

@@ -23,8 +23,22 @@
 #include <unordered_map>
 #include <vector>
 
+// This file is not in any CMake target; only the out-of-tree GQA
+// dispatch_bench harness compiles it, so it carries the vendor BLAS header and
+// status macro that the in-tree runtime no longer has.
+#include <hipblaslt/hipblaslt.h>
+
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
-#define HIPBLAS_CHECK(cmd) HIPBLAS_CHECK_GOTO(cmd, cleanup)
+#define HIPBLAS_CHECK(cmd)                                                     \
+  do {                                                                         \
+    hipblasStatus_t status = (cmd);                                            \
+    if (status != HIPBLAS_STATUS_SUCCESS) {                                    \
+      fprintf(stderr, "hipBLAS error: %s failed at %s:%d (status=%d)\n", #cmd, \
+              __FILE__, __LINE__, status);                                     \
+      result = -1;                                                             \
+      goto cleanup;                                                            \
+    }                                                                          \
+  } while (0)
 
 // Env-var gate for the group-batched "no-expand" hipBLASLt GQA pipeline.
 // When HIPDNN_EP_GQA_NO_EXPAND=1 (default) the Score and Value GEMMs read

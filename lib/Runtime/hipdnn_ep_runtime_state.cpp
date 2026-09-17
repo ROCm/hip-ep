@@ -183,9 +183,6 @@ static int initialize_state_handles(RuntimeState **out_state) {
   }
 
   state->stream = nullptr;
-  // Vestigial: the product no longer creates a vendor BLAS handle (all GEMMs
-  // route through Composable Kernel / the reference kernel). The field and its
-  // getter remain only for the out-of-tree gqa dispatch_bench A/B harness.
   state->hipblas_handle = nullptr;
   state->gpu_constants_blob = nullptr;
   state->gpu_constants = nullptr;

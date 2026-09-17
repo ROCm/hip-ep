@@ -288,9 +288,8 @@ HIPDNN_EP_RT_EXPORT void *hipdnn_ep_get_current_stream(void);
 // tls_stream.cpp alongside the getter.
 HIPDNN_EP_RT_EXPORT void hipdnn_ep_set_current_stream(void *stream);
 
-// Get hipBLASLt handle from state (for GEMM operations)
-// Returns: hipblasLtHandle_t cast to void* (NULL on error)
-// Ownership: Caller does NOT own handle (destroyed in cleanup)
+// Always returns NULL in the product: no GEMM takes a vendor BLAS handle.
+// Serves the out-of-tree GQA dispatch_bench harness, which sets the field.
 void *hipdnn_ep_state_get_hipblas_handle(RuntimeState *state);
 
 // Get buffer from memory pool by index

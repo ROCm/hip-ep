@@ -14,9 +14,6 @@
 // Mock type definitions for testing without GPU
 typedef void *hipStream_t;
 typedef void *hipEvent_t;
-// Vestigial: RuntimeState still carries a (never-created) handle field of this
-// type for the out-of-tree GQA dispatch_bench harness; no GEMM uses it.
-typedef void *hipblasLtHandle_t;
 typedef int hipError_t;
 
 struct hipDeviceProp_t {

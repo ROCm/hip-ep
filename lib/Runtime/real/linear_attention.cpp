@@ -17,7 +17,6 @@
 #include <cstring>
 
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
-#define HIPBLAS_CHECK(cmd) HIPBLAS_CHECK_GOTO(cmd, cleanup)
 
 // Update rule enum values (must match compiler lowering in
 // LinearAttentionLowering.cpp)
