@@ -6,6 +6,7 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
+#include <llvm/ADT/STLFunctionalExtras.h>
 #include <llvm/ADT/Sequence.h>
 #include <llvm/ADT/SmallVector.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
@@ -93,6 +94,20 @@ static Value transposeTo(Value input, ArrayRef<int64_t> shape,
   auto type = cast<RankedTensorType>(input.getType());
   return tosa::TransposeOp::create(rewriter, loc, type.clone(shape), input,
                                    rewriter.getDenseI32ArrayAttr(permutation));
+}
+
+// Zero-pad `input` by `padding`, given as [before, after] per dimension.
+static Value zeroPadTo(Value input, ArrayRef<int64_t> padding,
+                       ArrayRef<int64_t> shape,
+                       ConversionPatternRewriter &rewriter, Location loc) {
+  auto type = cast<RankedTensorType>(input.getType());
+  Type elemType = type.getElementType();
+  auto zeroType = RankedTensorType::get({1}, elemType);
+  Value zero = tosa::ConstOp::create(
+      rewriter, loc, zeroType,
+      DenseElementsAttr::get(zeroType, rewriter.getZeroAttr(elemType)));
+  return tosa::PadOp::create(rewriter, loc, type.clone(shape), input,
+                             createConstShape(rewriter, loc, padding), zero);
 }
 
 // Crop `input` to `shape`, anchored at the origin, via tosa.slice.
@@ -922,6 +937,41 @@ RankedTensorType keepdimsReduceType(RankedTensorType dataType, int32_t axis) {
   return RankedTensorType::get(shape, dataType.getElementType());
 }
 
+// TOSA has no reduce_mean. Scale by 1/N then reduce_sum on one axis
+// (keepdims=1). Used by hip.global_pool average mode.
+FailureOr<Value> emitTosaKeepdimsReduceMean(Value data, int32_t axis,
+                                            ConversionPatternRewriter &rewriter,
+                                            Location loc, Operation *op) {
+  auto dataType = dyn_cast<RankedTensorType>(data.getType());
+  if (!dataType || !dataType.hasStaticShape())
+    return rewriter.notifyMatchFailure(op, "expected static ranked data");
+  if (!isa<FloatType>(dataType.getElementType()))
+    return rewriter.notifyMatchFailure(
+        op, "tosa reduce_mean lowering requires a float tensor");
+  if (axis < 0 || axis >= dataType.getRank())
+    return rewriter.notifyMatchFailure(op, "reduce axis out of range");
+  int64_t n = dataType.getDimSize(axis);
+  if (n <= 0)
+    return rewriter.notifyMatchFailure(op, "reduce axis extent must be > 0");
+
+  Type elemType = dataType.getElementType();
+  auto oneType = RankedTensorType::get({1}, elemType);
+  Value nConst =
+      createSplatFloat(rewriter, loc, oneType, static_cast<double>(n));
+  auto inv = tosa::ReciprocalOp::create(rewriter, loc, oneType, nConst);
+  SmallVector<int64_t> ones(dataType.getRank(), 1);
+  Value onesShape = tosa::getTosaConstShape(rewriter, loc, ones);
+  auto invTy = RankedTensorType::get(ones, elemType);
+  Value invShaped =
+      tosa::ReshapeOp::create(rewriter, loc, invTy, inv, onesShape);
+  Value scaled = tosa::MulOp::create(rewriter, loc, dataType, data, invShaped,
+                                     createZeroMulShift(rewriter, loc));
+  auto reducedTy = keepdimsReduceType(dataType, axis);
+  return tosa::ReduceSumOp::create(rewriter, loc, reducedTy, scaled,
+                                   rewriter.getI32IntegerAttr(axis))
+      .getResult();
+}
+
 // hip.miopen.softmax is last-dim softmax. TOSA has no softmax op; expand to
 // reduce_max/sub/exp/reduce_sum/reciprocal/mul, which TosaToRock attention
 // matching expects.
@@ -1108,6 +1158,9 @@ struct ReduceMeanConverter final : public OpConversionPattern<ReduceMeanOp> {
 constexpr StringLiteral kRockCustomOpDomain = "rocmlir";
 constexpr StringLiteral kRockUnsignedCast = "unsigned_cast";
 constexpr StringLiteral kRockFpToIntCast = "fp_to_int_cast";
+constexpr int64_t kPoolAverage = 0;
+constexpr int64_t kPoolMax = 1;
+constexpr int64_t kPoolLp = 2;
 
 Value emitTosaCast(ConversionPatternRewriter &rewriter, Location loc,
                    Value input, Type resElemType) {
@@ -1354,6 +1407,358 @@ struct QuantizeLinearConverter final
         tosa::ClampOp::create(rewriter, loc, i32Type, biased, minVal, maxVal,
                               tosa::NanPropagationMode::PROPAGATE);
     rewriter.replaceOp(op, emitTosaCast(rewriter, loc, clamped, outElem));
+    return success();
+  }
+};
+
+FailureOr<Value> emitKeepdimsReduceMax(Value data, int32_t axis,
+                                       ConversionPatternRewriter &rewriter,
+                                       Location loc, Operation *op) {
+  auto dataType = dyn_cast<RankedTensorType>(data.getType());
+  if (!dataType || !dataType.hasStaticShape())
+    return rewriter.notifyMatchFailure(op, "expected static ranked data");
+  if (axis < 0 || axis >= dataType.getRank())
+    return rewriter.notifyMatchFailure(op, "reduce axis out of range");
+  auto reducedTy = keepdimsReduceType(dataType, axis);
+  return tosa::ReduceMaxOp::create(rewriter, loc, reducedTy, data,
+                                   rewriter.getI32IntegerAttr(axis))
+      .getResult();
+}
+
+FailureOr<Value> emitKeepdimsReduceSum(Value data, int32_t axis,
+                                       ConversionPatternRewriter &rewriter,
+                                       Location loc, Operation *op) {
+  auto dataType = dyn_cast<RankedTensorType>(data.getType());
+  if (!dataType || !dataType.hasStaticShape())
+    return rewriter.notifyMatchFailure(op, "expected static ranked data");
+  if (axis < 0 || axis >= dataType.getRank())
+    return rewriter.notifyMatchFailure(op, "reduce axis out of range");
+  auto reducedTy = keepdimsReduceType(dataType, axis);
+  return tosa::ReduceSumOp::create(rewriter, loc, reducedTy, data,
+                                   rewriter.getI32IntegerAttr(axis))
+      .getResult();
+}
+
+// Reduce every spatial axis [2, rank) keepdims. Global pooling is NCHW with
+// spatial dims collapsed to 1.
+FailureOr<Value> reduceSpatialAxes(
+    Value input, ConversionPatternRewriter &rewriter, Location loc,
+    Operation *op,
+    llvm::function_ref<FailureOr<Value>(Value, int32_t)> reduceOne) {
+  auto ty = dyn_cast<RankedTensorType>(input.getType());
+  if (!ty || !ty.hasStaticShape() || ty.getRank() < 3)
+    return rewriter.notifyMatchFailure(
+        op, "global pool expects a static rank >= 3 tensor");
+  Value cur = input;
+  for (int64_t a : llvm::seq<int64_t>(2, ty.getRank())) {
+    FailureOr<Value> next = reduceOne(cur, static_cast<int32_t>(a));
+    if (failed(next))
+      return failure();
+    cur = *next;
+  }
+  return cur;
+}
+
+// Global pooling is a keepdims reduction over every spatial axis, which TOSA
+// spells out; only the element type limits it.
+bool isTosaExpressibleGlobalPool(GlobalPoolOp op) {
+  if (op.getNumResults() != 1)
+    return false;
+  auto inTy = dyn_cast<RankedTensorType>(op.getInput().getType());
+  auto outTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+  if (!inTy || !outTy || !inTy.hasStaticShape() || !outTy.hasStaticShape())
+    return false;
+  if (inTy.getElementType() != outTy.getElementType() ||
+      inTy.getRank() != outTy.getRank() || inTy.getRank() < 3)
+    return false;
+  if (inTy.getDimSize(0) != outTy.getDimSize(0) ||
+      inTy.getDimSize(1) != outTy.getDimSize(1))
+    return false;
+  for (int64_t i : llvm::seq<int64_t>(2, outTy.getRank()))
+    if (outTy.getDimSize(i) != 1)
+      return false;
+
+  int64_t mode = op.getMode();
+  if (mode == kPoolMax)
+    return isa<FloatType, IntegerType>(inTy.getElementType());
+  if (mode == kPoolLp && op.getP() <= 0)
+    return false;
+  // The reduce-mean scale and the LP powers both need a float tensor.
+  return (mode == kPoolAverage || mode == kPoolLp) &&
+         isa<FloatType>(inTy.getElementType());
+}
+
+struct GlobalPoolConverter final : public OpConversionPattern<GlobalPoolOp> {
+  using OpConversionPattern<GlobalPoolOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(GlobalPoolOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isTosaExpressibleGlobalPool(op))
+      return rewriter.notifyMatchFailure(op, "no TOSA reduction spelling");
+
+    auto resultTy = cast<RankedTensorType>(op.getResult(0).getType());
+    Value input = adaptor.getInput();
+    auto inTy = cast<RankedTensorType>(input.getType());
+    Location loc = op.getLoc();
+    int64_t mode = op.getMode();
+    FailureOr<Value> y;
+    if (mode == kPoolAverage) {
+      y = reduceSpatialAxes(input, rewriter, loc, op, [&](Value v, int32_t a) {
+        return emitTosaKeepdimsReduceMean(v, a, rewriter, loc, op);
+      });
+    } else if (mode == kPoolMax) {
+      y = reduceSpatialAxes(input, rewriter, loc, op, [&](Value v, int32_t a) {
+        return emitKeepdimsReduceMax(v, a, rewriter, loc, op);
+      });
+    } else {
+      Value abs = tosa::AbsOp::create(rewriter, loc, inTy, input);
+      Value pSplat =
+          createSplatFloat(rewriter, loc, inTy, static_cast<double>(op.getP()));
+      Value powered = tosa::PowOp::create(rewriter, loc, inTy, abs, pSplat);
+      FailureOr<Value> summed = reduceSpatialAxes(
+          powered, rewriter, loc, op, [&](Value v, int32_t a) {
+            return emitKeepdimsReduceSum(v, a, rewriter, loc, op);
+          });
+      if (failed(summed))
+        return failure();
+      auto sumTy = cast<RankedTensorType>((*summed).getType());
+      double invP = 1.0 / static_cast<double>(op.getP());
+      Value invPSplat = createSplatFloat(rewriter, loc, sumTy, invP);
+      y = tosa::PowOp::create(rewriter, loc, sumTy, *summed, invPSplat)
+              .getResult();
+    }
+    if (failed(y))
+      return failure();
+    if ((*y).getType() != resultTy)
+      return rewriter.notifyMatchFailure(
+          op, "global pool result shape disagrees with the reduced tensor");
+    rewriter.replaceOp(op, *y);
+    return success();
+  }
+};
+
+// Geometry of the 2D TOSA pool that implements a hip.pool, normalized to NCHW.
+struct TosaPoolWindow {
+  SmallVector<int64_t, 2> kernel;
+  SmallVector<int64_t, 2> stride;
+  SmallVector<int64_t, 2> padBefore;
+  SmallVector<int64_t, 2> padAfter;
+  SmallVector<int64_t, 2> crop;
+  // Rank-4 NCHW shapes the pool runs on. A 1D pool is reshaped to these.
+  SmallVector<int64_t, 4> inShape;
+  SmallVector<int64_t, 4> outShape;
+  // tosa.avg_pool2d always divides by the window's in-bounds coverage of its
+  // own pad attribute, which is ONNX count_include_pad=0. The other two
+  // divisors instead need the padding materialized as explicit zeros, leaving
+  // the pool unpadded so it divides by the full kernel volume: that is
+  // count_include_pad=1 directly, and for LP it makes the pad cells
+  // contribute 0 to the window sum, as ONNX requires.
+  bool materializePad = false;
+};
+
+// TOSA pooling is 2D, undilated, and has no indices output, so only part of
+// hip.pool's ONNX-shaped configuration space has a TOSA spelling. The rest has
+// no entry here and stays a hip.pool that ends the fusion chain.
+std::optional<TosaPoolWindow> getTosaPoolWindow(PoolOp op) {
+  // MaxPool's Indices result has no TOSA equivalent.
+  if (op.getNumResults() != 1)
+    return std::nullopt;
+  auto inTy = dyn_cast<RankedTensorType>(op.getInput().getType());
+  auto outTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+  if (!inTy || !outTy || !inTy.hasStaticShape() || !outTy.hasStaticShape())
+    return std::nullopt;
+  if (inTy.getElementType() != outTy.getElementType() ||
+      inTy.getRank() != outTy.getRank())
+    return std::nullopt;
+
+  int64_t mode = op.getPoolMode();
+  Type elemType = inTy.getElementType();
+  if (mode == kPoolMax) {
+    if (!isa<FloatType, IntegerType>(elemType))
+      return std::nullopt;
+  } else if (mode == kPoolAverage || mode == kPoolLp) {
+    // The f32 accumulator and LP's tosa.pow both need a float tensor.
+    if (!isa<FloatType>(elemType))
+      return std::nullopt;
+    if (mode == kPoolLp && op.getP() <= 0)
+      return std::nullopt;
+  } else {
+    return std::nullopt;
+  }
+  // ceil_mode puts the output past what `pads` describes, and TOSA has no
+  // column-major indices.
+  if (op.getCeilMode() != 0 || op.getStorageOrder() != 0)
+    return std::nullopt;
+
+  int64_t spatialRank = inTy.getRank() - 2;
+  // TOSA has no 3D pooling.
+  if (spatialRank != 1 && spatialRank != 2)
+    return std::nullopt;
+  SmallVector<int64_t> kernel = getI64Values(op.getKernelShape());
+  SmallVector<int64_t> stride = getI64Values(op.getStrides());
+  SmallVector<int64_t> pads = getI64Values(op.getPads());
+  SmallVector<int64_t> dilations = getI64Values(op.getDilations());
+  if (kernel.size() != size_t(spatialRank) ||
+      stride.size() != size_t(spatialRank) ||
+      dilations.size() != size_t(spatialRank) ||
+      pads.size() != size_t(2 * spatialRank))
+    return std::nullopt;
+  // TOSA pooling windows are dense.
+  if (llvm::any_of(dilations, [](int64_t d) { return d != 1; }))
+    return std::nullopt;
+
+  TosaPoolWindow window;
+  window.crop = {0, 0};
+  window.materializePad =
+      mode == kPoolLp || (mode == kPoolAverage && op.getCountIncludePad() != 0);
+  if (spatialRank == 1) {
+    // Pool a 1D window as a 2D one over a unit leading spatial dim.
+    window.kernel = {1, kernel[0]};
+    window.stride = {1, stride[0]};
+    window.padBefore = {0, pads[0]};
+    window.padAfter = {0, pads[1]};
+    window.inShape = {inTy.getDimSize(0), inTy.getDimSize(1), 1,
+                      inTy.getDimSize(2)};
+    window.outShape = {outTy.getDimSize(0), outTy.getDimSize(1), 1,
+                       outTy.getDimSize(2)};
+  } else {
+    window.kernel = {kernel[0], kernel[1]};
+    window.stride = {stride[0], stride[1]};
+    window.padBefore = {pads[0], pads[1]};
+    window.padAfter = {pads[2], pads[3]};
+    window.inShape.assign(inTy.getShape().begin(), inTy.getShape().end());
+    window.outShape.assign(outTy.getShape().begin(), outTy.getShape().end());
+  }
+  if (window.inShape[0] != window.outShape[0] ||
+      window.inShape[1] != window.outShape[1])
+    return std::nullopt;
+
+  // ONNX floors the output size, dropping a trailing partial window, while
+  // TOSA requires the window arithmetic to divide exactly. Absorb the
+  // remainder the way ConvConverter does: shrink the trailing pad, and crop
+  // the input for whatever the pad cannot cover. Either way only elements no
+  // remaining window reads are removed, so the trailing window keeps the pad
+  // overlap -- and therefore the AVERAGE divisor -- that ONNX gives it.
+  for (int64_t dim : llvm::seq<int64_t>(2)) {
+    if (window.kernel[dim] < 1 || window.stride[dim] < 1)
+      return std::nullopt;
+    if (window.padBefore[dim] < 0 || window.padAfter[dim] < 0)
+      return std::nullopt;
+    int64_t inputSize = window.inShape[dim + 2];
+    int64_t span = inputSize - 1 + window.padBefore[dim] +
+                   window.padAfter[dim] - (window.kernel[dim] - 1);
+    if (span < 0)
+      return std::nullopt;
+    int64_t remainder = span % window.stride[dim];
+    int64_t fromPad = std::min(window.padAfter[dim], remainder);
+    window.padAfter[dim] -= fromPad;
+    window.crop[dim] = remainder - fromPad;
+    if (window.crop[dim] >= inputSize)
+      return std::nullopt;
+    if ((span - remainder) / window.stride[dim] + 1 != window.outShape[dim + 2])
+      return std::nullopt;
+  }
+  return window;
+}
+
+bool isTosaExpressiblePool(PoolOp op) {
+  return getTosaPoolWindow(op).has_value();
+}
+
+struct PoolConverter final : public OpConversionPattern<PoolOp> {
+  using OpConversionPattern<PoolOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(PoolOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    std::optional<TosaPoolWindow> window = getTosaPoolWindow(op);
+    if (!window)
+      return rewriter.notifyMatchFailure(op, "no TOSA pooling spelling");
+
+    Location loc = op.getLoc();
+    auto resultTy = cast<RankedTensorType>(op.getResult(0).getType());
+    Type elemType = resultTy.getElementType();
+    int64_t mode = op.getPoolMode();
+    ArrayRef<int64_t> inShape = window->inShape;
+    ArrayRef<int64_t> outShape = window->outShape;
+
+    Value input = adaptor.getInput();
+    if (resultTy.getRank() != 4)
+      input = reshapeTo(input, inShape, rewriter);
+
+    // tosa.max_pool2d / avg_pool2d are NHWC; hip.pool is ONNX's NCHW.
+    // rocMLIR folds these transposes into layout metadata.
+    Value nhwc =
+        transposeTo(input, {inShape[0], inShape[2], inShape[3], inShape[1]},
+                    {0, 2, 3, 1}, rewriter, loc);
+    SmallVector<int64_t> nhwcShape = {inShape[0], inShape[2] - window->crop[0],
+                                      inShape[3] - window->crop[1], inShape[1]};
+    if (window->crop[0] != 0 || window->crop[1] != 0)
+      nhwc = sliceTo(nhwc, nhwcShape, rewriter, loc);
+
+    SmallVector<int64_t, 2> padBefore = window->padBefore;
+    SmallVector<int64_t, 2> padAfter = window->padAfter;
+    if (window->materializePad &&
+        (padBefore[0] || padBefore[1] || padAfter[0] || padAfter[1])) {
+      nhwcShape[1] += padBefore[0] + padAfter[0];
+      nhwcShape[2] += padBefore[1] + padAfter[1];
+      nhwc = zeroPadTo(
+          nhwc,
+          {0, 0, padBefore[0], padAfter[0], padBefore[1], padAfter[1], 0, 0},
+          nhwcShape, rewriter, loc);
+      padBefore = {0, 0};
+      padAfter = {0, 0};
+    }
+
+    // LP is pow(sum(pow(|x|, p)), 1/p), and TOSA's only windowed sum is the
+    // average, so the window mean is scaled back up by the kernel volume.
+    auto nhwcInTy = cast<RankedTensorType>(nhwc.getType());
+    double p = static_cast<double>(op.getP());
+    if (mode == kPoolLp) {
+      Value abs = tosa::AbsOp::create(rewriter, loc, nhwcInTy, nhwc);
+      nhwc = tosa::PowOp::create(rewriter, loc, nhwcInTy, abs,
+                                 createSplatFloat(rewriter, loc, nhwcInTy, p));
+    }
+
+    auto nhwcOutTy =
+        resultTy.clone({outShape[0], outShape[2], outShape[3], outShape[1]});
+    auto padAttr = rewriter.getDenseI64ArrayAttr(
+        {padBefore[0], padAfter[0], padBefore[1], padAfter[1]});
+    Value pooled;
+    if (mode == kPoolMax) {
+      pooled =
+          tosa::MaxPool2dOp::create(
+              rewriter, loc, nhwcOutTy, nhwc, window->kernel, window->stride,
+              ArrayRef<int64_t>{padBefore[0], padAfter[0], padBefore[1],
+                                padAfter[1]},
+              tosa::NanPropagationMode::PROPAGATE)
+              .getResult();
+    } else {
+      Type accType = elemType.isF64() ? elemType : rewriter.getF32Type();
+      pooled = tosa::AvgPool2dOp::create(
+                   rewriter, loc, nhwcOutTy, nhwc,
+                   rewriter.getDenseI64ArrayAttr(window->kernel),
+                   rewriter.getDenseI64ArrayAttr(window->stride), padAttr,
+                   TypeAttr::get(accType))
+                   .getResult();
+    }
+    if (mode == kPoolLp) {
+      double volume =
+          static_cast<double>(window->kernel[0] * window->kernel[1]);
+      Value sum = tosa::MulOp::create(
+          rewriter, loc, nhwcOutTy, pooled,
+          createSplatFloat(rewriter, loc, nhwcOutTy, volume),
+          createZeroMulShift(rewriter, loc));
+      pooled = tosa::PowOp::create(
+          rewriter, loc, nhwcOutTy, sum,
+          createSplatFloat(rewriter, loc, nhwcOutTy, 1.0 / p));
+    }
+
+    Value result = transposeTo(pooled, outShape, {0, 3, 1, 2}, rewriter, loc);
+    if (resultTy.getRank() != 4)
+      result = reshapeTo(result, resultTy.getShape(), rewriter);
+    rewriter.replaceOp(op, result);
     return success();
   }
 };
@@ -2910,6 +3315,10 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         [](tensor::ExpandShapeOp op) { return !isStaticReshape(op); });
     conversion.addDynamicallyLegalOp<tensor::ExtractSliceOp>(
         [](tensor::ExtractSliceOp op) { return !isTosaExpressibleSlice(op); });
+    conversion.addDynamicallyLegalOp<PoolOp>(
+        [](PoolOp op) { return !isTosaExpressiblePool(op); });
+    conversion.addDynamicallyLegalOp<GlobalPoolOp>(
+        [](GlobalPoolOp op) { return !isTosaExpressibleGlobalPool(op); });
 
     RewritePatternSet patterns(ctx);
     patterns.add<
@@ -2937,7 +3346,7 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         ReduceSumConverter, ReduceMeanConverter, CastConverter,
         DequantizeLinearConverter, QuantizeLinearConverter,
         MatMulNBitsConverter, GatherConverter, RopeConverter, GqaConverter,
-        MhaConverter>(ctx);
+        MhaConverter, GlobalPoolConverter, PoolConverter>(ctx);
 
     if (failed(applyPartialConversion(funcOp, conversion, std::move(patterns))))
       signalPassFailure();
