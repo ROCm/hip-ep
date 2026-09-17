@@ -39,7 +39,6 @@ enum GraphExecError {
 // on the same ABI.
 struct RuntimeStateLayout {
   void *stream;
-  void *hipblas_handle;
   void *gpu_constants_blob;
   void **gpu_constants;
   size_t num_constants;

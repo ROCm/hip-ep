@@ -27,11 +27,9 @@
 //
 //   * Everything else the fused kernels do not implement (fp32, no_causal /
 //     bidirectional, additive attention bias, other head_dim, untemplated
-//     decode geometry) -> the feature-complete legacy decomposed hipBLASLt
-//     pipeline gqa_forward_hipblaslt below. This is a verbatim port of the
-//     proven gqa_back.cpp strategy (the read-only backup stays out of the
-//     build); it keeps hip_gqa_fused_decode for decode geometries the v2
-//     kernels do not template.
+//     decode geometry) -> the feature-complete decomposed pipeline
+//     gqa_forward_hipblaslt below; it keeps hip_gqa_fused_decode for decode
+//     geometries the v2 kernels do not template.
 //
 //   * The additive attention bias (onnx.Attention attn_mask) IS supported, but
 //     only by the decomposed path (Step 8b adds it; a causal op then masks the
@@ -807,10 +805,8 @@ static int gqa_forward_fused(
 }
 
 //===----------------------------------------------------------------------===//
-// Legacy decomposed hipBLASLt pipeline (verbatim port of gqa_back.cpp's
-// strategy). Reached from wrap_group_query_attention for every case the
-// optimized fused path does not implement. The read-only backup gqa_back.cpp
-// stays out of the build; this is the production copy.
+// Decomposed pipeline, reached from wrap_group_query_attention for every case
+// the optimized fused path does not implement.
 //===----------------------------------------------------------------------===//
 
 // Env-var gate for the group-batched "no-expand" hipBLASLt GQA pipeline.

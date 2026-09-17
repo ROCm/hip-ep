@@ -31,10 +31,6 @@
 // This struct is opaque to generated code (passed as void*)
 struct RuntimeState {
   hipStream_t stream;
-  // Always null in the product; no GEMM uses it. Typed void* so nothing in tree
-  // needs a vendor BLAS header -- the out-of-tree GQA dispatch_bench harness
-  // fills it with its own hipblasLtHandle_t.
-  void *hipblas_handle;
 
   // Single allocation holding all constants as one blob.
   // gpu_constants[i] points into gpu_constants_blob at the offset stored in

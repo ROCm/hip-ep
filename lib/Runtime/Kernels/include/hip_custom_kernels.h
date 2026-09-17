@@ -1083,7 +1083,7 @@ HIP_KERNEL_API int hip_gqa_flash_prefill_v2(
 /* Same as hip_gqa_flash_prefill_v2, plus attention sinks / smooth softmax and
  * a sliding window.
  * Kept as a separate symbol rather than widening v2, because v2 is redeclared
- * locally by the standalone GQA harnesses and the dispatch_bench shim header;
+ * locally by the standalone GQA harnesses;
  * widening it in place would break those and risk a silent host/kernel ABI skew.
  *
  *   local_window_size : <= 0 for full attention. > 0 masks key k for query q
