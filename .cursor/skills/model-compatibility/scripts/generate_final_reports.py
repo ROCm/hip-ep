@@ -42,17 +42,17 @@ def render_op_distribution_comparison_section(comp: dict) -> list:
     only_orig = summary.get("only_in_original") or []
     only_ep = summary.get("only_in_ep") or []
 
-    out = ["## Original vs compiler input\n\n"]
+    out = ["## Original vs EP input\n\n"]
     out.append(
-        "Compatibility is analysed on the **compiler input** "
-        "(`compiler_input.mlir`), the graph the hip-ep compiler receives after "
-        "ONNX Runtime's optimizations. Initializers are carrier ops in that "
-        "form and are excluded from its counts.\n\n"
+        "Compatibility is analysed on the **EP input** (`ep_input.mlir`), the "
+        "graph hip-ep receives from ONNX Runtime once its own optimizations "
+        "have run. Initializers are carrier ops in that form and are excluded "
+        "from its counts.\n\n"
     )
     out.append(f"- **Original model:** `{meta.get('original_model', '—')}`\n")
-    out.append(f"- **Compiler input (analyzed):** `{meta.get('ep_model', '—')}`\n\n")
+    out.append(f"- **EP input (analyzed):** `{meta.get('ep_model', '—')}`\n\n")
 
-    out.append("| Metric | Original | Compiler input | Delta |\n")
+    out.append("| Metric | Original | EP input | Delta |\n")
     out.append("|---|---:|---:|---:|\n")
     out.append(
         f"| Total node instances | {summary.get('original_total_nodes', 0)} | "
@@ -73,12 +73,12 @@ def render_op_distribution_comparison_section(comp: dict) -> list:
         )
     if only_ep:
         out.append(
-            "**Operators only in the compiler input:** "
+            "**Operators only in the EP input:** "
             + ", ".join(f"`{x}`" for x in only_ep)
             + "\n\n"
         )
 
-    out.append("| Op Type | Original | Compiler input | Delta |\n")
+    out.append("| Op Type | Original | EP input | Delta |\n")
     out.append("|---|---:|---:|---:|\n")
     for row in rows:
         delta = int(row.get("delta", 0))
@@ -363,7 +363,7 @@ def main():
 
     lines.append("## Operator Distribution with Compatibility Status\n\n")
     lines.append(
-        "_Counts and status below refer to the **compiler input** graph only._\n\n"
+        "_Counts and status below refer to the **EP input** graph only._\n\n"
         if op_dist_comparison
         else ""
     )

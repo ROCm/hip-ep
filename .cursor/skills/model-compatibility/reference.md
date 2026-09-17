@@ -8,7 +8,7 @@ Canonical definitions consumed by SKILL.md, diagnose.md, and report_template.md.
 
 ## Status definitions (data layer)
 
-`report_input.json` stores one of three canonical statuses per `(onnx_op, domain)`, all derived from running `convert-onnx-to-hip` over the compiler-input MLIR:
+`report_input.json` stores one of three canonical statuses per `(onnx_op, domain)`, all derived from running `convert-onnx-to-hip` over the EP-input MLIR:
 
 - `full` — every instance converted, and every ONNX attribute with a non-default value reached the resulting op.
 - `partial` — some instances did not convert, or an attribute with a non-default value was dropped.
@@ -35,7 +35,8 @@ When every op an ONNX operator converted into is outside the `hip.` dialect (`te
 Instances are paired pre- and post-conversion by their MLIR location, then each ONNX attribute is looked for on the ops that replaced the node.
 
 - An attribute that landed is fine.
-- An attribute that did not land, whose value equals the operator's default, is recorded under `dropped_default_attrs` and does **not** affect status: dropping a default changes no behaviour. Defaults come from the ONNX schema, or from [scripts/contrib_attr_defaults.json](scripts/contrib_attr_defaults.json) for contrib operators the `onnx` package has no schema for.
+- An attribute that did not land, whose value equals the operator's default, is recorded under `dropped_default_attrs` and does **not** affect status: dropping a default changes no behaviour. Defaults come from the ONNX schema, and for `com.microsoft` from ONNX Runtime's own contrib operator registry (`get_all_operator_schema`), so the skill carries no defaults table of its own.
+- An attribute the schema declares no default for cannot be compared, so it counts as a real drop and the reason text prints the observed value. That over-reports rather than hiding a behaviour difference.
 - An attribute that did not land with a non-default value gives reason code `EXTRA_ONNX_ATTR_NOT_IN_HIP` and status `partial`.
 
 Bookkeeping attributes (`onnx_node_name`, `node.outputs`, and the `function_name` / `domain_name` selectors on `onnx.Custom`) are never treated as operator attributes.

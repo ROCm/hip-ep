@@ -13,7 +13,7 @@ Support comes from what the compiler did, not from reading its source:
                non-default value did not reach the HIP op
   full         converted, with every meaningful attribute accounted for
 
-Without the conversion probe (the -SkipDump path, which has no compiler-input
+Without the conversion probe (the -SkipDump path, which has no EP-input
 MLIR to convert) no operator can be classified, so every row is reported as
 unknown-by-omission: the status stays `partial` with an explicit reason. The
 report then carries the badge the orchestrator adds.
@@ -126,7 +126,7 @@ def classify(op, domain, count, leftover, attr_row, reason_row, probed):
             "partial",
             ["CONVERSION_NOT_PROBED"],
             [
-                "Conversion was not run (no compiler-input MLIR), so support "
+                "Conversion was not run (no EP-input MLIR), so support "
                 "for this operator was not verified."
             ],
         )
@@ -147,8 +147,14 @@ def classify(op, domain, count, leftover, attr_row, reason_row, probed):
     dropped = (attr_row or {}).get("dropped_attrs") or {}
     if dropped:
         codes.append("EXTRA_ONNX_ATTR_NOT_IN_HIP")
+        # Show the value: an attribute whose schema declares no default cannot
+        # be proven harmless, so the reader needs to see what was set.
+        values = (attr_row or {}).get("dropped_attr_values") or {}
         detail = ", ".join(
-            f"{name} ({cnt} instance(s))" for name, cnt in dropped.items()
+            f"{name}={'/'.join(values[name])} ({cnt} instance(s))"
+            if values.get(name)
+            else f"{name} ({cnt} instance(s))"
+            for name, cnt in dropped.items()
         )
         texts.append(f"ONNX attributes not carried to the Hip op: {detail}.")
 

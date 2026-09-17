@@ -12,14 +12,14 @@
 # created at all.
 #
 # Usage:
-#   .\dump_compiler_input.ps1 -ModelPath <model.onnx> -OutputDir <dir>
-#   .\dump_compiler_input.ps1 -ModelPath <model.onnx> -HipEpPackageRoot <dir>
+#   .\dump_ep_input.ps1 -ModelPath <model.onnx> -OutputDir <dir>
+#   .\dump_ep_input.ps1 -ModelPath <model.onnx> -HipEpPackageRoot <dir>
 
 param(
     [Parameter(Mandatory = $true, Position = 0)]
     [string]$ModelPath,
 
-    # Directory receiving compiler_input.mlir. Defaults next to the model.
+    # Directory receiving ep_input.mlir. Defaults next to the model.
     [string]$OutputDir = "",
 
     # hip-ep package holding the runner and the hipgpu EP library under bin.
@@ -27,7 +27,7 @@ param(
     [string]$HipEpPackageRoot = "",
 
     [string]$ConfigPath = "",
-    [string]$DumpFileName = "compiler_input.mlir"
+    [string]$DumpFileName = "ep_input.mlir"
 )
 
 $ErrorActionPreference = "Stop"
@@ -92,7 +92,7 @@ foreach ($flag in @('--no-run', '--provider-options', '--allow-cpu-fallback')) {
 }
 
 if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
-    $ConfigPath = Join-Path $PSScriptRoot "only_init_morphizen.json"
+    $ConfigPath = Join-Path $PSScriptRoot "only_init_config.json"
 }
 if (-not (Test-Path -LiteralPath $ConfigPath)) {
     throw "MorphiZen config not found: $ConfigPath"
@@ -191,5 +191,5 @@ $metaPath = Join-Path $OutputDir "dump_meta.json"
 $meta | ConvertTo-Json | Set-Content -LiteralPath $metaPath -Encoding UTF8
 
 Write-Host ""
-Write-Host "OK: dumped compiler-input MLIR ($size bytes)"
+Write-Host "OK: dumped EP-input MLIR ($size bytes)"
 Write-Host "    $DumpPath"

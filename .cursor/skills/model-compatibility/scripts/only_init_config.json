@@ -14,7 +14,7 @@
       ],
       "provider_options": {
         "pass.init.enable_dump": "1",
-        "pass.init.filename": "compiler_input.mlir"
+        "pass.init.filename": "ep_input.mlir"
       }
     }
   ]

@@ -86,7 +86,9 @@ hip-mlir-opt <input>.mlir --onnx-dialect=stub --simplify-onnx --hip-add-context-
 - `PARTIAL_INSTANCE_CONVERSION` — some instances converted, others did not. Same playbook as above; the difference between converted and leftover instances is the interesting part, so compare their type signatures.
 - `EXTRA_ONNX_ATTR_NOT_IN_HIP` — the HIP op does not carry an ONNX attribute whose value is not the default. Confirm against the HIP op in `include/hip/Dialect/IR/HipOps.td`: if the attribute really is absent, the op silently ignores that setting, which is a genuine behaviour difference worth reporting.
 
-Attributes whose value equals the ONNX schema default are listed under `dropped_default_attrs` and are not partial. For contrib operators the defaults come from [scripts/contrib_attr_defaults.json](scripts/contrib_attr_defaults.json); if a contrib attribute shows up as dropped and you confirm from the ONNX Runtime specification that the value is that operator's default, add it there and re-run rather than hand-editing the report.
+Attributes whose value equals their schema default are listed under `dropped_default_attrs` and are not partial. Defaults come from the ONNX schema, or from ONNX Runtime's contrib operator registry for `com.microsoft`.
+
+An attribute can be dropped and still be harmless without the report knowing: ORT records no default for some optional contrib attributes, so the value cannot be compared to anything. The reason text prints the value for exactly this case (`rotary_interleaved=0`), and your job is to say whether that value is the operator's no-op setting. Do not add a defaults table to silence it; the value in the report is the evidence a reader needs.
 
 ## 5. When the pipeline itself is wrong
 
@@ -96,7 +98,7 @@ The oracle can still be misread by the scripts. Symptoms and fixes:
 |---|---|---|
 | An operator is `supported` but its `Hip Op` column is empty | its location had no match after conversion; it appears in `unpaired_instances` | usually a fold into a neighbour, which is fine; investigate if the count is large |
 | An attribute is reported dropped but the HIP op clearly has it | the attribute was renamed by the converter | record the rename in the diagnose notes; extend the pairing only if it recurs |
-| A whole operator type is missing from the report | the MLIR line form is not recognized | check [scripts/mlir_text.py](scripts/mlir_text.py) against the actual line in `compiler_input.mlir` |
+| A whole operator type is missing from the report | the MLIR line form is not recognized | check [scripts/mlir_text.py](scripts/mlir_text.py) against the actual line in `ep_input.mlir` |
 
 Fix the script and re-run the pipeline. Never edit the generated markdown to match a conclusion.
 

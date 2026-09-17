@@ -3,7 +3,7 @@
 ## Licensed under the MIT License.
 ##
 
-# Run the compiler-input MLIR through the ONNX-to-HIP conversion, which is the
+# Run the EP-input MLIR through the ONNX-to-HIP conversion, which is the
 # support oracle for the compatibility report: whatever is still an onnx op
 # afterwards has no working conversion.
 #
@@ -56,7 +56,7 @@ if ([string]::IsNullOrWhiteSpace($HipMlirOptPath) -or -not (Test-Path -LiteralPa
 }
 $HipMlirOptPath = (Resolve-Path -LiteralPath $HipMlirOptPath).ProviderPath
 
-$InputLoc = Join-Path $OutputDir "compiler_input_loc.mlir"
+$InputLoc = Join-Path $OutputDir "ep_input_loc.mlir"
 $Converted = Join-Path $OutputDir "converted.mlir"
 $ConvertLog = Join-Path $OutputDir "convert_log.txt"
 $ReprintLog = Join-Path $OutputDir "reprint_log.txt"

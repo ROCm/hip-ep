@@ -36,7 +36,7 @@ Exact order, do not reorder:
 
 1. `# Model compatibility report`
 2. Metadata bullets (one bullet each):
-   - `Analyzed graph` — the compiler input, or the original ONNX in `-SkipDump` mode
+   - `Analyzed graph` — the EP input, or the original ONNX in `-SkipDump` mode
    - `Original model`
    - `Generated UTC`
 3. *(conditional)* `> **Source:** original ONNX, conversion probe skipped` — when the pipeline ran in `-SkipDump` mode (the orchestrator injects this badge automatically)
@@ -48,7 +48,7 @@ Exact order, do not reorder:
    - Fully Compatible
    - Partially Compatible
    - Unsupported
-5. *(conditional)* `## Original vs compiler input` — only when the dump ran; rendered from `op_distribution_comparison.json`, with the totals table, the operators unique to either side, and the per-operator delta table
+5. *(conditional)* `## Original vs EP input` — only when the dump ran; rendered from `op_distribution_comparison.json`, with the totals table, the operators unique to either side, and the per-operator delta table
 6. `## Operator Distribution with Compatibility Status`
    - Columns (exact, in order): `Op Type | Domain | Count | Data Types | Recommended Rocm Implementation | Status | Op Description`
 7. `### Compatibility Summary`

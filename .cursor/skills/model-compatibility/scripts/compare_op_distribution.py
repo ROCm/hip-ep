@@ -4,7 +4,7 @@
 # Licensed under the MIT License.
 #
 """
-Compare step1 op distributions (original ONNX vs the compiler-input MLIR).
+Compare step1 op distributions (original ONNX vs the EP-input MLIR).
 
 Usage:
   python compare_op_distribution.py <original_step1.json> <ep_step1.json> <output_dir>
@@ -96,12 +96,12 @@ def write_markdown(comp: dict, out_md: Path) -> None:
     meta = comp["meta"]
     summary = comp["summary"]
     lines = [
-        "# Original vs compiler input - operator distribution comparison\n\n",
+        "# Original vs EP input - operator distribution comparison\n\n",
         f"- **Original model:** `{meta['original_model']}`\n",
-        f"- **Compiler input:** `{meta['ep_model']}`\n",
+        f"- **EP input:** `{meta['ep_model']}`\n",
         f"- **Generated UTC:** `{meta['generated_at_utc']}`\n\n",
         "## Summary\n\n",
-        "| Metric | Original | Compiler input | Delta |\n",
+        "| Metric | Original | EP input | Delta |\n",
         "|---|---:|---:|---:|\n",
         f"| Total node instances | {summary['original_total_nodes']} | "
         f"{summary['ep_total_nodes']} | {summary['node_delta']:+d} |\n",
@@ -117,13 +117,13 @@ def write_markdown(comp: dict, out_md: Path) -> None:
         lines.append("\n")
 
     if summary["only_in_ep"]:
-        lines.append("### Operators only in the compiler input\n\n")
+        lines.append("### Operators only in the EP input\n\n")
         for op in summary["only_in_ep"]:
             lines.append(f"- `{op}`\n")
         lines.append("\n")
 
     lines.append("## Full distribution\n\n")
-    lines.append("| Op Type | Original | Compiler input | Delta |\n")
+    lines.append("| Op Type | Original | EP input | Delta |\n")
     lines.append("|---|---:|---:|---:|\n")
     for row in comp["rows"]:
         d = row["delta"]
@@ -138,7 +138,7 @@ def write_markdown(comp: dict, out_md: Path) -> None:
 
     if comp["changed"]:
         lines.append("\n## Operators with count changes (both present)\n\n")
-        lines.append("| Op Type | Original | Compiler input | Delta |\n")
+        lines.append("| Op Type | Original | EP input | Delta |\n")
         lines.append("|---|---:|---:|---:|\n")
         for row in comp["changed"]:
             if row["original_count"] == 0 or row["ep_count"] == 0:
@@ -149,8 +149,8 @@ def write_markdown(comp: dict, out_md: Path) -> None:
 
     lines.append(
         "\n---\n\n"
-        "Compatibility analysis uses the **compiler input** (`compiler_input.mlir`), "
-        "the graph the hip-ep compiler receives. Initializers become carrier ops in "
+        "Compatibility analysis uses the **EP input** (`ep_input.mlir`), "
+        "the graph hip-ep receives from ONNX Runtime. Initializers become carrier ops in "
         "that form and are excluded from its column.\n"
     )
     out_md.write_text("".join(lines), encoding="utf-8")

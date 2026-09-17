@@ -4,7 +4,7 @@
 # Licensed under the MIT License.
 #
 """
-Operator distribution of the compiler-input MLIR (step 1b).
+Operator distribution of the EP-input MLIR (step 1b).
 
 Reads the graph the hip-ep init pass dumped -- the graph the compiler
 actually sees, after ONNX Runtime's own optimizations -- and writes the same
@@ -74,7 +74,7 @@ def analyze(mlir_path: Path, max_instances_per_op: int) -> dict:
 
     result = {
         "_analysis_meta": {
-            "source": "compiler_input_mlir",
+            "source": "ep_input_mlir",
             "mlir_path": str(mlir_path),
             "include_subgraphs": True,
             "total_nodes": total,
@@ -98,8 +98,8 @@ def analyze(mlir_path: Path, max_instances_per_op: int) -> dict:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("mlir_path", help="compiler_input.mlir")
-    ap.add_argument("output_dir", help="Directory for step1_compiler_input_ops.json")
+    ap.add_argument("mlir_path", help="ep_input.mlir")
+    ap.add_argument("output_dir", help="Directory for step1_ep_input_ops.json")
     ap.add_argument(
         "--max-instances-per-op",
         type=int,
@@ -114,7 +114,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     result = analyze(mlir_path, args.max_instances_per_op)
-    out_path = output_dir / "step1_compiler_input_ops.json"
+    out_path = output_dir / "step1_ep_input_ops.json"
     out_path.write_text(
         json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"
     )

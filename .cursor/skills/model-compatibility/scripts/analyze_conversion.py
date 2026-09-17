@@ -6,7 +6,7 @@
 """
 Compatibility oracle: what convert-onnx-to-hip actually did (steps 3 and 4).
 
-Compares the compiler-input MLIR with the same module after the conversion
+Compares the EP-input MLIR with the same module after the conversion
 pipeline and writes two files:
 
   leftover_onnx.json   onnx ops the conversion did not replace. The pass DCEs
@@ -17,8 +17,10 @@ pipeline and writes two files:
   attr_transfer.json   For converted ops, the ONNX attributes that did not
                        reach the HIP op. Pairing uses the location both dumps
                        carry (see mlir_text). An attribute whose value equals
-                       the ONNX schema default is recorded separately, because
-                       dropping a default changes no behaviour.
+                       its schema default is recorded separately, because
+                       dropping a default changes no behaviour; defaults come
+                       from the ONNX schema, or from ONNX Runtime's contrib
+                       operator registry for the com.microsoft domain.
 
 Both dumps must be produced with --mlir-print-debuginfo so the locations line
 up; the input dump is re-printed from the same file the conversion read.
@@ -28,6 +30,7 @@ import argparse
 import json
 import re
 from collections import defaultdict
+from functools import lru_cache
 from pathlib import Path
 
 from mlir_text import parse_mlir_file, strip_quotes
@@ -40,8 +43,6 @@ from mlir_text import parse_mlir_file, strip_quotes
 _ONNX_DIALECT = "onnx"
 
 _SCALAR_RE = re.compile(r"^\s*(-?[\d.eE+]+|\"[^\"]*\")")
-
-_CONTRIB_DEFAULTS_PATH = Path(__file__).with_name("contrib_attr_defaults.json")
 
 
 def _primary_op(ops):
@@ -70,17 +71,55 @@ def _attr_scalar(value: str):
         return None
 
 
-def _contrib_defaults(op_type: str, domain: str):
-    """Curated defaults for operators the onnx package has no schema for."""
+def _attribute_value(proto_bytes):
+    """Decode a serialized AttributeProto default."""
+    from onnx import AttributeProto, helper
+
+    proto = AttributeProto()
+    proto.ParseFromString(proto_bytes)
+    value = helper.get_attribute_value(proto)
+    return value.decode("utf-8", "replace") if isinstance(value, bytes) else value
+
+
+@lru_cache(maxsize=1)
+def _contrib_schemas():
+    """Contrib operator schemas, keyed by (domain, op type).
+
+    ONNX Runtime registers the contrib operators it implements, defaults
+    included, so their defaults come from the same place the model's producer
+    took them from. A hand-kept table would cover only the operators seen so
+    far, and would be wrong wherever a default was guessed.
+    """
     try:
-        table = json.loads(_CONTRIB_DEFAULTS_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        from onnxruntime.capi._pybind_state import get_all_operator_schema
+    except ImportError:
         return {}
-    return (table.get(domain) or {}).get(op_type) or {}
+    try:
+        return {(s.domain, s.name): s for s in get_all_operator_schema()}
+    except Exception:
+        return {}
+
+
+def _contrib_defaults(op_type: str, domain: str):
+    schema = _contrib_schemas().get((domain, op_type))
+    if schema is None:
+        return {}
+    defaults = {}
+    for name, attr in (schema.attributes or {}).items():
+        raw = getattr(attr, "_default_value", None)
+        # No recorded default means the operator requires a value, so dropping
+        # one is a real finding rather than a no-op.
+        if not raw:
+            continue
+        try:
+            defaults[name] = _attribute_value(raw)
+        except Exception:
+            continue
+    return defaults
 
 
 def _schema_defaults(op_type: str, domain: str):
-    """ONNX attribute defaults, falling back to the curated contrib table."""
+    """Attribute defaults from the ONNX schema, or the contrib registry."""
     try:
         from onnx import defs, helper
     except ImportError:
@@ -191,6 +230,7 @@ def build_attr_transfer(pre_module, post_module, leftover_locs, pairing_is_compl
             "folded": 0,
             "hip_ops": set(),
             "dropped_attrs": defaultdict(int),
+            "dropped_attr_values": defaultdict(set),
             "dropped_default_attrs": defaultdict(int),
             "samples": [],
         }
@@ -236,6 +276,13 @@ def build_attr_transfer(pre_module, post_module, leftover_locs, pairing_is_compl
                 entry["dropped_default_attrs"][name] += 1
             else:
                 entry["dropped_attrs"][name] += 1
+                # The value matters to the reader: a schema that declares no
+                # default leaves "harmless" unprovable, so the report has to
+                # show what was actually set.
+                scalar = _attr_scalar(op.attrs[name])
+                entry["dropped_attr_values"][name].add(
+                    str(scalar if scalar is not None else op.attrs[name])
+                )
                 dropped.append(name)
 
         if dropped and len(entry["samples"]) < 3:
@@ -258,6 +305,10 @@ def build_attr_transfer(pre_module, post_module, leftover_locs, pairing_is_compl
                 "folded_instances": entry["folded"],
                 "hip_ops": sorted(entry["hip_ops"]),
                 "dropped_attrs": dict(sorted(entry["dropped_attrs"].items())),
+                "dropped_attr_values": {
+                    name: sorted(values)
+                    for name, values in sorted(entry["dropped_attr_values"].items())
+                },
                 "dropped_default_attrs": dict(
                     sorted(entry["dropped_default_attrs"].items())
                 ),
@@ -270,7 +321,7 @@ def build_attr_transfer(pre_module, post_module, leftover_locs, pairing_is_compl
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("input_mlir", help="compiler-input MLIR printed with locations")
+    ap.add_argument("input_mlir", help="EP-input MLIR printed with locations")
     ap.add_argument(
         "converted_mlir", help="post-conversion MLIR printed with locations"
     )

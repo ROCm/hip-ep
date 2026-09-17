@@ -5,7 +5,7 @@
 
 # ONNX -> HIP compatibility pipeline, driven by what the compiler does.
 #
-#   S0  dump the compiler-input MLIR through hip-ep (init pass only)
+#   S0  dump the EP-input MLIR through hip-ep (init pass only)
 #   S1  operator distribution of the original ONNX and of that MLIR, compared
 #   S2  run the conversion up to convert-onnx-to-hip
 #   S3  scan the result: onnx ops still present are unsupported
@@ -27,7 +27,7 @@
 #   -OutputDir         = $env:TEMP\<meaningful-path-segments>_ep_compat
 #                        (or $env:HIP_EP_COMPAT_ROOT when set)
 #
-# -SkipDump analyzes the original ONNX only. Without the compiler-input MLIR
+# -SkipDump analyzes the original ONNX only. Without the EP-input MLIR
 # there is nothing to convert, so no operator can be classified and the report
 # says so rather than guessing.
 
@@ -44,7 +44,7 @@ param(
 
     [switch]$SkipDump,
     [switch]$ContinueOnDumpFailure,
-    [string]$CompilerInputMlir = ""
+    [string]$EpInputMlir = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -127,12 +127,12 @@ if ([string]::IsNullOrWhiteSpace($OutputDir)) {
 }
 $OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
 
-$EpInputDir = Join-Path $OutputDir "ep_input"
-$Step1OriginalDir = Join-Path $OutputDir "step1_original"
-$Step1EpDir = Join-Path $OutputDir "step1_ep"
+# Everything the pipeline produces on the way to the reports lives together;
+# the two markdown files and the status note stay at the top so the directory
+# opens on what a person reads.
 $CompatDir = Join-Path $OutputDir "compatibility"
 
-New-Item -ItemType Directory -Force -Path $OutputDir, $EpInputDir, $Step1OriginalDir, $Step1EpDir, $CompatDir | Out-Null
+New-Item -ItemType Directory -Force -Path $OutputDir, $CompatDir | Out-Null
 
 function Invoke-PythonStep {
     param(
@@ -161,36 +161,36 @@ Write-Host "Output dir:      $OutputDir"
 Write-Host "Repo root:       $RepoRoot"
 Write-Host ""
 
-# --- S0: dump the compiler-input MLIR ---------------------------------------
-$CompilerInput = if ($CompilerInputMlir) {
-    (Resolve-Path -LiteralPath $CompilerInputMlir).ProviderPath
+# --- S0: dump the EP-input MLIR ---------------------------------------
+$EpInput = if ($EpInputMlir) {
+    (Resolve-Path -LiteralPath $EpInputMlir).ProviderPath
 } else {
-    Join-Path $EpInputDir "compiler_input.mlir"
+    Join-Path $CompatDir "ep_input.mlir"
 }
 
 $dumpFailed = $false
 $dumpError = ""
 
-if (-not $SkipDump -and (Test-Path -LiteralPath $CompilerInput)) {
-    Write-Host "(1/5) Skip dump: compiler input already exists at $CompilerInput" -ForegroundColor DarkGray
+if (-not $SkipDump -and (Test-Path -LiteralPath $EpInput)) {
+    Write-Host "(1/5) Skip dump: EP input already exists at $EpInput" -ForegroundColor DarkGray
     $SkipDump = $true
 }
 
 if (-not $SkipDump) {
-    Write-Host '(1/5) Dumping compiler-input MLIR...' -ForegroundColor Yellow
-    $dumpScript = Join-Path $ToolsDir "dump_compiler_input.ps1"
+    Write-Host '(1/5) Dumping EP-input MLIR...' -ForegroundColor Yellow
+    $dumpScript = Join-Path $ToolsDir "dump_ep_input.ps1"
     try {
         $dumpArgs = @{
             ModelPath        = $ModelPath
-            OutputDir        = $EpInputDir
+            OutputDir        = $CompatDir
             HipEpPackageRoot = $HipEpPackageRoot
         }
         if (-not [string]::IsNullOrWhiteSpace($MorphizenConfigPath)) {
             $dumpArgs['ConfigPath'] = $MorphizenConfigPath
         }
         & $dumpScript @dumpArgs
-        if (-not (Test-Path -LiteralPath $CompilerInput)) {
-            throw "compiler-input MLIR missing: $CompilerInput"
+        if (-not (Test-Path -LiteralPath $EpInput)) {
+            throw "EP-input MLIR missing: $EpInput"
         }
     } catch {
         $dumpFailed = $true
@@ -200,36 +200,36 @@ if (-not $SkipDump) {
             throw
         }
     }
-} elseif (Test-Path -LiteralPath $CompilerInput) {
-    Write-Host "(1/5) Skip dump; using compiler input: $CompilerInput" -ForegroundColor Yellow
-} elseif ($CompilerInputMlir) {
-    throw "CompilerInputMlir not found: $CompilerInput"
+} elseif (Test-Path -LiteralPath $EpInput) {
+    Write-Host "(1/5) Skip dump; using EP input: $EpInput" -ForegroundColor Yellow
+} elseif ($EpInputMlir) {
+    throw "EpInputMlir not found: $EpInput"
 } else {
-    Write-Host '(1/5) Skip dump; no compiler input, analyzing the original ONNX' -ForegroundColor Yellow
+    Write-Host '(1/5) Skip dump; no EP input, analyzing the original ONNX' -ForegroundColor Yellow
 }
 
-$haveCompilerInput = (Test-Path -LiteralPath $CompilerInput)
+$haveEpInput = (Test-Path -LiteralPath $EpInput)
 
 # --- S1: operator distributions ---------------------------------------------
-$step1OrigJson = Join-Path $Step1OriginalDir "step1_original_onnx_ops.json"
+$step1OrigJson = Join-Path $CompatDir "step1_original_onnx_ops.json"
 if (OutputUpToDate -SourcePath $ModelPath -ProducedPath $step1OrigJson) {
     Write-Host '(2/5) step1 original: up-to-date, skip' -ForegroundColor DarkGray
 } else {
     Invoke-PythonStep -Label '(2/5) step1 - original ONNX...' -PyArgv @(
         (Join-Path $ToolsDir "step1_onnx_parser.py"),
-        $ModelPath, $Step1OriginalDir,
+        $ModelPath, $CompatDir,
         "--max-instances-per-op", "0"
     )
 }
 
-if ($haveCompilerInput) {
-    $step1EpJson = Join-Path $Step1EpDir "step1_compiler_input_ops.json"
-    if (OutputUpToDate -SourcePath $CompilerInput -ProducedPath $step1EpJson) {
-        Write-Host '(2/5) step1 compiler input: up-to-date, skip' -ForegroundColor DarkGray
+if ($haveEpInput) {
+    $step1EpJson = Join-Path $CompatDir "step1_ep_input_ops.json"
+    if (OutputUpToDate -SourcePath $EpInput -ProducedPath $step1EpJson) {
+        Write-Host '(2/5) step1 EP input: up-to-date, skip' -ForegroundColor DarkGray
     } else {
-        Invoke-PythonStep -Label '(2/5) step1 - compiler input (MLIR)...' -PyArgv @(
+        Invoke-PythonStep -Label '(2/5) step1 - EP input (MLIR)...' -PyArgv @(
             (Join-Path $ToolsDir "step1_mlir_parser.py"),
-            $CompilerInput, $Step1EpDir,
+            $EpInput, $CompatDir,
             "--max-instances-per-op", "0"
         )
     }
@@ -238,12 +238,12 @@ if ($haveCompilerInput) {
         (Join-Path $ToolsDir "compare_op_distribution.py"),
         $step1OrigJson,
         $step1EpJson,
-        $OutputDir,
+        $CompatDir,
         "--original-model", $ModelPath,
-        "--ep-model", $CompilerInput
+        "--ep-model", $EpInput
     )
 } else {
-    Write-Host '(2/5) Skip compiler-input distribution and comparison' -ForegroundColor Yellow
+    Write-Host '(2/5) Skip EP-input distribution and comparison' -ForegroundColor Yellow
 }
 
 # --- S2..S4: conversion probe, leftovers, attribute transfer ----------------
@@ -252,20 +252,20 @@ Remove-Item -LiteralPath (Join-Path $CompatDir "attr_transfer.json") -ErrorActio
 Remove-Item -LiteralPath (Join-Path $CompatDir "leftover_reasons.json") -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path $CompatDir "hip_runtime_map.json") -ErrorAction SilentlyContinue
 
-if ($haveCompilerInput) {
+if ($haveEpInput) {
     Write-Host '(4/5) Conversion probe (convert-onnx-to-hip)...' -ForegroundColor Yellow
     & (Join-Path $ToolsDir "run_convert_probe.ps1") `
-        -InputMlir $CompilerInput -OutputDir $EpInputDir -HipEpPackageRoot $HipEpPackageRoot
+        -InputMlir $EpInput -OutputDir $CompatDir -HipEpPackageRoot $HipEpPackageRoot
 
-    $locatedInput = Join-Path $EpInputDir "compiler_input_loc.mlir"
+    $locatedInput = Join-Path $CompatDir "ep_input_loc.mlir"
     Invoke-PythonStep -Label '  leftover + attribute analysis' -PyArgv @(
         (Join-Path $ToolsDir "analyze_conversion.py"),
         $locatedInput,
-        (Join-Path $EpInputDir "converted.mlir"),
+        (Join-Path $CompatDir "converted.mlir"),
         $CompatDir
     )
     # It only existed to join the two sides by location, and it is a copy of
-    # compiler_input.mlir that the probe can recreate.
+    # ep_input.mlir that the probe can recreate.
     Remove-Item -LiteralPath $locatedInput -ErrorAction SilentlyContinue
 
     # Why each leftover did not convert. The conversion cannot report its own
@@ -285,12 +285,12 @@ if ($haveCompilerInput) {
         "--attr-transfer", (Join-Path $CompatDir "attr_transfer.json")
     )
 } else {
-    Write-Host '(4/5) Skip conversion probe (no compiler input); support will be reported as unverified' -ForegroundColor Yellow
+    Write-Host '(4/5) Skip conversion probe (no EP input); support will be reported as unverified' -ForegroundColor Yellow
 }
 
 # --- S5, S6: normalize and render -------------------------------------------
-$analyzedGraph = if ($haveCompilerInput) { $CompilerInput } else { $ModelPath }
-$step1ForCompat = if ($haveCompilerInput) { $step1EpJson } else { $step1OrigJson }
+$analyzedGraph = if ($haveEpInput) { $EpInput } else { $ModelPath }
+$step1ForCompat = if ($haveEpInput) { $step1EpJson } else { $step1OrigJson }
 
 Write-Host '(5/5) Reports...' -ForegroundColor Yellow
 Invoke-PythonStep -Label '  build_report_input' -PyArgv @(
@@ -301,10 +301,10 @@ Invoke-PythonStep -Label '  generate_final_reports' -PyArgv @(
     (Join-Path $ToolsDir "generate_final_reports.py"), $CompatDir, $OutputDir
 )
 
-$compatNote = if ($haveCompilerInput) {
-    "Compatibility analysis uses the compiler-input MLIR and the convert-onnx-to-hip result."
+$compatNote = if ($haveEpInput) {
+    "Compatibility analysis uses the EP-input MLIR and the convert-onnx-to-hip result."
 } else {
-    "WARNING: no compiler-input MLIR; the original ONNX was counted but no operator support was verified."
+    "WARNING: no EP-input MLIR; the original ONNX was counted but no operator support was verified."
 }
 
 $statusPath = Join-Path $OutputDir "pipeline_status.md"
@@ -312,9 +312,9 @@ $statusLines = @(
     "# hip-ep compatibility pipeline status",
     "",
     "- **Original model:** ``$($ModelPath)``",
-    "- **Compiler input:** ``$($CompilerInput)``",
-    "- **Dump succeeded:** $(-not $dumpFailed -and $haveCompilerInput)",
-    "- **Conversion probed:** $haveCompilerInput",
+    "- **EP input:** ``$($EpInput)``",
+    "- **Dump succeeded:** $(-not $dumpFailed -and $haveEpInput)",
+    "- **Conversion probed:** $haveEpInput",
     "- **Analyzed graph:** ``$($analyzedGraph)``",
     "- **hip-ep package:** ``$($HipEpPackageRoot)``",
     "- **Note:** $compatNote",
@@ -328,7 +328,7 @@ $statusLines | Set-Content -LiteralPath $statusPath -Encoding UTF8
 # Without the conversion probe the report describes operator counts only.
 # Badge it right after the H1 so the limitation cannot be missed when the
 # agent reads the report back.
-if (-not $haveCompilerInput) {
+if (-not $haveEpInput) {
     $badge = "> **Source:** original ONNX, conversion probe skipped. No hip-ep package was configured or the dump failed, so operator support was NOT verified against the compiler."
     foreach ($mdTarget in @(
         (Join-Path $OutputDir "model_compatibility_report.md"),
@@ -347,13 +347,13 @@ if (-not $haveCompilerInput) {
 Write-Host ""
 Write-Host "=== Done ===" -ForegroundColor Green
 Write-Host "Pipeline status:       $statusPath"
-if ($haveCompilerInput) {
-    Write-Host "Compiler input:        $CompilerInput"
-    Write-Host "Converted MLIR:        $(Join-Path $EpInputDir 'converted.mlir')"
+if ($haveEpInput) {
+    Write-Host "EP input:              $EpInput"
+    Write-Host "Converted MLIR:        $(Join-Path $CompatDir 'converted.mlir')"
     Write-Host "Converted ops:         $(Join-Path $CompatDir 'attr_transfer.json')"
 } else {
-    Write-Host "Compiler input:        (not produced)"
+    Write-Host "EP input:              (not produced)"
 }
 Write-Host "Compatibility report:  $(Join-Path $OutputDir 'model_compatibility_report.md')"
 Write-Host "Full artifacts:        $CompatDir"
-if (-not $haveCompilerInput) { Write-Host $compatNote -ForegroundColor Yellow }
+if (-not $haveEpInput) { Write-Host $compatNote -ForegroundColor Yellow }

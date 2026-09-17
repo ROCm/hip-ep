@@ -4,7 +4,7 @@ Licensed under the MIT License.
 -->
 ---
 name: model-compatibility
-description: Analyze ONNX models for AMD HIP / hip-ep compatibility by running the compiler. Dumps the graph the hip-ep compiler receives, runs the real ONNX-to-HIP conversion over it, classifies every operator as supported / partial / unsupported from what the conversion produced, and generates markdown reports. Use when the user asks to analyze an ONNX model, check op compatibility, diagnose EP fallbacks, decide if a model can run on hipdnn EP, or batch-compare multiple ONNX models.
+description: Analyze ONNX models for AMD HIP / hip-ep compatibility by running the compiler. Dumps the EP-input graph hip-ep receives from ONNX Runtime, runs the real ONNX-to-HIP conversion over it, classifies every operator as supported / partial / unsupported from what the conversion produced, and generates markdown reports. Use when the user asks to analyze an ONNX model, check op compatibility, diagnose EP fallbacks, decide if a model can run on hipdnn EP, or batch-compare multiple ONNX models.
 ---
 
 # model-compatibility
@@ -67,23 +67,25 @@ Package detection order in [scripts/run_ep_compatibility_check.ps1](scripts/run_
 | `...\blip\onnx\decoder\fp16\model.onnx` | `$env:TEMP\blip_decoder_fp16_ep_compat` |
 | `<any-drive>\bar\custom_v2.onnx` | `$env:TEMP\bar_custom_v2_ep_compat` |
 
-Re-runs reuse the directory, and an existing `ep_input\compiler_input.mlir` is reused instead of re-dumping. Pass `-OutputDir` explicitly when two distinct models would collide, or when an earlier result must be kept for comparison.
+Re-runs reuse the directory, and an existing `compatibility\ep_input.mlir` is reused instead of re-dumping. Pass `-OutputDir` explicitly when two distinct models would collide, or when an earlier result must be kept for comparison.
 
 ### 3. Steps, outputs and checkpoints
 
+The three markdown files sit at the top of `<OutputDir>`; everything the pipeline produced on the way to them is in `<OutputDir>\compatibility`, named below without that prefix.
+
 | Step | Produces | Check before continuing |
 |---|---|---|
-| S0 dump | `ep_input\compiler_input.mlir`, `ep_input\dump_meta.json` | file is text MLIR starting with `module` and contains `onnx.` ops |
-| S1a original | `step1_original\step1_original_onnx_ops.json` | node total matches the model |
-| S1b compiler input | `step1_ep\step1_compiler_input_ops.json` | `_analysis_meta.excluded_carrier_ops` lists the `onnx.Constant` carriers, not compute ops |
+| S0 dump | `ep_input.mlir`, `dump_meta.json` | file is text MLIR starting with `module` and contains `onnx.` ops |
+| S1a original | `step1_original_onnx_ops.json` | node total matches the model |
+| S1b EP input | `step1_ep_input_ops.json` | `_analysis_meta.excluded_carrier_ops` lists the `onnx.Constant` carriers, not compute ops |
 | S1c compare | `op_distribution_comparison.json` | deltas explain themselves (ORT fusions, `Swish` to `Sigmoid`+`Mul`, initializers) |
-| S2 convert | `ep_input\converted.mlir`, `convert_log.txt` | probe exited 0; the log's unconverted list matches S3 |
-| S3 leftovers | `compatibility\leftover_onnx.json`, `compatibility\leftover_reasons.json` | every leftover key also appears in S1b; each leftover says whether a converter exists |
-| S4 attributes | `compatibility\attr_transfer.json`, `compatibility\hip_runtime_map.json` | `unpaired_instances` is small and explainable; every observed `hip.*` op resolves to a runtime function |
-| S5 normalize | `compatibility\report_input.json` | supported + unsupported instances equal the total |
-| S6 render | `model_compatibility_report.md`, `model_compatibility_details.md`, `pipeline_status.md`, `compatibility\unsupported_reco_runtime.json` | summary numbers equal `report_input.json` |
+| S2 convert | `converted.mlir`, `convert_log.txt` | probe exited 0; the log's unconverted list matches S3 |
+| S3 leftovers | `leftover_onnx.json`, `leftover_reasons.json` | every leftover key also appears in S1b; each leftover says whether a converter exists |
+| S4 attributes | `attr_transfer.json`, `hip_runtime_map.json` | `unpaired_instances` is small and explainable; every observed `hip.*` op resolves to a runtime function |
+| S5 normalize | `report_input.json` | supported + unsupported instances equal the total |
+| S6 render | `..\model_compatibility_report.md`, `..\model_compatibility_details.md`, `..\pipeline_status.md`, `unsupported_reco_runtime.json` | summary numbers equal `report_input.json` |
 
-Each fact is written once. The comparison and the operator distribution are rendered only in the report, and the evidence behind non-supported rows only in the details file; `op_distribution_comparison.json` is the report's input, not a second copy for the reader. `ep_input\compiler_input_loc.mlir` is a location-carrying copy the probe recreates on demand, so it is removed after the analysis reads it.
+Each fact is written once. The comparison and the operator distribution are rendered only in the report, and the evidence behind non-supported rows only in the details file; `op_distribution_comparison.json` is the report's input, not a second copy for the reader. `ep_input_loc.mlir` is a location-carrying copy the probe recreates on demand, so it is removed after the analysis reads it.
 
 The whole run is seconds, not minutes; nothing here compiles a kernel or touches the GPU.
 
