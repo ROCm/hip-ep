@@ -56,6 +56,9 @@ struct MatmulCacheEntry {
   // instances do not serve it, so the reference GEMM fallback is used. Resolved
   // once per shape under `mu`; `resolved` gates the lock-free steady state.
   int ck_instance = -1;
+  // Set for the single-row shapes hip_gemv_fp16 accepts. Resolved before the CK
+  // probe and suppresses it, so the two routes are mutually exclusive.
+  bool use_gemv = false;
   std::atomic<bool> resolved{false};
   std::mutex mu;
 };
@@ -182,7 +185,11 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
   if (!entry->resolved.load(std::memory_order_acquire)) {
     std::lock_guard<std::mutex> probeGuard(entry->mu);
     if (!entry->resolved.load(std::memory_order_relaxed)) {
-      if (ck_eligible) {
+      // M == 1 leaves a GEMM tile's M extent idle, so offer the shape to the
+      // GEMV kernel first and only probe CK for what it declines.
+      entry->use_gemv = ck_eligible && M == 1 && batch_count == 1 &&
+                        hip_gemv_fp16(stream, A, B, output, N, K) == 0;
+      if (ck_eligible && !entry->use_gemv) {
         entry->ck_instance = ckSelectGemmInstance(
             stream, B, A, /*bias=*/nullptr, output, N, M, K, batch_count,
             /*transA=*/0, /*transB=*/0, HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT16,
@@ -191,10 +198,22 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
       }
       entry->resolved.store(true, std::memory_order_release);
       RUNTIME_DEBUG_LOG("[MATMUL] resolved M=%lld N=%lld K=%lld batch=%lld -> "
-                        "ck_instance=%d\n",
+                        "gemv=%d ck_instance=%d\n",
                         (long long)M, (long long)N, (long long)K,
-                        (long long)batch_count, entry->ck_instance);
+                        (long long)batch_count, (int)entry->use_gemv,
+                        entry->ck_instance);
     }
+  }
+
+  if (entry->use_gemv) {
+    if (hip_gemv_fp16(stream, A, B, output, N, K) != 0) {
+      // The shape was accepted during resolve, so a refusal here means the
+      // routing contract is broken rather than the shape changing.
+      fprintf(stderr, "wrap_hipblasLtMatmul: GEMV refused N=%lld K=%lld\n",
+              (long long)N, (long long)K);
+      return -1;
+    }
+    return 0;
   }
 
   if (entry->ck_instance >= 0) {

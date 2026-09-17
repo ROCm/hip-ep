@@ -3183,6 +3183,22 @@ HIP_KERNEL_API int hip_ref_gemm_run(void* stream, const void* A, const void* B,
                        float alpha, int64_t lda, int64_t ldb, int64_t ldd,
                        int64_t strideA, int64_t strideB, int64_t strideD);
 
+/* =========================================================================
+ * fp16 GEMV
+ * =========================================================================
+ *
+ * y[1, n] = a[1, k] @ b[k, n], row-major fp16, no bias, alpha = 1. Unlike the
+ * GEMM entries above this takes the ONNX row-major form directly, since the
+ * single-row case has no transpose or leading-dimension freedom to express.
+ *
+ * Returns non-zero when the shape is declined -- currently a column count too
+ * small to fill the device, which is a routing answer rather than a failure:
+ * the caller keeps its GEMM route. The decision is pure shape arithmetic, so a
+ * declined call leaves y untouched and an accepted one always writes it.
+ */
+HIP_KERNEL_API int hip_gemv_fp16(void* stream, const void* a, const void* b,
+                       void* y, int64_t n, int64_t k);
+
 #ifdef __cplusplus
 }
 #endif
