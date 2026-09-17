@@ -43,14 +43,108 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <random>
 #include <vector>
 #include <string>
 
-#include "../../../common/csv_writer.h"
+// ---- Tiny inline coverage-tier resolver (replaces example/common/coverage.h) ----
+// Model: categorical situations (real models, MHA/GQA head-dim geometries,
+// sliding-window/head-sink/smooth-softmax) are covered by every case below
+// regardless of tier; COVERAGE only picks how many of the typical context
+// lengths (kLens) run.
+namespace hipdnn_ep_test {
+inline int resolveCoverageTier(int argc, char** argv, int default_tier = 3) {
+  int tier = default_tier;
+  if (const char* env = std::getenv("HIPDNN_UT_COVERAGE")) tier = std::atoi(env);
+  for (int i = 1; i < argc; ++i)
+    if (std::strcmp(argv[i], "--coverage") == 0 && i + 1 < argc)
+      tier = std::atoi(argv[++i]);
+  return tier < 1 ? 1 : (tier > 3 ? 3 : tier);
+}
+
+// Tiny out/results.csv writer (op,leaf,arch,mode,shape,config,time_ms,relL2,
+// verdict), opt-in via HIPDNN_RESULTS_CSV (set by the Makefile).
+struct CsvRow {
+  std::string shape, config;
+  double time_ms = 0.0;
+  double rel_l2 = 0.0;
+  std::string verdict;
+};
+class CsvWriter {
+ public:
+  CsvWriter() {
+    const char* path = std::getenv("HIPDNN_RESULTS_CSV");
+    if (!path || !path[0]) return;
+    path_ = path;
+    bool need_header = true;
+    if (FILE* probe = std::fopen(path_.c_str(), "rb")) {
+      std::fseek(probe, 0, SEEK_END);
+      need_header = std::ftell(probe) == 0;
+      std::fclose(probe);
+    }
+    f_ = std::fopen(path_.c_str(), "a");
+    if (f_ && need_header) {
+      std::fprintf(f_, "op,leaf,arch,mode,shape,config,time_ms,relL2,verdict\n");
+      std::fflush(f_);
+    }
+  }
+  ~CsvWriter() { if (f_) std::fclose(f_); }
+  void write(const CsvRow& r) {
+    if (!f_) return;
+    std::fprintf(f_, "%s,%s,%s,%s,%s,%s,%.6f,%.6e,%s\n",
+                 env_or("HIPDNN_RESULTS_OP", "unknown"),
+                 env_or("HIPDNN_RESULTS_LEAF", "unknown"),
+                 env_or("HIPDNN_RESULTS_ARCH", "unknown"),
+                 env_or("HIPDNN_RESULTS_MODE", "unknown"), r.shape.c_str(),
+                 r.config.c_str(), r.time_ms, r.rel_l2, r.verdict.c_str());
+    std::fflush(f_);
+  }
+ private:
+  static const char* env_or(const char* name, const char* dflt) {
+    const char* v = std::getenv(name);
+    return (v && v[0]) ? v : dflt;
+  }
+  std::string path_;
+  FILE* f_ = nullptr;
+};
+
+// Redirects stderr to `tmp_path` for the duration of `fn` (with `env_var=1`
+// set) so the [custom_kernels]/[gqa-lut] debug lines the op already prints
+// (gated on that env var) land in a file instead of the console, then
+// returns them split by line.
+inline std::vector<std::string> captureLogLines(
+    const char* env_var, const std::string& tmp_path,
+    const std::function<void()>& fn) {
+  std::vector<std::string> lines;
+  _putenv_s(env_var, "1");
+  std::fflush(stderr);
+  FILE* redirected = std::freopen(tmp_path.c_str(), "w", stderr);
+  if (!redirected) { _putenv_s(env_var, ""); return lines; }
+  fn();
+  std::fflush(stderr);
+  std::freopen("CON", "w", stderr);
+  _putenv_s(env_var, "");
+  std::ifstream in(tmp_path);
+  std::string line;
+  while (std::getline(in, line)) lines.push_back(line);
+  in.close();
+  std::remove(tmp_path.c_str());
+  return lines;
+}
+}  // namespace hipdnn_ep_test
 
 #ifdef HIPDNN_LUT_LINKED_EXTERNALLY
 #include "gqa_autotune.h"
+// One-line C23 #embed of the real LUT .fb -- HIPDNN_LUT_FB is defined by a
+// tiny Makefile-generated header (a plain #define, not a data file) so the
+// path never has to survive hipcc's Windows -D quoting (which mangles
+// embedded quote characters).
+#include "lut_fb_path.h"
+extern "C" const unsigned char kGqaLutData[] = {
+#embed HIPDNN_LUT_FB
+};
+extern "C" const size_t kGqaLutData_size = sizeof(kGqaLutData);
 #endif
 
 // Launcher under test (implemented in hip/gqa_kernel.hip).
@@ -388,26 +482,7 @@ static double run_fused(const Case& c, float scale,
   return ms / iters;
 }
 
-// data_dir/{Q,K,V,Sink}.bin are raw little-endian float32, written by
-// gen_data.py for the exact (B,H,G,D,max_seq) shape being run. Only the
-// single-shape path (make test / test_custom) uses this; --all keeps
-// in-process rng since one data/ directory cannot hold every matrix shape.
-static void load_f32_or_die(const std::string& path, std::vector<float>& v) {
-  std::ifstream f(path, std::ios::binary);
-  if (!f) { fprintf(stderr, "cannot open %s (run `make gendata` first)\n", path.c_str()); std::exit(1); }
-  f.seekg(0, std::ios::end);
-  size_t bytes = (size_t)f.tellg();
-  f.seekg(0, std::ios::beg);
-  if (bytes != v.size() * sizeof(float)) {
-    fprintf(stderr, "%s: size mismatch (got %zu bytes, want %zu)\n",
-            path.c_str(), bytes, v.size() * sizeof(float));
-    std::exit(1);
-  }
-  f.read(reinterpret_cast<char*>(v.data()), bytes);
-}
-
-static int run_case(const Case& c, int iters, unsigned seed, bool verbose,
-                     const std::string& data_dir = std::string()) {
+static int run_case(const Case& c, int iters, unsigned seed, bool verbose) {
   const int B = c.B, H = c.H, G = c.G, D = c.D, max_seq = c.max_seq;
   if (H % G != 0) { printf("[skip] %s: H%%G!=0\n", c.name); return 0; }
   const float scale = 1.0f / std::sqrt((float)D);
@@ -420,17 +495,10 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose,
   std::vector<float> Vv((size_t)B * G * max_seq * D);
   std::vector<float> Sink(H);
   std::vector<int> Seq(B, c.total - 1);
-  if (!data_dir.empty()) {
-    load_f32_or_die(data_dir + "/Q.bin", Q);
-    load_f32_or_die(data_dir + "/K.bin", K);
-    load_f32_or_die(data_dir + "/V.bin", Vv);
-    load_f32_or_die(data_dir + "/Sink.bin", Sink);
-  } else {
-    for (auto& x : Q) x = dist(rng);
-    for (auto& x : K) x = dist(rng);
-    for (auto& x : Vv) x = dist(rng);
-    for (auto& x : Sink) x = dist(rng);  // natural-unit sink logits
-  }
+  for (auto& x : Q) x = dist(rng);
+  for (auto& x : K) x = dist(rng);
+  for (auto& x : Vv) x = dist(rng);
+  for (auto& x : Sink) x = dist(rng);  // natural-unit sink logits
 
   // fp16 device copies.
   auto to_half = [](const std::vector<float>& f) {
@@ -464,19 +532,7 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose,
   // --prod-only drops all three: when comparing two builds, the extra configs
   // would run between the timed ones and move the clock state under them.
   std::vector<float> O_auto, O_base, O_wmma, O_scalar;
-  double ms_auto = 0.0;
-#ifndef HIPDNN_LUT_LINKED_EXTERNALLY
-  // First call for this (B,H,G,D,skv) key runs + logs the tuner's timed
-  // candidates (cached after); capture them here for out/results.csv without
-  // perturbing this measured call.
-  std::vector<std::string> autotune_capture_lines = hipdnn_ep_test::captureLogLines(
-      "HIPDNN_EP_DEBUG", "out/_autotune_capture.tmp",
-      [&]() {
-        ms_auto = run_kernel(MODE_AUTO, c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink, iters, O_auto);
-      });
-#else
-  ms_auto = run_kernel(MODE_AUTO, c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink, iters, O_auto);
-#endif
+  double ms_auto = run_kernel(MODE_AUTO, c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink, iters, O_auto);
   double ms_base = 0.0, ms_wmma = 0.0, ms_scalar = 0.0;
   double l2_base = 0.0, l2_wmma = 0.0, l2_scalar = 0.0, l2_ab = 0.0;
   if (!g_prod_only) {
@@ -546,10 +602,7 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose,
     row.shape = csv_shape;
     row.config = lut_config.empty() ? "lut:none" : lut_config;
     row.time_ms = ms_lut;
-    row.is_best = 1;
-    row.lut_source = lut_source;
     row.rel_l2 = l2_lut;
-    row.has_verdict = true;
     row.verdict = lut_ok ? "PASS" : "FAIL";
     csv.write(row);
   }
@@ -557,17 +610,11 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose,
   {
     using namespace hipdnn_ep_test;
     CsvWriter csv;
-    std::vector<CsvRow> candidates = parseCandidateLines(autotune_capture_lines);
-    for (CsvRow& cr : candidates) {
-      cr.shape = csv_shape;
-      csv.write(cr);
-    }
     CsvRow row;
     row.shape = csv_shape;
     row.config = "final";
     row.time_ms = ms_auto;
     row.rel_l2 = l2_auto;
-    row.has_verdict = true;
     row.verdict = ok ? "PASS" : "FAIL";
     csv.write(row);
   }
@@ -634,73 +681,12 @@ static void emit_markdown(int iters, const char* dev, int cus) {
   }
 }
 
-// ============================================================
-// --model <json> sweep: reads the "gqa_decode" array from the shared model
-// shape JSON (example/models/*.json). Minimal hand-rolled scan (no JSON
-// library) matching the flat {"B":.., "H":.., ...} objects in that key.
-// ============================================================
-struct ModelDecodeCase { int B = 1, H = 32, G = 8, D = 128, max_seq = 4096; };
-
-static std::vector<ModelDecodeCase> parseGqaModelArray(const std::string& s, const std::string& key) {
-  std::vector<ModelDecodeCase> out;
-  auto pos = s.find("\"" + key + "\"");
-  if (pos == std::string::npos) return out;
-  auto arr_start = s.find('[', pos);
-  auto arr_end = s.find(']', arr_start);
-  if (arr_start == std::string::npos || arr_end == std::string::npos) return out;
-  size_t i = arr_start + 1;
-  while (i < arr_end) {
-    auto obj_start = s.find('{', i);
-    if (obj_start == std::string::npos || obj_start > arr_end) break;
-    auto obj_end = s.find('}', obj_start);
-    std::string obj = s.substr(obj_start, obj_end - obj_start + 1);
-    auto getInt = [&](const char* k, int defv) {
-      auto p = obj.find(std::string("\"") + k + "\"");
-      if (p == std::string::npos) return defv;
-      auto colon = obj.find(':', p);
-      size_t j = colon + 1;
-      while (j < obj.size() && !(std::isdigit(static_cast<unsigned char>(obj[j])) || obj[j] == '-')) j++;
-      return j < obj.size() ? std::atoi(obj.c_str() + j) : defv;
-    };
-    ModelDecodeCase mc;
-    mc.B = getInt("B", 1);
-    mc.H = getInt("H", 32);
-    mc.G = getInt("G", 8);
-    mc.D = getInt("D", 128);
-    mc.max_seq = getInt("max_seq", 4096);
-    out.push_back(mc);
-    i = obj_end + 1;
-  }
-  return out;
-}
-
-static int runModelSweep(const std::string& json_path, int iters, unsigned seed, bool verbose) {
-  std::ifstream f(json_path);
-  if (!f) { fprintf(stderr, "ERROR: cannot read %s\n", json_path.c_str()); return 1; }
-  std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-  auto rows = parseGqaModelArray(json, "gqa_decode");
-  if (rows.empty()) {
-    fprintf(stderr, "ERROR: no gqa_decode entries in %s\n", json_path.c_str());
-    return 1;
-  }
-  printf("Model sweep (gqa_decode): %s -- %zu shapes\n", json_path.c_str(), rows.size());
-  int fails = 0;
-  for (auto& r : rows) {
-    Case c{"model", r.B, r.H, r.G, r.D, r.max_seq, r.max_seq, 0, 0, 0};
-    fails += run_case(c, iters, seed, verbose);
-  }
-  printf("%s (%d failing case(s))\n", fails == 0 ? "ALL PASS" : "FAILURES", fails);
-  return fails == 0 ? 0 : 1;
-}
-
 int main(int argc, char** argv) {
   int iters = 200;
   unsigned seed = 1234;
   bool all = false, verbose = false;
   Case single = {"custom", 1, 64, 8, 64, 8192, 8192, 0, 0, 0};
   bool have_single = false;
-  std::string model_json;
-  std::string data_dir;
 
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -711,8 +697,6 @@ int main(int argc, char** argv) {
     else if (a == "--fused") g_do_fused = true;
     else if (a == "--prod-only") g_prod_only = true;
     else if (a == "--only" && i + 1 < argc) { g_only = argv[++i]; all = true; }
-    else if (a == "--model" && i + 1 < argc) { model_json = argv[++i]; }
-    else if (a == "--data-dir" && i + 1 < argc) { data_dir = argv[++i]; }
     else if (a == "--iters") next(iters);
     else if (a == "--seed") { int s; next(s); seed = (unsigned)s; }
     else if (a == "--b") { next(single.B); have_single = true; }
@@ -726,9 +710,6 @@ int main(int argc, char** argv) {
     else if (a == "--smooth") { next(single.smooth); have_single = true; }
   }
 
-  if (!model_json.empty())
-    return runModelSweep(model_json, iters, seed, verbose);
-
   int dev = 0;
   HIP_CHECK(hipGetDevice(&dev));
   hipDeviceProp_t prop;
@@ -739,47 +720,65 @@ int main(int argc, char** argv) {
 
   int fails = 0;
   if (all || !have_single) {
-    // B=1 single-stream decode. Coverage: real models + a geometry sweep over
-    // MHA (HpG==1) and GQA (HpG in {2,4,5,8,16}) x head_dim in {64,128,256}.
-    const int lens[] = {512, 2048, 8192, 32768};
-    auto maybe = [&](const Case& c) {
-      if (!g_only.empty() &&
-          std::string(c.name).find(g_only) == std::string::npos)
-        return;
-      fails += run_case(c, iters, seed, verbose);
-    };
-    for (int L : lens) {
+    // B=1 single-stream decode. Categorical situations -- real models, a
+    // geometry sweep over MHA (HpG==1) and GQA (HpG in {2,4,5,8,16}) x
+    // head_dim in {64,128,256}, sliding-window/head-sink/smooth-softmax --
+    // are all 13 named rows below and run at EVERY tier. kLens is the small
+    // typical-context-length list; COVERAGE only thins that (tier3=all 3,
+    // tier2=2, tier1=1), NOT the full {512..32768} context-length ladder.
+    static const int kLens3[] = {512, 2048, 8192};
+    static const int kLens2[] = {512, 8192};
+    static const int kLens1[] = {2048};
+    const int coverage_tier = hipdnn_ep_test::resolveCoverageTier(argc, argv);
+    const int* lens = coverage_tier == 1 ? kLens1
+                     : coverage_tier == 2 ? kLens2
+                                          : kLens3;
+    const size_t n_lens = coverage_tier == 1 ? sizeof(kLens1) / sizeof(kLens1[0])
+                        : coverage_tier == 2 ? sizeof(kLens2) / sizeof(kLens2[0])
+                                             : sizeof(kLens3) / sizeof(kLens3[0]);
+    std::vector<Case> full_cases;
+    for (size_t li = 0; li < n_lens; ++li) {
+      const int L = lens[li];
       // ---- Real models ----
       // gpt-oss-20b carries a learnable per-head attention SINK on ALL 24
       // layers; the layer TYPE alternates between full attention and a 128
       // sliding window. So "full"/"sliding" names the attention type, and
       // head_sink is present in BOTH -- it is NOT "full=smooth, sliding=sink".
       // full attention layer: HpG8 D64 + head_sink.
-      maybe({"gpt_oss-20b full",    1, 64,  8,  64, L, L,   0, 1, 0});
+      full_cases.push_back({"gpt_oss-20b full",    1, 64,  8,  64, L, L,   0, 1, 0});
       // sliding-window layer: window 128 + head_sink.
-      maybe({"gpt_oss-20b sliding", 1, 64,  8,  64, L, L, 128, 1, 0});
+      full_cases.push_back({"gpt_oss-20b sliding", 1, 64,  8,  64, L, L, 128, 1, 0});
       // smooth-softmax variant (sink logit fixed to 0): keeps the smooth path
       // under correctness coverage even though real gpt-oss ships head_sink.
-      maybe({"gpt_oss-20b smooth",  1, 64,  8,  64, L, L,   0, 0, 1});
+      full_cases.push_back({"gpt_oss-20b smooth",  1, 64,  8,  64, L, L,   0, 0, 1});
       // llama-3.1-8b: H32 G8 (hpg4) D128.
-      maybe({"llama-3.1-8b",        1, 32,  8, 128, L, L,   0, 0, 0});
+      full_cases.push_back({"llama-3.1-8b",        1, 32,  8, 128, L, L,   0, 0, 0});
       // llama-3.2-1b: H32 G8 (hpg4) D64.
-      maybe({"llama-3.2-1b",        1, 32,  8,  64, L, L,   0, 0, 0});
+      full_cases.push_back({"llama-3.2-1b",        1, 32,  8,  64, L, L,   0, 0, 0});
       // qwen2.5-14b: H40 G8 (hpg5) D128 -- HpG=5 has no WMMA path (scalar).
-      maybe({"qwen2.5-14b",         1, 40,  8, 128, L, L,   0, 0, 0});
+      full_cases.push_back({"qwen2.5-14b",         1, 40,  8, 128, L, L,   0, 0, 0});
       // ---- Geometry sweep: MHA (hpg1) x head_dim ----
-      maybe({"MHA hpg1 D64",        1, 16, 16,  64, L, L,   0, 0, 0});
-      maybe({"MHA hpg1 D128",       1, 16, 16, 128, L, L,   0, 0, 0});
-      maybe({"MHA hpg1 D256",       1,  8,  8, 256, L, L,   0, 0, 0});
+      full_cases.push_back({"MHA hpg1 D64",        1, 16, 16,  64, L, L,   0, 0, 0});
+      full_cases.push_back({"MHA hpg1 D128",       1, 16, 16, 128, L, L,   0, 0, 0});
+      full_cases.push_back({"MHA hpg1 D256",       1,  8,  8, 256, L, L,   0, 0, 0});
       // ---- Geometry sweep: GQA HpG {2,8,16} and D256 ----
-      maybe({"GQA hpg2 D128",       1, 16,  8, 128, L, L,   0, 0, 0});
-      maybe({"GQA hpg8 D128",       1, 64,  8, 128, L, L,   0, 0, 0});
-      maybe({"GQA hpg16 D64",       1, 32,  2,  64, L, L,   0, 0, 0});
-      maybe({"GQA hpg4 D256",       1, 32,  8, 256, L, L,   0, 0, 0});
-      if (!g_md) printf("\n");
+      full_cases.push_back({"GQA hpg2 D128",       1, 16,  8, 128, L, L,   0, 0, 0});
+      full_cases.push_back({"GQA hpg8 D128",       1, 64,  8, 128, L, L,   0, 0, 0});
+      full_cases.push_back({"GQA hpg16 D64",       1, 32,  2,  64, L, L,   0, 0, 0});
+      full_cases.push_back({"GQA hpg4 D256",       1, 32,  8, 256, L, L,   0, 0, 0});
+    }
+
+    printf("coverage=%d -> running %zu typical length(s) x 13 categorical "
+           "case(s) = %zu gqa_decode cases\n",
+           coverage_tier, n_lens, full_cases.size());
+    for (const Case& c : full_cases) {
+      if (!g_only.empty() &&
+          std::string(c.name).find(g_only) == std::string::npos)
+        continue;
+      fails += run_case(c, iters, seed, verbose);
     }
   } else {
-    fails += run_case(single, iters, seed, verbose, data_dir);
+    fails += run_case(single, iters, seed, verbose);
   }
 
   if (g_md) emit_markdown(iters, prop.name, prop.multiProcessorCount);

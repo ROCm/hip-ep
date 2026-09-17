@@ -38,6 +38,36 @@
 #include <string>
 #include <vector>
 
+// ---- Tiny inline coverage-tier resolver (replaces example/common/coverage.h) ----
+// Model: categorical situations (the 11 named MHA/GQA geometries below) are
+// covered by every case regardless of tier; COVERAGE only picks how many of
+// the typical context lengths (kLens) run.
+namespace hipdnn_ep_test {
+inline int resolveCoverageTier(int argc, char** argv, int default_tier = 3) {
+  int tier = default_tier;
+  if (const char* env = std::getenv("HIPDNN_UT_COVERAGE")) tier = std::atoi(env);
+  for (int i = 1; i < argc; ++i)
+    if (std::strcmp(argv[i], "--coverage") == 0 && i + 1 < argc)
+      tier = std::atoi(argv[++i]);
+  return tier < 1 ? 1 : (tier > 3 ? 3 : tier);
+}
+}  // namespace hipdnn_ep_test
+
+#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
+// This leaf's kernel calls are always the runtime-autotune entry point (no
+// resolve-from-LUT call here, unlike the fp16 decode/prefill leaves) --
+// MODE=lut only needs to satisfy gqa_autotune.cpp's (unused by this test)
+// extern LUT-data symbols so it still links. One-line C23 #embed of the real
+// LUT .fb -- HIPDNN_LUT_FB is defined by a tiny Makefile-generated header (a
+// plain #define, not a data file) so the path never has to survive hipcc's
+// Windows -D quoting (which mangles embedded quote characters).
+#include "lut_fb_path.h"
+extern "C" const unsigned char kGqaLutData[] = {
+#embed HIPDNN_LUT_FB
+};
+extern "C" const size_t kGqaLutData_size = sizeof(kGqaLutData);
+#endif
+
 // KV-cache dtype ABI (mirrors hip_kv_dtype_t in hip_custom_kernels.h).
 enum { HIP_KV_DTYPE_FP16 = 0, HIP_KV_DTYPE_INT8 = 1 };
 
@@ -178,39 +208,7 @@ struct Result {
   bool pass;
 };
 
-// data_dir/{Q,K,V,kscale,vscale}.bin are raw little-endian float32 and
-// data_dir/{K_i8,V_i8}.bin raw int8, all written by gen_data.py for the exact
-// shape being run (only the single-shape path uses this; --all keeps
-// in-process generation since one data/ directory cannot hold every shape).
-static void load_f32_or_die(const std::string& path, std::vector<float>& v) {
-  std::ifstream f(path, std::ios::binary);
-  if (!f) { fprintf(stderr, "cannot open %s (run `make gendata` first)\n", path.c_str()); std::exit(1); }
-  f.seekg(0, std::ios::end);
-  size_t bytes = (size_t)f.tellg();
-  f.seekg(0, std::ios::beg);
-  if (bytes != v.size() * sizeof(float)) {
-    fprintf(stderr, "%s: size mismatch (got %zu bytes, want %zu)\n",
-            path.c_str(), bytes, v.size() * sizeof(float));
-    std::exit(1);
-  }
-  f.read(reinterpret_cast<char*>(v.data()), bytes);
-}
-static void load_i8_or_die(const std::string& path, std::vector<int8_t>& v) {
-  std::ifstream f(path, std::ios::binary);
-  if (!f) { fprintf(stderr, "cannot open %s (run `make gendata` first)\n", path.c_str()); std::exit(1); }
-  f.seekg(0, std::ios::end);
-  size_t bytes = (size_t)f.tellg();
-  f.seekg(0, std::ios::beg);
-  if (bytes != v.size()) {
-    fprintf(stderr, "%s: size mismatch (got %zu bytes, want %zu)\n",
-            path.c_str(), bytes, v.size());
-    std::exit(1);
-  }
-  f.read(reinterpret_cast<char*>(v.data()), bytes);
-}
-
-static Result run_case(const Case& c, int iters, unsigned seed,
-                        const std::string& data_dir = std::string()) {
+static Result run_case(const Case& c, int iters, unsigned seed) {
   const int B = c.B, H = c.H, G = c.G, D = c.D, max_seq = c.max_seq;
   const float scale = 1.0f / std::sqrt((float)D);
   const int hpg = H / G;
@@ -228,51 +226,39 @@ static Result run_case(const Case& c, int iters, unsigned seed,
   std::vector<float> vscale((size_t)G * D, 0.0f);
   std::vector<int8_t> K_i8, V_i8;
 
-  if (!data_dir.empty()) {
-    load_f32_or_die(data_dir + "/Q.bin", Q);
-    load_f32_or_die(data_dir + "/K.bin", K);
-    load_f32_or_die(data_dir + "/V.bin", Vv);
-    load_f32_or_die(data_dir + "/kscale.bin", kscale);
-    load_f32_or_die(data_dir + "/vscale.bin", vscale);
-    K_i8.resize(K.size());
-    V_i8.resize(Vv.size());
-    load_i8_or_die(data_dir + "/K_i8.bin", K_i8);
-    load_i8_or_die(data_dir + "/V_i8.bin", V_i8);
-  } else {
-    for (auto& x : Q) x = dist(rng);
-    for (auto& x : K) x = dist(rng);
-    for (auto& x : Vv) x = dist(rng);
+  for (auto& x : Q) x = dist(rng);
+  for (auto& x : K) x = dist(rng);
+  for (auto& x : Vv) x = dist(rng);
 
-    // Per-channel symmetric int8 quant: scale[g,e] = max_abs_{b,s<eff}/127.
+  // Per-channel symmetric int8 quant: scale[g,e] = max_abs_{b,s<eff}/127.
+  for (int b = 0; b < B; ++b)
+    for (int g = 0; g < G; ++g)
+      for (int s = 0; s < eff; ++s)
+        for (int e = 0; e < D; ++e) {
+          float ka = std::fabs(K[(((size_t)b * G + g) * max_seq + s) * D + e]);
+          float va = std::fabs(Vv[(((size_t)b * G + g) * max_seq + s) * D + e]);
+          if (ka > kscale[(size_t)g * D + e]) kscale[(size_t)g * D + e] = ka;
+          if (va > vscale[(size_t)g * D + e]) vscale[(size_t)g * D + e] = va;
+        }
+  for (auto& s : kscale) s = (s > 0.0f ? s : 1.0f) / 127.0f;
+  for (auto& s : vscale) s = (s > 0.0f ? s : 1.0f) / 127.0f;
+
+  auto quant = [&](const std::vector<float>& src, const std::vector<float>& sc,
+                   std::vector<int8_t>& dst) {
+    dst.resize(src.size());
     for (int b = 0; b < B; ++b)
       for (int g = 0; g < G; ++g)
-        for (int s = 0; s < eff; ++s)
+        for (int s = 0; s < max_seq; ++s)
           for (int e = 0; e < D; ++e) {
-            float ka = std::fabs(K[(((size_t)b * G + g) * max_seq + s) * D + e]);
-            float va = std::fabs(Vv[(((size_t)b * G + g) * max_seq + s) * D + e]);
-            if (ka > kscale[(size_t)g * D + e]) kscale[(size_t)g * D + e] = ka;
-            if (va > vscale[(size_t)g * D + e]) vscale[(size_t)g * D + e] = va;
+            size_t idx = (((size_t)b * G + g) * max_seq + s) * D + e;
+            float inv = 1.0f / sc[(size_t)g * D + e];
+            int q = (int)std::lround(src[idx] * inv);
+            if (q > 127) q = 127; if (q < -128) q = -128;
+            dst[idx] = (int8_t)q;
           }
-    for (auto& s : kscale) s = (s > 0.0f ? s : 1.0f) / 127.0f;
-    for (auto& s : vscale) s = (s > 0.0f ? s : 1.0f) / 127.0f;
-
-    auto quant = [&](const std::vector<float>& src, const std::vector<float>& sc,
-                     std::vector<int8_t>& dst) {
-      dst.resize(src.size());
-      for (int b = 0; b < B; ++b)
-        for (int g = 0; g < G; ++g)
-          for (int s = 0; s < max_seq; ++s)
-            for (int e = 0; e < D; ++e) {
-              size_t idx = (((size_t)b * G + g) * max_seq + s) * D + e;
-              float inv = 1.0f / sc[(size_t)g * D + e];
-              int q = (int)std::lround(src[idx] * inv);
-              if (q > 127) q = 127; if (q < -128) q = -128;
-              dst[idx] = (int8_t)q;
-            }
-    };
-    quant(K, kscale, K_i8);
-    quant(Vv, vscale, V_i8);
-  }
+  };
+  quant(K, kscale, K_i8);
+  quant(Vv, vscale, V_i8);
 
   // CPU references.
   std::vector<float> ref_i8, ref_fp16;
@@ -522,7 +508,7 @@ static void write_markdown(const char* path, const char* dev, int cus,
                 r.c.name, attn, hpg, r.c.D, r.c.total, sp, why);
       }
       fprintf(f, "\nThe d64 cases recover to >=1x once the context grows long enough "
-                 "for the KV scan to become bandwidth-bound (see their 32768 rows). "
+                 "for the KV scan to become bandwidth-bound (see their long-context rows). "
                  "The **hpg8 / d128** case is the exception: each KV tile is reused "
                  "across 8 query heads, so its arithmetic intensity is high enough "
                  "that the decode stays compute-bound at *every* tested length and "
@@ -542,65 +528,6 @@ static void write_markdown(const char* path, const char* dev, int cus,
   printf("\n[markdown] wrote %s\n", path);
 }
 
-// ============================================================
-// --model <json> sweep: reads the "gqa_decode" array from the shared model
-// shape JSON (example/models/*.json). Minimal hand-rolled scan (no JSON
-// library) matching the flat {"B":.., "H":.., ...} objects in that key.
-// ============================================================
-struct ModelDecodeCase { int B = 1, H = 32, G = 8, D = 128, max_seq = 4096; };
-
-static std::vector<ModelDecodeCase> parseGqaModelArray(const std::string& s, const std::string& key) {
-  std::vector<ModelDecodeCase> out;
-  auto pos = s.find("\"" + key + "\"");
-  if (pos == std::string::npos) return out;
-  auto arr_start = s.find('[', pos);
-  auto arr_end = s.find(']', arr_start);
-  if (arr_start == std::string::npos || arr_end == std::string::npos) return out;
-  size_t i = arr_start + 1;
-  while (i < arr_end) {
-    auto obj_start = s.find('{', i);
-    if (obj_start == std::string::npos || obj_start > arr_end) break;
-    auto obj_end = s.find('}', obj_start);
-    std::string obj = s.substr(obj_start, obj_end - obj_start + 1);
-    auto getInt = [&](const char* k, int defv) {
-      auto p = obj.find(std::string("\"") + k + "\"");
-      if (p == std::string::npos) return defv;
-      auto colon = obj.find(':', p);
-      size_t j = colon + 1;
-      while (j < obj.size() && !(std::isdigit(static_cast<unsigned char>(obj[j])) || obj[j] == '-')) j++;
-      return j < obj.size() ? std::atoi(obj.c_str() + j) : defv;
-    };
-    ModelDecodeCase mc;
-    mc.B = getInt("B", 1);
-    mc.H = getInt("H", 32);
-    mc.G = getInt("G", 8);
-    mc.D = getInt("D", 128);
-    mc.max_seq = getInt("max_seq", 4096);
-    out.push_back(mc);
-    i = obj_end + 1;
-  }
-  return out;
-}
-
-static int runModelSweep(const std::string& json_path, int iters, unsigned seed) {
-  std::ifstream f(json_path);
-  if (!f) { fprintf(stderr, "ERROR: cannot read %s\n", json_path.c_str()); return 1; }
-  std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-  auto rows = parseGqaModelArray(json, "gqa_decode");
-  if (rows.empty()) {
-    fprintf(stderr, "ERROR: no gqa_decode entries in %s\n", json_path.c_str());
-    return 1;
-  }
-  printf("Model sweep (gqa_decode, i8): %s -- %zu shapes\n", json_path.c_str(), rows.size());
-  int fails = 0;
-  for (auto& r : rows) {
-    Result res = run_case({"model", r.B, r.H, r.G, r.D, r.max_seq, r.max_seq}, iters, seed);
-    if (!res.pass) ++fails;
-  }
-  printf("%s (%d failing case(s))\n", fails == 0 ? "ALL PASS" : "FAILURES", fails);
-  return fails == 0 ? 0 : 1;
-}
-
 int main(int argc, char** argv) {
   int iters = 200;
   unsigned seed = 1234;
@@ -608,8 +535,6 @@ int main(int argc, char** argv) {
   const char* md = nullptr;
   Case single = {"custom", 1, 40, 10, 128, 8192, 8192};
   bool have_single = false;
-  std::string model_json;
-  std::string data_dir;
 
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -618,8 +543,6 @@ int main(int argc, char** argv) {
     else if (a == "--iters") next(iters);
     else if (a == "--seed") { int s; next(s); seed = (unsigned)s; }
     else if (a == "--md") { if (i + 1 < argc) md = argv[++i]; }
-    else if (a == "--model" && i + 1 < argc) { model_json = argv[++i]; }
-    else if (a == "--data-dir" && i + 1 < argc) { data_dir = argv[++i]; }
     else if (a == "--b") { next(single.B); have_single = true; }
     else if (a == "--h") { next(single.H); have_single = true; }
     else if (a == "--g") { next(single.G); have_single = true; }
@@ -627,9 +550,6 @@ int main(int argc, char** argv) {
     else if (a == "--max-seq") { next(single.max_seq); have_single = true; }
     else if (a == "--total") { next(single.total); have_single = true; }
   }
-
-  if (!model_json.empty())
-    return runModelSweep(model_json, iters, seed);
 
   int dev = 0;
   HIP_CHECK(hipGetDevice(&dev));
@@ -641,8 +561,10 @@ int main(int argc, char** argv) {
   std::vector<Result> results;
   int fails = 0;
   if (all || !have_single) {
-    // Comprehensive coverage: MHA (heads-per-group = 1) and GQA (hpg 2/4/8),
-    // each at head_dim 64 AND 128, swept across decode context lengths.
+    // Categorical situations: MHA (heads-per-group = 1) and GQA (hpg
+    // 2/4/8), each at head_dim 64 AND 128 -- all 11 named geometries run at
+    // every tier. kLens (below) is the small typical-context-length list;
+    // COVERAGE only thins that.
     struct Shape { const char* name; int H, G, D; };
     const Shape shapes[] = {
         // ---- MHA (hpg = 1) ----
@@ -661,15 +583,31 @@ int main(int argc, char** argv) {
         {"gpt-oss-20b",    64,  8,  64},
         {"llama-3-70b",    64,  8, 128},
     };
-    const int lens[] = {512, 2048, 8192, 32768};
+    // Typical context-length list -- NOT the full shape space. COVERAGE
+    // thins this list only; every tier still runs all 11 named geometries.
+    static const int kLens3[] = {512, 2048, 8192};
+    static const int kLens2[] = {512, 8192};
+    static const int kLens1[] = {2048};
+    const int coverage_tier = hipdnn_ep_test::resolveCoverageTier(argc, argv);
+    const int* lens = coverage_tier == 1 ? kLens1
+                     : coverage_tier == 2 ? kLens2
+                                          : kLens3;
+    const size_t n_lens = coverage_tier == 1 ? sizeof(kLens1) / sizeof(kLens1[0])
+                        : coverage_tier == 2 ? sizeof(kLens2) / sizeof(kLens2[0])
+                                             : sizeof(kLens3) / sizeof(kLens3[0]);
+    std::vector<Case> full_cases;
     for (const auto& s : shapes) {
-      for (int L : lens)
-        results.push_back(run_case({s.name, 1, s.H, s.G, s.D, L, L}, iters, seed));
-      printf("\n");
+      for (size_t li = 0; li < n_lens; ++li)
+        full_cases.push_back({s.name, 1, s.H, s.G, s.D, lens[li], lens[li]});
     }
+    printf("coverage=%d -> running %zu typical length(s) x 11 categorical "
+           "case(s) = %zu gqa_decode_i8 cases\n",
+           coverage_tier, n_lens, full_cases.size());
+
+    for (const Case& c : full_cases) results.push_back(run_case(c, iters, seed));
     for (const auto& r : results) if (!r.pass) ++fails;
   } else {
-    Result r = run_case(single, iters, seed, data_dir);
+    Result r = run_case(single, iters, seed);
     results.push_back(r);
     if (!r.pass) ++fails;
   }

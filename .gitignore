@@ -163,6 +163,7 @@ _local/
 lib/Runtime/Kernels/test/example/**/out/
 lib/Runtime/Kernels/test/example/**/data/
 lib/Runtime/Kernels/test/example/**/data_model/
+lib/Runtime/Kernels/test/example/**/data_sweep/
 
 # Whisper test audio (auto-downloaded at test setup, cached locally; README kept)
 test/python/data/whisper/*.wav

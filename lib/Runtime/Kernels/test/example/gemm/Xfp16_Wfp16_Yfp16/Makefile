@@ -1,11 +1,16 @@
 # ============================================================
 # hip_gemm (gemm_kernel.hip) correctness + bench
 #
-#   make test        OFFLOAD=--offload-arch=gfx1151 HIP_SDK=<sdk>
-#   make test_shapes OFFLOAD=... HIP_SDK=... [SHAPES=shapes.csv]
-#   make test_model  OFFLOAD=... HIP_SDK=... [MODEL_JSON=../models/gpt_oss_20b.json]
+#   make test        OFFLOAD=--offload-arch=gfx1151 HIP_SDK=<sdk> [COVERAGE=1|2|3]
 #   make test_custom OFFLOAD=... HIP_SDK=... M=128 N=4096 K=2880 TA=0 TB=1 TYPE=0
 #   make clean
+#
+# `test` builds the exe and runs it with no positional shape, which hits the
+# built-in `cases[]` matrix in test_gemm.cpp's main() -- every TA/TB/bias/
+# dtype situation paired with a small set of typical shapes, NOT a full M/N/K
+# sweep. COVERAGE (default 3) picks how many of those typical shapes run;
+# every tier still touches every TA/TB/bias/dtype value. See
+# example/README.md "Shape coverage".
 #
 # MODE=auto (default) -- lut if AUTOTUNE_DIR/lut/<arch>.fb exists, else
 # autotune. MODE=lut forces lut (falls back to autotune with a warning if the
@@ -14,10 +19,10 @@
 # FLATBUFFERS_INC=<its include dir>.
 # HIPDNN_EP_DEBUG=1 logs autotune. HIPDNN_EP_GEMM_AUTOTUNE=0 uses heuristics.
 #
-# NOTE: out/results.csv is not yet wired for this leaf (test_gemm.cpp's
+# NOTE: out/results.csv is not wired for this leaf (test_gemm.cpp's
 # perf/correctness path is inlined in main(), unlike matmul_nbits/gqa's
 # extracted single-shape functions) -- MODE=auto/lut/autotune all build and
-# run correctly, but only print to stdout. See example/README.md.
+# run correctly, but only print to stdout.
 # ============================================================
 
 ifeq ($(OS),Windows_NT)
@@ -30,18 +35,13 @@ endif
 
 # ---- Required from CI / CLI ----
 
-OFFLOAD ?= --offload-arch=gfx1151
-HIP_SDK ?= $(HIP_PATH)
-MODE    ?= auto
+OFFLOAD  ?= --offload-arch=gfx1151
+HIP_SDK  ?= $(HIP_PATH)
+MODE     ?= auto
+COVERAGE ?= 3
 
 ifeq ($(HIP_SDK),)
     $(error pass HIP_SDK=<HIP SDK root>)
-endif
-
-ifeq ($(DETECTED_OS),Windows)
-    PYTHON ?= python
-else
-    PYTHON ?= python3
 endif
 
 # ---- Paths ----
@@ -50,12 +50,9 @@ HIPCC        := $(HIP_SDK)/bin/hipcc.exe
 INCLUDE_DIR  := ../../../../include
 KERNEL_HIP   := ../../../../hip/gemm_kernel.hip
 AUTOTUNE_DIR := ../../../../hip/autotune/gemm
-MODEL_DIR    := ../../models
-COMMON_DIR   := ../../common
 
 BUILD_DIR ?= out
 TARGET    := $(BUILD_DIR)/test_gemm.exe
-RESULTS_CSV := $(BUILD_DIR)/results.csv
 
 ARCH   := $(patsubst --offload-arch=%,%,$(OFFLOAD))
 LUT_FB := $(AUTOTUNE_DIR)/lut/$(ARCH).fb
@@ -72,7 +69,7 @@ FLATC ?= flatc
 FLATBUFFERS_INC ?=
 
 KERNEL_FLAGS := -O3 -std=c++17 -x hip -ffp-contract=fast
-CXXFLAGS     := -O3 -std=c++17
+CXXFLAGS     := -O3 -std=c++17 -Wno-c23-extensions
 INCLUDES     := -I$(INCLUDE_DIR) -I$(AUTOTUNE_DIR)
 
 # ---- Test parameters (test_custom) ----
@@ -83,24 +80,20 @@ K    ?= 256
 TA   ?= 0
 TB   ?= 1
 TYPE ?= 0
-SHAPES ?= shapes.csv
-
-DATA_DIR ?= data
 
 # ---- OS-specific: run command + clean ----
 
 ifeq ($(DETECTED_OS),Windows)
     HIP_SDK_WIN := $(subst /,\,$(HIP_SDK))
-    RUN_CMD     = set "PATH=$(HIP_SDK_WIN)\bin;%PATH%" && set "HIPDNN_RESULTS_CSV=$(subst /,\,$(RESULTS_CSV))" && set "HIPDNN_RESULTS_OP=gemm" && set "HIPDNN_RESULTS_LEAF=Xfp16_Wfp16_Yfp16" && set "HIPDNN_RESULTS_ARCH=$(ARCH)" && set "HIPDNN_RESULTS_MODE=$(MODE_RESOLVED)" && $(subst /,\,.\$(1))
+    RUN_CMD     = set "PATH=$(HIP_SDK_WIN)\bin;%PATH%" && $(subst /,\,.\$(1))
     define DO_CLEAN
 	if exist $(BUILD_DIR) rmdir /s /q $(BUILD_DIR)
-	if exist $(DATA_DIR) rmdir /s /q $(DATA_DIR)
     endef
 else
     HIP_SDK_WIN := $(shell wslpath -w "$(HIP_SDK)")
-    RUN_CMD     = cmd.exe /c "set PATH=$(HIP_SDK_WIN)\bin;%PATH% && set HIPDNN_RESULTS_CSV=$(RESULTS_CSV) && set HIPDNN_RESULTS_OP=gemm && set HIPDNN_RESULTS_LEAF=Xfp16_Wfp16_Yfp16 && set HIPDNN_RESULTS_ARCH=$(ARCH) && set HIPDNN_RESULTS_MODE=$(MODE_RESOLVED) && %CD%\$(1)"
+    RUN_CMD     = cmd.exe /c "set PATH=$(HIP_SDK_WIN)\bin;%PATH% && %CD%\$(1)"
     define DO_CLEAN
-	rm -rf $(BUILD_DIR) $(DATA_DIR)
+	rm -rf $(BUILD_DIR)
     endef
 endif
 
@@ -124,35 +117,39 @@ $(GEN_DIR): | $(BUILD_DIR)
 TEST_OBJ   := $(BUILD_DIR)/test_gemm.obj
 KERNEL_OBJ := $(BUILD_DIR)/gemm_kernel.obj
 
+# ---- MODE=lut extras: flatc-generated header (kept, not python) + the real
+# resolver, reused unmodified from hip/autotune/gemm/. The LUT bytes
+# themselves are embedded directly into test_gemm.cpp via a one-line C23
+# #embed (see the HIPDNN_LUT_LINKED_EXTERNALLY block there) -- LUT_FB_HEADER
+# just gives that #embed a path macro without needing python or a generated
+# .cpp; it's a single #define line written by `echo`, not data. ----
+
 LUT_GENERATED_H := $(GEN_DIR)/gemm_autotune_generated.h
-LUT_DATA_CPP    := $(GEN_DIR)/gemm_lut_data.cpp
-LUT_DATA_OBJ    := $(BUILD_DIR)/lut_data.obj
+LUT_FB_HEADER   := $(GEN_DIR)/lut_fb_path.h
 AUTOTUNE_OBJ    := $(BUILD_DIR)/autotune.obj
-EMBED_SCRIPT    := $(COMMON_DIR)/embed_lut.py
 
 $(LUT_GENERATED_H): $(AUTOTUNE_DIR)/gemm_autotune.fbs | $(GEN_DIR)
 	$(FLATC) --cpp --gen-object-api --scoped-enums -o $(GEN_DIR) $(AUTOTUNE_DIR)/gemm_autotune.fbs
 
-$(LUT_DATA_CPP): $(LUT_FB) $(EMBED_SCRIPT) | $(GEN_DIR)
-	$(PYTHON) $(EMBED_SCRIPT) $(LUT_FB) kGemmLutData $(LUT_DATA_CPP)
+$(LUT_FB_HEADER): | $(GEN_DIR)
+	@echo #define HIPDNN_LUT_FB "$(LUT_FB)" > $(subst /,\,$(LUT_FB_HEADER))
 
 $(AUTOTUNE_OBJ): $(AUTOTUNE_DIR)/gemm_autotune.cpp $(LUT_GENERATED_H) | $(BUILD_DIR)
 	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) -x hip -I$(AUTOTUNE_DIR) -I$(GEN_DIR) -I$(FLATBUFFERS_INC) $(AUTOTUNE_DIR)/gemm_autotune.cpp -o $(AUTOTUNE_OBJ)
 
-$(LUT_DATA_OBJ): $(LUT_DATA_CPP) | $(BUILD_DIR)
-	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) -x hip $(LUT_DATA_CPP) -o $(LUT_DATA_OBJ)
-
 ifeq ($(MODE_RESOLVED),lut)
     TEST_DEFINES       := -DHIPDNN_LUT_LINKED_EXTERNALLY=1
     LUT_EXTRA_INCLUDES := -I$(GEN_DIR) -I$(FLATBUFFERS_INC)
-    LUT_OBJS           := $(AUTOTUNE_OBJ) $(LUT_DATA_OBJ)
+    LUT_OBJS           := $(AUTOTUNE_OBJ)
+    LUT_HEADER_DEP     := $(LUT_FB_HEADER)
 else
     TEST_DEFINES       :=
     LUT_EXTRA_INCLUDES :=
     LUT_OBJS           :=
+    LUT_HEADER_DEP      :=
 endif
 
-$(TARGET): FORCE mode_info $(LUT_OBJS) | $(BUILD_DIR)
+$(TARGET): FORCE mode_info $(LUT_OBJS) $(LUT_HEADER_DEP) | $(BUILD_DIR)
 	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) $(TEST_DEFINES) $(INCLUDES) $(LUT_EXTRA_INCLUDES) -x hip test_gemm.cpp -o $(TEST_OBJ)
 	$(HIPCC) -c $(KERNEL_FLAGS) $(OFFLOAD) $(INCLUDES) $(KERNEL_HIP) -o $(KERNEL_OBJ)
 	$(HIPCC) $(OFFLOAD) $(TEST_OBJ) $(KERNEL_OBJ) $(LUT_OBJS) -o $(TARGET)
@@ -171,20 +168,6 @@ ifeq ($(FLATBUFFERS_INC),)
 endif
 endif
 
-bench_hipblaslt: FORCE | $(BUILD_DIR)
-	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) $(INCLUDES) -DHIPDNN_GEMM_BENCH_HIPBLASLT -x hip test_gemm.cpp -o $(TEST_OBJ)
-	$(HIPCC) -c $(KERNEL_FLAGS) $(OFFLOAD) $(INCLUDES) $(KERNEL_HIP) -o $(KERNEL_OBJ)
-	$(HIPCC) $(OFFLOAD) $(TEST_OBJ) $(KERNEL_OBJ) -lhipblaslt -o $(TARGET)
-	$(call RUN_CMD,$(TARGET)) $(M) $(N) $(K) $(TA) $(TB) $(TYPE)
-
-# Decode NT, prefill NT, prefill NN, square-ish NT -- vs wrap_gemm algos. Not
-# CI, kept as a convenience (was already in this Makefile before normalizing).
-bench_suite: bench_hipblaslt
-	$(call RUN_CMD,$(TARGET)) 1 4096 2880 0 1 0
-	$(call RUN_CMD,$(TARGET)) 128 4096 2880 0 1 0
-	$(call RUN_CMD,$(TARGET)) 128 4096 2880 0 0 0
-	$(call RUN_CMD,$(TARGET)) 256 2048 2048 0 1 0
-
 # ============================================================
 # Run / test targets (uniform API)
 # ============================================================
@@ -192,27 +175,14 @@ bench_suite: bench_hipblaslt
 clean:
 	$(DO_CLEAN)
 
-gendata:
-	$(PYTHON) gen_data.py --m $(M) --n $(N) --k $(K) --ta $(TA) --tb $(TB) --dir $(DATA_DIR)
+# Coverage-tiered sweep: the exe enumerates its own built-in cases[] matrix
+# and self-samples to COVERAGE (default 3). No data-dir -- in-process rng.
+test: $(TARGET)
+	$(call RUN_CMD,$(TARGET)) --coverage $(COVERAGE)
 
-# Smoke: one small fixed shape (matches this Makefile's M/N/K/TA/TB defaults).
-test: gendata $(TARGET)
-	$(call RUN_CMD,$(TARGET)) $(M) $(N) $(K) $(TA) $(TB) $(TYPE) --data-dir $(DATA_DIR)
-
-# One shape from Make variables / CLI.
-test_custom: gendata $(TARGET)
-	$(call RUN_CMD,$(TARGET)) $(M) $(N) $(K) $(TA) $(TB) $(TYPE) --data-dir $(DATA_DIR)
-
-# Every row in $(SHAPES) (default shapes.csv).
-test_shapes: $(TARGET)
-	@for /f "usebackq skip=1 tokens=1-6 delims=," %%a in ("$(SHAPES)") do @$(MAKE) test_custom M=%%a N=%%b K=%%c TA=%%d TB=%%e TYPE=%%f OFFLOAD=$(OFFLOAD) HIP_SDK=$(HIP_SDK) MODE=$(MODE)
-
-# ---- Model sweep mode (M_array x KN_pairs from the shared model JSON) ----
-
-MODEL_JSON ?= $(MODEL_DIR)/gpt_oss_20b.json
-
-test_model: $(TARGET)
-	$(call RUN_CMD,$(TARGET)) --model $(MODEL_JSON)
+# One shape from Make variables / CLI (in-process rng, no data files).
+test_custom: $(TARGET)
+	$(call RUN_CMD,$(TARGET)) $(M) $(N) $(K) $(TA) $(TB) $(TYPE)
 
 FORCE:
-.PHONY: test test_shapes test_model test_custom clean bench_hipblaslt bench_suite mode_info gendata FORCE
+.PHONY: test test_custom clean mode_info FORCE

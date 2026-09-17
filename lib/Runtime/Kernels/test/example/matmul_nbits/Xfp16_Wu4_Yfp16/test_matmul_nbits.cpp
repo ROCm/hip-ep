@@ -1,31 +1,32 @@
 /*
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
+ *
+ * custom_kernels MatMulNBits bits=4 (uint4, nibble-packed) Verification.
+ *
+ * Unit-test model: this file is entirely self-contained (no example/common/,
+ * no python, no on-disk data) -- inputs, the uint4 packing, and the
+ * dequant+matmul CPU reference are all generated in-process. The case set is
+ * every categorical situation this op supports (group_size in {32,64,128},
+ * zero-points on/off, dtype fp16/fp32) crossed with a SMALL list of typical
+ * (M,K,N) shapes (decode M=1 at real model FFN/attn-proj K,N, plus two
+ * smaller prefill-representative shapes) -- NOT the full M/K/N shape space.
+ * COVERAGE=1|2|3 (default 3) only thins how many typical shapes run; every
+ * tier still touches every group_size/zero-points/dtype value.
+ *
+ * A:        FP16 (or FP32) row-major [M, K]
+ * B_packed: uint4 packed [N, K/2]-ish (see kernel_ut spec below), each byte
+ *           = 2 values (low nibble first), row padded to
+ *           num_groups_k * (group_size/2) bytes (ONNX MatMulNBits convention)
+ * scales:   FP16 [N, num_groups_k], per-column per-group
+ * zeros:    FP16 [N, num_groups_k], per-column per-group zero point
+ *           (optional; default zero point is 8 when absent)
+ * C:        FP16 (or FP32) row-major [M, N]
  */
-
-// ============================================================
-// custom_kernels MatMulNBits Verification
-//
-// Tests the hip_matmul_nbits() API which performs:
-//   C[M×N] = A[M×K] × dequant(B_packed[N×K/2])^T
-//
-// Public API — all tensors are ROW-MAJOR per ONNX convention:
-//   A:        FP16 row-major [batch, M, K]
-//   B_packed: uint4 packed [N, K/2], each byte = 2 values (low nibble first)
-//   scales:   FP16 [N, num_groups_k], per-column per-group
-//   zeros:    FP16 [N, num_groups_k], per-column per-group zero point
-//             (optional, nullptr to skip)
-//   C:        FP16 row-major [batch, M, N]
-//
-// Workflow:
-//   1) python gen_matmul_nbits_data.py MxKxN --group-size GS --dir data
-//   2) build and run the test executable
-// ============================================================
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include "hip_custom_kernels.h"
 #include "matmul_nbits_autotune.h"
-#include "../../common/csv_writer.h"
 
 #ifndef HIPDNN_LUT_LINKED_EXTERNALLY
 // MODE=autotune (default): no real FlatBuffers LUT is linked. Empty resolve()
@@ -38,1232 +39,419 @@ Result resolve(const Request&, WmmaValidator, GemvValidator, void*) { return {};
 Stats stats() { return {}; }
 }  // namespace matmul_nbits_autotune
 }  // namespace hipdnn_ep
+#else
+// One-line C23 #embed of the real LUT .fb -- HIPDNN_LUT_FB is defined by a
+// tiny Makefile-generated header (a plain #define, not a data file) so the
+// path never has to survive hipcc's Windows -D quoting (which mangles
+// embedded quote characters).
+#include "lut_fb_path.h"
+extern "C" const unsigned char kMatmulNbitsLutData[] = {
+#embed HIPDNN_LUT_FB
+};
+extern "C" const size_t kMatmulNbitsLutData_size = sizeof(kMatmulNbitsLutData);
 #endif  // HIPDNN_LUT_LINKED_EXTERNALLY
 
-#include <iostream>
-#include <fstream>
-#include <vector>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <iomanip>
-#include <chrono>
-#include <string>
-#include <algorithm>
-#include <functional>
-#include <cstring>
+#include <cstdio>
 #include <cstdlib>
-#include <thread>
+#include <cstring>
+#include <random>
+#include <string>
+#include <vector>
 
-static float half_to_float(__half h)
-{
-    uint16_t bits;
-    std::memcpy(&bits, &h, sizeof(bits));
-    uint32_t sign = (bits >> 15) & 1;
-    uint32_t exp  = (bits >> 10) & 0x1F;
-    uint32_t mant = bits & 0x3FF;
-    uint32_t f;
-    if(exp == 0)
-    {
-        if(mant == 0)
-            f = sign << 31;
-        else
-        {
-            exp = 1;
-            while(!(mant & 0x400)) { mant <<= 1; exp--; }
-            mant &= 0x3FF;
-            f = (sign << 31) | ((exp + 127 - 15) << 23) | (mant << 13);
-        }
+// ---- Tiny inline coverage-tier resolver + CSV writer (replaces
+// example/common/coverage.h + csv_writer.h) ----
+namespace hipdnn_ep_test {
+inline int resolveCoverageTier(int argc, char** argv, int default_tier = 3) {
+  int tier = default_tier;
+  if (const char* env = std::getenv("HIPDNN_UT_COVERAGE")) tier = std::atoi(env);
+  for (int i = 1; i < argc; ++i)
+    if (std::strcmp(argv[i], "--coverage") == 0 && i + 1 < argc)
+      tier = std::atoi(argv[++i]);
+  return tier < 1 ? 1 : (tier > 3 ? 3 : tier);
+}
+
+struct CsvRow {
+  std::string shape, config;
+  double time_ms = 0.0;
+  double rel_l2 = 0.0;
+  std::string verdict;
+};
+class CsvWriter {
+ public:
+  CsvWriter() {
+    const char* path = std::getenv("HIPDNN_RESULTS_CSV");
+    if (!path || !path[0]) return;
+    path_ = path;
+    bool need_header = true;
+    if (FILE* probe = std::fopen(path_.c_str(), "rb")) {
+      std::fseek(probe, 0, SEEK_END);
+      need_header = std::ftell(probe) == 0;
+      std::fclose(probe);
     }
-    else if(exp == 31)
-        f = (sign << 31) | (0xFFu << 23) | (mant << 13);
-    else
-        f = (sign << 31) | ((exp + 127 - 15) << 23) | (mant << 13);
-    float result;
-    std::memcpy(&result, &f, sizeof(result));
-    return result;
+    f_ = std::fopen(path_.c_str(), "a");
+    if (f_ && need_header) {
+      std::fprintf(f_, "op,leaf,arch,mode,shape,config,time_ms,relL2,verdict\n");
+      std::fflush(f_);
+    }
+  }
+  ~CsvWriter() { if (f_) std::fclose(f_); }
+  void write(const CsvRow& r) {
+    if (!f_) return;
+    std::fprintf(f_, "%s,%s,%s,%s,%s,%s,%.6f,%.6e,%s\n",
+                 env_or("HIPDNN_RESULTS_OP", "unknown"),
+                 env_or("HIPDNN_RESULTS_LEAF", "unknown"),
+                 env_or("HIPDNN_RESULTS_ARCH", "unknown"),
+                 env_or("HIPDNN_RESULTS_MODE", "unknown"), r.shape.c_str(),
+                 r.config.c_str(), r.time_ms, r.rel_l2, r.verdict.c_str());
+    std::fflush(f_);
+  }
+ private:
+  static const char* env_or(const char* name, const char* dflt) {
+    const char* v = std::getenv(name);
+    return (v && v[0]) ? v : dflt;
+  }
+  std::string path_;
+  FILE* f_ = nullptr;
+};
+}  // namespace hipdnn_ep_test
+
+static float half_to_float(__half h) {
+  uint16_t bits;
+  std::memcpy(&bits, &h, sizeof(bits));
+  uint32_t sign = (bits >> 15) & 1;
+  uint32_t exp = (bits >> 10) & 0x1F;
+  uint32_t mant = bits & 0x3FF;
+  uint32_t f;
+  if (exp == 0) {
+    if (mant == 0) f = sign << 31;
+    else {
+      exp = 1;
+      while (!(mant & 0x400)) { mant <<= 1; exp--; }
+      mant &= 0x3FF;
+      f = (sign << 31) | ((exp + 127 - 15) << 23) | (mant << 13);
+    }
+  } else if (exp == 31) f = (sign << 31) | (0xFFu << 23) | (mant << 13);
+  else f = (sign << 31) | ((exp + 127 - 15) << 23) | (mant << 13);
+  float result;
+  std::memcpy(&result, &f, sizeof(result));
+  return result;
+}
+
+static __half float_to_half(float x) {
+  uint32_t f;
+  std::memcpy(&f, &x, 4);
+  uint32_t s = (f >> 31) & 1;
+  int e = (int)((f >> 23) & 0xff) - 127 + 15;
+  uint32_t m = f & 0x7fffff;
+  uint16_t bits;
+  if (e <= 0) bits = (uint16_t)(s << 15);
+  else if (e >= 31) bits = (uint16_t)((s << 15) | 0x7c00);
+  else bits = (uint16_t)((s << 15) | (e << 10) | (m >> 13));
+  __half h;
+  std::memcpy(&h, &bits, 2);
+  return h;
 }
 
 #define HIP_CHECK(call)                                                     \
-    do                                                                      \
-    {                                                                       \
+    do {                                                                    \
         hipError_t err = (call);                                            \
-        if(err != hipSuccess)                                               \
-        {                                                                   \
-            std::cerr << "HIP error at " << __FILE__ << ":" << __LINE__     \
-                      << " code=" << err << " \""                           \
-                      << hipGetErrorString(err) << "\"" << std::endl;       \
-            exit(1);                                                        \
+        if (err != hipSuccess) {                                            \
+            std::fprintf(stderr, "HIP error at %s:%d code=%d \"%s\"\n",     \
+                         __FILE__, __LINE__, err, hipGetErrorString(err));   \
+            std::exit(1);                                                   \
         }                                                                   \
-    } while(0)
-
-template <typename T>
-static bool readBin(const std::string& path, std::vector<T>& data, size_t count)
-{
-    std::ifstream f(path, std::ios::binary);
-    if(!f.is_open())
-        return false;
-    data.resize(count);
-    f.read(reinterpret_cast<char*>(data.data()), count * sizeof(T));
-    return f.good();
-}
+    } while (0)
 
 // ============================================================
-// Benchmark helpers
+// In-process data generation + CPU fp32 reference (no python, no disk I/O).
+// Mirrors the uint4 nibble-packing + dequant convention this repo's
+// gen_data.py generators used: B is randint(0,16) per element, packed
+// low-nibble-first into num_groups_k*(group_size/2) bytes/row (the ONNX
+// MatMulNBits blob layout -- the last group is padded to a full group_size
+// even when K % group_size != 0); scales are uniform(0.01,0.05); zeros (when
+// present) are integers in [7,9] cast to fp16; dequant is
+// (B - zp) * scale, default zp = 8 when zeros are absent.
 // ============================================================
-static int calibrateIters(double warmup_ms, int warmup_count,
-                          double target_ms = 2000.0, int lo = 5, int hi = 200)
-{
-    double per_iter = warmup_ms / warmup_count;
-    if(per_iter <= 0) return lo;
-    return std::max(lo, std::min(hi, static_cast<int>(target_ms / per_iter)));
-}
-
-constexpr int NROUNDS = 5;
-
-struct MeasureResult {
-    double median_ms;
-    double min_ms;
-    double max_ms;
+struct CaseData {
+  std::vector<__half> A16;
+  std::vector<float> A32;
+  std::vector<uint8_t> Bpacked;
+  std::vector<__half> scales;
+  std::vector<__half> zeros;
+  std::vector<__half> Cref16;
+  std::vector<float> Cref32;
 };
 
-static MeasureResult measureMedian(hipStream_t stream, int niters,
-                                   const std::function<void()>& launch)
-{
-    hipEvent_t ev0, ev1;
-    hipEventCreate(&ev0);
-    hipEventCreate(&ev1);
-    std::vector<float> round_ms(NROUNDS);
-    for(int r = 0; r < NROUNDS; r++)
-    {
-        hipEventRecord(ev0, stream);
-        for(int i = 0; i < niters; i++)
-            launch();
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-        hipEventElapsedTime(&round_ms[r], ev0, ev1);
+static void genCase(int M, int K, int N, int gs, bool zero, bool fp32,
+                    unsigned seed, CaseData& out) {
+  const int num_groups_k = (K + gs - 1) / gs;
+  const int row_bytes = num_groups_k * (gs / 2);
+
+  std::mt19937 rng(seed);
+  std::uniform_real_distribution<float> adist(-0.5f, 0.5f);
+  std::uniform_int_distribution<int> bdist(0, 15);
+  std::uniform_real_distribution<float> sdist(0.01f, 0.05f);
+  std::uniform_int_distribution<int> zdist(7, 9);
+
+  std::vector<float> A(static_cast<size_t>(M) * K);
+  for (auto& v : A) v = adist(rng);
+
+  std::vector<uint8_t> Bq(static_cast<size_t>(N) * K);
+  for (auto& v : Bq) v = static_cast<uint8_t>(bdist(rng));
+
+  std::vector<float> scalesF(static_cast<size_t>(N) * num_groups_k);
+  for (auto& v : scalesF) v = sdist(rng);
+
+  std::vector<float> zerosF;
+  if (zero) {
+    zerosF.resize(static_cast<size_t>(N) * num_groups_k);
+    for (auto& v : zerosF) v = static_cast<float>(zdist(rng));
+  }
+
+  out.Bpacked.assign(static_cast<size_t>(N) * row_bytes, 0);
+  for (int n = 0; n < N; ++n) {
+    const uint8_t* row = &Bq[static_cast<size_t>(n) * K];
+    uint8_t* prow = &out.Bpacked[static_cast<size_t>(n) * row_bytes];
+    for (int k2 = 0; k2 < K / 2; ++k2)
+      prow[k2] = static_cast<uint8_t>(row[2 * k2] | (row[2 * k2 + 1] << 4));
+  }
+
+  out.scales.resize(scalesF.size());
+  for (size_t i = 0; i < scalesF.size(); ++i) out.scales[i] = float_to_half(scalesF[i]);
+  if (zero) {
+    out.zeros.resize(zerosF.size());
+    for (size_t i = 0; i < zerosF.size(); ++i) out.zeros[i] = float_to_half(zerosF[i]);
+  }
+
+  // fp32 reference: C[m,n] = sum_k A[m,k] * (Bq[n,k] - zp) * scale.
+  std::vector<float> Cref(static_cast<size_t>(M) * N, 0.0f);
+  for (int n = 0; n < N; ++n) {
+    const uint8_t* row = &Bq[static_cast<size_t>(n) * K];
+    const float* srow = &scalesF[static_cast<size_t>(n) * num_groups_k];
+    const float* zrow = zero ? &zerosF[static_cast<size_t>(n) * num_groups_k] : nullptr;
+    for (int m = 0; m < M; ++m) {
+      const float* arow = &A[static_cast<size_t>(m) * K];
+      float acc = 0.0f;
+      for (int k = 0; k < K; ++k) {
+        const int g = k / gs;
+        const float zp = zero ? zrow[g] : 8.0f;
+        acc += arow[k] * (static_cast<float>(row[k]) - zp) * srow[g];
+      }
+      Cref[static_cast<size_t>(m) * N + n] = acc;
     }
-    hipEventDestroy(ev0);
-    hipEventDestroy(ev1);
+  }
 
-    std::cout << "\n  [debug] per-round raw (ms): ";
-    for(int r = 0; r < NROUNDS; r++)
-        std::cout << std::fixed << std::setprecision(2) << round_ms[r] << " ";
-    std::cout << "  (per-iter: ";
-    for(int r = 0; r < NROUNDS; r++)
-        std::cout << std::fixed << std::setprecision(3) << round_ms[r] / niters << " ";
-    std::cout << ")" << std::endl;
-
-    std::sort(round_ms.begin(), round_ms.end());
-    return {round_ms[NROUNDS / 2], round_ms[0], round_ms[NROUNDS - 1]};
+  if (fp32) {
+    out.A32.resize(A.size());
+    for (size_t i = 0; i < A.size(); ++i) out.A32[i] = A[i];
+    out.Cref32 = std::move(Cref);
+  } else {
+    out.A16.resize(A.size());
+    for (size_t i = 0; i < A.size(); ++i) out.A16[i] = float_to_half(A[i]);
+    out.Cref16.resize(Cref.size());
+    for (size_t i = 0; i < Cref.size(); ++i) out.Cref16[i] = float_to_half(Cref[i]);
+  }
 }
 
 // ============================================================
-// True-data mode: parse shape.json from a real-data folder
+// Categorical situations (group_size x zero-points x dtype) -- ALWAYS run in
+// full, every tier -- crossed with a small typical-shape list. Decode (M=1)
+// uses real model FFN/attn-proj (K,N); the M=128/512 prefill points use a
+// smaller representative (K,N) so the CPU reference (no BLAS) stays fast --
+// see genCase() above, which is O(M*K*N).
 // ============================================================
-struct TestFiles {
-    std::string a     = "matmul_nbits_A.bin";
-    std::string b     = "matmul_nbits_B_packed.bin";
-    std::string s     = "matmul_nbits_scales.bin";
-    std::string z     = "matmul_nbits_zeros.bin";
-    std::string c_ref = "matmul_nbits_C_ref.bin";
+namespace sweep {
+
+struct Shape { int M, K, N; };
+// tier3 (all 4): M=1 at two real layer shapes (decode) + M=128/512 at one
+// smaller representative shape (prefill dispatch paths, not full FFN size).
+static const Shape kShapes4[] = {
+    {1, 4096, 11008},  // decode, FFN gate/up-proj-sized K,N
+    {1, 2880, 5120},   // decode, attn-proj-sized K,N (2880 exercises the
+                        // group_size zero-padding path: not a multiple of 64/128)
+    {128, 512, 1024},  // prefill, small representative shape
+    {512, 512, 1024},  // prefill, small representative shape
+};
+static const Shape kShapes3[] = {kShapes4[0], kShapes4[2], kShapes4[3]};
+static const Shape kShapes2[] = {kShapes4[0], kShapes4[3]};  // "1 decode + 1 prefill"
+
+static const int kGsArray[] = {32, 64, 128};
+static const bool kZeroArray[] = {true, false};
+static const bool kDtypeArray[] = {false, true};  // fp16, fp32
+
+struct Case {
+  int M, K, N, gs;
+  bool zero, fp32;
 };
 
-struct ShapeConfig {
-    bool   no_zeros   = true;
-    int    batch_size = 1;
-    int    M = 0, K = 0, N = 0;
-    int    block_size = 128;
-    TestFiles files;
-};
-
-static std::string slurpFile(const std::string& path)
-{
-    std::ifstream f(path);
-    return std::string((std::istreambuf_iterator<char>(f)),
-                        std::istreambuf_iterator<char>());
+static std::vector<Case> buildCases(int tier) {
+  const Shape* shapes = tier == 1 ? kShapes2 : tier == 2 ? kShapes3 : kShapes4;
+  const size_t n_shapes = tier == 1 ? sizeof(kShapes2) / sizeof(kShapes2[0])
+                        : tier == 2 ? sizeof(kShapes3) / sizeof(kShapes3[0])
+                                    : sizeof(kShapes4) / sizeof(kShapes4[0]);
+  std::vector<Case> out;
+  for (int gs : kGsArray)
+    for (bool zero : kZeroArray)
+      for (bool fp32 : kDtypeArray)
+        for (size_t si = 0; si < n_shapes; ++si)
+          out.push_back({shapes[si].M, shapes[si].K, shapes[si].N, gs, zero, fp32});
+  return out;
 }
 
-static int jsonInt(const std::string& s, const std::string& key)
-{
-    std::string needle = "\"" + key + "\"";
-    auto pos = s.find(needle);
-    if(pos == std::string::npos) return 0;
-    pos = s.find(':', pos + needle.size());
-    while(pos < s.size() && s[pos] != '-' && !std::isdigit(static_cast<unsigned char>(s[pos])))
-        pos++;
-    return std::stoi(s.substr(pos));
-}
+static bool runOne(const Case& c, int idx) {
+  CaseData d;
+  genCase(c.M, c.K, c.N, c.gs, c.zero, c.fp32, /*seed=*/1000u + idx, d);
 
-static bool jsonBool(const std::string& s, const std::string& key)
-{
-    std::string needle = "\"" + key + "\"";
-    auto pos = s.find(needle);
-    if(pos == std::string::npos) return false;
-    pos = s.find(':', pos + needle.size());
-    auto end = s.find_first_of(",}", pos);
-    return s.substr(pos, end - pos).find("true") != std::string::npos;
-}
+  const size_t countA = static_cast<size_t>(c.M) * c.K;
+  const size_t countC = static_cast<size_t>(c.M) * c.N;
+  const size_t elem = c.fp32 ? 4 : 2;
 
-static std::string jsonNestedStr(const std::string& s,
-                                 const std::string& objKey,
-                                 const std::string& field)
-{
-    auto opos = s.find("\"" + objKey + "\"");
-    if(opos == std::string::npos) return "";
-    auto brace = s.find('{', opos);
-    if(brace == std::string::npos) return "";
-    int depth = 1;
-    auto bend = brace + 1;
-    while(bend < s.size() && depth > 0)
-    {
-        if(s[bend] == '{') depth++;
-        if(s[bend] == '}') depth--;
-        bend++;
+  void *dA = nullptr, *dC = nullptr;
+  __half* dS = nullptr;
+  __half* dZ = nullptr;
+  uint8_t* dB = nullptr;
+  HIP_CHECK(hipMalloc(&dA, countA * elem));
+  HIP_CHECK(hipMalloc(&dB, d.Bpacked.size()));
+  HIP_CHECK(hipMalloc(&dS, d.scales.size() * sizeof(__half)));
+  if (c.zero) HIP_CHECK(hipMalloc(&dZ, d.zeros.size() * sizeof(__half)));
+  HIP_CHECK(hipMalloc(&dC, countC * elem));
+  HIP_CHECK(hipMemcpy(dA, c.fp32 ? (void*)d.A32.data() : (void*)d.A16.data(),
+                      countA * elem, hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(dB, d.Bpacked.data(), d.Bpacked.size(), hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(dS, d.scales.data(), d.scales.size() * sizeof(__half), hipMemcpyHostToDevice));
+  if (c.zero) HIP_CHECK(hipMemcpy(dZ, d.zeros.data(), d.zeros.size() * sizeof(__half), hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemset(dC, 0, countC * elem));
+
+  hipStream_t stream;
+  HIP_CHECK(hipStreamCreate(&stream));
+  auto launch = [&]() {
+    return hip_matmul_nbits(stream, dA, dB, dS, c.zero ? dZ : nullptr,
+                            nullptr, dC, c.M, c.N, c.K, /*batch_count=*/1,
+                            /*bits=*/4, c.gs, static_cast<int>(elem),
+                            /*zp_elem_size=*/2, nullptr, nullptr);
+  };
+
+  // 3 calls: first triggers this shape's autotune search / LUT resolve
+  // (cached after), the rest are correctness-check warmup.
+  int status = 0;
+  for (int w = 0; w < 3; ++w) status = launch();
+  HIP_CHECK(hipStreamSynchronize(stream));
+
+  double avg_ms = 0.0;
+  if (status == 0) {
+    constexpr int kIters = 20;
+    hipEvent_t e0, e1;
+    hipEventCreate(&e0);
+    hipEventCreate(&e1);
+    hipEventRecord(e0, stream);
+    for (int i = 0; i < kIters; ++i) launch();
+    hipEventRecord(e1, stream);
+    HIP_CHECK(hipEventSynchronize(e1));
+    float ms = 0.0f;
+    hipEventElapsedTime(&ms, e0, e1);
+    avg_ms = ms / kIters;
+    hipEventDestroy(e0);
+    hipEventDestroy(e1);
+  }
+
+  bool pass = (status == 0);
+  double rel_l2 = 0.0;
+  if (status == 0) {
+    std::vector<uint8_t> raw(countC * elem);
+    HIP_CHECK(hipMemcpy(raw.data(), dC, countC * elem, hipMemcpyDeviceToHost));
+    double ssd = 0.0, ssr = 0.0;
+    int errors = 0;
+    for (size_t i = 0; i < countC; ++i) {
+      const float gpu_val = c.fp32 ? reinterpret_cast<float*>(raw.data())[i]
+                                    : half_to_float(reinterpret_cast<__half*>(raw.data())[i]);
+      const float ref_val = c.fp32 ? d.Cref32[i] : half_to_float(d.Cref16[i]);
+      const float diff = std::fabs(gpu_val - ref_val);
+      const float tol = std::fabs(ref_val) * 0.05f + 0.1f;
+      if (diff > tol) ++errors;
+      ssd += (double)diff * diff;
+      ssr += (double)ref_val * ref_val;
     }
-    auto obj = s.substr(brace, bend - brace);
-    auto fpos = obj.find("\"" + field + "\"");
-    if(fpos == std::string::npos) return "";
-    auto colon = obj.find(':', fpos);
-    auto q1 = obj.find('"', colon);
-    auto q2 = obj.find('"', q1 + 1);
-    return obj.substr(q1 + 1, q2 - q1 - 1);
+    rel_l2 = ssr > 0.0 ? std::sqrt(ssd / ssr) : std::sqrt(ssd);
+    pass = (errors == 0);
+  }
+
+  std::printf("  M=%d N=%d K=%d gs=%d zero=%d dtype=%s  status=%d  %.4f ms  relL2=%.3e  %s\n",
+              c.M, c.N, c.K, c.gs, c.zero, c.fp32 ? "fp32" : "fp16", status,
+              avg_ms, rel_l2, pass ? "PASS" : "*** FAIL ***");
+
+  {
+    using namespace hipdnn_ep_test;
+    CsvWriter csv;
+    char shape_buf[96];
+    std::snprintf(shape_buf, sizeof(shape_buf), "%dx%dx%d_gs%d_%s%s", c.M, c.N,
+                 c.K, c.gs, c.fp32 ? "fp32" : "fp16", c.zero ? "" : "_noz");
+    CsvRow row;
+    row.shape = shape_buf;
+    row.config = "final";
+    row.time_ms = avg_ms;
+    row.rel_l2 = rel_l2;
+    row.verdict = pass ? "PASS" : "FAIL";
+    csv.write(row);
+  }
+
+  hipFree(dA);
+  hipFree(dB);
+  hipFree(dS);
+  if (dZ) hipFree(dZ);
+  hipFree(dC);
+  hipStreamDestroy(stream);
+  return pass;
 }
 
-static std::vector<int> jsonIntArray(const std::string& s, const std::string& key)
-{
-    std::vector<int> result;
-    std::string needle = "\"" + key + "\"";
-    auto pos = s.find(needle);
-    if(pos == std::string::npos) return result;
-    auto bracket = s.find('[', pos);
-    if(bracket == std::string::npos) return result;
-    auto end_bracket = s.find(']', bracket);
-    if(end_bracket == std::string::npos) return result;
-    std::string arr = s.substr(bracket + 1, end_bracket - bracket - 1);
-    size_t i = 0;
-    while(i < arr.size())
-    {
-        while(i < arr.size() && !std::isdigit(static_cast<unsigned char>(arr[i])) && arr[i] != '-')
-            i++;
-        if(i >= arr.size()) break;
-        result.push_back(std::stoi(arr.substr(i)));
-        while(i < arr.size() && (std::isdigit(static_cast<unsigned char>(arr[i])) || arr[i] == '-'))
-            i++;
-    }
-    return result;
+static int run(int coverage_tier) {
+  std::vector<Case> cases = buildCases(coverage_tier);
+  std::printf("coverage=%d -> running %zu matmul_nbits cases (3 group_size x "
+             "2 zero-points x 2 dtype x typical shapes)\n",
+             coverage_tier, cases.size());
+  int fail = 0;
+  for (size_t i = 0; i < cases.size(); ++i)
+    if (!runOne(cases[i], static_cast<int>(i))) ++fail;
+  std::printf("\nCoverage sweep done: %zu cases, %d failed\n", cases.size(), fail);
+  std::printf("%s\n", fail == 0 ? "ALL PASS" : "SOME FAILED");
+  return fail == 0 ? 0 : 1;
 }
 
-static std::vector<int> jsonNestedIntArray(const std::string& s,
-                                           const std::string& objKey,
-                                           const std::string& arrKey)
-{
-    auto opos = s.find("\"" + objKey + "\"");
-    if(opos == std::string::npos) return {};
-    auto brace = s.find('{', opos);
-    if(brace == std::string::npos) return {};
-    int depth = 1;
-    auto bend = brace + 1;
-    while(bend < s.size() && depth > 0)
-    {
-        if(s[bend] == '{') depth++;
-        if(s[bend] == '}') depth--;
-        bend++;
-    }
-    return jsonIntArray(s.substr(brace, bend - brace), arrKey);
-}
-
-static ShapeConfig parseShapeJson(const std::string& path)
-{
-    auto json = slurpFile(path);
-    if(json.empty())
-    {
-        std::cerr << "ERROR: cannot read " << path << std::endl;
-        exit(1);
-    }
-    ShapeConfig cfg;
-    cfg.no_zeros   = jsonBool(json, "no_zeros");
-    cfg.batch_size = jsonInt(json, "batch_size");
-    cfg.M          = jsonInt(json, "M");
-    cfg.K          = jsonInt(json, "K");
-    cfg.N          = jsonInt(json, "N");
-    cfg.block_size = jsonInt(json, "block_size");
-
-    cfg.files.a     = jsonNestedStr(json, "ifm_disc",    "file_name");
-    cfg.files.b     = jsonNestedStr(json, "wts_disc",    "file_name");
-    cfg.files.s     = jsonNestedStr(json, "scales_disc", "file_name");
-    cfg.files.c_ref = jsonNestedStr(json, "output_disc", "file_name");
-    cfg.files.z     = "";
-
-    std::cout << "  Parsed shape.json: M=" << cfg.M << " K=" << cfg.K
-              << " N=" << cfg.N << " block_size=" << cfg.block_size
-              << " no_zeros=" << cfg.no_zeros
-              << " batch=" << cfg.batch_size << std::endl;
-    std::cout << "  Files: A=" << cfg.files.a
-              << "  B=" << cfg.files.b
-              << "  S=" << cfg.files.s
-              << "  C_ref=" << cfg.files.c_ref << std::endl;
-    return cfg;
-}
+}  // namespace sweep
 
 // ============================================================
-// Model sweep mode: parse model config and iterate all shapes
+// Single-shape convenience path (make test_custom): in-process rng, no data
+// files. SIZE=MxKxN GS=<group_size> [NO_ZEROS=1] [FP32=1].
 // ============================================================
-
-struct ModelConfig {
-    std::vector<int> M_array;
-    std::vector<int> K_array;
-    std::vector<int> N_array;
-};
-
-static ModelConfig parseModelConfig(const std::string& path)
-{
-    auto json = slurpFile(path);
-    if(json.empty())
-    {
-        std::cerr << "ERROR: cannot read " << path << std::endl;
-        exit(1);
-    }
-    ModelConfig cfg;
-    cfg.M_array = jsonIntArray(json, "M_array");
-    cfg.K_array = jsonNestedIntArray(json, "KN_pairs", "K");
-    cfg.N_array = jsonNestedIntArray(json, "KN_pairs", "N");
-    if(cfg.K_array.size() != cfg.N_array.size())
-    {
-        std::cerr << "ERROR: K and N arrays in KN_pairs must have the same length" << std::endl;
-        exit(1);
-    }
-    std::cout << "  Model: " << cfg.M_array.size() << " M values x "
-              << cfg.K_array.size() << " KN pairs = "
-              << cfg.M_array.size() * cfg.K_array.size() << " shapes" << std::endl;
-    std::cout << "  M_array: ";
-    for(int m : cfg.M_array) std::cout << m << " ";
-    std::cout << std::endl;
-    for(size_t i = 0; i < cfg.K_array.size(); i++)
-        std::cout << "  KN[" << i << "]: K=" << cfg.K_array[i]
-                  << " N=" << cfg.N_array[i] << std::endl;
-    return cfg;
+static int runCustom(int M, int N, int K, int gs, bool zero, bool fp32) {
+  return sweep::runOne({M, K, N, gs, zero, fp32}, /*idx=*/0) ? 0 : 1;
 }
 
-// ============================================================
-
-bool test_matmul_nbits(int M, int N, int K, int group_size,
-                       const std::string& data_dir, bool use_zeros,
-                       const TestFiles& tf = TestFiles{})
-{
-    int num_groups_k = (K + group_size - 1) / group_size;
-
-    std::cout << "\n=== Test MatMulNBits M=" << M << " N=" << N << " K=" << K
-              << " group_size=" << group_size
-              << (use_zeros ? "" : " (no zeros)") << " ===" << std::endl;
-
-    std::string fA = data_dir + "/" + tf.a;
-    std::string fB = data_dir + "/" + tf.b;
-    std::string fS = data_dir + "/" + tf.s;
-    std::string fZ = data_dir + "/" + tf.z;
-    std::string fC = data_dir + "/" + tf.c_ref;
-
-    std::vector<__half>  h_A;
-    std::vector<uint8_t> h_B_packed;
-    std::vector<__half>  h_scales;
-    std::vector<__half>  h_zeros;
-
-    size_t countA = static_cast<size_t>(M) * K;
-    // B_packed rows are padded to num_groups_k * (group_size/2) bytes (ONNX
-    // MatMulNBits blob layout -- the last group is padded to a full
-    // group_size even when K % group_size != 0), NOT a plain K/2 bytes/row.
-    size_t countB = static_cast<size_t>(N) * num_groups_k * (group_size / 2);
-    size_t countS = static_cast<size_t>(N) * num_groups_k;
-    size_t countZ = static_cast<size_t>(N) * num_groups_k;
-    size_t countC = static_cast<size_t>(M) * N;
-
-    bool data_ok = readBin(fA, h_A, countA) &&
-                   readBin(fB, h_B_packed, countB) &&
-                   readBin(fS, h_scales, countS);
-    if(use_zeros)
-        data_ok = data_ok && readBin(fZ, h_zeros, countZ);
-
-    if(!data_ok)
-    {
-        std::cerr << "  ERROR: Failed to read input data files from " << data_dir << "/" << std::endl;
-        std::cerr << "  Run: python gen_matmul_nbits_data.py "
-                  << M << "x" << K << "x" << N
-                  << " --group-size " << group_size
-                  << (use_zeros ? "" : " --no-zeros")
-                  << " --dir " << data_dir << std::endl;
-        return false;
-    }
-    std::cout << "  Loaded input data from " << data_dir << "/" << std::endl;
-
-    std::vector<__half> h_C_ref;
-    bool has_ref = readBin(fC, h_C_ref, countC);
-    if(!has_ref)
-        std::cout << "  WARNING: No reference file (" << fC << "), skipping verification." << std::endl;
-
-    __half*  d_A        = nullptr;
-    uint8_t* d_B_packed = nullptr;
-    __half*  d_scales   = nullptr;
-    __half*  d_zeros    = nullptr;
-    __half*  d_C        = nullptr;
-
-    size_t size_A      = countA * sizeof(__half);
-    size_t size_B      = countB;
-    size_t size_scales = countS * sizeof(__half);
-    size_t size_zeros  = countZ * sizeof(__half);
-    size_t size_C      = countC * sizeof(__half);
-
-    HIP_CHECK(hipMalloc(&d_A, size_A));
-    HIP_CHECK(hipMalloc(&d_B_packed, size_B));
-    HIP_CHECK(hipMalloc(&d_scales, size_scales));
-    if(use_zeros)
-    {
-        HIP_CHECK(hipMalloc(&d_zeros, size_zeros));
-    }
-    HIP_CHECK(hipMalloc(&d_C, size_C));
-
-    HIP_CHECK(hipMemcpy(d_A, h_A.data(), size_A, hipMemcpyHostToDevice));
-    HIP_CHECK(hipMemcpy(d_B_packed, h_B_packed.data(), size_B, hipMemcpyHostToDevice));
-    HIP_CHECK(hipMemcpy(d_scales, h_scales.data(), size_scales, hipMemcpyHostToDevice));
-    if(use_zeros)
-    {
-        HIP_CHECK(hipMemcpy(d_zeros, h_zeros.data(), size_zeros, hipMemcpyHostToDevice));
-    }
-    HIP_CHECK(hipMemset(d_C, 0, size_C));
-
-    hipStream_t stream;
-    HIP_CHECK(hipStreamCreate(&stream));
-
-    auto launch_kernel = [&]() {
-        hip_matmul_nbits(
-            stream,
-            d_A,
-            d_B_packed,
-            d_scales,
-            use_zeros ? d_zeros : nullptr,
-            nullptr,   // no bias
-            d_C,
-            M, N, K,
-            1,         // batch_count
-            4,         // bits
-            group_size,// block_size
-            2,         // element_size_bytes (fp16)
-            2,         // zp_elem_size (fp16 zero_points, used as-is)
-            nullptr,   // pre_unpacked_zp_u8 (unused, zp_elem_size==2)
-            nullptr);  // pre_unpacked_zp_fp16 (unused, zero_points is already fp16)
-    };
-
-    // First call triggers the tuner search / LUT resolve (cached for every
-    // call after); capture its [custom_kernels] log lines for out/results.csv
-    // without changing the measured warmup/benchmark calls below.
-#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
-    const char* kCaptureEnv = "HIPDNN_MATMUL_LUT_LOG";
-#else
-    const char* kCaptureEnv = "HIPDNN_MATMUL_AUTOTUNE_LOG";
-#endif
-    std::vector<std::string> capture_lines = hipdnn_ep_test::captureLogLines(
-        kCaptureEnv, "out/_autotune_capture.tmp", launch_kernel);
-    HIP_CHECK(hipStreamSynchronize(stream));
-
-    constexpr int PRE_WARMUP = 2000;
-    std::cout << "  Pre-warmup (" << PRE_WARMUP << " iters)..." << std::flush;
-    auto pw0 = std::chrono::steady_clock::now();
-    for(int w = 0; w < PRE_WARMUP; w++)
-        launch_kernel();
-    HIP_CHECK(hipStreamSynchronize(stream));
-    double pw_ms = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now() - pw0).count() / 1000.0;
-    std::cout << " done (" << std::fixed << std::setprecision(0) << pw_ms << " ms, "
-              << std::setprecision(3) << pw_ms / PRE_WARMUP << " ms/iter)" << std::endl;
-
-    std::cout << "  Warmup..." << std::flush;
-    auto tw0 = std::chrono::steady_clock::now();
-    int status = 0;
-    for(int w = 0; w < 3; w++)
-    {
-        status = hip_matmul_nbits(
-            stream,
-            d_A,
-            d_B_packed,
-            d_scales,
-            use_zeros ? d_zeros : nullptr,
-            nullptr,
-            d_C,
-            M, N, K,
-            1, 4, group_size, 2, 2, nullptr, nullptr);
-        if(status != 0) break;
-    }
-    HIP_CHECK(hipStreamSynchronize(stream));
-    auto tw1 = std::chrono::steady_clock::now();
-    double warmup_ms =
-        std::chrono::duration_cast<std::chrono::microseconds>(tw1 - tw0).count() / 1000.0;
-
-    if(status != 0)
-    {
-        std::cout << " FAILED (status=" << status << ")" << std::endl;
-        hipFree(d_A);
-        hipFree(d_B_packed);
-        hipFree(d_scales);
-        if(d_zeros) hipFree(d_zeros);
-        hipFree(d_C);
-        hipStreamDestroy(stream);
-        return false;
-    }
-
-    int niters = calibrateIters(warmup_ms, 3);
-    std::cout << " OK (" << std::fixed << std::setprecision(2) << warmup_ms
-              << " ms), iters=" << niters << std::endl;
-
-    std::cout << "  Benchmarking (" << NROUNDS << " rounds x " << niters << " iters)..."
-              << std::flush;
-    auto mr = measureMedian(stream, niters, launch_kernel);
-
-    double avg_ms    = mr.median_ms / niters;
-    double gflops    = (2.0 * M * N * K) / (avg_ms * 1e6);
-    double mem_bytes = static_cast<double>(countA) * 2 + static_cast<double>(countB)
-                     + static_cast<double>(countS) * 2
-                     + (use_zeros ? static_cast<double>(countZ) * 2 : 0.0)
-                     + static_cast<double>(countC) * 2;
-    double bw_gbs    = mem_bytes * niters / (mr.median_ms * 1e6);
-    double range_pct = (mr.max_ms - mr.min_ms) / mr.median_ms * 100.0;
-
-    std::cout << " done" << std::endl;
-    std::cout << "\n  === Performance ===" << std::endl;
-    std::cout << std::fixed << std::setprecision(3);
-    std::cout << "  Median: "
-              << std::setprecision(6) << avg_ms << " ms, "
-              << gflops << " GFLOPS, "
-              << bw_gbs << " GB/s" << std::endl;
-    std::cout << "  Range:  " << mr.min_ms / niters << " ~ " << mr.max_ms / niters
-              << " ms  (jitter " << std::setprecision(1) << range_pct << "%)" << std::endl;
-
-    std::vector<__half> h_C(countC);
-    HIP_CHECK(hipMemcpy(h_C.data(), d_C, size_C, hipMemcpyDeviceToHost));
-
-    bool pass = true;
-    double rel_l2 = 0.0;
-
-    if(has_ref)
-    {
-        int errors      = 0;
-        int total        = M * N;
-        float max_diff  = 0.0f;
-        float max_rdiff = 0.0f;
-        double sum_sq_diff = 0.0, sum_sq_ref = 0.0;
-
-        for(int i = 0; i < total; i++)
-        {
-            float gpu_val = half_to_float(h_C[i]);
-            float ref_val = half_to_float(h_C_ref[i]);
-            float diff    = std::fabs(gpu_val - ref_val);
-            float rdiff   = (std::fabs(ref_val) > 1e-6f) ? diff / std::fabs(ref_val) : diff;
-
-            if(diff > max_diff) max_diff = diff;
-            if(rdiff > max_rdiff) max_rdiff = rdiff;
-            sum_sq_diff += double(diff) * double(diff);
-            sum_sq_ref  += double(ref_val) * double(ref_val);
-
-            float tol = std::fabs(ref_val) * 0.05f + 0.1f;
-            if(diff > tol)
-                errors++;
-        }
-        rel_l2 = (sum_sq_ref > 0.0) ? std::sqrt(sum_sq_diff / sum_sq_ref) : std::sqrt(sum_sq_diff);
-
-        std::cout << "\n  === GPU vs Python Reference ===" << std::endl;
-        std::cout << "  Verified " << total << " elements, " << errors << " errors" << std::endl;
-        std::cout << "  Max abs diff: " << max_diff << ", max rel diff: "
-                  << std::fixed << std::setprecision(4) << (max_rdiff * 100.0f) << "%" << std::endl;
-
-        std::cout << "  Sample C values (GPU vs Python):" << std::endl;
-        for(int i = 0; i < 5 && i < total; i++)
-        {
-            float gpu_val = half_to_float(h_C[i]);
-            float ref_val = half_to_float(h_C_ref[i]);
-            std::cout << "    [" << i << "] GPU=" << std::setprecision(6) << gpu_val
-                      << "  Ref=" << ref_val
-                      << "  diff=" << std::fabs(gpu_val - ref_val) << std::endl;
-        }
-
-        pass = (errors == 0);
-        std::cout << "  Result: " << (pass ? "PASSED" : "FAILED") << std::endl;
-    }
-    else
-    {
-        std::cout << "  GPU output sample:" << std::endl;
-        int total = M * N;
-        for(int i = 0; i < 5 && i < total; i++)
-            std::cout << "    [" << i << "] = " << half_to_float(h_C[i]) << std::endl;
-    }
-
-    {
-        using namespace hipdnn_ep_test;
-        CsvWriter csv;
-        char shape_buf[64];
-        std::snprintf(shape_buf, sizeof(shape_buf), "%dx%dx%d_gs%d", M, N, K, group_size);
-#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
-        std::string lut_source;
-        for (const std::string& line : capture_lines) {
-            if (line.find("[matmul-lut]") == std::string::npos) continue;
-            if (line.find("exact") != std::string::npos) lut_source = "exact";
-            else if (line.find("nearest") != std::string::npos) lut_source = "nearest";
-            else if (line.find("fallback") != std::string::npos) lut_source = "fallback";
-            if (!lut_source.empty()) break;
-        }
-        CsvRow row;
-        row.shape = shape_buf;
-        row.config = lut_source.empty() ? "lut:none" : ("lut:" + lut_source);
-        row.time_ms = avg_ms;
-        row.gflops = gflops;
-        row.gbps = bw_gbs;
-        row.is_best = 1;
-        row.lut_source = lut_source;
-        row.rel_l2 = rel_l2;
-        row.has_verdict = true;
-        row.verdict = pass ? "PASS" : "FAIL";
-        csv.write(row);
-#else
-        std::vector<CsvRow> candidates = parseCandidateLines(capture_lines);
-        for (CsvRow& c : candidates) {
-            c.shape = shape_buf;
-            csv.write(c);
-        }
-        CsvRow row;
-        row.shape = shape_buf;
-        row.config = "final";
-        row.time_ms = avg_ms;
-        row.gflops = gflops;
-        row.gbps = bw_gbs;
-        row.is_best = 0;
-        row.rel_l2 = rel_l2;
-        row.has_verdict = true;
-        row.verdict = pass ? "PASS" : "FAIL";
-        csv.write(row);
-#endif
-    }
-
-    hipFree(d_A);
-    hipFree(d_B_packed);
-    hipFree(d_scales);
-    if(d_zeros) hipFree(d_zeros);
-    hipFree(d_C);
-    hipStreamDestroy(stream);
-
-    return pass;
-}
-
-// ============================================================
-// FP32 A / FP32 output test: drives the phase-1 fp32 cast patch
-// (element_size_bytes==4, bits=4) in hip_matmul_nbits. A is upcast
-// host-side from the same on-disk fp16 A (exact fp16->fp32), so the
-// kernel's internal fp32->fp16 downcast reproduces that exact fp16 A --
-// the existing fp16 C_ref is therefore still the correct ground truth,
-// just compared through float containers.
-// ============================================================
-bool test_matmul_nbits_fp32(int M, int N, int K, int group_size,
-                            const std::string& data_dir, bool use_zeros,
-                            const TestFiles& tf = TestFiles{})
-{
-    int num_groups_k = (K + group_size - 1) / group_size;
-
-    std::cout << "\n=== Test MatMulNBits FP32 M=" << M << " N=" << N << " K=" << K
-              << " group_size=" << group_size
-              << (use_zeros ? "" : " (no zeros)") << " ===" << std::endl;
-
-    std::string fA = data_dir + "/" + tf.a;
-    std::string fB = data_dir + "/" + tf.b;
-    std::string fS = data_dir + "/" + tf.s;
-    std::string fZ = data_dir + "/" + tf.z;
-    std::string fC = data_dir + "/" + tf.c_ref;
-
-    std::vector<__half>  h_A_fp16;
-    std::vector<uint8_t> h_B_packed;
-    std::vector<__half>  h_scales;
-    std::vector<__half>  h_zeros;
-
-    size_t countA = static_cast<size_t>(M) * K;
-    size_t countB = static_cast<size_t>(N) * num_groups_k * (group_size / 2);
-    size_t countS = static_cast<size_t>(N) * num_groups_k;
-    size_t countZ = static_cast<size_t>(N) * num_groups_k;
-    size_t countC = static_cast<size_t>(M) * N;
-
-    bool data_ok = readBin(fA, h_A_fp16, countA) &&
-                   readBin(fB, h_B_packed, countB) &&
-                   readBin(fS, h_scales, countS);
-    if(use_zeros)
-        data_ok = data_ok && readBin(fZ, h_zeros, countZ);
-
-    if(!data_ok)
-    {
-        std::cerr << "  ERROR: Failed to read input data files from " << data_dir << "/" << std::endl;
-        return false;
-    }
-    std::cout << "  Loaded input data from " << data_dir << "/" << std::endl;
-
-    std::vector<float> h_A(countA);
-    for(size_t i = 0; i < countA; i++)
-        h_A[i] = half_to_float(h_A_fp16[i]);
-
-    std::vector<__half> h_C_ref;
-    bool has_ref = readBin(fC, h_C_ref, countC);
-    if(!has_ref)
-        std::cout << "  WARNING: No reference file (" << fC << "), skipping verification." << std::endl;
-
-    float*   d_A        = nullptr;
-    uint8_t* d_B_packed = nullptr;
-    __half*  d_scales   = nullptr;
-    __half*  d_zeros    = nullptr;
-    float*   d_C        = nullptr;
-
-    size_t size_A      = countA * sizeof(float);
-    size_t size_B      = countB;
-    size_t size_scales = countS * sizeof(__half);
-    size_t size_zeros  = countZ * sizeof(__half);
-    size_t size_C      = countC * sizeof(float);
-
-    HIP_CHECK(hipMalloc(&d_A, size_A));
-    HIP_CHECK(hipMalloc(&d_B_packed, size_B));
-    HIP_CHECK(hipMalloc(&d_scales, size_scales));
-    if(use_zeros)
-    {
-        HIP_CHECK(hipMalloc(&d_zeros, size_zeros));
-    }
-    HIP_CHECK(hipMalloc(&d_C, size_C));
-
-    HIP_CHECK(hipMemcpy(d_A, h_A.data(), size_A, hipMemcpyHostToDevice));
-    HIP_CHECK(hipMemcpy(d_B_packed, h_B_packed.data(), size_B, hipMemcpyHostToDevice));
-    HIP_CHECK(hipMemcpy(d_scales, h_scales.data(), size_scales, hipMemcpyHostToDevice));
-    if(use_zeros)
-    {
-        HIP_CHECK(hipMemcpy(d_zeros, h_zeros.data(), size_zeros, hipMemcpyHostToDevice));
-    }
-    HIP_CHECK(hipMemset(d_C, 0, size_C));
-
-    hipStream_t stream;
-    HIP_CHECK(hipStreamCreate(&stream));
-
-    auto launch_kernel = [&]() {
-        hip_matmul_nbits(
-            stream,
-            d_A,
-            d_B_packed,
-            d_scales,
-            use_zeros ? d_zeros : nullptr,
-            nullptr,   // no bias
-            d_C,
-            M, N, K,
-            1,         // batch_count
-            4,         // bits
-            group_size,// block_size
-            4,         // element_size_bytes (fp32)
-            2,         // zp_elem_size (fp16 zero_points, used as-is)
-            nullptr,   // pre_unpacked_zp_u8 (unused, zp_elem_size==2)
-            nullptr);  // pre_unpacked_zp_fp16 (unused, zero_points is already fp16)
-    };
-
-    constexpr int PRE_WARMUP = 2000;
-    std::cout << "  Pre-warmup (" << PRE_WARMUP << " iters)..." << std::flush;
-    auto pw0 = std::chrono::steady_clock::now();
-    for(int w = 0; w < PRE_WARMUP; w++)
-        launch_kernel();
-    HIP_CHECK(hipStreamSynchronize(stream));
-    double pw_ms = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now() - pw0).count() / 1000.0;
-    std::cout << " done (" << std::fixed << std::setprecision(0) << pw_ms << " ms, "
-              << std::setprecision(3) << pw_ms / PRE_WARMUP << " ms/iter)" << std::endl;
-
-    std::cout << "  Warmup..." << std::flush;
-    auto tw0 = std::chrono::steady_clock::now();
-    int status = 0;
-    for(int w = 0; w < 3; w++)
-    {
-        status = hip_matmul_nbits(
-            stream,
-            d_A,
-            d_B_packed,
-            d_scales,
-            use_zeros ? d_zeros : nullptr,
-            nullptr,
-            d_C,
-            M, N, K,
-            1, 4, group_size, 4, 2, nullptr, nullptr);
-        if(status != 0) break;
-    }
-    HIP_CHECK(hipStreamSynchronize(stream));
-    auto tw1 = std::chrono::steady_clock::now();
-    double warmup_ms =
-        std::chrono::duration_cast<std::chrono::microseconds>(tw1 - tw0).count() / 1000.0;
-
-    if(status != 0)
-    {
-        std::cout << " FAILED (status=" << status << ")" << std::endl;
-        hipFree(d_A);
-        hipFree(d_B_packed);
-        hipFree(d_scales);
-        if(d_zeros) hipFree(d_zeros);
-        hipFree(d_C);
-        hipStreamDestroy(stream);
-        return false;
-    }
-
-    int niters = calibrateIters(warmup_ms, 3);
-    std::cout << " OK (" << std::fixed << std::setprecision(2) << warmup_ms
-              << " ms), iters=" << niters << std::endl;
-
-    std::cout << "  Benchmarking (" << NROUNDS << " rounds x " << niters << " iters)..."
-              << std::flush;
-    auto mr = measureMedian(stream, niters, launch_kernel);
-
-    double avg_ms    = mr.median_ms / niters;
-    double gflops    = (2.0 * M * N * K) / (avg_ms * 1e6);
-    double mem_bytes = static_cast<double>(countA) * 4 + static_cast<double>(countB)
-                     + static_cast<double>(countS) * 2
-                     + (use_zeros ? static_cast<double>(countZ) * 2 : 0.0)
-                     + static_cast<double>(countC) * 4;
-    double bw_gbs    = mem_bytes * niters / (mr.median_ms * 1e6);
-    double range_pct = (mr.max_ms - mr.min_ms) / mr.median_ms * 100.0;
-
-    std::cout << " done" << std::endl;
-    std::cout << "\n  === Performance ===" << std::endl;
-    std::cout << std::fixed << std::setprecision(3);
-    std::cout << "  Median: "
-              << std::setprecision(6) << avg_ms << " ms, "
-              << gflops << " GFLOPS, "
-              << bw_gbs << " GB/s" << std::endl;
-    std::cout << "  Range:  " << mr.min_ms / niters << " ~ " << mr.max_ms / niters
-              << " ms  (jitter " << std::setprecision(1) << range_pct << "%)" << std::endl;
-
-    std::vector<float> h_C(countC);
-    HIP_CHECK(hipMemcpy(h_C.data(), d_C, size_C, hipMemcpyDeviceToHost));
-
-    bool pass = true;
-
-    if(has_ref)
-    {
-        int errors      = 0;
-        int total        = M * N;
-        float max_diff  = 0.0f;
-        float max_rdiff = 0.0f;
-
-        for(int i = 0; i < total; i++)
-        {
-            float gpu_val = h_C[i];
-            float ref_val = half_to_float(h_C_ref[i]);
-            float diff    = std::fabs(gpu_val - ref_val);
-            float rdiff   = (std::fabs(ref_val) > 1e-6f) ? diff / std::fabs(ref_val) : diff;
-
-            if(diff > max_diff) max_diff = diff;
-            if(rdiff > max_rdiff) max_rdiff = rdiff;
-
-            float tol = std::fabs(ref_val) * 0.05f + 0.1f;
-            if(diff > tol)
-                errors++;
-        }
-
-        std::cout << "\n  === GPU vs Python Reference ===" << std::endl;
-        std::cout << "  Verified " << total << " elements, " << errors << " errors" << std::endl;
-        std::cout << "  Max abs diff: " << max_diff << ", max rel diff: "
-                  << std::fixed << std::setprecision(4) << (max_rdiff * 100.0f) << "%" << std::endl;
-
-        std::cout << "  Sample C values (GPU vs Python):" << std::endl;
-        for(int i = 0; i < 5 && i < total; i++)
-        {
-            float gpu_val = h_C[i];
-            float ref_val = half_to_float(h_C_ref[i]);
-            std::cout << "    [" << i << "] GPU=" << std::setprecision(6) << gpu_val
-                      << "  Ref=" << ref_val
-                      << "  diff=" << std::fabs(gpu_val - ref_val) << std::endl;
-        }
-
-        pass = (errors == 0);
-        std::cout << "  Result: " << (pass ? "PASSED" : "FAILED") << std::endl;
-    }
-    else
-    {
-        std::cout << "  GPU output sample:" << std::endl;
-        int total = M * N;
-        for(int i = 0; i < 5 && i < total; i++)
-            std::cout << "    [" << i << "] = " << h_C[i] << std::endl;
-    }
-
-    hipFree(d_A);
-    hipFree(d_B_packed);
-    hipFree(d_scales);
-    if(d_zeros) hipFree(d_zeros);
-    hipFree(d_C);
-    hipStreamDestroy(stream);
-
-    return pass;
-}
-
-// ============================================================
-// Model sweep: pre-warmup once, then benchmark + verify all shapes
-// ============================================================
-
-struct ShapeResult {
-    int    M, K, N;
-    double median_ms;
-    double gflops;
-    double bw_gbs;
-    bool   pass;
-    int    errors;
-    int    checked;
-};
-
-static int runModelSweep(const std::string& json_path, int group_size,
-                         bool use_zeros, const std::string& data_root)
-{
-    std::cout << "\nModel sweep: " << json_path
-              << "  (group_size=" << group_size
-              << (use_zeros ? ", with zeros)" : ", no zeros)")
-              << "\n  Data root: " << data_root << std::endl;
-
-    auto model = parseModelConfig(json_path);
-    if(model.M_array.empty() || model.K_array.empty())
-    {
-        std::cerr << "ERROR: empty model config" << std::endl;
-        return 1;
-    }
-
-    hipStream_t stream;
-    HIP_CHECK(hipStreamCreate(&stream));
-
-    int total_shapes = (int)(model.K_array.size() * model.M_array.size());
-    std::vector<ShapeResult> results;
-    results.reserve(total_shapes);
-    int shape_idx = 0;
-    bool warmup_done = false;
-
-    for(size_t ki = 0; ki < model.K_array.size(); ki++)
-    {
-        int K = model.K_array[ki];
-        int N = model.N_array[ki];
-
-        for(size_t mi = 0; mi < model.M_array.size(); mi++)
-        {
-            int M = model.M_array[mi];
-            shape_idx++;
-
-            int num_groups_k = (K + group_size - 1) / group_size;
-            size_t countA = (size_t)M * K;
-            // See test_matmul_nbits() above: B_packed rows are padded to
-            // num_groups_k * (group_size/2) bytes, not a plain K/2.
-            size_t countB = (size_t)N * num_groups_k * (group_size / 2);
-            size_t countS = (size_t)N * num_groups_k;
-            size_t countZ = (size_t)N * num_groups_k;
-            size_t countC = (size_t)M * N;
-
-            std::cout << "\n=== [" << shape_idx << "/" << total_shapes
-                      << "] M=" << M << " K=" << K << " N=" << N
-                      << " gs=" << group_size
-                      << (use_zeros ? "" : " (no zeros)") << " ===" << std::endl;
-
-            std::string shape_dir = data_root + "/"
-                + std::to_string(M) + "x" + std::to_string(K) + "x" + std::to_string(N);
-
-            std::vector<__half>  h_A;
-            std::vector<uint8_t> h_B;
-            std::vector<__half>  h_S, h_Z;
-
-            bool data_ok = readBin(shape_dir + "/matmul_nbits_A.bin", h_A, countA)
-                        && readBin(shape_dir + "/matmul_nbits_B_packed.bin", h_B, countB)
-                        && readBin(shape_dir + "/matmul_nbits_scales.bin", h_S, countS);
-            if(use_zeros)
-                data_ok = data_ok && readBin(shape_dir + "/matmul_nbits_zeros.bin", h_Z, countZ);
-
-            if(!data_ok)
-            {
-                std::cerr << "  ERROR: cannot read data from " << shape_dir << "/" << std::endl;
-                std::cerr << "  Run: make gendata_model  to generate all data first" << std::endl;
-                results.push_back({M, K, N, 0, 0, 0, false, -1, 0});
-                continue;
-            }
-            std::cout << "  Loaded data from " << shape_dir << "/" << std::endl;
-
-            std::vector<__half> h_C_ref;
-            bool has_ref = readBin(shape_dir + "/matmul_nbits_C_ref.bin", h_C_ref, countC);
-            if(!has_ref)
-                std::cout << "  WARNING: no reference file, skipping verification" << std::endl;
-
-            __half *dA, *dS, *dZ = nullptr, *dC;
-            uint8_t *dB;
-            HIP_CHECK(hipMalloc(&dA, countA * sizeof(__half)));
-            HIP_CHECK(hipMalloc(&dB, countB));
-            HIP_CHECK(hipMalloc(&dS, countS * sizeof(__half)));
-            if(use_zeros) HIP_CHECK(hipMalloc(&dZ, countZ * sizeof(__half)));
-            HIP_CHECK(hipMalloc(&dC, countC * sizeof(__half)));
-
-            HIP_CHECK(hipMemcpy(dA, h_A.data(), countA * sizeof(__half), hipMemcpyHostToDevice));
-            HIP_CHECK(hipMemcpy(dB, h_B.data(), countB, hipMemcpyHostToDevice));
-            HIP_CHECK(hipMemcpy(dS, h_S.data(), countS * sizeof(__half), hipMemcpyHostToDevice));
-            if(use_zeros)
-                HIP_CHECK(hipMemcpy(dZ, h_Z.data(), countZ * sizeof(__half), hipMemcpyHostToDevice));
-            HIP_CHECK(hipMemset(dC, 0, countC * sizeof(__half)));
-
-            auto launch = [&]() {
-                hip_matmul_nbits(stream, dA, dB, dS,
-                                 use_zeros ? dZ : nullptr, nullptr, dC,
-                                 M, N, K, 1, 4, group_size, 2, 2, nullptr, nullptr);
-            };
-
-            // Pre-warmup (once, on first successfully loaded shape)
-            if(!warmup_done)
-            {
-                constexpr int PRE_WARMUP = 200;
-                std::cout << "  Pre-warmup (" << PRE_WARMUP << " iters)..." << std::flush;
-                auto t0 = std::chrono::steady_clock::now();
-                for(int w = 0; w < PRE_WARMUP; w++)
-                    launch();
-                HIP_CHECK(hipStreamSynchronize(stream));
-                double ms = std::chrono::duration_cast<std::chrono::microseconds>(
-                    std::chrono::steady_clock::now() - t0).count() / 1000.0;
-                std::cout << " done (" << std::fixed << std::setprecision(0)
-                          << ms << " ms, "
-                          << std::setprecision(3) << ms / PRE_WARMUP << " ms/iter)" << std::endl;
-                HIP_CHECK(hipMemset(dC, 0, countC * sizeof(__half)));
-                warmup_done = true;
-            }
-
-            // Calibration warmup (per shape)
-            std::cout << "  Warmup..." << std::flush;
-            auto tw0 = std::chrono::steady_clock::now();
-            int status = 0;
-            for(int w = 0; w < 3; w++)
-            {
-                status = hip_matmul_nbits(stream, dA, dB, dS,
-                                          use_zeros ? dZ : nullptr, nullptr, dC,
-                                          M, N, K, 1, 4, group_size, 2, 2, nullptr, nullptr);
-                if(status != 0) break;
-            }
-            HIP_CHECK(hipStreamSynchronize(stream));
-            double warmup_ms = std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::steady_clock::now() - tw0).count() / 1000.0;
-
-            if(status != 0)
-            {
-                std::cout << " FAILED (status=" << status << ")" << std::endl;
-                results.push_back({M, K, N, 0, 0, 0, false, -1, 0});
-                hipFree(dA); hipFree(dB); hipFree(dS);
-                if(dZ) hipFree(dZ); hipFree(dC);
-                continue;
-            }
-
-            int niters = calibrateIters(warmup_ms, 3);
-            std::cout << " OK (" << std::fixed << std::setprecision(2)
-                      << warmup_ms << " ms), iters=" << niters << std::endl;
-
-            std::cout << "  Benchmarking (" << NROUNDS << " rounds x "
-                      << niters << " iters)..." << std::flush;
-            auto mr = measureMedian(stream, niters, launch);
-
-            double avg_ms    = mr.median_ms / niters;
-            double gflops    = (2.0 * M * N * K) / (avg_ms * 1e6);
-            double mem_bytes = (double)countA * 2 + (double)countB
-                             + (double)countS * 2
-                             + (use_zeros ? (double)countZ * 2 : 0.0)
-                             + (double)countC * 2;
-            double bw_gbs    = mem_bytes * niters / (mr.median_ms * 1e6);
-
-            std::cout << " done" << std::endl;
-            std::cout << "\n  === Performance ===" << std::endl;
-            std::cout << std::fixed << std::setprecision(6);
-            std::cout << "  Median: " << avg_ms << " ms, "
-                      << gflops << " GFLOPS, " << bw_gbs << " GB/s" << std::endl;
-
-            // Download and verify against Python reference
-            std::vector<__half> h_C(countC);
-            HIP_CHECK(hipMemcpy(h_C.data(), dC, countC * sizeof(__half), hipMemcpyDeviceToHost));
-
-            bool pass = true;
-            int errors = 0;
-            int total = M * N;
-
-            if(has_ref)
-            {
-                float max_diff  = 0.0f;
-                float max_rdiff = 0.0f;
-
-                for(int i = 0; i < total; i++)
-                {
-                    float gpu_val = half_to_float(h_C[i]);
-                    float ref_val = half_to_float(h_C_ref[i]);
-                    float diff    = std::fabs(gpu_val - ref_val);
-                    float rdiff   = (std::fabs(ref_val) > 1e-6f) ? diff / std::fabs(ref_val) : diff;
-                    if(diff > max_diff) max_diff = diff;
-                    if(rdiff > max_rdiff) max_rdiff = rdiff;
-                    float tol = std::fabs(ref_val) * 0.05f + 0.1f;
-                    if(diff > tol) errors++;
-                }
-
-                pass = (errors == 0);
-                std::cout << "\n  === GPU vs Python Reference ===" << std::endl;
-                std::cout << "  Verified " << total << " elements, " << errors << " errors" << std::endl;
-                std::cout << "  Max abs diff: " << std::setprecision(4) << max_diff
-                          << ", max rel diff: " << (max_rdiff * 100.0f) << "%" << std::endl;
-                std::cout << "  Result: " << (pass ? "PASS" : "FAIL") << std::endl;
-            }
-            else
-            {
-                std::cout << "  Verify: SKIPPED (no reference)" << std::endl;
-            }
-
-            results.push_back({M, K, N, avg_ms, gflops, bw_gbs,
-                               pass, errors, total});
-
-            hipFree(dA); hipFree(dB); hipFree(dS);
-            if(dZ) hipFree(dZ); hipFree(dC);
-        }
-    }
-
-    hipStreamDestroy(stream);
-
-    // ---- Summary table ----
-    std::cout << "\n=========================================================================="
-              << std::endl;
-    std::cout << "Model Sweep Summary: " << json_path << std::endl;
-    std::cout << "=========================================================================="
-              << std::endl;
-    std::cout << std::right
-              << std::setw(4)  << "#"    << " | "
-              << std::setw(5)  << "M"    << " | "
-              << std::setw(5)  << "K"    << " | "
-              << std::setw(7)  << "N"    << " | "
-              << std::setw(11) << "Median(ms)"  << " | "
-              << std::setw(9)  << "GFLOPS"  << " | "
-              << std::setw(8)  << "GB/s"    << " | "
-              << "Status" << std::endl;
-    std::cout << "-----+-------+-------+---------+-------------+-----------+----------+--------"
-              << std::endl;
-
-    int pass_count = 0, fail_count = 0;
-    for(size_t i = 0; i < results.size(); i++)
-    {
-        auto& r = results[i];
-        if(r.pass) pass_count++; else fail_count++;
-        std::cout << std::right << std::setw(4) << (i + 1) << " | "
-                  << std::setw(5) << r.M << " | "
-                  << std::setw(5) << r.K << " | "
-                  << std::setw(7) << r.N << " | "
-                  << std::setw(11) << std::fixed << std::setprecision(6) << r.median_ms << " | "
-                  << std::setw(9)  << std::setprecision(2) << r.gflops << " | "
-                  << std::setw(8)  << std::setprecision(2) << r.bw_gbs << " | "
-                  << (r.pass ? "PASS" : "FAIL") << std::endl;
-    }
-
-    std::cout << "=========================================================================="
-              << std::endl;
-    std::cout << "Total: " << results.size() << " shapes, "
-              << pass_count << " passed, " << fail_count << " failed" << std::endl;
-    std::cout << "=========================================================================="
-              << std::endl;
-
-    return (fail_count == 0) ? 0 : 1;
-}
-
-int main(int argc, char* argv[])
-{
-    std::cout << "custom_kernels MatMulNBits (WMMA Fused GEMM + Dequantization) Verification" << std::endl;
-    std::cout << "==========================================================================" << std::endl;
-
-    hipDeviceProp_t prop;
-    HIP_CHECK(hipGetDeviceProperties(&prop, 0));
-    std::cout << "GPU: " << prop.name << " (arch: " << prop.gcnArchName << ")" << std::endl;
-
-    std::string arch(prop.gcnArchName);
-    if(arch.find("gfx11") == std::string::npos && arch.find("gfx12") == std::string::npos)
-    {
-        std::cerr << "WARNING: WMMA fast path requires RDNA3+ (gfx11xx/gfx12xx). "
-                  << "Current arch: " << arch << std::endl;
-    }
-
-    // --- Check for --true-data mode ---
-    std::string true_data_folder;
-    for(int i = 1; i < argc; i++)
-    {
-        if(std::string(argv[i]) == "--true-data" && i + 1 < argc)
-        {
-            true_data_folder = argv[++i];
-            break;
-        }
-    }
-
-    if(!true_data_folder.empty())
-    {
-        std::string json_path = true_data_folder + "/shape.json";
-        std::cout << "True-data mode: " << json_path << std::endl;
-
-        auto cfg = parseShapeJson(json_path);
-        bool use_zeros = !cfg.no_zeros;
-
-        bool all_pass = test_matmul_nbits(
-            cfg.M, cfg.N, cfg.K, cfg.block_size,
-            true_data_folder, use_zeros, cfg.files);
-
-        std::cout << "\n==========================================================================" << std::endl;
-        std::cout << "Overall: " << (all_pass ? "ALL PASSED" : "SOME FAILED") << std::endl;
-        return all_pass ? 0 : 1;
-    }
-
-    // --- Check for --model mode ---
-    std::string model_json;
-    std::string model_data_root = "data_model";
-    int model_gs = 128;
-    bool model_use_zeros = true;
-    for(int i = 1; i < argc; i++)
-    {
-        if(std::string(argv[i]) == "--model" && i + 1 < argc)
-            model_json = argv[++i];
-        else if(std::string(argv[i]) == "--data-root" && i + 1 < argc)
-            model_data_root = argv[++i];
-        else if(std::string(argv[i]) == "--group-size" && i + 1 < argc)
-            model_gs = std::atoi(argv[++i]);
-        else if(std::string(argv[i]) == "--no-zeros")
-            model_use_zeros = false;
-    }
-
-    if(!model_json.empty())
-        return runModelSweep(model_json, model_gs, model_use_zeros, model_data_root);
-
-    // --- Random-data mode (original) ---
-    int M = 128, N = 128, K = 128, gs = 128;
-    std::string data_dir = "data";
-    bool use_zeros = true;
-    bool fp32_mode = false;
-
-    for(int i = 1; i < argc; i++)
-    {
-        if(std::string(argv[i]) == "--no-zeros")
-            use_zeros = false;
-        else if(std::string(argv[i]) == "--fp32")
-            fp32_mode = true;
-    }
-
-    if(argc >= 2 && std::string(argv[1]) != "--no-zeros" && std::string(argv[1]) != "--fp32")
-    {
-        if(sscanf(argv[1], "%dx%dx%d", &M, &K, &N) != 3)
-        {
-            std::cerr << "Usage: " << argv[0]
-                      << " [MxKxN] [group_size] [data_dir] [--no-zeros] [--fp32]" << std::endl;
-            std::cerr << "       " << argv[0]
-                      << " --true-data <folder>" << std::endl;
-            std::cerr << "       " << argv[0]
-                      << " --model <json> [--data-root DIR] [--group-size GS] [--no-zeros]" << std::endl;
-            return 1;
-        }
-    }
-    if(argc >= 3 && std::string(argv[2]) != "--no-zeros" && std::string(argv[2]) != "--fp32") gs = atoi(argv[2]);
-    if(argc >= 4 && std::string(argv[3]) != "--no-zeros" && std::string(argv[3]) != "--fp32") data_dir = argv[3];
-
-    std::cout << "Data dir: " << data_dir << std::endl;
-    if(!use_zeros)
-        std::cout << "Zero points: disabled (--no-zeros)" << std::endl;
-    if(fp32_mode)
-        std::cout << "Mode: FP32 A / FP32 output (element_size_bytes=4)" << std::endl;
-
-    bool all_pass = true;
-    all_pass &= fp32_mode
-        ? test_matmul_nbits_fp32(M, N, K, gs, data_dir, use_zeros)
-        : test_matmul_nbits(M, N, K, gs, data_dir, use_zeros);
-
-    std::cout << "\n==========================================================================" << std::endl;
-    std::cout << "Overall: " << (all_pass ? "ALL PASSED" : "SOME FAILED") << std::endl;
-
-    return all_pass ? 0 : 1;
+int main(int argc, char* argv[]) {
+  std::printf("custom_kernels MatMulNBits bits=4 (nibble-packed) Verification\n");
+  std::printf("===============================================================\n");
+
+  hipDeviceProp_t prop;
+  HIP_CHECK(hipGetDeviceProperties(&prop, 0));
+  std::printf("GPU: %s (arch: %s)\n", prop.name, prop.gcnArchName);
+
+  int M = 0, N = 0, K = 0;
+  int gs = 128;
+  bool no_zeros = false, fp32_mode = false;
+  bool have_custom = false;
+  for (int i = 1; i < argc; ++i) {
+    std::string a = argv[i];
+    if (a == "--no-zeros") no_zeros = true;
+    else if (a == "--fp32") fp32_mode = true;
+    else if (a == "--group-size" && i + 1 < argc) gs = std::atoi(argv[++i]);
+    else if (sscanf(argv[i], "%dx%dx%d", &M, &K, &N) == 3) have_custom = true;
+  }
+
+  if (have_custom)
+    return runCustom(M, N, K, gs, !no_zeros, fp32_mode);
+
+  const int tier = hipdnn_ep_test::resolveCoverageTier(argc, argv);
+  return sweep::run(tier);
 }

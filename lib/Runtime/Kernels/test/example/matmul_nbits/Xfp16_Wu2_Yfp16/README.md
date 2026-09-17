@@ -1,40 +1,47 @@
-# MatMulNBits bits=2 (uint2) vs bits=4 test
+# MatMulNBits bits=2 (uint2, 4-per-byte packed) test
 
-Standalone `hipcc`-only test for `hip_matmul_nbits()` (bits=2, 2-bit packed),
-benchmarked back-to-back against bits=4 on the same shape. No CMake, no EP
-build.
+Standalone `hipcc`-only test for `hip_matmul_nbits()` (bits=2, packed 4
+values/byte LSB-first -- a plain continuous 2-bit stream, no group_size
+padding). No CMake, no EP build. Entirely self-contained: inputs (uint2
+packing, scales, zero-points) and the CPU fp32 dequant+matmul reference are
+all generated in-process, no python, no data files, no `example/common/`.
 
 ```
-make test        OFFLOAD=--offload-arch=%GFX% HIP_SDK=%HIP_SDK%
-make test_shapes OFFLOAD=... HIP_SDK=... [SHAPES=shapes.csv]
-make test_model  OFFLOAD=... HIP_SDK=... [MODEL_JSON=../../models/gpt_oss_20b.json]
-make test_custom OFFLOAD=... HIP_SDK=... SIZE=128x128x128 GS=128 [NO_ZEROS=1]
+make test        OFFLOAD=--offload-arch=%GFX% HIP_SDK=%HIP_SDK% [COVERAGE=1|2|3]
+make test_custom OFFLOAD=... HIP_SDK=... SIZE=128x2880x5120 GS=128 [NO_ZEROS=1] [FP32=1]
 make clean
 ```
 
 | Target | Meaning |
 |---|---|
-| `test` | Smoke: one small fixed shape (`1x2880x2880`, GS=128). |
-| `test_shapes` | Every row in `SHAPES` (default `shapes.csv`). K must be a multiple of 32. |
-| `test_model` | Every `M_array` x `KN_pairs` shape in `MODEL_JSON` (shared `../../models/*.json`); shapes with K not %32 are skipped. |
-| `test_custom` | One shape from `SIZE=MxKxN`, `GS=`, `NO_ZEROS=1`. |
-| `clean` | Removes `out/`, `data/`, `data_model/`. |
+| `test` | Coverage-tiered sweep -- see "Shape coverage" below. |
+| `test_custom` | One shape from `SIZE=MxKxN`, `GS=`, `NO_ZEROS=1`, `FP32=1` (in-process rng). |
+| `clean` | Removes `out/`. |
 
-`MODE=autotune` (default) links an empty `resolve()` stub so the kernel runs
-its own runtime autotune sweep. `MODE=lut`: if
-`hip/autotune/matmul_nbits/lut/<arch>.fb` exists for the arch in `OFFLOAD`,
-this build prints a one-line notice and falls back to `MODE=autotune` -- the
-real FlatBuffers LUT resolver needs a flatc-generated header that only the
-CMake build produces, and this test intentionally builds without CMake/flatc.
-It never fails because of this.
+## Shape coverage (3 tiers)
 
-`gen_data.py` is the single data generator and covers all three modes itself:
+Same model as `matmul_nbits/Xfp16_Wu4_Yfp16` (see its README for the full
+rationale): `group_size {32,64,128} x zero-points {on,off} x dtype
+{fp16,fp32}` (12 combos, always full) x a typical-shape list thinned by
+tier (tier3 = 4 shapes, tier2 = 3, tier1 = 2 -- "1 decode + 1 prefill").
+`COVERAGE=1|2|3` only picks how many typical shapes run. At startup the exe
+prints `coverage=N -> running <n> matmul_nbits_u2 cases`. No human edits a
+shape list -- there is no `shapes.csv` or `gen_data.py` in this leaf.
 
-```
-python gen_data.py SIZE=... --group-size GS --dir data          # test / test_custom
-python gen_data.py --model ../../models/gpt_oss_20b.json --group-size GS --out-dir data_model  # test_model
-```
+`make test`'s sweep exercises bits=2 only, with zero-points passed as a raw
+per-group uint8 buffer (`zp_elem_size=1`, direct convention, default zero
+point 2 when absent) -- the packed-zero-points round-trip
+(`hip_matmul_nbits_unpack_zp_u8_2bit`) and the fractional-fp16-zero-point
+path this op also supports are lower-level kernel behaviors, not exercised
+by this small correctness UT.
 
-(`test_shapes` reuses the single-shape mode once per row of `shapes.csv`, driven by the Makefile.)
+`MODE=auto` (default) -- `lut` if `hip/autotune/matmul_nbits/lut/<arch>.fb`
+exists for the arch in `OFFLOAD`, else `autotune`. `MODE=lut` forces it
+(falls back to `autotune` with a warning if the `.fb` is missing). `MODE=lut`
+needs `flatc` + its `include/` (a build tool, not part of this repo --
+see `example/README.md`): `FLATC=<path to flatc(.exe)> FLATBUFFERS_INC=<its
+include dir>`. The LUT bytes are embedded directly into
+`test_matmul_nbits_u2.cpp` via a one-line C23 `#embed` -- no `embed_lut.py`,
+no generated `.cpp`. Both modes append to `out/results.csv`.
 
 CI passes `OFFLOAD`/`HIP_SDK` explicitly; there is no personal default.

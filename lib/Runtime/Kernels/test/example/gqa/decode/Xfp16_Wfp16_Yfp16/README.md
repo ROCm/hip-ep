@@ -1,25 +1,36 @@
 # GQA flash decode test -- fp16 KV cache
 
 Standalone `hipcc`-only test for `hip_gqa_flash_decode()` (fp16 KV cache).
-No CMake, no EP build. `test`/`test_custom` inputs come from `gen_data.py`
-(numpy); the built-in `--all`/matrix path keeps in-process random data
-since one `data/` directory cannot hold every shape.
+No CMake, no EP build. Entirely self-contained: inputs and the CPU fp32
+reference are generated in-process, no python, no data files, no
+`example/common/`.
 
 ```
-make test        OFFLOAD=--offload-arch=%GFX% HIP_SDK=%HIP_SDK%
-make test_shapes OFFLOAD=... HIP_SDK=...
-make test_model  OFFLOAD=... HIP_SDK=... [MODEL_JSON=../../../models/gpt_oss_20b.json]
+make test        OFFLOAD=--offload-arch=%GFX% HIP_SDK=%HIP_SDK% [COVERAGE=1|2|3]
 make test_custom OFFLOAD=... HIP_SDK=... B=1 H=32 G=8 D=128 MAX_SEQ=4096 TOTAL=2048
 make clean
 ```
 
 | Target | Meaning |
 |---|---|
-| `test` | Smoke: `gendata` writes `data/` for one small fixed shape, then the exe loads it (`--data-dir data`). |
-| `test_shapes` | The binary's own built-in `--all` matrix (real models + an MHA/GQA x head_dim geometry sweep); `shapes.csv` documents the representative real-model subset. |
-| `test_model` | Every `gqa_decode` entry in `MODEL_JSON` (shared `../../../models/*.json`). |
-| `test_custom` | One shape from `B=`, `H=`, `G=`, `D=`, `MAX_SEQ=`, `TOTAL=`; also `gendata`+`--data-dir`. |
-| `clean` | Removes `out/` and `data/`. |
+| `test` | Coverage-tiered sweep -- see "Shape coverage" below. |
+| `test_custom` | One shape from `B=`, `H=`, `G=`, `D=`, `MAX_SEQ=`, `TOTAL=` (in-process rng). |
+| `clean` | Removes `out/`. |
+
+## Shape coverage (3 tiers)
+
+`test_gqa_decode.cpp`'s `main()` has 13 named categorical situations (real
+models -- gpt-oss-20b full/sliding/smooth, llama-3.1-8b, llama-3.2-1b,
+qwen2.5-14b -- plus a geometry sweep over MHA (HpG==1) and GQA (HpG in
+{2,8,16}) x head_dim in {64,128,256}), which run in full at **every**
+`COVERAGE` tier. Crossed with that is `kLens`, a small typical
+context-length list: tier3 (default) = `{512, 2048, 8192}`, tier2 =
+`{512, 8192}`, tier1 = `{2048}` alone. `COVERAGE=1|2|3` (`make test
+COVERAGE=N` or env `HIPDNN_UT_COVERAGE`) only picks which of those lengths
+run; it never drops a categorical situation. At startup the exe prints
+`coverage=N -> running <n> typical length(s) x 13 categorical case(s) = <n*13>
+gqa_decode cases`. No human edits a shape list -- there is no `shapes.csv` or
+`gen_data.py` in this leaf.
 
 `MODE=auto` (default): `lut` if `hip/autotune/gqa/lut/<arch>.fb` exists for
 the arch in `OFFLOAD`, else `autotune`. `MODE=lut` forces it (warns + falls

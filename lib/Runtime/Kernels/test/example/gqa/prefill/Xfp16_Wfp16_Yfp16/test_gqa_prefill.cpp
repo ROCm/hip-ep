@@ -32,10 +32,101 @@
 #include <vector>
 #include <string>
 
-#include "../../../common/csv_writer.h"
+#include <functional>
+
+// ---- Tiny inline coverage-tier resolver + CSV writer (replaces
+// example/common/coverage.h + csv_writer.h) ----
+// Model: categorical situations (D dispatch v5/v7/v8, sink modes, window
+// on/off, chunked-prefill past>0, the d128-must-decline case) are covered by
+// every case in `cases[]` below regardless of tier; COVERAGE only picks how
+// many of those (categorical, typical-shape) rows run, via a fixed index
+// subset per tier (not a blind cross product).
+namespace hipdnn_ep_test {
+inline int resolveCoverageTier(int argc, char** argv, int default_tier = 3) {
+  int tier = default_tier;
+  if (const char* env = std::getenv("HIPDNN_UT_COVERAGE")) tier = std::atoi(env);
+  for (int i = 1; i < argc; ++i)
+    if (std::strcmp(argv[i], "--coverage") == 0 && i + 1 < argc)
+      tier = std::atoi(argv[++i]);
+  return tier < 1 ? 1 : (tier > 3 ? 3 : tier);
+}
+
+struct CsvRow {
+  std::string shape, config;
+  double time_ms = 0.0;
+  double rel_l2 = 0.0;
+  std::string verdict;
+};
+class CsvWriter {
+ public:
+  CsvWriter() {
+    const char* path = std::getenv("HIPDNN_RESULTS_CSV");
+    if (!path || !path[0]) return;
+    path_ = path;
+    bool need_header = true;
+    if (FILE* probe = std::fopen(path_.c_str(), "rb")) {
+      std::fseek(probe, 0, SEEK_END);
+      need_header = std::ftell(probe) == 0;
+      std::fclose(probe);
+    }
+    f_ = std::fopen(path_.c_str(), "a");
+    if (f_ && need_header) {
+      std::fprintf(f_, "op,leaf,arch,mode,shape,config,time_ms,relL2,verdict\n");
+      std::fflush(f_);
+    }
+  }
+  ~CsvWriter() { if (f_) std::fclose(f_); }
+  void write(const CsvRow& r) {
+    if (!f_) return;
+    std::fprintf(f_, "%s,%s,%s,%s,%s,%s,%.6f,%.6e,%s\n",
+                 env_or("HIPDNN_RESULTS_OP", "unknown"),
+                 env_or("HIPDNN_RESULTS_LEAF", "unknown"),
+                 env_or("HIPDNN_RESULTS_ARCH", "unknown"),
+                 env_or("HIPDNN_RESULTS_MODE", "unknown"), r.shape.c_str(),
+                 r.config.c_str(), r.time_ms, r.rel_l2, r.verdict.c_str());
+    std::fflush(f_);
+  }
+ private:
+  static const char* env_or(const char* name, const char* dflt) {
+    const char* v = std::getenv(name);
+    return (v && v[0]) ? v : dflt;
+  }
+  std::string path_;
+  FILE* f_ = nullptr;
+};
+
+inline std::vector<std::string> captureLogLines(
+    const char* env_var, const std::string& tmp_path,
+    const std::function<void()>& fn) {
+  std::vector<std::string> lines;
+  _putenv_s(env_var, "1");
+  std::fflush(stderr);
+  FILE* redirected = std::freopen(tmp_path.c_str(), "w", stderr);
+  if (!redirected) { _putenv_s(env_var, ""); return lines; }
+  fn();
+  std::fflush(stderr);
+  std::freopen("CON", "w", stderr);
+  _putenv_s(env_var, "");
+  std::ifstream in(tmp_path);
+  std::string line;
+  while (std::getline(in, line)) lines.push_back(line);
+  in.close();
+  std::remove(tmp_path.c_str());
+  return lines;
+}
+}  // namespace hipdnn_ep_test
 
 #ifdef HIPDNN_LUT_LINKED_EXTERNALLY
 #include "gqa_autotune.h"
+// One-line C23 #embed of the real LUT .fb -- HIPDNN_LUT_FB is defined by a
+// tiny Makefile-generated header (a plain #define, not a data file) so the
+// path never has to survive hipcc's Windows -D quoting (which mangles
+// embedded quote characters).
+#include "lut_fb_path.h"
+extern "C" const unsigned char kGqaLutData[] = {
+#embed HIPDNN_LUT_FB
+};
+extern "C" const size_t kGqaLutData_size = sizeof(kGqaLutData);
 
 // Lookup-only prefill entry: same ABI as hip_gqa_flash_prefill plus the
 // resolved v5/v7/v8 knobs (see gqa_kernel.hip).
@@ -171,25 +262,7 @@ static double rel_l2(const std::vector<float>& a, const std::vector<float>& b) {
   return std::sqrt(num / (den + 1e-12));
 }
 
-// data_dir/{Q,K,V}.bin are raw little-endian float32, written by gen_data.py
-// for the exact shape being run (only the single-shape path uses this; the
-// built-in case matrix keeps in-process rng since one data/ directory cannot
-// hold every shape in it).
-static void load_f32_or_die(const std::string& path, std::vector<float>& v) {
-  std::ifstream f(path, std::ios::binary);
-  if (!f) { fprintf(stderr, "cannot open %s (run `make gendata` first)\n", path.c_str()); std::exit(1); }
-  f.seekg(0, std::ios::end);
-  size_t bytes = (size_t)f.tellg();
-  f.seekg(0, std::ios::beg);
-  if (bytes != v.size() * sizeof(float)) {
-    fprintf(stderr, "%s: size mismatch (got %zu bytes, want %zu)\n",
-            path.c_str(), bytes, v.size() * sizeof(float));
-    std::exit(1);
-  }
-  f.read(reinterpret_cast<char*>(v.data()), bytes);
-}
-
-static bool run_case(const Case& c, int iters, const std::string& data_dir = std::string()) {
+static bool run_case(const Case& c, int iters) {
   const int B = c.B, H = c.H, G = c.G, D = c.D, sq = c.sq;
   const int past_len = c.past;
   const int skv = past_len + sq;   // total_seq
@@ -202,15 +275,9 @@ static bool run_case(const Case& c, int iters, const std::string& data_dir = std
   std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
 
   std::vector<float> Qf(qn), Kf(kn), Vf(kn), Oref(qn);
-  if (!data_dir.empty()) {
-    load_f32_or_die(data_dir + "/Q.bin", Qf);
-    load_f32_or_die(data_dir + "/K.bin", Kf);
-    load_f32_or_die(data_dir + "/V.bin", Vf);
-  } else {
-    for (auto& x : Qf) x = dist(rng);
-    for (auto& x : Kf) x = dist(rng);
-    for (auto& x : Vf) x = dist(rng);
-  }
+  for (auto& x : Qf) x = dist(rng);
+  for (auto& x : Kf) x = dist(rng);
+  for (auto& x : Vf) x = dist(rng);
 
   // gpt-oss ships sink logits around O(1); span a wider range so a sign or
   // scaling error in the log2-space conversion cannot hide. Round-trip through
@@ -303,17 +370,7 @@ static bool run_case(const Case& c, int iters, const std::string& data_dir = std
   };
 #endif
 
-  int rc;
-#ifndef HIPDNN_LUT_LINKED_EXTERNALLY
-  // First call for this shape runs + logs the tuner's timed candidates
-  // (cached after); capture them here for out/results.csv without
-  // perturbing this measured call.
-  std::vector<std::string> autotune_capture_lines = hipdnn_ep_test::captureLogLines(
-      "HIPDNN_PREFILL_TUNE_DEBUG", "out/_autotune_capture.tmp",
-      [&]() { rc = launch(); });
-#else
-  rc = launch();  // first call self-tunes
-#endif
+  int rc = launch();  // first call self-tunes (or resolves from the LUT)
   HIP_CHECK(hipDeviceSynchronize());
   if (c.expect_reject) {
     const bool ok = (rc != 0);
@@ -365,24 +422,15 @@ static bool run_case(const Case& c, int iters, const std::string& data_dir = std
     row.shape = shape_buf;
     row.config = config_buf;
     row.time_ms = ms;
-    row.is_best = 1;
-    row.lut_source = lut_source;
     row.rel_l2 = err;
-    row.has_verdict = true;
     row.verdict = pass ? "PASS" : "FAIL";
     csv.write(row);
 #else
-    std::vector<CsvRow> candidates = parseCandidateLines(autotune_capture_lines);
-    for (CsvRow& cr : candidates) {
-      cr.shape = shape_buf;
-      csv.write(cr);
-    }
     CsvRow row;
     row.shape = shape_buf;
     row.config = "final";
     row.time_ms = ms;
     row.rel_l2 = err;
-    row.has_verdict = true;
     row.verdict = pass ? "PASS" : "FAIL";
     csv.write(row);
 #endif
@@ -393,79 +441,18 @@ static bool run_case(const Case& c, int iters, const std::string& data_dir = std
   return pass;
 }
 
-// ============================================================
-// --model <json> sweep: reads the "gqa_prefill" array from the shared model
-// shape JSON (example/models/*.json). Minimal hand-rolled scan (no JSON
-// library) matching the flat {"B":.., "H":.., "sq":.., ...} objects there.
-// ============================================================
-struct ModelPrefillCase { int B = 1, H = 32, G = 8, D = 128, sq = 512; };
-
-static std::vector<ModelPrefillCase> parseGqaModelArray(const std::string& s, const std::string& key) {
-  std::vector<ModelPrefillCase> out;
-  auto pos = s.find("\"" + key + "\"");
-  if (pos == std::string::npos) return out;
-  auto arr_start = s.find('[', pos);
-  auto arr_end = s.find(']', arr_start);
-  if (arr_start == std::string::npos || arr_end == std::string::npos) return out;
-  size_t i = arr_start + 1;
-  while (i < arr_end) {
-    auto obj_start = s.find('{', i);
-    if (obj_start == std::string::npos || obj_start > arr_end) break;
-    auto obj_end = s.find('}', obj_start);
-    std::string obj = s.substr(obj_start, obj_end - obj_start + 1);
-    auto getInt = [&](const char* k, int defv) {
-      auto p = obj.find(std::string("\"") + k + "\"");
-      if (p == std::string::npos) return defv;
-      auto colon = obj.find(':', p);
-      size_t j = colon + 1;
-      while (j < obj.size() && !(std::isdigit(static_cast<unsigned char>(obj[j])) || obj[j] == '-')) j++;
-      return j < obj.size() ? std::atoi(obj.c_str() + j) : defv;
-    };
-    ModelPrefillCase mc;
-    mc.B = getInt("B", 1);
-    mc.H = getInt("H", 32);
-    mc.G = getInt("G", 8);
-    mc.D = getInt("D", 128);
-    mc.sq = getInt("sq", 512);
-    out.push_back(mc);
-    i = obj_end + 1;
-  }
-  return out;
-}
-
-static int runModelSweep(const std::string& json_path, int iters) {
-  std::ifstream f(json_path);
-  if (!f) { fprintf(stderr, "ERROR: cannot read %s\n", json_path.c_str()); return 1; }
-  std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-  auto rows = parseGqaModelArray(json, "gqa_prefill");
-  if (rows.empty()) {
-    fprintf(stderr, "ERROR: no gqa_prefill entries in %s\n", json_path.c_str());
-    return 1;
-  }
-  printf("Model sweep (gqa_prefill): %s -- %zu shapes\n", json_path.c_str(), rows.size());
-  int fails = 0;
-  for (auto& r : rows) {
-    Case c = {"model", r.B, r.H, r.G, r.D, r.sq, 0, kSinkNone, false, 0};
-    if (!run_case(c, iters)) ++fails;
-  }
-  printf("\n%s (%d failing case(s))\n", fails == 0 ? "ALL PASS" : "SOME FAILED", fails);
-  return fails == 0 ? 0 : 1;
-}
-
 int main(int argc, char** argv) {
+  const int coverage_tier = hipdnn_ep_test::resolveCoverageTier(argc, argv);
+
   int iters = 100;
-  std::string model_json;
   // "custom" single-shape mode, mirroring the i8 prefill test's --h/--g/--d/--sq
   // (plus --b/--past/--window, which the i8 variant doesn't expose).
   Case single = {"custom", 1, 32, 8, 128, 512, 0, kSinkNone, false, 0};
   bool have_single = false;
-  std::string data_dir;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     auto next = [&](int& v) { if (i + 1 < argc) v = std::atoi(argv[++i]); };
     if (!std::strcmp(argv[i], "--iters") && i + 1 < argc) iters = std::atoi(argv[++i]);
-    else if (a == "--model" && i + 1 < argc) model_json = argv[++i];
-    else if (a == "--data-dir" && i + 1 < argc) data_dir = argv[++i];
     else if (a == "--b") { next(single.B); have_single = true; }
     else if (a == "--h") { next(single.H); have_single = true; }
     else if (a == "--g") { next(single.G); have_single = true; }
@@ -475,11 +462,8 @@ int main(int argc, char** argv) {
     else if (a == "--window") { next(single.window); have_single = true; }
   }
 
-  if (!model_json.empty())
-    return runModelSweep(model_json, iters);
-
   if (have_single) {
-    bool ok = run_case(single, iters, data_dir);
+    bool ok = run_case(single, iters);
     printf("\n%s (%d failing case(s))\n", ok ? "ALL PASS" : "SOME FAILED", ok ? 0 : 1);
     return ok ? 0 : 1;
   }
@@ -541,8 +525,28 @@ int main(int argc, char** argv) {
       // Window at d==128 is implemented (prefill v5). Check relL2 like gpt_oss-win.
       {"llama-win-d128",1, 32, 8, 128, 512,  0,    kSinkNone,    false, 128},
   };
+  const size_t kNumCases = sizeof(cases) / sizeof(cases[0]);
+
+  // tier1 (10 rows) still touches D{64,128,256}, every sink_mode, window
+  // on/off, chunked-prefill (past>0), and the d128-must-decline case.
+  static const size_t kTier1[] = {0, 3, 7, 9, 11, 13, 15, 17, 18, 25};
+  static const size_t kTier2[] = {0,  1,  3,  4,  6,  7,  9,  10, 11, 12,
+                                  13, 14, 15, 16, 17, 18, 19, 20, 21, 25,
+                                  26, 28};
+  const size_t* idxs = coverage_tier == 1 ? kTier1
+                     : coverage_tier == 2 ? kTier2
+                                          : nullptr;
+  const size_t n_idxs = coverage_tier == 1 ? sizeof(kTier1) / sizeof(kTier1[0])
+                      : coverage_tier == 2 ? sizeof(kTier2) / sizeof(kTier2[0])
+                                           : kNumCases;
+  printf("coverage=%d -> running %zu/%zu gqa_prefill cases\n", coverage_tier,
+         n_idxs, kNumCases);
+
   int fails = 0;
-  for (const auto& c : cases) if (!run_case(c, iters)) ++fails;
+  for (size_t i = 0; i < n_idxs; ++i) {
+    const Case& c = idxs ? cases[idxs[i]] : cases[i];
+    if (!run_case(c, iters)) ++fails;
+  }
   printf("\n%s (%d failing case(s))\n", fails == 0 ? "ALL PASS" : "SOME FAILED", fails);
   return fails == 0 ? 0 : 1;
 }

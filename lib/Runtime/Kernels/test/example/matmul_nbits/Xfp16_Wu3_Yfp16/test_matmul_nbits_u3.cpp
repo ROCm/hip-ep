@@ -1,1037 +1,450 @@
 /*
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
+ *
+ * custom_kernels MatMulNBits bits=3 (uint3, continuous bitstream) Verification.
+ *
+ * Unit-test model: this file is entirely self-contained (no example/common/,
+ * no python, no on-disk data) -- inputs, the uint3 packing, and the
+ * dequant+matmul CPU reference are all generated in-process. The case set is
+ * every categorical situation this op supports (group_size in {32,64,128},
+ * zero-points on/off, dtype fp16/fp32) crossed with a SMALL list of typical
+ * (M,K,N) shapes (decode M=1 at real model FFN/attn-proj K,N, plus two
+ * smaller prefill-representative shapes) -- NOT the full M/K/N shape space.
+ * COVERAGE=1|2|3 (default 3) only thins how many typical shapes run; every
+ * tier still touches every group_size/zero-points/dtype value.
+ *
+ * uint3 packing: value k occupies bits [3k, 3k+3) of row n's bitstream,
+ * LSB-first -- a continuous per-row 3-bit bitstream (custom format, NOT an
+ * ONNX MatMulNBits convention; see matmul_nbits_kernel.hip), row byte stride
+ * = ceil(K*3/8).
+ *
+ * A:      FP16 (or FP32) row-major [M, K]
+ * B:      uint8 packed [N, ceil(K*3/8)], continuous 3-bit bitstream
+ * scales: FP16 [N, num_groups_k], per-column per-group
+ * zeros:  uint8 [N, num_groups_k], per-column per-group zero point in [0,7]
+ *         (optional; default zero point is 4 when absent), passed to the
+ *         kernel raw (zp_elem_size=1, plain per-element convention -- the
+ *         3-bit-packed zero_points path is exercised by the kernel's own
+ *         tests, not this small correctness UT).
+ * C:      FP16 (or FP32) row-major [M, N]
  */
-
-// ============================================================
-// custom_kernels MatMulNBits bits=3 vs bits=4 Verification + Benchmark
-//
-// Exercises the hip_matmul_nbits() API for the exploratory uint3
-// (continuous-bitstream) quantized-weight kernel and benchmarks it
-// back-to-back against the existing uint4 (nibble-packed) kernel on the
-// *same* (M, K, N, group_size) shape, so the two can be compared fairly.
-//
-//   C[M×N] = A[M×K] × dequant(B)^T
-//
-// Public API tensors — all ROW-MAJOR:
-//   A            : FP16 [batch, M, K]                        (shared)
-//   u3: B        : uint8 [N, ceil(K*3/8)] continuous 3-bit bitstream
-//       scales   : FP16  [N, num_groups_k]
-//       zeros    : uint8 [N, num_groups_k]  (optional, one byte per group)
-//       zeros_pkd: uint8 [N, ceil(num_groups_k*3/8)] (optional, ONNX-packed
-//                                             continuous 3-bit stream)
-//   u4: B_packed : uint8 [N, K/2] nibble-packed (ONNX convention)
-//       scales   : FP16  [N, num_groups_k]
-//       zeros_u8 : uint8 [N, num_groups_k]  (optional, per-element,
-//                                             pre-unpacked)
-//       zeros_fp16: FP16 [N, num_groups_k]  (optional, same values as
-//                                             zeros_u8, for WMMA/col-GEMV)
-//   C            : FP16 row-major [batch, M, N]
-//
-// Workflow:
-//   1) python gen_matmul_nbits_u3_data.py MxKxN --group-size GS --dir data
-//   2) build and run the test executable
-// ============================================================
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include "hip_custom_kernels.h"
 #include "matmul_nbits_autotune.h"
 
-// Example `make direct` has no CMake FlatBuffers LUT. Empty resolve()
-// lets the kernel link and fall back to its runtime sweep.
-namespace hipdnn_ep {
 #ifndef HIPDNN_LUT_LINKED_EXTERNALLY
+namespace hipdnn_ep {
 namespace matmul_nbits_autotune {
 Result resolve(const Request&, WmmaValidator, GemvValidator, void*) { return {}; }
 Stats stats() { return {}; }
 }  // namespace matmul_nbits_autotune
-#endif  // HIPDNN_LUT_LINKED_EXTERNALLY
 }  // namespace hipdnn_ep
+#else
+#include "lut_fb_path.h"
+extern "C" const unsigned char kMatmulNbitsLutData[] = {
+#embed HIPDNN_LUT_FB
+};
+extern "C" const size_t kMatmulNbitsLutData_size = sizeof(kMatmulNbitsLutData);
+#endif  // HIPDNN_LUT_LINKED_EXTERNALLY
 
-#include <iostream>
-#include <fstream>
-#include <vector>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <iomanip>
-#include <chrono>
-#include <string>
-#include <algorithm>
-#include <functional>
-#include <cstring>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <random>
+#include <string>
+#include <vector>
 
-static float half_to_float(__half h)
-{
-    uint16_t bits;
-    std::memcpy(&bits, &h, sizeof(bits));
-    uint32_t sign = (bits >> 15) & 1;
-    uint32_t exp  = (bits >> 10) & 0x1F;
-    uint32_t mant = bits & 0x3FF;
-    uint32_t f;
-    if(exp == 0)
-    {
-        if(mant == 0)
-            f = sign << 31;
-        else
-        {
-            exp = 1;
-            while(!(mant & 0x400)) { mant <<= 1; exp--; }
-            mant &= 0x3FF;
-            f = (sign << 31) | ((exp + 127 - 15) << 23) | (mant << 13);
-        }
+namespace hipdnn_ep_test {
+inline int resolveCoverageTier(int argc, char** argv, int default_tier = 3) {
+  int tier = default_tier;
+  if (const char* env = std::getenv("HIPDNN_UT_COVERAGE")) tier = std::atoi(env);
+  for (int i = 1; i < argc; ++i)
+    if (std::strcmp(argv[i], "--coverage") == 0 && i + 1 < argc)
+      tier = std::atoi(argv[++i]);
+  return tier < 1 ? 1 : (tier > 3 ? 3 : tier);
+}
+
+struct CsvRow {
+  std::string shape, config;
+  double time_ms = 0.0;
+  double rel_l2 = 0.0;
+  std::string verdict;
+};
+class CsvWriter {
+ public:
+  CsvWriter() {
+    const char* path = std::getenv("HIPDNN_RESULTS_CSV");
+    if (!path || !path[0]) return;
+    path_ = path;
+    bool need_header = true;
+    if (FILE* probe = std::fopen(path_.c_str(), "rb")) {
+      std::fseek(probe, 0, SEEK_END);
+      need_header = std::ftell(probe) == 0;
+      std::fclose(probe);
     }
-    else if(exp == 31)
-        f = (sign << 31) | (0xFFu << 23) | (mant << 13);
-    else
-        f = (sign << 31) | ((exp + 127 - 15) << 23) | (mant << 13);
-    float result;
-    std::memcpy(&result, &f, sizeof(result));
-    return result;
+    f_ = std::fopen(path_.c_str(), "a");
+    if (f_ && need_header) {
+      std::fprintf(f_, "op,leaf,arch,mode,shape,config,time_ms,relL2,verdict\n");
+      std::fflush(f_);
+    }
+  }
+  ~CsvWriter() { if (f_) std::fclose(f_); }
+  void write(const CsvRow& r) {
+    if (!f_) return;
+    std::fprintf(f_, "%s,%s,%s,%s,%s,%s,%.6f,%.6e,%s\n",
+                 env_or("HIPDNN_RESULTS_OP", "unknown"),
+                 env_or("HIPDNN_RESULTS_LEAF", "unknown"),
+                 env_or("HIPDNN_RESULTS_ARCH", "unknown"),
+                 env_or("HIPDNN_RESULTS_MODE", "unknown"), r.shape.c_str(),
+                 r.config.c_str(), r.time_ms, r.rel_l2, r.verdict.c_str());
+    std::fflush(f_);
+  }
+ private:
+  static const char* env_or(const char* name, const char* dflt) {
+    const char* v = std::getenv(name);
+    return (v && v[0]) ? v : dflt;
+  }
+  std::string path_;
+  FILE* f_ = nullptr;
+};
+}  // namespace hipdnn_ep_test
+
+static float half_to_float(__half h) {
+  uint16_t bits;
+  std::memcpy(&bits, &h, sizeof(bits));
+  uint32_t sign = (bits >> 15) & 1;
+  uint32_t exp = (bits >> 10) & 0x1F;
+  uint32_t mant = bits & 0x3FF;
+  uint32_t f;
+  if (exp == 0) {
+    if (mant == 0) f = sign << 31;
+    else {
+      exp = 1;
+      while (!(mant & 0x400)) { mant <<= 1; exp--; }
+      mant &= 0x3FF;
+      f = (sign << 31) | ((exp + 127 - 15) << 23) | (mant << 13);
+    }
+  } else if (exp == 31) f = (sign << 31) | (0xFFu << 23) | (mant << 13);
+  else f = (sign << 31) | ((exp + 127 - 15) << 23) | (mant << 13);
+  float result;
+  std::memcpy(&result, &f, sizeof(result));
+  return result;
+}
+
+static __half float_to_half(float x) {
+  uint32_t f;
+  std::memcpy(&f, &x, 4);
+  uint32_t s = (f >> 31) & 1;
+  int e = (int)((f >> 23) & 0xff) - 127 + 15;
+  uint32_t m = f & 0x7fffff;
+  uint16_t bits;
+  if (e <= 0) bits = (uint16_t)(s << 15);
+  else if (e >= 31) bits = (uint16_t)((s << 15) | 0x7c00);
+  else bits = (uint16_t)((s << 15) | (e << 10) | (m >> 13));
+  __half h;
+  std::memcpy(&h, &bits, 2);
+  return h;
 }
 
 #define HIP_CHECK(call)                                                     \
-    do                                                                      \
-    {                                                                       \
+    do {                                                                    \
         hipError_t err = (call);                                            \
-        if(err != hipSuccess)                                               \
-        {                                                                   \
-            std::cerr << "HIP error at " << __FILE__ << ":" << __LINE__     \
-                      << " code=" << err << " \""                           \
-                      << hipGetErrorString(err) << "\"" << std::endl;       \
-            exit(1);                                                        \
+        if (err != hipSuccess) {                                            \
+            std::fprintf(stderr, "HIP error at %s:%d code=%d \"%s\"\n",     \
+                         __FILE__, __LINE__, err, hipGetErrorString(err));   \
+            std::exit(1);                                                   \
         }                                                                   \
-    } while(0)
+    } while (0)
 
-template <typename T>
-static bool readBin(const std::string& path, std::vector<T>& data, size_t count)
-{
-    std::ifstream f(path, std::ios::binary);
-    if(!f.is_open())
-        return false;
-    data.resize(count);
-    f.read(reinterpret_cast<char*>(data.data()), count * sizeof(T));
-    return f.good();
+// Packs `vals` (K values, 0..7) into a continuous per-row 3-bit LSB-first
+// bitstream: value k occupies bits [3k, 3k+3). row_bytes = ceil(K*3/8).
+static void pack3bit(const uint8_t* vals, int K, std::vector<uint8_t>& out) {
+  const int row_bytes = (K * 3 + 7) / 8;
+  std::vector<uint8_t> buf(row_bytes + 1, 0);
+  for (int k = 0; k < K; ++k) {
+    const int bitpos = k * 3;
+    const int byte0 = bitpos / 8;
+    const int shift = bitpos % 8;
+    const uint32_t contrib = static_cast<uint32_t>(vals[k]) << shift;
+    buf[byte0] = static_cast<uint8_t>(buf[byte0] | (contrib & 0xFF));
+    buf[byte0 + 1] = static_cast<uint8_t>(buf[byte0 + 1] | ((contrib >> 8) & 0xFF));
+  }
+  out.assign(buf.begin(), buf.begin() + row_bytes);
 }
 
 // ============================================================
-// Benchmark helpers
+// In-process data generation + CPU fp32 reference (no python, no disk I/O).
+// B is randint(0,8) per element, packed via pack3bit(); scales are
+// uniform(0.01,0.05); zeros (when present) are integers in [3,5] (uint8,
+// plain per-element convention); dequant is (B - zp) * scale, default zp = 4
+// when zeros are absent.
 // ============================================================
-static int calibrateIters(double warmup_ms, int warmup_count,
-                          double target_ms = 1500.0, int lo = 5, int hi = 200)
-{
-    double per_iter = warmup_ms / warmup_count;
-    if(per_iter <= 0) return lo;
-    return std::max(lo, std::min(hi, static_cast<int>(target_ms / per_iter)));
-}
-
-constexpr int NROUNDS = 5;
-
-struct MeasureResult {
-    double median_ms;
-    double min_ms;
-    double max_ms;
+struct CaseData {
+  std::vector<__half> A16;
+  std::vector<float> A32;
+  std::vector<uint8_t> Bpacked;
+  std::vector<__half> scales;
+  std::vector<uint8_t> zeros;
+  std::vector<__half> Cref16;
+  std::vector<float> Cref32;
 };
 
-static MeasureResult measureMedian(hipStream_t stream, int niters,
-                                   const std::function<void()>& launch)
-{
-    hipEvent_t ev0, ev1;
-    hipEventCreate(&ev0);
-    hipEventCreate(&ev1);
-    std::vector<float> round_ms(NROUNDS);
-    for(int r = 0; r < NROUNDS; r++)
-    {
-        hipEventRecord(ev0, stream);
-        for(int i = 0; i < niters; i++)
-            launch();
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-        hipEventElapsedTime(&round_ms[r], ev0, ev1);
-    }
-    hipEventDestroy(ev0);
-    hipEventDestroy(ev1);
+static void genCase(int M, int K, int N, int gs, bool zero, bool fp32,
+                    unsigned seed, CaseData& out) {
+  const int num_groups_k = (K + gs - 1) / gs;
+  const int row_bytes = (K * 3 + 7) / 8;
 
-    std::sort(round_ms.begin(), round_ms.end());
-    return {round_ms[NROUNDS / 2], round_ms[0], round_ms[NROUNDS - 1]};
+  std::mt19937 rng(seed);
+  std::uniform_real_distribution<float> adist(-0.5f, 0.5f);
+  std::uniform_int_distribution<int> bdist(0, 7);
+  std::uniform_real_distribution<float> sdist(0.01f, 0.05f);
+  std::uniform_int_distribution<int> zdist(3, 5);
+
+  std::vector<float> A(static_cast<size_t>(M) * K);
+  for (auto& v : A) v = adist(rng);
+
+  std::vector<uint8_t> Bq(static_cast<size_t>(N) * K);
+  for (auto& v : Bq) v = static_cast<uint8_t>(bdist(rng));
+
+  std::vector<float> scalesF(static_cast<size_t>(N) * num_groups_k);
+  for (auto& v : scalesF) v = sdist(rng);
+
+  std::vector<float> zerosF;
+  if (zero) {
+    zerosF.resize(static_cast<size_t>(N) * num_groups_k);
+    for (auto& v : zerosF) v = static_cast<float>(zdist(rng));
+  }
+
+  out.Bpacked.assign(static_cast<size_t>(N) * row_bytes, 0);
+  std::vector<uint8_t> packed_row;
+  for (int n = 0; n < N; ++n) {
+    pack3bit(&Bq[static_cast<size_t>(n) * K], K, packed_row);
+    std::memcpy(&out.Bpacked[static_cast<size_t>(n) * row_bytes], packed_row.data(), row_bytes);
+  }
+
+  out.scales.resize(scalesF.size());
+  for (size_t i = 0; i < scalesF.size(); ++i) out.scales[i] = float_to_half(scalesF[i]);
+  if (zero) {
+    out.zeros.resize(zerosF.size());
+    for (size_t i = 0; i < zerosF.size(); ++i) out.zeros[i] = static_cast<uint8_t>(zerosF[i]);
+  }
+
+  std::vector<float> Cref(static_cast<size_t>(M) * N, 0.0f);
+  for (int n = 0; n < N; ++n) {
+    const uint8_t* row = &Bq[static_cast<size_t>(n) * K];
+    const float* srow = &scalesF[static_cast<size_t>(n) * num_groups_k];
+    const float* zrow = zero ? &zerosF[static_cast<size_t>(n) * num_groups_k] : nullptr;
+    for (int m = 0; m < M; ++m) {
+      const float* arow = &A[static_cast<size_t>(m) * K];
+      float acc = 0.0f;
+      for (int k = 0; k < K; ++k) {
+        const int g = k / gs;
+        const float zp = zero ? zrow[g] : 4.0f;
+        acc += arow[k] * (static_cast<float>(row[k]) - zp) * srow[g];
+      }
+      Cref[static_cast<size_t>(m) * N + n] = acc;
+    }
+  }
+
+  if (fp32) {
+    out.A32.resize(A.size());
+    for (size_t i = 0; i < A.size(); ++i) out.A32[i] = A[i];
+    out.Cref32 = std::move(Cref);
+  } else {
+    out.A16.resize(A.size());
+    for (size_t i = 0; i < A.size(); ++i) out.A16[i] = float_to_half(A[i]);
+    out.Cref16.resize(Cref.size());
+    for (size_t i = 0; i < Cref.size(); ++i) out.Cref16[i] = float_to_half(Cref[i]);
+  }
 }
 
-// ============================================================
-// Per-kernel benchmark + verify (shared by both bits=3 and bits=4)
-// ============================================================
-struct KernelStat {
-    std::string label;
-    bool launch_ok  = false;
-    double avg_ms   = 0.0;
-    double gflops   = 0.0;
-    double bw_gbs   = 0.0;
-    double min_ms   = 0.0;
-    double max_ms   = 0.0;
-    bool   has_ref  = false;
-    int    errors   = -1;
-    int    total    = 0;
-    float  max_diff = 0.0f;
-    float  max_rdiff = 0.0f;
+namespace sweep {
+
+struct Shape { int M, K, N; };
+static const Shape kShapes4[] = {
+    {1, 4096, 11008},
+    {1, 2880, 5120},
+    {128, 512, 1024},
+    {512, 512, 1024},
+};
+static const Shape kShapes3[] = {kShapes4[0], kShapes4[2], kShapes4[3]};
+static const Shape kShapes2[] = {kShapes4[0], kShapes4[3]};
+
+static const int kGsArray[] = {32, 64, 128};
+static const bool kZeroArray[] = {true, false};
+static const bool kDtypeArray[] = {false, true};  // fp16, fp32
+
+struct Case {
+  int M, K, N, gs;
+  bool zero, fp32;
 };
 
-static KernelStat benchmarkAndVerify(
-    const std::string& label,
-    hipStream_t stream,
-    const std::function<int()>& launch_checked,
-    const std::function<void()>& launch,
-    int M, int N, int K,
-    double mem_bytes,
-    __half* d_C, size_t countC,
-    const std::vector<__half>& h_C_ref, bool has_ref)
-{
-    KernelStat st;
-    st.label   = label;
-    st.has_ref = has_ref;
-
-    std::cout << "\n  --- " << label << " ---" << std::endl;
-
-    constexpr int PRE_WARMUP = 500;
-    std::cout << "  Pre-warmup (" << PRE_WARMUP << " iters)..." << std::flush;
-    auto pw0 = std::chrono::steady_clock::now();
-    for(int w = 0; w < PRE_WARMUP; w++)
-        launch();
-    HIP_CHECK(hipStreamSynchronize(stream));
-    double pw_ms = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now() - pw0).count() / 1000.0;
-    std::cout << " done (" << std::fixed << std::setprecision(3)
-              << pw_ms / PRE_WARMUP << " ms/iter)" << std::endl;
-
-    std::cout << "  Warmup..." << std::flush;
-    auto tw0 = std::chrono::steady_clock::now();
-    int status = 0;
-    for(int w = 0; w < 3; w++)
-    {
-        status = launch_checked();
-        if(status != 0) break;
-    }
-    HIP_CHECK(hipStreamSynchronize(stream));
-    double warmup_ms = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now() - tw0).count() / 1000.0;
-
-    if(status != 0)
-    {
-        std::cout << " FAILED (status=" << status << ")" << std::endl;
-        return st;
-    }
-
-    int niters = calibrateIters(warmup_ms, 3);
-    std::cout << " OK (" << std::fixed << std::setprecision(2) << warmup_ms
-              << " ms), iters=" << niters << std::endl;
-
-    std::cout << "  Benchmarking (" << NROUNDS << " rounds x " << niters
-              << " iters)..." << std::flush;
-    auto mr = measureMedian(stream, niters, launch);
-    std::cout << " done" << std::endl;
-
-    st.launch_ok = true;
-    st.avg_ms    = mr.median_ms / niters;
-    st.min_ms    = mr.min_ms / niters;
-    st.max_ms    = mr.max_ms / niters;
-    st.gflops    = (2.0 * M * N * K) / (st.avg_ms * 1e6);
-    st.bw_gbs    = mem_bytes * niters / (mr.median_ms * 1e6);
-
-    std::cout << "  Median: " << std::setprecision(6) << st.avg_ms << " ms, "
-              << std::setprecision(2) << st.gflops << " GFLOPS, "
-              << st.bw_gbs << " GB/s   (range " << st.min_ms << " ~ "
-              << st.max_ms << " ms)" << std::endl;
-
-    if(has_ref)
-    {
-        std::vector<__half> h_C(countC);
-        HIP_CHECK(hipMemcpy(h_C.data(), d_C, countC * sizeof(__half),
-                            hipMemcpyDeviceToHost));
-
-        int errors = 0;
-        float max_diff = 0.0f, max_rdiff = 0.0f;
-        for(size_t i = 0; i < countC; i++)
-        {
-            float gpu_val = half_to_float(h_C[i]);
-            float ref_val = half_to_float(h_C_ref[i]);
-            float diff    = std::fabs(gpu_val - ref_val);
-            float rdiff   = (std::fabs(ref_val) > 1e-6f) ? diff / std::fabs(ref_val) : diff;
-            if(diff > max_diff) max_diff = diff;
-            if(rdiff > max_rdiff) max_rdiff = rdiff;
-            float tol = std::fabs(ref_val) * 0.05f + 0.1f;
-            if(diff > tol) errors++;
-        }
-
-        st.errors    = errors;
-        st.total     = static_cast<int>(countC);
-        st.max_diff  = max_diff;
-        st.max_rdiff = max_rdiff;
-
-        std::cout << "  Verify: " << (st.total - errors) << "/" << st.total
-                  << " OK, max_abs_diff=" << std::setprecision(4) << max_diff
-                  << ", max_rel_diff=" << (max_rdiff * 100.0f) << "%   "
-                  << (errors == 0 ? "PASS" : "FAIL") << std::endl;
-    }
-
-    return st;
+static std::vector<Case> buildCases(int tier) {
+  const Shape* shapes = tier == 1 ? kShapes2 : tier == 2 ? kShapes3 : kShapes4;
+  const size_t n_shapes = tier == 1 ? sizeof(kShapes2) / sizeof(kShapes2[0])
+                        : tier == 2 ? sizeof(kShapes3) / sizeof(kShapes3[0])
+                                    : sizeof(kShapes4) / sizeof(kShapes4[0]);
+  std::vector<Case> out;
+  for (int gs : kGsArray)
+    for (bool zero : kZeroArray)
+      for (bool fp32 : kDtypeArray)
+        for (size_t si = 0; si < n_shapes; ++si)
+          out.push_back({shapes[si].M, shapes[si].K, shapes[si].N, gs, zero, fp32});
+  return out;
 }
 
-static void printComparison(const KernelStat& u3, const KernelStat& u4,
-                            size_t bytes_u3, size_t bytes_u4)
-{
-    std::cout << "\n  === u3 vs u4 comparison ===" << std::endl;
-    std::cout << "  " << std::left << std::setw(10) << "Kernel"
-              << std::right << std::setw(14) << "Median(ms)"
-              << std::setw(12) << "GFLOPS"
-              << std::setw(10) << "GB/s"
-              << std::setw(14) << "B size(KB)"
-              << std::setw(10) << "Verify" << std::endl;
+static bool runOne(const Case& c, int idx) {
+  CaseData d;
+  genCase(c.M, c.K, c.N, c.gs, c.zero, c.fp32, /*seed=*/1000u + idx, d);
 
-    auto row = [&](const KernelStat& s, size_t bytes) {
-        std::cout << "  " << std::left << std::setw(10) << s.label
-                  << std::right << std::setw(14);
-        if(s.launch_ok)
-            std::cout << std::fixed << std::setprecision(6) << s.avg_ms;
-        else
-            std::cout << "FAILED";
-        std::cout << std::setw(12) << std::setprecision(2)
-                  << (s.launch_ok ? s.gflops : 0.0)
-                  << std::setw(10) << (s.launch_ok ? s.bw_gbs : 0.0)
-                  << std::setw(14) << std::setprecision(1) << (bytes / 1024.0)
-                  << std::setw(10)
-                  << (!s.has_ref ? "N/A" : (s.errors == 0 ? "PASS" : "FAIL"))
-                  << std::endl;
-    };
-    row(u3, bytes_u3);
-    row(u4, bytes_u4);
+  const size_t countA = static_cast<size_t>(c.M) * c.K;
+  const size_t countC = static_cast<size_t>(c.M) * c.N;
+  const size_t elem = c.fp32 ? 4 : 2;
 
-    if(u3.launch_ok && u4.launch_ok)
-    {
-        double speedup = u4.avg_ms / u3.avg_ms;
-        double size_ratio = 100.0 * bytes_u3 / bytes_u4;
-        std::cout << "  u3/u4 weight size: " << std::fixed << std::setprecision(1)
-                  << size_ratio << "%   u3 vs u4 speed: "
-                  << std::setprecision(2) << speedup << "x "
-                  << (speedup >= 1.0 ? "(u3 faster)" : "(u4 faster)")
-                  << std::endl;
+  void *dA = nullptr, *dC = nullptr;
+  __half* dS = nullptr;
+  uint8_t* dZ = nullptr;
+  uint8_t* dB = nullptr;
+  HIP_CHECK(hipMalloc(&dA, countA * elem));
+  HIP_CHECK(hipMalloc(&dB, d.Bpacked.size()));
+  HIP_CHECK(hipMalloc(&dS, d.scales.size() * sizeof(__half)));
+  if (c.zero) HIP_CHECK(hipMalloc(&dZ, d.zeros.size()));
+  HIP_CHECK(hipMalloc(&dC, countC * elem));
+  HIP_CHECK(hipMemcpy(dA, c.fp32 ? (void*)d.A32.data() : (void*)d.A16.data(),
+                      countA * elem, hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(dB, d.Bpacked.data(), d.Bpacked.size(), hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(dS, d.scales.data(), d.scales.size() * sizeof(__half), hipMemcpyHostToDevice));
+  if (c.zero) HIP_CHECK(hipMemcpy(dZ, d.zeros.data(), d.zeros.size(), hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemset(dC, 0, countC * elem));
+
+  hipStream_t stream;
+  HIP_CHECK(hipStreamCreate(&stream));
+  auto launch = [&]() {
+    // bits=3, zp_elem_size=1 (raw per-group uint8 zero_points, plain
+    // per-element convention -- no pre_unpacked_zp_u8/fp16 buffer).
+    return hip_matmul_nbits(stream, dA, dB, dS, c.zero ? dZ : nullptr,
+                            nullptr, dC, c.M, c.N, c.K, /*batch_count=*/1,
+                            /*bits=*/3, c.gs, static_cast<int>(elem),
+                            /*zp_elem_size=*/1, nullptr, nullptr);
+  };
+
+  int status = 0;
+  for (int w = 0; w < 3; ++w) status = launch();
+  HIP_CHECK(hipStreamSynchronize(stream));
+
+  double avg_ms = 0.0;
+  if (status == 0) {
+    constexpr int kIters = 20;
+    hipEvent_t e0, e1;
+    hipEventCreate(&e0);
+    hipEventCreate(&e1);
+    hipEventRecord(e0, stream);
+    for (int i = 0; i < kIters; ++i) launch();
+    hipEventRecord(e1, stream);
+    HIP_CHECK(hipEventSynchronize(e1));
+    float ms = 0.0f;
+    hipEventElapsedTime(&ms, e0, e1);
+    avg_ms = ms / kIters;
+    hipEventDestroy(e0);
+    hipEventDestroy(e1);
+  }
+
+  bool pass = (status == 0);
+  double rel_l2 = 0.0;
+  if (status == 0) {
+    std::vector<uint8_t> raw(countC * elem);
+    HIP_CHECK(hipMemcpy(raw.data(), dC, countC * elem, hipMemcpyDeviceToHost));
+    double ssd = 0.0, ssr = 0.0;
+    int errors = 0;
+    for (size_t i = 0; i < countC; ++i) {
+      const float gpu_val = c.fp32 ? reinterpret_cast<float*>(raw.data())[i]
+                                    : half_to_float(reinterpret_cast<__half*>(raw.data())[i]);
+      const float ref_val = c.fp32 ? d.Cref32[i] : half_to_float(d.Cref16[i]);
+      const float diff = std::fabs(gpu_val - ref_val);
+      const float tol = std::fabs(ref_val) * 0.05f + 0.1f;
+      if (diff > tol) ++errors;
+      ssd += (double)diff * diff;
+      ssr += (double)ref_val * ref_val;
     }
+    rel_l2 = ssr > 0.0 ? std::sqrt(ssd / ssr) : std::sqrt(ssd);
+    pass = (errors == 0);
+  }
+
+  std::printf("  M=%d N=%d K=%d gs=%d zero=%d dtype=%s  status=%d  %.4f ms  relL2=%.3e  %s\n",
+              c.M, c.N, c.K, c.gs, c.zero, c.fp32 ? "fp32" : "fp16", status,
+              avg_ms, rel_l2, pass ? "PASS" : "*** FAIL ***");
+
+  {
+    using namespace hipdnn_ep_test;
+    CsvWriter csv;
+    char shape_buf[96];
+    std::snprintf(shape_buf, sizeof(shape_buf), "%dx%dx%d_gs%d_%s%s", c.M, c.N,
+                 c.K, c.gs, c.fp32 ? "fp32" : "fp16", c.zero ? "" : "_noz");
+    CsvRow row;
+    row.shape = shape_buf;
+    row.config = "final";
+    row.time_ms = avg_ms;
+    row.rel_l2 = rel_l2;
+    row.verdict = pass ? "PASS" : "FAIL";
+    csv.write(row);
+  }
+
+  hipFree(dA);
+  hipFree(dB);
+  hipFree(dS);
+  if (dZ) hipFree(dZ);
+  hipFree(dC);
+  hipStreamDestroy(stream);
+  return pass;
 }
 
-// ============================================================
-// Packed-zero_points real-model path: correctness + PERFORMANCE (bits=3)
-//
-// Runs the exact steady-state path the runtime uses for an asym 3-bit ONNX
-// model, and compares its performance head-to-head against u4 WITH zp:
-//   1. hip_matmul_nbits_unpack_zp_u8_3bit() unpacks the continuous per-row
-//      3-bit packed zero_points stream to one byte per group ONCE (byte-exact
-//      check vs the generator's zeros), mirroring the wrapper's pointer-keyed
-//      cache.
-//   2. The GEMM is benchmarked + verified with the raw packed stream as
-//      zero_points and the unpacked buffer as pre_unpacked_zp_u8. The unpack
-//      is NOT in the timed loop (once-per-pointer cache in the real runtime),
-//      so the number reflects steady-state decode cost, compared against u4's
-//      with-zp throughput.
-// ============================================================
-static bool benchmarkPackedZpPath(
-    hipStream_t stream,
-    const __half* d_A, const uint8_t* d_B_u3, const __half* d_S_u3,
-    const uint8_t* d_Z_packed, const std::vector<uint8_t>& h_Z_u8_ref,
-    int M, int N, int K, int group_size, int num_groups_k,
-    __half* d_C, size_t countC, double mem_bytes,
-    const std::vector<__half>& h_C_ref, bool has_ref,
-    const KernelStat& u4_stat)
-{
-    std::cout << "\n  --- u3 packed-zp real-model path (vs u4 with zp) ---" << std::endl;
-
-    size_t countZ = static_cast<size_t>(N) * num_groups_k;
-    uint8_t* d_Z_unpacked = nullptr;
-    HIP_CHECK(hipMalloc(&d_Z_unpacked, countZ));
-    HIP_CHECK(hipMemset(d_Z_unpacked, 0xEE, countZ));
-
-    // Unpack ONCE (as the wrapper's cache does), then check byte-exactness.
-    hip_matmul_nbits_unpack_zp_u8_3bit(stream, d_Z_packed, d_Z_unpacked,
-                                       N, num_groups_k);
-    HIP_CHECK(hipStreamSynchronize(stream));
-
-    std::vector<uint8_t> h_Z_unpacked(countZ);
-    HIP_CHECK(hipMemcpy(h_Z_unpacked.data(), d_Z_unpacked, countZ,
-                        hipMemcpyDeviceToHost));
-    size_t zp_mismatches = 0;
-    for(size_t i = 0; i < countZ; i++)
-        if(h_Z_unpacked[i] != h_Z_u8_ref[i]) zp_mismatches++;
-    bool unpack_ok = (zp_mismatches == 0);
-    std::cout << "  Unpack check: " << (countZ - zp_mismatches) << "/" << countZ
-              << " zero_points match one-byte-per-group   "
-              << (unpack_ok ? "PASS" : "FAIL") << std::endl;
-
-    // Benchmark + verify the steady-state GEMM: packed stream as zero_points,
-    // pre-unpacked buffer as pre_unpacked_zp_u8 (unpack excluded from timing).
-    auto launch_checked = [&]() -> int {
-        return hip_matmul_nbits(
-            stream, d_A, d_B_u3, d_S_u3,
-            d_Z_packed,        // zero_points (raw ONNX-packed stream)
-            nullptr,           // bias
-            d_C,
-            M, N, K, 1, 3, group_size, 2, 1,
-            d_Z_unpacked,      // pre_unpacked_zp_u8 (runtime cache output)
-            nullptr);          // pre_unpacked_zp_fp16 (u3 consumes u8)
-    };
-    auto launch = [&]() { launch_checked(); };
-
-    KernelStat st = benchmarkAndVerify(
-        "u3(pkd-zp)", stream, launch_checked, launch, M, N, K,
-        mem_bytes, d_C, countC, h_C_ref, has_ref);
-
-    if(st.launch_ok && u4_stat.launch_ok)
-    {
-        double speedup = u4_stat.avg_ms / st.avg_ms;
-        std::cout << "  u3(pkd-zp) vs u4(zp) speed: " << std::fixed
-                  << std::setprecision(2) << speedup << "x "
-                  << (speedup >= 1.0 ? "(u3 faster)" : "(u4 faster)")
-                  << "   [u3 " << st.gflops << " GFLOPS / " << st.bw_gbs
-                  << " GB/s  vs  u4 " << u4_stat.gflops << " GFLOPS / "
-                  << u4_stat.bw_gbs << " GB/s]" << std::endl;
-    }
-
-    hipFree(d_Z_unpacked);
-    return unpack_ok && st.launch_ok && (!has_ref || st.errors == 0);
+static int run(int coverage_tier) {
+  std::vector<Case> cases = buildCases(coverage_tier);
+  std::printf("coverage=%d -> running %zu matmul_nbits_u3 cases (3 group_size "
+             "x 2 zero-points x 2 dtype x typical shapes)\n",
+             coverage_tier, cases.size());
+  int fail = 0;
+  for (size_t i = 0; i < cases.size(); ++i)
+    if (!runOne(cases[i], static_cast<int>(i))) ++fail;
+  std::printf("\nCoverage sweep done: %zu cases, %d failed\n", cases.size(), fail);
+  std::printf("%s\n", fail == 0 ? "ALL PASS" : "SOME FAILED");
+  return fail == 0 ? 0 : 1;
 }
 
-// ============================================================
-// FP32 A / FP32 output benchmark + verify (bits=3 native kernel only)
-//
-// Mirrors benchmarkAndVerify above, but d_C is a float* buffer (the
-// phase-1 cast patch's fp32 output path) instead of __half*. The
-// reference stays the on-disk fp16 C_ref -- upcast per-element with
-// half_to_float() before comparing.
-// ============================================================
-static KernelStat benchmarkAndVerifyFp32(
-    const std::string& label,
-    hipStream_t stream,
-    const std::function<int()>& launch_checked,
-    const std::function<void()>& launch,
-    int M, int N, int K,
-    double mem_bytes,
-    float* d_C, size_t countC,
-    const std::vector<__half>& h_C_ref, bool has_ref)
-{
-    KernelStat st;
-    st.label   = label;
-    st.has_ref = has_ref;
+}  // namespace sweep
 
-    std::cout << "\n  --- " << label << " ---" << std::endl;
-
-    constexpr int PRE_WARMUP = 500;
-    std::cout << "  Pre-warmup (" << PRE_WARMUP << " iters)..." << std::flush;
-    auto pw0 = std::chrono::steady_clock::now();
-    for(int w = 0; w < PRE_WARMUP; w++)
-        launch();
-    HIP_CHECK(hipStreamSynchronize(stream));
-    double pw_ms = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now() - pw0).count() / 1000.0;
-    std::cout << " done (" << std::fixed << std::setprecision(3)
-              << pw_ms / PRE_WARMUP << " ms/iter)" << std::endl;
-
-    std::cout << "  Warmup..." << std::flush;
-    auto tw0 = std::chrono::steady_clock::now();
-    int status = 0;
-    for(int w = 0; w < 3; w++)
-    {
-        status = launch_checked();
-        if(status != 0) break;
-    }
-    HIP_CHECK(hipStreamSynchronize(stream));
-    double warmup_ms = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now() - tw0).count() / 1000.0;
-
-    if(status != 0)
-    {
-        std::cout << " FAILED (status=" << status << ")" << std::endl;
-        return st;
-    }
-
-    int niters = calibrateIters(warmup_ms, 3);
-    std::cout << " OK (" << std::fixed << std::setprecision(2) << warmup_ms
-              << " ms), iters=" << niters << std::endl;
-
-    std::cout << "  Benchmarking (" << NROUNDS << " rounds x " << niters
-              << " iters)..." << std::flush;
-    auto mr = measureMedian(stream, niters, launch);
-    std::cout << " done" << std::endl;
-
-    st.launch_ok = true;
-    st.avg_ms    = mr.median_ms / niters;
-    st.min_ms    = mr.min_ms / niters;
-    st.max_ms    = mr.max_ms / niters;
-    st.gflops    = (2.0 * M * N * K) / (st.avg_ms * 1e6);
-    st.bw_gbs    = mem_bytes * niters / (mr.median_ms * 1e6);
-
-    std::cout << "  Median: " << std::setprecision(6) << st.avg_ms << " ms, "
-              << std::setprecision(2) << st.gflops << " GFLOPS, "
-              << st.bw_gbs << " GB/s   (range " << st.min_ms << " ~ "
-              << st.max_ms << " ms)" << std::endl;
-
-    if(has_ref)
-    {
-        std::vector<float> h_C(countC);
-        HIP_CHECK(hipMemcpy(h_C.data(), d_C, countC * sizeof(float),
-                            hipMemcpyDeviceToHost));
-        int errors = 0;
-        float max_diff = 0.0f, max_rdiff = 0.0f;
-        for(size_t i = 0; i < countC; i++)
-        {
-            float gpu_val = h_C[i];
-            float ref_val = half_to_float(h_C_ref[i]);
-            float diff    = std::fabs(gpu_val - ref_val);
-            float rdiff   = (std::fabs(ref_val) > 1e-6f) ? diff / std::fabs(ref_val) : diff;
-            if(diff > max_diff) max_diff = diff;
-            if(rdiff > max_rdiff) max_rdiff = rdiff;
-            float tol = std::fabs(ref_val) * 0.05f + 0.1f;
-            if(diff > tol) errors++;
-        }
-
-        st.errors    = errors;
-        st.total     = static_cast<int>(countC);
-        st.max_diff  = max_diff;
-        st.max_rdiff = max_rdiff;
-
-        std::cout << "  Verify: " << (st.total - errors) << "/" << st.total
-                  << " OK, max_abs_diff=" << std::setprecision(4) << max_diff
-                  << ", max_rel_diff=" << (max_rdiff * 100.0f) << "%   "
-                  << (errors == 0 ? "PASS" : "FAIL") << std::endl;
-    }
-
-    return st;
+static int runCustom(int M, int N, int K, int gs, bool zero, bool fp32) {
+  return sweep::runOne({M, K, N, gs, zero, fp32}, /*idx=*/0) ? 0 : 1;
 }
 
-// ============================================================
-// FP32 A / FP32 output single-shape test (bits=3 native kernel only)
-//
-// Drives the phase-1 fp32 cast patch (element_size_bytes==4) for bits=3.
-// Reuses the same on-disk fp16 A/B/scales/zeros as the fp16 comparison
-// below -- A is upcast host-side (exact fp16->fp32), so the kernel's
-// internal fp32->fp16 downcast reproduces that exact fp16 A, making the
-// existing fp16 u3 C_ref the correct ground truth here too, just
-// compared through float containers.
-// ============================================================
-bool testFp32Shape(int M, int N, int K, int group_size,
-                   const std::string& data_dir, bool use_zeros)
-{
-    int num_groups_k = (K + group_size - 1) / group_size;
+int main(int argc, char* argv[]) {
+  std::printf("custom_kernels MatMulNBits bits=3 (uint3, continuous bitstream) Verification\n");
+  std::printf("=============================================================================\n");
 
-    std::cout << "\n=== MatMulNBits u3 FP32  M=" << M << " N=" << N
-              << " K=" << K << " group_size=" << group_size
-              << (use_zeros ? "" : " (no zeros)") << " ===" << std::endl;
+  hipDeviceProp_t prop;
+  HIP_CHECK(hipGetDeviceProperties(&prop, 0));
+  std::printf("GPU: %s (arch: %s)\n", prop.name, prop.gcnArchName);
 
-    size_t countA     = static_cast<size_t>(M) * K;
-    size_t countC      = static_cast<size_t>(M) * N;
-    size_t rowBytesU3  = (static_cast<size_t>(K) * 3 + 7) / 8;
-    size_t countB_u3   = static_cast<size_t>(N) * rowBytesU3;
-    size_t countS      = static_cast<size_t>(N) * num_groups_k;
+  int M = 0, N = 0, K = 0;
+  int gs = 128;
+  bool no_zeros = false, fp32_mode = false;
+  bool have_custom = false;
+  for (int i = 1; i < argc; ++i) {
+    std::string a = argv[i];
+    if (a == "--no-zeros") no_zeros = true;
+    else if (a == "--fp32") fp32_mode = true;
+    else if (a == "--group-size" && i + 1 < argc) gs = std::atoi(argv[++i]);
+    else if (sscanf(argv[i], "%dx%dx%d", &M, &K, &N) == 3) have_custom = true;
+  }
 
-    std::vector<__half> h_A_fp16;
-    if(!readBin(data_dir + "/matmul_nbits_A.bin", h_A_fp16, countA))
-    {
-        std::cerr << "  ERROR: cannot read " << data_dir << "/matmul_nbits_A.bin" << std::endl;
-        return false;
-    }
-    std::vector<float> h_A(countA);
-    for(size_t i = 0; i < countA; i++)
-        h_A[i] = half_to_float(h_A_fp16[i]);
+  if (have_custom)
+    return runCustom(M, N, K, gs, !no_zeros, fp32_mode);
 
-    std::vector<uint8_t> h_B_u3;
-    std::vector<__half>  h_S_u3;
-    std::vector<uint8_t> h_Z_u3;
-    std::vector<__half>  h_Cref_u3;
-    bool ok = readBin(data_dir + "/matmul_nbits_u3_B.bin", h_B_u3, countB_u3)
-           && readBin(data_dir + "/matmul_nbits_u3_scales.bin", h_S_u3, countS);
-    if(use_zeros)
-        ok = ok && readBin(data_dir + "/matmul_nbits_u3_zeros.bin", h_Z_u3, countS);
-    bool has_ref = readBin(data_dir + "/matmul_nbits_u3_C_ref.bin", h_Cref_u3, countC);
-
-    if(!ok)
-    {
-        std::cerr << "  ERROR: failed to read u3 input data from " << data_dir << "/" << std::endl;
-        return false;
-    }
-    std::cout << "  Loaded A (fp32-upcast) + u3 weights from " << data_dir << "/" << std::endl;
-
-    hipStream_t stream;
-    HIP_CHECK(hipStreamCreate(&stream));
-
-    float*   d_A    = nullptr;
-    float*   d_C    = nullptr;
-    uint8_t* d_B_u3 = nullptr;
-    __half*  d_S_u3 = nullptr;
-    uint8_t* d_Z_u3 = nullptr;
-
-    HIP_CHECK(hipMalloc(&d_A, countA * sizeof(float)));
-    HIP_CHECK(hipMalloc(&d_C, countC * sizeof(float)));
-    HIP_CHECK(hipMalloc(&d_B_u3, countB_u3));
-    HIP_CHECK(hipMalloc(&d_S_u3, countS * sizeof(__half)));
-    HIP_CHECK(hipMemcpy(d_A, h_A.data(), countA * sizeof(float), hipMemcpyHostToDevice));
-    HIP_CHECK(hipMemset(d_C, 0, countC * sizeof(float)));
-    HIP_CHECK(hipMemcpy(d_B_u3, h_B_u3.data(), countB_u3, hipMemcpyHostToDevice));
-    HIP_CHECK(hipMemcpy(d_S_u3, h_S_u3.data(), countS * sizeof(__half), hipMemcpyHostToDevice));
-    if(use_zeros)
-    {
-        HIP_CHECK(hipMalloc(&d_Z_u3, countS));
-        HIP_CHECK(hipMemcpy(d_Z_u3, h_Z_u3.data(), countS, hipMemcpyHostToDevice));
-    }
-
-    auto launch_checked = [&]() -> int {
-        return hip_matmul_nbits(
-            stream, d_A, d_B_u3, d_S_u3,
-            use_zeros ? d_Z_u3 : nullptr,
-            nullptr,           // bias
-            d_C,
-            M, N, K,
-            1,                 // batch_count
-            3,                 // bits
-            group_size,        // block_size
-            4,                 // element_size_bytes (fp32)
-            1,                 // zp_elem_size (uint8, plain per-element)
-            nullptr,           // pre_unpacked_zp_u8 (unused for bits=3)
-            nullptr);          // pre_unpacked_zp_fp16 (unused for bits=3)
-    };
-    auto launch = [&]() { launch_checked(); };
-
-    double mem_bytes = static_cast<double>(countA) * 4 + static_cast<double>(countB_u3)
-                      + static_cast<double>(countS) * 2
-                      + (use_zeros ? static_cast<double>(countS) : 0.0)
-                      + static_cast<double>(countC) * 4;
-
-    KernelStat st = benchmarkAndVerifyFp32(
-        "u3(fp32)", stream, launch_checked, launch, M, N, K,
-        mem_bytes, d_C, countC, h_Cref_u3, has_ref);
-
-    bool pass = st.launch_ok && (!st.has_ref || st.errors == 0);
-
-    hipFree(d_A);
-    hipFree(d_C);
-    hipFree(d_B_u3);
-    hipFree(d_S_u3);
-    if(d_Z_u3) hipFree(d_Z_u3);
-    hipStreamDestroy(stream);
-
-    return pass;
-}
-
-// ============================================================
-// Single-shape comparison test
-// ============================================================
-bool testCompareShape(int M, int N, int K, int group_size,
-                      const std::string& data_dir, bool use_zeros)
-{
-    int num_groups_k = (K + group_size - 1) / group_size;
-
-    std::cout << "\n=== MatMulNBits u3 vs u4  M=" << M << " N=" << N
-              << " K=" << K << " group_size=" << group_size
-              << (use_zeros ? "" : " (no zeros)") << " ===" << std::endl;
-
-    size_t countA        = static_cast<size_t>(M) * K;
-    size_t countC         = static_cast<size_t>(M) * N;
-    size_t rowBytesU3     = (static_cast<size_t>(K) * 3 + 7) / 8;
-    size_t countB_u3      = static_cast<size_t>(N) * rowBytesU3;
-    // B_packed rows are padded to num_groups_k * (group_size/2) bytes (ONNX
-    // MatMulNBits blob layout), NOT a plain K/2 -- see ../fp16u4/test_matmul_nbits.cpp.
-    size_t countB_u4      = static_cast<size_t>(N) * num_groups_k * (group_size / 2);
-    size_t countS         = static_cast<size_t>(N) * num_groups_k;
-
-    // ---- Load shared A ----
-    std::vector<__half> h_A;
-    if(!readBin(data_dir + "/matmul_nbits_A.bin", h_A, countA))
-    {
-        std::cerr << "  ERROR: cannot read " << data_dir << "/matmul_nbits_A.bin" << std::endl;
-        std::cerr << "  Run: python gen_matmul_nbits_u3_data.py " << M << "x" << K << "x" << N
-                  << " --group-size " << group_size
-                  << (use_zeros ? "" : " --no-zeros") << " --dir " << data_dir << std::endl;
-        return false;
-    }
-
-    size_t packedZpCols  = (static_cast<size_t>(num_groups_k) * 3 + 7) / 8;
-    size_t countZ_packed = static_cast<size_t>(N) * packedZpCols;
-
-    // ---- Load u3 data ----
-    std::vector<uint8_t> h_B_u3;
-    std::vector<__half>  h_S_u3;
-    std::vector<uint8_t> h_Z_u3;
-    std::vector<uint8_t> h_Z_u3_packed;
-    std::vector<__half>  h_Cref_u3;
-    bool ok_u3 = readBin(data_dir + "/matmul_nbits_u3_B.bin", h_B_u3, countB_u3)
-              && readBin(data_dir + "/matmul_nbits_u3_scales.bin", h_S_u3, countS);
-    if(use_zeros)
-        ok_u3 = ok_u3
-              && readBin(data_dir + "/matmul_nbits_u3_zeros.bin", h_Z_u3, countS)
-              && readBin(data_dir + "/matmul_nbits_u3_zeros_packed.bin", h_Z_u3_packed, countZ_packed);
-    bool has_ref_u3 = readBin(data_dir + "/matmul_nbits_u3_C_ref.bin", h_Cref_u3, countC);
-
-    // ---- Load u4 data ----
-    std::vector<uint8_t> h_B_u4;
-    std::vector<__half>  h_S_u4;
-    std::vector<uint8_t> h_Zu8_u4;
-    std::vector<__half>  h_Zfp16_u4;
-    std::vector<__half>  h_Cref_u4;
-    bool ok_u4 = readBin(data_dir + "/matmul_nbits_u4_B_packed.bin", h_B_u4, countB_u4)
-              && readBin(data_dir + "/matmul_nbits_u4_scales.bin", h_S_u4, countS);
-    if(use_zeros)
-        ok_u4 = ok_u4
-              && readBin(data_dir + "/matmul_nbits_u4_zeros_u8.bin", h_Zu8_u4, countS)
-              && readBin(data_dir + "/matmul_nbits_u4_zeros_fp16.bin", h_Zfp16_u4, countS);
-    bool has_ref_u4 = readBin(data_dir + "/matmul_nbits_u4_C_ref.bin", h_Cref_u4, countC);
-
-    if(!ok_u3 || !ok_u4)
-    {
-        std::cerr << "  ERROR: failed to read u3/u4 input data from " << data_dir << "/" << std::endl;
-        std::cerr << "  Run: python gen_matmul_nbits_u3_data.py " << M << "x" << K << "x" << N
-                  << " --group-size " << group_size
-                  << (use_zeros ? "" : " --no-zeros") << " --dir " << data_dir << std::endl;
-        return false;
-    }
-    std::cout << "  Loaded shared A + u3/u4 weights from " << data_dir << "/" << std::endl;
-
-    hipStream_t stream;
-    HIP_CHECK(hipStreamCreate(&stream));
-
-    // ---- Device buffers: shared A + per-kernel C ----
-    __half* d_A = nullptr;
-    __half* d_C_u3 = nullptr;
-    __half* d_C_u4 = nullptr;
-    HIP_CHECK(hipMalloc(&d_A, countA * sizeof(__half)));
-    HIP_CHECK(hipMalloc(&d_C_u3, countC * sizeof(__half)));
-    HIP_CHECK(hipMalloc(&d_C_u4, countC * sizeof(__half)));
-    HIP_CHECK(hipMemcpy(d_A, h_A.data(), countA * sizeof(__half), hipMemcpyHostToDevice));
-    HIP_CHECK(hipMemset(d_C_u3, 0, countC * sizeof(__half)));
-    HIP_CHECK(hipMemset(d_C_u4, 0, countC * sizeof(__half)));
-
-    // ---- u3 device buffers ----
-    uint8_t* d_B_u3 = nullptr;
-    __half*  d_S_u3 = nullptr;
-    uint8_t* d_Z_u3 = nullptr;
-    uint8_t* d_Z_u3_packed = nullptr;
-    HIP_CHECK(hipMalloc(&d_B_u3, countB_u3));
-    HIP_CHECK(hipMalloc(&d_S_u3, countS * sizeof(__half)));
-    HIP_CHECK(hipMemcpy(d_B_u3, h_B_u3.data(), countB_u3, hipMemcpyHostToDevice));
-    HIP_CHECK(hipMemcpy(d_S_u3, h_S_u3.data(), countS * sizeof(__half), hipMemcpyHostToDevice));
-    if(use_zeros)
-    {
-        HIP_CHECK(hipMalloc(&d_Z_u3, countS));
-        HIP_CHECK(hipMemcpy(d_Z_u3, h_Z_u3.data(), countS, hipMemcpyHostToDevice));
-        HIP_CHECK(hipMalloc(&d_Z_u3_packed, countZ_packed));
-        HIP_CHECK(hipMemcpy(d_Z_u3_packed, h_Z_u3_packed.data(), countZ_packed, hipMemcpyHostToDevice));
-    }
-
-    // ---- u4 device buffers ----
-    uint8_t* d_B_u4 = nullptr;
-    __half*  d_S_u4 = nullptr;
-    uint8_t* d_Zu8_u4 = nullptr;
-    __half*  d_Zfp16_u4 = nullptr;
-    HIP_CHECK(hipMalloc(&d_B_u4, countB_u4));
-    HIP_CHECK(hipMalloc(&d_S_u4, countS * sizeof(__half)));
-    HIP_CHECK(hipMemcpy(d_B_u4, h_B_u4.data(), countB_u4, hipMemcpyHostToDevice));
-    HIP_CHECK(hipMemcpy(d_S_u4, h_S_u4.data(), countS * sizeof(__half), hipMemcpyHostToDevice));
-    if(use_zeros)
-    {
-        HIP_CHECK(hipMalloc(&d_Zu8_u4, countS));
-        HIP_CHECK(hipMalloc(&d_Zfp16_u4, countS * sizeof(__half)));
-        HIP_CHECK(hipMemcpy(d_Zu8_u4, h_Zu8_u4.data(), countS, hipMemcpyHostToDevice));
-        HIP_CHECK(hipMemcpy(d_Zfp16_u4, h_Zfp16_u4.data(), countS * sizeof(__half), hipMemcpyHostToDevice));
-    }
-
-    // ---- Launchers ----
-    auto launch_u3_checked = [&]() -> int {
-        return hip_matmul_nbits(
-            stream, d_A, d_B_u3, d_S_u3,
-            use_zeros ? d_Z_u3 : nullptr,
-            nullptr,           // bias
-            d_C_u3,
-            M, N, K,
-            1,                 // batch_count
-            3,                 // bits
-            group_size,        // block_size
-            2,                 // element_size_bytes (fp16)
-            1,                 // zp_elem_size (uint8, plain per-element)
-            nullptr,           // pre_unpacked_zp_u8 (unused for bits=3)
-            nullptr);          // pre_unpacked_zp_fp16 (unused for bits=3)
-    };
-    auto launch_u3 = [&]() { launch_u3_checked(); };
-
-    auto launch_u4_checked = [&]() -> int {
-        return hip_matmul_nbits(
-            stream, d_A, d_B_u4, d_S_u4,
-            use_zeros ? d_Zu8_u4 : nullptr,
-            nullptr,           // bias
-            d_C_u4,
-            M, N, K,
-            1,                 // batch_count
-            4,                 // bits
-            group_size,        // block_size
-            2,                 // element_size_bytes (fp16)
-            1,                 // zp_elem_size (uint8, pre-unpacked)
-            use_zeros ? d_Zu8_u4    : nullptr,   // pre_unpacked_zp_u8
-            use_zeros ? d_Zfp16_u4  : nullptr);  // pre_unpacked_zp_fp16
-    };
-    auto launch_u4 = [&]() { launch_u4_checked(); };
-
-    double mem_bytes_u3 = static_cast<double>(countA) * 2 + static_cast<double>(countB_u3)
-                        + static_cast<double>(countS) * 2
-                        + (use_zeros ? static_cast<double>(countS) : 0.0)
-                        + static_cast<double>(countC) * 2;
-    double mem_bytes_u4 = static_cast<double>(countA) * 2 + static_cast<double>(countB_u4)
-                        + static_cast<double>(countS) * 2
-                        + (use_zeros ? static_cast<double>(countS) * 2 : 0.0)
-                        + static_cast<double>(countC) * 2;
-
-    KernelStat stat_u3 = benchmarkAndVerify(
-        "u3", stream, launch_u3_checked, launch_u3, M, N, K,
-        mem_bytes_u3, d_C_u3, countC, h_Cref_u3, has_ref_u3);
-    KernelStat stat_u4 = benchmarkAndVerify(
-        "u4", stream, launch_u4_checked, launch_u4, M, N, K,
-        mem_bytes_u4, d_C_u4, countC, h_Cref_u4, has_ref_u4);
-
-    printComparison(stat_u3, stat_u4, countB_u3, countB_u4);
-
-    // ---- Packed-zp real-model path (only meaningful with zeros) ----
-    bool packed_ok = true;
-    if(use_zeros)
-    {
-        packed_ok = benchmarkPackedZpPath(
-            stream, d_A, d_B_u3, d_S_u3, d_Z_u3_packed, h_Z_u3,
-            M, N, K, group_size, num_groups_k,
-            d_C_u3, countC, mem_bytes_u3, h_Cref_u3, has_ref_u3, stat_u4);
-    }
-
-    bool pass = stat_u3.launch_ok && stat_u4.launch_ok
-             && (!stat_u3.has_ref || stat_u3.errors == 0)
-             && (!stat_u4.has_ref || stat_u4.errors == 0)
-             && packed_ok;
-
-    hipFree(d_A);
-    hipFree(d_C_u3); hipFree(d_C_u4);
-    hipFree(d_B_u3); hipFree(d_S_u3); if(d_Z_u3) hipFree(d_Z_u3);
-    if(d_Z_u3_packed) hipFree(d_Z_u3_packed);
-    hipFree(d_B_u4); hipFree(d_S_u4);
-    if(d_Zu8_u4) hipFree(d_Zu8_u4);
-    if(d_Zfp16_u4) hipFree(d_Zfp16_u4);
-    hipStreamDestroy(stream);
-
-    return pass;
-}
-
-// ============================================================
-// Model sweep: parse model config and iterate all shapes
-// ============================================================
-static std::string slurpFile(const std::string& path)
-{
-    std::ifstream f(path);
-    return std::string((std::istreambuf_iterator<char>(f)),
-                        std::istreambuf_iterator<char>());
-}
-
-static std::vector<int> jsonIntArray(const std::string& s, const std::string& key)
-{
-    std::vector<int> result;
-    std::string needle = "\"" + key + "\"";
-    auto pos = s.find(needle);
-    if(pos == std::string::npos) return result;
-    auto bracket = s.find('[', pos);
-    if(bracket == std::string::npos) return result;
-    auto end_bracket = s.find(']', bracket);
-    if(end_bracket == std::string::npos) return result;
-    std::string arr = s.substr(bracket + 1, end_bracket - bracket - 1);
-    size_t i = 0;
-    while(i < arr.size())
-    {
-        while(i < arr.size() && !std::isdigit(static_cast<unsigned char>(arr[i])) && arr[i] != '-')
-            i++;
-        if(i >= arr.size()) break;
-        result.push_back(std::stoi(arr.substr(i)));
-        while(i < arr.size() && (std::isdigit(static_cast<unsigned char>(arr[i])) || arr[i] == '-'))
-            i++;
-    }
-    return result;
-}
-
-static std::vector<int> jsonNestedIntArray(const std::string& s,
-                                           const std::string& objKey,
-                                           const std::string& arrKey)
-{
-    auto opos = s.find("\"" + objKey + "\"");
-    if(opos == std::string::npos) return {};
-    auto brace = s.find('{', opos);
-    if(brace == std::string::npos) return {};
-    int depth = 1;
-    auto bend = brace + 1;
-    while(bend < s.size() && depth > 0)
-    {
-        if(s[bend] == '{') depth++;
-        if(s[bend] == '}') depth--;
-        bend++;
-    }
-    return jsonIntArray(s.substr(brace, bend - brace), arrKey);
-}
-
-struct ModelConfig {
-    std::vector<int> M_array;
-    std::vector<int> K_array;
-    std::vector<int> N_array;
-};
-
-static ModelConfig parseModelConfig(const std::string& path)
-{
-    auto json = slurpFile(path);
-    if(json.empty())
-    {
-        std::cerr << "ERROR: cannot read " << path << std::endl;
-        exit(1);
-    }
-    ModelConfig cfg;
-    cfg.M_array = jsonIntArray(json, "M_array");
-    cfg.K_array = jsonNestedIntArray(json, "KN_pairs", "K");
-    cfg.N_array = jsonNestedIntArray(json, "KN_pairs", "N");
-    if(cfg.K_array.size() != cfg.N_array.size())
-    {
-        std::cerr << "ERROR: K and N arrays in KN_pairs must have the same length" << std::endl;
-        exit(1);
-    }
-    std::cout << "  Model: " << cfg.M_array.size() << " M values x "
-              << cfg.K_array.size() << " KN pairs = "
-              << cfg.M_array.size() * cfg.K_array.size() << " shapes" << std::endl;
-    return cfg;
-}
-
-struct SweepRow {
-    int M, K, N;
-    KernelStat u3, u4;
-    size_t bytesB_u3 = 0, bytesB_u4 = 0;
-    bool skipped = false;
-};
-
-static int runModelSweep(const std::string& json_path, int group_size,
-                         bool use_zeros, const std::string& data_root)
-{
-    std::cout << "\nModel sweep (u3 vs u4): " << json_path
-              << "  (group_size=" << group_size
-              << (use_zeros ? ", with zeros)" : ", no zeros)")
-              << "\n  Data root: " << data_root << std::endl;
-
-    auto model = parseModelConfig(json_path);
-    if(model.M_array.empty() || model.K_array.empty())
-    {
-        std::cerr << "ERROR: empty model config" << std::endl;
-        return 1;
-    }
-
-    std::vector<SweepRow> rows;
-    int shape_idx = 0;
-    int total_shapes = static_cast<int>(model.K_array.size() * model.M_array.size());
-
-    for(size_t ki = 0; ki < model.K_array.size(); ki++)
-    {
-        int K = model.K_array[ki];
-        int N = model.N_array[ki];
-        for(size_t mi = 0; mi < model.M_array.size(); mi++)
-        {
-            int M = model.M_array[mi];
-            shape_idx++;
-            SweepRow row{M, K, N};
-
-            if(K % 32 != 0)
-            {
-                std::cout << "\n=== [" << shape_idx << "/" << total_shapes
-                          << "] M=" << M << " K=" << K << " N=" << N
-                          << "  SKIPPED (K not %32) ===" << std::endl;
-                row.skipped = true;
-                rows.push_back(row);
-                continue;
-            }
-
-            std::string shape_dir = data_root + "/"
-                + std::to_string(M) + "x" + std::to_string(K) + "x" + std::to_string(N);
-
-            std::cout << "\n=== [" << shape_idx << "/" << total_shapes << "] "
-                      << shape_dir << " ===" << std::endl;
-
-            bool pass = testCompareShape(M, N, K, group_size, shape_dir, use_zeros);
-            (void)pass;
-            rows.push_back(row);
-        }
-    }
-
-    std::cout << "\nDone: " << rows.size() << " shapes attempted "
-              << "(see per-shape sections above for pass/fail and timings)" << std::endl;
-    return 0;
-}
-
-// ============================================================
-
-int main(int argc, char* argv[])
-{
-    std::cout << "custom_kernels MatMulNBits bits=3 (uint3) vs bits=4 (uint4) Verification" << std::endl;
-    std::cout << "==========================================================================" << std::endl;
-
-    hipDeviceProp_t prop;
-    HIP_CHECK(hipGetDeviceProperties(&prop, 0));
-    std::cout << "GPU: " << prop.name << " (arch: " << prop.gcnArchName << ")" << std::endl;
-
-    // --- Check for --model mode ---
-    std::string model_json;
-    std::string model_data_root = "data_model";
-    int model_gs = 128;
-    bool model_use_zeros = true;
-    for(int i = 1; i < argc; i++)
-    {
-        if(std::string(argv[i]) == "--model" && i + 1 < argc)
-            model_json = argv[++i];
-        else if(std::string(argv[i]) == "--data-root" && i + 1 < argc)
-            model_data_root = argv[++i];
-        else if(std::string(argv[i]) == "--group-size" && i + 1 < argc)
-            model_gs = std::atoi(argv[++i]);
-        else if(std::string(argv[i]) == "--no-zeros")
-            model_use_zeros = false;
-    }
-
-    if(!model_json.empty())
-        return runModelSweep(model_json, model_gs, model_use_zeros, model_data_root);
-
-    // --- Random-data single-shape mode (default) ---
-    int M = 128, N = 128, K = 128, gs = 128;
-    std::string data_dir = "data";
-    bool use_zeros = true;
-    bool fp32_mode = false;
-
-    for(int i = 1; i < argc; i++)
-    {
-        if(std::string(argv[i]) == "--no-zeros")
-            use_zeros = false;
-        else if(std::string(argv[i]) == "--fp32")
-            fp32_mode = true;
-    }
-
-    if(argc >= 2 && std::string(argv[1]) != "--no-zeros" && std::string(argv[1]) != "--fp32")
-    {
-        if(sscanf(argv[1], "%dx%dx%d", &M, &K, &N) != 3)
-        {
-            std::cerr << "Usage: " << argv[0]
-                      << " [MxKxN] [group_size] [data_dir] [--no-zeros] [--fp32]" << std::endl;
-            std::cerr << "       " << argv[0]
-                      << " --model <json> [--data-root DIR] [--group-size GS] [--no-zeros]" << std::endl;
-            return 1;
-        }
-    }
-    if(argc >= 3 && std::string(argv[2]) != "--no-zeros" && std::string(argv[2]) != "--fp32") gs = atoi(argv[2]);
-    if(argc >= 4 && std::string(argv[3]) != "--no-zeros" && std::string(argv[3]) != "--fp32") data_dir = argv[3];
-
-    std::cout << "Data dir: " << data_dir << std::endl;
-    if(!use_zeros)
-        std::cout << "Zero points: disabled (--no-zeros)" << std::endl;
-    if(fp32_mode)
-        std::cout << "Mode: FP32 A / FP32 output (element_size_bytes=4, bits=3)" << std::endl;
-
-    bool all_pass = fp32_mode
-        ? testFp32Shape(M, N, K, gs, data_dir, use_zeros)
-        : testCompareShape(M, N, K, gs, data_dir, use_zeros);
-
-    std::cout << "\n==========================================================================" << std::endl;
-    std::cout << "Overall: " << (all_pass ? "ALL PASSED" : "SOME FAILED") << std::endl;
-
-    return all_pass ? 0 : 1;
+  const int tier = hipdnn_ep_test::resolveCoverageTier(argc, argv);
+  return sweep::run(tier);
 }
