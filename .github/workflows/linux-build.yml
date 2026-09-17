@@ -30,10 +30,11 @@ env:
   # ORT is still built from source either way). Part of the ort-install cache
   # key. Remove a PR once its fix lands in the pinned ONNX Runtime release.
   ONNXRUNTIME_PR_PATCHES: ""
-  # Fork branch carrying AMDGPU MorphiZen integration (former PR 2194) plus
-  # sliding_window support.
+  # Pin OGA to a commit (not a moving branch) so cache keys invalidate when
+  # the fork is updated. Branch: sliding_window_support_amdgpu (AMDGPU
+  # MorphiZen integration + sliding_window).
   OGA_REPO: "cliu1003/onnxruntime-genai"
-  OGA_REF: "sliding_window_support_amdgpu"
+  OGA_REF: "53500450cfc858000461e008ae2ecfc9d2da406f"
   # Optional space-separated microsoft/onnxruntime-genai PR numbers applied
   # on top of the fork checkout via pull/<n>.patch + git am. Empty when the
   # fork branch already carries the needed integration.
@@ -308,9 +309,9 @@ jobs:
       # Checkout + build are skipped on an OGA cache hit (step-level gate); the
       # install-copy below always runs so the
       # cached artifacts land in install/ either way.
-      # OGA is built from cliu1003/onnxruntime-genai sliding_window_support_amdgpu
-      # (AMDGPU MorphiZen integration + sliding_window). Optional OGA_PR_PATCHES
-      # apply extra upstream PRs on top of the fork checkout.
+      # OGA is built from cliu1003/onnxruntime-genai at OGA_REF (commit pin of
+      # sliding_window_support_amdgpu). Optional OGA_PR_PATCHES apply extra
+      # upstream PRs on top of the fork checkout.
       - name: Checkout OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
