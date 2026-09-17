@@ -71,7 +71,7 @@ extern "C" int hip_gqa_flash_prefill_v3_configured(
     int m_tiles, int bkv, int nw, int mt, int nd);
 
 static void* gqa_policy() {
-  static void* p = hip_gqa_autotune_create();
+  static void* p = hip_gqa_autotune_create(nullptr);
   return p;
 }
 
