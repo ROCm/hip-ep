@@ -1279,8 +1279,8 @@ struct ReduceL2Converter final : public OpConversionPattern<ReduceL2Op> {
     Value rsqrt = tosa::RsqrtOp::create(rewriter, loc, reducedTy, sum);
     Value norm = tosa::ReciprocalOp::create(rewriter, loc, reducedTy, rsqrt);
     if (widen)
-      norm = tosa::CastOp::create(
-          rewriter, loc, keepdimsReduceType(dataType, axis), norm);
+      norm = tosa::CastOp::create(rewriter, loc,
+                                  keepdimsReduceType(dataType, axis), norm);
     replaceWithTosaReduce(op, norm, resultType, keepdims, rewriter);
     return success();
   }
@@ -3075,9 +3075,9 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         ConvOp, MatmulOp, GemmOp, TransposeOp, AddOp, SubOp, MinOp, MaxOp,
         MulOp, DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
         TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, WhereOp, LeakyReluOp,
-        MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp,
-        CastOp, QuantizeLinearOp, DequantizeLinearOp,
-        MatMulNBitsOp, GatherOp, RopeOp, GqaOp, MultiHeadAttentionOp>();
+        MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp, QuantizeLinearOp,
+        DequantizeLinearOp, MatMulNBitsOp, GatherOp, RopeOp, GqaOp,
+        MultiHeadAttentionOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
