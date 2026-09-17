@@ -19,6 +19,10 @@
 // hip.sqrt has no TOSA sqrt; the lowering is tosa.reciprocal(tosa.rsqrt(x)).
 // rocMLIR folds that pair back to math.sqrt.
 //
+// hip.softplus has no TOSA op. The lowering is the stable expansion
+// max(x, 0) + log(1 + exp(-abs(x))) rather than log(1 + exp(x)), matching
+// hip_softplus and avoiding overflow on ordinary f16 values.
+//
 // FILE LAYOUT:
 // Everything that converts lives in the first --split-input-file chunk, so
 // it is one module and therefore also covers several ops converting in a
@@ -174,6 +178,37 @@ func.func @sqrt_outlined_kernel(%x: tensor<2x8xf16>, %init: tensor<2x8xf16>)
   return %r : tensor<2x8xf16>
 }
 
+// CHECK-LABEL: func.func @softplus
+// CHECK: tosa.abs
+// CHECK: tosa.negate
+// CHECK: tosa.exp
+// CHECK: tosa.add
+// CHECK: tosa.log
+// CHECK: tosa.maximum
+// CHECK: tosa.add
+// CHECK-NOT: hip.softplus
+func.func @softplus(%ctx: !hip.context, %x: tensor<2x8xf16>,
+                    %init: tensor<2x8xf16>) -> tensor<2x8xf16>
+    attributes {rock.kernel} {
+  %r = hip.softplus(%ctx) ins(%x : tensor<2x8xf16>)
+                          outs(%init : tensor<2x8xf16>) : tensor<2x8xf16>
+  return %r : tensor<2x8xf16>
+}
+
+// CHECK-LABEL: func.func @softplus_outlined_kernel
+// CHECK: tosa.abs
+// CHECK: tosa.log
+// CHECK: tosa.maximum
+// CHECK-NOT: hip.softplus
+func.func @softplus_outlined_kernel(%x: tensor<2x8xf16>,
+                                    %init: tensor<2x8xf16>)
+    -> tensor<2x8xf16> attributes {rock.kernel} {
+  %ctx = ub.poison : !hip.context
+  %r = hip.softplus(%ctx) ins(%x : tensor<2x8xf16>)
+                          outs(%init : tensor<2x8xf16>) : tensor<2x8xf16>
+  return %r : tensor<2x8xf16>
+}
+
 // -----
 
 // Dynamic shapes give the pattern no static shape to reason about.
@@ -253,5 +288,27 @@ func.func @sqrt_integer_operand(%ctx: !hip.context, %x: tensor<4xi32>,
   // expected-error @+1 {{failed to legalize operation 'hip.sqrt'}}
   %r = hip.sqrt(%ctx) ins(%x : tensor<4xi32>)
                       outs(%init : tensor<4xi32>) : tensor<4xi32>
+  return %r : tensor<4xi32>
+}
+
+// -----
+
+func.func @softplus_dynamic_shape(%ctx: !hip.context, %x: tensor<?x8xf16>,
+                                  %init: tensor<?x8xf16>) -> tensor<?x8xf16>
+    attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.softplus'}}
+  %r = hip.softplus(%ctx) ins(%x : tensor<?x8xf16>)
+                          outs(%init : tensor<?x8xf16>) : tensor<?x8xf16>
+  return %r : tensor<?x8xf16>
+}
+
+// -----
+
+func.func @softplus_integer_operand(%ctx: !hip.context, %x: tensor<4xi32>,
+                                    %init: tensor<4xi32>) -> tensor<4xi32>
+    attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.softplus'}}
+  %r = hip.softplus(%ctx) ins(%x : tensor<4xi32>)
+                          outs(%init : tensor<4xi32>) : tensor<4xi32>
   return %r : tensor<4xi32>
 }

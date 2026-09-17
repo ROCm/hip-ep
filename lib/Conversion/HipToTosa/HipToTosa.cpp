@@ -781,6 +781,60 @@ struct SqrtConverter final : public OpConversionPattern<SqrtOp> {
   }
 };
 
+// TOSA has no softplus. Expand to the numerically stable form the
+// hip_softplus kernel uses:
+//   softplus(x) = max(x, 0) + log(1 + exp(-abs(x)))
+//
+// The naive log(1 + exp(x)) overflows for values ONNX still considers
+// valid (f16 20 is ordinary; exp(20) is already Inf), so a fused kernel
+// that used it would disagree with wrap_softplus rather than fail.
+//
+// Before:
+//   %r = hip.softplus(%ctx) ins(%x : tensor<2x8xf16>)
+//                           outs(%init : tensor<2x8xf16>) : tensor<2x8xf16>
+// After:
+//   %abs = tosa.abs %x
+//   %neg = tosa.negate %abs
+//   %e = tosa.exp %neg
+//   %one = tosa.const dense<1.0> : tensor<2x8xf16>
+//   %s = tosa.add %e, %one
+//   %l = tosa.log %s
+//   %zero = tosa.const dense<0.0> : tensor<2x8xf16>
+//   %m = tosa.maximum %x, %zero
+//   %r = tosa.add %m, %l
+struct SoftplusConverter final : public OpConversionPattern<SoftplusOp> {
+  using OpConversionPattern<SoftplusOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(SoftplusOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!resultType || !resultType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
+    if (adaptor.getX().getType() != resultType)
+      return rewriter.notifyMatchFailure(
+          op, "operand and result types must match exactly");
+    if (!isa<FloatType>(resultType.getElementType()))
+      return rewriter.notifyMatchFailure(op, "tosa op requires a float tensor");
+
+    Location loc = op.getLoc();
+    Value x = adaptor.getX();
+    Value abs = tosa::AbsOp::create(rewriter, loc, resultType, x);
+    Value neg = tosa::NegateOp::create(rewriter, loc, resultType, abs);
+    Value exp = tosa::ExpOp::create(rewriter, loc, resultType, neg);
+    Value one = createSplatFloat(rewriter, loc, resultType, 1.0);
+    Value sum = tosa::AddOp::create(rewriter, loc, resultType, exp, one);
+    Value log = tosa::LogOp::create(rewriter, loc, resultType, sum);
+    Value zero = createSplatFloat(rewriter, loc, resultType, 0.0);
+    Value relu = tosa::MaximumOp::create(rewriter, loc, resultType, x, zero);
+    rewriter.replaceOpWithNewOp<tosa::AddOp>(op, resultType, relu, log);
+    return success();
+  }
+};
+
 // hip.where is ternary (cond, x, y). tosa.select is the 1-1 mapping; it cannot
 // use BinaryConverter because the predicate is i1 while the result is not.
 // EqualizeRanks is pairwise, so the three operands are equalized the same way
@@ -3233,10 +3287,10 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     conversion.addIllegalOp<
         ConvOp, MatmulOp, GemmOp, TransposeOp, AddOp, SubOp, MinOp, MaxOp,
         MulOp, DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
-        TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, WhereOp, LeakyReluOp,
-        MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp, QuantizeLinearOp,
-        DequantizeLinearOp, MatMulNBitsOp, GatherOp, RopeOp, GqaOp,
-        MultiHeadAttentionOp, RmsNormOp, LayerNormOp, InstanceNormOp,
+        TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, SoftplusOp, WhereOp,
+        LeakyReluOp, MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp,
+        QuantizeLinearOp, DequantizeLinearOp, MatMulNBitsOp, GatherOp, RopeOp,
+        GqaOp, MultiHeadAttentionOp, RmsNormOp, LayerNormOp, InstanceNormOp,
         SkipRmsNormOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
@@ -3276,9 +3330,9 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         UnaryConverter<SigmoidOp, tosa::SigmoidOp, /*FloatOnly=*/true>,
         UnaryConverter<ReciprocalOp, tosa::ReciprocalOp,
                        /*FloatOnly=*/true>,
-        SqrtConverter, WhereConverter, LeakyReluConverter, SoftmaxConverter,
-        ReduceSumConverter, ReduceMeanConverter, CastConverter,
-        DequantizeLinearConverter, QuantizeLinearConverter,
+        SqrtConverter, SoftplusConverter, WhereConverter, LeakyReluConverter,
+        SoftmaxConverter, ReduceSumConverter, ReduceMeanConverter,
+        CastConverter, DequantizeLinearConverter, QuantizeLinearConverter,
         MatMulNBitsConverter, GatherConverter, RopeConverter, GqaConverter,
         MhaConverter, RmsNormConverter, LayerNormConverter,
         InstanceNormConverter, SkipRmsNormConverter>(ctx);
