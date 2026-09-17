@@ -31,7 +31,33 @@ endif()
 # mlir-opt condenses the patterns before they are embedded. It is optional:
 # without it the textual module is embedded as-is, which the parser accepts
 # because it dispatches on the bytecode magic bytes.
+# A build-tree or installed MLIR package exports the tool targets whether or
+# not their executables were built, and an imported target carries no rule to
+# produce one. Take such a target only once its binary is on disk.
+set(MLIR_OPT_TARGET_USABLE FALSE)
 if(TARGET mlir-opt)
+    get_target_property(MLIR_OPT_IMPORTED mlir-opt IMPORTED)
+    if(NOT MLIR_OPT_IMPORTED)
+        set(MLIR_OPT_TARGET_USABLE TRUE)
+    else()
+        get_target_property(MLIR_OPT_LOCATION mlir-opt IMPORTED_LOCATION)
+        if(NOT MLIR_OPT_LOCATION)
+            get_target_property(MLIR_OPT_CONFIGS mlir-opt IMPORTED_CONFIGURATIONS)
+            foreach(_mlir_opt_config IN LISTS MLIR_OPT_CONFIGS)
+                get_target_property(MLIR_OPT_LOCATION mlir-opt
+                    IMPORTED_LOCATION_${_mlir_opt_config})
+                if(MLIR_OPT_LOCATION)
+                    break()
+                endif()
+            endforeach()
+        endif()
+        if(MLIR_OPT_LOCATION AND EXISTS "${MLIR_OPT_LOCATION}")
+            set(MLIR_OPT_TARGET_USABLE TRUE)
+        endif()
+    endif()
+endif()
+
+if(MLIR_OPT_TARGET_USABLE)
     set(MLIR_OPT_EXE mlir-opt)
     message(STATUS "OnnxToHip: using in-tree mlir-opt target")
 else()
@@ -84,7 +110,7 @@ if(MLIR_PDLL_EXE)
         VERBATIM)
 
     if(MLIR_OPT_EXE)
-        if(TARGET mlir-opt)
+        if(MLIR_OPT_TARGET_USABLE)
             set(MLIR_OPT_COMMAND "$<TARGET_FILE:mlir-opt>")
             set(MLIR_OPT_DEPENDS mlir-opt)
         else()

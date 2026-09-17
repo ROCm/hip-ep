@@ -65,6 +65,10 @@ target_link_libraries(hip-mlir-opt PRIVATE
   MLIRIndexToLLVM
   MLIRSCFToControlFlow
   MLIRControlFlowToLLVM
+  MLIRUBToLLVM
+  MLIRComplexToLLVM
+  MLIRMathToLLVM
+  MLIRVectorToLLVM
   MLIRConvertToLLVMPass
   MLIRReconcileUnrealizedCasts
   MLIRTransformUtils
