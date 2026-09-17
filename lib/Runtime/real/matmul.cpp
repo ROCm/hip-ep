@@ -197,11 +197,17 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
             /*strideA=*/b_batch_stride, /*strideB=*/M * K, /*strideD=*/M * N);
       }
       entry->resolved.store(true, std::memory_order_release);
-      RUNTIME_DEBUG_LOG("[MATMUL] resolved M=%lld N=%lld K=%lld batch=%lld -> "
-                        "gemv=%d ck_instance=%d\n",
-                        (long long)M, (long long)N, (long long)K,
-                        (long long)batch_count, (int)entry->use_gemv,
-                        entry->ck_instance);
+      if (entry->use_gemv) {
+        RUNTIME_DEBUG_LOG("[MATMUL] resolved M=%lld N=%lld K=%lld batch=%lld -> "
+                          "gemv\n",
+                          (long long)M, (long long)N, (long long)K,
+                          (long long)batch_count);
+      } else {
+        RUNTIME_DEBUG_LOG("[MATMUL] resolved M=%lld N=%lld K=%lld batch=%lld -> "
+                          "ck_instance=%d\n",
+                          (long long)M, (long long)N, (long long)K,
+                          (long long)batch_count, entry->ck_instance);
+      }
     }
   }
 
