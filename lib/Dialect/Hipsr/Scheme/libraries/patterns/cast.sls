@@ -18,29 +18,25 @@
           (mlir pattern-macro))
 
   ;;===--------------------------------------------------------------------===;;
-  ;; Cast Pattern - MLIR Operation Syntax
+  ;; Cast Pattern - MLIR-like Syntax with :where Clause
   ;;
-  ;; Uses operation syntax: (%v = "op.name" (operands) ((attrs)) ...)
-  ;; The macro recognizes "hipsr.placeholder" and "hipsr.cast" and translates
-  ;; to specialized FFI calls.
-  ;;
-  ;; mlir-tensor-type-in-device-space: adds #hipsr.mem<device> to tensor types
+  ;; Operations come first, helper bindings defined in :where (like Haskell)
   ;;===--------------------------------------------------------------------===;;
 
   (define-conversion-pattern onnx-cast->hipsr
     :match 
     (%output = "onnx.Cast" (%input) ((to = !to_type)) : (!input-type) -> !output-type)
     :rewrite %output :with
-    (%ctx = (mlir-get-hipsr-context-arg op))
-    (%placeholder = "hipsr.placeholder" (%ctx %input (mlir-tensor-type-in-device-space !output-type))
+    (%placeholder = "hipsr.placeholder" (%ctx %input !output-device)
                     ((placeholder_type 0))
-                    : ((mlir-tensor-type-in-device-space !input-type)) 
-                    -> (mlir-tensor-type-in-device-space !output-type))
-    (%cast = "hipsr.cast" (%ctx %input %placeholder (mlir-tensor-type-in-device-space !output-type))
+                    : (!input-device) -> !output-device)
+    (%cast = "hipsr.cast" (%ctx %input %placeholder !output-device)
              ((cast_attrs))
-             : ((mlir-tensor-type-in-device-space !input-type) 
-                (mlir-tensor-type-in-device-space !output-type)) 
-             -> (mlir-tensor-type-in-device-space !output-type)))
+             : (!input-device !output-device) -> !output-device)
+    :where
+    [%ctx (mlir-get-hipsr-context-arg op)]
+    [!input-device (mlir-tensor-type-in-device-space !input-type)]
+    [!output-device (mlir-tensor-type-in-device-space !output-type)])
 
   ;;===--------------------------------------------------------------------===;;
   ;; Pattern Population
