@@ -47,9 +47,9 @@ REASON_CATALOG = [
     ("CONVERSION_NOT_PROBED", "Conversion was not run; support is unknown."),
 ]
 
-# Dialects a converted op can land in. Anything outside hip.* is a
-# compile-time fold rather than a runtime kernel.
-_COMPILE_TIME_PREFIXES = ("tensor.", "arith.", "memref.", "bufferization.")
+# Anything outside the hip dialect is a compile-time fold rather than a
+# runtime kernel, whichever dialect the conversion happened to pick.
+_RUNTIME_DIALECT_PREFIX = "hip."
 
 
 def norm_domain(domain: str) -> str:
@@ -156,9 +156,10 @@ def classify(op, domain, count, leftover, attr_row, reason_row, probed):
         return "partial", codes, texts
 
     hip_ops = (attr_row or {}).get("hip_ops") or []
-    if hip_ops and all(
-        any(h.startswith(p) for p in _COMPILE_TIME_PREFIXES) for h in hip_ops
-    ):
+    if hip_ops and not any(h.startswith(_RUNTIME_DIALECT_PREFIX) for h in hip_ops):
+        return "full", ["COMPILE_TIME_TENSOR_OP"], ["Handled at compile time."]
+    # No runtime op came out of it, and the analysis proved none went missing.
+    if not hip_ops and (attr_row or {}).get("folded_instances"):
         return "full", ["COMPILE_TIME_TENSOR_OP"], ["Handled at compile time."]
     return "full", [], []
 
@@ -172,7 +173,7 @@ def runtime_entry(hip_op, runtime_map):
 def primary_hip_op(attr_row):
     hip_ops = (attr_row or {}).get("hip_ops") or []
     for hip_op in hip_ops:
-        if hip_op.startswith("hip."):
+        if hip_op.startswith(_RUNTIME_DIALECT_PREFIX):
             return hip_op
     return hip_ops[0] if hip_ops else None
 

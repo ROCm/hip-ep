@@ -257,12 +257,16 @@ if ($haveCompilerInput) {
     & (Join-Path $ToolsDir "run_convert_probe.ps1") `
         -InputMlir $CompilerInput -OutputDir $EpInputDir -HipEpPackageRoot $HipEpPackageRoot
 
+    $locatedInput = Join-Path $EpInputDir "compiler_input_loc.mlir"
     Invoke-PythonStep -Label '  leftover + attribute analysis' -PyArgv @(
         (Join-Path $ToolsDir "analyze_conversion.py"),
-        (Join-Path $EpInputDir "compiler_input_loc.mlir"),
+        $locatedInput,
         (Join-Path $EpInputDir "converted.mlir"),
         $CompatDir
     )
+    # It only existed to join the two sides by location, and it is a copy of
+    # compiler_input.mlir that the probe can recreate.
+    Remove-Item -LiteralPath $locatedInput -ErrorAction SilentlyContinue
 
     # Why each leftover did not convert. The conversion cannot report its own
     # refusal reason in a release build, so this reads the constraints out of
@@ -277,7 +281,8 @@ if ($haveCompilerInput) {
     # Which runtime function executes each converted op. Keyed on the hip ops
     # the conversion produced, so this is a lookup rather than a guess.
     Invoke-PythonStep -Label '  hip op to runtime map' -PyArgv @(
-        (Join-Path $ToolsDir "hip_runtime_map.py"), $RepoRoot, $CompatDir
+        (Join-Path $ToolsDir "hip_runtime_map.py"), $RepoRoot, $CompatDir,
+        "--attr-transfer", (Join-Path $CompatDir "attr_transfer.json")
     )
 } else {
     Write-Host '(4/5) Skip conversion probe (no compiler input); support will be reported as unverified' -ForegroundColor Yellow
@@ -293,7 +298,7 @@ Invoke-PythonStep -Label '  build_report_input' -PyArgv @(
     $analyzedGraph, $step1ForCompat, $CompatDir, $RepoRoot
 )
 Invoke-PythonStep -Label '  generate_final_reports' -PyArgv @(
-    (Join-Path $ToolsDir "generate_final_reports.py"), $CompatDir
+    (Join-Path $ToolsDir "generate_final_reports.py"), $CompatDir, $OutputDir
 )
 
 $compatNote = if ($haveCompilerInput) {
@@ -320,31 +325,22 @@ if ($dumpFailed) {
 }
 $statusLines | Set-Content -LiteralPath $statusPath -Encoding UTF8
 
-$summarySrc = Join-Path $CompatDir "model_compatibility_report.md"
-if (Test-Path -LiteralPath $summarySrc) {
-    Copy-Item -LiteralPath $summarySrc -Destination (Join-Path $OutputDir "model_compatibility_report.md") -Force
-    Copy-Item -LiteralPath (Join-Path $CompatDir "model_compatibility_details.md") `
-        -Destination (Join-Path $OutputDir "model_compatibility_details.md") -Force
-
-    # Without the conversion probe the report describes operator counts only.
-    # Badge both copies right after the H1 so the limitation cannot be missed
-    # when the agent reads the report back.
-    if (-not $haveCompilerInput) {
-        $badge = "> **Source:** original ONNX, conversion probe skipped. No hip-ep package was configured or the dump failed, so operator support was NOT verified against the compiler."
-        foreach ($mdTarget in @(
-            (Join-Path $OutputDir "model_compatibility_report.md"),
-            (Join-Path $OutputDir "model_compatibility_details.md"),
-            $summarySrc,
-            (Join-Path $CompatDir "model_compatibility_details.md")
-        )) {
-            if (-not (Test-Path -LiteralPath $mdTarget)) { continue }
-            $content = Get-Content -Raw -LiteralPath $mdTarget
-            if ($content -match '\*\*Source:\*\* original ONNX') { continue }
-            $h1End = $content.IndexOf("`n")
-            if ($h1End -lt 0) { continue }
-            $patched = $content.Substring(0, $h1End + 1) + "`n$badge`n" + $content.Substring($h1End + 1)
-            Set-Content -LiteralPath $mdTarget -Value $patched -Encoding UTF8 -NoNewline
-        }
+# Without the conversion probe the report describes operator counts only.
+# Badge it right after the H1 so the limitation cannot be missed when the
+# agent reads the report back.
+if (-not $haveCompilerInput) {
+    $badge = "> **Source:** original ONNX, conversion probe skipped. No hip-ep package was configured or the dump failed, so operator support was NOT verified against the compiler."
+    foreach ($mdTarget in @(
+        (Join-Path $OutputDir "model_compatibility_report.md"),
+        (Join-Path $OutputDir "model_compatibility_details.md")
+    )) {
+        if (-not (Test-Path -LiteralPath $mdTarget)) { continue }
+        $content = Get-Content -Raw -LiteralPath $mdTarget
+        if ($content -match '\*\*Source:\*\* original ONNX') { continue }
+        $h1End = $content.IndexOf("`n")
+        if ($h1End -lt 0) { continue }
+        $patched = $content.Substring(0, $h1End + 1) + "`n$badge`n" + $content.Substring($h1End + 1)
+        Set-Content -LiteralPath $mdTarget -Value $patched -Encoding UTF8 -NoNewline
     }
 }
 
@@ -354,7 +350,7 @@ Write-Host "Pipeline status:       $statusPath"
 if ($haveCompilerInput) {
     Write-Host "Compiler input:        $CompilerInput"
     Write-Host "Converted MLIR:        $(Join-Path $EpInputDir 'converted.mlir')"
-    Write-Host "Op comparison:         $(Join-Path $OutputDir 'op_distribution_comparison.md')"
+    Write-Host "Converted ops:         $(Join-Path $CompatDir 'attr_transfer.json')"
 } else {
     Write-Host "Compiler input:        (not produced)"
 }

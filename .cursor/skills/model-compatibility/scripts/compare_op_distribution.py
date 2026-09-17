@@ -165,6 +165,12 @@ def main() -> None:
         "--original-model", default="", help="Label for original model path"
     )
     ap.add_argument("--ep-model", default="", help="Label for EP onnx path")
+    ap.add_argument(
+        "--markdown",
+        action="store_true",
+        help="Also write op_distribution_comparison.md (standalone use; the "
+        "pipeline renders this comparison inside the compatibility report).",
+    )
     args = ap.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -174,13 +180,14 @@ def main() -> None:
     comp = build_comparison(args.original_step1, args.ep_step1, orig_label, ep_label)
 
     json_path = args.output_dir / "op_distribution_comparison.json"
-    md_path = args.output_dir / "op_distribution_comparison.md"
     json_path.write_text(
         json.dumps(comp, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    write_markdown(comp, md_path)
     print(f"[OK] {json_path}")
-    print(f"[OK] {md_path}")
+    if args.markdown:
+        md_path = args.output_dir / "op_distribution_comparison.md"
+        write_markdown(comp, md_path)
+        print(f"[OK] {md_path}")
 
 
 if __name__ == "__main__":

@@ -48,7 +48,7 @@ Exact order, do not reorder:
    - Fully Compatible
    - Partially Compatible
    - Unsupported
-5. *(conditional)* `## Original vs compiler input (operator distribution)` — only when the dump ran; embedded from `op_distribution_comparison.json`
+5. *(conditional)* `## Original vs compiler input` — only when the dump ran; rendered from `op_distribution_comparison.json`, with the totals table, the operators unique to either side, and the per-operator delta table
 6. `## Operator Distribution with Compatibility Status`
    - Columns (exact, in order): `Op Type | Domain | Count | Data Types | Recommended Rocm Implementation | Status | Op Description`
 7. `### Compatibility Summary`
@@ -61,13 +61,12 @@ Exact order, do not reorder:
 
 ## model_compatibility_details.md — section order
 
-1. Title + metadata
+This file carries only what the main report does not: the evidence behind a non-supported row.
+
+1. Title + metadata, with a pointer back to `model_compatibility_report.md`
 2. *(conditional)* `Source: original ONNX, conversion probe skipped` badge when applicable
-3. *(conditional)* `## Original vs compiler input (operator distribution)` block
-4. `## Supported operators table (full)`
-5. `## Partially compatible details` — columns: `Op Type | Domain | Reason Codes | Reason Texts | Evidence`
-6. `## Unsupported operators` — columns: `Op Type | Domain | Count | Reason`
-7. `## Data quality notes`
+3. `## Partially compatible details` — columns: `Op Type | Domain | Reason Codes | Reason Texts | Evidence`
+4. `## Data quality notes`
 
 ## Agent rendering rules
 

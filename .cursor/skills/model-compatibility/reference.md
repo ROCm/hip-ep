@@ -103,7 +103,7 @@ For every unsupported op recommendation include: recommended path, closest exist
 
 ## ROCm family routing matrix
 
-Machine-readable form: [scripts/unsupported_reco_rules.json](scripts/unsupported_reco_rules.json). Human-readable summary:
+[scripts/unsupported_reco_rules.json](scripts/unsupported_reco_rules.json) is the source of truth, because the report generator reads it. The table below is a reading aid; when the two disagree, the JSON is right and this needs updating.
 
 | # | Family | Preferred path | Fallback |
 |---|---|---|---|
@@ -129,12 +129,6 @@ Machine-readable form: [scripts/unsupported_reco_rules.json](scripts/unsupported
 - `wrap_skip_simplified_layer_norm` — Microsoft SkipSimplifiedLayerNormalization fusion
 - `wrap_reduce_sum` — current custom reduction path
 
-## Validation checklist (final pass before responding to user)
+## Validation checklist
 
-- Counts in summary equal computed counts from `operator_distribution`
-- No unsupported non-compile-time line uses text other than `No Hip Dialect implementation available.`
-- Every operator in compatibility summary appears in operator distribution
-- `mapping_chain` table rows exactly match input rows
-- No extra sections beyond template order
-- **Diagnose pass executed for every non-supported entry** (see [diagnose.md](diagnose.md)), and its finding is in the answer
-- If `-SkipDump` mode was used, the report header carries the `Source: original ONNX, conversion probe skipped` badge
+Kept in [SKILL.md](SKILL.md) so there is one list to follow; two copies drift.

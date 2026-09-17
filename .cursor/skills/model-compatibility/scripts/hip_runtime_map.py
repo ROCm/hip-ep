@@ -181,13 +181,35 @@ def build_map(repo_root: Path):
     return rows
 
 
+def observed_hip_ops(attr_transfer_path: Path):
+    """Hip ops this model's conversion actually produced."""
+    if not attr_transfer_path.is_file():
+        return None
+    data = json.loads(attr_transfer_path.read_text(encoding="utf-8"))
+    observed = set()
+    for row in data.get("rows") or []:
+        observed.update(row.get("hip_ops") or [])
+    return observed
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("repo_root", help="hip-ep repository root")
     ap.add_argument("output_dir", help="Directory for hip_runtime_map.json")
+    ap.add_argument(
+        "--attr-transfer",
+        default="",
+        help="attr_transfer.json; when given, only the ops it observed are kept",
+    )
     args = ap.parse_args()
 
     rows = build_map(Path(args.repo_root))
+    # The full dialect is ~90 ops and a model uses a dozen; keeping the rest
+    # would make the file mostly noise for the reader who opens it.
+    if args.attr_transfer:
+        observed = observed_hip_ops(Path(args.attr_transfer))
+        if observed is not None:
+            rows = {k: v for k, v in rows.items() if k in observed}
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / "hip_runtime_map.json"

@@ -22,7 +22,7 @@ param(
     # Directory receiving compiler_input.mlir. Defaults next to the model.
     [string]$OutputDir = "",
 
-    # hip-ep package with bin\hip-onnx-runner.exe and bin\hipgpu.dll.
+    # hip-ep package holding the runner and the hipgpu EP library under bin.
     # Resolution order: -HipEpPackageRoot > $env:HIP_EP_PACKAGE_ROOT > error.
     [string]$HipEpPackageRoot = "",
 
@@ -55,13 +55,29 @@ if ([string]::IsNullOrWhiteSpace($HipEpPackageRoot)) {
 $HipEpPackageRoot = (Resolve-Path -LiteralPath $HipEpPackageRoot).ProviderPath
 
 $PackageBin = Join-Path $HipEpPackageRoot "bin"
-$RunnerExe = Join-Path $PackageBin "hip-onnx-runner.exe"
-$EpLib = Join-Path $PackageBin "hipgpu.dll"
-if (-not (Test-Path -LiteralPath $RunnerExe)) {
-    throw "hip-onnx-runner.exe not found: $RunnerExe"
+
+# Executable suffixes and library naming differ by platform, and a package may
+# keep the EP library beside the tools or in a sibling lib directory.
+function Resolve-PackageFile {
+    param([string[]]$Names, [string[]]$Directories)
+    foreach ($directory in $Directories) {
+        foreach ($name in $Names) {
+            $candidate = Join-Path $directory $name
+            if (Test-Path -LiteralPath $candidate) { return $candidate }
+        }
+    }
+    return ""
 }
-if (-not (Test-Path -LiteralPath $EpLib)) {
-    throw "hipgpu.dll not found: $EpLib"
+
+$RunnerExe = Resolve-PackageFile -Names @('hip-onnx-runner.exe', 'hip-onnx-runner') `
+    -Directories @($PackageBin)
+if (-not $RunnerExe) {
+    throw "hip-onnx-runner not found under $PackageBin"
+}
+$EpLib = Resolve-PackageFile -Names @('hipgpu.dll', 'libhipgpu.so') `
+    -Directories @($PackageBin, (Join-Path $HipEpPackageRoot "lib"))
+if (-not $EpLib) {
+    throw "hipgpu EP library not found under $HipEpPackageRoot"
 }
 
 # The dump needs flags added in ROCm/hip-ep#1033. Check before running so an
@@ -134,10 +150,17 @@ finally {
 }
 
 Get-Content -LiteralPath $StdoutPath | Write-Host
+# A clean run leaves nothing on stderr; an empty file only invites a reader to
+# open it.
+if ((Get-Item -LiteralPath $StderrPath).Length -eq 0) {
+    Remove-Item -LiteralPath $StderrPath -ErrorAction SilentlyContinue
+}
 
 if (-not (Test-Path -LiteralPath $DumpPath)) {
-    Write-Host "--- runner stderr ---" -ForegroundColor DarkGray
-    Get-Content -LiteralPath $StderrPath -Tail 20 | Write-Host
+    if (Test-Path -LiteralPath $StderrPath) {
+        Write-Host "--- runner stderr ---" -ForegroundColor DarkGray
+        Get-Content -LiteralPath $StderrPath -Tail 20 | Write-Host
+    }
     throw "Dump file was not created (runner exit code $exitCode): $DumpPath"
 }
 if ($exitCode -ne 0) {

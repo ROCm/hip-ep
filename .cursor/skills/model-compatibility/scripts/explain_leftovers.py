@@ -28,23 +28,10 @@ import json
 import re
 from pathlib import Path
 
-# Element-type spellings that appear both in MLIR type signatures and in
-# converter messages ("Expected i8 (packed uint4) or f16").
-_TYPE_TOKENS = [
-    "bf16",
-    "f16",
-    "f32",
-    "f64",
-    "i1",
-    "i8",
-    "i16",
-    "i32",
-    "i64",
-    "ui8",
-    "ui16",
-    "ui32",
-    "ui64",
-]
+# MLIR scalar type spellings, as they appear both in type signatures and in
+# converter messages ("Expected i8 (packed uint4) or f16"). Matching the shape
+# rather than listing the types keeps new ones (f8E4M3FN, i4) working.
+_TYPE_TOKEN_RE = re.compile(r"\b(?:[su]?i\d+|[fu]\d+|f8E\w+|f4E\w+|bf16|index)\b")
 
 _STRING_LITERAL_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
 _NOTIFY_RE = re.compile(r"notifyMatchFailure\s*\(")
@@ -131,8 +118,7 @@ def rank_refusals(refusals, observed):
     """
 
     def score(refusal):
-        message = refusal["message"]
-        mentioned = [t for t in _TYPE_TOKENS if re.search(rf"\b{t}\b", message)]
+        mentioned = set(_TYPE_TOKEN_RE.findall(refusal["message"]))
         if not mentioned:
             return 0
         violating = [t for t in observed if t not in mentioned]

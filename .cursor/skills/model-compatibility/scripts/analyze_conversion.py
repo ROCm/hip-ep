@@ -32,10 +32,12 @@ from pathlib import Path
 
 from mlir_text import parse_mlir_file, strip_quotes
 
-# Dialects a converted ONNX op can legitimately land in. hip.* is the runtime
-# path; the others are compile-time folds (a Reshape that became a static
-# tensor.expand_shape, index arithmetic, and so on).
-_CONVERTED_DIALECTS = ("hip", "tensor", "arith", "memref", "scf", "bufferization")
+# Anything that is no longer an onnx op is a conversion result: hip.* is the
+# runtime path, and the rest are compile-time folds (a Reshape that became a
+# static tensor.expand_shape, index arithmetic, and so on). Listing the
+# expected dialects instead would silently drop a pairing the day a conversion
+# starts emitting one that is not on the list.
+_ONNX_DIALECT = "onnx"
 
 _SCALAR_RE = re.compile(r"^\s*(-?[\d.eE+]+|\"[^\"]*\")")
 
@@ -148,10 +150,35 @@ def collect_leftovers(post_ops):
     ]
 
 
-def build_attr_transfer(pre_module, post_module, leftover_locs):
+def orphan_hip_ops(pre_module, post_module):
+    """Hip ops whose location matches no pre-conversion onnx op.
+
+    Carriers count as pre ops: hip.constant comes from onnx.Constant, so
+    excluding those would make every carrier look unexplained.
+
+    When this is empty, every runtime op in the module is accounted for, which
+    turns "this onnx op has no pair" into proof that it produced no runtime op
+    rather than a suspicion that the pairing missed one.
+    """
+    accounted = {
+        pre_module.resolve_loc(op)
+        for op in pre_module.onnx_ops(include_non_compute=True)
+    }
+    accounted.discard("")
+
+    orphans = defaultdict(int)
+    for op in post_module.ops:
+        if not op.name.startswith("hip."):
+            continue
+        if post_module.resolve_loc(op) not in accounted:
+            orphans[op.name] += 1
+    return dict(sorted(orphans.items()))
+
+
+def build_attr_transfer(pre_module, post_module, leftover_locs, pairing_is_complete):
     post_by_loc = defaultdict(list)
     for op in post_module.ops:
-        if op.dialect not in _CONVERTED_DIALECTS:
+        if op.dialect == _ONNX_DIALECT:
             continue
         loc = post_module.resolve_loc(op)
         if loc:
@@ -161,6 +188,7 @@ def build_attr_transfer(pre_module, post_module, leftover_locs):
     per_key = defaultdict(
         lambda: {
             "paired": 0,
+            "folded": 0,
             "hip_ops": set(),
             "dropped_attrs": defaultdict(int),
             "dropped_default_attrs": defaultdict(int),
@@ -177,7 +205,13 @@ def build_attr_transfer(pre_module, post_module, leftover_locs):
 
         candidates = post_by_loc.get(loc)
         if not candidates:
-            unpaired[f"{key[1]}.{key[0]}"] += 1
+            # A conversion that rewrites an op into a chain can hand the new
+            # ops a neighbour's location, so a missing pair is only proof of a
+            # fold when nothing else in the module is unaccounted for.
+            if pairing_is_complete:
+                per_key[key]["folded"] += 1
+            else:
+                unpaired[f"{key[1]}.{key[0]}"] += 1
             continue
 
         entry = per_key[key]
@@ -221,6 +255,7 @@ def build_attr_transfer(pre_module, post_module, leftover_locs):
                 "op_type": op_type,
                 "domain": domain,
                 "paired_instances": entry["paired"],
+                "folded_instances": entry["folded"],
                 "hip_ops": sorted(entry["hip_ops"]),
                 "dropped_attrs": dict(sorted(entry["dropped_attrs"].items())),
                 "dropped_default_attrs": dict(
@@ -252,7 +287,10 @@ def main():
     leftover_locs.discard("")
     leftovers = collect_leftovers(leftover_ops)
 
-    attr_rows, unpaired = build_attr_transfer(pre_module, post_module, leftover_locs)
+    orphans = orphan_hip_ops(pre_module, post_module)
+    attr_rows, unpaired = build_attr_transfer(
+        pre_module, post_module, leftover_locs, pairing_is_complete=not orphans
+    )
 
     leftover_path = output_dir / "leftover_onnx.json"
     leftover_path.write_text(
@@ -275,6 +313,7 @@ def main():
             {
                 "rows": attr_rows,
                 "unpaired_instances": unpaired,
+                "orphan_hip_ops": orphans,
             },
             indent=2,
             ensure_ascii=False,
@@ -289,6 +328,10 @@ def main():
     for row in attr_rows:
         if row["status"] == "partial":
             print(f"  partial {row['key']} dropped {list(row['dropped_attrs'])}")
+        elif row["folded_instances"] and not row["paired_instances"]:
+            print(f"  folded (no runtime op) {row['key']} x{row['folded_instances']}")
+    if orphans:
+        print(f"  hip ops with no pre-conversion match: {orphans}")
     if unpaired:
         print(f"  unpaired (no location match): {unpaired}")
 

@@ -42,12 +42,17 @@ if ([string]::IsNullOrWhiteSpace($HipMlirOptPath)) {
         Write-Output $msg
         exit 10
     }
-    $HipMlirOptPath = Join-Path (Join-Path $HipEpPackageRoot "bin") "hip-mlir-opt.exe"
+    # Executables carry no suffix outside Windows.
+    $PackageBin = Join-Path $HipEpPackageRoot "bin"
+    $HipMlirOptPath = @('hip-mlir-opt.exe', 'hip-mlir-opt') |
+        ForEach-Object { Join-Path $PackageBin $_ } |
+        Where-Object { Test-Path -LiteralPath $_ } |
+        Select-Object -First 1
 }
-if (-not (Test-Path -LiteralPath $HipMlirOptPath)) {
+if ([string]::IsNullOrWhiteSpace($HipMlirOptPath) -or -not (Test-Path -LiteralPath $HipMlirOptPath)) {
     # Never fall back to a source-scanning approximation: a missing tool must
     # be visible, not silently downgrade the oracle.
-    throw "hip-mlir-opt not found: $HipMlirOptPath"
+    throw "hip-mlir-opt not found under $HipEpPackageRoot"
 }
 $HipMlirOptPath = (Resolve-Path -LiteralPath $HipMlirOptPath).ProviderPath
 
@@ -56,7 +61,11 @@ $Converted = Join-Path $OutputDir "converted.mlir"
 $ConvertLog = Join-Path $OutputDir "convert_log.txt"
 $ReprintLog = Join-Path $OutputDir "reprint_log.txt"
 
-# Pass order matches buildOnnxToHipPipeline up to convert-onnx-to-hip.
+# Pass order matches buildOnnxToHipPipeline (lib/Dialect/Transforms/
+# Pipelines.cpp) up to convert-onnx-to-hip. It is duplicated here because the
+# compiler registers only the whole pipeline, so the check below fails loudly
+# if a pass is renamed or dropped rather than letting the probe drift into
+# reporting a different graph than the one production compiles.
 $ConvertPasses = @(
     '--onnx-dialect=stub',
     '--simplify-onnx',
@@ -67,6 +76,16 @@ $ConvertPasses = @(
     '--convert-onnx-to-hip'
 )
 
+$optHelp = & $HipMlirOptPath --help 2>&1 | Out-String
+$missingPasses = $ConvertPasses |
+    ForEach-Object { ($_ -split '=')[0] } |
+    Where-Object { $optHelp -notmatch [regex]::Escape($_) }
+if ($missingPasses) {
+    throw ("hip-mlir-opt does not know: $($missingPasses -join ', '). " +
+        "The probe pipeline no longer matches buildOnnxToHipPipeline in " +
+        "lib/Dialect/Transforms/Pipelines.cpp; update `$ConvertPasses.")
+}
+
 function Invoke-Opt {
     param([string[]]$OptArgs, [string]$LogPath, [string]$Label)
 
@@ -76,6 +95,11 @@ function Invoke-Opt {
         -RedirectStandardOutput "$LogPath.out" -RedirectStandardError $LogPath
     # hip-mlir-opt writes the module with -o, so its stdout only carries noise.
     Remove-Item -LiteralPath "$LogPath.out" -ErrorAction SilentlyContinue
+    # An empty log is the normal case; keeping it suggests there is something
+    # to read.
+    if ((Test-Path -LiteralPath $LogPath) -and (Get-Item -LiteralPath $LogPath).Length -eq 0) {
+        Remove-Item -LiteralPath $LogPath -ErrorAction SilentlyContinue
+    }
     return $proc.ExitCode
 }
 
@@ -85,7 +109,9 @@ $exit = Invoke-Opt -Label '  re-print input with locations' -LogPath $ReprintLog
     $InputMlir, '--onnx-dialect=stub', '--mlir-print-debuginfo', '-o', $InputLoc
 )
 if ($exit -ne 0 -or -not (Test-Path -LiteralPath $InputLoc)) {
-    Get-Content -LiteralPath $ReprintLog -Tail 20 | Write-Host
+    if (Test-Path -LiteralPath $ReprintLog) {
+        Get-Content -LiteralPath $ReprintLog -Tail 20 | Write-Host
+    }
     throw "hip-mlir-opt could not re-print the input MLIR (exit $exit)"
 }
 
@@ -106,19 +132,20 @@ finally {
     }
 }
 
+$haveConvertLog = Test-Path -LiteralPath $ConvertLog
+
 if (-not (Test-Path -LiteralPath $Converted)) {
-    Get-Content -LiteralPath $ConvertLog -Tail 30 | Write-Host
+    if ($haveConvertLog) { Get-Content -LiteralPath $ConvertLog -Tail 30 | Write-Host }
     throw "convert-onnx-to-hip produced no output (exit $exit)"
 }
 if ($exit -ne 0) {
     # A pass can fail after writing partial output; the report would then
     # describe a graph the compiler never accepted.
-    Get-Content -LiteralPath $ConvertLog -Tail 30 | Write-Host
+    if ($haveConvertLog) { Get-Content -LiteralPath $ConvertLog -Tail 30 | Write-Host }
     throw "convert-onnx-to-hip failed with exit code $exit"
 }
 
-$unconverted = Select-String -LiteralPath $ConvertLog -Pattern 'unconverted onnx op type' -Quiet
-if ($unconverted) {
+if ($haveConvertLog -and (Select-String -LiteralPath $ConvertLog -Pattern 'unconverted onnx op type' -Quiet)) {
     Write-Host "  compiler reported unconverted ops:" -ForegroundColor Yellow
     Get-Content -LiteralPath $ConvertLog | Where-Object { $_ -match '^\s+onnx\.' } | Write-Host
 }
@@ -127,4 +154,4 @@ Write-Host ""
 Write-Host "OK: conversion probe complete"
 Write-Host "    input (located): $InputLoc"
 Write-Host "    converted:       $Converted"
-Write-Host "    log:             $ConvertLog"
+if ($haveConvertLog) { Write-Host "    log:             $ConvertLog" }

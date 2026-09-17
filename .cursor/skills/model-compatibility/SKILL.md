@@ -76,12 +76,14 @@ Re-runs reuse the directory, and an existing `ep_input\compiler_input.mlir` is r
 | S0 dump | `ep_input\compiler_input.mlir`, `ep_input\dump_meta.json` | file is text MLIR starting with `module` and contains `onnx.` ops |
 | S1a original | `step1_original\step1_original_onnx_ops.json` | node total matches the model |
 | S1b compiler input | `step1_ep\step1_compiler_input_ops.json` | `_analysis_meta.excluded_carrier_ops` lists the `onnx.Constant` carriers, not compute ops |
-| S1c compare | `op_distribution_comparison.{json,md}` | deltas explain themselves (ORT fusions, `Swish` to `Sigmoid`+`Mul`, initializers) |
-| S2 convert | `ep_input\converted.mlir`, `compiler_input_loc.mlir`, `convert_log.txt` | probe exited 0; the log's unconverted list matches S3 |
+| S1c compare | `op_distribution_comparison.json` | deltas explain themselves (ORT fusions, `Swish` to `Sigmoid`+`Mul`, initializers) |
+| S2 convert | `ep_input\converted.mlir`, `convert_log.txt` | probe exited 0; the log's unconverted list matches S3 |
 | S3 leftovers | `compatibility\leftover_onnx.json`, `compatibility\leftover_reasons.json` | every leftover key also appears in S1b; each leftover says whether a converter exists |
 | S4 attributes | `compatibility\attr_transfer.json`, `compatibility\hip_runtime_map.json` | `unpaired_instances` is small and explainable; every observed `hip.*` op resolves to a runtime function |
 | S5 normalize | `compatibility\report_input.json` | supported + unsupported instances equal the total |
 | S6 render | `model_compatibility_report.md`, `model_compatibility_details.md`, `pipeline_status.md`, `compatibility\unsupported_reco_runtime.json` | summary numbers equal `report_input.json` |
+
+Each fact is written once. The comparison and the operator distribution are rendered only in the report, and the evidence behind non-supported rows only in the details file; `op_distribution_comparison.json` is the report's input, not a second copy for the reader. `ep_input\compiler_input_loc.mlir` is a location-carrying copy the probe recreates on demand, so it is removed after the analysis reads it.
 
 The whole run is seconds, not minutes; nothing here compiles a kernel or touches the GPU.
 

@@ -30,19 +30,24 @@ def load_op_distribution_comparison(analysis_dir: Path):
 
 
 def render_op_distribution_comparison_section(comp: dict) -> list:
-    """Markdown lines for original vs compiler input (from compare_op_distribution.py)."""
+    """Why the analyzed graph differs from the packaged ONNX.
+
+    This is the only rendering of the comparison: op_distribution_comparison
+    stays a JSON input, and the details report points here instead of
+    repeating the table.
+    """
     meta = comp.get("meta") or {}
     summary = comp.get("summary") or {}
     rows = comp.get("rows") or []
+    only_orig = summary.get("only_in_original") or []
+    only_ep = summary.get("only_in_ep") or []
 
-    out = []
-    out.append("## Original vs compiler input (operator distribution)\n\n")
+    out = ["## Original vs compiler input\n\n"]
     out.append(
-        "Compatibility analysis below uses the **compiler input** "
+        "Compatibility is analysed on the **compiler input** "
         "(`compiler_input.mlir`), the graph the hip-ep compiler receives after "
-        "ONNX Runtime's optimizations. This section compares it to the packaged "
-        "**original** ONNX. Initializers are carrier ops in the MLIR form and "
-        "are excluded from its column.\n\n"
+        "ONNX Runtime's optimizations. Initializers are carrier ops in that "
+        "form and are excluded from its counts.\n\n"
     )
     out.append(f"- **Original model:** `{meta.get('original_model', '—')}`\n")
     out.append(f"- **Compiler input (analyzed):** `{meta.get('ep_model', '—')}`\n\n")
@@ -53,14 +58,13 @@ def render_op_distribution_comparison_section(comp: dict) -> list:
         f"| Total node instances | {summary.get('original_total_nodes', 0)} | "
         f"{summary.get('ep_total_nodes', 0)} | {summary.get('node_delta', 0):+d} |\n"
     )
+    original_types = int(summary.get("original_unique_ops", 0))
+    ep_types = int(summary.get("ep_unique_ops", 0))
     out.append(
-        f"| Unique operator types | {summary.get('original_unique_ops', 0)} | "
-        f"{summary.get('ep_unique_ops', 0)} | "
-        f"{int(summary.get('ep_unique_ops', 0)) - int(summary.get('original_unique_ops', 0)):+d} |\n\n"
+        f"| Unique operator types | {original_types} | {ep_types} | "
+        f"{ep_types - original_types:+d} |\n\n"
     )
 
-    only_orig = summary.get("only_in_original") or []
-    only_ep = summary.get("only_in_ep") or []
     if only_orig:
         out.append(
             "**Operators only in original:** "
@@ -77,11 +81,11 @@ def render_op_distribution_comparison_section(comp: dict) -> list:
     out.append("| Op Type | Original | Compiler input | Delta |\n")
     out.append("|---|---:|---:|---:|\n")
     for row in rows:
-        d = int(row.get("delta", 0))
-        mark = " **+**" if d > 0 else (" **-**" if d < 0 else "")
+        delta = int(row.get("delta", 0))
+        mark = " **+**" if delta > 0 else (" **-**" if delta < 0 else "")
         out.append(
             f"| {row.get('op_type', '')} | {row.get('original_count', 0)} | "
-            f"{row.get('ep_count', 0)} | {d:+d}{mark} |\n"
+            f"{row.get('ep_count', 0)} | {delta:+d}{mark} |\n"
         )
     out.append("\n")
     return out
@@ -186,6 +190,16 @@ def recommended_impl_with_trace(op_row, compat_row, reco_rules):
     hip_op = op_row.get("hip_op")
     backend = op_row.get("backend")
     runtime = op_row.get("runtime_func")
+    codes = (compat_row or {}).get("reason_codes") or []
+    if status in {"full", "partial"} and "COMPILE_TIME_TENSOR_OP" in codes:
+        # Covers both forms: converted into a non-runtime op, and folded away
+        # with no op left to point at.
+        return {
+            "recommended": "Compile Time Optimization",
+            "source": "compile_time",
+            "matched_rule": hip_op or "folded",
+            "rationale": "No runtime call comes out of this operator.",
+        }
     if status in {"full", "partial"}:
         # The conversion already picked the implementation, so report what it
         # produced instead of guessing from the rule table.
@@ -217,8 +231,7 @@ def recommended_impl_with_trace(op_row, compat_row, reco_rules):
             "rationale": "",
         }
 
-    reason_codes = (compat_row or {}).get("reason_codes") or []
-    if "CONVERSION_REJECTED_INSTANCES" in reason_codes:
+    if "CONVERSION_REJECTED_INSTANCES" in codes:
         # The operator is implemented; the fix is to widen what the existing
         # conversion accepts, not to write a new kernel.
         return {
@@ -294,10 +307,16 @@ def resolve_op_description(op_row):
 
 
 def main():
-    if len(sys.argv) != 2:
-        raise SystemExit("Usage: python generate_final_reports.py <analysis_dir>")
+    if len(sys.argv) not in (2, 3):
+        raise SystemExit(
+            "Usage: python generate_final_reports.py <analysis_dir> [report_dir]"
+        )
 
     analysis_dir = Path(sys.argv[1])
+    # The markdown is what a person opens, so it can live above the analysis
+    # JSON instead of being written twice.
+    report_dir = Path(sys.argv[2]) if len(sys.argv) == 3 else analysis_dir
+    report_dir.mkdir(parents=True, exist_ok=True)
     script_dir = Path(__file__).resolve().parent
     reco_rules = load_reco_rules(script_dir)
     report_input = read_json(analysis_dir / "report_input.json")
@@ -453,33 +472,20 @@ def main():
         "\nDetailed compatibility diagnostics are in model_compatibility_details.md\n"
     )
 
-    (analysis_dir / "model_compatibility_report.md").write_text(
+    (report_dir / "model_compatibility_report.md").write_text(
         "".join(lines), encoding="utf-8"
     )
 
     # Details report
+    # Everything the main report already states is left out on purpose: this
+    # file exists for the per-operator evidence behind a non-supported row.
     d = []
     d.append("# Model compatibility details\n\n")
     d.append(f"- **Analyzed graph:** `{meta['model_path']}`\n")
-    if op_dist_comparison:
-        orig_path = (op_dist_comparison.get("meta") or {}).get("original_model", "")
-        if orig_path:
-            d.append(f"- **Original model:** `{orig_path}`\n")
-    d.append(f"- Generated UTC: `{meta['generated_at_utc']}`\n\n")
-    if op_dist_comparison:
-        d.extend(render_op_distribution_comparison_section(op_dist_comparison))
+    d.append(f"- Generated UTC: `{meta['generated_at_utc']}`\n")
+    d.append("- Summary and operator distribution: `model_compatibility_report.md`\n\n")
 
-    d.append("## Supported operators table (full)\n\n")
-    d.append("| Op Type | Domain | Count | Recommended Rocm Implementation |\n")
-    d.append("|---|---|---:|---|\n")
-    for row in op_dist:
-        if status_display(row.get("status", "")) == "supported":
-            comp = compat_map.get((row.get("onnx_op"), row.get("domain")), {})
-            d.append(
-                f"| {row.get('onnx_op', '')} | {row.get('domain', '')} | {row.get('count', 0)} | {recommended_impl(row, comp, reco_rules)} |\n"
-            )
-
-    d.append("\n## Partially compatible details\n\n")
+    d.append("## Partially compatible details\n\n")
     d.append("| Op Type | Domain | Reason Codes | Reason Texts | Evidence |\n")
     d.append("|---|---|---|---|---|\n")
     for row in compatibility:
@@ -497,39 +503,38 @@ def main():
                 f"| {row.get('onnx_op', '')} | {row.get('domain', '')} | {', '.join(row.get('reason_codes') or []) or '-'} | {'; '.join(row.get('reason_texts') or []) or '-'} | {ev_text} |\n"
             )
 
-    d.append("\n## Unsupported operators\n\n")
-    d.append("| Op Type | Domain | Count | Reason |\n")
-    d.append("|---|---|---:|---|\n")
-    for row in op_dist:
-        if status_display(row.get("status", "")) == "unsupported":
-            comp = compat_map.get((row.get("onnx_op"), row.get("domain")), {})
-            reason = (
-                "; ".join(comp.get("reason_texts") or [])
-                or "No Hip Dialect implementation available."
-            )
-            d.append(
-                f"| {row.get('onnx_op', '')} | {row.get('domain', '')} | {row.get('count', 0)} | {reason} |\n"
-            )
-
     d.append("\n## Data quality notes\n\n")
     notes = []
     attr_path = analysis_dir / "attr_transfer.json"
     if attr_path.is_file():
-        unpaired = (read_json(attr_path).get("unpaired_instances") or {}).items()
-        for key, count in sorted(unpaired):
-            # No converted op carries this op's location: it was folded into a
-            # neighbour, or CSE merged it away. Its attributes were not checked.
+        attr_data = read_json(attr_path)
+        orphans = attr_data.get("orphan_hip_ops") or {}
+        for hip_op, count in sorted(orphans.items()):
+            # A runtime op no onnx op accounts for means the pairing lost
+            # track, which is why unpaired operators below stay unresolved.
+            notes.append(
+                f"- `{hip_op}`: {count} runtime op(s) trace back to no ONNX "
+                "operator, so pairing is incomplete for this model.\n"
+            )
+        for key, count in sorted((attr_data.get("unpaired_instances") or {}).items()):
             notes.append(
                 f"- `{key}`: {count} instance(s) had no location match after "
                 "conversion, so their attribute transfer was not verified.\n"
             )
+        for row in attr_data.get("rows") or []:
+            if row.get("folded_instances") and not row.get("paired_instances"):
+                notes.append(
+                    f"- `{row['key']}`: {row['folded_instances']} instance(s) left "
+                    "no runtime op; reported as compile-time because every hip op "
+                    "in the module is accounted for.\n"
+                )
     else:
         notes.append(
             "- Conversion was not probed, so operator support is unverified.\n"
         )
     d.extend(notes or ["- None.\n"])
 
-    (analysis_dir / "model_compatibility_details.md").write_text(
+    (report_dir / "model_compatibility_details.md").write_text(
         "".join(d), encoding="utf-8"
     )
     runtime_json = {
@@ -551,8 +556,8 @@ def main():
     (analysis_dir / "unsupported_reco_runtime.json").write_text(
         json.dumps(runtime_json, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    print(f"Wrote {(analysis_dir / 'model_compatibility_report.md')}")
-    print(f"Wrote {(analysis_dir / 'model_compatibility_details.md')}")
+    print(f"Wrote {(report_dir / 'model_compatibility_report.md')}")
+    print(f"Wrote {(report_dir / 'model_compatibility_details.md')}")
     print(f"Wrote {(analysis_dir / 'unsupported_reco_runtime.json')}")
 
 

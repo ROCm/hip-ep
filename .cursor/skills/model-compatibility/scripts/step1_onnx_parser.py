@@ -471,6 +471,12 @@ def main():
         action="store_true",
         help="Count only main-graph nodes (legacy behavior; excludes Loop subgraph ops).",
     )
+    ap.add_argument(
+        "--markdown",
+        action="store_true",
+        help="Also write step1_original_onnx_analysis.md (standalone use; the "
+        "pipeline reports from the comparison instead).",
+    )
     args = ap.parse_args()
 
     model_path = args.model_path
@@ -498,14 +504,12 @@ def main():
     # Derive a human-readable model name from the parent directory.
     model_name = Path(model_path).parent.name
 
-    # Render the Markdown report.
-    markdown_report = generate_markdown_report(ops_info, model_name, analyzer)
-
-    # Save the Markdown report.
-    md_path = Path(output_dir) / "step1_original_onnx_analysis.md"
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write(markdown_report)
-    print(f"[OK] Markdown report saved: {md_path}")
+    if args.markdown:
+        markdown_report = generate_markdown_report(ops_info, model_name, analyzer)
+        md_path = Path(output_dir) / "step1_original_onnx_analysis.md"
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(markdown_report)
+        print(f"[OK] Markdown report saved: {md_path}")
 
     # Save the JSON data.
     json_path = Path(output_dir) / "step1_original_onnx_ops.json"
