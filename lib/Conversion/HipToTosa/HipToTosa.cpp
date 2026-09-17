@@ -483,13 +483,21 @@ struct GemmConverter final : public OpConversionPattern<hip::GemmOp> {
 // Covers the hip ops whose operands are (ctx, lhs, rhs, output) and whose TOSA
 // counterpart preserves the element type. Comparisons (hip.equal, hip.less) do
 // not belong here: they produce i1, which isTosaCompatibleOperand's
-// element-type check rejects. hip.div does not either, since TOSA has no
-// single divide; DivConverter below spells one out per element type.
+// element-type check rejects, so ComparisonConverter below takes them.
+// hip.div does not either, since TOSA has no single divide; DivConverter below
+// spells one out per element type.
 //
 // tosa.maximum and tosa.minimum additionally carry a nan_mode attribute, but
 // ODS defaults it to PROPAGATE, which is what ONNX Max/Min do, so the
 // two-operand builder below is correct for them unchanged.
-template <typename HipOpTy, typename TosaOpTy>
+//
+// BoolOnly marks the logical ops (hip.and, hip.or), whose TOSA counterparts
+// take Tosa_I1Tensor. Their hip operands are declared Hip_TensorOrMemRef, so
+// nothing upstream narrows the element type; a wider integer would be replaced
+// with a tosa.logical_and that then fails the TOSA verifier, reported against
+// an op this pass synthesized rather than the hip op that carried the type.
+// Rejecting here names it.
+template <typename HipOpTy, typename TosaOpTy, bool BoolOnly = false>
 struct BinaryConverter final : public OpConversionPattern<HipOpTy> {
   using OpConversionPattern<HipOpTy>::OpConversionPattern;
   using OpAdaptor = typename OpConversionPattern<HipOpTy>::OpAdaptor;
@@ -504,6 +512,8 @@ struct BinaryConverter final : public OpConversionPattern<HipOpTy> {
     auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
     if (!resultType || !resultType.hasStaticShape())
       return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
+    if (BoolOnly && !resultType.getElementType().isInteger(1))
+      return rewriter.notifyMatchFailure(op, "tosa op requires an i1 tensor");
 
     // hip broadcasting rank-extends the way ONNX/NumPy do, so a ReLU lowered
     // from ONNX arrives as hip.max(tensor<1x64x112x112xf16>, tensor<f16>),
@@ -528,6 +538,64 @@ struct BinaryConverter final : public OpConversionPattern<HipOpTy> {
           op, resultType, lhs, rhs, createZeroMulShift(rewriter, op.getLoc()));
     else
       rewriter.replaceOpWithNewOp<TosaOpTy>(op, resultType, lhs, rhs);
+    return success();
+  }
+};
+
+// Covers hip.equal and hip.less, whose result is i1 while their operands carry
+// the type being compared. That mismatch is why they cannot use
+// BinaryConverter: isTosaCompatibleOperand checks an operand's element type
+// against the result's, which would reject every well-formed comparison. The
+// broadcast check below is made against the operand element type instead, and
+// the result is required to be i1 so a malformed hip op is named here rather
+// than by the TOSA verifier.
+//
+// TOSA spells the ordered comparisons as tosa.greater and tosa.greater_equal
+// only, so hip.less converts to tosa.greater with its operands swapped.
+// OnnxToHip already leans on the same identity in the other direction --
+// onnx.Greater is decomposed to hip.less(B, A) -- so an ONNX Greater arrives
+// here swapped and leaves as the tosa.greater it started out as.
+template <typename HipOpTy, typename TosaOpTy, bool SwapOperands = false>
+struct ComparisonConverter final : public OpConversionPattern<HipOpTy> {
+  using OpConversionPattern<HipOpTy>::OpConversionPattern;
+  using OpAdaptor = typename OpConversionPattern<HipOpTy>::OpAdaptor;
+
+  LogicalResult
+  matchAndRewrite(HipOpTy op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // Memref mode (post-bufferization) has no SSA result to replace.
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!resultType || !resultType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
+    if (!resultType.getElementType().isInteger(1))
+      return rewriter.notifyMatchFailure(op, "comparison must produce i1");
+
+    Value lhs = adaptor.getLhs();
+    Value rhs = adaptor.getRhs();
+    if (failed(tosa::EqualizeRanks(rewriter, op.getLoc(), lhs, rhs)))
+      return rewriter.notifyMatchFailure(op, "operand ranks not equalizable");
+
+    auto lhsType = dyn_cast<RankedTensorType>(lhs.getType());
+    auto rhsType = dyn_cast<RankedTensorType>(rhs.getType());
+    if (!lhsType || !rhsType ||
+        lhsType.getElementType() != rhsType.getElementType())
+      return rewriter.notifyMatchFailure(op, "operand element types differ");
+
+    // Both TOSA comparisons carry SameOperandsElementType, and each operand
+    // still has to broadcast up to the result's shape. Checking against a
+    // result-shaped tensor of the operand element type applies the shape rule
+    // without the element-type rule that i1 would fail.
+    auto operandShaped = resultType.clone(lhsType.getElementType());
+    if (!isTosaCompatibleOperand(lhs, operandShaped) ||
+        !isTosaCompatibleOperand(rhs, operandShaped))
+      return rewriter.notifyMatchFailure(op, "operands not tosa-broadcastable");
+
+    if constexpr (SwapOperands)
+      std::swap(lhs, rhs);
+    rewriter.replaceOpWithNewOp<TosaOpTy>(op, resultType, lhs, rhs);
     return success();
   }
 };
@@ -622,7 +690,12 @@ struct DivConverter final : public OpConversionPattern<hip::DivOp> {
 // profile, so an integer would verify and then have no lowering. Both are
 // unreachable from a valid ONNX model, where all ten are float-only, so the
 // gate documents the constraint rather than rejecting real inputs.
-template <typename HipOpTy, typename TosaOpTy, bool FloatOnly = false>
+//
+// BoolOnly is the mirror of it for hip.not, whose tosa.logical_not takes
+// Tosa_I1Tensor. ONNX Not is bool-only as well, so it documents that
+// constraint the same way.
+template <typename HipOpTy, typename TosaOpTy, bool FloatOnly = false,
+          bool BoolOnly = false>
 struct UnaryConverter final : public OpConversionPattern<HipOpTy> {
   using OpConversionPattern<HipOpTy>::OpConversionPattern;
   using OpAdaptor = typename OpConversionPattern<HipOpTy>::OpAdaptor;
@@ -641,6 +714,8 @@ struct UnaryConverter final : public OpConversionPattern<HipOpTy> {
           op, "operand and result types must match exactly");
     if (FloatOnly && !isa<FloatType>(resultType.getElementType()))
       return rewriter.notifyMatchFailure(op, "tosa op requires a float tensor");
+    if (BoolOnly && !resultType.getElementType().isInteger(1))
+      return rewriter.notifyMatchFailure(op, "tosa op requires an i1 tensor");
 
     // tosa.negate takes zero-point operands, but its quant-info builder
     // materializes them from this same (result type, input) signature.
@@ -777,6 +852,75 @@ struct SqrtConverter final : public OpConversionPattern<SqrtOp> {
     auto rsqrt = tosa::RsqrtOp::create(rewriter, op.getLoc(), resultType,
                                        adaptor.getX());
     rewriter.replaceOpWithNewOp<tosa::ReciprocalOp>(op, resultType, rsqrt);
+    return success();
+  }
+};
+
+// hip.sign is ONNX Sign: +1 where x > 0, -1 where x < 0, and 0 elsewhere.
+// TOSA has no sign op, so this expands to the nested select that the
+// definition spells out directly:
+//   select(x > 0, 1, select(0 > x, -1, 0))
+// tosa.greater is TOSA's only strict ordered comparison, which is why the
+// negative test reads `0 > x` rather than a `less`. Signed zero lands on 0 as
+// ONNX requires, both comparisons being false for it.
+//
+// NaN also lands on 0, since neither comparison holds. ONNX leaves Sign(NaN)
+// unspecified and onnxruntime's CPU kernel propagates NaN instead, so a float
+// model that can produce NaN would differ here -- the same caveat the
+// OnnxToHip decompositions of onnx.LessOrEqual and onnx.GreaterOrEqual
+// already carry.
+struct SignConverter final : public OpConversionPattern<SignOp> {
+  using OpConversionPattern<SignOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(SignOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!resultType || !resultType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
+    if (adaptor.getX().getType() != resultType)
+      return rewriter.notifyMatchFailure(
+          op, "operand and result types must match exactly");
+
+    // ONNX Sign is defined over both floats and signed integers, and the
+    // tosa.greater / tosa.select pair below takes either. i1 is excluded
+    // because -1 is not representable in it.
+    Type elementType = resultType.getElementType();
+    bool isFloat = isa<FloatType>(elementType);
+    if (!isFloat && !elementType.isSignlessInteger())
+      return rewriter.notifyMatchFailure(
+          op, "expected a float or signless integer tensor");
+    if (elementType.isInteger(1))
+      return rewriter.notifyMatchFailure(op, "i1 cannot represent -1");
+
+    Location loc = op.getLoc();
+    Value x = adaptor.getX();
+    auto splat = [&](double value) -> Value {
+      if (isFloat)
+        return createSplatFloat(rewriter, loc, resultType, value);
+      return tosa::ConstOp::create(
+          rewriter, loc, resultType,
+          DenseElementsAttr::get(
+              resultType, rewriter.getIntegerAttr(
+                              elementType, static_cast<int64_t>(value))));
+    };
+
+    Value zero = splat(0.0);
+    auto predType =
+        RankedTensorType::get(resultType.getShape(), rewriter.getI1Type());
+    Value isPositive =
+        tosa::GreaterOp::create(rewriter, loc, predType, x, zero);
+    Value isNegative =
+        tosa::GreaterOp::create(rewriter, loc, predType, zero, x);
+    // The inner select reuses `zero` as its else value, so the expansion needs
+    // three constants rather than four.
+    Value negativeOrZero = tosa::SelectOp::create(
+        rewriter, loc, resultType, isNegative, splat(-1.0), zero);
+    rewriter.replaceOpWithNewOp<tosa::SelectOp>(op, resultType, isPositive,
+                                                splat(1.0), negativeOrZero);
     return success();
   }
 };
@@ -2891,10 +3035,10 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     conversion.addIllegalOp<
         ConvOp, MatmulOp, GemmOp, TransposeOp, AddOp, SubOp, MinOp, MaxOp,
         MulOp, DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
-        TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, WhereOp, LeakyReluOp,
-        MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp, QuantizeLinearOp,
-        DequantizeLinearOp, MatMulNBitsOp, GatherOp, RopeOp, GqaOp,
-        MultiHeadAttentionOp>();
+        TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, SignOp, EqualOp, LessOp,
+        AndOp, OrOp, NotOp, WhereOp, LeakyReluOp, MiopenSoftmaxOp, ReduceSumOp,
+        ReduceMeanOp, CastOp, QuantizeLinearOp, DequantizeLinearOp,
+        MatMulNBitsOp, GatherOp, RopeOp, GqaOp, MultiHeadAttentionOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
@@ -2920,7 +3064,13 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         BinaryConverter<SubOp, tosa::SubOp>,
         BinaryConverter<MinOp, tosa::MinimumOp>,
         BinaryConverter<MaxOp, tosa::MaximumOp>,
-        BinaryConverter<MulOp, tosa::MulOp>, UnaryConverter<AbsOp, tosa::AbsOp>,
+        BinaryConverter<MulOp, tosa::MulOp>,
+        BinaryConverter<AndOp, tosa::LogicalAndOp, /*BoolOnly=*/true>,
+        BinaryConverter<OrOp, tosa::LogicalOrOp, /*BoolOnly=*/true>,
+        ComparisonConverter<EqualOp, tosa::EqualOp>,
+        // TOSA has no `less`, so the operands are swapped into a greater.
+        ComparisonConverter<LessOp, tosa::GreaterOp, /*SwapOperands=*/true>,
+        UnaryConverter<AbsOp, tosa::AbsOp>,
         UnaryConverter<NegOp, tosa::NegateOp>,
         UnaryConverter<CeilOp, tosa::CeilOp, /*FloatOnly=*/true>,
         UnaryConverter<FloorOp, tosa::FloorOp, /*FloatOnly=*/true>,
@@ -2933,9 +3083,11 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         UnaryConverter<SigmoidOp, tosa::SigmoidOp, /*FloatOnly=*/true>,
         UnaryConverter<ReciprocalOp, tosa::ReciprocalOp,
                        /*FloatOnly=*/true>,
-        SqrtConverter, WhereConverter, LeakyReluConverter, SoftmaxConverter,
-        ReduceSumConverter, ReduceMeanConverter, CastConverter,
-        DequantizeLinearConverter, QuantizeLinearConverter,
+        UnaryConverter<NotOp, tosa::LogicalNotOp, /*FloatOnly=*/false,
+                       /*BoolOnly=*/true>,
+        SqrtConverter, SignConverter, WhereConverter, LeakyReluConverter,
+        SoftmaxConverter, ReduceSumConverter, ReduceMeanConverter,
+        CastConverter, DequantizeLinearConverter, QuantizeLinearConverter,
         MatMulNBitsConverter, GatherConverter, RopeConverter, GqaConverter,
         MhaConverter>(ctx);
 
