@@ -184,8 +184,9 @@ jobs:
             ${{ env.ROCK_ROOT }}
             ${{ env.ROCK_SRC }}
           # Keyed only on the rocmlirTriton pin: a protobuf/ORT bump must not
-          # evict the multi-hour LLVM build.
-          key: linux-rocmlirtriton-${{ hashFiles('cmake/deps.txt') }}
+          # evict the multi-hour LLVM build. v2 adds mlir-opt, which OnnxToHip
+          # needs to turn its generated PDL module into bytecode.
+          key: linux-rocmlirtriton-v2-${{ hashFiles('cmake/deps.txt') }}
 
       # --rocmlirtriton_only stops once rockCompiler is installed, so the shared
       # LLVM is cached before hip-ep is configured and a later hip-ep failure
@@ -220,7 +221,7 @@ jobs:
           path: |
             ${{ env.ROCK_ROOT }}
             ${{ env.ROCK_SRC }}
-          key: linux-rocmlirtriton-${{ hashFiles('cmake/deps.txt') }}
+          key: linux-rocmlirtriton-v2-${{ hashFiles('cmake/deps.txt') }}
 
       # -----------------------------------------------------------------------
       # ONNX Runtime built from source into ort-install (cached): checkout ->
