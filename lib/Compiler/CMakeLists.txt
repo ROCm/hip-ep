@@ -65,6 +65,15 @@ llvm_map_components_to_libnames(compiler_llvm_libs
 
 target_link_libraries(LibHipCompiler PUBLIC ${compiler_llvm_libs})
 
+if(HIPDNN_EP_ENABLE_ROCMLIRTRITON)
+  # rockCompiler is an INTERFACE target backed exclusively by static
+  # rocMLIR/Triton/LLVM libraries. LibHipCompiler is linked into hipgpu.dll,
+  # so no rocmlirTriton runtime DLL is introduced.
+  target_link_libraries(LibHipCompiler PRIVATE rocMLIR::rockCompiler)
+  target_compile_definitions(LibHipCompiler
+    PRIVATE HIPDNN_EP_ENABLE_ROCMLIRTRITON=1)
+endif()
+
 target_include_directories(LibHipCompiler PUBLIC
   ${CMAKE_BINARY_DIR}/lib
   ${CMAKE_BINARY_DIR}/schemas
