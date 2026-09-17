@@ -19,6 +19,11 @@
 
   ;;===--------------------------------------------------------------------===;;
   ;; Cast Pattern - Using Macro
+  ;;
+  ;; Note: Uses expression syntax because mlir-create-placeholder-op and
+  ;; mlir-create-cast-op are specialized FFI functions, not generic operation
+  ;; builders. The operation syntax (%v = "op.name" ...) would require a
+  ;; generic mlir-create-operation FFI that doesn't exist yet.
   ;;===--------------------------------------------------------------------===;;
 
   (define-conversion-pattern onnx-cast->hipsr
