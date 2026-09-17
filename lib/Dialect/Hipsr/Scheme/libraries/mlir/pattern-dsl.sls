@@ -63,25 +63,25 @@
   ;; Build a pattern matcher that checks operation name and constraints
   ;; Returns: #t if pattern matches, #f otherwise
   (define (make-pattern-matcher op-name constraints)
-    (lambda (op)
+    (lambda (op operands-ref rewriter type-converter)
       (and (op-matches? op op-name)
            (loop :for constraint :in constraints
-                 :break #f :unless (constraint op)
+                 :break #f :unless (constraint op operands-ref rewriter type-converter)
                  :finally #t))))
 
   ;; Constraint: operation must have N operands
   (define (has-n-operands n)
-    (lambda (op)
+    (lambda (op operands-ref rewriter type-converter)
       (= (mlir-operation-num-operands op) n)))
 
   ;; Constraint: operation must have N results
   (define (has-n-results n)
-    (lambda (op)
+    (lambda (op operands-ref rewriter type-converter)
       (= (mlir-operation-num-results op) n)))
 
   ;; Constraint: first result must be ranked tensor
   (define (result-0-is-ranked-tensor)
-    (lambda (op)
+    (lambda (op operands-ref rewriter type-converter)
       (and (> (mlir-operation-num-results op) 0)
            (has-ranked-tensor-type?
              (mlir-operation-get-result-value op 0)))))
@@ -100,7 +100,7 @@
   ;; 4. Create placeholder(ctx, input, device_result_type)
   ;; 5. Create cast(ctx, input, placeholder, device_result_type)
   ;; 6. Replace onnx.Cast with cast result
-  (define (rewrite-with-placeholder-and-cast op)
+  (define (rewrite-with-placeholder-and-cast op operands-ref rewriter type-converter)
     ;; Get HipSR context argument (first function argument)
     (let ((ctx (mlir-get-hipsr-context-arg op)))
       (if (= ctx 0)
@@ -134,14 +134,15 @@
   ;;===--------------------------------------------------------------------===;;
 
   ;; Define a conversion pattern
+  ;; Returns a function with signature: (lambda (op operands-ref rewriter type-converter) ...)
   ;; Usage: (define-conversion-pattern "onnx.Cast"
   ;;          (list (has-n-operands 1) (has-n-results 1))
   ;;          rewrite-with-placeholder-and-cast)
   (define (define-conversion-pattern op-name constraints rewrite-action)
     (let ((matcher (make-pattern-matcher op-name constraints)))
-      (lambda (op)
-        (if (matcher op)
-            (rewrite-action op)
+      (lambda (op operands-ref rewriter type-converter)
+        (if (matcher op operands-ref rewriter type-converter)
+            (rewrite-action op operands-ref rewriter type-converter)
             (begin
               (mlir-notify-match-failure op
                 (string-append "Pattern " op-name " did not match"))
@@ -153,14 +154,14 @@
 
   ;; Apply a pattern to an operation
   ;; Returns: #t if pattern matched and rewrote, #f otherwise
-  (define (apply-pattern pattern op)
-    (pattern op))
+  (define (apply-pattern pattern op operands-ref rewriter type-converter)
+    (pattern op operands-ref rewriter type-converter))
 
   ;; Apply multiple patterns to an operation (try each in order)
   ;; Returns: #t if any pattern matched, #f if none matched
-  (define (apply-patterns patterns op)
+  (define (apply-patterns patterns op operands-ref rewriter type-converter)
     (loop :for pattern :in patterns
-          :break #t :if (apply-pattern pattern op)
+          :break #t :if (apply-pattern pattern op operands-ref rewriter type-converter)
           :finally #f))
 
 ) ;; end library (mlir pattern-dsl)
