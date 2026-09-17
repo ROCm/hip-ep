@@ -1,0 +1,71 @@
+//===- QAddFusion.pdll ----------------------------------------------------===//
+//
+// HIP-to-HIP fusion of a dequantize/add/quantize chain into hip.qadd: the
+// worked many-to-one example for hip-fusion-transform.
+//
+// Included by HipFusionTransformPatterns.pdll, which declares the native
+// helpers used below. Not compilable on its own.
+//===----------------------------------------------------------------------===//
+
+Pattern HipQAdd with benefit(10) {
+  // hip.dequantize_linear x2 -> hip.add -> hip.quantize_linear.
+  //
+  // !hip.context is operand 0 of every hip op, so binding `ctx` once ties the
+  // whole chain to a single context instead of needing a native helper to
+  // recover the enclosing function's argument.
+  //
+  // The trailing ValueRange absorbs the operands past the scale: the zero
+  // point is optional, so the DPS init lands at a different index depending on
+  // whether it is present. Which is which is resolved by the native helpers
+  // through the ODS accessors.
+  let dq_lhs = op<hip.dequantize_linear>(ctx: Value, lhs: Value,
+                                         lhs_scale: Value,
+                                         lhs_tail: ValueRange);
+  let dq_rhs = op<hip.dequantize_linear>(ctx, rhs: Value, rhs_scale: Value,
+                                         rhs_tail: ValueRange);
+
+  let add = op<hip.add>(ctx, dq_lhs.0, dq_rhs.0, add_init: Value);
+
+  let q = op<hip.quantize_linear>(ctx, add.0, output_scale: Value,
+                                  output_tail: ValueRange)
+      -> (output_type: Type);
+
+  // Fusability only. Every scale must be a per-tensor splat constant and every
+  // zero point must be readable (or absent, which means zero), because
+  // hip.qadd carries them as scalar attributes.
+  IsHipSplatScale(lhs_scale);
+  IsHipSplatScale(rhs_scale);
+  IsHipSplatScale(output_scale);
+  HasExtractableQdqZeropoint(dq_lhs);
+  HasExtractableQdqZeropoint(dq_rhs);
+  HasExtractableQdqZeropoint(q);
+  // hip.add's init already carries the fused result's shape, so it is the
+  // shape source for hip.qadd's own init.
+  CanBuildInit(output_type, add_init);
+  // A second consumer of the float sum would keep the dequantize/add chain
+  // alive beside hip.qadd, so the graph would compute the sum twice. The
+  // dequantize results are deliberately not constrained: a shared dequantize
+  // feeding several elementwise ops still fuses, it just survives for its
+  // other users.
+  HasSingleUseResult(add);
+
+  rewrite q with {
+    let lhs_scale_attr = ExtractHipSplatScale(lhs_scale);
+    let rhs_scale_attr = ExtractHipSplatScale(rhs_scale);
+    let output_scale_attr = ExtractHipSplatScale(output_scale);
+    let lhs_zp_attr = ExtractHipQdqZeropoint(dq_lhs, attr<"0 : i64">);
+    let rhs_zp_attr = ExtractHipQdqZeropoint(dq_rhs, attr<"0 : i64">);
+    let output_zp_attr = ExtractHipQdqZeropoint(q, attr<"0 : i64">);
+
+    let init = BuildInit(output_type, add_init);
+    let qadd = op<hip.qadd>(ctx, lhs, rhs, init) {
+      lhs_scale = lhs_scale_attr,
+      rhs_scale = rhs_scale_attr,
+      output_scale = output_scale_attr,
+      lhs_zp = lhs_zp_attr,
+      rhs_zp = rhs_zp_attr,
+      output_zp = output_zp_attr
+    } -> (output_type);
+    replace q with qadd;
+  };
+}

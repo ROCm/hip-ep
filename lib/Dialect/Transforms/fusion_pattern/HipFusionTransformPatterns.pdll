@@ -1,0 +1,41 @@
+//===- HipFusionTransformPatterns.pdll -----------------------------------===//
+//
+// Aggregate entry point for the HIP-to-HIP rewrite patterns driven by
+// hip-fusion-transform.
+//
+// Scope: any rewrite whose match and replacement are both `hip.*` ops --
+// one-to-many, many-to-one or many-to-many.
+//
+// mlir-pdll compiles one input file at a time, and collecting every pattern
+// into a single PDL module also puts them in one RewritePatternSet, so they
+// share a fixpoint and can trigger each other.
+//
+// PDLL has no include guards, so the native helpers are declared once here
+// and each pattern file - which carries only its Pattern definitions - is
+// included exactly once. Every name below must also be registered in
+// `registerNativeHelpers` (fusion_pattern/hip_fusion_transform.hpp); a
+// declared but unregistered helper aborts when the pattern runs.
+//
+// Adding a pattern: write `<Name>.pdll` next to this file holding only
+// `Pattern` definitions, then add one `#include` at the bottom.
+//===----------------------------------------------------------------------===//
+
+// Legality is decided by result-free constraints and the values are produced
+// by rewrites. Returning a result from a constraint shared by two patterns
+// rooted at the same op makes the PDL module fail to lower ("operand does not
+// dominate this use"), so nothing below may move back into the match section.
+
+// Op-agnostic: reusable by any pattern here. BuildInit produces a
+// replacement's DPS init, sizing each dynamic dim from shapeSource; its
+// preconditions sit in CanBuildInit because a native rewrite cannot decline.
+Constraint HasSingleUseResult(op: Op);
+Constraint CanBuildInit(resultType: Type, shapeSource: Value);
+Rewrite BuildInit(resultType: Type, shapeSource: Value) -> Value;
+
+// Q/DQ quantization parameters.
+Constraint IsHipSplatScale(val: Value);
+Constraint HasExtractableQdqZeropoint(op: Op);
+Rewrite ExtractHipSplatScale(val: Value) -> Attr;
+Rewrite ExtractHipQdqZeropoint(op: Op, absentValue: Attr) -> Attr;
+
+#include "QAddFusion.pdll"
