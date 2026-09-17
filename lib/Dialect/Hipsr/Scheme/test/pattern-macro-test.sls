@@ -18,7 +18,7 @@
   (define-conversion-pattern cast-pattern
     :match 
     (%r = "onnx.Cast" (%ctx %input) ((to = !to_type)) : (!input-type) -> !output-type)
-    :rewrite 
+    :rewrite %r :with
     (%0 = "hipsr.placeholder" (%ctx %input)
           ((placeholder_type = "#hipsr.placeholder_type<normal>")) 
           : types -> result)
@@ -33,7 +33,7 @@
     (test-assert "cast-pattern is a procedure"
       (procedure? cast-pattern))
     
-    (test-assert "cast-pattern matches onnx.Cast"
+    (test-assert "cast-pattern matches onnx.Cast and rewrites %r with %1"
       (let ([result (cast-pattern 2 'operands-ref 'rewriter 'type-converter)])
         (and (list? result)
              (eq? (car result) 'op)

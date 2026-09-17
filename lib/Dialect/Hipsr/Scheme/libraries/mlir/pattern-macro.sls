@@ -6,11 +6,11 @@
 
   (define-syntax define-conversion-pattern
     (lambda (stx)
-      (syntax-case stx (:match :rewrite = : ->)
+      (syntax-case stx (:match :rewrite :with = : ->)
         
         [(_ pattern-name
             :match (%result = op-name-str (%ctx %input) ((attr-name = !attr-val)) : (!type1) -> !output-type)
-            :rewrite 
+            :rewrite %root :with
             (%v0 = op0-name (operands0 ...) ((a0-name = a0-val)) rest0 ...)
             (%v1 = op1-name (operands1 ...) ((a1-name = a1-val)) rest1 ...)
             final-expr)
@@ -32,16 +32,19 @@
                             [!type1 (mlir-get-type %input)]
                             [!output-type (mlir-get-type %result)]
                             [!attr-val (mlir-get-attr op (symbol->string 'attr-name))])
-                       (let ([%v0 (mlir-create-operation op0-name 
-                                                         (list operands0 ...)
-                                                         (list (cons 'a0-name a0-val)))])
-                         (let ([%v1 (mlir-create-operation op1-name 
-                                                           (list operands1 ...)
-                                                           (list (cons 'a1-name a1-val)))])
-                           final-expr)))))))]
+                       ;; Verify %root matches %result from pattern
+                       (let ([%root %result])
+                         (let ([%v0 (mlir-create-operation op0-name 
+                                                           (list operands0 ...)
+                                                           (list (cons 'a0-name a0-val)))])
+                           (let ([%v1 (mlir-create-operation op1-name 
+                                                             (list operands1 ...)
+                                                             (list (cons 'a1-name a1-val)))])
+                             final-expr))))))))]
         
         [(_ . rest)
          (syntax-violation 'define-conversion-pattern
-           "Invalid pattern syntax" stx)])))
+           "Expected: (define-conversion-pattern name :match ... :rewrite %root :with ...)"
+           stx)])))
 
 ) ;; end library
