@@ -1021,13 +1021,25 @@ LogicalResult matchHipReduce(Operation *op, Value data, Value axes,
   return success();
 }
 
-// hip.reduce_sum -> tosa.reduce_sum. One constant axis, TOSA keepdims=1,
-// optional reshape.
-struct ReduceSumConverter final : public OpConversionPattern<ReduceSumOp> {
-  using OpConversionPattern<ReduceSumOp>::OpConversionPattern;
+// Covers the hip reductions that map 1-1 onto a TOSA reduce: reduce_sum,
+// reduce_max, reduce_min and reduce_prod. matchHipReduce already does
+// everything the hip reductions share -- the single constant axis, keepdims,
+// and the noop_with_empty_axes identity -- so only the op mapping varies. TOSA
+// always reduces with keepdims=1, hence the optional reshape at the end.
+//
+// hip.reduce_mean and hip.reduce_l2 are not in this set: TOSA has neither, so
+// each spells out its own expansion below.
+//
+// tosa.reduce_max and tosa.reduce_min additionally carry a nan_mode attribute,
+// but ODS defaults it to PROPAGATE, which is what ONNX ReduceMax/ReduceMin do,
+// so the builder below is correct for them unchanged.
+template <typename HipOpTy, typename TosaOpTy>
+struct ReduceConverter final : public OpConversionPattern<HipOpTy> {
+  using OpConversionPattern<HipOpTy>::OpConversionPattern;
+  using OpAdaptor = typename OpConversionPattern<HipOpTy>::OpAdaptor;
 
   LogicalResult
-  matchAndRewrite(ReduceSumOp op, OpAdaptor adaptor,
+  matchAndRewrite(HipOpTy op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     RankedTensorType resultType;
     Value data;
@@ -1045,9 +1057,8 @@ struct ReduceSumConverter final : public OpConversionPattern<ReduceSumOp> {
     }
     auto reducedTy =
         keepdimsReduceType(cast<RankedTensorType>(data.getType()), axis);
-    auto reduced =
-        tosa::ReduceSumOp::create(rewriter, op.getLoc(), reducedTy, data,
-                                  rewriter.getI32IntegerAttr(axis));
+    auto reduced = TosaOpTy::create(rewriter, op.getLoc(), reducedTy, data,
+                                    rewriter.getI32IntegerAttr(axis));
     replaceWithTosaReduce(op, reduced, resultType, keepdims, rewriter);
     return success();
   }
@@ -1099,6 +1110,57 @@ struct ReduceMeanConverter final : public OpConversionPattern<ReduceMeanOp> {
     auto reduced = tosa::ReduceSumOp::create(rewriter, loc, reducedTy, scaled,
                                              rewriter.getI32IntegerAttr(axis));
     replaceWithTosaReduce(op, reduced, resultType, keepdims, rewriter);
+    return success();
+  }
+};
+
+// TOSA has no reduce_l2. ONNX ReduceL2 is sqrt(sum(x^2)), which hip.reduce_l2's
+// own description spells out, so it expands to mul + reduce_sum + square root.
+//
+// The square root is reciprocal(rsqrt(x)), because TOSA has no sqrt either;
+// this is the expansion SqrtConverter already uses for hip.sqrt. It stays
+// correct on an all-zero reduction, where rsqrt(0) is +inf and
+// reciprocal(+inf) is 0, which is the norm ONNX asks for.
+//
+// The squaring is a plain tosa.mul of the data with itself rather than a
+// tosa.pow, so it holds for every float type TOSA accepts instead of only
+// those with a pow lowering.
+struct ReduceL2Converter final : public OpConversionPattern<ReduceL2Op> {
+  using OpConversionPattern<ReduceL2Op>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(ReduceL2Op op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    RankedTensorType resultType;
+    Value data;
+    int32_t axis = 0;
+    bool keepdims = true;
+    bool identity = false;
+    if (failed(matchHipReduce(op, adaptor.getData(), adaptor.getAxes(),
+                              op.getKeepdims(), op.getNoopWithEmptyAxes(),
+                              rewriter, resultType, data, axis, keepdims,
+                              identity)))
+      return failure();
+    // noop_with_empty_axes reduces nothing, so ONNX defines the result as the
+    // input itself rather than as an elementwise norm.
+    if (identity) {
+      rewriter.replaceOp(op, data);
+      return success();
+    }
+    auto dataType = cast<RankedTensorType>(data.getType());
+    if (!isa<FloatType>(dataType.getElementType()))
+      return rewriter.notifyMatchFailure(
+          op, "tosa reduce_l2 lowering requires a float tensor");
+
+    Location loc = op.getLoc();
+    Value squared = tosa::MulOp::create(rewriter, loc, dataType, data, data,
+                                        createZeroMulShift(rewriter, loc));
+    auto reducedTy = keepdimsReduceType(dataType, axis);
+    Value sum = tosa::ReduceSumOp::create(rewriter, loc, reducedTy, squared,
+                                          rewriter.getI32IntegerAttr(axis));
+    Value rsqrt = tosa::RsqrtOp::create(rewriter, loc, reducedTy, sum);
+    Value norm = tosa::ReciprocalOp::create(rewriter, loc, reducedTy, rsqrt);
+    replaceWithTosaReduce(op, norm, resultType, keepdims, rewriter);
     return success();
   }
 };
@@ -2892,9 +2954,9 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         ConvOp, MatmulOp, GemmOp, TransposeOp, AddOp, SubOp, MinOp, MaxOp,
         MulOp, DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
         TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, WhereOp, LeakyReluOp,
-        MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp, QuantizeLinearOp,
-        DequantizeLinearOp, MatMulNBitsOp, GatherOp, RopeOp, GqaOp,
-        MultiHeadAttentionOp>();
+        MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, ReduceMaxOp, ReduceMinOp,
+        ReduceProdOp, ReduceL2Op, CastOp, QuantizeLinearOp, DequantizeLinearOp,
+        MatMulNBitsOp, GatherOp, RopeOp, GqaOp, MultiHeadAttentionOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
@@ -2934,7 +2996,11 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         UnaryConverter<ReciprocalOp, tosa::ReciprocalOp,
                        /*FloatOnly=*/true>,
         SqrtConverter, WhereConverter, LeakyReluConverter, SoftmaxConverter,
-        ReduceSumConverter, ReduceMeanConverter, CastConverter,
+        ReduceConverter<ReduceSumOp, tosa::ReduceSumOp>,
+        ReduceConverter<ReduceMaxOp, tosa::ReduceMaxOp>,
+        ReduceConverter<ReduceMinOp, tosa::ReduceMinOp>,
+        ReduceConverter<ReduceProdOp, tosa::ReduceProductOp>,
+        ReduceMeanConverter, ReduceL2Converter, CastConverter,
         DequantizeLinearConverter, QuantizeLinearConverter,
         MatMulNBitsConverter, GatherConverter, RopeConverter, GqaConverter,
         MhaConverter>(ctx);

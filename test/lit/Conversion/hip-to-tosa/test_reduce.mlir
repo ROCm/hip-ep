@@ -3,9 +3,16 @@
 
 // ============================================================================
 // TEST PURPOSE:
-// Verify hip.reduce_sum / hip.reduce_mean lower inside a rock.kernel
-// function. TOSA reduce ops take one i32 axis and always keepdims=1;
-// keepdims=0 is a reshape afterward. Mean is scale-by-1/N then reduce_sum.
+// Verify the hip reduction ops lower inside a rock.kernel function. TOSA
+// reduce ops take one i32 axis and always keepdims=1; keepdims=0 is a reshape
+// afterward.
+//
+// reduce_sum, reduce_max, reduce_min and reduce_prod share the ReduceConverter
+// template, so the axis, keepdims and identity behaviour is exercised once
+// (through hip.reduce_sum) rather than repeated per op; the per-op cases prove
+// only the op mapping. reduce_mean and reduce_l2 have no TOSA counterpart and
+// expand instead: mean is scale-by-1/N then reduce_sum, and l2 is
+// sqrt(sum(x^2)) with the sqrt spelled reciprocal(rsqrt(..)).
 //
 // FILE LAYOUT:
 // Converting cases in the first chunk; each rejection in its own chunk.
@@ -77,6 +84,132 @@ func.func @reduce_sum_noop(%ctx: !hip.context, %data: tensor<2x8xf16>,
     attributes {rock.kernel} {
   %axes = arith.constant dense<[]> : tensor<0xi64>
   %r = hip.reduce_sum(%ctx)
+         ins(%data, %axes : tensor<2x8xf16>, tensor<0xi64>)
+         outs(%init : tensor<2x8xf16>)
+         {noop_with_empty_axes = 1 : i64} : tensor<2x8xf16>
+  return %r : tensor<2x8xf16>
+}
+
+// The nan_mode attribute on tosa.reduce_max defaults to PROPAGATE, which is
+// what ONNX ReduceMax does, so it is omitted from the pretty form.
+// CHECK-LABEL: func.func @reduce_max
+// CHECK: tosa.reduce_max %arg1 {axis = 1 : i32}
+// CHECK-NOT: hip.reduce_max
+func.func @reduce_max(%ctx: !hip.context, %data: tensor<2x8xf16>,
+                      %init: tensor<2x1xf16>) -> tensor<2x1xf16>
+    attributes {rock.kernel} {
+  %axes = arith.constant dense<[1]> : tensor<1xi64>
+  %r = hip.reduce_max(%ctx)
+         ins(%data, %axes : tensor<2x8xf16>, tensor<1xi64>)
+         outs(%init : tensor<2x1xf16>) : tensor<2x1xf16>
+  return %r : tensor<2x1xf16>
+}
+
+// CHECK-LABEL: func.func @reduce_min
+// CHECK: tosa.reduce_min %arg1 {axis = 1 : i32}
+// CHECK-NOT: hip.reduce_min
+func.func @reduce_min(%ctx: !hip.context, %data: tensor<2x8xf16>,
+                      %init: tensor<2x1xf16>) -> tensor<2x1xf16>
+    attributes {rock.kernel} {
+  %axes = arith.constant dense<[1]> : tensor<1xi64>
+  %r = hip.reduce_min(%ctx)
+         ins(%data, %axes : tensor<2x8xf16>, tensor<1xi64>)
+         outs(%init : tensor<2x1xf16>) : tensor<2x1xf16>
+  return %r : tensor<2x1xf16>
+}
+
+// CHECK-LABEL: func.func @reduce_prod
+// CHECK: tosa.reduce_product %arg1 {axis = 1 : i32}
+// CHECK-NOT: hip.reduce_prod
+func.func @reduce_prod(%ctx: !hip.context, %data: tensor<2x8xf16>,
+                       %init: tensor<2x1xf16>) -> tensor<2x1xf16>
+    attributes {rock.kernel} {
+  %axes = arith.constant dense<[1]> : tensor<1xi64>
+  %r = hip.reduce_prod(%ctx)
+         ins(%data, %axes : tensor<2x8xf16>, tensor<1xi64>)
+         outs(%init : tensor<2x1xf16>) : tensor<2x1xf16>
+  return %r : tensor<2x1xf16>
+}
+
+// Unlike max and min, these three go through the same template, so keepdims=0
+// is checked once here rather than for each of them.
+// CHECK-LABEL: func.func @reduce_max_keepdims0
+// CHECK: tosa.reduce_max %arg1 {axis = 1 : i32}
+// CHECK: tosa.reshape
+// CHECK-NOT: hip.reduce_max
+func.func @reduce_max_keepdims0(%ctx: !hip.context, %data: tensor<2x8xf16>,
+                                %init: tensor<2xf16>) -> tensor<2xf16>
+    attributes {rock.kernel} {
+  %axes = arith.constant dense<[1]> : tensor<1xi64>
+  %r = hip.reduce_max(%ctx)
+         ins(%data, %axes : tensor<2x8xf16>, tensor<1xi64>)
+         outs(%init : tensor<2xf16>)
+         {keepdims = 0 : i64} : tensor<2xf16>
+  return %r : tensor<2xf16>
+}
+
+// Integers reduce through the same op; only max/min/prod accept them, since
+// the mean and l2 expansions are float-only.
+// CHECK-LABEL: func.func @reduce_prod_i32
+// CHECK: tosa.reduce_product %arg1 {axis = 0 : i32}
+func.func @reduce_prod_i32(%ctx: !hip.context, %data: tensor<4x8xi32>,
+                           %init: tensor<1x8xi32>) -> tensor<1x8xi32>
+    attributes {rock.kernel} {
+  %axes = arith.constant dense<[0]> : tensor<1xi64>
+  %r = hip.reduce_prod(%ctx)
+         ins(%data, %axes : tensor<4x8xi32>, tensor<1xi64>)
+         outs(%init : tensor<1x8xi32>) : tensor<1x8xi32>
+  return %r : tensor<1x8xi32>
+}
+
+// sqrt(sum(x^2)): square with a self-multiply, reduce, then take the square
+// root as reciprocal(rsqrt(..)) since TOSA has no sqrt.
+// CHECK-LABEL: func.func @reduce_l2
+// CHECK: %[[SQ:.*]] = tosa.mul %arg1, %arg1
+// CHECK: %[[SUM:.*]] = tosa.reduce_sum %[[SQ]] {axis = 1 : i32}
+// CHECK: %[[RS:.*]] = tosa.rsqrt %[[SUM]]
+// CHECK: tosa.reciprocal %[[RS]]
+// CHECK-NOT: hip.reduce_l2
+func.func @reduce_l2(%ctx: !hip.context, %data: tensor<2x8xf16>,
+                     %init: tensor<2x1xf16>) -> tensor<2x1xf16>
+    attributes {rock.kernel} {
+  %axes = arith.constant dense<[1]> : tensor<1xi64>
+  %r = hip.reduce_l2(%ctx)
+         ins(%data, %axes : tensor<2x8xf16>, tensor<1xi64>)
+         outs(%init : tensor<2x1xf16>) : tensor<2x1xf16>
+  return %r : tensor<2x1xf16>
+}
+
+// The reshape for keepdims=0 comes after the whole expansion, not after the
+// reduce_sum in the middle of it.
+// CHECK-LABEL: func.func @reduce_l2_keepdims0
+// CHECK: tosa.reduce_sum {{.*}}{axis = 1 : i32}
+// CHECK: tosa.rsqrt
+// CHECK: %[[N:.*]] = tosa.reciprocal
+// CHECK: tosa.reshape %[[N]]
+// CHECK-NOT: hip.reduce_l2
+func.func @reduce_l2_keepdims0(%ctx: !hip.context, %data: tensor<2x8xf16>,
+                               %init: tensor<2xf16>) -> tensor<2xf16>
+    attributes {rock.kernel} {
+  %axes = arith.constant dense<[1]> : tensor<1xi64>
+  %r = hip.reduce_l2(%ctx)
+         ins(%data, %axes : tensor<2x8xf16>, tensor<1xi64>)
+         outs(%init : tensor<2xf16>)
+         {keepdims = 0 : i64} : tensor<2xf16>
+  return %r : tensor<2xf16>
+}
+
+// noop_with_empty_axes reduces nothing, so ONNX defines the result as the
+// input itself rather than as an elementwise norm.
+// CHECK-LABEL: func.func @reduce_l2_noop
+// CHECK-NOT: tosa.reduce_sum
+// CHECK-NOT: tosa.rsqrt
+// CHECK-NOT: hip.reduce_l2
+func.func @reduce_l2_noop(%ctx: !hip.context, %data: tensor<2x8xf16>,
+                          %init: tensor<2x8xf16>) -> tensor<2x8xf16>
+    attributes {rock.kernel} {
+  %axes = arith.constant dense<[]> : tensor<0xi64>
+  %r = hip.reduce_l2(%ctx)
          ins(%data, %axes : tensor<2x8xf16>, tensor<0xi64>)
          outs(%init : tensor<2x8xf16>)
          {noop_with_empty_axes = 1 : i64} : tensor<2x8xf16>
@@ -159,6 +292,22 @@ func.func @integer_mean(%ctx: !hip.context, %data: tensor<2x8xi32>,
   %axes = arith.constant dense<[1]> : tensor<1xi64>
   // expected-error @+1 {{failed to legalize operation 'hip.reduce_mean'}}
   %r = hip.reduce_mean(%ctx)
+         ins(%data, %axes : tensor<2x8xi32>, tensor<1xi64>)
+         outs(%init : tensor<2x1xi32>) : tensor<2x1xi32>
+  return %r : tensor<2x1xi32>
+}
+
+// -----
+
+// The l2 expansion ends in tosa.rsqrt / tosa.reciprocal, which are float-only,
+// so an integer reduction has no spelling even though tosa.reduce_sum alone
+// would take one.
+func.func @integer_l2(%ctx: !hip.context, %data: tensor<2x8xi32>,
+                      %init: tensor<2x1xi32>) -> tensor<2x1xi32>
+    attributes {rock.kernel} {
+  %axes = arith.constant dense<[1]> : tensor<1xi64>
+  // expected-error @+1 {{failed to legalize operation 'hip.reduce_l2'}}
+  %r = hip.reduce_l2(%ctx)
          ins(%data, %axes : tensor<2x8xi32>, tensor<1xi64>)
          outs(%init : tensor<2x1xi32>) : tensor<2x1xi32>
   return %r : tensor<2x1xi32>
