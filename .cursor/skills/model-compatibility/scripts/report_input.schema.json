@@ -123,27 +123,15 @@
         "unsupported"
       ]
     },
-    "backend": {
-      "type": "string",
-      "enum": [
-        "MIOpen",
-        "hipBLASLt",
-        "Custom Hip Kernel",
-        "Compile Time Optimization",
-        "Unknown"
-      ]
-    },
     "reasonCode": {
       "type": "string",
       "enum": [
         "NO_HIP_DIALECT_IMPL",
+        "CONVERSION_REJECTED_INSTANCES",
         "COMPILE_TIME_TENSOR_OP",
-        "MISSING_HIP_REQUIRED_ATTR",
         "EXTRA_ONNX_ATTR_NOT_IN_HIP",
-        "ONNX_INPUT_BELOW_HIP_MIN",
-        "ONNX_INPUT_ABOVE_HIP_MAX",
-        "ONNX_OUTPUT_BELOW_HIP_MIN",
-        "ONNX_OUTPUT_ABOVE_HIP_MAX"
+        "PARTIAL_INSTANCE_CONVERSION",
+        "CONVERSION_NOT_PROBED"
       ]
     },
     "operatorKey": {
@@ -201,15 +189,6 @@
             "null"
           ]
         },
-        "runtime_func": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "backend": {
-          "$ref": "#/$defs/backend"
-        },
         "op_description": {
           "type": "string"
         }
@@ -222,8 +201,8 @@
         "onnx_op",
         "domain",
         "hip_op",
-        "runtime_func",
-        "backend"
+        "instances",
+        "status"
       ],
       "properties": {
         "onnx_op": {
@@ -235,14 +214,12 @@
         "hip_op": {
           "type": "string"
         },
-        "runtime_func": {
-          "type": [
-            "string",
-            "null"
-          ]
+        "instances": {
+          "type": "integer",
+          "minimum": 0
         },
-        "backend": {
-          "$ref": "#/$defs/backend"
+        "status": {
+          "$ref": "#/$defs/status"
         }
       }
     },

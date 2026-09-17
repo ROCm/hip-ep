@@ -3,13 +3,26 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
 #
+"""
+Normalize the pipeline outputs into report_input.json (step 5).
+
+Support comes from what the compiler did, not from reading its source:
+
+  unsupported  every instance was still an onnx op after convert-onnx-to-hip
+  partial      some instances converted, or an ONNX attribute with a
+               non-default value did not reach the HIP op
+  full         converted, with every meaningful attribute accounted for
+
+Without the conversion probe (the -SkipDump path, which has no compiler-input
+MLIR to convert) no operator can be classified, so every row is reported as
+unknown-by-omission: the status stays `partial` with an explicit reason. The
+report then carries the badge the orchestrator adds.
+"""
+
 import json
-from collections import Counter, defaultdict
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
-import sys
-
-from onnx_graph_walk import iter_model_nodes
 
 FALLBACK_OP_DESCRIPTIONS = {
     "MatMulNBits": "Quantized N-bit matrix multiplication (com.microsoft)",
@@ -19,57 +32,33 @@ FALLBACK_OP_DESCRIPTIONS = {
     "QMoE": "Mixture-of-Experts routing and fused expert computation",
 }
 
+REASON_CATALOG = [
+    ("NO_HIP_DIALECT_IMPL", "No Hip Dialect implementation available."),
+    (
+        "CONVERSION_REJECTED_INSTANCES",
+        "A conversion exists but refused this model's instances.",
+    ),
+    ("COMPILE_TIME_TENSOR_OP", "Handled at compile time."),
+    ("EXTRA_ONNX_ATTR_NOT_IN_HIP", "Extra ONNX attributes not in Hip op."),
+    (
+        "PARTIAL_INSTANCE_CONVERSION",
+        "Some instances converted and others did not.",
+    ),
+    ("CONVERSION_NOT_PROBED", "Conversion was not run; support is unknown."),
+]
+
+# Dialects a converted op can land in. Anything outside hip.* is a
+# compile-time fold rather than a runtime kernel.
+_COMPILE_TIME_PREFIXES = ("tensor.", "arith.", "memref.", "bufferization.")
+
 
 def norm_domain(domain: str) -> str:
-    if not domain or domain == "ai.onnx":
+    if not domain or domain in {"ai.onnx", "onnx", ""}:
         return "onnx"
     return domain
 
 
-def unsupported_rec(op: str):
-    # Fallback table for ops that have NO Conversion.cpp at all but are known
-    # to be eliminated by MLIR's standard passes (constant folding /
-    # canonicalization / dead-code elimination). Ops whose conversion EXISTS
-    # but lowers to tensor.* / arith.* / memref.* are auto-detected by step2_1
-    # (which emits a synthetic `tensor.<X>` mapping) and never reach this
-    # branch -- they show up as supported / compile-time in the report.
-    compile_time = {
-        "Constant": "Constant folding / constant propagation - handled at compile time.",
-        "CastLike": "Type canonicalization pattern - resolved at compile time.",
-    }
-    if op in compile_time:
-        return "Compile Time Optimization", compile_time[op]
-    return "Custom Hip Kernel", "No Hip Dialect implementation available."
-
-
-def load_strict_attr_names(analysis_dir: Path, repo_root: Path):
-    """
-    Load strict-required attribute names from external config.
-    Search order:
-    1) <analysis_dir>/compatibility_attr_rules.json
-    2) <repo_root>/compatibility_attr_rules.json
-    """
-    candidates = [
-        analysis_dir / "compatibility_attr_rules.json",
-        repo_root / "compatibility_attr_rules.json",
-    ]
-    for cfg in candidates:
-        if not cfg.exists():
-            continue
-        try:
-            data = json.loads(cfg.read_text(encoding="utf-8"))
-            names = data.get("strict_required_attrs") or []
-            return {str(x) for x in names if str(x).strip()}
-        except Exception:
-            continue
-    return set()
-
-
 def onnx_op_description(op: str, domain: str) -> str:
-    """
-    Resolve ONNX operator description from schema docs.
-    Falls back to curated descriptions for non-standard domains.
-    """
     try:
         from onnx import defs
 
@@ -81,236 +70,158 @@ def onnx_op_description(op: str, domain: str) -> str:
             return doc.split(". ")[0].strip().rstrip(".")
     except Exception:
         pass
-    if op in FALLBACK_OP_DESCRIPTIONS:
-        return FALLBACK_OP_DESCRIPTIONS[op]
-    return "—"
+    return FALLBACK_OP_DESCRIPTIONS.get(op, "—")
 
 
-def io_bounds(operands: dict, skip_ctx: bool):
-    min_edges = 0
-    max_edges = 0
-    has_variadic = False
-    for name, info in (operands or {}).items():
-        if not isinstance(info, dict):
-            continue
-        if skip_ctx and name in {"ctx", "context"}:
-            continue
-        variadic = bool(info.get("variadic"))
-        required = bool(info.get("required", True))
-        if variadic:
-            has_variadic = True
-            if required:
-                min_edges += 1
-        else:
-            max_edges += 1
-            if required:
-                min_edges += 1
-    return min_edges, (None if has_variadic else max_edges)
+def read_json(path: Path):
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
-def analyze_schema_for_key(nodes, hip_entry, strict_attr_names):
-    ins = (hip_entry or {}).get("inputs") or {}
-    outs = (hip_entry or {}).get("outputs") or {}
-    attrs = (hip_entry or {}).get("attributes") or {}
+def load_optional(path: Path):
+    return read_json(path) if path.is_file() else None
 
-    req_attrs = []
-    for k, v in attrs.items():
-        if not isinstance(v, dict):
-            continue
-        if (not v.get("optional", False)) or (k in strict_attr_names):
-            req_attrs.append(k)
-    declared_attrs = {k for k, v in attrs.items() if isinstance(v, dict)}
-    req_attrs = sorted(req_attrs)
 
-    min_in, max_in = io_bounds(ins, skip_ctx=True)
-    min_out, max_out = io_bounds(outs, skip_ctx=False)
-    total = len(nodes)
+def index_by_key(entries, key_fields=("op_type", "domain")):
+    """Index rows on (op_type, normalized domain)."""
+    indexed = {}
+    for entry in entries or []:
+        key = (entry.get(key_fields[0], ""), norm_domain(entry.get(key_fields[1], "")))
+        indexed[key] = entry
+    return indexed
 
-    miss_attr_counts = Counter()
-    extra_attr_counts = Counter()
-    in_low = in_high = out_low = out_high = 0
-    nodes_with_extra = 0
 
-    for n in nodes:
-        attrs_set = {a.name for a in n.attribute}
-        for a in req_attrs:
-            if a not in attrs_set:
-                miss_attr_counts[a] += 1
-        extra = sorted(attrs_set - declared_attrs)
-        if extra:
-            nodes_with_extra += 1
-            for x in extra:
-                extra_attr_counts[x] += 1
-        nin = len(n.input)
-        nout = len(n.output)
-        if nin < min_in:
-            in_low += 1
-        if max_in is not None and nin > max_in:
-            in_high += 1
-        if nout < min_out:
-            out_low += 1
-        if max_out is not None and nout > max_out:
-            out_high += 1
+def leftover_reason(reason_row):
+    """Reason code and text for an operator no instance of which converted.
 
-    reason_codes = []
-    reason_texts = []
+    A missing converter and a converter that refused every instance are
+    different findings: the first needs a new implementation, the second needs
+    an existing one widened, so they must not share a reason text.
+    """
+    if not reason_row or not reason_row.get("converter_found"):
+        return "NO_HIP_DIALECT_IMPL", ["No Hip Dialect implementation available."]
 
-    all_missing = [a for a in req_attrs if miss_attr_counts[a] == total and total > 0]
-    some_missing = [a for a in req_attrs if 0 < miss_attr_counts[a] < total]
-    if all_missing:
-        reason_codes.append("MISSING_HIP_REQUIRED_ATTR")
-        reason_texts.append(
-            "Missing Hip-required attributes in all ONNX instances: "
-            + ", ".join(sorted(all_missing))
-        )
-    if some_missing:
-        if "MISSING_HIP_REQUIRED_ATTR" not in reason_codes:
-            reason_codes.append("MISSING_HIP_REQUIRED_ATTR")
-        reason_texts.append(
-            "Missing Hip-required attributes in some ONNX instances: "
-            + ", ".join(sorted(some_missing))
+    files = (
+        ", ".join(reason_row.get("converter_files") or []) or "lib/Conversion/OnnxToHip"
+    )
+    observed = ", ".join(reason_row.get("observed_element_types") or [])
+    text = (
+        f"A conversion exists ({files}) but refused every instance. "
+        f"Operand element types in this model: {observed or 'unknown'}."
+    )
+
+    likely = [r for r in reason_row.get("refusals") or [] if r.get("likely")]
+    if likely:
+        candidates = "; ".join(f"{r['message']} [{r['location']}]" for r in likely)
+        # Candidates, not a verdict: the refusal reason is compiled out of a
+        # release build, so these are the constraints that the observed types
+        # contradict, to be confirmed against the source.
+        text += f" Candidate constraints: {candidates}."
+    return "CONVERSION_REJECTED_INSTANCES", [text]
+
+
+def classify(op, domain, count, leftover, attr_row, reason_row, probed):
+    """Status, reason codes and texts for one operator type."""
+    if not probed:
+        return (
+            "partial",
+            ["CONVERSION_NOT_PROBED"],
+            [
+                "Conversion was not run (no compiler-input MLIR), so support "
+                "for this operator was not verified."
+            ],
         )
 
-    if in_low:
-        reason_codes.append("ONNX_INPUT_BELOW_HIP_MIN")
-        reason_texts.append(
-            f"ONNX inputs below Hip minimum in {in_low}/{total} instance(s)."
-        )
-    if in_high:
-        reason_codes.append("ONNX_INPUT_ABOVE_HIP_MAX")
-        reason_texts.append(
-            f"ONNX inputs above Hip maximum in {in_high}/{total} instance(s)."
-        )
-    if out_low:
-        reason_codes.append("ONNX_OUTPUT_BELOW_HIP_MIN")
-        reason_texts.append(
-            f"ONNX outputs below Hip minimum in {out_low}/{total} instance(s)."
-        )
-    if out_high:
-        reason_codes.append("ONNX_OUTPUT_ABOVE_HIP_MAX")
-        reason_texts.append(
-            f"ONNX outputs above Hip maximum in {out_high}/{total} instance(s)."
-        )
-    if nodes_with_extra:
-        reason_codes.append("EXTRA_ONNX_ATTR_NOT_IN_HIP")
-        top = [k for k, _ in extra_attr_counts.most_common(12)]
-        reason_texts.append(
-            "Extra attributes in ONNX not supported by Hip: " + ", ".join(top)
+    leftover_count = int((leftover or {}).get("count", 0))
+    if leftover_count >= count:
+        code, texts = leftover_reason(reason_row)
+        return "unsupported", [code], texts
+
+    codes, texts = [], []
+    if leftover_count:
+        codes.append("PARTIAL_INSTANCE_CONVERSION")
+        texts.append(
+            f"{leftover_count} of {count} instance(s) were not converted; the "
+            "conversion pattern bailed out on them."
         )
 
-    status = "partial" if reason_codes else "full"
-    return status, sorted(set(reason_codes)), reason_texts
+    dropped = (attr_row or {}).get("dropped_attrs") or {}
+    if dropped:
+        codes.append("EXTRA_ONNX_ATTR_NOT_IN_HIP")
+        detail = ", ".join(
+            f"{name} ({cnt} instance(s))" for name, cnt in dropped.items()
+        )
+        texts.append(f"ONNX attributes not carried to the Hip op: {detail}.")
+
+    if codes:
+        return "partial", codes, texts
+
+    hip_ops = (attr_row or {}).get("hip_ops") or []
+    if hip_ops and all(
+        any(h.startswith(p) for p in _COMPILE_TIME_PREFIXES) for h in hip_ops
+    ):
+        return "full", ["COMPILE_TIME_TENSOR_OP"], ["Handled at compile time."]
+    return "full", [], []
+
+
+def primary_hip_op(attr_row):
+    hip_ops = (attr_row or {}).get("hip_ops") or []
+    for hip_op in hip_ops:
+        if hip_op.startswith("hip."):
+            return hip_op
+    return hip_ops[0] if hip_ops else None
 
 
 def main():
     if len(sys.argv) != 4:
         raise SystemExit(
-            "Usage: build_report_input.py <model.onnx> <analysis_dir> <repo_root>"
+            "Usage: build_report_input.py <analyzed_graph> <analysis_dir> <repo_root>"
         )
-    model_path = Path(sys.argv[1])
+    analyzed_graph = Path(sys.argv[1])
     analysis_dir = Path(sys.argv[2])
     repo_root = Path(sys.argv[3])
 
-    import onnx
+    step1 = read_json(analysis_dir / "step1_onnx_ops.json")
+    leftovers = load_optional(analysis_dir / "leftover_onnx.json")
+    attrs = load_optional(analysis_dir / "attr_transfer.json")
+    reasons = load_optional(analysis_dir / "leftover_reasons.json")
+    probed = leftovers is not None
 
-    strict_attr_names = load_strict_attr_names(analysis_dir, repo_root)
+    leftover_by_key = index_by_key((leftovers or {}).get("unconverted"))
+    attr_by_key = index_by_key((attrs or {}).get("rows"))
+    reason_by_key = index_by_key((reasons or {}).get("rows"))
 
-    step1 = json.loads(
-        (analysis_dir / "step1_onnx_ops.json").read_text(encoding="utf-8")
-    )
-    step21 = json.loads(
-        (analysis_dir / "step2_1_onnx_to_hip_mappings.json").read_text(encoding="utf-8")
-    )
-    step23 = json.loads(
-        (analysis_dir / "step2_3_backend_analysis.json").read_text(encoding="utf-8")
-    )
-    step2hip = json.loads(
-        (analysis_dir / "step2_hip_ops.json").read_text(encoding="utf-8")
-    )
-
-    # Consolidate step2_1 mappings keyed on (op, domain). An ONNX op may
-    # have MULTIPLE mappings -- e.g. Gather has hip.gather (the runtime path
-    # in GatherConversion.cpp) AND tensor.from_elements (the shape-fold
-    # variant in GatherShapeFold.cpp); ConstantOfShape has tensor.splat (the
-    # MLIR-std fold) and no hip.* op. Prefer real hip.* mappings over
-    # tensor.*/arith.*/memref.* compile-time fold variants when both exist
-    # so the report column reflects the executed runtime path, not the
-    # shape-fold fallback.
-    def _mapping_priority(mapping):
-        hop = mapping.get("hip_op", "") or ""
-        if hop.startswith("hip."):
-            return 0  # real runtime path -- highest priority
-        if (
-            hop.startswith("tensor.")
-            or hop.startswith("arith.")
-            or hop.startswith("memref.")
-        ):
-            return 1  # compile-time fold variant
-        return 2
-
-    support = {}
-    for m in step21.get("mappings", []):
-        key = (m.get("onnx_op", ""), norm_domain(m.get("onnx_domain", "onnx")))
-        existing = support.get(key)
-        if existing is None or _mapping_priority(m) < _mapping_priority(existing):
-            support[key] = m
-    backend_by_key = {}
-    for m in step23.get("mappings", []):
-        key = (m.get("onnx_op", ""), norm_domain(m.get("onnx_domain", "onnx")))
-        existing = backend_by_key.get(key)
-        if existing is None or _mapping_priority(m) < _mapping_priority(existing):
-            backend_by_key[key] = m
-
-    model = onnx.load(str(model_path), load_external_data=False)
-    counts = Counter(
-        (n.op_type, norm_domain(n.domain or ""))
-        for n, _scope in iter_model_nodes(model)
-    )
-    nodes_by_key = defaultdict(list)
-    for n, _scope in iter_model_nodes(model):
-        nodes_by_key[(n.op_type, norm_domain(n.domain or ""))].append(n)
-
-    op_dist = []
-    comp_rows = []
+    op_dist, comp_rows, mapping_chain = [], [], []
     full_types = partial_types = unsupported_types = 0
     supported_instances = unsupported_instances = 0
+    total_instances = 0
 
-    for idx, ((op, dom), cnt) in enumerate(
-        sorted(counts.items(), key=lambda x: (-x[1], x[0][0], x[0][1]))
-    ):
-        s = support.get((op, dom))
-        b = backend_by_key.get((op, dom), {})
-        dtypes = []
-        step1_op = step1.get(op)
-        if isinstance(step1_op, dict) and not op.startswith("_"):
-            dtypes = [str(x) for x in (step1_op.get("data_types") or []) if x]
+    op_entries = [
+        (op, info)
+        for op, info in step1.items()
+        if not op.startswith("_") and isinstance(info, dict)
+    ]
+    op_entries.sort(key=lambda item: (-int(item[1].get("count", 0)), item[0]))
 
-        if s:
-            hip_op = s.get("hip_op", "")
-            if hip_op.startswith("tensor."):
-                status = "full"
-                reason_texts = ["Handled at compile time."]
-                reason_codes = ["COMPILE_TIME_TENSOR_OP"]
-            elif not isinstance(step2hip.get(hip_op), dict):
-                status = "partial"
-                reason_codes = ["NO_HIP_DIALECT_IMPL"]
-                reason_texts = ["No Hip Dialect implementation available."]
-            else:
-                status, reason_codes, reason_texts = analyze_schema_for_key(
-                    nodes_by_key[(op, dom)], step2hip.get(hip_op), strict_attr_names
-                )
-            supported_instances += cnt
-        else:
-            hip_op = None
-            status = "unsupported"
-            rec, why = unsupported_rec(op)
-            reason_texts = [why]
-            reason_codes = (
-                ["COMPILE_TIME_TENSOR_OP"]
-                if rec == "Compile Time Optimization"
-                else ["NO_HIP_DIALECT_IMPL"]
-            )
-            unsupported_instances += cnt
+    for op, info in op_entries:
+        count = int(info.get("count", 0))
+        domains = info.get("domain") or ["ai.onnx"]
+        domain = norm_domain(domains[0])
+        key = (op, domain)
+        leftover = leftover_by_key.get(key)
+        attr_row = attr_by_key.get(key)
+
+        status, reason_codes, reason_texts = classify(
+            op, domain, count, leftover, attr_row, reason_by_key.get(key), probed
+        )
+        leftover_count = int((leftover or {}).get("count", 0))
+
+        total_instances += count
+        if probed:
+            unsupported_instances += leftover_count
+            supported_instances += count - leftover_count
+        # Without the probe nothing is known, so no instance is counted as
+        # supported: a 100% headline on an unverified run would be read as a
+        # result rather than as an absence of one.
 
         if status == "full":
             full_types += 1
@@ -319,117 +230,82 @@ def main():
         else:
             unsupported_types += 1
 
-        backend = b.get("backend") if b else None
-        runtime = b.get("runtime_func") if b else None
-        desc = "—"
-        if hip_op and isinstance(step2hip.get(hip_op), dict):
-            desc = str(step2hip[hip_op].get("summary") or "—")
-        if not desc or desc == "—":
-            desc = onnx_op_description(op, dom)
-
+        hip_op = primary_hip_op(attr_row)
         op_dist.append(
             {
                 "onnx_op": op,
-                "domain": dom,
-                "count": int(cnt),
-                "data_types": dtypes,
+                "domain": domain,
+                "count": count,
+                "data_types": [str(x) for x in (info.get("data_types") or []) if x],
                 "status": status,
                 "hip_op": hip_op,
-                "runtime_func": runtime,
-                "backend": backend if backend else "Unknown",
-                "op_description": desc,
+                "op_description": onnx_op_description(op, domain),
             }
         )
 
+        evidence_file = "leftover_onnx.json" if leftover else "attr_transfer.json"
         comp_rows.append(
             {
                 "onnx_op": op,
-                "domain": dom,
+                "domain": domain,
                 "status": status,
                 "reason_codes": reason_codes,
                 "reason_texts": reason_texts,
                 "evidence": [
                     {
-                        "source_file": "step2_1_onnx_to_hip_mappings.json",
-                        "json_pointer": f"/mappings/{idx}",
+                        "source_file": evidence_file,
+                        "json_pointer": f"/{'unconverted' if leftover else 'rows'}",
                     }
                 ],
             }
         )
 
-    mapping_chain = []
-    for m in step23.get("mappings", []):
         mapping_chain.append(
             {
-                "onnx_op": m.get("onnx_op", ""),
-                "domain": norm_domain(m.get("onnx_domain", "onnx")),
-                "hip_op": m.get("hip_op", ""),
-                "runtime_func": m.get("runtime_func"),
-                "backend": m.get("backend", "Unknown")
-                if m.get("backend")
-                else "Unknown",
+                "onnx_op": op,
+                "domain": domain,
+                "hip_op": hip_op or "—",
+                "instances": count,
+                "status": status,
             }
         )
 
     out = {
         "meta": {
-            "model_path": str(model_path),
+            "model_path": str(analyzed_graph),
             "generated_at_utc": datetime.now(timezone.utc).strftime(
                 "%Y-%m-%dT%H:%M:%SZ"
             ),
             "repo_root": str(repo_root),
-            "tool_versions": {"pipeline": "step1-step2_3"},
+            "tool_versions": {
+                "pipeline": "convert-onnx-to-hip oracle",
+                "conversion_probed": str(probed).lower(),
+            },
         },
         "summary": {
-            "total_node_instances": int(sum(counts.values())),
-            "supported_instances": int(supported_instances),
-            "unsupported_instances": int(unsupported_instances),
-            "total_operator_types": int(len(counts)),
-            "fully_compatible_operator_types": int(full_types),
-            "partially_compatible_operator_types": int(partial_types),
-            "unsupported_operator_types": int(unsupported_types),
+            "total_node_instances": total_instances,
+            "supported_instances": supported_instances,
+            "unsupported_instances": unsupported_instances,
+            "total_operator_types": len(op_entries),
+            "fully_compatible_operator_types": full_types,
+            "partially_compatible_operator_types": partial_types,
+            "unsupported_operator_types": unsupported_types,
         },
         "operator_distribution": op_dist,
         "mapping_chain": mapping_chain,
         "compatibility": comp_rows,
         "reason_catalog": [
-            {
-                "code": "NO_HIP_DIALECT_IMPL",
-                "default_text": "No Hip Dialect implementation available.",
-            },
-            {
-                "code": "COMPILE_TIME_TENSOR_OP",
-                "default_text": "Handled at compile time.",
-            },
-            {
-                "code": "MISSING_HIP_REQUIRED_ATTR",
-                "default_text": "Missing Hip-required attributes.",
-            },
-            {
-                "code": "EXTRA_ONNX_ATTR_NOT_IN_HIP",
-                "default_text": "Extra ONNX attributes not in Hip op.",
-            },
-            {
-                "code": "ONNX_INPUT_BELOW_HIP_MIN",
-                "default_text": "ONNX inputs below Hip minimum.",
-            },
-            {
-                "code": "ONNX_INPUT_ABOVE_HIP_MAX",
-                "default_text": "ONNX inputs above Hip maximum.",
-            },
-            {
-                "code": "ONNX_OUTPUT_BELOW_HIP_MIN",
-                "default_text": "ONNX outputs below Hip minimum.",
-            },
-            {
-                "code": "ONNX_OUTPUT_ABOVE_HIP_MAX",
-                "default_text": "ONNX outputs above Hip maximum.",
-            },
+            {"code": code, "default_text": text} for code, text in REASON_CATALOG
         ],
     }
+
     out_path = analysis_dir / "report_input.json"
     out_path.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"Wrote {out_path}")
+    print(
+        f"  {supported_instances}/{total_instances} instances supported, "
+        f"{unsupported_types} unsupported operator type(s)"
+    )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,21 @@
+{
+  "passes": [
+    {
+      "name": "init",
+      "plugin": "morphizen-pass-init"
+    }
+  ],
+  "target": "mlir-target",
+  "targets": [
+    {
+      "name": "mlir-target",
+      "pass": [
+        "init"
+      ],
+      "provider_options": {
+        "pass.init.enable_dump": "1",
+        "pass.init.filename": "compiler_input.mlir"
+      }
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "_comment": [
+    "Attribute defaults for contrib operators, which the onnx package has no",
+    "schema for. analyze_conversion.py uses them the same way it uses the",
+    "ai.onnx schema defaults: an attribute the conversion dropped is only a",
+    "partial-support finding when its value differs from the default, because",
+    "dropping a default changes no behaviour.",
+    "Values follow the ONNX Runtime contrib operator specification. An",
+    "attribute missing from this table is always treated as a real drop, so",
+    "the table can only reduce false partials, never hide a real one."
+  ],
+  "com.microsoft": {
+    "GroupQueryAttention": {
+      "do_rotary": 0,
+      "k_quant_type": "NONE",
+      "local_window_size": -1,
+      "qk_output": 0,
+      "rotary_interleaved": 0,
+      "scale": 0.0,
+      "smooth_softmax": 0,
+      "softcap": 0.0,
+      "v_quant_type": "NONE"
+    },
+    "MatMulNBits": {
+      "accuracy_level": 0,
+      "bits": 4
+    },
+    "SkipSimplifiedLayerNormalization": {
+      "epsilon": 9.999999747378752e-06
+    },
+    "SimplifiedLayerNormalization": {
+      "axis": -1,
+      "epsilon": 9.999999747378752e-06,
+      "stash_type": 1
+    },
+    "RotaryEmbedding": {
+      "interleaved": 0,
+      "is_packed_batching": 0,
+      "num_heads": 0,
+      "rotary_embedding_dim": 0,
+      "scale": 1.0
+    }
+  }
+}

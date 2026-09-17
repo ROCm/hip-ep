@@ -30,21 +30,24 @@ def load_op_distribution_comparison(analysis_dir: Path):
 
 
 def render_op_distribution_comparison_section(comp: dict) -> list:
-    """Markdown lines for original vs EP input (from compare_op_distribution.py JSON)."""
+    """Markdown lines for original vs compiler input (from compare_op_distribution.py)."""
     meta = comp.get("meta") or {}
     summary = comp.get("summary") or {}
     rows = comp.get("rows") or []
 
     out = []
-    out.append("## Original vs EP input (operator distribution)\n\n")
+    out.append("## Original vs compiler input (operator distribution)\n\n")
     out.append(
-        "Compatibility analysis below uses the **EP input** graph (`onnx.onnx`). "
-        "This section compares it to the packaged **original** ONNX.\n\n"
+        "Compatibility analysis below uses the **compiler input** "
+        "(`compiler_input.mlir`), the graph the hip-ep compiler receives after "
+        "ONNX Runtime's optimizations. This section compares it to the packaged "
+        "**original** ONNX. Initializers are carrier ops in the MLIR form and "
+        "are excluded from its column.\n\n"
     )
     out.append(f"- **Original model:** `{meta.get('original_model', '—')}`\n")
-    out.append(f"- **EP input (analyzed):** `{meta.get('ep_model', '—')}`\n\n")
+    out.append(f"- **Compiler input (analyzed):** `{meta.get('ep_model', '—')}`\n\n")
 
-    out.append("| Metric | Original | EP input | Delta |\n")
+    out.append("| Metric | Original | Compiler input | Delta |\n")
     out.append("|---|---:|---:|---:|\n")
     out.append(
         f"| Total node instances | {summary.get('original_total_nodes', 0)} | "
@@ -66,12 +69,12 @@ def render_op_distribution_comparison_section(comp: dict) -> list:
         )
     if only_ep:
         out.append(
-            "**Operators only in EP input:** "
+            "**Operators only in the compiler input:** "
             + ", ".join(f"`{x}`" for x in only_ep)
             + "\n\n"
         )
 
-    out.append("| Op Type | Original | EP input | Delta |\n")
+    out.append("| Op Type | Original | Compiler input | Delta |\n")
     out.append("|---|---:|---:|---:|\n")
     for row in rows:
         d = int(row.get("delta", 0))
@@ -82,23 +85,6 @@ def render_op_distribution_comparison_section(comp: dict) -> list:
         )
     out.append("\n")
     return out
-
-
-def parse_step2_operator_summary(step2_md: Path):
-    if not step2_md.exists():
-        return []
-    lines = step2_md.read_text(encoding="utf-8").splitlines()
-    in_section = False
-    table_lines = []
-    for line in lines:
-        if line.strip() == "## Operator Summary":
-            in_section = True
-            continue
-        if in_section and line.startswith("## "):
-            break
-        if in_section and line.strip().startswith("|"):
-            table_lines.append(line)
-    return table_lines
 
 
 def status_display(status: str) -> str:
@@ -198,35 +184,21 @@ def infer_unsupported_reco(op_name: str, op_description: str, rules):
 def recommended_impl_with_trace(op_row, compat_row, reco_rules):
     status = op_row.get("status")
     hip_op = op_row.get("hip_op")
-    backend = op_row.get("backend")
-    runtime = op_row.get("runtime_func")
     if status in {"full", "partial"}:
-        if hip_op and hip_op.startswith("tensor."):
+        # The conversion already picked the implementation, so report what it
+        # produced instead of guessing from the rule table.
+        if hip_op and not hip_op.startswith("hip."):
             return {
                 "recommended": "Compile Time Optimization",
-                "source": "supported_tensor_compile_time",
-                "matched_rule": "tensor.*",
-                "rationale": "Mapped tensor op handled at compile time.",
+                "source": "supported_compile_time_fold",
+                "matched_rule": hip_op,
+                "rationale": "Converted to a compile-time op, not a runtime kernel.",
             }
-        if backend and backend != "Unknown" and runtime:
+        if hip_op:
             return {
-                "recommended": f"{backend} (`{runtime}`)",
-                "source": "supported_backend_runtime",
-                "matched_rule": "backend+runtime",
-                "rationale": "",
-            }
-        if backend and backend != "Unknown":
-            return {
-                "recommended": backend,
-                "source": "supported_backend_only",
-                "matched_rule": "backend",
-                "rationale": "",
-            }
-        if runtime:
-            return {
-                "recommended": f"`{runtime}`",
-                "source": "supported_runtime_only",
-                "matched_rule": "runtime",
+                "recommended": f"Hip Dialect (`{hip_op}`)",
+                "source": "supported_hip_op",
+                "matched_rule": hip_op,
                 "rationale": "",
             }
         return {
@@ -234,6 +206,17 @@ def recommended_impl_with_trace(op_row, compat_row, reco_rules):
             "source": "supported_unknown",
             "matched_rule": "unknown",
             "rationale": "",
+        }
+
+    reason_codes = (compat_row or {}).get("reason_codes") or []
+    if "CONVERSION_REJECTED_INSTANCES" in reason_codes:
+        # The operator is implemented; the fix is to widen what the existing
+        # conversion accepts, not to write a new kernel.
+        return {
+            "recommended": "Extend the existing conversion",
+            "source": "conversion_rejected",
+            "matched_rule": "CONVERSION_REJECTED_INSTANCES",
+            "rationale": "A conversion exists but refused this model's instances.",
         }
 
     if compile_time_reason_with_rules(
@@ -309,7 +292,6 @@ def main():
     script_dir = Path(__file__).resolve().parent
     reco_rules = load_reco_rules(script_dir)
     report_input = read_json(analysis_dir / "report_input.json")
-    step2_table = parse_step2_operator_summary(analysis_dir / "step2_hip_ops.md")
     op_dist_comparison = load_op_distribution_comparison(analysis_dir)
 
     meta = report_input["meta"]
@@ -329,7 +311,7 @@ def main():
     # Main report
     lines = []
     lines.append("# Model compatibility report\n")
-    lines.append(f"- **EP input (compatibility target):** `{meta['model_path']}`\n")
+    lines.append(f"- **Analyzed graph:** `{meta['model_path']}`\n")
     if op_dist_comparison:
         orig_path = (op_dist_comparison.get("meta") or {}).get("original_model", "")
         if orig_path:
@@ -353,7 +335,7 @@ def main():
 
     lines.append("## Operator Distribution with Compatibility Status\n\n")
     lines.append(
-        "_Counts and status below refer to the **EP input** graph only._\n\n"
+        "_Counts and status below refer to the **compiler input** graph only._\n\n"
         if op_dist_comparison
         else ""
     )
@@ -443,22 +425,13 @@ def main():
         lines.append(f"- {k}: " + ", ".join(f"`{x}`" for x in ops) + "\n")
     lines.append("\n")
 
-    lines.append("## Hip Ops Summary\n\n")
-    if step2_table:
-        for tl in step2_table:
-            lines.append(tl + "\n")
-    else:
-        lines.append("| Metric | Value |\n|---|---:|\n| Hip operator summary | — |\n")
-    lines.append("\n")
-
-    lines.append("## ONNX-HIP-RUNTIME Mapping\n\n")
-    lines.append("| ONNX Op | Domain | Hip Op | Runtime Func | Backend |\n")
-    lines.append("|---|---|---|---|---|\n")
+    lines.append("## ONNX to Hip mapping (observed in the conversion)\n\n")
+    lines.append("| ONNX Op | Domain | Hip Op | Instances | Status |\n")
+    lines.append("|---|---|---|---:|---|\n")
     for m in mapping_chain:
-        runtime = m.get("runtime_func") or "-"
-        backend = m.get("backend") or "Unknown"
         lines.append(
-            f"| {m.get('onnx_op', '')} | {m.get('domain', '')} | {m.get('hip_op', '')} | {runtime} | {backend} |\n"
+            f"| {m.get('onnx_op', '')} | {m.get('domain', '')} | {m.get('hip_op', '')} "
+            f"| {m.get('instances', 0)} | {status_display(m.get('status', ''))} |\n"
         )
     lines.append(
         "\nDetailed compatibility diagnostics are in model_compatibility_details.md\n"
@@ -471,7 +444,7 @@ def main():
     # Details report
     d = []
     d.append("# Model compatibility details\n\n")
-    d.append(f"- **EP input (compatibility target):** `{meta['model_path']}`\n")
+    d.append(f"- **Analyzed graph:** `{meta['model_path']}`\n")
     if op_dist_comparison:
         orig_path = (op_dist_comparison.get("meta") or {}).get("original_model", "")
         if orig_path:
@@ -523,7 +496,22 @@ def main():
             )
 
     d.append("\n## Data quality notes\n\n")
-    d.append("- None.\n")
+    notes = []
+    attr_path = analysis_dir / "attr_transfer.json"
+    if attr_path.is_file():
+        unpaired = (read_json(attr_path).get("unpaired_instances") or {}).items()
+        for key, count in sorted(unpaired):
+            # No converted op carries this op's location: it was folded into a
+            # neighbour, or CSE merged it away. Its attributes were not checked.
+            notes.append(
+                f"- `{key}`: {count} instance(s) had no location match after "
+                "conversion, so their attribute transfer was not verified.\n"
+            )
+    else:
+        notes.append(
+            "- Conversion was not probed, so operator support is unverified.\n"
+        )
+    d.extend(notes or ["- None.\n"])
 
     (analysis_dir / "model_compatibility_details.md").write_text(
         "".join(d), encoding="utf-8"
