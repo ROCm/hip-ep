@@ -6,15 +6,16 @@
 
   (define-syntax define-conversion-pattern
     (lambda (stx)
-      (syntax-case stx (:match :rewrite :with = : ->)
+      (syntax-case stx (:match :rewrite :with :where = : ->)
         
-        ;; Pattern: single operand, compute %ctx, then two operations
+        ;; Pattern with :where bindings after operations
         [(_ pattern-name
             :match (%result = op-name-str (%operand1) ((attr-name = !attr-val)) : (!type1) -> !output-type)
             :rewrite %root :with
-            (%v0 = expr0)
-            (%v1 = "hipsr.placeholder" (operands1 ...) ((attrs1 ...)) rest1 ...)
-            (%v2 = "hipsr.cast" (operands2 ...) ((attrs2 ...)) rest2 ...))
+            (%v1 = op1-name (operands1 ...) ((attrs1 ...)) rest1 ...)
+            (%v2 = op2-name (operands2 ...) ((attrs2 ...)) rest2 ...)
+            :where
+            [where-var where-expr] ...)
          
          (with-syntax ([mlir-op-name (datum->syntax #'pattern-name 'mlir-operation-name)]
                        [mlir-get-result (datum->syntax #'pattern-name 'mlir-operation-get-result)]
@@ -34,16 +35,14 @@
                             [!output-type (mlir-get-type %result)]
                             [!attr-val (mlir-get-attr op (symbol->string 'attr-name))])
                        (let ([%root %result])
-                         (let ([%v0 expr0])
-                           ;; "hipsr.placeholder" -> mlir-create-placeholder-op
-                           ;; Signature: (ctx input output-type placeholder-type-int)
+                         ;; :where bindings - pure Scheme computation
+                         (let ([where-var where-expr] ...)
+                           ;; Operations
                            (let ([%v1 (mlir-create-placeholder-op operands1 ... 0)])
-                             ;; "hipsr.cast" -> mlir-create-cast-op
-                             ;; Signature: (ctx input placeholder output-type)
                              (let ([%v2 (mlir-create-cast-op operands2 ...)])
                                %v2)))))))))]
         
-        ;; Pattern with two operands, two operations (for tests)
+        ;; Pattern with two operands, two operations (for tests - no :where)
         [(_ pattern-name
             :match (%result = op-name-str (%ctx %input) ((attr-name = !attr-val)) : (!type1) -> !output-type)
             :rewrite %root :with
