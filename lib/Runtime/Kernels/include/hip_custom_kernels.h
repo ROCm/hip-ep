@@ -883,6 +883,28 @@ HIP_KERNEL_API int hip_gqa_rope(
     int head_dim, int half_rot, int past_len,
     const void* seqlens_k, int element_size_bytes);
 
+/* RoPE the new K directly into the KV cache, and copy V alongside it, in ONE
+ * launch -- replacing hip_gqa_rope(K) + hip_gqa_kv_cache_append(K) +
+ * hip_gqa_kv_cache_append(V). Q is not covered: it is not cached, so it still
+ * takes hip_gqa_rope.
+ *
+ * k_src / v_src: BSHD [B, sq, G, d] new tokens.
+ * k_cache / v_cache: BNSD [B, G, present_seq, d], written at
+ *   [past_len .. past_len+sq) exactly as hip_gqa_kv_cache_append does.
+ * seqlens_k: as hip_gqa_rope / hip_gqa_kv_cache_append -- when non-null,
+ *   past_len is derived per batch from seqlens_k[b]+1-sq.
+ * element_size_bytes: 2 = fp16, 4 = fp32.
+ *
+ * Requires half_rot * 2 == d and returns -1 otherwise: the destination is the
+ * cache, so a partial rotation would leave [2*half_rot, d) holding whatever the
+ * cache had before rather than the unrotated tail. FP16/FP32 cache only; a
+ * quantized cache still goes through hip_gqa_kv_cache_append. */
+HIP_KERNEL_API int hip_gqa_rope_append_kv(
+    void* stream, const void* k_src, const void* v_src,
+    void* k_cache, void* v_cache, const void* cos_cache, const void* sin_cache,
+    int batch_size, int sq, int G, int d, int half_rot, int present_seq,
+    int past_len, const void* seqlens_k, int element_size_bytes);
+
 /* Transpose middle two dims of 4D tensor:
  * [B, dim1, dim2, D] -> [B, dim2, dim1, D]
  * element_size_bytes: 2 = fp16, 4 = fp32. */
@@ -3124,6 +3146,33 @@ HIP_KERNEL_API int hip_conv_transpose(
  */
 HIP_KERNEL_API int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
                        void* C, int M, int K, int N);
+
+/* Narrow-N fp16 GEMV for decode (M == 1): C[N] = A[K] * B[K,N], B row-major,
+ * no transpose. Built for the MoE router (K=2048, N=128), where a tiled GEMM
+ * library has neither M nor enough N to tile and retiles between context
+ * lengths for identical work.
+ *
+ * ONE dispatch. K is split across blocks for occupancy and the partials are
+ * reduced in-kernel by the last block to finish, so this replaces a GEMM that
+ * is frequently two dispatches (tiled kernel plus a GSU reduce).
+ *
+ * scratch must be at least hip_gemv_fp16_narrow_n_scratch_bytes(N, K) and
+ * ZEROED ONCE before first use -- the kernel leaves its completion counter at
+ * zero on exit, so later calls need no memset, but the first call would
+ * otherwise read whatever hipMalloc returned. N is capped at 256 (the
+ * cross-split reduction runs one thread per n in a single block); larger N
+ * returns -1 and the caller should use the general GEMM.
+ *
+ * The scratch may be reused by consecutive calls on the SAME stream without
+ * synchronisation -- each launch fully overwrites the partials it reads. */
+HIP_KERNEL_API int hip_gemv_fp16_narrow_n(void* stream, const void* A,
+                       const void* B, void* C, int N, int K,
+                       void* scratch, size_t scratch_bytes);
+
+/* Scratch size and split count hip_gemv_fp16_narrow_n will use for this shape.
+ * Exposed so the host can size its per-session buffer without guessing. */
+HIP_KERNEL_API size_t hip_gemv_fp16_narrow_n_scratch_bytes(int N, int K);
+HIP_KERNEL_API int hip_gemv_fp16_narrow_n_splits(int N, int K);
 
 #ifdef __cplusplus
 }

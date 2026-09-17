@@ -493,6 +493,40 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
                     (long long)transA, (long long)transB, (long long)elem_size,
                     type_name, (long long)(batch_count * M * N * elem_size));
 
+  // Narrow-N fp16 decode GEMV, in place of hipBLASLt. The MoE router lands
+  // here: M == 1, K = hidden, N = num_experts. hipBLASLt has neither an M nor
+  // enough N to tile, so it retiles between context lengths and the same 512 KB
+  // of work swings by a factor of two step to step.
+  //
+  // The guard is deliberately tighter than the kernel's own limits, because
+  // this intercepts an op every model in the tree runs:
+  //   - M == 1 and batch_count == 1: the decode shape, nothing else;
+  //   - fp16 only, no transpose: the kernel indexes B as [K, N] row-major;
+  //   - N <= 256: the cross-split reduction runs one thread per n in one block;
+  //   - K >= 512: below that hipBLASLt is not the bottleneck and the split-K
+  //     handshake is pure overhead.
+  // Anything outside falls through to the general path untouched.
+  if (hipdnn_ep_router_gemv_enabled() && M == 1 && batch_count == 1 &&
+      elem_size == 2 && !transA && !transB && N > 0 && N <= 256 && K >= 512) {
+    size_t need = hip_gemv_fp16_narrow_n_scratch_bytes(static_cast<int>(N),
+                                                       static_cast<int>(K));
+    if (need > 0 &&
+        hipdnn_ep_state_ensure_matmul_gemv_scratch(state, need) == 0) {
+      void *scratch = hipdnn_ep_state_get_matmul_gemv_scratch(state);
+      size_t have = need;
+      if (scratch &&
+          hip_gemv_fp16_narrow_n(stream, A, B, output, static_cast<int>(N),
+                                 static_cast<int>(K), scratch, have) == 0) {
+        return 0;
+      }
+    }
+    // Fall through to hipBLASLt on any failure: a launch error here must not
+    // fail the inference, only lose the optimization.
+    RUNTIME_DEBUG_LOG("[REAL] narrow-N gemv declined M=%lld N=%lld K=%lld; "
+                      "using hipBLASLt\n",
+                      (long long)M, (long long)N, (long long)K);
+  }
+
   MatmulState *ms = MatmulState::get_op_state(state, op_state_slot);
   if (!ms || !ms->table) {
     fprintf(stderr, "wrap_hipblasLtMatmul: missing op-state for slot %d\n",

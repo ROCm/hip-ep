@@ -459,25 +459,49 @@ static int gqa_forward_fused(
       vSrc = d_Vsplit;
     }
 
+    const int half_rot = static_cast<int>(d / 2);
+
+    // Fuse the K RoPE with both cache appends into one launch. Three dispatches
+    // per layer become one, and the roped K stops making a round trip through
+    // scratch. Conditions, all of which the unfused path handles and this one
+    // deliberately does not:
+    //   - the rotation must be full (half_rot*2 == d), because the destination
+    //     is the cache and a partial rotation would leave its tail stale;
+    //   - the cache must be fp16/fp32, since a quantized one writes through
+    //     kv_cache_append_quant_i8_kernel;
+    //   - the append must be the in-place kind. update_kv_cache takes the
+    //     separate-buffer concat when past and present differ and there is a
+    //     prefix to carry, and that path copies history this kernel never
+    //     touches. The predicate below mirrors its branch exactly.
+    // The workspace request is left alone: flag-on would need less of it, but
+    // varying the allocation between arms puts allocator behaviour inside the
+    // A/B, and the buffer is reused across layers anyway.
+    const bool fuse_rope_append =
+        hipdnn_ep_gqa_fuse_append_enabled() && need_rope &&
+        kv_format == KvCacheFormat::Fp16 && half_rot * 2 == static_cast<int>(d) &&
+        present_key != nullptr && present_value != nullptr &&
+        !(past_key && past_len > 0 && past_key != present_key);
+
     if (need_rope) {
       char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
       void *d_Qroped = ws + off_rope;
       void *d_Kroped = ws + off_rope + Q_full_bytes;
-      int half_rot = static_cast<int>(d / 2);
       if (hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
                        static_cast<int>(B), static_cast<int>(sq),
                        static_cast<int>(H), static_cast<int>(d), half_rot,
                        static_cast<int>(past_len), seqlens_k_ptr,
                        static_cast<int>(elem_sz)) != 0)
         return -1;
-      if (hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
-                       static_cast<int>(B), static_cast<int>(sq),
-                       static_cast<int>(G), static_cast<int>(d), half_rot,
-                       static_cast<int>(past_len), seqlens_k_ptr,
-                       static_cast<int>(elem_sz)) != 0)
-        return -1;
+      if (!fuse_rope_append) {
+        if (hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
+                         static_cast<int>(B), static_cast<int>(sq),
+                         static_cast<int>(G), static_cast<int>(d), half_rot,
+                         static_cast<int>(past_len), seqlens_k_ptr,
+                         static_cast<int>(elem_sz)) != 0)
+          return -1;
+        kSrc = d_Kroped; // V is never RoPE'd.
+      }
       qSrc = d_Qroped;
-      kSrc = d_Kroped; // V is never RoPE'd.
     }
 
     // Append the new token to the KV cache. Quantized cache:
@@ -492,14 +516,27 @@ static int gqa_forward_fused(
     // then rejects the call before it can reach the concat. When the cache is
     // instead in-place there is no prefix to copy and update_kv_cache appends.
     // So a bound here would be unreachable, and therefore untestable, code.
-    if (update_kv_cache(
-            stream, past_key, past_value, kSrc, vSrc, present_key,
-            present_value, static_cast<int>(B), static_cast<int>(past_len),
-            static_cast<int>(sq), static_cast<int>(G), static_cast<int>(d),
-            static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
-            seqlens_k_ptr, static_cast<int>(elem_sz), /*copy_lo=*/0,
-            /*no_causal=*/false, /*skv=*/-1, kv_format, k_scale, v_scale) != 0)
+    if (fuse_rope_append) {
+      // kSrc is deliberately still the UNroped K: the fused kernel rotates on
+      // the way in, which is the whole point of it.
+      if (hip_gqa_rope_append_kv(
+              stream, kSrc, vSrc, present_key, present_value, cos_cache,
+              sin_cache, static_cast<int>(B), static_cast<int>(sq),
+              static_cast<int>(G), static_cast<int>(d), half_rot,
+              static_cast<int>(present_seq), static_cast<int>(past_len),
+              seqlens_k_ptr, static_cast<int>(elem_sz)) != 0)
+        return -1;
+    } else if (update_kv_cache(
+                   stream, past_key, past_value, kSrc, vSrc, present_key,
+                   present_value, static_cast<int>(B),
+                   static_cast<int>(past_len), static_cast<int>(sq),
+                   static_cast<int>(G), static_cast<int>(d),
+                   static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
+                   seqlens_k_ptr, static_cast<int>(elem_sz), /*copy_lo=*/0,
+                   /*no_causal=*/false, /*skv=*/-1, kv_format, k_scale,
+                   v_scale) != 0) {
       return -1;
+    }
 
     {
       char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
@@ -891,6 +928,24 @@ static size_t gqa_score_budget_bytes() {
 // extra chunk, since a ragged n on one chunk is cheaper than a whole extra
 // pass.
 static constexpr int64_t kScoreChunkAlign = 128;
+
+// Chunk height for a windowed prefill, where chunking is worth doing for the
+// key narrowing rather than to fit a byte budget (see the window clause in
+// gqa_forward_hipblaslt).
+//
+// Measured, not assumed: gemma-4-12b at 2283 tokens with a 1024 window, TTFT
+// against an unchunked baseline of 2748 ms --
+//
+//   1024 rows  2663 ms   -3.1%
+//    512 rows  2516 ms   -8.4%
+//    256 rows  2441 ms  -11.2%   <-- here
+//    128 rows  2457 ms  -10.6%
+//
+// It is a peak rather than a plateau, and it sits either side of the trade:
+// a shorter chunk scores fewer keys per row but issues more passes and gives
+// the GEMMs a smaller n, so the two effects cross over around 2 x the align
+// quantum.
+static constexpr int64_t kWindowChunkRows = 2 * kScoreChunkAlign;
 
 // Env-var gate to force decode through the decomposed hipBLASLt pipeline
 // instead of the fused custom kernel hip_gqa_fused_decode. Default off
@@ -1767,10 +1822,18 @@ static int gqa_forward_hipblaslt(
   //
   // The softmax here reduces along total_seq, so each query row is independent
   // of every other. A block of rows can therefore be scored, biased, masked,
-  // softmaxed and multiplied by V to completion before the next block starts,
-  // and the result is identical -- this is a tiling of the same arithmetic, not
-  // an approximation, and it needs no running maximum or rescaling because
-  // every row sees its full key range within one chunk.
+  // softmaxed and multiplied by V to completion before the next block starts --
+  // this is a tiling of the same arithmetic, not an approximation, and it needs
+  // no running maximum or rescaling because every row sees its full key range
+  // within one chunk.
+  //
+  // Mathematically equivalent is not bitwise identical, though, and it is worth
+  // being precise about which one this is. Chunking changes the score GEMM's n
+  // from sq to sq_chunk, so hipBLASLt's heuristic can select a different kernel
+  // and a different tile accumulates in a different order. Measured on
+  // gemma-4-12b at 2283 tokens: the same build run twice is byte-identical, and
+  // chunked against unchunked agrees for ~45 greedy tokens before a near-tie
+  // flips. Treat a change here as a kernel retune, not as a no-op.
   //
   // Only the two score buffers shrink. Q, K, V and O are linear in sq and stay
   // whole, so Q is read and O is written through a per-chunk offset while their
@@ -1807,6 +1870,23 @@ static int gqa_forward_hipblaslt(
       sq_chunk = rows;
     }
   }
+
+  // A windowed op benefits from chunking for a reason the byte budget cannot
+  // see. The per-chunk key bound below is keyed off q0, so it narrows nothing
+  // on a single chunk: an unchunked windowed prefill scores the whole key
+  // range and throws the window away. At 2283 tokens the score pair is ~500 MB,
+  // far under the 1 GiB budget, so that is exactly what happens today.
+  //
+  // Chunk on the window instead, independently of size. The gate is the same
+  // one the narrowing itself needs (chunk_narrow_ok), plus a check that there
+  // is more to drop than the chunk already covers -- below that the extra
+  // passes cost more than the keys they save.
+  if (sq > 1 && !use_no_expand && local_window_size > 0 && chunk_narrow_ok &&
+      total_seq > local_window_size + kWindowChunkRows &&
+      sq_chunk > kWindowChunkRows) {
+    sq_chunk = kWindowChunkRows;
+  }
+
   const bool chunked = (sq_chunk < sq);
 
   //===--------------------------------------------------------------------===//
