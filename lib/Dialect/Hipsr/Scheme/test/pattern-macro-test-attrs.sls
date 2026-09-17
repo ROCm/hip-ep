@@ -1,6 +1,6 @@
 #!r6rs
 
-(library (test pattern-macro-test)
+(library (test pattern-macro-test-attrs)
   (export run-tests)
   (import (rnrs (6))
           (test test-framework)
@@ -10,10 +10,9 @@
   (define mlir-operation-name ffi:mlir-operation-name)
   (define mlir-operation-get-operand (lambda (op idx) idx))
   (define mlir-operation-get-result (lambda (op idx) 999))
-  (define mlir-value-get-type (lambda (val) 'f32))
-  (define mlir-operation-get-attr (lambda (op name) 'f16))
+  (define mlir-value-get-type (lambda (val) 'mock-type))
+  (define mlir-operation-get-attr (lambda (op name) 'mock-attr-value))
   (define mlir-create-operation (lambda (name operands attrs) (list 'op name operands attrs)))
-  (define mlir-tensor-attach-address-space ffi:mlir-tensor-attach-address-space)
   
   (define-conversion-pattern cast-pattern
     :match 
@@ -21,24 +20,25 @@
     :rewrite 
     (begin
       (%0 = "hipsr.placeholder" (%ctx %input)
-            ((placeholder_type = "#hipsr.placeholder_type<normal>")) 
+            ((placeholder_type = "attr-value")) 
             : types -> result)
       (%1 = "hipsr.cast" (%ctx %input %0) 
-            ((result_type = (mlir-tensor-attach-address-space !output-type)))
+            ((cast_attr = !to_type))
             : types -> result)
       %1))
   
   (define (run-tests)
-    (test-begin "define-conversion-pattern")
+    (test-begin "define-conversion-pattern-attrs")
     
     (test-assert "cast-pattern is a procedure"
       (procedure? cast-pattern))
     
-    (test-assert "cast-pattern matches onnx.Cast"
+    (test-assert "attrs are transformed to pairs"
       (let ([result (cast-pattern 2 'operands-ref 'rewriter 'type-converter)])
         (and (list? result)
              (eq? (car result) 'op)
-             (equal? (cadr result) "hipsr.cast"))))
+             (list? (cadddr result))
+             (pair? (car (cadddr result))))))
     
     (test-end)))
 
