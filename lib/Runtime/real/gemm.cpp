@@ -48,10 +48,15 @@ static int ckDtypeForTypeCode(int64_t typeCode) {
 struct GemmCacheKey {
   int64_t M, N, K, transA, transB, typeCode;
   bool bias_epilogue; // distinct algo for the fused-bias-epilogue problem
+  // CK eligibility also turns on alpha and on a C the epilogue cannot fuse,
+  // neither of which is a geometry field. Keying on the verdict stops an
+  // ineligible call from reusing an entry probed for an eligible one, which
+  // would silently drop that alpha or that C.
+  bool ck_eligible;
   bool operator==(const GemmCacheKey &o) const {
     return M == o.M && N == o.N && K == o.K && transA == o.transA &&
            transB == o.transB && typeCode == o.typeCode &&
-           bias_epilogue == o.bias_epilogue;
+           bias_epilogue == o.bias_epilogue && ck_eligible == o.ck_eligible;
   }
 };
 
@@ -64,6 +69,7 @@ struct GemmCacheKeyHash {
     h ^= std::hash<int64_t>{}(k.transB) + 0x9e3779b9 + (h << 6) + (h >> 2);
     h ^= std::hash<int64_t>{}(k.typeCode) + 0x9e3779b9 + (h << 6) + (h >> 2);
     h ^= std::hash<bool>{}(k.bias_epilogue) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    h ^= std::hash<bool>{}(k.ck_eligible) + 0x9e3779b9 + (h << 6) + (h >> 2);
     return h;
   }
 };
@@ -487,7 +493,17 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
   const int64_t hblA_ld = transB ? K : N;
   const int64_t hblB_ld = transA ? M : K;
 
-  GemmCacheKey key{M, N, K, transA, transB, typeCode, use_bias_epilogue};
+  // CK eligibility mirrors the tuned f16 instances: no alpha, ONNX transA==0,
+  // and the A-side transpose (ONNX transB) only together with a bias. `!C ||
+  // use_bias_epilogue` also keeps `output` free of a pre-seeded beta*C, which
+  // ckSelectGemmInstance relies on when it times into `output`.
+  const bool ck_eligible = typeCode == kTypeFloat16 && alpha == 1.0f &&
+                           transA == 0 && (!C || use_bias_epilogue) &&
+                           (transB == 0 || use_bias_epilogue);
+  const void *ck_bias = use_bias_epilogue ? C : nullptr;
+
+  GemmCacheKey key{
+      M, N, K, transA, transB, typeCode, use_bias_epilogue, ck_eligible};
   GemmCacheEntry cached{};
   bool have_cached = false;
   {
@@ -498,15 +514,6 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
       have_cached = true;
     }
   }
-
-  // CK eligibility mirrors the tuned f16 instances: no alpha, ONNX transA==0,
-  // and the A-side transpose (ONNX transB) only together with a bias. `!C ||
-  // use_bias_epilogue` also keeps `output` free of a pre-seeded beta*C, which
-  // ckSelectGemmInstance relies on when it times into `output`.
-  const bool ck_eligible = typeCode == kTypeFloat16 && alpha == 1.0f &&
-                           transA == 0 && (!C || use_bias_epilogue) &&
-                           (transB == 0 || use_bias_epilogue);
-  const void *ck_bias = use_bias_epilogue ? C : nullptr;
 
   // Resolve once per shape: try the CK instances when eligible, else mark the
   // entry for the reference fallback (ck_instance == -1). Cached either way so
