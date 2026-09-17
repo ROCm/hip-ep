@@ -1,5 +1,5 @@
 #!/bin/bash
-# Compile ONLY top-level passes as standalone with whole-library
+# Compile top-level passes as standalone libraries with all dependencies bundled
 
 set -e
 
@@ -7,7 +7,7 @@ SCHEME_COMPILER=$1
 SOURCE_DIR=$2
 BUILD_DIR=$3
 
-echo "Compiling top-level passes (standalone, all dependencies bundled)..."
+echo "Compiling standalone passes (all dependencies bundled)..."
 echo "Compiler: $SCHEME_COMPILER"
 echo "Source: $SOURCE_DIR"
 echo "Output: $BUILD_DIR"
@@ -17,24 +17,25 @@ mkdir -p "$BUILD_DIR/passes"
 LIBRARY_DIR="$SOURCE_DIR/libraries"
 RIME_DIR="$SOURCE_DIR/../../../../third_party/rime"
 
+# CRITICAL: Everything must run in ONE Scheme session
 $SCHEME_COMPILER <<EOF
 (generate-wpo-files #t)
 (compile-imported-libraries #t)
 (library-directories (list "$LIBRARY_DIR" "$BUILD_DIR" "$RIME_DIR"))
 
-; Compile top-level passes to generate WPO files
+; Step 1: Compile top-level passes to generate WPO files
 (compile-library "$LIBRARY_DIR/passes/onnx-to-hipsr.sls" "$BUILD_DIR/passes/onnx-to-hipsr-temp.so")
 (compile-library "$LIBRARY_DIR/passes/print.sls" "$BUILD_DIR/passes/print-temp.so")
 
-; Import to load all dependencies
+; Step 2: Import to compile all dependencies (with WPO files)
 (import (passes onnx-to-hipsr))
 (import (passes print))
 
-; Create standalone versions (ALL dependencies bundled)
+; Step 3: Bundle everything into standalone .so files
 (compile-whole-library "$BUILD_DIR/passes/onnx-to-hipsr-temp.wpo" "$BUILD_DIR/passes/onnx-to-hipsr.so")
 (compile-whole-library "$BUILD_DIR/passes/print-temp.wpo" "$BUILD_DIR/passes/print.so")
 
-; Clean up ALL intermediate files
+; Step 4: Clean up intermediate files
 (for-each (lambda (f) (when (file-exists? f) (delete-file f)))
   (list "$BUILD_DIR/passes/onnx-to-hipsr-temp.so"
         "$BUILD_DIR/passes/onnx-to-hipsr-temp.wpo"
