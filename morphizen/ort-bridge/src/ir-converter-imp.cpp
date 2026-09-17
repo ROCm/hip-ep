@@ -5,14 +5,18 @@
 #define MORPHIZEN_USER 1
 #include "./ir-converter-imp.hpp"
 #include "./ort-graph-wrapper.hpp"
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <glog/logging.h>
 #include <limits>
 #include <morphizen-utils/morphizen-utils.hpp>
+#include <morphizen/cache_identity.hpp>
 #include <morphizen/graph.hpp>
 #include <morphizen/morphizen-ort-api-ext.hpp>
 #include <morphizen/node_attr.hpp>
+#include <morphizen/symbolic_dims.hpp>
+#include <morphizen/util.hpp>
 #include <unordered_set>
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_IR_CONVERTER, "0")
 DEF_ENV_PARAM_2(MORPHIZEN_DEBUG_IR_CONVERTER_OUTPUT_FILE,
@@ -56,27 +60,41 @@ OrtStatus *IRConverterImp::convert_to_model(morphizen::Model &model) const {
   auto &main_graph = MORPHIZEN_ORT_API(model_main_graph)(model);
 
   throw_if_error(convert_metadata(main_graph, model));
+  if (MORPHIZEN_ORT_API(model_has_meta_data)(
+          model, std::string(kOnnxDimParamsMetadataKey)) ||
+      MORPHIZEN_ORT_API(model_has_meta_data)(
+          model, std::string(kInitializerDataDigestMetadataKey)) ||
+      MORPHIZEN_ORT_API(model_has_meta_data)(
+          model, std::string(kCompilerGraphDigestMetadataKey))) {
+    return ort_api.CreateStatus(ORT_INVALID_ARGUMENT,
+                                "input model uses a reserved compiler metadata "
+                                "key");
+  }
   throw_if_error(convert_graph(main_graph));
   // Top-level graph drives its own resolve(true); sub graphs are
   // resolved by the backend when graph_add_node consumes their
   // attr_proto_new_graph attribute.
   morphizen_cxx::GraphRef(main_graph).resolve(true);
 
-  // Serialize dim_params as model metadata for the level-1 pass.
-  // Format: "name1:p0,p1;name2:p0,p1,p2;..." (parsed by parse_dim_params_map)
-  if (!dim_params_map_.empty()) {
-    std::string encoded;
-    for (const auto &[name, params] : dim_params_map_) {
-      if (!encoded.empty())
-        encoded += ';';
-      encoded += name + ':';
-      for (size_t i = 0; i < params.size(); ++i) {
-        if (i > 0)
-          encoded += ',';
-        encoded += params[i];
-      }
+  // Preserve authoritative ONNX dimension-variable identity for compiler
+  // shape reasoning. The encoder sorts records and validates a deterministic,
+  // delimiter-safe representation. Empty maps have a canonical encoding so
+  // cache salting is stable for models without symbolic dimensions.
+  try {
+    std::vector<SymbolicDimRecord> records;
+    records.reserve(dim_params_map_.size());
+    for (const auto &[name, params] : dim_params_map_)
+      records.push_back({"main_graph", name, params});
+    MORPHIZEN_ORT_API(model_set_meta_data)
+    (model, std::string(kOnnxDimParamsMetadataKey),
+     encode_symbolic_dim_records(std::move(records)));
+    if (config_.hash_initializer_data) {
+      MORPHIZEN_ORT_API(model_set_meta_data)
+      (model, std::string(kInitializerDataDigestMetadataKey),
+       compute_graph_initializer_digest(main_graph));
     }
-    MORPHIZEN_ORT_API(model_set_meta_data)(model, "dim_params_map", encoded);
+  } catch (const std::exception &error) {
+    return ort_api.CreateStatus(ORT_INVALID_ARGUMENT, error.what());
   }
 
   // Save converted model to file for debugging if enabled
@@ -275,8 +293,6 @@ IRConverterImp::convert_graph_initializers(morphizen::Graph &graph) const {
   std::filesystem::path model_path = api_model_path
                                          ? std::filesystem::path(api_model_path)
                                          : std::filesystem::path();
-  std::filesystem::path model_dir =
-      model_path.has_parent_path() ? model_path.parent_path() : model_path;
 
   // Get initializers from the ORT graph
   auto initializers = graph_.initializers();
@@ -310,7 +326,7 @@ IRConverterImp::convert_graph_initializers(morphizen::Graph &graph) const {
       // directory to get an absolute path the runtime can fopen without
       // needing to know the model location.
       std::filesystem::path abs_path =
-          rel_path.is_absolute() ? rel_path : (model_dir / rel_path);
+          normalize_external_initializer_path(model_path, rel_path);
       std::string abs_path_str = abs_path.u8string();
       int64_t file_offset = ext_info.GetFileOffset();
       size_t byte_size = ext_info.GetByteSize();
@@ -447,9 +463,6 @@ IRConverterImp::convert_value_info_proto(const Ort::ConstValueInfo &value_info,
   }
 
   // Collect ONNX symbolic dimension names (dim_param) for each tensor.
-  // Data flow: ORT GetSymbolicDimensions → dim_params_map_ → model metadata
-  // "dim_params_map" → level-1 pass builds DimSource entries → custom op
-  // resolves dynamic output shapes at runtime from input tensor shapes.
   auto onnx_type = type_info.GetONNXType();
   if (onnx_type == ONNX_TYPE_TENSOR) {
     auto tensor_info = type_info.GetTensorTypeAndShapeInfo();

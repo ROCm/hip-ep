@@ -201,6 +201,8 @@ public:
   ContextProto context_proto;
   const ConfigProto config_; // Runtime-only INPUT (never serialized, immutable)
   bool is_ep_context_model = false;
+  bool cache_key_finalized = false;
+  bool initializer_digest_finalized = false;
   std::filesystem::path model_path;
   std::unique_ptr<morphizen_cxx::Model> ep_context_model_;
   std::chrono::time_point<std::chrono::steady_clock> start_ =
@@ -374,6 +376,8 @@ private:
       const std::vector<std::unique_ptr<morphizen::ExecutionProvider>> &eps,
       const char *const *keys, const char *const *values, size_t kv_len);
   friend bool check_cache_hit(PassContextImp &context);
+  friend void compile_onnx_model_2(std::shared_ptr<PassContextImp> context,
+                                   const Graph &onnx_graph);
   std::map<std::string, std::string> ep_dynamic_options;
   mutable std::mutex ep_dynamic_options_lock;
   // for share context, many context may be same. may need to change container

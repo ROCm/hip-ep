@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include <filesystem>
 #include <map>
@@ -50,6 +51,10 @@ public:
   bool has_metadata_prop(const std::string &key) const;
 
   mlir::ModuleOp getModule() const;
+
+  /// Build the compiler-facing structured symbolic-dimension attribute from
+  /// authoritative model metadata. Returns null when metadata is absent.
+  mlir::ArrayAttr get_symbolic_dim_attr() const;
 
   std::string serialize_as_string() const;
 

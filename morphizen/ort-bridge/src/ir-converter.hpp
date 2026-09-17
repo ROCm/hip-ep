@@ -19,6 +19,9 @@ struct IRConverterConfig {
   // external data mechanism (mirrors ORT kSmallTensorExternalDataThreshold).
   // Set to SIZE_MAX to disable the optimisation entirely.
   size_t external_data_threshold = 127;
+  // Persistent/prebuilt artifacts embed initializer bytes. Bind those bytes
+  // into cache identity only for paths that can reuse such an artifact.
+  bool hash_initializer_data = false;
 };
 
 class IRConverter {
