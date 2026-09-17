@@ -22,6 +22,8 @@
 #include "mlir/Dialect/Shape/Transforms/Passes.h"
 #include "mlir/Pass/PassRegistry.h"
 
+#include "compilation_options_generated.h"
+
 // --hipsr-pipeline is equivalent to running these in order:
 //   --hipsr-add-context-arg
 //   --convert-onnx-to-hipsr
@@ -46,7 +48,10 @@
 //   --lower-affine
 //   --convert-scf-to-cf
 //   --reconcile-unrealized-casts
+//   --hipsr-record-graph-io
 //   --convert-to-llvm
+//   --hipsr-main-graph-abi
+//   --generate-interface
 void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
                                      const HipsrPipelineOptions & /*options*/) {
   pm.addPass(createAddContextArgPass());
@@ -98,7 +103,16 @@ void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
   pm.addPass(createSCFToControlFlowPass());
   // Drop leftover unrealized_conversion_cast from earlier conversions.
   pm.addPass(createReconcileUnrealizedCastsPass());
+
+  // Save the ranked memref shapes before LLVM expands the graph signature.
+  pm.addPass(createRecordGraphIOMetadataPass());
   pm.addPass(createConvertToLLVMPass());
+
+  // Wrap the expanded graph in the fixed ABI used by inference_compute.
+  pm.addPass(createMainGraphAbiPass());
+
+  mlir::hip::CompilationOptionsT compOpts;
+  pm.addPass(hip::createGenerateInterfacePass(compOpts));
 }
 
 void mlir::hipsr::registerHipsrPipelines() {
