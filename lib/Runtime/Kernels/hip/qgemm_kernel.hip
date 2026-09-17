@@ -730,6 +730,16 @@ template <int kPlanes> struct QGemmMicroTile {
   int32_t col_b[kThreadN];
 };
 
+// The staged tiles live here rather than in the reduction, which is
+// instantiated once per staging specialization: a __shared__ array declared
+// inside it would be allocated once per instantiation even though only one
+// runs, multiplying the block's LDS footprint and eventually costing
+// occupancy.
+template <int kPlanes> struct __align__(16) QGemmTileLds {
+  QGemmSlab a[kPlanes][kTileQuads][kTileM];
+  QGemmSlab b[kTileQuads][kTileN];
+};
+
 // A split 16-bit A recombines as hi*256 + lo; a single plane is the value.
 template <int kPlanes>
 __device__ inline int64_t qgemm_combine(const int32_t (&planes)[kPlanes]) {
@@ -754,14 +764,24 @@ __device__ inline void qgemm_micro_tile_origin(int tid, int &thread_m,
 // so a slice needs no tail handling; it only has to start on a kTileK boundary
 // to keep the staging maps aligned.
 //
-// trans_a / trans_b and b_bits stay runtime flags: they only pick an index
-// during staging, which is block-uniform and off the dot4 inner loop.
-template <typename TA, typename TB>
+// trans_a / trans_b and b_bits only pick an index during staging and are
+// uniform for the whole launch, but left as runtime values they put a branch
+// and a fresh 64-bit address computation on every staged element -- inside the
+// k range loop, where they dominate the issue budget. Resolving them as
+// template parameters folds the indexing to constants and lifts the branches
+// out of the loop entirely. A negative kTransA / kTransB, or a zero kBBits,
+// keeps that value dynamic, so one body still serves the combinations that do
+// not earn an instantiation.
+template <typename TA, typename TB, int kTransA, int kTransB, int kBBits>
 __device__ QGemmMicroTile<QGemmAPlanes<TA>::kCount> qgemm_accumulate_k_range(
     const TA *__restrict__ A, const uint8_t *__restrict__ B, int64_t M,
     int64_t N, int64_t K, int64_t m_base, int64_t n_base, int64_t k_begin,
-    int64_t k_end, int b_bits, bool need_row_a, bool need_col_b, bool trans_a,
-    bool trans_b) {
+    int64_t k_end, QGemmTileLds<QGemmAPlanes<TA>::kCount> &lds, int dyn_b_bits,
+    bool need_row_a, bool need_col_b, bool dyn_trans_a, bool dyn_trans_b) {
+  const bool trans_a = kTransA < 0 ? dyn_trans_a : static_cast<bool>(kTransA);
+  const bool trans_b = kTransB < 0 ? dyn_trans_b : static_cast<bool>(kTransB);
+  const int b_bits = kBBits == 0 ? dyn_b_bits : kBBits;
+
   constexpr bool kAWide = QGemmAPlanes<TA>::kWide;
   constexpr int kAPlanes = QGemmAPlanes<TA>::kCount;
   constexpr bool kASigned = QGemmTraits<TA>::kSigned;
@@ -774,8 +794,8 @@ __device__ QGemmMicroTile<QGemmAPlanes<TA>::kCount> qgemm_accumulate_k_range(
   static_assert(kTileK % kBStageRows == 0,
                 "the [K, N] staging map covers every byte lane exactly once");
 
-  __shared__ __align__(16) QGemmSlab a_lds[kAPlanes][kTileQuads][kTileM];
-  __shared__ __align__(16) QGemmSlab b_lds[kTileQuads][kTileN];
+  auto &a_lds = lds.a;
+  auto &b_lds = lds.b;
 
   const int tid = threadIdx.x;
   int thread_m, thread_n;
@@ -902,6 +922,32 @@ __device__ QGemmMicroTile<QGemmAPlanes<TA>::kCount> qgemm_accumulate_k_range(
   return out;
 }
 
+// Picks the staging specialization once per block instead of re-testing the
+// flags per staged element. Only the layout the quantized weights actually ship
+// in ([N, K] with 4- or 8-bit values) earns its own body; every other
+// combination shares the fully dynamic one.
+template <typename TA, typename TB>
+__device__ inline QGemmMicroTile<QGemmAPlanes<TA>::kCount>
+qgemm_accumulate_k_range_dispatch(
+    const TA *__restrict__ A, const uint8_t *__restrict__ B, int64_t M,
+    int64_t N, int64_t K, int64_t m_base, int64_t n_base, int64_t k_begin,
+    int64_t k_end, QGemmTileLds<QGemmAPlanes<TA>::kCount> &lds, int b_bits,
+    bool need_row_a, bool need_col_b, bool trans_a, bool trans_b) {
+  if (!trans_a && trans_b) {
+    if (b_bits == 4)
+      return qgemm_accumulate_k_range<TA, TB, 0, 1, 4>(
+          A, B, M, N, K, m_base, n_base, k_begin, k_end, lds, b_bits,
+          need_row_a, need_col_b, trans_a, trans_b);
+    if (b_bits == 8)
+      return qgemm_accumulate_k_range<TA, TB, 0, 1, 8>(
+          A, B, M, N, K, m_base, n_base, k_begin, k_end, lds, b_bits,
+          need_row_a, need_col_b, trans_a, trans_b);
+  }
+  return qgemm_accumulate_k_range<TA, TB, -1, -1, 0>(
+      A, B, M, N, K, m_base, n_base, k_begin, k_end, lds, b_bits, need_row_a,
+      need_col_b, trans_a, trans_b);
+}
+
 // Y[m, n] = requantize(sum_k A[m, k] * B[k, n])
 //
 // Grid: (ceil(N/kTileN), ceil(M/kTileM)). One block owns a whole output tile
@@ -914,8 +960,10 @@ __global__ __launch_bounds__(kTiledBlock) void qgemm_tiled_kernel(
   const int64_t m_base = static_cast<int64_t>(blockIdx.y) * kTileM;
   const int64_t n_base = static_cast<int64_t>(blockIdx.x) * kTileN;
 
-  const auto mt = qgemm_accumulate_k_range<TA, TB>(
-      A, B, M, N, K, m_base, n_base, 0, K, b_bits, need_row_a, need_col_b,
+  __shared__ QGemmTileLds<QGemmAPlanes<TA>::kCount> lds;
+
+  const auto mt = qgemm_accumulate_k_range_dispatch<TA, TB>(
+      A, B, M, N, K, m_base, n_base, 0, K, lds, b_bits, need_row_a, need_col_b,
       trans_a, trans_b);
 
   int thread_m, thread_n;
@@ -975,8 +1023,10 @@ __global__ __launch_bounds__(kTiledBlock) void qgemm_splitk_partial_kernel(
   const bool add_row_a = need_row_a && blockIdx.x == 0;
   const bool add_col_b = need_col_b && blockIdx.y == 0;
 
-  const auto mt = qgemm_accumulate_k_range<TA, TB>(
-      A, B, M, N, K, m_base, n_base, k_begin, k_end, b_bits, add_row_a,
+  __shared__ QGemmTileLds<QGemmAPlanes<TA>::kCount> lds;
+
+  const auto mt = qgemm_accumulate_k_range_dispatch<TA, TB>(
+      A, B, M, N, K, m_base, n_base, k_begin, k_end, lds, b_bits, add_row_a,
       add_col_b, trans_a, trans_b);
 
   int thread_m, thread_n;
