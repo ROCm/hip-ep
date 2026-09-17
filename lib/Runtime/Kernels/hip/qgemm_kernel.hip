@@ -1708,14 +1708,41 @@ bool qgemm_gemv_nk_ok(const QGemmArgs &g) {
          (g.K % align) == 0 && g.K / align >= kGemvNkLanes;
 }
 
+int qgemm_gemv_nk_target_blocks_per_cu() {
+  static const int target = [] {
+    std::string raw;
+#ifdef _WIN32
+    char *value = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&value, &len,
+                  "HIPDNN_QGEMM_GEMV_NK_TARGET_BLOCKS_PER_CU") == 0 &&
+        value) {
+      raw = value;
+      free(value);
+    }
+#else
+    if (const char *value =
+            getenv("HIPDNN_QGEMM_GEMV_NK_TARGET_BLOCKS_PER_CU"))
+      raw = value;
+#endif
+    const int parsed =
+        raw.empty() ? kGemvTargetBlocksPerCU : std::atoi(raw.c_str());
+    return parsed >= 0 && parsed <= 4 ? parsed : kGemvTargetBlocksPerCU;
+  }();
+  return target;
+}
+
 // Column groups are the only other source of blocks here, so a narrow N still
 // needs K split across the grid. Unlike the [K, N] path there is no in-block
 // slice count competing for the same K, so the cap is one whole wave step per
 // slice.
-int qgemm_gemv_nk_grid_splits(const QGemmArgs &g, int64_t step) {
-  const int64_t groups = (g.N + kGemvNkGroup - 1) / kGemvNkGroup;
+int qgemm_gemv_nk_grid_splits(const QGemmArgs &g, int64_t step, int group) {
+  const int target_blocks_per_cu = qgemm_gemv_nk_target_blocks_per_cu();
+  if (target_blocks_per_cu == 0)
+    return 1;
+  const int64_t groups = (g.N + group - 1) / group;
   const int64_t target =
-      static_cast<int64_t>(qgemm_device_cu_count()) * kGemvTargetBlocksPerCU;
+      static_cast<int64_t>(qgemm_device_cu_count()) * target_blocks_per_cu;
   if (groups >= target)
     return 1;
   if (!g.workspace || g.workspace_bytes < qgemm_gemv_scratch_bytes(g.N))
@@ -1733,11 +1760,13 @@ int qgemm_gemv_nk_grid_splits(const QGemmArgs &g, int64_t step) {
   return want > 1 ? static_cast<int>(want) : 1;
 }
 
-template <typename TA, typename TB, typename TY>
-int qgemm_gemv_nk_launch(const QGemmArgs &g, const QGemmRequant &requant,
-                         bool need_row_a, bool need_col_b) {
+template <typename TA, typename TB, typename TY, int kCols, int kWaves>
+int qgemm_gemv_nk_launch_config(const QGemmArgs &g,
+                                const QGemmRequant &requant,
+                                bool need_row_a, bool need_col_b) {
+  constexpr int kGroup = kCols * kWaves;
   const int64_t step = 32 / g.b_bits; // logical elements per dword
-  const int splits = qgemm_gemv_nk_grid_splits(g, step);
+  const int splits = qgemm_gemv_nk_grid_splits(g, step, kGroup);
   auto *partial = splits > 1 ? static_cast<int64_t *>(g.workspace) : nullptr;
 
   (void)hipGetLastError();
@@ -1760,12 +1789,11 @@ int qgemm_gemv_nk_launch(const QGemmArgs &g, const QGemmRequant &requant,
   }
 
   const dim3 grid(
-      static_cast<unsigned>((g.N + kGemvNkGroup - 1) / kGemvNkGroup),
+      static_cast<unsigned>((g.N + kGroup - 1) / kGroup),
       static_cast<unsigned>(splits));
   hipLaunchKernelGGL(
-      HIP_KERNEL_NAME(
-          qgemm_gemv_nk_kernel<TA, TB, TY, kGemvNkCols, kGemvNkWaves>),
-      grid, dim3(kGemvNkLanes, kGemvNkWaves), 0, g.stream,
+      HIP_KERNEL_NAME(qgemm_gemv_nk_kernel<TA, TB, TY, kCols, kWaves>),
+      grid, dim3(kGemvNkLanes, kWaves), 0, g.stream,
       static_cast<const TA *>(g.A), g.B, static_cast<TY *>(g.Y), partial, g.N,
       g.K, grid_chunk, requant, g.b_bits, need_row_a, need_col_b);
   const hipError_t launched = hipGetLastError();
@@ -1779,6 +1807,56 @@ int qgemm_gemv_nk_launch(const QGemmArgs &g, const QGemmRequant &requant,
       dim3(kGemvReduceBlock), 0, g.stream, partial, static_cast<TY *>(g.Y), g.N,
       requant);
   return static_cast<int>(hipGetLastError());
+}
+
+int qgemm_gemv_nk_config_override() {
+  static const int config = [] {
+    std::string raw;
+#ifdef _WIN32
+    char *value = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&value, &len, "HIPDNN_QGEMM_GEMV_NK_CONFIG") == 0 &&
+        value) {
+      raw = value;
+      free(value);
+    }
+#else
+    if (const char *value = getenv("HIPDNN_QGEMM_GEMV_NK_CONFIG"))
+      raw = value;
+#endif
+    const int parsed = raw.empty() ? 0 : std::atoi(raw.c_str());
+    return parsed == 44 || parsed == 24 || parsed == 48 ? parsed : 0;
+  }();
+  return config;
+}
+
+template <typename TA, typename TB, typename TY>
+int qgemm_gemv_nk_launch(const QGemmArgs &g, const QGemmRequant &requant,
+                         bool need_row_a, bool need_col_b) {
+  constexpr bool kCanTuneNk =
+      std::is_same_v<TA, uint16_t> && std::is_same_v<TB, int8_t> &&
+      std::is_same_v<TY, uint16_t>;
+  if constexpr (kCanTuneNk) {
+    int config = qgemm_gemv_nk_config_override();
+    if (config == 0 && qgemm_device_cu_count() == 20) {
+      if (g.N == 1024)
+        config = 48;
+      else if (g.N == 8192)
+        config = 24;
+    }
+    switch (config) {
+    case 24:
+      return qgemm_gemv_nk_launch_config<TA, TB, TY, 2, 4>(
+          g, requant, need_row_a, need_col_b);
+    case 48:
+      return qgemm_gemv_nk_launch_config<TA, TB, TY, 4, 8>(
+          g, requant, need_row_a, need_col_b);
+    default:
+      break;
+    }
+  }
+  return qgemm_gemv_nk_launch_config<TA, TB, TY, kGemvNkCols, kGemvNkWaves>(
+      g, requant, need_row_a, need_col_b);
 }
 
 template <typename TA, typename TB, typename TY>
@@ -1829,6 +1907,28 @@ bool qgemm_gemv_autotune_enabled() {
     return !(raw == "0" || raw == "off" || raw == "OFF");
   }();
   return enabled;
+}
+
+int qgemm_gemv_config_override() {
+  static const int config = [] {
+    std::string raw;
+#ifdef _WIN32
+    char *value = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&value, &len, "HIPDNN_QGEMM_GEMV_CONFIG") == 0 && value) {
+      raw = value;
+      free(value);
+    }
+#else
+    if (const char *value = getenv("HIPDNN_QGEMM_GEMV_CONFIG"))
+      raw = value;
+#endif
+    if (raw.empty())
+      return -1;
+    const int parsed = std::atoi(raw.c_str());
+    return parsed >= 0 && parsed < kNumQGemmGemvConfigs ? parsed : -1;
+  }();
+  return config;
 }
 
 // Distinct per element type: the candidates differ in either width or
@@ -1920,6 +2020,18 @@ std::mutex g_qgemm_gemv_cache_mutex;
 template <typename TA, typename TB, typename TY>
 int qgemm_gemv_config(const QGemmArgs &g, const QGemmRequant &requant,
                       bool need_row_a, bool need_col_b) {
+  if (const int forced = qgemm_gemv_config_override(); forced >= 0)
+    return forced;
+  constexpr bool kPsuDecodeTypes =
+      std::is_same_v<TA, uint16_t> && std::is_same_v<TB, int8_t> &&
+      std::is_same_v<TY, uint16_t>;
+  if constexpr (kPsuDecodeTypes) {
+    // The LoRA-B GEMVs have only one 32-element K slice. Launching the generic
+    // 32-slice block wastes almost all of its waves; the single-slice geometry
+    // is the deterministic winner for every PSU output width on gfx1151.
+    if (g.K <= 32 && qgemm_device_cu_count() == 20)
+      return kQGemmGemvSafeConfig;
+  }
   if (!qgemm_gemv_autotune_enabled())
     return kQGemmGemvDefaultConfig;
 
