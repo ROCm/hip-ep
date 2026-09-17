@@ -109,4 +109,4 @@
 
     (mlir-log-info "Completed Pure Scheme MLIR Pass")))
 
-) ;; end library (printpass)
+) ;; end library (passes print)
