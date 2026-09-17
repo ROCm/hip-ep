@@ -1523,15 +1523,17 @@ static bool matchTosaPad(hip::PadOp op, SmallVectorImpl<int64_t> &interleaved) {
     return false;
 
   // Without `axes` the pads cover every dimension in order; with it they cover
-  // only the listed ones and the rest stay unpadded.
+  // only the listed ones and the rest stay unpadded. An `axes` that is present
+  // but empty means every dimension as well, not none: wrap_pad selects the
+  // per-axis layout on axes_host.empty(), and it fills axes_host only when the
+  // operand is both present and non-empty, so an absent operand and a
+  // zero-length one arrive there alike.
   SmallVector<int64_t, 4> axes;
-  if (op.getAxes()) {
-    if (!extractConstantInts(op.getAxes(), axes))
-      return false;
-  } else {
+  if (op.getAxes() && !extractConstantInts(op.getAxes(), axes))
+    return false;
+  if (axes.empty())
     for (int64_t i = 0; i < rank; ++i)
       axes.push_back(i);
-  }
   if (static_cast<int64_t>(pads.size()) !=
       2 * static_cast<int64_t>(axes.size()))
     return false;
