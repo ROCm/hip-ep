@@ -18,12 +18,11 @@
           (mlir pattern-macro))
 
   ;;===--------------------------------------------------------------------===;;
-  ;; Cast Pattern - Using Macro
+  ;; Cast Pattern - MLIR Operation Syntax
   ;;
-  ;; Note: Uses expression syntax because mlir-create-placeholder-op and
-  ;; mlir-create-cast-op are specialized FFI functions, not generic operation
-  ;; builders. The operation syntax (%v = "op.name" ...) would require a
-  ;; generic mlir-create-operation FFI that doesn't exist yet.
+  ;; Uses operation syntax: (%v = "op.name" (operands) ((attrs)) ...)
+  ;; The macro recognizes "hipsr.placeholder" and "hipsr.cast" and translates
+  ;; to specialized FFI calls: mlir-create-placeholder-op, mlir-create-cast-op
   ;;===--------------------------------------------------------------------===;;
 
   (define-conversion-pattern onnx-cast->hipsr
@@ -31,8 +30,12 @@
     (%output = "onnx.Cast" (%input) ((to = !to_type)) : (!input-type) -> !output-type)
     :rewrite %output :with
     (%ctx = (mlir-get-hipsr-context-arg op))
-    (%placeholder = (mlir-create-placeholder-op %ctx %input !output-type 0))
-    (%cast = (mlir-create-cast-op %ctx %input %placeholder !output-type)))
+    (%placeholder = "hipsr.placeholder" (%ctx %input !output-type)
+                    ((placeholder_type 0))
+                    : (!input-type) -> !output-type)
+    (%cast = "hipsr.cast" (%ctx %input %placeholder !output-type)
+             ((cast_attrs))
+             : (!input-type !output-type) -> !output-type))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Pattern Population
