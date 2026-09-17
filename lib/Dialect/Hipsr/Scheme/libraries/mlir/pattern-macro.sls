@@ -8,19 +8,20 @@
     (lambda (stx)
       (syntax-case stx (:match :rewrite :with = : ->)
         
-        ;; Pattern: single operand, expression then two operations
+        ;; Pattern: single operand, compute %ctx, then two operations
         [(_ pattern-name
             :match (%result = op-name-str (%operand1) ((attr-name = !attr-val)) : (!type1) -> !output-type)
             :rewrite %root :with
             (%v0 = expr0)
-            (%v1 = op1-name (operands1 ...) ((a1-specs ...)) rest1 ...)
-            (%v2 = op2-name (operands2 ...) ((a2-specs ...)) rest2 ...))
+            (%v1 = "hipsr.placeholder" (operands1 ...) ((attrs1 ...)) rest1 ...)
+            (%v2 = "hipsr.cast" (operands2 ...) ((attrs2 ...)) rest2 ...))
          
          (with-syntax ([mlir-op-name (datum->syntax #'pattern-name 'mlir-operation-name)]
                        [mlir-get-result (datum->syntax #'pattern-name 'mlir-operation-get-result)]
                        [mlir-get-type (datum->syntax #'pattern-name 'mlir-value-get-type)]
                        [mlir-get-attr (datum->syntax #'pattern-name 'mlir-operation-get-attr)]
-                       [mlir-create-operation (datum->syntax #'pattern-name 'mlir-create-operation)]
+                       [mlir-create-placeholder-op (datum->syntax #'pattern-name 'mlir-create-placeholder-op)]
+                       [mlir-create-cast-op (datum->syntax #'pattern-name 'mlir-create-cast-op)]
                        [value-array-ref-at (datum->syntax #'pattern-name 'value-array-ref-at)])
            
            #'(define pattern-name
@@ -34,12 +35,12 @@
                             [!attr-val (mlir-get-attr op (symbol->string 'attr-name))])
                        (let ([%root %result])
                          (let ([%v0 expr0])
-                           (let ([%v1 (mlir-create-operation op1-name 
-                                                             (list operands1 ...)
-                                                             (list a1-specs ...))])
-                             (let ([%v2 (mlir-create-operation op2-name 
-                                                               (list operands2 ...)
-                                                               (list a2-specs ...))])
+                           ;; "hipsr.placeholder" -> mlir-create-placeholder-op
+                           ;; Signature: (ctx input output-type placeholder-type-int)
+                           (let ([%v1 (mlir-create-placeholder-op operands1 ... 0)])
+                             ;; "hipsr.cast" -> mlir-create-cast-op
+                             ;; Signature: (ctx input placeholder output-type)
+                             (let ([%v2 (mlir-create-cast-op operands2 ...)])
                                %v2)))))))))]
         
         ;; Pattern with two operands, two operations (for tests)
