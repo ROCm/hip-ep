@@ -15,6 +15,7 @@
   (define mlir-create-operation (lambda (name operands attrs) (list 'op name operands attrs)))
   (define mlir-tensor-attach-address-space ffi:mlir-tensor-attach-address-space)
   
+  ;; Test implicit last operation
   (define-conversion-pattern cast-pattern
     :match 
     (%r = "onnx.Cast" (%ctx %input) ((to = !to_type)) : (!input-type) -> !output-type)
@@ -24,8 +25,7 @@
           : types -> result)
     (%1 = "hipsr.cast" (%ctx %input %0) 
           ((result_type = (mlir-tensor-attach-address-space !output-type)))
-          : types -> result)
-    %1)
+          : types -> result))
   
   (define (run-tests)
     (test-begin "define-conversion-pattern")
@@ -33,7 +33,7 @@
     (test-assert "cast-pattern is a procedure"
       (procedure? cast-pattern))
     
-    (test-assert "cast-pattern matches onnx.Cast and rewrites %r with %1"
+    (test-assert "implicit last operation %1 is the replacement"
       (let ([result (cast-pattern 2 'operands-ref 'rewriter 'type-converter)])
         (and (list? result)
              (eq? (car result) 'op)
