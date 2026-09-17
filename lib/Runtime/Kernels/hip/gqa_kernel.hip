@@ -3412,6 +3412,50 @@ static constexpr size_t kPrefillV5MaxSmem = 65536;
 
 static int g_v5_ablate = 0;  // perf-diagnostics ablation bitmask (default off)
 
+// Optional encoded M_TILES*1000+BKV override for D=128 window prefill.
+// The PSU production geometry is shape-gated to the measured winner; setting
+// the env var to 0 restores the LUT-selected M1 config for A/B.
+static int d128WindowPrefillConfig(int B, int Hq, int G, int sq,
+                                   int local_window_size) {
+    static const int env_cfg = [] {
+        const char* raw = std::getenv("HIPDNN_GQA_D128_WINDOW_CONFIG");
+        if (!raw || !*raw) return -1;
+        const int cfg = std::atoi(raw);
+        return (cfg == 1032 || cfg == 1064 || cfg == 2032 || cfg == 2064)
+                   ? cfg
+                   : 0;
+    }();
+    if (env_cfg >= 0) return env_cfg;
+    if (B == 1 && Hq == 24 && G == 8 && sq == 128 &&
+        local_window_size == 2048)
+        return 1032;
+    return 0;
+}
+
+// v7 window route encoded as MT*1,000,000 + NW*1,000 + BKV. The PSU shape
+// defaults to the deep-window winner; an explicit 0 restores v5 for A/B.
+static int d128WindowPrefillV7Config(int B, int Hq, int G, int sq,
+                                     int local_window_size) {
+    static const int env_cfg = [] {
+        const char* raw = std::getenv("HIPDNN_GQA_D128_WINDOW_V7_CONFIG");
+        if (!raw || !*raw) return -1;
+        const int cfg = std::atoi(raw);
+        const int mt = cfg / 1000000;
+        const int nw = (cfg / 1000) % 1000;
+        const int bkv = cfg % 1000;
+        return (mt >= 1 && mt <= 2 &&
+                (nw == 1 || nw == 2 || nw == 4) &&
+                (bkv == 32 || bkv == 64))
+                   ? cfg
+                   : 0;
+    }();
+    if (env_cfg >= 0) return env_cfg;
+    if (B == 1 && Hq == 24 && G == 8 && sq == 128 &&
+        local_window_size == 2048)
+        return 1004064;
+    return 0;
+}
+
 static inline void dispatchPrefillV5(
     int m_tiles, int bkv, int d, hipStream_t stream,
     const _Float16* Q, const _Float16* Kcache, const _Float16* Vcache,
@@ -3550,7 +3594,7 @@ static int tunePrefillV5Cfg(
 // staged once into block-shared LDS, and within a wave each K/V fragment feeds
 // all MT M-tiles -> the LDS read of K/V is amortized MT x.
 // ---------------------------------------------------------------------
-template <int NW, int BKV, int D, int MT>
+template <int NW, int BKV, int D, int MT, bool HAS_WINDOW>
 __global__ void __launch_bounds__(NW * 32)
 gqa_flash_prefill_v7_kernel(
     const _Float16* __restrict__ Q,       // [B, sq, Hq, D]
@@ -3558,7 +3602,7 @@ gqa_flash_prefill_v7_kernel(
     const _Float16* __restrict__ Vcache,  // [B, G, max_seq, D]
     _Float16* __restrict__ O,             // [B, sq, Hq, D]
     int B_count, int Hq, int G, int sq, int skv, int max_seq, int past_len,
-    float scale, int ablate)
+    float scale, int ablate, int local_window_size)
 {
     const int abl = __builtin_amdgcn_readfirstlane(ablate);
     constexpr int kWmmaTile = 16;
@@ -3625,8 +3669,13 @@ gqa_flash_prefill_v7_kernel(
     const int kv_max    = (skv - 1 < past_len + q_start + ROWS - 1)
                               ? (skv - 1) : (past_len + q_start + ROWS - 1);
     const int num_tiles = kv_max / BKV + 1;
+    int t_start = 0;
+    if constexpr (HAS_WINDOW) {
+        const int kv_lo_tile = past_len + q_start - local_window_size + 1;
+        t_start = (kv_lo_tile > 0) ? (kv_lo_tile / BKV) : 0;
+    }
 
-    for (int t = 0; t < num_tiles; ++t) {
+    for (int t = t_start; t < num_tiles; ++t) {
         const int kv0 = t * BKV;
 
         // ---- cooperative V staging into shared LDS (K streams from global) ----
@@ -3685,11 +3734,18 @@ gqa_flash_prefill_v7_kernel(
                 for (int e = 0; e < 8; ++e) {
                     const int row    = hipdnn_wmma_acc_row(pair, e);
                     const int q_pos  = row_base + mt * kWmmaTile + row;
+                    const int abs_q  = past_len + q_pos;
+                    int kv_lo = 0;
+                    if constexpr (HAS_WINDOW)
+                        kv_lo = abs_q - local_window_size + 1;
                     float rmax = -INFINITY;
                     #pragma unroll
                     for (int sj = 0; sj < S_TILES_J; ++sj) {
                         const int kv_pos = kv0 + sj * 16 + wmma_lane;
-                        if (kv_pos >= skv || kv_pos > past_len + q_pos)
+                        bool masked = kv_pos >= skv || kv_pos > abs_q;
+                        if constexpr (HAS_WINDOW)
+                            masked = masked || kv_pos < kv_lo;
+                        if (masked)
                             S_reg[mt][sj][e] = -INFINITY;
                         rmax = fmaxf(rmax, S_reg[mt][sj][e]);
                     }
@@ -3700,13 +3756,17 @@ gqa_flash_prefill_v7_kernel(
 
                     const float m_old = m_reg[mt][e];
                     const float m_new = fmaxf(m_old, rmax);
-                    const float corr  = exp2f(m_old - m_new);
+                    bool empty = false;
+                    if constexpr (HAS_WINDOW)
+                        empty = (m_new == -INFINITY);
+                    const float corr  = empty ? 1.0f : exp2f(m_old - m_new);
                     corr_e[e]         = corr;
 
                     float rsum = 0.0f;
                     #pragma unroll
                     for (int sj = 0; sj < S_TILES_J; ++sj) {
-                        const float p = exp2f(S_reg[mt][sj][e] - m_new);
+                        const float p =
+                            empty ? 0.0f : exp2f(S_reg[mt][sj][e] - m_new);
                         rsum += p;
                         P_lds[(pbase + mt * kWmmaTile + row) * P_STR + sj * 16 + wmma_lane] =
                             static_cast<_Float16>(p);
@@ -3788,7 +3848,7 @@ static inline void dispatchPrefillV7(
     int nw, int bkv, int mt, int d, hipStream_t stream,
     const _Float16* Q, const _Float16* Kcache, const _Float16* Vcache,
     _Float16* O, int B, int Hq, int G, int sq, int skv, int max_seq,
-    int past_len, float scale)
+    int past_len, float scale, int local_window_size)
 {
     static const bool s_log_cfg = gqa_autotune_log_enabled() || custom_kernels_debug_enabled();
     if (s_log_cfg)
@@ -3802,33 +3862,39 @@ static inline void dispatchPrefillV7(
     const size_t smem = prefillV7SmemBytes(nw, bkv, d, mt);
     const int ablate = g_v7_ablate;
 
-    #define LAUNCH_V7(NW_, BKV_, D_, MT_)                                       \
-        gqa_flash_prefill_v7_kernel<NW_, BKV_, D_, MT_>                         \
+    #define LAUNCH_V7(NW_, BKV_, D_, MT_, HW_)                                  \
+        gqa_flash_prefill_v7_kernel<NW_, BKV_, D_, MT_, HW_>                    \
             <<<grid, NW_ * 32, smem, stream>>>(                                 \
                 Q, Kcache, Vcache, O, B, Hq, G, sq, skv, max_seq, past_len,     \
-                scale, ablate)
-    #define DISPATCH_V7_D(D_)                                                   \
+                scale, ablate, local_window_size)
+    #define DISPATCH_V7_D(D_, HW_)                                              \
         do {                                                                    \
             if (mt == 1) {                                                      \
-                if      (nw == 4 && bkv == 64) LAUNCH_V7(4, 64, D_, 1);         \
-                else if (nw == 4)              LAUNCH_V7(4, 32, D_, 1);         \
-                else if (nw == 2 && bkv == 64) LAUNCH_V7(2, 64, D_, 1);         \
-                else if (nw == 2)              LAUNCH_V7(2, 32, D_, 1);         \
-                else if (bkv == 64)            LAUNCH_V7(1, 64, D_, 1);         \
-                else                           LAUNCH_V7(1, 32, D_, 1);         \
+                if      (nw == 4 && bkv == 64) LAUNCH_V7(4, 64, D_, 1, HW_);    \
+                else if (nw == 4)              LAUNCH_V7(4, 32, D_, 1, HW_);    \
+                else if (nw == 2 && bkv == 64) LAUNCH_V7(2, 64, D_, 1, HW_);    \
+                else if (nw == 2)              LAUNCH_V7(2, 32, D_, 1, HW_);    \
+                else if (bkv == 64)            LAUNCH_V7(1, 64, D_, 1, HW_);    \
+                else                           LAUNCH_V7(1, 32, D_, 1, HW_);    \
             } else {                                                            \
-                if      (nw == 4 && bkv == 64) LAUNCH_V7(4, 64, D_, 2);         \
-                else if (nw == 4)              LAUNCH_V7(4, 32, D_, 2);         \
-                else if (nw == 2 && bkv == 64) LAUNCH_V7(2, 64, D_, 2);         \
-                else if (nw == 2)              LAUNCH_V7(2, 32, D_, 2);         \
-                else if (bkv == 64)            LAUNCH_V7(1, 64, D_, 2);         \
-                else                           LAUNCH_V7(1, 32, D_, 2);         \
+                if      (nw == 4 && bkv == 64) LAUNCH_V7(4, 64, D_, 2, HW_);    \
+                else if (nw == 4)              LAUNCH_V7(4, 32, D_, 2, HW_);    \
+                else if (nw == 2 && bkv == 64) LAUNCH_V7(2, 64, D_, 2, HW_);    \
+                else if (nw == 2)              LAUNCH_V7(2, 32, D_, 2, HW_);    \
+                else if (bkv == 64)            LAUNCH_V7(1, 64, D_, 2, HW_);    \
+                else                           LAUNCH_V7(1, 32, D_, 2, HW_);    \
             }                                                                   \
         } while (0)
 
-    if (d == 64)       DISPATCH_V7_D(64);
-    else if (d == 128) DISPATCH_V7_D(128);
-    else               DISPATCH_V7_D(256);
+    if (local_window_size > 0) {
+        if (d == 64)       DISPATCH_V7_D(64, true);
+        else if (d == 128) DISPATCH_V7_D(128, true);
+        else               DISPATCH_V7_D(256, true);
+    } else {
+        if (d == 64)       DISPATCH_V7_D(64, false);
+        else if (d == 128) DISPATCH_V7_D(128, false);
+        else               DISPATCH_V7_D(256, false);
+    }
     #undef DISPATCH_V7_D
     #undef LAUNCH_V7
 }
@@ -3863,7 +3929,7 @@ static int tunePrefillV7Cfg(
 
     auto launch_cfg = [&](const PrefillV7Cfg& c) {
         dispatchPrefillV7(c.nw, c.bkv, c.mt, d, stream, Q, Kcache, Vcache, O,
-                          B, Hq, G, sq, skv, max_seq, past_len, scale);
+                          B, Hq, G, sq, skv, max_seq, past_len, scale, 0);
     };
 
     for (int w = 0; w < kWarmup; ++w) launch_cfg(cands[w % nc]);
@@ -4525,7 +4591,7 @@ extern "C" int hip_gqa_flash_prefill_v7_v2(
     }
     int mt = cfg / 1000000, nw = (cfg / 1000) % 1000, bkv = cfg % 1000;
     dispatchPrefillV7(nw, bkv, mt, d, stream, Q_ptr, K_ptr, V_ptr, O_ptr,
-                      B, Hq, G, sq, skv, max_seq, past_len, scale);
+                      B, Hq, G, sq, skv, max_seq, past_len, scale, 0);
     return 0;
 }
 
@@ -4652,8 +4718,30 @@ extern "C" int hip_gqa_flash_prefill_v3_configured(
     }
     if (d == 128) {
         if (wants_window) {
-            if (bkv != 32 && bkv != 64) return -1;
-            dispatchPrefillV5(1, bkv, d, stream, Q_ptr, K_ptr, V_ptr, O_ptr,
+            const int v7_cfg =
+                d128WindowPrefillV7Config(B, Hq, G, sq, local_window_size);
+            if (v7_cfg > 0) {
+                const int v7_mt = v7_cfg / 1000000;
+                const int v7_nw = (v7_cfg / 1000) % 1000;
+                const int v7_bkv = v7_cfg % 1000;
+                dispatchPrefillV7(v7_nw, v7_bkv, v7_mt, d, stream, Q_ptr,
+                                  K_ptr, V_ptr, O_ptr, B, Hq, G, sq, skv,
+                                  max_seq, past_len, scale, local_window_size);
+                return 0;
+            }
+            int actual_m_tiles = 1;
+            int actual_bkv = bkv;
+            const int shape_cfg =
+                d128WindowPrefillConfig(B, Hq, G, sq, local_window_size);
+            if (shape_cfg > 0) {
+                actual_m_tiles = shape_cfg / 1000;
+                actual_bkv = shape_cfg % 1000;
+            }
+            if ((actual_m_tiles != 1 && actual_m_tiles != 2) ||
+                (actual_bkv != 32 && actual_bkv != 64))
+                return -1;
+            dispatchPrefillV5(actual_m_tiles, actual_bkv, d, stream, Q_ptr,
+                              K_ptr, V_ptr, O_ptr,
                               B, Hq, G, sq, skv, max_seq, past_len, scale,
                               nullptr, Hq, 0, local_window_size);
             return 0;
@@ -4667,7 +4755,7 @@ extern "C" int hip_gqa_flash_prefill_v3_configured(
                 valid = true;
         if (!valid) return -1;
         dispatchPrefillV7(nw, bkv, mt, d, stream, Q_ptr, K_ptr, V_ptr, O_ptr,
-                          B, Hq, G, sq, skv, max_seq, past_len, scale);
+                          B, Hq, G, sq, skv, max_seq, past_len, scale, 0);
         return 0;
     }
     if (d == 256) {
