@@ -8,16 +8,12 @@
     (lambda (stx)
       (syntax-case stx (:match :rewrite = : ->)
         
-        ;; Pattern with operation syntax
-        ;;   attr-spec can be: (name = value) or just value
-        ;; We'll match two specific patterns for now
         [(_ pattern-name
             :match (%result = op-name-str (%ctx %input) ((attr-name = !attr-val)) : (!type1) -> !output-type)
             :rewrite 
-            (begin
-              (%v0 = op0-name (operands0 ...) ((a0-name = a0-val)) rest0 ...)
-              (%v1 = op1-name (operands1 ...) ((a1-name = a1-val)) rest1 ...)
-              final-expr))
+            (%v0 = op0-name (operands0 ...) ((a0-name = a0-val)) rest0 ...)
+            (%v1 = op1-name (operands1 ...) ((a1-name = a1-val)) rest1 ...)
+            final-expr)
          
          (with-syntax ([mlir-op-name (datum->syntax #'pattern-name 'mlir-operation-name)]
                        [mlir-get-operand (datum->syntax #'pattern-name 'mlir-operation-get-operand)]
@@ -42,8 +38,7 @@
                          (let ([%v1 (mlir-create-operation op1-name 
                                                            (list operands1 ...)
                                                            (list (cons 'a1-name a1-val)))])
-                           final-expr)))))))
-        ]
+                           final-expr)))))))]
         
         [(_ . rest)
          (syntax-violation 'define-conversion-pattern

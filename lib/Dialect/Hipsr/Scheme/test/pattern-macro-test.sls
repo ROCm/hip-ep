@@ -19,14 +19,13 @@
     :match 
     (%r = "onnx.Cast" (%ctx %input) ((to = !to_type)) : (!input-type) -> !output-type)
     :rewrite 
-    (begin
-      (%0 = "hipsr.placeholder" (%ctx %input)
-            ((placeholder_type = "#hipsr.placeholder_type<normal>")) 
-            : types -> result)
-      (%1 = "hipsr.cast" (%ctx %input %0) 
-            ((result_type = (mlir-tensor-attach-address-space !output-type)))
-            : types -> result)
-      %1))
+    (%0 = "hipsr.placeholder" (%ctx %input)
+          ((placeholder_type = "#hipsr.placeholder_type<normal>")) 
+          : types -> result)
+    (%1 = "hipsr.cast" (%ctx %input %0) 
+          ((result_type = (mlir-tensor-attach-address-space !output-type)))
+          : types -> result)
+    %1)
   
   (define (run-tests)
     (test-begin "define-conversion-pattern")
