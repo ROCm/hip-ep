@@ -897,10 +897,6 @@ void *hipdnn_ep_state_get_stream(RuntimeState *state) {
   return state ? static_cast<void *>(state->stream) : nullptr;
 }
 
-void *hipdnn_ep_state_get_hipblas_handle(RuntimeState *state) {
-  return state ? static_cast<void *>(state->hipblas_handle) : nullptr;
-}
-
 void *hipdnn_ep_state_get_op_profile(RuntimeState *state) {
   return state ? state->op_profile : nullptr;
 }

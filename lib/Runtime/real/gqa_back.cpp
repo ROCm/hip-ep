@@ -1466,7 +1466,7 @@ int wrap_group_query_attention(
   hipStream_t stream =
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
   hipblasLtHandle_t ltHandle =
-      static_cast<hipblasLtHandle_t>(hipdnn_ep_state_get_hipblas_handle(state));
+      static_cast<hipblasLtHandle_t>(state->hipblas_handle);
   if (!stream || !ltHandle) {
     fprintf(stderr, "wrap_group_query_attention: null stream or hipblas "
                     "handle\n");

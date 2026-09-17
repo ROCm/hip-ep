@@ -32,10 +32,6 @@ extern "C" void *hipdnn_ep_state_get_stream(RuntimeState *state) {
   return state ? static_cast<void *>(state->stream) : nullptr;
 }
 
-extern "C" void *hipdnn_ep_state_get_hipblas_handle(RuntimeState *state) {
-  return state ? static_cast<void *>(state->hipblas_handle) : nullptr;
-}
-
 extern "C" void *hipdnn_ep_state_get_workspace(RuntimeState *state) {
   return state ? state->workspace : nullptr;
 }

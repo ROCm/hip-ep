@@ -288,10 +288,6 @@ HIPDNN_EP_RT_EXPORT void *hipdnn_ep_get_current_stream(void);
 // tls_stream.cpp alongside the getter.
 HIPDNN_EP_RT_EXPORT void hipdnn_ep_set_current_stream(void *stream);
 
-// Always returns NULL in the product: no GEMM takes a vendor BLAS handle.
-// Serves the out-of-tree GQA dispatch_bench harness, which sets the field.
-void *hipdnn_ep_state_get_hipblas_handle(RuntimeState *state);
-
 // Get buffer from memory pool by index
 // Returns: GPU pointer at pool_base + buffer_offsets[index] (NULL on error)
 // Ownership: Caller does NOT own pointer (freed in cleanup)
