@@ -112,23 +112,24 @@ func.func @pad_negative_axis(%ctx: !hip.context, %x: tensor<2x3xf32>,
   return %r : tensor<2x8xf32>
 }
 
-// An empty `axes` names no dimension to pad, so every dimension keeps its
-// zeros and the pad is an identity. That is the same thing the general path
-// produces, so it needs no case of its own.
+// An empty `axes` means every dimension, not none. wrap_pad picks the per-axis
+// pads layout on axes_host.empty(), and it populates axes_host only when the
+// operand is present and non-empty, so a zero-length `axes` reaches the same
+// branch an omitted one does and `pads` carries the full 2 * rank entries.
 // CHECK-LABEL: func.func @pad_empty_axes
-// CHECK: %[[P:.*]] = tosa.const_shape {values = dense<0> : tensor<4xindex>}
+// CHECK: %[[P:.*]] = tosa.const_shape {values = dense<[1, 1, 2, 3]> : tensor<4xindex>}
 // CHECK: tosa.pad %arg1, %[[P]]
 // CHECK-NOT: hip.pad
 func.func @pad_empty_axes(%ctx: !hip.context, %x: tensor<2x3xf32>,
-                          %init: tensor<2x3xf32>) -> tensor<2x3xf32>
+                          %init: tensor<4x8xf32>) -> tensor<4x8xf32>
     attributes {rock.kernel} {
-  %pads = arith.constant dense<> : tensor<0xi64>
+  %pads = arith.constant dense<[1, 2, 1, 3]> : tensor<4xi64>
   %axes = arith.constant dense<> : tensor<0xi64>
-  %r = hip.pad(%ctx) ins(%x, %pads : tensor<2x3xf32>, tensor<0xi64>)
+  %r = hip.pad(%ctx) ins(%x, %pads : tensor<2x3xf32>, tensor<4xi64>)
                      axes(%axes : tensor<0xi64>)
-                     outs(%init : tensor<2x3xf32>)
-                     {mode = "constant"} : tensor<2x3xf32>
-  return %r : tensor<2x3xf32>
+                     outs(%init : tensor<4x8xf32>)
+                     {mode = "constant"} : tensor<4x8xf32>
+  return %r : tensor<4x8xf32>
 }
 
 // The fill value becomes tosa.pad's one-element pad_const operand.
