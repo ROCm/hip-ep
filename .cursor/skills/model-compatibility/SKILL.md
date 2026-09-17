@@ -82,8 +82,8 @@ The three markdown files sit at the top of `<OutputDir>`; everything the pipelin
 | S2 convert | `converted.mlir`, `convert_log.txt` | probe exited 0; the log's unconverted list matches S3 |
 | S3 leftovers | `leftover_onnx.json`, `leftover_reasons.json` | every leftover key also appears in S1b; each leftover says whether a converter exists |
 | S4 attributes | `attr_transfer.json`, `hip_runtime_map.json` | `unpaired_instances` is small and explainable; every observed `hip.*` op resolves to a runtime function |
-| S5 normalize | `report_input.json` | supported + unsupported instances equal the total |
-| S6 render | `..\model_compatibility_report.md`, `..\model_compatibility_details.md`, `..\pipeline_status.md`, `unsupported_reco_runtime.json` | summary numbers equal `report_input.json` |
+| S5 normalize | `report_input.json` | validated against `report_input.schema.json` as it is written; supported + unsupported instances equal the total |
+| S6 render | `..\model_compatibility_report.md`, `..\model_compatibility_details.md`, `..\pipeline_status.md` | summary numbers equal `report_input.json` |
 
 Each fact is written once. The comparison and the operator distribution are rendered only in the report, and the evidence behind non-supported rows only in the details file; `op_distribution_comparison.json` is the report's input, not a second copy for the reader. `ep_input_loc.mlir` is a location-carrying copy the probe recreates on demand, so it is removed after the analysis reads it.
 

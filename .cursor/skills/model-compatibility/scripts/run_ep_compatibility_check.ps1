@@ -217,8 +217,7 @@ if (OutputUpToDate -SourcePath $ModelPath -ProducedPath $step1OrigJson) {
 } else {
     Invoke-PythonStep -Label '(2/5) step1 - original ONNX...' -PyArgv @(
         (Join-Path $ToolsDir "step1_onnx_parser.py"),
-        $ModelPath, $CompatDir,
-        "--max-instances-per-op", "0"
+        $ModelPath, $CompatDir
     )
 }
 
@@ -229,8 +228,7 @@ if ($haveEpInput) {
     } else {
         Invoke-PythonStep -Label '(2/5) step1 - EP input (MLIR)...' -PyArgv @(
             (Join-Path $ToolsDir "step1_mlir_parser.py"),
-            $EpInput, $CompatDir,
-            "--max-instances-per-op", "0"
+            $EpInput, $CompatDir
         )
     }
 

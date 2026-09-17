@@ -77,6 +77,22 @@ def read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def validate_against_schema(report_input: dict) -> None:
+    """Fail here rather than let a malformed report reach the reader.
+
+    The schema is the contract between this file and everything downstream, so
+    a new reason code or a renamed field should stop the run. jsonschema is
+    optional: without it the check is skipped and says so.
+    """
+    schema_path = Path(__file__).with_name("report_input.schema.json")
+    try:
+        import jsonschema
+    except ImportError:
+        print("  (jsonschema not installed; report_input.json was not validated)")
+        return
+    jsonschema.validate(report_input, read_json(schema_path))
+
+
 def load_optional(path: Path):
     return read_json(path) if path.is_file() else None
 
@@ -327,6 +343,7 @@ def main():
 
     out_path = analysis_dir / "report_input.json"
     out_path.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
+    validate_against_schema(out)
     print(f"Wrote {out_path}")
     print(
         f"  {supported_instances}/{total_instances} instances supported, "

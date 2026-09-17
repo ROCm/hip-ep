@@ -7,7 +7,6 @@ import json
 import sys
 import re
 from pathlib import Path
-from datetime import datetime, timezone
 
 
 def read_json(path: Path):
@@ -258,10 +257,6 @@ def recommended_impl_with_trace(op_row, compat_row, reco_rules):
     )
 
 
-def recommended_impl(op_row, compat_row, reco_rules):
-    return recommended_impl_with_trace(op_row, compat_row, reco_rules)["recommended"]
-
-
 def fmt_data_types(dtypes):
     return ", ".join(dtypes) if dtypes else "-"
 
@@ -376,8 +371,6 @@ def main():
     supported_ops = []
     partial_ops = []
     unsupported_ops = []
-    unsupported_runtime_entries = []
-
     for row in op_dist:
         key = (row.get("onnx_op"), row.get("domain"))
         comp = compat_map.get(key, {})
@@ -414,20 +407,6 @@ def main():
                 }
             )
             unsupported_buckets.setdefault(reco, []).append(op)
-            unsupported_runtime_entries.append(
-                {
-                    "onnx_op": op,
-                    "domain": dom,
-                    "count": row.get("count", 0),
-                    "op_description": desc,
-                    "reason_codes": comp.get("reason_codes") or [],
-                    "reason_texts": comp.get("reason_texts") or [],
-                    "recommended_path": reco,
-                    "recommendation_source": reco_trace.get("source", ""),
-                    "matched_rule": reco_trace.get("matched_rule", ""),
-                    "rationale": reco_trace.get("rationale", ""),
-                }
-            )
 
     lines.append("\n### Compatibility Summary\n\n")
     lines.append(f"#### Fully Compatible Operator ({len(supported_ops)})\n\n")
@@ -537,28 +516,8 @@ def main():
     (report_dir / "model_compatibility_details.md").write_text(
         "".join(d), encoding="utf-8"
     )
-    runtime_json = {
-        "meta": {
-            "model_path": meta.get("model_path"),
-            "generated_at_utc": datetime.now(timezone.utc).strftime(
-                "%Y-%m-%dT%H:%M:%SZ"
-            ),
-            "rules_version": reco_rules.get("version", "unknown"),
-        },
-        "summary": {
-            "unsupported_operator_types": len(unsupported_runtime_entries),
-            "unsupported_node_instances": int(
-                sum(int(x.get("count", 0)) for x in unsupported_runtime_entries)
-            ),
-        },
-        "unsupported_recommendations": unsupported_runtime_entries,
-    }
-    (analysis_dir / "unsupported_reco_runtime.json").write_text(
-        json.dumps(runtime_json, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
     print(f"Wrote {(report_dir / 'model_compatibility_report.md')}")
     print(f"Wrote {(report_dir / 'model_compatibility_details.md')}")
-    print(f"Wrote {(analysis_dir / 'unsupported_reco_runtime.json')}")
 
 
 if __name__ == "__main__":

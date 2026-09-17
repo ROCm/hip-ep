@@ -22,16 +22,10 @@ import json
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from mlir_text import (
-    NON_COMPUTE_ONNX_OPS,
-    element_type_names,
-    parse_mlir_file,
-    shape_kind,
-    strip_quotes,
-)
+from mlir_text import NON_COMPUTE_ONNX_OPS, element_type_names, parse_mlir_file
 
 
-def analyze(mlir_path: Path, max_instances_per_op: int) -> dict:
+def analyze(mlir_path: Path) -> dict:
     module = parse_mlir_file(mlir_path)
 
     ops_info = defaultdict(
@@ -40,9 +34,6 @@ def analyze(mlir_path: Path, max_instances_per_op: int) -> dict:
             "count_top_level": 0,
             "domain": set(),
             "data_types": set(),
-            "shape_types": set(),
-            "scopes": set(),
-            "instances": [],
         }
     )
 
@@ -54,19 +45,6 @@ def analyze(mlir_path: Path, max_instances_per_op: int) -> dict:
             info["count_top_level"] += 1
         info["domain"].add(domain)
         info["data_types"].update(element_type_names(op.type_signature))
-        kind = shape_kind(op.type_signature)
-        if kind:
-            info["shape_types"].add(kind)
-        info["scopes"].add(op.scope)
-
-        if max_instances_per_op < 0 or len(info["instances"]) < max_instances_per_op:
-            info["instances"].append(
-                {
-                    "node_name": strip_quotes(op.attrs.get("onnx_node_name", "")),
-                    "graph_scope": op.scope,
-                    "attributes": {k: op.attrs[k] for k in op.onnx_attr_names()},
-                }
-            )
 
     total = sum(info["count"] for info in ops_info.values())
     top_level = sum(info["count_top_level"] for info in ops_info.values())
@@ -89,9 +67,6 @@ def analyze(mlir_path: Path, max_instances_per_op: int) -> dict:
             "count_top_level": info["count_top_level"],
             "domain": sorted(info["domain"]),
             "data_types": sorted(info["data_types"]),
-            "shape_types": sorted(info["shape_types"]),
-            "scopes": sorted(info["scopes"])[:20],
-            "instances": info["instances"],
         }
     return result
 
@@ -100,20 +75,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("mlir_path", help="ep_input.mlir")
     ap.add_argument("output_dir", help="Directory for step1_ep_input_ops.json")
-    ap.add_argument(
-        "--max-instances-per-op",
-        type=int,
-        default=5,
-        metavar="N",
-        help="Cap stored instances per op type (0=none, -1=unlimited; default 5)",
-    )
     args = ap.parse_args()
 
     mlir_path = Path(args.mlir_path)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    result = analyze(mlir_path, args.max_instances_per_op)
+    result = analyze(mlir_path)
     out_path = output_dir / "step1_ep_input_ops.json"
     out_path.write_text(
         json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"

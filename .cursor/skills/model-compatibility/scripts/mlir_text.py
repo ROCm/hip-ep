@@ -216,13 +216,6 @@ def element_type_names(type_signature: str) -> List[str]:
     return [n for n in names if n]
 
 
-def shape_kind(type_signature: str) -> Optional[str]:
-    bodies = tensor_types(type_signature)
-    if not bodies:
-        return None
-    return "dynamic" if any("?" in b for b in bodies) else "static"
-
-
 class MlirModule:
     """Operations of one textual MLIR module, in source order."""
 

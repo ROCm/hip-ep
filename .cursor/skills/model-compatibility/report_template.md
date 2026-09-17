@@ -28,7 +28,7 @@ These templates are the contract between the pipeline and the user-facing markdo
 |---|---|
 | `model_compatibility_report.md` | Executive summary + key tables (primary deliverable) |
 | `model_compatibility_details.md` | Per-operator diagnostics (supports, partials with reason codes, data quality notes) |
-| `compatibility/unsupported_reco_runtime.json` | Machine-readable unsupported recommendations |
+| `compatibility/report_input.json` | Normalized data behind both files, validated against `report_input.schema.json` |
 
 ## model_compatibility_report.md — section order
 
