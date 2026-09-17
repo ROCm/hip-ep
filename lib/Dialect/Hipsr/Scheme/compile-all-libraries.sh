@@ -17,25 +17,35 @@ mkdir -p "$BUILD_DIR/passes"
 LIBRARY_DIR="$SOURCE_DIR/libraries"
 RIME_DIR="$SOURCE_DIR/../../../../third_party/rime"
 
-# CRITICAL: Everything must run in ONE Scheme session
+# CRITICAL: Everything must run in ONE Scheme session so all .wpo files
+# have matching compilation instance IDs (required by compile-whole-library)
 $SCHEME_COMPILER <<EOF
 (generate-wpo-files #t)
 (compile-imported-libraries #t)
 (library-directories (list "$LIBRARY_DIR" "$BUILD_DIR" "$RIME_DIR"))
 
-; Step 1: Compile top-level passes to generate WPO files
+; Step 1: compile-library creates BOTH .so and .wpo files
+;   - onnx-to-hipsr-temp.so (38KB, not bundled)
+;   - onnx-to-hipsr-temp.wpo (metadata for bundling)
+;   - print-temp.so (8KB, not bundled)
+;   - print-temp.wpo (metadata for bundling)
 (compile-library "$LIBRARY_DIR/passes/onnx-to-hipsr.sls" "$BUILD_DIR/passes/onnx-to-hipsr-temp.so")
 (compile-library "$LIBRARY_DIR/passes/print.sls" "$BUILD_DIR/passes/print-temp.so")
 
-; Step 2: Import to compile all dependencies (with WPO files)
+; Step 2: Import triggers automatic compilation of ALL dependencies
+;   Creates .so + .wpo for ~30 rime libraries (loop, logging, etc.)
 (import (passes onnx-to-hipsr))
 (import (passes print))
 
-; Step 3: Bundle everything into standalone .so files
+; Step 3: compile-whole-library reads .wpo files and bundles dependencies
+;   INPUT:  onnx-to-hipsr-temp.wpo (lists dependencies)
+;   OUTPUT: onnx-to-hipsr.so (38KB, no rime dependencies in this pass)
+;   INPUT:  print-temp.wpo (lists rime dependencies)
+;   OUTPUT: print.so (238KB, includes all 30 rime libraries bundled)
 (compile-whole-library "$BUILD_DIR/passes/onnx-to-hipsr-temp.wpo" "$BUILD_DIR/passes/onnx-to-hipsr.so")
 (compile-whole-library "$BUILD_DIR/passes/print-temp.wpo" "$BUILD_DIR/passes/print.so")
 
-; Step 4: Clean up intermediate files
+; Step 4: Clean up intermediate files (.wpo files no longer needed)
 (for-each (lambda (f) (when (file-exists? f) (delete-file f)))
   (list "$BUILD_DIR/passes/onnx-to-hipsr-temp.so"
         "$BUILD_DIR/passes/onnx-to-hipsr-temp.wpo"
