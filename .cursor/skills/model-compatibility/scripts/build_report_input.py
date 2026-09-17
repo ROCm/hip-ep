@@ -165,7 +165,10 @@ def classify(op, domain, count, leftover, attr_row, reason_row, probed):
     if hip_ops and not any(h.startswith(_RUNTIME_DIALECT_PREFIX) for h in hip_ops):
         return "full", ["COMPILE_TIME_TENSOR_OP"], ["Handled at compile time."]
     # No runtime op came out of it, and the analysis proved none went missing.
-    if not hip_ops and (attr_row or {}).get("folded_instances"):
+    if not hip_ops and (
+        (attr_row or {}).get("folded_instances")
+        or (attr_row or {}).get("compile_time_instances")
+    ):
         return "full", ["COMPILE_TIME_TENSOR_OP"], ["Handled at compile time."]
     return "full", [], []
 

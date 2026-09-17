@@ -214,7 +214,9 @@ def orphan_hip_ops(pre_module, post_module):
     return dict(sorted(orphans.items()))
 
 
-def build_attr_transfer(pre_module, post_module, leftover_locs, pairing_is_complete):
+def build_attr_transfer(
+    pre_module, post_module, leftover_locs, pairing_is_complete, hip_op_attributes
+):
     post_by_loc = defaultdict(list)
     for op in post_module.ops:
         if op.dialect == _ONNX_DIALECT:
@@ -228,6 +230,7 @@ def build_attr_transfer(pre_module, post_module, leftover_locs, pairing_is_compl
         lambda: {
             "paired": 0,
             "folded": 0,
+            "compile_time": 0,
             "hip_ops": set(),
             "dropped_attrs": defaultdict(int),
             "dropped_attr_values": defaultdict(set),
@@ -260,7 +263,15 @@ def build_attr_transfer(pre_module, post_module, leftover_locs, pairing_is_compl
         if primary:
             entry["hip_ops"].add(primary.name)
 
-        landed = set()
+        # A conversion that produced no hip op folded this operator into
+        # structure: Split's axis becomes extract_slice offsets, Concat's
+        # becomes the destination offsets. There is no attribute dictionary
+        # left to check, and its absence says nothing about correctness.
+        if primary is None or not primary.name.startswith("hip."):
+            entry["compile_time"] += 1
+            continue
+
+        landed = set(hip_op_attributes.get(primary.name) or {})
         for candidate in candidates:
             landed.update(candidate.attrs.keys())
 
@@ -303,6 +314,7 @@ def build_attr_transfer(pre_module, post_module, leftover_locs, pairing_is_compl
                 "domain": domain,
                 "paired_instances": entry["paired"],
                 "folded_instances": entry["folded"],
+                "compile_time_instances": entry["compile_time"],
                 "hip_ops": sorted(entry["hip_ops"]),
                 "dropped_attrs": dict(sorted(entry["dropped_attrs"].items())),
                 "dropped_attr_values": {
@@ -326,7 +338,24 @@ def main():
         "converted_mlir", help="post-conversion MLIR printed with locations"
     )
     ap.add_argument("output_dir", help="Directory for the two JSON files")
+    ap.add_argument(
+        "--repo-root",
+        default="",
+        help="hip-ep repository root; lets the attribute check see which "
+        "attributes a hip op declares, so a value equal to the op's own "
+        "default is not read as a dropped attribute",
+    )
     args = ap.parse_args()
+
+    hip_op_attributes = {}
+    if args.repo_root:
+        from hip_op_defs import hip_ops_td_path, load_hip_ops
+
+        td_path = hip_ops_td_path(Path(args.repo_root))
+        if td_path.is_file():
+            hip_op_attributes = {
+                name: info["attributes"] for name, info in load_hip_ops(td_path).items()
+            }
 
     pre_module = parse_mlir_file(Path(args.input_mlir))
     post_module = parse_mlir_file(Path(args.converted_mlir))
@@ -340,7 +369,11 @@ def main():
 
     orphans = orphan_hip_ops(pre_module, post_module)
     attr_rows, unpaired = build_attr_transfer(
-        pre_module, post_module, leftover_locs, pairing_is_complete=not orphans
+        pre_module,
+        post_module,
+        leftover_locs,
+        pairing_is_complete=not orphans,
+        hip_op_attributes=hip_op_attributes,
     )
 
     leftover_path = output_dir / "leftover_onnx.json"

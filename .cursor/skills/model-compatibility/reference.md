@@ -37,6 +37,11 @@ Instances are paired pre- and post-conversion by their MLIR location, then each 
 - An attribute that landed is fine.
 - An attribute that did not land, whose value equals the operator's default, is recorded under `dropped_default_attrs` and does **not** affect status: dropping a default changes no behaviour. Defaults come from the ONNX schema, and for `com.microsoft` from ONNX Runtime's own contrib operator registry (`get_all_operator_schema`), so the skill carries no defaults table of its own.
 - An attribute the schema declares no default for cannot be compared, so it counts as a real drop and the reason text prints the observed value. That over-reports rather than hiding a behaviour difference.
+
+Two cases are excluded from the check, because in both "the attribute is not on the converted op" carries no information:
+
+- **The operator produced no `hip.*` op.** Its attributes were consumed into structure: `Split`'s `axis` becomes `tensor.extract_slice` offsets, and `Concat` refuses to convert without one. There is no attribute dictionary left to compare against.
+- **The HIP op declares the attribute.** MLIR omits an attribute equal to its ODS default when printing, so `hip.gqa` with `softcap=0.0` prints no `softcap` even though the conversion set it. [scripts/hip_op_defs.py](scripts/hip_op_defs.py) reads the declarations out of `HipOps.td` for exactly this, and an op it cannot parse falls back to reporting the drop.
 - An attribute that did not land with a non-default value gives reason code `EXTRA_ONNX_ATTR_NOT_IN_HIP` and status `partial`.
 
 Bookkeeping attributes (`onnx_node_name`, `node.outputs`, and the `function_name` / `domain_name` selectors on `onnx.Custom`) are never treated as operator attributes.
@@ -104,7 +109,9 @@ For every unsupported op recommendation include: recommended path, closest exist
 
 ## ROCm family routing matrix
 
-[scripts/unsupported_reco_rules.json](scripts/unsupported_reco_rules.json) is the source of truth, because the report generator reads it. The table below is a reading aid; when the two disagree, the JSON is right and this needs updating.
+Only one situation reaches these rules: an operator with **no converter at all**. A converter that refused the model gives `Extend the existing conversion`, and a converted operator names the runtime function it produced, both from the run rather than from a table.
+
+[scripts/unsupported_reco_rules.json](scripts/unsupported_reco_rules.json) is the source of truth, because the report generator reads it. Every wrapper it names must exist in `lib/Runtime/hipdnn_ep_runtime.h`; a rule pointing at a symbol nobody can extend is worse than no rule. The table below is a reading aid; when the two disagree, the JSON is right and this needs updating.
 
 | # | Family | Preferred path | Fallback |
 |---|---|---|---|
@@ -118,6 +125,8 @@ For every unsupported op recommendation include: recommended path, closest exist
 | 8 | Normalization / composite blocks | decompose into supported primitives if possible, else extend the `wrap_layer_normalization` / `wrap_rms_norm` family | new `Custom Hip Kernel` |
 
 ### Known runtime capabilities (capability inventory examples)
+
+Run `python scripts/hip_runtime_map.py <repo-root> <out-dir>` for the current list; it derives every `hip.*` op's runtime function and backend from the lowering and the wrapper's implementation. A few worth knowing:
 
 - `wrap_elementwise` — elementwise add / mul / min / max, with per-axis broadcast
 - `wrap_gelu` / `wrap_softplus` / `wrap_leaky_relu` — activation-family elementwise ops

@@ -262,7 +262,8 @@ if ($haveEpInput) {
         (Join-Path $ToolsDir "analyze_conversion.py"),
         $locatedInput,
         (Join-Path $CompatDir "converted.mlir"),
-        $CompatDir
+        $CompatDir,
+        "--repo-root", $RepoRoot
     )
     # It only existed to join the two sides by location, and it is a copy of
     # ep_input.mlir that the probe can recreate.
