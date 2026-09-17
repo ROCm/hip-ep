@@ -3151,9 +3151,9 @@ HIP_KERNEL_API int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B
  *   dDtype     - element type of D (hip_dtype_t value cast to int)
  *   strideA/B/D - batch strides; ignored when batch == 1
  *
- * Instantiated dtype pairs: fp16/fp16, fp16/fp32, bf16/bf16, bf16/fp32,
- * fp32/fp32. alpha is honoured only where the epilogue carries it, i.e.
- * everywhere except the fp16 and bf16 combos whose D is not fp32.
+ * Instantiated dtype pairs: fp16/fp16 and fp16/fp32, the only ones any caller
+ * asks for; everything else belongs to hip_ref_gemm_run. alpha is honoured only
+ * where the epilogue carries it, i.e. fp16/fp32 but not fp16/fp16.
  */
 HIP_KERNEL_API int hip_ck_gemm_num_instances(void);
 

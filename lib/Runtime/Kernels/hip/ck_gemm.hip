@@ -4,8 +4,9 @@
  */
 
 // Composable Kernel GEMM instances, behind a narrow C ABI so callers compiled
-// outside hipcc never see CK's device templates. fp16 and bf16 go through the
-// WMMA op; fp32 has no WMMA path and goes through the DL op instead.
+// outside hipcc never see CK's device templates. Every instance takes fp16
+// operands through the WMMA op, which is all any caller asks for; bf16 and fp32
+// operands go to hip_ref_gemm_run instead.
 //
 // Arguments arrive in hipBLASLt's column-major convention. A column-major
 // (rows x cols, ld=rows) buffer is bit-identical to a row-major
@@ -22,12 +23,10 @@
 // Tile configurations are copied verbatim from CK's own tuned gfx11 WMMA lists
 // in library/src/tensor_operation_instance/gpu/gemm_universal/
 // device_gemm_wmma_universal_f16_f16_f16/{mk_kn,mk_nk}_mn.hpp, plus the
-// single-relaxation variants noted below. bf16 reuses them unchanged: CK's
-// bf16 lists carry the same numbers. The fp32 DL tiles come from
-// gpu/gemm/device_gemm_dl_f32_f32_f32_{mk_kn,mk_nk}_mn_instance.cpp.
+// single-relaxation variants noted below.
 //
 // There is deliberately no all-scalar catch-all instance: one measures 30-50x
-// slower than the tuned instances, which is worse than the hipBLASLt fallback a
+// slower than the tuned instances, which is worse than the reference fallback a
 // caller reaches by way of the non-zero return.
 
 #include "hip_custom_kernels.h"
@@ -39,15 +38,13 @@
 #include "ck/ck.hpp"
 #include "ck/stream_config.hpp"
 #include "ck/tensor_operation/gpu/device/gemm_specialization.hpp"
-#include "ck/tensor_operation/gpu/device/impl/device_batched_gemm_multiple_d_dl.hpp"
 #include "ck/tensor_operation/gpu/device/impl/device_batched_gemm_multiple_d_wmma_cshuffle_v3.hpp"
 #include "ck/tensor_operation/gpu/element/element_wise_operation.hpp"
 
 namespace {
 
-using F16  = ck::half_t;
-using BF16 = ck::bhalf_t;
-using F32  = float;
+using F16 = ck::half_t;
+using F32 = float;
 
 using Row = ck::tensor_layout::gemm::RowMajor;
 using Col = ck::tensor_layout::gemm::ColumnMajor;
@@ -55,7 +52,6 @@ using Col = ck::tensor_layout::gemm::ColumnMajor;
 using Empty_Tuple = ck::Tuple<>;
 using Row_Tuple   = ck::Tuple<Row>;
 using F16_Tuple   = ck::Tuple<F16>;
-using BF16_Tuple  = ck::Tuple<BF16>;
 using PassThrough = ck::tensor_operation::element_wise::PassThrough;
 using Add         = ck::tensor_operation::element_wise::Add;
 using Scale       = ck::tensor_operation::element_wise::Scale;
@@ -65,8 +61,6 @@ using S = ck::Sequence<Is...>;
 
 static constexpr auto GemmMNKPadding =
     ck::tensor_operation::device::GemmSpecialization::MNKPadding;
-static constexpr auto GemmMNPadding =
-    ck::tensor_operation::device::GemmSpecialization::MNPadding;
 static constexpr auto Intrawave = ck::BlockGemmPipelineScheduler::Intrawave;
 static constexpr auto Interwave = ck::BlockGemmPipelineScheduler::Interwave;
 static constexpr auto V1        = ck::BlockGemmPipelineVersion::v1;
@@ -205,73 +199,6 @@ static constexpr auto V3        = ck::BlockGemmPipelineVersion::v3;
                                                                          ABDATA,         \
                                                                          ABDATA>
 
-// ------------------------------------------------------------- fp32 DL tiles
-
-// A Row / B Row.
-#define DKN_1()                                                                            \
-    256, 128, 128, 16, 2, 4, 4, 1, S<8, 2>, S<8, 2>, S<8, 1, 1, 2>, S<2, 1, 128, 1>,       \
-        S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>, S<1, 2, 0, 3>, S<1, 1, 1, 2>,         \
-        S<2, 1, 4, 2>, S<8, 1, 32, 1>, S<0, 3, 1, 2>, S<0, 3, 1, 2>, S<1, 1, 4, 1>,        \
-        S<0, 3, 1, 2>, S<1, 1, 4, 2>, S<0, 1, 2, 3, 4, 5>, 5, 1
-#define DKN_2()                                                                            \
-    256, 128, 128, 16, 2, 4, 4, 1, S<4, 4>, S<4, 4>, S<8, 1, 1, 2>, S<2, 1, 128, 1>,       \
-        S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>, S<1, 2, 0, 3>, S<1, 1, 1, 2>,         \
-        S<2, 1, 4, 2>, S<8, 1, 32, 1>, S<0, 3, 1, 2>, S<0, 3, 1, 2>, S<1, 1, 4, 1>,        \
-        S<0, 3, 1, 2>, S<1, 1, 4, 2>, S<0, 1, 2, 3, 4, 5>, 5, 1
-#define DKN_3()                                                                            \
-    256, 128, 128, 16, 2, 4, 4, 1, S<2, 8>, S<2, 8>, S<8, 1, 1, 2>, S<2, 1, 128, 1>,       \
-        S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>, S<1, 2, 0, 3>, S<1, 1, 1, 2>,         \
-        S<2, 1, 4, 2>, S<8, 1, 32, 1>, S<0, 3, 1, 2>, S<0, 3, 1, 2>, S<1, 1, 4, 1>,        \
-        S<0, 3, 1, 2>, S<1, 1, 4, 2>, S<0, 1, 2, 3, 4, 5>, 5, 1
-#define DKN_4()                                                                            \
-    128, 128, 64, 16, 2, 4, 4, 1, S<8, 2>, S<4, 2>, S<8, 1, 2, 2>, S<2, 1, 64, 1>,         \
-        S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>, S<1, 2, 0, 3>, S<1, 1, 1, 2>,         \
-        S<2, 1, 8, 2>, S<8, 1, 8, 1>, S<0, 3, 1, 2>, S<0, 3, 1, 2>, S<1, 1, 4, 1>,         \
-        S<0, 3, 1, 2>, S<1, 1, 4, 2>, S<0, 1, 2, 3, 4, 5>, 5, 1
-
-// A Row / B Col.
-#define DNK_1()                                                                            \
-    256, 128, 128, 16, 2, 4, 4, 1, S<8, 2>, S<8, 2>, S<8, 1, 1, 2>, S<2, 1, 128, 1>,       \
-        S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>, S<1, 2, 0, 3>, S<1, 1, 1, 2>,         \
-        S<8, 1, 1, 2>, S<2, 1, 128, 1>, S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>,       \
-        S<1, 2, 0, 3>, S<1, 1, 1, 2>, S<0, 1, 2, 3, 4, 5>, 5, 1
-#define DNK_2()                                                                            \
-    256, 128, 128, 16, 2, 4, 4, 1, S<4, 4>, S<4, 4>, S<8, 1, 1, 2>, S<2, 1, 128, 1>,       \
-        S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>, S<1, 2, 0, 3>, S<1, 1, 1, 2>,         \
-        S<8, 1, 1, 2>, S<2, 1, 128, 1>, S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>,       \
-        S<1, 2, 0, 3>, S<1, 1, 1, 2>, S<0, 1, 2, 3, 4, 5>, 5, 1
-#define DNK_3()                                                                            \
-    256, 128, 128, 16, 2, 4, 4, 1, S<2, 8>, S<2, 8>, S<8, 1, 1, 2>, S<2, 1, 128, 1>,       \
-        S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>, S<1, 2, 0, 3>, S<1, 1, 1, 2>,         \
-        S<8, 1, 1, 2>, S<2, 1, 128, 1>, S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>,       \
-        S<1, 2, 0, 3>, S<1, 1, 1, 2>, S<0, 1, 2, 3, 4, 5>, 5, 1
-#define DNK_4()                                                                            \
-    128, 128, 64, 16, 2, 4, 4, 1, S<8, 2>, S<4, 2>, S<8, 1, 2, 2>, S<2, 1, 64, 1>,         \
-        S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>, S<1, 2, 0, 3>, S<1, 1, 1, 2>,         \
-        S<8, 1, 2, 2>, S<2, 1, 32, 1>, S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>,        \
-        S<1, 2, 0, 3>, S<1, 1, 1, 2>, S<0, 1, 2, 3, 4, 5>, 5, 1
-
-// MNPadding lets arbitrary M/N run (real fp32 shapes are rarely 128-multiples);
-// its padded C write forces CThreadTransferDstScalarPerVector to 1, already
-// baked into the DKN_/DNK_ tile tails. K is still not padded, so K must stay a
-// multiple of K0PerBlock*K1 or IsSupportedArgument rejects and the caller falls
-// back. Tiles are CK's own MNPadding (irregular) list, verbatim.
-#define MAKE_DL_OP(ALAY, BLAY, DSLAY, DSDATA, CDEOP, TILE)                             \
-    ck::tensor_operation::device::DeviceBatchedGemmMultipleD_Dl<ALAY,                  \
-                                                               BLAY,                  \
-                                                               DSLAY,                 \
-                                                               Row,                   \
-                                                               F32,                   \
-                                                               F32,                   \
-                                                               F32,                   \
-                                                               DSDATA,                \
-                                                               F32,                   \
-                                                               PassThrough,           \
-                                                               PassThrough,           \
-                                                               CDEOP,                 \
-                                                               GemmMNPadding,         \
-                                                               TILE()>
-
 // ------------------------------------------------------------------ runners
 
 struct RunArgs {
@@ -329,23 +256,6 @@ int runBias(const RunArgs &r) {
   return 0;
 }
 
-// The DL op's MakeArgument is the WMMA one minus the trailing KBatch.
-template <typename Op, typename CDEOp>
-int runNoBiasDl(const RunArgs &r) {
-  auto arg = Op::MakeArgument(
-      r.a, r.b, {}, r.e, (ck::index_t)r.m, (ck::index_t)r.n, (ck::index_t)r.k,
-      (ck::index_t)r.batch, (ck::index_t)r.strideA, (ck::index_t)r.strideB, {},
-      (ck::index_t)r.strideE, (ck::index_t)r.batchStrideA,
-      (ck::index_t)r.batchStrideB, {}, (ck::index_t)r.batchStrideE,
-      PassThrough{}, PassThrough{}, makeCde<CDEOp>(r.alpha));
-  if (!Op::IsSupportedArgument(arg)) {
-    return 1;
-  }
-  auto inv = Op::MakeInvoker();
-  inv.Run(arg, StreamConfig{r.stream, false});
-  return 0;
-}
-
 // ----------------------------------------------------------------- registry
 
 enum Combo {
@@ -353,14 +263,6 @@ enum Combo {
   kTN_F32 = 1,      // transA=T, f32 out, alpha!=1 -> B' Col, Scale epilogue
   kTN_F16_BIAS = 2, // transA=T, f16 out, bias     -> B' Col, Add epilogue
   kNN_F16_BIAS = 3, // transA=N, f16 out, bias     -> A'/B' both Row, Add
-
-  kNN_BF16 = 4,      // bf16 in, mirrors kNN_F16
-  kTN_F32_BF16 = 5,  // bf16 in, f32 out, mirrors kTN_F32
-  kTN_BF16_BIAS = 6, // bf16 in, mirrors kTN_F16_BIAS
-  kNN_BF16_BIAS = 7, // bf16 in, mirrors kNN_F16_BIAS
-
-  kNN_F32 = 8,     // f32 in and out, no bias, Scale epilogue
-  kTN_F32_F32 = 9, // f32 in and out, no bias, B' Col, Scale
 };
 
 using RunFn = int (*)(const RunArgs &);
@@ -375,26 +277,10 @@ struct Entry {
 #define OP_C(TILE) MAKE_OP(F16, Row, Col, Row_Tuple, F16_Tuple, F16, Add, 8, TILE)
 #define OP_D(TILE) MAKE_OP(F16, Row, Row, Row_Tuple, F16_Tuple, F16, Add, 8, TILE)
 
-#define OP_E(TILE) MAKE_OP(BF16, Row, Row, Empty_Tuple, Empty_Tuple, BF16, PassThrough, 8, TILE)
-#define OP_F(TILE) MAKE_OP(BF16, Row, Col, Empty_Tuple, Empty_Tuple, F32, Scale, 4, TILE)
-#define OP_G(TILE) MAKE_OP(BF16, Row, Col, Row_Tuple, BF16_Tuple, BF16, Add, 8, TILE)
-#define OP_H(TILE) MAKE_OP(BF16, Row, Row, Row_Tuple, BF16_Tuple, BF16, Add, 8, TILE)
-
-#define OP_I(TILE) MAKE_DL_OP(Row, Row, Empty_Tuple, Empty_Tuple, Scale, TILE)
-#define OP_J(TILE) MAKE_DL_OP(Row, Col, Empty_Tuple, Empty_Tuple, Scale, TILE)
-
 #define ENT_A(TILE) {kNN_F16, &runNoBias<OP_A(TILE), PassThrough>},
 #define ENT_B(TILE) {kTN_F32, &runNoBias<OP_B(TILE), Scale>},
 #define ENT_C(TILE) {kTN_F16_BIAS, &runBias<OP_C(TILE), Add>},
 #define ENT_D(TILE) {kNN_F16_BIAS, &runBias<OP_D(TILE), Add>},
-
-#define ENT_E(TILE) {kNN_BF16, &runNoBias<OP_E(TILE), PassThrough>},
-#define ENT_F(TILE) {kTN_F32_BF16, &runNoBias<OP_F(TILE), Scale>},
-#define ENT_G(TILE) {kTN_BF16_BIAS, &runBias<OP_G(TILE), Add>},
-#define ENT_H(TILE) {kNN_BF16_BIAS, &runBias<OP_H(TILE), Add>},
-
-#define ENT_I(TILE) {kNN_F32, &runNoBiasDl<OP_I(TILE), Scale>},
-#define ENT_J(TILE) {kTN_F32_F32, &runNoBiasDl<OP_J(TILE), Scale>},
 
 const Entry kEntries[] = {
     // 0-9: NN, f16 out, no bias
@@ -413,24 +299,6 @@ const Entry kEntries[] = {
     // 32-39: NN, f16 out, bias
     ENT_D(TKN_1) ENT_D(TKN_2) ENT_D(TKN_3) ENT_D(TKN_4) ENT_D(TKN_5)
     ENT_D(TKN_6) ENT_D(TKN_7) ENT_D(TKN_8)
-
-    // 40-43: NN, bf16 out, no bias
-    ENT_E(TKN_1) ENT_E(TKN_2) ENT_E(TKN_3) ENT_E(TKN_4)
-
-    // 44-47: TN, bf16 in, f32 out, Scale
-    ENT_F(TNK_1) ENT_F(TNK_2) ENT_F(TNK_3) ENT_F(TNK_4)
-
-    // 48-51: TN, bf16 out, bias
-    ENT_G(TNK_1) ENT_G(TNK_2) ENT_G(TNK_3) ENT_G(TNK_4)
-
-    // 52-55: NN, bf16 out, bias
-    ENT_H(TKN_1) ENT_H(TKN_2) ENT_H(TKN_3) ENT_H(TKN_4)
-
-    // 56-59: NN, f32 in and out, no bias
-    ENT_I(DKN_1) ENT_I(DKN_2) ENT_I(DKN_3) ENT_I(DKN_4)
-
-    // 60-63: TN, f32 in and out, no bias
-    ENT_J(DNK_1) ENT_J(DNK_2) ENT_J(DNK_3) ENT_J(DNK_4)
 };
 
 constexpr int kNumEntries = (int)(sizeof(kEntries) / sizeof(kEntries[0]));
@@ -467,27 +335,6 @@ extern "C" int hip_ck_gemm_run(void *stream, int instance, const void *A,
     } else {
       combo = kNN_F16;
     }
-  } else if (abDtype == HIP_DTYPE_BFLOAT16 && dDtype == HIP_DTYPE_FLOAT32) {
-    if (!transA || bias) {
-      return 1;
-    }
-    combo = kTN_F32_BF16;
-  } else if (abDtype == HIP_DTYPE_BFLOAT16 && dDtype == HIP_DTYPE_BFLOAT16) {
-    if (bias) {
-      combo = transA ? kTN_BF16_BIAS : kNN_BF16_BIAS;
-    } else if (transA) {
-      return 1;
-    } else {
-      combo = kNN_BF16;
-    }
-  } else if (abDtype == HIP_DTYPE_FLOAT32 && dDtype == HIP_DTYPE_FLOAT32) {
-    // The DL op does not broadcast a stride-0 D along M', so an fp32 bias would
-    // only land on the first row; those shapes fall back rather than get a
-    // wrong result. fp32 without bias is served.
-    if (bias) {
-      return 1;
-    }
-    combo = transA ? kTN_F32_F32 : kNN_F32;
   } else {
     return 1;
   }
