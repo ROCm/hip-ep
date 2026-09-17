@@ -1538,15 +1538,19 @@ static bool matchTosaPad(hip::PadOp op, SmallVectorImpl<int64_t> &interleaved) {
 
   int64_t numAxes = axes.size();
   SmallVector<int64_t, 8> lo(rank, 0), hi(rank, 0);
+  SmallVector<bool, 8> padded(rank, false);
   for (int64_t i = 0; i < numAxes; ++i) {
     int64_t axis = axes[i];
     if (axis < 0)
       axis += rank;
     if (axis < 0 || axis >= rank)
       return false;
-    // A repeated axis would silently drop one of the two paddings.
-    if (lo[axis] != 0 || hi[axis] != 0)
+    // A repeated axis would silently drop one of the two paddings. Reading
+    // lo/hi back would miss the repeat when the earlier pad was (0, 0), so the
+    // axes seen are tracked separately.
+    if (padded[axis])
       return false;
+    padded[axis] = true;
     if (pads[i] < 0 || pads[i + numAxes] < 0)
       return false;
     lo[axis] = pads[i];
@@ -1562,22 +1566,55 @@ static bool matchTosaPad(hip::PadOp op, SmallVectorImpl<int64_t> &interleaved) {
   return true;
 }
 
+// tosa.pad takes the fill as a one-element tensor operand. hip carries it as a
+// rank-0 tensor, so it is rematerialized as a TOSA constant instead of being
+// reshaped, which means it has to be readable here. Only the output matching
+// `elementType` is written; an absent operand is ONNX's default fill of zero.
+// Both the legality predicate and the converter go through this, so an op is
+// never claimed on terms the rewrite cannot then meet.
+static bool matchPadConstant(hip::PadOp op, Type elementType, double &fpFill,
+                             int64_t &intFill) {
+  fpFill = 0.0;
+  intFill = 0;
+  bool isFloat = isa<FloatType>(elementType);
+  if (!isFloat && !isa<IntegerType>(elementType))
+    return false;
+
+  Value cval = op.getConstantValue();
+  if (!cval)
+    return true;
+
+  if (isFloat) {
+    DenseFPElementsAttr dense;
+    if (matchPattern(cval, m_Constant(&dense)) && dense.isSplat()) {
+      fpFill = dense.getSplatValue<APFloat>().convertToDouble();
+      return true;
+    }
+    FloatAttr scalar;
+    if (matchPattern(cval, m_Constant(&scalar))) {
+      fpFill = scalar.getValueAsDouble();
+      return true;
+    }
+    return false;
+  }
+
+  SmallVector<int64_t, 1> ints;
+  if (!extractConstantInts(cval, ints) || ints.size() != 1)
+    return false;
+  intFill = ints.front();
+  return true;
+}
+
 static bool isTosaExpressiblePad(hip::PadOp op) {
   SmallVector<int64_t, 8> interleaved;
   if (!matchTosaPad(op, interleaved))
     return false;
-  // tosa.pad takes the fill as a one-element tensor operand. hip carries it as
-  // a rank-0 tensor, so it is rematerialized as a TOSA constant instead of
-  // being reshaped, which means it has to be constant.
-  if (Value cval = op.getConstantValue()) {
-    auto cvalType = dyn_cast<RankedTensorType>(cval.getType());
-    if (!cvalType)
-      return false;
-    Attribute unused;
-    if (!matchPattern(cval, m_Constant(&unused)))
-      return false;
-  }
-  return true;
+  // matchTosaPad has already established the result is a ranked tensor.
+  Type elementType =
+      cast<RankedTensorType>(op.getResult(0).getType()).getElementType();
+  double fpFill;
+  int64_t intFill;
+  return matchPadConstant(op, elementType, fpFill, intFill);
 }
 
 struct PadConverter final : public OpConversionPattern<hip::PadOp> {
@@ -1595,32 +1632,14 @@ struct PadConverter final : public OpConversionPattern<hip::PadOp> {
     Type elementType = resultType.getElementType();
     auto padConstType = RankedTensorType::get({1}, elementType);
 
-    Value padConst;
-    if (Value cval = op.getConstantValue()) {
-      if (isa<FloatType>(elementType)) {
-        DenseFPElementsAttr dense;
-        FloatAttr scalar;
-        if (matchPattern(cval, m_Constant(&dense)) && dense.isSplat())
-          padConst = createSplatFloat(
-              rewriter, loc, padConstType,
-              dense.getSplatValue<APFloat>().convertToDouble());
-        else if (matchPattern(cval, m_Constant(&scalar)))
-          padConst = createSplatFloat(rewriter, loc, padConstType,
-                                      scalar.getValueAsDouble());
-      } else if (isa<IntegerType>(elementType)) {
-        SmallVector<int64_t, 1> ints;
-        if (extractConstantInts(cval, ints) && ints.size() == 1)
-          padConst = createSplatInt(rewriter, loc, padConstType, ints.front());
-      }
-      if (!padConst)
-        return rewriter.notifyMatchFailure(
-            op, "pad constant_value must be a scalar constant");
-    } else {
-      // ONNX defaults the fill to zero.
-      padConst = isa<FloatType>(elementType)
-                     ? createSplatFloat(rewriter, loc, padConstType, 0.0)
-                     : createSplatInt(rewriter, loc, padConstType, 0);
-    }
+    double fpFill;
+    int64_t intFill;
+    if (!matchPadConstant(op, elementType, fpFill, intFill))
+      return rewriter.notifyMatchFailure(
+          op, "pad constant_value must be a scalar constant");
+    Value padConst = isa<FloatType>(elementType)
+                         ? createSplatFloat(rewriter, loc, padConstType, fpFill)
+                         : createSplatInt(rewriter, loc, padConstType, intFill);
 
     rewriter.replaceOpWithNewOp<tosa::PadOp>(
         op, resultType, adaptor.getData(),

@@ -112,6 +112,25 @@ func.func @pad_negative_axis(%ctx: !hip.context, %x: tensor<2x3xf32>,
   return %r : tensor<2x8xf32>
 }
 
+// An empty `axes` names no dimension to pad, so every dimension keeps its
+// zeros and the pad is an identity. That is the same thing the general path
+// produces, so it needs no case of its own.
+// CHECK-LABEL: func.func @pad_empty_axes
+// CHECK: %[[P:.*]] = tosa.const_shape {values = dense<0> : tensor<4xindex>}
+// CHECK: tosa.pad %arg1, %[[P]]
+// CHECK-NOT: hip.pad
+func.func @pad_empty_axes(%ctx: !hip.context, %x: tensor<2x3xf32>,
+                          %init: tensor<2x3xf32>) -> tensor<2x3xf32>
+    attributes {rock.kernel} {
+  %pads = arith.constant dense<> : tensor<0xi64>
+  %axes = arith.constant dense<> : tensor<0xi64>
+  %r = hip.pad(%ctx) ins(%x, %pads : tensor<2x3xf32>, tensor<0xi64>)
+                     axes(%axes : tensor<0xi64>)
+                     outs(%init : tensor<2x3xf32>)
+                     {mode = "constant"} : tensor<2x3xf32>
+  return %r : tensor<2x3xf32>
+}
+
 // The fill value becomes tosa.pad's one-element pad_const operand.
 // CHECK-LABEL: func.func @pad_with_cval
 // CHECK: %[[PC:.*]] = "tosa.const"() <{values = dense<2.500000e+00> : tensor<1xf32>}>
@@ -222,6 +241,59 @@ func.func @pad_negative_pads(%ctx: !hip.context, %x: tensor<1x4xf32>,
                      outs(%init : tensor<1x3xf32>)
                      {mode = "constant"} : tensor<1x3xf32>
   return %r : tensor<1x3xf32>
+}
+
+// ONNX requires the entries of `axes` to be distinct. A repeat would drop one
+// of the two paddings, and it has to be caught by axis rather than by reading
+// the accumulated pads back, since the earlier entry may itself be (0, 0).
+// CHECK-LABEL: func.func @pad_repeated_axis
+// CHECK: hip.pad
+// CHECK-NOT: tosa.pad
+func.func @pad_repeated_axis(%ctx: !hip.context, %x: tensor<2x3xf32>,
+                             %init: tensor<7x3xf32>) -> tensor<7x3xf32>
+    attributes {rock.kernel} {
+  %pads = arith.constant dense<[0, 2, 0, 3]> : tensor<4xi64>
+  %axes = arith.constant dense<[0, 0]> : tensor<2xi64>
+  %r = hip.pad(%ctx) ins(%x, %pads : tensor<2x3xf32>, tensor<4xi64>)
+                     axes(%axes : tensor<2xi64>)
+                     outs(%init : tensor<7x3xf32>)
+                     {mode = "constant"} : tensor<7x3xf32>
+  return %r : tensor<7x3xf32>
+}
+
+// The fill becomes a one-element tosa.pad operand, so a constant holding more
+// than one distinct value has nothing to collapse to. The legality predicate
+// has to decline it for the same reason the rewrite would, otherwise the op is
+// marked illegal and the pass fails on it.
+// CHECK-LABEL: func.func @pad_non_splat_cval
+// CHECK: hip.pad
+// CHECK-NOT: tosa.pad
+func.func @pad_non_splat_cval(%ctx: !hip.context, %x: tensor<1x2xf32>,
+                              %init: tensor<4x9xf32>) -> tensor<4x9xf32>
+    attributes {rock.kernel} {
+  %pads = arith.constant dense<[1, 3, 2, 4]> : tensor<4xi64>
+  %cval = arith.constant dense<[1.000000e+00, 2.000000e+00]> : tensor<2xf32>
+  %r = hip.pad(%ctx) ins(%x, %pads : tensor<1x2xf32>, tensor<4xi64>)
+                     cval(%cval : tensor<2xf32>)
+                     outs(%init : tensor<4x9xf32>)
+                     {mode = "constant"} : tensor<4x9xf32>
+  return %r : tensor<4x9xf32>
+}
+
+// A fill whose type does not match the tensor it fills is not read either.
+// CHECK-LABEL: func.func @pad_mistyped_cval
+// CHECK: hip.pad
+// CHECK-NOT: tosa.pad
+func.func @pad_mistyped_cval(%ctx: !hip.context, %x: tensor<4xi32>,
+                             %init: tensor<7xi32>) -> tensor<7xi32>
+    attributes {rock.kernel} {
+  %pads = arith.constant dense<[1, 2]> : tensor<2xi64>
+  %cval = arith.constant dense<2.500000e+00> : tensor<f32>
+  %r = hip.pad(%ctx) ins(%x, %pads : tensor<4xi32>, tensor<2xi64>)
+                     cval(%cval : tensor<f32>)
+                     outs(%init : tensor<7xi32>)
+                     {mode = "constant"} : tensor<7xi32>
+  return %r : tensor<7xi32>
 }
 
 // A computed `repeats` cannot become a !tosa.shape either.
