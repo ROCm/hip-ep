@@ -21,9 +21,10 @@ concurrency:
 
 env:
   # Pins (kept in lockstep with cmake/deps.txt).
-  # LLVM/MLIR/LLD are built from source at this upstream release tag; bumping it
-  # only invalidates the llvm-install cache.
-  LLVM_TAG: llvmorg-22.1.0
+  # LLVM/MLIR/LLD are built from source at this upstream revision; bumping it
+  # only invalidates the llvm-install cache. LLVM 23 is unreleased, so this is a
+  # commit rather than a release tag.
+  LLVM_TAG: 62b7cf9623fc310525f39ed69aaecc318a909731
   ONNXRUNTIME_VERSION: "1.27.0"
   # Space-separated microsoft/onnxruntime PR numbers `git apply`-ed on top of
   # the pinned tag during the from-source build (an empty list applies nothing;
@@ -150,8 +151,10 @@ jobs:
         run: |
           set -euo pipefail
           SRC="${{ runner.workspace }}/llvm-project"
-          git clone --depth 1 --branch "${{ env.LLVM_TAG }}" \
-            https://github.com/llvm/llvm-project.git "$SRC"
+          git init "$SRC"
+          git -C "$SRC" remote add origin https://github.com/llvm/llvm-project.git
+          git -C "$SRC" fetch --depth 1 origin "${{ env.LLVM_TAG }}"
+          git -C "$SRC" checkout FETCH_HEAD
           cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
             -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \

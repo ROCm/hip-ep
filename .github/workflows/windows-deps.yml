@@ -27,7 +27,8 @@ permissions:
   contents: read
 
 env:
-  LLVM_TAG: llvmorg-22.1.0
+  # LLVM 23 is unreleased, so this is an upstream commit rather than a tag.
+  LLVM_TAG: 62b7cf9623fc310525f39ed69aaecc318a909731
   ONNXRUNTIME_VERSION: "1.27.0"
   ONNXRUNTIME_PR_PATCHES: ""
   OGA_VERSION: "0.14.0"

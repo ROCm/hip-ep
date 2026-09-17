@@ -14,11 +14,15 @@
 #include "hip/Dialect/Transforms/Pipelines.h"
 
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
+#include "mlir/Conversion/ComplexToLLVM/ComplexToLLVM.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
 #include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVM.h"
 #include "mlir/Conversion/IndexToLLVM/IndexToLLVM.h"
+#include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
 #include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
 #include "mlir/Conversion/Passes.h"
+#include "mlir/Conversion/UBToLLVM/UBToLLVM.h"
+#include "mlir/Conversion/VectorToLLVM/ConvertVectorToLLVM.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Transforms/BufferDeallocationOpInterfaceImpl.h"
@@ -94,6 +98,17 @@ int main(int argc, char **argv) {
   mlir::arith::registerConvertArithToLLVMInterface(registry);
   mlir::cf::registerConvertControlFlowToLLVMInterface(registry);
   mlir::index::registerConvertIndexToLLVMInterface(registry);
+  // --convert-to-llvm dyn_casts every *loaded* dialect to
+  // ConvertToLLVMPatternInterface. A dialect that declares it as promised
+  // aborts the process when loaded without its extension ("promised by dialect
+  // 'ub' but never implemented") instead of just finding no patterns, so cover
+  // every upstream dialect this pipeline can load. Registering is a no-op for
+  // the ones that never do. `nvvm` and `openmp` also promise it but are
+  // unreachable from here, so their conversions stay unlinked.
+  mlir::ub::registerConvertUBToLLVMInterface(registry);
+  mlir::registerConvertComplexToLLVMInterface(registry);
+  mlir::registerConvertMathToLLVMInterface(registry);
+  mlir::vector::registerConvertVectorToLLVMInterface(registry);
   // `onnx` is claimed further down, once --onnx-dialect is parsed.
 
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
