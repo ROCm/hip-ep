@@ -248,6 +248,77 @@ func.func @reduce_mean_outlined_kernel(%data: tensor<2x8xf16>,
 
 // -----
 
+//===----------------------------------------------------------------------===//
+// Forms this pass does not claim. The ordered reductions and reduce_l2 are
+// legal by element type, so an unsupported one is left as a hip op for the
+// runtime lowering and the pass still succeeds rather than failing the whole
+// function. These share one chunk since none produce a diagnostic.
+//===----------------------------------------------------------------------===//
+
+// ONNX ReduceMax/ReduceMin accept unsigned types and OnnxToHip preserves them,
+// but TOSA integers are signless, so a ui8 255 would be read as -1 and lose a
+// maximum it should win. Sum and product are not gated this way: two's
+// complement add and multiply give the same bits either way.
+// CHECK-LABEL: func.func @reduce_max_unsigned
+// CHECK: hip.reduce_max
+// CHECK-NOT: tosa.reduce_max
+func.func @reduce_max_unsigned(%ctx: !hip.context, %data: tensor<2x8xui8>,
+                               %init: tensor<2x1xui8>) -> tensor<2x1xui8>
+    attributes {rock.kernel} {
+  %axes = arith.constant dense<[1]> : tensor<1xi64>
+  %r = hip.reduce_max(%ctx)
+         ins(%data, %axes : tensor<2x8xui8>, tensor<1xi64>)
+         outs(%init : tensor<2x1xui8>) : tensor<2x1xui8>
+  return %r : tensor<2x1xui8>
+}
+
+// CHECK-LABEL: func.func @reduce_min_unsigned
+// CHECK: hip.reduce_min
+// CHECK-NOT: tosa.reduce_min
+func.func @reduce_min_unsigned(%ctx: !hip.context, %data: tensor<2x8xui32>,
+                               %init: tensor<2x1xui32>) -> tensor<2x1xui32>
+    attributes {rock.kernel} {
+  %axes = arith.constant dense<[1]> : tensor<1xi64>
+  %r = hip.reduce_min(%ctx)
+         ins(%data, %axes : tensor<2x8xui32>, tensor<1xi64>)
+         outs(%init : tensor<2x1xui32>) : tensor<2x1xui32>
+  return %r : tensor<2x1xui32>
+}
+
+// TOSA's float tensor constraint is AnyFloat, so an f64 norm would satisfy the
+// verifier and then have no lowering. onnx.ReduceL2 permits f64 input, so this
+// is a form the pass has to decline rather than one that cannot arrive.
+// CHECK-LABEL: func.func @reduce_l2_f64
+// CHECK: hip.reduce_l2
+// CHECK-NOT: tosa.reduce_sum
+func.func @reduce_l2_f64(%ctx: !hip.context, %data: tensor<2x8xf64>,
+                         %init: tensor<2x1xf64>) -> tensor<2x1xf64>
+    attributes {rock.kernel} {
+  %axes = arith.constant dense<[1]> : tensor<1xi64>
+  %r = hip.reduce_l2(%ctx)
+         ins(%data, %axes : tensor<2x8xf64>, tensor<1xi64>)
+         outs(%init : tensor<2x1xf64>) : tensor<2x1xf64>
+  return %r : tensor<2x1xf64>
+}
+
+// The l2 expansion ends in tosa.rsqrt / tosa.reciprocal, which are float-only,
+// so an integer reduction has no spelling even though tosa.reduce_sum alone
+// would take one.
+// CHECK-LABEL: func.func @integer_l2
+// CHECK: hip.reduce_l2
+// CHECK-NOT: tosa.reduce_sum
+func.func @integer_l2(%ctx: !hip.context, %data: tensor<2x8xi32>,
+                      %init: tensor<2x1xi32>) -> tensor<2x1xi32>
+    attributes {rock.kernel} {
+  %axes = arith.constant dense<[1]> : tensor<1xi64>
+  %r = hip.reduce_l2(%ctx)
+         ins(%data, %axes : tensor<2x8xi32>, tensor<1xi64>)
+         outs(%init : tensor<2x1xi32>) : tensor<2x1xi32>
+  return %r : tensor<2x1xi32>
+}
+
+// -----
+
 func.func @dynamic_shape(%ctx: !hip.context, %data: tensor<?x8xf16>,
                          %init: tensor<?x1xf16>) -> tensor<?x1xf16>
     attributes {rock.kernel} {
@@ -297,18 +368,3 @@ func.func @integer_mean(%ctx: !hip.context, %data: tensor<2x8xi32>,
   return %r : tensor<2x1xi32>
 }
 
-// -----
-
-// The l2 expansion ends in tosa.rsqrt / tosa.reciprocal, which are float-only,
-// so an integer reduction has no spelling even though tosa.reduce_sum alone
-// would take one.
-func.func @integer_l2(%ctx: !hip.context, %data: tensor<2x8xi32>,
-                      %init: tensor<2x1xi32>) -> tensor<2x1xi32>
-    attributes {rock.kernel} {
-  %axes = arith.constant dense<[1]> : tensor<1xi64>
-  // expected-error @+1 {{failed to legalize operation 'hip.reduce_l2'}}
-  %r = hip.reduce_l2(%ctx)
-         ins(%data, %axes : tensor<2x8xi32>, tensor<1xi64>)
-         outs(%init : tensor<2x1xi32>) : tensor<2x1xi32>
-  return %r : tensor<2x1xi32>
-}
