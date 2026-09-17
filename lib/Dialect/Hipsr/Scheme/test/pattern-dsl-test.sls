@@ -1,6 +1,6 @@
 #!r6rs
 ;;===----------------------------------------------------------------------===;;
-;; Unit Tests for Pattern DSL
+;; Unit Tests for define-conversion-pattern
 ;;===----------------------------------------------------------------------===;;
 
 (library (test pattern-dsl-test)
@@ -11,66 +11,48 @@
           (mlir pattern-dsl))
 
   (define (run-tests)
-    (test-begin "pattern-dsl")
+    (test-begin "define-conversion-pattern")
 
-    ;;===------------------------------------------------------------------===;;
-    ;; Test Constraint Builders
-    ;;===------------------------------------------------------------------===;;
+    ;; Test: Pattern returns a procedure
+    (test-assert "returns a procedure"
+      (procedure? (define-conversion-pattern "test.op"
+                    '()
+                    (lambda (op operands-ref rewriter type-converter) #t))))
 
-    (test-assert "has-n-operands returns a procedure"
-      (procedure? (has-n-operands 1)))
-
-    (test-assert "has-n-results returns a procedure"
-      (procedure? (has-n-results 2)))
-
-    (test-assert "result-0-is-ranked-tensor returns a procedure"
-      (procedure? (result-0-is-ranked-tensor)))
-
-    ;;===------------------------------------------------------------------===;;
-    ;; Test Pattern Definition
-    ;;===------------------------------------------------------------------===;;
-
-    (test-assert "define-conversion-pattern returns a procedure"
-      (let ([pattern (define-conversion-pattern "test.op"
-                       (list (has-n-operands 1))
-                       (lambda (op operands-ref rewriter type-converter)
-                         #t))])
-        (procedure? pattern)))
-
-    (test-assert "pattern accepts 4 parameters"
+    ;; Test: Pattern accepts 4 parameters (op, operands-ref, rewriter, type-converter)
+    (test-equal "accepts 4 parameters and calls rewrite action"
       (let ([pattern (define-conversion-pattern "test.op"
                        '()
                        (lambda (op operands-ref rewriter type-converter)
-                         #t))])
-        (procedure? pattern)))
+                         (+ op operands-ref rewriter type-converter)))])
+        (pattern 1 2 3 4))
+      10)  ; 1+2+3+4 = 10
 
-    ;;===------------------------------------------------------------------===;;
-    ;; Test Pattern Application
-    ;;===------------------------------------------------------------------===;;
-
-    (test-equal "apply-patterns with empty list returns #f"
-      (apply-patterns '() 0 0 0 0)
+    ;; Test: Pattern returns #f when constraints fail
+    (test-equal "returns #f when constraint fails"
+      (let ([pattern (define-conversion-pattern "test.op"
+                       (list (lambda (op operands-ref rewriter type-converter) #f))
+                       (lambda (op operands-ref rewriter type-converter) #t))])
+        (pattern 0 0 0 0))
       #f)
 
-    (test-equal "apply-patterns with false pattern returns #f"
-      (let ([pattern (lambda (op operands-ref rewriter type-converter) #f)])
-        (apply-patterns (list pattern) 0 0 0 0))
-      #f)
+    ;; Test: Pattern calls rewrite action when all constraints pass
+    (test-equal "calls rewrite action when all constraints pass"
+      (let ([pattern (define-conversion-pattern "test.op"
+                       (list (lambda (op operands-ref rewriter type-converter) #t)
+                             (lambda (op operands-ref rewriter type-converter) #t))
+                       (lambda (op operands-ref rewriter type-converter) 'success))])
+        (pattern 0 0 0 0))
+      'success)
 
-    (test-equal "apply-patterns with true pattern returns #t"
-      (let ([pattern (lambda (op operands-ref rewriter type-converter) #t)])
-        (apply-patterns (list pattern) 0 0 0 0))
-      #t)
-
-    (test-equal "apply-pattern with matching pattern returns #t"
-      (let ([pattern (lambda (op operands-ref rewriter type-converter) #t)])
-        (apply-pattern pattern 0 0 0 0))
-      #t)
-
-    (test-equal "apply-pattern with non-matching pattern returns #f"
-      (let ([pattern (lambda (op operands-ref rewriter type-converter) #f)])
-        (apply-pattern pattern 0 0 0 0))
-      #f)
+    ;; Test: Pattern returns result of rewrite action
+    (test-equal "returns result of rewrite action"
+      (let ([pattern (define-conversion-pattern "test.op"
+                       '()
+                       (lambda (op operands-ref rewriter type-converter)
+                         (list op operands-ref rewriter type-converter)))])
+        (pattern 'a 'b 'c 'd))
+      '(a b c d))
 
     (test-end))
 
