@@ -11,6 +11,7 @@
 (display "╚════════════════════════════════════════╝\n")
 
 ;; Run test suites
+;; Note: pattern-dsl-test requires FFI bindings (run via hip-mlir-opt)
 (run-tests)
 
-(display "✓ All tests completed\n\n")
+(display "✓ All test suites completed\n\n")
