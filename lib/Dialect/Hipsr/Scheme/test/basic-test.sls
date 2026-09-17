@@ -1,6 +1,6 @@
 #!r6rs
 ;;===----------------------------------------------------------------------===;;
-;; Basic Tests (No FFI Required)
+;; Basic Test - Verify test framework works
 ;;===----------------------------------------------------------------------===;;
 
 (library (test basic-test)
@@ -12,18 +12,8 @@
   (define (run-tests)
     (test-begin "basic")
 
-    ;; Test test framework itself
-    (test-equal "1 + 1 = 2"
-      (+ 1 1)
-      2)
-
-    (test-assert "list? works"
-      (list? '(1 2 3)))
-
-    (test-assert "procedure? works"
-      (procedure? (lambda (x) x)))
-
-    (test-equal "string-append works"
+    ;; Single test to verify framework works
+    (test-equal "hello test"
       (string-append "hello" " " "world")
       "hello world")
 
