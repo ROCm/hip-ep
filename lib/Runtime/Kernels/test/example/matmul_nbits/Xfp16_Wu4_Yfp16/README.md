@@ -23,20 +23,28 @@ make clean
 
 - **Categorical, always full**: `group_size` in `{32,64,128}` x zero-points
   `{on,off}` x dtype `{fp16,fp32}` -- 12 combos, every tier.
-- **Typical shapes, thinned by tier**: tier3 (default, 4 shapes) = decode
-  `M=1` at two real model layer sizes (`K=4096,N=11008` FFN-ish;
-  `K=2880,N=5120` attn-proj-ish, which also exercises the group_size
-  zero-padding path since 2880 isn't a multiple of 64/128) plus two smaller
-  prefill-representative shapes (`M=128` and `M=512` at `K=512,N=1024`).
-  tier2 drops the second decode shape (3 shapes); tier1 keeps just the first
-  decode shape and the `M=512` prefill shape (2 shapes, "1 decode + 1
-  prefill"). The `M=128/512` shapes are deliberately smaller than a real FFN
-  layer -- the CPU reference is a plain `O(M*K*N)` triple loop with no BLAS,
-  so `M=512` at real FFN size (`K=4096,N=11008`) would take the reference
-  alone minutes-to-hours; see the comment above `genCase()` in the cpp.
+- **Typical shapes, thinned by tier**: tier3 (default, 12 shapes) = M in
+  `{1,16,64,128,512}` (decode/GEMV through several prefill points)
+  round-robined -- not a full M x KN cross -- across 4 representative real
+  layer `(K,N)` families: FFN gate/up-proj (`K=4096,N=11008`), attn-proj
+  (`K=2880,N=5120`, which also exercises the group_size zero-padding path
+  since 2880 isn't a multiple of 64/128), FFN down-proj (`K=11008,N=4096`),
+  and a square o-proj/attn-combine shape (`K=4096,N=4096`). `M=1` (decode,
+  cheap) touches all 4 families; `M=16/128` touch gate/up-proj + attn-proj;
+  `M=64/512` touch down-proj + o-proj -- every `M` and every `(K,N)` family
+  appears at least once without paying for the full `5x4=20`-shape cross
+  (which would multiply the already-12-way categorical cross to 240
+  cases/leaf). tier2 (8 shapes) keeps all 4 `M=1` families plus one mid-`M`
+  point per remaining `M`; tier1 (2 shapes) keeps just the smallest `M=1`
+  family and one `M>1` point ("1 decode + 1 prefill"). Every shape is ALSO
+  crossed with the full 12-way categorical set in `buildCases()`, so the
+  shape-list size directly multiplies total CPU-reference cost by 12 -- the
+  reference (`genCase()`'s `O(M*K*N)` triple loop, no BLAS) is now
+  multithreaded over `N` so this wider set stays affordable; see the comment
+  above `genCase()` in the cpp.
 
 `COVERAGE=1|2|3` (`make test COVERAGE=N` or env `HIPDNN_UT_COVERAGE`) only
-picks how many typical shapes run (2/3/4); it never drops a group_size/
+picks how many typical shapes run (2/8/12); it never drops a group_size/
 zero-points/dtype combo. At startup the exe prints `coverage=N -> running
 <n> matmul_nbits cases`. No human edits a shape list -- there is no
 `shapes.csv` or `gen_data.py` in this leaf.

@@ -23,14 +23,16 @@ make clean
 models -- gpt-oss-20b full/sliding/smooth, llama-3.1-8b, llama-3.2-1b,
 qwen2.5-14b -- plus a geometry sweep over MHA (HpG==1) and GQA (HpG in
 {2,8,16}) x head_dim in {64,128,256}), which run in full at **every**
-`COVERAGE` tier. Crossed with that is `kLens`, a small typical
-context-length list: tier3 (default) = `{512, 2048, 8192}`, tier2 =
-`{512, 8192}`, tier1 = `{2048}` alone. `COVERAGE=1|2|3` (`make test
-COVERAGE=N` or env `HIPDNN_UT_COVERAGE`) only picks which of those lengths
-run; it never drops a categorical situation. At startup the exe prints
-`coverage=N -> running <n> typical length(s) x 13 categorical case(s) = <n*13>
-gqa_decode cases`. No human edits a shape list -- there is no `shapes.csv` or
-`gen_data.py` in this leaf.
+`COVERAGE` tier. Crossed with that is `kLens`, a typical context-length list
+widened to also cover a short/interactive decode length: tier3 (default) =
+`{128, 512, 2048, 8192}`, tier2 = `{128, 2048, 8192}`, tier1 = `{2048}`
+alone. `COVERAGE=1|2|3` (`make test COVERAGE=N` or env `HIPDNN_UT_COVERAGE`)
+only picks which of those lengths run; it never drops a categorical
+situation. At startup the exe prints `coverage=N -> running <n> typical
+length(s) x 13 categorical case(s) = <n*13> gqa_decode cases`. No human
+edits a shape list -- there is no `shapes.csv` or `gen_data.py` in this
+leaf. Decode's reference cost scales ~linearly with context length (one
+query against `eff` keys), so no threading was needed here.
 
 `MODE=auto` (default): `lut` if `hip/autotune/gqa/lut/<arch>.fb` exists for
 the arch in `OFFLOAD`, else `autotune`. `MODE=lut` forces it (warns + falls

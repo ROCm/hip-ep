@@ -23,19 +23,21 @@ make clean
 `test_gqa_prefill_i8.cpp`'s `main()` has 8 named geometries (MHA d64, MHA
 d128, GQA2 d128, llama-3.2-1b, llama-3.1-8b, psu_orc_211, gpt-oss-20b,
 llama-3-70b), which run in full at **every** `COVERAGE` tier. Crossed with
-that is a small typical prompt-length list: tier3 (default) =
-`{256, 512, 1024}`, tier2 = `{256, 1024}`, tier1 = `{512}` alone.
+that is a typical prompt-length list: tier3 (default) =
+`{128, 256, 512, 1024, 2048}`, tier2 = `{256, 1024}`, tier1 = `{512}` alone.
 `COVERAGE=1|2|3` (`make test COVERAGE=N` or env `HIPDNN_UT_COVERAGE`) only
 picks which of those lengths run. At startup the exe prints `coverage=N ->
 running <n> typical length(s) x 8 categorical case(s) = <n*8>
 gqa_prefill_i8 cases`. No human edits a shape list -- there is no
 `shapes.csv` or `gen_data.py` in this leaf.
 
-These lengths are deliberately shorter than the fp16 prefill leaf's 2048
-ceiling: this leaf runs *every* named shape (including the `H=64` ones) at
-*every* length and computes two `O(sq^2)` causal-attention CPU references per
-case (i8 + fp16), unlike the fp16 leaf's curated one-case-per-shape list --
-`sq=4096` at `H=64` made the full 8x3 sweep take minutes.
+This leaf runs *every* named shape (including the `H=64` ones) at *every*
+length and computes two `O(sq^2)` causal-attention CPU references per case
+(i8 + fp16), unlike the fp16 leaf's curated one-case-per-shape list. Both
+references (`cpu_reference_i8`, `cpu_reference_fp16`) are now multithreaded
+over `(batch, query-head)` pairs (`forEachBH()`), which is what makes adding
+`128` (short) and `2048` (long) to the length list affordable without a
+full-cross budget blowup.
 
 `MODE=auto` (default): `lut` if `hip/autotune/gqa/lut/<arch>.fb` exists for
 the arch in `OFFLOAD`, else `autotune`. `MODE=lut` forces it (warns + falls

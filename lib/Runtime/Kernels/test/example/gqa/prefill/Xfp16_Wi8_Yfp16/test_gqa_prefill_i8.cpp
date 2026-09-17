@@ -30,6 +30,7 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -39,6 +40,7 @@
 #include <fstream>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 // ---- Tiny inline coverage-tier resolver (replaces example/common/coverage.h) ----
@@ -65,10 +67,12 @@ inline int resolveCoverageTier(int argc, char** argv, int default_tier = 3) {
 // never has to survive hipcc's Windows -D quoting (which mangles embedded
 // quote characters).
 #include "lut_fb_path.h"
-extern "C" const unsigned char kGqaLutData[] = {
+static const unsigned char kLutBlob0[] = {
 #embed HIPDNN_LUT_FB
 };
-extern "C" const size_t kGqaLutData_size = sizeof(kGqaLutData);
+extern "C" const unsigned char* const kGqaLutBlobs[1]   = { kLutBlob0 };
+extern "C" const size_t               kGqaLutBlobSizes[1] = { sizeof(kLutBlob0) };
+extern "C" const size_t               kGqaLutBlobCount    = 1;
 #endif
 
 // KV-cache dtype ABI (mirrors hip_kv_dtype_t in hip_custom_kernels.h).
@@ -100,6 +104,34 @@ extern "C" int hip_gqa_flash_prefill_v2(
 
 struct Case { const char* name; int B, H, G, D, sq; };
 
+// Runs `body(b, hq)` for every (batch, query-head) pair, threaded across
+// std::thread::hardware_concurrency() workers (each pair is fully
+// independent) so the wider sq coverage below stays inside the shared
+// ~30 min tier3 budget across all 9 UT leaves.
+template <typename Fn>
+static void forEachBH(int B, int H, Fn&& body) {
+  const int total = B * H;
+  auto run = [&](int idx0, int idx1) {
+    for (int idx = idx0; idx < idx1; ++idx) body(idx / H, idx % H);
+  };
+  const unsigned hw = std::thread::hardware_concurrency();
+  const unsigned nthreads = std::min<unsigned>(hw ? hw : 4u,
+                                                total > 0 ? static_cast<unsigned>(total) : 1u);
+  if (nthreads <= 1 || total < 2) {
+    run(0, total);
+  } else {
+    std::vector<std::thread> pool;
+    const int chunk = (total + static_cast<int>(nthreads) - 1) / static_cast<int>(nthreads);
+    for (unsigned t = 0; t < nthreads; ++t) {
+      const int i0 = static_cast<int>(t) * chunk;
+      const int i1 = std::min(total, i0 + chunk);
+      if (i0 >= i1) break;
+      pool.emplace_back(run, i0, i1);
+    }
+    for (auto& th : pool) th.join();
+  }
+}
+
 // CPU fp32 causal GQA over an INT8 BNSD cache + per-channel scale. Q BSHD.
 static void cpu_reference_i8(const std::vector<float>& Q,
                              const std::vector<int8_t>& K_i8,
@@ -109,9 +141,8 @@ static void cpu_reference_i8(const std::vector<float>& Q,
                              std::vector<float>& O, int B, int H, int G, int D,
                              int sq, int max_seq, float scale) {
   const int HPG = H / G;
-  std::vector<float> s(sq);
-  for (int b = 0; b < B; ++b)
-    for (int hq = 0; hq < H; ++hq) {
+  forEachBH(B, H, [&](int b, int hq) {
+      std::vector<float> s(sq);
       const int hkv = hq / HPG;
       const float* ks = &kscale[(size_t)hkv * D];
       const float* vs = &vscale[(size_t)hkv * D];
@@ -136,7 +167,7 @@ static void cpu_reference_i8(const std::vector<float>& Q,
           for (int e = 0; e < D; ++e) o[e] += w * ((float)vp[e] * vs[e]);
         }
       }
-    }
+  });
 }
 
 // CPU fp32 causal GQA over the original fp16 (as fp32) BNSD K/V (quant-error ref).
@@ -146,9 +177,8 @@ static void cpu_reference_fp16(const std::vector<float>& Q,
                                int B, int H, int G, int D, int sq, int max_seq,
                                float scale) {
   const int HPG = H / G;
-  std::vector<float> s(sq);
-  for (int b = 0; b < B; ++b)
-    for (int hq = 0; hq < H; ++hq) {
+  forEachBH(B, H, [&](int b, int hq) {
+      std::vector<float> s(sq);
       const int hkv = hq / HPG;
       for (int i = 0; i < sq; ++i) {
         const float* q = &Q[((size_t)(b * sq + i) * H + hq) * D];
@@ -171,7 +201,7 @@ static void cpu_reference_fp16(const std::vector<float>& Q,
           for (int e = 0; e < D; ++e) o[e] += w * vp[e];
         }
       }
-    }
+  });
 }
 
 static double rel_l2(const std::vector<float>& a, const std::vector<float>& b) {
@@ -422,14 +452,14 @@ int main(int argc, char** argv) {
         {"gpt-oss-20b", 64, 8, 64},    {"llama-3-70b", 64, 8, 128},
     };
     // Typical prompt-length list -- NOT the full shape space. COVERAGE thins
-    // this list only; every tier still runs all 8 named geometries.
-    // Kept well below the fp16 leaf's 2048 ceiling: unlike that leaf (one
-    // curated case per shape), this leaf runs EVERY named shape (incl. the
-    // H=64 ones) x every sq, and computes TWO O(sq^2) causal-attention CPU
-    // references per case (i8 + fp16) -- at sq=4096/H=64/D=128 that alone is
-    // minutes of scalar CPU time. 1024 keeps the full 8-shape x 3-sq tier3
-    // sweep fast while still covering short/medium/longer prefill.
-    static const int kSqs3[] = {256, 512, 1024};
+    // this list only; every tier still runs all 8 named geometries. This
+    // leaf runs EVERY named shape (incl. the H=64 ones) x every sq, and
+    // computes TWO O(sq^2) causal-attention CPU references per case (i8 +
+    // fp16) -- both are now threaded over (batch, query-head) pairs (see
+    // forEachBH() above), which is what makes adding 128 (short) and 2048
+    // (long) affordable here without a full-cross budget blowup (8 shapes x
+    // 5 sq x 2 refs, previously 8 x 3 x 2).
+    static const int kSqs3[] = {128, 256, 512, 1024, 2048};
     static const int kSqs2[] = {256, 1024};
     static const int kSqs1[] = {512};
     const int coverage_tier = hipdnn_ep_test::resolveCoverageTier(argc, argv);

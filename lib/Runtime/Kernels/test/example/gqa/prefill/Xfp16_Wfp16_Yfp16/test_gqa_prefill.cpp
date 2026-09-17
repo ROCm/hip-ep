@@ -34,6 +34,7 @@
 #include <cstring>
 #include <fstream>
 #include <random>
+#include <thread>
 #include <vector>
 #include <string>
 
@@ -128,10 +129,12 @@ inline std::vector<std::string> captureLogLines(
 // path never has to survive hipcc's Windows -D quoting (which mangles
 // embedded quote characters).
 #include "lut_fb_path.h"
-extern "C" const unsigned char kGqaLutData[] = {
+static const unsigned char kLutBlob0[] = {
 #embed HIPDNN_LUT_FB
 };
-extern "C" const size_t kGqaLutData_size = sizeof(kGqaLutData);
+extern "C" const unsigned char* const kGqaLutBlobs[1]   = { kLutBlob0 };
+extern "C" const size_t               kGqaLutBlobSizes[1] = { sizeof(kLutBlob0) };
+extern "C" const size_t               kGqaLutBlobCount    = 1;
 
 // Lookup-only prefill entry: same ABI as hip_gqa_flash_prefill plus the
 // resolved v5/v7/v8 knobs (see gqa_kernel.hip).
@@ -231,7 +234,11 @@ struct Case {
   int window;
 };
 
-// CPU fp32 reference: causal GQA attention. Q/O BSHD, K/V cache BNSD.
+// CPU fp32 reference: causal GQA attention. Q/O BSHD, K/V cache BNSD. O(sq^2)
+// per (b,hq) -- threaded over the B*H (batch, query-head) pairs (each is
+// fully independent) so the wider sq/past additions below (including the new
+// sq=8192 rows) stay inside the shared ~30 min tier3 budget across all 9 UT
+// leaves. Each thread gets its own `scores` scratch buffer.
 static void cpu_reference(const std::vector<float>& Q,
                           const std::vector<float>& K,
                           const std::vector<float>& V, std::vector<float>& O,
@@ -240,9 +247,11 @@ static void cpu_reference(const std::vector<float>& Q,
                           const std::vector<float>& sink, int window) {
   const int HPG = H / G;
   const int total = past_len + sq;
-  std::vector<float> scores(total);
-  for (int b = 0; b < B; ++b) {
-    for (int hq = 0; hq < H; ++hq) {
+  auto bhRange = [&](int idx0, int idx1) {
+    std::vector<float> scores(total);
+    for (int idx = idx0; idx < idx1; ++idx) {
+      const int b = idx / H;
+      const int hq = idx % H;
       const int hkv = hq / HPG;
       for (int s = 0; s < sq; ++s) {
         const float* q = &Q[((size_t)(b * sq + s) * H + hq) * D];
@@ -277,6 +286,23 @@ static void cpu_reference(const std::vector<float>& Q,
         }
       }
     }
+  };
+  const int total_bh = B * H;
+  const unsigned hw = std::thread::hardware_concurrency();
+  const unsigned nthreads = std::min<unsigned>(hw ? hw : 4u,
+                                                total_bh > 0 ? static_cast<unsigned>(total_bh) : 1u);
+  if (nthreads <= 1 || total_bh < 2) {
+    bhRange(0, total_bh);
+  } else {
+    std::vector<std::thread> pool;
+    const int chunk = (total_bh + static_cast<int>(nthreads) - 1) / static_cast<int>(nthreads);
+    for (unsigned t = 0; t < nthreads; ++t) {
+      const int i0 = static_cast<int>(t) * chunk;
+      const int i1 = std::min(total_bh, i0 + chunk);
+      if (i0 >= i1) break;
+      pool.emplace_back(bhRange, i0, i1);
+    }
+    for (auto& th : pool) th.join();
   }
 }
 
@@ -580,15 +606,39 @@ int main(int argc, char** argv) {
       {"gpt_oss-win+bo",1, 64, 8,  64, 512,  8192, kSinkBoth,    false, 128},
       // Window at d==128 is implemented (prefill v5). Check relL2 like gpt_oss-win.
       {"llama-win-d128",1, 32, 8, 128, 512,  0,    kSinkNone,    false, 128},
+
+      // ---- Widened shape coverage: short (sq=128) and long (sq=8192, pure
+      // prefill) prompts, appended so the existing 0-28 indices above are
+      // unchanged. sq=128 is cheap (O(sq^2) reference) so it is spread across
+      // most scenario types; sq=8192 pure-prefill (past=0, so this is the
+      // "long single prompt" case, distinct from the existing past=8192
+      // chunked-prefill rows above which keep sq short) is expensive even
+      // threaded, so only 2 representative (D=64, D=128) rows are added. ----
+      {"qwen3.6-d256",   1, 16, 2, 256, 128,  0,    kSinkNone,    false, 0},
+      {"gpt_oss-20b",    1, 64, 8,  64, 128,  0,    kSinkNone,    false, 0},
+      {"llama-3.1-8b",   1, 32, 8, 128, 128,  0,    kSinkNone,    false, 0},
+      {"gpt_oss-sink",   1, 64, 8,  64, 128,  0,    kSinkPerHead, false, 0},
+      {"gpt_oss-win",    1, 64, 8,  64, 128,  0,    kSinkNone,    false, 128},
+      {"gpt_oss-both",   1, 64, 8,  64, 128,  0,    kSinkBoth,    false, 0},
+      {"llama-win-d128", 1, 32, 8, 128, 128,  0,    kSinkNone,    false, 128},
+      {"llama-sink-d128",1, 32, 8, 128, 128,  0,    kSinkPerHead, true,  0},
+      {"gpt_oss-20b",    1, 64, 8,  64, 8192, 0,    kSinkNone,    false, 0},
+      {"llama-3.1-8b",   1, 32, 8, 128, 8192, 0,    kSinkNone,    false, 0},
   };
   const size_t kNumCases = sizeof(cases) / sizeof(cases[0]);
 
-  // tier1 (10 rows) still touches D{64,128,256}, every sink_mode, window
-  // on/off, chunked-prefill (past>0), and the d128-must-decline case.
-  static const size_t kTier1[] = {0, 3, 7, 9, 11, 13, 15, 17, 18, 25};
+  // tier1 (12 rows) still touches D{64,128,256}, every sink_mode, window
+  // on/off, chunked-prefill (past>0), and the d128-must-decline case; now
+  // also includes 2 of the new sq=128 rows (the cheapest shape) so tier1's
+  // "smallest shape per scenario" rule covers the widened range too.
+  static const size_t kTier1[] = {0, 3, 7, 9, 11, 13, 15, 17, 18, 25, 29, 30};
+  // tier2 (~65% by case count, but includes ALL the cheap sq=128 additions
+  // since they cost almost nothing -- see kTier2 vs tier3 wall time in
+  // RESULT.md) still excludes the 2 new expensive sq=8192 rows (kept
+  // tier3-only, a deliberate budget trade-off documented in RESULT.md).
   static const size_t kTier2[] = {0,  1,  3,  4,  6,  7,  9,  10, 11, 12,
                                   13, 14, 15, 16, 17, 18, 19, 20, 21, 25,
-                                  26, 28};
+                                  26, 28, 29, 30, 31, 32, 33, 34, 35, 36};
   const size_t* idxs = coverage_tier == 1 ? kTier1
                      : coverage_tier == 2 ? kTier2
                                           : nullptr;

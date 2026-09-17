@@ -62,10 +62,12 @@ inline int resolveCoverageTier(int argc, char** argv, int default_tier = 3) {
 // plain #define, not a data file) so the path never has to survive hipcc's
 // Windows -D quoting (which mangles embedded quote characters).
 #include "lut_fb_path.h"
-extern "C" const unsigned char kGqaLutData[] = {
+static const unsigned char kLutBlob0[] = {
 #embed HIPDNN_LUT_FB
 };
-extern "C" const size_t kGqaLutData_size = sizeof(kGqaLutData);
+extern "C" const unsigned char* const kGqaLutBlobs[1]   = { kLutBlob0 };
+extern "C" const size_t               kGqaLutBlobSizes[1] = { sizeof(kLutBlob0) };
+extern "C" const size_t               kGqaLutBlobCount    = 1;
 #endif
 
 // KV-cache dtype ABI (mirrors hip_kv_dtype_t in hip_custom_kernels.h).
@@ -583,10 +585,11 @@ int main(int argc, char** argv) {
         {"gpt-oss-20b",    64,  8,  64},
         {"llama-3-70b",    64,  8, 128},
     };
-    // Typical context-length list -- NOT the full shape space. COVERAGE
-    // thins this list only; every tier still runs all 11 named geometries.
-    static const int kLens3[] = {512, 2048, 8192};
-    static const int kLens2[] = {512, 8192};
+    // Typical context-length list (widened to also cover a short/interactive
+    // decode length) -- NOT the full shape space. COVERAGE thins this list
+    // only; every tier still runs all 11 named geometries.
+    static const int kLens3[] = {128, 512, 2048, 8192};
+    static const int kLens2[] = {128, 2048, 8192};
     static const int kLens1[] = {2048};
     const int coverage_tier = hipdnn_ep_test::resolveCoverageTier(argc, argv);
     const int* lens = coverage_tier == 1 ? kLens1

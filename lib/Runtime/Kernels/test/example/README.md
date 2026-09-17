@@ -6,16 +6,19 @@ No full-EP cmake.
 
 Repo-relative paths only. `HIP_SDK` and `OFFLOAD` come from the command line.
 
-## These are unit tests — small and fast, not a perf sweep
+## These are unit tests — comprehensive shapes, not a perf sweep
 
-A kernel unit test's job is to catch correctness regressions in minutes, not
-to characterize performance across the whole shape space (that is what
-`hip/autotune/<op>/tools/` is for). The coverage model is:
+A kernel unit test's job is to catch correctness regressions across a
+**comprehensive** shape surface in well under the ~30 min tier3 budget, not
+to characterize performance across the whole *continuous* shape space (that
+is what `hip/autotune/<op>/tools/` is for). The coverage model is:
 
 > **all categorical situations, fully** (every mode/dtype/flag the op
-> supports) **x a SMALL set of typical shapes** (a handful of representative
-> `(M,K,N)` / `(B,H,G,D,seq)` points — decode + a couple of prefill points),
-> **not the full continuous shape space.**
+> supports) **x a comprehensive set of typical shapes** (multiple M
+> including M=1 GEMV/decode and several M>1 prefill points, crossed with
+> multiple representative `(K,N)` / `(B,H,G,D,seq)` scenarios), **not the
+> full continuous shape space** (no blind `1..4096`-style ladder, and never a
+> giant perf shape like `N≈201088`, `M≈4096` at real FFN size).
 
 Concretely:
 
@@ -23,17 +26,27 @@ Concretely:
   TA/TB transpose, bias on/off, heads-per-group ratio, head_dim,
   sliding-window/head-sink/smooth-softmax, INT8-KV, …) are enumerated in
   full and run at **every** `COVERAGE` tier.
-- **Continuous axes** (M/K/N, sequence length) are a short, explicitly listed
-  set of typical values (e.g. matmul decode `M=1` + two prefill points over
-  2-3 real `(K,N)` layer shapes; GQA 2-3 typical context lengths) — never the
-  full `1..4096`-style ladder, and never a giant perf shape (`N≈201088`,
-  `M≈4096`, …). `COVERAGE=1|2|3` only thins how many of those typical values
-  run; it never drops a categorical situation.
+- **Continuous axes** (M/K/N, sequence length) are a comprehensive, explicitly
+  listed set of typical values — e.g. gemm/matmul_nbits M in
+  `{1,16,64,128,512[,1024]}` round-robined across several real `(K,N)` layer
+  families (gate/up-proj, down-proj, attn-proj, square); GQA a widened
+  typical context-length / prompt-length list (e.g. `{128,512,2048,8192}`)
+  — still never the full `1..16384`-style ladder, and never a giant perf
+  shape. `COVERAGE=1|2|3` only thins how many of those typical values run
+  (tier3 = the full comprehensive set, tier1 = a minimal fast subset); it
+  never drops a categorical situation.
 
-A tier3 (default) run of one leaf is on the order of **tens of cases**, not
-hundreds, and finishes in well under a minute; the whole 9-leaf suite at
-tier3 finishes in a few minutes. This is intentional and by design — a unit
-test does not need to, and should not try to, cover the whole shape space.
+A tier3 (default) run of one leaf is on the order of tens to ~150 cases, and
+the whole 9-leaf suite at tier3 is budgeted at **up to ~30 min total**
+(measured ~20-25 min in practice) — this is intentionally wider than a
+"finishes in a minute" smoke test, because the shape axis (M=1 vs M>1,
+multiple K/N/seq scenarios) needs real coverage too, not just the categorical
+axis. `COVERAGE=1` (tier1) stays a fast, seconds-to-low-minutes path for
+quick dev iteration. The CPU references that were plain single-threaded
+loops are now multithreaded (`std::thread`, chunked over the independent
+output rows/columns/query-heads) specifically so this wider shape set fits
+the budget — see each leaf's `test_<op>.cpp` and README for the threading
+details.
 
 ## Leaf name = tensor dtypes, not a single "fp16"
 
@@ -134,27 +147,41 @@ COVERAGE=N` (any leaf, or the top-level aggregator) builds and runs it.
 
 **Per op family:**
 
-- **gemm**: a hand-enumerated `cases[]` array in `test_gemm.cpp` (M/N/K x
-  TA/TB transpose x bias on/off x dtype path fp16/fp32, each row commented
-  with the dispatch path it targets, ~16 rows total) **is** the tier-3 set —
-  a blind M x N x K sweep would mostly re-test the same WMMA/GEMV/split-K
-  path a targeted case already covers. `kTier1`/`kTier2` are fixed index
-  subsets of that array chosen so every TA/TB/bias/dtype value still appears
-  at tier1.
+- **gemm**: a hand-enumerated `cases[]` array in `test_gemm.cpp` — M in
+  `{1,16,64,128,512,1024}` round-robined (not a full cross) across 5
+  representative `(K,N)` families (square, MLP gate/up-proj, MLP down-proj,
+  2 attn-proj sizes), 30 rows total, each commented with its `(ta,tb,dtype)`
+  combo — **is** the tier-3 set. `kTier1`/`kTier2` are fixed index subsets of
+  that array chosen so every TA/TB/bias/dtype value still appears at tier1
+  (6 rows) / tier2 (20 rows). The CPU reference (`cpuGemmF32`) is
+  multithreaded over M-rows. Every row's `(ta,tb,dtype)` triple is unique
+  within its `(K,N)` family across the whole grid — needed to route around a
+  discovered `hip_gemm` autotune-cache issue where reusing the same
+  `(N,K,ta,tb,dtype)` signature at a very different `M` in the same process
+  can return wrong results (out of scope to fix here; see the
+  `kernel_ut_coverage_wide` handoff `RESULT.md`).
 - **gqa decode/prefill (fp16)**: a fixed list of named real-model +
-  geometry-sweep cases (13 for decode, 29 hand-authored rows for prefill)
-  crossed with (decode) or fused with (prefill) a small typical
-  context-length / prompt-length list.
-- **gqa decode/prefill (i8)**: same idea, 11 / 8 named geometries x a small
-  typical length list.
+  geometry-sweep cases (13 for decode, 39 hand-authored rows for prefill,
+  widened from 29 with short `sq=128` and long pure-prefill `sq=8192` rows)
+  crossed with (decode) or fused with (prefill) a typical context-length /
+  prompt-length list (decode: `{128,512,2048,8192}`). Prefill's `O(sq^2)`
+  causal-attention CPU reference is multithreaded over `(batch,
+  query-head)` pairs.
+- **gqa decode/prefill (i8)**: same idea, 11 / 8 named geometries x a typical
+  length list (decode: `{128,512,2048,8192}`; prefill:
+  `{128,256,512,1024,2048}`). The i8 prefill leaf's two `O(sq^2)` CPU
+  references (i8-cache + fp16) are also multithreaded over `(batch,
+  query-head)` pairs.
 - **matmul_nbits** (all four bit-widths): `group_size {32,64,128} x
-  zero-points {on,off} x dtype {fp16,fp32}` (12 combos, always full) x 2-4
-  typical `(M,K,N)` shapes — decode (`M=1`) at real model FFN/attention-proj
-  `(K,N)`, plus 1-2 smaller prefill-representative shapes chosen small enough
-  that the in-process CPU reference (`O(M*K*N)`, no BLAS) stays fast. Real
-  full-size FFN `(K,N)` at `M=128/512` would make the naive CPU reference
-  alone take minutes-to-hours per case — see the comment above `genCase()` in
-  any `matmul_nbits/*/test_matmul_nbits*.cpp`.
+  zero-points {on,off} x dtype {fp16,fp32}` (12 combos, always full) x 12
+  typical `(M,K,N)` shapes — M in `{1,16,64,128,512}` round-robined (not a
+  full M x KN cross) across 4 representative real-model `(K,N)` layer
+  families (gate/up-proj, attn-proj, down-proj, o-proj/square). Every shape
+  is ALSO crossed with the full 12-way categorical set, so the shape-list
+  size directly multiplies CPU-reference cost by 12 — the reference
+  (`genCase()`'s `O(M*K*N)`, no BLAS) is now multithreaded over `N` to keep
+  this affordable; see the comment above `genCase()` in any
+  `matmul_nbits/*/test_matmul_nbits*.cpp`.
 
 A new op's test cpp should follow whichever of the above shapes fit it best:
 if the kernel's dispatch paths are better covered by a small hand-picked
@@ -199,11 +226,28 @@ inline stub.
 `test_<op>.cpp` has, guarded by `#ifdef HIPDNN_LUT_LINKED_EXTERNALLY`:
 
 ```cpp
+// gemm: single-blob ABI.
 #include "lut_fb_path.h"
-extern "C" const unsigned char kFooLutData[] = {
+extern "C" const unsigned char kGemmLutData[] = {
 #embed HIPDNN_LUT_FB
 };
-extern "C" const size_t kFooLutData_size = sizeof(kFooLutData);
+extern "C" const size_t kGemmLutData_size = sizeof(kGemmLutData);
+```
+
+`matmul_nbits` and `gqa` instead expose a **multi-blob** ABI (one blob per
+family-member arch a generic-ISA DLL might embed; each test leaf still only
+`#embed`s its own single `.fb`, wrapped as a 1-entry array):
+
+```cpp
+// matmul_nbits / gqa: multi-blob ABI.
+#include "lut_fb_path.h"
+static const unsigned char kLutBlob0[] = {
+#embed HIPDNN_LUT_FB
+};
+extern "C" const unsigned char* const kMatmulNbitsLutBlobs[1]   = { kLutBlob0 };
+extern "C" const size_t               kMatmulNbitsLutBlobSizes[1] = { sizeof(kLutBlob0) };
+extern "C" const size_t               kMatmulNbitsLutBlobCount    = 1;
+// (gqa: same shape, symbols kGqaLutBlobs / kGqaLutBlobSizes / kGqaLutBlobCount)
 ```
 
 `HIPDNN_LUT_FB` is a `#define` in a one-line Makefile-generated header
@@ -220,19 +264,23 @@ handles the same quoted `-D` fine; hipcc.exe's wrapper does not). Two other
   warning). Bumping to `-std=c++23` actually **breaks** the build on this
   toolchain (MSVC STL `<cmath>` vs Clang's HIP `<cmath>` `isfinite`
   overload conflict) — do not do it.
-- The `extern "C" const unsigned char kFooLutData[] = {...};` declaration
-  must **not** be wrapped in a shared `extern "C" { ... }` block with its
-  `_size` sibling — that form silently gets **internal** linkage from this
-  clang/MSVC-target configuration (no error, no warning; the symbol simply
-  never appears in the `.obj`, and the link fails with "undefined symbol" in
-  the *other* translation unit that references it). Use two separate
-  `extern "C" const ... = ...;` declarations, exactly like the snippet above
-  (this matches what the old `embed_lut.py` output already did, for the same
-  reason).
+- The `extern "C"` array declarations above (the single-blob pair, or the
+  multi-blob pointer-array/size-array/count triplet) must **not** be wrapped
+  in one shared `extern "C" { ... }` block — that form silently gets
+  **internal** linkage from this clang/MSVC-target configuration (no error,
+  no warning; the symbol simply never appears in the `.obj`, and the link
+  fails with "undefined symbol" in the *other* translation unit that
+  references it). Use separate `extern "C" const ... = ...;` statements,
+  exactly like the snippets above (this matches what the old
+  `embed_lut.py` output already did, for the same reason).
 
-Keep the exact resolver symbol names (`kGemmLutData`/`_size`,
-`kGqaLutData`/`_size`, `kMatmulNbitsLutData`/`_size`) — they are declared
-`extern "C"` in each op's unmodified `hip/autotune/<op>/<op>_autotune.cpp`.
+Keep the exact resolver symbol names — `gemm` still uses the single-blob
+`kGemmLutData`/`_size` pair. `matmul_nbits` and `gqa` use the multi-blob
+`k<Op>LutBlobs[]` / `k<Op>LutBlobSizes[]` / `k<Op>LutBlobCount` triplet
+(`kMatmulNbitsLutBlobs`/`kMatmulNbitsLutBlobSizes`/`kMatmulNbitsLutBlobCount`,
+`kGqaLutBlobs`/`kGqaLutBlobSizes`/`kGqaLutBlobCount`) — one blob = one array
+entry. They are declared `extern "C"` in each op's unmodified
+`hip/autotune/<op>/<op>_autotune.cpp`.
 
 For matmul_nbits and gemm the kernel calls `resolve()` itself, so linking the
 real resolver is enough. For GQA, `gqa_kernel.hip` does not call the resolver

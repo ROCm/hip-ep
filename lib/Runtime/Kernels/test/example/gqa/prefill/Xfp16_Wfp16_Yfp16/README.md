@@ -19,18 +19,28 @@ make clean
 
 ## Shape coverage (3 tiers)
 
-`test_gqa_prefill.cpp`'s `main()` has an explicit `cases[]` array (29 rows,
+`test_gqa_prefill.cpp`'s `main()` has an explicit `cases[]` array (39 rows,
 each commented with why it exists) -- a hand-picked set of (categorical
-situation, typical shape) pairs, same idea as gemm's `cases[]`.
-`COVERAGE=1|2|3` (default 3, `make test COVERAGE=N` or env
-`HIPDNN_UT_COVERAGE`) picks a fixed index subset of that array (`kTier1` 10
-rows, `kTier2` 22 rows, tier3 all 29) chosen so tier1 still touches every
-`D`(64/128/256)/sink-mode/window-on-off/chunked-prefill(`past>0`)/
-must-decline value. At startup the exe prints `coverage=N -> running
-<n>/29 gqa_prefill cases`. No human edits a shape list -- there is no
-`shapes.csv` or `gen_data.py` in this leaf.
+situation, typical shape) pairs, same idea as gemm's `cases[]`. Rows 0-28 are
+the original real-model/sink/window matrix (typical `sq` of 512/1000/2048,
+plus `past` up to 8192 for chunked prefill); rows 29-38 widen the shape
+coverage with cheap `sq=128` short-prompt variants across most scenario
+types, plus 2 `sq=8192` **pure** long-prompt rows (`past=0`, i.e. one very
+long single prompt, as opposed to the existing `past=8192` chunked-prefill
+rows which keep `sq` short). The CPU reference (`cpu_reference`, `O(sq^2)`
+causal attention) is now multithreaded over `(batch, query-head)` pairs so
+this wider range -- especially the 2 `sq=8192` rows -- stays inside the
+shared ~30 min tier3 budget. `COVERAGE=1|2|3` (default 3, `make test
+COVERAGE=N` or env `HIPDNN_UT_COVERAGE`) picks a fixed index subset of that
+array (`kTier1` 12 rows, `kTier2` 30 rows, tier3 all 39) chosen so tier1
+still touches every `D`(64/128/256)/sink-mode/window-on-off/chunked-prefill
+(`past>0`)/must-decline value, plus 2 of the cheap `sq=128` rows; tier2 adds
+all 8 `sq=128` rows (cheap) but deliberately excludes the 2 expensive
+`sq=8192` rows (tier3-only, a budget trade-off). At startup the exe prints
+`coverage=N -> running <n>/39 gqa_prefill cases`. No human edits a shape
+list -- there is no `shapes.csv` or `gen_data.py` in this leaf.
 
-The 29 cases cover:
+The original 29 cases (rows 0-28) cover:
 - Real model geometries: Qwen3.6-35B-A3B (d=256, v8 kernel), gpt-oss-20b
   (d=64, v5), Llama-3.2-1B (d=64, v5), Llama-3.1-8B (d=128, v7).
 - Sequence lengths including one (`sq=1000`) deliberately off the 16-row Q
@@ -46,6 +56,12 @@ The 29 cases cover:
   window combined with the sink, and the full gpt-oss sliding-layer
   configuration (window + sink tensor + smooth together).
 - Window at d==128 (prefill v7 path), which does implement it.
+
+Rows 29-38 (widened coverage) add: short (`sq=128`) prompts across
+qwen3.6-d256, gpt_oss-20b, llama-3.1-8b, gpt_oss-sink, gpt_oss-win,
+gpt_oss-both, llama-win-d128, and the d128-sink-must-decline case; plus 2
+long pure-prefill (`sq=8192`, `past=0`) rows at D=64 (gpt_oss-20b) and D=128
+(llama-3.1-8b).
 
 `MODE=auto` (default): `lut` if `hip/autotune/gqa/lut/<arch>.fb` exists for
 the arch in `OFFLOAD`, else `autotune`. `MODE=lut` forces it (warns + falls

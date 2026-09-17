@@ -141,10 +141,12 @@ inline std::vector<std::string> captureLogLines(
 // path never has to survive hipcc's Windows -D quoting (which mangles
 // embedded quote characters).
 #include "lut_fb_path.h"
-extern "C" const unsigned char kGqaLutData[] = {
+static const unsigned char kLutBlob0[] = {
 #embed HIPDNN_LUT_FB
 };
-extern "C" const size_t kGqaLutData_size = sizeof(kGqaLutData);
+extern "C" const unsigned char* const kGqaLutBlobs[1]   = { kLutBlob0 };
+extern "C" const size_t               kGqaLutBlobSizes[1] = { sizeof(kLutBlob0) };
+extern "C" const size_t               kGqaLutBlobCount    = 1;
 #endif
 
 // Launcher under test (implemented in hip/gqa_kernel.hip).
@@ -723,11 +725,13 @@ int main(int argc, char** argv) {
     // B=1 single-stream decode. Categorical situations -- real models, a
     // geometry sweep over MHA (HpG==1) and GQA (HpG in {2,4,5,8,16}) x
     // head_dim in {64,128,256}, sliding-window/head-sink/smooth-softmax --
-    // are all 13 named rows below and run at EVERY tier. kLens is the small
-    // typical-context-length list; COVERAGE only thins that (tier3=all 3,
-    // tier2=2, tier1=1), NOT the full {512..32768} context-length ladder.
-    static const int kLens3[] = {512, 2048, 8192};
-    static const int kLens2[] = {512, 8192};
+    // are all 13 named rows below and run at EVERY tier. kLens is the
+    // typical-context-length list (widened to also cover a short/interactive
+    // decode length, not just medium/long); COVERAGE only thins that
+    // (tier3=all 4, tier2=3, tier1=1), NOT the full {512..32768}
+    // context-length ladder.
+    static const int kLens3[] = {128, 512, 2048, 8192};
+    static const int kLens2[] = {128, 2048, 8192};
     static const int kLens1[] = {2048};
     const int coverage_tier = hipdnn_ep_test::resolveCoverageTier(argc, argv);
     const int* lens = coverage_tier == 1 ? kLens1
