@@ -1902,34 +1902,34 @@ __global__ void gemm_padrow_copy_kernel(const T *__restrict__ src,
     dst[d0 + k] = src[s0 + k];
 }
 
-struct GemmPadKey {
-  const void *ptr;
-  int N, K, tb;
-  bool operator==(const GemmPadKey &o) const {
-    return ptr == o.ptr && N == o.N && K == o.K && tb == o.tb;
-  }
-};
-struct GemmPadKeyHash {
-  size_t operator()(const GemmPadKey &k) const {
-    size_t h = std::hash<const void *>{}(k.ptr);
-    h ^= std::hash<int>{}(k.N) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= std::hash<int>{}(k.K) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= std::hash<int>{}(k.tb) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    return h;
-  }
-};
-struct GemmPadEntry {
-  void *buf;
-  size_t bytes;
-  uint64_t lru;
-};
-
+/* One reusable scratch for the padded B copy (row-pad or K-extend), shared
+ * across every gemm call and grown to the largest single shape it sees -- the
+ * same pattern MatMulNBits uses (g_bpad_buf / ensureBPadBuffer). The padded B
+ * is a transient WMMA input, not persistent state, so it is REPACKED from the
+ * current B on every call. This deliberately replaces the former g_pad_map
+ * keyed by the raw B device pointer: that cache returned a stale padded copy
+ * whenever a caller freed B and the allocator recycled the address for a
+ * different tensor (a clean unit test that malloc/frees B per case, or any
+ * dynamic-B use), silently computing on the wrong weights. Repacking each call
+ * is a single strided copy, cheap next to the GEMM, and bounds the footprint to
+ * one shape instead of the sum of every padrow weight. */
 static std::mutex g_pad_mu;
-static std::unordered_map<GemmPadKey, GemmPadEntry, GemmPadKeyHash> g_pad_map;
-static size_t g_pad_total = 0;
-static uint64_t g_pad_clock = 0;
-static uint64_t g_pad_hits = 0, g_pad_misses = 0;
-static bool g_pad_disabled = false;
+static void *g_pad_buf = nullptr;
+static size_t g_pad_bytes = 0;
+
+static void *gemmEnsurePadScratch(size_t bytes) {
+  if (g_pad_buf && g_pad_bytes >= bytes)
+    return g_pad_buf;
+  if (g_pad_buf)
+    hipFree(g_pad_buf);
+  if (hipMalloc(&g_pad_buf, bytes) != hipSuccess) {
+    g_pad_buf = nullptr;
+    g_pad_bytes = 0;
+    return nullptr;
+  }
+  g_pad_bytes = bytes;
+  return g_pad_buf;
+}
 
 static size_t gemmPadRowMaxBytes() {
   static const size_t cap = [] {
@@ -1953,58 +1953,18 @@ static const T *gemmEnsurePaddedB(hipStream_t s, const T *B, int N, int K,
   if (cap == 0 || bytes > cap)
     return nullptr; /* padrow off, or one weight bigger than the whole cap */
 
-  GemmPadKey key{static_cast<const void *>(B), N, K, (int)sizeof(T)};
   std::lock_guard<std::mutex> lk(g_pad_mu);
-  if (g_pad_disabled)
+  void *buf = gemmEnsurePadScratch(bytes);
+  if (!buf)
     return nullptr;
-
-  auto it = g_pad_map.find(key);
-  if (it != g_pad_map.end()) {
-    it->second.lru = ++g_pad_clock;
-    ++g_pad_hits;
-    *out_ldb = ldb;
-    return static_cast<const T *>(it->second.buf);
-  }
-
-  /* Miss: hit-rate guard. If, after warming up, the caller keeps handing us
-   * new B pointers (B is a dynamic activation, not a reused weight), the copy
-   * never amortizes -- disable padrow process-wide and fall back. */
-  ++g_pad_misses;
-  const uint64_t total = g_pad_hits + g_pad_misses;
-  if (total >= 32 && g_pad_hits * 100 < total * 40) { /* <40% hit rate */
-    g_pad_disabled = true;
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[gemm] padrow disabled: hit-rate %llu/%llu too low (dynamic B)\n",
-        (unsigned long long)g_pad_hits, (unsigned long long)total);
-    return nullptr;
-  }
-
-  /* Evict LRU entries until the new buffer fits under the cap. */
-  while (g_pad_total + bytes > cap && !g_pad_map.empty()) {
-    auto victim = g_pad_map.begin();
-    for (auto i = g_pad_map.begin(); i != g_pad_map.end(); ++i)
-      if (i->second.lru < victim->second.lru)
-        victim = i;
-    hipFree(victim->second.buf);
-    g_pad_total -= victim->second.bytes;
-    g_pad_map.erase(victim);
-  }
-
-  void *buf = nullptr;
-  if (hipMalloc(&buf, bytes) != hipSuccess)
-    return nullptr;
+  /* Repack the CURRENT B into the shared scratch. The pad columns [K,ldb) only
+   * change the row stride and are never read by the GEMM, so they need no
+   * zeroing. */
   dim3 grid((K + 255) / 256 < 1 ? 1 : (K + 255) / 256, N);
   hipLaunchKernelGGL(HIP_KERNEL_NAME(gemm_padrow_copy_kernel<T>), grid,
                      dim3(256), 0, s, B, static_cast<T *>(buf), N, K, ldb);
-  if (hipGetLastError() != hipSuccess) {
-    hipFree(buf);
+  if (hipGetLastError() != hipSuccess)
     return nullptr;
-  }
-  g_pad_map[key] = GemmPadEntry{buf, bytes, ++g_pad_clock};
-  g_pad_total += bytes;
-  CUSTOM_KERNELS_DEBUG_LOG(
-      "[gemm] padrow: cached B=%p N=%d K=%d -> ldb=%d (%zu MB total)\n",
-      (const void *)B, N, K, ldb, g_pad_total >> 20);
   *out_ldb = ldb;
   return static_cast<const T *>(buf);
 }
@@ -2013,8 +1973,8 @@ static const T *gemmEnsurePaddedB(hipStream_t s, const T *B, int N, int K,
  * and the tail [K,K_pad) zero-filled, so a K%32!=0 shape (vision K=4304) can run
  * the fast BK=32 BC=false path instead of the 2x-barrier BK=16 tile. A keeps its
  * real stride (K): the A-load reads garbage in the [K,K_pad) tail, but B's zeros
- * null it (sum_k A*0 = 0), so no A copy is needed. Cached like padrow (weight
- * reuse); returns nullptr to fall back. Sets *out_kpad. The A over-read is <=
+ * null it (sum_k A*0 = 0), so no A copy is needed. Repacked into the shared
+ * padrow scratch each call; returns nullptr to fall back. Sets *out_kpad. The A over-read is <=
  * (K_pad-K)*2 bytes past the last row -- within the pooled/aligned A slack. */
 template <typename T>
 static const T *gemmEnsureKPaddedB(hipStream_t s, const T *B, int N, int K,
@@ -2027,51 +1987,20 @@ static const T *gemmEnsureKPaddedB(hipStream_t s, const T *B, int N, int K,
   if (cap == 0 || bytes > cap)
     return nullptr;
 
-  GemmPadKey key{static_cast<const void *>(B), N, K, -1 /* K-extend mode */};
   std::lock_guard<std::mutex> lk(g_pad_mu);
-  if (g_pad_disabled)
+  void *buf = gemmEnsurePadScratch(bytes);
+  if (!buf)
     return nullptr;
-  auto it = g_pad_map.find(key);
-  if (it != g_pad_map.end()) {
-    it->second.lru = ++g_pad_clock;
-    ++g_pad_hits;
-    *out_kpad = kpad;
-    return static_cast<const T *>(it->second.buf);
-  }
-  ++g_pad_misses;
-  const uint64_t total = g_pad_hits + g_pad_misses;
-  if (total >= 32 && g_pad_hits * 100 < total * 40) {
-    g_pad_disabled = true;
+  /* K-extend: the GEMM reads all kpad columns, so the tail [K,kpad) must be
+   * zero (sum_k A*0 = 0). Zero then repack the current B into the shared
+   * scratch each call. */
+  if (hipMemsetAsync(buf, 0, bytes, s) != hipSuccess)
     return nullptr;
-  }
-  while (g_pad_total + bytes > cap && !g_pad_map.empty()) {
-    auto victim = g_pad_map.begin();
-    for (auto i = g_pad_map.begin(); i != g_pad_map.end(); ++i)
-      if (i->second.lru < victim->second.lru)
-        victim = i;
-    hipFree(victim->second.buf);
-    g_pad_total -= victim->second.bytes;
-    g_pad_map.erase(victim);
-  }
-  void *buf = nullptr;
-  if (hipMalloc(&buf, bytes) != hipSuccess)
-    return nullptr;
-  if (hipMemsetAsync(buf, 0, bytes, s) != hipSuccess) {
-    hipFree(buf);
-    return nullptr;
-  }
   dim3 grid((K + 255) / 256 < 1 ? 1 : (K + 255) / 256, N);
   hipLaunchKernelGGL(HIP_KERNEL_NAME(gemm_padrow_copy_kernel<T>), grid,
                      dim3(256), 0, s, B, static_cast<T *>(buf), N, K, kpad);
-  if (hipGetLastError() != hipSuccess) {
-    hipFree(buf);
+  if (hipGetLastError() != hipSuccess)
     return nullptr;
-  }
-  g_pad_map[key] = GemmPadEntry{buf, bytes, ++g_pad_clock};
-  g_pad_total += bytes;
-  CUSTOM_KERNELS_DEBUG_LOG(
-      "[gemm] padK: cached B=%p N=%d K=%d -> kpad=%d (%zu MB total)\n",
-      (const void *)B, N, K, kpad, g_pad_total >> 20);
   *out_kpad = kpad;
   return static_cast<const T *>(buf);
 }
