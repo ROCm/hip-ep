@@ -7,14 +7,22 @@
 
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
+#include "hip/Dialect/Transforms/Passes.h"
 
+#include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
+#include "mlir/Conversion/ConvertToLLVM/ToLLVMPass.h"
+#include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
+#include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
 #include "mlir/Conversion/ShapeToStandard/ShapeToStandard.h"
 #include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/Passes.h"
+#include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Dialect/Shape/Transforms/Passes.h"
 #include "mlir/Pass/PassRegistry.h"
+
+#include "compilation_options_generated.h"
 
 // --hipsr-pipeline is equivalent to running these in order:
 //   --hipsr-add-context-arg
@@ -34,6 +42,16 @@
 //   --buffer-deallocation-pipeline
 //   --optimize-allocation-liveness
 //   --hipsr-externalize-constants
+//   --assign-op-state-slots
+//   --generate-op-state-init
+//   --expand-strided-metadata
+//   --lower-affine
+//   --convert-scf-to-cf
+//   --reconcile-unrealized-casts
+//   --hipsr-record-graph-io
+//   --convert-to-llvm
+//   --hipsr-main-graph-abi
+//   --generate-interface
 void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
                                      const HipsrPipelineOptions & /*options*/) {
   pm.addPass(createAddContextArgPass());
@@ -73,6 +91,28 @@ void mlir::hipsr::buildHipsrPipeline(OpPassManager &pm,
       bufferization::createOptimizeAllocationLivenessPass());
 
   pm.addPass(createHipsrExternalizeConstantsPass());
+
+  pm.addPass(hip::createAssignOpStateSlotsPass());
+  pm.addPass(hip::createGenerateOpStateInitPass());
+
+  // collapse_shape / expand_shape have no LLVM pattern.
+  pm.addPass(memref::createExpandStridedMetadataPass());
+  // expand-strided-metadata emits affine.apply for stride products.
+  pm.addPass(createLowerAffinePass());
+  // convert-linalg-to-loops leaves scf.for / scf.if.
+  pm.addPass(createSCFToControlFlowPass());
+  // Drop leftover unrealized_conversion_cast from earlier conversions.
+  pm.addPass(createReconcileUnrealizedCastsPass());
+
+  // Save the ranked memref shapes before LLVM expands the graph signature.
+  pm.addPass(createRecordGraphIOMetadataPass());
+  pm.addPass(createConvertToLLVMPass());
+
+  // Wrap the expanded graph in the fixed ABI used by inference_compute.
+  pm.addPass(createMainGraphAbiPass());
+
+  mlir::hip::CompilationOptionsT compOpts;
+  pm.addPass(hip::createGenerateInterfacePass(compOpts));
 }
 
 void mlir::hipsr::registerHipsrPipelines() {

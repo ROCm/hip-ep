@@ -503,12 +503,14 @@ void loadBuffer(Table &t, const unsigned char *data, size_t size) {
 } // namespace
 } // namespace hipdnn_ep
 
-// Emitted by cmake/xxd.py from lut/<arch>.fb; see lib/Runtime/Kernels/
-// CMakeLists.txt. Arch-neutral on purpose: each custom_kernels_<arch> DLL links
-// exactly one such payload (its own arch's table, or an empty stub), so this
-// one reference resolves whatever arch the DLL is built for.
-extern "C" const unsigned char kGqaLutData[];
-extern "C" const size_t kGqaLutData_size;
+// Emitted by lib/Runtime/Kernels/CMakeLists.txt (_emit_lut_registry, pure
+// CMake). A gfx*-generic DLL embeds one blob per family-member ISA whose
+// lut/<arch>.fb exists; a concrete-arch DLL embeds one; an unmeasured build
+// embeds none. The table() loop keeps the first blob compatible() accepts (its
+// gpu_arch == this device), so each arch gets its own table, no cross-arch mix.
+extern "C" const unsigned char* const kGqaLutBlobs[];
+extern "C" const size_t kGqaLutBlobSizes[];
+extern "C" const size_t kGqaLutBlobCount;
 
 namespace hipdnn_ep {
 namespace {
@@ -516,7 +518,8 @@ namespace {
 Table &table() {
   static Table *t = [] {
     auto *fresh = new Table();
-    loadBuffer(*fresh, kGqaLutData, kGqaLutData_size);
+    for (size_t i = 0; i < kGqaLutBlobCount && !fresh->loaded; ++i)
+      loadBuffer(*fresh, kGqaLutBlobs[i], kGqaLutBlobSizes[i]);
     return fresh;
   }();
   return *t;

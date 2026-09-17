@@ -36,10 +36,10 @@ struct GemmToHip : public mlir::RewritePattern {
       beta = attr.getValueAsDouble();
     int64_t transA = 0;
     if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("transA"))
-      transA = attr.getSInt();
+      transA = attr.getValue().getSExtValue();
     int64_t transB = 0;
     if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("transB"))
-      transB = attr.getSInt();
+      transB = attr.getValue().getSExtValue();
 
     mlir::Location loc = op->getLoc();
     auto resultType =

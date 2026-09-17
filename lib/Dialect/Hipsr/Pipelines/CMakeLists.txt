@@ -10,6 +10,7 @@ add_library(HipsrDialectPipelines STATIC
 target_link_libraries(HipsrDialectPipelines PUBLIC
   HipsrDialectTransforms
   OnnxToHipsr
+  HipDialectTransforms
   MLIRPass
   MLIRIR
   MLIRSupport
@@ -17,4 +18,9 @@ target_link_libraries(HipsrDialectPipelines PUBLIC
   MLIRShapeToStandard
   MLIRBufferizationTransforms
   MLIRLinalgTransforms
+  MLIRMemRefTransforms
+  MLIRAffineToStandard
+  MLIRSCFToControlFlow
+  MLIRReconcileUnrealizedCasts
+  MLIRConvertToLLVMPass
 )

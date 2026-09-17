@@ -3,12 +3,21 @@
  * Licensed under the MIT License.
  */
 
+#include "hip/Conversion/HipsrToLLVM/HipsrToLLVM.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
+#include "hip/Dialect/Hipsr/IR/HipsrLLVMLoweringUtils.h"
 #include "hip/Dialect/Hipsr/IR/HipsrShapeRegionPopulationUtils.h"
 
+#include "mlir/Conversion/LLVMCommon/Pattern.h"
+#include "mlir/Conversion/LLVMCommon/TypeConverter.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/Transforms/DialectConversion.h"
+
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 
 using namespace mlir;
 using namespace mlir::hipsr;
@@ -63,8 +72,8 @@ LogicalResult NonZeroOp::verify() {
   if (!indicesType.getElementType().isInteger(64)) {
     return emitOpError("indices element type must be i64");
   }
-  if (!countType.getElementType().isInteger(64)) {
-    return emitOpError("count element type must be i64");
+  if (!countType.getElementType().isInteger(32)) {
+    return emitOpError("count element type must be i32");
   }
   if (indicesType.getRank() != 2) {
     return emitOpError("indices must be rank-2: one row per input axis, one "
@@ -80,4 +89,75 @@ LogicalResult NonZeroOp::verify() {
     return emitOpError("count must be a static single-element vector");
   }
   return success();
+}
+
+namespace {
+
+constexpr const char *kWrapNonZero = "wrap_nonzero";
+
+struct NonZeroLowering : ConvertOpToLLVMPattern<NonZeroOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(NonZeroOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+
+    auto inputType = dyn_cast<MemRefType>(op.getInput().getType());
+    auto indicesType = dyn_cast<MemRefType>(op.getIndicesInit().getType());
+    if (!inputType || !indicesType) {
+      return rewriter.notifyMatchFailure(
+          op, "operands must be memrefs (run bufferization first)");
+    }
+
+    int64_t dataType = getHipdnnDataType(inputType.getElementType());
+    if (dataType < 0) {
+      return rewriter.notifyMatchFailure(op, "unsupported element type");
+    }
+
+    Type i64Type = rewriter.getI64Type();
+    llvm::SmallVector<Value> inputDims =
+        extractShape(inputType, adaptor.getInput(), rewriter, loc, i64Type);
+
+    Value numElements =
+        inputDims.empty()
+            ? LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                       rewriter.getI64IntegerAttr(1))
+                  .getResult()
+            : inputDims.front();
+    for (Value dim : llvm::drop_begin(inputDims)) {
+      numElements = LLVM::MulOp::create(rewriter, loc, numElements, dim);
+    }
+
+    llvm::SmallVector<Value> indicesDims = extractShape(
+        indicesType, adaptor.getIndicesInit(), rewriter, loc, i64Type);
+    Value capacity = indicesDims.back();
+
+    Value dimsArray = emitHostI64Array(inputDims, rewriter, loc);
+
+    using NonZeroCall = RuntimeFunc<i32, hostPtr, devicePtr, devicePtr,
+                                    devicePtr, i64, i64, hostPtr, i64, i64>;
+    auto nonZeroFunc =
+        NonZeroCall::lookupOrCreateFn(rewriter, loc, module, kWrapNonZero);
+    if (failed(nonZeroFunc)) {
+      return failure();
+    }
+    if (failed(nonZeroFunc->call(
+            adaptor.getCtx(), adaptor.getInput(), adaptor.getIndicesInit(),
+            adaptor.getCountInit(), numElements, inputType.getRank(), dimsArray,
+            capacity, dataType))) {
+      return failure();
+    }
+
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+} // namespace
+
+void mlir::hipsr::populateHipsrNonZeroLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+  patterns.add<NonZeroLowering>(converter);
 }
