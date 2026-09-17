@@ -183,6 +183,30 @@ def FuseROCMlirPass : Pass<"hip-fuse-rocmlir", "mlir::func::FuncOp"> {
   ];
 }
 
+def HipFusionTransformPass
+    : Pass<"hip-fusion-transform", "mlir::ModuleOp"> {
+  let summary = "Rewrite HIP operations into other HIP operations via PDLL "
+                "patterns";
+  let description = [{
+    HIP-to-HIP rewriting at unrestricted arity: one operation may become many,
+    many may collapse into one, or a subgraph may be replaced by another.
+    Native constraints and rewrites let a pattern fold an operand payload into
+    an attribute of the replacement, or decline a match it cannot express.
+
+    Patterns live in `lib/Dialect/Transforms/fusion_pattern/`, compiled into
+    the library as a byte array, and all share one fixpoint. The pass runs in
+    `buildOnnxToHipPipelineTail` after hip-infer-shapes (replacements need
+    refined result types) and before hip-externalize-constants (patterns read
+    `hip.constant` payloads) and bufferization (inits are `tensor.empty`).
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::tensor::TensorDialect",
+    "mlir::pdl::PDLDialect",
+    "mlir::pdl_interp::PDLInterpDialect"
+  ];
+}
+
 def ConvertHipToTosaPass : Pass<"convert-hip-to-tosa", "mlir::func::FuncOp"> {
   let dependentDialects = [
     "mlir::tosa::TosaDialect"
