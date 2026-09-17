@@ -1021,6 +1021,32 @@ LogicalResult matchHipReduce(Operation *op, Value data, Value axes,
   return success();
 }
 
+// TOSA's float tensor constraint is AnyFloat, so f64 satisfies the verifier
+// while having no GPU lowering behind it; GemmConverter above excludes it for
+// the same reason. onnx.ReduceL2 explicitly permits f64 input, so naming the
+// TOSA-expressible floats keeps a double-precision reduction from being
+// replaced with TOSA that only fails later.
+static bool isTosaExpressibleFloat(Type elementType) {
+  return isa<FloatType>(elementType) && !elementType.isF64();
+}
+
+// ONNX reductions accept unsigned element types and OnnxToHip preserves them,
+// but TOSA integers are signless. For sum and product that is harmless --
+// two's-complement add and multiply give the same bits whichever way the sign
+// bit is read -- so those stay ungated. tosa.reduce_max and tosa.reduce_min
+// are ordered, though, and would read a ui8 255 as -1, turning a maximum into
+// a minimum. They are claimed only for types whose ordering TOSA shares.
+static bool isTosaOrderedReduceType(Type elementType) {
+  return isTosaExpressibleFloat(elementType) || elementType.isSignlessInteger();
+}
+
+static bool hasTosaOrderedReduceType(Operation *op, Value data) {
+  if (op->getNumResults() != 1)
+    return false;
+  auto dataType = dyn_cast<RankedTensorType>(data.getType());
+  return dataType && isTosaOrderedReduceType(dataType.getElementType());
+}
+
 // Covers the hip reductions that map 1-1 onto a TOSA reduce: reduce_sum,
 // reduce_max, reduce_min and reduce_prod. matchHipReduce already does
 // everything the hip reductions share -- the single constant axis, keepdims,
@@ -1033,7 +1059,10 @@ LogicalResult matchHipReduce(Operation *op, Value data, Value axes,
 // tosa.reduce_max and tosa.reduce_min additionally carry a nan_mode attribute,
 // but ODS defaults it to PROPAGATE, which is what ONNX ReduceMax/ReduceMin do,
 // so the builder below is correct for them unchanged.
-template <typename HipOpTy, typename TosaOpTy>
+//
+// Ordered marks those same two, whose result depends on how the sign bit is
+// read; see isTosaOrderedReduceType above.
+template <typename HipOpTy, typename TosaOpTy, bool Ordered = false>
 struct ReduceConverter final : public OpConversionPattern<HipOpTy> {
   using OpConversionPattern<HipOpTy>::OpConversionPattern;
   using OpAdaptor = typename OpConversionPattern<HipOpTy>::OpAdaptor;
@@ -1055,8 +1084,11 @@ struct ReduceConverter final : public OpConversionPattern<HipOpTy> {
       rewriter.replaceOp(op, data);
       return success();
     }
-    auto reducedTy =
-        keepdimsReduceType(cast<RankedTensorType>(data.getType()), axis);
+    auto dataType = cast<RankedTensorType>(data.getType());
+    if (Ordered && !isTosaOrderedReduceType(dataType.getElementType()))
+      return rewriter.notifyMatchFailure(
+          op, "tosa has no unsigned ordering for this reduction");
+    auto reducedTy = keepdimsReduceType(dataType, axis);
     auto reduced = TosaOpTy::create(rewriter, op.getLoc(), reducedTy, data,
                                     rewriter.getI32IntegerAttr(axis));
     replaceWithTosaReduce(op, reduced, resultType, keepdims, rewriter);
@@ -1148,9 +1180,10 @@ struct ReduceL2Converter final : public OpConversionPattern<ReduceL2Op> {
       return success();
     }
     auto dataType = cast<RankedTensorType>(data.getType());
-    if (!isa<FloatType>(dataType.getElementType()))
+    if (!isTosaExpressibleFloat(dataType.getElementType()))
       return rewriter.notifyMatchFailure(
-          op, "tosa reduce_l2 lowering requires a float tensor");
+          op, "tosa reduce_l2 lowering requires a tosa-expressible float "
+              "tensor");
 
     Location loc = op.getLoc();
     Value squared = tosa::MulOp::create(rewriter, loc, dataType, data, data,
@@ -2954,8 +2987,8 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         ConvOp, MatmulOp, GemmOp, TransposeOp, AddOp, SubOp, MinOp, MaxOp,
         MulOp, DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
         TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, WhereOp, LeakyReluOp,
-        MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, ReduceMaxOp, ReduceMinOp,
-        ReduceProdOp, ReduceL2Op, CastOp, QuantizeLinearOp, DequantizeLinearOp,
+        MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp,
+        ReduceProdOp, CastOp, QuantizeLinearOp, DequantizeLinearOp,
         MatMulNBitsOp, GatherOp, RopeOp, GqaOp, MultiHeadAttentionOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
@@ -2966,6 +2999,23 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     conversion.addLegalOp<ub::PoisonOp, tensor::EmptyOp>();
     conversion.addDynamicallyLegalOp<ExpandOp>(
         [](ExpandOp op) { return !isTosaExpressibleExpand(op); });
+    // The ordered reductions and reduce_l2 are claimed by element type rather
+    // than outright, so an unsigned max/min or an f64 norm -- both of which
+    // ONNX permits and OnnxToHip preserves -- stays a hip op for the runtime
+    // lowering instead of failing this pass and taking the fusible ops in the
+    // same function with it.
+    conversion.addDynamicallyLegalOp<ReduceMaxOp>([](ReduceMaxOp op) {
+      return !hasTosaOrderedReduceType(op, op.getData());
+    });
+    conversion.addDynamicallyLegalOp<ReduceMinOp>([](ReduceMinOp op) {
+      return !hasTosaOrderedReduceType(op, op.getData());
+    });
+    conversion.addDynamicallyLegalOp<ReduceL2Op>([](ReduceL2Op op) {
+      if (op->getNumResults() != 1)
+        return true;
+      auto dataType = dyn_cast<RankedTensorType>(op.getData().getType());
+      return !dataType || !isTosaExpressibleFloat(dataType.getElementType());
+    });
     conversion.addDynamicallyLegalOp<tensor::CollapseShapeOp>(
         [](tensor::CollapseShapeOp op) { return !isStaticReshape(op); });
     conversion.addDynamicallyLegalOp<tensor::ExpandShapeOp>(
@@ -2997,8 +3047,8 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
                        /*FloatOnly=*/true>,
         SqrtConverter, WhereConverter, LeakyReluConverter, SoftmaxConverter,
         ReduceConverter<ReduceSumOp, tosa::ReduceSumOp>,
-        ReduceConverter<ReduceMaxOp, tosa::ReduceMaxOp>,
-        ReduceConverter<ReduceMinOp, tosa::ReduceMinOp>,
+        ReduceConverter<ReduceMaxOp, tosa::ReduceMaxOp, /*Ordered=*/true>,
+        ReduceConverter<ReduceMinOp, tosa::ReduceMinOp, /*Ordered=*/true>,
         ReduceConverter<ReduceProdOp, tosa::ReduceProductOp>,
         ReduceMeanConverter, ReduceL2Converter, CastConverter,
         DequantizeLinearConverter, QuantizeLinearConverter,
