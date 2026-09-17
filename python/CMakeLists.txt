@@ -19,10 +19,10 @@ set(_dist_dir "${CMAKE_CURRENT_BINARY_DIR}/dist")
 
 # hipBLASLt resolves Tensile data as library/<device-isa>/, so this tracks the
 # ISA the pinned dist ships, not HIP_ARCHITECTURES (a generic compile target
-# like gfx11-generic has no such directory). A dist named for a whole family
-# (gfx11-all) carries every member and matches nothing here, which is what
-# sends it down the generic branch for _pack_libs.py to resolve.
-if(DEP_HASH_therock_windows MATCHES "(gfx[0-9][0-9][0-9][0-9])")
+# like gfx11-generic has no such directory). Match only the token after
+# "windows-": family tags (gfx11-all, gfx115x-gfx1170) and variant suffixes
+# (hipblaslt-gfx1170-trimmed) must not match here.
+if(DEP_HASH_therock_windows MATCHES "windows-(gfx[0-9][0-9][0-9][0-9])[-.]")
   set(MORPHIZEN_HIP_ARCH "${CMAKE_MATCH_1}")
 else()
   set(MORPHIZEN_HIP_ARCH "${HIP_ARCHITECTURES}")

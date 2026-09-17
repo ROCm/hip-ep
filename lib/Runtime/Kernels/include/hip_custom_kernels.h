@@ -2144,6 +2144,13 @@ HIP_KERNEL_API int hip_matmul_nbits(
     const void* pre_unpacked_zp_u8,
     const void* pre_unpacked_zp_fp16);
 
+/* Hands the session's matmul_autotune_mode option ("lookup" resolves the
+ * offline LUT, "online" always sweeps; null when absent) to the autotune.
+ * Precedence is HIPDNN_MATMUL_AUTOTUNE_MODE > provider_mode > lookup. The mode
+ * is process-wide and latched by the first call, so a later session gets the
+ * one in force; calling this at all is optional. */
+HIP_KERNEL_API void hip_matmul_nbits_autotune_set_mode(const char* provider_mode);
+
 /* W4A8 integer-dot-product (dp4a) GEMV for a single decode row (M==1).
  * Dynamically quantizes the fp16 activation row to per-group int8 (into
  * caller-owned scratch) and runs a `v_dot4_i32_iu8` (`__builtin_amdgcn_sudot4`)
@@ -2338,6 +2345,17 @@ HIP_KERNEL_API int hip_qlpnormalization_prepare_params(
     void* rms_scale,
     int64_t norm_num_elements,
     float norm_scale,
+    void* input_scale_device,
+    float input_scale,
+    void* output_scale_device,
+    float output_scale,
+    void* input_zp_device,
+    uint16_t input_zp,
+    void* output_zp_device,
+    uint16_t output_zp);
+
+HIP_KERNEL_API int hip_qsigmoid_prepare_params(
+    void* stream,
     void* input_scale_device,
     float input_scale,
     void* output_scale_device,

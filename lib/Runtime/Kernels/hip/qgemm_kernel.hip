@@ -211,8 +211,14 @@ __device__ inline void qgemm_atomic_add_i64(int64_t *addr, int64_t v) {
 //===----------------------------------------------------------------------===//
 //
 // A tile has no reuse left to schedule at M == 1 -- one A element is consumed
-// once per column and never again -- so what remains is a bandwidth problem. A
-// thread owns kCols consecutive columns, which turns the per-k read of B into
+// once per column and never again -- so what remains is a bandwidth problem.
+//
+// This kernel serves B stored [K, N], a [N, K] B whose columns are too short
+// to hand every lane of a wave a dword, and whatever the dword loads cannot
+// take at all. A long-column [N, K] B goes to qgemm_gemv_nk_kernel below, which
+// walks k contiguously because k is the contiguous axis there.
+//
+// A thread owns kCols consecutive columns, which turns the per-k read of B into
 // whole dwords instead of a single byte, and A is staged once per k-tile in LDS
 // rather than re-read per column.
 //
@@ -375,10 +381,12 @@ __device__ void qgemm_gemv_vector_kn(const TA *__restrict__ A,
   }
 }
 
-// B stored [N, K], the transB = 1 layout. Here k is the contiguous axis, so a
-// dword carries 32 / kBits steps of ONE column instead of one step of several.
-// The wave's lanes then sit K bytes apart, but each walks its own cache line to
-// the end before moving on, so the line is fully consumed either way.
+// B stored [N, K] with a column too short for qgemm_gemv_nk_kernel to give
+// every lane of a wave a dword of it. Here k is the contiguous axis, so a dword
+// carries 32 / kBits steps of ONE column instead of one step of several, and
+// the wave's lanes sit K bytes apart. That wastes most of each fetched line
+// once a column is long, which is why the [N, K] kernel takes over there, but
+// on a short column the line is small enough that the lanes consume it.
 //
 // kUnroll has no role in this layout: successive iterations read the next
 // dwords of the same lines, which already keeps several requests in flight.
@@ -535,8 +543,8 @@ __global__ __launch_bounds__(kBlock *kSplits) void qgemm_gemv_kernel(
   const bool vector_kn_ok = !trans_b && base_ok && window_ok &&
                             kCols * b_bits >= 32 && (N % align) == 0 &&
                             (kCols % align) == 0;
-  const bool vector_nk_ok =
-      trans_b && base_ok && window_ok && (K % align) == 0 && (kTile % align) == 0;
+  const bool vector_nk_ok = trans_b && base_ok && window_ok &&
+                            (K % align) == 0 && (kTile % align) == 0;
 
   // Also publishes the zeroed merge buffers to the whole block.
   __syncthreads();
@@ -1029,6 +1037,183 @@ qgemm_splitk_epilogue_kernel(const int64_t *__restrict__ acc_ws,
 }
 
 //===----------------------------------------------------------------------===//
+// GEMV for B stored [N, K]
+//===----------------------------------------------------------------------===//
+//
+// The layout every fully-connected weight arrives in, so this is the decode
+// hot path. The kernel above walks it with a lane per column group, which puts
+// the lanes of a wave K bytes apart: one dword load per lane, each on its own
+// cache line, 4 bytes taken from a 128-byte fetch. The line is only repaid if
+// it survives until that lane's next step, and it does not -- the concurrent k
+// slices of one block keep far more lines live than the vector cache holds.
+//
+// Here a whole wave owns a column group and the lanes walk k instead, so the
+// 32 dwords of one load are 128 contiguous bytes: one fetch, fully consumed.
+// The cost is that a column's sum ends up spread across the wave and has to be
+// folded with cross-lane shuffles, which is paid once per column group rather
+// than once per k step.
+//
+// No LDS and no barrier: A is re-read per wave, but it is the activation
+// vector, which every block reads and the cache keeps.
+//
+// kCols columns share a wave so that one A load and one rowA reduction serve
+// all of them; their dword loads are each independently contiguous.
+
+constexpr int kGemvNkLanes = 32;
+
+// One dword per lane per column, folded into the running sums. The lanes of a
+// wave then cover 32 consecutive dwords of each column, which is one fetch per
+// column with every byte of it used.
+template <int kBits, int kCols, typename TA, typename TB>
+__device__ void qgemm_gemv_nk_columns(const TA *__restrict__ A,
+                                      const uint8_t *__restrict__ B,
+                                      int64_t k_begin, int64_t k_end,
+                                      const int64_t *col_offsets, int lane,
+                                      bool need_row_a, bool need_col_b,
+                                      int64_t *acc, int64_t *col_b,
+                                      int64_t &row_a) {
+  constexpr int kStep = 32 / kBits; // logical values per dword
+  constexpr int64_t kStride = static_cast<int64_t>(kGemvNkLanes) * kStep;
+  // A term is at most 65535 * 128, so a step contributes under 2^25 to an
+  // accumulator and 32 bits hold a few dozen of them. Folding the int32
+  // partials into the int64 totals on that period keeps the inner multiply-add
+  // off the 64-bit path, where every term would cost a carry chain.
+  constexpr int kFold = (kBits == 4) ? 256 : 32;
+
+  int32_t p_acc[kCols] = {};
+  int32_t p_col_b[kCols] = {};
+  int32_t p_row_a = 0;
+  int folded = 0;
+
+  auto fold = [&]() {
+#pragma unroll
+    for (int c = 0; c < kCols; ++c) {
+      acc[c] += p_acc[c];
+      p_acc[c] = 0;
+      col_b[c] += p_col_b[c];
+      p_col_b[c] = 0;
+    }
+    row_a += p_row_a;
+    p_row_a = 0;
+  };
+
+  for (int64_t k = k_begin + static_cast<int64_t>(lane) * kStep;
+       k + kStep <= k_end; k += kStride) {
+    uint32_t packed[kCols];
+#pragma unroll
+    for (int c = 0; c < kCols; ++c)
+      packed[c] = *reinterpret_cast<const uint32_t *>(B + col_offsets[c] +
+                                                      k * kBits / 8);
+
+#pragma unroll
+    for (int j = 0; j < kStep; ++j) {
+      const int32_t a_val = static_cast<int32_t>(A[k + j]);
+      if (need_row_a)
+        p_row_a += a_val;
+#pragma unroll
+      for (int c = 0; c < kCols; ++c) {
+        const int32_t b_val = qgemm_gemv_unpack<kBits, TB>(packed[c], j);
+        p_acc[c] += a_val * b_val;
+        if (need_col_b)
+          p_col_b[c] += b_val;
+      }
+    }
+
+    if (++folded == kFold) {
+      fold();
+      folded = 0;
+    }
+  }
+  fold();
+}
+
+__device__ inline int64_t qgemm_wave_sum(int64_t v) {
+#pragma unroll
+  for (int off = kGemvNkLanes / 2; off > 0; off >>= 1)
+    v += __shfl_down(v, off, kGemvNkLanes);
+  return v;
+}
+
+// `partial` is null for the single-pass form, where the wave owns all of K for
+// its columns and writes Y itself. Otherwise blockIdx.y selects a slice of K
+// and the totals go to scratch for qgemm_gemv_reduce_kernel to requantize.
+template <typename TA, typename TB, typename TY, int kCols, int kWaves>
+__global__ __launch_bounds__(kGemvNkLanes *kWaves) void qgemm_gemv_nk_kernel(
+    const TA *__restrict__ A, const uint8_t *__restrict__ B,
+    TY *__restrict__ Y, int64_t *__restrict__ partial, int64_t N, int64_t K,
+    int64_t grid_chunk, QGemmRequant requant, int b_bits, bool need_row_a,
+    bool need_col_b) {
+  const int lane = threadIdx.x;
+  const int wave = threadIdx.y;
+  const int64_t n0 =
+      (static_cast<int64_t>(blockIdx.x) * kWaves + wave) * kCols;
+  if (n0 >= N)
+    return;
+
+  const int64_t col_bytes = K * b_bits / 8;
+  // A column past N would read out of bounds, so the lane reads column 0
+  // instead and the store below drops it. That keeps the load uniform.
+  int64_t col_offsets[kCols];
+#pragma unroll
+  for (int c = 0; c < kCols; ++c)
+    col_offsets[c] = (n0 + c < N ? n0 + c : 0) * col_bytes;
+
+  const int64_t k_begin = static_cast<int64_t>(blockIdx.y) * grid_chunk;
+  const int64_t k_end =
+      (k_begin + grid_chunk < K) ? k_begin + grid_chunk : K;
+
+  int64_t acc[kCols] = {};
+  int64_t col_b[kCols] = {};
+  int64_t row_a = 0;
+
+  if (b_bits == 8)
+    qgemm_gemv_nk_columns<8, kCols, TA, TB>(A, B, k_begin, k_end, col_offsets,
+                                            lane, need_row_a, need_col_b, acc,
+                                            col_b, row_a);
+  else
+    qgemm_gemv_nk_columns<4, kCols, TA, TB>(A, B, k_begin, k_end, col_offsets,
+                                            lane, need_row_a, need_col_b, acc,
+                                            col_b, row_a);
+
+#pragma unroll
+  for (int c = 0; c < kCols; ++c) {
+    acc[c] = qgemm_wave_sum(acc[c]);
+    if (need_col_b)
+      col_b[c] = qgemm_wave_sum(col_b[c]);
+  }
+  if (need_row_a)
+    row_a = qgemm_wave_sum(row_a);
+
+  if (lane != 0)
+    return;
+
+  if (!partial) {
+#pragma unroll
+    for (int c = 0; c < kCols; ++c) {
+      const int64_t n = n0 + c;
+      if (n < N)
+        Y[n] = qgemm_requant<TY>(acc[c], row_a, col_b[c], 0, n, requant);
+    }
+    return;
+  }
+
+#pragma unroll
+  for (int c = 0; c < kCols; ++c) {
+    const int64_t n = n0 + c;
+    if (n >= N)
+      continue;
+    // One wave per (column, k slice), so these never contend with each other;
+    // the atomic is what merges the slices.
+    qgemm_atomic_add_i64(&partial[n], acc[c]);
+    qgemm_atomic_add_i64(&partial[N + n], col_b[c]);
+  }
+  // Every column of a k slice recomputed the same rowA, so exactly one of them
+  // may contribute it.
+  if (need_row_a && blockIdx.x == 0 && wave == 0)
+    qgemm_atomic_add_i64(&partial[2 * N], row_a);
+}
+
+//===----------------------------------------------------------------------===//
 // Host launch and dtype dispatch
 //===----------------------------------------------------------------------===//
 
@@ -1184,6 +1369,98 @@ int qgemm_gemv_launch(const QGemmArgs &g, const QGemmRequant &requant,
       grid, dim3(kBlock, kSplits), 0, g.stream, static_cast<const TA *>(g.A),
       g.B, static_cast<TY *>(g.Y), partial, g.N, g.K, grid_chunk, requant,
       g.b_bits, need_row_a, need_col_b, g.trans_b);
+  const hipError_t launched = hipGetLastError();
+  if (launched != hipSuccess || !partial)
+    return static_cast<int>(launched);
+
+  hipLaunchKernelGGL(
+      HIP_KERNEL_NAME(qgemm_gemv_reduce_kernel<TY>),
+      dim3(static_cast<unsigned>((g.N + kGemvReduceBlock - 1) /
+                                 kGemvReduceBlock)),
+      dim3(kGemvReduceBlock), 0, g.stream, partial, static_cast<TY *>(g.Y), g.N,
+      requant);
+  return static_cast<int>(hipGetLastError());
+}
+
+// Column groups per block, and how many of them a block carries. Four waves
+// keeps the tail waste under a wave on the narrow shapes while still giving
+// the scheduler whole-block granularity.
+constexpr int kGemvNkCols = 4;
+constexpr int kGemvNkWaves = 4;
+constexpr int kGemvNkGroup = kGemvNkCols * kGemvNkWaves;
+
+// Whether the [N, K] kernel can take the shape. Its loads are whole dwords cut
+// out of one column, so a column must hold an integral number of them -- and
+// at least one per lane, or the wave that owns the column runs with most of
+// its lanes idle and the [K, N] kernel's column-per-lane mapping wins instead.
+bool qgemm_gemv_nk_ok(const QGemmArgs &g) {
+  if (!g.trans_b)
+    return false;
+  const int64_t align = 32 / g.b_bits; // logical elements per dword
+  return (reinterpret_cast<uintptr_t>(g.B) % sizeof(uint32_t)) == 0 &&
+         (g.K % align) == 0 && g.K / align >= kGemvNkLanes;
+}
+
+// Column groups are the only other source of blocks here, so a narrow N still
+// needs K split across the grid. Unlike the [K, N] path there is no in-block
+// slice count competing for the same K, so the cap is one whole wave step per
+// slice.
+int qgemm_gemv_nk_grid_splits(const QGemmArgs &g, int64_t step) {
+  const int64_t groups = (g.N + kGemvNkGroup - 1) / kGemvNkGroup;
+  const int64_t target =
+      static_cast<int64_t>(qgemm_device_cu_count()) * kGemvTargetBlocksPerCU;
+  if (groups >= target)
+    return 1;
+  if (!g.workspace || g.workspace_bytes < qgemm_gemv_scratch_bytes(g.N))
+    return 1;
+
+  const int64_t cap = g.K / (kGemvNkLanes * step);
+  if (cap < 2)
+    return 1;
+
+  int64_t want = (target + groups - 1) / groups;
+  if (want > cap)
+    want = cap;
+  if (want > kGemvMaxGridSplits)
+    want = kGemvMaxGridSplits;
+  return want > 1 ? static_cast<int>(want) : 1;
+}
+
+template <typename TA, typename TB, typename TY>
+int qgemm_gemv_nk_launch(const QGemmArgs &g, const QGemmRequant &requant,
+                         bool need_row_a, bool need_col_b) {
+  const int64_t step = 32 / g.b_bits; // logical elements per dword
+  const int splits = qgemm_gemv_nk_grid_splits(g, step);
+  auto *partial = splits > 1 ? static_cast<int64_t *>(g.workspace) : nullptr;
+
+  (void)hipGetLastError();
+  if (partial) {
+    // Half-zeroed accumulators would corrupt the result, so a memset that fails
+    // drops the whole op rather than the extra parallelism silently.
+    const hipError_t cleared = hipMemsetAsync(
+        partial, 0, qgemm_gemv_scratch_bytes(g.N), g.stream);
+    if (cleared != hipSuccess)
+      return static_cast<int>(cleared);
+  }
+
+  // Rounded up to a whole wave step so a slice boundary lands where a lane
+  // starts a dword.
+  int64_t grid_chunk = g.K;
+  if (splits > 1) {
+    const int64_t unit = kGemvNkLanes * step;
+    grid_chunk = (g.K + splits - 1) / splits;
+    grid_chunk = (grid_chunk + unit - 1) / unit * unit;
+  }
+
+  const dim3 grid(
+      static_cast<unsigned>((g.N + kGemvNkGroup - 1) / kGemvNkGroup),
+      static_cast<unsigned>(splits));
+  hipLaunchKernelGGL(
+      HIP_KERNEL_NAME(
+          qgemm_gemv_nk_kernel<TA, TB, TY, kGemvNkCols, kGemvNkWaves>),
+      grid, dim3(kGemvNkLanes, kGemvNkWaves), 0, g.stream,
+      static_cast<const TA *>(g.A), g.B, static_cast<TY *>(g.Y), partial, g.N,
+      g.K, grid_chunk, requant, g.b_bits, need_row_a, need_col_b);
   const hipError_t launched = hipGetLastError();
   if (launched != hipSuccess || !partial)
     return static_cast<int>(launched);
@@ -1362,6 +1639,10 @@ int qgemm_gemv_config(const QGemmArgs &g, const QGemmRequant &requant,
 template <typename TA, typename TB, typename TY>
 int qgemm_launch_gemv(const QGemmArgs &g, const QGemmRequant &requant,
                       bool need_row_a, bool need_col_b) {
+  if (qgemm_gemv_nk_ok(g))
+    return qgemm_gemv_nk_launch<TA, TB, TY>(g, requant, need_row_a,
+                                            need_col_b);
+
   const int config =
       qgemm_gemv_config<TA, TB, TY>(g, requant, need_row_a, need_col_b);
   const int err = qgemm_gemv_launch_config<TA, TB, TY>(config, g, requant,
