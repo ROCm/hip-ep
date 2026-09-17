@@ -709,6 +709,11 @@ def build_rocmlirtriton(args, build_dir, source_dir=None, rocm_path=None):
             "lldCommon",
             "llvm-link",
             "mlir-tblgen",
+            # OnnxToHip condenses generated PDL patterns to MLIR bytecode with
+            # this executable. The restored build-tree package exports the
+            # target even when its executable was never built, so it must be
+            # present in the dependency cache before consumers configure.
+            "mlir-opt",
             "mlir-pdll",
             "FileCheck",
             "not",

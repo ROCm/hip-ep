@@ -101,7 +101,10 @@ jobs:
             exit 1
           fi
           SDK_HASH=$(printf '%s' "$SDK" | sha256sum | cut -c1-12)
-          echo "value=dep-rocmlirtriton-${REV:0:12}-clang-${TOOLS_REV}-${SDK_HASH}" >> "$GITHUB_OUTPUT"
+          # v2 includes mlir-opt, which OnnxToHip needs to turn its generated
+          # PDL module into bytecode. Older entries export the target from the
+          # build-tree package but do not contain mlir-opt.exe.
+          echo "value=dep-rocmlirtriton-v2-${REV:0:12}-clang-${TOOLS_REV}-${SDK_HASH}" >> "$GITHUB_OUTPUT"
 
       - name: Probe rocmlirTriton tree
         id: cache-rock
