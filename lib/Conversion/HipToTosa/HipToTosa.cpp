@@ -3251,10 +3251,10 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     conversion.addIllegalOp<
         ConvOp, MatmulOp, GemmOp, TransposeOp, AddOp, SubOp, MinOp, MaxOp,
         MulOp, DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
-        TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp,
-        WhereOp, LeakyReluOp, MiopenSoftmaxOp, ReduceSumOp,
-        ReduceMeanOp, CastOp, QuantizeLinearOp, DequantizeLinearOp,
-        MatMulNBitsOp, GatherOp, RopeOp, GqaOp, MultiHeadAttentionOp>();
+        TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, WhereOp, LeakyReluOp,
+        MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp, QuantizeLinearOp,
+        DequantizeLinearOp, MatMulNBitsOp, GatherOp, RopeOp, GqaOp,
+        MultiHeadAttentionOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
@@ -3279,9 +3279,8 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     conversion.addDynamicallyLegalOp<OrOp>([](OrOp op) {
       return !isTosaExpressibleLogical(op, {op.getLhs(), op.getRhs()});
     });
-    conversion.addDynamicallyLegalOp<NotOp>([](NotOp op) {
-      return !isTosaExpressibleLogical(op, {op.getX()});
-    });
+    conversion.addDynamicallyLegalOp<NotOp>(
+        [](NotOp op) { return !isTosaExpressibleLogical(op, {op.getX()}); });
     conversion.addDynamicallyLegalOp<SignOp>(
         [](SignOp op) { return !isTosaExpressibleSign(op); });
     conversion.addDynamicallyLegalOp<tensor::CollapseShapeOp>(
