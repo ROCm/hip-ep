@@ -22,7 +22,9 @@
   ;;
   ;; Uses operation syntax: (%v = "op.name" (operands) ((attrs)) ...)
   ;; The macro recognizes "hipsr.placeholder" and "hipsr.cast" and translates
-  ;; to specialized FFI calls: mlir-create-placeholder-op, mlir-create-cast-op
+  ;; to specialized FFI calls.
+  ;;
+  ;; mlir-tensor-type-in-device-space: adds #hipsr.mem<device> to tensor types
   ;;===--------------------------------------------------------------------===;;
 
   (define-conversion-pattern onnx-cast->hipsr
@@ -30,12 +32,15 @@
     (%output = "onnx.Cast" (%input) ((to = !to_type)) : (!input-type) -> !output-type)
     :rewrite %output :with
     (%ctx = (mlir-get-hipsr-context-arg op))
-    (%placeholder = "hipsr.placeholder" (%ctx %input !output-type)
+    (%placeholder = "hipsr.placeholder" (%ctx %input (mlir-tensor-type-in-device-space !output-type))
                     ((placeholder_type 0))
-                    : (!input-type) -> !output-type)
-    (%cast = "hipsr.cast" (%ctx %input %placeholder !output-type)
+                    : ((mlir-tensor-type-in-device-space !input-type)) 
+                    -> (mlir-tensor-type-in-device-space !output-type))
+    (%cast = "hipsr.cast" (%ctx %input %placeholder (mlir-tensor-type-in-device-space !output-type))
              ((cast_attrs))
-             : (!input-type !output-type) -> !output-type))
+             : ((mlir-tensor-type-in-device-space !input-type) 
+                (mlir-tensor-type-in-device-space !output-type)) 
+             -> (mlir-tensor-type-in-device-space !output-type)))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Pattern Population
