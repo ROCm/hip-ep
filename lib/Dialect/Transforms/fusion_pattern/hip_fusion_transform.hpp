@@ -263,6 +263,79 @@ isHipQdqUnsignedQuantized(mlir::PatternRewriter &, mlir::PDLResultList &,
   return mlir::success(intType && intType.isUnsigned());
 }
 
+/// rms computes an L2 normalization over the trailing axis
+///
+/// `onnx.LpNormalization` never reaches this layer: LpNormalizationConversion
+/// decomposes it, and for exactly the p=2 trailing-axis static-extent case
+/// this pattern wants, it emits a SimplifiedLayerNormalization that becomes
+/// `hip.rms_norm`. So the fusable shape here is an RMS norm, recognized by
+/// the identity its op documentation records:
+///
+///   rms_norm(x, scale, eps) = x / sqrt(mean(x^2) + eps) * scale
+///                           = L2(x)   when eps = 0 and scale = 1/sqrt(N)
+///
+/// This is a statement about the math, not about where the op came from: an
+/// RMS norm written by hand with those parameters is an L2 normalization too,
+/// and fusing it is equally correct.
+inline mlir::LogicalResult
+isHipL2EquivalentRmsNorm(mlir::PatternRewriter &, mlir::PDLResultList &,
+                         llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 1)
+    return mlir::failure();
+  auto rms = mlir::dyn_cast_or_null<mlir::hip::RmsNormOp>(
+      args[0].dyn_cast<mlir::Operation *>());
+  if (!rms)
+    return mlir::failure();
+
+  // Read generically rather than through the ODS accessor: F32Attr hands back
+  // an APFloat whose zero test is the same either way, and this keeps the
+  // read next to the axis one below.
+  auto epsilon = rms->getAttrOfType<mlir::FloatAttr>("epsilon");
+  if (!epsilon || !epsilon.getValue().isZero())
+    return mlir::failure();
+
+  auto inputType =
+      mlir::dyn_cast<mlir::RankedTensorType>(rms.getInput().getType());
+  if (!inputType || inputType.getRank() == 0)
+    return mlir::failure();
+  int64_t rank = inputType.getRank();
+
+  // Only the trailing axis: hip.qlpnormalization reduces the innermost
+  // dimension, and nothing else would give it a contiguous reduction.
+  std::optional<int64_t> axis = tryHipIntAttr(rms, "axis", -1);
+  if (!axis)
+    return mlir::failure();
+  int64_t normAxis = *axis < 0 ? *axis + rank : *axis;
+  if (normAxis != rank - 1)
+    return mlir::failure();
+
+  // N has to be known to compare the scale against 1/sqrt(N) at all. Only the
+  // trailing extent matters -- the batch dimensions may stay dynamic, and
+  // BuildInit recovers them.
+  int64_t n = inputType.getDimSize(rank - 1);
+  if (n == mlir::ShapedType::kDynamic || n <= 0)
+    return mlir::failure();
+
+  mlir::DenseElementsAttr payload = tryHipConstantPayload(rms.getScale());
+  if (!payload || !payload.isSplat() ||
+      !mlir::isa<mlir::FloatType>(payload.getElementType()))
+    return mlir::failure();
+  // Splat alone is not enough: the scale is applied per trailing element, so
+  // the identity needs one entry per reduced element, all equal.
+  if (payload.getNumElements() != n)
+    return mlir::failure();
+  llvm::APFloat actual = payload.getSplatValue<llvm::APFloat>();
+
+  // 1/sqrt(N) is computed in f32 and then rounded into the tensor's element
+  // type, so the comparison has to round the same way before it can be exact:
+  // an f16 scale never equals the f32 quotient it was rounded from.
+  llvm::APFloat expected(1.0f / std::sqrt(static_cast<float>(n)));
+  bool losesInfo = false;
+  expected.convert(actual.getSemantics(), llvm::APFloat::rmNearestTiesToEven,
+                   &losesInfo);
+  return mlir::success(actual.bitwiseIsEqual(expected));
+}
+
 /// dq and q carry identical per-tensor parameters, so the pair returns every
 /// code it is given unchanged
 inline mlir::LogicalResult
@@ -728,6 +801,8 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
                                       extractHipQdqZeropoint);
   pdlPatterns.registerRewriteFunction("ExtractHipQdqValueBits",
                                       extractHipQdqValueBits);
+  pdlPatterns.registerConstraintFunction("IsHipL2EquivalentRmsNorm",
+                                         isHipL2EquivalentRmsNorm);
   pdlPatterns.registerConstraintFunction("HasMatchingHipQdqParams",
                                          hasMatchingHipQdqParams);
   pdlPatterns.registerConstraintFunction("IsHipQdqIdentityRoundTrip",
