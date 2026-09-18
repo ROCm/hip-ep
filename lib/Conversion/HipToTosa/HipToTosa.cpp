@@ -1752,14 +1752,24 @@ struct ExtractSliceConverter final
 // Fold those residues to tosa.const / tosa.identity so a rock.kernel can
 // absorb them. Runtime shape queries (tensor.dim, dynamic hip.size) stay
 // unconverted: TOSA has no shape-of.
+//
+// TOSA number tensors cannot have a zero extent (`tensor<0xi64>`). Leave
+// those as arith.constant / tensor.from_elements / tensor.splat; Reduce
+// empty-axes identity uses exactly that type.
+bool hasPositiveStaticExtents(RankedTensorType type) {
+  return type && type.hasStaticShape() &&
+         llvm::all_of(type.getShape(), [](int64_t d) { return d > 0; });
+}
+
 bool isTosaExpressibleTensorConst(arith::ConstantOp op) {
   auto type = dyn_cast<RankedTensorType>(op.getType());
-  return type && type.hasStaticShape() && isa<DenseElementsAttr>(op.getValue());
+  return hasPositiveStaticExtents(type) &&
+         isa<DenseElementsAttr>(op.getValue());
 }
 
 bool isTosaExpressibleFromElements(tensor::FromElementsOp op) {
   auto type = dyn_cast<RankedTensorType>(op.getType());
-  if (!type || !type.hasStaticShape())
+  if (!hasPositiveStaticExtents(type))
     return false;
   return llvm::all_of(op.getElements(),
                       [](Value v) { return matchPattern(v, m_Constant()); });
@@ -1767,7 +1777,7 @@ bool isTosaExpressibleFromElements(tensor::FromElementsOp op) {
 
 bool isTosaExpressibleSplat(tensor::SplatOp op) {
   auto type = dyn_cast<RankedTensorType>(op.getType());
-  if (!type || !type.hasStaticShape() || !op.getDynamicSizes().empty())
+  if (!hasPositiveStaticExtents(type) || !op.getDynamicSizes().empty())
     return false;
   return matchPattern(op.getInput(), m_Constant());
 }

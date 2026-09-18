@@ -111,6 +111,16 @@ func.func @constant_of_shape_i64() -> tensor<3xi64> attributes {rock.kernel} {
   return %r : tensor<3xi64>
 }
 
+// TOSA number tensors cannot be empty. Empty ONNX residues (Reduce axes
+// dense<[]>) stay arith.constant.
+// CHECK-LABEL: func.func @empty_tensor_const
+// CHECK: arith.constant dense<> : tensor<0xi64>
+// CHECK-NOT: tosa.const
+func.func @empty_tensor_const() -> tensor<0xi64> attributes {rock.kernel} {
+  %r = arith.constant dense<[]> : tensor<0xi64>
+  return %r : tensor<0xi64>
+}
+
 // -----
 
 func.func @size_dynamic(%ctx: !hip.context, %x: tensor<?x?xf32>,
