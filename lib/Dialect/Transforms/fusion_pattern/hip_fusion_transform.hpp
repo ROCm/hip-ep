@@ -33,6 +33,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/STLExtras.h"
@@ -40,7 +41,9 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/MemoryBufferRef.h"
 
+#include <cmath>
 #include <cstdint>
+#include <limits>
 #include <optional>
 
 namespace hip {
@@ -260,6 +263,109 @@ isHipQdqUnsignedQuantized(mlir::PatternRewriter &, mlir::PDLResultList &,
   return mlir::success(intType && intType.isUnsigned());
 }
 
+/// dq and q carry identical per-tensor parameters, so the pair returns every
+/// code it is given unchanged
+inline mlir::LogicalResult
+hasMatchingHipQdqParams(mlir::PatternRewriter &, mlir::PDLResultList &,
+                        llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 2)
+    return mlir::failure();
+  auto dq = mlir::dyn_cast_or_null<mlir::hip::DequantizeLinearOp>(
+      args[0].dyn_cast<mlir::Operation *>());
+  auto q = mlir::dyn_cast_or_null<mlir::hip::QuantizeLinearOp>(
+      args[1].dyn_cast<mlir::Operation *>());
+  if (!dq || !q)
+    return mlir::failure();
+
+  // The two ends have to agree on the storage type before agreeing on the
+  // numbers means anything: the same scale against a different code range is a
+  // different mapping.
+  mlir::IntegerType dqType = getQdqQuantizedElementType(dq);
+  if (!dqType || dqType != getQdqQuantizedElementType(q))
+    return mlir::failure();
+
+  // block_size > 0 subdivides each slice, a granularity a single splat
+  // parameter cannot describe even when both ends declare the same one.
+  if (dq.getBlockSize() != 0 || q.getBlockSize() != 0)
+    return mlir::failure();
+
+  // Splat rather than scalar: a per-axis parameter whose entries are all equal
+  // applies the same mapping everywhere, which makes the axis immaterial.
+  std::optional<float> dqScale = tryHipSplatScale(dq.getScale());
+  std::optional<float> qScale = tryHipSplatScale(q.getScale());
+  if (!dqScale || !qScale || *dqScale != *qScale)
+    return mlir::failure();
+
+  // Agreeing on a degenerate scale is not enough to survive the round trip: a
+  // subnormal one collapses distinct codes onto one value, and one large
+  // enough to overflow the dequantized range cannot be requantized back.
+  unsigned width = dqType.getWidth();
+  float maxCode = width >= 32
+                      ? static_cast<float>(std::numeric_limits<uint32_t>::max())
+                      : static_cast<float>((1u << width) - 1);
+  if (!std::isfinite(*dqScale) ||
+      *dqScale < std::numeric_limits<float>::min() ||
+      *dqScale > std::numeric_limits<float>::max() / maxCode)
+    return mlir::failure();
+
+  std::optional<int64_t> dqZp = tryHipQdqZeropoint(dq, /*absentValue=*/0);
+  std::optional<int64_t> qZp = tryHipQdqZeropoint(q, /*absentValue=*/0);
+  return mlir::success(dqZp && qZp && *dqZp == *qZp);
+}
+
+/// dq's quantized input and q's quantized output are the same type, so the
+/// pair is a round trip with nothing in between to reshape it
+inline mlir::LogicalResult
+isHipQdqIdentityRoundTrip(mlir::PatternRewriter &, mlir::PDLResultList &,
+                          llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 2)
+    return mlir::failure();
+  auto dq = mlir::dyn_cast_or_null<mlir::hip::DequantizeLinearOp>(
+      args[0].dyn_cast<mlir::Operation *>());
+  auto q = mlir::dyn_cast_or_null<mlir::hip::QuantizeLinearOp>(
+      args[1].dyn_cast<mlir::Operation *>());
+  if (!dq || !q)
+    return mlir::failure();
+  // The replacement hands the dequantize's input straight to the quantize's
+  // users, so the two have to be interchangeable rather than merely carry the
+  // same element type.
+  return mlir::success(dq.getInput().getType() == q.getOutput().getType());
+}
+
+/// layout only moves or relabels elements, and a copy of it producing
+/// resultType can be built
+inline mlir::LogicalResult
+canRequantizeLayoutOp(mlir::PatternRewriter &, mlir::PDLResultList &,
+                      llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 2)
+    return mlir::failure();
+  auto *layout = args[0].dyn_cast<mlir::Operation *>();
+  auto resultType = mlir::dyn_cast_or_null<mlir::RankedTensorType>(
+      args[1].dyn_cast<mlir::Type>());
+  if (!layout || !resultType || layout->getNumResults() != 1)
+    return mlir::failure();
+
+  // A name list rather than a property test, on two counts that are both
+  // per-op review rather than anything inferable: the op must move elements
+  // without changing them, and its existing lowering must already accept
+  // narrow integer storage, since this rewrite creates no quantized-specific
+  // op or kernel. Extending the mechanism is an entry here.
+  llvm::StringRef name = layout->getName().getStringRef();
+  if (name != "hip.transpose" && name != "tensor.collapse_shape" &&
+      name != "tensor.expand_shape")
+    return mlir::failure();
+
+  // A DPS op's init decides its result type, so a retyped result needs a
+  // retyped init and the existing one supplies the extents. Ops outside DPS
+  // carry their result type directly and need nothing built.
+  auto dps = mlir::dyn_cast<mlir::DestinationStyleOpInterface>(layout);
+  if (!dps)
+    return mlir::success();
+  if (dps.getNumDpsInits() != 1)
+    return mlir::failure();
+  return mlir::success(isBuildableInit(resultType, dps.getDpsInits()[0]));
+}
+
 /// conv is a 1x1 window over two spatial dims with unit stride and dilation,
 /// no padding and no grouping
 inline mlir::LogicalResult
@@ -414,13 +520,10 @@ hasHipIntAttrEqual(mlir::PatternRewriter &, mlir::PDLResultList &,
 //===----------------------------------------------------------------------===//
 
 /// a tensor.empty of resultType whose dynamic dims are read off shapeSource
-inline mlir::LogicalResult buildInit(mlir::PatternRewriter &rewriter,
-                                     mlir::PDLResultList &results,
-                                     llvm::ArrayRef<mlir::PDLValue> args) {
-  // Guarded by CanBuildInit, so the casts hold.
-  auto initType =
-      mlir::cast<mlir::RankedTensorType>(args[0].dyn_cast<mlir::Type>());
-  mlir::Value shapeSource = args[1].dyn_cast<mlir::Value>();
+/// a tensor.empty of initType, sizing each dynamic dim from shapeSource
+inline mlir::Value buildInitValue(mlir::PatternRewriter &rewriter,
+                                  mlir::RankedTensorType initType,
+                                  mlir::Value shapeSource) {
   mlir::Location loc = shapeSource.getLoc();
 
   llvm::SmallVector<mlir::Value> dynSizes;
@@ -429,12 +532,61 @@ inline mlir::LogicalResult buildInit(mlir::PatternRewriter &rewriter,
       dynSizes.push_back(
           mlir::tensor::DimOp::create(rewriter, loc, shapeSource, dim));
 
+  return mlir::tensor::EmptyOp::create(rewriter, loc, initType.getShape(),
+                                       initType.getElementType(), dynSizes)
+      .getResult();
+}
+
+inline mlir::LogicalResult buildInit(mlir::PatternRewriter &rewriter,
+                                     mlir::PDLResultList &results,
+                                     llvm::ArrayRef<mlir::PDLValue> args) {
+  // Guarded by CanBuildInit, so the casts hold.
   // getResult(), not the op: an op wrapper converts to both Value and
   // Operation *, which makes push_back ambiguous.
-  results.push_back(mlir::tensor::EmptyOp::create(
-                        rewriter, loc, initType.getShape(),
-                        initType.getElementType(), dynSizes)
-                        .getResult());
+  results.push_back(buildInitValue(
+      rewriter,
+      mlir::cast<mlir::RankedTensorType>(args[0].dyn_cast<mlir::Type>()),
+      args[1].dyn_cast<mlir::Value>()));
+  return mlir::success();
+}
+
+/// a copy of layout reading dq's quantized input and producing q's result type
+inline mlir::LogicalResult
+createRequantizedLayoutOp(mlir::PatternRewriter &rewriter,
+                          mlir::PDLResultList &results,
+                          llvm::ArrayRef<mlir::PDLValue> args) {
+  // Guarded by CanRequantizeLayoutOp, so the casts and the single init hold.
+  auto dq = mlir::cast<mlir::hip::DequantizeLinearOp>(
+      args[0].dyn_cast<mlir::Operation *>());
+  auto *layout = args[1].dyn_cast<mlir::Operation *>();
+  auto *q = args[2].dyn_cast<mlir::Operation *>();
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(q->getResult(0).getType());
+
+  // The dequantized float is the only operand whose meaning changes. Whatever
+  // else the op carries describes the layout -- a permutation, a reassociation,
+  // an output extent -- and the rewrite moves the same elements, so all of it
+  // carries over untouched.
+  llvm::SmallVector<mlir::Value> operands(layout->getOperands());
+  for (mlir::Value &operand : operands)
+    if (operand == dq.getResult(0))
+      operand = dq.getInput();
+
+  // Done after the substitution above rather than folded into it: the init is
+  // never the dequantized value, so the two never touch the same operand.
+  if (auto dps = mlir::dyn_cast<mlir::DestinationStyleOpInterface>(layout)) {
+    mlir::OpOperand &init = dps.getDpsInitsMutable()[0];
+    operands[init.getOperandNumber()] =
+        buildInitValue(rewriter, resultType, init.get());
+  }
+
+  // Built generically because the mechanism is not tied to one op: the name,
+  // the attributes and the layout operands are all taken from the matched op.
+  mlir::OperationState state(layout->getLoc(), layout->getName());
+  state.addOperands(operands);
+  state.addTypes(resultType);
+  state.addAttributes(layout->getAttrs());
+  results.push_back(rewriter.create(state)->getResult(0));
   return mlir::success();
 }
 
@@ -576,6 +728,14 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
                                       extractHipQdqZeropoint);
   pdlPatterns.registerRewriteFunction("ExtractHipQdqValueBits",
                                       extractHipQdqValueBits);
+  pdlPatterns.registerConstraintFunction("HasMatchingHipQdqParams",
+                                         hasMatchingHipQdqParams);
+  pdlPatterns.registerConstraintFunction("IsHipQdqIdentityRoundTrip",
+                                         isHipQdqIdentityRoundTrip);
+  pdlPatterns.registerConstraintFunction("CanRequantizeLayoutOp",
+                                         canRequantizeLayoutOp);
+  pdlPatterns.registerRewriteFunction("CreateRequantizedLayoutOp",
+                                      createRequantizedLayoutOp);
 }
 
 /// apply the patterns in pdlBuffer to every function body in module, an empty

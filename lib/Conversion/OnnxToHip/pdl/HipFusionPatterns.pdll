@@ -45,6 +45,6 @@ Rewrite CreateQuantizedSiso(dq: Op, siso: Op, q: Op) -> Value;
 // #include "QDQMatMulFusion.pdll"
 // #include "QDQGemmFusion.pdll"
 // #include "QDQConvFusion.pdll"
-#include "QDQSisoFusion.pdll"
+// #include "QDQSisoFusion.pdll"
 #include "QDQLpNormalizationFusion.pdll"
 // #include "QDQSigmoidFusion.pdll"
