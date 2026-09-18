@@ -1,0 +1,73 @@
+From 29ea7a22cde5c46062dadd2828511b7f8cb344f1 Mon Sep 17 00:00:00 2001
+From: Ilango Rajagopal <ilangokul@gmail.com>
+Date: Fri, 18 Sep 2026 01:50:33 -0600
+Subject: [PATCH] Use external LLVM when provided
+
+---
+ cmake/triton.cmake | 43 +++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 43 insertions(+)
+
+diff --git a/cmake/triton.cmake b/cmake/triton.cmake
+index 177db851d..7f469d7e9 100644
+--- a/cmake/triton.cmake
++++ b/cmake/triton.cmake
+@@ -26,6 +26,47 @@ set(ROCMLIR_LLVM_PROJECT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/llvm-project"
+ # code keep working unchanged.
+ #===----------------------------------------------------------------------===//
+ 
++# When embedded in a larger build (e.g. hip-ep) that has already provided
++# LLVM/MLIR -- either via find_package or via its own add_subdirectory of the
++# same vendored external/llvm-project -- the MLIRSupport target already exists.
++# In that case we must NOT add_subdirectory the LLVM tree again (it would
++# redefine every LLVM/MLIR target) nor rebuild LLVM. Instead we consume the
++# discovery variables the parent already populated. The standalone build (no
++# external LLVM) keeps the original in-tree flow unchanged.
++if(TARGET MLIRSupport)
++  set(ROCMLIR_EXTERNAL_LLVM ON)
++else()
++  set(ROCMLIR_EXTERNAL_LLVM OFF)
++endif()
++
++if(ROCMLIR_EXTERNAL_LLVM)
++  message(STATUS "Using externally-provided LLVM/MLIR (MLIRSupport target already defined); "
++    "skipping in-tree external/llvm-project build")
++
++  # The parent build is expected to have set the standard discovery variables
++  # (LLVM_DIR, MLIR_DIR, MLIR_CMAKE_DIR, LLVM_CMAKE_DIR, LLD_DIR,
++  # LLVM_TOOLS_BINARY_DIR, LLVM_LIBRARY_DIR, LLVM_INCLUDE_DIRS,
++  # MLIR_INCLUDE_DIRS). These are exactly what the in-tree branch fabricates by
++  # hand below, so everything downstream (add_subdirectory(mlir) and Triton's
++  # own find_package(MLIR CONFIG PATHS ${MLIR_DIR})) works unchanged.
++  if(NOT DEFINED MLIR_CMAKE_DIR AND DEFINED MLIR_DIR)
++    set(MLIR_CMAKE_DIR "${MLIR_DIR}")
++  endif()
++  if(NOT DEFINED LLVM_CMAKE_DIR AND DEFINED LLVM_DIR)
++    set(LLVM_CMAKE_DIR "${LLVM_DIR}")
++  endif()
++  list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
++  list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
++  # Triton's find_package(MLIR) does not pass NO_DEFAULT_PATH, so ensure the
++  # build-tree/install MLIR package dir is on the search path.
++  list(APPEND CMAKE_PREFIX_PATH "${MLIR_CMAKE_DIR}")
++
++  message(STATUS "MLIR_DIR: ${MLIR_DIR}")
++  message(STATUS "LLD_DIR: ${LLD_DIR}")
++  message(STATUS "MLIR_INCLUDE_DIRS: ${MLIR_INCLUDE_DIRS}")
++  message(STATUS "LLVM_INCLUDE_DIRS: ${LLVM_INCLUDE_DIRS}")
++else()
++
+ if(NOT EXISTS "${ROCMLIR_LLVM_PROJECT_DIR}/llvm/CMakeLists.txt")
+   message(FATAL_ERROR
+     "external/llvm-project/llvm/CMakeLists.txt is missing.\n"
+@@ -152,6 +193,8 @@ message(STATUS "LLD_DIR: ${LLD_DIR}")
+ message(STATUS "MLIR_INCLUDE_DIRS: ${MLIR_INCLUDE_DIRS}")
+ message(STATUS "LLVM_INCLUDE_DIRS: ${LLVM_INCLUDE_DIRS}")
+ 
++endif() # ROCMLIR_EXTERNAL_LLVM
++
+ #===----------------------------------------------------------------------===//
+ # ROCm Configuration
+ #
+-- 
+2.43.0
+
