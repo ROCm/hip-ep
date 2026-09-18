@@ -1920,8 +1920,9 @@ struct ScatterNDConverter final : public OpConversionPattern<ScatterNDOp> {
 
     int64_t rank = dataTy.getRank();
     int64_t indicesRank = indicesTy.getRank();
-if (indicesRank < 1)
-      return rewriter.notifyMatchFailure(op, "indices must have rank at least 1");
+    if (indicesRank < 1)
+      return rewriter.notifyMatchFailure(op,
+                                         "indices must have rank at least 1");
     int64_t tuple = indicesTy.getDimSize(indicesRank - 1);
     if (tuple < 1 || tuple > rank)
       return rewriter.notifyMatchFailure(
