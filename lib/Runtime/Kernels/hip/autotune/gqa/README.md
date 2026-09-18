@@ -115,7 +115,7 @@ functions. (The old design embedded the table in `runtime.bc`; this replaced it.
 | `lut/<arch>.json` | The table, per arch. Reviewable source of truth (one entry per line). | `scripts/update_lut.py build` |
 | `lut/<arch>.fb` | What the DLL embeds, produced from the JSON by `flatc`. | `scripts/update_lut.py compile` |
 | `scripts/update_lut.py` | `plan` / `measure` / `build` / `compile` pipeline. | — |
-| `../../test/example/gqa/autotune/` | the GPU sweep driver + Makefile. | — |
+| `tools/gqa_autotune_sweep.cpp` | GPU sweep driver + `maxseq_probe.cpp`. | `tools/Makefile` |
 
 ## Using it
 

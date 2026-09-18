@@ -1,0 +1,200 @@
+# ============================================================
+# custom_kernels GQA flash decode (TPS) Test -- fp16 KV cache
+#
+#   make test        OFFLOAD=--offload-arch=gfx1151 HIP_SDK=<sdk> [COVERAGE=1|2|3]
+#   make test_custom OFFLOAD=... HIP_SDK=... B=1 H=32 G=8 D=128 MAX_SEQ=4096 TOTAL=2048
+#   make clean
+#
+# MODE=auto (default) -- lut if AUTOTUNE_DIR/lut/<arch>.fb exists, else
+# autotune. MODE=lut forces lut (falls back to autotune with a warning if the
+# .fb is missing). MODE=lut needs flatc + its include/ (a build tool, not part
+# of this repo -- see README): FLATC=<path to flatc(.exe)>
+# FLATBUFFERS_INC=<its include dir>.
+#
+# `test` runs the exe with no single-shape flags, which hits its own built-in
+# 13-case geometry+model matrix x a small typical context-length list
+# (auto-enumerated in test_gqa_decode.cpp) -- every categorical situation runs
+# at every tier; COVERAGE (default 3) only picks how many typical lengths run.
+# See example/README.md.
+# ============================================================
+
+ifeq ($(OS),Windows_NT)
+    DETECTED_OS := Windows
+    SHELL := cmd.exe
+    .SHELLFLAGS := /c
+else
+    DETECTED_OS := WSL
+endif
+
+# ---- Required from CI / CLI ----
+
+OFFLOAD  ?= --offload-arch=gfx1151
+HIP_SDK  ?= $(HIP_PATH)
+MODE     ?= auto
+COVERAGE ?= 3
+
+ifeq ($(HIP_SDK),)
+    $(error pass HIP_SDK=<HIP SDK root>)
+endif
+
+# ---- Paths ----
+
+HIPCC        := $(HIP_SDK)/bin/hipcc.exe
+INCLUDE_DIR  := ../../../../../include
+KERNEL_HIP   := ../../../../../hip/gqa_kernel.hip
+AUTOTUNE_DIR := ../../../../../hip/autotune/gqa
+
+BUILD_DIR ?= out
+TARGET    := $(BUILD_DIR)/test_gqa_decode.exe
+RESULTS_CSV := $(BUILD_DIR)/results.csv
+
+ARCH   := $(patsubst --offload-arch=%,%,$(OFFLOAD))
+LUT_FB := $(AUTOTUNE_DIR)/lut/$(ARCH).fb
+
+ifeq ($(MODE),auto)
+    MODE_RESOLVED := $(if $(wildcard $(LUT_FB)),lut,autotune)
+else ifeq ($(MODE),lut)
+    MODE_RESOLVED := $(if $(wildcard $(LUT_FB)),lut,autotune)
+else
+    MODE_RESOLVED := autotune
+endif
+
+FLATC ?= flatc
+FLATBUFFERS_INC ?=
+
+KERNEL_FLAGS := -O3 -std=c++17 -x hip -ffp-contract=fast
+CXXFLAGS     := -O3 -std=c++17 -Wno-c23-extensions
+INCLUDES     := -I$(INCLUDE_DIR)
+
+# ---- Test parameters (test_custom) ----
+
+ITERS   ?= 100
+B       ?= 1
+H       ?= 32
+G       ?= 8
+D       ?= 128
+MAX_SEQ ?= 4096
+TOTAL   ?= 2048
+
+# ---- OS-specific: run command + clean ----
+
+ifeq ($(DETECTED_OS),Windows)
+    HIP_SDK_WIN := $(subst /,\,$(HIP_SDK))
+    RUN_CMD     = set "PATH=$(HIP_SDK_WIN)\bin;%PATH%" && set "HIPDNN_RESULTS_CSV=$(subst /,\,$(RESULTS_CSV))" && set "HIPDNN_RESULTS_OP=gqa" && set "HIPDNN_RESULTS_LEAF=decode/Xfp16_Wfp16_Yfp16" && set "HIPDNN_RESULTS_ARCH=$(ARCH)" && set "HIPDNN_RESULTS_MODE=$(MODE_RESOLVED)" && $(subst /,\,.\$(1))
+    define DO_CLEAN
+	if exist $(BUILD_DIR) rmdir /s /q $(BUILD_DIR)
+    endef
+else
+    HIP_SDK_WIN := $(shell wslpath -w "$(HIP_SDK)")
+    RUN_CMD     = cmd.exe /c "set PATH=$(HIP_SDK_WIN)\bin;%PATH% && set HIPDNN_RESULTS_CSV=$(RESULTS_CSV) && set HIPDNN_RESULTS_OP=gqa && set HIPDNN_RESULTS_LEAF=decode/Xfp16_Wfp16_Yfp16 && set HIPDNN_RESULTS_ARCH=$(ARCH) && set HIPDNN_RESULTS_MODE=$(MODE_RESOLVED) && %CD%\$(1)"
+    define DO_CLEAN
+	rm -rf $(BUILD_DIR)
+    endef
+endif
+
+CSV_FRESH ?= 1
+RESET_RESULTS_CSV = if exist $(subst /,\,$(RESULTS_CSV)) del $(subst /,\,$(RESULTS_CSV))
+
+# ============================================================
+# Build -- gqa_kernel.hip does not call the autotune-LUT resolver itself (only
+# real/gqa.cpp does, in production); MODE=lut instead has THIS test call
+# hip_gqa_autotune_resolve_decode() then dispatch through
+# hip_gqa_flash_decode_configured() (see test_gqa_decode.cpp, guarded by
+# HIPDNN_LUT_LINKED_EXTERNALLY). MODE=autotune links no LUT at all.
+# ============================================================
+
+ifeq ($(DETECTED_OS),Windows)
+$(BUILD_DIR):
+	@if not exist $(BUILD_DIR) mkdir $(BUILD_DIR)
+else
+$(BUILD_DIR):
+	@mkdir -p $@
+endif
+
+GEN_DIR := $(BUILD_DIR)/gen
+
+$(GEN_DIR): | $(BUILD_DIR)
+	@if not exist $(subst /,\,$(GEN_DIR)) mkdir $(subst /,\,$(GEN_DIR))
+
+TEST_OBJ   := $(BUILD_DIR)/decode_test.obj
+KERNEL_OBJ := $(BUILD_DIR)/decode_kernel.obj
+
+# ---- MODE=lut extras: flatc-generated header (kept, not python) + the real
+# resolver, reused unmodified from hip/autotune/gqa/. The LUT bytes themselves
+# are embedded directly into test_gqa_decode.cpp via a one-line C23 #embed
+# (see the HIPDNN_LUT_LINKED_EXTERNALLY block there) -- LUT_FB_HEADER just
+# gives that #embed a path macro without needing python or a generated .cpp;
+# it's a single #define line written by `echo`, not data. ----
+
+LUT_GENERATED_H := $(GEN_DIR)/gqa_autotune_generated.h
+LUT_FB_HEADER   := $(GEN_DIR)/lut_fb_path.h
+AUTOTUNE_OBJ    := $(BUILD_DIR)/autotune.obj
+
+$(LUT_GENERATED_H): $(AUTOTUNE_DIR)/gqa_autotune.fbs | $(GEN_DIR)
+	$(FLATC) --cpp --gen-object-api --scoped-enums -o $(GEN_DIR) $(AUTOTUNE_DIR)/gqa_autotune.fbs
+
+$(LUT_FB_HEADER): | $(GEN_DIR)
+	@echo #define HIPDNN_LUT_FB "$(LUT_FB)" > $(subst /,\,$(LUT_FB_HEADER))
+
+$(AUTOTUNE_OBJ): $(AUTOTUNE_DIR)/gqa_autotune.cpp $(LUT_GENERATED_H) | $(BUILD_DIR)
+	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) -x hip -I$(AUTOTUNE_DIR) -I$(GEN_DIR) -I$(FLATBUFFERS_INC) $(AUTOTUNE_DIR)/gqa_autotune.cpp -o $(AUTOTUNE_OBJ)
+
+ifeq ($(MODE_RESOLVED),lut)
+    TEST_DEFINES       := -DHIPDNN_LUT_LINKED_EXTERNALLY=1
+    LUT_EXTRA_INCLUDES := -I$(AUTOTUNE_DIR) -I$(GEN_DIR) -I$(FLATBUFFERS_INC)
+    LUT_OBJS           := $(AUTOTUNE_OBJ)
+    LUT_HEADER_DEP     := $(LUT_FB_HEADER)
+else
+    TEST_DEFINES       :=
+    LUT_EXTRA_INCLUDES :=
+    LUT_OBJS           :=
+    LUT_HEADER_DEP      :=
+endif
+
+$(TARGET): FORCE mode_info $(LUT_OBJS) $(LUT_HEADER_DEP) | $(BUILD_DIR)
+	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) $(TEST_DEFINES) $(INCLUDES) $(LUT_EXTRA_INCLUDES) -x hip test_gqa_decode.cpp -o $(TEST_OBJ)
+	$(HIPCC) -c $(KERNEL_FLAGS) $(OFFLOAD) $(INCLUDES) $(KERNEL_HIP) -o $(KERNEL_OBJ)
+	$(HIPCC) $(OFFLOAD) $(TEST_OBJ) $(KERNEL_OBJ) $(LUT_OBJS) -o $(TARGET)
+
+mode_info:
+	@echo [MODE=$(MODE) -^> $(MODE_RESOLVED)] arch=$(ARCH) lut_fb=$(LUT_FB)
+ifeq ($(MODE),lut)
+ifneq ($(MODE_RESOLVED),lut)
+	@echo [MODE=lut] no LUT for $(ARCH) at $(LUT_FB) -- falling back to MODE=autotune
+endif
+endif
+ifeq ($(MODE_RESOLVED),lut)
+ifeq ($(FLATBUFFERS_INC),)
+	@echo ERROR: MODE=lut needs FLATBUFFERS_INC=^<flatbuffers include dir^> (flatc's include/, a build tool outside the repo -- see README) 1>&2
+	@exit /b 1
+endif
+endif
+
+asm: | $(BUILD_DIR)
+	$(HIPCC) -c $(KERNEL_FLAGS) --save-temps $(OFFLOAD) $(INCLUDES) $(KERNEL_HIP) -o $(BUILD_DIR)/gqa_kernel_asm.obj
+	@echo "[asm] ISA saved -- look for .s files in $(BUILD_DIR)/"
+
+# ============================================================
+# Run / test targets (uniform API)
+# ============================================================
+
+clean:
+	$(DO_CLEAN)
+
+# Coverage-tiered sweep: the exe's own built-in geometry+model matrix (every
+# categorical situation, always) x a small typical context-length list
+# (thinned by COVERAGE, default 3). No single-shape flags -- that routes
+# main() into the sweep branch.
+test: $(TARGET)
+	@$(RESET_RESULTS_CSV)
+	$(call RUN_CMD,$(TARGET)) --coverage $(COVERAGE) --iters $(ITERS)
+
+# One shape from Make variables / CLI (in-process rng, no data files).
+test_custom: $(TARGET)
+ifeq ($(CSV_FRESH),1)
+	@$(RESET_RESULTS_CSV)
+endif
+	$(call RUN_CMD,$(TARGET)) --b $(B) --h $(H) --g $(G) --d $(D) --max-seq $(MAX_SEQ) --total $(TOTAL) --iters $(ITERS)
+
+FORCE:
+.PHONY: test test_custom clean asm mode_info FORCE
