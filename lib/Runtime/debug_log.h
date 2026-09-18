@@ -8,6 +8,7 @@
 // Set HIPDNN_EP_DEBUG=1 to enable all [Runtime DEBUG] output.
 // Set HIPDNN_EP_PERF=1 to enable only [PERF] timing breakdown per inference.
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 
 #include "hip/env.h" // single cross-platform env reader (see its header)
@@ -17,10 +18,10 @@ inline bool hipdnn_ep_debug_enabled() {
   return enabled;
 }
 
-// W4A8 integer-dot-product (dp4a) path for matmul_nbits single-row (M==1)
-// decode GEMV. When enabled, eligible bits==4, K%32==0 fp16 decode GEMVs
-// dynamically quantize the activation to per-group int8 and use a
-// v_dot4_i32_iu8 dot product instead of the dequant-ALU-bound fp GEMV.
+// W4A8 integer-dot-product (dp4a) path for matmul_nbits GEMV. When enabled,
+// eligible bits==4, K%32==0 fp16 GEMVs dynamically quantize the activation to
+// per-group int8 and use a v_dot4_i32_iu8 dot product instead of the
+// dequant-ALU-bound fp GEMV.
 // DEFAULT-ON (so CI validates the optimization); set HIPDNN_EP_MATMUL_DP4A=0
 // to force the classic fp GEMV path for A/B isolation. Latched on first read
 // like the other flags here.
@@ -28,6 +29,23 @@ inline bool hipdnn_ep_matmul_dp4a_enabled() {
   static const bool enabled =
       hipdnn_ep::env_enabled_default_on("HIPDNN_EP_MATMUL_DP4A");
   return enabled;
+}
+
+// Widest M the dp4a path claims. 1 is decode; above that is the speculative
+// verify pass, where blocking rows over one pass of the weight is the whole
+// point (see the GEMV-M dp4a section in matmul_nbits_kernel.hip). The default
+// stops below the fp path's WMMA cutoff, which owns M >= 8 and is measured
+// per shape there. HIPDNN_EP_MATMUL_DP4A_MAX_M=1 restores decode-only
+// behaviour, which is the A/B control for the verify-pass claim.
+inline int hipdnn_ep_matmul_dp4a_max_m() {
+  static const int m = [] {
+    const std::string v = hipdnn_ep::env_string("HIPDNN_EP_MATMUL_DP4A_MAX_M");
+    if (v.empty())
+      return 7;
+    const int parsed = atoi(v.c_str());
+    return (parsed >= 1 && parsed <= 64) ? parsed : 7;
+  }();
+  return m;
 }
 
 inline bool hipdnn_ep_perf_enabled() {
