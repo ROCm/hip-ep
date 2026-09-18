@@ -182,9 +182,9 @@ inline bool isBuildableInit(mlir::Type resultType, mlir::Value shapeSource) {
 }
 
 /// resultType and shapeSource are accepted by BuildInit
-inline mlir::LogicalResult
-canBuildInit(mlir::PatternRewriter &, mlir::PDLResultList &,
-             llvm::ArrayRef<mlir::PDLValue> args) {
+inline mlir::LogicalResult canBuildInit(mlir::PatternRewriter &,
+                                        mlir::PDLResultList &,
+                                        llvm::ArrayRef<mlir::PDLValue> args) {
   if (args.size() != 2)
     return mlir::failure();
   // BuildInit itself has no failure path: a native rewrite that returns
@@ -223,8 +223,7 @@ hasExtractableQdqZeropoint(mlir::PatternRewriter &, mlir::PDLResultList &,
   if (args.size() != 1)
     return mlir::failure();
   auto *op = args[0].dyn_cast<mlir::Operation *>();
-  return mlir::success(
-      tryHipQdqZeropoint(op, /*absentValue=*/0).has_value());
+  return mlir::success(tryHipQdqZeropoint(op, /*absentValue=*/0).has_value());
 }
 
 /// op is a Q/DQ whose quantized side has one of the element widths listed in
