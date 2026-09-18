@@ -22,10 +22,22 @@
 // differ by one divisor precisely where the remainder and divisor signs
 // disagree and the remainder is not zero.
 //
+// Both expansions combine their predicates with the bitwise ops rather than the
+// logical ones, which coincide on i1. rocMLIR's RockTosaToElementwise has
+// patterns for tosa.bitwise_and/_or/_xor and none for any tosa.logical_*, and
+// it marks every surviving tosa op illegal, so the logical spelling converts
+// cleanly here and then kills the kernel it was meant to enable.
+//
 // COVERAGE:
 // - Round emits the floor/compare/select expansion, with the tie broken on the
 //   parity of the floor rather than on the fraction alone
-// - Round converts for f32 and f16 alike
+// - Round steps up with tosa.ceil, so a value in [-0.5, 0) keeps its signed
+//   zero as nearbyintf does in the round runtime
+// - Round converts for f32, f16 and bf16 alike, and names f64, which ONNX
+//   allows and TOSA has no tensor type for
+// - Mod divides by a divisor with -1 substituted away, since the most negative
+//   value over -1 is undefined behaviour once tosa.intdiv becomes an sdiv
+// - Neither expansion emits a tosa.logical_* op
 // - Mod with the default fmod = 0 emits the remainder plus the divisor-sign
 //   correction; fmod = 1 stops at the bare remainder with no select
 // - Signless i32 and i64, the only widths tosa.intdiv accepts, both convert
@@ -50,10 +62,15 @@
 // the result steps up when the fraction exceeds a half, or when it is exactly a
 // half and %[[F]] is odd. Oddness is the floor failing to survive a halving and
 // a doubling, which is why the second floor and the multiply by two are here
-// rather than a cheaper test on the fraction.
+// rather than a cheaper test on the fraction; halving drops the low bit, so an
+// odd floor comes back one smaller and %[[ODD]] can read that as a compare.
+//
+// The step-up value is tosa.ceil rather than %[[F]] + 1 so that an input in
+// [-0.5, 0) keeps the sign of its zero, as nearbyintf does in the round
+// runtime. The two agree wherever the branch is taken, since it is taken only
+// on a non-zero fraction.
 // CHECK-LABEL: func.func @round_f32
 // CHECK-DAG: %[[HALF:.*]] = "tosa.const"() <{values = dense<5.000000e-01> : tensor<4xf32>}>
-// CHECK-DAG: %[[ONE:.*]] = "tosa.const"() <{values = dense<1.000000e+00> : tensor<4xf32>}>
 // CHECK-DAG: %[[TWO:.*]] = "tosa.const"() <{values = dense<2.000000e+00> : tensor<4xf32>}>
 // CHECK: %[[F:.*]] = tosa.floor %arg1
 // CHECK: %[[D:.*]] = tosa.sub %arg1, %[[F]]
@@ -62,13 +79,17 @@
 // CHECK: %[[HALVED:.*]] = tosa.mul %[[F]], %[[HALF]]
 // CHECK: %[[FH:.*]] = tosa.floor %[[HALVED]]
 // CHECK: %[[BACK:.*]] = tosa.mul %[[FH]], %[[TWO]]
-// CHECK: %[[EVEN:.*]] = tosa.equal %[[BACK]], %[[F]]
-// CHECK: %[[ODD:.*]] = tosa.logical_not %[[EVEN]]
-// CHECK: %[[TIEUP:.*]] = tosa.logical_and %[[TIE]], %[[ODD]]
-// CHECK: %[[UP:.*]] = tosa.logical_or %[[ABOVE]], %[[TIEUP]]
-// CHECK: %[[NEXT:.*]] = tosa.add %[[F]], %[[ONE]]
+// CHECK: %[[ODD:.*]] = tosa.greater %[[F]], %[[BACK]]
+// CHECK: %[[TIEUP:.*]] = tosa.bitwise_and %[[TIE]], %[[ODD]]
+// CHECK: %[[UP:.*]] = tosa.bitwise_or %[[ABOVE]], %[[TIEUP]]
+// CHECK: %[[NEXT:.*]] = tosa.ceil %arg1
 // CHECK: tosa.select %[[UP]], %[[NEXT]], %[[F]]
 // CHECK-NOT: hip.round
+// The predicates are combined bitwise, never logically: rocMLIR's
+// RockTosaToElementwise has no pattern for any tosa.logical_* op and marks
+// every surviving tosa op illegal, so the logical spelling would convert here
+// and then kill the kernel this conversion exists to enable.
+// CHECK-NOT: tosa.logical
 func.func @round_f32(%ctx: !hip.context, %x: tensor<4xf32>,
                      %init: tensor<4xf32>) -> tensor<4xf32>
     attributes {rock.kernel} {
@@ -103,20 +124,32 @@ func.func @round_f16(%ctx: !hip.context, %x: tensor<2x8xf16>,
 // moves its sign onto the divisor. The correction fires only where the two
 // signs disagree and the remainder is non-zero -- an exact divide must not
 // collect a spurious divisor.
+//
+// The divide runs against %[[DIV]], which is the divisor with -1 replaced by 1,
+// because the most negative value over -1 overflows and tosa.intdiv becomes an
+// LLVM sdiv, where that pair is undefined behaviour rather than a wrong value.
+// Every remainder by -1 is zero under both fmod rules and dividing by 1 gives
+// exactly that, so the substitution costs nothing but the overflow.
 // CHECK-LABEL: func.func @mod_i32
-// CHECK: %[[Q:.*]] = tosa.intdiv %arg1, %arg2
-// CHECK: %[[P:.*]] = tosa.mul %[[Q]], %arg2
+// CHECK-DAG: %[[MONE:.*]] = "tosa.const"() <{values = dense<-1> : tensor<4xi32>}>
+// CHECK-DAG: %[[ONE:.*]] = "tosa.const"() <{values = dense<1> : tensor<4xi32>}>
+// CHECK: %[[ISMONE:.*]] = tosa.equal %arg2, %[[MONE]]
+// CHECK: %[[DIV:.*]] = tosa.select %[[ISMONE]], %[[ONE]], %arg2
+// CHECK: %[[Q:.*]] = tosa.intdiv %arg1, %[[DIV]]
+// CHECK: %[[P:.*]] = tosa.mul %[[Q]], %[[DIV]]
 // CHECK: %[[R:.*]] = tosa.sub %arg1, %[[P]]
 // CHECK: %[[ZERO:.*]] = "tosa.const"() <{values = dense<0> : tensor<4xi32>}>
 // CHECK: %[[BNEG:.*]] = tosa.greater %[[ZERO]], %arg2
 // CHECK: %[[RNEG:.*]] = tosa.greater %[[ZERO]], %[[R]]
-// CHECK: %[[DIFF:.*]] = tosa.logical_xor %[[RNEG]], %[[BNEG]]
+// CHECK: %[[DIFF:.*]] = tosa.bitwise_xor %[[RNEG]], %[[BNEG]]
+// CHECK: %[[TRUE:.*]] = "tosa.const"() <{values = dense<true> : tensor<4xi1>}>
 // CHECK: %[[ISZERO:.*]] = tosa.equal %[[R]], %[[ZERO]]
-// CHECK: %[[NONZERO:.*]] = tosa.logical_not %[[ISZERO]]
-// CHECK: %[[ADJ:.*]] = tosa.logical_and %[[DIFF]], %[[NONZERO]]
+// CHECK: %[[NONZERO:.*]] = tosa.bitwise_xor %[[ISZERO]], %[[TRUE]]
+// CHECK: %[[ADJ:.*]] = tosa.bitwise_and %[[DIFF]], %[[NONZERO]]
 // CHECK: %[[SHIFTED:.*]] = tosa.add %[[R]], %arg2
 // CHECK: tosa.select %[[ADJ]], %[[SHIFTED]], %[[R]]
 // CHECK-NOT: hip.mod
+// CHECK-NOT: tosa.logical
 func.func @mod_i32(%ctx: !hip.context, %a: tensor<4xi32>, %b: tensor<4xi32>,
                    %init: tensor<4xi32>) -> tensor<4xi32>
     attributes {rock.kernel} {
@@ -131,11 +164,14 @@ func.func @mod_i32(%ctx: !hip.context, %a: tensor<4xi32>, %b: tensor<4xi32>,
 // already has, so the correction is absent entirely rather than emitted and
 // folded later.
 // CHECK-LABEL: func.func @mod_fmod_i32
-// CHECK: %[[Q:.*]] = tosa.intdiv %arg1, %arg2
-// CHECK: %[[P:.*]] = tosa.mul %[[Q]], %arg2
+// CHECK: %[[DIV:.*]] = tosa.select %{{.*}}, %{{.*}}, %arg2
+// CHECK: %[[Q:.*]] = tosa.intdiv %arg1, %[[DIV]]
+// CHECK: %[[P:.*]] = tosa.mul %[[Q]], %[[DIV]]
 // CHECK: tosa.sub %arg1, %[[P]]
+// The sign correction is absent, so the only select left is the overflow
+// substitution matched above.
 // CHECK-NOT: tosa.select
-// CHECK-NOT: tosa.logical_xor
+// CHECK-NOT: tosa.bitwise_xor
 // CHECK-NOT: hip.mod
 func.func @mod_fmod_i32(%ctx: !hip.context, %a: tensor<4xi32>,
                         %b: tensor<4xi32>, %init: tensor<4xi32>) -> tensor<4xi32>
@@ -148,8 +184,11 @@ func.func @mod_fmod_i32(%ctx: !hip.context, %a: tensor<4xi32>,
 // -----
 
 // i64 is the other half of tosa.intdiv's Tosa_Int32Or64Tensor operand type.
+// The i64 multiply in the expansion lowers too: rocMLIR's MulConverter takes
+// any integer element type on a zero shift, which is the shift this pass emits.
 // CHECK-LABEL: func.func @mod_i64
-// CHECK: tosa.intdiv %arg1, %arg2 : (tensor<4xi64>, tensor<4xi64>) -> tensor<4xi64>
+// CHECK: tosa.intdiv %arg1, %{{.*}} : (tensor<4xi64>, tensor<4xi64>) -> tensor<4xi64>
+// CHECK: tosa.mul %{{.*}} : (tensor<4xi64>, tensor<4xi64>, tensor<1xi8>) -> tensor<4xi64>
 // CHECK-NOT: hip.mod
 func.func @mod_i64(%ctx: !hip.context, %a: tensor<4xi64>, %b: tensor<4xi64>,
                    %init: tensor<4xi64>) -> tensor<4xi64>
@@ -166,7 +205,8 @@ func.func @mod_i64(%ctx: !hip.context, %a: tensor<4xi64>, %b: tensor<4xi64>,
 // CHECK-LABEL: func.func @mod_rank_extending
 // CHECK: %[[SHAPE:.*]] = tosa.const_shape {values = dense<1> : tensor<2xindex>}
 // CHECK: %[[B:.*]] = tosa.reshape %arg2, %[[SHAPE]] : (tensor<i32>, !tosa.shape<2>) -> tensor<1x1xi32>
-// CHECK: tosa.intdiv %arg1, %[[B]] : (tensor<4x8xi32>, tensor<1x1xi32>) -> tensor<4x8xi32>
+// CHECK: %[[DIV:.*]] = tosa.select %{{.*}}, %{{.*}}, %[[B]] : (tensor<4x8xi1>, tensor<4x8xi32>, tensor<1x1xi32>) -> tensor<4x8xi32>
+// CHECK: tosa.intdiv %arg1, %[[DIV]] : (tensor<4x8xi32>, tensor<4x8xi32>) -> tensor<4x8xi32>
 // CHECK-NOT: hip.mod
 func.func @mod_rank_extending(%ctx: !hip.context, %a: tensor<4x8xi32>,
                               %b: tensor<i32>, %init: tensor<4x8xi32>)
@@ -264,10 +304,43 @@ func.func @mod_unsigned(%ctx: !hip.context, %a: tensor<4xui32>,
 func.func @round_int(%ctx: !hip.context, %x: tensor<4xi32>,
                      %init: tensor<4xi32>) -> tensor<4xi32>
     attributes {rock.kernel} {
+  // expected-error @+2 {{hip.round has no TOSA spelling for element type 'i32'}}
   // expected-error @+1 {{failed to legalize operation 'hip.round'}}
   %r = hip.round(%ctx) ins(%x : tensor<4xi32>)
                        outs(%init : tensor<4xi32>) : tensor<4xi32>
   return %r : tensor<4xi32>
+}
+
+// -----
+
+// f64 is the reachable one: ONNX has a double tensor type, so a double Round is
+// a valid model, but TOSA has no f64 tensor type. Asking only for a FloatType
+// would have built tosa.floor and tosa.ceil on an element type TOSA cannot
+// represent, which verifies here and fails later. GemmConverter excludes f64
+// for the same reason.
+func.func @round_f64(%ctx: !hip.context, %x: tensor<4xf64>,
+                     %init: tensor<4xf64>) -> tensor<4xf64>
+    attributes {rock.kernel} {
+  // expected-error @+2 {{hip.round has no TOSA spelling for element type 'f64'}}
+  // expected-error @+1 {{failed to legalize operation 'hip.round'}}
+  %r = hip.round(%ctx) ins(%x : tensor<4xf64>)
+                       outs(%init : tensor<4xf64>) : tensor<4xf64>
+  return %r : tensor<4xf64>
+}
+
+// -----
+
+// bf16 rounds like the other two supported floats, with no f32 bridge.
+// CHECK-LABEL: func.func @round_bf16
+// CHECK: tosa.floor %arg1 : (tensor<4xbf16>) -> tensor<4xbf16>
+// CHECK: tosa.ceil %arg1 : (tensor<4xbf16>) -> tensor<4xbf16>
+// CHECK-NOT: hip.round
+func.func @round_bf16(%ctx: !hip.context, %x: tensor<4xbf16>,
+                      %init: tensor<4xbf16>) -> tensor<4xbf16>
+    attributes {rock.kernel} {
+  %r = hip.round(%ctx) ins(%x : tensor<4xbf16>)
+                       outs(%init : tensor<4xbf16>) : tensor<4xbf16>
+  return %r : tensor<4xbf16>
 }
 
 // -----
