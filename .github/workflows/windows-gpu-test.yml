@@ -618,6 +618,21 @@ jobs:
             return $rows
           }
 
+          function Get-DllSizeRows($dir) {
+            $rows = ""
+            $files = @()
+            $hipgpu = Join-Path $dir "hipgpu.dll"
+            if (Test-Path -LiteralPath $hipgpu) {
+              $files += Get-Item -LiteralPath $hipgpu
+            }
+            $files += @(Get-ChildItem -Path $dir -Filter "custom_kernels*.dll" -File -ErrorAction SilentlyContinue | Sort-Object Name)
+            foreach ($f in $files) {
+              $mb = "{0:F2}" -f ($f.Length / 1MB)
+              $rows += "| $($f.Name) | $mb | $($f.Length) |`n"
+            }
+            return $rows
+          }
+
           # Build table rows from result files
           $tableRows = Get-PerfRows $resultsDir
           if (-not $tableRows) { $tableRows = "| (no results) | - | - | - | - | - |`n" }
@@ -722,8 +737,17 @@ jobs:
                           $vlmRows
           }
 
+          $dllRows = Get-DllSizeRows "gpu-test-package/bin"
+          $dllSection = ""
+          if ($dllRows) {
+            $dllSection = "## Binary sizes`n`n" +
+                          "| File | Size (MB) | Bytes |`n" +
+                          "|------|----------:|------:|`n" +
+                          $dllRows + "`n"
+          }
+
           $footer = "`nRun: [${{ github.run_number }}]($runUrl) - Commit: ``$sha``"
-          $summary = $header + $tableRows + $epctxSection + $ogaSection + $smokeSection + $vlmSection + $footer
+          $summary = $dllSection + $header + $tableRows + $epctxSection + $ogaSection + $smokeSection + $vlmSection + $footer
 
           # Always write to step summary and log
           Write-Host $summary

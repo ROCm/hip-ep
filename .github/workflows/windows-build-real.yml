@@ -244,6 +244,9 @@ jobs:
           cp "$ORT_WHEEL" staging/wheels/
           cp "$OGA_WHEEL" staging/wheels/
 
+          echo "=== Binary sizes ==="
+          ls -lh staging/bin/hipgpu.dll staging/bin/custom_kernels*.dll 2>/dev/null || true
+
           echo "=== Staged package contents ==="
           find staging/ -type f | sort
 
