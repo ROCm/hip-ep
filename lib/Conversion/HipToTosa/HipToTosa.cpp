@@ -781,6 +781,84 @@ struct SqrtConverter final : public OpConversionPattern<SqrtOp> {
   }
 };
 
+// TOSA has no silu/swish. Both expand to the ONNX definition:
+//   silu(x)        = x * sigmoid(x)
+//   swish(x,alpha) = x * sigmoid(alpha * x)
+// with alpha default 1, which is silu. hip.silu is already a FuseROCMlir
+// pointwise consumer; hip.swish is not, so the swish pattern still needs
+// rock.kernel on the test function.
+//
+// Before:
+//   %y = hip.silu(%ctx) ins(%x : tensor<2x8xf16>)
+//                       outs(%init : tensor<2x8xf16>) -> tensor<2x8xf16>
+// After:
+//   %s = tosa.sigmoid %x
+//   %y = tosa.mul %x, %s
+LogicalResult matchStaticFloatSameType(Operation *op, Value input,
+                                       RankedTensorType &resultType,
+                                       ConversionPatternRewriter &rewriter) {
+  if (op->getNumResults() != 1)
+    return rewriter.notifyMatchFailure(op, "expected tensor mode");
+  resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+  if (!resultType || !resultType.hasStaticShape())
+    return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
+  if (input.getType() != resultType)
+    return rewriter.notifyMatchFailure(
+        op, "operand and result types must match exactly");
+  if (!isa<FloatType>(resultType.getElementType()))
+    return rewriter.notifyMatchFailure(op, "tosa op requires a float tensor");
+  return success();
+}
+
+Value emitMulSigmoid(Value x, Value preSigmoid, RankedTensorType ty,
+                     ConversionPatternRewriter &rewriter, Location loc) {
+  Value sig = tosa::SigmoidOp::create(rewriter, loc, ty, preSigmoid);
+  return tosa::MulOp::create(rewriter, loc, ty, x, sig,
+                             createZeroMulShift(rewriter, loc));
+}
+
+struct SiluConverter final : public OpConversionPattern<SiluOp> {
+  using OpConversionPattern<SiluOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(SiluOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    RankedTensorType resultType;
+    if (failed(matchStaticFloatSameType(op, adaptor.getInput(), resultType,
+                                        rewriter)))
+      return failure();
+    rewriter.replaceOp(op,
+                       emitMulSigmoid(adaptor.getInput(), adaptor.getInput(),
+                                      resultType, rewriter, op.getLoc()));
+    return success();
+  }
+};
+
+struct SwishConverter final : public OpConversionPattern<SwishOp> {
+  using OpConversionPattern<SwishOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(SwishOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    RankedTensorType resultType;
+    if (failed(matchStaticFloatSameType(op, adaptor.getInput(), resultType,
+                                        rewriter)))
+      return failure();
+    Location loc = op.getLoc();
+    Value x = adaptor.getInput();
+    double alphaVal = op.getAlpha().convertToDouble();
+    Value preSigmoid = x;
+    if (alphaVal != 1.0)
+      preSigmoid = tosa::MulOp::create(
+          rewriter, loc, resultType, x,
+          createSplatFloat(rewriter, loc, resultType, alphaVal),
+          createZeroMulShift(rewriter, loc));
+    rewriter.replaceOp(
+        op, emitMulSigmoid(x, preSigmoid, resultType, rewriter, loc));
+    return success();
+  }
+};
+
 // hip.where is ternary (cond, x, y). tosa.select is the 1-1 mapping; it cannot
 // use BinaryConverter because the predicate is i1 while the result is not.
 // EqualizeRanks is pairwise, so the three operands are equalized the same way
@@ -3233,11 +3311,11 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     conversion.addIllegalOp<
         ConvOp, MatmulOp, GemmOp, TransposeOp, AddOp, SubOp, MinOp, MaxOp,
         MulOp, DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
-        TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, WhereOp, LeakyReluOp,
-        MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp, QuantizeLinearOp,
-        DequantizeLinearOp, MatMulNBitsOp, GatherOp, RopeOp, GqaOp,
-        MultiHeadAttentionOp, RmsNormOp, LayerNormOp, InstanceNormOp,
-        SkipRmsNormOp>();
+        TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, SiluOp, SwishOp,
+        WhereOp, LeakyReluOp, MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp,
+        CastOp, QuantizeLinearOp, DequantizeLinearOp, MatMulNBitsOp, GatherOp,
+        RopeOp, GqaOp, MultiHeadAttentionOp, RmsNormOp, LayerNormOp,
+        InstanceNormOp, SkipRmsNormOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
@@ -3276,12 +3354,12 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         UnaryConverter<SigmoidOp, tosa::SigmoidOp, /*FloatOnly=*/true>,
         UnaryConverter<ReciprocalOp, tosa::ReciprocalOp,
                        /*FloatOnly=*/true>,
-        SqrtConverter, WhereConverter, LeakyReluConverter, SoftmaxConverter,
-        ReduceSumConverter, ReduceMeanConverter, CastConverter,
-        DequantizeLinearConverter, QuantizeLinearConverter,
-        MatMulNBitsConverter, GatherConverter, RopeConverter, GqaConverter,
-        MhaConverter, RmsNormConverter, LayerNormConverter,
-        InstanceNormConverter, SkipRmsNormConverter>(ctx);
+        SqrtConverter, SiluConverter, SwishConverter, WhereConverter,
+        LeakyReluConverter, SoftmaxConverter, ReduceSumConverter,
+        ReduceMeanConverter, CastConverter, DequantizeLinearConverter,
+        QuantizeLinearConverter, MatMulNBitsConverter, GatherConverter,
+        RopeConverter, GqaConverter, MhaConverter, RmsNormConverter,
+        LayerNormConverter, InstanceNormConverter, SkipRmsNormConverter>(ctx);
 
     if (failed(applyPartialConversion(funcOp, conversion, std::move(patterns))))
       signalPassFailure();
