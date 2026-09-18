@@ -222,8 +222,9 @@ int wrap_qmoe_amd(
   size_t sz_expert_offsets = align_up_64((num_experts + 1) * sizeof(int32_t));
   size_t sz_sorted_token_ids = align_up_64(num_tokens * k * sizeof(int32_t));
   size_t sz_sorted_weights = align_up_64(num_tokens * k * elem_size);
-  size_t sz_pair_to_padded = align_up_64(num_tokens * k * sizeof(int32_t));
-  size_t sz_pair_to_slot = align_up_64(num_tokens * k * sizeof(int32_t));
+  // Only the grouped prefill path scatters back to slot-major order.
+  size_t sz_sorted_pair_ids =
+      use_prefill_grouped ? align_up_64(num_tokens * k * sizeof(int32_t)) : 0;
   size_t sz_y_buf = align_up_64(num_tokens * hidden_size * elem_size);
   size_t sz_shared_buf =
       align_up_64(num_tokens * shared_intermediate_size * elem_size);
@@ -239,9 +240,8 @@ int wrap_qmoe_amd(
   size_t off_expert_offsets = off_expert_counts + sz_expert_counts;
   size_t off_sorted_token_ids = off_expert_offsets + sz_expert_offsets;
   size_t off_sorted_weights = off_sorted_token_ids + sz_sorted_token_ids;
-  size_t off_pair_to_padded = off_sorted_weights + sz_sorted_weights;
-  size_t off_pair_to_slot = off_pair_to_padded + sz_pair_to_padded;
-  size_t off_y_buf = off_pair_to_slot + sz_pair_to_slot;
+  size_t off_sorted_pair_ids = off_sorted_weights + sz_sorted_weights;
+  size_t off_y_buf = off_sorted_pair_ids + sz_sorted_pair_ids;
   size_t off_shared_buf = off_y_buf + sz_y_buf;
   size_t total_scratch = off_shared_buf + sz_shared_buf;
 
@@ -266,10 +266,10 @@ int wrap_qmoe_amd(
   int32_t *d_sorted_token_ids =
       reinterpret_cast<int32_t *>(scratch_base + off_sorted_token_ids);
   char *d_sorted_weights = scratch_base + off_sorted_weights;
-  int32_t *d_pair_to_padded =
-      reinterpret_cast<int32_t *>(scratch_base + off_pair_to_padded);
-  int32_t *d_pair_to_slot =
-      reinterpret_cast<int32_t *>(scratch_base + off_pair_to_slot);
+  int32_t *d_sorted_pair_ids =
+      sz_sorted_pair_ids
+          ? reinterpret_cast<int32_t *>(scratch_base + off_sorted_pair_ids)
+          : nullptr;
   void *d_y_buf = scratch_base + off_y_buf;
   void *d_shared_buf = scratch_base + off_shared_buf;
 
@@ -321,7 +321,7 @@ int wrap_qmoe_amd(
         stream, d_h_buf, d_expert_indices, d_expert_weights,
         fc1_experts_weights, fc1_experts_scales, fc2_experts_weights,
         fc2_experts_scales, d_expert_counts, d_expert_offsets,
-        d_sorted_token_ids, d_sorted_weights, d_pair_to_padded, d_pair_to_slot,
+        d_sorted_token_ids, d_sorted_pair_ids, d_sorted_weights,
         /*packed_latent=*/d_gather_buf, /*packed_act=*/d_fc1_buf,
         /*slot_scratch=*/d_fc2_buf, /*acc=*/d_acc_buf, num_tokens, num_experts,
         latent_size, moe_intermediate_size, k, expert_weight_bits, block_size,
@@ -334,8 +334,8 @@ int wrap_qmoe_amd(
     // to drive the host-side per-expert dispatch loop below.
     HIP_CHECK(hip_qmoe_amd_bucket_tokens(
         stream, d_expert_indices, d_expert_weights, d_expert_counts,
-        d_expert_offsets, d_sorted_token_ids, d_sorted_weights, num_tokens,
-        num_experts, k, elem_size));
+        d_expert_offsets, d_sorted_token_ids, /*sorted_pair_ids=*/nullptr,
+        d_sorted_weights, num_tokens, num_experts, k, elem_size));
 
     size_t total_host = align_up_64(num_experts * sizeof(int32_t));
     if (hipdnn_ep_state_ensure_qmoe_amd_host_scratch(state, total_host) != 0) {

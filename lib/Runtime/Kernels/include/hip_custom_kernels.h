@@ -2507,6 +2507,10 @@ HIP_KERNEL_API int hip_qmoe_amd_relu2(
  *   expert_counts    - GPU [num_experts] int32 (output)
  *   expert_offsets   - GPU [num_experts + 1] int32 (output, exclusive scan)
  *   sorted_token_ids - GPU [num_tokens * k] int32 (output)
+ *   sorted_pair_ids  - GPU [num_tokens * k] int32 (output, nullable): the
+ *                      routing slot (token * k + slot) each sorted row came
+ *                      from, so consumers that scatter back to slot-major
+ *                      order need no search over the token's k entries
  *   sorted_weights   - GPU [num_tokens * k] fp16 (output)
  */
 HIP_KERNEL_API int hip_qmoe_amd_bucket_tokens(
@@ -2516,6 +2520,7 @@ HIP_KERNEL_API int hip_qmoe_amd_bucket_tokens(
     void* expert_counts,
     void* expert_offsets,
     void* sorted_token_ids,
+    void* sorted_pair_ids,
     void* sorted_weights,
     int64_t num_tokens,
     int64_t num_experts,
@@ -2524,7 +2529,8 @@ HIP_KERNEL_API int hip_qmoe_amd_bucket_tokens(
 
 /* Fully device-side expert-grouped QMoE prefill via ragged WMMA.
  * packed_latent/packed_act hold expert slices back-to-back in routing order
- * (valid_rows = sum of counts). pair maps are [num_tokens*k].
+ * (valid_rows = sum of counts), so the pair index is itself the packed row.
+ * sorted_* are [num_tokens*k] scratch filled by the bucketing pass.
  * packed_latent is reused for the FC2 output.
  */
 HIP_KERNEL_API int hip_qmoe_amd_prefill_grouped_wmma(
@@ -2539,9 +2545,8 @@ HIP_KERNEL_API int hip_qmoe_amd_prefill_grouped_wmma(
     void* expert_counts,
     void* expert_offsets,
     void* sorted_token_ids,
+    void* sorted_pair_ids,
     void* sorted_weights,
-    void* pair_to_padded,
-    void* pair_to_slot,
     void* packed_latent,
     void* packed_act,
     void* slot_scratch,

@@ -449,6 +449,7 @@ __global__ void qmoe_amd_bucket_scatter_kernel(
     const __half* __restrict__ expert_weights,
     const int32_t* __restrict__ expert_offsets,
     int32_t* __restrict__ sorted_token_ids,
+    int32_t* __restrict__ sorted_pair_ids,  // nullable
     __half* __restrict__ sorted_weights,
     int total_pairs,
     int k) {
@@ -486,48 +487,20 @@ __global__ void qmoe_amd_bucket_scatter_kernel(
   for (int i = lo; i < hi; i++) {
     if (expert_indices[i] == e) {
       sorted_token_ids[w] = i / k;  // pair index i == token * k + slot
+      if (sorted_pair_ids) sorted_pair_ids[w] = i;
       sorted_weights[w] = expert_weights[i];
       w++;
     }
   }
 }
 
-// Build compact-pair -> packed-row and original routing-slot maps.
-// Bucketing already sorts pairs by expert, so expert_offsets[e] is the packed
-// base row of slice e and the pair index is itself the packed row. The grouped
-// WMMA launch addresses every expert through those same offsets.
-__global__ void qmoe_amd_grouped_map_kernel(
-    const int32_t* __restrict__ expert_indices,
-    const int32_t* __restrict__ expert_counts,
-    const int32_t* __restrict__ expert_offsets,
-    const int32_t* __restrict__ sorted_token_ids,
-    int32_t* __restrict__ pair_to_padded,
-    int32_t* __restrict__ pair_to_slot,
-    int k_top) {
-  const int e = static_cast<int>(blockIdx.x);
-  const int count = expert_counts[e];
-  const int off = expert_offsets[e];
-  for (int row = static_cast<int>(threadIdx.x); row < count;
-       row += static_cast<int>(blockDim.x)) {
-    const int pair = off + row;
-    const int token = sorted_token_ids[pair];
-    const int token_base = token * k_top;
-    int slot = token_base;
-    for (int s = 0; s < k_top; s++) {
-      if (expert_indices[token_base + s] == e) {
-        slot = token_base + s;
-        break;
-      }
-    }
-    pair_to_padded[pair] = pair;
-    pair_to_slot[pair] = slot;
-  }
-}
-
+// Bucketing sorts the pairs by expert, so expert_offsets[e] is the packed base
+// row of slice e and the pair index is itself the packed row. The grouped WMMA
+// launch addresses every expert through those same offsets, which is why these
+// kernels index `packed` by the pair directly.
 __global__ void qmoe_amd_grouped_pack_kernel(
     const __half* __restrict__ latent,
     const int32_t* __restrict__ sorted_token_ids,
-    const int32_t* __restrict__ pair_to_padded,
     __half* __restrict__ packed,
     int width,
     int total_pairs) {
@@ -538,33 +511,23 @@ __global__ void qmoe_amd_grouped_pack_kernel(
   const int pair = static_cast<int>(idx / width);
   const int col = static_cast<int>(idx - static_cast<int64_t>(pair) * width);
   const int token = sorted_token_ids[pair];
-  const int padded = pair_to_padded[pair];
-  packed[static_cast<int64_t>(padded) * width + col] =
-      latent[static_cast<int64_t>(token) * width + col];
+  packed[idx] = latent[static_cast<int64_t>(token) * width + col];
 }
 
 __global__ void qmoe_amd_grouped_relu2_kernel(
     __half* data,
-    const int32_t* __restrict__ pair_to_padded,
-    int width,
-    int total_pairs) {
+    int64_t total) {
   const int64_t idx =
       static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  const int64_t total = static_cast<int64_t>(total_pairs) * width;
   if (idx >= total) return;
-  const int pair = static_cast<int>(idx / width);
-  const int col = static_cast<int>(idx - static_cast<int64_t>(pair) * width);
-  const int64_t out =
-      static_cast<int64_t>(pair_to_padded[pair]) * width + col;
-  const float v = fmaxf(0.0f, static_cast<float>(data[out]));
-  data[out] = static_cast<__half>(v * v);
+  const float v = fmaxf(0.0f, static_cast<float>(data[idx]));
+  data[idx] = static_cast<__half>(v * v);
 }
 
 __global__ void qmoe_amd_grouped_unpack_kernel(
     const __half* __restrict__ packed,
     const __half* __restrict__ sorted_weights,
-    const int32_t* __restrict__ pair_to_padded,
-    const int32_t* __restrict__ pair_to_slot,
+    const int32_t* __restrict__ sorted_pair_ids,
     __half* __restrict__ slot_out,
     int width,
     int total_pairs) {
@@ -574,10 +537,11 @@ __global__ void qmoe_amd_grouped_unpack_kernel(
   if (idx >= total) return;
   const int pair = static_cast<int>(idx / width);
   const int col = static_cast<int>(idx - static_cast<int64_t>(pair) * width);
-  const int padded = pair_to_padded[pair];
-  const int slot = pair_to_slot[pair];
-  const float value =
-      static_cast<float>(packed[static_cast<int64_t>(padded) * width + col]);
+  // The bucket scatter records the routing slot each packed row came from, so
+  // the scatter back to slot-major order needs no search over the token's k
+  // entries.
+  const int slot = sorted_pair_ids[pair];
+  const float value = static_cast<float>(packed[idx]);
   const float weight = static_cast<float>(sorted_weights[pair]);
   slot_out[static_cast<int64_t>(slot) * width + col] =
       static_cast<__half>(value * weight);
@@ -972,6 +936,7 @@ extern "C" int hip_qmoe_amd_bucket_tokens(
     void* expert_counts,
     void* expert_offsets,
     void* sorted_token_ids,
+    void* sorted_pair_ids,
     void* sorted_weights,
     int64_t num_tokens,
     int64_t num_experts,
@@ -1020,6 +985,7 @@ extern "C" int hip_qmoe_amd_bucket_tokens(
                      static_cast<const __half*>(expert_weights),
                      static_cast<const int32_t*>(expert_offsets),
                      static_cast<int32_t*>(sorted_token_ids),
+                     static_cast<int32_t*>(sorted_pair_ids),
                      static_cast<__half*>(sorted_weights), pairs,
                      static_cast<int>(k));
 
@@ -1202,9 +1168,8 @@ extern "C" int hip_qmoe_amd_prefill_grouped_wmma(
     void* expert_counts,
     void* expert_offsets,
     void* sorted_token_ids,
+    void* sorted_pair_ids,
     void* sorted_weights,
-    void* pair_to_padded,
-    void* pair_to_slot,
     void* packed_latent,
     void* packed_act,
     void* slot_scratch,
@@ -1226,7 +1191,6 @@ extern "C" int hip_qmoe_amd_prefill_grouped_wmma(
 
   hipStream_t s = static_cast<hipStream_t>(stream);
   const int tokens = static_cast<int>(num_tokens);
-  const int experts = static_cast<int>(num_experts);
   const int latent_n = static_cast<int>(latent_size);
   const int moe_n = static_cast<int>(moe_intermediate_size);
   const int k_top = static_cast<int>(k);
@@ -1234,18 +1198,9 @@ extern "C" int hip_qmoe_amd_prefill_grouped_wmma(
 
   int rc = hip_qmoe_amd_bucket_tokens(
       stream, expert_indices, expert_weights, expert_counts, expert_offsets,
-      sorted_token_ids, sorted_weights, num_tokens, num_experts, k,
-      element_size_bytes);
+      sorted_token_ids, sorted_pair_ids, sorted_weights, num_tokens,
+      num_experts, k, element_size_bytes);
   if (rc != 0) return rc;
-
-  hipLaunchKernelGGL(
-      qmoe_amd_grouped_map_kernel, dim3(experts), dim3(128), 0, s,
-      static_cast<const int32_t*>(expert_indices),
-      static_cast<const int32_t*>(expert_counts),
-      static_cast<const int32_t*>(expert_offsets),
-      static_cast<const int32_t*>(sorted_token_ids),
-      static_cast<int32_t*>(pair_to_padded),
-      static_cast<int32_t*>(pair_to_slot), k_top);
 
   const int64_t pack_total = static_cast<int64_t>(total_pairs) * latent_n;
   hipLaunchKernelGGL(
@@ -1253,7 +1208,6 @@ extern "C" int hip_qmoe_amd_prefill_grouped_wmma(
       dim3(static_cast<unsigned>((pack_total + kBlock - 1) / kBlock)),
       dim3(kBlock), 0, s, static_cast<const __half*>(latent),
       static_cast<const int32_t*>(sorted_token_ids),
-      static_cast<const int32_t*>(pair_to_padded),
       static_cast<__half*>(packed_latent), latent_n, total_pairs);
 
   rc = hip_matmul_nbits_grouped_wmma(
@@ -1267,8 +1221,7 @@ extern "C" int hip_qmoe_amd_prefill_grouped_wmma(
   hipLaunchKernelGGL(
       qmoe_amd_grouped_relu2_kernel,
       dim3(static_cast<unsigned>((act_total + kBlock - 1) / kBlock)),
-      dim3(kBlock), 0, s, static_cast<__half*>(packed_act),
-      static_cast<const int32_t*>(pair_to_padded), moe_n, total_pairs);
+      dim3(kBlock), 0, s, static_cast<__half*>(packed_act), act_total);
 
   // FC2 output reuses packed_latent: FC1 no longer consumes it after the
   // first grouped WMMA completes, and both tensors have latent_size columns.
@@ -1285,8 +1238,7 @@ extern "C" int hip_qmoe_amd_prefill_grouped_wmma(
       dim3(static_cast<unsigned>((unpack_total + kBlock - 1) / kBlock)),
       dim3(kBlock), 0, s, static_cast<const __half*>(packed_latent),
       static_cast<const __half*>(sorted_weights),
-      static_cast<const int32_t*>(pair_to_padded),
-      static_cast<const int32_t*>(pair_to_slot),
+      static_cast<const int32_t*>(sorted_pair_ids),
       static_cast<__half*>(slot_scratch), latent_n, total_pairs);
 
   const int reduce_grid = (latent_n + kBlock - 1) / kBlock;
