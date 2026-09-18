@@ -1453,6 +1453,8 @@ static bool isTosaExpressibleTile(hip::TileOp op) {
   if (!resultType || !resultType.hasStaticShape() || !inputType ||
       !inputType.hasStaticShape())
     return false;
+  if (resultType.getElementType() != inputType.getElementType())
+    return false;
 
   SmallVector<int64_t, 4> repeats;
   if (!extractConstantInts(op.getRepeats(), repeats))
