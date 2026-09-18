@@ -256,6 +256,10 @@ __global__ void qmoe_amd_route_kernel(
 // decode_logits_scratch aliases the expert-count buffer.
 static constexpr int kAmdDecodeRouteTileN = kAmdRouteExpertsPerLane;
 static constexpr int kAmdDecodeRouteBlock = 128;
+// The top-k kernel stages every expert's score in static LDS. It launches as a
+// single block, so this costs no occupancy, but it does bound the expert count
+// the decode fast path can accept.
+static constexpr int kAmdDecodeRouteMaxExperts = 512;
 
 __global__ void qmoe_amd_route_logits_decode_kernel(
     const __half* __restrict__ hidden_states,
@@ -312,8 +316,8 @@ __global__ void qmoe_amd_route_topk_decode_kernel(
     int use_correction_bias,
     float routed_scaling_factor) {
   const int tid = static_cast<int>(threadIdx.x);
-  __shared__ float s_prob[512];
-  __shared__ float s_biased[512];
+  __shared__ float s_prob[kAmdDecodeRouteMaxExperts];
+  __shared__ float s_biased[kAmdDecodeRouteMaxExperts];
   __shared__ float s_red[kAmdRoutingBlock];
   __shared__ int s_idx[kAmdRoutingBlock];
 
@@ -881,9 +885,15 @@ extern "C" int hip_qmoe_amd_route(
   // return -- without this clear, an error left sticky by an earlier op's
   // unchecked launch fails QMoE with a bogus diagnostic.
   (void)hipGetLastError();
-  const bool use_parallel_decode = num_tokens == 1 && hidden_size == 4096 &&
-                                   num_experts == 512 &&
-                                   decode_logits_scratch != nullptr;
+  // Fast path for single-token routing, where the generic one-block-per-token
+  // kernel would stream the whole router weight through a single CU. Anything
+  // declined here falls through to that kernel and produces the same result.
+  // grid.x = num_experts / kAmdDecodeRouteTileN and the uint4 router_weight
+  // load both assume whole 8-expert groups.
+  const bool use_parallel_decode =
+      num_tokens == 1 && decode_logits_scratch != nullptr &&
+      num_experts <= kAmdDecodeRouteMaxExperts &&
+      (num_experts % kAmdDecodeRouteTileN) == 0;
   if (use_parallel_decode) {
     const unsigned logit_blocks = static_cast<unsigned>(
         num_experts / kAmdDecodeRouteTileN);
