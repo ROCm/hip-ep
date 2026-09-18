@@ -56,3 +56,4 @@ Rewrite ExtractHipQdqValueBits(dq: Op) -> Attr;
 #include "QMatMulFusion.pdll"
 #include "QGemmFusion.pdll"
 #include "QConvFusion.pdll"
+#include "QSigmoidFusion.pdll"

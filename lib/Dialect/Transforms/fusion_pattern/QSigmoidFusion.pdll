@@ -1,0 +1,62 @@
+//===- QSigmoidFusion.pdll ------------------------------------------------===//
+//
+// HIP-to-HIP fusion of a dequantize/sigmoid/quantize chain into hip.qsigmoid.
+//
+// Included by HipFusionTransformPatterns.pdll, which declares the native
+// helpers used below. Not compilable on its own.
+//
+// Sigmoid changes values, so the two ends' quantization parameters are
+// unrelated and requantization is part of the fused op. That is what separates
+// this from a layout op, where a matching Q/DQ pair can be dropped outright
+// and the op made to run on the quantized data instead.
+//===----------------------------------------------------------------------===//
+
+Pattern HipQSigmoid with benefit(10) {
+  let dq = op<hip.dequantize_linear>(ctx: Value, input: Value,
+                                     input_scale: Value,
+                                     input_tail: ValueRange);
+  let sigmoid = op<hip.sigmoid>(ctx, dq.0, sigmoid_init: Value);
+  let q = op<hip.quantize_linear>(ctx, sigmoid.0, output_scale: Value,
+                                  output_tail: ValueRange)
+      -> (output_type: Type);
+
+  // The width and signedness the fused kernel implements. hip.qsigmoid lowers
+  // to a wrap that accepts nothing else, so an unsupported model has to keep
+  // the unfused dequantize/sigmoid/quantize path.
+  IsHipQdqQuantizedWidth(dq, attr<"[16]">);
+  IsHipQdqUnsignedQuantized(dq);
+  IsHipQdqQuantizedWidth(q, attr<"[16]">);
+  IsHipQdqUnsignedQuantized(q);
+
+  // hip.qsigmoid carries all four coefficients as scalar attributes, so every
+  // scale must be a per-tensor splat constant and every zero point must be
+  // readable (or absent, which means zero).
+  IsHipSplatScale(input_scale);
+  IsHipSplatScale(output_scale);
+  HasExtractableQdqZeropoint(dq);
+  HasExtractableQdqZeropoint(q);
+  // hip.sigmoid's init already carries the fused result's shape, so it is the
+  // shape source for hip.qsigmoid's own init. A dynamic dim is fine on both
+  // ends: BuildInit sizes it from that init, and the fused op's lowering takes
+  // its element count from the memref descriptor rather than the type.
+  CanBuildInit(output_type, sigmoid_init);
+  // A second consumer of the float sigmoid would keep the dequantize/sigmoid
+  // chain alive beside hip.qsigmoid, so the graph would compute it twice.
+  HasSingleUseResult(sigmoid);
+
+  rewrite q with {
+    let input_scale_attr = ExtractHipSplatScale(input_scale);
+    let output_scale_attr = ExtractHipSplatScale(output_scale);
+    let input_zp_attr = ExtractHipQdqZeropoint(dq, attr<"0 : i64">);
+    let output_zp_attr = ExtractHipQdqZeropoint(q, attr<"0 : i64">);
+
+    let init = BuildInit(output_type, sigmoid_init);
+    let qsigmoid = op<hip.qsigmoid>(ctx, input, init) {
+      input_scale = input_scale_attr,
+      input_zp = input_zp_attr,
+      output_scale = output_scale_attr,
+      output_zp = output_zp_attr
+    } -> (output_type);
+    replace q with qsigmoid;
+  };
+}
