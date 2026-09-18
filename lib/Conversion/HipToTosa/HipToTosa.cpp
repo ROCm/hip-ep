@@ -1441,6 +1441,43 @@ Value createSplatInt(ConversionPatternRewriter &rewriter, Location loc,
       DenseElementsAttr::get(type, rewriter.getIntegerAttr(elemType, value)));
 }
 
+// ONNX permits indices in [-extent, extent-1]. TOSA requires non-negative
+// in-range indices, so normalize the negative half before gathering.
+Value normalizeNegativeIndices(Value indices, int64_t extent,
+                               ConversionPatternRewriter &rewriter,
+                               Location loc) {
+  auto type = cast<RankedTensorType>(indices.getType());
+  Value zero = createSplatInt(rewriter, loc, type, 0);
+  Value extentSplat = createSplatInt(rewriter, loc, type, extent);
+  Value isNegative = tosa::GreaterOp::create(
+      rewriter, loc,
+      RankedTensorType::get(type.getShape(), rewriter.getI1Type()), zero,
+      indices);
+  Value wrapped =
+      tosa::AddOp::create(rewriter, loc, type, indices, extentSplat);
+  return tosa::SelectOp::create(rewriter, loc, type, isNegative, wrapped,
+                                indices);
+}
+
+// Take component `component` out of the trailing dimension of `indices`,
+// dropping that dimension.
+Value extractIndexComponent(Value indices, int64_t component,
+                            ConversionPatternRewriter &rewriter, Location loc) {
+  auto type = cast<RankedTensorType>(indices.getType());
+  SmallVector<int64_t> starts(type.getRank(), 0);
+  starts.back() = component;
+  SmallVector<int64_t> sizes(type.getShape());
+  sizes.back() = 1;
+  auto shapeType = tosa::shapeType::get(rewriter.getContext(), type.getRank());
+  auto start = tosa::ConstShapeOp::create(rewriter, loc, shapeType,
+                                          rewriter.getIndexTensorAttr(starts));
+  auto size = tosa::ConstShapeOp::create(rewriter, loc, shapeType,
+                                         rewriter.getIndexTensorAttr(sizes));
+  Value sliced = tosa::SliceOp::create(rewriter, loc, type.clone(sizes),
+                                       indices, start, size);
+  return reshapeTo(sliced, type.getShape().drop_back(), rewriter);
+}
+
 // ONNX Gather indexes one axis with an indices tensor of arbitrary rank. TOSA
 // gather has the canonical batched form [N,K,C] x [N,W] -> [N,W,C]. Flatten
 // the dimensions around the gathered axis into N/C, replicate the common ONNX
@@ -1500,23 +1537,213 @@ struct GatherConverter final : public OpConversionPattern<GatherOp> {
     if (n != 1)
       indices = tileMultiples(indices, {n, 1}, {n, w}, rewriter, loc);
 
-    // ONNX permits indices in [-K, K-1]. TOSA requires non-negative in-range
-    // indices, so normalize the negative half before gathering.
-    auto canonicalIndicesTy =
-        RankedTensorType::get({n, w}, rewriter.getI32Type());
-    Value zero = createSplatInt(rewriter, loc, canonicalIndicesTy, 0);
-    Value extent = createSplatInt(rewriter, loc, canonicalIndicesTy, k);
-    Value isNegative = tosa::GreaterOp::create(
-        rewriter, loc, RankedTensorType::get({n, w}, rewriter.getI1Type()),
-        zero, indices);
-    Value wrapped =
-        tosa::AddOp::create(rewriter, loc, canonicalIndicesTy, indices, extent);
-    indices = tosa::SelectOp::create(rewriter, loc, canonicalIndicesTy,
-                                     isNegative, wrapped, indices);
+    indices = normalizeNegativeIndices(indices, k, rewriter, loc);
 
     auto gatheredTy = RankedTensorType::get({n, w, c}, dataTy.getElementType());
     Value gathered =
         tosa::GatherOp::create(rewriter, loc, gatheredTy, values, indices);
+    rewriter.replaceOp(op, reshapeTo(gathered, resultTy.getShape(), rewriter));
+    return success();
+  }
+};
+
+// ONNX GatherElements reads one element per output position: `indices` has
+// data's rank and holds, at every position, the coordinate to read along
+// `axis` while the remaining coordinates are the position's own. TOSA gather
+// fetches a whole contiguous C-wide slice per index, so drive it with C = 1 --
+// move `axis` last, collapse every other dimension into the batch N, and the
+// single-element "slice" it then fetches is exactly what ONNX asks for.
+struct GatherElementsConverter final
+    : public OpConversionPattern<GatherElementsOp> {
+  using OpConversionPattern<GatherElementsOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(GatherElementsOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    auto dataTy = dyn_cast<RankedTensorType>(adaptor.getData().getType());
+    auto indicesTy = dyn_cast<RankedTensorType>(adaptor.getIndices().getType());
+    auto resultTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!dataTy || !indicesTy || !resultTy || !dataTy.hasStaticShape() ||
+        !indicesTy.hasStaticShape() || !resultTy.hasStaticShape())
+      return rewriter.notifyMatchFailure(
+          op, "expected static ranked data, indices, and result tensors");
+    if (!isa<IntegerType>(indicesTy.getElementType()))
+      return rewriter.notifyMatchFailure(op, "indices must be integers");
+
+    int64_t rank = dataTy.getRank();
+    if (indicesTy.getRank() != rank)
+      return rewriter.notifyMatchFailure(op, "indices must have data's rank");
+
+    int64_t axis = op.getAxis();
+    if (axis < 0)
+      axis += rank;
+    if (axis < 0 || axis >= rank)
+      return rewriter.notifyMatchFailure(op, "axis out of range");
+
+    // Off the gathered axis an output position reads data at its own
+    // coordinate, so N is a shared batch only when the two agree there.
+    for (int64_t i = 0; i < rank; ++i)
+      if (i != axis && dataTy.getDimSize(i) != indicesTy.getDimSize(i))
+        return rewriter.notifyMatchFailure(
+            op, "data and indices disagree off the gathered axis");
+    if (resultTy.getShape() != indicesTy.getShape())
+      return rewriter.notifyMatchFailure(
+          op, "result shape is not ONNX GatherElements");
+
+    int64_t k = dataTy.getDimSize(axis);
+    int64_t w = indicesTy.getDimSize(axis);
+    if (k <= 0)
+      return rewriter.notifyMatchFailure(op, "gathered axis must be non-empty");
+    int64_t n = 1;
+    for (int64_t i = 0; i < rank; ++i)
+      if (i != axis)
+        n *= indicesTy.getDimSize(i);
+
+    // Move the gathered axis last, leaving the others in order so they
+    // collapse into N.
+    SmallVector<int32_t> axisToBack;
+    SmallVector<int64_t> dataBackShape, indicesBackShape;
+    for (int64_t i = 0; i < rank; ++i) {
+      if (i == axis)
+        continue;
+      axisToBack.push_back(static_cast<int32_t>(i));
+      dataBackShape.push_back(dataTy.getDimSize(i));
+      indicesBackShape.push_back(indicesTy.getDimSize(i));
+    }
+    axisToBack.push_back(static_cast<int32_t>(axis));
+    dataBackShape.push_back(k);
+    indicesBackShape.push_back(w);
+
+    Location loc = op.getLoc();
+    Value values = adaptor.getData();
+    Value indices = emitTosaCast(rewriter, loc, adaptor.getIndices(),
+                                 rewriter.getI32Type());
+    if (axis != rank - 1) {
+      values = transposeTo(values, dataBackShape, axisToBack, rewriter, loc);
+      indices =
+          transposeTo(indices, indicesBackShape, axisToBack, rewriter, loc);
+    }
+    values = reshapeTo(values, {n, k, 1}, rewriter);
+    indices = reshapeTo(indices, {n, w}, rewriter);
+    indices = normalizeNegativeIndices(indices, k, rewriter, loc);
+
+    auto gatheredTy = RankedTensorType::get({n, w, 1}, dataTy.getElementType());
+    Value gathered =
+        tosa::GatherOp::create(rewriter, loc, gatheredTy, values, indices);
+    Value result = reshapeTo(gathered, indicesBackShape, rewriter);
+    if (axis != rank - 1) {
+      // Undo the move: the gathered axis is last and belongs back at `axis`,
+      // which pushed each dimension after it one place forward.
+      SmallVector<int32_t> axisFromBack;
+      for (int64_t i = 0; i < rank; ++i)
+        axisFromBack.push_back(static_cast<int32_t>(
+            i < axis ? i : (i == axis ? rank - 1 : i - 1)));
+      result =
+          transposeTo(result, resultTy.getShape(), axisFromBack, rewriter, loc);
+    }
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+// ONNX GatherND indexes the `tuple` dimensions following `batch_dims` with an
+// index tuple held in the trailing dimension of `indices`. TOSA gather indexes
+// one dimension, so flatten those dimensions into a single K and fold each
+// tuple into the matching row-major offset. The batch dimensions need no such
+// work: they map straight onto TOSA's N, and row-major layout already leaves
+// data in the [N, K, C] order the op wants, so no transpose is needed either.
+struct GatherNDConverter final : public OpConversionPattern<GatherNDOp> {
+  using OpConversionPattern<GatherNDOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(GatherNDOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    auto dataTy = dyn_cast<RankedTensorType>(adaptor.getData().getType());
+    auto indicesTy = dyn_cast<RankedTensorType>(adaptor.getIndices().getType());
+    auto resultTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!dataTy || !indicesTy || !resultTy || !dataTy.hasStaticShape() ||
+        !indicesTy.hasStaticShape() || !resultTy.hasStaticShape())
+      return rewriter.notifyMatchFailure(
+          op, "expected static ranked data, indices, and result tensors");
+    if (!isa<IntegerType>(indicesTy.getElementType()))
+      return rewriter.notifyMatchFailure(op, "indices must be integers");
+
+    int64_t rank = dataTy.getRank();
+    int64_t indicesRank = indicesTy.getRank();
+    int64_t batchDims = op.getBatchDims();
+    if (batchDims < 0 || batchDims >= indicesRank || batchDims > rank)
+      return rewriter.notifyMatchFailure(op, "batch_dims out of range");
+
+    // The trailing dimension carries the tuple rather than a gathered
+    // position, and names how many of data's dimensions each tuple indexes.
+    int64_t tuple = indicesTy.getDimSize(indicesRank - 1);
+    if (tuple < 1 || batchDims + tuple > rank)
+      return rewriter.notifyMatchFailure(
+          op, "index tuple does not name a valid slice of data");
+    for (int64_t i = 0; i < batchDims; ++i)
+      if (dataTy.getDimSize(i) != indicesTy.getDimSize(i))
+        return rewriter.notifyMatchFailure(
+            op, "data and indices disagree on the batch dims");
+
+    SmallVector<int64_t> expectedShape(indicesTy.getShape().drop_back());
+    expectedShape.append(dataTy.getShape().begin() + batchDims + tuple,
+                         dataTy.getShape().end());
+    if (resultTy.getShape() != ArrayRef<int64_t>(expectedShape))
+      return rewriter.notifyMatchFailure(op,
+                                         "result shape is not ONNX GatherND");
+
+    int64_t n = 1;
+    int64_t k = 1;
+    int64_t c = 1;
+    int64_t w = 1;
+    for (int64_t i = 0; i < batchDims; ++i)
+      n *= dataTy.getDimSize(i);
+    for (int64_t i = batchDims; i < batchDims + tuple; ++i)
+      k *= dataTy.getDimSize(i);
+    for (int64_t i = batchDims + tuple; i < rank; ++i)
+      c *= dataTy.getDimSize(i);
+    for (int64_t i = batchDims; i < indicesRank - 1; ++i)
+      w *= indicesTy.getDimSize(i);
+    // Also rules out a zero extent below, where each one divides the stride.
+    if (k <= 0)
+      return rewriter.notifyMatchFailure(op, "gathered dims must be non-empty");
+
+    Location loc = op.getLoc();
+    Value values = reshapeTo(adaptor.getData(), {n, k, c}, rewriter);
+    Value indices = emitTosaCast(rewriter, loc, adaptor.getIndices(),
+                                 rewriter.getI32Type());
+    indices = reshapeTo(indices, {n, w, tuple}, rewriter);
+
+    // Fold each tuple into one index into the flattened K, component by
+    // component, weighting each by its row-major stride over the gathered
+    // dimensions.
+    auto linearTy = RankedTensorType::get({n, w}, rewriter.getI32Type());
+    Value linear;
+    int64_t stride = k;
+    for (int64_t i = 0; i < tuple; ++i) {
+      int64_t extent = dataTy.getDimSize(batchDims + i);
+      stride /= extent;
+      Value component = extractIndexComponent(indices, i, rewriter, loc);
+      component = normalizeNegativeIndices(component, extent, rewriter, loc);
+      if (stride != 1)
+        component =
+            tosa::MulOp::create(rewriter, loc, linearTy, component,
+                                createSplatInt(rewriter, loc, linearTy, stride),
+                                createZeroMulShift(rewriter, loc));
+      linear = linear ? tosa::AddOp::create(rewriter, loc, linearTy, linear,
+                                            component)
+                      : component;
+    }
+
+    auto gatheredTy = RankedTensorType::get({n, w, c}, dataTy.getElementType());
+    Value gathered =
+        tosa::GatherOp::create(rewriter, loc, gatheredTy, values, linear);
     rewriter.replaceOp(op, reshapeTo(gathered, resultTy.getShape(), rewriter));
     return success();
   }
@@ -2893,8 +3120,8 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         MulOp, DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
         TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, WhereOp, LeakyReluOp,
         MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp, QuantizeLinearOp,
-        DequantizeLinearOp, MatMulNBitsOp, GatherOp, RopeOp, GqaOp,
-        MultiHeadAttentionOp>();
+        DequantizeLinearOp, MatMulNBitsOp, GatherOp, GatherElementsOp,
+        GatherNDOp, RopeOp, GqaOp, MultiHeadAttentionOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
@@ -2936,8 +3163,8 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         SqrtConverter, WhereConverter, LeakyReluConverter, SoftmaxConverter,
         ReduceSumConverter, ReduceMeanConverter, CastConverter,
         DequantizeLinearConverter, QuantizeLinearConverter,
-        MatMulNBitsConverter, GatherConverter, RopeConverter, GqaConverter,
-        MhaConverter>(ctx);
+        MatMulNBitsConverter, GatherConverter, GatherElementsConverter,
+        GatherNDConverter, RopeConverter, GqaConverter, MhaConverter>(ctx);
 
     if (failed(applyPartialConversion(funcOp, conversion, std::move(patterns))))
       signalPassFailure();
