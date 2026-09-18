@@ -64,6 +64,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 
 namespace {
@@ -711,6 +712,52 @@ __device__ inline int32_t qgemm_pack_bytes(const int32_t (&v)[kCount]) {
   return static_cast<int32_t>(packed);
 }
 
+// Expand four packed int4 values into the byte lanes consumed by dot4.
+template <bool kSigned>
+__device__ inline int32_t
+qgemm_unpack_w4x4(uint16_t packed) {
+  int32_t values[kDotK];
+#pragma unroll
+  for (int i = 0; i < kDotK; ++i) {
+    const uint8_t nibble =
+        static_cast<uint8_t>((packed >> (i * 4)) & 0x0F);
+    if constexpr (kSigned)
+      values[i] =
+          static_cast<int32_t>(static_cast<int8_t>(nibble << 4)) >> 4;
+    else
+      values[i] = static_cast<int32_t>(nibble);
+  }
+  return qgemm_pack_bytes(values);
+}
+
+// The hot W4 transposed-weight path always starts on a four-element boundary,
+// so one aligned 16-bit load replaces four scalar qgemm_read_quant calls.
+template <bool kSigned>
+__device__ inline int32_t
+qgemm_load_w4x4(const uint8_t *__restrict__ buf, int64_t logical) {
+  const uint16_t packed =
+      *reinterpret_cast<const uint16_t *>(buf + (logical >> 1));
+  return qgemm_unpack_w4x4<kSigned>(packed);
+}
+
+__device__ inline void qgemm_split_u16x4(const ushort4 &packed,
+                                         int32_t &hi, int32_t &lo) {
+  const int32_t high[kDotK] = {
+      static_cast<int32_t>(packed.x >> 8),
+      static_cast<int32_t>(packed.y >> 8),
+      static_cast<int32_t>(packed.z >> 8),
+      static_cast<int32_t>(packed.w >> 8),
+  };
+  const int32_t low[kDotK] = {
+      static_cast<int32_t>(packed.x & 0xFF),
+      static_cast<int32_t>(packed.y & 0xFF),
+      static_cast<int32_t>(packed.z & 0xFF),
+      static_cast<int32_t>(packed.w & 0xFF),
+  };
+  hi = qgemm_pack_bytes(high);
+  lo = qgemm_pack_bytes(low);
+}
+
 // kThreadM / kThreadN being kDotK and the slabs being 16-byte aligned make a
 // fragment one aligned dwordx4 read.
 template <int kCount>
@@ -756,7 +803,7 @@ __device__ inline void qgemm_micro_tile_origin(int tid, int &thread_m,
 //
 // trans_a / trans_b and b_bits stay runtime flags: they only pick an index
 // during staging, which is block-uniform and off the dot4 inner loop.
-template <typename TA, typename TB>
+template <typename TA, typename TB, bool kW4TransB = false>
 __device__ QGemmMicroTile<QGemmAPlanes<TA>::kCount> qgemm_accumulate_k_range(
     const TA *__restrict__ A, const uint8_t *__restrict__ B, int64_t M,
     int64_t N, int64_t K, int64_t m_base, int64_t n_base, int64_t k_begin,
@@ -800,7 +847,32 @@ __device__ QGemmMicroTile<QGemmAPlanes<TA>::kCount> qgemm_accumulate_k_range(
 
   for (int64_t k0 = k_begin; k0 < k_end; k0 += kTileK) {
     const int64_t quad_k = k0 + quad_idx * kDotK;
-    {
+    if constexpr (kW4TransB) {
+      static_assert(std::is_same_v<TA, uint16_t> &&
+                        std::is_same_v<TB, int8_t>,
+                    "the co-issued W4 path is uint16 x signed-int4");
+      const int64_t a_row = m_base + quad_row;
+      const int64_t b_row = n_base + quad_row;
+      ushort4 packed_a{};
+      uint16_t packed_b = 0;
+
+      // Keep both independent global loads live before consuming either.
+      // gfx11 then emits global_load_b64 + global_load_u16 under one vmcnt
+      // dependency instead of serial load/wait pairs.
+      if (a_row < M && quad_k + kDotK <= k_end)
+        packed_a =
+            *reinterpret_cast<const ushort4 *>(A + a_row * K + quad_k);
+      if (b_row < N && quad_k + kDotK <= k_end)
+        packed_b = *reinterpret_cast<const uint16_t *>(
+            B + ((b_row * K + quad_k) >> 1));
+
+      int32_t a_hi = 0;
+      int32_t a_lo = 0;
+      qgemm_split_u16x4(packed_a, a_hi, a_lo);
+      a_lds[kPlaneHi][quad_idx][quad_row] = a_hi;
+      a_lds[kPlaneLo][quad_idx][quad_row] = a_lo;
+      b_lds[quad_idx][quad_row] = qgemm_unpack_w4x4<true>(packed_b);
+    } else {
       const int64_t a_row = m_base + quad_row;
       int32_t planes[kAPlanes][kDotK];
 #pragma unroll
@@ -821,34 +893,35 @@ __device__ QGemmMicroTile<QGemmAPlanes<TA>::kCount> qgemm_accumulate_k_range(
 #pragma unroll
       for (int p = 0; p < kAPlanes; ++p)
         a_lds[p][quad_idx][quad_row] = qgemm_pack_bytes(planes[p]);
-    }
 
-    if (trans_b) {
-      const int64_t b_row = n_base + quad_row;
-      int32_t v[kDotK];
+      if (trans_b) {
+        const int64_t b_row = n_base + quad_row;
+        int32_t v[kDotK];
 #pragma unroll
-      for (int i = 0; i < kDotK; ++i) {
-        const int64_t k = quad_k + i;
-        v[i] = (b_row < N && k < k_end)
-                   ? qgemm_read_quant(B, b_row * K + k, b_bits, kBSigned)
-                   : 0;
-      }
-      b_lds[quad_idx][quad_row] = qgemm_pack_bytes(v);
-    } else {
-      // k is the strided axis of a [K, N] B, so a thread's elements land one
-      // byte each in that many different dwords; the kDotK byte lanes of a
-      // dword come from as many distinct threads.
-      const int64_t b_col = n_base + b_n;
+        for (int i = 0; i < kDotK; ++i) {
+          const int64_t k = quad_k + i;
+          v[i] = (b_row < N && k < k_end)
+                     ? qgemm_read_quant(B, b_row * K + k, b_bits, kBSigned)
+                     : 0;
+        }
+        b_lds[quad_idx][quad_row] = qgemm_pack_bytes(v);
+      } else {
+        // k is the strided axis of a [K, N] B, so a thread's elements land one
+        // byte each in that many different dwords; the kDotK byte lanes of a
+        // dword come from as many distinct threads.
+        const int64_t b_col = n_base + b_n;
 #pragma unroll
-      for (int rep = 0; rep < kTileK / kBStageRows; ++rep) {
-        const int b_k = b_k_base + rep * kBStageRows;
-        const int64_t k = k0 + b_k;
-        const int32_t v =
-            (b_col < N && k < k_end)
-                ? qgemm_read_quant(B, k * N + b_col, b_bits, kBSigned)
-                : 0;
-        reinterpret_cast<QGemmByte *>(&b_lds[b_k / kDotK][b_n])[b_k % kDotK] =
-            static_cast<QGemmByte>(v);
+        for (int rep = 0; rep < kTileK / kBStageRows; ++rep) {
+          const int b_k = b_k_base + rep * kBStageRows;
+          const int64_t k = k0 + b_k;
+          const int32_t v =
+              (b_col < N && k < k_end)
+                  ? qgemm_read_quant(B, k * N + b_col, b_bits, kBSigned)
+                  : 0;
+          reinterpret_cast<QGemmByte *>(
+              &b_lds[b_k / kDotK][b_n])[b_k % kDotK] =
+              static_cast<QGemmByte>(v);
+        }
       }
     }
 
@@ -906,7 +979,7 @@ __device__ QGemmMicroTile<QGemmAPlanes<TA>::kCount> qgemm_accumulate_k_range(
 //
 // Grid: (ceil(N/kTileN), ceil(M/kTileM)). One block owns a whole output tile
 // and the whole reduction, so it can requantize in place.
-template <typename TA, typename TB, typename TY>
+template <typename TA, typename TB, typename TY, bool kW4TransB = false>
 __global__ __launch_bounds__(kTiledBlock) void qgemm_tiled_kernel(
     const TA *__restrict__ A, const uint8_t *__restrict__ B,
     TY *__restrict__ Y, int64_t M, int64_t N, int64_t K, QGemmRequant requant,
@@ -914,7 +987,7 @@ __global__ __launch_bounds__(kTiledBlock) void qgemm_tiled_kernel(
   const int64_t m_base = static_cast<int64_t>(blockIdx.y) * kTileM;
   const int64_t n_base = static_cast<int64_t>(blockIdx.x) * kTileN;
 
-  const auto mt = qgemm_accumulate_k_range<TA, TB>(
+  const auto mt = qgemm_accumulate_k_range<TA, TB, kW4TransB>(
       A, B, M, N, K, m_base, n_base, 0, K, b_bits, need_row_a, need_col_b,
       trans_a, trans_b);
 
@@ -938,6 +1011,240 @@ __global__ __launch_bounds__(kTiledBlock) void qgemm_tiled_kernel(
   }
 }
 
+// Full-tile W4 candidate with twice the K depth. It keeps the baseline
+// [64 x 64] output mapping and register-sized [4 x 4] micro-tile, but stages
+// two A/B slabs before each compute section so the K loop pays half as many
+// block barriers.
+constexpr int kK32TileK = 32;
+constexpr int kK32TileQuads = kK32TileK / kDotK;
+constexpr int kK32StageReps =
+    (kTileM * kK32TileQuads) / kTiledBlock; // 2
+
+__global__ __launch_bounds__(kTiledBlock) void qgemm_tiled_k32_w4_kernel(
+    const uint16_t *__restrict__ A, const uint8_t *__restrict__ B,
+    uint16_t *__restrict__ Y, int64_t N, int64_t K, QGemmRequant requant,
+    bool need_row_a, bool need_col_b) {
+  const int tid = threadIdx.x;
+  const int64_t m_base = static_cast<int64_t>(blockIdx.y) * kTileM;
+  const int64_t n_base = static_cast<int64_t>(blockIdx.x) * kTileN;
+  int thread_m, thread_n;
+  qgemm_micro_tile_origin(tid, thread_m, thread_n);
+
+  __shared__ __align__(16)
+      QGemmSlab a_lds[2][kK32TileQuads][kTileM];
+  __shared__ __align__(16) QGemmSlab b_lds[kK32TileQuads][kTileN];
+  QGemmMicroTile<2> out = {};
+
+  for (int64_t k0 = 0; k0 < K; k0 += kK32TileK) {
+    ushort4 packed_a[kK32StageReps];
+    uint16_t packed_b[kK32StageReps];
+
+    // Issue every independent A/B load before consuming any of them.
+#pragma unroll
+    for (int rep = 0; rep < kK32StageReps; ++rep) {
+      const int linear = tid + rep * kTiledBlock;
+      const int q = linear / kTileM;
+      const int row = linear % kTileM;
+      const int64_t quad_k = k0 + q * kDotK;
+      packed_a[rep] = *reinterpret_cast<const ushort4 *>(
+          A + (m_base + row) * K + quad_k);
+      packed_b[rep] = *reinterpret_cast<const uint16_t *>(
+          B + (((n_base + row) * K + quad_k) >> 1));
+    }
+
+#pragma unroll
+    for (int rep = 0; rep < kK32StageReps; ++rep) {
+      const int linear = tid + rep * kTiledBlock;
+      const int q = linear / kTileM;
+      const int row = linear % kTileM;
+      int32_t a_hi = 0;
+      int32_t a_lo = 0;
+      qgemm_split_u16x4(packed_a[rep], a_hi, a_lo);
+      a_lds[kPlaneHi][q][row] = a_hi;
+      a_lds[kPlaneLo][q][row] = a_lo;
+      b_lds[q][row] = qgemm_unpack_w4x4<true>(packed_b[rep]);
+    }
+
+    __syncthreads();
+
+#pragma unroll
+    for (int q = 0; q < kK32TileQuads; ++q) {
+      int32_t a_frag[2][kThreadM];
+      int32_t b_frag[kThreadN];
+      qgemm_read_frag(&a_lds[kPlaneHi][q][thread_m],
+                      a_frag[kPlaneHi]);
+      qgemm_read_frag(&a_lds[kPlaneLo][q][thread_m],
+                      a_frag[kPlaneLo]);
+      qgemm_read_frag(&b_lds[q][thread_n], b_frag);
+
+#pragma unroll
+      for (int i = 0; i < kThreadM; ++i) {
+#pragma unroll
+        for (int j = 0; j < kThreadN; ++j) {
+          out.acc[i][j][kPlaneHi] =
+              hipdnn_dot4<false, true>(a_frag[kPlaneHi][i], b_frag[j],
+                                      out.acc[i][j][kPlaneHi]);
+          out.acc[i][j][kPlaneLo] =
+              hipdnn_dot4<false, true>(a_frag[kPlaneLo][i], b_frag[j],
+                                      out.acc[i][j][kPlaneLo]);
+        }
+        if (need_row_a) {
+          out.row_a[i][kPlaneHi] =
+              hipdnn_dot4<false, false>(a_frag[kPlaneHi][i], kOnes4,
+                                       out.row_a[i][kPlaneHi]);
+          out.row_a[i][kPlaneLo] =
+              hipdnn_dot4<false, false>(a_frag[kPlaneLo][i], kOnes4,
+                                       out.row_a[i][kPlaneLo]);
+        }
+      }
+      if (need_col_b) {
+#pragma unroll
+        for (int j = 0; j < kThreadN; ++j)
+          out.col_b[j] =
+              hipdnn_dot4<true, false>(b_frag[j], kOnes4, out.col_b[j]);
+      }
+    }
+    __syncthreads();
+  }
+
+#pragma unroll
+  for (int i = 0; i < kThreadM; ++i) {
+    const int64_t m = m_base + thread_m + i;
+    const int64_t row_sum = qgemm_combine(out.row_a[i]);
+#pragma unroll
+    for (int j = 0; j < kThreadN; ++j) {
+      const int64_t n = n_base + thread_n + j;
+      Y[m * N + n] =
+          qgemm_requant<uint16_t>(qgemm_combine(out.acc[i][j]), row_sum,
+                                  out.col_b[j], m, n, requant);
+    }
+  }
+}
+
+// M=128 W4 candidate: one block owns [128 x 32], so each B slab is loaded once
+// instead of once per 64-row tile. The narrower N tile keeps the block at 128
+// threads while each thread accumulates an [8 x 4] output micro-tile.
+constexpr int kM128TileM = 128;
+constexpr int kM128TileN = 32;
+constexpr int kM128TileK = 16;
+constexpr int kM128ThreadM = 8;
+constexpr int kM128ThreadN = 4;
+constexpr int kM128Block =
+    (kM128TileM / kM128ThreadM) * (kM128TileN / kM128ThreadN); // 128
+constexpr int kM128TileQuads = kM128TileK / kDotK;
+
+__global__ __launch_bounds__(kM128Block) void
+qgemm_tiled_m128n32_w4_kernel(
+    const uint16_t *__restrict__ A, const uint8_t *__restrict__ B,
+    uint16_t *__restrict__ Y, int64_t N, int64_t K, QGemmRequant requant,
+    bool need_row_a, bool need_col_b) {
+  const int tid = threadIdx.x;
+  const int64_t n_base = static_cast<int64_t>(blockIdx.x) * kM128TileN;
+  const int thread_m =
+      (tid / (kM128TileN / kM128ThreadN)) * kM128ThreadM;
+  const int thread_n =
+      (tid % (kM128TileN / kM128ThreadN)) * kM128ThreadN;
+
+  __shared__ __align__(16)
+      QGemmSlab a_lds[2][kM128TileQuads][kM128TileM];
+  __shared__ __align__(16) QGemmSlab b_lds[kM128TileQuads][kM128TileN];
+
+  int32_t acc[kM128ThreadM][kM128ThreadN][2] = {};
+  int32_t row_a[kM128ThreadM][2] = {};
+  int32_t col_b[kM128ThreadN] = {};
+
+  for (int64_t k0 = 0; k0 < K; k0 += kM128TileK) {
+    ushort4 packed_a[kM128TileQuads] = {};
+    uint16_t packed_b = 0;
+
+    // Four vector A loads per thread cover [quad=0..3, row=tid].
+#pragma unroll
+    for (int q = 0; q < kM128TileQuads; ++q) {
+      const int64_t quad_k = k0 + q * kDotK;
+      if (quad_k + kDotK <= K)
+        packed_a[q] = *reinterpret_cast<const ushort4 *>(
+            A + static_cast<int64_t>(tid) * K + quad_k);
+    }
+
+    // Issue the independent B load before any A result is consumed.
+    const int b_q = tid / kM128TileN;
+    const int b_n = tid % kM128TileN;
+    const int64_t b_k = k0 + b_q * kDotK;
+    const int64_t b_row = n_base + b_n;
+    if (b_row < N && b_k + kDotK <= K)
+      packed_b = *reinterpret_cast<const uint16_t *>(
+          B + ((b_row * K + b_k) >> 1));
+
+#pragma unroll
+    for (int q = 0; q < kM128TileQuads; ++q) {
+      int32_t hi = 0;
+      int32_t lo = 0;
+      qgemm_split_u16x4(packed_a[q], hi, lo);
+      a_lds[kPlaneHi][q][tid] = hi;
+      a_lds[kPlaneLo][q][tid] = lo;
+    }
+    b_lds[b_q][b_n] = qgemm_unpack_w4x4<true>(packed_b);
+
+    __syncthreads();
+
+#pragma unroll
+    for (int q = 0; q < kM128TileQuads; ++q) {
+      int32_t a_frag[2][kM128ThreadM];
+      int32_t b_frag[kM128ThreadN];
+#pragma unroll
+      for (int i = 0; i < kM128ThreadM; ++i) {
+        a_frag[kPlaneHi][i] = a_lds[kPlaneHi][q][thread_m + i];
+        a_frag[kPlaneLo][i] = a_lds[kPlaneLo][q][thread_m + i];
+      }
+#pragma unroll
+      for (int j = 0; j < kM128ThreadN; ++j)
+        b_frag[j] = b_lds[q][thread_n + j];
+
+#pragma unroll
+      for (int i = 0; i < kM128ThreadM; ++i) {
+#pragma unroll
+        for (int j = 0; j < kM128ThreadN; ++j) {
+          acc[i][j][kPlaneHi] =
+              hipdnn_dot4<false, true>(a_frag[kPlaneHi][i], b_frag[j],
+                                      acc[i][j][kPlaneHi]);
+          acc[i][j][kPlaneLo] =
+              hipdnn_dot4<false, true>(a_frag[kPlaneLo][i], b_frag[j],
+                                      acc[i][j][kPlaneLo]);
+        }
+        if (need_row_a) {
+          row_a[i][kPlaneHi] =
+              hipdnn_dot4<false, false>(a_frag[kPlaneHi][i], kOnes4,
+                                       row_a[i][kPlaneHi]);
+          row_a[i][kPlaneLo] =
+              hipdnn_dot4<false, false>(a_frag[kPlaneLo][i], kOnes4,
+                                       row_a[i][kPlaneLo]);
+        }
+      }
+      if (need_col_b) {
+#pragma unroll
+        for (int j = 0; j < kM128ThreadN; ++j)
+          col_b[j] = hipdnn_dot4<true, false>(b_frag[j], kOnes4, col_b[j]);
+      }
+    }
+
+    __syncthreads();
+  }
+
+#pragma unroll
+  for (int i = 0; i < kM128ThreadM; ++i) {
+    const int64_t m = thread_m + i;
+    const int64_t row_sum = qgemm_combine(row_a[i]);
+#pragma unroll
+    for (int j = 0; j < kM128ThreadN; ++j) {
+      const int64_t n = n_base + thread_n + j;
+      if (n < N)
+        Y[m * N + n] =
+            qgemm_requant<uint16_t>(qgemm_combine(acc[i][j]), row_sum,
+                                    col_b[j], m, n, requant);
+    }
+  }
+}
+
 //===----------------------------------------------------------------------===//
 // Split-K (low output parallelism)
 //===----------------------------------------------------------------------===//
@@ -953,7 +1260,7 @@ __global__ __launch_bounds__(kTiledBlock) void qgemm_tiled_kernel(
 // interleave.
 
 // One block per (n-tile, m-tile, k slice).
-template <typename TA, typename TB>
+template <typename TA, typename TB, bool kW4TransB = false>
 __global__ __launch_bounds__(kTiledBlock) void qgemm_splitk_partial_kernel(
     const TA *__restrict__ A, const uint8_t *__restrict__ B,
     int64_t *__restrict__ acc_ws, int64_t *__restrict__ row_a_ws,
@@ -975,7 +1282,7 @@ __global__ __launch_bounds__(kTiledBlock) void qgemm_splitk_partial_kernel(
   const bool add_row_a = need_row_a && blockIdx.x == 0;
   const bool add_col_b = need_col_b && blockIdx.y == 0;
 
-  const auto mt = qgemm_accumulate_k_range<TA, TB>(
+  const auto mt = qgemm_accumulate_k_range<TA, TB, kW4TransB>(
       A, B, M, N, K, m_base, n_base, k_begin, k_end, b_bits, add_row_a,
       add_col_b, trans_a, trans_b);
 
@@ -1401,14 +1708,41 @@ bool qgemm_gemv_nk_ok(const QGemmArgs &g) {
          (g.K % align) == 0 && g.K / align >= kGemvNkLanes;
 }
 
+int qgemm_gemv_nk_target_blocks_per_cu() {
+  static const int target = [] {
+    std::string raw;
+#ifdef _WIN32
+    char *value = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&value, &len,
+                  "HIPDNN_QGEMM_GEMV_NK_TARGET_BLOCKS_PER_CU") == 0 &&
+        value) {
+      raw = value;
+      free(value);
+    }
+#else
+    if (const char *value =
+            getenv("HIPDNN_QGEMM_GEMV_NK_TARGET_BLOCKS_PER_CU"))
+      raw = value;
+#endif
+    const int parsed =
+        raw.empty() ? kGemvTargetBlocksPerCU : std::atoi(raw.c_str());
+    return parsed >= 0 && parsed <= 4 ? parsed : kGemvTargetBlocksPerCU;
+  }();
+  return target;
+}
+
 // Column groups are the only other source of blocks here, so a narrow N still
 // needs K split across the grid. Unlike the [K, N] path there is no in-block
 // slice count competing for the same K, so the cap is one whole wave step per
 // slice.
-int qgemm_gemv_nk_grid_splits(const QGemmArgs &g, int64_t step) {
-  const int64_t groups = (g.N + kGemvNkGroup - 1) / kGemvNkGroup;
+int qgemm_gemv_nk_grid_splits(const QGemmArgs &g, int64_t step, int group) {
+  const int target_blocks_per_cu = qgemm_gemv_nk_target_blocks_per_cu();
+  if (target_blocks_per_cu == 0)
+    return 1;
+  const int64_t groups = (g.N + group - 1) / group;
   const int64_t target =
-      static_cast<int64_t>(qgemm_device_cu_count()) * kGemvTargetBlocksPerCU;
+      static_cast<int64_t>(qgemm_device_cu_count()) * target_blocks_per_cu;
   if (groups >= target)
     return 1;
   if (!g.workspace || g.workspace_bytes < qgemm_gemv_scratch_bytes(g.N))
@@ -1426,11 +1760,13 @@ int qgemm_gemv_nk_grid_splits(const QGemmArgs &g, int64_t step) {
   return want > 1 ? static_cast<int>(want) : 1;
 }
 
-template <typename TA, typename TB, typename TY>
-int qgemm_gemv_nk_launch(const QGemmArgs &g, const QGemmRequant &requant,
-                         bool need_row_a, bool need_col_b) {
+template <typename TA, typename TB, typename TY, int kCols, int kWaves>
+int qgemm_gemv_nk_launch_config(const QGemmArgs &g,
+                                const QGemmRequant &requant,
+                                bool need_row_a, bool need_col_b) {
+  constexpr int kGroup = kCols * kWaves;
   const int64_t step = 32 / g.b_bits; // logical elements per dword
-  const int splits = qgemm_gemv_nk_grid_splits(g, step);
+  const int splits = qgemm_gemv_nk_grid_splits(g, step, kGroup);
   auto *partial = splits > 1 ? static_cast<int64_t *>(g.workspace) : nullptr;
 
   (void)hipGetLastError();
@@ -1453,12 +1789,11 @@ int qgemm_gemv_nk_launch(const QGemmArgs &g, const QGemmRequant &requant,
   }
 
   const dim3 grid(
-      static_cast<unsigned>((g.N + kGemvNkGroup - 1) / kGemvNkGroup),
+      static_cast<unsigned>((g.N + kGroup - 1) / kGroup),
       static_cast<unsigned>(splits));
   hipLaunchKernelGGL(
-      HIP_KERNEL_NAME(
-          qgemm_gemv_nk_kernel<TA, TB, TY, kGemvNkCols, kGemvNkWaves>),
-      grid, dim3(kGemvNkLanes, kGemvNkWaves), 0, g.stream,
+      HIP_KERNEL_NAME(qgemm_gemv_nk_kernel<TA, TB, TY, kCols, kWaves>),
+      grid, dim3(kGemvNkLanes, kWaves), 0, g.stream,
       static_cast<const TA *>(g.A), g.B, static_cast<TY *>(g.Y), partial, g.N,
       g.K, grid_chunk, requant, g.b_bits, need_row_a, need_col_b);
   const hipError_t launched = hipGetLastError();
@@ -1472,6 +1807,56 @@ int qgemm_gemv_nk_launch(const QGemmArgs &g, const QGemmRequant &requant,
       dim3(kGemvReduceBlock), 0, g.stream, partial, static_cast<TY *>(g.Y), g.N,
       requant);
   return static_cast<int>(hipGetLastError());
+}
+
+int qgemm_gemv_nk_config_override() {
+  static const int config = [] {
+    std::string raw;
+#ifdef _WIN32
+    char *value = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&value, &len, "HIPDNN_QGEMM_GEMV_NK_CONFIG") == 0 &&
+        value) {
+      raw = value;
+      free(value);
+    }
+#else
+    if (const char *value = getenv("HIPDNN_QGEMM_GEMV_NK_CONFIG"))
+      raw = value;
+#endif
+    const int parsed = raw.empty() ? 0 : std::atoi(raw.c_str());
+    return parsed == 44 || parsed == 24 || parsed == 48 ? parsed : 0;
+  }();
+  return config;
+}
+
+template <typename TA, typename TB, typename TY>
+int qgemm_gemv_nk_launch(const QGemmArgs &g, const QGemmRequant &requant,
+                         bool need_row_a, bool need_col_b) {
+  constexpr bool kCanTuneNk =
+      std::is_same_v<TA, uint16_t> && std::is_same_v<TB, int8_t> &&
+      std::is_same_v<TY, uint16_t>;
+  if constexpr (kCanTuneNk) {
+    int config = qgemm_gemv_nk_config_override();
+    if (config == 0 && qgemm_device_cu_count() == 20) {
+      if (g.N == 1024)
+        config = 48;
+      else if (g.N == 8192)
+        config = 24;
+    }
+    switch (config) {
+    case 24:
+      return qgemm_gemv_nk_launch_config<TA, TB, TY, 2, 4>(
+          g, requant, need_row_a, need_col_b);
+    case 48:
+      return qgemm_gemv_nk_launch_config<TA, TB, TY, 4, 8>(
+          g, requant, need_row_a, need_col_b);
+    default:
+      break;
+    }
+  }
+  return qgemm_gemv_nk_launch_config<TA, TB, TY, kGemvNkCols, kGemvNkWaves>(
+      g, requant, need_row_a, need_col_b);
 }
 
 template <typename TA, typename TB, typename TY>
@@ -1522,6 +1907,28 @@ bool qgemm_gemv_autotune_enabled() {
     return !(raw == "0" || raw == "off" || raw == "OFF");
   }();
   return enabled;
+}
+
+int qgemm_gemv_config_override() {
+  static const int config = [] {
+    std::string raw;
+#ifdef _WIN32
+    char *value = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&value, &len, "HIPDNN_QGEMM_GEMV_CONFIG") == 0 && value) {
+      raw = value;
+      free(value);
+    }
+#else
+    if (const char *value = getenv("HIPDNN_QGEMM_GEMV_CONFIG"))
+      raw = value;
+#endif
+    if (raw.empty())
+      return -1;
+    const int parsed = std::atoi(raw.c_str());
+    return parsed >= 0 && parsed < kNumQGemmGemvConfigs ? parsed : -1;
+  }();
+  return config;
 }
 
 // Distinct per element type: the candidates differ in either width or
@@ -1613,6 +2020,18 @@ std::mutex g_qgemm_gemv_cache_mutex;
 template <typename TA, typename TB, typename TY>
 int qgemm_gemv_config(const QGemmArgs &g, const QGemmRequant &requant,
                       bool need_row_a, bool need_col_b) {
+  if (const int forced = qgemm_gemv_config_override(); forced >= 0)
+    return forced;
+  constexpr bool kPsuDecodeTypes =
+      std::is_same_v<TA, uint16_t> && std::is_same_v<TB, int8_t> &&
+      std::is_same_v<TY, uint16_t>;
+  if constexpr (kPsuDecodeTypes) {
+    // The LoRA-B GEMVs have only one 32-element K slice. Launching the generic
+    // 32-slice block wastes almost all of its waves; the single-slice geometry
+    // is the deterministic winner for every PSU output width on gfx1151.
+    if (g.K <= 32 && qgemm_device_cu_count() == 20)
+      return kQGemmGemvSafeConfig;
+  }
   if (!qgemm_gemv_autotune_enabled())
     return kQGemmGemvDefaultConfig;
 
@@ -1668,7 +2087,95 @@ constexpr int kSplitKMaxSplits = 32;
 // atomics it ends with.
 constexpr int64_t kSplitKMinKPerSplit = 4 * kTileK;
 // Blocks per CU the plain grid must already reach for split-K to be pointless.
-constexpr int kSplitKTargetBlocksPerCU = 2;
+// Keep this tunable so a shape sweep can trade occupancy against partial-buffer
+// atomics without rebuilding the kernel DLL.
+int qgemm_splitk_target_blocks_per_cu_override() {
+  static const int target = [] {
+    std::string raw;
+#ifdef _WIN32
+    char *value = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&value, &len,
+                  "HIPDNN_QGEMM_SPLITK_TARGET_BLOCKS_PER_CU") == 0 &&
+        value) {
+      raw = value;
+      free(value);
+    }
+#else
+    if (const char *value =
+            getenv("HIPDNN_QGEMM_SPLITK_TARGET_BLOCKS_PER_CU"))
+      raw = value;
+#endif
+    if (raw.empty())
+      return 0;
+    const int parsed = std::atoi(raw.c_str());
+    return parsed >= 1 && parsed <= 8 ? parsed : 0;
+  }();
+  return target;
+}
+
+// Default-on after validation, with an explicit A/B escape hatch. The hot
+// specialization is type/shape gated below, so other QGemm forms never enter
+// it even when this process-level switch is enabled.
+bool qgemm_tiled_w4_specialized_enabled() {
+  static const bool enabled = [] {
+    std::string raw;
+#ifdef _WIN32
+    char *value = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&value, &len, "HIPDNN_QGEMM_TILED_W4_SPECIALIZED") == 0 &&
+        value) {
+      raw = value;
+      free(value);
+    }
+#else
+    if (const char *value = getenv("HIPDNN_QGEMM_TILED_W4_SPECIALIZED"))
+      raw = value;
+#endif
+    return !(raw == "0" || raw == "off" || raw == "OFF");
+  }();
+  return enabled;
+}
+
+int qgemm_tiled_m128_config() {
+  static const int config = [] {
+    std::string raw;
+#ifdef _WIN32
+    char *value = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&value, &len, "HIPDNN_QGEMM_TILED_M128_CONFIG") == 0 &&
+        value) {
+      raw = value;
+      free(value);
+    }
+#else
+    if (const char *value = getenv("HIPDNN_QGEMM_TILED_M128_CONFIG"))
+      raw = value;
+#endif
+    return (raw == "0" || raw == "off" || raw == "OFF") ? 0 : 1;
+  }();
+  return config;
+}
+
+int qgemm_tiled_k32_config() {
+  static const int config = [] {
+    std::string raw;
+#ifdef _WIN32
+    char *value = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&value, &len, "HIPDNN_QGEMM_TILED_K32_CONFIG") == 0 &&
+        value) {
+      raw = value;
+      free(value);
+    }
+#else
+    if (const char *value = getenv("HIPDNN_QGEMM_TILED_K32_CONFIG"))
+      raw = value;
+#endif
+    return (raw == "0" || raw == "off" || raw == "OFF") ? 0 : 1;
+  }();
+  return config;
+}
 
 struct QGemmSplitKPlan {
   bool enabled;
@@ -1684,8 +2191,18 @@ QGemmSplitKPlan qgemm_plan_splitk(int64_t M, int64_t N, int64_t K) {
 
   const int64_t base_blocks =
       ((N + kTileN - 1) / kTileN) * ((M + kTileM - 1) / kTileM);
+  const int override_target = qgemm_splitk_target_blocks_per_cu_override();
+  // PSU M=128 sweep: N=32 LoRA-A wins at 3 blocks/CU, while the N=1024
+  // K/V base projections win at 4. Preserve the established value elsewhere.
+  const int target_blocks_per_cu =
+      override_target > 0
+          ? override_target
+          : (M == 128 && N == 32
+                 ? 3
+                 : (M == 128 && N == 1024 && K == 2048 ? 4 : 2));
   const int64_t target =
-      static_cast<int64_t>(qgemm_device_cu_count()) * kSplitKTargetBlocksPerCU;
+      static_cast<int64_t>(qgemm_device_cu_count()) *
+      target_blocks_per_cu;
   if (base_blocks >= target)
     return plan;
 
@@ -1731,8 +2248,48 @@ int qgemm_launch_tiled(const QGemmArgs &g, const QGemmRequant &requant,
   const size_t scratch =
       plan.enabled ? qgemm_splitk_scratch_bytes(g.M, g.N) : 0;
   bool use_splitk = plan.enabled && g.workspace && g.workspace_bytes >= scratch;
+  constexpr bool kCanUseW4Specialized =
+      std::is_same_v<TA, uint16_t> && std::is_same_v<TB, int8_t> &&
+      std::is_same_v<TY, uint16_t>;
+  const bool use_w4_specialized =
+      kCanUseW4Specialized && qgemm_tiled_w4_specialized_enabled() &&
+      !g.trans_a && g.trans_b && g.b_bits == 4 &&
+      (reinterpret_cast<uintptr_t>(g.B) % alignof(uint16_t)) == 0 &&
+      (g.K % kDotK) == 0;
 
   (void)hipGetLastError();
+  if constexpr (kCanUseW4Specialized) {
+    // K=32 staging wins for the PSU Up/Gate and O/Down shapes, but regresses
+    // Q (N=3072). Keep the dispatch shape-exact instead of applying it to all
+    // complete tiles.
+    const bool use_k32_shape =
+        (g.N >= 8192 && g.K == 2048) ||
+        (g.N == 2048 && g.K >= 3072);
+    if (!use_splitk && use_w4_specialized && g.M == 128 && use_k32_shape &&
+        (g.N % kTileN) == 0 && (g.K % kK32TileK) == 0 &&
+        qgemm_tiled_k32_config() == 1) {
+      hipLaunchKernelGGL(
+          qgemm_tiled_k32_w4_kernel,
+          dim3(static_cast<unsigned>(g.N / kTileN),
+               static_cast<unsigned>(g.M / kTileM)),
+          dim3(kTiledBlock), 0, g.stream, a_ptr, g.B, y_ptr, g.N, g.K,
+          requant, need_row_a, need_col_b);
+      return static_cast<int>(hipGetLastError());
+    }
+
+    // Screening showed this geometry wins on the PSU Up/Gate projection
+    // (M=128, K=2048, N=8192) but loses on narrower N and K=32 LoRA-B.
+    if (!use_splitk && use_w4_specialized && g.M == kM128TileM &&
+        g.N >= 8192 && g.K >= 1024 && qgemm_tiled_m128_config() == 1) {
+      hipLaunchKernelGGL(
+          qgemm_tiled_m128n32_w4_kernel,
+          dim3(static_cast<unsigned>((g.N + kM128TileN - 1) / kM128TileN)),
+          dim3(kM128Block), 0, g.stream, a_ptr, g.B, y_ptr, g.N, g.K, requant,
+          need_row_a, need_col_b);
+      return static_cast<int>(hipGetLastError());
+    }
+  }
+
   if (use_splitk &&
       hipMemsetAsync(g.workspace, 0, scratch, g.stream) != hipSuccess) {
     // Half-zeroed accumulators would corrupt the result, so drop to the
@@ -1753,12 +2310,30 @@ int qgemm_launch_tiled(const QGemmArgs &g, const QGemmRequant &requant,
         (long long)g.M, (long long)g.N, (long long)g.K, plan.splits,
         (long long)plan.k_chunk, scratch);
 
-    hipLaunchKernelGGL(
-        HIP_KERNEL_NAME(qgemm_splitk_partial_kernel<TA, TB>),
-        dim3(grid_xy.x, grid_xy.y, static_cast<unsigned>(plan.splits)),
-        dim3(kTiledBlock), 0, g.stream, a_ptr, g.B, acc_ws, row_a_ws, col_b_ws,
-        g.M, g.N, g.K, plan.k_chunk, g.b_bits, need_row_a, need_col_b,
-        g.trans_a, g.trans_b);
+    if constexpr (kCanUseW4Specialized) {
+      if (use_w4_specialized) {
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(qgemm_splitk_partial_kernel<TA, TB, true>),
+            dim3(grid_xy.x, grid_xy.y, static_cast<unsigned>(plan.splits)),
+            dim3(kTiledBlock), 0, g.stream, a_ptr, g.B, acc_ws, row_a_ws,
+            col_b_ws, g.M, g.N, g.K, plan.k_chunk, g.b_bits, need_row_a,
+            need_col_b, g.trans_a, g.trans_b);
+      } else {
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(qgemm_splitk_partial_kernel<TA, TB, false>),
+            dim3(grid_xy.x, grid_xy.y, static_cast<unsigned>(plan.splits)),
+            dim3(kTiledBlock), 0, g.stream, a_ptr, g.B, acc_ws, row_a_ws,
+            col_b_ws, g.M, g.N, g.K, plan.k_chunk, g.b_bits, need_row_a,
+            need_col_b, g.trans_a, g.trans_b);
+      }
+    } else {
+      hipLaunchKernelGGL(
+          HIP_KERNEL_NAME(qgemm_splitk_partial_kernel<TA, TB, false>),
+          dim3(grid_xy.x, grid_xy.y, static_cast<unsigned>(plan.splits)),
+          dim3(kTiledBlock), 0, g.stream, a_ptr, g.B, acc_ws, row_a_ws,
+          col_b_ws, g.M, g.N, g.K, plan.k_chunk, g.b_bits, need_row_a,
+          need_col_b, g.trans_a, g.trans_b);
+    }
     const hipError_t launched = hipGetLastError();
     if (launched != hipSuccess)
       return static_cast<int>(launched);
@@ -1773,10 +2348,24 @@ int qgemm_launch_tiled(const QGemmArgs &g, const QGemmRequant &requant,
     return static_cast<int>(hipGetLastError());
   }
 
-  hipLaunchKernelGGL(HIP_KERNEL_NAME(qgemm_tiled_kernel<TA, TB, TY>), grid_xy,
-                     dim3(kTiledBlock), 0, g.stream, a_ptr, g.B, y_ptr, g.M,
-                     g.N, g.K, requant, g.b_bits, need_row_a, need_col_b,
-                     g.trans_a, g.trans_b);
+  if constexpr (kCanUseW4Specialized) {
+    if (use_w4_specialized) {
+      hipLaunchKernelGGL(
+          HIP_KERNEL_NAME(qgemm_tiled_kernel<TA, TB, TY, true>), grid_xy,
+          dim3(kTiledBlock), 0, g.stream, a_ptr, g.B, y_ptr, g.M, g.N, g.K,
+          requant, g.b_bits, need_row_a, need_col_b, g.trans_a, g.trans_b);
+    } else {
+      hipLaunchKernelGGL(
+          HIP_KERNEL_NAME(qgemm_tiled_kernel<TA, TB, TY, false>), grid_xy,
+          dim3(kTiledBlock), 0, g.stream, a_ptr, g.B, y_ptr, g.M, g.N, g.K,
+          requant, g.b_bits, need_row_a, need_col_b, g.trans_a, g.trans_b);
+    }
+  } else {
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(qgemm_tiled_kernel<TA, TB, TY, false>), grid_xy,
+        dim3(kTiledBlock), 0, g.stream, a_ptr, g.B, y_ptr, g.M, g.N, g.K,
+        requant, g.b_bits, need_row_a, need_col_b, g.trans_a, g.trans_b);
+  }
   return static_cast<int>(hipGetLastError());
 }
 
