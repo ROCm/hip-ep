@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   test:
@@ -27,6 +28,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      actions: read
 
     env:
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
@@ -781,4 +783,181 @@ jobs:
             } else {
               Write-Host "WARNING: gh api unreachable, skipping PR comment"
             }
+          }
+
+      - name: Check DLL sizes vs main
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Continue"
+          $repo = "${{ github.repository }}"
+          $eventName = "${{ github.event_name }}"
+          $prNumber = "${{ github.event.pull_request.number }}"
+          $currentRun = "${{ github.run_id }}"
+          $gate = ($eventName -eq "pull_request") -or ($eventName -eq "merge_group")
+          $threshold = 1MB
+          $binDir = "gpu-test-package/bin"
+          $baselineDir = "main-dll-baseline"
+
+          function Get-WatchedSizes($dir) {
+            $map = [ordered]@{}
+            if (-not (Test-Path -LiteralPath $dir)) {
+              return ,$map
+            }
+            $hipgpu = Join-Path $dir "hipgpu.dll"
+            if (Test-Path -LiteralPath $hipgpu) {
+              $map["hipgpu.dll"] = (Get-Item -LiteralPath $hipgpu).Length
+            }
+            foreach ($f in @(Get-ChildItem -Path $dir -Filter "custom_kernels*.dll" -File -ErrorAction SilentlyContinue | Sort-Object Name)) {
+              $map[$f.Name] = $f.Length
+            }
+            return ,$map
+          }
+
+          function Read-SizeJson($path) {
+            $map = @{}
+            $obj = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+            foreach ($p in $obj.PSObject.Properties) {
+              $map[$p.Name] = [int64]$p.Value
+            }
+            return ,$map
+          }
+
+          $thisSizes = Get-WatchedSizes $binDir
+          if ($thisSizes.Count -eq 0) {
+            Write-Host "WARNING: no hipgpu.dll / custom_kernels*.dll under $binDir, skipping size gate"
+            exit 0
+          }
+
+          $mainSizes = @{}
+          $gotBaseline = $false
+          $baselineNote = "unavailable"
+
+          if (Test-Path -LiteralPath $baselineDir) {
+            Remove-Item -LiteralPath $baselineDir -Recurse -Force
+          }
+
+          $runsJson = gh run list -R $repo --workflow "Windows Build" --branch main --status success --limit 20 --json databaseId,headSha,url 2>$null
+          if ($LASTEXITCODE -ne 0 -or -not $runsJson) {
+            Write-Host "WARNING: gh run list failed, skipping size gate"
+          } else {
+            foreach ($run in @($runsJson | ConvertFrom-Json)) {
+              if ("$($run.databaseId)" -eq $currentRun) {
+                continue
+              }
+              $artsJson = gh api "repos/$repo/actions/runs/$($run.databaseId)/artifacts" 2>$null
+              if ($LASTEXITCODE -ne 0 -or -not $artsJson) {
+                continue
+              }
+              $arts = @(($artsJson | ConvertFrom-Json).artifacts)
+              $dllArt = $arts | Where-Object { $_.name -eq "dll-sizes" -and -not $_.expired } | Select-Object -First 1
+              $pkgArt = $arts | Where-Object { $_.name -eq "gpu-test-package" -and -not $_.expired } | Select-Object -First 1
+              $sha7 = $run.headSha.Substring(0, 7)
+              New-Item -ItemType Directory -Force -Path $baselineDir | Out-Null
+
+              if ($dllArt) {
+                gh run download $run.databaseId -R $repo -n dll-sizes -D $baselineDir 2>$null
+                $jsonFile = Get-ChildItem -LiteralPath $baselineDir -Recurse -Filter "dll-sizes.json" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($jsonFile) {
+                  $mainSizes = Read-SizeJson $jsonFile.FullName
+                  $baselineNote = "run [$($run.databaseId)]($($run.url)) - ``$sha7`` (dll-sizes)"
+                  $gotBaseline = $true
+                  break
+                }
+              }
+
+              if ($pkgArt) {
+                if (Test-Path -LiteralPath $baselineDir) {
+                  Remove-Item -LiteralPath $baselineDir -Recurse -Force
+                }
+                New-Item -ItemType Directory -Force -Path $baselineDir | Out-Null
+                gh run download $run.databaseId -R $repo -n gpu-test-package -D $baselineDir 2>$null
+                $hit = Get-ChildItem -LiteralPath $baselineDir -Recurse -Filter "hipgpu.dll" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+                if (-not $hit) {
+                  $hit = Get-ChildItem -LiteralPath $baselineDir -Recurse -Filter "custom_kernels*.dll" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+                }
+                if ($hit) {
+                  $mainSizes = @{}
+                  $watched = Get-WatchedSizes $hit.DirectoryName
+                  foreach ($k in $watched.Keys) {
+                    $mainSizes[$k] = $watched[$k]
+                  }
+                  $baselineNote = "run [$($run.databaseId)]($($run.url)) - ``$sha7`` (gpu-test-package)"
+                  $gotBaseline = $true
+                  break
+                }
+              }
+            }
+          }
+
+          if (Test-Path -LiteralPath $baselineDir) {
+            Remove-Item -LiteralPath $baselineDir -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+          $fail = $false
+          $rows = ""
+          foreach ($name in @($thisSizes.Keys)) {
+            $thisB = [int64]$thisSizes[$name]
+            $thisMB = "{0:F2}" -f ($thisB / 1MB)
+            if (-not $gotBaseline) {
+              $rows += "| $name | $thisMB | - | - |`n"
+              continue
+            }
+            $mainB = 0
+            if ($mainSizes.ContainsKey($name)) {
+              $mainB = [int64]$mainSizes[$name]
+            }
+            $delta = $thisB - $mainB
+            $mainMB = "{0:F2}" -f ($mainB / 1MB)
+            $deltaMB = "{0:+0.00;-0.00;0.00}" -f ($delta / 1MB)
+            $mark = ""
+            if ($delta -gt $threshold) {
+              $mark = " FAIL"
+              if ($gate) {
+                $fail = $true
+              }
+            }
+            $rows += "| $name | $thisMB | $mainMB | $deltaMB$mark |`n"
+          }
+
+          $dllSection = "## Binary sizes`n`n" +
+                        "Baseline: $baselineNote`n`n" +
+                        "| File | This (MB) | Main (MB) | Delta (MB) |`n" +
+                        "|------|----------:|----------:|-----------:|`n" +
+                        $rows
+          if (-not $gotBaseline) {
+            $dllSection += "`nSize gate skipped: no main baseline.`n"
+          }
+
+          Write-Host $dllSection
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $dllSection
+
+          if ($eventName -eq "pull_request" -and $prNumber) {
+            $marker = "<!-- morphizen-perf-results -->"
+            $commentsJson = gh api "repos/$repo/issues/$prNumber/comments" 2>$null
+            if (($LASTEXITCODE -eq 0) -and $commentsJson) {
+              $comments = $commentsJson | ConvertFrom-Json
+              $found = $comments | Where-Object { $_.body -and $_.body.StartsWith($marker) } | Select-Object -First 1
+              if ($found) {
+                $pattern = '(?s)## Binary sizes\r?\n.*?(?=\r?\n## MorphiZen EP Performance Results)'
+                $updated = [regex]::Replace($found.body, $pattern, $dllSection.TrimEnd())
+                if ($updated -eq $found.body) {
+                  $updated = $marker + "`n" + $dllSection.TrimEnd() + "`n" + ($found.body.Substring($marker.Length).TrimStart())
+                }
+                gh api --method PATCH "repos/$repo/issues/comments/$($found.id)" -f body="$updated"
+                if ($LASTEXITCODE -ne 0) {
+                  Write-Host "WARNING: Failed to update Binary sizes on PR comment"
+                }
+              }
+            }
+          }
+
+          if ($fail) {
+            Write-Host "ERROR: one or more watched DLLs grew by more than 1 MiB vs main"
+            exit 1
+          }
+          if (-not $gotBaseline) {
+            exit 0
           }
