@@ -1965,6 +1965,215 @@ if (indicesRank < 1)
   }
 };
 
+// A value that loses every comparison, so a masked-out position is never
+// selected again.
+Value createLosingSentinel(ConversionPatternRewriter &rewriter, Location loc,
+                           RankedTensorType type) {
+  Type elemType = type.getElementType();
+  if (auto floatTy = dyn_cast<FloatType>(elemType)) {
+    APFloat lowest =
+        APFloat::getInf(floatTy.getFloatSemantics(), /*Negative=*/true);
+    return tosa::ConstOp::create(
+        rewriter, loc, type,
+        DenseElementsAttr::get(type, rewriter.getFloatAttr(floatTy, lowest)));
+  }
+  auto intTy = cast<IntegerType>(elemType);
+  return createSplatInt(
+      rewriter, loc, type,
+      APInt::getSignedMinValue(intTy.getWidth()).getSExtValue());
+}
+
+// [0, 1, ..., extent-1] along `axis`, size 1 elsewhere so it broadcasts over
+// the whole tensor.
+Value createAxisIota(ConversionPatternRewriter &rewriter, Location loc,
+                     ArrayRef<int64_t> shape, int64_t axis, Type elemType) {
+  SmallVector<int64_t> iotaShape(shape.size(), 1);
+  iotaShape[axis] = shape[axis];
+  auto type = RankedTensorType::get(iotaShape, elemType);
+  unsigned width = cast<IntegerType>(elemType).getIntOrFloatBitWidth();
+  SmallVector<APInt> steps;
+  for (int64_t i = 0; i < shape[axis]; ++i)
+    steps.push_back(APInt(width, i));
+  return tosa::ConstOp::create(rewriter, loc, type,
+                               DenseElementsAttr::get(type, steps));
+}
+
+// Each round of the TopK expansion costs a reduce_max, an argmax, a compare
+// and a select, so an unbounded K would unroll into an unusable kernel.
+constexpr int64_t kMaxTopKUnroll = 16;
+
+// The capability gate for TopK: a form this pass cannot express stays a hip op
+// rather than failing the conversion. Shape disagreements are deliberately not
+// listed, so those remain hard failures inside the pattern.
+bool isTosaExpressibleTopK(TopKOp op) {
+  if (op.getNumResults() != 2)
+    return false;
+  auto xTy = dyn_cast<RankedTensorType>(op.getX().getType());
+  auto valuesTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+  if (!xTy || !valuesTy || !xTy.hasStaticShape() || !valuesTy.hasStaticShape())
+    return false;
+
+  Type elemType = xTy.getElementType();
+  if (auto floatTy = dyn_cast<FloatType>(elemType)) {
+    if (!floatTy.isF32() && !floatTy.isF16() && !floatTy.isBF16())
+      return false;
+  } else if (auto intTy = dyn_cast<IntegerType>(elemType)) {
+    // Smallest-first negates the input, which an integer range cannot take.
+    if (!intTy.isSignless() || !op.getLargest())
+      return false;
+  } else {
+    return false;
+  }
+
+  int64_t rank = xTy.getRank();
+  int64_t axis = op.getAxis();
+  if (axis < 0)
+    axis += rank;
+  if (axis < 0 || axis >= rank)
+    return false;
+  int64_t k = valuesTy.getDimSize(axis);
+  return k >= 1 && k <= kMaxTopKUnroll;
+}
+
+// ONNX TopK, expanded as K rounds of "take the maximum, then mask it out so
+// the next round finds the runner-up". TOSA has no sort and no top-k op;
+// tosa.argmax and tosa.reduce_max are its only order-aware operations, so
+// there is no shorter shape for this.
+//
+// The mask compares positions, not values. Masking everything equal to the
+// round's maximum would erase both halves of a tie, so an input holding two
+// equal maxima would report one of them and then skip to the third element
+// where ONNX wants both. Comparing an iota against the round's argmax removes
+// exactly one element, because argmax names exactly one position.
+//
+// K is read from the result shape, not from the `k` operand: that operand is a
+// runtime tensor, while the values result is K-wide along `axis` by
+// construction.
+struct TopKConverter final : public OpConversionPattern<TopKOp> {
+  using OpConversionPattern<TopKOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(TopKOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 2)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    auto xTy = dyn_cast<RankedTensorType>(adaptor.getX().getType());
+    auto valuesTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    auto indicesTy = dyn_cast<RankedTensorType>(op.getResult(1).getType());
+    if (!xTy || !valuesTy || !indicesTy || !xTy.hasStaticShape() ||
+        !valuesTy.hasStaticShape() || !indicesTy.hasStaticShape())
+      return rewriter.notifyMatchFailure(
+          op, "expected static ranked input and results");
+    if (valuesTy.getElementType() != xTy.getElementType())
+      return rewriter.notifyMatchFailure(
+          op, "values must carry the input element type");
+    if (!isa<IntegerType>(indicesTy.getElementType()))
+      return rewriter.notifyMatchFailure(op, "indices must be integers");
+    if (valuesTy.getShape() != indicesTy.getShape())
+      return rewriter.notifyMatchFailure(
+          op, "values and indices must have one shape");
+
+    Type elemType = xTy.getElementType();
+    // TOSA has no f64 tensor type, and an integer has to be signless to reduce.
+    if (auto floatTy = dyn_cast<FloatType>(elemType)) {
+      if (!floatTy.isF32() && !floatTy.isF16() && !floatTy.isBF16())
+        return rewriter.notifyMatchFailure(op, "unsupported float width");
+    } else if (auto intTy = dyn_cast<IntegerType>(elemType)) {
+      if (!intTy.isSignless())
+        return rewriter.notifyMatchFailure(op, "expected a signless integer");
+    } else {
+      return rewriter.notifyMatchFailure(op, "unsupported element type");
+    }
+
+    int64_t rank = xTy.getRank();
+    int64_t axis = op.getAxis();
+    if (axis < 0)
+      axis += rank;
+    if (axis < 0 || axis >= rank)
+      return rewriter.notifyMatchFailure(op, "axis out of range");
+    for (int64_t i = 0; i < rank; ++i)
+      if (i != axis && xTy.getDimSize(i) != valuesTy.getDimSize(i))
+        return rewriter.notifyMatchFailure(
+            op, "results disagree with the input off the selected axis");
+
+    int64_t extent = xTy.getDimSize(axis);
+    int64_t k = valuesTy.getDimSize(axis);
+    if (k < 1 || k > extent)
+      return rewriter.notifyMatchFailure(
+          op, "K does not fit within the selected axis");
+    if (k > kMaxTopKUnroll)
+      return rewriter.notifyMatchFailure(
+          op, "K is too wide to unroll into repeated tosa.argmax rounds");
+
+    // Smallest-first would need an argmin, which TOSA does not have, so the
+    // input is negated and the same largest-first rounds run. Negating the
+    // minimum of an integer range overflows, so integers keep to largest.
+    bool largest = op.getLargest();
+    if (!largest && !isa<FloatType>(elemType))
+      return rewriter.notifyMatchFailure(
+          op, "smallest-first needs a negate the integer range cannot take");
+
+    Location loc = op.getLoc();
+    Type i32 = rewriter.getI32Type();
+    auto axisAttr = rewriter.getI32IntegerAttr(static_cast<int32_t>(axis));
+
+    // A round reduces the axis to one element; argmax drops it entirely.
+    SmallVector<int64_t> sliceShape(xTy.getShape());
+    sliceShape[axis] = 1;
+    SmallVector<int64_t> argMaxShape(xTy.getShape());
+    argMaxShape.erase(argMaxShape.begin() + axis);
+    auto valueSliceTy = RankedTensorType::get(sliceShape, elemType);
+    auto argMaxTy = RankedTensorType::get(argMaxShape, i32);
+    auto maskTy = RankedTensorType::get(xTy.getShape(), rewriter.getI1Type());
+
+    Value cur = adaptor.getX();
+    if (!largest)
+      cur = tosa::NegateOp::create(rewriter, loc, xTy, cur);
+    Value iota = createAxisIota(rewriter, loc, xTy.getShape(), axis, i32);
+    Value sentinel = createLosingSentinel(rewriter, loc, xTy);
+
+    SmallVector<Value> valueSlices, indexSlices;
+    for (int64_t round = 0; round < k; ++round) {
+      // A NaN is ignored rather than propagated, so it never takes a top slot
+      // from a real value. ONNX leaves this unspecified.
+      Value roundValue = tosa::ReduceMaxOp::create(
+          rewriter, loc, valueSliceTy, cur, static_cast<uint32_t>(axis),
+          tosa::NanPropagationMode::IGNORE);
+      Value roundIndex = tosa::ArgMaxOp::create(
+          rewriter, loc, argMaxTy, cur, static_cast<uint32_t>(axis),
+          tosa::NanPropagationMode::IGNORE);
+      roundIndex = reshapeTo(roundIndex, sliceShape, rewriter);
+      valueSlices.push_back(roundValue);
+      indexSlices.push_back(roundIndex);
+
+      // The final round leaves nothing to mask for.
+      if (round + 1 == k)
+        break;
+      Value taken =
+          tosa::EqualOp::create(rewriter, loc, maskTy, iota, roundIndex);
+      cur = tosa::SelectOp::create(rewriter, loc, xTy, taken, sentinel, cur);
+    }
+
+    // The rounds already run largest first, which is what sorted=true asks
+    // for; sorted=false accepts any order, so neither needs extra work.
+    Value values = valueSlices.front();
+    Value indices = indexSlices.front();
+    if (k > 1) {
+      values = tosa::ConcatOp::create(rewriter, loc, valuesTy, valueSlices,
+                                      axisAttr);
+      indices = tosa::ConcatOp::create(
+          rewriter, loc, RankedTensorType::get(valuesTy.getShape(), i32),
+          indexSlices, axisAttr);
+    }
+    if (!largest)
+      values = tosa::NegateOp::create(rewriter, loc, valuesTy, values);
+    indices = emitTosaCast(rewriter, loc, indices, indicesTy.getElementType());
+    rewriter.replaceOp(op, {values, indices});
+    return success();
+  }
+};
+
 // Packed uint8 int4: low nibble is the first value, high nibble the second.
 // Cast to i32 so nibble extract is an unsigned bit pattern, then interleave.
 Value unpackInt4LastDim(Value packed, ConversionPatternRewriter &rewriter,
@@ -3361,6 +3570,8 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         [](ScatterElementsOp op) { return op.getReduction() != "none"; });
     conversion.addDynamicallyLegalOp<ScatterNDOp>(
         [](ScatterNDOp op) { return op.getReduction() != "none"; });
+    conversion.addDynamicallyLegalOp<TopKOp>(
+        [](TopKOp op) { return !isTosaExpressibleTopK(op); });
 
     RewritePatternSet patterns(ctx);
     patterns.add<
@@ -3389,7 +3600,7 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         DequantizeLinearConverter, QuantizeLinearConverter,
         MatMulNBitsConverter, GatherConverter, GatherElementsConverter,
         GatherNDConverter, ScatterElementsConverter, ScatterNDConverter,
-        RopeConverter, GqaConverter, MhaConverter>(ctx);
+        TopKConverter, RopeConverter, GqaConverter, MhaConverter>(ctx);
 
     if (failed(applyPartialConversion(funcOp, conversion, std::move(patterns))))
       signalPassFailure();
