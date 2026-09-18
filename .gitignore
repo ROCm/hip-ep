@@ -171,6 +171,8 @@ lib/Runtime/Kernels/test/example/*/data_*/
 CMakeUserPresets.json
 build.*/
 
+lib/**/*.wpo
+
 # Jekyll documentation site
 /_site/
 site/.jekyll-cache/
