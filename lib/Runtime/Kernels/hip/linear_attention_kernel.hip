@@ -805,8 +805,12 @@ __global__ void la_pf_pass1_local(
     // Compact LDS (K as half, single reused solve buffer) keeps this pass off
     // the occupancy limit: 13,568 B at C=16, so four blocks fit a CU's 64 KB.
     extern __shared__ float smem[];
-    float*  Tm   = smem;                           // C*C
-    float*  Buf  = Tm + LA_CHUNK * LA_CHUNK;       // C*dv (Uloc, then W)
+    // Gated has T=0 and never reads Tm, so it skips the C*C tile and Buf
+    // starts at the front of the arena. Tm stays null there so a stray read
+    // faults instead of silently aliasing Buf.
+    constexpr int kTmElems = GATED_ONLY ? 0 : LA_CHUNK * LA_CHUNK;
+    float*  Tm   = GATED_ONLY ? nullptr : smem;    // C*C (delta rules only)
+    float*  Buf  = smem + kTmElems;                // C*dv (Uloc, then W)
     float*  Asm  = Buf + LA_CHUNK * dv;            // C
     float*  clog = Asm + LA_CHUNK;                 // C
     float*  bsm  = clog + LA_CHUNK;                // C
@@ -855,28 +859,31 @@ __global__ void la_pf_pass1_local(
 
     // T[t][s] strict-lower, on the matrix cores. Same shape as pass 3's Pm: A
     // is K row-major, B wants K^T column-major, which is the same row-major
-    // Ksm, so one operand serves as both.
-    if constexpr (GATED_ONLY) {
-        for (int idx = tid; idx < LA_CHUNK * LA_CHUNK; idx += nthreads)
-            Tm[idx] = 0.f;
-    } else if (tid < 32) {
-        const int ln = tid % LA_WT;
-        const int pr = tid / LA_WT;
-        // K-axis base for this lane's pair-half: 0 on gfx11 (each lane loads
-        // the full 16-wide K range), pair*8 on the gfx12-style encoding.
-        const int k_off = hipdnn_wmma_k_off(pr);
-        la_float8 acc = {};
-        for (int k = 0; k < dk; k += LA_WT) {
-            la_half16 frag;
-            for (int ele = 0; ele < HIPDNN_WMMA_FRAG_ELEMS; ele++)
-                frag[ele] = (_Float16)__half2float(Ksm[ln * dk + k + k_off + ele]);
-            acc = HIPDNN_WMMA_F32_16X16X16_F16(frag, frag, acc);
-        }
-        for (int ele = 0; ele < 8; ele++) {
-            const int t = hipdnn_wmma_acc_row(pr, ele), s = ln;
-            if (t < Ceff && s < Ceff)
-                Tm[t * Ceff + s] =
-                    (s < t) ? bsm[t] * expf(clog[t] - clog[s]) * acc[ele] : 0.f;
+    // Ksm, so one operand serves as both. Gated has T=0 and no solve, so it
+    // builds nothing here.
+    if constexpr (!GATED_ONLY) {
+        if (tid < 32) {
+            const int ln = tid % LA_WT;
+            const int pr = tid / LA_WT;
+            // K-axis base for this lane's pair-half: 0 on gfx11 (each lane
+            // loads the full 16-wide K range), pair*8 on the gfx12-style
+            // encoding.
+            const int k_off = hipdnn_wmma_k_off(pr);
+            la_float8 acc = {};
+            for (int k = 0; k < dk; k += LA_WT) {
+                la_half16 frag;
+                for (int ele = 0; ele < HIPDNN_WMMA_FRAG_ELEMS; ele++)
+                    frag[ele] =
+                        (_Float16)__half2float(Ksm[ln * dk + k + k_off + ele]);
+                acc = HIPDNN_WMMA_F32_16X16X16_F16(frag, frag, acc);
+            }
+            for (int ele = 0; ele < 8; ele++) {
+                const int t = hipdnn_wmma_acc_row(pr, ele), s = ln;
+                if (t < Ceff && s < Ceff)
+                    Tm[t * Ceff + s] =
+                        (s < t) ? bsm[t] * expf(clog[t] - clog[s]) * acc[ele]
+                                : 0.f;
+            }
         }
     }
     __syncthreads();
@@ -1551,12 +1558,13 @@ static int la_launch_parallel(
     float*  carry_f = (float*)(sp + L.oC);
 
     const int block = LA_PAR_THREADS;
-    // Pass 1 LDS: Tm + Buf(=C*dv) + 4 vecs (float). The K tile (half) is only
-    // for delta rules; gated does not reserve it.
-    const size_t s1 = (size_t)(LA_CHUNK * LA_CHUNK + LA_CHUNK * dv +
-                               4 * LA_CHUNK) * sizeof(float) +
-                      (GATED_ONLY ? 0
-                                  : (size_t)(LA_CHUNK * dk) * sizeof(__half));
+    // Pass 1 LDS: Buf(=C*dv) + 4 vecs (float). The T tile (float) and the K
+    // tile (half) are delta-rule only; gated has T=0 and reserves neither.
+    const size_t s1 = (size_t)(LA_CHUNK * dv + 4 * LA_CHUNK) * sizeof(float) +
+                      (GATED_ONLY
+                           ? 0
+                           : (size_t)(LA_CHUNK * LA_CHUNK) * sizeof(float) +
+                                 (size_t)(LA_CHUNK * dk) * sizeof(__half));
     // Pass 2 (scan) LDS: padded state tile + the shared A-operand buffer + U,
     // all fp16 now that the scan runs on the matrix cores, which leaves it
     // smaller than the 18,432 B the scalar version needed. The dv-split
