@@ -3166,7 +3166,7 @@ __attribute__((amdgpu_flat_work_group_size(
     GEMM_WG_SZ(BM_T, BN_T, 1, 1))))
 __attribute__((amdgpu_waves_per_eu(8)))
 void MatMulNBitsWMMA_Grouped_NoZP(
-    int max_m, int N, int K,
+    int N, int K,
     const _Float16* __restrict__ A,
     const unsigned char* __restrict__ B_packed,
     const _Float16* __restrict__ scales,
@@ -3177,12 +3177,14 @@ void MatMulNBitsWMMA_Grouped_NoZP(
 {
     const int expert = static_cast<int>(blockIdx.z);
     const int count = expert_counts[expert];
+    // The impl below runs with swizzle_n=1 so its row tile is exactly
+    // blockIdx.y. Any other swizzle would remap the tile behind this test and
+    // the surviving blocks would then compute the wrong rows.
     if (static_cast<int>(blockIdx.y) * BM_T >= count) return;
 
     // Rows are packed back-to-back across experts; a slice starts at its
-    // routing prefix sum. max_m only bounds grid.y; BOUNDS_CHECK clamps every
-    // A read and C write to `count`, so no tile-aligned padding is needed
-    // between slices.
+    // routing prefix sum. BOUNDS_CHECK clamps every A read and C write to
+    // `count`, so no tile-aligned padding is needed between slices.
     const size_t row0 = static_cast<size_t>(expert_row_offsets[expert]);
     const size_t b_stride = static_cast<size_t>(N) * (K >> 1);
     const size_t s_stride = static_cast<size_t>(N) * num_groups_k;
@@ -3202,10 +3204,15 @@ enum class GroupedWmmaGeometry {
   k64x64,
 };
 
-// 32x64 unless the average expert slice exceeds BM=32, or K is long relative
-// to N (64x64: more threads, fewer K-steps).
+// Returns a geometry the kernel can actually run for this shape, so callers
+// switch on it without re-checking legality. 64x64 consumes a whole BK_T=64
+// K-step and a full WMMA N tile, so it is only available when both divide;
+// 32x64 (BK_T=32) covers everything the entry point already accepts. Within
+// the legal set, 32x64 wins unless the average expert slice exceeds BM=32, or
+// K is long relative to N (64x64: more threads, fewer K-steps).
 static GroupedWmmaGeometry select_grouped_wmma_geometry(
     int64_t valid_rows, int64_t num_experts, int64_t N, int64_t K) {
+  if ((K % 64) != 0 || (N % 64) != 0) return GroupedWmmaGeometry::k32x64;
   const int64_t avg_rows =
       num_experts > 0 ? (valid_rows + num_experts - 1) / num_experts : 0;
   if (avg_rows > 32 || (K >= 2048 && K >= 2 * N))
@@ -3230,9 +3237,17 @@ extern "C" int hip_matmul_nbits_grouped_wmma(
     int64_t block_size,
     int64_t element_size_bytes) {
   if (max_m <= 0 || num_experts <= 0 || N <= 0 || K <= 0) return 0;
+  if (hipdnn_device_is_wave64()) {
+    // WMMA is a wave32 instruction. Callers keep wave64 parts on the
+    // per-expert host dispatch, so arriving here is a routing bug, not a
+    // shape the entry point could have accepted.
+    fprintf(stderr,
+            "[custom_kernels] hip_matmul_nbits_grouped_wmma: requires wave32 "
+            "(WMMA) hardware\n");
+    return -1;
+  }
   if (bits != 4 || element_size_bytes != 2 || (K % 32) != 0 ||
-      block_size < 32 || (block_size % 32) != 0 ||
-      hipdnn_device_is_wave64()) {
+      block_size < 32 || (block_size % 32) != 0) {
     fprintf(stderr,
             "[custom_kernels] hip_matmul_nbits_grouped_wmma: unsupported "
             "geometry (max_m=%lld experts=%lld N=%lld K=%lld bits=%lld "
@@ -3244,44 +3259,31 @@ extern "C" int hip_matmul_nbits_grouped_wmma(
   }
 
   hipStream_t s = static_cast<hipStream_t>(stream);
-  const GroupedWmmaGeometry geometry =
-      select_grouped_wmma_geometry(valid_rows, num_experts, N, K);
-  const bool use_64x64 =
-      geometry == GroupedWmmaGeometry::k64x64 &&
-      (K % 64) == 0 && (N % 64) == 0;
-  if (use_64x64) {
-    dim3 grid(static_cast<unsigned>((N + 63) / 64),
-              static_cast<unsigned>((max_m + 63) / 64),
-              static_cast<unsigned>(num_experts));
-    hipLaunchKernelGGL(
-        HIP_KERNEL_NAME(MatMulNBitsWMMA_Grouped_NoZP<64, 64>), grid,
-        dim3(GEMM_WG_SZ(64, 64, 1, 1)), 0, s, static_cast<int>(max_m),
-        static_cast<int>(N), static_cast<int>(K),
-        static_cast<const _Float16*>(A),
-        static_cast<const unsigned char*>(B),
-        static_cast<const _Float16*>(scales),
-        static_cast<const int32_t*>(expert_counts),
-        static_cast<const int32_t*>(expert_row_offsets),
-        static_cast<int>(block_size),
-        static_cast<int>((K + block_size - 1) / block_size),
-        static_cast<_Float16*>(output));
-  } else {
-    dim3 grid(static_cast<unsigned>((N + 63) / 64),
-              static_cast<unsigned>((max_m + 31) / 32),
-              static_cast<unsigned>(num_experts));
-    hipLaunchKernelGGL(
-        HIP_KERNEL_NAME(MatMulNBitsWMMA_Grouped_NoZP<32, 64>), grid,
-        dim3(GEMM_WG_SZ(32, 64, 1, 1)), 0, s, static_cast<int>(max_m),
-        static_cast<int>(N), static_cast<int>(K),
-        static_cast<const _Float16*>(A),
-        static_cast<const unsigned char*>(B),
-        static_cast<const _Float16*>(scales),
-        static_cast<const int32_t*>(expert_counts),
-        static_cast<const int32_t*>(expert_row_offsets),
-        static_cast<int>(block_size),
-        static_cast<int>((K + block_size - 1) / block_size),
-        static_cast<_Float16*>(output));
+
+#define GROUPED_WMMA_LAUNCH(BM_V, BN_V) do { \
+    dim3 grid_(static_cast<unsigned>((N + BN_V - 1) / BN_V), \
+               static_cast<unsigned>((max_m + BM_V - 1) / BM_V), \
+               static_cast<unsigned>(num_experts)); \
+    hipLaunchKernelGGL( \
+        HIP_KERNEL_NAME(MatMulNBitsWMMA_Grouped_NoZP<BM_V, BN_V>), grid_, \
+        dim3(GEMM_WG_SZ(BM_V, BN_V, 1, 1)), 0, s, \
+        static_cast<int>(N), static_cast<int>(K), \
+        static_cast<const _Float16*>(A), \
+        static_cast<const unsigned char*>(B), \
+        static_cast<const _Float16*>(scales), \
+        static_cast<const int32_t*>(expert_counts), \
+        static_cast<const int32_t*>(expert_row_offsets), \
+        static_cast<int>(block_size), \
+        static_cast<int>((K + block_size - 1) / block_size), \
+        static_cast<_Float16*>(output)); \
+} while(0)
+
+  switch (select_grouped_wmma_geometry(valid_rows, num_experts, N, K)) {
+    case GroupedWmmaGeometry::k64x64: GROUPED_WMMA_LAUNCH(64, 64); break;
+    case GroupedWmmaGeometry::k32x64: GROUPED_WMMA_LAUNCH(32, 64); break;
   }
+
+#undef GROUPED_WMMA_LAUNCH
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess)

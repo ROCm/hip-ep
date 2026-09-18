@@ -2006,10 +2006,10 @@ HIP_KERNEL_API int hip_matmul_nbits(
  * That keeps the buffers at valid_rows rows instead of num_experts*max_m.
  * B/scales are contiguous expert-major tensors. One launch covers every expert
  * and skips empty/invalid row tiles on device; max_m is only the host-side
- * upper bound on any single expert_counts entry and sizes grid.y. Wide-N (FC1)
- * uses a 32x64 tile; long-K shapes use 64x64 on architectures whose policy
- * enables it. valid_rows is the sum of expert_counts and lets the selector
- * account for ragged density.
+ * upper bound on any single expert_counts entry and sizes grid.y. The tile
+ * comes from the shape alone: wide-N (FC1) takes 32x64, while dense or long-K
+ * slices take 64x64 where K and N divide it. valid_rows is the sum of
+ * expert_counts and lets the selector account for ragged density.
  */
 HIP_KERNEL_API int hip_matmul_nbits_grouped_wmma(
     void* stream,
@@ -2528,10 +2528,11 @@ HIP_KERNEL_API int hip_qmoe_amd_bucket_tokens(
     int64_t element_size_bytes);
 
 /* Fully device-side expert-grouped QMoE prefill via ragged WMMA.
- * packed_latent/packed_act hold expert slices back-to-back in routing order
- * (valid_rows = sum of counts), so the pair index is itself the packed row.
- * sorted_* are [num_tokens*k] scratch filled by the bucketing pass.
- * packed_latent is reused for the FC2 output.
+ * packed_latent/packed_act hold the expert slices back-to-back in
+ * expert-sorted order (valid_rows = sum of counts), so a row's position in
+ * that order is its packed row, and sorted_pair_ids[row] carries the routing
+ * slot it came from. sorted_* are [num_tokens*k] scratch filled by the
+ * bucketing pass. packed_latent is reused for the FC2 output.
  */
 HIP_KERNEL_API int hip_qmoe_amd_prefill_grouped_wmma(
     void* stream,
