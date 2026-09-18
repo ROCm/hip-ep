@@ -229,9 +229,51 @@ isHipQdqQuantizedWidth(mlir::PatternRewriter &, mlir::PDLResultList &,
   }));
 }
 
-/// dq is a hip.dequantize_linear applying one f32 scale and one zero point per
-/// slice along `axis` of a statically shaped rank-2 8-bit storage weight, with
-/// packed_int4 set exactly when `packedInt4` is true
+/// dq applies one f32 scale and one zero point per slice along `expectedAxis`
+/// of a statically shaped rank-2 8-bit storage weight
+inline bool isPerSliceQuantizedWeight(mlir::hip::DequantizeLinearOp dq,
+                                      int64_t expectedAxis) {
+  // The per-slice form has no way to express an absent zero point.
+  mlir::Value zeroPoints = dq.getZeroPoint();
+  if (!zeroPoints)
+    return false;
+
+  // block_size > 0 subdivides each slice, a second and finer granularity that
+  // one scale per slice cannot represent.
+  if (dq.getBlockSize() != 0)
+    return false;
+
+  auto weightType =
+      mlir::dyn_cast<mlir::RankedTensorType>(dq.getInput().getType());
+  if (!weightType || !weightType.hasStaticShape() ||
+      weightType.getRank() != 2 || !weightType.getElementType().isInteger(8))
+    return false;
+
+  // ONNX allows a negative axis, so normalize before comparing it against the
+  // axis the consumer's layout puts the slices on.
+  int64_t axis = dq.getAxis();
+  if (axis < 0)
+    axis += weightType.getRank();
+  if (axis != expectedAxis)
+    return false;
+  int64_t slices = weightType.getDimSize(axis);
+
+  auto scaleType =
+      mlir::dyn_cast<mlir::RankedTensorType>(dq.getScale().getType());
+  if (!scaleType || scaleType.getRank() != 1 ||
+      scaleType.getDimSize(0) != slices || !scaleType.getElementType().isF32())
+    return false;
+
+  // ONNX guarantees zero_point.dtype == x.dtype, so the zero point carries the
+  // weight's element type and its value width. That is what lets one packed
+  // 4-bit marker describe both operands.
+  auto zpType = mlir::dyn_cast<mlir::RankedTensorType>(zeroPoints.getType());
+  return zpType && zpType.getRank() == 1 && zpType.getDimSize(0) == slices &&
+         zpType.getElementType() == weightType.getElementType();
+}
+
+/// dq is a hip.dequantize_linear quantizing its weight per slice along `axis`,
+/// with packed_int4 set exactly when `packedInt4` is true
 inline mlir::LogicalResult
 isHipPerColumnQuantizedWeight(mlir::PatternRewriter &, mlir::PDLResultList &,
                               llvm::ArrayRef<mlir::PDLValue> args) {
@@ -246,51 +288,47 @@ isHipPerColumnQuantizedWeight(mlir::PatternRewriter &, mlir::PDLResultList &,
   if (!dq || !axisAttr || !packedAttr)
     return mlir::failure();
 
-  // A PDLL `op<>` literal cannot make an attribute conditional, so the two
-  // storage widths need one pattern each and each must reject the other's
-  // weight. The element type cannot tell them apart -- a packed 4-bit operand
-  // keeps 8-bit storage and its logical element count -- so the marker
-  // convert-onnx-to-hip carried over from constant lowering is what decides.
+  // A PDLL `op<>` literal cannot make an attribute conditional, so a fused op
+  // that spells the value width as a unit marker needs one pattern per width,
+  // and each must reject the other's weight. The element type cannot tell them
+  // apart -- a packed 4-bit operand keeps 8-bit storage and its logical
+  // element count -- so the marker convert-onnx-to-hip carried over from
+  // constant lowering is what decides.
   if (dq.getPackedInt4() != packedAttr.getValue())
     return mlir::failure();
+  return mlir::success(isPerSliceQuantizedWeight(dq, axisAttr.getInt()));
+}
 
-  // The per-column form has no way to express an absent zero point.
-  mlir::Value zeroPoints = dq.getZeroPoint();
-  if (!zeroPoints)
+/// dq is a hip.dequantize_linear quantizing its weight per output feature of
+/// consumer, whose transB decides which of the weight's two axes that feature
+/// runs along
+inline mlir::LogicalResult
+isHipPerChannelQuantizedWeight(mlir::PatternRewriter &, mlir::PDLResultList &,
+                               llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 2)
+    return mlir::failure();
+  auto dq = mlir::dyn_cast_or_null<mlir::hip::DequantizeLinearOp>(
+      args[0].dyn_cast<mlir::Operation *>());
+  auto *consumer = args[1].dyn_cast<mlir::Operation *>();
+  if (!dq || !consumer)
     return mlir::failure();
 
-  // block_size > 0 subdivides each slice, a second and finer granularity that
-  // one scale per slice cannot represent.
-  if (dq.getBlockSize() != 0)
+  // Transposing the weight swaps its two extents and so moves the output
+  // feature with them. Any nonzero transB counts as a transpose, which is how
+  // the fused op reads the same flag it is handed verbatim.
+  std::optional<int64_t> transB = tryHipIntAttr(consumer, "transB", 0);
+  if (!transB)
+    return mlir::failure();
+  int64_t channelAxis = *transB != 0 ? 0 : 1;
+  if (!isPerSliceQuantizedWeight(dq, channelAxis))
     return mlir::failure();
 
-  auto weightType =
-      mlir::dyn_cast<mlir::RankedTensorType>(dq.getInput().getType());
-  if (!weightType || !weightType.hasStaticShape() ||
-      weightType.getRank() != 2 || !weightType.getElementType().isInteger(8))
-    return mlir::failure();
-
-  int64_t axis = dq.getAxis();
-  if (axis < 0)
-    axis += weightType.getRank();
-  if (axis != axisAttr.getInt())
-    return mlir::failure();
-  int64_t slices = weightType.getDimSize(axis);
-
-  auto scaleType =
-      mlir::dyn_cast<mlir::RankedTensorType>(dq.getScale().getType());
-  if (!scaleType || scaleType.getRank() != 1 ||
-      scaleType.getDimSize(0) != slices || !scaleType.getElementType().isF32())
-    return mlir::failure();
-
-  // ONNX guarantees zero_point.dtype == x.dtype, so the zero point carries the
-  // weight's element type and its value width. That is what lets one
-  // packed_int4 flag describe both operands.
-  auto zpType = mlir::dyn_cast<mlir::RankedTensorType>(zeroPoints.getType());
-  return mlir::success(zpType && zpType.getRank() == 1 &&
-                       zpType.getDimSize(0) == slices &&
-                       zpType.getElementType() ==
-                           weightType.getElementType());
+  // A lone output feature is per-tensor quantization written as a length-1
+  // array. Leaving it unmatched keeps it on the per-tensor path, where the
+  // coefficient folds into the instruction stream rather than costing a load
+  // per output.
+  auto weightType = mlir::cast<mlir::RankedTensorType>(dq.getInput().getType());
+  return mlir::success(weightType.getDimSize(channelAxis) >= 2);
 }
 
 /// op's `name` attribute equals expected, an absent one being absentValue
@@ -368,6 +406,51 @@ extractHipIntAttr(mlir::PatternRewriter &rewriter, mlir::PDLResultList &results,
   return mlir::success();
 }
 
+/// op's `name` attribute as an f32 attribute, defaultValue when absent
+inline mlir::LogicalResult
+extractHipFloatAttr(mlir::PatternRewriter &rewriter,
+                    mlir::PDLResultList &results,
+                    llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 3)
+    return mlir::failure();
+  auto *op = args[0].dyn_cast<mlir::Operation *>();
+  auto nameAttr = mlir::dyn_cast_or_null<mlir::StringAttr>(
+      args[1].dyn_cast<mlir::Attribute>());
+  auto defaultValue = mlir::dyn_cast_or_null<mlir::FloatAttr>(
+      args[2].dyn_cast<mlir::Attribute>());
+  if (!op || !nameAttr || !defaultValue)
+    return mlir::failure();
+  // No companion constraint, for the same reason as ExtractHipIntAttr: the
+  // attributes read here are declared DefaultValuedAttr<F32Attr>, so an absent
+  // one only means the op is carrying its default.
+  auto attr = op->getAttrOfType<mlir::FloatAttr>(nameAttr.getValue());
+  // f32, because it feeds a hip op attribute declared as F32Attr.
+  results.push_back(rewriter.getF32FloatAttr(
+      static_cast<float>((attr ? attr : defaultValue).getValueAsDouble())));
+  return mlir::success();
+}
+
+/// dq's quantized value width in bits: 4 when its quantized operands hold two
+/// values per byte, otherwise the storage element type's own width
+inline mlir::LogicalResult
+extractHipQdqValueBits(mlir::PatternRewriter &rewriter,
+                       mlir::PDLResultList &results,
+                       llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 1)
+    return mlir::failure();
+  auto *op = args[0].dyn_cast<mlir::Operation *>();
+  auto dq = mlir::dyn_cast_or_null<mlir::hip::DequantizeLinearOp>(op);
+  mlir::IntegerType intType = getQdqQuantizedElementType(op);
+  if (!dq || !intType)
+    return mlir::failure();
+  // A packed operand keeps its logical element count and an 8-bit element
+  // type, so the type cannot report the value width; the marker
+  // convert-onnx-to-hip carried over from constant lowering is what can.
+  results.push_back(rewriter.getI64IntegerAttr(
+      dq.getPackedInt4() ? 4 : static_cast<int64_t>(intType.getWidth())));
+  return mlir::success();
+}
+
 inline mlir::LogicalResult
 extractHipSplatScale(mlir::PatternRewriter &rewriter,
                      mlir::PDLResultList &results,
@@ -414,6 +497,8 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
   pdlPatterns.registerConstraintFunction("HasHipIntAttrEqual",
                                          hasHipIntAttrEqual);
   pdlPatterns.registerRewriteFunction("ExtractHipIntAttr", extractHipIntAttr);
+  pdlPatterns.registerRewriteFunction("ExtractHipFloatAttr",
+                                      extractHipFloatAttr);
   pdlPatterns.registerConstraintFunction("IsHipSplatScale", isHipSplatScale);
   pdlPatterns.registerConstraintFunction("HasExtractableQdqZeropoint",
                                          hasExtractableQdqZeropoint);
@@ -421,10 +506,14 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
                                          isHipQdqQuantizedWidth);
   pdlPatterns.registerConstraintFunction("IsHipPerColumnQuantizedWeight",
                                          isHipPerColumnQuantizedWeight);
+  pdlPatterns.registerConstraintFunction("IsHipPerChannelQuantizedWeight",
+                                         isHipPerChannelQuantizedWeight);
   pdlPatterns.registerRewriteFunction("ExtractHipSplatScale",
                                       extractHipSplatScale);
   pdlPatterns.registerRewriteFunction("ExtractHipQdqZeropoint",
                                       extractHipQdqZeropoint);
+  pdlPatterns.registerRewriteFunction("ExtractHipQdqValueBits",
+                                      extractHipQdqValueBits);
 }
 
 /// apply the patterns in pdlBuffer to every function body in module, an empty
