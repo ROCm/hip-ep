@@ -126,6 +126,7 @@ private:
   void DropOutgrown(size_t size, std::vector<void *> &out);
   bool EvictLruLarge(size_t keep, std::vector<void *> &out);
   void DrainLarge(std::vector<void *> &out);
+  void NoteLargeAlloc(bool hit);
 
   // Fixed size-class caching allocator. hipHostMalloc is a heavyweight
   // (page-pinning) call: ORT re-allocates the per-Run input device-copy
@@ -195,6 +196,9 @@ private:
   // is run at instead of with a fixed share of RAM.
   size_t large_peak_live_bytes_ = 0;
   size_t large_retained_bytes_ = 0;
+  uint32_t large_hits_ = 0;
+  uint32_t large_misses_ = 0;
+  bool large_hit_rate_warm_ = false;
 
   const OrtMemoryInfo *memory_info_;
   // Cached at construction time. -1 means "couldn't read it from memory_info"

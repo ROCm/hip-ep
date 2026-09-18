@@ -77,6 +77,9 @@ int SizeClassIndex(size_t size) noexcept {
 
 constexpr size_t kPageSize = 4096;
 
+// 50% of a 32-alloc window. MMLU var-len prefill ~10% hits; Gemma-4 KV ~99%.
+constexpr uint32_t kLargeHitRateWindow = 32;
+
 // Capacity for a large request that is known to be growing. The 1/64 headroom
 // is the reuse span: a Gemma-4 KV tensor is 64 MiB at a 16 K context and grows
 // 4096 bytes per token, so one capacity covers the next 256 tokens.
@@ -217,6 +220,19 @@ void HipGpuAllocator::DrainLarge(std::vector<void *> &out) {
   large_retained_bytes_ = 0;
 }
 
+void HipGpuAllocator::NoteLargeAlloc(bool hit) {
+  if (hit) {
+    ++large_hits_;
+  } else {
+    ++large_misses_;
+  }
+  if (large_hits_ + large_misses_ >= kLargeHitRateWindow) {
+    large_hit_rate_warm_ = true;
+    large_hits_ >>= 1;
+    large_misses_ >>= 1;
+  }
+}
+
 void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
                                               size_t size) {
   if (size == 0) {
@@ -267,12 +283,14 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
         if (it->second.free.empty()) {
           self->large_free_.erase(it);
         }
+        self->NoteLargeAlloc(true);
         return ptr;
       }
       if (octave.growing) {
         alloc_size = LargeCapacity(size);
         self->DropOutgrown(size, stale);
       }
+      self->NoteLargeAlloc(false);
     }
   }
   ReleaseToDriver(stale, self->device_id_);
@@ -358,16 +376,19 @@ void ORT_API_CALL HipGpuAllocator::FreeImpl(OrtAllocator *this_, void *p) {
       self->large_live_bytes_ -= (self->large_live_bytes_ < capacity)
                                      ? self->large_live_bytes_
                                      : capacity;
-      // Retaining this would put the pool over a ceiling that tracks the most
-      // this model has had checked out at once, so evict the capacities that
-      // have gone longest without being asked for before giving up on it.
+      // Probe is "pool was empty", captured before LRU eviction. Evicting the
+      // last idle buffer must not re-arm the probe and keep this one instead:
+      // that pins the latest unique size and starves the driver's best-fit.
+      const bool probe = self->large_free_.empty();
       bool room = self->large_retained_bytes_ + capacity <=
                   self->large_peak_live_bytes_;
       while (!room && self->EvictLruLarge(capacity, to_release)) {
         room = self->large_retained_bytes_ + capacity <=
                self->large_peak_live_bytes_;
       }
-      if (room) {
+      const bool worth = probe || (self->large_hit_rate_warm_ &&
+                                   self->large_hits_ >= self->large_misses_);
+      if (room && worth) {
         auto &bucket = self->large_free_[capacity];
         bucket.free.push_back(p);
         bucket.last_used = self->large_ops_;
