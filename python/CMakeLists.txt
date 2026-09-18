@@ -17,23 +17,6 @@ set(_stage "${CMAKE_CURRENT_BINARY_DIR}/pkg")
 set(_libs_dir "${_stage}/onnxruntime_ep_amdgpu")
 set(_dist_dir "${CMAKE_CURRENT_BINARY_DIR}/dist")
 
-# hipBLASLt resolves Tensile data as library/<device-isa>/, so this tracks the
-# ISA the pinned dist ships, not HIP_ARCHITECTURES (a generic compile target
-# like gfx11-generic has no such directory). Match only the token after
-# "windows-": family tags (gfx11-all, gfx115x-gfx1170) and variant suffixes
-# (hipblaslt-gfx1170-trimmed) must not match here.
-if(DEP_HASH_therock_windows MATCHES "windows-(gfx[0-9][0-9][0-9][0-9])[-.]")
-  set(MORPHIZEN_HIP_ARCH "${CMAKE_MATCH_1}")
-else()
-  set(MORPHIZEN_HIP_ARCH "${HIP_ARCHITECTURES}")
-  if(MORPHIZEN_HIP_ARCH MATCHES ";")
-    list(GET MORPHIZEN_HIP_ARCH 0 MORPHIZEN_HIP_ARCH)
-  endif()
-  if(NOT MORPHIZEN_HIP_ARCH)
-    set(MORPHIZEN_HIP_ARCH "gfx1151")
-  endif()
-endif()
-
 configure_file(
   "${_pkg_src}/pyproject.toml.in"
   "${_stage}/pyproject.toml"
@@ -93,8 +76,6 @@ add_custom_target(wheel ALL
   COMMAND ${Python3_EXECUTABLE} "${_pkg_src}/_pack_libs.py"
           ${_dll_args}
           --dest "${_libs_dir}"
-          --rocm-dist "${THEROCK_DIST}"
-          --rocm-arch "${MORPHIZEN_HIP_ARCH}"
           --with-crt
   # 3. Build the wheel (PEP 517). Drop setuptools' build cache + egg-info first:
   #    they linger across runs and would re-pack stale (e.g. removed) artifacts.

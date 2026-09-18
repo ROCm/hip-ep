@@ -1083,7 +1083,7 @@ HIP_KERNEL_API int hip_gqa_flash_prefill_v2(
 /* Same as hip_gqa_flash_prefill_v2, plus attention sinks / smooth softmax and
  * a sliding window.
  * Kept as a separate symbol rather than widening v2, because v2 is redeclared
- * locally by the standalone GQA harnesses and the dispatch_bench shim header;
+ * locally by the standalone GQA harnesses;
  * widening it in place would break those and risk a silent host/kernel ABI skew.
  *
  *   local_window_size : <= 0 for full attention. > 0 masks key k for query q
@@ -3124,6 +3124,81 @@ HIP_KERNEL_API int hip_conv_transpose(
  */
 HIP_KERNEL_API int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
                        void* C, int M, int K, int N);
+
+/* =========================================================================
+ * Composable Kernel WMMA GEMM
+ * =========================================================================
+ *
+ * D = alpha * op(A) op(B) (+ bias), computed by one of a fixed set of CK WMMA
+ * instances. Arguments follow hipBLASLt's column-major convention: D is
+ * [m, n] with leading dimension ldd, op(A) is [m, k], op(B) is [k, n], and
+ * bias (nullable) is length m.
+ *
+ * CK ships no heuristic, so the caller names the instance. Instance indices
+ * are a property of one build of ck_gemm.hip and must not be persisted;
+ * select by measurement and key any cache on the problem geometry.
+ *
+ * hip_ck_gemm_run returns non-zero when the named instance cannot serve the
+ * shape -- an alignment, layout or dtype combination it was not instantiated
+ * for. That is a routing answer, not a failure: the caller is expected to try
+ * another instance or fall back to hip_ref_gemm_run.
+ *
+ * Parameters:
+ *   stream     - hipStream_t cast to void*
+ *   instance   - index in [0, hip_ck_gemm_num_instances())
+ *   bias       - nullable; length m, added to every column of D
+ *   abDtype    - element type of A and B (hip_dtype_t value cast to int)
+ *   dDtype     - element type of D (hip_dtype_t value cast to int)
+ *   strideA/B/D - batch strides; ignored when batch == 1
+ *
+ * Instantiated dtype pairs: fp16/fp16 and fp16/fp32, the only ones any caller
+ * asks for; everything else belongs to hip_ref_gemm_run. alpha is honoured only
+ * where the epilogue carries it, i.e. fp16/fp32 but not fp16/fp16.
+ */
+HIP_KERNEL_API int hip_ck_gemm_num_instances(void);
+
+HIP_KERNEL_API int hip_ck_gemm_run(void* stream, int instance, const void* A,
+                       const void* B, const void* bias, void* D,
+                       int64_t m, int64_t n, int64_t k, int64_t batch,
+                       int transA, int transB, int abDtype, int dDtype,
+                       float alpha, int64_t lda, int64_t ldb, int64_t ldd,
+                       int64_t strideA, int64_t strideB, int64_t strideD);
+
+/* =========================================================================
+ * Composable Kernel reference (naive) GEMM
+ * =========================================================================
+ *
+ * D = alpha * op(A) op(B), the universal fallback for shapes and dtypes the
+ * tuned hip_ck_gemm_run instances do not serve. Same column-major convention
+ * as hip_ck_gemm_run, but no bias and no instance selection. Covers
+ * fp16/fp16, fp16/fp32, bf16/bf16, bf16/fp32, fp32/fp32 and fp64/fp64.
+ *
+ * ck::ReferenceGemm assumes packed operands, so lda/ldb/ldd are unused and the
+ * caller must pass packed buffers; strideA/B/D are batch strides and are
+ * honoured. Returns non-zero only for a dtype pair it does not cover.
+ */
+HIP_KERNEL_API int hip_ref_gemm_run(void* stream, const void* A, const void* B,
+                       void* D, int64_t m, int64_t n, int64_t k, int64_t batch,
+                       int transA, int transB, int abDtype, int dDtype,
+                       float alpha, int64_t lda, int64_t ldb, int64_t ldd,
+                       int64_t strideA, int64_t strideB, int64_t strideD);
+
+/* =========================================================================
+ * fp16 GEMV
+ * =========================================================================
+ *
+ * y[1, n] = a[1, k] @ b[k, n], row-major fp16, no bias, alpha = 1. Unlike the
+ * GEMM entries above this takes the ONNX row-major form directly, since the
+ * single-row case has no transpose or leading-dimension freedom to express.
+ *
+ * Returns non-zero when the shape is declined -- currently n or k too small to
+ * carry the parallelism this needs, which is a routing answer rather than a
+ * failure: the caller keeps its GEMM route. The decision is pure shape
+ * arithmetic, so a declined call leaves y untouched and an accepted one always
+ * writes it.
+ */
+HIP_KERNEL_API int hip_gemv_fp16(void* stream, const void* a, const void* b,
+                       void* y, int64_t n, int64_t k);
 
 #ifdef __cplusplus
 }
