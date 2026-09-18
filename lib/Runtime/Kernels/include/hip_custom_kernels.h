@@ -2522,40 +2522,6 @@ HIP_KERNEL_API int hip_qmoe_amd_bucket_tokens(
     int64_t k,
     int64_t element_size_bytes);
 
-/* Expert-grouped routed branch for com.amd QMoE prefill (num_tokens > 1).
- *
- * GPU bucketing (no D2H sync) followed by per-expert FC1/FC2 GEMV tiles that
- * load each expert's weights once, then a per-token reduce over the k routing
- * slots. Same geometry constraints as hip_qmoe_amd_decode_fused_supported().
- *
- *   latent [num_tokens, latent_size] -> bucket -> per-expert fc1 -> relu2
- *   -> per-expert fc2 (weighted, pair layout) -> reduce -> acc [num_tokens, latent]
- */
-HIP_KERNEL_API int hip_qmoe_amd_prefill_grouped_fused(
-    void* stream,
-    const void* latent,
-    const void* expert_indices,
-    const void* expert_weights,
-    const void* fc1_weights,
-    const void* fc1_scales,
-    const void* fc2_weights,
-    const void* fc2_scales,
-    void* expert_counts,
-    void* expert_offsets,
-    void* sorted_token_ids,
-    void* sorted_weights,
-    void* act_scratch,
-    void* slot_scratch,
-    void* acc,
-    int64_t num_tokens,
-    int64_t num_experts,
-    int64_t latent_size,
-    int64_t moe_intermediate_size,
-    int64_t k,
-    int64_t expert_weight_bits,
-    int64_t block_size,
-    int64_t element_size_bytes);
-
 /* Fully device-side expert-grouped QMoE prefill via ragged WMMA.
  * packed_latent/packed_act hold expert slices back-to-back in routing order
  * (valid_rows = sum of counts). pair maps are [num_tokens*k].
@@ -2610,16 +2576,16 @@ HIP_KERNEL_API int hip_qmoe_amd_prefill_grouped_wmma(
  * needs 32-element K tiles and power-of-two quant blocks, so shapes outside
  * that must keep using the general path.
  *
- *   latent           - GPU [num_tokens, latent_size] fp16 (fc1_latent_proj output)
- *   expert_indices   - GPU [num_tokens * k] int32
- *   expert_weights   - GPU [num_tokens * k] fp16
+ *   latent           - GPU [latent_size] fp16 (fc1_latent_proj output)
+ *   expert_indices   - GPU [k] int32
+ *   expert_weights   - GPU [k] fp16
  *   fc1_weights      - GPU [num_experts, moe_intermediate_size, latent/2]
  *   fc1_scales       - GPU [num_experts, moe_intermediate_size, latent/block]
  *   fc2_weights      - GPU [num_experts, latent_size, moe_inter/2]
  *   fc2_scales       - GPU [num_experts, latent_size, moe_inter/block]
- *   act_scratch      - GPU [num_tokens * k, moe_intermediate_size] fp16 (scratch)
- *   slot_scratch     - GPU [num_tokens * k, latent_size] fp16 (scratch)
- *   acc              - GPU [num_tokens, latent_size] fp16 (output)
+ *   act_scratch      - GPU [k, moe_intermediate_size] fp16 (scratch)
+ *   slot_scratch     - GPU [k, latent_size] fp16 (scratch)
+ *   acc              - GPU [latent_size] fp16 (output)
  */
 HIP_KERNEL_API int hip_qmoe_amd_decode_fused(
     void* stream,
@@ -2633,7 +2599,6 @@ HIP_KERNEL_API int hip_qmoe_amd_decode_fused(
     void* act_scratch,
     void* slot_scratch,
     void* acc,
-    int64_t num_tokens,
     int64_t latent_size,
     int64_t moe_intermediate_size,
     int64_t k,

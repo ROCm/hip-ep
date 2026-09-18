@@ -14,7 +14,6 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
@@ -167,10 +166,6 @@ extern "C" int wrap_linear_attention(
   const int64_t beta_token_bytes = (beta_per_head ? Hkv : 1) * elem_size;
 
   int result = 0;
-  static const bool gated_prefill_chunked = []() {
-    const char *value = std::getenv("HIPDNN_EP_LA_GATED_PREFILL_CHUNKED");
-    return !value || std::atoi(value) != 0;
-  }();
 
   // Initialize present_state from past_state (or zeros) before dispatching any
   // update rule or execution path. Use a compute-stream kernel rather than
@@ -207,7 +202,7 @@ extern "C" int wrap_linear_attention(
   // handled by a chunked-parallel affine scan. This replaces ~seq_len
   // per-token launches per layer. The launcher returns 1 when it declines an
   // unsupported config; we then fall back to the per-token loop below.
-  if (((update_rule == kUpdateRuleGated && gated_prefill_chunked) ||
+  if ((update_rule == kUpdateRuleGated ||
        update_rule == kUpdateRuleGatedDelta) &&
       seq_len > 1) {
     // The chunk-parallel path needs a device scratch arena sized to this shape.
