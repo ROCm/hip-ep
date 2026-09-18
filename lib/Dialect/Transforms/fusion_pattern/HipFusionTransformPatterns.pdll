@@ -31,12 +31,19 @@
 Constraint HasSingleUseResult(op: Op);
 Constraint CanBuildInit(resultType: Type, shapeSource: Value);
 Rewrite BuildInit(resultType: Type, shapeSource: Value) -> Value;
+Constraint HasHipIntAttrEqual(op: Op, name: Attr, expected: Attr,
+                              absentValue: Attr);
+Rewrite ExtractHipIntAttr(op: Op, name: Attr, defaultValue: Attr) -> Attr;
 
 // Q/DQ quantization parameters.
 Constraint IsHipSplatScale(val: Value);
 Constraint HasExtractableQdqZeropoint(op: Op);
+Constraint IsHipQdqQuantizedWidth(op: Op, widths: Attr);
+Constraint IsHipPerColumnQuantizedWeight(dq: Op, axis: Attr,
+                                         packedInt4: Attr);
 Rewrite ExtractHipSplatScale(val: Value) -> Attr;
 Rewrite ExtractHipQdqZeropoint(op: Op, absentValue: Attr) -> Attr;
 
 #include "QAddFusion.pdll"
 #include "QMulFusion.pdll"
+#include "QMatMulFusion.pdll"

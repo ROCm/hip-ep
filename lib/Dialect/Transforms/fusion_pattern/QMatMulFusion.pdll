@@ -1,0 +1,228 @@
+//===- QMatMulFusion.pdll -------------------------------------------------===//
+//
+// HIP-to-HIP fusion of a dequantize/matmul/quantize chain into hip.qmatmul.
+//
+// Included by HipFusionTransformPatterns.pdll, which declares the native
+// helpers used below. Not compilable on its own.
+//
+// The B edge comes in three shapes that hip.qmatmul spells differently, so
+// each gets its own pattern:
+//
+//   per-tensor      scale and zero point fold into attributes
+//   per-column W4   they stay operands, `packed_int4` marks the value width
+//   per-column W8   they stay operands, no marker
+//
+// PDL's match section is a pure conjunction with no `or`, and a constraint
+// that returns a result cannot be shared by two patterns rooted at the same op
+// (the PDL module then fails to lower with "operand does not dominate this
+// use"), so the split is into independent patterns whose match sections use
+// only result-free constraints.
+//
+// All three root at the same hip.quantize_linear. The two per-column ones are
+// mutually exclusive -- a weight cannot carry both markers -- but a weight
+// that somehow satisfied per-tensor as well would be better served by the
+// folded coefficient, so the benefits order per-tensor first rather than
+// leaving that tie to pattern insertion order.
+//===----------------------------------------------------------------------===//
+
+// ===== Per-tensor B: scale and zero point fold into attributes =====
+Pattern HipQMatMul with benefit(10) {
+  // hip.dequantize_linear x2 -> hip.matmul -> hip.quantize_linear.
+  //
+  // !hip.context is operand 0 of every hip op, so binding `ctx` once ties the
+  // whole chain to a single context.
+  //
+  // The trailing ValueRange absorbs the operands past the scale: the zero
+  // point is optional, so the DPS init lands at a different index depending on
+  // whether it is present. Which is which is resolved by the native helpers
+  // through the ODS accessors.
+  let dq_a = op<hip.dequantize_linear>(ctx: Value, a: Value, a_scale: Value,
+                                       a_tail: ValueRange);
+  let dq_b = op<hip.dequantize_linear>(ctx, b: Value, b_scale: Value,
+                                       b_tail: ValueRange);
+
+  // Currently, we support A16W8 and A8W8. A16W16 requires a higher-bit-width
+  // accumulator and therefore an additional kernel implementation, so we will
+  // not add support for it for now.
+  IsHipQdqQuantizedWidth(dq_a, attr<"[8, 16]">);
+  IsHipQdqQuantizedWidth(dq_b, attr<"[8]">);
+
+  let matmul = op<hip.matmul>(ctx, dq_a.0, dq_b.0, matmul_init: Value);
+
+  let q = op<hip.quantize_linear>(ctx, matmul.0, y_scale: Value,
+                                  y_tail: ValueRange)
+      -> (y_type: Type);
+  IsHipQdqQuantizedWidth(q, attr<"[8, 16]">);
+
+  // Fusability only. Every scale must be a per-tensor splat constant and every
+  // zero point must be readable (or absent, which means zero), because this
+  // form of hip.qmatmul carries them as scalar attributes.
+  // todo: per-axis scale not support yet
+  IsHipSplatScale(a_scale);
+  IsHipSplatScale(b_scale);
+  IsHipSplatScale(y_scale);
+  HasExtractableQdqZeropoint(dq_a);
+  HasExtractableQdqZeropoint(dq_b);
+  HasExtractableQdqZeropoint(q);
+  // hip.matmul's init already carries the fused result's shape, so it is the
+  // shape source for hip.qmatmul's own init.
+  CanBuildInit(y_type, matmul_init);
+  // A second consumer of the float product would keep the dequantize/matmul
+  // chain alive beside hip.qmatmul, so the graph would compute the product
+  // twice. The dequantize results are deliberately not constrained: a shared
+  // dequantize feeding several ops still fuses, it just survives for its
+  // other users.
+  HasSingleUseResult(matmul);
+
+  rewrite q with {
+    let a_scale_attr = ExtractHipSplatScale(a_scale);
+    let b_scale_attr = ExtractHipSplatScale(b_scale);
+    let y_scale_attr = ExtractHipSplatScale(y_scale);
+    let a_zp_attr = ExtractHipQdqZeropoint(dq_a, attr<"0 : i64">);
+    let b_zp_attr = ExtractHipQdqZeropoint(dq_b, attr<"0 : i64">);
+    let y_zp_attr = ExtractHipQdqZeropoint(q, attr<"0 : i64">);
+
+    // TransposeMatMulFold folds a Transpose into the MatMul upstream, which
+    // convert-onnx-to-hip turns into these two, so carry them through.
+    let trans_a_attr =
+        ExtractHipIntAttr(matmul, attr<"\"transA\"">, attr<"0 : i64">);
+    let trans_b_attr =
+        ExtractHipIntAttr(matmul, attr<"\"transB\"">, attr<"0 : i64">);
+
+    let init = BuildInit(y_type, matmul_init);
+    let qmatmul = op<hip.qmatmul>(ctx, a, b, init) {
+      A_scale = a_scale_attr,
+      A_zero_point = a_zp_attr,
+      B_scale = b_scale_attr,
+      B_zero_point = b_zp_attr,
+      Y_scale = y_scale_attr,
+      Y_zero_point = y_zp_attr,
+      transA = trans_a_attr,
+      transB = trans_b_attr
+    } -> (y_type);
+    replace q with qmatmul;
+  };
+}
+
+// ===== Per-output-column B, packed 4-bit =====
+//
+// Unlike the per-tensor pattern, the weight scale and zero point hold one
+// value per column and arrive as external constants whose bytes are not in the
+// IR, so there is nothing to fold -- the kernel has to index them by column.
+Pattern HipQMatMulPerColumnW4 with benefit(9) {
+  let dq_a = op<hip.dequantize_linear>(ctx: Value, a: Value, a_scale: Value,
+                                       a_tail: ValueRange);
+  // Five operands pin the zero point as present, because without it the DPS
+  // init would occupy that slot and the op would be four operands wide. The
+  // per-column form passes the weight scale and zero point straight through to
+  // hip.qmatmul; `b_init` is bound only to make the arity exact.
+  let dq_b = op<hip.dequantize_linear>(ctx, b: Value, b_scales: Value,
+                                       b_zero_points: Value, b_init: Value);
+
+  IsHipQdqQuantizedWidth(dq_a, attr<"[8, 16]">);
+  IsHipPerColumnQuantizedWeight(dq_b, attr<"1 : i64">, attr<"true">);
+
+  let matmul = op<hip.matmul>(ctx, dq_a.0, dq_b.0, matmul_init: Value);
+  // B_quant_axis below names B's column axis, which transB would move.
+  HasHipIntAttrEqual(matmul, attr<"\"transB\"">, attr<"0 : i64">,
+                     attr<"0 : i64">);
+
+  let q = op<hip.quantize_linear>(ctx, matmul.0, y_scale: Value,
+                                  y_tail: ValueRange)
+      -> (y_type: Type);
+  IsHipQdqQuantizedWidth(q, attr<"[8, 16]">);
+
+  // Activation and result quantization must be per-tensor for their scales to
+  // fold into a single coefficient; the weight side is deliberately exempt.
+  IsHipSplatScale(a_scale);
+  IsHipSplatScale(y_scale);
+  HasExtractableQdqZeropoint(dq_a);
+  HasExtractableQdqZeropoint(q);
+  CanBuildInit(y_type, matmul_init);
+  HasSingleUseResult(matmul);
+
+  rewrite q with {
+    let a_scale_attr = ExtractHipSplatScale(a_scale);
+    let y_scale_attr = ExtractHipSplatScale(y_scale);
+    let a_zp_attr = ExtractHipQdqZeropoint(dq_a, attr<"0 : i64">);
+    let y_zp_attr = ExtractHipQdqZeropoint(q, attr<"0 : i64">);
+    // transA acts on the activation only, so a folded Transpose there is still
+    // fusable; transB is pinned to 0 by the constraint above.
+    let trans_a_attr =
+        ExtractHipIntAttr(matmul, attr<"\"transA\"">, attr<"0 : i64">);
+
+    let init = BuildInit(y_type, matmul_init);
+    let qmatmul = op<hip.qmatmul>(ctx, a, b, b_scales, b_zero_points, init) {
+      A_scale = a_scale_attr,
+      A_zero_point = a_zp_attr,
+      Y_scale = y_scale_attr,
+      Y_zero_point = y_zp_attr,
+      transA = trans_a_attr,
+      transB = attr<"0 : i64">,
+      B_quant_axis = attr<"1 : i64">,
+      packed_int4 = attr<"unit">
+    } -> (y_type);
+    replace q with qmatmul;
+  };
+}
+
+// ===== Per-output-column B, full-width 8-bit =====
+//
+// The W4 pattern above with the packed_int4 marker dropped on both ends;
+// everything the compiler does is otherwise identical, which is why this is a
+// copy rather than a shared helper -- the two differ only in what a PDLL
+// `op<>` literal cannot make conditional.
+//
+// The widths part ways in the kernel, not here. A 4-bit weight has its column
+// zero point subtracted while its nibble is widened, which is free and makes
+// the rowA correction vanish; an 8-bit weight cannot, because B - z_b reaches
+// +-255 and would not fit the dot4 operand, so it keeps the raw weight and
+// pays for the per-column zero point in the epilogue instead. Both stay on
+// dot4. b_bits, which the lowering derives from `packed_int4`, is what tells
+// the runtime which one it is.
+Pattern HipQMatMulPerColumnW8 with benefit(9) {
+  let dq_a = op<hip.dequantize_linear>(ctx: Value, a: Value, a_scale: Value,
+                                       a_tail: ValueRange);
+  let dq_b = op<hip.dequantize_linear>(ctx, b: Value, b_scales: Value,
+                                       b_zero_points: Value, b_init: Value);
+
+  IsHipQdqQuantizedWidth(dq_a, attr<"[8, 16]">);
+  IsHipPerColumnQuantizedWeight(dq_b, attr<"1 : i64">, attr<"false">);
+
+  let matmul = op<hip.matmul>(ctx, dq_a.0, dq_b.0, matmul_init: Value);
+  HasHipIntAttrEqual(matmul, attr<"\"transB\"">, attr<"0 : i64">,
+                     attr<"0 : i64">);
+
+  let q = op<hip.quantize_linear>(ctx, matmul.0, y_scale: Value,
+                                  y_tail: ValueRange)
+      -> (y_type: Type);
+  IsHipQdqQuantizedWidth(q, attr<"[8, 16]">);
+
+  IsHipSplatScale(a_scale);
+  IsHipSplatScale(y_scale);
+  HasExtractableQdqZeropoint(dq_a);
+  HasExtractableQdqZeropoint(q);
+  CanBuildInit(y_type, matmul_init);
+  HasSingleUseResult(matmul);
+
+  rewrite q with {
+    let a_scale_attr = ExtractHipSplatScale(a_scale);
+    let y_scale_attr = ExtractHipSplatScale(y_scale);
+    let a_zp_attr = ExtractHipQdqZeropoint(dq_a, attr<"0 : i64">);
+    let y_zp_attr = ExtractHipQdqZeropoint(q, attr<"0 : i64">);
+    let trans_a_attr =
+        ExtractHipIntAttr(matmul, attr<"\"transA\"">, attr<"0 : i64">);
+
+    let init = BuildInit(y_type, matmul_init);
+    let qmatmul = op<hip.qmatmul>(ctx, a, b, b_scales, b_zero_points, init) {
+      A_scale = a_scale_attr,
+      A_zero_point = a_zp_attr,
+      Y_scale = y_scale_attr,
+      Y_zero_point = y_zp_attr,
+      transA = trans_a_attr,
+      transB = attr<"0 : i64">,
+      B_quant_axis = attr<"1 : i64">
+    } -> (y_type);
+    replace q with qmatmul;
+  };
+}

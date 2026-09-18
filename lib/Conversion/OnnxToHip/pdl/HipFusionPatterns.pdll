@@ -42,7 +42,7 @@ Rewrite ExtractAttrInt64(op: Op, name: Attr, defaultValue: Attr) -> Attr;
 Rewrite ExtractAttrF32(op: Op, name: Attr, defaultValue: Attr) -> Attr;
 Rewrite CreateQuantizedSiso(dq: Op, siso: Op, q: Op) -> Value;
 
-#include "QDQMatMulFusion.pdll"
+// #include "QDQMatMulFusion.pdll"
 #include "QDQGemmFusion.pdll"
 #include "QDQConvFusion.pdll"
 #include "QDQSisoFusion.pdll"

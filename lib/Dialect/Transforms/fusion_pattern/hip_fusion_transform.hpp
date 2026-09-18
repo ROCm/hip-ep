@@ -13,10 +13,9 @@
 //
 // The helpers come in two groups:
 //
-//   * op-agnostic helpers (`hasSingleUseResult`, `buildInit`) that any
-//     pattern can reuse;
+//   * op-agnostic helpers that any pattern can reuse;
 //   * readers for a specific op family, currently the Q/DQ quantization
-//     parameters that QAddFusion.pdll needs.
+//     parameters.
 //
 // Adding a pattern that needs a new native helper means adding it below,
 // registering it in `registerNativeHelpers`, and declaring it in
@@ -36,6 +35,7 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Sequence.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/MemoryBufferRef.h"
@@ -127,6 +127,22 @@ inline std::optional<int64_t> tryHipQdqZeropoint(mlir::Operation *op,
                               : raw.getSExtValue();
 }
 
+/// op's `name` attribute as a signed int64, absentValue when it is missing,
+/// nullopt when it is present but not a 64-bit integer
+inline std::optional<int64_t>
+tryHipIntAttr(mlir::Operation *op, llvm::StringRef name, int64_t defaultValue) {
+  if (!op)
+    return std::nullopt;
+  auto attr = op->getAttrOfType<mlir::IntegerAttr>(name);
+  if (!attr)
+    return defaultValue;
+  // Every hip op attribute read this way is declared I64Attr, so a different
+  // width means the name does not refer to the attribute the caller meant.
+  if (!attr.getType().isInteger(64))
+    return std::nullopt;
+  return attr.getValue().getSExtValue();
+}
+
 //===----------------------------------------------------------------------===//
 // Match constraints
 //===----------------------------------------------------------------------===//
@@ -191,6 +207,112 @@ hasExtractableQdqZeropoint(mlir::PatternRewriter &, mlir::PDLResultList &,
       tryHipQdqZeropoint(op, /*absentValue=*/0).has_value());
 }
 
+/// op is a Q/DQ whose quantized side has one of the element widths listed in
+/// the `widths` array attribute
+inline mlir::LogicalResult
+isHipQdqQuantizedWidth(mlir::PatternRewriter &, mlir::PDLResultList &,
+                       llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 2)
+    return mlir::failure();
+  auto widths = mlir::dyn_cast_or_null<mlir::ArrayAttr>(
+      args[1].dyn_cast<mlir::Attribute>());
+  auto intType =
+      getQdqQuantizedElementType(args[0].dyn_cast<mlir::Operation *>());
+  if (!widths || !intType)
+    return mlir::failure();
+  // A width the kernel does not implement must leave the unfused chain in
+  // place rather than fuse into a kernel that would reject it at runtime.
+  return mlir::success(llvm::any_of(widths, [&](mlir::Attribute width) {
+    auto widthAttr = mlir::dyn_cast<mlir::IntegerAttr>(width);
+    return widthAttr &&
+           widthAttr.getInt() == static_cast<int64_t>(intType.getWidth());
+  }));
+}
+
+/// dq is a hip.dequantize_linear applying one f32 scale and one zero point per
+/// slice along `axis` of a statically shaped rank-2 8-bit storage weight, with
+/// packed_int4 set exactly when `packedInt4` is true
+inline mlir::LogicalResult
+isHipPerColumnQuantizedWeight(mlir::PatternRewriter &, mlir::PDLResultList &,
+                              llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 3)
+    return mlir::failure();
+  auto dq = mlir::dyn_cast_or_null<mlir::hip::DequantizeLinearOp>(
+      args[0].dyn_cast<mlir::Operation *>());
+  auto axisAttr = mlir::dyn_cast_or_null<mlir::IntegerAttr>(
+      args[1].dyn_cast<mlir::Attribute>());
+  auto packedAttr = mlir::dyn_cast_or_null<mlir::BoolAttr>(
+      args[2].dyn_cast<mlir::Attribute>());
+  if (!dq || !axisAttr || !packedAttr)
+    return mlir::failure();
+
+  // A PDLL `op<>` literal cannot make an attribute conditional, so the two
+  // storage widths need one pattern each and each must reject the other's
+  // weight. The element type cannot tell them apart -- a packed 4-bit operand
+  // keeps 8-bit storage and its logical element count -- so the marker
+  // convert-onnx-to-hip carried over from constant lowering is what decides.
+  if (dq.getPackedInt4() != packedAttr.getValue())
+    return mlir::failure();
+
+  // The per-column form has no way to express an absent zero point.
+  mlir::Value zeroPoints = dq.getZeroPoint();
+  if (!zeroPoints)
+    return mlir::failure();
+
+  // block_size > 0 subdivides each slice, a second and finer granularity that
+  // one scale per slice cannot represent.
+  if (dq.getBlockSize() != 0)
+    return mlir::failure();
+
+  auto weightType =
+      mlir::dyn_cast<mlir::RankedTensorType>(dq.getInput().getType());
+  if (!weightType || !weightType.hasStaticShape() ||
+      weightType.getRank() != 2 || !weightType.getElementType().isInteger(8))
+    return mlir::failure();
+
+  int64_t axis = dq.getAxis();
+  if (axis < 0)
+    axis += weightType.getRank();
+  if (axis != axisAttr.getInt())
+    return mlir::failure();
+  int64_t slices = weightType.getDimSize(axis);
+
+  auto scaleType =
+      mlir::dyn_cast<mlir::RankedTensorType>(dq.getScale().getType());
+  if (!scaleType || scaleType.getRank() != 1 ||
+      scaleType.getDimSize(0) != slices || !scaleType.getElementType().isF32())
+    return mlir::failure();
+
+  // ONNX guarantees zero_point.dtype == x.dtype, so the zero point carries the
+  // weight's element type and its value width. That is what lets one
+  // packed_int4 flag describe both operands.
+  auto zpType = mlir::dyn_cast<mlir::RankedTensorType>(zeroPoints.getType());
+  return mlir::success(zpType && zpType.getRank() == 1 &&
+                       zpType.getDimSize(0) == slices &&
+                       zpType.getElementType() ==
+                           weightType.getElementType());
+}
+
+/// op's `name` attribute equals expected, an absent one being absentValue
+inline mlir::LogicalResult
+hasHipIntAttrEqual(mlir::PatternRewriter &, mlir::PDLResultList &,
+                   llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 4)
+    return mlir::failure();
+  auto *op = args[0].dyn_cast<mlir::Operation *>();
+  auto nameAttr = mlir::dyn_cast_or_null<mlir::StringAttr>(
+      args[1].dyn_cast<mlir::Attribute>());
+  auto expected = mlir::dyn_cast_or_null<mlir::IntegerAttr>(
+      args[2].dyn_cast<mlir::Attribute>());
+  auto absentValue = mlir::dyn_cast_or_null<mlir::IntegerAttr>(
+      args[3].dyn_cast<mlir::Attribute>());
+  if (!op || !nameAttr || !expected || !absentValue)
+    return mlir::failure();
+  std::optional<int64_t> value =
+      tryHipIntAttr(op, nameAttr.getValue(), absentValue.getInt());
+  return mlir::success(value && *value == expected.getInt());
+}
+
 //===----------------------------------------------------------------------===//
 // Rewrite helpers
 //===----------------------------------------------------------------------===//
@@ -217,6 +339,32 @@ inline mlir::LogicalResult buildInit(mlir::PatternRewriter &rewriter,
                         rewriter, loc, initType.getShape(),
                         initType.getElementType(), dynSizes)
                         .getResult());
+  return mlir::success();
+}
+
+/// op's `name` attribute as a signless i64 attribute, defaultValue when absent
+inline mlir::LogicalResult
+extractHipIntAttr(mlir::PatternRewriter &rewriter, mlir::PDLResultList &results,
+                  llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 3)
+    return mlir::failure();
+  auto *op = args[0].dyn_cast<mlir::Operation *>();
+  auto nameAttr = mlir::dyn_cast_or_null<mlir::StringAttr>(
+      args[1].dyn_cast<mlir::Attribute>());
+  auto defaultValue = mlir::dyn_cast_or_null<mlir::IntegerAttr>(
+      args[2].dyn_cast<mlir::Attribute>());
+  if (!op || !nameAttr || !defaultValue)
+    return mlir::failure();
+  // No companion constraint: the attributes read here are declared
+  // DefaultValuedAttr<I64Attr>, so ODS has already pinned the width and an
+  // absent one only means the op is carrying its default. The fallback keeps
+  // this total, because a native rewrite that declines still has to push a
+  // result or the PDL bytecode asserts.
+  std::optional<int64_t> value =
+      tryHipIntAttr(op, nameAttr.getValue(), defaultValue.getInt());
+  // Signless, because it feeds a hip op attribute declared as I64Attr.
+  results.push_back(
+      rewriter.getI64IntegerAttr(value.value_or(defaultValue.getInt())));
   return mlir::success();
 }
 
@@ -263,9 +411,16 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
                                          hasSingleUseResult);
   pdlPatterns.registerConstraintFunction("CanBuildInit", canBuildInit);
   pdlPatterns.registerRewriteFunction("BuildInit", buildInit);
+  pdlPatterns.registerConstraintFunction("HasHipIntAttrEqual",
+                                         hasHipIntAttrEqual);
+  pdlPatterns.registerRewriteFunction("ExtractHipIntAttr", extractHipIntAttr);
   pdlPatterns.registerConstraintFunction("IsHipSplatScale", isHipSplatScale);
   pdlPatterns.registerConstraintFunction("HasExtractableQdqZeropoint",
                                          hasExtractableQdqZeropoint);
+  pdlPatterns.registerConstraintFunction("IsHipQdqQuantizedWidth",
+                                         isHipQdqQuantizedWidth);
+  pdlPatterns.registerConstraintFunction("IsHipPerColumnQuantizedWeight",
+                                         isHipPerColumnQuantizedWeight);
   pdlPatterns.registerRewriteFunction("ExtractHipSplatScale",
                                       extractHipSplatScale);
   pdlPatterns.registerRewriteFunction("ExtractHipQdqZeropoint",
