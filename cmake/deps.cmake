@@ -18,6 +18,39 @@ foreach(_dep IN LISTS _HIPDNN_DEPS_LIST)
   set(DEP_HASH_${_dep_name} "${_dep}")  # remaining column = hash (may be empty)
 endforeach()
 
+# Local patch applied to the fetched rocmlirTriton checkout so its in-tree
+# LLVM build is skipped when this project already provides LLVM/MLIR (see the
+# ROCMLIR_EXTERNAL_LLVM path in rocmlirTriton's cmake/triton.cmake). Temporary
+# until the change is upstreamed and the rocmlirtriton pin is bumped.
+#
+# We do NOT use FetchContent's PATCH_COMMAND: its populate sub-build re-runs the
+# patch step on every reconfigure (not just on first clone), and `git apply` is
+# not idempotent, so the second configure fails with "patch does not apply".
+# Instead we apply the patch ourselves via this helper right after populate,
+# reverse-checking first so a re-run on an already-patched tree is a no-op.
+set(_rocmlirtriton_patch
+    "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-use-external-LLVM.patch")
+get_filename_component(_rocmlirtriton_patch "${_rocmlirtriton_patch}" ABSOLUTE)
+
+function(_apply_rocmlirtriton_patch src_dir)
+  find_package(Git QUIET REQUIRED)
+  # Already applied? A clean reverse-check means the patch is present.
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" apply --reverse --check "${_rocmlirtriton_patch}"
+    WORKING_DIRECTORY "${src_dir}"
+    RESULT_VARIABLE _rc OUTPUT_QUIET ERROR_QUIET)
+  if(_rc EQUAL 0)
+    return()
+  endif()
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" apply "${_rocmlirtriton_patch}"
+    WORKING_DIRECTORY "${src_dir}"
+    RESULT_VARIABLE _rc)
+  if(NOT _rc EQUAL 0)
+    message(FATAL_ERROR "Failed to apply ${_rocmlirtriton_patch} in ${src_dir}")
+  endif()
+endfunction()
+
 # ===========================================================================
 # Toolchain deps, resolved first so the EP section below and the top-level
 # CMakeLists.txt reuse the same targets. find_package wins when a prefix is
@@ -167,7 +200,23 @@ else()
   # external dependency. Kept identical to the CI LLVM build so the prefix that
   # CI caches (find_package path) and this fallback produce equivalent toolsets.
   set(LLVM_ENABLE_PROJECTS "clang;mlir;lld" CACHE STRING "" FORCE)
-  set(LLVM_TARGETS_TO_BUILD "X86" CACHE STRING "" FORCE)
+  # rocMLIR/Triton needs the AMDGPU backend and matching assertions. When
+  # ENABLE_ROCMLIRTRITON is on, the single in-tree LLVM must be a superset that
+  # satisfies both hip-ep and rocmlirTriton (which is added as a subdirectory
+  # later and reuses these targets instead of building its own LLVM).
+  if(ENABLE_ROCMLIRTRITON)
+    set(LLVM_TARGETS_TO_BUILD "X86;AMDGPU" CACHE STRING "" FORCE)
+    set(LLVM_ENABLE_ASSERTIONS ON CACHE BOOL "" FORCE)
+    # rocMLIR's Rock libraries link Triton targets and get registered into
+    # MLIR's MLIRTargets install-export set; Triton targets are not in any
+    # export set, so install(EXPORT MLIRTargets) errors at generate time.
+    # Toolchain-only install disables MLIR's export machinery (this embedded
+    # LLVM is consumed from the build tree, never installed), matching what
+    # rocmlirTriton's own in-tree build sets.
+    set(LLVM_INSTALL_TOOLCHAIN_ONLY ON CACHE BOOL "" FORCE)
+  else()
+    set(LLVM_TARGETS_TO_BUILD "X86" CACHE STRING "" FORCE)
+  endif()
   set(LLVM_ENABLE_RTTI ON CACHE BOOL "" FORCE)
   set(LLVM_ENABLE_ZLIB OFF CACHE BOOL "" FORCE)
   set(LLVM_ENABLE_ZSTD OFF CACHE BOOL "" FORCE)
@@ -195,10 +244,14 @@ else()
   FetchContent_Declare(rocmlirtriton
     GIT_REPOSITORY ${DEP_URL_rocmlirtriton}
     GIT_TAG ${DEP_HASH_rocmlirtriton}
-    GIT_SHALLOW TRUE
+    # GIT_SHALLOW cannot check out a non-tip pinned commit; the rocmlirtriton
+    # pin is an ancestor of develop, not its current tip, so a full fetch is
+    # required or git reports "reference is not a tree".
+    GIT_SHALLOW FALSE
     SOURCE_SUBDIR external
     EXCLUDE_FROM_ALL)
   FetchContent_MakeAvailable(rocmlirtriton)
+  _apply_rocmlirtriton_patch("${rocmlirtriton_SOURCE_DIR}")
   FetchContent_Declare(llvm-project
     SOURCE_DIR "${rocmlirtriton_SOURCE_DIR}/external/llvm-project"
     SOURCE_SUBDIR llvm
@@ -271,6 +324,42 @@ else()
     "${llvm-project_BINARY_DIR}/tools/mlir/include"
     "${llvm-project_SOURCE_DIR}/lld/include"
     "${llvm-project_BINARY_DIR}/tools/lld/include")
+endif()
+
+# ===========================================================================
+# rocmlirTriton (rocMLIR/Triton) in-tree targets. Only when ENABLE_ROCMLIRTRITON
+# is on. rocmlirTriton reuses the LLVM/MLIR resolved above (its cmake/triton.cmake
+# detects the already-defined MLIRSupport target and skips building its own
+# LLVM), so it must be configured after LLVM is resolved. Its own triton.cmake
+# sets up the MLIR CMake module path and includes (TableGen/AddMLIR/AddLLVM),
+# so it does not need the top-level module setup that runs later.
+#
+# The from-source LLVM path above already populated the checkout; the
+# find_package path did not, so populate it here with the SAME populate-only
+# declaration (SOURCE_SUBDIR external, so MakeAvailable clones/patches but does
+# not configure rocMLIR/Triton). Either way, add_subdirectory then configures
+# the rocMLIR/Triton targets as a separate step -- decoupling population from
+# configuration keeps the FetchContent declaration identical across configures
+# so the patch step never re-runs.
+# ===========================================================================
+if(ENABLE_ROCMLIRTRITON)
+  # rocmlirTriton packages libRockCompiler as a single fat archive.
+  set(BUILD_FAT_LIBROCKCOMPILER ON CACHE BOOL "" FORCE)
+  if(NOT DEFINED rocmlirtriton_SOURCE_DIR)
+    FetchContent_Declare(rocmlirtriton
+      GIT_REPOSITORY ${DEP_URL_rocmlirtriton}
+      GIT_TAG ${DEP_HASH_rocmlirtriton}
+      # Full fetch: the pin is a non-tip commit (a shallow clone cannot check
+      # it out). SOURCE_SUBDIR external keeps this populate-only, identical to
+      # the from-source LLVM declaration above.
+      GIT_SHALLOW FALSE
+      SOURCE_SUBDIR external
+      EXCLUDE_FROM_ALL)
+    FetchContent_MakeAvailable(rocmlirtriton)
+    _apply_rocmlirtriton_patch("${rocmlirtriton_SOURCE_DIR}")
+  endif()
+  add_subdirectory("${rocmlirtriton_SOURCE_DIR}"
+                   "${CMAKE_BINARY_DIR}/rocmlirTriton" EXCLUDE_FROM_ALL)
 endif()
 
 # ===========================================================================
