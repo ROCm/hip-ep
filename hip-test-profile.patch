@@ -1,0 +1,23 @@
+diff --git a/tools/hip-test/hip-test.cpp b/tools/hip-test/hip-test.cpp
+index c7e49b03..33affa74 100644
+--- a/tools/hip-test/hip-test.cpp
++++ b/tools/hip-test/hip-test.cpp
+@@ -435,6 +435,8 @@ int main(int argc, char **argv) {
+           hipdnn::abi::kSetOutputAllocator);
+   auto cleanup_func =
+       artifact->get_method<int, void *>(hipdnn::abi::kInferenceCleanup);
++  auto flush_op_profile_func =
++      artifact->get_method<void, void *>(hipdnn::abi::kRuntimeFlushOpProfile);
+   auto get_metadata_func = artifact->get_method<const char *>(
+       hipdnn::abi::kInferenceGetMetadataJson);
+ 
+@@ -573,6 +575,9 @@ int main(int argc, char **argv) {
+       return 1;
+     }
+ 
++    if (flush_op_profile_func)
++      flush_op_profile_func(state);
++
+     if (verbose && iterations > 1)
+       std::cout << "  Iteration " << (iter + 1) << "/" << iterations << "\n";
+   }
