@@ -1132,6 +1132,59 @@ static void launchGemvConfig(
 #undef GEMV_CASE
 }
 
+// Drive `launch()` until per-iter latency plateaus at the sustained clock
+// (>=60 ms total so the still-boosted first samples are not accepted, then 3
+// consecutive iters within 2% of each other). Shared by all GEMV/decode
+// tuners below: this APU boosts cold and throttles under sustained load, so
+// every candidate must be measured at the same steady-state clock or the
+// ranking is biased by table position instead of true speed.
+template <typename LaunchFn>
+static void settleClock(hipEvent_t ev0, hipEvent_t ev1, hipStream_t stream,
+                        LaunchFn&& launch) {
+    float prev = 1e30f, cur = 0.0f, total = 0.0f;
+    int stable = 0;
+    for (int i = 0; i < 200 && stable < 3 && total < 200.0f; i++) {
+        hipEventRecord(ev0, stream);
+        launch();
+        hipEventRecord(ev1, stream);
+        hipEventSynchronize(ev1);
+        hipEventElapsedTime(&cur, ev0, ev1);
+        if (total >= 60.0f && cur <= prev * 1.02f) stable++;
+        else                                       stable = 0;
+        prev = cur;
+        total += cur;
+    }
+}
+
+// Time one config: `warmup` untimed launches, then the min (peak) of `iters`
+// timed launches -- a config is judged by its least-throttled sample, not an
+// average that folds in throttled ones. Sub-`floor_ms` configs get extra
+// iterations up to `floor_iters`: hipEventElapsedTime's own timer noise is
+// comparable to the signal at that scale, so a small-iters min alone is not
+// trustworthy there. A reading <= 0 is not a real duration (Windows HIP event
+// timer noise at sub-0.1ms scale can yield this); it must never win the min.
+template <typename LaunchFn>
+static float timeConfigPeak(hipEvent_t ev0, hipEvent_t ev1, hipStream_t stream,
+                            int warmup, int iters, int floor_iters, float floor_ms,
+                            LaunchFn&& launch) {
+    for (int w = 0; w < warmup; w++) launch();
+
+    float best = 1e30f;
+    int iter_count = 0;
+    while (iter_count < iters ||
+           (best < floor_ms && iter_count < floor_iters)) {
+        hipEventRecord(ev0, stream);
+        launch();
+        hipEventRecord(ev1, stream);
+        hipEventSynchronize(ev1);
+        float ms = 0.0f;
+        hipEventElapsedTime(&ms, ev0, ev1);
+        if (ms > 0.0f && ms < best) best = ms;
+        iter_count++;
+    }
+    return best;
+}
+
 static int tuneGemvConfig(
     hipStream_t stream,
     const __half* A, const uint8_t* B,
@@ -1147,31 +1200,29 @@ static int tuneGemvConfig(
 
     float best_ms = 1e30f;
     int   best_id = 8;
-    constexpr int WARMUP = 1;
+    constexpr int WARMUP = 3;
     constexpr int ITERS  = 5;
+    constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
+
+    settleClock(ev0, ev1, stream, [&]{
+        launchGemvConfig(best_id, stream, A, B, sc, zp, bi, out,
+                         M, N, K, batch, bs, col_major);
+    });
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
-        for (int w = 0; w < WARMUP; w++)
+        float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
+                                            kFloorIters, 0.1f, [&]{
             launchGemvConfig(cid, stream, A, B, sc, zp, bi, out,
                              M, N, K, batch, bs, col_major);
-
-        hipEventRecord(ev0, stream);
-        for (int i = 0; i < ITERS; i++)
-            launchGemvConfig(cid, stream, A, B, sc, zp, bi, out,
-                             M, N, K, batch, bs, col_major);
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-
-        float ms = 0.0f;
-        hipEventElapsedTime(&ms, ev0, ev1);
+        });
 
         MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   config[%2d] threads=%3d tile_n=%d : %.4f ms\n",
             cid, kGemvConfigs[cid].threads, kGemvConfigs[cid].tile_n,
-            ms / ITERS);
+            cfg_best_ms);
 
-        if (ms < best_ms) {
-            best_ms = ms;
+        if (cfg_best_ms < best_ms) {
+            best_ms = cfg_best_ms;
             best_id = cid;
         }
     }
@@ -1184,7 +1235,7 @@ static int tuneGemvConfig(
         "best config[%d] threads=%d tile_n=%d (%.4f ms/iter)\n",
         (long long)M, (long long)N, (long long)K, (long long)bs, col_major,
         best_id, kGemvConfigs[best_id].threads,
-        kGemvConfigs[best_id].tile_n, best_ms / ITERS);
+        kGemvConfigs[best_id].tile_n, best_ms);
 
     return best_id;
 }
@@ -1222,37 +1273,72 @@ namespace matmul_lut = hipdnn_ep::matmul_nbits_autotune;
  *                      autotune sweep only on a miss.
  *   online           - bypass the LUT and always run the in-kernel sweep (the
  *                      behaviour that predates the table), for A/B comparison.
- * Both paths are compiled in; this only picks which one a process takes. Read
- * once and latched: the tuners sit on the dispatch path, and getenv per call
- * would serialize decode through the CRT environment lock. */
-static bool matmulNbitsLutLookupEnabled() {
-    static const bool lookup = [] {
-        std::string raw;   // cross-platform env read (_dupenv_s / getenv)
+ * Both paths are compiled in; this only picks which one a process takes.
+ *
+ * Precedence, as in gqa_autotune.cpp's chooseMode():
+ *   HIPDNN_MATMUL_AUTOTUNE_MODE > matmul_autotune_mode provider option > lookup
+ * A lever naming neither mode is dropped, so a typo in the environment variable
+ * does not hide the provider option.
+ *
+ * Process-wide and latched on the first read, where GQA keeps a per-session
+ * policy: the caches this gates (gemv_cache, dp4a_cache, wmma_cache) are
+ * process-wide, so a second session choosing the other mode would read the
+ * winners the first one measured anyway. Latching also keeps the environment
+ * read off the dispatch path, where it would serialize decode through the CRT
+ * environment lock. */
+
+// Honours one lever, reporting a value that names neither mode.
+static bool matmulNbitsModeLever(const char* value, const char* origin,
+                                 bool& lookup) {
+    std::string mode;
+    for (const char* p = value ? value : ""; *p; p++)
+        if (*p > ' ')
+            mode.push_back(*p >= 'A' && *p <= 'Z' ? char(*p - 'A' + 'a') : *p);
+    if (mode == "online") { lookup = false; return true; }
+    if (mode == "lookup") { lookup = true;  return true; }
+    if (!mode.empty())
+        fprintf(stderr,
+                "[custom_kernels] unrecognised %s=\"%s\" (expected \"lookup\" "
+                "or \"online\"); ignored\n",
+                origin, value);
+    return false;
+}
+
+static bool matmulNbitsChooseMode(const char* provider_mode) {
 #ifdef _WIN32
-        char* v = nullptr;
-        size_t len = 0;
-        if (_dupenv_s(&v, &len, "HIPDNN_MATMUL_AUTOTUNE_MODE") == 0 && v) {
-            raw = v;
-            free(v);
-        }
+    // Win32 rather than the CRT: a static-CRT (/MT) build of this library has
+    // its own environment copy, blind to what the host process set.
+    char buf[32];
+    const unsigned long n = GetEnvironmentVariableA(
+        "HIPDNN_MATMUL_AUTOTUNE_MODE", buf, sizeof(buf));
+    const char* env = (n > 0 && n < sizeof(buf)) ? buf : nullptr;
 #else
-        if (const char* v = getenv("HIPDNN_MATMUL_AUTOTUNE_MODE")) raw = v;
+    const char* env = getenv("HIPDNN_MATMUL_AUTOTUNE_MODE");
 #endif
-        std::string s;
-        for (char c : raw) {
-            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') continue;
-            s.push_back(c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c);
-        }
-        if (s == "online") return false;
-        if (!s.empty() && s != "lookup")
-            fprintf(stderr,
-                    "[custom_kernels] unrecognised HIPDNN_MATMUL_AUTOTUNE_MODE="
-                    "\"%s\" (expected \"lookup\" or \"online\"); using lookup\n",
-                    raw.c_str());
-        return true;   // default, and explicit "lookup"
-    }();
+    bool lookup = true;   // build default
+    if (!matmulNbitsModeLever(env, "HIPDNN_MATMUL_AUTOTUNE_MODE", lookup))
+        matmulNbitsModeLever(provider_mode, "matmul_autotune_mode", lookup);
     return lookup;
 }
+
+static int g_matmul_autotune_lookup = -1;   // -1 until the first read latches it
+static std::mutex g_matmul_autotune_mutex;
+
+// `provider_mode` is consulted only by the call that latches; null means there
+// is no session behind it (hip-test, the sweep driver, a direct library user).
+static bool matmulNbitsMode(const char* provider_mode) {
+    std::lock_guard<std::mutex> lock(g_matmul_autotune_mutex);
+    if (g_matmul_autotune_lookup < 0)
+        g_matmul_autotune_lookup = matmulNbitsChooseMode(provider_mode) ? 1 : 0;
+    return g_matmul_autotune_lookup == 1;
+}
+
+// Session-init hook; see hip_custom_kernels.h.
+extern "C" void hip_matmul_nbits_autotune_set_mode(const char* provider_mode) {
+    (void)matmulNbitsMode(provider_mode);
+}
+
+static bool matmulNbitsLutLookupEnabled() { return matmulNbitsMode(nullptr); }
 
 static int gemvConfigFromGeometry(const matmul_lut::GemvAnswer& g) {
     for (int cid = 0; cid < kNumGemvConfigs; cid++)
@@ -1414,30 +1500,28 @@ static int tuneDp4aConfig(
     hipEventCreate(&ev1);
     float best_ms = 1e30f;
     int   best_id = 9;  // 128x1 default
-    constexpr int WARMUP = 1;
+    constexpr int WARMUP = 3;
     constexpr int ITERS  = 5;
+    constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
+
+    settleClock(ev0, ev1, stream, [&]{
+        launchDp4aConfig(best_id, stream, a_qb, a_scale, B, sc, zp, bi, out,
+                         N, K, bs);
+    });
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
-        for (int w = 0; w < WARMUP; w++)
+        float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
+                                            kFloorIters, 0.1f, [&]{
             launchDp4aConfig(cid, stream, a_qb, a_scale, B, sc, zp, bi, out,
                              N, K, bs);
-
-        hipEventRecord(ev0, stream);
-        for (int i = 0; i < ITERS; i++)
-            launchDp4aConfig(cid, stream, a_qb, a_scale, B, sc, zp, bi, out,
-                             N, K, bs);
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-
-        float ms = 0.0f;
-        hipEventElapsedTime(&ms, ev0, ev1);
+        });
 
         MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   dp4a config[%2d] threads=%3d tile_n=%d : %.4f ms\n",
             cid, kGemvConfigs[cid].threads, kGemvConfigs[cid].tile_n,
-            ms / ITERS);
+            cfg_best_ms);
 
-        if (ms < best_ms) { best_ms = ms; best_id = cid; }
+        if (cfg_best_ms < best_ms) { best_ms = cfg_best_ms; best_id = cid; }
     }
     hipEventDestroy(ev0);
     hipEventDestroy(ev1);
@@ -1447,7 +1531,7 @@ static int tuneDp4aConfig(
         "best config[%d] threads=%d tile_n=%d (%.4f ms/iter)\n",
         (long long)N, (long long)K, (long long)bs, zp ? "yes" : "no",
         best_id, kGemvConfigs[best_id].threads,
-        kGemvConfigs[best_id].tile_n, best_ms / ITERS);
+        kGemvConfigs[best_id].tile_n, best_ms);
 
     return best_id;
 }
@@ -1613,31 +1697,29 @@ static int tuneGemvConfigI8(
 
     float best_ms = 1e30f;
     int   best_id = 8; // 128 threads, TILE_N=8 -- safe default for typical N
-    constexpr int WARMUP = 1;
+    constexpr int WARMUP = 3;
     constexpr int ITERS  = 5;
+    constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
+
+    settleClock(ev0, ev1, stream, [&]{
+        launchGemvConfigI8(best_id, stream, A, B, sc, zp, bi, out,
+                           M, N, K, batch, bs);
+    });
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
-        for (int w = 0; w < WARMUP; w++)
+        float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
+                                            kFloorIters, 0.1f, [&]{
             launchGemvConfigI8(cid, stream, A, B, sc, zp, bi, out,
                                M, N, K, batch, bs);
-
-        hipEventRecord(ev0, stream);
-        for (int i = 0; i < ITERS; i++)
-            launchGemvConfigI8(cid, stream, A, B, sc, zp, bi, out,
-                               M, N, K, batch, bs);
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-
-        float ms = 0.0f;
-        hipEventElapsedTime(&ms, ev0, ev1);
+        });
 
         MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   i8 config[%2d] threads=%3d tile_n=%d : %.4f ms\n",
             cid, kGemvConfigs[cid].threads, kGemvConfigs[cid].tile_n,
-            ms / ITERS);
+            cfg_best_ms);
 
-        if (ms < best_ms) {
-            best_ms = ms;
+        if (cfg_best_ms < best_ms) {
+            best_ms = cfg_best_ms;
             best_id = cid;
         }
     }
@@ -1650,7 +1732,7 @@ static int tuneGemvConfigI8(
         "best config[%d] threads=%d tile_n=%d (%.4f ms/iter)\n",
         (long long)M, (long long)N, (long long)K, (long long)bs,
         best_id, kGemvConfigs[best_id].threads,
-        kGemvConfigs[best_id].tile_n, best_ms / ITERS);
+        kGemvConfigs[best_id].tile_n, best_ms);
 
     return best_id;
 }
@@ -2041,31 +2123,29 @@ static int tuneGemvConfigU3(
 
     float best_ms = 1e30f;
     int   best_id = 8;
-    constexpr int WARMUP = 1;
+    constexpr int WARMUP = 3;
     constexpr int ITERS  = 5;
+    constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
+
+    settleClock(ev0, ev1, stream, [&]{
+        launchGemvConfigU3(best_id, stream, A, B, sc, zp, bi, out,
+                           M, N, K, batch, bs);
+    });
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
-        for (int w = 0; w < WARMUP; w++)
+        float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
+                                            kFloorIters, 0.1f, [&]{
             launchGemvConfigU3(cid, stream, A, B, sc, zp, bi, out,
                                M, N, K, batch, bs);
-
-        hipEventRecord(ev0, stream);
-        for (int i = 0; i < ITERS; i++)
-            launchGemvConfigU3(cid, stream, A, B, sc, zp, bi, out,
-                               M, N, K, batch, bs);
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-
-        float ms = 0.0f;
-        hipEventElapsedTime(&ms, ev0, ev1);
+        });
 
         MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   u3 config[%2d] threads=%3d tile_n=%d : %.4f ms\n",
             cid, kGemvConfigs[cid].threads, kGemvConfigs[cid].tile_n,
-            ms / ITERS);
+            cfg_best_ms);
 
-        if (ms < best_ms) {
-            best_ms = ms;
+        if (cfg_best_ms < best_ms) {
+            best_ms = cfg_best_ms;
             best_id = cid;
         }
     }
@@ -2078,7 +2158,7 @@ static int tuneGemvConfigU3(
         "best config[%d] threads=%d tile_n=%d (%.4f ms/iter)\n",
         (long long)M, (long long)N, (long long)K, (long long)bs,
         best_id, kGemvConfigs[best_id].threads,
-        kGemvConfigs[best_id].tile_n, best_ms / ITERS);
+        kGemvConfigs[best_id].tile_n, best_ms);
 
     return best_id;
 }
@@ -2446,31 +2526,29 @@ static int tuneGemvConfigU2(
 
     float best_ms = 1e30f;
     int   best_id = 8;
-    constexpr int WARMUP = 1;
+    constexpr int WARMUP = 3;
     constexpr int ITERS  = 5;
+    constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
+
+    settleClock(ev0, ev1, stream, [&]{
+        launchGemvConfigU2(best_id, stream, A, B, sc, zp, bi, out,
+                           M, N, K, batch, bs);
+    });
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
-        for (int w = 0; w < WARMUP; w++)
+        float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
+                                            kFloorIters, 0.1f, [&]{
             launchGemvConfigU2(cid, stream, A, B, sc, zp, bi, out,
                                M, N, K, batch, bs);
-
-        hipEventRecord(ev0, stream);
-        for (int i = 0; i < ITERS; i++)
-            launchGemvConfigU2(cid, stream, A, B, sc, zp, bi, out,
-                               M, N, K, batch, bs);
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-
-        float ms = 0.0f;
-        hipEventElapsedTime(&ms, ev0, ev1);
+        });
 
         MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   u2 config[%2d] threads=%3d tile_n=%d : %.4f ms\n",
             cid, kGemvConfigs[cid].threads, kGemvConfigs[cid].tile_n,
-            ms / ITERS);
+            cfg_best_ms);
 
-        if (ms < best_ms) {
-            best_ms = ms;
+        if (cfg_best_ms < best_ms) {
+            best_ms = cfg_best_ms;
             best_id = cid;
         }
     }
@@ -2483,7 +2561,7 @@ static int tuneGemvConfigU2(
         "best config[%d] threads=%d tile_n=%d (%.4f ms/iter)\n",
         (long long)M, (long long)N, (long long)K, (long long)bs,
         best_id, kGemvConfigs[best_id].threads,
-        kGemvConfigs[best_id].tile_n, best_ms / ITERS);
+        kGemvConfigs[best_id].tile_n, best_ms);
 
     return best_id;
 }
@@ -6342,6 +6420,114 @@ extern "C" void hip_matmul_nbits_dequant_b_fp16(
                        N, K, group_size, num_groups_k);
 }
 
+/* -----------------------------------------------------------------------
+ * fp32 A / fp32 output cast patch (element_size_bytes==4, all bits incl. 8):
+ * device-side, vectorized float<->fp16 conversion so the existing fp16
+ * compute path (WMMA/GEMV/naive below, and the bits=8 dispatch) runs
+ * completely unchanged. Trading a persistent (cached, grow-on-demand) fp16
+ * scratch pair for zero per-kernel code duplication -- fp32 is a cold input
+ * type, so this keeps the binary small instead of templating every hot
+ * int8/int4 kernel on the element type.
+ * ----------------------------------------------------------------------- */
+
+__global__ void cast_fp32_to_fp16_kernel(
+    const float* __restrict__ src, _Float16* __restrict__ dst,
+    int64_t n, int64_t num_vec2)
+{
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < num_vec2) {
+        float2 v = reinterpret_cast<const float2*>(src)[idx];
+        reinterpret_cast<__half2*>(dst)[idx] = __floats2half2_rn(v.x, v.y);
+    }
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        for (int64_t i = num_vec2 * 2; i < n; ++i)
+            dst[i] = static_cast<_Float16>(src[i]);
+    }
+}
+
+__global__ void cast_fp16_to_fp32_kernel(
+    const _Float16* __restrict__ src, float* __restrict__ dst,
+    int64_t n, int64_t num_vec2)
+{
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < num_vec2) {
+        __half2 v = reinterpret_cast<const __half2*>(src)[idx];
+        reinterpret_cast<float2*>(dst)[idx] = __half22float2(v);
+    }
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        for (int64_t i = num_vec2 * 2; i < n; ++i)
+            dst[i] = static_cast<float>(src[i]);
+    }
+}
+
+static void launchCastFp32ToFp16(hipStream_t stream, const float* src,
+                                 _Float16* dst, int64_t n)
+{
+    int64_t num_vec2 = n / 2;
+    constexpr int THR = 256;
+    int64_t blocks = (num_vec2 + THR - 1) / THR;
+    if (blocks < 1) blocks = 1;
+    hipLaunchKernelGGL(cast_fp32_to_fp16_kernel,
+                       dim3(static_cast<unsigned>(blocks)), dim3(THR), 0, stream,
+                       src, dst, n, num_vec2);
+}
+
+static void launchCastFp16ToFp32(hipStream_t stream, const _Float16* src,
+                                 float* dst, int64_t n)
+{
+    int64_t num_vec2 = n / 2;
+    constexpr int THR = 256;
+    int64_t blocks = (num_vec2 + THR - 1) / THR;
+    if (blocks < 1) blocks = 1;
+    hipLaunchKernelGGL(cast_fp16_to_fp32_kernel,
+                       dim3(static_cast<unsigned>(blocks)), dim3(THR), 0, stream,
+                       src, dst, n, num_vec2);
+}
+
+// Flat fp32 -> fp16 cast for a MatMulNBits `scales` buffer ([N, num_groups_k],
+// n_elems = N * num_groups_k). ONNX MatMulNBits allows scales to carry either
+// fp16 or fp32 (independent of the packed-weight dtype); every fast/naive path
+// below reads `scales` as a raw `__half`/`_Float16` array, so a fp32 scales
+// buffer must be converted once up front (see
+// lib/Runtime/real/matmul_nbits.cpp's lookup_or_convert_scale_fp16, which
+// caches the converted buffer per weight pointer -- scales are model
+// constants, so this is a one-time cost per session).
+extern "C" void hip_matmul_nbits_convert_scale_fp32_to_fp16(
+    void* stream, const void* scale_fp32, void* scale_fp16_out, int64_t n_elems)
+{
+    launchCastFp32ToFp16(static_cast<hipStream_t>(stream),
+                         static_cast<const float*>(scale_fp32),
+                         static_cast<_Float16*>(scale_fp16_out), n_elems);
+}
+
+static _Float16* g_fp32cast_a_buf = nullptr;
+static size_t    g_fp32cast_a_elems = 0;
+static _Float16* ensureFp32CastABuffer(size_t elems) {
+    if (g_fp32cast_a_buf && g_fp32cast_a_elems >= elems) return g_fp32cast_a_buf;
+    if (g_fp32cast_a_buf) hipFree(g_fp32cast_a_buf);
+    g_fp32cast_a_buf = nullptr;
+    if (hipMalloc(&g_fp32cast_a_buf, elems * sizeof(_Float16)) != hipSuccess) {
+        g_fp32cast_a_elems = 0;
+        return nullptr;
+    }
+    g_fp32cast_a_elems = elems;
+    return g_fp32cast_a_buf;
+}
+
+static _Float16* g_fp32cast_c_buf = nullptr;
+static size_t    g_fp32cast_c_elems = 0;
+static _Float16* ensureFp32CastCBuffer(size_t elems) {
+    if (g_fp32cast_c_buf && g_fp32cast_c_elems >= elems) return g_fp32cast_c_buf;
+    if (g_fp32cast_c_buf) hipFree(g_fp32cast_c_buf);
+    g_fp32cast_c_buf = nullptr;
+    if (hipMalloc(&g_fp32cast_c_buf, elems * sizeof(_Float16)) != hipSuccess) {
+        g_fp32cast_c_elems = 0;
+        return nullptr;
+    }
+    g_fp32cast_c_elems = elems;
+    return g_fp32cast_c_buf;
+}
+
 extern "C" int hip_matmul_nbits(
     void* stream,
     const void* A,
@@ -6367,6 +6553,43 @@ extern "C" int hip_matmul_nbits(
   }
 
   if (M <= 0 || N <= 0 || K <= 0 || batch_count <= 0) return 0;
+
+  // All bits widths (2/3/4/8) route fp32 A/C through the shared fp16 cast
+  // scratch: cast A to fp16, run the unchanged fp16 compute path, cast the
+  // fp16 result back to fp32. bits=8 is included so the int8 dispatch below
+  // stays fp16-only (no element-type template, no code-size growth).
+  if (element_size_bytes == 4) {
+    hipStream_t cast_stream = static_cast<hipStream_t>(stream);
+    const int64_t a_elems = batch_count * M * K;
+    const int64_t c_elems = batch_count * M * N;
+
+    _Float16* a_fp16 = ensureFp32CastABuffer(static_cast<size_t>(a_elems));
+    _Float16* c_fp16 = ensureFp32CastCBuffer(static_cast<size_t>(c_elems));
+    if (!a_fp16 || !c_fp16) {
+      fprintf(stderr,
+              "[custom_kernels] hip_matmul_nbits: fp32 cast scratch alloc failed\n");
+      return -1;
+    }
+
+    launchCastFp32ToFp16(cast_stream, static_cast<const float*>(A), a_fp16, a_elems);
+
+    int rc = hip_matmul_nbits(
+        stream, a_fp16, B, scales, zero_points, bias, c_fp16,
+        M, N, K, batch_count, bits, block_size,
+        /*element_size_bytes=*/2, zp_elem_size,
+        pre_unpacked_zp_u8, pre_unpacked_zp_fp16);
+    if (rc != 0) return rc;
+
+    launchCastFp16ToFp32(cast_stream, c_fp16, static_cast<float*>(output), c_elems);
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+      fprintf(stderr,
+              "[custom_kernels] hip_matmul_nbits: fp32 cast convert launch failed: %s\n",
+              hipGetErrorString(err));
+    }
+    return static_cast<int>(err);
+  }
 
   if (element_size_bytes != 2) {
     fprintf(stderr,
@@ -6893,6 +7116,27 @@ extern "C" int hip_matmul_nbits(
   // Any cutoff is safe for partial tiles: need_bc in launchWmmaConfig selects
   // the bounds-checked variant whenever M is not a multiple of the tile.
   static constexpr int kWmmaMinM = 8;
+
+  // Defensive guard: the M>1 bits=4 asymmetric prefill paths below (WMMA, the
+  // WMMA K-pad variant for K%32!=0, and the col-major GEMV for 1<M<8) all read
+  // zero_points as FP16 via zp_for_fp16_paths. If the caller passed packed
+  // nibble zero_points (zp_elem_size==1) but no converted FP16 buffer, that
+  // pointer is the raw packed-uint8 bytes; reading it as FP16 silently yields
+  // garbage zero-points and catastrophically wrong output (this is exactly the
+  // K%32!=0 down_proj failure). Fail loudly so the caller converts first via
+  // hip_matmul_nbits_convert_zp_fp16. The 1<M<8 && K%32!=0 case is excluded: it
+  // uses the row-major uint8 GEMV and legitimately needs no FP16 zp.
+  if (bits == 4 && batch_count == 1 && zero_points && zp_elem_size == 1 &&
+      pre_unpacked_zp_fp16 == nullptr &&
+      (M >= kWmmaMinM || (M > 1 && (K % 32 == 0)))) {
+    fprintf(stderr,
+            "[custom_kernels] hip_matmul_nbits: bits=4 M>1 asymmetric prefill "
+            "(M=%lld N=%lld K=%lld) requires pre_unpacked_zp_fp16; packed-uint8 "
+            "zero_points cannot be reinterpreted as FP16. Caller must convert "
+            "via hip_matmul_nbits_convert_zp_fp16.\n",
+            (long long)M, (long long)N, (long long)K);
+    return -1;
+  }
 
   /* int4 prefill with K%32!=0 (e.g. a model whose intermediate_size is not a
    * multiple of 32, so down_proj has K=4304): the WMMA kernel requires K%32==0,

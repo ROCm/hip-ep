@@ -27,23 +27,21 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/FormatVariadic.h"
+#include "llvm/Support/MemoryBufferRef.h"
 #include "llvm/Support/raw_ostream.h"
 
-#include <filesystem>
+#include <cstddef>
 #include <limits>
 #include <map>
 #include <string>
 
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-// windows.h defines min/max macros that break std::numeric_limits<>::max().
-#define NOMINMAX
-#include <windows.h>
-#else
-#include <dlfcn.h>
-#endif
-
 #define DEBUG_TYPE "convert-onnx-to-hip"
+
+// The compiled PDL fusion patterns, embedded as a byte array by CMake:
+// mlir-pdll -> mlir-opt --strip-debuginfo --emit-bytecode -> xxd.py ->
+// pdl_fused_pattern_data.cpp. Nothing is loaded from disk.
+extern "C" const unsigned char *hip_pdl_fused_pattern_data(void);
+extern "C" size_t hip_pdl_fused_pattern_size(void);
 
 namespace mlir {
 namespace hip {
@@ -59,27 +57,9 @@ namespace {
 
 constexpr llvm::StringLiteral kOrtMemoryAddressLocation = "*/_ORT_MEM_ADDR_/*";
 
-// This function is defined in a static library, so its return value depends on
-// the final link target: either the executable path or the library path.
-static std::string dll_path() {
-#ifdef _WIN32
-  HMODULE module = nullptr;
-  GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                         GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                     reinterpret_cast<LPCSTR>(&dll_path), &module);
-
-  char path[MAX_PATH];
-  DWORD len = GetModuleFileNameA(module, path, MAX_PATH);
-  return std::string(path, len);
-#else
-  Dl_info info{};
-  if (dladdr(reinterpret_cast<void *>(&dll_path), &info) == 0 ||
-      info.dli_fname == nullptr)
-    return {};
-
-  return std::string(info.dli_fname);
-#endif
-}
+// Buffer identifier for the embedded patterns. Parser diagnostics quote it, so
+// it names the build artifact the bytes came from.
+constexpr llvm::StringLiteral kPdlFusionPatternsName = "HipFusionPatterns.pdl";
 
 /// Classification of an 8-bit constant's backing byte size against its element
 /// count, returned by markPackedInt4Consumers so the caller can diagnose a
@@ -477,19 +457,32 @@ void ConvertOnnxToHipPass::runOnOperation() {
     return signalPassFailure();
   logSubpass("metadata");
 
-  const std::string pdlFusionFile =
-      (std::filesystem::path(dll_path()).parent_path() /
-       "HipFusionPatterns.pdl.mlir")
-          .string();
-  if (std::filesystem::exists(pdlFusionFile)) {
-    if (!::hip::pdl::run(module, pdlFusionFile)) {
-      module.emitWarning() << "Failed to load/apply fusion PDL patterns from "
-                           << pdlFusionFile;
-    }
-  } else {
-    module.emitError() << "Fusion PDL patterns not found at " << pdlFusionFile
-                       << "; QDQ fusion is disabled";
+  // MorphiZen may import com.microsoft Q/DQ function ops as onnx.Custom.
+  // Normalize them before PDLL so the existing native-ONNX QDQ fusion patterns
+  // can match the graph.
+  {
+    mlir::RewritePatternSet customQdqPatterns(ctx);
+    populateCustomQdqCanonicalizationPatterns(customQdqPatterns, ctx);
+    if (mlir::failed(
+            mlir::applyPatternsGreedily(module, std::move(customQdqPatterns))))
+      return signalPassFailure();
+  }
+  logSubpass("custom QDQ canonicalization");
+
+  // hip::pdl::run treats an empty blob as "nothing to do", which would
+  // silently skip fusion, so an unembedded pattern set is rejected here.
+  if (hip_pdl_fused_pattern_size() == 0) {
+    module.emitError() << "PDL fusion patterns were not embedded into the "
+                          "execution provider; QDQ fusion is disabled";
     return signalPassFailure();
+  }
+  const llvm::MemoryBufferRef pdlBuffer(
+      llvm::StringRef(
+          reinterpret_cast<const char *>(hip_pdl_fused_pattern_data()),
+          hip_pdl_fused_pattern_size()),
+      kPdlFusionPatternsName);
+  if (!::hip::pdl::run(module, pdlBuffer)) {
+    module.emitWarning() << "Failed to apply the embedded fusion PDL patterns";
   }
 
   int64_t constantOrder = 0;

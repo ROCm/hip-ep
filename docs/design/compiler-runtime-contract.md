@@ -39,14 +39,14 @@ contract; see [Generated-Code Runtime Inputs](#generated-code-runtime-inputs).
         │    __metadata_blob  (binary, for runtime)
         │    __metadata_json  (text, for inspection)
         ▼
-  ┌──────────────────────────────────────┐
-  │           model.bc (bitcode)         │
-  │  __metadata_blob       (internal)    │  ← baked into bitcode data
-  │  __metadata_json       (internal)    │  ← human-readable copy
-  │                                      │
-  │  inference_init(out_state, fs)       │  ← public API
-  │  inference_get_metadata_json()       │  ← public API
-  └──────────────────────────────────────┘
+  ┌───────────────────────────────────────────┐
+  │            model.bc (bitcode)             │
+  │  __metadata_blob       (internal)         │  ← baked into bitcode data
+  │  __metadata_json       (internal)         │  ← human-readable copy
+  │                                           │
+  │  inference_init(out_state, fs, config)    │  ← public API
+  │  inference_get_metadata_json()            │  ← public API
+  └───────────────────────────────────────────┘
         │
         │  LlvmIrJit parses bytes → llvm::orc::LLJIT codegen
         │  inference_init reads __metadata_blob directly

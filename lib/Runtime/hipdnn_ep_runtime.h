@@ -51,6 +51,17 @@ static inline const char *hipdnn_ep_tensor_op_name(int64_t op) {
   }
 }
 
+static inline const char *hipdnn_ep_qelementwise_kind_name(int64_t kind) {
+  switch (kind) {
+  case HIPDNN_EP_QELEMENTWISE_ADD:
+    return "qadd";
+  case HIPDNN_EP_QELEMENTWISE_MUL:
+    return "qmul";
+  default:
+    return "qelementwise_unknown";
+  }
+}
+
 static inline int64_t hipdnn_ep_datatype_size(int64_t data_type) {
   switch (data_type) {
   case HIPDNN_EP_DATATYPE_FLOAT:
@@ -241,9 +252,13 @@ void *hipdnn_ep_alloc_output(RuntimeState *state, int64_t out_idx,
 //   fs:            morphizen::FileSystem* (void* for C ABI) - must not be null
 //   metadata_blob: FlatBuffers binary blob (HipModelMetaInfo) baked into DLL
 //   blob_size:     Size of metadata_blob in bytes
+//   config:        hipdnn_ep_init_config* (hip/init_config_abi.h) carrying the
+//                  session's provider options, or null. Kept const void* here
+//                  so ordinary runtime TUs do not pull that ABI in.
 // Return codes: 0=success, 1=alloc/read error, 2-11=GPU/runtime init error
 int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
-                                 const void *metadata_blob, size_t blob_size);
+                                 const void *metadata_blob, size_t blob_size,
+                                 const void *config);
 
 // Cleanup runtime state (destroys handles, frees memory)
 // Best-effort cleanup - continues even if individual operations fail
@@ -356,6 +371,20 @@ int hipdnn_ep_state_ensure_qmoe_amd_host_scratch(RuntimeState *state,
 void *hipdnn_ep_state_get_conv_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
                                         size_t needed_size);
+
+// Per-session scratch for wrap_qlpnormalization intermediate tensors and
+// scalar parameters. A single contiguous device allocation is shared by all
+// instances on the session stream, grows on demand, and never shrinks.
+void *hipdnn_ep_state_get_qlpnormalization_scratch(RuntimeState *state);
+int hipdnn_ep_state_ensure_qlpnormalization_scratch(RuntimeState *state,
+                                                    size_t needed_size);
+
+// Per-session scratch for wrap_qsigmoid: one f32 workspace plus device
+// scalars for the Q/DQ kernels. Same grow-on-demand, never-shrink policy
+// as conv_scratch; lazily allocated on first call, freed in cleanup.
+void *hipdnn_ep_state_get_qsigmoid_scratch(RuntimeState *state);
+int hipdnn_ep_state_ensure_qsigmoid_scratch(RuntimeState *state,
+                                            size_t needed_size);
 
 // Per-session scratch for the W4A8 dp4a matmul_nbits decode path
 // (hip_matmul_nbits_dp4a). One contiguous device buffer holding the quantized
@@ -596,6 +625,11 @@ int hipdnn_ep_stream_sync(RuntimeState *state);
 // HIPDNN_EP_PERF)
 void *hipdnn_ep_state_get_op_profile(RuntimeState *state);
 
+// Session-scoped copy from init config. nullptr if state/key is null or the
+// key is absent. Owned by RuntimeState; invalid after hipdnn_ep_state_cleanup.
+const char *hipdnn_ep_runtime_get_provider_option(RuntimeState *state,
+                                                  const char *key);
+
 // NOTE: the GQA GEMM descriptor cache (GqaGemmCache) formerly lived in
 // RuntimeState::gqa_gemm_cache with a hipdnn_ep_gqa_gemm_cache_destroy teardown
 // shim here. It is now per-instance: each gqa instance owns one in its GqaState
@@ -805,6 +839,22 @@ int wrap_hipblasLtMatmul(
     int64_t transA,         // 1 = swap A's last two dims before multiply
     int64_t transB);        // 1 = swap B's last two dims before multiply
 
+// RocMLIR dispatch wrapper (hip.rocmlir). Launches a pre-compiled GPU kernel
+// embedded (as an ELF/HSACO blob) in `kernel_binary` at compile time. The
+// generated IR stages the operand data pointers (inputs first, then output)
+// into `kernargs` (a contiguous array of `size` bytes = num_args *
+// sizeof(void*)) and passes the module's launch geometry from the compiled
+// perfConfig.
+//   kernel_binary : embedded GPU binary blob (module image)
+//   func_name     : NUL-terminated kernel symbol to launch
+//   block_size    : threads per block
+//   grid_size     : blocks per grid
+//   kernargs      : packed array of kernel-argument pointers
+//   size          : byte size of kernargs
+int wrap_rocmlir(RuntimeState *state, const char *kernel_binary,
+                 char *func_name, int64_t block_size, int64_t grid_size,
+                 void *kernargs, size_t size);
+
 // GroupQueryAttention operation wrapper (Full MS spec)
 // Called by generated IR for onnx.Custom(GroupQueryAttention) lowering
 // GQA runtime wrapper following the complete Microsoft ONNX Runtime
@@ -941,12 +991,111 @@ int wrap_qelementwise(RuntimeState *state, void *lhs, void *rhs, void *output,
 //
 //   Y = saturate(round(M_scale * (acc - B_zp*rowA - A_zp*colB + K*A_zp*B_zp))
 //                + Y_zp)
+//
+// Per-column B at 4 bits admits a cheaper evaluation: subtracting the column's
+// zero point while the nibble is widened costs nothing and drops the rowA and
+// K*A_zp*B_zp terms, leaving
+//
+//   Bc[k,n] = B[k,n] - B_zero_points[n]
+//   Y[m,n]  = saturate(round(AY_ratio * B_scales[n]
+//                            * (sum_k A[m,k]*Bc[k,n]
+//                               - A_zp * sum_k Bc[k,n])) + Y_zp)
+//
+
 int wrap_qmatmul(RuntimeState *state, const void *A, const void *B, void *Y,
-                 int64_t M, int64_t N, int64_t K, int64_t batch_count,
+                 const void *B_scales, const void *B_zero_points, int64_t M,
+                 int64_t N, int64_t K, int64_t batch_count,
                  int64_t b_batch_stride, int64_t trans_a, int64_t trans_b,
                  int64_t a_data_type, int64_t b_data_type, int64_t y_data_type,
-                 float M_scale, int64_t A_zero_point, int64_t B_zero_point,
+                 int64_t b_bits, float M_scale, float AY_ratio,
+                 int64_t A_zero_point, int64_t B_zero_point,
                  int64_t Y_zero_point);
+
+// Quantized Gemm wrapper: the integer-domain form of the fused
+// DequantizeLinear x2 (or x3) -> Gemm -> QuantizeLinear chain. See
+// QGemmLowering.cpp.
+//
+//   op(A): [M, K], op(B): [K, N], Y: [M, N], all row-major. trans_a / trans_b
+//   swap the stored extents of the corresponding operand; M, N and K stay the
+//   logical ones and Y is never transposed.
+//
+// With acc[m,n] = sum_k (A[m,k] - A_zp) * (B[k,n] - B_zp[n]):
+//
+//   Y = saturate(round(M_ab * B_scales[n] * acc + M_c * (C - C_zp)) + Y_zp)
+//
+// M_ab (= alpha*s_a*s_b/s_y) and M_c (= beta*s_c/s_y) are folded by lowering,
+// so no scale is divided here. What cannot fold is a per-output-channel B:
+// B_scales / B_zero_points are then device arrays of one value per N, and
+// B_scale contributes its 1.0 identity to M_ab instead. The two are given
+// together or not at all; when both are null the per-tensor B_zero_point and
+// the already-folded B_scale apply.
+//
+// B and B_zero_points carry their LOGICAL element counts with an 8-bit element
+// type; b_bits == 4 means each byte holds two values, low nibble first, and
+// b_data_type's signedness decides how a nibble widens.
+//
+// a_data_type / y_data_type are 8- or 16-bit, for the same reason as
+// wrap_qmatmul. C is nullable; when present it is 8-, 16- or 32-bit (an ONNX
+// quantizer emits a Gemm bias as int32 at s_c = s_a * s_b) and is
+// unidirectionally broadcast to [M, N] from [c_dim0, c_dim1], the shape
+// normalized by lowering the same way wrap_gemm's is. c_data_type and the
+// c_dim pair are meaningful only when C is non-null.
+int wrap_qgemm(RuntimeState *state, const void *A, const void *B, const void *C,
+               const void *B_scales, const void *B_zero_points, void *Y,
+               int64_t M, int64_t N, int64_t K, int64_t trans_a,
+               int64_t trans_b, int64_t a_data_type, int64_t b_data_type,
+               int64_t c_data_type, int64_t y_data_type, int64_t b_bits,
+               int64_t c_dim0, int64_t c_dim1, float M_ab, float M_c,
+               int64_t A_zero_point, int64_t B_zero_point, int64_t C_zero_point,
+               int64_t Y_zero_point);
+
+// Fused quantized 1x1 convolution: Q(Conv(DQ(input), DQ(weights))) with the
+// weights never leaving their packed 4-bit form. See QConvLowering.cpp.
+//
+// The geometry is fixed by construction -- 1x1 kernel, unit stride, unit
+// dilation, no padding, no grouping -- which makes the convolution one dot
+// product per output position down the channel axis, i.e. a GEMM with
+// M = out_channels, K = in_channels, N = spatial_size. That is why no per-axis
+// extents appear here the way they do in wrap_conv: every one of them would be
+// a constant 1 or 0. `spatial_size` is the product of the output spatial dims,
+// and unit stride with no padding makes the input's identical.
+//
+// Activation quantization is per-tensor, so input_scale/zp and output_scale/zp
+// are scalars. Weight quantization is per OUTPUT CHANNEL, so weight_scales and
+// weight_zero_points are device arrays of one value each per output channel --
+// they cannot fold into scalars, and on a real model they arrive as external
+// constants whose values are not even known at compile time.
+//
+// weights and weight_zero_points carry their LOGICAL element counts with an
+// 8-bit element type; weight_bits == 4 means each byte holds two values, low
+// nibble first. weight_dtype's signedness decides how a nibble widens.
+//
+// activation_dtype: HIPDNN_EP_DATATYPE_UINT16 (input and output).
+// weight_dtype: HIPDNN_EP_DATATYPE_INT8 / UINT8 (storage of both weight
+// arrays). bias is nullable; bias_dtype is meaningful only when it is non-null
+// and is HIPDNN_EP_DATATYPE_UNSUPPORTED otherwise, meaning "no bias type".
+int wrap_qconv(RuntimeState *state, const void *input, const void *weights,
+               const void *weight_scales, const void *weight_zero_points,
+               const void *bias, void *output, int64_t batch,
+               int64_t in_channels, int64_t out_channels, int64_t spatial_size,
+               int64_t activation_dtype, int64_t weight_dtype,
+               int64_t weight_bits, int64_t bias_dtype, float input_scale,
+               int64_t input_zp, float output_scale, int64_t output_zp);
+
+// Fused Q(LpNormalization(DQ(x))) for UINT16 per-tensor QDQ, p=2, last axis.
+// Inside: dequant -> RMS (scale = 1/sqrt(N), epsilon = 0) -> quant.
+int wrap_qlpnormalization(RuntimeState *state, const void *input, void *output,
+                          int64_t num_elements, int64_t norm_num_elements,
+                          int64_t data_type, float input_scale,
+                          int64_t input_zp, float output_scale,
+                          int64_t output_zp, int64_t axis, int64_t p);
+
+// Fused quantized sigmoid: Q(sigmoid(DQ(x))) for UINT16 per-tensor QDQ.
+// Input and output scales stay separate because the activation changes
+// values, so matching Q/DQ parameters never hold on LoRA/ORC sandwiches.
+int wrap_qsigmoid(RuntimeState *state, const void *input, void *output,
+                  int64_t num_elements, int64_t data_type, float input_scale,
+                  int64_t input_zp, float output_scale, int64_t output_zp);
 
 // Element-wise Where wrapper (NumPy-style multidirectional broadcasting,
 // arbitrary rank). Computes output[i] = condition[i] ? x[i] : y[i] with
@@ -1266,7 +1415,8 @@ int wrap_matmul_nbits(
     int64_t bits,            // quantization bits (e.g. 4)
     int64_t block_size,      // quantization block size
     int64_t elem_size,       // element size in bytes
-    int64_t zp_elem_size);   // zero_points element size: 1=uint8 packed, 2=fp16
+    int64_t zp_elem_size,    // zero_points element size: 1=uint8 packed, 2=fp16
+    int64_t scale_elem_size); // scales element size in bytes: 2=fp16, 4=fp32
 
 // GatherBlockQuantized operation wrapper (com.microsoft).
 // Gather + block-wise dequantize: gather rows from `data` along

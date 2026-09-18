@@ -42,9 +42,8 @@ jobs:
       # ilammy/msvc-dev-cmd and mozilla-actions/sccache-action have no
       # Node.js 24 releases yet; allow Node.js 20 until they are updated.
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
-      # gfx1151 first: TheRock tarball selection, NATIVE default import lib, and
-      # wheel rocm index hint all take the first list entry (see cmake/deps.cmake).
-      HIP_ARCHITECTURES: "gfx1151;gfx1152;gfx1150"
+      HIP_ARCHITECTURES: "gfx11-generic;gfx1170"
+      SCCACHE_CACHE_SIZE: "200M"
 
     steps:
       # MorphiZen is vendored in-tree as a git subtree under morphizen,
@@ -157,9 +156,6 @@ jobs:
           cp "${{ runner.workspace }}/install/bin/"*.dll staging/bin/ 2>/dev/null || true
           cp "${{ runner.workspace }}/install/bin/"*.exe staging/bin/ 2>/dev/null || true
 
-          # cp fusion pattern file
-          cp "${{ runner.workspace }}/install/bin/HipFusionPatterns.pdl.mlir" staging/bin/
-
           cp "${{ runner.workspace }}/amdgpu-artifacts/bin/"* staging/bin/
 
           # Smoke: every per-arch kernel DLL must be present in staging/bin/
@@ -248,6 +244,12 @@ jobs:
           cp "$ORT_WHEEL" staging/wheels/
           cp "$OGA_WHEEL" staging/wheels/
 
+          echo "=== Binary sizes ==="
+          ls -lh staging/bin/hipgpu.dll staging/bin/custom_kernels*.dll 2>/dev/null || true
+
+          mkdir -p dll-sizes
+          python -c 'import glob,json,os; b="staging/bin"; d={}; p=os.path.join(b,"hipgpu.dll"); d.update({"hipgpu.dll": os.path.getsize(p)} if os.path.isfile(p) else {}); d.update({os.path.basename(x): os.path.getsize(x) for x in sorted(glob.glob(os.path.join(b,"custom_kernels*.dll")))}); open("dll-sizes/dll-sizes.json","w",encoding="utf-8",newline="\n").write(json.dumps(d,indent=2)+"\n"); print(open("dll-sizes/dll-sizes.json",encoding="utf-8").read())'
+
           echo "=== Staged package contents ==="
           find staging/ -type f | sort
 
@@ -256,6 +258,13 @@ jobs:
         with:
           name: gpu-test-package
           path: staging/
+          retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 14 || 3 }}
+
+      - name: Upload DLL sizes
+        uses: actions/upload-artifact@v4
+        with:
+          name: dll-sizes
+          path: dll-sizes/dll-sizes.json
           retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 14 || 3 }}
 
       - name: Stage Python wheel package

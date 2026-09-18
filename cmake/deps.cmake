@@ -55,7 +55,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     set(_therock_root "${CMAKE_BINARY_DIR}/_therock")
     if(NOT EXISTS "${_therock_root}/bin")
       if(WIN32)
-        set(_therock_windows_archs gfx1150 gfx1151 gfx1152 gfx1153)
+        set(_therock_windows_archs gfx1150 gfx1151 gfx1152 gfx1153 gfx11-generic gfx1170)
         foreach(_arch IN LISTS HIP_ARCHITECTURES)
           if(NOT _arch IN_LIST _therock_windows_archs)
             message(FATAL_ERROR
@@ -67,16 +67,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         set(_therock_base "${DEP_HASH_therock_windows}")
         set(_therock_url "${DEP_URL_therock_windows}/${_therock_base}.tar.gz")
       else()
-        set(_therock_arch "${HIP_ARCHITECTURES}")
-        if(_therock_arch MATCHES ";")
-          list(GET _therock_arch 0 _therock_arch)
-        endif()
-        if(NOT _therock_arch)
-          message(FATAL_ERROR
-            "Cannot derive the TheRock tarball: set -DHIP_ARCHITECTURES=<gfxNNNN> "
-            "(GPU arch), or provide -DTHEROCK_DIST=/path/to/therock.")
-        endif()
-        set(_therock_base "therock-dist-linux-${_therock_arch}-${DEP_HASH_therock_linux}")
+        set(_therock_base "${DEP_HASH_therock_linux}")
         set(_therock_url "${DEP_URL_therock_linux}/${_therock_base}.tar.gz")
       endif()
       set(_therock_tgz "${CMAKE_BINARY_DIR}/${_therock_base}.tar.gz")
@@ -177,6 +168,13 @@ else()
   set(LLVM_ENABLE_RTTI ON CACHE BOOL "" FORCE)
   set(LLVM_ENABLE_ZLIB OFF CACHE BOOL "" FORCE)
   set(LLVM_ENABLE_ZSTD OFF CACHE BOOL "" FORCE)
+  # LLVM auto-enables DIA once it finds the DIA SDK, and DIASupport.h then pulls
+  # atlbase.h from the ATL headers. ATL reaches cl.exe differently per generator:
+  # MSBuild puts atlmfc/include on IncludePath itself, while Ninja takes it from
+  # INCLUDE in the invoking shell -- so the same machine builds from source under
+  # the Visual Studio generator and fails under Ninja. Nothing here reads PDBs,
+  # so drop the dependency rather than constrain how the build is launched.
+  set(LLVM_ENABLE_DIA_SDK OFF CACHE BOOL "" FORCE)
   set(LLVM_INCLUDE_TESTS OFF CACHE BOOL "" FORCE)
   set(LLVM_INCLUDE_EXAMPLES OFF CACHE BOOL "" FORCE)
   set(LLVM_INCLUDE_BENCHMARKS OFF CACHE BOOL "" FORCE)

@@ -9,9 +9,12 @@ add_library(HipsrDialectTransforms STATIC
   ConvertShapeToExtentPass.cpp
   ExternalizeConstants.cpp
   HipsrPoolAllocPass.cpp
+  HipsrInlineRegionsPass.cpp
+  MainGraphAbiPass.cpp
   MaterializeInitTensorsPass.cpp
   PartitionPoolDomains.cpp
   PopulateShapeRegionPass.cpp
+  RecordGraphIOMetadataPass.cpp
   HipsrUseOutputAllocator.cpp
 )
 
@@ -29,6 +32,7 @@ target_link_libraries(HipsrDialectTransforms PUBLIC
   MLIRTransformUtils
   MLIRFuncDialect
   MLIRArithDialect
+  MLIRLLVMDialect
   MLIRMemRefDialect
   MLIRSCFDialect
   MLIRShapeDialect

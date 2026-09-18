@@ -213,8 +213,11 @@ def HipsrExternalizeConstantsPass
     : Pass<"hipsr-externalize-constants", "mlir::ModuleOp"> {
   let summary = "Externalize hipsr.constant: stamp offset/size/index, write constants file";
   let description = [{
-    Externalizes each `hipsr.constant`: stamps `offset`/`size`/`index`.
-    With a FileSystem injected, also writes the constants file.
+    Gives each `hipsr.constant` an `index`, `offset`, and `size`.
+    When the module has constants, it sets `hip.constants_file`,
+    `hipdnn.constant_sizes`, and `hipdnn.constant_offsets`.
+    `--generate-interface` reads those attributes.
+    When a FileSystem is present, it writes the constants file.
   }];
   let options = [
     Option<"constantsFile", "constants-file", "std::string",
@@ -244,6 +247,97 @@ def HipsrPoolAllocPass : Pass<"hipsr-pool-alloc", "mlir::ModuleOp"> {
   ];
 }
 
+def HipsrInlineRegionsPass : Pass<"hipsr-inline-regions", "mlir::ModuleOp"> {
+  let summary = "Inline hipsr.pool_domain and hipsr.compute into their parents";
+  let description = [{
+    Flattens `hipsr.pool_domain` and `hipsr.compute` regions. Nested regions
+    are flattened from the inside out.
+
+    Before:
+    ```mlir
+    %r = hipsr.compute(%ctx) ins(%in) outs(%out) {
+    ^bb0(%c: !hipsr.context, %i: memref<4xf32>, %o: memref<4xf32>):
+      memref.copy %i, %o : memref<4xf32> to memref<4xf32>
+      hipsr.compute_yield %o : memref<4xf32>
+    } : memref<4xf32>
+    ```
+
+    After:
+    ```mlir
+    memref.copy %in, %out : memref<4xf32> to memref<4xf32>
+    ```
+  }];
+  let dependentDialects = [
+    "::mlir::hipsr::HipsrDialect"
+  ];
+}
+
+def RecordGraphIOMetadataPass
+    : Pass<"hipsr-record-graph-io", "mlir::ModuleOp"> {
+  let summary = "Record @main_graph input and output metadata";
+  let description = [{
+    Records each ranked input and output type as `hipdnn.*` module attributes.
+    `generate-interface` uses these attributes for runtime metadata.
+
+    Run before `convert-to-llvm`, while the function still has ranked types.
+
+    Example:
+    ```mlir
+    func.func @main_graph(!hipsr.context, memref<?x4xf16>)
+        -> memref<?x8xi8>
+    // Adds:
+    //   hipdnn.input_count = 1
+    //   hipdnn.input_shapes = [array<i64: -1, 4>]
+    //   hipdnn.input_element_sizes = array<i64: 2>
+    //   hipdnn.output_count = 1
+    //   hipdnn.output_shapes = [array<i64: -1, 8>]
+    //   hipdnn.output_element_sizes = array<i64: 1>
+    ```
+  }];
+  let dependentDialects = [
+    "::mlir::func::FuncDialect"
+  ];
+}
+
+def MainGraphAbiPass : Pass<"hipsr-main-graph-abi", "mlir::ModuleOp"> {
+  let summary = "Wrap @main_graph in the runtime's (state, inputs) ABI";
+  let description = [{
+    Renames `@main_graph` to `@main_graph_internal` and adds the
+    `(state, inputs) -> i32` wrapper that `inference_compute` calls.
+
+    `convert-to-llvm` expands each memref input into its pointers, offset,
+    sizes, and strides. The runtime instead passes an array of pointers to
+    packed memref descriptors. This pass loads each descriptor and unpacks its
+    fields for `@main_graph_internal`.
+
+    The graph allocates outputs through `hipsr.alloc_output`. The wrapper drops
+    the graph's returned descriptors and returns zero.
+
+    Before:
+    ```mlir
+    llvm.func @main_graph(%state: !llvm.ptr, %allocated: !llvm.ptr<1>,
+        %aligned: !llvm.ptr<1>, %offset: i64, %size: i64, %stride: i64)
+        -> !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>,
+                         array<1 x i64>)>
+    ```
+
+    After:
+    ```mlir
+    llvm.func @main_graph_internal(%state: !llvm.ptr, ...) -> ...
+    llvm.func @main_graph(%state: !llvm.ptr, %inputs: !llvm.ptr) -> i32 {
+      %slot = llvm.getelementptr %inputs[0] : !llvm.ptr, !llvm.ptr
+      %descriptor_ptr = llvm.load %slot : !llvm.ptr -> !llvm.ptr
+      %descriptor = llvm.load %descriptor_ptr : !llvm.ptr -> !llvm.struct<...>
+      ...
+      llvm.call @main_graph_internal(%state, ...)
+      %zero = llvm.mlir.constant(0 : i32) : i32
+      llvm.return %zero : i32
+    }
+    ```
+  }];
+  let dependentDialects = ["::mlir::LLVM::LLVMDialect"];
+}
+
 def HipsrUseOutputAllocatorPass
     : Pass<"hipsr-use-output-allocator", "mlir::func::FuncOp"> {
   let summary =
@@ -256,7 +350,7 @@ def HipsrUseOutputAllocatorPass
     deallocated or pooled.
 
     Runs after bufferization, since a shape it reads must be an index memref,
-    and before `hipsr-pool-alloc` and `hipsr-remove-preserve-shape`.
+    and before `hipsr-pool-alloc`.
 
     An allocation counts as a graph output when `func.return` returns it either
     directly or through view-like aliases. The view operations are left in

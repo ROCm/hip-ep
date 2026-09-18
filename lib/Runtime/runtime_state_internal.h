@@ -138,6 +138,21 @@ struct RuntimeState {
   void *conv_scratch;
   size_t conv_scratch_size;
 
+  // Per-session scratch for wrap_qlpnormalization. One contiguous device
+  // buffer holds the dequantized input, RMS output, normalization scale, and
+  // Q/DQ scalar parameters. Shared by all qlpnormalization instances because
+  // they execute on the same serial stream. Grows on demand, never shrinks,
+  // and is released at session teardown.
+  void *qlpnormalization_scratch;
+  size_t qlpnormalization_scratch_size;
+
+  // Per-session scratch for wrap_qsigmoid (f32 workspace + Q/DQ scalars).
+  // Same grow-on-demand / never-shrink policy as conv_scratch; lazily
+  // allocated on first call, freed in hipdnn_ep_state_cleanup. Single-buffer
+  // reuse is safe because the HIP stream is serialised.
+  void *qsigmoid_scratch;
+  size_t qsigmoid_scratch_size;
+
   // Per-session scratch for the W4A8 dp4a matmul_nbits decode path
   // (hip_matmul_nbits_dp4a). One contiguous device buffer holding the
   // per-token quantized activation (int8, K bytes, nibble-deinterleaved) plus
@@ -205,6 +220,11 @@ struct RuntimeState {
   // type lives in Kernels/hip/autotune/gqa/gqa_autotune.cpp to keep this
   // ABI-facing struct opaque.
   void *gqa_autotune_policy;
+
+  // Session-scoped EP provider options, copied out of the init config so they
+  // outlive it (std::unordered_map<std::string, std::string>*). Read through
+  // hipdnn_ep_runtime_get_provider_option.
+  void *provider_options;
 
   // Device-side error flag used by kernels to report runtime-invalid inputs.
   // 0 = no error, non-zero = error code (currently -1).
@@ -301,6 +321,16 @@ struct RuntimeState {
   // by hipdnn_ep_op_states_alloc / _set / _get in op_state.cpp.
   OpState **op_states;
   int num_op_states;
+
+  // Per-session scratch for the fp32-activation + INT8-KV GQA adapter.
+  // Appended to preserve every pre-existing RuntimeState field offset.
+  // Fused GQA kernels are fp16-only; a W4A32 export therefore casts packed
+  // QKV, RoPE tables, and the fused output through this buffer every call
+  // (no table cache yet). Grow-on-demand, never shrinks, freed in cleanup.
+  // GQA layers share the allocation safely because one HIP stream serialises
+  // their casts and fused kernels.
+  void *gqa_fp32_adapter_scratch;
+  size_t gqa_fp32_adapter_scratch_size;
 };
 
 #endif // HIPDNN_EP_RUNTIME_STATE_INTERNAL_H

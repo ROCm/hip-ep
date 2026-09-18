@@ -18,6 +18,7 @@
 // OUT = saturate(round(M * (A - z_a) * (B - z_b)) + z_out)
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../op_profile.h"
 #include "hip_custom_kernels.h"
 
 #include <cstdio>
@@ -48,6 +49,23 @@ int wrap_qelementwise(RuntimeState *state, void *lhs, void *rhs, void *output,
                       const int64_t *out_shape, int64_t out_rank,
                       int64_t data_type, float M_a, int64_t lhs_zp, float M_b,
                       int64_t rhs_zp, int64_t output_zp) {
+  // Kind-specific OP_PROFILE label so PERF rows separate qadd / qmul.
+  OP_PROFILE(
+      hipdnn_ep_qelementwise_kind_name(kind),
+      [&] {
+        char b[96];
+        int n =
+            snprintf(b, sizeof(b), "%s:", hipdnn_ep_datatype_name(data_type));
+        for (int64_t i = 0; out_shape && i < out_rank; ++i) {
+          if (n <= 0 || n >= static_cast<int>(sizeof(b)))
+            break;
+          n += snprintf(b + n, sizeof(b) - n, "%s%lld", i ? "x" : "",
+                        (long long)out_shape[i]);
+        }
+        return std::string(b);
+      },
+      state);
+
   if (!state || !lhs || !rhs || !output) {
     fprintf(stderr, "wrap_qelementwise: null tensor argument\n");
     return -1;

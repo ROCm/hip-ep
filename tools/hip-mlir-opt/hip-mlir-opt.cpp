@@ -43,6 +43,7 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Tensor/IR/TensorInferTypeOpInterfaceImpl.h"
 #include "mlir/Dialect/Tensor/Transforms/BufferizableOpInterfaceImpl.h"
+#include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 #include "mlir/Transforms/Passes.h"
@@ -86,12 +87,8 @@ int main(int argc, char **argv) {
   registry.insert<mlir::hipsr::HipsrDialect>();
   registry.insert<mlir::pdl::PDLDialect>();
   registry.insert<mlir::pdl_interp::PDLInterpDialect>();
-  mlir::hipsr::registerConvertHipsrToLLVMInterface(registry);
-  mlir::registerConvertFuncToLLVMInterface(registry);
-  mlir::registerConvertMemRefToLLVMInterface(registry);
-  mlir::arith::registerConvertArithToLLVMInterface(registry);
-  mlir::cf::registerConvertControlFlowToLLVMInterface(registry);
-  mlir::index::registerConvertIndexToLLVMInterface(registry);
+  registry.insert<mlir::ub::UBDialect>();
+  hip::compiler::registerConvertToLLVMInterfaces(registry);
   // `onnx` is claimed further down, once --onnx-dialect is parsed.
 
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);

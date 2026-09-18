@@ -15,6 +15,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/DialectResourceBlobManager.h"
 
+#include "llvm/ADT/SmallVectorExtras.h"
 #include "llvm/Support/MathExtras.h"
 
 #include <cstdint>
@@ -86,7 +87,23 @@ struct HipsrExternalizeConstantsPass
       entries.push_back(std::move(entry));
     });
 
-    // Phase 2: write the constants file, only when a FileSystem was injected
+    // Phase 2: `--generate-interface` reads these attributes.
+    if (!entries.empty()) {
+      auto sizes = llvm::map_to_vector(
+          entries, [](const hip::ConstantEntry &entry) { return entry.size; });
+      auto offsets =
+          llvm::map_to_vector(entries, [](const hip::ConstantEntry &entry) {
+            return entry.offset;
+          });
+      module->setAttr("hip.constants_file",
+                      builder.getStringAttr(constantsFile));
+      module->setAttr("hipdnn.constant_sizes",
+                      builder.getDenseI64ArrayAttr(sizes));
+      module->setAttr("hipdnn.constant_offsets",
+                      builder.getDenseI64ArrayAttr(offsets));
+    }
+
+    // Phase 3: write the constants file, only when a FileSystem was injected
     // (e.g. by the compile driver). Standalone runs (hip-mlir-opt) inject none,
     // so the pass is a pure IR transform there.
     morphizen::FileSystem *fs = nullptr;
@@ -94,9 +111,8 @@ struct HipsrExternalizeConstantsPass
       fs = dialect->getFileSystem();
     }
     if (fs && !entries.empty()) {
-      if (!hip::writeConstantsBinToFileSystem(
-              fs, constantsFile, entries,
-              llvm::alignTo(filePos, kConstantAlignment))) {
+      if (!hip::writeConstantsBinToFileSystem(fs, constantsFile, entries,
+                                              filePos)) {
         module.emitError("failed to write constants file: ") << constantsFile;
         signalPassFailure();
       }

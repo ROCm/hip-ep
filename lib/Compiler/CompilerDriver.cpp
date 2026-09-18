@@ -5,9 +5,12 @@
 
 #include "hip/Compiler/CompilerDriver.h"
 #include "hip/Compiler/PluginRegistry.h"
+#include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
+#include "hip/Dialect/Hipsr/Pipelines/Pipelines.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Pipelines.h"
 #include "hip/InitAllPasses.h"
+#include "hip/Support/DiskFileSystem.h"
 
 #include "hip/Target/LLVM/DLLLinker.h"
 #include "hip/Target/LLVM/LLVMBackend.h"
@@ -35,6 +38,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <memory>
 #include <sstream>
 
 namespace hip::compiler {
@@ -44,6 +48,15 @@ bool fileExists(const std::string &path) {
   llvm::sys::fs::file_status status;
   std::error_code EC = llvm::sys::fs::status(path, status);
   return !EC && llvm::sys::fs::exists(status);
+}
+
+bool hipsrPipelineRequested() {
+  return !hip_get_env("HIPDNN_EP_HIPSR").empty();
+}
+
+OnnxDialectKind onnxDialectKind() {
+  return hipsrPipelineRequested() ? OnnxDialectKind::Modeled
+                                  : OnnxDialectKind::Stub;
 }
 } // namespace
 
@@ -59,7 +72,7 @@ bool CompilerDriver::compile(llvm::StringRef input_mlir,
   hip::compiler::dispatchPluginRegistrationsOnce();
 
   mlir::MLIRContext context;
-  hip::compiler::loadAllDialects(context);
+  hip::compiler::loadAllDialects(context, onnxDialectKind());
   mlir::registerLLVMDialectTranslation(context);
 
   COMPILER_DEBUG_LOG("[CompilerDriver::compile] Input size: "
@@ -101,7 +114,7 @@ bool CompilerDriver::compileFromModule(
 bool CompilerDriver::validate(llvm::StringRef input_mlir,
                               std::string &error_message) {
   mlir::MLIRContext context;
-  hip::compiler::loadAllDialects(context);
+  hip::compiler::loadAllDialects(context, onnxDialectKind());
 
   auto memBuffer = llvm::MemoryBuffer::getMemBuffer(input_mlir, "", false);
   llvm::SourceMgr sourceMgr;
@@ -254,6 +267,7 @@ bool CompilerDriver::runMLIRPasses(
   // EP DLL where std::getenv cannot see host-process env vars.
   std::string customPipeline = hip_get_env("HIPDNN_EP_PIPELINE");
   const bool overridePipeline = !customPipeline.empty();
+  std::unique_ptr<mlir::hip::DiskFileSystem> fallbackFileSystem;
 
   if (overridePipeline) {
     std::string parseErr;
@@ -303,6 +317,27 @@ bool CompilerDriver::runMLIRPasses(
              "injections do NOT run. Name the plugin pass directly in the "
              "HIPDNN_EP_PIPELINE string to run it under the override.\n";
     }
+  } else if (hipsrPipelineRequested()) {
+    // hip-compiler does not call setFileSystem. Fall back to cwd so the
+    // constants file is still written.
+    morphizen::FileSystem *fs = fileSystem_;
+    if (!fs) {
+      fallbackFileSystem = std::make_unique<mlir::hip::DiskFileSystem>(".");
+      fs = fallbackFileSystem.get();
+    }
+    module.getContext()
+        ->getOrLoadDialect<mlir::hipsr::HipsrDialect>()
+        ->setFileSystem(fs);
+
+    mlir::hipsr::HipsrPipelineOptions hipsrOpts;
+    // Leave the builder's default in place when the caller named no file; an
+    // empty name would reach the FileSystem as one.
+    if (!options.constants_file.empty()) {
+      hipsrOpts.constantsFile = options.constants_file;
+    }
+    mlir::hipsr::buildHipsrPipeline(pm, hipsrOpts);
+
+    COMPILER_DEBUG_LOG("[CompilerDriver] HIPDNN_EP_HIPSR set\n");
   } else {
     mlir::hip::OnnxToHipPipelineOptions onnxToHipOpts;
     onnxToHipOpts.externalizeMinNumElements =

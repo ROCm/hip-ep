@@ -114,6 +114,7 @@ def _make_matmul_nbits_model(
     block_size: int = 32,
     accuracy_level: int = 4,
     seed: int = 42,
+    fp32: bool = False,
 ):
     """Build a MatMulNBits ONNX model with random quantized weights.
 
@@ -127,6 +128,13 @@ def _make_matmul_nbits_model(
 
     ``scale_range`` controls the uniform distribution used to generate
     per-block quantization scales -- set it to match the target projection.
+
+    ``fp32``: when True, X/Y and the scales initializer are fp32 instead of
+    fp16 (ONNX MatMulNBits allows either dtype for scales, independent of the
+    packed-weight dtype -- e.g. the PSU_MF_LORA lm_head submodel uses fp32
+    activations with fp32 scales). Regression coverage for the bug where the
+    HIP EP always read `scales` as raw fp16 regardless of its actual dtype,
+    producing NaN/Inf logits for fp32-scale models.
     """
     if bits not in (4, 8):
         raise ValueError(f"bits must be 4 or 8, got {bits}")
@@ -140,14 +148,17 @@ def _make_matmul_nbits_model(
         weight_name = "weight_Q8"
     bytes_per_block = block_size // weights_per_byte
 
+    onnx_dtype = TensorProto.FLOAT if fp32 else TensorProto.FLOAT16
+    np_dtype = np.float32 if fp32 else np.float16
+
     x = helper.make_tensor_value_info(
         "X",
-        TensorProto.FLOAT16,
+        onnx_dtype,
         [batch, seq_len, K],
     )
     y = helper.make_tensor_value_info(
         "Y",
-        TensorProto.FLOAT16,
+        onnx_dtype,
         [batch, seq_len, N],
     )
 
@@ -162,7 +173,7 @@ def _make_matmul_nbits_model(
         scale_range[0],
         scale_range[1],
         [N, n_blocks],
-    ).astype(np.float16)
+    ).astype(np_dtype)
 
     initializers = [
         numpy_helper.from_array(q_weight, name=weight_name),
@@ -209,6 +220,35 @@ class TestMatMulNBits:
 
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-2, rtol=1e-2)
+
+    @pytest.mark.parametrize("seq_len", [1, 8, 64])
+    def test_matmul_nbits_fp32_activation_fp32_scale(self, model_runner, seq_len):
+        """fp32 activation + fp32 scale (PSU_MF_LORA lm_head shape/dtype).
+
+        Regression test: ONNX MatMulNBits allows `scales` to be fp16 or fp32
+        independent of the packed-weight dtype. The HIP EP used to always
+        read `scales` as raw fp16 regardless of its declared dtype, so a
+        fp32-scale model (e.g. PSU_MF_LORA_lm_head.onnx: fp32 hidden states,
+        fp32 scales, K=2048, N=200029, bits=4, block_size=32) produced
+        NaN/Inf logits on GPU while the CPU EP was correct. Uses a smaller N
+        than the real model to keep the test fast.
+        """
+        K, N = 64, 256
+        model = _make_matmul_nbits_model(
+            1,
+            seq_len,
+            K,
+            N,
+            scale_range=(-0.01, 0.01),
+            fp32=True,
+        )
+
+        rng = np.random.default_rng(99)
+        x = rng.uniform(-1, 1, [1, seq_len, K]).astype(np.float32)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        assert np.isfinite(actual[0]).all(), "GPU EP produced NaN/Inf logits"
+        compare_outputs(actual, expected, atol=2e-2, rtol=1e-2, cos_threshold=0.999)
 
     @pytest.mark.parametrize("seq_len", SEQ_LENS)
     def test_matmul_nbits_qkv_gpt_oss_shape(self, model_runner, seq_len):

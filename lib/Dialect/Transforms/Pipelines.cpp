@@ -17,6 +17,7 @@
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Func/Transforms/Passes.h"
 #include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Pass/PassRegistry.h"
@@ -110,10 +111,9 @@ std::unique_ptr<Pass> createVerifyNoConstantCarriersPass() {
 /// (allocated in-graph at runtime via the EP's output-allocator callback).
 /// It must run before pool-allocs (slot 6); the reason is at that slot. See
 /// docs/design/output-allocator-design.md.
-static void
-buildOnnxToHipPipelineTail(OpPassManager &pm,
-                           const mlir::hip::OnnxToHipPipelineOptions &options,
-                           morphizen::FileSystem *fs) {
+void mlir::hip::buildOnnxToHipPipelineTail(
+    OpPassManager &pm, const mlir::hip::OnnxToHipPipelineOptions &options,
+    morphizen::FileSystem *fs) {
   // 1b. Refine `?` (kDynamic) dims on HIP DPS op result types using each
   //     op's `ReifyRankedShapedTypeOpInterface` impl. Placed here so the
   //     refinements propagate through bufferize and into pool / alloc
@@ -521,6 +521,14 @@ void mlir::hip::buildHipdnnPipeline(OpPassManager &pm,
   buildHipToLLVMPipeline(pm, llvmOpts);
 }
 
+void mlir::hip::buildRocMlirPipeline(
+    OpPassManager &pm, const mlir::hip::RocMlirPipelineOptions &options) {
+  pm.addPass(mlir::hip::createFuseROCMlirPass());
+  pm.addPass(func::createDuplicateFunctionEliminationPass());
+  pm.addPass(mlir::hip::createConvertHipToTosaPass());
+  pm.addPass(mlir::createCanonicalizerPass());
+}
+
 void mlir::hip::registerHipPipelines() {
   PassPipelineRegistration<OnnxToHipPipelineOptions>(
       "onnx-to-hip-pipeline",
@@ -538,4 +546,7 @@ void mlir::hip::registerHipPipelines() {
   PassPipelineRegistration<HipdnnPipelineOptions>(
       "hipdnn-pipeline", "Complete HIPDNN ONNX→HIP→LLVM→Interface pipeline",
       buildHipdnnPipeline);
+
+  PassPipelineRegistration<RocMlirPipelineOptions>(
+      "rocmlir-pipeline", "RocMLIR pipeline", buildRocMlirPipeline);
 }

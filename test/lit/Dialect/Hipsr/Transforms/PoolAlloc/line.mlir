@@ -30,7 +30,7 @@
 // CHECK-NEXT: %[[G1:.+]] = arith.muli %[[D1]], %[[C256B]] : index
 // CHECK-NEXT: %[[OFF0:.+]] = arith.constant 0 : index
 // CHECK-NEXT: %[[POOLSZ:.+]] = arith.addi %[[G0]], %[[G1]] : index
-// CHECK-NEXT: %[[POOL:.+]] = hipsr.get_pool(%{{.+}}, %[[POOLSZ]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
+// CHECK-NEXT: %[[POOL:.+]] = hipsr.get_pool(%{{.+}}, %[[POOLSZ]]) {bufferization.manual_deallocation, domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
 // CHECK-NEXT: %[[V0:.+]] = memref.view %[[POOL]][%[[OFF0]]][%[[DIM]]] : memref<?xi8, #hipsr.mem<device>> to memref<?x1024xf16, #hipsr.mem<device>>
 // CHECK-NEXT: %[[V2:.+]] = memref.view %[[POOL]][%[[OFF0]]][%[[DIM]]] : memref<?xi8, #hipsr.mem<device>> to memref<?x1024xf16, #hipsr.mem<device>>
 // CHECK-NEXT: %[[V4:.+]] = memref.view %[[POOL]][%[[OFF0]]][%[[DIM]]] : memref<?xi8, #hipsr.mem<device>> to memref<?x1024xf16, #hipsr.mem<device>>
@@ -87,7 +87,7 @@ func.func @line(%ctx: !hipsr.context, %in: memref<?x1024xf16, #hipsr.mem<device>
 // CHECK-NEXT: %[[G1:.+]] = arith.muli %[[D1]], %[[C256B]] : index
 // CHECK-NEXT: %[[OFF0:.+]] = arith.constant 0 : index
 // CHECK-NEXT: %[[POOLSZ:.+]] = arith.addi %[[G0]], %[[G1]] : index
-// CHECK-NEXT: %[[POOL:.+]] = hipsr.get_pool(%{{.+}}, %[[POOLSZ]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
+// CHECK-NEXT: %[[POOL:.+]] = hipsr.get_pool(%{{.+}}, %[[POOLSZ]]) {bufferization.manual_deallocation, domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
 // CHECK-NEXT: %[[V0:.+]] = memref.view %[[POOL]][%[[OFF0]]][] : memref<?xi8, #hipsr.mem<device>> to memref<8x1024xf16, #hipsr.mem<device>>
 // CHECK-NEXT: %[[V2:.+]] = memref.view %[[POOL]][%[[OFF0]]][] : memref<?xi8, #hipsr.mem<device>> to memref<2x1024xf16, #hipsr.mem<device>>
 // CHECK-NEXT: %[[V4:.+]] = memref.view %[[POOL]][%[[OFF0]]][] : memref<?xi8, #hipsr.mem<device>> to memref<8x1024xf16, #hipsr.mem<device>>

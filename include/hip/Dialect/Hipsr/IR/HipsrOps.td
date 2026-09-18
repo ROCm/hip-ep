@@ -10,6 +10,7 @@ include "mlir/IR/OpBase.td"
 include "mlir/Interfaces/ControlFlowInterfaces.td"
 include "mlir/Interfaces/DestinationStyleOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
+include "hip/Dialect/IR/HipOpStateInterface.td"
 include "hip/Dialect/Hipsr/IR/HipsrAttrs.td"
 include "hip/Dialect/Hipsr/IR/HipsrDialect.td"
 include "hip/Dialect/Hipsr/IR/HipsrTypes.td"
@@ -32,9 +33,18 @@ class Hipsr_Op<string mnemonic, list<Trait> traits = []> :
 class Hipsr_DpsOp<string mnemonic, list<Trait> traits = []> :
     Hipsr_Op<mnemonic, !listconcat([
         DeclareOpInterfaceMethods<DestinationStyleOpInterface,
-                                  ["getDpsInitsMutable"]>
+                                  ["getDpsInitsMutable"]>,
+        DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
       ], traits)> {
   let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
+
+  let extraClassDefinition = [{
+    void $cppClass::getEffects(
+        ::llvm::SmallVectorImpl<::mlir::SideEffects::EffectInstance<
+            ::mlir::MemoryEffects::Effect>> &effects) {
+      ::mlir::hipsr::getDpsMemoryEffects(*this, effects);
+    }
+  }];
 }
 
 include "hip/Dialect/Hipsr/IR/HipsrPlaceholderOp.td"
