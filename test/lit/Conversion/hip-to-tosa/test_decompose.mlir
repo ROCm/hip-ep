@@ -19,6 +19,9 @@
 // hip.sqrt has no TOSA sqrt; the lowering is tosa.reciprocal(tosa.rsqrt(x)).
 // rocMLIR folds that pair back to math.sqrt.
 //
+// hip.silu / hip.swish have no TOSA ops. silu is x * sigmoid(x). swish is
+// x * sigmoid(alpha * x); default alpha is 1, which is silu.
+//
 // FILE LAYOUT:
 // Everything that converts lives in the first --split-input-file chunk, so
 // it is one module and therefore also covers several ops converting in a
@@ -174,6 +177,68 @@ func.func @sqrt_outlined_kernel(%x: tensor<2x8xf16>, %init: tensor<2x8xf16>)
   return %r : tensor<2x8xf16>
 }
 
+// CHECK-LABEL: func.func @silu
+// CHECK: tosa.sigmoid
+// CHECK: tosa.mul
+// CHECK-NOT: hip.silu
+func.func @silu(%ctx: !hip.context, %x: tensor<2x8xf16>,
+                %init: tensor<2x8xf16>) -> tensor<2x8xf16>
+    attributes {rock.kernel} {
+  %r = hip.silu(%ctx) ins(%x : tensor<2x8xf16>)
+                      outs(%init : tensor<2x8xf16>) -> tensor<2x8xf16>
+  return %r : tensor<2x8xf16>
+}
+
+// CHECK-LABEL: func.func @silu_outlined_kernel
+// CHECK: tosa.sigmoid
+// CHECK: tosa.mul
+// CHECK-NOT: hip.silu
+func.func @silu_outlined_kernel(%x: tensor<2x8xf16>, %init: tensor<2x8xf16>)
+    -> tensor<2x8xf16> attributes {rock.kernel} {
+  %ctx = ub.poison : !hip.context
+  %r = hip.silu(%ctx) ins(%x : tensor<2x8xf16>)
+                      outs(%init : tensor<2x8xf16>) -> tensor<2x8xf16>
+  return %r : tensor<2x8xf16>
+}
+
+// Default alpha = 1 is silu: one sigmoid and one mul, no alpha scale.
+// CHECK-LABEL: func.func @swish_default
+// CHECK: tosa.sigmoid
+// CHECK: tosa.mul
+// CHECK-NOT: hip.swish
+func.func @swish_default(%ctx: !hip.context, %x: tensor<3x4xf32>,
+                         %init: tensor<3x4xf32>) -> tensor<3x4xf32>
+    attributes {rock.kernel} {
+  %r = hip.swish(%ctx) ins(%x : tensor<3x4xf32>)
+                       outs(%init : tensor<3x4xf32>) : tensor<3x4xf32>
+  return %r : tensor<3x4xf32>
+}
+
+// CHECK-LABEL: func.func @swish_alpha
+// CHECK: tosa.mul
+// CHECK: tosa.sigmoid
+// CHECK: tosa.mul
+// CHECK-NOT: hip.swish
+func.func @swish_alpha(%ctx: !hip.context, %x: tensor<2x3xf16>,
+                       %init: tensor<2x3xf16>) -> tensor<2x3xf16>
+    attributes {rock.kernel} {
+  %r = hip.swish(%ctx) ins(%x : tensor<2x3xf16>)
+                       outs(%init : tensor<2x3xf16>)
+                       {alpha = 5.000000e-01 : f64} : tensor<2x3xf16>
+  return %r : tensor<2x3xf16>
+}
+
+// CHECK-LABEL: func.func @swish_outlined_kernel
+// CHECK: tosa.sigmoid
+// CHECK-NOT: hip.swish
+func.func @swish_outlined_kernel(%x: tensor<3x4xf32>, %init: tensor<3x4xf32>)
+    -> tensor<3x4xf32> attributes {rock.kernel} {
+  %ctx = ub.poison : !hip.context
+  %r = hip.swish(%ctx) ins(%x : tensor<3x4xf32>)
+                       outs(%init : tensor<3x4xf32>) : tensor<3x4xf32>
+  return %r : tensor<3x4xf32>
+}
+
 // -----
 
 // Dynamic shapes give the pattern no static shape to reason about.
@@ -253,5 +318,49 @@ func.func @sqrt_integer_operand(%ctx: !hip.context, %x: tensor<4xi32>,
   // expected-error @+1 {{failed to legalize operation 'hip.sqrt'}}
   %r = hip.sqrt(%ctx) ins(%x : tensor<4xi32>)
                       outs(%init : tensor<4xi32>) : tensor<4xi32>
+  return %r : tensor<4xi32>
+}
+
+// -----
+
+func.func @silu_dynamic_shape(%ctx: !hip.context, %x: tensor<?x8xf16>,
+                               %init: tensor<?x8xf16>) -> tensor<?x8xf16>
+    attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.silu'}}
+  %r = hip.silu(%ctx) ins(%x : tensor<?x8xf16>)
+                      outs(%init : tensor<?x8xf16>) -> tensor<?x8xf16>
+  return %r : tensor<?x8xf16>
+}
+
+// -----
+
+func.func @silu_integer_operand(%ctx: !hip.context, %x: tensor<4xi32>,
+                                 %init: tensor<4xi32>) -> tensor<4xi32>
+    attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.silu'}}
+  %r = hip.silu(%ctx) ins(%x : tensor<4xi32>)
+                      outs(%init : tensor<4xi32>) -> tensor<4xi32>
+  return %r : tensor<4xi32>
+}
+
+// -----
+
+func.func @swish_dynamic_shape(%ctx: !hip.context, %x: tensor<?x8xf16>,
+                                %init: tensor<?x8xf16>) -> tensor<?x8xf16>
+    attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.swish'}}
+  %r = hip.swish(%ctx) ins(%x : tensor<?x8xf16>)
+                       outs(%init : tensor<?x8xf16>) : tensor<?x8xf16>
+  return %r : tensor<?x8xf16>
+}
+
+// -----
+
+func.func @swish_integer_operand(%ctx: !hip.context, %x: tensor<4xi32>,
+                                  %init: tensor<4xi32>) -> tensor<4xi32>
+    attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.swish'}}
+  %r = hip.swish(%ctx) ins(%x : tensor<4xi32>)
+                       outs(%init : tensor<4xi32>) : tensor<4xi32>
   return %r : tensor<4xi32>
 }
