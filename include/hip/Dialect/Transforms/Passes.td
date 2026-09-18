@@ -189,6 +189,36 @@ def ConvertHipToTosaPass : Pass<"convert-hip-to-tosa", "mlir::func::FuncOp"> {
   ];
 }
 
+def DecomposeConvTransposePass
+    : Pass<"hip-decompose-conv-transpose", "mlir::func::FuncOp"> {
+  let summary = "Rewrite hip.conv_transpose into stride-1 hip.conv residues";
+  let description = [{
+    Splits a transposed convolution into `stride` dense stride-1 forward
+    convolutions plus a strided reassembly, following MIOpen's implicit-gemm
+    backward-data v4r1 decomposition.
+
+    rocMLIR anchors kernel outlining on gemm / convolution / attention, so a
+    `hip.conv_transpose` reaching `convert-hip-to-tosa` leaves the outlined
+    region without an anchor and the backend rejects it. Emitting plain
+    `hip.conv` ops instead lets the existing `hip-fuse-rocmlir` and
+    `convert-hip-to-tosa` machinery claim the kernel unchanged, with no new
+    anchor op and no new TOSA op.
+
+    The per-residue tap selection, spatial flip, and channel swap apply only
+    to the filter, so they are constant-folded into fresh `hip.constant`s
+    rather than emitted as ops -- TOSA has no strided slice to lower a tap
+    stride to. Reassembly is one strided `tensor.insert_slice` per residue,
+    which bufferizes to a `memref.subview` plus a copy.
+
+    Restricted to the statically shaped, non-grouped, dilation-1 case with
+    `stride <= kernel` (so the residues tile the output with no holes) and a
+    compile-time filter. Anything else is left for the MIOpen path.
+  }];
+  let dependentDialects = [
+    "mlir::tensor::TensorDialect"
+  ];
+}
+
 def PromoteStridedHipOperandsPass
     : Pass<"hip-promote-strided-operands", "mlir::func::FuncOp"> {
   let summary = "Materialize identity-layout temporaries for DPS-input memrefs "
