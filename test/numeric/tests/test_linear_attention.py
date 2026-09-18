@@ -201,8 +201,10 @@ class TestLinearAttention:
     ):
         """Non-zero past state reaches every update rule in decode and prefill.
 
-        This guards the common runtime state-initialization path used before
-        the per-token kernel loop and the gated-delta chunked prefill path.
+        This guards the shared runtime state-initialization path that runs
+        before both the per-token kernel loop and the chunked prefill. dk=8 is
+        below the WMMA tile, so the delta rules stay on the per-token loop at
+        these dims and only gated enters the chunked path.
         """
         batch, qh, kvh, d_k, d_v = 1, 2, 2, 8, 8
         q_dim = qh * d_k
@@ -277,6 +279,7 @@ class TestLinearAttention:
         [
             (1, 8, 4, 4, 16, 16),
             (1, 1, 4, 4, 16, 16),
+            (1, 48, 4, 4, 16, 16),
         ],
     )
     @pytest.mark.parametrize("update_rule", ["gated", "gated_delta"])
@@ -292,6 +295,10 @@ class TestLinearAttention:
         update_rule,
     ):
         """Small-shape coverage of gated/gated_delta decode and chunked prefill.
+
+        The seq_len points are decode (1), a single partial chunk (8) and
+        several whole chunks (48), so the cross-chunk state recurrence is
+        covered rather than only the degenerate one-chunk case.
 
         Restricted to ``q_num_heads == kv_num_heads`` (no GQA-style head
         sharing) so the output-dim convention is unambiguous.  Asymmetric
