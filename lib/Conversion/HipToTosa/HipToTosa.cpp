@@ -8,6 +8,7 @@
 
 #include <llvm/ADT/Sequence.h>
 #include <llvm/ADT/SmallVector.h>
+#include <mlir/Dialect/Arith/IR/Arith.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/Tensor/IR/Tensor.h>
 #include <mlir/Dialect/Tosa/IR/TosaOps.h>
@@ -1395,6 +1396,137 @@ struct ExtractSliceConverter final
         op, resultType, adaptor.getSource(),
         createConstShape(rewriter, op.getLoc(), starts),
         createConstShape(rewriter, op.getLoc(), resultType.getShape()));
+    return success();
+  }
+};
+
+// onnx.Shape / Size / Identity / ConstantOfShape are not 1-1 TOSA ops
+// (except Identity → tosa.identity). After convert-onnx-to-hip they arrive
+// as:
+//   Identity          SSA forward, or a same-type tensor.cast
+//   Shape (static)    arith.constant dims + tensor.from_elements
+//   Size (static)     arith.constant rank-0 i64; hip.size is the dynamic path
+//   ConstantOfShape   arith.constant splat, or tensor.splat
+// Fold those residues to tosa.const / tosa.identity so a rock.kernel can
+// absorb them. Runtime shape queries (tensor.dim, dynamic hip.size) stay
+// unconverted: TOSA has no shape-of.
+bool isTosaExpressibleTensorConst(arith::ConstantOp op) {
+  auto type = dyn_cast<RankedTensorType>(op.getType());
+  return type && type.hasStaticShape() && isa<DenseElementsAttr>(op.getValue());
+}
+
+bool isTosaExpressibleFromElements(tensor::FromElementsOp op) {
+  auto type = dyn_cast<RankedTensorType>(op.getType());
+  if (!type || !type.hasStaticShape())
+    return false;
+  return llvm::all_of(op.getElements(),
+                      [](Value v) { return matchPattern(v, m_Constant()); });
+}
+
+bool isTosaExpressibleSplat(tensor::SplatOp op) {
+  auto type = dyn_cast<RankedTensorType>(op.getType());
+  if (!type || !type.hasStaticShape() || !op.getDynamicSizes().empty())
+    return false;
+  return matchPattern(op.getInput(), m_Constant());
+}
+
+Value emitTosaConst(ConversionPatternRewriter &rewriter, Location loc,
+                    RankedTensorType type, ElementsAttr values) {
+  return tosa::ConstOp::create(rewriter, loc, type, values);
+}
+
+struct TensorConstConverter final
+    : public OpConversionPattern<arith::ConstantOp> {
+  using OpConversionPattern<arith::ConstantOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(arith::ConstantOp op, OpAdaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isTosaExpressibleTensorConst(op))
+      return rewriter.notifyMatchFailure(op, "expected a static dense tensor");
+    auto type = cast<RankedTensorType>(op.getType());
+    rewriter.replaceOp(op, emitTosaConst(rewriter, op.getLoc(), type,
+                                         cast<ElementsAttr>(op.getValue())));
+    return success();
+  }
+};
+
+struct FromElementsConverter final
+    : public OpConversionPattern<tensor::FromElementsOp> {
+  using OpConversionPattern<tensor::FromElementsOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(tensor::FromElementsOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isTosaExpressibleFromElements(op))
+      return rewriter.notifyMatchFailure(
+          op, "expected a static from_elements of constants");
+    auto type = cast<RankedTensorType>(op.getType());
+    SmallVector<Attribute> elems;
+    elems.reserve(adaptor.getElements().size());
+    for (Value v : adaptor.getElements()) {
+      Attribute attr;
+      if (!matchPattern(v, m_Constant(&attr)))
+        return rewriter.notifyMatchFailure(op, "element is not a constant");
+      elems.push_back(attr);
+    }
+    rewriter.replaceOp(op, emitTosaConst(rewriter, op.getLoc(), type,
+                                         DenseElementsAttr::get(type, elems)));
+    return success();
+  }
+};
+
+struct SplatConverter final : public OpConversionPattern<tensor::SplatOp> {
+  using OpConversionPattern<tensor::SplatOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(tensor::SplatOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isTosaExpressibleSplat(op))
+      return rewriter.notifyMatchFailure(op,
+                                         "expected a static constant splat");
+    auto type = cast<RankedTensorType>(op.getType());
+    Attribute attr;
+    if (!matchPattern(adaptor.getInput(), m_Constant(&attr)))
+      return rewriter.notifyMatchFailure(op, "splat input is not a constant");
+    TypedAttr typed = dyn_cast<TypedAttr>(attr);
+    if (!typed)
+      return rewriter.notifyMatchFailure(op, "splat input is not a typed attr");
+    rewriter.replaceOp(op, emitTosaConst(rewriter, op.getLoc(), type,
+                                         DenseElementsAttr::get(type, typed)));
+    return success();
+  }
+};
+
+// hip.size is the dynamic OnnxToHip path. A static input still folds to
+// tosa.const(prod(shape)), matching SizeToConstant. Dynamic dims cannot
+// be read in TOSA.
+struct SizeConverter final : public OpConversionPattern<SizeOp> {
+  using OpConversionPattern<SizeOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(SizeOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    auto inputType = dyn_cast<RankedTensorType>(adaptor.getX().getType());
+    if (!resultType || !resultType.hasStaticShape() || !inputType ||
+        !inputType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected static ranked tensors");
+    if (resultType.getRank() != 0 || !resultType.getElementType().isInteger(64))
+      return rewriter.notifyMatchFailure(op, "result must be tensor<i64>");
+
+    int64_t n = 1;
+    for (int64_t d : inputType.getShape()) {
+      if (d < 0)
+        return rewriter.notifyMatchFailure(op, "expected a static shape");
+      n *= d;
+    }
+    auto attr = DenseElementsAttr::get(
+        resultType, rewriter.getIntegerAttr(rewriter.getI64Type(), n));
+    rewriter.replaceOp(op,
+                       emitTosaConst(rewriter, op.getLoc(), resultType, attr));
     return success();
   }
 };
@@ -2893,7 +3025,7 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         MulOp, DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
         TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, WhereOp, LeakyReluOp,
         MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp, QuantizeLinearOp,
-        DequantizeLinearOp, MatMulNBitsOp, GatherOp, RopeOp, GqaOp,
+        DequantizeLinearOp, MatMulNBitsOp, GatherOp, SizeOp, RopeOp, GqaOp,
         MultiHeadAttentionOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
@@ -2910,6 +3042,14 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         [](tensor::ExpandShapeOp op) { return !isStaticReshape(op); });
     conversion.addDynamicallyLegalOp<tensor::ExtractSliceOp>(
         [](tensor::ExtractSliceOp op) { return !isTosaExpressibleSlice(op); });
+    conversion.addDynamicallyLegalOp<arith::ConstantOp>(
+        [](arith::ConstantOp op) { return !isTosaExpressibleTensorConst(op); });
+    conversion.addDynamicallyLegalOp<tensor::FromElementsOp>(
+        [](tensor::FromElementsOp op) {
+          return !isTosaExpressibleFromElements(op);
+        });
+    conversion.addDynamicallyLegalOp<tensor::SplatOp>(
+        [](tensor::SplatOp op) { return !isTosaExpressibleSplat(op); });
 
     RewritePatternSet patterns(ctx);
     patterns.add<
@@ -2936,8 +3076,9 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         SqrtConverter, WhereConverter, LeakyReluConverter, SoftmaxConverter,
         ReduceSumConverter, ReduceMeanConverter, CastConverter,
         DequantizeLinearConverter, QuantizeLinearConverter,
-        MatMulNBitsConverter, GatherConverter, RopeConverter, GqaConverter,
-        MhaConverter>(ctx);
+        MatMulNBitsConverter, GatherConverter, SizeConverter,
+        TensorConstConverter, FromElementsConverter, SplatConverter,
+        RopeConverter, GqaConverter, MhaConverter>(ctx);
 
     if (failed(applyPartialConversion(funcOp, conversion, std::move(patterns))))
       signalPassFailure();
