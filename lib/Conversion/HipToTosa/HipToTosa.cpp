@@ -1470,9 +1470,16 @@ Value createSplatInt(ConversionPatternRewriter &rewriter, Location loc,
 // After:
 //   %f = tosa.floor %x
 //   %d = tosa.sub %x, %f
-//   %up = tosa.logical_or (tosa.greater %d, 0.5),
-//                         (tosa.logical_and (tosa.equal %d, 0.5), f is odd)
-//   %y = tosa.select %up, (tosa.add %f, 1.0), %f
+//   %up = tosa.bitwise_or (tosa.greater %d, 0.5),
+//                         (tosa.bitwise_and (tosa.equal %d, 0.5), f is odd)
+//   %y = tosa.select %up, (tosa.ceil %x), %f
+//
+// The predicates are combined with the bitwise ops rather than the logical
+// ones, which coincide on i1. rocMLIR's RockTosaToElementwise has patterns for
+// tosa.bitwise_and/_or/_xor and none for any tosa.logical_*, and it marks every
+// surviving tosa op illegal, so the logical spelling converts cleanly here and
+// then kills the kernel it was meant to enable. hip.and/or/not are spelled the
+// same way for the same reason.
 struct RoundConverter final : public OpConversionPattern<RoundOp> {
   using OpConversionPattern<RoundOp>::OpConversionPattern;
 
@@ -1490,16 +1497,19 @@ struct RoundConverter final : public OpConversionPattern<RoundOp> {
       return rewriter.notifyMatchFailure(
           op, "operand and result types must match exactly");
     // ONNX Round is float-only, so an integer here is unreachable from a valid
-    // model; the gate states the expansion's own requirement, the same way the
-    // float-only UnaryConverter instances do.
-    if (!isa<FloatType>(resultType.getElementType()))
-      return rewriter.notifyMatchFailure(op, "the expansion requires floats");
+    // model. f64 is reachable -- ONNX has a double tensor type -- but TOSA has
+    // no f64 tensor type, so the expansion would build tosa.floor on an element
+    // type TOSA cannot represent. Both are named rather than left to fail
+    // later, for the reason GemmConverter names its own f64 rejection.
+    Type elementType = resultType.getElementType();
+    if (!elementType.isF32() && !elementType.isF16() && !elementType.isBF16())
+      return op->emitError("hip.round has no TOSA spelling for element type ")
+             << elementType << ": the expansion needs f32, f16, or bf16";
 
     Location loc = op.getLoc();
     auto predType =
         RankedTensorType::get(resultType.getShape(), rewriter.getI1Type());
     Value half = createSplatFloat(rewriter, loc, resultType, 0.5);
-    Value one = createSplatFloat(rewriter, loc, resultType, 1.0);
     Value two = createSplatFloat(rewriter, loc, resultType, 2.0);
     Value shift = createZeroMulShift(rewriter, loc);
 
@@ -1514,14 +1524,22 @@ struct RoundConverter final : public OpConversionPattern<RoundOp> {
     Value rounded = tosa::MulOp::create(
         rewriter, loc, resultType,
         tosa::FloorOp::create(rewriter, loc, resultType, halved), two, shift);
-    Value isOdd = tosa::LogicalNotOp::create(
-        rewriter, loc, predType,
-        tosa::EqualOp::create(rewriter, loc, predType, rounded, floored));
+    // Halving and doubling drops exactly the low bit, so an odd floor comes
+    // back one smaller and an even one comes back unchanged. Asking which is
+    // the greater reads that off without a negation.
+    Value isOdd =
+        tosa::GreaterOp::create(rewriter, loc, predType, floored, rounded);
 
-    Value stepUp = tosa::LogicalOrOp::create(
+    Value stepUp = tosa::BitwiseOrOp::create(
         rewriter, loc, predType, above,
-        tosa::LogicalAndOp::create(rewriter, loc, predType, tie, isOdd));
-    Value next = tosa::AddOp::create(rewriter, loc, resultType, floored, one);
+        tosa::BitwiseAndOp::create(rewriter, loc, predType, tie, isOdd));
+    // The step-up value is tosa.ceil rather than floor + 1 so that a negative
+    // input rounding to zero keeps its sign. nearbyintf, which the round
+    // runtime uses, returns -0 on [-0.5, 0), and floor + 1 would return +0
+    // there. The two agree everywhere the branch is taken: it is taken only
+    // when the fraction is non-zero, and ceil is floor + 1 on every
+    // non-integral value.
+    Value next = tosa::CeilOp::create(rewriter, loc, resultType, x);
     rewriter.replaceOpWithNewOp<tosa::SelectOp>(op, resultType, stepUp, next,
                                                 floored);
     return success();
@@ -1584,10 +1602,25 @@ struct ModConverter final : public OpConversionPattern<hip::ModOp> {
         !isTosaCompatibleOperand(rhs, resultType))
       return rewriter.notifyMatchFailure(op, "operands not tosa-broadcastable");
 
+    auto predType =
+        RankedTensorType::get(resultType.getShape(), rewriter.getI1Type());
+    // Dividing the most negative value by -1 overflows, and tosa.intdiv becomes
+    // arith.divsi and then an LLVM sdiv, where that pair is undefined behaviour
+    // rather than a merely wrong value -- a later select cannot take it back.
+    // Every remainder by -1 is zero under both fmod rules, and dividing by 1
+    // instead produces exactly that (lhs - (lhs / 1) * 1), so substituting the
+    // divisor keeps the result and leaves no overflowing division behind.
+    Value minusOne = createSplatInt(rewriter, loc, resultType, -1);
+    Value divisor = tosa::SelectOp::create(
+        rewriter, loc, resultType,
+        tosa::EqualOp::create(rewriter, loc, predType, rhs, minusOne),
+        createSplatInt(rewriter, loc, resultType, 1), rhs);
+
     Value quotient =
-        tosa::IntDivOp::create(rewriter, loc, resultType, lhs, rhs);
-    Value product = tosa::MulOp::create(rewriter, loc, resultType, quotient,
-                                        rhs, createZeroMulShift(rewriter, loc));
+        tosa::IntDivOp::create(rewriter, loc, resultType, lhs, divisor);
+    Value product =
+        tosa::MulOp::create(rewriter, loc, resultType, quotient, divisor,
+                            createZeroMulShift(rewriter, loc));
     Value remainder =
         tosa::SubOp::create(rewriter, loc, resultType, lhs, product);
 
@@ -1596,17 +1629,18 @@ struct ModConverter final : public OpConversionPattern<hip::ModOp> {
       return success();
     }
 
-    auto predType =
-        RankedTensorType::get(resultType.getShape(), rewriter.getI1Type());
     Value zero = createSplatInt(rewriter, loc, resultType, 0);
-    Value signsDiffer = tosa::LogicalXorOp::create(
+    Value signsDiffer = tosa::BitwiseXorOp::create(
         rewriter, loc, predType,
         tosa::GreaterOp::create(rewriter, loc, predType, zero, remainder),
         tosa::GreaterOp::create(rewriter, loc, predType, zero, rhs));
-    Value nonZero = tosa::LogicalNotOp::create(
+    // x ^ true is !x, which is how the and/or/not lowerings spell negation for
+    // the same reason: tosa.logical_not has no downstream pattern either.
+    Value nonZero = tosa::BitwiseXorOp::create(
         rewriter, loc, predType,
-        tosa::EqualOp::create(rewriter, loc, predType, remainder, zero));
-    Value adjust = tosa::LogicalAndOp::create(rewriter, loc, predType,
+        tosa::EqualOp::create(rewriter, loc, predType, remainder, zero),
+        createSplatInt(rewriter, loc, predType, 1));
+    Value adjust = tosa::BitwiseAndOp::create(rewriter, loc, predType,
                                               signsDiffer, nonZero);
     Value shifted =
         tosa::AddOp::create(rewriter, loc, resultType, remainder, rhs);
