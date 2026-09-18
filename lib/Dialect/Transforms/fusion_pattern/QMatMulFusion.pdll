@@ -120,7 +120,8 @@ Pattern HipQMatMulPerColumnW4 with benefit(9) {
                                        b_zero_points: Value, b_init: Value);
 
   IsHipQdqQuantizedWidth(dq_a, attr<"[8, 16]">);
-  IsHipPerColumnQuantizedWeight(dq_b, attr<"1 : i64">, attr<"true">);
+  IsHipPerAxisQuantizedWeight(dq_b, attr<"2 : i64">, attr<"1 : i64">,
+                              attr<"true">);
 
   let matmul = op<hip.matmul>(ctx, dq_a.0, dq_b.0, matmul_init: Value);
   // B_quant_axis below names B's column axis, which transB would move.
@@ -187,7 +188,8 @@ Pattern HipQMatMulPerColumnW8 with benefit(9) {
                                        b_zero_points: Value, b_init: Value);
 
   IsHipQdqQuantizedWidth(dq_a, attr<"[8, 16]">);
-  IsHipPerColumnQuantizedWeight(dq_b, attr<"1 : i64">, attr<"false">);
+  IsHipPerAxisQuantizedWeight(dq_b, attr<"2 : i64">, attr<"1 : i64">,
+                              attr<"false">);
 
   let matmul = op<hip.matmul>(ctx, dq_a.0, dq_b.0, matmul_init: Value);
   HasHipIntAttrEqual(matmul, attr<"\"transB\"">, attr<"0 : i64">,

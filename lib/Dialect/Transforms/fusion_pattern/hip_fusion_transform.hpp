@@ -143,6 +143,23 @@ tryHipIntAttr(mlir::Operation *op, llvm::StringRef name, int64_t defaultValue) {
   return attr.getValue().getSExtValue();
 }
 
+/// op's `name` array attribute holds exactly `size` integers, all equal to
+/// `expected`
+inline bool hipListAttrAllEqual(mlir::Operation *op, llvm::StringRef name,
+                                int64_t size, int64_t expected) {
+  auto arrayAttr = op->getAttrOfType<mlir::ArrayAttr>(name);
+  // Unlike their ONNX counterparts these attributes are declared required on
+  // the hip op, so an absent one is a malformed op rather than a per-axis
+  // default to be filled in. The length is checked because a replacement that
+  // hard-codes the geometry is only justified for the rank it was written for.
+  if (!arrayAttr || static_cast<int64_t>(arrayAttr.size()) != size)
+    return false;
+  return llvm::all_of(arrayAttr, [&](mlir::Attribute entry) {
+    auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(entry);
+    return intAttr && intAttr.getValue().getSExtValue() == expected;
+  });
+}
+
 //===----------------------------------------------------------------------===//
 // Match constraints
 //===----------------------------------------------------------------------===//
@@ -229,10 +246,48 @@ isHipQdqQuantizedWidth(mlir::PatternRewriter &, mlir::PDLResultList &,
   }));
 }
 
+/// op is a Q/DQ whose quantized side has an unsigned element type
+inline mlir::LogicalResult
+isHipQdqUnsignedQuantized(mlir::PatternRewriter &, mlir::PDLResultList &,
+                          llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 1)
+    return mlir::failure();
+  auto intType =
+      getQdqQuantizedElementType(args[0].dyn_cast<mlir::Operation *>());
+  // Signedness selects how a stored code is widened, so it is not a detail a
+  // kernel written for one of them can absorb. Kept separate from the width
+  // check because the two are independent properties of the same operand.
+  return mlir::success(intType && intType.isUnsigned());
+}
+
+/// conv is a 1x1 window over two spatial dims with unit stride and dilation,
+/// no padding and no grouping
+inline mlir::LogicalResult
+isHipFusableQConvGeometry(mlir::PatternRewriter &, mlir::PDLResultList &,
+                          llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 1)
+    return mlir::failure();
+  auto *op = args[0].dyn_cast<mlir::Operation *>();
+  if (!op)
+    return mlir::failure();
+  // This is the only geometry that collapses to a per-position dot product
+  // down the channel axis, and the replacement restates it as hard-coded
+  // attributes, so the check has to be strict enough to justify every one of
+  // them. hip.conv resolves ONNX's per-axis defaults during conversion and
+  // carries no auto_pad, so the explicit values are the whole story.
+  std::optional<int64_t> group = tryHipIntAttr(op, "group", 1);
+  return mlir::success(
+      group && *group == 1 &&
+      hipListAttrAllEqual(op, "kernel_shape", /*size=*/2, /*expected=*/1) &&
+      hipListAttrAllEqual(op, "strides", /*size=*/2, /*expected=*/1) &&
+      hipListAttrAllEqual(op, "dilations", /*size=*/2, /*expected=*/1) &&
+      hipListAttrAllEqual(op, "pads", /*size=*/4, /*expected=*/0));
+}
+
 /// dq applies one f32 scale and one zero point per slice along `expectedAxis`
-/// of a statically shaped rank-2 8-bit storage weight
+/// of a statically shaped rank-`rank` 8-bit storage weight
 inline bool isPerSliceQuantizedWeight(mlir::hip::DequantizeLinearOp dq,
-                                      int64_t expectedAxis) {
+                                      int64_t rank, int64_t expectedAxis) {
   // The per-slice form has no way to express an absent zero point.
   mlir::Value zeroPoints = dq.getZeroPoint();
   if (!zeroPoints)
@@ -246,7 +301,7 @@ inline bool isPerSliceQuantizedWeight(mlir::hip::DequantizeLinearOp dq,
   auto weightType =
       mlir::dyn_cast<mlir::RankedTensorType>(dq.getInput().getType());
   if (!weightType || !weightType.hasStaticShape() ||
-      weightType.getRank() != 2 || !weightType.getElementType().isInteger(8))
+      weightType.getRank() != rank || !weightType.getElementType().isInteger(8))
     return false;
 
   // ONNX allows a negative axis, so normalize before comparing it against the
@@ -272,20 +327,22 @@ inline bool isPerSliceQuantizedWeight(mlir::hip::DequantizeLinearOp dq,
          zpType.getElementType() == weightType.getElementType();
 }
 
-/// dq is a hip.dequantize_linear quantizing its weight per slice along `axis`,
-/// with packed_int4 set exactly when `packedInt4` is true
+/// dq is a hip.dequantize_linear quantizing a rank-`rank` weight per slice
+/// along `axis`, with packed_int4 set exactly when `packedInt4` is true
 inline mlir::LogicalResult
-isHipPerColumnQuantizedWeight(mlir::PatternRewriter &, mlir::PDLResultList &,
-                              llvm::ArrayRef<mlir::PDLValue> args) {
-  if (args.size() != 3)
+isHipPerAxisQuantizedWeight(mlir::PatternRewriter &, mlir::PDLResultList &,
+                            llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 4)
     return mlir::failure();
   auto dq = mlir::dyn_cast_or_null<mlir::hip::DequantizeLinearOp>(
       args[0].dyn_cast<mlir::Operation *>());
-  auto axisAttr = mlir::dyn_cast_or_null<mlir::IntegerAttr>(
+  auto rankAttr = mlir::dyn_cast_or_null<mlir::IntegerAttr>(
       args[1].dyn_cast<mlir::Attribute>());
-  auto packedAttr = mlir::dyn_cast_or_null<mlir::BoolAttr>(
+  auto axisAttr = mlir::dyn_cast_or_null<mlir::IntegerAttr>(
       args[2].dyn_cast<mlir::Attribute>());
-  if (!dq || !axisAttr || !packedAttr)
+  auto packedAttr = mlir::dyn_cast_or_null<mlir::BoolAttr>(
+      args[3].dyn_cast<mlir::Attribute>());
+  if (!dq || !rankAttr || !axisAttr || !packedAttr)
     return mlir::failure();
 
   // A PDLL `op<>` literal cannot make an attribute conditional, so a fused op
@@ -296,7 +353,8 @@ isHipPerColumnQuantizedWeight(mlir::PatternRewriter &, mlir::PDLResultList &,
   // constant lowering is what decides.
   if (dq.getPackedInt4() != packedAttr.getValue())
     return mlir::failure();
-  return mlir::success(isPerSliceQuantizedWeight(dq, axisAttr.getInt()));
+  return mlir::success(
+      isPerSliceQuantizedWeight(dq, rankAttr.getInt(), axisAttr.getInt()));
 }
 
 /// dq is a hip.dequantize_linear quantizing its weight per output feature of
@@ -320,7 +378,7 @@ isHipPerChannelQuantizedWeight(mlir::PatternRewriter &, mlir::PDLResultList &,
   if (!transB)
     return mlir::failure();
   int64_t channelAxis = *transB != 0 ? 0 : 1;
-  if (!isPerSliceQuantizedWeight(dq, channelAxis))
+  if (!isPerSliceQuantizedWeight(dq, /*rank=*/2, channelAxis))
     return mlir::failure();
 
   // A lone output feature is per-tensor quantization written as a length-1
@@ -504,8 +562,12 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
                                          hasExtractableQdqZeropoint);
   pdlPatterns.registerConstraintFunction("IsHipQdqQuantizedWidth",
                                          isHipQdqQuantizedWidth);
-  pdlPatterns.registerConstraintFunction("IsHipPerColumnQuantizedWeight",
-                                         isHipPerColumnQuantizedWeight);
+  pdlPatterns.registerConstraintFunction("IsHipQdqUnsignedQuantized",
+                                         isHipQdqUnsignedQuantized);
+  pdlPatterns.registerConstraintFunction("IsHipFusableQConvGeometry",
+                                         isHipFusableQConvGeometry);
+  pdlPatterns.registerConstraintFunction("IsHipPerAxisQuantizedWeight",
+                                         isHipPerAxisQuantizedWeight);
   pdlPatterns.registerConstraintFunction("IsHipPerChannelQuantizedWeight",
                                          isHipPerChannelQuantizedWeight);
   pdlPatterns.registerRewriteFunction("ExtractHipSplatScale",

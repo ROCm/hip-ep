@@ -40,9 +40,13 @@ Rewrite ExtractHipFloatAttr(op: Op, name: Attr, defaultValue: Attr) -> Attr;
 Constraint IsHipSplatScale(val: Value);
 Constraint HasExtractableQdqZeropoint(op: Op);
 Constraint IsHipQdqQuantizedWidth(op: Op, widths: Attr);
-Constraint IsHipPerColumnQuantizedWeight(dq: Op, axis: Attr,
-                                         packedInt4: Attr);
+Constraint IsHipQdqUnsignedQuantized(op: Op);
+Constraint IsHipPerAxisQuantizedWeight(dq: Op, rank: Attr, axis: Attr,
+                                       packedInt4: Attr);
 Constraint IsHipPerChannelQuantizedWeight(dq: Op, consumer: Op);
+
+// Compute-op geometry.
+Constraint IsHipFusableQConvGeometry(conv: Op);
 Rewrite ExtractHipSplatScale(val: Value) -> Attr;
 Rewrite ExtractHipQdqZeropoint(op: Op, absentValue: Attr) -> Attr;
 Rewrite ExtractHipQdqValueBits(dq: Op) -> Attr;
@@ -51,3 +55,4 @@ Rewrite ExtractHipQdqValueBits(dq: Op) -> Attr;
 #include "QMulFusion.pdll"
 #include "QMatMulFusion.pdll"
 #include "QGemmFusion.pdll"
+#include "QConvFusion.pdll"
