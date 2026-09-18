@@ -1450,33 +1450,49 @@ __global__ void la_pf_pass3_f32(
 // beats 128 (10 windows, 193.3 MiB) by 9.6%.
 static constexpr int LA_WINDOW_CHUNKS = 32;
 
+// Which of the two chunk-parallel kernel triples a rule runs. Gated uses the
+// fp32 scan and needs no W tile; gated_delta uses the fp16 matrix-core scan.
+// The scratch layout and the launch must agree on this, so the mapping from
+// update_rule lives here and nowhere else.
+static inline bool la_rule_is_gated_only(int64_t update_rule) {
+    return update_rule == LA_RULE_GATED;
+}
+
 // Scratch layout for the chunk-parallel path. The buffer itself is owned by
 // the runtime (RuntimeState::la_scratch, grown on demand, freed on session
 // cleanup) and passed in; this kernel TU only computes the sub-buffer offsets.
 // Kept in one place so hip_linear_attention_prefill_scratch_bytes (used by the
-// wrapper to size the pool) and la_launch_parallel cannot drift apart.
+// wrapper to size the pool) and la_launch_parallel cannot drift apart. Both
+// must pass the same gated_only, or the launch declines its own arena.
 struct LaScratchLayout { size_t oU, oW, oR, oA, oS, oC, total; };
 
 static inline LaScratchLayout la_scratch_layout(int B, int seq_len, int Hkv,
-                                                int dk, int dv) {
+                                                int dk, int dv,
+                                                bool gated_only) {
     const int nchunks = (seq_len + LA_CHUNK - 1) / LA_CHUNK;
     const int win = nchunks < LA_WINDOW_CHUNKS ? nchunks : LA_WINDOW_CHUNKS;
     const int64_t ncb = (int64_t)B * Hkv * win;  // # (head,chunk) blocks / window
     auto align = [](size_t x){ return (x + 255) & ~((size_t)255); };
+    // The recurrent state tile follows the scan that writes it: fp32 for
+    // gated, fp16 for gated_delta's matrix-core scan.
+    const size_t state_elem = gated_only ? sizeof(float) : sizeof(__half);
     const size_t sz_Uloc  = (size_t)ncb * LA_CHUNK * dv * sizeof(float);
-    const size_t sz_W     = (size_t)ncb * LA_CHUNK * dk * sizeof(float);
+    // Gated is the W=0 special case, so neither its scan nor its output pass
+    // takes the W tile and pass 1 never writes it.
+    const size_t sz_W     = gated_only
+        ? 0 : (size_t)ncb * LA_CHUNK * dk * sizeof(float);
     const size_t sz_rlast = (size_t)ncb * LA_CHUNK * sizeof(float);
     const size_t sz_alast = (size_t)ncb * sizeof(float);
-    // Full dk*dv tile: the fp32 gated scan writes every element. gated_delta
-    // WMMA only fills the leading half and ignores the rest.
-    const size_t sz_S0    = (size_t)ncb * dk * dv * sizeof(float);
+    const size_t sz_S0    = (size_t)ncb * dk * dv * state_elem;
     // Cross-window carry of the recurrent state, one tile per (batch, kv head).
     // A single-window prefill hands off through `state` directly and never
     // touches the carry, so it does not pay for it.
     const size_t sz_carry = (nchunks > win)
-        ? (size_t)B * Hkv * dk * dv * sizeof(float) : 0;
+        ? (size_t)B * Hkv * dk * dv * state_elem : 0;
     LaScratchLayout L;
     L.oU = 0;
+    // A zero-sized sub-buffer leaves its offset aliasing the next one. That is
+    // safe because the path that skips the buffer never dereferences it.
     L.oW = align(L.oU + sz_Uloc);
     L.oR = align(L.oW + sz_W);
     L.oA = align(L.oR + sz_rlast);
@@ -1486,12 +1502,17 @@ static inline LaScratchLayout la_scratch_layout(int B, int seq_len, int Hkv,
     return L;
 }
 
-// Bytes of runtime scratch the chunk-parallel prefill needs for this shape.
-// Returns 0 for shapes the parallel path does not run (caller sizes nothing).
+// Bytes of runtime scratch the chunk-parallel prefill needs for this shape and
+// rule. Returns 0 for configs the parallel path does not run (caller sizes
+// nothing). The rule matters because the two kernel triples hold the recurrent
+// state in different precisions and only one of them uses a W tile.
 extern "C" HIP_KERNEL_API size_t hip_linear_attention_prefill_scratch_bytes(
-    int B, int seq_len, int Hkv, int dk, int dv) {
+    int B, int seq_len, int Hkv, int dk, int dv, int64_t update_rule) {
     if (B <= 0 || seq_len <= 1 || Hkv <= 0 || dk <= 0 || dv <= 0) return 0;
-    return la_scratch_layout(B, seq_len, Hkv, dk, dv).total;
+    if (update_rule != LA_RULE_GATED && update_rule != LA_RULE_GATED_DELTA)
+        return 0;
+    return la_scratch_layout(B, seq_len, Hkv, dk, dv,
+                             la_rule_is_gated_only(update_rule)).total;
 }
 
 template <typename T, bool GATED_ONLY>
@@ -1503,8 +1524,22 @@ static int la_launch_parallel(
 {
     const int nchunks = (seq_len + LA_CHUNK - 1) / LA_CHUNK;
 
-    const LaScratchLayout L = la_scratch_layout(B, seq_len, Hkv, dk, dv);
-    if (!scratch || scratch_bytes < L.total) return 1;  // caller under-sized it
+    const LaScratchLayout L =
+        la_scratch_layout(B, seq_len, Hkv, dk, dv, GATED_ONLY);
+    if (!scratch) return 1;  // the caller could not provide the arena
+    if (scratch_bytes < L.total) {
+        // The caller sized this arena from the same shape and rule through
+        // hip_linear_attention_prefill_scratch_bytes, so a short buffer means
+        // the two computed different layouts. Falling back keeps the results
+        // correct, but the mismatch is a bug and must not pass unnoticed.
+        fprintf(stderr,
+                "[custom_kernels] la_launch_parallel: scratch %zu < required "
+                "%zu\n",
+                scratch_bytes, L.total);
+        return 1;
+    }
+    // Only the views matching GATED_ONLY are in bounds: the layout sizes S0 and
+    // the carry for that scan's precision and gives gated no W tile.
     char* sp = (char*)scratch;
     float*  Uloc_g  = (float*)(sp + L.oU);
     float*  W_g     = (float*)(sp + L.oW);
@@ -1642,7 +1677,7 @@ extern "C" int hip_linear_attention_prefill_chunked(
 
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
 
-    const bool gated_only = update_rule == LA_RULE_GATED;
+    const bool gated_only = la_rule_is_gated_only(update_rule);
     int rc;
     if (type == 0) {
       if (gated_only)

@@ -2743,9 +2743,10 @@ HIP_KERNEL_API int hip_linear_attention_decode(
 // path and may round-trip S/Q/K through fp16.
 // scratch / scratch_bytes: caller-owned device scratch for the chunk-parallel
 // path (RuntimeState::la_scratch, grown on demand, freed on session cleanup).
-// Size it with hip_linear_attention_prefill_scratch_bytes() below. When null or
-// under-sized the launcher declines (returns 1) and the caller falls back to
-// the per-token loop.
+// Size it with hip_linear_attention_prefill_scratch_bytes() below, passing the
+// same update_rule: the two rules need different layouts, so a mismatch makes
+// the launcher decline its own arena. When null or under-sized the launcher
+// declines (returns 1) and the caller falls back to the per-token loop.
 HIP_KERNEL_API int hip_linear_attention_prefill_chunked(
     void* stream,
     const void* query,
@@ -2770,11 +2771,14 @@ HIP_KERNEL_API int hip_linear_attention_prefill_chunked(
     void* scratch,
     size_t scratch_bytes);
 
-// Device-scratch bytes the chunk-parallel prefill needs for a given shape.
-// Returns 0 for shapes/params the parallel path will decline. The runtime
-// wrapper uses this to grow RuntimeState::la_scratch before the launch.
+// Device-scratch bytes the chunk-parallel prefill needs for a given shape and
+// update rule. Returns 0 for shapes/params the parallel path will decline. The
+// runtime wrapper uses this to grow RuntimeState::la_scratch before the launch.
+// The rule is required because the two supported rules run different kernels:
+// gated holds the recurrent state in fp32 and needs no W tile, gated_delta
+// holds it in fp16 on the matrix cores and does.
 HIP_KERNEL_API size_t hip_linear_attention_prefill_scratch_bytes(
-    int B, int seq_len, int Hkv, int dk, int dv);
+    int B, int seq_len, int Hkv, int dk, int dv, int64_t update_rule);
 
 // Max memref rank honoured by the strided memref.copy fast path
 // (hip_strided_copy) and the host per-row fallback in memrefCopy. Defined

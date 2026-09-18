@@ -205,7 +205,8 @@ extern "C" int wrap_linear_attention(
   if ((update_rule == kUpdateRuleGated ||
        update_rule == kUpdateRuleGatedDelta) &&
       seq_len > 1) {
-    // The chunk-parallel path needs a device scratch arena sized to this shape.
+    // The chunk-parallel path needs a device scratch arena sized to this shape
+    // and rule; the two rules run different kernels and need different layouts.
     // It lives in the per-session RuntimeState::la_scratch pool
     // (grow-on-demand, freed in hipdnn_ep_state_cleanup) -- same policy as
     // qmoe/conv scratch -- rather than a process-static buffer. If
@@ -213,7 +214,7 @@ extern "C" int wrap_linear_attention(
     // (rc=1 -> per-token loop below).
     void *la_scratch = nullptr;
     size_t la_bytes = hip_linear_attention_prefill_scratch_bytes(
-        (int)B, (int)seq_len, (int)Hkv, (int)dk, (int)dv);
+        (int)B, (int)seq_len, (int)Hkv, (int)dk, (int)dv, update_rule);
     if (la_bytes > 0 &&
         hipdnn_ep_state_ensure_la_scratch(state, la_bytes) == 0) {
       la_scratch = hipdnn_ep_state_get_la_scratch(state);
