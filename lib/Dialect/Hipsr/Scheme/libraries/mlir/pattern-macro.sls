@@ -138,16 +138,22 @@
           [(result eq op-name operands attrs colon input-types arrow output-type)
            (and (identifier? #'result)
                 (identifier? #'eq) (eq? (syntax->datum #'eq) '=)
-                (string? (syntax->datum #'op-name))
+                ;; op-name can be either string "test.op" or symbol test.op - convert to string
+                (or (string? (syntax->datum #'op-name))
+                    (symbol? (syntax->datum #'op-name)))
                 (identifier? #'colon) (eq? (syntax->datum #'colon) ':)
                 (identifier? #'arrow) (eq? (syntax->datum #'arrow) '->))
-           (make-ast-match-expand
-             #'result          ;; Store syntax object
-             #'op-name         ;; Store syntax object (string literal)
-             #'operands        ;; Store syntax object (TODO: parse structure)
-             #'attrs           ;; Store syntax object (TODO: parse structure)
-             #'input-types     ;; Store syntax object (TODO: parse structure)
-             #'output-type)]   ;; Store syntax object
+           (let ([op-name-stx (let ([datum (syntax->datum #'op-name)])
+                                (if (string? datum)
+                                    #'op-name  ;; Already a string, keep as-is
+                                    (datum->syntax #'op-name (symbol->string datum))))])  ;; Convert symbol to string
+             (make-ast-match-expand
+               #'result          ;; Store syntax object
+               op-name-stx       ;; String syntax object
+               #'operands        ;; Store syntax object (TODO: parse structure)
+               #'attrs           ;; Store syntax object (TODO: parse structure)
+               #'input-types     ;; Store syntax object (TODO: parse structure)
+               #'output-type))]  ;; Store syntax object
 
           [_ (syntax-violation 'parse-match-operation
                "Invalid match operation syntax (expected: result = \"op.name\" operands attrs : types -> type)"
@@ -166,13 +172,19 @@
           [(result eq op-name operands attrs rest ...)
            (and (identifier? #'result)
                 (identifier? #'eq) (eq? (syntax->datum #'eq) '=)
-                (string? (syntax->datum #'op-name)))
-           (make-ast-operation-expand
-             #'result          ;; Store syntax object
-             #'op-name         ;; Store syntax object (string literal)
-             #'operands        ;; Store syntax object (TODO: parse structure)
-             #'attrs           ;; Store syntax object (TODO: parse structure)
-             #'(rest ...))]    ;; Store syntax object
+                ;; op-name can be either string "test.op" or symbol test.op - convert to string
+                (or (string? (syntax->datum #'op-name))
+                    (symbol? (syntax->datum #'op-name))))
+           (let ([op-name-stx (let ([datum (syntax->datum #'op-name)])
+                                (if (string? datum)
+                                    #'op-name  ;; Already a string, keep as-is
+                                    (datum->syntax #'op-name (symbol->string datum))))])  ;; Convert symbol to string
+             (make-ast-operation-expand
+               #'result          ;; Store syntax object
+               op-name-stx       ;; String syntax object
+               #'operands        ;; Store syntax object (TODO: parse structure)
+               #'attrs           ;; Store syntax object (TODO: parse structure)
+               #'(rest ...)))]   ;; Store syntax object
           
           ;; TODO: Add more patterns for variations
           
