@@ -70,7 +70,8 @@
                 op-name        ;; syntax - string literal (e.g., #'"hipsr.cast")
                 operands       ;; syntax - operand expressions
                 attributes     ;; syntax - attribute expressions
-                rest))         ;; syntax - remainder (types, etc.)
+                input-types    ;; syntax - input types
+                output-type))  ;; syntax - output type
 
       ;; Expansion-time AST record for where bindings
       ;; Contains syntax objects for code generation
@@ -182,27 +183,49 @@
       ;; Output: ast-operation-expand record with syntax objects
       ;;=======================================================================
       (define (parse-rewrite-operation op-stx)
-        (syntax-case op-stx (=)
-          ;; Full pattern with attrs: (result = "op.name" (operands ...) (attrs ...) rest ...)
-          [(result = op-name operands attrs rest ...)
+        (syntax-case op-stx (= : ->)
+          ;; Full pattern: (result = "op.name" (operands ...) (attrs ...) : (input-types ...) -> output-type)
+          [(result = op-name operands attrs : input-types -> output-type)
            (make-ast-operation-expand
              #'result
              #'op-name
              #'operands
              #'attrs
-             #'(rest ...))]
+             #'input-types
+             #'output-type)]
 
-          ;; Minimal pattern without attrs: (result = "op.name" (operands ...))
+          ;; No types: (result = "op.name" (operands ...) (attrs ...))
+          [(result = op-name operands attrs)
+           (make-ast-operation-expand
+             #'result
+             #'op-name
+             #'operands
+             #'attrs
+             #'()              ;; Empty input-types
+             #'())]            ;; Empty output-type
+
+          ;; No attrs, with types: (result = "op.name" (operands ...) : (input-types ...) -> output-type)
+          [(result = op-name operands : input-types -> output-type)
+           (make-ast-operation-expand
+             #'result
+             #'op-name
+             #'operands
+             #'()              ;; Empty attrs
+             #'input-types
+             #'output-type)]
+
+          ;; Minimal: (result = "op.name" (operands ...))
           [(result = op-name operands)
            (make-ast-operation-expand
              #'result
              #'op-name
              #'operands
              #'()              ;; Empty attrs
-             #'())]            ;; Empty rest
+             #'()              ;; Empty input-types
+             #'())]            ;; Empty output-type
 
           [_ (syntax-violation 'parse-rewrite-operation
-               "Invalid rewrite operation syntax (expected: result = \"op.name\" operands attrs ...)"
+               "Invalid rewrite operation syntax (expected: result = \"op.name\" operands [attrs] [: types -> type])"
                op-stx)]))
       
       ;; Helper: parse optional :where clause
@@ -281,7 +304,8 @@
                        normalized-name  ;; Now guaranteed to be string syntax
                        (ast-operation-expand-operands rewrite-op)
                        (ast-operation-expand-attributes rewrite-op)
-                       (ast-operation-expand-rest rewrite-op)))))
+                       (ast-operation-expand-input-types rewrite-op)
+                       (ast-operation-expand-output-type rewrite-op)))))
                (ast-pattern-expand-rewrite ast-rec)))
 
         ;; Validate where bindings
@@ -323,7 +347,8 @@
               (syntax->datum (ast-operation-expand-op-name op-exp))
               (syntax->datum (ast-operation-expand-operands op-exp))
               (syntax->datum (ast-operation-expand-attributes op-exp))
-              (syntax->datum (ast-operation-expand-rest op-exp))))
+              (syntax->datum (ast-operation-expand-input-types op-exp))
+              (syntax->datum (ast-operation-expand-output-type op-exp))))
 
       ;; Convert ast-where-binding-expand to datum for runtime AST record
       (define (where-binding-expand->datum where-exp)
