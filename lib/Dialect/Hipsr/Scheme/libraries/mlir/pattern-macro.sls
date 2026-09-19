@@ -65,10 +65,12 @@
 
       ;; Expansion-time AST record for rewrite operations
       ;; Contains syntax objects for code generation
+      ;; Field order matches MLIR generic syntax: operands, regions, attributes, types
       (define-record-type (ast-operation-expand make-ast-operation-expand ast-operation-expand?)
         (fields result-var     ;; syntax - identifier (e.g., #'%new)
                 op-name        ;; syntax - string literal (e.g., #'"hipsr.cast")
                 operands       ;; syntax - operand expressions
+                regions        ;; syntax - regions (before attributes in MLIR syntax)
                 attributes     ;; syntax - attribute expressions
                 input-types    ;; syntax - input types
                 output-type))  ;; syntax - output type
@@ -78,6 +80,18 @@
       (define-record-type (ast-where-binding-expand make-ast-where-binding-expand ast-where-binding-expand?)
         (fields var            ;; syntax - identifier (e.g., #'%ctx)
                 expr))         ;; syntax - expression to compute
+
+      ;; Expansion-time AST record for regions (mimics MLIR Region)
+      ;; A region contains a list of blocks
+      (define-record-type (ast-region-expand make-ast-region-expand ast-region-expand?)
+        (fields blocks))       ;; list of ast-block-expand
+
+      ;; Expansion-time AST record for blocks (mimics MLIR Block)
+      ;; A block has a label, arguments, and operations
+      (define-record-type (ast-block-expand make-ast-block-expand ast-block-expand?)
+        (fields label          ;; syntax - block label (e.g., #'^bb0)
+                arguments      ;; list of (var type) pairs - block arguments
+                operations))   ;; list of ast-operation-expand
 
       ;;=======================================================================
       ;; Phase 1: Parse whole syntax to AST record - pure pattern matching
@@ -192,7 +206,8 @@
              #'operands
              #'attrs
              #'input-types
-             #'output-type)]
+             #'output-type
+             #'())]            ;; Empty regions (TODO: add region syntax)
 
           ;; No types: (result = "op.name" (operands ...) (attrs ...))
           [(result = op-name operands attrs)
@@ -202,7 +217,8 @@
              #'operands
              #'attrs
              #'()              ;; Empty input-types
-             #'())]            ;; Empty output-type
+             #'()              ;; Empty output-type
+             #'())]            ;; Empty regions
 
           ;; No attrs, with types: (result = "op.name" (operands ...) : (input-types ...) -> output-type)
           [(result = op-name operands : input-types -> output-type)
@@ -212,7 +228,8 @@
              #'operands
              #'()              ;; Empty attrs
              #'input-types
-             #'output-type)]
+             #'output-type
+             #'())]            ;; Empty regions
 
           ;; Minimal: (result = "op.name" (operands ...))
           [(result = op-name operands)
@@ -222,7 +239,8 @@
              #'operands
              #'()              ;; Empty attrs
              #'()              ;; Empty input-types
-             #'())]            ;; Empty output-type
+             #'()              ;; Empty output-type
+             #'())]            ;; Empty regions
 
           [_ (syntax-violation 'parse-rewrite-operation
                "Invalid rewrite operation syntax (expected: result = \"op.name\" operands [attrs] [: types -> type])"
@@ -305,7 +323,8 @@
                        (ast-operation-expand-operands rewrite-op)
                        (ast-operation-expand-attributes rewrite-op)
                        (ast-operation-expand-input-types rewrite-op)
-                       (ast-operation-expand-output-type rewrite-op)))))
+                       (ast-operation-expand-output-type rewrite-op)
+                       (ast-operation-expand-regions rewrite-op)))))
                (ast-pattern-expand-rewrite ast-rec)))
 
         ;; Validate where bindings
