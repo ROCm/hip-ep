@@ -389,9 +389,59 @@
 
         ast-rec)
 
-      ;; Validate and analyze match operations
-      ;; Builds match-bindings (hashtable) and match-actions (ordered list)
+      ;; Validate and analyze match operations (coordinator)
       (define (validate-and-analyze-pattern-matching ast-rec)
+        (validate-match-operations ast-rec)
+        (analyze-match-operations ast-rec))
+
+      ;; Validate match operations
+      (define (validate-match-operations ast-rec)
+        (let ([match-list (ast-pattern-expand-match ast-rec)])
+          (for-each
+            (lambda (match-op)
+              ;; Validate and normalize op-name
+              (let* ([op-name-stx (ast-match-expand-op-name match-op)]
+                     [op-name-datum (syntax->datum op-name-stx)])
+                (unless (or (string? op-name-datum) (symbol? op-name-datum))
+                  (syntax-violation 'validate-match-operations
+                    "Operation name must be string or symbol" op-name-stx))
+                ;; Normalize: symbol -> string
+                (when (symbol? op-name-datum)
+                  (ast-match-expand-op-name-set! match-op
+                    (datum->syntax op-name-stx (symbol->string op-name-datum)))))
+
+              ;; Validate result-var (identifier or list of identifiers)
+              (let ([result-var (ast-match-expand-result-var match-op)])
+                (let ([results (if (identifier? result-var)
+                                  (list result-var)
+                                  (syntax->list result-var))])
+                  (for-each
+                    (lambda (var)
+                      (unless (identifier? var)
+                        (syntax-violation 'validate-match-operations
+                          "Result must be identifier" var))
+                      (let ([var-name (symbol->string (syntax->datum var))])
+                        (unless (char=? (string-ref var-name 0) #\%)
+                          (syntax-violation 'validate-match-operations
+                            "Result identifier must start with %" var))))
+                    results)))
+
+              ;; Validate operands
+              (let ([operands (syntax->list (ast-match-expand-operands match-op))])
+                (for-each
+                  (lambda (var)
+                    (unless (identifier? var)
+                      (syntax-violation 'validate-match-operations
+                        "Operand must be identifier" var))
+                    (let ([var-name (symbol->string (syntax->datum var))])
+                      (unless (char=? (string-ref var-name 0) #\%)
+                        (syntax-violation 'validate-match-operations
+                          "Operand identifier must start with %" var))))
+                  operands)))
+            match-list)))
+
+      ;; Analyze match operations - build match-bindings and match-actions
+      (define (analyze-match-operations ast-rec)
         ;; Convert match list to vector for index-based access
         (let* ([match-list (ast-pattern-expand-match ast-rec)]
                [match-vec (list->vector match-list)]
