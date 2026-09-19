@@ -100,14 +100,12 @@
              ;; Store syntax objects, not datums
              (ast-pattern-expand-function-name-set! ast #'fname)
              (ast-pattern-expand-root-var-set! ast #'root)
-             ;; Parse each match operation into ast-match-expand using loop
+             ;; Parse each match operation into ast-match-expand using map
              (ast-pattern-expand-match-set! ast 
-               (loop :for op-stx :in (syntax->list #'(match-op ...))
-                     :collect (parse-match-operation op-stx)))
-             ;; Parse each rewrite operation into ast-operation-expand using loop
+               (map parse-match-operation (syntax->list #'(match-op ...))))
+             ;; Parse each rewrite operation into ast-operation-expand using map
              (ast-pattern-expand-rewrite-set! ast
-               (loop :for op-stx :in (syntax->list #'(rewrite-op ...))
-                     :collect (parse-rewrite-operation op-stx)))
+               (map parse-rewrite-operation (syntax->list #'(rewrite-op ...))))
              (parse-where #'where-rest ast)
              ast)]
           
