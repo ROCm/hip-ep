@@ -10,19 +10,19 @@
   (define-conversion-pattern :debug-ast test-basic-ast
     :match ((%out = "test.op" (%in) () : (!in-type) -> !out-type))
     :rewrite %out :with
-    ((%new = "new.op" (%in) () -> !out-type)))
+    ((%new = "new.op" (%in) -> !out-type)))
 
   ;; Test 2: Pattern without :debug-ast - returns lambda
   (define-conversion-pattern test-lambda-mode
     :match ((%out = "test.op" (%in) () : (!in-type) -> !out-type))
     :rewrite %out :with
-    ((%new = "new.op" (%in) () -> !out-type)))
+    ((%new = "new.op" (%in) -> !out-type)))
 
   ;; Test 3: Pattern with :where clause
   (define-conversion-pattern :debug-ast test-with-where
     :match ((%out = "test.op" (%in) () : (!in-type) -> !out-type))
     :rewrite %out :with
-    ((%new = "new.op" (%in) () -> !out-type))
+    ((%new = "new.op" (%in) -> !out-type))
     :where ((%ctx (get-context))
             (%val (compute-value))))
   

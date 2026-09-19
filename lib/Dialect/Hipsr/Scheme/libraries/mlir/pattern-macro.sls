@@ -1,7 +1,8 @@
 #!r6rs
 (library (mlir pattern-macro)
   (export define-conversion-pattern
-          :match :rewrite :with :where :debug-ast :debug-matching = : -> :region
+          :match :rewrite :with :where :debug-ast :debug-matching
+          = : -> :region :regions :attrs
           ast-pattern?
           ast-pattern-function-name
           ast-pattern-root-op-name
@@ -26,6 +27,8 @@
   (define-syntax : (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
   (define-syntax -> (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
   (define-syntax :region (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
+  (define-syntax :regions (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
+  (define-syntax :attrs (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
 
   ;; Runtime AST record (created when :debug-ast is used)
   ;; Contains datums (symbols, strings, lists) for inspection
@@ -194,17 +197,18 @@
       
       ;;=======================================================================
       ;; Parse individual rewrite operation
-      ;; Follows MLIR generic syntax with -> for result types:
-      ;;   (result-list =)? "op.name" (operands) (regions)? [attrs]? -> result-types
+      ;; Uses keywords for clarity: :regions and :attrs
+      ;;   (result-list =)? "op.name" (operands) [:regions (...)]? [:attrs [...]]? [-> result-types]?
       ;;
       ;; Examples:
-      ;;   (%r = "op" ())                           - no operands, minimal
-      ;;   (%r = "op" (%a %b))                      - with operands
-      ;;   (%r = "op" (%a) [attr val])              - with attrs
-      ;;   (%r = "op" (%a) -> i32)                  - with result type
-      ;;   (%r = "op" (%a) ([^bb0: ...]) [attrs] -> i32)  - full
-      ;;   ((%r1 %r2) = "op" ())                    - multiple results
-      ;;   ("op" ())                                - no results
+      ;;   (%r = "op" ())                                    - minimal
+      ;;   (%r = "op" (%a %b))                               - with operands
+      ;;   (%r = "op" (%a) :attrs [attr val])                - with attrs
+      ;;   (%r = "op" (%a) -> i32)                           - with result type
+      ;;   (%r = "op" (%a) :regions ([^bb0: ...]) -> i32)    - with region
+      ;;   (%r = "op" (%a) :regions ([...]) :attrs [...] -> i32)  - full
+      ;;   ((%r1 %r2) = "op" ())                             - multiple results
+      ;;   ("op" ())                                         - no results
       ;;=======================================================================
       (define (parse-rewrite-operation op-stx)
         ;; Step 1: Extract result(s), =, op-name, and rest
@@ -223,71 +227,42 @@
                "Invalid operation syntax (expected: [result =] \"op.name\" (operands) ...)"
                op-stx)]))
 
-      ;; Step 2: Parse the rest: (operands) (regions)? [attrs]? -> result-types
+      ;; Step 2: Parse the rest: (operands) [:regions (...)]? [:attrs [...]]? [-> result-types]?
+      ;; Use recursive helper to accumulate optional parts
       (define (parse-rewrite-rest result-stx op-name-stx rest-stx)
-        (syntax-case rest-stx (->)
-          ;; Pattern: (operands) (regions) [attrs] -> result-types
-          [(operands regions attrs -> result-types)
+        (syntax-case rest-stx ()
+          [(operands . more)
+           (parse-rewrite-optional #'operands #'more result-stx op-name-stx #'() #'() #'())]))
+
+      ;; Helper: parse optional :regions, :attrs, -> result-types
+      (define (parse-rewrite-optional operands-stx rest-stx result-stx op-name-stx regions-stx attrs-stx types-stx)
+        (syntax-case rest-stx (:regions :attrs ->)
+          ;; Found :regions
+          [(:regions region-list . more)
+           (parse-rewrite-optional operands-stx #'more result-stx op-name-stx #'region-list attrs-stx types-stx)]
+
+          ;; Found :attrs
+          [(:attrs attr-list . more)
+           (parse-rewrite-optional operands-stx #'more result-stx op-name-stx regions-stx #'attr-list types-stx)]
+
+          ;; Found -> result-types
+          [(-> result-types . more)
+           (null? (syntax->datum #'more))  ;; Must be last
+           (parse-rewrite-optional operands-stx #'() result-stx op-name-stx regions-stx attrs-stx #'result-types)]
+
+          ;; End of list - create record
+          [()
            (make-ast-operation-expand
              result-stx
              op-name-stx
-             #'operands
-             #'regions
-             #'attrs
-             #'result-types)]
+             operands-stx
+             regions-stx
+             attrs-stx
+             types-stx)]
 
-          ;; Pattern: (operands) [attrs] -> result-types (no regions)
-          [(operands attrs -> result-types)
-           (make-ast-operation-expand
-             result-stx
-             op-name-stx
-             #'operands
-             #'()           ;; Empty regions
-             #'attrs
-             #'result-types)]
-
-          ;; Pattern: (operands) (regions) -> result-types (no attrs)
-          [(operands regions -> result-types)
-           (make-ast-operation-expand
-             result-stx
-             op-name-stx
-             #'operands
-             #'regions
-             #'()           ;; Empty attrs
-             #'result-types)]
-
-          ;; Pattern: (operands) -> result-types (minimal with types)
-          [(operands -> result-types)
-           (make-ast-operation-expand
-             result-stx
-             op-name-stx
-             #'operands
-             #'()           ;; Empty regions
-             #'()           ;; Empty attrs
-             #'result-types)]
-
-          ;; Pattern: (operands) [attrs] (no types)
-          [(operands attrs)
-           (make-ast-operation-expand
-             result-stx
-             op-name-stx
-             #'operands
-             #'()           ;; Empty regions
-             #'attrs
-             #'())]         ;; Empty result-types
-
-          ;; Pattern: (operands) (minimal - just operands)
-          [(operands)
-           (make-ast-operation-expand
-             result-stx
-             op-name-stx
-             #'operands
-             #'()           ;; Empty regions
-             #'()           ;; Empty attrs
-             #'())]         ;; Empty result-types
-
-          [_ (syntax-violation 'parse-rewrite-rest
-               "Invalid operation syntax after op-name (expected: (operands) [(regions)] [[attrs]] [-> result-types])"
+          ;; Error
+          [_ (syntax-violation 'parse-rewrite-optional
+               "Invalid operation syntax (expected: [:regions (...)] [:attrs [...]] [-> result-types])"
                rest-stx)]))
       
       ;; Helper: parse optional :where clause
