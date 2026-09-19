@@ -202,18 +202,22 @@
       
       ;;=======================================================================
       ;; Parse individual rewrite operation
-      ;; Uses keywords for clarity: :regions and :attrs
-      ;;   (result-list =)? "op.name" (operands) [:regions (...)]? [:attrs [...]]? [-> result-types]?
+      ;; Keywords introduce sections that accumulate elements until next keyword
+      ;;   (result-list =)? "op.name" (operands) [:regions region1 region2 ...]? [:attrs attr1 attr2 ...]? -> result-types
       ;;
       ;; Examples:
-      ;;   (%r = "op" ())                                    - minimal
-      ;;   (%r = "op" (%a %b))                               - with operands
-      ;;   (%r = "op" (%a) :attrs [attr val])                - with attrs
-      ;;   (%r = "op" (%a) -> i32)                           - with result type
-      ;;   (%r = "op" (%a) :regions ([^bb0: ...]) -> i32)    - with region
-      ;;   (%r = "op" (%a) :regions ([...]) :attrs [...] -> i32)  - full
-      ;;   ((%r1 %r2) = "op" ())                             - multiple results
-      ;;   ("op" ())                                         - no results
+      ;;   (%r = "op" (%a %b) -> i32)                        - with operands
+      ;;   (%r = "op" (%a) :attrs [a1 v1] [a2 v2] -> i32)    - with attrs (flat!)
+      ;;   (%r = "op" (%a) :regions [region1] -> i32)        - with one region (flat!)
+      ;;   (%r = "op" (%a) :regions [r1] [r2] -> i32)        - with two regions (flat!)
+      ;;   (%r = "op" (%a) :regions [r1] :attrs [a1 v1] -> i32)  - full
+      ;;   ((%r1 %r2) = "op" (%a) -> (i32 i32))              - multiple results
+      ;;   ("op" (%a) -> ())                                 - no results (void)
+      ;;
+      ;; Keywords as section markers (not wrappers):
+      ;;   :regions [r1] [r2] :attrs [a1] [a2] -> types
+      ;;   ^^^^^^^^ ^^^^^^^^^ ^^^^^^ ^^^^^^^^^
+      ;;   Section  Elements  Section Elements
       ;;=======================================================================
       (define (parse-rewrite-operation op-stx)
         ;; Step 1: Extract result(s), =, op-name, and rest
@@ -246,28 +250,67 @@
              (parse-rewrite-optional rec #'more)
              rec)]))
 
-      ;; Helper: parse optional :regions, :attrs, then REQUIRED -> result-types
+      ;; Helper: parse sections :regions, :attrs, then REQUIRED -> result-types
+      ;; Sections accumulate elements until next keyword
       (define (parse-rewrite-optional rec rest-stx)
         (syntax-case rest-stx (:regions :attrs ->)
-          ;; Found :regions
-          [(:regions region-list . more)
-           (begin
-             (ast-operation-expand-regions-set! rec #'region-list)
-             (parse-rewrite-optional rec #'more))]
+          ;; :regions starts region section - accumulate until :attrs, ->, or end
+          [(:regions . more)
+           (parse-regions-section rec #'more '())]
 
-          ;; Found :attrs
-          [(:attrs attr-list . more)
-           (begin
-             (ast-operation-expand-attributes-set! rec #'attr-list)
-             (parse-rewrite-optional rec #'more))]
+          ;; :attrs starts attrs section - accumulate until -> or end
+          [(:attrs . more)
+           (parse-attrs-section rec #'more '())]
 
-          ;; Found -> result-types (REQUIRED - must be present)
+          ;; -> result-types (REQUIRED - must be present)
           [(-> result-types)
            (ast-operation-expand-result-types-set! rec #'result-types)]
 
           ;; Error - -> result-types is mandatory
           [_ (syntax-violation 'parse-rewrite-optional
                "Missing -> result-types (required for operations with results)"
+               rest-stx)]))
+
+      ;; Accumulate regions until hitting :attrs, ->, or end
+      (define (parse-regions-section rec rest-stx regions-acc)
+        (syntax-case rest-stx (:attrs ->)
+          ;; Hit :attrs - done with regions, start attrs section
+          [(:attrs . more)
+           (begin
+             (ast-operation-expand-regions-set! rec (reverse regions-acc))
+             (parse-attrs-section rec #'more '()))]
+
+          ;; Hit -> - done with regions, parse result types
+          [(-> result-types)
+           (begin
+             (ast-operation-expand-regions-set! rec (reverse regions-acc))
+             (ast-operation-expand-result-types-set! rec #'result-types))]
+
+          ;; Another region - accumulate it
+          [(region . more)
+           (parse-regions-section rec #'more (cons #'region regions-acc))]
+
+          ;; Error - must have -> result-types
+          [_ (syntax-violation 'parse-regions-section
+               "Expected region, :attrs, or -> result-types"
+               rest-stx)]))
+
+      ;; Accumulate attrs until hitting -> or end
+      (define (parse-attrs-section rec rest-stx attrs-acc)
+        (syntax-case rest-stx (->)
+          ;; Hit -> - done with attrs, parse result types
+          [(-> result-types)
+           (begin
+             (ast-operation-expand-attributes-set! rec (reverse attrs-acc))
+             (ast-operation-expand-result-types-set! rec #'result-types))]
+
+          ;; Another attr - accumulate it
+          [(attr . more)
+           (parse-attrs-section rec #'more (cons #'attr attrs-acc))]
+
+          ;; Error - must have -> result-types
+          [_ (syntax-violation 'parse-attrs-section
+               "Expected attr or -> result-types"
                rest-stx)]))
       
       ;; Helper: parse optional :where clause
