@@ -194,15 +194,15 @@
       
       ;;=======================================================================
       ;; Parse individual rewrite operation
-      ;; Follows MLIR generic syntax:
-      ;;   (result-list =)? "op.name" (operands) (regions)? [attrs]? : result-types
+      ;; Follows MLIR generic syntax with -> for result types:
+      ;;   (result-list =)? "op.name" (operands) (regions)? [attrs]? -> result-types
       ;;
       ;; Examples:
       ;;   (%r = "op" ())                           - no operands, minimal
       ;;   (%r = "op" (%a %b))                      - with operands
       ;;   (%r = "op" (%a) [attr val])              - with attrs
-      ;;   (%r = "op" (%a) : i32)                   - with result type
-      ;;   (%r = "op" (%a) ([^bb0: ...]) [attrs] : i32)  - full
+      ;;   (%r = "op" (%a) -> i32)                  - with result type
+      ;;   (%r = "op" (%a) ([^bb0: ...]) [attrs] -> i32)  - full
       ;;   ((%r1 %r2) = "op" ())                    - multiple results
       ;;   ("op" ())                                - no results
       ;;=======================================================================
@@ -223,11 +223,11 @@
                "Invalid operation syntax (expected: [result =] \"op.name\" (operands) ...)"
                op-stx)]))
 
-      ;; Step 2: Parse the rest: (operands) (regions)? [attrs]? : result-types
+      ;; Step 2: Parse the rest: (operands) (regions)? [attrs]? -> result-types
       (define (parse-rewrite-rest result-stx op-name-stx rest-stx)
-        (syntax-case rest-stx (: ->)
-          ;; Pattern: (operands) (regions) [attrs] : result-types
-          [(operands regions attrs : result-types)
+        (syntax-case rest-stx (->)
+          ;; Pattern: (operands) (regions) [attrs] -> result-types
+          [(operands regions attrs -> result-types)
            (make-ast-operation-expand
              result-stx
              op-name-stx
@@ -236,8 +236,8 @@
              #'attrs
              #'result-types)]
 
-          ;; Pattern: (operands) [attrs] : result-types (no regions)
-          [(operands attrs : result-types)
+          ;; Pattern: (operands) [attrs] -> result-types (no regions)
+          [(operands attrs -> result-types)
            (make-ast-operation-expand
              result-stx
              op-name-stx
@@ -246,8 +246,8 @@
              #'attrs
              #'result-types)]
 
-          ;; Pattern: (operands) (regions) : result-types (no attrs)
-          [(operands regions : result-types)
+          ;; Pattern: (operands) (regions) -> result-types (no attrs)
+          [(operands regions -> result-types)
            (make-ast-operation-expand
              result-stx
              op-name-stx
@@ -256,8 +256,8 @@
              #'()           ;; Empty attrs
              #'result-types)]
 
-          ;; Pattern: (operands) : result-types (minimal with types)
-          [(operands : result-types)
+          ;; Pattern: (operands) -> result-types (minimal with types)
+          [(operands -> result-types)
            (make-ast-operation-expand
              result-stx
              op-name-stx
@@ -287,7 +287,7 @@
              #'())]         ;; Empty result-types
 
           [_ (syntax-violation 'parse-rewrite-rest
-               "Invalid operation syntax after op-name (expected: (operands) [(regions)] [[attrs]] [: result-types])"
+               "Invalid operation syntax after op-name (expected: (operands) [(regions)] [[attrs]] [-> result-types])"
                rest-stx)]))
       
       ;; Helper: parse optional :where clause
