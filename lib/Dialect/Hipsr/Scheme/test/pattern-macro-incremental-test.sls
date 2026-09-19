@@ -25,6 +25,18 @@
     ((%new = "new.op" (%in) -> !out-type))
     :where ((%ctx (get-context))
             (%val (compute-value))))
+
+  ;; Test 4: Pattern with region containing blocks
+  (define-conversion-pattern :debug-ast test-with-region
+    :match ((%out = "scf.if" (%cond) () : (!cond-type) -> !result-type))
+    :rewrite %out :with
+    ((%r = "scf.if" (%cond)
+       :regions
+         ((^then ()
+            (%t = "arith.constant" () :attrs [value 1] -> i32))
+          (^else ()
+            (%f = "arith.constant" () :attrs [value 0] -> i32)))
+       -> i32)))
   
   (define (run-tests)
     (test-begin "pattern-macro-incremental")
@@ -55,5 +67,11 @@
     (test-equal ":where bindings captured" #t (list? (ast-pattern-where test-with-where)))
     (test-equal ":where bindings not empty" #t (pair? (ast-pattern-where test-with-where)))
     (test-equal ":where has 2 bindings" 2 (length (ast-pattern-where test-with-where)))
-    
+
+    ;; Region and block tests
+    ;; Since expansion-time records aren't exported, we just test that it parses
+    (test-equal "region pattern is ast-pattern" #t (ast-pattern? test-with-region))
+    ;; The rewrite list contains raw s-expressions (not expansion-time records)
+    (test-equal "has rewrite operations" #t (pair? (ast-pattern-rewrite test-with-region)))
+
     (test-end)))
