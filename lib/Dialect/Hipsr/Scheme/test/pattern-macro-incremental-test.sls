@@ -2,7 +2,7 @@
 
 (library (test pattern-macro-incremental-test)
   (export run-tests)
-  (import (chezscheme)
+  (import (except (chezscheme) =)  ;; Exclude chezscheme's = to use mlir pattern-macro's =
           (test test-framework)
           (mlir pattern-macro))
   
