@@ -246,7 +246,7 @@
              (parse-rewrite-optional rec #'more)
              rec)]))
 
-      ;; Helper: parse optional :regions, :attrs, -> result-types (mutate record in-place)
+      ;; Helper: parse optional :regions, :attrs, then REQUIRED -> result-types
       (define (parse-rewrite-optional rec rest-stx)
         (syntax-case rest-stx (:regions :attrs ->)
           ;; Found :regions
@@ -261,16 +261,13 @@
              (ast-operation-expand-attributes-set! rec #'attr-list)
              (parse-rewrite-optional rec #'more))]
 
-          ;; Found -> result-types (must be last - no trailing elements)
+          ;; Found -> result-types (REQUIRED - must be present)
           [(-> result-types)
            (ast-operation-expand-result-types-set! rec #'result-types)]
 
-          ;; End of list - nothing more to do
-          [() #f]
-
-          ;; Error
+          ;; Error - -> result-types is mandatory
           [_ (syntax-violation 'parse-rewrite-optional
-               "Invalid operation syntax (expected: [:regions (...)] [:attrs [...]] [-> result-types])"
+               "Missing -> result-types (required for operations with results)"
                rest-stx)]))
       
       ;; Helper: parse optional :where clause
