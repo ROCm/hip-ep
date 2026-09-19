@@ -13,7 +13,8 @@
           ast-pattern-debug-matching?
           make-ast-pattern)  ;; Re-export for generated code
   (import (except (rnrs (6)) =)
-          (for (only (chezscheme) syntax->list) expand))  ;; Import syntax->list for expansion time
+          (for (only (chezscheme) syntax->list) expand)  ;; Import syntax->list for expansion time
+          (for (except (rime loop) :with) expand))  ;; Import loop (except :with which conflicts with our DSL)
 
 
   ;; Define keywords as syntax (for cross-library hygiene)
@@ -394,50 +395,36 @@
         (validate-match-operations ast-rec)
         (analyze-match-operations ast-rec))
 
+      ;; Helper: validate identifier starts with %
+      (define (validate-%-identifier var context-msg)
+        (unless (identifier? var)
+          (syntax-violation 'validate-match-operations
+            (string-append context-msg " must be identifier") var))
+        (let ([var-name (symbol->string (syntax->datum var))])
+          (unless (char=? (string-ref var-name 0) #\%)
+            (syntax-violation 'validate-match-operations
+              (string-append context-msg " must start with %") var))))
+
+      ;; Helper: normalize op-name (string or symbol -> string)
+      (define (normalize-op-name match-op)
+        (let* ([op-name-stx (ast-match-expand-op-name match-op)]
+               [op-name-datum (syntax->datum op-name-stx)])
+          (unless (or (string? op-name-datum) (symbol? op-name-datum))
+            (syntax-violation 'validate-match-operations
+              "Operation name must be string or symbol" op-name-stx))
+          (when (symbol? op-name-datum)
+            (ast-match-expand-op-name-set! match-op
+              (datum->syntax op-name-stx (symbol->string op-name-datum))))))
+
       ;; Validate match operations
       (define (validate-match-operations ast-rec)
-        (let ([match-list (ast-pattern-expand-match ast-rec)])
-          (for-each
-            (lambda (match-op)
-              ;; op-name must be string or symbol (normalize symbol -> string)
-              (let* ([op-name-stx (ast-match-expand-op-name match-op)]
-                     [op-name-datum (syntax->datum op-name-stx)])
-                (unless (or (string? op-name-datum) (symbol? op-name-datum))
-                  (syntax-violation 'validate-match-operations
-                    "Operation name must be string or symbol" op-name-stx))
-                (when (symbol? op-name-datum)
-                  (ast-match-expand-op-name-set! match-op
-                    (datum->syntax op-name-stx (symbol->string op-name-datum)))))
-
-              ;; result-var must be identifier or list of identifiers, starting with %
-              (let ([result-var (ast-match-expand-result-var match-op)])
-                (let ([results (if (identifier? result-var)
-                                  (list result-var)
-                                  (syntax->list result-var))])
-                  (for-each
-                    (lambda (var)
-                      (unless (identifier? var)
-                        (syntax-violation 'validate-match-operations
-                          "Result must be identifier" var))
-                      (let ([var-name (symbol->string (syntax->datum var))])
-                        (unless (char=? (string-ref var-name 0) #\%)
-                          (syntax-violation 'validate-match-operations
-                            "Result identifier must start with %" var))))
-                    results)))
-
-              ;; operands must be identifiers starting with %
-              (let ([operands (syntax->list (ast-match-expand-operands match-op))])
-                (for-each
-                  (lambda (var)
-                    (unless (identifier? var)
-                      (syntax-violation 'validate-match-operations
-                        "Operand must be identifier" var))
-                    (let ([var-name (symbol->string (syntax->datum var))])
-                      (unless (char=? (string-ref var-name 0) #\%)
-                        (syntax-violation 'validate-match-operations
-                          "Operand identifier must start with %" var))))
-                  operands)))
-            match-list)))
+        (loop :for match-op :in (ast-pattern-expand-match ast-rec)
+              :do (normalize-op-name match-op)
+              (:loop :for var :in (let ([rv (ast-match-expand-result-var match-op)])
+                                    (if (identifier? rv) (list rv) (syntax->list rv)))
+                     :do (validate-%-identifier var "Result"))
+              (:loop :for var :in (syntax->list (ast-match-expand-operands match-op))
+                     :do (validate-%-identifier var "Operand"))))
 
       ;; Analyze match operations - build match-bindings and match-actions
       (define (analyze-match-operations ast-rec)
@@ -525,14 +512,18 @@
           (ast-pattern-expand-match-actions-set! ast-rec (reverse actions))
 
           ;; Find root operation and extract its name
-          (let ([root-var-stx (ast-pattern-expand-root-var ast-rec)])
-            (let find-root ([op-idx 0])
-              (when (< op-idx (vector-length match-vec))
-                (let ([match-op (vector-ref match-vec op-idx)])
-                  (if (free-identifier=? (ast-match-expand-result-var match-op) root-var-stx)
-                      (ast-pattern-expand-root-op-name-set! ast-rec
-                        (ast-match-expand-op-name match-op))
-                      (find-root (+ op-idx 1)))))))))
+          (let ([root-var (ast-pattern-expand-root-var ast-rec)])
+            (loop :for op-idx :from 0 :below (vector-length match-vec)
+                  :do (let* ([match-op (vector-ref match-vec op-idx)]
+                             [result-var (ast-match-expand-result-var match-op)]
+                             [is-root? (if (identifier? result-var)
+                                          (free-identifier=? result-var root-var)
+                                          (loop :for var :in (syntax->list result-var)
+                                                :break #t :if (free-identifier=? var root-var)
+                                                :finally #f))])
+                        (when is-root?
+                          (ast-pattern-expand-root-op-name-set! ast-rec
+                            (ast-match-expand-op-name match-op))))))))
 
       ;; Validate a single operation and walk its structure
       (define (validate-operation op)
