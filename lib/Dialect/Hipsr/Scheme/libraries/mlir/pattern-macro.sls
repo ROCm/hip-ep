@@ -9,7 +9,8 @@
           ast-pattern-rewrite
           ast-pattern-where
           ast-pattern-debug-ast?
-          ast-pattern-debug-matching?)
+          ast-pattern-debug-matching?
+          make-ast-pattern)  ;; Re-export for generated code
   (import (except (rnrs (6)) =)
           (for (only (chezscheme) syntax->list) expand))  ;; Import syntax->list for expansion time
 
@@ -323,40 +324,70 @@
           ast-rec))
 
       ;;=======================================================================
+      ;; Helper: Convert expansion-time AST to runtime data (datums)
+      ;;=======================================================================
+      ;; Convert ast-match-expand to datum for runtime AST record
+      (define (match-expand->datum match-exp)
+        (list 'match
+              (syntax->datum (ast-match-expand-result-var match-exp))
+              (syntax->datum (ast-match-expand-op-name match-exp))
+              (syntax->datum (ast-match-expand-operands match-exp))
+              (syntax->datum (ast-match-expand-attributes match-exp))
+              (syntax->datum (ast-match-expand-input-types match-exp))
+              (syntax->datum (ast-match-expand-output-type match-exp))))
+
+      ;; Convert ast-operation-expand to datum for runtime AST record
+      (define (operation-expand->datum op-exp)
+        (list 'rewrite
+              (syntax->datum (ast-operation-expand-result-var op-exp))
+              (syntax->datum (ast-operation-expand-op-name op-exp))
+              (syntax->datum (ast-operation-expand-operands op-exp))
+              (syntax->datum (ast-operation-expand-attributes op-exp))
+              (syntax->datum (ast-operation-expand-rest op-exp))))
+
+      ;; Convert ast-where-binding-expand to datum for runtime AST record
+      (define (where-binding-expand->datum where-exp)
+        (list (syntax->datum (ast-where-binding-expand-var where-exp))
+              (syntax->datum (ast-where-binding-expand-expr where-exp))))
+
+      ;;=======================================================================
       ;; Phase 3: Generate code from validated AST record
       ;;=======================================================================
       (define (generate-code whole-stx ast-rec)
         (syntax-case whole-stx ()
           [(macro-name . _)
-           (let ([fname-stx (ast-pattern-expand-function-name ast-rec)]
-                 [root-op-name-stx (ast-pattern-expand-root-op-name ast-rec)]
-                 [match-ops (ast-pattern-expand-match ast-rec)]
-                 [rewrite-ops (ast-pattern-expand-rewrite ast-rec)]
-                 [where-bindings (ast-pattern-expand-where ast-rec)]
-                 [debug-ast? (ast-pattern-expand-debug-ast? ast-rec)]
-                 [debug-matching? (ast-pattern-expand-debug-matching? ast-rec)])
-             (if debug-ast?
-                 ;; For :debug-ast, create runtime ast-pattern record with datums
-                 (with-syntax ([fname-id fname-stx]
-                               [fname-datum (syntax->datum fname-stx)]
-                               [root-op-name-datum (syntax->datum root-op-name-stx)]
-                               [match-ops-datum (syntax->datum #'match-ops)]  ;; TODO: convert properly
-                               [rewrite-ops-datum (syntax->datum #'rewrite-ops)]  ;; TODO: convert properly
-                               [where-bindings-datum (syntax->datum #'where-bindings)]  ;; TODO: convert properly
-                               [debug-ast-val debug-ast?]
-                               [debug-matching-val debug-matching?])
-                   #'(define fname-id 
-                       (make-ast-pattern 'fname-datum 
-                                       'root-op-name-datum 
-                                       'match-ops-datum 
-                                       'rewrite-ops-datum 
-                                       'where-bindings-datum 
-                                       'debug-ast-val 
-                                       'debug-matching-val)))
-                 ;; For normal mode, generate lambda using syntax objects directly
-                 #`(define #,fname-stx 
-                     (lambda (op operands-ref rewriter type-converter) 
-                       #f))))]))
+           (with-syntax ([fname (ast-pattern-expand-function-name ast-rec)]
+                        [root-op-name (ast-pattern-expand-root-op-name ast-rec)])
+             (let ([match-ops (ast-pattern-expand-match ast-rec)]
+                   [rewrite-ops (ast-pattern-expand-rewrite ast-rec)]
+                   [where-bindings (ast-pattern-expand-where ast-rec)]
+                   [debug-ast? (ast-pattern-expand-debug-ast? ast-rec)]
+                   [debug-matching? (ast-pattern-expand-debug-matching? ast-rec)])
+               (if debug-ast?
+                   ;; For :debug-ast mode, generate record constructor call with actual data
+                   ;; Convert syntax objects to datums for runtime inspection
+                   (with-syntax ([fname-sym #'(quote fname)]
+                                [root-op-str (syntax->datum #'root-op-name)]
+                                [match-data (datum->syntax #'macro-name
+                                              (list 'quote (map match-expand->datum match-ops)))]
+                                [rewrite-data (datum->syntax #'macro-name
+                                                (list 'quote (map operation-expand->datum rewrite-ops)))]
+                                [where-data (datum->syntax #'macro-name
+                                              (list 'quote (map where-binding-expand->datum where-bindings)))]
+                                [debug-ast-flag (datum->syntax #'macro-name debug-ast?)]
+                                [debug-match-flag (datum->syntax #'macro-name debug-matching?)])
+                     #'(define fname
+                         (make-ast-pattern fname-sym
+                                           root-op-str
+                                           match-data
+                                           rewrite-data
+                                           where-data
+                                           debug-ast-flag
+                                           debug-match-flag)))
+                   ;; For normal mode, generate lambda using syntax objects directly
+                   #'(define fname
+                       (lambda (op operands-ref rewriter type-converter)
+                         #f)))))]))
 
       (let* ([ast-rec (parse-to-ast stx)]
              [validated (validate-ast ast-rec)])
