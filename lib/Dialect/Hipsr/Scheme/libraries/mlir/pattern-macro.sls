@@ -372,19 +372,40 @@
           (syntax-violation 'validate-ast "Root variable must be an identifier"
                            (ast-pattern-expand-root-var ast-rec)))
 
+        ;; Validate and normalize match operations
+        (validate-and-analyze-pattern-matching ast-rec)
+
+        ;; Validate and normalize each rewrite operation
+        (for-each validate-operation (ast-pattern-expand-rewrite ast-rec))
+
+        ;; Validate where bindings
+        (for-each (lambda (where-binding)
+                   (unless (identifier? (ast-where-binding-expand-var where-binding))
+                     (syntax-violation 'validate-ast "Where binding variable must be an identifier"
+                                      (ast-where-binding-expand-var where-binding))))
+                 (ast-pattern-expand-where ast-rec))
+
+        ast-rec)
+
+      ;; Validate and analyze match operations
+      ;; - Normalize op-name (symbol->string)
+      ;; - Find root operation and extract its name
+      (define (validate-and-analyze-pattern-matching ast-rec)
         ;; Validate and normalize each match operation
         (ast-pattern-expand-match-set! ast-rec
           (map (lambda (match-op)
                  ;; Validate result-var is identifier
                  (unless (identifier? (ast-match-expand-result-var match-op))
-                   (syntax-violation 'validate-ast "Match result must be an identifier"
-                                    (ast-match-expand-result-var match-op)))
+                   (syntax-violation 'validate-and-analyze-pattern-matching
+                     "Match result must be an identifier"
+                     (ast-match-expand-result-var match-op)))
                  ;; Validate and normalize op-name (string or symbol -> string)
                  (let* ([op-name-stx (ast-match-expand-op-name match-op)]
                         [op-name-datum (syntax->datum op-name-stx)])
                    (unless (or (string? op-name-datum) (symbol? op-name-datum))
-                     (syntax-violation 'validate-ast "Operation name must be string or symbol"
-                                      op-name-stx))
+                     (syntax-violation 'validate-and-analyze-pattern-matching
+                       "Operation name must be string or symbol"
+                       op-name-stx))
                    (let ([normalized-name (if (string? op-name-datum)
                                              op-name-stx
                                              (datum->syntax op-name-stx (symbol->string op-name-datum)))])
@@ -397,16 +418,6 @@
                        (ast-match-expand-output-type match-op)))))
                (ast-pattern-expand-match ast-rec)))
 
-        ;; Validate and normalize each rewrite operation
-        (for-each (lambda (rewrite-op)
-                    (validate-operation rewrite-op))
-                  (ast-pattern-expand-rewrite ast-rec))
-        (for-each (lambda (where-binding)
-                   (unless (identifier? (ast-where-binding-expand-var where-binding))
-                     (syntax-violation 'validate-ast "Where binding variable must be an identifier"
-                                      (ast-where-binding-expand-var where-binding))))
-                 (ast-pattern-expand-where ast-rec))
-
         ;; Find the match operation that produces root-var and extract its op-name
         (let ([root-var-stx (ast-pattern-expand-root-var ast-rec)]
               [match-ops (ast-pattern-expand-match ast-rec)])
@@ -416,8 +427,7 @@
                 (if (free-identifier=? (ast-match-expand-result-var match-op) root-var-stx)
                     (ast-pattern-expand-root-op-name-set! ast-rec
                       (ast-match-expand-op-name match-op))
-                    (find-root (cdr ops))))))
-          ast-rec))
+                    (find-root (cdr ops))))))))
 
       ;; Validate a single operation and walk its structure
       (define (validate-operation op)
