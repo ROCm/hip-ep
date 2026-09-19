@@ -316,7 +316,6 @@
         (syntax-case block-stx (:)
           ;; ((%var : type) ...) matches zero or more arguments
           [(label ((%var : type) ...) operation ...)
-           (for-all identifier? (syntax->list #'(%var ...)))
            (let ([args (syntax->list #'((%var type) ...))]
                  [ops (map parse-rewrite-operation (syntax->list #'(operation ...)))])
              (make-ast-block-expand #'label args ops))]
