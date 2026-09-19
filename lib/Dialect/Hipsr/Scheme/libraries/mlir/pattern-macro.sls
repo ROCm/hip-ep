@@ -183,14 +183,13 @@
         (syntax-case rest-stx (:where)
           [(:where ((var expr) ...))
            (ast-pattern-expand-where-set! ast 
-             (loop :for binding :in (syntax->list #'((var expr) ...))
-                   :collect (syntax-case binding ()
-                              [(v e) 
-                               (identifier? #'v)
-                               (make-ast-where-binding-expand
-                                 #'v          ;; Store syntax object
-                                 #'e)]        ;; Store syntax object
-                              [_ (syntax-violation 'parse-where "Invalid where binding (expected: (var expr))" binding)])))]
+             (map (lambda (binding)
+                    (syntax-case binding ()
+                      [(v e)
+                       (identifier? #'v)
+                       (make-ast-where-binding-expand #'v #'e)]
+                      [_ (syntax-violation 'parse-where "Invalid where binding (expected: (var expr))" binding)]))
+                  (syntax->list #'((var expr) ...))))]
           [()
            (if #f #f)]
           [_ (syntax-violation 'define-conversion-pattern "Expected :where ((var expr) ...) or end" rest-stx)]))
