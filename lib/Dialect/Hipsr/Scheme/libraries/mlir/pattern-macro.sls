@@ -314,12 +314,7 @@
       ;; Returns ast-block-expand
       (define (parse-block block-stx)
         (syntax-case block-stx (:)
-          ;; Block with no arguments
-          [(label () operation ...)
-           (let ([ops (map parse-rewrite-operation (syntax->list #'(operation ...)))])
-             (make-ast-block-expand #'label '() ops))]
-
-          ;; Block with arguments: ((%var : type) ...)
+          ;; ((%var : type) ...) matches zero or more arguments
           [(label ((%var : type) ...) operation ...)
            (for-all identifier? (syntax->list #'(%var ...)))
            (let ([args (syntax->list #'((%var type) ...))]
