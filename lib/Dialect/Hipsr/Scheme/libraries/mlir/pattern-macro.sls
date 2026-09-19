@@ -321,11 +321,27 @@
                  (syntax-violation 'parse-block
                    "Block label must start with ^ (e.g., ^bb0)"
                    #'label)
-                 (let ([ops (map parse-rewrite-operation (syntax->list #'(operation ...)))])
-                   (make-ast-block-expand #'label #'arguments ops))))]
+                 (let ([args (parse-block-arguments #'arguments)]
+                       [ops (map parse-rewrite-operation (syntax->list #'(operation ...)))])
+                   (make-ast-block-expand #'label args ops))))]
           [_ (syntax-violation 'parse-block
                "Invalid block syntax (expected: (^label (args...) operations...))"
                block-stx)]))
+
+      ;; Parse block arguments: ((%var : type) ...)
+      ;; Returns list of (var type) pairs
+      (define (parse-block-arguments args-stx)
+        (syntax-case args-stx (:)
+          [()  ;; Empty arguments
+           '()]
+          [((%var : type) ...)
+           ;; Validate all vars are identifiers
+           (for-all identifier? (syntax->list #'(%var ...)))
+           ;; Build list of pairs using template
+           (syntax->list #'((%var type) ...))]
+          [_ (syntax-violation 'parse-block-arguments
+               "Invalid block arguments (expected: ((%var : type) ...) form)"
+               args-stx)]))
 
       ;; Accumulate attrs until hitting -> or end
       (define (parse-attrs-section rec rest-stx attrs-acc)
