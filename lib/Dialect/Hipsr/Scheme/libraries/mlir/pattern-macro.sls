@@ -10,7 +10,6 @@
           ast-pattern-debug-ast?
           ast-pattern-debug-matching?)
   (import (rnrs (6))
-          (for (rime loop) expand)                        ;; Import loop macro for expansion time
           (for (only (chezscheme) syntax->list) expand))  ;; Import syntax->list for expansion time
 
   ;; Runtime AST record (created when :debug-ast is used)
@@ -94,8 +93,8 @@
             . where-rest)
            (and (identifier? #'fname)
                 (identifier? #'root)
-                (not (null? #'(match-op ...)))
-                (not (null? #'(rewrite-op ...))))
+                (not (null? (syntax->list #'(match-op ...))))
+                (not (null? (syntax->list #'(rewrite-op ...)))))
            (begin
              ;; Store syntax objects, not datums
              (ast-pattern-expand-function-name-set! ast #'fname)
@@ -108,24 +107,6 @@
                (map parse-rewrite-operation (syntax->list #'(rewrite-op ...))))
              (parse-where #'where-rest ast)
              ast)]
-          
-          ;; Error: function name must be identifier
-          [(fname :match . _)
-           (not (identifier? #'fname))
-           (syntax-violation 'define-conversion-pattern "Function name must be an identifier" #'fname)]
-          
-          ;; Error: root var must be identifier
-          [(_ :match _ :rewrite root . _)
-           (not (identifier? #'root))
-           (syntax-violation 'define-conversion-pattern "Root variable must be an identifier" #'root)]
-          
-          ;; Error: match operations cannot be empty
-          [(_ :match () . _)
-           (syntax-violation 'define-conversion-pattern "At least one match operation required" #'())]
-          
-          ;; Error: rewrite operations cannot be empty
-          [(_ :match _ :rewrite _ :with () . _)
-           (syntax-violation 'define-conversion-pattern "At least one rewrite operation required" #'())]
           
           [_ (syntax-violation 'define-conversion-pattern "Invalid pattern syntax (expected fname :match (...) :rewrite root :with (...))" rest)]))
       
