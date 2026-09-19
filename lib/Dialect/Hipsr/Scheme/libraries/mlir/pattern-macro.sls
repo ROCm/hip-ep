@@ -135,25 +135,18 @@
           ;; cross function boundaries - the = in user's input has different lexical context than
           ;; the = in this helper's literals list, even when properly exported/imported.
           ;; Datum matching with eq? checks symbol names only, bypassing the binding context issue.
+          ;; PARSE PHASE: Only check pattern structure (= : -> positions), no validation
           [(result eq op-name operands attrs colon input-types arrow output-type)
-           (and (identifier? #'result)
-                (identifier? #'eq) (eq? (syntax->datum #'eq) '=)
-                ;; op-name can be either string "test.op" or symbol test.op - convert to string
-                (or (string? (syntax->datum #'op-name))
-                    (symbol? (syntax->datum #'op-name)))
-                (identifier? #'colon) (eq? (syntax->datum #'colon) ':)
-                (identifier? #'arrow) (eq? (syntax->datum #'arrow) '->))
-           (let ([op-name-stx (let ([datum (syntax->datum #'op-name)])
-                                (if (string? datum)
-                                    #'op-name  ;; Already a string, keep as-is
-                                    (datum->syntax #'op-name (symbol->string datum))))])  ;; Convert symbol to string
-             (make-ast-match-expand
-               #'result          ;; Store syntax object
-               op-name-stx       ;; Syntax object wrapping string (converted from symbol if needed)
-               #'operands        ;; Store syntax object (TODO: parse structure)
-               #'attrs           ;; Store syntax object (TODO: parse structure)
-               #'input-types     ;; Store syntax object (TODO: parse structure)
-               #'output-type))]  ;; Store syntax object
+           (and (eq? (syntax->datum #'eq) '=)
+                (eq? (syntax->datum #'colon) ':)
+                (eq? (syntax->datum #'arrow) '->))
+           (make-ast-match-expand
+             #'result          ;; Store syntax object as-is
+             #'op-name         ;; Store syntax object as-is (validation will check/convert)
+             #'operands        ;; Store syntax object (TODO: parse structure)
+             #'attrs           ;; Store syntax object (TODO: parse structure)
+             #'input-types     ;; Store syntax object (TODO: parse structure)
+             #'output-type)]   ;; Store syntax object
 
           [_ (syntax-violation 'parse-match-operation
                "Invalid match operation syntax (expected: result = \"op.name\" operands attrs : types -> type)"
@@ -169,22 +162,15 @@
           ;; Pattern: (result = "op.name" (operands ...) (attrs ...) rest ...)
           ;; WHY datum matching: Same reason as parse-match-operation - literal keywords fail
           ;; when syntax objects are passed between functions due to lexical context mismatch.
+          ;; PARSE PHASE: Only check pattern structure (= position), no validation
           [(result eq op-name operands attrs rest ...)
-           (and (identifier? #'result)
-                (identifier? #'eq) (eq? (syntax->datum #'eq) '=)
-                ;; op-name can be either string "test.op" or symbol test.op - convert to string
-                (or (string? (syntax->datum #'op-name))
-                    (symbol? (syntax->datum #'op-name))))
-           (let ([op-name-stx (let ([datum (syntax->datum #'op-name)])
-                                (if (string? datum)
-                                    #'op-name  ;; Already a string, keep as-is
-                                    (datum->syntax #'op-name (symbol->string datum))))])  ;; Convert symbol to string
-             (make-ast-operation-expand
-               #'result          ;; Store syntax object
-               op-name-stx       ;; Syntax object wrapping string (converted from symbol if needed)
-               #'operands        ;; Store syntax object (TODO: parse structure)
-               #'attrs           ;; Store syntax object (TODO: parse structure)
-               #'(rest ...)))]   ;; Store syntax object
+           (eq? (syntax->datum #'eq) '=)
+           (make-ast-operation-expand
+             #'result          ;; Store syntax object as-is
+             #'op-name         ;; Store syntax object as-is (validation will check/convert)
+             #'operands        ;; Store syntax object (TODO: parse structure)
+             #'attrs           ;; Store syntax object (TODO: parse structure)
+             #'(rest ...))]    ;; Store syntax object
           
           ;; TODO: Add more patterns for variations
           
@@ -209,19 +195,84 @@
           [_ (syntax-violation 'define-conversion-pattern "Expected :where ((var expr) ...) or end" rest-stx)]))
 
       ;;=======================================================================
-      ;; Phase 2: Validate AST record
+      ;; Phase 2: Validate AST record and normalize fields
       ;;=======================================================================
       (define (validate-ast ast-rec)
+        ;; Validate function name
+        (unless (identifier? (ast-pattern-expand-function-name ast-rec))
+          (syntax-violation 'validate-ast "Function name must be an identifier"
+                           (ast-pattern-expand-function-name ast-rec)))
+
+        ;; Validate root-var
+        (unless (identifier? (ast-pattern-expand-root-var ast-rec))
+          (syntax-violation 'validate-ast "Root variable must be an identifier"
+                           (ast-pattern-expand-root-var ast-rec)))
+
+        ;; Validate and normalize each match operation
+        (ast-pattern-expand-match-set! ast-rec
+          (map (lambda (match-op)
+                 ;; Validate result-var is identifier
+                 (unless (identifier? (ast-match-expand-result-var match-op))
+                   (syntax-violation 'validate-ast "Match result must be an identifier"
+                                    (ast-match-expand-result-var match-op)))
+                 ;; Validate and normalize op-name (string or symbol -> string)
+                 (let* ([op-name-stx (ast-match-expand-op-name match-op)]
+                        [op-name-datum (syntax->datum op-name-stx)])
+                   (unless (or (string? op-name-datum) (symbol? op-name-datum))
+                     (syntax-violation 'validate-ast "Operation name must be string or symbol"
+                                      op-name-stx))
+                   (let ([normalized-name (if (string? op-name-datum)
+                                             op-name-stx
+                                             (datum->syntax op-name-stx (symbol->string op-name-datum)))])
+                     (make-ast-match-expand
+                       (ast-match-expand-result-var match-op)
+                       normalized-name  ;; Now guaranteed to be string syntax
+                       (ast-match-expand-operands match-op)
+                       (ast-match-expand-attributes match-op)
+                       (ast-match-expand-input-types match-op)
+                       (ast-match-expand-output-type match-op)))))
+               (ast-pattern-expand-match ast-rec)))
+
+        ;; Validate and normalize each rewrite operation
+        (ast-pattern-expand-rewrite-set! ast-rec
+          (map (lambda (rewrite-op)
+                 ;; Validate result-var is identifier
+                 (unless (identifier? (ast-operation-expand-result-var rewrite-op))
+                   (syntax-violation 'validate-ast "Rewrite result must be an identifier"
+                                    (ast-operation-expand-result-var rewrite-op)))
+                 ;; Validate and normalize op-name
+                 (let* ([op-name-stx (ast-operation-expand-op-name rewrite-op)]
+                        [op-name-datum (syntax->datum op-name-stx)])
+                   (unless (or (string? op-name-datum) (symbol? op-name-datum))
+                     (syntax-violation 'validate-ast "Operation name must be string or symbol"
+                                      op-name-stx))
+                   (let ([normalized-name (if (string? op-name-datum)
+                                             op-name-stx
+                                             (datum->syntax op-name-stx (symbol->string op-name-datum)))])
+                     (make-ast-operation-expand
+                       (ast-operation-expand-result-var rewrite-op)
+                       normalized-name  ;; Now guaranteed to be string syntax
+                       (ast-operation-expand-operands rewrite-op)
+                       (ast-operation-expand-attributes rewrite-op)
+                       (ast-operation-expand-rest rewrite-op)))))
+               (ast-pattern-expand-rewrite ast-rec)))
+
+        ;; Validate where bindings
+        (for-each (lambda (where-binding)
+                   (unless (identifier? (ast-where-binding-expand-var where-binding))
+                     (syntax-violation 'validate-ast "Where binding variable must be an identifier"
+                                      (ast-where-binding-expand-var where-binding))))
+                 (ast-pattern-expand-where ast-rec))
+
         ;; Find the match operation that produces root-var and extract its op-name
         (let ([root-var-stx (ast-pattern-expand-root-var ast-rec)]
               [match-ops (ast-pattern-expand-match ast-rec)])
           (let find-root ([ops match-ops])
             (when (pair? ops)
               (let ([match-op (car ops)])
-                ;; Compare syntax objects using bound-identifier=? or free-identifier=?
                 (if (free-identifier=? (ast-match-expand-result-var match-op) root-var-stx)
-                    (ast-pattern-expand-root-op-name-set! ast-rec 
-                      (ast-match-expand-op-name match-op))  ;; Store syntax object
+                    (ast-pattern-expand-root-op-name-set! ast-rec
+                      (ast-match-expand-op-name match-op))
                     (find-root (cdr ops))))))
           ast-rec))
 
