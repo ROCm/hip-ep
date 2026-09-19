@@ -227,8 +227,7 @@
       (define (parse-rewrite-rest result-stx op-name-stx rest-stx)
         (syntax-case rest-stx (: ->)
           ;; Pattern: (operands) (regions) [attrs] : result-types
-          [(operands regions attrs colon result-types . more)
-           (eq? (syntax->datum #'colon) ':)
+          [(operands regions attrs : result-types)
            (make-ast-operation-expand
              result-stx
              op-name-stx
@@ -238,8 +237,7 @@
              #'result-types)]
 
           ;; Pattern: (operands) [attrs] : result-types (no regions)
-          [(operands attrs colon result-types . more)
-           (eq? (syntax->datum #'colon) ':)
+          [(operands attrs : result-types)
            (make-ast-operation-expand
              result-stx
              op-name-stx
@@ -249,8 +247,7 @@
              #'result-types)]
 
           ;; Pattern: (operands) (regions) : result-types (no attrs)
-          [(operands regions colon result-types . more)
-           (eq? (syntax->datum #'colon) ':)
+          [(operands regions : result-types)
            (make-ast-operation-expand
              result-stx
              op-name-stx
@@ -260,8 +257,7 @@
              #'result-types)]
 
           ;; Pattern: (operands) : result-types (minimal with types)
-          [(operands colon result-types . more)
-           (eq? (syntax->datum #'colon) ':)
+          [(operands : result-types)
            (make-ast-operation-expand
              result-stx
              op-name-stx
