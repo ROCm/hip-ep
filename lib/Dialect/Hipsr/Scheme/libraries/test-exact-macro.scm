@@ -1,41 +1,4 @@
-#!r6rs
-(library (mlir pattern-macro)
-  (export define-conversion-pattern
-          :match :rewrite :with :where :debug-ast :debug-matching = : ->
-          ast-pattern?
-          ast-pattern-function-name
-          ast-pattern-root-op-name
-          ast-pattern-match
-          ast-pattern-rewrite
-          ast-pattern-where
-          ast-pattern-debug-ast?
-          ast-pattern-debug-matching?)
-  (import (except (rnrs (6)) =)
-          (for (only (chezscheme) syntax->list) expand))  ;; Import syntax->list for expansion time
-
-
-  ;; Define keywords as syntax (for cross-library hygiene)
-  (define-syntax :match (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
-  (define-syntax :rewrite (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
-  (define-syntax :with (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
-  (define-syntax :where (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
-  (define-syntax :debug-ast (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
-  (define-syntax :debug-matching (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
-  (define-syntax = (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
-  (define-syntax : (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
-  (define-syntax -> (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
-
-  ;; Runtime AST record (created when :debug-ast is used)
-  ;; Contains datums (symbols, strings, lists) for inspection
-  (define-record-type ast-pattern
-    (fields function-name      ;; symbol - name of the pattern function
-            root-op-name       ;; string - operation name for OpConversionPattern (e.g., "onnx.Cast")
-            match              ;; list - match operations (at least one, raw s-expressions)
-            rewrite            ;; list - rewrite operations (at least one, raw s-expressions)
-            where              ;; list - where bindings (zero or more, raw s-expressions)
-            debug-ast?         ;; boolean - return AST instead of compiled pattern
-            debug-matching?))  ;; boolean - add debug prints during matching
-
+(import (chezscheme) (for (only (chezscheme) syntax->list) expand))
   (define-syntax define-conversion-pattern
     (lambda (stx)
       
@@ -129,7 +92,7 @@
       ;; Output: ast-match-expand record with syntax objects
       ;;=======================================================================
       (define (parse-match-operation op-stx)
-        (syntax-case op-stx (= : ->)
+        (syntax-case op-stx (= :)
           ;; Pattern: (result-var = "op.name" (operands ...) (attrs ...) : (input-types ...) -> output-type)
           [(result = op-name operands attrs : input-types -> output-type)
            (and (identifier? #'result)
@@ -154,7 +117,7 @@
       ;; Output: ast-operation-expand record with syntax objects
       ;;=======================================================================
       (define (parse-rewrite-operation op-stx)
-        (syntax-case op-stx (= : ->)
+        (syntax-case op-stx (= :)
           ;; Pattern: (result = "op.name" (operands ...) (attrs ...) : types ... -> output-type)
           [(result = op-name operands attrs rest ...)
            (and (identifier? #'result)
@@ -246,3 +209,11 @@
         (generate-code stx validated))))
 
 ) ;; end library
+
+(define-conversion-pattern test1
+  :match ((%out = "test.op" (%in) () : (!t) -> !t))
+  :rewrite %out :with ((%new = "new.op" (%in) () : (!t) -> !t)))
+
+(display "test1 is procedure: ")
+(display (procedure? test1))
+(newline)
