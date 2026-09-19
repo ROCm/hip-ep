@@ -399,18 +399,17 @@
         (let ([match-list (ast-pattern-expand-match ast-rec)])
           (for-each
             (lambda (match-op)
-              ;; Validate and normalize op-name
+              ;; op-name must be string or symbol (normalize symbol -> string)
               (let* ([op-name-stx (ast-match-expand-op-name match-op)]
                      [op-name-datum (syntax->datum op-name-stx)])
                 (unless (or (string? op-name-datum) (symbol? op-name-datum))
                   (syntax-violation 'validate-match-operations
                     "Operation name must be string or symbol" op-name-stx))
-                ;; Normalize: symbol -> string
                 (when (symbol? op-name-datum)
                   (ast-match-expand-op-name-set! match-op
                     (datum->syntax op-name-stx (symbol->string op-name-datum)))))
 
-              ;; Validate result-var (identifier or list of identifiers)
+              ;; result-var must be identifier or list of identifiers, starting with %
               (let ([result-var (ast-match-expand-result-var match-op)])
                 (let ([results (if (identifier? result-var)
                                   (list result-var)
@@ -426,7 +425,7 @@
                             "Result identifier must start with %" var))))
                     results)))
 
-              ;; Validate operands
+              ;; operands must be identifiers starting with %
               (let ([operands (syntax->list (ast-match-expand-operands match-op))])
                 (for-each
                   (lambda (var)
