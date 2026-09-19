@@ -16,8 +16,8 @@ namespace {
 
 /// MorphiZen imports com.microsoft QuantizeLinear / DequantizeLinear function
 /// ops as generic onnx.Custom operations. Canonicalize them to the native ONNX
-/// operation names before the PDLL fusion pass runs so existing QDQ fusion and
-/// lowering patterns work for both importer representations.
+/// operation names so that the QDQ lowering patterns below, which only match
+/// the native spelling, work for both importer representations.
 struct CustomQdqToNativeOnnx : public mlir::RewritePattern {
   CustomQdqToNativeOnnx(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}

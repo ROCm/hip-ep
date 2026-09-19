@@ -15,6 +15,7 @@
 #include "hip/Dialect/IR/HipDialect.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -37,12 +38,13 @@ namespace {
 
 void emitSampleConstant(mlir::func::FuncOp function,
                         llvm::StringRef sourceName) {
+  mlir::Block &entry = function.front();
   mlir::OpBuilder builder(function.getContext());
-  builder.setInsertionPointToStart(&function.front());
-  auto tensorType = mlir::RankedTensorType::get({2}, builder.getIntegerType(8));
+  builder.setInsertionPointToStart(&entry);
+  auto tensorType = mlir::RankedTensorType::get({2}, builder.getF32Type());
   llvm::SmallVector<mlir::Attribute> values = {
-      builder.getI8IntegerAttr(101),
-      builder.getI8IntegerAttr(102),
+      builder.getF32FloatAttr(101.0f),
+      builder.getF32FloatAttr(102.0f),
   };
   auto value = mlir::DenseElementsAttr::get(tensorType, values);
   auto constant = mlir::hip::ConstantOp::create(builder, function.getLoc(),
@@ -50,6 +52,31 @@ void emitSampleConstant(mlir::func::FuncOp function,
   auto name = builder.getStringAttr(sourceName);
   constant.setSymbolNameHintAttr(name);
   constant.setSourceNameAttr(name);
+
+  mlir::Value context;
+  for (mlir::BlockArgument argument : function.getArguments()) {
+    if (mlir::isa<mlir::hip::ContextType>(argument.getType())) {
+      context = argument;
+      break;
+    }
+  }
+  auto terminator = mlir::dyn_cast<mlir::func::ReturnOp>(entry.getTerminator());
+  if (!context || !terminator)
+    return;
+
+  for (mlir::OpOperand &returned : terminator->getOpOperands()) {
+    if (returned.get().getType() != tensorType)
+      continue;
+    builder.setInsertionPoint(terminator);
+    mlir::Value init = mlir::tensor::EmptyOp::create(
+        builder, function.getLoc(), tensorType.getShape(),
+        tensorType.getElementType());
+    auto biased =
+        mlir::hip::AddOp::create(builder, function.getLoc(), context,
+                                 returned.get(), constant.getResult(), init);
+    returned.set(biased->getResult(0));
+    break;
+  }
 }
 
 // Emits one remark per func.func. A marked function also gets a plugin-owned
@@ -66,6 +93,10 @@ struct SamplePrintFunctionsPass
 
   llvm::StringRef getDescription() const final {
     return "Sample plugin pass: emit a remark and optional hip.constant";
+  }
+
+  void getDependentDialects(mlir::DialectRegistry &registry) const override {
+    registry.insert<mlir::hip::HipDialect, mlir::tensor::TensorDialect>();
   }
 
   void runOnOperation() override {
@@ -90,6 +121,10 @@ struct SampleEmitLateConstantPass
 
   llvm::StringRef getDescription() const final {
     return "Sample plugin negative fixture: emit a late hip.constant";
+  }
+
+  void getDependentDialects(mlir::DialectRegistry &registry) const override {
+    registry.insert<mlir::hip::HipDialect, mlir::tensor::TensorDialect>();
   }
 
   void runOnOperation() override {

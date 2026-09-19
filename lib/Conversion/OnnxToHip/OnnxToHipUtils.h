@@ -471,7 +471,8 @@ void populateQdqConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 
 /// Canonicalize com.microsoft QuantizeLinear / DequantizeLinear represented as
-/// onnx.Custom into native ONNX QDQ ops. Must run before the PDLL fusion pass.
+/// onnx.Custom into native ONNX QDQ ops. Must run before QDQ conversion, which
+/// only matches the native spelling.
 void populateCustomQdqCanonicalizationPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 
