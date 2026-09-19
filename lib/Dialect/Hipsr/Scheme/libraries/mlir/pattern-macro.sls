@@ -66,14 +66,15 @@
       ;; Expansion-time AST record for rewrite operations
       ;; Contains syntax objects for code generation
       ;; Field order matches MLIR generic syntax: operands, regions, attributes, types
+      ;; Note: No input-types field because input types are implicit in operands
+      ;;       (each operand is a Value with .getType()). Only result types are needed.
       (define-record-type (ast-operation-expand make-ast-operation-expand ast-operation-expand?)
         (fields result-var     ;; syntax - identifier (e.g., #'%new)
                 op-name        ;; syntax - string literal (e.g., #'"hipsr.cast")
                 operands       ;; syntax - operand expressions
                 regions        ;; syntax - regions (before attributes in MLIR syntax)
                 attributes     ;; syntax - attribute expressions
-                input-types    ;; syntax - input types
-                output-type))  ;; syntax - output type
+                result-types)) ;; syntax - result type(s) for operation output
 
       ;; Expansion-time AST record for where bindings
       ;; Contains syntax objects for code generation
@@ -193,58 +194,105 @@
       
       ;;=======================================================================
       ;; Parse individual rewrite operation
-      ;; Input: (%new = "hipsr.cast" (%ctx %in) ((attr val)) : (!t1 !t2) -> !t3)
-      ;; Output: ast-operation-expand record with syntax objects
+      ;; Follows MLIR generic syntax:
+      ;;   (result-list =)? "op.name" (operands) (regions)? [attrs]? : result-types
+      ;;
+      ;; Examples:
+      ;;   (%r = "op" ())                           - no operands, minimal
+      ;;   (%r = "op" (%a %b))                      - with operands
+      ;;   (%r = "op" (%a) [attr val])              - with attrs
+      ;;   (%r = "op" (%a) : i32)                   - with result type
+      ;;   (%r = "op" (%a) ([^bb0: ...]) [attrs] : i32)  - full
+      ;;   ((%r1 %r2) = "op" ())                    - multiple results
+      ;;   ("op" ())                                - no results
       ;;=======================================================================
       (define (parse-rewrite-operation op-stx)
-        (syntax-case op-stx (= : ->)
-          ;; Full pattern: (result = "op.name" (operands ...) (attrs ...) : (input-types ...) -> output-type)
-          [(result = op-name operands attrs : input-types -> output-type)
-           (make-ast-operation-expand
-             #'result
-             #'op-name
-             #'operands
-             #'attrs
-             #'input-types
-             #'output-type
-             #'())]            ;; Empty regions (TODO: add region syntax)
+        ;; Step 1: Extract result(s), =, op-name, and rest
+        (syntax-case op-stx (=)
+          ;; Pattern: (result = op-name . rest) or ((results ...) = op-name . rest)
+          [(result-part = op-name . rest)
+           (parse-rewrite-rest #'result-part #'op-name #'rest)]
 
-          ;; No types: (result = "op.name" (operands ...) (attrs ...))
-          [(result = op-name operands attrs)
-           (make-ast-operation-expand
-             #'result
-             #'op-name
-             #'operands
-             #'attrs
-             #'()              ;; Empty input-types
-             #'()              ;; Empty output-type
-             #'())]            ;; Empty regions
-
-          ;; No attrs, with types: (result = "op.name" (operands ...) : (input-types ...) -> output-type)
-          [(result = op-name operands : input-types -> output-type)
-           (make-ast-operation-expand
-             #'result
-             #'op-name
-             #'operands
-             #'()              ;; Empty attrs
-             #'input-types
-             #'output-type
-             #'())]            ;; Empty regions
-
-          ;; Minimal: (result = "op.name" (operands ...))
-          [(result = op-name operands)
-           (make-ast-operation-expand
-             #'result
-             #'op-name
-             #'operands
-             #'()              ;; Empty attrs
-             #'()              ;; Empty input-types
-             #'()              ;; Empty output-type
-             #'())]            ;; Empty regions
+          ;; Pattern: ("op-name" . rest) - no result
+          [(op-name . rest)
+           (or (string? (syntax->datum #'op-name))
+               (symbol? (syntax->datum #'op-name)))
+           (parse-rewrite-rest #'() #'op-name #'rest)]
 
           [_ (syntax-violation 'parse-rewrite-operation
-               "Invalid rewrite operation syntax (expected: result = \"op.name\" operands [attrs] [: types -> type])"
+               "Invalid operation syntax (expected: [result =] \"op.name\" (operands) ...)"
                op-stx)]))
+
+      ;; Step 2: Parse the rest: (operands) (regions)? [attrs]? : result-types
+      (define (parse-rewrite-rest result-stx op-name-stx rest-stx)
+        (syntax-case rest-stx (: ->)
+          ;; Pattern: (operands) (regions) [attrs] : result-types
+          [(operands regions attrs colon result-types . more)
+           (eq? (syntax->datum #'colon) ':)
+           (make-ast-operation-expand
+             result-stx
+             op-name-stx
+             #'operands
+             #'regions
+             #'attrs
+             #'result-types)]
+
+          ;; Pattern: (operands) [attrs] : result-types (no regions)
+          [(operands attrs colon result-types . more)
+           (eq? (syntax->datum #'colon) ':)
+           (make-ast-operation-expand
+             result-stx
+             op-name-stx
+             #'operands
+             #'()           ;; Empty regions
+             #'attrs
+             #'result-types)]
+
+          ;; Pattern: (operands) (regions) : result-types (no attrs)
+          [(operands regions colon result-types . more)
+           (eq? (syntax->datum #'colon) ':)
+           (make-ast-operation-expand
+             result-stx
+             op-name-stx
+             #'operands
+             #'regions
+             #'()           ;; Empty attrs
+             #'result-types)]
+
+          ;; Pattern: (operands) : result-types (minimal with types)
+          [(operands colon result-types . more)
+           (eq? (syntax->datum #'colon) ':)
+           (make-ast-operation-expand
+             result-stx
+             op-name-stx
+             #'operands
+             #'()           ;; Empty regions
+             #'()           ;; Empty attrs
+             #'result-types)]
+
+          ;; Pattern: (operands) [attrs] (no types)
+          [(operands attrs)
+           (make-ast-operation-expand
+             result-stx
+             op-name-stx
+             #'operands
+             #'()           ;; Empty regions
+             #'attrs
+             #'())]         ;; Empty result-types
+
+          ;; Pattern: (operands) (minimal - just operands)
+          [(operands)
+           (make-ast-operation-expand
+             result-stx
+             op-name-stx
+             #'operands
+             #'()           ;; Empty regions
+             #'()           ;; Empty attrs
+             #'())]         ;; Empty result-types
+
+          [_ (syntax-violation 'parse-rewrite-rest
+               "Invalid operation syntax after op-name (expected: (operands) [(regions)] [[attrs]] [: result-types])"
+               rest-stx)]))
       
       ;; Helper: parse optional :where clause
       (define (parse-where rest-stx ast)
@@ -321,10 +369,9 @@
                        (ast-operation-expand-result-var rewrite-op)
                        normalized-name  ;; Now guaranteed to be string syntax
                        (ast-operation-expand-operands rewrite-op)
+                       (ast-operation-expand-regions rewrite-op)
                        (ast-operation-expand-attributes rewrite-op)
-                       (ast-operation-expand-input-types rewrite-op)
-                       (ast-operation-expand-output-type rewrite-op)
-                       (ast-operation-expand-regions rewrite-op)))))
+                       (ast-operation-expand-result-types rewrite-op)))))
                (ast-pattern-expand-rewrite ast-rec)))
 
         ;; Validate where bindings
@@ -365,9 +412,9 @@
               (syntax->datum (ast-operation-expand-result-var op-exp))
               (syntax->datum (ast-operation-expand-op-name op-exp))
               (syntax->datum (ast-operation-expand-operands op-exp))
+              (syntax->datum (ast-operation-expand-regions op-exp))
               (syntax->datum (ast-operation-expand-attributes op-exp))
-              (syntax->datum (ast-operation-expand-input-types op-exp))
-              (syntax->datum (ast-operation-expand-output-type op-exp))))
+              (syntax->datum (ast-operation-expand-result-types op-exp))))
 
       ;; Convert ast-where-binding-expand to datum for runtime AST record
       (define (where-binding-expand->datum where-exp)
