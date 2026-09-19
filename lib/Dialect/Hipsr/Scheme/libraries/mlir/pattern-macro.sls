@@ -429,83 +429,41 @@
       ;; Analyze match operations - build match-bindings and match-actions
       (define (analyze-match-operations ast-rec)
         ;; Convert match list to vector for index-based access
-        (let* ([match-list (ast-pattern-expand-match ast-rec)]
-               [match-vec (list->vector match-list)]
-               [bindings (make-eq-hashtable)]  ;; identifier -> matcher
-               [actions '()])  ;; list of matchers (accumulated in reverse, will reverse at end)
+        (let* ([match-vec (list->vector (ast-pattern-expand-match ast-rec))]
+               [bindings (make-eq-hashtable)]
+               [actions '()])
 
           ;; Walk through each match operation
-          (let loop ([op-idx 0])
-            (when (< op-idx (vector-length match-vec))
-              (let ([match-op (vector-ref match-vec op-idx)])
+          (loop :for op-idx :from 0 :below (vector-length match-vec)
+                :rime-with match-op := (vector-ref match-vec op-idx)
+                :rime-with op-name := (let ([op-name-datum (syntax->datum (ast-match-expand-op-name match-op))])
+                                         (if (string? op-name-datum)
+                                             op-name-datum
+                                             (symbol->string op-name-datum)))
+                :rime-with results := (let ([rv (ast-match-expand-result-var match-op)])
+                                        (if (identifier? rv) (list rv) (syntax->list rv)))
+                :rime-with operands := (syntax->list (ast-match-expand-operands match-op))
 
-                ;; 1. Validate and normalize op-name
-                (let* ([op-name-stx (ast-match-expand-op-name match-op)]
-                       [op-name-datum (syntax->datum op-name-stx)])
-                  (unless (or (string? op-name-datum) (symbol? op-name-datum))
-                    (syntax-violation 'validate-and-analyze-pattern-matching
-                      "Operation name must be string or symbol" op-name-stx))
-                  ;; Normalize: symbol -> string
-                  (when (symbol? op-name-datum)
-                    (ast-match-expand-op-name-set! match-op
-                      (datum->syntax op-name-stx (symbol->string op-name-datum))))
+                ;; Create :match-operation action
+                :do (set! actions (cons (list ':match-operation op-name op-idx) actions))
 
-                  ;; Create :match-operation action
-                  (let ([op-name-str (if (string? op-name-datum)
-                                        op-name-datum
-                                        (symbol->string op-name-datum))])
-                    (set! actions (cons (list ':match-operation op-name-str op-idx) actions))))
+                ;; Process results with nested loop
+                (:loop :for result-idx :from 0
+                       :for var :in results
+                       :do (let ([matcher (list ':match-result result-idx op-idx)])
+                             (hashtable-set! bindings var matcher)
+                             (set! actions (cons matcher actions))))
 
-                ;; 2. Process result-var (identifier or list of identifiers)
-                (let ([result-var (ast-match-expand-result-var match-op)])
-                  (let process-results ([results (if (identifier? result-var)
-                                                    (list result-var)
-                                                    (syntax->list result-var))]
-                                       [result-idx 0])
-                    (when (pair? results)
-                      (let ([var (car results)])
-                        ;; Validate: must be identifier starting with %
-                        (unless (identifier? var)
-                          (syntax-violation 'validate-and-analyze-pattern-matching
-                            "Result must be identifier" var))
-                        (let ([var-name (symbol->string (syntax->datum var))])
-                          (unless (char=? (string-ref var-name 0) #\%)
-                            (syntax-violation 'validate-and-analyze-pattern-matching
-                              "Result identifier must start with %" var)))
-
-                        ;; Create :match-result and add to bindings
-                        (let ([matcher (list ':match-result result-idx op-idx)])
-                          (hashtable-set! bindings var matcher)
-                          (set! actions (cons matcher actions)))
-
-                        (process-results (cdr results) (+ result-idx 1))))))
-
-                ;; 3. Process operands
-                (let ([operands (syntax->list (ast-match-expand-operands match-op))])
-                  (let process-operands ([ops operands] [operand-idx 0])
-                    (when (pair? ops)
-                      (let ([var (car ops)])
-                        ;; Validate: must be identifier starting with %
-                        (unless (identifier? var)
-                          (syntax-violation 'validate-and-analyze-pattern-matching
-                            "Operand must be identifier" var))
-                        (let ([var-name (symbol->string (syntax->datum var))])
-                          (unless (char=? (string-ref var-name 0) #\%)
-                            (syntax-violation 'validate-and-analyze-pattern-matching
-                              "Operand identifier must start with %" var)))
-
-                        ;; Check if first occurrence or reuse
-                        (if (hashtable-ref bindings var #f)
-                            ;; Reuse: create :match-exact-value
-                            (set! actions (cons (list ':match-exact-value var operand-idx op-idx) actions))
-                            ;; First occurrence: create :match-operand
-                            (let ([matcher (list ':match-operand operand-idx op-idx)])
-                              (hashtable-set! bindings var matcher)
-                              (set! actions (cons matcher actions))))
-
-                        (process-operands (cdr ops) (+ operand-idx 1))))))
-
-                (loop (+ op-idx 1)))))
+                ;; Process operands with nested loop
+                (:loop :for operand-idx :from 0
+                       :for var :in operands
+                       :do (if (hashtable-ref bindings var #f)
+                               ;; Reuse: create :match-exact-value
+                               (set! actions (cons (list ':match-exact-value var operand-idx op-idx) actions))
+                               ;; First occurrence: create :match-operand
+                               (let ([matcher (list ':match-operand operand-idx op-idx)])
+                                 (hashtable-set! bindings var matcher)
+                                 (set! actions (cons matcher actions))))))
 
           ;; Store results (reverse actions to maintain order)
           (ast-pattern-expand-match-bindings-set! ast-rec bindings)
