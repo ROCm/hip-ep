@@ -514,16 +514,16 @@
           ;; Find root operation and extract its name
           (let ([root-var (ast-pattern-expand-root-var ast-rec)])
             (loop :for op-idx :from 0 :below (vector-length match-vec)
-                  :do (let* ([match-op (vector-ref match-vec op-idx)]
-                             [result-var (ast-match-expand-result-var match-op)]
-                             [is-root? (if (identifier? result-var)
-                                          (free-identifier=? result-var root-var)
-                                          (loop :for var :in (syntax->list result-var)
-                                                :break #t :if (free-identifier=? var root-var)
-                                                :finally #f))])
-                        (when is-root?
-                          (ast-pattern-expand-root-op-name-set! ast-rec
-                            (ast-match-expand-op-name match-op))))))))
+                  :rime-with match-op := (vector-ref match-vec op-idx)
+                  :rime-with result-var := (ast-match-expand-result-var match-op)
+                  :rime-with is-root? := (if (identifier? result-var)
+                                            (free-identifier=? result-var root-var)
+                                            (loop :for var :in (syntax->list result-var)
+                                                  :break #t :if (free-identifier=? var root-var)
+                                                  :finally #f))
+                  :do (when is-root?
+                        (ast-pattern-expand-root-op-name-set! ast-rec
+                          (ast-match-expand-op-name match-op)))))))
 
       ;; Validate a single operation and walk its structure
       (define (validate-operation op)
