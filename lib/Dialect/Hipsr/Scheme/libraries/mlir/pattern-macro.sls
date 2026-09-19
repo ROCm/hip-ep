@@ -129,11 +129,15 @@
       ;; Output: ast-match-expand record with syntax objects
       ;;=======================================================================
       (define (parse-match-operation op-stx)
-        (syntax-case op-stx (= : ->)
-          ;; Pattern: (result-var = "op.name" (operands ...) (attrs ...) : (input-types ...) -> output-type)
-          [(result = op-name operands attrs : input-types -> output-type)
+        (syntax-case op-stx ()
+          ;; Pattern: (result = "op.name" (operands ...) (attrs ...) : (input-types ...) -> output-type)
+          ;; Use datum matching instead of literal keywords for helper functions
+          [(result eq op-name operands attrs colon input-types arrow output-type)
            (and (identifier? #'result)
-                (string? (syntax->datum #'op-name)))  ;; Check it's a string, but store syntax
+                (identifier? #'eq) (eq? (syntax->datum #'eq) '=)
+                (string? (syntax->datum #'op-name))
+                (identifier? #'colon) (eq? (syntax->datum #'colon) ':)
+                (identifier? #'arrow) (eq? (syntax->datum #'arrow) '->))
            (make-ast-match-expand
              #'result          ;; Store syntax object
              #'op-name         ;; Store syntax object (string literal)
@@ -141,10 +145,8 @@
              #'attrs           ;; Store syntax object (TODO: parse structure)
              #'input-types     ;; Store syntax object (TODO: parse structure)
              #'output-type)]   ;; Store syntax object
-          
-          ;; TODO: Add more patterns for variations
-          
-          [_ (syntax-violation 'parse-match-operation 
+
+          [_ (syntax-violation 'parse-match-operation
                "Invalid match operation syntax (expected: result = \"op.name\" operands attrs : types -> type)"
                op-stx)]))
       
@@ -154,11 +156,13 @@
       ;; Output: ast-operation-expand record with syntax objects
       ;;=======================================================================
       (define (parse-rewrite-operation op-stx)
-        (syntax-case op-stx (= : ->)
-          ;; Pattern: (result = "op.name" (operands ...) (attrs ...) : types ... -> output-type)
-          [(result = op-name operands attrs rest ...)
+        (syntax-case op-stx ()
+          ;; Pattern: (result = "op.name" (operands ...) (attrs ...) rest ...)
+          ;; Use datum matching instead of literal keywords
+          [(result eq op-name operands attrs rest ...)
            (and (identifier? #'result)
-                (string? (syntax->datum #'op-name)))  ;; Check it's a string, but store syntax
+                (identifier? #'eq) (eq? (syntax->datum #'eq) '=)
+                (string? (syntax->datum #'op-name)))
            (make-ast-operation-expand
              #'result          ;; Store syntax object
              #'op-name         ;; Store syntax object (string literal)
