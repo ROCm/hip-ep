@@ -213,14 +213,13 @@
       (define (parse-rewrite-operation op-stx)
         ;; Step 1: Extract result(s), =, op-name, and rest
         (syntax-case op-stx (=)
-          ;; Pattern: (result = op-name . rest) or ((results ...) = op-name . rest)
+          ;; Pattern: (result-part = op-name . rest) or ((results ...) = op-name . rest)
           [(result-part = op-name . rest)
            (parse-rewrite-rest #'result-part #'op-name #'rest)]
 
-          ;; Pattern: ("op-name" . rest) - no result
+          ;; Pattern: (op-name . rest) - no result
+          ;; Validation will check if op-name is valid string/symbol
           [(op-name . rest)
-           (or (string? (syntax->datum #'op-name))
-               (symbol? (syntax->datum #'op-name)))
            (parse-rewrite-rest #'() #'op-name #'rest)]
 
           [_ (syntax-violation 'parse-rewrite-operation
