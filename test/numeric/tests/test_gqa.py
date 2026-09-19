@@ -21,6 +21,13 @@ GPT-OSS-20B (packed QKV, in-op rotary, attention sinks):
   scale = 1/sqrt(64) = 0.125, do_rotary = 1
   cos/sin cache: [131072, 32], sinks: [64]
   Variants: local_window_size = 128  and  local_window_size = -1 (full)
+
+Gemma-4-style windowed prefill (separate Q/K/V, head_dim = 256):
+  num_heads = 8, kv_num_heads = 4, head_dim = 256
+  hidden = 2048, kv_hidden = 1024, local_window_size = 128
+  A windowed prefill at head_dim 256 is the one attention shape the fused
+  WMMA path rejects, so it is also the only one that exercises the
+  decomposed pipeline's query-row tiling.
 """
 
 import numpy as np
@@ -49,6 +56,14 @@ GPT_OSS_KV_HIDDEN = GPT_OSS_KV_NUM_HEADS * GPT_OSS_HEAD_DIM  # 512
 GPT_OSS_QKV_HIDDEN = GPT_OSS_Q_HIDDEN + 2 * GPT_OSS_KV_HIDDEN  # 5120
 GPT_OSS_MAX_POS = 131072
 GPT_OSS_HALF_HEAD_DIM = GPT_OSS_HEAD_DIM // 2  # 32
+
+# --- Gemma-4-style windowed prefill constants ---
+GEMMA_NUM_HEADS = 8
+GEMMA_KV_NUM_HEADS = 4
+GEMMA_HEAD_DIM = 256
+GEMMA_HIDDEN = GEMMA_NUM_HEADS * GEMMA_HEAD_DIM  # 2048
+GEMMA_KV_HIDDEN = GEMMA_KV_NUM_HEADS * GEMMA_HEAD_DIM  # 1024
+GEMMA_WINDOW = 128
 
 
 def _make_gqa_model(
@@ -128,7 +143,14 @@ def _make_gqa_model(
 
 
 def _make_gqa_fixed_cache_model(
-    batch, seq_len, cache_size, hidden, kv_hidden, num_heads, kv_num_heads
+    batch,
+    seq_len,
+    cache_size,
+    hidden,
+    kv_hidden,
+    num_heads,
+    kv_num_heads,
+    local_window_size=-1,
 ):
     """Build a GQA ONNX model with pre-allocated fixed-size KV cache.
 
@@ -193,6 +215,7 @@ def _make_gqa_fixed_cache_model(
         num_heads=num_heads,
         kv_num_heads=kv_num_heads,
         scale=scale,
+        local_window_size=local_window_size,
         do_rotary=0,
         rotary_interleaved=0,
         softcap=0.0,
@@ -502,6 +525,60 @@ class TestGroupQueryAttention:
             [qkv, pk, pv, seqlens, total],
         )
         compare_outputs(actual, expected, atol=1e-2, rtol=1e-2, cos_threshold=0.999)
+
+    @pytest.mark.parametrize("seq_len", [512, 256])
+    def test_gqa_window_prefill_tiled_gemma_shape(self, model_runner, seq_len):
+        """Windowed prefill longer than its window, at head_dim 256.
+
+        Covers the query-row tiling in lib/Runtime/real/gqa.cpp: a windowed
+        prefill is cut into chunks of ``local_window_size`` rows even when the
+        score matrix already fits the byte budget, because a single chunk takes
+        its key bound from its FIRST row and so cannot narrow anything.  The
+        gate is ``sq > local_window_size``, which needs a prefill longer than
+        the window -- 128-token cases never reach it.
+
+        head_dim 256 is load-bearing, not incidental.  A windowed prefill is
+        implemented on the fused WMMA path at head_dim 64 and 128, so those
+        geometries (GPT-OSS above) never reach the decomposed pipeline where
+        the tiling lives.  256 is the shape the fused path declines.
+
+        Cache layout is the fixed-size (past == present extent) pattern with an
+        empty cache, so total_seq == sq and past_len == 0 -- the fresh-prefill
+        shape the tiling was written for, and the one where a chunk's bound is
+        derived purely from its own query range.
+        """
+        cache_size = seq_len
+
+        model = _make_gqa_fixed_cache_model(
+            1,
+            seq_len,
+            cache_size,
+            GEMMA_HIDDEN,
+            GEMMA_KV_HIDDEN,
+            GEMMA_NUM_HEADS,
+            GEMMA_KV_NUM_HEADS,
+            local_window_size=GEMMA_WINDOW,
+        )
+
+        rng = np.random.default_rng(42)
+        q = rng.uniform(-1, 1, [1, seq_len, GEMMA_HIDDEN]).astype(np.float16)
+        k = rng.uniform(-1, 1, [1, seq_len, GEMMA_KV_HIDDEN]).astype(np.float16)
+        v = rng.uniform(-1, 1, [1, seq_len, GEMMA_KV_HIDDEN]).astype(np.float16)
+        # Empty cache: every scored key comes from this prefill's own K/V.
+        pk = np.zeros(
+            [1, GEMMA_KV_NUM_HEADS, cache_size, GEMMA_HEAD_DIM], dtype=np.float16
+        )
+        pv = np.zeros(
+            [1, GEMMA_KV_NUM_HEADS, cache_size, GEMMA_HEAD_DIM], dtype=np.float16
+        )
+        seqlens = np.array([seq_len - 1], dtype=np.int32)
+        total = np.array(cache_size, dtype=np.int32)
+
+        actual, expected = model_runner.run_sample(
+            model,
+            [q, k, v, pk, pv, seqlens, total],
+        )
+        compare_outputs(actual, expected, atol=1e-3)
 
     @pytest.mark.parametrize("past_valid", [0, 64, 128])
     def test_gqa_prefill_fixed_cache_llama_shape(self, model_runner, past_valid):

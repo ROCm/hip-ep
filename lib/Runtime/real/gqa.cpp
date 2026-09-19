@@ -867,10 +867,10 @@ static bool gqa_no_expand_prefill_enabled() {
 // for A/B testing.
 //
 // The default is deliberately far above any shape that already runs well: at
-// 1 GiB nothing tiles below roughly 3.5K tokens on a 16-head model, so short
-// and medium sequences keep their existing kernel launch counts and descriptor
-// cache entries exactly, and only the lengths whose score matrices are already
-// tens of gigabytes change behaviour.
+// 1 GiB an *unwindowed* op does not tile below roughly 3.5K tokens on a
+// 16-head model. Windowed prefills still tile below that budget (see
+// gqa_forward_hipblaslt) because a single query chunk cannot apply a sliding
+// window.
 static size_t gqa_score_budget_bytes() {
   static const size_t budget = [] {
     const char *v = std::getenv("HIPDNN_EP_GQA_SCORE_BUDGET_MB");
@@ -891,6 +891,11 @@ static size_t gqa_score_budget_bytes() {
 // extra chunk, since a ragged n on one chunk is cheaper than a whole extra
 // pass.
 static constexpr int64_t kScoreChunkAlign = 128;
+
+// Windowed prefills are cut into this many query rows per window length so
+// each chunk's KV span can actually shrink. 1024/4 = 256 matches the
+// HIPDNN_EP_GQA_SCORE_BUDGET_MB=64 A/B (sq=2398, window=1024).
+static constexpr int64_t kWindowChunkDivisor = 4;
 
 // Env-var gate to force decode through the decomposed hipBLASLt pipeline
 // instead of the fused custom kernel hip_gqa_fused_decode. Default off
@@ -1776,9 +1781,27 @@ static int gqa_forward_hipblaslt(
   // whole, so Q is read and O is written through a per-chunk offset while their
   // batch strides continue to describe the full sq.
   //
-  // Chunking is skipped entirely unless the score pair exceeds the budget, in
-  // which case sq_chunk == sq, the loop below runs once, the GEMM keys keep
-  // their dense default strides and the behaviour is exactly what it was.
+  // Two independent reasons to chunk, and the smaller chunk of the two wins:
+  //
+  //  - Footprint. The score pair would exceed the byte budget, so rows are
+  //    capped at what fits. This is the only reason that applies to an
+  //    unwindowed op, whose chunks score the same keys in total however they
+  //    are cut, and so it keeps its high default: nothing is gained by cutting
+  //    a shape that already fits.
+  //
+  //  - A window. A single chunk cannot apply a sliding window at all. Every
+  //    key bound is the union over the query rows it covers, so the one chunk
+  //    of an unchunked call reaches back from its FIRST row -- at a prefill
+  //    that is absolute position past_len, where the window's lower bound is
+  //    non-positive and bounds nothing, which is why the op-level kv_span above
+  //    stays the full sequence there. The window only starts paying once the
+  //    query range is cut into chunks that each carry their own bound, so a
+  //    windowed prefill is chunked whether or not it fits the budget.
+  //
+  // Where neither applies sq_chunk == sq, the loop below runs once, the GEMM
+  // keys keep their dense default strides and the behaviour is exactly what it
+  // was. A budget of 0 (HIPDNN_EP_GQA_SCORE_BUDGET_MB=0) suppresses both and
+  // restores the single-shot path for A/B testing.
   //
   // The no-expand flavour is excluded: its Q and O operands are laid out
   // [B, G, HPG, sq, d] with n = HPG*sq, so a range of query rows is not a
@@ -1786,16 +1809,16 @@ static int gqa_forward_hipblaslt(
   // is off by default for prefill.
   //===--------------------------------------------------------------------===//
   int64_t sq_chunk = sq;
-  if (sq > 1 && !use_no_expand) {
-    // kv_span, matching what the score buffers are actually sized to below: on
-    // a narrowed windowed prefill a row is cheaper, so more rows fit per chunk
-    // and the loop runs fewer times.
+  const size_t score_budget = gqa_score_budget_bytes();
+  if (sq > 1 && !use_no_expand && score_budget > 0) {
+    // A row's cost is taken against kv_span, matching what the score buffers
+    // are actually sized to below: on a narrowed windowed prefill a row is
+    // cheaper, so more rows fit per chunk and the loop runs fewer times.
     const size_t score_row_bytes =
         static_cast<size_t>(B) * H * kv_span * (sizeof(float) + elem_sz);
-    const size_t budget = gqa_score_budget_bytes();
-    if (budget > 0 && score_row_bytes > 0 &&
-        static_cast<size_t>(sq) * score_row_bytes > budget) {
-      int64_t rows = static_cast<int64_t>(budget / score_row_bytes);
+    if (score_row_bytes > 0 &&
+        static_cast<size_t>(sq) * score_row_bytes > score_budget) {
+      int64_t rows = static_cast<int64_t>(score_budget / score_row_bytes);
       // A single row can already exceed the budget on a long enough context.
       // Correctness wins: one row per chunk is the floor.
       if (rows < 1)
@@ -1805,6 +1828,27 @@ static int gqa_forward_hipblaslt(
       if (rows > sq)
         rows = sq;
       sq_chunk = rows;
+    }
+    // The window-driven chunk, gated on the narrowing actually being available
+    // and on there being something for it to remove:
+    //
+    //  - chunk_narrow_ok, because a chunk's bounds are meaningless without the
+    //    absolute-position identity they are derived from; chunking such a
+    //    shape would add passes and narrow nothing.
+    //
+    //  - sq > local_window_size, which is exactly the condition for some row of
+    //    the call to sit further than a window above its first row. Below it,
+    //    every row of every chunk can reach the whole op-level range and no
+    //    chunk's lower bound moves.
+    if (local_window_size > 0 && chunk_narrow_ok && sq > local_window_size) {
+      int64_t rows = std::max<int64_t>(kScoreChunkAlign,
+                                       local_window_size / kWindowChunkDivisor);
+      if (rows >= 2 * kScoreChunkAlign)
+        rows -= rows % kScoreChunkAlign;
+      // Both reasons bound the chunk from above, so honour whichever is
+      // tighter: a windowed prefill long enough to exceed the budget still has
+      // to fit it.
+      sq_chunk = std::min<int64_t>(sq_chunk, rows);
     }
   }
   const bool chunked = (sq_chunk < sq);
