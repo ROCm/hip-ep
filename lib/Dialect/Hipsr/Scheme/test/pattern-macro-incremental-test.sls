@@ -37,6 +37,18 @@
           (^else ()
             (%f = "arith.constant" () :attrs [value 0] -> i32)))
        -> i32)))
+
+  ;; Test 5: func.func with block arguments - function that adds two i32s
+  (define-conversion-pattern :debug-ast test-func-func
+    :match ((%func = "func.func" () () : () -> !func-type))
+    :rewrite %func :with
+    ((%new-func = "func.func" ()
+       :regions
+         ((^entry ((%a : i32) (%b : i32))
+            (%sum = "arith.addi" (%a %b) -> i32)
+            ("func.return" (%sum) -> ())))
+       :attrs [sym_name "add"] [function_type "(i32, i32) -> i32"]
+       -> ())))
   
   (define (run-tests)
     (test-begin "pattern-macro-incremental")
@@ -73,5 +85,9 @@
     (test-equal "region pattern is ast-pattern" #t (ast-pattern? test-with-region))
     ;; The rewrite list contains raw s-expressions (not expansion-time records)
     (test-equal "has rewrite operations" #t (pair? (ast-pattern-rewrite test-with-region)))
+
+    ;; func.func test - block arguments and attrs
+    (test-equal "func.func is ast-pattern" #t (ast-pattern? test-func-func))
+    (test-equal "func.func has rewrite ops" #t (pair? (ast-pattern-rewrite test-func-func)))
 
     (test-end)))
