@@ -131,7 +131,10 @@
       (define (parse-match-operation op-stx)
         (syntax-case op-stx ()
           ;; Pattern: (result = "op.name" (operands ...) (attrs ...) : (input-types ...) -> output-type)
-          ;; Use datum matching instead of literal keywords for helper functions
+          ;; WHY datum matching: Literal keywords use free-identifier=? which fails when syntax objects
+          ;; cross function boundaries - the = in user's input has different lexical context than
+          ;; the = in this helper's literals list, even when properly exported/imported.
+          ;; Datum matching with eq? checks symbol names only, bypassing the binding context issue.
           [(result eq op-name operands attrs colon input-types arrow output-type)
            (and (identifier? #'result)
                 (identifier? #'eq) (eq? (syntax->datum #'eq) '=)
@@ -158,7 +161,8 @@
       (define (parse-rewrite-operation op-stx)
         (syntax-case op-stx ()
           ;; Pattern: (result = "op.name" (operands ...) (attrs ...) rest ...)
-          ;; Use datum matching instead of literal keywords
+          ;; WHY datum matching: Same reason as parse-match-operation - literal keywords fail
+          ;; when syntax objects are passed between functions due to lexical context mismatch.
           [(result eq op-name operands attrs rest ...)
            (and (identifier? #'result)
                 (identifier? #'eq) (eq? (syntax->datum #'eq) '=)
