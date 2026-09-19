@@ -3,32 +3,32 @@
 ## Licensed under the MIT License.
 ##
 
-# EP-aware compatibility pipeline:
-#   1) Dump EP input graph -> <OutputDir>/ep_input/<DumpFileName> (default onnx.onnx)
-#   2) step1 on original model and EP input; compare op distributions
-#   3) step2..final compatibility reports using EP input only
+# ONNX -> HIP compatibility pipeline, driven by what the compiler does.
+#
+#   1  dump the EP-input MLIR through hip-ep (init pass only)
+#   2  count operators in the original ONNX and in that MLIR, and diff them
+#   3  run the conversion up to convert-onnx-to-hip
+#   4  analyze what it produced: leftovers, why they were refused, attribute
+#      transfer, and the runtime function behind each hip op
+#   5  normalize into report_input.json and render the markdown
 #
 # Usage:
-#   .\run_ep_compatibility_check.ps1 -ModelPath "<path>\model.onnx"
-#   .\run_ep_compatibility_check.ps1 -ModelPath "<path>\model.onnx" -OutputDir "$env:TEMP\my_run"
-#   .\run_ep_compatibility_check.ps1 -ModelPath "<path>\model.onnx" -SkipDump -EpOnnxPath "<path>\onnx.onnx"
+#   .\run_ep_compatibility_check.ps1 -ModelPath <model.onnx>
+#   .\run_ep_compatibility_check.ps1 -ModelPath <model.onnx> -OutputDir <dir>
+#   .\run_ep_compatibility_check.ps1 -ModelPath <model.onnx> -SkipDump
 #
 # Defaults (derived):
-#   -RepoRoot         = (Resolve-Path "$PSScriptRoot\..\..\..\..")
-#                       skill lives at <repo>/.cursor/skills/model-compatibility/scripts/
-#   -ToolsDir         = $PSScriptRoot
-#   -VoePackageRoot   = $env:VOE_PACKAGE_ROOT  (when unset and -SkipDump absent,
-#                       script emits [VOE_NOT_CONFIGURED] to stdout and exits 10)
-#   -OutputDir        = $env:TEMP\<meaningful-path-segments>_ep_compat
-#                       (or $env:HIP_EP_COMPAT_ROOT when set)
-#                       Built from the last 3 parent segments (skipping generic
-#                       ones like "onnx" / "models") + optional non-generic
-#                       basename. Examples:
-#                         ...\blip\onnx\decoder\fp16\model.onnx
-#                           -> $env:TEMP\blip_decoder_fp16_ep_compat
-#                         <any-drive>\bar\custom_v2.onnx
-#                           -> $env:TEMP\bar_custom_v2_ep_compat
-#                       Override with -OutputDir <dir> if the auto name collides.
+#   -RepoRoot          = (Resolve-Path "$PSScriptRoot\..\..\..\..")
+#   -ToolsDir          = $PSScriptRoot
+#   -HipEpPackageRoot  = $env:HIP_EP_PACKAGE_ROOT (when unset and -SkipDump is
+#                        absent, the script emits [HIP_EP_NOT_CONFIGURED] and
+#                        exits 10)
+#   -OutputDir         = $env:TEMP\<meaningful-path-segments>_ep_compat
+#                        (or $env:HIP_EP_COMPAT_ROOT when set)
+#
+# -SkipDump analyzes the original ONNX only. Without the EP-input MLIR
+# there is nothing to convert, so no operator can be classified and the report
+# says so rather than guessing.
 
 param(
     [Parameter(Mandatory = $true)]
@@ -38,14 +38,12 @@ param(
     [string]$RepoRoot = "",
     [string]$ToolsDir = "",
 
-    [string]$VoePackageRoot = "",
-    [string]$DumpFileName = "onnx.onnx",
-    [string]$VaipConfigPath = "",
-    [string]$VaipTarget = "VAIML",
+    [string]$HipEpPackageRoot = "",
+    [string]$MorphizenConfigPath = "",
 
     [switch]$SkipDump,
     [switch]$ContinueOnDumpFailure,
-    [string]$EpOnnxPath = ""
+    [string]$EpInputMlir = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -57,9 +55,6 @@ $ToolsDir = (Resolve-Path -LiteralPath $ToolsDir).Path
 
 # Default RepoRoot = 4 levels above this script:
 #   .cursor/skills/model-compatibility/scripts/   <- $PSScriptRoot
-#   .cursor/skills/model-compatibility/           <- ..
-#   .cursor/skills/                               <- ..
-#   .cursor/                                      <- ..
 #   <repo>/                                       <- ..  (4 levels up)
 if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
     $RepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..\..\..")).Path
@@ -67,17 +62,13 @@ if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 $ModelPath = (Resolve-Path -LiteralPath $ModelPath).ProviderPath
 
-# VoePackageRoot: param > env > empty.
-# Empty + no -SkipDump => emit machine-readable marker and exit 10 so the
-# calling agent can AskQuestion the user (VOE path vs -SkipDump).
-if ([string]::IsNullOrWhiteSpace($VoePackageRoot)) {
-    if ($env:VOE_PACKAGE_ROOT) { $VoePackageRoot = $env:VOE_PACKAGE_ROOT }
+if ([string]::IsNullOrWhiteSpace($HipEpPackageRoot) -and $env:HIP_EP_PACKAGE_ROOT) {
+    $HipEpPackageRoot = $env:HIP_EP_PACKAGE_ROOT
 }
-if (-not $SkipDump -and [string]::IsNullOrWhiteSpace($VoePackageRoot)) {
-    # Write-Output (not Write-Host) so the marker is reliably captured by
-    # any caller piping the success stream (Python subprocess, CI, agent shell).
-    # Single-quoted so the literal $env:VOE_PACKAGE_ROOT is preserved without escape.
-    $msg = '[VOE_NOT_CONFIGURED] No VoePackageRoot supplied. Pass -VoePackageRoot path, set env var VOE_PACKAGE_ROOT, or rerun with -SkipDump to analyze the original ONNX without EP rewrites.'
+if (-not $SkipDump -and [string]::IsNullOrWhiteSpace($HipEpPackageRoot)) {
+    # Write-Output (not Write-Host) so the marker is captured by any caller
+    # reading the success stream. Single-quoted to keep the literal env name.
+    $msg = '[HIP_EP_NOT_CONFIGURED] No HipEpPackageRoot supplied. Pass -HipEpPackageRoot <dir>, set $env:HIP_EP_PACKAGE_ROOT to a hip-ep package, or rerun with -SkipDump to analyze the original ONNX without the conversion probe.'
     Write-Output $msg
     exit 10
 }
@@ -87,8 +78,8 @@ if (-not $SkipDump -and [string]::IsNullOrWhiteSpace($VoePackageRoot)) {
 # when it is non-generic, lowercase and sanitize to [a-z0-9_], suffix with
 # _ep_compat. Example:
 #   ...\blip\onnx\decoder\fp16\model.onnx  -> blip_decoder_fp16_ep_compat
-# When auto-derivation would actually collide between two distinct models the
-# caller should pass an explicit -OutputDir <dir>.
+# When auto-derivation would collide between two distinct models the caller
+# should pass an explicit -OutputDir <dir>.
 if ([string]::IsNullOrWhiteSpace($OutputDir)) {
     $base = [System.IO.Path]::GetFileNameWithoutExtension($ModelPath)
     # Use [Path]::GetDirectoryName, not Split-Path -LiteralPath ... -Parent:
@@ -96,11 +87,8 @@ if ([string]::IsNullOrWhiteSpace($OutputDir)) {
     # resolve into different parameter sets of Split-Path on some hosts).
     $parentDir = [System.IO.Path]::GetDirectoryName($ModelPath)
 
-    # Generic path segments that carry no model identity; skip them so the
-    # resulting name highlights the model variant (family + role + dtype).
     $genericSegments = @('onnx', 'models')
 
-    # Split on / and \, drop empty pieces and drive roots like "D:".
     $allSegs = $parentDir -split '[\\/]+' | Where-Object {
         $_ -and $_ -notmatch '^[A-Za-z]:$'
     }
@@ -109,25 +97,20 @@ if ([string]::IsNullOrWhiteSpace($OutputDir)) {
         $genericSegments -notcontains $_.ToLowerInvariant()
     })
 
-    # Keep at most the last 3 meaningful segments.
     if ($meaningful.Count -gt 3) {
         $meaningful = $meaningful[-3..-1]
     }
 
-    # Append the basename if it carries identity (not "model" or a format word).
     $baseLower = $base.ToLowerInvariant()
     if ($baseLower -and $baseLower -ne 'model' -and ($genericSegments -notcontains $baseLower)) {
         $meaningful = @($meaningful) + @($base)
     }
 
-    # Sanitize each segment to [a-z0-9_] and drop empties.
     $sanitized = @($meaningful | ForEach-Object {
         ($_ -replace '[^A-Za-z0-9]+', '_').ToLowerInvariant().Trim('_')
     } | Where-Object { $_ })
 
     if ($sanitized.Count -eq 0) {
-        # Nothing identifiable in the path; fall back to the basename so the
-        # dir name is at least deterministic.
         $sanitized = @($baseLower)
     }
 
@@ -142,18 +125,13 @@ if ([string]::IsNullOrWhiteSpace($OutputDir)) {
     $OutputDir = Join-Path $compatRoot (($sanitized -join '_') + '_ep_compat')
 }
 $OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
-New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
-$EpInputDir = Join-Path $OutputDir "ep_input"
-$Step1OriginalDir = Join-Path $OutputDir "step1_original"
-$Step1EpDir = Join-Path $OutputDir "step1_ep"
+# Everything the pipeline produces on the way to the reports lives together;
+# the two markdown files and the status note stay at the top so the directory
+# opens on what a person reads.
 $CompatDir = Join-Path $OutputDir "compatibility"
 
-New-Item -ItemType Directory -Force -Path $EpInputDir, $Step1OriginalDir, $Step1EpDir, $CompatDir | Out-Null
-
-$HipOpsTd = Join-Path $RepoRoot "include\hip\Dialect\IR\HipOps.td"
-$ConversionDir = Join-Path $RepoRoot "lib\Conversion"
-$RuntimeDir = Join-Path $RepoRoot "lib\Runtime\real"
+New-Item -ItemType Directory -Force -Path $OutputDir, $CompatDir | Out-Null
 
 function Invoke-PythonStep {
     param(
@@ -170,158 +148,146 @@ function Invoke-PythonStep {
     Write-Host ("  done in {0:N1}s" -f $sw.Elapsed.TotalSeconds) -ForegroundColor DarkGray
 }
 
-function Step1UpToDate {
-    param([string]$OnnxPath, [string]$Step1Json)
-    if (-not (Test-Path -LiteralPath $Step1Json)) { return $false }
-    return (Get-Item -LiteralPath $Step1Json).LastWriteTimeUtc -ge (Get-Item -LiteralPath $OnnxPath).LastWriteTimeUtc
-}
-
-Write-Host "=== EP compatibility check ===" -ForegroundColor Cyan
+Write-Host "=== hip-ep compatibility check ===" -ForegroundColor Cyan
 Write-Host "Original model:  $ModelPath"
 Write-Host "Output dir:      $OutputDir"
 Write-Host "Repo root:       $RepoRoot"
 Write-Host ""
 
-# --- Step 0: Dump EP input ONNX ---
-$EpOnnx = if ($EpOnnxPath) {
-    (Resolve-Path -LiteralPath $EpOnnxPath).Path
+# --- S0: dump the EP-input MLIR ---------------------------------------
+$EpInput = if ($EpInputMlir) {
+    (Resolve-Path -LiteralPath $EpInputMlir).ProviderPath
 } else {
-    Join-Path $EpInputDir $DumpFileName
+    Join-Path $CompatDir "ep_input.mlir"
 }
 
 $dumpFailed = $false
 $dumpError = ""
 
-# If EP graph already exists, skip dump unless user forces a new dump.
-if (-not $SkipDump -and (Test-Path -LiteralPath $EpOnnx)) {
-    Write-Host "(1/4) Skip dump: EP ONNX already exists at $EpOnnx" -ForegroundColor DarkGray
+# Re-runs reuse the output directory, so a failure recorded by an earlier run
+# would be reported against this one.
+$failureRecord = Join-Path $CompatDir "pipeline_failure.json"
+Remove-Item -LiteralPath $failureRecord -ErrorAction SilentlyContinue
+
+if (-not $SkipDump -and (Test-Path -LiteralPath $EpInput)) {
+    Write-Host "(1/5) Skip dump: EP input already exists at $EpInput" -ForegroundColor DarkGray
     $SkipDump = $true
 }
 
 if (-not $SkipDump) {
-    Write-Host '(1/4) Dumping EP input graph...' -ForegroundColor Yellow
-    $dumpScript = Join-Path $ToolsDir "dump_ep_onnx.ps1"
-    if (-not (Test-Path -LiteralPath $dumpScript)) {
-        throw "dump_ep_onnx.ps1 not found: $dumpScript"
-    }
+    Write-Host '(1/5) Dumping EP-input MLIR...' -ForegroundColor Yellow
+    $dumpScript = Join-Path $ToolsDir "dump_ep_input.ps1"
     try {
         $dumpArgs = @{
-            ModelPath       = $ModelPath
-            VoePackageRoot  = $VoePackageRoot
-            DumpDirectory   = $EpInputDir
-            DumpFileName    = $DumpFileName
+            ModelPath        = $ModelPath
+            OutputDir        = $CompatDir
+            HipEpPackageRoot = $HipEpPackageRoot
         }
-        if (-not [string]::IsNullOrWhiteSpace($VaipConfigPath)) {
-            $dumpArgs['VaipConfigPath'] = $VaipConfigPath
-        }
-        if (-not [string]::IsNullOrWhiteSpace($VaipTarget)) {
-            $dumpArgs['VaipTarget'] = $VaipTarget
+        if (-not [string]::IsNullOrWhiteSpace($MorphizenConfigPath)) {
+            $dumpArgs['ConfigPath'] = $MorphizenConfigPath
         }
         & $dumpScript @dumpArgs
-        if (-not (Test-Path -LiteralPath $EpOnnx)) {
-            throw "EP dump missing: $EpOnnx"
+        if (-not (Test-Path -LiteralPath $EpInput)) {
+            throw "EP-input MLIR missing: $EpInput"
         }
     } catch {
+        # Why the dump failed is a compatibility finding in its own right: an
+        # importer that rejects the graph means the model never reaches the
+        # compiler. Record it so the report can say so.
         $dumpFailed = $true
         $dumpError = $_.Exception.Message
-        Write-Host "WARN: EP dump failed: $dumpError" -ForegroundColor Red
+        Write-Host "WARN: dump failed: $dumpError" -ForegroundColor Red
+        [ordered]@{
+            stage     = "dump"
+            command   = "hip-onnx-runner --no-run"
+            exit_code = $null
+            message   = $dumpError
+            log       = Join-Path $CompatDir "dump_stderr.txt"
+        } | ConvertTo-Json | Set-Content -LiteralPath $failureRecord -Encoding UTF8
         if (-not $ContinueOnDumpFailure) {
             throw
         }
     }
+} elseif (Test-Path -LiteralPath $EpInput) {
+    Write-Host "(1/5) Skip dump; using EP input: $EpInput" -ForegroundColor Yellow
+} elseif ($EpInputMlir) {
+    throw "EpInputMlir not found: $EpInput"
 } else {
-    if (Test-Path -LiteralPath $EpOnnx) {
-        Write-Host "(1/4) Skip dump; using EP ONNX: $EpOnnx" -ForegroundColor Yellow
-    } elseif ($EpOnnxPath) {
-        # User explicitly passed -EpOnnxPath that does not exist: hard error.
-        throw "EpOnnxPath not found: $EpOnnx"
-    } else {
-        # -SkipDump given without -EpOnnxPath and no default EP graph present:
-        # fall through to analyzing the original ONNX. Downstream code branches
-        # on the haveEpOnnx flag and produces a Source-original-ONNX badge.
-        Write-Host "(1/4) Skip dump; no EP ONNX available, will analyze original ONNX" -ForegroundColor Yellow
-    }
+    Write-Host '(1/5) Skip dump; no EP input, analyzing the original ONNX' -ForegroundColor Yellow
 }
 
-# --- Step 1: step1 on both graphs (typically ~1-2s each; NOT the slow step) ---
-$step1OrigJson = Join-Path $Step1OriginalDir "step1_onnx_ops.json"
-if (Step1UpToDate -OnnxPath $ModelPath -Step1Json $step1OrigJson) {
-    Write-Host '(2/4) step1 original: up-to-date, skip' -ForegroundColor DarkGray
-} else {
-    Invoke-PythonStep -Label '(2/4) step1 - original model...' -PyArgv @(
-        (Join-Path $ToolsDir "step1_onnx_parser.py"),
-        $ModelPath, $Step1OriginalDir,
-        "--max-instances-per-op", "0"
+$haveEpInput = (Test-Path -LiteralPath $EpInput)
+
+# --- Step 2: operator distributions and their difference --------------------
+$step1OrigJson = Join-Path $CompatDir "step1_original_onnx_ops.json"
+$step1EpJson = Join-Path $CompatDir "step1_ep_input_ops.json"
+
+$distributionArgs = @((Join-Path $ToolsDir "op_distribution.py"), $ModelPath, $CompatDir)
+if ($haveEpInput) {
+    $distributionArgs += @("--ep-input", $EpInput)
+}
+Invoke-PythonStep -Label '(2/5) Operator distributions...' -PyArgv $distributionArgs
+
+# --- Step 3 and 4: conversion probe, then what it produced ------------------
+foreach ($stale in @('leftover_onnx.json', 'leftover_reasons.json',
+        'attr_transfer.json', 'hip_runtime_map.json')) {
+    Remove-Item -LiteralPath (Join-Path $CompatDir $stale) -ErrorAction SilentlyContinue
+}
+
+$converted = Join-Path $CompatDir "converted.mlir"
+if ($haveEpInput) {
+    Write-Host '(3/5) Conversion probe (convert-onnx-to-hip)...' -ForegroundColor Yellow
+    & (Join-Path $ToolsDir "run_convert_probe.ps1") `
+        -InputMlir $EpInput -OutputDir $CompatDir -HipEpPackageRoot $HipEpPackageRoot
+}
+
+if (Test-Path -LiteralPath $converted) {
+    $locatedInput = Join-Path $CompatDir "ep_input_loc.mlir"
+    Invoke-PythonStep -Label '(4/5) Analyzing the conversion...' -PyArgv @(
+        (Join-Path $ToolsDir "analyze_conversion.py"),
+        $locatedInput,
+        $converted,
+        $CompatDir,
+        $RepoRoot
     )
-}
-
-$haveEpOnnx = (Test-Path -LiteralPath $EpOnnx)
-
-if ($haveEpOnnx) {
-    $step1EpJson = Join-Path $Step1EpDir "step1_onnx_ops.json"
-    if (Step1UpToDate -OnnxPath $EpOnnx -Step1Json $step1EpJson) {
-        Write-Host '(2/4) step1 EP: up-to-date, skip' -ForegroundColor DarkGray
-    } else {
-        Invoke-PythonStep -Label '(2/4) step1 - EP input (onnx.onnx)...' -PyArgv @(
-            (Join-Path $ToolsDir "step1_onnx_parser.py"),
-            $EpOnnx, $Step1EpDir,
-            "--max-instances-per-op", "0"
-        )
-    }
-
-    Invoke-PythonStep -Label '(3/4) Op distribution comparison...' -PyArgv @(
-        (Join-Path $ToolsDir "compare_op_distribution.py"),
-        $step1OrigJson,
-        $step1EpJson,
-        $OutputDir,
-        "--original-model", $ModelPath,
-        "--ep-model", $EpOnnx
-    )
+    # It only existed to join the two sides by location, and it is a copy of
+    # ep_input.mlir that the probe can recreate.
+    Remove-Item -LiteralPath $locatedInput -ErrorAction SilentlyContinue
+} elseif ($haveEpInput) {
+    Write-Host '(4/5) Conversion failed; the report will name the step and the reason' -ForegroundColor Red
 } else {
-    Write-Host '(2/4) Skip step1 EP / comparison (no onnx.onnx)' -ForegroundColor Yellow
+    Write-Host '(3/5) Skip conversion probe (no EP input); support will be reported as unverified' -ForegroundColor Yellow
 }
 
-$compatModel = if ($haveEpOnnx) { $EpOnnx } else { $ModelPath }
-$compatNote = if ($haveEpOnnx) {
-    "Compatibility analysis uses EP input (onnx.onnx)."
-} else {
-    "WARNING: EP dump unavailable; compatibility below uses ORIGINAL model.onnx only (not EP true input)."
-}
+# --- Step 5: normalize and render -------------------------------------------
+$analyzedGraph = if ($haveEpInput) { $EpInput } else { $ModelPath }
+$step1ForCompat = if ($haveEpInput) { $step1EpJson } else { $step1OrigJson }
 
-# --- Step 2 - final: compatibility on EP input (or original if dump failed) ---
-Write-Host "(4/4) Compatibility pipeline ($([System.IO.Path]::GetFileName($compatModel)))..." -ForegroundColor Yellow
-Invoke-PythonStep -Label '  step2_0 hip parser' -PyArgv @((Join-Path $ToolsDir "step2_0_hip_parser.py"), $HipOpsTd, $CompatDir)
-Invoke-PythonStep -Label '  step2_1 onnx->hip' -PyArgv @((Join-Path $ToolsDir "step2_1_onnx_to_hip_parser.py"), $ConversionDir, $CompatDir, $HipOpsTd)
-Invoke-PythonStep -Label '  step2_2 hip->llvm' -PyArgv @((Join-Path $ToolsDir "step2_2_hip_to_llvm_parser.py"), $ConversionDir, $CompatDir, $HipOpsTd)
-Invoke-PythonStep -Label '  step2_3 backend' -PyArgv @(
-    (Join-Path $ToolsDir "step2_3_backend_analyzer_final.py"),
-    $RuntimeDir,
-    (Join-Path $CompatDir "step2_2_hip_to_llvm_mappings.json"),
-    (Join-Path $CompatDir "step2_1_onnx_to_hip_mappings.json"),
-    $CompatDir
-)
-# build_report_input expects step1_onnx_ops.json in the compatibility output dir
-$step1ForCompat = if ($haveEpOnnx) {
-    Join-Path $Step1EpDir "step1_onnx_ops.json"
-} else {
-    Join-Path $Step1OriginalDir "step1_onnx_ops.json"
-}
-Copy-Item -LiteralPath $step1ForCompat -Destination (Join-Path $CompatDir "step1_onnx_ops.json") -Force
-
+Write-Host '(5/5) Reports...' -ForegroundColor Yellow
 Invoke-PythonStep -Label '  build_report_input' -PyArgv @(
     (Join-Path $ToolsDir "build_report_input.py"),
-    $compatModel, $CompatDir, $RepoRoot
+    $analyzedGraph, $step1ForCompat, $CompatDir, $RepoRoot
 )
-Invoke-PythonStep -Label '  generate_final_reports' -PyArgv @((Join-Path $ToolsDir "generate_final_reports.py"), $CompatDir)
+Invoke-PythonStep -Label '  generate_final_reports' -PyArgv @(
+    (Join-Path $ToolsDir "generate_final_reports.py"), $CompatDir, $OutputDir
+)
+
+$compatNote = if ($haveEpInput) {
+    "Compatibility analysis uses the EP-input MLIR and the convert-onnx-to-hip result."
+} else {
+    "WARNING: no EP-input MLIR; the original ONNX was counted but no operator support was verified."
+}
 
 $statusPath = Join-Path $OutputDir "pipeline_status.md"
 $statusLines = @(
-    "# EP compatibility pipeline status",
+    "# hip-ep compatibility pipeline status",
     "",
     "- **Original model:** ``$($ModelPath)``",
-    "- **EP onnx:** ``$($EpOnnx)``",
-    "- **EP dump succeeded:** $(-not $dumpFailed -and $haveEpOnnx)",
-    "- **Compatibility analyzed:** ``$($compatModel)``",
+    "- **EP input:** ``$($EpInput)``",
+    "- **Dump succeeded:** $(-not $dumpFailed -and $haveEpInput)",
+    "- **Conversion probed:** $haveEpInput",
+    "- **Analyzed graph:** ``$($analyzedGraph)``",
+    "- **hip-ep package:** ``$($HipEpPackageRoot)``",
     "- **Note:** $compatNote",
     ""
 )
@@ -330,45 +296,43 @@ if ($dumpFailed) {
 }
 $statusLines | Set-Content -LiteralPath $statusPath -Encoding UTF8
 
-# Copy/link key artifacts to output root for convenience
-$summarySrc = Join-Path $CompatDir "model_compatibility_report.md"
-if (Test-Path -LiteralPath $summarySrc) {
-    Copy-Item -LiteralPath $summarySrc -Destination (Join-Path $OutputDir "model_compatibility_report.md") -Force
-    Copy-Item -LiteralPath (Join-Path $CompatDir "model_compatibility_details.md") `
-        -Destination (Join-Path $OutputDir "model_compatibility_details.md") -Force
-
-    # When dump did not produce an EP graph the compatibility analysis ran on
-    # the ORIGINAL ONNX, not the EP-rewritten graph. Add a prominent badge to
-    # the top of both report copies (after the H1) so the limitation is
-    # impossible to miss when the agent reads back the report to the user.
-    if (-not $haveEpOnnx) {
-        $badge = "> **Source:** original ONNX (no EP rewrites). VOE was not configured or the dump failed; report reflects the model file as authored, not the graph the EP would compile."
-        foreach ($mdTarget in @(
-            (Join-Path $OutputDir "model_compatibility_report.md"),
-            (Join-Path $OutputDir "model_compatibility_details.md"),
-            $summarySrc,
-            (Join-Path $CompatDir "model_compatibility_details.md")
-        )) {
-            if (-not (Test-Path -LiteralPath $mdTarget)) { continue }
-            $content = Get-Content -Raw -LiteralPath $mdTarget
-            if ($content -match '\*\*Source:\*\* original ONNX') { continue }
-            $h1End = $content.IndexOf("`n")
-            if ($h1End -lt 0) { continue }
-            $patched = $content.Substring(0, $h1End + 1) + "`n$badge`n" + $content.Substring($h1End + 1)
-            Set-Content -LiteralPath $mdTarget -Value $patched -Encoding UTF8 -NoNewline
-        }
+# Without the conversion probe the report describes operator counts only.
+# Badge it right after the H1 so the limitation cannot be missed when the
+# agent reads the report back. A recorded failure already carries a banner
+# that says the same thing and names the cause, so do not repeat it.
+if (-not $haveEpInput -and -not (Test-Path -LiteralPath $failureRecord)) {
+    $badge = "> **Source:** original ONNX, conversion probe skipped. No hip-ep package was configured or the dump failed, so operator support was NOT verified against the compiler."
+    foreach ($mdTarget in @(
+        (Join-Path $OutputDir "model_compatibility_report.md"),
+        (Join-Path $OutputDir "model_compatibility_details.md")
+    )) {
+        if (-not (Test-Path -LiteralPath $mdTarget)) { continue }
+        $content = Get-Content -Raw -LiteralPath $mdTarget
+        if ($content -match '\*\*Source:\*\* original ONNX') { continue }
+        $h1End = $content.IndexOf("`n")
+        if ($h1End -lt 0) { continue }
+        $patched = $content.Substring(0, $h1End + 1) + "`n$badge`n" + $content.Substring($h1End + 1)
+        Set-Content -LiteralPath $mdTarget -Value $patched -Encoding UTF8 -NoNewline
     }
 }
 
 Write-Host ""
 Write-Host "=== Done ===" -ForegroundColor Green
 Write-Host "Pipeline status:       $statusPath"
-if ($haveEpOnnx) {
-    Write-Host "EP input:              $EpOnnx"
-    Write-Host "Op comparison:         $(Join-Path $OutputDir 'op_distribution_comparison.md')"
+if ($haveEpInput) {
+    Write-Host "EP input:              $EpInput"
 } else {
     Write-Host "EP input:              (not produced)"
 }
+if (Test-Path -LiteralPath $converted) {
+    Write-Host "Converted MLIR:        $converted"
+    Write-Host "Converted ops:         $(Join-Path $CompatDir 'attr_transfer.json')"
+}
 Write-Host "Compatibility report:  $(Join-Path $OutputDir 'model_compatibility_report.md')"
 Write-Host "Full artifacts:        $CompatDir"
-if (-not $haveEpOnnx) { Write-Host $compatNote -ForegroundColor Yellow }
+if (Test-Path -LiteralPath $failureRecord) {
+    Write-Host ("WARNING: a pipeline step failed; nothing was verified. " +
+        "See the 'Where it failed' section of the report.") -ForegroundColor Yellow
+} elseif (-not $haveEpInput) {
+    Write-Host $compatNote -ForegroundColor Yellow
+}

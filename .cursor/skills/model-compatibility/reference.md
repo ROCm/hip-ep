@@ -8,11 +8,11 @@ Canonical definitions consumed by SKILL.md, diagnose.md, and report_template.md.
 
 ## Status definitions (data layer)
 
-`report_input.json` stores one of three canonical statuses per `(onnx_op, domain)`:
+`report_input.json` stores one of three canonical statuses per `(onnx_op, domain)`, all derived from running `convert-onnx-to-hip` over the EP-input MLIR:
 
-- `full` — mapped to a HIP op (or a compile-time `tensor.*` op) and no per-instance schema mismatch found.
-- `partial` — mapped to a HIP op, but per-instance schema checks found mismatch.
-- `unsupported` — no ONNX -> HIP mapping found in the parsed conversion patterns.
+- `full` — every instance converted, and every ONNX attribute with a non-default value reached the resulting op.
+- `partial` — some instances did not convert, or an attribute with a non-default value was dropped.
+- `unsupported` — no instance converted; the operator is still `onnx.*` in the converted module.
 
 ## Status display rule (report layer)
 
@@ -24,53 +24,65 @@ Canonical definitions consumed by SKILL.md, diagnose.md, and report_template.md.
 
 ## Compile-time operators
 
-When a mapping's `hip_op` starts with `tensor.` (e.g. `tensor.expand_shape`, `tensor.collapse_shape`):
+When every op an ONNX operator converted into is outside the `hip.` dialect (`tensor.expand_shape`, `arith.*`, and similar):
 
 - status = `full`
 - reason code = `COMPILE_TIME_TENSOR_OP`
 - reason text = `Handled at compile time.`
 
-## Non-compile-time per-instance schema checks
+## Attribute transfer check
 
-For each `(onnx_op, domain)` mapped to a non-`tensor.*` HIP op, the pipeline runs three checks:
+Instances are paired pre- and post-conversion by their MLIR location, then each ONNX attribute is looked for on the ops that replaced the node.
 
-1. **Input edge compatibility**
-   - HIP input bounds from TableGen:
-     - lower bound = required non-`ctx` operands
-     - upper bound = total non-`ctx` operands unless variadic
-   - reason codes: `ONNX_INPUT_BELOW_HIP_MIN`, `ONNX_INPUT_ABOVE_HIP_MAX`
-2. **Output edge compatibility**
-   - HIP output bounds same way.
-   - reason codes: `ONNX_OUTPUT_BELOW_HIP_MIN`, `ONNX_OUTPUT_ABOVE_HIP_MAX`
-3. **Attribute compatibility**
-   - Required attrs = TD non-optional attrs + strict overrides from `compatibility_attr_rules.json` (key `strict_required_attrs`).
-   - No strict attrs are hardcoded.
-   - reason codes: `MISSING_HIP_REQUIRED_ATTR`, `EXTRA_ONNX_ATTR_NOT_IN_HIP`
+- An attribute that landed is fine.
+- An attribute that did not land, whose value equals the operator's default, is recorded under `dropped_default_attrs` and does **not** affect status: dropping a default changes no behaviour. Defaults come from the ONNX schema, and for `com.microsoft` from ONNX Runtime's own contrib operator registry (`get_all_operator_schema`), so the skill carries no defaults table of its own.
+- An attribute the schema declares no default for cannot be compared, so it counts as a real drop and the reason text prints the observed value. That over-reports rather than hiding a behaviour difference.
 
-Any reason code present => `partial`. No reason code => `full`.
+Two cases are excluded from the check, because in both "the attribute is not on the converted op" carries no information:
+
+- **The operator produced no `hip.*` op.** Its attributes were consumed into structure: `Split`'s `axis` becomes `tensor.extract_slice` offsets, and `Concat` refuses to convert without one. There is no attribute dictionary left to compare against.
+- **The HIP op declares the attribute.** MLIR omits an attribute equal to its ODS default when printing, so `hip.gqa` with `softcap=0.0` prints no `softcap` even though the conversion set it. [scripts/hip_source.py](scripts/hip_source.py) reads the declarations out of `HipOps.td` for exactly this, and an op it cannot parse falls back to reporting the drop.
+- An attribute that did not land with a non-default value gives reason code `EXTRA_ONNX_ATTR_NOT_IN_HIP` and status `partial`.
+
+Bookkeeping attributes (`onnx_node_name`, `node.outputs`, and the `function_name` / `domain_name` selectors on `onnx.Custom`) are never treated as operator attributes.
+
+Instances with no post-conversion location match are counted in `unpaired_instances` and listed under the details report's data-quality notes rather than being silently treated as clean.
 
 ## Unsupported rule
 
-No ONNX -> HIP mapping found for `(onnx_op, domain)`:
+Every instance of `(onnx_op, domain)` is still `onnx.*` after conversion, so status = `unsupported`. Which reason code applies depends on whether the operator has a converter at all, because the two cases need different work:
 
-- status = `unsupported`
-- reason code = `NO_HIP_DIALECT_IMPL`
-- reason text:
-  - if op is compile-time classifiable elsewhere: keep that specific text
-  - otherwise: **exactly** `No Hip Dialect implementation available.`
+| Situation | Reason code | Reason text |
+|---|---|---|
+| No converter matches the operator name | `NO_HIP_DIALECT_IMPL` | **exactly** `No Hip Dialect implementation available.` |
+| A converter matches but refused every instance | `CONVERSION_REJECTED_INSTANCES` | names the converter file, the operand element types in this model, and the candidate constraints with file and line |
+
+[scripts/hip_source.py](scripts/hip_source.py) makes that distinction. It finds converters by the quoted operator name they match on (`"MatMulNBits"`, `"onnx.Cast"`), then lists the messages that converter can pass to `notifyMatchFailure`, ordered so constraints the observed element types contradict come first.
+
+Those candidates are a hint, not a verdict: `notifyMatchFailure` messages are compiled out of a release build, so no reason reaches the log at runtime and the ranking is inferred from types. Confirm the real constraint with [diagnose.md](diagnose.md) before telling the user.
+
+When only some instances are left over, status is `partial` with `PARTIAL_INSTANCE_CONVERSION`.
 
 ## Reason code catalog
 
 ```
 NO_HIP_DIALECT_IMPL
+CONVERSION_REJECTED_INSTANCES
 COMPILE_TIME_TENSOR_OP
-MISSING_HIP_REQUIRED_ATTR
 EXTRA_ONNX_ATTR_NOT_IN_HIP
-ONNX_INPUT_BELOW_HIP_MIN
-ONNX_INPUT_ABOVE_HIP_MAX
-ONNX_OUTPUT_BELOW_HIP_MIN
-ONNX_OUTPUT_ABOVE_HIP_MAX
+PARTIAL_INSTANCE_CONVERSION
+CONVERSION_NOT_PROBED
+PIPELINE_FAILED
 ```
+
+`CONVERSION_NOT_PROBED` only appears in `-SkipDump` runs, where nothing was verified.
+
+`PIPELINE_FAILED` means a stage failed, so no operator was verified. This is a
+stronger finding than any unsupported operator: the model does not compile as
+it stands. `meta.failure` in `report_input.json` and the `## Where it failed`
+section of the report carry the step, the command, the exit code, the reason
+quoted from the log, and the log path. The pipeline records it instead of
+aborting, because which step broke and why is the answer the run was asked for.
 
 ## Recommended ROCm implementation (report-layer inference)
 
@@ -78,28 +90,36 @@ ONNX_OUTPUT_ABOVE_HIP_MAX
 
 ### For `full` / `supported` / `partial`
 
-In order, first match wins:
+The conversion already chose the implementation, so the column reports what it produced rather than what a rule table would suggest. In order, first match wins:
 
-1. `hip_op` starts with `tensor.` -> `Compile Time Optimization`
-2. `backend` AND `runtime_func` exist -> `` `<backend>` (`<runtime_func>`) ``
-3. only `backend` exists -> `<backend>`
-4. only `runtime_func` exists -> `` `<runtime_func>` ``
-5. else -> `Unknown`
+1. `hip_op` is outside the `hip.` dialect -> `Compile Time Optimization`
+2. `hip_op` resolves to a runtime function -> `` <backend> (`<runtime_func>`) ``
+3. `hip_op` with no runtime entry -> ``Hip Dialect (`<hip_op>`)``
+4. no `hip_op` (the instance had no location match) -> `Unknown`
+
+[scripts/hip_source.py](scripts/hip_source.py) builds that mapping from the HIP-to-LLVM lowering, which names one symbol constant per op, and reads the backend off the wrapper's own implementation: a file calling `hipblasLt*` is hipBLASLt, one calling `hipdnn*` is hipDNN, one launching custom kernels is a custom kernel. A wrapper can be several at once (`hipBLASLt + Custom Hip Kernel` for GQA and MatMulNBits, which drive hipBLASLt for their matmuls and custom kernels around them), and one that touches no library and no kernel is a `Runtime helper`.
+
+This is source reading, but it answers a different question from support: the key is a `hip.*` op the conversion actually produced, and a wrong lookup shows up as an unresolved op rather than as a false "supported".
 
 ### For `unsupported`
 
-1. If reason text indicates compile-time handling -> `Compile Time Optimization`
-2. Otherwise run capability-driven recommendation:
+1. Reason code `CONVERSION_REJECTED_INSTANCES` -> `Extend the existing conversion`
+2. If reason text indicates compile-time handling -> `Compile Time Optimization`
+3. Otherwise run capability-driven recommendation:
    1. Infer op family from ONNX semantics (`op_type` + schema description)
-   2. Build capability inventory from `step2_3_backend_analysis.json`, runtime wrappers in `lib/Runtime/real/`, and [scripts/unsupported_reco_rules.json](scripts/unsupported_reco_rules.json)
-   3. Map family to nearest available ROCm path and name extension target wrapper
-3. If no feasible ROCm/library match -> `Custom Hip Kernel`
+   2. Build the capability inventory from the runtime wrappers in `lib/Runtime/real/` and [scripts/unsupported_reco_rules.json](scripts/unsupported_reco_rules.json)
+   3. Map family to nearest available ROCm path and name the extension target wrapper
+4. If no feasible ROCm/library match -> `Custom Hip Kernel`
+
+For `Extend the existing conversion`, name the converter file and the constraint that has to be widened, so the reader can see the work is a guard and its runtime path rather than a new kernel.
 
 For every unsupported op recommendation include: recommended path, closest existing wrapper / entry point (if any), short rationale.
 
 ## ROCm family routing matrix
 
-Machine-readable form: [scripts/unsupported_reco_rules.json](scripts/unsupported_reco_rules.json). Human-readable summary:
+Only one situation reaches these rules: an operator with **no converter at all**. A converter that refused the model gives `Extend the existing conversion`, and a converted operator names the runtime function it produced, both from the run rather than from a table.
+
+[scripts/unsupported_reco_rules.json](scripts/unsupported_reco_rules.json) is the source of truth, because the report generator reads it. Every wrapper it names must exist in `lib/Runtime/hipdnn_ep_runtime.h`; a rule pointing at a symbol nobody can extend is worse than no rule. The table below is a reading aid; when the two disagree, the JSON is right and this needs updating.
 
 | # | Family | Preferred path | Fallback |
 |---|---|---|---|
@@ -114,6 +134,8 @@ Machine-readable form: [scripts/unsupported_reco_rules.json](scripts/unsupported
 
 ### Known runtime capabilities (capability inventory examples)
 
+`hip_runtime_map.json` in any run lists the ops that model used; [scripts/hip_source.py](scripts/hip_source.py) derives every `hip.*` op's runtime function and backend from the lowering and the wrapper's implementation. A few worth knowing:
+
 - `wrap_elementwise` — elementwise add / mul / min / max, with per-axis broadcast
 - `wrap_gelu` / `wrap_softplus` / `wrap_leaky_relu` — activation-family elementwise ops
 - `wrap_power` — `Reciprocal` and `Sqrt` only; any other exponent is rejected
@@ -125,12 +147,6 @@ Machine-readable form: [scripts/unsupported_reco_rules.json](scripts/unsupported
 - `wrap_skip_simplified_layer_norm` — Microsoft SkipSimplifiedLayerNormalization fusion
 - `wrap_reduce_sum` — current custom reduction path
 
-## Validation checklist (final pass before responding to user)
+## Validation checklist
 
-- Counts in summary equal computed counts from `operator_distribution`
-- No unsupported non-compile-time line uses text other than `No Hip Dialect implementation available.`
-- Every operator in compatibility summary appears in operator distribution
-- `mapping_chain` table rows exactly match input rows
-- No extra sections beyond template order
-- **Diagnose pass executed for every non-supported entry** (see [diagnose.md](diagnose.md))
-- If `-SkipDump` mode was used, report header carries `Source: original ONNX (no EP rewrites)` badge
+Kept in [SKILL.md](SKILL.md) so there is one list to follow; two copies drift.

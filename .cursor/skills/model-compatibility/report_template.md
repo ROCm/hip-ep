@@ -9,9 +9,11 @@ These templates are the contract between the pipeline and the user-facing markdo
 ## Non-negotiable rules
 
 1. Never invent operators, counts, mappings, or reasons. Every number must match `compatibility/report_input.json`.
-2. Unsupported reason text policy:
+2. Unsupported reason text policy — the text must say which of these it is, never a blanket "not implemented":
+   - No converter matches the operator: `No Hip Dialect implementation available.`
+   - A converter exists but refused every instance: the generated text names the converter, the operand element types in this model, and the candidate constraints with file and line. Keep it; do not shorten it to the sentence above.
    - Compile-time ops: keep the specific compile-time reason text.
-   - All others: exactly `No Hip Dialect implementation available.`
+   The candidates are ranked, not proven, because a release build compiles the refusal message out. Confirm the real one with [diagnose.md](diagnose.md) and state it in your prose.
 3. Status display rule:
    - input `full` -> displayed as `supported`
    - input `partial` -> kept as `partial`
@@ -26,7 +28,7 @@ These templates are the contract between the pipeline and the user-facing markdo
 |---|---|
 | `model_compatibility_report.md` | Executive summary + key tables (primary deliverable) |
 | `model_compatibility_details.md` | Per-operator diagnostics (supports, partials with reason codes, data quality notes) |
-| `compatibility/unsupported_reco_runtime.json` | Machine-readable unsupported recommendations |
+| `compatibility/report_input.json` | Normalized data behind both files, validated against `report_input.schema.json` |
 
 ## model_compatibility_report.md — section order
 
@@ -34,10 +36,10 @@ Exact order, do not reorder:
 
 1. `# Model compatibility report`
 2. Metadata bullets (one bullet each):
-   - `EP input (compatibility target)` — only present when dump ran
+   - `Analyzed graph` — the EP input, or the original ONNX in `-SkipDump` mode
    - `Original model`
    - `Generated UTC`
-3. *(conditional)* `> **Source:** original ONNX (no EP rewrites)` — when pipeline ran in `-SkipDump` mode (orchestrator injects this badge automatically)
+3. *(conditional)* `> **Source:** original ONNX, conversion probe skipped` — when the pipeline ran in `-SkipDump` mode (the orchestrator injects this badge automatically)
 4. `## Summary`
    - Total node instances
    - Supported instances `<n> (<pct>%)`
@@ -46,7 +48,7 @@ Exact order, do not reorder:
    - Fully Compatible
    - Partially Compatible
    - Unsupported
-5. *(conditional)* `## Original vs EP input (operator distribution)` — only when dump ran; embedded from `op_distribution_comparison.json`
+5. *(conditional)* `## Original vs EP input` — only when the dump ran; rendered from `op_distribution_comparison.json`, with the totals table, the operators unique to either side, and the per-operator delta table
 6. `## Operator Distribution with Compatibility Status`
    - Columns (exact, in order): `Op Type | Domain | Count | Data Types | Recommended Rocm Implementation | Status | Op Description`
 7. `### Compatibility Summary`
@@ -54,23 +56,22 @@ Exact order, do not reorder:
    - `#### Partially Compatible Operators (<count>):`
    - `#### Unsupported Operators (<count>):`
 8. `Unsupported operator recommendation buckets` (one bucket per recommended path)
-9. `## Hip Ops Summary` — copy the `## Operator Summary` table from `step2_hip_ops.md` when available
-10. `## ONNX-HIP-RUNTIME Mapping` — render from `mapping_chain`
-11. Final pointer line: `Detailed compatibility diagnostics are in model_compatibility_details.md`
+9. `## ONNX to Hip to runtime mapping` — rendered from `mapping_chain`; columns `ONNX Op | Domain | Hip Op | Runtime Func | Backend | Instances | Status`
+10. Final pointer line: `Detailed compatibility diagnostics are in model_compatibility_details.md`
 
 ## model_compatibility_details.md — section order
 
-1. Title + metadata
-2. *(conditional)* `Source: original ONNX (no EP rewrites)` badge when applicable
-3. *(conditional)* `## Original vs EP input (operator distribution)` block
-4. `## Supported operators table (full)`
-5. `## Partially compatible details` — columns: `Op Type | Domain | Reason Codes | Reason Texts | Evidence`
-6. `## Unsupported operators` — columns: `Op Type | Domain | Count | Reason`
-7. `## Data quality notes`
+This file carries only what the main report does not: the evidence behind a non-supported row.
+
+1. Title + metadata, with a pointer back to `model_compatibility_report.md`
+2. *(conditional)* `Source: original ONNX, conversion probe skipped` badge when applicable
+3. `## Partially compatible details` — columns: `Op Type | Domain | Reason Codes | Reason Texts | Evidence`
+4. `## Data quality notes`
 
 ## Agent rendering rules
 
-- When you echo the report back to the user, do not re-render or reformat; **read the generated markdown** and paste / quote it.
-- When you summarize verbally, the percentage in Summary is the headline number; mention any tool-FP rescued by diagnose and the resulting "true" supported percentage.
-- For every `unsupported` recommendation bucket you should include closest existing wrapper / entry point (if any) and short family-based rationale per [reference.md](reference.md).
-- When the report header carries the `Source: original ONNX` badge, lead your user-facing summary with that caveat — the numbers do not reflect EP fusions/folds.
+- When you echo the report back to the user, do not re-render or reformat; **read the generated markdown** and quote it.
+- Chat Summary **must** equal `model_compatibility_report.md`. If a diagnose finding changes a status, fix the pipeline and re-run; never keep a private "true" percentage that disagrees with the file.
+- The percentage in Summary is the headline number. Follow it with the constraint behind each unsupported operator (from [diagnose.md](diagnose.md)), because that is what tells the user whether a fix is small or structural.
+- For every `unsupported` recommendation bucket include the closest existing wrapper / entry point (if any) and a short family-based rationale per [reference.md](reference.md).
+- When the report header carries the `Source: original ONNX, conversion probe skipped` badge, lead your summary with that caveat: nothing was verified against the compiler.
