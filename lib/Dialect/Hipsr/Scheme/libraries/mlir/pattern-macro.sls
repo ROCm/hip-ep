@@ -261,13 +261,9 @@
              (ast-operation-expand-attributes-set! rec #'attr-list)
              (parse-rewrite-optional rec #'more))]
 
-          ;; Found -> result-types
-          [(-> result-types . more)
-           (if (null? (syntax->datum #'more))  ;; Must be last
-               (ast-operation-expand-result-types-set! rec #'result-types)
-               (syntax-violation 'parse-rewrite-optional
-                 "Unexpected tokens after -> result-types"
-                 #'more))]
+          ;; Found -> result-types (must be last - no trailing elements)
+          [(-> result-types)
+           (ast-operation-expand-result-types-set! rec #'result-types)]
 
           ;; End of list - nothing more to do
           [() #f]
