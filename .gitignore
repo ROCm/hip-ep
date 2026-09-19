@@ -165,3 +165,4 @@ test/python/data/whisper/librispeech/
 CMakeUserPresets.json
 build.*/
 lib/**/*.wpo
+third_party/**/*.wpo
