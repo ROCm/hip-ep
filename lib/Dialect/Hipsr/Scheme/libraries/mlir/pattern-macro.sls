@@ -10,10 +10,11 @@
           ast-pattern-debug-ast?
           ast-pattern-debug-matching?)
   (import (rnrs (6))
-          (for (rime loop) expand)      ;; Import loop macro for expansion time
-          (for (only (chezscheme) syntax->list) expand))    ;; Import syntax->list for expansion time
+          (for (rime loop) expand)                        ;; Import loop macro for expansion time
+          (for (only (chezscheme) syntax->list) expand))  ;; Import syntax->list for expansion time
 
   ;; Runtime AST record (created when :debug-ast is used)
+  ;; Contains datums (symbols, strings, lists) for inspection
   (define-record-type ast-pattern
     (fields function-name      ;; symbol - name of the pattern function
             root-op-name       ;; string - operation name for OpConversionPattern (e.g., "onnx.Cast")
@@ -27,37 +28,41 @@
     (lambda (stx)
       
       ;; Expansion-time AST record for the whole pattern
+      ;; Contains syntax objects to preserve lexical context for code generation
       (define-record-type (ast-pattern-expand make-ast-pattern-expand ast-pattern-expand?)
-        (fields (mutable function-name)    ;; symbol - name of the pattern function
-                (mutable root-var)         ;; symbol - which match result is the root (e.g., %out)
-                (mutable root-op-name)     ;; string - operation name extracted from match (e.g., "onnx.Cast")
-                (mutable match)            ;; list - match operations (at least one, will be list of ast-match-expand)
-                (mutable rewrite)          ;; list - rewrite operations (at least one, will be list of ast-operation-expand)
-                (mutable where)            ;; list - where bindings (zero or more, will be list of ast-where-binding-expand)
+        (fields (mutable function-name)    ;; syntax - identifier for pattern function
+                (mutable root-var)         ;; syntax - identifier for root result var (e.g., #'%out)
+                (mutable root-op-name)     ;; syntax - string literal for op name (e.g., #'"onnx.Cast")
+                (mutable match)            ;; list of ast-match-expand - parsed match operations
+                (mutable rewrite)          ;; list of ast-operation-expand - parsed rewrite operations
+                (mutable where)            ;; list of ast-where-binding-expand - parsed where bindings
                 (mutable debug-ast?)       ;; boolean - whether :debug-ast flag is present
                 (mutable debug-matching?)))  ;; boolean - whether :debug-matching flag is present
 
       ;; Expansion-time AST record for match operations
+      ;; Contains syntax objects for code generation
       (define-record-type (ast-match-expand make-ast-match-expand ast-match-expand?)
-        (fields result-var     ;; symbol - result variable (e.g., %out)
-                op-name        ;; string - operation name (e.g., "onnx.Cast")
-                operands       ;; list - operand variables (zero or more)
-                attributes     ;; list - attribute bindings (zero or more)
-                input-types    ;; list - input type expressions (zero or more)
-                output-type))  ;; expression - output type expression
+        (fields result-var     ;; syntax - identifier (e.g., #'%out)
+                op-name        ;; syntax - string literal (e.g., #'"onnx.Cast")
+                operands       ;; syntax - operand list (e.g., #'(%in))
+                attributes     ;; syntax - attribute list (e.g., #'())
+                input-types    ;; syntax - input types (e.g., #'(!in-type))
+                output-type))  ;; syntax - output type (e.g., #'!out-type)
 
       ;; Expansion-time AST record for rewrite operations
+      ;; Contains syntax objects for code generation
       (define-record-type (ast-operation-expand make-ast-operation-expand ast-operation-expand?)
-        (fields result-var     ;; symbol - result variable (e.g., %new)
-                op-name        ;; string - operation name (e.g., "hipsr.cast")
-                operands       ;; list - operand expressions (zero or more)
-                attributes     ;; list - attribute expressions (zero or more)
-                rest))         ;; list - remainder (types, etc.)
+        (fields result-var     ;; syntax - identifier (e.g., #'%new)
+                op-name        ;; syntax - string literal (e.g., #'"hipsr.cast")
+                operands       ;; syntax - operand expressions
+                attributes     ;; syntax - attribute expressions
+                rest))         ;; syntax - remainder (types, etc.)
 
       ;; Expansion-time AST record for where bindings
+      ;; Contains syntax objects for code generation
       (define-record-type (ast-where-binding-expand make-ast-where-binding-expand ast-where-binding-expand?)
-        (fields var            ;; symbol - binding variable (e.g., %ctx)
-                expr))         ;; expression - Scheme expression to compute
+        (fields var            ;; syntax - identifier (e.g., #'%ctx)
+                expr))         ;; syntax - expression to compute
 
       ;;=======================================================================
       ;; Phase 1: Parse whole syntax to AST record - pure pattern matching
@@ -92,8 +97,9 @@
                 (not (null? #'(match-op ...)))
                 (not (null? #'(rewrite-op ...))))
            (begin
-             (ast-pattern-expand-function-name-set! ast (syntax->datum #'fname))
-             (ast-pattern-expand-root-var-set! ast (syntax->datum #'root))
+             ;; Store syntax objects, not datums
+             (ast-pattern-expand-function-name-set! ast #'fname)
+             (ast-pattern-expand-root-var-set! ast #'root)
              ;; Parse each match operation into ast-match-expand using loop
              (ast-pattern-expand-match-set! ast 
                (loop :for op-stx :in (syntax->list #'(match-op ...))
@@ -128,21 +134,21 @@
       ;;=======================================================================
       ;; Parse individual match operation
       ;; Input: (%out = "onnx.Cast" (%in) () : (!in-type) -> !out-type)
-      ;; Output: ast-match-expand record
+      ;; Output: ast-match-expand record with syntax objects
       ;;=======================================================================
       (define (parse-match-operation op-stx)
         (syntax-case op-stx (= :)
           ;; Pattern: (result-var = "op.name" (operands ...) (attrs ...) : (input-types ...) -> output-type)
           [(result = op-name operands attrs : input-types -> output-type)
            (and (identifier? #'result)
-                (string? (syntax->datum #'op-name)))
+                (string? (syntax->datum #'op-name)))  ;; Check it's a string, but store syntax
            (make-ast-match-expand
-             (syntax->datum #'result)          ;; result-var: symbol
-             (syntax->datum #'op-name)         ;; op-name: string
-             (syntax->datum #'operands)        ;; operands: list (TODO: parse structure)
-             (syntax->datum #'attrs)           ;; attributes: list (TODO: parse structure)
-             (syntax->datum #'input-types)     ;; input-types: list (TODO: parse structure)
-             (syntax->datum #'output-type))]   ;; output-type: expression
+             #'result          ;; Store syntax object
+             #'op-name         ;; Store syntax object (string literal)
+             #'operands        ;; Store syntax object (TODO: parse structure)
+             #'attrs           ;; Store syntax object (TODO: parse structure)
+             #'input-types     ;; Store syntax object (TODO: parse structure)
+             #'output-type)]   ;; Store syntax object
           
           ;; TODO: Add more patterns for variations
           
@@ -153,20 +159,20 @@
       ;;=======================================================================
       ;; Parse individual rewrite operation
       ;; Input: (%new = "hipsr.cast" (%ctx %in) ((attr val)) : (!t1 !t2) -> !t3)
-      ;; Output: ast-operation-expand record
+      ;; Output: ast-operation-expand record with syntax objects
       ;;=======================================================================
       (define (parse-rewrite-operation op-stx)
         (syntax-case op-stx (= :)
           ;; Pattern: (result = "op.name" (operands ...) (attrs ...) : types ... -> output-type)
           [(result = op-name operands attrs rest ...)
            (and (identifier? #'result)
-                (string? (syntax->datum #'op-name)))
+                (string? (syntax->datum #'op-name)))  ;; Check it's a string, but store syntax
            (make-ast-operation-expand
-             (syntax->datum #'result)          ;; result-var: symbol
-             (syntax->datum #'op-name)         ;; op-name: string
-             (syntax->datum #'operands)        ;; operands: list (TODO: parse structure)
-             (syntax->datum #'attrs)           ;; attributes: list (TODO: parse structure)
-             (syntax->datum #'(rest ...)))]    ;; rest: types, etc.
+             #'result          ;; Store syntax object
+             #'op-name         ;; Store syntax object (string literal)
+             #'operands        ;; Store syntax object (TODO: parse structure)
+             #'attrs           ;; Store syntax object (TODO: parse structure)
+             #'(rest ...))]    ;; Store syntax object
           
           ;; TODO: Add more patterns for variations
           
@@ -184,8 +190,8 @@
                               [(v e) 
                                (identifier? #'v)
                                (make-ast-where-binding-expand
-                                 (syntax->datum #'v)
-                                 (syntax->datum #'e))]
+                                 #'v          ;; Store syntax object
+                                 #'e)]        ;; Store syntax object
                               [_ (syntax-violation 'parse-where "Invalid where binding (expected: (var expr))" binding)])))]
           [()
            (if #f #f)]
@@ -196,14 +202,15 @@
       ;;=======================================================================
       (define (validate-ast ast-rec)
         ;; Find the match operation that produces root-var and extract its op-name
-        (let ([root-var (ast-pattern-expand-root-var ast-rec)]
+        (let ([root-var-stx (ast-pattern-expand-root-var ast-rec)]
               [match-ops (ast-pattern-expand-match ast-rec)])
           (let find-root ([ops match-ops])
             (when (pair? ops)
               (let ([match-op (car ops)])
-                (if (eq? (ast-match-expand-result-var match-op) root-var)
+                ;; Compare syntax objects using bound-identifier=? or free-identifier=?
+                (if (free-identifier=? (ast-match-expand-result-var match-op) root-var-stx)
                     (ast-pattern-expand-root-op-name-set! ast-rec 
-                      (ast-match-expand-op-name match-op))
+                      (ast-match-expand-op-name match-op))  ;; Store syntax object
                     (find-root (cdr ops))))))
           ast-rec))
 
@@ -213,24 +220,35 @@
       (define (generate-code whole-stx ast-rec)
         (syntax-case whole-stx ()
           [(macro-name . _)
-           (let ([fname (ast-pattern-expand-function-name ast-rec)]
-                 [root-op-name (ast-pattern-expand-root-op-name ast-rec)]
+           (let ([fname-stx (ast-pattern-expand-function-name ast-rec)]
+                 [root-op-name-stx (ast-pattern-expand-root-op-name ast-rec)]
                  [match-ops (ast-pattern-expand-match ast-rec)]
                  [rewrite-ops (ast-pattern-expand-rewrite ast-rec)]
                  [where-bindings (ast-pattern-expand-where ast-rec)]
                  [debug-ast? (ast-pattern-expand-debug-ast? ast-rec)]
                  [debug-matching? (ast-pattern-expand-debug-matching? ast-rec)])
-             (with-syntax ([fname-id (datum->syntax #'macro-name fname)]
-                           [fname-q (datum->syntax #'macro-name fname)]
-                           [root-op-name-q (datum->syntax #'macro-name root-op-name)]
-                           [match-ops-q (datum->syntax #'macro-name match-ops)]
-                           [rewrite-ops-q (datum->syntax #'macro-name rewrite-ops)]
-                           [where-bindings-q (datum->syntax #'macro-name where-bindings)]
-                           [debug-ast-q (datum->syntax #'macro-name debug-ast?)]
-                           [debug-matching-q (datum->syntax #'macro-name debug-matching?)])
-               (if debug-ast?
-                   #'(define fname-id (make-ast-pattern 'fname-q 'root-op-name-q 'match-ops-q 'rewrite-ops-q 'where-bindings-q 'debug-ast-q 'debug-matching-q))
-                   #'(define fname-id (lambda (op operands-ref rewriter type-converter) #f)))))]))
+             (if debug-ast?
+                 ;; For :debug-ast, create runtime ast-pattern record with datums
+                 (with-syntax ([fname-id fname-stx]
+                               [fname-datum (syntax->datum fname-stx)]
+                               [root-op-name-datum (syntax->datum root-op-name-stx)]
+                               [match-ops-datum (syntax->datum #'match-ops)]  ;; TODO: convert properly
+                               [rewrite-ops-datum (syntax->datum #'rewrite-ops)]  ;; TODO: convert properly
+                               [where-bindings-datum (syntax->datum #'where-bindings)]  ;; TODO: convert properly
+                               [debug-ast-val debug-ast?]
+                               [debug-matching-val debug-matching?])
+                   #'(define fname-id 
+                       (make-ast-pattern 'fname-datum 
+                                       'root-op-name-datum 
+                                       'match-ops-datum 
+                                       'rewrite-ops-datum 
+                                       'where-bindings-datum 
+                                       'debug-ast-val 
+                                       'debug-matching-val)))
+                 ;; For normal mode, generate lambda using syntax objects directly
+                 #`(define #,fname-stx 
+                     (lambda (op operands-ref rewriter type-converter) 
+                       #f))))]))
 
       (let* ([ast-rec (parse-to-ast stx)]
              [validated (validate-ast ast-rec)])
