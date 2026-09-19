@@ -315,15 +315,9 @@
       (define (parse-block block-stx)
         (syntax-case block-stx ()
           [(label arguments operation ...)
-           ;; Validate label starts with ^
-           (let ([label-str (symbol->string (syntax->datum #'label))])
-             (if (not (char=? (string-ref label-str 0) #\^))
-                 (syntax-violation 'parse-block
-                   "Block label must start with ^ (e.g., ^bb0)"
-                   #'label)
-                 (let ([args (parse-block-arguments #'arguments)]
-                       [ops (map parse-rewrite-operation (syntax->list #'(operation ...)))])
-                   (make-ast-block-expand #'label args ops))))]
+           (let ([args (parse-block-arguments #'arguments)]
+                 [ops (map parse-rewrite-operation (syntax->list #'(operation ...)))])
+             (make-ast-block-expand #'label args ops))]
           [_ (syntax-violation 'parse-block
                "Invalid block syntax (expected: (^label (args...) operations...))"
                block-stx)]))
