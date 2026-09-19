@@ -14,7 +14,7 @@
           make-ast-pattern)  ;; Re-export for generated code
   (import (except (rnrs (6)) =)
           (for (only (chezscheme) syntax->list) expand)  ;; Import syntax->list for expansion time
-          (for (except (rime loop) :with) expand))  ;; Import loop (except :with which conflicts with our DSL)
+          (for (rename (rime loop) (:with :rime-with)) expand))  ;; Import loop with :with renamed to avoid conflict
 
 
   ;; Define keywords as syntax (for cross-library hygiene)
