@@ -58,44 +58,49 @@
 
       ;; Expansion-time AST record for match operations
       ;; Contains syntax objects for code generation
+      ;; Mutable fields allow validation to normalize in-place
       (define-record-type (ast-match-expand make-ast-match-expand ast-match-expand?)
-        (fields result-var     ;; syntax - identifier (e.g., #'%out)
-                op-name        ;; syntax - string literal (e.g., #'"onnx.Cast")
-                operands       ;; syntax - operand list (e.g., #'(%in))
-                attributes     ;; syntax - attribute list (e.g., #'())
-                input-types    ;; syntax - input types (e.g., #'(!in-type))
-                output-type))  ;; syntax - output type (e.g., #'!out-type)
+        (fields (mutable result-var)     ;; syntax - identifier (e.g., #'%out)
+                (mutable op-name)        ;; syntax - string literal (e.g., #'"onnx.Cast")
+                (mutable operands)       ;; syntax - operand list (e.g., #'(%in))
+                (mutable attributes)     ;; syntax - attribute list (e.g., #'())
+                (mutable input-types)    ;; syntax - input types (e.g., #'(!in-type))
+                (mutable output-type)))  ;; syntax - output type (e.g., #'!out-type)
 
       ;; Expansion-time AST record for rewrite operations
       ;; Contains syntax objects for code generation
       ;; Field order matches MLIR generic syntax: operands, regions, attributes, types
       ;; Note: No input-types field because input types are implicit in operands
       ;;       (each operand is a Value with .getType()). Only result types are needed.
+      ;; Mutable fields allow validation to normalize in-place
       (define-record-type (ast-operation-expand make-ast-operation-expand ast-operation-expand?)
-        (fields result-var     ;; syntax - identifier (e.g., #'%new)
-                op-name        ;; syntax - string literal (e.g., #'"hipsr.cast")
-                operands       ;; syntax - operand expressions
-                regions        ;; syntax - regions (before attributes in MLIR syntax)
-                attributes     ;; syntax - attribute expressions
-                result-types)) ;; syntax - result type(s) for operation output
+        (fields (mutable result-var)     ;; syntax - identifier (e.g., #'%new)
+                (mutable op-name)        ;; syntax - string literal (e.g., #'"hipsr.cast")
+                (mutable operands)       ;; syntax - operand expressions
+                (mutable regions)        ;; syntax - regions (before attributes in MLIR syntax)
+                (mutable attributes)     ;; syntax - attribute expressions
+                (mutable result-types))) ;; syntax - result type(s) for operation output
 
       ;; Expansion-time AST record for where bindings
       ;; Contains syntax objects for code generation
+      ;; Mutable fields allow validation to normalize in-place
       (define-record-type (ast-where-binding-expand make-ast-where-binding-expand ast-where-binding-expand?)
-        (fields var            ;; syntax - identifier (e.g., #'%ctx)
-                expr))         ;; syntax - expression to compute
+        (fields (mutable var)            ;; syntax - identifier (e.g., #'%ctx)
+                (mutable expr)))         ;; syntax - expression to compute
 
       ;; Expansion-time AST record for regions (mimics MLIR Region)
       ;; A region contains a list of blocks
+      ;; Mutable fields allow validation to normalize in-place
       (define-record-type (ast-region-expand make-ast-region-expand ast-region-expand?)
-        (fields blocks))       ;; list of ast-block-expand
+        (fields (mutable blocks)))       ;; list of ast-block-expand
 
       ;; Expansion-time AST record for blocks (mimics MLIR Block)
       ;; A block has a label, arguments, and operations
+      ;; Mutable fields allow validation to normalize in-place
       (define-record-type (ast-block-expand make-ast-block-expand ast-block-expand?)
-        (fields label          ;; syntax - block label (e.g., #'^bb0)
-                arguments      ;; list of (var type) pairs - block arguments
-                operations))   ;; list of ast-operation-expand
+        (fields (mutable label)          ;; syntax - block label (e.g., #'^bb0)
+                (mutable arguments)      ;; list of (var type) pairs - block arguments
+                (mutable operations)))   ;; list of ast-operation-expand
 
       ;;=======================================================================
       ;; Phase 1: Parse whole syntax to AST record - pure pattern matching
@@ -319,30 +324,23 @@
                        (ast-match-expand-output-type match-op)))))
                (ast-pattern-expand-match ast-rec)))
 
-        ;; Validate and normalize each rewrite operation
-        (ast-pattern-expand-rewrite-set! ast-rec
-          (map (lambda (rewrite-op)
-                 ;; Validate result-var is identifier
-                 (unless (identifier? (ast-operation-expand-result-var rewrite-op))
-                   (syntax-violation 'validate-ast "Rewrite result must be an identifier"
-                                    (ast-operation-expand-result-var rewrite-op)))
-                 ;; Validate and normalize op-name
-                 (let* ([op-name-stx (ast-operation-expand-op-name rewrite-op)]
-                        [op-name-datum (syntax->datum op-name-stx)])
-                   (unless (or (string? op-name-datum) (symbol? op-name-datum))
-                     (syntax-violation 'validate-ast "Operation name must be string or symbol"
-                                      op-name-stx))
-                   (let ([normalized-name (if (string? op-name-datum)
-                                             op-name-stx
-                                             (datum->syntax op-name-stx (symbol->string op-name-datum)))])
-                     (make-ast-operation-expand
-                       (ast-operation-expand-result-var rewrite-op)
-                       normalized-name  ;; Now guaranteed to be string syntax
-                       (ast-operation-expand-operands rewrite-op)
-                       (ast-operation-expand-regions rewrite-op)
-                       (ast-operation-expand-attributes rewrite-op)
-                       (ast-operation-expand-result-types rewrite-op)))))
-               (ast-pattern-expand-rewrite ast-rec)))
+        ;; Validate and normalize each rewrite operation (in-place with mutation)
+        (for-each (lambda (rewrite-op)
+                    ;; Validate result-var is identifier
+                    (unless (identifier? (ast-operation-expand-result-var rewrite-op))
+                      (syntax-violation 'validate-ast "Rewrite result must be an identifier"
+                                       (ast-operation-expand-result-var rewrite-op)))
+                    ;; Validate and normalize op-name
+                    (let* ([op-name-stx (ast-operation-expand-op-name rewrite-op)]
+                           [op-name-datum (syntax->datum op-name-stx)])
+                      (unless (or (string? op-name-datum) (symbol? op-name-datum))
+                        (syntax-violation 'validate-ast "Operation name must be string or symbol"
+                                         op-name-stx))
+                      ;; Normalize: convert symbol to string in-place
+                      (unless (string? op-name-datum)
+                        (ast-operation-expand-op-name-set! rewrite-op
+                          (datum->syntax op-name-stx (symbol->string op-name-datum))))))
+                  (ast-pattern-expand-rewrite ast-rec))
 
         ;; Validate where bindings
         (for-each (lambda (where-binding)
