@@ -131,28 +131,19 @@
       ;; Output: ast-match-expand record with syntax objects
       ;;=======================================================================
       (define (parse-match-operation op-stx)
-        (syntax-case op-stx ()
+        (syntax-case op-stx (= : ->)
           ;; Full pattern: (result = "op.name" (operands ...) (attrs ...) : (input-types ...) -> output-type)
-          ;; WHY datum matching: Literal keywords use free-identifier=? which fails when syntax objects
-          ;; cross function boundaries - the = in user's input has different lexical context than
-          ;; the = in this helper's literals list, even when properly exported/imported.
-          ;; Datum matching with eq? checks symbol names only, bypassing the binding context issue.
-          ;; PARSE PHASE: Only check pattern structure (= : -> positions), no validation
-          [(result eq op-name operands attrs colon input-types arrow output-type)
-           (and (eq? (syntax->datum #'eq) '=)
-                (eq? (syntax->datum #'colon) ':)
-                (eq? (syntax->datum #'arrow) '->))
+          [(result = op-name operands attrs : input-types -> output-type)
            (make-ast-match-expand
-             #'result          ;; Store syntax object as-is
-             #'op-name         ;; Store syntax object as-is (validation will check/convert)
-             #'operands        ;; Store syntax object (TODO: parse structure)
-             #'attrs           ;; Store syntax object (TODO: parse structure)
-             #'input-types     ;; Store syntax object (TODO: parse structure)
-             #'output-type)]   ;; Store syntax object
+             #'result
+             #'op-name
+             #'operands
+             #'attrs
+             #'input-types
+             #'output-type)]
 
           ;; No types: (result = "op.name" (operands ...) (attrs ...))
-          [(result eq op-name operands attrs)
-           (eq? (syntax->datum #'eq) '=)
+          [(result = op-name operands attrs)
            (make-ast-match-expand
              #'result
              #'op-name
@@ -162,10 +153,7 @@
              #'())]            ;; Empty output-type
 
           ;; No attrs, with types: (result = "op.name" (operands ...) : (input-types ...) -> output-type)
-          [(result eq op-name operands colon input-types arrow output-type)
-           (and (eq? (syntax->datum #'eq) '=)
-                (eq? (syntax->datum #'colon) ':)
-                (eq? (syntax->datum #'arrow) '->))
+          [(result = op-name operands : input-types -> output-type)
            (make-ast-match-expand
              #'result
              #'op-name
@@ -175,8 +163,7 @@
              #'output-type)]
 
           ;; Minimal: (result = "op.name" (operands ...))
-          [(result eq op-name operands)
-           (eq? (syntax->datum #'eq) '=)
+          [(result = op-name operands)
            (make-ast-match-expand
              #'result
              #'op-name
@@ -195,33 +182,26 @@
       ;; Output: ast-operation-expand record with syntax objects
       ;;=======================================================================
       (define (parse-rewrite-operation op-stx)
-        (syntax-case op-stx ()
+        (syntax-case op-stx (=)
           ;; Full pattern with attrs: (result = "op.name" (operands ...) (attrs ...) rest ...)
-          ;; WHY datum matching: Same reason as parse-match-operation - literal keywords fail
-          ;; when syntax objects are passed between functions due to lexical context mismatch.
-          ;; PARSE PHASE: Only check pattern structure (= position), no validation
-          [(result eq op-name operands attrs rest ...)
-           (eq? (syntax->datum #'eq) '=)
+          [(result = op-name operands attrs rest ...)
            (make-ast-operation-expand
-             #'result          ;; Store syntax object as-is
-             #'op-name         ;; Store syntax object as-is (validation will check/convert)
-             #'operands        ;; Store syntax object (TODO: parse structure)
-             #'attrs           ;; Store syntax object (TODO: parse structure)
-             #'(rest ...))]    ;; Store syntax object
+             #'result
+             #'op-name
+             #'operands
+             #'attrs
+             #'(rest ...))]
 
           ;; Minimal pattern without attrs: (result = "op.name" (operands ...))
-          [(result eq op-name operands)
-           (eq? (syntax->datum #'eq) '=)
+          [(result = op-name operands)
            (make-ast-operation-expand
              #'result
              #'op-name
              #'operands
              #'()              ;; Empty attrs
              #'())]            ;; Empty rest
-          
-          ;; TODO: Add more patterns for variations
-          
-          [_ (syntax-violation 'parse-rewrite-operation 
+
+          [_ (syntax-violation 'parse-rewrite-operation
                "Invalid rewrite operation syntax (expected: result = \"op.name\" operands attrs ...)"
                op-stx)]))
       
