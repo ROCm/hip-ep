@@ -232,37 +232,45 @@
                op-stx)]))
 
       ;; Step 2: Parse the rest: (operands) [:regions (...)]? [:attrs [...]]? [-> result-types]?
-      ;; Use recursive helper to accumulate optional parts
+      ;; Create record with operands, then mutate as we find optional parts
       (define (parse-rewrite-rest result-stx op-name-stx rest-stx)
         (syntax-case rest-stx ()
           [(operands . more)
-           (parse-rewrite-optional #'operands #'more result-stx op-name-stx #'() #'() #'())]))
+           (let ([rec (make-ast-operation-expand
+                        result-stx
+                        op-name-stx
+                        #'operands
+                        #'()  ;; Empty regions (may be updated)
+                        #'()  ;; Empty attrs (may be updated)
+                        #'())]) ;; Empty result-types (may be updated)
+             (parse-rewrite-optional rec #'more)
+             rec)]))
 
-      ;; Helper: parse optional :regions, :attrs, -> result-types
-      (define (parse-rewrite-optional operands-stx rest-stx result-stx op-name-stx regions-stx attrs-stx types-stx)
+      ;; Helper: parse optional :regions, :attrs, -> result-types (mutate record in-place)
+      (define (parse-rewrite-optional rec rest-stx)
         (syntax-case rest-stx (:regions :attrs ->)
           ;; Found :regions
           [(:regions region-list . more)
-           (parse-rewrite-optional operands-stx #'more result-stx op-name-stx #'region-list attrs-stx types-stx)]
+           (begin
+             (ast-operation-expand-regions-set! rec #'region-list)
+             (parse-rewrite-optional rec #'more))]
 
           ;; Found :attrs
           [(:attrs attr-list . more)
-           (parse-rewrite-optional operands-stx #'more result-stx op-name-stx regions-stx #'attr-list types-stx)]
+           (begin
+             (ast-operation-expand-attributes-set! rec #'attr-list)
+             (parse-rewrite-optional rec #'more))]
 
           ;; Found -> result-types
           [(-> result-types . more)
-           (null? (syntax->datum #'more))  ;; Must be last
-           (parse-rewrite-optional operands-stx #'() result-stx op-name-stx regions-stx attrs-stx #'result-types)]
+           (if (null? (syntax->datum #'more))  ;; Must be last
+               (ast-operation-expand-result-types-set! rec #'result-types)
+               (syntax-violation 'parse-rewrite-optional
+                 "Unexpected tokens after -> result-types"
+                 #'more))]
 
-          ;; End of list - create record
-          [()
-           (make-ast-operation-expand
-             result-stx
-             op-name-stx
-             operands-stx
-             regions-stx
-             attrs-stx
-             types-stx)]
+          ;; End of list - nothing more to do
+          [() #f]
 
           ;; Error
           [_ (syntax-violation 'parse-rewrite-optional
