@@ -1,7 +1,7 @@
 #!r6rs
 (library (mlir pattern-macro)
   (export define-conversion-pattern
-          :match :rewrite :with :where :debug-ast :debug-matching = : ->
+          :match :rewrite :with :where :debug-ast :debug-matching = : -> :region
           ast-pattern?
           ast-pattern-function-name
           ast-pattern-root-op-name
@@ -24,6 +24,7 @@
   (define-syntax = (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
   (define-syntax : (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
   (define-syntax -> (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
+  (define-syntax :region (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
 
   ;; Runtime AST record (created when :debug-ast is used)
   ;; Contains datums (symbols, strings, lists) for inspection
