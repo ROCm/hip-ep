@@ -272,6 +272,7 @@
                rest-stx)]))
 
       ;; Accumulate regions until hitting :attrs, ->, or end
+      ;; Each region is a list of blocks
       (define (parse-regions-section rec rest-stx regions-acc)
         (syntax-case rest-stx (:attrs ->)
           ;; Hit :attrs - done with regions, start attrs section
@@ -286,14 +287,45 @@
              (ast-operation-expand-regions-set! rec (reverse regions-acc))
              (ast-operation-expand-result-types-set! rec #'result-types))]
 
-          ;; Another region - accumulate it
+          ;; Another region - parse it and accumulate
           [(region . more)
-           (parse-regions-section rec #'more (cons #'region regions-acc))]
+           (let ([region-rec (parse-region #'region)])
+             (parse-regions-section rec #'more (cons region-rec regions-acc)))]
 
           ;; Error - must have -> result-types
           [_ (syntax-violation 'parse-regions-section
                "Expected region, :attrs, or -> result-types"
                rest-stx)]))
+
+      ;; Parse a region: a list of blocks wrapped in parens
+      ;; Region syntax: ([block1] [block2] ...)
+      ;; Returns ast-region-expand
+      (define (parse-region region-stx)
+        (syntax-case region-stx ()
+          [(block ...)
+           (let ([blocks (map parse-block (syntax->list #'(block ...)))])
+             (make-ast-region-expand blocks))]
+          [_ (syntax-violation 'parse-region
+               "Invalid region syntax (expected: list of blocks)"
+               region-stx)]))
+
+      ;; Parse a block: (^label (args...) operations...)
+      ;; Block syntax: (^bb0 ((%arg0 : i32) (%arg1 : i32)) (%op1 = ...) (%op2 = ...))
+      ;; Returns ast-block-expand
+      (define (parse-block block-stx)
+        (syntax-case block-stx ()
+          [(label arguments operation ...)
+           ;; Validate label starts with ^
+           (let ([label-str (symbol->string (syntax->datum #'label))])
+             (if (not (char=? (string-ref label-str 0) #\^))
+                 (syntax-violation 'parse-block
+                   "Block label must start with ^ (e.g., ^bb0)"
+                   #'label)
+                 (let ([ops (map parse-rewrite-operation (syntax->list #'(operation ...)))])
+                   (make-ast-block-expand #'label #'arguments ops))))]
+          [_ (syntax-violation 'parse-block
+               "Invalid block syntax (expected: (^label (args...) operations...))"
+               block-stx)]))
 
       ;; Accumulate attrs until hitting -> or end
       (define (parse-attrs-section rec rest-stx attrs-acc)
