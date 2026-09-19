@@ -149,7 +149,7 @@
                                     (datum->syntax #'op-name (symbol->string datum))))])  ;; Convert symbol to string
              (make-ast-match-expand
                #'result          ;; Store syntax object
-               op-name-stx       ;; String syntax object
+               op-name-stx       ;; Syntax object wrapping string (converted from symbol if needed)
                #'operands        ;; Store syntax object (TODO: parse structure)
                #'attrs           ;; Store syntax object (TODO: parse structure)
                #'input-types     ;; Store syntax object (TODO: parse structure)
@@ -181,7 +181,7 @@
                                     (datum->syntax #'op-name (symbol->string datum))))])  ;; Convert symbol to string
              (make-ast-operation-expand
                #'result          ;; Store syntax object
-               op-name-stx       ;; String syntax object
+               op-name-stx       ;; Syntax object wrapping string (converted from symbol if needed)
                #'operands        ;; Store syntax object (TODO: parse structure)
                #'attrs           ;; Store syntax object (TODO: parse structure)
                #'(rest ...)))]   ;; Store syntax object
