@@ -1011,58 +1011,83 @@ __global__ __launch_bounds__(kTiledBlock) void qgemm_tiled_kernel(
   }
 }
 
-// Full-tile W4 candidate with twice the K depth. It keeps the baseline
-// [64 x 64] output mapping and register-sized [4 x 4] micro-tile, but stages
-// two A/B slabs before each compute section so the K loop pays half as many
-// block barriers.
+// Full-tile W4 candidate with twice the K depth, staging two A/B slabs before
+// each compute section so the K loop pays half as many block barriers.
+//
+// The output tile is [128 x 16] rather than the square [64 x 64] the other
+// tiled kernels use, which is worth explaining because the intuition points the
+// other way. Logical traffic for one GEMM is
+//
+//   A: (N / TN) * M * K * 2      B: (M / TM) * N * K * 0.5
+//
+// and weighting those by element width suggests a wide N tile. Measurement says
+// the opposite, because the two operands sit on different sides of the cache:
+// at M=128 the A panel is 0.5-2 MB and stays resident in L2 across the whole N
+// grid, so re-reading it is nearly free, while B runs to 8 MB per projection
+// and every re-read is a miss. So the tile wants TM as tall as M -- one row of
+// blocks, B fetched once -- and TN as narrow as the block can go before it
+// stops filling the machine. A sweep of nine shapes bottomed out here; TN=8
+// (two waves per block) regresses 17%, and any shape that pushes the
+// accumulator past [4 x 4] regresses 8-30% on register pressure alone.
 constexpr int kK32TileK = 32;
 constexpr int kK32TileQuads = kK32TileK / kDotK;
-constexpr int kK32StageReps =
-    (kTileM * kK32TileQuads) / kTiledBlock; // 2
+constexpr int kK32TileM = 128;
+constexpr int kK32TileN = 16;
+constexpr int kK32Block = (kK32TileM / kThreadM) * (kK32TileN / kThreadN);
+constexpr int kK32StageRepsA = (kK32TileM * kK32TileQuads) / kK32Block; // 8
+constexpr int kK32StageRepsB = (kK32TileN * kK32TileQuads) / kK32Block; // 1
 
-__global__ __launch_bounds__(kTiledBlock) void qgemm_tiled_k32_w4_kernel(
+__global__ __launch_bounds__(kK32Block) void qgemm_tiled_k32_w4_kernel(
     const uint16_t *__restrict__ A, const uint8_t *__restrict__ B,
     uint16_t *__restrict__ Y, int64_t N, int64_t K, QGemmRequant requant,
     bool need_row_a, bool need_col_b) {
   const int tid = threadIdx.x;
-  const int64_t m_base = static_cast<int64_t>(blockIdx.y) * kTileM;
-  const int64_t n_base = static_cast<int64_t>(blockIdx.x) * kTileN;
-  int thread_m, thread_n;
-  qgemm_micro_tile_origin(tid, thread_m, thread_n);
+  const int64_t m_base = static_cast<int64_t>(blockIdx.y) * kK32TileM;
+  const int64_t n_base = static_cast<int64_t>(blockIdx.x) * kK32TileN;
+  const int thread_m = (tid / (kK32TileN / kThreadN)) * kThreadM;
+  const int thread_n = (tid % (kK32TileN / kThreadN)) * kThreadN;
 
   __shared__ __align__(16)
-      QGemmSlab a_lds[2][kK32TileQuads][kTileM];
-  __shared__ __align__(16) QGemmSlab b_lds[kK32TileQuads][kTileN];
+      QGemmSlab a_lds[2][kK32TileQuads][kK32TileM];
+  __shared__ __align__(16) QGemmSlab b_lds[kK32TileQuads][kK32TileN];
   QGemmMicroTile<2> out = {};
 
   for (int64_t k0 = 0; k0 < K; k0 += kK32TileK) {
-    ushort4 packed_a[kK32StageReps];
-    uint16_t packed_b[kK32StageReps];
+    ushort4 packed_a[kK32StageRepsA];
+    uint16_t packed_b[kK32StageRepsB];
 
-    // Issue every independent A/B load before consuming any of them.
+    // Issue every independent A/B load before consuming any of them. A and B
+    // stage at different rates now that the tile is not square.
 #pragma unroll
-    for (int rep = 0; rep < kK32StageReps; ++rep) {
-      const int linear = tid + rep * kTiledBlock;
-      const int q = linear / kTileM;
-      const int row = linear % kTileM;
-      const int64_t quad_k = k0 + q * kDotK;
+    for (int rep = 0; rep < kK32StageRepsA; ++rep) {
+      const int linear = tid + rep * kK32Block;
       packed_a[rep] = *reinterpret_cast<const ushort4 *>(
-          A + (m_base + row) * K + quad_k);
+          A + (m_base + linear % kK32TileM) * K + k0 +
+          (linear / kK32TileM) * kDotK);
+    }
+#pragma unroll
+    for (int rep = 0; rep < kK32StageRepsB; ++rep) {
+      const int linear = tid + rep * kK32Block;
       packed_b[rep] = *reinterpret_cast<const uint16_t *>(
-          B + (((n_base + row) * K + quad_k) >> 1));
+          B + (((n_base + linear % kK32TileN) * K + k0 +
+                (linear / kK32TileN) * kDotK) >>
+               1));
     }
 
 #pragma unroll
-    for (int rep = 0; rep < kK32StageReps; ++rep) {
-      const int linear = tid + rep * kTiledBlock;
-      const int q = linear / kTileM;
-      const int row = linear % kTileM;
+    for (int rep = 0; rep < kK32StageRepsA; ++rep) {
+      const int linear = tid + rep * kK32Block;
       int32_t a_hi = 0;
       int32_t a_lo = 0;
       qgemm_split_u16x4(packed_a[rep], a_hi, a_lo);
-      a_lds[kPlaneHi][q][row] = a_hi;
-      a_lds[kPlaneLo][q][row] = a_lo;
-      b_lds[q][row] = qgemm_unpack_w4x4<true>(packed_b[rep]);
+      a_lds[kPlaneHi][linear / kK32TileM][linear % kK32TileM] = a_hi;
+      a_lds[kPlaneLo][linear / kK32TileM][linear % kK32TileM] = a_lo;
+    }
+#pragma unroll
+    for (int rep = 0; rep < kK32StageRepsB; ++rep) {
+      const int linear = tid + rep * kK32Block;
+      b_lds[linear / kK32TileN][linear % kK32TileN] =
+          qgemm_unpack_w4x4<true>(packed_b[rep]);
     }
 
     __syncthreads();
@@ -2275,14 +2300,14 @@ int qgemm_launch_tiled(const QGemmArgs &g, const QGemmRequant &requant,
     const bool use_k32_shape =
         (g.N >= 8192 && g.K == 2048) ||
         (g.N == 2048 && g.K >= 3072);
-    if (!use_splitk && use_w4_specialized && g.M == 128 && use_k32_shape &&
-        (g.N % kTileN) == 0 && (g.K % kK32TileK) == 0 &&
+    if (!use_splitk && use_w4_specialized && g.M == kK32TileM && use_k32_shape &&
+        (g.N % kK32TileN) == 0 && (g.K % kK32TileK) == 0 &&
         qgemm_tiled_k32_config() == 1) {
       hipLaunchKernelGGL(
           qgemm_tiled_k32_w4_kernel,
-          dim3(static_cast<unsigned>(g.N / kTileN),
-               static_cast<unsigned>(g.M / kTileM)),
-          dim3(kTiledBlock), 0, g.stream, a_ptr, g.B, y_ptr, g.N, g.K,
+          dim3(static_cast<unsigned>(g.N / kK32TileN),
+               static_cast<unsigned>(g.M / kK32TileM)),
+          dim3(kK32Block), 0, g.stream, a_ptr, g.B, y_ptr, g.N, g.K,
           requant, need_row_a, need_col_b);
       return static_cast<int>(hipGetLastError());
     }
