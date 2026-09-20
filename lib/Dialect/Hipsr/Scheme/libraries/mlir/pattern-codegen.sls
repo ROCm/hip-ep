@@ -1,0 +1,71 @@
+#!r6rs
+(library (mlir pattern-codegen)
+  (export generate-code)
+  (import (rnrs)
+          (for (only (chezscheme) syntax->list) expand)
+          (for (mlir pattern-ast) expand))
+
+  ;;=======================================================================
+  ;; Helper: Convert expansion-time AST to runtime data (datums)
+  ;;=======================================================================
+
+  ;; Convert ast-match-expand to datum for runtime AST record
+  (define (match-expand->datum match-exp)
+    (list 'match
+          (syntax->datum (ast-match-expand-result-var match-exp))
+          (syntax->datum (ast-match-expand-op-name match-exp))
+          (syntax->datum (ast-match-expand-operands match-exp))
+          (syntax->datum (ast-match-expand-attributes match-exp))
+          (syntax->datum (ast-match-expand-input-types match-exp))
+          (syntax->datum (ast-match-expand-output-type match-exp))))
+
+  ;; Convert ast-operation-expand to datum for runtime AST record
+  (define (operation-expand->datum op-exp)
+    (list 'rewrite
+          (syntax->datum (ast-operation-expand-result-var op-exp))
+          (syntax->datum (ast-operation-expand-op-name op-exp))
+          (syntax->datum (ast-operation-expand-operands op-exp))
+          (syntax->datum (ast-operation-expand-regions op-exp))
+          (syntax->datum (ast-operation-expand-attributes op-exp))
+          (syntax->datum (ast-operation-expand-result-types op-exp))))
+
+  ;; Convert ast-where-binding-expand to datum for runtime AST record
+  (define (where-binding-expand->datum where-exp)
+    (list (syntax->datum (ast-where-binding-expand-var where-exp))
+          (syntax->datum (ast-where-binding-expand-expr where-exp))))
+
+  ;;=======================================================================
+  ;; Phase 3: Generate code from validated AST record
+  ;;=======================================================================
+
+  (define (generate-code whole-stx ast-rec)
+    (syntax-case whole-stx ()
+      [(macro-name . _)
+       (with-syntax ([fname (ast-pattern-expand-function-name ast-rec)]
+                    [root-op-name (ast-pattern-expand-root-op-name ast-rec)])
+         (let ([match-ops (ast-pattern-expand-match ast-rec)]
+               [rewrite-ops (ast-pattern-expand-rewrite ast-rec)]
+               [where-bindings (ast-pattern-expand-where ast-rec)]
+               [debug-ast? (ast-pattern-expand-debug-ast? ast-rec)]
+               [debug-matching? (ast-pattern-expand-debug-matching? ast-rec)])
+           (if debug-ast?
+               ;; For :debug-ast mode, return list with AST data
+               (let ([fname-sym (syntax->datum #'fname)]
+                     [root-op-str (syntax->datum #'root-op-name)]
+                     [match-data (map match-expand->datum match-ops)]
+                     [rewrite-data (map operation-expand->datum rewrite-ops)]
+                     [where-data (map where-binding-expand->datum where-bindings)])
+                 (with-syntax ([ast-list (datum->syntax #'macro-name
+                                           `(list 'function-name ',fname-sym
+                                                  'root-op-name ,root-op-str
+                                                  'match ',match-data
+                                                  'rewrite ',rewrite-data
+                                                  'where ',where-data
+                                                  'debug-ast? ,debug-ast?
+                                                  'debug-matching? ,debug-matching?))])
+                   #'(define fname ast-list)))
+               ;; For normal mode, generate lambda
+               #'(define fname
+                   (lambda (op operands-ref rewriter type-converter)
+                     #f)))))]))
+)
