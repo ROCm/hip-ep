@@ -74,23 +74,32 @@
   ;;-----------------------------------------------------------------------
 
   (define (validate-match-operations ast-rec)
+    (validate-match-identifiers-start-with-% ast-rec)
+    (validate-no-duplicate-result-variables ast-rec))
+
+  (define (validate-match-identifiers-start-with-% ast-rec)
+    (let ([match-vec (ast-pattern-expand-match ast-rec)])
+      (loop :for op-idx :from 0 :below (vector-length match-vec)
+            :rime-with match-op := (vector-ref match-vec op-idx)
+            :do (begin
+                  ;; Validate result variables start with %
+                  (loop :for var :in (ast-match-expand-result-var match-op)
+                        :do (validate-%-identifier var "Result"))
+                  ;; Validate operand variables start with %
+                  (loop :for var :in (syntax->list (ast-match-expand-operands match-op))
+                        :do (validate-%-identifier var "Operand"))))))
+
+  (define (validate-no-duplicate-result-variables ast-rec)
     (let ([match-vec (ast-pattern-expand-match ast-rec)]
           [seen-results (make-hashtable identifier-hash bound-identifier=?)])
       (loop :for op-idx :from 0 :below (vector-length match-vec)
             :rime-with match-op := (vector-ref match-vec op-idx)
-            :do (begin
-                  ;; Validate result variables
-                  (loop :for var :in (ast-match-expand-result-var match-op)
-                        :do (begin
-                              (validate-%-identifier var "Result")
-                              ;; Check for duplicate result variables across all operations
-                              (when (hashtable-contains? seen-results var)
-                                (syntax-violation 'validate-match-operations
-                                  "Duplicate result variable" var))
-                              (hashtable-set! seen-results var #t)))
-                  ;; Validate operand variables
-                  (loop :for var :in (syntax->list (ast-match-expand-operands match-op))
-                        :do (validate-%-identifier var "Operand"))))))
+            :do (loop :for var :in (ast-match-expand-result-var match-op)
+                      :do (begin
+                            (when (hashtable-contains? seen-results var)
+                              (syntax-violation 'validate-no-duplicate-result-variables
+                                "Duplicate result variable" var))
+                            (hashtable-set! seen-results var #t))))))
 
   ;;-----------------------------------------------------------------------
   ;; Rewrite operation validation
