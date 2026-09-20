@@ -6,37 +6,12 @@
           (for (mlir pattern-ast) expand))
 
   ;;=======================================================================
-  ;; Helper: Convert expansion-time AST to runtime data (datums)
+  ;; Phase 4: Code generation - generate lambda from analyzed AST
   ;;=======================================================================
 
-  ;; Convert ast-match-expand to datum for runtime AST record
-  (define (match-expand->datum match-exp)
-    (list 'match
-          (syntax->datum (ast-match-expand-result-var match-exp))
-          (syntax->datum (ast-match-expand-op-name match-exp))
-          (syntax->datum (ast-match-expand-operands match-exp))
-          (syntax->datum (ast-match-expand-attributes match-exp))
-          (syntax->datum (ast-match-expand-input-types match-exp))
-          (syntax->datum (ast-match-expand-output-type match-exp))))
-
-  ;; Convert ast-operation-expand to datum for runtime AST record
-  (define (operation-expand->datum op-exp)
-    (list 'rewrite
-          (syntax->datum (ast-operation-expand-result-var op-exp))
-          (syntax->datum (ast-operation-expand-op-name op-exp))
-          (syntax->datum (ast-operation-expand-operands op-exp))
-          (syntax->datum (ast-operation-expand-regions op-exp))
-          (syntax->datum (ast-operation-expand-attributes op-exp))
-          (syntax->datum (ast-operation-expand-result-types op-exp))))
-
-  ;; Convert ast-where-binding-expand to datum for runtime AST record
-  (define (where-binding-expand->datum where-exp)
-    (list (syntax->datum (ast-where-binding-expand-var where-exp))
-          (syntax->datum (ast-where-binding-expand-expr where-exp))))
-
-  ;;=======================================================================
-  ;; Phase 3: Generate code from validated AST record
-  ;;=======================================================================
+  ;;-----------------------------------------------------------------------
+  ;; Main entry point
+  ;;-----------------------------------------------------------------------
 
   (define (generate-code whole-stx ast-rec)
     (syntax-case whole-stx ()
@@ -68,4 +43,29 @@
                #'(define fname
                    (lambda (op operands-ref rewriter type-converter)
                      #f)))))]))
-)
+
+  ;;-----------------------------------------------------------------------
+  ;; AST to datum conversion (for :debug-ast mode)
+  ;;-----------------------------------------------------------------------
+
+  (define (match-expand->datum match-exp)
+    (list 'match
+          (syntax->datum (ast-match-expand-result-var match-exp))
+          (syntax->datum (ast-match-expand-op-name match-exp))
+          (syntax->datum (ast-match-expand-operands match-exp))
+          (syntax->datum (ast-match-expand-attributes match-exp))
+          (syntax->datum (ast-match-expand-input-types match-exp))
+          (syntax->datum (ast-match-expand-output-type match-exp))))
+
+  (define (operation-expand->datum op-exp)
+    (list 'rewrite
+          (syntax->datum (ast-operation-expand-result-var op-exp))
+          (syntax->datum (ast-operation-expand-op-name op-exp))
+          (syntax->datum (ast-operation-expand-operands op-exp))
+          (syntax->datum (ast-operation-expand-regions op-exp))
+          (syntax->datum (ast-operation-expand-attributes op-exp))
+          (syntax->datum (ast-operation-expand-result-types op-exp))))
+
+  (define (where-binding-expand->datum where-exp)
+    (list (syntax->datum (ast-where-binding-expand-var where-exp))
+          (syntax->datum (ast-where-binding-expand-expr where-exp)))))
