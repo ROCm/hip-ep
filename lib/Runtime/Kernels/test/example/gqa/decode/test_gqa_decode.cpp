@@ -89,7 +89,7 @@ extern "C" int hip_gqa_flash_decode_configured(
     int bkv);
 
 static void* gqa_policy() {
-  static void* p = hip_gqa_autotune_create();
+  static void* p = hip_gqa_autotune_create(nullptr);
   return p;
 }
 #endif

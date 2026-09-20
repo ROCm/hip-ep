@@ -56,7 +56,16 @@
 // CHECK-SAME: hip.constants_file = "constants.bin"
 // CHECK-SAME: hipdnn.constant_offsets = array<i64: 0, 64>
 // CHECK-SAME: hipdnn.constant_sizes = array<i64: 8, 2034237440>
-// CHECK-NEXT:  llvm.func @wrap_scatter_nd(!llvm.ptr, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64) -> i32
+// CHECK-SAME: hipdnn.input_count = 2 : i64
+// CHECK-SAME: hipdnn.input_element_sizes = array<i64: 8, 2>
+// CHECK-SAME: hipdnn.input_shapes = [array<i64: -1, -1>, array<i64: -1, 4096>]
+// CHECK-SAME: hipdnn.output_count = 1 : i64
+// CHECK-SAME: hipdnn.output_element_sizes = array<i64: 2>
+// CHECK-SAME: hipdnn.output_shapes = [array<i64: -1, -1, 4096>]
+// Blob and JSON payload bytes are incidental; only the symbols matter.
+// CHECK: llvm.mlir.global internal constant @__metadata_json
+// CHECK: llvm.mlir.global internal constant @__metadata_blob
+// CHECK:       llvm.func @wrap_scatter_nd(!llvm.ptr, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64) -> i32
 // CHECK-NEXT:  llvm.func @wrap_slice(!llvm.ptr, !llvm.ptr<1>, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr<1>, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
 // CHECK-NEXT:  llvm.func @hipdnn_ep_alloc_output(!llvm.ptr, i64, !llvm.ptr, i64, i64) -> !llvm.ptr
 // CHECK-NEXT:  llvm.func @wrap_transpose(!llvm.ptr, !llvm.ptr<1>, !llvm.ptr<1>, i64, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
@@ -69,7 +78,36 @@
 // CHECK-NEXT:  llvm.func @free(!llvm.ptr)
 // CHECK-NEXT:  llvm.func @malloc(i64) -> !llvm.ptr
 // CHECK-NEXT:  llvm.func @hipdnn_ep_constant_get(!llvm.ptr, i64) -> !llvm.ptr<1>
-// CHECK-LABEL: llvm.func @main_graph(
+// The ABI wrapper unpacks packed memref descriptors for the graph body.
+// CHECK-LABEL: llvm.func private @main_graph(
+// CHECK-SAME:    %[[ARG0:[^,]*]]: !llvm.ptr, %[[ARG1:[^,]*]]: !llvm.ptr) -> i32 attributes {passthrough = ["noinline"]} {
+// CHECK-NEXT:    %[[MLIR_0:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK-NEXT:    %[[GETELEMENTPTR_0:.*]] = llvm.getelementptr %[[ARG1]]{{\[}}%[[MLIR_0]]] : (!llvm.ptr, i64) -> !llvm.ptr, !llvm.ptr
+// CHECK-NEXT:    %[[LOAD_0:.*]] = llvm.load %[[GETELEMENTPTR_0]] : !llvm.ptr -> !llvm.ptr
+// CHECK-NEXT:    %[[LOAD_1:.*]] = llvm.load %[[LOAD_0]] : !llvm.ptr -> !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[EXTRACTVALUE_0:.*]] = llvm.extractvalue %[[LOAD_1]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[EXTRACTVALUE_1:.*]] = llvm.extractvalue %[[LOAD_1]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[EXTRACTVALUE_2:.*]] = llvm.extractvalue %[[LOAD_1]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[EXTRACTVALUE_3:.*]] = llvm.extractvalue %[[LOAD_1]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[EXTRACTVALUE_4:.*]] = llvm.extractvalue %[[LOAD_1]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[EXTRACTVALUE_5:.*]] = llvm.extractvalue %[[LOAD_1]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[EXTRACTVALUE_6:.*]] = llvm.extractvalue %[[LOAD_1]][4, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[MLIR_1:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT:    %[[GETELEMENTPTR_1:.*]] = llvm.getelementptr %[[ARG1]]{{\[}}%[[MLIR_1]]] : (!llvm.ptr, i64) -> !llvm.ptr, !llvm.ptr
+// CHECK-NEXT:    %[[LOAD_2:.*]] = llvm.load %[[GETELEMENTPTR_1]] : !llvm.ptr -> !llvm.ptr
+// CHECK-NEXT:    %[[LOAD_3:.*]] = llvm.load %[[LOAD_2]] : !llvm.ptr -> !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[EXTRACTVALUE_7:.*]] = llvm.extractvalue %[[LOAD_3]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[EXTRACTVALUE_8:.*]] = llvm.extractvalue %[[LOAD_3]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[EXTRACTVALUE_9:.*]] = llvm.extractvalue %[[LOAD_3]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[EXTRACTVALUE_10:.*]] = llvm.extractvalue %[[LOAD_3]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[EXTRACTVALUE_11:.*]] = llvm.extractvalue %[[LOAD_3]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[EXTRACTVALUE_12:.*]] = llvm.extractvalue %[[LOAD_3]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[EXTRACTVALUE_13:.*]] = llvm.extractvalue %[[LOAD_3]][4, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[CALL_0:.*]] = llvm.call @main_graph_internal(%[[ARG0]], %[[EXTRACTVALUE_0]], %[[EXTRACTVALUE_1]], %[[EXTRACTVALUE_2]], %[[EXTRACTVALUE_3]], %[[EXTRACTVALUE_4]], %[[EXTRACTVALUE_5]], %[[EXTRACTVALUE_6]], %[[EXTRACTVALUE_7]], %[[EXTRACTVALUE_8]], %[[EXTRACTVALUE_9]], %[[EXTRACTVALUE_10]], %[[EXTRACTVALUE_11]], %[[EXTRACTVALUE_12]], %[[EXTRACTVALUE_13]]) : (!llvm.ptr, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64) -> !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
+// CHECK-NEXT:    %[[MLIR_2:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK-NEXT:    llvm.return %[[MLIR_2]] : i32
+// CHECK-NEXT:  }
+// CHECK-LABEL: llvm.func private @main_graph_internal(
 // CHECK-SAME:    %[[ARG0:[^,]*]]: !llvm.ptr, %[[ARG1:[^,]*]]: !llvm.ptr<1>, %[[ARG2:[^,]*]]: !llvm.ptr<1>, %[[ARG3:[^,]*]]: i64, %[[ARG4:[^,]*]]: i64, %[[ARG5:[^,]*]]: i64, %[[ARG6:[^,]*]]: i64, %[[ARG7:[^,]*]]: i64, %[[ARG8:[^,]*]]: !llvm.ptr<1>, %[[ARG9:[^,]*]]: !llvm.ptr<1>, %[[ARG10:[^,]*]]: i64, %[[ARG11:[^,]*]]: i64, %[[ARG12:[^,]*]]: i64, %[[ARG13:[^,]*]]: i64, %[[ARG14:[^,]*]]: i64) -> (!llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)> {onnx.name = "inputs_embeds"}) attributes {onnx.graph.name = "main_graph"} {
 // CHECK-NEXT:    %[[V0:.*]] = llvm.mlir.poison : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
 // CHECK-NEXT:    %[[V1:.*]] = llvm.insertvalue %[[ARG1]], %[[V0]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
@@ -1823,6 +1861,162 @@
 // CHECK-NEXT:    %[[V1583:.*]] = llvm.extractvalue %[[V1446]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
 // CHECK-NEXT:    llvm.call @free(%[[V1583]]) : (!llvm.ptr) -> ()
 // CHECK-NEXT:    llvm.return %[[V1514]] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
+// CHECK-NEXT:  }
+
+// generate-interface emits the public C entry points used by the runtime.
+// CHECK-LABEL: llvm.func @inference_init(
+// CHECK-SAME:    %[[ARG0:[^,]*]]: !llvm.ptr, %[[ARG1:[^,]*]]: !llvm.ptr, %[[ARG2:[^,]*]]: !llvm.ptr) -> i32 attributes {llvm.emit_c_interface, sym_visibility = "public"} {
+// CHECK-NEXT:    %[[MLIR_0:.*]] = llvm.mlir.addressof @__metadata_blob : !llvm.ptr
+// CHECK-NEXT:    %[[MLIR_1:.*]] = llvm.mlir.constant(312 : i64) : i64
+// CHECK-NEXT:    %[[CALL_0:.*]] = llvm.call @hipdnn_ep_state_init_with_fs(%[[ARG0]], %[[ARG1]], %[[MLIR_0]], %[[MLIR_1]], %[[ARG2]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr) -> i32
+// CHECK-NEXT:    llvm.return %[[CALL_0]] : i32
+// CHECK-NEXT:  }
+// CHECK-LABEL: llvm.func @inference_compute(
+// CHECK-SAME:    %[[ARG0:[^,]*]]: !llvm.ptr, %[[ARG1:[^,]*]]: !llvm.ptr) -> i32 attributes {llvm.emit_c_interface, sym_visibility = "public"} {
+// CHECK-NEXT:    llvm.call @hipdnn_ep_runtime_begin_compute(%[[ARG0]]) : (!llvm.ptr) -> ()
+// CHECK-NEXT:    %[[MLIR_0:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK-NEXT:    %[[MLIR_1:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT:    %[[ALLOCA_0:.*]] = llvm.alloca %[[MLIR_1]] x i32 : (i64) -> !llvm.ptr
+// CHECK-NEXT:    %[[MLIR_2:.*]] = llvm.mlir.constant(48 : i64) : i64
+// CHECK-NEXT:    %[[ALLOCA_1:.*]] = llvm.alloca %[[MLIR_2]] x i8 : (i64) -> !llvm.ptr
+// CHECK-NEXT:    %[[ALLOCA_2:.*]] = llvm.alloca %[[MLIR_2]] x i8 : (i64) -> !llvm.ptr
+// CHECK-NEXT:    %[[MLIR_3:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK-NEXT:    %[[MLIR_4:.*]] = llvm.mlir.constant(2 : i64) : i64
+// CHECK-NEXT:    %[[CALL_0:.*]] = llvm.call @hipdnn_ep_tensor_prepare_input(%[[ARG0]], %[[ARG1]], %[[MLIR_3]], %[[MLIR_4]], %[[ALLOCA_1]]) : (!llvm.ptr, !llvm.ptr, i64, i64, !llvm.ptr) -> i32
+// CHECK-NEXT:    %[[MLIR_5:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK-NEXT:    %[[ICMP_0:.*]] = llvm.icmp "ne" %[[CALL_0]], %[[MLIR_5]] : i32
+// CHECK-NEXT:    llvm.cond_br %[[ICMP_0]], ^bb3, ^bb2
+// CHECK-NEXT:    ^bb1:
+// CHECK-NEXT:    %[[LOAD_0:.*]] = llvm.load %[[ALLOCA_0]] : !llvm.ptr -> i32
+// CHECK-NEXT:    llvm.call @hipdnn_ep_tensor_free_input(%[[ARG0]], %[[ALLOCA_1]]) : (!llvm.ptr, !llvm.ptr) -> ()
+// CHECK-NEXT:    llvm.call @hipdnn_ep_tensor_free_input(%[[ARG0]], %[[ALLOCA_2]]) : (!llvm.ptr, !llvm.ptr) -> ()
+// CHECK-NEXT:    llvm.return %[[LOAD_0]] : i32
+// CHECK-NEXT:    ^bb2:
+// CHECK-NEXT:    %[[MLIR_6:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT:    %[[MLIR_7:.*]] = llvm.mlir.constant(2 : i64) : i64
+// CHECK-NEXT:    %[[CALL_1:.*]] = llvm.call @hipdnn_ep_tensor_prepare_input(%[[ARG0]], %[[ARG1]], %[[MLIR_6]], %[[MLIR_7]], %[[ALLOCA_2]]) : (!llvm.ptr, !llvm.ptr, i64, i64, !llvm.ptr) -> i32
+// CHECK-NEXT:    %[[MLIR_8:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK-NEXT:    %[[ICMP_1:.*]] = llvm.icmp "ne" %[[CALL_1]], %[[MLIR_8]] : i32
+// CHECK-NEXT:    llvm.cond_br %[[ICMP_1]], ^bb5, ^bb4
+// CHECK-NEXT:    ^bb3:
+// CHECK-NEXT:    llvm.store %[[CALL_0]], %[[ALLOCA_0]] : i32, !llvm.ptr
+// CHECK-NEXT:    llvm.br ^bb1
+// CHECK-NEXT:    ^bb4:
+// CHECK-NEXT:    %[[MLIR_9:.*]] = llvm.mlir.constant(2 : i64) : i64
+// CHECK-NEXT:    %[[ALLOCA_3:.*]] = llvm.alloca %[[MLIR_9]] x !llvm.ptr : (i64) -> !llvm.ptr
+// CHECK-NEXT:    %[[CALL_2:.*]] = llvm.call @hipdnn_ep_tensor_buffer_get_gpu_ptr(%[[ALLOCA_1]]) : (!llvm.ptr) -> !llvm.ptr
+// CHECK-NEXT:    %[[CALL_3:.*]] = llvm.call @hipdnn_ep_tensor_buffer_get_shape_ptr(%[[ALLOCA_1]]) : (!llvm.ptr) -> !llvm.ptr
+// CHECK-NEXT:    %[[ADDRSPACECAST_0:.*]] = llvm.addrspacecast %[[CALL_2]] : !llvm.ptr to !llvm.ptr<1>
+// CHECK-NEXT:    %[[MLIR_10:.*]] = llvm.mlir.undef : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[INSERTVALUE_0:.*]] = llvm.insertvalue %[[ADDRSPACECAST_0]], %[[MLIR_10]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[INSERTVALUE_1:.*]] = llvm.insertvalue %[[ADDRSPACECAST_0]], %[[INSERTVALUE_0]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[MLIR_11:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK-NEXT:    %[[INSERTVALUE_2:.*]] = llvm.insertvalue %[[MLIR_11]], %[[INSERTVALUE_1]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[MLIR_12:.*]] = llvm.mlir.undef : !llvm.array<2 x i64>
+// CHECK-NEXT:    %[[MLIR_13:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK-NEXT:    %[[GETELEMENTPTR_0:.*]] = llvm.getelementptr %[[CALL_3]]{{\[}}%[[MLIR_13]]] : (!llvm.ptr, i64) -> !llvm.ptr, !llvm.ptr
+// CHECK-NEXT:    %[[LOAD_1:.*]] = llvm.load %[[GETELEMENTPTR_0]] : !llvm.ptr -> i64
+// CHECK-NEXT:    %[[INSERTVALUE_3:.*]] = llvm.insertvalue %[[LOAD_1]], %[[MLIR_12]][0] : !llvm.array<2 x i64>
+// CHECK-NEXT:    %[[MLIR_14:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT:    %[[GETELEMENTPTR_1:.*]] = llvm.getelementptr %[[CALL_3]]{{\[}}%[[MLIR_14]]] : (!llvm.ptr, i64) -> !llvm.ptr, !llvm.ptr
+// CHECK-NEXT:    %[[LOAD_2:.*]] = llvm.load %[[GETELEMENTPTR_1]] : !llvm.ptr -> i64
+// CHECK-NEXT:    %[[INSERTVALUE_4:.*]] = llvm.insertvalue %[[LOAD_2]], %[[INSERTVALUE_3]][1] : !llvm.array<2 x i64>
+// CHECK-NEXT:    %[[INSERTVALUE_5:.*]] = llvm.insertvalue %[[INSERTVALUE_4]], %[[INSERTVALUE_2]][3] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[MLIR_15:.*]] = llvm.mlir.undef : !llvm.array<2 x i64>
+// CHECK-NEXT:    %[[MLIR_16:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT:    %[[INSERTVALUE_6:.*]] = llvm.insertvalue %[[MLIR_16]], %[[MLIR_15]][1] : !llvm.array<2 x i64>
+// CHECK-NEXT:    %[[MLIR_17:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT:    %[[GETELEMENTPTR_2:.*]] = llvm.getelementptr %[[CALL_3]]{{\[}}%[[MLIR_17]]] : (!llvm.ptr, i64) -> !llvm.ptr, !llvm.ptr
+// CHECK-NEXT:    %[[LOAD_3:.*]] = llvm.load %[[GETELEMENTPTR_2]] : !llvm.ptr -> i64
+// CHECK-NEXT:    %[[MUL_0:.*]] = llvm.mul %[[MLIR_16]], %[[LOAD_3]] : i64
+// CHECK-NEXT:    %[[INSERTVALUE_7:.*]] = llvm.insertvalue %[[MUL_0]], %[[INSERTVALUE_6]][0] : !llvm.array<2 x i64>
+// CHECK-NEXT:    %[[INSERTVALUE_8:.*]] = llvm.insertvalue %[[INSERTVALUE_7]], %[[INSERTVALUE_5]][4] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[ALLOCA_4:.*]] = llvm.alloca %[[MLIR_1]] x !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)> : (i64) -> !llvm.ptr
+// CHECK-NEXT:    llvm.store %[[INSERTVALUE_8]], %[[ALLOCA_4]] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>, !llvm.ptr
+// CHECK-NEXT:    %[[MLIR_18:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK-NEXT:    %[[GETELEMENTPTR_3:.*]] = llvm.getelementptr %[[ALLOCA_3]]{{\[}}%[[MLIR_18]]] : (!llvm.ptr, i64) -> !llvm.ptr, !llvm.ptr
+// CHECK-NEXT:    llvm.store %[[ALLOCA_4]], %[[GETELEMENTPTR_3]] : !llvm.ptr, !llvm.ptr
+// CHECK-NEXT:    %[[CALL_4:.*]] = llvm.call @hipdnn_ep_tensor_buffer_get_gpu_ptr(%[[ALLOCA_2]]) : (!llvm.ptr) -> !llvm.ptr
+// CHECK-NEXT:    %[[CALL_5:.*]] = llvm.call @hipdnn_ep_tensor_buffer_get_shape_ptr(%[[ALLOCA_2]]) : (!llvm.ptr) -> !llvm.ptr
+// CHECK-NEXT:    %[[ADDRSPACECAST_1:.*]] = llvm.addrspacecast %[[CALL_4]] : !llvm.ptr to !llvm.ptr<1>
+// CHECK-NEXT:    %[[MLIR_19:.*]] = llvm.mlir.undef : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[INSERTVALUE_9:.*]] = llvm.insertvalue %[[ADDRSPACECAST_1]], %[[MLIR_19]][0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[INSERTVALUE_10:.*]] = llvm.insertvalue %[[ADDRSPACECAST_1]], %[[INSERTVALUE_9]][1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[MLIR_20:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK-NEXT:    %[[INSERTVALUE_11:.*]] = llvm.insertvalue %[[MLIR_20]], %[[INSERTVALUE_10]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[MLIR_21:.*]] = llvm.mlir.undef : !llvm.array<2 x i64>
+// CHECK-NEXT:    %[[MLIR_22:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK-NEXT:    %[[GETELEMENTPTR_4:.*]] = llvm.getelementptr %[[CALL_5]]{{\[}}%[[MLIR_22]]] : (!llvm.ptr, i64) -> !llvm.ptr, !llvm.ptr
+// CHECK-NEXT:    %[[LOAD_4:.*]] = llvm.load %[[GETELEMENTPTR_4]] : !llvm.ptr -> i64
+// CHECK-NEXT:    %[[INSERTVALUE_12:.*]] = llvm.insertvalue %[[LOAD_4]], %[[MLIR_21]][0] : !llvm.array<2 x i64>
+// CHECK-NEXT:    %[[MLIR_23:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT:    %[[GETELEMENTPTR_5:.*]] = llvm.getelementptr %[[CALL_5]]{{\[}}%[[MLIR_23]]] : (!llvm.ptr, i64) -> !llvm.ptr, !llvm.ptr
+// CHECK-NEXT:    %[[LOAD_5:.*]] = llvm.load %[[GETELEMENTPTR_5]] : !llvm.ptr -> i64
+// CHECK-NEXT:    %[[INSERTVALUE_13:.*]] = llvm.insertvalue %[[LOAD_5]], %[[INSERTVALUE_12]][1] : !llvm.array<2 x i64>
+// CHECK-NEXT:    %[[INSERTVALUE_14:.*]] = llvm.insertvalue %[[INSERTVALUE_13]], %[[INSERTVALUE_11]][3] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[MLIR_24:.*]] = llvm.mlir.undef : !llvm.array<2 x i64>
+// CHECK-NEXT:    %[[MLIR_25:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT:    %[[INSERTVALUE_15:.*]] = llvm.insertvalue %[[MLIR_25]], %[[MLIR_24]][1] : !llvm.array<2 x i64>
+// CHECK-NEXT:    %[[MLIR_26:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT:    %[[GETELEMENTPTR_6:.*]] = llvm.getelementptr %[[CALL_5]]{{\[}}%[[MLIR_26]]] : (!llvm.ptr, i64) -> !llvm.ptr, !llvm.ptr
+// CHECK-NEXT:    %[[LOAD_6:.*]] = llvm.load %[[GETELEMENTPTR_6]] : !llvm.ptr -> i64
+// CHECK-NEXT:    %[[MUL_1:.*]] = llvm.mul %[[MLIR_25]], %[[LOAD_6]] : i64
+// CHECK-NEXT:    %[[INSERTVALUE_16:.*]] = llvm.insertvalue %[[MUL_1]], %[[INSERTVALUE_15]][0] : !llvm.array<2 x i64>
+// CHECK-NEXT:    %[[INSERTVALUE_17:.*]] = llvm.insertvalue %[[INSERTVALUE_16]], %[[INSERTVALUE_14]][4] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+// CHECK-NEXT:    %[[ALLOCA_5:.*]] = llvm.alloca %[[MLIR_1]] x !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)> : (i64) -> !llvm.ptr
+// CHECK-NEXT:    llvm.store %[[INSERTVALUE_17]], %[[ALLOCA_5]] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>, !llvm.ptr
+// CHECK-NEXT:    %[[MLIR_27:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT:    %[[GETELEMENTPTR_7:.*]] = llvm.getelementptr %[[ALLOCA_3]]{{\[}}%[[MLIR_27]]] : (!llvm.ptr, i64) -> !llvm.ptr, !llvm.ptr
+// CHECK-NEXT:    llvm.store %[[ALLOCA_5]], %[[GETELEMENTPTR_7]] : !llvm.ptr, !llvm.ptr
+// CHECK-NEXT:    %[[CALL_6:.*]] = llvm.call @hipdnn_ep_state_reset_error_flag(%[[ARG0]]) : (!llvm.ptr) -> i32
+// CHECK-NEXT:    %[[MLIR_28:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK-NEXT:    %[[ICMP_2:.*]] = llvm.icmp "ne" %[[CALL_6]], %[[MLIR_28]] : i32
+// CHECK-NEXT:    llvm.cond_br %[[ICMP_2]], ^bb7, ^bb6
+// CHECK-NEXT:    ^bb5:
+// CHECK-NEXT:    llvm.store %[[CALL_1]], %[[ALLOCA_0]] : i32, !llvm.ptr
+// CHECK-NEXT:    llvm.br ^bb1
+// CHECK-NEXT:    ^bb6:
+// CHECK-NEXT:    %[[CALL_7:.*]] = llvm.call @main_graph(%[[ARG0]], %[[ALLOCA_3]]) : (!llvm.ptr, !llvm.ptr) -> i32
+// CHECK-NEXT:    %[[MLIR_29:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK-NEXT:    %[[ICMP_3:.*]] = llvm.icmp "ne" %[[CALL_7]], %[[MLIR_29]] : i32
+// CHECK-NEXT:    llvm.cond_br %[[ICMP_3]], ^bb10, ^bb9
+// CHECK-NEXT:    ^bb7:
+// CHECK-NEXT:    llvm.store %[[CALL_6]], %[[ALLOCA_0]] : i32, !llvm.ptr
+// CHECK-NEXT:    llvm.br ^bb1
+// CHECK-NEXT:    ^bb8:
+// CHECK-NEXT:    %[[CALL_8:.*]] = llvm.call @hipdnn_ep_stream_sync(%[[ARG0]]) : (!llvm.ptr) -> i32
+// CHECK-NEXT:    %[[MLIR_30:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK-NEXT:    %[[ICMP_4:.*]] = llvm.icmp "ne" %[[CALL_8]], %[[MLIR_30]] : i32
+// CHECK-NEXT:    llvm.cond_br %[[ICMP_4]], ^bb12, ^bb11
+// CHECK-NEXT:    ^bb9:
+// CHECK-NEXT:    llvm.br ^bb8
+// CHECK-NEXT:    ^bb10:
+// CHECK-NEXT:    llvm.store %[[CALL_7]], %[[ALLOCA_0]] : i32, !llvm.ptr
+// CHECK-NEXT:    llvm.br ^bb1
+// CHECK-NEXT:    ^bb11:
+// CHECK-NEXT:    %[[CALL_9:.*]] = llvm.call @hipdnn_ep_state_read_and_clear_error_flag(%[[ARG0]]) : (!llvm.ptr) -> i32
+// CHECK-NEXT:    %[[MLIR_31:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK-NEXT:    %[[ICMP_5:.*]] = llvm.icmp "ne" %[[CALL_9]], %[[MLIR_31]] : i32
+// CHECK-NEXT:    llvm.cond_br %[[ICMP_5]], ^bb14, ^bb13
+// CHECK-NEXT:    ^bb12:
+// CHECK-NEXT:    llvm.store %[[CALL_8]], %[[ALLOCA_0]] : i32, !llvm.ptr
+// CHECK-NEXT:    llvm.br ^bb1
+// CHECK-NEXT:    ^bb13:
+// CHECK-NEXT:    llvm.call @hipdnn_ep_tensor_free_input(%[[ARG0]], %[[ALLOCA_1]]) : (!llvm.ptr, !llvm.ptr) -> ()
+// CHECK-NEXT:    llvm.call @hipdnn_ep_tensor_free_input(%[[ARG0]], %[[ALLOCA_2]]) : (!llvm.ptr, !llvm.ptr) -> ()
+// CHECK-NEXT:    llvm.return %[[MLIR_0]] : i32
+// CHECK-NEXT:    ^bb14:
+// CHECK-NEXT:    llvm.store %[[CALL_9]], %[[ALLOCA_0]] : i32, !llvm.ptr
+// CHECK-NEXT:    llvm.br ^bb1
+// CHECK-NEXT:  }
+// CHECK-LABEL: llvm.func @inference_cleanup(
+// CHECK-SAME:    %[[ARG0:.*]]: !llvm.ptr) -> i32 attributes {llvm.emit_c_interface, sym_visibility = "public"} {
+// CHECK-NEXT:    %[[CALL_0:.*]] = llvm.call @hipdnn_ep_state_cleanup(%[[ARG0]]) : (!llvm.ptr) -> i32
+// CHECK-NEXT:    llvm.return %[[CALL_0]] : i32
+// CHECK-NEXT:  }
+// CHECK-LABEL: llvm.func @inference_get_metadata_json() -> !llvm.ptr attributes {llvm.emit_c_interface, sym_visibility = "public"} {
+// CHECK-NEXT:    %[[MLIR_0:.*]] = llvm.mlir.addressof @__metadata_json : !llvm.ptr
+// CHECK-NEXT:    llvm.return %[[MLIR_0]] : !llvm.ptr
 // CHECK-NEXT:  }
 
 module {
