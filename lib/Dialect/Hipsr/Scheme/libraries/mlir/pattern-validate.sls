@@ -7,7 +7,7 @@
           (for (mlir pattern-ast) expand))
 
   ;;=======================================================================
-  ;; Phase 2: Validate AST record and normalize fields
+  ;; Phase 2: Validation - validate syntax and semantics, normalize fields
   ;;=======================================================================
 
   ;; Helper: validate function name is identifier
@@ -27,117 +27,18 @@
     (ast-pattern-expand-match-set! ast-rec
       (list->vector (ast-pattern-expand-match ast-rec))))
 
-  (define (validate-ast ast-rec)
-    (validate-ast-match-function-name ast-rec)
-    (normalize-ast-match-to-vector ast-rec)
-    (validate-ast-match-root-var ast-rec)
-
-    ;; Validate and normalize match operations
-    (validate-and-analyze-pattern-matching ast-rec)
-
-    ;; Validate and normalize each rewrite operation
-    (for-each validate-operation (ast-pattern-expand-rewrite ast-rec))
-
-    ;; Validate where bindings
-    (for-each (lambda (where-binding)
-               (unless (identifier? (ast-where-binding-expand-var where-binding))
-                 (syntax-violation 'validate-ast "Where binding variable must be an identifier"
-                                  (ast-where-binding-expand-var where-binding))))
-             (ast-pattern-expand-where ast-rec))
-
-    ast-rec)
-
-  ;; Validate and analyze match operations (coordinator)
-  (define (validate-and-analyze-pattern-matching ast-rec)
-    (validate-match-operations ast-rec)
-    (analyze-match-operations ast-rec))
-
-  ;; Helper: validate identifier starts with %
-  (define (validate-%-identifier var context-msg)
-    (unless (identifier? var)
-      (syntax-violation 'validate-match-operations
-        (string-append context-msg " must be identifier") var))
-    (let ([var-name (symbol->string (syntax->datum var))])
-      (unless (char=? (string-ref var-name 0) #\%)
-        (syntax-violation 'validate-match-operations
-          (string-append context-msg " must start with %") var))))
-
-  ;; Helper: normalize op-name (string or symbol -> string)
-  (define (normalize-op-name match-op)
-    (let* ([op-name-stx (ast-match-expand-op-name match-op)]
-           [op-name-datum (syntax->datum op-name-stx)])
-      (unless (or (string? op-name-datum) (symbol? op-name-datum))
-        (syntax-violation 'validate-match-operations
-          "Operation name must be string or symbol" op-name-stx))
-      (when (symbol? op-name-datum)
-        (ast-match-expand-op-name-set! match-op
-          (datum->syntax op-name-stx (symbol->string op-name-datum))))))
-
-  ;; Validate match operations (match field is already a vector)
-  (define (validate-match-operations ast-rec)
+  ;; Helper: normalize result-var in match operations to list
+  (define (normalize-match-result-vars ast-rec)
     (let ([match-vec (ast-pattern-expand-match ast-rec)])
       (loop :for op-idx :from 0 :below (vector-length match-vec)
             :rime-with match-op := (vector-ref match-vec op-idx)
-            :do (normalize-op-name match-op)
-            (:loop :for var :in (let ([rv (ast-match-expand-result-var match-op)])
-                                  (if (identifier? rv) (list rv) (syntax->list rv)))
-                   :do (validate-%-identifier var "Result"))
-            (:loop :for var :in (syntax->list (ast-match-expand-operands match-op))
-                   :do (validate-%-identifier var "Operand")))))
+            :rime-with result-var := (ast-match-expand-result-var match-op)
+            :when (identifier? result-var)
+            :do (ast-match-expand-result-var-set! match-op (list result-var)))))
 
-  ;; Analyze match operations - build match-bindings and match-actions
-  (define (analyze-match-operations ast-rec)
-    ;; Match field is already a vector (normalized earlier)
-    (let* ([match-vec (ast-pattern-expand-match ast-rec)]
-           [bindings (make-eq-hashtable)]
-           [actions '()])
-
-      ;; Walk through each match operation
-      (loop :for op-idx :from 0 :below (vector-length match-vec)
-            :rime-with match-op := (vector-ref match-vec op-idx)
-            :rime-with op-name := (syntax->datum (ast-match-expand-op-name match-op))
-            :rime-with results := (let ([rv (ast-match-expand-result-var match-op)])
-                                    (if (identifier? rv) (list rv) (syntax->list rv)))
-            :rime-with operands := (syntax->list (ast-match-expand-operands match-op))
-
-            ;; Create :match-operation action
-            :do (set! actions (cons (list ':match-operation op-name op-idx) actions))
-
-            ;; Process results with nested loop
-            (:loop :for result-idx :from 0
-                   :for var :in results
-                   :do (let ([matcher (list ':match-result result-idx op-idx)])
-                         (hashtable-set! bindings var matcher)
-                         (set! actions (cons matcher actions))))
-
-            ;; Process operands with nested loop
-            (:loop :for operand-idx :from 0
-                   :for var :in operands
-                   :do (if (hashtable-ref bindings var #f)
-                           ;; Reuse: create :match-exact-value
-                           (set! actions (cons (list ':match-exact-value var operand-idx op-idx) actions))
-                           ;; First occurrence: create :match-operand
-                           (let ([matcher (list ':match-operand operand-idx op-idx)])
-                             (hashtable-set! bindings var matcher)
-                             (set! actions (cons matcher actions))))))
-
-      ;; Store results (reverse actions to maintain order)
-      (ast-pattern-expand-match-bindings-set! ast-rec bindings)
-      (ast-pattern-expand-match-actions-set! ast-rec (reverse actions))
-
-      ;; Find root operation and extract its name
-      (let ([root-var (ast-pattern-expand-root-var ast-rec)])
-        (loop :for op-idx :from 0 :below (vector-length match-vec)
-              :rime-with match-op := (vector-ref match-vec op-idx)
-              :rime-with result-var := (ast-match-expand-result-var match-op)
-              :rime-with is-root? := (if (identifier? result-var)
-                                        (free-identifier=? result-var root-var)
-                                        (loop :for var :in (syntax->list result-var)
-                                              :break #t :if (free-identifier=? var root-var)
-                                              :finally #f))
-              :do (when is-root?
-                    (ast-pattern-expand-root-op-name-set! ast-rec
-                      (ast-match-expand-op-name match-op)))))))
+  ;;=======================================================================
+  ;; Rewrite operation validation (defined before validate-ast)
+  ;;=======================================================================
 
   ;; Helper: validate result-var is identifier (or empty for void operations)
   (define (validate-operation-result-var op)
@@ -179,4 +80,74 @@
   (define (validate-block block)
     ;; Walk operations in this block
     (for-each validate-operation (ast-block-expand-operations block)))
+
+  ;;=======================================================================
+  ;; Main validation entry point
+  ;;=======================================================================
+
+  (define (validate-ast ast-rec)
+    (validate-ast-match-function-name ast-rec)
+    (normalize-ast-match-to-vector ast-rec)
+    (normalize-match-result-vars ast-rec)
+    (validate-ast-match-root-var ast-rec)
+
+    ;; Validate match operations
+    (validate-match-operations ast-rec)
+
+    ;; Validate each rewrite operation
+    (for-each validate-operation (ast-pattern-expand-rewrite ast-rec))
+
+    ;; Validate where bindings
+    (for-each (lambda (where-binding)
+               (unless (identifier? (ast-where-binding-expand-var where-binding))
+                 (syntax-violation 'validate-ast "Where binding variable must be an identifier"
+                                  (ast-where-binding-expand-var where-binding))))
+             (ast-pattern-expand-where ast-rec))
+
+    ast-rec)
+
+  ;; Helper: validate identifier starts with %
+  (define (validate-%-identifier var context-msg)
+    (unless (identifier? var)
+      (syntax-violation 'validate-match-operations
+        (string-append context-msg " must be identifier") var))
+    (let ([var-name (symbol->string (syntax->datum var))])
+      (unless (char=? (string-ref var-name 0) #\%)
+        (syntax-violation 'validate-match-operations
+          (string-append context-msg " must start with %") var))))
+
+  ;; Helper: normalize op-name (string or symbol -> string)
+  (define (normalize-op-name match-op)
+    (let* ([op-name-stx (ast-match-expand-op-name match-op)]
+           [op-name-datum (syntax->datum op-name-stx)])
+      (unless (or (string? op-name-datum) (symbol? op-name-datum))
+        (syntax-violation 'validate-match-operations
+          "Operation name must be string or symbol" op-name-stx))
+      (when (symbol? op-name-datum)
+        (ast-match-expand-op-name-set! match-op
+          (datum->syntax op-name-stx (symbol->string op-name-datum))))))
+
+  ;; Hash function for identifiers using symbol-hash
+  (define (identifier-hash id)
+    (symbol-hash (syntax->datum id)))
+
+  ;; Validate match operations (match field and result-vars already normalized)
+  (define (validate-match-operations ast-rec)
+    (let ([match-vec (ast-pattern-expand-match ast-rec)]
+          [seen-results (make-hashtable identifier-hash bound-identifier=?)])
+      (loop :for op-idx :from 0 :below (vector-length match-vec)
+            :rime-with match-op := (vector-ref match-vec op-idx)
+            :do (begin
+                  (normalize-op-name match-op)
+                  (loop :for var :in (ast-match-expand-result-var match-op)
+                        :do (begin
+                              (validate-%-identifier var "Result")
+                              ;; Check for duplicate result variables
+                              (when (hashtable-contains? seen-results var)
+                                (syntax-violation 'validate-match-operations
+                                  "Duplicate result variable" var))
+                              (hashtable-set! seen-results var #t)))
+                  (loop :for var :in (syntax->list (ast-match-expand-operands match-op))
+                        :do (validate-%-identifier var "Operand"))))))
+
 )

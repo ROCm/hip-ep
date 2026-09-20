@@ -1,6 +1,9 @@
 #!r6rs
+;;===----------------------------------------------------------------------===;;
+;; Parse & Validate Test - Test all 4 phases of pattern macro
+;;===----------------------------------------------------------------------===;;
 
-(library (test pattern-macro-incremental-test)
+(library (test parse-validate-test)
   (export run-tests)
   (import (except (chezscheme) =)  ;; Exclude chezscheme's = to use mlir pattern-macro's =
           (test test-framework)
@@ -59,8 +62,8 @@
         [else (loop (cddr rest))])))
 
   (define (run-tests)
-    (test-begin "pattern-macro-incremental")
-    (display "\n=== Testing clause splitting ===\n\n")
+    (test-begin "parse-validate")
+    (display "\n=== Testing Parse & Validate Phases ===\n\n")
 
     ;; Basic AST structure tests
     (test-equal "debug mode returns list" #t (list? test-basic-ast))
@@ -97,3 +100,4 @@
     (test-equal "func.func has rewrite ops" #t (pair? (ast-get test-func-func 'rewrite)))
 
     (test-end)))
+
