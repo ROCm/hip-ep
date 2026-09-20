@@ -8,6 +8,7 @@
 // Set HIPDNN_EP_DEBUG=1 to enable all [Runtime DEBUG] output.
 // Set HIPDNN_EP_PERF=1 to enable only [PERF] timing breakdown per inference.
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 
 #include "hip/env.h" // single cross-platform env reader (see its header)
@@ -28,6 +29,42 @@ inline bool hipdnn_ep_matmul_dp4a_enabled() {
   static const bool enabled =
       hipdnn_ep::env_enabled_default_on("HIPDNN_EP_MATMUL_DP4A");
   return enabled;
+}
+
+// Widest token burst the fused decode path serves by iterating tokens, instead
+// of handing the burst to the bucketed multi-pass path below it.
+//
+// The two paths trade traffic against overhead. Bucketing reads each *distinct*
+// expert once, which is the less traffic, but it costs a D2H of the per-expert
+// counts plus a hipStreamSynchronize per MoE layer and then five kernel
+// launches per active expert -- on a 30-layer model verifying four positions,
+// 30 pipeline stalls and ~2700 launches. Iterating the fused path reads one
+// expert set per token, which is more traffic, but it is three launches per
+// layer and never synchronizes.
+//
+// Overhead wins at the widths speculative decoding actually verifies, where
+// each expert serves one or two tokens and the bucketed path's per-expert GEMMs
+// degenerate to GEMVs anyway. Measured on gemma-4-26B-A4B (128 experts, top-8,
+// 30 MoE layers), verify time per burst, bucketed against fused: 34.0/23.1 ms
+// at width 2, 50.2/32.1 at 4, 81.2/58.3 at 8. Fused wins throughout that range;
+// it must lose eventually, once bursts are wide enough for expert reuse to
+// repay the stall, hence a ceiling and not an unconditional switch. The default
+// stops at the widest burst measured rather than extrapolating.
+//
+// Prefill is unaffected: it presents hundreds of positions at once and stays
+// bucketed.
+//
+// 1 restores the previous decode-only behaviour, which is the A/B control.
+inline int hipdnn_ep_qmoe_fused_max_tokens() {
+  static const int n = [] {
+    const std::string v =
+        hipdnn_ep::env_string("HIPDNN_EP_QMOE_FUSED_MAX_TOKENS");
+    if (v.empty())
+      return 8;
+    const int parsed = atoi(v.c_str());
+    return (parsed >= 1 && parsed <= 64) ? parsed : 8;
+  }();
+  return n;
 }
 
 inline bool hipdnn_ep_perf_enabled() {
