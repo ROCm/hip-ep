@@ -37,7 +37,7 @@
     ;; Rule: Result variables must be unique across all operations (FATAL if violated)
     (validate-match-operations ast-rec)
 
-    ;; Rule: Rewrite operations must have valid structure (recursive validation)
+    ;; TODO: Document specific validation rules for rewrite operations
     (for-each validate-operation (ast-pattern-expand-rewrite ast-rec))
 
     ;; Rule: Where binding variables must be identifiers
