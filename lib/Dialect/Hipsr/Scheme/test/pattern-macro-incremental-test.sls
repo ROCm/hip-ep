@@ -50,44 +50,50 @@
        :attrs [sym_name "add"] [function_type "(i32, i32) -> i32"]
        -> ())))
   
+  ;; Helper to get field from AST list
+  (define (ast-get ast key)
+    (let loop ([rest ast])
+      (cond
+        [(null? rest) #f]
+        [(eq? (car rest) key) (cadr rest)]
+        [else (loop (cddr rest))])))
+
   (define (run-tests)
     (test-begin "pattern-macro-incremental")
     (display "\n=== Testing clause splitting ===\n\n")
-    
+
     ;; Basic AST structure tests
-    (test-equal "debug mode returns ast-pattern" #t (ast-pattern? test-basic-ast))
-    (test-equal "function name" 'test-basic-ast (ast-pattern-function-name test-basic-ast))
-    (test-equal "root-op-name extracted" "test.op" (ast-pattern-root-op-name test-basic-ast))
-    (test-equal "debug-ast flag" #t (ast-pattern-debug-ast? test-basic-ast))
-    
+    (test-equal "debug mode returns list" #t (list? test-basic-ast))
+    (test-equal "function name" 'test-basic-ast (ast-get test-basic-ast 'function-name))
+    (test-equal "root-op-name extracted" "test.op" (ast-get test-basic-ast 'root-op-name))
+    (test-equal "debug-ast flag" #t (ast-get test-basic-ast 'debug-ast?))
+
     ;; Match operations
-    (test-equal "match ops captured" #t (list? (ast-pattern-match test-basic-ast)))
-    (test-equal "match ops not empty" #t (pair? (ast-pattern-match test-basic-ast)))
-    
+    (test-equal "match ops captured" #t (list? (ast-get test-basic-ast 'match)))
+    (test-equal "match ops not empty" #t (pair? (ast-get test-basic-ast 'match)))
+
     ;; Rewrite operations
-    (test-equal "rewrite ops captured" #t (list? (ast-pattern-rewrite test-basic-ast)))
-    (test-equal "rewrite ops not empty" #t (pair? (ast-pattern-rewrite test-basic-ast)))
-    
-    ;; Where clause  
-    (test-equal "where clause empty" (list) (ast-pattern-where test-basic-ast))
-    
+    (test-equal "rewrite ops captured" #t (list? (ast-get test-basic-ast 'rewrite)))
+    (test-equal "rewrite ops not empty" #t (pair? (ast-get test-basic-ast 'rewrite)))
+
+    ;; Where clause
+    (test-equal "where clause empty" (list) (ast-get test-basic-ast 'where))
+
     ;; Lambda mode test
     (test-equal "lambda mode returns procedure" #t (procedure? test-lambda-mode))
-    
+
     ;; :where pattern tests
-    (test-equal ":where pattern is ast-pattern" #t (ast-pattern? test-with-where))
-    (test-equal ":where bindings captured" #t (list? (ast-pattern-where test-with-where)))
-    (test-equal ":where bindings not empty" #t (pair? (ast-pattern-where test-with-where)))
-    (test-equal ":where has 2 bindings" 2 (length (ast-pattern-where test-with-where)))
+    (test-equal ":where pattern is list" #t (list? test-with-where))
+    (test-equal ":where bindings captured" #t (list? (ast-get test-with-where 'where)))
+    (test-equal ":where bindings not empty" #t (pair? (ast-get test-with-where 'where)))
+    (test-equal ":where has 2 bindings" 2 (length (ast-get test-with-where 'where)))
 
     ;; Region and block tests
-    ;; Since expansion-time records aren't exported, we just test that it parses
-    (test-equal "region pattern is ast-pattern" #t (ast-pattern? test-with-region))
-    ;; The rewrite list contains raw s-expressions (not expansion-time records)
-    (test-equal "has rewrite operations" #t (pair? (ast-pattern-rewrite test-with-region)))
+    (test-equal "region pattern is list" #t (list? test-with-region))
+    (test-equal "has rewrite operations" #t (pair? (ast-get test-with-region 'rewrite)))
 
     ;; func.func test - block arguments and attrs
-    (test-equal "func.func is ast-pattern" #t (ast-pattern? test-func-func))
-    (test-equal "func.func has rewrite ops" #t (pair? (ast-pattern-rewrite test-func-func)))
+    (test-equal "func.func is list" #t (list? test-func-func))
+    (test-equal "func.func has rewrite ops" #t (pair? (ast-get test-func-func 'rewrite)))
 
     (test-end)))
