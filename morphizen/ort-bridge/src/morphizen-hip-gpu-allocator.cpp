@@ -351,7 +351,6 @@ void ORT_API_CALL HipGpuAllocator::FreeImpl(OrtAllocator *this_, void *p) {
       // ptr_to_size_ so the destructor can release it. Safe to reuse without
       // a stream sync: see the pool comment in the header.
       self->free_lists_[cls].push_back(p);
-      return;
     } else {
       const size_t capacity = it->second;
       ++self->large_ops_;
@@ -372,12 +371,17 @@ void ORT_API_CALL HipGpuAllocator::FreeImpl(OrtAllocator *this_, void *p) {
         bucket.free.push_back(p);
         bucket.last_used = self->large_ops_;
         self->large_retained_bytes_ += capacity;
-        return;
+      } else {
+        self->ptr_to_size_.erase(it);
+        to_release.push_back(p);
       }
-      self->ptr_to_size_.erase(it);
-      to_release.push_back(p);
     }
   }
+  // Single exit, because every branch above can have left evicted buffers in
+  // to_release and this is the only thing that unpins them. Returning early
+  // from the retain path leaked exactly those buffers, and since
+  // EvictLruLarge has already dropped them from ptr_to_size_, not even the
+  // destructor could find them again.
   ReleaseToDriver(to_release, self->device_id_);
 }
 
