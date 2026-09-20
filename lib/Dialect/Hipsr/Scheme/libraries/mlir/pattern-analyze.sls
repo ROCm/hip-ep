@@ -26,8 +26,8 @@
     ;; Phase 2 validation guarantees: root variable exists as a result in some match operation
     (let* ([match-vec (ast-pattern-expand-match ast-rec)]
            [root-var (ast-pattern-expand-root-var ast-rec)]
-           [root-idx (find-root-operation match-vec root-var)]
-           [root-op (vector-ref match-vec root-idx)]
+           [root-op-idx (find-root-operation match-vec root-var)]
+           [root-op (vector-ref match-vec root-op-idx)]
            [root-result-idx (find-result-index root-op root-var)])
 
       ;; Extract root operation name
@@ -39,11 +39,12 @@
              [visited (make-vector (vector-length match-vec) #f)])
 
         ;; Create initial action: bind root variable to root operation result
-        (let ([initial-action (list ':bind-root root-var root-idx root-result-idx)])
+        (let ([initial-action (list ':bind-root root-var root-op-idx root-result-idx)])
 
           ;; Build match actions (includes binding for all results and operands)
           (let ([actions (cons initial-action
-                              (build-match-actions match-vec root-idx visited binding-mgr))])
+                              (build-match-actions match-vec root-op-idx root-var root-result-idx
+                                                  visited binding-mgr))])
 
             (ast-pattern-expand-match-bindings-set! ast-rec binding-mgr)
             (ast-pattern-expand-match-actions-set! ast-rec actions)
@@ -55,7 +56,7 @@
   ;; DAG traversal and action generation
   ;;-----------------------------------------------------------------------
 
-  (define (build-match-actions match-vec op-idx visited binding-mgr)
+  (define (build-match-actions match-vec op-idx result-var result-var-idx visited binding-mgr)
     (if (vector-ref visited op-idx)
         '()  ; Already visited - return early
         (begin
@@ -66,12 +67,8 @@
                  [actions '()])
 
             ;; Generate check actions for this operation
-            (set! actions (cons (list ':set-current-op op-idx) actions))
-            (set! actions (cons (list ':check-op-name op-idx) actions))
-            (set! actions (cons (list ':check-num-results op-idx) actions))
-            (set! actions (cons (list ':check-num-operands op-idx) actions))
-            (set! actions (cons (list ':check-input-types op-idx) actions))
-            (set! actions (cons (list ':check-output-types op-idx) actions))
+            (set! actions (cons (list ':set-current-op op-idx result-var result-var-idx) actions))
+            (set! actions (cons (list ':check-op op-idx) actions))
 
             ;; Bind all result variables for this operation
             (loop :for result-var :in (ast-match-expand-result-var match-op)
@@ -97,8 +94,10 @@
               (loop :for operand :in operands
                     :rime-with operand-op-idx := (find-operation-by-result match-vec operand)
                     :when operand-op-idx
+                    :rime-with operand-op := (vector-ref match-vec operand-op-idx)
+                    :rime-with operand-result-idx := (find-result-index operand-op operand)
                     :do (set! actions
-                           (append (build-match-actions match-vec operand-op-idx
+                           (append (build-match-actions match-vec operand-op-idx operand operand-result-idx
                                                        visited binding-mgr)
                                    actions))))
 
