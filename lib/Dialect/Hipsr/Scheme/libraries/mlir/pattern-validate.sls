@@ -19,6 +19,7 @@
     (validate-ast-match-function-name ast-rec)
     (normalize-ast-match-to-vector ast-rec)
     (normalize-match-result-vars ast-rec)
+    (normalize-match-op-names ast-rec)
     (validate-ast-match-root-var ast-rec)
 
     ;; Validate match operations (checks for duplicate result variables)
@@ -62,6 +63,12 @@
             :when (identifier? result-var)
             :do (ast-match-expand-result-var-set! match-op (list result-var)))))
 
+  (define (normalize-match-op-names ast-rec)
+    (let ([match-vec (ast-pattern-expand-match ast-rec)])
+      (loop :for op-idx :from 0 :below (vector-length match-vec)
+            :rime-with match-op := (vector-ref match-vec op-idx)
+            :do (normalize-op-name match-op))))
+
   ;;-----------------------------------------------------------------------
   ;; Match operations validation
   ;;-----------------------------------------------------------------------
@@ -72,8 +79,6 @@
       (loop :for op-idx :from 0 :below (vector-length match-vec)
             :rime-with match-op := (vector-ref match-vec op-idx)
             :do (begin
-                  ;; Normalize operation name
-                  (normalize-op-name match-op)
                   ;; Validate result variables
                   (loop :for var :in (ast-match-expand-result-var match-op)
                         :do (begin
