@@ -338,12 +338,25 @@ def main():
     # A failed stage is the finding, so it goes before anything a reader could
     # mistake for a verdict.
     failure = meta.get("failure")
+    evidence = (meta.get("tool_versions") or {}).get("support_evidence", "")
     if failure:
-        lines.append(
-            f"\n> **The {failure['stage']} step failed: {failure['headline']}.** "
-            "No operator support was verified; the counts below describe the "
-            "graph, not what hip-ep can run.\n\n"
-        )
+        # A model that does not compile is the finding either way, but which
+        # operator stopped it is a different statement from none of them being
+        # known, and the slices tell those apart.
+        if evidence == "single-operator conversions":
+            lines.append(
+                f"\n> **The {failure['stage']} step failed on the whole graph: "
+                f"{failure['headline']}.** The model does not compile as it "
+                "stands. Support below comes from converting each operator on "
+                "its own, so it says which operators are not what stopped it, "
+                "not that the model runs.\n\n"
+            )
+        else:
+            lines.append(
+                f"\n> **The {failure['stage']} step failed: {failure['headline']}.** "
+                "No operator support was verified; the counts below describe the "
+                "graph, not what hip-ep can run.\n\n"
+            )
 
     lines.append(f"- **Analyzed graph:** `{meta['model_path']}`\n")
     if op_dist_comparison:

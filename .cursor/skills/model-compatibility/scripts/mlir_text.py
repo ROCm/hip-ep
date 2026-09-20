@@ -31,14 +31,25 @@ from typing import Dict, List, Optional, Tuple
 # Carrier / terminator ops that exist in the MLIR form but are not graph
 # compute nodes. Initializers in particular become one onnx.Constant each,
 # which would swamp an operator distribution taken from the protobuf.
+# onnx.Yield terminates an If or Loop region the way onnx.Return terminates a
+# function, so it is structure the importer wrote rather than a node the model
+# contains -- the protobuf has no Yield to compare it against.
 NON_COMPUTE_ONNX_OPS = frozenset(
-    {"onnx.Constant", "onnx.NoValue", "onnx.Return", "onnx.EntryPoint"}
+    {
+        "onnx.Constant",
+        "onnx.NoValue",
+        "onnx.Return",
+        "onnx.Yield",
+        "onnx.EntryPoint",
+    }
 )
 
 _LOC_ALIAS_RE = re.compile(r"^#(loc\w*)\s*=\s*(.+?)\s*$")
 _TRAILING_LOC_RE = re.compile(r"\s+loc\((#?\S+?)\)\s*$")
 _GENERIC_OP_RE = re.compile(r'^(?:%\S+(?::\s*\d+)?\s*=\s*)?"([A-Za-z_][\w.]*)"\s*\(')
 _CUSTOM_OP_RE = re.compile(r"^(?:%\S+(?::\s*\d+)?\s*=\s*)?([a-z][\w]*\.[\w.]+)\b")
+# `%3 = ` names one result, `%827:3 = ` names three reached as %827#0..#2.
+_RESULT_RE = re.compile(r"^(%[\w$.]+)(?::\s*(\d+))?\s*=\s*")
 
 _ELEM_TYPE_NAMES = {
     "f16": "float16",
@@ -67,6 +78,23 @@ class MlirOp:
     loc: str = ""
     line_no: int = 0
     scope: str = "main"
+    # SSA name this op defines, with how many results it carries: `%827:3`
+    # defines %827#0 through %827#2. Empty for an op that yields nothing.
+    result: str = ""
+    result_count: int = 0
+    # SSA names the op reads, in order, for an op printed in generic form.
+    # The custom form spreads its operands over ins()/outs() groups and puts
+    # only the context in the leading parentheses, so it is left empty there
+    # rather than reported as if it were the whole operand list.
+    operands: List[str] = field(default_factory=list)
+    generic: bool = False
+    # The line with its trailing location removed, so a probe can re-emit the
+    # op instead of rebuilding it from the parsed pieces.
+    text: str = ""
+    # The op opens a region: its body is on the lines that follow and its type
+    # signature is on the line that closes it, so neither is on this one. A
+    # line scanner cannot reproduce such an op, only report that it is here.
+    opens_region: bool = False
 
     @property
     def dialect(self) -> str:
@@ -167,6 +195,42 @@ def _match_backwards(line: str, close_idx: int) -> int:
     return -1
 
 
+def _match_forward(line: str, open_idx: int) -> int:
+    depth = 0
+    in_string = False
+    for i in range(open_idx, len(line)):
+        ch = line[i]
+        if in_string:
+            if ch == '"' and line[i - 1] != "\\":
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def _operands(line: str, open_idx: int) -> List[str]:
+    """SSA names in the parenthesis group starting at `open_idx`.
+
+    Keeping only `%` entries drops the type list that follows the operands in
+    an ins()/outs() group, so the result is operands either way.
+    """
+    close = _match_forward(line, open_idx)
+    if close < 0:
+        return []
+    return [
+        part
+        for part in _split_top_level(line[open_idx + 1 : close])
+        if part.startswith("%")
+    ]
+
+
 def _parse_attrs(body: Optional[str]) -> Dict[str, str]:
     if not body:
         return {}
@@ -207,13 +271,63 @@ def tensor_types(type_signature: str) -> List[str]:
     return re.findall(r"tensor<([^<>]*)>", type_signature)
 
 
+def element_type(tensor_type: str) -> str:
+    """The MLIR element type of one tensor type, shape stripped.
+
+    Accepts either the whole type (`tensor<2x?xf32>`) or the body a
+    `tensor_types` match returns (`2x?xf32`).
+    """
+    body = tensor_type.strip()
+    if body.startswith("tensor<") and body.endswith(">"):
+        body = body[len("tensor<") : -1]
+    return (body.rsplit("x", 1)[-1] if "x" in body else body).strip()
+
+
 def element_type_names(type_signature: str) -> List[str]:
     """Readable element-type names for every tensor in a type signature."""
     names = []
     for body in tensor_types(type_signature):
-        elem = body.rsplit("x", 1)[-1].strip() if "x" in body else body.strip()
+        elem = element_type(body)
         names.append(_ELEM_TYPE_NAMES.get(elem, elem))
     return [n for n in names if n]
+
+
+def split_signature(type_signature: str) -> Tuple[List[str], List[str]]:
+    """Operand and result types of `(t, t) -> t` or `(t) -> (t, t)`.
+
+    A single result prints without parentheses, so the right side is a group
+    only when it has one.
+    """
+    depth = 0
+    in_string = False
+    arrow = -1
+    for i, ch in enumerate(type_signature):
+        if in_string:
+            if ch == '"' and type_signature[i - 1] != "\\":
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "([{<":
+            depth += 1
+        elif ch in ")]}>":
+            depth -= 1
+        elif ch == "-" and depth == 0 and type_signature[i : i + 2] == "->":
+            arrow = i
+            break
+    if arrow < 0:
+        return [], []
+    return (
+        _type_group(type_signature[:arrow]),
+        _type_group(type_signature[arrow + 2 :]),
+    )
+
+
+def _type_group(text: str) -> List[str]:
+    text = text.strip()
+    if text.startswith("(") and text.endswith(")"):
+        return _split_top_level(text[1:-1])
+    return [text] if text else []
 
 
 class MlirModule:
@@ -222,6 +336,32 @@ class MlirModule:
     def __init__(self, ops: List[MlirOp], loc_aliases: Dict[str, str]):
         self.ops = ops
         self.loc_aliases = loc_aliases
+        self._by_result: Dict[str, List[MlirOp]] = {}
+        for op in ops:
+            if op.result:
+                self._by_result.setdefault(op.result, []).append(op)
+
+    def defining_op(self, ssa: str, before_line: int) -> Optional[MlirOp]:
+        """The op defining `ssa` as read from `before_line`, or None for a
+        block argument.
+
+        An SSA name belongs to its region, so a name defined in one onnx.If or
+        onnx.Loop body can be defined again in a sibling body, and a dump of a
+        model with a few of them reuses names freely. The definition in force
+        at a use is the nearest one above it. Taking any definition of the name
+        crosses region boundaries and resolves to an unrelated value, which is
+        worse than failing to resolve: it answers with a real operation of the
+        wrong type.
+
+        An operand may name one result of several (`%827#1`), which the
+        defining op carries under its base name.
+        """
+        found = None
+        for op in self._by_result.get(ssa.split("#", 1)[0]) or []:
+            if op.line_no >= before_line:
+                break
+            found = op
+        return found
 
     def resolve_loc(self, op: MlirOp) -> str:
         if not op.loc:
@@ -270,13 +410,15 @@ def parse_mlir(text: str) -> MlirModule:
         if line.startswith("module"):
             continue
 
-        match = _GENERIC_OP_RE.match(line) or _CUSTOM_OP_RE.match(line)
+        generic = _GENERIC_OP_RE.match(line)
+        match = generic or _CUSTOM_OP_RE.match(line)
         if not match:
             continue
         name = match.group(1)
         if "." not in name:
             continue
 
+        result = _RESULT_RE.match(line)
         attr_body, attr_start = _find_attr_dict(line)
         ops.append(
             MlirOp(
@@ -286,6 +428,13 @@ def parse_mlir(text: str) -> MlirModule:
                 loc=loc,
                 line_no=line_no,
                 scope=scope,
+                result=result.group(1) if result else "",
+                result_count=(int(result.group(2) or 1) if result else 0),
+                # The regex ends at the opening parenthesis of the operand list.
+                operands=_operands(line, generic.end() - 1) if generic else [],
+                generic=generic is not None,
+                text=line,
+                opens_region=line.endswith("{"),
             )
         )
 

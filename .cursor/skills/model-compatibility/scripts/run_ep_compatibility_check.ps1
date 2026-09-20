@@ -10,7 +10,11 @@
 #   3  run the conversion up to convert-onnx-to-hip
 #   4  analyze what it produced: leftovers, why they were refused, attribute
 #      transfer, and the runtime function behind each hip op
-#   5  normalize into report_input.json and render the markdown
+#   5  convert one operator at a time, which answers what step 4 cannot: the
+#      per-operator result a failed whole-graph conversion leaves unavailable,
+#      and whether a leftover has no working conversion or was blocked by this
+#      graph's shapes or by a conversion upstream of it
+#   6  normalize into report_input.json and render the markdown
 #
 # Usage:
 #   .\run_ep_compatibility_check.ps1 -ModelPath <model.onnx>
@@ -170,12 +174,12 @@ $failureRecord = Join-Path $CompatDir "pipeline_failure.json"
 Remove-Item -LiteralPath $failureRecord -ErrorAction SilentlyContinue
 
 if (-not $SkipDump -and (Test-Path -LiteralPath $EpInput)) {
-    Write-Host "(1/5) Skip dump: EP input already exists at $EpInput" -ForegroundColor DarkGray
+    Write-Host "(1/6) Skip dump: EP input already exists at $EpInput" -ForegroundColor DarkGray
     $SkipDump = $true
 }
 
 if (-not $SkipDump) {
-    Write-Host '(1/5) Dumping EP-input MLIR...' -ForegroundColor Yellow
+    Write-Host '(1/6) Dumping EP-input MLIR...' -ForegroundColor Yellow
     $dumpScript = Join-Path $ToolsDir "dump_ep_input.ps1"
     try {
         $dumpArgs = @{
@@ -209,11 +213,11 @@ if (-not $SkipDump) {
         }
     }
 } elseif (Test-Path -LiteralPath $EpInput) {
-    Write-Host "(1/5) Skip dump; using EP input: $EpInput" -ForegroundColor Yellow
+    Write-Host "(1/6) Skip dump; using EP input: $EpInput" -ForegroundColor Yellow
 } elseif ($EpInputMlir) {
     throw "EpInputMlir not found: $EpInput"
 } else {
-    Write-Host '(1/5) Skip dump; no EP input, analyzing the original ONNX' -ForegroundColor Yellow
+    Write-Host '(1/6) Skip dump; no EP input, analyzing the original ONNX' -ForegroundColor Yellow
 }
 
 $haveEpInput = (Test-Path -LiteralPath $EpInput)
@@ -226,7 +230,7 @@ $distributionArgs = @((Join-Path $ToolsDir "op_distribution.py"), $ModelPath, $C
 if ($haveEpInput) {
     $distributionArgs += @("--ep-input", $EpInput)
 }
-Invoke-PythonStep -Label '(2/5) Operator distributions...' -PyArgv $distributionArgs
+Invoke-PythonStep -Label '(2/6) Operator distributions...' -PyArgv $distributionArgs
 
 # --- Step 3 and 4: conversion probe, then what it produced ------------------
 foreach ($stale in @('leftover_onnx.json', 'leftover_reasons.json',
@@ -236,14 +240,14 @@ foreach ($stale in @('leftover_onnx.json', 'leftover_reasons.json',
 
 $converted = Join-Path $CompatDir "converted.mlir"
 if ($haveEpInput) {
-    Write-Host '(3/5) Conversion probe (convert-onnx-to-hip)...' -ForegroundColor Yellow
+    Write-Host '(3/6) Conversion probe (convert-onnx-to-hip)...' -ForegroundColor Yellow
     & (Join-Path $ToolsDir "run_convert_probe.ps1") `
         -InputMlir $EpInput -OutputDir $CompatDir -HipEpPackageRoot $HipEpPackageRoot
 }
 
 if (Test-Path -LiteralPath $converted) {
     $locatedInput = Join-Path $CompatDir "ep_input_loc.mlir"
-    Invoke-PythonStep -Label '(4/5) Analyzing the conversion...' -PyArgv @(
+    Invoke-PythonStep -Label '(4/6) Analyzing the conversion...' -PyArgv @(
         (Join-Path $ToolsDir "analyze_conversion.py"),
         $locatedInput,
         $converted,
@@ -254,16 +258,35 @@ if (Test-Path -LiteralPath $converted) {
     # ep_input.mlir that the probe can recreate.
     Remove-Item -LiteralPath $locatedInput -ErrorAction SilentlyContinue
 } elseif ($haveEpInput) {
-    Write-Host '(4/5) Conversion failed; the report will name the step and the reason' -ForegroundColor Red
+    Write-Host '(4/6) Conversion failed; the slices below are the only per-operator result' -ForegroundColor Red
 } else {
-    Write-Host '(3/5) Skip conversion probe (no EP input); support will be reported as unverified' -ForegroundColor Yellow
+    Write-Host '(3/6) Skip conversion probe (no EP input); support will be reported as unverified' -ForegroundColor Yellow
 }
 
-# --- Step 5: normalize and render -------------------------------------------
+# --- Step 5: convert one operator at a time --------------------------------
+# With a whole-graph result, only its leftovers are worth a slice, and a
+# leftover that converts alone was blocked by this graph rather than
+# unsupported. Without one, the slices are the only per-operator result there
+# is, so every operator gets one.
+Remove-Item -LiteralPath (Join-Path $CompatDir "slice_probe.json") -ErrorAction SilentlyContinue
+if ($haveEpInput) {
+    $sliceArgs = @(
+        (Join-Path $ToolsDir "slice_probe.py"),
+        $EpInput, $CompatDir,
+        "--hip-ep-package-root", $HipEpPackageRoot
+    )
+    $leftovers = Join-Path $CompatDir "leftover_onnx.json"
+    if (Test-Path -LiteralPath $leftovers) {
+        $sliceArgs += @("--leftovers", $leftovers)
+    }
+    Invoke-PythonStep -Label '(5/6) Converting one operator at a time...' -PyArgv $sliceArgs
+}
+
+# --- Step 6: normalize and render -------------------------------------------
 $analyzedGraph = if ($haveEpInput) { $EpInput } else { $ModelPath }
 $step1ForCompat = if ($haveEpInput) { $step1EpJson } else { $step1OrigJson }
 
-Write-Host '(5/5) Reports...' -ForegroundColor Yellow
+Write-Host '(6/6) Reports...' -ForegroundColor Yellow
 Invoke-PythonStep -Label '  build_report_input' -PyArgv @(
     (Join-Path $ToolsDir "build_report_input.py"),
     $analyzedGraph, $step1ForCompat, $CompatDir, $RepoRoot
@@ -331,7 +354,12 @@ if (Test-Path -LiteralPath $converted) {
 Write-Host "Compatibility report:  $(Join-Path $OutputDir 'model_compatibility_report.md')"
 Write-Host "Full artifacts:        $CompatDir"
 if (Test-Path -LiteralPath $failureRecord) {
-    Write-Host ("WARNING: a pipeline step failed; nothing was verified. " +
+    $verified = if (Test-Path -LiteralPath (Join-Path $CompatDir "slice_probe.json")) {
+        "support below it comes from converting each operator on its own"
+    } else {
+        "nothing was verified"
+    }
+    Write-Host ("WARNING: a pipeline step failed; $verified. " +
         "See the 'Where it failed' section of the report.") -ForegroundColor Yellow
 } elseif (-not $haveEpInput) {
     Write-Host $compatNote -ForegroundColor Yellow

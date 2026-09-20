@@ -14,11 +14,11 @@ and writes what the report is built from:
                          is live: the operator is unsupported, or its pattern
                          bailed out on these instances.
 
-  leftover_reasons.json  for each of those, whether a converter exists at all
-                         and which of its refusals the observed types
-                         contradict. Read from the source through hip_source,
-                         because a release build compiles the refusal messages
-                         out.
+  leftover_reasons.json  for each of those, whether a converter exists at all,
+                         which separates an operator with no implementation
+                         from one whose implementation refused this model.
+                         Which constraint refused it comes from the slice
+                         probe, which reads the message out of the conversion.
 
   attr_transfer.json     for converted ops, the ONNX attributes that did not
                          reach the HIP op, and which hip op each became.
@@ -341,32 +341,20 @@ def build_attr_transfer(
     return rows, dict(sorted(unpaired.items()))
 
 
-def observed_element_types(entry):
-    """Element types on the leftover instances' operands and results."""
-    found = []
-    for sample in entry.get("samples") or []:
-        for body in re.findall(r"tensor<([^<>]*)>", sample.get("type_signature", "")):
-            elem = body.rsplit("x", 1)[-1].strip() if "x" in body else body.strip()
-            if elem and elem not in found:
-                found.append(elem)
-    return found
+def explain_leftovers(source, leftovers):
+    """Whether a converter exists for each leftover operator.
 
-
-def explain_leftovers(source, leftovers, max_refusals):
-    """Why each leftover did not convert: no converter, or a refused one."""
+    Which constraint refused it is answered by the slice probe, which puts the
+    operator through the conversion on its own and reads the message back.
+    """
     rows = []
     for entry in leftovers:
-        observed = observed_element_types(entry)
-        explanation = source.explain_leftover(
-            entry.get("op_type", ""), observed, max_refusals
-        )
         rows.append(
             {
                 "key": entry.get("key"),
                 "op_type": entry.get("op_type", ""),
                 "domain": entry.get("domain", ""),
-                "observed_element_types": observed,
-                **explanation,
+                **source.explain_leftover(entry.get("op_type", "")),
             }
         )
     return rows
@@ -388,12 +376,6 @@ def main():
         "repo_root",
         help="hip-ep repository root: which attributes a hip op declares, what "
         "runs it, and what its converter can refuse all come from there",
-    )
-    ap.add_argument(
-        "--max-refusals",
-        type=int,
-        default=6,
-        help="Candidate constraints to keep per leftover operator (default 6)",
     )
     args = ap.parse_args()
 
@@ -422,7 +404,7 @@ def main():
         hip_op_attributes=hip_op_attributes,
     )
 
-    reasons = explain_leftovers(source, leftovers, args.max_refusals)
+    reasons = explain_leftovers(source, leftovers)
     observed_hip_ops = {op for row in attr_rows for op in row["hip_ops"]}
     # The dialect is ~90 ops and a model uses a dozen; the rest would be noise
     # for whoever opens the file.
@@ -456,11 +438,9 @@ def main():
     for row in reasons:
         if not row["converter_found"]:
             print(f"  {row['key']}: no converter in {source.conversion_dir.name}")
-            continue
-        likely = [r for r in row["refusals"] if r.get("likely")] or row["refusals"]
-        head = likely[0] if likely else None
-        detail = f"{head['message']} ({head['location']})" if head else "unknown"
-        print(f"  {row['key']}: converter exists, rejected all; likely: {detail}")
+        else:
+            files = ", ".join(row["converter_files"])
+            print(f"  {row['key']}: converter exists ({files}), rejected all")
     for row in attr_rows:
         if row["status"] == "partial":
             print(f"  partial {row['key']} dropped {list(row['dropped_attrs'])}")

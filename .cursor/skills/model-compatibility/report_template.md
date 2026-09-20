@@ -11,9 +11,9 @@ These templates are the contract between the pipeline and the user-facing markdo
 1. Never invent operators, counts, mappings, or reasons. Every number must match `compatibility/report_input.json`.
 2. Unsupported reason text policy — the text must say which of these it is, never a blanket "not implemented":
    - No converter matches the operator: `No Hip Dialect implementation available.`
-   - A converter exists but refused every instance: the generated text names the converter, the operand element types in this model, and the candidate constraints with file and line. Keep it; do not shorten it to the sentence above.
+   - A converter exists but refused every instance: the generated text names the converter and quotes what the conversion reported. Keep it; do not shorten it to the sentence above.
    - Compile-time ops: keep the specific compile-time reason text.
-   The candidates are ranked, not proven, because a release build compiles the refusal message out. Confirm the real one with [diagnose.md](diagnose.md) and state it in your prose.
+   An `It reported:` clause is the compiler's own message, so quote it in your prose rather than restating it. Text without one means the converter refused without a message; [diagnose.md](diagnose.md) is how you find the guard.
 3. Status display rule:
    - input `full` -> displayed as `supported`
    - input `partial` -> kept as `partial`
@@ -75,3 +75,4 @@ This file carries only what the main report does not: the evidence behind a non-
 - The percentage in Summary is the headline number. Follow it with the constraint behind each unsupported operator (from [diagnose.md](diagnose.md)), because that is what tells the user whether a fix is small or structural.
 - For every `unsupported` recommendation bucket include the closest existing wrapper / entry point (if any) and a short family-based rationale per [reference.md](reference.md).
 - When the report header carries the `Source: original ONNX, conversion probe skipped` badge, lead your summary with that caveat: nothing was verified against the compiler.
+- When it says support comes from converting each operator on its own, lead with the failing step and keep the numbers qualified: they say which operators are not what stopped the model, not that it runs. A row whose only reason codes are `SLICE_*` rests on that weaker evidence.

@@ -88,16 +88,6 @@ _HELPER_BACKEND = "Runtime helper"
 
 # --- OnnxToHip: why a converter refused --------------------------------------
 
-# MLIR scalar type spellings, as they appear both in type signatures and in
-# converter messages ("Expected i8 (packed uint4) or f16"). Matching the shape
-# rather than listing the types keeps new ones (f8E4M3FN, i4) working.
-_TYPE_TOKEN_RE = re.compile(r"\b(?:[su]?i\d+|[fu]\d+|f8E\w+|f4E\w+|bf16|index)\b")
-_STRING_LITERAL_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
-_NOTIFY_RE = re.compile(r"notifyMatchFailure\s*\(")
-# How far above a notifyMatchFailure call its message may be built. Messages
-# assembled through raw_string_ostream span several lines.
-_MESSAGE_LOOKBEHIND = 14
-
 
 class HipSource:
     """The hip-ep tree, answering one question per method."""
@@ -249,20 +239,17 @@ class HipSource:
 
     # -- conversion refusals --------------------------------------------------
 
-    def explain_leftover(self, op_type: str, observed_types, max_refusals: int = 6):
-        """Whether a converter exists for this operator, and what it can refuse."""
-        files = self._converter_files(op_type)
-        if not files:
-            return {"converter_found": False, "converter_files": [], "refusals": []}
+    def explain_leftover(self, op_type: str):
+        """Whether a converter exists for this operator.
 
-        refusals = []
-        for path, text in files:
-            refusals.extend(_extract_refusals(path, text))
-        refusals = _rank_refusals(refusals, observed_types)[:max_refusals]
+        Why it refused is not asked here. The conversion says so itself when a
+        module holding one operator is put through it, and what it prints is
+        the constraint that applied rather than a guess at which one did.
+        """
+        files = self._converter_files(op_type)
         return {
-            "converter_found": True,
+            "converter_found": bool(files),
             "converter_files": [path.name for path, _ in files],
-            "refusals": refusals,
         }
 
     def _converter_files(self, op_type: str):
@@ -354,58 +341,3 @@ def _attributes_of(block: str):
 
 def _first_symbol(symbols):
     return next((s for s in symbols if s not in _PLUMBING_SYMBOLS), None)
-
-
-def _clean_message(message: str) -> str:
-    """Tidy a message whose dynamic parts (a printed type) are not available."""
-    message = re.sub(r"\s+", " ", message).strip()
-    # "unsupported element type: " + <printed type> + ". Expected ..." leaves a
-    # colon with nothing after it.
-    message = re.sub(r"\s*:\s*(?=[.,])", "", message)
-    return message.strip(" :")
-
-
-def _extract_refusals(path: Path, text: str):
-    """Messages the file can pass to notifyMatchFailure, with line numbers."""
-    lines = text.splitlines()
-    refusals = []
-    previous_notify = -1
-    for index, line in enumerate(lines):
-        if not _NOTIFY_RE.search(line):
-            continue
-        # Stay inside this message: never reach back past the previous refusal,
-        # whose literals belong to it.
-        start = max(previous_notify + 1, index - _MESSAGE_LOOKBEHIND, 0)
-        previous_notify = index
-        pieces = []
-        for window_line in lines[start : index + 2]:
-            # Skip comments so explanatory prose is not read as a message.
-            if window_line.strip().startswith("//"):
-                continue
-            pieces.extend(_STRING_LITERAL_RE.findall(window_line))
-        message = _clean_message(" ".join(p.strip() for p in pieces if p.strip()))
-        if message:
-            refusals.append(
-                {"message": message, "location": f"{path.name}:{index + 1}"}
-            )
-    return refusals
-
-
-def _rank_refusals(refusals, observed):
-    """Put refusals the observed types violate first.
-
-    A message that lists accepted types is a likely cause when an observed type
-    is missing from that list, and an unlikely one when every observed type is
-    covered.
-    """
-
-    def score(refusal):
-        mentioned = set(_TYPE_TOKEN_RE.findall(refusal["message"]))
-        if not mentioned:
-            return 0
-        return 2 if [t for t in observed if t not in mentioned] else 1
-
-    ordered = sorted(refusals, key=lambda r: -score(r))
-    for refusal in ordered:
-        refusal["likely"] = score(refusal) == 2
-    return ordered

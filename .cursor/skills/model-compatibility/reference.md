@@ -55,13 +55,21 @@ Every instance of `(onnx_op, domain)` is still `onnx.*` after conversion, so sta
 | Situation | Reason code | Reason text |
 |---|---|---|
 | No converter matches the operator name | `NO_HIP_DIALECT_IMPL` | **exactly** `No Hip Dialect implementation available.` |
-| A converter matches but refused every instance | `CONVERSION_REJECTED_INSTANCES` | names the converter file, the operand element types in this model, and the candidate constraints with file and line |
+| A converter matches but refused every instance | `CONVERSION_REJECTED_INSTANCES` | names the converter file, then quotes what the conversion reported |
 
-[scripts/hip_source.py](scripts/hip_source.py) makes that distinction. It finds converters by the quoted operator name they match on (`"MatMulNBits"`, `"onnx.Cast"`), then lists the messages that converter can pass to `notifyMatchFailure`, ordered so constraints the observed element types contradict come first.
+[scripts/hip_source.py](scripts/hip_source.py) makes that distinction, by the quoted operator name a converter matches on (`"MatMulNBits"`, `"onnx.Cast"`). It answers only whether an implementation exists, which is the part that decides whether the work is a new kernel or a wider guard.
 
-Those candidates are a hint, not a verdict: `notifyMatchFailure` messages are compiled out of a release build, so no reason reaches the log at runtime and the ranking is inferred from types. Confirm the real constraint with [diagnose.md](diagnose.md) before telling the user.
+Which constraint refused it is quoted, not inferred. The slice probe puts the operator through the conversion on its own and reads the message back, so the reason text carries the operand type that failed:
 
-When only some instances are left over, status is `partial` with `PARTIAL_INSTANCE_CONVERSION`.
+```
+A conversion exists (MatMulNBitsConversion.cpp) but refused every instance.
+It reported: MatMulNBits: unsupported zero_points element type: f32.
+Expected i8 (packed uint4) or f16.
+```
+
+A converter that returns failure without a message leaves the text without one and keeps the code, because the implementation still exists.
+
+When only some instances are left over, status is `partial` with `PARTIAL_INSTANCE_CONVERSION`, whose text carries the same quoted message.
 
 ## Reason code catalog
 
@@ -73,16 +81,47 @@ EXTRA_ONNX_ATTR_NOT_IN_HIP
 PARTIAL_INSTANCE_CONVERSION
 CONVERSION_NOT_PROBED
 PIPELINE_FAILED
+SLICE_VERIFIED
+SLICE_UNSUPPORTED
+SLICE_PROBE_FAILED
+SLICE_NOT_BUILDABLE
 ```
 
 `CONVERSION_NOT_PROBED` only appears in `-SkipDump` runs, where nothing was verified.
 
-`PIPELINE_FAILED` means a stage failed, so no operator was verified. This is a
-stronger finding than any unsupported operator: the model does not compile as
-it stands. `meta.failure` in `report_input.json` and the `## Where it failed`
-section of the report carry the step, the command, the exit code, the reason
-quoted from the log, and the log path. The pipeline records it instead of
-aborting, because which step broke and why is the answer the run was asked for.
+`PIPELINE_FAILED` means a stage failed and the slices produced nothing either,
+so no operator was verified. A stage that failed is a stronger finding than any
+unsupported operator: the model does not compile as it stands. `meta.failure` in
+`report_input.json` and the `## Where it failed` section of the report carry the
+step, the command, the exit code, the reason quoted from the log, and the log
+path. The pipeline records it instead of aborting, because which step broke and
+why is the answer the run was asked for.
+
+## Slice reason codes
+
+The four `SLICE_*` codes appear only when a stage failed, where the
+single-operator conversions are the whole per-operator result. They carry a
+weaker claim than the whole-graph codes, and the reason text says so: an
+operator that converts on its own is not what stopped the model, which is not
+the same as the model running.
+
+| Reason code | What the slice did | Status contribution | Work it asks for |
+|---|---|---|---|
+| `SLICE_VERIFIED` | converted on its own | supported | none |
+| `SLICE_UNSUPPORTED` | stayed `onnx.*`; quotes the refusal | unsupported | widen or add the conversion |
+| `SLICE_PROBE_FAILED` | the conversion errored; quotes the error | unsupported | fix a conversion that fails on a lone operator |
+| `SLICE_NOT_BUILDABLE` | no slice could be built; quotes why | neither | teach the probe to slice it, or accept it as unverifiable |
+
+`SLICE_NOT_BUILDABLE` instances count as neither supported nor unsupported, so
+the denominator is smaller than the operator instance total. Two reasons reach
+it: an operation that opens a region (`onnx.Loop`, `onnx.If`), whose body and
+type signature sit on the lines around it rather than on its own; and an operand
+of unranked type (`tensor<*xf16>`, as against `tensor<?x?xf16>`), whose rank the
+graph itself leaves open, so a slice would have to invent one and would then
+report the invented rank's result as the operator's.
+
+`meta.tool_versions.support_evidence` records which set the numbers came from:
+`whole graph`, `single-operator conversions`, or `none`.
 
 ## Recommended ROCm implementation (report-layer inference)
 
@@ -96,6 +135,15 @@ The conversion already chose the implementation, so the column reports what it p
 2. `hip_op` resolves to a runtime function -> `` <backend> (`<runtime_func>`) ``
 3. `hip_op` with no runtime entry -> ``Hip Dialect (`<hip_op>`)``
 4. no `hip_op` (the instance had no location match) -> `Unknown`
+
+`hip_op` comes from the whole-graph result when there is one, and otherwise from
+what the slice produced. Either way it is the operation that will run, not the
+machinery beside it: `hip.constant` and `hip.get_constant` carry an operator's
+constant operands, `hip.readback_scalar` reads a shape to the host, and
+`tensor.empty` / `tensor.dim` / `arith.*` are a destination, a dimension query
+and index math. All of them appear next to almost every operator. Past them, an
+operator with no `hip.*` op left was handled at compile time, and rule 1 names
+the tensor op it became.
 
 [scripts/hip_source.py](scripts/hip_source.py) builds that mapping from the HIP-to-LLVM lowering, which names one symbol constant per op, and reads the backend off the wrapper's own implementation: a file calling `hipblasLt*` is hipBLASLt, one calling `hipdnn*` is hipDNN, one launching custom kernels is a custom kernel. A wrapper can be several at once (`hipBLASLt + Custom Hip Kernel` for GQA and MatMulNBits, which drive hipBLASLt for their matmuls and custom kernels around them), and one that touches no library and no kernel is a `Runtime helper`.
 

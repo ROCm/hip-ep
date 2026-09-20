@@ -135,7 +135,11 @@
         "EXTRA_ONNX_ATTR_NOT_IN_HIP",
         "PARTIAL_INSTANCE_CONVERSION",
         "CONVERSION_NOT_PROBED",
-        "PIPELINE_FAILED"
+        "PIPELINE_FAILED",
+        "SLICE_VERIFIED",
+        "SLICE_UNSUPPORTED",
+        "SLICE_PROBE_FAILED",
+        "SLICE_NOT_BUILDABLE"
       ]
     },
     "operatorKey": {

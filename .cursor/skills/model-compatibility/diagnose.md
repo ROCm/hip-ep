@@ -12,9 +12,11 @@ The pipeline runs the real `convert-onnx-to-hip`, so its verdict is what the com
 
 Cases 2 and 3 are common on real models and read very differently in a report: "hip-ep does not support MatMulNBits" is wrong when the truth is "hip-ep supports MatMulNBits but not with fp32 zero-points".
 
-The pipeline already separates case 1 from cases 2 and 3 in `compatibility/leftover_reasons.json` and puts the candidate constraints in the report's reason text. That ranking is inferred from the observed element types, so this playbook is what turns a candidate into a confirmed cause.
+**Start by reading the reason text.** The pipeline separates case 1 from cases 2 and 3 in `compatibility/leftover_reasons.json`, and the slice probe quotes what the conversion said when it refused, so the constraint is usually already there:
 
-Run it for every `unsupported` and `partial` row before answering.
+> A conversion exists (MatMulNBitsConversion.cpp) but refused every instance. It reported: MatMulNBits: unsupported zero_points element type: f32. Expected i8 (packed uint4) or f16.
+
+That is the answer — the guard and the type that tripped it. Go to the steps below only when the text carries no `It reported:` clause, which means the converter refused without a message, or when the message names a condition you cannot map to the model.
 
 ## 1. Read the instance the compiler saw
 
@@ -36,26 +38,39 @@ Run it for every `unsupported` and `partial` row before answering.
 
 The type signature is the evidence. Note the operand dtypes and ranks before opening any source.
 
-## 2. Find the converter
+## 2. Ask the conversion directly
 
-`leftover_reasons.json` already names the candidate files. Confirm, and check the dialect side too:
+The slices are kept, so re-run one and read the log. The conversion reports a refusal through `notifyMatchFailure`, which the greedy driver logs under its own category — `dialect-conversion` is a different driver and prints nothing for this pass:
+
+```bash
+# compatibility/slices/<domain>.<Op>.mlir, plus .1, .2 ... for further signatures
+hip-mlir-opt compatibility/slices/com.microsoft.SkipLayerNormalization.mlir \
+  --onnx-dialect=stub --simplify-onnx --hip-add-context-arg \
+  --onnx-loop-outline --onnx-if-outline --hip-infer-loop-body-shapes \
+  --convert-onnx-to-hip -debug-only=greedy-rewriter 2>&1 \
+  | rg "Match Failure" | rg -v "not a[n]? .*(operation|custom op)"
+```
+
+```
+** Match Failure : 5-input SkipLayerNormalization (input-bias) not supported
+```
+
+The second filter matters: every pattern rooted on `onnx.Custom` checks the function name first, so each one refuses every operator that is not its own. On the example above that is 14 of the 15 lines. A slice holds one operator, so what survives is its own refusal; over the whole graph it would be one line per pattern per custom operator instead.
+
+Editing the slice is how you find what a refusal objected to: change one operand's element type or one attribute, re-run, and see whether the message changes.
+
+## 3. Read the guard
+
+Go to source when you need the surrounding condition rather than the message:
 
 ```bash
 rg -l '"<OpType>"' lib/Conversion/OnnxToHip/
-rg "def Hip_.*Op|hip\.<expected_mnemonic>" include/hip/Dialect/IR/HipOps.td
-```
-
-No file and no dialect op means case 1: genuinely unsupported, and the report's `No Hip Dialect implementation available.` is accurate. Anything else means the report carries `CONVERSION_REJECTED_INSTANCES` and you owe the reader the specific constraint.
-
-## 3. Find the bail-out
-
-When a converter exists, look for the guard that rejected the instance. Converters report these through `notifyMatchFailure`, so grep for it in the matching file:
-
-```bash
 rg -n "notifyMatchFailure" lib/Conversion/OnnxToHip/<Op>Conversion.cpp
 ```
 
-Compare each guard against the type signature from step 1. Worked example, MatMulNBits on a 2-bit quantized model:
+No converter file and no dialect op (`rg "def Hip_.*Op" include/hip/Dialect/IR/HipOps.td`) means case 1: genuinely unsupported, and the report's `No Hip Dialect implementation available.` is accurate.
+
+Worked example, MatMulNBits on a 2-bit quantized model, whose reported refusal was `unsupported zero_points element type: f32`:
 
 ```cpp
 // lib/Conversion/OnnxToHip/MatMulNBitsConversion.cpp
@@ -64,20 +79,11 @@ if (elemTy.isInteger(8)) {
 } else if (elemTy.isF16()) {
   zpElemSize = 2;
 } else {
-  // "unsupported zero_points element type: ... Expected i8 (packed uint4) or f16"
   return rewriter.notifyMatchFailure(op, msg);
 }
 ```
 
 The model's zero-points are `tensor<512x16xf32>`, so every instance failed this guard. The report line becomes "MatMulNBits is supported, but not with fp32 zero-points; this model would fall back to CPU for all 224 of them", which points at a concrete fix.
-
-To watch the matcher live on a small reproduction:
-
-```bash
-hip-mlir-opt <input>.mlir --onnx-dialect=stub --simplify-onnx --hip-add-context-arg \
-  --onnx-loop-outline --onnx-if-outline --hip-infer-loop-body-shapes \
-  --convert-onnx-to-hip --debug-only=dialect-conversion
-```
 
 ## 4. Check a partial
 
@@ -99,6 +105,8 @@ The oracle can still be misread by the scripts. Symptoms and fixes:
 | An operator is `supported` but its `Hip Op` column is empty | its location had no match after conversion; it appears in `unpaired_instances` | usually a fold into a neighbour, which is fine; investigate if the count is large |
 | An attribute is reported dropped but the HIP op clearly has it | the attribute was renamed by the converter | record the rename in the diagnose notes; extend the pairing only if it recurs |
 | A whole operator type is missing from the report | the MLIR line form is not recognized | check [scripts/mlir_text.py](scripts/mlir_text.py) against the actual line in `ep_input.mlir` |
+| A `SLICE_PROBE_FAILED` error is about the slice's own structure rather than the operator | the slice is not a faithful copy of the graph line | diff `compatibility/slices/<case>.mlir` against the operation in `ep_input.mlir`: the operand types must match the line, and an operand the graph computes must be an argument rather than a materialized constant |
+| An operator reads `unsupported` on slice evidence but converts in a model whose graph gets through | the slice is a weaker claim by construction | say so; a slice cannot reproduce context an earlier pass supplies, so prefer a whole-graph result whenever one exists |
 
 Fix the script and re-run the pipeline. Never edit the generated markdown to match a conclusion.
 

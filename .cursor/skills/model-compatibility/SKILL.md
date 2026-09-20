@@ -17,9 +17,11 @@ The classification never comes from reading conversion source code. It comes fro
 - an operator that converted but lost an ONNX attribute carrying a non-default value is **partial**;
 - everything else is **supported**.
 
+When the whole graph does not get through, each operator is put through the conversion on its own, and those verdicts are reported instead. They are a weaker claim, worded as such: an operator that converts alone is not what stopped the model, which is not the same as the model running.
+
 Source is read for two things, neither of which decides support:
 
-- **Explaining a leftover.** "Unsupported" covers two very different findings, and the report must say which one applies — no converter exists, or a converter exists and refused this model's instances (a dtype guard, an operand count). The second is the common case on real models and points at a much smaller fix.
+- **Whether a converter exists.** "Unsupported" covers two very different findings — no implementation at all, or one that refused this model's instances — and they ask for different work. *Why* it refused is not read from source: the conversion prints the constraint when a single operator goes through it, and the report quotes that.
 - **Naming the runtime path.** Which runtime function executes a `hip.*` op is written down once in its HIP-to-LLVM lowering, so it is a lookup keyed on an op the conversion actually produced, not an inference about support.
 
 ## Gather inputs
@@ -78,9 +80,12 @@ The three markdown files sit at the top of `<OutputDir>`; everything the pipelin
 | 1 dump | `dump_ep_input.ps1` | `ep_input.mlir`, `dump_meta.json` | file is text MLIR starting with `module` and contains `onnx.` ops |
 | 2 count | `op_distribution.py` | `step1_original_onnx_ops.json`, `step1_ep_input_ops.json`, `op_distribution_comparison.json` | `_analysis_meta.excluded_carrier_ops` lists the `onnx.Constant` carriers, not compute ops; deltas explain themselves (ORT fusions, `Swish` to `Sigmoid`+`Mul`) |
 | 3 convert | `run_convert_probe.ps1` | `converted.mlir`, `convert_log.txt` | probe exited 0; the log's unconverted list matches step 4 |
-| — failure | orchestrator, or step 3 | `pipeline_failure.json` | written only when step 1 or 3 failed; step 4 is then skipped |
+| — failure | orchestrator, or step 3 | `pipeline_failure.json` | written only when step 1 or 3 failed; step 4 is then skipped and step 5 carries the run |
 | 4 analyze | `analyze_conversion.py` | `leftover_onnx.json`, `leftover_reasons.json`, `attr_transfer.json`, `hip_runtime_map.json` | every leftover also appears in the EP-input counts and says whether a converter exists; `unpaired_instances` is small and explainable; every observed `hip.*` op resolves to a runtime function |
-| 5 report | `build_report_input.py`, `generate_final_reports.py` | `report_input.json`, and the three markdown files above it | `report_input.json` is validated against its schema as it is written; summary numbers match it |
+| 5 slice | `slice_probe.py` | `slice_probe.json`, `slices/*.mlir` | every case names the operator it holds; `unbuildable` entries give a reason; a refusal quotes the conversion rather than describing it |
+| 6 report | `build_report_input.py`, `generate_final_reports.py` | `report_input.json`, and the three markdown files above it | `report_input.json` is validated against its schema as it is written; summary numbers match it |
+
+Step 5 runs either way, and what it covers depends on step 3. With a whole-graph result it probes only the leftovers, to quote why each was refused. Without one it probes every operator, and those verdicts become the report's support numbers — which is why a failed conversion no longer reads as nothing being supported.
 
 Each fact is written once. The comparison and the operator distribution are rendered only in the report, and the evidence behind non-supported rows only in the details file; `op_distribution_comparison.json` is the report's input, not a second copy for the reader. `ep_input_loc.mlir` is a location-carrying copy the probe recreates on demand, so it is removed after the analysis reads it.
 
@@ -92,7 +97,9 @@ For each `unsupported` or `partial` operator, follow [diagnose.md](diagnose.md).
 
 Report the finding; do not silently promote a leftover to supported. If the diagnose pass shows the pipeline itself is wrong (a pairing miss, a bad default), fix the script and re-run rather than editing the generated markdown.
 
-When the dump or the conversion probe fails, the run still produces a report, and its `## Where it failed` section is the result: the step, the reason quoted from the log, and the source line for a crash. Lead your summary with it. Nothing was verified, so the 0% headline is the absence of a measurement rather than a measurement — say that, and treat the failing step as the model's blocking issue.
+When the dump or the conversion probe fails, the run still produces a report, and its `## Where it failed` section is the result: the step, the reason quoted from the log, and the source line for a crash. Lead your summary with it and treat the failing step as the model's blocking issue.
+
+The support numbers under it then come from the single-operator conversions, and `meta.tool_versions.support_evidence` says so. Report them as what they are: they name the operators that are *not* in the way and the few that are, which is the useful part, but none of them says the model compiles. If even the slices produced nothing, the 0% headline is the absence of a measurement rather than a measurement — say that.
 
 ### 5. Batch
 
