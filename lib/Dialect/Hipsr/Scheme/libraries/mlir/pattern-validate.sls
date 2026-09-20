@@ -82,10 +82,7 @@
       ;; Walk through each match operation
       (loop :for op-idx :from 0 :below (vector-length match-vec)
             :rime-with match-op := (vector-ref match-vec op-idx)
-            :rime-with op-name := (let ([op-name-datum (syntax->datum (ast-match-expand-op-name match-op))])
-                                     (if (string? op-name-datum)
-                                         op-name-datum
-                                         (symbol->string op-name-datum)))
+            :rime-with op-name := (syntax->datum (ast-match-expand-op-name match-op))
             :rime-with results := (let ([rv (ast-match-expand-result-var match-op)])
                                     (if (identifier? rv) (list rv) (syntax->list rv)))
             :rime-with operands := (syntax->list (ast-match-expand-operands match-op))
