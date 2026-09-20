@@ -35,6 +35,7 @@
 
     ;; Rule: All identifiers in match operations must start with %
     ;; Rule: Result variables must be unique across all operations (FATAL if violated)
+    ;; Rule: Root variable must appear as a result in at least one match operation
     (validate-match-operations ast-rec)
 
     ;; TODO: Document specific validation rules for rewrite operations
@@ -87,7 +88,8 @@
 
   (define (validate-match-operations ast-rec)
     (validate-match-identifiers-start-with-% ast-rec)
-    (validate-no-duplicate-result-variables ast-rec))
+    (validate-no-duplicate-result-variables ast-rec)
+    (validate-root-var-is-result ast-rec))
 
   (define (validate-match-identifiers-start-with-% ast-rec)
     (let ([match-vec (ast-pattern-expand-match ast-rec)])
@@ -112,6 +114,18 @@
                               (syntax-violation 'validate-no-duplicate-result-variables
                                 "Duplicate result variable" var))
                             (hashtable-set! seen-results var #t))))))
+
+  (define (validate-root-var-is-result ast-rec)
+    ;; Rule: Root variable must appear as a result in at least one match operation
+    (let ([match-vec (ast-pattern-expand-match ast-rec)]
+          [root-var (ast-pattern-expand-root-var ast-rec)])
+      (unless (loop :for op-idx :from 0 :below (vector-length match-vec)
+                    :rime-with match-op := (vector-ref match-vec op-idx)
+                    :rime-with result-vars := (ast-match-expand-result-var match-op)
+                    :break #t :if (loop :for var :in result-vars
+                                        :break #t :if (bound-identifier=? var root-var)))
+        (syntax-violation 'validate-root-var-is-result
+          "Root variable not found in any match operation result" root-var))))
 
   ;;-----------------------------------------------------------------------
   ;; Rewrite operation validation

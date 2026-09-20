@@ -23,36 +23,22 @@
   ;;-----------------------------------------------------------------------
 
   (define (analyze-match-operations ast-rec)
-    ;; Match field is already a vector (normalized earlier)
+    ;; Phase 2 validation guarantees: root variable exists as a result in some match operation
     (let* ([match-vec (ast-pattern-expand-match ast-rec)]
            [root-var (ast-pattern-expand-root-var ast-rec)]
-           [root-idx (find-root-operation match-vec root-var)])
-
-      (unless root-idx
-        (syntax-violation 'analyze-match-operations
-          "Root variable not found in any match operation result"
-          root-var))
+           [root-idx (find-root-operation match-vec root-var)]
+           [root-op (vector-ref match-vec root-idx)])
 
       ;; Extract root operation name
       (ast-pattern-expand-root-op-name-set! ast-rec
-        (ast-match-expand-op-name (vector-ref match-vec root-idx)))
+        (ast-match-expand-op-name root-op))
 
       ;; Collect all identifiers (binding-manager)
       (let* ([binding-mgr (collect-all-identifiers match-vec)]
-             [visited (make-vector (vector-length match-vec) #f)]
-             ;; Find which result index the root-var is
-             [root-op (vector-ref match-vec root-idx)]
-             [root-result-idx (find-result-index root-op root-var)])
-
-        (unless root-result-idx
-          (syntax-violation 'analyze-match-operations
-            "Root variable not found in operation results" root-var))
+             [visited (make-vector (vector-length match-vec) #f)])
 
         ;; Build match actions (includes binding for all results and operands)
         (let ([actions (build-match-actions match-vec root-idx visited binding-mgr)])
-
-          ;; Check all result variables are bound
-          (check-all-results-bound! binding-mgr)
 
           (ast-pattern-expand-match-bindings-set! ast-rec binding-mgr)
           (ast-pattern-expand-match-actions-set! ast-rec actions)
@@ -203,17 +189,6 @@
     ;; DAG traversal guarantees: identifier is already bound
     (list ':check-operand-equal id op-idx operand-idx))
 
-  (define (check-all-results-bound! mgr)
-    ;; Verify all result variables are bound (call at end of analysis)
-    (let-values ([(keys values) (hashtable-entries (binding-manager-bindings mgr))])
-      (vector-for-each
-        (lambda (bentry)
-          (when (and (binding-entry-is-result? bentry)
-                     (not (binding-entry-bound? bentry)))
-            (syntax-violation 'check-all-results-bound!
-              "Result variable not bound during pattern matching"
-              (binding-entry-id bentry))))
-        values)))
 
   ;;-----------------------------------------------------------------------
   ;; Helper functions
@@ -237,13 +212,6 @@
                                       :break #t :if (bound-identifier=? var root-var)))
         #f))
 
-  (define (find-result-index match-op target-var)
-    (let ([result-vars (ast-match-expand-result-var match-op)])
-      (let loop-inner ([vars result-vars] [idx 0])
-        (cond
-          [(null? vars) #f]
-          [(bound-identifier=? (car vars) target-var) idx]
-          [else (loop-inner (cdr vars) (+ idx 1))]))))
 
   (define (find-operation-by-result match-vec result-var)
     (or (loop :for op-idx :from 0 :below (vector-length match-vec)
